@@ -7,7 +7,9 @@ py scripts/gamectl.py <pid> <command...>        one control-pipe command (\\\\.\
 py scripts/gamectl.py <pid> key F3 [F4 ...]     posts hotkeys to the game's window (WM_KEYDOWN/UP; no focus change):
                                                F1 F3 F4 F5 F7 F8 F11 Esc, or letters and Enter for the keyboard pad
 py scripts/gamectl.py <pid> title               the window's title (its state: FPS limit, RECORDING, LSFG)
-py scripts/gamectl.py find <exe name>           the PIDs of running processes with that image name (read-only)
+py scripts/gamectl.py find <exe name>           the PIDs of running processes with that image name (read-only;
+                                               never a target: keys and commands need GAME_LOCK held by NXRS_LANE
+                                               for that PID's executable, `check_owned`)
 
 Used by scripts/play_scenario.py; also by hand. Never touches any other program's window.
 """
@@ -25,7 +27,31 @@ WM_KEYDOWN, WM_KEYUP = 0x100, 0x101
 CLASS = 'NxrsGameWindow'
 
 
+LOCK = r'D:\Projects\Switch2RECOMP-main\build\evidence\GAME_LOCK'
+
+
+def image_of(pid):
+    out = subprocess.run(['tasklist', '/FI', 'PID eq %d' % pid, '/FO', 'CSV', '/NH'], capture_output=True, text=True).stdout
+    return next((l.split('","')[0].strip('"') for l in out.splitlines() if l.startswith('"')), None)
+
+
+def check_owned(pid):
+    """Keys and pipe commands go only to the game this lane started and holds GAME_LOCK for: the lock's lane is
+    NXRS_LANE and its executable is the image of `pid` (a PID from `find` or another lane's game is refused)."""
+    lane = os.environ.get('NXRS_LANE', '')
+    try:
+        f = [x.strip() for x in open(LOCK).read().split('|')]
+    except OSError:
+        raise OSError('refused: no GAME_LOCK (the game is not running under run_game.py)')
+    if not lane or f[0] != lane:
+        raise OSError('refused: GAME_LOCK is %r, not this lane (NXRS_LANE=%r)' % (f[0], lane))
+    img = image_of(pid)
+    if img is None or len(f) < 2 or img.lower() != f[1].lower():
+        raise OSError('refused: pid %d is %r, the locked game is %r' % (pid, img, f[1] if len(f) > 1 else None))
+
+
 def pipe(pid, line, timeout=30.0):
+    check_owned(pid)
     name = r'\\.\pipe\nxrs_ctl_%d' % pid
     t0 = time.time()
     while True:
@@ -75,6 +101,7 @@ def title(pid):
 
 
 def key(pid, names, hold=0.05):
+    check_owned(pid)
     h = window(pid)
     if not h:
         raise SystemExit('no game window for pid %d' % pid)
@@ -89,6 +116,7 @@ def key(pid, names, hold=0.05):
 
 
 def find(image):
+    """PIDs by image name: for looking only. Never send keys or commands to a PID found this way."""
     out = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq %s' % image, '/FO', 'CSV', '/NH'], capture_output=True, text=True).stdout
     return [int(l.split('","')[1]) for l in out.splitlines() if l.startswith('"')]
 

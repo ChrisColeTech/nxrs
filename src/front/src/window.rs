@@ -234,8 +234,15 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
                 }
                 match vk as u16 {
                     VK_ESCAPE => {
-                        crate::flog!("Esc: quit");
-                        std::thread::spawn(|| crate::quit("Esc"));
+                        // NXRS_ESC_QUIT=0 (scripted runs): Esc is logged and ignored; the foreground state says
+                        // whether a key press reached the window or a message was posted to it from outside
+                        let fg = windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() == h;
+                        if std::env::var("NXRS_ESC_QUIT").is_ok_and(|v| v.trim() == "0") {
+                            crate::flog!("Esc ignored (NXRS_ESC_QUIT=0; window in the foreground: {fg})");
+                        } else {
+                            crate::flog!("Esc: quit (window in the foreground: {fg})");
+                            std::thread::spawn(|| crate::quit("Esc"));
+                        }
                     }
                     VK_F11 => toggle_fullscreen(),
                     VK_F1 => crate::help::show(h),

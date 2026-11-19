@@ -314,6 +314,35 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   parked, replay queue …` every 600; the pass dump also logs every draw's stage resources (textures with size /
   format / target, the first 16 floats of each uniform bank).
 
+**Lane G, rev 6 (2026-11-19, uncommitted; lane P's five items):**
+- **Lazy write-back (`vk/lazy.rs`) is off by default** (`NXGFX_WB_LAZY=1` turns it on). The fault it caused is fixed
+  as well: a page was taken out of the lazy set before it was readable again, so a second thread touching the same
+  page in that window got a fatal fault (Violet ~35 s, Z-A ~60 s). Now the page stays marked as being read back, other
+  threads' faults wait for it and retry, and a fault on a page that is already back simply retries.
+- **Screenshots no longer freeze the game** (`shot`, `fullres`, F8, `NXGFX_SHOT*`): `queue::present` takes the
+  screenshot before it locks the submission state (the capture's own submission locked it again: deadlock, the
+  game stopped in `nvnQueuePresentTexture`). Shots requested while a queue is parked go to the next present.
+- **Review of lane P's host-lent command memory reclaim (`nvn/cmd.rs`): OK.** It matches nxnative's design.
+  Parked and queued submissions copy their records, so a reclaimed segment is never replayed late. What is left: a
+  segment with no guest range (an overflow by a command buffer that is not recording, or at the very end of the
+  game's memory) is never reclaimed (red line once). Control memory is never reclaimed, with a panic at 256 MB; it
+  can reach that in a long session if a game keeps giving none.
+- **Built-in frame generation quality** (`fg_interp.comp`): the "no motion" vector is tried first, matches are judged
+  over a small patch rather than one pixel, and where no vector fits, the nearer real frame is shown unwarped instead
+  of a warped guess. Lane P's Arceus captures (`m6.png`: torn speech-bubble text, smeared house texels) were taken
+  with frame generation on (base 30 -> 60): a generated frame, most likely. Lane P: compare a capture with
+  `--option lsfg=0`.
+- **Write watch across allocations** (`vk/mem.rs`): a mirrored pool spanning several allocations had no write watch,
+  so all of it was compared with a snapshot at every submission (`prep` 40-50 ms a frame in Violet with 0 uploads).
+  The watch is now asked per allocation. The pools line now ends with `N mirrors without write watch (MB)`.
+- **Descriptor work** (`vk/exec.rs`): a stage's c0 / c2 driver banks are rebuilt and staged only when a bind for that
+  stage changed them (Z-A: ~1,700 draws a frame, `sets` 7.9 ms a frame).
+- **Texture uploads decode on several threads** (`vk/image.rs decode_many`): with 4 or more textures (4 MB or more)
+  due in one submission, their storage is read and de-tiled on up to 8 threads before recording (Z-A's streaming
+  bursts: 200-370 ms frames).
+- **Compressible textures (render targets) are not uploaded from storage** on creation. MK8D's dynamic resolution makes
+  new targets of 1880x1057 .. 1920x1080 every frame, and each was uploaded: 20-50 ms a frame in races (`r28`).
+
 **Shaders (agreed with shaders, lane C):** graphics reads lane C's output as written above: `<data>/shaders/spv/
 <key>.spv` + `.json` (`status` "ok"), the shader key as defined there (`nxgfx::nvn::prog::shader_key` computes it at
 `nvnProgramSetShaders`). Nothing in lane C's output needs to change for the binding model: at module load graphics
@@ -785,7 +814,8 @@ displaced, as Turbo's "garbled UI labels" in Z-A before its GOB-order fix) and t
   the bedroom and the Adventure Guide (`0010-t600.png`) in 600 s; 30 FPS at first, 6-15 FPS in the real-time opening
   (slow frames: `prep` 53-93 ms with 22-32 ms texture uploads: lane G), 23 FPS at the end. Next: walk out of the
   bedroom (left stick), the first town.
-- Z-A (`build\games\plzauns61119-160759-run6`, main-tree engine of 15:35, `NXGFX_WB_LAZY=0`): title, opening,
+- Z-A (`build\games\plza
+uns61119-160759-run6`, main-tree engine of 15:35, `NXGFX_WB_LAZY=0`): title, opening,
   **Lumiose City lit and populated with the starters** (`0006-t240.png`; the black world above is gone in that build),
   no crash in 240 s; 60.0 FPS on the title, 35-46 FPS in the city (p95 22-64 ms, slow frames up to 0.87 s): short of
   M6's 59. With the lazy write-back on it faults at ~60 s (item above).
@@ -793,3 +823,21 @@ displaced, as Turbo's "garbled UI labels" in Z-A before its GOB-order fix) and t
   `NXRS_LANE=P`, `NXRS_NO_SONY_HID=1` (see the lane I item), `NXOS_SWKBD=auto` (else the name box waits for a person),
   presses through `scripts/gamectl.py <pid> press A~0.2`, and PrintWindow captures (the graphics-layer `shot` /
   `fullres` freeze the game today).
+- **Esc from outside (lane W, for the coordinator):** lane W's runs get `[front] Esc: quit` (a WM_KEYDOWN VK_ESCAPE
+  on the game window) that no lane W step sent: Jamboree `20261119-153405-W-jamboree-menus3` at 167 s,
+  `20261119-161203-W-jamboree-m5` at 51.5 s, Smash `20261119-155110-W-smash-menus2` at 267 s, Anime Girls
+  `20261119-161*-W-agsob-m5` at 35.7 s (before any step). Lane W's scenarios send only `press`, `shot` / `fullres` and
+  `quit` through the pipe of the PID run_game started; they never post keys.
+  Front (lane W, for lane I): `NXRS_ESC_QUIT=0` makes Esc log `Esc ignored` instead of quitting, and every Esc line
+  now says whether the window was in the foreground (a real key press) or not (a message posted from outside).
+  Lane W passes it in scripted runs; `NXRS_SHOT=shot|none` picks play_scenario's screenshot command.
+- **Lane W hand-off (2026-11-19 16:35).** Engine for lane W games: `build\W-src` (a worktree at HEAD plus lane W's
+  uncommitted files; scratchpad scripts `wt.sh` / `wsync.py` / `relink.sh` move it to HEAD, rebuild `target\W` and
+  relink every lane W game). Blockers now: (1) **lane G**: any screenshot (`fullres` or the front's `shot`, both go
+  through `shot::on_present`) can hang `nvnQueuePresentTexture` (Jamboree, Smash, Anime Girls: every run); runs
+  without shots (`NXRS_SHOT=none`, scenario `presses`) are the way until that is fixed. (2) **someone closes lane W's
+  game windows**: Esc in the foreground, then "window: closed by the user or the system" 30-60 s in (bbounce m6,
+  agsob m6) — likely a person at the machine; lane W stopped launching. Next steps per game: MK8D waits for lane G
+  (picture, 60 FPS); Jamboree / Anime Girls / Beach Bounce: a `presses` run to reach menus, then gameplay scenarios;
+  Sonic: re-run (its last run predates the system-resource fix); Smash: find why nnMain runs 140 s before its first
+  present (main thread busy, ~180 SVCs/s: `NXOS_TRACE=fs,svc`), then the menus.

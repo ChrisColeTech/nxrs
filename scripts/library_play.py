@@ -27,6 +27,8 @@ ps.SCENARIOS.update({
     'mk8d_booster': dict(seconds=330, window=(90, 300), steps=MENU_MK8D[:-3] + [('shot', 3, 'cups'), ('r', 3, 'booster page'),
                          ('a', 3, 'booster cup'), ('a', 30, 'gp-ok'), ('replay', 20, 'race', 'mk8d_gp.txt')]
                          + [('shot', 40, 'race +%d s' % (40 * m)) for m in range(1, 6)]),
+    # presses only, no screenshot (a pending screenshot can hang a present: INTERFACES lane G)
+    'presses': dict(seconds=330, window=(60, 300), steps=[('a', 8, 'a%d' % i) for i in range(38)]),
     'probe': dict(seconds=420, window=(60, 400), steps=[('shot', 30, 'boot')] + [('shot', 60, 'min %d' % m) for m in range(1, 7)]),
     'menus': dict(seconds=420, window=(60, 400), steps=[('shot', 40, 'boot')] + [('a', 8, 'a%d' % i) for i in range(40)]),
 })

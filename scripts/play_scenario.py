@@ -58,6 +58,9 @@ SCENARIOS = {
         ('replay', 20, 'driving', 'mkw_drive.txt'), ('shot', 18, 'driving +20s')]),
 }
 PM = []
+# 'fullres' (graphics: the game's picture at its resolution, at the next present) or 'shot' (the front end: the
+# window as shown, now); NXRS_SHOT=shot picks the window, NXRS_SHOT=none takes none (lane W: a pending fullres can hang a present, INTERFACES)
+SHOT_CMD = os.environ.get('NXRS_SHOT', 'fullres')
 PACING = re.compile(r'^\[\s*([\d.]+)\] \[vk\] pacing: ([\d.]+) FPS \| p95 ([\d.]+) p99 ([\d.]+) max ([\d.]+) ms')
 
 
@@ -211,12 +214,16 @@ def scenario(a, sc, run, exe):
 
     def steps(pid):
         def shot(name):
+            if SHOT_CMD == 'none':
+                return
             count[0] += 1
             p = run / ('%04d-%s.png' % (count[0], re.sub(r'[^A-Za-z0-9]+', '_', name)[:40]))
             try:
-                gamectl.pipe(pid, 'fullres %s' % p, timeout=20)
+                gamectl.pipe(pid, '%s %s' % (SHOT_CMD, p), timeout=20)
             except OSError as e:
                 record(screenshot=None, name=name, note='control pipe: %s' % e)
+                if str(e).startswith('refused'):
+                    raise   # not our game any more (it exited, or the lock is another lane's): the scenario stops
                 return
             for _ in range(100):
                 if p.exists() and p.stat().st_size > 0 and p.read_bytes()[-8:-4] == b'IEND':
