@@ -666,6 +666,38 @@ harness. **G** = graphics, shaders, and M4.
 
 ---
 
+## 5B. The LIBRARY phase: every game in the owner's library, played past the title
+
+Owner, 2026-11-19: get the rest of the library working on the nxrs engine and validate **gameplay**, not just the
+title screen and movies. A game counts as **Playable** only when a run shows: controllable gameplay reached (scripted
+input through the control pipe moves the player / kart / character), 10 minutes of that gameplay without a crash, the
+picture correct (screenshots checked; FLIP against a Turbo capture where one exists), memory flat (no growth trend
+over the 10 minutes, under the watchdog), sound playing with no underruns, and FPS from the pacing line at the game's
+target. Then the owner plays it by hand. Sources are the owner's library entries (read only).
+
+| Game | Package | Lane | Gameplay target | Status |
+|---|---|---|---|---|
+| Mario Kart 8 Deluxe | dump folder (+ update, Booster Course DLC) | W | Grand Prix race, 10 min, 60 FPS (= M5) | Reaches races; road black / blue tint, ~50 FPS, memory growth (lane G) |
+| Super Smash Bros. Ultimate | NSP v0 | W | a stage match vs CPU, 10 min | Not started |
+| Sonic X Shadow Generations | NSP v0 | W | a playable act, 10 min | Not started |
+| Super Mario Party Jamboree | NSP / XCI (+ update) | W | a board turn and a minigame | Not started; update package fails to open ("compression table damaged") |
+| Anime Girls: Sun of a Beach | NSP v0 | W | gameplay, 10 min | Not started |
+| Beach Bounce Remastered | NSP v0 | W | gameplay, 10 min | Not started |
+| Pokémon Legends: Arceus | NSP 1G+1U | P | Obsidian Fieldlands, 10 min (= M6) | In progress |
+| Pokémon Violet | NSP 1G+1U+1D | P | first town, 30 min (= M6) | In progress |
+| Pokémon Legends: Z-A | NUP (Switch 2 Edition) | P | Lumiose at 60 with the profile patch (= M6) | In progress |
+| Mario Kart World | NUP | X | a race, 10 min, 60 FPS (= M7) | Builds; killed at ~28 GB 1-6 s after the first frame (lane G) |
+| Donkey Kong Bananza | NUP v458752 | X | opening + mining tunnel, 10 min (= M7) | Not started |
+| Super Mario Bros. Wonder (Switch 2 Edition) | NUP | X | a course, 10 min | Not started |
+| The Legend of Zelda: Ocarina of Time | NUP v131072 | — | (= M8) | Deferred by the owner |
+
+Not separate targets: "Mario Kart World v1.8.0" (the same NUP as Mario Kart World) and "Pokemon Legends Arceus base"
+(a test package of the update work).
+
+Lanes: **W** = Switch 1 library, **X** = Switch 2 library, **P** = Pokémon, **G** = graphics (the blocker most games
+share: memory growth in NVN pools, the MK8D road / tint, mesh draws). Game-specific OS / loader / service gaps are
+fixed by the game's lane; graphics findings go to lane G through `docs/INTERFACES.md`.
+
 ## 6. Launcher integration
 
 ### 6.1 Contract v1 (drop-in)
