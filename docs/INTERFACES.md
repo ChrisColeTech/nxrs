@@ -334,7 +334,10 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   `--option lsfg=0`.
 - **Write watch across allocations** (`vk/mem.rs`): a mirrored pool spanning several allocations had no write watch,
   so all of it was compared with a snapshot at every submission (`prep` 40-50 ms a frame in Violet with 0 uploads).
-  The watch is now asked per allocation. The pools line now ends with `N mirrors without write watch (MB)`.
+  When the whole range fails, the watch is now asked per allocation (the whole range is still tried first: a region
+  walk on every submission cost MK8D 1.9 s a frame in `r29`). The pools line now ends with `N mirrors without write
+  watch (MB)`. The texture check after CPU writes takes each texture once, not once per dirty page under it, and
+  looks only at the dirty ranges over it. `prep` in the replay line is split into `pools` and `texture hashes`.
 - **Descriptor work** (`vk/exec.rs`): a stage's c0 / c2 driver banks are rebuilt and staged only when a bind for that
   stage changed them (Z-A: ~1,700 draws a frame, `sets` 7.9 ms a frame).
 - **Texture uploads decode on several threads** (`vk/image.rs decode_many`): with 4 or more textures (4 MB or more)
@@ -393,7 +396,8 @@ shared by every program** (no per-program layouts, so pipelines key only on shad
 - MKW after the first present: a null `sead` heap allocation (`main+0x3e3550`, 0x58 bytes, heap `[[sp+0x90]+0x2a78]`)
   read at main+0xa66e0+0x2df5 (`read of 0xa0`) 4-5 s after the first present, in 3 of 4 runs; DKB faults at
   different places 30-35 s in (main+0x8a2d80 reading 0x100000001, main+0x26c620 reading 0x48) and once ran 89 s
-  clean. Lane X is checking whether these are the guest's (exclusive monitor off for Switch 2) before blaming graphics.
+  clean. `SWR_XMON=1` and `NXGFX_WB_LAZY=0` do not change either; `NXGFX_POOL=host` does not change MKW (DKB ran 120 s
+  clean with it, but that run also never committed its save, so it proves nothing yet). Details: lane X section.
 
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
@@ -841,3 +845,43 @@ uns61119-160759-run6`, main-tree engine of 15:35, `NXGFX_WB_LAZY=0`): title, o
   (picture, 60 FPS); Jamboree / Anime Girls / Beach Bounce: a `presses` run to reach menus, then gameplay scenarios;
   Sonic: re-run (its last run predates the system-resource fix); Smash: find why nnMain runs 140 s before its first
   present (main thread busy, ~180 SVCs/s: `NXOS_TRACE=fs,svc`), then the menus.
+
+## Switch 2 library (lane X, 5B)
+
+Builds (engine from `target\X`): `build\games\{mkw,dkb,wonder}` (`nxrs-build build <NUP> -o <g> --outdir
+build\games\<g> --jobs 4 --keys <launcher keys>`). Runs: `build\I\runs\<time>-X-<label>\` through
+`build\X\xplay.py <exe> <label> <seconds> "<steps>" [--env K=V]` (run_game.py's guard; steps `wait`, `press BTN S`,
+`hold`, `replay FILE S` (`build\X\inputs\`, `scripts\inputs\`), `threads NAME` (control pipe dump), `loop N k`;
+writes `summary.json`: FPS / private MB per minute, the memory slope after 60 s, underruns). `build\X\xq2.sh <out>
+<xplay args>` waits for GAME_LOCK. **Pictures:** `NXGFX_DUMP_AT_S=<s,...>` + `NXGFX_DUMP_DIR` (graphics' pass dump,
+recorded in the submission: safe); the last 1920x1080 / window-size R8G8B8A8 pass of a dumped frame is the picture.
+Not `fullres`/F8 (deadlocks, lane G section) and never a screen grab (it reads whatever covers the window).
+
+**Fixed / added (lane X, uncommitted):**
+- os `services/vi.rs`: the Switch 2 SDKs' vi calls nxnative takes over (HDR status / paper white / metadata set and
+  clear, VRR support, extended swap interval, buffer max resolution, CreateLayer with LayerCreationSettings,
+  InitializeWithVrrLfcEnabled, indirect image requirement). Mario Kart World called SetLayerNextHdrContentGamutMetadata
+  through the SDK's null vi2 table (`rt_dispatch: no function at guest pc 0x0` 4 s after the first present).
+- os `services/hid.rs`: GetTouchScreenState(s)<N> for every N = 1..16 (only 16 was taken over; each writes its own
+  size). Donkey Kong Bananza aborted in GetTouchScreenState<1> (Result 0x52ca) at its first present.
+- os `nvn/nv.rs`: `nn::gs::sdk::QueryApplicationGpuTimeSpan` (the game is the GPU's only client); nv::MemoryInfo is
+  0x40 bytes from SDK 11. `nvn/mod.rs`: the SDK major skips a variant name (`nnSdk-Generic_21_4_0` was read as "no
+  version": MKW is SDK 21, DKB 20). `services/misc.rs`: `pl::IsRunningOnOunce` from the profile's platform.
+- runtime: `NXRT_FATAL_PEEK=<chain>[;...]` (crash report: `sp+0x90>0x2a78>0` = follow pointers, dump 0x100 bytes);
+  the thread dump (`threads`, stalls) names the host function a thread is in.
+
+**Open (hand-off):**
+- MKW: first present 25-69 s after start (graphics' RegisterTexture, lane G section), then 4-5 s later a null object
+  in the game's render thread (`main+0xa66e0`, or a host NVN proc reading 0x8 from `main+0xa0040`); the object at
+  `[sp+0x90]` has its `+0x2a78` heap pointer 0 (`build\I\runs\20261119-155719-X-mkw8-peek`). Not changed by
+  `SWR_XMON=1`, `NXGFX_WB_LAZY=0` or `NXGFX_POOL=host`. Next: which NVN query feeds that object (texture / pool
+  sizes for NVN2) and a PDB for the code DLL so host frames get names.
+- DKB: title at 54-60 FPS; 20-35 s in, after the game writes `save:/config.sav` and commits, it faults on bad
+  pointers in its own data (`0x100000001`, `0x100000062`, null+0xa0, a branch to code bytes) at a different place
+  each run; not changed by `SWR_XMON=1` or `NXGFX_WB_LAZY=0`; one 120 s run with `NXGFX_POOL=host` and one without
+  the commit did not crash. Sound: 0.9 s not silent in 2 minutes of title (check the title music).
+- Wonder: the NUP is the Switch 1 game 1.2.1. 12.5 minutes from boot through the title and file select into the
+  first course with scripted input (`build\I\runs\20261119-164407-X-wonder4-10min`: 30 x A, then
+  `build\X\inputs\wonder_run.txt` (run right, jump) ten times), exit 0, pictures right (pass dumps at 60..700 s),
+  674 s of sound, 0 underruns. Left for Playable: FPS (pacing median 59.6, per minute 54-59.6, p10 52.7: single long
+  frames, not yet attributed) and memory in the first 5 minutes (3.7 → 4.8 GB, then flat for 7 minutes).
