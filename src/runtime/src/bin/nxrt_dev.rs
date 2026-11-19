@@ -352,7 +352,7 @@ fn translate(generator: &str, nxrs: &Path, exefs_parent: &Path, gen: &Path) -> R
             let py = std::env::var("NXRT_MKW_PYTHON")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| root().join("../../build/venv-mkw/Scripts/python.exe"));
-            run(Command::new(py).arg("-I").arg(&script).arg("--exefs").arg(exefs_parent.join("exefs")).arg("--out").arg(gen).args(["--jobs", "4"]))
+            run(Command::new(py).env("PYTHONDONTWRITEBYTECODE", "1").arg("-B").arg("-I").arg(&script).arg("--exefs").arg(exefs_parent.join("exefs")).arg("--out").arg(gen).args(["--jobs", "4"]))
                 .map(|_| ())
         }
         g => Err(format!("unknown generator {g}")),

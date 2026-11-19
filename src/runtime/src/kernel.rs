@@ -16,7 +16,7 @@
 use crate::cpu::Cpu;
 use crate::mem::Space;
 use std::cell::Cell;
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock, PoisonError};
 use std::time::{Duration, Instant};
 
 pub const R_OK: u64 = 0;
@@ -87,6 +87,9 @@ struct Thread {
     cv: Arc<Condvar>,
     tls: u64,
     cpu: *mut Cpu,
+    /// Its host thread still runs (from spawn until `thread_main` returns): the object, its `Cpu` and its TLS
+    /// region stay allocated until then, whatever the guest does with the handle.
+    host_running: bool,
 }
 
 unsafe impl Send for Thread {}
@@ -282,7 +285,7 @@ impl State {
         match r {
             SyncRef::Thread(i) => {
                 self.t(i).refs -= 1;
-                self.thread_maybe_free(i);
+                release(self.thread_maybe_free(i));
             }
             SyncRef::Event(e) => self.event_put(e),
         }
@@ -294,16 +297,40 @@ impl State {
             self.events[e] = None;
         }
     }
-    fn thread_maybe_free(&mut self, i: usize) {
+    /// Frees thread i once nothing can reach it: its handle closed, the guest thread exited, no wait holds it, and
+    /// its host thread finished (the exit path still runs on its stack and `Cpu` after ExitThread).
+    fn thread_maybe_free(&mut self, i: usize) -> Option<(u64, *mut Cpu)> {
         let t = self.t(i);
-        if t.closed && t.exited && t.refs == 0 {
-            let (tls, cpu) = (t.tls, t.cpu);
+        if t.closed && t.exited && t.refs == 0 && !t.host_running {
+            let r = (t.tls, t.cpu);
             self.threads[i] = None;
-            get().space.free_tls(tls);
-            // SAFETY: the Cpu was leaked from a Box at creation and no host thread uses it any more.
-            unsafe { drop(Box::from_raw(cpu)) };
+            return Some(r);
+        }
+        None
+    }
+
+    /// The guest thread i ended (ExitThread, or its host thread ending): waiters on it are released. Idempotent.
+    fn mark_exited(&mut self, i: usize) {
+        if !self.t(i).exited {
+            self.t(i).exited = true;
+            self.wake_sync_waiters(SyncRef::Thread(i));
         }
     }
+}
+
+/// Releases what `thread_maybe_free` gave back.
+fn release(freed: Option<(u64, *mut Cpu)>) {
+    if let Some((tls, cpu)) = freed {
+        get().space.free_tls(tls);
+        // SAFETY: leaked from a Box at creation; its host thread has finished, nothing else holds it.
+        unsafe { drop(Box::from_raw(cpu)) };
+    }
+}
+
+/// The kernel lock. It never poisons: a panic anywhere in the runtime ends the process (`boundary::guard`, which
+/// every entry point and every runtime thread runs under), so no later caller can see a half-done update.
+fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
+    m.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Blocks thread i (holding the lock) until woken or timed out (ns < 0: forever, 0: immediate timeout).
@@ -322,7 +349,7 @@ fn block<'a>(mut g: MutexGuard<'a, State>, i: usize, kind: Wait, ns: i64) -> (Mu
     let deadline = (ns > 0).then(|| Instant::now() + Duration::from_nanos(ns as u64));
     while !g.t(i).woke {
         match deadline {
-            None => g = cv.wait(g).unwrap(),
+            None => g = cv.wait(g).unwrap_or_else(PoisonError::into_inner),
             Some(d) => {
                 let now = Instant::now();
                 if now >= d {
@@ -330,7 +357,7 @@ fn block<'a>(mut g: MutexGuard<'a, State>, i: usize, kind: Wait, ns: i64) -> (Mu
                     t.wkind = Wait::None;
                     return (g, R_TIMEOUT);
                 }
-                g = cv.wait_timeout(g, d - now).unwrap().0;
+                g = cv.wait_timeout(g, d - now).unwrap_or_else(PoisonError::into_inner).0;
             }
         }
     }
@@ -345,7 +372,7 @@ fn cur(svc: u32) -> usize {
 /// The calling host thread's guest thread handle, if it is one.
 pub fn current_handle() -> Option<u32> {
     let i = CUR.get()?;
-    get().g.lock().unwrap().threads[i].as_ref().map(|t| t.handle)
+    lock(&get().g).threads[i].as_ref().map(|t| t.handle)
 }
 
 impl Kernel {
@@ -353,7 +380,7 @@ impl Kernel {
     pub fn create_thread(&self, entry: u64, arg: u64, stack_top: u64, prio: i32, core: i32) -> u32 {
         let tls = self.space.alloc_tls();
         let cpu = Box::into_raw(Cpu::new_boxed());
-        let mut g = self.g.lock().unwrap();
+        let mut g = lock(&self.g);
         let id = g.next_id;
         g.next_id += 1;
         let slot = g.threads.iter().position(|t| t.is_none()).unwrap_or_else(|| {
@@ -388,6 +415,7 @@ impl Kernel {
             cv: Arc::new(Condvar::new()),
             tls,
             cpu,
+            host_running: true,
         });
         drop(g);
         let r = std::thread::Builder::new()
@@ -404,7 +432,7 @@ impl Kernel {
     }
 
     pub fn start_thread(&self, h: u32) -> u64 {
-        let mut g = self.g.lock().unwrap();
+        let mut g = lock(&self.g);
         match g.h_get(h) {
             Obj::Thread(i) => {
                 let t = g.t(i);
@@ -419,23 +447,23 @@ impl Kernel {
     /// The calling thread ends: its waiters are released (the host stack then unwinds to the thread's base,
     /// `boundary::exit_jump`).
     pub fn exit_current(&self) {
-        self.finish(cur(0x0A));
+        lock(&self.g).mark_exited(cur(0x0A));
     }
 
-    fn finish(&self, i: usize) {
-        let mut g = self.g.lock().unwrap();
-        if g.t(i).exited {
-            return;
-        }
-        g.t(i).exited = true;
-        g.wake_sync_waiters(SyncRef::Thread(i));
-        g.thread_maybe_free(i);
+    /// The end of thread i's host thread (the last thing `thread_main` does with it).
+    fn host_finished(&self, i: usize) {
+        let mut g = lock(&self.g);
+        g.mark_exited(i);
+        g.t(i).host_running = false;
+        let freed = g.thread_maybe_free(i);
+        drop(g);
+        release(freed);
     }
 
     /// The main thread: created and started at once; returns (handle, its Cpu).
     pub fn create_main(&self, entry: u64, stack_top: u64, prio: i32, core: i32) -> u32 {
         let h = self.create_thread(entry, 0, stack_top, prio, core);
-        let mut g = self.g.lock().unwrap();
+        let mut g = lock(&self.g);
         let Obj::Thread(i) = g.h_get(h) else { unreachable!() };
         let t = g.t(i);
         t.arg = 0;
@@ -447,23 +475,27 @@ impl Kernel {
 }
 
 fn thread_main(slot: usize) {
+    crate::boundary::guard("a guest thread's host thread", || thread_body(slot));
+}
+
+fn thread_body(slot: usize) {
     CUR.set(Some(slot));
     let k = get();
     let (cpu, entry, arg, sp, tls, handle, main);
     {
-        let mut g = k.g.lock().unwrap();
+        let mut g = lock(&k.g);
         loop {
             let t = g.t(slot);
             if t.started || t.closed {
                 break;
             }
             let cv = t.cv.clone();
-            g = cv.wait(g).unwrap();
+            g = cv.wait(g).unwrap_or_else(PoisonError::into_inner);
         }
         let t = g.t(slot);
         if !t.started {
             drop(g);
-            k.finish(slot);
+            k.host_finished(slot);
             return;
         }
         (cpu, entry, arg, sp, tls, handle) = (t.cpu, t.entry, t.arg, t.stack_top, t.tls, t.handle);
@@ -492,7 +524,8 @@ fn thread_main(slot: usize) {
         }
         crate::boundary::take_pending();
     }
-    k.finish(slot);
+    CPU.set(core::ptr::null_mut());
+    k.host_finished(slot);
 }
 
 /// The kernel's SVCs. Returns false for a number this file does not handle.
@@ -514,13 +547,13 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             }
         }
         0x0C => {
-            let g = k.g.lock().unwrap();
+            let g = lock(&k.g);
             let t = g.thread_of(c.x[1] as u32);
             c.x[0] = if t.is_some() { R_OK } else { R_BAD_HANDLE };
             c.x[1] = t.map_or(0, |i| g.threads[i].as_ref().unwrap().prio as u64);
         }
         0x0D => {
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             match g.thread_of(c.x[0] as u32) {
                 Some(i) => {
                     g.t(i).prio = c.x[1] as i32;
@@ -530,14 +563,14 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             }
         }
         0x0E => {
-            let g = k.g.lock().unwrap();
+            let g = lock(&k.g);
             let t = g.thread_of(c.x[2] as u32).map(|i| g.threads[i].as_ref().unwrap());
             c.x[0] = if t.is_some() { R_OK } else { R_BAD_HANDLE };
             c.x[1] = t.map_or(0, |t| t.core as u64);
             c.x[2] = t.map_or(0, |t| t.mask);
         }
         0x0F => {
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             match g.thread_of(c.x[0] as u32) {
                 Some(i) => {
                     let (ideal, mask) = (c.x[1] as i32, c.x[2]);
@@ -554,11 +587,11 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             }
         }
         0x10 => {
-            let g = k.g.lock().unwrap();
+            let g = lock(&k.g);
             c.x[0] = CUR.get().map_or(0, |i| g.threads[i].as_ref().unwrap().core as u64);
         }
         0x25 => {
-            let g = k.g.lock().unwrap();
+            let g = lock(&k.g);
             let t = g.thread_of(c.x[1] as u32);
             c.x[0] = if t.is_some() { R_OK } else { R_BAD_HANDLE };
             c.x[1] = t.map_or(0, |i| g.threads[i].as_ref().unwrap().id);
@@ -567,7 +600,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             // ArbitrateLock(w0 owner handle, x1 address, w2 this thread's tag)
             let i = cur(imm);
             let (addr, tag) = (c.x[1], c.x[2] as u32);
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             let mut r = R_OK;
             if ld32(addr) == (c.x[0] as u32 | WAITERS_BIT) {
                 let t = g.t(i);
@@ -579,7 +612,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             c.x[0] = r;
         }
         0x1B => {
-            k.g.lock().unwrap().lock_handoff(c.x[0]);
+            lock(&k.g).lock_handoff(c.x[0]);
             c.x[0] = R_OK;
         }
         0x1C => {
@@ -587,7 +620,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             // before the lock is released: a signaller that reads key 0 in user mode skips svc 0x1D.
             let i = cur(imm);
             let (addr, key, tag, ns) = (c.x[0], c.x[1], c.x[2] as u32, c.x[3] as i64);
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             st32(key, 1);
             {
                 let t = g.t(i);
@@ -603,7 +636,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
         0x1D => {
             // SignalProcessWideKey(x0 key, w1 count; <= 0: all). Each woken waiter retakes its lock.
             let (key, cnt) = (c.x[0], c.x[1] as i32);
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             let mut n = 0;
             while cnt <= 0 || n < cnt {
                 let Some(w) = g.pick(Wait::CondVar, key) else { break };
@@ -622,7 +655,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             // than then wait, 2 wait if equal, 3 wait if the 64-bit value is equal
             let i = cur(imm);
             let (addr, ty, val, ns) = (c.x[0], c.x[1] as u32, c.x[2] as i32, c.x[3] as i64);
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             let mut v = ld32(addr);
             let mut ok = match ty {
                 3 => ld64(addr) == c.x[2],
@@ -652,7 +685,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             // SignalToAddress(x0 address, w1 type, w2 value, w3 count): 0 wake; 1 increment if equal and wake; 2 if
             // equal, modify by the waiter count and wake
             let (addr, ty, val, cnt) = (c.x[0], c.x[1] as u32, c.x[2] as i32, c.x[3] as i32);
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             let nw = g.threads.iter().filter(|t| t.as_ref().is_some_and(|t| t.wkind == Wait::Address && t.waddr == addr)).count() as i32;
             let mut r = R_OK;
             if ty != 0 {
@@ -684,7 +717,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             c.x[0] = r;
         }
         0x45 => {
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             let e = g.events.iter().position(|e| e.is_none()).unwrap_or_else(|| {
                 g.events.push(None);
                 g.events.len() - 1
@@ -697,7 +730,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
         }
         0x11 | 0x12 | 0x17 => {
             // SignalEvent(write end) / ClearEvent(either end) / ResetSignal(read end, error if not signaled)
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             let e = match (imm, g.h_get(c.x[0] as u32)) {
                 (0x11, Obj::EventW(e)) | (0x17, Obj::EventR(e)) | (0x12, Obj::EventW(e) | Obj::EventR(e)) => Some(e),
                 _ => None,
@@ -726,7 +759,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
                 return true;
             }
             let hs: Vec<u32> = (0..n).map(|k| unsafe { *((c.x[1] + 4 * k as u64) as *const u32) }).collect();
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             let mut objs = vec![];
             for &h in &hs {
                 match g.h_get(h) {
@@ -763,7 +796,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             c.x[1] = idx.unwrap_or(0) as u64;
         }
         0x19 => {
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             c.x[0] = match g.thread_of(c.x[0] as u32) {
                 Some(t) => {
                     if g.t(t).wkind == Wait::Sync {
@@ -778,7 +811,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
         }
         0x16 => {
             let h = c.x[0] as u32;
-            let mut g = k.g.lock().unwrap();
+            let mut g = lock(&k.g);
             match g.h_get(h) {
                 Obj::EventR(e) | Obj::EventW(e) => {
                     g.h_free(h);
@@ -788,7 +821,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
                     g.h_free(h);
                     g.t(t).closed = true;
                     g.t(t).cv.notify_one();
-                    g.thread_maybe_free(t);
+                    release(g.thread_maybe_free(t));
                 }
                 Obj::Free => {}
             }
@@ -833,6 +866,7 @@ mod tests {
                 cv: Arc::new(Condvar::new()),
                 tls: 0,
                 cpu: core::ptr::null_mut(),
+                host_running: true,
             }));
         }
         s
@@ -851,6 +885,34 @@ mod tests {
             t.wkey = a;
         } else {
             t.waddr = a;
+        }
+    }
+
+    /// ExitThread, WaitSynchronization + CloseHandle by another thread, then the host thread's end, in either order:
+    /// the object is freed exactly once, only after both the handle is closed and the host thread is done, and a
+    /// second "exited" is harmless. (The race behind a 1-in-5 `threads` failure: the object was freed at
+    /// CloseHandle while its host thread still ran the exit path, which then unwrapped a freed or reused slot.)
+    #[test]
+    fn thread_object_outlives_its_host_thread() {
+        for close_first in [true, false] {
+            let mut s = state_with_threads(2);
+            s.t(1).wkind = Wait::Sync;
+            s.t(1).wobjs = vec![SyncRef::Thread(0)];
+            s.mark_exited(0); // ExitThread
+            assert!(s.t(1).woke, "the joiner is released at ExitThread");
+            let close = |s: &mut State| {
+                s.t(0).closed = true;
+                s.thread_maybe_free(0)
+            };
+            let host_end = |s: &mut State| {
+                s.mark_exited(0);
+                s.t(0).host_running = false;
+                s.thread_maybe_free(0)
+            };
+            let (first, second) = if close_first { (close(&mut s), host_end(&mut s)) } else { (host_end(&mut s), close(&mut s)) };
+            assert!(first.is_none(), "freed too early (close_first {close_first})");
+            assert!(second.is_some() && s.threads[0].is_none());
+            assert!(s.threads[1].is_some(), "the other thread is untouched");
         }
     }
 

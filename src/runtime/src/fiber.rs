@@ -60,12 +60,12 @@ pub fn on_fiber() -> bool {
 }
 
 fn find(addr: u64) -> Option<Arc<Mutex<Fiber>>> {
-    FIBERS.lock().unwrap().as_ref().and_then(|m| m.get(&addr).cloned())
+    FIBERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().and_then(|m| m.get(&addr).cloned())
 }
 
 fn resumed() {
     if let Some(f) = LEAVING.with(|l| l.borrow_mut().take()) {
-        f.lock().unwrap().running = false;
+        f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).running = false;
     }
 }
 
@@ -78,7 +78,7 @@ unsafe extern "C" fn nxrt_fiber_run(p: *mut core::ffi::c_void) -> usize {
         resumed();
         let f = Arc::from_raw(p as *const Mutex<Fiber>);
         let (c, func, arg, addr) = {
-            let g = f.lock().unwrap();
+            let g = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             (g.cpu, g.func, g.arg, g.addr)
         };
         (*c).x[0] = arg;
@@ -86,7 +86,7 @@ unsafe extern "C" fn nxrt_fiber_run(p: *mut core::ffi::c_void) -> usize {
             crate::rt::guest_fatal(c, &format!("fiber {addr:#x}: a guest jump or ExitThread left the fiber's function"));
         }
         let next = (*c).x[0];
-        f.lock().unwrap().state = St::Done;
+        f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).state = St::Done;
         drop(f);
         let n = if next != 0 {
             Some(find(next).unwrap_or_else(|| {
@@ -116,7 +116,7 @@ unsafe fn prepare(from: *const Cpu, to: Option<Arc<Mutex<Fiber>>>) -> usize {
     }
     let (dst, host) = match &to {
         Some(f) => {
-            let mut g = f.lock().unwrap();
+            let mut g = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if g.state == St::Done {
                 crate::rt::fatal(&format!("SwitchToFiber({:#x}): the fiber has finished", g.addr));
             }
@@ -150,7 +150,7 @@ unsafe fn switch_to(from: *const Cpu, to: Option<Arc<Mutex<Fiber>>>) {
     let host = prepare(from, to);
     SwitchToFiber(host as *const _);
     resumed();
-    let me = CURRENT.with(|c| c.borrow().as_ref().map(|f| f.lock().unwrap().cpu)).unwrap_or(THREAD_CPU.get());
+    let me = CURRENT.with(|c| c.borrow().as_ref().map(|f| f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu)).unwrap_or(THREAD_CPU.get());
     (*me).sync_mxcsr();
 }
 
@@ -158,10 +158,10 @@ unsafe fn switch_to(from: *const Cpu, to: Option<Arc<Mutex<Fiber>>>) {
 unsafe fn initialize(c: *mut Cpu) {
     let c = &mut *c;
     let addr = c.x[0];
-    let mut map = FIBERS.lock().unwrap();
+    let mut map = FIBERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let map = map.get_or_insert_with(HashMap::new);
     if let Some(old) = map.get(&addr) {
-        let g = old.lock().unwrap();
+        let g = old.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if g.running {
             crate::rt::guest_fatal(c, &format!("InitializeFiber({addr:#x}): the fiber is running"));
         }
@@ -173,18 +173,18 @@ unsafe fn initialize(c: *mut Cpu) {
     if host.is_null() {
         crate::rt::fatal("fiber: cannot create a host fiber");
     }
-    f.lock().unwrap().host = host as usize;
+    f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).host = host as usize;
     if let Some(old) = map.insert(addr, f) {
-        release(&old.lock().unwrap());
+        release(&old.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
     }
 }
 
 /// FinalizeFiber(x0 FiberType*)
 unsafe fn finalize(c: *mut Cpu) {
     let addr = (*c).x[0];
-    let f = FIBERS.lock().unwrap().as_mut().and_then(|m| m.remove(&addr));
+    let f = FIBERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut().and_then(|m| m.remove(&addr));
     let Some(f) = f else { crate::rt::guest_fatal(c, &format!("FinalizeFiber({addr:#x}): not an initialized fiber")) };
-    let g = f.lock().unwrap();
+    let g = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if g.running {
         crate::rt::guest_fatal(c, &format!("FinalizeFiber({addr:#x}): the fiber is running"));
     }
@@ -225,7 +225,7 @@ unsafe fn switch(c: *mut Cpu) {
 
 /// GetCurrentFiber() -> x0 (NULL on the thread's own context)
 unsafe fn current(c: *mut Cpu) {
-    (*c).x[0] = CURRENT.with(|f| f.borrow().as_ref().map_or(0, |f| f.lock().unwrap().addr));
+    (*c).x[0] = CURRENT.with(|f| f.borrow().as_ref().map_or(0, |f| f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).addr));
 }
 
 pub fn register() {

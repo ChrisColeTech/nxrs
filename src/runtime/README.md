@@ -61,9 +61,12 @@ alignment or offset that differs from the Rust mirrors.
    the switching host function (they continue when switched back); a finished fiber's stack holds only the asm entry
    frame, and a fiber suspended mid-function is never deleted under its frames. Tested by
    `boundary::tests::longjmp_out_of_a_host_callback_keeps_rust_frames` and the `setjmp` homebrew test.
-2. **No panic unwinds into C or guest frames.** Every entry point C or generated code calls runs under
-   `boundary::guard`, which reports the panic and exits with code 70; host functions are plain Rust functions
-   (`HostFn`) called only from inside that guard. Tested by `boundary::tests::panic_in_host_function_exits_cleanly`.
+2. **No panic unwinds into C or guest frames, and none cascades.** Every entry point C or generated code calls, and
+   every thread the runtime starts (guest threads' host threads, fibers), runs under `boundary::guard`, which reports
+   the panic and exits with code 70: the first panic ends the process with its own message. Host functions are plain
+   Rust functions (`HostFn`) called only from inside that guard. The runtime's locks recover instead of poisoning, so
+   no later caller can turn one panic into a `PoisonError` elsewhere. Tested by
+   `boundary::tests::panic_in_host_function_exits_cleanly`.
 3. **Shared layouts match.** `tests/abi_layout.rs` (needs clang; `NXRT_CLANG` names it).
 
 ## Host functions
@@ -91,8 +94,8 @@ The M2 homebrew tests (`guest/tests/*.c`, expected output in `*.expected`) run e
 
 ```
 cargo build -p runtime -p translator
-target/debug/nxrt-dev e2e --generator rust      # Rust translator (src/translator)
-target/debug/nxrt-dev e2e --generator mkw       # mkw-recomp gen.py + landing-pad owners (tools/mkw_gen.py)
+target/debug/nxrt-dev e2e --generator rust      # Rust translator (src/translator): all 8
+target/debug/nxrt-dev e2e --generator mkw       # mkw-recomp gen.py + landing-pad owners (tools/mkw_gen.py): all 8
 ```
 
 There is no devkitA64 or libnx here, so the tests are homebrew of their own: a small libnx-shaped SDK in
@@ -104,21 +107,17 @@ Imports named after host functions are linked against stand-ins (`guest/hostlib.
 loader. The expected output of `float_printf` is the output of the same source and printf run natively on x86.
 
 The mkw generator path needs numpy and lz4: `py -m venv build/venv-mkw` and
-`build/venv-mkw/Scripts/python -m pip install numpy lz4` (`NXRT_MKW_PYTHON` names another interpreter).
+`build/venv-mkw/Scripts/python -m pip install numpy lz4` (`NXRT_MKW_PYTHON` names another interpreter). It runs with
+`-B` and `PYTHONDONTWRITEBYTECODE=1`, so nothing is written into the mkw-recomp checkout.
 
-## Requests to the translator
+## Translator support it relies on
 
-1. **Landing pads as owners (C++ exceptions).** An unwinder's resume jumps to a landing pad inside a lifted function,
-   which only a resumable owner can take. Functions holding a landing pad (from `.eh_frame` FDE → LSDA → call-site
-   table) should be owners like setjmp callers. `tools/mkw_gen.py` does exactly this on gen.py's output; with it the
-   `cxx_exceptions` test passes, without it the run stops with
-   `rt_dispatch: no function at guest pc … not a function start, and no live setjmp owner holds it`.
-2. **libunwind's resume ends in `ret x30`**, not `br`: a lifted `ret` is a C return, so a game's own libunwind would
-   return into its caller instead of jumping. The function that loads sp and every register and then `ret`s
-   (`__libunwind_Registers_arm64_jumpto`, `Registers_arm64::jumpto`) needs its `ret` lowered as a dispatch to x30. The
-   test SDK's unwinder uses `br x16` and does not depend on this.
-3. **The module entry as a seed.** A module's first instruction (the entry the runtime starts) is not a seed unless an
-   FDE or a symbol names it; the test crt0 gives it an FDE.
+- **Landing pads as owners (C++ exceptions):** functions holding a landing pad are resumable owners like setjmp
+  callers, so an unwinder's resume into the middle of one is taken by `rt_sj_owner`. Done in the translator;
+  `tools/mkw_gen.py` gives gen.py the same owners.
+- **libunwind's `ret x30` after a context restore** is lowered as a dispatch to x30 (a lifted `ret` is otherwise a C
+  return). Done in the translator. The test SDK's unwinder uses `br x16` and does not depend on it.
+- **The module entry as a seed:** the test crt0 gives the entry an FDE, so it is a function start either way.
 
 ## Not done (later milestones)
 

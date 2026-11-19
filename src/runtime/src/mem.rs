@@ -288,7 +288,7 @@ impl Space {
         if !protect(base, size, p) {
             return Err(format!("memory: protect {base:#x}+{size:#x} failed"));
         }
-        let mut st = self.st.lock().unwrap();
+        let mut st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         st.regions.push(Region { r: Range { base, size }, state, perm });
         st.regions.sort_by_key(|r| r.r.base);
         Ok(())
@@ -296,7 +296,7 @@ impl Space {
 
     /// svcSetHeapSize: the heap grows and shrinks at its base in 2 MiB steps; returns the heap's address.
     pub fn set_heap_size(&self, size: u64) -> Result<u64, u32> {
-        let mut st = self.st.lock().unwrap();
+        let mut st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if size > HEAP_CAP || !size.is_multiple_of(0x20_0000) || size > self.pool {
             return Err(R_INVALID_SIZE);
         }
@@ -312,13 +312,13 @@ impl Space {
     }
 
     pub fn heap_size(&self) -> u64 {
-        self.st.lock().unwrap().heap_size
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).heap_size
     }
 
     /// A guest stack of `size` bytes in the stack region (the main thread's), committed. Returns its base.
     pub fn alloc_stack(&self, size: u64) -> Result<u64, String> {
         let size = align_up(size, PAGE);
-        let mut st = self.st.lock().unwrap();
+        let mut st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let a = st.stack_top;
         if a + size > self.stack.end() {
             return Err("memory: the stack region is full".into());
@@ -334,7 +334,7 @@ impl Space {
 
     /// Zeroed, committed memory in the kernel region (host objects the guest reads).
     pub fn kernel_alloc(&self, size: u64, align: u64) -> u64 {
-        let mut st = self.st.lock().unwrap();
+        let mut st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let a = align_up(st.kernel_top, align.max(16));
         let end = a + size;
         if end > self.kernel.end() {
@@ -350,7 +350,7 @@ impl Space {
 
     /// A thread's 0x200-byte TLS region (TPIDRRO_EL0), zeroed; reused after `free_tls`.
     pub fn alloc_tls(&self) -> u64 {
-        if let Some(a) = self.st.lock().unwrap().free_tls.pop() {
+        if let Some(a) = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).free_tls.pop() {
             // SAFETY: a region this space handed out, committed.
             unsafe { core::ptr::write_bytes(a as *mut u8, 0, 0x200) };
             return a;
@@ -359,13 +359,13 @@ impl Space {
     }
 
     pub fn free_tls(&self, a: u64) {
-        self.st.lock().unwrap().free_tls.push(a);
+        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).free_tls.push(a);
     }
 
     /// svcQueryMemory: the region holding `a`, from the runtime's own table (heap, stacks, module segments), free
     /// space between them clipped to the neighbours.
     pub fn query(&self, a: u64) -> MemoryInfo {
-        let st = self.st.lock().unwrap();
+        let st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut regions = st.regions.clone();
         if st.heap_size > 0 {
             regions.push(Region { r: Range { base: self.heap.base, size: st.heap_size }, state: ST_NORMAL, perm: PERM_RW });

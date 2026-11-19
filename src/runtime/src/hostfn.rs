@@ -45,7 +45,7 @@ struct Registry {
 static REG: Mutex<Option<Registry>> = Mutex::new(None);
 
 fn with<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
-    let mut g = REG.lock().unwrap();
+    let mut g = REG.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let r = g.get_or_insert_with(|| Registry {
         names: vec![],
         by_key: HashMap::new(),
