@@ -47,6 +47,8 @@ pub enum C {
     VtxNs,
     UploadsSame,
     ImagesReused,
+    PoolSyncNs,
+    HashNs,
     // dropped or degraded work
     TexNoFormat,
     TexCreateFailed,
@@ -90,6 +92,8 @@ const NAMES: [&str; C::N as usize] = [
     "vertex_ns",
     "uploads_same_bytes",
     "images_reused",
+    "pool_sync_ns",
+    "hash_ns",
     "tex_no_format",
     "tex_create_failed",
     "view_failed",
@@ -229,8 +233,10 @@ fn csv_start() {
 fn breakdown(cur: &[u64; C::N as usize], base: &[u64; C::N as usize], frames: f64) -> String {
     let d = |c: C| (cur[c as usize] - base[c as usize]) as f64 / 1e6 / frames;
     format!(
-        "prep {:.2}, sets {:.2} (memory {:.2}, views {:.2}), pipeline lookups {:.2}, passes {:.2}, vertex input {:.2}, uploads {:.2} ms, {:.1} uploads skipped (same bytes), {:.1} images reused",
+        "prep {:.2} (pools {:.2}, texture hashes {:.2}), sets {:.2} (memory {:.2}, views {:.2}), pipeline lookups {:.2}, passes {:.2}, vertex input {:.2}, uploads {:.2} ms, {:.1} uploads skipped (same bytes), {:.1} images reused",
         d(C::PrepNs),
+        d(C::PoolSyncNs),
+        d(C::HashNs),
         d(C::SetNs),
         d(C::ResolveNs),
         d(C::TexViewNs),

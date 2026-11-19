@@ -322,6 +322,8 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
 - **Screenshots no longer freeze the game** (`shot`, `fullres`, F8, `NXGFX_SHOT*`): `queue::present` takes the
   screenshot before it locks the submission state (the capture's own submission locked it again: deadlock, the
   game stopped in `nvnQueuePresentTexture`). Shots requested while a queue is parked go to the next present.
+  Checked: `gamectl fullres` twice on lane G's Violet (`build/G/runs/v2/fullres1.png`, `fullres2.png`); the game
+  played on at the same rate. (Lanes W / X / P saw the freeze on builds without this change.)
 - **Review of lane P's host-lent command memory reclaim (`nvn/cmd.rs`): OK.** It matches nxnative's design.
   Parked and queued submissions copy their records, so a reclaimed segment is never replayed late. What is left: a
   segment with no guest range (an overflow by a command buffer that is not recording, or at the very end of the
@@ -338,11 +340,36 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   walk on every submission cost MK8D 1.9 s a frame in `r29`). The pools line now ends with `N mirrors without write
   watch (MB)`. The texture check after CPU writes takes each texture once, not once per dirty page under it, and
   looks only at the dirty ranges over it. `prep` in the replay line is split into `pools` and `texture hashes`.
+  Results: Violet `build/G/runs/v5` holds its 30 FPS cap from 20 s to 150 s, `prep` 3 ms a frame (was 40-65 ms,
+  `v2` / `v3`: 11-25 FPS). MK8D `r30`: races at 54-60 FPS from 81 s to 281 s (were 41-47, and 22-26 in `r28`).
 - **Descriptor work** (`vk/exec.rs`): a stage's c0 / c2 driver banks are rebuilt and staged only when a bind for that
   stage changed them (Z-A: ~1,700 draws a frame, `sets` 7.9 ms a frame).
+- **Z-A (item 5) is still 35-46 FPS in Lumiose** (`build/G/runs/z1`, `z2`; picture right, `z2/lumiose.png`). Upload
+  stalls are gone; what is left is the replay's descriptor work: ~1,640 draws and ~2,170 new descriptor sets a frame,
+  `sets` 10-12 ms of 15-19 ms of replay CPU a frame. Caching the staged constant blocks (support buffer, c1, push
+  banks, c0 / c2) did not move it; the cost is the set allocations and writes. Next: push descriptors or descriptor
+  buffers for the stage sets, or the replay on its own thread (async, off since MK8D's stalls).
+- MK8D with all of rev 6 (`r31`, `r32`): races and battle at 58-60 FPS, race start included; the race picture is
+  right in lane G's build (`r28/shot-006400.png`, `r32/shot-005000.png`): lane W's tint and black road came from a
+  build without these changes or with frame generation; worth one more look on the main build once it is rebuilt.
 - **Texture uploads decode on several threads** (`vk/image.rs decode_many`): with 4 or more textures (4 MB or more)
   due in one submission, their storage is read and de-tiled on up to 8 threads before recording (Z-A's streaming
   bursts: 200-370 ms frames).
+- **Guest memory reads (`vk::mem::guest_bytes`) use ReadProcessMemory on the own process** instead of VirtualQuery:
+  VirtualQuery scans a large uniform reservation page by page to size its region, ~2.5 ms a call in Violet (its
+  texture checks: 60 ms a frame). Pages with no storage still read as zeros.
+- **ASTC decoding allocates no buffers per texture** (`Sub::gpu_scratch`, 64 MB device-local chunks kept with the
+  submission; the BC7 copy reads the blocks in place). Image initialization and uploads of one submission share two
+  barriers instead of two each.
+- **MKW boot stall (lane X):** the first submission's set-up took 11.4-11.7 s (29,331 images, 10 s of it two buffer
+  allocations per ASTC level) and the first frame came at 19-38 s; now 2.0 s and 9.6 s (`build/G/runs/w11`). A
+  submission's set-up over 1 s is logged with its parts (`a submission's set-up took …`, `textures at a submission: …`).
+- **For lanes X / O, MKW's crash after its first frame:** with a PDB (`w11`), the fault is
+  `nvnCommandBufferWaitEvent` called with a **null command buffer** from main+0xa0040 (`cmd.rs` reads `o.cur` at
+  offset 8: "read of 0x8"); the other runs' read of 0xa0 at main+0xa66e0 comes from the same caller tree. Graphics
+  only sees the null; the object that should hold the command buffer is the null heap allocation X found. Not
+  changed by the graphics fixes above. A graphics cause would be sizes the game budgets its heap from
+  (`nvnTextureBuilderGetStorageSize`, pool and command-memory sizes on NVN2); not checked yet.
 - **Compressible textures (render targets) are not uploaded from storage** on creation. MK8D's dynamic resolution makes
   new targets of 1880x1057 .. 1920x1080 every frame, and each was uploaded: 20-50 ms a frame in races (`r28`).
 

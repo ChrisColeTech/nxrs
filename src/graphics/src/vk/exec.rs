@@ -93,9 +93,83 @@ pub struct QState {
     missing: Vec<(crate::nvn::prog::ShaderKey, u32)>,
     /// block aliases of compressed targets to copy into their images when the pass ends
     copyback: Vec<(vk::Image, vk::Image, u32, u32, vk::Extent2D, vk::Extent2D, u32)>,
+    /// a stage's bindings generation (new at every bind for it) and its driver constant banks c0 / c2 built for it
+    bgen: [u64; 7],
+    cbank: std::cell::RefCell<[Option<CBank>; 7]>,
+    /// push constants' generation (new at every PushConstants)
+    pgen: u64,
+    /// staged constant blocks by (kind, key): where they are in submission `serial` (support buffer by pass size,
+    /// a module's c1, the push banks by generation; each was hashed and staged again at every draw)
+    scache: std::cell::RefCell<std::collections::HashMap<(u8, u64), (u64, (vk::Buffer, u64))>>,
+}
+
+/// A stage's c0 / c2 as last built: valid while its bindings generation, dispatch size and base instance stand; where
+/// they were staged in submission `sub` (Pokemon Legends: Z-A, ~1,700 draws a frame: building, hashing and staging
+/// 5 KB a stage a draw was most of the 8 ms of descriptor work a frame)
+struct CBank {
+    gen: u64,
+    dispatch: [u32; 3],
+    base_instance: u32,
+    c0: Arc<Vec<u8>>,
+    c2: Arc<Vec<u8>>,
+    staged: Option<(u64, (vk::Buffer, u64), (vk::Buffer, u64))>,
+}
+
+fn new_bgen() -> u64 {
+    static G: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+    G.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 impl QState {
+    /// `bytes` staged in `sub`, once per submission for the same (kind, key).
+    fn staged(&self, g: &Gpu, sub: &mut Sub, kind: u8, key: u64, bytes: impl FnOnce() -> Vec<u8>) -> (vk::Buffer, u64) {
+        let mut c = self.scache.borrow_mut();
+        if let Some(&(serial, r)) = c.get(&(kind, key)) {
+            if serial == sub.serial {
+                return r;
+            }
+        }
+        if c.len() > 4096 {
+            c.clear();
+        }
+        let r = sub.stage_bytes(g, &bytes());
+        c.insert((kind, key), (sub.serial, r));
+        r
+    }
+
+    fn bump(&mut self, st: usize) {
+        if st < 7 {
+            self.bgen[st] = new_bgen();
+        }
+    }
+
+    /// c0 / c2 of stage `st` and where they are staged in `sub` (built and staged again only when they changed).
+    fn banks(&self, g: &Gpu, sub: &mut Sub, st: usize, dispatch: [u32; 3], base_instance: u32) -> (Arc<Vec<u8>>, Arc<Vec<u8>>, (vk::Buffer, u64), (vk::Buffer, u64)) {
+        let mut cb = self.cbank.borrow_mut();
+        let ok = cb[st].as_ref().is_some_and(|c| c.gen == self.bgen[st] && c.dispatch == dispatch && c.base_instance == base_instance);
+        if !ok {
+            cb[st] = Some(CBank {
+                gen: self.bgen[st],
+                dispatch,
+                base_instance,
+                c0: Arc::new(c0_bytes(self, st, dispatch, base_instance)),
+                c2: Arc::new(c2_bytes(self, st)),
+                staged: None,
+            });
+        }
+        let c = cb[st].as_mut().unwrap();
+        let (s0, s2) = match c.staged {
+            Some((serial, s0, s2)) if serial == sub.serial => (s0, s2),
+            _ => {
+                let s0 = sub.stage_bytes(g, &c.c0);
+                let s2 = sub.stage_bytes(g, &c.c2);
+                c.staged = Some((sub.serial, s0, s2));
+                (s0, s2)
+            }
+        };
+        (c.c0.clone(), c.c2.clone(), s0, s2)
+    }
+
     pub fn new(origin_ll: bool) -> QState {
         let mut blend = [blend_st(0); 8];
         for (i, b) in blend.iter_mut().enumerate() {
@@ -154,6 +228,10 @@ impl QState {
             pass_extent: vk::Extent2D::default(),
             pass_formats: ([0; 8], 0, 0, 1),
             copyback: Vec::new(),
+            bgen: core::array::from_fn(|_| new_bgen()),
+            cbank: Default::default(),
+            pgen: new_bgen(),
+            scache: Default::default(),
             vis_on: false,
             occl_q: None,
             last_color: vk::Extent2D::default(),
@@ -1101,8 +1179,8 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
 
     let zero = zero_buffer(g, sub);
     let max_ubo = (g.d.props.limits.max_uniform_buffer_range as u64).min(65536);
-    let c0 = c0_bytes(qs, st, dispatch, base_instance);
-    let c2 = c2_bytes(qs, st);
+    let (c0, c2, c0s, c2s) = qs.banks(g, sub, st, dispatch, base_instance);
+    let (c0, c2) = (&c0[..], &c2[..]);
     let (tb, sb) = pool_bases(qs);
     let mut bufs: Vec<(u32, vk::DescriptorType, vk::DescriptorBufferInfo)> = Vec::new();
     let mut imgs: Vec<(u32, vk::DescriptorType, vk::DescriptorImageInfo)> = Vec::new();
@@ -1113,36 +1191,30 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
         let b = *b;
         match r {
             Res::Support => {
-                let (w, h) = (qs.pass_extent.width.max(1) as f32, qs.pass_extent.height.max(1) as f32);
-                let (buf, off) = sub.stage_bytes(g, &support_bytes(w, h));
+                let (wi, hi) = (qs.pass_extent.width.max(1), qs.pass_extent.height.max(1));
+                let (buf, off) = qs.staged(g, sub, 0, (wi as u64) << 32 | hi as u64, || support_bytes(wi as f32, hi as f32).to_vec());
                 bufs.push((b, vk::DescriptorType::UNIFORM_BUFFER, vk::DescriptorBufferInfo { buffer: buf, offset: off, range: 1392 }));
             }
             Res::Cbuf { bank } => {
                 let info = match *bank {
-                    0 => {
-                        let (buf, off) = sub.stage_bytes(g, &c0);
-                        vk::DescriptorBufferInfo { buffer: buf, offset: off, range: DRV_SIZE as u64 }
-                    }
+                    0 => vk::DescriptorBufferInfo { buffer: c0s.0, offset: c0s.1, range: DRV_SIZE as u64 },
                     1 => match &m.c1 {
                         Some(c1) if !c1.is_empty() => {
-                            let (buf, off) = sub.stage_bytes(g, c1);
+                            let (buf, off) = qs.staged(g, sub, 1, c1.as_ptr() as u64 ^ (c1.len() as u64) << 48, || c1.to_vec());
                             vk::DescriptorBufferInfo { buffer: buf, offset: off, range: (c1.len() as u64).min(max_ubo) }
                         }
                         _ => vk::DescriptorBufferInfo { buffer: zero, offset: 0, range: max_ubo },
                     },
-                    2 => {
-                        let (buf, off) = sub.stage_bytes(g, &c2);
-                        vk::DescriptorBufferInfo { buffer: buf, offset: off, range: DRV_SIZE as u64 }
-                    }
+                    2 => vk::DescriptorBufferInfo { buffer: c2s.0, offset: c2s.1, range: DRV_SIZE as u64 },
                     24 => {
                         let grp = (st == 5) as usize;
-                        let (buf, off) = sub.stage_bytes(g, &qs.push[grp][..]);
+                        let (buf, off) = qs.staged(g, sub, 2 + grp as u8, qs.pgen, || qs.push[grp][..].to_vec());
                         vk::DescriptorBufferInfo { buffer: buf, offset: off, range: 0x800 }
                     }
                     k @ 25..=29 => {
                         // graphics stage i reads its push block 1 + i through its own bank (NVN2)
                         let b = (k - 24) as usize * 0x100;
-                        let (buf, off) = sub.stage_bytes(g, &qs.push[0][b..b + 0x100]);
+                        let (buf, off) = qs.staged(g, sub, k as u8, qs.pgen, || qs.push[0][b..b + 0x100].to_vec());
                         vk::DescriptorBufferInfo { buffer: buf, offset: off, range: 0x100 }
                     }
                     k @ 3..=18 => {
@@ -2157,18 +2229,22 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             };
             if (b.stage as usize) < 7 && (b.index as usize) < 16 {
                 qs.ubo[b.stage as usize][b.index as usize] = (b.addr, b.size);
+                qs.bump(b.stage as usize);
+                qs.bump(5);
             }
         }
         op::BIND_SSBO => {
             let b: p_bind_buf = rd_payload(rec);
             if (b.stage as usize) < 7 && (b.index as usize) < 16 {
                 qs.ssbo[b.stage as usize][b.index as usize] = (b.addr, b.size);
+                qs.bump(b.stage as usize);
             }
         }
         op::BIND_TEX | op::BIND_SAMP | op::BIND_IMG => {
             let (stage, first, n): (i32, i32, i32) = unsafe { (rd_at(rec, 0), rd_at(rec, 4), rd_at(rec, 8)) };
             let (defer, src): (i32, u64) = unsafe { (rd_at(rec, 12), rd_at(rec, 16)) };
             if (stage as usize) < 7 {
+                qs.bump(stage as usize);
                 for i in 0..n.clamp(0, 32) as usize {
                     // a deferred bind reads the game's handle array now, as the queue runs it
                     let h: u64 = if defer != 0 && src != 0 { unsafe { core::ptr::read_unaligned((src + 8 * i as u64) as *const u64) } } else { unsafe { rd_at(rec, 24 + 8 * i) } };
@@ -2186,6 +2262,7 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             let b: p_bind_tex1 = rd_payload(rec);
             if (b.stage as usize) < 7 && (b.slot as usize) < 256 {
                 qs.tex[b.stage as usize][b.slot as usize] = b.h as u32;
+                qs.bump(b.stage as usize);
             }
         }
         op::SET_TEX_POOL => qs.tex_pool = rd_payload::<usize>(rec),
@@ -2384,6 +2461,7 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             let p: crate::nvn::cmd2::p_push_const = rd_payload(rec);
             let (o, n) = (p.offset as usize, p.size as usize);
             if o + n <= 0x800 {
+                qs.pgen = new_bgen();
                 let grp = &mut qs.push[(p.compute != 0) as usize][o..o + n];
                 if p.deferred != 0 {
                     unsafe { core::ptr::copy_nonoverlapping(p.src as *const u8, grp.as_mut_ptr(), n) };
@@ -2396,6 +2474,8 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
         op::BUFS_DEFERRED => {
             let b: crate::nvn::cmd2::p_bufs_deferred = rd_payload(rec);
             if (b.stage as usize) < 7 {
+                qs.bump(b.stage as usize);
+                qs.bump(5);
                 for i in 0..b.n.clamp(0, 16) {
                     let k = (b.first + i) as usize;
                     if k >= 16 {

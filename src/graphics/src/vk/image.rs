@@ -44,6 +44,8 @@ pub struct Image {
     pub needs_init: bool,
     pub needs_upload: bool,
     pub bc7: bool,
+    /// its storage decoded ahead (on several threads) for the upload due
+    pub decoded: Option<Vec<Part>>,
     /// a texture in a sparse virtual pool: the physical ranges its last upload read and the mapping generation then
     pub sparse: Option<(Vec<(u64, u64)>, u64)>,
     /// a hash of each 4 KB page of the storage as last uploaded: a CPU write to a page the texture shares with other
@@ -57,11 +59,17 @@ unsafe impl Send for Image {}
 const HPAGE: u64 = 4096;
 
 fn hash_bytes(b: &[u8]) -> u64 {
-    let mut h = 0xcbf29ce484222325u64;
-    let mut ch = b.chunks_exact(8);
+    // four independent lanes of 8 bytes (one lane's multiply chain ran at ~2 GB/s: Violet hashed ~70 MB of
+    // re-written texture pages a frame, 17-37 ms)
+    let mut l = [0xcbf29ce484222325u64, 0x84222325cbf29ce4, 0x9e3779b97f4a7c15, 0x632be59bd9b4e019];
+    let mut ch = b.chunks_exact(32);
     for c in &mut ch {
-        h = (h ^ u64::from_le_bytes(c.try_into().unwrap())).wrapping_mul(0x100000001b3).rotate_left(23);
+        for (i, x) in l.iter_mut().enumerate() {
+            let v = u64::from_le_bytes(c[8 * i..8 * i + 8].try_into().unwrap());
+            *x = (*x ^ v).wrapping_mul(0x100000001b3).rotate_left(23);
+        }
     }
+    let mut h = l[0] ^ l[1].rotate_left(17) ^ l[2].rotate_left(31) ^ l[3].rotate_left(47);
     for &x in ch.remainder() {
         h = (h ^ x as u64).wrapping_mul(0x100000001b3);
     }
@@ -121,6 +129,95 @@ fn pages_changed(hashes: &mut [u64], lo: u64, hi: u64, a: u64, n: u64) -> bool {
     changed
 }
 
+/// One level / layer of a texture laid out linearly (as the upload copies it, or as the ASTC encoder takes it).
+pub struct Part {
+    level: u32,
+    layer: u32,
+    lw: u32,
+    lh: u32,
+    ld: u32,
+    slices: u32,
+    data: Vec<u8>,
+}
+
+/// The levels and layers of a texture from its storage bytes, laid out linearly.
+fn decode_parts(im: &Image, storage: &[u8]) -> Vec<Part> {
+    let t = im.tex;
+    let d = t.d;
+    let (bpb, bw, bh) = layout::fmt_bpb(d.format);
+    let linear = d.flags as u32 & (tex_flags::LINEAR | tex_flags::LINEAR_RENDER_TARGET) != 0;
+    let mut out = Vec::new();
+    for layer in 0..im.layers {
+        for level in 0..im.levels {
+            let lw = (im.extent.width >> level).max(1);
+            let lh = (im.extent.height >> level).max(1);
+            let ld = (im.extent.depth >> level).max(1);
+            let (rows_data, slices) = if linear {
+                if level > 0 {
+                    continue;
+                }
+                let stride = if d.stride != 0 { d.stride as usize } else { (t.l.layer_size / lh.max(1) as u64) as usize };
+                let rb = lw.div_ceil(bw) as usize * bpb as usize;
+                let rws = lh.div_ceil(bh) as usize;
+                let mut v = vec![0u8; rb * rws];
+                for y in 0..rws {
+                    let s = y * stride;
+                    if s + rb <= storage.len() {
+                        v[y * rb..(y + 1) * rb].copy_from_slice(&storage[s..s + rb]);
+                    }
+                }
+                (v, 1)
+            } else {
+                let Some(g) = deswizzle::geom(&d, level, if d.target == target::T3D { 0 } else { layer }) else { continue };
+                let mut v = vec![0u8; g.row_bytes as usize * g.rows as usize * g.slices as usize];
+                if deswizzle::deswizzle(&d, level, if d.target == target::T3D { 0 } else { layer }, storage, &mut v, g.row_bytes as usize).is_none() {
+                    crate::log::red_once(&format!("texture {}x{} format {:#x}: storage shorter than its layout", d.width, d.height, d.format));
+                    continue;
+                }
+                (v, g.slices)
+            };
+            let data = if im.tf.astc.is_none() && im.tf.expand3 != 0 { expand3(&rows_data, im.tf.expand3 as usize) } else { rows_data };
+            out.push(Part { level, layer, lw, lh, ld, slices, data });
+        }
+        if d.target == target::T3D {
+            break;
+        }
+    }
+    out
+}
+
+/// The storage of the textures among `serials` due an upload (not of sparse pools), decoded on several threads; only
+/// when there are enough of them to be worth the threads.
+fn decode_many(imgs: &Images, serials: &[u64]) -> HashMap<u64, Vec<Part>> {
+    let due: Vec<&Image> = serials
+        .iter()
+        .filter_map(|s| imgs.by_serial.get(s))
+        .filter(|im| im.needs_upload && !im.gpu_owned && !im.tex.mem.is_null() && !crate::nvn::vpool::is_sparse(im.tex.mem as u64))
+        .collect();
+    let bytes: u64 = due.iter().map(|im| im.tex.l.size).sum();
+    if due.len() < 4 || bytes < (4 << 20) {
+        return HashMap::new();
+    }
+    for im in &due {
+        super::lazy::touch(im.tex.mem as u64, im.tex.l.size);
+    }
+    let n = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4).clamp(2, 8);
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let out = std::sync::Mutex::new(HashMap::new());
+    std::thread::scope(|sc| {
+        for _ in 0..n {
+            sc.spawn(|| loop {
+                let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                let Some(im) = due.get(i) else { break };
+                let storage = super::mem::guest_bytes(im.tex.mem as u64, im.tex.l.size);
+                let parts = decode_parts(im, &storage);
+                out.lock().unwrap().insert(im.tex.serial, parts);
+            });
+        }
+    });
+    out.into_inner().unwrap()
+}
+
 #[derive(Default)]
 pub struct Images {
     pub by_serial: HashMap<u64, Image>,
@@ -149,6 +246,13 @@ fn tex_identity(t: &tex_t) -> u128 {
     b.extend_from_slice(&t.l.size.to_le_bytes());
     b.push(t.bits & 2);
     super::queue::memo_hash(&b)
+}
+
+/// Whether a new image takes its content from the texture's storage. Not a compressible texture's (a render target:
+/// the GPU draws it, and its storage holds no picture the CPU made; Mario Kart 8 Deluxe's dynamic resolution makes new
+/// 1880x1057 .. 1920x1080 targets every frame, each was uploaded from storage: 20-50 ms a frame in races).
+fn from_storage(t: &tex_t) -> bool {
+    !t.mem.is_null() && t.d.flags as u32 & tex_flags::COMPRESSIBLE == 0
 }
 
 const PARK_FRAMES: u64 = 8;
@@ -324,6 +428,7 @@ impl Gpu {
                     needs_init: true,
                     needs_upload: false,
                     bc7,
+                    decoded: None,
                     sparse: None,
                     page_hash: Vec::new(),
             rewrites: 0,
@@ -360,8 +465,9 @@ impl Gpu {
             views: HashMap::new(),
             gpu_owned: false,
             needs_init: true,
-            needs_upload: !t.mem.is_null(),
+            needs_upload: from_storage(t),
             bc7,
+            decoded: None,
             sparse: None,
             page_hash: Vec::new(),
             rewrites: 0,
@@ -399,7 +505,7 @@ impl Gpu {
                 im.needs_upload |= pages_changed(&mut ph, lo, lo + t.l.size, lo, t.l.size);
                 im.page_hash = ph;
             } else if !im.gpu_owned {
-                im.needs_upload = !t.mem.is_null();
+                im.needs_upload = from_storage(t);
             }
             super::perf::inc(super::perf::C::ImagesReused);
             im
@@ -730,27 +836,74 @@ impl Gpu {
             self.tables.write_texel_views(&self.d, id, uv, sv);
         }
         let mut imgs = self.images.lock().unwrap();
+        let t_all = std::time::Instant::now();
         if !dirty.is_empty() && !imgs.by_addr.is_empty() {
             let max = imgs.max_size;
             let mut hit = Vec::new();
-            for &(a, n) in dirty {
-                for (_, ss) in imgs.by_addr.range(a.saturating_sub(max)..a + n) {
-                    hit.extend_from_slice(ss);
+            let dirty_sorted = dirty.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0);
+            let per_range: usize = if dirty_sorted { dirty.len().min(imgs.by_addr.len()) } else { usize::MAX };
+            if dirty_sorted && per_range >= 64 {
+                // many dirty ranges (a game's loading: Mario Kart World's first submission had ~30,000 textures and
+                // pages without end; a lookup per range over the largest texture's span took 17 s): one pass over the
+                // textures, each looking its storage up in the sorted ranges
+                for ss in imgs.by_addr.values() {
+                    for &sv in ss {
+                        if let Some(im) = imgs.by_serial.get(&sv) {
+                            let (lo, hi) = (im.tex.mem as u64, im.tex.mem as u64 + im.tex.l.size);
+                            let i0 = dirty.partition_point(|&(a, n)| a + n <= lo);
+                            if i0 < dirty.len() && dirty[i0].0 < hi {
+                                hit.push(sv);
+                            }
+                        }
+                    }
+                }
+            } else {
+                for &(a, n) in dirty {
+                    for (_, ss) in imgs.by_addr.range(a.saturating_sub(max)..a + n) {
+                        hit.extend_from_slice(ss);
+                    }
                 }
             }
+            // once each (a texture under many dirty pages was hashed once per page: Violet's 40 ms of prep a frame)
+            hit.sort_unstable();
+            hit.dedup();
             for s in hit {
                 if let Some(im) = imgs.by_serial.get_mut(&s) {
                     let lo = im.tex.mem as u64;
                     let hi = lo + im.tex.l.size;
+                    // the dirty ranges over this texture only
+                    let mine: Vec<(u64, u64)> = if dirty_sorted {
+                        let i0 = dirty.partition_point(|&(a, n)| a + n <= lo);
+                        dirty[i0..].iter().take_while(|&&(a, _)| a < hi).copied().collect()
+                    } else {
+                        dirty.iter().filter(|&&(a, n)| a < hi && a + n > lo).copied().collect()
+                    };
+                    let dirty = &mine[..];
                     let covered: u64 = dirty.iter().map(|&(a, n)| (a + n).min(hi).saturating_sub(a.max(lo))).sum();
                     // a GPU-written texture is taken back from its storage only when the CPU rewrote most of it (a
                     // decoded movie frame); a write to a page it merely shares keeps the GPU's content
                     // bytes the texture already holds (a write to a page it shares with other data): nothing to upload
                     if covered > 0 && !im.gpu_owned && !im.needs_upload && im.sparse.is_none() && !im.page_hash.is_empty() {
                         let mut ph = std::mem::take(&mut im.page_hash);
-                        let changed = dirty.iter().fold(false, |c, &(a, n)| pages_changed(&mut ph, lo, hi, a, n) || c);
+                        let th = std::time::Instant::now();
+                        let changed = super::perf::timed(super::perf::C::HashNs, || dirty.iter().fold(false, |c, &(a, n)| pages_changed(&mut ph, lo, hi, a, n) || c));
+                        let hms = th.elapsed().as_secs_f64() * 1e3;
+                        if hms > 2.0 {
+                            static SLOW: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                            if SLOW.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 10 {
+                                let dn: u64 = dirty.iter().map(|&(a, n)| (a + n).min(hi).saturating_sub(a.max(lo))).sum();
+                                crate::vklog!("texture hash check took {hms:.1} ms: ser{s} {}x{} fmt {:#x} at {lo:#x} ({} KB), {} dirty ranges over it ({} KB), {} page hashes", im.tex.d.width, im.tex.d.height, im.tex.d.format, (hi - lo) >> 10, dirty.len(), dn >> 10, ph.len());
+                            }
+                        }
                         im.page_hash = ph;
                         if !changed {
+                            static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                            if im.rewrites > 30 && im.rewrites < 32 && SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 12 {
+                                let d = &im.tex.d;
+                                let dn: u64 = dirty.iter().map(|&(a, n)| (a + n).min(hi).saturating_sub(a.max(lo))).sum();
+                                crate::vklog!("texture rewritten with the same bytes again and again: ser{s} {}x{}x{} fmt {:#x} flags {:#x} at {lo:#x} ({} KB), {} KB of it written this time in {} ranges", d.width, d.height, d.depth, d.format, d.flags, (hi - lo) >> 10, dn >> 10, dirty.len());
+                            }
+                            im.rewrites += 1;
                             super::perf::inc(super::perf::C::UploadsSame);
                             continue;
                         }
@@ -787,8 +940,32 @@ impl Gpu {
             }
         }
         let serials: Vec<u64> = imgs.by_serial.iter().filter(|(_, i)| i.needs_init || i.needs_upload).map(|(s, _)| *s).collect();
-        for s in serials {
-            self.prepare_image(&mut imgs, s, sub);
+        // the textures' storage read and laid out linearly on several threads first (a streaming burst: Pokemon
+        // Legends: Z-A uploads ~1,400 textures in a few seconds, 0.5 ms each on one thread: frames of 200-370 ms)
+        let t_scan = t_all.elapsed().as_secs_f64();
+        let mut pre = decode_many(&imgs, &serials);
+        let t_dec = t_all.elapsed().as_secs_f64();
+        let mut t_init = t_dec;
+        if !serials.is_empty() {
+            // all initializations, one barrier, all uploads, one barrier
+            for &s in &serials {
+                self.prepare_image_in(&mut imgs, s, sub, 1);
+            }
+            super::queue::full_barrier(self, sub.pre);
+            t_init = t_all.elapsed().as_secs_f64();
+            for &s in &serials {
+                if let Some(parts) = pre.remove(&s) {
+                    if let Some(im) = imgs.by_serial.get_mut(&s) {
+                        im.decoded = Some(parts);
+                    }
+                }
+                self.prepare_image_in(&mut imgs, s, sub, 2);
+            }
+            super::queue::full_barrier(self, sub.pre);
+        }
+        let t_up = t_all.elapsed().as_secs_f64();
+        if t_up > 0.5 {
+            crate::vklog!("textures at a submission: {t_up:.2} s for {} images due: CPU writes checked {t_scan:.2} s, decoded ahead {:.2} s, initialized {:.2} s, uploaded {:.2} s", serials.len(), t_dec - t_scan, t_init - t_dec, t_up - t_init);
         }
         let writes = std::mem::take(&mut imgs.writes);
         for (s, level, layer, off, ext, data) in writes {
@@ -810,9 +987,16 @@ impl Gpu {
     /// Layout and contents of an image, in the submission's upload command buffer (also used mid-replay for a render
     /// target created there: the upload command buffer runs before the replay).
     pub fn prepare_image(&self, imgs: &mut Images, serial: u64, sub: &mut Sub) {
+        self.prepare_image_in(imgs, serial, sub, 0);
+    }
+
+    /// `phase` 0: initialization and upload with their barriers; 1: initialization only, 2: upload only, both without
+    /// the barrier after (the caller puts one after a whole batch: Mario Kart World's first submission initialized
+    /// ~30,000 images, two full barriers each)
+    fn prepare_image_in(&self, imgs: &mut Images, serial: u64, sub: &mut Sub, phase: u8) {
         let Some(im) = imgs.by_serial.get_mut(&serial) else { return };
         let range = vk::ImageSubresourceRange { aspect_mask: aspect(&im.tf), base_mip_level: 0, level_count: im.levels, base_array_layer: 0, layer_count: im.layers };
-        if im.needs_init {
+        if im.needs_init && phase != 2 {
             let b = [vk::ImageMemoryBarrier2::default()
                 .src_stage_mask(vk::PipelineStageFlags2::NONE)
                 .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
@@ -833,9 +1017,14 @@ impl Gpu {
                     let v = vk::ClearColorValue { uint32: [0; 4] };
                     unsafe { self.dev().cmd_clear_color_image(sub.pre, im.image, vk::ImageLayout::GENERAL, &v, &[range]) };
                 }
-                super::queue::full_barrier(self, sub.pre);
+                if phase == 0 {
+                    super::queue::full_barrier(self, sub.pre);
+                }
             }
             im.needs_init = false;
+        }
+        if phase == 1 {
+            return;
         }
         if im.needs_upload && !im.gpu_owned && !im.tex.mem.is_null() {
             let t0 = std::time::Instant::now();
@@ -848,7 +1037,12 @@ impl Gpu {
             let ns = t0.elapsed().as_nanos() as u64;
             super::perf::add(super::perf::C::TexUploadNs, ns);
             upload_stats::note(serial, &im.tex, ns);
-            super::queue::full_barrier(self, sub.pre);
+            if ns > 500_000_000 {
+                crate::vklog!("uploading texture ser{serial} ({}x{}x{} format {:#x}, {} MB) took {:.2} s", im.tex.d.width, im.tex.d.height, im.tex.d.depth, im.tex.d.format, im.tex.l.size >> 20, ns as f64 / 1e9);
+            }
+            if phase == 0 {
+                super::queue::full_barrier(self, sub.pre);
+            }
         }
         im.needs_upload = false;
     }
@@ -870,6 +1064,10 @@ impl Gpu {
                 if crate::nvn::vpool::is_sparse(t.mem as u64) { " (sparse pool)" } else { "" }
             );
         }
+        if let Some(parts) = im.decoded.take() {
+            self.record_parts(im, sub, parts);
+            return;
+        }
         // a texture of a sparse virtual pool reads its storage through the pool's page table (unmapped pages as 0)
         let owned;
         let owned_c;
@@ -885,60 +1083,29 @@ impl Gpu {
             owned_c = super::mem::guest_bytes(t.mem as u64, t.l.size);
             &owned_c
         };
-        let (bpb, bw, bh) = layout::fmt_bpb(d.format);
-        let linear = d.flags as u32 & (tex_flags::LINEAR | tex_flags::LINEAR_RENDER_TARGET) != 0;
+        let parts = decode_parts(im, storage);
+        self.record_parts(im, sub, parts);
+    }
+
+    fn record_parts(&self, im: &Image, sub: &mut Sub, parts: Vec<Part>) {
         let mut copies = Vec::new();
-        for layer in 0..im.layers {
-            for level in 0..im.levels {
-                let lw = (im.extent.width >> level).max(1);
-                let lh = (im.extent.height >> level).max(1);
-                let ld = (im.extent.depth >> level).max(1);
-                let (rows_data, row_bytes, rows, slices) = if linear {
-                    if level > 0 {
-                        continue;
-                    }
-                    let stride = if d.stride != 0 { d.stride as usize } else { (t.l.layer_size / lh.max(1) as u64) as usize };
-                    let rb = lw.div_ceil(bw) as usize * bpb as usize;
-                    let rws = lh.div_ceil(bh) as usize;
-                    let mut v = vec![0u8; rb * rws];
-                    for y in 0..rws {
-                        let s = y * stride;
-                        if s + rb <= storage.len() {
-                            v[y * rb..(y + 1) * rb].copy_from_slice(&storage[s..s + rb]);
-                        }
-                    }
-                    (v, rb, rws as u32, 1)
-                } else {
-                    let Some(g) = deswizzle::geom(&d, level, if d.target == target::T3D { 0 } else { layer }) else { continue };
-                    let mut v = vec![0u8; g.row_bytes as usize * g.rows as usize * g.slices as usize];
-                    if deswizzle::deswizzle(&d, level, if d.target == target::T3D { 0 } else { layer }, storage, &mut v, g.row_bytes as usize).is_none() {
-                        crate::log::red_once(&format!("texture {}x{} format {:#x}: storage shorter than its layout", d.width, d.height, d.format));
-                        continue;
-                    }
-                    (v, g.row_bytes as usize, g.rows, g.slices)
-                };
-                let _ = (row_bytes, rows);
-                if let Some((abw, abh, srgb)) = im.tf.astc {
-                    crate::tex::astc::record(self, sub, &rows_data, lw, lh, slices, abw, abh, srgb, im.bc7, im.image, level, layer);
-                    continue;
-                }
-                let data = if im.tf.expand3 != 0 { expand3(&rows_data, im.tf.expand3 as usize) } else { rows_data };
-                let (buf, off) = sub.stage_bytes(self, &data);
-                copies.push((
-                    buf,
-                    vk::BufferImageCopy {
-                        buffer_offset: off,
-                        buffer_row_length: 0,
-                        buffer_image_height: 0,
-                        image_subresource: vk::ImageSubresourceLayers { aspect_mask: upload_aspect(&im.tf), mip_level: level, base_array_layer: layer, layer_count: 1 },
-                        image_offset: vk::Offset3D::default(),
-                        image_extent: vk::Extent3D { width: lw, height: lh, depth: if im.ty == vk::ImageType::TYPE_3D { ld } else { 1 } },
-                    },
-                ));
+        for p in parts {
+            if let Some((abw, abh, srgb)) = im.tf.astc {
+                crate::tex::astc::record(self, sub, &p.data, p.lw, p.lh, p.slices, abw, abh, srgb, im.bc7, im.image, p.level, p.layer);
+                continue;
             }
-            if d.target == target::T3D {
-                break;
-            }
+            let (buf, off) = sub.stage_bytes(self, &p.data);
+            copies.push((
+                buf,
+                vk::BufferImageCopy {
+                    buffer_offset: off,
+                    buffer_row_length: 0,
+                    buffer_image_height: 0,
+                    image_subresource: vk::ImageSubresourceLayers { aspect_mask: upload_aspect(&im.tf), mip_level: p.level, base_array_layer: p.layer, layer_count: 1 },
+                    image_offset: vk::Offset3D::default(),
+                    image_extent: vk::Extent3D { width: p.lw, height: p.lh, depth: if im.ty == vk::ImageType::TYPE_3D { p.ld } else { 1 } },
+                },
+            ));
         }
         for (buf, r) in copies {
             unsafe { self.dev().cmd_copy_buffer_to_image(sub.pre, buf, im.image, vk::ImageLayout::GENERAL, &[r]) };

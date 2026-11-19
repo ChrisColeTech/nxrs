@@ -77,8 +77,47 @@ const BUF_USAGE: vk::BufferUsageFlags = vk::BufferUsageFlags::from_raw(
 mod watch {
     use windows_sys::Win32::System::Memory::{GetWriteWatch, ResetWriteWatch};
     const WRITE_WATCH_FLAG_RESET: u32 = 1;
-    /// The pages of [lo, hi) (page-aligned) written since the last reset; None when the range has no write watch.
+    /// The pages of [lo, hi) (page-aligned) written since the last reset; None when part of the range has no write
+    /// watch. A range over several allocations is asked per allocation (GetWriteWatch fails across them: such a pool
+    /// fell back to comparing a snapshot of all of it every submission, 40-50 ms a frame in Pokemon Violet).
     pub fn take(lo: u64, hi: u64, reset: bool) -> Option<Vec<u64>> {
+        // one allocation (the usual case): one call; the region walk only where that fails (a walk over a pool split
+        // into thousands of regions by page protections took 1.9 s a frame in Mario Kart 8 Deluxe)
+        if let Some(v) = take_one(lo, hi, reset) {
+            return Some(v);
+        }
+        let mut out = Vec::new();
+        for (a, b) in allocations(lo, hi) {
+            out.extend(take_one(a, b, reset)?);
+        }
+        Some(out)
+    }
+    /// [lo, hi) split where its allocations (VirtualQuery's allocation base) change.
+    fn allocations(lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
+        let mut out: Vec<(u64, u64, u64)> = Vec::new();
+        let mut at = lo;
+        while at < hi {
+            let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+            if unsafe { VirtualQuery(at as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+                out.push((at, hi, 0));
+                break;
+            }
+            let e = (mbi.BaseAddress as u64 + mbi.RegionSize as u64).min(hi);
+            if e <= at {
+                out.push((at, hi, 0));
+                break;
+            }
+            let ab = mbi.AllocationBase as u64;
+            match out.last_mut() {
+                Some(l) if l.2 == ab && l.1 == at => l.1 = e,
+                _ => out.push((at, e, ab)),
+            }
+            at = e;
+        }
+        out.into_iter().map(|(a, b, _)| (a, b)).collect()
+    }
+    fn take_one(lo: u64, hi: u64, reset: bool) -> Option<Vec<u64>> {
         let n = ((hi - lo) / super::PAGE) as usize;
         let mut addrs: Vec<*mut core::ffi::c_void> = vec![core::ptr::null_mut(); n.max(1)];
         let mut count = addrs.len();
@@ -92,7 +131,12 @@ mod watch {
         Some(addrs[..count].iter().map(|p| *p as u64).collect())
     }
     pub fn reset(lo: u64, hi: u64) {
-        unsafe { ResetWriteWatch(lo as *const _, (hi - lo) as usize) };
+        if unsafe { ResetWriteWatch(lo as *const _, (hi - lo) as usize) } == 0 {
+            return;
+        }
+        for (a, b) in allocations(lo, hi) {
+            unsafe { ResetWriteWatch(a as *const _, (b - a) as usize) };
+        }
     }
 }
 #[cfg(not(windows))]
@@ -104,6 +148,34 @@ mod watch {
 }
 
 /// [a, a + n) of guest memory as it reads, the parts not committed as zeros (reading them would fault).
+#[cfg(windows)]
+pub fn guest_bytes(a: u64, n: u64) -> std::borrow::Cow<'static, [u8]> {
+    // ReadProcessMemory on this process: a read that fails on pages with no storage instead of faulting, with no
+    // VirtualQuery (whose region size scan over a large uniform reservation took ~2.5 ms a call: Violet's texture
+    // checks, 60 ms a frame)
+    use windows_sys::Win32::System::Diagnostics::Debug::ReadProcessMemory;
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut v = vec![0u8; n as usize];
+    let rd = |at: u64, dst: &mut [u8]| -> bool {
+        let mut got = 0usize;
+        unsafe { ReadProcessMemory(GetCurrentProcess(), at as *const _, dst.as_mut_ptr() as *mut _, dst.len(), &mut got) != 0 && got == dst.len() }
+    };
+    if n == 0 || rd(a, &mut v) {
+        return std::borrow::Cow::Owned(v);
+    }
+    // part of it has no storage: page by page, those as zeros
+    let mut at = a;
+    while at < a + n {
+        let e = ((at & !(PAGE - 1)) + PAGE).min(a + n);
+        let o = (at - a) as usize;
+        if !rd(at, &mut v[o..o + (e - at) as usize]) {
+            v[o..o + (e - at) as usize].fill(0);
+        }
+        at = e;
+    }
+    std::borrow::Cow::Owned(v)
+}
+#[cfg(not(windows))]
 pub fn guest_bytes(a: u64, n: u64) -> std::borrow::Cow<'static, [u8]> {
     let c = committed(a, n);
     if c.len() == 1 && c[0] == (a, n) {
@@ -565,18 +637,21 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         cnt[i] += 1;
         bytes[i] += p.size;
     }
+    // mirrors without a write watch: compared with a snapshot of all of them at every submission
+    let (sn, sb) = m.by_base.values().filter(|p| p.snapshot.is_some()).fold((0usize, 0u64), |(n, b), p| (n + 1, b + p.size));
     let f = frames.max(1) as f64;
     let up = UPLOAD_BYTES.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
     let wb = WRITEBACK_BYTES.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
     let wbms = WRITEBACK_NS.swap(0, Ordering::Relaxed) as f64 / f / 1e6;
     format!(
-        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms",
+        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms; {sn} mirrors without write watch ({} MB)",
         cnt[0],
         bytes[0] >> 20,
         cnt[1],
         bytes[1] >> 20,
         cnt[2],
         bytes[2] >> 20,
-        cnt[3]
+        cnt[3],
+        sb >> 20
     )
 }

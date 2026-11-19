@@ -41,6 +41,9 @@ pub struct Sub {
     pub occl_n: u32,
     pub images_new: Vec<vk::Image>,
     pub transient: Vec<Buf>,
+    /// device-local scratch chunks handed out by `gpu_scratch` (kept with the submission, reused)
+    pub arena: Vec<Buf>,
+    pub arena_used: u64,
     pub transient_views: Vec<vk::ImageView>,
     /// texel buffer views of buffer textures, destroyed at completion
     pub buffer_views: Vec<vk::BufferView>,
@@ -51,10 +54,14 @@ pub struct Sub {
     pub memo_sets: std::collections::HashMap<u128, vk::DescriptorSet>,
     /// texture views by (texture ID, sampler type, storage) within the submission
     pub memo_views: std::collections::HashMap<(i32, u32, bool), vk::ImageView>,
+    /// which recording this is (a stage's staged driver constants are reused by it while they stand)
+    pub serial: u64,
 }
 unsafe impl Send for Sub {}
 
 /// A 128-bit content hash (two FNV-1a lanes) for the submission's memos.
+const ARENA_CHUNK: u64 = 64 << 20;
+
 pub fn memo_hash(b: &[u8]) -> u128 {
     let (mut a, mut c) = (0xcbf29ce484222325u64, 0x84222325cbf29ce4u64);
     for ch in b.chunks(8) {
@@ -222,6 +229,27 @@ impl Sub {
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), self.stage[b].ptr.add(off as usize), src.len()) };
         (self.stage[b].buf, off)
     }
+    /// Device-local scratch of n bytes for this submission's own GPU work (storage, transfer source and
+    /// destination), 256-aligned: (buffer, offset). One allocation per chunk instead of one per use (the ASTC
+    /// decoder allocated two buffers for each texture level: Mario Kart World's first submission, 29,000 textures, 10 s).
+    pub fn gpu_scratch(&mut self, g: &Gpu, n: u64) -> Option<(vk::Buffer, u64)> {
+        let off = (self.arena_used + 255) & !255;
+        if let Some(last) = self.arena.last() {
+            if off + n <= last.size {
+                self.arena_used = off + n;
+                return Some((last.buf, off));
+            }
+        }
+        let size = n.max(ARENA_CHUNK);
+        let b = g
+            .buffer(size, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuOnly, "scratch")
+            .ok()?;
+        let buf = b.buf;
+        // older chunks stay allocated until the submission is recycled
+        self.arena.push(b);
+        self.arena_used = n;
+        Some((buf, 0))
+    }
     /// Staging space of n bytes: (chunk index, offset), 256-aligned.
     pub fn stage_alloc(&mut self, g: &Gpu, n: u64) -> (usize, u64) {
         let off = (self.stage_used + 255) & !255;
@@ -335,14 +363,19 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
             occl_n: 0,
             images_new: Vec::new(),
             transient: Vec::new(),
+            arena: Vec::new(),
+            arena_used: 0,
             transient_views: Vec::new(),
             buffer_views: Vec::new(),
             present: Vec::new(),
             memo_bytes: Default::default(),
             memo_sets: Default::default(),
             memo_views: Default::default(),
+            serial: 0,
         }
     };
+    static SUB_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    s.serial = SUB_SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
     g.q.recording.store(true, Ordering::Release);
     let bi = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe {
@@ -527,6 +560,12 @@ fn completion_loop(g: &'static Gpu) {
             g.free_buffer(rb);
         }
         for b in sub.transient.drain(..) {
+            g.free_buffer(b);
+        }
+        // scratch: one ordinary chunk kept for the next use of this submission
+        sub.arena_used = 0;
+        while sub.arena.len() > 1 || sub.arena.last().is_some_and(|b| b.size > ARENA_CHUNK) {
+            let b = sub.arena.pop().unwrap();
             g.free_buffer(b);
         }
         for v in sub.transient_views.drain(..) {
@@ -828,10 +867,19 @@ pub fn submit(qserial: u64, origin_ll: bool, handles: &[u64]) {
 /// Replays a stream for a queue in one submission; parks the queue at an unsatisfied wait.
 fn run_stream(g: &'static Gpu, st: &mut SubmitState, qserial: u64, origin_ll: bool, stream: Vec<u8>, receipts: Vec<u64>) {
     let mut sub = new_sub(g, st);
+    let t0 = std::time::Instant::now();
+    let mut nd = 0;
+    let mut tp = 0.0;
     super::perf::timed(super::perf::C::PrepNs, || {
-        let dirty = super::mem::begin_submit(g, &mut sub);
+        let dirty = super::perf::timed(super::perf::C::PoolSyncNs, || super::mem::begin_submit(g, &mut sub));
+        tp = t0.elapsed().as_secs_f64();
+        nd = dirty.len();
         g.image_begin_submit(&mut sub, &dirty);
     });
+    let tt = t0.elapsed().as_secs_f64();
+    if tt > 1.0 {
+        crate::vklog!("a submission's set-up took {tt:.2} s: pools {tp:.2} s ({nd} CPU-written ranges), textures {:.2} s", tt - tp);
+    }
     let mut qs = st.qstates.remove(&qserial).unwrap_or_else(|| QState::new(origin_ll));
     let rest = super::perf::timed(super::perf::C::ReplayNs, || exec::run(g, &mut sub, &mut qs, &stream));
     exec::end(g, &mut sub, &mut qs);
@@ -883,7 +931,8 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
                 Some(again) => again.presents.extend(p.presents),
                 None => {
                     for (t, crop) in p.presents {
-                        present_locked(g, st, q, ll, &t, crop);
+                        let frame = present_frame(&t, crop, ll, false);
+                        present_locked(g, st, q, ll, &t, crop, frame);
                     }
                 }
             }
@@ -1008,25 +1057,40 @@ pub fn present(qserial: u64, origin_ll: bool, t: &crate::nvn::obj::tex_t, crop: 
 }
 
 fn present_now(g: &'static Gpu, qserial: u64, origin_ll: bool, t: &crate::nvn::obj::tex_t, crop: Option<[i32; 4]>) -> u64 {
+    {
+        let mut st = g.q.sub.lock().unwrap();
+        take_recycled(g, &mut st);
+        if let Some(p) = st.parked.get_mut(&qserial) {
+            // in queue order: shown once the queue's parked work has run (retry_locked)
+            p.presents.push((*t, crop));
+            return g.q.last_fence();
+        }
+    }
+    // the frame's bookkeeping and a requested screenshot before the submission state is locked: a screenshot reads
+    // the texture back through its own submission (oneoff locks it; under the lock the game froze in its present)
+    let frame = present_frame(t, crop, origin_ll, true);
     let mut st = g.q.sub.lock().unwrap();
     take_recycled(g, &mut st);
-    if let Some(p) = st.parked.get_mut(&qserial) {
-        // in queue order: shown once the queue's parked work has run (retry_locked)
-        p.presents.push((*t, crop));
-        return g.q.last_fence();
-    }
-    present_locked(g, &mut st, qserial, origin_ll, t, crop)
+    present_locked(g, &mut st, qserial, origin_ll, t, crop, frame)
 }
 
-/// A present in queue order (the submission state locked).
-fn present_locked(g: &'static Gpu, st: &mut SubmitState, _qserial: u64, origin_ll: bool, t: &crate::nvn::obj::tex_t, crop: Option<[i32; 4]>) -> u64 {
+/// A present's frame number, telemetry and pass-dump bookkeeping, and the screenshot requested for it (`shot`:
+/// false where the submission state is held).
+fn present_frame(t: &crate::nvn::obj::tex_t, crop: Option<[i32; 4]>, origin_ll: bool, shot: bool) -> u64 {
     let frame = super::present::note_present();
     super::perf::frame(frame);
     super::exec::passdump::frame(frame, crate::log::elapsed());
-    super::shot::on_present(t, frame, crop, origin_ll);
+    if shot {
+        super::shot::on_present(t, frame, crop, origin_ll);
+    }
+    frame
+}
+
+/// A present in queue order (the submission state locked).
+fn present_locked(g: &'static Gpu, st: &mut SubmitState, _qserial: u64, origin_ll: bool, t: &crate::nvn::obj::tex_t, crop: Option<[i32; 4]>, _frame: u64) -> u64 {
     let mut sub = new_sub(g, st);
     super::perf::timed(super::perf::C::PrepNs, || {
-        let dirty = super::mem::begin_submit(g, &mut sub);
+        let dirty = super::perf::timed(super::perf::C::PoolSyncNs, || super::mem::begin_submit(g, &mut sub));
         g.image_begin_submit(&mut sub, &dirty);
     });
     super::present::record_present(g, &mut sub, t, origin_ll, crop);
@@ -1052,7 +1116,7 @@ pub fn oneoff(_g: &Gpu, f: impl FnOnce(&Gpu, &mut Sub, &mut super::image::Images
     take_recycled(g, &mut st);
     let mut sub = new_sub(g, &mut st);
     super::perf::timed(super::perf::C::PrepNs, || {
-        let dirty = super::mem::begin_submit(g, &mut sub);
+        let dirty = super::perf::timed(super::perf::C::PoolSyncNs, || super::mem::begin_submit(g, &mut sub));
         g.image_begin_submit(&mut sub, &dirty);
     });
     {

@@ -5,13 +5,13 @@
 //! inaccessible (`PAGE_NOACCESS`) and not copied; the first CPU access to it, by the game or the host, faults, the
 //! handler reads the page back from the device (a copy of its own, outside the replay's locks) and lets the access go
 //! on. Such a page then stays eager for a while, longer each time (64 frames, doubled per return, at most 4096).
-//! `NXGFX_WB_LAZY=0` turns it off. A page the completion thread must write (an eager write-back landing on it) is
+//! Off unless `NXGFX_WB_LAZY=1` (until the Pokemon games run clean with it: they faulted at 35-60 s). A page the completion thread must write (an eager write-back landing on it) is
 //! read back first the same way.
 
 use super::Gpu;
 use ash::vk;
 use gpu_allocator::MemoryLocation;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
 
@@ -35,6 +35,9 @@ struct Hist {
 struct St {
     lazy: HashMap<u64, Lazy>,
     hist: HashMap<u64, Hist>,
+    /// Pages being read back right now (out of `lazy`, still inaccessible): a second thread's fault on one waits for
+    /// the first to finish and then retries its access, instead of falling through to the crash handler
+    returning: HashSet<u64>,
 }
 static ST: Mutex<Option<St>> = Mutex::new(None);
 static HANDLER: AtomicBool = AtomicBool::new(false);
@@ -43,7 +46,7 @@ pub static SKIP_BYTES: AtomicU64 = AtomicU64::new(0);
 
 pub fn enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| std::env::var("NXGFX_WB_LAZY").as_deref() != Ok("0"))
+    *V.get_or_init(|| std::env::var("NXGFX_WB_LAZY").as_deref() == Ok("1"))
 }
 
 fn frame() -> u64 {
@@ -66,7 +69,7 @@ pub fn take_lazy(a: u64, n: u64) -> Vec<u64> {
     let hi = (a + n) & !(PAGE - 1);
     let mut out = vec![];
     let mut g = ST.lock().unwrap();
-    let st = g.get_or_insert_with(|| St { lazy: HashMap::new(), hist: HashMap::new() });
+    let st = g.get_or_insert_with(|| St { lazy: HashMap::new(), hist: HashMap::new(), returning: HashSet::new() });
     let mut p = lo;
     while p < hi {
         let h = st.hist.entry(p).or_default();
@@ -93,6 +96,9 @@ pub fn make_lazy(pages: &[u64], buf: vk::Buffer, base: u64, off0: u64) {
     let mut g = ST.lock().unwrap();
     let st = g.as_mut().unwrap();
     for &p in pages {
+        if st.returning.contains(&p) {
+            continue; // being read back for a CPU access right now: stays eager
+        }
         st.lazy.insert(p, Lazy { buf, off: off0 + (p - base) });
         protect(p, false);
         SKIP_BYTES.fetch_add(PAGE, Ordering::Relaxed);
@@ -120,27 +126,59 @@ pub fn touch(a: u64, n: u64) {
     }
 }
 
-/// The page at `p` read back from the device, made accessible again. False when it is not a lazy page.
+/// The page at `p` read back from the device, made accessible again. False when it is not a lazy page. A page another
+/// thread is reading back is waited for (true: the access can go on once it is back).
 pub fn bring_back(p: u64) -> bool {
     let p = p & !(PAGE - 1);
-    let l = {
+    let l = loop {
         let mut g = ST.lock().unwrap();
         let Some(st) = g.as_mut() else { return false };
-        let Some(l) = st.lazy.remove(&p) else { return false };
+        if st.returning.contains(&p) {
+            drop(g);
+            std::thread::yield_now();
+            continue;
+        }
+        let Some(l) = st.lazy.remove(&p) else {
+            // not ours: or one that came back between the fault and this lookup (accessible again: retry)
+            return st.hist.contains_key(&p) && accessible(p);
+        };
+        st.returning.insert(p);
         let h = st.hist.entry(p).or_default();
         h.backoff = (h.backoff * 2).clamp(64, 4096);
         h.eager_until = frame() + h.backoff;
         h.streak = 0;
-        l
+        break l;
     };
-    let Some(g) = Gpu::try_get() else { return false };
-    protect(p, true);
+    let done = || {
+        if let Some(st) = ST.lock().unwrap().as_mut() {
+            st.returning.remove(&p);
+        }
+    };
+    let Some(g) = Gpu::try_get() else {
+        protect(p, true);
+        done();
+        return true;
+    };
     let data = read_page(g, l.buf, l.off);
-    // SAFETY: the guest page, accessible again
+    protect(p, true);
+    // SAFETY: the guest page, accessible again; other threads' faults on it wait in `returning` until it is filled
     unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, PAGE as usize) };
     super::mem::reset_watch(p, PAGE);
+    done();
     PAGES_IN.fetch_add(1, Ordering::Relaxed);
     true
+}
+
+#[cfg(windows)]
+fn accessible(p: u64) -> bool {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_NOACCESS};
+    let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+    let n = unsafe { VirtualQuery(p as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+    n != 0 && mbi.State == MEM_COMMIT && mbi.Protect & PAGE_NOACCESS == 0
+}
+#[cfg(not(windows))]
+fn accessible(_p: u64) -> bool {
+    false
 }
 
 struct Reader {

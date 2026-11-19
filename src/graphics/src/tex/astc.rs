@@ -144,10 +144,10 @@ fn barrier(g: &Gpu, cb: vk::CommandBuffer) {
 /// into `image` at `level` / `layer`, as RGBA8 or, with `bc7`, BC7. Into the submission's upload command buffer.
 #[allow(clippy::too_many_arguments)]
 pub fn record(g: &Gpu, sub: &mut Sub, blocks: &[u8], w: u32, h: u32, slices: u32, bw: u32, bh: u32, srgb: bool, bc7: bool, image: vk::Image, level: u32, layer: u32) {
-    let Some((out, rows, bufrow)) = dispatch(g, sub, blocks, w, h, slices, bw, bh, srgb, bc7) else { return };
+    let Some((out, off, rows, bufrow)) = dispatch(g, sub, blocks, w, h, slices, bw, bh, srgb, bc7) else { return };
     let (ex, ey) = (w.div_ceil(4), h.div_ceil(4));
     let r = vk::BufferImageCopy {
-        buffer_offset: 0,
+        buffer_offset: off,
         buffer_row_length: bufrow,
         buffer_image_height: rows,
         image_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: level, base_array_layer: layer, layer_count: 1 },
@@ -158,10 +158,10 @@ pub fn record(g: &Gpu, sub: &mut Sub, blocks: &[u8], w: u32, h: u32, slices: u32
     unsafe { g.dev().cmd_copy_buffer_to_image(sub.pre, out, image, vk::ImageLayout::GENERAL, &[r]) };
 }
 
-/// The dispatches: blocks -> RGBA8 texels (-> BC7 blocks). Returns the output buffer, its rows per image and row
-/// length in texels.
+/// The dispatches: blocks -> RGBA8 texels (-> BC7 blocks). Returns the output buffer, the output's offset in it, its
+/// rows per image and row length in texels.
 #[allow(clippy::too_many_arguments)]
-fn dispatch(g: &Gpu, sub: &mut Sub, blocks: &[u8], w: u32, h: u32, slices: u32, bw: u32, bh: u32, srgb: bool, bc7: bool) -> Option<(vk::Buffer, u32, u32)> {
+fn dispatch(g: &Gpu, sub: &mut Sub, blocks: &[u8], w: u32, h: u32, slices: u32, bw: u32, bh: u32, srgb: bool, bc7: bool) -> Option<(vk::Buffer, u64, u32, u32)> {
     if !(4..=12).contains(&bw) || !(4..=12).contains(&bh) {
         crate::log::red_once(&format!("ASTC block {bw}x{bh} is not 2D LDR"));
         return None;
@@ -188,16 +188,14 @@ fn dispatch(g: &Gpu, sub: &mut Sub, blocks: &[u8], w: u32, h: u32, slices: u32, 
     let texels = w as u64 * h as u64 * slices as u64;
     let (ex, ey) = (w.div_ceil(4), h.div_ceil(4));
     let bc_bytes = if bc7 { ex as u64 * ey as u64 * slices as u64 * 16 } else { 0 };
-    let scratch = g
-        .buffer(texels * 4 + bc_bytes + 256, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_SRC, MemoryLocation::GpuOnly, "astc scratch")
-        .ok()?;
-    let out_texels_off = 0u64;
-    let bc_off = (texels * 4 + 255) & !255;
+    let (scratch_buf, base) = sub.gpu_scratch(g, texels * 4 + bc_bytes + 256)?;
+    let out_texels_off = base;
+    let bc_off = base + ((texels * 4 + 255) & !255);
     let (sbuf, soff) = sub.stage_bytes(g, blocks);
     let set = sub.alloc_set(g, a.set_layout);
     let bi = [
         vk::DescriptorBufferInfo { buffer: sbuf, offset: soff, range: blocks.len().max(16) as u64 },
-        vk::DescriptorBufferInfo { buffer: scratch.buf, offset: out_texels_off, range: texels * 4 },
+        vk::DescriptorBufferInfo { buffer: scratch_buf, offset: out_texels_off, range: texels * 4 },
         vk::DescriptorBufferInfo { buffer: a.tab.buf, offset: 0, range: vk::WHOLE_SIZE },
     ];
     let wr: Vec<_> = (0..3)
@@ -216,8 +214,8 @@ fn dispatch(g: &Gpu, sub: &mut Sub, blocks: &[u8], w: u32, h: u32, slices: u32, 
     let result = if bc7 {
         let set2 = sub.alloc_set(g, a.set_layout);
         let bi2 = [
-            vk::DescriptorBufferInfo { buffer: scratch.buf, offset: out_texels_off, range: texels * 4 },
-            vk::DescriptorBufferInfo { buffer: scratch.buf, offset: bc_off, range: bc_bytes },
+            vk::DescriptorBufferInfo { buffer: scratch_buf, offset: out_texels_off, range: texels * 4 },
+            vk::DescriptorBufferInfo { buffer: scratch_buf, offset: bc_off, range: bc_bytes },
         ];
         let wr2: Vec<_> = (0..2)
             .map(|i| vk::WriteDescriptorSet::default().dst_set(set2).dst_binding(i as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&bi2[i..i + 1]))
@@ -231,17 +229,11 @@ fn dispatch(g: &Gpu, sub: &mut Sub, blocks: &[u8], w: u32, h: u32, slices: u32, 
             dev.cmd_dispatch(sub.pre, ex.div_ceil(8), ey.div_ceil(8), slices);
         }
         barrier(g, sub.pre);
-        // the BC7 blocks as their own buffer region: copy it to the start of a buffer of its own
-        let bcb = g.buffer(bc_bytes, vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuOnly, "bc7").ok()?;
-        unsafe { dev.cmd_copy_buffer(sub.pre, scratch.buf, bcb.buf, &[vk::BufferCopy { src_offset: bc_off, dst_offset: 0, size: bc_bytes }]) };
-        barrier(g, sub.pre);
-        let b = bcb.buf;
-        sub.transient.push(bcb);
-        (b, ey * 4, ex * 4)
+        // the copy reads the BC7 blocks where they are (256-aligned)
+        (scratch_buf, bc_off, ey * 4, ex * 4)
     } else {
-        (scratch.buf, h, w)
+        (scratch_buf, out_texels_off, h, w)
     };
-    sub.transient.push(scratch);
     Some(result)
 }
 
@@ -251,8 +243,8 @@ pub fn decode_blocks(g: &'static Gpu, blocks: &[u8], w: u32, h: u32, bw: u32, bh
     let rb = g.buffer(size, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "astc readback").ok()?;
     let mut ok = false;
     let f = crate::vk::queue::oneoff(g, |g, sub, _imgs| {
-        if let Some((buf, _, _)) = dispatch(g, sub, blocks, w, h, 1, bw, bh, srgb, bc7) {
-            unsafe { g.dev().cmd_copy_buffer(sub.pre, buf, rb.buf, &[vk::BufferCopy { src_offset: 0, dst_offset: 0, size }]) };
+        if let Some((buf, off, _, _)) = dispatch(g, sub, blocks, w, h, 1, bw, bh, srgb, bc7) {
+            unsafe { g.dev().cmd_copy_buffer(sub.pre, buf, rb.buf, &[vk::BufferCopy { src_offset: off, dst_offset: 0, size }]) };
             ok = true;
         }
     });
