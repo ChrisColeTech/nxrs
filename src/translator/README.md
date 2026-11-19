@@ -116,7 +116,7 @@ UTF-8 (Turbo's Python prints them in the console code page).
 ## Not done yet
 
 - XCI or NSZ as the game's own package (only as update or DLC), compressed (NSZ / XCZ) updates, sparse or
-  compressed NCA storage: refused, as in Turbo.
+  compressed NCA storage: refused (Turbo accepts XCI as the game package; to be ported, PORT_PLAN 5A.1).
 - Code patches shipped by mods (`mods/<mod>/mod.json`) and enabled mods' image bytes.
 - The inline-asm SIMD path (AArch64 hosts only).
 - Compiling and linking into `<name>_code.dll`.
