@@ -252,6 +252,7 @@ pub(crate) mod synth {
         let mut ctl = vec![0u8; 0x880];
         ctl[..4].copy_from_slice(&CTL_MAGIC);
         ctl[4] = 1;
+        ctl[0x20..0x24].copy_from_slice(&0x880u32.to_le_bytes());
         ctl[0x704..0x708].copy_from_slice(&(code.len() as u32).to_le_bytes());
         ctl[0x100] = seed;
         (ctl, code)

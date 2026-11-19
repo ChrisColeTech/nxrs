@@ -6,23 +6,28 @@
 //! stage's own entry point around it:
 //!
 //! 1. the stage memory is cleared (every invocation a share of it), the workgroup's number is stored (and, for a mesh
-//!    shader launched by a task, the task's payload is copied in, its word 0 being the mesh workgroup's number);
+//!    shader launched by a task, the task's payload is copied in, its word 0 being the mesh workgroup's number among
+//!    the task's launches, as the hardware leaves it). A task shader's, or a mesh shader's with no task, is the draw's
+//!    first workgroup + its own: the first is word 1 of the draw's NVN record `{count, first}` (`DrawMeshTasks*`), read
+//!    from the storage buffer `mesh_draw` at word `DrawIndex * stride + 1`, the stride (in words) being push constant
+//!    word 3 (byte 12); graphics binds the game's indirect records there, or a staged record for a direct draw;
 //! 2. the kernel runs;
 //! 3. a task shader copies its payload out and launches `min(word 1 of its outputs, 65535)` mesh workgroups; a mesh
 //!    shader declares its vertices (all `max_v`) and the primitive count the kernel wrote (byte 3 of the primitive
 //!    word, at most `max_p`), and copies the attribute blocks out: vertex v's component k at
 //!    `out + (v / 32) * 32 * nv + 32 * k + v % 32` (words), primitives' after all vertex blocks, their system values
-//!    (primitive ID, layer, viewport) first. Per-primitive generic attributes go to the primitive's vertices (the
-//!    pixel shader declares them per vertex); the index bytes become the primitive index array.
+//!    (primitive ID, layer, viewport) first. Per-primitive generic attributes are `PerPrimitiveEXT` outputs; a pixel
+//!    shader drawn with such a mesh shader declares those inputs per primitive too ([`fragment_per_primitive`]). The
+//!    index bytes become the primitive index array. The position is invariant (a game may draw the same geometry with
+//!    two mesh shaders and test the second for depth equality, as Ocarina of Time's foliage does).
 //!
 //! The kernel's subgroup lane number becomes the workgroup's invocation index (a console workgroup is one warp; a PC
-//! may split it). The module becomes SPIR-V 1.4 (its entry point lists every global variable). The draw's first
-//! workgroup is 0: Vulkan has no parameter for it (graphics says so in red when a game asks for another).
+//! may split it). The module becomes SPIR-V 1.4 (its entry point lists every global variable).
 
 use serde_json::Value;
 
 /// Part of a task / mesh output's identity (prebuild.rs): a change here translates those shaders again.
-pub const VERSION: &str = "mesh 1";
+pub const VERSION: &str = "mesh 3";
 
 const OP_EXTENSION: u32 = 10;
 const OP_MEMORY_MODEL: u32 = 14;
@@ -35,6 +40,8 @@ const OP_TYPE_INT: u32 = 21;
 const OP_TYPE_FLOAT: u32 = 22;
 const OP_TYPE_VECTOR: u32 = 23;
 const OP_TYPE_ARRAY: u32 = 28;
+const OP_TYPE_RUNTIME_ARRAY: u32 = 29;
+const OP_TYPE_STRUCT: u32 = 30;
 const OP_TYPE_POINTER: u32 = 32;
 const OP_TYPE_FUNCTION: u32 = 33;
 const OP_CONSTANT: u32 = 43;
@@ -46,7 +53,9 @@ const OP_VARIABLE: u32 = 59;
 const OP_LOAD: u32 = 61;
 const OP_STORE: u32 = 62;
 const OP_ACCESS_CHAIN: u32 = 65;
+const OP_NAME: u32 = 5;
 const OP_DECORATE: u32 = 71;
+const OP_MEMBER_DECORATE: u32 = 72;
 const OP_COMPOSITE_CONSTRUCT: u32 = 80;
 const OP_COMPOSITE_EXTRACT: u32 = 81;
 const OP_BITCAST: u32 = 124;
@@ -73,8 +82,20 @@ const SC_INPUT: u32 = 1;
 const SC_OUTPUT: u32 = 3;
 const SC_WORKGROUP: u32 = 4;
 const SC_FUNCTION: u32 = 7;
+const SC_PUSH_CONSTANT: u32 = 9;
+const SC_STORAGE_BUFFER: u32 = 12;
 const SC_TASK_PAYLOAD: u32 = 5402;
 
+const DEC_BLOCK: u32 = 2;
+const DEC_ARRAY_STRIDE: u32 = 6;
+const DEC_NO_PERSPECTIVE: u32 = 13;
+const DEC_CENTROID: u32 = 16;
+const DEC_SAMPLE: u32 = 17;
+const DEC_INVARIANT: u32 = 18;
+const DEC_NON_WRITABLE: u32 = 24;
+const DEC_BINDING: u32 = 33;
+const DEC_SET: u32 = 34;
+const DEC_OFFSET: u32 = 35;
 const DEC_BUILTIN: u32 = 11;
 const DEC_LOCATION: u32 = 30;
 const DEC_PER_PRIMITIVE: u32 = 5271;
@@ -87,6 +108,7 @@ const BI_VIEWPORT_INDEX: u32 = 10;
 const BI_WORKGROUP_ID: u32 = 26;
 const BI_LOCAL_INVOCATION_INDEX: u32 = 29;
 const BI_SUBGROUP_LOCAL_ID: u32 = 41;
+const BI_DRAW_INDEX: u32 = 4426;
 const BI_POINT_INDICES: u32 = 5294;
 const BI_LINE_INDICES: u32 = 5295;
 const BI_TRIANGLE_INDICES: u32 = 5296;
@@ -97,12 +119,18 @@ const EM_OUTPUT_LINES: u32 = 5269;
 const EM_OUTPUT_PRIMITIVES: u32 = 5270;
 const EM_OUTPUT_TRIANGLES: u32 = 5298;
 const CAP_MESH_SHADING: u32 = 5283;
+const CAP_DRAW_PARAMETERS: u32 = 4427;
 const MODEL_TASK: u32 = 5364;
 const MODEL_MESH: u32 = 5365;
 
 const BLOCK: u32 = 32;
 /// Mesh workgroups a task workgroup launches at most (Vulkan's guaranteed maxMeshWorkGroupCount[0]).
 const MAX_LAUNCH: u32 = 65535;
+/// The storage buffer with the draw's NVN records (`{count, first}`), as its OpName says; the reflection's
+/// `{"kind": "mesh_draw"}`.
+pub const DRAW_BUFFER: &str = "mesh_draw";
+/// Push constant byte offset of the record stride in words (0: every draw reads record 0).
+pub const DRAW_STRIDE_PUSH: u32 = 12;
 
 /// The facts the pass needs, from job.rs's `mesh_stage` info.
 #[derive(Debug, Clone)]
@@ -123,6 +151,23 @@ pub struct Info {
 }
 
 impl Info {
+    /// The generic attribute locations a mesh shader writes per primitive (`PerPrimitiveEXT` outputs): its
+    /// per-primitive SPH's attributes that its vertex SPH does not also enable.
+    pub fn per_primitive_locations(&self) -> Vec<u32> {
+        if self.task {
+            return vec![];
+        }
+        let mut v: Vec<u32> = self.primitive.iter().filter(|p| p.0 >= 0 && !self.vertex.iter().any(|x| x.0 == p.0)).map(|p| p.0 as u32).collect();
+        v.sort();
+        v.dedup();
+        v
+    }
+
+    /// Whether the stage reads the draw's first workgroup (a task shader, or a mesh shader with no task).
+    pub fn reads_first(&self) -> bool {
+        self.task || !self.has_task
+    }
+
     pub fn from_json(v: &Value) -> Result<Info, String> {
         let u = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0) as u32;
         let comps = |k: &str| -> Vec<(i64, u32)> {
@@ -233,13 +278,31 @@ impl M {
         id
     }
     fn decorate(&mut self, d: &[u32]) {
+        self.annotate(OP_DECORATE, d);
+    }
+    fn annotate(&mut self, op: u32, d: &[u32]) {
         let at = self
             .ins
             .iter()
             .rposition(|i| matches!(M::op(i), 71 | 72 | 73 | 74 | 75 | 332 | 5632 | 5633))
             .map(|p| p + 1)
             .unwrap_or_else(|| self.ins.iter().position(|i| matches!(M::op(i), 19..=39 | 43..=52 | 59)).unwrap_or(0));
-        self.ins.insert(at, inst(OP_DECORATE, d));
+        self.ins.insert(at, inst(op, d));
+    }
+    /// A type made anew at the end of the global section (structs and arrays that carry decorations of their own).
+    fn fresh_type(&mut self, op: u32, ops: &[u32]) -> u32 {
+        let id = self.id();
+        let mut v = vec![id];
+        v.extend_from_slice(ops);
+        let at = self.first_function();
+        self.ins.insert(at, inst(op, &v));
+        id
+    }
+    fn name(&mut self, id: u32, n: &str) {
+        let at = self.ins.iter().rposition(|i| matches!(M::op(i), 2 | 3 | 4 | 5 | 6 | 7 | 10 | 11 | 14 | 15 | 16 | 17 | 331)).map(|p| p + 1).unwrap_or(0);
+        let mut v = vec![id];
+        v.extend(str_words(n));
+        self.ins.insert(at, inst(OP_NAME, &v));
     }
     fn builtin_var(&self, b: u32) -> Option<u32> {
         self.ins.iter().find(|i| M::op(i) == OP_DECORATE && i.len() >= 4 && i[2] == DEC_BUILTIN && i[3] == b).map(|i| i[1])
@@ -315,10 +378,11 @@ impl F<'_> {
 }
 
 /// The translated compute kernel → the task or mesh stage. Errors say why it cannot be.
-pub fn to_stage(spv: &[u8], i: &Info) -> Result<Vec<u8>, String> {
+pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
     let w = crate::reflect::words(spv).ok_or("not SPIR-V")?;
     let mut m = M::parse(&w).ok_or("SPIR-V that does not parse")?;
     let kind = if i.task { "task" } else { "mesh" };
+    buffer_blocks_to_storage(&mut m);
     // the kernel and its stage memory
     let ep = m.ins.iter().position(|x| M::op(x) == OP_ENTRY_POINT).ok_or("no entry point")?;
     let old = m.ins[ep][2];
@@ -378,6 +442,45 @@ pub fn to_stage(spv: &[u8], i: &Info) -> Result<Vec<u8>, String> {
             v
         }
     };
+    // the draw's records (`mesh_draw`, the stage's set, after its last binding), the record stride (push constant
+    // word 3) and the draw's index
+    let draw = if i.reads_first() {
+        let binding = m
+            .ins
+            .iter()
+            .filter(|x| M::op(x) == OP_DECORATE && x.len() >= 4 && x[2] == DEC_SET && x[3] == set)
+            .filter_map(|x| m.ins.iter().find(|y| M::op(y) == OP_DECORATE && y.len() >= 4 && y[1] == x[1] && y[2] == DEC_BINDING).map(|y| y[3]))
+            .max()
+            .map_or(1, |b| b + 1);
+        let ra = m.fresh_type(OP_TYPE_RUNTIME_ARRAY, &[uint]);
+        m.decorate(&[ra, DEC_ARRAY_STRIDE, 4]);
+        let st = m.fresh_type(OP_TYPE_STRUCT, &[ra]);
+        m.decorate(&[st, DEC_BLOCK]);
+        m.annotate(OP_MEMBER_DECORATE, &[st, 0, DEC_OFFSET, 0]);
+        m.annotate(OP_MEMBER_DECORATE, &[st, 0, DEC_NON_WRITABLE]);
+        let stp = m.ty(OP_TYPE_POINTER, &[SC_STORAGE_BUFFER, st]);
+        let buf = m.global_var(stp, SC_STORAGE_BUFFER);
+        m.decorate(&[buf, DEC_SET, set]);
+        m.decorate(&[buf, DEC_BINDING, binding]);
+        m.name(buf, DRAW_BUFFER);
+        let pst = m.fresh_type(OP_TYPE_STRUCT, &[uint]);
+        m.decorate(&[pst, DEC_BLOCK]);
+        m.annotate(OP_MEMBER_DECORATE, &[pst, 0, DEC_OFFSET, DRAW_STRIDE_PUSH]);
+        let pstp = m.ty(OP_TYPE_POINTER, &[SC_PUSH_CONSTANT, pst]);
+        let push = m.global_var(pstp, SC_PUSH_CONSTANT);
+        m.name(push, "mesh_push");
+        let di = m.global_var(in_u, SC_INPUT);
+        m.decorate(&[di, DEC_BUILTIN, BI_DRAW_INDEX]);
+        if !m.ins.iter().any(|x| M::op(x) == OP_CAPABILITY && x[1] == CAP_DRAW_PARAMETERS) {
+            let at = m.ins.iter().rposition(|x| M::op(x) == OP_CAPABILITY).ok_or("no capability")?;
+            m.ins.insert(at + 1, inst(OP_CAPABILITY, &[CAP_DRAW_PARAMETERS]));
+        }
+        let sb_u = m.ty(OP_TYPE_POINTER, &[SC_STORAGE_BUFFER, uint]);
+        let pc_u = m.ty(OP_TYPE_POINTER, &[SC_PUSH_CONSTANT, uint]);
+        Some((buf, push, di, sb_u, pc_u))
+    } else {
+        None
+    };
     let pay_words = (i.payload + 3) / 4;
     let pay_words = pay_words.max(1);
     let payload = if i.task || i.has_task {
@@ -398,7 +501,7 @@ pub fn to_stage(spv: &[u8], i: &Info) -> Result<Vec<u8>, String> {
         scalar: bool,
     }
     let mut vouts: Vec<Out> = vec![];
-    let mut pouts: Vec<Out> = vec![]; // per-primitive generic attributes written at the primitive's vertices
+    let mut pouts: Vec<Out> = vec![]; // per-primitive generic attributes (PerPrimitiveEXT)
     let mut sys_outs: Vec<(u32, u32, u32)> = vec![]; // (variable, element pointer, component in the primitive block)
     let mut idx_var = (0, 0, 0); // (variable, element pointer, index type)
     let (nv, npc) = (i.vertex.len() as u32, i.primitive_system.len() as u32 + i.primitive.len() as u32);
@@ -438,11 +541,14 @@ pub fn to_stage(spv: &[u8], i: &Info) -> Result<Vec<u8>, String> {
             let v = m.global_var(va4p, SC_OUTPUT);
             if *a == -1 {
                 m.decorate(&[v, DEC_BUILTIN, BI_POSITION]);
+                m.decorate(&[v, DEC_INVARIANT]);
             } else {
                 m.decorate(&[v, DEC_LOCATION, *a as u32]);
             }
             vouts.push(Out { var: v, elem_ptr: o4, comps: *cs, scalar: false });
         }
+        let pa4 = m.ty(OP_TYPE_ARRAY, &[vec4, nmax_p]);
+        let pa4p = m.ty(OP_TYPE_POINTER, &[SC_OUTPUT, pa4]);
         let mut pattrs: Vec<(i64, [Option<u32>; 4])> = vec![];
         for (k, &(a, comp)) in i.primitive.iter().enumerate() {
             let at = i.primitive_system.len() as u32 + k as u32;
@@ -459,8 +565,9 @@ pub fn to_stage(spv: &[u8], i: &Info) -> Result<Vec<u8>, String> {
             if attrs.iter().any(|x| x.0 == a) || a < 0 {
                 continue;
             }
-            let v = m.global_var(va4p, SC_OUTPUT);
+            let v = m.global_var(pa4p, SC_OUTPUT);
             m.decorate(&[v, DEC_LOCATION, a as u32]);
+            m.decorate(&[v, DEC_PER_PRIMITIVE]);
             pouts.push(Out { var: v, elem_ptr: o4, comps: cs, scalar: false });
         }
         // per-primitive system values: OMAP bit 8 the primitive ID, 9 the layer, 10 the viewport
@@ -568,7 +675,19 @@ pub fn to_stage(spv: &[u8], i: &Info) -> Result<Vec<u8>, String> {
             store_mem(f, cinp, tg);
         });
     } else {
-        f.if_then(is0, &mut |f| store_mem(f, cwg, tg));
+        // the draw's first workgroup + this one: record DrawIndex * stride, word 1
+        let (buf, push, di, sb_u, pc_u) = draw.ok_or("a stage that reads the draw's first workgroup without its buffer")?;
+        f.if_then(is0, &mut |f| {
+            let sp = f.e(OP_ACCESS_CHAIN, pc_u, &[push, zero]);
+            let stride = f.e(OP_LOAD, uint, &[sp]);
+            let d = f.e(OP_LOAD, uint, &[di]);
+            let rec = f.e(OP_IMUL, uint, &[d, stride]);
+            let at = f.e(OP_IADD, uint, &[rec, one]);
+            let fp = f.e(OP_ACCESS_CHAIN, sb_u, &[buf, zero, at]);
+            let first = f.e(OP_LOAD, uint, &[fp]);
+            let w = f.e(OP_IADD, uint, &[first, tg]);
+            store_mem(f, cwg, w);
+        });
     }
     barrier(&mut f);
     // 2. the kernel
@@ -661,10 +780,8 @@ pub fn to_stage(spv: &[u8], i: &Info) -> Result<Vec<u8>, String> {
             }
             for o in &pouts {
                 let val = vec4_of(f, cpbase, cpstride, n, &o.comps);
-                for &vi in &idx {
-                    let p = f.e(OP_ACCESS_CHAIN, o.elem_ptr, &[o.var, vi]);
-                    f.raw(OP_STORE, &[p, val]);
-                }
+                let p = f.e(OP_ACCESS_CHAIN, o.elem_ptr, &[o.var, n]);
+                f.raw(OP_STORE, &[p, val]);
             }
         });
         f.raw(OP_RETURN, &[]);
@@ -722,6 +839,136 @@ pub fn to_stage(spv: &[u8], i: &Info) -> Result<Vec<u8>, String> {
     Ok(m.words().iter().flat_map(|x| x.to_le_bytes()).collect())
 }
 
+/// SPIR-V 1.4 has no `BufferBlock`: the translator's storage buffers (Uniform variables of `BufferBlock` structs)
+/// become StorageBuffer variables of `Block` structs, and every pointer derived from them a StorageBuffer pointer.
+fn buffer_blocks_to_storage(m: &mut M) {
+    const DEC_BUFFER_BLOCK: u32 = 3;
+    const SC_UNIFORM: u32 = 2;
+    let bb: Vec<u32> = m.ins.iter().filter(|x| M::op(x) == OP_DECORATE && x.len() >= 3 && x[2] == DEC_BUFFER_BLOCK).map(|x| x[1]).collect();
+    if bb.is_empty() {
+        return;
+    }
+    // a struct reached through arrays (a variable may be an array of blocks)
+    let mut wraps: Vec<u32> = bb.clone();
+    loop {
+        let more: Vec<u32> = m.ins.iter().filter(|x| matches!(M::op(x), OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY) && wraps.contains(&x[2]) && !wraps.contains(&x[1])).map(|x| x[1]).collect();
+        if more.is_empty() {
+            break;
+        }
+        wraps.extend(more);
+    }
+    for x in m.ins.iter_mut() {
+        if M::op(x) == OP_DECORATE && x.len() >= 3 && x[2] == DEC_BUFFER_BLOCK {
+            x[2] = DEC_BLOCK;
+        }
+    }
+    // the variables' pointer types (used by nothing but them), then the variables
+    let mut ptrs = vec![];
+    for x in m.ins.iter_mut() {
+        if M::op(x) == OP_TYPE_POINTER && x[2] == SC_UNIFORM && wraps.contains(&x[3]) {
+            x[2] = SC_STORAGE_BUFFER;
+            ptrs.push(x[1]);
+        }
+    }
+    let mut derived: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for x in m.ins.iter_mut() {
+        if M::op(x) == OP_VARIABLE && x.len() >= 4 && ptrs.contains(&x[1]) {
+            x[3] = SC_STORAGE_BUFFER;
+            derived.insert(x[2]);
+        }
+    }
+    // pointers into them: access chains (65 OpAccessChain, 66 InBounds, 67 Ptr, 70 InBoundsPtr) and copies (83)
+    loop {
+        let mut changed = false;
+        for k in 0..m.ins.len() {
+            let x = &m.ins[k];
+            let op = M::op(x);
+            if matches!(op, 65 | 66 | 67 | 70 | 83) && x.len() >= 4 && derived.contains(&x[3]) && !derived.contains(&x[2]) {
+                derived.insert(x[2]);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    let pointee: std::collections::HashMap<u32, (u32, u32)> = m.ins.iter().filter(|x| M::op(x) == OP_TYPE_POINTER).map(|x| (x[1], (x[2], x[3]))).collect();
+    let is_ptr_op = |x: &Vec<u32>| matches!(M::op(x), 65 | 66 | 67 | 70 | 83) && x.len() >= 4;
+    let olds: Vec<u32> = m.ins.iter().filter(|x| is_ptr_op(x) && derived.contains(&x[2]) && pointee.get(&x[1]).is_some_and(|p| p.0 == SC_UNIFORM)).map(|x| x[1]).collect();
+    let mut retype: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
+    for t in olds {
+        if !retype.contains_key(&t) {
+            let n = m.ty(OP_TYPE_POINTER, &[SC_STORAGE_BUFFER, pointee[&t].1]);
+            retype.insert(t, n);
+        }
+    }
+    for x in m.ins.iter_mut() {
+        if is_ptr_op(x) && derived.contains(&x[2]) {
+            if let Some(&n) = retype.get(&x[1]) {
+                x[1] = n;
+            }
+        }
+    }
+    m.ins.retain(|x| !(M::op(x) == OP_EXTENSION && x[1..] == str_words("SPV_KHR_storage_buffer_storage_class")[..]));
+}
+
+/// SPIR-V 1.4 for a module: its entry points list every global variable (1.4's rule), its version word raised.
+fn to_1_4(m: &mut M) {
+    if m.head[1] >= 0x0001_0400 {
+        return;
+    }
+    m.head[1] = 0x0001_0400;
+    buffer_blocks_to_storage(m);
+    let ff = m.first_function();
+    let globals: Vec<u32> = m.ins[..ff].iter().filter(|x| M::op(x) == OP_VARIABLE && x.len() >= 4 && x[3] != SC_FUNCTION).map(|x| x[2]).collect();
+    for e in m.ins.iter_mut().filter(|x| M::op(x) == OP_ENTRY_POINT) {
+        let name_end = 3 + e[3..].iter().position(|w| w.to_le_bytes().contains(&0)).map_or(e.len() - 3, |p| p + 1);
+        let mut v: Vec<u32> = e[1..name_end].to_vec();
+        for g in &globals {
+            v.push(*g);
+        }
+        *e = inst(OP_ENTRY_POINT, &v);
+    }
+}
+
+/// A pixel shader drawn with a mesh shader that writes generic attributes per primitive: its inputs at those locations
+/// (the mesh json's `per_primitive_locations`) declared `PerPrimitiveEXT`, as Vulkan requires of the two sides of the
+/// interface (Ryujinx declares every pixel input per vertex). The module becomes SPIR-V 1.4 with the mesh shading
+/// capability. Graphics calls it for the pipeline's pixel shader; the same pixel shader in a vertex pipeline is used
+/// as built.
+pub fn fragment_per_primitive(spv: &[u8], locations: &[u32]) -> Result<Vec<u8>, String> {
+    let w = crate::reflect::words(spv).ok_or("not SPIR-V")?;
+    let mut m = M::parse(&w).ok_or("SPIR-V that does not parse")?;
+    if !m.ins.iter().any(|x| M::op(x) == OP_ENTRY_POINT && x[1] == 4) {
+        return Err("not a pixel shader".into());
+    }
+    let inputs: Vec<u32> = m.ins.iter().filter(|x| M::op(x) == OP_VARIABLE && x.len() >= 4 && x[3] == SC_INPUT).map(|x| x[2]).collect();
+    let targets: Vec<u32> = m
+        .ins
+        .iter()
+        .filter(|x| M::op(x) == OP_DECORATE && x.len() >= 4 && x[2] == DEC_LOCATION && locations.contains(&x[3]) && inputs.contains(&x[1]))
+        .map(|x| x[1])
+        .collect();
+    if targets.is_empty() {
+        return Ok(spv.to_vec());
+    }
+    // interpolation does not apply to a per-primitive value
+    m.ins.retain(|x| !(M::op(x) == OP_DECORATE && x.len() >= 3 && targets.contains(&x[1]) && matches!(x[2], DEC_NO_PERSPECTIVE | DEC_CENTROID | DEC_SAMPLE)));
+    for t in &targets {
+        if !m.ins.iter().any(|x| M::op(x) == OP_DECORATE && x.len() >= 3 && x[1] == *t && x[2] == DEC_PER_PRIMITIVE) {
+            m.decorate(&[*t, DEC_PER_PRIMITIVE]);
+        }
+    }
+    if !m.ins.iter().any(|x| M::op(x) == OP_CAPABILITY && x[1] == CAP_MESH_SHADING) {
+        let at = m.ins.iter().rposition(|x| M::op(x) == OP_CAPABILITY).ok_or("no capability")?;
+        m.ins.insert(at + 1, inst(OP_CAPABILITY, &[CAP_MESH_SHADING]));
+        let at = m.ins.iter().rposition(|x| M::op(x) == OP_CAPABILITY).unwrap() + 1;
+        m.ins.insert(at, inst(OP_EXTENSION, &str_words("SPV_EXT_mesh_shader")));
+    }
+    to_1_4(&mut m);
+    Ok(m.words().iter().flat_map(|x| x.to_le_bytes()).collect())
+}
+
 /// A small uint constant inside a function's emission (made in the module's global section).
 fn kconst_small(f: &mut F, v: u32) -> u32 {
     let uint = f.m.ins.iter().find(|i| M::op(i) == OP_TYPE_INT && i.len() == 4 && i[2] == 32 && i[3] == 0).map(|i| i[1]).unwrap();
@@ -736,5 +983,53 @@ mod tests {
     fn strings_are_nul_terminated_words() {
         assert_eq!(str_words("abc"), vec![u32::from_le_bytes(*b"abc\0")]);
         assert_eq!(str_words("abcd").len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod build_tests {
+    /// On a real build (`NXSHADERS_TEST_BUILD=<shader folder>`, opt-in): every mesh shader with per-primitive outputs,
+    /// its paired pixel shaders made per-primitive and checked with spirv-val (`NXSHADERS_SPIRV_VAL`).
+    #[test]
+    fn fragment_per_primitive_on_a_build() {
+        let (Ok(dir), Ok(val)) = (std::env::var("NXSHADERS_TEST_BUILD"), std::env::var("NXSHADERS_SPIRV_VAL")) else { return };
+        let dir = std::path::Path::new(&dir);
+        let pairs = std::fs::read_to_string(dir.join("pairs.tsv")).unwrap();
+        let mut checked = 0;
+        for l in pairs.lines().filter(|l| !l.starts_with('#')) {
+            let f: Vec<&str> = l.split('\t').collect();
+            let Ok(j) = std::fs::read(dir.join("spv").join(format!("{}.json", f[0]))) else { continue };
+            let j: serde_json::Value = serde_json::from_slice(&j).unwrap();
+            let Some(locs) = j.get("per_primitive_locations").and_then(|v| v.as_array()) else { continue };
+            let locs: Vec<u32> = locs.iter().map(|x| x.as_u64().unwrap() as u32).collect();
+            let ps = std::fs::read(dir.join("spv").join(format!("{}.spv", f[1]))).unwrap();
+            let out = super::fragment_per_primitive(&ps, &locs).unwrap();
+            let tmp = std::env::temp_dir().join(format!("nxs_pp_{}.spv", f[1]));
+            std::fs::write(&tmp, &out).unwrap();
+            let o = std::process::Command::new(&val).args(["--target-env", "vulkan1.3"]).arg(&tmp).output().unwrap();
+            assert!(o.status.success(), "{}: {}", f[1], String::from_utf8_lossy(&o.stderr));
+            let _ = std::fs::remove_file(&tmp);
+            checked += 1;
+        }
+        // no mesh / pixel pair in the scan (MKW's mesh programs are not in program variations): every 50th pixel
+        // shader with locations 0 and 1 made per-primitive
+        if checked == 0 {
+            let man = std::fs::read_to_string(dir.join("manifest.tsv")).unwrap();
+            for (n, l) in man.lines().filter(|l| l.split('\t').nth(1) == Some("ps") && l.split('\t').nth(4) == Some("ok")).enumerate() {
+                if n % 50 != 0 {
+                    continue;
+                }
+                let k = l.split('\t').next().unwrap();
+                let ps = std::fs::read(dir.join("spv").join(format!("{k}.spv"))).unwrap();
+                let out = super::fragment_per_primitive(&ps, &[0, 1]).unwrap();
+                let tmp = std::env::temp_dir().join(format!("nxs_pp_{k}.spv"));
+                std::fs::write(&tmp, &out).unwrap();
+                let o = std::process::Command::new(&val).args(["--target-env", "vulkan1.3"]).arg(&tmp).output().unwrap();
+                assert!(o.status.success(), "{k}: {}", String::from_utf8_lossy(&o.stderr));
+                let _ = std::fs::remove_file(&tmp);
+                checked += 1;
+            }
+        }
+        eprintln!("per-primitive pixel shaders checked: {checked}");
     }
 }

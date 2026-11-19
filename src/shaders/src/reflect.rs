@@ -15,6 +15,7 @@ const OP_TYPE_ARRAY: u32 = 28;
 const OP_TYPE_RUNTIME_ARRAY: u32 = 29;
 const OP_TYPE_STRUCT: u32 = 30;
 const OP_TYPE_POINTER: u32 = 32;
+const OP_TYPE_ACCELERATION_STRUCTURE: u32 = 5341;
 const OP_CONSTANT: u32 = 43;
 const OP_VARIABLE: u32 = 59;
 const OP_DECORATE: u32 = 71;
@@ -119,7 +120,7 @@ pub fn reflect(spv: &[u8]) -> Result<Module, String> {
                 }
                 _ => {}
             },
-            OP_TYPE_IMAGE | OP_TYPE_SAMPLER | OP_TYPE_SAMPLED_IMAGE | OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY | OP_TYPE_STRUCT | OP_TYPE_POINTER => {
+            OP_TYPE_IMAGE | OP_TYPE_SAMPLER | OP_TYPE_SAMPLED_IMAGE | OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY | OP_TYPE_STRUCT | OP_TYPE_POINTER | OP_TYPE_ACCELERATION_STRUCTURE => {
                 types.insert(ins[1], ins.to_vec());
             }
             OP_CONSTANT if n >= 4 => {
@@ -156,6 +157,7 @@ pub fn reflect(spv: &[u8]) -> Result<Module, String> {
             (SC_UNIFORM, Some(OP_TYPE_STRUCT)) if block.get(&t) == Some(&DEC_BUFFER_BLOCK) => "storage_buffer",
             (SC_UNIFORM, _) => "uniform_buffer",
             (SC_UNIFORM_CONSTANT, Some(OP_TYPE_SAMPLER)) => "sampler",
+            (SC_UNIFORM_CONSTANT, Some(OP_TYPE_ACCELERATION_STRUCTURE)) => "acceleration_structure",
             (SC_UNIFORM_CONSTANT, Some(OP_TYPE_SAMPLED_IMAGE)) => {
                 let img = types.get(&ins.unwrap()[2]);
                 if img.is_some_and(|im| im[3] == DIM_BUFFER) {

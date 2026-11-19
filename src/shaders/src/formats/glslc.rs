@@ -79,9 +79,15 @@ fn program(d: &[u8], h: usize, size: usize, label: &str) -> Vec<Found> {
 
 /// Every GLSLC output in `d` that passes the checks.
 pub fn shaders(d: &[u8], label: &str) -> Vec<Found> {
+    shaders_skip(d, label, &[])
+}
+
+/// The same, leaving out outputs whose magic lies in one of `skip`'s byte ranges (compressed streams a reader decodes
+/// and reads on its own).
+pub fn shaders_skip(d: &[u8], label: &str, skip: &[(usize, usize)]) -> Vec<Found> {
     let mut out = vec![];
     for h in memchr::memmem::find_iter(d, &MAGIC) {
-        if h + 0x48 > d.len() {
+        if h + 0x48 > d.len() || skip.iter().any(|&(a, b)| a <= h && h < b) {
             continue;
         }
         let (size, _, first, _) = layout(d, h);

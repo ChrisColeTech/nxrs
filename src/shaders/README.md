@@ -17,6 +17,9 @@ Credits and licenses: the repository's [README](../../README.md#credits-and-lice
    capabilities; a size query's missing depth / layer component read as 1 on a texture typed 2D for want of a
    per-game type answer; a fetch / read with a computed `Offset`, which Vulkan allows on gathers only, gets the offset
    added to its coordinate, a constant one becomes `ConstOffset`), then **validate** each module with the Vulkan SDK's `spirv-val --target-env vulkan1.3`.
+   NVN2 task and mesh shaders become Vulkan task / mesh modules around the translated kernel (`mesh.rs`,
+   `VK_EXT_mesh_shader`); every ray-tracing module of the game is linked into one library (`rt.rs`), translated as one
+   compute kernel that traces with ray queries.
 5. **Write** `spv/<key>.spv` + `spv/<key>.json` (bindings with their Vulkan descriptor types and what the game binds
    there), `manifest.tsv`, `pairs.tsv`, `problems.txt`. A rebuild reuses every output whose job and tools are unchanged.
 
@@ -35,6 +38,15 @@ Credits and licenses: the repository's [README](../../README.md#credits-and-lice
 | `formats/koei.rs` | KTGL RDB files (IDRK / PDRK entries, G2S / _DOK GLSLC outputs), LINKDATA archives by their index, Koei Tecmo's and Gust's chunked zlib |
 | `formats/smash.rs` | Super Smash Bros. Ultimate's data.arc: the file-system table, every current file (every region's) |
 | `formats/fromsoft.rs` | FromSoftware dvdbnd archives (.bdt by their .bhd5), DCX, BND3 entries with GLSLC outputs |
+| `formats/monogame.rs` | MonoGame effects (MGFX 8 and 5) in XNB files and main; XNB content compressed with LZX (a 64 KB-window decoder) or LZ4 |
+| `formats/monolith.rs` | Monolith Soft: ARH1 / ARH2 indexes of `.ard` files, XBC1 streams (stored, zlib, zstd), Firehawk `cmp\0zlib`, HCPS programs, standalone SLCTs in main |
+| `formats/retro.rs` | Retro Studios: RFRM forms and `PACK` archives (ADIR, MTRL resources, zlib or zstd), SNVN program records, the startup archive LZSS-compressed in main |
+| `formats/nlg.rs` | Next Level Games: `.dict` indexes with `.data` / `.patch` (revision 1 sections and update packing; revision 4 zstd streams and shader tables) |
+| `formats/studios.rs` | Sumo Digital (`Ninty_NX`, `NVNsh`, MuxFDMR v2), Firaxis CIVBSF, Diablo II: Resurrected SHAD trees, PhyreEngine effects and programs, Star Fox's shader binaries and VIPR containers, Larian BSHD, NintendoWare Bezel Engine archives (BEA, both layouts) |
+| `formats/packs.rs` | archives read member by member: PlatinumGames PKZ (Oodle, zstd), Rockstar RPF6 (AES tables, the key from main's data or its key setup), Camelot's CRA (the index from the game's NRO: `NXSHADERS_NRO_DIR`) and NARC containers, Blizzard CASC folders and Diablo III packages, Kirby Air Riders' PDAT, zip (zip64; Star Fox's chained-LZ4 members), Larian LSPK, Unravel TWO's KIT, Virtuos' SRYK (VBF), UbiArt IPK, Double Eleven's resource packs |
+| `formats/frostbite.rs` | Frostbite: `Data/layout.toc` install chunks, superbundle tables, bundle manifests, CompiledBytecode resources (VNVN records) in the cas files |
+| `mesh.rs` | NVN2 task / mesh shaders as Vulkan task / mesh stages; `fragment_per_primitive` for the pixel shader of a pipeline with per-primitive attributes |
+| `rt.rs` | NVN2 ray-tracing modules: RTCore metadata read and checked, every module linked into the game's `rt_library` (logical IDs, MOV relocations, resource layout) |
 | `formats/zbic.rs`, `formats/nso.rs` | ZBIC (Switch 2 NSO segments; the decoder is `translator::loader::zbic`, shared with the build); NSO images |
 | `scan.rs` | the whole game in parallel work items (files, Trinity pack groups, CPK entry ranges, Unreal pak file groups, IoStore chunks, RE Engine PAK entries, RDB files, LINKDATA / dvdbnd / data.arc entries, code modules) |
 | `job.rs` | translator jobs: VertexA/B merge, c1, NVN2 compute c0 layout and stage banks, task / mesh stage memory, facts |
@@ -69,6 +81,14 @@ under a second.
   textures, images, workgroup size) equal on 413. The 87 others: 59 vertex shaders where sm86 keeps a load of c16 whose
   value is never read (Ryujinx removes it), 28 compute shaders where the two address NVN2's per-shader c0 layout
   differently (dmsh_xlate maps it onto NVN's fixed tables, sm86 keeps raw c0 offsets) with the same resource counts.
+
+Lane S re-run with the task / mesh stages, the RT library and the added readers (`build/S/shaders/`): the same seven
+counts, all valid, 0 failed, 0 scan problems; MKW's 19 mesh + 7 task and Ocarina's 500 mesh + 20 task shaders are now
+`MeshEXT` / `TaskEXT` modules, spirv-val clean. Super Mario Party Jamboree (XCI v0, Bezel Engine 2.9): 25,693 found
+(25,447 in `.bea` archives), all valid, every one of the 971 keys nxnative's run of the game used among them. No game on
+this PC has RT modules; a synthetic 3-module library translates and validates. With `NXSHADERS_TEST_BUILD=<shaders
+folder>` and `NXSHADERS_SPIRV_VAL`, `cargo test -p shaders fragment_per_primitive` checks pixel shaders made
+per-primitive (MKW: 147, clean).
 
 The commands:
 

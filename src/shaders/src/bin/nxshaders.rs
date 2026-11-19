@@ -135,8 +135,8 @@ fn main() {
             match prebuild(&game, &out, &opts, &say) {
                 Ok(r) => {
                     println!(
-                        "RESULT found={} translated={} reused={} failed={} skipped={} valid={} invalid={} scan_problems={} conflicts={} pairs={} files={} read_mb={:.0} scan_s={:.1} translate_s={:.1} validate_s={:.1} total_s={:.1}",
-                        r.found, r.translated, r.reused, r.failed, r.skipped, r.valid, r.invalid, r.scan_problems, r.conflicts, r.pairs, r.files, r.bytes_read as f64 / 1e6, r.scan_seconds, r.translate_seconds, r.validate_seconds, r.total_seconds
+                        "RESULT found={} translated={} reused={} failed={} skipped={} rt_in_library={} valid={} invalid={} scan_problems={} conflicts={} pairs={} files={} read_mb={:.0} scan_s={:.1} translate_s={:.1} validate_s={:.1} total_s={:.1}",
+                        r.found, r.translated, r.reused, r.failed, r.skipped, r.in_library, r.valid, r.invalid, r.scan_problems, r.conflicts, r.pairs, r.files, r.bytes_read as f64 / 1e6, r.scan_seconds, r.translate_seconds, r.validate_seconds, r.total_seconds
                     );
                     println!("RESULT stages {:?}", r.by_stage);
                 }

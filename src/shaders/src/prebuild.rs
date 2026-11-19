@@ -50,6 +50,8 @@ pub struct Report {
     pub reused: usize,
     pub failed: usize,
     pub skipped: usize,
+    /// Ray-tracing modules translated as part of the game's one RT library (`rt_library`).
+    pub in_library: usize,
     pub valid: usize,
     pub invalid: usize,
     pub scan_problems: usize,
@@ -131,6 +133,13 @@ fn reflection(job: &job::Job, chain: &str, job_sha: &str, spv: &[u8], res: &Valu
             let mut o = json!({"set": b.set, "binding": b.binding, "type": b.kind, "count": b.count, "name": b.name});
             if b.set == 0 && b.binding == 0 && b.name == "support_buffer" {
                 o["resource"] = json!({"kind": "support"});
+            } else if job.stage == Stage::Rt && b.set == 0 && matches!(b.name.as_str(), "rt_scene" | "rt_dispatch" | "rt_errors" | "rt_instance_sbt") {
+                // the RT library's own resources (the translator's reserved set 0 bindings 1..4): the scene's
+                // acceleration structure, the dispatch parameters, the error words, the instance SBT records
+                o["resource"] = json!({"kind": b.name});
+            } else if b.name == crate::mesh::DRAW_BUFFER && b.kind == "storage_buffer" && job.extra.contains_key("mesh_draw") {
+                // the draw's NVN records {count, first} (mesh.rs): word DrawIndex * stride + 1 is its first workgroup
+                o["resource"] = json!({"kind": "mesh_draw"});
             } else if let Some((kind, e)) = by_binding.get(&(b.binding as i64)).filter(|_| b.set as u64 == set) {
                 let mut r = e.clone();
                 r["kind"] = json!(kind);
@@ -145,7 +154,13 @@ fn reflection(job: &job::Job, chain: &str, job_sha: &str, spv: &[u8], res: &Valu
             } else {
                 o["resource"] = json!({"kind": "translator"});
             }
-            if !(b.set == 0 && b.binding == 0) && (b.set as u64 != set || b.binding == 0) {
+            let rt_own = job.stage == Stage::Rt && b.set == 0 && b.name.starts_with("rt_");
+            // the RT library's banks are its own: c0 the core parameters (`coreParams`), c3 the descriptor arena
+            // (`descriptorBaseArray`), as the link layout places them
+            if job.stage == Stage::Rt && b.kind == "uniform_buffer" && (b.name.ends_with("_c0") || b.name.ends_with("_c3")) {
+                o["resource"] = json!({"kind": if b.name.ends_with("_c0") { "rt_bank0" } else { "rt_bank3" }});
+            }
+            if !(b.set == 0 && b.binding == 0) && !rt_own && (b.set as u64 != set || b.binding == 0) {
                 layout_problems.push(format!("binding {} in set {}, not the stage's set {set}", b.binding, b.set));
             }
             bindings.push(o);
@@ -334,13 +349,59 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
         keys = keys.into_iter().step_by(step).take(n).collect();
     }
     let mut jobs: HashMap<String, (job::Job, String)> = HashMap::new();
+    let mut rt_job: Option<job::Job> = None;
     let mut rows: BTreeMap<String, String> = BTreeMap::new();
     let mut work = vec![];
     let row = |s: &scan::Shader, j: Option<&job::Job>, status: &str, bytes: usize| {
         let arch = if crate::nvn::nvn2_ctl(&s.ctl) { "sm86" } else { "maxwell" };
         format!("{}\t{}\t{}\t{arch}\t{status}\t{bytes}\t{}\n", s.key, s.stage, j.map(|j| j.xlate_stage.name()).unwrap_or("-"), s.source)
     };
+    // ray-tracing modules: all of them linked into one library (rt.rs), translated as one compute kernel
+    let mut rt_records: Vec<(String, Vec<u8>, Vec<u8>)> = vec![];
+    for s in keys.iter().filter(|s| s.stage == Stage::Rt) {
+        rt_records.push((s.key.clone(), s.ctl.clone(), s.code.clone()));
+    }
+    let mut rt_shader: Option<scan::Shader> = None;
+    let mut rt_failed: Option<String> = None;
+    let mut rt_catalog: Option<Value> = None;
+    if !rt_records.is_empty() {
+        match crate::rt::make_library(&rt_records) {
+            Ok(lib) => {
+                let mut extra = Map::new();
+                extra.insert("local".into(), json!(crate::rt::LOCAL));
+                rt_catalog = Some(lib.manifest.clone());
+                let mut jj = Map::new();
+                for (k, v) in [("key", json!(crate::rt::KEY)), ("stage", json!("cs")), ("arch", json!("sm86")), ("local", json!(crate::rt::LOCAL)), ("tex", json!({})), ("img", json!({})), ("attr", json!({})), ("fout", json!({})), ("c1", json!("")), ("debug", json!(opts.job.debug)), ("reduced", json!(opts.job.reduced)), ("target", json!("vulkan")), ("set", json!(job::stage_set(Stage::Rt))), ("rt", lib.rt.clone())] {
+                    jj.insert(k.into(), v);
+                }
+                let j = job::Job { key: crate::rt::KEY.into(), stage: Stage::Rt, xlate_stage: Stage::Cs, code: lib.code.clone(), json: jj, extra };
+                rt_shader = Some(scan::Shader { key: crate::rt::KEY.into(), stage: Stage::Rt, ctl: vec![], code: lib.code, source: format!("the game's {} ray-tracing modules, linked", rt_records.len()), copies: rt_records.len() });
+                rt_job = Some(j);
+            }
+            Err(e) => rt_failed = Some(e),
+        }
+    }
     for s in &keys {
+        if s.stage == Stage::Rt {
+            // a module of the library: its translation is the library's
+            let (st, why) = match &rt_failed {
+                None => ("library", None),
+                Some(e) => ("failed", Some(format!("the ray-tracing library: {e}"))),
+            };
+            if st == "failed" {
+                report.failed += 1;
+            } else {
+                report.in_library += 1;
+            }
+            let _ = std::fs::remove_file(spv_dir.join(format!("{}.spv", s.key)));
+            let mut o = json!({"layout": LAYOUT, "key": s.key, "stage": "rt", "status": st, "library": crate::rt::KEY});
+            if let Some(w) = why {
+                o["why"] = json!(w);
+            }
+            write_atomic(&spv_dir.join(format!("{}.json", s.key)), serde_json::to_string_pretty(&o).unwrap().as_bytes()).map_err(|e| io(&spv_dir, e))?;
+            rows.insert(s.key.clone(), row(s, None, st, 0));
+            continue;
+        }
         let j = match job::job_for(&s.key, s.stage, &s.ctl, &s.code, opts.job) {
             Ok(j) => j,
             Err(e) => {
@@ -382,7 +443,37 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
         work.push(Work { key: s.key.clone(), json: Value::Object(js) });
         jobs.insert(s.key.clone(), (j, job_sha));
     }
-    let src_of: HashMap<&str, &scan::Shader> = keys.iter().map(|s| (s.key.as_str(), *s)).collect();
+    if let (Some(j), Some(sh)) = (rt_job, rt_shader.as_ref()) {
+        let mut jj = j.json.clone();
+        jj.remove("code");
+        let job_sha = sha_hex(&[chain.as_bytes(), crate::rt::VERSION.as_bytes(), REFLECTION.as_bytes(), serde_json::to_string(&jj).unwrap().as_bytes(), &j.code]);
+        let prev: Option<Value> = std::fs::read(spv_dir.join(format!("{}.json", j.key))).ok().and_then(|b| serde_json::from_slice(&b).ok());
+        let spv_len = std::fs::metadata(spv_dir.join(format!("{}.spv", j.key))).map(|m| m.len() as usize).unwrap_or(0);
+        match prev.filter(|p| p.get("job_sha").and_then(Value::as_str) == Some(&job_sha) && p.get("layout").and_then(Value::as_str) == Some(LAYOUT) && (spv_len > 0 || p.get("status").and_then(Value::as_str) != Some("ok"))) {
+            Some(p) => {
+                let st = p.get("status").and_then(Value::as_str).unwrap_or("?").to_string();
+                report.reused += 1;
+                match st.as_str() {
+                    "ok" => report.valid += 1,
+                    "invalid" => report.invalid += 1,
+                    _ => report.failed += 1,
+                }
+                rows.insert(j.key.clone(), row(sh, Some(&j), &st, spv_len));
+            }
+            None => {
+                let cp = code_dir.join(format!("{}.bin", j.key));
+                std::fs::write(&cp, &j.code).map_err(|e| io(&cp, e))?;
+                let mut js = j.json.clone();
+                js.insert("code".into(), json!(cp.to_string_lossy()));
+                work.push(Work { key: j.key.clone(), json: Value::Object(js) });
+                jobs.insert(j.key.clone(), (j, job_sha));
+            }
+        }
+    }
+    let mut src_of: HashMap<&str, &scan::Shader> = keys.iter().map(|s| (s.key.as_str(), *s)).collect();
+    if let Some(sh) = rt_shader.as_ref() {
+        src_of.insert(sh.key.as_str(), sh);
+    }
 
     // translate
     let t1 = Instant::now();
@@ -402,6 +493,7 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
     // the SPIR-V edits Vulkan needs (fixes.rs)
     let mut applied: HashMap<String, Vec<&'static str>> = HashMap::new();
     let mut mesh_failed: HashMap<String, String> = HashMap::new();
+    let mut staged_mesh: Vec<(String, crate::mesh::Info)> = vec![];
     for (k, o) in &outcomes {
         if o.is_ok() {
             let p = xl_dir.join(format!("{k}.spv"));
@@ -414,11 +506,12 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
                 }
             }
             // a task or mesh shader: its Vulkan stage around the kernel (mesh.rs)
-            if let Some(info) = jobs.get(k).and_then(|(j, _)| j.extra.get("mesh_stage")) {
-                match crate::mesh::Info::from_json(info).and_then(|i| crate::mesh::to_stage(&b, &i)) {
-                    Ok(staged) => {
+            if let Some((info, set)) = jobs.get(k).and_then(|(j, _)| Some((j.extra.get("mesh_stage")?, job::stage_set(j.stage)))) {
+                match crate::mesh::Info::from_json(info).and_then(|i| crate::mesh::to_stage(&b, &i, set).map(|s| (s, i))) {
+                    Ok((staged, i)) => {
                         b = staged;
                         names.push("mesh_stage");
+                        staged_mesh.push((k.clone(), i));
                     }
                     Err(e) => {
                         mesh_failed.insert(k.clone(), e);
@@ -433,6 +526,19 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
         }
     }
 
+    // a task or mesh stage made: the module is that stage now; what graphics binds and links for it
+    for (k, i) in staged_mesh {
+        if let Some((j, _)) = jobs.get_mut(&k) {
+            j.xlate_stage = j.stage;
+            let pp = i.per_primitive_locations();
+            if !pp.is_empty() {
+                j.extra.insert("per_primitive_locations".into(), json!(pp));
+            }
+            if i.reads_first() {
+                j.extra.insert("mesh_draw".into(), json!({"binding_name": crate::mesh::DRAW_BUFFER, "stride_push_offset": crate::mesh::DRAW_STRIDE_PUSH}));
+            }
+        }
+    }
     for (k, e) in mesh_failed {
         outcomes.insert(k, Err(format!("mesh stage: {e}")));
     }
@@ -470,6 +576,16 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
             }
         };
         let mut r = reflection(j, &chain, job_sha, &spv, &res, status, why.as_deref());
+        if j.stage == Stage::Rt {
+            // what the translator laid out (bindings of the scene, parameters, errors, instance SBT; local memory; each
+            // module's acceleration-structure slots), and the linked catalog
+            if let Some(rt) = res.get("rt") {
+                r["rt"] = rt.clone();
+            }
+            if let Some(c) = &rt_catalog {
+                r["rt_catalog"] = c.clone();
+            }
+        }
         if let Some(f) = applied.get(key) {
             r["fixes"] = json!(f);
         }
