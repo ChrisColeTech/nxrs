@@ -9,6 +9,22 @@ use super::types::*;
 unsafe fn nb<'a>(b: *const NVNdlssNetworkBuilder) -> &'a mut dlss_builder_t {
     &mut *(b as *mut dlss_builder_t)
 }
+/// nvnCommandBufferEvaluateDlss's record: the input colour and output textures (snapshots), the input rectangle and
+/// the output size.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct p_dlss {
+    pub color: tex_t,
+    pub out: tex_t,
+    pub has: u32,
+    pub iw: i32,
+    pub ih: i32,
+    pub ow: i32,
+    pub oh: i32,
+    pub cbase: [i32; 2],
+    pub obase: [i32; 2],
+}
+
 unsafe fn pr<'a>(p: *const NVNdlssParameters) -> &'a mut dlss_params_t {
     &mut *(p as *mut dlss_params_t)
 }
@@ -80,6 +96,24 @@ nvn_fns! {
         let v = optimal(nb(b));
         for (p, x) in [o0, o1, o2, o3, o4, o5].into_iter().zip(v) { if !p.is_null() { *p = x; } }
         1
+    }
+
+    // ---------- evaluation ----------
+    /// nvnCommandBufferEvaluateDlss(cmd, network, parameters): recorded; the replay upscales the input rectangle into
+    /// the output (no DLSS network runs on a PC GPU here: a filtered upscale stands in).
+    fn nvnCommandBufferEvaluateDlss(c: *mut NVNcommandBuffer, n: *const NVNdlssNetwork, p: *const NVNdlssParameters) {
+        let net = &*(n as *const dlss_net_t);
+        let pa = pr(p);
+        let r = &mut *super::cmd::rec_t::<p_dlss>(c, op::DLSS);
+        let (ct, ot) = (pa.tex[DLSS_COLOR], pa.tex[DLSS_OUTPUT]);
+        if !ct.is_null() { r.color = *ct; r.has |= 1; }
+        if !ot.is_null() { r.out = *ot; r.has |= 2; }
+        r.iw = pa.iw;
+        r.ih = pa.ih;
+        r.ow = net.b.w;
+        r.oh = net.b.h;
+        r.cbase = pa.base[DLSS_COLOR];
+        r.obase = pa.base[DLSS_OUTPUT];
     }
 
     // ---------- network ----------

@@ -55,6 +55,8 @@ pub const SECTIONS: &[Section] = &[
             o!("fps_target", "60", "Experimental: 30 or 20 = draw only every 2nd / 3rd frame while the game keeps its speed (less GPU work;\n;   effects updated on skipped frames can flicker). 120 = frame generation x2 at 120 FPS (see lsfg). 60 = normal"),
             o!("fps_limit", "1", "1 = 60 FPS, 30 = show at most 30 images a second while the game keeps its 60 Hz steps, 0 = unlimited.\n;   F4 switches between 60 and unlimited"),
             o!("forced_vsync", "0", "1 = always wait for the display's refresh (can cost a lot of FPS on slow PCs)"),
+            o!("present_interval", "0", "0 = the game chooses how many vsyncs a frame lasts; 1 = force every vsync (a 30 FPS game drawn at 60:
+;   only for games that keep their speed, see the profile), 2 = force every second vsync"),
             o!("null_trap", "0", "1 = a write through a NULL pointer stops the game with a precise log (diagnostics; 0 = normal)"),
             o!("memory_gb", "0", "Memory the game sees: 0 = automatic (as the console, more for games that need it), 4 = console,\n;   6 or 8 = extended (as yuzu's extended memory layout)"),
             o!("driver_exclusive", "auto", "auto = on for Intel graphics (its driver crashes when compiling and drawing at the same time), 1 = always, 0 = never"),

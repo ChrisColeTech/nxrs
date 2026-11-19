@@ -57,6 +57,7 @@ SCENARIOS = {
         ('a', 3, 'menu2'), ('a', 5, 'menu3'), ('a', 4, 'char'), ('a', 2, 'k1'), ('a', 2, 'k2'), ('a', 4, 'k3'), ('a', 4, 'cup'), ('a', 30, 'gp-ok'),
         ('replay', 20, 'driving', 'mkw_drive.txt'), ('shot', 18, 'driving +20s')]),
 }
+PM = []
 PACING = re.compile(r'^\[\s*([\d.]+)\] \[vk\] pacing: ([\d.]+) FPS \| p95 ([\d.]+) p99 ([\d.]+) max ([\d.]+) ms')
 
 
@@ -226,9 +227,10 @@ def scenario(a, sc, run, exe):
 
         try:
             if a.presentmon and Path(a.presentmon).is_file():
-                subprocess.Popen([a.presentmon, '--process_id', str(pid), '--output_file', str(run / 'presentmon.csv'), '--v1_metrics', '--no_console_stats',
+                # unelevated, --terminate_on_proc_exit does not fire: the harness stops it by its PID after the run
+                PM.append(subprocess.Popen([a.presentmon, '--process_id', str(pid), '--output_file', str(run / 'presentmon.csv'), '--v1_metrics', '--no_console_stats',
                                   '--session_name', 'nxrs_%d' % pid, '--stop_existing_session', '--terminate_on_proc_exit'],
-                                 stdout=(run / 'presentmon.log').open('wb'), stderr=subprocess.STDOUT)
+                                 stdout=(run / 'presentmon.log').open('wb'), stderr=subprocess.STDOUT))
             for st in sc['steps']:
                 action, settle, observed = st[0], st[1] * a.slow, st[2]
                 record(action=action, observed_before=observed)
@@ -245,6 +247,10 @@ def scenario(a, sc, run, exe):
     env.update(dict(x.split('=', 1) for x in a.env))
     args = ([a.data] if a.data else []) + ['--fullscreen=0', '--metrics=1'] + ['--' + o for o in a.option]
     r = run_game.run(str(exe), str(run / 'run.log'), a.seconds or sc['seconds'], args, env=env, during=steps, say=lambda s: print(s, flush=True))
+    for pm in PM:
+        if pm.poll() is None:
+            subprocess.run(['taskkill', '/PID', str(pm.pid), '/F'], capture_output=True)
+            pm.wait(timeout=10)
     (run / 'result.json').write_text(json.dumps(r, indent=1))
 
 

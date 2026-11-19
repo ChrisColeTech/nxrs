@@ -132,6 +132,5 @@ UTF-8 (Turbo's Python prints them in the console code page).
 
 - NSZ / XCZ as the game's own package or update (Turbo refuses them too; DLC from NSZ / XCZ is unpacked once),
   sparse NCA storage, a compressed section under an update's patch (no such package on hand to verify).
-- Code patches shipped by mods (`mods/<mod>/mod.json`) and enabled mods' image bytes.
 - The inline-asm SIMD path (AArch64 hosts only).
 - Differential testing against dynarmic.

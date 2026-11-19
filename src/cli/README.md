@@ -88,6 +88,22 @@ Z-A (Switch 2 Edition NUP, 270,366 functions, 1.05 GB of C, with the profile's 6
 `--jobs 8`. The eight runtime homebrew tests (`src/runtime/guest/tests`) built by `nxrs-build build` and run through the
 loader all pass.
 
+## Mods
+
+The player's mods go in `<build folder>\mods\<mod>\` (`NXRS_MODS=<folder>` names another), in the layouts Atmosphère,
+Ryujinx and yuzu use: `exefs\<build id>.ips` (IPS or IPS32), `exefs\*.pchtxt` (IPSwitch, `@nsobid-...`),
+`exefs_patches\<x>\...`, loose patch files in the mod folder, `romfs\...` (files that replace or join the game's), and an
+optional `mod.json` (`{"name": "...", "enabled": false}`). The build (`profiles::mods` parses, `mods.rs` plans):
+- every changed instruction word in a module's `.text` becomes a site of the translator's patch table, one set per mod
+  (`mod_<folder>`, switch `NXRS_MOD_<FOLDER>`): both instructions are lifted, so a mod is turned off or on without a
+  rebuild: `NXRS_MOD_<FOLDER>=0` / `=1`, or a file named `disabled` in the mod's folder (modules.c checks it at start);
+- bytes outside `.text` (data, constants) and the RomFS folder go to `<data>\mods.tsv`; the run writes an enabled mod's
+  bytes into the loaded modules before the game starts and layers its RomFS files over the game's (src/os `mods.rs`);
+- a word the profile (or an earlier mod) patches already is left out with a line; a patch for a build id no module
+  has is left out with a line. Adding or removing a mod's code patches retranslates the game once.
+
+Mods are the player's files: nxrs never ships or downloads one.
+
 ## Modules
 
 | File | What |
@@ -96,6 +112,7 @@ loader all pass.
 | `pipeline.rs` | `build`: the steps above, the output layout, `modules.c` |
 | `cc.rs` | clang discovery, flags, the chunk cache and compile pool, the DLL and loader links, the loader's C |
 | `profile.rs` | the build's profile line and patch table; `nxrs-build profile` |
+| `mods.rs` | the player's mods (below) |
 | `out.rs` | console lines (CRLF, flushed), `-q`, the v2 `@progress` / `@result` lines |
 | `launcher/switchrecomp.py` | the v1 shim the launcher's `recomp_cli.py` imports: runs `nxrs-build.exe` |
 

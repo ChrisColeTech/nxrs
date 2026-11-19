@@ -132,7 +132,8 @@ pub struct Lsfg {
     progs: Vec<Prog>,
     samplers: [vk::Sampler; 3],
     black: Img,
-    black_alloc: Option<Allocation>,
+    /// kept for the life of the black image
+    _black_alloc: Option<Allocation>,
     black_fresh: bool,
     ubos: Vec<([f32; 3], super::Buf)>,
     ctx: Option<Ctx>,
@@ -271,7 +272,7 @@ impl Lsfg {
         let mut fresh = vec![];
         let black = make(g, 1, 1, RGBA8, &mut owned, &mut fresh)?;
         let (_, _, ba) = owned.pop().unwrap();
-        Ok(Lsfg { progs, samplers, black, black_alloc: Some(ba), black_fresh: true, ubos: vec![], ctx: None })
+        Ok(Lsfg { progs, samplers, black, _black_alloc: Some(ba), black_fresh: true, ubos: vec![], ctx: None })
     }
 
     fn ctx(&mut self, g: &Gpu, w: u32, h: u32, flow: f32) -> Result<(), String> {

@@ -121,9 +121,37 @@ pub fn proc_address(name: &str) -> u64 {
     }
     let key = format!("nvn:{name}");
     if let Some((_, f)) = GRAPHICS.lock().unwrap().iter().find(|(n, _)| n == name) {
+        if std::env::var("NXOS_NVN_BT").is_ok_and(|v| v == name) {
+            let _ = BT_TARGET.set(*f);
+            return crate::hle::addr(&format!("{key}#bt"), bt_proc);
+        }
         return crate::hle::addr(&key, *f);
     }
     crate::hle::addr(&key, stub)
+}
+
+static BT_TARGET: std::sync::OnceLock<HostFn> = std::sync::OnceLock::new();
+
+/// `NXOS_NVN_BT=<proc>` (Turbo's SWR_NVN_INTERVAL_BT): the first 64 calls of that proc log their arguments and the
+/// guest's return chain (x30, then the x29 frames), e.g. where a game sets its present interval.
+unsafe fn bt_proc(c: *mut Cpu) {
+    static N: AtomicU64 = AtomicU64::new(0);
+    if N.fetch_add(1, Ordering::Relaxed) < 64 {
+        let r = &*c;
+        let mut s = format!("x0 {:#x} x1 {:#x} x2 {:#x}; lr {:#x}", r.x[0], r.x[1], r.x[2], r.x[30]);
+        let mut fp = r.x[29];
+        for _ in 0..8 {
+            if fp == 0 || fp & 7 != 0 || !nxrt::mem::readable(fp, 16) {
+                break;
+            }
+            s.push_str(&format!(" {:#x}", *((fp + 8) as *const u64)));
+            fp = *(fp as *const u64);
+        }
+        crate::log!("NVN bt {}: {s}", std::env::var("NXOS_NVN_BT").unwrap_or_default());
+    }
+    if let Some(f) = BT_TARGET.get() {
+        f(c);
+    }
 }
 
 /// `nvnBootstrapLoader(const char *name)`: the entry to NVN; imported by `main`, defined by no module on SDK 4.
@@ -140,7 +168,13 @@ fn sdk_major(data: &std::path::Path) -> i32 {
     fn scan(b: &[u8]) -> Option<i32> {
         let pat = b"NintendoSdk_nnSdk-";
         let i = b.windows(pat.len()).position(|w| w == pat)?;
-        let digits: String = b[i + pat.len()..].iter().take(4).map(|&c| c as char).take_while(|c| c.is_ascii_digit()).collect();
+        // Switch 2 SDKs name a variant first: "nnSdk-Generic_21_4_0" (Mario Kart World), as nxnative's dm_sdk_major
+        let mut s = &b[i + pat.len()..];
+        let alpha = s.iter().take(16).take_while(|c| c.is_ascii_alphabetic()).count();
+        if alpha > 0 && s.get(alpha) == Some(&b'_') {
+            s = &s[alpha + 1..];
+        }
+        let digits: String = s.iter().take(4).map(|&c| c as char).take_while(|c| c.is_ascii_digit()).collect();
         digits.parse().ok()
     }
     let v = std::fs::read(data.join("exefs").join("sdk")).ok().and_then(|raw| match nxrt::loader::parse(&raw) {

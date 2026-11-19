@@ -4,7 +4,7 @@
 //! guest fiber gets a host fiber (its own reserved host stack) and its own `Cpu`: a suspended fiber's guest registers
 //! and host frames stay untouched while others run. A switch carries the thread's state (TPIDR, TPIDRRO, FPCR/FPSR)
 //! over to the target's `Cpu` and clears the exclusive monitor. A fiber's function returns the fiber to switch to
-//! next (NULL: back to the thread's own context).
+//! next (NULL: back to the thread's own context); switched to again, it runs its function again.
 
 use crate::cpu::Cpu;
 #[allow(unused_imports)]
@@ -26,7 +26,6 @@ pub const SYM_CURRENT: &str = "_ZN2nn2os15GetCurrentFiberEv";
 enum St {
     New,
     Started,
-    Done,
 }
 
 struct Fiber {
@@ -69,33 +68,38 @@ fn resumed() {
     }
 }
 
-/// Runs a fiber's guest function (called by `nxrt_fiber_entry`, the fiber's first frame) and returns the host fiber
-/// to switch to when it returns: the next fiber it names, or the thread's own context. Every Rust frame has returned
-/// before the switch, so a finished fiber's stack holds none.
+/// Runs a fiber's guest function (called by `nxrt_fiber_entry`, the fiber's first frame). When the function returns,
+/// the fiber switches to the fiber it names (NULL: the thread's own context), as nn::os does; a later switch back to
+/// it runs the function again from the start of its stack (Super Mario Party Jamboree's job fibers return when their
+/// job is done and are switched to again for the next one, without a new InitializeFiber).
 #[no_mangle]
 unsafe extern "C" fn nxrt_fiber_run(p: *mut core::ffi::c_void) -> usize {
     crate::boundary::guard("a fiber entry", || {
         resumed();
         let f = Arc::from_raw(p as *const Mutex<Fiber>);
-        let (c, func, arg, addr) = {
-            let g = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            (g.cpu, g.func, g.arg, g.addr)
-        };
-        (*c).x[0] = arg;
-        if crate::boundary::call_guest(c, func) != crate::boundary::GuestCall::Returned {
-            crate::rt::guest_fatal(c, &format!("fiber {addr:#x}: a guest jump or ExitThread left the fiber's function"));
+        loop {
+            let (c, func, arg, addr, top) = {
+                let g = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+                (g.cpu, g.func, g.arg, g.addr, (g.stack + g.size) & !15)
+            };
+            (*c).x[0] = arg;
+            (*c).sp = top;
+            if crate::boundary::call_guest(c, func) != crate::boundary::GuestCall::Returned {
+                crate::rt::guest_fatal(c, &format!("fiber {addr:#x}: a guest jump or ExitThread left the fiber's function"));
+            }
+            let next = (*c).x[0];
+            if crate::rt::trace("fiber") {
+                crate::rt::log(&format!("fiber {addr:#x}: its function returned, next {next:#x}"));
+            }
+            let n = if next != 0 {
+                Some(find(next).unwrap_or_else(|| {
+                    crate::rt::guest_fatal(c, &format!("fiber {addr:#x} returned {next:#x}, which is not an initialized fiber"))
+                }))
+            } else {
+                None
+            };
+            switch_to(c, n);
         }
-        let next = (*c).x[0];
-        f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).state = St::Done;
-        drop(f);
-        let n = if next != 0 {
-            Some(find(next).unwrap_or_else(|| {
-                crate::rt::guest_fatal(c, &format!("fiber {addr:#x} returned {next:#x}, which is not an initialized fiber"))
-            }))
-        } else {
-            None
-        };
-        prepare(c, n)
     })
 }
 
@@ -117,9 +121,6 @@ unsafe fn prepare(from: *const Cpu, to: Option<Arc<Mutex<Fiber>>>) -> usize {
     let (dst, host) = match &to {
         Some(f) => {
             let mut g = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            if g.state == St::Done {
-                crate::rt::fatal(&format!("SwitchToFiber({:#x}): the fiber has finished", g.addr));
-            }
             if g.running {
                 crate::rt::fatal(&format!("SwitchToFiber({:#x}): the fiber is running", g.addr));
             }
@@ -158,6 +159,9 @@ unsafe fn switch_to(from: *const Cpu, to: Option<Arc<Mutex<Fiber>>>) {
 unsafe fn initialize(c: *mut Cpu) {
     let c = &mut *c;
     let addr = c.x[0];
+    if crate::rt::trace("fiber") {
+        crate::rt::log(&format!("fiber {addr:#x}: InitializeFiber function {:#x} argument {:#x} stack {:#x}+{:#x} flags {:#x}", c.x[1], c.x[2], c.x[3], c.x[4], c.x[5]));
+    }
     let mut map = FIBERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     let map = map.get_or_insert_with(HashMap::new);
     if let Some(old) = map.get(&addr) {
@@ -205,6 +209,10 @@ unsafe fn release(g: &Fiber) {
 /// SwitchToFiber(x0 FiberType*; NULL: the thread's own context)
 unsafe fn switch(c: *mut Cpu) {
     let addr = (*c).x[0];
+    if crate::rt::trace("fiber") {
+        let cur = CURRENT.with(|f| f.borrow().as_ref().map_or(0, |f| f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).addr));
+        crate::rt::log(&format!("fiber: SwitchToFiber {cur:#x} -> {addr:#x} (lr {:#x})", (*c).x[30]));
+    }
     if !on_fiber() {
         THREAD_CPU.set(c);
     }

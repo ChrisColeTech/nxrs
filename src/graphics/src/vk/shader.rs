@@ -37,6 +37,8 @@ pub enum Res {
     Img { handle: u32, cbuf_slot: i32, ty: u32 },
     /// NVN's texture pool / sampler pool / image pool indexed by ID (the pool set)
     Pool,
+    /// a task / mesh shader's draw records (`mesh_draw`: {count, first} per draw; lane S)
+    MeshDraw,
 }
 
 pub struct Module {
@@ -57,6 +59,12 @@ pub struct Module {
     pub omap: Option<u32>,
     /// 1 a task shader, 2 a mesh shader (in the tessellation stages' places 3 / 4)
     pub mesh: u8,
+    /// what the program captures with transform feedback (the reflection's `transform_feedback`)
+    pub xfb: Option<super::xfb::Layout>,
+    /// the module's words as bound (its transform feedback variant is made from them)
+    pub words: Vec<u32>,
+    /// a mesh shader's per-primitive output locations (the pixel shader drawn with it reads them per primitive)
+    pub per_primitive: Vec<u32>,
 }
 
 impl Module {
@@ -220,6 +228,10 @@ struct JRefl {
     c1: Option<String>,
     #[serde(default)]
     frag_out_map: Option<i64>,
+    #[serde(default)]
+    transform_feedback: Option<serde_json::Value>,
+    #[serde(default)]
+    per_primitive_locations: Vec<u32>,
 }
 
 fn hex_bytes(h: &str) -> Option<Vec<u8>> {
@@ -276,6 +288,13 @@ pub fn remap(words: &[u32], refl: &Refl, json: Option<&str>) -> Result<(Vec<u32>
         let array = iv(r, "array");
         let (set, b, what) = match (kind, jb.ty.as_str()) {
             ("support", _) => (st, L::SUPPORT, Some(Res::Support)),
+            ("mesh_draw", "storage_buffer") => {
+                if nsb >= L::SSBO_N {
+                    return Err("more than 32 storage buffers".into());
+                }
+                nsb += 1;
+                (st, L::SSBO_BASE + nsb - 1, Some(Res::MeshDraw))
+            }
             ("cbuf", "uniform_buffer") => {
                 let bank = iv(r, "slot") as u32;
                 if bank >= L::BANKS {
@@ -442,10 +461,44 @@ impl Library {
         built
     }
 
+    /// The pixel shader `key` with its inputs at `locs` read per primitive (drawn with a mesh shader that writes
+    /// them so; lane S's `shaders::mesh::fragment_per_primitive`), made once per (key, locations).
+    pub fn per_primitive(&self, dev: &ash::Device, key: &ShaderKey, locs: &[u32]) -> Option<Arc<Module>> {
+        let mut vk = *key;
+        vk[6] ^= 0xc3;
+        vk[7] ^= locs.iter().fold(0u8, |a, &l| a ^ (1u8 << (l & 7)));
+        if let Some(m) = self.modules.lock().unwrap().get(&vk) {
+            return m.clone();
+        }
+        let built = self.load(key).and_then(|(w, j)| {
+            let bytes: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
+            match shaders::mesh::fragment_per_primitive(&bytes, locs) {
+                Ok(b) => {
+                    let w2: Vec<u32> = b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+                    match self.build(dev, &vk, &w2, j.as_deref()) {
+                        Ok(m) => Some(m),
+                        Err(e) => {
+                            crate::log::red_once(&format!("pixel shader {}: per-primitive variant: {e}", key_hex(key)));
+                            None
+                        }
+                    }
+                }
+                Err(e) => {
+                    crate::log::red_once(&format!("pixel shader {}: no per-primitive variant ({e}): drawn as built", key_hex(key)));
+                    None
+                }
+            }
+        });
+        self.modules.lock().unwrap().insert(vk, built.clone());
+        built
+    }
+
     fn build(&self, dev: &ash::Device, key: &ShaderKey, words: &[u32], json: Option<&str>) -> Result<Arc<Module>, String> {
         let r = reflect(words)?;
         let (w, res, pool, c1) = remap(words, &r, json)?;
-        let omap = json.and_then(|j| serde_json::from_str::<JRefl>(j).ok()).and_then(|j| j.frag_out_map).filter(|&m| m >= 0 && r.stage == 1).map(|m| m as u32);
+        let jr = json.and_then(|j| serde_json::from_str::<JRefl>(j).ok());
+        let omap = jr.as_ref().and_then(|j| j.frag_out_map).filter(|&m| m >= 0 && r.stage == 1).map(|m| m as u32);
+        let xfb = jr.as_ref().and_then(|j| j.transform_feedback.as_ref()).and_then(super::xfb::Layout::from_json);
         let ci = vk::ShaderModuleCreateInfo::default().code(&w);
         let module = unsafe { dev.create_shader_module(&ci, None) }.map_err(|e| format!("vkCreateShaderModule: {e}"))?;
         Ok(Arc::new(Module {
@@ -459,6 +512,9 @@ impl Library {
             c1,
             omap,
             mesh: r.mesh,
+            xfb,
+            words: w.clone(),
+            per_primitive: jr.as_ref().map(|j| j.per_primitive_locations.clone()).unwrap_or_default(),
             id: self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }))
     }

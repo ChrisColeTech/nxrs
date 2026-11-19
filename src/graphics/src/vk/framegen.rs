@@ -383,6 +383,11 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
             let flow = nxconfig::f32("lsfg_flow").clamp(0.25, 1.0);
             match l.process(g, sub, src, [x0, y0, x1, y1], gens_wanted, flow) {
                 Ok((gens, real, w, h)) => {
+                    if let Some(&g0) = gens.first() {
+                        capture(g, sub, g0, vk::Format::R8G8B8A8_UNORM, w, h, "generated");
+                        capture(g, sub, real, vk::Format::R8G8B8A8_UNORM, w, h, "current");
+                        CAPTURE_TAKEN.store(true, std::sync::atomic::Ordering::Relaxed);
+                    }
                     note_stats(fg, &s, gens.len(), "LSFG");
                     return Some(Output { gens, real, w, h });
                 }
@@ -464,6 +469,12 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
             dispatch(g, sub, fg_ro, fg_ro.interp, set, &bytes(&p), w, h);
         }
     }
+    if gens > 0 {
+        capture(g, sub, frames.gen[0].image, HIST_FMT, w, h, "generated");
+        capture(g, sub, frames.hist[prev].image, HIST_FMT, w, h, "previous");
+        capture(g, sub, real, HIST_FMT, w, h, "current");
+        CAPTURE_TAKEN.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     let out = Output { gens: frames.gen[..gens].iter().map(|i| i.image).collect(), real, w, h };
     note_stats(fg, &s, gens, if s.lsfg { "built-in (LSFG not available)" } else { "built-in" });
     Some(out)
@@ -487,6 +498,45 @@ fn note_stats(fg: &mut Fg, s: &Settings, gens: usize, mode: &str) {
         fg.base = 0;
         fg.out = 0;
     }
+}
+
+static CAPTURE_TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `NXGFX_FG_SHOT=<s>`: once, after that many seconds, the first generated frame of a game frame and its two
+/// neighbours as PNG (`fg-generated.png`, `fg-previous.png`, `fg-current.png` in `NXGFX_SHOT_DIR`).
+fn capture(g: &Gpu, sub: &mut Sub, img: vk::Image, fmt: vk::Format, w: u32, h: u32, name: &'static str) {
+    use std::sync::atomic::Ordering;
+    let Ok(at) = std::env::var("NXGFX_FG_SHOT") else { return };
+    if CAPTURE_TAKEN.load(Ordering::Relaxed) || crate::log::elapsed() < at.parse::<f64>().unwrap_or(0.0) {
+        return;
+    }
+    let n = w as u64 * h as u64 * 8;
+    let Ok(buf) = g.buffer(n, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "fg shot") else { return };
+    let r = vk::BufferImageCopy {
+        buffer_offset: 0,
+        buffer_row_length: 0,
+        buffer_image_height: 0,
+        image_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+        image_offset: vk::Offset3D::default(),
+        image_extent: vk::Extent3D { width: w, height: h, depth: 1 },
+    };
+    unsafe { g.dev().cmd_copy_image_to_buffer(sub.main, img, vk::ImageLayout::GENERAL, buf.buf, &[r]) };
+    super::queue::full_barrier(g, sub.main);
+    let ptr = buf.ptr as usize;
+    sub.transient.push(buf);
+    let dir = std::env::var("NXGFX_SHOT_DIR").unwrap_or_else(|_| "captures".into());
+    sub.post.push(super::queue::Post::Callback(Box::new(move |_g: &Gpu| {
+        let np = (w * h) as usize;
+        // SAFETY: the read-back buffer, kept until after this callback
+        let src = unsafe { core::slice::from_raw_parts(ptr as *const u8, n as usize) };
+        let mut out = vec![0u8; np * 4];
+        if super::shot::to_rgba8(fmt, src, np, &mut out) {
+            let _ = std::fs::create_dir_all(&dir);
+            let p = std::path::Path::new(&dir).join(format!("fg-{name}.png"));
+            let _ = super::shot::png_write(&p, &out, w, h);
+            crate::vklog!("frame generation: {} written", p.display());
+        }
+    })));
 }
 
 /// The game frame interval the pacer measured (s), for spacing the presents.

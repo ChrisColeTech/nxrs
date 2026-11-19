@@ -61,6 +61,8 @@ pub struct Caps {
     pub xfb: bool,
     /// VK_KHR_push_descriptor (frame generation's LSFG passes)
     pub push_desc: bool,
+    /// sparse 2D images with aliased residency on the graphics queue (sparse textures)
+    pub sparse: bool,
 }
 
 pub struct Device {
@@ -288,6 +290,10 @@ impl Device {
             mesh: has(ash::ext::mesh_shader::NAME) && f_ms.mesh_shader != 0 && f_ms.task_shader != 0 && env_on("NXGFX_MESH").unwrap_or(true),
             xfb: has(ash::ext::transform_feedback::NAME) && f_xfb.transform_feedback != 0,
             push_desc: has(ash::khr::push_descriptor::NAME),
+            sparse: base.sparse_binding != 0
+                && base.sparse_residency_image2_d != 0
+                && base.sparse_residency_aliased != 0
+                && qfams[qfam as usize].queue_flags.contains(vk::QueueFlags::SPARSE_BINDING),
             ..Default::default()
         };
         if has(ash::ext::external_memory_host::NAME) {
@@ -317,6 +323,9 @@ impl Device {
             occlusion_query_precise: base.occlusion_query_precise,
             vertex_pipeline_stores_and_atomics: base.vertex_pipeline_stores_and_atomics,
             fragment_stores_and_atomics: base.fragment_stores_and_atomics,
+            sparse_binding: base.sparse_binding,
+            sparse_residency_image2_d: base.sparse_residency_image2_d,
+            sparse_residency_aliased: base.sparse_residency_aliased,
             shader_image_gather_extended: base.shader_image_gather_extended,
             shader_storage_image_extended_formats: base.shader_storage_image_extended_formats,
             shader_storage_image_read_without_format: base.shader_storage_image_read_without_format,

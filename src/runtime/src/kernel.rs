@@ -416,6 +416,46 @@ fn cur(svc: u32) -> usize {
 }
 
 /// The calling host thread's guest thread handle, if it is one.
+/// Every guest thread's state for a stall report (os's `threads` control command): handle, priority, core, what it
+/// waits for, and its guest frames (x30, then the x29 chain) as of its last SVC.
+pub fn dump_threads() -> String {
+    let Some(k) = KERNEL.get() else { return "no kernel\n".into() };
+    let g = lock(&k.g);
+    let mut out = String::new();
+    for t in g.threads.iter().flatten() {
+        if t.exited {
+            continue;
+        }
+        let w = match t.wkind {
+            Wait::None => "running or sleeping".to_string(),
+            Wait::Lock => format!("lock {:#x}", t.waddr),
+            Wait::CondVar => format!("condvar key {:#x} (lock {:#x})", t.wkey, t.waddr),
+            Wait::Address => format!("address {:#x}", t.waddr),
+            Wait::Sync => format!("sync on {} objects", t.wobjs.len()),
+        };
+        out.push_str(&format!("thread {:#x} prio {} core {} entry {:#x}: {w}", t.handle, t.prio, t.core, t.entry));
+        if !t.cpu.is_null() {
+            let c = unsafe { &*t.cpu };
+            out.push_str(&format!("; pc {:#x}", c.pc));
+            if let Some(n) = crate::hostfn::name_of(c.pc) {
+                out.push_str(&format!(" ({n})"));
+            }
+            out.push_str(&format!(" lr {:#x} frames", c.x[30]));
+            let mut fp = c.x[29];
+            for _ in 0..12 {
+                if fp == 0 || fp & 7 != 0 || !crate::mem::readable(fp, 16) {
+                    break;
+                }
+                let ret = unsafe { *((fp + 8) as *const u64) };
+                out.push_str(&format!(" {ret:#x}"));
+                fp = unsafe { *(fp as *const u64) };
+            }
+        }
+        out.push('\n');
+    }
+    out
+}
+
 pub fn current_handle() -> Option<u32> {
     let i = CUR.get()?;
     lock(&get().g).threads[i].as_ref().map(|t| t.handle)

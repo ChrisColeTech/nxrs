@@ -183,7 +183,27 @@ impl Memory {
         a >= b && a + n <= b + st.heap_size
     }
 
-    /// svcMapMemory(dst, src, size): dst in the stack region, src a heap range.
+    /// Whether [a, a+n) is wholly mapped with MapPhysicalMemory (Horizon's alias-region memory is Normal, so it may
+    /// be MapMemory's source as heap memory is: Pokémon Legends: Z-A maps its thread stacks from its allocator's
+    /// pages in the alias region).
+    fn in_phys(st: &State, a: u64, n: u64) -> bool {
+        let mut runs: Vec<(u64, u64)> = st.phys.iter().map(|&(b, k)| (b, b + k)).collect();
+        runs.sort_unstable();
+        let mut at = a;
+        for (lo, hi) in runs {
+            if lo > at {
+                break;
+            }
+            at = at.max(hi);
+            if at >= a + n {
+                return true;
+            }
+        }
+        at >= a + n
+    }
+
+    /// svcMapMemory(dst, src, size): dst in the stack region, src heap, mapped alias-region memory or other mapped memory
+    /// (a module's .bss: Pokémon Violet maps a thread stack from main's; Turbo checks no source state).
     pub fn map_memory(&self, dst: u64, src: u64, size: u64) -> u64 {
         if size == 0 || (dst | src | size) & (PAGE - 1) != 0 {
             return R_INVALID_SIZE;
@@ -194,8 +214,8 @@ impl Memory {
             return R_INVALID_ADDRESS;
         }
         let mut st = self.st.lock().unwrap();
-        if !self.in_heap(&st, src, size) {
-            crate::log!("[RED] MapMemory {dst:#x} <- {src:#x} +{size:#x}: source is not heap");
+        if !self.in_heap(&st, src, size) && !Self::in_phys(&st, src, size) && !rmem::readable(src, size) {
+            crate::log!("[RED] MapMemory {dst:#x} <- {src:#x} +{size:#x}: source is not mapped");
             return R_INVALID_STATE;
         }
         let overl = |a: u64, b: u64, c: u64, d: u64| a < c + d && c < a + b;
@@ -386,13 +406,15 @@ impl Memory {
     }
 }
 
-/// Whether a map past the application pool fails with ResultLimitReached: the runtime's rule (lane T, Turbo
-/// 8a4618c / b316a9f): the titles that need it (Pokémon Legends: Z-A, Ocarina of Time), `SWR_MAP_LIMIT=1/0` for any.
+/// Whether a map past the application pool fails with ResultLimitReached: Turbo's titles (b316a9f: Pokémon Legends:
+/// Z-A, Ocarina of Time) and every profile with nxnative's `mem_map_limit on` (Pokémon Scarlet / Violet: start-up
+/// probes all allocatable memory and gives the cached pages back only after a map fails); `SWR_MAP_LIMIT=1/0` for any.
 fn map_limit() -> bool {
     if let Some(v) = std::env::var("SWR_MAP_LIMIT").ok().filter(|v| !v.is_empty()) {
         return v.trim().parse::<i64>().map_or(true, |n| n > 0);
     }
-    matches!(crate::profile::get().program_id, 0x0100_F430_08C4_4000 | 0x0400_4860_24DE_C000)
+    let p = crate::profile::get();
+    p.map_limit || matches!(p.program_id, 0x0100_F430_08C4_4000 | 0x0400_4860_24DE_C000)
 }
 
 fn prepare_locked(m: &Memory, st: &State, a: u64, n: u64) {
@@ -453,6 +475,10 @@ mod tests {
         assert_eq!(m.physical(a, 0x4000, true), 0);
         assert_eq!(m.physical(a + 0x2000, 0x4000, true), 0);
         assert_eq!(m.query(a + 0x5000).state, ST_NORMAL);
+        let dst = m.space.stack.base + 0x40_0000;
+        assert_eq!(m.map_memory(dst, a + 0x1000, 0x4000), 0, "mapped alias memory is a MapMemory source");
+        assert_eq!(m.unmap_memory(dst, a + 0x1000, 0x4000), 0);
+        assert_eq!(m.map_memory(dst, a + 0x8000, 0x1000), R_INVALID_STATE, "unmapped alias memory is not");
         let used0 = m.info(7).unwrap();
         assert_eq!(m.physical(a, 0x6000, false), 0);
         assert_eq!(m.info(7).unwrap(), used0 - 0x6000);

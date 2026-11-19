@@ -125,12 +125,13 @@ struct ModLine {
 
 fn module_lines(exefs: &BTreeMap<String, Vec<u8>>) -> Result<Vec<ModLine>> {
     let mut nsos = BTreeMap::new();
-    for name in translator::loader::layout::order() {
-        if let Some(raw) = exefs.get(&name) {
+    let names = translator::loader::layout::order_with(exefs.keys());
+    for name in &names {
+        if let Some(raw) = exefs.get(name) {
             nsos.insert(name.clone(), translator::loader::Nso::parse(raw).map_err(|e| anyhow!("{name}: {e}"))?);
         }
     }
-    let lay = translator::loader::layout(&|n: &str| nsos.get(n).map(|x| x.size)).map_err(|e| anyhow!(e))?;
+    let lay = translator::loader::layout::layout_names(&names, &|n: &str| nsos.get(n).map(|x| x.size)).map_err(|e| anyhow!(e))?;
     Ok(lay
         .into_iter()
         .map(|m| {
@@ -138,6 +139,67 @@ fn module_lines(exefs: &BTreeMap<String, Vec<u8>>) -> Result<Vec<ModLine>> {
             ModLine { name: m.name.clone(), base: m.base, text: n.text.1, build_id: n.build_id.clone() }
         })
         .collect())
+}
+
+/// Registered NROs no loose RomFS file holds: from the build's cache (`<build>\nro\<SHA-256>.nro`), else inside the
+/// RomFS's archives (data.arc's index), else found by a scan of the RomFS's large files (once; then cached).
+fn nros_beyond_files(romfs: &package::romfs::RomFs, missing: &[[u8; 32]], cache: &Path, out: &Out) -> std::result::Result<Vec<(String, Vec<u8>)>, package::PackageError> {
+    let hex = |h: &[u8; 32]| h.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let mut got: Vec<(String, Vec<u8>)> = missing.iter().filter_map(|h| std::fs::read(cache.join(format!("{}.nro", hex(h)))).ok().map(|d| (format!("cache {}", hex(h)), d))).collect();
+    if got.len() == missing.len() {
+        return Ok(got);
+    }
+    let have = |got: &Vec<(String, Vec<u8>)>| -> Vec<[u8; 32]> { got.iter().map(|(_, d)| Sha256::digest(d).into()).collect() };
+    let left: Vec<[u8; 32]> = { let h = have(&got); missing.iter().filter(|m| !h.contains(m)).copied().collect() };
+    got.extend(archive_nros(romfs, &left));
+    let left: Vec<[u8; 32]> = { let h = have(&got); missing.iter().filter(|m| !h.contains(m)).copied().collect() };
+    if !left.is_empty() {
+        out.say(&format!("NRO modules: scanning the RomFS for {} registered NROs no file holds (once; cached in {})", left.len(), cache.display()));
+        got.extend(package::nro::scan(romfs, &left, &|l| out.say(&format!("  {l}")))?);
+    }
+    let _ = std::fs::create_dir_all(cache);
+    for (_, d) in &got {
+        let h: [u8; 32] = Sha256::digest(d).into();
+        let p = cache.join(format!("{}.nro", hex(&h)));
+        if !p.exists() {
+            let _ = std::fs::write(&p, d);
+        }
+    }
+    Ok(got)
+}
+
+/// NROs inside the RomFS's archives (Super Smash Bros. Ultimate's data.arc: its fighters' code). Members whose
+/// inflated head is an NRO header, read through the archive's index; the registered ones (`want`: SHA-256s).
+fn archive_nros(romfs: &package::romfs::RomFs, want: &[[u8; 32]]) -> Vec<(String, Vec<u8>)> {
+    let mut out = vec![];
+    for (p, size) in romfs.walk() {
+        if size < 0x38 || romfs.read(&p, 0, 8).ok().as_deref() != Some(&shaders::formats::smash::MAGIC[..]) {
+            continue;
+        }
+        let read = |o: u64, n: u64| romfs.read(&p, o, n).map_err(|e| e.to_string());
+        let Ok(files) = shaders::formats::smash::files(&read, &p) else { continue };
+        for e in &files {
+            if e.3 < 0x100 || e.3 > package::nro::MAX_NRO {
+                continue;
+            }
+            let Ok(d) = read(e.1, e.2.min(0x4000)) else { continue };
+            let head = if d.starts_with(&[0x28, 0xb5, 0x2f, 0xfd]) { package::nro::zstd_head(&d, 0x20) } else { Some(d) };
+            if head.as_deref().and_then(|h| h.get(0x10..0x14)) != Some(b"NRO0") {
+                continue;
+            }
+            if let Ok(full) = shaders::formats::smash::read_file(&read, e, &p) {
+                let n = full.get(0x18..0x1c).map_or(0, |b| u32::from_le_bytes(b.try_into().unwrap()) as usize).min(full.len());
+                let h: [u8; 32] = Sha256::digest(&full[..n]).into();
+                if want.contains(&h) {
+                    out.push((format!("{p}#{:010x}", e.0), full[..n].to_vec()));
+                    if out.len() >= want.len() {
+                        return out;
+                    }
+                }
+            }
+        }
+    }
+    out
 }
 
 /// The modules layout.json lists, as (name, base, size) strings.
@@ -167,12 +229,14 @@ pub fn modules_c(mods: &[(String, String, String)], entry: &str) -> String {
          #undef NXRS_SET\n\
          }\n\n",
     );
+    s.push_str(crate::mods::C_DECLS);
+    s.push_str(&crate::mods::c_code());
     for (n, _, _) in mods {
         s.push_str(&format!(
             "extern const uint64_t {n}_fn_addrs[];\nextern const GuestFn {n}_fn_ptrs[];\nextern const uint64_t {n}_fn_count;\n"
         ));
     }
-    s.push_str("\n__declspec(dllexport) int nxrs_game_main(int argc, char **argv) {\n    nxrs_patch_sets();\n    RtModule mods[] = {\n");
+    s.push_str("\n__declspec(dllexport) int nxrs_game_main(int argc, char **argv) {\n    nxrs_patch_sets();\n    nxrs_mod_markers();\n    RtModule mods[] = {\n");
     for (n, b, z) in mods {
         s.push_str(&format!("        {{\"{n}\", {b}ull, {z}ull, {n}_fn_addrs, {n}_fn_ptrs, 0}},\n"));
     }
@@ -310,6 +374,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     let base = outdir.join(&name);
     let with = |suffix: &str| PathBuf::from(format!("{}{suffix}", base.display()));
     let (exe, dll, data) = (with(".exe"), with("_code.dll"), with("_data"));
+    // the player's mods: their code patches join the profile's table, their data bytes and RomFS go to the run
+    let patch_text = crate::mods::prepare(&outdir, &game.exefs.files, &data, patch_text, out)?;
     if !a.no_build {
         check_writable(&[&exe, &dll])?;
     }
@@ -322,6 +388,23 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     };
     let (gen, obj) = (build_dir.join("gen"), build_dir.join("obj"));
     std::fs::create_dir_all(&obj)?;
+
+    // NRO modules the game loads at run time: translated with the ExeFS at bases after it (package::nro)
+    let nros = package::nro::collect_with(&game.romfs, &|missing| nros_beyond_files(&game.romfs, missing, &build_dir.join("nro"), out)).map_err(|e| anyhow!("Cannot read the game's NRO modules: {e}"))?;
+    let mut code = game.exefs.files.clone();
+    for n in &nros.nros {
+        code.insert(n.name.clone(), n.bytes.clone());
+    }
+    if nros.registered > 0 {
+        out.say(&format!(
+            "NRO modules: {} of the {} the game's {} NRR files register, loaded by the game at run time{}{}",
+            nros.nros.len(),
+            nros.registered,
+            nros.nrrs,
+            if nros.refused.is_empty() { String::new() } else { format!("; {} online SDKs left out", nros.refused.len()) },
+            if nros.missing.is_empty() { String::new() } else { format!("; {} not found in the RomFS", nros.missing.len()) },
+        ));
+    }
 
     // ---- translate
     let t = Instant::now();
@@ -341,7 +424,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         opts.chunk_bytes = n as i64 * translator::aot::discover::EST_INT;
         opts.chunk_fns = usize::MAX;
     }
-    let key = gen_key(&game.exefs.files, patch_text.as_deref().unwrap_or(""), &format!("{:?}{:?}", (opts.chunk_fns, opts.chunk_bytes, opts.big_fn), (opts.emit.reg_locals, opts.emit.callee_saved)))?;
+    let key = gen_key(&code, patch_text.as_deref().unwrap_or(""), &format!("{:?}{:?}", (opts.chunk_fns, opts.chunk_bytes, opts.big_fn), (opts.emit.reg_locals, opts.emit.callee_saved)))?;
     let stamp = gen.join("nxrs.gen.key");
     let reuse = std::fs::read_to_string(&stamp).ok().as_deref() == Some(key.as_str()) && gen.join("layout.json").is_file();
     if reuse {
@@ -356,7 +439,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         let _ = std::fs::remove_file(&stamp);
         let started = std::sync::atomic::AtomicBool::new(false);
         let t_gen = Instant::now();
-        let report = generate(&game.exefs.files, &opts, &|line: &str| {
+        let report = generate(&code, &opts, &|line: &str| {
             if let Some(rest) = line.strip_prefix("C generated: ") {
                 if !started.swap(true, std::sync::atomic::Ordering::Relaxed) {
                     out.say("Translating ARM64 to C...");
@@ -389,6 +472,19 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             out.say(&m.replace("install it with nxrs dlc install", "install it with nxrs-build dlc install"));
         }
     })?;
+    let nro_tsv = data.join("nro.tsv");
+    if nros.nros.is_empty() && nros.refused.is_empty() {
+        let _ = std::fs::remove_file(&nro_tsv);
+    } else {
+        let lay: Vec<(String, u64, u64)> = layout_modules(&gen)?
+            .into_iter()
+            .map(|(n, b, z)| {
+                let h = |v: &str| u64::from_str_radix(v.trim_start_matches("0x"), 16).unwrap_or(0);
+                (n, h(&b), h(&z))
+            })
+            .collect();
+        crate::write_if_changed(&nro_tsv, package::nro::tsv(&nros, &lay).as_bytes())?;
+    }
     let ini = with(".ini");
     if !ini.exists() {
         std::fs::write(&ini, ini_text(&name))?;

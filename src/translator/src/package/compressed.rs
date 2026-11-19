@@ -281,4 +281,31 @@ mod tests {
         }
         eprintln!("{} stored blocks checked, {} NROs match the NRR", blocks.div_ceil(997), nros.len());
     }
+
+    /// Jamboree's 1.1.0 update over the card image: the patch has its own compression table and relocates onto the
+    /// base's stored (compressed) bytes; its RomFS opens and its NROs hash into the NRR.
+    /// `cargo test -p translator --release -- --ignored real_update`
+    #[test]
+    #[ignore]
+    fn real_update_over_compressed_base() {
+        use sha2::{Digest, Sha256};
+        let j = std::path::Path::new(r"P:\Games\Nintendo\DUMPS\Super Mario Party Jamboree [0100965017338800]");
+        let game = j.join("Super Mario Party Jamboree [0100965017338000][USA][v0][Base].xci");
+        let update = j.join(r"Updates\Super Mario Party Jamboree [0100965017338800][USA][v65536][Update].nsp");
+        if !game.exists() || !update.exists() {
+            return eprintln!("skip: {}", j.display());
+        }
+        let keys = crate::package::keys::Keys::load(&crate::package::keys::keys_path(None).unwrap()).unwrap();
+        let pkg = crate::package::app::Package::open(&game, &keys, &crate::package::UpdateChoice::Package(update)).unwrap();
+        assert_eq!(pkg.version, 65536);
+        let romfs = pkg.romfs().unwrap();
+        let nrr = romfs.read_file(".nrr/bq_Release.nrr").unwrap();
+        let (at, n) = (u32le(&nrr, 0x340) as usize, u32le(&nrr, 0x344) as usize);
+        let listed: std::collections::HashSet<&[u8]> = (0..n).map(|i| &nrr[at + 32 * i..at + 32 * i + 32]).collect();
+        let nros: Vec<String> = romfs.walk().into_iter().map(|x| x.0).filter(|p| p.ends_with(".nro")).collect();
+        assert!(!nros.is_empty());
+        for f in &nros {
+            assert!(listed.contains(&Sha256::digest(romfs.read_file(f).unwrap())[..]), "{f}");
+        }
+    }
 }

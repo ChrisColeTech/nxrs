@@ -1,0 +1,66 @@
+"""library_play.py: the 5B library runs (lane W): long scripted gameplay scenarios on play_scenario.py's harness
+(GAME_LOCK, watchdog, control pipe, screenshots, metrics), plus a memory-trend summary.
+
+py scripts/library_play.py <scenario> --exe <game.exe> [play_scenario options...]
+py scripts/library_play.py memory <run folder> [--window FROM,TO]   private MB over time from metrics-*.csv
+
+Scenarios here: mk8d_gp (Grand Prix, 50cc, ~11 min of racing), probe (boot + a shot a minute, input-free), menus
+(boot, then A every 8 s with shots). Replay files in scripts/inputs.
+"""
+import json
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+import play_scenario as ps  # noqa: E402
+
+MENU_MK8D = [('shot', 9, 'boot'), ('lr', 4, 'title'), ('right', 1.5, 'mii'), ('a', 3, 'first Mii'), ('a', 3, 'menu1'),
+             ('a', 3, 'menu2'), ('a', 5, 'menu3'), ('a', 4, 'char'), ('a', 2, 'k1'), ('a', 2, 'k2'), ('a', 4, 'k3'),
+             ('a', 4, 'cup'), ('a', 30, 'gp-ok')]
+ps.KEYS.update(r='R', l='L', zr='ZR', minus='Minus')
+ps.SCENARIOS.update({
+    'mk8d_gp': dict(seconds=900, window=(120, 760), steps=MENU_MK8D + [('replay', 30, 'race', 'mk8d_gp.txt')]
+                    + [('shot', 60, 'race +%d min' % m) for m in range(1, 12)]),
+    'mk8d_cups': dict(seconds=200, window=(60, 150), steps=MENU_MK8D[:-2] + [('shot', 4, 'cups')]
+                      + [('right', 2, 'right %d' % i) for i in range(1, 13)] + [('down', 2, 'down')]),
+    # the Booster Course: at the cup select (the save remembers the last kart, one step fewer) R turns to its cups
+    'mk8d_booster': dict(seconds=330, window=(90, 300), steps=MENU_MK8D[:-3] + [('shot', 3, 'cups'), ('r', 3, 'booster page'),
+                         ('a', 3, 'booster cup'), ('a', 30, 'gp-ok'), ('replay', 20, 'race', 'mk8d_gp.txt')]
+                         + [('shot', 40, 'race +%d s' % (40 * m)) for m in range(1, 6)]),
+    'probe': dict(seconds=420, window=(60, 400), steps=[('shot', 30, 'boot')] + [('shot', 60, 'min %d' % m) for m in range(1, 7)]),
+    'menus': dict(seconds=420, window=(60, 400), steps=[('shot', 40, 'boot')] + [('a', 8, 'a%d' % i) for i in range(40)]),
+})
+
+
+def memory(run, window=(0, 1e9)):
+    rows = []
+    for mt in sorted(Path(run).glob('metrics-*.csv')):
+        for line in mt.read_text().splitlines():
+            f = line.split(',')
+            try:
+                t, mb = float(f[0]), float(f[4])
+            except (ValueError, IndexError):
+                continue
+            if window[0] <= t <= window[1]:
+                rows.append((t, mb))
+    if len(rows) < 2:
+        return dict(samples=len(rows))
+    n = len(rows)
+    mt = sum(t for t, _ in rows) / n
+    mm = sum(m for _, m in rows) / n
+    slope = sum((t - mt) * (m - mm) for t, m in rows) / max(sum((t - mt) ** 2 for t, _ in rows), 1e-9)
+    by_min = {}
+    for t, m in rows:
+        by_min.setdefault(int(t // 60), m)
+    return dict(samples=n, first_mb=rows[0][1], last_mb=rows[-1][1], max_mb=max(m for _, m in rows),
+                slope_mb_per_min=round(slope * 60, 1), per_minute=by_min)
+
+
+if __name__ == '__main__':
+    if len(sys.argv) > 2 and sys.argv[1] == 'memory':
+        w = (0, 1e9)
+        if '--window' in sys.argv:
+            w = tuple(float(x) for x in sys.argv[sys.argv.index('--window') + 1].split(','))
+        print(json.dumps(memory(sys.argv[2], w), indent=1))
+    else:
+        ps.main()

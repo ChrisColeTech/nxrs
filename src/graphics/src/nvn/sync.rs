@@ -54,6 +54,10 @@ nvn_fns! {
         1
     }
     fn nvnSyncWait(s: *const NVNsync, timeout: u64) -> u32 {
+        // a fence recorded in a command buffer still queued for the replay thread is set once that replays
+        if (*(s as *const sync_t)).fenced == 0 && vk::queue::aq_busy() {
+            super::blocking(vk::queue::aq_drain);
+        }
         let o = &*(s as *const sync_t);
         if o.fenced == 0 || vk::queue::fence_done(o.fence) {
             return sync_wait::ALREADY_SIGNALED;

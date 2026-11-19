@@ -2,6 +2,8 @@
 //! - `btm:u` (Bluetooth LE): command 0 hands out IBtmUserCore, whose four Acquire…Event commands (scan, connection,
 //!   service discovery, MTU) answer "valid" with an event that never fires; everything else succeeds and finds
 //!   nothing (Pokémon Violet 4.0.0 aborted at start without the interface, for the Pokémon GO Plus +);
+//! - `bt` (IBluetoothUser): command 9 RegisterBleEvent hands out an event that never fires, the rest succeed (Violet
+//!   4.0.0 opens it after btm:u and aborted when sm refused it; Turbo answers it with its generic stub);
 //! - `bsd:u` / `bsd:s`: no network (a socket other than loopback UDP answers -1 with ENETDOWN), but event descriptors
 //!   and loopback UDP work (`socket.rs`, the table the by-name takeovers share; EventFd is 31):
 //!   a counter written, read, closed and polled, as newer network libraries make one for their worker's wake-up at
@@ -37,6 +39,25 @@ impl Service for BtmCore {
         if matches!(ctx.cmd(), 0 | 17 | 26 | 33) {
             let e = Event::new();
             ctx.push_u8(1);
+            ctx.copy_handle(e.readable);
+            self.events.push(e);
+        }
+        0
+    }
+}
+
+struct Bt {
+    events: Vec<Event>,
+}
+
+impl Service for Bt {
+    fn name(&self) -> String {
+        "bt".into()
+    }
+    fn call(&mut self, ctx: &mut Ctx) -> u32 {
+        crate::log_once!("bt", "bt: Bluetooth user service opened (no adapter: its BLE event never fires)");
+        if ctx.cmd() == 9 {
+            let e = Event::new();
             ctx.copy_handle(e.readable);
             self.events.push(e);
         }
@@ -161,6 +182,7 @@ impl Service for Bsd {
 
 pub fn register() {
     ipc::register("btm:u", || Box::new(Btm));
+    ipc::register("bt", || Box::new(Bt { events: vec![] }));
     ipc::register("bsd:u", || Box::new(Bsd("bsd:u")));
     ipc::register("bsd:s", || Box::new(Bsd("bsd:s")));
     ipc::register("bsd:a", || Box::new(Bsd("bsd:a")));

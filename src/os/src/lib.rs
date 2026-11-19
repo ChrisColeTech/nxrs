@@ -12,6 +12,7 @@ pub mod input;
 pub mod ipc;
 pub mod kobj;
 pub mod mem;
+pub mod mods;
 pub mod media;
 pub mod nvn;
 pub mod options;

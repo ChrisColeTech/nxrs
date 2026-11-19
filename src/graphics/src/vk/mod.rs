@@ -30,7 +30,9 @@ pub mod present;
 pub mod queue;
 pub mod shader;
 pub mod shot;
+pub mod sparse;
 pub mod tables;
+pub mod xfb;
 
 use ash::vk;
 use gpu_allocator::vulkan::{Allocation, AllocationCreateDesc, AllocationScheme, Allocator, AllocatorCreateDesc};
@@ -128,6 +130,19 @@ impl Gpu {
     /// A buffer in `loc` memory (mapped when host-visible).
     pub fn buffer(&self, size: u64, usage: vk::BufferUsageFlags, loc: MemoryLocation, name: &str) -> Result<Buf, String> {
         let size = size.max(16);
+        // what this layer takes from system memory is capped (Turbo 8a4618c): 8 GB or a quarter of the machine's
+        // memory, NXGFX_HOST_MB (0 = no cap); over it the allocation is refused and its caller's fallback applies
+        if loc != MemoryLocation::GpuOnly {
+            let cap = host_cap();
+            let live = HOST_LIVE.load(std::sync::atomic::Ordering::Relaxed);
+            if live + size > cap {
+                let n = HOST_REFUSED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if (n & n.wrapping_sub(1)) == 0 {
+                    crate::log::red(&format!("system memory cap: {name} of {} MB refused, {} MB of this layer's in system memory, cap {} MB (NXGFX_HOST_MB); {} refused so far", size >> 20, live >> 20, cap >> 20, n + 1));
+                }
+                return Err(format!("{name}: over the system memory cap"));
+            }
+        }
         let ci = vk::BufferCreateInfo::default().size(size).usage(usage).sharing_mode(vk::SharingMode::EXCLUSIVE);
         let buf = unsafe { self.dev().create_buffer(&ci, None) }.map_err(|e| format!("vkCreateBuffer {name}: {e}"))?;
         let req = unsafe { self.dev().get_buffer_memory_requirements(buf) };
@@ -139,12 +154,18 @@ impl Gpu {
             .map_err(|e| format!("allocation {name} ({size} bytes): {e}"))?;
         unsafe { self.dev().bind_buffer_memory(buf, a.memory(), a.offset()) }.map_err(|e| format!("bind {name}: {e}"))?;
         let ptr = a.mapped_ptr().map(|p| p.as_ptr() as *mut u8).unwrap_or(core::ptr::null_mut());
+        if !ptr.is_null() {
+            HOST_LIVE.fetch_add(a.size(), std::sync::atomic::Ordering::Relaxed);
+        }
         Ok(Buf { buf, alloc: Some(a), mem: vk::DeviceMemory::null(), size, ptr })
     }
 
     pub fn free_buffer(&self, b: Buf) {
         unsafe { self.dev().destroy_buffer(b.buf, None) };
         if let Some(a) = b.alloc {
+            if a.mapped_ptr().is_some() {
+                HOST_LIVE.fetch_sub(a.size(), std::sync::atomic::Ordering::Relaxed);
+            }
             let _ = self.alloc.lock().unwrap().free(a);
         }
         if b.mem != vk::DeviceMemory::null() {
@@ -158,6 +179,33 @@ impl Gpu {
     pub fn timestamp_period(&self) -> f32 {
         self.d.caps.timestamp_period
     }
+}
+
+/// Bytes of host-visible (system) memory this layer's buffers hold, and allocations refused over the cap.
+pub static HOST_LIVE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub static HOST_REFUSED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn host_cap() -> u64 {
+    static V: OnceLock<u64> = OnceLock::new();
+    *V.get_or_init(|| {
+        if let Some(mb) = std::env::var("NXGFX_HOST_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
+            return if mb == 0 { u64::MAX } else { mb << 20 };
+        }
+        let total = total_phys();
+        (8u64 << 30).min(if total > 0 { total / 4 } else { 8 << 30 })
+    })
+}
+
+#[cfg(windows)]
+fn total_phys() -> u64 {
+    use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
+    let mut m: MEMORYSTATUSEX = unsafe { core::mem::zeroed() };
+    m.dwLength = core::mem::size_of::<MEMORYSTATUSEX>() as u32;
+    if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 { m.ullTotalPhys } else { 0 }
+}
+#[cfg(not(windows))]
+fn total_phys() -> u64 {
+    0
 }
 
 /// Validation messages counted since the process started (errors, warnings).

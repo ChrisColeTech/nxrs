@@ -156,6 +156,12 @@ pub fn install(reg: &Registry, syms: &ModuleSyms) -> Installed {
     out
 }
 
+/// Is `name` an import nothing in the ExeFS defines, bound to the reporting stub at boot? (an NRO loaded later may
+/// define it: `services::ro`)
+pub fn stubbed_import(name: &str) -> bool {
+    hostfn::override_of(name).is_some_and(|f| f as *const () as usize == unimpl_import as *const () as usize)
+}
+
 static ALIASES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 
 /// A reference to an alias: the call goes on to the target's own definition, with the caller's registers and

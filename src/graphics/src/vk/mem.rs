@@ -103,6 +103,57 @@ mod watch {
     pub fn reset(_lo: u64, _hi: u64) {}
 }
 
+/// [a, a + n) of guest memory as it reads, the parts not committed as zeros (reading them would fault).
+pub fn guest_bytes(a: u64, n: u64) -> std::borrow::Cow<'static, [u8]> {
+    let c = committed(a, n);
+    if c.len() == 1 && c[0] == (a, n) {
+        // SAFETY: committed guest memory
+        return std::borrow::Cow::Borrowed(unsafe { core::slice::from_raw_parts(a as *const u8, n as usize) });
+    }
+    let mut v = vec![0u8; n as usize];
+    for (ca, cn) in c {
+        let o = (ca - a) as usize;
+        // SAFETY: committed guest memory
+        v[o..o + cn as usize].copy_from_slice(unsafe { core::slice::from_raw_parts(ca as *const u8, cn as usize) });
+    }
+    std::borrow::Cow::Owned(v)
+}
+
+/// The committed parts of [a, a + n) (VirtualQuery): what the guest has written or reserved with content.
+#[cfg(windows)]
+pub fn committed(a: u64, n: u64) -> Vec<(u64, u64)> {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    let end = a + n;
+    let mut at = a;
+    while at < end {
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+        let r = unsafe { VirtualQuery(at as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+        if r == 0 {
+            // not queryable: take the rest as it is
+            out.push((at, end - at));
+            break;
+        }
+        let rb = mbi.BaseAddress as u64;
+        let re = (rb + mbi.RegionSize as u64).min(end);
+        if re <= at {
+            break;
+        }
+        if mbi.State == MEM_COMMIT {
+            match out.last_mut() {
+                Some(l) if l.0 + l.1 == at => l.1 += re - at,
+                _ => out.push((at, re - at)),
+            }
+        }
+        at = re;
+    }
+    out
+}
+#[cfg(not(windows))]
+pub fn committed(a: u64, n: u64) -> Vec<(u64, u64)> {
+    vec![(a, n)]
+}
+
 fn page_range(a: u64, n: u64) -> (u64, u64) {
     (a & !(PAGE - 1), (a + n + PAGE - 1) & !(PAGE - 1))
 }
@@ -238,17 +289,31 @@ impl Pool {
             _ => {}
         }
         let b = g.buffer(self.size, BUF_USAGE, MemoryLocation::GpuOnly, "pool")?;
-        // The whole storage now: a Vram pool's initial content, a mirror's current one.
+        // The storage now: a Vram pool's initial content, a mirror's current one. Only the committed parts of the
+        // guest's memory hold anything (a large pool the game has not written yet is zero and is not read here: reading
+        // it would commit it, and staging it would double it in host memory; Mario Kart World's pools)
         super::lazy::touch(self.base, self.size);
-        let src = unsafe { core::slice::from_raw_parts(self.base as *const u8, self.size as usize) };
-        sub.upload(g, src, b.buf, 0);
-        UPLOAD_BYTES.fetch_add(self.size, Ordering::Relaxed);
+        unsafe { g.dev().cmd_fill_buffer(sub.pre, b.buf, 0, vk::WHOLE_SIZE, 0) };
+        super::queue::full_barrier(g, sub.pre);
+        let mut staged = 0u64;
+        for (a, n) in committed(self.base, self.size) {
+            let src = unsafe { core::slice::from_raw_parts(a as *const u8, n as usize) };
+            // in pieces of at most 64 MB (staging chunks)
+            for (k, part) in src.chunks(64 << 20).enumerate() {
+                sub.upload(g, part, b.buf, a - self.base + (k as u64) * (64 << 20));
+            }
+            staged += n;
+        }
+        UPLOAD_BYTES.fetch_add(staged, Ordering::Relaxed);
+        if self.size >= 256 << 20 {
+            crate::vklog!("pool {:#x}: {} MB on the GPU, {} MB of it committed and uploaded ({:?})", self.base, self.size >> 20, staged >> 20, self.placement);
+        }
         if self.placement == Placement::Mirror {
             let (lo, hi) = page_range(self.base, self.size);
             if self.watched {
                 let _ = watch::take(lo, hi, true);
             } else {
-                self.snapshot = Some(src.to_vec());
+                self.snapshot = Some(guest_bytes(self.base, self.size).into_owned());
             }
         }
         self.buf = Some(b);
@@ -269,15 +334,19 @@ impl Pool {
                 }
             }
         } else if let Some(snap) = self.snapshot.as_mut() {
-            let cur = unsafe { core::slice::from_raw_parts(self.base as *const u8, self.size as usize) };
-            let mut i = 0usize;
-            while i < cur.len() {
-                let e = (i + PAGE as usize).min(cur.len());
-                if cur[i..e] != snap[i..e] {
-                    snap[i..e].copy_from_slice(&cur[i..e]);
-                    out.push((self.base + i as u64, (e - i) as u64));
+            // only the committed parts can have been written (reading the rest faults)
+            for (ca, cn) in committed(self.base, self.size) {
+                let cur = unsafe { core::slice::from_raw_parts(ca as *const u8, cn as usize) };
+                let o0 = (ca - self.base) as usize;
+                let mut i = 0usize;
+                while i < cur.len() {
+                    let e = (i + PAGE as usize).min(cur.len());
+                    if cur[i..e] != snap[o0 + i..o0 + e] {
+                        snap[o0 + i..o0 + e].copy_from_slice(&cur[i..e]);
+                        out.push((ca + i as u64, (e - i) as u64));
+                    }
+                    i = e;
                 }
-                i = e;
             }
         }
         // clip to the pool, mark generations, merge

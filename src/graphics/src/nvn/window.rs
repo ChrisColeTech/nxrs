@@ -148,7 +148,7 @@ nvn_fns! {
         let n = window_active(o);
         let i = if n > 0 { let v = o.next % n; o.next = (o.next + 1) % n; v } else { 0 };
         *idx = i;
-        let period = crate::vk::present::pace_period(o.interval);
+        let period = crate::vk::present::pace_period(forced_interval().unwrap_or(o.interval));
         let mut pacer = Pacer { target: o.pace };
         let wait = pacer.pace(super::device::now_ns(), period);
         o.pace = pacer.target;
@@ -182,4 +182,23 @@ mod tests {
         assert_eq!(p.target, 1450);
         assert_eq!(p.pace(1460, 0), 0); // period 0: no wait
     }
+}
+
+/// A forced present interval (5A.6): the game presents every `n` vsyncs whatever it asks the window for.
+/// The ini option `present_interval` (0 = the game's own, 1 / 2 / 3 forced) wins over the per-game profile's value
+/// (`set_profile_interval`, from the profile's `present_interval` key). Off by default.
+static PROFILE_INTERVAL: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+
+/// The game's profile forces this interval (0 = not forced); os calls it at start-up.
+pub fn set_profile_interval(n: i32) {
+    PROFILE_INTERVAL.store(n.clamp(0, 4), std::sync::atomic::Ordering::Relaxed);
+    if n > 0 {
+        crate::nvnlog!("present interval forced to {n} by the game's profile");
+    }
+}
+
+pub fn forced_interval() -> Option<i32> {
+    let ini = nxconfig::int("present_interval");
+    let n = if ini > 0 { ini as i32 } else { PROFILE_INTERVAL.load(std::sync::atomic::Ordering::Relaxed) };
+    (n > 0).then_some(n.min(4))
 }

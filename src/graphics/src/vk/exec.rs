@@ -82,6 +82,13 @@ pub struct QState {
     vp_swizzle: [u32; 16],
     tf: [(u64, u64); 4],
     tf_on: bool,
+    /// transform feedback: buffers of the capture open around the current draw (0: none), and whether the next
+    /// draw continues the capture (its counters) rather than starting at the buffers' start
+    tf_active: u32,
+    tf_cont: bool,
+    /// a mesh draw's records (buffer, offset, bytes) and their stride in words (push constant byte 12)
+    mesh_rec: Option<(vk::Buffer, u64, u64)>,
+    mesh_stride: u32,
     /// graphics program keys bound whose modules the library did not have (the draw waits for the live translator)
     missing: Vec<(crate::nvn::prog::ShaderKey, u32)>,
     /// block aliases of compressed targets to copy into their images when the pass ends
@@ -162,6 +169,10 @@ impl QState {
             vp_swizzle: [0x0302_0100; 16],
             tf: [(0, 0); 4],
             tf_on: false,
+            tf_active: 0,
+            tf_cont: false,
+            mesh_rec: None,
+            mesh_stride: 0,
         }
     }
 }
@@ -383,9 +394,6 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
         super::perf::inc(super::perf::C::DrawsSkipped);
         return;
     }
-    if m.first != 0 {
-        crate::log::red_once("a mesh draw from a first workgroup other than 0: Vulkan has no parameter for it, drawn from 0");
-    }
     let indirect = m.ind != 0;
     // indirect: build {x, y, z} records first (a copy is not allowed inside a pass)
     let mut args: Option<(vk::Buffer, u64, u32)> = None;
@@ -409,7 +417,28 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
         barrier(g, sub);
         args = Some((ab, ao, n));
     }
-    if !draw_setup_ex(g, sub, qs, prim::TRIANGLES, 0, true) {
+    // the draw records the task / mesh shader reads its first workgroup from (lane S: `mesh_draw`, stride at push
+    // constant byte 12): the game's records for an indirect draw, a staged {count, first} for a direct one, zero for 3D
+    if indirect {
+        let src_stride = if m.stride > 0 { m.stride as u64 } else if m.three_d != 0 { 12 } else { 8 };
+        let span = src_stride * (m.n.max(1) as u64 - 1) + if m.three_d != 0 { 12 } else { 8 };
+        qs.mesh_rec = super::mem::resolve(g, sub, m.ind, span).map(|(b, o, _)| (b, o, span));
+        qs.mesh_stride = if m.three_d != 0 { 0 } else { (src_stride / 4) as u32 };
+        if m.three_d != 0 {
+            let (b, o) = sub.stage_bytes(g, &[0u8; 16]);
+            qs.mesh_rec = Some((b, o, 16));
+        }
+    } else {
+        let rec: [u32; 4] = [m.x.max(0) as u32, if m.three_d != 0 { 0 } else { m.first.max(0) as u32 }, 0, 0];
+        let bytes: Vec<u8> = rec.iter().flat_map(|x| x.to_le_bytes()).collect();
+        let (b, o) = sub.stage_bytes(g, &bytes);
+        qs.mesh_rec = Some((b, o, 16));
+        qs.mesh_stride = 0;
+    }
+    let ok = draw_setup_ex(g, sub, qs, prim::TRIANGLES, 0, true);
+    if !ok {
+        qs.mesh_rec = None;
+        qs.mesh_stride = 0;
         return;
     }
     let ms = &g.d.mesh;
@@ -436,6 +465,8 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
     if k & 0xfff == 0 {
         crate::vklog!("mesh draws so far: {}; this one {} ({} {} {}), indirect {}", k + 1, if m.three_d != 0 { "3D" } else { "1D" }, m.x, m.y, m.z, indirect);
     }
+    qs.mesh_rec = None;
+    qs.mesh_stride = 0;
 }
 
 /// MultiDraw{Arrays,Elements}IndirectCount: Vulkan's indirect draws with a count the GPU reads.
@@ -561,7 +592,17 @@ fn source_image(g: &Gpu, sub: &mut Sub, t: &tex_t) -> Option<(vk::Image, format:
     let im = &imgs.by_serial[&t.serial];
     Some((im.image, im.tf, im.extent))
 }
-fn attach_view(g: &Gpu, sub: &mut Sub, qs: &mut QState, t: &tex_t, v: Option<&view_t>) -> Option<(vk::ImageView, vk::Format, vk::Extent2D, vk::SampleCountFlags, Kind)> {
+/// The layers a render target's view covers (a layered pass draws into all of them).
+fn attach_layers(im: &super::image::Image, v: Option<&view_t>) -> u32 {
+    let lvl = v.filter(|v| v.bits & VW_LEVELS != 0).map(|v| v.base_level as u32).unwrap_or(0);
+    let total = if im.ty == vk::ImageType::TYPE_3D { (im.extent.depth >> lvl).max(1) } else { im.layers };
+    match v.filter(|v| v.bits & VW_LAYERS != 0) {
+        Some(v) => (v.nlayers as u32).max(1).min(total.saturating_sub(v.min_layer as u32).max(1)),
+        None => total,
+    }
+}
+
+fn attach_view_layers(g: &Gpu, sub: &mut Sub, qs: &mut QState, t: &tex_t, v: Option<&view_t>) -> Option<((vk::ImageView, vk::Format, vk::Extent2D, vk::SampleCountFlags, Kind), u32)> {
     let _ = target_image(g, sub, t)?;
     let mut imgs = g.images.lock().unwrap();
     let im = imgs.by_serial.get_mut(&t.serial)?;
@@ -584,12 +625,13 @@ fn attach_view(g: &Gpu, sub: &mut Sub, qs: &mut QState, t: &tex_t, v: Option<&vi
             let (img, view) = block_alias(g, sub, fmt, be)?;
             let bpb = crate::tex::layout::fmt_bpb(t.d.format).0.max(if im_bc7 { 16 } else { 0 });
             qs.copyback.push((img, dst, lvl, layer, be, e, bpb));
-            return Some((view, fmt, be, samples, Kind::Float));
+            return Some(((view, fmt, be, samples, Kind::Float), 1));
         }
     }
     let fmt = g.view_format(im, v);
+    let layers = attach_layers(im, v);
     let view = g.image_view(im, v, true)?;
-    Some((view, fmt, e, samples, kind))
+    Some(((view, fmt, e, samples, kind), layers))
 }
 
 /// An uncompressed image standing in for a compressed render target (one texel per block), kept per format and size.
@@ -649,11 +691,13 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
     let mut formats = [0i32; 8];
     let mut extent = vk::Extent2D { width: u32::MAX, height: u32::MAX };
     let mut samples = vk::SampleCountFlags::TYPE_1;
+    let mut layers = u32::MAX;
     for i in 0..qs.rt_n {
         let r = qs.rt[i];
-        let a = r.tex.and_then(|t| attach_view(g, sub, qs, &t, r.view.as_ref()));
+        let a = r.tex.and_then(|t| attach_view_layers(g, sub, qs, &t, r.view.as_ref()));
         match a {
-            Some((view, fmt, e, s, _)) => {
+            Some(((view, fmt, e, s, _), nl)) => {
+                layers = layers.min(nl);
                 colors.push(
                     vk::RenderingAttachmentInfo::default()
                         .image_view(view)
@@ -673,7 +717,8 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
     let mut dfmt = 0;
     if let Some(t) = qs.rt_depth.tex {
         let dv = qs.rt_depth.view;
-        if let Some((view, fmt, e, s, kind)) = attach_view(g, sub, qs, &t, dv.as_ref()) {
+        if let Some(((view, fmt, e, s, kind), nl)) = attach_view_layers(g, sub, qs, &t, dv.as_ref()) {
+            layers = layers.min(nl);
             depth = Some((view, kind));
             dfmt = fmt.as_raw();
             extent.width = extent.width.min(e.width);
@@ -690,7 +735,8 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
     });
     let mut ri = vk::RenderingInfo::default()
         .render_area(vk::Rect2D { offset: vk::Offset2D::default(), extent })
-        .layer_count(1)
+        // a layered pass: as many layers as every attachment's view has (the shaders choose one per primitive)
+        .layer_count(layers.clamp(1, g.d.props.limits.max_framebuffer_layers))
         .color_attachments(&colors);
     let da_arr;
     if let (Some(d), Some((_, kind))) = (da, depth) {
@@ -898,6 +944,15 @@ fn target_of(ty: u32) -> i32 {
 
 /// The view of a registered texture ID with the type the shader declares; a stand-in when there is none.
 fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::ImageView {
+    if let Some(&v) = sub.memo_views.get(&(id, ty, storage)) {
+        return v;
+    }
+    let v = tex_view_uncached(g, sub, id, ty, storage);
+    sub.memo_views.insert((id, ty, storage), v);
+    v
+}
+
+fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::ImageView {
     let want = target_of(ty);
     if let Some((serial, view)) = g.tables.tex_at(id) {
         let mut imgs = g.images.lock().unwrap();
@@ -1106,7 +1161,13 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                                 }
                                 vk::DescriptorBufferInfo { buffer: buf, offset: off, range: n.min(max_ubo) }
                             }
-                            None => vk::DescriptorBufferInfo { buffer: zero, offset: 0, range: max_ubo },
+                            None => {
+                                if a != 0 {
+                                    let k: String = m.key.iter().map(|b| format!("{b:02x}")).collect();
+                                    crate::log::red_once(&format!("shader {k} (stage {st}): uniform bank c{k2} at {a:#x} (+{n:#x}) is in no memory pool: zeros bound", k2 = *bank));
+                                }
+                                vk::DescriptorBufferInfo { buffer: zero, offset: 0, range: max_ubo }
+                            }
                         }
                     }
                     _ => vk::DescriptorBufferInfo { buffer: zero, offset: 0, range: max_ubo },
@@ -1192,6 +1253,16 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                 }
             }
             Res::Pool => {}
+            Res::MeshDraw => {
+                let info = match qs.mesh_rec {
+                    Some((buf, off, range)) => vk::DescriptorBufferInfo { buffer: buf, offset: off, range },
+                    None => {
+                        crate::log::red_once("a task / mesh shader's draw records are not bound (a draw that is not a mesh draw)");
+                        vk::DescriptorBufferInfo { buffer: zero, offset: 0, range: 65536 }
+                    }
+                };
+                bufs.push((b, vk::DescriptorType::STORAGE_BUFFER, info));
+            }
         }
     }
     if dumping {
@@ -1241,7 +1312,7 @@ fn pool_bases(qs: &QState) -> (i32, i32) {
 
 fn push_constants(g: &Gpu, sub: &Sub, qs: &QState, flipped: bool) {
     let (tb, sb) = pool_bases(qs);
-    let pc: [u32; 4] = [tb as u32, sb as u32, flipped as u32, 0];
+    let pc: [u32; 4] = [tb as u32, sb as u32, flipped as u32, qs.mesh_stride];
     let bytes = unsafe { core::slice::from_raw_parts(pc.as_ptr() as *const u8, 16) };
     unsafe { g.dev().cmd_push_constants(sub.main, g.layout.pipeline, g.layout.push_stages, 0, bytes) };
 }
@@ -1346,10 +1417,36 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
     }
     // a mesh draw: the task (if any) and mesh shaders and the pixel shader; any other draw leaves task and mesh shaders out
     let mods: Vec<Arc<Module>> = if mesh {
-        [3usize, 4, 1].iter().filter_map(|&s| qs.prog[s].clone()).filter(|m| m.stage == 1 || m.mesh != 0).collect()
+        let mut v: Vec<Arc<Module>> = [3usize, 4, 1].iter().filter_map(|&s| qs.prog[s].clone()).filter(|m| m.stage == 1 || m.mesh != 0).collect();
+        // the pixel shader reads the mesh shader's per-primitive outputs per primitive
+        let locs = v.iter().find(|m| m.mesh == 2).map(|m| m.per_primitive.clone()).unwrap_or_default();
+        if !locs.is_empty() {
+            if let Some(i) = v.iter().position(|m| m.stage == 1) {
+                if let Some(pp) = g.shaders.per_primitive(g.dev(), &v[i].key, &locs) {
+                    v[i] = pp;
+                }
+            }
+        }
+        v
     } else {
         [0usize, 1, 2, 3, 4].iter().filter_map(|&s| qs.prog[s].clone()).filter(|m| m.mesh == 0).collect()
     };
+    // transform feedback: the last vertex-processing stage's capture variant, the capture opened around the draw
+    let mut mods = mods;
+    let mut xfb_layout = None;
+    if qs.tf_on && !mesh && g.d.caps.xfb {
+        let last = if mods.iter().any(|m| m.stage == 2) { 2 } else if mods.iter().any(|m| m.stage == 4) { 4 } else { 0 };
+        if let Some(i) = mods.iter().position(|m| m.stage == last) {
+            match super::xfb::variant_module(g.dev(), &mods[i]) {
+                Some(v) => {
+                    xfb_layout = mods[i].xfb.clone();
+                    mods[i] = v;
+                }
+                None if mods[i].xfb.is_none() => crate::log::red_once("transform feedback on, but the vertex stage's reflection names no capture: not written"),
+                None => {}
+            }
+        }
+    }
     let mut key = super::pipe::GfxKey::default();
     for m in &mods {
         key.shaders[m.stage as usize] = m.key;
@@ -1496,6 +1593,10 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
     }
     if !mesh {
         super::perf::timed(super::perf::C::VtxNs, || vertex_input(g, sub, qs, &vs));
+    }
+    if let Some(l) = xfb_layout {
+        tf_begin(g, sub, qs, &l);
+        super::perf::inc(super::perf::C::TfCaptures);
     }
     true
 }
@@ -1791,6 +1892,82 @@ pub fn run(g: &Gpu, sub: &mut Sub, qs: &mut QState, stream: &[u8]) -> Option<usi
 
 /// One record; false = this wait parks the queue.
 fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool {
+    let r = record_op(g, sub, qs, opc, rec);
+    // a capture is open around one draw only (no other pipeline may be bound while it is active)
+    if qs.tf_active > 0 {
+        tf_end(g, sub, qs);
+    }
+    r
+}
+
+/// The four capture counters (Vulkan continues a capture of several draws from them).
+fn tf_counters(g: &Gpu) -> Option<vk::Buffer> {
+    static B: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+    let b = B.get_or_init(|| {
+        g.buffer(16, vk::BufferUsageFlags::TRANSFORM_FEEDBACK_COUNTER_BUFFER_EXT, MemoryLocation::GpuOnly, "transform feedback counters")
+            .ok()
+            .map(|b| {
+                let h = vk::Handle::as_raw(b.buf) as usize;
+                std::mem::forget(b);
+                h
+            })
+    });
+    b.map(|h| vk::Handle::from_raw(h as u64))
+}
+
+/// Opens the capture of the draw about to be recorded (its pipeline uses the capture variant).
+fn tf_begin(g: &Gpu, sub: &mut Sub, qs: &mut QState, l: &super::xfb::Layout) {
+    let xfb = &g.d.xfb;
+    let mut bufs = vec![];
+    let mut offs = vec![];
+    let mut sizes = vec![];
+    for i in 0..l.nbuf as usize {
+        let (a, n) = qs.tf[i];
+        match if a != 0 && n != 0 { super::mem::resolve(g, sub, a, n) } else { None } {
+            Some((b, o, _)) if o % 4 == 0 => {
+                super::mem::note_gpu_write(g, sub, a, n);
+                bufs.push(b);
+                offs.push(o);
+                sizes.push(n);
+            }
+            _ => {
+                crate::log::red_once(&format!("transform feedback buffer {i} ({a:#x}, {n} bytes) is in no memory pool or not word aligned: the capture is not written"));
+                bufs.push(zero_buffer(g, sub));
+                offs.push(0);
+                sizes.push(16);
+            }
+        }
+    }
+    let cb = sub.main;
+    unsafe { (xfb.fp().cmd_bind_transform_feedback_buffers_ext)(cb, 0, bufs.len() as u32, bufs.as_ptr(), offs.as_ptr(), sizes.as_ptr()) };
+    let cnt = tf_counters(g);
+    match (qs.tf_cont, cnt) {
+        (true, Some(c)) => {
+            let cs: Vec<vk::Buffer> = (0..l.nbuf).map(|_| c).collect();
+            let co: Vec<u64> = (0..l.nbuf as u64).map(|i| 4 * i).collect();
+            unsafe { (xfb.fp().cmd_begin_transform_feedback_ext)(cb, 0, cs.len() as u32, cs.as_ptr(), co.as_ptr()) };
+        }
+        _ => unsafe { (xfb.fp().cmd_begin_transform_feedback_ext)(cb, 0, 0, core::ptr::null(), core::ptr::null()) },
+    }
+    qs.tf_active = l.nbuf;
+}
+
+fn tf_end(g: &Gpu, sub: &mut Sub, qs: &mut QState) {
+    let n = qs.tf_active;
+    qs.tf_active = 0;
+    qs.tf_cont = true;
+    let cb = sub.main;
+    match tf_counters(g) {
+        Some(c) => {
+            let cs: Vec<vk::Buffer> = (0..n).map(|_| c).collect();
+            let co: Vec<u64> = (0..n as u64).map(|i| 4 * i).collect();
+            unsafe { (g.d.xfb.fp().cmd_end_transform_feedback_ext)(cb, 0, cs.len() as u32, cs.as_ptr(), co.as_ptr()) };
+        }
+        None => unsafe { (g.d.xfb.fp().cmd_end_transform_feedback_ext)(cb, 0, 0, core::ptr::null(), core::ptr::null()) },
+    }
+}
+
+fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool {
     let dev = g.dev();
     match opc {
         op::END => {}
@@ -2280,12 +2457,16 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
         op::TF_STATE => {
             let s: crate::nvn::cmd2::p_tf_state = rd_payload(rec);
             match s.what & 0xff {
-                0 | 3 => qs.tf_on = true,
+                0 => {
+                    qs.tf_on = true;
+                    qs.tf_cont = false;
+                }
+                3 => qs.tf_on = true,
                 1 | 2 => qs.tf_on = false,
-                _ => crate::log::red_once("DrawTransformFeedback is not replayed yet (needs VK_EXT_transform_feedback captures)"),
+                _ => crate::log::red_once("DrawTransformFeedback is not replayed yet (a draw of the count a capture wrote)"),
             }
-            if qs.tf_on {
-                crate::log::red_once("transform feedback captures are not replayed yet (VK_EXT_transform_feedback)");
+            if qs.tf_on && !g.d.caps.xfb {
+                crate::log::red_once("transform feedback: the device has no VK_EXT_transform_feedback, captures are not written");
             }
         }
         op::MULTI_DRAW => {
@@ -2299,7 +2480,6 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
         op::MESH => {
             let m: crate::nvn::cmd2::p_mesh = rd_payload(rec);
             mesh_draw(g, sub, qs, m);
-            super::perf::inc(super::perf::C::DrawsSkipped);
         }
         op::REPORT_VALUE => {
             let r: crate::nvn::cmd2::p_report_value = rd_payload(rec);
@@ -2318,6 +2498,32 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
             let e = |x: vk::Extent3D, l: u32| vk::Offset3D { x: (x.width >> l).max(1) as i32, y: (x.height >> l).max(1) as i32, z: 1 };
             let r = vk::ImageBlit { src_subresource: sl(sl0), src_offsets: [vk::Offset3D::default(), e(sext, sl0)], dst_subresource: sl(dl0), dst_offsets: [vk::Offset3D::default(), e(dext, dl0)] };
             unsafe { dev.cmd_blit_image(sub.main, si, vk::ImageLayout::GENERAL, di, vk::ImageLayout::GENERAL, &[r], if stf.kind == Kind::Float { vk::Filter::LINEAR } else { vk::Filter::NEAREST }) };
+            barrier(g, sub);
+        }
+        op::DLSS => {
+            end_pass(g, sub, qs);
+            let d: crate::nvn::dlss::p_dlss = rd_payload(rec);
+            if d.has & 3 != 3 {
+                crate::log::red_once("EvaluateDlss without its input colour or output texture: skipped");
+                return true;
+            }
+            let Some((si, stf, sext)) = source_image(g, sub, &d.color) else { return true };
+            let Some((di, _dtf, dext, _)) = target_image(g, sub, &d.out) else { return true };
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                crate::vklog!("DLSS evaluation: {}x{} -> {}x{} as a filtered upscale (no DLSS network on this GPU path)", d.iw, d.ih, d.ow, d.oh);
+            }
+            let (iw, ih) = (if d.iw > 0 { d.iw } else { sext.width as i32 }, if d.ih > 0 { d.ih } else { sext.height as i32 });
+            let (ow, oh) = (if d.ow > 0 { d.ow } else { dext.width as i32 }, if d.oh > 0 { d.oh } else { dext.height as i32 });
+            let asp = super::image::upload_aspect(&stf);
+            let sl = vk::ImageSubresourceLayers { aspect_mask: asp, mip_level: 0, base_array_layer: 0, layer_count: 1 };
+            let r = vk::ImageBlit {
+                src_subresource: sl,
+                src_offsets: [vk::Offset3D { x: d.cbase[0], y: d.cbase[1], z: 0 }, vk::Offset3D { x: (d.cbase[0] + iw).min(sext.width as i32), y: (d.cbase[1] + ih).min(sext.height as i32), z: 1 }],
+                dst_subresource: sl,
+                dst_offsets: [vk::Offset3D { x: d.obase[0], y: d.obase[1], z: 0 }, vk::Offset3D { x: (d.obase[0] + ow).min(dext.width as i32), y: (d.obase[1] + oh).min(dext.height as i32), z: 1 }],
+            };
+            unsafe { dev.cmd_blit_image(sub.main, si, vk::ImageLayout::GENERAL, di, vk::ImageLayout::GENERAL, &[r], vk::Filter::LINEAR) };
             barrier(g, sub);
         }
         op::RESOLVE_DEPTH => {

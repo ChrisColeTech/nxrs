@@ -128,7 +128,16 @@ pub fn map(o: &mut pool_t, rq: &[MapReq]) -> bool {
             crate::log::red_once("MapVirtual: sparse pool without its address range");
             return false;
         };
-        return rq.iter().all(|r| map_sparse(v, r));
+        let base = v.base;
+        let ok = rq.iter().all(|r| map_sparse(v, r));
+        drop(g);
+        // sparse images over the remapped ranges bind their blocks again
+        for r in rq {
+            if r.voff >= 0 {
+                crate::vk::sparse::remap(base + r.voff as u64, r.size);
+            }
+        }
+        return ok;
     }
     for r in rq {
         if r.phys.is_null() {
@@ -220,6 +229,17 @@ fn with_pool<R>(a: u64, f: impl FnOnce(&VPool, u64) -> R) -> Option<R> {
     let g = POOLS.read().unwrap();
     let v = g.iter().find(|v| a >= v.base && a < v.base + v.len.max(v.size))?;
     Some(f(v, a - v.base))
+}
+
+/// Whether the sparse virtual pool holding `a` is one the CPU cannot access (its textures only the GPU writes).
+pub fn gpu_only(a: u64) -> bool {
+    // SAFETY: the game's pool object, live while its range is registered
+    with_pool(a, |v, _| unsafe { (*(v.pool as *const pool_t)).flags } & mem_flags::CPU_NO_ACCESS != 0).unwrap_or(false)
+}
+
+/// The virtual address range [base, base + size) a sparse pool's offsets map into.
+pub fn range_of(pool: usize) -> Option<(u64, u64)> {
+    POOLS.read().unwrap().iter().find(|v| v.pool == pool).map(|v| (v.base, v.size))
 }
 
 /// Whether `a` is in a sparse virtual pool's range.

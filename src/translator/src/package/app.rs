@@ -304,12 +304,19 @@ impl Package {
         let Some(di) = program.section(3, 0) else { return fmt(format!("{p}: the Program NCA has no RomFS")) };
         let data = &program.sections[di];
         let base_section = base.as_ref().and_then(|b| b.section(3, 0).map(|i| (b, i)));
+        // A patch with a compression table of its own relocates onto the base's stored (compressed) bytes and is
+        // decompressed on top (Jamboree 1.1.0 over its card image: the IVFC hashes match only that way); a patch
+        // without one reads the base decompressed.
+        let patch_compressed = data.patch && compressed::table_of(&data.fs).is_some();
         let base_data: Option<Arc<dyn Storage>> = match base_section {
+            Some((b, i)) if patch_compressed => Some(Arc::new(SectionStorage::new(b, i))),
             Some((b, i)) => Some(section_data(b, i, &p)?),
             None => None,
         };
         let base_compressed = match base_section {
-            Some((b, i)) if data.patch => compressed::over(Arc::new(SectionStorage::new(b, i)), &b.sections[i].fs, &p)?.map(|c| c.1),
+            Some((b, i)) if data.patch && !patch_compressed => {
+                compressed::over(Arc::new(SectionStorage::new(b, i)), &b.sections[i].fs, &p)?.map(|c| c.1)
+            }
             _ => None,
         };
         let (storage, top_compressed) = if data.patch {

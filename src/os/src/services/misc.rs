@@ -485,6 +485,12 @@ mfn!(shop, |a| {
     0
 });
 
+/// nn::pl::IsRunningOnOunce: the profile's platform. Super Mario Bros. Wonder 1.2.1 counts add-on content and takes
+/// other Switch 2 paths only when true; its profile is the Switch 1 build (NVN 55, 19.2 MHz), as nxnative answers it.
+unsafe fn running_on_ounce(c: *mut Cpu) {
+    (*c).x[0] = crate::profile::get().switch2 as u64;
+}
+
 pub fn register(r: &mut Registry) {
     for (n, w, f) in [
         ("_ZN2nn2vi20GetDisplayVsyncEventEPNS_2os15SystemEventTypeEPNS0_7DisplayE", "vsync: a host thread signals it at 60 Hz", vsync_event as unsafe fn(*mut Cpu)),
@@ -508,6 +514,7 @@ pub fn register(r: &mut Registry) {
         ("_ZN2nn2pl17GetSharedFontSizeENS0_14SharedFontTypeE", "the stand-in shared font", font_size),
         ("_ZN2nn2pl13GetSharedFontEPiPNS0_14SharedFontDataEiNS_8settings12LanguageCodeE", "the stand-in shared font", shared_font),
         ("_ZN2nn2pl21RequestSharedFontLoadENS0_14SharedFontTypeE", "the stand-in shared font is always loaded", zero),
+        ("_ZN2nn2pl16IsRunningOnOunceEv", "a Switch 2: the profile's platform (a Switch 1 build runs as on a Switch 1)", running_on_ounce),
         ("_ZN2nn3nfp10InitializeEv", "one NFC device, no tag", nfp_init),
         ("_ZN2nn3nfp8FinalizeEv", "amiibo", nfp_fini),
         ("_ZN2nn3nfp8GetStateEv", "amiibo", nfp_lib_state),

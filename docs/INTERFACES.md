@@ -251,10 +251,25 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   `pass dump N: stage 1 …` lines of the pass writing A2B10G10R10 1920x1080 just before the UI). The HDR scene itself
   (before grading) still has a black sky: next suspect for the lighting item. MKW: 28 GB was 19 GB of whole images
   for sparse terrain arrays + a 76 s scan; sparse images fix both (MKW presents, 8.4-8.9 GB peak).
-- Open: the measurements queued at hand-off time (r21 10-minute MK8D demo memory/FPS, r22 built-in frame gen, r23
-  LSFG frame gen, w5 MKW) — their dirs are `build/G/runs/<name>` and `runs-<name>.out`.
+- **For lanes X / O (MKW with lane G's engine, `build/G/runs/w6`):** with sparse images MKW presents (first present
+  30 s, peak 8.8 GB) and then stops in game code: `host access violation … lifted main+0x47ff40 +0x1cc (read of 0x30)`
+  (a null object; w5 instead: `rt_dispatch: no function at guest pc 0x0`). No graphics red line precedes it. w7 (sync replay): `nvnCommandBufferWaitEvent` called with a null command buffer (x0 = 0, event 0x2264cbb88, from main+0xa0140): something earlier handed the game a null command buffer or it was never initialized; lane G checks its NVN2 command-buffer entry points next, lanes X / O please check which object the game expected there.
+- **Asynchronous submission is off by default** (`NXGFX_ASYNC=1` turns it on): with it MK8D stopped submitting ~120 s
+  into a run (r24: no NVN call after 3,305 submits, every core idle, SVCs still counting) and after 2 presents in
+  another (r22); cause not found yet. Synchronous replay costs the game's thread ~3-10 ms a frame.
+- Results so far: MK8D demo 10 minutes with async on (r24): peak private 3.73 GB, flat (it stalled at 121 s, see
+  above); with sync replay r27 3.47 GB; frame generation built-in 60.1 -> 119.5 FPS (r25) and 32 -> 64 (r27, captures
+  `fg-previous/generated/current.png`: the r27 generated frame falls on a scene cut and came out dark, to be checked
+  on a moving frame), LSFG 59.0 -> 117.2 FPS (r26; generated frame `runs/r23/fg-generated.png`). Open: r28 (10-minute
+  MK8D demo, sync replay, pass dump in the demo race at 108 s) was queued by `build/G/queue5.sh` when lane G stopped;
+  if it did not run, run `bash build/G/demo.sh build/G/runs/r28 600 NXGFX_DUMP_AT_S=108 NXGFX_SHOT=6400`. Next for
+  the race picture: the pass that writes A2B10G10R10 1920x1080 before the UI samples an 8x8x8 3D LUT (`pass dump N:
+  stage 1` lines): check its slices now that 3D targets render; then the black sky of the HDR scene.
 
 **Lane G, rev 5 (2026-11-19, uncommitted):**
+- **Forced present interval (5A.6):** ini `present_interval` (0 = the game's, 1-3 forced) or, when it is 0, the
+  profile's value: **lane O / profiles**, call `nxgfx::nvn::window::set_profile_interval(n)` at start-up with the
+  profile's `present_interval` key (0 / absent = not forced). Graphics paces AcquireTexture by the forced interval.
 - **Asynchronous submission** (Turbo's translation thread): `nvnQueueSubmitCommands` copies the records and returns;
   the `vk replay` thread replays submits and presents in order. Fences taken while ops are queued are `1 << 62 | op
   sequence` and resolve once the op ran (`vk::queue::wait_fence` / `fence_done` handle them); `nvnSyncWait` on a sync
@@ -324,6 +339,19 @@ shared by every program** (no per-program layouts, so pipelines key only on shad
   needs are enabled when offered: fragment shader pixel/sample interlock, int8/float16 storage, image formats.
 - Checked against lane C's MK8D build: 2,000 program pairs and 28 compute shaders remap and build with the
   validation layer clean (`tests/shaders_lane_c.rs`).
+
+**Lane X findings for lane G (2026-11-19):**
+- **A `fullres` / F8 / `NXGFX_SHOT*` screenshot hangs the game for ever (deadlock).** `vk/queue.rs present_locked`
+  (runs on the `vk replay` thread with async on, and holds `g.q.sub`) calls `shot::on_present` → `capture` →
+  `Gpu::read_texels` → `queue::oneoff`, which first `aq_drain()`s (waits for the replay queue, i.e. for the op this
+  thread is in) and then locks `g.q.sub` again (std Mutex, already held by this thread). Seen in every lane X run
+  that asked for a shot: Super Mario Bros. Wonder at 60 FPS stopped presenting the instant play_scenario's first
+  `fullres` came (`build\I\runs\20261119-144355-X-wonder1`: 1,738 presents, then `stall: no present for 15 s`, sound
+  still playing; main thread in a host function), Mario Kart World stopped after its first present
+  (`...-144153-X-mkw3-peek`, shot requested at 39.6 s, first present 50.9 s, then none). Repro: any game,
+  `py scripts/gamectl.py <pid> fullres x.png`. Lane X runs use the window grab (`NXRS_SHOT_CMD=shot`, play_scenario)
+  until it is fixed: the capture has to be recorded into the present's own submission (copy + read back after its
+  fence) instead of a one-off from inside the present.
 
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
@@ -573,3 +601,79 @@ pads, WinMM; `nxos::services::hid` shows them as npads. The front end calls `set
    not in front (a screen copy otherwise), so a 60 FPS video repeats frames. Wanted: `nxgfx::vk::shot::set_frame_sink(
    fps, fn(bgra: &[u8], w: u32, h: u32))`, the presented picture read back asynchronously at most `fps` times a second
    while set; front feeds it to the H.264 writer.
+
+## Pokémon bring-up (lane P, M6)
+
+Builds: `build\games\{plza,arceus,violet}` (`nxrs-build build <package> -o <g> --outdir build\games\<g> --jobs 4`;
+Violet's add-on content installed with `nxrs-build dlc install`). Runs: `build\games\<g>\runs\<time>-<label>\` (run.log,
+screenshots through the control pipe). Engine fixes of lane P (uncommitted):
+- **runtime `mem.rs`: the alias region is 64 GiB** (was 4): Horizon's size for a 39-bit space and Turbo's
+  `g_alias_size`. Z-A's nninitStartup puts a StandardAllocator over 12 GiB of it (`StandardAllocator::Initialize(nullptr,
+  0x300000000)`); with 4 GiB the SDK aborted in nninitStartup (sdk+0x134214). Address space only.
+- **os `mem.rs`: MapMemory takes mapped alias-region memory as its source** (MapPhysicalMemory pages are Normal on
+  Horizon): Z-A maps its thread stacks from its allocator's pages; before, every try was refused ("source is not heap")
+  and the SDK aborted (sdk+0x13e81c).
+- **os `profile.rs` / `mem.rs`: maps past the pool fail for every profile with `mem_map_limit on`** (nxnative's key,
+  Violet / Scarlet), besides Turbo's two titles.
+
+**For lane G — Z-A stops at ~49 s: NVN command memory, host-lent segments reach 1 GB** (2026-11-19 13:36,
+`build\games\plza\runs\20261119-130103-boot3\run.log`). The game renders at 60 FPS (title, language, "Confirm choices"
+screens crisp), then `thread 'guest 0x1012' panicked at src\graphics\src\nvn\cmd.rs:34:9` / `FATAL: panic in a host
+function: NVN command memory: host-lent segments reached 1024 MB`. The lending starts at 2.97 s (`the game's command
+memory ran short, the host lends a segment of 256 KB (1 times so far)`) and reaches 1024 loans by 11.5 s: about 128
+segments a second, never given back. nxnative met the same (issue #2717, Arceus at frame 2,117) and fixed it in
+`hle_nvn.c` `cmd_alloc` / `hostseg_take`: "a record that does not fit claims its position for command memory reclaim"
+(docs/reference/nvn-objects.md, "A recording that runs short before it writes into the game's memory"): the lent pool
+stays at 132 segments. **Lane P ported it (2026-11-19, `nvn/cmd.rs`: `hostseg_take` / `hostseg_written` / `hostseg_size`, a separate
+`ctlseg_take` for control memory, never reclaimed), since it stopped all three games; lane G please review.** Also in that run: `[RED] transform feedback captures are not replayed yet` (6.9 s; Turbo's
+skinned characters in Z-A need it), many `[RED] texture ID n: target 1 bound where the shader samples target 8` at 34 s
+(the cube placeholders Turbo also logs), `nvnCommandBufferSetConservativeRasterEnable` / `SetShaderScratchMemory` stubs.
+
+**For lane G — Z-A in gameplay draws a black world** (2026-11-19 13:58, `build\games\plza\runs\20261119-135546-run4`,
+with the host-segment reclaim: the lent pool stays at 208 segments / 52 MB through 16,384 loans in 170 s, no stop).
+The game runs title → language → name → the opening dialogue; from ~40 s on every screenshot is black except the UI
+(`0008-t160.png`: only "A Talk" and the dialogue arrow). Turbo had exactly this (GAMEPLAY_INVESTIGATION.md, "Pokemon
+Legends Z-A: the black world", 78ece7b): the colour-grading table is a 32x32x32 target drawn with one instance per
+plane (the vertex shader writes the layer, `vs=b29f08619f379a83 inst=32`); a pass begun with `layerCount` 1 leaves 31
+planes black and the tone mapping multiplies the world by black. Fix there: a pass has as many layers as every
+attachment's view holds. Same commit, also needed by Z-A: transform feedback replay (`[RED] transform feedback captures
+are not replayed yet` at 6.9 s; 116 captures a frame in the station, the skinned characters) and cube views of 2D arrays
+of six layers or more. FPS in that run (another lane compiling): 44-52 in the dialogue, p95 22-35 ms.
+
+## Switch 1 library (lane W, 5B)
+
+Builds: `build\games\{mk8dw,smash,jamboree,sonic,agsob,bbounce}` (`nxrs-build build <package> -o <g> --outdir
+build\games\<g> --jobs 4`). Runs: `build\I\runs\<time>-W-<label>\` through `scripts/library_play.py` (play_scenario's
+harness plus long scenarios `mk8d_gp`, `mk8d_cups`, `probe`, `menus`, and `library_play.py memory <run>`: private
+memory per minute and its slope from the metrics CSV).
+
+**NRO modules loaded at run time (new, lane W; translator + cli + os):**
+- translator `package::nro`: `collect(romfs)` / `collect_with(romfs, extra)` find every NRO the RomFS's NRRs register
+  (loose `.nro` files; `extra` for archives), `scan(romfs, want, say)` finds them inside large files (stored or zstd
+  frames), `tsv()` writes `<data>\nro.tsv` (name, base, size, NRO bytes, SHA-256, build id, path; `refused` rows for
+  online SDKs, EOS). Online SDKs (export `EOS_Platform_Create`) are left out.
+- translator layout: modules named `nro_<index>` (`layout::is_nro`, `order_with`, `layout_names`) follow `sdk` at
+  2 MiB-aligned bases; `generate` takes them in the same map as the ExeFS.
+- cli: collects before translating, adds them to the translated code, writes `nro.tsv`; registered NROs no loose file
+  holds come from `<name>_build\nro\<sha>.nro` (cache), data.arc's index (shaders' `formats::smash`), then a scan.
+- os `services/ro.rs`: `read_table(data)` at boot (those modules are not loaded from the ExeFS but are in the module
+  window and the dispatch table), `set_base(&loaded)`; `ro::LoadModule` maps the NRO at its base by build id,
+  copies the game's image, relocates against ExeFS + loaded NROs (load order), binds earlier modules' imports only it
+  defines (`hle::stubbed_import`), calls DT_INIT; `UnloadModule` calls DT_FINI and binds back; `LookupSymbol` /
+  `LookupModuleSymbol` see loaded NROs.
+- **Package (lane W):** an update whose patch section has its own compression table relocates onto the base's stored
+  (compressed) bytes (Jamboree 1.1.0 over its NSP / XCI); `app.rs` gives `Patched` the raw base then.
+- **runtime `fiber.rs` (lane W, for lane T):** a fiber whose function returned runs its function again when switched
+  to (from the top of its stack), as nn::os does; it was a fatal ("the fiber has finished"). Super Mario Party
+  Jamboree's four job fibers (function `main+0x18d9b0`) return when a job is done and are switched to again for the
+  next. `NXRT_TRACE=fiber` logs InitializeFiber, every switch and every return.
+
+**For lane G — `fullres` screenshot freezes the game** (2026-11-19 14:51, Arceus, `build\games\arceus\runs\20261119-145110-run4`
+and `-144521-run3`, engine built from the main tree at ~14:40). Right after `ctl: fullres <png>` / `[vk] screenshot of
+the next present requested` at 30 s, no frame is presented again (`heartbeat: ... 790 presents` from then on); the stall
+dump shows the game's render thread inside `nvn:nvnQueuePresentTexture` (`thread 0x100a ... pc 0x7f10001f60
+(nvn:nvnQueuePresentTexture)`), every other thread in condvar waits behind it. The same build ran Arceus 160 s with
+no hang before `fullres` was requested (`-135934-run2`, older graphics). The front's `shot` does the same now (it
+asks graphics for the picture too): Arceus `-145805-run5` and Violet `build\gamesioletuns61119-145624-run3`,
+`-150358-run4` froze in `nvnQueuePresentTexture` right after `ctl: shot` at 30 s. Lane P takes no screenshots before a
+run's end meanwhile.

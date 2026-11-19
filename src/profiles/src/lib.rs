@@ -11,6 +11,7 @@
 //!   rewriter loads every profile's tables the same way);
 //! - [`translator_patches`]: the translator's patch-table text for the entries nxrs applies at build time.
 
+pub mod mods;
 pub mod patches;
 
 pub use patches::PatchFile;

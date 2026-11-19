@@ -23,20 +23,125 @@ unsafe fn put_hdr(p: *mut u8, op: u32, size: u32) {
 }
 
 // ---------- host-lent memory: when the game's own command or control memory runs short ----------
+// A segment hangs off the recording that overflowed into it, by that recording's bytes in the game's memory it ran
+// short in: [its first record there, the write position), or the byte at the write position when it wrote nothing
+// there (`own_back`). The game lets a recording write at a position only once the list there is dead, so a segment is
+// reclaimed when another recording writes records over its range, or tries to write a record there that does not fit
+// (`hostseg_written`, `cmd_alloc`): Pokémon Legends: Z-A, Arceus and Violet grant 1 KB blocks and a recording that opens
+// with a 1,400-byte record overflows before writing anything, so only the attempt shows the block was given out again.
+// Segments overflowing from a host segment keep its range; one with no range is never reclaimed. A free segment is
+// taken again only for a request of its own size; the cap counts every segment's bytes (nxnative `hle_nvn.c`).
 const HOSTSEG_SZ: usize = 256 << 10;
+const HOSTSEG_SMALL: usize = 4 << 10;
 const HOSTSEG_CAP: u64 = 1 << 30;
-static HOSTSEG_BYTES: AtomicU64 = AtomicU64::new(0);
-/// A segment of host memory the recording continues in. Kept for the process: a list recorded into it may be called
-/// as long as the game keeps its handle.
-fn hostseg_take(n: usize) -> *mut u8 {
-    let total = HOSTSEG_BYTES.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
-    if total > HOSTSEG_CAP {
-        panic!("NVN command memory: host-lent segments reached {} MB", HOSTSEG_CAP >> 20);
+struct HostSeg {
+    mem: usize,
+    n: usize,
+    busy: bool,
+    lo: usize,
+    hi: usize,
+    rec_id: u32,
+}
+struct HostSegs {
+    segs: Vec<HostSeg>,
+    bytes: u64,
+    total: u64,
+}
+static HOSTSEGS: Mutex<HostSegs> = Mutex::new(HostSegs { segs: Vec::new(), bytes: 0, total: 0 });
+/// Busy segments with a guest range: 0 lets `hostseg_written` return without the lock.
+static HOSTSEG_HELD: AtomicU32 = AtomicU32::new(0);
+
+fn hostseg_size(o: &cmd_t, empty_pool: bool, want: usize) -> usize {
+    if empty_pool {
+        return if want != 0 && want <= HOSTSEG_SMALL && o.recording == 0 { HOSTSEG_SMALL } else { HOSTSEG_SZ };
     }
-    static N: AtomicU32 = AtomicU32::new(0);
-    let k = N.fetch_add(1, Ordering::Relaxed) + 1;
-    if k == 1 || k % 1024 == 0 {
-        crate::nvnlog!("the game's command memory ran short, the host lends a segment of {} KB ({k} times so far)", n >> 10);
+    if want > HOSTSEG_SZ { (want + 0xfff) & !0xfff } else { HOSTSEG_SZ }
+}
+
+fn cmd_own(o: &cmd_t) -> usize {
+    if o.own_back != 0 { o.end as usize - o.own_back as usize } else { 0 }
+}
+
+/// A segment of `n` bytes for the recording `o` to continue in.
+unsafe fn hostseg_take(o: &mut cmd_t, n: usize) -> *mut u8 {
+    if o.recording != 0 {
+        ctl_chunk_close(o);
+    }
+    let cur = o.cur as usize;
+    let mut g = HOSTSEGS.lock().unwrap_or_else(|e| e.into_inner());
+    let (mut lo, mut hi) = (0usize, 0usize);
+    let in_seg = if cur != 0 {
+        g.segs.iter().find(|s| cur >= s.mem && o.end as usize == s.mem + s.n).map(|s| (s.lo, s.hi))
+    } else {
+        None
+    };
+    if let Some((a, b)) = in_seg {
+        lo = a;
+        hi = b;
+    } else if o.recording != 0 && cur != 0 {
+        let own = cmd_own(o);
+        let own = if own != 0 && own <= cur { own } else if cur < o.end as usize { cur } else { 0 };
+        if own != 0 {
+            lo = own;
+            hi = if cur > lo { cur } else { lo + 1 };
+        } else {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| crate::log::red("NVN command memory: a recording ran short at the very end of the game's memory with no byte of its own there; the segment the host lends it is never reclaimed"));
+        }
+    }
+    let rec = o.rec_id;
+    let mut m = 0usize;
+    if let Some(s) = g.segs.iter_mut().find(|s| !s.busy && s.n == n) {
+        *s = HostSeg { mem: s.mem, n, busy: true, lo, hi, rec_id: rec };
+        m = s.mem;
+    }
+    if m == 0 && g.bytes + n as u64 <= HOSTSEG_CAP {
+        let v = vec![0u64; n / 8].into_boxed_slice();
+        m = Box::leak(v).as_mut_ptr() as usize;
+        g.segs.push(HostSeg { mem: m, n, busy: true, lo, hi, rec_id: rec });
+        g.bytes += n as u64;
+    }
+    if m != 0 && hi > lo {
+        HOSTSEG_HELD.fetch_add(1, Ordering::Relaxed);
+    }
+    g.total += 1;
+    let (t, ns, bytes) = (g.total, g.segs.len(), g.bytes);
+    drop(g);
+    if m == 0 {
+        panic!("NVN command memory: the game's pool is empty and host-lent segments reached {} MB without being reclaimed by the game's blocks", HOSTSEG_CAP >> 20);
+    }
+    if t == 1 || t % 1024 == 0 {
+        crate::nvnlog!("the game's command memory ran short, the host lends a segment of {} KB ({t} times so far, segment pool {ns} segments, {} KB)", n >> 10, bytes >> 10);
+    }
+    m as *mut u8
+}
+
+/// Recording `o` wrote records at [p, p+n) (or tried to write one at p, n = 1): the segments of other recordings whose
+/// guest bytes these overlap belong to dead lists; reclaim them.
+fn hostseg_written(o: &cmd_t, p: *const u8, n: u64) {
+    if n == 0 || HOSTSEG_HELD.load(Ordering::Relaxed) == 0 {
+        return;
+    }
+    let (lo, hi) = (p as usize, p as usize + n as usize);
+    let mut g = HOSTSEGS.lock().unwrap_or_else(|e| e.into_inner());
+    for s in g.segs.iter_mut() {
+        if s.busy && s.hi > s.lo && s.rec_id != o.rec_id && s.hi > lo && s.lo < hi {
+            s.busy = false;
+            HOSTSEG_HELD.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Control memory the host lends when the game's callback gives none: never reclaimed (nothing tells when the game is
+/// done with the handles listed in it).
+fn ctlseg_take(n: usize) -> *mut u8 {
+    static BYTES: AtomicU64 = AtomicU64::new(0);
+    let b = BYTES.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
+    if b > 256 << 20 {
+        panic!("NVN control memory: the game gives none and host-lent control memory reached 256 MB");
+    }
+    if b == n as u64 || b % (16 << 20) == 0 {
+        crate::nvnlog!("the game gave no control memory when asked, the host lends a block ({} KB so far)", b >> 10);
     }
     let v = vec![0u64; n / 8].into_boxed_slice();
     Box::leak(v).as_mut_ptr() as *mut u8
@@ -82,7 +187,7 @@ unsafe fn ctl_put(o: &mut cmd_t, e: u64) {
     let mut tries = 0;
     while o.ctl_mem.is_null() || o.ctl_size - o.ctl_used < need {
         if o.cb == 0 || tries == 2 {
-            let m = hostseg_take(CTLSEG_SZ);
+            let m = ctlseg_take(CTLSEG_SZ);
             ctl_set(o, m, CTLSEG_SZ);
             break;
         }
@@ -120,6 +225,7 @@ unsafe fn ctl_flush(o: &mut cmd_t) {
 }
 unsafe fn ctl_chunk_close(o: &mut cmd_t) {
     if !o.chunk.is_null() && o.cur > o.chunk {
+        hostseg_written(o, o.chunk, (o.cur as usize - o.chunk as usize) as u64);
         let e = ctl_e(CTL_CHUNK, o.chunk, (o.cur as usize - o.chunk as usize) as u64);
         ctl_push(o, e);
     }
@@ -132,13 +238,16 @@ unsafe fn cmd_alloc(o: &mut cmd_t, size: u32) -> *mut u8 {
     let size = (size + 7) & !7;
     let mut tries = 0;
     while o.cur.is_null() || o.cur.add(size as usize) > o.end {
+        // the record goes here in the game's count, though it does not fit: a segment lent off this position belongs
+        // to a dead list
         if o.recording != 0 && !o.cur.is_null() && o.cur < o.end {
             let c = o.cur;
             cmd_own_at(o, c);
+            hostseg_written(o, c, 1);
         }
         if o.cb == 0 || tries == 2 {
-            let sz = if size as usize > HOSTSEG_SZ { (size as usize + 0xfff) & !0xfff } else { HOSTSEG_SZ };
-            let m = hostseg_take(sz);
+            let sz = hostseg_size(o, false, size as usize);
+            let m = hostseg_take(o, sz);
             cmd_new_segment(o, m, sz);
             break;
         }
@@ -157,12 +266,14 @@ unsafe fn cmd_alloc(o: &mut cmd_t, size: u32) -> *mut u8 {
         cmd_own_at(o, p);
         if !o.chunk.is_null() && (o.cur as usize - o.chunk as usize) as u64 > CTL_CHUNK_MAX {
             if p > o.chunk {
+                hostseg_written(o, o.chunk, (p as usize - o.chunk as usize) as u64);
                 let e = ctl_e(CTL_CHUNK, o.chunk, (p as usize - o.chunk as usize) as u64);
                 ctl_push(o, e);
             }
             o.chunk = core::ptr::null_mut();
         }
         if size as u64 > CTL_CHUNK_MAX {
+            hostseg_written(o, p, size as u64);
             ctl_push(o, ctl_e(CTL_CHUNK, p, CTL_ONE));
         } else if o.chunk.is_null() {
             o.chunk = p;
@@ -711,8 +822,9 @@ nvn_fns! {
         let o = cb(c);
         if !p.is_null() { o.cmd_size = n; }
         if p.is_null() || n < 8 {
-            let m = hostseg_take(HOSTSEG_SZ);
-            cmd_new_segment(o, m, HOSTSEG_SZ);
+            let sz = hostseg_size(o, p.is_null(), n);
+            let m = hostseg_take(o, sz);
+            cmd_new_segment(o, m, sz);
             return;
         }
         let pl = &*(p as *const pool_t);

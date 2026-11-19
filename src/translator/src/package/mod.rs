@@ -26,6 +26,7 @@ mod io;
 mod keys;
 pub mod marker;
 mod nca;
+pub mod nro;
 mod nsp;
 mod nup;
 mod pfs0;

@@ -1,7 +1,8 @@
 //! A host thread that watches the run: a heartbeat line with the guest's progress every few seconds
 //! (`NXOS_HEARTBEAT` seconds, default 10, 0 = none), and the end of a measured run: `NXOS_EXIT_AFTER=<seconds>`
 //! ends the process after that long, and `NXOS_EXIT_AFTER_SUBMIT=<seconds>` that long after the first NVN queue
-//! submit, both with the gap summary.
+//! submit, both with the gap summary. A stall (presents stopped for 15 s after the first) logs every guest thread's
+//! state once per stall (`nxrt::kernel::dump_threads`); the control command `threads` prints it any time.
 
 use std::time::{Duration, Instant};
 
@@ -15,7 +16,19 @@ pub fn run() {
     let after = env_secs("NXOS_EXIT_AFTER");
     let after_submit = env_secs("NXOS_EXIT_AFTER_SUBMIT");
     let mut last = Instant::now();
+    nxconfig::ctl::register("threads", ": every guest thread, what it waits for and its guest frames", |_| nxrt::kernel::dump_threads());
+    let (mut seen, mut since, mut dumped) = (0u64, Instant::now(), false);
     loop {
+        let p = crate::nvn::presents();
+        if p != seen {
+            (seen, since, dumped) = (p, Instant::now(), false);
+        } else if p > 0 && !dumped && since.elapsed().as_secs() >= 15 {
+            dumped = true;
+            crate::log!("stall: no present for 15 s (frame {p}); the guest threads:");
+            for l in nxrt::kernel::dump_threads().lines() {
+                crate::log!("  {l}");
+            }
+        }
         std::thread::sleep(Duration::from_millis(100));
         if beat > 0.0 && last.elapsed().as_secs_f64() >= beat {
             last = Instant::now();

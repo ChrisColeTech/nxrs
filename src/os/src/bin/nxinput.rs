@@ -4,7 +4,7 @@
 //!                                   input layer makes of them (player, backend)
 //!     nxinput read [seconds=20]     prints each change of each player's buttons and sticks (guest bits after
 //!                                   button_layout), and each physical button as both layouts name it
-//!     nxinput rumble                lights on, low motor 0.4 s, high motor 0.4 s, everything off (under a second)
+//!     nxinput rumble [--short]      lights, low motor 1 s, high motor 1 s, both 1 s, off (--short: 0.4 s each, under a second)
 //!
 //! `--layout xbox` / `--map south:a` set button_layout / button_map for the run.
 
@@ -128,7 +128,11 @@ fn read(secs: f64) {
     }
 }
 
+/// `rumble` (or `--owner`): Turbo's physical check (controller_device --rumble), strong and long enough to feel: lights,
+/// low motor 160/255 1 s, high motor 160/255 1 s, both 200/255 1 s, stop. `rumble --short`: 128/255 0.4 s each
+/// (under a second: the agents' bounded check). `rumble <low 0..255> <high 0..255> <ms>`: one setting for that long.
 fn rumble() {
+    let a: Vec<String> = std::env::args().skip(2).filter(|x| !x.starts_with("--layout") && !x.starts_with("--map")).collect();
     for _ in 0..30 {
         input::probe_tick();
         std::thread::sleep(Duration::from_millis(10));
@@ -138,8 +142,9 @@ fn rumble() {
         println!("no controllers");
         return;
     }
-    println!("{} device(s); lights on, low 0.4 s, high 0.4 s, off", d.len());
-    let run = |v: input::Vib, ms: u64| {
+    let run = |low: u32, high: u32, ms: u64, what: &str| {
+        println!("{what}: low {low}/255 high {high}/255 for {ms} ms");
+        let v = input::Vib { amp_low: low as f32 / 255.0, amp_high: high as f32 / 255.0, ..Default::default() };
         for p in 0..PLAYERS {
             input::vibrate(p, 0, v);
             input::vibrate(p, 1, v);
@@ -150,9 +155,20 @@ fn rumble() {
             std::thread::sleep(Duration::from_millis(4));
         }
     };
-    run(input::Vib { amp_low: 0.5, ..Default::default() }, 400);
-    run(input::Vib { amp_high: 0.5, ..Default::default() }, 400);
-    run(input::Vib::default(), 50);
+    println!("{} device(s): {:?}", d.len(), d.iter().map(|x| x.0.clone()).collect::<Vec<_>>());
+    if a.first().map(|s| s.as_str()) == Some("--short") {
+        run(128, 0, 400, "low motor");
+        run(0, 128, 400, "high motor");
+    } else if let (Some(l), Some(h), Some(ms)) = (a.first().and_then(|x| x.parse().ok()), a.get(1).and_then(|x| x.parse().ok()), a.get(2).and_then(|x| x.parse().ok())) {
+        run(l, h, ms, "setting");
+    } else {
+        println!("Hold the controller: LOW motor (left grip), HIGH motor (right grip), both, then off.");
+        run(0, 0, 1000, "lights on");
+        run(160, 0, 1000, "low-frequency motor");
+        run(0, 160, 1000, "high-frequency motor");
+        run(200, 200, 1000, "both motors");
+    }
+    run(0, 0, 50, "off");
     input::shutdown();
     println!("done");
 }

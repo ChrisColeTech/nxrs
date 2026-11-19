@@ -5,7 +5,7 @@ use crate::aot::discover::{discover, estimate_sizes, partition, DiscoverStats};
 use crate::aot::emit::{table_text, EmitOptions, Emitter, GENERATED_MARKER};
 use crate::aot::patches::Table;
 use anyhow::{anyhow, Context, Result};
-use crate::loader::layout::{layout, layout_h, layout_json};
+use crate::loader::layout::{layout_h, layout_json, layout_names};
 use crate::loader::{Module, Nso};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
@@ -106,12 +106,13 @@ struct ChunkResult {
 pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: &(dyn Fn(&str) + Sync)) -> Result<GenReport> {
     let t0 = Instant::now();
     let mut nsos: HashMap<String, Nso> = HashMap::new();
-    for name in crate::loader::layout::order() {
-        if let Some(raw) = exefs.get(&name) {
+    let names = crate::loader::layout::order_with(exefs.keys());
+    for name in &names {
+        if let Some(raw) = exefs.get(name) {
             nsos.insert(name.clone(), Nso::parse(raw).with_context(|| format!("loading {name}"))?);
         }
     }
-    let mods = layout(&|n: &str| nsos.get(n).map(|x| x.size)).map_err(|e| anyhow!(e))?;
+    let mods = layout_names(&names, &|n: &str| nsos.get(n).map(|x| x.size)).map_err(|e| anyhow!(e))?;
     std::fs::create_dir_all(&opts.out)?;
     // gen.py writes these two with Path.write_text, so they carry the platform's line ends.
     write_if_changed(&opts.out.join("layout.json"), text_mode(&layout_json(&mods)).as_bytes())?;

@@ -6,7 +6,7 @@
 //!   site <set> <module> <offset> <original> <replacement> [...]   (`@page:x<n>` = adrp x<n>, <patch page>)
 //!   span <set> <module> <offset> <word> [...]
 //!   spin <module> <head> <back-edge> [...]
-//! Not supported yet: code patches shipped by mods (`mods/<mod>/mod.json`) and enabled mods' image bytes.
+//! The player's mods arrive here as sets and sites too (src/cli `mods.rs`: one set per mod).
 
 use crate::loader::{ModLayout, Module};
 use std::collections::BTreeMap;

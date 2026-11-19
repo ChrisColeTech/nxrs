@@ -119,6 +119,11 @@ pub fn romfs() -> Option<Arc<RomFs>> {
         .clone()
 }
 
+/// Whether this is the game's own RomFS (the one the player's mods layer over).
+fn is_game(fs: &Arc<RomFs>) -> bool {
+    ROMFS.get().and_then(|r| r.as_ref()).is_some_and(|g| Arc::ptr_eq(g, fs))
+}
+
 /// Splits `mount:/a/b` into the mount and the normalized path (`a/b`).
 pub fn split(path: &str) -> Option<(String, String)> {
     let (m, rest) = path.split_once(':')?;
@@ -251,6 +256,15 @@ pub fn open_file(path: &str, mode: u32) -> Result<u64, u64> {
             if mode & (MODE_WRITE | MODE_APPEND) != 0 {
                 crate::log!("[RED] fs: write open of {path} on a read-only mount");
                 return Err(RES_FAIL);
+            }
+            if let Some(hp) = is_game(&fs).then(|| crate::mods::romfs_file(&p)).flatten() {
+                let f = std::fs::File::open(&hp).map_err(|e| io_res(&e))?;
+                crate::log_once!(format!("mod file {p}"), "fs: {path} from a mod ({})", hp.display());
+                return Ok(with(|st| {
+                    let h = new_handle(st);
+                    st.files.insert(h, FileH { open: Open::Host { file: f, txn: None }, mode });
+                    h
+                }));
             }
             match fs.find(&p) {
                 Some(n) if n.is_file() => {
@@ -424,19 +438,39 @@ pub fn rename(from: &str, to: &str) -> u64 {
 /// GetEntryType: Some(true) for a directory.
 pub fn entry_type(path: &str) -> Result<bool, u64> {
     match resolve(path)? {
-        Target::Rom(fs, p) => fs.find(&p).map(|n| !n.is_file()).ok_or(RES_PATH_NOT_FOUND),
+        Target::Rom(fs, p) => {
+            if is_game(&fs) {
+                if crate::mods::romfs_file(&p).is_some() {
+                    return Ok(false);
+                }
+                if crate::mods::romfs_has_dir(&p) {
+                    return Ok(true);
+                }
+            }
+            fs.find(&p).map(|n| !n.is_file()).ok_or(RES_PATH_NOT_FOUND)
+        }
         Target::Host(hp, _, _) => std::fs::metadata(&hp).map(|m| m.is_dir()).map_err(|e| io_res(&e)),
     }
 }
 
 pub fn open_dir(path: &str, mode: u32) -> Result<u64, u64> {
     let entries: Vec<(String, i8, u64)> = match resolve(path)? {
-        Target::Rom(fs, p) => fs
-            .list(&p)
-            .map_err(|_| RES_PATH_NOT_FOUND)?
-            .into_iter()
-            .map(|e| (e.name, if e.is_dir { ENT_DIR } else { ENT_FILE }, e.size))
-            .collect(),
+        Target::Rom(fs, p) => {
+            let layered = if is_game(&fs) { crate::mods::romfs_dir(&p) } else { vec![] };
+            let mut v: Vec<(String, i8, u64)> = match fs.list(&p) {
+                Ok(l) => l.into_iter().map(|e| (e.name, if e.is_dir { ENT_DIR } else { ENT_FILE }, e.size)).collect(),
+                Err(_) if !layered.is_empty() || (is_game(&fs) && crate::mods::romfs_has_dir(&p)) => vec![],
+                Err(_) => return Err(RES_PATH_NOT_FOUND),
+            };
+            for (name, dir, size) in layered {
+                let e = (name, if dir { ENT_DIR } else { ENT_FILE }, size);
+                match v.iter_mut().find(|x| x.0 == e.0) {
+                    Some(x) => *x = e,
+                    None => v.push(e),
+                }
+            }
+            v
+        }
         Target::Host(hp, _, _) => {
             let mut v = vec![];
             for e in std::fs::read_dir(&hp).map_err(|e| io_res(&e))? {

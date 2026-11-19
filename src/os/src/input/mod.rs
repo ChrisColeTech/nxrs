@@ -510,6 +510,9 @@ fn sony_write(s: &mut SonyDev, name: &str, low: u32, high: u32, reset: bool) {
     } else if s.writes < 8 || trace() {
         s.writes += 1;
         ilog!("{name}: output sent id={:02x} bytes={n} low={low} high={high} leds={:#04x} reset={reset}", pkt[0], s.leds);
+        if trace() {
+            ilog!("{name}: report {}", pkt[..n].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "));
+        }
     }
 }
 

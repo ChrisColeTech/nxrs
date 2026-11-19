@@ -20,6 +20,8 @@ pub struct Profile {
     /// GetInfo CoreMask: cores 0-2 on Switch 1.
     pub core_mask: u64,
     pub switch2: bool,
+    /// A map past the application pool fails with ResultLimitReached (`mem_map_limit on`).
+    pub map_limit: bool,
 }
 
 impl Default for Profile {
@@ -33,6 +35,7 @@ impl Default for Profile {
             tick_hz: 19_200_000,
             core_mask: 0x7,
             switch2: false,
+            map_limit: false,
         }
     }
 }
@@ -67,6 +70,7 @@ impl Profile {
                 "sys_resource" => self.sys_resource = num(v).unwrap_or(self.sys_resource),
                 "tick_hz" => self.tick_hz = num(v).unwrap_or(self.tick_hz as u64) as u32,
                 "core_mask" => self.core_mask = num(v).unwrap_or(self.core_mask),
+                "mem_map_limit" => self.map_limit = v.trim() == "on",
                 "switch2" => {
                     self.switch2 = v.trim() == "1";
                     if self.switch2 {
@@ -91,6 +95,7 @@ impl Profile {
                 self.used_beside_heap = pr.memory.used;
             }
             self.sys_resource = pr.memory.sys_resource;
+            self.map_limit = pr.memory.map_limit;
         }
         if program.switch2() {
             self.switch2 = true;

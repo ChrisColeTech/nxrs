@@ -92,6 +92,61 @@ pub fn guest_report(c: &Cpu) -> String {
         }
         fp = next;
     }
+    if let Ok(e) = std::env::var("NXRT_FATAL_PEEK") {
+        for chain in e.split(';') {
+            s.push_str(&peek(c, chain));
+        }
+    }
+    s
+}
+
+/// `NXRT_FATAL_PEEK=<chain>[;<chain>...]` (a debugging aid for crash reports): a chain is `<reg or hex>[+-off]`
+/// followed by `>off` steps (read the u64 there, then add off); 0x100 bytes at the end are dumped. Example:
+/// `sp+0x90>0x2a78>0` = the u64 at [[sp+0x90]+0x2a78].
+fn peek(c: &Cpu, chain: &str) -> String {
+    fn num(t: &str) -> Option<i64> {
+        let t = t.trim();
+        let (neg, t) = t.strip_prefix('-').map(|r| (true, r)).unwrap_or((false, t.strip_prefix('+').unwrap_or(t)));
+        let v = if let Some(h) = t.strip_prefix("0x") { i64::from_str_radix(h, 16).ok()? } else { t.parse().ok()? };
+        Some(if neg { -v } else { v })
+    }
+    let mut parts = chain.split('>');
+    let head = parts.next().unwrap_or("");
+    let (base, off) = match head.find(['+', '-']) {
+        Some(i) => (&head[..i], num(&head[i..]).unwrap_or(0)),
+        None => (head, 0),
+    };
+    let b = match base.trim() {
+        "sp" => c.sp,
+        "lr" => c.x[30],
+        "fp" => c.x[29],
+        r if r.starts_with('x') => r[1..].parse::<usize>().ok().filter(|&i| i < 31).map(|i| c.x[i]).unwrap_or(0),
+        h => num(h).unwrap_or(0) as u64,
+    };
+    let mut a = b.wrapping_add(off as u64);
+    let mut s = format!("  peek {chain}: {a:#x}");
+    for st in parts {
+        if !crate::mem::readable(a, 8) {
+            s.push_str(" (unreadable)\n");
+            return s;
+        }
+        // SAFETY: checked readable.
+        let v = unsafe { *(a as *const u64) };
+        a = v.wrapping_add(num(st).unwrap_or(0) as u64);
+        s.push_str(&format!(" -> {v:#x} -> {a:#x}"));
+    }
+    s.push('\n');
+    for row in 0..16u64 {
+        let p = a + row * 16;
+        if !crate::mem::readable(p, 16) {
+            break;
+        }
+        // SAFETY: checked readable.
+        let b = unsafe { core::slice::from_raw_parts(p as *const u8, 16) };
+        let hex: Vec<String> = b.chunks(8).map(|q| format!("{:016x}", u64::from_le_bytes(q.try_into().unwrap()))).collect();
+        let asc: String = b.iter().map(|&x| if (0x20..0x7f).contains(&x) { x as char } else { '.' }).collect();
+        s.push_str(&format!("    {p:#014x}: {}  {asc}\n", hex.join(" ")));
+    }
     s
 }
 

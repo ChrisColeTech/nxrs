@@ -786,20 +786,32 @@ hidfn!(vib_actual, |a| {
 
 // ---------------------------------------------------------------- other devices: connected, idle
 
-hidfn!(touch_states, |a| {
-    let (out, n) = (a.x(0), a.i(1));
-    if n <= 0 {
-        return 0;
+// TouchScreenState<N> = { i64 sampling number; i32 count; i32 reserved; TouchState[N] (0x28 each) }: every
+// template the SDK instantiates (N = 1..16) is taken over, each writing its own size (Donkey Kong Bananza reads
+// GetTouchScreenState<1>, whose SDK version aborts with Result 0x52ca without the hid service). The screen is idle:
+// docked it is out of reach, and the host has no touch panel.
+fn touch_fill(out: u64, n: u64, count: i32) -> u64 {
+    let stride = 0x10 + 0x28 * n;
+    let num = SAMPLING.fetch_add(1, Ordering::Relaxed) as u64 + 1;
+    let k = count.clamp(0, 1) as u64; // one idle sample: the newest
+    for i in 0..k {
+        crate::guest::zero(out + i * stride, stride);
+        w64(out + i * stride, num);
     }
-    crate::guest::zero(out, 0x10 + 0x28 * 16);
-    w64(out, SAMPLING.fetch_add(1, Ordering::Relaxed) as u64 + 1);
-    1
-});
-hidfn!(touch_state, |a| {
-    crate::guest::zero(a.x(0), 0x10 + 0x28 * 16);
-    w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) as u64 + 1);
-    0
-});
+    k
+}
+macro_rules! touch_n {
+    ($($n:literal $one:ident $many:ident),*) => {
+        $(
+            hidfn!($one, |a| { touch_fill(a.x(0), $n, 1); 0 });
+            hidfn!($many, |a| { touch_fill(a.x(0), $n, a.i(1)) });
+        )*
+        const TOUCH_FNS: &[(u64, unsafe fn(*mut Cpu), unsafe fn(*mut Cpu))] = &[$(($n, $one, $many)),*];
+    };
+}
+touch_n!(1 touch1 touches1, 2 touch2 touches2, 3 touch3 touches3, 4 touch4 touches4, 5 touch5 touches5, 6 touch6 touches6,
+    7 touch7 touches7, 8 touch8 touches8, 9 touch9 touches9, 10 touch10 touches10, 11 touch11 touches11, 12 touch12 touches12,
+    13 touch13 touches13, 14 touch14 touches14, 15 touch15 touches15, 16 touch16 touches16);
 macro_rules! idle_dev {
     ($one:ident, $many:ident, $size:expr) => {
         hidfn!($one, |a| {
@@ -898,8 +910,6 @@ pub fn register(r: &mut Registry) {
         ("27BeginForcedVibrationSessionEv", nothing),
         ("25EndForcedVibrationSessionEv", nothing),
         ("21InitializeTouchScreenEv", nothing),
-        ("19GetTouchScreenStateILm16EEEvPNS0_16TouchScreenStateIXT_EEE", touch_state),
-        ("20GetTouchScreenStatesILm16EEEiPNS0_16TouchScreenStateIXT_EEEi", touch_states),
         ("17InitializeGestureEv", nothing),
         ("16GetGestureStatesEPNS0_12GestureStateEi", gestures),
         ("18InitializeDebugPadEv", nothing),
@@ -913,6 +923,10 @@ pub fn register(r: &mut Registry) {
         ("14GetMouseStatesEPNS0_10MouseStateEi", mouse_states),
     ] {
         r.force(&format!("{p}{n}"), W, f);
+    }
+    for &(n, one, many) in TOUCH_FNS {
+        r.force(&format!("{p}19GetTouchScreenStateILm{n}EEEvPNS0_16TouchScreenStateIXT_EEE"), W, one);
+        r.force(&format!("{p}20GetTouchScreenStatesILm{n}EEEiPNS0_16TouchScreenStateIXT_EEEi"), W, many);
     }
     super::hid_ext::register(r);
 }

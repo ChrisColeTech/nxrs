@@ -359,6 +359,7 @@ pub fn frame(frame: u64) {
         if let Some(l) = super::image::upload_stats::line(frame - st.rsz_frame) {
             crate::vklog!("{l}");
         }
+        crate::vklog!("{}", memory_line());
         st.rsz_frame = frame;
     }
 }
@@ -374,4 +375,45 @@ mod tests {
         assert!(l.starts_with("render sizes up to frame 600, passes per frame: 1920x1080 x2.0 (2.0 with depth), 64x64"), "{l}");
         assert!(l.ends_with("largest with depth 1920x1080"));
     }
+}
+
+/// Where memory is (every 600 frames): the process's private bytes, the allocator's blocks and allocations by name,
+/// images, parked images, staging kept by recycled submissions, and imported / mirrored pools.
+pub fn memory_line() -> String {
+    let Some(g) = super::Gpu::try_get() else { return String::new() };
+    let private = private_mb();
+    let rep = g.alloc.lock().unwrap().generate_report();
+    let mut by: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
+    for a in &rep.allocations {
+        let e = by.entry(a.name.clone()).or_default();
+        e.0 += 1;
+        e.1 += a.size;
+    }
+    let mut v: Vec<_> = by.into_iter().collect();
+    v.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
+    let top: Vec<String> = v.iter().take(8).map(|(n, (c, b))| format!("{n} {c} = {} MB", b >> 20)).collect();
+    let (ni, parked) = g.image_counts();
+    format!(
+        "memory: private {private} MB; allocator {} MB in blocks, {} MB allocated ({}); this layer's system memory {} MB ({} refused over its cap); images {ni}, parked {parked}; replay queue {} ops behind",
+        rep.total_reserved_bytes >> 20,
+        rep.total_allocated_bytes >> 20,
+        top.join(", "),
+        super::HOST_LIVE.load(std::sync::atomic::Ordering::Relaxed) >> 20,
+        super::HOST_REFUSED.load(std::sync::atomic::Ordering::Relaxed),
+        super::queue::aq_backlog()
+    )
+}
+
+#[cfg(windows)]
+fn private_mb() -> u64 {
+    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+    use windows_sys::Win32::System::Threading::GetCurrentProcess;
+    let mut c: PROCESS_MEMORY_COUNTERS_EX = unsafe { core::mem::zeroed() };
+    c.cb = core::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
+    let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut c as *mut _ as *mut _, c.cb) };
+    if ok != 0 { c.PrivateUsage as u64 >> 20 } else { 0 }
+}
+#[cfg(not(windows))]
+fn private_mb() -> u64 {
+    0
 }

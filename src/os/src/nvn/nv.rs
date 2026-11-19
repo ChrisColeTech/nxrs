@@ -35,10 +35,23 @@ unsafe fn gs_check_initialized(c: *mut Cpu) {
 }
 unsafe fn nv_mem_info(c: *mut Cpu) {
     let o = (*c).x[0];
-    crate::guest::zero(o, 0x20); // SDK 10 and older: four counters
+    // 0x20 bytes (four counters) on SDK 10 and older, 0x40 from SDK 11 on (the SDK zeroes all 0x40)
+    let m = nxgfx::nvn::device::SDK_MAJOR.load(Ordering::Relaxed);
+    crate::guest::zero(o, if m != 0 && m <= 10 { 0x20 } else { 0x40 });
     let n = NV_SIZE.load(Ordering::Relaxed);
     w64(o, n);
     w64(o + 16, n);
+}
+/// nn::gs::sdk::QueryApplicationGpuTimeSpan(TimeSpan *out, begin, end) (Switch 2): how much of [begin, end] the GPU
+/// gave the application rather than another client; the SDK asks the gsv session the host never opens (a null
+/// context). The game is the only client of the host's GPU timeline, so it held the GPU for the whole interval.
+unsafe fn gs_gpu_time_span(c: *mut Cpu) {
+    let a = Args(&mut *c);
+    let (o, b, e) = (a.x(0), a.x(1), a.x(2));
+    if o != 0 {
+        w64(o, e.saturating_sub(b));
+    }
+    (*c).x[0] = 0;
 }
 unsafe fn nv_dump(_c: *mut Cpu) {
     crate::log!("nv::DumpGraphicsMemoryInfo: pool {:.2} MB, the graphics layer keeps its own", NV_SIZE.load(Ordering::Relaxed) as f64 / 1048576.0);
@@ -51,5 +64,6 @@ pub fn register_nv(r: &mut Registry) {
     r.force("_ZN2nv9InitCheckEv", WHY, nv_init_check);
     r.force("_ZN2nv21GetGraphicsMemoryInfoEPNS_10MemoryInfoE", WHY, nv_mem_info);
     r.force("_ZN2nv22DumpGraphicsMemoryInfoEv", WHY, nv_dump);
+    r.force("_ZN2nn2gs3sdk27QueryApplicationGpuTimeSpanEPNS_8TimeSpanEmm", "application GPU time: the game is the only client of the host's GPU", gs_gpu_time_span);
     r.force("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "the gs boot is nv::InitializeGraphics' (replaced): initialized once it ran", gs_check_initialized);
 }
