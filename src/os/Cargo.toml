@@ -1,0 +1,30 @@
+[package]
+name = "os"
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+description = "RecompLauncher engine: the OS services layer (HLE of the SDK's system interfaces, IPC, sm and the services, memory and SVCs)"
+
+[lib]
+name = "nxos"
+path = "src/lib.rs"
+# rlib for tests and the dev tool; staticlib (nxos.lib, which carries the runtime) is what the game executable links.
+crate-type = ["rlib", "staticlib"]
+
+[[bin]]
+name = "nxos-dev"
+path = "src/bin/nxos_dev.rs"
+
+[dependencies]
+runtime = { path = "../runtime" }
+translator = { path = "../translator" }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_SystemInformation",
+    "Win32_System_ProcessStatus",
+    "Win32_System_Time",
+] }
