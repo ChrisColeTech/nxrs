@@ -187,6 +187,13 @@ its first 0x48 bytes with +0x30..+0x34 zeroed, code area length at +0x44. NVN: i
   near = -w needs `VK_EXT_depth_clip_control` negativeOneToOne); origin upper-left, no Y flip. Reads past a bound
   uniform or storage range give 0 only with `robustBufferAccess2` (nxnative's Metal-only bound tables are off here).
 
+**Device features the outputs need** (SPIR-V capabilities over the 184,350 valid modules of the seven verification
+games): `shaderFloat64` (every module declares Float64), `shaderInt64`, `shaderImageGatherExtended`,
+`shaderStorageImageReadWithoutFormat` / `WriteWithoutFormat`, subgroup vote / ballot / shuffle,
+`shaderDrawParameters`, `geometryShader`, `shaderOutputViewportIndex` + `shaderOutputLayer`, `bufferDeviceAddress`
+(PhysicalStorageBufferAddresses: raw global memory), `VK_EXT_fragment_shader_interlock` (fragmentShaderPixelInterlock:
+declared by 101,276 pixel shaders), `VK_NV_geometry_shader_passthrough` and `VK_NV_viewport_array2` (4 geometry shaders).
+
 **For the translator crate:** `loader::nso::Nso::parse` cannot read ZBIC-compressed segments (Switch 2; Ocarina of
 Time 2.0's `main`). This crate decodes NSO segments itself (LZ4 and ZBIC, `shaders::formats::nso::image`).
 

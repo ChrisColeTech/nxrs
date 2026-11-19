@@ -1,0 +1,50 @@
+--- dmsh_xlate/Program.cs
++++ dmsh_xlate/Program.cs
+@@ -34,9 +34,9 @@ static class SwshXlate
+ 
+     sealed class Accessor : IGpuAccessor
+     {
+-        readonly byte[] _code; readonly JsonObject _job; int _binding = 1; public readonly List<string> Notes = new();
++        readonly byte[] _code; readonly JsonObject _job; int _binding = 1; readonly int _set; public readonly List<string> Notes = new();
+         readonly byte[] _c1;
+-        public Accessor(byte[] code, JsonObject job, Dictionary<int, SamplerType> imageTypes = null, Dictionary<int, SamplerType> textureTypes = null) { if (job["rt"] != null) _binding = RayTracingProgram.ReservedBindings; else if (job["geometry_topology"] != null) _binding = 40; _code = code; _job = job; _c1 = job["c1"] is JsonNode h ? Convert.FromHexString((string)h) : Array.Empty<byte>(); _imageTypes = imageTypes; _textureTypes = textureTypes; }
++        public Accessor(byte[] code, JsonObject job, Dictionary<int, SamplerType> imageTypes = null, Dictionary<int, SamplerType> textureTypes = null) { if (job["rt"] != null) _binding = RayTracingProgram.ReservedBindings; else if (job["geometry_topology"] != null) _binding = 40; _set = job["set"] is JsonNode sn ? (int)sn : 0; _code = code; _job = job; _c1 = job["c1"] is JsonNode h ? Convert.FromHexString((string)h) : Array.Empty<byte>(); _imageTypes = imageTypes; _textureTypes = textureTypes; }
+         public bool QueryRawGlobalMemory() => _job["rt"] != null;
+         public bool QueryHostSupportsImageLoadFormatted() => _job["rt"] == null;
+         // A texture query on an image handle (TXQ on c2 0x120 + 8 r: Unreal's GetDimensions on the RWTexture3D a compute shader writes) asks the type of that handle, which a table built
+@@ -77,10 +77,10 @@ static class SwshXlate
+         // All resources go into set 0, each with a distinct binding number (spirv-cross emits them as one argument buffer); the translator's convention of giving the buffer of constant segment number index binding = index+1 is not relied on
+         // The translator's own messages (a bindless read it resolved, or could not and removed, its result 0; an invalid encoding) go into the notes, marked, which dmsh_build.py counts apart
+         public void Log(string message) => Notes.Add("translator: " + message);
+-        public SetBindingPair CreateConstantBufferBinding(int index) => new(0, _binding++);
+-        public SetBindingPair CreateImageBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(0, b); }
+-        public SetBindingPair CreateStorageBufferBinding(int index) => new(0, _binding++);
+-        public SetBindingPair CreateTextureBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(0, b); }
++        public SetBindingPair CreateConstantBufferBinding(int index) => new(_set, _binding++);
++        public SetBindingPair CreateImageBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(_set, b); }
++        public SetBindingPair CreateStorageBufferBinding(int index) => new(_set, _binding++);
++        public SetBindingPair CreateTextureBinding(int count, bool isBuffer) { int b = _binding; _binding += count; return new(_set, b); }
+         // An address past the code is no code: FindBrxTargetsAmpere ends a jump table on it when the words after the table are not code offsets (Yoshi and the Mysterious Book's 23e73eaf528c9c0b, whose slice threw)
+         public ReadOnlySpan<ulong> GetCode(ulong address, int minimumSize) => address >= (ulong)_code.Length ? default : MemoryMarshal.Cast<byte, ulong>(new ReadOnlySpan<byte>(_code)[(int)address..]);
+         // A texture read whose handle the translator cannot trace to one slot indexes the texture and sampler pools by the handle's IDs (20 and 12 bits); dmsh_build.py turns these
+@@ -218,8 +218,9 @@ static class SwshXlate
+                 byte[] code = File.ReadAllBytes((string)job["code"]);
+                 var acc = new Accessor(code, job);
+                 // Job debug = false: turn off DebugMode (DebugMode skips the AST optimizer and the output is full of temporaries; semantics unchanged)
+-                var flags = TranslationFlags.MetalImageAtomics |
+-                    (job["rt"] != null ? 0 : TranslationFlags.MetalUniformBounds | TranslationFlags.MetalBufferImageBias | TranslationFlags.MetalStorageBounds) |
++                bool vulkan = (string)job["target"] == "vulkan";
++                var flags = (vulkan ? 0 : TranslationFlags.MetalImageAtomics) |
++                    (job["rt"] != null || vulkan ? 0 : TranslationFlags.MetalUniformBounds | TranslationFlags.MetalBufferImageBias | TranslationFlags.MetalStorageBounds) |
+                     (job["debug"] is JsonNode dbg && !(bool)dbg ? 0 : TranslationFlags.DebugMode) |
+                     ((string)job["stage"] == "cs" ? TranslationFlags.Compute : 0) |
+                     ((string)job["arch"] == "sm86" ? TranslationFlags.Ampere : 0);
+@@ -254,7 +255,7 @@ static class SwshXlate
+                 File.WriteAllBytes(Path.Combine(outDir, key + ".spv"), VertexCounterLowering.Apply(code, (string)job["stage"], p.BinaryCode, acc.Notes));
+                 var res = new JsonObject
+                 {
+-                    ["key"] = key, ["stage"] = (string)job["stage"], ["notes"] = new JsonArray(acc.Notes.ConvertAll(n => (JsonNode)n).ToArray()),
++                    ["key"] = key, ["stage"] = (string)job["stage"], ["set"] = job["set"] is JsonNode setn ? (int)setn : 0, ["target"] = (string)job["target"] ?? "metal", ["notes"] = new JsonArray(acc.Notes.ConvertAll(n => (JsonNode)n).ToArray()),
+                     ["cbufs"] = new JsonArray(), ["sbufs"] = new JsonArray(), ["textures"] = new JsonArray(), ["images"] = new JsonArray(),
+                     ["geometry_stride"] = geometry ? ctx.GetResourceReservations().OutputSizePerInvocation : 0,
+                     ["uses_frag_coord"] = p.Info.UsesFragCoord, ["frag_out_map"] = p.Info.FragmentOutputMap,

@@ -1,0 +1,25 @@
+[package]
+name = "shaders"
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+description = "RecompLauncher engine: every shader of a game found at build time and translated to SPIR-V for Vulkan"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "nxshaders"
+path = "src/bin/nxshaders.rs"
+
+[dependencies]
+translator = { path = "../translator" }
+zstd = "0.13"
+lz4_flex = { version = "0.11", default-features = false, features = ["safe-decode", "std", "frame"] }
+flate2 = "1"
+lztans = "0.1.1"
+memchr = "2"
+sha2 = "0.10"
+serde_json = { version = "1", features = ["preserve_order"] }
+clap = { version = "4", features = ["derive"] }
+base64 = "0.22"
