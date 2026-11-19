@@ -60,8 +60,70 @@ Graphics calls `nxos::nvn::note_submit(queue, n)` and `nxos::nvn::note_present(w
    main thread at its own host function and runs nn::init's steps), and lazy heap commit in `mem::Space`.
 5. A public way to create kernel events and signal them from host code (os calls `kernel::svc` with a scratch `Cpu`).
 
-## graphics (src/graphics)
-_(lane B)_
+## graphics (src/graphics, lib `nxgfx`)
+NVN on Vulkan: the record layer (nxnative's `hle_nvn.c`: objects in place in the game's memory, commands recorded into
+its command memory) and the replay on a discrete GPU. Module map in `src/lib.rs` and `src/vk/mod.rs`.
+
+**Binding NVN (agreed with os, lane A; os's snippet above is the registration):**
+- `nxgfx::nvn::procs() -> &'static [Entry { name: &'static str, f: HostFn }]`: every implemented `nvn*` entry point as a
+  bridge host function, `HostFn = unsafe fn(*mut nxrt::cpu::Cpu)` (the runtime's type; integer arguments from x0-x7
+  then the guest stack, floats from v0-v7, NVN booleans as their low 8 bits; result in x0 / s0). 400 today.
+- `nxgfx::nvn::set_proc_resolver(fn(&str) -> u64)`: name → guest address (`nxos::nvn::proc_address`), answered by
+  `nvnDeviceGetProcAddress`; `nxgfx::nvn::entry::nvn_bootstrap_loader` is a `HostFn` for `nvnBootstrapLoader` if os
+  wants graphics to own it (os owns it today).
+- `nxgfx::nvn::set_guest_caller(fn(addr: u64, args: &[u64]) -> u64)`: runs a guest function (`nxos::guest::call_current`);
+  graphics calls the game's command-memory callbacks with it.
+- `nxgfx::nvn::set_hooks(Hooks { submit: fn(queue: u64, n: u64), present: fn(window: u64, index: u32), blocking:
+  fn(&mut dyn FnMut()) })`: graphics calls `submit` / `present` with the NVN object's guest address from
+  `nvnQueueSubmitCommands` / `nvnQueuePresentTexture`, and runs every wait that blocks a guest thread (SyncWait,
+  QueueFinish, WindowAcquireTexture's vsync pacing and present wait, ReadTexels) inside `blocking`. os:
+  `Hooks { submit: nxos::nvn::note_submit, present: nxos::nvn::note_present, blocking: |f| nxos::sched::without_core(|| f()) }`.
+- Before `nvnDeviceInitialize`: `nxgfx::nvn::device::SWITCH2` (NVN2: API 231.39, the Switch 2's GOB order, timestamps
+  in ns) and `SDK_MAJOR` (SDK 10 and older answer API 53.313), from the title's sdk module.
+- Guest addresses are host addresses; a memory pool's storage address is its GPU address. Pools over memory reserved
+  with `MEM_WRITE_WATCH` (the runtime's guest blocks) get their CPU writes from the OS write watch; elsewhere graphics
+  falls back to comparing a snapshot (slower).
+
+**Run-time setup (the front end / the binary):**
+- `nxgfx::set_window(hwnd: isize, hinstance: isize)`: the host window every NVN window presents into (0 = headless;
+  presents are counted and paced, not shown). `NVNwindowBuilderSetNativeWindow`'s value is kept, not used.
+  `nxgfx::close_window()` before the window goes.
+- `nxgfx::set_shader_dir(<data>/shaders)`, `nxgfx::set_cache_dir(<data>)` (pipeline key file `pipeline-keys.bin`,
+  `pipeline-cache.bin`), `nxgfx::prewarm(threads) -> PrewarmReport` (builds the keys earlier runs used, stopping at
+  `NXGFX_PREWARM_BUDGET_MB` of private-memory growth, default 2048), `nxgfx::save_caches()` at exit.
+- `nxgfx::log::set_sink(Fn(&str))`: where log lines go (`<name>.log`). Lines are `[   t.tt] [vk] …` / `[nvn] …`; red
+  ones `[RED] …`. Every 300 presents (`NXGFX_PACE_N`) or 5 s: `[vk] pacing: F FPS | p95 a p99 b max c ms | >16.67 n
+  >33/50/100 x/y/z (last N intervals)` (the launcher's format) and `[vk] pools: …` (placement, upload and write-back
+  MB and ms per frame).
+- Switches: `NXGFX_VALIDATION=1` (Vulkan validation layer), `NXGFX_GPU=<name part>`, `NXGFX_POOL=mirror|host|vram`,
+  `NXGFX_PRESENT=fifo|mailbox|immediate`, `NXGFX_ASTC=rgba8` (no BC7 re-encode), `NXGFX_TEX_CAP` / `NXGFX_SAMP_CAP`
+  (pool set size, 65536 / 4096), `NXGFX_SHADERS`, `NXGFX_CACHE`, `NXGFX_POOL_LOG=1`.
+
+**Shaders (agreed with shaders, lane C):** graphics reads lane C's output as written above: `<data>/shaders/spv/
+<key>.spv` + `.json` (`status` "ok"), the shader key as defined there (`nxgfx::nvn::prog::shader_key` computes it at
+`nvnProgramSetShaders`). Nothing in lane C's output needs to change for the binding model: at module load graphics
+rewrites each module's DescriptorSet / Binding decorations from the json's `bindings[]` into **one pipeline layout
+shared by every program** (no per-program layouts, so pipelines key only on shaders + attachment formats + samples):
+- set s = NVN stage s (0 vertex, 1 fragment, 2 geometry, 3 tess control, 4 tess evaluation, 5 compute); in it:
+  `cbuf` slot b → binding b (c0 driver segment and c2 handle table built per draw as described above; c1 from the
+  json; c3+r the game's uniform slot r); `support` → binding 31 (filled per draw: alpha test off, is_bgra 0,
+  viewport_inverse (2/w, 2/h, 1, 0) and viewport_size (w, h, 1, 0) of the render area, render_scale 1.0); `sbuf` k →
+  binding 32 + k (its {address, size} read from c[cb_slot] at word cb_offset; c0 is the driver segment's tables);
+  `texture` k (combined_image_sampler) → 64 + k (handle words read from c2, or from c[cbuf_slot] for bindless; texture
+  ID | sampler ID << 20, the separate-sampler kinds 1 and 2 too; a view of the registered texture with the json's
+  `type` as its target); `image` k → 128 + k; buffer textures / images → 144 + k / 160 + k (not bound yet).
+- set 6 = NVN's texture / sampler pools as bindless arrays by host ID (sampled images 0, samplers 1, storage images
+  2, texel buffers 3 / 4), for arrays the json marks `array` 1<<20 / 4096 as `sampled_image` / `sampler` /
+  `storage_image`. Push constants (128 bytes, all stages): 0 the active texture pool's base, 4 the sampler pool's,
+  8 flags (bit 0: upper-left origin).
+- Not bound yet (the module is refused with a red line): `array` 301 / 8192 handle tables, combined-sampler pool
+  arrays, buffer textures, more than 64 textures or 32 storage buffers a stage.
+- Conventions taken as lane C states them: clip z as written (graphics sets `depthClipNegativeOneToOne` from NVN's
+  depth mode), no Y flip in the shader (graphics flips the viewport for NVN's upper-left origin and inverts the
+  winding otherwise; NVN's default lower-left picture is flipped at present). Device features the translated code
+  needs are enabled when offered: fragment shader pixel/sample interlock, int8/float16 storage, image formats.
+- Checked against lane C's MK8D build: 2,000 program pairs and 28 compute shaders remap and build with the
+  validation layer clean (`tests/shaders_lane_c.rs`).
 
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
