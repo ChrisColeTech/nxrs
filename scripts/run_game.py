@@ -1,6 +1,6 @@
 """run_game.py <exe> <log> <hard timeout s> [args...]: the machine's game rules for one run.
 
-Waits until no build runs (cargo, rustc, clang, nxshaders, nxrs-build: a run overlapping a build crashed the PC), takes
+Takes
 GAME_LOCK atomically, checks no other game exe runs and free commit > 40 GB, starts the exe, watches it BY PID
 (kill if private bytes > 20 GB or free commit < 25 GB, or past the hard timeout), deletes the lock once it exited.
 Environment: NXRS_LANE names the lane in the lock. scripts/play_scenario.py runs games through `run()` here.
@@ -62,15 +62,17 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
     g = other_games()
     if g:
         raise SystemExit('another game runs: %s' % g)
-    for i in range(61):   # wait up to 10 minutes for builds to finish
-        busy = compilers()
-        if not busy:
-            break
-        if i == 60:
-            raise SystemExit('builds still running after 10 minutes: %s' % busy)
-        if i == 0:
-            say('waiting for builds to finish: %s' % busy)
-        time.sleep(10)
+    # builds may overlap a run (owner, 2026-11-19): NXRS_WAIT_FOR_BUILDS=1 restores the wait if crashes under load return
+    if os.environ.get('NXRS_WAIT_FOR_BUILDS') == '1':
+        for i in range(61):
+            busy = compilers()
+            if not busy:
+                break
+            if i == 60:
+                raise SystemExit('builds still running after 10 minutes: %s' % busy)
+            if i == 0:
+                say('waiting for builds to finish: %s' % busy)
+            time.sleep(10)
     fc = free_commit_mb()
     if fc < COMMIT_MIN_START_MB:
         raise SystemExit('free commit %d MB < 40 GB' % fc)
