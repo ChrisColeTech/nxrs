@@ -28,12 +28,20 @@ pub fn run() {
                 crate::log::gaps().len(),
                 crate::sched::stats()
             );
+            if crate::log::secs() as u64 % 60 < beat as u64 + 1 {
+                for l in crate::services::audio::report() {
+                    crate::log!("{l}");
+                }
+            }
         }
         let done = after.is_some_and(|s| t0.elapsed().as_secs_f64() >= s)
             || after_submit.is_some_and(|s| crate::nvn::first_submit_age().is_some_and(|a| a >= s));
         if done {
             crate::log!("run ends here (NXOS_EXIT_AFTER / NXOS_EXIT_AFTER_SUBMIT)");
             crate::nvn::report();
+            for l in crate::services::audio::report() {
+                crate::log!("{l}");
+            }
             crate::log::report_gaps("end of run");
             nxrt::process::exit(0);
         }

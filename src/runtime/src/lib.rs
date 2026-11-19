@@ -14,6 +14,7 @@ pub mod kernel;
 pub mod loader;
 pub mod mem;
 pub mod process;
+pub mod profile;
 pub mod rt;
 pub mod sjlj;
 pub mod svc;

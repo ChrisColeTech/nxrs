@@ -110,6 +110,46 @@ pub struct Kernel {
 
 static KERNEL: OnceLock<Kernel> = OnceLock::new();
 
+/// What a scheduler (the os layer's virtual cores) is told and asked. Every method has a do-nothing default, so a
+/// scheduler implements what it needs. None is called with the kernel lock held.
+pub trait Scheduler: Sync {
+    /// A guest thread starts running on this host thread (before its entry), with its ideal core.
+    fn thread_start(&self, _handle: u32, _core: i32) {}
+    /// A guest thread is done (after ExitThread or its entry returned), on its own host thread.
+    fn thread_exit(&self, _handle: u32) {}
+    /// The calling guest thread is about to block in an SVC (sleep, a lock, a condition variable, an address wait,
+    /// WaitSynchronization): its core can go to another thread.
+    fn block_enter(&self) {}
+    /// It is back from the blocking SVC and wants its core again (may wait for one).
+    fn block_leave(&self) {}
+    /// SetThreadPriority was applied to a thread.
+    fn priority_changed(&self, _handle: u32, _prio: i32) {}
+    /// SetThreadCoreMask was applied to a thread.
+    fn affinity_changed(&self, _handle: u32, _core: i32, _mask: u64) {}
+    /// GetCurrentProcessorNumber of the calling thread; None: the thread's ideal core.
+    fn current_processor(&self) -> Option<u32> {
+        None
+    }
+    /// A pass of a marked spin-wait loop (`rt_spin_gate`, before it yields the host core): a checkpoint.
+    fn spin_pass(&self) {}
+}
+
+struct NoScheduler;
+impl Scheduler for NoScheduler {}
+
+static SCHEDULER: OnceLock<&'static dyn Scheduler> = OnceLock::new();
+
+/// Installs the scheduler (once, before guest threads start).
+pub fn set_scheduler(s: &'static dyn Scheduler) {
+    if SCHEDULER.set(s).is_err() {
+        crate::rt::fatal("kernel: a scheduler is installed twice");
+    }
+}
+
+pub(crate) fn sched() -> &'static dyn Scheduler {
+    SCHEDULER.get().copied().unwrap_or(&NoScheduler)
+}
+
 thread_local! {
     /// The guest thread running on this host thread (its slot), if any.
     static CUR: Cell<Option<usize>> = const { Cell::new(None) };
@@ -131,7 +171,13 @@ pub fn init(space: &'static Space) -> &'static Kernel {
     if KERNEL.set(Kernel { g: Mutex::new(State { next_id: 0x51, ..Default::default() }), space }).is_err() {
         crate::rt::fatal("kernel initialised twice");
     }
+    crate::process::startup(space);
     get()
+}
+
+/// The kernel, once a process started.
+pub fn try_get() -> Option<&'static Kernel> {
+    KERNEL.get()
 }
 
 fn ld32(a: u64) -> u32 {
@@ -376,6 +422,59 @@ pub fn current_handle() -> Option<u32> {
 }
 
 impl Kernel {
+    /// A new event as svcCreateEvent makes it: (write handle, read handle). Host code signals it with
+    /// [`Kernel::signal_event`]; the guest waits on the read handle.
+    pub fn create_event(&self) -> (u32, u32) {
+        let mut g = lock(&self.g);
+        let e = g.events.iter().position(|e| e.is_none()).unwrap_or_else(|| {
+            g.events.push(None);
+            g.events.len() - 1
+        });
+        g.events[e] = Some(Event { signaled: false, refs: 2 });
+        (g.h_new(Obj::EventW(e)), g.h_new(Obj::EventR(e)))
+    }
+
+    /// Signals an event (either handle): its waiters wake. R_OK or R_BAD_HANDLE.
+    pub fn signal_event(&self, h: u32) -> u64 {
+        let mut g = lock(&self.g);
+        match g.h_get(h) {
+            Obj::EventW(e) | Obj::EventR(e) => {
+                g.events[e].as_mut().unwrap().signaled = true;
+                g.wake_sync_waiters(SyncRef::Event(e));
+                R_OK
+            }
+            _ => R_BAD_HANDLE,
+        }
+    }
+
+    /// Clears an event (either handle). R_OK or R_BAD_HANDLE.
+    pub fn clear_event(&self, h: u32) -> u64 {
+        let mut g = lock(&self.g);
+        match g.h_get(h) {
+            Obj::EventW(e) | Obj::EventR(e) => {
+                g.events[e].as_mut().unwrap().signaled = false;
+                R_OK
+            }
+            _ => R_BAD_HANDLE,
+        }
+    }
+
+    /// Whether an event (either handle) is signaled; None for another handle.
+    pub fn event_signaled(&self, h: u32) -> Option<bool> {
+        let g = lock(&self.g);
+        match g.h_get(h) {
+            Obj::EventW(e) | Obj::EventR(e) => Some(g.events[e].as_ref().unwrap().signaled),
+            _ => None,
+        }
+    }
+
+    /// Closes a handle (svcCloseHandle).
+    pub fn close_handle(&self, h: u32) {
+        let mut c = Cpu::new_boxed();
+        c.x[0] = h as u64;
+        svc_inner(&mut c, 0x16);
+    }
+
     /// Creates a guest thread (not started); returns its handle.
     pub fn create_thread(&self, entry: u64, arg: u64, stack_top: u64, prio: i32, core: i32) -> u32 {
         let tls = self.space.alloc_tls();
@@ -500,7 +599,16 @@ fn thread_body(slot: usize) {
         }
         (cpu, entry, arg, sp, tls, handle) = (t.cpu, t.entry, t.arg, t.stack_top, t.tls, t.handle);
         main = t.id == 0x51;
+        // The thread's ID at ThreadLocalRegion+0x110: SDK 22's InternalCriticalSection compares a mutex's owner
+        // word with the 32-bit ID it reads there (mrs tpidrro_el0; ldr w8, [x8, #0x110]). Left 0, it equals an
+        // unlocked mutex's owner, every mutex reads as held by the caller and the SDK's allocator aborts at its
+        // first lock (Ocarina of Time, SDK 22.2.8).
+        // SAFETY: the thread's own TLS region, 0x200 bytes, committed.
+        unsafe { ((tls + 0x110) as *mut u32).write_unaligned(t.id as u32) };
     }
+    let core = lock(&k.g).t(slot).core;
+    sched().thread_start(handle, core);
+    crate::profile::add_current(handle);
     CPU.set(cpu);
     // SAFETY: this thread owns its Cpu until it exits.
     unsafe {
@@ -525,11 +633,27 @@ fn thread_body(slot: usize) {
         crate::boundary::take_pending();
     }
     CPU.set(core::ptr::null_mut());
+    crate::profile::remove(handle);
+    sched().thread_exit(handle);
     k.host_finished(slot);
 }
 
-/// The kernel's SVCs. Returns false for a number this file does not handle.
+/// The kernel's SVCs. Returns false for a number this file does not handle. The blocking ones (sleep, locks,
+/// condition variables, address waits, WaitSynchronization) are bracketed by the scheduler's `block_enter` /
+/// `block_leave`.
 pub fn svc(c: &mut Cpu, imm: u32) -> bool {
+    let blocking = matches!(imm, 0x0B | 0x18 | 0x1A | 0x1C | 0x34);
+    if blocking {
+        sched().block_enter();
+    }
+    let r = svc_inner(c, imm);
+    if blocking {
+        sched().block_leave();
+    }
+    r
+}
+
+fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
     let k = get();
     match imm {
         0x08 => {
@@ -557,6 +681,9 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             match g.thread_of(c.x[0] as u32) {
                 Some(i) => {
                     g.t(i).prio = c.x[1] as i32;
+                    let h = g.t(i).handle;
+                    drop(g);
+                    sched().priority_changed(h, c.x[1] as i32);
                     c.x[0] = R_OK;
                 }
                 None => c.x[0] = R_BAD_HANDLE,
@@ -581,14 +708,21 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
                         t.core = 0;
                     }
                     t.mask = if ideal == -2 { 1 } else if mask != 0 { mask } else { t.mask };
+                    let (h, core, mask) = (t.handle, t.core, t.mask);
+                    drop(g);
+                    sched().affinity_changed(h, core, mask);
                     c.x[0] = R_OK;
                 }
                 None => c.x[0] = R_BAD_HANDLE,
             }
         }
         0x10 => {
-            let g = lock(&k.g);
-            c.x[0] = CUR.get().map_or(0, |i| g.threads[i].as_ref().unwrap().core as u64);
+            if let Some(n) = sched().current_processor() {
+                c.x[0] = n as u64;
+            } else {
+                let g = lock(&k.g);
+                c.x[0] = CUR.get().map_or(0, |i| g.threads[i].as_ref().unwrap().core as u64);
+            }
         }
         0x25 => {
             let g = lock(&k.g);
@@ -717,13 +851,7 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
             c.x[0] = r;
         }
         0x45 => {
-            let mut g = lock(&k.g);
-            let e = g.events.iter().position(|e| e.is_none()).unwrap_or_else(|| {
-                g.events.push(None);
-                g.events.len() - 1
-            });
-            g.events[e] = Some(Event { signaled: false, refs: 2 });
-            let (w, r) = (g.h_new(Obj::EventW(e)), g.h_new(Obj::EventR(e)));
+            let (w, r) = k.create_event();
             c.x[0] = R_OK;
             c.x[1] = w as u64;
             c.x[2] = r as u64;

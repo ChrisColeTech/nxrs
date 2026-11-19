@@ -31,7 +31,7 @@ uint8_t rt_patch_on[1];
 #define F(T, f) printf(#T "." #f " %zu\n", offsetof(T, f));
 int main(void) {
     S(Cpu) F(Cpu, x) F(Cpu, sp) F(Cpu, pc) F(Cpu, nzcv) F(Cpu, tpidr) F(Cpu, tpidrro) F(Cpu, excl_addr)
-    F(Cpu, excl_val) F(Cpu, thread) F(Cpu, fpcr) F(Cpu, fpsr) F(Cpu, excl_val_hi) F(Cpu, sj) F(Cpu, v)
+    F(Cpu, excl_val) F(Cpu, thread) F(Cpu, fpcr) F(Cpu, fpsr) F(Cpu, excl_val_hi) F(Cpu, sj) F(Cpu, excl_seq) F(Cpu, v)
     S(RtModule) F(RtModule, name) F(RtModule, base) F(RtModule, size) F(RtModule, addrs) F(RtModule, fns)
     F(RtModule, count)
     return 0;
@@ -80,6 +80,7 @@ fn c_and_rust_layouts_agree() {
         ("Cpu.fpsr", offset_of!(Cpu, fpsr)),
         ("Cpu.excl_val_hi", offset_of!(Cpu, excl_val_hi)),
         ("Cpu.sj", offset_of!(Cpu, sj)),
+        ("Cpu.excl_seq", offset_of!(Cpu, excl_seq)),
         ("Cpu.v", offset_of!(Cpu, v)),
         ("RtModule.sizeof", size_of::<RtModule>()),
         ("RtModule.alignof", align_of::<RtModule>()),

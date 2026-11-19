@@ -173,14 +173,14 @@ unsafe fn cmd_alloc(o: &mut cmd_t, size: u32) -> *mut u8 {
 }
 
 /// A canonical record with a zeroed payload of `payload` bytes; returns the payload.
-unsafe fn rec(c: *mut NVNcommandBuffer, op: u32, payload: usize) -> *mut u8 {
+pub(crate) unsafe fn rec(c: *mut NVNcommandBuffer, op: u32, payload: usize) -> *mut u8 {
     let sz = ((8 + payload + 7) & !7) as u32;
     let p = cmd_alloc(cb(c), sz);
     put_hdr(p, op, sz);
     core::ptr::write_bytes(p.add(8), 0, sz as usize - 8);
     p.add(8)
 }
-unsafe fn rec_t<T>(c: *mut NVNcommandBuffer, op: u32) -> *mut T {
+pub(crate) unsafe fn rec_t<T>(c: *mut NVNcommandBuffer, op: u32) -> *mut T {
     rec(c, op, core::mem::size_of::<T>()) as *mut T
 }
 /// A compact record: op | args << 8, payload bytes.
@@ -206,7 +206,7 @@ fn compact() -> bool {
     REC_COMPACT.load(Ordering::Relaxed)
 }
 
-unsafe fn rec_draw(c: *mut NVNcommandBuffer, d: p_draw) {
+pub(crate) unsafe fn rec_draw(c: *mut NVNcommandBuffer, d: p_draw) {
     if compact() && d.mdi_cnt == 0 && (d.prim as u32) < 0x100 {
         if d.ind != 0 {
             let mut q = crec(c, opc::DRAW_IND, d.prim as u32, 8);
@@ -558,7 +558,7 @@ fn slots_bound(what: &str, st: i32, first: i32, n: i32, slots: i32) -> i32 {
     }
     k
 }
-fn st_host(st: i32) -> i32 {
+pub(crate) fn st_host(st: i32) -> i32 {
     match st {
         6 => 3,
         7 => 4,
@@ -611,6 +611,20 @@ unsafe fn rec_bufs(c: *mut NVNcommandBuffer, o: u32, st: i32, first: i32, n: i32
     }
     true
 }
+/// A Bind*Deferred: the handles at `src` as they are when the queue runs the record.
+pub(crate) unsafe fn bind_handles_deferred(c: *mut NVNcommandBuffer, o: u32, st: i32, first: i32, n: i32, src: u64) {
+    if !(0..=32).contains(&n) || src == 0 {
+        crate::log::red(&format!("deferred bind handle count {n} at {src:#x}"));
+        return;
+    }
+    let r = rec(c, o, 24 + 8 * n as usize) as *mut p_bind_handles;
+    (*r).stage = st;
+    (*r).first = first;
+    (*r).n = n;
+    (*r).defer = 1;
+    (*r).src = src;
+}
+
 unsafe fn bind_handles(c: *mut NVNcommandBuffer, o: u32, st: i32, first: i32, n: i32, h: *const u64) {
     if !(0..=32).contains(&n) {
         crate::log::red(&format!("bind handle count {n}"));
@@ -867,6 +881,9 @@ nvn_fns! {
         (*o).mask = mask;
         (*o).is_uint = 0;
         (*o).c = core::ptr::read_unaligned(rgba as *const [u32; 4]);
+    }
+    fn nvnCommandBufferClearTexturei(c: *mut NVNcommandBuffer, t: *const NVNtexture, v: *const NVNtextureView, r: *const NVNcopyRegion, rgba: *const i32, mask: i32) {
+        nvnCommandBufferClearTextureui(c, t, v, r, rgba as *const u32, mask);
     }
     fn nvnCommandBufferClearTextureui(c: *mut NVNcommandBuffer, t: *const NVNtexture, v: *const NVNtextureView, r: *const NVNcopyRegion, rgba: *const u32, mask: i32) {
         let o = rec_snap::<p_clear_tex>(c, op::CLEAR_TEX, 1);

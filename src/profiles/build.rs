@@ -17,19 +17,21 @@ fn main() {
     ids.sort();
     let lit = |p: &Path| format!("include_str!({:?})", p.display().to_string());
     let opt = |p: std::path::PathBuf| if p.is_file() { format!("Some({})", lit(&p)) } else { "None".into() };
+    let opt_bytes = |p: std::path::PathBuf| if p.is_file() { format!("Some(include_bytes!({:?}))", p.display().to_string()) } else { "None".into() };
     let mut s = String::from("pub static GAMES: &[RawProfile] = &[\n");
     for id in &ids {
         let d = games.join(id);
         println!("cargo:rerun-if-changed={}", d.display());
-        for f in ["game.tsv", "patches.toml", "turbo.toml"] {
+        for f in ["game.tsv", "patches.toml", "turbo.toml", "shaders.tsv.zst"] {
             println!("cargo:rerun-if-changed={}", d.join(f).display());
         }
         writeln!(
             s,
-            "    RawProfile {{ id: {id:?}, game_tsv: {}, patches: {}, turbo: {} }},",
+            "    RawProfile {{ id: {id:?}, game_tsv: {}, patches: {}, turbo: {}, shaders: {} }},",
             lit(&d.join("game.tsv")),
             opt(d.join("patches.toml")),
-            opt(d.join("turbo.toml"))
+            opt(d.join("turbo.toml")),
+            opt_bytes(d.join("shaders.tsv.zst"))
         )
         .unwrap();
     }

@@ -4,6 +4,7 @@
 //! section per read), version, control data, and the `romfs.nsp` marker the runtime reads.
 use crate::package::bktr::Patched;
 use crate::package::cnmt::{self, is_addon_of};
+use crate::package::compressed::{self, Compressed};
 use crate::package::error::{fmt, PackageError, Result};
 use crate::package::io::{abspath, u32le, u64le, Blob};
 use crate::package::keys::Keys;
@@ -33,10 +34,11 @@ pub struct ExeFsNode {
     pub size: u64,
 }
 
-/// The ROMFS storage: a plain section or a BKTR-patched one.
+/// The ROMFS storage: a plain section or a BKTR-patched one, either possibly under a compression layer.
 pub enum RomStorage {
     Plain(SectionStorage),
     Patched(Patched),
+    Compressed(Compressed),
 }
 
 impl Storage for RomStorage {
@@ -44,12 +46,14 @@ impl Storage for RomStorage {
         match self {
             RomStorage::Plain(s) => s.size(),
             RomStorage::Patched(p) => p.size(),
+            RomStorage::Compressed(c) => c.size(),
         }
     }
     fn read(&self, offset: u64, size: u64) -> Result<Vec<u8>> {
         match self {
             RomStorage::Plain(s) => s.read(offset, size),
             RomStorage::Patched(p) => p.read(offset, size),
+            RomStorage::Compressed(c) => c.read(offset, size),
         }
     }
 }
@@ -70,9 +74,15 @@ pub struct Package {
     pub update_ncas: Vec<Arc<Nca>>,
     pub program: Arc<Nca>,
     pub encrypted: bool,
-    pub exefs_section: (Arc<Nca>, usize),
+    /// The ExeFS section (decrypted, decompressed).
+    pub exefs_section: Arc<dyn Storage>,
     pub exefs_nodes: Vec<ExeFsNode>,
     pub storage: Arc<RomStorage>,
+    /// Compression layers (data level offset, table offset, table size): of the game's RomFS section under a patch,
+    /// and of the section read last (the patched one, or the game's own when no update applies). The marker's
+    /// `compressed` rows.
+    pub base_compressed: Option<(u64, u64, u64)>,
+    pub top_compressed: Option<(u64, u64, u64)>,
     pub romfs_at: u64,
     pub romfs_size: u64,
     pub version: u32,
@@ -158,15 +168,19 @@ fn control_files(ncas: &[Arc<Nca>], title_id: u64, wanted: Option<&str>) -> (BTr
         }
         let Some(si) = nca.section(3, 0) else { continue };
         let s = &nca.sections[si];
-        if s.patch || s.sparse || s.compressed {
+        if s.patch || s.sparse {
             continue;
         }
         let files = (|| -> Result<BTreeMap<String, Vec<u8>>> {
-            let (at, size) = nca.ivfc_data(s)?;
-            if size > 64 << 20 || at > s.size || size > s.size - at {
+            let view = section_data(nca, si, &nca.blob.path.display().to_string())?;
+            let (at, mut size) = nca.ivfc_data(s)?;
+            if s.compressed {
+                size = view.size().saturating_sub(at);
+            }
+            if size > 64 << 20 || at > view.size() || size > view.size() - at {
                 return fmt("skip");
             }
-            let image = nca.read(s, at, size, None)?;
+            let image = view.read(at, size)?;
             let read = |o: u64, n: u64| {
                 image.get(o as usize..(o + n) as usize).map(|x| x.to_vec()).ok_or_else(|| PackageError::Format("cut".into()))
             };
@@ -258,11 +272,8 @@ impl Package {
         let encrypted = programs.iter().any(|n| n.sections.iter().any(|s| s.crypto != 1));
         for n in &programs {
             for s in &n.sections {
-                if s.sparse || s.compressed {
-                    return fmt(format!(
-                        "{p}: {} storage in the Program NCA is not supported",
-                        if s.sparse { "sparse" } else { "compressed" }
-                    ));
+                if s.sparse {
+                    return fmt(format!("{p}: sparse storage in the Program NCA is not supported"));
                 }
                 if ![1, 3, 4].contains(&s.crypto) {
                     return fmt(format!(
@@ -281,20 +292,45 @@ impl Package {
             if at > code.size || size > code.size - at {
                 return fmt(format!("{p}: ExeFS range is out of bounds"));
             }
-            exefs_nodes = Self::exefs_of(&p, nca, code, at, size)?;
-            exefs_section = Some((nca.clone(), si));
+            let st = section_data(nca, si, &p)?;
+            // a compressed data level is its decompressed size
+            let size = if compressed::table_of(&code.fs).is_some() { st.size().saturating_sub(at) } else { size };
+            if at > st.size() || size > st.size() - at {
+                return fmt(format!("{p}: ExeFS range is out of bounds"));
+            }
+            exefs_nodes = Self::exefs_of(&p, nca, &*st, at, size)?;
+            exefs_section = Some(st);
         }
         let Some(di) = program.section(3, 0) else { return fmt(format!("{p}: the Program NCA has no RomFS")) };
         let data = &program.sections[di];
-        let base_data: Option<Arc<dyn Storage>> = base
-            .as_ref()
-            .and_then(|b| b.section(3, 0).map(|i| Arc::new(SectionStorage::new(b, i)) as Arc<dyn Storage>));
-        let storage = if data.patch {
-            RomStorage::Patched(Patched::new(SectionStorage::new(&program, di), base_data)?)
-        } else {
-            RomStorage::Plain(SectionStorage::new(&program, di))
+        let base_section = base.as_ref().and_then(|b| b.section(3, 0).map(|i| (b, i)));
+        let base_data: Option<Arc<dyn Storage>> = match base_section {
+            Some((b, i)) => Some(section_data(b, i, &p)?),
+            None => None,
         };
-        let (romfs_at, romfs_size) = program.ivfc_data(data)?;
+        let base_compressed = match base_section {
+            Some((b, i)) if data.patch => compressed::over(Arc::new(SectionStorage::new(b, i)), &b.sections[i].fs, &p)?.map(|c| c.1),
+            _ => None,
+        };
+        let (storage, top_compressed) = if data.patch {
+            let patched = Patched::new(SectionStorage::new(&program, di), base_data)?;
+            if compressed::table_of(&data.fs).is_some() {
+                let fs = data.fs.clone();
+                let (c, t) = compressed::over(Arc::new(patched), &fs, &p)?.unwrap();
+                (RomStorage::Compressed(c), Some(t))
+            } else {
+                (RomStorage::Patched(patched), None)
+            }
+        } else {
+            match compressed::over(Arc::new(SectionStorage::new(&program, di)), &data.fs, &p)? {
+                Some((c, t)) => (RomStorage::Compressed(c), Some(t)),
+                None => (RomStorage::Plain(SectionStorage::new(&program, di)), None),
+            }
+        };
+        let (romfs_at, mut romfs_size) = program.ivfc_data(data)?;
+        if top_compressed.is_some() {
+            romfs_size = storage.size().saturating_sub(romfs_at);
+        }
         if romfs_at > storage.size() || romfs_size > storage.size() - romfs_at {
             return fmt(format!("{p}: RomFS range is out of bounds"));
         }
@@ -320,6 +356,8 @@ impl Package {
             exefs_section: exefs_section.unwrap(),
             exefs_nodes,
             storage: Arc::new(storage),
+            base_compressed,
+            top_compressed,
             romfs_at,
             romfs_size,
             version,
@@ -329,8 +367,8 @@ impl Package {
         })
     }
 
-    fn exefs_of(p: &str, nca: &Nca, s: &Section, at: u64, size: u64) -> Result<Vec<ExeFsNode>> {
-        let head = nca.read(s, at, 0x10, None)?;
+    fn exefs_of(p: &str, nca: &Nca, s: &dyn Storage, at: u64, size: u64) -> Result<Vec<ExeFsNode>> {
+        let head = s.read(at, 0x10)?;
         let (count, strings_size) = (u32le(&head, 4) as u64, u32le(&head, 8) as u64);
         let table_size = 0x10 + count * 0x18 + strings_size;
         if &head[..4] != b"PFS0" || count > 1000 || table_size > size {
@@ -339,7 +377,7 @@ impl Package {
                 "{p}: the ExeFS did not decrypt; the installed keys probably lack this game's generation ({kek})"
             ));
         }
-        let table = nca.read(s, at, table_size, None)?;
+        let table = s.read(at, table_size)?;
         let strings = &table[(0x10 + count * 0x18) as usize..];
         let mut nodes = vec![];
         for i in 0..count as usize {
@@ -361,9 +399,7 @@ impl Package {
 
     /// The ExeFS files (name -> bytes): the update's when one is applied.
     pub fn exefs(&self) -> Result<BTreeMap<String, Vec<u8>>> {
-        let (nca, si) = &self.exefs_section;
-        let s = &nca.sections[*si];
-        self.exefs_nodes.iter().map(|n| Ok((n.name.clone(), nca.read(s, n.offset, n.size, None)?))).collect()
+        self.exefs_nodes.iter().map(|n| Ok((n.name.clone(), self.exefs_section.read(n.offset, n.size)?))).collect()
     }
 
     /// The RomFS image (IVFC level 6 of the possibly patched section) as a storage.
@@ -380,7 +416,7 @@ impl Package {
     pub fn marker(&self) -> String {
         let p = self.path.display();
         match &*self.storage {
-            RomStorage::Plain(s) if !self.encrypted => {
+            RomStorage::Plain(s) if !self.encrypted && self.top_compressed.is_none() => {
                 format!("SWRNSP1\n{p}\n{:x}\n{:x}\n", s.file_offset + self.romfs_at, self.romfs_size)
             }
             storage => {
@@ -390,24 +426,32 @@ impl Package {
                     format!("keys {}", self.keys_path.display()),
                     format!("romfs {:x} {:x}", self.romfs_at, self.romfs_size),
                 ];
-                match storage {
-                    RomStorage::Patched(pt) => {
+                let patched = self.program.sections[self.program.section(3, 0).unwrap()].patch;
+                match (storage, patched) {
+                    (_, true) => {
                         if let Some(b) = &self.base {
                             if let Some(i) = b.section(3, 0) {
-                                if pt.base.is_some() {
+                                if self.base.is_some() {
                                     lines.push(format!("base {}", b.layer(&b.sections[i])));
+                                    if let Some((h, a, n)) = self.base_compressed {
+                                        lines.push(format!("compressed base {h:x} {a:x} {n:x}"));
+                                    }
                                 }
                             }
                         }
                         if let Some(u) = &self.update_path {
                             lines.push(format!("update {}", u.display()));
                         }
-                        let (a, b, c, d) = pt.tables;
+                        let fs = &self.program.sections[self.program.section(3, 0).unwrap()].fs;
+                        let (a, b, c, d) = (u64le(fs, 0x100), u64le(fs, 0x108), u64le(fs, 0x120), u64le(fs, 0x128));
                         lines.push(format!("patch {} {a:x} {b:x} {c:x} {d:x}", self.program.layer(&self.program.sections[self.program.section(3, 0).unwrap()])));
                     }
-                    RomStorage::Plain(_) => {
+                    (_, false) => {
                         lines.push(format!("base {}", self.program.layer(&self.program.sections[self.program.section(3, 0).unwrap()])))
                     }
+                }
+                if let Some((h, a, n)) = self.top_compressed {
+                    lines.push(format!("compressed {h:x} {a:x} {n:x}"));
                 }
                 lines.join("\n") + "\n"
             }
@@ -431,13 +475,23 @@ impl UpdateInfo {
     }
 }
 
+/// An NSP (PFS0) or a card image (XCI: `HEAD` at 0x100, or at 0x1100 behind the key area).
 fn is_nsp(p: &Path) -> bool {
-    std::fs::File::open(p)
-        .and_then(|mut f| {
-            let mut m = [0u8; 4];
-            std::io::Read::read_exact(&mut f, &mut m).map(|_| &m == b"PFS0")
-        })
-        .unwrap_or(false)
+    let Ok(b) = Blob::open(p) else { return false };
+    b.read_at(0, 4).is_ok_and(|m| m == b"PFS0")
+        || [0x100u64, 0x1100].iter().any(|&at| b.size >= at + 4 && b.read_at(at, 4).is_ok_and(|m| m == b"HEAD"))
+}
+
+/// An NCA section as a storage: decrypted, and decompressed when the FS header has a compression table.
+fn section_data(nca: &Arc<Nca>, index: usize, what: &str) -> Result<Arc<dyn Storage>> {
+    let plain = Arc::new(SectionStorage::new(nca, index));
+    if nca.sections[index].patch {
+        return Ok(plain);
+    }
+    Ok(match compressed::over(plain.clone(), &nca.sections[index].fs, what)? {
+        Some((c, _)) => Arc::new(c),
+        None => plain,
+    })
 }
 
 /// nca.py `update_info`: what an update package is. With `game` (the game's own package) the update is opened over

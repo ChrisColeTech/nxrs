@@ -3,11 +3,18 @@
 //! shader container found inside is read.
 
 pub mod archive;
+pub mod capcom;
 pub mod engines;
+pub mod fromsoft;
 pub mod gamefreak;
+pub mod koei;
 pub mod glslc;
 pub mod nso;
 pub mod nvnfmt;
+pub mod raw;
+pub mod smash;
+pub mod unity;
+pub mod unreal;
 pub mod zbic;
 
 use crate::nvn::*;
@@ -38,8 +45,13 @@ fn worth_reading(d: &[u8]) -> bool {
         || (head4 == b"SARC" && (find(d, b"Yaz0").is_some() || find(d, &archive::ZSTD_MAGIC).is_some()))
         || find(d, &glslc::MAGIC).is_some()
         || (d.len() < 0x40000 && !nvnfmt::sead_prim(d, "").is_empty())
-        || d.get(..8) == Some(&engines::PACX4[..])
+        || engines::is_pacx4(d)
         || find(d, engines::NEEDLE).is_some()
+        || head4 == b"DAT\0"
+        || head4 == engines::RGXD
+        || d.starts_with(engines::TFXO)
+        || engines::pg_stage(d).is_some()
+        || engines::pg_sized(d, "").is_some()
 }
 
 /// A container's bytes: archives opened, every shader container read. Errors leave out the part that failed.
@@ -59,7 +71,7 @@ pub fn scan_blob(ctx: &Ctx, d: &[u8], label: &str, out: &mut Scanned, depth: usi
             scan_blob(ctx, &dec, label, out, depth + 1);
             return Ok(());
         }
-        if head(8) == engines::PACX4 {
+        if engines::is_pacx4(d) {
             for (nm, p) in engines::pacx4_parts(d, label)? {
                 scan_blob(ctx, &p, &format!("{label}/{nm}"), out, depth + 1);
             }
@@ -78,6 +90,26 @@ pub fn scan_blob(ctx: &Ctx, d: &[u8], label: &str, out: &mut Scanned, depth: usi
         }
         if head(8) == gamefreak::GFPAK {
             gamefreak::gfpak_members(d, label, &mut |i, m| scan_blob(ctx, &m, &format!("{label}#{i}"), out, depth + 1))?;
+            return Ok(());
+        }
+        if head(4) == b"DAT\0" {
+            if let Some(members) = engines::pgdat_members(d) {
+                for (nm, m) in members {
+                    scan_blob(ctx, m, &format!("{label}/{nm}"), out, depth + 1);
+                }
+                return Ok(());
+            }
+        }
+        if let Some(r) = engines::pg_object(d, label).or_else(|| engines::pg_sized(d, label)) {
+            out.found.push(r?);
+            return Ok(());
+        }
+        if head(4) == engines::RGXD {
+            out.found.extend(engines::rgxd(d, label, &mut out.problems));
+            return Ok(());
+        }
+        if d.starts_with(engines::TFXO) {
+            out.found.extend(engines::tfxo(d, label)?);
             return Ok(());
         }
         if head(4) == b"BAHS" {
@@ -121,6 +153,31 @@ pub fn scan_file(ctx: &Ctx, data: &[u8], label: &str, out: &mut Scanned) {
             scan_blob(ctx, &d, label, out, 0);
             return Ok(());
         }
+        if head.get(..4) == Some(&engines::BND2[..]) {
+            out.found.extend(engines::bnd2(&d, label)?);
+            return Ok(());
+        }
+        if unreal::is_ue3(&head) {
+            let body = if head.starts_with(&unreal::UE3_TAG) { unreal::ue3_body(&d, label)? } else { d.to_vec() };
+            out.found.extend(unreal::ue3_shaders(&body, label)?);
+            return Ok(());
+        }
+        if head.get(..4) == Some(b"DCX\0") || head.get(..4) == Some(b"BND3") {
+            out.found.extend(fromsoft::bnd(&d, label)?);
+            return Ok(());
+        }
+        if head.get(..4) == Some(&capcom::MTARC[..]) {
+            out.found.extend(capcom::mtarc(&d, label)?);
+            return Ok(());
+        }
+        if head.get(..4) == Some(b"SDF\0") {
+            out.found.extend(capcom::sdf(&d, label)?);
+            return Ok(());
+        }
+        if head.get(..4) == Some(b"OCIO") {
+            out.found.extend(capcom::ocio(&d, label)?);
+            return Ok(());
+        }
         if head.get(..4) == Some(b"BERG") {
             out.found.extend(engines::snowdrop(&d, label, false)?);
             return Ok(());
@@ -136,9 +193,26 @@ pub fn scan_file(ctx: &Ctx, data: &[u8], label: &str, out: &mut Scanned) {
         if d.get(..4) == Some(b"Yaz0") {
             d = archive::yaz0(&d, label)?.into();
         }
+        if d.get(..8) == Some(&koei::IDRK[..]) || d.get(..8) == Some(&koei::PDRK[..]) {
+            let read = |o: u64, n: u64| span(&d, o, n, label).map(|x| x.to_vec());
+            koei::rdb(&read, d.len() as u64, label, out);
+            return Ok(());
+        }
+        // Koei Tecmo's and Gust's chunked zlib
+        if let Some(z) = koei::kt_gz(&d).or_else(|| if d.get(4) == Some(&0x78) { koei::gust_gz(&d) } else { None }) {
+            d = z.into();
+        }
         if d.get(..8) == Some(&gamefreak::GFPAK[..]) || d.get(..4) == Some(b"SHN!") {
             scan_blob(ctx, &d, label, out, 0);
             return Ok(());
+        }
+        if d.get(..8) == Some(&unity::UNITYFS[..]) || unity::is_serialized(&d) {
+            unity::unity(&d, label, out);
+            return Ok(());
+        }
+        if memchr::memmem::find(&d, b"LSLG").is_some() {
+            // Unreal's global shader cache or a cooked package outside a pak
+            unreal::pak_member(&d, label, label, out);
         }
         if !worth_reading(&d) {
             return Ok(());
@@ -158,8 +232,20 @@ pub fn scan_file(ctx: &Ctx, data: &[u8], label: &str, out: &mut Scanned) {
 
 /// A code module's image (main, sdk, subsdk*): containers anywhere in it, and loose GLSLC outputs.
 pub fn scan_code(ctx: &Ctx, image: &[u8], label: &str, out: &mut Scanned) {
+    let before = out.found.len();
     scan_blob(ctx, image, label, out, 0);
     out.found.extend(glslc::shaders(image, label));
+    // YEBIS effect files linked in as zlib streams
+    match engines::tfxo_streams(image, label) {
+        Ok(f) => out.found.extend(f),
+        Err(e) => out.problems.push(e),
+    }
+    // control sections loose in main, outside what the readers above took
+    if label.ends_with("main") {
+        let known: std::collections::HashSet<Vec<u8>> = out.found[before..].iter().map(|f| f.ctl[..(u32_at(&f.ctl, 0x20).unwrap_or(0) as usize).min(f.ctl.len())].to_vec()).collect();
+        let raw = raw::raw_shaders(image, label, &known, &mut out.problems);
+        out.found.extend(raw);
+    }
 }
 
 #[cfg(test)]

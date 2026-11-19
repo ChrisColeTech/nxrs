@@ -21,8 +21,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Mutex;
 use std::time::Instant;
 
-/// The target every object is built for: the Rust runtime is an MSVC-ABI static library.
+/// The target every object is built for with Visual Studio's libraries: the engine is an MSVC-ABI static library.
 pub const TARGET: &str = "x86_64-pc-windows-msvc";
+/// On a machine without Visual Studio: the bundled llvm-mingw and the engine built for `x86_64-pc-windows-gnullvm`
+/// (`gnu\libnxfront.a`, `gnu\libnxrt.a`), linked against the UCRT that every Windows 10 has.
+pub const TARGET_GNU: &str = "x86_64-w64-windows-gnu";
 
 /// The game-code flags: -O1 without the vectorizers, frame pointers or debug info (measured: fewer instructions than
 /// either compiler's defaults), for x86-64-v3 (AVX2, FMA, BMI2). `-fms-runtime-lib=dll` matches the CRT the Rust
@@ -60,6 +63,67 @@ pub struct Clang {
     /// What an object depends on of the compiler: `--version` without InstalledDir (a moved toolchain keeps its
     /// objects), and the target.
     pub id: String,
+    /// llvm-mingw and the gnullvm engine (no Visual Studio), else clang with Visual Studio's libraries.
+    pub gnu: bool,
+}
+
+impl Clang {
+    pub fn target(&self) -> &'static str {
+        if self.gnu { TARGET_GNU } else { TARGET }
+    }
+
+    /// The game-code flags for this toolchain (the MSVC CRT choice only applies to the MSVC target).
+    pub fn gen_flags(&self) -> Vec<String> {
+        GEN_FLAGS.iter().filter(|f| !(self.gnu && f.starts_with("-fms-runtime-lib"))).map(|s| s.to_string()).collect()
+    }
+}
+
+/// Whether Visual Studio's C++ build tools (the MSVC libraries the MSVC-ABI engine links) are installed: vswhere's
+/// answer, or a developer prompt's `VCToolsInstallDir`.
+pub fn have_visual_studio() -> bool {
+    if std::env::var_os("VCToolsInstallDir").is_some() {
+        return true;
+    }
+    let vswhere = PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
+    Command::new(vswhere)
+        .args(["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"])
+        .output()
+        .is_ok_and(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
+}
+
+/// The bundled llvm-mingw's clang: `NXRS_LLVM_MINGW\bin`, beside nxrs (`llvm-mingw\bin`, `..\toolchain\llvm-mingw\bin`),
+/// or a development checkout's `build\tools\llvm-mingw`.
+pub fn llvm_mingw_clang() -> Option<PathBuf> {
+    let mut v = vec![];
+    if let Some(d) = std::env::var_os("NXRS_LLVM_MINGW") {
+        v.push(Path::new(&d).join(r"bin\clang.exe"));
+    }
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        v.push(dir.join(r"llvm-mingw\bin\clang.exe"));
+        v.push(dir.join(r"..\toolchain\llvm-mingw\bin\clang.exe"));
+        for up in dir.ancestors().take(5) {
+            v.push(up.join(r"build\tools\llvm-mingw\bin\clang.exe"));
+        }
+    }
+    v.into_iter().find(|p| p.is_file())
+}
+
+/// Which toolchain: `NXRS_TOOLCHAIN=msvc|gnu`, else MSVC when Visual Studio is installed, else the bundled
+/// llvm-mingw when it is there.
+pub fn use_gnu() -> bool {
+    match std::env::var("NXRS_TOOLCHAIN").ok().as_deref().map(str::trim) {
+        Some("gnu") | Some("mingw") | Some("gnullvm") => true,
+        Some("msvc") => false,
+        _ => !have_visual_studio() && llvm_mingw_clang().is_some(),
+    }
+}
+
+/// The folder of the gnullvm engine libraries: `NXRS_GNU_LIBS`, else `gnu\` beside nxrs.
+pub fn gnu_lib_dir() -> Result<PathBuf> {
+    if let Some(d) = std::env::var_os("NXRS_GNU_LIBS") {
+        return Ok(PathBuf::from(d));
+    }
+    Ok(std::env::current_exe()?.parent().unwrap().join("gnu"))
 }
 
 fn version_of(path: &Path) -> Result<(String, String)> {
@@ -105,11 +169,16 @@ pub fn candidates(cc_hint: Option<&str>) -> Vec<PathBuf> {
 }
 
 pub fn find_clang(cc_hint: Option<&str>) -> Result<Clang> {
+    if use_gnu() {
+        let path = llvm_mingw_clang().ok_or_else(|| anyhow!("NXRS_TOOLCHAIN=gnu, but llvm-mingw is not bundled (llvm-mingw\\bin beside nxrs, or NXRS_LLVM_MINGW)"))?;
+        let (version, id) = version_of(&path)?;
+        return Ok(Clang { path, version, id: format!("{id}\ntarget {TARGET_GNU}"), gnu: true });
+    }
     let tried = candidates(cc_hint);
     for path in &tried {
         if path.is_file() {
             let (version, id) = version_of(path)?;
-            return Ok(Clang { path: path.clone(), version, id: format!("{id}\ntarget {TARGET}") });
+            return Ok(Clang { path: path.clone(), version, id: format!("{id}\ntarget {TARGET}"), gnu: false });
         }
     }
     bail!(
@@ -118,14 +187,55 @@ pub fn find_clang(cc_hint: Option<&str>) -> Result<Clang> {
     )
 }
 
-/// The runtime library the code DLL links: `NXRS_RUNTIME_LIB`, else `nxrt.lib` beside nxrs.
-pub fn find_runtime_lib() -> Result<PathBuf> {
+/// What the code DLL links: the whole engine (`nxfront.lib`: front end, os services, graphics and the runtime;
+/// the game enters `nxfront_main`) for a title built on Nintendo's SDK, or the runtime alone (`nxrt.lib`,
+/// `nxrt_main`) for homebrew that brings its own (the runtime's tests).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Engine {
+    pub lib: PathBuf,
+    /// The front end (`nxfront_main`, the os layer's cpu.h overlay) or the runtime alone (`nxrt_main`).
+    pub front: bool,
+}
+
+impl Engine {
+    pub fn entry(&self) -> &'static str {
+        if self.front { "nxfront_main" } else { "nxrt_main" }
+    }
+}
+
+/// `nxfront.lib` beside nxrs (or `NXRS_ENGINE_LIB`; `gnu\libnxfront.a` for llvm-mingw) for an SDK title, else the
+/// runtime (`find_runtime_lib`).
+pub fn find_engine(sdk_title: bool, gnu: bool) -> Result<Engine> {
+    if !sdk_title {
+        return Ok(Engine { lib: find_runtime_lib(gnu)?, front: false });
+    }
+    if let Some(p) = std::env::var_os("NXRS_ENGINE_LIB") {
+        let p = PathBuf::from(p);
+        return if p.is_file() { Ok(Engine { lib: p, front: true }) } else { Err(anyhow!("NXRS_ENGINE_LIB={} does not exist", p.display())) };
+    }
+    let p = if gnu { gnu_lib_dir()?.join("libnxfront.a") } else { std::env::current_exe()?.parent().unwrap().join("nxfront.lib") };
+    if p.is_file() {
+        Ok(Engine { lib: p, front: true })
+    } else {
+        bail!("the engine library {} is missing (cargo build --release -p front, or set NXRS_ENGINE_LIB)", p.display())
+    }
+}
+
+/// System libraries the whole engine needs on top of [`SYS_LIBS`]: COM, the window and its theme, the shell, audio
+/// (WinMM), HID controllers (SetupAPI, HID), video recording (Media Foundation).
+const ENGINE_LIBS: &[&str] = &[
+    "-lole32", "-loleaut32", "-lgdi32", "-lshell32", "-ldwmapi", "-luxtheme", "-limm32", "-lcomctl32", "-lwinmm",
+    "-lpropsys", "-llegacy_stdio_definitions", "-lsetupapi", "-lhid", "-lmfplat", "-lmfreadwrite", "-lmfuuid",
+];
+
+/// The runtime library the code DLL links: `NXRS_RUNTIME_LIB`, else `nxrt.lib` beside nxrs (`gnu\libnxrt.a`).
+pub fn find_runtime_lib(gnu: bool) -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("NXRS_RUNTIME_LIB") {
         let p = PathBuf::from(p);
         return if p.is_file() { Ok(p) } else { Err(anyhow!("NXRS_RUNTIME_LIB={} does not exist", p.display())) };
     }
     let exe = std::env::current_exe()?;
-    let p = exe.parent().unwrap().join("nxrt.lib");
+    let p = if gnu { gnu_lib_dir()?.join("libnxrt.a") } else { exe.parent().unwrap().join("nxrt.lib") };
     if p.is_file() {
         Ok(p)
     } else {
@@ -211,7 +321,7 @@ fn compile_one(clang: &Clang, unit: &Unit, key: &str) -> Result<(), String> {
     let mut last = String::new();
     for attempt in 0..3 {
         let out = Command::new(&clang.path)
-            .arg(format!("--target={TARGET}"))
+            .arg(format!("--target={}", clang.target()))
             .args(&unit.flags)
             .arg("-c")
             .arg(&unit.src)
@@ -324,7 +434,7 @@ pub fn response_file(objs: &[PathBuf]) -> String {
 
 fn run_link(clang: &Clang, args: &[String], cwd: &Path) -> Result<()> {
     let out = Command::new(&clang.path)
-        .arg(format!("--target={TARGET}"))
+        .arg(format!("--target={}", clang.target()))
         .args(args)
         .current_dir(cwd)
         .output()
@@ -335,8 +445,22 @@ fn run_link(clang: &Clang, args: &[String], cwd: &Path) -> Result<()> {
     Ok(())
 }
 
-fn extra_libs() -> Vec<String> {
+/// What the gnullvm engine adds (`--print native-static-libs`): the windows crate's import library (shipped in
+/// `gnu\`) and LLVM's unwinder, linked statically so the game needs no llvm-mingw DLL.
+const GNU_LIBS: &[&str] = &["-lwindows.0.52.0", "-Wl,-Bstatic", "-lunwind", "-Wl,-Bdynamic"];
+
+fn extra_libs(front: bool, gnu: bool) -> Vec<String> {
     let mut v: Vec<String> = SYS_LIBS.iter().map(|s| s.to_string()).collect();
+    if front {
+        // the MinGW CRT has the stdio functions MSVC keeps in legacy_stdio_definitions
+        v.extend(ENGINE_LIBS.iter().filter(|l| !(gnu && l.contains("legacy_stdio"))).map(|s| s.to_string()));
+    }
+    if gnu {
+        if let Ok(d) = gnu_lib_dir() {
+            v.push(format!("-L{}", d.display()));
+        }
+        v.extend(GNU_LIBS.iter().map(|s| s.to_string()));
+    }
     if let Ok(more) = std::env::var("NXRS_LINK_LIBS") {
         v.extend(more.split_whitespace().map(String::from));
     }
@@ -345,22 +469,27 @@ fn extra_libs() -> Vec<String> {
 
 /// `<dll>`: every object and the runtime library, through a response file (hundreds of objects pass the command
 /// line's limit). Written as `<dll>.part` and renamed, so a failed link leaves the previous DLL whole.
-pub fn link_dll(clang: &Clang, objs: &[PathBuf], runtime: &Path, obj_dir: &Path, dll: &Path) -> Result<()> {
+pub fn link_dll(clang: &Clang, objs: &[PathBuf], engine: &Engine, obj_dir: &Path, dll: &Path) -> Result<()> {
     let rsp = obj_dir.join("link.rsp");
     std::fs::write(&rsp, response_file(objs))?;
     let part = dll.with_file_name(format!("{}.part", dll.file_name().unwrap().to_string_lossy()));
-    let mut args: Vec<String> = vec![
-        "-shared".into(),
-        "-fuse-ld=lld".into(),
-        "-fms-runtime-lib=dll".into(),
+    let mut args: Vec<String> = vec!["-shared".into(), "-fuse-ld=lld".into()];
+    if !clang.gnu {
+        args.push("-fms-runtime-lib=dll".into());
+    }
+    args.extend([
         "-o".into(),
         part.display().to_string(),
         format!("@{}", rsp.display()),
-        runtime.display().to_string(),
+        engine.lib.display().to_string(),
         // the import library and export file stay with the objects, not beside the game
-        format!("-Wl,/implib:{}", obj_dir.join("code.lib").display()),
-    ];
-    args.extend(extra_libs());
+        if clang.gnu { format!("-Wl,--out-implib,{}", obj_dir.join("code.dll.a").display()) } else { format!("-Wl,/implib:{}", obj_dir.join("code.lib").display()) },
+    ]);
+    if clang.gnu {
+        // compiler-rt's builtins, statically: no llvm-mingw DLL beside the game
+        args.extend(["-static-libgcc".into(), "--rtlib=compiler-rt".into()]);
+    }
+    args.extend(extra_libs(engine.front, clang.gnu));
     run_link(clang, &args, obj_dir)?;
     rename_retry(&part, dll).with_context(|| format!("{} is in use. Close the game and try again.", dll.display()))?;
     Ok(())
@@ -376,8 +505,15 @@ pub const STUB_C: &str = r#"#define WIN32_LEAN_AND_MEAN
 
 typedef int (*nxrs_entry)(int argc, char **argv);
 
+/* A windowed program: a failure before the game's own log exists goes to stderr when it is redirected, and to a message
+   box for a player who started the game from the launcher or the Explorer. */
 static void fail(const wchar_t *what, const wchar_t *path, DWORD err) {
-    fwprintf(stderr, L"%ls: %ls (error %lu)\n", what, path, (unsigned long)err);
+    wchar_t msg[4200];
+    _snwprintf(msg, 4200, L"%ls: %ls (error %lu)", what, path, (unsigned long)err);
+    msg[4199] = 0;
+    HANDLE e = GetStdHandle(STD_ERROR_HANDLE);
+    if (e && e != INVALID_HANDLE_VALUE && GetFileType(e) != FILE_TYPE_UNKNOWN) fwprintf(stderr, L"%ls\n", msg);
+    else MessageBoxW(NULL, msg, L"nxrs", MB_OK | MB_ICONERROR);
 }
 
 int main(int argc, char **argv) {
@@ -405,19 +541,25 @@ pub fn link_exe(clang: &Clang, obj_dir: &Path, exe: &Path) -> Result<()> {
     let unit = Unit {
         src,
         obj: obj_dir.join("nxrs_loader.o"),
-        flags: STUB_FLAGS.iter().map(|s| s.to_string()).collect(),
+        flags: STUB_FLAGS.iter().filter(|f| !(clang.gnu && f.starts_with("-fms-runtime-lib"))).map(|s| s.to_string()).collect(),
         headers: headers_key(clang, &[])?,
     };
     compile(clang, std::slice::from_ref(&unit), obj_dir, 1, &|_| {})?;
     let part = exe.with_file_name(format!("{}.part", exe.file_name().unwrap().to_string_lossy()));
-    let args: Vec<String> = vec![
-        "-fuse-ld=lld".into(),
-        "-fms-runtime-lib=dll".into(),
-        "-o".into(),
-        part.display().to_string(),
-        unit.obj.display().to_string(),
-        "-lkernel32".into(),
-    ];
+    let mut args: Vec<String> = vec!["-fuse-ld=lld".into(), "-o".into(), part.display().to_string(), unit.obj.display().to_string(), "-lkernel32".into(), "-luser32".into()];
+    if clang.gnu {
+        // a windowed program (mainCRTStartup calls main), the engine's start-up on a 16 MB main stack
+        args.extend(["-mwindows".into(), "-static-libgcc".into(), "--rtlib=compiler-rt".into(), "-Wl,--stack,0x1000000".into()]);
+    } else {
+        args.extend([
+            "-fms-runtime-lib=dll".into(),
+            // a windowed program: no console opens beside the game (the front end writes <name>.log)
+            "-Wl,/SUBSYSTEM:WINDOWS".into(),
+            "-Wl,/ENTRY:mainCRTStartup".into(),
+            // the engine's start-up runs on the process's main thread
+            "-Wl,/STACK:0x1000000".into(),
+        ]);
+    }
     run_link(clang, &args, obj_dir)?;
     rename_retry(&part, exe).with_context(|| format!("{} is in use. Close the game and try again.", exe.display()))?;
     Ok(())
@@ -428,7 +570,7 @@ mod tests {
     use super::*;
 
     fn fake_clang() -> Clang {
-        Clang { path: "clang".into(), version: "clang version 0".into(), id: "clang version 0\ntarget x".into() }
+        Clang { path: "clang".into(), version: "clang version 0".into(), id: "clang version 0\ntarget x".into(), gnu: false }
     }
 
     #[test]

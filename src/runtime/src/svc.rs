@@ -8,6 +8,40 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static SVCS: AtomicU64 = AtomicU64::new(0);
 
+/// An SVC handled outside the runtime (the os layer's IPC, memory and info SVCs): it reads its arguments from the
+/// guest registers and writes its results there. Returns false to let the runtime handle it after all.
+pub type SvcHandler = fn(&mut Cpu, u32) -> bool;
+
+static HANDLERS: [std::sync::atomic::AtomicUsize; 256] = [const { std::sync::atomic::AtomicUsize::new(0) }; 256];
+static FALLBACK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Routes `SVC #imm` to `f` before the runtime's own handling (set before guest code runs; a later call replaces it).
+pub fn set_handler(imm: u8, f: SvcHandler) {
+    HANDLERS[imm as usize].store(f as usize, Ordering::Release);
+}
+
+/// Called for every SVC neither a handler nor the runtime handles, instead of the fatal "not implemented".
+pub fn set_fallback(f: SvcHandler) {
+    FALLBACK.store(f as usize, Ordering::Release);
+}
+
+fn handler_of(slot: &std::sync::atomic::AtomicUsize) -> Option<SvcHandler> {
+    match slot.load(Ordering::Acquire) {
+        0 => None,
+        // SAFETY: only `set_handler` / `set_fallback` store here, always an `SvcHandler`.
+        p => Some(unsafe { core::mem::transmute::<usize, SvcHandler>(p) }),
+    }
+}
+
+thread_local! {
+    static CALLER: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+/// The guest address of the SVC instruction the calling thread is in (for a handler's logs).
+pub fn caller_pc() -> u64 {
+    CALLER.get()
+}
+
 pub fn count() -> u64 {
     SVCS.load(Ordering::Relaxed)
 }
@@ -29,6 +63,7 @@ fn name(imm: u32) -> &'static str {
         0x28 => "ReturnFromException",
         0x29 => "GetInfo",
         0x2C => "MapPhysicalMemory",
+        0x2D => "UnmapPhysicalMemory",
         0x32 => "SetThreadActivity",
         0x33 => "GetThreadContext3",
         0x40 => "CreateSession",
@@ -49,8 +84,14 @@ pub unsafe extern "C" fn nxrt_svc_impl(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
 unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
     SVCS.fetch_add(1, Ordering::Relaxed);
     let c = &mut *c;
+    CALLER.set(pc);
     if crate::rt::trace("svc") && imm != 0x27 {
         crate::rt::log(&format!("svc {imm:#04x} at {} x0 {:#x} x1 {:#x} x2 {:#x} x3 {:#x}", crate::dispatch::guest_name(pc), c.x[0], c.x[1], c.x[2], c.x[3]));
+    }
+    if let Some(f) = handler_of(&HANDLERS[(imm & 0xFF) as usize]) {
+        if f(c, imm) {
+            return crate::asm::ST_RETURN;
+        }
     }
     let space = kernel::get().space;
     match imm {
@@ -116,8 +157,9 @@ unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
             }
         }
         0x1E => c.x[0] = crate::rt::rt_ticks(),
+        0x2C | 0x2D => c.x[0] = space.map_physical(c.x[0], c.x[1], imm == 0x2C) as u64,
         _ => {
-            if !kernel::svc(c, imm) {
+            if !kernel::svc(c, imm) && !handler_of(&FALLBACK).is_some_and(|f| f(c, imm)) {
                 c.pc = pc;
                 crate::rt::guest_fatal(c, &format!("svc #{imm:#x} {} at {} is not implemented", name(imm), crate::dispatch::guest_name(pc)));
             }

@@ -200,6 +200,37 @@ impl Default for JobOptions {
     }
 }
 
+/// An Ampere SPH (not an instruction) at the start of a code area. Word 0 as every NVN2 graphics SPH of the verification
+/// games has it: SPH type 1 or 2 (bits 0..4), version 4 (bits 5..9), shader type 1..5 (bits 10..13), byte 2 0x0c or
+/// 0x0d; and bytes 13..16 zero, where every instruction has its scheduling controls (stall count, barriers, yield).
+pub fn is_ampere_sph(code: &[u8]) -> bool {
+    let Some(w) = u32_at(code, 0) else { return false };
+    let ty = (w >> 10) & 0xf;
+    matches!(w & 0x1f, 1 | 2)
+        && (w >> 5) & 0x1f == 4
+        && (1..=5).contains(&ty)
+        && matches!((w >> 16) & 0xff, 0x0c | 0x0d)
+        && code.get(13..16).is_some_and(|b| b == [0, 0, 0])
+        && code.len() > 0x80
+}
+
+#[cfg(test)]
+mod sph_tests {
+    #[test]
+    fn sph_or_instruction() {
+        let mut sph = vec![0u8; 0x90];
+        sph[..4].copy_from_slice(&0x020c0481u32.to_le_bytes());
+        assert!(super::is_ampere_sph(&sph));
+        // S2R R2 (MKW compute 0028b5da242b07b2) and an FADD with predicate P0
+        let s2r = [0x19u8, 0x79, 2, 0, 0, 0, 0, 0, 0, 0x25, 0, 0, 0, 0x28, 0x0e, 0];
+        assert!(!super::is_ampere_sph(&[&s2r[..], &[0u8; 0x80]].concat()));
+        let mut fadd = vec![0u8; 0x90];
+        fadd[..4].copy_from_slice(&0x020c0421u32.to_le_bytes());
+        fadd[13] = 0xe2;
+        assert!(!super::is_ampere_sph(&fadd));
+    }
+}
+
 pub fn job_for(key: &str, stage: Stage, ctl: &[u8], area: &[u8], opts: JobOptions) -> R<Job> {
     let mut j = Map::new();
     let mut extra = Map::new();
@@ -224,6 +255,14 @@ pub fn job_for(key: &str, stage: Stage, ctl: &[u8], area: &[u8], opts: JobOption
             j.insert("shared".into(), json!((u32_at(ctl, 0x64).unwrap_or(0) + 15) / 16 * 16));
             let b = |o: usize| *ctl.get(o).unwrap_or(&0) as u32;
             j.insert("nvn2_cs".into(), json!([b(0xb1), b(0xb2), b(0xb3), u16_at(ctl, 0xba).unwrap_or(0), b(0xa9) * 4, b(0xb4), b(0xb5), b(0xaa) * 4]));
+            // A compute program whose code area starts with a 0x80-byte SPH (Mario Kart World's DrivePassShaderDefault
+            // 078997bf631992c5: word 0 0x020c0481, SPH type 1, then S2R / I2F / ... EXIT / BRA-to-self from +0x80):
+            // the instructions start after it. Ampere's opcode 0x481 does not exist, so such a word is never an
+            // instruction.
+            if cut.len() > 0x80 && is_ampere_sph(&cut) {
+                cut = cut[0x80..].to_vec();
+                extra.insert("cs_sph".into(), json!("a 0x80-byte SPH before the compute instructions, taken off"));
+            }
         }
         let idx = match stage {
             Stage::Vs => Some(0),

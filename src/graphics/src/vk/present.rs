@@ -38,6 +38,8 @@ pub struct Presenter {
     next_sem: usize,
     stale: bool,
     pub presented: u64,
+    /// the swap chain waits for the display's refresh (forced_vsync)
+    vsync: bool,
 }
 
 /// The host window every NVN window presents into (Win32 HWND and HINSTANCE). 0 = headless.
@@ -47,6 +49,61 @@ pub fn set_window(hwnd: isize, hinstance: isize) {
     p.hwnd = hwnd;
     p.hinstance = hinstance;
     p.stale = true;
+}
+
+/// The options the display follows (nxconfig, applied live): `fps_limit` (0 unlimited, 30, 60..240; F4 switches
+/// 60 / unlimited) and `forced_vsync`.
+fn fps_limit() -> u32 {
+    nxconfig::fps_limit_hz()
+}
+
+/// The game's frame pacing for a present interval: one display slot (1/60 s) per interval unit; with `fps_limit` 0
+/// no wait at all, and with a limit above 60 Hz the slot is that short. At `fps_limit=30` the game keeps its 60 Hz
+/// steps and every other image is not shown (`show`).
+pub fn pace_period(interval: i32) -> u64 {
+    if interval <= 0 {
+        return 0;
+    }
+    let slot = match fps_limit() {
+        0 => return 0,
+        hz if hz > 60 => 1_000_000_000 / hz as u64,
+        _ => crate::nvn::window::VSYNC_NS,
+    };
+    slot * interval as u64
+}
+
+/// Whether this present is shown (fps_limit=30: at most 30 images a second reach the window).
+fn show(now: Instant) -> bool {
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+    let skip = nxconfig::frame_skip();
+    if skip > 0 {
+        // fps_target 30 / 20: the frames whose draws were skipped are not shown
+        return frames() % (skip as u64 + 1) == 1 % (skip as u64 + 1);
+    }
+    let hz = fps_limit();
+    if hz != 30 {
+        return true;
+    }
+    let mut l = LAST.lock().unwrap();
+    match *l {
+        Some(t) if now.duration_since(t).as_secs_f64() < 1.0 / 30.0 - 0.002 => false,
+        _ => {
+            *l = Some(now);
+            true
+        }
+    }
+}
+
+/// Whether the front end gave a window already.
+pub fn has_window() -> bool {
+    Gpu::try_get().is_some_and(|g| g.present.lock().unwrap().hwnd != 0)
+}
+
+/// The window's size changed: the next present rebuilds the swap chain.
+pub fn window_resized() {
+    if let Some(g) = Gpu::try_get() {
+        g.present.lock().unwrap().stale = true;
+    }
 }
 
 /// Destroys the swap chain and surface (before the window goes).
@@ -94,8 +151,11 @@ fn create_swapchain(g: &Gpu, p: &mut Presenter, srgb: bool) -> Result<(), String
     let want = if srgb { vk::Format::B8G8R8A8_SRGB } else { vk::Format::B8G8R8A8_UNORM };
     let fmt = formats.iter().find(|f| f.format == want).or_else(|| formats.first()).ok_or("no surface format")?;
     let modes = unsafe { g.d.surface_i.get_physical_device_surface_present_modes(g.d.pdev, p.surface) }.map_err(|e| e.to_string())?;
+    let vsync = nxconfig::flag("forced_vsync");
+    p.vsync = vsync;
     let mode = match std::env::var("NXGFX_PRESENT").as_deref() {
         Ok("fifo") => vk::PresentModeKHR::FIFO,
+        _ if vsync => vk::PresentModeKHR::FIFO,
         Ok("immediate") if modes.contains(&vk::PresentModeKHR::IMMEDIATE) => vk::PresentModeKHR::IMMEDIATE,
         _ if modes.contains(&vk::PresentModeKHR::MAILBOX) => vk::PresentModeKHR::MAILBOX,
         _ => vk::PresentModeKHR::FIFO,
@@ -136,7 +196,7 @@ fn create_swapchain(g: &Gpu, p: &mut Presenter, srgb: bool) -> Result<(), String
 
 /// Records a present of `t` into `sub` (acquire, blit, layout for present); the queue presents after submitting.
 pub fn record_present(g: &Gpu, sub: &mut Sub, t: &tex_t, origin_ll: bool, crop: Option<[i32; 4]>) {
-    if !t.valid() || g.present.lock().unwrap().hwnd == 0 {
+    if !t.valid() || g.present.lock().unwrap().hwnd == 0 || !show(Instant::now()) {
         return;
     }
     // the source first: once an image is acquired this submission must wait for it
@@ -155,7 +215,7 @@ pub fn record_present(g: &Gpu, sub: &mut Sub, t: &tex_t, origin_ll: bool, crop: 
     let mut p = g.present.lock().unwrap();
     let done = g.q.completed();
     let srgb = crate::tex::format::tex_format(t.d.format).map(|f| f.srgb).unwrap_or(false);
-    if p.swapchain == vk::SwapchainKHR::null() || p.stale || p.srgb != srgb {
+    if p.swapchain == vk::SwapchainKHR::null() || p.stale || p.srgb != srgb || p.vsync != nxconfig::flag("forced_vsync") {
         if let Err(e) = create_swapchain(g, &mut p, srgb) {
             crate::log::red_once(&format!("present: {e}"));
             return;
@@ -268,8 +328,22 @@ fn pace_window() -> usize {
     std::env::var("NXGFX_PACE_N").ok().and_then(|v| v.parse().ok()).unwrap_or(300)
 }
 
+static PRESENT_NO: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Presents so far (the replay's frame number).
+pub fn frames() -> u64 {
+    PRESENT_NO.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 /// Every present call: its interval joins the window; a full window (or 5 s of a slow game) prints the pacing line.
-pub fn note_present() {
+/// Returns the present's number (from 1).
+pub fn note_present() -> u64 {
+    let no = PRESENT_NO.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    pace_note();
+    no
+}
+
+fn pace_note() {
     let now = Instant::now();
     let mut p = PACE.lock().unwrap();
     p.frames += 1;

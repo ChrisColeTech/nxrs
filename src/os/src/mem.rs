@@ -244,7 +244,7 @@ impl Memory {
             .sum();
         if map {
             let need = size - mapped_in;
-            if self.fig.used_beside_heap + st.heap_size + st.phys_bytes + need > self.fig.pool && self.fig.sys_resource != 0 {
+            if self.fig.used_beside_heap + st.heap_size + st.phys_bytes + need > self.fig.pool && map_limit() {
                 return R_LIMIT_REACHED;
             }
             if !commit_rw(a, size) {
@@ -384,6 +384,15 @@ impl Memory {
             _ => return None,
         })
     }
+}
+
+/// Whether a map past the application pool fails with ResultLimitReached: the runtime's rule (lane T, Turbo
+/// 8a4618c / b316a9f): the titles that need it (Pokémon Legends: Z-A, Ocarina of Time), `SWR_MAP_LIMIT=1/0` for any.
+fn map_limit() -> bool {
+    if let Some(v) = std::env::var("SWR_MAP_LIMIT").ok().filter(|v| !v.is_empty()) {
+        return v.trim().parse::<i64>().map_or(true, |n| n > 0);
+    }
+    matches!(crate::profile::get().program_id, 0x0100_F430_08C4_4000 | 0x0400_4860_24DE_C000)
 }
 
 fn prepare_locked(m: &Memory, st: &State, a: u64, n: u64) {

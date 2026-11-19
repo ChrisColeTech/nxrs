@@ -8,11 +8,14 @@
 //!   depth or layer count, read from a texture the translator had to assume 2D for want of a per-game type answer)
 //!   reads 1 for each missing component, the depth and layer count of a 2D texture. spirv-val refuses the
 //!   out-of-range extract.
+//! - `dynamic_offsets`: a fetch or read with a variable `Offset` (texelFetchOffset with a computed offset) gets the
+//!   offset added to its coordinate; Vulkan allows non-constant offsets on gathers only. A constant one becomes
+//!   `ConstOffset`.
 
 use std::collections::HashSet;
 
 /// The edits' version: part of each output's identity, so a change here translates every shader again.
-pub const VERSION: &str = "fixes 2: storage_format_caps size_query_components";
+pub const VERSION: &str = "fixes 3: storage_format_caps size_query_components dynamic_offsets";
 
 const OP_CAPABILITY: u32 = 17;
 const OP_TYPE_IMAGE: u32 = 25;
@@ -161,6 +164,189 @@ pub fn size_query_components(spv: &[u8]) -> Option<(Vec<u8>, Vec<&'static str>)>
     Some((to_bytes(&out), vec!["size_query_components"]))
 }
 
+const OP_IMAGE_FETCH: u32 = 95;
+const OP_COMPOSITE_CONSTRUCT: u32 = 80;
+const OP_IADD: u32 = 128;
+const IMG_OFFSET: u32 = 0x10;
+
+/// The words each image operand bit carries after the mask, in bit order (SPIR-V 3.14 Image Operands).
+fn image_operand_words(bit: u32) -> usize {
+    match bit {
+        0x4 => 2,                                                   // Grad
+        0x1 | 0x2 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x200 | 0x10000 => 1,
+        _ => 0,
+    }
+}
+
+/// Opcodes whose word 1 is a result type and word 2 a result (the value instructions coordinates and offsets come
+/// from: constants, loads, access chains, composites, conversions, arithmetic, image instructions, extended ones).
+fn has_type_and_result(op: u32) -> bool {
+    matches!(op, 12 | 41..=46 | 50..=52 | 59 | 61 | 65..=70 | 77..=84 | 86..=107 | 109..=202 | 227..=242 | 300..=320 | 4421..=4500)
+}
+
+/// A dynamic `Offset` on an integer-coordinate fetch or read (texelFetchOffset with a variable offset): Vulkan allows a
+/// non-constant offset only on gathers (VUID-StandaloneSpirv-Offset-04663), so the offset is added to the coordinate
+/// (`OpIAdd`, widened with zeros when the coordinate also holds a layer) and the operand dropped. A constant one becomes
+/// `ConstOffset`. Ocarina of Time's d17eefaff4f0bc23 (compute) and Pokémon Violet's abd67260d710b0a0 (pixel) have them.
+pub fn dynamic_offsets(spv: &[u8]) -> Option<(Vec<u8>, Vec<&'static str>)> {
+    let w = crate::reflect::words(spv)?;
+    let mut types: std::collections::HashMap<u32, u32> = std::collections::HashMap::new(); // value -> type
+    let mut vecs: std::collections::HashMap<u32, (u32, u32)> = std::collections::HashMap::new(); // vector type -> (component, count)
+    let mut ints: HashSet<u32> = HashSet::new();
+    let mut consts: HashSet<u32> = HashSet::new();
+    let mut zeros: std::collections::HashMap<u32, u32> = std::collections::HashMap::new(); // int type -> its constant 0
+    let mut first_fn = None;
+    let mut targets = vec![];
+    let mut i = 5;
+    while i < w.len() {
+        let n = (w[i] >> 16) as usize;
+        if n == 0 || i + n > w.len() {
+            return None;
+        }
+        let op = w[i] & 0xffff;
+        match op {
+            OP_TYPE_INT => {
+                ints.insert(w[i + 1]);
+            }
+            OP_TYPE_VECTOR if n >= 4 => {
+                vecs.insert(w[i + 1], (w[i + 2], w[i + 3]));
+            }
+            OP_FUNCTION if first_fn.is_none() => first_fn = Some(i),
+            _ => {}
+        }
+        if (41..=46).contains(&op) || op == OP_CONSTANT {
+            consts.insert(w[i + 2]);
+        }
+        if op == OP_CONSTANT && n == 4 && w[i + 3] == 0 && ints.contains(&w[i + 1]) {
+            zeros.entry(w[i + 1]).or_insert(w[i + 2]);
+        }
+        if has_type_and_result(op) && n >= 3 {
+            types.insert(w[i + 2], w[i + 1]);
+        }
+        if (op == OP_IMAGE_FETCH || op == OP_IMAGE_READ) && n >= 6 && w[i + 5] & IMG_OFFSET != 0 {
+            targets.push(i);
+        }
+        i += n;
+    }
+    if targets.is_empty() {
+        return None;
+    }
+    let mut bound = w[3];
+    let mut new_consts: Vec<u32> = vec![];
+    let mut edits: std::collections::HashMap<usize, Vec<u32>> = std::collections::HashMap::new(); // index -> replacement words
+    let mut names = vec![];
+    for &at in &targets {
+        let n = (w[at] >> 16) as usize;
+        let op = w[at] & 0xffff;
+        let (rt, res, img, coord, mask) = (w[at + 1], w[at + 2], w[at + 3], w[at + 4], w[at + 5]);
+        // the operands after the mask, by bit
+        let mut ops: Vec<(u32, Vec<u32>)> = vec![];
+        let mut k = at + 6;
+        let mut bit = 1u32;
+        while bit != 0 && bit <= 0x10000 {
+            if mask & bit != 0 {
+                let c = image_operand_words(bit);
+                ops.push((bit, w[k..k + c].to_vec()));
+                k += c;
+            }
+            bit <<= 1;
+        }
+        if k != at + n {
+            return None;
+        }
+        let off = ops.iter().find(|o| o.0 == IMG_OFFSET)?.1[0];
+        if consts.contains(&off) {
+            // a constant offset: ConstOffset (bit 0x8, ordered before Offset)
+            let mut out = vec![0u32, rt, res, img, coord, (mask & !IMG_OFFSET) | 0x8];
+            let mut sorted: Vec<(u32, Vec<u32>)> = ops.iter().map(|(b, v)| (if *b == IMG_OFFSET { 0x8 } else { *b }, v.clone())).collect();
+            sorted.sort_by_key(|o| o.0);
+            for (_, v) in sorted {
+                out.extend(v);
+            }
+            out[0] = ((out.len() as u32) << 16) | op;
+            edits.insert(at, out);
+            names.push("const_offset");
+            continue;
+        }
+        let (Some(&ct), Some(&ot)) = (types.get(&coord), types.get(&off)) else { return None };
+        let mut pre: Vec<u32> = vec![];
+        let add_to = if ct == ot {
+            off
+        } else {
+            // widen the offset to the coordinate's components with zeros (an array layer, a 3D coordinate's z)
+            let (&(cc, cn), &(oc, on)) = (vecs.get(&ct)?, vecs.get(&ot).unwrap_or(&(ot, 1)));
+            if !ints.contains(&cc) || on >= cn {
+                return None;
+            }
+            let zero = match zeros.get(&cc) {
+                Some(z) => *z,
+                None => {
+                    let z = bound;
+                    bound += 1;
+                    new_consts.extend([(4 << 16) | OP_CONSTANT, cc, z, 0]);
+                    zeros.insert(cc, z);
+                    z
+                }
+            };
+            let mut parts = vec![];
+            for c in 0..on {
+                if vecs.contains_key(&ot) {
+                    let id = bound;
+                    bound += 1;
+                    pre.extend([(5 << 16) | OP_COMPOSITE_EXTRACT, oc, id, off, c]);
+                    parts.push(id);
+                } else {
+                    parts.push(off);
+                }
+            }
+            while (parts.len() as u32) < cn {
+                parts.push(zero);
+            }
+            let id = bound;
+            bound += 1;
+            pre.push(((3 + parts.len() as u32) << 16) | OP_COMPOSITE_CONSTRUCT);
+            pre.extend([ct, id]);
+            pre.extend(&parts);
+            id
+        };
+        let sum = bound;
+        bound += 1;
+        pre.extend([(5 << 16) | OP_IADD, ct, sum, coord, add_to]);
+        let rest_mask = mask & !IMG_OFFSET;
+        let mut out = pre;
+        let mut inst = vec![0u32, rt, res, img, sum];
+        if rest_mask != 0 {
+            inst.push(rest_mask);
+            for (b, v) in &ops {
+                if *b != IMG_OFFSET {
+                    inst.extend(v);
+                }
+            }
+        }
+        inst[0] = ((inst.len() as u32) << 16) | op;
+        out.extend(inst);
+        edits.insert(at, out);
+        names.push("dynamic_offset_added");
+    }
+    let mut out = w[..5].to_vec();
+    out[3] = bound;
+    let mut i = 5;
+    while i < w.len() {
+        let n = (w[i] >> 16) as usize;
+        if Some(i) == first_fn {
+            out.extend(&new_consts);
+        }
+        match edits.get(&i) {
+            Some(e) => out.extend(e),
+            None => out.extend_from_slice(&w[i..i + n]),
+        }
+        i += n;
+    }
+    names.sort();
+    names.dedup();
+    Some((to_bytes(&out), names))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -178,6 +364,25 @@ mod tests {
         let ow = crate::reflect::words(&out).unwrap();
         assert_eq!(&ow[7..9], &[(2 << 16) | OP_CAPABILITY, CAP_WRITE_WITHOUT_FORMAT]);
         assert!(storage_format_caps(&out).is_none());
+    }
+
+    #[test]
+    fn dynamic_fetch_offset_is_added_to_the_coordinate() {
+        let mut w = vec![0x0723_0203u32, 0x0001_0300, 0, 100, 0];
+        w.extend([(2 << 16) | OP_CAPABILITY, 1]);
+        w.extend([(4 << 16) | OP_TYPE_INT, 20, 32, 1]);
+        w.extend([(4 << 16) | OP_TYPE_VECTOR, 21, 20, 2]);
+        w.extend([(4 << 16) | OP_CONSTANT, 20, 22, 0]);
+        w.extend([(5 << 16) | OP_FUNCTION, 1, 2, 0, 3]);
+        w.extend([(5 << 16) | OP_COMPOSITE_CONSTRUCT, 21, 30, 40, 41]); // coordinate
+        w.extend([(5 << 16) | OP_COMPOSITE_CONSTRUCT, 21, 31, 42, 43]); // offset (computed)
+        w.extend([(8 << 16) | OP_IMAGE_FETCH, 50, 51, 52, 30, 0x2 | 0x10, 22, 31]);
+        let (out, names) = dynamic_offsets(&to_bytes(&w)).unwrap();
+        assert_eq!(names, vec!["dynamic_offset_added"]);
+        let o = crate::reflect::words(&out).unwrap();
+        assert_eq!(o[3], 101);
+        assert!(o.windows(5).any(|x| x == [(5 << 16) | OP_IADD, 21, 100, 30, 31]));
+        assert!(o.windows(7).any(|x| x == [(7 << 16) | OP_IMAGE_FETCH, 50, 51, 52, 100, 0x2, 22]));
     }
 
     #[test]

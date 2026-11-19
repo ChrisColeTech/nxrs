@@ -80,12 +80,12 @@ nvn_fns! {
         let s = &*(b as *const pool_builder_t);
         let o = p as *mut pool_t;
         *o = pool_t { magic: MAGIC_POOL, flags: s.flags, mem: s.mem, size: s.size, vp: core::ptr::null_mut(), vmode: 0, serial: super::new_serial() };
+        if (*o).flags & mem_flags::VIRTUAL != 0 {
+            (*o).mem = super::vpool::initialize(&mut *o) as *mut u8;
+            return (!(*o).mem.is_null()) as u8;
+        }
         if (*o).mem.is_null() {
-            if (*o).flags & mem_flags::VIRTUAL == 0 {
-                crate::log::red(&format!("MemoryPoolInitialize: non-virtual pool has no storage flags={:#x} size={:#x}", s.flags, s.size));
-            } else {
-                crate::log::red_once("MemoryPoolInitialize: virtual pools are not implemented yet");
-            }
+            crate::log::red(&format!("MemoryPoolInitialize: non-virtual pool has no storage flags={:#x} size={:#x}", s.flags, s.size));
             return 1;
         }
         if (*o).flags & mem_flags::VIRTUAL == 0 {
@@ -95,7 +95,9 @@ nvn_fns! {
     }
     fn nvnMemoryPoolFinalize(p: *mut NVNmemoryPool) {
         let o = p as *mut pool_t;
-        if !(*o).mem.is_null() && (*o).flags & mem_flags::VIRTUAL == 0 {
+        if (*o).flags & mem_flags::VIRTUAL != 0 {
+            if (*o).vmode != super::vpool::ALIAS { super::vpool::finalize(&mut *o); }
+        } else if !(*o).mem.is_null() {
             vk::mem::pool_del((*o).mem as u64);
         }
         (*o).magic = 0;
@@ -112,6 +114,12 @@ nvn_fns! {
     fn nvnMemoryPoolGetBufferAddress(p: *const NVNmemoryPool) -> u64 { (*(p as *const pool_t)).mem as u64 }
     fn nvnMemoryPoolGetSize(p: *const NVNmemoryPool) -> usize { (*(p as *const pool_t)).size as usize }
     fn nvnMemoryPoolGetFlags(p: *const NVNmemoryPool) -> u32 { (*(p as *const pool_t)).flags }
+    fn nvnMemoryPoolMapVirtual(p: *mut NVNmemoryPool, n: i32, rq: *const u8) -> NVNboolean {
+        let o = &mut *(p as *mut pool_t);
+        if o.flags & mem_flags::VIRTUAL == 0 { crate::log::red_once("MapVirtual on a pool that is not virtual"); return 0; }
+        let r = if n > 0 && !rq.is_null() { core::slice::from_raw_parts(rq as *const super::vpool::MapReq, n as usize) } else { &[] };
+        super::vpool::map(o, r) as u8
+    }
 
     // ---------- buffers ----------
     fn nvnBufferBuilderSetDefaults(b: *mut NVNbufferBuilder) {

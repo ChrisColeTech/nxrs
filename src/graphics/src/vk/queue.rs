@@ -34,17 +34,43 @@ pub struct Sub {
     pub writebacks: Vec<(u64, u64, u64, vk::Buffer, u64)>,
     pub post: Vec<Post>,
     pub query: vk::QueryPool,
+    /// timestamp queries used (0 and 1: the submission's start and end)
     pub queries: u32,
+    /// occlusion queries (SAMPLES_PASSED counters)
+    pub occl: vk::QueryPool,
+    pub occl_n: u32,
     pub images_new: Vec<vk::Image>,
     pub transient: Vec<Buf>,
     pub transient_views: Vec<vk::ImageView>,
+    /// texel buffer views of buffer textures, destroyed at completion
+    pub buffer_views: Vec<vk::BufferView>,
     pub present: Option<super::present::PendingPresent>,
+    /// staged bytes by content, and descriptor sets by their writes (reused within the submission)
+    pub memo_bytes: std::collections::HashMap<u128, (vk::Buffer, u64)>,
+    pub memo_sets: std::collections::HashMap<u128, vk::DescriptorSet>,
 }
 unsafe impl Send for Sub {}
+
+/// A 128-bit content hash (two FNV-1a lanes) for the submission's memos.
+pub fn memo_hash(b: &[u8]) -> u128 {
+    let (mut a, mut c) = (0xcbf29ce484222325u64, 0x84222325cbf29ce4u64);
+    for ch in b.chunks(8) {
+        let mut w = [0u8; 8];
+        w[..ch.len()].copy_from_slice(ch);
+        let v = u64::from_le_bytes(w);
+        a = (a ^ v).wrapping_mul(0x100000001b3);
+        c = (c ^ v.rotate_left(29)).wrapping_mul(0x1000193_0000_01b3);
+    }
+    ((a as u128) << 64 | c as u128) ^ b.len() as u128
+}
 
 pub enum Post {
     Event { addr: u64, mode: u32, value: u32 },
     Counter { addr: u64, kind: u32, query: u32 },
+    /// an occlusion query's samples join the SAMPLES_PASSED sum
+    Occl { q: u32 },
+    OcclReset,
+    OcclReport { addr: u64 },
     Readback { dst: *mut u8, src: *const u8, n: usize },
     Callback(Box<dyn FnOnce(&Gpu) + Send>),
 }
@@ -87,6 +113,9 @@ pub struct Queue {
     inflight_cv: Condvar,
     recycled: Mutex<Vec<Sub>>,
     deferred: Mutex<Vec<(u64, Box<dyn FnOnce(&Gpu) + Send>)>>,
+    /// a submission is being recorded (under `sub`): releases wait for its fence, which it does not have yet
+    recording: AtomicBool,
+    after_current: Mutex<Vec<Box<dyn FnOnce(&Gpu) + Send>>>,
     receipts: Mutex<HashMap<u64, u64>>,
     next_receipt: AtomicU64,
     thread_started: AtomicBool,
@@ -114,6 +143,8 @@ impl Queue {
             inflight_cv: Condvar::new(),
             recycled: Mutex::new(Vec::new()),
             deferred: Mutex::new(Vec::new()),
+            recording: AtomicBool::new(false),
+            after_current: Mutex::new(Vec::new()),
             receipts: Mutex::new(HashMap::new()),
             next_receipt: AtomicU64::new(1),
             thread_started: AtomicBool::new(false),
@@ -136,11 +167,36 @@ impl Queue {
         }
         self.deferred.lock().unwrap().push((fence, f));
     }
+
+    /// Runs `f` once the GPU can no longer use what it frees: after everything submitted so far, and after the
+    /// submission being recorded now (which may have referenced it before its owner let it go).
+    pub fn defer_after_use(&self, f: Box<dyn FnOnce(&Gpu) + Send>) {
+        if self.recording.load(Ordering::Acquire) {
+            let mut l = self.after_current.lock().unwrap();
+            // re-check under the list lock: submit_sub drains it under the same lock before clearing the flag
+            if self.recording.load(Ordering::Acquire) {
+                l.push(f);
+                return;
+            }
+        }
+        self.defer(self.last_fence(), f);
+    }
 }
 
 impl Sub {
     /// Copies `src` into staging memory; returns (buffer, offset). Aligned to 256 (usable as a uniform buffer).
     pub fn stage_bytes(&mut self, g: &Gpu, src: &[u8]) -> (vk::Buffer, u64) {
+        // the same bytes staged earlier in this submission are bound again (a stage's driver constants, handle table
+        // and support buffer repeat from draw to draw)
+        let h = memo_hash(src);
+        if let Some(&r) = self.memo_bytes.get(&h) {
+            return r;
+        }
+        let r = self.stage_bytes_new(g, src);
+        self.memo_bytes.insert(h, r);
+        r
+    }
+    fn stage_bytes_new(&mut self, g: &Gpu, src: &[u8]) -> (vk::Buffer, u64) {
         let n = src.len() as u64;
         let (b, off) = self.stage_alloc(g, n);
         unsafe { core::ptr::copy_nonoverlapping(src.as_ptr(), self.stage[b].ptr.add(off as usize), src.len()) };
@@ -232,6 +288,8 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
         let cbs = unsafe { g.dev().allocate_command_buffers(&ai) }.expect("command buffers");
         let qi = vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(256);
         let query = unsafe { g.dev().create_query_pool(&qi, None) }.expect("query pool");
+        let oi = vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::OCCLUSION).query_count(256);
+        let occl = unsafe { g.dev().create_query_pool(&oi, None) }.expect("occlusion query pool");
         Sub {
             pre: cbs[0],
             main: cbs[1],
@@ -242,13 +300,19 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
             writebacks: Vec::new(),
             post: Vec::new(),
             query,
-            queries: 0,
+            queries: 2,
+            occl,
+            occl_n: 0,
             images_new: Vec::new(),
             transient: Vec::new(),
             transient_views: Vec::new(),
+            buffer_views: Vec::new(),
             present: None,
+            memo_bytes: Default::default(),
+            memo_sets: Default::default(),
         }
     };
+    g.q.recording.store(true, Ordering::Release);
     let bi = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe {
         g.dev().reset_command_buffer(s.pre, vk::CommandBufferResetFlags::empty()).unwrap();
@@ -256,7 +320,11 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
         g.dev().begin_command_buffer(s.pre, &bi).unwrap();
         g.dev().begin_command_buffer(s.main, &bi).unwrap();
         g.dev().cmd_reset_query_pool(s.pre, s.query, 0, 256);
+        g.dev().cmd_reset_query_pool(s.pre, s.occl, 0, 256);
+        g.dev().cmd_write_timestamp2(s.main, vk::PipelineStageFlags2::TOP_OF_PIPE, s.query, 0);
     }
+    s.queries = 2;
+    s.occl_n = 0;
     barrier_all(g, s.main);
     s.stage_used = 0;
     // keep one staging chunk; the rest go
@@ -265,6 +333,12 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
         g.free_buffer(b);
     }
     s
+}
+
+/// A submission of the host's own (the lazy page reader), in queue order with the replay's.
+pub fn submit_raw(g: &Gpu, si: &[vk::SubmitInfo2], fence: vk::Fence) {
+    let _vq = g.q.vkq.lock().unwrap();
+    unsafe { g.dev().queue_submit2(g.d.queue, si, fence) }.unwrap_or_else(|e| panic!("vkQueueSubmit2: {e}"));
 }
 
 /// Ends and submits a recorded submission; returns its timeline value.
@@ -295,9 +369,11 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
     unsafe { g.dev().cmd_pipeline_barrier2(s.main, &vk::DependencyInfo::default().memory_barriers(&mb)) };
     barrier_all(g, s.pre);
     unsafe {
+        g.dev().cmd_write_timestamp2(s.main, vk::PipelineStageFlags2::ALL_COMMANDS, s.query, 1);
         g.dev().end_command_buffer(s.pre).unwrap();
         g.dev().end_command_buffer(s.main).unwrap();
     }
+    let _x = super::pipe::driver_exclusive(g).then(|| super::pipe::EXCLUSIVE.lock().unwrap());
     let _vq = q.vkq.lock().unwrap();
     let value = q.last.load(Ordering::Acquire) + 1;
     let cbs = [vk::CommandBufferSubmitInfo::default().command_buffer(s.pre), vk::CommandBufferSubmitInfo::default().command_buffer(s.main)];
@@ -310,6 +386,14 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
     let si = [vk::SubmitInfo2::default().command_buffer_infos(&cbs).signal_semaphore_infos(&sig).wait_semaphore_infos(&wait)];
     unsafe { g.dev().queue_submit2(g.d.queue, &si, vk::Fence::null()) }.unwrap_or_else(|e| panic!("vkQueueSubmit2: {e}"));
     q.last.store(value, Ordering::Release);
+    {
+        let mut l = q.after_current.lock().unwrap();
+        let mut d = q.deferred.lock().unwrap();
+        for f in l.drain(..) {
+            d.push((value, f));
+        }
+        q.recording.store(false, Ordering::Release);
+    }
     if let Some(p) = s.present.take() {
         super::present::queue_present(g, p);
     }
@@ -354,9 +438,20 @@ fn completion_loop(g: &'static Gpu) {
         // CPU-visible effects, in order: write-backs first (an event may tell the game to read them)
         super::mem::apply_writebacks(g, &item.wb);
         let mut sub = item.sub;
-        let ts = if sub.queries > 0 {
-            let mut v = vec![0u64; sub.queries as usize];
+        let ts: Vec<u64> = {
+            let mut v = vec![0u64; sub.queries.max(2) as usize];
             unsafe { g.dev().get_query_pool_results(sub.query, 0, &mut v, vk::QueryResultFlags::TYPE_64) }.ok();
+            let period = g.timestamp_period() as f64;
+            v.iter().map(|&t| (t as f64 * period) as u64).collect()
+        };
+        let (t0, t1) = (ts[0], ts[1]);
+        if t1 >= t0 && t1 > 0 {
+            super::counters::part(t0, t1);
+            super::perf::gpu_time(t1 - t0);
+        }
+        let occl: Vec<u64> = if sub.occl_n > 0 {
+            let mut v = vec![0u64; sub.occl_n as usize];
+            unsafe { g.dev().get_query_pool_results(sub.occl, 0, &mut v, vk::QueryResultFlags::TYPE_64) }.ok();
             v
         } else {
             vec![]
@@ -368,11 +463,16 @@ fn completion_loop(g: &'static Gpu) {
                     signalled = true;
                 }
                 Post::Counter { addr, kind, query } => {
-                    let ticks = ts.get(query as usize).copied().unwrap_or(0);
-                    let ns = (ticks as f64 * g.timestamp_period() as f64) as u64;
-                    let t = crate::nvn::device::timestamp_from_ns(crate::nvn::device::now_ns().min(ns.max(1)).max(ns));
+                    let stamp = if query != u32::MAX { ts.get(query as usize).copied() } else { None };
+                    let t = super::counters::report_time(stamp, t0, t1);
                     let counter = if kind == crate::nvn::types::counter::TIMESTAMP || kind == crate::nvn::types::counter::TIMESTAMP_TOP { t } else { 0 };
-                    unsafe { core::ptr::write_unaligned(addr as *mut [u64; 2], [counter, t]) };
+                    super::counters::write_record(addr, counter, t);
+                }
+                Post::Occl { q } => super::counters::vis_add(occl.get(q as usize).copied().unwrap_or(0)),
+                Post::OcclReset => super::counters::vis_reset(),
+                Post::OcclReport { addr } => {
+                    let t = super::counters::report_time(None, t0, t1);
+                    super::counters::write_record(addr, super::counters::vis(), t);
                 }
                 Post::Readback { dst, src, n } => unsafe { core::ptr::copy_nonoverlapping(src, dst, n) },
                 Post::Callback(f) => f(g),
@@ -387,12 +487,18 @@ fn completion_loop(g: &'static Gpu) {
         for v in sub.transient_views.drain(..) {
             unsafe { g.dev().destroy_image_view(v, None) };
         }
+        for v in sub.buffer_views.drain(..) {
+            unsafe { g.dev().destroy_buffer_view(v, None) };
+        }
         for p in &sub.dpools {
             unsafe { g.dev().reset_descriptor_pool(*p, vk::DescriptorPoolResetFlags::empty()) }.ok();
         }
         sub.dpool_i = 0;
+        sub.memo_bytes.clear();
+        sub.memo_sets.clear();
         sub.writebacks.clear();
-        sub.queries = 0;
+        sub.queries = 2;
+        sub.occl_n = 0;
         q.recycled.lock().unwrap().push(sub);
         {
             let mut dl = q.deferred.lock().unwrap();
@@ -472,7 +578,7 @@ fn run_stream(g: &'static Gpu, st: &mut SubmitState, qserial: u64, origin_ll: bo
     let dirty = super::mem::begin_submit(g, &mut sub);
     g.image_begin_submit(&mut sub, &dirty);
     let mut qs = st.qstates.remove(&qserial).unwrap_or_else(|| QState::new(origin_ll));
-    let rest = exec::run(g, &mut sub, &mut qs, &stream);
+    let rest = super::perf::timed(super::perf::C::ReplayNs, || exec::run(g, &mut sub, &mut qs, &stream));
     exec::end(g, &mut sub, &mut qs);
     st.qstates.insert(qserial, qs);
     let value = submit_sub(g, sub);
@@ -604,7 +710,10 @@ pub fn queue_forget(qserial: u64) {
 /// nvnQueuePresentTexture: in queue order after the work submitted before it. Returns a ticket for `present_wait`.
 pub fn present(qserial: u64, origin_ll: bool, t: &crate::nvn::obj::tex_t, crop: Option<[i32; 4]>) -> u64 {
     let Some(g) = Gpu::try_get() else { return 0 };
-    super::present::note_present();
+    let frame = super::present::note_present();
+    super::perf::frame(frame);
+    super::exec::passdump::frame(frame, crate::log::elapsed());
+    super::shot::on_present(t, frame, crop, origin_ll);
     let mut st = g.q.sub.lock().unwrap();
     take_recycled(g, &mut st);
     if st.parked.contains_key(&qserial) {
@@ -614,6 +723,7 @@ pub fn present(qserial: u64, origin_ll: bool, t: &crate::nvn::obj::tex_t, crop: 
     let dirty = super::mem::begin_submit(g, &mut sub);
     g.image_begin_submit(&mut sub, &dirty);
     super::present::record_present(g, &mut sub, t, origin_ll, crop);
+    super::shot::record_sink(g, &mut sub, t, crop, origin_ll);
     submit_sub(g, sub)
 }
 

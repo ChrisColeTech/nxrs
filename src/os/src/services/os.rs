@@ -17,10 +17,12 @@ fn find(ev: u64) -> Option<u32> {
     BOUND.lock().unwrap().iter().find(|(e, _)| *e == ev).map(|(_, h)| *h)
 }
 
-fn ksvc(imm: u32, h: u32) {
-    let mut c = Cpu::new_boxed();
-    c.x[0] = h as u64;
-    nxrt::kernel::svc(&mut c, imm);
+fn signal(h: u32) {
+    nxrt::kernel::get().signal_event(h);
+}
+
+fn clear(h: u32) {
+    nxrt::kernel::get().clear_event(h);
 }
 
 /// Binds `ev` (a guest SystemEventType) to a new kernel event on the calling guest thread `c`.
@@ -53,7 +55,7 @@ pub unsafe fn signal_system_event(c: *mut Cpu, ev: u64) {
         None => bind_system_event(c, ev, false),
     };
     if let Some(h) = h {
-        ksvc(0x11, h);
+        signal(h);
     }
 }
 
@@ -61,7 +63,7 @@ pub unsafe fn signal_system_event(c: *mut Cpu, ev: u64) {
 pub fn signal_bound(ev: u64) -> bool {
     match find(ev) {
         Some(h) => {
-            ksvc(0x11, h);
+            signal(h);
             true
         }
         None => false,
@@ -71,7 +73,7 @@ pub fn signal_bound(ev: u64) -> bool {
 /// Clears a bound SystemEvent from any thread.
 pub fn clear_system_event(ev: u64) {
     if let Some(h) = find(ev) {
-        ksvc(0x12, h);
+        clear(h);
     }
 }
 

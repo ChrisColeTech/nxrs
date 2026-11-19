@@ -5,14 +5,40 @@ use crate::cpu::Cpu;
 use std::io::Write;
 use std::sync::OnceLock;
 
-/// The counter rate cpu.h fixes (`RT_TICK_HZ`, the Switch 2's 31.25 MHz; CNTFRQ_EL0 reads the same constant).
-pub const TICK_HZ: u64 = 31_250_000;
+/// The Switch 2's system counter: 31.25 MHz (32 ns a tick). MKW's sdk returns 31,250,000 from
+/// nn::os::GetSystemTickFrequency and converts with it.
+pub const TICK_HZ_SWITCH2: u32 = 31_250_000;
+/// A Switch program's: 19.2 MHz.
+pub const TICK_HZ_SWITCH1: u32 = 19_200_000;
+/// The rate before start-up chose one (`process::startup`).
+pub const TICK_HZ: u64 = TICK_HZ_SWITCH2 as u64;
+
+/// `RT_TICK_HZ` of the generated code (cpu.h: CNTFRQ_EL0) and the rate of `rt_ticks`: set once at start-up, before
+/// any guest code runs, by the program's console (`set_tick_hz`).
+#[no_mangle]
+#[allow(non_upper_case_globals)]
+pub static mut rt_tick_hz: u32 = TICK_HZ_SWITCH2;
+
+/// The counter rate (CNTFRQ_EL0, svcGetSystemTick).
+pub fn tick_hz() -> u32 {
+    // SAFETY: written only before guest threads start
+    unsafe { core::ptr::addr_of!(rt_tick_hz).read_volatile() }
+}
+
+/// Sets the counter rate; call before any guest code runs.
+pub fn set_tick_hz(hz: u32) {
+    // SAFETY: start-up, one thread
+    unsafe { core::ptr::addr_of_mut!(rt_tick_hz).write_volatile(hz) }
+}
 
 static TRACE: OnceLock<String> = OnceLock::new();
 
 /// `NXRT_TRACE=svc,host,sjlj,thread,load` (or `all`).
 pub fn trace(what: &str) -> bool {
-    let t = TRACE.get_or_init(|| std::env::var("NXRT_TRACE").unwrap_or_default());
+    // NXRT_TRACE, else the ini's log=2 ("everything", slow): every trace
+    let t = TRACE.get_or_init(|| {
+        std::env::var("NXRT_TRACE").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| if nxconfig::int("log") >= 2 { "all".into() } else { String::new() })
+    });
     !t.is_empty() && (t == "all" || t.split(',').any(|w| w == what))
 }
 
@@ -88,19 +114,38 @@ pub fn now_ns() -> u64 {
     (n as u128 * 1_000_000_000 / f as u128) as u64
 }
 
-/// CNTPCT_EL0 / CNTVCT_EL0 and svcGetSystemTick: ticks at `TICK_HZ`.
+static CLOCK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// The counter's time base: a function returning the guest clock in ns (the os layer's clock, whose rate the front
+/// end may lower). Unset, the counter follows the host's monotonic clock. Set before guest code runs.
+pub fn set_clock(f: fn() -> u64) {
+    CLOCK.store(f as usize, std::sync::atomic::Ordering::Release);
+}
+
+/// CNTPCT_EL0 / CNTVCT_EL0 and svcGetSystemTick: ticks at [`tick_hz`].
 #[no_mangle]
 pub extern "C" fn rt_ticks() -> u64 {
-    crate::boundary::guard("rt_ticks", || {
-        let (n, f) = qpc();
-        (n as u128 * TICK_HZ as u128 / f as u128) as u64
+    crate::boundary::guard("rt_ticks", || match CLOCK.load(std::sync::atomic::Ordering::Acquire) {
+        0 => {
+            let (n, f) = qpc();
+            (n as u128 * tick_hz() as u128 / f as u128) as u64
+        }
+        // SAFETY: only `set_clock` stores here, always a `fn() -> u64`.
+        p => {
+            let ns = unsafe { core::mem::transmute::<usize, fn() -> u64>(p) }();
+            (ns as u128 * tick_hz() as u128 / 1_000_000_000) as u64
+        }
     })
 }
 
-/// One pass of a spin-wait loop the generator marked (`recomp/patches.py` `spin`): give the core away.
+/// One pass of a spin-wait loop the generator marked (`recomp/patches.py` `spin`): the scheduler's checkpoint
+/// (`Scheduler::spin_pass`), then give the host core away.
 #[no_mangle]
 pub extern "C" fn rt_spin_gate(_c: *mut Cpu, _head: u64) {
-    crate::boundary::guard("rt_spin_gate", std::thread::yield_now);
+    crate::boundary::guard("rt_spin_gate", || {
+        crate::kernel::sched().spin_pass();
+        std::thread::yield_now();
+    });
 }
 
 /// BRK #imm: the guest's abort / assertion.
@@ -134,6 +179,6 @@ mod tests {
         std::thread::sleep(std::time::Duration::from_millis(20));
         let (t1, n1) = (super::rt_ticks(), super::now_ns());
         let hz = (t1 - t0) as f64 / ((n1 - n0) as f64 / 1e9);
-        assert!((hz / super::TICK_HZ as f64 - 1.0).abs() < 0.01, "{hz}");
+        assert!((hz / super::tick_hz() as f64 - 1.0).abs() < 0.01, "{hz}");
     }
 }

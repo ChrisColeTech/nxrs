@@ -18,7 +18,8 @@ typedef struct __attribute__((aligned(16))) Cpu {
     uint64_t fpsr;           // 328
     uint64_t excl_val_hi;    // 336: upper half of a 128-bit exclusive pair (LDXP/LDAXP of two X registers)
     void *sj;                // 344: the newest live setjmp owner of this guest thread (cpu/sjlj.c)
-    uint8_t _pad[512 - 352];
+    uint32_t excl_seq;       // 352: the exclusive monitor bucket's sequence at the last LDXR (rt_excl_mon)
+    uint8_t _pad[512 - 356];
     __uint128_t v[32];       // 512
 } Cpu;
 
@@ -38,10 +39,11 @@ void rt_spin_gate(Cpu *c, uint64_t head);  // a pass of a spin wait loop (kernel
 void rt_svc(Cpu *c, uint32_t imm, uint64_t pc);
 void rt_brk(Cpu *c, uint32_t imm, uint64_t pc) __attribute__((noreturn));
 void rt_udf(Cpu *c, uint64_t pc) __attribute__((noreturn));
-// The Switch 2 counter runs at 31.25 MHz (32 ns a tick): MKW's sdk returns 31,250,000 from
-// nn::os::GetSystemTickFrequency and converts with it (TickManager::ConvertToTimeSpan, sdk+0x147208).
-#define RT_TICK_HZ 31250000u
-#define RT_TICK_NS 32u
+// The system counter's rate (CNTFRQ_EL0) and value (rt_ticks): the runtime sets the rate at start-up, before any
+// guest code runs: 19.2 MHz for a Switch program, 31.25 MHz (32 ns a tick) for a Switch 2 one (MKW's sdk returns
+// 31,250,000 from nn::os::GetSystemTickFrequency and converts with it).
+extern uint32_t rt_tick_hz;
+#define RT_TICK_HZ rt_tick_hz
 uint64_t rt_ticks(void);
 
 // Host FP state is not the guest's: code lifted with --simd=c keeps FPCR/FPSR in Cpu (c->fpcr, zeroed with the
@@ -96,8 +98,42 @@ void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
 #define ST64(a, v) (*(u64u *)(uintptr_t)(a) = (uint64_t)(v))
 
 // ---- exclusive monitor (emulated with compare-and-swap)
+// A STXR succeeds when the value still matches its LDXR's and, with the global monitor on, no other exclusive store
+// went to the same 16-byte bucket since: every bucket (hashed into the runtime's table rt_excl_mon) has a sequence
+// number that the LDXR remembers, and a STXR holds the bucket (odd sequence) for the length of its compare-and-swap.
+// Without it a STXR succeeds after other threads changed the value and changed it back (ABA): lock-free lists and
+// reference counts lost updates that way (Pokemon Legends: Z-A, a Switch 1 program). Plain stores do not count, as
+// with dynarmic. The runtime turns the table on for Switch 1 programs and leaves it NULL (values only) for Switch 2
+// ones, where it cost Mario Kart World a third of its frames.
+// LDXR and LDAR are acquire loads, STLR a sequentially consistent store: ARM orders an STLR before a later LDAR
+// (RCsc), which x86 gives only with a locked store.
+extern uint32_t *rt_excl_mon;
+#define RT_XM_BITS 16
+static inline uint32_t *rt_xm(uint64_t a) {
+    uint32_t *t = rt_excl_mon;
+    return t ? t + (((uint32_t)(a >> 4) * 2654435761u) >> (32 - RT_XM_BITS)) : (uint32_t *)0;
+}
+static inline void rt_xm_mark(Cpu *c, uint64_t a) {
+    uint32_t *m = rt_xm(a);
+    if (m) {
+        uint32_t q;
+        while ((q = __atomic_load_n(m, __ATOMIC_ACQUIRE)) & 1) {}
+        c->excl_seq = q;
+    }
+}
+// 1: the bucket is this thread's (unchanged since its LDXR); release it with rt_xm_end
+static inline int rt_xm_begin(Cpu *c, uint64_t a) {
+    uint32_t *m = rt_xm(a);
+    uint32_t e = c->excl_seq;
+    return !m || __atomic_compare_exchange_n(m, &e, e + 1, 0, __ATOMIC_SEQ_CST, __ATOMIC_RELAXED);
+}
+static inline void rt_xm_end(Cpu *c, uint64_t a, int stored) {
+    uint32_t *m = rt_xm(a);
+    if (m) __atomic_store_n(m, stored ? c->excl_seq + 2 : c->excl_seq, __ATOMIC_RELEASE);
+}
 #define EXCL(N, T)                                                                         \
     static inline uint64_t ldx##N(Cpu *c, uint64_t a) {                                    \
+        rt_xm_mark(c, a);                                                                  \
         T v = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                        \
         c->excl_addr = a;                                                                  \
         c->excl_val = v;                                                                   \
@@ -106,15 +142,18 @@ void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
     static inline uint32_t stx##N(Cpu *c, uint64_t a, uint64_t v) {                        \
         if (c->excl_addr != a) return 1;                                                   \
         c->excl_addr = ~0ull;                                                              \
+        if (!rt_xm_begin(c, a)) return 1;                                                  \
         T expected = (T)c->excl_val;                                                       \
-        return !__atomic_compare_exchange_n((T *)(uintptr_t)a, &expected, (T)v, 0,         \
-                                            __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);           \
+        int ok = __atomic_compare_exchange_n((T *)(uintptr_t)a, &expected, (T)v, 0,        \
+                                             __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);          \
+        rt_xm_end(c, a, ok);                                                               \
+        return !ok;                                                                        \
     }                                                                                      \
     static inline uint64_t lda##N(uint64_t a) {                                            \
         return __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                       \
     }                                                                                      \
     static inline void stl##N(uint64_t a, uint64_t v) {                                    \
-        __atomic_store_n((T *)(uintptr_t)a, (T)v, __ATOMIC_RELEASE);                       \
+        __atomic_store_n((T *)(uintptr_t)a, (T)v, __ATOMIC_SEQ_CST);                       \
     }
 EXCL(8, uint8_t)
 EXCL(16, uint16_t)
@@ -124,6 +163,7 @@ EXCL(64, uint64_t)
 // Exclusive pair of two X registers: one 16-byte-aligned 128-bit access (cmpxchg16b; x86-64-v3 has CX16).
 // A pair of two W registers is a 64-bit exclusive and uses ldx64/stx64.
 static inline __uint128_t ldxp128(Cpu *c, uint64_t a) {
+    rt_xm_mark(c, a);
     __uint128_t v = __atomic_load_n((__uint128_t *)(uintptr_t)a, __ATOMIC_ACQUIRE);
     c->excl_addr = a;
     c->excl_val = (uint64_t)v;
@@ -133,10 +173,13 @@ static inline __uint128_t ldxp128(Cpu *c, uint64_t a) {
 static inline uint32_t stxp128(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
     if (c->excl_addr != a) return 1;
     c->excl_addr = ~0ull;
+    if (!rt_xm_begin(c, a)) return 1;
     __uint128_t expected = ((__uint128_t)c->excl_val_hi << 64) | c->excl_val;
     __uint128_t v = ((__uint128_t)hi << 64) | lo;
-    return !__atomic_compare_exchange_n((__uint128_t *)(uintptr_t)a, &expected, v, 0, __ATOMIC_SEQ_CST,
-                                        __ATOMIC_SEQ_CST);
+    int ok = __atomic_compare_exchange_n((__uint128_t *)(uintptr_t)a, &expected, v, 0, __ATOMIC_SEQ_CST,
+                                         __ATOMIC_SEQ_CST);
+    rt_xm_end(c, a, ok);
+    return !ok;
 }
 
 // ---- LSE atomics (ARMv8.1; the A57 lacks them, the SDK carries them behind a CPU feature check).

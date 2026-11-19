@@ -34,6 +34,10 @@ pub struct BuildArgs {
     pub cc: Option<String>,
     /// generate the C and stage the data folder, compile nothing
     pub no_build: bool,
+    /// `--chunk`: about this many ARM instructions per C file (Turbo's default 30000); None: the translator's sizing
+    pub chunk: Option<u64>,
+    /// `--native`: compile for this processor (-march=native) instead of x86-64-v3
+    pub native: bool,
     pub no_shaders: bool,
     /// v1: the DLC hint names `--install-dlc` (what a v1 caller passes); v2: `nxrs dlc install`
     pub v1: bool,
@@ -148,12 +152,14 @@ fn layout_modules(gen: &Path) -> Result<Vec<(String, String, String)>> {
     Ok(out)
 }
 
-/// modules.c: the module table for the runtime and the DLL's entry point.
-pub fn modules_c(mods: &[(String, String, String)]) -> String {
+/// modules.c: the module table for the engine and the DLL's entry point, which calls `entry` (`nxfront_main` or
+/// `nxrt_main`, both `int (int argc, char **argv, const RtModule *mods, int count)`).
+pub fn modules_c(mods: &[(String, String, String)], entry: &str) -> String {
     let mut s = String::from(
         "// Written by nxrs: the translated modules for nxrt_main, and the entry the loader calls.\n#include <stdlib.h>\n#include \"nxrt.h\"\n#include \"patches.h\"\n\n\
          volatile int g_fnprof __attribute__((visibility(\"hidden\")));\n\
-         uint8_t rt_patch_on[256] __attribute__((visibility(\"hidden\")));\n\n\
+         uint8_t rt_patch_on[256] __attribute__((visibility(\"hidden\")));\n\
+         int nxfront_main(int argc, char **argv, const RtModule *mods, int count);\n\n\
          // A patch set is on by its default; its environment switch set to 0 turns it off, to anything else on.\n\
          static void nxrs_patch_sets(void) {\n\
          #define NXRS_SET(i, name, env, def) { const char *v = getenv(env); rt_patch_on[i] = (v && v[0]) ? (v[0] != '0') : (def); }\n\
@@ -174,15 +180,15 @@ pub fn modules_c(mods: &[(String, String, String)]) -> String {
     for (i, (n, _, _)) in mods.iter().enumerate() {
         s.push_str(&format!("    mods[{i}].count = {n}_fn_count;\n"));
     }
-    s.push_str(&format!("    return nxrt_main(argc, argv, mods, {});\n}}\n", mods.len()));
+    s.push_str(&format!("    return {entry}(argc, argv, mods, {});\n}}\n", mods.len()));
     s
 }
 
-/// The runtime's C interface (src/runtime/include/nxrt.h), carried by nxrs so a release needs only nxrt.lib.
+/// The runtime's C interface (src/runtime/include/nxrt.h), carried by nxrs so a release needs only the libraries.
 const NXRT_H: &str = include_str!("../../runtime/include/nxrt.h");
 
 /// The compile units of a generated tree: every chunk and table of the modules in layout.json, and modules.c.
-pub fn units(clang: &Clang, gen: &Path, obj: &Path, mods: &[(String, String, String)]) -> Result<Vec<Unit>> {
+pub fn units(clang: &Clang, gen: &Path, obj: &Path, mods: &[(String, String, String)], engine: &cc::Engine) -> Result<Vec<Unit>> {
     let include = gen.join("include");
     let mut headers: Vec<PathBuf> = std::fs::read_dir(&include)
         .with_context(|| format!("{}", include.display()))?
@@ -196,9 +202,9 @@ pub fn units(clang: &Clang, gen: &Path, obj: &Path, mods: &[(String, String, Str
         }
     }
     let hk = cc::headers_key(clang, &headers)?;
-    let gen_flags: Vec<String> = cc::GEN_FLAGS
-        .iter()
-        .map(|s| s.to_string())
+    let gen_flags: Vec<String> = clang
+        .gen_flags()
+        .into_iter()
         .chain([format!("-I{}", include.display()), format!("-I{}", gen.display())])
         .collect();
     let mut v = vec![];
@@ -217,15 +223,15 @@ pub fn units(clang: &Clang, gen: &Path, obj: &Path, mods: &[(String, String, Str
         }
     }
     crate::write_if_changed(&obj.join("nxrt.h"), NXRT_H.as_bytes())?;
-    crate::write_if_changed(&obj.join("modules.c"), modules_c(mods).as_bytes())?;
+    crate::write_if_changed(&obj.join("modules.c"), modules_c(mods, engine.entry()).as_bytes())?;
     let mut h2 = headers.clone();
     h2.push(obj.join("nxrt.h"));
     v.push(Unit {
         src: obj.join("modules.c"),
         obj: obj.join("modules.o"),
-        flags: cc::GEN_FLAGS
-            .iter()
-            .map(|s| s.to_string())
+        flags: clang
+            .gen_flags()
+            .into_iter()
             .chain([format!("-I{}", obj.display()), format!("-I{}", include.display()), format!("-I{}", gen.display())])
             .collect(),
         headers: cc::headers_key(clang, &h2)?,
@@ -233,14 +239,33 @@ pub fn units(clang: &Clang, gen: &Path, obj: &Path, mods: &[(String, String, Str
     Ok(v)
 }
 
-/// The shader step. Lane C's `shaders::prebuild` is called here once its interface is published in
-/// docs/INTERFACES.md; until then the skip is said, and the game translates its shaders while it runs.
-fn shaders_step(out: &Out, no_shaders: bool) {
-    if no_shaders {
-        out.say("shaders: not translated at build time (--no-shaders); the game translates them while it runs");
-    } else {
-        out.say("shaders: not translated at build time: the shader lane's prebuild (shaders::prebuild) is not available yet; the game translates them while it runs");
+/// The shader step: every shader the game ships, found and translated to SPIR-V into `<data>\shaders\`
+/// (`shaders::prebuild_data`: the ExeFS, the RomFS the marker names and the add-on content installed there), and the
+/// profile's shader tables (nxnative's prewarm seed, pairs and translation answers) into `<data>\shaders\profile\`.
+/// A rebuild reuses every translated shader whose inputs and tools are unchanged.
+fn shaders_step(out: &Out, data: &Path, profile: Option<&str>, a: &BuildArgs) -> Result<()> {
+    if a.no_shaders {
+        out.say("shaders: not translated (--no-shaders); a game built so draws only the shaders an earlier build left in its data folder");
+        return Ok(());
     }
+    out.progress("shaders", 0, 0);
+    let prof_dir = data.join("shaders").join("profile");
+    if let Some(id) = profile {
+        let tables = profiles::shader_tables(id).map_err(|e| anyhow!(e))?;
+        if !tables.is_empty() {
+            std::fs::create_dir_all(&prof_dir)?;
+            for (name, text) in &tables {
+                crate::write_if_changed(&prof_dir.join(name), text.as_bytes())?;
+            }
+            let names: Vec<&str> = tables.iter().map(|(n, _)| n.as_str()).collect();
+            out.say(&format!("shaders: the profile's tables ({}) in {}", names.join(", "), prof_dir.display()));
+        }
+    }
+    let opts = shaders::Options { keys: a.keys.clone(), jobs: a.jobs.max(1), ..shaders::Options::default() };
+    let say = |m: &str| out.say(&format!("  {m}"));
+    out.say("Translating the shaders...");
+    shaders::prebuild_data(data, &opts, &say).map_err(|e| anyhow!("shaders: {e} (--no-shaders builds without them)"))?;
+    Ok(())
 }
 
 pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
@@ -250,7 +275,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         bail!("Cannot load the game: {} does not exist", a.input.display());
     }
     // the compiler and the runtime are checked first, not after minutes of translation
-    let tools = if a.no_build { None } else { Some((cc::find_clang(a.cc.as_deref())?, cc::find_runtime_lib()?)) };
+    let clang = if a.no_build { None } else { Some(cc::find_clang(a.cc.as_deref())?) };
     out.say("nxrs - use your own copy of the game. No games or keys included.");
     if let Some(i) = &a.ignored {
         out.say(i);
@@ -261,6 +286,12 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     if game.exefs.files.is_empty() {
         bail!("Cannot load the game: {} has no ExeFS modules", a.input.display());
     }
+    // a title on Nintendo's SDK runs on the whole engine; homebrew brings its own and gets the runtime alone
+    let engine = match &clang {
+        // a retail title (Nintendo's rtld and an NPDM beside its sdk); the runtime's own homebrew has neither
+        Some(c) => Some(cc::find_engine(game.exefs.files.contains_key("sdk") && (game.exefs.files.contains_key("rtld") || game.exefs.files.contains_key("main.npdm")), c.gnu)?),
+        None => None,
+    };
     for m in module_lines(&game.exefs.files)? {
         out.say(&format!("  {:<8} {:010X}  code {:.1} MB  build id {}", m.name, m.base, m.text as f64 / 1048576.0, m.build_id));
     }
@@ -304,7 +335,12 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         }
         None => None,
     };
-    let opts = GenOptions { out: gen.clone(), jobs: a.jobs.max(1), emit: EmitOptions::default(), patches, ..GenOptions::default() };
+    let mut opts = GenOptions { out: gen.clone(), jobs: a.jobs.max(1), emit: EmitOptions::default(), patches, ..GenOptions::default() };
+    if let Some(n) = a.chunk.filter(|&n| n > 0) {
+        // Turbo counts ARM instructions per C file; the translator sizes chunks by the C they make
+        opts.chunk_bytes = n as i64 * translator::aot::discover::EST_INT;
+        opts.chunk_fns = usize::MAX;
+    }
     let key = gen_key(&game.exefs.files, patch_text.as_deref().unwrap_or(""), &format!("{:?}{:?}", (opts.chunk_fns, opts.chunk_bytes, opts.big_fn), (opts.emit.reg_locals, opts.emit.callee_saved)))?;
     let stamp = gen.join("nxrs.gen.key");
     let reuse = std::fs::read_to_string(&stamp).ok().as_deref() == Some(key.as_str()) && gen.join("layout.json").is_file();
@@ -361,19 +397,31 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     if a.no_build {
         return Ok(Built { exe, data, timings });
     }
-    let (clang, runtime) = tools.unwrap();
+    let (clang, engine) = (clang.unwrap(), engine.unwrap());
 
     // ---- shaders
-    shaders_step(out, a.no_shaders);
+    let t = Instant::now();
+    shaders_step(out, &data, prof.as_ref().map(|m| m.profile.id.as_str()), a)?;
+    timings.push(("shaders", t.elapsed().as_secs_f64()));
 
     // ---- compile and link
     let t = Instant::now();
     let mods = layout_modules(&gen)?;
-    let units = units(&clang, &gen, &obj, &mods)?;
+    let mut units = units(&clang, &gen, &obj, &mods, &engine)?;
+    if a.native {
+        for u in &mut units {
+            for f in &mut u.flags {
+                if f == "-march=x86-64-v3" {
+                    *f = "-march=native".into();
+                }
+            }
+        }
+    }
     out.say(&format!(
-        "Compiling with {} {} (-O1, {} at a time)...",
+        "Compiling with {} {} (-O1{}, {} at a time)...",
         clang.path.file_name().unwrap().to_string_lossy(),
         clang.version.trim_start_matches("clang version "),
+        if a.native { ", -march=native" } else { "" },
         a.jobs.max(1)
     ));
     let total = units.len();
@@ -390,7 +438,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     out.say(&format!("Linking {} ...", dll.file_name().unwrap().to_string_lossy()));
     out.progress("link", 0, 0);
     let objs: Vec<PathBuf> = units.iter().map(|u| u.obj.clone()).collect();
-    cc::link_dll(&clang, &objs, &runtime, &obj, &dll)?;
+    out.say(&format!("  with {} ({})", engine.lib.file_name().unwrap().to_string_lossy(), engine.entry()));
+    cc::link_dll(&clang, &objs, &engine, &obj, &dll)?;
     cc::link_exe(&clang, &obj, &exe)?;
     timings.push(("link", t.elapsed().as_secs_f64()));
     timings.push(("total", t_all.elapsed().as_secs_f64()));
@@ -428,7 +477,7 @@ mod tests {
 
     #[test]
     fn modules_c_exports_the_entry() {
-        let s = modules_c(&[("main".into(), "0x7000000000".into(), "0x1000".into())]);
+        let s = modules_c(&[("main".into(), "0x7000000000".into(), "0x1000".into())], "nxrt_main");
         assert!(s.contains("__declspec(dllexport) int nxrs_game_main"));
         assert!(s.contains("{\"main\", 0x7000000000ull, 0x1000ull, main_fn_addrs, main_fn_ptrs, 0}"));
         assert!(s.contains("mods[0].count = main_fn_count;"));

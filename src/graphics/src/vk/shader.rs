@@ -52,6 +52,9 @@ pub struct Module {
     pub inputs: Vec<(u32, InKind)>,
     pub c1: Option<Vec<u8>>,
     pub id: u64,
+    /// a pixel shader's output map (SPH OmapTargets: 4 bits per colour target, R G B A from the low bit): the GPU
+    /// writes only these components of a bound target and leaves the others as they were
+    pub omap: Option<u32>,
 }
 
 pub struct Refl {
@@ -191,6 +194,8 @@ struct JRefl {
     bindings: Vec<JBinding>,
     #[serde(default)]
     c1: Option<String>,
+    #[serde(default)]
+    frag_out_map: Option<i64>,
 }
 
 fn hex_bytes(h: &str) -> Option<Vec<u8>> {
@@ -320,6 +325,9 @@ pub struct Library {
     dir: Mutex<Option<PathBuf>>,
     mem: Mutex<HashMap<ShaderKey, (Vec<u32>, Option<String>)>>,
     modules: Mutex<HashMap<ShaderKey, Option<Arc<Module>>>>,
+    /// keys found in no folder, and when they were last looked for (looked for again twice a second: the live
+    /// translator may deliver them)
+    missing: Mutex<HashMap<ShaderKey, std::time::Instant>>,
     next_id: std::sync::atomic::AtomicU64,
 }
 
@@ -329,6 +337,7 @@ impl Library {
             dir: Mutex::new(std::env::var("NXGFX_SHADERS").ok().map(PathBuf::from)),
             mem: Mutex::new(HashMap::new()),
             modules: Mutex::new(HashMap::new()),
+            missing: Mutex::new(HashMap::new()),
             next_id: std::sync::atomic::AtomicU64::new(1),
         }
     }
@@ -346,9 +355,10 @@ impl Library {
         if let Some(v) = self.mem.lock().unwrap().get(key) {
             return Some(v.clone());
         }
-        let dir = self.dir.lock().unwrap().clone()?;
+        let dir = self.dir.lock().unwrap().clone();
         let hex = key_hex(key);
-        for d in [dir.join("spv"), dir.clone()] {
+        let dirs: Vec<PathBuf> = dir.iter().flat_map(|d| [d.join("spv"), d.clone()]).chain(super::live::spv_dir(key)).collect();
+        for d in dirs {
             if let Ok(bytes) = std::fs::read(d.join(format!("{hex}.spv"))) {
                 if bytes.len() % 4 != 0 {
                     crate::log::red(&format!("shader {hex}.spv is not whole words"));
@@ -364,13 +374,34 @@ impl Library {
 
     /// The module of a shader key; None (a red line once) when the library has none or it cannot be bound.
     pub fn get(&self, dev: &ash::Device, key: &ShaderKey) -> Option<Arc<Module>> {
+        self.get_ex(dev, key, false)
+    }
+
+    /// Whether a module of `key` is on disk (or in memory) now.
+    pub fn has(&self, key: &ShaderKey) -> bool {
+        if self.mem.lock().unwrap().contains_key(key) || self.modules.lock().unwrap().get(key).is_some_and(|m| m.is_some()) {
+            return true;
+        }
+        let Some(dir) = self.dir.lock().unwrap().clone() else { return false };
+        let hex = key_hex(key);
+        dir.join("spv").join(format!("{hex}.spv")).is_file() || dir.join(format!("{hex}.spv")).is_file() || super::live::spv_dir(key).is_some()
+    }
+
+    /// As `get`; `force`: a missing key is looked for again now (a draw waiting for the live translator).
+    pub fn get_ex(&self, dev: &ash::Device, key: &ShaderKey, force: bool) -> Option<Arc<Module>> {
         if let Some(m) = self.modules.lock().unwrap().get(key) {
             return m.clone();
+        }
+        if let Some(t) = self.missing.lock().unwrap().get(key) {
+            if !force && t.elapsed() < std::time::Duration::from_millis(500) {
+                return None;
+            }
         }
         let built = match self.load(key) {
             None => {
                 crate::log::red_once(&format!("shader {} is not in the shader library", key_hex(key)));
-                None
+                self.missing.lock().unwrap().insert(*key, std::time::Instant::now());
+                return None;
             }
             Some((w, j)) => match self.build(dev, key, &w, j.as_deref()) {
                 Ok(m) => Some(m),
@@ -380,6 +411,9 @@ impl Library {
                 }
             },
         };
+        if built.is_some() && self.missing.lock().unwrap().remove(key).is_some() {
+            crate::vklog!("shader {} is in the library now", key_hex(key));
+        }
         self.modules.lock().unwrap().insert(*key, built.clone());
         built
     }
@@ -387,6 +421,7 @@ impl Library {
     fn build(&self, dev: &ash::Device, key: &ShaderKey, words: &[u32], json: Option<&str>) -> Result<Arc<Module>, String> {
         let r = reflect(words)?;
         let (w, res, pool, c1) = remap(words, &r, json)?;
+        let omap = json.and_then(|j| serde_json::from_str::<JRefl>(j).ok()).and_then(|j| j.frag_out_map).filter(|&m| m >= 0 && r.stage == 1).map(|m| m as u32);
         let ci = vk::ShaderModuleCreateInfo::default().code(&w);
         let module = unsafe { dev.create_shader_module(&ci, None) }.map_err(|e| format!("vkCreateShaderModule: {e}"))?;
         Ok(Arc::new(Module {
@@ -398,6 +433,7 @@ impl Library {
             uses_pool: pool,
             inputs: r.inputs,
             c1,
+            omap,
             id: self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }))
     }

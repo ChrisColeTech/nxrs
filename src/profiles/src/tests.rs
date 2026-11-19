@@ -111,3 +111,14 @@ fn settings_and_player_rows() {
     assert!(rows.iter().any(|r| r.variable == "DM_FPS_TARGET" && r.default == "DM_GAME_FPS_TARGET"));
     assert!(source().starts_with("nxnative "));
 }
+
+#[test]
+fn shader_tables_are_embedded() {
+    let t = shader_tables("0100152000022000").unwrap();
+    let names: Vec<&str> = t.iter().map(|(n, _)| n.as_str()).collect();
+    assert_eq!(names, ["pso_manifest.tsv", "pso_pairs.tsv", "shader_pairs.tsv", "shader_facts.tsv"]);
+    assert_eq!(t[2].1.lines().count(), 19013);
+    let seed = prewarm_shaders("0100152000022000").unwrap();
+    assert!(seed.len() > 500 && seed.iter().all(|(k, s)| k.len() >= 16 && !s.is_empty()), "{}", seed.len());
+    assert!(shader_tables("0000000000000000").unwrap().is_empty());
+}

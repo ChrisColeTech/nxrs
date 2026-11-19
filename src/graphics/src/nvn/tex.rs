@@ -102,6 +102,8 @@ nvn_fns! {
         if l.bpb == 0 { crate::log::red_once(&format!("TextureBuilderGetStorageSize: unknown format {:#x}", ctb(b).d.format)); }
         l.size as usize
     }
+    fn nvnTextureBuilderGetZCullStorageSize(b: *const NVNtextureBuilder) -> usize { layout::zcull_size(&ctb(b).d) as usize }
+    fn nvnTextureBuilderGetStorageClass(b: *const NVNtextureBuilder) -> i32 { let _ = b; 0 }
     fn nvnTextureBuilderGetStorageAlignment(b: *const NVNtextureBuilder) -> usize { layout::tex_layout(&ctb(b).d).align as usize }
     fn nvnTextureBuilderGetViewOffset(b: *const NVNtextureBuilder, v: *const NVNtextureView) -> isize {
         let d = &ctb(b).d;
@@ -158,6 +160,9 @@ nvn_fns! {
     fn nvnTextureGetMemoryOffset(t: *const NVNtexture) -> isize { ctx(t).off as isize }
     fn nvnTextureGetTextureAddress(t: *const NVNtexture) -> u64 { let o = ctx(t); if o.pool.is_null() { 0 } else { (*o.pool).mem as u64 + o.off as u64 } }
     fn nvnTextureGetZCullStorageSize(t: *const NVNtexture) -> usize { layout::zcull_size(&ctx(t).d) as usize }
+    /// Storage class: NVN's compression class of the texture's memory; every texture here is class 0 (none), as the
+    /// host decides its own placement.
+    fn nvnTextureGetStorageClass(t: *const NVNtexture) -> i32 { let _ = t; 0 }
     fn nvnTextureGetViewOffset(t: *const NVNtexture, v: *const NVNtextureView) -> isize {
         let o = ctx(t);
         view_offset(&o.d, o.l.layer_size, (v as *const view_t).as_ref())
@@ -270,7 +275,7 @@ nvn_fns! {
     fn nvnSamplerBuilderSetBorderColorui(b: *mut NVNsamplerBuilder, c: *const u32) { for i in 0..4 { sb(b).border[i] = *c.add(i) as f32; } }
     fn nvnSamplerBuilderSetMaxAnisotropy(b: *mut NVNsamplerBuilder, v: f32) { sb(b).aniso = v; }
     fn nvnSamplerBuilderSetReductionFilter(b: *mut NVNsamplerBuilder, v: i32) { sb(b).reduction = v as u8; }
-    fn nvnSamplerBuilderSetLodSnap(b: *mut NVNsamplerBuilder, v: f32) { let _ = (b, v); }
+    fn nvnSamplerBuilderSetLodSnap(b: *mut NVNsamplerBuilder, v: f32) { (*(b as *mut samp_builder_t)).lod_snap = v; }
     fn nvnSamplerBuilderGetMinMagFilter(b: *const NVNsamplerBuilder, mi: *mut i32, ma: *mut i32) { *mi = csb(b).minf as i32; *ma = csb(b).magf as i32; }
     fn nvnSamplerBuilderGetWrapMode(b: *const NVNsamplerBuilder, s: *mut i32, t: *mut i32, r: *mut i32) { let o = csb(b); *s = o.ws as i32; *t = o.wt as i32; *r = o.wr as i32; }
     fn nvnSamplerBuilderGetLodClamp(b: *const NVNsamplerBuilder, lo: *mut f32, hi: *mut f32) { *lo = csb(b).lod_min; *hi = csb(b).lod_max; }

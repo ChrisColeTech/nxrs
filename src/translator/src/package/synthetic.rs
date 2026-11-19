@@ -363,6 +363,29 @@ fn combined_package_applies_its_update_per_read() {
     assert_eq!(b.romfs.read_file("file.bin").unwrap(), b"test");
 }
 
+/// A card image (XCI) as the game's own package, with and without the key area, holding the game and its update.
+#[test]
+fn game_from_xci() {
+    let (_t, keys) = setup("xcigame");
+    let fx = Fixture::new();
+    let all: Vec<(String, Vec<u8>)> = [fx.base(false), fx.update(GAME)].into_iter().flatten().collect();
+    let refs: Vec<(&str, &[u8])> = all.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+    for key_area in [false, true] {
+        let pkg = _t.0.join(format!("game{}.xci", key_area as u8));
+        std::fs::write(&pkg, build_xci(&refs, key_area)).unwrap();
+        let g = open_game(&pkg, &opts(&keys, UpdateChoice::Embedded)).unwrap();
+        assert_eq!(g.applied, Applied::Embedded);
+        assert_eq!(g.exefs.files["main"], nso(b"update"));
+        assert_eq!(g.exefs.version, Some(262144));
+        expect_new(&g.romfs);
+        let data = _t.0.join(format!("data{}", key_area as u8));
+        g.write_data(&data, &|_| {}).unwrap();
+        expect_new(&marker::open_data_dir(&data, Some(&keys)).unwrap());
+        let b = open_game(&pkg, &opts(&keys, UpdateChoice::None)).unwrap();
+        assert_eq!(b.exefs.files["main"], nso(b"base"));
+    }
+}
+
 #[test]
 fn separate_update_nsp_xci_and_bare_nca() {
     let (_t, keys) = setup("separate");

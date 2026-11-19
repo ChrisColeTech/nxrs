@@ -24,7 +24,7 @@ pub fn stage(ctl: &[u8], code: &[u8]) -> Option<Stage> {
 }
 
 /// (the output's length, section count, first section header, distance between section headers), relative to `h`.
-fn layout(d: &[u8], h: usize) -> (usize, usize, usize, usize) {
+pub(crate) fn layout(d: &[u8], h: usize) -> (usize, usize, usize, usize) {
     let w = |o: usize| u32_at(d, h + o).unwrap_or(0) as usize;
     if h + 0x68 <= d.len() && w(0x30) == 0xc9 && w(0x44) == 0 {
         return (w(0x5c), w(0x64), 0xa8, 0x98);

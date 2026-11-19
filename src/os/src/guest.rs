@@ -170,6 +170,40 @@ pub fn call_current(addr: u64, args: &[u64]) -> u64 {
     }
 }
 
+/// A guest thread made with the SDK's own nn::os::CreateThread (malloc'd ThreadType and stack), running the host
+/// function `entry` with `arg` in x0, started at once. For host work that must call guest code (signalling an
+/// nn::os event, the renderer's frames). Returns the ThreadType.
+///
+/// # Safety
+/// `c` is the calling guest thread's state.
+pub unsafe fn spawn(c: *mut Cpu, name: &str, entry: nxrt::hostfn::HostFn, arg: u64, prio: u64, stack_size: u64) -> Option<u64> {
+    let sym = |n: &str| crate::hle::sym(n);
+    let (malloc, create, start) = (sym("malloc")?, sym("_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mi")?, sym("_ZN2nn2os11StartThreadEPNS0_10ThreadTypeE")?);
+    let tt = call(c, malloc, &[0x200])?;
+    zero(tt, 0x200);
+    let sa = call(c, malloc, &[stack_size + 0x1000])?;
+    let stack = (sa + 0xfff) & !0xfff;
+    let e = crate::hle::addr(name, entry);
+    let rc = call(c, create, &[tt, e, arg, stack, stack_size, prio])?;
+    if rc as u32 != 0 {
+        crate::log!("[RED] {name}: CreateThread failed {rc:#x}");
+        return None;
+    }
+    call(c, start, &[tt])?;
+    Some(tt)
+}
+
+/// True when `a` is committed, readable memory (a pointer the guest handed over that may be stale).
+pub fn readable(a: u64, n: u64) -> bool {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS};
+    if a < 0x1000 {
+        return false;
+    }
+    let mut m: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+    let got = unsafe { VirtualQuery(a as *const _, &mut m, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+    got != 0 && m.State == MEM_COMMIT && m.Protect & (PAGE_NOACCESS | PAGE_GUARD) == 0 && a + n <= m.BaseAddress as u64 + m.RegionSize as u64
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

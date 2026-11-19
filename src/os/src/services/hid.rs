@@ -1,13 +1,24 @@
-//! nn::hid: one player's controller, taken from the host's input state (`set_input`, for the front end), as a Pro
-//! Controller on npad No1 docked or the handheld pair on npad Handheld in handheld mode (`NXOS_OPMODE`). Other
-//! npads report nothing connected. Touch, gestures, keyboard, mouse and the debug pad read empty; six-axis
-//! sensors report a controller at rest; vibration is accepted and dropped. State reads fill every requested
-//! history entry with consecutive sampling numbers, as nxnative found games need.
+//! nn::hid: the host's controllers (`crate::input`) as the game's npads, after nxnative's `hle_hid.c`.
+//!
+//! Player 1 is the Handheld npad in handheld mode (`oe::opmode() == 0`), else No1; player n is No n. Player 1 reads
+//! the keyboard and mouse, the scripted path and its controller ORed (each stick axis the most deflected source);
+//! players 2..8 read their own controller. A player whose npad the game does not support (SetSupportedNpadIdType) is
+//! not reported: in a one-player game its controller feeds player 1, otherwise it is not used. A pad holding Joy-Cons
+//! is shown in the style the game asked for: both of a pair as one JoyDual npad, or split into JoyLeft / JoyRight on
+//! two npads under single assignment; a game that supports no Joy-Con style gets the pair's merged state as a
+//! full-key pad. A full-key pad the game does not support is shown as a JoyDual pair (the one style with every
+//! button), and each npad's style-set event is signalled when its style changes.
+//!
+//! State reads fill every history entry asked for with consecutive sampling numbers (games read all 16 whatever the
+//! count says). Six-axis sensors report the controller's live motion while it sends some (DualSense / DS4 / Switch
+//! Pro / Joy-Con), else a controller at rest lying flat. Vibration goes to the player's controller (`input::vibrate`).
+//! Touch, gestures, keyboard, mouse and the debug pad read connected-but-idle states.
 
 use crate::guest::{r32, w32, w64, w8, Args};
 use crate::hle::{Registry, RES_OK};
+use crate::input::{self, pick, PLAYERS};
 use nxrt::cpu::Cpu;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU32, Ordering};
 use std::sync::Mutex;
 
 pub const NPAD_NO1: u32 = 0;
@@ -15,6 +26,12 @@ pub const NPAD_HANDHELD: u32 = 0x20;
 pub const STYLE_FULLKEY: u32 = 1;
 pub const STYLE_HANDHELD: u32 = 2;
 pub const STYLE_JOYDUAL: u32 = 4;
+pub const STYLE_JOYLEFT: u32 = 8;
+pub const STYLE_JOYRIGHT: u32 = 0x10;
+/// The Joy-Con 2 forms (Switch 2 SDKs).
+pub const STYLE_JOYDUAL2: u32 = 1 << 12;
+pub const STYLE_JOYLEFT2: u32 = 1 << 13;
+pub const STYLE_JOYRIGHT2: u32 = 1 << 14;
 const ATTR_CONNECTED: u32 = 1;
 const ATTR_WIRED: u32 = 2;
 const ATTR_LEFT: u32 = 4;
@@ -23,22 +40,20 @@ const ATTR_RIGHT: u32 = 0x10;
 const ATTR_RIGHT_WIRED: u32 = 0x20;
 const STICK: i32 = 0x4000;
 
-static SAMPLING: AtomicU64 = AtomicU64::new(0);
+static SAMPLING: AtomicI64 = AtomicI64::new(1 << 16);
 static STYLES: AtomicU32 = AtomicU32::new(0xFFFF_FFFF);
-static IDS: AtomicU32 = AtomicU32::new(0);
+/// Bit id for No1..No8, bit 8 Handheld, bit 9 Other: all until the game names its npads.
+static IDS: AtomicU32 = AtomicU32::new(0x3ff);
 static HOLD: AtomicU32 = AtomicU32::new(0);
-/// The host's input: buttons (NpadButton bits) and the sticks (lx, ly, rx, ry as i16).
-static BUTTONS: AtomicU64 = AtomicU64::new(0);
-static AXES: AtomicU64 = AtomicU64::new(0);
-static STYLE_EVENTS: Mutex<Vec<(u32, u64)>> = Mutex::new(Vec::new());
+/// Bit id: single Joy-Con assignment on npad No(id + 1); KEEP[id]: 1 the left one stays, 2 the right one.
+static SINGLE: AtomicU32 = AtomicU32::new(0);
+static KEEP: [AtomicU32; PLAYERS] = [const { AtomicU32::new(0) }; PLAYERS];
+/// Players the controller applet left out, and whether its maximum was one.
+static BENCHED: AtomicU32 = AtomicU32::new(0);
+static BENCH_ONE: AtomicU32 = AtomicU32::new(0);
 
-/// The front end's input for player 1.
-pub fn set_input(buttons: u64, lx: i16, ly: i16, rx: i16, ry: i16) {
-    BUTTONS.store(buttons, Ordering::Relaxed);
-    AXES.store(lx as u16 as u64 | (ly as u16 as u64) << 16 | (rx as u16 as u64) << 32 | (ry as u16 as u64) << 48, Ordering::Relaxed);
-}
+// ---------------------------------------------------------------- players and npads
 
-/// The npad the player's controller is on.
 pub fn connected_id() -> u32 {
     if crate::services::oe::opmode() == 0 {
         NPAD_HANDHELD
@@ -47,50 +62,301 @@ pub fn connected_id() -> u32 {
     }
 }
 
-/// The style set npad `id` reports.
-pub fn style_of(id: u32) -> u32 {
-    if id != connected_id() {
-        return 0;
-    }
-    let supported = STYLES.load(Ordering::Relaxed);
-    if id == NPAD_HANDHELD {
-        return STYLE_HANDHELD & supported;
-    }
-    if supported & STYLE_FULLKEY != 0 {
-        STYLE_FULLKEY
-    } else if supported & STYLE_JOYDUAL != 0 {
-        STYLE_JOYDUAL
+fn id_bit(id: u32) -> u32 {
+    if (id as usize) < PLAYERS {
+        1 << id
+    } else if id == NPAD_HANDHELD {
+        1 << 8
+    } else if id == 0x10 {
+        1 << 9
     } else {
         0
     }
 }
 
-/// One NpadState (0x28 bytes: sampling, buttons, left and right stick, attributes).
-fn fill(out: u64, id: u32, style: u32, sampling: u64) {
-    crate::guest::zero(out, 0x28);
-    w64(out, sampling);
-    if style_of(id) & style == 0 {
-        return;
+fn players() -> u32 {
+    input::PLAYERS_MASK.load(Ordering::Acquire) | 1
+}
+
+fn reported(p: usize) -> bool {
+    p == 0 || (players() >> p & 1 != 0 && IDS.load(Ordering::Acquire) & id_bit(p as u32) != 0 && BENCHED.load(Ordering::Acquire) >> p & 1 == 0)
+}
+
+fn unsupported_players() -> u32 {
+    (1..PLAYERS).filter(|&p| players() >> p & 1 != 0 && !reported(p)).fold(0, |m, p| m | 1 << p)
+}
+
+fn one_player() -> bool {
+    IDS.load(Ordering::Acquire) & ((1 << PLAYERS) - 2) == 0
+}
+
+/// Players whose controllers feed player 1.
+fn merged_players() -> u32 {
+    if one_player() {
+        unsupported_players()
+    } else if BENCH_ONE.load(Ordering::Acquire) != 0 {
+        BENCHED.load(Ordering::Acquire) & players()
+    } else {
+        0
     }
-    let v = AXES.load(Ordering::Relaxed);
-    let ax = |i: u32| (v >> (16 * i)) as i16 as i32;
-    let (lx, ly, rx, ry) = (ax(0), ax(1), ax(2), ax(3));
-    let mut b = BUTTONS.load(Ordering::Relaxed) & 0xFFFF;
-    for (cond, bit) in [(lx < -STICK, 16), (ly > STICK, 17), (lx > STICK, 18), (ly < -STICK, 19), (rx < -STICK, 20), (ry > STICK, 21), (rx > STICK, 22), (ry < -STICK, 23)] {
-        if cond {
-            b |= 1 << bit;
+}
+
+fn player_of(id: u32) -> Option<usize> {
+    if id == connected_id() {
+        return Some(0);
+    }
+    (id > 0 && (id as usize) < PLAYERS && reported(id as usize)).then_some(id as usize)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum Kind {
+    None,
+    Pad,
+    Dual,
+    Left,
+    Right,
+}
+
+fn joy_supported() -> u32 {
+    let s = STYLES.load(Ordering::Acquire);
+    s | (s >> 10 & (STYLE_JOYDUAL | STYLE_JOYLEFT | STYLE_JOYRIGHT))
+}
+fn joy_sides(p: usize) -> u32 {
+    input::JOY_SIDES[p].load(Ordering::Acquire)
+}
+fn joy_active(p: usize) -> bool {
+    p < PLAYERS && joy_sides(p) != 0 && !(p == 0 && crate::services::oe::opmode() == 0)
+}
+fn joy_split(p: usize) -> bool {
+    joy_sides(p) == 3 && SINGLE.load(Ordering::Acquire) >> p & 1 != 0 && joy_supported() & (STYLE_JOYLEFT | STYLE_JOYRIGHT) == (STYLE_JOYLEFT | STYLE_JOYRIGHT)
+}
+/// The npad the other Joy-Con of a split pair on player p takes: the lowest supported No2..No8 with no player.
+fn split_target(p: usize) -> Option<usize> {
+    let mut taken = players() | 1;
+    let mut mine = None;
+    for q in 0..=p.min(PLAYERS - 1) {
+        if joy_active(q) && joy_split(q) {
+            let t = (1..PLAYERS).find(|&i| taken >> i & 1 == 0 && IDS.load(Ordering::Acquire) & id_bit(i as u32) != 0);
+            if let Some(t) = t {
+                taken |= 1 << t;
+            }
+            if q == p {
+                mine = t;
+            }
         }
     }
-    w64(out + 8, b);
-    w32(out + 0x10, lx as u32);
-    w32(out + 0x14, ly as u32);
-    w32(out + 0x18, rx as u32);
-    w32(out + 0x1C, ry as u32);
-    let attr = if id == NPAD_HANDHELD {
-        ATTR_CONNECTED | ATTR_WIRED | ATTR_LEFT | ATTR_LEFT_WIRED | ATTR_RIGHT | ATTR_RIGHT_WIRED
+    mine
+}
+
+fn resolve(id: u32) -> (Option<usize>, Kind) {
+    if let Some(pl) = player_of(id) {
+        let mut k = Kind::Pad;
+        if joy_active(pl) {
+            let s = joy_sides(pl);
+            k = if s == 3 {
+                if joy_split(pl) {
+                    if KEEP[pl].load(Ordering::Acquire) == 2 {
+                        Kind::Right
+                    } else {
+                        Kind::Left
+                    }
+                } else if joy_supported() & STYLE_JOYDUAL != 0 {
+                    Kind::Dual
+                } else {
+                    Kind::Pad
+                }
+            } else if s == 1 {
+                Kind::Left
+            } else {
+                Kind::Right
+            };
+            if k == Kind::Left && joy_supported() & STYLE_JOYLEFT == 0 || k == Kind::Right && joy_supported() & STYLE_JOYRIGHT == 0 {
+                k = Kind::Pad;
+            }
+        }
+        return (Some(pl), k);
+    }
+    if id > 0 && (id as usize) < PLAYERS {
+        for p in 0..PLAYERS {
+            if joy_active(p) && joy_split(p) && split_target(p) == Some(id as usize) {
+                return (Some(p), if KEEP[p].load(Ordering::Acquire) == 2 { Kind::Left } else { Kind::Right });
+            }
+        }
+    }
+    (None, Kind::None)
+}
+
+fn pad_style(id: u32) -> u32 {
+    if id == NPAD_HANDHELD {
+        return STYLE_HANDHELD;
+    }
+    let s = STYLES.load(Ordering::Acquire);
+    if s & STYLE_FULLKEY == 0 && s & STYLE_JOYDUAL != 0 {
+        STYLE_JOYDUAL
     } else {
-        ATTR_CONNECTED | ATTR_LEFT | ATTR_RIGHT
+        STYLE_FULLKEY
+    }
+}
+
+fn kind_style(k: Kind, id: u32) -> u32 {
+    match k {
+        Kind::Pad => pad_style(id),
+        Kind::Dual => STYLE_JOYDUAL,
+        Kind::Left => STYLE_JOYLEFT,
+        Kind::Right => STYLE_JOYRIGHT,
+        Kind::None => 0,
+    }
+}
+
+/// The style set npad `id` reports.
+pub fn style_of(id: u32) -> u32 {
+    let (_, k) = resolve(id);
+    kind_style(k, id)
+}
+
+// style-set events per npad (No1..No8, then Handheld): signalled when the style changes
+const SLOTS: usize = PLAYERS + 1;
+struct StyleEv {
+    ev: [u64; SLOTS],
+    told: [u32; SLOTS],
+}
+static STYLE_EV: Mutex<StyleEv> = Mutex::new(StyleEv { ev: [0; SLOTS], told: [0; SLOTS] });
+
+fn style_slot(id: u32) -> Option<usize> {
+    if (id as usize) < PLAYERS {
+        Some(id as usize)
+    } else if id == NPAD_HANDHELD {
+        Some(PLAYERS)
+    } else {
+        None
+    }
+}
+
+fn styles_sync() {
+    let mut g = STYLE_EV.lock().unwrap();
+    for i in 0..SLOTS {
+        let id = if i < PLAYERS { i as u32 } else { NPAD_HANDHELD };
+        let st = style_of(id);
+        if st == g.told[i] {
+            continue;
+        }
+        g.told[i] = st;
+        if g.ev[i] != 0 {
+            crate::services::os::signal_bound(g.ev[i]);
+        }
+    }
+}
+
+/// The input layer: a pad's Joy-Cons changed.
+pub fn styles_changed() {
+    styles_sync();
+}
+
+/// The input layer: the players with a controller changed.
+pub fn players_changed(mask: u32) {
+    BENCHED.fetch_and(mask, Ordering::AcqRel);
+    styles_sync();
+    note_merged();
+}
+
+fn note_merged() {
+    static LAST: AtomicU32 = AtomicU32::new(0);
+    let m = unsupported_players();
+    let key = m | (one_player() as u32) << 31 | BENCHED.load(Ordering::Relaxed) << 8;
+    if LAST.swap(key, Ordering::Relaxed) == key {
+        return;
+    }
+    for p in 1..PLAYERS {
+        if m >> p & 1 != 0 {
+            if one_player() {
+                crate::log!("hid: player {}'s controller feeds player 1: the game supports one player (no npad {p})", p + 1);
+            } else {
+                crate::log!("hid: player {}'s controller is not used: the game supports no npad {p}", p + 1);
+            }
+        }
+    }
+}
+
+// ---------------------------------------------------------------- states
+
+fn stick_dirs(a: &[i32; 4]) -> u64 {
+    let mut b = 0;
+    for (cond, bit) in [(a[0] < -STICK, 16), (a[1] > STICK, 17), (a[0] > STICK, 18), (a[1] < -STICK, 19), (a[2] < -STICK, 20), (a[3] > STICK, 21), (a[2] > STICK, 22), (a[3] < -STICK, 23)] {
+        if cond {
+            b |= 1u64 << bit;
+        }
+    }
+    b
+}
+
+/// The merged view of player p (buttons, sticks), latches taken.
+fn player_input(p: usize) -> (u64, [i32; 4]) {
+    let mut b = 0u64;
+    let mut a = [0i32; 4];
+    let mut add = |(pb, pa): (u64, [i32; 4])| {
+        b |= pb;
+        for i in 0..4 {
+            a[i] = pick(a[i], pa[i]);
+        }
     };
+    if p == 0 {
+        if !input::REPLAYING.load(Ordering::Acquire) {
+            add(input::KEYS.take());
+            let src = 1 | merged_players();
+            for q in 0..PLAYERS {
+                if src >> q & 1 != 0 {
+                    add(input::PADS[q].take());
+                }
+            }
+        }
+        add(input::SCRIPT.take());
+    } else {
+        add(input::PADS[p].take());
+        add(input::SCRIPT_P[p].take());
+    }
+    (b, a)
+}
+
+/// One NpadState (0x28 bytes: sampling, buttons, left and right stick, attributes).
+fn fill(out: u64, id: u32, style: u32, sampling: i64) {
+    crate::guest::zero(out, 0x28);
+    w64(out, sampling as u64);
+    let (pl, kind) = resolve(id);
+    let Some(p) = pl else { return };
+    if kind_style(kind, id) & style == 0 {
+        return;
+    }
+    let (b, a, attr) = match kind {
+        Kind::Dual | Kind::Left | Kind::Right => {
+            let (l, r) = (kind != Kind::Right, kind != Kind::Left);
+            let mut b = 0u64;
+            let mut a = [0i32; 4];
+            for side in 0..2 {
+                if if side == 0 { l } else { r } {
+                    let (jb, ja) = input::JOY[p][side].take();
+                    b |= jb;
+                    a[2 * side] = ja[0];
+                    a[2 * side + 1] = ja[1];
+                }
+            }
+            (b & 0x0f00_ffff, a, ATTR_CONNECTED | if l { ATTR_LEFT } else { 0 } | if r { ATTR_RIGHT } else { 0 })
+        }
+        _ => {
+            let (b, a) = player_input(p);
+            let attr = if id == NPAD_HANDHELD { ATTR_CONNECTED | ATTR_WIRED | ATTR_LEFT | ATTR_LEFT_WIRED | ATTR_RIGHT | ATTR_RIGHT_WIRED } else { ATTR_CONNECTED | ATTR_LEFT | ATTR_RIGHT };
+            (b & 0xffff, a, attr)
+        }
+    };
+    if p == 0 && input::env_flag("NXRS_CONTROLLER_TRACE") {
+        static LAST: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if LAST.swap(b, Ordering::Relaxed) != b {
+            crate::log!("hid: the game read player 1 on npad {id:#x}: buttons {b:#06x} sticks {a:?}");
+        }
+    }
+    w64(out + 8, b | stick_dirs(&a));
+    for (i, v) in a.iter().enumerate() {
+        w32(out + 0x10 + 4 * i as u64, *v as u32);
+    }
     w32(out + 0x20, attr);
 }
 
@@ -98,9 +364,13 @@ fn states(out: u64, n: i32, id: u32, style: u32) -> u64 {
     if n <= 0 {
         return 0;
     }
-    let s = SAMPLING.fetch_add(1, Ordering::Relaxed) + 1 + n as u64;
-    for i in 0..n as u64 {
-        fill(out + 0x28 * i, id, style, s - i);
+    let s = SAMPLING.fetch_add(1, Ordering::Relaxed) + 1;
+    fill(out, id, style, s);
+    for i in 1..n as u64 {
+        for k in 0..5u64 {
+            w64(out + 0x28 * i + 8 * k, crate::guest::r64(out + 8 * k));
+        }
+        w64(out + 0x28 * i, (s - i as i64) as u64);
     }
     n as u64
 }
@@ -120,62 +390,103 @@ macro_rules! hidfn {
 macro_rules! style_fns {
     ($one:ident, $many:ident, $style:expr) => {
         hidfn!($one, |a| {
+            input::start();
             let s = SAMPLING.fetch_add(1, Ordering::Relaxed) + 1;
             fill(a.x(0), r32(a.x(1)), $style, s);
             0
         });
-        hidfn!($many, |a| { states(a.x(0), a.i(1), r32(a.x(2)), $style) });
+        hidfn!($many, |a| {
+            input::start();
+            states(a.x(0), a.i(1), r32(a.x(2)), $style)
+        });
     };
 }
 style_fns!(state_fullkey, states_fullkey, STYLE_FULLKEY);
 style_fns!(state_handheld, states_handheld, STYLE_HANDHELD);
 style_fns!(state_joydual, states_joydual, STYLE_JOYDUAL);
-style_fns!(state_joyleft, states_joyleft, 8);
-style_fns!(state_joyright, states_joyright, 0x10);
+style_fns!(state_joyleft, states_joyleft, STYLE_JOYLEFT);
+style_fns!(state_joyright, states_joyright, STYLE_JOYRIGHT);
 
+hidfn!(init_npad, |a| {
+    input::start();
+    0
+});
 hidfn!(nothing, |a| { 0 });
 hidfn!(ok, |a| { RES_OK });
 hidfn!(set_ids, |a| {
     let (ids, n) = (a.x(0), a.x(1));
     let mut m = 0u32;
     for i in 0..n.min(16) {
-        let id = r32(ids + 4 * i);
-        m |= if id < 8 { 1 << id } else if id == NPAD_HANDHELD { 1 << 8 } else { 1 << 9 };
+        m |= id_bit(r32(ids + 4 * i));
     }
-    if IDS.swap(m, Ordering::Relaxed) != m {
-        crate::log!("hid: supported npad ids {m:#x}");
+    if IDS.swap(m, Ordering::AcqRel) != m {
+        BENCHED.store(0, Ordering::Release);
+        crate::log!("hid: supported npad ids {m:#x} (bit n: No n+1, bit 8 Handheld, bit 9 Other)");
+        styles_sync();
+        note_merged();
     }
     0
 });
 hidfn!(set_styles, |a| {
     let s = a.w(0);
-    if STYLES.swap(s, Ordering::Relaxed) != s {
+    if STYLES.swap(s, Ordering::AcqRel) != s {
         crate::log!("hid: supported npad styles {s:#x}; player 1 reports {:#x} on npad {:#x}", style_of(connected_id()), connected_id());
+        styles_sync();
     }
     0
 });
-hidfn!(get_styles, |a| { STYLES.load(Ordering::Relaxed) as u64 });
+hidfn!(get_styles, |a| { STYLES.load(Ordering::Acquire) as u64 });
 hidfn!(get_style, |a| { style_of(r32(a.x(0))) as u64 });
 hidfn!(hold_type_set, |a| {
     HOLD.store(a.w(0), Ordering::Relaxed);
     0
 });
 hidfn!(hold_type, |a| { HOLD.load(Ordering::Relaxed) as u64 });
+fn joy_assign(id: u32, single: bool, keep: u32) {
+    if id as usize >= PLAYERS {
+        return;
+    }
+    KEEP[id as usize].store(keep, Ordering::Release);
+    let was = SINGLE.load(Ordering::Acquire);
+    let now = if single { was | 1 << id } else { was & !(1 << id) };
+    if SINGLE.swap(now, Ordering::AcqRel) != now {
+        crate::log!("hid: npad {id}: {} Joy-Con assignment", if single { "single" } else { "dual" });
+        styles_sync();
+    }
+}
+hidfn!(joy_get_assign, |a| {
+    let id = r32(a.x(0));
+    ((id as usize) < PLAYERS && SINGLE.load(Ordering::Acquire) >> id & 1 != 0) as u64
+});
+hidfn!(joy_single, |a| {
+    joy_assign(r32(a.x(0)), true, 0);
+    0
+});
+hidfn!(joy_single_dev, |a| {
+    // (const NpadId&, NpadJoyDeviceType): 0 left stays, 1 right stays
+    joy_assign(r32(a.x(0)), true, if a.w(1) == 1 { 2 } else { 1 });
+    0
+});
+hidfn!(joy_single_out, |a| {
+    // (NpadId* out, const NpadId&, NpadJoyDeviceType): the npad the other half went to, if any
+    let id = r32(a.x(1));
+    joy_assign(id, true, if a.w(2) == 1 { 2 } else { 1 });
+    let t = split_target(id as usize);
+    if let Some(t) = t {
+        w32(a.x(0), t as u32);
+    }
+    t.is_some() as u64
+});
+hidfn!(joy_dual, |a| {
+    joy_assign(r32(a.x(0)), false, 0);
+    0
+});
 hidfn!(zero, |a| { 0 });
 hidfn!(one, |a| { 1 });
 hidfn!(led, |a| {
     let id = r32(a.x(0));
-    (match id {
-        0 => 0b0001,
-        1 => 0b0011,
-        2 => 0b0111,
-        3 => 0b1111,
-        4 => 0b1001,
-        5 => 0b0101,
-        6 => 0b1101,
-        7 => 0b0110,
-        _ => 0,
-    }) as u64
+    let p = if id == NPAD_HANDHELD { 0 } else { id as usize };
+    crate::input::nintendo::lights(p) as u64
 });
 hidfn!(color, |a| {
     w32(a.x(0), 0xFF32_3232);
@@ -189,26 +500,110 @@ hidfn!(color2, |a| {
     }
     RES_OK
 });
+hidfn!(icon_color, |a| {
+    // no host controller is a decorated Joy-Con (Switch 2 SDKs): ResultNoIconDecoration, or invalid npad
+    let id = r32(a.x(1));
+    if (id as usize) < 8 || id == 0x10 || id == 0x20 {
+        0x4b6ca
+    } else {
+        0x58aca
+    }
+});
+hidfn!(icon_color2, |a| {
+    let id = r32(a.x(2));
+    if (id as usize) < 8 || id == 0x10 || id == 0x20 {
+        0x4b6ca
+    } else {
+        0x58aca
+    }
+});
+
+fn players_reported() -> i32 {
+    (0..PLAYERS).map(|p| reported(p) as i32 + (reported(p) && joy_active(p) && joy_split(p) && split_target(p).is_some()) as i32).sum()
+}
+
+const RES_CTRL_CANCELED: u64 = 202 | 3101 << 9;
 hidfn!(controller_support, |a| {
-    // (ControllerSupportResultInfo* out, const ControllerSupportArg&): one player, on the connected npad
-    let out = a.x(0);
+    // (ControllerSupportResultInfo* out, const ControllerSupportArg& {i8 min, i8 max, ...})
+    let (out, arg) = (a.x(0), a.x(1));
+    let (min, max) = if arg != 0 { (crate::guest::rd::<i8>(arg) as i32, crate::guest::rd::<i8>(arg + 1) as i32) } else { (0, 0) };
+    let mut count = players_reported();
+    // more players wanted than reported: those left out before count again
+    for p in 1..PLAYERS {
+        if max <= 0 || count < max {
+            if BENCHED.load(Ordering::Acquire) >> p & 1 != 0 {
+                BENCHED.fetch_and(!(1 << p), Ordering::AcqRel);
+                count = players_reported();
+            }
+        }
+    }
+    // too few: a pair of Joy-Cons held sideways is two
+    for p in 0..PLAYERS {
+        if count >= min {
+            break;
+        }
+        if reported(p) && joy_active(p) && joy_sides(p) == 3 && SINGLE.load(Ordering::Acquire) >> p & 1 == 0 {
+            joy_assign(p as u32, true, 0);
+            if joy_split(p) && split_target(p).is_some() {
+                count += 1;
+            } else {
+                joy_assign(p as u32, false, 0);
+            }
+        }
+    }
+    let canceled = min > count;
+    // more than the maximum: the highest players are left out
+    let mut p = PLAYERS - 1;
+    while max > 0 && p > 0 && count > max {
+        if reported(p) {
+            BENCHED.fetch_or(1 << p, Ordering::AcqRel);
+            count = players_reported();
+        }
+        p -= 1;
+    }
+    BENCH_ONE.store((max == 1) as u32, Ordering::Release);
+    styles_sync();
+    note_merged();
+    if max > 0 && count > max {
+        count = max;
+    }
+    crate::log!("hid: controller applet: {min} to {max} players wanted, {count} connected{}", if canceled { ": too few, closed as the player would (canceled)" } else { "" });
     if out != 0 {
-        w8(out, 1);
+        w8(out, count as u8);
         w32(out + 4, connected_id());
     }
-    crate::log_once!("ctrl applet", "hid: controller applet answered with one player on npad {:#x}", connected_id());
-    RES_OK
+    if canceled {
+        RES_CTRL_CANCELED
+    } else {
+        RES_OK
+    }
+});
+hidfn!(controller_support_noout, |a| {
+    let arg = a.x(0);
+    let min = if arg != 0 { crate::guest::rd::<i8>(arg) as i32 } else { 0 };
+    if min > players_reported() {
+        RES_CTRL_CANCELED
+    } else {
+        RES_OK
+    }
 });
 unsafe fn bind_style_event(c: *mut Cpu) {
     let (id, ev, mode) = (r32((*c).x[0]), (*c).x[1], (*c).x[2] as u32);
     crate::services::os::bind_system_event(c, ev, mode == 1);
-    STYLE_EVENTS.lock().unwrap().push((id, ev));
+    if let Some(s) = style_slot(id) {
+        let mut g = STYLE_EV.lock().unwrap();
+        g.ev[s] = ev;
+        g.told[s] = style_of(id);
+    }
     if style_of(id) != 0 {
         crate::services::os::signal_bound(ev);
     }
 }
+
+// ---------------------------------------------------------------- six-axis sensors
+
+// SixAxisSensorHandle: {u8 style index, u8 npad id, u8 device index (0 left, 1 right), u8}.
 hidfn!(six_handles, |a| {
-    // (handles*, n, const NpadId&, style): one sensor, two for a handheld or dual pair
     let (h, n, id, style) = (a.x(0), a.i(1), r32(a.x(2)), a.w(3));
     if n <= 0 {
         return 0;
@@ -217,54 +612,126 @@ hidfn!(six_handles, |a| {
         s if s & STYLE_FULLKEY != 0 => 3,
         s if s & STYLE_HANDHELD != 0 => 4,
         s if s & STYLE_JOYDUAL != 0 => 5,
+        s if s & STYLE_JOYLEFT != 0 => 6,
+        s if s & STYLE_JOYRIGHT != 0 => 7,
         _ => 3,
     };
     let k = if style & (STYLE_HANDHELD | STYLE_JOYDUAL) != 0 { 2.min(n) } else { 1 };
     for i in 0..k as u64 {
-        w32(h + 4 * i, idx | (id & 0xFF) << 8 | (i as u32) << 16);
+        let dev = if style & STYLE_JOYRIGHT != 0 { 1 } else { i as u32 };
+        w32(h + 4 * i, idx | (id & 0xFF) << 8 | dev << 16);
     }
     k as u64
 });
-fn six_fill(out: u64, sampling: u64) {
+
+/// The live motion behind a handle at host time t, if any is fresh.
+fn six_live(handle: u32, t: f64) -> Option<input::motion::Sample> {
+    let id = handle >> 8 & 0xff;
+    let dev = (handle >> 16 & 0xff) as usize;
+    let style_idx = handle & 0xff;
+    let (pl, kind) = resolve(id);
+    let p = pl?;
+    let m = input::motion();
+    let joy = matches!(kind, Kind::Dual | Kind::Left | Kind::Right) || style_idx >= 5;
+    if joy {
+        let side = match kind {
+            Kind::Right => 1,
+            Kind::Left => 0,
+            _ => dev.min(1),
+        };
+        let s = m.joy[p][side].lock().unwrap();
+        if s.fresh(t) {
+            return Some(s.at(t));
+        }
+    }
+    // the player's pad, or in a one-player game whichever merged pad is fresh
+    let src = if p == 0 { 1 | merged_players() } else { 1 << p };
+    for q in 0..PLAYERS {
+        if src >> q & 1 != 0 {
+            let s = m.pad[q].lock().unwrap();
+            if s.fresh(t) {
+                return Some(s.at(t));
+            }
+        }
+    }
+    None
+}
+
+/// The player an npad id shows (a split Joy-Con pair's other half included), for the Joy-Con mouse.
+pub fn player_on(id: u32) -> Option<usize> {
+    resolve(id).0
+}
+
+/// The six-axis sample behind a handle at host time t: the live motion, else at rest.
+pub fn six_sample_at(handle: u32, t: f64) -> input::motion::Sample {
+    six_live(handle, t).unwrap_or_default()
+}
+
+/// Whether a live sensor stands behind a handle now.
+pub fn six_sample_live(handle: u32) -> bool {
+    six_live(handle, input::motion::now_s()).is_some()
+}
+
+fn six_fill(out: u64, sampling: i64, s: Option<input::motion::Sample>) {
     // SixAxisSensorState: delta time, sampling, acceleration, angular velocity, angle, direction (3x3), attributes
     crate::guest::zero(out, 0x60);
     w64(out, 5_000_000);
-    w64(out + 8, sampling);
-    crate::guest::wr::<f32>(out + 0x18, -1.0); // acceleration z: at rest, screen up
-    for (i, off) in [0x34u64, 0x44, 0x54].iter().enumerate() {
-        let _ = i;
-        crate::guest::wr::<f32>(out + off, 1.0); // the direction matrix's diagonal
+    w64(out + 8, sampling as u64);
+    let s = s.unwrap_or_default();
+    for i in 0..3u64 {
+        crate::guest::wr::<f32>(out + 0x10 + 4 * i, s.acc[i as usize]);
+        crate::guest::wr::<f32>(out + 0x1c + 4 * i, s.gyro[i as usize]);
+        crate::guest::wr::<f32>(out + 0x28 + 4 * i, s.angle[i as usize]);
+        for j in 0..3u64 {
+            crate::guest::wr::<f32>(out + 0x34 + 12 * i + 4 * j, s.dir[i as usize][j as usize]);
+        }
     }
     w32(out + 0x58, 1);
 }
+fn six_tick(t: f64) -> i64 {
+    (t / 0.005) as i64
+}
 hidfn!(six_state, |a| {
-    let s = SAMPLING.fetch_add(1, Ordering::Relaxed) + 1;
-    six_fill(a.x(0), s);
+    let t = input::motion::now_s();
+    six_fill(a.x(0), six_tick(t), six_live(r32(a.x(1)), t));
     0
 });
 hidfn!(six_states, |a| {
-    let (out, n) = (a.x(0), a.i(1));
+    let (out, n, h) = (a.x(0), a.i(1), r32(a.x(2)));
     if n <= 0 {
         return 0;
     }
-    let s = SAMPLING.fetch_add(1, Ordering::Relaxed) + 1 + n as u64;
-    for i in 0..n as u64 {
-        six_fill(out + 0x60 * i, s - i);
+    let t = input::motion::now_s();
+    let tick = six_tick(t);
+    for i in 0..n as i64 {
+        let ti = (tick - i) as f64 * 0.005;
+        six_fill(out + 0x60 * i as u64, tick - i, six_live(h, ti));
     }
     n as u64
+});
+hidfn!(six_at_rest, |a| {
+    let t = input::motion::now_s();
+    match six_live(r32(a.x(0)), t) {
+        Some(s) => (s.gyro.iter().all(|g| g.abs() < 0.01)) as u64,
+        None => 1,
+    }
 });
 hidfn!(fusion_params, |a| {
     crate::guest::out(a.x(0), 0.03f32);
     crate::guest::out(a.x(1), 0.4f32);
     0
 });
+
+// ---------------------------------------------------------------- vibration
+
 hidfn!(vib_handles, |a| {
-    // (handles*, n, const NpadId&, style): two devices (left, right) of the connected controller
-    let (h, n, id) = (a.x(0), a.i(1), r32(a.x(2)));
-    let k = n.clamp(0, 2) as u64;
+    // (handles*, n, const NpadId&, style): the left and right devices of the controller
+    let (h, n, id, style) = (a.x(0), a.i(1), r32(a.x(2)), a.w(3));
+    let k = if style & (STYLE_JOYLEFT | STYLE_JOYRIGHT) != 0 { 1 } else { n.clamp(0, 2) as u64 };
     let ty = if id == NPAD_HANDHELD { 2 } else { 3 };
     for i in 0..k {
-        w32(h + 4 * i, ty | (id & 0xFF) << 8 | (i as u32) << 16);
+        let dev = if style & STYLE_JOYRIGHT != 0 { 1 } else { i as u32 };
+        w32(h + 4 * i, ty | (id & 0xFF) << 8 | dev << 16);
     }
     k
 });
@@ -275,6 +742,40 @@ hidfn!(vib_info, |a| {
     w32(a.x(0) + 4, 1 + (h >> 16 & 1));
     0
 });
+fn vib_send(handle: u32, v: u64) {
+    let rd = |o: u64| crate::guest::rd::<f32>(v + o);
+    let val = input::Vib { amp_low: rd(0), freq_low: rd(4), amp_high: rd(8), freq_high: rd(12) };
+    let id = handle >> 8 & 0xff;
+    let side = (handle >> 16 & 1) as usize;
+    let (pl, kind) = resolve(id);
+    let Some(p) = pl else { return };
+    let side = match kind {
+        Kind::Left => 0,
+        Kind::Right => 1,
+        _ => side,
+    };
+    static LAST: Mutex<[[u32; 4]; 2 * PLAYERS]> = Mutex::new([[0; 4]; 2 * PLAYERS]);
+    if input::env_flag("NXRS_CONTROLLER_TRACE") {
+        let bits = [val.amp_low.to_bits(), val.freq_low.to_bits(), val.amp_high.to_bits(), val.freq_high.to_bits()];
+        let mut l = LAST.lock().unwrap();
+        if l[2 * p + side] != bits && (val.amp_low > 0.0 || val.amp_high > 0.0) {
+            crate::log!("hid: vibration player {} side {side}: low {:.3}@{:.0} Hz high {:.3}@{:.0} Hz", p + 1, val.amp_low, val.freq_low, val.amp_high, val.freq_high);
+        }
+        l[2 * p + side] = bits;
+    }
+    input::vibrate(p, side, val);
+}
+hidfn!(vib_one, |a| {
+    vib_send(r32(a.x(0)), a.x(1));
+    0
+});
+hidfn!(vib_many, |a| {
+    let (hs, vs, n) = (a.x(0), a.x(1), a.i(2));
+    for i in 0..n.clamp(0, 16) as u64 {
+        vib_send(r32(hs + 4 * i), vs + 16 * i);
+    }
+    RES_OK
+});
 hidfn!(vib_actual, |a| {
     let o = a.x(0);
     crate::guest::zero(o, 16);
@@ -282,88 +783,52 @@ hidfn!(vib_actual, |a| {
     crate::guest::wr::<f32>(o + 12, 320.0);
     0
 });
+
+// ---------------------------------------------------------------- other devices: connected, idle
+
 hidfn!(touch_states, |a| {
-    // GetTouchScreenStates<16>(states*, n): one sample with no touch points
     let (out, n) = (a.x(0), a.i(1));
     if n <= 0 {
         return 0;
     }
     crate::guest::zero(out, 0x10 + 0x28 * 16);
-    w64(out, SAMPLING.fetch_add(1, Ordering::Relaxed) + 1);
+    w64(out, SAMPLING.fetch_add(1, Ordering::Relaxed) as u64 + 1);
     1
 });
 hidfn!(touch_state, |a| {
     crate::guest::zero(a.x(0), 0x10 + 0x28 * 16);
-    w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) + 1);
+    w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) as u64 + 1);
     0
 });
-hidfn!(empty_state, |a| {
-    // a single state of a device that reports nothing: sampling only
-    crate::guest::zero(a.x(0), 0x30);
-    w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) + 1);
-    0
-});
-hidfn!(empty_states, |a| {
-    let n = a.i(1);
-    if n <= 0 {
-        return 0;
-    }
-    crate::guest::zero(a.x(0), 0x30);
-    w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) + 1);
-    1
-});
-hidfn!(debugpad_state, |a| {
-    crate::guest::zero(a.x(0), 0x20);
-    w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) + 1);
-    0
-});
-hidfn!(debugpad_states, |a| {
-    let n = a.i(1);
-    if n <= 0 {
-        return 0;
-    }
-    crate::guest::zero(a.x(0), 0x20);
-    w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) + 1);
-    1
-});
-hidfn!(keyboard_state, |a| {
-    crate::guest::zero(a.x(0), 0x38);
-    w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) + 1);
-    0
-});
-hidfn!(keyboard_states, |a| {
-    let n = a.i(1);
-    if n <= 0 {
-        return 0;
-    }
-    crate::guest::zero(a.x(0), 0x38);
-    w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) + 1);
-    1
-});
-hidfn!(mouse_state, |a| {
-    crate::guest::zero(a.x(0), 0x28);
-    w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) + 1);
-    0
-});
-hidfn!(mouse_states, |a| {
-    let n = a.i(1);
-    if n <= 0 {
-        return 0;
-    }
-    crate::guest::zero(a.x(0), 0x28);
-    w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) + 1);
-    1
-});
+macro_rules! idle_dev {
+    ($one:ident, $many:ident, $size:expr) => {
+        hidfn!($one, |a| {
+            crate::guest::zero(a.x(0), $size);
+            w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) as u64 + 1);
+            0
+        });
+        hidfn!($many, |a| {
+            if a.i(1) <= 0 {
+                return 0;
+            }
+            crate::guest::zero(a.x(0), $size);
+            w64(a.x(0), SAMPLING.fetch_add(1, Ordering::Relaxed) as u64 + 1);
+            1
+        });
+    };
+}
+idle_dev!(debugpad_state, debugpad_states, 0x20);
+idle_dev!(keyboard_state, keyboard_states, 0x38);
+idle_dev!(mouse_state, mouse_states, 0x28);
 hidfn!(gestures, |a| { 0 });
 hidfn!(handheld_mode, |a| { 0 });
 hidfn!(comm_mode, |a| { 0 });
-hidfn!(joy_assign, |a| { 0 });
 
 pub fn register(r: &mut Registry) {
-    const W: &str = "hid: the host's controller state";
+    const W: &str = "hid: the host's controllers (crate::input)";
     let p = "_ZN2nn3hid";
     for (n, f) in [
-        ("14InitializeNpadEv", nothing as unsafe fn(*mut Cpu)),
+        ("14InitializeNpadEv", init_npad as unsafe fn(*mut Cpu)),
         ("22SetSupportedNpadIdTypeEPKjm", set_ids),
         ("24SetSupportedNpadStyleSetENS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", set_styles),
         ("24GetSupportedNpadStyleSetEv", get_styles),
@@ -381,10 +846,11 @@ pub fn register(r: &mut Registry) {
         ("14DisconnectNpadERKj", nothing),
         ("18SetNpadJoyHoldTypeENS0_15NpadJoyHoldTypeE", hold_type_set),
         ("18GetNpadJoyHoldTypeEv", hold_type),
-        ("20GetNpadJoyAssignmentERKj", joy_assign),
-        ("28SetNpadJoyAssignmentModeDualERKj", nothing),
-        ("30SetNpadJoyAssignmentModeSingleERKj", nothing),
-        ("30SetNpadJoyAssignmentModeSingleERKjNS0_17NpadJoyDeviceTypeE", nothing),
+        ("20GetNpadJoyAssignmentERKj", joy_get_assign),
+        ("28SetNpadJoyAssignmentModeDualERKj", joy_dual),
+        ("30SetNpadJoyAssignmentModeSingleERKj", joy_single),
+        ("30SetNpadJoyAssignmentModeSingleERKjNS0_17NpadJoyDeviceTypeE", joy_single_dev),
+        ("30SetNpadJoyAssignmentModeSingleEPjRKjNS0_17NpadJoyDeviceTypeE", joy_single_out),
         ("23MergeSingleJoyAsDualJoyERKjS2_", ok),
         ("18SwapNpadAssignmentERKjS2_", nothing),
         ("21StartLrAssignmentModeEv", nothing),
@@ -396,8 +862,10 @@ pub fn register(r: &mut Registry) {
         ("19GetPlayerLedPatternERKj", led),
         ("22GetNpadControllerColorEPNS0_19NpadControllerColorERKj", color),
         ("22GetNpadControllerColorEPNS0_19NpadControllerColorES2_RKj", color2),
+        ("29GetNpadJoyIconDecorationColorEPNS0_26NpadJoyIconDecorationColorERKj", icon_color),
+        ("29GetNpadJoyIconDecorationColorEPNS0_26NpadJoyIconDecorationColorES2_RKj", icon_color2),
         ("21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", controller_support),
-        ("21ShowControllerSupportERKNS0_20ControllerSupportArgE", ok),
+        ("21ShowControllerSupportERKNS0_20ControllerSupportArgE", controller_support_noout),
         ("24ShowControllerStrapGuideEv", ok),
         ("28ShowControllerFirmwareUpdateERKNS0_27ControllerFirmwareUpdateArgE", ok),
         ("27BindNpadStyleSetUpdateEventERKjPNS_2os15SystemEventTypeENS3_14EventClearModeE", bind_style_event),
@@ -408,7 +876,7 @@ pub fn register(r: &mut Registry) {
         ("17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", nothing),
         ("21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE", six_state),
         ("22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", six_states),
-        ("21IsSixAxisSensorAtRestERKNS0_19SixAxisSensorHandleE", one),
+        ("21IsSixAxisSensorAtRestERKNS0_19SixAxisSensorHandleE", six_at_rest),
         ("25EnableSixAxisSensorFusionERKNS0_19SixAxisSensorHandleEb", nothing),
         ("28IsSixAxisSensorFusionEnabledERKNS0_19SixAxisSensorHandleE", one),
         ("32SetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleEff", nothing),
@@ -416,12 +884,15 @@ pub fn register(r: &mut Registry) {
         ("34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", nothing),
         ("25SetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleERKNS0_22GyroscopeZeroDriftModeE", nothing),
         ("25GetGyroscopeZeroDriftModeERKNS0_19SixAxisSensorHandleE", one),
+        ("34IsSixAxisSensorDeviceNewlyAssignedERKNS0_19SixAxisSensorHandleE", zero),
+        ("39ResetIsSixAxisSensorDeviceNewlyAssignedERKNS0_19SixAxisSensorHandleE", nothing),
         ("25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", vib_handles),
         ("25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", nothing),
         ("22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", vib_info),
         ("24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", one),
-        ("18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", nothing),
-        ("6detail19SendVibrationValuesEPKNS0_21VibrationDeviceHandleEPKNS0_14VibrationValueEi", ok),
+        ("29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", zero),
+        ("18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", vib_one),
+        ("6detail19SendVibrationValuesEPKNS0_21VibrationDeviceHandleEPKNS0_14VibrationValueEi", vib_many),
         ("23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", vib_actual),
         ("20IsVibrationPermittedEv", one),
         ("27BeginForcedVibrationSessionEv", nothing),
@@ -443,7 +914,7 @@ pub fn register(r: &mut Registry) {
     ] {
         r.force(&format!("{p}{n}"), W, f);
     }
-    let _ = (empty_state, empty_states);
+    super::hid_ext::register(r);
 }
 
 #[cfg(test)]
@@ -451,9 +922,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn npad_states() {
+    fn npad_states_and_players() {
         STYLES.store(STYLE_FULLKEY | STYLE_HANDHELD, Ordering::Relaxed);
-        set_input(0b1, 0, 0x7000, 0, 0);
+        input::set_keyboard(0b1, [0, 0x7000, 0, 0]);
         let mut buf = vec![0u8; 0x28 * 3];
         let a = buf.as_mut_ptr() as u64;
         assert_eq!(states(a, 3, connected_id(), style_of(connected_id())), 3);
@@ -463,6 +934,21 @@ mod tests {
         assert_eq!(r32(a + 0x20) & ATTR_CONNECTED, 1);
         fill(a, 3, STYLE_FULLKEY, 1);
         assert_eq!(r32(a + 0x20), 0, "no controller on npad No4");
-        set_input(0, 0, 0, 0, 0);
+        // a second controller on player 2 in a game that supports No1..No4
+        input::PLAYERS_MASK.store(0b11, Ordering::Relaxed);
+        IDS.store(0b1111 | 1 << 8, Ordering::Relaxed);
+        input::PADS[1].set(1 << 1, [0; 4]);
+        fill(a, 1, STYLE_FULLKEY, 1);
+        assert_eq!(crate::guest::r64(a + 8), 1 << 1, "player 2 reads its own pad on No2");
+        // a one-player game: player 2's pad feeds player 1
+        IDS.store(1 | 1 << 8, Ordering::Relaxed);
+        input::PADS[1].set(1 << 2, [0; 4]);
+        input::set_keyboard(0, [0; 4]);
+        let s = style_of(connected_id());
+        fill(a, connected_id(), s, 1);
+        assert_eq!(crate::guest::r64(a + 8) & 0xffff, 1 << 2, "player 2's pad merged into player 1");
+        input::PLAYERS_MASK.store(1, Ordering::Relaxed);
+        input::PADS[1].clear();
+        IDS.store(0x3ff, Ordering::Relaxed);
     }
 }

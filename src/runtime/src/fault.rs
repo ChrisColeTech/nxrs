@@ -16,6 +16,7 @@ use windows_sys::Win32::System::LibraryLoader::{
 };
 
 const EXCEPTION_CONTINUE_SEARCH: i32 = 0;
+const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 
 /// The guest function a host address belongs to: exact through the PE function table when the address has unwind
 /// info, else the nearest lifted function below it.
@@ -36,14 +37,19 @@ pub fn describe_host(rip: u64) -> String {
     }
 }
 
-fn ours(rip: u64) -> bool {
+fn module_of(a: u64) -> Option<HMODULE> {
     let mut m: HMODULE = core::ptr::null_mut();
     let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
-    if unsafe { GetModuleHandleExW(flags, rip as *const u16, &mut m) } == 0 {
-        return true; // no module: a wild jump
+    (unsafe { GetModuleHandleExW(flags, a as *const u16, &mut m) } != 0).then_some(m)
+}
+
+/// A fault in the image the runtime is linked into (the game's code DLL, or a test executable), or at no module at
+/// all (a wild jump).
+fn ours(rip: u64) -> bool {
+    match module_of(rip) {
+        None => true,
+        Some(m) => Some(m) == module_of(install as *const () as u64),
     }
-    let exe = unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleHandleW(core::ptr::null()) };
-    m == exe
 }
 
 unsafe extern "system" fn handler(ep: *mut EXCEPTION_POINTERS) -> i32 {
@@ -60,6 +66,14 @@ unsafe fn report(ep: *mut EXCEPTION_POINTERS) -> i32 {
         EXCEPTION_STACK_OVERFLOW => "stack overflow",
         _ => return EXCEPTION_CONTINUE_SEARCH,
     };
+    if er.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er.NumberParameters >= 2 {
+        // an untouched page of a lazily committed heap: commit it and retry, from any code (drivers too)
+        if let Some(k) = crate::kernel::try_get() {
+            if k.space.lazy_fault(er.ExceptionInformation[1] as u64) {
+                return EXCEPTION_CONTINUE_EXECUTION;
+            }
+        }
+    }
     let ctx = &*(*ep).ContextRecord;
     let rip = ctx.Rip;
     if !ours(rip) {

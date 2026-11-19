@@ -1,0 +1,7 @@
+# Mario Kart World: accelerate (A held) and steer a little, about 40 s
+0 1 0 0 0 0
+8000 1 12000 0 0 0
+10000 1 0 0 0 0
+20000 1 -12000 0 0 0
+22000 1 0 0 0 0
+40000 0 0 0 0 0

@@ -18,18 +18,19 @@ nvn_fns! {
         let dev = qb(b).dev;
         core::ptr::write_bytes(b as *mut u8, 0, core::mem::size_of::<queue_builder_t>());
         qb(b).dev = dev;
+        qb(b).prio = 100;
     }
     fn nvnQueueBuilderSetDevice(b: *mut NVNqueueBuilder, d: *mut NVNdevice) { qb(b).dev = d; }
     fn nvnQueueBuilderSetFlags(b: *mut NVNqueueBuilder, f: i32) { qb(b).flags = f as u32; }
     fn nvnQueueBuilderSetCommandMemorySize(b: *mut NVNqueueBuilder, n: usize) { qb(b).sz[QB_CMD] = n as u32; qb(b).set[QB_CMD] = 1; }
     fn nvnQueueBuilderSetComputeMemorySize(b: *mut NVNqueueBuilder, n: usize) { qb(b).sz[QB_COMP] = n as u32; qb(b).set[QB_COMP] = 1; }
     fn nvnQueueBuilderSetControlMemorySize(b: *mut NVNqueueBuilder, n: usize) { qb(b).sz[QB_CTL] = n as u32; qb(b).set[QB_CTL] = 1; }
-    fn nvnQueueBuilderSetCommandFlushThreshold(b: *mut NVNqueueBuilder, n: usize) { qb(b).flush = n as u32; }
+    fn nvnQueueBuilderSetCommandFlushThreshold(b: *mut NVNqueueBuilder, n: usize) { qb(b).flush = n as u32; qb(b).flush_set = 1; }
     fn nvnQueueBuilderGetQueueMemorySize(b: *const NVNqueueBuilder) -> usize {
         let o = &*(b as *const queue_builder_t);
         ((qb_size(o, QB_CMD) + qb_size(o, QB_COMP) + qb_size(o, QB_CTL) + 4095) & !4095) as usize
     }
-    fn nvnQueueBuilderSetQueueMemory(b: *mut NVNqueueBuilder, m: *mut u8, n: usize) { qb(b).mem = m; qb(b).mem_sz = n as u64; }
+    fn nvnQueueBuilderSetQueueMemory(b: *mut NVNqueueBuilder, m: *mut u8, n: usize) { qb(b).mem = m; qb(b).mem_sz = n as u32; }
     fn nvnQueueBuilderGetCommandMemorySize(b: *const NVNqueueBuilder, size: *mut i32) -> NVNboolean { let o = &*(b as *const queue_builder_t); *size = o.sz[QB_CMD] as i32; o.set[QB_CMD] }
     fn nvnQueueBuilderGetComputeMemorySize(b: *const NVNqueueBuilder, size: *mut i32) -> NVNboolean { let o = &*(b as *const queue_builder_t); *size = o.sz[QB_COMP] as i32; o.set[QB_COMP] }
     fn nvnQueueBuilderGetControlMemorySize(b: *const NVNqueueBuilder, size: *mut i32) -> NVNboolean { let o = &*(b as *const queue_builder_t); *size = o.sz[QB_CTL] as i32; o.set[QB_CTL] }

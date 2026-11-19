@@ -1,5 +1,5 @@
 //! nn::settings: the language codes the system offers (the fixed table, in nn::settings::Language order) and the
-//! comparisons; the desired language is oe's (`NXOS_LANG`).
+//! comparisons; the desired language is oe's (the `language` setting).
 
 use crate::guest::Args;
 use crate::hle::Registry;

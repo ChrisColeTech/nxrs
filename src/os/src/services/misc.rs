@@ -42,7 +42,8 @@ unsafe fn vsync_event(c: *mut Cpu) {
                     if next > now {
                         std::thread::sleep(next - now);
                     }
-                    next += period;
+                    // the guest clock's rate (crate::clock): a slowed clock slows the display too
+                    next += period.div_f64(crate::clock::rate());
                     if !crate::services::os::signal_bound(ev) {
                         break;
                     }
@@ -194,6 +195,16 @@ unsafe fn diag_abort(c: *mut Cpu) {
     crate::nvn::report();
     nxrt::rt::guest_fatal(c, "nn::diag abort");
 }
+/// AbortImpl() and AbortImpl(const Result *): no message, the Result when there is one, and the call site.
+unsafe fn diag_abort_short(c: *mut Cpu) {
+    let cpu = &mut *c;
+    let name = nxrt::hostfn::name_of(cpu.pc).unwrap_or_default();
+    let res = if name.ends_with("PKNS_6ResultE") && cpu.x[0] != 0 { r32(cpu.x[0]) } else { 0 };
+    crate::log!("[RED] the game aborted (nn::diag) Result {res:#x}, called from {}", nxrt::dispatch::guest_name(cpu.x[30]));
+    crate::log::report_gaps("guest abort");
+    crate::nvn::report();
+    nxrt::rt::guest_fatal(c, "nn::diag abort");
+}
 mfn!(diag_sym, |a| {
     if a.x(0) != 0 && a.x(1) != 0 {
         crate::guest::w8(a.x(0), 0);
@@ -277,6 +288,53 @@ mfn!(shared_font, |a| {
     1
 });
 
+/// One built-in font (SDK 21's pl): {u8 type, u8 flag, pad, address, u64 size}, the stand-in TTF for every type.
+fn builtin_font(out: u64, ty: u32) -> bool {
+    let Some(f) = font() else { return false };
+    crate::guest::zero(out, 0x18);
+    crate::guest::w8(out, ty as u8);
+    w64(out + 8, f.addr + 8);
+    w64(out + 16, f.size - 8);
+    true
+}
+mfn!(builtin_font_fn, |a| { builtin_font(a.x(0), a.w(1)) as u64 });
+// GetBuiltInFontDataSet(int *count, BuiltInFontData *out, const u8 *types, int n, LanguageCode, bool): the types asked
+// for, in order, at most 6 (Switch 2 types) or 7 (Switch 1 types); the Switch 2 form writes the count even when
+// nothing is loaded.
+mfn!(builtin_font_set, |a| {
+    let name = nxrt::hostfn::name_of(a.0.pc).unwrap_or_default();
+    let ounce = name.contains("Ounce");
+    let (count, out, types, n) = (a.x(0), a.x(1), a.x(2), a.i(3));
+    let max = if ounce { 6 } else { 7 };
+    let mut k = 0u64;
+    for i in 0..n.clamp(0, max) as u64 {
+        if builtin_font(out + 0x18 * k, crate::guest::r8(types + i) as u32) {
+            k += 1;
+        }
+    }
+    if k > 0 || ounce {
+        w32(count, k as u32);
+    }
+    (k > 0) as u64
+});
+/// ScalableFontEngine::LoadFont(self, name, data, index, capacity): a font handed over at its BFTTF header goes to
+/// the SDK as the TTF behind it; parsing and errors stay the SDK's.
+unsafe fn font_load(c: *mut Cpu) {
+    let a = Args(&mut *c);
+    let (this, name, mut data, index, cap) = (a.x(0), a.x(1), a.x(2), a.x(3), a.x(4));
+    if let Some(f) = font() {
+        if data == f.addr {
+            data = f.addr + 8;
+        }
+    }
+    let Some(orig) = crate::hle::sym("_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj") else {
+        nxrt::rt::guest_fatal(c, "ScalableFontEngine::LoadFont is not in the SDK");
+    };
+    if let Some(r) = crate::guest::call(c, orig, &[this, name, data, index, cap]) {
+        (*c).x[0] = r;
+    }
+}
+
 // ---- amiibo
 
 static NFP_LIB: AtomicI32 = AtomicI32::new(0);
@@ -316,6 +374,30 @@ mfn!(nfp_stop, |a| {
 });
 mfn!(nfp_dev_state, |a| { NFP_STATE.load(Ordering::Relaxed) as u64 });
 mfn!(nfp_no_tag, |a| { NFP_NO_TAG });
+// Reading an application area: no tag, and nothing read.
+mfn!(nfp_get_area, |a| {
+    crate::guest::out(a.x(1), 0u64);
+    NFP_NO_TAG
+});
+mfn!(nfp_init_ext, |a| {
+    NFP_LIB.store(1, Ordering::Relaxed);
+    crate::log_once!("nfp", "nfp::InitializeWithExtendedApplicationArea: one NFC device that never finds an amiibo");
+    0
+});
+
+// ---- nfc: the library beside nfp, on a console whose NFC is switched off (the game shows its own message)
+
+static NFC_STATE: AtomicI32 = AtomicI32::new(0);
+mfn!(nfc_init, |a| {
+    NFC_STATE.store(1, Ordering::Relaxed);
+    crate::log_once!("nfc", "nfc::Initialize: NFC is disabled (the PC has no NFC reader)");
+    0
+});
+mfn!(nfc_fini, |a| {
+    NFC_STATE.store(0, Ordering::Relaxed);
+    0
+});
+mfn!(nfc_state, |a| { NFC_STATE.load(Ordering::Relaxed) as u64 });
 unsafe fn nfp_attach(c: *mut Cpu) {
     let ev = (*c).x[0];
     crate::services::os::bind_system_event(c, ev, false);
@@ -377,6 +459,27 @@ mfn!(err_show, |a| {
     crate::log!("[RED] err::ShowError Result {r:#x} (module {}, description {}): the host shows no error applet", r & 0x1ff, (r >> 9) & 0x1fff);
     0
 });
+unsafe fn err_log(c: *mut Cpu) {
+    let name = nxrt::hostfn::name_of((*c).pc).unwrap_or_default();
+    let what = if name.contains("9ShowErrorENS0_9ErrorCodeE") {
+        let code = (*c).x[0];
+        format!("error code {:04}-{:04}", code & 0xffff_ffff, code >> 32)
+    } else if name.contains("ApplicationError") {
+        "an application error (ApplicationErrorArg)".into()
+    } else if name.contains("ForUpgradeVersion") {
+        "its upgrade add-on content is older than this program needs (install the add-on of the game's version)".into()
+    } else if name.contains("AddOnContentVersion") {
+        "add-on content version mismatch".into()
+    } else if name.contains("ApplicationVersion") {
+        "game version mismatch".into()
+    } else if name.contains("AddOnContentLost") {
+        format!("add-on content lost ({} entries)", (*c).x[1] as i32)
+    } else {
+        "an error (ErrorResultVariant)".into()
+    };
+    crate::log!("[RED] the game asks to show {what}: the host shows no error applet");
+    (*c).x[0] = 0;
+}
 mfn!(shop, |a| {
     crate::log!("ec: a shop page was asked for: the host has no shop");
     0
@@ -424,6 +527,77 @@ pub fn register(r: &mut Registry) {
         ("_ZN2nn3err9ShowErrorENS_6ResultE", "the error applet: logged", err_show),
         ("_ZN2nn2ec24ShowShopAddOnContentListENS_13ApplicationIdERKNS_7account10UserHandleE", "no shop", shop),
         ("_ZN2nn2ec24ShowShopAddOnContentListENS_13ApplicationIdE", "no shop", shop),
+        ("_ZN2nn2ec19ShowShopProductListEPKNS0_5NsUidEiPKc", "no shop", shop),
+        ("_ZN2nn2ec19ShowShopProductListEPKNS0_5NsUidEiPKcRKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec22ShowShopEnterCodeSceneERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec22ShowShopEnterCodeSceneEv", "no shop", shop),
+        ("_ZN2nn2ec22ShowShopProductDetailsENS0_5NsUidE", "no shop", shop),
+        ("_ZN2nn2ec22ShowShopProductDetailsENS0_5NsUidERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec24ShowShopAddOnContentListERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec24ShowShopAddOnContentListEv", "no shop", shop),
+        ("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdE", "no shop", shop),
+        ("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS0_8CourseIdE", "no shop", shop),
+        ("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS0_8CourseIdERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec24ShowShopSubscriptionListENS_13ApplicationIdERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec24ShowShopSubscriptionListERKNS0_8CourseIdE", "no shop", shop),
+        ("_ZN2nn2ec24ShowShopSubscriptionListERKNS0_8CourseIdERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec24ShowShopSubscriptionListERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec24ShowShopSubscriptionListEv", "no shop", shop),
+        ("_ZN2nn2ec26ShowShopConsumableItemListENS_13ApplicationIdE", "no shop", shop),
+        ("_ZN2nn2ec26ShowShopConsumableItemListENS_13ApplicationIdERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec26ShowShopConsumableItemListERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec26ShowShopConsumableItemListEv", "no shop", shop),
+        ("_ZN2nn2ec27ShowShopSubscriptionDetailsERKNS0_8CourseIdENS0_5NsUidERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec28ShowShopConsumableItemDetailENS_13ApplicationIdERKNS0_12ConsumableIdENS0_5NsUidE", "no shop", shop),
+        ("_ZN2nn2ec28ShowShopConsumableItemDetailENS_13ApplicationIdERKNS0_12ConsumableIdENS0_5NsUidERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec28ShowShopConsumableItemDetailERKNS0_12ConsumableIdENS0_5NsUidE", "no shop", shop),
+        ("_ZN2nn2ec28ShowShopConsumableItemDetailERKNS0_12ConsumableIdENS0_5NsUidERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec30ShowShopApplicationInformationENS_13ApplicationIdE", "no shop", shop),
+        ("_ZN2nn2ec30ShowShopApplicationInformationENS_13ApplicationIdERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec30ShowShopApplicationInformationERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn2ec30ShowShopApplicationInformationEv", "no shop", shop),
+        ("_ZN2nn2ec40ShowShopApplicationInformationForUpgradeENS0_14UpgradeEditionE", "no shop", shop),
+        ("_ZN2nn2ec40ShowShopApplicationInformationForUpgradeENS0_14UpgradeEditionERKNS_7account10UserHandleE", "no shop", shop),
+        ("_ZN2nn4diag6detail10VAbortImplEPKcS3_S3_iPKNS_6ResultEPKNS_2os17UserExceptionInfoES3_RSt9__va_list", "an abort: reported with its message", diag_abort),
+        ("_ZN2nn4diag6detail9AbortImplEPKNS_6ResultE", "an abort: reported with its Result", diag_abort_short),
+        ("_ZN2nn4diag6detail9AbortImplEv", "an abort: reported with its call site", diag_abort_short),
+        ("_ZN2nn2pl18GetBuiltInFontDataEPNS0_17BuiltInFontDataNxENS0_17BuiltInFontTypeNxEb", "the stand-in shared font", builtin_font_fn),
+        ("_ZN2nn2pl18GetBuiltInFontDataEPNS0_20BuiltInFontDataOunceENS0_20BuiltInFontTypeOunceEb", "the stand-in shared font", builtin_font_fn),
+        ("_ZN2nn2pl21GetBuiltInFontDataSetEPiPNS0_17BuiltInFontDataNxEPKNS0_17BuiltInFontTypeNxEiNS_8settings12LanguageCodeEb", "the stand-in shared font", builtin_font_set),
+        ("_ZN2nn2pl21GetBuiltInFontDataSetEPiPNS0_20BuiltInFontDataOunceEPKNS0_20BuiltInFontTypeOunceEiNS_8settings12LanguageCodeEb", "the stand-in shared font", builtin_font_set),
+        ("_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj", "a stand-in font at its BFTTF header: the TTF behind it", font_load),
+        ("_ZN2nn3nfc10InitializeEv", "NFC switched off (no reader)", nfc_init),
+        ("_ZN2nn3nfc8FinalizeEv", "NFC switched off (no reader)", nfc_fini),
+        ("_ZN2nn3nfc8GetStateEv", "NFC library state", nfc_state),
+        ("_ZN2nn3nfp37InitializeWithExtendedApplicationAreaEv", "one NFC device, no tag", nfp_init_ext),
+        ("_ZN2nn3nfp18GetApplicationAreaEPvPmRKNS0_12DeviceHandleEm", "no tag", nfp_get_area),
+        ("_ZN2nn3ngc15ProfanityFilter19CheckProfanityWordsEPjjPPKDsm", "never profanity", ngc_check),
+        ("_ZN2nn3ngc15ProfanityFilter24MaskProfanityWordsInTextEPiPDsj", "nothing masked", ngc_mask),
+        ("_ZN2nn3err20ShowApplicationErrorERKNS0_19ApplicationErrorArgE", "the error applet: logged", err_log),
+        ("_ZN2nn3err39ShowUnacceptableApplicationVersionErrorEv", "the error applet: logged", err_log),
+        ("_ZN2nn3err40ShowUnacceptableAddOnContentVersionErrorEv", "the error applet: logged", err_log),
+        ("_ZN2nn3err50ShowUnacceptableAddOnContentForUpgradeVersionErrorEv", "the error applet: logged", err_log),
+        ("_ZN2nn3err9ShowErrorENS0_9ErrorCodeE", "the error applet: logged", err_log),
+        ("_ZN2nn3err9ShowErrorERKNS0_18ErrorResultVariantE", "the error applet: logged", err_log),
+        ("_ZN2nn3aoc25ShowAddOnContentLostErrorEPKii", "the error applet: logged", err_log),
+        ("_ZN2nn3nfp10GetTagInfoEPNS0_7TagInfoERKNS0_12DeviceHandleE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp13GetCommonInfoEPNS0_10CommonInfoERKNS0_12DeviceHandleE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp13StartRestorerEPNS0_12DeviceHandleERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp15GetRegisterInfoEPNS0_12RegisterInfoERKNS0_12DeviceHandleE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp18SetApplicationAreaERKNS0_12DeviceHandleEPKvm", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp19OpenApplicationAreaERKNS0_12DeviceHandleEj", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp19StartGameDataEraserEPNS0_12DeviceHandleERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp21CreateApplicationAreaERKNS0_12DeviceHandleERKNS0_25ApplicationAreaCreateInfoE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp23RecreateApplicationAreaERKNS0_12DeviceHandleERKNS0_25ApplicationAreaCreateInfoE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp26GetExtendedApplicationAreaEPvPmRKNS0_12DeviceHandleEm", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp26SetExtendedApplicationAreaERKNS0_12DeviceHandleEPKvm", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp29StartNicknameAndOwnerSettingsEPNS0_12DeviceHandleEPbPNS0_12RegisterInfoERKNS0_24AmiiboSettingsStartParamERKNS0_7TagInfoERKS4_", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp30GetExtendedApplicationAreaInfoEPNS0_27ExtendedApplicationAreaInfoERKNS0_12DeviceHandleE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp5FlushERKNS0_12DeviceHandleE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp5MountERKNS0_12DeviceHandleENS0_9ModelTypeE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp7RestoreERKNS0_12DeviceHandleE", "no tag", nfp_no_tag),
+        ("_ZN2nn3nfp7UnmountERKNS0_12DeviceHandleE", "no tag", nfp_no_tag),
     ] {
         r.force(n, w, f);
     }

@@ -9,7 +9,7 @@ pub enum PackageError {
     Format(String),
     #[error("keys: {0}")]
     Keys(String),
-    #[error("{0}: not a recognised package (folder with ExeFS, .nsp or .nup)")]
+    #[error("{0}: not a recognised package (folder with ExeFS, .nsp, .xci or .nup)")]
     Unrecognised(PathBuf),
 }
 

@@ -58,7 +58,7 @@ struct V1 {
     opt: Option<String>,
     #[arg(long, default_value_t = 4)]
     jobs: usize,
-    /// ignored (the translator sizes its chunks itself)
+    /// ARM instructions per C file (default: the translator sizes its chunks itself)
     #[arg(long)]
     chunk: Option<u64>,
     /// ignored unless it is linux: nxrs builds Windows x86-64 programs
@@ -67,7 +67,7 @@ struct V1 {
     /// ignored
     #[arg(long)]
     backend: Option<String>,
-    /// ignored (the code is built for x86-64-v3)
+    /// optimize for THIS processor (-march=native; the default is x86-64-v3: AVX2, FMA, BMI2)
     #[arg(long)]
     native: bool,
     /// only generate the C code and stage the game data
@@ -78,7 +78,7 @@ struct V1 {
     no_shaders: bool,
     #[arg(long, hide = true)]
     keep_c: bool,
-    /// (Turbo diagnostics) not available: nxrs has no interpreter
+    /// (Turbo diagnostics: everything interpreted) nxrs has no interpreter; every function is translated
     #[arg(long, hide = true)]
     interp_only: bool,
     /// ignored: the runtime is linked into the game's code DLL
@@ -146,7 +146,8 @@ fn run_v1(args: Vec<String>) -> i32 {
         return 0;
     }
     if a.build_runtime {
-        return match (cc::find_runtime_lib(), cc::find_clang(a.cc.as_deref())) {
+        let gnu = cc::use_gnu();
+        return match (cc::find_runtime_lib(gnu), cc::find_clang(a.cc.as_deref())) {
             (Ok(lib), Ok(c)) => {
                 o.say(&format!("The runtime ships prebuilt and is linked into each game: {} ({})", lib.display(), c.version));
                 0
@@ -205,8 +206,6 @@ fn run_v1(args: Vec<String>) -> i32 {
         a.cc.as_ref().filter(|c| !c.to_lowercase().contains("clang")).map(|v| format!("--cc {v}")),
         a.opt.as_ref().map(|v| format!("-O {v}")),
         a.runtime.as_ref().map(|v| format!("--runtime {v}")),
-        a.native.then(|| "--native".to_string()),
-        a.chunk.map(|v| format!("--chunk {v}")),
     ]
     .into_iter()
     .flatten()
@@ -221,6 +220,8 @@ fn run_v1(args: Vec<String>) -> i32 {
         cc: a.cc.clone(),
         no_build: a.no_build,
         no_shaders: a.no_shaders,
+        chunk: a.chunk,
+        native: a.native,
         v1: true,
         ignored: (!ignored.is_empty()).then(|| format!("nxrs: ignored (Turbo options with no meaning here): {}", ignored.join(" "))),
     };
@@ -308,6 +309,12 @@ enum Cmd {
         no_build: bool,
         #[arg(long)]
         no_shaders: bool,
+        /// ARM instructions per C file (default: the translator sizes its chunks)
+        #[arg(long)]
+        chunk: Option<u64>,
+        /// compile for this processor (-march=native) instead of x86-64-v3
+        #[arg(long)]
+        native: bool,
         #[arg(short, long)]
         quiet: bool,
         /// also print @progress and @result lines
@@ -399,7 +406,7 @@ fn run_v2(args: Vec<String>) -> i32 {
             out::line(CONTRACT);
             0
         }
-        Cmd::Build { input, out, outdir, jobs, pkg, cc, no_build, no_shaders, quiet, machine } => {
+        Cmd::Build { input, out, outdir, jobs, pkg, cc, no_build, no_shaders, chunk, native, quiet, machine } => {
             let o = Out::new(quiet, machine);
             let b = pipeline::BuildArgs {
                 input,
@@ -411,6 +418,8 @@ fn run_v2(args: Vec<String>) -> i32 {
                 cc,
                 no_build,
                 no_shaders,
+                chunk,
+                native,
                 v1: false,
                 ignored: None,
             };
@@ -489,21 +498,121 @@ fn doctor() -> i32 {
     };
     check(std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") && std::arch::is_x86_feature_detected!("bmi2"),
         "CPU: AVX2, FMA, BMI2 (the game code is built for x86-64-v3)".into());
+    let gnu = cc::use_gnu();
+    out::line(&format!(
+        "     toolchain: {} (NXRS_TOOLCHAIN=msvc|gnu decides)",
+        if gnu { "llvm-mingw + the gnullvm engine (no Visual Studio)" } else { "clang + Visual Studio's libraries (MSVC ABI)" }
+    ));
     match cc::find_clang(None) {
-        Ok(c) => check(true, format!("compiler: {} ({})", c.path.display(), c.version)),
+        Ok(c) => check(true, format!("compiler: {} ({}, {})", c.path.display(), c.version, c.target())),
         Err(e) => check(false, format!("compiler: {e}")),
     }
-    match cc::find_runtime_lib() {
+    if !gnu {
+        check(cc::have_visual_studio(), "Visual Studio C++ build tools (the MSVC libraries)".into());
+    }
+    match cc::find_runtime_lib(gnu) {
         Ok(p) => check(true, format!("runtime library: {}", p.display())),
         Err(e) => check(false, format!("runtime library: {e}")),
     }
+    match cc::find_engine(true, gnu) {
+        Ok(e) => check(true, format!("engine library: {}", e.lib.display())),
+        Err(e) => check(false, format!("engine library: {e}")),
+    }
     let sys = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| r"C:\Windows".into());
     check(sys.join(r"System32\vulkan-1.dll").is_file(), "Vulkan loader (vulkan-1.dll)".into());
+    match vulkan_devices() {
+        Ok(devs) if devs.is_empty() => check(false, "Vulkan: no device".into()),
+        Ok(devs) => {
+            for (name, api, driver, discrete) in &devs {
+                let ok = *api >= ash::vk::API_VERSION_1_3;
+                check(
+                    ok,
+                    format!(
+                        "Vulkan device: {name}{} - Vulkan {}.{}.{}{}, driver {driver}",
+                        if *discrete { " (discrete)" } else { "" },
+                        ash::vk::api_version_major(*api),
+                        ash::vk::api_version_minor(*api),
+                        ash::vk::api_version_patch(*api),
+                        if ok { "" } else { " (the engine needs Vulkan 1.3: update the graphics driver)" }
+                    ),
+                );
+            }
+        }
+        Err(e) => check(false, format!("Vulkan: {e}")),
+    }
+    for (what, dir, need) in disk_checks() {
+        match free_bytes(&dir) {
+            Some(free) => check(
+                free >= need,
+                format!(
+                    "free disk for {what} ({}): {:.1} GB{}",
+                    dir.display(),
+                    free as f64 / 1e9,
+                    if free >= need { String::new() } else { format!(" (a build needs about {:.0} GB)", need as f64 / 1e9) }
+                ),
+            ),
+            None => check(false, format!("free disk for {what}: {} cannot be read", dir.display())),
+        }
+    }
     match translator::package::default_keys_path() {
         Some(p) => check(p.is_file(), format!("keys: {} (present; never read here)", p.display())),
         None => check(false, "keys: none installed (SWR_PROD_KEYS or the launcher's keys folder); NSP games need them".into()),
     }
     i32::from(bad > 0)
+}
+
+/// Every Vulkan device: (name, API version, driver version as its vendor writes it, discrete).
+fn vulkan_devices() -> Result<Vec<(String, u32, String, bool)>> {
+    use ash::vk;
+    // SAFETY: the loader is loaded and released here; every handle made is destroyed before return
+    unsafe {
+        let entry = ash::Entry::load().map_err(|e| anyhow!("the Vulkan loader does not load: {e}"))?;
+        let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
+        let inst = entry
+            .create_instance(&vk::InstanceCreateInfo::default().application_info(&app), None)
+            .map_err(|e| anyhow!("no Vulkan instance: {e}"))?;
+        let mut out = vec![];
+        for pd in inst.enumerate_physical_devices().unwrap_or_default() {
+            let p = inst.get_physical_device_properties(pd);
+            let name = p.device_name_as_c_str().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let d = p.driver_version;
+            let driver = if p.vendor_id == 0x10DE {
+                // NVIDIA: 10 bits major, 8 minor, 8 sub-minor, 6 patch
+                format!("{}.{}", d >> 22, (d >> 14) & 0xFF)
+            } else if p.vendor_id == 0x8086 && cfg!(windows) {
+                format!("{}.{}", d >> 14, d & 0x3FFF)
+            } else {
+                format!("{}.{}.{}", vk::api_version_major(d), vk::api_version_minor(d), vk::api_version_patch(d))
+            };
+            out.push((name, p.api_version, driver, p.device_type == vk::PhysicalDeviceType::DISCRETE_GPU));
+        }
+        inst.destroy_instance(None);
+        Ok(out)
+    }
+}
+
+/// (what, folder, bytes a build needs): the folder nxrs builds into by default (beside nxrs: the launcher's engine
+/// folder) and the temporary folder. A game's generated C, objects and code DLL take up to ~3 GB (Pokemon Legends:
+/// Z-A), its translated shaders a few hundred MB.
+fn disk_checks() -> Vec<(&'static str, PathBuf, u64)> {
+    let mut v = vec![];
+    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        v.push(("builds", d, 4_000_000_000));
+    }
+    v.push(("temporary files", std::env::temp_dir(), 1_000_000_000));
+    v
+}
+
+/// Free bytes for this user on the volume of `dir`.
+fn free_bytes(dir: &Path) -> Option<u64> {
+    use std::os::windows::ffi::OsStrExt;
+    let w: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();
+    let mut free = 0u64;
+    // SAFETY: a NUL-terminated path and our output variable
+    let ok = unsafe {
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(w.as_ptr(), &mut free, core::ptr::null_mut(), core::ptr::null_mut())
+    };
+    (ok != 0).then_some(free)
 }
 
 fn main() {

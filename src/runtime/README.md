@@ -20,7 +20,8 @@ The contract is the C the translator emits and the headers that C includes (`src
 | `rt_sj_owner(c, body, lo, hi)` | `cpu.h` | The frame of a function a guest longjmp may re-enter (`sjlj.rs`) |
 | `rt_svc(c, imm, pc)` | `cpu.h` | `SVC #imm` |
 | `rt_brk(c, imm, pc)`, `rt_udf(c, pc)` | `cpu.h` | `BRK`, unlifted words: a fatal report with the guest state |
-| `rt_ticks()` | `cpu.h` | CNTPCT/CNTVCT at `RT_TICK_HZ` (31.25 MHz; CNTFRQ reads the same constant) |
+| `rt_ticks()`, `rt_tick_hz` | `cpu.h` | CNTPCT/CNTVCT at `RT_TICK_HZ` = `rt_tick_hz`: 19.2 MHz for a Switch program, 31.25 MHz for a Switch 2 one, set at start-up (`SWR_TICK_HZ`); CNTFRQ reads it |
+| `rt_excl_mon` | `cpu.h` | The global exclusive monitor: 2^16 sequence numbers by 16-byte bucket. LDXR remembers its bucket's, STXR succeeds only if no other exclusive store went there since (and the value matches). On for Switch 1 programs, NULL (values only) for Switch 2 (`SWR_XMON=1` / `SWR_NO_XMON=1`). LDXR/LDAR/LDAPR are acquire loads, STLR a sequentially consistent store |
 | `rt_spin_gate(c, head)` | `cpu.h` | One pass of a marked spin-wait loop: yields |
 | `fnprof_hit(addr, lr, x0)` | `cpu.h` | Function-entry profiler hook (reached only while `g_fnprof` is set) |
 | `g_fnprof`, `rt_patch_on[]` | `cpu.h` (hidden) | Defined beside the generated code, in the `modules.c` the build glue writes |
@@ -41,12 +42,13 @@ alignment or offset that differs from the Rust mirrors.
 | `hostfn.rs` | The bridge: host functions at synthetic guest addresses (`0x7F_1000_0000 + 16*i`), overrides by symbol name, UNIMPL stubs for imports nobody provides |
 | `sjlj.rs` | Which owner or barrier a non-local guest jump goes to |
 | `fiber.rs` | nn::os fibers (`InitializeFiber`, `SwitchToFiber`, `GetCurrentFiber`, `FinalizeFiber`) bound by name to host fibers, each with its own `Cpu` |
-| `mem.rs` | Guest address space: module window from `0x70_0000_0000`, kernel region `0x7F_0000_0000`, a write-watched stack+heap block and alias region found from 4 GiB up, all below 2^39; heap, stacks, TLS regions, QueryMemory, GetInfo ids, `written_pages` (GetWriteWatch) |
+| `mem.rs` | Guest address space: module window from `0x70_0000_0000`, kernel region `0x7F_0000_0000`, a write-watched stack+heap block and alias region found from 4 GiB up, all below 2^39; heap (lazily committed on demand: `set_lazy_heap`, `NXRT_LAZY_HEAP=1`), physical memory in the alias region counted against the pool (a map past it fails with ResultLimitReached when the map limit is on: Z-A, Ocarina, `SWR_MAP_LIMIT`), stacks, TLS regions, QueryMemory, GetInfo ids, `written_pages` (GetWriteWatch) |
 | `loader.rs` | NSO (lz4) and NRO images, MOD0/.dynamic, mapping at the translator's bases, RELATIVE/ABS64/GLOB_DAT/JUMP_SLOT/RELR relocation, imports bound across modules by name with host overrides first, `main.npdm` main-thread parameters |
-| `kernel.rs` | Threads (one host thread per guest thread, 256 MiB reserved host stack), ArbitrateLock/Unlock, WaitProcessWideKeyAtomic/SignalProcessWideKey, WaitForAddress/SignalToAddress, events, WaitSynchronization, CancelSynchronization, CloseHandle, priorities and core masks |
-| `svc.rs` | `rt_svc`: memory (SetHeapSize, QueryMemory), ExitProcess, ExitThread, Break, OutputDebugString (stdout), GetInfo, GetSystemTick, then the kernel; anything else is a named fatal |
-| `fault.rs` | Vectored exception handler: a host fault in lifted code is reported as the guest function it was lifted from, with the host stack walked and mapped the same way, and the guest registers and frame chain |
-| `process.rs` | `nxrt_main`: reserve, load, bind, seal the dispatch table, start the main thread at `main`'s entry with x1 = its handle |
+| `kernel.rs` | Threads (one host thread per guest thread, 256 MiB reserved host stack; the thread ID at TLS+0x110 for SDK 22), ArbitrateLock/Unlock, WaitProcessWideKeyAtomic/SignalProcessWideKey, WaitForAddress (incl. WaitIfEqual64)/SignalToAddress, events (also from host code: `create_event`, `signal_event`, ...), WaitSynchronization, CancelSynchronization, CloseHandle, priorities and core masks; a `Scheduler` (`set_scheduler`) is told thread start and exit, blocking SVCs, priority and affinity changes and answers GetCurrentProcessorNumber |
+| `svc.rs` | `rt_svc`: handlers registered by number first (`set_handler`), memory (SetHeapSize, QueryMemory, Map/UnmapPhysicalMemory), ExitProcess, ExitThread, Break, OutputDebugString (stdout), GetInfo, GetSystemTick, then the kernel, then the fallback (`set_fallback`); anything else is a named fatal |
+| `fault.rs` | Vectored exception handler: commits an untouched lazy-heap page and retries; a host fault in lifted code (the image the runtime is linked into: the game's code DLL) is reported as the guest function it was lifted from, with the host stack walked and mapped the same way, and the guest registers and frame chain |
+| `process.rs` | `nxrt_main`; `load` (reserve, load, bind, seal the dispatch table) and `start` (the main thread at `Entry::{Main, Module, Address, Host}` with x1 = its handle); `startup`: from main.npdm's program id the counter rate, the exclusive monitor, the map limit, and the process memory cap (a job object: half of RAM within 12..32 GB, at least the pool + 8 GB, `SWR_MEMORY_CAP_GB`); the ini's (`nxconfig`) `memory_gb` (the pool: 0 automatic, 4 console, 6 / 8 extended), `null_trap` (page 0 always traps here), `log` (2: every trace), `profile` |
+| `profile.rs` | `profile=1`: samples every guest thread's host pc about once a millisecond and writes `profile.txt` (the guest functions with the most samples) every 10 s |
 | `rt.rs` | Logging, fatal errors, the guest report, `rt_ticks`, `rt_brk`, `rt_udf` |
 | `bin/nxrt_dev.rs` | Build glue: guest test build, `modules.c`, compile + link, the end-to-end test runner |
 
@@ -121,10 +123,13 @@ The mkw generator path needs numpy and lz4: `py -m venv build/venv-mkw` and
 
 ## Not done (later milestones)
 
-- Scheduling: virtual cores, preemption, priority donation (threads run as free host threads).
-- Memory: lazy heap commit, MapMemory/stack moves, physical memory in the alias region, transfer and shared memory,
-  read traps; QueryMemory reports the heap, stacks and module segments only.
+- Scheduling itself (virtual cores, preemption) is the os layer's, through the `Scheduler` hooks.
+- Memory: MapMemory/stack moves, transfer and shared memory, read traps; QueryMemory reports the heap, stacks and
+  module segments only.
 - ExitThread from inside a guest fiber; a fiber resuming on another thread is untested.
 - IPC/services (ConnectToNamedPort, SendSyncRequest): named fatals until nxnative's HLE layer comes.
-- `rt_ticks` is fixed at cpu.h's 31.25 MHz; Switch 1 titles want 19.2 MHz (a translator/header constant).
-- A `cdylib` (`nxrt.dll`) build for game code linked as a DLL; today the game code links statically with `nxrt.lib`.
+- A `cdylib` (`nxrt.dll`): the game code links the engine statically into its DLL instead (src/cli).
+
+Verified in a real run (2026-11-19, MK8D built by `nxrs build`, linked with `nxfront.lib`, real Vulkan): `program
+0100152000022000: system tick 19.20 MHz; exclusive monitor on`, `process memory cap: 32768 MB`, 60 FPS on the title
+for a minute, no crash; the eight homebrew tests pass with the monitor on (both toolchains).

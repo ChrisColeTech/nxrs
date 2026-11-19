@@ -60,8 +60,15 @@ pub struct queue_builder_t {
     pub sz: [u32; 4],
     pub flush: u32,
     pub set: [u8; 4],
+    /// NVN2 queue priority (SetDefaults: 100, NORMAL)
+    pub prio: i32,
     pub mem: *mut u8,
-    pub mem_sz: u64,
+    /// stored as 32 bits, as the NVN2 driver does
+    pub mem_sz: u32,
+    /// SetCommandFlushThreshold was called (NVN2's getter returns it)
+    pub flush_set: u8,
+    /// NVN2: the primary queue of a subcontext queue
+    pub primary: *mut NVNqueue,
 }
 fits!(queue_builder_t, 0x40);
 
@@ -139,6 +146,8 @@ pub struct tex_builder_t {
     /// bit 0: swizzle set, bit 1: stencil mode
     pub bits: u8,
     pub swz: u16,
+    /// TextureBuilderSetGLTextureName (GL interop; the host has none)
+    pub gl_name: u32,
 }
 fits!(tex_builder_t, 0x80);
 
@@ -223,6 +232,8 @@ const _: () = assert!(size_of::<samp_par>() == 40);
 pub struct samp_builder_t {
     pub dev: *mut NVNdevice,
     pub p: samp_par,
+    /// SamplerBuilderSetLodSnap (kept for its getter; Vulkan has no LOD snap)
+    pub lod_snap: f32,
 }
 fits!(samp_builder_t, 0x60);
 /// All state from byte 8 on: games hash a sampler's bytes from there.
@@ -297,8 +308,26 @@ pub struct win_t {
     pub ticket: [u64; 4],
     pub nactive: i32,
     pub follow: i32,
+    /// NVN2 HDR display metadata (red, green, blue, white xy; min, max luminance) and content metadata
+    pub hdr_disp: [f32; 10],
+    pub hdr_content: [f32; 2],
 }
 fits!(win_t, 384);
+
+/// NVN2's window builder state past NVN1's 0x40 bytes (NVN2 reserves 0x80): at builder + 0x40, touched only when the
+/// game is a Switch 2 game (`device::SWITCH2`).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct win_builder2_t {
+    pub color_space: i32,
+    pub hdr_disp: [f32; 10],
+    pub hdr_content: [f32; 2],
+}
+pub const WIN_BUILDER2_OFF: usize = 0x40;
+const _: () = assert!(WIN_BUILDER2_OFF + size_of::<win_builder2_t>() <= 0x80);
+/// The NVN2 driver's HDR defaults (Rec.709 primaries, D65 white, 0.03 to 1000 nits; content 200 / 60).
+pub const HDR_DISPLAY_DEFAULT: [f32; 10] = [0.64, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.329, 0.03, 1000.0];
+pub const HDR_CONTENT_DEFAULT: [f32; 2] = [200.0, 60.0];
 
 /// Command buffer: records go into the command memory the game gives (AddCommandMemory), the list that strings a
 /// recording's pieces together into its control memory (AddControlMemory). The handle is that list's address.
@@ -381,6 +410,7 @@ pub mod blend_field {
     pub const ADV: usize = 7;
 }
 
+/// `bits`: MS_* flags. `sl`: programmable sample locations, one byte per sample, x | y << 4 in 1/16 pixel.
 #[repr(C)]
 #[derive(Clone, Copy, Default, Debug)]
 pub struct ms_st {
@@ -390,12 +420,15 @@ pub struct ms_st {
     pub a2c_dither: u8,
     pub raster_samples: u8,
     pub cov_mod: u8,
-    pub cov2color_en: u8,
     pub cov2color_out: u8,
-    pub sl_en: u8,
-    pub sl_grid: u8,
+    pub bits: u8,
+    pub sl: [u8; 16],
 }
 fits!(ms_st, 0x18);
+pub const MS_COV2COLOR: u8 = 1;
+pub const MS_SL_EN: u8 = 2;
+pub const MS_SL_GRID: u8 = 4;
+pub const MS_COV_TRUNC: u8 = 8;
 
 /// cull:2 front:1 mode:2 offset_en:3
 #[repr(C)]
@@ -602,7 +635,17 @@ pub mod op {
     pub const WAIT_SYNC: u32 = 57;
     pub const PATCH_SIZE: u32 = 58;
     pub const LINE_WIDTH: u32 = 59;
-    pub const COUNT: u32 = 64;
+    pub const BUFS_DEFERRED: u32 = 60;
+    pub const DEPTH_BOUNDS: u32 = 61;
+    pub const SAMPLE_MASK: u32 = 62;
+    pub const POINT_SIZE: u32 = 63;
+    pub const TESS_LEVELS: u32 = 65;
+    pub const MESH: u32 = 66;
+    pub const REPORT_VALUE: u32 = 67;
+    pub const DOWNSAMPLE: u32 = 68;
+    pub const RESOLVE_DEPTH: u32 = 69;
+    pub const PROVOKING: u32 = 70;
+    pub const COUNT: u32 = 80;
 }
 
 // ---- payloads (immediately after op_hdr) ----
@@ -884,3 +927,104 @@ pub struct p_patch_size {
 pub unsafe fn rd<T: Copy>(p: *const u8) -> T {
     core::ptr::read_unaligned(p as *const T)
 }
+
+// ---------- NVN2 objects (Switch 2 SDK) ----------
+/// NVN2 program builder (the game reserves 0x80). The shader and module arrays are the game's: NVN keeps the pointers
+/// until nvnProgramInitializeFromBuilder.
+#[repr(C)]
+pub struct prog_builder_t {
+    pub dev: *mut NVNdevice,
+    pub sample_shading: i32,
+    pub nhash: i32,
+    pub hash: *const u8,
+    pub nshader: i32,
+    pub nrt: i32,
+    pub shader: *const NVNshaderData,
+    pub rt: *const NVNshaderData,
+    pub nlink: i32,
+    pub max_trace: i32,
+    pub link: *const u64,
+    pub max_callable: i32,
+    pub rt_flags: u32,
+}
+fits!(prog_builder_t, 0x80);
+
+/// DLSS parameter texture slots (`dlss_params_t.tex`).
+pub const DLSS_COLOR: usize = 0;
+pub const DLSS_DEPTH: usize = 1;
+pub const DLSS_MOTION: usize = 2;
+pub const DLSS_OUTPUT: usize = 3;
+pub const DLSS_BIAS: usize = 4;
+pub const DLSS_EXPOSURE: usize = 5;
+pub const DLSS_TEXTURES: usize = 6;
+/// The DLSS network builder (the game reserves 0xC0).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct dlss_builder_t {
+    pub dev: *mut NVNdevice,
+    pub w: i32,
+    pub h: i32,
+    pub method: i32,
+    pub preset: i32,
+    pub flags: u32,
+    pub max_eval: i32,
+    pub tex_pool: *const NVNtexturePool,
+    pub mem: *mut u8,
+    pub mem_size: u64,
+    pub tex_ids: [i32; 32],
+}
+fits!(dlss_builder_t, 0xC0);
+/// The DLSS network (the game reserves 0x218): what it was built with, and a serial its evaluations carry (new at each
+/// Initialize: a network made again in the same memory is another network to the replay).
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct dlss_net_t {
+    pub magic: u32,
+    pub b: dlss_builder_t,
+    pub serial: u64,
+}
+fits!(dlss_net_t, 0x218);
+pub const MAGIC_DLSS: u32 = magic(b'D', b'L', b'S', b'S');
+/// DLSS evaluation parameters (the game reserves 0xC8); nvnCommandBufferEvaluateDlss reads them at its call.
+#[repr(C)]
+#[derive(Clone, Copy)]
+pub struct dlss_params_t {
+    pub tex: [*const tex_t; DLSS_TEXTURES],
+    /// bit k: slot k was given a texture view (the whole texture is used, as nxnative does)
+    pub has_view: u8,
+    pub reset: u8,
+    pub overlay: [u8; 4],
+    pub iw: i32,
+    pub ih: i32,
+    pub base: [[i32; 2]; DLSS_TEXTURES],
+    pub mv: [f32; 2],
+    pub jitter: [f32; 2],
+    pub pre_exposure: f32,
+    pub eval_index: i32,
+}
+fits!(dlss_params_t, 0xC8);
+
+/// NVN2 device command buffer (driver: 0x30 bytes): storage for commands the GPU generates.
+#[repr(C)]
+pub struct dcb_t {
+    pub dev: *mut NVNdevice,
+    pub pool: *const pool_t,
+    pub off: i64,
+    pub size: u64,
+    pub cmd_size: u64,
+    pub comp_size: u64,
+}
+fits!(dcb_t, 0x30);
+
+/// NVN2 device message buffer (driver: 0x28 bytes): a storage range shaders write printf records into.
+#[repr(C)]
+pub struct dmb_t {
+    pub dev: *mut NVNdevice,
+    pub pool: *const pool_t,
+    pub off: i32,
+    pub size: i32,
+    /// the read cursor of BeginMessages / GetNextMessage (0 = not reading)
+    pub cursor: u32,
+    pub end: u32,
+}
+fits!(dmb_t, 0x28);

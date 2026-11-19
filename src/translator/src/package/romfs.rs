@@ -205,6 +205,11 @@ impl RomFs {
         RomFs { root, backend: Backend::Nup(reader), source }
     }
 
+    /// A RomFS with no files (a homebrew NRO without one).
+    pub fn empty(source: String) -> RomFs {
+        RomFs { root: Node { name: String::new(), kind: NodeKind::Dir(vec![]) }, backend: Backend::Folder, source }
+    }
+
     /// A folder of files served as a RomFS (a dump's `romfs/`, or a DLC title's hand-filled `romfs/`).
     pub fn from_folder(dir: &Path) -> Result<RomFs> {
         if !dir.is_dir() {

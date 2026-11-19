@@ -9,9 +9,12 @@
 //!   host functions    `hostfn::HOSTFN_BASE`, 1 MiB, never accessible
 //! Placed at start-up: the stack+heap block (write-watched) and the alias region (write-watched).
 //!
-//! What M2 leaves out (they come with the games): lazy commit of the heap on first touch,
-//! frozen regions, read traps for GPU-written pages, physical memory in the alias region, stack moves (MapMemory).
+//! Physical memory in the alias region (MapPhysicalMemory) is counted against the application pool with the heap;
+//! with the map limit on, a map past the pool fails with ResultLimitReached as on Horizon. The heap can be committed
+//! lazily, a page group at its first touch (`set_lazy_heap`). What is left out: frozen regions, read traps for
+//! GPU-written pages, stack moves (MapMemory).
 
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use windows_sys::Win32::System::Memory::*;
 // Not in windows-sys' Memory module: SystemServices values.
@@ -201,11 +204,25 @@ pub struct Space {
     pub heap: Range,
     pub alias: Range,
     pub kernel: Range,
+    /// The application pool (GetInfo TotalMemorySize): what the heap and physical memory may take together.
     pub pool: u64,
+    pool_override: AtomicU64,
+    /// Bytes of the alias region mapped with MapPhysicalMemory.
+    phys_bytes: AtomicU64,
+    /// A map past the pool fails with ResultLimitReached (else it is granted beyond the pool).
+    map_limit: AtomicBool,
+    /// The heap is committed at first touch (`lazy_fault`) instead of at SetHeapSize.
+    lazy: AtomicBool,
+    /// The heap's current size, for the fault handler (no lock there).
+    heap_end: AtomicU64,
     st: Mutex<State>,
 }
 
+/// Lazy commit grain: a fault commits the 64 KiB around it.
+const LAZY_GRAIN: u64 = 0x1_0000;
+
 pub const R_OK: u32 = 0;
+pub const R_LIMIT_REACHED: u32 = 0x10801;
 pub const R_INVALID_SIZE: u32 = 0xca01;
 pub const R_INVALID_STATE: u32 = 0xd401;
 pub const R_INVALID_ADDRESS: u32 = 0xcc01;
@@ -258,6 +275,11 @@ impl Space {
             alias: Range { base: alias, size: ALIAS_SIZE },
             kernel: Range { base: kernel_base, size: KERNEL_SIZE },
             pool: DEFAULT_POOL,
+            pool_override: AtomicU64::new(0),
+            phys_bytes: AtomicU64::new(0),
+            map_limit: AtomicBool::new(false),
+            lazy: AtomicBool::new(false),
+            heap_end: AtomicU64::new(0),
             st: Mutex::new(State {
                 heap_size: 0,
                 kernel_top: kernel_base,
@@ -294,21 +316,139 @@ impl Space {
         Ok(())
     }
 
-    /// svcSetHeapSize: the heap grows and shrinks at its base in 2 MiB steps; returns the heap's address.
+    /// The application pool now (the title's, once `set_pool` gave it).
+    pub fn pool(&self) -> u64 {
+        match self.pool_override.load(Ordering::Relaxed) {
+            0 => self.pool,
+            p => p,
+        }
+    }
+
+    /// The title's application pool (its profile's `app_pool`).
+    pub fn set_pool(&self, bytes: u64) {
+        self.pool_override.store(bytes, Ordering::Relaxed);
+    }
+
+    /// Whether a map past the pool fails with ResultLimitReached.
+    pub fn set_map_limit(&self, on: bool) {
+        self.map_limit.store(on, Ordering::Relaxed);
+    }
+
+    /// Commit the heap at first touch instead of at SetHeapSize. Host code that hands guest heap memory to the OS
+    /// (ReadFile into a guest buffer) must call `ensure_committed` first: the OS reports an uncommitted page as an
+    /// error instead of faulting.
+    pub fn set_lazy_heap(&self, on: bool) {
+        self.lazy.store(on, Ordering::Relaxed);
+    }
+
+    /// Commits the heap pages of [a, a+n) that are not yet (lazy heap); other ranges are left alone.
+    pub fn ensure_committed(&self, a: u64, n: u64) {
+        if !self.lazy.load(Ordering::Relaxed) || n == 0 {
+            return;
+        }
+        let (lo, hi) = (a.max(self.heap.base), (a + n).min(self.heap.base + self.heap_end.load(Ordering::Acquire)));
+        if lo < hi {
+            let c0 = lo & !(LAZY_GRAIN - 1);
+            commit(c0, align_up(hi, LAZY_GRAIN).min(self.heap.base + self.heap_end.load(Ordering::Acquire)) - c0);
+        }
+    }
+
+    /// The fault handler's question: `a` is an untouched page of a lazily committed heap; commits the 64 KiB
+    /// around it. True: the access can be retried.
+    pub fn lazy_fault(&self, a: u64) -> bool {
+        if !self.lazy.load(Ordering::Relaxed) {
+            return false;
+        }
+        let end = self.heap.base + self.heap_end.load(Ordering::Acquire);
+        if a < self.heap.base || a >= end {
+            return false;
+        }
+        let c0 = a & !(LAZY_GRAIN - 1);
+        commit(c0, (c0 + LAZY_GRAIN).min(end) - c0)
+    }
+
+    /// svcSetHeapSize: the heap grows and shrinks at its base in 2 MiB steps; returns the heap's address. The heap
+    /// and the mapped physical memory share the pool.
     pub fn set_heap_size(&self, size: u64) -> Result<u64, u32> {
         let mut st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        if size > HEAP_CAP || !size.is_multiple_of(0x20_0000) || size > self.pool {
+        if size > HEAP_CAP || !size.is_multiple_of(0x20_0000) {
             return Err(R_INVALID_SIZE);
         }
+        if size > st.heap_size && size + self.phys_bytes.load(Ordering::Relaxed) > self.pool() {
+            return Err(R_LIMIT_REACHED);
+        }
         let b = self.heap.base;
-        if size > st.heap_size && !commit(b + st.heap_size, size - st.heap_size) {
+        let lazy = self.lazy.load(Ordering::Relaxed);
+        if size > st.heap_size && !lazy && !commit(b + st.heap_size, size - st.heap_size) {
             crate::rt::fatal(&format!("memory: commit of the heap to {size:#x} failed"));
         }
         if size < st.heap_size && !decommit(b + size, st.heap_size - size) {
             crate::rt::fatal("memory: decommit of the heap failed");
         }
         st.heap_size = size;
+        self.heap_end.store(size, Ordering::Release);
         Ok(b)
+    }
+
+    /// Committed bytes of [a, a+n).
+    fn committed_in(a: u64, n: u64) -> u64 {
+        let mut total = 0;
+        let mut p = a;
+        while p < a + n {
+            let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+            // SAFETY: a query of our own address space
+            if unsafe { VirtualQuery(p as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+                break;
+            }
+            let end = (mbi.BaseAddress as u64 + mbi.RegionSize as u64).min(a + n);
+            if mbi.State == MEM_COMMIT {
+                total += end - p;
+            }
+            p = end;
+        }
+        total
+    }
+
+    /// svcMapPhysicalMemory / svcUnmapPhysicalMemory: pages of the alias region committed and released, counted
+    /// against the pool with the heap. With the map limit on, a map that would take the pool past its size fails
+    /// with ResultLimitReached: the SDK's allocator keeps freed pages mapped and maps more until a map fails; only
+    /// then does it give its cached block back and try again (Pokemon Legends: Z-A, Ocarina of Time).
+    pub fn map_physical(&self, a: u64, size: u64, map: bool) -> u32 {
+        let al = self.alias;
+        if size == 0 || (a | size) & (PAGE - 1) != 0 || a < al.base || a + size > al.end() {
+            return R_INVALID_ADDRESS;
+        }
+        let _st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mapped = Self::committed_in(a, size);
+        if map {
+            let need = size - mapped;
+            let used = self.heap_end.load(Ordering::Relaxed) + self.phys_bytes.load(Ordering::Relaxed);
+            if need > 0 && used + need > self.pool() && self.map_limit.load(Ordering::Relaxed) {
+                static SAID: AtomicU64 = AtomicU64::new(0);
+                if SAID.fetch_add(1, Ordering::Relaxed) < 8 {
+                    crate::rt::log(&format!(
+                        "memory: MapPhysicalMemory +{} MB refused: {} MB mapped, the application pool ({} MB) is full (ResultLimitReached: the SDK gives its cached pages back and tries again)",
+                        need >> 20,
+                        self.phys_bytes.load(Ordering::Relaxed) >> 20,
+                        self.pool() >> 20
+                    ));
+                }
+                return R_LIMIT_REACHED;
+            }
+            if !commit(a, size) {
+                crate::rt::fatal(&format!("memory: MapPhysicalMemory commit of {a:#x}+{size:#x} failed"));
+            }
+            self.phys_bytes.fetch_add(need, Ordering::Relaxed);
+        } else {
+            decommit(a, size);
+            self.phys_bytes.fetch_sub(mapped.min(self.phys_bytes.load(Ordering::Relaxed)), Ordering::Relaxed);
+        }
+        R_OK
+    }
+
+    /// Bytes mapped with MapPhysicalMemory.
+    pub fn physical_bytes(&self) -> u64 {
+        self.phys_bytes.load(Ordering::Relaxed)
     }
 
     pub fn heap_size(&self) -> u64 {
@@ -387,8 +527,8 @@ impl Space {
             3 => self.alias.size,
             4 => self.heap.base,
             5 => self.heap.size,
-            6 | 21 => self.pool,
-            7 | 22 => used,
+            6 | 21 => self.pool(),
+            7 | 22 => used + self.physical_bytes(),
             12 => self.aslr.base,
             13 => self.aslr.size,
             14 => self.stack.base,

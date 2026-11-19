@@ -95,12 +95,32 @@ pub unsafe fn prog_keys(p: &prog_t) -> Vec<ShaderKey> {
                 sd.control = c.as_ptr();
             }
             rec.key[i] = shader_key(&sd, false);
+            if let Some(k) = rec.key[i] {
+                if sd.data != 0 && crate::vk::mem::addr_known(sd.data, ctl_lens(sd.control).1 as u64) {
+                    live_if_missing(&k, &sd);
+                }
+            }
         }
         if let Some(k) = rec.key[i] {
             out.push(k);
         }
     }
     out
+}
+
+/// A stage the shader library lacks goes to the live translator (its control and code copied: the game may free the
+/// control section once SetShaders returns).
+/// # Safety
+/// `sd`'s control section and code area are readable.
+unsafe fn live_if_missing(k: &ShaderKey, sd: &NVNshaderData) {
+    let Some(g) = crate::vk::Gpu::try_get() else { return };
+    if g.shaders.has(k) || sd.control.is_null() || sd.data == 0 {
+        return;
+    }
+    let (nctl, ncode) = ctl_lens(sd.control);
+    let ctl = core::slice::from_raw_parts(sd.control, nctl).to_vec();
+    let code = core::slice::from_raw_parts(sd.data as *const u8, ncode).to_vec();
+    crate::vk::live::request(*k, ctl, code);
 }
 
 nvn_fns! {
@@ -134,6 +154,9 @@ nvn_fns! {
         for i in 0..n as usize {
             let s = &*sd.add(i);
             rec.key[i] = shader_key(s, true);
+            if let Some(k) = rec.key[i] {
+                live_if_missing(&k, s);
+            }
             if rec.key[i].is_none() && !s.control.is_null() {
                 // nctl covers what ctl_lens reads again (+0x704 / +0x44)
                 let (nctl, _) = ctl_lens(s.control);
@@ -141,6 +164,7 @@ nvn_fns! {
             }
         }
         KEYS.lock().unwrap().get_or_insert_with(HashMap::new).insert(o.serial, rec);
+        super::prog2::note_program(o.serial, core::slice::from_raw_parts(sd, n as usize));
         1
     }
 }

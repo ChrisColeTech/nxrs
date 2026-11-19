@@ -1,18 +1,10 @@
-//! NVN as the os layer binds it until the graphics layer takes over: `nvnBootstrapLoader` and
-//! `nvnDeviceGetProcAddress` hand out host functions by name, from three sources in order:
-//!
-//! 1. procs the graphics layer registered (`register`; see docs/INTERFACES.md, graphics);
-//! 2. the os layer's null device (`null.rs`): the calls whose answers the game reads before it can render
-//!    (device integers, memory pools and buffer addresses, texture storage sizes, queue and command memory sizes,
-//!    window texture indices, syncs that are signalled), with the objects kept in the game's own NVN memory;
-//! 3. a logging stub per name, which counts the call, records an `UNIMPL Nvn` gap on its first call and answers 0
-//!    (command recording calls, state setters and the rest).
-//!
-//! Every proc's calls are counted; `report` prints the table. The first `nvnQueueSubmitCommands` is logged with
-//! the time since boot: milestone M3's mark.
+//! NVN as the os layer binds it: `nvnBootstrapLoader` and `nvnDeviceGetProcAddress` hand out host functions by
+//! name, the graphics layer's (NVN on Vulkan, `bind_graphics`: every game run is on the real device, rule 1.1.6),
+//! or a logging stub for a name graphics does not implement, which counts the call, records an `UNIMPL Nvn` gap on
+//! its first call and answers 0. Every proc's calls are counted; `report` prints the table. The first
+//! `nvnQueueSubmitCommands` is logged with the time since boot. `nv.rs` is the driver glue under NVN.
 
-pub mod null;
-pub mod tex;
+pub mod nv;
 
 use nxrt::cpu::Cpu;
 use nxrt::hostfn::HostFn;
@@ -46,27 +38,6 @@ pub fn presents() -> u64 {
 pub fn note_present(window: u64, index: u32) {
     if PRESENTS.fetch_add(1, Ordering::Relaxed) == 0 {
         crate::log!("nvn: first present (window {window:#x}, texture {index}), {:.3} s after start", crate::log::secs());
-    }
-}
-
-/// A present waits for the display's next 60 Hz slot, as a swap interval of 1 does (the null device has no
-/// display to pace it); the core is given up while it waits.
-pub fn pace_present() {
-    static NEXT: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
-    let period = std::time::Duration::from_nanos(16_666_667);
-    let wait = {
-        let mut g = NEXT.lock().unwrap();
-        let now = std::time::Instant::now();
-        let at = match *g {
-            Some(t) if t > now => t,
-            Some(t) if now - t < period => t,
-            _ => now,
-        };
-        *g = Some(at + period);
-        at.saturating_duration_since(now)
-    };
-    if !wait.is_zero() {
-        crate::sched::without_core(|| std::thread::sleep(wait));
     }
 }
 
@@ -104,7 +75,8 @@ pub fn report() {
     v.sort_by(|a, b| b.1.cmp(a.1).then(a.0.cmp(b.0)));
     crate::log!("NVN calls: {} procs, {} calls", v.len(), calls());
     for (n, c) in v {
-        crate::log!("  nvn {c:8} {n}{}", if null::implements(n) { "" } else { "  (stub)" });
+        let have = GRAPHICS.lock().unwrap().iter().any(|(g, _)| g == n);
+        crate::log!("  nvn {c:8} {n}{}", if have { "" } else { "  (stub)" });
     }
 }
 
@@ -151,9 +123,6 @@ pub fn proc_address(name: &str) -> u64 {
     if let Some((_, f)) = GRAPHICS.lock().unwrap().iter().find(|(n, _)| n == name) {
         return crate::hle::addr(&key, *f);
     }
-    if let Some(f) = null::lookup(name) {
-        return crate::hle::addr(&key, f);
-    }
     crate::hle::addr(&key, stub)
 }
 
@@ -164,10 +133,110 @@ unsafe fn bootstrap_loader(c: *mut Cpu) {
     (*c).x[0] = proc_address(&name);
 }
 
+/// The game's NintendoSDK major from its `sdk` module's "NintendoSdk_nnSdk-<major>_<minor>_<micro>-Release" (Turbo
+/// 2f8f44e): it picks the NVN API the device reports (SDK 10 and older are API 53; Mario Kart 8 Deluxe, SDK 4.4.0,
+/// creates no graphics system on another). 19 when the string is absent. (Read from the module file before the load: the parsed image, or the raw file.)
+fn sdk_major(data: &std::path::Path) -> i32 {
+    fn scan(b: &[u8]) -> Option<i32> {
+        let pat = b"NintendoSdk_nnSdk-";
+        let i = b.windows(pat.len()).position(|w| w == pat)?;
+        let digits: String = b[i + pat.len()..].iter().take(4).map(|&c| c as char).take_while(|c| c.is_ascii_digit()).collect();
+        digits.parse().ok()
+    }
+    let v = std::fs::read(data.join("exefs").join("sdk")).ok().and_then(|raw| match nxrt::loader::parse(&raw) {
+        Ok(img) => scan(&img.bytes),
+        Err(_) => scan(&raw),
+    });
+    let major = v.unwrap_or(19);
+    crate::log!("sdk: NintendoSDK {major}{}", if v.is_none() { " (no version string: taken as 19)" } else { "" });
+    major
+}
+
+/// The hand-off to the graphics layer (docs/INTERFACES.md, graphics): every NVN proc the game asks for is the
+/// graphics layer's, on the real Vulkan device; its waits give the virtual core up; its present and submit marks
+/// come here. The game's host window opens now (until the front end owns it).
+fn bind_graphics() {
+    for e in nxgfx::nvn::procs() {
+        register(e.name, e.f);
+    }
+    nxgfx::nvn::set_proc_resolver(proc_address);
+    nxgfx::nvn::set_guest_caller(crate::guest::call_current);
+    nxgfx::vk::counters::set_guest_clock(crate::svc::guest_ns);
+    nxgfx::register_controls();
+    nxgfx::nvn::set_hooks(nxgfx::nvn::Hooks { submit: note_submit, present: note_present, blocking: |f| crate::sched::without_core(f) });
+    let prof = crate::profile::get();
+    let data = crate::boot::process().data_dir.clone();
+    let major = sdk_major(&data);
+    nxgfx::nvn::device::SWITCH2.store(prof.switch2, Ordering::Relaxed);
+    nxgfx::nvn::device::SDK_MAJOR.store(major, Ordering::Relaxed);
+    nxgfx::nvn::vpool::APP_POOL.store(prof.pool, Ordering::Relaxed);
+    let shaders = std::env::var("NXGFX_SHADERS").map(std::path::PathBuf::from).unwrap_or_else(|_| data.join("shaders"));
+    if !shaders.join("manifest.tsv").is_file() {
+        crate::log!("[RED] graphics: no translated shaders at {} (nxshaders prebuild-data): draws with a missing shader wait for none", shaders.display());
+    }
+    nxgfx::set_shader_dir(shaders.clone());
+    nxgfx::set_cache_dir(data.clone());
+    crate::log!("graphics: NVN on Vulkan, {} procs, SDK {major}{}, shaders {}", nxgfx::nvn::procs().len(), if prof.switch2 { ", NVN2" } else { "" }, shaders.display());
+    // the front end (lane I, src/front) owns the game window when it is linked: it set FRONT_WINDOW and gave graphics its window
+    if std::env::var("NXGFX_HEADLESS").is_err() && !FRONT_WINDOW.load(Ordering::Acquire) {
+        nxgfx::host_window::set_key_handler(window_key);
+        nxgfx::host_window::open(&prof.name, 1920, 1080);
+    }
+    let threads = std::env::var("NXGFX_PREWARM_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+    std::thread::spawn(move || {
+        let r = nxgfx::prewarm(threads);
+        crate::log!("graphics: pipeline prewarm {r:?}");
+    });
+}
+
+/// The keyboard as player 1's controller while the graphics layer's host window is the game window (Turbo's
+/// layout: X / Space A, Z B, C X, V Y, Q L, E R, 1 ZL, 3 ZR, Enter +, Backspace -, arrows the d-pad, WASD the left
+/// stick, IJKL the right stick). The front end's input layer replaces it when it owns the window.
+fn window_key(vk: u32, down: bool) {
+    static HELD: AtomicU64 = AtomicU64::new(0);
+    let bit = match vk {
+        0x58 | 0x20 => 1u64 << 0,
+        0x5A => 1 << 1,
+        0x43 => 1 << 2,
+        0x56 => 1 << 3,
+        0x51 => 1 << 6,
+        0x45 => 1 << 7,
+        0x31 => 1 << 8,
+        0x33 => 1 << 9,
+        0x0D => 1 << 10,
+        0x08 => 1 << 11,
+        0x25 => 1 << 12,
+        0x26 => 1 << 13,
+        0x27 => 1 << 14,
+        0x28 => 1 << 15,
+        0x41 => 1 << 40,
+        0x57 => 1 << 41,
+        0x44 => 1 << 42,
+        0x53 => 1 << 43,
+        0x4A => 1 << 44,
+        0x49 => 1 << 45,
+        0x4C => 1 << 46,
+        0x4B => 1 << 47,
+        _ => return,
+    };
+    let h = if down { HELD.fetch_or(bit, Ordering::Relaxed) | bit } else { HELD.fetch_and(!bit, Ordering::Relaxed) & !bit };
+    let axis = |neg: u64, pos: u64| -> i16 { (if h & pos != 0 { 0x7fff } else { 0 }) - (if h & neg != 0 { 0x7fff } else { 0 }) };
+    crate::input::set_keyboard(h & 0xffff, [axis(1 << 40, 1 << 42) as i32, axis(1 << 43, 1 << 41) as i32, axis(1 << 44, 1 << 46) as i32, axis(1 << 47, 1 << 45) as i32]);
+}
+
+/// Set by the front end before the boot: it owns the game window (graphics' host window is not opened).
+pub static FRONT_WINDOW: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// Called by the boot after the services registered: binds the NVN entry and the nv:: driver glue.
 pub fn finish_registration(reg: &mut crate::hle::Registry) {
-    reg.force("nvnBootstrapLoader", "the NVN entry: the host's procs (graphics layer, null device, stubs)", bootstrap_loader);
-    null::register_nv(reg);
+    bind_graphics();
+    // NVN2 native images (decoded video pictures as textures): sdk symbols, the graphics layer's over the decoders' pictures
+    nxgfx::nvn::native::set_source(crate::services::codec_video::native_image);
+    for (name, f) in nxgfx::nvn::native::takeovers() {
+        reg.force(name, "native images are the graphics layer's, over the video decoders' pictures", f);
+    }
+    reg.force("nvnBootstrapLoader", "the NVN entry: the graphics layer's procs (logging stubs for names it lacks)", bootstrap_loader);
+    nv::register_nv(reg);
     let n = GRAPHICS.lock().unwrap().len();
-    crate::log!("NVN: {n} procs from the graphics layer, {} from the null device, the rest logging stubs", null::count());
+    crate::log!("NVN: {n} procs from the graphics layer, the rest logging stubs");
 }

@@ -15,6 +15,10 @@
 //!            update <the update's package>                (only for an update in a package of its own)
 //!            patch <file offset> <size> <offset in NCA> 4 <counter> <key name>:<wrapped key> <indirect offset>
 //!                  <size> <AesCtrEx offset> <size>        (one line)
+//!            compressed base <data level> <table offset> <size>   (this engine) the base section under the patch
+//!                                                          has a compression layer (NCA CompressionInfo)
+//!            compressed <data level> <table offset> <size>        (this engine) so has the section read last
+//!                                                          (patched or base); `romfs` is then in its view
 //!
 //! romfs.nup  <package path>              a NUP's RomFS tree, read in place
 //! romfs.dir  <folder path>               (this engine) a dumped folder's romfs/, read in place
@@ -22,6 +26,7 @@
 //! Content keys stay wrapped as the package holds them; they are unwrapped with prod.keys when the marker is opened
 //! (the explicit keys, else SWR_PROD_KEYS, else the marker's `keys` path). No key is written by the build.
 use crate::package::bktr::Patched;
+use crate::package::compressed::Compressed;
 use crate::package::crypto::ecb_decrypt;
 use crate::package::error::{fmt, PackageError, Result};
 use crate::package::io::Blob;
@@ -35,6 +40,8 @@ use std::sync::Arc;
 pub const NSP: &str = "romfs.nsp";
 pub const NUP: &str = "romfs.nup";
 pub const DIR: &str = "romfs.dir";
+/// No marker: the game has no RomFS (a homebrew NRO without one); the data folder gets an empty `romfs/`.
+pub const NONE: &str = "";
 
 fn hexnum(s: &str, what: &str) -> Result<u64> {
     u64::from_str_radix(s, 16).map_err(|_| PackageError::Format(format!("{what}: bad number {s:?} in the marker")))
@@ -103,6 +110,7 @@ pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
             let mut base_row = None;
             let mut patch_row = None;
             let mut update = None;
+            let (mut base_comp, mut top_comp) = (None, None);
             for l in &lines[2..] {
                 if let Some(r) = l.strip_prefix("keys ") {
                     keys_file = Some(PathBuf::from(r));
@@ -114,6 +122,13 @@ pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
                         return fmt(format!("{what}: bad romfs row"));
                     }
                     romfs = Some((hexnum(f[0], &what)?, hexnum(f[1], &what)?));
+                } else if let Some(r) = l.strip_prefix("compressed ") {
+                    let f: Vec<&str> = r.split_whitespace().collect();
+                    match f[..] {
+                        ["base", h, a, n] => base_comp = Some((hexnum(h, &what)?, hexnum(a, &what)?, hexnum(n, &what)?)),
+                        [h, a, n] => top_comp = Some((hexnum(h, &what)?, hexnum(a, &what)?, hexnum(n, &what)?)),
+                        _ => return fmt(format!("{what}: bad compressed row")),
+                    }
                 } else if let Some(r) = l.strip_prefix("base ") {
                     base_row = Some(r.split_whitespace().collect::<Vec<_>>());
                 } else if let Some(r) = l.strip_prefix("patch ") {
@@ -136,7 +151,13 @@ pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
             let keys_once = loaded.as_ref();
             let game = open(&package)?;
             let base = match &base_row {
-                Some(r) => Some(Arc::new(section_row(r, &game, keys_once, &what)?) as Arc<dyn Storage>),
+                Some(r) => {
+                    let s = Arc::new(section_row(r, &game, keys_once, &what)?) as Arc<dyn Storage>;
+                    match (base_comp, &patch_row) {
+                        (Some((h, a, n)), Some(_)) => Some(Arc::new(Compressed::new(s, h, (a, n), &what)?) as Arc<dyn Storage>),
+                        _ => Some(s),
+                    }
+                }
                 None => None,
             };
             let storage: Arc<dyn Storage> = match &patch_row {
@@ -159,6 +180,10 @@ pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
                     Arc::new(Patched::from_tables(patch, base, t)?)
                 }
                 None => base.ok_or_else(|| PackageError::Format(format!("{what}: the marker has no base row")))?,
+            };
+            let storage: Arc<dyn Storage> = match top_comp {
+                Some((h, a, n)) => Arc::new(Compressed::new(storage, h, (a, n), &what)?),
+                None => storage,
             };
             if at > storage.size() || size > storage.size() - at {
                 return fmt(format!("{what}: RomFS range is out of bounds"));

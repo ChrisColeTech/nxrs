@@ -364,3 +364,23 @@ pub mod fmt {
     pub const ASTC_4X4: i32 = 0x79;
     pub const ASTC_12X12_SRGB: i32 = 0x94;
 }
+
+opaque! {
+    NVNprogramBuilder = 0x80;
+    NVNdlssNetworkBuilder = 0xC0;
+    NVNdlssNetwork = 0x218;
+    NVNdlssParameters = 0xC8;
+    NVNdeviceCommandBuffer = 0x30;
+    NVNdeviceMessageBuffer = 0x28;
+}
+
+/// nvnTexture(Builder)GetSparseTileLayout's result.
+#[repr(C)]
+#[derive(Clone, Copy, Default, Debug)]
+pub struct NVNtextureSparseTileLayout {
+    pub num_tiled_levels: i32,
+    pub tile_width: i32,
+    pub tile_height: i32,
+    pub tile_depth: i32,
+    pub reserved: [u8; 16],
+}

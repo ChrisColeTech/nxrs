@@ -21,10 +21,10 @@ Agents update their own rows when they finish.
 | T-lane | dynarmic differential tests | Not started | | parallel, not gating |
 | M2 | Execution and the bridge (runtime) | Done | c7d34a3, 6fae87d | homebrew e2e 80/80, threads 200/200; 5 os requests open (`docs/INTERFACES.md`) |
 | M3 | OS + HLE boot | Done | 3845d1c | MK8D to first submit 0.64 s, 5 min no crash, peak 1.7 GB, **on the null GPU** (to be removed, rule 1.1.6) |
-| G-lane | Graphics: NVN on Vulkan | Partial | 34f540b | 400 entry points, headless tests pixel-exact, ASTC bit-exact, 2,000 MK8D pipelines. **Not wired to os.** Gaps in 5A.4 |
-| G-lane | Build-time shaders | Partial | 6c11b77 | 184k shaders over 7 games, every Turbo-used key found. **3 fail**, mesh/task as compute, `nxrs build` does not call it. Gaps in 5A.5 |
-| **GAPS** | **Turbo + lane parity (section 5A)** | Not started | | everything Turbo does today, ported; real I/O only |
-| M4 | First pixels: MK8D title screen on Vulkan | Not started | | needs os ↔ graphics wiring |
+| G-lane | Graphics: NVN on Vulkan | Partial | 34f540b | Wired to os (M4). ~620 entry points: every nxnative name except 26 with no known prototype or needing ray tracing; NVN2 push constants (bank 24/25..29), deferred binds, render enable, multi-draw count, DrawTexture recorded and replayed. **Recorded, not yet replayed:** mesh-task draws, transform feedback, DLSS evaluation, ray dispatches, depth resolve. MK8D race lighting wrong (ground unlit, sky black). Gaps in 5A.4 |
+| G-lane | Build-time shaders | Partial | 6c11b77 | 184k shaders over 7 games, every Turbo-used key found, 0 fail; live translator for keys the build missed. Mesh/task still as compute, `nxrs build` does not call it. Gaps in 5A.5 |
+| **GAPS** | **Turbo + lane parity (section 5A)** | In progress | | everything Turbo does today, ported; real I/O only |
+| M4 | First pixels: MK8D title screen on Vulkan | Done | | os → graphics wired (os links graphics, no null device in the path); title screen, Mii select and main menu on the RTX 5090 at 59.4 FPS; title FLIP 0.017 vs Turbo's capture (menu 0.138: Turbo's capture has banding ours lacks); `[vk] pools:` logs placement and write-back ms/frame. Shots: `build/G/m4/` |
 | M5 | MK8D at 60 | Not started | | needs audio, input, video, window from GAPS |
 | M6 | Pokémon trio | Not started | | |
 | M7 | MKW + DKB | Not started | | needs ZBIC, real mesh shaders |
@@ -595,74 +595,74 @@ harness. **G** = graphics, shaders, and M4.
 
 | Item | Turbo source | Status |
 |---|---|---|
-| XCI (and its secure partition) as the game's own package, not only as update/DLC. The README's "refused, as in Turbo" is wrong | `nca.py` `open_ncas`, `dlc.members` | Not started |
-| ZBIC-compressed NSO segments (Switch 2: Ocarina, and any other); **one** decoder shared by translator and shaders (shaders has its own today) | `zbic.py`, `nxloader.py` (3eac6c2, b196d14) | Not started |
-| The 6 untyped SDK crypto symbols seeded (os `bignum.rs` workaround then removed) | — | Not started |
-| `nxrs build` runs the shader prebuild; profiles' shader tables imported | lane C `shaders::prebuild` | Not started |
-| `--key=value` applies any ini option for one run | e4b388d | Not started |
-| Settings versions and their migrations (`settings_version` 3: `game_dynamic_resolution` auto) | 01f9119, 81a1d95 | Not started |
-| Per-game memory cap (job object), allocations counted | 8a4618c | Not started |
-| Every `switchrecomp.py` option has its nxrs equivalent or a launcher-agreed replacement (`--chunk`, `--keep-c`, `--no-shaders`, `--dlc-stub`, …) | `switchrecomp.py` | Not started |
-| `doctor`: Vulkan device version, free disk | — | Not started |
-| Toolchain for machines without Visual Studio (runtime for `x86_64-pc-windows-gnullvm`, llvm-mingw bundled) | a1c5d81 (Turbo bundles its compiler) | Not started |
-| Exclusive monitor on for Switch 1 programs only; LDAR/LDAPR/STLR/LDXR as atomic accesses — confirm the translator's equivalents | b89e9e5, efa9b2a, e440705 | Not started |
-| Runtime: the 5 requests os filed (SVC hook, tick rate incl. Switch 2 tick, scheduler hooks, start entry, kernel events), os workarounds removed | `docs/INTERFACES.md`, 78ece7b | Not started |
-| Map past the application pool fails with ResultLimitReached; SDK 22 thread ID; WaitIfEqual64 | b316a9f, 78ece7b, 362b172 | Not started |
+| XCI (and its secure partition) as the game's own package, not only as update/DLC. The README's "refused, as in Turbo" is wrong | `nca.py` `open_ncas`, `dlc.members` | Done (uncommitted, lane T): XCI with or without key area; NCA compressed storage added (the owner's only XCI, Super Mario Party Jamboree, needs it): ExeFS + 1,539 RomFS files read, all 139 NROs match the game's NRR hashes. Also homebrew `.nro` input. Not built and run as a game |
+| ZBIC-compressed NSO segments (Switch 2: Ocarina, and any other); **one** decoder shared by translator and shaders (shaders has its own today) | `zbic.py`, `nxloader.py` (3eac6c2, b196d14) | Done (uncommitted, lane T): `translator::loader::zbic`, shaders re-exports it. OoT translates (297,043 functions), builds with shaders (42,848) and runs: main staged unpacked, loaded, DT_INIT runs; then an nn::diag abort in sdk init after GetInfo 29/30/33 (os) |
+| The 6 untyped SDK crypto symbols seeded (os `bignum.rs` workaround then removed) | — | Done (uncommitted, lane T): seeded; MK8D's six are lifted functions. Removing `bignum.rs` is left to lane O (it is editing `services/mod.rs`; INTERFACES.md) |
+| `nxrs build` runs the shader prebuild; profiles' shader tables imported | lane C `shaders::prebuild` | Done (uncommitted, lane T): MK8D 29,651 shaders at build, the game ran on them at ~60 FPS; 187 profiles' tables embedded (24.7 MB), written to `<data>\shaders\profile\`; nxrs now links `nxfront.lib` |
+| `--key=value` applies any ini option for one run | e4b388d | Done by lane I (`nxconfig`); lane T: argv passes through, the runtime skips `--k=v` when finding its folder, and applies `memory_gb`, `null_trap`, `log`, `profile` |
+| Settings versions and their migrations (`settings_version` 3: `game_dynamic_resolution` auto) | 01f9119, 81a1d95 | Done by lane I (`nxconfig`); MK8D's ini rewritten at version 3 in lane T's run |
+| Per-game memory cap (job object), allocations counted | 8a4618c | Done (uncommitted, lane T): `process memory cap: 32768 MB` in MK8D and OoT runs, raised to the pool + 8 GB for memory_gb. Counting vkAllocateMemory is lane G's |
+| Every `switchrecomp.py` option has its nxrs equivalent or a launcher-agreed replacement (`--chunk`, `--keep-c`, `--no-shaders`, `--dlc-stub`, …) | `switchrecomp.py` | Done (uncommitted, lane T): `--chunk`, `--native`, `.nro` input added; the rest as listed in src/cli/README.md |
+| `doctor`: Vulkan device version, free disk | — | Done (uncommitted, lane T): devices with API/driver version (1.3 needed), free disk, toolchain, Visual Studio, engine libraries |
+| Toolchain for machines without Visual Studio (runtime for `x86_64-pc-windows-gnullvm`, llvm-mingw bundled) | a1c5d81 (Turbo bundles its compiler) | Done (uncommitted, lane T): `NXRS_TOOLCHAIN=gnu` / no Visual Studio → bundled llvm-mingw 20261104 + the engine built for gnullvm (`gnu\libnxfront.a`); MK8D built so imports only system DLLs and the UCRT and ran 60 s at 60 FPS; homebrew tests pass. Release packaging (bundling llvm-mingw + gnu\) is M9 |
+| Exclusive monitor on for Switch 1 programs only; LDAR/LDAPR/STLR/LDXR as atomic accesses — confirm the translator's equivalents | b89e9e5, efa9b2a, e440705 | Done (uncommitted, lane T): global monitor (`rt_excl_mon`) on for MK8D, off for OoT (run logs); LDXR/LDAR/LDAPR acquire, STLR now seq-cst |
+| Runtime: the 5 requests os filed (SVC hook, tick rate incl. Switch 2 tick, scheduler hooks, start entry, kernel events), os workarounds removed | `docs/INTERFACES.md`, 78ece7b | Partial (uncommitted, lane T): all five in the runtime (INTERFACES.md), tick 19.2 / 31.25 MHz in the runs; removing os's workarounds is lane O's |
+| Map past the application pool fails with ResultLimitReached; SDK 22 thread ID; WaitIfEqual64 | b316a9f, 78ece7b, 362b172 | Done in the runtime (uncommitted, lane T): map limit on for Z-A/OoT (OoT log), TLS+0x110, WaitForAddress type 3; os answers memory SVCs itself (INTERFACES.md note to lane O) |
 
 ### 5A.2 OS services, audio, video (lane O)
 
 | Item | Turbo source | Status |
 |---|---|---|
-| Audio to a real output device (WASAPI); `audio_slowdown`; no underruns | `runtime/audio.c`, `audio_queue.h`, `audio_limit.h` | Not started |
-| hwopus decoding through libopus (Turbo decoded silence before c406ae6) | c406ae6, `runtime/opus/` | Not started |
-| Renderer mix fixes: a voice reaching no mix stays audible; mixes kept between updates; splitters | 8a265ab, a22b102 | Not started |
-| Video: VP9 (Switch 2 GSV, libvpx), AV1 (dav1d, nn::ndve), H.264 (menu previews), the Switch 2 video decoder's fences and back-pressure; Ocarina's movies on screen | f9c8469, 6c4578c, 5093a7d, 0ae160a, 9ce9b8e, `runtime/vp9`, `av1`, `oh264` | Not started |
-| AudioIn opens (silent capture device is not acceptable: a real device or the service's own "no device") | — | Not started |
-| Services Turbo answers that os may not: `btm:u` interface (Violet 4.0.0), MiiEdit applet cancel, bsd event descriptors, time shared page entries 0x38, the game's SDK version read for the NVN API | 13a2693, 9ae9441, 362b172, 1f12977, 2f8f44e | Not started |
-| Software keyboard (`keyboard_text`, the swkbd font) | `runtime/swkbd_font.h`, `svc_ns2.c` | Not started |
-| Docked / TV mode by default; `docked`, `language` options | d5b36a1 | Not started |
-| Delete the null NVN device; os hands NVN to graphics (with lane G) | rule 1.1.6 | Not started |
+| Audio to a real output device (WASAPI); `audio_slowdown`; no underruns | `runtime/audio.c`, `audio_queue.h`, `audio_limit.h` | Done: MK8D on WASAPI 68.5 s, 67.6 s not silent, 0 underruns, limiter + smooth slowdown (`os/src/media/sink.rs`, `services/audren.rs`) |
+| hwopus decoding through libopus (Turbo decoded silence before c406ae6) | c406ae6, `runtime/opus/` | Partial: libopus 1.5.2 linked, classes / C interface / SDK 21 manager / `hwopus` IPC (`services/codec.rs`), unit-tested; no built game uses it yet (Ocarina needs ZBIC) |
+| Renderer mix fixes: a voice reaching no mix stays audible; mixes kept between updates; splitters | 8a265ab, a22b102 | Partial: the SDK's own renderer mixes in-process (no host mixer, so mixes / splitters are the SDK's), MK8D audible; Ocarina's unrouted voices unverified (no build); audren:u for SDK 1.x not served |
+| Video: VP9 (Switch 2 GSV, libvpx), AV1 (dav1d, nn::ndve), H.264 (menu previews), the Switch 2 video decoder's fences and back-pressure; Ocarina's movies on screen | f9c8469, 6c4578c, 5093a7d, 0ae160a, 9ce9b8e, `runtime/vp9`, `av1`, `oh264` | Partial: MK8D menu previews H.264 (Media Foundation) 926/926 pictures decoded, not black, handed to the game; panel still draws black (lane G, INTERFACES); VP9 / AV1 / Switch 2 decoders ported (`services/movie.rs`, `codec_video.rs`), not run (no Switch 2 build) |
+| AudioIn opens (silent capture device is not acceptable: a real device or the service's own "no device") | — | Partial: real capture device through WASAPI, "no device" when none (`services/audio.rs`, `media/mic.rs`); no built game opens it |
+| Services Turbo answers that os may not: `btm:u` interface (Violet 4.0.0), MiiEdit applet cancel, bsd event descriptors, time shared page entries 0x38, the game's SDK version read for the NVN API | 13a2693, 9ae9441, 362b172, 1f12977, 2f8f44e | Partial: SDK version done (MK8D `sdk: NintendoSDK 4`, boots on Vulkan); btm:u and bsd event descriptors served (`services/net.rs`), not exercised; MiiEdit by name (AppendMii) as nxnative, applet IPC path absent; time shared page not served |
+| Software keyboard (`keyboard_text`, the swkbd font) | `runtime/swkbd_font.h`, `svc_ns2.c` | Partial: ShowKeyboard + InlineKeyboard with a Win32 text box in the Hind font, `keyboard_text` default (`services/swkbd.rs`); not exercised by a built game |
+| Docked / TV mode by default; `docked`, `language` options | d5b36a1 | Done: from `nxconfig`, live docked change notifies the game; MK8D `oe: docked, TV mode, language en-US` |
+| Delete the null NVN device; os hands NVN to graphics (with lane G) | rule 1.1.6 | Done: `nvn/null.rs`, `tex.rs` deleted; MK8D runs to its menus on Vulkan (407 graphics procs) |
 
 ### 5A.3 Input, window, front end, harness (lane I)
 
 | Item | Turbo source | Status |
 |---|---|---|
-| Real controllers in `hid`: XInput, DualSense / DS4 (lights, rumble, motion), Switch Pro, Joy-Con (1 and 2), WinMM fallback; hot-plug; several players | `controller_sony*.h`, `svc_hid.c`, `hid_layout.h`, 88401aa, a0581fe; nxnative `pad_*.h`, `switch2_proto.h`, `motion_fusion.h` | Not started |
-| `button_layout` (switch / xbox / positional) and `button_map` | 08130c4, 10e1ef4, ac1bd36, `pad_layout.h` | Not started |
-| Keyboard and mouse as a controller: `mouse_right_stick`, `mouse_sensitivity`, `mouse_invert` | `backend_win32.c` | Not started |
-| Game window: fullscreen / windowed, F11, title bar state, Esc quit, F1 help; windowed loader exe (no console) | `backend_win32.c` | Not started |
-| Hotkeys: F3 screenshot (`captures/`), F4 fps limit, F7 recording (`smooth_recording`, `recording_fps`) | `backend_win32.c`, `rec_win32.c`, `rec_flow.h` | Not started |
-| The ini: every Turbo option read and honoured (`renderer`, `resolution`, `dynamic_resolution(_min)`, `game_dynamic_resolution`, `shadows`, `fps_target` incl. frame skip 30/20 and 120 = LSFG x2, `fps_limit`, `forced_vsync`, `memory_gb`, `driver_exclusive`, `shader_thread`, `low_priority_shader_compiler`, `lsfg*`, `lossless_scaling`, `lossless_path`, `log`, `diag`, `profile`, `metrics`, `null_trap`) and written with comments when missing | `runtime/main.c` option table | Not started |
-| Frame generation through the owner's Lossless.dll (LSFG) | `runtime/lsfg.c` | Not started |
-| Control pipe (scripted actions from the harness) | 0b0d902, d54f04e | Not started |
-| Metrics, dropped-work counters, input record / replay | 8f5410f | Not started |
-| Harness: guard (GAME_LOCK, memory watchdog), scenarios with frame-time statistics, per-run ini, the pacing line at least every 5 s, PresentMon | dec5a09, 4f0f731, `tools/play_scenario.py` | Not started |
+| Real controllers in `hid`: XInput, DualSense / DS4 (lights, rumble, motion), Switch Pro, Joy-Con (1 and 2), WinMM fallback; hot-plug; several players | `controller_sony*.h`, `svc_hid.c`, `hid_layout.h`, 88401aa, a0581fe; nxnative `pad_*.h`, `switch2_proto.h`, `motion_fusion.h` | Partial: all paths written (XInput; DualSense / DS4 lights, rumble, motion; Switch Pro, Joy-Con 1 and NSO pads over HID with HD rumble, lights, IMU; Joy-Con 2 / Pro Controller 2 over BLE; WinMM; hot-plug; 8 players), unit-tested; enumeration verified (`nxinput list`); no pad was connected, so live input / lights / rumble await the owner's hands-on test |
+| `button_layout` (switch / xbox / positional) and `button_map` | 08130c4, 10e1ef4, ac1bd36, `pad_layout.h` | Partial: the owner's `pad_layout.h` ported with tests, applied to every pad path; needs a pad for a live check |
+| Keyboard and mouse as a controller: `mouse_right_stick`, `mouse_sensitivity`, `mouse_invert` | `backend_win32.c` | Partial: keyboard verified in MK8D (the game read A from X, the stick from W); the mouse stick (raw input, sensitivity curve, inversion) is written and unit-tested, not exercised in a game |
+| Game window: fullscreen / windowed, F11, title bar state, Esc quit, F1 help; windowed loader exe (no console) | `backend_win32.c` | Done: MK8D windowed, F11 / Alt+Enter fullscreen and back (kept in the ini), title states, F1 page, Esc quit; loader is a GUI-subsystem exe |
+| Hotkeys: F3 screenshot (`captures/`), F4 fps limit, F7 recording (`smooth_recording`, `recording_fps`) | `backend_win32.c`, `rec_win32.c`, `rec_flow.h` | Done: F3 (PNG of the game), F4 (`fps_limit` + title), F7 (H.264 + AAC MP4; `smooth_recording` slowed the clock to 0.30 and kept every frame distinct, A/V lengths 1.97 / 2.07 s), F8 (graphics' shot) verified in MK8D |
+| The ini: every Turbo option read and honoured (`renderer`, `resolution`, `dynamic_resolution(_min)`, `game_dynamic_resolution`, `shadows`, `fps_target` incl. frame skip 30/20 and 120 = LSFG x2, `fps_limit`, `forced_vsync`, `memory_gb`, `driver_exclusive`, `shader_thread`, `low_priority_shader_compiler`, `lsfg*`, `lossless_scaling`, `lossless_path`, `log`, `diag`, `profile`, `metrics`, `null_trap`) and written with comments when missing | `runtime/main.c` option table | Partial: every option read, normalised, published (`nxconfig`), written with comments, migrated, reloaded live, `--key=value` (all verified in MK8D); applied today: front / input (`fullscreen`, `mouse_*`, `button_*`, `smooth_recording`, `recording_fps`, `lsfg*`, `lossless_*`, `metrics`, `diag`), lane O (`docked`, `language`, `keyboard_text`, `audio_slowdown`), lane G (`fps_limit`, `forced_vsync`, `shadows`, `game_dynamic_resolution`); still unread by their lanes: `resolution`, `dynamic_resolution(_min)`, `fps_target` frame skip, `driver_exclusive`, `shader_thread`, `low_priority_shader_compiler` (G), `memory_gb`, `null_trap`, `log`, `profile` (T / O) |
+| Frame generation through the owner's Lossless.dll (LSFG) | `runtime/lsfg.c` | Partial: Lossless.dll found and its LSFG 3.1 set identified (tests); the passes need graphics' present hook (requested); no Lossless.dll on this PC |
+| Control pipe (scripted actions from the harness) | 0b0d902, d54f04e | Done: `\\.\pipe\nxrs_ctl_<pid>` + registry; status / press / pads / shot / quit verified in MK8D |
+| Metrics, dropped-work counters, input record / replay | 8f5410f | Done: metrics CSV per second (verified), counter registry for every crate, frames CSV sink; NXRS_INPUT_RECORD / REPLAY verified in MK8D (replayed states read by the game) |
+| Harness: guard (GAME_LOCK, memory watchdog), scenarios with frame-time statistics, per-run ini, the pacing line at least every 5 s, PresentMon | dec5a09, 4f0f731, `tools/play_scenario.py` | Partial: run_game.py guard as a module, play_scenario.py (Turbo's scenarios, per-run ini, stats, pacing gaps ≤ 5 s verified: 5.02 s), gamectl.py; PresentMon parsing written but no PresentMon.exe on this PC |
 
 ### 5A.4 Graphics (lane G)
 
 | Item | Turbo source | Status |
 |---|---|---|
-| Wire os → graphics; MK8D title screen and menu (= M4) | — | Not started |
-| Virtual / sparse pools | `vk_sparse.inc` | Not started |
-| Buffer textures, query counters with the GPU's own time, append counters as indirect-draw arguments | 8097152, 7b5a28c | Not started |
+| Wire os → graphics; MK8D title screen and menu (= M4) | — | Done (`build/G/m4/mk8d-title.png`, `mk8d-main-menu.png`) |
+| Virtual / sparse pools | `vk_sparse.inc` | Partial: virtual pools (alias on a whole-pool first mapping, else a 4 KB page table the GPU resolves buffers through and textures upload through; `nvn/vpool.rs`) — MK8D maps its 88 MB pool as an alias, the "no memory pool" lines and the device loss they led to are gone. **Missing:** Vulkan sparse images for textures ≥ 64 MB in sparse pools (MKW terrain), no runnable NVN2 build to test |
+| Buffer textures, query counters with the GPU's own time, append counters as indirect-draw arguments | 8097152, 7b5a28c | Partial: all three implemented (`vk/counters.rs`: timestamps stamped on the GPU and brought to the guest clock, SAMPLES_PASSED from occlusion queries; texel buffer views per draw and in the pool set; append resets + size-0 storage buffers) — MK8D runs with SAMPLES_PASSED counted (no red), GPU time logged; buffer textures and append counters not exercised by MK8D, DKB not runnable yet |
 | Transform feedback, layered passes, raw global memory through loaded pointers | 78ece7b | Not started |
-| Recording on several threads; parked submissions at GPU event waits without red log lines | 362b172, 1316538 | Not started |
-| Write-back on demand, joined ranges (discrete-GPU model) | 6e86483, ad91c4d | Not started |
-| A draw whose shader is missing waits for a live translation instead of being skipped | 336dcb7 | Not started |
+| Recording on several threads; parked submissions at GPU event waits without red log lines | 362b172, 1316538 | Not started (releases during a recording now wait for its fence: the MK8D device loss of a texture freed mid-recording is fixed) |
+| Write-back on demand, joined ranges (discrete-GPU model) | 6e86483, ad91c4d | Partial: implemented (`vk/lazy.rs`: pages with 3 frames of GPU writes go PAGE_NOACCESS instead of being copied back, a fault reads the page back on a copy of its own; adjacent write-backs joined in `mem::note_gpu_write`); MK8D runs with it on, its write-backs do not reach the streak; DKB (the case it is for) not runnable |
+| A draw whose shader is missing waits for a live translation instead of being skipped | 336dcb7 | Done (`vk/live.rs` + `shaders::prebuild::translate_one`, 4 translator threads, waited-for keys first): MK8D with an empty shader folder translated 1,821 shaders live (0.1 s each) and drew its title (`build/G/runs/r9`). That run lost the device at 17 s, not diagnosed |
 | Storage use for images without the IMAGE flag (off by default), integer output variants, storage textures | caa07ad, 3d77358 | Not started |
 | Push constants as driver bank 24; memory pool table 8192; queues / texture pools / mesh draws as Ocarina needs | 9ce9b8e, 4bb959d, 9f19968 | Not started |
-| Live alpha-to-coverage switch; per-title texture rewrites; present ticket race fix | 0b0d902, 362b172, a22b102 | Not started |
-| Resolution scale, dynamic resolution (host and the game's own), shadows option, vsync, fps limit | `render_scale.h`, 81a1d95 | Not started |
-| Screenshot (`vk_shot`), perf counters and the pacing line (`vk_perf`), render sizes in the log, pipeline cache on disk | `vk_shot.c`, `vk_perf.c`, `vk_pcache.c` | Not started |
+| Live alpha-to-coverage switch; per-title texture rewrites; present ticket race fix | 0b0d902, 362b172, a22b102 | Partial: `a2c 0|1` control command (and `NXGFX_A2C=0`); the ticket race cannot happen here (a present's ticket is written by the presenting thread, there is no translation thread); per-title texture rewrites not done |
+| Resolution scale, dynamic resolution (host and the game's own), shadows option, vsync, fps limit | `render_scale.h`, 81a1d95 | Partial: `fps_limit` (0 / 30 / 60..240), `forced_vsync`, `shadows=0` (depth-only passes of their own size skipped) and the game's own dynamic resolution (`game_dynamic_resolution`: GPU timestamps, or a 256x slower clock when 0) read live from nxconfig; not yet tried with changed ini values. **Missing:** `resolution` scale and the host's dynamic resolution (Turbo has them only in its GL renderer) |
+| Screenshot (`vk_shot`), perf counters and the pacing line (`vk_perf`), render sizes in the log, pipeline cache on disk | `vk_shot.c`, `vk_perf.c`, `vk_pcache.c` | Done: `vk/shot.rs` (F3, `shot` command, `NXGFX_SHOT*`), `vk/perf.rs` (GPU time and replay lines every 60 frames, slow frames, render sizes every 600, `NXGFX_FRAME_CSV`), pacing line every ≤ 5 s, `vk/pcache.rs` (saved 2 s after the last new pipeline, atomic replace, header checked). MK8D `build/G/runs/r10` |
 
 ### 5A.5 Shaders (lane G)
 
 | Item | Turbo source | Status |
 |---|---|---|
-| The 3 failures: MKW's unimplemented Ampere instruction; Ocarina's and Violet's offset on a non-gather sample | — | Not started |
-| Real task / mesh shaders on Vulkan (`VK_EXT_mesh_shader`) instead of compute (MKW, DKB) | 9f19968 (Turbo's mesh draws) | Not started |
+| The 3 failures: MKW's unimplemented Ampere instruction; Ocarina's and Violet's offset on a non-gather sample | — | Done: MKW's was a compute program starting with a 0x80-byte SPH (`job::is_ampere_sph`), the other two fetch with a computed offset (`fixes::dynamic_offsets`). Re-run: MKW 11,609/11,609, Violet 35,937/35,937, OoT 42,848/42,848 valid, 0 failed (`build/G/shaders/*.log`) |
+| Real task / mesh shaders on Vulkan (`VK_EXT_mesh_shader`) instead of compute (MKW, DKB) | 9f19968 (Turbo's mesh draws) | Not started (graphics also lacks NVN2's DrawMeshTasks* entry points) |
 | Ray-tracing stages translated (NVN2) | — | Not started |
-| Sonic X Shadow Generations' archive format; Unity, Unreal and the other engine readers nxnative has | nxnative `shader_split.py` | Not started |
+| Sonic X Shadow Generations' archive format; Unity, Unreal and the other engine readers nxnative has | nxnative `shader_split.py` | Partial: PACx 405 (Sonic X Shadow Generations: 6,064 found, 6,064 valid, `build/G/shaders/sonic`), Unity (UnityFS LZ4/LZMA, serialized files), Unreal (paks incl. encrypted indexes, IoStore, `.ushaderbytecode`, inline, UE3), PlatinumGames DAT, Criterion BND2, RE Engine KPKA/SDF/OCIO, MT Framework ARC/SPK, KTGL/Koei/Gust, Smash data.arc, FromSoftware BHD5/BDT/DCX/BND3, RAGE rgxd, YEBIS tfxo, loose control sections in main. **Missing:** MonoGame MGFX/XNB (LZX), Monolith, Retro, SUMO, CIVBSF, SHAD+CASC, Diablo III, Camelot, PKZ, RPF6, Frostbite, BEA, NLG, IPK, Double Eleven, LSPK, KIT, VBF/Phyre, Viper, PDAT |
 
 ---
 

@@ -152,8 +152,7 @@ pub fn pool_add(p: &pool_t) {
 
 fn release(g: &Gpu, p: Pool) {
     if let Some(b) = p.buf {
-        let f = g.q.last_fence();
-        g.q.defer(f, Box::new(move |g: &Gpu| g.free_buffer(b)));
+        g.q.defer_after_use(Box::new(move |g: &Gpu| g.free_buffer(b)));
     }
 }
 
@@ -182,6 +181,26 @@ pub fn addr_known(a: u64, n: u64) -> bool {
         Some(g) => find(&g.mem.lock().unwrap(), a, n).is_some(),
         None => false,
     }
+}
+
+/// The bytes from `a` to the end of its memory pool (0 when `a` is in none).
+pub fn room(a: u64) -> u64 {
+    let Some(g) = Gpu::try_get() else { return 0 };
+    let a = if crate::nvn::vpool::is_sparse(a) { crate::nvn::vpool::translate(a, 1).unwrap_or(0) } else { a };
+    let m = g.mem.lock().unwrap();
+    match find(&m, a, 1) {
+        Some(b) => {
+            let p = &m.by_base[&b];
+            p.base + p.size - a
+        }
+        None => 0,
+    }
+}
+
+/// The OS write watch of [a, a + n) reset (the host wrote it, not the game).
+pub fn reset_watch(a: u64, n: u64) {
+    let (lo, hi) = page_range(a, n);
+    watch::reset(lo, hi);
 }
 
 /// Flushed by the CPU (nvnMemoryPoolFlushMappedRange): uploaded at the next submission even without a write watch.
@@ -220,6 +239,7 @@ impl Pool {
         }
         let b = g.buffer(self.size, BUF_USAGE, MemoryLocation::GpuOnly, "pool")?;
         // The whole storage now: a Vram pool's initial content, a mirror's current one.
+        super::lazy::touch(self.base, self.size);
         let src = unsafe { core::slice::from_raw_parts(self.base as *const u8, self.size as usize) };
         sub.upload(g, src, b.buf, 0);
         UPLOAD_BYTES.fetch_add(self.size, Ordering::Relaxed);
@@ -320,9 +340,24 @@ fn import(g: &Gpu, base: u64, size: u64) -> Result<(Buf, u64), String> {
 
 /// A GPU address range as (buffer, offset, pool base); creates the pool's buffer at its first use.
 pub fn resolve(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(vk::Buffer, u64, u64)> {
+    // a sparse virtual pool's range: the physical memory its page table maps there (contiguous pages only)
+    let a = if crate::nvn::vpool::is_sparse(a) {
+        match crate::nvn::vpool::translate(a, n) {
+            Some(p) => p,
+            None => {
+                crate::log::red_once(&format!("GPU address {a:#x} (+{n:#x}) of a sparse virtual pool is not mapped to contiguous memory"));
+                return None;
+            }
+        }
+    } else {
+        a
+    };
     let mut m = g.mem.lock().unwrap();
     let Some(b) = find(&m, a, n.max(1)) else {
-        crate::log::red_once(&format!("GPU address {a:#x} (+{n:#x}) is in no memory pool"));
+        static N: AtomicU64 = AtomicU64::new(0);
+        if N.fetch_add(1, Ordering::Relaxed) < 8 {
+            crate::log::red(&format!("GPU address {a:#x} (+{n:#x}) is in no memory pool"));
+        }
         return None;
     };
     let p = m.by_base.get_mut(&b).unwrap();
@@ -368,7 +403,28 @@ pub fn note_gpu_write(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     let Some(b) = find(&m, a, n) else { return };
     let p = &m.by_base[&b];
     if p.placement == Placement::Mirror && p.buf.is_some() {
-        sub.writebacks.push((b, a, n, p.buf.as_ref().unwrap().buf, p.buf_off + (a - p.base)));
+        super::perf::inc(super::perf::C::Writebacks);
+        let (buf, off) = (p.buf.as_ref().unwrap().buf, p.buf_off + (a - p.base));
+        // ranges that follow each other (or one inside another) in the same pool are one copy
+        for w in sub.writebacks.iter_mut().rev() {
+            if w.0 != b {
+                continue;
+            }
+            if a >= w.1 && a + n <= w.1 + w.2 {
+                return;
+            }
+            if a == w.1 + w.2 {
+                w.2 += n;
+                return;
+            }
+            if a + n == w.1 {
+                w.1 = a;
+                w.2 += n;
+                w.4 = off;
+                return;
+            }
+        }
+        sub.writebacks.push((b, a, n, buf, off));
     }
 }
 
@@ -382,6 +438,31 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8)]) {
     let mut m = g.mem.lock().unwrap();
     for &(pool, a, n, src) in wbs {
         let Some(p) = m.by_base.get_mut(&pool) else { continue };
+        // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
+        let lazy = if p.watched { super::lazy::take_lazy(a, n) } else { vec![] };
+        if !lazy.is_empty() {
+            let (buf, off0) = (p.buf.as_ref().map(|b| b.buf).unwrap_or_default(), p.buf_off);
+            let base = p.base;
+            let mut at = a;
+            for &pg in lazy.iter().chain(std::iter::once(&(a + n))) {
+                let end = pg.min(a + n);
+                if end > at {
+                    land(p, at, end - at, unsafe { src.add((at - a) as usize) });
+                }
+                at = (pg + PAGE).min(a + n).max(at);
+            }
+            super::lazy::make_lazy(&lazy, buf, base, off0);
+            continue;
+        }
+        land(p, a, n, src);
+    }
+    WRITEBACK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+}
+
+/// One write-back's bytes into guest memory (pages held on the device are read back first).
+fn land(p: &mut Pool, a: u64, n: u64, src: *const u8) {
+    {
+        super::lazy::touch(a, n);
         let (lo, hi) = page_range(a, n);
         if p.watched {
             if let Some(pages) = watch::take(lo, hi, true) {
@@ -399,7 +480,6 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8)]) {
         }
         WRITEBACK_BYTES.fetch_add(n, Ordering::Relaxed);
     }
-    WRITEBACK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
 /// One line of placement and traffic (with the pacing line).

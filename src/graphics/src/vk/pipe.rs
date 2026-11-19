@@ -91,7 +91,7 @@ impl Key {
 
 pub struct Pipes {
     map: Mutex<HashMap<Key, vk::Pipeline>>,
-    cache: vk::PipelineCache,
+    pub cache: vk::PipelineCache,
     dir: Mutex<Option<PathBuf>>,
     known: Mutex<std::collections::HashSet<Key>>,
     pub created_sync: AtomicU64,
@@ -106,7 +106,7 @@ fn cache_dir() -> Option<PathBuf> {
 impl Pipes {
     pub fn new(d: &super::device::Device) -> Pipes {
         let dir = cache_dir();
-        let data = dir.as_ref().and_then(|p| std::fs::read(p.join("pipeline-cache.bin")).ok()).unwrap_or_default();
+        let data = dir.as_ref().and_then(|p| std::fs::read(p.join("pipeline-cache.bin")).ok()).filter(|data| super::pcache::header_ok(data, &d.props)).unwrap_or_default();
         let ci = vk::PipelineCacheCreateInfo::default().initial_data(&data);
         let cache = unsafe { d.dev.create_pipeline_cache(&ci, None) }
             .or_else(|_| unsafe { d.dev.create_pipeline_cache(&vk::PipelineCacheCreateInfo::default(), None) })
@@ -139,14 +139,9 @@ impl Pipes {
         }
     }
 
-    /// Writes the pipeline cache (at a clean exit, or when the game goes to the background).
+    /// Writes the pipeline cache now (it is also saved incrementally, `pcache`).
     pub fn save(&self, g: &Gpu) {
-        if let Some(d) = self.dir.lock().unwrap().clone() {
-            if let Ok(data) = unsafe { g.dev().get_pipeline_cache_data(self.cache) } {
-                let _ = std::fs::create_dir_all(&d);
-                let _ = std::fs::write(d.join("pipeline-cache.bin"), data);
-            }
-        }
+        super::pcache::save_now(g);
     }
 
     pub fn count(&self) -> usize {
@@ -240,7 +235,15 @@ fn depth_has_depth(f: vk::Format) -> bool {
     f != vk::Format::UNDEFINED && f != vk::Format::S8_UINT
 }
 
+/// `driver_exclusive` (auto = on for Intel, whose driver crashes compiling and drawing at once): pipeline creation and
+/// queue submissions take turns.
+pub static EXCLUSIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+pub fn driver_exclusive(g: &Gpu) -> bool {
+    nxconfig::tristate("driver_exclusive").unwrap_or(g.d.props.vendor_id == 0x8086)
+}
+
 fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, String> {
+    let _x = driver_exclusive(g).then(|| EXCLUSIVE.lock().unwrap());
     let stages: Vec<vk::PipelineShaderStageCreateInfo> = mods
         .iter()
         .map(|m| vk::PipelineShaderStageCreateInfo::default().stage(super::layout::stage_flag(m.stage)).module(m.module).name(&m.entry))
@@ -281,13 +284,16 @@ fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, 
         ci = ci.tessellation_state(&ts);
     }
     let p = unsafe { g.dev().create_graphics_pipelines(g.pipes.cache, &[ci], None) }.map_err(|(_, e)| format!("vkCreateGraphicsPipelines: {e}"))?;
+    super::pcache::note_created(1);
     Ok(p[0])
 }
 
 fn build_compute(g: &Gpu, m: &Module) -> Result<vk::Pipeline, String> {
+    let _x = driver_exclusive(g).then(|| EXCLUSIVE.lock().unwrap());
     let st = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(m.module).name(&m.entry);
     let ci = vk::ComputePipelineCreateInfo::default().stage(st).layout(g.layout.pipeline);
     let p = unsafe { g.dev().create_compute_pipelines(g.pipes.cache, &[ci], None) }.map_err(|(_, e)| format!("vkCreateComputePipelines: {e}"))?;
+    super::pcache::note_created(1);
     Ok(p[0])
 }
 
@@ -308,8 +314,14 @@ impl Gpu {
         if let Some(p) = self.pipes.map.lock().unwrap().get(&key) {
             return Some(*p);
         }
-        match build_gfx(self, k, mods) {
+        let t0 = std::time::Instant::now();
+        let r = build_gfx(self, k, mods);
+        let ns = t0.elapsed().as_nanos() as u64;
+        super::perf::add(super::perf::C::PipeNs, ns);
+        super::perf::max(super::perf::C::PipeMaxNs, ns);
+        match r {
             Ok(p) => {
+                super::perf::inc(super::perf::C::PipesGfx);
                 self.pipes.created_sync.fetch_add(1, Ordering::Relaxed);
                 self.pipes.map.lock().unwrap().insert(key, p);
                 self.pipes.note_key(key);
@@ -326,8 +338,14 @@ impl Gpu {
         if let Some(p) = self.pipes.map.lock().unwrap().get(&key) {
             return Some(*p);
         }
-        match build_compute(self, m) {
+        let t0 = std::time::Instant::now();
+        let r = build_compute(self, m);
+        let ns = t0.elapsed().as_nanos() as u64;
+        super::perf::add(super::perf::C::PipeNs, ns);
+        super::perf::max(super::perf::C::PipeMaxNs, ns);
+        match r {
             Ok(p) => {
+                super::perf::inc(super::perf::C::PipesCompute);
                 self.pipes.created_sync.fetch_add(1, Ordering::Relaxed);
                 self.pipes.map.lock().unwrap().insert(key, p);
                 self.pipes.note_key(key);
@@ -338,6 +356,15 @@ impl Gpu {
                 None
             }
         }
+    }
+}
+
+/// `low_priority_shader_compiler`: the pipeline builder threads run below normal priority.
+fn low_priority() {
+    #[cfg(windows)]
+    if nxconfig::flag("low_priority_shader_compiler") {
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+        unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) };
     }
 }
 
@@ -396,6 +423,7 @@ pub fn prewarm(g: &'static Gpu, threads: usize) -> PrewarmReport {
     for _ in 0..threads.max(1) {
         let (queue, built, skipped, over) = (queue.clone(), built.clone(), skipped.clone(), over.clone());
         hs.push(std::thread::spawn(move || loop {
+            low_priority();
             if g.pipes.stop.load(Ordering::Relaxed) || over.load(Ordering::Relaxed) {
                 return;
             }

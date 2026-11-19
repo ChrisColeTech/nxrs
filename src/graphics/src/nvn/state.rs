@@ -74,6 +74,8 @@ nvn_fns! {
         *o = ms_st::default();
         o.enable = 1;
         o.a2c_dither = 1;
+        // sample locations at the pixel centre (0.5, 0.5), as the driver's defaults
+        o.sl = [0x88; 16];
     }
     fn nvnMultisampleStateSetMultisampleEnable(s: *mut NVNmultisampleState, e: u32) { st::<ms_st>(s).enable = super::b(e) as u8; }
     fn nvnMultisampleStateSetSamples(s: *mut NVNmultisampleState, n: i32) { st::<ms_st>(s).samples = n as u8; }

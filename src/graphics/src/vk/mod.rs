@@ -13,15 +13,21 @@
 //! | `queue` | submissions, the timeline, completion and its CPU-visible effects, queue parking, presents |
 //! | `present` | the host window's swap chain and the pacing log |
 
+pub mod counters;
 pub mod device;
 pub mod exec;
 pub mod image;
 pub mod layout;
+pub mod lazy;
+pub mod live;
 pub mod mem;
+pub mod pcache;
+pub mod perf;
 pub mod pipe;
 pub mod present;
 pub mod queue;
 pub mod shader;
+pub mod shot;
 pub mod tables;
 
 use ash::vk;

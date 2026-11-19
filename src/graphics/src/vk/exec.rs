@@ -64,6 +64,28 @@ pub struct QState {
     in_pass: bool,
     pass_extent: vk::Extent2D,
     pass_formats: ([i32; 8], usize, i32, u8),
+    /// SAMPLES_PASSED counting is on (ResetCounter); the occlusion query open in the current pass
+    vis_on: bool,
+    occl_q: Option<u32>,
+    /// the size of the last pass with colour targets (shadows=0 tells shadow-map passes by a depth-only size of their own)
+    last_color: vk::Extent2D,
+    /// NVN2 push constants: c[24] of the graphics (0) and compute (1) groups
+    push: Box<[[u8; 0x800]; 2]>,
+    /// conditional render: draws and clears go when true
+    render_on: bool,
+    alpha_ref: f32,
+    depth_bounds: (bool, f32, f32),
+    sample_mask: u32,
+    point_size: f32,
+    tess_levels: [f32; 6],
+    provoking_last: bool,
+    vp_swizzle: [u32; 16],
+    tf: [(u64, u64); 4],
+    tf_on: bool,
+    /// graphics program keys bound whose modules the library did not have (the draw waits for the live translator)
+    missing: Vec<(crate::nvn::prog::ShaderKey, u32)>,
+    /// block aliases of compressed targets to copy into their images when the pass ends
+    copyback: Vec<(vk::Image, vk::Image, u32, u32, vk::Extent2D, vk::Extent2D, u32)>,
 }
 
 impl QState {
@@ -124,6 +146,22 @@ impl QState {
             in_pass: false,
             pass_extent: vk::Extent2D::default(),
             pass_formats: ([0; 8], 0, 0, 1),
+            copyback: Vec::new(),
+            vis_on: false,
+            occl_q: None,
+            last_color: vk::Extent2D::default(),
+            missing: Vec::new(),
+            push: Box::new([[0; 0x800]; 2]),
+            render_on: true,
+            alpha_ref: 0.0,
+            depth_bounds: (false, 0.0, 1.0),
+            sample_mask: u32::MAX,
+            point_size: 1.0,
+            tess_levels: [1.0; 6],
+            provoking_last: true,
+            vp_swizzle: [0x0302_0100; 16],
+            tf: [(0, 0); 4],
+            tf_on: false,
         }
     }
 }
@@ -132,11 +170,295 @@ fn barrier(g: &Gpu, sub: &Sub) {
     super::queue::full_barrier(g, sub.main);
 }
 
-fn end_pass(g: &Gpu, sub: &Sub, qs: &mut QState) {
+/// Append counters that are indirect draw arguments (Donkey Kong Bananza's terrain). Every chunk has a 64-byte record
+/// the CPU never touches, one NVNdrawElementsIndirectData, all zero. The depth pre-pass draws the chunk with a
+/// passthrough geometry shader that has the record as a written storage buffer: per visible triangle it adds 3 to
+/// word 0 and stores the indices behind the old count into a second buffer. The shading pass draws that list with
+/// DrawElementsIndirect(arguments = the record). Nothing in the game's command stream or on its CPU writes the record
+/// again, so taken literally the count grows without end and the draw has 0 instances. What a frame needs: a list
+/// holding this frame's triangles, drawn once. So an indirect draw whose arguments a draw's shader wrote as a storage
+/// buffer in the same frame gets one instance when its record says none, and its count goes back to 0 when the next
+/// frame begins. Records written by dispatches or by the CPU are not touched. `NXGFX_APPEND_RESET=0` turns it off.
+mod append {
+    use super::*;
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    struct St {
+        /// address -> the frame a draw last bound it as a written storage buffer
+        bound: HashMap<u64, u64>,
+        /// records in use by indirect draws
+        on: Vec<u64>,
+        started: u64,
+    }
+    static ST: Mutex<Option<St>> = Mutex::new(None);
+
+    fn enabled() -> bool {
+        static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *V.get_or_init(|| std::env::var("NXGFX_APPEND_RESET").as_deref() != Ok("0"))
+    }
+    fn frame() -> u64 {
+        super::super::present::frames() + 2
+    }
+
+    pub fn bound(a: u64) {
+        if !enabled() {
+            return;
+        }
+        let mut g = ST.lock().unwrap();
+        let s = g.get_or_insert_with(|| St { bound: HashMap::new(), on: Vec::new(), started: 0 });
+        if s.bound.len() > 65536 {
+            let f = frame();
+            s.bound.retain(|_, v| *v + 600 >= f);
+        }
+        s.bound.insert(a, frame());
+    }
+
+    fn fill(g: &Gpu, sub: &mut Sub, a: u64, v: u32) {
+        if let Some((b, o, _)) = super::super::mem::resolve(g, sub, a, 4) {
+            unsafe {
+                super::super::queue::full_barrier(g, sub.main);
+                g.dev().cmd_fill_buffer(sub.main, b, o, 4, v);
+                super::super::queue::full_barrier(g, sub.main);
+            }
+            super::super::mem::note_gpu_write(g, sub, a, 4);
+        }
+    }
+
+    /// An indirect draw with its arguments at `ind` (inside the pass: fills end and reopen it).
+    pub fn draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, ind: u64, indexed: bool) {
+        if !enabled() {
+            return;
+        }
+        let f = frame();
+        let (resets, fresh) = {
+            let mut gl = ST.lock().unwrap();
+            let Some(s) = gl.as_mut() else { return };
+            let mut resets = Vec::new();
+            if s.started != f {
+                s.started = f;
+                let bound = &s.bound;
+                s.on.retain(|a| bound.get(a).is_some_and(|&b| b + 600 >= f));
+                resets = s.on.clone();
+            }
+            let recent = ind != 0 && s.bound.get(&ind).is_some_and(|&b| b + 1 >= f);
+            let fresh = recent && !s.on.contains(&ind) && s.on.len() < 8192;
+            if fresh {
+                s.on.push(ind);
+            }
+            (resets, fresh)
+        };
+        if resets.is_empty() && !fresh {
+            return;
+        }
+        // fills cannot run inside a pass: the draw opens its pass again
+        end_pass(g, sub, qs);
+        for a in resets {
+            fill(g, sub, a, 0);
+            super::super::perf::inc(super::super::perf::C::AppendReset);
+        }
+        if fresh {
+            // SAFETY: the record in guest memory (the CPU's view of the instance count)
+            let inst = unsafe { core::ptr::read_unaligned((ind + 4) as *const u32) };
+            if inst == 0 {
+                fill(g, sub, ind + 4, 1);
+            }
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                crate::vklog!("append counters: a draw's shader appends to the arguments of a later indirect {}draw ({ind:#x}); such counts start each frame at 0, and a record with 0 instances draws once (NXGFX_APPEND_RESET=0 turns it off)", if indexed { "indexed " } else { "" });
+            }
+        }
+    }
+}
+
+/// Pass dumps (diagnostics): `NXGFX_DUMP_AT_S=<s>[,<s>...]` (or the control command `passdump`): at each moment the
+/// colour targets of one frame's passes as they leave them, `<dir>/pass-<frame>-<n>-<target>-<w>x<h>-<format>.png`
+/// (`NXGFX_DUMP_DIR`, default `captures`), with one log line per pass (its draws, targets, formats).
+pub mod passdump {
+    use super::*;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    static FRAME: AtomicU64 = AtomicU64::new(0); // the frame being dumped (0: none)
+    static PASS: AtomicU64 = AtomicU64::new(0);
+    static REQ: Mutex<Vec<f64>> = Mutex::new(Vec::new());
+    static INIT: std::sync::Once = std::sync::Once::new();
+
+    pub fn request_now() {
+        REQ.lock().unwrap().push(0.0);
+    }
+
+    /// Every present: starts a dump frame when one is due.
+    pub fn frame(n: u64, secs: f64) {
+        INIT.call_once(|| {
+            if let Ok(v) = std::env::var("NXGFX_DUMP_AT_S") {
+                REQ.lock().unwrap().extend(v.split(',').filter_map(|x| x.trim().parse::<f64>().ok()));
+            }
+        });
+        if FRAME.load(Ordering::Relaxed) != 0 && FRAME.load(Ordering::Relaxed) + 1 <= n {
+            FRAME.store(0, Ordering::Relaxed);
+        }
+        let mut r = REQ.lock().unwrap();
+        if let Some(i) = r.iter().position(|&t| t <= secs) {
+            r.remove(i);
+            FRAME.store(n + 1, Ordering::Relaxed);
+            PASS.store(0, Ordering::Relaxed);
+            crate::vklog!("pass dump: frame {}", n + 1);
+        }
+    }
+
+    fn dir() -> std::path::PathBuf {
+        std::env::var("NXGFX_DUMP_DIR").map(Into::into).unwrap_or_else(|_| "captures".into())
+    }
+
+    pub fn pass_end(g: &Gpu, sub: &mut Sub, qs: &QState) {
+        let f = FRAME.load(Ordering::Relaxed);
+        if f == 0 || super::super::present::frames() + 1 != f {
+            return;
+        }
+        let p = PASS.fetch_add(1, Ordering::Relaxed);
+        let mut desc = vec![];
+        for i in 0..qs.rt_n {
+            let Some(t) = qs.rt[i].tex else { continue };
+            let Some(tf) = crate::tex::format::tex_format(t.d.format) else { continue };
+            desc.push(format!("{i}:{:?} {}x{}", tf.vk, t.d.width, t.d.height));
+            let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(t.d.format);
+            if bw != 1 || bh != 1 || bpb == 0 || !matches!(tf.kind, Kind::Float | Kind::Uint | Kind::Sint) {
+                continue;
+            }
+            let v = qs.rt[i].view;
+            let level = v.filter(|v| v.bits & VW_LEVELS != 0).map(|v| v.base_level as u32).unwrap_or(0);
+            let layer = v.filter(|v| v.bits & VW_LAYERS != 0).map(|v| v.min_layer as u32).unwrap_or(0);
+            let (w, h) = ((t.d.width >> level).max(1), (t.d.height >> level).max(1));
+            let n = w as u64 * h as u64 * bpb as u64;
+            let img = { g.images.lock().unwrap().by_serial.get(&t.serial).map(|im| im.image) };
+            let Some(img) = img else { continue };
+            let Ok(buf) = g.buffer(n, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "pass dump") else { continue };
+            let r = vk::BufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: level, base_array_layer: layer, layer_count: 1 },
+                image_offset: vk::Offset3D::default(),
+                image_extent: vk::Extent3D { width: w, height: h, depth: 1 },
+            };
+            unsafe { g.dev().cmd_copy_image_to_buffer(sub.main, img, vk::ImageLayout::GENERAL, buf.buf, &[r]) };
+            super::super::queue::full_barrier(g, sub.main);
+            let ptr = buf.ptr as usize;
+            let path = dir().join(format!("pass-{f:06}-{p:03}-t{i}-{w}x{h}-{:?}.png", tf.vk));
+            let fmt = tf.vk;
+            sub.transient.push(buf);
+            sub.post.push(Post::Callback(Box::new(move |_g: &Gpu| {
+                let np = (w * h) as usize;
+                // SAFETY: the read-back buffer, kept until after this callback
+                let src = unsafe { core::slice::from_raw_parts(ptr as *const u8, n as usize) };
+                let mut out = vec![0u8; np * 4];
+                if super::super::shot::to_rgba8(fmt, src, np, &mut out) {
+                    let _ = std::fs::create_dir_all(dir());
+                    let _ = super::super::shot::png_write(&path, &out, w, h);
+                }
+            })));
+        }
+        let ds = qs.rt_depth.tex.map(|t| format!(" depth {}x{} fmt {:#x}", t.d.width, t.d.height, t.d.format)).unwrap_or_default();
+        crate::vklog!("pass dump {f}/{p}: extent {}x{}, targets [{}]{ds}", qs.pass_extent.width, qs.pass_extent.height, desc.join(", "));
+    }
+}
+
+/// MultiDraw{Arrays,Elements}IndirectCount: Vulkan's indirect draws with a count the GPU reads.
+fn multi_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_multi_draw) {
+    if m.max <= 0 {
+        return;
+    }
+    let indexed = m.itype >= 0;
+    let base = p_draw { prim: m.prim, instances: 1, ..Default::default() };
+    if !draw_setup(g, sub, qs, base.prim, 0) {
+        return;
+    }
+    let rec_n = if indexed { 20 } else { 16 };
+    let stride = if m.stride > 0 { m.stride as u32 } else { rec_n };
+    let span = stride as u64 * (m.max as u64 - 1) + rec_n as u64;
+    let (Some((ib, io, _)), Some((cb, co, _))) = (super::mem::resolve(g, sub, m.ind, span), super::mem::resolve(g, sub, m.cnt, 4)) else { return };
+    let dev = g.dev();
+    unsafe {
+        if indexed {
+            let ity = match m.itype {
+                index_type::U8 if g.d.caps.index_u8 => vk::IndexType::UINT8_EXT,
+                index_type::U16 => vk::IndexType::UINT16,
+                _ => vk::IndexType::UINT32,
+            };
+            let Some((xb, xo, _)) = super::mem::resolve(g, sub, m.ibuf, 1) else { return };
+            dev.cmd_bind_index_buffer(sub.main, xb, xo, ity);
+            dev.cmd_draw_indexed_indirect_count(sub.main, ib, io, cb, co, m.max as u32, stride);
+        } else {
+            dev.cmd_draw_indirect_count(sub.main, ib, io, cb, co, m.max as u32, stride);
+        }
+    }
+}
+
+/// DrawTexture: the texture's source rectangle drawn into the destination rectangle of colour target 0 (a filtered
+/// blit; NVN draws it without the bound program, depth test or blending).
+fn draw_texture(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: crate::nvn::cmd2::p_draw_tex) {
+    if !qs.render_on {
+        return;
+    }
+    let (tb, _) = pool_bases(qs);
+    let id = (d.handle & 0xfffff) as i32 + tb;
+    let Some((serial, _)) = g.tables.tex_at(id) else {
+        crate::log::red_once("DrawTexture of an unregistered texture");
+        return;
+    };
+    let Some(Rt { tex: Some(dst), view }) = qs.rt.first().copied() else { return };
+    end_pass(g, sub, qs);
+    let src_img = {
+        let mut imgs = g.images.lock().unwrap();
+        g.prepare_image(&mut imgs, serial, sub);
+        imgs.by_serial.get(&serial).map(|im| (im.image, im.tf))
+    };
+    let Some((si, stf)) = src_img else { return };
+    let Some((di, _, _, _)) = target_image(g, sub, &dst) else { return };
+    let level = view.filter(|v| v.bits & VW_LEVELS != 0).map(|v| v.base_level as u32).unwrap_or(0);
+    let o = |v: [f32; 4], i: usize| vk::Offset3D { x: v[i] as i32, y: v[i + 1] as i32, z: i as i32 / 2 };
+    let r = vk::ImageBlit {
+        src_subresource: vk::ImageSubresourceLayers { aspect_mask: super::image::upload_aspect(&stf), mip_level: 0, base_array_layer: 0, layer_count: 1 },
+        src_offsets: [o(d.src, 0), o(d.src, 2)],
+        dst_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: level, base_array_layer: 0, layer_count: 1 },
+        dst_offsets: [o(d.dst, 0), o(d.dst, 2)],
+    };
+    unsafe { g.dev().cmd_blit_image(sub.main, si, vk::ImageLayout::GENERAL, di, vk::ImageLayout::GENERAL, &[r], vk::Filter::LINEAR) };
+    barrier(g, sub);
+}
+
+/// Closes the open occlusion query: its samples join the sum at completion.
+fn end_query(g: &Gpu, sub: &mut Sub, qs: &mut QState) {
+    if let Some(q) = qs.occl_q.take() {
+        unsafe { g.dev().cmd_end_query(sub.main, sub.occl, q) };
+        sub.post.push(Post::Occl { q });
+    }
+}
+
+fn end_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) {
+    end_query(g, sub, qs);
     if qs.in_pass {
         unsafe { g.dev().cmd_end_rendering(sub.main) };
         qs.in_pass = false;
         barrier(g, sub);
+        passdump::pass_end(g, sub, qs);
+        // compressed targets drawn through a block alias: the texels become the blocks
+        // (through a buffer: an image copy cannot name a level smaller than one block, a buffer copy can)
+        for (src, dst, level, layer, e, texels, bpb) in qs.copyback.drain(..) {
+            let size = e.width as u64 * e.height as u64 * bpb as u64;
+            let Ok(tmp) = g.buffer(size, vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuOnly, "block copy") else { continue };
+            let sub_l = |mip, layer| vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: mip, base_array_layer: layer, layer_count: 1 };
+            let up = vk::BufferImageCopy { buffer_offset: 0, buffer_row_length: 0, buffer_image_height: 0, image_subresource: sub_l(0, 0), image_offset: vk::Offset3D::default(), image_extent: vk::Extent3D { width: e.width, height: e.height, depth: 1 } };
+            let down = vk::BufferImageCopy { image_subresource: sub_l(level, layer), image_extent: vk::Extent3D { width: texels.width, height: texels.height, depth: 1 }, ..up };
+            unsafe {
+                g.dev().cmd_copy_image_to_buffer(sub.main, src, vk::ImageLayout::GENERAL, tmp.buf, &[up]);
+                super::queue::full_barrier(g, sub.main);
+                g.dev().cmd_copy_buffer_to_image(sub.main, tmp.buf, dst, vk::ImageLayout::GENERAL, &[down]);
+            }
+            barrier(g, sub);
+            sub.transient.push(tmp);
+        }
     }
 }
 
@@ -165,15 +487,84 @@ fn source_image(g: &Gpu, sub: &mut Sub, t: &tex_t) -> Option<(vk::Image, format:
     let im = &imgs.by_serial[&t.serial];
     Some((im.image, im.tf, im.extent))
 }
-fn attach_view(g: &Gpu, sub: &mut Sub, t: &tex_t, v: Option<&view_t>) -> Option<(vk::ImageView, vk::Format, vk::Extent2D, vk::SampleCountFlags, Kind)> {
+fn attach_view(g: &Gpu, sub: &mut Sub, qs: &mut QState, t: &tex_t, v: Option<&view_t>) -> Option<(vk::ImageView, vk::Format, vk::Extent2D, vk::SampleCountFlags, Kind)> {
     let _ = target_image(g, sub, t)?;
     let mut imgs = g.images.lock().unwrap();
     let im = imgs.by_serial.get_mut(&t.serial)?;
     let lvl = v.filter(|v| v.bits & VW_LEVELS != 0).map(|v| v.base_level as u32).unwrap_or(0);
+    let layer = v.filter(|v| v.bits & VW_LAYERS != 0).map(|v| v.min_layer as u32).unwrap_or(0);
     let e = vk::Extent2D { width: (im.extent.width >> lvl).max(1), height: (im.extent.height >> lvl).max(1) };
-    let (fmt, samples, kind) = (im.format, im.samples, im.tf.kind);
+    let fmt = g.raw_view_format(im, v);
+    let (samples, kind) = (im.samples, im.tf.kind);
+    // a compressed texture rendered through an uncompressed view of its block size (a game encoding blocks on the
+    // GPU): Vulkan cannot render into a compressed image, so the pass draws into an image of the view's format, one
+    // texel per block, copied into the blocks at the end of the pass
+    if !im.usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT) && fmt != im.format {
+        let (_, bw, bh) = crate::tex::layout::fmt_bpb(t.d.format);
+        if bw > 1 || bh > 1 || im.bc7 {
+            let (bw, bh) = if im.bc7 { (4, 4) } else { (bw, bh) };
+            let be = vk::Extent2D { width: e.width.div_ceil(bw), height: e.height.div_ceil(bh) };
+            let dst = im.image;
+            let im_bc7 = im.bc7;
+            drop(imgs);
+            let (img, view) = block_alias(g, sub, fmt, be)?;
+            let bpb = crate::tex::layout::fmt_bpb(t.d.format).0.max(if im_bc7 { 16 } else { 0 });
+            qs.copyback.push((img, dst, lvl, layer, be, e, bpb));
+            return Some((view, fmt, be, samples, Kind::Float));
+        }
+    }
+    let fmt = g.view_format(im, v);
     let view = g.image_view(im, v, true)?;
     Some((view, fmt, e, samples, kind))
+}
+
+/// An uncompressed image standing in for a compressed render target (one texel per block), kept per format and size.
+fn block_alias(g: &Gpu, sub: &mut Sub, fmt: vk::Format, e: vk::Extent2D) -> Option<(vk::Image, vk::ImageView)> {
+    type Alias = (vk::Format, vk::Extent2D, vk::Image, vk::ImageView);
+    static ALIASES: std::sync::Mutex<Vec<Alias>> = std::sync::Mutex::new(Vec::new());
+    let mut a = ALIASES.lock().unwrap();
+    if let Some(x) = a.iter().find(|x| x.0 == fmt && x.1 == e) {
+        return Some((x.2, x.3));
+    }
+    let ci = vk::ImageCreateInfo::default()
+        .image_type(vk::ImageType::TYPE_2D)
+        .format(fmt)
+        .extent(vk::Extent3D { width: e.width, height: e.height, depth: 1 })
+        .mip_levels(1)
+        .array_layers(1)
+        .samples(vk::SampleCountFlags::TYPE_1)
+        .usage(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
+        .initial_layout(vk::ImageLayout::UNDEFINED);
+    let img = unsafe { g.dev().create_image(&ci, None) }.ok()?;
+    let req = unsafe { g.dev().get_image_memory_requirements(img) };
+    let al = g
+        .alloc
+        .lock()
+        .unwrap()
+        .allocate(&gpu_allocator::vulkan::AllocationCreateDesc {
+            name: "block alias",
+            requirements: req,
+            location: MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: gpu_allocator::vulkan::AllocationScheme::GpuAllocatorManaged,
+        })
+        .ok()?;
+    unsafe { g.dev().bind_image_memory(img, al.memory(), al.offset()) }.ok()?;
+    std::mem::forget(al); // kept for the process (one per format and size)
+    let range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+    let vci = vk::ImageViewCreateInfo::default().image(img).view_type(vk::ImageViewType::TYPE_2D).format(fmt).subresource_range(range);
+    let view = unsafe { g.dev().create_image_view(&vci, None) }.ok()?;
+    let b = [vk::ImageMemoryBarrier2::default()
+        .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+        .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+        .old_layout(vk::ImageLayout::UNDEFINED)
+        .new_layout(vk::ImageLayout::GENERAL)
+        .image(img)
+        .subresource_range(range)];
+    unsafe { g.dev().cmd_pipeline_barrier2(sub.pre, &vk::DependencyInfo::default().image_memory_barriers(&b)) };
+    crate::vklog!("compressed render target: an uncompressed {fmt:?} {}x{} stands in for its blocks", e.width, e.height);
+    a.push((fmt, e, img, view));
+    Some((img, view))
 }
 
 fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
@@ -186,7 +577,7 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
     let mut samples = vk::SampleCountFlags::TYPE_1;
     for i in 0..qs.rt_n {
         let r = qs.rt[i];
-        let a = r.tex.and_then(|t| attach_view(g, sub, &t, r.view.as_ref()));
+        let a = r.tex.and_then(|t| attach_view(g, sub, qs, &t, r.view.as_ref()));
         match a {
             Some((view, fmt, e, s, _)) => {
                 colors.push(
@@ -207,7 +598,8 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
     let mut depth = None;
     let mut dfmt = 0;
     if let Some(t) = qs.rt_depth.tex {
-        if let Some((view, fmt, e, s, kind)) = attach_view(g, sub, &t, qs.rt_depth.view.as_ref()) {
+        let dv = qs.rt_depth.view;
+        if let Some((view, fmt, e, s, kind)) = attach_view(g, sub, qs, &t, dv.as_ref()) {
             depth = Some((view, kind));
             dfmt = fmt.as_raw();
             extent.width = extent.width.min(e.width);
@@ -237,8 +629,13 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
         }
     }
     unsafe { g.dev().cmd_begin_rendering(sub.main, &ri) };
+    super::perf::inc(super::perf::C::Passes);
+    super::perf::render_size(extent.width, extent.height, depth.is_some());
     qs.in_pass = true;
     qs.pass_extent = extent;
+    if formats[..qs.rt_n].iter().any(|&f| f != 0) {
+        qs.last_color = extent;
+    }
     qs.pass_formats = (formats, qs.rt_n, dfmt, samples.as_raw() as u8);
     true
 }
@@ -434,7 +831,10 @@ fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::Imag
                 (a, b) if a == b => true,
                 (target::T2D | target::RECTANGLE, target::T2D) => true,
                 (target::T2D | target::T2D_ARRAY | target::CUBE | target::CUBE_ARRAY | target::RECTANGLE, target::T2D_ARRAY | target::T2D) => true,
-                (target::CUBE_ARRAY, target::CUBE) => true,
+                (target::CUBE_ARRAY, target::CUBE) | (target::CUBE, target::CUBE_ARRAY) => true,
+                // a multisampled sampler type over a single-sample texture: the view type is the same in Vulkan
+                (target::T2D | target::T2D_MS, target::T2D_MS | target::T2D) => true,
+                (target::T2D_ARRAY | target::T2D_MS_ARRAY, target::T2D_MS_ARRAY | target::T2D_ARRAY) => true,
                 _ => false,
             };
             if compatible && (!storage || im.usage.contains(vk::ImageUsageFlags::STORAGE)) {
@@ -442,12 +842,19 @@ fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::Imag
                     v.bits |= VW_TARGET;
                     v.target = want as u8;
                 }
-                if let Some(view) = g.image_view(im, Some(&v), false) {
+                let view = if storage { g.storage_view(im, Some(&v)) } else { g.image_view(im, Some(&v), false) };
+                if let Some(view) = view {
                     return view;
                 }
             } else {
                 crate::log::red_once(&format!("texture ID {id}: target {base_target} bound where the shader samples target {want}"));
             }
+        }
+    }
+    {
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 16 {
+            crate::vklog!("texture ID {id} (target {want}{}) has no registered texture: a zero stand-in is bound", if storage { ", image" } else { "" });
         }
     }
     dummy_view(g, sub, want, storage)
@@ -549,7 +956,7 @@ fn support_bytes(w: f32, h: f32) -> Vec<u8> {
 /// The descriptor set of one stage of the draw or dispatch.
 fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3], base_instance: u32) -> vk::DescriptorSet {
     let st = m.stage as usize;
-    let set = sub.alloc_set(g, g.layout.stage_sets[st]);
+
     let zero = zero_buffer(g, sub);
     let max_ubo = (g.d.props.limits.max_uniform_buffer_range as u64).min(65536);
     let c0 = c0_bytes(qs, st, dispatch, base_instance);
@@ -557,6 +964,7 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
     let (tb, sb) = pool_bases(qs);
     let mut bufs: Vec<(u32, vk::DescriptorType, vk::DescriptorBufferInfo)> = Vec::new();
     let mut imgs: Vec<(u32, vk::DescriptorType, vk::DescriptorImageInfo)> = Vec::new();
+    let mut tbufs: Vec<(u32, vk::DescriptorType, vk::BufferView)> = Vec::new();
     for (b, r) in &m.res {
         let b = *b;
         match r {
@@ -582,6 +990,17 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                         let (buf, off) = sub.stage_bytes(g, &c2);
                         vk::DescriptorBufferInfo { buffer: buf, offset: off, range: DRV_SIZE as u64 }
                     }
+                    24 => {
+                        let grp = (st == 5) as usize;
+                        let (buf, off) = sub.stage_bytes(g, &qs.push[grp][..]);
+                        vk::DescriptorBufferInfo { buffer: buf, offset: off, range: 0x800 }
+                    }
+                    k @ 25..=29 => {
+                        // graphics stage i reads its push block 1 + i through its own bank (NVN2)
+                        let b = (k - 24) as usize * 0x100;
+                        let (buf, off) = sub.stage_bytes(g, &qs.push[0][b..b + 0x100]);
+                        vk::DescriptorBufferInfo { buffer: buf, offset: off, range: 0x100 }
+                    }
                     k @ 3..=18 => {
                         let (a, n) = qs.ubo[st][(k - 3) as usize];
                         match if a != 0 && n != 0 { super::mem::resolve(g, sub, a, n.min(max_ubo)) } else { None } {
@@ -599,7 +1018,21 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                 bufs.push((b, vk::DescriptorType::UNIFORM_BUFFER, info));
             }
             Res::Sbuf { cb_slot, cb_off, written } => {
-                let (a, n) = bank_u64(qs, st, m, &c0, &c2, *cb_slot, *cb_off);
+                let (a, mut n) = bank_u64(qs, st, m, &c0, &c2, *cb_slot, *cb_off);
+                // A buffer bound with size 0 is still the memory at its address: an NVN shader holds the address and
+                // reads and writes through it, the size is only what the driver tells it. Donkey Kong Bananza binds the
+                // list its depth-sampling dispatch appends to this way. It runs to the end of its pool, at most 1 MB.
+                if a != 0 && n == 0 {
+                    n = super::mem::room(a).min(1 << 20);
+                    super::perf::inc(super::perf::C::SbufSize0);
+                    static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                    if n > 0 && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                        crate::vklog!("a storage buffer bound with size 0 ({a:#x}): bound to the end of its memory pool, {n} bytes (later ones are not logged)");
+                    }
+                }
+                if *written && st < 5 && a != 0 {
+                    append::bound(a);
+                }
                 let info = match if a != 0 && n != 0 { super::mem::resolve(g, sub, a, n) } else { None } {
                     Some((buf, off, _)) => {
                         if *written {
@@ -616,13 +1049,22 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
             }
             Res::Tex { handle, cbuf_slot, ty } | Res::Img { handle, cbuf_slot, ty } => {
                 let is_img = matches!(r, Res::Img { .. });
-                if *ty == 2 {
-                    crate::log::red_once("buffer textures are not bound yet");
-                    continue;
-                }
                 let word = bank_word(qs, st, m, &c0, &c2, *cbuf_slot, handle & 0x3fff);
                 let kind = handle >> 28;
                 let tid = (word & 0xfffff) as i32 + tb;
+                if *ty == 2 {
+                    // a buffer texture / buffer image: a texel buffer view over its memory
+                    let dt = if is_img { vk::DescriptorType::STORAGE_TEXEL_BUFFER } else { vk::DescriptorType::UNIFORM_TEXEL_BUFFER };
+                    if let Some(t) = g.tables.buf_tex_at(tid) {
+                        if let Some(v) = g.texel_view(sub, &t, is_img) {
+                            if is_img {
+                                super::mem::note_gpu_write(g, sub, t.mem as u64, t.d.width as u64 * crate::tex::layout::fmt_bpb(t.d.format).0 as u64);
+                            }
+                            tbufs.push((b, dt, v));
+                        }
+                    }
+                    continue;
+                }
                 let sid = match kind {
                     0 => (word >> 20) as i32,
                     1 => (bank_word(qs, st, m, &c0, &c2, *cbuf_slot, handle >> 14 & 0x3fff) >> 20) as i32,
@@ -643,11 +1085,37 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
             Res::Pool => {}
         }
     }
+    // the same writes for the same stage layout earlier in this submission: that set is bound again
+    let mut key: Vec<u8> = Vec::with_capacity(16 + 32 * (bufs.len() + imgs.len() + tbufs.len()));
+    key.extend_from_slice(&(st as u64).to_le_bytes());
+    for (b, ty, i) in &bufs {
+        key.extend_from_slice(&[*b as u8, ty.as_raw() as u8]);
+        key.extend_from_slice(&vk::Handle::as_raw(i.buffer).to_le_bytes());
+        key.extend_from_slice(&i.offset.to_le_bytes());
+        key.extend_from_slice(&i.range.to_le_bytes());
+    }
+    for (b, ty, i) in &imgs {
+        key.extend_from_slice(&[*b as u8, ty.as_raw() as u8]);
+        key.extend_from_slice(&vk::Handle::as_raw(i.image_view).to_le_bytes());
+        key.extend_from_slice(&vk::Handle::as_raw(i.sampler).to_le_bytes());
+    }
+    for (b, ty, v) in &tbufs {
+        key.extend_from_slice(&[*b as u8, ty.as_raw() as u8]);
+        key.extend_from_slice(&vk::Handle::as_raw(*v).to_le_bytes());
+    }
+    let kh = super::queue::memo_hash(&key);
+    if let Some(&set) = sub.memo_sets.get(&kh) {
+        return set;
+    }
+    let set = sub.alloc_set(g, g.layout.stage_sets[st]);
+    super::perf::inc(super::perf::C::DescSets);
+    sub.memo_sets.insert(kh, set);
     let mut writes: Vec<vk::WriteDescriptorSet> = bufs
         .iter()
         .map(|(b, ty, i)| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(*b).descriptor_type(*ty).buffer_info(std::slice::from_ref(i)))
         .collect();
     writes.extend(imgs.iter().map(|(b, ty, i)| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(*b).descriptor_type(*ty).image_info(std::slice::from_ref(i))));
+    writes.extend(tbufs.iter().map(|(b, ty, v)| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(*b).descriptor_type(*ty).texel_buffer_view(std::slice::from_ref(v))));
     unsafe { g.dev().update_descriptor_sets(&writes, &[]) };
     set
 }
@@ -677,14 +1145,85 @@ fn bind_sets(g: &Gpu, sub: &mut Sub, qs: &QState, mods: &[Arc<Module>], bp: vk::
     }
 }
 
+/// Alpha to coverage as the game sets it; the control command `a2c 0` (or `NXGFX_A2C=0`) turns it off live
+/// (diagnostics: dithered foliage and hair).
+pub static A2C: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// `fps_target`'s frame skip (nxconfig), read again when the settings change.
+fn frame_skip() -> u32 {
+    use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+    static GEN: AtomicU64 = AtomicU64::new(0);
+    static V: AtomicU32 = AtomicU32::new(0);
+    let g = nxconfig::generation();
+    if GEN.swap(g, Ordering::Relaxed) != g {
+        V.store(nxconfig::frame_skip(), Ordering::Relaxed);
+    }
+    V.load(Ordering::Relaxed)
+}
+
+/// The `shadows` option (nxconfig), read again when the settings change.
+fn shadows_on() -> bool {
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+    static GEN: AtomicU64 = AtomicU64::new(0);
+    static ON: AtomicBool = AtomicBool::new(true);
+    let g = nxconfig::generation();
+    if GEN.swap(g, Ordering::Relaxed) != g {
+        ON.store(nxconfig::flag("shadows"), Ordering::Relaxed);
+    }
+    ON.load(Ordering::Relaxed)
+}
+
 /// Everything a draw needs bound; false when it cannot be drawn (it is skipped).
 fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instance: u32) -> bool {
+    if !qs.missing.is_empty() {
+        // shaders the build did not translate: wait for the live translator (once per set), then bind what came
+        let keys: Vec<_> = qs.missing.iter().map(|m| m.0).collect();
+        let dev = g.dev();
+        super::live::wait_for(&keys, || keys.iter().all(|k| g.shaders.get_ex(dev, k, true).is_some()));
+        let missing = std::mem::take(&mut qs.missing);
+        for (k, stages) in missing {
+            match g.shaders.get(dev, &k) {
+                Some(m) if stages & (1 << m.stage) != 0 => {
+                    let s = m.stage as usize;
+                    qs.prog[s] = Some(m);
+                }
+                Some(_) => {}
+                None => qs.missing.push((k, stages)),
+            }
+        }
+    }
     let Some(vs) = qs.prog[0].clone() else {
         crate::log::red_once("draw with no vertex shader bound");
+        super::perf::inc(super::perf::C::DrawsSkipped);
+        super::perf::inc(super::perf::C::SkipNoShader);
         return false;
     };
     if !begin_pass(g, sub, qs) {
+        super::perf::inc(super::perf::C::DrawsSkipped);
+        super::perf::inc(super::perf::C::SkipNoTarget);
         return false;
+    }
+    if !qs.render_on {
+        super::perf::inc(super::perf::C::DrawsSkipped);
+        return false;
+    }
+    // fps_target 30 / 20: the game keeps its 60 steps a second, only every 2nd / 3rd frame is drawn
+    let skip = frame_skip();
+    if skip > 0 && super::present::frames() % (skip as u64 + 1) != 0 {
+        super::perf::inc(super::perf::C::DrawsSkipped);
+        return false;
+    }
+    // shadows=0: a depth-only pass of a size other than the last colour pass's is a shadow map; its draws are skipped
+    if !shadows_on() && qs.pass_formats.0[..qs.pass_formats.1].iter().all(|&f| f == 0) && qs.pass_formats.2 != 0 && qs.pass_extent != qs.last_color {
+        super::perf::inc(super::perf::C::DrawsSkipped);
+        return false;
+    }
+    if qs.vis_on && qs.occl_q.is_none() && sub.occl_n < 256 {
+        let q = sub.occl_n;
+        sub.occl_n += 1;
+        let flags = if g.d.caps.occlusion_precise { vk::QueryControlFlags::PRECISE } else { vk::QueryControlFlags::empty() };
+        unsafe { g.dev().cmd_begin_query(sub.main, sub.occl, q, flags) };
+        qs.occl_q = Some(q);
     }
     let mods: Vec<Arc<Module>> = [0usize, 1, 2, 3, 4].iter().filter_map(|&s| qs.prog[s].clone()).collect();
     let mut key = super::pipe::GfxKey::default();
@@ -696,7 +1235,12 @@ fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instan
     key.ncolor = n as u8;
     key.depth = dfmt;
     key.samples = samples;
-    let Some(pipe) = g.gfx_pipeline(&key, &mods) else { return false };
+    let Some(pipe) = g.gfx_pipeline(&key, &mods) else {
+        super::perf::inc(super::perf::C::DrawsSkipped);
+        super::perf::inc(super::perf::C::SkipNoPipeline);
+        return false;
+    };
+    super::perf::inc(super::perf::C::Draws);
     let dev = g.dev();
     let cb = sub.main;
     unsafe { dev.cmd_bind_pipeline(cb, vk::PipelineBindPoint::GRAPHICS, pipe) };
@@ -730,8 +1274,8 @@ fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instan
         dev.cmd_set_depth_bias_enable(cb, off_on);
         dev.cmd_set_depth_bias(cb, qs.poly_off[1], qs.poly_off[2], qs.poly_off[0]);
         dev.cmd_set_blend_constants(cb, &qs.blend_color);
-        dev.cmd_set_depth_bounds(cb, 0.0, 1.0);
-        dev.cmd_set_depth_bounds_test_enable(cb, false);
+        dev.cmd_set_depth_bounds(cb, qs.depth_bounds.1.clamp(0.0, 1.0), qs.depth_bounds.2.clamp(0.0, 1.0));
+        dev.cmd_set_depth_bounds_test_enable(cb, qs.depth_bounds.0 && g.d.caps.depth_bounds);
         for (i, f) in [vk::StencilFaceFlags::FRONT, vk::StencilFaceFlags::BACK].iter().enumerate() {
             dev.cmd_set_stencil_compare_mask(cb, *f, qs.stencil[i][0]);
             dev.cmd_set_stencil_write_mask(cb, *f, qs.stencil[i][1]);
@@ -781,10 +1325,10 @@ fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instan
             e3.cmd_set_rasterization_samples(cb, sflag);
         }
         if caps.eds3_sample_mask {
-            e3.cmd_set_sample_mask(cb, sflag, &[u32::MAX]);
+            e3.cmd_set_sample_mask(cb, sflag, &[qs.sample_mask]);
         }
         if caps.eds3_a2c {
-            e3.cmd_set_alpha_to_coverage_enable(cb, qs.ms.a2c != 0);
+            e3.cmd_set_alpha_to_coverage_enable(cb, qs.ms.a2c != 0 && A2C.load(std::sync::atomic::Ordering::Relaxed));
         }
         if caps.eds3_logic_en {
             e3.cmd_set_logic_op_enable(cb, qs.color.logic_op() != logic_op::COPY);
@@ -810,7 +1354,10 @@ fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instan
                     }
                 })
                 .collect();
-            let wm: Vec<vk::ColorComponentFlags> = (0..n).map(|i| vk::ColorComponentFlags::from_raw(qs.chmask >> (4 * i) & 0xf)).collect();
+            // the channel mask, and only the components the pixel shader's output map says it writes (a component it does
+            // not write keeps the target's value, as on the GPU: the translator stores nothing there)
+            let omap = qs.prog[1].as_ref().and_then(|m| m.omap).unwrap_or(u32::MAX);
+            let wm: Vec<vk::ColorComponentFlags> = (0..n).map(|i| vk::ColorComponentFlags::from_raw(qs.chmask >> (4 * i) & omap >> (4 * i) & 0xf)).collect();
             e3.cmd_set_color_blend_enable(cb, 0, &en);
             e3.cmd_set_color_blend_equation(cb, 0, &eq);
             e3.cmd_set_color_write_mask(cb, 0, &wm);
@@ -902,6 +1449,7 @@ fn quads_indices(n: u32, src: Option<(&[u8], i32)>) -> Vec<u32> {
 
 fn draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw) {
     let inst = if d.instances <= 0 { 1 } else { d.instances as u32 };
+    append::draw(g, sub, qs, d.ind, false);
     if !draw_setup(g, sub, qs, d.prim, d.base_instance as u32) {
         return;
     }
@@ -935,6 +1483,7 @@ fn draw_idx(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw_idx) {
         index_type::U16 => 2,
         _ => 4,
     };
+    append::draw(g, sub, qs, d.ind, true);
     if !draw_setup(g, sub, qs, d.prim, d.base_instance as u32) {
         return;
     }
@@ -998,6 +1547,7 @@ fn dispatch(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
         return;
     };
     let Some(pipe) = g.compute_pipeline(&cs) else { return };
+    super::perf::inc(super::perf::C::Dispatches);
     unsafe { g.dev().cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe) };
     bind_sets(g, sub, qs, std::slice::from_ref(&cs), vk::PipelineBindPoint::COMPUTE, [d.x as u32, d.y as u32, d.z as u32], 0);
     push_constants(g, sub, qs, false);
@@ -1136,6 +1686,7 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
             }
         }
         op::CLEAR_COLOR => {
+            super::perf::inc(super::perf::C::Clears);
             let c: p_clear_color = rd_payload(rec);
             let i = c.index.clamp(0, 7) as usize;
             if i >= qs.rt_n || qs.rt[i].tex.is_none() || !begin_pass(g, sub, qs) {
@@ -1157,6 +1708,7 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
             }
         }
         op::CLEAR_DS => {
+            super::perf::inc(super::perf::C::Clears);
             let c: p_clear_ds = rd_payload(rec);
             let Some(t) = qs.rt_depth.tex else { return true };
             if !begin_pass(g, sub, qs) {
@@ -1223,12 +1775,19 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
                     qs.prog[s] = None;
                 }
             }
+            if b.stages & 0x1f != 0 {
+                qs.missing.clear();
+            }
             for k in keys {
-                if let Some(m) = g.shaders.get(dev, &k) {
-                    let s = m.stage as usize;
-                    if b.stages & (1 << s) != 0 {
-                        qs.prog[s] = Some(m);
+                match g.shaders.get(dev, &k) {
+                    Some(m) => {
+                        let s = m.stage as usize;
+                        if b.stages & (1 << s) != 0 {
+                            qs.prog[s] = Some(m);
+                        }
                     }
+                    None if b.stages & 0x1f != 0 => qs.missing.push((k, b.stages as u32)),
+                    None => {}
                 }
             }
         }
@@ -1299,9 +1858,11 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
         }
         op::BIND_TEX | op::BIND_SAMP | op::BIND_IMG => {
             let (stage, first, n): (i32, i32, i32) = unsafe { (rd_at(rec, 0), rd_at(rec, 4), rd_at(rec, 8)) };
+            let (defer, src): (i32, u64) = unsafe { (rd_at(rec, 12), rd_at(rec, 16)) };
             if (stage as usize) < 7 {
                 for i in 0..n.clamp(0, 32) as usize {
-                    let h: u64 = unsafe { rd_at(rec, 24 + 8 * i) };
+                    // a deferred bind reads the game's handle array now, as the queue runs it
+                    let h: u64 = if defer != 0 && src != 0 { unsafe { core::ptr::read_unaligned((src + 8 * i as u64) as *const u64) } } else { unsafe { rd_at(rec, 24 + 8 * i) } };
                     let k = first as usize + i;
                     match opc {
                         op::BIND_TEX if k < 256 => qs.tex[stage as usize][k] = h as u32,
@@ -1383,6 +1944,7 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
             }
         }
         op::COPY_B2T | op::COPY_T2B => {
+            super::perf::inc(super::perf::C::TexCopies);
             end_pass(g, sub, qs);
             let c: p_copy_b2t = rd_payload(rec);
             if c.tex.is_null() {
@@ -1414,6 +1976,7 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
             barrier(g, sub);
         }
         op::COPY_T2T => {
+            super::perf::inc(super::perf::C::TexCopies);
             end_pass(g, sub, qs);
             let c: p_copy_t2t = rd_payload(rec);
             if c.src.is_null() || c.dst.is_null() {
@@ -1492,16 +2055,149 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
         }
         op::REPORT_COUNTER => {
             let (kind, addr): (u64, u64) = unsafe { (rd_at(rec, 0), rd_at(rec, 8)) };
-            if kind as u32 != counter::TIMESTAMP && kind as u32 != counter::TIMESTAMP_TOP {
-                crate::log::red_once(&format!("counter report of type {kind}: only timestamps are counted (others read 0)"));
-            }
-            let q = sub.query();
-            if q < 256 {
-                unsafe { dev.cmd_write_timestamp2(sub.main, vk::PipelineStageFlags2::ALL_COMMANDS, sub.query, q) };
-                sub.post.push(Post::Counter { addr, kind: kind as u32, query: q });
+            let kind = kind as u32;
+            if kind == counter::SAMPLES_PASSED {
+                end_query(g, sub, qs);
+                sub.post.push(Post::OcclReport { addr });
+            } else {
+                if kind != counter::TIMESTAMP && kind != counter::TIMESTAMP_TOP {
+                    crate::log::red_once(&format!("counter report of type {kind}: reported as 0 (timestamps and samples passed are counted)"));
+                }
+                let stage = if kind == counter::TIMESTAMP_TOP { vk::PipelineStageFlags2::TOP_OF_PIPE } else { vk::PipelineStageFlags2::ALL_COMMANDS };
+                let q = if sub.queries < 256 { sub.query() } else { u32::MAX };
+                if q != u32::MAX {
+                    unsafe { dev.cmd_write_timestamp2(sub.main, stage, sub.query, q) };
+                }
+                sub.post.push(Post::Counter { addr, kind, query: q });
             }
         }
-        op::RESET_COUNTER => {}
+        op::PUSH_CONST => {
+            let p: crate::nvn::cmd2::p_push_const = rd_payload(rec);
+            let (o, n) = (p.offset as usize, p.size as usize);
+            if o + n <= 0x800 {
+                let grp = &mut qs.push[(p.compute != 0) as usize][o..o + n];
+                if p.deferred != 0 {
+                    unsafe { core::ptr::copy_nonoverlapping(p.src as *const u8, grp.as_mut_ptr(), n) };
+                } else {
+                    let at = core::mem::size_of::<crate::nvn::cmd2::p_push_const>();
+                    grp.copy_from_slice(&rec[8 + at..8 + at + n]);
+                }
+            }
+        }
+        op::BUFS_DEFERRED => {
+            let b: crate::nvn::cmd2::p_bufs_deferred = rd_payload(rec);
+            if (b.stage as usize) < 7 {
+                for i in 0..b.n.clamp(0, 16) {
+                    let k = (b.first + i) as usize;
+                    if k >= 16 {
+                        break;
+                    }
+                    let r: [u64; 2] = unsafe { core::ptr::read_unaligned((b.src + 16 * i as u64) as *const [u64; 2]) };
+                    if b.ssbo != 0 {
+                        qs.ssbo[b.stage as usize][k] = (r[0], r[1]);
+                    } else {
+                        qs.ubo[b.stage as usize][k] = (r[0], r[1]);
+                    }
+                }
+            }
+        }
+        op::RENDER_COND => {
+            let r: crate::nvn::cmd2::p_render_cond = rd_payload(rec);
+            qs.render_on = match r.mode {
+                2 => true,
+                3 => false,
+                m if r.addr != 0 => {
+                    // the two 64-bit values the condition compares, as the queue reaches it (reports land at completion)
+                    let v: [u64; 2] = unsafe { core::ptr::read_unaligned(r.addr as *const [u64; 2]) };
+                    if m == 0 { v[0] == v[1] } else { v[0] != v[1] }
+                }
+                _ => true,
+            };
+        }
+        op::ALPHA_REF => qs.alpha_ref = rd_payload::<crate::nvn::cmd2::p_f32x4>(rec).v[0],
+        op::DEPTH_BOUNDS => {
+            let p: crate::nvn::cmd2::p_f32x4 = rd_payload(rec);
+            qs.depth_bounds = (p.i[0] != 0, p.v[0], p.v[1]);
+        }
+        op::SAMPLE_MASK => qs.sample_mask = rd_payload::<crate::nvn::cmd2::p_f32x4>(rec).i[0] as u32,
+        op::POINT_SIZE => qs.point_size = rd_payload::<crate::nvn::cmd2::p_f32x4>(rec).v[0],
+        op::TESS_LEVELS => {
+            let p: crate::nvn::cmd2::p_f32x4 = rd_payload(rec);
+            if p.i[0] == 0 {
+                qs.tess_levels[4..6].copy_from_slice(&p.v[..2]);
+            } else {
+                qs.tess_levels[..4].copy_from_slice(&p.v);
+            }
+        }
+        op::PROVOKING => qs.provoking_last = rd_payload::<crate::nvn::cmd2::p_f32x4>(rec).i[0] != 0,
+        op::VP_SWIZZLE => {
+            let p: crate::nvn::cmd2::p_f32x4 = rd_payload(rec);
+            if (0..16).contains(&p.i[0]) {
+                qs.vp_swizzle[p.i[0] as usize] = p.i[1] as u32;
+                if p.i[1] as u32 != 0x0302_0100 {
+                    crate::log::red_once("viewport swizzles other than the identity are not applied (VK_NV_viewport_swizzle)");
+                }
+            }
+        }
+        op::TF_BIND => {
+            let b: crate::nvn::cmd2::p_tf_bind = rd_payload(rec);
+            if (0..4).contains(&b.index) {
+                qs.tf[b.index as usize] = (b.addr, b.size);
+            }
+        }
+        op::TF_STATE => {
+            let s: crate::nvn::cmd2::p_tf_state = rd_payload(rec);
+            match s.what & 0xff {
+                0 | 3 => qs.tf_on = true,
+                1 | 2 => qs.tf_on = false,
+                _ => crate::log::red_once("DrawTransformFeedback is not replayed yet (needs VK_EXT_transform_feedback captures)"),
+            }
+            if qs.tf_on {
+                crate::log::red_once("transform feedback captures are not replayed yet (VK_EXT_transform_feedback)");
+            }
+        }
+        op::MULTI_DRAW => {
+            let m: crate::nvn::cmd2::p_multi_draw = rd_payload(rec);
+            multi_draw(g, sub, qs, m);
+        }
+        op::DRAW_TEX => {
+            let d: crate::nvn::cmd2::p_draw_tex = rd_payload(rec);
+            draw_texture(g, sub, qs, d);
+        }
+        op::MESH => {
+            crate::log::red_once("mesh-task draws are not replayed yet (VK_EXT_mesh_shader pipelines)");
+            super::perf::inc(super::perf::C::DrawsSkipped);
+        }
+        op::REPORT_VALUE => {
+            let r: crate::nvn::cmd2::p_report_value = rd_payload(rec);
+            let (a, v) = (r.addr, r.value);
+            sub.post.push(Post::Callback(Box::new(move |_g: &Gpu| unsafe { core::ptr::write_unaligned(a as *mut u32, v) })));
+        }
+        op::DOWNSAMPLE => {
+            end_pass(g, sub, qs);
+            let t: crate::nvn::cmd2::p_tex2 = rd_payload(rec);
+            let Some((si, stf, sext)) = source_image(g, sub, &t.src) else { return true };
+            let Some((di, _dtf, dext, _)) = target_image(g, sub, &t.dst) else { return true };
+            let asp = super::image::upload_aspect(&stf);
+            let sl = |l: u32| vk::ImageSubresourceLayers { aspect_mask: asp, mip_level: l, base_array_layer: 0, layer_count: 1 };
+            let sl0 = if t.has_sv != 0 && t.sv.bits & VW_LEVELS != 0 { t.sv.base_level as u32 } else { 0 };
+            let dl0 = if t.has_dv != 0 && t.dv.bits & VW_LEVELS != 0 { t.dv.base_level as u32 } else { 0 };
+            let e = |x: vk::Extent3D, l: u32| vk::Offset3D { x: (x.width >> l).max(1) as i32, y: (x.height >> l).max(1) as i32, z: 1 };
+            let r = vk::ImageBlit { src_subresource: sl(sl0), src_offsets: [vk::Offset3D::default(), e(sext, sl0)], dst_subresource: sl(dl0), dst_offsets: [vk::Offset3D::default(), e(dext, dl0)] };
+            unsafe { dev.cmd_blit_image(sub.main, si, vk::ImageLayout::GENERAL, di, vk::ImageLayout::GENERAL, &[r], if stf.kind == Kind::Float { vk::Filter::LINEAR } else { vk::Filter::NEAREST }) };
+            barrier(g, sub);
+        }
+        op::RESOLVE_DEPTH => {
+            crate::log::red_once("ResolveDepthBuffer: a multisample depth resolve is not replayed yet");
+        }
+        op::RESET_COUNTER => {
+            let kind: u64 = unsafe { rd_at(rec, 0) };
+            if kind as u32 == counter::SAMPLES_PASSED {
+                end_query(g, sub, qs);
+                sub.post.push(Post::OcclReset);
+                qs.vis_on = true;
+            }
+        }
         _ => crate::log::red_once(&format!("replay: record op {opc} is not implemented yet")),
     }
     true

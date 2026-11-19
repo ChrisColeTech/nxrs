@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["src/translator", "src/runtime", "src/graphics", "src/shaders", "src/os", "src/cli", "src/profiles"]
+members = ["src/translator", "src/runtime", "src/graphics", "src/shaders", "src/os", "src/cli", "src/profiles", "src/config", "src/front"]
 
 [profile.release]
 debug = 1

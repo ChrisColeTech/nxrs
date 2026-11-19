@@ -23,6 +23,12 @@ struct Inner {
     /// host texture ID -> (serial, view) as registered
     tex: HashMap<i32, (u64, Option<view_t>)>,
     samp: HashMap<i32, vk::Sampler>,
+    /// buffer textures by host texture ID (no image: a texel buffer view over their pool's memory)
+    buf_tex: HashMap<i32, crate::nvn::obj::tex_t>,
+    /// buffer textures whose pool-set texel buffer views are still to be made (at the next submission)
+    buf_pending: Vec<i32>,
+    /// the pool set's texel buffer views by ID (destroyed when the ID is registered again)
+    buf_views: HashMap<i32, (vk::BufferView, Option<vk::BufferView>)>,
 }
 
 fn samp_key(p: &samp_par) -> [u32; 10] {
@@ -71,6 +77,42 @@ impl Tables {
         let ai = vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&sl);
         let set = unsafe { d.dev.allocate_descriptor_sets(&ai) }.map_err(|e| format!("pool set: {e}"))?[0];
         Ok(Tables { pool, set, inner: Mutex::new(Inner::default()) })
+    }
+
+    /// A buffer texture registered at host ID `id`.
+    pub fn note_buf_tex(&self, id: i32, t: crate::nvn::obj::tex_t) {
+        let mut i = self.inner.lock().unwrap();
+        i.tex.remove(&id);
+        i.buf_tex.insert(id, t);
+        i.buf_pending.push(id);
+    }
+    pub fn buf_tex_at(&self, id: i32) -> Option<crate::nvn::obj::tex_t> {
+        self.inner.lock().unwrap().buf_tex.get(&id).copied()
+    }
+    pub fn take_buf_pending(&self) -> Vec<i32> {
+        std::mem::take(&mut self.inner.lock().unwrap().buf_pending)
+    }
+    /// Writes the pool set's texel buffer views of buffer texture `id` (uniform, and storage when the format allows).
+    pub fn write_texel_views(&self, d: &Device, id: i32, uv: vk::BufferView, sv: Option<vk::BufferView>) {
+        let u = [uv];
+        let s = [sv.unwrap_or(uv)];
+        let mut w = vec![vk::WriteDescriptorSet::default().dst_set(self.set).dst_binding(layout::B_TBUF).dst_array_element(id as u32).descriptor_type(vk::DescriptorType::UNIFORM_TEXEL_BUFFER).texel_buffer_view(&u)];
+        if sv.is_some() {
+            w.push(vk::WriteDescriptorSet::default().dst_set(self.set).dst_binding(layout::B_IBUF).dst_array_element(id as u32).descriptor_type(vk::DescriptorType::STORAGE_TEXEL_BUFFER).texel_buffer_view(&s));
+        }
+        let mut g = self.inner.lock().unwrap();
+        unsafe { d.dev.update_descriptor_sets(&w, &[]) };
+        if let Some((ou, os)) = g.buf_views.insert(id, (uv, sv)) {
+            drop(g);
+            if let Some(gpu) = super::Gpu::try_get() {
+                gpu.q.defer_after_use(Box::new(move |gpu: &super::Gpu| unsafe {
+                    gpu.dev().destroy_buffer_view(ou, None);
+                    if let Some(os) = os {
+                        gpu.dev().destroy_buffer_view(os, None);
+                    }
+                }));
+            }
+        }
     }
 
     pub fn reserve_tex(&self, base: i32, n: i32) {
@@ -177,11 +219,12 @@ impl Tables {
         unsafe { d.dev.update_descriptor_sets(&w, &[]) };
     }
 
-    pub fn write_image(&self, d: &Device, id: i32, view: vk::ImageView, storage: bool) {
+    pub fn write_image(&self, d: &Device, id: i32, view: vk::ImageView, storage: Option<vk::ImageView>) {
         let ii = [vk::DescriptorImageInfo::default().image_view(view).image_layout(vk::ImageLayout::GENERAL)];
+        let si = [vk::DescriptorImageInfo::default().image_view(storage.unwrap_or(view)).image_layout(vk::ImageLayout::GENERAL)];
         let mut w = vec![vk::WriteDescriptorSet::default().dst_set(self.set).dst_binding(layout::B_TEX).dst_array_element(id as u32).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&ii)];
-        if storage {
-            w.push(vk::WriteDescriptorSet::default().dst_set(self.set).dst_binding(layout::B_IMG).dst_array_element(id as u32).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).image_info(&ii));
+        if storage.is_some() {
+            w.push(vk::WriteDescriptorSet::default().dst_set(self.set).dst_binding(layout::B_IMG).dst_array_element(id as u32).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).image_info(&si));
         }
         let _g = self.inner.lock().unwrap();
         unsafe { d.dev.update_descriptor_sets(&w, &[]) };

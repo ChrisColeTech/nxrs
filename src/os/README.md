@@ -11,16 +11,20 @@ licenses: the "Credits and licenses" section of the repository README. The inter
 | File | Part |
 |---|---|
 | `boot.rs` | `nxos_main`: profile, address space, module load with the host's bindings, the main thread running nn::init's steps (`_init_libc0`, `nnosInitialize`, `nninitInitializeSdkModule`, the host arguments, `nninitStartup`, `_init_libc2`, every DT_INIT, `nnMain`) without rtld |
-| `svc.rs` | `nxos_svc` (the generated code's SVC entry through `include/cpu.h`): memory, IPC, GetInfo, the counter at the title's rate (`nxos_ticks`); the rest to the runtime's `nxrt_svc_impl`; an SVC nobody handles answers success with an `UNIMPL Svc` line |
+| `svc.rs` | os's SVCs on the runtime's registry (`install`: `nxrt::svc::set_handler` / `set_fallback`): memory, IPC, GetInfo, GetSystemTick; the kernel's through `nxrt::kernel::svc`; a checkpoint after each; ExitThread / ExitProcess / Break to the runtime; an SVC nobody handles answers success with an `UNIMPL Svc` line. The counter: `rt_tick_hz` from the profile, `rt_ticks` on the guest clock (`nxrt::rt::set_clock`) |
 | `mem.rs` | lazily committed heap (first touch, by the guest or `prepare`), MapMemory / UnmapMemory, Map/UnmapPhysicalMemory in the alias region, shared memory views, QueryMemory over the runtime's regions, the memory GetInfo ids from the profile |
-| `sched.rs` | virtual cores: a guest thread holds one of the title's cores while it runs guest code; handoffs at SVCs and spin waits, steals after 2 / 20 ms, the core number |
+| `sched.rs` | virtual cores as the runtime kernel's `Scheduler` (thread start / exit, blocking enter / leave, priority and core mask, the core number, spin passes): a guest thread holds one of the title's cores while it runs guest code; handoffs at SVCs and spin waits, steals after 2 / 20 ms |
 | `hle.rs` | takeovers by mangled name (`force`, `hle`, `alias`), logging stubs for imports nothing provides, the loaded modules' symbols |
 | `ipc/` | HIPC / CMIF messages (`hipc.rs`), host sessions, domains, control requests, `sm:`, services by name |
-| `nvn/` | `nvnBootstrapLoader` and the proc table (graphics layer, null device, logging stubs); the null device (`null.rs`) and texture storage sizes (`tex.rs`) |
+| `nvn/` | `nvnBootstrapLoader`, the proc table (the graphics layer's procs, a logging stub for a name it lacks; no null device, rule 1.1.6), the hand-off to graphics (`bind_graphics`, the SDK major), the nv:: glue (`nv.rs`) |
+| `media/` | the sound card (`sink.rs`: WASAPI through cpal, every stream mixed, smooth slowdown, limiter, statistics, the recording tap), the capture device (`mic.rs`), libopus (`opus.rs`), libvpx VP9 (`vpx.rs`), dav1d AV1 (`av1.rs`), Media Foundation H.264 and AAC (`mf.rs`), pictures and their NV12 / RGBA layouts (`yuv.rs`), the MinGW CRT pieces the codec archives need (`crt.rs`); the archives in `third_party/` |
+| `clock.rs` | the guest clock and its rate (`set_rate`, for smooth recordings) |
+| `options.rs` | the settings os reads (`docked`, `language`, `keyboard_text`, `audio_slowdown`) through `nxconfig`, applied live |
 | `kobj.rs` | kernel events the host owns |
 | `profile.rs` | per-title facts (program id, pool, used memory, system resource, counter rate, cores) |
+| `input/` | the controllers (lane I): XInput, DualSense / DualSense Edge / DualShock 4 over raw HID (lights, rumble, motion; the owner's `controller_sony*`), Switch Pro / Joy-Con / Online pads over raw HID (handshake, SPI stick calibration, IMU, HD rumble, player lights), WinMM fallback, hot-plug, player slots (nxnative's `pad_slots.h`), `button_layout` / `button_map` (the owner's `pad_layout.h`), motion fusion, scripted input (`NXRS_KEYS`, the control pipe's `press`), Turbo's record / replay (`NXRS_INPUT_RECORD` / `NXRS_INPUT_REPLAY`); `bin/nxinput.rs` lists, reads and rumbles them without a game |
 | `log.rs`, `watch.rs` | `[os]` log, the gap list (`UNIMPL` lines, summary at the first submit, at an abort and at the end), heartbeat and timed exits |
-| `bin/nxos_dev.rs` | build glue: compile the generated C with the overlay, link with `nxos.lib` |
+| `bin/nxos_dev.rs` | build glue: compile the generated C (the translator's `cpu.h`), link with `nxos.lib` |
 
 ## Services
 
@@ -34,14 +38,19 @@ licenses: the "Credits and licenses" section of the repository README. The inter
 | `time` | the host's clocks, calendar conversions in the host's zone, clock snapshots, contexts | network clock check fails (offline) |
 | `settings` | language codes and comparisons | |
 | `vi` | display, layer, native window, crop, frame number, display list; vsync event at 60 Hz (`misc`) | |
-| `hid` | one controller (Pro Controller docked, handheld pair handheld), states with full histories, style events, LEDs, colours, controller applet, six-axis at rest, vibration accepted | touch, gestures, keyboard, mouse, debug pad read empty |
-| `audio` | the SDK's own renderer in-process (CPU + manual) with a 5 ms render thread; AudioOut accepting and releasing buffers; device names and volume | output is silent (no sink yet); AudioIn fails |
+| `hid` | the host's controllers (`input/`) as npads: player 1 Handheld or No1, players 2..8 on No2..No8, one-player games merging every pad into player 1, Joy-Con pairs as JoyDual or split JoyLeft / JoyRight (single assignment), style-set events, latched presses, full histories, the controller applet (player counts, players past the maximum left out), six-axis from live motion (DualSense / DS4 / Pro / Joy-Con), vibration to the pad (HD rumble on Nintendo pads), player LEDs, colours | touch, gestures, keyboard, mouse and debug pad read connected and idle |
+| `hid_ext` | the Joy-Con 2 mouse sensor (Jcms ring fed by a Joy-Con 2's reports) and its pointer (Nmouse), the npad IMU the SDK's sensor fusion reads (live motion at 5 ms ticks), six-axis IC information, the fusion's calibration store, the console six-axis sensor, Palma (none connected), the private app's scene id, the two-argument touch / gesture initializers | no USB mouse as an Nmouse |
+| `audren` | the SDK's own renderer in-process (CPU + manual): its DeviceSink in every SDK's command layout folded to stereo for the sound card, a render thread paced by the sound card (8 blocks of 5 ms in flight), the update lock read off the SDK, catch-up frames, 32 kHz upsampled | the audren:u service for SDK 1.x (no in-process renderer): not served |
+| `audio` | AudioOut on the sound card (release events, six channels folded), AudioIn on the PC's capture device (none: the list is empty and an open fails, as audin answers), device names, volume, auto-tune and notifications | |
+| `codec` | hwopus with libopus: the HardwareOpus(MultiStream)Decoder classes, their C interface, SDK 21's decoder manager, and the `hwopus` IPC service | |
+| `movie` | movie::Decoder (NintendoSDK_movie): VP9 libvpx, H.264 / AAC Media Foundation, Vorbis lewton; NV12 to the client's buffer or RGBA into its NVN texture; MediaCodec's back-pressure; `NXOS_MOVIE_DUMP=<dir>` writes pictures handed out | VP8 (not in the libvpx build) fails with a red line |
+| `codec_video` | the Switch 2's nn::codec video decoders (VP9, H.264, AV1 with dav1d frame threads): image pools, sync handles and nn::syncpt events, submission back-pressure (3603), Stop / Flush, native images for graphics, SDK 19 / 22 names | VP8; encrypted input; HDR read-back (black) |
+| `swkbd` | ShowKeyboard and the InlineKeyboard: a text box over the game window (Hind font), `keyboard_text` by default (`NXOS_SWKBD=auto` answers the default without a box) | |
+| `net` | `btm:u` (the interface, events that never fire), `bsd:*` event descriptors (EventFd, Read / Write / Poll) | sockets: no network |
 | `mii` | the six default Miis, random and default Miis, the editor adds the default Mii; the MiiModel system data stand-in | |
 | `misc` | diag log lines and aborts into the log, add-on content list, the shared font (a stand-in TTF), amiibo (no tag), the profanity filter (nothing filtered), error and shop applets logged | |
 | `os` | SDK SystemEvents bound and signalled by the host, entropy | |
-| `bignum` | the SDK's untyped big-number routines the translator does not seed | |
 | `simple` | 159 offline stand-ins as nxnative answers them (friends, local wireless, telemetry, IR camera, SSL, parental controls, BCAT, album, sockets, …) | all |
-| `nvn` (null device) | device integers, pools, buffers, textures and their storage sizes, texture / sampler pools, programs, syncs, events, queues, command memory, windows, the first submit and present marks, 60 Hz presents | command recording and state objects: counted, nothing drawn |
 
 ## Build, test, run
 
@@ -53,5 +62,5 @@ licenses: the "Credits and licenses" section of the repository README. The inter
     build\games\<g>\<g>.exe build\games\<g>\data
 
 Switches: `NXOS_TRACE=svc,ipc,fs` (or `all`), `NXOS_EXIT_AFTER=<s>`, `NXOS_EXIT_AFTER_SUBMIT=<s>`,
-`NXOS_HEARTBEAT=<s>`, `NXOS_OPMODE=0|1`, `NXOS_LANG`, `NXOS_NICK`, `NXOS_FIXED_TIME`, `NXOS_FONT`, `NXOS_SAVE`,
-`NXOS_FREE_CORES=1` (no virtual cores), `NXOS_HOST_CPUS=<n>`; the runtime's `NXRT_TRACE` still works.
+`NXOS_HEARTBEAT=<s>`, `NXOS_OPMODE=0|1` (else `docked`), `NXOS_LANG` (else `language`), `NXOS_<SETTING>` (any setting os reads), `NXOS_MOVIE_DUMP=<dir>`, `NXOS_SWKBD=auto`, `NXOS_NICK`, `NXOS_FIXED_TIME`, `NXOS_FONT`, `NXOS_SAVE`,
+`NXOS_FREE_CORES=1` (no virtual cores), `NXOS_HOST_CPUS=<n>`, the controller switches in `input/mod.rs` (`NXRS_CONTROLLER_TRACE`, `_SELFTEST`, `_BACKGROUND`, `NXRS_NO_SONY_HID`, ...); the runtime's `NXRT_TRACE` still works.

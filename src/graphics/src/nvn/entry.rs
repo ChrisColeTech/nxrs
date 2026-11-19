@@ -46,8 +46,15 @@ impl<T> Arg for *mut T {
     }
 }
 impl Arg for f32 {
-    unsafe fn take(c: &Cpu, _xi: &mut usize, vi: &mut usize) -> Self {
-        let v = c.arg_s(*vi);
+    /// Past v7 a float goes to the next 8-byte stack slot, after the integer arguments that went to the stack before it
+    /// (nvnWindowSetHdrDisplayMetadata's 9th and 10th floats).
+    unsafe fn take(c: &Cpu, xi: &mut usize, vi: &mut usize) -> Self {
+        let v = if *vi < 8 {
+            c.arg_s(*vi)
+        } else {
+            let slot = (*xi).saturating_sub(8) + (*vi - 8);
+            f32::from_bits(core::ptr::read_unaligned((c.sp + 8 * slot as u64) as *const u32))
+        };
         *vi += 1;
         v
     }
@@ -155,9 +162,15 @@ pub fn procs() -> &'static [Entry] {
         super::sync::entries(&mut v);
         super::queue::entries(&mut v);
         super::cmd::entries(&mut v);
+        super::cmd2::entries(&mut v);
+        super::cmd2::hints::entries(&mut v);
         super::state::entries(&mut v);
         super::window::entries(&mut v);
         super::nops::entries(&mut v);
+        super::query::entries(&mut v);
+        super::prog2::entries(&mut v);
+        super::dlss::entries(&mut v);
+        super::devbuf::entries(&mut v);
         v.sort_by_key(|e| e.name);
         for w in v.windows(2) {
             assert!(w[0].name != w[1].name, "NVN entry point {} defined twice", w[0].name);

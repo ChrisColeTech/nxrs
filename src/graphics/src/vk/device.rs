@@ -53,6 +53,8 @@ pub struct Caps {
     pub timestamp_period: f32,
     pub uniform_align: u64,
     pub storage_align: u64,
+    pub occlusion_precise: bool,
+    pub depth_bounds: bool,
 }
 
 pub struct Device {
@@ -265,6 +267,8 @@ impl Device {
             timestamp_period: props.limits.timestamp_period,
             uniform_align: props.limits.min_uniform_buffer_offset_alignment,
             storage_align: props.limits.min_storage_buffer_offset_alignment,
+            occlusion_precise: base.occlusion_query_precise != 0,
+            depth_bounds: base.depth_bounds != 0,
             ..Default::default()
         };
         if has(ash::ext::external_memory_host::NAME) {
@@ -285,6 +289,7 @@ impl Device {
             multi_draw_indirect: base.multi_draw_indirect,
             depth_clamp: base.depth_clamp,
             depth_bias_clamp: base.depth_bias_clamp,
+            depth_bounds: base.depth_bounds,
             fill_mode_non_solid: base.fill_mode_non_solid,
             wide_lines: base.wide_lines,
             large_points: base.large_points,
@@ -325,6 +330,8 @@ impl Device {
             .storage_buffer8_bit_access(f12.storage_buffer8_bit_access != 0)
             .uniform_and_storage_buffer8_bit_access(f12.uniform_and_storage_buffer8_bit_access != 0)
             .host_query_reset(f12.host_query_reset != 0)
+            .draw_indirect_count(f12.draw_indirect_count != 0)
+            .buffer_device_address(f12.buffer_device_address != 0)
             .sampler_filter_minmax(f12.sampler_filter_minmax != 0)
             .sampler_mirror_clamp_to_edge(f12.sampler_mirror_clamp_to_edge != 0);
         let mut e13 = vk::PhysicalDeviceVulkan13Features::default()

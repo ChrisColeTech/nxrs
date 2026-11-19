@@ -22,6 +22,8 @@ pub struct RawProfile {
     pub game_tsv: &'static str,
     pub patches: Option<&'static str>,
     pub turbo: Option<&'static str>,
+    /// nxnative's shader tables, zstd-compressed (`tools/export_shaders.py`)
+    pub shaders: Option<&'static [u8]>,
 }
 
 mod data {
@@ -487,6 +489,45 @@ fn db() -> &'static Db {
         let engine = shared("engine_patches.toml", data::ENGINE_PATCHES);
         Db { profiles, errors, sdk, engine }
     })
+}
+
+/// nxnative's shader tables of a profile (`games/<id>/shaders.tsv.zst`), each file byte for byte: `pso_manifest.tsv`
+/// (the prewarm seed: `S <key> <stage>`, `R <Metal pipeline key>`, `C <key>`), `pso_pairs.tsv` and
+/// `shader_pairs.tsv` (vertex / pixel key pairs), `shader_facts.tsv` and `shader_facts_manual.tsv` (answers to the
+/// shader translator's queries). Empty when the profile has none.
+pub fn shader_tables(id: &str) -> Result<Vec<(String, String)>, String> {
+    let Some(raw) = data::GAMES.iter().find(|r| r.id.eq_ignore_ascii_case(id)).and_then(|r| r.shaders) else { return Ok(vec![]) };
+    let text = zstd::stream::decode_all(raw).map_err(|e| format!("{id}: shaders.tsv.zst: {e}"))?;
+    let text = String::from_utf8(text).map_err(|_| format!("{id}: shaders.tsv.zst: not UTF-8"))?;
+    let mut out: Vec<(String, String)> = vec![];
+    for line in text.split_inclusive('\n') {
+        if let Some(name) = line.strip_prefix("## ").filter(|n| n.trim_end().ends_with(".tsv")) {
+            out.push((name.trim_end().to_string(), String::new()));
+        } else if let Some(last) = out.last_mut() {
+            last.1.push_str(line);
+        } else {
+            return Err(format!("{id}: shaders.tsv.zst: no table header"));
+        }
+    }
+    Ok(out)
+}
+
+/// The prewarm seed of a profile's `pso_manifest.tsv`: shader keys in the order a play-through used them, with the
+/// stage digit (`S` rows) or `c` for compute (`C` rows). nxnative's render pipeline keys (`R` rows) are Metal's and
+/// are left out.
+pub fn prewarm_shaders(id: &str) -> Result<Vec<(String, String)>, String> {
+    let tables = shader_tables(id)?;
+    let Some((_, m)) = tables.iter().find(|(n, _)| n == "pso_manifest.tsv") else { return Ok(vec![]) };
+    Ok(m.lines()
+        .filter_map(|l| {
+            let f: Vec<&str> = l.split('\t').collect();
+            match f[..] {
+                ["S", key, stage, ..] => Some((key.to_string(), stage.to_string())),
+                ["C", key, ..] => Some((key.to_string(), "c".to_string())),
+                _ => None,
+            }
+        })
+        .collect())
 }
 
 /// Every profile that parsed, by folder id.

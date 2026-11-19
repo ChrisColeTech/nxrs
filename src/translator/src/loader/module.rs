@@ -96,17 +96,26 @@ impl Module {
         starts
     }
 
-    /// Known function starts: .eh_frame_hdr, exported FUNC symbols, R_AARCH64_RELATIVE targets in .text.
+    /// Known function starts: .eh_frame_hdr, exported FUNC symbols, R_AARCH64_RELATIVE targets in .text, and code
+    /// reached by name: every relocation naming a symbol this module defines in .text, and every global untyped
+    /// (STT_NOTYPE) symbol it defines there. Hand-written routines are exported untyped and reached only through the
+    /// PLT (Mario Kart 8 Deluxe's sdk: `nndetailCryptoBignum*Words`, `nndetailCryptoBignum_{mul,sqr}_comba8`), so
+    /// neither unwind entries nor FUNC symbols find them.
     pub fn seeds(&self) -> Vec<u64> {
         let mut starts: BTreeSet<u64> = self.eh_frame_functions().into_iter().collect();
         for s in &self.nso.syms {
-            if s.shndx != 0 && (s.info & 0xF) == 2 {
+            let (kind, bind) = (s.info & 0xF, s.info >> 4);
+            if s.shndx != 0 && (kind == 2 || (kind == 0 && bind != 0 && !s.name.is_empty())) {
                 starts.insert(self.base.wrapping_add(s.value));
             }
         }
         for r in &self.nso.relocs {
             if r.typ == R_AARCH64_RELATIVE {
                 starts.insert(self.base.wrapping_add(r.addend as u64));
+            } else if let Some(s) = self.nso.syms.get(r.sym as usize).filter(|s| r.sym != 0 && s.shndx != 0) {
+                if matches!(s.info & 0xF, 0 | 2) {
+                    starts.insert(self.base.wrapping_add(s.value));
+                }
             }
         }
         starts.into_iter().filter(|&a| self.in_text(a)).collect()

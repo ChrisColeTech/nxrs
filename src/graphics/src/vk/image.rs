@@ -23,6 +23,8 @@ pub struct ViewKey {
     pub has: bool,
     /// an attachment view: identity swizzle, every aspect
     pub attach: bool,
+    /// a storage-image view: identity swizzle (storage descriptors take no swizzle)
+    pub storage: bool,
 }
 
 pub struct Image {
@@ -42,6 +44,8 @@ pub struct Image {
     pub needs_init: bool,
     pub needs_upload: bool,
     pub bc7: bool,
+    /// a texture in a sparse virtual pool: the physical ranges its last upload read and the mapping generation then
+    pub sparse: Option<(Vec<(u64, u64)>, u64)>,
 }
 unsafe impl Send for Image {}
 
@@ -53,6 +57,8 @@ pub struct Images {
     max_size: u64,
     /// texel writes waiting for the next submission: (serial, level, layer, offset, extent, linear rows)
     writes: Vec<(u64, u32, u32, vk::Offset3D, vk::Extent3D, Vec<u8>)>,
+    /// the virtual pool mapping generation the sparse textures were last checked at
+    sparse_seen: u64,
 }
 
 impl Images {
@@ -178,7 +184,8 @@ impl Gpu {
         if !compressed && tf.kind != Kind::Depth && tf.kind != Kind::DepthStencil && tf.kind != Kind::Stencil {
             flags |= vk::ImageCreateFlags::MUTABLE_FORMAT;
         }
-        if matches!(t.d.target, target::CUBE | target::CUBE_ARRAY) && extent.width == extent.height && layers % 6 == 0 {
+        // any square 2D image of whole cubes: games view 2D arrays as cubes and cubes as cube arrays
+        if ty == vk::ImageType::TYPE_2D && extent.width == extent.height && layers >= 6 && layers % 6 == 0 && samples == vk::SampleCountFlags::TYPE_1 {
             flags |= vk::ImageCreateFlags::CUBE_COMPATIBLE;
         }
         let ci = vk::ImageCreateInfo::default()
@@ -224,6 +231,7 @@ impl Gpu {
             needs_init: true,
             needs_upload: !t.mem.is_null(),
             bc7,
+            sparse: None,
         })
     }
 
@@ -243,7 +251,44 @@ impl Gpu {
 
     /// A view of an image (created once per view key).
     pub fn image_view(&self, im: &mut Image, v: Option<&view_t>, attach: bool) -> Option<vk::ImageView> {
-        let k = ViewKey { view: v.copied().unwrap_or_default(), has: v.is_some(), attach };
+        self.image_view_kind(im, v, attach, false)
+    }
+
+    /// The format a view of `im` through `v` has (the texture's, or the view's own when Vulkan allows it).
+    pub fn view_format(&self, im: &Image, v: Option<&view_t>) -> vk::Format {
+        let f = self.raw_view_format(im, v);
+        // a compressed image keeps its own format in views (an uncompressed view of its blocks is a render target's
+        // block alias, exec::attach_view)
+        let compressed = im.bc7 || layout::fmt_bpb(im.tex.d.format).1 > 1;
+        if compressed && f != im.format {
+            im.format
+        } else {
+            f
+        }
+    }
+
+    /// The view's own format as Vulkan allows it, before the compressed-image rule.
+    pub fn raw_view_format(&self, im: &Image, v: Option<&view_t>) -> vk::Format {
+        let mut fmt = im.format;
+        if let Some(v) = v {
+            if v.bits & VW_FORMAT != 0 && im.tf.astc.is_none() {
+                if let Some(f) = format::tex_format(v.format as i32) {
+                    if im.usage.contains(vk::ImageUsageFlags::STORAGE) || f.vk == fmt || !matches!(f.kind, Kind::Depth | Kind::DepthStencil | Kind::Stencil) {
+                        fmt = f.vk;
+                    }
+                }
+            }
+        }
+        fmt
+    }
+
+    /// A storage-image view (identity swizzle).
+    pub fn storage_view(&self, im: &mut Image, v: Option<&view_t>) -> Option<vk::ImageView> {
+        self.image_view_kind(im, v, false, true)
+    }
+
+    fn image_view_kind(&self, im: &mut Image, v: Option<&view_t>, attach: bool, storage: bool) -> Option<vk::ImageView> {
+        let k = ViewKey { view: v.copied().unwrap_or_default(), has: v.is_some(), attach, storage };
         if let Some(x) = im.views.get(&k) {
             return Some(*x);
         }
@@ -264,13 +309,7 @@ impl Gpu {
             if v.bits & VW_TARGET != 0 {
                 ty = view_type(v.target as i32);
             }
-            if v.bits & VW_FORMAT != 0 && im.tf.astc.is_none() {
-                if let Some(f) = format::tex_format(v.format as i32) {
-                    if im.usage.contains(vk::ImageUsageFlags::STORAGE) || f.vk == fmt || !matches!(f.kind, Kind::Depth | Kind::DepthStencil | Kind::Stencil) {
-                        fmt = f.vk;
-                    }
-                }
-            }
+            fmt = self.view_format(im, Some(v));
             if v.bits & 0x20 != 0 && (v.bits >> 6) == 1 && im.tf.kind == Kind::DepthStencil {
                 asp = vk::ImageAspectFlags::STENCIL;
             }
@@ -293,12 +332,29 @@ impl Gpu {
         if base_level + nlevels > im.levels {
             nlevels = im.levels.saturating_sub(base_level).max(1);
         }
-        let comps = if attach { vk::ComponentMapping::default() } else { components(&t, v, &im.tf) };
-        let usage_ci = vk::ImageViewUsageCreateInfo::default().usage(if attach {
-            im.usage & (vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT)
+        let comps = if attach || storage { vk::ComponentMapping::default() } else { components(&t, v, &im.tf) };
+        let want = if attach {
+            vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
+        } else if storage {
+            vk::ImageUsageFlags::STORAGE
         } else {
-            im.usage & (vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE)
-        });
+            vk::ImageUsageFlags::SAMPLED
+        };
+        let mut vusage = im.usage & want;
+        // a view format the image's own format cannot have as an attachment or storage (a compressed image's
+        // uncompressed view): the view keeps the usages its format allows
+        let ff = self.d.format_features(fmt);
+        if !ff.contains(vk::FormatFeatureFlags::COLOR_ATTACHMENT) {
+            vusage &= !vk::ImageUsageFlags::COLOR_ATTACHMENT;
+        }
+        if !ff.contains(vk::FormatFeatureFlags::STORAGE_IMAGE) {
+            vusage &= !vk::ImageUsageFlags::STORAGE;
+        }
+        if vusage.is_empty() {
+            crate::log::red_once(&format!("a view of a {:?} image as {fmt:?} has no usage the image allows ({})", im.format, if attach { "attachment" } else if storage { "storage" } else { "sampled" }));
+            return None;
+        }
+        let usage_ci = vk::ImageViewUsageCreateInfo::default().usage(vusage);
         let mut usage_ci = usage_ci;
         let ci = vk::ImageViewCreateInfo::default()
             .image(im.image)
@@ -328,6 +384,11 @@ impl Gpu {
             crate::log::red_once(&format!("texture ID {id} past the pool set (NXGFX_TEX_CAP)"));
             return;
         }
+        if t.d.target == target::BUFFER {
+            // a buffer texture: no image; its texel buffer views are made over its pool's memory
+            self.tables.note_buf_tex(id, *t);
+            return;
+        }
         let mut imgs = self.images.lock().unwrap();
         if !self.ensure_image(&mut imgs, t) {
             return;
@@ -338,9 +399,10 @@ impl Gpu {
             im.gpu_owned = true;
         }
         let Some(view) = self.image_view(im, v.as_ref(), false) else { return };
+        let sview = if storage { self.storage_view(im, v.as_ref()) } else { None };
         drop(imgs);
         self.tables.note_tex(id, t.serial, v);
-        self.tables.write_image(&self.d, id, view, storage);
+        self.tables.write_image(&self.d, id, view, sview);
     }
 
     /// nvnTextureFinalize: the image goes once the GPU no longer uses it.
@@ -356,9 +418,7 @@ impl Gpu {
             im
         };
         if let Some(im) = im {
-            let f = self.q.last_fence();
-            self.q.defer(
-                f,
+            self.q.defer_after_use(
                 Box::new(move |g: &Gpu| unsafe {
                     for v in im.views.values() {
                         g.dev().destroy_image_view(*v, None);
@@ -382,7 +442,57 @@ impl Gpu {
 
     /// Start of a submission: textures whose storage the CPU wrote upload again; new images get their layout and
     /// content; texel writes land. All recorded into the submission's upload command buffer.
+    /// A texel buffer view of buffer texture `t` (its format, `width` texels from its storage address), kept until
+    /// `sub` completes; None when its memory or format cannot be viewed. `storage`: a storage texel buffer view.
+    pub fn texel_view(&self, sub: &mut Sub, t: &tex_t, storage: bool) -> Option<vk::BufferView> {
+        let Some(tf) = format::tex_format(t.d.format) else {
+            crate::log::red_once(&format!("buffer texture format {:#x} has no texel buffer format", t.d.format));
+            return None;
+        };
+        let (bpb, bw, bh) = layout::fmt_bpb(t.d.format);
+        if bw != 1 || bh != 1 || bpb == 0 || tf.expand3 != 0 {
+            crate::log::red_once(&format!("buffer texture format {:?} cannot be a texel buffer", tf.vk));
+            return None;
+        }
+        let need = if storage { vk::FormatFeatureFlags::STORAGE_TEXEL_BUFFER } else { vk::FormatFeatureFlags::UNIFORM_TEXEL_BUFFER };
+        let ff = unsafe { self.d.instance.get_physical_device_format_properties(self.d.pdev, tf.vk) }.buffer_features;
+        if !ff.contains(need) {
+            if !storage {
+                crate::log::red_once(&format!("buffer texture format {:?} is not a texel buffer format on this device", tf.vk));
+            }
+            return None;
+        }
+        let max = self.d.props.limits.max_texel_buffer_elements as u64;
+        let n = (t.d.width as u64).min(max) * bpb as u64;
+        if n == 0 || t.mem.is_null() {
+            return None;
+        }
+        let (buf, off, _) = super::mem::resolve(self, sub, t.mem as u64, n)?;
+        if off % self.d.props.limits.min_texel_buffer_offset_alignment != 0 {
+            crate::log::red_once(&format!("buffer texture at an offset Vulkan cannot view ({off:#x})"));
+            return None;
+        }
+        let ci = vk::BufferViewCreateInfo::default().buffer(buf).format(tf.vk).offset(off).range(n);
+        let v = unsafe { self.dev().create_buffer_view(&ci, None) }.ok()?;
+        sub.buffer_views.push(v);
+        Some(v)
+    }
+
+    fn texel_view_persistent(&self, sub: &mut Sub, t: &tex_t, storage: bool) -> Option<vk::BufferView> {
+        let v = self.texel_view(sub, t, storage)?;
+        // the pool set holds it past this submission: it is taken out of the submission's list and kept
+        sub.buffer_views.pop();
+        Some(v)
+    }
+
     pub fn image_begin_submit(&self, sub: &mut Sub, dirty: &[(u64, u64)]) {
+        // buffer textures registered since the last submission: their pool-set views
+        for id in self.tables.take_buf_pending() {
+            let Some(t) = self.tables.buf_tex_at(id) else { continue };
+            let Some(uv) = self.texel_view_persistent(sub, &t, false) else { continue };
+            let sv = self.texel_view_persistent(sub, &t, true);
+            self.tables.write_texel_views(&self.d, id, uv, sv);
+        }
         let mut imgs = self.images.lock().unwrap();
         if !dirty.is_empty() && !imgs.by_addr.is_empty() {
             let max = imgs.max_size;
@@ -396,10 +506,37 @@ impl Gpu {
                 if let Some(im) = imgs.by_serial.get_mut(&s) {
                     let lo = im.tex.mem as u64;
                     let hi = lo + im.tex.l.size;
-                    if !im.gpu_owned && dirty.iter().any(|&(a, n)| a < hi && lo < a + n) {
+                    let covered: u64 = dirty.iter().map(|&(a, n)| (a + n).min(hi).saturating_sub(a.max(lo))).sum();
+                    // a GPU-written texture is taken back from its storage only when the CPU rewrote most of it (a
+                    // decoded movie frame); a write to a page it merely shares keeps the GPU's content
+                    if covered > 0 && (!im.gpu_owned || covered * 2 >= hi - lo) {
+                        // the CPU wrote the storage: its bytes are the texture's newest content, also when the GPU
+                        // wrote the texture before (a movie frame the game decodes into a texture it cleared once:
+                        // Mario Kart 8 Deluxe's mode-select preview stayed black)
+                        if im.gpu_owned {
+                            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                            if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                                crate::vklog!("a texture the GPU wrote was written by the CPU: uploaded again from its storage (later ones are not logged)");
+                            }
+                            im.gpu_owned = false;
+                        }
                         im.needs_upload = true;
                     }
                 }
+            }
+        }
+        // textures of sparse virtual pools: a mapping in their range changed, or the CPU wrote a physical page behind them
+        let vgen = crate::nvn::vpool::generation();
+        let look = vgen != imgs.sparse_seen;
+        imgs.sparse_seen = vgen;
+        for im in imgs.by_serial.values_mut() {
+            let Some((runs, gen)) = im.sparse.as_ref() else { continue };
+            if im.gpu_owned {
+                continue;
+            }
+            let hit = dirty.iter().any(|&(a, n)| runs.iter().any(|&(b, m)| a < b + m && b < a + n));
+            if hit || (look && crate::nvn::vpool::gen_in(im.tex.mem as u64, im.tex.l.size) > *gen) {
+                im.needs_upload = true;
             }
         }
         let serials: Vec<u64> = imgs.by_serial.iter().filter(|(_, i)| i.needs_init || i.needs_upload).map(|(s, _)| *s).collect();
@@ -454,7 +591,7 @@ impl Gpu {
             im.needs_init = false;
         }
         if im.needs_upload && !im.gpu_owned && !im.tex.mem.is_null() {
-            self.upload_from_storage(im, sub);
+            super::perf::timed(super::perf::C::TexUploadNs, || self.upload_from_storage(im, sub));
             super::queue::full_barrier(self, sub.pre);
         }
         im.needs_upload = false;
@@ -463,7 +600,19 @@ impl Gpu {
     fn upload_from_storage(&self, im: &mut Image, sub: &mut Sub) {
         let t = im.tex;
         let d = t.d;
-        let storage = unsafe { core::slice::from_raw_parts(t.mem as *const u8, t.l.size as usize) };
+        // a texture of a sparse virtual pool reads its storage through the pool's page table (unmapped pages as 0)
+        let owned;
+        let storage: &[u8] = if crate::nvn::vpool::is_sparse(t.mem as u64) {
+            let mut v = vec![0u8; t.l.size as usize];
+            let gen = crate::nvn::vpool::generation();
+            let runs = crate::nvn::vpool::copy(t.mem as u64, &mut v).unwrap_or_default();
+            im.sparse = Some((runs, gen));
+            owned = v;
+            &owned
+        } else {
+            super::lazy::touch(t.mem as u64, t.l.size);
+            unsafe { core::slice::from_raw_parts(t.mem as *const u8, t.l.size as usize) }
+        };
         let (bpb, bw, bh) = layout::fmt_bpb(d.format);
         let linear = d.flags as u32 & (tex_flags::LINEAR | tex_flags::LINEAR_RENDER_TARGET) != 0;
         let mut copies = Vec::new();

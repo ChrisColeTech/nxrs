@@ -1,0 +1,6 @@
+# Pokemon Legends Z-A: walk forward, turn the camera, walk on (a save in the world)
+0 0 0 32767 0 0
+2500 0 0 0 20000 0
+3500 0 0 32767 0 0
+6000 0 -32767 0 0 0
+8000 0 0 0 0 0

@@ -3,12 +3,14 @@
 //! the core number without locks). Guest threads run on free host threads, so each guest thread holds one of the
 //! application's cores (three on Switch 1) while it runs guest code, as mkw-recomp's kernel does:
 //!
-//! * it takes a core when it starts (CreateThread's entry goes through `thread_entry`) and gives it back where
-//!   Horizon switches threads: the blocking SVCs (waits, locks, condition variables, address waits, sleep), yields,
-//!   ExitThread, and host functions that block (`without_core`);
+//! * it takes a core when it starts and gives it back where Horizon switches threads: the blocking SVCs (waits,
+//!   locks, condition variables, address waits, sleep), yields, ExitThread, and host functions that block
+//!   (`without_core`). The runtime's kernel tells it through `nxrt::kernel::Scheduler` (thread start and exit,
+//!   blocking enter and leave, priority and core mask changes, GetCurrentProcessorNumber; installed by `init`);
 //! * a free core goes to the best waiting thread that may run there (priority, then first come); a thread prefers
 //!   its ideal core and migrates within its affinity mask;
-//! * preemption at checkpoints: after every SVC, and at every pass of a marked spin-wait loop (`nxos_spin_gate`),
+//! * preemption at checkpoints: after every SVC os answers (`svc.rs`), and at every pass of a marked spin-wait loop
+//!   (the runtime's `rt_spin_gate`, `Scheduler::spin_pass`),
 //!   a thread that holds a core a better thread waits for hands it over and queues again;
 //! * a waiter that has waited 2 ms for a core held by a worse thread (20 ms for an equal or better one: a holder
 //!   spinning in code with no checkpoint) takes the core; the holder gives up its claim at its next checkpoint;
@@ -16,7 +18,6 @@
 //!
 //! `NXOS_FREE_CORES=1` turns the gate off (every thread runs whenever it is ready).
 
-use nxrt::cpu::Cpu;
 use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
@@ -38,8 +39,6 @@ struct Th {
     /// A waiter took its core: it gives up the claim at its next checkpoint.
     displaced: bool,
     handle: u32,
-    entry: u64,
-    arg: u64,
     alive: bool,
 }
 
@@ -65,22 +64,23 @@ fn off() -> bool {
     *OFF.get_or_init(|| std::env::var("NXOS_FREE_CORES").is_ok_and(|v| v == "1"))
 }
 
-/// Configures the core count from the process core mask (before any thread starts).
+/// Configures the core count from the process core mask and installs the scheduler (before any thread starts).
 pub fn init(core_mask: u64) {
     let n = (core_mask.count_ones() as usize).clamp(1, MAX_CORES);
     ST.lock().unwrap().ncores = n;
     STARTED.store(true, Ordering::Relaxed);
+    nxrt::kernel::set_scheduler(&Cores);
     crate::log!(
         "scheduler: {n} virtual cores{}",
         if off() { " are OFF (NXOS_FREE_CORES=1): threads run freely" } else { ", the best ready thread on each; checkpoints at SVCs and spin waits" }
     );
 }
 
-fn new_thread(st: &mut State, prio: i32, ideal: i32, mask: u64, handle: u32, entry: u64, arg: u64) -> usize {
+fn new_thread(st: &mut State, prio: i32, ideal: i32, mask: u64, handle: u32) -> usize {
     let all = (1u64 << st.ncores) - 1;
     let ideal = if ideal < 0 || ideal as usize >= st.ncores { 0 } else { ideal as usize };
     let mask = if mask & all == 0 { 1 << ideal } else { mask & all };
-    st.threads.push(Th { prio, ideal, mask, core: None, waiting: false, wseq: 0, displaced: false, handle, entry, arg, alive: true });
+    st.threads.push(Th { prio, ideal, mask, core: None, waiting: false, wseq: 0, displaced: false, handle, alive: true });
     st.threads.len() - 1
 }
 
@@ -235,34 +235,40 @@ fn by_handle(h: u32) -> Option<usize> {
     st.threads.iter().position(|t| t.handle == h && t.alive)
 }
 
-/// The main thread joins the scheduler (on itself).
-pub fn enter_main(handle: u32, prio: i32, core: i32) {
-    let i = {
-        let mut st = ST.lock().unwrap();
-        new_thread(&mut st, prio, core, 0, handle, 0, 0)
-    };
-    ME.set(Some(i));
-    if !off() {
-        acquire(i);
-    }
+/// The main thread's priority and ideal core (main.npdm), for its start.
+static MAIN: OnceLock<(i32, i32)> = OnceLock::new();
+
+pub fn set_main(prio: i32, core: i32) {
+    let _ = MAIN.set((prio, core));
 }
 
-/// A new thread's first function: takes a core, then runs the guest entry with its argument.
-unsafe fn thread_entry(c: *mut Cpu) {
-    let i = (*c).x[0] as usize;
-    ME.set(Some(i));
-    let (entry, arg) = {
-        let st = ST.lock().unwrap();
-        (st.threads[i].entry, st.threads[i].arg)
+/// The scheduler is on and the calling thread is one of its guest threads.
+pub fn active() -> bool {
+    !off() && STARTED.load(Ordering::Relaxed) && ME.get().is_some()
+}
+
+/// CreateThread made thread `handle` (not started yet): the scheduler's copy of its priority and ideal core.
+pub fn created(handle: u32, prio: i32, core: i32) {
+    let mut st = ST.lock().unwrap();
+    new_thread(&mut st, prio, core, 0, handle);
+}
+
+/// A guest thread starts on this host thread: it takes a core before its entry runs. A thread os did not see
+/// created is the main thread (main.npdm's priority and core).
+fn start(handle: u32) {
+    let i = {
+        let mut st = ST.lock().unwrap();
+        match st.threads.iter().position(|t| t.handle == handle && t.alive) {
+            Some(i) => i,
+            None => {
+                let (prio, core) = MAIN.get().copied().unwrap_or((44, 0));
+                new_thread(&mut st, prio, core, 0, handle)
+            }
+        }
     };
+    ME.set(Some(i));
     if !off() {
         acquire(i);
-    }
-    (*c).x[0] = arg;
-    let r = nxrt::boundary::call_guest(c, entry);
-    finish(i);
-    if r == nxrt::boundary::GuestCall::Returned {
-        crate::log!("[RED] scheduler: a guest thread's entry returned (Horizon requires ExitThread)");
     }
 }
 
@@ -273,62 +279,45 @@ fn finish(i: usize) {
     ST.lock().unwrap().threads[i].alive = false;
 }
 
-/// Hands an SVC to the runtime (threads, synchronization, exit, debug output) and passes its shim status on,
-/// with the core given up around the blocking ones.
-pub unsafe fn delegate(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
-    let me = ME.get().filter(|_| !off() && STARTED.load(Ordering::Relaxed));
-    match (imm, me) {
-        (0x0A, Some(i)) => {
+/// The runtime kernel's view of the virtual cores.
+struct Cores;
+
+impl nxrt::kernel::Scheduler for Cores {
+    fn thread_start(&self, handle: u32, _core: i32) {
+        start(handle);
+    }
+    fn thread_exit(&self, _handle: u32) {
+        if let Some(i) = ME.take() {
             finish(i);
-            nxrt::svc::nxrt_svc_impl(c, imm, pc)
         }
-        (0x0B, Some(i)) => {
-            // SleepThread: 0 / -1 / -2 are yields (to the same priority, with migration, to anyone)
-            let ns = (*c).x[0] as i64;
-            if ns <= 0 {
-                checkpoint(ns == -2 || ns == -1);
-                std::thread::yield_now();
-                (*c).x[0] = 0;
-                return nxrt::asm::ST_RETURN;
-            }
-            release(i);
-            let r = nxrt::svc::nxrt_svc_impl(c, imm, pc);
-            acquire(i);
-            r
+    }
+    fn block_enter(&self) {
+        if active() {
+            release(ME.get().unwrap());
         }
-        (0x18 | 0x1A | 0x1C | 0x34, Some(i)) => {
-            release(i);
-            let r = nxrt::svc::nxrt_svc_impl(c, imm, pc);
-            acquire(i);
-            r
+    }
+    fn block_leave(&self) {
+        if active() {
+            acquire(ME.get().unwrap());
         }
-        _ => nxrt::svc::nxrt_svc_impl(c, imm, pc),
+    }
+    fn priority_changed(&self, handle: u32, prio: i32) {
+        note_priority(handle, prio);
+    }
+    fn affinity_changed(&self, handle: u32, core: i32, mask: u64) {
+        note_core_mask(handle, core, mask);
+    }
+    fn current_processor(&self) -> Option<u32> {
+        current_core().map(|c| c as u32)
+    }
+    /// A pass of a marked spin-wait loop: give the core to anyone waiting for it (the runtime then lets the host
+    /// run others).
+    fn spin_pass(&self) {
+        checkpoint(true);
     }
 }
 
-/// CreateThread(-> w1 handle; x1 entry, x2 argument, x3 stack top, w4 priority, w5 core): the thread starts in
-/// `thread_entry`, which takes a core first.
-pub unsafe fn create_thread(c: *mut Cpu, pc: u64) -> u32 {
-    let (entry, arg, prio, core) = ((*c).x[1], (*c).x[2], (*c).x[4] as i32, (*c).x[5] as i32);
-    let core = if core == -2 { 0 } else { core };
-    (*c).x[5] = core as u32 as u64;
-    let i = {
-        let mut st = ST.lock().unwrap();
-        new_thread(&mut st, prio, core, 0, 0, entry, arg)
-    };
-    (*c).x[1] = crate::hle::addr("nxos thread entry", thread_entry);
-    (*c).x[2] = i as u64;
-    let r = nxrt::svc::nxrt_svc_impl(c, 0x08, pc);
-    if (*c).x[0] == 0 {
-        ST.lock().unwrap().threads[i].handle = (*c).x[1] as u32;
-    } else {
-        ST.lock().unwrap().threads[i].alive = false;
-    }
-    r
-}
-
-/// SetThreadPriority(w0 handle, w1 priority) / SetThreadCoreMask(w0 handle, w1 ideal core, x2 mask): the
-/// scheduler's copy follows the kernel's.
+/// SetThreadPriority / SetThreadCoreMask applied by the kernel: the scheduler's copy follows the kernel's.
 pub fn note_priority(h: u32, prio: i32) {
     if let Some(i) = by_handle(h) {
         ST.lock().unwrap().threads[i].prio = prio;
@@ -359,15 +348,6 @@ pub fn note_core_mask(h: u32, ideal: i32, mask: u64) {
     CV.notify_all();
 }
 
-/// One pass of a marked spin-wait loop: give the core to anyone waiting for it, else let the host run others.
-#[no_mangle]
-pub extern "C" fn nxos_spin_gate(_c: *mut Cpu, _head: u64) {
-    nxrt::boundary::guard("nxos_spin_gate", || {
-        checkpoint(true);
-        std::thread::yield_now();
-    })
-}
-
 pub fn stats() -> String {
     let st = ST.lock().unwrap();
     let held: Vec<String> = st.owner[..st.ncores].iter().map(|o| o.map_or("-".into(), |i| format!("{:#x}", st.threads[i].handle))).collect();
@@ -382,9 +362,9 @@ mod tests {
     #[test]
     fn best_waiter_and_take() {
         let mut st = State { threads: vec![], owner: [None; MAX_CORES], ncores: 3, seq: 0 };
-        let a = new_thread(&mut st, 44, 0, 0, 1, 0, 0);
-        let b = new_thread(&mut st, 30, 0, 0, 2, 0, 0);
-        let m = new_thread(&mut st, 40, 1, 0b111, 3, 0, 0);
+        let a = new_thread(&mut st, 44, 0, 0, 1);
+        let b = new_thread(&mut st, 30, 0, 0, 2);
+        let m = new_thread(&mut st, 40, 1, 0b111, 3);
         for (k, s) in [(a, 1), (b, 2), (m, 3)] {
             st.threads[k].waiting = true;
             st.threads[k].wseq = s;

@@ -5,16 +5,22 @@ use crate::hle::Registry;
 
 pub mod account;
 pub mod audio;
-pub mod bignum;
+pub mod audren;
+pub mod codec;
+pub mod codec_video;
 pub mod fs;
 pub mod hid;
+pub mod hid_ext;
 pub mod mii;
+pub mod movie;
+pub mod net;
 pub mod misc;
 pub mod oe;
 pub mod os;
 pub mod sdkinit;
 pub mod settings;
 pub mod simple;
+pub mod swkbd;
 pub mod sf;
 pub mod time;
 pub mod vi;
@@ -36,7 +42,13 @@ pub fn register(r: &mut Registry) {
     hid::register(r);
     misc::register(r);
     audio::register(r);
-    bignum::register(r);
+    audren::register(r);
+    codec::register(r);
+    movie::register(r);
+    codec_video::register(r);
+    swkbd::register(r);
+    net::register();
+    net::register_names(r);
 }
 
 /// A host function that returns `v` (a takeover whose answer is constant).

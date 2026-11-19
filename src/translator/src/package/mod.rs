@@ -5,7 +5,7 @@
 //!
 //! | Call | What |
 //! |---|---|
-//! | [`open_game`] | a dumped folder, an `.nsp` (plain, encrypted, combined 1G+1U(+1D)) or a `.nup`, with an [`UpdateChoice`]: ExeFS, RomFS, version, control data, add-on hint |
+//! | [`open_game`] | a dumped folder, an `.nsp` (plain, encrypted, combined 1G+1U(+1D)), an `.xci` or a `.nup`, with an [`UpdateChoice`]: ExeFS, RomFS, version, control data, add-on hint |
 //! | [`Game::write_data`] | stage a build's data folder: `exefs/`, the RomFS marker (`romfs.nsp` / `romfs.nup` / `romfs.dir`), `control.nacp` and icon |
 //! | [`open_data_dir`] | what the runtime calls at start: the game's [`RomFs`] from its data folder's marker |
 //! | [`RomFs`] | `list(dir)`, `walk()`, `find(path)`, `read(path, offset, len)`, `read_file(path)`, `image()`; `Send + Sync` |
@@ -16,6 +16,7 @@
 mod app;
 mod bktr;
 mod cnmt;
+mod compressed;
 mod container;
 mod crypto;
 pub mod dlc;
@@ -49,6 +50,8 @@ pub enum SourceKind {
     Folder,
     Nsp,
     Nup,
+    /// A homebrew NRO file.
+    Nro,
 }
 
 /// A game's ExeFS: what the translator reads.
@@ -122,6 +125,7 @@ enum Detected {
     Folder,
     Nsp,
     Nup,
+    Nro,
 }
 
 fn detect(input: &Path) -> Result<Detected> {
@@ -135,11 +139,15 @@ fn detect(input: &Path) -> Result<Detected> {
     match &blob.read_at(0, 4)?[..] {
         b"PFS0" => Ok(Detected::Nsp),
         m if m == nup::MAGIC => Ok(Detected::Nup),
+        _ if blob.size >= 0x80 && blob.read_at(0x10, 4).is_ok_and(|m| m == b"NRO0") => Ok(Detected::Nro),
+        // a card image (XCI), with or without the 0x1000-byte key area in front: its secure partition's NCAs are read
+        // in place like an NSP's (container::members)
+        _ if [0x100u64, 0x1100].iter().any(|&at| blob.size >= at + 4 && blob.read_at(at, 4).is_ok_and(|m| m == b"HEAD")) => Ok(Detected::Nsp),
         _ => Err(PackageError::Unrecognised(input.to_path_buf())),
     }
 }
 
-/// Open a game: a dumped folder, an NSP or a NUP, applying the update `opts.update` chooses.
+/// Open a game: a dumped folder, an NSP, an XCI (card image) or a NUP, applying the update `opts.update` chooses.
 pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
     let path = io::abspath(input);
     let detected = detect(&path)?;
@@ -171,6 +179,51 @@ pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
                 romfs: Arc::new(romfs),
                 display_version: None,
                 control: BTreeMap::new(),
+                addons: vec![],
+                applied: Applied::None,
+                marker,
+            })
+        }
+        Detected::Nro => {
+            // homebrew: the NRO is `main`; its asset section (after the image) may hold an icon, a control.nacp and
+            // a RomFS, which is read in place (a byte range of the file, as an NSP's plaintext RomFS)
+            let d = std::fs::read(&path).map_err(|source| PackageError::Io { path: path.clone(), source })?;
+            let size = u32::from_le_bytes(d[0x18..0x1c].try_into().unwrap()) as usize;
+            if size < 0x80 || size > d.len() {
+                return fmt(format!("{}: the NRO is cut short", path.display()));
+            }
+            let asset = |which: usize| -> Option<(u64, u64)> {
+                let a = d.get(size..)?;
+                if a.len() < 0x38 || &a[..4] != b"ASET" {
+                    return None;
+                }
+                let at = 8 + which * 0x10;
+                let (o, n) = (u64::from_le_bytes(a[at..at + 8].try_into().unwrap()), u64::from_le_bytes(a[at + 8..at + 16].try_into().unwrap()));
+                (n > 0 && o + n <= a.len() as u64).then_some((size as u64 + o, n))
+            };
+            let mut control = BTreeMap::new();
+            for (which, name) in [(0, "icon_AmericanEnglish.dat"), (1, "control.nacp")] {
+                if let Some((o, n)) = asset(which) {
+                    control.insert(name.to_string(), d[o as usize..(o + n) as usize].to_vec());
+                }
+            }
+            let (romfs, marker) = match asset(2) {
+                Some((o, n)) => {
+                    let blob = Arc::new(io::Blob::open(&path)?);
+                    let image = storage::FileRange { blob, offset: o, size: n };
+                    (RomFs::from_image(Arc::new(image), format!("NRO {}", path.display()))?, (marker::NSP, format!("SWRNSP1\n{}\n{o:x}\n{n:x}\n", path.display())))
+                }
+                None => (RomFs::empty(format!("NRO {}", path.display())), (marker::NONE, String::new())),
+            };
+            let mut files = BTreeMap::new();
+            files.insert("main".to_string(), d[..size].to_vec());
+            Ok(Game {
+                kind: SourceKind::Nro,
+                path,
+                exefs: ExeFs { kind: SourceKind::Nro, title_id: None, version: None, files },
+                romfs: Arc::new(romfs),
+                display_version: None,
+                control,
                 addons: vec![],
                 applied: Applied::None,
                 marker,
@@ -233,8 +286,10 @@ impl Game {
                 return fmt(format!("unsafe ExeFS name in {}: {name:?}", self.path.display()));
             }
             let dst = ex.join(name);
+            // ZBIC segments unpacked: the runtime's loader reads LZ4 only
+            let data = crate::loader::nso::for_runtime(data).or_else(|e| fmt(format!("{}: exefs/{name}: {e}", self.path.display())))?;
             if std::fs::read(&dst).ok().as_deref() != Some(&data[..]) {
-                std::fs::write(&dst, data).map_err(io_err(&dst))?;
+                std::fs::write(&dst, &data[..]).map_err(io_err(&dst))?;
             }
         }
         for e in std::fs::read_dir(&ex).map_err(io_err(&ex))?.flatten() {
@@ -248,8 +303,14 @@ impl Game {
                 let _ = std::fs::remove_file(datadir.join(other));
             }
         }
-        let m = datadir.join(self.marker.0);
-        std::fs::write(&m, &self.marker.1).map_err(io_err(&m))?;
+        if self.marker.0 == marker::NONE {
+            // no RomFS: the runtime finds the empty romfs/ folder
+            let r = datadir.join("romfs");
+            std::fs::create_dir_all(&r).map_err(io_err(&r))?;
+        } else {
+            let m = datadir.join(self.marker.0);
+            std::fs::write(&m, &self.marker.1).map_err(io_err(&m))?;
+        }
         let icons: Vec<&String> = self.control.keys().filter(|n| n.starts_with("icon_")).collect();
         let icon = self.control.get("icon_AmericanEnglish.dat").or_else(|| icons.first().map(|n| &self.control[*n]));
         for (name, blob) in [("control.nacp", self.control.get("control.nacp")), ("icon_AmericanEnglish.dat", icon)] {
@@ -266,7 +327,11 @@ impl Game {
             Applied::LeftOut => say(&format!("Package: the game without the update this package holds: {display} (v{v})")),
             Applied::None => {}
         }
-        say(&format!("RomFS: using {} in place", self.path.display()));
+        if self.marker.0 == marker::NONE {
+            say(&format!("RomFS: {} has none", self.path.display()));
+        } else {
+            say(&format!("RomFS: using {} in place", self.path.display()));
+        }
         if !self.addons.is_empty() {
             let ids: Vec<String> = self.addons.iter().map(|t| format!("{t:016x}")).collect();
             say(&format!(

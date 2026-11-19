@@ -77,15 +77,74 @@ fn rd32(b: &[u8], o: usize) -> Result<u32, NsoError> {
     b.get(o..o + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap())).ok_or(NsoError::Bounds(o))
 }
 
+/// One compressed segment: a ZBIC frame (Switch 2) or an LZ4 block.
+pub fn unpack_segment(data: &[u8], size: usize) -> Result<Vec<u8>, String> {
+    if super::zbic::is_zbic(data) {
+        super::zbic::decompress(data, size)
+    } else {
+        lz4_flex::block::decompress(data, size).map_err(|e| format!("LZ4: {e}"))
+    }
+}
+
+/// An NSO as the runtime's loader reads it. The runtime unpacks LZ4 segments only, so an NSO with ZBIC segments
+/// (Ocarina of Time's `main`: flags 0xff) is stored with its three segments unpacked: the same header (build id,
+/// memory layout, hashes), the compression flags cleared, file offsets and sizes of the stored bytes. Any other file
+/// comes back unchanged.
+pub fn for_runtime(d: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, String> {
+    use std::borrow::Cow;
+    if d.len() < 0x100 || &d[..4] != b"NSO0" {
+        return Ok(Cow::Borrowed(d));
+    }
+    let r = |o: usize| u32::from_le_bytes(d[o..o + 4].try_into().unwrap());
+    let flags = r(0xC);
+    let segs: Vec<(usize, usize, usize)> =
+        (0..3).map(|i| (r(0x10 + i * 0x10) as usize, r(0x18 + i * 0x10) as usize, r(0x60 + i * 4) as usize)).collect();
+    let packed = |i: usize| flags >> i & 1 != 0;
+    let zbic = flags & super::zbic::NSO_FLAG_ZBIC != 0
+        || (0..3).any(|i| packed(i) && d.get(segs[i].0..segs[i].0 + segs[i].2).is_some_and(super::zbic::is_zbic));
+    if !zbic {
+        return Ok(Cow::Borrowed(d));
+    }
+    let mut head = d[..0x100].to_vec();
+    let mut body = vec![];
+    let mut at = 0x100usize;
+    for (i, &(foff, size, stored)) in segs.iter().enumerate() {
+        let raw = d.get(foff..foff + if packed(i) { stored } else { size }).ok_or(format!("segment {i} is truncated"))?;
+        let seg = if packed(i) { unpack_segment(raw, size).map_err(|e| format!("segment {i}: {e}"))? } else { raw.to_vec() };
+        if seg.len() < size {
+            return Err(format!("segment {i} is truncated"));
+        }
+        head[0x10 + i * 0x10..0x14 + i * 0x10].copy_from_slice(&(at as u32).to_le_bytes());
+        head[0x60 + i * 4..0x64 + i * 4].copy_from_slice(&(size as u32).to_le_bytes());
+        body.extend_from_slice(&seg[..size]);
+        at += size;
+    }
+    head[0xC..0x10].copy_from_slice(&(flags & !(7 | super::zbic::NSO_FLAG_ZBIC)).to_le_bytes());
+    head.extend_from_slice(&body);
+    Ok(Cow::Owned(head))
+}
+
+/// An NRO (homebrew) as (text, rodata, data) segments at their file offsets, which are their memory offsets: (offset,
+/// size) each, and the bss size. `NRO0` at +0x10, the image size at +0x18, segments from +0x20, bss at +0x38.
+fn nro_segments(raw: &[u8]) -> Option<([(usize, usize); 3], u32, usize)> {
+    if raw.get(0x10..0x14) != Some(b"NRO0") {
+        return None;
+    }
+    let r = |o: usize| rd32(raw, o).ok().map(|v| v as usize);
+    let size = r(0x18)?;
+    let segs = [(r(0x20)?, r(0x24)?), (r(0x28)?, r(0x2C)?), (r(0x30)?, r(0x34)?)];
+    (size <= raw.len() && segs.iter().all(|&(o, n)| o + n <= size)).then_some((segs, r(0x38)? as u32, size))
+}
+
 impl Nso {
     pub fn parse(raw: &[u8]) -> Result<Nso, NsoError> {
+        if let Some((segs, bss, _)) = nro_segments(raw) {
+            return Self::from_segments(raw, &segs.map(|(o, n)| (o, raw[o..o + n].to_vec())), bss);
+        }
         if raw.get(..4) != Some(b"NSO0") {
             return Err(NsoError::Magic);
         }
         let flags = rd32(raw, 0xC)?;
-        let bid = raw.get(0x40..0x60).ok_or(NsoError::Bounds(0x40))?;
-        let end = bid.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
-        let build_id = bid[..end].iter().map(|b| format!("{b:02x}")).collect::<String>();
         let mut segs = Vec::new();
         for i in 0..3 {
             let file_off = rd32(raw, 0x10 + i * 0x10)? as usize;
@@ -96,20 +155,29 @@ impl Nso {
                 .get(file_off..file_off + comp_size)
                 .ok_or_else(|| NsoError::Segment(i, "truncated".into()))?;
             let data = if flags & (1 << i) != 0 {
-                lz4_flex::block::decompress(data, dec_size).map_err(|e| NsoError::Segment(i, e.to_string()))?
+                unpack_segment(data, dec_size).map_err(|e| NsoError::Segment(i, e))?
             } else {
                 data.to_vec()
             };
             segs.push((mem_off, data));
         }
-        let bss_size = rd32(raw, 0x3C)?;
+        let segs: [(usize, Vec<u8>); 3] = segs.try_into().unwrap();
+        Self::from_segments(raw, &segs, rd32(raw, 0x3C)?)
+    }
+
+    /// The image from its three segments (memory offset, bytes) and the bss size; the build id at +0x40 (NSO and NRO
+    /// alike).
+    fn from_segments(raw: &[u8], segs: &[(usize, Vec<u8>); 3], bss_size: u32) -> Result<Nso, NsoError> {
+        let bid = raw.get(0x40..0x60).ok_or(NsoError::Bounds(0x40))?;
+        let end = bid.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
+        let build_id = bid[..end].iter().map(|b| format!("{b:02x}")).collect::<String>();
         let text = (segs[0].0, segs[0].1.len());
         let rodata = (segs[1].0, segs[1].1.len());
         let data = (segs[2].0, segs[2].1.len());
         let end = segs[2].0 + segs[2].1.len() + bss_size as usize;
         let size = (end + 0xFFF) & !0xFFF;
         let mut image = vec![0u8; size];
-        for (off, d) in &segs {
+        for (off, d) in segs.iter() {
             image[*off..*off + d.len()].copy_from_slice(d);
         }
         let mut n = Nso {

@@ -1,72 +1,50 @@
-//! The SVC entry of the generated code as the os layer builds it: the translated C calls `nxos_svc` (the os
-//! layer's `cpu.h` overlay renames `rt_svc`), which answers the memory, IPC, information and counter SVCs here and
-//! hands the rest (threads, synchronization, ExitThread, ExitProcess, debug output) to the runtime's
-//! `nxrt_svc_impl`, whose shim status it passes on. An SVC neither side handles answers success with an
-//! `UNIMPL Svc` gap line, as on nxnative.
+//! The os layer's SVCs on the runtime's registry (`nxrt::svc::set_handler`, installed by `install` before any
+//! guest code runs): the memory, IPC, information and counter SVCs are answered here; the kernel's (threads,
+//! synchronization) go to `nxrt::kernel::svc`, which tells the scheduler (`sched.rs`) about blocking waits; ExitThread,
+//! ExitProcess and Break are left to the runtime. After every SVC answered here comes the scheduler's checkpoint. An
+//! SVC nobody handles (the runtime's fallback) answers success with an `UNIMPL Svc` gap line, as on nxnative.
 //!
-//! The counter (`nxos_ticks`, CNTPCT/CNTVCT and GetSystemTick) runs at the title's rate: 19.2 MHz on Switch 1,
-//! 31.25 MHz on Switch 2 (`nxos_tick_hz`, also what CNTFRQ reads).
+//! The counter (CNTPCT/CNTVCT and GetSystemTick, the runtime's `rt_ticks`) runs at the title's rate (19.2 MHz on
+//! Switch 1, 31.25 MHz on Switch 2: the runtime's `rt_tick_hz`, also what CNTFRQ reads) on the guest clock
+//! (`clock.rs`, through `nxrt::rt::set_clock`), starting at 0.
 
 use crate::guest::{r32, w32, w64};
 use crate::log::Gap;
 use nxrt::cpu::Cpu;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-core::arch::global_asm!(
-    ".text",
-    ".globl nxos_svc",
-    ".p2align 4",
-    ".seh_proc nxos_svc",
-    "nxos_svc:",
-    "push rcx",
-    ".seh_pushreg rcx",
-    "sub rsp, 32",
-    ".seh_stackalloc 32",
-    ".seh_endprologue",
-    "call nxos_svc_impl",
-    "add rsp, 32",
-    "pop rcx",
-    "test eax, eax",
-    "jnz 2f",
-    "ret",
-    "2:",
-    "cmp eax, 1",
-    "je rt_dispatch",
-    "jmp nxrt_jump_pending",
-    ".seh_endproc",
-);
-
-/// The counter rate (CNTFRQ): set from the profile before any guest code runs.
-#[no_mangle]
-pub static mut nxos_tick_hz: u32 = 19_200_000;
-
 static T0: AtomicU64 = AtomicU64::new(0);
 
+/// The counter rate (CNTFRQ): set from the profile before any guest code runs (after `kernel::init`, whose start-up
+/// sets the runtime's default).
 pub fn set_tick_hz(hz: u32) {
-    unsafe { nxos_tick_hz = hz };
+    nxrt::rt::set_tick_hz(hz);
 }
 
 pub fn tick_hz() -> u64 {
-    unsafe { nxos_tick_hz as u64 }
+    nxrt::rt::tick_hz() as u64
 }
 
-/// The guest's system counter.
-#[no_mangle]
-pub extern "C" fn nxos_ticks() -> u64 {
-    let ns = nxrt::rt::now_ns();
+/// The counter's time base: the guest clock since the first reading, in ns.
+fn counter_ns() -> u64 {
+    let ns = crate::clock::now_ns();
     let t0 = T0.load(Ordering::Relaxed);
-    let ns = if t0 == 0 {
+    if t0 == 0 {
         let _ = T0.compare_exchange(0, ns, Ordering::Relaxed, Ordering::Relaxed);
         0
     } else {
         ns - t0.min(ns)
-    };
-    (ns as u128 * tick_hz() as u128 / 1_000_000_000) as u64
+    }
+}
+
+/// The guest's system counter.
+pub fn ticks() -> u64 {
+    nxrt::rt::rt_ticks()
 }
 
 /// Nanoseconds of the guest clock (the counter's time base).
 pub fn guest_ns() -> u64 {
-    (nxos_ticks() as u128 * 1_000_000_000 / tick_hz() as u128) as u64
+    (ticks() as u128 * 1_000_000_000 / tick_hz() as u128) as u64
 }
 
 static COUNTS: [AtomicU64; 0x80] = [const { AtomicU64::new(0) }; 0x80];
@@ -78,12 +56,21 @@ pub fn counts() -> Vec<(u32, u64)> {
     }).collect()
 }
 
-/// SVCs the runtime answers (memory and debug ones it has are answered here instead).
-fn runtime_handles(imm: u32) -> bool {
-    matches!(
-        imm,
-        0x07 | 0x08 | 0x09 | 0x0A | 0x0B | 0x0C | 0x0D | 0x0E | 0x0F | 0x10 | 0x11 | 0x12 | 0x16 | 0x17 | 0x18 | 0x19 | 0x1A | 0x1B | 0x1C | 0x1D | 0x25 | 0x26 | 0x27 | 0x34 | 0x35 | 0x45
-    )
+/// The SVCs os registers: its own and the kernel's (0x07 ExitProcess and 0x0A ExitThread are counted, then left to
+/// the runtime).
+const SERVED: &[u8] = &[
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
+    0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x21, 0x22, 0x24, 0x25, 0x26, 0x27, 0x29, 0x2C, 0x2D,
+    0x34, 0x35, 0x36, 0x45,
+];
+
+/// Registers os's SVCs, the fallback and the counter's clock with the runtime (before any guest code runs).
+pub fn install() {
+    for &imm in SERVED {
+        nxrt::svc::set_handler(imm, handle);
+    }
+    nxrt::svc::set_fallback(unhandled);
+    nxrt::rt::set_clock(counter_ns);
 }
 
 pub fn name(imm: u32) -> &'static str {
@@ -149,23 +136,39 @@ fn shared_of(h: u32) -> Option<&'static SharedMem> {
     SHARED.lock().unwrap().iter().find(|s| s.handle == h).copied()
 }
 
-#[no_mangle]
-pub unsafe extern "C" fn nxos_svc_impl(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
-    nxrt::boundary::guard("nxos_svc", || {
-        let st = svc(c, imm, pc);
+/// os's handler for every SVC in `SERVED`: true = answered (the checkpoint follows), false = the runtime's.
+fn handle(cpu: &mut Cpu, imm: u32) -> bool {
+    let pc = nxrt::svc::caller_pc();
+    // SAFETY: the calling guest thread's own state, as the runtime hands it.
+    let done = unsafe { svc(cpu, imm, pc) };
+    if done {
         // the scheduler's checkpoint: a better thread waiting for this core runs first
-        if st == nxrt::asm::ST_RETURN && imm != 0x0A {
-            crate::sched::checkpoint(false);
-        }
-        st
-    })
+        crate::sched::checkpoint(false);
+    }
+    done
 }
 
-unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
+/// An SVC neither os nor the runtime handles: success, with a gap line.
+fn unhandled(cpu: &mut Cpu, imm: u32) -> bool {
     if let Some(n) = COUNTS.get(imm as usize) {
         n.fetch_add(1, Ordering::Relaxed);
     }
-    let cpu = &mut *c;
+    let pc = nxrt::svc::caller_pc();
+    crate::log::gap(Gap::Svc, &format!("svc {imm:#x} {}", name(imm)), &format!("at {}, answered success", nxrt::dispatch::guest_name(pc)));
+    cpu.x[0] = 0;
+    crate::sched::checkpoint(false);
+    true
+}
+
+/// The kernel's handling of a thread / synchronization SVC.
+fn kernel(cpu: &mut Cpu, imm: u32) -> bool {
+    nxrt::kernel::svc(cpu, imm)
+}
+
+unsafe fn svc(cpu: &mut Cpu, imm: u32, pc: u64) -> bool {
+    if let Some(n) = COUNTS.get(imm as usize) {
+        n.fetch_add(1, Ordering::Relaxed);
+    }
     if crate::trace::on("svc") && imm != 0x27 && imm != 0x1E {
         crate::log!("svc {imm:#04x} {} at {} x0 {:#x} x1 {:#x} x2 {:#x} x3 {:#x}", name(imm), nxrt::dispatch::guest_name(pc), cpu.x[0], cpu.x[1], cpu.x[2], cpu.x[3]);
     }
@@ -220,7 +223,7 @@ unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
             cpu.x[1] = (0xD100_0000 | (TRANSFER.fetch_add(1, Ordering::Relaxed) & 0x7FFF)) as u64;
         }
         0x1E => {
-            cpu.x[0] = nxos_ticks();
+            cpu.x[0] = ticks();
         }
         0x1F => {
             // ConnectToNamedPort(-> w1 handle; x1 name)
@@ -261,7 +264,7 @@ unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
                 crate::log!("svcBreak reason {reason:#x} result {res:#x} at {}", nxrt::dispatch::guest_name(pc));
                 crate::log::report_gaps("svcBreak");
             }
-            return nxrt::svc::nxrt_svc_impl(c, imm, pc);
+            return false;
         }
         0x29 => {
             // GetInfo(-> x1; w1 id0, w2 handle, x3 id1)
@@ -277,7 +280,9 @@ unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
                 20 => Some(user_exception_context()),
                 23 => Some(1),
                 24 => Some(96u64.saturating_sub(THREADS.load(Ordering::Relaxed))),
-                25..=28 => Some(0),
+                // 29, 30: Switch 2 kernels' newer ids (0 as Turbo answers); 33: their page size (Turbo kernel.c)
+                25..=30 => Some(0),
+                33 => Some(0x1000),
                 _ => m.info(id0),
             };
             match v {
@@ -296,40 +301,46 @@ unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
         0x2D => cpu.x[0] = m.physical(cpu.x[0], cpu.x[1], false),
         0x36 => cpu.x[0] = 0,
         0x08 => {
+            // CreateThread(-> w1 handle; x1 entry, x2 argument, x3 stack top, w4 priority, w5 core): the scheduler
+            // learns the thread here, and gives it a core when it starts (`Scheduler::thread_start`)
             THREADS.fetch_add(1, Ordering::Relaxed);
-            return crate::sched::create_thread(c, pc);
-        }
-        0x16 => {
-            crate::services::os::handle_closed(cpu.x[0] as u32);
-            return crate::sched::delegate(c, imm, pc);
-        }
-        0x0D => {
-            let (h, p) = (cpu.x[0] as u32, cpu.x[1] as i32);
-            let st = crate::sched::delegate(c, imm, pc);
-            if (*c).x[0] == 0 {
-                crate::sched::note_priority(h, p);
+            let (prio, core) = (cpu.x[4] as i32, cpu.x[5] as i32);
+            let core = if core == -2 { 0 } else { core };
+            cpu.x[5] = core as u32 as u64;
+            if !kernel(cpu, imm) {
+                return false;
             }
-            return st;
-        }
-        0x0F => {
-            let (h, ideal, mask) = (cpu.x[0] as u32, cpu.x[1] as i32, cpu.x[2]);
-            let st = crate::sched::delegate(c, imm, pc);
-            if (*c).x[0] == 0 {
-                crate::sched::note_core_mask(h, ideal, mask);
+            if cpu.x[0] == 0 {
+                crate::sched::created(cpu.x[1] as u32, prio, core);
             }
-            return st;
         }
-        0x10 => match crate::sched::current_core() {
-            Some(core) => cpu.x[0] = core as u64,
-            None => return crate::sched::delegate(c, imm, pc),
-        },
-        _ if runtime_handles(imm) => return crate::sched::delegate(c, imm, pc),
-        _ => {
-            crate::log::gap(Gap::Svc, &format!("svc {imm:#x} {}", name(imm)), &format!("at {}, answered success", nxrt::dispatch::guest_name(pc)));
+        0x0B if crate::sched::active() && (cpu.x[0] as i64) <= 0 => {
+            // SleepThread 0 / -1 / -2: yields (to the same priority, with migration, to anyone)
+            let ns = cpu.x[0] as i64;
+            crate::sched::checkpoint(ns == -2 || ns == -1);
+            std::thread::yield_now();
             cpu.x[0] = 0;
         }
+        // ExitProcess, ExitThread: the runtime's (the scheduler hears of the thread's end in `thread_exit`)
+        0x07 | 0x0A => return false,
+        0x16 => {
+            crate::services::os::handle_closed(cpu.x[0] as u32);
+            return kernel(cpu, imm);
+        }
+        0x27 => {
+            // OutputDebugString(x0 string, x1 size): the guest's output, to stdout
+            use std::io::Write;
+            let s = core::slice::from_raw_parts(cpu.x[0] as *const u8, cpu.x[1] as usize);
+            let mut o = std::io::stdout().lock();
+            let _ = o.write_all(s);
+            let _ = o.flush();
+            cpu.x[0] = 0;
+        }
+        // threads and synchronization (SetThreadPriority / SetThreadCoreMask / GetCurrentProcessorNumber reach the
+        // scheduler through its hooks, the blocking waits through block_enter / block_leave)
+        _ => return kernel(cpu, imm),
     }
-    nxrt::asm::ST_RETURN
+    true
 }
 
 static THREADS: AtomicU64 = AtomicU64::new(1);

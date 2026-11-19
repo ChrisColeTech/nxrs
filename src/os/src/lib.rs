@@ -5,12 +5,16 @@
 
 pub mod log;
 pub mod boot;
+pub mod clock;
 pub mod guest;
 pub mod hle;
+pub mod input;
 pub mod ipc;
 pub mod kobj;
 pub mod mem;
+pub mod media;
 pub mod nvn;
+pub mod options;
 pub mod profile;
 pub mod sched;
 pub mod services;

@@ -9,17 +9,24 @@
 //!   back end gives every address its placement on the discrete GPU (`vk::mem`).
 
 pub mod cmd;
+pub mod cmd2;
+pub mod native;
 pub mod device;
 pub mod entry;
 pub mod nops;
 pub mod obj;
 pub mod pool;
 pub mod prog;
+pub mod prog2;
+pub mod query;
+pub mod dlss;
+pub mod devbuf;
 pub mod queue;
 pub mod state;
 pub mod sync;
 pub mod tex;
 pub mod types;
+pub mod vpool;
 pub mod window;
 
 pub use entry::{find, procs, resolve, set_proc_resolver, Entry, HostFn};

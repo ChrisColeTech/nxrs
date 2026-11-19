@@ -1,0 +1,9 @@
+# Donkey Kong Bananza: press Y (punch) four times, one a second
+0 8 0 0 0 0
+250 0 0 0 0 0
+1000 8 0 0 0 0
+1250 0 0 0 0 0
+2000 8 0 0 0 0
+2250 0 0 0 0 0
+3000 8 0 0 0 0
+3250 0 0 0 0 0

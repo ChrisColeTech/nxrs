@@ -1,0 +1,10 @@
+[package]
+name = "config"
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+description = "RecompLauncher engine: the game's settings (<name>.ini, Turbo's options), published to every part, and the control-command registry"
+
+[lib]
+name = "nxconfig"
+path = "src/lib.rs"

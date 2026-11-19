@@ -228,6 +228,50 @@ pub fn prebuild_data(data: &Path, opts: &Options, say: &(dyn Fn(&str) + Sync)) -
     build_from_scan(rep, &data.join("shaders"), opts, say, t0)
 }
 
+/// The stage of a control section + code area as the scan reads it: NVN2 by its control's stage byte or SPH, NVN by
+/// the code area's magic (compute) or its SPH.
+pub fn stage_of(ctl: &[u8], code: &[u8]) -> Option<Stage> {
+    if crate::nvn::nvn2_ctl(ctl) {
+        return crate::nvn::nvn2_stage(ctl, code);
+    }
+    if code.get(..4) == Some(&crate::nvn::CS_MAGIC[..]) {
+        return Some(Stage::Cs);
+    }
+    crate::nvn::sph_stage(code)
+}
+
+/// The live translator: one shader the game set at run time that the build did not find (its key was missing from
+/// `<data>/shaders`), translated and validated into `<out_dir>/<key>/` in the build's layout (`spv/<key>.spv` +
+/// `.json`, `manifest.tsv`). Returns its key. Blocking; the graphics layer runs it on a thread of its own.
+pub fn translate_one(ctl: &[u8], code: &[u8], out_dir: &Path) -> Result<String, String> {
+    let stage = stage_of(ctl, code).ok_or("the shader's stage cannot be told")?;
+    if let Some(why) = crate::nvn::check(stage, ctl, code) {
+        return Err(why.to_string());
+    }
+    let key = crate::nvn::skey(ctl, code);
+    let mut shaders = BTreeMap::new();
+    shaders.insert(key.clone(), scan::Shader { key: key.clone(), stage, ctl: ctl.to_vec(), code: code.to_vec(), source: "live (set by the game at run time)".into(), copies: 1 });
+    let rep = ScanReport {
+        shaders,
+        pairs: Default::default(),
+        problems: vec![],
+        conflicts: vec![],
+        files: 0,
+        bytes_read: 0,
+        seconds: 0.0,
+        by_reader: Default::default(),
+        zstd_dicts: 0,
+        oodle_streams: 0,
+    };
+    let opts = Options { jobs: 1, ..Default::default() };
+    let r = build_from_scan(rep, &out_dir.join(&key), &opts, &|_| {}, Instant::now())?;
+    if r.valid == 1 {
+        Ok(key)
+    } else {
+        Err(format!("translated {}, failed {}, invalid {}", r.translated, r.failed, r.invalid))
+    }
+}
+
 /// Translate and write what a scan found (used by [`prebuild`]).
 pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(dyn Fn(&str) + Sync), t0: Instant) -> Result<Report, String> {
     let mut report = Report {
@@ -361,7 +405,7 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
             let p = xl_dir.join(format!("{k}.spv"));
             let Ok(mut b) = std::fs::read(&p) else { continue };
             let mut names = vec![];
-            for f in [crate::fixes::storage_format_caps, crate::fixes::size_query_components] {
+            for f in [crate::fixes::storage_format_caps, crate::fixes::size_query_components, crate::fixes::dynamic_offsets] {
                 if let Some((fixed, n)) = f(&b) {
                     b = fixed;
                     names.extend(n);

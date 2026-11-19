@@ -22,6 +22,7 @@ pub struct Patched {
     pub patch: SectionStorage,
     pub base: Option<Arc<dyn Storage>>,
     /// (indirect offset, size, AesCtrEx offset, size) in the patch section.
+    #[allow(dead_code)]
     pub tables: (u64, u64, u64, u64),
     /// (virtual offset, physical offset, source)
     pub relocations: Vec<(u64, u64, u32)>,

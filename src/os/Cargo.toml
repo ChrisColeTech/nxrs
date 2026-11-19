@@ -16,8 +16,13 @@ name = "nxos-dev"
 path = "src/bin/nxos_dev.rs"
 
 [dependencies]
+cpal = "0.18"
+lewton = "0.10"
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Foundation", "Foundation_Collections", "Devices", "Devices_Bluetooth", "Devices_Bluetooth_Advertisement", "Devices_Bluetooth_GenericAttributeProfile", "Storage", "Storage_Streams"] }
 runtime = { path = "../runtime" }
 translator = { path = "../translator" }
+nxgfx = { package = "graphics", path = "../graphics" }
+nxconfig = { package = "config", path = "../config" }
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Memory",
@@ -27,4 +32,18 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_SystemInformation",
     "Win32_System_ProcessStatus",
     "Win32_System_Time",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_Storage_FileSystem",
+    "Win32_Devices_HumanInterfaceDevice",
+    "Win32_Devices_DeviceAndDriverInstallation",
+    "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_Graphics_Gdi",
 ] }
+
+[[bin]]
+name = "nxinput"
+path = "src/bin/nxinput.rs"

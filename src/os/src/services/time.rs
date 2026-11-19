@@ -20,7 +20,7 @@ pub fn now() -> i64 {
 }
 
 fn steady_secs() -> i64 {
-    (nxrt::rt::now_ns() / 1_000_000_000) as i64
+    (crate::clock::now_ns() / 1_000_000_000) as i64
 }
 
 /// The host's offset from UTC now, in seconds (daylight saving included), and its zone abbreviation.
@@ -166,7 +166,7 @@ tfn!(timespec, |a| {
     0
 });
 tfn!(mono_timespec, |a| {
-    let ns = nxrt::rt::now_ns();
+    let ns = crate::clock::now_ns();
     w64(a.x(0), ns / 1_000_000_000);
     w64(a.x(0) + 8, ns % 1_000_000_000);
     0

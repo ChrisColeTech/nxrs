@@ -15,7 +15,9 @@ byte for byte, apart from three additions the runtime needs (below). Credits and
     nxrs dlc install | sync | remove | list --datadir <dir> [package or title id...]
 
 - `<input>`: a dumped folder (`exefs/` + `romfs/`), an `.nsp` (plain or encrypted; a combined 1G+1U(+1D) package
-  applies its own update unless `--no-update`), or a `.nup`. For `romfs`, also a built game's data folder.
+  applies its own update unless `--no-update`), an `.xci` (card image, with or without the key area; its secure
+  partition read like an NSP), a `.nup`, or a homebrew `.nro` (its asset section's icon, control.nacp and RomFS). For
+  `romfs`, also a built game's data folder.
 - Keys: `--keys`, else `SWR_PROD_KEYS`, else `%LOCALAPPDATA%\RecompLauncher\RecompLauncher\keys\prod.keys`. Inputs
   are only read; key values are never printed or written (markers carry content keys still wrapped, as the package
   holds them).
@@ -33,7 +35,7 @@ byte for byte, apart from three additions the runtime needs (below). Credits and
 | Module | What |
 |---|---|
 | `package/` | package input, see below |
-| `loader/` | NSO: LZ4 segments, MOD0, symbols (DT_HASH / DT_GNU_HASH), RELA/JMPREL/RELR, function seeds, guest layout |
+| `loader/` | NSO (LZ4 or ZBIC segments) and NRO, MOD0, symbols (DT_HASH / DT_GNU_HASH), RELA/JMPREL/RELR, function seeds, guest layout; `zbic.rs` is the engine's one ZBIC decoder (shaders uses it) |
 | `xlate/` | the lifter (integer, branch, load/store, system, exclusives, LSE atomics, PAC as identity), FP / AdvSIMD / crypto / CRC32 as portable C, NZCV and registers in function locals, symbolic jump tables |
 | `aot/` | function discovery, chunking, parallel emission (threads), tables, manifests, the patch table (sites, spans, spin waits) |
 | `runtime/` | `cpu.h`, `simd.h`, `simd_fp.h`: the headers the generated C includes |
@@ -46,6 +48,7 @@ byte for byte, apart from three additions the runtime needs (below). Credits and
 | Functions holding a C++ landing pad (`.eh_frame` FDE → LSDA → call-site table) are built resumable, like setjmp callers (`rt_sj_owner`, every instruction a label) | an unwinder resumes in the middle of the function | 3,638 functions (main 3,070, sdk 568) |
 | A `ret` that ends a context restore (x30 loaded through a base other than sp, sp set from a register other than x29: libunwind's `jumpto`) is lowered as `c->pc = x30` + dispatch | it resumes into a landing pad, not a caller | 1 function (sdk `f_7004c172d4`) |
 | Each module's first instruction is a seed | the runtime starts it even with no unwind entry or symbol | none (already a start in every module) |
+| Code reached by name is a seed: every relocation naming a symbol the module defines in `.text` (any type), every global untyped symbol defined there | hand-written routines are exported untyped and reached only through the PLT (MK8D's six `nndetailCryptoBignum*`) | — |
 
 Every other function and file is identical (242,014 functions; the tables, layout and patch headers).
 
@@ -68,6 +71,8 @@ How each source is read, with nothing extracted:
 |---|---|
 | NSP, plaintext | a byte range of the package |
 | NSP, encrypted | AES-CTR per read; content key from the ticket (`titlekek_XX`) or the NCA key area |
+| XCI | as an NSP (the secure partition's NCAs); a compressed NCA section (FS header CompressionInfo: LZ4, zero and plain runs; Super Mario Party Jamboree) is decompressed per block (`compressed.rs`); the marker adds a `compressed` row |
+| NRO | the asset section's RomFS as a byte range of the file (`SWRNSP1`), or an empty `romfs/` |
 | NSP with an update (combined, or `--update` NSP / XCI / bare NCA + `.tik`) | BKTR per read: the indirect (relocation) table over the game's section and the update's, the update's ranges decrypted with the counter generation of its AesCtrEx table |
 | NUP | its file tree; raw entries are ranges, zstd entries are decoded once (256 MiB LRU cache) |
 | folder | its `romfs/` |
@@ -75,8 +80,13 @@ How each source is read, with nothing extracted:
 
 Refused with Turbo's reasons: an update for another game (`this update is for <id>, not for this game (<id>)`), a
 package with no update, an update on its own as the game, a console-bound (personalized) ticket, a missing ticket,
-keys without the content's generation, compressed NSZ / XCZ updates, sparse or compressed NCA storage, a separate
-update for a NUP or folder game.
+keys without the content's generation, compressed NSZ / XCZ updates and games, sparse NCA storage, a separate update
+for a NUP or folder game.
+
+**ZBIC.** Switch 2 NSOs may store their segments as ZBIC frames (Ocarina of Time's `main`: flags 0xff): zstd with the
+`ZBIC` magic and binary-interpolative-coded FSE table headers, rewritten here into standard ones for the stock zstd
+decoder (`loader/zbic.rs`). The build writes such an NSO into `<data>\exefs` with its segments unpacked (same header,
+build id and hashes; compression flags cleared), since the runtime reads LZ4 only.
 
 ### Markers (the build records what the runtime reads)
 
@@ -102,22 +112,26 @@ UTF-8 (Turbo's Python prints them in the console code page).
 
 ## Verification
 
-- `cargo test`: 54 fast tests (well under a second to run): lifter classes, SIMD, flags, registers, the patch table,
-  partitioning, an end-to-end generate, PFS0 / HFS0 (XCI with and without the key area), keys, AES / XTS / CTR,
+- `cargo test`: 57 fast tests (well under a second to run): lifter classes, SIMD, flags, registers, the patch table,
+  partitioning, an end-to-end generate, the ZBIC reference vector, compressed NCA storage, a game XCI (with and
+  without the key area), PFS0 / HFS0, keys, AES / XTS / CTR,
   tickets, cnmt, NUP (zstd, the RomFS cache), BKTR tables, the RomFS image parser, the DLC manifest and
   `install.json`, and a synthetic package suite with test keys: a combined game + update + DLC (two counter
   generations changing mid-block), separate updates as NSP / XCI / bare NCA, `--no-update`, the markers read back,
   `update-info`, every refusal, DLC from NSP / XCI / NCA / NSZ (solid and block).
-- `cargo test --release -- --ignored`: differential checks on real data (SIMD words, jump tables, packages).
+- `cargo test --release -- --ignored`: differential checks on real data (SIMD words, jump tables, packages; the
+  owner's Super Mario Party Jamboree XCI: its compressed RomFS's stored blocks match the IVFC hashes and all 139 NROs
+  read through the LZ4 blocks match the game's NRR list).
+- Real builds: Ocarina of Time (ZBIC `main`, 297,043 functions) translates and builds; MK8D's six bignum routines are
+  lifted functions; Super Mario Party Jamboree opens as an XCI (ExeFS, 1,539 RomFS files).
 - `scripts/pkg/`: reference listings and hashes from the owner's Turbo readers, and `compare.sh` for nxrs.
 - `scripts/compare_gen.py <ref> <ours>`, `scripts/cc_check.sh <gen dir> <chunks...>`: generated C against
   mkw-recomp, and a clang compile check.
 
 ## Not done yet
 
-- XCI or NSZ as the game's own package (only as update or DLC), compressed (NSZ / XCZ) updates, sparse or
-  compressed NCA storage: refused (Turbo accepts XCI as the game package; to be ported, PORT_PLAN 5A.1).
+- NSZ / XCZ as the game's own package or update (Turbo refuses them too; DLC from NSZ / XCZ is unpacked once),
+  sparse NCA storage, a compressed section under an update's patch (no such package on hand to verify).
 - Code patches shipped by mods (`mods/<mod>/mod.json`) and enabled mods' image bytes.
 - The inline-asm SIMD path (AArch64 hosts only).
-- Compiling and linking into `<name>_code.dll`.
 - Differential testing against dynarmic.

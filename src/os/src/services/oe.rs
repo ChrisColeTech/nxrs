@@ -1,26 +1,47 @@
 //! nn::oe (and the bits of nn::applet / am an application reaches through it): the operation mode, focus, the
 //! notification queue, performance configuration, language, launch parameter and the switches the system keeps.
-//! The host runs one application in the foreground; `NXOS_OPMODE` (0 handheld, 1 docked; default docked) and
-//! `NXOS_LANG` (default en-US) set what it reports.
+//! The host runs one application in the foreground. The operation mode is the `docked` setting (Turbo d5b36a1: TV
+//! mode by default, so games draw for a television; `NXOS_OPMODE` overrides), changed live with the console's
+//! operation-mode notification; the language is the `language` setting (Turbo's numbers; `NXOS_LANG` overrides).
 
 use crate::guest::{w32, w64, Args};
 use crate::hle::{Registry, RES_OK};
 use nxrt::cpu::Cpu;
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, OnceLock};
+use std::sync::{Condvar, Mutex};
 
 pub const MSG_FOCUS: u32 = 15;
 pub const MSG_OPMODE: u32 = 30;
 pub const MSG_PERFMODE: u32 = 31;
 
+static OPMODE: AtomicI32 = AtomicI32::new(-1);
+
 pub fn opmode() -> i32 {
-    static M: OnceLock<i32> = OnceLock::new();
-    *M.get_or_init(|| std::env::var("NXOS_OPMODE").ok().and_then(|v| v.parse().ok()).unwrap_or(1))
+    let m = OPMODE.load(Ordering::Relaxed);
+    if m >= 0 {
+        return m;
+    }
+    let v = std::env::var("NXOS_OPMODE").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| if crate::options::get("docked").trim() == "0" { 0 } else { 1 });
+    OPMODE.store(v, Ordering::Relaxed);
+    crate::log!("oe: {} (the docked setting), language {}", if v == 1 { "docked, TV mode" } else { "handheld mode" }, language());
+    v
+}
+
+/// The console docked (1) or taken out (0) while the game runs: the game gets the operation-mode and
+/// performance-mode notifications, as on the console.
+pub fn set_opmode(m: i32) {
+    if opmode() == m {
+        return;
+    }
+    OPMODE.store(m, Ordering::Relaxed);
+    crate::log!("oe: operation mode {} (the docked setting changed)", if m == 1 { "docked" } else { "handheld" });
+    push(MSG_OPMODE);
+    push(MSG_PERFMODE);
 }
 
 pub fn language() -> String {
-    std::env::var("NXOS_LANG").unwrap_or_else(|_| "en-US".into())
+    std::env::var("NXOS_LANG").unwrap_or_else(|_| crate::options::language_code(&crate::options::get("language")))
 }
 
 /// The language code as nn::settings::LanguageCode holds it (8 bytes, NUL padded).
@@ -195,7 +216,76 @@ oefn!(relaunch, |a| {
 oefn!(ok, |a| { RES_OK });
 oefn!(zero, |a| { 0 });
 
+// ---- the Switch 2's (and newer SDKs') am / apm / gs calls the host answers itself (nxnative hle_oe.c)
+
+static NOSLEEP: AtomicI32 = AtomicI32::new(0);
+static CPU_OC: AtomicI32 = AtomicI32::new(0);
+oefn!(zero_fn, |a| { 0 });
+oefn!(gfx_scale, |a| { std::env::var("NXOS_GFX_SCALE").ok().and_then(|v| v.parse().ok()).unwrap_or(0) });
+oefn!(nosleep_begin, |a| {
+    NOSLEEP.fetch_add(1, Ordering::Relaxed);
+    0
+});
+oefn!(nosleep_end, |a| {
+    let _ = NOSLEEP.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| Some((v - 1).max(0)));
+    0
+});
+oefn!(nosleep_q, |a| { (NOSLEEP.load(Ordering::Relaxed) > 0) as u64 });
+oefn!(cpu_oc, |a| { CPU_OC.load(Ordering::Relaxed) as u64 });
+oefn!(set_cpu_oc, |a| {
+    CPU_OC.store(a.x(0) as u8 as i32, Ordering::Relaxed);
+    0
+});
+oefn!(startup_logo_msg, |a| {
+    push(MSG_STARTUP_LOGO);
+    0
+});
+oefn!(frame_length, |a| {
+    crate::log_once!("gs frame length", "gs::SetGraphicsFrameLengthMode {} (the host paces by the present interval)", a.x(0));
+    0
+});
+oefn!(demo_exit, |a| {
+    crate::log_once!("demo exit", "[RED] oe: ExitApplicationAndGoBackToInStoreDemoMenu: ignored (no in-store demo menu)");
+    0
+});
+oefn!(execute_program, |a| {
+    crate::log!("[RED] oe::ExecuteProgram {} ({} bytes of parameters): the host runs one program; the run ends here", a.i(0), a.x(2));
+    crate::log::report_gaps("ExecuteProgram");
+    nxrt::process::exit(0);
+});
+pub const MSG_STARTUP_LOGO: u32 = 95;
+
+pub fn register_switch2(r: &mut Registry) {
+    const W: &str = "am / apm / gs (Switch 2 SDKs): answered by the host";
+    for (n, f) in [
+        ("_ZN2nn2oe23GetCurrentGraphicsScaleEv", gfx_scale as unsafe fn(*mut Cpu)),
+        ("_ZN2nn2oe42SetGraphicsScaleChangedNotificationEnabledEb", zero_fn),
+        ("_ZN2nn2gs3sdk26SetGraphicsFrameLengthModeENS1_23GraphicsFrameLengthModeE", frame_length),
+        ("_ZN2nn2oe13MuteRecordingEv", zero_fn),
+        ("_ZN2nn2oe15UnmuteRecordingEv", zero_fn),
+        ("_ZN2nn2oe17SetCopyrightImageEPKvmiiiiNS0_16WindowOriginModeE", zero_fn),
+        ("_ZN2nn2oe22SetCopyrightVisibilityEb", zero_fn),
+        ("_ZN2nn2oe30InitializeCopyrightFrameBufferEPvm", zero_fn),
+        ("_ZN2nn2oe32BeginPresentPhotographedContentsEv", zero_fn),
+        ("_ZN2nn2oe30EndPresentPhotographedContentsEv", zero_fn),
+        ("_ZN2nn2oe17FinishStartupLogoEv", zero_fn),
+        ("_ZN2nn2oe35EnableStartupLogoDisappearedMessageEv", startup_logo_msg),
+        ("_ZN2nn2oe29BeginAutoSleepDisabledSectionEv", nosleep_begin),
+        ("_ZN2nn2oe27EndAutoSleepDisabledSectionEv", nosleep_end),
+        ("_ZN2nn2oe19IsAutoSleepDisabledEv", nosleep_q),
+        ("_ZN2nn2oe21IsCpuOverclockEnabledEv", cpu_oc),
+        ("_ZN2nn2oe22SetCpuOverclockEnabledEb", set_cpu_oc),
+        ("_ZN2nn2oe24IsInStoreDemoModeEnabledEv", zero_fn),
+        ("_ZN2nn2oe40SendServerMaintenanceOverlayNotificationENS_4time9PosixTimeES2_", zero_fn),
+        ("_ZN2nn2oe41ExitApplicationAndGoBackToInStoreDemoMenuEv", demo_exit),
+        ("_ZN2nn2oe14ExecuteProgramEiPKvm", execute_program),
+    ] {
+        r.force(n, W, f);
+    }
+}
+
 pub fn register(r: &mut Registry) {
+    register_switch2(r);
     const W: &str = "am/oe: the host runs one application in the foreground";
     for (n, f) in [
         ("_ZN2nn2oe20SwitchLcdBacklightOnEv", nothing as unsafe fn(*mut Cpu)),

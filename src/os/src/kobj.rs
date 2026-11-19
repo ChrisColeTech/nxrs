@@ -2,17 +2,8 @@
 //! read end copied to the client), signalled and cleared by the host. They are ordinary kernel events, so the
 //! guest waits on them with WaitSynchronization like any other.
 
-use nxrt::cpu::Cpu;
-
-fn ksvc(imm: u32, args: &[u64]) -> [u64; 3] {
-    let mut c = Cpu::new_boxed();
-    for (i, &a) in args.iter().enumerate() {
-        c.x[i] = a;
-    }
-    if !nxrt::kernel::svc(&mut c, imm) {
-        nxrt::rt::fatal(&format!("os: kernel svc {imm:#x} is not handled"));
-    }
-    [c.x[0], c.x[1], c.x[2]]
+fn kernel() -> &'static nxrt::kernel::Kernel {
+    nxrt::kernel::get()
 }
 
 /// An event made by the host: it keeps the write end and hands out the read end.
@@ -24,9 +15,8 @@ pub struct Event {
 
 impl Event {
     pub fn new() -> Event {
-        let r = ksvc(0x45, &[]);
-        assert_eq!(r[0], 0, "CreateEvent");
-        Event { writable: r[1] as u32, readable: r[2] as u32 }
+        let (writable, readable) = kernel().create_event();
+        Event { writable, readable }
     }
     /// A new event, already signalled (a state the client reads as "there is something").
     pub fn signalled() -> Event {
@@ -35,10 +25,10 @@ impl Event {
         e
     }
     pub fn signal(&self) {
-        ksvc(0x11, &[self.writable as u64]);
+        kernel().signal_event(self.writable);
     }
     pub fn clear(&self) {
-        ksvc(0x12, &[self.writable as u64]);
+        kernel().clear_event(self.writable);
     }
 }
 

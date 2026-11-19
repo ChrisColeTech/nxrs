@@ -73,6 +73,10 @@ nvn_fns! {
         core::ptr::write_bytes(o as *mut u8, 0, core::mem::size_of::<win_builder_t>());
         (*o).dev = dev;
         (*o).interval = 1;
+        // NVN2 builders are 0x80 bytes: their colour space and HDR metadata lie past NVN1's 0x40
+        if super::device::SWITCH2.load(std::sync::atomic::Ordering::Relaxed) {
+            *((b as *mut u8).add(WIN_BUILDER2_OFF) as *mut win_builder2_t) = win_builder2_t { color_space: 0, hdr_disp: HDR_DISPLAY_DEFAULT, hdr_content: HDR_CONTENT_DEFAULT };
+        }
     }
     fn nvnWindowBuilderSetDevice(b: *mut NVNwindowBuilder, d: *mut NVNdevice) { (*(b as *mut win_builder_t)).dev = d; }
     fn nvnWindowBuilderSetNativeWindow(b: *mut NVNwindowBuilder, w: u64) { (*(b as *mut win_builder_t)).native = w; }
@@ -97,6 +101,14 @@ nvn_fns! {
         o.interval = s.interval;
         o.nactive = s.nactive;
         o.tex = s.tex;
+        if super::device::SWITCH2.load(std::sync::atomic::Ordering::Relaxed) {
+            let x = &*((b as *const u8).add(WIN_BUILDER2_OFF) as *const win_builder2_t);
+            o.hdr_disp = x.hdr_disp;
+            o.hdr_content = x.hdr_content;
+        } else {
+            o.hdr_disp = HDR_DISPLAY_DEFAULT;
+            o.hdr_content = HDR_CONTENT_DEFAULT;
+        }
         let (tw, th, tf) = if o.ntex > 0 && !o.tex[0].is_null() { let t = &*(o.tex[0] as *const tex_t); (t.d.width, t.d.height, t.d.format) } else { (0, 0, 0) };
         crate::nvnlog!("WindowInitialize swap chain {} textures ({} active), interval {}, first {}x{} format {:#x}", o.ntex, window_active(o), o.interval, tw, th, tf);
         1
@@ -126,6 +138,7 @@ nvn_fns! {
             *r = NVNrectangle { x: 0, y: 0, width: tw, height: th };
         }
     }
+    fn nvnWindowGetNumTextures(w: *const NVNwindow) -> i32 { (*(w as *const win_t)).ntex }
     fn nvnWindowGetNumActiveTextures(w: *const NVNwindow) -> i32 { window_active(&*(w as *const win_t)) }
     fn nvnWindowSetNumActiveTextures(w: *mut NVNwindow, n: i32) { (*(w as *mut win_t)).nactive = n; }
     /// Vsync blocks here, not in present (a game often presents while holding a lock): the texture's previous present
@@ -135,7 +148,7 @@ nvn_fns! {
         let n = window_active(o);
         let i = if n > 0 { let v = o.next % n; o.next = (o.next + 1) % n; v } else { 0 };
         *idx = i;
-        let period = if o.interval > 0 { VSYNC_NS * o.interval as u64 } else { 0 };
+        let period = crate::vk::present::pace_period(o.interval);
         let mut pacer = Pacer { target: o.pace };
         let wait = pacer.pace(super::device::now_ns(), period);
         o.pace = pacer.target;

@@ -13,6 +13,8 @@ nvn_fns! {
     fn nvnDeviceRegisterFastClearColorui(d: *mut NVNdevice, c: *const u32, f: i32) { let _ = (d, c, f); }
     fn nvnDeviceRegisterFastClearDepth(d: *mut NVNdevice, v: f32) { let _ = (d, v); }
     fn nvnMemoryPoolSetDebugLabel(p: *mut NVNmemoryPool, s: *const u8) { let _ = (p, s); }
+    fn nvnTexturePoolSetDebugLabel(p: *mut NVNtexturePool, s: *const u8) { let _ = (p, s); }
+    fn nvnSamplerPoolSetDebugLabel(p: *mut NVNsamplerPool, s: *const u8) { let _ = (p, s); }
     fn nvnCommandBufferPushDebugGroup(c: *mut NVNcommandBuffer, s: *const u8) { let _ = (c, s); }
     fn nvnCommandBufferPushDebugGroupStatic(c: *mut NVNcommandBuffer, id: u32, s: *const u8) { let _ = (c, id, s); }
     fn nvnCommandBufferPushDebugGroupDynamic(c: *mut NVNcommandBuffer, id: u32, s: *const u8) { let _ = (c, id, s); }

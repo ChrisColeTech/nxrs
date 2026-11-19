@@ -35,9 +35,31 @@ pub struct Cpu {
     pub excl_val_hi: u64,
     /// 344: the newest live setjmp owner of this guest thread (`sjlj.rs`).
     pub sj: *mut c_void,
-    pub _pad: [u8; 512 - 352],
+    /// 352: the exclusive monitor bucket's sequence at the last LDXR (`rt_excl_mon`).
+    pub excl_seq: u32,
+    pub _pad: [u8; 512 - 356],
     /// 512: v0-v31.
     pub v: [u128; 32],
+}
+
+/// The global exclusive monitor (cpu.h `rt_excl_mon`): one sequence number per 16-byte address bucket, 2^16
+/// buckets. NULL: STXR compares values only (Switch 2 programs; see `set_exclusive_monitor`).
+#[no_mangle]
+#[allow(non_upper_case_globals)]
+pub static mut rt_excl_mon: *mut u32 = core::ptr::null_mut();
+
+/// Turns the global exclusive monitor on or off; call before any guest code runs.
+pub fn set_exclusive_monitor(on: bool) {
+    static TABLE: [core::sync::atomic::AtomicU32; 1 << 16] = [const { core::sync::atomic::AtomicU32::new(0) }; 1 << 16];
+    let p = if on { TABLE.as_ptr() as *mut u32 } else { core::ptr::null_mut() };
+    // SAFETY: start-up, before guest threads run
+    unsafe { core::ptr::addr_of_mut!(rt_excl_mon).write_volatile(p) }
+}
+
+/// Whether the global exclusive monitor is on.
+pub fn exclusive_monitor() -> bool {
+    // SAFETY: a pointer read
+    unsafe { !core::ptr::addr_of!(rt_excl_mon).read_volatile().is_null() }
 }
 
 /// `typedef void (*GuestFn)(Cpu *);`

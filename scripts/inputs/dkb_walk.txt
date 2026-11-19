@@ -1,0 +1,13 @@
+# Donkey Kong Bananza: walk forward, jump, turn, punch (tools/plza_probe.py action RUN replay --file ...)
+# ms buttons(hex: A=1 B=2 X=4 Y=8) lx ly rx ry
+0 0 0 32767 0 0
+2500 2 0 32767 0 0
+2700 0 0 32767 0 0
+4000 0 32767 20000 0 0
+6000 0 0 32767 0 0
+7500 8 0 0 0 0
+7700 0 0 0 0 0
+8500 8 0 0 0 0
+8700 0 0 0 0 0
+9500 0 -32767 0 0 0
+11500 0 0 0 0 0

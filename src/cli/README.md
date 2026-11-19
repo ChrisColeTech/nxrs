@@ -4,7 +4,7 @@ The engine's command line: the build (package → data folder → C → shaders 
 the launcher contract (v1 drop-in for Turbo's `switchrecomp.py`, v2 subcommands): [docs/LAUNCHER_CONTRACT.md](../../docs/LAUNCHER_CONTRACT.md).
 
     nxrs build <input> [-o <name>] [--outdir <dir>] [--jobs 4] [--update <pkg> | --no-update] [--keys <file>]
-               [--no-build] [--no-shaders] [-q] [--machine]
+               [--no-build] [--no-shaders] [--chunk N] [--native] [-q] [--machine]
     nxrs update-info [--game <input>] <package>...
     nxrs dlc install | sync | remove | list --datadir <dir> [package or title id...]
     nxrs profile [<title id> [<main build id>]] [--package <input>]
@@ -12,25 +12,45 @@ the launcher contract (v1 drop-in for Turbo's `switchrecomp.py`, v2 subcommands)
     nxrs translate <input> --out <dir>                      (development: C + data folder, for nxrt-dev e2e)
     nxrs <input> --outdir <dir> -o <name> ...                (contract v1: Turbo's options)
 
-Build and test: `cargo build --release -p cli -p runtime` (nxrs finds `nxrt.lib` beside itself), `cargo test -p cli`.
+Build and test: `cargo build --release -p cli -p runtime -p front` (nxrs finds `nxfront.lib` and `nxrt.lib` beside
+itself), `cargo test -p cli`. Input: a folder, NSP, XCI, NUP or a homebrew NRO.
 
 ## The build step
 
 | Step | What |
 |---|---|
-| Package | `translator::package::open_game` (folder, NSP, NUP; the update chosen); one line per module (layout base, text size, build id) |
+| Package | `translator::package::open_game` (folder, NSP, XCI, NUP, NRO; the update chosen); one line per module (layout base, text size, build id) |
 | Profile | `profiles::lookup(title id, main build id)`; its build-time patches become the translator's patch table |
 | Translate | `translator::aot::generate` into `<name>_build\gen`, `jobs` threads; skipped when nothing it reads changed (`gen\nxrs.gen.key`: this executable, the ExeFS, the patch table, the options) |
 | Data | `Game::write_data` into `<name>_data` (the RomFS marker, ExeFS, control.nacp, icon); `<name>.ini` when missing |
-| Shaders | lane C's `shaders::prebuild`, once published in docs/INTERFACES.md; until then a logged skip |
+| Shaders | `shaders::prebuild_data(<name>_data)`: every shader found and translated into `<name>_data\shaders\` (an unchanged one is reused); the profile's nxnative shader tables into `shaders\profile\` |
 | Compile | every chunk, table and `modules.c` with clang, `jobs` at a time (default 4), the largest first |
-| Link | `<name>_code.dll` (objects + `nxrt.lib`) and `<name>.exe` (the loader) |
+| Link | `<name>_code.dll` (objects + `nxfront.lib`, the whole engine, for a retail title; `nxrt.lib` for the runtime's homebrew) and `<name>.exe` (the loader) |
 
-**Compiler.** clang for `x86_64-pc-windows-msvc` (the Rust runtime's ABI), found as `NXRS_CLANG`, `--cc` when it is a
-clang, the bundled `clang\bin` beside nxrs (or `..\toolchain\clang\bin`), `NXRT_LLVM` (as `nxrt-dev`), `C:\Program
-Files\LLVM\bin`, then PATH. Flags: mkw-recomp's game-code set, `-std=gnu11 -O1 -fno-strict-aliasing -Wno-return-type
--Wno-unused-label -fvisibility=hidden -march=x86-64-v3 -fno-vectorize -fno-slp-vectorize -fomit-frame-pointer -g0`,
-plus `-fms-runtime-lib=dll -w`.
+**Compiler.** With Visual Studio's C++ build tools installed: clang for `x86_64-pc-windows-msvc` (the engine's ABI),
+found as `NXRS_CLANG`, `--cc` when it is a clang, the bundled `clang\bin` beside nxrs (or `..\toolchain\clang\bin`),
+`NXRT_LLVM` (as `nxrt-dev`), `C:\Program Files\LLVM\bin`, then PATH. **Without Visual Studio** (a player's machine):
+the bundled llvm-mingw (`llvm-mingw\bin` beside nxrs, `NXRS_LLVM_MINGW`) for `x86_64-w64-windows-gnu`, linking the
+engine built for `x86_64-pc-windows-gnullvm` (`gnu\libnxfront.a`, `gnu\libnxrt.a`, `gnu\libwindows.0.52.0.a`;
+`NXRS_GNU_LIBS`) with compiler-rt and libunwind statically: the DLL imports only system DLLs and the UCRT.
+`NXRS_TOOLCHAIN=msvc|gnu` forces one. Build the gnullvm engine with llvm-mingw on PATH:
+`rustup target add x86_64-pc-windows-gnullvm`, then `CC_x86_64_pc_windows_gnullvm=x86_64-w64-mingw32-clang
+CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS="-L native=build\tools\gnu-libs" cargo build --release --target
+x86_64-pc-windows-gnullvm -p front -p runtime` (`gnu-libs`: os's codec archives as `lib<name>.a`, and the windows
+crate's import library). Flags: mkw-recomp's game-code set, `-std=gnu11 -O1 -fno-strict-aliasing -Wno-return-type
+-Wno-unused-label -fvisibility=hidden -march=x86-64-v3 -fno-vectorize -fno-slp-vectorize -fomit-frame-pointer -g0 -w`,
+plus `-fms-runtime-lib=dll` on MSVC; `--native` builds for `-march=native` instead. A retail title's code is compiled
+with os's `cpu.h` overlay first (SVCs, the counter and spin waits to the os layer).
+
+**Turbo's options (contract v1).** Every `switchrecomp.py` option is accepted: `--chunk N` (ARM instructions per C
+file; the default lets the translator size chunks), `--native` (`-march=native`), `--no-build`, `--no-shaders`,
+`--keep-c` (the C is always kept), `--dlc-stub`, the DLC, update and `--update-info` options, `-q`, `--build-runtime`
+(checks the engine libraries and the compiler). Launcher-agreed replacements (docs/LAUNCHER_CONTRACT.md): `-O`
+(one measured flag set), `--cc` when it is not a clang, `--runtime` (the engine is linked into the DLL),
+`--backend` (Windows only) are said as ignored in one line; `--target linux` (M10) and `--interp-only` (no
+interpreter: every function is translated) fail with the reason. `nxrs doctor`: CPU, toolchain, compiler, Visual
+Studio, engine libraries, the Vulkan loader, every Vulkan device with its API and driver version (1.3 needed), free
+disk for builds and temporary files, keys.
 
 **Chunk cache.** One object per unit in `<name>_build\obj`, with a `.key` beside it: sha256 of the compiler's id
 (`--version` without its folder), every header the units can include (`gen\include\*.h`, `layout.h`, `patches.h`),
@@ -47,8 +67,9 @@ retried twice: this machine has crashed compilers at random under parallel load.
 - a runtime change relinks only (every object is reused: about a second for MK8D).
 
 `<name>.exe` holds no runtime: it loads `<its name>_code.dll` from its folder and calls `nxrs_game_main(argc, argv)`
-(exported by `modules.c`), with `NXRS_DATA` and `NXRT_EXEFS` set to its data folder unless set already. The same
-11 KB file serves every game.
+(exported by `modules.c`), with `NXRS_DATA` and `NXRT_EXEFS` set to its data folder unless set already. It is a
+windowed program (`/SUBSYSTEM:WINDOWS`): no console opens; a failure to load shows a message box (or goes to stderr
+when it is redirected). The same 11 KB file serves every game.
 
 **MK8D** (Mario Kart 8 Deluxe 1G+1U+1D NSP, update 4.0.1: 98,570 functions, 124 chunks, 339 MB of C; Core Ultra 9
 285K, clang 21.1.8):
@@ -79,8 +100,5 @@ loader all pass.
 
 ## Not done
 
-- Linking needs the MSVC libraries (Visual Studio Build Tools) because the runtime is an MSVC-ABI Rust library. A
-  player's machine without them needs the runtime built for `x86_64-pc-windows-gnullvm` and llvm-mingw bundled.
-- The shader step waits for lane C's published `shaders::prebuild`.
-- `doctor` does not check the Vulkan device version or free disk space.
-- The loader is a console program (the runtime logs to stdout); a windowed one waits for the front end.
+- A release layout that bundles llvm-mingw and `gnu\` (the toolchain works from a checkout; packaging is M9).
+- `--target linux` (M10).
