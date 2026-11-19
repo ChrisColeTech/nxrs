@@ -1,0 +1,15 @@
+[package]
+name = "profiles"
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+description = "RecompLauncher engine: game profiles (nxnative's dm/games as data) and their lookup by title and build id"
+
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"

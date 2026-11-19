@@ -1,0 +1,516 @@
+//! `nxrs`: the engine's command line.
+//!
+//! Contract v1 (what RecompLauncher sends Turbo's `switchrecomp.py` today, docs/LAUNCHER_CONTRACT.md):
+//!
+//!   nxrs <input> --outdir <dir> -o <name> [--jobs N] [--update <pkg> | --no-update] [ignored: --target --backend
+//!        --cc -O --runtime --native --chunk]
+//!   nxrs <game> --update-info <package>...
+//!   nxrs --install-dlc <pkg>... | --sync-dlc [<pkg>...] | --remove-dlc <id or pkg>... | --list-dlc  --datadir <dir>
+//!
+//! Contract v2 (subcommands; `--machine` adds `@progress` / `@result` lines):
+//!
+//!   nxrs build <input> [-o <name>] [--outdir <dir>] [--jobs 4] [--update <pkg> | --no-update] [--keys <prod.keys>]
+//!   nxrs update-info [--game <game>] <package>...
+//!   nxrs dlc install|sync|remove|list --datadir <dir> [package or title id...]
+//!   nxrs profile <title id> [<main build id>]
+//!   nxrs doctor | contract
+//!   nxrs translate <input> --out <dir>      (development: the C and the data folder only, as nxrt-dev uses it)
+//!
+//! Exit codes: 0 done, 1 failed (the reason on stderr, or the UPDATE / DLC error lines), 2 bad arguments.
+
+mod cc;
+mod out;
+mod pipeline;
+mod profile;
+
+use anyhow::{anyhow, Result};
+use clap::{Args, Parser, Subcommand};
+use out::Out;
+use std::path::{Path, PathBuf};
+use translator::package::{self, dlc, UpdateChoice};
+
+/// Writes `data` unless the file holds it already (an unchanged file keeps its time).
+pub fn write_if_changed(p: &Path, data: &[u8]) -> std::io::Result<bool> {
+    translator::aot::gen::write_if_changed(p, data)
+}
+
+pub const CONTRACT: &str = "nxrs-contract 2";
+
+// ------------------------------------------------------------------------------------------------ contract v1
+
+/// Turbo's switchrecomp.py options, as the launcher passes them.
+#[derive(Parser, Debug)]
+#[command(name = "nxrs", about = "Builds a Switch game into a native Windows program (contract v1; `nxrs help` for the subcommands).")]
+struct V1 {
+    /// game folder (exefs/ + romfs/), .nsp or .nup package
+    input: Option<PathBuf>,
+    /// output name (no extension)
+    #[arg(short = 'o', long = "out")]
+    out: Option<String>,
+    /// output folder (default: <the input's folder>\SwitchRecomp Builds\<name>)
+    #[arg(long)]
+    outdir: Option<PathBuf>,
+    /// C compiler: used when it is a clang, ignored otherwise (nxrs compiles with clang)
+    #[arg(long)]
+    cc: Option<String>,
+    /// ignored: the game code is compiled at one measured flag set
+    #[arg(short = 'O')]
+    opt: Option<String>,
+    #[arg(long, default_value_t = 4)]
+    jobs: usize,
+    /// ignored (the translator sizes its chunks itself)
+    #[arg(long)]
+    chunk: Option<u64>,
+    /// ignored unless it is linux: nxrs builds Windows x86-64 programs
+    #[arg(long)]
+    target: Option<String>,
+    /// ignored
+    #[arg(long)]
+    backend: Option<String>,
+    /// ignored (the code is built for x86-64-v3)
+    #[arg(long)]
+    native: bool,
+    /// only generate the C code and stage the game data
+    #[arg(long)]
+    no_build: bool,
+    /// do not translate the game's shaders during the build
+    #[arg(long)]
+    no_shaders: bool,
+    #[arg(long, hide = true)]
+    keep_c: bool,
+    /// (Turbo diagnostics) not available: nxrs has no interpreter
+    #[arg(long, hide = true)]
+    interp_only: bool,
+    /// ignored: the runtime is linked into the game's code DLL
+    #[arg(long)]
+    runtime: Option<String>,
+    /// check the prebuilt runtime library and the compiler, and exit
+    #[arg(long)]
+    build_runtime: bool,
+    #[arg(long, num_args = 1.., value_name = "PACKAGE")]
+    install_dlc: Option<Vec<PathBuf>>,
+    #[arg(long, num_args = 0.., value_name = "PACKAGE")]
+    sync_dlc: Option<Vec<PathBuf>>,
+    #[arg(long, num_args = 1.., value_name = "TITLE_OR_PACKAGE")]
+    remove_dlc: Option<Vec<String>>,
+    #[arg(long)]
+    list_dlc: bool,
+    /// the built game's data folder (<outdir>\<name>_data), for the DLC options
+    #[arg(long)]
+    datadir: Option<PathBuf>,
+    #[arg(long, hide = true)]
+    dlc_stub: bool,
+    /// apply a game update from a package of its own (.nsp .xci, or .nca with its .tik beside it)
+    #[arg(long, value_name = "PACKAGE", conflicts_with = "no_update")]
+    update: Option<PathBuf>,
+    /// build a combined package (game + update) without the update it holds
+    #[arg(long)]
+    no_update: bool,
+    /// say what each update package is (title, version) and exit; with the game as the input, also check it belongs
+    #[arg(long, num_args = 1.., value_name = "PACKAGE")]
+    update_info: Option<Vec<PathBuf>>,
+    #[arg(short, long)]
+    quiet: bool,
+    /// prod.keys (default: SWR_PROD_KEYS, else the launcher's keys folder)
+    #[arg(long)]
+    keys: Option<PathBuf>,
+    /// print the contract version and exit
+    #[arg(long)]
+    contract: bool,
+}
+
+fn update_choice(update: &Option<PathBuf>, no_update: bool) -> UpdateChoice {
+    match (update, no_update) {
+        (Some(p), _) => UpdateChoice::Package(p.clone()),
+        (None, true) => UpdateChoice::None,
+        _ => UpdateChoice::Embedded,
+    }
+}
+
+fn usage_error(msg: &str) -> i32 {
+    eprintln!("nxrs: error: {msg}");
+    2
+}
+
+fn run_v1(args: Vec<String>) -> i32 {
+    let a = match V1::try_parse_from(&args) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = e.print();
+            return if e.use_stderr() { 2 } else { 0 };
+        }
+    };
+    let o = Out::new(a.quiet, false);
+    if a.contract {
+        o.print(CONTRACT);
+        return 0;
+    }
+    if a.build_runtime {
+        return match (cc::find_runtime_lib(), cc::find_clang(a.cc.as_deref())) {
+            (Ok(lib), Ok(c)) => {
+                o.say(&format!("The runtime ships prebuilt and is linked into each game: {} ({})", lib.display(), c.version));
+                0
+            }
+            (Err(e), _) | (_, Err(e)) => fail(&e),
+        };
+    }
+    if a.install_dlc.is_some() || a.sync_dlc.is_some() || a.remove_dlc.is_some() || a.list_dlc {
+        let datadir = a.datadir.clone().or_else(|| match (&a.outdir, &a.out) {
+            (Some(d), Some(n)) => Some(std::path::absolute(d).unwrap_or(d.clone()).join(format!("{n}_data"))),
+            _ => None,
+        });
+        let Some(datadir) = datadir else { return usage_error("the DLC options need --datadir (or --outdir with -o)") };
+        let say = |m: &str| o.say(m);
+        let r = (|| -> Result<Vec<String>, package::PackageError> {
+            let mut errors = vec![];
+            for w in a.remove_dlc.iter().flatten() {
+                if dlc::remove(&datadir, w, &say)? == 0 {
+                    errors.push(format!("{w} is not installed"));
+                    say(&format!("DLC error: {w} is not installed"));
+                }
+            }
+            if let Some(p) = &a.sync_dlc {
+                errors.extend(dlc::sync(p, &datadir, &say, a.keys.as_deref())?.1);
+            }
+            if let Some(p) = &a.install_dlc {
+                errors.extend(dlc::install(p, &datadir, &say, a.keys.as_deref(), a.dlc_stub)?.1);
+            }
+            if a.list_dlc {
+                dlc::describe(&datadir, &|m: &str| o.print(m));
+            }
+            Ok(errors)
+        })();
+        return match r {
+            Ok(e) if e.is_empty() => 0,
+            Ok(_) => 1,
+            Err(e) => {
+                eprintln!("DLC error: {e}");
+                1
+            }
+        };
+    }
+    if let Some(pkgs) = &a.update_info {
+        return update_info(&o, pkgs, a.input.as_deref(), a.keys.as_deref());
+    }
+    let Some(input) = a.input.clone() else { return usage_error("the game folder, .nup or .nsp package is required") };
+    if a.interp_only {
+        return fail(&anyhow!("--interp-only: nxrs has no interpreter; every function is translated"));
+    }
+    if a.target.as_deref() == Some("linux") {
+        return fail(&anyhow!("--target linux: nxrs builds Windows x86-64 programs"));
+    }
+    let ignored: Vec<String> = [
+        a.target.as_ref().map(|v| format!("--target {v}")),
+        a.backend.as_ref().map(|v| format!("--backend {v}")),
+        a.cc.as_ref().filter(|c| !c.to_lowercase().contains("clang")).map(|v| format!("--cc {v}")),
+        a.opt.as_ref().map(|v| format!("-O {v}")),
+        a.runtime.as_ref().map(|v| format!("--runtime {v}")),
+        a.native.then(|| "--native".to_string()),
+        a.chunk.map(|v| format!("--chunk {v}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let b = pipeline::BuildArgs {
+        input,
+        name: a.out.clone(),
+        outdir: a.outdir.clone(),
+        jobs: a.jobs,
+        update: update_choice(&a.update, a.no_update),
+        keys: a.keys.clone(),
+        cc: a.cc.clone(),
+        no_build: a.no_build,
+        no_shaders: a.no_shaders,
+        v1: true,
+        ignored: (!ignored.is_empty()).then(|| format!("nxrs: ignored (Turbo options with no meaning here): {}", ignored.join(" "))),
+    };
+    build(&o, &b)
+}
+
+fn fail(e: &anyhow::Error) -> i32 {
+    eprintln!("{e:#}");
+    1
+}
+
+fn build(o: &Out, b: &pipeline::BuildArgs) -> i32 {
+    match pipeline::build(b, o) {
+        Ok(built) => {
+            let t: Vec<String> = built.timings.iter().map(|(k, v)| format!("{k} {v:.1}s")).collect();
+            o.say(&format!("  time: {}", t.join(", ")));
+            if b.no_build {
+                o.say(&format!("Done (C and data only): {}", built.data.display()));
+            } else {
+                o.say(&format!("Done: {}", built.exe.display()));
+            }
+            o.result(true, &built.exe.display().to_string());
+            0
+        }
+        Err(e) => {
+            o.result(false, &format!("{e:#}").replace(['\r', '\n'], " "));
+            fail(&e)
+        }
+    }
+}
+
+fn update_info(o: &Out, packages: &[PathBuf], game: Option<&Path>, keys: Option<&Path>) -> i32 {
+    let mut failed = false;
+    for p in packages {
+        match package::update_info(p, keys, game) {
+            Ok(info) => o.print(&info.line()),
+            Err(e) => {
+                failed = true;
+                o.print(&format!("UPDATE error: {e}"));
+            }
+        }
+    }
+    i32::from(failed)
+}
+
+// ------------------------------------------------------------------------------------------------ contract v2
+
+#[derive(Parser)]
+#[command(name = "nxrs", about = "RecompLauncher engine: builds Switch games into native Windows programs")]
+struct V2 {
+    #[command(subcommand)]
+    cmd: Cmd,
+}
+
+#[derive(Args, Clone, Default)]
+struct PkgArgs {
+    /// prod.keys (default: SWR_PROD_KEYS, else %LOCALAPPDATA%\RecompLauncher\RecompLauncher\keys\prod.keys)
+    #[arg(long)]
+    keys: Option<PathBuf>,
+    /// apply the game update in this package of its own (.nsp, .xci, or .nca with its .tik beside it)
+    #[arg(long, conflicts_with = "no_update")]
+    update: Option<PathBuf>,
+    /// leave out the update a combined package holds
+    #[arg(long)]
+    no_update: bool,
+}
+
+#[derive(Subcommand)]
+enum Cmd {
+    /// Build a game: <outdir>\<name>.exe, <name>_code.dll and <name>_data\.
+    Build {
+        input: PathBuf,
+        #[arg(short = 'o', long = "out")]
+        out: Option<String>,
+        #[arg(long)]
+        outdir: Option<PathBuf>,
+        #[arg(long, default_value_t = 4)]
+        jobs: usize,
+        #[command(flatten)]
+        pkg: PkgArgs,
+        /// clang to compile with (default: NXRS_CLANG, the bundled one, LLVM's folder, PATH)
+        #[arg(long)]
+        cc: Option<String>,
+        #[arg(long)]
+        no_build: bool,
+        #[arg(long)]
+        no_shaders: bool,
+        #[arg(short, long)]
+        quiet: bool,
+        /// also print @progress and @result lines
+        #[arg(long)]
+        machine: bool,
+    },
+    /// Say what each update package is; with --game, check it belongs to that game (exit 1 on any error).
+    UpdateInfo {
+        #[arg(required = true)]
+        packages: Vec<PathBuf>,
+        #[arg(long)]
+        game: Option<PathBuf>,
+        #[arg(long)]
+        keys: Option<PathBuf>,
+    },
+    /// Add-on content of a built game.
+    Dlc {
+        #[command(subcommand)]
+        cmd: DlcCmd,
+    },
+    /// The game profile of a title (and main build id), or of a package's program (--package).
+    Profile {
+        title_id: Option<String>,
+        main_build_id: Option<String>,
+        #[arg(long)]
+        package: Option<PathBuf>,
+        #[arg(long)]
+        keys: Option<PathBuf>,
+    },
+    /// Check this machine and the toolchain.
+    Doctor,
+    /// Print the contract version.
+    Contract,
+    /// (development) Translate to C and stage the data folder: what nxrt-dev's end-to-end tests run.
+    Translate {
+        input: PathBuf,
+        #[arg(long)]
+        out: PathBuf,
+        #[arg(long)]
+        data: Option<PathBuf>,
+        #[command(flatten)]
+        pkg: PkgArgs,
+        #[arg(long, default_value_t = 4)]
+        jobs: usize,
+    },
+}
+
+#[derive(Subcommand)]
+enum DlcCmd {
+    Install {
+        #[arg(long)]
+        datadir: PathBuf,
+        #[arg(required = true)]
+        packages: Vec<PathBuf>,
+        #[arg(long)]
+        keys: Option<PathBuf>,
+    },
+    Sync {
+        #[arg(long)]
+        datadir: PathBuf,
+        packages: Vec<PathBuf>,
+        #[arg(long)]
+        keys: Option<PathBuf>,
+    },
+    Remove {
+        #[arg(long)]
+        datadir: PathBuf,
+        #[arg(required = true)]
+        what: Vec<String>,
+    },
+    List {
+        #[arg(long)]
+        datadir: PathBuf,
+    },
+}
+
+const SUBCOMMANDS: &[&str] = &["build", "update-info", "dlc", "profile", "doctor", "contract", "translate", "help"];
+
+fn run_v2(args: Vec<String>) -> i32 {
+    let a = match V2::try_parse_from(&args) {
+        Ok(a) => a,
+        Err(e) => {
+            let _ = e.print();
+            return if e.use_stderr() { 2 } else { 0 };
+        }
+    };
+    match a.cmd {
+        Cmd::Contract => {
+            out::line(CONTRACT);
+            0
+        }
+        Cmd::Build { input, out, outdir, jobs, pkg, cc, no_build, no_shaders, quiet, machine } => {
+            let o = Out::new(quiet, machine);
+            let b = pipeline::BuildArgs {
+                input,
+                name: out,
+                outdir,
+                jobs,
+                update: update_choice(&pkg.update, pkg.no_update),
+                keys: pkg.keys,
+                cc,
+                no_build,
+                no_shaders,
+                v1: false,
+                ignored: None,
+            };
+            build(&o, &b)
+        }
+        Cmd::UpdateInfo { packages, game, keys } => update_info(&Out::default(), &packages, game.as_deref(), keys.as_deref()),
+        Cmd::Dlc { cmd } => {
+            let o = Out::default();
+            let say = |m: &str| o.say(m);
+            let r = (|| -> Result<Vec<String>, package::PackageError> {
+                Ok(match cmd {
+                    DlcCmd::Install { datadir, packages, keys } => dlc::install(&packages, &datadir, &say, keys.as_deref(), false)?.1,
+                    DlcCmd::Sync { datadir, packages, keys } => dlc::sync(&packages, &datadir, &say, keys.as_deref())?.1,
+                    DlcCmd::Remove { datadir, what } => {
+                        let mut errors = vec![];
+                        for w in &what {
+                            if dlc::remove(&datadir, w, &say)? == 0 {
+                                errors.push(format!("{w} is not installed"));
+                                say(&format!("DLC error: {w} is not installed"));
+                            }
+                        }
+                        errors
+                    }
+                    DlcCmd::List { datadir } => {
+                        dlc::describe(&datadir, &say);
+                        vec![]
+                    }
+                })
+            })();
+            match r {
+                Ok(e) if e.is_empty() => 0,
+                Ok(_) => 1,
+                Err(e) => {
+                    eprintln!("DLC error: {e}");
+                    1
+                }
+            }
+        }
+        Cmd::Profile { title_id, main_build_id, package, keys } => {
+            match profile::command(title_id.as_deref(), main_build_id.as_deref(), package.as_deref(), keys.as_deref()) {
+                Ok(()) => 0,
+                Err(e) => fail(&e),
+            }
+        }
+        Cmd::Doctor => doctor(),
+        Cmd::Translate { input, out, data, pkg, jobs } => match translate(&input, &out, data, &pkg, jobs) {
+            Ok(()) => 0,
+            Err(e) => fail(&e),
+        },
+    }
+}
+
+fn translate(input: &Path, out: &Path, data: Option<PathBuf>, pkg: &PkgArgs, jobs: usize) -> Result<()> {
+    let game = package::open_game(input, &package::OpenOptions { keys: pkg.keys.clone(), update: update_choice(&pkg.update, pkg.no_update) })?;
+    let opts = translator::aot::GenOptions { out: out.to_path_buf(), jobs, ..Default::default() };
+    let report = translator::aot::generate(&game.exefs.files, &opts, &|l| eprintln!("{l}"))?;
+    translator::aot::runtime_headers::write(out)?;
+    let datadir = data.unwrap_or_else(|| out.join("data"));
+    game.write_data(&datadir, &|m: &str| out::line(m))?;
+    out::line(&format!(
+        "translated {} functions in {} modules to {} ({:.1}s); data in {}",
+        report.modules.iter().map(|m| m.functions).sum::<usize>(),
+        report.modules.len(),
+        out.display(),
+        report.seconds,
+        datadir.display()
+    ));
+    Ok(())
+}
+
+fn doctor() -> i32 {
+    let mut bad = 0;
+    let mut check = |ok: bool, what: String| {
+        out::line(&format!("{} {what}", if ok { "ok  " } else { "FAIL" }));
+        bad += i32::from(!ok);
+    };
+    check(std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") && std::arch::is_x86_feature_detected!("bmi2"),
+        "CPU: AVX2, FMA, BMI2 (the game code is built for x86-64-v3)".into());
+    match cc::find_clang(None) {
+        Ok(c) => check(true, format!("compiler: {} ({})", c.path.display(), c.version)),
+        Err(e) => check(false, format!("compiler: {e}")),
+    }
+    match cc::find_runtime_lib() {
+        Ok(p) => check(true, format!("runtime library: {}", p.display())),
+        Err(e) => check(false, format!("runtime library: {e}")),
+    }
+    let sys = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| r"C:\Windows".into());
+    check(sys.join(r"System32\vulkan-1.dll").is_file(), "Vulkan loader (vulkan-1.dll)".into());
+    match translator::package::default_keys_path() {
+        Some(p) => check(p.is_file(), format!("keys: {} (present; never read here)", p.display())),
+        None => check(false, "keys: none installed (SWR_PROD_KEYS or the launcher's keys folder); NSP games need them".into()),
+    }
+    i32::from(bad > 0)
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+    let code = match args.get(1).map(String::as_str) {
+        Some(s) if SUBCOMMANDS.contains(&s) => run_v2(args),
+        _ => run_v1(args),
+    };
+    std::process::exit(code);
+}

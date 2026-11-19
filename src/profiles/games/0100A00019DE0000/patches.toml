@@ -1,0 +1,20 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/0100A00019DE0000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/0100A00019DE0000/patches.py"
+
+[[binding]]
+what = "render size: 1280x720 times the host's render scale"
+now = "game"
+goal = "game"
+purpose = "rendering"
+why = "the game's own size constant, found in the one function that calls nn::vi::CreateLayer on any build whose code there passes the stub's checks (no fingerprint); the game asks no service for a size, and no other game in the repository runs Supergiant's NVN engine (Hades is Vulkan)"
+checked = "v0 and 1.0.141667 mains: the anchor finds the reviewed site (+0x190, x8) in each, the constant once in main, the stub's registers unused in the function (2026-11-10)"
+
+[[match]]
+kind = "frame_step"
+module = "main"
+name = "render size from the host's render scale"
+calls = "_ZN2nn2vi11CreateLayerEPPNS0_5LayerEPNS0_7DisplayE"
+reviewed = ["(400, 8)"]
+[match.stub]
+evaluated = false
+needs = "an anchored rule's find (reads the module's own code)"

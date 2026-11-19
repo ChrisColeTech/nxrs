@@ -1,0 +1,82 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/0400486024DEC000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/0400486024DEC000/patches.py"
+
+[[binding]]
+what = "movie pictures a frame: up to 2"
+now = "game"
+goal = "game"
+purpose = "frame rate"
+why = "the game's own movie player constructor, found by its function's fingerprint on any build that keeps the function; no other game has it: the fingerprint matches no function in the mains of Donkey Kong Bananza, Splatoon Raiders, Pokopia, Mario Tennis Fever, Switch Sports, Yoshi and the Mysterious Book, Mario Golf, Xenoblade Chronicles 2 or Super Mario 3D All-Stars, and Breath of the Wild's and Tears of the Kingdom's movies go through subsdk0's movie::Decoder, not a player in main"
+checked = "v131072 main: one function with this fingerprint, the constructor, its one caller, the update and the advance read by disassembly; the limit and the count read in play with DM_PROBE, the opening movie timed at a 30 fps frame step without and with the cut (2026-11-12)"
+
+[[binding]]
+what = "movie update cap: 3 pictures a frame"
+now = "game"
+goal = "game"
+purpose = "frame rate"
+why = "the game's own movie player update, found by its function's fingerprint on any build that keeps the function; it goes with the player's two-picture cut and has no wider binding"
+checked = "v131072 main: one function with this fingerprint, the cap's only read of the limit, the pool and input slots the limit sizes and the advance read by disassembly; the opening with frames forced to three vsyncs at cap 2, limit 3 with pool 4 (decode error) and cap 3 (2026-11-16)"
+
+[[binding]]
+what = "movie frame: the pictures the player has taken"
+now = "game"
+goal = "game"
+purpose = "frame rate"
+why = "the game's own movie draw functions, found by their functions' fingerprints on any build that keeps them; it is the counter the same game's player keeps, so it goes with the player's two-picture cut and has no wider binding"
+checked = "v131072 main: one function with each fingerprint, each with one caller, the event update that reads the frame (vtable +0x78), the timeline and sound syncs and the player's +0xc read by disassembly; the opening timed with frames forced to two vsyncs (2026-11-16)"
+
+[[binding]]
+what = "frame ratio from the host's step"
+now = "game"
+goal = "game"
+purpose = "frame rate"
+why = "the game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function"
+checked = "v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08)"
+
+[[binding]]
+what = "dynamic resolution: full size, or a climb on the load measured at each level"
+now = "game"
+goal = "game"
+purpose = "rendering"
+why = "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)"
+checked = "v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09)"
+
+[[match]]
+kind = "cuts"
+module = "main"
+name = "movie pictures a frame: up to 2, the constructor's value for an argument of 2 or more, whatever its caller passes (1)"
+size = 0x33c
+fingerprints = ["f61ad468b6b4e1d574fe8678f5a12dfc60e1aab71be7375142a4b48b0d73ce19"]
+cuts = [{ delta = 0x1c4, original = "88b79c1a", replacement = "48008052", reason = "movie pictures a frame: up to 2, the constructor's value for an argument of 2 or more, whatever its caller passes (1) (cinc w8, w28, ge → mov w8, #2; as v131072 main+0x3b5d084)" }]
+
+[[match]]
+kind = "cuts"
+module = "main"
+name = "movie update cap: 3 pictures a frame, the frame step's largest hold, in place of the limit (2), which also sizes the decoder pipeline"
+size = 0x170
+fingerprints = ["6a29b27559214b3b89cc31a5b85f14bda4a55685f1ae4fe486d53eda66855867"]
+cuts = [{ delta = 0xc0, original = "092040b9", replacement = "69008052", reason = "movie update cap: 3 pictures a frame, the frame step's largest hold, in place of the limit (2), which also sizes the decoder pipeline (ldr w9, [x0, #0x20] → mov w9, #3; as v131072 main+0x3b5cb20)" }]
+
+[[match]]
+kind = "cuts"
+module = "main"
+name = "movie frame: the pictures the player has taken (its +0xc), not 1 more for each frame drawn"
+functions = [{ size = 0x158, fingerprints = ["cc1ca04feb1ca4e553a6c7a4f36f99b13f56977185eea8ef5cd8dd3dbbdcdbcd"], cuts = [{ delta = 0xb4, original = "88fa42b908050011", replacement = "880a40f9080d40b9", reason = "movie frame: the pictures the player has taken (its +0xc), not 1 more for each frame drawn (ldr w8, [x20, #0x2f8]; add w8, w8, #1 → ldr x8, [x20, #0x10]; ldr w8, [x8, #0xc]; as v131072 main+0x3b5c7c4)" }] }, { size = 0xc4, fingerprints = ["8fe123ca6fcd016cd9c718e5e66035c807b27f63408861235765e47b4ec34da3"], cuts = [{ delta = 0x98, original = "88fa42b908050011", replacement = "880a40f9080d40b9", reason = "movie frame: the pictures the player has taken (its +0xc), not 1 more for each frame drawn (the same; as v131072 main+0x3b5c908)" }] }]
+
+[[match]]
+kind = "frame_step"
+module = "main"
+name = "frame ratio from the host's step"
+size = 0x9b4
+fingerprints = ["6ae2aff5344d14568e4dbaf93455e2d8278384bf892ed6c6eca87fef98fbcd1d"]
+others = [{ label = "dynamic resolution", size = 0x294, fingerprints = ["7af6ceb0aedf8e0c17dc08ce17fcd6a7cba6d394a0d09e3b504c6d668dc418e7"] }, { label = "dynamic resolution update", size = 0xb24, fingerprints = ["5a423697838976baf286cffa5e2ceef0d4e037abbcd9d371e90e9e702d61b3d4"] }]
+[match.stub]
+evaluated = true
+code = [0x90ff8010, 0xb9400211, 0x340001b1, 0xb9402211, 0x34000171, 0x1e230220, 0xf9401a10, 0x8b110210, 0x90ff8011, 0xf9001a30, 0x1e210808, 0x52a84e10, 0x1e270200, 0x1e201908, 0x1680002c, 0x1e201828, 0x1680002a, 0x90ff8010, 0xb9404211, 0x35000071, 0x2a1f03e0, 0xd65f03c0, 0xbd400800, 0xbd401001, 0xb9417402, 0xb941a003, 0x7100005f, 0x1a9fa042, 0x528001e9, 0x6b09005f, 0x1a89d042, 0xb9420204, 0x11000484, 0xb9020204, 0xb9420605, 0xb9420a06, 0x6b0200bf, 0x1a8617e6, 0xb9020602, 0xb9020a06, 0x35000046, 0xb9020e1f, 0x91084207, 0x91094208, 0x710020df, 0x5400040b, 0x1e212000, 0x540001ad, 0xb9420e0b, 0x1100056b, 0xb9020e0b, 0x7100217f, 0x5400032b, 0xbc2258e0, 0xb8225904, 0x51000469, 0x1100044a, 0x6b09015f, 0x1a89d140, 0xd65f03c0, 0xb9020e1f, 0xbc2258e0, 0xb8225904, 0x34000182, 0x51000449, 0xb869590a, 0x340000ea, 0x4b0a008a, 0x7109615f, 0x54000088, 0xbc6958e2, 0x1e212040, 0x540000aa, 0x2a0903e0, 0xd65f03c0, 0x2a1f03e0, 0xd65f03c0, 0x2a0203e0, 0xd65f03c0]
+relocs = [{ index = 0, op = "adrp", target = "state", addend = 0x0 }, { index = 8, op = "adrp", target = "state", addend = 0x0 }, { index = 14, op = "b", target = "base", addend = 0xe8 }, { index = 16, op = "b", target = "base", addend = 0xe8 }, { index = 17, op = "adrp", target = "state", addend = 0x0 }]
+sites = [{ base = "base", offset = 0xe4, original = "2818201e" }, { base = "other:dynamic resolution", offset = 0x0, original = "017c40bd" }]
+puts = [{ base = "base", offset = 0xe4, words = [0x157fffc7], reason = "frame ratio: the host's step × base rate / 60 instead of base rate / the game's frame rate (state page target fps; 0 = the game's ratio)", relocs = [{ index = 0, op = "b", target = "area", addend = 0x0 }] }, { base = "other:dynamic resolution", offset = 0x0, words = [0x15400011], reason = "dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level", relocs = [{ index = 0, op = "b", target = "area", addend = 0x44 }] }]
+step_max = 0
+render_scale = 0
+capabilities = ["DYNAMIC_RESOLUTION"]
+fps_ready = false

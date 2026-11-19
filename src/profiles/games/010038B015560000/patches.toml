@@ -1,0 +1,23 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/010038B015560000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/010038B015560000/patches.py"
+
+[[cut]]
+build = "3cfd457814dd647f4cd0f0ae9f9454d2"
+offset = 0x12554
+original = "000040f9"
+replacement = "000400f9"
+reason = "job pool wake: ldr x0,[x0] → str x0,[x0,#8] (pending = nonzero: the woken worker signals once more)"
+
+[[cut]]
+build = "3cfd457814dd647f4cd0f0ae9f9454d2"
+offset = 0x12558
+original = "36fc1814"
+replacement = "fdffff17"
+reason = "job pool wake: b SignalEvent → b 0x1254c (ldr x0,[x0]; b SignalEvent)"
+
+[[binding]]
+what = "job pool wake-up"
+now = "build"
+goal = "game"
+purpose = "race"
+why = "a lost wake-up in the game's own job pool, not a host or SDK difference"

@@ -2,7 +2,7 @@
 # Compare nxrs's RomFS listing and file hashes with Turbo's (scripts/pkg/turbo_romfs.py output).
 # Usage: scripts/pkg/compare.sh <out prefix> <nxrs romfs source args...>
 pre=$1; shift
-NXRS=${NXRS:-target/release/nxrs}
+NXRS=${NXRS:-target/release/nxrs-translate}
 "$NXRS" romfs ls -r "$@" | sed 's/\r$//' | sort -k2 > "$pre.rs.list"
 sort -k2 "$pre.list" > "$pre.py.sorted"
 if cmp -s "$pre.py.sorted" "$pre.rs.list"; then echo "listing: identical ($(wc -l < "$pre.rs.list") files)"; else echo "listing: DIFFERS"; diff "$pre.py.sorted" "$pre.rs.list" | head; fi

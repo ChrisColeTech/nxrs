@@ -1,0 +1,16 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/0100317013770000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/0100317013770000/patches.py"
+
+[[cut]]
+build = "5b76a43b231e0640521ac66203f7c178"
+offset = 0x94354
+original = "0108a052"
+replacement = "2100a052"
+reason = "Unused 272-byte slot pool: 4,194,304 -> 65,536 slots, 1.06 GB -> 17 MB of address space (mov w1,#0x10000)"
+
+[[binding]]
+what = "unused 272-byte slot pool: 4,194,304 → 65,536 slots"
+now = "build"
+goal = "game"
+purpose = "address space"
+why = "Sparks of Hope's own init (Kingdom Battle has none)"

@@ -45,12 +45,13 @@ fn two_functions() {
     let out = std::env::temp_dir().join(format!("nxrs-synth-{}", std::process::id()));
     let opts = GenOptions { out: out.clone(), jobs: 2, ..Default::default() };
     let r = generate(&exefs, &opts, &|_| {}).unwrap();
-    assert_eq!(r.modules[0].functions, 1); // only the BL target: no seeds in this image
+    assert_eq!(r.modules[0].functions, 2); // the module start (always a seed) and the BL target
     let c = std::fs::read_to_string(out.join("main/main_0000.c")).unwrap();
     assert!(c.contains("void f_7000000010(Cpu *c) {"), "{c}");
     assert!(c.contains("Flags F = {0};"), "{c}");
     assert!(c.contains("if (fc_sub32(&F, CC_NE)) { goto L_700000001c; }"), "{c}");
     let table = std::fs::read_to_string(out.join("main/main_table.c")).unwrap();
-    assert!(table.contains("const uint64_t main_fn_count = 1;"));
+    assert!(table.contains("const uint64_t main_fn_count = 2;"));
+    assert!(c.contains("void f_7000000000(Cpu *c) {"), "{c}");
     let _ = std::fs::remove_dir_all(out);
 }

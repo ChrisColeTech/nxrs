@@ -1,0 +1,29 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/0100ECD018EBE000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/0100ECD018EBE000/patches.py"
+
+[[cut]]
+build = "0effe4af1dec3a7966b934d4a7c3d2bf"
+offset = 0x2e77a4
+original = "49008052"
+replacement = "29008052"
+reason = "frame step floor in 60 Hz vsyncs: mov w9,#2 → mov w9,#1 (the game steps by the vsyncs that passed, down to one)"
+
+[[binding]]
+what = "frame step floor 2 → 1 vsync, and its frame step"
+now = "build"
+goal = "game"
+purpose = "frame rate"
+why = "the game's own clock floor and step; MATCH_CUTS and MATCH_FRAME_STEP could carry the cut and the stub, both near the step's function (main+0x2e7750; one function not checked yet)"
+
+[[stub]]
+kind = "frame_step"
+build = "0effe4af1dec3a7966b934d4a7c3d2bf"
+evaluated = true
+code = [0x90ff8010, 0xb9400211, 0x34000111, 0xb9402211, 0x340000d1, 0x1e230220, 0xf9401a10, 0x8b110210, 0x90ff8011, 0xf9001a30, 0xbd004660, 0x164b9df4]
+relocs = [{ index = 0, op = "adrp", target = "state", addend = 0x0 }, { index = 8, op = "adrp", target = "state", addend = 0x0 }, { index = 11, op = "b", target = "module", addend = 0x2e77fc }]
+sites = [{ base = "module", offset = 0x2e77f8, original = "604600bd" }]
+puts = [{ base = "module", offset = 0x2e77f8, words = [0x15b46202], reason = "frame step: the base clock steps by the host's vsyncs (state page target fps; 0 = the game's measured step)", relocs = [{ index = 0, op = "b", target = "area", addend = 0x0 }] }]
+step_max = 0
+render_scale = 0
+capabilities = []
+fps_ready = false

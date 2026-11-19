@@ -1,0 +1,28 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/0100A8E016236000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/0100A8E016236000/patches.py"
+
+[[binding]]
+what = "BaseSystem initialization before dependent Info setup"
+now = "game"
+goal = "game"
+purpose = "race"
+why = "Scn.Step.Modules queues BaseSystem and Info setup together, but RewardGet.OnSetup caches the GamePauseManager that BaseSystem creates"
+checked = "Dream Buffet 1.0.0: complete Add/ExecuteAndWait/task-runner functions, Basil initialization call graph, and null-cache-before-source-write runtime trace"
+
+[[match]]
+kind = "stubs"
+module = "main"
+name = "BaseSystem initialization precedes Info setup"
+size = 0xf8
+fingerprints = ["0904214804ff466cc9a0d9911656bb8888f89d08a9b5819b4709f696b8bdceca"]
+others = [{ label = "execute and wait", size = 0xd0, fingerprints = ["436e2422d30d906519630af2c9f3da3e7019c30f23d692d5246b39d5f6217494"] }, { label = "task runner", size = 0x2a0, fingerprints = ["6d177ae833a2260661809aeee11c69454659857235deed9000bfc44a9ec33913"] }]
+[match.stub]
+evaluated = true
+code = [0xa9be7bfd, 0x910003fd, 0xf9000be0, 0x9400001e, 0xf9400be0, 0xf9400008, 0xf9404508, 0xf9400909, 0xb40002e9, 0x9000000a, 0x9102314a, 0x3840152b, 0x3840154c, 0x6b0c017f, 0x54000221, 0x35ffff8b, 0xf9400509, 0xb40001c9, 0xf85f8129, 0xf9400529, 0x9000000a, 0x9102914a, 0x3840152b, 0x3840154c, 0x6b0c017f, 0x540000c1, 0x35ffff8b, 0xf9400be0, 0x90fd8010, 0x91000210, 0xd63f0200, 0xa8c27bfd, 0xd65f03c0, 0xd10203ff, 0x167fffdf, 0x74696e49, 0x696c6169, 0x6142657a, 0x79536573, 0x6d657473, 0x0, 0x2e6e6353, 0x70657453, 0x646f4d2e, 0x73656c75, 0x0]
+relocs = [{ index = 28, op = "adrp", target = "other:execute and wait", addend = 0x0 }, { index = 34, op = "b", target = "base", addend = 0x4 }]
+sites = [{ base = "base", offset = 0x0, original = "ff0302d1" }, { base = "other:execute and wait", offset = 0x0, original = "fd7bbda9" }]
+puts = [{ base = "base", offset = 0x0, words = [0x15800000], reason = "Modules.InitializeBaseSystem: finish its queued initialization before Info/Decor are added", relocs = [{ index = 0, op = "b", target = "area", addend = 0x0 }] }]
+step_max = 0
+render_scale = 0
+capabilities = []
+fps_ready = false

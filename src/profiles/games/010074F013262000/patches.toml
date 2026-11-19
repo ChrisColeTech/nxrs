@@ -1,0 +1,51 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/010074F013262000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/010074F013262000/patches.py"
+
+[[cut]]
+build = "82d187fe9ef9be921b8e1b1cddf7bd28"
+offset = 0x128e58c
+original = "e001c0d2"
+replacement = "2000c0d2"
+reason = "malloc address region: 60 GB to 4 GB"
+
+[[cut]]
+build = "82d187fe9ef9be921b8e1b1cddf7bd28"
+offset = 0x1241870
+original = "e98340b2"
+replacement = "e9ff9fd2"
+reason = "first arena bump size, low part: mov x9,#0xffff"
+
+[[cut]]
+build = "82d187fe9ef9be921b8e1b1cddf7bd28"
+offset = 0x1241880
+original = "4900a0f2"
+replacement = "4900a4f2"
+reason = "first arena bump size: 512 MB + 128 KB + 64 KB - 1"
+
+[[cut]]
+build = "82d187fe9ef9be921b8e1b1cddf7bd28"
+offset = 0x12418d8
+original = "e97b5fb2"
+replacement = "e98361b2"
+reason = "first arena subtraction, sign extension"
+
+[[cut]]
+build = "82d187fe9ef9be921b8e1b1cddf7bd28"
+offset = 0x12418dc
+original = "c9ffbff2"
+replacement = "c9ffbbf2"
+reason = "first arena subtraction: -(512 MB + 128 KB)"
+
+[[cut]]
+build = "82d187fe9ef9be921b8e1b1cddf7bd28"
+offset = 0x12418e8
+original = "2800c0f2"
+replacement = "4800a4f2"
+reason = "first arena stored capacity: 512 MB + 128 KB"
+
+[[binding]]
+what = "malloc region 60 GB → 4 GB and its first arena"
+now = "build"
+goal = "game"
+purpose = "address space"
+why = "Monolith's own allocator; its constants span two functions (a multi-function rule). The cause, an iPhone's address space, is a platform limit"

@@ -1,0 +1,17 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/01008DD013200000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/01008DD013200000/patches.py"
+
+[[binding]]
+what = "Unity's constant-buffer table locked on the shared device"
+now = "build"
+goal = "engine"
+purpose = "race"
+why = "Unity 2018.4's threaded GfxDevice: the main thread registers layouts on the real device while the render thread uses the same table; any Unity 2018.4 build with this code has the race"
+blocked = "the stubs have no function-matched form yet, and no other Unity 2018.4 main on the drive shares these functions (Ori and the Blind Forest 1.0.2: no fingerprint match)"
+checked = "probes of both threads inserting the same key and of the table API's callers by thread; Blind Forest main compared with nso_fnmap"
+
+[[stub]]
+kind = "stub"
+build = "11c33c7c2dbd3c5491841f67495c7ee8"
+evaluated = false
+needs = "ctx.address (reads the module's own code)"

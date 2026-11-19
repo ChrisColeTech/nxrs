@@ -9,7 +9,7 @@ description = "RecompLauncher engine: Switch package input and the ARM64 -> C tr
 path = "src/lib.rs"
 
 [[bin]]
-name = "nxrs"
+name = "nxrs-translate"
 path = "src/bin/nxrs.rs"
 
 [dependencies]

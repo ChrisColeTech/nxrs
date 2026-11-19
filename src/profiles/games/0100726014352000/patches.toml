@@ -1,0 +1,32 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/0100726014352000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/0100726014352000/patches.py"
+
+[[cut]]
+build = "db0507f36b84200ac05f75d76ed5026f"
+offset = 0x1979bc
+original = "e8a79f1a"
+replacement = "28008052"
+reason = "offline allowed (last online within 30 days): cset w8,lt → mov w8,#1"
+
+[[cut]]
+build = "db0507f36b84200ac05f75d76ed5026f"
+offset = 0x1979c4
+original = "e8031f2a"
+replacement = "28008052"
+reason = "offline allowed (no \"User Last Online\" setting): mov w8,wzr → mov w8,#1"
+
+[[binding]]
+what = "offline play without a Battle.net login in the last 30 days"
+now = "game"
+goal = "game"
+purpose = "runtime"
+checked = "MATCH_CUTS enrolled on 1.0.34.0; the base game has no such check (2026-11-12)"
+why = "the game's own offline policy (a saved last-online time), which an offline host cannot satisfy; function-matched (MATCH_CUTS) over the game's updates"
+
+[[match]]
+kind = "cuts"
+module = "main"
+name = "offline allowed without a recent Battle.net login"
+size = 0x13c
+fingerprints = ["0904297729da61276db29eeb9880aad2da62c0003c822113b7e6142be7cd8db1"]
+cuts = [{ delta = 0x110, original = "e8a79f1a", replacement = "28008052", reason = "offline allowed (last online within 30 days): cset w8,lt → mov w8,#1 (as 1.0.34.0 main+0x1979bc)" }, { delta = 0x118, original = "e8031f2a", replacement = "28008052", reason = "offline allowed (no \"User Last Online\" setting): mov w8,wzr → mov w8,#1 (as 1.0.34.0 main+0x1979c4)" }]

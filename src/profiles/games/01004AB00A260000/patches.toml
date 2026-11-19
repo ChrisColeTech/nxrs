@@ -1,0 +1,23 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/01004AB00A260000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/01004AB00A260000/patches.py"
+
+[[cut]]
+build = "df3766a2bb651a3e822828abf10b6f7b"
+offset = 0x706fa4
+original = "e10f1f32"
+replacement = "81078052"
+reason = "frame limiter target: mov w1,#30 → mov w1,#60 (main+0x707090 sleeps out 1000 / fps ms since the last frame)"
+
+[[cut]]
+build = "df3766a2bb651a3e822828abf10b6f7b"
+offset = 0x667904
+original = "08ed46bd"
+replacement = "083548bd"
+reason = "frame update step: ldr s8,[x8,#0x6ec] (1/30) → ldr s8,[x8,#0x834] (1/60), passed to main+0x6a337c"
+
+[[binding]]
+what = "frame limiter 30 → 60 fps and the 1/60 update step"
+now = "build"
+goal = "game"
+purpose = "frame rate"
+why = "the game's own limiter constant and fixed step"

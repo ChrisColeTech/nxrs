@@ -1,0 +1,58 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/010055D009F78000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/010055D009F78000/patches.py"
+
+[[cut]]
+build = "89048449ba238c8cf565518b83bf02d3"
+offset = 0xd13de0
+original = "020000000100000002000000020000000100000002000000"
+replacement = "010000000100000001000000010000000100000001000000"
+reason = "per-render-mode present interval table {2,1,2,2,1,2} → all 1 (60 fps; the game logic already runs at 60 updates a second)"
+
+[[cut]]
+build = "89048449ba238c8cf565518b83bf02d3"
+offset = 0xd13e40
+original = "000000400000803f00000040000000400000803f00000040"
+replacement = "0000803f0000803f0000803f0000803f0000803f0000803f"
+reason = "per-render-mode interval as float {2.0,1.0,2.0,2.0,1.0,2.0} → all 1.0 (render-thread per-frame steps)"
+
+[[cut]]
+build = "89048449ba238c8cf565518b83bf02d3"
+offset = 0x50fb7c
+original = "2801082a"
+replacement = "e8031f2a"
+reason = "render thread forced interval 2: orr w8,w9,w8 (either flag) → mov w8,wzr (the mode's interval, 1)"
+
+[[cut]]
+build = "89048449ba238c8cf565518b83bf02d3"
+offset = 0x50f8e8
+original = "01102e1e"
+replacement = "483d0090"
+reason = "render thread wait timeout: fmov s1,#1.0 → adrp x8,#0xcb7000"
+
+[[cut]]
+build = "89048449ba238c8cf565518b83bf02d3"
+offset = 0x50f8ec
+original = "2018201e"
+replacement = "08514bbd"
+reason = "render thread wait timeout: fdiv s0,s1,s0 → ldr s8,[x8,#0xb50] (1000.0)"
+
+[[cut]]
+build = "89048449ba238c8cf565518b83bf02d3"
+offset = 0x50f8f0
+original = "483d0090"
+replacement = "0019201e"
+reason = "render thread wait timeout: adrp x8,#0xcb7000 → fdiv s0,s8,s0 (1000/fps; the fmul by s8 that follows makes it µs)"
+
+[[cut]]
+build = "89048449ba238c8cf565518b83bf02d3"
+offset = 0x50f8f4
+original = "08514bbd"
+replacement = "1f2003d5"
+reason = "render thread wait timeout: ldr s8,[x8,#0xb50] → nop (moved up)"
+
+[[binding]]
+what = "render intervals, the forced-interval flag and the render-wait timeout"
+now = "build"
+goal = "game"
+purpose = "frame rate"
+why = "the game's own tables, flag and timeout"

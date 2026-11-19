@@ -1,0 +1,33 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/0100346017304000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/0100346017304000/patches.py"
+
+[[cut]]
+build = "f5ab74b9d45f955de2dc91da8e039c57"
+offset = 0x443fac
+original = "087c149be9e301b2291191f2087dc99b14fd45d3"
+replacement = "087c149b890780520809c99a9f060071f403889a"
+reason = "frame limiter threshold: N × tick frequency / 60 (umulh by 1/60 → udiv by 60), then 0 when N = 1 (cmp w20, #1; csel x20, xzr, x8, eq): one vsync a frame is the present pacing's; N = 2 keeps the 2 ms rounds"
+
+[[binding]]
+what = "KTGL frame limiter threshold: 0 at one vsync a frame"
+now = "game"
+goal = "game"
+purpose = "frame rate"
+checked = "MATCH_CUTS enrolled on both builds"
+why = "function-matched over its two builds (MATCH_CUTS); whether Age of Calamity, Three Houses or ROMANCE OF THE THREE KINGDOMS 8 REMAKE share the function is unchecked (an engine rule if they do)"
+
+[[match]]
+kind = "cuts"
+module = "main"
+name = "frame limiter threshold: 0 when N = 1"
+size = 0x16c
+fingerprints = ["3191958fa93fa496f5b57c61cf4a08fd6154d947f0b16f481d119ba38c28c48d"]
+cuts = [{ delta = 0x120, original = "087c149be9e301b2291191f2087dc99b14fd45d3", replacement = "087c149b890780520809c99a9f060071f403889a", reason = "frame limiter threshold: 0 when N = 1 (as 1.1.1 main+0x443fac)" }]
+
+[[match]]
+kind = "cuts"
+module = "main"
+name = "frame limiter threshold: 0 when N = 1"
+size = 0xac
+fingerprints = ["8fda590c2f6df29ae21230a600452979e26c0972dcb738cec24130239aef1346"]
+cuts = [{ delta = 0x68, original = "087c149be9e301b2291191f2087dc99b14fd45d3", replacement = "087c149b890780520809c99a9f060071f403889a", reason = "frame limiter threshold: 0 when N = 1 (as v0 main+0x43e1a8)" }]

@@ -1,0 +1,78 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/0100453019AA8000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/0100453019AA8000/patches.py"
+
+[[cut]]
+build = "3f2425864cf226844511065f77aa3e36"
+offset = 0x13f3cf0
+original = "e001c0d2"
+replacement = "2000c0d2"
+reason = "malloc address region: 60 GB to 4 GB"
+
+[[cut]]
+build = "3f2425864cf226844511065f77aa3e36"
+offset = 0xbabe70
+original = "e98340b2"
+replacement = "e9ff9fd2"
+reason = "first arena bump size, low part: mov x9,#0xffff"
+
+[[cut]]
+build = "3f2425864cf226844511065f77aa3e36"
+offset = 0xbabe80
+original = "4900a0f2"
+replacement = "4900a4f2"
+reason = "first arena bump size: 512 MB + 128 KB + 64 KB - 1"
+
+[[cut]]
+build = "3f2425864cf226844511065f77aa3e36"
+offset = 0xbabf04
+original = "ea7b5fb2"
+replacement = "ea8361b2"
+reason = "first arena subtraction, sign extension"
+
+[[cut]]
+build = "3f2425864cf226844511065f77aa3e36"
+offset = 0xbabf0c
+original = "caffbff2"
+replacement = "caffbbf2"
+reason = "first arena subtraction: -(512 MB + 128 KB)"
+
+[[cut]]
+build = "3f2425864cf226844511065f77aa3e36"
+offset = 0xbabf1c
+original = "2800c0f2"
+replacement = "4800a4f2"
+reason = "first arena stored capacity: 512 MB + 128 KB"
+
+[[binding]]
+what = "malloc region 60 GB → 4 GB and its first arena"
+now = "game"
+goal = "game"
+purpose = "address space"
+why = "Monolith's allocator calls nn::os directly; its sizes span two functions matched atomically. The 512 MB first arena is sized for this game; an engine rule needs shared-layout proof and dynamic sizing"
+checked = "both complete functions and their callees in base 1.0.0 and update 1.0.1; forged-build rewrite byte-identical; 1.0.1 opening-field gameplay with the iPhone alias size, first arena 95 MB committed"
+
+[[binding]]
+what = "camera angular integration uses elapsed time"
+now = "game"
+goal = "game"
+purpose = "frame rate"
+why = "the game's orbit camera integrates configured angular speed once per update; multiply the loaded gain by its own 30 Hz elapsed-time ratio. Engine input is amplitude state and must not be scaled"
+checked = "complete orbit bodies, scratch-register liveness, unique interval setter, elapsed getter and clamped task-step functions in base 1.0.0 and update 1.0.1"
+
+[[match]]
+kind = "cuts"
+module = "main"
+name = "Monolith malloc region and first arena"
+functions = [{ size = 0x2b8, fingerprints = ["b00403a9284d46d15659fc765ce9c0d0474170eb6b9fe2369a4fb69f5458bba2"], cuts = [{ delta = 0x10, original = "e98340b2", replacement = "e9ff9fd2", reason = "first arena bump size, low part: mov x9,#0xffff" }, { delta = 0x20, original = "4900a0f2", replacement = "4900a4f2", reason = "first arena bump size: 512 MB + 128 KB + 64 KB - 1" }, { delta = 0xa4, original = "ea7b5fb2", replacement = "ea8361b2", reason = "first arena subtraction, sign extension" }, { delta = 0xac, original = "caffbff2", replacement = "caffbbf2", reason = "first arena subtraction: -(512 MB + 128 KB)" }, { delta = 0xbc, original = "2800c0f2", replacement = "4800a4f2", reason = "first arena stored capacity: 512 MB + 128 KB" }] }, { size = 0x10, fingerprints = ["df6920c64d84efc7c01f51f9b17e9bd252f9058ed5903bfe6fd5a7ff1a7f4ca3"], cuts = [{ delta = 0x0, original = "e001c0d2", replacement = "2000c0d2", reason = "malloc address region: 60 GB to 4 GB" }] }]
+
+[[match]]
+kind = "stubs"
+module = "main"
+name = "camera angular integration uses elapsed time"
+size = 0xadc
+fingerprints = ["42a7fb59ce3cc9292102bfb463f9e4a56886e88a998ad8f14999767331b9fb72", "5d789f70bf12105dd2ae10c6822b8d840055330e9db6893271e4b56349d14c83"]
+fps_required = true
+others = [{ label = "clamped task step", size = 0xe0, fingerprints = ["8480c574e5a54f7e9f79b72a4e903daade2896eaa663a517666edb968d013f03"] }, { label = "elapsed seconds", size = 0x20, fingerprints = ["4aa168a4c43f8e25311f1983d975a58457ab41b00497892fc6cf433e1a54bd97"] }, { label = "interval setter", size = 0x20, fingerprints = ["5b3276a0309456b63d7a5ebf4477d5b4249b49b769e9033d540beb29823345ce"] }]
+[match.stub]
+evaluated = false
+needs = "ctx.address (reads the module's own code)"

@@ -1,0 +1,44 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/0400C3F00006E000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/0400C3F00006E000/patches.py"
+
+[[binding]]
+what = "frame interval from the host's step"
+now = "game"
+goal = "game"
+purpose = "frame rate"
+why = "the game's own interval choice, found by its function's fingerprint on any build that keeps the function"
+checked = "v0 and 1.8.0 mains: one function with each fingerprint, the sites and the free registers read by disassembly (2026-11-08, 1.8.0 2026-11-12)"
+
+[[match]]
+kind = "frame_step"
+module = "main"
+name = "frame interval from the host's step"
+size = 0x290
+fingerprints = ["fe68735d459ac00d848aa10c5da10964193abc0c950c35cafe5203606de3ea29"]
+[match.stub]
+evaluated = true
+code = [0x90ff8010, 0xb9400211, 0x34000211, 0xb9421268, 0x7100091f, 0x54000100, 0xb900261f, 0xb9402211, 0x34000151, 0x52800048, 0x71000a3f, 0x1a889228, 0x14000002, 0xb9002608, 0xf9401a11, 0x8b284231, 0xf9001a11, 0x1680003e, 0xb9421268, 0x16800016]
+relocs = [{ index = 0, op = "adrp", target = "state", addend = 0x0 }, { index = 17, op = "b", target = "base", addend = 0x13c }, { index = 19, op = "b", target = "base", addend = 0xa4 }]
+sites = [{ base = "base", offset = 0xa0, original = "681242b9" }, { base = "base", offset = 0x13c, original = "681602b9" }]
+puts = [{ base = "base", offset = 0xa0, words = [0x157fffd8], reason = "frame interval: the host's step, at most 2, unless the game's 30 fps mode is set (state page target fps; 0 = the game's choice by CPU time)", relocs = [{ index = 0, op = "b", target = "area", addend = 0x0 }] }]
+step_max = 2
+render_scale = 0
+capabilities = []
+fps_ready = false
+
+[[match]]
+kind = "frame_step"
+module = "main"
+name = "frame interval from the host's step"
+size = 0x28c
+fingerprints = ["f5ff6fbab4ddd6eb8be409727bbc0cbf68ef791aa143a1043253cdbb771cc365"]
+[match.stub]
+evaluated = true
+code = [0x90ff8010, 0xb9400211, 0x34000211, 0xb9421268, 0x7100091f, 0x54000100, 0xb900261f, 0xb9402211, 0x34000151, 0x52800048, 0x71000a3f, 0x1a889228, 0x14000002, 0xb9002608, 0xf9401a11, 0x8b284231, 0xf9001a11, 0x1680003f, 0xb9421268, 0x16800017]
+relocs = [{ index = 0, op = "adrp", target = "state", addend = 0x0 }, { index = 17, op = "b", target = "base", addend = 0x140 }, { index = 19, op = "b", target = "base", addend = 0xa8 }]
+sites = [{ base = "base", offset = 0xa4, original = "681242b9" }, { base = "base", offset = 0x140, original = "681602b9" }]
+puts = [{ base = "base", offset = 0xa4, words = [0x157fffd7], reason = "frame interval: the host's step, at most 2, unless the game's 30 fps mode is set (state page target fps; 0 = the game's choice by CPU time)", relocs = [{ index = 0, op = "b", target = "area", addend = 0x0 }] }]
+step_max = 2
+render_scale = 0
+capabilities = []
+fps_ready = false

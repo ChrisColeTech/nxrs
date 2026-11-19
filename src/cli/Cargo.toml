@@ -1,0 +1,19 @@
+[package]
+name = "cli"
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+description = "RecompLauncher engine: the nxrs command line (build, updates, DLC) and the build step (clang, chunk cache, code DLL)"
+
+[[bin]]
+name = "nxrs"
+path = "src/main.rs"
+
+[dependencies]
+translator = { path = "../translator" }
+profiles = { path = "../profiles" }
+anyhow = "1"
+sha2 = "0.10"
+unicode-normalization = "0.1"
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }

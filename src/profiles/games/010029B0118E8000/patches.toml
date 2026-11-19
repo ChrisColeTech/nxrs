@@ -1,0 +1,16 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/010029B0118E8000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/010029B0118E8000/patches.py"
+
+[[cut]]
+build = "799d1061182c1302e08e706b84ce76e5"
+offset = 0x4835a4
+original = "2cffff54"
+replacement = "1f2003d5"
+reason = "frame limiter spin: b.gt main+0x483588 → nop (the host paces the frames)"
+
+[[binding]]
+what = "frame limiter spin: its branch back cut"
+now = "build"
+goal = "game"
+purpose = "frame rate"
+why = "the engine's own spin limiter; a function-matched rule could carry it over the game's updates"

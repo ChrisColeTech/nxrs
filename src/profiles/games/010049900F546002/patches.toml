@@ -1,0 +1,25 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/010049900F546002/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/010049900F546002/patches.py"
+
+[[cut]]
+build = "b21e3733e11d6fcf1a8d57ce51bef4a5"
+offset = 0x151214
+original = "e2030232"
+replacement = "0280a052"
+reason = "coroutine stack region size: orr w2,wzr,#0x40000000 → mov w2,#0x4000000 (1 GB → 64 MB)"
+
+[[cut]]
+build = "b21e3733e11d6fcf1a8d57ce51bef4a5"
+offset = 0x151398
+original = "e2030232"
+replacement = "0280a052"
+reason = "coroutine stack region size, the other start path: 1 GB → 64 MB"
+
+[[binding]]
+what = "Hagi coroutine stack region 1 GB → 64 MB"
+now = "build"
+goal = "game"
+purpose = "memory"
+why = "a size inside Hagi's own code: nothing the host sees tells a 1 GB reservation it can shrink from one it cannot"
+checked = "the final build 1.1.4 (the only one the profile packs), 2026-11-04"
+kept = "1.1.4 is the last update; a match over Hagi would serve no other build of this game"
