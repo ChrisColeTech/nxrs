@@ -3,10 +3,10 @@ name = "cli"
 edition = "2021"
 version = "0.1.0"
 license = "MIT"
-description = "RecompLauncher engine: the nxrs command line (build, updates, DLC) and the build step (clang, chunk cache, code DLL)"
+description = "RecompLauncher engine: nxrs-build, the command line the launcher runs (build, updates, DLC) and the build step (clang, chunk cache, code DLL)"
 
 [[bin]]
-name = "nxrs"
+name = "nxrs-build"
 path = "src/main.rs"
 
 [dependencies]

@@ -1,17 +1,20 @@
 # Launcher contract
 
-How RecompLauncher drives the engine. v1 is what the launcher does today with Turbo's `switchrecomp.py`; nxrs
-answers it unchanged. v2 is the proposal for a launcher that runs nxrs directly.
+How the nxrs launcher (`nxrs.exe`, formerly RecompLauncher) drives the engine's build tool, `nxrs-build.exe`. v1 is
+what the launcher does with Turbo's `switchrecomp.py`; nxrs-build answers it unchanged. v2 is what the launcher does
+for a game set to the nxrs engine: it runs nxrs-build itself, without Python (implemented on both sides, 2026-11-19).
 
-## v1 (today)
+## v1 (Turbo's command line)
 
 ### How the launcher starts the engine
 
 The launcher runs `<python> -u <engine>\recomp_cli.py <args>` (working directory: the engine folder; stdout and
 stderr merged; environment `PYTHONUTF8=1`, `PYTHONUNBUFFERED=1`, `SWR_PROD_KEYS=<keys>`, its tool folders on `PATH`).
 `recomp_cli.py` imports `switchrecomp` from beside itself and returns `switchrecomp.main()`. For nxrs, that module is
-`src/cli/launcher/switchrecomp.py`: it runs `nxrs.exe` (beside it, `bin\nxrs.exe`, or `NXRS_EXE`) with the same
-arguments and returns its exit code. Cancel kills the tree (`taskkill /PID <python> /T /F`), nxrs with it.
+`src/cli/launcher/switchrecomp.py`: it runs `nxrs-build.exe` (`NXRS_BUILD`, `NXRS_EXE`, beside it, or
+`bin\nxrs-build.exe`) with the same arguments and returns its exit code. Cancel kills the tree (`taskkill /PID <python>
+/T /F`), nxrs-build with it. The launcher no longer needs this path (it speaks v2); it stays for tools that drive
+`switchrecomp.py`.
 
 An engine folder the launcher accepts (`Toolchain::problem()`) holds `switchrecomp.py` (the shim), a Python, a file at
 one of its gcc paths (`gcc\bin\gcc.exe`, …) and `bin\runtime_win64_win32.exe`. nxrs uses neither of the last two:
@@ -71,7 +74,7 @@ into `build\cli\` (never the owner's build folders), and through the launcher's 
 
 Intentional differences:
 
-1. Banner `nxrs - use your own copy…` instead of Turbo's; one `nxrs: ignored (…)` line after it.
+1. Banner `nxrs - use your own copy…` instead of Turbo's; one `nxrs-build: ignored (…)` line after it.
 2. Module lines show the translator's layout (`7000000000`…) and each build id, not `.eh_frame functions`; a
    `Profile:` line; the translator's per-module discovery and C summaries, `C code: … functions` (not `entries`);
    `patch applied: …` for the profile's build-time patches (Turbo printed the same words for its built-in ones).
@@ -92,23 +95,78 @@ Intentional differences:
     exefs/main in <path>` after it); the launcher checks the source before it starts a build. Package errors are the
     same lines (e.g. `Cannot load the game: <update>: this update is for <id>, not for this game (<id>)`).
 
-## v2 (proposed: versioned, no Python)
+## v2 (the launcher runs nxrs-build; no Python)
 
-The launcher runs `nxrs.exe` itself; Python leaves the build path.
+Implemented in the launcher (D:\Projects\RecompLauncher, `src/launcher/library.cpp` + `buildmanager.cpp`) and in
+nxrs-build (`src/cli`). Windows only.
 
-- **Version.** `nxrs contract` (and `nxrs --contract`) prints `nxrs-contract 2`. A launcher that finds no such line
-  falls back to v1. The number only grows; a v2 launcher reads every 2.x.
-- **Subcommands** (implemented): `nxrs build <input> -o <name> --outdir <dir> [--jobs N] [--update <pkg> |
-  --no-update] [--keys <file>] [--machine]`, `nxrs update-info [--game <input>] <pkg>...`, `nxrs dlc install | sync
-  | remove | list --datadir <dir> [...]`, `nxrs profile`, `nxrs doctor`.
-- **Machine lines** (with `--machine`, implemented for `build`): `@progress\t<stage>\t<done>\t<total>` with stages
-  `open`, `analyze`, `translate`, `compile`, `link`; one final `@result\tok\t<exe>` or `@result\terror\t<reason>`. Human
-  lines stay as they are, so the log reads the same.
-- **`doctor`** (implemented): AVX2/FMA/BMI2, clang, `nxrt.lib`, the Vulkan loader, keys present; exit 1 on a failure.
-  To add: the Vulkan 1.3 device and driver version, free disk space.
-- **`engine.json`** beside `nxrs.exe`: `{ "contract": 2, "engine": "nxrs", "version": "…" }`, so the launcher finds the
-  engine without starting it; `Toolchain::problem()` then checks `nxrs.exe`, clang and `nxrt.lib` instead of
-  `switchrecomp.py`, Python, gcc and the runtime exe.
-- **Per-game engine.** A `library.json` game field `"engine": "turbo" | "nxrs"`; an nxrs build of a game Turbo also
-  builds goes to `<dump>\SwitchRecomp Builds\<name> [nxrs]\` so both can exist side by side.
-- **Unchanged from v1:** the output layout, the data folder, the `UPDATE` and `DLC` lines, exit codes 0 / 1 / 2.
+### Finding nxrs-build
+
+The launcher looks, in order, at `NXRS_BUILD` (a file or its folder), the path chosen in **Settings > Engine >
+nxrs-build** (`library.json` `"nxrsBuild"`, also `nxrs.exe --nxrs-build <exe>`; for development: the engine's
+`target\<dir>\release\nxrs-build.exe`), then the release's `nxrs-engine\nxrs-build.exe` beside `nxrs.exe`.
+
+**Version.** `engine.json` beside nxrs-build (a release writes it: `{"contract": 2, "engine": "nxrs", "version":
+"<engine commit>"}`) is read without starting the engine; without it the launcher runs `nxrs-build contract` (10 s
+limit) and reads `nxrs-contract <n>`. It needs contract 2; less is shown as the problem. The number only grows; a v2
+launcher reads every 2.x.
+
+**Ready to build** (`Toolchain::nxrsProblem()`): nxrs-build found and contract ≥ 2. The compiler and the engine
+libraries are nxrs-build's to find (`nxrs-build doctor` says what is missing); the build fails with its reason when one
+is.
+
+### The invocations
+
+The program is nxrs-build itself; working directory: its folder; stdout and stderr merged; environment as in v1
+(`SWR_PROD_KEYS` included); keys are also passed as `--keys` when the installed file exists.
+
+| What | Arguments (`nxrsBuildArguments`, `nxrsUpdateInfoArguments`, `nxrsDlcSyncArguments`) |
+|---|---|
+| Build | `build <source> --outdir <buildDir> -o <outputName> --jobs <n> --machine [--no-update \| --update <pkg>] [--keys <prod.keys>]` |
+| Update probe | `update-info --game <source> [--keys <prod.keys>] <pkg>...` |
+| DLC | `dlc sync --datadir <buildDir>\<name>_data [--keys <prod.keys>] [<pkg>...]` (Play, Install DLC, Remove, after a build) |
+| Version | `contract` |
+
+Other subcommands (not run by the launcher): `dlc install | remove | list`, `profile`, `doctor`, `translate`.
+
+### What the launcher reads
+
+Everything v1 lists (the progress lines, the `DLC:` package line, `UPDATE` / `UPDATE error:` / `DLC error:` lines,
+exit codes 0 / 1 / 2, the output layout and the data folder), plus, with `--machine`:
+
+- `@progress\t<stage>\t<done>\t<total>`, stages `open`, `analyze`, `translate`, `compile`, `link` (the launcher
+  shows `shaders` and `data` too if they come). Machine lines are not shown in the build console; the log file keeps
+  them.
+- One final `@result\tok\t<exe>` or `@result\terror\t<reason>`; the exit code still decides.
+
+### Per-game engine and the build folder
+
+- `library.json` game field `"engine": "turbo" | "nxrs"`. Absent (every entry from before) or anything else is
+  `turbo`: existing entries keep building with Turbo until the user switches (Properties > Build > Engine, or
+  `nxrs.exe --select-title <game> --engine nxrs`).
+- An nxrs build goes to `<build folder> [nxrs]` (e.g. `<dump>\SwitchRecomp Builds\<name> [nxrs]\`), Turbo's stays in
+  `<build folder>`: both can exist. Switching moves the entry to the other folder and reads what is built there
+  (source and applied update from the data folder's marker), so switching back to a finished build needs no rebuild.
+- **Import build** / discover: a build whose `<name>_build*\gen\nxrs.gen.key` exists is an nxrs build (the entry gets
+  `"engine": "nxrs"`).
+- **Play**: an nxrs game skips Turbo's checks (Python, .NET, `tools\nxshader`: nxrs translates shaders in the
+  build). The DLC check before Play and the INI settings (renderer, button layout) are the same.
+
+### Release layout (`scripts/package-release.py --nxrs-engine <engine checkout>`)
+
+```
+nxrs.exe                         the launcher
+nxrs-engine\nxrs-build.exe, engine.json
+nxrs-engine\nxfront.lib, nxrt.lib                       MSVC engine (used when Visual Studio + a clang are installed)
+nxrs-engine\gnu\libnxfront.a, libnxrt.a, libwindows.0.52.0.a   gnullvm engine
+toolchain\llvm-mingw\                                   x86_64 part of llvm-mingw (no Visual Studio needed)
+legal\licenses\nxrs-engine\                             the engine's LICENSES\
+```
+
+nxrs-build chooses MSVC only when Visual Studio, a clang and `nxfront.lib` are all there (`cc::use_gnu`), else the
+bundled llvm-mingw with `gnu\`: a release may ship only the gnullvm set.
+
+### Not done
+
+- `doctor` is not run by the launcher (its health text shows nxrs-build's path and contract only).
+- No one-time save copy between a Turbo and an nxrs build of the same game (PORT_PLAN 6.3); saves stay per folder.

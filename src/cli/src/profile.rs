@@ -1,4 +1,4 @@
-//! The game profile in the build (`Profile:` line, the patch table the translator applies) and `nxrs profile`.
+//! The game profile in the build (`Profile:` line, the patch table the translator applies) and `nxrs-build profile`.
 
 use crate::out::Out;
 use anyhow::{anyhow, Result};
@@ -57,7 +57,7 @@ fn hex_u64(s: &str) -> Result<u64> {
     u64::from_str_radix(s.trim_start_matches("0x"), 16).map_err(|_| anyhow!("not a title id: {s}"))
 }
 
-/// `nxrs profile [<title id> [<main build id>]] [--package <input>]`
+/// `nxrs-build profile [<title id> [<main build id>]] [--package <input>]`
 pub fn command(title: Option<&str>, build: Option<&str>, package: Option<&Path>, keys: Option<&Path>) -> Result<()> {
     let (tid, mods) = match package {
         Some(input) => {

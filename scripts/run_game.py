@@ -1,6 +1,6 @@
 """run_game.py <exe> <log> <hard timeout s> [args...]: the machine's game rules for one run.
 
-Waits until no build runs (cargo, rustc, clang, nxshaders, nxrs: a run overlapping a build crashed the PC), takes
+Waits until no build runs (cargo, rustc, clang, nxshaders, nxrs-build: a run overlapping a build crashed the PC), takes
 GAME_LOCK atomically, checks no other game exe runs and free commit > 40 GB, starts the exe, watches it BY PID
 (kill if private bytes > 20 GB or free commit < 25 GB, or past the hard timeout), deletes the lock once it exited.
 Environment: NXRS_LANE names the lane in the lock. scripts/play_scenario.py runs games through `run()` here.
@@ -38,7 +38,7 @@ def other_games():
     return r if isinstance(r, list) else [r]
 
 
-COMPILERS = ('cargo.exe', 'rustc.exe', 'clang.exe', 'clang++.exe', 'lld-link.exe', 'ld.lld.exe', 'nxshaders.exe', 'nxrs.exe', 'dmsh_xlate.exe')
+COMPILERS = ('cargo.exe', 'rustc.exe', 'clang.exe', 'clang++.exe', 'lld-link.exe', 'ld.lld.exe', 'nxshaders.exe', 'nxrs-build.exe', 'nxrs.exe', 'dmsh_xlate.exe')
 
 
 def compilers():

@@ -236,6 +236,69 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
 - Diagnostics: `NXGFX_DUMP_AT_S=<s,...>` / control command `passdump`: every colour target of one frame's passes as
   PNG (`NXGFX_DUMP_DIR`), a log line per pass.
 
+**Lane G hand-off notes (2026-11-19, keep current):**
+- Test builds of lane G: `build/G/compile_mk8dt.sh` (lane T's MK8D gen compiled with the current headers into
+  `build/G/mk8dt/obj`), `build/G/link_mk8dt.sh` and `build/G/link_game.sh <name> <game build dir> <out>` (link with
+  `target/G/release/nxfront.lib`); MKW at `build/G/mkwt` (lane O's objects, a copy of its data folder). Runs:
+  `build/G/demo.sh <dir> <s> [env…]` (MK8D, the title demo race starts ~40-50 s in: dump / measure there; key scripts
+  are unreliable), `build/G/race.sh` (keys), `build/G/mkw_run.sh`; all go through `run_retry.sh` → `run_when_free.sh`
+  → `scripts/run_game.py`; `GAME_ARGS="--k=v …"` passes options. Never edit `run_when_free.sh` / `run_retry.sh`
+  while a run of them waits (bash reads scripts as it goes).
+- Findings so far: MK8D race CPU cost was texture uploads (render targets re-initialized every frame → new images
+  uploaded from storage, ~15 ms a frame; fixed by parking / reusing images) and replay on the game's thread (moved to
+  the replay thread). MK8D race tint: the final grading pass samples an 8x8x8 3D LUT the game renders slice by slice;
+  3D targets were bound as 3D views (not renderable) — fixed by 2D-array views of slices (verify with a demo dump:
+  `pass dump N: stage 1 …` lines of the pass writing A2B10G10R10 1920x1080 just before the UI). The HDR scene itself
+  (before grading) still has a black sky: next suspect for the lighting item. MKW: 28 GB was 19 GB of whole images
+  for sparse terrain arrays + a 76 s scan; sparse images fix both (MKW presents, 8.4-8.9 GB peak).
+- Open: the measurements queued at hand-off time (r21 10-minute MK8D demo memory/FPS, r22 built-in frame gen, r23
+  LSFG frame gen, w5 MKW) — their dirs are `build/G/runs/<name>` and `runs-<name>.out`.
+
+**Lane G, rev 5 (2026-11-19, uncommitted):**
+- **Asynchronous submission** (Turbo's translation thread): `nvnQueueSubmitCommands` copies the records and returns;
+  the `vk replay` thread replays submits and presents in order. Fences taken while ops are queued are `1 << 62 | op
+  sequence` and resolve once the op ran (`vk::queue::wait_fence` / `fence_done` handle them); `nvnSyncWait` on a sync
+  a queued command buffer will set drains first; `oneoff` (ReadTexels, tools) and `finish` drain;
+  `defer_after_use` from another thread runs after the queued ops. `NXGFX_ASYNC=0`: replay on the game's thread.
+- **Images of re-initialized textures are reused**: a texture initialized again with the same storage, description and
+  layout gets the released image back (content kept; a CPU texture is uploaded again only if its pages' bytes
+  changed). Released images are parked 8 frames (at most 512). `images_reused` / `uploads_same_bytes` counters.
+- **Frame generation** (`vk/framegen.rs`, built-in; `vk/lsfg.rs`, LSFG): options `lsfg` (on), `frame_gen_type`
+  (`builtin` default | `lsfg`, added to lane I's option table), `lsfg_target`, `lsfg_multiplier`, `lsfg_flow`;
+  `fps_target=120` = x2 at 120 as before. The front end calls `nxgfx::vk::framegen::set_lsfg_state(front::lsfg::state)`
+  and, once its set is identified, `nxgfx::vk::lsfg::set_shaders(Some(Arc<Shaders { mip, generate, passes }>))`
+  (done in `front/src/lib.rs` / `lsfg.rs`); `front::lsfg::start` reads the DLL only for `frame_gen_type=lsfg`. LSFG
+  missing / failing → one line and the built-in mode. Generated frames are presented before the game's frame, spaced
+  over its interval by the `vk frame-gen present` thread; the swap chain gets 4 more images while frame generation is
+  on. `NXGFX_FRAMEGEN=0` off; `NXGFX_FG_SHOT=<s>`: `fg-generated.png` / `fg-previous.png` / `fg-current.png` once.
+  Log: `[vk] frame generation: <mode>, base B FPS, output O FPS (g generated per game frame) …` every 5 s.
+- **Mesh draws** replayed through VK_EXT_mesh_shader (task / mesh shaders in stage places 3 / 4, see the shaders
+  section's hand-over; indirect records copied on the GPU outside the pass, count buffers as
+  `vkCmdDrawMeshTasksIndirectCountEXT`); `NXGFX_MESH=0` turns the device feature off. Transform feedback device
+  feature enabled (replay still to do).
+- **Layered passes**: a pass has as many layers as all its attachments' views; 3D render targets are 2D-array
+  compatible and drawn as arrays of their slices (they were bound as 3D views, which Vulkan does not render into).
+  Cube views of square 2D arrays of whole cubes.
+- **Pool buffers** upload only the committed parts of the guest's memory (VirtualQuery) and zero the rest; texture
+  uploads, page hashes and pool snapshots read guest memory through `vk::mem::guest_bytes` (uncommitted parts as
+  zeros: reading them from host code faulted MKW).
+- **Lane S's mesh contract consumed:** `mesh_draw` bindings get the draw's records (the game's indirect records, or a
+  staged `{count, first}` for a direct draw, zeros for 3D), push constant byte 12 = the record stride in words; the
+  pixel shader of a mesh pipeline whose mesh shader has `per_primitive_locations` is the
+  `shaders::mesh::fragment_per_primitive` variant (`Library::per_primitive`). Not yet drawn in a game.
+- **Sparse textures** (`vk/sparse.rs`, mkw-recomp's design): Vulkan sparse images for sparse textures of GPU-only
+  sparse pools; `NXGFX_SPARSE=0` off, `NXGFX_SPARSE_MIB` tile memory cap (default half of VRAM). `nvn::vpool::map`
+  calls `vk::sparse::remap` for the remapped range.
+- **Transform feedback** (`vk/xfb.rs`): capture variants from the json's `transform_feedback`, captures around each
+  draw while `BeginTransformFeedback` … `End` is on (counters continue a capture).
+- **Parked queues:** `nvnQueueWaitSync` on another parked queue's sync parks the waiting queue behind it; a present on a
+  parked queue is shown after its work. **System memory cap:** this layer's host-visible buffers are capped at 8 GB or
+  a quarter of RAM (`NXGFX_HOST_MB`, 0 = none); over it an allocation is refused (staging waits once, then retries).
+- Diagnostics: `[vk] … replay on the CPU x ms (prep, sets (memory, views), pipeline lookups, passes, vertex input,
+  uploads …)` every 60 frames; `[vk] uploads from storage: …` and `[vk] memory: private …, allocator … by name, images,
+  parked, replay queue …` every 600; the pass dump also logs every draw's stage resources (textures with size /
+  format / target, the first 16 floats of each uniform bank).
+
 **Shaders (agreed with shaders, lane C):** graphics reads lane C's output as written above: `<data>/shaders/spv/
 <key>.spv` + `.json` (`status` "ok"), the shader key as defined there (`nxgfx::nvn::prog::shader_key` computes it at
 `nvnProgramSetShaders`). Nothing in lane C's output needs to change for the binding model: at module load graphics
@@ -265,6 +328,21 @@ shared by every program** (no per-program layouts, so pipelines key only on shad
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
 
+**Hand-over from lane G to lane S (2026-11-19, uncommitted, compiles, not yet validated on real modules):**
+`src/shaders/src/mesh.rs` (new) turns a translated task / mesh kernel into a Vulkan task / mesh stage (SPIR-V 1.4,
+`SPV_EXT_mesh_shader`): a new entry point clears the stage memory, stores the workgroup number (and copies a task's
+payload in), calls the kernel, then emits mesh tasks (`min(word 1 of the outputs, 65535)`) or sets the mesh outputs
+(all `max_v` vertices, the primitive count byte, at most `max_p`) and copies the SoA attribute blocks out (position,
+point size, generic attributes by Location; per-primitive system values 8/9/10 as PrimitiveId / Layer / ViewportIndex
+with PerPrimitiveEXT; per-primitive generic attributes written at the primitive's vertices; triangle / line / point
+index arrays). `job.rs` `mesh_stage` info gained `vertex`, `primitive` (`[attribute, component]`, -2 point size, -1
+position) and `memory` (the stage memory offsets); `prebuild.rs` applies the pass after the fixes (`mesh::VERSION` is
+in a task / mesh job's `job_sha` only, so only those retranslate) and records a failure as `failed` ("mesh stage: …").
+Lane S owns it from here: run it over MKW / DKB, spirv-val, fix what is refused. **What graphics consumes:** a module
+whose entry point is TaskEXT / MeshEXT (json `execution_model` "task" / "mesh"); graphics puts task shaders in stage
+place 3 and mesh shaders in 4 (sets 3 / 4, c0 storage tables 0x670 / 0x770 as nxnative's dmsh_abi.h); the draw's first
+workgroup is 0 (Vulkan has none; a red line when a game asks for another).
+
 **Calls** (all return `Result<shaders::Report, String>`; `say` gets progress lines; `Options::default()`: 4 translator
 processes, 8 scan threads, the update its package holds):
 - `shaders::prebuild_data(data, &Options, say)`: for the build. Reads `<data>/exefs/*`, the RomFS the data folder's
@@ -280,7 +358,7 @@ processes, 8 scan threads, the update its package holds):
 
 | File | What |
 |---|---|
-| `manifest.tsv` | `#` lines (layout, translator chain, counts), a header, then per key: `key stage translated_as arch status spv_bytes source`. `status`: `ok` (spirv-val clean), `invalid` (refused by spirv-val; do not load), `failed` (no SPIR-V; `why` in its json), `skipped` (ray-tracing programs) |
+| `manifest.tsv` | `#` lines (layout, translator chain, counts), a header, then per key: `key stage translated_as arch status spv_bytes source`. `status`: `ok` (spirv-val clean), `invalid` (refused by spirv-val; do not load), `failed` (no SPIR-V; `why` in its json), `library` (an NVN2 ray-tracing module: translated as part of the game's one `rt_library`, see below; no `.spv` of its own) |
 | `spv/<key>.spv` | SPIR-V 1.3, entry point `main`, valid for `--target-env vulkan1.3` |
 | `spv/<key>.json` | the reflection below; written after the `.spv`, so a key is ready when its json exists with `status: ok` |
 | `pairs.tsv` | `vertex-or-mesh key, pixel key, var or prog`: stages of one program variation (pipeline prewarm) |
@@ -296,7 +374,7 @@ its first 0x48 bytes with +0x30..+0x34 zeroed, code area length at +0x44. NVN: i
   uvec4, `viewport_inverse` vec4, `viewport_size` vec4, `frag_scale_count` ivec4, `render_scale[73]` vec4,
   `tfe_offset` ivec4, `tfe_vertex_count` ivec4), one per pipeline, visible to every stage (render_scale 1.0, is_bgra 0).
 - a stage's own resources: set = vertex 0, fragment 1, geometry 2, tessellation control 3, tessellation evaluation 4,
-  compute 5 (NVN2 task 6, mesh 7), bindings from 1 up. No two stages share a set; gaps take empty set layouts.
+  compute 5 (NVN2 task 6, mesh 7; the RT library 5 plus its own set 0 bindings 1..4), bindings from 1 up. No two stages share a set; gaps take empty set layouts.
 - the json's `bindings[]`: `{set, binding, type, count, name, resource}`. `type` is the Vulkan descriptor type
   (`uniform_buffer`, `storage_buffer`, `combined_image_sampler`, `sampled_image`, `sampler`, `storage_image`,
   `uniform_texel_buffer`, `storage_texel_buffer`); `count` 0 = a runtime-sized array (descriptor indexing).
@@ -317,9 +395,73 @@ its first 0x48 bytes with +0x30..+0x34 zeroed, code area length at +0x44. NVN: i
     Ryujinx SamplerType bits; `array` 1 normally (1 << 20 = the texture pool by ID, 4096 = the sampler pool, 301 = every
     c2 handle word, 8192 = a uniform buffer's handles).
 - Facts outside the SPIR-V: `execution_model`, `local_size`, `early_fragment_tests`, `tess_mode` (domain),
-  `transform_feedback` (vertex / geometry), `mesh_stage` (task and mesh shaders are translated as compute with their
-  stage memory in shared memory; not yet Vulkan task / mesh stages), `uses_frag_coord`, `frag_out_map`, `fetch1d`,
-  `capabilities` (SPIR-V ids), `fixes` (SPIR-V edits applied), `notes` (the translator's).
+  `transform_feedback` (vertex / geometry), `mesh_stage` (task / mesh facts, below), `per_primitive_locations`,
+  `mesh_draw`, `uses_frag_coord`, `frag_out_map`, `fetch1d`, `capabilities` (SPIR-V ids), `fixes` (SPIR-V edits
+  applied), `notes` (the translator's).
+
+**Task and mesh shaders (lane S, rev 4; VK_EXT_mesh_shader).** A key whose `stage` is `ts` / `ms` is now a real Vulkan
+task / mesh module: `execution_model` `task` / `mesh`, `translated_as` `ts` / `ms`, SPIR-V 1.4 (entry point lists every
+global; storage buffers are StorageBuffer `Block`s), `SPV_EXT_mesh_shader` + `MeshShadingEXT`, entry `main`,
+`LocalSize` = the json's `local_size` (NVN2 control +0x58: 8 or 32 threads in the verification games). Its set is the
+json's `set` (task 6, mesh 7: graphics remaps as for every stage). What graphics does for a mesh draw:
+- **Pipeline:** task (optional) + mesh + pixel; no vertex input, no tessellation. A mesh module declares
+  `OutputVertices max_v`, `OutputPrimitivesEXT max_p`, `OutputTrianglesEXT` / lines / points (`mesh_stage.verts`
+  3 / 2 / 1). Outputs: `Position` (decorated `Invariant`), `PointSize` when the SPH enables it, generic attributes as
+  `vec4[max_v]` at `Location n`, `Primitive{Point,Line,Triangle}IndicesEXT`, per-primitive `PrimitiveId` / `Layer` /
+  `ViewportIndex` when the per-primitive SPH enables them, and per-primitive generic attributes as `vec4[max_p]`
+  decorated `PerPrimitiveEXT` at the locations in `per_primitive_locations` (11 of MKW's 19 mesh shaders, 4 of OoT's 500; locations 0..3). Checked: 147 of MKW's pixel shaders made per-primitive at locations 0 and 1 are spirv-val clean (opt-in test, `NXSHADERS_TEST_BUILD`). **The pixel shader of such a pipeline must declare those inputs `PerPrimitiveEXT` too:** call
+  `shaders::mesh::fragment_per_primitive(&pixel_spv_bytes, &locations) -> Result<Vec<u8>, String>` on the pixel
+  module for that pipeline (it decorates the inputs at those locations, adds the capability / extension and makes the
+  module SPIR-V 1.4); the same pixel shader in a vertex pipeline is used as built. Device features: `meshShader`,
+  `taskShader`, `shaderDrawParameters`; limits used by the verification games (estimated, NVIDIA granularity): output
+  memory ≤ 29,696 bytes (OoT), workgroup memory ≤ 23,124 bytes (MKW), task payload ≤ 3,200 bytes, all within the
+  RTX 5090's 32 KB / 28 KB / 16 KB.
+- **The draw's first workgroup** (NVN's `DrawMeshTasks(first, count)` and the `{count, first}` records of the
+  indirect forms): a task shader, and a mesh shader with no task (`mesh_draw` present in its json), read it
+  themselves. They declare a read-only storage buffer named `mesh_draw` (json binding `resource: {"kind":
+  "mesh_draw"}`, in the stage's set after its other bindings) and a push constant block with one `uint` at **byte 12**
+  (`mesh_draw.stride_push_offset`), the record stride in 32-bit words; the workgroup's number is
+  `mesh_draw[DrawIndex * stride + 1] + WorkgroupId.x`. Graphics binds the game's NVN records there (the indirect
+  buffer at its offset; stride = the record stride / 4, e.g. 2 for `{count, first}`), or for a direct draw a staged
+  `{count, first}` record with stride 0; `DrawIndex` is Vulkan's draw index within a multi-draw (`vkCmdDrawMeshTasks
+  IndirectEXT` / `…CountEXT`), so each record's first is read on the GPU, no CPU read-back. Push constant bytes 0..11
+  stay graphics' own (pool bases, flags); the range already covers TASK | MESH (layout.rs). 3D draws (no first):
+  bind a zero record. Without a binding the module cannot be used (it is not optional).
+- A mesh shader with a task reads the task's payload (`TaskPayloadWorkgroupEXT`, `payload` bytes); the task launches
+  `min(word 1 of its outputs, 65535)` mesh workgroups in x.
+- Verification (lane S, `build/S/shaders/`): MKW 19 mesh + 7 task, OoT 500 mesh + 20 task, all spirv-val clean
+  (`--target-env vulkan1.3`); DKB, MK8D, Z-A, Arceus and Violet have none.
+
+**Ray tracing (lane S, rev 4).** NVN2 ray-tracing modules (stage 8: control +0x56 = 8, RTCore metadata at +0x60) are
+not separate stages: every RT module of the game is linked (`shaders::rt`, nxnative's design) into **one** library,
+key `rt_library` (`spv/rt_library.spv` + `.json`, `stage` `rt`, `translated_as` `cs`): the modules' code concatenated
+at 256-byte boundaries, each entry region given a logical ID (positive 16-bit, contiguous within an entry's
+continuations), the logical-ID MOV relocations applied by the translator, the named resources `coreParams` (0x140) and
+`descriptorBaseArray` (0x1430) checked equal across modules. The translator makes it one **compute** kernel
+(`LocalSize 8 4 1`) that runs the ray-generation entries and their continuations (hit / miss entries as callable
+continuations) and traces rays with **ray queries** (`SPV_KHR_ray_query`, `RayQueryKHR`), so graphics needs
+`VK_KHR_acceleration_structure` + `VK_KHR_ray_query` (not a ray-tracing pipeline or SBT: NVN2's RT model is the
+continuation scheme the kernel emulates). Its json adds:
+- bindings in **set 0** besides the support buffer: `rt_scene` (binding 1, type `acceleration_structure`: the TLAS
+  graphics builds from the game's NVN2 acceleration structures), `rt_dispatch` (2, the dispatch parameters,
+  `rt.parameter_words` words as the translator's RayTracingProgram lays them out: image classes from word
+  `rt.image_class_base` (16, 8 slots), entry membership bits from word `rt.membership_base` (24)), `rt_errors` (3,
+  fault words the kernel writes), `rt_instance_sbt` (4, the instance SBT records); resource kinds named after them.
+  Its banks are in set 5: `{"kind": "rt_bank0"}` (c0 = the `coreParams` block at `rt.core_offset`) and
+  `{"kind": "rt_bank3"}` (c3 = the descriptor arena `descriptorBaseArray` at `rt.descriptor_offset`: handles from
+  +0x430, push words from +0xb98, nxnative `dmsh_abi.h` DMSH_RT_*); raw global memory as for other shaders (the
+  storage buffer under cb_slot 255).
+- `rt` (the translator's runtime layout: `version`, the four bindings, `parameter_words`, `image_class_base`,
+  `membership_base`, `local_bytes` (continuation arena, from the frames), `local_bias`, `core_offset`,
+  `descriptor_offset`, `entries` [{address, id, owner, kind 0 raygen / 7 hit / 8 miss, frame}],
+  `as_slots_by_module`) and `rt_catalog` (the linked catalog: per module key its address, length, hashes and entries).
+  A dispatch of an NVN2 RT program = one compute dispatch of `rt_library` over the launch size, with the program's
+  entry IDs in `rt_dispatch`.
+- The module rows of the RT keys have `status` `library` and a json `{"status": "library", "library": "rt_library"}`.
+- Verification: none of the seven verification games has an RT module (only Nintendo Switch 2 Welcome Tour is known
+  to: not on this PC). A synthetic library (3 modules: a ray-generation entry with a continuation, a miss and a hit
+  entry; RET bodies) translates and is spirv-val clean for vulkan1.3; the linker's IDs, addresses and moves match
+  nxnative's for the same records (unit test).
 - Conventions: clip-space z as the game writes it (no GL to Vulkan depth rewrite: a game whose NVN depth mode is
   near = -w needs `VK_EXT_depth_clip_control` negativeOneToOne); origin upper-left, no Y flip. Reads past a bound
   uniform or storage range give 0 only with `robustBufferAccess2` (nxnative's Metal-only bound tables are off here).
@@ -334,14 +476,35 @@ declared by 101,276 pixel shaders), `VK_NV_geometry_shader_passthrough` and `VK_
 **ZBIC (done, lane T):** the one decoder is `translator::loader::zbic`; `shaders::formats::zbic` re-exports it (the
 reference vector moved to `src/translator/tests/data/zbic_sample.zbic`). `Nso::parse` reads ZBIC segments too.
 
-## cli (src/cli, binary `nxrs`)
+## cli (src/cli, binary `nxrs-build`)
+**Renamed (lane L, 2026-11-19; owner's decision): the CLI binary is now `nxrs-build` (`target\<dir>\release\nxrs-build.exe`),
+not `nxrs`.** Every lane: switch your commands (`nxrs build …` → `nxrs-build build …`, `nxrs profile`, `nxrs doctor`,
+`nxrs translate` likewise; contract v1 calls are unchanged apart from the name). `cargo build -p cli` still builds it
+(the package is `cli`). An old `nxrs.exe` left in a target folder is stale: delete it. `nxrt-dev e2e` now looks for
+`nxrs-build.exe` beside itself (`--nxrs` still overrides); `scripts/run_game.py` waits for `nxrs-build.exe` as a
+compiler. The product is nxrs, the launcher `nxrs.exe`, the engine repo becomes nxrs-engine (the folder is renamed
+later by the coordinator).
+
 The build and the launcher contract (docs/LAUNCHER_CONTRACT.md). What a built game is, for the lanes that run it:
 - `<outdir>\<name>.exe` is a loader with no runtime in it (a windowed program, 16 MB main stack): it sets `NXRS_DATA=<outdir>\<name>_data` and `NXRT_EXEFS=<data>\exefs` (unless already set), loads `<name>_code.dll` and calls its export `int nxrs_game_main(int argc, char **argv)`, which sets the patch switches and calls **`nxfront_main`** (a retail title: `sdk` plus `rtld` or `main.npdm`) or `nxrt_main` (the runtime's homebrew). argv is the exe's own (`--key=value` options pass through to nxconfig).
 - `<name>_code.dll` = every generated chunk (compiled with os's `cpu.h` overlay first for a retail title) + `modules.c` + **`nxfront.lib` linked statically** (front + os + graphics + runtime; `nxrt.lib` for homebrew). Extra system libraries: `cc.rs` `SYS_LIBS` / `ENGINE_LIBS`, or `NXRS_LINK_LIBS`.
 - `rt_patch_on[i]` is set before the entry from `patches.h` `RT_PATCH_SETS`: the set's default, or its environment switch (`0` off, anything else on).
 - Toolchains: with Visual Studio, clang (`NXRS_CLANG`, bundled `clang\bin`, `NXRT_LLVM`, LLVM's folder, PATH) for `x86_64-pc-windows-msvc` and `nxfront.lib` / `nxrt.lib` beside nxrs (`NXRS_ENGINE_LIB`, `NXRS_RUNTIME_LIB`); **without it**, the bundled llvm-mingw (`llvm-mingw\bin` beside nxrs, `NXRS_LLVM_MINGW`) for `x86_64-w64-windows-gnu` and the engine built for `x86_64-pc-windows-gnullvm` in `gnu\` beside nxrs (`libnxfront.a`, `libnxrt.a`, `libwindows.0.52.0.a`; `NXRS_GNU_LIBS`). `NXRS_TOOLCHAIN=msvc|gnu` forces one. The gnu DLL imports only system DLLs and the UCRT.
 - Shaders: the build calls `shaders::prebuild_data(<data>)` after staging the data folder (output `<data>\shaders\`) and writes the profile's nxnative shader tables (`pso_manifest.tsv`, `pso_pairs.tsv`, `shader_pairs.tsv`, `shader_facts.tsv`) into `<data>\shaders\profile\` for prewarm (lane G may read them). `--no-shaders` skips both.
-- `nxrs translate <input> --out <dir>` keeps what `nxrt-dev e2e` calls (the translator's dev binary is now `nxrs-translate`).
+- `nxrs-build translate <input> --out <dir>` keeps what `nxrt-dev e2e` calls (the translator's dev binary is now `nxrs-translate`).
+- Toolchain default (lane L): MSVC only when Visual Studio, a clang and `nxfront.lib` beside nxrs-build are all there (`cc::msvc_ready`), else llvm-mingw when found: a release may ship only `gnu\`.
+
+**Launcher (lane L, M9).** The launcher (D:\Projects\RecompLauncher, `nxrs.exe`) has a per-game engine (`library.json`
+`"engine": "turbo" | "nxrs"`, Turbo for every existing entry) and runs nxrs-build itself with contract v2 for build,
+Install Updates (`update-info --game`), DLC (`dlc sync`) and before Play; an nxrs build goes to `<build folder> [nxrs]`.
+Contract v2 as implemented: docs/LAUNCHER_CONTRACT.md. **Keep these stable** (the launcher parses them): the
+`@progress` / `@result` lines, `nxrs-contract <n>`, the `DLC: this package also holds add-on content` prefix, `UPDATE` /
+`UPDATE error:` / `DLC error:` lines, `<name>_build*\gen\nxrs.gen.key` (how an imported build is known as nxrs's).
+Verified 2026-11-19 (temp library, build\L): MK8D built/updated/DLC through the launcher and raced via
+run_game (Booster Course seen by `aoc`); MKW built through the launcher, boots, then the run_game watchdog kills it at
+27 GB private after 6 s (`[nvn] virtual pool ... mapped`: lane G's pool host-memory issue, not the launcher).
+Release: the launcher's `scripts/package-release.py --nxrs-engine <this checkout>` ships `nxrs-engine\` (nxrs-build,
+`engine.json`, `nxfront.lib`/`nxrt.lib`, `gnu\*.a`) and `toolchain\llvm-mingw\` (x86_64 only).
 
 ## profiles (src/profiles)
 nxnative's 187 `dm/games` profiles + its shared patch tables, embedded as data (`games/<id>/game.tsv`, `patches.toml`; the owner's `turbo.toml`), and the lookup:

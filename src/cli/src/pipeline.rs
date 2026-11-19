@@ -1,4 +1,4 @@
-//! `nxrs build`: package → data folder → C → shaders → code DLL + loader, in Turbo's output layout:
+//! `nxrs-build build`: package → data folder → C → shaders → code DLL + loader, in Turbo's output layout:
 //!
 //! ```text
 //! <outdir>\<name>.exe            the loader (cc::STUB_C)
@@ -39,7 +39,7 @@ pub struct BuildArgs {
     /// `--native`: compile for this processor (-march=native) instead of x86-64-v3
     pub native: bool,
     pub no_shaders: bool,
-    /// v1: the DLC hint names `--install-dlc` (what a v1 caller passes); v2: `nxrs dlc install`
+    /// v1: the DLC hint names `--install-dlc` (what a v1 caller passes); v2: `nxrs-build dlc install`
     pub v1: bool,
     /// v1: the Turbo options that were passed and mean nothing here, said after the banner
     pub ignored: Option<String>,
@@ -386,7 +386,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         if v1 {
             out.say(&m.replace("install it with nxrs dlc install (the launcher does)", "install it with --install-dlc (the launcher does)"));
         } else {
-            out.say(m);
+            out.say(&m.replace("install it with nxrs dlc install", "install it with nxrs-build dlc install"));
         }
     })?;
     let ini = with(".ini");

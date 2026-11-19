@@ -108,14 +108,23 @@ pub fn llvm_mingw_clang() -> Option<PathBuf> {
     v.into_iter().find(|p| p.is_file())
 }
 
-/// Which toolchain: `NXRS_TOOLCHAIN=msvc|gnu`, else MSVC when Visual Studio is installed, else the bundled
-/// llvm-mingw when it is there.
+/// Which toolchain: `NXRS_TOOLCHAIN=msvc|gnu`, else MSVC when it can work here (Visual Studio installed, a clang
+/// found, the MSVC engine library beside nxrs-build or `NXRS_ENGINE_LIB`), else the bundled llvm-mingw when it is
+/// there. A release may ship only the gnullvm engine: then a machine with Visual Studio builds with llvm-mingw too.
 pub fn use_gnu() -> bool {
     match std::env::var("NXRS_TOOLCHAIN").ok().as_deref().map(str::trim) {
         Some("gnu") | Some("mingw") | Some("gnullvm") => true,
         Some("msvc") => false,
-        _ => !have_visual_studio() && llvm_mingw_clang().is_some(),
+        _ => llvm_mingw_clang().is_some() && !msvc_ready(),
     }
+}
+
+/// Everything the MSVC toolchain needs: Visual Studio's libraries, a clang, and the MSVC engine library.
+fn msvc_ready() -> bool {
+    let lib = std::env::var_os("NXRS_ENGINE_LIB")
+        .map(PathBuf::from)
+        .or_else(|| std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("nxfront.lib"))));
+    lib.is_some_and(|l| l.is_file()) && candidates(None).iter().any(|p| p.is_file()) && have_visual_studio()
 }
 
 /// The folder of the gnullvm engine libraries: `NXRS_GNU_LIBS`, else `gnu\` beside nxrs.

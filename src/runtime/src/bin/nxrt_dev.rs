@@ -424,7 +424,7 @@ fn main() {
             let work = PathBuf::from(arg(&args, "--work").unwrap_or_else(|| root().join("../../build/runtime-e2e").display().to_string()));
             let generator = arg(&args, "--generator").unwrap_or("rust".into());
             let nxrs = PathBuf::from(arg(&args, "--nxrs").unwrap_or_else(|| {
-                std::env::current_exe().unwrap().parent().unwrap().join("nxrs.exe").display().to_string()
+                std::env::current_exe().unwrap().parent().unwrap().join("nxrs-build.exe").display().to_string()
             }));
             let mut tests = positional(&["--work", "--generator", "--nxrs"]);
             if tests.is_empty() {

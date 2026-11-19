@@ -1,20 +1,20 @@
-//! `nxrs`: the engine's command line.
+//! `nxrs-build`: the engine's command line (the launcher runs it).
 //!
 //! Contract v1 (what RecompLauncher sends Turbo's `switchrecomp.py` today, docs/LAUNCHER_CONTRACT.md):
 //!
-//!   nxrs <input> --outdir <dir> -o <name> [--jobs N] [--update <pkg> | --no-update] [ignored: --target --backend
+//!   nxrs-build <input> --outdir <dir> -o <name> [--jobs N] [--update <pkg> | --no-update] [ignored: --target --backend
 //!        --cc -O --runtime --native --chunk]
-//!   nxrs <game> --update-info <package>...
-//!   nxrs --install-dlc <pkg>... | --sync-dlc [<pkg>...] | --remove-dlc <id or pkg>... | --list-dlc  --datadir <dir>
+//!   nxrs-build <game> --update-info <package>...
+//!   nxrs-build --install-dlc <pkg>... | --sync-dlc [<pkg>...] | --remove-dlc <id or pkg>... | --list-dlc  --datadir <dir>
 //!
 //! Contract v2 (subcommands; `--machine` adds `@progress` / `@result` lines):
 //!
-//!   nxrs build <input> [-o <name>] [--outdir <dir>] [--jobs 4] [--update <pkg> | --no-update] [--keys <prod.keys>]
-//!   nxrs update-info [--game <game>] <package>...
-//!   nxrs dlc install|sync|remove|list --datadir <dir> [package or title id...]
-//!   nxrs profile <title id> [<main build id>]
-//!   nxrs doctor | contract
-//!   nxrs translate <input> --out <dir>      (development: the C and the data folder only, as nxrt-dev uses it)
+//!   nxrs-build build <input> [-o <name>] [--outdir <dir>] [--jobs 4] [--update <pkg> | --no-update] [--keys <prod.keys>]
+//!   nxrs-build update-info [--game <game>] <package>...
+//!   nxrs-build dlc install|sync|remove|list --datadir <dir> [package or title id...]
+//!   nxrs-build profile <title id> [<main build id>]
+//!   nxrs-build doctor | contract
+//!   nxrs-build translate <input> --out <dir>      (development: the C and the data folder only, as nxrt-dev uses it)
 //!
 //! Exit codes: 0 done, 1 failed (the reason on stderr, or the UPDATE / DLC error lines), 2 bad arguments.
 
@@ -40,7 +40,7 @@ pub const CONTRACT: &str = "nxrs-contract 2";
 
 /// Turbo's switchrecomp.py options, as the launcher passes them.
 #[derive(Parser, Debug)]
-#[command(name = "nxrs", about = "Builds a Switch game into a native Windows program (contract v1; `nxrs help` for the subcommands).")]
+#[command(name = "nxrs-build", about = "Builds a Switch game into a native Windows program (contract v1; `nxrs-build help` for the subcommands).")]
 struct V1 {
     /// game folder (exefs/ + romfs/), .nsp or .nup package
     input: Option<PathBuf>,
@@ -128,7 +128,7 @@ fn update_choice(update: &Option<PathBuf>, no_update: bool) -> UpdateChoice {
 }
 
 fn usage_error(msg: &str) -> i32 {
-    eprintln!("nxrs: error: {msg}");
+    eprintln!("nxrs-build: error: {msg}");
     2
 }
 
@@ -223,7 +223,7 @@ fn run_v1(args: Vec<String>) -> i32 {
         chunk: a.chunk,
         native: a.native,
         v1: true,
-        ignored: (!ignored.is_empty()).then(|| format!("nxrs: ignored (Turbo options with no meaning here): {}", ignored.join(" "))),
+        ignored: (!ignored.is_empty()).then(|| format!("nxrs-build: ignored (Turbo options with no meaning here): {}", ignored.join(" "))),
     };
     build(&o, &b)
 }
@@ -270,7 +270,7 @@ fn update_info(o: &Out, packages: &[PathBuf], game: Option<&Path>, keys: Option<
 // ------------------------------------------------------------------------------------------------ contract v2
 
 #[derive(Parser)]
-#[command(name = "nxrs", about = "RecompLauncher engine: builds Switch games into native Windows programs")]
+#[command(name = "nxrs-build", about = "nxrs engine: builds Switch games into native Windows programs")]
 struct V2 {
     #[command(subcommand)]
     cmd: Cmd,

@@ -1,18 +1,18 @@
-# cli (`nxrs`)
+# cli (`nxrs-build`)
 
 The engine's command line: the build (package → data folder → C → shaders → code DLL + loader), updates, DLC, and
 the launcher contract (v1 drop-in for Turbo's `switchrecomp.py`, v2 subcommands): [docs/LAUNCHER_CONTRACT.md](../../docs/LAUNCHER_CONTRACT.md).
 
-    nxrs build <input> [-o <name>] [--outdir <dir>] [--jobs 4] [--update <pkg> | --no-update] [--keys <file>]
-               [--no-build] [--no-shaders] [--chunk N] [--native] [-q] [--machine]
-    nxrs update-info [--game <input>] <package>...
-    nxrs dlc install | sync | remove | list --datadir <dir> [package or title id...]
-    nxrs profile [<title id> [<main build id>]] [--package <input>]
-    nxrs doctor | contract
-    nxrs translate <input> --out <dir>                      (development: C + data folder, for nxrt-dev e2e)
-    nxrs <input> --outdir <dir> -o <name> ...                (contract v1: Turbo's options)
+    nxrs-build build <input> [-o <name>] [--outdir <dir>] [--jobs 4] [--update <pkg> | --no-update] [--keys <file>]
+                     [--no-build] [--no-shaders] [--chunk N] [--native] [-q] [--machine]
+    nxrs-build update-info [--game <input>] <package>...
+    nxrs-build dlc install | sync | remove | list --datadir <dir> [package or title id...]
+    nxrs-build profile [<title id> [<main build id>]] [--package <input>]
+    nxrs-build doctor | contract
+    nxrs-build translate <input> --out <dir>                      (development: C + data folder, for nxrt-dev e2e)
+    nxrs-build <input> --outdir <dir> -o <name> ...                (contract v1: Turbo's options)
 
-Build and test: `cargo build --release -p cli -p runtime -p front` (nxrs finds `nxfront.lib` and `nxrt.lib` beside
+Build and test: `cargo build --release -p cli -p runtime -p front` (`nxrs-build.exe` finds `nxfront.lib` and `nxrt.lib` beside
 itself), `cargo test -p cli`. Input: a folder, NSP, XCI, NUP or a homebrew NRO.
 
 ## The build step
@@ -33,7 +33,8 @@ found as `NXRS_CLANG`, `--cc` when it is a clang, the bundled `clang\bin` beside
 the bundled llvm-mingw (`llvm-mingw\bin` beside nxrs, `NXRS_LLVM_MINGW`) for `x86_64-w64-windows-gnu`, linking the
 engine built for `x86_64-pc-windows-gnullvm` (`gnu\libnxfront.a`, `gnu\libnxrt.a`, `gnu\libwindows.0.52.0.a`;
 `NXRS_GNU_LIBS`) with compiler-rt and libunwind statically: the DLL imports only system DLLs and the UCRT.
-`NXRS_TOOLCHAIN=msvc|gnu` forces one. Build the gnullvm engine with llvm-mingw on PATH:
+`NXRS_TOOLCHAIN=msvc|gnu` forces one; by default MSVC is used only when Visual Studio, a clang and
+`nxfront.lib` are all there, else llvm-mingw (a release may ship only the gnullvm engine). Build the gnullvm engine with llvm-mingw on PATH:
 `rustup target add x86_64-pc-windows-gnullvm`, then `CC_x86_64_pc_windows_gnullvm=x86_64-w64-mingw32-clang
 CARGO_TARGET_X86_64_PC_WINDOWS_GNULLVM_RUSTFLAGS="-L native=build\tools\gnu-libs" cargo build --release --target
 x86_64-pc-windows-gnullvm -p front -p runtime` (`gnu-libs`: os's codec archives as `lib<name>.a`, and the windows
@@ -48,7 +49,7 @@ file; the default lets the translator size chunks), `--native` (`-march=native`)
 (checks the engine libraries and the compiler). Launcher-agreed replacements (docs/LAUNCHER_CONTRACT.md): `-O`
 (one measured flag set), `--cc` when it is not a clang, `--runtime` (the engine is linked into the DLL),
 `--backend` (Windows only) are said as ignored in one line; `--target linux` (M10) and `--interp-only` (no
-interpreter: every function is translated) fail with the reason. `nxrs doctor`: CPU, toolchain, compiler, Visual
+interpreter: every function is translated) fail with the reason. `nxrs-build doctor`: CPU, toolchain, compiler, Visual
 Studio, engine libraries, the Vulkan loader, every Vulkan device with its API and driver version (1.3 needed), free
 disk for builds and temporary files, keys.
 
@@ -84,7 +85,7 @@ when it is redirected). The same 11 KB file serves every game.
 
 The DLL is 80 MB and imports only system DLLs and the MSVC runtime (`VCRUNTIME140.dll`, the UCRT). Pokémon Legends:
 Z-A (Switch 2 Edition NUP, 270,366 functions, 1.05 GB of C, with the profile's 60 FPS patch) builds cold in 233.7 s at
-`--jobs 8`. The eight runtime homebrew tests (`src/runtime/guest/tests`) built by `nxrs build` and run through the
+`--jobs 8`. The eight runtime homebrew tests (`src/runtime/guest/tests`) built by `nxrs-build build` and run through the
 loader all pass.
 
 ## Modules
@@ -94,11 +95,13 @@ loader all pass.
 | `main.rs` | argument parsing: contract v1 (Turbo's options) and v2 (subcommands); update-info, DLC, doctor, translate |
 | `pipeline.rs` | `build`: the steps above, the output layout, `modules.c` |
 | `cc.rs` | clang discovery, flags, the chunk cache and compile pool, the DLL and loader links, the loader's C |
-| `profile.rs` | the build's profile line and patch table; `nxrs profile` |
+| `profile.rs` | the build's profile line and patch table; `nxrs-build profile` |
 | `out.rs` | console lines (CRLF, flushed), `-q`, the v2 `@progress` / `@result` lines |
-| `launcher/switchrecomp.py` | the v1 shim the launcher's `recomp_cli.py` imports: runs `nxrs.exe` |
+| `launcher/switchrecomp.py` | the v1 shim the launcher's `recomp_cli.py` imports: runs `nxrs-build.exe` |
 
 ## Not done
 
-- A release layout that bundles llvm-mingw and `gnu\` (the toolchain works from a checkout; packaging is M9).
+- Release packaging lives in the launcher (`scripts/package-release.py --nxrs-engine <this checkout>`: `nxrs-engine\` with
+  nxrs-build, `engine.json`, the MSVC and gnullvm engine libraries, and `toolchain\llvm-mingw\`); CI cannot build
+  this engine until it has a remote.
 - `--target linux` (M10).

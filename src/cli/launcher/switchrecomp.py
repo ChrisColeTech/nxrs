@@ -1,8 +1,8 @@
-"""Contract v1 for RecompLauncher: the launcher runs `python -u recomp_cli.py <args>`, which imports this module from
-its own folder and returns main(). Here main() runs nxrs.exe with the same arguments, its output straight to the
-launcher (merged, unbuffered: nxrs flushes every line), and returns its exit code.
+"""Contract v1 for the nxrs launcher: the launcher runs `python -u recomp_cli.py <args>`, which imports this module
+from its own folder and returns main(). Here main() runs nxrs-build.exe with the same arguments, its output straight
+to the launcher (merged, unbuffered: nxrs-build flushes every line), and returns its exit code.
 
-nxrs.exe is NXRS_EXE, else beside this file, else bin/nxrs.exe below it.
+nxrs-build.exe is NXRS_BUILD (or the older NXRS_EXE), else beside this file, else bin/nxrs-build.exe below it.
 """
 import os
 import subprocess
@@ -11,10 +11,11 @@ import sys
 
 def nxrs_path():
     here = os.path.dirname(os.path.abspath(__file__))
-    for p in (os.environ.get('NXRS_EXE'), os.path.join(here, 'nxrs.exe'), os.path.join(here, 'bin', 'nxrs.exe')):
+    for p in (os.environ.get('NXRS_BUILD'), os.environ.get('NXRS_EXE'), os.path.join(here, 'nxrs-build.exe'),
+              os.path.join(here, 'bin', 'nxrs-build.exe')):
         if p and os.path.isfile(p):
             return p
-    raise SystemExit('nxrs.exe is missing beside %s (or set NXRS_EXE)' % here)
+    raise SystemExit('nxrs-build.exe is missing beside %s (or set NXRS_BUILD)' % here)
 
 
 def main():

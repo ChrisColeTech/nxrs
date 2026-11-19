@@ -12,7 +12,7 @@ game's data is read in place from its own packages.
 | [`src/shaders`](src/shaders/README.md) | every shader of a game found at build time (ExeFS and RomFS, the containers of many engines, zstd / Yaz0 / ZBIC / Oodle) and translated to SPIR-V for Vulkan, validated, with a manifest by shader key; CLI `nxshaders` |
 | [`src/os`](src/os/README.md) | the OS services: the SDK's service clients replaced by name (file system over the packages in place, saves, accounts, applet / oe, time, settings, hid, audio renderer, vi, Mii, the offline stand-ins), the IPC framework and `sm`, the memory and IPC SVCs, virtual cores, the process boot, and the NVN bootstrap with a null device |
 
-Build and test: `cargo build --release`, `cargo test` (seconds). The CLI is `target/release/nxrs`; it links games
+Build and test: `cargo build --release`, `cargo test` (seconds). The build tool the launcher runs is `target/release/nxrs-build`; it links games
 against `target/release/nxrt.lib` (`cargo build --release -p runtime`).
 
 ## Credits and licenses
