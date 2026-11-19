@@ -288,6 +288,15 @@ pub mod passdump {
         REQ.lock().unwrap().push(0.0);
     }
 
+    /// The frame being replayed is being dumped (its draws' resources are logged too).
+    pub fn active() -> bool {
+        let f = FRAME.load(Ordering::Relaxed);
+        f != 0 && super::super::present::frames() + 1 == f
+    }
+    pub fn pass_no() -> u64 {
+        PASS.load(Ordering::Relaxed)
+    }
+
     /// Every present: starts a dump frame when one is due.
     pub fn frame(n: u64, secs: f64) {
         INIT.call_once(|| {
@@ -361,6 +370,71 @@ pub mod passdump {
         }
         let ds = qs.rt_depth.tex.map(|t| format!(" depth {}x{} fmt {:#x}", t.d.width, t.d.height, t.d.format)).unwrap_or_default();
         crate::vklog!("pass dump {f}/{p}: extent {}x{}, targets [{}]{ds}", qs.pass_extent.width, qs.pass_extent.height, desc.join(", "));
+    }
+}
+
+/// NVN2's DrawMeshTasks*: the bound task and mesh shaders through VK_EXT_mesh_shader. Direct: `x` (`y`, `z`)
+/// workgroups. Indirect: the game's records ({count, first}, 3D {x, y, z}) are written by the GPU earlier in the same
+/// submission, so the workgroup counts are copied on the GPU into Vulkan's {x, y, z} records (outside the pass) and
+/// drawn from there; with a count buffer, MultiDraw…IndirectCount reads the draw count on the GPU too.
+fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mesh) {
+    if !g.d.caps.mesh {
+        crate::log::red_once("task and mesh draws: the device has no VK_EXT_mesh_shader, they are not drawn");
+        super::perf::inc(super::perf::C::DrawsSkipped);
+        return;
+    }
+    if m.first != 0 {
+        crate::log::red_once("a mesh draw from a first workgroup other than 0: Vulkan has no parameter for it, drawn from 0");
+    }
+    let indirect = m.ind != 0;
+    // indirect: build {x, y, z} records first (a copy is not allowed inside a pass)
+    let mut args: Option<(vk::Buffer, u64, u32)> = None;
+    if indirect {
+        let n = m.n.max(1) as u32;
+        let src_stride = if m.stride > 0 { m.stride as u64 } else if m.three_d != 0 { 12 } else { 8 };
+        let span = src_stride * (n as u64 - 1) + if m.three_d != 0 { 12 } else { 8 };
+        let Some((sb, so, _)) = super::mem::resolve(g, sub, m.ind, span) else {
+            crate::log::red_once(&format!("DrawMeshTasksIndirect record at {:#x} is in no memory pool: draw skipped", m.ind));
+            super::perf::inc(super::perf::C::DrawsSkipped);
+            return;
+        };
+        end_pass(g, sub, qs);
+        let ones: Vec<u8> = (0..n).flat_map(|_| [0u32, 1, 1]).flat_map(|w| w.to_le_bytes()).collect();
+        let (ab, ao) = sub.stage_bytes_fresh(g, &ones);
+        let dev = g.dev();
+        let regions: Vec<vk::BufferCopy> = (0..n as u64)
+            .map(|i| vk::BufferCopy { src_offset: so + i * src_stride, dst_offset: ao + i * 12, size: if m.three_d != 0 { 12 } else { 4 } })
+            .collect();
+        unsafe { dev.cmd_copy_buffer(sub.main, sb, ab, &regions) };
+        barrier(g, sub);
+        args = Some((ab, ao, n));
+    }
+    if !draw_setup_ex(g, sub, qs, prim::TRIANGLES, 0, true) {
+        return;
+    }
+    let ms = &g.d.mesh;
+    match args {
+        None => {
+            let (x, y, z) = if m.three_d != 0 { (m.x, m.y, m.z) } else { (m.x, 1, 1) };
+            if x > 0 && y > 0 && z > 0 {
+                unsafe { ms.cmd_draw_mesh_tasks(sub.main, x as u32, y as u32, z as u32) };
+            }
+        }
+        Some((ab, ao, n)) => {
+            if m.cnt != 0 {
+                match super::mem::resolve(g, sub, m.cnt, 4) {
+                    Some((cb, co, _)) => unsafe { ms.cmd_draw_mesh_tasks_indirect_count(sub.main, ab, ao, cb, co, n, 12) },
+                    None => crate::log::red_once(&format!("mesh draw count at {:#x} is in no memory pool: draw skipped", m.cnt)),
+                }
+            } else {
+                unsafe { ms.cmd_draw_mesh_tasks_indirect(sub.main, ab, ao, n, 12) };
+            }
+        }
+    }
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let k = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    if k & 0xfff == 0 {
+        crate::vklog!("mesh draws so far: {}; this one {} ({} {} {}), indirect {}", k + 1, if m.three_d != 0 { "3D" } else { "1D" }, m.x, m.y, m.z, indirect);
     }
 }
 
@@ -729,11 +803,14 @@ fn zero_buffer(g: &Gpu, sub: &mut Sub) -> vk::Buffer {
 /// instance.
 fn c0_bytes(qs: &QState, st: usize, dispatch: [u32; 3], base_instance: u32) -> Vec<u8> {
     let mut v = vec![0u8; DRV_SIZE];
+    // NVN stages 3 and 4 hold NVN2's task and mesh shaders' storage tables (nxnative dmsh_abi.h)
     let base = match st {
         0 => 0x110,
         5 => 0x310,
         2 => 0x410,
         1 => 0x510,
+        3 => 0x670,
+        4 => 0x770,
         _ => 0,
     };
     if base != 0 {
@@ -827,8 +904,18 @@ fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::Imag
         if let Some(im) = imgs.by_serial.get_mut(&serial) {
             let mut v = view.unwrap_or_default();
             let base_target = if v.bits & VW_TARGET != 0 { v.target as i32 } else { im.tex.d.target };
+            // a square 2D array of whole cubes is made cube compatible (image.rs): viewed as a cube where the shader
+            // samples one (environment maps kept as 2D arrays; Turbo 78ece7b)
+            let first = if v.bits & VW_LAYERS != 0 { v.min_layer as u32 } else { 0 };
+            let cube_ok = im.ty == vk::ImageType::TYPE_2D
+                && im.extent.width == im.extent.height
+                && im.layers >= 6
+                && im.layers % 6 == 0
+                && first + 6 <= im.layers
+                && im.samples == vk::SampleCountFlags::TYPE_1;
             let compatible = match (base_target, want) {
                 (a, b) if a == b => true,
+                (target::T2D_ARRAY, target::CUBE | target::CUBE_ARRAY) if cube_ok => true,
                 (target::T2D | target::RECTANGLE, target::T2D) => true,
                 (target::T2D | target::T2D_ARRAY | target::CUBE | target::CUBE_ARRAY | target::RECTANGLE, target::T2D_ARRAY | target::T2D) => true,
                 (target::CUBE_ARRAY, target::CUBE) | (target::CUBE, target::CUBE_ARRAY) => true,
@@ -965,6 +1052,8 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
     let mut bufs: Vec<(u32, vk::DescriptorType, vk::DescriptorBufferInfo)> = Vec::new();
     let mut imgs: Vec<(u32, vk::DescriptorType, vk::DescriptorImageInfo)> = Vec::new();
     let mut tbufs: Vec<(u32, vk::DescriptorType, vk::BufferView)> = Vec::new();
+    let dumping = passdump::active();
+    let mut said: Vec<String> = Vec::new();
     for (b, r) in &m.res {
         let b = *b;
         match r {
@@ -1003,6 +1092,13 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                     }
                     k @ 3..=18 => {
                         let (a, n) = qs.ubo[st][(k - 3) as usize];
+                        if dumping && a != 0 && n >= 64 && super::mem::room(a) >= 64 {
+                            // SAFETY: guest memory inside a registered pool (identity mapped)
+                            let f = unsafe { core::slice::from_raw_parts(a as *const f32, 16) };
+                            said.push(format!("c{k}@{a:#x}+{n:#x}={:?}", f.iter().map(|v| (v * 1000.0).round() / 1000.0).collect::<Vec<_>>()));
+                        } else if dumping {
+                            said.push(format!("c{k}@{a:#x}+{n:#x}"));
+                        }
                         match if a != 0 && n != 0 { super::mem::resolve(g, sub, a, n.min(max_ubo)) } else { None } {
                             Some((buf, off, _)) => {
                                 if off % g.d.caps.uniform_align != 0 {
@@ -1074,7 +1170,20 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                         0
                     }
                 } + sb;
-                let view = tex_view(g, sub, tid, *ty, is_img);
+                let view = super::perf::timed(super::perf::C::TexViewNs, || tex_view(g, sub, tid, *ty, is_img));
+                if dumping {
+                    let what = g
+                        .tables
+                        .tex_at(tid)
+                        .and_then(|(serial, v)| {
+                            g.images.lock().unwrap().by_serial.get(&serial).map(|im| {
+                                let d = &im.tex.d;
+                                format!("ser{serial} fmt{:#x} {}x{}x{} t{} v{:?}", d.format, d.width, d.height, d.depth, d.target, v.map(|v| (v.bits, v.target, v.base_level, v.min_layer)))
+                            })
+                        })
+                        .unwrap_or_else(|| "none".into());
+                    said.push(format!("{}{b}=id{tid}/s{sid} ty{ty}: {what}", if is_img { "img" } else { "tex" }));
+                }
                 if is_img {
                     imgs.push((b, vk::DescriptorType::STORAGE_IMAGE, vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: view, image_layout: vk::ImageLayout::GENERAL }));
                 } else {
@@ -1084,6 +1193,10 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
             }
             Res::Pool => {}
         }
+    }
+    if dumping {
+        let k: String = m.key.iter().map(|b| format!("{b:02x}")).collect();
+        crate::vklog!("pass dump {}: stage {st} {k}: {}", passdump::pass_no(), said.join("; "));
     }
     // the same writes for the same stage layout earlier in this submission: that set is bound again
     let mut key: Vec<u8> = Vec::with_capacity(16 + 32 * (bufs.len() + imgs.len() + tbufs.len()));
@@ -1130,13 +1243,13 @@ fn push_constants(g: &Gpu, sub: &Sub, qs: &QState, flipped: bool) {
     let (tb, sb) = pool_bases(qs);
     let pc: [u32; 4] = [tb as u32, sb as u32, flipped as u32, 0];
     let bytes = unsafe { core::slice::from_raw_parts(pc.as_ptr() as *const u8, 16) };
-    unsafe { g.dev().cmd_push_constants(sub.main, g.layout.pipeline, L::PUSH_STAGES, 0, bytes) };
+    unsafe { g.dev().cmd_push_constants(sub.main, g.layout.pipeline, g.layout.push_stages, 0, bytes) };
 }
 
 fn bind_sets(g: &Gpu, sub: &mut Sub, qs: &QState, mods: &[Arc<Module>], bp: vk::PipelineBindPoint, dispatch: [u32; 3], base_instance: u32) {
     let mut pool = false;
     for m in mods {
-        let set = stage_set(g, sub, qs, m, dispatch, base_instance);
+        let set = super::perf::timed(super::perf::C::SetNs, || stage_set(g, sub, qs, m, dispatch, base_instance));
         unsafe { g.dev().cmd_bind_descriptor_sets(sub.main, bp, g.layout.pipeline, m.stage, &[set], &[]) };
         pool |= m.uses_pool;
     }
@@ -1175,6 +1288,11 @@ fn shadows_on() -> bool {
 
 /// Everything a draw needs bound; false when it cannot be drawn (it is skipped).
 fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instance: u32) -> bool {
+    draw_setup_ex(g, sub, qs, prim_ty, base_instance, false)
+}
+
+/// As `draw_setup`; `mesh`: a task / mesh draw (NVN2), its program's task and mesh shaders in places 3 and 4.
+fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instance: u32, mesh: bool) -> bool {
     if !qs.missing.is_empty() {
         // shaders the build did not translate: wait for the live translator (once per set), then bind what came
         let keys: Vec<_> = qs.missing.iter().map(|m| m.0).collect();
@@ -1192,13 +1310,14 @@ fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instan
             }
         }
     }
-    let Some(vs) = qs.prog[0].clone() else {
-        crate::log::red_once("draw with no vertex shader bound");
+    let first = if mesh { qs.prog[4].clone().filter(|m| m.mesh == 2) } else { qs.prog[0].clone() };
+    let Some(vs) = first else {
+        crate::log::red_once(if mesh { "a mesh draw with no mesh shader bound" } else { "draw with no vertex shader bound" });
         super::perf::inc(super::perf::C::DrawsSkipped);
         super::perf::inc(super::perf::C::SkipNoShader);
         return false;
     };
-    if !begin_pass(g, sub, qs) {
+    if !super::perf::timed(super::perf::C::PassNs, || begin_pass(g, sub, qs)) {
         super::perf::inc(super::perf::C::DrawsSkipped);
         super::perf::inc(super::perf::C::SkipNoTarget);
         return false;
@@ -1225,7 +1344,12 @@ fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instan
         unsafe { g.dev().cmd_begin_query(sub.main, sub.occl, q, flags) };
         qs.occl_q = Some(q);
     }
-    let mods: Vec<Arc<Module>> = [0usize, 1, 2, 3, 4].iter().filter_map(|&s| qs.prog[s].clone()).collect();
+    // a mesh draw: the task (if any) and mesh shaders and the pixel shader; any other draw leaves task and mesh shaders out
+    let mods: Vec<Arc<Module>> = if mesh {
+        [3usize, 4, 1].iter().filter_map(|&s| qs.prog[s].clone()).filter(|m| m.stage == 1 || m.mesh != 0).collect()
+    } else {
+        [0usize, 1, 2, 3, 4].iter().filter_map(|&s| qs.prog[s].clone()).filter(|m| m.mesh == 0).collect()
+    };
     let mut key = super::pipe::GfxKey::default();
     for m in &mods {
         key.shaders[m.stage as usize] = m.key;
@@ -1235,7 +1359,7 @@ fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instan
     key.ncolor = n as u8;
     key.depth = dfmt;
     key.samples = samples;
-    let Some(pipe) = g.gfx_pipeline(&key, &mods) else {
+    let Some(pipe) = super::perf::timed(super::perf::C::PipeLookNs, || g.gfx_pipeline(&key, &mods)) else {
         super::perf::inc(super::perf::C::DrawsSkipped);
         super::perf::inc(super::perf::C::SkipNoPipeline);
         return false;
@@ -1286,7 +1410,9 @@ fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instan
         let ccw = poly.front() == front_face::CCW;
         let vk_ccw = if upper_left { ccw } else { !ccw };
         dev.cmd_set_front_face(cb, if vk_ccw { vk::FrontFace::COUNTER_CLOCKWISE } else { vk::FrontFace::CLOCKWISE });
-        dev.cmd_set_primitive_topology(cb, topology(prim_ty));
+        if !mesh {
+            dev.cmd_set_primitive_topology(cb, topology(prim_ty));
+        }
         dev.cmd_set_depth_test_enable(cb, ds.get(ds_field::DT) != 0);
         dev.cmd_set_depth_write_enable(cb, ds.get(ds_field::DW) != 0);
         dev.cmd_set_depth_compare_op(cb, super::tables::compare_op(ds.get(ds_field::DF)));
@@ -1308,12 +1434,14 @@ fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instan
             super::tables::compare_op(ds.get(ds_field::SF_B)),
         );
         dev.cmd_set_rasterizer_discard_enable(cb, qs.rast_discard);
-        dev.cmd_set_primitive_restart_enable(cb, qs.prim_restart.0 && !matches!(prim_ty, prim::POINTS | prim::LINES | prim::TRIANGLES | prim::QUADS | prim::PATCHES));
+        if !mesh {
+            dev.cmd_set_primitive_restart_enable(cb, qs.prim_restart.0 && !matches!(prim_ty, prim::POINTS | prim::LINES | prim::TRIANGLES | prim::QUADS | prim::PATCHES));
+        }
         let caps = g.d.caps;
         if caps.logic_op_dyn {
             g.d.eds2.cmd_set_logic_op(cb, vk::LogicOp::from_raw(qs.color.logic_op() as i32));
         }
-        if caps.patch_dyn && mods.iter().any(|m| m.stage == 3 || m.stage == 4) {
+        if caps.patch_dyn && !mesh && mods.iter().any(|m| m.stage == 3 || m.stage == 4) {
             g.d.eds2.cmd_set_patch_control_points(cb, qs.patch.max(1));
         }
         let e3 = &g.d.eds3;
@@ -1366,7 +1494,9 @@ fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instan
     if qs.color.alpha_func() != cmp::ALWAYS && qs.color.alpha_func() != 0 {
         crate::log::red_once("alpha test is not implemented yet (it belongs in the translated fragment shader)");
     }
-    vertex_input(g, sub, qs, &vs);
+    if !mesh {
+        super::perf::timed(super::perf::C::VtxNs, || vertex_input(g, sub, qs, &vs));
+    }
     true
 }
 
@@ -1755,7 +1885,9 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
             qs.depth_range = [d.n, d.f];
         }
         op::BIND_PROGRAM => {
-            let b: p_bind_program = rd_payload(rec);
+            let mut b: p_bind_program = rd_payload(rec);
+            // NVN2's task and mesh stage bits take the tessellation stages' places
+            b.stages = (b.stages & 0x3f) | if b.stages & 0x40 != 0 { 8 } else { 0 } | if b.stages & 0x80 != 0 { 16 } else { 0 };
             if b.prog.is_null() {
                 for s in 0..6 {
                     if b.stages & (1 << s) != 0 {
@@ -2165,7 +2297,8 @@ fn record(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool
             draw_texture(g, sub, qs, d);
         }
         op::MESH => {
-            crate::log::red_once("mesh-task draws are not replayed yet (VK_EXT_mesh_shader pipelines)");
+            let m: crate::nvn::cmd2::p_mesh = rd_payload(rec);
+            mesh_draw(g, sub, qs, m);
             super::perf::inc(super::perf::C::DrawsSkipped);
         }
         op::REPORT_VALUE => {

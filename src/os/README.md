@@ -31,26 +31,30 @@ licenses: the "Credits and licenses" section of the repository README. The inter
 | Module | Implemented | Stubbed / offline |
 |---|---|---|
 | `sdkinit` | nninitInitializeSdkModule's connections (no-ops) | |
-| `sf` | nn::sf::hipc client takeovers onto host sessions; `olsc:u`, `caps:*`, `notif:a`, `mnpp:app` answered | |
-| `fs` | RomFS in place (update applied) through `translator::package`, add-on content (`dlc::title_romfs`), transactional saves, temporary and cache storage, files, directories, RomFS working-memory sizes | system data other than the Mii model |
+| `sf` | nn::sf::hipc client takeovers onto host sessions (DuplicateSessionEx too); `olsc:u`, `caps:*`, `notif:a`, `mnpp:app` answered; the Switch 2 camera context as a session with no camera plugged in (open / close succeed, its event never fires, the rest 0x7c4) | |
+| `fs` | RomFS in place (update applied) through `translator::package`, another program's RomFS by index (`romfs_programs/<n>.img`), add-on content (`dlc::title_romfs`), transactional saves (a Commit of a mount list when it is one save), temporary storage, cache storages (create with a size record, delete, list, size, limits from `control.nacp`), files, directories, IsPathMounted, RomFS working-memory sizes | system data other than the Mii model; a Commit list spanning two saves is refused |
 | `account` | one local user (more by marker), sessions, nickname, profile image, the selector picks user 1 | online accounts fail |
 | `oe` | operation mode, focus, notification queue and its event, performance configuration, language, region, display version, launch parameter, the switches | relaunch ends the run |
-| `time` | the host's clocks, calendar conversions in the host's zone, clock snapshots, contexts | network clock check fails (offline) |
+| `time` | the host's clocks, calendar conversions in the host's zone, clock snapshots, contexts, periodic benefit claims (the SDK's detail:: with the two service questions answered); `time:u` / `time:a` / `time:s` over IPC with the service's shared memory (steady clock, system clock contexts, automatic correction, ContinuousAdjustmentTimePoint; layout in `time.rs`), written into every view by a host thread | network clock check fails (offline) |
 | `settings` | language codes and comparisons | |
 | `vi` | display, layer, native window, crop, frame number, display list; vsync event at 60 Hz (`misc`) | |
 | `hid` | the host's controllers (`input/`) as npads: player 1 Handheld or No1, players 2..8 on No2..No8, one-player games merging every pad into player 1, Joy-Con pairs as JoyDual or split JoyLeft / JoyRight (single assignment), style-set events, latched presses, full histories, the controller applet (player counts, players past the maximum left out), six-axis from live motion (DualSense / DS4 / Pro / Joy-Con), vibration to the pad (HD rumble on Nintendo pads), player LEDs, colours | touch, gestures, keyboard, mouse and debug pad read connected and idle |
 | `hid_ext` | the Joy-Con 2 mouse sensor (Jcms ring fed by a Joy-Con 2's reports) and its pointer (Nmouse), the npad IMU the SDK's sensor fusion reads (live motion at 5 ms ticks), six-axis IC information, the fusion's calibration store, the console six-axis sensor, Palma (none connected), the private app's scene id, the two-argument touch / gesture initializers | no USB mouse as an Nmouse |
 | `audren` | the SDK's own renderer in-process (CPU + manual): its DeviceSink in every SDK's command layout folded to stereo for the sound card, a render thread paced by the sound card (8 blocks of 5 ms in flight), the update lock read off the SDK, catch-up frames, 32 kHz upsampled | the audren:u service for SDK 1.x (no in-process renderer): not served |
-| `audio` | AudioOut on the sound card (release events, six channels folded), AudioIn on the PC's capture device (none: the list is empty and an open fails, as audin answers), device names, volume, auto-tune and notifications | |
+| `audio` | AudioOut on the sound card (release events, six channels folded), SDK 21's OutputStream on the sound card (PCM16 / float, its event as blocks play, free / filled counts, purge, gain), AudioIn on the PC's capture device (none: the list is empty and an open fails, as audin answers), device names, volume, auto-tune and notifications | SDK 21's InputStream: no virtual input device listed, an open fails |
 | `codec` | hwopus with libopus: the HardwareOpus(MultiStream)Decoder classes, their C interface, SDK 21's decoder manager, and the `hwopus` IPC service | |
 | `movie` | movie::Decoder (NintendoSDK_movie): VP9 libvpx, H.264 / AAC Media Foundation, Vorbis lewton; NV12 to the client's buffer or RGBA into its NVN texture; MediaCodec's back-pressure; `NXOS_MOVIE_DUMP=<dir>` writes pictures handed out | VP8 (not in the libvpx build) fails with a red line |
 | `codec_video` | the Switch 2's nn::codec video decoders (VP9, H.264, AV1 with dav1d frame threads): image pools, sync handles and nn::syncpt events, submission back-pressure (3603), Stop / Flush, native images for graphics, SDK 19 / 22 names | VP8; encrypted input; HDR read-back (black) |
 | `swkbd` | ShowKeyboard and the InlineKeyboard: a text box over the game window (Hind font), `keyboard_text` by default (`NXOS_SWKBD=auto` answers the default without a box) | |
-| `net` | `btm:u` (the interface, events that never fire), `bsd:*` event descriptors (EventFd, Read / Write / Poll) | sockets: no network |
+| `net` | `btm:u` (the interface, events that never fire), `bsd:*` on `socket`'s descriptor table | sockets past loopback: no network |
+| `socket` | nn::socket / nnsocket* by name, offline: event descriptors (counter, semaphore and non-blocking flags), loopback UDP (bind, connect, ephemeral ports, SO_REUSE*, timeouts, a queue per socket), Poll / Select / libc poll, Fcntl, socket options, per-thread errno | name resolution and everything past loopback: ENETDOWN / EAI_FAIL |
+| `offline` | streamplay (no guest: its getters keep what the game set, its event never fires), GameChat's camera storages (blank native images), the shop's purchase and friends notification events (never fire), play statistics (never played), IR camera handle, nifm's request (on hold for one query), nn::web offline pages (the stand-in of a run without a web view: one empty message, closed when it appears) | all offline |
+| `ro` | ro::LookupSymbol over the loaded modules, NRO buffer sizes, NRR checks; jit::GetJitEnvironmentInfo | LoadModule fails (no NRO is loaded at run time); jit::Create / GenerateCode / Control / Destroy not served (no plugin loading) |
+| `nvdrv` | NvOsDrvOpen fails (only the movie library's hardware decoder opens it); `NXOS_GLSLC_CAPTURE=<dir>` saves the game's run-time GLSL compiles | nvdrv: no device |
 | `mii` | the six default Miis, random and default Miis, the editor adds the default Mii; the MiiModel system data stand-in | |
-| `misc` | diag log lines and aborts into the log, add-on content list, the shared font (a stand-in TTF), amiibo (no tag), the profanity filter (nothing filtered), error and shop applets logged | |
-| `os` | SDK SystemEvents bound and signalled by the host, entropy | |
-| `simple` | 159 offline stand-ins as nxnative answers them (friends, local wireless, telemetry, IR camera, SSL, parental controls, BCAT, album, sockets, …) | all |
+| `misc` | diag log lines and aborts into the log, add-on content list, the shared font (a stand-in TTF; SDK 21's built-in font data and font sets, ScalableFontEngine::LoadFont at the BFTTF header), amiibo (no tag), nfc (switched off), the profanity filter (nothing filtered), error and shop applets logged | |
+| `os` | SDK SystemEvents bound and signalled by the host, entropy; with their settings, `game_env` answering getenv and `alloc_big_align` (64 KB alignment of big StandardAllocator blocks) | |
+| `simple` | 296 offline stand-ins as nxnative answers them (friends, local wireless, telemetry, IR camera, SSL, parental controls, BCAT, album, name resolution, streamplay, GameChat, the shop's accessors, nvdrv's ioctls, …) | all |
 
 ## Build, test, run
 
@@ -62,5 +66,5 @@ licenses: the "Credits and licenses" section of the repository README. The inter
     build\games\<g>\<g>.exe build\games\<g>\data
 
 Switches: `NXOS_TRACE=svc,ipc,fs` (or `all`), `NXOS_EXIT_AFTER=<s>`, `NXOS_EXIT_AFTER_SUBMIT=<s>`,
-`NXOS_HEARTBEAT=<s>`, `NXOS_OPMODE=0|1` (else `docked`), `NXOS_LANG` (else `language`), `NXOS_<SETTING>` (any setting os reads), `NXOS_MOVIE_DUMP=<dir>`, `NXOS_SWKBD=auto`, `NXOS_NICK`, `NXOS_FIXED_TIME`, `NXOS_FONT`, `NXOS_SAVE`,
+`NXOS_HEARTBEAT=<s>`, `NXOS_OPMODE=0|1` (else `docked`), `NXOS_LANG` (else `language`), `NXOS_<SETTING>` (any setting os reads: `NXOS_GAME_ENV`, `NXOS_ALLOC_BIG_ALIGN`), `NXOS_MOVIE_DUMP=<dir>`, `NXOS_GLSLC_CAPTURE=<dir>`, `NXOS_SWKBD=auto`, `NXOS_NICK`, `NXOS_FIXED_TIME`, `NXOS_FONT`, `NXOS_SAVE`,
 `NXOS_FREE_CORES=1` (no virtual cores), `NXOS_HOST_CPUS=<n>`, the controller switches in `input/mod.rs` (`NXRS_CONTROLLER_TRACE`, `_SELFTEST`, `_BACKGROUND`, `NXRS_NO_SONY_HID`, ...); the runtime's `NXRT_TRACE` still works.

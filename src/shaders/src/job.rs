@@ -68,7 +68,7 @@ fn mesh_stage(ctl: &[u8], area: &[u8]) -> (Value, Vec<u32>, u32, u32) {
     let payload = u16_at(ctl, 0x5a).unwrap_or(0) as u32;
     let out = INPUT + ((payload + 15) & !15);
     if kind == "ts" {
-        let info = json!({"kind": kind, "threads": threads, "payload": payload});
+        let info = json!({"kind": kind, "threads": threads, "payload": payload, "memory": [WORKGROUP, INPUT, out, out + payload]});
         return (info, vec![WORKGROUP, INPUT, out, out + payload], out + ((payload + 3) & !3), threads);
     }
     let (max_v, max_p) = (u16_at(ctl, 0x60).unwrap_or(0) as u32, u16_at(ctl, 0x62).unwrap_or(0) as u32);
@@ -88,8 +88,14 @@ fn mesh_stage(ctl: &[u8], area: &[u8]) -> (Value, Vec<u32>, u32, u32) {
     let mem = vec![WORKGROUP, INPUT, out, prim, prim - out, n, max_v * 4 * n];
     let shared = prim + ((4 + verts * pb * BLOCK + 3) & !3);
     let info = json!({"kind": kind, "threads": threads, "payload": payload, "task": ctl.get(0x5e).is_some_and(|&b| b != 0), "verts": verts,
-        "max_v": max_v, "max_p": max_p, "vertex_components": vertex.len(), "primitive_components": primitive.len(), "primitive_system": psys});
+        "max_v": max_v, "max_p": max_p, "vertex_components": vertex.len(), "primitive_components": primitive.len(), "primitive_system": psys,
+        "vertex": comp_list(&vertex), "primitive": comp_list(&primitive), "memory": mem.clone()});
     (info, mem, shared, threads)
+}
+
+/// An attribute area's components as `[attribute, component]`: -2 the point size, -1 the position, n generic n.
+fn comp_list(c: &[(Option<u32>, u32)]) -> Value {
+    json!(c.iter().map(|&(a, k)| json!([match a { None => -1i64, Some(u32::MAX) => -2, Some(n) => n as i64 }, k])).collect::<Vec<_>>())
 }
 
 /// Whether Ampere instructions use shared memory of their own (LDS, STS, ATOMS), which would lie over the stage memory.

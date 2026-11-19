@@ -340,6 +340,10 @@ fn import(g: &Gpu, base: u64, size: u64) -> Result<(Buf, u64), String> {
 
 /// A GPU address range as (buffer, offset, pool base); creates the pool's buffer at its first use.
 pub fn resolve(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(vk::Buffer, u64, u64)> {
+    super::perf::timed(super::perf::C::ResolveNs, || resolve_in(g, sub, a, n))
+}
+
+fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(vk::Buffer, u64, u64)> {
     // a sparse virtual pool's range: the physical memory its page table maps there (contiguous pages only)
     let a = if crate::nvn::vpool::is_sparse(a) {
         match crate::nvn::vpool::translate(a, n) {

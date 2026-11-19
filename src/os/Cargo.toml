@@ -20,6 +20,7 @@ cpal = "0.18"
 lewton = "0.10"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Foundation", "Foundation_Collections", "Devices", "Devices_Bluetooth", "Devices_Bluetooth_Advertisement", "Devices_Bluetooth_GenericAttributeProfile", "Storage", "Storage_Streams"] }
 runtime = { path = "../runtime" }
+profiles = { path = "../profiles" }
 translator = { path = "../translator" }
 nxgfx = { package = "graphics", path = "../graphics" }
 nxconfig = { package = "config", path = "../config" }

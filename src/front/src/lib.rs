@@ -248,6 +248,7 @@ pub fn start() {
     ctl::start();
     metrics::start();
     lsfg::start();
+    nxgfx::vk::framegen::set_lsfg_state(lsfg::state);
     std::thread::Builder::new().name("front".into()).spawn(front_loop).expect("front thread");
 }
 

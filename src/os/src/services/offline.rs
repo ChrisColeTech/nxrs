@@ -106,8 +106,8 @@ ofn!(chat_storage_image, |c, a| {
 
 // ---- play statistics, IR camera handle
 
-/// QueryApplicationPlayStatistics(ApplicationPlayStatistics *out, uid, const ApplicationId *ids, int n): each
-/// {application id, play time 0, launches 0}: the host keeps no play log of other games.
+// QueryApplicationPlayStatistics(ApplicationPlayStatistics *out, uid, const ApplicationId *ids, int n): each
+// {application id, play time 0, launches 0}: the host keeps no play log of other games.
 ofn!(pdm_stats, |c, a| {
     let (out, ids, n) = (a.x(0), a.x(2), a.i(3));
     if out != 0 && ids != 0 {
@@ -119,7 +119,7 @@ ofn!(pdm_stats, |c, a| {
     }
     RES_OK
 });
-/// GetIrCameraHandle(const NpadId &): the player number in the low byte.
+// GetIrCameraHandle(const NpadId &): the player number in the low byte.
 ofn!(irs_handle, |c, a| { (r32(a.x(0)) & 0xff) as u64 });
 
 // ---- nifm's network request: on hold for the first query after its submission, then settled (unavailable)
@@ -133,7 +133,18 @@ ofn!(nifm_cancel, |c, a| {
     NIFM_HOLD.store(0, Ordering::Relaxed);
     0
 });
-ofn!(nifm_on_hold, |c, a| { (NIFM_HOLD.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |h| (h > 0).then(|| h - 1)).unwrap_or(0) > 0) as u64 });
+// Whether the request is on hold: true once after its submission.
+fn nifm_hold_take() -> bool {
+    let mut h = NIFM_HOLD.load(Ordering::Relaxed);
+    while h > 0 {
+        match NIFM_HOLD.compare_exchange_weak(h, h - 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return true,
+            Err(x) => h = x,
+        }
+    }
+    false
+}
+ofn!(nifm_on_hold, |c, a| { nifm_hold_take() as u64 });
 
 // ---- nn::web offline HTML pages: the stand-in (no web view on the host)
 
@@ -333,7 +344,7 @@ mod tests {
     fn nifm_request_holds_once() {
         use std::sync::atomic::Ordering;
         super::NIFM_HOLD.store(1, Ordering::Relaxed);
-        let q = || super::NIFM_HOLD.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |h| (h > 0).then(|| h - 1)).unwrap_or(0) > 0;
+        let q = super::nifm_hold_take;
         assert!(q());
         assert!(!q());
     }

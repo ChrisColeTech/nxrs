@@ -17,6 +17,7 @@
 //!   with the image types it needs).
 //! - push constants (all stages, 128 bytes): 0 the active texture pool's base in the host table, 4 the sampler pool's,
 //!   8 flags (bit 0: the viewport is flipped for an upper-left origin).
+//! - NVN2's task and mesh shaders use sets 3 and 4 (a mesh pipeline has no tessellation stages).
 
 use super::device::Device;
 use ash::vk;
@@ -73,6 +74,8 @@ pub struct Layout {
     pub pipeline: vk::PipelineLayout,
     pub tex_cap: u32,
     pub samp_cap: u32,
+    /// the push constant range's stages (with task and mesh when the device has them)
+    pub push_stages: vk::ShaderStageFlags,
 }
 
 fn env_u32(n: &str, d: u32) -> u32 {
@@ -84,7 +87,13 @@ impl Layout {
         let dev = &d.dev;
         let mut stage_sets = [vk::DescriptorSetLayout::null(); STAGE_SETS as usize];
         for (s, slot) in stage_sets.iter_mut().enumerate() {
-            let sf = stage_flag(s as u32);
+            // NVN2's task and mesh shaders take the tessellation stages' sets (a mesh pipeline has no tessellation)
+            let sf = stage_flag(s as u32)
+                | match (s, d.caps.mesh) {
+                    (3, true) => vk::ShaderStageFlags::TASK_EXT,
+                    (4, true) => vk::ShaderStageFlags::MESH_EXT,
+                    _ => vk::ShaderStageFlags::empty(),
+                };
             let binds: Vec<_> = (0..STAGE_BINDINGS)
                 .map(|b| vk::DescriptorSetLayoutBinding::default().binding(b).descriptor_type(stage_binding_type(b)).descriptor_count(1).stage_flags(sf))
                 .collect();
@@ -111,10 +120,11 @@ impl Layout {
         let pool_set = unsafe { dev.create_descriptor_set_layout(&ci, None) }.map_err(|e| format!("pool set layout: {e}"))?;
         let mut sets = stage_sets.to_vec();
         sets.push(pool_set);
-        let pcr = [vk::PushConstantRange::default().stage_flags(PUSH_STAGES).offset(0).size(PUSH_SIZE)];
+        let push_stages = if d.caps.mesh { PUSH_STAGES | vk::ShaderStageFlags::TASK_EXT | vk::ShaderStageFlags::MESH_EXT } else { PUSH_STAGES };
+        let pcr = [vk::PushConstantRange::default().stage_flags(push_stages).offset(0).size(PUSH_SIZE)];
         let ci = vk::PipelineLayoutCreateInfo::default().set_layouts(&sets).push_constant_ranges(&pcr);
         let pipeline = unsafe { dev.create_pipeline_layout(&ci, None) }.map_err(|e| format!("pipeline layout: {e}"))?;
         crate::vklog!("shared pipeline layout: 6 stage sets of {STAGE_BINDINGS} bindings, pool set of {tex_cap} textures / {samp_cap} samplers");
-        Ok(Layout { stage_sets, pool_set, pipeline, tex_cap, samp_cap })
+        Ok(Layout { stage_sets, pool_set, pipeline, tex_cap, samp_cap, push_stages })
     }
 }

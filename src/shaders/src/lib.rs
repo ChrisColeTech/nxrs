@@ -8,6 +8,7 @@
 //! | [`scan`] | a whole game: ExeFS code modules + RomFS (update applied), in parallel, one copy per key, vertex / pixel pairs |
 //! | [`job`] | a shader → the translator's job (Maxwell and Ampere code, c1, compute and mesh facts) |
 //! | [`xlate`] | the translator (`dmsh_xlate`, NativeAOT) driven in parallel, and `spirv-val` |
+//! | [`mesh`] | NVN2 task and mesh shaders made Vulkan task and mesh stages around the translated kernel |
 //! | [`fixes`] | the SPIR-V edits Vulkan needs (capabilities the translator leaves out, out-of-range size-query components) |
 //! | [`reflect`] | the SPIR-V's descriptor bindings, as the graphics module creates its layouts |
 //! | [`prebuild`] | the whole build step: scan, translate, validate, write the output and its manifest |
@@ -17,6 +18,7 @@
 pub mod fixes;
 pub mod formats;
 pub mod job;
+pub mod mesh;
 pub mod nvn;
 pub mod prebuild;
 pub mod reflect;

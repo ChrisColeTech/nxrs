@@ -46,8 +46,67 @@ pub struct Image {
     pub bc7: bool,
     /// a texture in a sparse virtual pool: the physical ranges its last upload read and the mapping generation then
     pub sparse: Option<(Vec<(u64, u64)>, u64)>,
+    /// a hash of each 4 KB page of the storage as last uploaded: a CPU write to a page the texture shares with other
+    /// data (a uniform ring, a neighbour) that leaves its bytes as they were uploads nothing
+    pub page_hash: Vec<u64>,
 }
 unsafe impl Send for Image {}
+
+const HPAGE: u64 = 4096;
+
+fn hash_bytes(b: &[u8]) -> u64 {
+    let mut h = 0xcbf29ce484222325u64;
+    let mut ch = b.chunks_exact(8);
+    for c in &mut ch {
+        h = (h ^ u64::from_le_bytes(c.try_into().unwrap())).wrapping_mul(0x100000001b3).rotate_left(23);
+    }
+    for &x in ch.remainder() {
+        h = (h ^ x as u64).wrapping_mul(0x100000001b3);
+    }
+    h
+}
+
+/// The hash of page `i` of [lo, hi) (clipped to the range).
+fn page_hash_at(lo: u64, hi: u64, i: usize) -> u64 {
+    let s = (lo & !(HPAGE - 1)) + i as u64 * HPAGE;
+    let (a, e) = (s.max(lo), (s + HPAGE).min(hi));
+    if e <= a {
+        return 0;
+    }
+    // SAFETY: the texture's storage in guest memory
+    hash_bytes(unsafe { core::slice::from_raw_parts(a as *const u8, (e - a) as usize) })
+}
+
+/// Hashes of every page of a texture's storage.
+fn page_hashes(lo: u64, hi: u64) -> Vec<u64> {
+    let n = ((hi + HPAGE - 1) / HPAGE - lo / HPAGE) as usize;
+    (0..n).map(|i| page_hash_at(lo, hi, i)).collect()
+}
+
+/// Whether a write to [a, a + n) changed a page of the texture's storage [lo, hi) since its hashes were taken (the
+/// changed pages' hashes are updated).
+fn pages_changed(hashes: &mut [u64], lo: u64, hi: u64, a: u64, n: u64) -> bool {
+    if hashes.is_empty() {
+        return true;
+    }
+    let base = lo & !(HPAGE - 1);
+    let (s, e) = (a.max(lo), (a + n).min(hi));
+    if e <= s {
+        return false;
+    }
+    let mut changed = false;
+    for i in ((s - base) / HPAGE) as usize..=((e - 1 - base) / HPAGE) as usize {
+        if i >= hashes.len() {
+            break;
+        }
+        let h = page_hash_at(lo, hi, i);
+        if h != hashes[i] {
+            hashes[i] = h;
+            changed = true;
+        }
+    }
+    changed
+}
 
 #[derive(Default)]
 pub struct Images {
@@ -59,7 +118,22 @@ pub struct Images {
     writes: Vec<(u64, u32, u32, vk::Offset3D, vk::Extent3D, Vec<u8>)>,
     /// the virtual pool mapping generation the sparse textures were last checked at
     sparse_seen: u64,
+    /// released images by what they were (storage, description, layout): a game that initializes its transient
+    /// render targets again every frame over the same memory gets the same image back, with its content, instead of
+    /// a new one uploaded from storage (Mario Kart 8 Deluxe: ~2 a frame, 15 ms of uploads). (image, present frame)
+    parked: HashMap<u128, Vec<(Image, u64)>>,
+    parked_n: usize,
 }
+
+/// What a texture object is, without its serial: the key a released image is found again by.
+fn tex_identity(t: &tex_t) -> u128 {
+    // SAFETY: tex_t is plain data of 0x80 bytes; bytes 4..0x78 are everything but the magic and the serial
+    let b = unsafe { core::slice::from_raw_parts(t as *const tex_t as *const u8, 0x78) };
+    super::queue::memo_hash(&b[4..])
+}
+
+const PARK_FRAMES: u64 = 4;
+const PARK_MAX: usize = 512;
 
 impl Images {
     pub fn drop_pool(&mut self, _base: u64, _size: u64) {}
@@ -232,6 +306,7 @@ impl Gpu {
             needs_upload: !t.mem.is_null(),
             bc7,
             sparse: None,
+            page_hash: Vec::new(),
         })
     }
 
@@ -240,7 +315,23 @@ impl Gpu {
         if imgs.by_serial.contains_key(&t.serial) {
             return true;
         }
-        let Some(im) = self.create_image(t) else { return false };
+        // the same texture initialized again over the same memory: its released image, with its content
+        let key = tex_identity(t);
+        let reused = imgs.parked.get_mut(&key).and_then(|v| v.pop()).map(|(mut im, _)| {
+            imgs.parked_n -= 1;
+            im.tex = *t;
+            if !im.gpu_owned && im.sparse.is_none() && !im.page_hash.is_empty() && !t.mem.is_null() {
+                let lo = t.mem as u64;
+                let mut ph = std::mem::take(&mut im.page_hash);
+                im.needs_upload |= pages_changed(&mut ph, lo, lo + t.l.size, lo, t.l.size);
+                im.page_hash = ph;
+            } else if !im.gpu_owned {
+                im.needs_upload = !t.mem.is_null();
+            }
+            super::perf::inc(super::perf::C::ImagesReused);
+            im
+        });
+        let Some(im) = reused.or_else(|| self.create_image(t)) else { return false };
         if !t.mem.is_null() {
             imgs.by_addr.entry(t.mem as u64).or_default().push(t.serial);
             imgs.max_size = imgs.max_size.max(t.l.size);
@@ -329,6 +420,12 @@ impl Gpu {
         if ty == vk::ImageViewType::TYPE_2D && nlayers > 1 {
             nlayers = 1;
         }
+        // a cube view of a 2D array: six faces from its first layer (whole cubes for a cube array)
+        if ty == vk::ImageViewType::CUBE {
+            nlayers = 6;
+        } else if ty == vk::ImageViewType::CUBE_ARRAY {
+            nlayers = (nlayers.min(im.layers.saturating_sub(base_layer)) / 6 * 6).max(6);
+        }
         if base_level + nlevels > im.levels {
             nlevels = im.levels.saturating_sub(base_level).max(1);
         }
@@ -407,17 +504,47 @@ impl Gpu {
 
     /// nvnTextureFinalize: the image goes once the GPU no longer uses it.
     pub fn tex_release(&self, serial: u64) {
-        let im = {
-            let mut imgs = self.images.lock().unwrap();
-            let im = imgs.by_serial.remove(&serial);
-            if let Some(im) = &im {
-                if let Some(v) = imgs.by_addr.get_mut(&(im.tex.mem as u64)) {
-                    v.retain(|s| *s != serial);
+        let mut imgs = self.images.lock().unwrap();
+        let Some(im) = imgs.by_serial.remove(&serial) else { return };
+        if let Some(v) = imgs.by_addr.get_mut(&(im.tex.mem as u64)) {
+            v.retain(|s| *s != serial);
+        }
+        // kept a few frames for a texture initialized again the same way (ensure_image)
+        let key = tex_identity(&im.tex);
+        let frame = super::present::frames();
+        imgs.parked.entry(key).or_default().push((im, frame));
+        imgs.parked_n += 1;
+        let old = self.evict_parked(&mut imgs, frame);
+        drop(imgs);
+        for im in old {
+            self.destroy_released(im);
+        }
+    }
+
+    /// Parked images older than PARK_FRAMES frames, or the oldest past PARK_MAX: taken out to be destroyed.
+    fn evict_parked(&self, imgs: &mut Images, frame: u64) -> Vec<Image> {
+        let mut out = Vec::new();
+        if imgs.parked_n == 0 {
+            return out;
+        }
+        let over = imgs.parked_n > PARK_MAX;
+        for v in imgs.parked.values_mut() {
+            let mut i = 0;
+            while i < v.len() {
+                if frame.saturating_sub(v[i].1) > PARK_FRAMES || over && v.len() > 1 && i == 0 {
+                    out.push(v.remove(i).0);
+                } else {
+                    i += 1;
                 }
             }
-            im
-        };
-        if let Some(im) = im {
+        }
+        imgs.parked.retain(|_, v| !v.is_empty());
+        imgs.parked_n -= out.len();
+        out
+    }
+
+    fn destroy_released(&self, im: Image) {
+        {
             self.q.defer_after_use(
                 Box::new(move |g: &Gpu| unsafe {
                     for v in im.views.values() {
@@ -509,6 +636,16 @@ impl Gpu {
                     let covered: u64 = dirty.iter().map(|&(a, n)| (a + n).min(hi).saturating_sub(a.max(lo))).sum();
                     // a GPU-written texture is taken back from its storage only when the CPU rewrote most of it (a
                     // decoded movie frame); a write to a page it merely shares keeps the GPU's content
+                    // bytes the texture already holds (a write to a page it shares with other data): nothing to upload
+                    if covered > 0 && !im.gpu_owned && !im.needs_upload && im.sparse.is_none() && !im.page_hash.is_empty() {
+                        let mut ph = std::mem::take(&mut im.page_hash);
+                        let changed = dirty.iter().fold(false, |c, &(a, n)| pages_changed(&mut ph, lo, hi, a, n) || c);
+                        im.page_hash = ph;
+                        if !changed {
+                            super::perf::inc(super::perf::C::UploadsSame);
+                            continue;
+                        }
+                    }
                     if covered > 0 && (!im.gpu_owned || covered * 2 >= hi - lo) {
                         // the CPU wrote the storage: its bytes are the texture's newest content, also when the GPU
                         // wrote the texture before (a movie frame the game decodes into a texture it cleared once:
@@ -591,7 +728,15 @@ impl Gpu {
             im.needs_init = false;
         }
         if im.needs_upload && !im.gpu_owned && !im.tex.mem.is_null() {
-            super::perf::timed(super::perf::C::TexUploadNs, || self.upload_from_storage(im, sub));
+            let t0 = std::time::Instant::now();
+            self.upload_from_storage(im, sub);
+            if im.sparse.is_none() {
+                let lo = im.tex.mem as u64;
+                im.page_hash = page_hashes(lo, lo + im.tex.l.size);
+            }
+            let ns = t0.elapsed().as_nanos() as u64;
+            super::perf::add(super::perf::C::TexUploadNs, ns);
+            upload_stats::note(serial, &im.tex, ns);
             super::queue::full_barrier(self, sub.pre);
         }
         im.needs_upload = false;
@@ -769,4 +914,32 @@ fn expand3(src: &[u8], comp: usize) -> Vec<u8> {
         out[i * 4 * comp..i * 4 * comp + 3 * comp].copy_from_slice(&src[i * 3 * comp..(i + 1) * 3 * comp]);
     }
     out
+}
+
+/// Which textures are uploaded from their storage, and what that costs (the `[vk] uploads` line every 600 frames).
+pub mod upload_stats {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static S: Mutex<Option<HashMap<u64, (String, u64, u64)>>> = Mutex::new(None);
+
+    pub fn note(serial: u64, t: &crate::nvn::obj::tex_t, ns: u64) {
+        let mut g = S.lock().unwrap();
+        let m = g.get_or_insert_with(HashMap::new);
+        let e = m.entry(serial).or_insert_with(|| {
+            (format!("ser{serial} {}x{}x{} fmt {:#x} flags {:#x} at {:#x} ({} KB)", t.d.width, t.d.height, t.d.depth, t.d.format, t.d.flags, t.mem as u64, t.l.size / 1024), 0, 0)
+        });
+        e.1 += 1;
+        e.2 += ns;
+    }
+
+    /// The most expensive uploads since the last call (the window is cleared).
+    pub fn line(frames: u64) -> Option<String> {
+        let m = S.lock().unwrap().take()?;
+        let total: u64 = m.values().map(|e| e.2).sum();
+        let mut v: Vec<_> = m.into_values().collect();
+        v.sort_by(|a, b| b.2.cmp(&a.2));
+        let f = frames.max(1) as f64;
+        let top: Vec<String> = v.iter().take(6).map(|e| format!("{} x{:.2}/frame {:.2} ms/frame", e.0, e.1 as f64 / f, e.2 as f64 / 1e6 / f)).collect();
+        Some(format!("uploads from storage: {} textures, {:.2} ms per frame; most: {}", v.len(), total as f64 / 1e6 / f, top.join("; ")))
+    }
 }

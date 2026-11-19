@@ -20,7 +20,7 @@ use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Copy, Hash, PartialEq, Eq, Debug, Default)]
 pub struct GfxKey {
-    /// vertex, fragment, geometry, tess control, tess evaluation; zero = none
+    /// vertex, fragment, geometry, tess control (or task), tess evaluation (or mesh); zero = none
     pub shaders: [ShaderKey; 5],
     pub colors: [i32; 8],
     pub ncolor: u8,
@@ -158,7 +158,7 @@ impl Pipes {
     }
 }
 
-fn dynamic_states(g: &Gpu, tess: bool) -> Vec<vk::DynamicState> {
+fn dynamic_states(g: &Gpu, tess: bool, mesh: bool) -> Vec<vk::DynamicState> {
     use vk::DynamicState as D;
     let c = &g.d.caps;
     let mut v = vec![
@@ -188,10 +188,14 @@ fn dynamic_states(g: &Gpu, tess: bool) -> Vec<vk::DynamicState> {
         D::COLOR_BLEND_EQUATION_EXT,
         D::COLOR_WRITE_MASK_EXT,
     ];
+    if mesh {
+        // a mesh pipeline has no vertex input or input assembly: those states may not be dynamic
+        v.retain(|d| !matches!(*d, D::PRIMITIVE_TOPOLOGY | D::PRIMITIVE_RESTART_ENABLE | D::VERTEX_INPUT_EXT));
+    }
     if c.logic_op_dyn {
         v.push(D::LOGIC_OP_EXT);
     }
-    if c.patch_dyn && tess {
+    if c.patch_dyn && tess && !mesh {
         v.push(D::PATCH_CONTROL_POINTS_EXT);
     }
     if c.eds3_poly {
@@ -246,9 +250,10 @@ fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, 
     let _x = driver_exclusive(g).then(|| EXCLUSIVE.lock().unwrap());
     let stages: Vec<vk::PipelineShaderStageCreateInfo> = mods
         .iter()
-        .map(|m| vk::PipelineShaderStageCreateInfo::default().stage(super::layout::stage_flag(m.stage)).module(m.module).name(&m.entry))
+        .map(|m| vk::PipelineShaderStageCreateInfo::default().stage(m.vk_stage()).module(m.module).name(&m.entry))
         .collect();
-    let tess = mods.iter().any(|m| m.stage == 3 || m.stage == 4);
+    let mesh = mods.iter().any(|m| m.mesh != 0);
+    let tess = !mesh && mods.iter().any(|m| m.stage == 3 || m.stage == 4);
     let vi = vk::PipelineVertexInputStateCreateInfo::default();
     let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(if tess { vk::PrimitiveTopology::PATCH_LIST } else { vk::PrimitiveTopology::TRIANGLE_LIST });
     let ts = vk::PipelineTessellationStateCreateInfo::default().patch_control_points(3);
@@ -260,7 +265,7 @@ fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, 
     let att: Vec<vk::PipelineColorBlendAttachmentState> =
         (0..k.ncolor).map(|_| vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)).collect();
     let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&att);
-    let dyns = dynamic_states(g, tess);
+    let dyns = dynamic_states(g, tess, mesh);
     let dy = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
     let colors: Vec<vk::Format> = k.colors[..k.ncolor as usize].iter().map(|&f| vk::Format::from_raw(f)).collect();
     let df = vk::Format::from_raw(k.depth);
@@ -270,8 +275,6 @@ fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, 
         .stencil_attachment_format(if depth_has_stencil(df) { df } else { vk::Format::UNDEFINED });
     let mut ci = vk::GraphicsPipelineCreateInfo::default()
         .stages(&stages)
-        .vertex_input_state(&vi)
-        .input_assembly_state(&ia)
         .viewport_state(&vp)
         .rasterization_state(&rs)
         .multisample_state(&ms)
@@ -280,6 +283,9 @@ fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, 
         .dynamic_state(&dy)
         .layout(g.layout.pipeline)
         .push_next(&mut ri);
+    if !mesh {
+        ci = ci.vertex_input_state(&vi).input_assembly_state(&ia);
+    }
     if tess {
         ci = ci.tessellation_state(&ts);
     }

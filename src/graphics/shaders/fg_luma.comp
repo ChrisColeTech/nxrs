@@ -1,0 +1,20 @@
+#version 450
+// Frame generation, step 1: one level of the luma pyramid. Each output texel is the mean luma of the 2x2 source
+// texels under it (one bilinear tap at their shared corner). Level 1 reads the frame (RGB), deeper levels read luma.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D src;
+layout(binding = 3, r16f) uniform writeonly image2D dst;
+layout(push_constant) uniform P {
+    ivec2 size;      // dst size
+    vec2 inv_src;    // 1 / src size
+    int from_rgb;
+} p;
+
+void main() {
+    ivec2 q = ivec2(gl_GlobalInvocationID.xy);
+    if (q.x >= p.size.x || q.y >= p.size.y) return;
+    vec2 uv = (vec2(q) * 2.0 + 1.0) * p.inv_src;
+    vec4 c = textureLod(src, uv, 0.0);
+    float l = p.from_rgb != 0 ? dot(clamp(c.rgb, 0.0, 1.0), vec3(0.2126, 0.7152, 0.0722)) : c.r;
+    imageStore(dst, q, vec4(l));
+}

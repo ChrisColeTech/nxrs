@@ -28,7 +28,7 @@ Agents update their own rows when they finish.
 | M5 | MK8D at 60 | Not started | | needs audio, input, video, window from GAPS |
 | M6 | Pokémon trio | Not started | | |
 | M7 | MKW + DKB | Not started | | needs ZBIC, real mesh shaders |
-| M8 | Ocarina of Time | Not started | | needs ZBIC |
+| M8 | Ocarina of Time | Deferred | | owner 2026-11-19: after the other games are validated. ZBIC done; builds; stops at a static-init fault after SDK start-up |
 | M9 | Launcher contract v2 | Not started | | contract v1 done in 202d449 |
 | M10 | Linux | Not started | | |
 
@@ -627,7 +627,7 @@ harness. **G** = graphics, shaders, and M4.
 
 | Item | Turbo source | Status |
 |---|---|---|
-| Real controllers in `hid`: XInput, DualSense / DS4 (lights, rumble, motion), Switch Pro, Joy-Con (1 and 2), WinMM fallback; hot-plug; several players | `controller_sony*.h`, `svc_hid.c`, `hid_layout.h`, 88401aa, a0581fe; nxnative `pad_*.h`, `switch2_proto.h`, `motion_fusion.h` | Partial: all paths written (XInput; DualSense / DS4 lights, rumble, motion; Switch Pro, Joy-Con 1 and NSO pads over HID with HD rumble, lights, IMU; Joy-Con 2 / Pro Controller 2 over BLE; WinMM; hot-plug; 8 players), unit-tested; enumeration verified (`nxinput list`); no pad was connected, so live input / lights / rumble await the owner's hands-on test |
+| Real controllers in `hid`: XInput, DualSense / DS4 (lights, rumble, motion), Switch Pro, Joy-Con (1 and 2), WinMM fallback; hot-plug; several players | `controller_sony*.h`, `svc_hid.c`, `hid_layout.h`, 88401aa, a0581fe; nxnative `pad_*.h`, `switch2_proto.h`, `motion_fusion.h` | Partial: all paths written (XInput; DualSense / DS4; Switch Pro, Joy-Con 1, NSO pads over HID; Joy-Con 2 / Pro Controller 2 over BLE; WinMM; hot-plug; 8 players) and unit-tested. **DualSense on hardware (USB, 054c:0ce6, fw 0630):** enumerated as native HID read+write, player 1, centre LED + blue lightbar written, rumble low / high 0.4 s each written (48-byte reports, no errors), input reports parsed with motion streaming (flat: 0.11 / -0.98 G, gyro 0). The same in MK8D's boot (player 1, lights). Open: live presses (owner, `nxinput read 30`), the game reading the pad (today's tree dies in `svc MapMemory` before nn::hid starts: lane O / T), the other pad kinds (no hardware). hid takeovers: all 134 nxnative names Ocarina's modules use are provided (hid.rs + hid_ext.rs) |
 | `button_layout` (switch / xbox / positional) and `button_map` | 08130c4, 10e1ef4, ac1bd36, `pad_layout.h` | Partial: the owner's `pad_layout.h` ported with tests, applied to every pad path; needs a pad for a live check |
 | Keyboard and mouse as a controller: `mouse_right_stick`, `mouse_sensitivity`, `mouse_invert` | `backend_win32.c` | Partial: keyboard verified in MK8D (the game read A from X, the stick from W); the mouse stick (raw input, sensitivity curve, inversion) is written and unit-tested, not exercised in a game |
 | Game window: fullscreen / windowed, F11, title bar state, Esc quit, F1 help; windowed loader exe (no console) | `backend_win32.c` | Done: MK8D windowed, F11 / Alt+Enter fullscreen and back (kept in the ini), title states, F1 page, Esc quit; loader is a GUI-subsystem exe |
@@ -636,7 +636,7 @@ harness. **G** = graphics, shaders, and M4.
 | Frame generation through the owner's Lossless.dll (LSFG) | `runtime/lsfg.c` | Partial: Lossless.dll found and its LSFG 3.1 set identified (tests); the passes need graphics' present hook (requested); no Lossless.dll on this PC |
 | Control pipe (scripted actions from the harness) | 0b0d902, d54f04e | Done: `\\.\pipe\nxrs_ctl_<pid>` + registry; status / press / pads / shot / quit verified in MK8D |
 | Metrics, dropped-work counters, input record / replay | 8f5410f | Done: metrics CSV per second (verified), counter registry for every crate, frames CSV sink; NXRS_INPUT_RECORD / REPLAY verified in MK8D (replayed states read by the game) |
-| Harness: guard (GAME_LOCK, memory watchdog), scenarios with frame-time statistics, per-run ini, the pacing line at least every 5 s, PresentMon | dec5a09, 4f0f731, `tools/play_scenario.py` | Partial: run_game.py guard as a module, play_scenario.py (Turbo's scenarios, per-run ini, stats, pacing gaps ≤ 5 s verified: 5.02 s), gamectl.py; PresentMon parsing written but no PresentMon.exe on this PC |
+| Harness: guard (GAME_LOCK, memory watchdog), scenarios with frame-time statistics, per-run ini, the pacing line at least every 5 s, PresentMon | dec5a09, 4f0f731, `tools/play_scenario.py` | Partial: run_game.py guard as a module (now also waits for builds: cargo / rustc / clang / nxshaders / nxrs), play_scenario.py (Turbo's scenarios, per-run ini, stats, pacing gaps ≤ 5 s verified: 5.02 s), gamectl.py; PresentMon 2.6.0 (Intel-signed) in build/tools/presentmon and started per run, but its ETW session needs an administrator or the Performance Log Users group: no presentmon.csv was captured from this unelevated account |
 
 ### 5A.4 Graphics (lane G)
 

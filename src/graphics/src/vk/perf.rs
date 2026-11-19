@@ -37,6 +37,16 @@ pub enum C {
     GpuSubs,
     ReplayNs,
     TexUploadNs,
+    // where the replay's CPU time goes (nanoseconds, nested timers overlap)
+    PrepNs,
+    SetNs,
+    ResolveNs,
+    TexViewNs,
+    PipeLookNs,
+    PassNs,
+    VtxNs,
+    UploadsSame,
+    ImagesReused,
     // dropped or degraded work
     TexNoFormat,
     TexCreateFailed,
@@ -71,6 +81,15 @@ const NAMES: [&str; C::N as usize] = [
     "gpu_subs",
     "replay_ns",
     "tex_upload_ns",
+    "prep_ns",
+    "set_ns",
+    "resolve_ns",
+    "tex_view_ns",
+    "pipe_lookup_ns",
+    "pass_ns",
+    "vertex_ns",
+    "uploads_same_bytes",
+    "images_reused",
     "tex_no_format",
     "tex_create_failed",
     "view_failed",
@@ -204,6 +223,26 @@ fn csv_start() {
         .ok();
 }
 
+/// Where the replay's time went over `frames` frames, ms per frame: submission set-up (dirty pools and textures),
+/// descriptor sets (with the memory lookups and texture views inside them), pipeline lookups, passes, vertex input,
+/// texture uploads.
+fn breakdown(cur: &[u64; C::N as usize], base: &[u64; C::N as usize], frames: f64) -> String {
+    let d = |c: C| (cur[c as usize] - base[c as usize]) as f64 / 1e6 / frames;
+    format!(
+        "prep {:.2}, sets {:.2} (memory {:.2}, views {:.2}), pipeline lookups {:.2}, passes {:.2}, vertex input {:.2}, uploads {:.2} ms, {:.1} uploads skipped (same bytes), {:.1} images reused",
+        d(C::PrepNs),
+        d(C::SetNs),
+        d(C::ResolveNs),
+        d(C::TexViewNs),
+        d(C::PipeLookNs),
+        d(C::PassNs),
+        d(C::VtxNs),
+        d(C::TexUploadNs),
+        (cur[C::UploadsSame as usize] - base[C::UploadsSame as usize]) as f64 / frames,
+        (cur[C::ImagesReused as usize] - base[C::ImagesReused as usize]) as f64 / frames
+    )
+}
+
 fn dropped_total() -> u64 {
     (C::TexNoFormat as usize..C::N as usize).map(|i| COUNT[i].load(Ordering::Relaxed)).sum()
 }
@@ -262,9 +301,10 @@ pub fn frame(frame: u64) {
     if interval > slow_ms() * 1_000_000 && st.slow_lines < 20_000 {
         st.slow_lines += 1;
         crate::vklog!(
-            "slow frame {frame}: {:.0} ms: replay {:.1} ms, GPU {:.1} ms ({} submissions), pipelines {:.1} ms ({} made), texture uploads {:.1} ms, {} draws",
+            "slow frame {frame}: {:.0} ms: replay {:.1} ms ({}), GPU {:.1} ms ({} submissions), pipelines {:.1} ms ({} made), texture uploads {:.1} ms, {} draws",
             interval as f64 / 1e6,
             d(C::ReplayNs, &st.slow) as f64 / 1e6,
+            breakdown(&cur, &st.slow, 1.0),
             d(C::GpuNs, &st.slow) as f64 / 1e6,
             d(C::GpuSubs, &st.slow),
             d(C::PipeNs, &st.slow) as f64 / 1e6,
@@ -282,11 +322,12 @@ pub fn frame(frame: u64) {
     let subs = d(C::GpuSubs, &p);
     if subs > 0 {
         crate::vklog!(
-            "GPU time up to frame {frame}: {:.2} ms per frame ({:.2} ms per submission, {:.1} submissions per frame); replay on the CPU {:.2} ms per frame",
+            "GPU time up to frame {frame}: {:.2} ms per frame ({:.2} ms per submission, {:.1} submissions per frame); replay on the CPU {:.2} ms per frame ({})",
             d(C::GpuNs, &p) as f64 / 1e6 / df,
             d(C::GpuNs, &p) as f64 / 1e6 / subs as f64,
             subs as f64 / df,
-            d(C::ReplayNs, &p) as f64 / 1e6 / df
+            d(C::ReplayNs, &p) as f64 / 1e6 / df,
+            breakdown(&cur, &p, df)
         );
     }
     crate::vklog!(
@@ -313,6 +354,9 @@ pub fn frame(frame: u64) {
     st.prev_frame = frame;
     if frame - st.rsz_frame >= 600 {
         if let Some(l) = render_sizes_line(frame, frame - st.rsz_frame) {
+            crate::vklog!("{l}");
+        }
+        if let Some(l) = super::image::upload_stats::line(frame - st.rsz_frame) {
             crate::vklog!("{l}");
         }
         st.rsz_frame = frame;

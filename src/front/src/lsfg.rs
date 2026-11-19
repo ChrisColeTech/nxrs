@@ -238,6 +238,11 @@ pub fn find_dll() -> Option<PathBuf> {
 /// At start: reads and identifies the set when frame generation is wanted.
 pub fn start() {
     let (on, mult, target) = nxconfig::lsfg();
+    // the DLL is read only for frame_gen_type=lsfg (graphics' built-in frame generation needs nothing)
+    if on && !nxconfig::string("frame_gen_type").eq_ignore_ascii_case("lsfg") {
+        *STATE.lock().unwrap() = "not used (frame_gen_type=builtin)".into();
+        return;
+    }
     if !on {
         *STATE.lock().unwrap() = "off (lsfg=0)".into();
         return;
@@ -262,7 +267,7 @@ pub fn start() {
             match identify(&dll, res, false) {
                 Ok(s) => {
                     crate::flog!(
-                        "lsfg: LSFG 3.1 shaders from {} (mip {}, generate {}, passes {}..{}, performance set, flow {}, x{mult}, target {target}, height {}) in {:.0} ms; frame generation runs on graphics' present hook",
+                        "lsfg: LSFG 3.1 shaders from {} (mip {}, generate {}, passes {}..{}, performance set, flow {}, x{mult}, target {target}, height {}) in {:.0} ms; graphics runs them on the present path (frame_gen_type=lsfg)",
                         dll.display(),
                         s.mip.id,
                         s.generate.id,
@@ -273,6 +278,11 @@ pub fn start() {
                         t.elapsed().as_secs_f64() * 1000.0
                     );
                     *STATE.lock().unwrap() = format!("ready x{mult}");
+                    nxgfx::vk::lsfg::set_shaders(Some(std::sync::Arc::new(nxgfx::vk::lsfg::Shaders {
+                        mip: s.mip.words.clone(),
+                        generate: s.generate.words.clone(),
+                        passes: s.passes.iter().map(|p| p.words.clone()).collect(),
+                    })));
                     *SET.lock().unwrap() = Some(std::sync::Arc::new(s));
                 }
                 Err(e) => {

@@ -55,6 +55,12 @@ pub struct Caps {
     pub storage_align: u64,
     pub occlusion_precise: bool,
     pub depth_bounds: bool,
+    /// VK_EXT_mesh_shader's task and mesh stages (NVN2's DrawMeshTasks*)
+    pub mesh: bool,
+    /// VK_EXT_transform_feedback (NVN's transform feedback)
+    pub xfb: bool,
+    /// VK_KHR_push_descriptor (frame generation's LSFG passes)
+    pub push_desc: bool,
 }
 
 pub struct Device {
@@ -76,6 +82,9 @@ pub struct Device {
     pub eds2: ash::ext::extended_dynamic_state2::Device,
     pub vin: ash::ext::vertex_input_dynamic_state::Device,
     pub emh: ash::ext::external_memory_host::Device,
+    pub mesh: ash::ext::mesh_shader::Device,
+    pub xfb: ash::ext::transform_feedback::Device,
+    pub push_desc: ash::khr::push_descriptor::Device,
 }
 
 fn env_on(name: &str) -> Option<bool> {
@@ -197,12 +206,15 @@ impl Device {
             }
         }
         let mut dexts: Vec<*const i8> = required.iter().map(|n| n.as_ptr()).collect();
-        let optional: [&CStr; 5] = [
+        let optional: [&CStr; 8] = [
+            ash::khr::push_descriptor::NAME,
             ash::ext::external_memory_host::NAME,
             ash::ext::vertex_attribute_divisor::NAME,
             ash::ext::index_type_uint8::NAME,
             ash::ext::custom_border_color::NAME,
             ash::ext::fragment_shader_interlock::NAME,
+            ash::ext::mesh_shader::NAME,
+            ash::ext::transform_feedback::NAME,
         ];
         for o in optional {
             if has(o) {
@@ -219,6 +231,8 @@ impl Device {
         let mut f_u8 = vk::PhysicalDeviceIndexTypeUint8FeaturesEXT::default();
         let mut f_cb = vk::PhysicalDeviceCustomBorderColorFeaturesEXT::default();
         let mut f_il = vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT::default();
+        let mut f_ms = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
+        let mut f_xfb = vk::PhysicalDeviceTransformFeedbackFeaturesEXT::default();
         let mut f12 = vk::PhysicalDeviceVulkan12Features::default();
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default();
         let mut f11 = vk::PhysicalDeviceVulkan11Features::default();
@@ -233,7 +247,9 @@ impl Device {
             .push_next(&mut f_div)
             .push_next(&mut f_u8)
             .push_next(&mut f_cb)
-            .push_next(&mut f_il);
+            .push_next(&mut f_il)
+            .push_next(&mut f_ms)
+            .push_next(&mut f_xfb);
         unsafe { instance.get_physical_device_features2(pdev, &mut f2) };
         let base = f2.features;
         let need = |ok: u32, what: &str| -> Result<(), String> { if ok != 0 { Ok(()) } else { Err(format!("device {name} lacks {what}")) } };
@@ -269,6 +285,9 @@ impl Device {
             storage_align: props.limits.min_storage_buffer_offset_alignment,
             occlusion_precise: base.occlusion_query_precise != 0,
             depth_bounds: base.depth_bounds != 0,
+            mesh: has(ash::ext::mesh_shader::NAME) && f_ms.mesh_shader != 0 && f_ms.task_shader != 0 && env_on("NXGFX_MESH").unwrap_or(true),
+            xfb: has(ash::ext::transform_feedback::NAME) && f_xfb.transform_feedback != 0,
+            push_desc: has(ash::khr::push_descriptor::NAME),
             ..Default::default()
         };
         if has(ash::ext::external_memory_host::NAME) {
@@ -367,6 +386,17 @@ impl Device {
         let mut e_il = vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT::default()
             .fragment_shader_pixel_interlock(f_il.fragment_shader_pixel_interlock != 0)
             .fragment_shader_sample_interlock(f_il.fragment_shader_sample_interlock != 0);
+        if !caps.mesh {
+            dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::mesh_shader::NAME);
+        }
+        if !caps.xfb {
+            dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::transform_feedback::NAME);
+        }
+        // task and mesh shaders alone (multiview, shading rate and queries would need features not enabled here)
+        let mut e_ms = vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(caps.mesh).task_shader(caps.mesh);
+        let mut e_xfb = vk::PhysicalDeviceTransformFeedbackFeaturesEXT::default()
+            .transform_feedback(caps.xfb)
+            .geometry_streams(caps.xfb && f_xfb.geometry_streams != 0);
         let prio = [1.0f32];
         let qci = [vk::DeviceQueueCreateInfo::default().queue_family_index(qfam).queue_priorities(&prio)];
         let mut dci = vk::DeviceCreateInfo::default()
@@ -392,10 +422,16 @@ impl Device {
         if has(ash::ext::fragment_shader_interlock::NAME) {
             dci = dci.push_next(&mut e_il);
         }
+        if caps.mesh {
+            dci = dci.push_next(&mut e_ms);
+        }
+        if caps.xfb {
+            dci = dci.push_next(&mut e_xfb);
+        }
         let dev = unsafe { instance.create_device(pdev, &dci, None) }.map_err(|e| format!("vkCreateDevice: {e}"))?;
         let queue = unsafe { dev.get_device_queue(qfam, 0) };
         crate::vklog!(
-            "device {name} (Vulkan {}.{}.{}), validation {}, host import {} (align {:#x}), divisor {}, index u8 {}",
+            "device {name} (Vulkan {}.{}.{}), validation {}, host import {} (align {:#x}), divisor {}, index u8 {}, mesh shaders {}, transform feedback {}",
             vk::api_version_major(props.api_version),
             vk::api_version_minor(props.api_version),
             vk::api_version_patch(props.api_version),
@@ -403,7 +439,9 @@ impl Device {
             caps.host_import,
             caps.import_align,
             caps.divisor,
-            caps.index_u8
+            caps.index_u8,
+            caps.mesh,
+            caps.xfb
         );
         Ok(Device {
             surface_i: ash::khr::surface::Instance::new(&entry, &instance),
@@ -413,6 +451,9 @@ impl Device {
             eds2: ash::ext::extended_dynamic_state2::Device::new(&instance, &dev),
             vin: ash::ext::vertex_input_dynamic_state::Device::new(&instance, &dev),
             emh: ash::ext::external_memory_host::Device::new(&instance, &dev),
+            mesh: ash::ext::mesh_shader::Device::new(&instance, &dev),
+            xfb: ash::ext::transform_feedback::Device::new(&instance, &dev),
+            push_desc: ash::khr::push_descriptor::Device::new(&instance, &dev),
             entry,
             instance,
             debug,

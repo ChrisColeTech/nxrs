@@ -14,6 +14,10 @@ pub mod hid_ext;
 pub mod mii;
 pub mod movie;
 pub mod net;
+pub mod nvdrv;
+pub mod offline;
+pub mod ro;
+pub mod socket;
 pub mod misc;
 pub mod oe;
 pub mod os;
@@ -48,7 +52,10 @@ pub fn register(r: &mut Registry) {
     codec_video::register(r);
     swkbd::register(r);
     net::register();
-    net::register_names(r);
+    socket::register(r);
+    offline::register(r);
+    ro::register(r);
+    nvdrv::register(r);
 }
 
 /// A host function that returns `v` (a takeover whose answer is constant).

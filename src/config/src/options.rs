@@ -52,7 +52,7 @@ pub const SECTIONS: &[Section] = &[
     Section {
         title: "Performance",
         opts: &[
-            o!("fps_target", "60", "Experimental: 30 or 20 = draw only every 2nd / 3rd frame while the game keeps its speed (less GPU work;\n;   effects updated on skipped frames can flicker). 120 = frame generation x2 (needs Lossless.dll, see lsfg). 60 = normal"),
+            o!("fps_target", "60", "Experimental: 30 or 20 = draw only every 2nd / 3rd frame while the game keeps its speed (less GPU work;\n;   effects updated on skipped frames can flicker). 120 = frame generation x2 at 120 FPS (see lsfg). 60 = normal"),
             o!("fps_limit", "1", "1 = 60 FPS, 30 = show at most 30 images a second while the game keeps its 60 Hz steps, 0 = unlimited.\n;   F4 switches between 60 and unlimited"),
             o!("forced_vsync", "0", "1 = always wait for the display's refresh (can cost a lot of FPS on slow PCs)"),
             o!("null_trap", "0", "1 = a write through a NULL pointer stops the game with a precise log (diagnostics; 0 = normal)"),
@@ -65,7 +65,10 @@ pub const SECTIONS: &[Section] = &[
     Section {
         title: "Frame generation",
         opts: &[
-            o!("lsfg", "1", "Frame generation in the game (LSFG), with the Lossless.dll of YOUR Lossless Scaling (copied beside the\n;   game, set in lsfg_dll, or found in Steam). It only makes frames while the game is below lsfg_target"),
+            o!("lsfg", "1", "Frame generation: in-between frames shown while the game is below lsfg_target (1 = on, 0 = off)"),
+            o!("frame_gen_type", "builtin", "builtin = the engine's own (motion estimated on the shown frames, needs nothing else);
+;   lsfg = LSFG with the Lossless.dll of YOUR Lossless Scaling (copied beside the game, set in lsfg_dll, or found in Steam);
+;   without a usable Lossless.dll the built-in one is used"),
             o!("lsfg_target", "60", "The FPS frame generation aims for"),
             o!("lsfg_multiplier", "2", "2 = x2, 3 = x3, 4 = x4"),
             o!("lsfg_flow", "0.5", "Flow scale: 1 = best quality, 0.5 = faster (for integrated GPUs)"),
@@ -182,6 +185,7 @@ pub fn normalise(key: &str, v: &str) -> Option<String> {
             (if n != 30 && n != 0 && n < 60 { if n == 1 { 1 } else { 60 } } else { n }).to_string()
         }
         "lsfg_flow" => clamp_f(v, 0.25, 1.0, 0.5),
+        "frame_gen_type" => if v.eq_ignore_ascii_case("lsfg") { "lsfg".into() } else { "builtin".into() },
         "lsfg_multiplier" => int(v).clamp(2, 4).to_string(),
         "lsfg_resolution" => int(v).clamp(240, 2160).to_string(),
         "lsfg_target" => trim_float(v.parse::<f64>().unwrap_or(60.0).max(30.0)),

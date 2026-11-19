@@ -6,12 +6,20 @@
 //! | `MountAddOnContent(index)` | the add-on title's RomFS (`dlc::title_romfs`, installed into the data folder) |
 //! | `MountSaveData(uid)`, `MountDeviceSaveData` | `<save dir>/user<n>`, `<save dir>/device`: transactional (below) |
 //! | `MountTemporaryStorage`, `MountCacheStorage` | `<save dir>/temp`, `<save dir>/cache<n>`, written directly |
+//! | `MountRom(name, program index)` | `<data dir>/romfs_programs/<index>.img` (another program's RomFS image), else the game's |
 //! | `MountSystemData` | the console's own archive under `<save dir>/system/<id>`, else "target not found" |
 //!
 //! Save transactions: a mount works on `<save>.work`, a copy of the committed `<save>` made at the first mount;
 //! `Commit` copies the work tree to `<save>.new`, moves the committed one to `<save>.old`, `<save>.new` into its
 //! place and deletes the old one. A run killed at any point leaves the committed save whole (a `.new` left with no
 //! committed save is taken as committed at the next mount).
+//!
+//! Cache storages: storage `<n>` is the folder `cache<n>`; CreateCacheStorage records its size beside it
+//! (`cache<n>.size`, "<data> <journal>"), which GetCacheStorageSize reports (else the control data's default, else
+//! 256 MB of each); the list is the cache folders that exist, in index order. The limits come from the control
+//! data (`<data dir>/control.nacp`: CacheStorageDataAndJournalSizeMax at 0x3180, CacheStorageIndexMax at 0x3188).
+//! A Commit of a mount list commits it only when every transactional mount in it is the same save (one host
+//! transaction); a list that spans two saves is refused before either is published.
 //!
 //! Handles: a FileHandle the guest holds is the host's number shifted left by 4 (16-byte aligned, as the SDK's
 //! FileAccessor pointers are: games mask low bits off). DirectoryEntry is {name[0x301], pad[3], i8 type, pad[3],
@@ -485,6 +493,163 @@ pub fn commit(name: &str) -> u64 {
     }
 }
 
+/// A Commit of several mounts: they must exist and be writable, and the transactional ones must be one save.
+pub fn commit_list(names: &[String]) -> u64 {
+    let mut target: Option<(usize, String)> = None;
+    for n in names {
+        let b = with(|st| st.mounts.get(n).cloned());
+        match b {
+            Some(Backing::Dir { ro: false, txn, .. }) => {
+                if let Some(i) = txn {
+                    match &target {
+                        Some((t, _)) if *t != i => {
+                            crate::log!("[RED] fs: a Commit mount list spans independent saves; refused without a partial commit");
+                            return RES_FAIL;
+                        }
+                        Some(_) => {}
+                        None => target = Some((i, n.clone())),
+                    }
+                }
+            }
+            _ => return RES_FAIL,
+        }
+    }
+    match target {
+        Some((_, n)) => commit(&n),
+        None => RES_OK,
+    }
+}
+
+// ---- cache storages
+
+fn cache_dir(index: i32) -> PathBuf {
+    save_dir().join(format!("cache{index}"))
+}
+fn cache_size_path(index: i32) -> PathBuf {
+    save_dir().join(format!("cache{index}.size"))
+}
+
+pub fn create_cache(index: i32, size: i64, journal: i64) -> u64 {
+    let d = cache_dir(index);
+    crate::log!("fs: create cache storage {index} ({size} bytes, journal {journal}) -> {}", d.display());
+    if let Err(e) = std::fs::create_dir_all(&d) {
+        crate::log!("[RED] fs: create cache storage {index}: {e}");
+        return RES_FAIL;
+    }
+    let rec = cache_size_path(index);
+    if !rec.exists() {
+        let tmp = rec.with_extension("size.tmp");
+        if std::fs::write(&tmp, format!("{size} {journal}\n")).and_then(|_| std::fs::rename(&tmp, &rec)).is_err() {
+            crate::log!("[RED] fs: cache storage {index}: cannot record its size in {}", rec.display());
+            let _ = std::fs::remove_file(&tmp);
+        }
+    }
+    RES_OK
+}
+
+pub fn delete_cache(index: i32) -> u64 {
+    let _ = std::fs::remove_dir_all(cache_dir(index));
+    let _ = std::fs::remove_file(cache_size_path(index));
+    RES_OK
+}
+
+/// `len` bytes of the application's control data at `off`.
+fn control(off: u64, len: usize) -> Option<Vec<u8>> {
+    let b = std::fs::read(data_dir().join("control.nacp")).ok()?;
+    b.get(off as usize..off as usize + len).map(|s| s.to_vec())
+}
+
+/// (data size, journal size) of cache storage `index`; None when it does not exist.
+pub fn cache_size(index: i32) -> Option<(i64, i64)> {
+    if !cache_dir(index).is_dir() {
+        return None;
+    }
+    let rec = std::fs::read_to_string(cache_size_path(index)).ok().and_then(|t| {
+        let mut w = t.split_whitespace().map(|x| x.parse::<i64>());
+        Some((w.next()?.ok()?, w.next()?.ok()?))
+    });
+    Some(rec.unwrap_or_else(|| {
+        let c = control(0x3170, 16).map(|b| (i64::from_le_bytes(b[0..8].try_into().unwrap()), i64::from_le_bytes(b[8..16].try_into().unwrap())));
+        match c {
+            Some((s, j)) if s != 0 || j != 0 => (s, j),
+            _ => (256 << 20, 256 << 20),
+        }
+    }))
+}
+
+/// The cache storages that exist (folders `cache<n>`, canonical decimal, 0..65535), in index order.
+pub fn cache_indices() -> Vec<u16> {
+    let mut v: Vec<u16> = std::fs::read_dir(save_dir())
+        .map(|rd| {
+            rd.flatten()
+                .filter(|e| e.path().is_dir())
+                .filter_map(|e| {
+                    let n = e.file_name().to_string_lossy().to_string();
+                    let d = n.strip_prefix("cache")?;
+                    let ok = !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()) && (d == "0" || !d.starts_with('0'));
+                    if ok {
+                        d.parse::<u16>().ok()
+                    } else {
+                        None
+                    }
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    v.sort_unstable();
+    v
+}
+
+/// Open cache storage lists: (handle, indices, next).
+static CACHE_LISTS: Mutex<Vec<(u64, Vec<u16>, usize)>> = Mutex::new(Vec::new());
+static CACHE_LIST_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A RomFS image file, read in place.
+struct ImageFile {
+    file: File,
+    size: u64,
+}
+
+impl translator::package::storage::Storage for ImageFile {
+    fn size(&self) -> u64 {
+        self.size
+    }
+    fn read(&self, offset: u64, size: u64) -> std::result::Result<Vec<u8>, translator::package::PackageError> {
+        use std::os::windows::fs::FileExt;
+        if offset.checked_add(size).is_none_or(|e| e > self.size) {
+            return Err(translator::package::PackageError::Format("read past the end of the RomFS image".into()));
+        }
+        let mut buf = vec![0u8; size as usize];
+        let mut done = 0;
+        while done < buf.len() {
+            let n = self.file.seek_read(&mut buf[done..], offset + done as u64).map_err(|e| translator::package::PackageError::Format(e.to_string()))?;
+            if n == 0 {
+                return Err(translator::package::PackageError::Format("the RomFS image is cut short".into()));
+            }
+            done += n;
+        }
+        Ok(buf)
+    }
+}
+
+/// Another program's RomFS image (`romfs_programs/<index>.img` beside the game's data), if there is one.
+fn program_romfs(index: i32) -> Option<Arc<RomFs>> {
+    let img = data_dir().join("romfs_programs").join(format!("{index}.img"));
+    if !img.is_file() {
+        return None;
+    }
+    let file = File::open(&img).ok()?;
+    let size = file.metadata().ok()?.len();
+    let st = Arc::new(ImageFile { file, size });
+    match RomFs::from_image(st, img.display().to_string()) {
+        Ok(r) => Some(Arc::new(r)),
+        Err(e) => {
+            crate::log!("[RED] fs: {}: {e}", img.display());
+            None
+        }
+    }
+}
+
 // ---- the RomFS working-memory size (Query...CacheSize)
 
 fn romfs_buckets(n: usize) -> usize {
@@ -591,6 +756,101 @@ fsfn!(mount_rom, |a| {
         }
         None => RES_FAIL,
     }
+});
+// MountRom(name, program index, cache, size): another program of the application by its index (its RomFS image),
+// else this program's own.
+fsfn!(mount_rom_index, |a| {
+    let (name, idx) = (cstr(a.x(0), 32), a.i(1));
+    if let Some(r) = program_romfs(idx) {
+        crate::log!("fs: {name}: -> the RomFS of program {idx}");
+        return mount(&name, Backing::Rom(r));
+    }
+    if idx != 0 {
+        crate::log!("[RED] fs: MountRom({name}, program index {idx}): no romfs_programs/{idx}.img beside the game's data: this program's own");
+    }
+    match romfs() {
+        Some(r) => {
+            crate::log!("fs: {name}: -> the game's RomFS");
+            mount(&name, Backing::Rom(r))
+        }
+        None => RES_FAIL,
+    }
+});
+// IsPathMounted(path): whether the mount before ':' is one of the host's.
+fsfn!(is_path_mounted, |a| {
+    let p = cstr(a.x(0), 0x301);
+    match p.split_once(':') {
+        Some((m, _)) => with(|st| st.mounts.contains_key(m)) as u64,
+        None => 0,
+    }
+});
+// Commit(const char *const *names, int count)
+fsfn!(commit_list_fn, |a| {
+    let (names, n) = (a.x(0), a.i(1));
+    if !(0..=64).contains(&n) || (n > 0 && names == 0) {
+        return RES_FAIL;
+    }
+    let v: Vec<String> = (0..n as u64).map(|i| cstr(crate::guest::r64(names + 8 * i), 32)).collect();
+    commit_list(&v)
+});
+fsfn!(create_cache_fn, |a| { create_cache(a.i(0), a.x(1) as i64, a.x(2) as i64) });
+fsfn!(delete_cache_fn, |a| { delete_cache(a.i(0)) });
+// GetCacheStorageMax(int *index, i64 *size): the control data's limits.
+fsfn!(cache_max, |a| {
+    let Some(b) = control(0x3180, 10) else {
+        crate::log!("[RED] fs: GetCacheStorageMax: no control data ({})", data_dir().join("control.nacp").display());
+        return RES_TARGET_NOT_FOUND;
+    };
+    let size = i64::from_le_bytes(b[0..8].try_into().unwrap());
+    let index = u16::from_le_bytes([b[8], b[9]]) as u32;
+    crate::guest::out(a.x(0), index);
+    crate::guest::out(a.x(1), size);
+    crate::log!("fs: cache storage max: index {index}, {size} bytes of data and journal");
+    RES_OK
+});
+// GetCacheStorageSize(i64 *size, i64 *journal, int index)
+fsfn!(cache_size_fn, |a| {
+    match cache_size(a.i(2)) {
+        Some((s, j)) => {
+            crate::guest::out(a.x(0), s);
+            crate::guest::out(a.x(1), j);
+            RES_OK
+        }
+        None => RES_TARGET_NOT_FOUND,
+    }
+});
+// OpenCacheStorageList(CacheStorageListHandle *): a snapshot of the cache storages that exist.
+fsfn!(cache_list_open, |a| {
+    let v = cache_indices();
+    let id = CACHE_LIST_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    crate::log!("fs: cache storage list: {}", v.len());
+    CACHE_LISTS.lock().unwrap().push((id, v, 0));
+    w64(a.x(0), id);
+    RES_OK
+});
+// ReadCacheStorageList(int *n, CacheStorageInfo *info, handle, int max): 0x20-byte entries, the index first.
+fsfn!(cache_list_read, |a| {
+    let (n, info, h, max) = (a.x(0), a.x(1), a.x(2), a.i(3));
+    let mut g = CACHE_LISTS.lock().unwrap();
+    w32(n, 0);
+    let Some(l) = g.iter_mut().find(|l| l.0 == h) else {
+        crate::log!("[RED] fs: ReadCacheStorageList: handle {h:#x} is no open list");
+        return RES_FAIL;
+    };
+    let mut k = 0u64;
+    while l.2 < l.1.len() && (k as i32) < max {
+        let e = info + 0x20 * k;
+        crate::guest::zero(e, 0x20);
+        w32(e, l.1[l.2] as u32);
+        l.2 += 1;
+        k += 1;
+    }
+    w32(n, k as u32);
+    RES_OK
+});
+fsfn!(cache_list_close, |a| {
+    CACHE_LISTS.lock().unwrap().retain(|l| l.0 != a.x(0));
+    0
 });
 fsfn!(query_aoc_cache, |a| {
     let n = aoc_romfs(a.w(1)).map_or(0x1000, |r| romfs_work_size(&r));
@@ -824,6 +1084,17 @@ pub fn register(r: &mut Registry) {
         ("_ZN2nn2fs22QueryMountRomCacheSizeEPm", query_rom_cache as unsafe fn(*mut Cpu)),
         ("_ZN2nn2fs8MountRomEPKcPvm", mount_rom),
         ("_ZN2nn2fs8MountRomEPKc", mount_rom),
+        ("_ZN2nn2fs22QueryMountRomCacheSizeEPmi", query_rom_cache),
+        ("_ZN2nn2fs8MountRomEPKciPvm", mount_rom_index),
+        ("_ZN2nn2fs13IsPathMountedEPKc", is_path_mounted),
+        ("_ZN2nn2fs6CommitEPKPKci", commit_list_fn),
+        ("_ZN2nn2fs18CreateCacheStorageEill", create_cache_fn),
+        ("_ZN2nn2fs18DeleteCacheStorageEi", delete_cache_fn),
+        ("_ZN2nn2fs18GetCacheStorageMaxEPiPl", cache_max),
+        ("_ZN2nn2fs19GetCacheStorageSizeEPlS1_i", cache_size_fn),
+        ("_ZN2nn2fs20OpenCacheStorageListEPNS0_22CacheStorageListHandleE", cache_list_open),
+        ("_ZN2nn2fs20ReadCacheStorageListEPiPNS0_16CacheStorageInfoENS0_22CacheStorageListHandleEi", cache_list_read),
+        ("_ZN2nn2fs21CloseCacheStorageListENS0_22CacheStorageListHandleE", cache_list_close),
         ("_ZN2nn2fs31QueryMountAddOnContentCacheSizeEPmi", query_aoc_cache),
         ("_ZN2nn2fs17MountAddOnContentEPKciPvm", mount_aoc),
         ("_ZN2nn2fs29QueryMountSystemDataCacheSizeEPmNS_3ncm12SystemDataIdE", query_sysdata_cache),

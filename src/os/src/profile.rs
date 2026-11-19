@@ -78,6 +78,29 @@ impl Profile {
         }
     }
 
+    /// The title's facts from the engine's profiles (nxnative's), and the platform from its title id: a Switch 2
+    /// program (04...) counts at 31.25 MHz and gets the runtime's application pool (`nxrt::process::app_pool`).
+    fn from_profiles(&mut self, id: u64) {
+        let program = nxrt::process::Program { program_id: id };
+        if let Some(pr) = profiles::by_title(id) {
+            self.name = pr.name.clone();
+            if pr.memory.app_pool != 0 {
+                self.pool = pr.memory.app_pool;
+            }
+            if pr.memory.used != 0 {
+                self.used_beside_heap = pr.memory.used;
+            }
+            self.sys_resource = pr.memory.sys_resource;
+        }
+        if program.switch2() {
+            self.switch2 = true;
+            self.tick_hz = 31_250_000;
+            if profiles::by_title(id).is_none_or(|pr| pr.memory.app_pool == 0) {
+                self.pool = nxrt::process::app_pool(program);
+            }
+        }
+    }
+
     /// The profile for a program, from its NPDM and the data folder's override.
     pub fn load(npdm: Option<&[u8]>, override_tsv: Option<&str>) -> Profile {
         let mut p = Profile::default();
@@ -85,6 +108,8 @@ impl Profile {
             p.program_id = id;
             if let Some((_, row)) = BUILTIN.iter().find(|(t, _)| *t == id) {
                 p.apply(row);
+            } else {
+                p.from_profiles(id);
             }
         }
         if let Some(t) = override_tsv {

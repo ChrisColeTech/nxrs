@@ -8,6 +8,13 @@
 //!   which middleware reads directly. Six-channel output is folded to stereo with the system's downmix.
 //! * AudioIn: the default capture device (WASAPI), 48 kHz PCM16 in the game's channel count. With no capture
 //!   device the list is empty and an open fails, as the service answers on a console without a microphone.
+//! * SDK 21's OutputStream on the one virtual output device (`AudioVirtualOutput`): StreamFormat {sample format
+//!   (2 PCM16, 5 float), channels, rate} and a capacity in frames; each write is one block on a sound card stream
+//!   of its own (interleaved, converted to 16 bits and folded to stereo as AudioOut's), so the free count is the
+//!   capacity less the frames still queued and the stream's event fires as blocks play. States as games read them:
+//!   0 not open, 1 open (stopped), 2 started. The device's properties give a 10 ms shortest stream.
+//! * SDK 21's InputStream: no virtual input device is listed and an open fails, so a game never reads one; the
+//!   calls that need an open stream still answer (closed, nothing captured) without touching the guest object.
 
 use crate::guest::{r16, r32, r64, w32, Args};
 use crate::hle::{Registry, RES_FAIL, RES_OK};
@@ -404,6 +411,231 @@ afn!(ai_rate, |a| { RATE as u64 });
 afn!(ai_channels, |a| { in_of(a.x(0)).map_or(2, |i| i.ch as u64) });
 afn!(ai_format, |a| { FMT_PCM16 as u64 });
 
+// ---- SDK 21's OutputStream / InputStream
+
+const OS_STOPPED: u32 = 1;
+const OS_STARTED: u32 = 2;
+const OS_PCM16: i32 = 2;
+const OS_FLOAT: i32 = 5;
+const VDEV_OUT: &str = "AudioVirtualOutput";
+const VDEV_NAME: u64 = 0x100;
+/// The shortest stream the device takes, in ns (VirtualDeviceProperties +0x100): one 10 ms period.
+const OS_MIN_NS: u64 = 10_000_000;
+
+struct OStream {
+    id: u32,
+    ch: usize,
+    fmt: i32,
+    cap: i64,
+    queued: i64,
+    frames: HashMap<u64, i64>,
+    next: u64,
+    state: u32,
+    gain: f32,
+    stream: Arc<sink::Stream>,
+}
+
+impl OStream {
+    /// The blocks the output played: their frames leave the queue.
+    fn reclaim(&mut self) {
+        while let Some(t) = self.stream.released() {
+            self.queued -= self.frames.remove(&t).unwrap_or(0);
+        }
+    }
+}
+
+static OSTREAMS: Mutex<Option<HashMap<u64, Arc<Mutex<OStream>>>>> = Mutex::new(None);
+
+fn ostream(g: u64) -> Option<Arc<Mutex<OStream>>> {
+    OSTREAMS.lock().unwrap().as_ref()?.get(&g).cloned()
+}
+
+afn!(os_default_dev, |a| {
+    crate::guest::zero(a.x(0), VDEV_NAME);
+    crate::guest::put_cstr(a.x(0), VDEV_NAME, VDEV_OUT);
+    0
+});
+afn!(os_dev_props, |a| {
+    let (p, name) = (a.x(0), a.x(1));
+    let n = crate::guest::cstr(name, VDEV_NAME as usize);
+    if n != VDEV_OUT {
+        crate::log!("[RED] audio: virtual output device {n}: the host has only {VDEV_OUT}, no properties");
+        return RES_FAIL;
+    }
+    crate::guest::zero(p, 0x110);
+    crate::guest::write_bytes(p, crate::guest::bytes(name, VDEV_NAME));
+    crate::guest::w64(p + 0x100, OS_MIN_NS);
+    RES_OK
+});
+
+unsafe fn os_open(c: *mut Cpu, g: u64, ev: u64, fmt: u64, frames: i32) -> u64 {
+    let (f, ch, rate) = (r32(fmt) as i32, r32(fmt + 4) as i32, r32(fmt + 8) as i32);
+    if f != OS_FLOAT && f != OS_PCM16 {
+        crate::log!("[RED] audio: OutputStream sample format {f}: not supported, the open fails");
+        return RES_FAIL;
+    }
+    if rate != 0 && rate != RATE as i32 {
+        crate::log!("[RED] audio: OutputStream sample rate {rate}: not supported (48 kHz only), the open fails");
+        return RES_FAIL;
+    }
+    if ch <= 0 || frames <= 0 {
+        return RES_FAIL;
+    }
+    if ev != 0 {
+        crate::services::os::bind_system_event(c, ev, true);
+    }
+    let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
+    let stream = sink::open(&format!("OutputStream #{id}"));
+    if ev != 0 {
+        stream.on_release(move || {
+            crate::services::os::signal_bound(ev);
+        });
+    }
+    let o = OStream { id, ch: ch as usize, fmt: f, cap: frames as i64, queued: 0, frames: HashMap::new(), next: 1, state: OS_STOPPED, gain: 1.0, stream };
+    OSTREAMS.lock().unwrap().get_or_insert_with(HashMap::new).insert(g, Arc::new(Mutex::new(o)));
+    crate::log!(
+        "audio: OutputStream #{id} open, {ch} channels {}, {frames} frames, on {}{}",
+        if f == OS_FLOAT { "float" } else { "PCM16" },
+        sink::device(),
+        if ev != 0 { "" } else { ", no event (the game polls)" }
+    );
+    RES_OK
+}
+// OpenOutputStream(g, SystemEvent *, buffer, size, device, const StreamFormat &, frames, threshold[, flags])
+unsafe fn os_open_ev(c: *mut Cpu) {
+    let a = Args(&mut *c);
+    let (g, ev, fmt, frames) = (a.x(0), a.x(1), a.x(5), a.i(6));
+    (*c).x[0] = os_open(c, g, ev, fmt, frames);
+}
+// OpenOutputStream(g, buffer, size, device, const StreamFormat &, frames, flags): no event, the game polls
+unsafe fn os_open_noev(c: *mut Cpu) {
+    let a = Args(&mut *c);
+    let (g, fmt, frames) = (a.x(0), a.x(4), a.i(5));
+    (*c).x[0] = os_open(c, g, 0, fmt, frames);
+}
+fn os_start_one(g: u64) -> u64 {
+    let Some(o) = ostream(g) else {
+        crate::log!("[RED] audio: StartOutputStream on {g:#x}, not opened by the host");
+        return RES_FAIL;
+    };
+    let mut o = o.lock().unwrap();
+    o.state = OS_STARTED;
+    o.stream.start();
+    RES_OK
+}
+afn!(os_start, |a| { os_start_one(a.x(0)) });
+afn!(os_start_n, |a| {
+    let (gs, n) = (a.x(0), a.i(1));
+    for i in 0..n.max(0) as u64 {
+        let r = os_start_one(r64(gs + 8 * i));
+        if r != RES_OK {
+            return r;
+        }
+    }
+    RES_OK
+});
+afn!(os_stop, |a| {
+    if let Some(o) = ostream(a.x(0)) {
+        let mut o = o.lock().unwrap();
+        o.stream.stop();
+        o.reclaim();
+        o.state = OS_STOPPED;
+    }
+    0
+});
+// PurgeOutputStream: the frames not yet played are dropped (they come back as released); a started stream plays on.
+afn!(os_purge, |a| {
+    if let Some(o) = ostream(a.x(0)) {
+        let mut o = o.lock().unwrap();
+        o.reclaim();
+        o.stream.stop();
+        if o.state == OS_STARTED {
+            o.stream.start();
+        }
+        o.reclaim();
+    }
+    0
+});
+afn!(os_close, |a| {
+    let o = OSTREAMS.lock().unwrap().as_mut().and_then(|m| m.remove(&a.x(0)));
+    if let Some(o) = o {
+        let o = o.lock().unwrap();
+        o.stream.stop();
+        o.stream.close();
+        crate::log!("audio: OutputStream #{} closed", o.id);
+    }
+    0
+});
+afn!(os_state, |a| { ostream(a.x(0)).map_or(0, |o| o.lock().unwrap().state as u64) });
+afn!(os_free, |a| {
+    let Some(o) = ostream(a.x(0)) else { return 0 };
+    let mut o = o.lock().unwrap();
+    o.reclaim();
+    if o.stream.blocks() >= QMAX - 1 {
+        return 0;
+    }
+    (o.cap - o.queued).max(0) as u64
+});
+afn!(os_filled, |a| {
+    let Some(o) = ostream(a.x(0)) else { return 0 };
+    let mut o = o.lock().unwrap();
+    o.reclaim();
+    o.queued.max(0) as u64
+});
+// WriteOutputStream(g, const void *data, int frames): one block, at most what the free count allows.
+afn!(os_write, |a| {
+    let (g, data, frames) = (a.x(0), a.x(1), a.i(2));
+    let Some(o) = ostream(g) else { return 0 };
+    let mut o = o.lock().unwrap();
+    if frames <= 0 || data == 0 {
+        return 0;
+    }
+    o.reclaim();
+    if o.stream.blocks() >= QMAX - 1 || frames as i64 > o.cap - o.queued {
+        return 0;
+    }
+    let n = frames as usize * o.ch;
+    let pcm: Vec<i16> = if o.fmt == OS_FLOAT {
+        crate::guest::bytes(data, n as u64 * 4)
+            .chunks_exact(4)
+            .map(|b| (f32::from_le_bytes([b[0], b[1], b[2], b[3]]) * 32767.0).clamp(-32768.0, 32767.0) as i16)
+            .collect()
+    } else {
+        crate::guest::bytes(data, n as u64 * 2).chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()
+    };
+    let tag = o.next;
+    o.next += 1;
+    let stereo = to_stereo(&pcm, o.ch, o.gain);
+    o.stream.append(tag, stereo);
+    o.frames.insert(tag, frames as i64);
+    o.queued += frames as i64;
+    frames as u64
+});
+// SetOutputStreamGain(g, float gain, TimeSpan fade): the volume, no fade.
+unsafe fn os_gain(c: *mut Cpu) {
+    let a = Args(&mut *c);
+    let v = a.f(0);
+    if let Some(o) = ostream(a.x(0)) {
+        o.lock().unwrap().gain = if v >= 0.0 { v } else { 0.0 };
+    }
+}
+/// Statistics, returned through x8 (24 bytes; a game reads +0x10 as its glitch count): none kept.
+unsafe fn stream_stats(c: *mut Cpu) {
+    crate::guest::zero((*c).x[8], 24);
+}
+
+afn!(is_list, |a| { 0 });
+afn!(is_fail, |a| { RES_FAIL });
+afn!(is_zero, |a| { 0 });
+/// GetInputStreamFormat: StreamFormat {PCM16, 1 channel, 48 kHz}, 12 bytes in x0 / x1.
+unsafe fn is_format(c: *mut Cpu) {
+    (*c).x[0] = OS_PCM16 as u32 as u64 | 1 << 32;
+    (*c).x[1] = RATE as u64;
+}
+unsafe fn is_gain(c: *mut Cpu) {
+    (*c).ret_s(1.0);
+}
+
 /// The output and input lines for the log.
 pub fn report() -> Vec<String> {
     let mut v = sink::report();
@@ -465,6 +697,38 @@ pub fn register(r: &mut Registry) {
         ("_ZN2nn5audio20GetAudioInSampleRateEPKNS0_7AudioInE", ai_rate),
         ("_ZN2nn5audio22GetAudioInChannelCountEPKNS0_7AudioInE", ai_channels),
         ("_ZN2nn5audio22GetAudioInSampleFormatEPKNS0_7AudioInE", ai_format),
+        ("_ZN2nn5audio29GetDefaultVirtualOutputDeviceEPNS0_15AudioDeviceNameE", os_default_dev),
+        ("_ZN2nn5audio32GetVirtualOutputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", os_dev_props),
+        ("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPNS_2os11SystemEventEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEiiNS_4util10BitFlagSetILi32ENS0_16OutputStreamFlagEEE", os_open_ev),
+        ("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPNS_2os11SystemEventEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEii", os_open_ev),
+        ("_ZN2nn5audio16OpenOutputStreamEPNS0_16OutputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEiNS_4util10BitFlagSetILi32ENS0_16OutputStreamFlagEEE", os_open_noev),
+        ("_ZN2nn5audio17StartOutputStreamEPNS0_16OutputStreamTypeE", os_start),
+        ("_ZN2nn5audio18StartOutputStreamsEPKPNS0_16OutputStreamTypeEi", os_start_n),
+        ("_ZN2nn5audio16StopOutputStreamEPNS0_16OutputStreamTypeE", os_stop),
+        ("_ZN2nn5audio17PurgeOutputStreamEPNS0_16OutputStreamTypeE", os_purge),
+        ("_ZN2nn5audio17CloseOutputStreamEPNS0_16OutputStreamTypeE", os_close),
+        ("_ZN2nn5audio20GetOutputStreamStateEPKNS0_16OutputStreamTypeE", os_state),
+        ("_ZN2nn5audio29GetOutputStreamFreeFrameCountEPKNS0_16OutputStreamTypeE", os_free),
+        ("_ZN2nn5audio31GetOutputStreamFilledFrameCountEPKNS0_16OutputStreamTypeE", os_filled),
+        ("_ZN2nn5audio17WriteOutputStreamEPNS0_16OutputStreamTypeEPKvi", os_write),
+        ("_ZN2nn5audio19SetOutputStreamGainEPNS0_16OutputStreamTypeEfNS_8TimeSpanE", os_gain),
+        ("_ZN2nn5audio25GetOutputStreamStatisticsEPNS0_16OutputStreamTypeEb", stream_stats),
+        ("_ZN2nn5audio23ListVirtualInputDevicesEPNS0_15AudioDeviceNameEi", is_list),
+        ("_ZN2nn5audio31GetVirtualInputDevicePropertiesEPNS0_23VirtualDevicePropertiesERKNS0_15AudioDeviceNameE", is_fail),
+        ("_ZN2nn5audio15OpenInputStreamEPNS0_15InputStreamTypeEPvmRKNS0_15AudioDeviceNameERKNS0_12StreamFormatEi", is_fail),
+        ("_ZN2nn5audio16CloseInputStreamEPNS0_15InputStreamTypeE", is_zero),
+        ("_ZN2nn5audio16StartInputStreamEPNS0_15InputStreamTypeE", is_fail),
+        ("_ZN2nn5audio15StopInputStreamEPNS0_15InputStreamTypeE", is_zero),
+        ("_ZN2nn5audio15ReadInputStreamEPNS0_15InputStreamTypeEPvi", is_zero),
+        ("_ZN2nn5audio30GetInputStreamFilledFrameCountEPKNS0_15InputStreamTypeE", is_zero),
+        ("_ZN2nn5audio20GetInputStreamFormatEPKNS0_15InputStreamTypeE", is_format),
+        ("_ZN2nn5audio19GetInputStreamStateEPKNS0_15InputStreamTypeE", is_zero),
+        ("_ZN2nn5audio16PurgeInputStreamEPNS0_15InputStreamTypeE", is_zero),
+        ("_ZN2nn5audio24GetInputStreamStatisticsEPNS0_15InputStreamTypeEb", stream_stats),
+        ("_ZN2nn5audio28GetInputStreamFreeFrameCountEPKNS0_15InputStreamTypeE", is_zero),
+        ("_ZN2nn5audio32GetInputStreamCapacityFrameCountEPKNS0_15InputStreamTypeE", is_zero),
+        ("_ZN2nn5audio18GetInputStreamGainEPKNS0_15InputStreamTypeE", is_gain),
+        ("_ZN2nn5audio18SetInputStreamGainEPNS0_15InputStreamTypeEfNS_8TimeSpanE", is_zero),
     ] {
         r.force(n, W, f);
     }

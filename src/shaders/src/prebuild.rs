@@ -358,7 +358,8 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
         };
         let mut jj = j.json.clone();
         jj.remove("code");
-        let job_sha = sha_hex(&[chain.as_bytes(), crate::fixes::VERSION.as_bytes(), REFLECTION.as_bytes(), serde_json::to_string(&jj).unwrap().as_bytes(), &j.code]);
+        let mesh_v = if j.extra.contains_key("mesh_stage") { crate::mesh::VERSION } else { "" };
+        let job_sha = sha_hex(&[chain.as_bytes(), crate::fixes::VERSION.as_bytes(), mesh_v.as_bytes(), REFLECTION.as_bytes(), serde_json::to_string(&jj).unwrap().as_bytes(), &j.code]);
         let prev: Option<Value> = std::fs::read(spv_dir.join(format!("{}.json", s.key))).ok().and_then(|b| serde_json::from_slice(&b).ok());
         if let Some(p) = prev.filter(|p| p.get("job_sha").and_then(Value::as_str) == Some(&job_sha) && p.get("layout").and_then(Value::as_str) == Some(LAYOUT)) {
             let st = p.get("status").and_then(Value::as_str).unwrap_or("?").to_string();
@@ -388,7 +389,7 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
     let n = work.len();
     say(&format!("shaders: translating {n} ({} reused) with {} processes", report.reused, opts.jobs));
     let last = std::sync::Mutex::new(Instant::now());
-    let outcomes = xlate::translate(&tools, work, &xl_dir, opts.jobs, opts.batch, Duration::from_secs(120), &|d, t| {
+    let mut outcomes = xlate::translate(&tools, work, &xl_dir, opts.jobs, opts.batch, Duration::from_secs(120), &|d, t| {
         let mut l = last.lock().unwrap();
         if l.elapsed().as_secs_f64() >= 3.0 || d == t {
             *l = Instant::now();
@@ -400,6 +401,7 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
 
     // the SPIR-V edits Vulkan needs (fixes.rs)
     let mut applied: HashMap<String, Vec<&'static str>> = HashMap::new();
+    let mut mesh_failed: HashMap<String, String> = HashMap::new();
     for (k, o) in &outcomes {
         if o.is_ok() {
             let p = xl_dir.join(format!("{k}.spv"));
@@ -411,11 +413,28 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
                     names.extend(n);
                 }
             }
+            // a task or mesh shader: its Vulkan stage around the kernel (mesh.rs)
+            if let Some(info) = jobs.get(k).and_then(|(j, _)| j.extra.get("mesh_stage")) {
+                match crate::mesh::Info::from_json(info).and_then(|i| crate::mesh::to_stage(&b, &i)) {
+                    Ok(staged) => {
+                        b = staged;
+                        names.push("mesh_stage");
+                    }
+                    Err(e) => {
+                        mesh_failed.insert(k.clone(), e);
+                        continue;
+                    }
+                }
+            }
             if !names.is_empty() {
                 std::fs::write(&p, &b).map_err(|e| io(&p, e))?;
                 applied.insert(k.clone(), names);
             }
         }
+    }
+
+    for (k, e) in mesh_failed {
+        outcomes.insert(k, Err(format!("mesh stage: {e}")));
     }
 
     // validate what was written

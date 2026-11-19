@@ -16,10 +16,12 @@
 pub mod counters;
 pub mod device;
 pub mod exec;
+pub mod framegen;
 pub mod image;
 pub mod layout;
 pub mod lazy;
 pub mod live;
+pub mod lsfg;
 pub mod mem;
 pub mod pcache;
 pub mod perf;

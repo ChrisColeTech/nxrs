@@ -5,6 +5,14 @@
 //! itself (`CreateSystemEvent(ev, clear mode, interprocess)` then `GetWritableHandleOfSystemEvent`, run as guest
 //! code on the calling guest thread); the host keeps the write end and signals or clears it from any thread.
 //! A CloseHandle of that write end (the game destroyed the event) ends the binding.
+//!
+//! Two pass-throughs a game's settings turn on: `game_env` (`KEY=VALUE` words; `NXOS_GAME_ENV`) answers getenv
+//! for its names (Horizon gives a program no environment, and runtimes that read settings from it run on
+//! defaults sized for the console otherwise: a .NET GC's region range), every other name going to the SDK's own
+//! getenv; `alloc_big_align` (`NXOS_ALLOC_BIG_ALIGN=1`) makes nn::mem::StandardAllocator::Allocate align blocks
+//! of 64 KB or more to 64 KB (an engine that cuts its GPU memory pools at 64 KB alignment relative to the pool's
+//! GPU address, which is a big page on the console and only a 4 KB page here). Neither is taken over without its
+//! setting.
 
 use crate::guest::Args;
 use crate::hle::Registry;
@@ -106,7 +114,63 @@ unsafe fn csrng(c: *mut Cpu) {
     fill_entropy(a.x(0), a.x(1));
 }
 
+/// The game's environment: (name, guest address of its value), from `game_env`.
+fn game_env() -> &'static [(String, u64)] {
+    static E: std::sync::OnceLock<Vec<(String, u64)>> = std::sync::OnceLock::new();
+    E.get_or_init(|| {
+        let spec = crate::options::get("game_env");
+        let mut v = vec![];
+        for word in spec.split_whitespace() {
+            let Some((k, val)) = word.split_once('=') else { continue };
+            let p = nxrt::kernel::get().space.kernel_alloc(val.len() as u64 + 1, 16);
+            crate::guest::put_cstr(p, val.len() as u64 + 1, val);
+            v.push((k.to_string(), p));
+        }
+        if !v.is_empty() {
+            crate::log!("game environment (game_env): {spec}");
+        }
+        v
+    })
+}
+
+unsafe fn getenv(c: *mut Cpu) {
+    let p = (*c).x[0];
+    let name = if p != 0 { crate::guest::cstr(p, 256) } else { String::new() };
+    if let Some((_, v)) = game_env().iter().find(|(k, _)| !name.is_empty() && *k == name) {
+        (*c).x[0] = *v;
+        return;
+    }
+    let Some(orig) = crate::hle::sym("getenv") else {
+        (*c).x[0] = 0;
+        return;
+    };
+    if let Some(r) = crate::guest::call(c, orig, &[p]) {
+        (*c).x[0] = r;
+    }
+}
+
+/// StandardAllocator::Allocate(self, size): blocks of 64 KB or more through Allocate(self, size, 64 KB).
+unsafe fn sa_allocate(c: *mut Cpu) {
+    let (this, size) = ((*c).x[0], (*c).x[1]);
+    let sym = |n: &str| crate::hle::sym(n).unwrap_or_else(|| nxrt::rt::fatal(&format!("os: the SDK has no {n}")));
+    let r = if size >= 0x10000 {
+        crate::guest::call(c, sym("_ZN2nn3mem17StandardAllocator8AllocateEmm"), &[this, size, 0x10000])
+    } else {
+        crate::guest::call(c, sym("_ZN2nn3mem17StandardAllocator8AllocateEm"), &[this, size])
+    };
+    if let Some(r) = r {
+        (*c).x[0] = r;
+    }
+}
+
 pub fn register(r: &mut Registry) {
+    if !crate::options::get("game_env").trim().is_empty() {
+        r.force("getenv", "the game's environment (game_env), the SDK's getenv for the rest", getenv);
+    }
+    if crate::options::int("alloc_big_align") != 0 {
+        crate::log!("StandardAllocator::Allocate: allocations of 64 KB or more are 64 KB aligned (alloc_big_align)");
+        r.force("_ZN2nn3mem17StandardAllocator8AllocateEm", "blocks of 64 KB or more 64 KB aligned (alloc_big_align)", sa_allocate);
+    }
     r.hle("getentropy", getentropy);
     r.force("_ZN2nn6crypto36GenerateCryptographicallyRandomBytesEPvm", "csrng service: host entropy", csrng);
 }

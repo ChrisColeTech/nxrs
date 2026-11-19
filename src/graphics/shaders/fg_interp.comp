@@ -1,0 +1,46 @@
+#version 450
+// Frame generation, step 3: the frame at time t between the previous (t = 0) and the current (t = 1) frame. A pixel y
+// of the new frame was at y + d*t in the previous frame and is at y - d*(1 - t) in the current one, d being the flow
+// (in half-resolution texels, doubled here). Of the flow vectors at y and around it, the one whose two samples agree
+// best is used (it follows the moving edge rather than the background behind it); where even that one disagrees
+// (something uncovered or hidden) the nearer frame's sample is taken.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D cur;
+layout(binding = 1) uniform sampler2D prev;
+layout(binding = 2) uniform sampler2D flow;
+layout(binding = 3, rgba16f) uniform writeonly image2D dst;
+layout(push_constant) uniform P {
+    ivec2 size;
+    vec2 inv_size;
+    float t;
+    float flow_scale;   // full-resolution pixels per flow unit
+} p;
+
+float luma(vec3 c) { return dot(c, vec3(0.2126, 0.7152, 0.0722)); }
+
+void main() {
+    ivec2 y = ivec2(gl_GlobalInvocationID.xy);
+    if (y.x >= p.size.x || y.y >= p.size.y) return;
+    vec2 uv = (vec2(y) + 0.5) * p.inv_size;
+    vec2 ft = 1.0 / vec2(textureSize(flow, 0));
+    const vec2 offs[5] = vec2[](vec2(0.0), vec2(2.0, 0.0), vec2(-2.0, 0.0), vec2(0.0, 2.0), vec2(0.0, -2.0));
+    vec3 bp = vec3(0.0), bc = vec3(0.0);
+    float berr = 1e9;
+    vec2 bd = vec2(0.0);
+    for (int k = 0; k < 5; k++) {
+        vec2 d = textureLod(flow, uv + offs[k] * ft, 0.0).xy * p.flow_scale * p.inv_size;
+        vec3 sp = textureLod(prev, uv + d * p.t, 0.0).rgb;
+        vec3 sc = textureLod(cur, uv - d * (1.0 - p.t), 0.0).rgb;
+        float e = abs(luma(sp) - luma(sc)) + (k == 0 ? 0.0 : 0.01);
+        if (e < berr) {
+            berr = e;
+            bp = sp;
+            bc = sc;
+            bd = d;
+        }
+    }
+    vec3 blend = mix(bp, bc, p.t);
+    vec3 near = p.t < 0.5 ? bp : bc;
+    vec3 col = mix(blend, near, smoothstep(0.08, 0.3, berr));
+    imageStore(dst, y, vec4(col, 1.0));
+}

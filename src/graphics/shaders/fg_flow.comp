@@ -1,0 +1,55 @@
+#version 450
+// Frame generation, step 2: block matching on one pyramid level. For each texel of the current frame's luma, the
+// displacement d to where it was in the previous frame (prev(x + d) ~ cur(x)), searched in a square window around
+// the coarser level's answer (doubled) and around zero; cost = sum of absolute differences over a 5x5 patch (every
+// other texel) plus a small penalty on the vector's length, so flat areas keep still.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D cur;
+layout(binding = 1) uniform sampler2D prev;
+layout(binding = 2) uniform sampler2D coarse;
+layout(binding = 3, rg16f) uniform writeonly image2D dst;
+layout(push_constant) uniform P {
+    ivec2 size;
+    int radius;
+    int has_coarse;
+} p;
+
+float lum(sampler2D s, ivec2 at) {
+    return texelFetch(s, clamp(at, ivec2(0), p.size - 1), 0).r;
+}
+
+float cost(ivec2 x, ivec2 d, float best) {
+    float sad = 0.0;
+    for (int j = -2; j <= 2; j += 2) {
+        for (int i = -2; i <= 2; i += 2) {
+            ivec2 o = ivec2(i, j);
+            sad += abs(lum(cur, x + o) - lum(prev, x + o + d));
+        }
+        if (sad >= best) return sad;
+    }
+    return sad + 0.004 * length(vec2(d));
+}
+
+void main() {
+    ivec2 x = ivec2(gl_GlobalInvocationID.xy);
+    if (x.x >= p.size.x || x.y >= p.size.y) return;
+    ivec2 c0 = ivec2(0);
+    if (p.has_coarse != 0) {
+        vec2 uv = (vec2(x) + 0.5) / vec2(p.size);
+        c0 = ivec2(round(textureLod(coarse, uv, 0.0).xy * 2.0));
+    }
+    ivec2 best_d = ivec2(0);
+    float best = cost(x, ivec2(0), 1e9) - 0.002;   // still pixels win ties
+    for (int dy = -p.radius; dy <= p.radius; dy++) {
+        for (int dx = -p.radius; dx <= p.radius; dx++) {
+            ivec2 d = c0 + ivec2(dx, dy);
+            if (d == ivec2(0)) continue;
+            float c = cost(x, d, best);
+            if (c < best) {
+                best = c;
+                best_d = d;
+            }
+        }
+    }
+    imageStore(dst, x, vec4(vec2(best_d), 0.0, 0.0));
+}

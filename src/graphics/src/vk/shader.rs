@@ -55,10 +55,25 @@ pub struct Module {
     /// a pixel shader's output map (SPH OmapTargets: 4 bits per colour target, R G B A from the low bit): the GPU
     /// writes only these components of a bound target and leaves the others as they were
     pub omap: Option<u32>,
+    /// 1 a task shader, 2 a mesh shader (in the tessellation stages' places 3 / 4)
+    pub mesh: u8,
+}
+
+impl Module {
+    /// The Vulkan stage the module runs as.
+    pub fn vk_stage(&self) -> vk::ShaderStageFlags {
+        match self.mesh {
+            1 => vk::ShaderStageFlags::TASK_EXT,
+            2 => vk::ShaderStageFlags::MESH_EXT,
+            _ => super::layout::stage_flag(self.stage),
+        }
+    }
 }
 
 pub struct Refl {
     pub stage: u32,
+    /// 1 a task shader, 2 a mesh shader (stage 3 / 4)
+    pub mesh: u8,
     pub entry: String,
     /// (variable id, set, binding)
     pub vars: Vec<(u32, u32, u32)>,
@@ -72,6 +87,7 @@ pub fn reflect(words: &[u32]) -> Result<Refl, String> {
     }
     let mut i = 5;
     let mut stage = None;
+    let mut mesh = 0u8;
     let mut entry = String::from("main");
     let mut set: HashMap<u32, u32> = HashMap::new();
     let mut binding: HashMap<u32, u32> = HashMap::new();
@@ -90,6 +106,11 @@ pub fn reflect(words: &[u32]) -> Result<Refl, String> {
         let a = &words[i + 1..i + n];
         match op {
             15 => {
+                mesh = match a[0] {
+                    5364 => 1,
+                    5365 => 2,
+                    _ => 0,
+                };
                 stage = Some(match a[0] {
                     0 => 0,
                     1 => 3,
@@ -97,6 +118,9 @@ pub fn reflect(words: &[u32]) -> Result<Refl, String> {
                     3 => 2,
                     4 => 1,
                     5 => 5,
+                    // NVN2's task and mesh shaders take the tessellation stages' places
+                    5364 => 3,
+                    5365 => 4,
                     m => return Err(format!("execution model {m}")),
                 });
                 let bytes: Vec<u8> = a[2..].iter().flat_map(|w| w.to_le_bytes()).collect();
@@ -153,7 +177,7 @@ pub fn reflect(words: &[u32]) -> Result<Refl, String> {
             }
         }
     }
-    Ok(Refl { stage, entry, vars: rv, inputs })
+    Ok(Refl { stage, mesh, entry, vars: rv, inputs })
 }
 
 /// Rewrites the DescriptorSet / Binding decorations of variable `id`.
@@ -434,6 +458,7 @@ impl Library {
             inputs: r.inputs,
             c1,
             omap,
+            mesh: r.mesh,
             id: self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
         }))
     }

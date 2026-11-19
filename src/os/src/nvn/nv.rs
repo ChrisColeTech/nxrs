@@ -8,11 +8,13 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static NV_POOL: AtomicU64 = AtomicU64::new(0);
 static NV_SIZE: AtomicU64 = AtomicU64::new(0);
+static NV_INITED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 unsafe fn nv_init(c: *mut Cpu) {
     let a = Args(&mut *c);
     NV_POOL.store(a.x(0), Ordering::Relaxed);
     NV_SIZE.store(a.x(1), Ordering::Relaxed);
+    NV_INITED.store(true, Ordering::Release);
     crate::log!("nv::InitializeGraphics: pool {:.2} MB at {:#x}, recorded", a.x(1) as f64 / 1048576.0, a.x(0));
 }
 unsafe fn nv_fin(_c: *mut Cpu) {
@@ -21,6 +23,14 @@ unsafe fn nv_fin(_c: *mut Cpu) {
 unsafe fn nv_init_check(c: *mut Cpu) {
     if NV_POOL.load(Ordering::Relaxed) == 0 {
         nxrt::rt::guest_fatal(c, "nv::InitCheck: graphics not initialised");
+    }
+}
+/// nn::gs::sdk::CheckGraphicsSystemInitialized(caller, length) (Switch 2): the SDK's flag is set by
+/// `BootGraphicsSystem`, which only the replaced nv::InitializeGraphics calls; the host's graphics system is up
+/// once the game called nv::InitializeGraphics.
+unsafe fn gs_check_initialized(c: *mut Cpu) {
+    if !NV_INITED.load(Ordering::Acquire) {
+        nxrt::rt::guest_fatal(c, "nn::gs::sdk::CheckGraphicsSystemInitialized before nv::InitializeGraphics");
     }
 }
 unsafe fn nv_mem_info(c: *mut Cpu) {
@@ -41,4 +51,5 @@ pub fn register_nv(r: &mut Registry) {
     r.force("_ZN2nv9InitCheckEv", WHY, nv_init_check);
     r.force("_ZN2nv21GetGraphicsMemoryInfoEPNS_10MemoryInfoE", WHY, nv_mem_info);
     r.force("_ZN2nv22DumpGraphicsMemoryInfoEv", WHY, nv_dump);
+    r.force("_ZN2nn2gs3sdk30CheckGraphicsSystemInitializedEPKcm", "the gs boot is nv::InitializeGraphics' (replaced): initialized once it ran", gs_check_initialized);
 }

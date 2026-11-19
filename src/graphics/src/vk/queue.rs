@@ -44,7 +44,8 @@ pub struct Sub {
     pub transient_views: Vec<vk::ImageView>,
     /// texel buffer views of buffer textures, destroyed at completion
     pub buffer_views: Vec<vk::BufferView>,
-    pub present: Option<super::present::PendingPresent>,
+    /// the presents this submission renders, shown in this order (generated frames first, then the game's)
+    pub present: Vec<super::present::PendingPresent>,
     /// staged bytes by content, and descriptor sets by their writes (reused within the submission)
     pub memo_bytes: std::collections::HashMap<u128, (vk::Buffer, u64)>,
     pub memo_sets: std::collections::HashMap<u128, vk::DescriptorSet>,
@@ -151,6 +152,10 @@ impl Queue {
         })
     }
 
+    /// The Vulkan queue's lock (vkQueueSubmit / vkQueuePresentKHR from several threads).
+    pub fn vkq_lock(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.vkq.lock().unwrap()
+    }
     pub fn last_fence(&self) -> u64 {
         self.last.load(Ordering::Acquire)
     }
@@ -196,6 +201,10 @@ impl Sub {
         self.memo_bytes.insert(h, r);
         r
     }
+    /// Staged bytes of their own (not shared with equal bytes staged earlier): the GPU writes into them.
+    pub fn stage_bytes_fresh(&mut self, g: &Gpu, src: &[u8]) -> (vk::Buffer, u64) {
+        self.stage_bytes_new(g, src)
+    }
     fn stage_bytes_new(&mut self, g: &Gpu, src: &[u8]) -> (vk::Buffer, u64) {
         let n = src.len() as u64;
         let (b, off) = self.stage_alloc(g, n);
@@ -215,7 +224,11 @@ impl Sub {
         let b = g
             .buffer(
                 size,
-                vk::BufferUsageFlags::TRANSFER_SRC | vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                vk::BufferUsageFlags::TRANSFER_SRC
+                    | vk::BufferUsageFlags::UNIFORM_BUFFER
+                    | vk::BufferUsageFlags::STORAGE_BUFFER
+                    | vk::BufferUsageFlags::TRANSFER_DST
+                    | vk::BufferUsageFlags::INDIRECT_BUFFER,
                 MemoryLocation::CpuToGpu,
                 "staging",
             )
@@ -307,7 +320,7 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
             transient: Vec::new(),
             transient_views: Vec::new(),
             buffer_views: Vec::new(),
-            present: None,
+            present: Vec::new(),
             memo_bytes: Default::default(),
             memo_sets: Default::default(),
         }
@@ -379,7 +392,7 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
     let cbs = [vk::CommandBufferSubmitInfo::default().command_buffer(s.pre), vk::CommandBufferSubmitInfo::default().command_buffer(s.main)];
     let mut sig = vec![vk::SemaphoreSubmitInfo::default().semaphore(q.timeline).value(value).stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)];
     let mut wait = vec![];
-    if let Some(p) = &s.present {
+    for p in &s.present {
         wait.push(vk::SemaphoreSubmitInfo::default().semaphore(p.acquired).stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS));
         sig.push(vk::SemaphoreSubmitInfo::default().semaphore(p.rendered).stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS));
     }
@@ -394,8 +407,17 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         }
         q.recording.store(false, Ordering::Release);
     }
-    if let Some(p) = s.present.take() {
-        super::present::queue_present(g, p);
+    let presents = std::mem::take(&mut s.present);
+    if presents.len() == 1 {
+        super::present::queue_present(g, presents.into_iter().next().unwrap());
+    } else if !presents.is_empty() {
+        // generated frames: spaced over the game's frame interval by frame generation's presenting thread
+        drop(_vq);
+        super::framegen::schedule(g, presents);
+        start_completion(g);
+        q.inflight.lock().unwrap().push_back(Inflight { value, sub: s, wb, readback });
+        q.inflight_cv.notify_one();
+        return value;
     }
     drop(_vq);
     start_completion(g);
@@ -575,8 +597,10 @@ pub fn submit(qserial: u64, origin_ll: bool, handles: &[u64]) {
 /// Replays a stream for a queue in one submission; parks the queue at an unsatisfied wait.
 fn run_stream(g: &'static Gpu, st: &mut SubmitState, qserial: u64, origin_ll: bool, stream: Vec<u8>, receipts: Vec<u64>) {
     let mut sub = new_sub(g, st);
-    let dirty = super::mem::begin_submit(g, &mut sub);
-    g.image_begin_submit(&mut sub, &dirty);
+    super::perf::timed(super::perf::C::PrepNs, || {
+        let dirty = super::mem::begin_submit(g, &mut sub);
+        g.image_begin_submit(&mut sub, &dirty);
+    });
     let mut qs = st.qstates.remove(&qserial).unwrap_or_else(|| QState::new(origin_ll));
     let rest = super::perf::timed(super::perf::C::ReplayNs, || exec::run(g, &mut sub, &mut qs, &stream));
     exec::end(g, &mut sub, &mut qs);
@@ -720,8 +744,10 @@ pub fn present(qserial: u64, origin_ll: bool, t: &crate::nvn::obj::tex_t, crop: 
         crate::log::red_once("present on a parked queue: shown when the queue runs on is not implemented; presented now");
     }
     let mut sub = new_sub(g, &mut st);
-    let dirty = super::mem::begin_submit(g, &mut sub);
-    g.image_begin_submit(&mut sub, &dirty);
+    super::perf::timed(super::perf::C::PrepNs, || {
+        let dirty = super::mem::begin_submit(g, &mut sub);
+        g.image_begin_submit(&mut sub, &dirty);
+    });
     super::present::record_present(g, &mut sub, t, origin_ll, crop);
     super::shot::record_sink(g, &mut sub, t, crop, origin_ll);
     submit_sub(g, sub)
@@ -742,8 +768,10 @@ pub fn oneoff(_g: &Gpu, f: impl FnOnce(&Gpu, &mut Sub, &mut super::image::Images
     let mut st = g.q.sub.lock().unwrap();
     take_recycled(g, &mut st);
     let mut sub = new_sub(g, &mut st);
-    let dirty = super::mem::begin_submit(g, &mut sub);
-    g.image_begin_submit(&mut sub, &dirty);
+    super::perf::timed(super::perf::C::PrepNs, || {
+        let dirty = super::mem::begin_submit(g, &mut sub);
+        g.image_begin_submit(&mut sub, &dirty);
+    });
     {
         let mut imgs = g.images.lock().unwrap();
         f(g, &mut sub, &mut imgs);

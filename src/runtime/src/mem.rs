@@ -27,11 +27,12 @@ pub const ADDRESS_LIMIT: u64 = 1 << 39;
 pub const KERNEL_BASE: u64 = 0x7F_0000_0000;
 pub const KERNEL_SIZE: u64 = 0x1000_0000;
 const LOW_SEARCH_FROM: u64 = 0x1_0000_0000;
-const LOW_SIZE: u64 = 8 * GIB;
+const LOW_SIZE: u64 = 12 * GIB;
 const STACK_OFF: u64 = 0x1000_0000;
 const STACK_SIZE: u64 = 0x1000_0000;
 const HEAP_OFF: u64 = STACK_OFF + STACK_SIZE + 0x1000_0000;
-pub const HEAP_CAP: u64 = 6 * GIB;
+/// The heap region: room for a Switch 2 pool (9 GiB, `process::app_pool`) less what the SDK keeps beside the heap.
+pub const HEAP_CAP: u64 = 10 * GIB;
 const ALIAS_SIZE: u64 = 4 * GIB;
 const ALIAS_ALIGN: u64 = 4 * GIB;
 /// Application memory pool a Switch 1 title sees (GetInfo TotalMemorySize): 3285 MiB.
