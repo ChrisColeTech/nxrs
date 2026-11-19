@@ -1,0 +1,4 @@
+ldxr/stxr add: 200000
+cas loop: 400000
+128-bit cas: hi 200000 lo 200000
+lse ldadd: 600000, cas: 200000, swp total: 200000

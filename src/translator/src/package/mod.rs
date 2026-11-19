@@ -1,0 +1,313 @@
+//! Package input, read in place and read-only: the game's code (ExeFS) for translation, and its RomFS, updates and
+//! add-on content for the runtime's file system, with nothing extracted.
+//!
+//! # API
+//!
+//! | Call | What |
+//! |---|---|
+//! | [`open_game`] | a dumped folder, an `.nsp` (plain, encrypted, combined 1G+1U(+1D)) or a `.nup`, with an [`UpdateChoice`]: ExeFS, RomFS, version, control data, add-on hint |
+//! | [`Game::write_data`] | stage a build's data folder: `exefs/`, the RomFS marker (`romfs.nsp` / `romfs.nup` / `romfs.dir`), `control.nacp` and icon |
+//! | [`open_data_dir`] | what the runtime calls at start: the game's [`RomFs`] from its data folder's marker |
+//! | [`RomFs`] | `list(dir)`, `walk()`, `find(path)`, `read(path, offset, len)`, `read_file(path)`, `image()`; `Send + Sync` |
+//! | [`update_info`] | what an update package is (and, with the game, that it belongs to it): Turbo's `UPDATE\t...` line |
+//! | [`dlc`] | `install`, `sync`, `remove`, `describe`, `read_manifest`, `title_romfs` (a title's RomFS, in place) |
+//! | [`open_exefs`], [`list`] | the ExeFS alone (the translator's input), a debugging listing |
+
+mod app;
+mod bktr;
+mod cnmt;
+mod container;
+mod crypto;
+pub mod dlc;
+mod error;
+mod folder;
+mod io;
+mod keys;
+pub mod marker;
+mod nca;
+mod nsp;
+mod nup;
+mod pfs0;
+pub mod romfs;
+pub mod storage;
+#[cfg(test)]
+mod synthetic;
+
+pub use app::{update_info, UpdateChoice, UpdateInfo};
+pub use error::PackageError;
+pub use keys::default_keys_path;
+pub use marker::open_data_dir;
+pub use romfs::{DirEntry, RomFs};
+
+use error::{fmt, Result};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourceKind {
+    Folder,
+    Nsp,
+    Nup,
+}
+
+/// A game's ExeFS: what the translator reads.
+#[derive(Debug, Clone)]
+pub struct ExeFs {
+    pub kind: SourceKind,
+    /// Program id (title id for a NUP), if known.
+    pub title_id: Option<u64>,
+    /// Title version if known (the update's when one is applied).
+    pub version: Option<u32>,
+    /// File name -> bytes.
+    pub files: BTreeMap<String, Vec<u8>>,
+}
+
+impl ExeFs {
+    /// The NSO build id of `main` (bytes 0x40..0x60), trailing zero bytes trimmed.
+    pub fn main_build_id(&self) -> Option<Vec<u8>> {
+        nso_build_id(self.files.get("main")?)
+    }
+}
+
+/// The build id of an NSO (bytes 0x40..0x60), trailing zero bytes trimmed.
+pub fn nso_build_id(nso: &[u8]) -> Option<Vec<u8>> {
+    if nso.len() < 0x60 || &nso[..4] != b"NSO0" {
+        return None;
+    }
+    let id = &nso[0x40..0x60];
+    let end = id.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
+    Some(id[..end].to_vec())
+}
+
+/// Which update a build applied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Applied {
+    /// The package has no update (or the source cannot hold one).
+    None,
+    /// The update the game's own package holds (a combined NSP).
+    Embedded,
+    /// An update from a package of its own.
+    Separate(PathBuf),
+    /// `--no-update`: the update the package holds was left out.
+    LeftOut,
+}
+
+/// Options for [`open_game`].
+#[derive(Debug, Clone, Default)]
+pub struct OpenOptions {
+    /// prod.keys; None => [`default_keys_path`] (only NSPs need keys).
+    pub keys: Option<PathBuf>,
+    pub update: UpdateChoice,
+}
+
+/// A game opened from its package: code, data, and what was applied.
+pub struct Game {
+    pub kind: SourceKind,
+    /// The input, absolute.
+    pub path: PathBuf,
+    pub exefs: ExeFs,
+    pub romfs: Arc<RomFs>,
+    pub display_version: Option<String>,
+    /// control.nacp and the icons (packages read with keys).
+    pub control: BTreeMap<String, Vec<u8>>,
+    /// Add-on content titles the game's package also holds (install them with [`dlc::install`]).
+    pub addons: Vec<u64>,
+    pub applied: Applied,
+    /// The RomFS marker for the data folder: (file name, text).
+    pub marker: (&'static str, String),
+}
+
+enum Detected {
+    Folder,
+    Nsp,
+    Nup,
+}
+
+fn detect(input: &Path) -> Result<Detected> {
+    if input.is_dir() {
+        return Ok(Detected::Folder);
+    }
+    let blob = io::Blob::open(input)?;
+    if blob.size < 4 {
+        return Err(PackageError::Unrecognised(input.to_path_buf()));
+    }
+    match &blob.read_at(0, 4)?[..] {
+        b"PFS0" => Ok(Detected::Nsp),
+        m if m == nup::MAGIC => Ok(Detected::Nup),
+        _ => Err(PackageError::Unrecognised(input.to_path_buf())),
+    }
+}
+
+/// Open a game: a dumped folder, an NSP or a NUP, applying the update `opts.update` chooses.
+pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
+    let path = io::abspath(input);
+    let detected = detect(&path)?;
+    if let UpdateChoice::Package(u) = &opts.update {
+        if !matches!(detected, Detected::Nsp) {
+            let what = if matches!(detected, Detected::Nup) {
+                "a NUP package, which holds its update already"
+            } else {
+                "an extracted folder or another kind of file"
+            };
+            return fmt(format!(
+                "{}: a separate update needs the game as an NSP package; this game is built from {what}",
+                io::abspath(u).display()
+            ));
+        }
+    }
+    match detected {
+        Detected::Folder => {
+            let exefs = folder::exefs(&path)?;
+            let romfs_dir = folder::find_exefs(&path).and_then(|e| e.parent().map(|p| p.join("romfs")));
+            let (romfs, marker) = match romfs_dir.filter(|d| d.is_dir()) {
+                Some(d) => (RomFs::from_folder(&d)?, (marker::DIR, format!("{}\n", d.display()))),
+                None => return fmt(format!("{}: the folder has no romfs/ beside its exefs/", path.display())),
+            };
+            Ok(Game {
+                kind: SourceKind::Folder,
+                path,
+                exefs,
+                romfs: Arc::new(romfs),
+                display_version: None,
+                control: BTreeMap::new(),
+                addons: vec![],
+                applied: Applied::None,
+                marker,
+            })
+        }
+        Detected::Nup => {
+            let blob = io::Blob::open(&path)?;
+            let exefs = nup::exefs(&blob)?;
+            let romfs = nup::romfs(blob)?;
+            Ok(Game {
+                kind: SourceKind::Nup,
+                marker: (marker::NUP, format!("{}\n", path.display())),
+                path,
+                exefs,
+                romfs: Arc::new(romfs),
+                display_version: None,
+                control: BTreeMap::new(),
+                addons: vec![],
+                applied: Applied::None,
+            })
+        }
+        Detected::Nsp => {
+            let keys = keys::Keys::load(&keys::keys_path(opts.keys.as_deref())?)?;
+            let pkg = app::Package::open(&path, &keys, &opts.update)?;
+            let romfs = pkg.romfs()?;
+            let applied = match (&pkg.update, &pkg.update_path) {
+                (Some(_), Some(p)) => Applied::Separate(p.clone()),
+                (Some(_), None) => Applied::Embedded,
+                (None, _) if pkg.embedded_update.is_some() => Applied::LeftOut,
+                _ => Applied::None,
+            };
+            Ok(Game {
+                kind: SourceKind::Nsp,
+                exefs: ExeFs { kind: SourceKind::Nsp, title_id: Some(pkg.title_id), version: Some(pkg.version), files: pkg.exefs()? },
+                romfs: Arc::new(romfs),
+                display_version: pkg.display_version.clone(),
+                control: pkg.control.clone(),
+                addons: pkg.addons.clone(),
+                applied,
+                marker: (marker::NSP, pkg.marker()),
+                path: pkg.path.clone(),
+            })
+        }
+    }
+}
+
+impl Game {
+    /// Stage the data folder a build hands the runtime (switchrecomp.py `copy_data`): `exefs/` (modules only the
+    /// other version had are removed), the RomFS marker (the other markers removed), `control.nacp` and the icon.
+    /// Says what was applied, in Turbo's words.
+    pub fn write_data(&self, datadir: &Path, say: &dyn Fn(&str)) -> Result<()> {
+        let io_err = |p: &Path| {
+            let p = p.to_path_buf();
+            move |source| PackageError::Io { path: p.clone(), source }
+        };
+        let ex = datadir.join("exefs");
+        std::fs::create_dir_all(&ex).map_err(io_err(&ex))?;
+        for (name, data) in &self.exefs.files {
+            if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+                return fmt(format!("unsafe ExeFS name in {}: {name:?}", self.path.display()));
+            }
+            let dst = ex.join(name);
+            if std::fs::read(&dst).ok().as_deref() != Some(&data[..]) {
+                std::fs::write(&dst, data).map_err(io_err(&dst))?;
+            }
+        }
+        for e in std::fs::read_dir(&ex).map_err(io_err(&ex))?.flatten() {
+            let n = e.file_name().to_string_lossy().into_owned();
+            if !self.exefs.files.contains_key(&n) && e.path().is_file() {
+                let _ = std::fs::remove_file(e.path());
+            }
+        }
+        for other in [marker::NSP, marker::NUP, marker::DIR, "romfs.bin"] {
+            if other != self.marker.0 {
+                let _ = std::fs::remove_file(datadir.join(other));
+            }
+        }
+        let m = datadir.join(self.marker.0);
+        std::fs::write(&m, &self.marker.1).map_err(io_err(&m))?;
+        let icons: Vec<&String> = self.control.keys().filter(|n| n.starts_with("icon_")).collect();
+        let icon = self.control.get("icon_AmericanEnglish.dat").or_else(|| icons.first().map(|n| &self.control[*n]));
+        for (name, blob) in [("control.nacp", self.control.get("control.nacp")), ("icon_AmericanEnglish.dat", icon)] {
+            if let Some(b) = blob {
+                let p = datadir.join(name);
+                std::fs::write(&p, b).map_err(io_err(&p))?;
+            }
+        }
+        let v = self.exefs.version.unwrap_or(0);
+        let display = self.display_version.clone().unwrap_or_default();
+        match &self.applied {
+            Applied::Separate(u) => say(&format!("Package: game with its update {display} (v{v}), applied in place from {}", u.display())),
+            Applied::Embedded => say(&format!("Package: game with its update {display} (v{v}), applied in place")),
+            Applied::LeftOut => say(&format!("Package: the game without the update this package holds: {display} (v{v})")),
+            Applied::None => {}
+        }
+        say(&format!("RomFS: using {} in place", self.path.display()));
+        if !self.addons.is_empty() {
+            let ids: Vec<String> = self.addons.iter().map(|t| format!("{t:016x}")).collect();
+            say(&format!(
+                "DLC: this package also holds add-on content {}; install it with nxrs dlc install (the launcher does)",
+                ids.join(" ")
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Read the ExeFS of a folder / NSP / NUP (the game with the update its own package holds).
+pub fn open_exefs(input: &Path, keys: Option<&Path>) -> Result<ExeFs> {
+    let opts = OpenOptions { keys: keys.map(Path::to_path_buf), update: UpdateChoice::Embedded };
+    Ok(open_game(input, &opts)?.exefs)
+}
+
+/// Human-readable listing of the package entries (names, sizes, content types) for debugging.
+pub fn list(input: &Path, keys: Option<&Path>) -> Result<Vec<String>> {
+    let path = io::abspath(input);
+    if path.is_dir() {
+        return folder::list(&path);
+    }
+    let blob = io::Blob::open(&path)?;
+    if blob.size >= 4 && &blob.read_at(0, 4)?[..] == nup::MAGIC {
+        return nup::list(&blob);
+    }
+    let keys = keys::Keys::load(&keys::keys_path(keys)?)?;
+    nsp::list(Arc::new(blob), &keys)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn build_id_trims_trailing_zeros() {
+        let mut nso = vec![0u8; 0x100];
+        nso[..4].copy_from_slice(b"NSO0");
+        nso[0x40..0x48].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0, 1, 0, 0]);
+        assert_eq!(nso_build_id(&nso).unwrap(), vec![0xde, 0xad, 0xbe, 0xef, 0, 1]);
+        assert!(nso_build_id(b"NSO0").is_none());
+    }
+}

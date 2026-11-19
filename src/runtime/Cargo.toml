@@ -1,0 +1,29 @@
+[package]
+name = "runtime"
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+description = "RecompLauncher engine: the runtime that executes translated (ARM64 -> C) game code on Windows x86-64"
+
+[lib]
+name = "nxrt"
+path = "src/lib.rs"
+# rlib for the dev tool and unit tests; staticlib (nxrt.lib) is what the translated game code links against.
+crate-type = ["rlib", "staticlib"]
+
+[[bin]]
+name = "nxrt-dev"
+path = "src/bin/nxrt_dev.rs"
+
+[dependencies]
+lz4_flex = { version = "0.11", default-features = false, features = ["safe-decode", "std"] }
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_Memory",
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_Performance",
+    "Win32_System_SystemInformation",
+    "Win32_System_LibraryLoader",
+] }

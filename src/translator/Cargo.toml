@@ -1,0 +1,24 @@
+[package]
+name = "translator"
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+description = "RecompLauncher engine: Switch package input and the ARM64 -> C translator (nxrs)"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "nxrs"
+path = "src/bin/nxrs.rs"
+
+[dependencies]
+thiserror = "2"
+anyhow = "1"
+aes = "0.8"
+zstd = "0.13"
+lz4_flex = { version = "0.11", default-features = false, features = ["safe-decode", "std"] }
+regex = "1"
+serde_json = { version = "1", features = ["preserve_order"] }
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"

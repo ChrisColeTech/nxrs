@@ -1,0 +1,7 @@
+setjmp returned 0 (pass 1, local 7)
+setjmp returned 1 (pass 2, local 7)
+setjmp returned 2 (pass 3, local 7)
+setjmp returned 3 (pass 4, local 7)
+longjmp(b2, 0) made setjmp return 1
+callback runs (arg 99), longjmps out
+back in main with 5; host frames dropped: 1

@@ -1,0 +1,9 @@
+main: switching to fiber1 (current 0x0)
+fiber1: start (arg 11, on its stack: 1)
+fiber2: start (arg 22, on its stack: 1)
+fiber1: resumed, current is fiber1: 1, local 1
+fiber2: resumed after fiber1 finished
+main: back on the thread (current 0x0, local 42)
+fiber2: resumed from the thread, local 2
+main: back again; finalizing
+main: done

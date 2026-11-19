@@ -1,0 +1,12 @@
+~Guard(thrower)
+~Guard(middle)
+caught int 42
+~Guard(thrower)
+~Guard(middle)
+caught Base& code 7
+~Guard(thrower)
+~Guard(middle)
+caught const char* c-string
+~Guard(thrower)
+caught ...
+done

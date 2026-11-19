@@ -1,0 +1,5 @@
+main: tl = 100, name ''
+thread 0: tl*10+name_ok = 11001, handle ok 1
+thread 1: tl*10+name_ok = 21001, handle ok 1
+thread 2: tl*10+name_ok = 31001, handle ok 1
+TLS regions distinct: yes
