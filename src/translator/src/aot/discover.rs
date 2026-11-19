@@ -38,7 +38,12 @@ pub struct DiscoverStats {
 pub fn discover(m: &Module) -> (Vec<i64>, DiscoverStats) {
     let w = &m.words;
     let n = w.len() as i64;
-    let seeds: Vec<i64> = m.seeds().iter().map(|&a| ((a - m.lo) >> 2) as i64).collect();
+    let mut seeds: Vec<i64> = m.seeds().iter().map(|&a| ((a - m.lo) >> 2) as i64).collect();
+    // The module's first instruction is its entry (the runtime starts it): a function start even when no unwind
+    // entry or symbol names it.
+    if n > 0 && !seeds.contains(&0) {
+        seeds.insert(0, 0);
+    }
 
     let mut bl_tgt = vec![];
     let mut br_src = vec![];
@@ -207,6 +212,19 @@ pub fn setjmp_owners(m: &Module, starts: &[u64]) -> BTreeSet<u64> {
                     out.insert(starts[k - 1]);
                 }
             }
+        }
+    }
+    out
+}
+
+/// Function starts (absolute) that hold a C++ exception landing pad (`.eh_frame` FDE -> LSDA -> call-site
+/// table): an unwinder resumes there, in the middle of the function, so it is built resumable like a setjmp caller.
+pub fn landing_pad_owners(m: &Module, starts: &[u64]) -> BTreeSet<u64> {
+    let mut out = BTreeSet::new();
+    for pad in crate::xlate::jumptables::landing_pad_addresses(m).into_iter().filter(|&p| m.in_text(p)) {
+        let k = starts.partition_point(|&s| s <= pad);
+        if k > 0 {
+            out.insert(starts[k - 1]);
         }
     }
     out

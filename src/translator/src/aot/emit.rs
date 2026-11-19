@@ -66,7 +66,11 @@ pub struct Emitter<'m> {
     spanned: BTreeMap<u64, (usize, u64)>,
     reg_locals: usize,
     kept: BTreeSet<u32>,
+    /// Functions a non-local jump may re-enter: setjmp callers and holders of a C++ landing pad. They are built
+    /// resumable (`rt_sj_owner`, every instruction a label).
     sj_owners: BTreeSet<u64>,
+    /// The landing-pad holders among them (statistics only).
+    pad_owners: BTreeSet<u64>,
     jt: JumpTables<'m>,
     lifter: Lifter,
     pub uses_patches: bool,
@@ -91,7 +95,12 @@ impl<'m> Emitter<'m> {
             spanned,
             reg_locals: opts.reg_locals,
             kept: if opts.callee_saved { regs::callee_saved() } else { BTreeSet::new() },
-            sj_owners: crate::aot::discover::setjmp_owners(m, sorted_starts),
+            sj_owners: {
+                let mut o = crate::aot::discover::setjmp_owners(m, sorted_starts);
+                o.extend(crate::aot::discover::landing_pad_owners(m, sorted_starts));
+                o
+            },
+            pad_owners: crate::aot::discover::landing_pad_owners(m, sorted_starts),
             jt: JumpTables::new(m),
             lifter: Lifter::new(),
             uses_patches: false,
@@ -249,13 +258,24 @@ impl<'m> Emitter<'m> {
 
     /// (lines of C, referenced function starts) for the guest function [entry, end).
     pub fn function(&mut self, entry: u64, end: u64) -> R<(Vec<String>, BTreeSet<u64>)> {
-        let insns: Vec<Insn> = (entry..end).step_by(4).map(|a| self.lift(a)).collect();
+        let mut insns: Vec<Insn> = (entry..end).step_by(4).map(|a| self.lift(a)).collect();
+        // A context restore (libunwind's jumpto) ends in `ret` to a computed x30: lowered as a jump through
+        // dispatch, not a C return.
+        for i in 0..insns.len() {
+            if insns[i].kind == Kind::Ret && is_context_restore(&self.m.words, ((entry - self.m.lo) / 4) as usize, i) {
+                insns[i] = Insn { kind: Kind::Br, target_reg: "c->x[30]".into(), ..Insn::op("") };
+                self.stat("ret_dispatch", 1);
+            }
+        }
         let (mut labels, tables) = self.scan(&insns, entry, end);
         let mut refs = BTreeSet::new();
         let sj_owner = self.sj_owners.contains(&entry);
         let all_labels = tables.values().any(|t| *t == Table::All) || sj_owner;
         if sj_owner {
             self.stat("setjmp_owners", 1);
+            if self.pad_owners.contains(&entry) {
+                self.stat("landing_pad_owners", 1);
+            }
         }
         if all_labels {
             labels = (entry..end).step_by(4).collect();
@@ -589,6 +609,38 @@ impl<'m> Emitter<'m> {
     }
 }
 
+/// True when the `ret` at index `i` of the function starting at word `first` ends a context restore: in the
+/// straight-line code before it, x30 is loaded from memory through a base other than sp, and sp is set from a
+/// general register other than x29 (`mov sp, xN`). A function epilogue does neither (it loads x30 from the stack
+/// and moves sp by an immediate or from x29).
+pub fn is_context_restore(words: &[u32], first: usize, i: usize) -> bool {
+    let (mut sp_set, mut lr_loaded) = (false, false);
+    for k in (i.saturating_sub(96)..i).rev() {
+        let w = words[first + k];
+        // a branch ends the straight-line code: b, b.cond, cbz/cbnz, tbz/tbnz, br/blr/ret
+        if (w & 0x7C00_0000) == 0x1400_0000
+            || (w & 0xFF00_0010) == 0x5400_0000
+            || (w & 0x7E00_0000) == 0x3400_0000
+            || (w & 0x7E00_0000) == 0x3600_0000
+            || (w & 0xFE00_0000) == 0xD600_0000
+        {
+            break;
+        }
+        let rn = (w >> 5) & 31;
+        // mov sp, xN (add sp, xN, #0)
+        if (w & 0xFFFF_FC1F) == 0x9100_001F && rn != 31 && rn != 29 {
+            sp_set = true;
+        }
+        // ldr x30, [xN, #imm] / ldp x?, x30 / ldp x30, x? with a base other than sp
+        let ldr = (w & 0xFFC0_001F) == 0xF940_001E;
+        let ldp = (w & 0xFFC0_0000) == 0xA940_0000 && ((w & 31) == 30 || ((w >> 10) & 31) == 30);
+        if (ldr || ldp) && rn != 31 {
+            lr_loaded = true;
+        }
+    }
+    sp_set && lr_loaded
+}
+
 fn kind_name(k: Kind) -> &'static str {
     match k {
         Kind::Op => "op",
@@ -619,4 +671,25 @@ pub fn table_text(name: &str, addrs: &[u64]) -> String {
     s.push_str(&addrs.iter().map(|a| fname(*a)).collect::<Vec<_>>().join(",\n"));
     s.push_str(&format!("\n}};\nconst uint64_t {name}_fn_count = {};\n", addrs.len()));
     s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_context_restore;
+
+    #[test]
+    fn context_restore_ret_is_recognised_and_epilogues_are_not() {
+        // libunwind jumpto: ldp x2,x3,[x0,#16]; ldr x30,[x0,#0x100]; ldr x16,[x0,#0xf8]; ldp x0,x1,[x0]; mov sp,x16; ret
+        let jumpto = [0xA9410C02, 0xF940801E, 0xF9407C10, 0xA9400400, 0x9100021F, 0xD65F03C0];
+        assert!(is_context_restore(&jumpto, 0, 5));
+        // an epilogue: ldp x29,x30,[sp,#16]; add sp,sp,#0x20; ret
+        let epilogue = [0xA9417BFD, 0x910083FF, 0xD65F03C0];
+        assert!(!is_context_restore(&epilogue, 0, 2));
+        // mov sp, x29 with x30 from the stack
+        let frame = [0xA9407BFD, 0x910003BF, 0xD65F03C0];
+        assert!(!is_context_restore(&frame, 0, 2));
+        // a branch between the loads and the ret ends the search
+        let split = [0xF940801E, 0x9100021F, 0x14000001, 0xD65F03C0];
+        assert!(!is_context_restore(&split, 0, 3));
+    }
 }

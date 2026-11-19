@@ -1252,6 +1252,15 @@ fn enc(img: &[u8], o: i128, e: u8) -> R<(i128, i128)> {
     Ok((v, o2))
 }
 
+/// Every C++ exception landing pad of the module (absolute addresses), from `.eh_frame` and the LSDAs; none when the
+/// unwind data does not parse.
+pub fn landing_pad_addresses(m: &Module) -> Vec<u64> {
+    match landing_pads(m) {
+        Ok(p) => p.keys().filter(|&&a| a >= 0).map(|&a| a as u64).collect(),
+        Err(_) => vec![],
+    }
+}
+
 fn landing_pads(m: &Module) -> R<BTreeMap<i128, Vec<(i128, i128)>>> {
     let img = &m.image[..];
     let hdr = m.nso.eh_start as i128;

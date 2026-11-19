@@ -1,8 +1,8 @@
 # translator
 
 The engine's first piece, as one crate: Switch package input (the game's code, and its RomFS, updates and DLC read
-in place) and the ARM64 → C translator, driven by the `nxrs` binary. The C it writes is byte-identical to
-mkw-recomp's generator. Credits and licenses: the repository's [README](../../README.md#credits-and-licenses).
+in place) and the ARM64 → C translator, driven by the `nxrs` binary. The C it writes is mkw-recomp's generator's,
+byte for byte, apart from three additions the runtime needs (below). Credits and licenses: the repository's [README](../../README.md#credits-and-licenses).
 
 ## CLI
 
@@ -38,6 +38,16 @@ mkw-recomp's generator. Credits and licenses: the repository's [README](../../RE
 | `aot/` | function discovery, chunking, parallel emission (threads), tables, manifests, the patch table (sites, spans, spin waits) |
 | `runtime/` | `cpu.h`, `simd.h`, `simd_fp.h`: the headers the generated C includes |
 | `bin/nxrs.rs` | the CLI |
+
+### Additions to mkw-recomp's generator
+
+| Addition | Why | Effect on Mario Kart World 1.8.0 |
+|---|---|---|
+| Functions holding a C++ landing pad (`.eh_frame` FDE → LSDA → call-site table) are built resumable, like setjmp callers (`rt_sj_owner`, every instruction a label) | an unwinder resumes in the middle of the function | 3,638 functions (main 3,070, sdk 568) |
+| A `ret` that ends a context restore (x30 loaded through a base other than sp, sp set from a register other than x29: libunwind's `jumpto`) is lowered as `c->pc = x30` + dispatch | it resumes into a landing pad, not a caller | 1 function (sdk `f_7004c172d4`) |
+| Each module's first instruction is a seed | the runtime starts it even with no unwind entry or symbol | none (already a start in every module) |
+
+Every other function and file is identical (242,014 functions; the tables, layout and patch headers).
 
 ## Package input (`package/`)
 
@@ -92,7 +102,7 @@ UTF-8 (Turbo's Python prints them in the console code page).
 
 ## Verification
 
-- `cargo test`: 53 fast tests (well under a second to run): lifter classes, SIMD, flags, registers, the patch table,
+- `cargo test`: 54 fast tests (well under a second to run): lifter classes, SIMD, flags, registers, the patch table,
   partitioning, an end-to-end generate, PFS0 / HFS0 (XCI with and without the key area), keys, AES / XTS / CTR,
   tickets, cnmt, NUP (zstd, the RomFS cache), BKTR tables, the RomFS image parser, the DLC manifest and
   `install.json`, and a synthetic package suite with test keys: a combined game + update + DLC (two counter
