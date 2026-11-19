@@ -1,0 +1,6 @@
+# Kept by hand by the engine's lanes (format of game.tsv; these rows are read first). Lane P, 2026-11-19.
+# 60 FPS test (5A.6), 1.1.1: the forced present interval 1 and a test patch at main+0x2aa278c (the interval the game
+# hands nvnWindowSetPresentInterval is its setting + 1: add w1, w8, #1 -> mov w1, #1) both run 59-60 FPS, but the
+# opening's dialogue went from the first load to "What is your name?" in 18 s instead of 33.5 s at 30 FPS with the same
+# presses (runs build\games\arceus\runs\*-speedA30, *-speedA60): the game steps per frame, double speed at 60.
+fps60	double_speed

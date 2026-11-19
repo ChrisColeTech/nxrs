@@ -274,7 +274,9 @@ pub fn load(space: &Space, mods: &[(String, u64, u64, Vec<u8>)]) -> Result<(Vec<
     for m in &loaded {
         let i = &m.image;
         let ro_end = i.data.0;
-        space.protect_segment(m.base + i.text.0, i.text.1, ST_CODE, mem::PERM_RX)?;
+        // Horizon's regions are whole pages: the code runs up to read-only data (the SDK's C++ unwinder walks the
+        // regions from a PC to find its module; a gap after an unaligned .text ended the walk and aborted it)
+        space.protect_segment(m.base + i.text.0, i.rodata.0.max(i.text.0 + i.text.1) - i.text.0, ST_CODE, mem::PERM_RX)?;
         space.protect_segment(m.base + i.rodata.0, ro_end - i.rodata.0, ST_CODE, mem::PERM_R)?;
         space.protect_segment(m.base + i.data.0, m.size - i.data.0, ST_CODEDATA, mem::PERM_RW)?;
     }

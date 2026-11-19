@@ -122,3 +122,10 @@ fn shader_tables_are_embedded() {
     assert!(seed.len() > 500 && seed.iter().all(|(k, s)| k.len() >= 16 && !s.is_empty()), "{}", seed.len());
     assert!(shader_tables("0000000000000000").unwrap().is_empty());
 }
+
+#[test]
+fn engine_tsv_rows_come_first() {
+    let a = by_title(0x0100_1F50_10DF_A000).expect("Arceus");
+    assert_eq!(a.get("fps60").as_deref(), Some("double_speed"));
+    assert_eq!(a.name, "Pokémon Legends: Arceus", "game.tsv's rows still apply");
+}

@@ -109,6 +109,12 @@ impl Profile {
     /// The profile for a program, from its NPDM and the data folder's override.
     pub fn load(npdm: Option<&[u8]>, override_tsv: Option<&str>) -> Profile {
         let mut p = Profile::default();
+        // the NPDM's SystemResourceSize (META +0x14): virtual address memory for a title no profile describes
+        // (Anime Girls: Sun of a Beach, Beach Bounce Remastered, Sonic X Shadow Generations reserve address regions
+        // in their static initialisers); a profile's value replaces it
+        if let Some(n) = npdm.filter(|n| n.get(..4) == Some(&b"META"[..])).and_then(|n| n.get(0x14..0x18)) {
+            p.sys_resource = u32::from_le_bytes(n.try_into().unwrap()) as u64;
+        }
         if let Some(id) = npdm.and_then(npdm_program_id) {
             p.program_id = id;
             if let Some((_, row)) = BUILTIN.iter().find(|(t, _)| *t == id) {
@@ -164,6 +170,9 @@ mod tests {
         assert_eq!(p.pool, 0xCD50_0000);
         assert_eq!(p.used_beside_heap, 0x800_0000);
         assert_eq!(p.tick_hz, 19_200_000);
+        npdm[0x14..0x18].copy_from_slice(&0x100_0000u32.to_le_bytes());
+        npdm[0x110..0x118].copy_from_slice(&0x0100_C680_1E0F_A000u64.to_le_bytes());
+        assert_eq!(Profile::load(Some(&npdm), None).sys_resource, 0x100_0000);
         let s2 = Profile::load(None, Some("switch2\t1\n"));
         assert_eq!(s2.tick_hz, 31_250_000);
     }

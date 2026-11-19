@@ -205,7 +205,8 @@ fn load(s: &mut State, i: usize, img: u64) -> Result<(u64, u32), String> {
     }
     unsafe { core::ptr::copy_nonoverlapping(image.bytes.as_ptr(), base as *mut u8, size as usize) };
     let (init, fini) = (dyn_tag(&image.bytes, &dynamic, 12), dyn_tag(&image.bytes, &dynamic, 13));
-    let text = image.text;
+    // whole pages, up to the read-only data (as `nxrt::loader::load`)
+    let text = (image.text.0, image.rodata.0.max(image.text.0 + image.text.1) - image.text.0);
     let ro = (image.rodata.0, image.data.0 - image.rodata.0);
     let data_at = image.data.0;
     let m = Loaded { name: s.nros[i].name.clone(), base, size, image, dynamic };

@@ -21,6 +21,8 @@ use std::sync::OnceLock;
 pub struct RawProfile {
     pub id: &'static str,
     pub game_tsv: &'static str,
+    /// `games/<id>/engine.tsv`: keys the engine's lanes keep by hand (results of their runs), over game.tsv's.
+    pub engine_tsv: Option<&'static str>,
     pub patches: Option<&'static str>,
     pub turbo: Option<&'static str>,
     /// nxnative's shader tables, zstd-compressed (`tools/export_shaders.py`)
@@ -470,7 +472,10 @@ fn db() -> &'static Db {
         let mut profiles = vec![];
         let mut errors = vec![];
         for r in data::GAMES {
-            let parsed = Profile::parse(r.id, r.game_tsv).and_then(|mut p| {
+            // engine.tsv's rows come first: a key takes its first row
+            let text = match r.engine_tsv { Some(e) => format!("{e}
+{}", r.game_tsv), None => r.game_tsv.to_string() };
+            let parsed = Profile::parse(r.id, &text).and_then(|mut p| {
                 p.patches = r.patches.map(PatchFile::parse).transpose().map_err(|e| format!("{}: patches.toml: {e}", r.id))?;
                 p.turbo = r.turbo.map(PatchFile::parse).transpose().map_err(|e| format!("{}: turbo.toml: {e}", r.id))?;
                 Ok(p)

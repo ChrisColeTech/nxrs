@@ -23,7 +23,8 @@ licenses: the "Credits and licenses" section of the repository README. The inter
 | `kobj.rs` | kernel events the host owns |
 | `profile.rs` | per-title facts (program id, pool, used memory, system resource, counter rate, cores) |
 | `input/` | the controllers (lane I): XInput, DualSense / DualSense Edge / DualShock 4 over raw HID (lights, rumble, motion; the owner's `controller_sony*`), Switch Pro / Joy-Con / Online pads over raw HID (handshake, SPI stick calibration, IMU, HD rumble, player lights), WinMM fallback, hot-plug, player slots (nxnative's `pad_slots.h`), `button_layout` / `button_map` (the owner's `pad_layout.h`), motion fusion, scripted input (`NXRS_KEYS`, the control pipe's `press`), Turbo's record / replay (`NXRS_INPUT_RECORD` / `NXRS_INPUT_REPLAY`); `bin/nxinput.rs` lists, reads and rumbles them without a game |
-| `log.rs`, `watch.rs` | `[os]` log, the gap list (`UNIMPL` lines, summary at the first submit, at an abort and at the end), heartbeat and timed exits |
+| `log.rs`, `watch.rs` | `[os]` log, the gap list (`UNIMPL` lines, summary at the first submit, at an abort and at the end), heartbeat and timed exits; a stall (no present for 15 s) logs every guest thread (`nxrt::kernel::dump_threads`: what it waits for, the host function it is in, its guest frames), the control command `threads` prints the same |
+| `mods.rs` | the player's mods at run time (`<data>\mods.tsv` from the build): on / off by `NXRS_MOD_<NAME>` or a `disabled` file in the mod's folder, data bytes written into the modules before the game starts, RomFS files layered over the game's (fs) |
 | `bin/nxos_dev.rs` | build glue: compile the generated C (the translator's `cpu.h`), link with `nxos.lib` |
 
 ## Services
@@ -67,4 +68,4 @@ licenses: the "Credits and licenses" section of the repository README. The inter
 
 Switches: `NXOS_TRACE=svc,ipc,fs` (or `all`), `NXOS_EXIT_AFTER=<s>`, `NXOS_EXIT_AFTER_SUBMIT=<s>`,
 `NXOS_HEARTBEAT=<s>`, `NXOS_OPMODE=0|1` (else `docked`), `NXOS_LANG` (else `language`), `NXOS_<SETTING>` (any setting os reads: `NXOS_GAME_ENV`, `NXOS_ALLOC_BIG_ALIGN`), `NXOS_MOVIE_DUMP=<dir>`, `NXOS_GLSLC_CAPTURE=<dir>`, `NXOS_SWKBD=auto`, `NXOS_NICK`, `NXOS_FIXED_TIME`, `NXOS_FONT`, `NXOS_SAVE`,
-`NXOS_FREE_CORES=1` (no virtual cores), `NXOS_HOST_CPUS=<n>`, the controller switches in `input/mod.rs` (`NXRS_CONTROLLER_TRACE`, `_SELFTEST`, `_BACKGROUND`, `NXRS_NO_SONY_HID`, ...); the runtime's `NXRT_TRACE` still works.
+`NXOS_FREE_CORES=1` (no virtual cores), `NXOS_NVN_BT=<nvn proc>` (its first 64 calls with arguments and guest frames: where a game sets its present interval), `NXOS_HOST_CPUS=<n>`, the controller switches in `input/mod.rs` (`NXRS_CONTROLLER_TRACE`, `_SELFTEST`, `_BACKGROUND`, `NXRS_NO_SONY_HID`, ...); the runtime's `NXRT_TRACE` still works.

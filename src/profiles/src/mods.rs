@@ -5,12 +5,14 @@
 //!
 //! A mod folder (the layouts Atmosphère, Ryujinx and yuzu use, so a downloaded mod drops in unchanged):
 //!
-//!     mods/<mod>/mod.json                      optional: {"name": "...", "enabled": true, "description": "..."}
-//!     mods/<mod>/exefs/<build id>.ips          IPS / IPS32 named by the module's build id
-//!     mods/<mod>/exefs/*.pchtxt                IPSwitch text patches (`@nsobid-<build id>` inside)
-//!     mods/<mod>/exefs_patches/<any>/<...>     Atmosphère's layout, same files
-//!     mods/<mod>/*.ips | *.pchtxt              loose patch files in the mod folder
-//!     mods/<mod>/romfs/...                     files that replace or add to the game's RomFS
+//! ```text
+//! mods/<mod>/mod.json                      optional: {"name": "...", "enabled": true, "description": "..."}
+//! mods/<mod>/exefs/<build id>.ips          IPS / IPS32 named by the module's build id
+//! mods/<mod>/exefs/*.pchtxt                IPSwitch text patches (`@nsobid-<build id>` inside)
+//! mods/<mod>/exefs_patches/<any>/<...>     Atmosphère's layout, same files
+//! mods/<mod>/*.ips | *.pchtxt              loose patch files in the mod folder
+//! mods/<mod>/romfs/...                     files that replace or add to the game's RomFS
+//! ```
 //!
 //! IPS offsets count from the start of the NSO file, whose header is 0x100 bytes: image offset = offset - 0x100.
 //! `.pchtxt` offsets are as written plus `@flag offset_shift` (usually 0x100, so the written offsets are image

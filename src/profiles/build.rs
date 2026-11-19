@@ -22,13 +22,14 @@ fn main() {
     for id in &ids {
         let d = games.join(id);
         println!("cargo:rerun-if-changed={}", d.display());
-        for f in ["game.tsv", "patches.toml", "turbo.toml", "shaders.tsv.zst"] {
+        for f in ["game.tsv", "engine.tsv", "patches.toml", "turbo.toml", "shaders.tsv.zst"] {
             println!("cargo:rerun-if-changed={}", d.join(f).display());
         }
         writeln!(
             s,
-            "    RawProfile {{ id: {id:?}, game_tsv: {}, patches: {}, turbo: {}, shaders: {} }},",
+            "    RawProfile {{ id: {id:?}, game_tsv: {}, engine_tsv: {}, patches: {}, turbo: {}, shaders: {} }},",
             lit(&d.join("game.tsv")),
+            opt(d.join("engine.tsv")),
             opt(d.join("patches.toml")),
             opt(d.join("turbo.toml")),
             opt_bytes(d.join("shaders.tsv.zst"))

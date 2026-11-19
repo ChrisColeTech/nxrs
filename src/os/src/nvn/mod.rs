@@ -196,6 +196,10 @@ fn bind_graphics() {
     nxgfx::nvn::set_proc_resolver(proc_address);
     nxgfx::nvn::set_guest_caller(crate::guest::call_current);
     nxgfx::vk::counters::set_guest_clock(crate::svc::guest_ns);
+    // the profile's `present_interval display` (engine.tsv: a game that keeps its speed at 60) forces every vsync
+    if profiles::by_title(crate::profile::get().program_id).is_some_and(|p| p.settings.present_interval == "display") {
+        nxgfx::nvn::window::set_profile_interval(1);
+    }
     nxgfx::register_controls();
     nxgfx::nvn::set_hooks(nxgfx::nvn::Hooks { submit: note_submit, present: note_present, blocking: |f| crate::sched::without_core(f) });
     let prof = crate::profile::get();

@@ -1,0 +1,5 @@
+# Kept by hand by the engine's lanes (format of game.tsv; these rows are read first). Lane P, 2026-11-19.
+# 60 FPS test (5A.6), 4.0.0: the game sets the present interval (2) itself every frame from main+0x2b7a898's caller;
+# forced to 1 it ran 33-40 FPS and its opening slowed (no name prompt in 140 s, 63.5 s at 30 FPS with the same
+# presses: build\games\violet\runs\*-speed30, *-speed60). Not safe forced; a real 60 FPS patch is needed.
+fps60	needs_patch

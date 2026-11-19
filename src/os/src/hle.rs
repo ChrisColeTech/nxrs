@@ -64,11 +64,15 @@ pub struct ModuleSyms {
     pub referenced: HashSet<String>,
     /// Imports (undefined symbols) by module.
     pub imports: Vec<(String, String)>,
+    /// Imports every importing module declares weak: nothing defining them, rtld binds them to 0 and the code tests
+    /// the address before calling (Super Smash Bros. Ultimate's `nu::VirtualAllocHook` / `VirtualFreeHook`).
+    pub weak_imports: HashSet<String>,
 }
 
 impl ModuleSyms {
     pub fn read(files: &[(String, Vec<u8>)]) -> std::result::Result<ModuleSyms, String> {
         let mut s = ModuleSyms::default();
+        let (mut weak, mut strong) = (HashSet::new(), HashSet::new());
         for (name, raw) in files {
             let img = nxrt::loader::parse(raw).map_err(|e| format!("{name}: {e}"))?;
             let d = nxrt::loader::dynamic(&img.bytes).map_err(|e| format!("{name}: {e}"))?;
@@ -80,6 +84,11 @@ impl ModuleSyms {
                     s.defined.push((name.clone(), sym.name.clone(), sym.value));
                 } else {
                     s.imports.push((name.clone(), sym.name.clone()));
+                    if sym.weak() {
+                        weak.insert(sym.name.clone());
+                    } else {
+                        strong.insert(sym.name.clone());
+                    }
                 }
             }
             for r in &d.relocs {
@@ -90,6 +99,7 @@ impl ModuleSyms {
                 }
             }
         }
+        s.weak_imports = weak.difference(&strong).cloned().collect();
         Ok(s)
     }
 
@@ -144,7 +154,7 @@ pub fn install(reg: &Registry, syms: &ModuleSyms) -> Installed {
         .imports
         .iter()
         .map(|(_, n)| n.clone())
-        .filter(|n| !defined.contains(n.as_str()) && !provided.contains(n) && !n.starts_with("__rel_"))
+        .filter(|n| !defined.contains(n.as_str()) && !provided.contains(n) && !n.starts_with("__rel_") && !syms.weak_imports.contains(n))
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();

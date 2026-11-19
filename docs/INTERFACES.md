@@ -352,6 +352,19 @@ shared by every program** (no per-program layouts, so pipelines key only on shad
   `py scripts/gamectl.py <pid> fullres x.png`. Lane X runs use the window grab (`NXRS_SHOT_CMD=shot`, play_scenario)
   until it is fixed: the capture has to be recorded into the present's own submission (copy + read back after its
   fence) instead of a one-off from inside the present.
+- **Mario Kart World's 20-60 s black boot is `nvnTexturePoolRegisterTexture`.** Between the first submit (4-5 s) and the
+  first present (25-69 s, varies run to run) every core is idle. The `threads` control command at 16 s and again at
+  26 s (`build\I\runs\20261119-151619-X-mkw5\boot15.txt`, `boot25.txt`; host function names now in the dump) shows
+  the same picture both times: thread 0x1065 inside `nvn:nvnTexturePoolRegisterTexture` (lr main+0x4c9ab8, the
+  game's texture loader), the render thread 0x1004 inside `nvn:nvnQueueSubmitCommands` (waiting on graphics, not on
+  the guest), a loader thread on a guest lock, the rest idle. The log meanwhile has one `[vk] uploading a 85 MB
+  texture from its storage: 8192x8192x1 format 0x50` line and nothing else for 30-50 s. The game registers ~131k
+  texture IDs (`[RED] texture pool IDs up to 131372 pass the pool set's 65536`). Next for G: time
+  RegisterTexture (per call / the 85 MB one, ASTC 8x8 → transcode?) and whether submit waits on the same lock.
+- MKW after the first present: a null `sead` heap allocation (`main+0x3e3550`, 0x58 bytes, heap `[[sp+0x90]+0x2a78]`)
+  read at main+0xa66e0+0x2df5 (`read of 0xa0`) 4-5 s after the first present, in 3 of 4 runs; DKB faults at
+  different places 30-35 s in (main+0x8a2d80 reading 0x100000001, main+0x26c620 reading 0x48) and once ran 89 s
+  clean. Lane X is checking whether these are the guest's (exclusive monitor off for Switch 2) before blaming graphics.
 
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
@@ -615,6 +628,17 @@ screenshots through the control pipe). Engine fixes of lane P (uncommitted):
   and the SDK aborted (sdk+0x13e81c).
 - **os `profile.rs` / `mem.rs`: maps past the pool fail for every profile with `mem_map_limit on`** (nxnative's key,
   Violet / Scarlet), besides Turbo's two titles.
+- **os `mem.rs`: MapMemory takes any mapped source** (Turbo checks none): Violet maps a thread stack from main's .bss
+  (`MapMemory ... <- 0x70046fd000`) and aborted at 3.6 s.
+- **os `services/net.rs`: the `bt` service** (IBluetoothUser; command 9 RegisterBleEvent gives an event that never
+  fires): Violet 4.0.0 aborted at 2.7 s when sm refused it.
+- **graphics `nvn/cmd.rs`: nxnative's host-lent command memory reclaim** (below, for lane G to review).
+- **Diagnostics:** `nxrt::kernel::dump_threads()` (each guest thread: wait kind and address, the host function it is
+  in, guest frames), logged by os's watcher at a stall (no present for 15 s) and printed by the control command
+  `threads`; `NXOS_NVN_BT=<proc>` logs a proc's first 64 calls with guest frames (Turbo's `SWR_NVN_INTERVAL_BT`).
+- **Mods (5A.6):** `profiles::mods`, `cli/src/mods.rs`, `os/src/mods.rs` (src/cli/README.md "Mods"); profiles'
+  `games/<id>/engine.tsv` (hand-kept keys, read before game.tsv's: `fps60`, `present_interval`); os hands a profile's
+  `present_interval display` to graphics (`nxgfx::nvn::window::set_profile_interval(1)`).
 
 **For lane G — Z-A stops at ~49 s: NVN command memory, host-lent segments reach 1 GB** (2026-11-19 13:36,
 `build\games\plza\runs\20261119-130103-boot3\run.log`). The game renders at 60 FPS (title, language, "Confirm choices"
@@ -674,6 +698,98 @@ the next present requested` at 30 s, no frame is presented again (`heartbeat: ..
 dump shows the game's render thread inside `nvn:nvnQueuePresentTexture` (`thread 0x100a ... pc 0x7f10001f60
 (nvn:nvnQueuePresentTexture)`), every other thread in condvar waits behind it. The same build ran Arceus 160 s with
 no hang before `fullres` was requested (`-135934-run2`, older graphics). The front's `shot` does the same now (it
-asks graphics for the picture too): Arceus `-145805-run5` and Violet `build\gamesioletuns61119-145624-run3`,
+asks graphics for the picture too): Arceus `-145805-run5` and Violet `build\gamesiolet
+uns61119-145624-run3`,
 `-150358-run4` froze in `nvnQueuePresentTexture` right after `ctl: shot` at 30 s. Lane P takes no screenshots before a
 run's end meanwhile.
+- **For lane G — MK8D in a 10-minute Grand Prix** (`build\I\runs\20261119-140731-W-mk8d-gp`, `build\games\mk8dw`,
+  engine at 1c80457 + lane W): menus and HUD crisp, every race picture blue / purple with a black road and black
+  sky patches (`0016-shot_race_2_min.png`, `0025-shot_race_11_min.png`; Booster Course's Paris Promenade the same:
+  `20261119-143627-W-mk8d-booster\0016-shot_race_40_s.png`); 50.7 FPS over 120-760 s (only 196 of 641 s at 58+), stalls
+  up to 2.5 s at race loads (`[vk] slow frame` lines); `[RED] GPU address 0x1669f0c00 (+0x750) is in no memory pool`
+  x8 at 641-645 s (race 4 load), `[RED] texture ID 1212: target 4 bound where the shader samples target 8` at 674 s.
+  Private memory is flat (3.93 -> 3.98 GB). The menu preview panel (Grand Prix / Time Trials) draws black while the
+  H.264 pictures decode fine (`0004-a_first_Mii.png` of the booster run).
+- **runtime `loader.rs` (lane W, for lane T / O):** a module's code region is reported (QueryMemory) as whole pages up
+  to its read-only data, as on Horizon. The SDK's C++ unwinder (`nn::ro::detail::GetExceptionInfo`, sdk+0x1429b0 in
+  Jamboree) walks the regions from a PC to its module's end; an unaligned `.text` end (Jamboree's sdk: +0x5e7780) left
+  a free gap, the walk stopped and every C++ throw aborted (`nn::diag abort` from sdk+0x142bcc). os `ro.rs` does the
+  same for NROs.
+
+**For lane I — presses nobody scripted while the DualSense is connected** (2026-11-19, `NXRS_CONTROLLER_BACKGROUND=1`,
+the game window not focused). With the DualSense read, the Pokémon games advanced through screens that need A before
+any scripted press: Z-A reached "What is your name?" at 17.5 s with the first `press` at 60 s
+(`build\games\plza\runs\20261119-130103-boot3`); Arceus reached it at 47.7 s with the first press at 70 s
+(`build\games\arceus\runs\20261119-133724-boot1`); Violet at 22.7 s (`build\games\violet\runs\20261119-145624-run3`,
+first press at 60 s). With `NXRS_NO_SONY_HID=1` and the same scripts nothing advances before the scripted presses.
+Either someone pressed the pad during those runs or the pad reports a button it should not (A, or a stuck input when
+the window is in the background); worth a `nxinput read` check. Lane P runs with `NXRS_NO_SONY_HID=1` meanwhile.
+- **For lane G / I — a screenshot hangs the present while frame generation generates** (Super Mario Party Jamboree,
+  `build\I\runs\20261119-153405-W-jamboree-menus3`): the game ran its opening movie at a 29 FPS base with built-in
+  frame generation adding frames (`[vk] frame generation: built-in, base 29.3 FPS, output 57.7 FPS`); the control
+  pipe's `fullres` at 39.97 s (`[vk] screenshot of the next present requested`) was the last present: frame 580, then
+  `stall: no present for 15 s`, the main thread inside `nvnQueuePresentTexture` for good, every later `fullres` "no
+  present within 10 s". MK8D's shots (no frames generated at 60 FPS) never hung. Lane W runs with `--option lsfg=0`
+  meanwhile.
+- **For lane S / G — Super Smash Bros. Ultimate v0's data.arc is not read** (`build\games\smash\smash_data\shaders\
+  problems.txt`: `data.arc: zstd: Unknown frame descriptor`): in the 1.0.0 archive the file-system table at the
+  header's +0x20 offset (0x35a253fb8) is stored **uncompressed** (it starts with its size, 0x24add70, then the counts;
+  later versions have the `{0x10, size, stored size, ...}` header and a zstd frame), and its counts header differs
+  (regions at +0x30, not +0x38). So only 77 shaders (main's) are prebuilt and the game misses hundreds at run time
+  (`[vk] live shader ... translated ... 41 s after it was missed`, run `build\I\runs\20261119-153655-W-smash-menus`).
+  The NROs do not need the index (lane W scans for them, 84 of 84 in 24 s). `romfs_peek` (translator example) dumps
+  any RomFS range: `romfs_peek <nsp> data.arc 35a253fb8 80`.
+
+**For lane G — Z-A: fatal write fault into an NVN pool page at ~60 s** (2026-11-19 15:39,
+`build\games\plza\runs\20261119-153747-run5`, main-tree engine of 15:35): `[nxrt] FATAL: host access violation at
+0x7ffbcae6ddfa = lifted 0x700679c6c0 (sdk+0x59c6c0) +0x3aa (write of 0x735b49000)`, x0 = 0x735b48b00, x2 = 0x970: the
+SDK's memcpy (host code in a system DLL) writing across into page 0x735b49000 in the alias region, where the game's
+NVN pools live (`uploads from storage ... at 0x6f6ee1000`). The game wrote there fine for 60 s at ~30-52 FPS (668 draws a
+frame, `pools: 1191 vram (810 MB), 259 mirror`, `write-back 0.53 MB`); suspicion: a page `vk/lazy.rs` set PAGE_NOACCESS
+after GPU writes, faulted from host code (not lifted code), so the read-back path never ran. The earlier run of the same
+game (`-135546-run4`, older graphics) went 170 s without it.
+Violet does the same at 35 s (`build\games\violet\runs\*-long1`: `write of 0x70e5c8df0` from sdk+0x581bd0, the
+memcpy, called from main+0xdbd340); **with `NXGFX_WB_LAZY=0` the same Violet script ran 95 s without it**
+(`*-nolazy`), so it is the lazy write-back's page (a fault on a page `bring_back` does not answer for, or a page made
+inaccessible while the CPU copy into it runs).
+- **os `hle.rs` (lane W, for lane O):** an import every importing module declares **weak** and nothing defines is no
+  longer bound to the reporting stub: it binds to 0 as Horizon's rtld does (`ModuleSyms::weak_imports`). Super Smash
+  Bros. Ultimate tests `nu::VirtualAllocHook` / `nu::VirtualFreeHook` before each call; bound to the stub (which
+  answered 0) its allocator spun in nnMain with no frame drawn (`gap Import _ZN2nu16VirtualAllocHookEmmPv x598`).
+
+**For lane G — Arceus: garbled text bubbles and smeared house textures in Jubilife Village** (2026-11-19 15:48,
+`build\games\arceus\runs\20261119-153916-long1\m6.png`, a PrintWindow capture at 555 s). The opening, the beach and
+the field (`m2.png`, `m4.png`) look right; in the village the speech bubbles' text is unreadable (glyph rows
+displaced, as Turbo's "garbled UI labels" in Z-A before its GOB-order fix) and the house walls / roofs look smeared
+(blocky, misplaced texel rows). 30.0 FPS (p95 34-35 ms) throughout the 600 s run.
+- **os `profile.rs` (lane W, for lane O):** a title no profile describes takes its system resource size from its
+  NPDM (META +0x14) instead of 0, so its virtual address memory works: Anime Girls: Sun of a Beach, Beach Bounce
+  Remastered and Sonic X Shadow Generations (16 MB each) crashed in their static initialisers in
+  `VammManager::AllocateAddressRegion` (read of 0xc0; Beach Bounce printed "IsVirtualAddressMemoryEnabled() is
+  false"). A profile's `sys_resource` still wins (Jamboree's 0).
+- **scripts `gamectl.py` (lane W, coordinator's rule):** `pipe` and `key` refuse unless GAME_LOCK's lane is
+  `NXRS_LANE` and its executable is the target PID's image (`check_owned`); `find` is for looking only.
+  play_scenario stops a scenario at the first refusal (the game exited or the lock is another lane's).
+  **Update (lane W):** not frame generation: Smash (`build\I\runs\20261119-155110-W-smash-menus2`, `lsfg=0`) and the
+  first MK8D run (`20261119-135517-W-mk8d-gp`) hang the same way when a `fullres` request is pending at a present
+  (the first present for both): the main thread stays in `nvnQueuePresentTexture` (`stall: no present for 15 s (frame
+  1)`). Likely path: `queue.rs present_locked` (holding `g.q.sub`, on the async replay thread) -> `shot::on_present`
+  -> `capture` -> `Gpu::read_texels` -> `queue::oneoff`, which calls `aq_drain()` and locks `g.q.sub` again.
+
+**Lane P status and hand-off (2026-11-19 16:15).**
+- Arceus (`build\games\arceus\runs\20261119-153916-long1`, PrintWindow captures `m*.png`): boot, the opening, the
+  beach and the Obsidian Fieldlands field with the player running (`m4.png`), Jubilife Village by 555 s (`m6.png`,
+  garbled text: lane G); 30.0 FPS (p95 34-35 ms) for 600 s, no stall. Its build carries lane P's test mod
+  `mods\arceus60` (on by default: present interval 1, double speed; runs use `NXRS_MOD_ARCEUS60=0`).
+- Violet (`build\games\violet\runs\20261119-155739-long2`, `NXGFX_WB_LAZY=0`): the academy opening (`0002`, `0005`) to
+  the bedroom and the Adventure Guide (`0010-t600.png`) in 600 s; 30 FPS at first, 6-15 FPS in the real-time opening
+  (slow frames: `prep` 53-93 ms with 22-32 ms texture uploads: lane G), 23 FPS at the end. Next: walk out of the
+  bedroom (left stick), the first town.
+- Z-A (`build\games\plzauns61119-160759-run6`, main-tree engine of 15:35, `NXGFX_WB_LAZY=0`): title, opening,
+  **Lumiose City lit and populated with the starters** (`0006-t240.png`; the black world above is gone in that build),
+  no crash in 240 s; 60.0 FPS on the title, 35-46 FPS in the city (p95 22-64 ms, slow frames up to 0.87 s): short of
+  M6's 59. With the lazy write-back on it faults at ~60 s (item above).
+- How lane P runs: `scratchpad` scripts are not in the tree; the equivalent is `py scripts/run_game.py` with
+  `NXRS_LANE=P`, `NXRS_NO_SONY_HID=1` (see the lane I item), `NXOS_SWKBD=auto` (else the name box waits for a person),
+  presses through `scripts/gamectl.py <pid> press A~0.2`, and PrintWindow captures (the graphics-layer `shot` /
+  `fullres` freeze the game today).
