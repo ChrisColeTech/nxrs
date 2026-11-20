@@ -14,8 +14,11 @@ use crate::services::{data_dir, legacy};
 /// Runs the launcher as the options say; its exit code.
 pub fn run(o: Options) -> i32 {
     // a library of its own (--library: tests, a portable library) leaves the data folder alone
+    let note = crate::services::startup_log::note;
     if o.library.is_none() {
+        note(&format!("data folder {}", data_dir::data_dir()));
         legacy::migrate(&data_dir::data_dir());
+        note("migrated");
     }
     if let Some(image) = &o.check_image {
         return headless::check_image(image);

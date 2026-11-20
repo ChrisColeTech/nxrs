@@ -43,6 +43,7 @@ pub fn attach_console() {
 /// Says why the launcher stopped: on stderr, or in a message box when nothing reads stderr (a
 /// double-clicked GUI program).
 pub fn fatal(text: &str) {
+    super::startup_log::note(&format!("fatal: {text}"));
     eprintln!("nxrs: {text}");
     #[cfg(windows)]
     {

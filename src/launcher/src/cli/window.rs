@@ -42,8 +42,10 @@ fn viewport(app: &App) -> egui::ViewportBuilder {
 }
 
 pub fn run(path: &str, o: &Options) -> i32 {
+    crate::services::startup_log::note(&format!("library {path}"));
     let mut probe = App::new(path, o.demo, crate::services::jobs::noop());
     probe.open();
+    crate::services::startup_log::note(&format!("library open: {} games", probe.lib.games.len()));
     let builder = viewport(&probe);
     let native = eframe::NativeOptions {
         viewport: builder,
@@ -53,10 +55,12 @@ pub fn run(path: &str, o: &Options) -> i32 {
     let shot = Arc::new(std::sync::Mutex::new(1));
     let exit = shot.clone();
     let opts = o.clone();
+    crate::services::startup_log::note("opening the window");
     let started = eframe::run_native(
         layout::WINDOW_TITLE,
         native,
         Box::new(move |cc| {
+            crate::services::startup_log::note("window created");
             let ctx = cc.egui_ctx.clone();
             let notify: crate::services::jobs::Notify = Arc::new(move || ctx.request_repaint());
             let mut app = probe;
