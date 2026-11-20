@@ -1676,6 +1676,13 @@ waits for never completes. A log line when a queue parks / is still parked at th
 Earlier (`K-mkw5`) the window losing focus paused the game (FocusHandlingMode 2, as on a console): scripted MKW runs
 need `NXRS_KEEP_FOCUS=1`.
 
+**Lane G4 for lane K (2026-11-20):** G4's parked-queue poll and never-fenced SyncWait change were taken out of the tree
+again (lane K's AcquireTexture sync fix in `nvn/window.rs` covers the stall). Kept from G4: **device item 0x6** answers
+32 on the Switch 2 (mkw-recomp's 1.8.0 table), and the write-watch grouping per allocation joins a gap only while the
+pools cover most of the span (G4's one MKW run, `build/I/runs/20261120-032722-G4-mkw-park`, overlapped a lane K run and
+was killed at ~56 s; its pool sync was up to 47 ms in slow frames before that bound). The mkw-recomp 1.8.0 rendering
+fixes (#423 / #485 / #441 / #291 / #468 / #22 / #395 / #384) are not checked by G4: file the ones a K run shows.
+
 **Not ported (and why):** mkw-recomp's button-icon sheet redraw (#19, its own UI textures), Discord presence, its
 launcher / setup / settings menu, LAN sockets (no LAN layer in nxrs; the `lan` set is there, off). The 1.8.0
 rendering fixes of its CHANGELOG are graphics / shader work, filed for **lane G4**: #423 / #485 push constants reach
@@ -1684,3 +1691,29 @@ compute writes of the water height map reaching guest memory at the fence, #291 
 back at a fence wait, #468 released textures overwritten by a later image dropped, #22 constant-bank reads through
 a storage view, #395 integer abs written as `x * ((x >> 31) | 1)`, photo mode's compute push (#384). Not checked
 against nxrs's graphics in this lane.
+
+**Lane O3, continued (2026-11-20, after a2b663b):**
+- **MATCH cuts** (`translator::aot::nso_match`, cli `profile::match_sites`): a build now applies nxnative's
+  function-matched cuts (set `match`, `NXRS_PATCH_MATCH=0` off; `address space` rules left out). Arceus's
+  capture-demo crash fix and Ocarina's movie cuts match the owner's builds; **they take effect at the games' next
+  build** (the patch table changes the translation key, so that build translates again).
+- **Prompts**: `os::ui` (state machines + a topmost prompt window over the game). The controller applet now waits for
+  players to join when it wants more than it sees: **scripted runs that might meet a controller applet should set
+  `NXOS_CTRL_PROMPT=0`**. Home held 2 s asks to quit (`NXOS_HOME_QUIT=0` off). `input::set_prompt` blocks the game's
+  pads while a prompt is open.
+- **Fonts**: shared font slots from `<data>\fonts\<Name>.bfttf|.ttf`, else a system TTF.
+- **Folder input**: flat folders and folders without a RomFS build (translator `package::folder`).
+- **Metrics**: per-thread guest CPU (`cpu_t<handle>_ms`, `guest_cpu_ms`), `cpu: busiest guest threads` lines;
+  runtime `profile::thread_cpu()` (the profiler's thread list is kept always now).
+- **Gestures**: GetGestureStates answers from the touch screen (`services/gesture.rs`).
+- **Control pipe**: `wpage`, `wtrace`, `wclear` (write watches, `os/src/wwatch.rs`).
+- **Jamboree (current tree, `build/I/runs/20261120-032440-O3-jamboree-focus3`, NXRS_KEEP_FOCUS=1)**: with the boot
+  focus message the game still shows the white fade over the hub at 60 FPS (no hang this time). So the focus
+  message is not what the fade waits on. The fade stays a game-state question (lane W / X): next candidates are the
+  account / friends / online-play answers around the hub (`friends::TryPopFriendInvitationNotificationInfo` and
+  `nifm::IsNetworkAvailable` are the only stand-ins on the path).
+- **Violet new save (`build/I/runs/20261120-032706-O3-violet-new3`)**: past name entry and the opening to the
+  bedroom ("Get Up" with the left stick) at about 7 min; Mom not seen yet. Keep that run's new save next time.
+- **Not done** (lane O3): FRAME_STEP / STUBS, observation gates and the Trinity fence; the engine frame lock;
+  the cheats engine; `bp`; the user-select dialog; shader facts read by the shaders crate (G4's crate; graphics'
+  prewarm reader exists in `vk/pipe.rs prewarm_profile`); AudioIn's real-device half (needs a microphone).

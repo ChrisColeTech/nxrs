@@ -37,6 +37,8 @@ pub fn run() {
             .collect()
     });
     register_debug_commands();
+    let mut cpu = ThreadCpu::default();
+    let mut last_cpu = Instant::now();
     let (mut seen, mut since, mut dumped) = (0u64, Instant::now(), false);
     loop {
         let p = crate::nvn::presents();
@@ -50,6 +52,10 @@ pub fn run() {
             }
         }
         std::thread::sleep(Duration::from_millis(100));
+        if last_cpu.elapsed().as_secs_f64() >= 1.0 {
+            last_cpu = Instant::now();
+            cpu.tick();
+        }
         if beat > 0.0 && last.elapsed().as_secs_f64() >= beat {
             last = Instant::now();
             let svcs: u64 = crate::svc::counts().iter().map(|c| c.1).sum();
@@ -91,6 +97,19 @@ fn hex(s: &str) -> Option<u64> {
 /// The control pipe's debugging commands on the os side (Turbo vk_ctl.c / nxnative DM_CTL): symbols, memory to a
 /// file, the environment, the guest clock's speed, focus and touch gestures for scripted runs.
 pub fn register_debug_commands() {
+    nxconfig::ctl::register("wpage", "<page hex>: log each write to a guest page and the function that made it (up to 600)", |a| match a.first().and_then(|s| hex(s)) {
+        Some(p) => crate::wwatch::arm(p, p + 0x1000),
+        None => "wpage <page hex>
+".into(),
+    });
+    nxconfig::ctl::register("wtrace", "<from hex> <to hex>: log each write to a guest range (at most 64 MB, up to 600)", |a| {
+        match (a.first().and_then(|s| hex(s)), a.get(1).and_then(|s| hex(s))) {
+            (Some(lo), Some(hi)) => crate::wwatch::arm(lo, hi),
+            _ => "wtrace <from hex> <to hex>
+".into(),
+        }
+    });
+    nxconfig::ctl::register("wclear", ": stop every write watch", |_| crate::wwatch::disarm());
     nxconfig::ctl::register("addr", "<mangled name>: the guest address a loaded module defines it at (and its host takeover, if any)", |a| {
         let Some(n) = a.first() else { return "addr <mangled name>\n".into() };
         match crate::hle::sym(n) {
@@ -155,4 +174,52 @@ pub fn register_debug_commands() {
         });
         format!("dragging {x0} {y0} -> {x1} {y1} over {secs} s\n")
     });
+}
+
+/// Guest CPU per thread (Turbo kernel.c): each second, every guest thread's CPU time since the last second goes to
+/// the metrics as `cpu_t<handle>_ms` and the total as `guest_cpu_ms` (metrics=1); the busiest threads of the last
+/// 10 s are logged.
+#[derive(Default)]
+struct ThreadCpu {
+    last: std::collections::HashMap<u32, f64>,
+    window: std::collections::HashMap<u32, f64>,
+    ticks: u32,
+}
+
+impl ThreadCpu {
+    fn tick(&mut self) {
+        let on = nxconfig::metrics::enabled();
+        let mut total = 0.0;
+        for (h, t) in nxrt::profile::thread_cpu() {
+            let d = (t - self.last.insert(h, t).unwrap_or(t)).max(0.0);
+            total += d;
+            *self.window.entry(h).or_default() += d;
+            if on {
+                static NAMES: std::sync::Mutex<Vec<(u32, &'static std::sync::atomic::AtomicU64)>> = std::sync::Mutex::new(Vec::new());
+                let mut n = NAMES.lock().unwrap();
+                let c = match n.iter().find(|x| x.0 == h) {
+                    Some(x) => x.1,
+                    None => {
+                        let name: &'static str = Box::leak(format!("cpu_t{h:x}_ms").into_boxed_str());
+                        let c = nxconfig::metrics::counter(name);
+                        n.push((h, c));
+                        c
+                    }
+                };
+                nxconfig::metrics::add(c, (d * 1000.0) as u64);
+            }
+        }
+        if on {
+            crate::metric!("guest_cpu_ms", (total * 1000.0) as u64);
+        }
+        self.ticks += 1;
+        if self.ticks % 10 == 0 {
+            let mut v: Vec<(u32, f64)> = self.window.drain().collect();
+            v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+            let busy: Vec<String> = v.iter().take(4).filter(|x| x.1 > 0.05).map(|(h, t)| format!("{h:#x} {:.0}%", t * 10.0)).collect();
+            if !busy.is_empty() {
+                crate::log!("cpu: busiest guest threads over 10 s (percent of a core): {}", busy.join(", "));
+            }
+        }
+    }
 }

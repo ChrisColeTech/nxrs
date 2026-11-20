@@ -120,6 +120,8 @@ pub static SCRIPT_PLAYERS: AtomicU32 = AtomicU32::new(0);
 pub static REPLAYING: AtomicBool = AtomicBool::new(false);
 static FOCUS: AtomicBool = AtomicBool::new(true);
 static SUSPENDED: AtomicBool = AtomicBool::new(false);
+/// A host prompt (controller support, Home quit) is open: the game reads no pads.
+static PROMPT: AtomicBool = AtomicBool::new(false);
 static RESCAN: AtomicBool = AtomicBool::new(true);
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
 
@@ -226,6 +228,13 @@ pub fn set_touch(down: bool, x: u32, y: u32) {
     }
 }
 
+/// Where the finger is, without taking a sample (the gesture recognizer's view): down, or released but still inside
+/// its latch.
+pub fn touch_peek() -> Option<(u32, u32)> {
+    let t = TOUCH.lock().unwrap();
+    t.down.then_some((t.x, t.y))
+}
+
 /// The touch the game reads now (None: nothing on the screen).
 pub fn touch_now() -> Option<Touch> {
     let mut t = TOUCH.lock().unwrap();
@@ -256,6 +265,10 @@ pub fn set_focus(focused: bool) {
 pub fn set_suspended(on: bool) {
     SUSPENDED.store(on, Ordering::Release);
 }
+/// A host prompt opens or closes over the game (its pads are the prompt's meanwhile).
+pub fn set_prompt(on: bool) {
+    PROMPT.store(on, Ordering::Release);
+}
 /// A device arrived or left (WM_DEVICECHANGE): rescan now.
 pub fn device_changed() {
     RESCAN.store(true, Ordering::Release);
@@ -263,7 +276,7 @@ pub fn device_changed() {
 
 fn active() -> bool {
     static BG: OnceLock<bool> = OnceLock::new();
-    !SUSPENDED.load(Ordering::Acquire) && (FOCUS.load(Ordering::Acquire) || *BG.get_or_init(|| env_flag("NXRS_CONTROLLER_BACKGROUND")))
+    !SUSPENDED.load(Ordering::Acquire) && !PROMPT.load(Ordering::Acquire) && (FOCUS.load(Ordering::Acquire) || *BG.get_or_init(|| env_flag("NXRS_CONTROLLER_BACKGROUND")))
 }
 
 fn trace() -> bool {

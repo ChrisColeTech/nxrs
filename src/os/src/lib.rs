@@ -24,6 +24,8 @@ pub mod svc;
 pub mod watch;
 
 /// `NXOS_TRACE=svc,ipc,hle,nvn,fs` (or `all`).
+pub mod ui;
+pub mod wwatch;
 pub mod trace {
     use std::sync::OnceLock;
     static T: OnceLock<String> = OnceLock::new();

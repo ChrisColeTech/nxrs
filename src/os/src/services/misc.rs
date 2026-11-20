@@ -238,46 +238,108 @@ unsafe fn aoc_event(c: *mut Cpu) {
 
 // ---- shared fonts
 
+/// The six shared font slots (pl::SharedFontType): the console's are firmware content, so each slot is the player's
+/// own `<data>\fonts\<Name>.bfttf` (decrypted) or `.ttf` when there is one (Turbo main.c fonts_fill), else one system
+/// TTF for every slot (Arial, Segoe UI, Tahoma; `NXOS_FONT` names another).
+const FONT_NAMES: [&str; 6] = ["FontStandard", "FontChineseSimplified", "FontExtendedChineseSimplified", "FontChineseTraditional", "FontKorean", "FontNintendoExtended"];
+
+#[derive(Clone, Copy)]
 struct Font {
     addr: u64,
     size: u64,
 }
 
-fn font() -> Option<&'static Font> {
-    static F: OnceLock<Option<Font>> = OnceLock::new();
-    F.get_or_init(|| {
-        let dir = std::env::var("NXOS_FONT").map(std::path::PathBuf::from).unwrap_or_else(|_| {
-            let w = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-            std::path::Path::new(&w).join("Fonts").join("arial.ttf")
-        });
-        let ttf = std::fs::read(&dir).ok()?;
-        let n = ttf.len() as u64;
-        let a = nxrt::kernel::get().space.kernel_alloc(n + 8, 0x1000);
-        // the BFTTF header: a "decrypted" marker and the length, XOR-keyed and big-endian
-        w32(a, 0x1802_9a7f);
-        w32(a + 4, (n as u32 ^ 0x4962_1806).swap_bytes());
-        crate::guest::write_bytes(a + 8, &ttf);
-        crate::log!("pl: the shared fonts are the stand-in {} ({n} bytes): the console's are firmware content", dir.display());
-        Some(Font { addr: a, size: n + 8 })
-    })
-    .as_ref()
+/// A BFTTF file's TTF (the console's XOR obfuscation: key from its first word, big-endian words).
+pub fn bfttf_decrypt(d: &[u8]) -> Option<Vec<u8>> {
+    const RESULT: u32 = 0x7f9a_0218;
+    if d.len() < 8 {
+        return None;
+    }
+    let w = |o: usize| u32::from_le_bytes(d[o..o + 4].try_into().unwrap());
+    let k2 = w(0) ^ RESULT;
+    let tsz = ((w(4) ^ k2).swap_bytes() as usize).min(d.len() - 8);
+    let mut out = Vec::with_capacity(d.len() - 8);
+    let mut k = 0;
+    while k + 8 < d.len() {
+        let x = if k + 12 <= d.len() { w(8 + k) } else { 0 };
+        out.extend_from_slice(&(x ^ k2).swap_bytes().to_le_bytes());
+        k += 4;
+    }
+    out.truncate(tsz);
+    Some(out)
 }
 
-mfn!(font_state, |a| { font().is_some() as u64 });
-mfn!(font_addr, |a| { font().map_or(0, |f| f.addr + 8) });
-mfn!(font_size, |a| { font().map_or(0, |f| f.size - 8) });
+/// The font file for a slot: the player's file in the data folder's `fonts\`, else None.
+fn slot_file(dir: &std::path::Path, name: &str) -> Option<(Vec<u8>, std::path::PathBuf)> {
+    let b = dir.join(format!("{name}.bfttf"));
+    if let Ok(d) = std::fs::read(&b) {
+        return bfttf_decrypt(&d).map(|t| (t, b));
+    }
+    let t = dir.join(format!("{name}.ttf"));
+    std::fs::read(&t).ok().map(|d| (d, t))
+}
+
+fn fallback_ttf() -> Option<(Vec<u8>, std::path::PathBuf)> {
+    if let Ok(p) = std::env::var("NXOS_FONT") {
+        return std::fs::read(&p).ok().map(|d| (d, p.into()));
+    }
+    let w = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+    ["arial.ttf", "segoeui.ttf", "tahoma.ttf"].iter().map(|n| std::path::Path::new(&w).join("Fonts").join(n)).find_map(|p| std::fs::read(&p).ok().map(|d| (d, p)))
+}
+
+/// A TTF placed in guest memory behind its BFTTF header (a "decrypted" marker and the length, XOR-keyed).
+fn place(ttf: &[u8]) -> Font {
+    let n = ttf.len() as u64;
+    let a = nxrt::kernel::get().space.kernel_alloc(n + 8, 0x1000);
+    w32(a, 0x1802_9a7f);
+    w32(a + 4, (n as u32 ^ 0x4962_1806).swap_bytes());
+    crate::guest::write_bytes(a + 8, ttf);
+    Font { addr: a, size: n + 8 }
+}
+
+fn fonts() -> &'static [Option<Font>; 6] {
+    static F: OnceLock<[Option<Font>; 6]> = OnceLock::new();
+    F.get_or_init(|| {
+        let dir = crate::boot::try_process().map(|p| p.data_dir.join("fonts")).unwrap_or_default();
+        let mut fb: Option<Font> = None;
+        let mut out = [None; 6];
+        for (i, name) in FONT_NAMES.iter().enumerate() {
+            if let Some((ttf, path)) = slot_file(&dir, name) {
+                crate::log!("pl: {name} <- {} ({} bytes)", path.display(), ttf.len());
+                out[i] = Some(place(&ttf));
+                continue;
+            }
+            if fb.is_none() {
+                if let Some((ttf, path)) = fallback_ttf() {
+                    crate::log!("pl: the shared fonts without a file in {} are the system's {} ({} bytes): the console's are firmware content", dir.display(), path.display(), ttf.len());
+                    fb = Some(place(&ttf));
+                }
+            }
+            out[i] = fb;
+        }
+        if out.iter().all(|f| f.is_none()) {
+            crate::log!("[RED] pl: no font found: the game's system text will not show");
+        }
+        out
+    })
+}
+
+fn font_of(ty: u32) -> Option<Font> {
+    fonts().get(ty as usize).copied().flatten().or(fonts()[0])
+}
+
+mfn!(font_state, |a| { font_of(a.w(0)).is_some() as u64 });
+mfn!(font_addr, |a| { font_of(a.w(0)).map_or(0, |f| f.addr + 8) });
+mfn!(font_size, |a| { font_of(a.w(0)).map_or(0, |f| f.size - 8) });
 mfn!(shared_font, |a| {
     // GetSharedFont(int *count, SharedFontData *out, int max, LanguageCode): {u32 type, pad, address, size} per type
     let (count, out, max) = (a.x(0), a.x(1), a.i(2));
-    let Some(f) = font() else {
-        w32(count, 0);
-        return 0;
-    };
-    let mut n = 0;
-    for t in 0..6u64 {
+    let mut n = 0u64;
+    for t in 0..6u32 {
+        let Some(f) = font_of(t) else { continue };
         if (n as i32) < max {
             let e = out + 0x18 * n;
-            w32(e, t as u32);
+            w32(e, t);
             w32(e + 4, 0);
             w64(e + 8, f.addr + 8);
             w64(e + 16, f.size - 8);
@@ -285,12 +347,12 @@ mfn!(shared_font, |a| {
         n += 1;
     }
     w32(count, n as u32);
-    1
+    (n > 0) as u64
 });
 
-/// One built-in font (SDK 21's pl): {u8 type, u8 flag, pad, address, u64 size}, the stand-in TTF for every type.
+/// One built-in font (SDK 21's pl): {u8 type, u8 flag, pad, address, u64 size}: the slot of that number.
 fn builtin_font(out: u64, ty: u32) -> bool {
-    let Some(f) = font() else { return false };
+    let Some(f) = font_of(ty) else { return false };
     crate::guest::zero(out, 0x18);
     crate::guest::w8(out, ty as u8);
     w64(out + 8, f.addr + 8);
@@ -322,10 +384,8 @@ mfn!(builtin_font_set, |a| {
 unsafe fn font_load(c: *mut Cpu) {
     let a = Args(&mut *c);
     let (this, name, mut data, index, cap) = (a.x(0), a.x(1), a.x(2), a.x(3), a.x(4));
-    if let Some(f) = font() {
-        if data == f.addr {
-            data = f.addr + 8;
-        }
+    if let Some(f) = fonts().iter().flatten().find(|f| f.addr == data) {
+        data = f.addr + 8;
     }
     let Some(orig) = crate::hle::sym("_ZN2nn6fontll18ScalableFontEngine8LoadFontEPcPKvjj") else {
         nxrt::rt::guest_fatal(c, "ScalableFontEngine::LoadFont is not in the SDK");
@@ -612,6 +672,24 @@ pub fn register(r: &mut Registry) {
 
 #[cfg(test)]
 mod tests {
+    /// A BFTTF the player put in `fonts\` decrypts to its TTF (Turbo main.c's key from the first word).
+    #[test]
+    fn bfttf_decrypts() {
+        let ttf: Vec<u8> = (0..37u8).collect();
+        let k2 = 0x1234_5678u32;
+        let mut f = vec![];
+        f.extend_from_slice(&(k2 ^ 0x7f9a_0218).to_le_bytes());
+        f.extend_from_slice(&((ttf.len() as u32).swap_bytes() ^ k2).to_le_bytes());
+        let mut padded = ttf.clone();
+        padded.resize(40, 0);
+        for c in padded.chunks(4) {
+            let x = u32::from_le_bytes(c.try_into().unwrap());
+            f.extend_from_slice(&(x.swap_bytes() ^ k2).to_le_bytes());
+        }
+        assert_eq!(super::bfttf_decrypt(&f).unwrap(), ttf);
+        assert_eq!(super::FONT_NAMES.len(), 6);
+    }
+
     #[test]
     fn printf() {
         let s = b"str\0";

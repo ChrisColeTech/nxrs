@@ -168,18 +168,18 @@ pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
     match detected {
         Detected::Folder => {
             let exefs = folder::exefs(&path)?;
-            let romfs_dir = folder::find_exefs(&path).and_then(|e| e.parent().map(|p| p.join("romfs")));
-            let (romfs, marker) = match romfs_dir.filter(|d| d.is_dir()) {
+            // the RomFS is optional (a game without data, homebrew): Turbo builds such a folder with an empty one
+            let (romfs, marker) = match folder::find_romfs(&path) {
                 Some(d) => (RomFs::from_folder(&d)?, (marker::DIR, format!("{}\n", d.display()))),
-                None => return fmt(format!("{}: the folder has no romfs/ beside its exefs/", path.display())),
+                None => (RomFs::empty(format!("{} (no romfs/)", path.display())), (marker::NONE, String::new())),
             };
             Ok(Game {
                 kind: SourceKind::Folder,
-                path,
+                path: path.clone(),
                 exefs,
                 romfs: Arc::new(romfs),
                 display_version: None,
-                control: BTreeMap::new(),
+                control: folder::control(&path),
                 addons: vec![],
                 applied: Applied::None,
                 marker,

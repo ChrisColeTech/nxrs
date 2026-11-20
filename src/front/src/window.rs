@@ -141,6 +141,41 @@ pub fn poll_input() {
     let m = if mouse_mode() { Some(MOUSE.lock().unwrap().stick(f)) } else { None };
     let (b, a) = keys::state(held, m);
     nxos::input::set_keyboard(b, a);
+    home_quit();
+}
+
+/// Home held 2 s on a controller: "Quit the game?" over it (nxnative home_quit.h); A / Return quits, B / Escape /
+/// Home closes it. `NXOS_HOME_QUIT=0` turns it off.
+fn home_quit() {
+    use nxos::ui::{HomeQuit, HqPhase};
+    static Q: Mutex<Option<(HomeQuit, std::time::Instant)>> = Mutex::new(None);
+    if std::env::var("NXOS_HOME_QUIT").as_deref() == Ok("0") {
+        return;
+    }
+    let mut g = Q.lock().unwrap();
+    let (q, t0) = g.get_or_insert_with(|| (HomeQuit::default(), std::time::Instant::now()));
+    let before = q.phase;
+    let (pa, pb) = nxos::ui::pads_ab();
+    let (confirm, cancel) = if before == HqPhase::Prompt { nxos::ui::keys() } else { (false, false) };
+    let now = q.step(t0.elapsed().as_secs_f64(), nxos::input::home_held(), pa, pb, confirm, cancel);
+    if now == before {
+        return;
+    }
+    match now {
+        HqPhase::Prompt => {
+            crate::flog!("Home held: the quit prompt");
+            nxos::input::set_prompt(true);
+            nxos::ui::show("Quit the game?", "A / Return: quit.   B / Esc / Home: keep playing.");
+        }
+        HqPhase::Quit => {
+            nxos::ui::hide();
+            crate::flog!("Home: quit from the prompt");
+            std::thread::spawn(|| crate::quit("Home"));
+        }
+        HqPhase::Settle => nxos::ui::hide(),
+        HqPhase::Idle if before == HqPhase::Settle => nxos::input::set_prompt(false),
+        _ => {}
+    }
 }
 
 fn fps_limit_toggle(h: HWND) {

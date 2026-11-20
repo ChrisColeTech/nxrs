@@ -11,6 +11,7 @@ pub mod audren_ipc;
 pub mod codec;
 pub mod codec_video;
 pub mod fs;
+pub mod gesture;
 pub mod hid;
 pub mod hid_ext;
 pub mod mii;

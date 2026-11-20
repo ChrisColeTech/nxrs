@@ -29,11 +29,9 @@ pub fn on() -> bool {
     *ON.get().unwrap_or(&false)
 }
 
-/// The calling host thread runs guest thread `handle`: sample it while the profiler is on.
+/// The calling host thread runs guest thread `handle`: kept for the profiler's samples and the per-thread CPU
+/// figures (`thread_cpu`).
 pub fn add_current(handle: u32) {
-    if !on() {
-        return;
-    }
     let mut d: HANDLE = core::ptr::null_mut();
     // SAFETY: duplicating our own thread's pseudo-handle into a real one
     let ok = unsafe { DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &mut d, 0, 0, DUPLICATE_SAME_ACCESS) };
@@ -44,15 +42,29 @@ pub fn add_current(handle: u32) {
 
 /// Guest thread `handle` is done on this host thread.
 pub fn remove(handle: u32) {
-    if !on() {
-        return;
-    }
     let mut t = threads().lock().unwrap_or_else(|p| p.into_inner());
     if let Some(i) = t.0.iter().position(|(h, _)| *h == handle) {
         let (_, d) = t.0.remove(i);
         // SAFETY: our duplicated handle
         unsafe { CloseHandle(d as HANDLE) };
     }
+}
+
+/// Every live guest thread's CPU time so far (user + kernel, seconds), by its handle (Turbo kernel.c's per-thread
+/// guest CPU).
+pub fn thread_cpu() -> Vec<(u32, f64)> {
+    use windows_sys::Win32::Foundation::FILETIME;
+    use windows_sys::Win32::System::Threading::GetThreadTimes;
+    let t = threads().lock().unwrap_or_else(|p| p.into_inner());
+    t.0.iter()
+        .filter_map(|&(h, d)| {
+            let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) = unsafe { core::mem::zeroed() };
+            // SAFETY: our duplicated thread handle and our own FILETIMEs
+            let ok = unsafe { GetThreadTimes(d as HANDLE, &mut c, &mut e, &mut k, &mut u) } != 0;
+            let ft = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
+            ok.then(|| (h, ft(k) + ft(u)))
+        })
+        .collect()
 }
 
 /// The host pc of a thread: suspended, read, resumed, nothing else in between (it may hold any lock).

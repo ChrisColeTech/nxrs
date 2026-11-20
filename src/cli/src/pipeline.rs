@@ -363,6 +363,15 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     let prof = crate::profile::find(game.exefs.title_id, &builds);
     out.say(&crate::profile::line(&prof, game.exefs.title_id, &builds));
     let patch_text = crate::profile::patch_table(&builds, out)?;
+    let patch_text = if std::env::var("NXRS_NO_PROFILE_PATCHES").is_ok_and(|v| !v.is_empty() && v != "0") {
+        patch_text
+    } else {
+        let (sites, said) = crate::profile::match_sites(&prof, &game.exefs.files, &builds);
+        for l in &said {
+            out.say(&format!("patch matched: {l}"));
+        }
+        crate::profile::with_match_sites(patch_text, &sites)
+    };
     let title = a
         .name
         .clone()

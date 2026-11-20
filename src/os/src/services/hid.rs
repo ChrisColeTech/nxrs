@@ -523,6 +523,37 @@ fn players_reported() -> i32 {
 }
 
 const RES_CTRL_CANCELED: u64 = 202 | 3101 << 9;
+
+/// The controller-support prompt over the game until it has its answer (true: enough players, done).
+fn ctrl_prompt(min: i32, max: i32, joined: i32) -> bool {
+    use crate::ui::{CpPhase, CtrlPrompt};
+    let (a, b) = crate::ui::pads_ab();
+    let mut q = CtrlPrompt::open(min, max, joined, a, b);
+    crate::log!("hid: controller applet: {min} players wanted, {joined} joined: the prompt waits for controllers to join");
+    crate::input::set_prompt(true);
+    let mut shown = String::new();
+    loop {
+        let (a, b) = crate::ui::pads_ab();
+        let (confirm, cancel) = crate::ui::keys();
+        let phase = q.step(players_reported(), crate::ui::pads_waiting(), a, b, confirm, cancel);
+        if phase == CpPhase::Open {
+            let (t, x) = q.text();
+            if x != shown {
+                crate::ui::show(&t, &x);
+                shown = x;
+            }
+        } else {
+            crate::ui::hide();
+        }
+        if phase == CpPhase::Idle {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    crate::input::set_prompt(false);
+    crate::log!("hid: controller prompt closed: {} ({} players)", if q.ok { "done" } else { "cancelled" }, q.joined);
+    q.ok
+}
 hidfn!(controller_support, |a| {
     // (ControllerSupportResultInfo* out, const ControllerSupportArg& {i8 min, i8 max, ...})
     let (out, arg) = (a.x(0), a.x(1));
@@ -551,7 +582,15 @@ hidfn!(controller_support, |a| {
             }
         }
     }
-    let canceled = min > count;
+    // still too few: the player screen a Switch shows, as a host prompt the game's thread waits on until enough
+    // controllers joined or the player closes it (nxnative ctrl_prompt.h); NXOS_CTRL_PROMPT=0 answers at once
+    // (scripted runs), as does a run with no game window
+    let mut canceled = min > count;
+    if canceled && crate::options::get("ctrl_prompt").trim() != "0" && std::env::var("NXOS_CTRL_PROMPT").as_deref() != Ok("0") {
+        let ok = crate::sched::without_core(|| ctrl_prompt(min, max, count));
+        count = players_reported();
+        canceled = !ok || min > count;
+    }
     // more than the maximum: the highest players are left out
     let mut p = PLAYERS - 1;
     while max > 0 && p > 0 && count > max {
@@ -849,7 +888,16 @@ macro_rules! idle_dev {
 idle_dev!(debugpad_state, debugpad_states, 0x20);
 idle_dev!(keyboard_state, keyboard_states, 0x30); // KeyboardState is 0x30 bytes (nxnative, yuzu); 0x38 overran the caller's by 8
 idle_dev!(mouse_state, mouse_states, 0x28);
-hidfn!(gestures, |a| { 0 });
+// GetGestureStates(GestureState *out, int count): the newest entries of the gesture recognizer's history (newest
+// first, 16 kept), built from the touch screen (`gesture.rs`, nxnative hle_touch.c / yuzu's rules).
+hidfn!(gestures, |a| {
+    let (out, n) = (a.x(0), a.i(1).clamp(0, 16) as usize);
+    let entries = crate::services::gesture::fill(n, crate::input::touch_peek(), crate::clock::now_ns());
+    for (i, e) in entries.iter().enumerate() {
+        crate::guest::write_bytes(out + 0x60 * i as u64, e);
+    }
+    entries.len() as u64
+});
 hidfn!(handheld_mode, |a| { 0 });
 hidfn!(comm_mode, |a| { 0 });
 
