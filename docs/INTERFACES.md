@@ -2225,6 +2225,20 @@ write-watch calls and their time every 600 submissions).
   off): bringing such a page back put the buffer's copy over the CPU's bytes. Diagnosis line: `CPU write kept out of
   GPU-written texture` (a CPU write under half of a texture the GPU wrote is not uploaded: the rule in `image.rs`); not
   seen in `K2-mkw9` before its fault at 55 s.
+- **Guest GPU addresses -> device addresses, every path read (08:10):** vertex / index / indirect / uniform / storage
+  binds, texel buffers, copies, mesh records and the clamp kernel all go through `mem::resolve` (a pool range ->
+  (VkBuffer, offset), the pool's own buffer) or a staging buffer of the submission; descriptor-buffer addresses come
+  from the buffer's own device address (`addr_of` / `buffer_address`, the zero buffer when none); query / report
+  targets and conditional rendering are read and written by the CPU at completion; only c9a56f796ea4a4cd /
+  ce770ef0597876ca use the raw global-memory table (delta per pool). No path hands a guest address to the device as
+  is. **What can hold a dead device reference: the texture pool's slots.** A slot keeps the descriptor of the image
+  it was registered with after the game finalizes that texture (on the console that descriptor still names memory
+  that is there); nxrs parks the image 8 frames, then destroys it and its views, and the slot's descriptor then names
+  freed memory (with descriptor buffers, a VA that is no longer mapped). A shader that indexes the pool (bindless) or a
+  draw whose plain binding reads that slot then reads unmapped memory. `NXGFX_DESTROY_DELAY=64` only moved that
+  later. **Fix (graphics `vk/image.rs` `scrub_slots`, `vk/exec.rs` `dummy_view_ready`):** when a parked or evicted
+  image (or an alias's views) goes, every pool slot naming its texture first gets the zero stand-in's view (the
+  console would show the old bytes; nxrs shows zeros, no fault). `NXGFX_SCRUB_SLOTS=0` off. Not run yet.
 - Runs `K2-mkw7` (07:22), `K2-mkw8` (07:32), `K2-mkw9` (08:03) each reset the display driver; next MKW run waits for
   G4's Smash address-report run.
 

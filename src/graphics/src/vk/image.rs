@@ -973,6 +973,7 @@ impl Gpu {
             }
             let views: Vec<vk::ImageView> = im.views.drain().map(|(_, v)| v).collect();
             drop(imgs);
+            self.scrub_slots(serial, im.tex.d.target);
             self.defer_image_free(Box::new(move |g: &Gpu| unsafe {
                 for v in views {
                     g.dev().destroy_image_view(v, None);
@@ -988,6 +989,7 @@ impl Gpu {
         let old = self.evict_parked(&mut imgs, frame);
         drop(imgs);
         for im in old {
+            self.scrub_slots(im.tex.serial, im.tex.d.target);
             self.destroy_released(im);
         }
     }
@@ -1026,6 +1028,7 @@ impl Gpu {
         let n = gone.len();
         let bytes: u64 = gone.iter().filter_map(|im| im.alloc.as_ref().map(|a| a.size())).sum();
         for im in gone {
+            self.scrub_slots(im.tex.serial, im.tex.d.target);
             self.destroy_released(im);
         }
         static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -1343,6 +1346,36 @@ impl Gpu {
         };
         for f in due {
             self.q.defer_after_use(f);
+        }
+    }
+
+    /// The texture pool's slots that name `serial` get the zero stand-in, before its views go: a slot keeps its
+    /// descriptor after the game finalizes the texture (the console's descriptor still points at memory that is
+    /// there), and a shader that samples it after the image went read freed memory and lost the device (lane K2:
+    /// MKW's device losses at addresses no live allocation held). `NXGFX_SCRUB_SLOTS=0` off.
+    fn scrub_slots(&self, serial: u64, tex_target: i32) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("NXGFX_SCRUB_SLOTS").as_deref() != Ok("0")) {
+            return;
+        }
+        let ids = self.tables.ids_of(&std::iter::once(serial).collect());
+        if ids.is_empty() {
+            return;
+        }
+        let mut n = 0;
+        for (id, _, v) in ids {
+            let target = match v {
+                Some(v) if v.bits & VW_TARGET != 0 => v.target as i32,
+                _ => tex_target,
+            };
+            let Some(view) = super::exec::dummy_view_ready(self, target, false) else { return };
+            let sview = super::exec::dummy_view_ready(self, target, true);
+            self.tables.write_image(&self.d, id, view, sview);
+            n += 1;
+        }
+        static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            crate::vklog!("texture pool: {n} slot(s) of an image that goes now name the zero stand-in (NXGFX_SCRUB_SLOTS=0 off)");
         }
     }
 

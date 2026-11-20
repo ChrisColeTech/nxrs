@@ -1599,8 +1599,19 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
 }
 
 /// 1x1 zero images standing in for unbound textures, one per view type.
+static DUMMY: std::sync::Mutex<Option<(vk::Image, vk::Image, Vec<(i32, bool, vk::ImageView)>)>> = std::sync::Mutex::new(None);
+
+/// The zero stand-in's view for `target` when the stand-in images exist already (made at the first unbound texture);
+/// None before. For the texture pool's slots of an image that goes (`image.rs` `scrub_slots`).
+pub fn dummy_view_ready(g: &Gpu, target: i32, storage: bool) -> Option<vk::ImageView> {
+    if DUMMY.lock().unwrap().is_none() {
+        return None;
+    }
+    let mut d = DUMMY.lock().unwrap();
+    Some(dummy_view_of(g, d.as_mut()?, target, storage))
+}
+
 fn dummy_view(g: &Gpu, sub: &mut Sub, target: i32, storage: bool) -> vk::ImageView {
-    static DUMMY: std::sync::Mutex<Option<(vk::Image, vk::Image, Vec<(i32, bool, vk::ImageView)>)>> = std::sync::Mutex::new(None);
     let mut d = DUMMY.lock().unwrap();
     if d.is_none() {
         let mk = |ty: vk::ImageType, layers: u32, cube: bool| {
@@ -1644,7 +1655,11 @@ fn dummy_view(g: &Gpu, sub: &mut Sub, target: i32, storage: bool) -> vk::ImageVi
         super::queue::full_barrier(g, sub.pre);
         *d = Some((i2, i3, Vec::new()));
     }
-    let (i2, i3, views) = d.as_mut().unwrap();
+    dummy_view_of(g, d.as_mut().unwrap(), target, storage)
+}
+
+fn dummy_view_of(g: &Gpu, d: &mut (vk::Image, vk::Image, Vec<(i32, bool, vk::ImageView)>), target: i32, storage: bool) -> vk::ImageView {
+    let (i2, i3, views) = d;
     if let Some(v) = views.iter().find(|v| v.0 == target && v.1 == storage) {
         return v.2;
     }
