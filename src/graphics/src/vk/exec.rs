@@ -612,7 +612,32 @@ pub mod passdump {
 /// workgroups. Indirect: the game's records ({count, first}, 3D {x, y, z}) are written by the GPU earlier in the same
 /// submission, so the workgroup counts are copied on the GPU into Vulkan's {x, y, z} records (outside the pass) and
 /// drawn from there; with a count buffer, MultiDraw…IndirectCount reads the draw count on the GPU too.
+/// A checkpoint before a draw or dispatch (vk/lost.rs: what the GPU was doing if it stops responding).
+fn checkpoint(g: &Gpu, sub: &Sub, qs: &QState, direct: bool, what: impl FnOnce() -> String) {
+    super::lost::checkpoint(g, sub.main, direct, || {
+        let keys: Vec<String> = qs.prog.iter().enumerate().filter_map(|(i, m)| m.as_ref().map(|m| format!("{}:{}", i, crate::nvn::prog::key_hex(&m.key)))).collect();
+        format!("{} with shaders [{}]", what(), keys.join(" "))
+    });
+}
+
+/// The device's task workgroup count limits (VK_EXT_mesh_shader).
+fn mesh_limits(g: &Gpu) -> [u32; 3] {
+    static L: std::sync::OnceLock<[u32; 3]> = std::sync::OnceLock::new();
+    *L.get_or_init(|| {
+        let mut mp = vk::PhysicalDeviceMeshShaderPropertiesEXT::default();
+        let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut mp);
+        unsafe { g.d.instance.get_physical_device_properties2(g.d.pdev, &mut p2) };
+        let c = mp.max_task_work_group_count;
+        if c[0] == 0 {
+            [65535; 3]
+        } else {
+            c
+        }
+    })
+}
+
 fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mesh) {
+    checkpoint(g, sub, qs, false, || "a mesh draw".to_string());
     // a mesh pipeline has no vertex input: the next draw sets it again
     qs.vin_last.borrow_mut().0 = 0;
     if !g.d.caps.mesh {
@@ -671,6 +696,12 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
     match args {
         None => {
             let (x, y, z) = if m.three_d != 0 { (m.x, m.y, m.z) } else { (m.x, 1, 1) };
+            // counts past the device's limits are undefined (a GPU fault or hang): held to them, said once
+            let lim = mesh_limits(g);
+            let (x, y, z) = (x.min(lim[0] as i32), y.min(lim[1] as i32), z.min(lim[2] as i32));
+            if x != m.x || (m.three_d != 0 && (y != m.y || z != m.z)) {
+                crate::log::red_once(&format!("a mesh draw of {}x{}x{} task groups held to the device's {lim:?}", m.x, m.y, m.z));
+            }
             if x > 0 && y > 0 && z > 0 {
                 unsafe { ms.cmd_draw_mesh_tasks(sub.main, x as u32, y as u32, z as u32) };
             }
@@ -697,6 +728,7 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
 
 /// MultiDraw{Arrays,Elements}IndirectCount: Vulkan's indirect draws with a count the GPU reads.
 fn multi_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_multi_draw) {
+    checkpoint(g, sub, qs, false, || "an indirect multi-draw".to_string());
     if m.max <= 0 {
         return;
     }
@@ -1635,7 +1667,11 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                         }
                         vk::DescriptorBufferInfo { buffer: buf, offset: off, range: n }
                     }
-                    None => vk::DescriptorBufferInfo { buffer: zero, offset: 0, range: 65536 },
+                    None => {
+                        let k: String = m.key.iter().map(|b| format!("{b:02x}")).collect();
+                        crate::log::red_once(&format!("shader {k} (stage {st}): storage buffer {cb_slot}:{cb_off:#x} at {a:#x} (+{n:#x}) is in no memory pool: a 64 KiB zero buffer bound"));
+                        vk::DescriptorBufferInfo { buffer: zero, offset: 0, range: 65536 }
+                    }
                 };
                 bufs.push((b, vk::DescriptorType::STORAGE_BUFFER, info));
             }
@@ -2326,6 +2362,7 @@ fn quads_indices(n: u32, src: Option<(&[u8], i32)>) -> Vec<u32> {
 }
 
 fn draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw) {
+    checkpoint(g, sub, qs, d.ind == 0, || format!("a draw of {} vertices x{}{}", d.count, d.instances, if d.ind != 0 { format!(", indirect at {:#x}", d.ind) } else { String::new() }));
     let inst = if d.instances <= 0 { 1 } else { d.instances as u32 };
     append::draw(g, sub, qs, d.ind, false);
     if !draw_setup(g, sub, qs, d.prim, d.base_instance as u32) {
@@ -2355,6 +2392,7 @@ fn draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw) {
 }
 
 fn draw_idx(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw_idx) {
+    checkpoint(g, sub, qs, d.ind == 0, || format!("an indexed draw of {} indices x{}{}", d.count, d.instances, if d.ind != 0 { format!(", indirect at {:#x}", d.ind) } else { String::new() }));
     let inst = if d.instances <= 0 { 1 } else { d.instances as u32 };
     let isz = match d.itype {
         index_type::U8 => 1u64,
@@ -2419,6 +2457,7 @@ fn draw_idx(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw_idx) {
 }
 
 fn dispatch(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
+    checkpoint(g, sub, qs, false, || format!("a dispatch of {}x{}x{} groups{}", d.x, d.y, d.z, if d.ind != 0 { format!(", indirect at {:#x}", d.ind) } else { String::new() }));
     end_pass(g, sub, qs);
     let Some(cs) = qs.prog[5].clone() else {
         crate::log::red_once("dispatch with no compute shader bound");

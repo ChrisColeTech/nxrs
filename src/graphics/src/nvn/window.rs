@@ -201,8 +201,8 @@ static PROFILE_INTERVAL: std::sync::atomic::AtomicI32 = std::sync::atomic::Atomi
 
 /// The game's profile forces this interval (0 = not forced); os calls it at start-up.
 pub fn set_profile_interval(n: i32) {
-    PROFILE_INTERVAL.store(n.clamp(0, 4), std::sync::atomic::Ordering::Relaxed);
-    if n > 0 {
+    let n = n.clamp(0, 4);
+    if PROFILE_INTERVAL.swap(n, std::sync::atomic::Ordering::Relaxed) != n && n > 0 {
         crate::nvnlog!("present interval forced to {n} by the game's profile");
     }
 }

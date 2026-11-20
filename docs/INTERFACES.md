@@ -759,6 +759,44 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   `vk_defer.c`), ray tracing (PORT_PLAN 5A.4 row), VRAM eviction, capture / replay, DKB's purple world, Wonder's
   stutter measured.
 
+**Lane G4, round 2 (2026-11-20, after the 03:51 crash; uncommitted).**
+- **GPU hangs (top priority).** `vk/lost.rs`: VK_NV_device_diagnostic_checkpoints before every dispatch and indirect
+  draw (`NXGFX_CHECKPOINTS=all`: every draw; `0` off), what each was (shader keys, sizes, indirect address); VK_EXT_device_fault.
+  On VK_ERROR_DEVICE_LOST (submit, the completion wait, present, acquire, sparse binds) the report is logged once,
+  then the process ends with **exit code 71** (no retry, no panic). The device line says what is on: `if the GPU
+  stops responding: checkpoints …, the driver's fault report …, loops bounded at …`.
+  - **MKW:** lane K's runs `-K-mkw13-demote` / `-K-mkw14-robust` were reported: a mesh draw (task fea1d6ca04512de1,
+    mesh ddc034e8e009ebfc, pixel 3cc3501255bb2d74), the driver's fault an **invalid read** (0xca19c6000,
+    0xcbf689000). The task shader reads storage buffers through descriptors: **robust buffer access is now on by
+    default on NVIDIA** (Turbo, Ryujinx; `NXGFX_ROBUST=0` off). Details in the MKW (lane K) section.
+  - **DKB** (`-G4-dkb-pools2`, 03:44 reset): lost right after a new pipeline (pipeline lookups 446 ms) at 116 s, the
+    frame rate falling 60 → 20 → 1 FPS before it; no checkpoints then. DKB_HANG3
+  - **Every shader loop is bounded** (`shaders::link::loop_guard`, applied at module load: a counter per function,
+    the back-edge goes to the loop's merge after 65,536; `NXGFX_LOOP_GUARD=<n>`, 0 off). 47 of DKB's first 300
+    modules have loops. Lane C's test clean on MK8D / DKB / Z-A / Smash with it; GPU test `loops_are_bounded`.
+  - Not done: indirect counts clamped before the draw (an indirect draw sits inside a pass, where no compute can run;
+    the checkpoint names the draw and its indirect address), flight recorder / Aftermath.
+- **Recording on a thread of its own** (`vk/defer.rs`, `NXGFX_DEFER=1`, off): barriers, passes, copies, blits, clears
+  and queries are queued with copies now (they waited for the recorder before), and the main buffers have a command
+  pool of their own (the replay thread records the upload buffer meanwhile; one pool's buffers may not be recorded
+  at once: the validation layer's threading check found it). MK8D measured before this change: on 10.8 ms of replay a
+  frame against 5.75 off, 57.6 against 59.4 FPS: off by default. Not measured again yet.
+- **Ray tracing** (`vk/rt.rs`): acceleration structures from NVN2's own build descriptions, keyed by guest address;
+  GPU test `ray_query_traces_a_triangle`. NVN2's command entry points still wait for their argument layouts.
+- **VRAM eviction** (`image.rs vram_budget`, VK_EXT_memory_budget, every 30 frames, over 90%: the parked images go);
+  GPU test `vram_budget_frees_parked_images`. **Sampler pool set** 16,384 (Smash registers sampler IDs up to 6,400:
+  past the old 4,096 they had no descriptor). **NVN2 device item 0x6** answers 32.
+- **Measured:** Wonder's first run with the profile prewarm (`-G4-wonder-first`, key file emptied): 3,955 shader parts
+  made ahead, 58.5 FPS over 20-190 s, 36 slow frames, the worst 2.49 s at 83 s (1,706 ms of pipeline lookups, 61
+  pipelines made: the first entry into a level still compiles there); G3's `x2` second session had 17. DKB
+  (`-G4-dkb-pools2`): 60 FPS through the opening (39-80 s), then the device loss above; its pool sync 12-33 ms a frame
+  (was 33.8).
+- **MK8D shadowed ground:** with `NXGFX_ASYNC=0` (`-G4-mk8d-sync2`) the stretch past the grandstand is right (no cyan
+  road, no black), so the cyan / black there comes from asynchronous replay (a race or the replay reading memory the
+  game has rewritten by then); the karts' own shadow stays a cyan blob either way (the swizzle question above).
+  `NXGFX_ASYNC_PRESENTS=1` (one present queued at most) was queued to tell lag from a race; not run yet (GPU resets'
+  cooldowns).
+
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
 
@@ -1549,21 +1587,46 @@ which has no music; the music plays once the game starts.
   `O3_ARGS` adds `--key=value`). Copies in `build/O3/{mk8d,violet}`; saves backed up in `build/O3/saves`.
 - **Patch table (translator `aot::patches`), new lines**: `area <set> <module> <words>`, `areloc <module> <index>
   adrp|b|bl state|area|module <addend>`, and a site word `@<op>:<target>:<addend>[:<word>]`. A module with an area
-  gets a lifted code module `<module>_stubs` (in layout.json, so in modules.c and the dispatch table) after main's
-  patch page; its first page is the frame-step state page. os skips `*_stubs` when loading the ExeFS and maps them RW.
+  gets a lifted code module `<module>_stubs` (in layout.json, so in modules.c and the dispatch table) after the
+  last module (2 MiB aligned; the layout packs modules, so there is no room right after main); its first page is the frame-step state page. os skips `*_stubs` when loading the ExeFS and maps them RW.
   `Module::code(name, base, code, words, entries)` and `Module::extra_seeds` (function starts the table adds).
 - **Profile patches placed by `nxrs-build`** (cli `profile::{stubs, trinity_sites}`): sets `fstep`
   (`NXRS_PATCH_FSTEP`), `stubs` (`NXRS_PATCH_STUBS`), `trinity` (`NXRS_PATCH_TRINITY`); `<data>\frame_step.txt`.
   **For lane K:** MKW's profile says `fps_target 60`, so its next build gets nxnative's frame-interval stub (main,
   one site) and the host's frame step (hold 1 at 60); `NXRS_PATCH_FSTEP=0` or `NXOS_FPS_TARGET=0` leaves the game's
-  own interval. **For lane G4:** the frame step sets the hold through `nvn::window::set_profile_interval` (only when
+  own interval. **Lane O3 builds a separate MKW copy** (`build\O3\mkw-fs`, from `build\games\mkw\mkw_data` as a
+  folder input, engine `target\O3`) only to prove the frame-step stubs module translates, compiles and links; K's
+  `build\games\mkw` and its saves are not touched, and O3 does not run it while K owns MKW. **For lane G4:** the
+  frame step sets the hold through `nvn::window::set_profile_interval` (only when
   it changes, as that logs); a quiet setter would be better.
 - **os `fstep`** (state page writer and step controller, at each present), **os `cheats`** (dmnt VM, per present;
   control commands `cheats`, `cheat on|off <name>`), **os `fpslock::main()`** (main's facts once booted).
 - **Options, PC defaults** (owner, 2026-11-20: nxrs is a native PC app, not an emulator): `pause_on_focus_loss` 0,
-  `controller_prompt` 1, `home_quit` 1, `keyboard_box` 1 (all in the option table, read live). Other console-UI
-  imitations found, not options yet: library applets answered at once with no UI (MiiEdit cancelled, others closed),
-  the user picker always the console user, `docked` (already an option).
+  `controller_prompt` 1, `home_quit` 1, `keyboard_box` 1, and the PC's player: `pc_user` 1 (1..8: the profile
+  opened at launch, the last-opened user, the account picker's and PlayerSelect's answer, always registered) with
+  `pc_user_name` "Player" (`NXOS_NICK` overrides); test `account::tests::pc_user_option`.
+- **Library applets, the call per applet** (owner rule: a host UI only where a PC player needs one):
+  Controller (0x0C): host prompt, done (`controller_prompt`). Software keyboard (0x11): host text box, done
+  (`keyboard_box`). PlayerSelect (0x10): no UI, the `pc_user` option answers. Error (0x0E): **warranted** (the game's
+  message to the player: a host notice, non-blocking), not built yet. OfflineWeb (0x17, game manuals in the
+  game's own HTML): **warranted** (open it in the PC's browser), not built yet. Auth (0x0A, parental PIN): no UI,
+  a PC has no parental lock. Cabinet (0x0B, amiibo): no UI until there is an amiibo-file option. DataErase (0x0D),
+  Set (0x16), PhotoViewer (0x15): console settings / album, closed. NetConnect (0x0F), Web (0x13), Shop (0x14),
+  LoginShare (0x18), WifiWebAuth (0x19), MyPage (0x1A): online, closed. MiiEdit (0x12): no UI, cancelled (the game
+  keeps its default Mii).
+- **Observation gates: not built, on purpose.** Every gate nxnative places (OBS_UE_MALLOC, OBS_REGION_ASK / GOT /
+  FREE, OBS_STDALLOC_INIT, OBS_UE_REGION; `dm.h`, `hle_svc.c`) is a workaround for the iPhone's / Mac's address space
+  ("not the game", its own comments): the `address space` purpose nxrs leaves out (512 GB guest space). No profile
+  records an `[[obs]]` entry. A gate mechanism with no caller would be a fake feature; when a game needs one, the
+  translator's site + host function call is the place.
+- **Frame lock finders:** the generic target frame rate (nxnative `fps_target.py`) is in os `fpslock`
+  (`target_field_find`, run on main as loaded, written each present; test `target_field_by_its_readers`). Left:
+  Unreal console variables / fixed frame rate, Unity targetFrameRate / vSyncCount, Monolith's interval (no game of
+  the owner's here uses those engines, so nothing could check them).
+- **Stubs that read the module at export** (4 bodies: HW Age of Calamity's matched frame step, Xenoblade X DE,
+  01008DD013200000, 0100A00019DE0000): left. Their Python assembles code from addresses it reads out of the module
+  (values that land in immediates, not only relocations), so each needs its generator ported; none of those games
+  is here to check one against.
 - **Findings**: Violet new game passes name entry with `NXOS_SWKBD=auto` (the old run's gradient was the opening's
   wait, not the keyboard: no swkbd call had happened); the opening runs past 5 minutes, so "Mom missing" is still
   open. AudioIn: this PC has no capture endpoint now (DualSense mic disconnected). The owner was at the PC during
@@ -1708,7 +1771,7 @@ task shader reads two storage buffers (s0 / s1 from its c0 table) and the mesh-d
 faults the GPU when robust buffer access is off, which it was. **Fix (G4): robust buffer access is on by default on
 NVIDIA** (Turbo and Ryujinx do the same; `NXGFX_ROBUST=0` off). Still to find: why the address is outside the bound
 range (a storage buffer whose guest address is in no pool gets the zero buffer, 64 KB; or the task shader's record
-index). Not run by G4 (K owns MKW runs). K's `20261120-041317-K-mkw14-robust` (a build from before the default changed: its log has no `if the GPU stops responding` line) lost the device the same way: checkpoint #5256, the same three shaders, invalid read at 0xcbf689000. If a build with robust buffer access still resets there, the read is not through a bounded descriptor (a pointer the task shader computes): then the task shader's SPIR-V is the next look (G4).
+index). Not run by G4 (K owns MKW runs). K's `20261120-041317-K-mkw14-robust` (a build from before the default changed: its log has no `if the GPU stops responding` line) lost the device the same way: checkpoint #5256, the same three shaders, invalid read at 0xcbf689000. If a build with robust buffer access still resets there, the read is not through a bounded descriptor (a pointer the task shader computes): then the task shader's SPIR-V is the next look (G4). **K's `-K-mkw15-robust-sets` (04:24):** another mesh program this time (task 6098504f5d12ea03, mesh 1de24686294997d8, pixel 1e3e40ea043238db), checkpoints #124-#190 in flight (all mesh draws of that program), the fault an **invalid read at 0x0**. A read at address 0 is not a bounded descriptor read: a descriptor whose address is 0 or a pointer the shader built. G4's next step (needs a run, K's or G4's): `NXGFX_CHECKPOINTS=all` and the pass dump of the frame before, to see which resource of that program is unbound; meanwhile `NXGFX_MESH=0` (mesh draws off) tells whether MKW runs on without the resets.
 
 **Not ported (and why):** mkw-recomp's button-icon sheet redraw (#19, its own UI textures), Discord presence, its
 launcher / setup / settings menu, LAN sockets (no LAN layer in nxrs; the `lan` set is there, off). The 1.8.0
@@ -1797,3 +1860,17 @@ lane K's; G4 please review).**
   bank, the payload, shared memory, outputs bounded (32 vertices, at most 16 primitives); the fragment shader
   (3cc3501255bb2d74) two constant banks only. No raw pointers, no textures. Next: `K-mkw15` with
   `NXGFX_DESCBUF=0 NXGFX_ROBUST=1` (classic sets, where robustness applies).
+- **`K-mkw15-robust-sets` (`NXGFX_DESCBUF=0 NXGFX_ROBUST=1`; GPU RESET at 18.5 s):** another mesh draw (#190, shaders
+  [1:1e3e40ea043238db 3:6098504f5d12ea03 4:1de24686294997d8]) faulted, invalid read at **0x0**. Every MKW device loss
+  so far is in a mesh draw (task + mesh shaders), at a different draw each run. Mesh draws bind nxrs's own draw records
+  (`exec.rs` `mesh_draw`: `qs.mesh_rec`, read by the task shader at `mesh_draw[mesh_push[0] * DrawIndex + 1]`) and,
+  for indirect draws, a staged {x, 1, 1} argument copy; which read faults is not known yet. Next: `NXGFX_MESH=0`
+  (mesh draws skipped) to confirm the hang is confined to the mesh path.
+- **Not run yet (lane K, 04:35):** `K-mkw16-nomesh` (`NXGFX_MESH=0`: mesh draws skipped, to confirm the hang is
+  confined to the mesh path and let the menus / race go on meanwhile) did not start: G4's exclusive DKB run took the
+  machine first. Command, for whoever runs MKW next: `py scripts/play_scenario.py mkw-race --exe
+  build\games\mkw\mkw.exe --label K-mkw16-nomesh --option lsfg=0 --env NXRS_KEYS=12:A*400/1.5 --env NXGFX_MESH=0`
+  (with `NXRS_LANE=K NXRS_ESC_QUIT=0 NXRS_CLOSE_QUIT=0 NXRS_KEEP_FOCUS=1 NXRS_NO_ACTIVATE=1`). Lane K's graphics
+  changes, all small: `nvn/window.rs` (acquire sync satisfied at once: the stall fix), `vk/spvfix.rs` + `vk/shader.rs`
+  (`sabs_product`, `kill_demote`, their switches `NXGFX_SABS_FIX` / `NXGFX_DEMOTE_FIX`), `vk/device.rs`
+  (`NXGFX_ROBUST`, diagnosis, off), `vk/exec.rs` (a red line when a storage buffer falls back to the zero buffer).

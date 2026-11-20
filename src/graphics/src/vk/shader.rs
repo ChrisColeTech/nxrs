@@ -17,6 +17,12 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 /// The device's maxCombinedClipAndCullDistances (0 until the device is made): modules declaring more are trimmed.
+/// `NXGFX_LOOP_GUARD`: the back-edges a shader invocation's function may take (0: loops left unbounded).
+pub fn loop_cap() -> u32 {
+    static C: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *C.get_or_init(|| std::env::var("NXGFX_LOOP_GUARD").ok().and_then(|v| v.parse().ok()).unwrap_or(65536))
+}
+
 pub static CLIP_CULL_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -596,6 +602,9 @@ impl Library {
         let (w, res, pool, c1) = remap(words, &r, json)?;
         // a vertex shader's outputs written once at the end (`spvfix`; NXGFX_LATE_OUTPUTS=0: as translated)
         let w = if r.stage == 0 && r.mesh == 0 && std::env::var("NXGFX_LATE_OUTPUTS").as_deref() != Ok("0") { super::spvfix::late_outputs(&w).unwrap_or(w) } else { w };
+        // a discard made a demote to a helper: NVIDIA lost the device on a pass whose fragment shader ends pixels
+        // midway (mkw-recomp #22 / #231; NXGFX_DEMOTE_FIX=0 off)
+        let w = if r.stage == 1 && std::env::var("NXGFX_DEMOTE_FIX").as_deref() != Ok("0") && super::spvfix::DEMOTE.load(std::sync::atomic::Ordering::Relaxed) { super::spvfix::kill_demote(&w).unwrap_or(w) } else { w };
         // integer abs as a product, which NVIDIA's compiler does not turn into a GPU fault (mkw-recomp #395 / #22;
         // NXGFX_SABS_FIX=0 off)
         let w = if std::env::var("NXGFX_SABS_FIX").as_deref() != Ok("0") { super::spvfix::sabs_product(&w).unwrap_or(w) } else { w };
@@ -610,6 +619,15 @@ impl Library {
             }
         } else {
             w
+        };
+        // every loop bounded (GPU hangs: a loop whose exit depends on garbage never ends and the driver resets the GPU);
+        // NXGFX_LOOP_GUARD=<back-edges a call> (default 65536), 0 off
+        let w = match loop_cap() {
+            0 => w,
+            cap => match shaders::link::loop_guard(&w, cap) {
+                Some((nw, _)) => nw,
+                None => w,
+            },
         };
         // gl_PerVertex's unused cull member dropped when clip + cull pass the device's limit (shaders::link)
         let limit = CLIP_CULL_LIMIT.load(std::sync::atomic::Ordering::Relaxed);

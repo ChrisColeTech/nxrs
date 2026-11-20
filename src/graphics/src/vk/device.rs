@@ -61,6 +61,10 @@ pub struct Caps {
     pub dual_src: bool,
     /// acceleration structures and ray queries (NVN2 ray tracing, `vk/rt.rs`; `NXGFX_RT=0` off)
     pub rt: bool,
+    /// VK_NV_device_diagnostic_checkpoints (vk/lost.rs)
+    pub checkpoints: bool,
+    /// VK_EXT_device_fault (vk/lost.rs)
+    pub device_fault: bool,
     /// VK_EXT_mesh_shader's task and mesh stages (NVN2's DrawMeshTasks*)
     pub mesh: bool,
     /// VK_EXT_transform_feedback (NVN's transform feedback)
@@ -98,6 +102,8 @@ pub struct Device {
     pub emh: ash::ext::external_memory_host::Device,
     pub mesh: ash::ext::mesh_shader::Device,
     pub accel: ash::khr::acceleration_structure::Device,
+    pub ck: ash::nv::device_diagnostic_checkpoints::Device,
+    pub fault: ash::ext::device_fault::Device,
     pub xfb: ash::ext::transform_feedback::Device,
     pub push_desc: ash::khr::push_descriptor::Device,
     pub db: ash::ext::descriptor_buffer::Device,
@@ -224,7 +230,9 @@ impl Device {
             }
         }
         let mut dexts: Vec<*const i8> = required.iter().map(|n| n.as_ptr()).collect();
-        let optional: [&CStr; 15] = [
+        let optional: [&CStr; 17] = [
+            ash::nv::device_diagnostic_checkpoints::NAME,
+            ash::ext::device_fault::NAME,
             ash::khr::acceleration_structure::NAME,
             ash::khr::ray_query::NAME,
             ash::khr::deferred_host_operations::NAME,
@@ -262,6 +270,7 @@ impl Device {
         let mut f_db = vk::PhysicalDeviceDescriptorBufferFeaturesEXT::default();
         let mut f_as = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
         let mut f_rq = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
+        let mut f_fault = vk::PhysicalDeviceFaultFeaturesEXT::default();
         let mut f12 = vk::PhysicalDeviceVulkan12Features::default();
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default();
         let mut f11 = vk::PhysicalDeviceVulkan11Features::default();
@@ -282,12 +291,14 @@ impl Device {
             .push_next(&mut f_gpl)
             .push_next(&mut f_db)
             .push_next(&mut f_as)
-            .push_next(&mut f_rq);
+            .push_next(&mut f_rq)
+            .push_next(&mut f_fault);
         unsafe { instance.get_physical_device_features2(pdev, &mut f2) };
         let base = f2.features;
         let need = |ok: u32, what: &str| -> Result<(), String> { if ok != 0 { Ok(()) } else { Err(format!("device {name} lacks {what}")) } };
         need(f13.dynamic_rendering, "dynamicRendering")?;
         need(f13.synchronization2, "synchronization2")?;
+        super::spvfix::DEMOTE.store(f13.shader_demote_to_helper_invocation != 0, std::sync::atomic::Ordering::Relaxed);
         need(f12.timeline_semaphore, "timelineSemaphore")?;
         need(f12.descriptor_binding_partially_bound, "descriptorBindingPartiallyBound")?;
         need(f12.descriptor_binding_sampled_image_update_after_bind, "descriptorBindingSampledImageUpdateAfterBind")?;
@@ -329,6 +340,8 @@ impl Device {
                 && f_rq.ray_query != 0
                 && f12.buffer_device_address != 0
                 && env_on("NXGFX_RT").unwrap_or(true),
+            checkpoints: has(ash::nv::device_diagnostic_checkpoints::NAME) && super::lost::level() > 0,
+            device_fault: has(ash::ext::device_fault::NAME) && f_fault.device_fault != 0,
             mem_budget: has(ash::ext::memory_budget::NAME),
             mesh: has(ash::ext::mesh_shader::NAME) && f_ms.mesh_shader != 0 && f_ms.task_shader != 0 && env_on("NXGFX_MESH").unwrap_or(true),
             xfb: has(ash::ext::transform_feedback::NAME) && f_xfb.transform_feedback != 0,
@@ -357,6 +370,10 @@ impl Device {
 
         // Enable: exactly the queried support for the parts we use.
         let en_base = vk::PhysicalDeviceFeatures {
+            // reads past a bound buffer's range return in-range data or zero instead of faulting the GPU: on by default on
+            // NVIDIA (Turbo, Ryujinx). Mario Kart World's GPU resets were a task shader's read of 0xca19c6000 (a device
+            // fault report of lane K's run 20261120-040222-K-mkw13-demote). NXGFX_ROBUST=0 off, =1 on other GPUs too
+            robust_buffer_access: if env_on("NXGFX_ROBUST").unwrap_or(props.vendor_id == 0x10de) { base.robust_buffer_access } else { 0 },
             independent_blend: base.independent_blend,
             geometry_shader: base.geometry_shader,
             tessellation_shader: base.tessellation_shader,
@@ -468,6 +485,13 @@ impl Device {
         if !caps.gpl {
             dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::graphics_pipeline_library::NAME && unsafe { CStr::from_ptr(n) } != ash::khr::pipeline_library::NAME);
         }
+        let mut e_fault = vk::PhysicalDeviceFaultFeaturesEXT::default().device_fault(true);
+        if !caps.checkpoints {
+            dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::nv::device_diagnostic_checkpoints::NAME);
+        }
+        if !caps.device_fault {
+            dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::device_fault::NAME);
+        }
         let mut e_as = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
         let mut e_rq = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
         if !caps.rt {
@@ -518,6 +542,9 @@ impl Device {
         if caps.rt {
             dci = dci.push_next(&mut e_as).push_next(&mut e_rq);
         }
+        if caps.device_fault {
+            dci = dci.push_next(&mut e_fault);
+        }
         let dev = unsafe { instance.create_device(pdev, &dci, None) }.map_err(|e| format!("vkCreateDevice: {e}"))?;
         let queue = unsafe { dev.get_device_queue(qfam, 0) };
         // deferred recording: the device and its loaders through the shims (vk/defer.rs)
@@ -552,6 +579,8 @@ impl Device {
             emh: ash::ext::external_memory_host::Device::new(li, &dev),
             mesh: ash::ext::mesh_shader::Device::new(li, &dev),
             accel: ash::khr::acceleration_structure::Device::new(li, &dev),
+            ck: ash::nv::device_diagnostic_checkpoints::Device::new(li, &dev),
+            fault: ash::ext::device_fault::Device::new(li, &dev),
             xfb: ash::ext::transform_feedback::Device::new(li, &dev),
             push_desc: ash::khr::push_descriptor::Device::new(li, &dev),
             db: ash::ext::descriptor_buffer::Device::new(li, &dev),
