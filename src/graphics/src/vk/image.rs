@@ -1434,7 +1434,7 @@ impl Gpu {
     /// fence (`vk_tex_alias.c` `gpu_written_locked`, `wb_at_fence`). Only single-level, single-layer, uncompressed 2D
     /// textures of at most 512 KB whose image is the storage's size; a CPU write to the storage in the meantime keeps
     /// the old behaviour for that texture (the write-back is dropped). Byte-copy formats only (the image's texels
-    /// are the storage's bytes: true for every format let through here). `NXGFX_TEX_WB=0` off.
+    /// are the storage's bytes: true for every format let through here). `NXGFX_TEX_WB=1` on (off by default: `K2-mkw16`'s race washed out with it).
     pub fn tex_writeback(&self, sub: &mut Sub, serials: &[u64]) {
         let mut seen = std::collections::HashSet::new();
         let imgs = self.images.lock().unwrap();
@@ -1521,7 +1521,7 @@ impl Gpu {
         im.page_hash.clear();
         static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
         if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
-            crate::vklog!("texture write-back: ser{serial} {w}x{h} fmt {:#x} back in its storage at {:#x} (NXGFX_TEX_WB=0 off)", t.d.format, t.mem as u64);
+            crate::vklog!("texture write-back: ser{serial} {w}x{h} fmt {:#x} back in its storage at {:#x} (NXGFX_TEX_WB=1)", t.d.format, t.mem as u64);
         }
     }
 

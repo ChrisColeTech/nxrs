@@ -2423,6 +2423,30 @@ Picture with all mesh draws on (`K2-mkw11` `0004`, 85 s, the race's opening flyo
 is drawn and lit (sand, grass, hills, sky) where the skip-mode runs showed flat sky; the road and many patches of
 ground are black (a material or lighting input still missing).
 
+**Lane K2, 10:25-11:11 (runs 12-16, all mesh draws on, both diagnostics):**
+- `K2-mkw12-lazyfix` (write-back off): no fault for its 178 s (cut short by lane K2's own wrapper timeout), past
+  `K2-mkw11`'s 105 s: the lazy-page fix (e2496aa) holds here (and fixed Smash, G4).
+- `K2-mkw13`: the first write-back build crashed the host at 9.5 s (a write into guest storage that was not writable:
+  memmove in the landing). Fixed: `mem::host_writable` (VirtualQuery: committed read-write) before a landing.
+- `K2-mkw14` (write-back on, landing at completion): 240 s, no fault; but 8,193 of ~8,200 landings were dropped (the
+  image table was busy at completion). Landing moved to the next submission's start (`image_begin_submit`, which holds
+  the table anyway): `K2-mkw16` landed them.
+- `K2-mkw15` (write-back on): **GPU reset at 14.3 s in the 128x128x5 pass again** (ser28824, the same pass as
+  `K2-mkw9`): "invalid read at 0x38c349000 ... inside BUFFER 0x1e3513d7d50 (bound at 11.69 s: 0x38be00000 +0x800000),
+  UNBOUND at 11.78 s": a buffer of 8 MB (a staging chunk's size, `STAGE_CHUNK`, or an 8 MB pool) freed 2.5 s before
+  the pass read it. Not the lazy pages (the reader has no part in a pass). Intermittent: `K2-mkw16` ran 240 s clean.
+  **The address report now names buffers** (`lost::name_object` from `Gpu::buffer`: "staging", "pool", "write-back",
+  ...), so the next fault says which kind; read so far: every cache of staged buffers across submissions is keyed by
+  the submission's serial (banks, `scache`, vertex binds, set cache, mesh records).
+- `K2-mkw16-names` (write-back on, landing at submission start): 240 s, no fault; the race view **washed out to near
+  white** (where `K2-mkw12` without write-back showed the course in haze). **Write-back is now off by default**
+  (`NXGFX_TEX_WB=1` on). A suspect: a texture written through a storage-image binding of a cached set is not marked
+  GPU-written again (the set cache skips the bind code), so after a landing a CPU write to a shared page re-uploads a
+  stale snapshot over it. Not proven.
+- Race picture without write-back (`K2-mkw12` `0008`): the course drawn and lit but hazy / overexposed, the character
+  portrait a black silhouette; "1st" HUD text right. Menu text still drops letters; the glyph path is not identified.
+- FPS 8-9 in the race.
+
 **For G4 (texture code, lane K2's change, contained): GPU-written textures go back to their storage.**
 `image.rs` `tex_writeback` / `tex_writeback_land`, `queue.rs` `Sub::tex_wb`, `exec.rs` `target_image`, `mem.rs`
 `cpu_written`. A texture written as a render target or copy destination (`target_image`) is listed for its
@@ -2432,7 +2456,7 @@ their guest storage through the swizzle (`write_storage`), the storage's write w
 page hashes dropped. A later CPU write to part of the texture then uploads the whole texture from storage that holds
 both (mkw-recomp's `gpu_written_locked` / `wb_at_fence`). Dropped (old behaviour kept) when a later GPU write to the
 texture came (`gpu_seq`), the CPU wrote the storage meanwhile (write-watch peek), a page is held on the device (lazy),
-or the image table is busy (`try_lock` on the completion thread: never waits). `NXGFX_TEX_WB=0` off. Not run yet.
+(landing at the next submission's start). Off by default since `K2-mkw16` (`NXGFX_TEX_WB=1` on).
 
 **Left (lane K2; bar per plan 5B 2afe332: a race start with the right picture, no GPU fault, at the FPS target):**
 the 128x128x5 pass fault (slot scrub to verify) and whether direct mesh draws are clean; then all mesh draws on

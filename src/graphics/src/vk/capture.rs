@@ -38,6 +38,7 @@ pub mod rec {
     pub const DPOOL: u32 = 11; // {tex, pool object address, base}
     pub const END: u32 = 12;
     pub const WTEX: u32 = 13; // {w, h, row, 0} + tex_t + level 0's texels (rows packed): a texture only the GPU held
+    pub const WIMG: u32 = 14; // ImgHead + tex_t + the image's raw texels (every aspect, level, layer, slice): an image only the GPU held
 }
 
 const PAGE: u64 = 0x1000;
@@ -271,28 +272,11 @@ pub fn present(queue: u64, origin_ll: bool, t: &tex_t, crop: Option<[i32; 4]>) {
                 put(&mut l, rec::MEM, &[&(base + (k as u64) * (16 << 20)).to_le_bytes(), c]);
             }
         }
-        let texs: Vec<tex_t> = {
-            let imgs = g.images.lock().unwrap();
-            imgs.by_serial
-                .values()
-                .filter(|im| {
-                    let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(im.tex.d.format);
-                    let depthy = matches!(im.tf.kind, crate::tex::format::Kind::Depth | crate::tex::format::Kind::DepthStencil | crate::tex::format::Kind::Stencil);
-                    im.gpu_owned && im.ty == ash::vk::ImageType::TYPE_2D && im.layers == 1 && bpb > 0 && bw == 1 && bh == 1 && !depthy && im.tf.astc.is_none() && !im.bc7 && im.tf.expand3 == 0 && im.scale == 1.0 && im.samples == ash::vk::SampleCountFlags::TYPE_1
-                })
-                .map(|im| im.tex)
-                .collect()
-        };
-        for t in texs {
-            let (w, h) = (t.d.width.max(1) as u32, t.d.height.max(1) as u32);
-            let row = w as usize * crate::tex::layout::fmt_bpb(t.d.format).0 as usize;
-            let mut buf = vec![0u8; row * h as usize];
-            let r = crate::nvn::types::NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: w as i32, height: h as i32, depth: 1 };
-            g.read_texels(&t, None, &r, buf.as_mut_ptr(), row, buf.len());
-            let hd = [w, h, row as u32, 0];
-            put(&mut l, rec::WTEX, &[bytes_of(&hd), bytes_of(&t), &buf]);
-            ntex += 1;
-            tex_bytes += buf.len() as u64;
+        let (n, b, skipped) = put_gpu_images(&mut l, g);
+        ntex = n;
+        tex_bytes = b;
+        if skipped > 0 {
+            crate::log::red(&format!("capture: {skipped} GPU-drawn images not taken (multisampled or block-compressed): a replay starts them as zero"));
         }
     }
     crate::vklog!(
@@ -308,6 +292,175 @@ pub fn present(queue: u64, origin_ll: bool, t: &tex_t, crop: Option<[i32; 4]>) {
         t0.elapsed().as_secs_f64()
     );
     s.live = Some(l);
+}
+
+// ---------- GPU-held images, whole ----------
+
+/// A WIMG record's header: the image as this back end made it (a replay restores only into an image of the same
+/// shape) and its aspects' texel sizes; the bytes follow per aspect, per level: every layer (or 3D slice), rows packed.
+#[repr(C)]
+#[derive(Clone, Copy, Default)]
+struct ImgHead {
+    w: u32,
+    h: u32,
+    d: u32,
+    levels: u32,
+    layers: u32,
+    format: i32,
+    /// texel bytes of the aspects in order (colour, or depth then stencil); 0 = absent
+    bpt: [u32; 2],
+}
+
+type Aspects = [(ash::vk::ImageAspectFlags, u32); 2];
+
+/// The aspects of an uncompressed, single-sample image and their texel sizes; None for an image a buffer copy cannot
+/// carry this way (multisampled, block-compressed, decoded from ASTC / encoded to BC7, sparse).
+fn raw_aspects(im: &super::image::Image) -> Option<Aspects> {
+    use crate::tex::format::Kind;
+    use ash::vk::{Format as F, ImageAspectFlags as A};
+    if im.samples != ash::vk::SampleCountFlags::TYPE_1 || im.tf.astc.is_some() || im.bc7 || im.tf.expand3 != 0 || im.sparse.is_some() {
+        return None;
+    }
+    let none = (A::empty(), 0);
+    Some(match im.tf.kind {
+        Kind::Depth => [(A::DEPTH, if im.format == F::D16_UNORM { 2 } else { 4 }), none],
+        Kind::DepthStencil => [(A::DEPTH, 4), (A::STENCIL, 1)],
+        Kind::Stencil => [(A::STENCIL, 1), none],
+        _ => {
+            let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(im.tex.d.format);
+            if bpb == 0 || bw != 1 || bh != 1 {
+                return None;
+            }
+            [(A::COLOR, bpb), none]
+        }
+    })
+}
+
+/// The copies of an image's whole content to / from a packed buffer, and the buffer's size.
+fn raw_copies(h: &ImgHead, asp: &Aspects, three_d: bool) -> (Vec<ash::vk::BufferImageCopy>, u64) {
+    let mut out = Vec::new();
+    let mut off = 0u64;
+    for &(a, bpt) in asp.iter().filter(|x| x.1 > 0) {
+        for lv in 0..h.levels {
+            let (w, hh, d) = ((h.w >> lv).max(1), (h.h >> lv).max(1), if three_d { (h.d >> lv).max(1) } else { 1 });
+            out.push(ash::vk::BufferImageCopy {
+                buffer_offset: off,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: ash::vk::ImageSubresourceLayers { aspect_mask: a, mip_level: lv, base_array_layer: 0, layer_count: h.layers },
+                image_offset: ash::vk::Offset3D::default(),
+                image_extent: ash::vk::Extent3D { width: w, height: hh, depth: d },
+            });
+            off += w as u64 * hh as u64 * d as u64 * h.layers as u64 * bpt as u64;
+            off = (off + 15) & !15;
+        }
+    }
+    (out, off)
+}
+
+/// Every live image the GPU drew (its owner, not an alias), whole, as WIMG records: (taken, bytes, skipped).
+fn put_gpu_images(l: &mut Live, g: &super::Gpu) -> (u64, u64, u64) {
+    let list: Vec<(tex_t, ImgHead, Option<Aspects>, bool)> = {
+        let imgs = g.images.lock().unwrap();
+        imgs.by_serial
+            .values()
+            .filter(|im| im.gpu_owned && im.alloc.is_some() && im.alias_of.is_none())
+            .map(|im| {
+                let h = ImgHead { w: im.extent.width, h: im.extent.height, d: im.extent.depth, levels: im.levels, layers: im.layers, format: im.format.as_raw(), bpt: [0; 2] };
+                (im.tex, h, raw_aspects(im), im.ty == ash::vk::ImageType::TYPE_3D)
+            })
+            .collect()
+    };
+    let (mut n, mut bytes, mut skipped) = (0u64, 0u64, 0u64);
+    for (t, mut h, asp, three_d) in list {
+        let Some(asp) = asp else {
+            skipped += 1;
+            continue;
+        };
+        h.bpt = [asp[0].1, asp[1].1];
+        let (copies, total) = raw_copies(&h, &asp, three_d);
+        let Ok(rb) = g.buffer(total, ash::vk::BufferUsageFlags::TRANSFER_DST, gpu_allocator::MemoryLocation::GpuToCpu, "capture image") else {
+            skipped += 1;
+            continue;
+        };
+        let (serial, dst) = (t.serial, rb.buf);
+        let mut ok = false;
+        let f = super::queue::oneoff(g, |g, sub, imgs| {
+            let Some(im) = imgs.by_serial.get(&serial) else { return };
+            super::queue::full_barrier(g, sub.main);
+            unsafe { g.dev().cmd_copy_image_to_buffer(sub.main, im.image, ash::vk::ImageLayout::GENERAL, dst, &copies) };
+            ok = true;
+        });
+        super::queue::wait_fence(f, u64::MAX);
+        if ok {
+            // SAFETY: a host-visible buffer of `total` bytes that the copy above filled (waited for)
+            let data = unsafe { core::slice::from_raw_parts(rb.ptr as *const u8, total as usize) };
+            put(l, rec::WIMG, &[bytes_of(&h), bytes_of(&t), data]);
+            n += 1;
+            bytes += total;
+        }
+        g.free_buffer(rb);
+    }
+    (n, bytes, skipped)
+}
+
+/// A WIMG record into the replay's image of that texture (made now if need be): the content the GPU had, the image
+/// GPU-owned (later texture objects over the same storage take it over, as in the game).
+fn restore_image(g: &super::Gpu, p: &[u8]) -> bool {
+    use crate::tex::format::Kind;
+    use ash::vk::ImageAspectFlags as A;
+    let h: ImgHead = read_t(p, 0);
+    let t: tex_t = read_t(p, core::mem::size_of::<ImgHead>());
+    let data = &p[core::mem::size_of::<ImgHead>() + core::mem::size_of::<tex_t>()..];
+    let asp_of = |bpt: u32, second: bool, kind: Kind| -> (A, u32) {
+        if bpt == 0 {
+            return (A::empty(), 0);
+        }
+        let a = match (kind, second) {
+            (Kind::DepthStencil, true) | (Kind::Stencil, _) => A::STENCIL,
+            (Kind::DepthStencil, false) | (Kind::Depth, _) => A::DEPTH,
+            _ => A::COLOR,
+        };
+        (a, bpt)
+    };
+    // its storage may never have been touched by the CPU (not in the capture's pages)
+    if !t.mem.is_null() && t.l.size > 0 {
+        let lo = t.mem as u64 & !0xfff;
+        commit(lo, (t.mem as u64 + t.l.size + 0xfff & !0xfff) - lo);
+    }
+    let mut ok = false;
+    let f = super::queue::oneoff(g, |g, sub, imgs| {
+        if !g.ensure_image(imgs, &t) {
+            return;
+        }
+        if let Some(im) = imgs.by_serial.get_mut(&t.serial) {
+            // nothing from storage: the captured content replaces it
+            im.needs_upload = false;
+        }
+        g.prepare_image(imgs, t.serial, sub);
+        let Some(im) = imgs.by_serial.get_mut(&t.serial) else { return };
+        if im.alloc.is_none() || im.extent.width != h.w || im.extent.height != h.h || im.extent.depth != h.d || im.levels != h.levels || im.layers != h.layers || im.format.as_raw() != h.format {
+            return;
+        }
+        let asp = [asp_of(h.bpt[0], false, im.tf.kind), asp_of(h.bpt[1], true, im.tf.kind)];
+        let (mut copies, total) = raw_copies(&h, &asp, im.ty == ash::vk::ImageType::TYPE_3D);
+        if total as usize != data.len() {
+            return;
+        }
+        let (buf, off) = sub.stage_bytes_fresh(g, data);
+        for c in copies.iter_mut() {
+            c.buffer_offset += off;
+        }
+        super::queue::full_barrier(g, sub.pre);
+        unsafe { g.dev().cmd_copy_buffer_to_image(sub.pre, buf, im.image, ash::vk::ImageLayout::GENERAL, &copies) };
+        super::queue::full_barrier(g, sub.pre);
+        im.gpu_owned = true;
+        im.needs_upload = false;
+        im.gpu_seq += 1;
+        ok = true;
+    });
+    super::queue::wait_fence(f, u64::MAX);
+    ok
 }
 
 // ---------- guest memory ----------
@@ -509,6 +662,7 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
     let (mut frames, mut subs) = (0u64, 0u64);
     let trace = std::env::var("NXGFX_REPLAY_TRACE").is_ok();
     let mut n_rec = 0u64;
+    let (mut n_img, mut bad_img) = (0u64, 0u64);
     while let Some((ty, p)) = pending.take().or_else(|| r.next()) {
         n_rec += 1;
         if trace {
@@ -563,6 +717,12 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
                 let r = crate::nvn::types::NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: w as i32, height: h as i32, depth: 1 };
                 g.write_texels(&t, None, &r, data.as_ptr(), row as usize, data.len());
             }
+            rec::WIMG => {
+                n_img += 1;
+                if !restore_image(g, &p) {
+                    bad_img += 1;
+                }
+            }
             rec::SUBMIT => {
                 super::queue::submit_stream(u64_at(&p, 0), u64_at(&p, 8) != 0, p[16..].to_vec());
                 subs += 1;
@@ -587,6 +747,7 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
         }
     }
     super::queue::finish();
+    crate::vklog!("replay: {n_img} GPU-held images restored whole ({bad_img} not: no image of the captured shape)");
     crate::vklog!("replay: {frames} presents, {subs} submissions{}", if failed_regions > 0 { format!("; {failed_regions} regions could not be mapped at their address") } else { String::new() });
     Ok(frames)
 }

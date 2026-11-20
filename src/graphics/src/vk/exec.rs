@@ -1084,7 +1084,7 @@ fn target_image(g: &Gpu, sub: &mut Sub, t: &tex_t) -> Option<(vk::Image, format:
     g.tex_gpu_written(&mut imgs, t.serial);
     g.prepare_image(&mut imgs, t.serial, sub);
     static WB: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if *WB.get_or_init(|| std::env::var("NXGFX_TEX_WB").as_deref() != Ok("0")) && t.l.size <= 512 << 10 {
+    if *WB.get_or_init(|| std::env::var("NXGFX_TEX_WB").as_deref() == Ok("1")) && t.l.size <= 512 << 10 {
         sub.tex_wb.push(t.serial);
     }
     let im = &imgs.by_serial[&t.serial];
@@ -1954,7 +1954,7 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                 // an image bound for stores: the GPU writes it in this submission (its write-back at completion)
                 if is_img {
                     static WB: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-                    if *WB.get_or_init(|| std::env::var("NXGFX_TEX_WB").as_deref() != Ok("0")) {
+                    if *WB.get_or_init(|| std::env::var("NXGFX_TEX_WB").as_deref() == Ok("1")) {
                         if let Some((serial, _)) = g.tables.tex_at(tid) {
                             let mut imgs = g.images.lock().unwrap();
                             if imgs.by_serial.get(&serial).is_some_and(|im| im.tex.l.size <= 512 << 10) {
