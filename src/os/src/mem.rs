@@ -192,6 +192,24 @@ fn first_touch(a: u64) -> bool {
     commit_rw(lo, hi - lo)
 }
 
+/// The ini's hidden `heap_max_mb` (Turbo main.c / mem.c `g_heap_max`), in bytes; 0 when unset.
+fn heap_max() -> u64 {
+    static M: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *M.get_or_init(|| {
+        let mb = nxconfig::string("heap_max_mb").trim().parse::<u64>().unwrap_or(0);
+        if mb > 0 {
+            crate::log!("heap_max_mb={mb}: the heap may grow to {mb} MB even past the application pool");
+        }
+        mb << 20
+    })
+}
+
+/// The largest heap SetHeapSize grants: what the application pool has left beside the memory in use (Horizon), or
+/// the ini's `heap_max_mb` when that is more (Turbo mem.c: the cap never goes below what the game is told it has).
+pub fn heap_cap(pool: u64, used: u64, heap_max: u64) -> u64 {
+    pool.saturating_sub(used).max(heap_max)
+}
+
 impl Memory {
     /// svcSetHeapSize: the heap's end moves in 2 MiB steps; pages are committed on first touch.
     pub fn set_heap_size(&self, size: u64) -> Result<u64, u64> {
@@ -204,7 +222,7 @@ impl Memory {
         }
         let mut st = self.st.lock().unwrap();
         let used = self.fig.used_beside_heap + st.phys_bytes;
-        if used > self.fig.pool || size > self.fig.pool - used {
+        if size > heap_cap(self.fig.pool, used, heap_max()) {
             crate::log_once!("heap-limit", "SetHeapSize {size:#x} > pool {:#x} less used {used:#x} (ResultLimitReached)", self.fig.pool);
             return Err(R_LIMIT_REACHED);
         }

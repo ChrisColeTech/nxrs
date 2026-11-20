@@ -57,7 +57,7 @@ fn patch_tables_round_trip() {
         assert_eq!(&back, *f, "{}", f.source);
         entries += f.cut.len() + f.obs.len() + f.stub.len() + f.matches.len() + f.capability.len() + f.binding.len();
     }
-    assert_eq!(files.len(), 29 + 1 + 2, "29 patches.py, the owner's turbo.toml (Z-A; MKW's patches are its recomp.txt), sdk + engine");
+    assert_eq!(files.len(), 29 + 2 + 2, "29 patches.py, the owner's turbo.toml (Z-A, OoT; MKW's patches are its recomp.txt), sdk + engine");
     assert!(entries > 150, "{entries}");
 }
 
@@ -100,6 +100,18 @@ fn za_60fps_is_applied_at_build() {
     // another build of main gets nothing
     let (text, _) = translator_patches(&[("main", "b1f12fd919eae86ab8a978317677e64bce443d1e")]).unwrap();
     assert!(text.is_empty());
+}
+
+/// Turbo nxloader.py BUILTIN_PATCHES: Ocarina of Time's full resolution (main+0x805BD0, 0x360041E8 -> 0x1400020F)
+/// on its v131072 main, as a switchable set.
+#[test]
+fn oot_fullres_is_applied_at_build() {
+    let mods = [("main", "e0f3ccfaf50065ae4ea01eb5aeb13b1a45da3348")];
+    let (text, _) = translator_patches(&mods).unwrap();
+    assert!(text.contains("set oot_fullres NXRS_PATCH_OOT_FULLRES 1\n"), "{text}");
+    assert!(text.contains("site oot_fullres main 0x805bd0 360041e8 1400020f"), "{text}");
+    let (text, _) = translator_patches(&[("main", "e0f3ccfaf50065ae4ea01eb5aeb13b1a45da3349")]).unwrap();
+    assert!(!text.contains("oot_fullres"));
 }
 
 #[test]

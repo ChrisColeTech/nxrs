@@ -8,7 +8,7 @@
 //! The guest side is built with clang for aarch64-none-elf and ld.lld (linker script `guest/link.ld`), and each ELF
 //! becomes an NSO (lz4-compressed segments, MOD0 from `guest/crt0.S`). The host side uses clang for
 //! x86_64-pc-windows-msvc with the generated-code flag set the translated games use; on Linux clang for the host
-//! (x86_64-unknown-linux-gnu) with `libnxrt.a`, PATH's clang and ld.lld unless NXRT_LLVM names their folder.
+//! (x86_64- or aarch64-unknown-linux-gnu) with `libnxrt.a`, PATH's clang and ld.lld unless NXRT_LLVM names their folder.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -244,12 +244,20 @@ fn build_guest(out: &Path, tests: &[String]) -> R<()> {
 
 // ---------------------------------------------------------------- host build
 
+/// The host baseline the games use (nxrs-build `cc::MARCH`).
+const HOST_MARCH: &str = if cfg!(target_arch = "aarch64") { "-march=armv8.2-a+fp16+rcpc+dotprod+crc" } else { "-march=x86-64-v3" };
+
+/// Linux: the host triple, stated (a cross clang builds for it too, finding the target's C library as a cross
+/// toolchain: an AArch64 runtime tested under qemu-user on an x86-64 machine).
+#[cfg(not(windows))]
+const HOST_TARGET: &str = if cfg!(target_arch = "aarch64") { "--target=aarch64-linux-gnu" } else { "--target=x86_64-linux-gnu" };
+
 const GEN_FLAGS: &[&str] = &[
     "-O1",
     "-fno-strict-aliasing",
     "-Wno-return-type",
     "-Wno-unused-label",
-    "-march=x86-64-v3",
+    HOST_MARCH,
     "-fno-vectorize",
     "-fno-slp-vectorize",
     "-fomit-frame-pointer",
@@ -328,6 +336,8 @@ fn link(gen: &Path, out: &Path) -> R<()> {
     for (i, src) in srcs.iter().enumerate() {
         let o = obj.join(format!("{i:04}_{}.o", src.file_stem().unwrap().to_string_lossy()));
         let mut c = Command::new(llvm("clang"));
+        #[cfg(not(windows))]
+        c.arg(HOST_TARGET);
         c.args(GEN_FLAGS.iter().filter(|f| cfg!(windows) || !f.starts_with("-fms-runtime-lib")));
         for inc in &incs {
             c.arg(format!("-I{}", inc.display()));
@@ -351,6 +361,8 @@ fn link(gen: &Path, out: &Path) -> R<()> {
     } else {
         // the runtime's system libraries (--print native-static-libs); the test executable's main stack is the
         // process's own
+        #[cfg(not(windows))]
+        c.arg(HOST_TARGET);
         c.args(&objs).arg(&lib).args(["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"]);
     }
     c.arg("-o").arg(out);

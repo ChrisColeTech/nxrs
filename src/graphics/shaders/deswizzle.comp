@@ -1,0 +1,40 @@
+// Tegra block-linear -> linear rows on the GPU (nxnative nvn_deswizzle_gpu / deswz.metal; the CPU version and the
+// layout are src/tex/deswizzle.rs). One invocation moves one 32-bit word of a level and layer: word q of block row y
+// of slice z. GOB = 64 bytes x 8 rows; a GOB's 16-byte pieces are ordered by the X1's or the Switch 2's rule; a block
+// is 1 GOB wide x 2^th GOBs high x 2^td GOBs deep.
+#version 460
+
+layout(local_size_x = 64, local_size_y = 1, local_size_z = 1) in;
+
+layout(std430, set = 0, binding = 0) readonly buffer Src { uint src[]; };    // the texture's storage, from its start
+layout(std430, set = 0, binding = 1) writeonly buffer Dst { uint dst[]; };   // rows of `pitch` bytes, slice after slice
+
+layout(push_constant) uniform Params {
+    uint base;       // the level and layer's start in the storage (bytes; a multiple of 4)
+    uint row_bytes;  // bytes of a block row (a multiple of 4)
+    uint rows;       // block rows
+    uint slices;
+    uint th, td;     // log2 of the block's height and depth in GOBs
+    uint gobs_x;     // GOB columns as laid out
+    uint pitch;      // bytes of a destination row (a multiple of 4)
+    uint switch2;    // 1: the Switch 2's order inside a GOB
+};
+
+void main() {
+    uint q = gl_GlobalInvocationID.x, y = gl_GlobalInvocationID.y, z = gl_GlobalInvocationID.z;
+    if (q * 4u >= row_bytes || y >= rows || z >= slices) return;
+    uint x = q * 4u;   // byte in the row
+    uint bh = 1u << th, bd = 1u << td;
+    uint block = 512u * bh * bd;
+    uint blocks_y = (rows + 8u * bh - 1u) >> (3u + th);
+    uint ky = y & 7u;
+    uint koy = switch2 != 0u ? (ky >> 2) * 128u + ((ky >> 1) & 1u) * 32u + (ky & 1u) * 16u
+                             : (ky >> 1) * 64u + (ky & 1u) * 16u;
+    uint kx = (x >> 4) & 3u;
+    uint kox = switch2 != 0u ? (kx >> 1) * 256u + (kx & 1u) * 64u : (kx >> 1) * 256u + (kx & 1u) * 32u;
+    uint off = base
+             + (z >> td) * gobs_x * blocks_y * block + (z & (bd - 1u)) * bh * 512u
+             + (y >> (3u + th)) * gobs_x * block + ((y & (8u * bh - 1u)) >> 3) * 512u + koy
+             + (x >> 6) * block + kox + (x & 15u);
+    dst[((z * rows + y) * pitch + x) >> 2] = src[off >> 2];
+}

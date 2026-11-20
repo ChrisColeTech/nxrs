@@ -125,9 +125,30 @@ pub fn focused() -> bool {
 }
 
 /// From the front-end loop: player 1's keyboard and mouse, and the focus.
+/// The power request while the game is in front (Turbo plat.c: the display and the system kept awake while playing):
+/// ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED, and ES_CONTINUOUS alone (released) behind other windows.
+pub fn awake_state(focused: bool) -> u32 {
+    use windows_sys::Win32::System::Power::{ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
+    if focused {
+        ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
+    } else {
+        ES_CONTINUOUS
+    }
+}
+
+/// Keeps the display awake while the window has the focus (set from the front-end loop's thread, which lives as long
+/// as the game: the request is that thread's).
+fn keep_awake(focused: bool) {
+    static LAST: std::sync::atomic::AtomicU8 = std::sync::atomic::AtomicU8::new(2);
+    if LAST.swap(focused as u8, Ordering::Relaxed) != focused as u8 {
+        unsafe { windows_sys::Win32::System::Power::SetThreadExecutionState(awake_state(focused)) };
+    }
+}
+
 pub fn poll_input() {
     static MOUSE: Mutex<keys::Mouse> = Mutex::new(keys::Mouse::new());
     let f = focused();
+    keep_awake(f);
     nxos::input::set_focus(f);
     // the game's focus state (oe message 15): in front 1, behind another window 2, minimised 3
     let h = hwnd();
@@ -140,7 +161,7 @@ pub fn poll_input() {
     let held = if f { keys::HELD.load(Ordering::Acquire) } else { 0 };
     let m = if mouse_mode() { Some(MOUSE.lock().unwrap().stick(f)) } else { None };
     let (b, a) = keys::state(held, m);
-    nxos::input::set_keyboard(b, a);
+    nxos::input::set_keyboard(b | crate::script_now(), a);
     home_quit();
 }
 
@@ -434,4 +455,18 @@ pub fn open(title: &str) {
         })
         .expect("window thread");
     let _ = rx.recv();
+}
+
+#[cfg(test)]
+mod tests {
+    /// Turbo plat.c: display and system kept awake while playing; released when the window is behind others.
+    #[test]
+    fn display_kept_awake_while_focused() {
+        assert_eq!(super::awake_state(true), 0x8000_0003);
+        assert_eq!(super::awake_state(false), 0x8000_0000);
+        // the request is accepted by Windows (the previous state comes back), and released again
+        let prev = unsafe { windows_sys::Win32::System::Power::SetThreadExecutionState(super::awake_state(true)) };
+        assert_ne!(prev, 0);
+        assert_ne!(unsafe { windows_sys::Win32::System::Power::SetThreadExecutionState(super::awake_state(false)) }, 0);
+    }
 }

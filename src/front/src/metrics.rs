@@ -93,11 +93,18 @@ pub fn tick() {
     let snap = nxconfig::metrics::snapshot();
     let names: Vec<&'static str> = snap.iter().map(|(k, _)| *k).collect();
     if names != m.names {
-        let _ = writeln!(m.f, "#seconds,frames,fps,cpu_percent,private_mb{}", names.iter().map(|n| format!(",{n}")).collect::<String>());
+        let _ = writeln!(m.f, "#seconds,frames,fps,cpu_percent,private_mb,xmon{}", names.iter().map(|n| format!(",{n}")).collect::<String>());
         m.last.resize(names.len(), 0);
         m.names = names;
     }
-    let mut row = format!("{t:.1},{frames},{:.1},{:.0},{:.0}", (frames - m.last_frames) as f64 / dt, (cpu - m.last_cpu) / dt * 100.0, private_mb());
+    // xmon: the global exclusive monitor on (1) or off (Turbo kernel.c's metrics column)
+    let mut row = format!(
+        "{t:.1},{frames},{:.1},{:.0},{:.0},{}",
+        (frames - m.last_frames) as f64 / dt,
+        (cpu - m.last_cpu) / dt * 100.0,
+        private_mb(),
+        nxrt::cpu::exclusive_monitor() as u8
+    );
     for (i, (_, v)) in snap.iter().enumerate() {
         row.push_str(&format!(",{}", v - m.last[i]));
         m.last[i] = *v;

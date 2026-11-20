@@ -463,13 +463,22 @@ pub fn target() -> u32 {
     let t = std::env::var("NXOS_FPS_TARGET").ok().and_then(|v| v.trim().parse::<u32>().ok()).unwrap_or_else(|| {
         profiles::by_title(crate::profile::get().program_id).map_or(0, |p| p.settings.fps_target)
     });
+    let fps_max: u32 = crate::options::game("fps_max", "60").trim().parse().unwrap_or(60);
+    let (t, said) = target_within(t, fps_max);
+    if let Some(m) = said {
+        crate::log_once!("fps target bad", "[RED] fps lock: {m}");
+    }
+    t
+}
+
+/// A target frame rate within what the profile allows (nxnative hle_fpslock.c): 0, 30, 60, and 120 only for a game
+/// whose speed at 120 was checked (`fps_max 120`), else 60.
+pub fn target_within(t: u32, fps_max: u32) -> (u32, Option<String>) {
     match t {
-        0 | 30 | 60 => t,
-        120 => 60,
-        _ => {
-            crate::log_once!("fps target bad", "[RED] fps lock: frame rate target {t}: must be 0, 30 or 60; the game's own limit stays");
-            0
-        }
+        0 | 30 | 60 => (t, None),
+        120 if fps_max >= 120 => (120, None),
+        120 => (60, Some("frame rate target 120: this game's speed at 120 fps is not checked (profile fps_max); running at 60".into())),
+        _ => (0, Some(format!("frame rate target {t}: must be 0, 30, 60 or 120; the game's own limit stays"))),
     }
 }
 
@@ -699,6 +708,18 @@ pub fn tick() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// nxnative hle_fpslock.c: 120 only with the profile's fps_max 120, else 60; other values leave the game's limit.
+    #[test]
+    fn target_within_fps_max() {
+        assert_eq!(target_within(60, 60), (60, None));
+        assert_eq!(target_within(30, 60), (30, None));
+        assert_eq!(target_within(0, 60), (0, None));
+        assert_eq!(target_within(120, 120), (120, None));
+        assert_eq!(target_within(120, 60).0, 60);
+        assert!(target_within(120, 60).1.unwrap().contains("fps_max"));
+        assert_eq!(target_within(45, 120).0, 0);
+    }
 
     /// The generic target frame rate: 8 readers of 60 / [[global]+0x10] and a store of 30 there make the field; 7
     /// readers do not.

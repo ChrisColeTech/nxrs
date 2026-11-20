@@ -95,6 +95,8 @@ struct Ikb {
     finished: u64,
     enter: u64,
     changed: u64,
+    /// The moved-cursor callback: recorded, never called (the host's box decides the whole text at once).
+    moved: u64,
     pending: bool,
     fin_init_due: bool,
     released_due: bool,
@@ -187,6 +189,31 @@ kfn!(ikb_disappear, |a| {
 });
 kfn!(ikb_ok, |a| { 0 });
 kfn!(ikb_height, |a| { 400 });
+kfn!(ikb_set_moved, |a| {
+    with_ikb(a.x(0), |k| k.moved = a.x(1));
+    0
+});
+// Appearance settings (window mode, footer / key top alpha, scale and translation, touch, hardware keyboard): the
+// applet would draw with them; the host's keyboard is its own text box, so there is nothing to apply.
+kfn!(ikb_appearance, |a| {
+    let n = nxrt::hostfn::name_of(a.0.pc).unwrap_or_default();
+    crate::log_once!(format!("ikb {n}"), "swkbd: inline keyboard {}: an appearance setting, nothing to apply (the host's keyboard is a text box of its own)", n.trim_start_matches("_ZN2nn5swkbd14InlineKeyboard"));
+    0
+});
+// GetImage(void *buf, size_t size) -> bool: the applet's picture comes from its shared memory, which the host never
+// made (the keyboard is a window of its own): no picture, the buffer is not touched.
+kfn!(ikb_image, |a| { 0 });
+// GetWindowSize(int *w, int *h) const: the keyboard's picture is 1280x720 on the console (Monster Hunter Rise makes
+// its textures of this size; 0x0 made the creation return null).
+kfn!(ikb_window_size, |a| {
+    if a.x(1) != 0 {
+        w32(a.x(1), 1280);
+    }
+    if a.x(2) != 0 {
+        w32(a.x(2), 720);
+    }
+    0
+});
 
 /// Calc: the callbacks due, then a pending Appear's text through the enter (and changed-string) callbacks.
 unsafe fn ikb_calc(c: *mut Cpu) {
@@ -444,10 +471,70 @@ pub fn register(r: &mut Registry) {
         (format!("{k}12GetMaxHeightEv"), ikb_height),
         (format!("{k}12SetInputTextERKNS0_9InputTextE"), ikb_ok),
         (format!("{k}12SetCursorPosEi"), ikb_ok),
+        (format!("{k}22SetMovedCursorCallbackEPFvPKNS0_14MovedCursorArgEE"), ikb_set_moved),
+        (format!("{k}13SetWindowModeENS1_10WindowModeE"), ikb_appearance),
+        (format!("{k}14SetFooterAlphaEf"), ikb_appearance),
+        (format!("{k}14SetKeytopAlphaEf"), ikb_appearance),
+        (format!("{k}14SetKeytopScaleEf"), ikb_appearance),
+        (format!("{k}18SetKeytopTranslateEff"), ikb_appearance),
+        (format!("{k}15SetTouchEnabledEb"), ikb_appearance),
+        (format!("{k}26SetHardwareKeyboardEnabledEb"), ikb_appearance),
+        (format!("{k}8GetImageEPvm"), ikb_image),
+        ("_ZNK2nn5swkbd14InlineKeyboard13GetWindowSizeEPiS2_".to_string(), ikb_window_size),
     ] {
         r.force(&n, W, f);
     }
     let _ = w64;
+}
+
+#[cfg(test)]
+mod ikb_tests {
+    use nxrt::cpu::Cpu;
+
+    /// InlineKeyboard's remaining methods as nxnative answers them: every one taken over by its SDK name; the moved-
+    /// cursor callback recorded; GetImage answers no picture without touching the buffer; GetWindowSize 1280x720;
+    /// the appearance setters answer and change nothing.
+    #[test]
+    fn inline_keyboard_methods() {
+        let mut r = crate::hle::Registry::default();
+        super::register(&mut r);
+        let names: Vec<&str> = r.names().collect();
+        let k = "_ZN2nn5swkbd14InlineKeyboard";
+        for n in [
+            "22SetMovedCursorCallbackEPFvPKNS0_14MovedCursorArgEE",
+            "13SetWindowModeENS1_10WindowModeE",
+            "14SetFooterAlphaEf",
+            "14SetKeytopAlphaEf",
+            "14SetKeytopScaleEf",
+            "18SetKeytopTranslateEff",
+            "15SetTouchEnabledEb",
+            "26SetHardwareKeyboardEnabledEb",
+            "8GetImageEPvm",
+        ] {
+            assert!(names.contains(&format!("{k}{n}").as_str()), "{n}");
+        }
+        assert!(names.contains(&"_ZNK2nn5swkbd14InlineKeyboard13GetWindowSizeEPiS2_"));
+        let mut c = Cpu::new_boxed();
+        let kb = 0x5a5a_0000u64;
+        c.x[0] = kb;
+        c.x[1] = 0x1234;
+        unsafe { super::ikb_set_moved(&mut *c) };
+        assert_eq!(super::with_ikb(kb, |k| k.moved), 0x1234);
+        let mut pic = vec![0x77u8; 64];
+        c.x[..3].copy_from_slice(&[kb, pic.as_mut_ptr() as u64, 64]);
+        unsafe { super::ikb_image(&mut *c) };
+        assert_eq!(c.x[0], 0, "no picture");
+        assert!(pic.iter().all(|&b| b == 0x77), "the buffer untouched");
+        let (mut w, mut h) = (0i32, 0i32);
+        c.x[..3].copy_from_slice(&[kb, &mut w as *mut i32 as u64, &mut h as *mut i32 as u64]);
+        unsafe { super::ikb_window_size(&mut *c) };
+        assert_eq!((w, h), (1280, 720));
+        let before = super::with_ikb(kb, |k| (k.state, k.pending));
+        c.x[0] = kb;
+        unsafe { super::ikb_appearance(&mut *c) };
+        assert_eq!(super::with_ikb(kb, |k| (k.state, k.pending)), before);
+        super::super::swkbd::IKB.lock().unwrap().retain(|k| k.kb != kb);
+    }
 }
 
 // the Win32 text box itself (Linux answers through the desktop's dialog: desk.rs)

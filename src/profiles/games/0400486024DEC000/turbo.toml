@@ -1,0 +1,25 @@
+# The owner's patches for The Legend of Zelda: Ocarina of Time (Switch 2), from Turbo (nxloader.py BUILTIN_PATCHES);
+# kept by hand, never written by the exporter. nxrs applies them when it builds the game (apply = "build"): the
+# translator lifts the replacement and the original both, and the runtime picks one by the set's switch
+# (NXRS_PATCH_OOT_FULLRES=0 lets the game's own dynamic resolution run). NXRS_NO_PROFILE_PATCHES=1 at build time
+# leaves them out.
+#
+# Against the profile's own "dynamic resolution level: 0" stub (patches.toml, the frame step's second site at the
+# level function main+0x8065e0): both give the full-size picture. The level function's result goes through
+# main+0x31c3fe0 (level -> the level's size factor x the full width, rounded to the alignment, / the full width), and
+# nxnative's play check found level 0 is full size; this patch takes the update's "dynamic resolution disabled" path
+# instead, which returns scale 1.0 without calling the level function at all (main+0x805bd0 tbz -> b main+0x80640c,
+# its return value 1.0 with the level kept). With this set on, the stub's site on that path is not reached; with it
+# off, the stub decides (full size, or the climb when the frame step's dynamic resolution flag is set).
+source = "Turbo nxloader.py (the owner's built-in patches)"
+
+[[cut]]
+build = "e0f3ccfaf50065ae4ea01eb5aeb13b1a45da3348"
+module = "main"
+offset = 0x805bd0
+original = "e8410036"
+replacement = "0f020014"
+reason = """Ocarina of Time: full resolution (tbz w8, #0 -> b). Take the "dynamic resolution disabled" path so the 3D renders at full scale instead of following its GPU time controller down to 480p (from Lichii's built-in patch list). The word at the offset has to be the original or nothing is changed."""
+apply = "build"
+set = "oot_fullres"
+env = "NXRS_PATCH_OOT_FULLRES"

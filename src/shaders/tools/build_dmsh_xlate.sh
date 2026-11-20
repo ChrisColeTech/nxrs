@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Builds the shader translator tool for Linux x86-64, build/tools/dmsh_xlate-linux/dmsh_xlate (a self-contained
+# Builds the shader translator tool for Linux (x86-64, or arm64 on an arm64 machine; DMSH_RID=linux-x64|linux-arm64
+# overrides), build/tools/dmsh_xlate-linux/dmsh_xlate (a self-contained
 # NativeAOT executable), from nxnative's source exactly as build_dmsh_xlate.ps1 does for Windows: its
 # dm/gfx/tools/dmsh_xlate (Program.cs + csproj) and dm/third_party/ryujinx copied out of the nxnative checkout (not
 # modified) and patched with dmsh_xlate.patch.
@@ -33,5 +34,7 @@ for f in "${crlf[@]}"; do
     sed -i 's/$/\r/' "$src/$f"
 done
 export PATH="$HOME/.dotnet:$PATH" DOTNET_CLI_TELEMETRY_OPTOUT=1
-(cd "$src/dmsh_xlate" && dotnet publish dmsh_xlate.csproj -c Release -r linux-x64 -p:RyuSrc=../ryujinx -o "$out")
+case "$(uname -m)" in aarch64 | arm64) rid=linux-arm64 ;; *) rid=linux-x64 ;; esac
+rid="${DMSH_RID:-$rid}"
+(cd "$src/dmsh_xlate" && dotnet publish dmsh_xlate.csproj -c Release -r "$rid" -p:RyuSrc=../ryujinx -o "$out")
 "$out/dmsh_xlate" --source-sha

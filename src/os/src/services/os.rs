@@ -118,7 +118,7 @@ unsafe fn csrng(c: *mut Cpu) {
 fn game_env() -> &'static [(String, u64)] {
     static E: std::sync::OnceLock<Vec<(String, u64)>> = std::sync::OnceLock::new();
     E.get_or_init(|| {
-        let spec = crate::options::get("game_env");
+        let spec = crate::options::game("game_env", "");
         let mut v = vec![];
         for word in spec.split_whitespace() {
             let Some((k, val)) = word.split_once('=') else { continue };
@@ -164,10 +164,10 @@ unsafe fn sa_allocate(c: *mut Cpu) {
 }
 
 pub fn register(r: &mut Registry) {
-    if !crate::options::get("game_env").trim().is_empty() {
+    if !crate::options::game("game_env", "").trim().is_empty() {
         r.force("getenv", "the game's environment (game_env), the SDK's getenv for the rest", getenv);
     }
-    if crate::options::int("alloc_big_align") != 0 {
+    if crate::options::game_flag("alloc_big_align", false) {
         crate::log!("StandardAllocator::Allocate: allocations of 64 KB or more are 64 KB aligned (alloc_big_align)");
         r.force("_ZN2nn3mem17StandardAllocator8AllocateEm", "blocks of 64 KB or more 64 KB aligned (alloc_big_align)", sa_allocate);
     }

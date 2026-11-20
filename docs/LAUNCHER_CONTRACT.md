@@ -98,7 +98,7 @@ Intentional differences:
 ## v2 (the launcher runs nxrs-build; no Python)
 
 Implemented in the launcher (D:\Projects\RecompLauncher, `src/launcher/library.cpp` + `buildmanager.cpp`) and in
-nxrs-build (`src/cli`). Windows only.
+nxrs-build (`src/cli`). Windows and Linux (`nxrs-engine/nxrs-build`, no `.exe`).
 
 ### Finding nxrs-build
 
@@ -168,5 +168,8 @@ bundled llvm-mingw with `gnu\`: a release may ship only the gnullvm set.
 
 ### Not done
 
-- `doctor` is not run by the launcher (its health text shows nxrs-build's path and contract only).
-- No one-time save copy between a Turbo and an nxrs build of the same game (PORT_PLAN 6.3); saves stay per folder.
+Nothing of v2 (2026-11-20). Done since: the launcher runs `doctor` (Settings > Engine, `nxrs --nxrs-doctor`; launcher
+2d3ea0d) and copies saves between a Turbo and an nxrs build of a game (Game > Copy saves, offered once on Play;
+2d3ea0d); releases bundle `nxrs-engine/` for Windows and Linux by default (b3cd6a5); nxrs games are Vulkan-only
+(b3cd6a5). An arm64 Linux engine bundle is built by the engine's CI (`nxrs-engine-linux-arm64`); the launcher has no
+arm64 release.

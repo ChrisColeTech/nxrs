@@ -166,8 +166,48 @@ unsafe fn report(ep: *mut EXCEPTION_POINTERS) -> i32 {
         s.push_str(&crate::rt::guest_report(&*c));
     }
     crate::rt::log(&s);
+    write_minidump(ep);
     let _ = std::io::stderr().flush();
     std::process::exit(70);
+}
+
+/// Which minidump a crash writes (`NXRT_MINIDUMP`): `0` none, `full` with the memory the threads' stacks point to,
+/// anything else (the default) the threads, their stacks and the modules: small enough to send.
+pub fn minidump_flags(v: Option<&str>) -> Option<u32> {
+    // MiniDumpNormal 0, WithUnloadedModules 0x20, WithIndirectlyReferencedMemory 0x40, WithThreadInfo 0x1000
+    match v.map(str::trim) {
+        Some("0") | Some("off") => None,
+        Some("full") => Some(0x20 | 0x40 | 0x1000),
+        _ => Some(0x20 | 0x1000),
+    }
+}
+
+/// The crash's minidump beside the executable (`<name>.dmp`, replaced by the next crash), for a debugger with the
+/// game's code DLL.
+#[cfg(windows)]
+unsafe fn write_minidump(ep: *mut EXCEPTION_POINTERS) {
+    let Some(flags) = minidump_flags(std::env::var("NXRT_MINIDUMP").ok().as_deref()) else { return };
+    let path = std::env::current_exe().map(|e| e.with_extension("dmp")).unwrap_or_else(|_| "crash.dmp".into());
+    if dump_to(&path, flags, ep) {
+        crate::rt::log(&format!("minidump written: {} (NXRT_MINIDUMP=0 turns it off, =full adds referenced memory)", path.display()));
+    }
+}
+
+/// A minidump of this process into `path` (`ep`: the exception, or null); whether it was written.
+#[cfg(windows)]
+pub unsafe fn dump_to(path: &std::path::Path, flags: u32, ep: *mut EXCEPTION_POINTERS) -> bool {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::System::Diagnostics::Debug::{MiniDumpWriteDump, MINIDUMP_EXCEPTION_INFORMATION};
+    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId};
+    let Ok(f) = std::fs::File::create(path) else { return false };
+    let info = MINIDUMP_EXCEPTION_INFORMATION { ThreadId: GetCurrentThreadId(), ExceptionPointers: ep, ClientPointers: 0 };
+    let pinfo = if ep.is_null() { core::ptr::null() } else { &info as *const _ };
+    let ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), f.as_raw_handle() as _, flags as _, pinfo, core::ptr::null(), core::ptr::null());
+    drop(f);
+    if ok == 0 {
+        let _ = std::fs::remove_file(path);
+    }
+    ok != 0
 }
 
 #[cfg(windows)]
@@ -265,4 +305,26 @@ unsafe fn report(f: &mut crate::linux::Fault) -> bool {
 #[cfg(target_os = "linux")]
 pub fn install() {
     crate::linux::add_fault_hook(hook);
+}
+
+#[cfg(test)]
+mod tests {
+    /// NXRT_MINIDUMP: off, the default (threads and modules), full (with referenced memory).
+    #[test]
+    fn minidump_flags_by_setting() {
+        assert_eq!(super::minidump_flags(Some("0")), None);
+        assert_eq!(super::minidump_flags(None), Some(0x1020));
+        assert_eq!(super::minidump_flags(Some("full")), Some(0x1060));
+    }
+
+    /// A minidump of the test process is written and starts with the MDMP signature.
+    #[cfg(windows)]
+    #[test]
+    fn minidump_is_written() {
+        let p = std::env::temp_dir().join(format!("nxrt-minidump-{}.dmp", std::process::id()));
+        assert!(unsafe { super::dump_to(&p, 0x1020, core::ptr::null_mut()) });
+        let head = std::fs::read(&p).unwrap();
+        let _ = std::fs::remove_file(&p);
+        assert_eq!(&head[..4], b"MDMP");
+    }
 }

@@ -109,7 +109,7 @@ fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     f(g.get_or_insert_with(|| State { next: 1, ..Default::default() }))
 }
 
-fn data_dir() -> PathBuf {
+pub fn data_dir() -> PathBuf {
     crate::boot::try_process().map(|p| p.data_dir.clone()).unwrap_or_else(|| PathBuf::from("."))
 }
 

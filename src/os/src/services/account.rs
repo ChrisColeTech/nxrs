@@ -184,6 +184,29 @@ accfn!(select, |a| {
         None => RES_CANCELLED,
     }
 });
+/// A new local profile in the first free slot of `dir` (its `user<n>.registered` marker written before the answer,
+/// as nxnative's creator persists it); None when all 8 are taken or the marker cannot be written.
+fn create_user_in(dir: &std::path::Path, registered: u64) -> Option<u64> {
+    let slot = (1..USERS).find(|i| registered >> i & 1 == 0)?;
+    std::fs::create_dir_all(dir).ok()?;
+    std::fs::write(dir.join(format!("user{}.registered", slot + 1)), b"").ok()?;
+    Some(slot)
+}
+
+// ShowUserCreator: the player makes a new local profile (nxnative show_selector with the creator); the PC app has no
+// account UI to fill in, so the profile is made at once in the first free slot, named "Player <n>".
+accfn!(creator, |a| {
+    match create_user_in(&crate::services::fs::save_dir(), registered()) {
+        Some(u) => {
+            crate::log!("account: user creator: profile {} ({}) made", u + 1, nickname(u));
+            RES_OK
+        }
+        None => {
+            crate::log!("[RED] account: user creator: no free profile slot (8 used) or the save folder is not writable");
+            RES_CANCELLED
+        }
+    }
+});
 accfn!(fail, |a| { RES_FAIL });
 accfn!(fail_zero_n, |a| {
     crate::guest::out(a.x(0), 0u64);
@@ -253,7 +276,7 @@ pub fn register(r: &mut Registry) {
         ("_ZN2nn7account9GetUserIdEPNS0_3UidERKNS0_10UserHandleE", get_user_id),
         ("_ZN2nn7account11GetNicknameEPNS0_8NicknameERKNS0_3UidE", nickname_fn),
         ("_ZN2nn7account16ShowUserSelectorEPNS0_3UidERKNS0_21UserSelectionSettingsE", select),
-        ("_ZN2nn7account15ShowUserCreatorEv", ok),
+        ("_ZN2nn7account15ShowUserCreatorEv", creator),
         ("_ZN2nn7account36EnsureNetworkServiceAccountAvailableERKNS0_10UserHandleE", fail),
         ("_ZN2nn7account26GetNetworkServiceAccountIdEPNS0_23NetworkServiceAccountIdERKNS0_10UserHandleE", fail),
         ("_ZN2nn7account37LoadNetworkServiceAccountIdTokenCacheEPmPcmRKNS0_10UserHandleE", fail_zero_n),
@@ -296,6 +319,19 @@ mod tests {
         let out = crate::services::applet::applet_output(0x10);
         assert_eq!(u64::from_le_bytes(out[8..16].try_into().unwrap()), UID0 + 2);
         assert!(nxconfig::apply_arg("--pc_user=1") && nxconfig::apply_arg("--pc_user_name=Player"));
+    }
+
+    /// ShowUserCreator makes the first free profile slot and keeps it (its marker), then the next; none when all
+    /// 8 are taken.
+    #[test]
+    fn user_creator_persists_a_new_profile() {
+        let d = std::env::temp_dir().join(format!("nxos-acc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        assert_eq!(create_user_in(&d, 0b1), Some(1));
+        assert!(d.join("user2.registered").exists());
+        assert_eq!(create_user_in(&d, 0b1011), Some(2));
+        assert_eq!(create_user_in(&d, 0xff), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     #[test]

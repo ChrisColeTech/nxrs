@@ -36,7 +36,7 @@ pub struct BuildArgs {
     pub no_build: bool,
     /// `--chunk`: about this many ARM instructions per C file (Turbo's default 30000); None: the translator's sizing
     pub chunk: Option<u64>,
-    /// `--native`: compile for this processor (-march=native) instead of x86-64-v3
+    /// `--native`: compile for this processor (-march=native) instead of the baseline (`cc::MARCH`)
     pub native: bool,
     pub no_shaders: bool,
     /// v1: the DLC hint names `--install-dlc` (what a v1 caller passes); v2: `nxrs-build dlc install`
@@ -372,7 +372,14 @@ fn shaders_step(out: &Out, data: &Path, profile: Option<&str>, a: &BuildArgs) {
         out.say(&format!("shaders: the profile's tables not written ({e}); the game runs without its prewarm seed"));
     }
     let opts = shaders::Options { keys: a.keys.clone(), jobs: a.jobs.clamp(1, 4), ..shaders::Options::default() };
-    let say = |m: &str| out.say(&format!("  {m}"));
+    // the prebuild's own lines give the real counts: `@progress shaders <done> <found>` as they are translated
+    let counts = std::sync::Mutex::new(ShaderCounts::default());
+    let say = |m: &str| {
+        out.say(&format!("  {m}"));
+        if let Some((d, n)) = counts.lock().unwrap().line(m) {
+            out.progress("shaders", d, n);
+        }
+    };
     out.say("Translating the shaders (beside the compile)...");
     match shaders::prebuild_data(data, &opts, &say) {
         Ok(rep) => {
@@ -381,6 +388,32 @@ fn shaders_step(out: &Out, data: &Path, profile: Option<&str>, a: &BuildArgs) {
             out.say(&format!("shaders: {} found, {} translated, {} reused, {} failed ({:.1}s)", rep.found, rep.translated, rep.reused, rep.failed, rep.total_seconds));
         }
         Err(e) => out.say(&format!("shaders: not translated at build time ({e}); the game translates them while it runs")),
+    }
+}
+
+/// Progress read from the shader prebuild's lines (`shaders: N found in ...`, `shaders: translating N ...`,
+/// `shaders: translated D of T ...`): every shader found and not in this round's work is already done (reused or in
+/// the library), so done = found - T + D.
+#[derive(Default)]
+struct ShaderCounts {
+    found: usize,
+}
+
+impl ShaderCounts {
+    fn line(&mut self, m: &str) -> Option<(usize, usize)> {
+        let rest = m.strip_prefix("shaders: ")?;
+        let num = |s: &str| s.split_whitespace().next().and_then(|w| w.parse::<usize>().ok());
+        if let Some(n) = rest.split_once(" found in ").and_then(|(n, _)| num(n)) {
+            self.found = n;
+            return Some((0, n));
+        }
+        let t = rest.strip_prefix("translating ").and_then(num).map(|t| (0, t));
+        let t = t.or_else(|| {
+            let (d, r) = rest.strip_prefix("translated ")?.split_once(" of ")?;
+            Some((num(d)?, num(r)?))
+        })?;
+        let total = self.found.max(t.1);
+        Some((total - t.1 + t.0, total))
     }
 }
 
@@ -584,6 +617,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
 
     // ---- data folder
     let t = Instant::now();
+    out.progress("data", 0, 0);
     let v1 = a.v1;
     game.write_data(&data, &|m: &str| {
         // the hint names the option the caller's contract has
@@ -636,6 +670,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         std::fs::write(&ini, ini_text(&name))?;
     }
     timings.push(("data", t.elapsed().as_secs_f64()));
+    out.progress("data", 1, 1);
     if a.no_build {
         return Ok(Built { exe, data, timings });
     }
@@ -650,7 +685,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         let extra = extra_cflags(std::env::var("SWR_CFLAGS").ok().as_deref());
         for u in &mut units {
             for f in &mut u.flags {
-                if a.native && f == "-march=x86-64-v3" {
+                if a.native && f == crate::cc::MARCH {
                     *f = "-march=native".into();
                 }
             }
@@ -690,7 +725,10 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             .name("shader prebuild".into())
             .spawn_scoped(s, move || {
                 let t = Instant::now();
-                shaders_step(out, data, profile_id, a);
+                // never fatal, a panic included (Turbo catches every exception of the prebuild thread)
+                if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shaders_step(out, data, profile_id, a))).is_err() {
+                    out.say("shaders: not translated at build time (the prebuild stopped); the game translates them while it runs");
+                }
                 t.elapsed().as_secs_f64()
             })
             .expect("shader prebuild thread");
@@ -753,6 +791,19 @@ mod tests {
         assert_eq!(extra_cflags(Some(" -march=znver4  -mtune=znver4\t")), vec!["-march=znver4", "-mtune=znver4"]);
         assert!(extra_cflags(None).is_empty() && extra_cflags(Some("  ")).is_empty());
         assert_eq!(default_jobs(), std::thread::available_parallelism().unwrap().get());
+    }
+
+    /// 6d04b3b: the shader step reports real counts from the prebuild's own lines (found, then translated D of T
+    /// with the reused ones counted done).
+    #[test]
+    fn shader_progress_from_prebuild_lines() {
+        let mut c = ShaderCounts::default();
+        assert_eq!(c.line("shaders: 11609 found in 13.0 s (3 files, 12 MB read, 0 problems)"), Some((0, 11609)));
+        assert_eq!(c.line("shaders: translating 11608 (1 reused) with 4 processes"), Some((1, 11609)));
+        assert_eq!(c.line("shaders: translated 500 of 11608 (40 a second)"), Some((501, 11609)));
+        assert_eq!(c.line("shaders: translated 11608 of 11608 (44 a second)"), Some((11609, 11609)));
+        assert_eq!(c.line("shaders: 11609 found, 11608 translated (1 reused), 0 failed, 0 skipped, 1 valid, 0 invalid; 263 s"), None);
+        assert_eq!(c.line("shaders: validated 3 of 9"), None);
     }
 
     #[test]

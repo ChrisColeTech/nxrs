@@ -58,8 +58,33 @@ pub fn toggle() {
     TOGGLE.store(true, Ordering::Release);
 }
 
+/// When the recorder last finished a write (ms since `epoch()`); the stall watchdog reads it.
+static PROGRESS_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static STARTED_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn now_ms() -> u64 {
+    static E: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    E.get_or_init(std::time::Instant::now).elapsed().as_millis() as u64
+}
+
+/// The encoder made no progress for 5 s since the later of the recording's start and its last finished write
+/// (Turbo's recording stall watchdog, reimplemented).
+pub fn stalled(now: u64, entered: u64, progress: u64) -> bool {
+    now.saturating_sub(progress.max(entered)) >= 5000
+}
+
 /// From the front-end loop.
 pub fn tick() {
+    // the stall watchdog: a writer stuck in the encoder (Media Foundation) ends the recording, the game's clock back
+    // to real time, instead of the game staying slowed down behind it
+    if recording() && stalled(now_ms(), STARTED_MS.load(Ordering::Acquire), PROGRESS_MS.load(Ordering::Acquire)) {
+        crate::flog!("[RED] F7: the encoder made no progress for 5 seconds; the recording stops (its file may be incomplete)");
+        ON.store(false, Ordering::Release);
+        nxos::media::sink::set_tap(None);
+        nxgfx::vk::shot::set_frame_sink(0, None);
+        nxos::clock::set_rate(1.0);
+        crate::window::set_state(1, "Recording stopped: the encoder stalled");
+    }
     if !TOGGLE.swap(false, Ordering::AcqRel) {
         return;
     }
@@ -269,6 +294,8 @@ fn start() {
     let path = dir.join(format!("recording_{}.mp4", crate::capture::stamp()));
     let (w, h) = (first.w & !1, first.h & !1);
     AUDIO.lock().unwrap().clear();
+    STARTED_MS.store(now_ms(), Ordering::Release);
+    PROGRESS_MS.store(0, Ordering::Release);
     ON.store(true, Ordering::Release);
     BUSY.store(true, Ordering::Release);
     let handle = std::thread::Builder::new()
@@ -322,6 +349,7 @@ fn start() {
                     ON.store(false, Ordering::Release);
                     break;
                 }
+                PROGRESS_MS.store(now_ms(), Ordering::Release);
                 // behind real time without smooth recording: repeat the picture so the video keeps the game's speed
                 if !smooth {
                     while (nxos::clock::now_ns() - g0) * fps as u64 / 1_000_000_000 > wr.frame {
@@ -382,5 +410,18 @@ pub fn stop() {
     let t = THREAD.lock().unwrap().take();
     if let Some(h) = t {
         let _ = h.join();
+    }
+}
+#[cfg(test)]
+mod tests {
+    /// Five seconds without a finished write, counted from the later of the start and the last write.
+    #[test]
+    fn stall_after_five_seconds_without_progress() {
+        assert!(!super::stalled(4_999, 0, 0));
+        assert!(super::stalled(5_000, 0, 0));
+        assert!(!super::stalled(12_000, 10_000, 0), "counted from the start");
+        assert!(!super::stalled(12_000, 0, 8_000), "a write 4 s ago");
+        assert!(super::stalled(13_000, 0, 8_000));
+        assert!(!super::stalled(100, 5_000, 0), "a clock before the start is no stall");
     }
 }

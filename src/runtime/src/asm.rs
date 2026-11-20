@@ -1,5 +1,6 @@
-//! The machine-code boundary between generated code and Rust (x86-64, Windows x64 ABI). Every function here has SEH
-//! unwind info, so host stack walks (crash reports, `fault.rs`) pass through.
+//! The machine-code boundary between generated code and Rust: x86-64 (Windows x64 ABI, System V on Linux) and AArch64
+//! Linux (AAPCS64). The Windows functions have SEH unwind info and the Linux ones CFI, so host stack walks (crash
+//! reports, `fault.rs`) pass through.
 //!
 //! The rule this layer enforces: **no non-local jump ever skips a live Rust frame.** Rust code reached from generated
 //! code is always entered through a shim here that *calls* it, lets it return, and only then performs whatever jump
@@ -225,7 +226,7 @@ core::arch::global_asm!(
 // The same boundary for the System V ABI (Linux): arguments in rdi, rsi, rdx, rcx; no shadow space is needed, but the
 // frame of rt_sj_owner / nxrt_call_guest keeps the Windows layout (the SjSlot at rsp+32) so `SjSlot` is one type.
 // The frames save rbx, rbp, r12-r15 (the System V callee-saved set) and, harmlessly, rsi, rdi and xmm6-15 as well.
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 macro_rules! frame_asm_sysv {
     (prologue $name:literal) => {
         concat!(
@@ -259,7 +260,7 @@ macro_rules! frame_asm_sysv {
     };
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 core::arch::global_asm!(
     ".text",
     // void rt_dispatch(Cpu *c): jump to the lifted function for c->pc.
@@ -447,6 +448,254 @@ core::arch::global_asm!(
     ".size nxrt_ctx_switch, .-nxrt_ctx_switch",
 );
 
+// The same boundary for AArch64 Linux (AAPCS64): `Cpu *` in x0, the return address in x30, x9-x15 free scratch at
+// every entry here (each is a call or a tail jump from generated code). The frame of rt_sj_owner / nxrt_call_guest
+// (224 bytes) saves the callee-saved set and holds the SjSlot: 0 x29 x30 (the frame record), 16 x19-x28, 96 d8-d15,
+// 160 the SjSlot (`rsp` is the frame's sp). A jump to a slot loads its sp and branches to its resume address with the
+// status in x0; the epilogue then restores x19-x30 and d8-d15 from the frame, so whatever the generated code between
+// the jump and the slot left in them does not matter.
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+macro_rules! frame_asm_a64 {
+    (prologue $name:literal) => {
+        concat!(
+            ".type ", $name, ",%function\n", $name, ":\n",
+            ".cfi_startproc\n",
+            "sub sp, sp, #224\n.cfi_def_cfa_offset 224\n",
+            "stp x29, x30, [sp]\n",
+            "stp x19, x20, [sp, #16]\nstp x21, x22, [sp, #32]\nstp x23, x24, [sp, #48]\n",
+            "stp x25, x26, [sp, #64]\nstp x27, x28, [sp, #80]\n",
+            "stp d8, d9, [sp, #96]\nstp d10, d11, [sp, #112]\nstp d12, d13, [sp, #128]\nstp d14, d15, [sp, #144]\n",
+            ".cfi_offset w29, -224\n.cfi_offset w30, -216\n",
+            ".cfi_offset w19, -208\n.cfi_offset w20, -200\n.cfi_offset w21, -192\n.cfi_offset w22, -184\n",
+            ".cfi_offset w23, -176\n.cfi_offset w24, -168\n.cfi_offset w25, -160\n.cfi_offset w26, -152\n",
+            ".cfi_offset w27, -144\n.cfi_offset w28, -136\n",
+            ".cfi_offset b8, -128\n.cfi_offset b9, -120\n.cfi_offset b10, -112\n.cfi_offset b11, -104\n",
+            ".cfi_offset b12, -96\n.cfi_offset b13, -88\n.cfi_offset b14, -80\n.cfi_offset b15, -72\n",
+            "mov x29, sp\n",
+        )
+    };
+    (epilogue $name:literal) => {
+        concat!(
+            "ldp x19, x20, [sp, #16]\nldp x21, x22, [sp, #32]\nldp x23, x24, [sp, #48]\n",
+            "ldp x25, x26, [sp, #64]\nldp x27, x28, [sp, #80]\n",
+            "ldp d8, d9, [sp, #96]\nldp d10, d11, [sp, #112]\nldp d12, d13, [sp, #128]\nldp d14, d15, [sp, #144]\n",
+            "ldp x29, x30, [sp]\n",
+            "add sp, sp, #224\n.cfi_def_cfa_offset 0\n",
+            "ret\n",
+            ".cfi_endproc\n.size ", $name, ", .-", $name, "\n",
+        )
+    };
+}
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+core::arch::global_asm!(
+    ".text",
+    // void rt_dispatch(Cpu *c): jump to the lifted function for c->pc (x30 untouched: it is the target's return).
+    ".globl rt_dispatch",
+    ".type rt_dispatch,%function",
+    ".p2align 4",
+    "rt_dispatch:",
+    "adrp x9, NXRT_DISPATCH",
+    "add x9, x9, :lo12:NXRT_DISPATCH",
+    "ldr x10, [x0, #264]",
+    "ldr x11, [x9]",
+    "sub x10, x10, x11",
+    "ror x10, x10, #2",
+    "ldr x11, [x9, #8]",
+    "cmp x10, x11",
+    "b.hs 2f",
+    "ldr x11, [x9, #16]",
+    "ldr w12, [x11, x10, lsl #2]",
+    "cbz w12, 2f",
+    "ldr x11, [x9, #24]",
+    "add x12, x12, x11",
+    "br x12",
+    "2:",
+    "b nxrt_dispatch_slow",
+    ".size rt_dispatch, .-rt_dispatch",
+    "",
+    ".globl nxrt_dispatch_slow",
+    ".type nxrt_dispatch_slow,%function",
+    ".p2align 4",
+    "nxrt_dispatch_slow:",
+    ".cfi_startproc",
+    "stp x0, x30, [sp, #-16]!",
+    ".cfi_def_cfa_offset 16",
+    ".cfi_offset w30, -8",
+    "bl nxrt_dispatch_resolve",
+    "mov x9, x0",
+    "ldp x0, x30, [sp], #16",
+    ".cfi_def_cfa_offset 0",
+    ".cfi_restore w30",
+    "br x9",
+    ".cfi_endproc",
+    ".size nxrt_dispatch_slow, .-nxrt_dispatch_slow",
+    "",
+    // void rt_sj_owner(Cpu *c, GuestFn body, uint64_t lo, uint64_t hi)
+    ".globl rt_sj_owner",
+    ".p2align 4",
+    frame_asm_a64!(prologue "rt_sj_owner"),
+    "ldr x9, [x0, #344]",
+    "str x9, [sp, #160]",        // up
+    "stp x2, x3, [sp, #168]",    // lo, hi
+    "mov x9, sp",
+    "str x9, [sp, #184]",        // rsp (the frame's sp)
+    "stp x0, x1, [sp, #192]",    // c, body
+    "adr x9, 3f",
+    "str x9, [sp, #208]",        // resume
+    "str xzr, [sp, #216]",       // status
+    "add x9, sp, #160",
+    "str x9, [x0, #344]",
+    "3:",
+    "mov x29, sp",
+    "ldp x0, x9, [sp, #192]",
+    "blr x9",
+    "ldr x0, [sp, #192]",
+    "ldr x9, [sp, #160]",
+    "str x9, [x0, #344]",
+    frame_asm_a64!(epilogue "rt_sj_owner"),
+    "",
+    // uint64_t nxrt_call_guest(Cpu *c)
+    ".globl nxrt_call_guest",
+    ".p2align 4",
+    frame_asm_a64!(prologue "nxrt_call_guest"),
+    "ldr x9, [x0, #344]",
+    "str x9, [sp, #160]",
+    "stp xzr, xzr, [sp, #168]",
+    "mov x9, sp",
+    "str x9, [sp, #184]",
+    "stp x0, xzr, [sp, #192]",
+    "adr x9, 5f",
+    "str x9, [sp, #208]",
+    "str xzr, [sp, #216]",
+    "add x9, sp, #160",
+    "str x9, [x0, #344]",
+    "bl rt_dispatch",
+    "mov x0, #0",
+    "5:",
+    "ldr x1, [sp, #192]",
+    "ldr x9, [sp, #160]",
+    "str x9, [x1, #344]",
+    frame_asm_a64!(epilogue "nxrt_call_guest"),
+    "",
+    // noreturn void nxrt_sj_jump(SjSlot *slot): into the slot's frame at its resume address, x0 = its status.
+    ".globl nxrt_sj_jump",
+    ".type nxrt_sj_jump,%function",
+    ".p2align 4",
+    "nxrt_sj_jump:",
+    "ldr x9, [x0, #24]",
+    "mov sp, x9",
+    "ldr x10, [x0, #48]",
+    "ldr x0, [x0, #56]",
+    "br x10",
+    ".size nxrt_sj_jump, .-nxrt_sj_jump",
+    "",
+    ".globl nxrt_jump_pending",
+    ".type nxrt_jump_pending,%function",
+    ".p2align 4",
+    "nxrt_jump_pending:",
+    "ldr x0, [x0, #344]",
+    "b nxrt_sj_jump",
+    ".size nxrt_jump_pending, .-nxrt_jump_pending",
+    "",
+    // void rt_svc(Cpu *c, uint32_t imm, uint64_t pc): its arguments are nxrt_svc_impl's already
+    ".globl rt_svc",
+    ".type rt_svc,%function",
+    ".p2align 4",
+    "rt_svc:",
+    ".cfi_startproc",
+    "stp x0, x30, [sp, #-16]!",
+    ".cfi_def_cfa_offset 16",
+    ".cfi_offset w30, -8",
+    "bl nxrt_svc_impl",
+    "mov w9, w0",
+    "ldp x0, x30, [sp], #16",
+    ".cfi_def_cfa_offset 0",
+    ".cfi_restore w30",
+    "cbnz w9, 6f",
+    "ret",
+    "6:",
+    "cmp w9, #1",
+    "b.eq rt_dispatch",
+    "b nxrt_jump_pending",
+    ".cfi_endproc",
+    ".size rt_svc, .-rt_svc",
+    "",
+    ".globl nxrt_host_entry",
+    ".type nxrt_host_entry,%function",
+    ".p2align 4",
+    "nxrt_host_entry:",
+    ".cfi_startproc",
+    "stp x0, x30, [sp, #-16]!",
+    ".cfi_def_cfa_offset 16",
+    ".cfi_offset w30, -8",
+    "bl nxrt_host_invoke",
+    "mov w9, w0",
+    "ldp x0, x30, [sp], #16",
+    ".cfi_def_cfa_offset 0",
+    ".cfi_restore w30",
+    "cbnz w9, 7f",
+    "ret",
+    "7:",
+    "cmp w9, #1",
+    "b.eq rt_dispatch",
+    "b nxrt_jump_pending",
+    ".cfi_endproc",
+    ".size nxrt_host_entry, .-nxrt_host_entry",
+    "",
+    // A host fiber's first frame (fiber.rs builds its stack so that nxrt_ctx_switch returns here with the fiber's
+    // parameter in x19 and x29 = 0, the end of the frame chain): runs the fiber's guest function, then switches to
+    // the host fiber it returns for good.
+    ".globl nxrt_fiber_entry",
+    ".type nxrt_fiber_entry,%function",
+    ".p2align 4",
+    "nxrt_fiber_entry:",
+    "mov x0, x19",
+    "bl nxrt_fiber_run",
+    "bl nxrt_fiber_leave",
+    "bl nxrt_fiber_resumed_dead",
+    "brk #0",
+    ".size nxrt_fiber_entry, .-nxrt_fiber_entry",
+    "",
+    // void nxrt_ctx_switch(size_t *save, size_t to): x19-x30, d8-d15 and FPCR in a 176-byte frame (CTX_FRAME in
+    // fiber.rs): 0 x19 x20, 16 x21 x22, 32 x23 x24, 48 x25 x26, 64 x27 x28, 80 x29 x30, 96 d8-d15, 160 FPCR.
+    ".globl nxrt_ctx_switch",
+    ".type nxrt_ctx_switch,%function",
+    ".p2align 4",
+    "nxrt_ctx_switch:",
+    "sub sp, sp, #176",
+    "stp x19, x20, [sp, #0]",
+    "stp x21, x22, [sp, #16]",
+    "stp x23, x24, [sp, #32]",
+    "stp x25, x26, [sp, #48]",
+    "stp x27, x28, [sp, #64]",
+    "stp x29, x30, [sp, #80]",
+    "stp d8, d9, [sp, #96]",
+    "stp d10, d11, [sp, #112]",
+    "stp d12, d13, [sp, #128]",
+    "stp d14, d15, [sp, #144]",
+    "mrs x9, fpcr",
+    "str x9, [sp, #160]",
+    "mov x9, sp",
+    "str x9, [x0]",
+    "mov sp, x1",
+    "ldr x9, [sp, #160]",
+    "msr fpcr, x9",
+    "ldp x19, x20, [sp, #0]",
+    "ldp x21, x22, [sp, #16]",
+    "ldp x23, x24, [sp, #32]",
+    "ldp x25, x26, [sp, #48]",
+    "ldp x27, x28, [sp, #64]",
+    "ldp x29, x30, [sp, #80]",
+    "ldp d8, d9, [sp, #96]",
+    "ldp d10, d11, [sp, #112]",
+    "ldp d12, d13, [sp, #128]",
+    "ldp d14, d15, [sp, #144]",
+    "add sp, sp, #176",
+    "ret",
+    ".size nxrt_ctx_switch, .-nxrt_ctx_switch",
+);
+
 extern "C" {
     pub fn rt_dispatch(c: *mut Cpu);
     pub fn rt_sj_owner(c: *mut Cpu, body: crate::cpu::GuestFn, lo: u64, hi: u64);
@@ -459,8 +708,9 @@ extern "C" {
 
 #[cfg(target_os = "linux")]
 extern "C" {
-    /// Saves the callee-saved registers, MXCSR and the x87 control word on the current stack, stores the stack
-    /// pointer in `*save`, and resumes the context whose stack pointer is `to` (a host fiber switch).
+    /// Saves the callee-saved registers and the FP control state (MXCSR and the x87 control word; AArch64: FPCR) on
+    /// the current stack, stores the stack pointer in `*save`, and resumes the context whose stack pointer is `to` (a
+    /// host fiber switch).
     pub fn nxrt_ctx_switch(save: *mut usize, to: usize);
 }
 

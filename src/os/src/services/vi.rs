@@ -213,6 +213,81 @@ vifn!(indirect_req, |a| {
     RES_OK
 });
 
+// ---- the layer's frame history (nxnative hle_vi.c): the last 8 presents, newest first
+
+const VFH: usize = 8;
+
+#[derive(Clone, Copy, Default)]
+struct FrameRec {
+    frame: u64,
+    queued: u64,
+    shown: u64,
+}
+
+static HISTORY: std::sync::Mutex<[FrameRec; VFH]> = std::sync::Mutex::new([FrameRec { frame: 0, queued: 0, shown: 0 }; VFH]);
+
+/// At each present the game queues (`nvn::note_present`): frame = the frame number with it, at the guest counter now.
+pub fn frame_queued(frame: u64) {
+    HISTORY.lock().unwrap()[frame as usize % VFH] = FrameRec { frame, queued: crate::svc::ticks(), shown: 0 };
+}
+
+/// FrameInfo[] (40 bytes each: status 2 shown / 1 queued, frame number, the queue tick, the present tick twice), the
+/// frames up to `latest`, newest first; a frame is shown once the present queue has handed it to the display
+/// (`handed`), at the tick it was first seen so. Returns the entries written.
+fn frame_history(out: u64, n: usize, latest: u64, handed: u64, now: u64) -> usize {
+    let mut h = HISTORY.lock().unwrap();
+    let mut k = 0;
+    let mut f = latest;
+    while f > 0 && latest - f < VFH as u64 && k < n {
+        let e = &mut h[f as usize % VFH];
+        if e.frame == f {
+            if f <= handed && e.shown == 0 {
+                e.shown = now.max(1);
+            }
+            let o = out + 40 * k as u64;
+            w64(o, if e.shown != 0 { 2 } else { 1 });
+            w64(o + 8, f);
+            w64(o + 16, e.queued);
+            w64(o + 24, e.shown);
+            w64(o + 32, e.shown);
+            k += 1;
+        }
+        f -= 1;
+    }
+    k
+}
+
+// ListFrameHistory(FrameInfo *out, int n, const Layer *) -> int: a null buffer asks for the history's size (8).
+// Unreal Engine 5's flip tracking reads it each vsync and completes its frame-end fences by the first shown entry;
+// the SDK's own version reads the compositor's records the host never made.
+vifn!(list_frame_history, |a| {
+    let (out, n) = (a.x(0), a.i(1));
+    if out == 0 || n <= 0 {
+        return VFH as u64;
+    }
+    let k = frame_history(out, n as usize, crate::nvn::presents(), nxgfx::vk::present::presented(), crate::svc::ticks());
+    crate::log_once!("vi history", "vi::ListFrameHistory: {k} of the last {VFH} presents returned");
+    k as u64
+});
+
+// GetIndirectImage(u64 *w, u64 *h, void *buffer, size_t size, u64 consumer, int width, int height[, 4 floats: the
+// crop]): the picture of an indirect layer (the inline keyboard's applet draws into it; the game draws it over its
+// screen). The host's keyboard is a window of its own, so the picture is fully transparent (Turbo vi 2450 / 2451:
+// the buffer zeroed, sizes 0); left as it was, whatever that memory held would be drawn over the game.
+vifn!(indirect_image, |a| {
+    let (buf, size) = (a.x(2), a.x(3));
+    if buf != 0 && size != 0 && size <= 64 << 20 {
+        crate::guest::zero(buf, size);
+    }
+    for i in 0..2 {
+        if a.x(i) != 0 {
+            w64(a.x(i), 0);
+        }
+    }
+    crate::log_once!("vi indirect", "vi::GetIndirectImage {}x{}: transparent (the host's keyboard is a window of its own)", a.i(5), a.i(6));
+    RES_OK
+});
+
 pub fn register(r: &mut Registry) {
     const W: &str = "vi: the host's display, layer and native window";
     for (n, f) in [
@@ -248,7 +323,43 @@ pub fn register(r: &mut Registry) {
         ("_ZN2nn2vi37ClearLayerNextHdrContentGamutMetadataEPNS0_5LayerE", hdr_meta),
         ("_ZN2nn2vi41ClearLayerNextHdrToSdrToneMappingMetadataEPNS0_5LayerE", hdr_meta),
         ("_ZN2nn2vi33GetIndirectImageMemoryRequirementEPmS1_ii", indirect_req),
+        ("_ZN2nn2vi16ListFrameHistoryEPNS0_9FrameInfoEiPKNS0_5LayerE", list_frame_history),
+        ("_ZN2nn2vi16GetIndirectImageEPmS1_Pvmmii", indirect_image),
+        ("_ZN2nn2vi16GetIndirectImageEPmS1_Pvmmiiffff", indirect_image),
     ] {
         r.force(n, W, f);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// ListFrameHistory as nxnative answers it: the size (8) for a null buffer; the frames up to the latest, newest
+    /// first, status 2 with a present tick once the present queue handed them on, 1 before; frames older than 8 are
+    /// gone. GetIndirectImage leaves a transparent picture (Turbo 2450).
+    #[test]
+    fn frame_history_and_indirect_image() {
+        for f in 1..=10 {
+            super::frame_queued(f);
+        }
+        let mut out = vec![0u64; 5 * 10];
+        let a = out.as_mut_ptr() as u64;
+        // frames 1..10 queued, 9 handed to the display
+        assert_eq!(super::frame_history(a, 10, 10, 9, 777), 8, "8 at most");
+        assert_eq!(&out[0..2], &[1, 10], "the newest, not shown yet");
+        assert_eq!((out[4], out[5], out[6], out[8], out[9]), (0, 2, 9, 777, 777), "shown at the tick first seen so");
+        assert_eq!(out[7 * 5 + 1], 3);
+        assert_eq!(super::frame_history(a, 2, 10, 10, 900), 2);
+        assert_eq!((out[0], out[3], out[5], out[8]), (2, 900, 2, 777), "a shown frame keeps its first tick");
+        let mut c = nxrt::cpu::Cpu::new_boxed();
+        c.x[0] = 0;
+        c.x[1] = 0;
+        unsafe { super::list_frame_history(&mut *c) };
+        assert_eq!(c.x[0], 8);
+        let mut pic = vec![0xFFu8; 4096];
+        let (mut w, mut h) = (5u64, 5u64);
+        c.x[..7].copy_from_slice(&[&mut w as *mut u64 as u64, &mut h as *mut u64 as u64, pic.as_mut_ptr() as u64, 4096, 1, 32, 32]);
+        unsafe { super::indirect_image(&mut *c) };
+        assert_eq!((c.x[0], w, h), (0, 0, 0));
+        assert!(pic.iter().all(|&b| b == 0));
     }
 }

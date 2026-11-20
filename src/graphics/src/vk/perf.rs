@@ -147,6 +147,16 @@ pub fn snapshot() -> Vec<(&'static str, u64)> {
 pub fn gpu_time(ns: u64) {
     add(C::GpuNs, ns);
     inc(C::GpuSubs);
+    FRAME_GPU.fetch_add(ns, Ordering::Relaxed);
+}
+
+/// GPU time of the submissions finished since the last `frame_gpu_take` (the frame step's present tick: a frame's
+/// GPU cost; nxnative takes the latest finished frame's GPU time).
+static FRAME_GPU: AtomicU64 = AtomicU64::new(0);
+
+/// The GPU ns finished since the last call (0: none).
+pub fn frame_gpu_take() -> u64 {
+    FRAME_GPU.swap(0, Ordering::Relaxed)
 }
 
 /// The fine-grained timers inside the descriptor work (memory lookups, views, banks, keys, writes): thousands a

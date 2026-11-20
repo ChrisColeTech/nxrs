@@ -589,7 +589,8 @@ mod stub_tests {
                     assert!((code..code + 4 * words.len() as u64).contains(&to), "{game}: site {a:#x} branches to {to:#x}, outside the area");
                 }
             }
-            eprintln!("{game}: {} area words, {} sites, step_max {}", words.len(), sites.len(), st.step_max);
+            let at: Vec<String> = sites.keys().map(|a| format!("main+{:#x}", a - m.base)).collect();
+            eprintln!("{game}: {} area words, {} sites ({}), step_max {}", words.len(), sites.len(), at.join(" "), st.step_max);
         }
     }
 }

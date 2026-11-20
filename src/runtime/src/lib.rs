@@ -10,6 +10,7 @@ pub mod dispatch;
 pub mod fault;
 pub mod fiber;
 pub mod hostfn;
+pub mod hostprof;
 pub mod interp;
 pub mod kernel;
 #[cfg(target_os = "linux")]

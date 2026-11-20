@@ -49,6 +49,15 @@ pub const SECTIONS: &[Section] = &[
             o!("ask_user", "0", "1 = when the game asks who is playing and more than one local profile exists, a picker opens over it
 ;   (Up / Down to choose, A / Return: select, B / Esc: cancel); 0 = the game gets pc_user without asking"),
             o!("home_quit", "1", "1 = holding a controller's Home (logo) button 2 s asks whether to quit; 0 = off"),
+            o!("rumble", "1", "1 = the game's rumble reaches the controllers; 0 = off. Applies live"),
+            o!("rumble_gain", "1.00", "Rumble strength, 0 to 3 (0 = silent, 1 = as the game sends it). Applies live"),
+            o!("rumble_min", "0", "Rumble cutoff, 0 to 0.9: levels below it stay silent and the rest is stretched over the full range
+;   (for controllers with rotating motors that a game's quiet rumble keeps running: Mario Kart 8 Deluxe 0.45). Applies live"),
+            o!("pad_press_to_join", "0", "1 = a controller is no player until one of its buttons is pressed, then it is the lowest player free;
+;   0 = each controller connected is a player at once (the one it had before, else player 1 first)"),
+            o!("pad_merge", "0", "1 = every controller is player 1 together; 0 = each controller is a player of its own"),
+            o!("keyboard_player", "shared", "shared = the keyboard is player 1 together with the first controller; own = the keyboard alone is
+;   player 1 and the controllers are players 2 and on"),
             o!("pause_on_focus_loss", "0", "0 = the game runs on when its window is behind others (a PC app); 1 = the game is told it lost
 ;   the focus (many pause, as on a console) when the window is in the background or a prompt is open over it"),
             o!("mute_on_focus_loss", "0", "1 = the game's sound is muted while its window is behind others or minimised (it comes back with the

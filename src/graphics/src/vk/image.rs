@@ -233,6 +233,22 @@ pub struct Part {
 }
 
 /// The levels and layers of a texture from its storage bytes, laid out linearly.
+/// Bytes of texture storage deswizzled on the GPU.
+pub static GPU_DESWIZZLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether a texture's upload from its storage goes through the GPU deswizzle: block-linear, not ASTC (its blocks are
+/// decoded on the GPU from CPU-deswizzled rows), no 3-byte expansion, big enough, every level in whole words.
+fn gpu_deswizzle_ok(im: &Image) -> bool {
+    let t = im.tex;
+    let linear = t.d.flags as u32 & (tex_flags::LINEAR | tex_flags::LINEAR_RENDER_TARGET) != 0;
+    !linear
+        && im.tf.astc.is_none()
+        && im.tf.expand3 == 0
+        && t.l.size >= crate::tex::deswizzle_gpu::MIN_BYTES
+        && t.l.size < (1 << 31)
+        && crate::tex::deswizzle_gpu::fits(&t.d, if t.d.target == target::T3D { 1 } else { im.layers }, im.levels)
+}
+
 fn decode_parts(im: &Image, storage: &[u8]) -> Vec<Part> {
     let t = im.tex;
     let d = t.d;
@@ -286,7 +302,7 @@ fn decode_many(imgs: &Images, serials: &[u64]) -> HashMap<u64, Vec<Part>> {
     let due: Vec<&Image> = serials
         .iter()
         .filter_map(|s| imgs.by_serial.get(s))
-        .filter(|im| im.needs_upload && !im.gpu_owned && !im.tex.mem.is_null() && !crate::nvn::vpool::is_sparse(im.tex.mem as u64))
+        .filter(|im| im.needs_upload && !im.gpu_owned && !im.tex.mem.is_null() && !crate::nvn::vpool::is_sparse(im.tex.mem as u64) && !gpu_deswizzle_ok(im))
         .collect();
     let bytes: u64 = due.iter().map(|im| im.tex.l.size).sum();
     if due.len() < 4 || bytes < (4 << 20) {
@@ -2065,8 +2081,52 @@ impl Gpu {
             owned_c = super::mem::guest_bytes(t.mem as u64, t.l.size);
             &owned_c
         };
+        if gpu_deswizzle_ok(im) && self.record_gpu_deswizzle(im, sub, storage) {
+            return;
+        }
         let parts = decode_parts(im, storage);
         self.record_parts(im, sub, parts);
+    }
+
+    /// The storage staged as it is and deswizzled on the GPU (`tex::deswizzle_gpu`), every level and layer copied
+    /// into the image from there. False (nothing recorded) when a level does not take that path.
+    fn record_gpu_deswizzle(&self, im: &Image, sub: &mut Sub, storage: &[u8]) -> bool {
+        let d = im.tex.d;
+        let native = shape(&im.tex).1;
+        let (sbuf, soff) = sub.stage_bytes_fresh(self, storage);
+        let mut copies = Vec::new();
+        for layer in 0..im.layers {
+            for level in 0..im.levels {
+                let gl = if d.target == target::T3D { 0 } else { layer };
+                let Some((buf, off, _)) = crate::tex::deswizzle_gpu::record(self, sub, &d, level, gl, sbuf, soff, storage.len() as u64) else {
+                    if copies.is_empty() && level == 0 && layer == 0 {
+                        return false;
+                    }
+                    crate::log::red_once(&format!("texture {}x{} format {:#x}: level {level} layer {layer} not deswizzled on the GPU", d.width, d.height, d.format));
+                    continue;
+                };
+                let (lw, lh, ld) = ((native.width >> level).max(1), (native.height >> level).max(1), (native.depth >> level).max(1));
+                copies.push((
+                    buf,
+                    vk::BufferImageCopy {
+                        buffer_offset: off,
+                        buffer_row_length: 0,
+                        buffer_image_height: 0,
+                        image_subresource: vk::ImageSubresourceLayers { aspect_mask: upload_aspect(&im.tf), mip_level: level, base_array_layer: layer, layer_count: 1 },
+                        image_offset: vk::Offset3D::default(),
+                        image_extent: vk::Extent3D { width: lw, height: lh, depth: if im.ty == vk::ImageType::TYPE_3D { ld } else { 1 } },
+                    },
+                ));
+            }
+            if d.target == target::T3D {
+                break;
+            }
+        }
+        for (buf, r) in copies {
+            copy_buf_img(self, sub.pre, im, buf, r, true);
+        }
+        GPU_DESWIZZLED.fetch_add(storage.len() as u64, std::sync::atomic::Ordering::Relaxed);
+        true
     }
 
     fn record_parts(&self, im: &Image, sub: &mut Sub, parts: Vec<Part>) {

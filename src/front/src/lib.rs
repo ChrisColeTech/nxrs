@@ -129,22 +129,107 @@ impl WideZ for str {
     }
 }
 
-/// Ends the run: controllers quiet, settings and caches written, recording finished, then the process ends without
-/// joining the guest threads (Turbo's TerminateProcess).
+/// The graceful exit's time limits (nxnative hle_lifecycle.c): graphics' drain is waited for at most `DRAIN`, and the
+/// whole exit at most `DEADLINE`; past it the process ends all the same.
+pub const EXIT_DRAIN: std::time::Duration = std::time::Duration::from_millis(1500);
+pub const EXIT_DEADLINE: std::time::Duration = std::time::Duration::from_millis(4000);
+
+/// The graceful exit's steps, in nxnative's order (hle_lifecycle.c): the writers of state stopped (controllers quiet,
+/// recording finished), the sound paused, graphics drained beside the rest (waited for at most `drain_for`: a draw
+/// compiling its pipeline can take seconds), then what the run keeps written (the pipeline cache, the settings).
+/// Returns whether the drain finished in time.
+pub fn graceful_exit(stop_writers: &dyn Fn(), pause_audio: &dyn Fn(), drain: Box<dyn FnOnce() + Send>, keep: &dyn Fn(), drain_for: std::time::Duration) -> bool {
+    stop_writers();
+    pause_audio();
+    let (tx, rx) = std::sync::mpsc::channel();
+    let _ = std::thread::Builder::new().name("exit drain".into()).spawn(move || {
+        drain();
+        let _ = tx.send(());
+    });
+    let drained = rx.recv_timeout(drain_for).is_ok();
+    keep();
+    drained
+}
+
+/// Ends the run: controllers quiet, recording finished, the sound paused, graphics drained, settings and caches
+/// written, then the process ends without joining the guest threads (Turbo's TerminateProcess); a watchdog ends it
+/// all the same if the exit is stuck.
 pub fn quit(why: &str) -> ! {
     if !QUIT.swap(true, Ordering::AcqRel) {
+        let t0 = std::time::Instant::now();
         flog!("exit: {why}");
-        nxos::input::shutdown();
-        rec::stop();
-        nxconfig::flush();
-        nxgfx::save_caches();
-        nxos::log::report_gaps("exit");
-        ctl::cleanup();
-        flog!("Exit.");
+        let _ = std::thread::Builder::new().name("exit deadline".into()).spawn(|| {
+            std::thread::sleep(EXIT_DEADLINE);
+            flog!("[RED] graceful exit not done in {:.1} s, exiting at once", EXIT_DEADLINE.as_secs_f64());
+            end_process();
+        });
+        let drained = graceful_exit(
+            &|| {
+                nxos::input::shutdown();
+                rec::stop();
+            },
+            &nxos::media::sink::pause_for_exit,
+            Box::new(nxgfx::vk::queue::finish),
+            &|| {
+                nxgfx::save_caches();
+                nxconfig::flush();
+                nxos::log::report_gaps("exit");
+                ctl::cleanup();
+            },
+            EXIT_DRAIN,
+        );
+        if !drained {
+            flog!("[RED] graceful exit: graphics not drained in {:.1} s (a draw under way); the pipeline cache is written all the same", EXIT_DRAIN.as_secs_f64());
+        }
+        flog!("Exit. ({:.3} s)", t0.elapsed().as_secs_f64());
         use std::io::Write;
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
+        end_process()
     }
+    // another path is ending the process (the first quit, or its deadline): wait for it
+    loop {
+        std::thread::park();
+    }
+}
+
+/// The console's Ctrl+C, Ctrl+Break and close (Windows), SIGINT and SIGTERM (Linux): the graceful exit, as the
+/// window's close does (nxnative hle_lifecycle.c's SIGTERM; Turbo has no handler and the process just dies).
+pub fn install_exit_handlers() {
+    #[cfg(windows)]
+    unsafe {
+        unsafe extern "system" fn on_ctrl(kind: u32) -> windows_sys::core::BOOL {
+            let why = match kind {
+                0 => "Ctrl+C in the console",
+                1 => "Ctrl+Break in the console",
+                2 => "the console closed",
+                5 => "the user logged off",
+                6 => "the system shut down",
+                _ => return 0,
+            };
+            quit(why)
+        }
+        windows_sys::Win32::System::Console::SetConsoleCtrlHandler(Some(on_ctrl), 1);
+    }
+    #[cfg(target_os = "linux")]
+    unsafe {
+        static SIG: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+        extern "C" fn on_sig(s: libc::c_int) {
+            SIG.store(s, Ordering::Release);
+        }
+        libc::signal(libc::SIGTERM, on_sig as *const () as libc::sighandler_t);
+        libc::signal(libc::SIGINT, on_sig as *const () as libc::sighandler_t);
+        // the exit runs on an ordinary thread, not in the handler
+        let _ = std::thread::Builder::new().name("exit signals".into()).spawn(|| loop {
+            match SIG.load(Ordering::Acquire) {
+                0 => std::thread::sleep(std::time::Duration::from_millis(20)),
+                s => quit(if s == libc::SIGTERM { "SIGTERM" } else { "SIGINT" }),
+            }
+        });
+    }
+}
+
+fn end_process() -> ! {
     #[cfg(windows)]
     unsafe {
         windows_sys::Win32::System::Threading::TerminateProcess(windows_sys::Win32::System::Threading::GetCurrentProcess(), 0);
@@ -178,6 +263,17 @@ fn front_loop() {
                 flog!("settings: {} reloaded", nxconfig::path().map(|p| p.display().to_string()).unwrap_or_default());
             }
             metrics::tick();
+        }
+        // the stuck-mutex healer, each frame (Turbo main.c `kernel_heal_mutexes`)
+        if let Some(k) = nxrt::kernel::try_get() {
+            k.heal_mutexes();
+        }
+        // every 15 s, `threads.txt` beside the game: every guest thread's state (Turbo main.c), for a hang
+        if tick % 900 == 0 && tick > 0 {
+            if let Some(_k) = nxrt::kernel::try_get() {
+                let s = format!("second {}, frames {}\n{}", tick / 60, nxos::nvn::presents(), nxrt::kernel::dump_threads());
+                let _ = std::fs::write(game().exe_dir.join("threads.txt"), s);
+            }
         }
         // diag=1: the diagnostic dump (F5) by itself at 20 s and 40 s (Turbo's automatic dumps)
         if (tick == 60 * 20 || tick == 60 * 40) && nxconfig::flag("diag") {
@@ -272,11 +368,46 @@ pub fn setup(args: &[String]) -> Vec<String> {
         if a.starts_with("--") && a.contains('=') && nxconfig::apply_arg(a) {
             flog!("settings: {a} for this run");
         }
+        // -v (Turbo main.c: g_verbose=2): everything logged for this run, as log=2
+        if a == "-v" && nxconfig::apply_arg("log=2") {
+            flog!("settings: -v: log=2 for this run");
+        }
     }
+    hidden_keys_log();
     let _ = GAME.set(Game { exe_dir, name, title, data });
     flog!("{} - nxrs front end; settings {}", game().title, ini.display());
     settings_log();
     rest
+}
+
+/// The buttons the ini's hidden `script` holds now (Turbo's test input; `keys::script_buttons`), from the front end's
+/// start.
+pub fn script_now() -> u64 {
+    static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    let t0 = *T0.get_or_init(std::time::Instant::now);
+    let s = nxconfig::string("script");
+    if s.is_empty() {
+        return 0;
+    }
+    keys::script_buttons(&s, t0.elapsed().as_millis() as u64)
+}
+
+/// Turbo's hidden ini keys (never written, read when present): `script` (test input), `heap_max_mb` (os), and the
+/// three of Turbo's OpenGL renderer, which this Vulkan engine has no use for: said once when set.
+fn hidden_keys_log() {
+    let _ = script_now();
+    if nxconfig::is_set("script") {
+        flog!("settings: script={} (test input: buttons held 300 ms at those times)", nxconfig::string("script"));
+    }
+    for (k, what) in [
+        ("loop_limit", "the loop guard of Turbo's OpenGL shader translator"),
+        ("show_game_rt", "Turbo's OpenGL render-target view"),
+        ("shader_process", "Turbo's OpenGL helper process for driver crashes; pipelines are built on threads here (shader_thread)"),
+    ] {
+        if nxconfig::is_set(k) {
+            flog!("settings: {k}={} has no effect: {what}, and this engine renders with Vulkan only", nxconfig::string(k));
+        }
+    }
 }
 
 /// Opens the window and starts the controllers, the loop, the control pipe and the metrics; returns once the window
@@ -285,6 +416,7 @@ pub fn start() {
     nxos::nvn::FRONT_WINDOW.store(true, Ordering::Release);
     window::open(&game().title);
     nxos::input::start();
+    install_exit_handlers();
     ctl::start();
     metrics::start();
     lsfg::start();
@@ -303,4 +435,33 @@ pub unsafe extern "C" fn nxfront_main(argc: i32, argv: *const *const core::ffi::
     let cs: Vec<std::ffi::CString> = rest.iter().map(|s| std::ffi::CString::new(s.as_str()).unwrap_or_default()).collect();
     let ptrs: Vec<*const core::ffi::c_char> = cs.iter().map(|c| c.as_ptr()).collect();
     nxos::boot::nxos_main_with(ptrs.len() as i32, ptrs.as_ptr(), mods, count, None)
+}
+
+#[cfg(test)]
+mod exit_tests {
+    use std::sync::{Arc, Mutex};
+    use std::time::{Duration, Instant};
+
+    /// nxnative hle_lifecycle.c's order: writers stopped, sound paused, graphics drained, then what the run keeps
+    /// written; a drain that hangs is waited for only its time limit and the rest still runs.
+    #[test]
+    fn graceful_exit_order_and_drain_limit() {
+        let log = Arc::new(Mutex::new(Vec::<&str>::new()));
+        let (l1, l2, l3, l4) = (log.clone(), log.clone(), log.clone(), log.clone());
+        let ok = super::graceful_exit(
+            &move || l1.lock().unwrap().push("writers"),
+            &move || l2.lock().unwrap().push("audio"),
+            Box::new(move || l3.lock().unwrap().push("drain")),
+            &move || l4.lock().unwrap().push("keep"),
+            Duration::from_secs(5),
+        );
+        assert!(ok);
+        assert_eq!(*log.lock().unwrap(), ["writers", "audio", "drain", "keep"]);
+        let t = Instant::now();
+        let kept = Arc::new(Mutex::new(false));
+        let k = kept.clone();
+        let ok = super::graceful_exit(&|| {}, &|| {}, Box::new(|| std::thread::sleep(Duration::from_secs(3))), &move || *k.lock().unwrap() = true, Duration::from_millis(100));
+        assert!(!ok && *kept.lock().unwrap(), "a stuck drain: the cache is written all the same");
+        assert!(t.elapsed() < Duration::from_secs(1));
+    }
 }

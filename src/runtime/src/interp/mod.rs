@@ -446,7 +446,7 @@ core::arch::global_asm!(
     ".seh_endproc",
 );
 
-#[cfg(target_os = "linux")]
+#[cfg(all(target_os = "linux", target_arch = "x86_64"))]
 core::arch::global_asm!(
     ".text",
     ".globl nxrt_interp_owner",
@@ -483,6 +483,52 @@ core::arch::global_asm!(
     "cmp eax, 1",
     "je rt_dispatch",
     "jmp nxrt_jump_pending",
+    ".cfi_endproc",
+    ".size nxrt_interp_entry, .-nxrt_interp_entry",
+);
+
+#[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+core::arch::global_asm!(
+    ".text",
+    ".globl nxrt_interp_owner",
+    ".type nxrt_interp_owner,%function",
+    ".p2align 4",
+    "nxrt_interp_owner:",
+    ".cfi_startproc",
+    "stp x0, x30, [sp, #-16]!",
+    ".cfi_def_cfa_offset 16",
+    ".cfi_offset w30, -8",
+    "bl nxrt_interp_span_end",
+    "mov x3, x0",
+    "ldp x0, x30, [sp], #16",
+    ".cfi_def_cfa_offset 0",
+    ".cfi_restore w30",
+    "ldr x2, [x0, #264]",
+    "adrp x1, nxrt_interp_entry",
+    "add x1, x1, :lo12:nxrt_interp_entry",
+    "b rt_sj_owner",
+    ".cfi_endproc",
+    ".size nxrt_interp_owner, .-nxrt_interp_owner",
+    "",
+    ".globl nxrt_interp_entry",
+    ".type nxrt_interp_entry,%function",
+    ".p2align 4",
+    "nxrt_interp_entry:",
+    ".cfi_startproc",
+    "stp x0, x30, [sp, #-16]!",
+    ".cfi_def_cfa_offset 16",
+    ".cfi_offset w30, -8",
+    "bl nxrt_interp_invoke",
+    "mov w9, w0",
+    "ldp x0, x30, [sp], #16",
+    ".cfi_def_cfa_offset 0",
+    ".cfi_restore w30",
+    "cbnz w9, 2f",
+    "ret",
+    "2:",
+    "cmp w9, #1",
+    "b.eq rt_dispatch",
+    "b nxrt_jump_pending",
     ".cfi_endproc",
     ".size nxrt_interp_entry, .-nxrt_interp_entry",
 );

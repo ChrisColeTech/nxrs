@@ -1,6 +1,7 @@
 //! ASTC on the GPU. Desktop GPUs do not sample ASTC: the blocks are decoded by a compute shader into RGBA8 texels
 //! (`shaders/astc_decode.comp`, the same bytes as astcenc's 8-bit LDR decode), and textures of 256x256 and up are
-//! re-encoded to BC7 (`shaders/bc7_encode.comp`, mode 6): 1 byte per texel instead of 4.
+//! re-encoded to BC7 (`shaders/bc7_encode.comp`, modes 1, 3, 6 and 7): 1 byte per texel instead of 4. Encoded BC7
+//! levels go into the disk cache (`astc_cache`) and later uploads of the same ASTC bytes take them from there.
 
 use crate::vk::queue::Sub;
 use crate::vk::Gpu;
@@ -9,6 +10,10 @@ use gpu_allocator::MemoryLocation;
 
 static DECODE_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/astc_decode_comp.spv"));
 static BC7_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/bc7_encode_comp.spv"));
+static BC7_M6_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/bc7_encode_comp_m6.spv"));
+/// The full BC7 encoder's pipeline (0 until made): its pipeline takes seconds to make the first time, so it is made on a
+/// thread of its own (through the pipeline cache, which keeps it for later runs) while the mode-6 build encodes.
+static BC7_FULL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 // The unquantization tables the decoder reads (binding 2): 12 + 16 row offsets in bytes, then the rows.
 static WUNQ: [u8; 142] = [
@@ -87,6 +92,7 @@ pub struct Astc {
     set_layout: vk::DescriptorSetLayout,
     layout: vk::PipelineLayout,
     decode: vk::Pipeline,
+    /// the mode-6 build of the encoder (made at once)
     bc7: vk::Pipeline,
     tab: crate::vk::Buf,
     tab_uploaded: bool,
@@ -106,8 +112,54 @@ struct Push {
     srgb: u32,
 }
 
+/// The BC7 encoder writes mode 6 only (the earlier encoder; `NXGFX_BC7_MODE6=1`, tests compare against it).
+pub static BC7_MODE6_ONLY: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+fn mode6_only() -> bool {
+    static ENV: std::sync::Once = std::sync::Once::new();
+    ENV.call_once(|| {
+        if std::env::var("NXGFX_BC7_MODE6").as_deref() == Ok("1") {
+            BC7_MODE6_ONLY.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    });
+    BC7_MODE6_ONLY.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 fn words(b: &[u8]) -> Vec<u32> {
     b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+}
+
+fn make_pipeline(g: &Gpu, layout: vk::PipelineLayout, spv: &[u8]) -> Result<vk::Pipeline, String> {
+    let dev = g.dev();
+    let w = words(spv);
+    let m = unsafe { dev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&w), None) }.map_err(|e| e.to_string())?;
+    let st = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(m).name(c"main");
+    let p = unsafe { dev.create_compute_pipelines(g.pipes.cache, &[vk::ComputePipelineCreateInfo::default().stage(st).layout(layout)], None) }.map_err(|(_, e)| e.to_string());
+    unsafe { dev.destroy_shader_module(m, None) };
+    Ok(p?[0])
+}
+
+/// The full BC7 encoder, when its pipeline is ready.
+fn bc7_full() -> Option<vk::Pipeline> {
+    let r = BC7_FULL.load(std::sync::atomic::Ordering::Acquire);
+    (r != 0).then(|| vk::Handle::from_raw(r))
+}
+
+/// Waits (up to 60 s) until the full BC7 encoder is ready; makes the ASTC pipelines first if needed. Tests and tools.
+pub fn wait_bc7_encoder(g: &Gpu) -> bool {
+    {
+        let mut a = g.astc.lock().unwrap();
+        if a.is_none() {
+            match Astc::new(g) {
+                Ok(x) => *a = Some(x),
+                Err(_) => return false,
+            }
+        }
+    }
+    let t = std::time::Instant::now();
+    while bc7_full().is_none() && t.elapsed().as_secs() < 60 {
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    bc7_full().is_some()
 }
 
 impl Astc {
@@ -120,17 +172,27 @@ impl Astc {
         let pcr = [vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::COMPUTE).size(core::mem::size_of::<Push>() as u32)];
         let sl = [set_layout];
         let layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&sl).push_constant_ranges(&pcr), None) }.map_err(|e| e.to_string())?;
-        let mk = |spv: &[u8]| -> Result<vk::Pipeline, String> {
-            let w = words(spv);
-            let m = unsafe { dev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&w), None) }.map_err(|e| e.to_string())?;
-            let st = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(m).name(c"main");
-            let p = unsafe { dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(st).layout(layout)], None) }
-                .map_err(|(_, e)| e.to_string())?[0];
-            unsafe { dev.destroy_shader_module(m, None) };
-            Ok(p)
-        };
-        let decode = mk(DECODE_SPV)?;
-        let bc7 = mk(BC7_SPV)?;
+        let t0 = std::time::Instant::now();
+        let decode = make_pipeline(g, layout, DECODE_SPV)?;
+        let t1 = t0.elapsed();
+        let bc7 = make_pipeline(g, layout, BC7_M6_SPV)?;
+        crate::vklog!("ASTC pipelines made: decode {} ms, BC7 encode (mode 6) {} ms", t1.as_millis(), (t0.elapsed() - t1).as_millis());
+        let raw = vk::Handle::as_raw(layout);
+        std::thread::Builder::new()
+            .name("bc7 pipeline".into())
+            .spawn(move || {
+                let Some(g) = Gpu::try_get() else { return };
+                let t = std::time::Instant::now();
+                match make_pipeline(g, vk::Handle::from_raw(raw), BC7_SPV) {
+                    Ok(p) => {
+                        crate::vk::pcache::note_created(1);
+                        BC7_FULL.store(vk::Handle::as_raw(p), std::sync::atomic::Ordering::Release);
+                        crate::vklog!("BC7 encoder (modes 1, 3, 5, 6, 7) ready in {} ms", t.elapsed().as_millis());
+                    }
+                    Err(e) => crate::log::red(&format!("BC7 encoder pipeline: {e} (mode 6 only)")),
+                }
+            })
+            .map_err(|e| e.to_string())?;
         let tab = g.buffer(tables().len() as u64, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuOnly, "astc tables")?;
         Ok(Astc { set_layout, layout, decode, bc7, tab, tab_uploaded: false })
     }
@@ -166,6 +228,18 @@ fn dispatch(g: &Gpu, sub: &mut Sub, blocks: &[u8], w: u32, h: u32, slices: u32, 
         crate::log::red_once(&format!("ASTC block {bw}x{bh} is not 2D LDR"));
         return None;
     }
+    let (ex, ey) = (w.div_ceil(4), h.div_ceil(4));
+    let bc_bytes = if bc7 { ex as u64 * ey as u64 * slices as u64 * 16 } else { 0 };
+    // the disk cache: a level encoded before (this run or an earlier one) is uploaded as it was encoded
+    let full = if mode6_only() { None } else { bc7_full() };
+    let ckey = (bc7 && bc_bytes as usize >= crate::tex::astc_cache::MIN_BYTES && full.is_some() && crate::tex::astc_cache::active())
+        .then(|| crate::tex::astc_cache::key(blocks, w, h, slices, bw, bh, srgb));
+    if let Some(k) = ckey {
+        if let Some(b) = crate::tex::astc_cache::get(k, bc_bytes as usize) {
+            let (sbuf, soff) = sub.stage_bytes_fresh(g, &b);
+            return Some((sbuf, soff, ey * 4, ex * 4));
+        }
+    }
     let mut a = g.astc.lock().unwrap();
     if a.is_none() {
         match Astc::new(g) {
@@ -186,8 +260,6 @@ fn dispatch(g: &Gpu, sub: &mut Sub, blocks: &[u8], w: u32, h: u32, slices: u32, 
     }
     let (bx, by) = (w.div_ceil(bw), h.div_ceil(bh));
     let texels = w as u64 * h as u64 * slices as u64;
-    let (ex, ey) = (w.div_ceil(4), h.div_ceil(4));
-    let bc_bytes = if bc7 { ex as u64 * ey as u64 * slices as u64 * 16 } else { 0 };
     let (scratch_buf, base) = sub.gpu_scratch(g, texels * 4 + bc_bytes + 256)?;
     let out_texels_off = base;
     let bc_off = base + ((texels * 4 + 255) & !255);
@@ -223,13 +295,25 @@ fn dispatch(g: &Gpu, sub: &mut Sub, blocks: &[u8], w: u32, h: u32, slices: u32, 
             .collect();
         unsafe {
             dev.update_descriptor_sets(&wr2, &[]);
-            dev.cmd_bind_pipeline(sub.pre, vk::PipelineBindPoint::COMPUTE, a.bc7);
+            dev.cmd_bind_pipeline(sub.pre, vk::PipelineBindPoint::COMPUTE, full.unwrap_or(a.bc7));
             dev.cmd_bind_descriptor_sets(sub.pre, vk::PipelineBindPoint::COMPUTE, a.layout, 0, &[set2], &[]);
-            let pc = Push { in_base: 0, out_base: 0, width: w, height: h, bw: ex, bh: ex * ey, bx: 0, bslice: 0, srgb: 0 };
+            let pc = Push { in_base: 0, out_base: 0, width: w, height: h, bw: ex, bh: ex * ey, bx: mode6_only() as u32, bslice: 0, srgb: 0 };
             dev.cmd_push_constants(sub.pre, a.layout, vk::ShaderStageFlags::COMPUTE, 0, core::slice::from_raw_parts(&pc as *const Push as *const u8, core::mem::size_of::<Push>()));
             dev.cmd_dispatch(sub.pre, ex.div_ceil(8), ey.div_ceil(8), slices);
         }
         barrier(g, sub.pre);
+        // a miss goes into the disk cache once the submission has run
+        if let Some(k) = ckey {
+            if let Ok(rb) = g.buffer(bc_bytes, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "astc cache readback") {
+                unsafe { dev.cmd_copy_buffer(sub.pre, scratch_buf, rb.buf, &[vk::BufferCopy { src_offset: bc_off, dst_offset: 0, size: bc_bytes }]) };
+                sub.post.push(crate::vk::queue::Post::Callback(Box::new(move |g: &Gpu| {
+                    let v = unsafe { core::slice::from_raw_parts(rb.ptr, bc_bytes as usize) }.to_vec();
+                    g.free_buffer(rb);
+                    crate::tex::astc_cache::put(k, v);
+                })));
+                barrier(g, sub.pre);
+            }
+        }
         // the copy reads the BC7 blocks where they are (256-aligned)
         (scratch_buf, bc_off, ey * 4, ex * 4)
     } else {
@@ -253,6 +337,80 @@ pub fn decode_blocks(g: &'static Gpu, blocks: &[u8], w: u32, h: u32, bw: u32, bh
     let out = ok.then(|| unsafe { core::slice::from_raw_parts(rb.ptr, size as usize) }.to_vec());
     g.free_buffer(rb);
     out
+}
+
+/// Decodes BC7 blocks with the GPU's own BC7 decoder (tests: an independent check of the encoder's bit layouts): the
+/// blocks into a BC7 image, blitted into an RGBA8 one, read back. None when the device cannot blit from BC7.
+pub fn bc7_hw_decode(g: &'static Gpu, blocks: &[u8], w: u32, h: u32) -> Option<Vec<u8>> {
+    use gpu_allocator::vulkan::{AllocationCreateDesc, AllocationScheme};
+    if !g.d.format_features(vk::Format::BC7_UNORM_BLOCK).contains(vk::FormatFeatureFlags::BLIT_SRC) {
+        return None;
+    }
+    let dev = g.dev();
+    let mk = |f: vk::Format| -> Option<(vk::Image, gpu_allocator::vulkan::Allocation)> {
+        let ci = vk::ImageCreateInfo::default()
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(f)
+            .extent(vk::Extent3D { width: w, height: h, depth: 1 })
+            .mip_levels(1)
+            .array_layers(1)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED);
+        let im = unsafe { dev.create_image(&ci, None) }.ok()?;
+        let req = unsafe { dev.get_image_memory_requirements(im) };
+        let a = g
+            .alloc
+            .lock()
+            .unwrap()
+            .allocate(&AllocationCreateDesc { name: "bc7 check", requirements: req, location: MemoryLocation::GpuOnly, linear: false, allocation_scheme: AllocationScheme::GpuAllocatorManaged })
+            .ok()?;
+        unsafe { dev.bind_image_memory(im, a.memory(), a.offset()) }.ok()?;
+        Some((im, a))
+    };
+    let (src, sa) = mk(vk::Format::BC7_UNORM_BLOCK)?;
+    let (dst, da) = mk(vk::Format::R8G8B8A8_UNORM)?;
+    let size = w as u64 * h as u64 * 4;
+    let rb = g.buffer(size, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "bc7 check readback").ok()?;
+    let sr = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+    let sl = vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 };
+    let f = crate::vk::queue::oneoff(g, |g, sub, _| {
+        let cb = sub.pre;
+        let (sbuf, soff) = sub.stage_bytes_fresh(g, blocks);
+        let to_general = |im: vk::Image| {
+            vk::ImageMemoryBarrier::default()
+                .src_access_mask(vk::AccessFlags::empty())
+                .dst_access_mask(vk::AccessFlags::TRANSFER_WRITE | vk::AccessFlags::TRANSFER_READ)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .src_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .dst_queue_family_index(vk::QUEUE_FAMILY_IGNORED)
+                .image(im)
+                .subresource_range(sr)
+        };
+        unsafe {
+            dev.cmd_pipeline_barrier(cb, vk::PipelineStageFlags::TOP_OF_PIPE, vk::PipelineStageFlags::TRANSFER, vk::DependencyFlags::empty(), &[], &[], &[to_general(src), to_general(dst)]);
+            let r = vk::BufferImageCopy { buffer_offset: soff, buffer_row_length: 0, buffer_image_height: 0, image_subresource: sl, image_offset: vk::Offset3D::default(), image_extent: vk::Extent3D { width: w, height: h, depth: 1 } };
+            dev.cmd_copy_buffer_to_image(cb, sbuf, src, vk::ImageLayout::GENERAL, &[r]);
+        }
+        barrier(g, cb);
+        let off = [vk::Offset3D::default(), vk::Offset3D { x: w as i32, y: h as i32, z: 1 }];
+        let blit = vk::ImageBlit { src_subresource: sl, src_offsets: off, dst_subresource: sl, dst_offsets: off };
+        unsafe { dev.cmd_blit_image(cb, src, vk::ImageLayout::GENERAL, dst, vk::ImageLayout::GENERAL, &[blit], vk::Filter::NEAREST) };
+        barrier(g, cb);
+        let r = vk::BufferImageCopy { buffer_offset: 0, buffer_row_length: 0, buffer_image_height: 0, image_subresource: sl, image_offset: vk::Offset3D::default(), image_extent: vk::Extent3D { width: w, height: h, depth: 1 } };
+        unsafe { dev.cmd_copy_image_to_buffer(cb, dst, vk::ImageLayout::GENERAL, rb.buf, &[r]) };
+    });
+    crate::vk::queue::wait_fence(f, u64::MAX);
+    let out = unsafe { core::slice::from_raw_parts(rb.ptr, size as usize) }.to_vec();
+    g.free_buffer(rb);
+    unsafe {
+        dev.destroy_image(src, None);
+        dev.destroy_image(dst, None);
+    }
+    let mut al = g.alloc.lock().unwrap();
+    let _ = al.free(sa);
+    let _ = al.free(da);
+    Some(out)
 }
 
 #[cfg(test)]

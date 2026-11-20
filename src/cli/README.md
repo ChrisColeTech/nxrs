@@ -3,7 +3,7 @@
 The engine's command line: the build (package → data folder → C → shaders → code DLL + loader), updates, DLC, and
 the launcher contract (v1 drop-in for Turbo's `switchrecomp.py`, v2 subcommands): [docs/LAUNCHER_CONTRACT.md](../../docs/LAUNCHER_CONTRACT.md).
 
-    nxrs-build build <input> [-o <name>] [--outdir <dir>] [--jobs 4] [--update <pkg> | --no-update] [--keys <file>]
+    nxrs-build build <input> [-o <name>] [--outdir <dir>] [--jobs N] [--update <pkg> | --no-update] [--keys <file>]
                      [--no-build] [--no-shaders] [--chunk N] [--native] [-q] [--machine]
     nxrs-build update-info [--game <input>] <package>...
     nxrs-build dlc install | sync | remove | list --datadir <dir> [package or title id...]
@@ -22,9 +22,9 @@ itself), `cargo test -p cli`. Input: a folder, NSP, XCI, NUP or a homebrew NRO.
 | Package | `translator::package::open_game` (folder, NSP, XCI, NUP, NRO; the update chosen); one line per module (layout base, text size, build id) |
 | Profile | `profiles::lookup(title id, main build id)`; its build-time patches become the translator's patch table |
 | Translate | `translator::aot::generate` into `<name>_build\gen`, `jobs` threads; skipped when nothing it reads changed (`gen\nxrs.gen.key`: this executable, the ExeFS, the patch table, the options) |
-| Data | `Game::write_data` into `<name>_data` (the RomFS marker, ExeFS, control.nacp, icon); `<name>.ini` when missing |
-| Shaders | `shaders::prebuild_data(<name>_data)`: every shader found and translated into `<name>_data\shaders\` (an unchanged one is reused); the profile's nxnative shader tables into `shaders\profile\` |
-| Compile | every chunk, table and `modules.c` with clang, `jobs` at a time (default 4), the largest first |
+| Data | `Game::write_data` into `<name>_data` (the RomFS marker, ExeFS (names Windows cannot hold refused: CON, NUL, COM1, a trailing dot or space), control.nacp, icon); `<name>.ini` when missing; `@progress data` |
+| Shaders | on a thread beside the compile (Turbo 6d04b3b), at most 4 translators: `shaders::prebuild_data(<name>_data)`, every shader found and translated into `<name>_data\shaders\` (an unchanged one is reused), `@progress shaders <done> <found>` as they go; the profile's nxnative shader tables into `shaders\profile\`. Never fatal: a failure is a warning, the game's live translator covers it |
+| Compile | every chunk, table and `modules.c` with clang, `jobs` at a time (default: the CPU count, as Turbo), the largest first; `SWR_CFLAGS` (white-space separated) added to the game code's flags and to the object keys |
 | Link | `<name>_code.dll` (objects + `nxfront.lib`, the whole engine, for a retail title; `nxrt.lib` for the runtime's homebrew) and `<name>.exe` (the loader) |
 
 **Compiler.** With Visual Studio's C++ build tools installed: clang for `x86_64-pc-windows-msvc` (the engine's ABI),

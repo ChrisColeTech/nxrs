@@ -286,6 +286,65 @@ impl State {
         self.wake(w, 0);
     }
 
+    /// Whether the owner a lock word names cannot release it (Turbo kernel.c `owner_is_stale_nl`): no owner, an
+    /// exited thread, or a thread itself waiting for this lock (or on a condition variable over it). The pseudo-handle
+    /// and anything that is not a thread are left alone: never steal from a real owner.
+    fn owner_is_stale(&self, v: u32, addr: u64) -> bool {
+        let o = v & !WAITERS_BIT;
+        if o == 0 {
+            return true;
+        }
+        if o == H_CUR_THREAD {
+            return false;
+        }
+        let Obj::Thread(i) = self.h_get(o) else { return false };
+        let Some(t) = self.threads[i].as_ref() else { return false };
+        t.exited || (matches!(t.wkind, Wait::Lock | Wait::CondVar) && t.waddr == addr)
+    }
+
+    fn lock_waiters(&self, addr: u64, except: Option<usize>) -> bool {
+        self.threads.iter().enumerate().any(|(i, t)| Some(i) != except && t.as_ref().is_some_and(|t| t.wkind == Wait::Lock && t.waddr == addr))
+    }
+
+    /// The sweep for lock waiters stuck behind a stale owner or whose waiters bit was cleared (then the owner unlocks
+    /// in user mode without calling the kernel): Turbo kernel.c `kernel_heal_mutexes`, run each frame. The stale
+    /// lock goes to its first waiter in kernel order; a lost bit is set again. What it repaired: (address, what, the
+    /// word it found).
+    fn heal_locks(&mut self) -> Vec<(u64, &'static str, u32)> {
+        let mut notes = vec![];
+        for _ in 0..64 {
+            let mut changed = false;
+            for i in 0..self.threads.len() {
+                let Some(t) = self.threads[i].as_ref() else { continue };
+                if t.wkind != Wait::Lock {
+                    continue;
+                }
+                let a = t.waddr;
+                let mut v = ld32(a);
+                if self.owner_is_stale(v, a) {
+                    let Some(n) = self.pick(Wait::Lock, a) else { continue };
+                    let nv = self.t(n).wtag | if self.lock_waiters(a, Some(n)) { WAITERS_BIT } else { 0 };
+                    let found = v;
+                    if cas32(a, &mut v, nv) {
+                        self.wake(n, 0);
+                        notes.push((a, "stale owner", found));
+                        changed = true;
+                        break;
+                    }
+                } else if v & WAITERS_BIT == 0 {
+                    let found = v;
+                    if cas32(a, &mut v, found | WAITERS_BIT) {
+                        notes.push((a, "lost waiter flag", found));
+                    }
+                }
+            }
+            if !changed {
+                break;
+            }
+        }
+        notes
+    }
+
     /// Makes waiter i take the lock at addr: free -> it gets it and wakes; else it becomes a lock waiter.
     fn lock_acquire_for(&mut self, i: usize, addr: u64, tag: u32) {
         let mut v = ld32(addr);
@@ -371,6 +430,26 @@ impl State {
             self.t(i).exited = true;
             self.wake_sync_waiters(SyncRef::Thread(i));
         }
+    }
+}
+
+/// A repaired lock: the first 20 logged, then every 1024th (Turbo `heal_note`).
+fn heal_note(addr: u64, what: &str, v: u32) {
+    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+    if n <= 20 || n % 1024 == 0 {
+        crate::rt::log(&format!("kernel: mutex {addr:#x} repaired ({what}, value {v:#x}) [{n} times]"));
+    }
+}
+
+impl Kernel {
+    /// The stuck-mutex healer (Turbo `kernel_heal_mutexes`): the host calls it each frame. How many locks it repaired.
+    pub fn heal_mutexes(&self) -> usize {
+        let notes = lock(&self.g).heal_locks();
+        for (a, what, v) in &notes {
+            heal_note(*a, what, *v);
+        }
+        notes.len()
     }
 }
 
@@ -841,7 +920,16 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
             let (addr, tag) = (c.x[1], c.x[2] as u32);
             let mut g = lock(&k.g);
             let mut r = R_OK;
-            if ld32(addr) == (c.x[0] as u32 | WAITERS_BIT) {
+            let mut v = ld32(addr);
+            if v == (c.x[0] as u32 | WAITERS_BIT) && g.owner_is_stale(v, addr) {
+                // already released (Turbo `svc_arbitrate_lock`): hand it to the caller, the waiters bit kept if anyone
+                // else is queued; the caller rereads the word
+                let nv = tag | if g.lock_waiters(addr, None) { WAITERS_BIT } else { 0 };
+                let found = v;
+                if cas32(addr, &mut v, nv) {
+                    heal_note(addr, "on request", found);
+                }
+            } else if v == (c.x[0] as u32 | WAITERS_BIT) {
                 let t = g.t(i);
                 t.waddr = addr;
                 t.wtag = tag;
@@ -1211,6 +1299,36 @@ mod tests {
         assert_eq!(ld32(a), 0x1002, "last waiter: no waiters bit");
         s.lock_handoff(a);
         assert_eq!(ld32(a), 0, "free");
+    }
+
+    /// Turbo kernel.c `kernel_heal_mutexes` / `owner_is_stale_nl`: a lock held by an exited thread or by one of its
+    /// own waiters goes to the best waiter; a lost waiters bit is set again; a live owner is never robbed.
+    #[test]
+    fn stuck_mutexes_are_healed_as_turbo() {
+        let mut s = state_with_threads(5); // handles 0x1001..0x1005
+        let words = Box::new([0u32; 3]);
+        let (a, b, c) = (&words[0] as *const u32 as u64, &words[1] as *const u32 as u64, &words[2] as *const u32 as u64);
+        // a: its owner 0x1001 exited; waiters 0x1002 (priority 44) and 0x1003 (priority 30)
+        st32(a, 0x1001 | WAITERS_BIT);
+        s.t(0).exited = true;
+        wait_on(&mut s, 1, Wait::Lock, a, 44, 0x1002);
+        wait_on(&mut s, 2, Wait::Lock, a, 30, 0x1003);
+        // b: held by 0x1004 (alive, running), waiter 0x1005, the waiters bit lost
+        st32(b, 0x1004);
+        wait_on(&mut s, 4, Wait::Lock, b, 44, 0x1005);
+        // c: a live owner with no kernel waiter: not visited
+        st32(c, 0x1004 | WAITERS_BIT);
+        let notes = s.heal_locks();
+        assert_eq!(notes, vec![(a, "stale owner", 0x1001 | WAITERS_BIT), (b, "lost waiter flag", 0x1004)]);
+        assert_eq!(ld32(a), 0x1003 | WAITERS_BIT, "priority 30 takes it, 0x1002 still waits");
+        assert!(s.t(2).woke && s.t(2).wkind == Wait::None && s.t(1).wkind == Wait::Lock);
+        assert_eq!(ld32(b), 0x1004 | WAITERS_BIT, "the lost bit set again; the live owner keeps the lock");
+        assert!(s.t(4).wkind == Wait::Lock);
+        assert_eq!(ld32(c), 0x1004 | WAITERS_BIT);
+        assert!(s.heal_locks().is_empty(), "nothing left to repair");
+        // an owner waiting on the very lock it holds is stale; the pseudo-handle and non-threads are left alone
+        assert!(s.owner_is_stale(0x1005 | WAITERS_BIT, b) && s.owner_is_stale(WAITERS_BIT, b));
+        assert!(!s.owner_is_stale(H_CUR_THREAD | WAITERS_BIT, b) && !s.owner_is_stale(0x5000, b) && !s.owner_is_stale(0x1003, a));
     }
 
     #[test]

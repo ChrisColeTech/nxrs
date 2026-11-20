@@ -16,8 +16,15 @@
 //! No output device at all (none installed, or every open fails): the streams are consumed in real time by a
 //! clock, so the game keeps its pace, and the log says so in red.
 //!
-//! Muting (`set_muted`, the player's `mute_on_focus_loss`): the device gets silence, faded over 10 ms; the streams
-//! play on at their pace (the game is not slowed or told), and a recording (the tap) keeps the sound.
+//! Muting (`set_muted`, the player's `mute_on_focus_loss`; `NXOS_AUDIO_MUTE=1` for a whole run): the device gets
+//! silence, faded over 10 ms; the streams play on at their pace (the game is not slowed or told), and a recording
+//! (the tap) keeps the sound.
+//!
+//! Diagnostics (Turbo 9ce9b8e, nxnative DM_AUDIO_*): every 5 s of output the log gets each channel's RMS and the
+//! peak (silence once, then every minute; sound every 5 s for the first 5 minutes, then every minute), so "is there
+//! sound" can be read from a log; `NXOS_AUDIO_DEVICE=<part of a name>` plays on that output device instead of the
+//! default (a name no device has: the default, said in red); `NXOS_AUDIO_DUMP=<file.wav>` writes the mix as it goes
+//! out (48 kHz stereo 16-bit WAV, its header kept valid as it grows).
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -375,8 +382,135 @@ pub fn set_muted(on: bool) {
     }
 }
 
+/// The graceful exit (nxnative hle_lifecycle.c `dm_audio_suspend`): the device silenced before graphics drains, so
+/// the last blocks do not stutter or loop while the process ends.
+pub fn pause_for_exit() {
+    MUTED.store(true, Ordering::Relaxed);
+    crate::log!("audio: paused for the exit");
+}
+
 pub fn muted() -> bool {
     MUTED.load(Ordering::Relaxed)
+}
+
+/// The mixed output measured: each channel's mean square and the peak over 5 s of sound.
+#[derive(Default)]
+struct Meter {
+    sq: [f64; 2],
+    peak: f32,
+    n: u64,
+    silent: u64,
+    lines: u64,
+}
+
+impl Meter {
+    /// Adds a block (stereo); every 5 s of it, the line to log (None: not due, or a repeat of silence / steady sound
+    /// that is said less often).
+    fn add(&mut self, out: &[f32]) -> Option<String> {
+        for f in out.chunks_exact(2) {
+            self.sq[0] += (f[0] as f64).powi(2);
+            self.sq[1] += (f[1] as f64).powi(2);
+            self.peak = self.peak.max(f[0].abs()).max(f[1].abs());
+        }
+        self.n += (out.len() / 2) as u64;
+        if self.n < 5 * RATE as u64 {
+            return None;
+        }
+        let (l, r) = ((self.sq[0] / self.n as f64).sqrt(), (self.sq[1] / self.n as f64).sqrt());
+        let db = |x: f64| if x > 0.0 { 20.0 * x.log10() } else { -200.0 };
+        let quiet = l < 1e-5 && r < 1e-5;
+        let say = if quiet {
+            self.silent += 1;
+            self.silent % 12 == 1
+        } else {
+            self.silent = 0;
+            self.lines < 60 || self.lines % 12 == 0
+        };
+        let line = say.then(|| format!("audio: output, last {:.0} s: RMS {l:.5} / {r:.5} ({:.1} / {:.1} dBFS), peak {:.4}", self.n as f64 / RATE as f64, db(l), db(r), self.peak));
+        self.lines += 1;
+        (self.sq, self.peak, self.n) = ([0.0; 2], 0.0, 0);
+        line
+    }
+}
+
+/// A 48 kHz stereo 16-bit WAV file that grows: the header's sizes are rewritten after each block, so the file is
+/// whole whenever the run ends.
+pub struct Wav {
+    f: std::fs::File,
+    data: u64,
+}
+
+impl Wav {
+    pub fn create(path: &std::path::Path) -> std::io::Result<Wav> {
+        let mut w = Wav { f: std::fs::File::create(path)?, data: 0 };
+        w.header()?;
+        Ok(w)
+    }
+    fn header(&mut self) -> std::io::Result<()> {
+        use std::io::{Seek, SeekFrom, Write};
+        let d = self.data.min(u32::MAX as u64 - 36) as u32;
+        let mut h = Vec::with_capacity(44);
+        h.extend_from_slice(b"RIFF");
+        h.extend_from_slice(&(36 + d).to_le_bytes());
+        h.extend_from_slice(b"WAVEfmt ");
+        h.extend_from_slice(&16u32.to_le_bytes());
+        h.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        h.extend_from_slice(&2u16.to_le_bytes());
+        h.extend_from_slice(&RATE.to_le_bytes());
+        h.extend_from_slice(&(RATE * 4).to_le_bytes());
+        h.extend_from_slice(&4u16.to_le_bytes());
+        h.extend_from_slice(&16u16.to_le_bytes());
+        h.extend_from_slice(b"data");
+        h.extend_from_slice(&d.to_le_bytes());
+        self.f.seek(SeekFrom::Start(0))?;
+        self.f.write_all(&h)?;
+        self.f.seek(SeekFrom::End(0))?;
+        Ok(())
+    }
+    /// Appends stereo samples (full scale = 1).
+    pub fn write(&mut self, pcm: &[f32]) -> std::io::Result<()> {
+        use std::io::Write;
+        let b: Vec<u8> = pcm.iter().flat_map(|&x| ((x.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes()).collect();
+        self.f.write_all(&b)?;
+        self.data += b.len() as u64;
+        self.header()
+    }
+}
+
+/// `NXOS_AUDIO_DUMP`: the writer thread's queue (blocks of the mix), made at the first block.
+fn dump_tx() -> Option<&'static Mutex<mpsc::Sender<Vec<f32>>>> {
+    static TX: OnceLock<Option<Mutex<mpsc::Sender<Vec<f32>>>>> = OnceLock::new();
+    TX.get_or_init(|| {
+        let path = std::path::PathBuf::from(std::env::var_os("NXOS_AUDIO_DUMP").filter(|p| !p.is_empty())?);
+        let mut w = match Wav::create(&path) {
+            Ok(w) => w,
+            Err(e) => {
+                crate::log!("[RED] audio: NXOS_AUDIO_DUMP={}: {e}", path.display());
+                return None;
+            }
+        };
+        crate::log!("audio: the mix is written to {} as it goes out (NXOS_AUDIO_DUMP)", path.display());
+        let (tx, rx) = mpsc::channel::<Vec<f32>>();
+        std::thread::Builder::new()
+            .name("nxos audio dump".into())
+            .spawn(move || {
+                while let Ok(b) = rx.recv() {
+                    if let Err(e) = w.write(&b) {
+                        crate::log!("[RED] audio: NXOS_AUDIO_DUMP stopped: {e}");
+                        return;
+                    }
+                }
+            })
+            .ok()?;
+        Some(Mutex::new(tx))
+    })
+    .as_ref()
+}
+
+/// `NXOS_AUDIO_MUTE=1`: the whole run silent on the device (the meter, a dump and a recording keep the sound).
+fn mute_run() -> bool {
+    static M: OnceLock<bool> = OnceLock::new();
+    *M.get_or_init(|| std::env::var("NXOS_AUDIO_MUTE").is_ok_and(|v| v.trim() == "1"))
 }
 
 /// Fills `out` (stereo, 48 kHz) from every stream; blocks that finished are announced to their producers.
@@ -384,6 +518,7 @@ struct Mixer {
     gain: f32,
     /// The mute fade: 1 sound, 0 silence.
     level: f32,
+    meter: Meter,
 }
 
 impl Mixer {
@@ -426,7 +561,13 @@ impl Mixer {
         if let Some(t) = *TAP.lock().unwrap() {
             t(out, RATE, 2);
         }
-        mute_fade(&mut self.level, MUTED.load(Ordering::Relaxed), out);
+        if let Some(l) = self.meter.add(out) {
+            crate::log!("{l}");
+        }
+        if let Some(tx) = dump_tx() {
+            let _ = tx.lock().unwrap().send(out.to_vec());
+        }
+        mute_fade(&mut self.level, MUTED.load(Ordering::Relaxed) || mute_run(), out);
     }
 }
 
@@ -456,7 +597,7 @@ struct Resampler {
 
 impl Resampler {
     fn new(dev_rate: u32) -> Resampler {
-        Resampler { mixer: Mixer { gain: 1.0, level: 1.0 }, buf: vec![0.0; CHUNK * 2], pos: CHUNK, a: [0.0; 2], b: [0.0; 2], phase: 1.0, step: RATE as f64 / dev_rate as f64 }
+        Resampler { mixer: Mixer { gain: 1.0, level: 1.0, meter: Meter::default() }, buf: vec![0.0; CHUNK * 2], pos: CHUNK, a: [0.0; 2], b: [0.0; 2], phase: 1.0, step: RATE as f64 / dev_rate as f64 }
     }
     fn next48(&mut self) -> [f32; 2] {
         if self.pos >= CHUNK {
@@ -564,10 +705,28 @@ fn clock(d: Duration) {
     }
 }
 
+/// The output device `want` names: the first whose name contains it, case aside.
+fn pick_device(names: &[String], want: &str) -> Option<usize> {
+    let w = want.trim().to_lowercase();
+    names.iter().position(|n| n.to_lowercase().contains(&w))
+}
+
 fn open_device(lost: Arc<AtomicBool>) -> Result<(cpal::Stream, String), String> {
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let host = cpal::default_host();
-    let dev = host.default_output_device().ok_or("no default output device")?;
+    let mut picked = None;
+    if let Some(want) = std::env::var("NXOS_AUDIO_DEVICE").ok().filter(|w| !w.trim().is_empty()) {
+        let devs: Vec<cpal::Device> = host.output_devices().map(|d| d.collect()).unwrap_or_default();
+        let names: Vec<String> = devs.iter().map(|d| d.to_string()).collect();
+        match pick_device(&names, &want) {
+            Some(i) => picked = Some(devs[i].clone()),
+            None => crate::log_once!("audio device pick", "[RED] audio: NXOS_AUDIO_DEVICE='{want}' names no output device ({}): the default output plays", names.join(", ")),
+        }
+    }
+    let dev = match picked {
+        Some(d) => d,
+        None => host.default_output_device().ok_or("no default output device")?,
+    };
     let cfg = dev.default_output_config().map_err(|e| e.to_string())?;
     let name = format!("{} ({:?}, {} Hz, {} channels, {:?})", dev, host.id(), cfg.sample_rate(), cfg.channels(), cfg.sample_format());
     let fmt = cfg.sample_format();
@@ -624,6 +783,49 @@ mod tests {
     }
     fn ms(t0: Instant, n: u64) -> Instant {
         t0 + Duration::from_micros(n * 1000)
+    }
+
+    /// The output measured every 5 s (Turbo 9ce9b8e's line): a 0.5 square wave's RMS and peak; silence said once,
+    /// then every 12th time (a minute); sound every 5 s while the first 60 lines last.
+    #[test]
+    fn rms_and_peak_line_every_5_s() {
+        let mut m = Meter::default();
+        let tone: Vec<f32> = (0..2 * 480).map(|i| if (i / 2) % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        let lines: Vec<String> = (0..500).filter_map(|_| m.add(&tone)).collect();
+        assert_eq!(lines, vec!["audio: output, last 5 s: RMS 0.50000 / 0.50000 (-6.0 / -6.0 dBFS), peak 0.5000".to_string()]);
+        let quiet = vec![0f32; 2 * 480];
+        let said = (0..500 * 24).filter_map(|_| m.add(&quiet)).count();
+        assert_eq!(said, 2, "24 silent periods: said at the first and the 13th");
+        assert_eq!((0..500).filter_map(|_| m.add(&tone)).count(), 1, "sound again: said");
+    }
+
+    /// NXOS_AUDIO_DUMP's file: a WAV whose header (RIFF / data sizes, 48 kHz stereo 16-bit) is right after each block,
+    /// samples as written.
+    #[test]
+    fn wav_dump_stays_whole() {
+        let p = std::env::temp_dir().join(format!("nxos-dump-{}.wav", std::process::id()));
+        let mut w = Wav::create(&p).unwrap();
+        w.write(&[0.5, -0.5, 1.0, -2.0]).unwrap();
+        let b = std::fs::read(&p).unwrap();
+        assert_eq!((&b[..4], &b[8..16], &b[36..40]), (&b"RIFF"[..], &b"WAVEfmt "[..], &b"data"[..]));
+        assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 48000);
+        assert_eq!(u32::from_le_bytes(b[40..44].try_into().unwrap()), 8);
+        let s: Vec<i16> = b[44..].chunks(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        assert_eq!(s, vec![16384, -16384, 32767, -32767]);
+        w.write(&[0.0; 4]).unwrap();
+        let b = std::fs::read(&p).unwrap();
+        assert_eq!((b.len(), u32::from_le_bytes(b[4..8].try_into().unwrap()), u32::from_le_bytes(b[40..44].try_into().unwrap())), (60, 52, 16));
+        drop(w);
+        let _ = std::fs::remove_file(&p);
+    }
+
+    /// NXOS_AUDIO_DEVICE: a part of a device's name, case aside; none: the default.
+    #[test]
+    fn output_device_by_name() {
+        let names = vec!["Speakers (Realtek(R) Audio)".to_string(), "Headphones (DualSense Wireless Controller)".to_string()];
+        assert_eq!(pick_device(&names, "dualsense"), Some(1));
+        assert_eq!(pick_device(&names, " Realtek"), Some(0));
+        assert_eq!(pick_device(&names, "HDMI"), None);
     }
 
     #[test]

@@ -960,7 +960,9 @@ pub fn aq_ns() -> u64 {
 }
 
 fn aq_main(g: &'static Gpu, a: &'static Aq) {
+    super::rtclass::join("vk replay");
     loop {
+        super::rtclass::tick();
         // the op, and the sequence numbers of the submits of the same queue queued right behind it and taken with it
         let mut merged: Vec<u64> = Vec::new();
         let (mut seq, mut op) = {

@@ -178,18 +178,47 @@ pub fn open(svc: Box<dyn Service>) -> u32 {
     new_session(Arc::new(Mutex::new(svc)), false)
 }
 
-/// A session to the service registered as `name`, or sm's refusal (with its gap line).
+/// A session to the service registered as `name`, or sm's refusal (with its gap line). A Switch 2 program gets a
+/// catch-all session for a name nobody registered (`Unknown`; `NXOS_NS2_STRICT=1` refuses it as for a Switch game).
 pub fn connect(name: &str) -> Result<u32, u32> {
+    let switch2 = crate::profile::get().program_id >> 56 == 0x04 && std::env::var("NXOS_NS2_STRICT").map_or(true, |v| v != "1");
+    connect_as(name, switch2)
+}
+
+fn connect_as(name: &str, switch2: bool) -> Result<u32, u32> {
     match lookup(name) {
         Some(f) => {
             let h = open(f());
             crate::log_once!(format!("connect {name}"), "sm: {name} -> host session {h:#x}");
             Ok(h)
         }
+        None if switch2 => {
+            crate::log::gap(Gap::Service, name, "a Switch 2 service the host does not know: every command succeeds, command 0 hands out an object");
+            Ok(open(Box::new(Unknown(name.to_string()))))
+        }
         None => {
             crate::log::gap(Gap::Service, name, "sm refused it (ResultNotRegistered)");
             Err(R_NOT_REGISTERED)
         }
+    }
+}
+
+/// A Switch 2 service the host does not serve (chat:u, GameChat...): their clients hand out their interface with
+/// command 0 and call through it, so command 0 answers an object of the same kind; every command succeeds with
+/// zeroed output and its gap line (Turbo `svc_core.c` generic_disp: Mario Kart World's nn::chat::Initialize called
+/// through the object it did not get).
+pub struct Unknown(pub String);
+
+impl Service for Unknown {
+    fn name(&self) -> String {
+        self.0.clone()
+    }
+    fn call(&mut self, ctx: &mut Ctx) -> u32 {
+        ctx.unimplemented();
+        if ctx.cmd() == 0 {
+            ctx.object(Unknown(format!("{}#obj", self.0)));
+        }
+        0
     }
 }
 
@@ -455,6 +484,20 @@ mod tests {
         assert_eq!(resp.result, R_NOT_REGISTERED);
         assert!(close(sub) && !is_session(sub));
         assert_eq!(process(sub, &mut [0u8; 0x100]), R_INVALID_HANDLE);
+    }
+
+    /// A name nobody registered: refused for a Switch program; a Switch 2 program gets the catch-all, whose command 0
+    /// hands out an object and whose every command succeeds with zeroed output.
+    #[test]
+    fn unknown_switch2_services_are_caught() {
+        assert_eq!(connect_as("nope:s2", false), Err(R_NOT_REGISTERED));
+        let h = connect_as("nope:s2", true).unwrap();
+        let (_, resp) = send(h, Builder { ty: T_REQUEST, cmd: 0, ..Default::default() }, false);
+        assert_eq!((resp.result, resp.moved.len()), (0, 1));
+        let obj = resp.moved[0];
+        let (_, resp) = send(obj, Builder { ty: T_REQUEST, cmd: 7, ..Default::default() }, false);
+        assert_eq!((resp.result, resp.moved.len()), (0, 0));
+        assert!(resp.data.iter().all(|&b| b == 0));
     }
 
     #[test]

@@ -25,6 +25,7 @@ pub fn set_shader_dir(p: std::path::PathBuf) {
 
 /// Where the pipeline key file and pipeline cache live (the game's `_data`).
 pub fn set_cache_dir(p: std::path::PathBuf) {
+    tex::astc_cache::set_dir(&p);
     if let Ok(g) = vk::Gpu::get() {
         vk::pcache::attach(g, &p);
         g.pipes.set_dir(p);

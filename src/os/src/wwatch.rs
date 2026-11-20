@@ -5,7 +5,8 @@
 //!
 //! Linux: a watched page is made read-only instead of a guard page (only writes fault, which is all the watch logs);
 //! the write fault logs, opens the page and sets the trap flag; the SIGTRAP after the instruction closes it again.
-//! A system call writing a watched page (a read() into it) fails with EFAULT meanwhile.
+//! A system call writing a watched page (a read() into it) fails with EFAULT meanwhile. AArch64 Linux has no user-mode
+//! single step, so there a page logs its first write and then stays open.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
@@ -60,7 +61,11 @@ unsafe fn hook(f: &mut nxrt::linux::Fault) -> bool {
         }
         let page = a & !(PAGE - 1);
         nxrt::mem::protect(page, PAGE, nxrt::mem::Prot::ReadWrite);
-        if LINES.load(Ordering::Relaxed) <= MAX_LINES {
+        if !nxrt::linux::CAN_SINGLE_STEP {
+            // AArch64: no single step to close the page after this write, so it stays open: its first write is the
+            // only one logged
+            crate::log!("wwatch: page {page:#x} is no longer watched (no single step on this host)");
+        } else if LINES.load(Ordering::Relaxed) <= MAX_LINES {
             REARM.with(|r| r.set(page));
             f.set_trap(true); // trap after this instruction
         }

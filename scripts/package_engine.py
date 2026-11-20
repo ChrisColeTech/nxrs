@@ -3,22 +3,24 @@
 --nxrs-engine makes the same layout), as one archive.
 
     py -I scripts/package_engine.py --target <cargo release dir> [--gnu <gnullvm release dir>] --xlate <dmsh_xlate>
-                                    --spirv-val <spirv-val> [--out dist] [--platform linux|windows]
+                                    --spirv-val <spirv-val> [--out dist] [--platform linux|windows] [--arch x64|arm64]
 
 nxrs-engine/
   nxrs-build(.exe)              the CLI the launcher runs (contract v2)
   engine.json                   {"contract", "engine": "nxrs", "version", "platform"} (+ "requires" on Linux)
-  libnxfront.a, libnxrt.a       Linux: the engine and the runtime a game's <name>_code.so links (x86-64)
+  libnxfront.a, libnxrt.a       Linux: the engine and the runtime a game's <name>_code.so links (x86-64 or arm64)
   nxfront.lib, nxrt.lib         Windows: the MSVC engine; gnu/ the gnullvm one (llvm-mingw ships beside, by the launcher)
   tools/dmsh_xlate(.exe)        the shader translator nxrs-build runs during a build
   tools/spirv-val(.exe)         the SPIR-V validator it runs over the translated shaders
   LICENSES/                     the engine's third-party licenses
-Output: <out>/nxrs-engine-<platform>-x64.tar.gz (Linux) or .zip (Windows), and a .sha256 beside it. Only x86-64: the
-runtime's assembly boundary (guest calls, fibers, setjmp) is x86-64 code.
+Output: <out>/nxrs-engine-<platform>-<arch>.tar.gz (Linux) or .zip (Windows), and a .sha256 beside it. <arch> is the
+machine's (--arch overrides): x64 everywhere, arm64 on Linux too (the runtime's assembly boundary - guest calls, fibers,
+setjmp - exists for x86-64 and AArch64 Linux).
 """
 import hashlib
 import json
 import os
+import platform as host
 import re
 import shutil
 import stat
@@ -58,6 +60,9 @@ def put(src, dst, executable=False):
 def main():
     platform = arg('--platform', 'windows' if os.name == 'nt' else 'linux')
     exe = '.exe' if platform == 'windows' else ''
+    arch = arg('--arch', 'arm64' if host.machine().lower() in ('aarch64', 'arm64') else 'x64')
+    if arch not in ('x64', 'arm64') or (arch == 'arm64' and platform != 'linux'):
+        sys.exit(f'--arch {arch}: the engine is built for windows-x64, linux-x64 and linux-arm64')
     target = Path(arg('--target', ROOT / 'target/release'))
     out = Path(arg('--out', ROOT / 'dist'))
     xlate, spirv = arg('--xlate'), arg('--spirv-val')
@@ -87,11 +92,11 @@ def main():
     m = re.search(r'nxrs-contract (\d+)', answer)
     if not m:
         sys.exit('nxrs-build does not answer "contract": ' + answer.strip())
-    info = {'contract': int(m.group(1)), 'engine': 'nxrs', 'version': version(), 'platform': f'{platform}-x64'}
+    info = {'contract': int(m.group(1)), 'engine': 'nxrs', 'version': version(), 'platform': f'{platform}-{arch}'}
     if platform == 'linux':
         info['requires'] = LINUX_REQUIRES
     (eng / 'engine.json').write_text(json.dumps(info, indent=2) + '\n')
-    name = f'nxrs-engine-{platform}-x64'
+    name = f'nxrs-engine-{platform}-{arch}'
     out.mkdir(parents=True, exist_ok=True)
     if platform == 'linux':
         archive = out / f'{name}.tar.gz'

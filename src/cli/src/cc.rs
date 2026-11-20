@@ -13,8 +13,8 @@
 //! The executable carries no runtime at all: it loads `<its name>_code.dll` from its folder and calls the DLL's one
 //! export, `nxrs_game_main`, so the same small file serves every game.
 //!
-//! Linux (x86-64): the same split as `<name>` (an ELF loader, no extension) and `<name>_code.so`, built with clang for
-//! `x86_64-unknown-linux-gnu` and linked by ld.lld: the objects position-independent (`-fPIC`), the shared object
+//! Linux (x86-64 and AArch64): the same split as `<name>` (an ELF loader, no extension) and `<name>_code.so`, built with clang for
+//! `TARGET_LINUX` and linked by ld.lld: the objects position-independent (`-fPIC`), the shared object
 //! linked `-Bsymbolic` (the generated code's calls into the runtime bind inside the image, no PLT on `rt_dispatch`)
 //! and `--no-undefined`, with the engine's `libnxfront.a` / `libnxrt.a` beside nxrs-build. The loader raises its
 //! stack limit to 16 MB and runs itself again when the limit was lower (the main thread's stack is sized at exec).
@@ -32,11 +32,15 @@ pub const TARGET: &str = "x86_64-pc-windows-msvc";
 /// On a machine without Visual Studio: the bundled llvm-mingw and the engine built for `x86_64-pc-windows-gnullvm`
 /// (`gnu\libnxfront.a`, `gnu\libnxrt.a`), linked against the UCRT that every Windows 10 has.
 pub const TARGET_GNU: &str = "x86_64-w64-windows-gnu";
-/// Linux: the system's C library, the engine built for the host (`libnxfront.a`, `libnxrt.a`).
-pub const TARGET_LINUX: &str = "x86_64-unknown-linux-gnu";
+/// Linux: the system's C library, the engine built for the host (`libnxfront.a`, `libnxrt.a`); x86-64 or AArch64.
+pub const TARGET_LINUX: &str = if cfg!(target_arch = "aarch64") { "aarch64-unknown-linux-gnu" } else { "x86_64-unknown-linux-gnu" };
+
+/// The game code's processor baseline: x86-64-v3 (AVX2, FMA, BMI2); AArch64 Linux: ARMv8.2-A with FP16, RCpc,
+/// dot product and CRC32 (mkw-recomp's AArch64 baseline: Cortex-A76 / Neoverse N1 and later, Apple M1).
+pub const MARCH: &str = if cfg!(target_arch = "aarch64") { "-march=armv8.2-a+fp16+rcpc+dotprod+crc" } else { "-march=x86-64-v3" };
 
 /// The game-code flags: -O1 without the vectorizers, frame pointers or debug info (measured: fewer instructions than
-/// either compiler's defaults), for x86-64-v3 (AVX2, FMA, BMI2). `-fms-runtime-lib=dll` matches the CRT the Rust
+/// either compiler's defaults), for `MARCH`. `-fms-runtime-lib=dll` matches the CRT the Rust
 /// runtime links.
 pub const GEN_FLAGS: &[&str] = &[
     "-std=gnu11",
@@ -45,7 +49,7 @@ pub const GEN_FLAGS: &[&str] = &[
     "-Wno-return-type",
     "-Wno-unused-label",
     "-fvisibility=hidden",
-    "-march=x86-64-v3",
+    MARCH,
     "-fno-vectorize",
     "-fno-slp-vectorize",
     "-fomit-frame-pointer",
@@ -627,6 +631,12 @@ pub const STUB_C: &str = r#"#define WIN32_LEAN_AND_MEAN
 
 typedef int (*nxrs_entry)(int argc, char **argv);
 
+/* Hybrid systems otherwise put this unknown executable on the integrated GPU. These exports are the documented
+   NVIDIA / AMD application hints (read from the executable, not a DLL) and do nothing on systems without switchable
+   graphics (Turbo 6aace78). */
+__declspec(dllexport) DWORD NvOptimusEnablement = 1;
+__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
+
 /* A windowed program: a failure before the game's own log exists goes to stderr when it is redirected, and to a message
    box for a player who started the game from the launcher or the Explorer. */
 static void fail(const wchar_t *what, const wchar_t *path, DWORD err) {
@@ -806,5 +816,51 @@ mod tests {
     #[test]
     fn response_file_quotes_with_forward_slashes() {
         assert_eq!(response_file(&[PathBuf::from(r"C:\a b\c.o")]), "\"C:/a b/c.o\"\n");
+    }
+
+    /// The names a PE image exports (its export directory).
+    #[cfg(windows)]
+    fn pe_exports(d: &[u8]) -> Vec<String> {
+        let u16_at = |o: usize| u16::from_le_bytes([d[o], d[o + 1]]) as usize;
+        let u32_at = |o: usize| u32::from_le_bytes(d[o..o + 4].try_into().unwrap()) as usize;
+        let pe = u32_at(0x3c);
+        let (nsec, optsz, opt) = (u16_at(pe + 6), u16_at(pe + 20), pe + 24);
+        let exp_rva = u32_at(opt + 112);
+        let off = |rva: usize| {
+            (0..nsec).find_map(|i| {
+                let s = opt + optsz + 40 * i;
+                let (vs, va, rs, rp) = (u32_at(s + 8), u32_at(s + 12), u32_at(s + 16), u32_at(s + 20));
+                (va <= rva && rva < va + vs.max(rs)).then(|| rva - va + rp)
+            })
+        };
+        let Some(e) = (exp_rva != 0).then(|| off(exp_rva)).flatten() else { return vec![] };
+        let (n, names) = (u32_at(e + 24), off(u32_at(e + 32)).unwrap());
+        (0..n)
+            .map(|i| {
+                let o = off(u32_at(names + 4 * i)).unwrap();
+                String::from_utf8_lossy(&d[o..o + d[o..].iter().position(|&c| c == 0).unwrap()]).into_owned()
+            })
+            .collect()
+    }
+
+    /// Turbo 6aace78: the game's executable exports NvOptimusEnablement and AmdPowerXpressRequestHighPerformance, so a
+    /// hybrid laptop runs it on the discrete GPU. Built with the clang a build would use (skipped without one).
+    #[cfg(windows)]
+    #[test]
+    fn loader_exports_the_gpu_hints() {
+        assert!(STUB_C.contains("__declspec(dllexport) DWORD NvOptimusEnablement = 1;"));
+        assert!(STUB_C.contains("__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;"));
+        let Ok(clang) = find_clang(None) else {
+            eprintln!("no clang: the link is not checked");
+            return;
+        };
+        let d = std::env::temp_dir().join(format!("nxrs-loader-exports-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&d);
+        std::fs::create_dir_all(&d).unwrap();
+        let exe = d.join("game.exe");
+        link_exe(&clang, &d, &exe).unwrap();
+        let names = pe_exports(&std::fs::read(&exe).unwrap());
+        let _ = std::fs::remove_dir_all(&d);
+        assert!(names.iter().any(|n| n == "NvOptimusEnablement") && names.iter().any(|n| n == "AmdPowerXpressRequestHighPerformance"), "{names:?}");
     }
 }

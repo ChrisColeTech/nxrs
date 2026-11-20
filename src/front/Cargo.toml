@@ -40,6 +40,7 @@ windows-sys = { version = "0.61", features = [
     "Win32_Security",
     "Win32_Storage_Xps",
     "Win32_System_SystemInformation",
+    "Win32_System_Power",
 ] }
 windows = { version = "0.62", features = [
     "Win32_Media_MediaFoundation",

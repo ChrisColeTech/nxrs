@@ -119,7 +119,7 @@ pub fn poll_input() {
     let held = if f { keys::HELD.load(Ordering::Acquire) } else { 0 };
     let m = if mouse_mode() { Some(MOUSE.lock().unwrap().stick(f)) } else { None };
     let (b, a) = keys::state(held, m);
-    nxos::input::set_keyboard(b, a);
+    nxos::input::set_keyboard(b | crate::script_now(), a);
     home_quit();
 }
 

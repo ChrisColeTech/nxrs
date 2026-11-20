@@ -39,14 +39,11 @@ pub fn run() {
     register_debug_commands();
     let mut cpu = ThreadCpu::default();
     let mut last_cpu = Instant::now();
-    let (mut seen, mut since, mut dumped) = (0u64, Instant::now(), false);
+    let mut stall = Stall::default();
     loop {
         let p = crate::nvn::presents();
-        if p != seen {
-            (seen, since, dumped) = (p, Instant::now(), false);
-        } else if p > 0 && !dumped && since.elapsed().as_secs() >= 15 {
-            dumped = true;
-            crate::log!("stall: no present for 15 s (frame {p}); the guest threads:");
+        if let Some(sec) = stall.tick(p, Instant::now()) {
+            crate::log!("warning: {sec} s without a new image (frames={p}, GPU submits={}); the guest threads:", crate::nvn::submits());
             for l in nxrt::kernel::dump_threads().lines() {
                 crate::log!("  {l}");
             }
@@ -177,6 +174,34 @@ pub fn register_debug_commands() {
     });
 }
 
+/// The stall dumps (Turbo main.c's front loop): presents stopped after the first one -> a thread dump after 6 s
+/// (people close a frozen game before 15), then one every further 15 s without an image, at most 4 in a run; a new
+/// image starts the count again. Not before the first image (the boot's loading is not a stall).
+#[derive(Default)]
+struct Stall {
+    seen: u64,
+    since: Option<Instant>,
+    dumps: u32,
+}
+
+impl Stall {
+    /// The seconds of the dump due now, if one is.
+    fn tick(&mut self, presents: u64, now: Instant) -> Option<u32> {
+        if presents != self.seen || self.since.is_none() {
+            self.seen = presents;
+            self.since = Some(now);
+            return None;
+        }
+        let sec = if self.dumps == 0 { 6 } else { 15 };
+        if presents == 0 || self.dumps >= 4 || now.duration_since(self.since?).as_secs() < sec as u64 {
+            return None;
+        }
+        self.dumps += 1;
+        self.since = Some(now);
+        Some(sec)
+    }
+}
+
 /// Guest CPU per thread (Turbo kernel.c): each second, every guest thread's CPU time since the last second goes to
 /// the metrics as `cpu_t<handle>_ms` and the total as `guest_cpu_ms` (metrics=1); the busiest threads of the last
 /// 10 s are logged.
@@ -222,5 +247,31 @@ impl ThreadCpu {
                 crate::log!("cpu: busiest guest threads over 10 s (percent of a core): {}", busy.join(", "));
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Turbo main.c: the first stall dump after 6 s, then every 15 s, at most 4 in a run; a new image restarts the
+    /// count; nothing before the first image.
+    #[test]
+    fn stall_dumps_as_turbo() {
+        let t0 = Instant::now();
+        let at = |s: f64| t0 + Duration::from_secs_f64(s);
+        let mut st = Stall::default();
+        assert_eq!(st.tick(0, at(0.0)), None);
+        assert_eq!(st.tick(0, at(30.0)), None, "no image yet: loading");
+        assert_eq!(st.tick(5, at(30.0)), None);
+        assert_eq!(st.tick(5, at(35.9)), None);
+        assert_eq!(st.tick(5, at(36.0)), Some(6));
+        assert_eq!(st.tick(5, at(50.0)), None);
+        assert_eq!(st.tick(5, at(51.0)), Some(15));
+        assert_eq!(st.tick(6, at(52.0)), None, "an image");
+        assert_eq!(st.tick(6, at(66.9)), None);
+        assert_eq!(st.tick(6, at(67.0)), Some(15), "the 6 s dump is only the first");
+        assert_eq!(st.tick(6, at(82.0)), Some(15));
+        assert_eq!(st.tick(6, at(200.0)), None, "four dumps a run");
     }
 }

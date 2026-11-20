@@ -380,6 +380,12 @@ f!(palma_handle, |a| {
     RES_PALMA_INVALID_HANDLE
 });
 
+// every call on a Palma handle: none is ever connected (the operation complete event is never bound)
+f!(palma_fail, |a| {
+    crate::log_once!("palma fail", "hid: a Poké Ball Plus call on a handle: none connected (ResultPalmaInvalidHandle)");
+    RES_PALMA_INVALID_HANDLE
+});
+
 pub fn register(r: &mut Registry) {
     const W: &str = "hid: Joy-Con mouse, pointer, npad IMU, sensor IC and calibration, console six-axis, Palma (hid_ext)";
     let p = "_ZN2nn3hid";
@@ -434,6 +440,26 @@ pub fn register(r: &mut Registry) {
         ("24EnableAnyPalmaConnectionEv", ok),
         ("25DisableAnyPalmaConnectionEv", ok),
         ("24GetPalmaConnectionHandleEPNS0_21PalmaConnectionHandleERKj", palma_handle),
+        ("15InitializePalmaERKNS0_21PalmaConnectionHandleE", palma_fail),
+        ("31BindPalmaOperationCompleteEventERKNS0_21PalmaConnectionHandleEPNS_2os15SystemEventTypeENS4_14EventClearModeE", palma_fail),
+        ("21GetPalmaOperationInfoEPNS0_18PalmaOperationInfoERKNS0_21PalmaConnectionHandleE", palma_fail),
+        ("17PlayPalmaActivityERKNS0_21PalmaConnectionHandleERKt", palma_fail),
+        ("18SetPalmaFrModeTypeERKNS0_21PalmaConnectionHandleERKNS0_15PalmaFrModeTypeE", palma_fail),
+        ("13ReadPalmaStepERKNS0_21PalmaConnectionHandleE", palma_fail),
+        ("15EnablePalmaStepERKNS0_21PalmaConnectionHandleEb", palma_fail),
+        ("14ResetPalmaStepERKNS0_21PalmaConnectionHandleE", palma_fail),
+        ("27ReadPalmaApplicationSectionERKNS0_21PalmaConnectionHandleEim", palma_fail),
+        ("28WritePalmaApplicationSectionERKNS0_21PalmaConnectionHandleEimRKNS0_35PalmaApplicationSectionAccessBufferE", palma_fail),
+        ("19ReadPalmaUniqueCodeERKNS0_21PalmaConnectionHandleE", palma_fail),
+        ("25SetPalmaUniqueCodeInvalidERKNS0_21PalmaConnectionHandleE", palma_fail),
+        ("23WritePalmaActivityEntryERKNS0_21PalmaConnectionHandleERKtPKNS0_18PalmaActivityEntryE", palma_fail),
+        ("28WritePalmaRgbLedPatternEntryERKNS0_21PalmaConnectionHandleERKtPKvm", palma_fail),
+        ("19WritePalmaWaveEntryERKNS0_21PalmaConnectionHandleERKNS0_12PalmaWaveSetERKtPKvmm", palma_fail),
+        ("37GetPalmaDataBaseIdentificationVersionERKNS0_21PalmaConnectionHandleE", palma_fail),
+        ("37SetPalmaDataBaseIdentificationVersionERKNS0_21PalmaConnectionHandleEi", palma_fail),
+        ("19SuspendPalmaFeatureERKNS0_21PalmaConnectionHandleERKNS_4util10BitFlagSetILi32ENS0_12PalmaFeatureEEE", palma_fail),
+        ("16ReadPalmaPlayLogERKNS0_21PalmaConnectionHandleERKt", palma_fail),
+        ("17ResetPalmaPlayLogERKNS0_21PalmaConnectionHandleERKt", palma_fail),
         ("21InitializeTouchScreenEii", nothing),
         ("17InitializeGestureEii", nothing),
         ("24ShowControllerStrapGuideERKNS0_13StrapGuideArgE", ok),
@@ -460,6 +486,19 @@ mod tests {
         assert_eq!(r32(a + 32 + 0x14) as i32, -40);
         assert!(nmouse_of(NMOUSE_TAG | (super::super::hid::connected_id() as u64) << 8 | 1).is_some());
         assert!(nmouse_of(NMOUSE_TAG | 5 << 8).is_none(), "no sensor on that npad");
+    }
+
+    /// Palma (Poké Ball Plus) as nxnative answers it: all 24 calls taken over; no handle, every call on one fails
+    /// with ResultPalmaInvalidHandle (202-3302).
+    #[test]
+    fn palma_calls_fail_as_none_connected() {
+        let mut r = crate::hle::Registry::default();
+        register(&mut r);
+        let n = r.names().filter(|n| n.starts_with("_ZN2nn3hid") && n.contains("Palma")).count();
+        assert_eq!(n, 24);
+        let mut c = nxrt::cpu::Cpu::new_boxed();
+        unsafe { palma_fail(&mut *c) };
+        assert_eq!(c.x[0], 202 | 3302 << 9);
     }
 
     #[test]

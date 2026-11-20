@@ -160,7 +160,7 @@ mod tests {
         "mov qword ptr [rcx + 264], rax",
         "jmp rt_dispatch",
     );
-    #[cfg(target_os = "linux")]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64"))]
     core::arch::global_asm!(
         ".globl nxrt_test_owner_body",
         ".p2align 4",
@@ -187,6 +187,40 @@ mod tests {
         "mov rax, 0x7A0000000108",
         "mov qword ptr [rdi + 264], rax",
         "jmp rt_dispatch",
+    );
+    #[cfg(all(target_os = "linux", target_arch = "aarch64"))]
+    core::arch::global_asm!(
+        ".globl nxrt_test_owner_body",
+        ".p2align 4",
+        "nxrt_test_owner_body:",
+        "stp x29, x30, [sp, #-32]!",
+        "mov x29, sp",
+        "movz x9, #0x0108",
+        "movk x9, #0x7A00, lsl #32",
+        "ldr x10, [x0, #264]",
+        "cmp x10, x9",
+        "b.ne 2f",
+        "mov x9, #42",
+        "str x9, [x0]",
+        "ldp x29, x30, [sp], #32",
+        "ret",
+        "2:",
+        "str x0, [sp, #16]",
+        "ldr x9, [x0, #8]",
+        "str x9, [x0, #264]",
+        "bl rt_dispatch",
+        "ldr x0, [sp, #16]",
+        "mov x9, #7",   // only if the host function returned: wrong
+        "str x9, [x0]",
+        "ldp x29, x30, [sp], #32",
+        "ret",
+        ".globl nxrt_test_longjmp",
+        ".p2align 4",
+        "nxrt_test_longjmp:",
+        "movz x9, #0x0108",
+        "movk x9, #0x7A00, lsl #32",
+        "str x9, [x0, #264]",
+        "b rt_dispatch",
     );
     extern "C" {
         fn nxrt_test_owner_body(c: *mut Cpu);

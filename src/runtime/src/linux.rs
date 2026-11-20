@@ -503,13 +503,18 @@ pub struct Fault {
     pub sig: i32,
     /// The faulting data address (SIGSEGV / SIGBUS).
     pub addr: u64,
-    /// The access was a write (x86's page-fault error code bit 1).
+    /// The access was a write (x86's page-fault error code bit 1; AArch64: ESR's WnR of a data abort).
     pub write: bool,
     /// The access was an instruction fetch.
     pub exec: bool,
     uc: *mut libc::ucontext_t,
 }
 
+/// Whether a fault hook can single-step (`Fault::set_trap`): x86-64's trap flag. AArch64 Linux has no user-mode single
+/// step outside ptrace (MDSCR_EL1.SS is the kernel's), so there `set_trap` does nothing.
+pub const CAN_SINGLE_STEP: bool = cfg!(target_arch = "x86_64");
+
+#[cfg(target_arch = "x86_64")]
 impl Fault {
     pub fn rip(&self) -> u64 {
         // SAFETY: the kernel's signal frame
@@ -535,6 +540,89 @@ impl Fault {
             }
         }
     }
+}
+
+/// AArch64: the same accessors over the kernel's `struct sigcontext` (pc, sp, x29 the frame pointer).
+#[cfg(target_arch = "aarch64")]
+impl Fault {
+    pub fn rip(&self) -> u64 {
+        // SAFETY: the kernel's signal frame
+        unsafe { (*self.uc).uc_mcontext.pc }
+    }
+    pub fn rsp(&self) -> u64 {
+        // SAFETY: as above
+        unsafe { (*self.uc).uc_mcontext.sp }
+    }
+    pub fn rbp(&self) -> u64 {
+        // SAFETY: as above
+        unsafe { (*self.uc).uc_mcontext.regs[29] }
+    }
+    /// Nothing on AArch64 (`CAN_SINGLE_STEP`).
+    pub fn set_trap(&mut self, _on: bool) {}
+}
+
+/// The fault's access kind from the signal frame: (write, instruction fetch).
+#[cfg(target_arch = "x86_64")]
+unsafe fn access_kind(sig: i32, ucp: *const libc::ucontext_t) -> (bool, bool) {
+    let err = (*ucp).uc_mcontext.gregs[libc::REG_ERR as usize] as u64;
+    (sig == libc::SIGSEGV && err & 2 != 0, sig == libc::SIGSEGV && err & 16 != 0)
+}
+
+/// AArch64: from the ESR record the kernel puts in the frame's `__reserved` area (`esr_context`).
+#[cfg(target_arch = "aarch64")]
+unsafe fn access_kind(sig: i32, ucp: *const libc::ucontext_t) -> (bool, bool) {
+    if sig != libc::SIGSEGV {
+        return (false, false);
+    }
+    // `__reserved` follows pstate, 16-aligned (offset 288 of the sigcontext); libc keeps the field private
+    let mc = core::ptr::addr_of!((*ucp).uc_mcontext);
+    let res = (core::ptr::addr_of!((*mc).pstate) as usize + 8 + 15) & !15;
+    let area = core::slice::from_raw_parts(res as *const u8, 4096);
+    match find_esr(area) {
+        Some(esr) => esr_access(esr),
+        None => (false, false),
+    }
+}
+
+/// The ESR value in a sigcontext `__reserved` area: its records are {u32 magic, u32 size, payload}, up to a zero magic.
+#[cfg(any(target_arch = "aarch64", test))]
+fn find_esr(area: &[u8]) -> Option<u64> {
+    const ESR_MAGIC: u32 = 0x4553_5201;
+    let mut at = 0;
+    while at + 16 <= area.len() {
+        let magic = u32::from_ne_bytes(area[at..at + 4].try_into().ok()?);
+        let size = u32::from_ne_bytes(area[at + 4..at + 8].try_into().ok()?) as usize;
+        if magic == 0 || size < 8 || at + size > area.len() {
+            return None;
+        }
+        if magic == ESR_MAGIC {
+            return Some(u64::from_ne_bytes(area[at + 8..at + 16].try_into().ok()?));
+        }
+        at += size;
+    }
+    None
+}
+
+/// (write, instruction fetch) of an abort's ESR: an instruction abort (EC 0x20 / 0x21) is a fetch; a data abort
+/// (EC 0x24 / 0x25) is a write when WnR (bit 6) is set and it is not a cache maintenance operation (CM, bit 8).
+#[cfg(any(target_arch = "aarch64", test))]
+fn esr_access(esr: u64) -> (bool, bool) {
+    match (esr >> 26) & 0x3f {
+        0x20 | 0x21 => (false, true),
+        0x24 | 0x25 => (esr & (1 << 6) != 0 && esr & (1 << 8) == 0, false),
+        _ => (false, false),
+    }
+}
+
+/// The interrupted pc of a signal frame.
+unsafe fn frame_pc(ucp: *const libc::ucontext_t) -> u64 {
+    #[cfg(target_arch = "x86_64")]
+    return (*ucp).uc_mcontext.gregs[libc::REG_RIP as usize] as u64;
+    #[cfg(target_arch = "aarch64")]
+    return (*ucp).uc_mcontext.pc;
+}
+
+impl Fault {
     pub fn what(&self) -> &'static str {
         match self.sig {
             libc::SIGSEGV => "access violation",
@@ -571,9 +659,9 @@ pub fn add_fault_hook(h: FaultHook) {
 unsafe extern "C" fn handler(sig: i32, si: *mut libc::siginfo_t, uc: *mut libc::c_void) {
     let errno = *libc::__errno_location();
     let ucp = uc as *mut libc::ucontext_t;
-    let err = (*ucp).uc_mcontext.gregs[libc::REG_ERR as usize] as u64;
     let addr = if sig == libc::SIGSEGV || sig == libc::SIGBUS { (*si).si_addr() as u64 } else { 0 };
-    let mut f = Fault { sig, addr, write: (sig == libc::SIGSEGV) && err & 2 != 0, exec: (sig == libc::SIGSEGV) && err & 16 != 0, uc: ucp };
+    let (write, exec) = access_kind(sig, ucp);
+    let mut f = Fault { sig, addr, write, exec, uc: ucp };
     let n = NHOOKS.load(Ordering::Acquire).min(MAX_HOOKS);
     for i in (0..n).rev() {
         let h = HOOKS[i].load(Ordering::Acquire);
@@ -688,7 +776,7 @@ static SAMPLE_SEM: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
 
 unsafe extern "C" fn sample_handler(_s: i32, _si: *mut libc::siginfo_t, uc: *mut libc::c_void) {
     let u = uc as *mut libc::ucontext_t;
-    SAMPLE_PC.store((*u).uc_mcontext.gregs[libc::REG_RIP as usize] as u64, Ordering::Release);
+    SAMPLE_PC.store(frame_pc(u), Ordering::Release);
     if let Some(&s) = SAMPLE_SEM.get() {
         libc::sem_post(s as *mut libc::sem_t);
     }
@@ -879,5 +967,30 @@ mod tests {
         assert!(thread_cpu_seconds(t).is_some_and(|s| s > 0.0));
         stop.store(true, Ordering::Relaxed);
         h.join().unwrap();
+    }
+
+    /// AArch64 fault kinds: the ESR record is found among the sigcontext records and decoded as the kernel sets it.
+    #[test]
+    fn esr_records_and_access_kinds() {
+        let rec = |magic: u32, size: u32, payload: &[u8]| {
+            let mut v = magic.to_ne_bytes().to_vec();
+            v.extend(size.to_ne_bytes());
+            v.extend(payload);
+            v.resize(size as usize, 0);
+            v
+        };
+        // an FPSIMD record (528 bytes), then ESR, then the terminator
+        let esr = (0x24u64 << 26) | (1 << 6) | 0x07; // data abort, lower EL, write, translation fault level 3
+        let mut area = rec(0x4650_8001, 528, &[]);
+        area.extend(rec(0x4553_5201, 16, &esr.to_ne_bytes()));
+        area.extend(rec(0, 8, &[]));
+        area.resize(4096, 0);
+        assert_eq!(find_esr(&area), Some(esr));
+        assert_eq!(find_esr(&[0u8; 64]), None);
+        assert_eq!(esr_access(esr), (true, false));
+        assert_eq!(esr_access(esr & !(1 << 6)), (false, false), "a read");
+        assert_eq!(esr_access(esr | (1 << 8)), (false, false), "cache maintenance is not a write");
+        assert_eq!(esr_access(0x20u64 << 26), (false, true), "instruction abort");
+        assert_eq!(esr_access(0x15u64 << 26), (false, false), "an SVC is no access");
     }
 }

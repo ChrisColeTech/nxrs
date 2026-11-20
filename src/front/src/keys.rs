@@ -121,9 +121,40 @@ pub fn state(held: u64, mouse: Option<(i32, i32)>) -> (u64, [i32; 4]) {
     (b, a)
 }
 
+/// The ini's hidden `script` (Turbo backend_win32.c, test input as the X11 backend has it): `ms:hex,ms:hex,...`, each
+/// entry holds those controller buttons (hex, as the guest's button bits) for 300 ms from that many milliseconds after
+/// start. The buttons held at `elapsed_ms`.
+pub fn script_buttons(spec: &str, elapsed_ms: u64) -> u64 {
+    let mut b = 0;
+    for e in spec.split(',') {
+        let Some((t, m)) = e.split_once(':') else { break };
+        let Ok(t) = t.trim().parse::<u64>() else { break };
+        let m = m.trim();
+        let m = u64::from_str_radix(m.strip_prefix("0x").or_else(|| m.strip_prefix("0X")).unwrap_or(m), 16).unwrap_or(0);
+        if elapsed_ms >= t && elapsed_ms < t + 300 {
+            b |= m;
+        }
+    }
+    b
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Turbo's script: "ms:hex" entries, each held 300 ms.
+    #[test]
+    fn script_holds_buttons_300_ms() {
+        let s = "1000:1,1200:0x10,5000:400";
+        assert_eq!(script_buttons(s, 999), 0);
+        assert_eq!(script_buttons(s, 1000), 1);
+        assert_eq!(script_buttons(s, 1250), 0x11, "both held");
+        assert_eq!(script_buttons(s, 1300), 0x10);
+        assert_eq!(script_buttons(s, 5299), 0x400);
+        assert_eq!(script_buttons(s, 5300), 0);
+        assert_eq!(script_buttons("", 0), 0);
+        assert_eq!(script_buttons("x:1,0:1", 100), 0, "stops at the first entry it cannot read, as strtoull");
+    }
     #[test]
     fn keyboard() {
         let h = keymap(0x58) | keymap(0x57) | keymap(0x4C);

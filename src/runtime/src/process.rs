@@ -99,6 +99,7 @@ pub fn startup(space: &Space) {
         crate::rt::log("null_trap: writes to page 0 crash with a log (always so here: Windows maps nothing below 64 KB)");
     }
     crate::profile::start(nxconfig::flag("profile"));
+    crate::hostprof::start();
     crate::rt::log(&format!(
         "program {:016x}: system tick {:.2} MHz{}; exclusive monitor {} (SWR_XMON=1 / SWR_NO_XMON=1); maps past the pool {}",
         p.program_id,
@@ -467,6 +468,7 @@ mod option_tests {
     fn profile_starts_the_profiler() {
         assert!(nxconfig::apply_arg("--profile=1"));
         crate::profile::start(nxconfig::flag("profile"));
+    crate::hostprof::start();
         assert!(crate::profile::on());
     }
 }

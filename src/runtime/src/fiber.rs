@@ -257,8 +257,8 @@ pub fn register() {
 }
 
 /// Host fibers on Linux, with the Win32 calls' shape: a fiber is a stack of its own (mmap, a guard page below it) and
-/// the stack pointer it was left at; `nxrt_ctx_switch` (asm.rs) saves the callee-saved registers, MXCSR and the x87
-/// control word (FIBER_FLAG_FLOAT_SWITCH's state) on the stack it leaves.
+/// the stack pointer it was left at; `nxrt_ctx_switch` (asm.rs) saves the callee-saved registers and the FP control
+/// state (FIBER_FLAG_FLOAT_SWITCH's: x86-64 MXCSR and the x87 control word, AArch64 FPCR) on the stack it leaves.
 #[cfg(target_os = "linux")]
 #[allow(non_snake_case)]
 mod host {
@@ -295,20 +295,40 @@ mod host {
             return core::ptr::null_mut();
         }
         libc::mprotect(p, GUARD, libc::PROT_NONE);
-        // the first switch "returns" into the entry with the parameter in rbx (asm.rs nxrt_fiber_entry):
-        // top-8 a null return address, top-16 the entry, then rbp rbx r12 r13 r14 r15 and MXCSR / x87 control word
         let top = (p as usize + size) & !15;
+        let sp = initial_frame(top, entry.map_or(0, |e| e as usize as u64), param as u64);
+        let f = Box::into_raw(Box::new(HostFiber { sp, stack: p as usize, size }));
+        f as *mut _
+    }
+
+    /// Writes the frame `nxrt_ctx_switch` resumes a new fiber from below `top` (16-aligned) and returns its sp.
+    /// x86-64: the first switch "returns" into the entry with the parameter in rbx (asm.rs nxrt_fiber_entry): top-8 a
+    /// null return address, top-16 the entry, then rbp rbx r12 r13 r14 r15 and MXCSR / x87 control word.
+    #[cfg(target_arch = "x86_64")]
+    pub(super) unsafe fn initial_frame(top: usize, entry: u64, param: u64) -> usize {
         let w = |off: usize, v: u64| *((top - off) as *mut u64) = v;
         w(8, 0);
-        w(16, entry.map_or(0, |e| e as usize as u64));
+        w(16, entry);
         w(24, 0); // rbp
-        w(32, param as u64); // rbx
+        w(32, param); // rbx
         for off in [40, 48, 56, 64] {
             w(off, 0); // r12-r15
         }
         w(72, 0x1F80 | (0x037F << 32)); // MXCSR default, x87 control word default
-        let f = Box::into_raw(Box::new(HostFiber { sp: top - 72, stack: p as usize, size }));
-        f as *mut _
+        top - 72
+    }
+
+    /// AArch64: nxrt_ctx_switch's 176-byte frame (CTX_FRAME words), all zero (x29 = 0 ends the frame chain, FPCR 0 is
+    /// the default) but x19 = the parameter and x30 = the entry, which its `ret` goes to with sp = `top`.
+    #[cfg(target_arch = "aarch64")]
+    pub(super) unsafe fn initial_frame(top: usize, entry: u64, param: u64) -> usize {
+        const CTX_FRAME: usize = 22;
+        let sp = top - CTX_FRAME * 8;
+        let f = core::slice::from_raw_parts_mut(sp as *mut u64, CTX_FRAME);
+        f.fill(0);
+        f[0] = param; // x19
+        f[11] = entry; // x30
+        sp
     }
 
     pub unsafe fn DeleteFiber(f: *const core::ffi::c_void) {
@@ -332,5 +352,99 @@ mod host {
     #[no_mangle]
     unsafe extern "C" fn nxrt_fiber_leave(to: usize) {
         SwitchToFiber(to as *const _);
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use crate::cpu::Cpu;
+        use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+
+        // The test fiber's first frame, as nxrt_fiber_entry: the parameter from the frame's register to the argument.
+        #[cfg(target_arch = "x86_64")]
+        core::arch::global_asm!(
+            ".globl nxrt_test_fiber_tramp",
+            ".p2align 4",
+            "nxrt_test_fiber_tramp:",
+            "sub rsp, 8",
+            "mov rdi, rbx",
+            "call nxrt_test_fiber_body",
+            "ud2",
+        );
+        #[cfg(target_arch = "aarch64")]
+        core::arch::global_asm!(
+            ".globl nxrt_test_fiber_tramp",
+            ".p2align 4",
+            "nxrt_test_fiber_tramp:",
+            "mov x0, x19",
+            "bl nxrt_test_fiber_body",
+            "brk #0",
+        );
+        extern "C" {
+            fn nxrt_test_fiber_tramp(p: *mut core::ffi::c_void);
+        }
+
+        /// Flush-to-zero in the host FP control (MXCSR.FTZ / FPCR.FZ).
+        fn host_fz() -> bool {
+            #[cfg(target_arch = "x86_64")]
+            #[allow(deprecated)]
+            // SAFETY: reads MXCSR
+            return unsafe { core::arch::x86_64::_mm_getcsr() } & 0x8000 != 0;
+            #[cfg(target_arch = "aarch64")]
+            {
+                let v: u64;
+                // SAFETY: reads FPCR
+                unsafe { core::arch::asm!("mrs {}, fpcr", out(reg) v, options(nomem, nostack)) };
+                v & (1 << 24) != 0
+            }
+        }
+
+        static BASE_FIBER: AtomicUsize = AtomicUsize::new(0);
+        static STEPS: AtomicU32 = AtomicU32::new(0);
+        static FZ_KEPT: AtomicU32 = AtomicU32::new(0);
+
+        /// The fiber: turns flush-to-zero on (as a guest with FPCR.FZ does, through `sync_mxcsr`), switches back, and
+        /// checks its FP control survived the base context's turn. Never returns (a fiber's first frame has no caller).
+        #[no_mangle]
+        unsafe extern "C" fn nxrt_test_fiber_body(p: *mut core::ffi::c_void) -> ! {
+            let mut c = Cpu::new_boxed();
+            c.fpcr = 1 << 24;
+            c.sync_mxcsr();
+            (*(p as *const AtomicU32)).fetch_add(1, Ordering::SeqCst);
+            loop {
+                SwitchToFiber(BASE_FIBER.load(Ordering::SeqCst) as *const _);
+                FZ_KEPT.store(host_fz() as u32, Ordering::SeqCst);
+                STEPS.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        /// nxrt_ctx_switch and the new fiber's frame: a fiber starts at its entry with its parameter, the switch
+        /// keeps each context's callee-saved registers and FP control (MXCSR / FPCR) apart, and a switched-out fiber
+        /// resumes where it left off.
+        #[test]
+        fn host_fiber_switch_keeps_fp_control_apart() {
+            std::thread::spawn(|| unsafe {
+                let started = AtomicU32::new(0);
+                let base = ConvertThreadToFiberEx(core::ptr::null(), 1);
+                BASE_FIBER.store(base as usize, Ordering::SeqCst);
+                let f = CreateFiberEx(64 << 10, 1 << 20, 1, Some(nxrt_test_fiber_tramp), &started as *const _ as *const _);
+                assert!(!f.is_null());
+                assert!(!host_fz());
+                let kept = core::hint::black_box(0x1234_5678_u64);
+                SwitchToFiber(f);
+                assert_eq!(started.load(Ordering::SeqCst), 1, "the fiber ran from its entry");
+                assert!(!host_fz(), "the fiber's FP control did not leak into the base context");
+                assert_eq!(core::hint::black_box(kept), 0x1234_5678);
+                for i in 1..=3 {
+                    SwitchToFiber(f);
+                    assert_eq!(STEPS.load(Ordering::SeqCst), i);
+                    assert_eq!(FZ_KEPT.load(Ordering::SeqCst), 1, "the fiber's own FP control came back with it");
+                    assert!(!host_fz());
+                }
+                DeleteFiber(f);
+            })
+            .join()
+            .unwrap();
+        }
     }
 }

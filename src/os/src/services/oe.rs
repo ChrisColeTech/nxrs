@@ -22,9 +22,12 @@ pub fn opmode() -> i32 {
     if m >= 0 {
         return m;
     }
-    let v = std::env::var("NXOS_OPMODE").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| if crate::options::get("docked").trim() == "0" { 0 } else { 1 });
+    // the profile's op_mode handheld (nxnative hle_oe.c DM_GAME_OPMODE: a game that reads the touch screen, which
+    // reaches it only in handheld mode) starts handheld; `docked` changed while it runs still applies
+    let handheld = crate::options::game("op_mode", "console").trim() == "handheld";
+    let v = std::env::var("NXOS_OPMODE").ok().and_then(|v| v.parse().ok()).unwrap_or_else(|| if handheld || crate::options::get("docked").trim() == "0" { 0 } else { 1 });
     OPMODE.store(v, Ordering::Relaxed);
-    crate::log!("oe: {} (the docked setting), language {}", if v == 1 { "docked, TV mode" } else { "handheld mode" }, language());
+    crate::log!("oe: {} ({}), language {}", if v == 1 { "docked, TV mode" } else { "handheld mode" }, if handheld { "the profile's op_mode handheld" } else { "the docked setting" }, language());
     v
 }
 
@@ -183,7 +186,9 @@ macro_rules! oefn {
 
 oefn!(nothing, |a| { 0 });
 oefn!(get_opmode, |a| { opmode() as u64 });
-oefn!(get_perfmode, |a| { opmode() as u64 });
+// GetPerformanceMode: the operation mode's (Boost docked, Normal handheld); the profile's perf_mode boost: Boost
+// always (nxnative hle_oe.c h_oe_GetPerfMode)
+oefn!(get_perfmode, |a| { if crate::options::game("perf_mode", "follow").trim() == "boost" { 1 } else { opmode() as u64 } });
 oefn!(get_focus, |a| { FOCUS.load(Ordering::Relaxed) as u64 });
 oefn!(set_focus_mode, |a| {
     FOCUS_MODE.store(a.i(0), Ordering::Relaxed);
@@ -223,9 +228,10 @@ unsafe fn get_msg_event(c: *mut Cpu) {
     (*c).x[0] = ev;
 }
 oefn!(get_lang, |a| { language_code() });
-oefn!(region, |a| {
+/// The console's region (nn::settings RegionCode: 0 Japan, 1 USA, 2 Europe, 4 China / Korea) for the language.
+pub fn region_code() -> u32 {
     let l = language();
-    (if l.starts_with("ja") {
+    if l.starts_with("ja") {
         0
     } else if l.starts_with("ko") || l.starts_with("zh") {
         4
@@ -233,8 +239,9 @@ oefn!(region, |a| {
         1
     } else {
         2
-    }) as u64
-});
+    }
+}
+oefn!(region, |a| { region_code() as u64 });
 oefn!(device_id, |a| {
     crate::guest::write_bytes(a.x(0), &[0x78, 0x62, 0x6c, 0x00, 0x53, 0x57, 0x4e, 0x41, 0x54, 0x49, 0x56, 0x45, 0x31, 0x30, 0x30, 0x31]);
     0
@@ -243,13 +250,30 @@ oefn!(device_id, |a| {
 // this one passed to ExecuteProgram (`NXRS_LAUNCH_PARAM`, a file), once
 oefn!(launch_param, |a| {
     static POPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-    let data = std::env::var_os("NXRS_LAUNCH_PARAM").and_then(|p| std::fs::read(p).ok());
+    let file = std::env::var_os("NXRS_LAUNCH_PARAM").and_then(|p| std::fs::read(p).ok());
+    // else the profile's launch_param (nxnative hle_oe.c): a program of a multi-program application run by itself
+    // (Super Mario 3D All-Stars' games quit without the launcher's language and two volumes)
+    let spec = crate::options::game("launch_param", "");
+    let from_profile = file.is_none() && !spec.trim().is_empty();
+    let data = file.or_else(|| {
+        from_profile.then(|| {
+            let (b, bad) = crate::options::launch_param_bytes(&spec, language_code());
+            for f in bad {
+                crate::log!("[RED] launch_param: field {f} not understood");
+            }
+            b
+        })
+    });
     match data {
         Some(d) if !POPPED.swap(true, Ordering::Relaxed) => {
             let n = d.len().min(a.x(2) as usize);
             crate::guest::write_bytes(a.x(1), &d[..n]);
             crate::guest::out(a.x(0), n as u64);
-            crate::log!("oe: launch parameter of {} bytes from program {}", d.len(), previous_program());
+            if from_profile {
+                crate::log!("oe::TryPopLaunchParameter: {n} bytes from the profile ({spec})");
+            } else {
+                crate::log!("oe: launch parameter of {} bytes from program {}", d.len(), previous_program());
+            }
             1
         }
         _ => {
@@ -316,9 +340,12 @@ oefn!(volume_balance, |a| {
     0
 });
 oefn!(active_time, |a| { (crate::log::secs() * 1e9) as u64 });
+// RequestToRelaunchApplication: the application starts again from its first program, with no launch parameter and
+// no previous program (as from HOME; nxnative hle_oe.c oe_start with relaunch: Smash Ultimate after a language
+// change, "the software will restart"); this program ends.
 oefn!(relaunch, |a| {
-    crate::log!("oe::RequestToRelaunchApplication: the host ends the run");
     crate::log::report_gaps("relaunch requested");
+    start_successor(0, None);
     nxrt::process::exit(0)
 });
 oefn!(ok, |a| { RES_OK });
@@ -362,30 +389,52 @@ oefn!(demo_exit, |a| {
 oefn!(execute_program, |a| {
     let (index, param, size) = (a.i(0), a.x(1), a.x(2));
     crate::log::report_gaps("ExecuteProgram");
+    let bytes = if param != 0 && size != 0 { crate::guest::bytes(param, size).to_vec() } else { vec![] };
+    start_successor(index, Some(bytes));
+    nxrt::process::exit(0);
+});
+
+/// The process that takes this one's place: program `index` of the application (`program_exe`), with this run's
+/// arguments, in its folder; ExecuteProgram passes its parameter (`NXRS_LAUNCH_PARAM`, a file) and this program's
+/// index (`NXRS_PREV_PROGRAM`); a relaunch (`param` None) passes neither (`NXRS_RELAUNCH=1`).
+fn successor(cur: i32, exe: &std::path::Path, param: Option<&std::path::Path>) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.args(std::env::args_os().skip(1)).env_remove("NXRS_DATA").env_remove("NXRT_EXEFS");
+    if let Some(d) = exe.parent() {
+        cmd.current_dir(d);
+    }
+    match param {
+        Some(p) => {
+            cmd.env("NXRS_LAUNCH_PARAM", p).env("NXRS_PREV_PROGRAM", cur.to_string()).env_remove("NXRS_RELAUNCH");
+        }
+        None => {
+            cmd.env_remove("NXRS_LAUNCH_PARAM").env_remove("NXRS_PREV_PROGRAM").env("NXRS_RELAUNCH", "1");
+        }
+    }
+    cmd
+}
+
+/// Starts the successor (`successor`) and says so with the `exec:` line the harness follows; the caller ends this run.
+fn start_successor(index: i32, param: Option<Vec<u8>>) {
+    let what = if param.is_some() { "oe::ExecuteProgram" } else { "oe::RequestToRelaunchApplication" };
     match program_exe(index) {
         Some((cur, exe)) if exe.is_file() => {
             let pfile = std::env::temp_dir().join(format!("nxrs_launch_{}_{index}.bin", std::process::id()));
-            let bytes = if param != 0 && size != 0 { crate::guest::bytes(param, size).to_vec() } else { vec![] };
-            let _ = std::fs::write(&pfile, &bytes);
-            let mut cmd = std::process::Command::new(&exe);
-            cmd.args(std::env::args_os().skip(1))
-                .current_dir(exe.parent().unwrap())
-                .env_remove("NXRS_DATA")
-                .env_remove("NXRT_EXEFS")
-                .env("NXRS_LAUNCH_PARAM", &pfile)
-                .env("NXRS_PREV_PROGRAM", cur.to_string());
-            match cmd.spawn() {
+            if let Some(b) = &param {
+                let _ = std::fs::write(&pfile, b);
+            }
+            match successor(cur, &exe, param.as_ref().map(|_| pfile.as_path())).spawn() {
                 Ok(child) => {
-                    crate::log!("exec: program {cur} -> program {index} ({} bytes of parameters): {} started as process {}", bytes.len(), exe.display(), child.id());
+                    let n = param.as_ref().map_or(0, |b| b.len());
+                    crate::log!("exec: program {cur} -> program {index} ({n} bytes of parameters{}): {} started as process {}", if param.is_none() { ", a relaunch" } else { "" }, exe.display(), child.id());
                 }
-                Err(e) => crate::log!("[RED] oe::ExecuteProgram {index}: {} did not start: {e}", exe.display()),
+                Err(e) => crate::log!("[RED] {what} {index}: {} did not start: {e}", exe.display()),
             }
         }
-        Some((_, exe)) => crate::log!("[RED] oe::ExecuteProgram {index} ({size} bytes of parameters): {} is not built (nxrs-build build --program {index}); the run ends here", exe.display()),
-        None => crate::log!("[RED] oe::ExecuteProgram {index}: no executable path; the run ends here"),
+        Some((_, exe)) => crate::log!("[RED] {what} {index}: {} is not built (nxrs-build build --program {index}); the run ends here", exe.display()),
+        None => crate::log!("[RED] {what} {index}: no executable path; the run ends here"),
     }
-    nxrt::process::exit(0);
-});
+}
 pub const MSG_STARTUP_LOGO: u32 = 95;
 
 pub fn register_switch2(r: &mut Registry) {
@@ -496,6 +545,28 @@ mod tests {
     /// message per change, none under focus handling modes 0 / 3 (nxnative hle_oe.c).
     /// The notification queue is one for the process: its tests take turns.
     static QUEUE_TESTS: Mutex<()> = Mutex::new(());
+
+    /// RequestToRelaunchApplication starts program 0 afresh as nxnative's oe_start(relaunch) does: no launch
+    /// parameter, no previous program, NXRS_RELAUNCH=1, in the program's folder with this run's arguments; ExecuteProgram
+    /// passes its parameter file and this program's index.
+    #[test]
+    fn relaunch_starts_program_0_afresh() {
+        let envs = |c: &std::process::Command| -> Vec<(String, Option<String>)> {
+            c.get_envs().map(|(k, v)| (k.to_string_lossy().into_owned(), v.map(|v| v.to_string_lossy().into_owned()))).collect()
+        };
+        let exe = std::path::Path::new("C:/games/x/x.exe");
+        let (_, p0) = program_exe(0).unwrap();
+        assert_eq!(p0.file_stem(), std::env::current_exe().unwrap().file_stem(), "program 0 is this executable's base");
+        let r = successor(2, exe, None);
+        let e = envs(&r);
+        assert!(e.contains(&("NXRS_RELAUNCH".into(), Some("1".into()))));
+        assert!(e.contains(&("NXRS_LAUNCH_PARAM".into(), None)) && e.contains(&("NXRS_PREV_PROGRAM".into(), None)), "{e:?}");
+        assert_eq!(r.get_current_dir(), Some(std::path::Path::new("C:/games/x")));
+        let x = successor(2, exe, Some(std::path::Path::new("p.bin")));
+        let e = envs(&x);
+        assert!(e.contains(&("NXRS_LAUNCH_PARAM".into(), Some("p.bin".into()))) && e.contains(&("NXRS_PREV_PROGRAM".into(), Some("2".into()))));
+        assert!(e.contains(&("NXRS_RELAUNCH".into(), None)));
+    }
 
     #[test]
     fn focus_changes_notify_the_game() {

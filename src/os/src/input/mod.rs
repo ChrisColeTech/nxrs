@@ -150,14 +150,49 @@ struct Rumble {
 }
 static RUMBLE: Mutex<Rumble> = Mutex::new(Rumble { v: [[Vib { amp_low: 0.0, freq_low: 160.0, amp_high: 0.0, freq_high: 320.0 }; 2]; PLAYERS], dirty: [false; PLAYERS] });
 
+/// The player's rumble settings (nxnative docs/settings.md, global): `rumble` 0 = off, `rumble_gain` 0..3 scales the
+/// strength, `rumble_min` 0..0.9: levels below it stay silent and the rest is stretched over the full range (for
+/// rotating motors a game's quiet HD rumble texture keeps running: Mario Kart 8 Deluxe 0.45).
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RumbleSettings {
+    pub on: bool,
+    pub gain: f32,
+    pub min: f32,
+}
+
+impl RumbleSettings {
+    pub fn from_ini() -> RumbleSettings {
+        let f = |k: &str, d: f32| nxconfig::string(k).trim().parse::<f32>().ok().filter(|v| v.is_finite()).unwrap_or(d);
+        RumbleSettings { on: nxconfig::string("rumble").trim() != "0", gain: f("rumble_gain", 1.0).clamp(0.0, 3.0), min: f("rumble_min", 0.0).clamp(0.0, 0.9) }
+    }
+
+    /// One amplitude as the pad gets it (nxnative haptics_apple.m `controller_level(x * gain)`).
+    pub fn level(&self, x: f32) -> f32 {
+        if !self.on {
+            return 0.0;
+        }
+        let x = if x.is_finite() { (x * self.gain).clamp(0.0, 1.0) } else { 0.0 };
+        if x <= self.min { 0.0 } else { (x - self.min) / (1.0 - self.min) }
+    }
+
+    pub fn apply(&self, v: Vib) -> Vib {
+        Vib { amp_low: self.level(v.amp_low), amp_high: self.level(v.amp_high), ..v }
+    }
+}
+
 /// The game's vibration for player p's device `side` (0 left / the whole pad, 1 right).
 pub fn vibrate(p: usize, side: usize, v: Vib) {
+    vibrate_with(p, side, v, false);
+}
+
+/// The same; `force` sends it even when the pad has that value already (a vibration device initialised idle).
+pub fn vibrate_with(p: usize, side: usize, v: Vib, force: bool) {
     if p >= PLAYERS || side > 1 {
         return;
     }
-    let v = clean(v);
+    let v = RumbleSettings::from_ini().apply(clean(v));
     let mut r = RUMBLE.lock().unwrap();
-    if r.v[p][side] != v {
+    if r.v[p][side] != v || force {
         r.v[p][side] = v;
         r.dirty[p] = true;
     }
@@ -661,6 +696,30 @@ impl Slots {
         self.last[p] = name.to_string();
         Some(p)
     }
+    /// The slot a new pad takes under the player's pad settings (nxnative pad_slots.h / docs/settings.md):
+    /// `merge` every pad is player 1 (owning nothing); `lowest` (press to join) the lowest free player whatever the
+    /// pad; `first` the first player a pad may take (1 when the keyboard is player 1 on its own).
+    pub fn take_with(&mut self, key: &str, name: &str, merge: bool, lowest: bool, first: usize) -> Option<usize> {
+        if merge {
+            return Some(0);
+        }
+        if let Some(p) = self.of(key).filter(|&p| p >= first) {
+            return Some(p);
+        }
+        let free = |s: &Self, i: usize| s.owner[i].is_none();
+        let p = if lowest {
+            (first..PLAYERS).find(|&i| free(self, i))?
+        } else {
+            (first..PLAYERS)
+                .find(|&i| free(self, i) && !name.is_empty() && self.last[i] == name)
+                .or_else(|| (first < PLAYERS && free(self, first)).then_some(first))
+                .or_else(|| (first..PLAYERS).find(|&i| free(self, i) && self.last[i].is_empty()))
+                .or_else(|| (first..PLAYERS).find(|&i| free(self, i)))?
+        };
+        self.owner[p] = Some(key.to_string());
+        self.last[p] = name.to_string();
+        Some(p)
+    }
     pub fn free(&mut self, key: &str) -> Option<usize> {
         let p = self.of(key)?;
         self.owner[p] = None;
@@ -803,8 +862,15 @@ impl Inputs {
                 }
             }
             if slot.is_none() {
+                // the player's pad settings: pad_merge, pad_press_to_join (a pad is no player until one of its
+                // buttons is pressed), keyboard_player own (the keyboard alone is player 1)
+                let (merge, join) = (nxconfig::flag("pad_merge"), nxconfig::flag("pad_press_to_join") && !nxconfig::flag("pad_merge"));
+                if join && self.devs[i].buttons == 0 {
+                    continue;
+                }
+                let first = if nxconfig::string("keyboard_player").trim() == "own" && !merge { 1 } else { 0 };
                 let (key, name) = (self.devs[i].key.clone(), self.devs[i].name.clone());
-                slot = self.slots.take(&key, &name);
+                slot = self.slots.take_with(&key, &name, merge, join, first);
             }
             if let Some(p) = slot {
                 let d = &mut self.devs[i];
@@ -1097,6 +1163,64 @@ pub fn home_held() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rumble_settings_as_nxnative() {
+        let s = RumbleSettings { on: true, gain: 1.0, min: 0.0 };
+        assert_eq!(s.level(0.5), 0.5);
+        // gain 2: doubled, at most 1; gain 0 silent
+        assert_eq!(RumbleSettings { gain: 2.0, ..s }.level(0.3), 0.6);
+        assert_eq!(RumbleSettings { gain: 2.0, ..s }.level(0.8), 1.0);
+        assert_eq!(RumbleSettings { gain: 0.0, ..s }.level(0.8), 0.0);
+        // cutoff 0.45 (MK8D): the low texture silent, the rest stretched
+        let m = RumbleSettings { min: 0.45, ..s };
+        assert_eq!(m.level(0.4), 0.0);
+        assert!((m.level(0.725) - 0.5).abs() < 1e-6 && m.level(1.0) == 1.0);
+        // off: nothing; frequencies kept
+        let v = RumbleSettings { on: false, ..s }.apply(Vib { amp_low: 0.9, freq_low: 100.0, amp_high: 0.9, freq_high: 300.0 });
+        assert_eq!((v.amp_low, v.amp_high, v.freq_low, v.freq_high), (0.0, 0.0, 100.0, 300.0));
+        assert_eq!(s.level(f32::NAN), 0.0);
+    }
+
+    /// nxnative hle_hid.c h_hid_InitVib: an initialised vibration device gets an idle value sent even when the pad
+    /// already has it (a pad left vibrating stops); an unchanged ordinary value is not sent again.
+    #[test]
+    fn vibration_init_sends_idle() {
+        let p = PLAYERS - 1;
+        RUMBLE.lock().unwrap().dirty[p] = false;
+        vibrate(p, 0, Vib::default());
+        assert!(!RUMBLE.lock().unwrap().dirty[p], "the same value: nothing to send");
+        vibrate_with(p, 0, Vib::default(), true);
+        assert!(RUMBLE.lock().unwrap().dirty[p], "initialised: sent");
+        RUMBLE.lock().unwrap().dirty[p] = false;
+    }
+
+    /// pad_merge, pad_press_to_join (the lowest free player), keyboard_player own (controllers from player 2).
+    #[test]
+    fn slot_rules_of_the_pad_settings() {
+        let mut s = Slots::default();
+        assert_eq!(s.take_with("a", "Pad", true, false, 0), Some(0));
+        assert_eq!(s.take_with("b", "Pad", true, false, 0), Some(0), "merged: everyone is player 1");
+        assert!(s.owner.iter().all(|o| o.is_none()));
+        // keyboard own: the first pad is player 2
+        let mut s = Slots::default();
+        assert_eq!(s.take_with("a", "Pad A", false, false, 1), Some(1));
+        assert_eq!(s.take_with("b", "Pad B", false, false, 1), Some(2));
+        // press to join: the lowest free player, not the one a pad of that name held
+        let mut s = Slots::default();
+        s.take_with("a", "Pad A", false, false, 0);
+        s.take_with("b", "Pad B", false, false, 0);
+        s.free("a");
+        s.free("b");
+        assert_eq!(s.take_with("b2", "Pad B", false, false, 0), Some(1), "by default a reconnecting pad gets its player back");
+        s.free("b2");
+        assert_eq!(s.take_with("b3", "Pad B", false, true, 0), Some(0), "press to join: the lowest free player");
+        // the default rule is nxnative's own
+        let (mut x, mut y) = (Slots::default(), Slots::default());
+        for (k, n) in [("a", "A"), ("b", "B"), ("c", "C")] {
+            assert_eq!(x.take(k, n), y.take_with(k, n, false, false, 0));
+        }
+    }
 
     #[test]
     fn slots_follow_nxnative() {

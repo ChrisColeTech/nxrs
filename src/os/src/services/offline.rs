@@ -299,8 +299,20 @@ ofn!(web_show_offline, |c, a| {
     RES_FAIL
 });
 
+/// PlayReport::Send(const Uid&) -> AsyncContext, returned through x8 (the hidden result pointer): nothing is sent;
+/// the context written is the SDK's default one (a null service object: its completion event is made signalled,
+/// GetResult answers success, the destructor does nothing; nxnative `hle_offline.c` h_prepo_Send, Ocarina of Time).
+unsafe fn prepo_send(c: *mut Cpu) {
+    let ctx = (*c).x[8];
+    if ctx != 0 {
+        crate::guest::w64(ctx, 0);
+    }
+    crate::log_once!("prepo send", "prepo: PlayReport::Send: nothing is sent, the default context completes with success");
+}
+
 pub fn register(r: &mut Registry) {
     for (n, w, f) in [
+        ("_ZN2nn5prepo10PlayReport4SendERKNS_7account3UidE", "telemetry send: nothing is sent", prepo_send as unsafe fn(*mut Cpu)),
         ("_ZN2nn10streamplay29SetSupportedGuestNpadStyleSetENS_4util10BitFlagSetILi32ENS_3hid12NpadStyleTagEEE", "streamplay: kept for the getter", stpl_set_styles as unsafe fn(*mut Cpu)),
         ("_ZN2nn10streamplay29GetSupportedGuestNpadStyleSetEv", "streamplay: what the game set", stpl_styles),
         ("_ZN2nn10streamplay23SetGuestNpadJoyHoldTypeENS_3hid15NpadJoyHoldTypeE", "streamplay: kept for the getter", stpl_set_hold),
@@ -341,6 +353,36 @@ pub fn register(r: &mut Registry) {
 
 #[cfg(test)]
 mod tests {
+    /// The SDK takeovers the audit found missing, as nxnative answers them: ssl GetBuiltInCertificates (its SDK's
+    /// mangling) fails with the output cleared, the two China-region ngc checks find nothing, the album's last share
+    /// URL fails empty, and PlayReport::Send writes the default AsyncContext through x8 (nxnative's naked x8 store;
+    /// a host function sees x8 directly).
+    #[test]
+    fn missing_sdk_takeovers() {
+        let mut r = crate::hle::Registry::default();
+        super::register(&mut r);
+        crate::services::simple::register(&mut r);
+        let names: Vec<&str> = r.names().collect();
+        for n in [
+            "_ZN2nn3ssl14BuiltInManager22GetBuiltInCertificatesEPPNS1_22BuiltInCertificateInfoEPhjPNS0_15CaCertificateIdEj",
+            "_ZN2nn3ngc47CheckProfanityWordsInTextForPlatformRegionChinaEPbPKc",
+            "_ZN2nn3ngc46MaskProfanityWordsInTextForPlatformRegionChinaEPc",
+            "_ZN2nn5album21GetSharePostedLastUrlEPcmRKNS0_7ShareIdE",
+            "_ZN2nn5prepo10PlayReport4SendERKNS_7account3UidE",
+        ] {
+            assert!(names.contains(&n), "{n}");
+        }
+        let row = |n: &str| crate::services::simple::TABLE.iter().find(|s| s.name == n).unwrap();
+        let s = row("_ZN2nn3ngc47CheckProfanityWordsInTextForPlatformRegionChinaEPbPKc");
+        assert_eq!((s.ret, s.outs), (0, &[(0usize, 1u32, 0u64)][..]), "no profanity");
+        assert_eq!(row("_ZN2nn5album21GetSharePostedLastUrlEPcmRKNS0_7ShareIdE").ret, crate::hle::RES_FAIL);
+        let mut c = nxrt::cpu::Cpu::new_boxed();
+        let mut ctx = 0xdead_beefu64;
+        c.x[8] = &mut ctx as *mut u64 as u64;
+        unsafe { super::prepo_send(&mut *c) };
+        assert_eq!((ctx, c.x[0]), (0, 0));
+    }
+
     #[test]
     fn nifm_request_holds_once() {
         use std::sync::atomic::Ordering;

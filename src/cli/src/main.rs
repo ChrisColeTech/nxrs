@@ -510,13 +510,26 @@ fn doctor() -> i32 {
         out::line(&format!("{} {what}", if ok { "ok  " } else { "FAIL" }));
         bad += i32::from(!ok);
     };
+    #[cfg(target_arch = "x86_64")]
     check(std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") && std::arch::is_x86_feature_detected!("bmi2"),
         "CPU: AVX2, FMA, BMI2 (the game code is built for x86-64-v3)".into());
+    #[cfg(target_arch = "aarch64")]
+    check(
+        std::arch::is_aarch64_feature_detected!("fp16")
+            && std::arch::is_aarch64_feature_detected!("rcpc")
+            && std::arch::is_aarch64_feature_detected!("dotprod")
+            && std::arch::is_aarch64_feature_detected!("crc"),
+        "CPU: FP16, RCpc, dot product, CRC32 (the game code is built for ARMv8.2-A)".into(),
+    );
     let gnu = cc::use_gnu();
     out::line(&format!(
         "     toolchain: {} (NXRS_TOOLCHAIN=msvc|gnu decides)",
         if cfg!(target_os = "linux") {
-            "clang + ld.lld for x86_64-unknown-linux-gnu, the engine's libnxfront.a / libnxrt.a"
+            if cfg!(target_arch = "aarch64") {
+                "clang + ld.lld for aarch64-unknown-linux-gnu, the engine's libnxfront.a / libnxrt.a"
+            } else {
+                "clang + ld.lld for x86_64-unknown-linux-gnu, the engine's libnxfront.a / libnxrt.a"
+            }
         } else if gnu {
             "llvm-mingw + the gnullvm engine (no Visual Studio)"
         } else {
@@ -596,7 +609,8 @@ fn doctor() -> i32 {
 /// What a game on Linux loads at run time: the Vulkan loader, the shared libraries the engine links (sound, codecs),
 /// a display, and the optional pieces (SDL2 for controllers, zenity / kdialog for dialogs, ffmpeg for F7).
 fn linux_checks(check: &mut dyn FnMut(bool, String)) {
-    let dirs = ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib", "/lib/x86_64-linux-gnu", "/lib64"];
+    let multiarch = if cfg!(target_arch = "aarch64") { "aarch64-linux-gnu" } else { "x86_64-linux-gnu" };
+    let dirs = [format!("/usr/lib/{multiarch}"), "/usr/lib64".into(), "/usr/lib".into(), format!("/lib/{multiarch}"), "/lib64".into()];
     let has_lib = |prefix: &str| {
         dirs.iter().any(|d| {
             std::fs::read_dir(d).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with(prefix))

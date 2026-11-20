@@ -29,6 +29,30 @@ impl Pacer {
     }
 }
 
+/// The frame step's present tick (os `fstep`, nxnative hle_nvn.c g_fs_start / g_fs_wait): when the first acquire after
+/// a present returned (the frame's start, 0 = none yet) and how long that acquire waited (its pacing: the hold and the
+/// texture's previous present).
+static FS_START: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static FS_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// An acquire that entered at `t_in` returned at `t_out` (ns, `device::now_ns`): the frame's start when it is the
+/// first since the last present.
+pub fn frame_started(t_in: u64, t_out: u64) {
+    use std::sync::atomic::Ordering;
+    if FS_START.compare_exchange(0, t_out.max(1), Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+        FS_WAIT.store(t_out.saturating_sub(t_in), Ordering::Release);
+    }
+}
+
+/// The frame that is being presented: (its start, its pacing wait), ns; the next acquire starts the next frame.
+/// (0, 0) when no acquire came since the last call.
+pub fn frame_start_take() -> (u64, u64) {
+    use std::sync::atomic::Ordering;
+    let s = FS_START.swap(0, Ordering::AcqRel);
+    let w = FS_WAIT.swap(0, Ordering::AcqRel);
+    (s, if s > 0 { w } else { 0 })
+}
+
 /// The display period of one present interval (the Switch's 60 Hz).
 pub const VSYNC_NS: u64 = 16_666_667;
 
@@ -152,11 +176,16 @@ nvn_fns! {
         let i = if n > 0 { let v = o.next % n; o.next = (o.next + 1) % n; v } else { 0 };
         *idx = i;
         let period = crate::vk::present::pace_period(forced_interval().unwrap_or(o.interval));
+        // the thread that acquires carries the game's frame (its scheduling class: vk/rtclass.rs)
+        crate::vk::rtclass::join("acquire thread");
+        crate::vk::rtclass::tick();
+        if period > 0 { crate::vk::rtclass::PERIOD_NS.store(period, std::sync::atomic::Ordering::Relaxed); }
         let mut pacer = Pacer { target: o.pace };
         let wait = pacer.pace(super::device::now_ns(), period);
         o.pace = pacer.target;
         let tk = o.ticket[i as usize & 3];
         let until = o.pace;
+        let t_in = super::device::now_ns();
         super::blocking(|| {
             if wait > 0 { sleep_until(until); }
             // the GPU side only: the vsync pacing above is not the GPU's
@@ -164,6 +193,7 @@ nvn_fns! {
             if tk != 0 { vk::queue::present_wait(tk); }
             vk::perf::add(vk::perf::C::WaitAcquireNs, t0.elapsed().as_nanos() as u64);
         });
+        frame_started(t_in, super::device::now_ns());
         o.ticket[i as usize & 3] = 0;
         if !s.is_null() {
             let so = &mut *(s as *mut sync_t);
@@ -181,6 +211,19 @@ nvn_fns! {
 #[cfg(test)]
 mod tests {
     use super::Pacer;
+    /// The frame step's present tick reads each frame's start and pacing wait once: the first acquire after a
+    /// present starts the frame, later ones before the next present do not move it.
+    #[test]
+    fn frame_start_is_the_first_acquire_after_a_present() {
+        let _ = super::frame_start_take();
+        super::frame_started(1000, 1500);
+        super::frame_started(2000, 2100);
+        assert_eq!(super::frame_start_take(), (1500, 500));
+        assert_eq!(super::frame_start_take(), (0, 0), "taken once");
+        super::frame_started(3000, 3000);
+        assert_eq!(super::frame_start_take(), (3000, 0));
+    }
+
     #[test]
     fn pacer_holds_phase_and_restarts_when_behind() {
         let mut p = Pacer::default();

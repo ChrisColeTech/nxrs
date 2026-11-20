@@ -786,7 +786,10 @@ hidfn!(vib_info, |a| {
 });
 fn vib_send(handle: u32, v: u64) {
     let rd = |o: u64| crate::guest::rd::<f32>(v + o);
-    let val = input::Vib { amp_low: rd(0), freq_low: rd(4), amp_high: rd(8), freq_high: rd(12) };
+    vib_route(handle, input::Vib { amp_low: rd(0), freq_low: rd(4), amp_high: rd(8), freq_high: rd(12) }, false);
+}
+/// A vibration value to the pad a handle names (`force`: sent even when it is the value the pad has).
+fn vib_route(handle: u32, val: input::Vib, force: bool) {
     let id = handle >> 8 & 0xff;
     let side = (handle >> 16 & 1) as usize;
     let (pl, kind) = resolve(id);
@@ -805,8 +808,14 @@ fn vib_send(handle: u32, v: u64) {
         }
         l[2 * p + side] = bits;
     }
-    input::vibrate(p, side, val);
+    input::vibrate_with(p, side, val, force);
 }
+// InitializeVibrationDevice: the channel starts idle, an idle value sent to it (nxnative hle_hid.c h_hid_InitVib:
+// {0, 160 Hz, 0, 320 Hz}), so a pad left vibrating by an earlier run or another program stops
+hidfn!(vib_init, |a| {
+    vib_route(r32(a.x(0)), input::Vib::default(), true);
+    0
+});
 hidfn!(vib_one, |a| {
     vib_send(r32(a.x(0)), a.x(1));
     0
@@ -964,7 +973,7 @@ pub fn register(r: &mut Registry) {
         ("34IsSixAxisSensorDeviceNewlyAssignedERKNS0_19SixAxisSensorHandleE", zero),
         ("39ResetIsSixAxisSensorDeviceNewlyAssignedERKNS0_19SixAxisSensorHandleE", nothing),
         ("25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", vib_handles),
-        ("25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", nothing),
+        ("25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", vib_init),
         ("22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", vib_info),
         ("24IsVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", one),
         ("29IsOunceVibrationDeviceMountedERKNS0_21VibrationDeviceHandleE", zero),

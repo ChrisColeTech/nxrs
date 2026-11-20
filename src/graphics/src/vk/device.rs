@@ -240,7 +240,7 @@ impl Device {
                 return Err(format!("device {name} lacks {}", r.to_string_lossy()));
             }
         }
-        let mut dexts: Vec<*const i8> = required.iter().map(|n| n.as_ptr()).collect();
+        let mut dexts: Vec<*const core::ffi::c_char> = required.iter().map(|n| n.as_ptr()).collect();
         let optional: [&CStr; 19] = [
             ash::ext::robustness2::NAME,
             ash::ext::device_address_binding_report::NAME,
