@@ -438,8 +438,8 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   a page, ~415 a frame). Now only newly held pages are protected, in runs of neighbours (page by page when a run spans
   two allocations). `v9` (that fix, lazy on): no fault in 58 s (the window was then closed from outside, as lanes W /
   X2 saw), but still 20 FPS and 28 ms of write-back a frame with 466 pages held and none brought back: the cost is in
-  the completion path's lazy bookkeeping or the landing beside it, not found yet. **Lazy write-back stays off by
-  default**: clean in Violet now (`v8` 150 s, `v9`), slower than copying back (30 FPS in `v7`).
+  the completion path's lazy bookkeeping or the landing beside it, not found yet. **(Rev 8: on by default, see below.)** Lazy write-back stayed off by
+  default: clean in Violet now (`v8` 150 s, `v9`), slower than copying back (30 FPS in `v7`).
 - **MKW null command buffer (item 6; lane X2's root cause: the render-buffer pool fills).** Graphics now answers NVN2's
   device integers as Turbo does (`DEVINFO2`, 0xAA items, and the constants of the driver compiled into the game's sdk:
   `nvn::device::set_sdk_image`, called by os with the sdk module's image; MKW's sdk gives API 231.39, GPU code 201.20);
@@ -553,7 +553,9 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   write-back landing, texture upload and pool sync "touched" every page of its range, each a lock and a VirtualQuery
   (64 ms a frame of it in `v11`, timers added to the pools line). It now visits only the held pages in the range.
   Violet `v12`: 150 s clean at its 30 FPS cap, write-back 0.5 ms a frame (1.3 ms copied back eagerly, `v7`). Z-A
-  (`NXRS_EXCLUSIVE=1`): `z8` lazy on 53.5-58 FPS, `z9` lazy off {Z9}.
+  (`NXRS_EXCLUSIVE=1`): `z8` lazy on 53.5-58 FPS, `z9` lazy off 47-48.5: the write-backs it no longer copies were most of Z-A's gap
+  (the game waited 15.6 ms a frame against 18.0). MK8D's demo with it on: 60 FPS, nothing held (`m5`).
+- **Not reached this round:** Wonder's first-entry stutter, ray tracing / the rest of 5A.4.
 
 **Shaders (agreed with shaders, lane C):** graphics reads lane C's output as written above: `<data>/shaders/spv/
 <key>.spv` + `.json` (`status` "ok"), the shader key as defined there (`nxgfx::nvn::prog::shader_key` computes it at
@@ -1361,5 +1363,6 @@ which has no music; the music plays once the game starts.
   patch off, where the out-of-memory comes first.
 - Display: MKW 1.8.0 makes its 3840x2160 swap chain at 0.8 s before any display query; `NXOS_DISPLAY_MAX=0..3` (new,
   os `vi.rs`) caps QueryDisplayBufferMaxResolution for tests (MKW never calls it).
+- **The double free, traced (2026-11-20 01:10, `x2-mkw47-ev`, `x2-mkw49-view`, `x2-mkw50-ev`):** `main+0xa13b0` is a per-view render-phase handler: phase 0 allocates the view's render buffer (`main+0xa163c` -> slot+0x98), phase 0xf frees it (`main+0xa14e8`); the event 0xf branch in `main+0xa07b0` (flag tests at main+0xa0c94..0xa0cc4) only picks arguments for a lighting call, it allocates nothing. The phases come from `main+0xb5080` through `main+0xa0040`: phase 0xf is sent every time (main+0xb5928), phase 0 only when `main+0xa26b0` returns 1, i.e. when bit 4 of the view's entry word (table at `[[obj+0x1e38]+0x18]+0x10`, 0x4468-byte entries) is clear. Traced: one phase 0, then 0xc / 0xf from four render contexts (`x21` = 0x1130aa798, 0x11b2fc798, 0x115b1c798, 0x11d2ab798) on the same view (index 0), two 0xf -> the second frees the freed buffer. So on the console that bit is clear every frame for view 0 and here it stays set after the first frame. Next: find the writer of bit 4 (likely a "skip this view" state tied to GPU progress, an NVN query / sync result or the present cadence) and compare its input with Turbo / mkw-recomp. Not the scheduler steals (`NXOS_STEAL_ANY_MS=0` same), not game dynamic resolution (`game_dynamic_resolution=0` same), not the camera service (ours answers 0x7c4 as mkw-recomp's stand-in); `NXOS_CORES=1` dies earlier (main+0x308520 at 5 s).
 
 **Lane X2 (2026-11-20 00:50), other games.** Super Mario Bros. Wonder, exclusive 229 s on the new scheduler (`x2-wonder-sched2`): median 60.0 / p10 59.9, memory flat, no crash; with the `call_guest` change relinked (`x2-wonder-suspend`, 150 s) 59.3-60.0 per minute, no crash. Arceus "lost progress": the game's, not ours (the 21.7 min run wrote nothing to the save or its work tree; at that story step the game has no menu Save, only its autosave points). Violet: in-game Save commits (`fs: commit save0`, `x2-violet5-obj`); still no way out of the house (menu has Options / Save only, Mom not found). Saves backed up in `build\X\saves\` before each run. **Concurrent runs in one lane share its claim file:** an exclusive run of mine waited while my own non-exclusive runs rewrote and removed `GAME_LOCK.X2`, and run_game's give-up path then failed on `os.remove` (FileNotFoundError). Exclusive runs now use their own lane name (`X2W`).

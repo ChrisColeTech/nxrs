@@ -5,7 +5,7 @@
 //! inaccessible (`PAGE_NOACCESS`) and not copied; the first CPU access to it, by the game or the host, faults, the
 //! handler reads the page back from the device (a copy of its own, outside the replay's locks) and lets the access go
 //! on. Such a page then stays eager for a while, longer each time (64 frames, doubled per return, at most 4096).
-//! Off unless `NXGFX_WB_LAZY=1` (until the Pokemon games run clean with it: they faulted at 35-60 s). A page the completion thread must write (an eager write-back landing on it) is
+//! On by default (`NXGFX_WB_LAZY=0` off) since Pokemon Violet runs clean with it (lane G3 `v12`). A page the completion thread must write (an eager write-back landing on it) is
 //! read back first the same way.
 
 use super::Gpu;
@@ -45,7 +45,7 @@ pub static PAGES_IN: AtomicU64 = AtomicU64::new(0);
 /// time spent bringing pages back (the faulting threads' and the completion thread's)
 pub static BACK_NS: AtomicU64 = AtomicU64::new(0);
 
-/// The pools line's part (`NXGFX_WB_LAZY=1` only): pages held on the device, brought back per frame and their time.
+/// The pools line's part (lazy write-back on): pages held on the device, brought back per frame and their time.
 pub fn summary(frames: f64) -> String {
     if !enabled() {
         return String::new();
@@ -71,7 +71,9 @@ pub static SKIP_BYTES: AtomicU64 = AtomicU64::new(0);
 
 pub fn enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
-    *V.get_or_init(|| std::env::var("NXGFX_WB_LAZY").as_deref() == Ok("1"))
+    // on by default since lane G3 rev 8 (Pokemon Violet 150 s clean at its 30 FPS cap, write-back 0.5 ms a frame
+    // against 1.3 ms copied back eagerly); NXGFX_WB_LAZY=0: every write-back lands at completion
+    *V.get_or_init(|| std::env::var("NXGFX_WB_LAZY").as_deref() != Ok("0"))
 }
 
 fn frame() -> u64 {
