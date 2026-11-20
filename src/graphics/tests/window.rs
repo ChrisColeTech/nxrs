@@ -8,7 +8,7 @@ use nxgfx::nvn::cmd::*;
 use nxgfx::nvn::queue::*;
 use nxgfx::nvn::types::*;
 use nxgfx::nvn::window::*;
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use winit::application::ApplicationHandler;
@@ -59,14 +59,11 @@ fn main() {
         el.pump_app_events(Some(Duration::from_millis(10)), &mut app);
     }
     let window = app.window.as_ref().expect("the window opened");
-    let (hwnd, hinst) = match window.window_handle().unwrap().as_raw() {
-        RawWindowHandle::Win32(h) => (h.hwnd.get(), h.hinstance.map(|x| x.get()).unwrap_or(0)),
-        _ => panic!("not a Win32 window"),
-    };
+    let raw = (window.display_handle().unwrap().as_raw(), window.window_handle().unwrap().as_raw());
 
     let mut n = Nvn::new();
     let e0 = validation_errors();
-    nxgfx::set_window(hwnd, hinst);
+    nxgfx::set_window_raw(raw.0, raw.1).expect("a window Vulkan can present to");
     // the game's swap chain: two 640x360 RGBA8 textures (smaller than the 960x540 window: the sharp upscale runs)
     let mut texs: Vec<Box<NVNtexture>> = (0..2).map(|_| n.texture(640, 360, 37, tex_flags::DISPLAY, false)).collect();
     let tp: Vec<*mut NVNtexture> = texs.iter_mut().map(|t| &mut **t as *mut NVNtexture).collect();

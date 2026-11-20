@@ -1286,6 +1286,18 @@ impl Gpu {
     }
 
     fn destroy_released(&self, im: Image) {
+        super::lost::note_gone(|| {
+            format!(
+                "image {:#x} of texture ser{} at {:#x} ({}x{}, {} views, {})",
+                vk::Handle::as_raw(im.image),
+                im.tex.serial,
+                im.tex.mem as u64,
+                im.extent.width,
+                im.extent.height,
+                im.views.len(),
+                if im.alloc.is_some() { "with its memory" } else { "no memory of its own" }
+            )
+        });
         {
             self.q.defer_after_use(
                 Box::new(move |g: &Gpu| unsafe {

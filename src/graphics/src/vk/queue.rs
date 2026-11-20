@@ -622,8 +622,12 @@ fn completion_loop(g: &'static Gpu) {
                 Post::Counter { addr, kind, query } => {
                     let stamp = if query != u32::MAX { ts.get(query as usize).copied() } else { None };
                     let t = super::counters::report_time(stamp, t0, t1);
-                    let counter = if kind == crate::nvn::types::counter::TIMESTAMP || kind == crate::nvn::types::counter::TIMESTAMP_TOP { t } else { 0 };
-                    super::counters::write_record(addr, counter, t);
+                    // a timestamp's counter field is 0 (Turbo; agl's "already cleared" records compare it), other kinds 0 too
+                    let ts = kind == crate::nvn::types::counter::TIMESTAMP || kind == crate::nvn::types::counter::TIMESTAMP_TOP;
+                    super::counters::write_record(addr, 0, t);
+                    if ts {
+                        super::counters::rc_landed(addr);
+                    }
                 }
                 Post::Occl { q } => super::counters::vis_add(occl.get(q as usize).copied().unwrap_or(0)),
                 Post::OcclReset => super::counters::vis_reset(),

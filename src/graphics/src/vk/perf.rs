@@ -66,6 +66,7 @@ pub enum C {
     SbufSize0,
     GmemLearned,
     TfCaptures,
+    SetsReused,
     N,
 }
 
@@ -116,6 +117,7 @@ const NAMES: [&str; C::N as usize] = [
     "sbuf_size0",
     "gmem_pages_learned",
     "tf_captures",
+    "sets_reused",
 ];
 
 static COUNT: [AtomicU64; C::N as usize] = [const { AtomicU64::new(0) }; C::N as usize];
@@ -374,7 +376,7 @@ pub fn frame(frame: u64) {
         );
     }
     crate::vklog!(
-        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets, {:.1} write-backs; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms; {} linked from parts, {} of them optimized since, {} shader parts made ahead); dropped work {}",
+        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets ({:.1} reused), {:.1} write-backs; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms; {} linked from parts, {} of them optimized since, {} shader parts made ahead); dropped work {}",
         d(C::Draws, &p) as f64 / df,
         d(C::DrawsSkipped, &p) as f64 / df,
         cur[C::SkipNoShader as usize],
@@ -386,6 +388,7 @@ pub fn frame(frame: u64) {
         d(C::TexCopies, &p) as f64 / df,
         d(C::BufCopies, &p) as f64 / df,
         d(C::DescSets, &p) as f64 / df,
+        d(C::SetsReused, &p) as f64 / df,
         d(C::Writebacks, &p) as f64 / df,
         cur[C::PipesGfx as usize],
         cur[C::PipesCompute as usize],

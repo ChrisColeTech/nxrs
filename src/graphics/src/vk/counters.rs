@@ -82,6 +82,64 @@ pub fn vis() -> u64 {
     VIS.load(Ordering::Relaxed)
 }
 
+/// Conditional rendering (Turbo `vk_replay.c` render_cond): SetRenderEnableConditional compares the 64-bit counters
+/// at addr and addr + 16. agl wraps its clears in it: the CPU sets the record to 1 when a target needs a clear, each
+/// clear is followed by ReportCounter(TIMESTAMP_TOP) there, and a timestamp's counter field is 0, so a target already
+/// cleared is not cleared again. A timestamp report replayed but not landed yet (it lands when its submission
+/// completes) counts with its known counter 0; an address a samples-passed report writes is known only on the GPU, and
+/// a condition on it keeps drawing. Without this (addr + 8, the timestamp, compared; timestamps' counter the time)
+/// the second clear ran and wiped the lit scene: Mario Kart 8 Deluxe's black world with only its lights' glow.
+static RC: Mutex<Option<Rc>> = Mutex::new(None);
+#[derive(Default)]
+struct Rc {
+    pending: std::collections::HashMap<u64, u32>,
+    occl: std::collections::HashSet<u64>,
+}
+
+/// A report replayed at `addr` (timestamp: counter 0 once it lands; samples passed: unknown at replay).
+pub fn rc_note(addr: u64, timestamp: bool) {
+    let mut g = RC.lock().unwrap();
+    let r = g.get_or_insert_with(Rc::default);
+    if timestamp {
+        *r.pending.entry(addr).or_insert(0) += 1;
+    } else if r.occl.len() < 1 << 20 {
+        r.occl.insert(addr);
+    }
+}
+
+/// A timestamp report at `addr` landed.
+pub fn rc_landed(addr: u64) {
+    let mut g = RC.lock().unwrap();
+    if let Some(r) = g.as_mut() {
+        if let Some(n) = r.pending.get_mut(&addr) {
+            *n -= 1;
+            if *n == 0 {
+                r.pending.remove(&addr);
+            }
+        }
+    }
+}
+
+/// The counter at `addr` as the GPU will see it when it reaches the condition; None: not known before the GPU runs.
+pub fn rc_value(addr: u64) -> Option<u64> {
+    {
+        let g = RC.lock().unwrap();
+        if let Some(r) = g.as_ref() {
+            if r.occl.contains(&addr) {
+                return None;
+            }
+            if r.pending.contains_key(&addr) {
+                return Some(0);
+            }
+        }
+    }
+    if addr == 0 {
+        return None;
+    }
+    // SAFETY: the game's report memory (identity mapped guest memory, as the replay read it before)
+    Some(unsafe { core::ptr::read_unaligned(addr as *const u64) })
+}
+
 /// Writes NVN's counter record {counter, time} at `addr`.
 pub fn write_record(addr: u64, counter: u64, t: u64) {
     // SAFETY: the game's report memory (16 bytes, possibly unaligned)

@@ -831,23 +831,51 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   descriptors name their pool buffer's device address**; when that pool was finalized (or a new one took its address)
   they kept the freed address. `mem::pool_add` / `pool_del` now queue the buffer textures over the range again
   (`Tables::requeue_buf_texs`), written at the next submission from the new pool, or over a 64 KB zero buffer when
-  none holds them (`image.rs texel_dummy`). Not yet shown to be Smash's cause: `chain7` reruns the match with
-  `NXGFX_CHECKPOINTS=all` -> `build/G4/c7_smash.out`.
+  none holds them (`image.rs texel_dummy`). **Not Smash's cause:** with it and `NXGFX_CHECKPOINTS=all` the device
+  was lost twice more at the same draw (`-G4-smash-fault` 131.7 s, invalid write at 0x300000000; `-G4-smash-fault2`
+  203.9 s, at 0x400002000): **an indexed draw of 3 indices (a full-screen triangle), vertex shader `2df54d1acbb46153`,
+  pixel shader `f9252217720fbfc5`** (one texture, three uniform banks, one colour output, no stores: the write is the
+  colour target's). The images freed in the 15 s before (`lost.rs note_gone`, listed on loss) are ordinary released
+  textures. The loss report now also names the pass's targets (texture serial and address, view, image, size, alias /
+  sparse): `chain12` -> `c12_smash.out`.
 - **DKB, cold pools measured** (`-G4-dkb-cold`, exclusive): pool sync 10-12 ms a frame (was 32.5), play at 15-25 FPS
   (was 5-12), no device loss in 170 s. What is left is descriptor sets: **27 ms a frame for 15,400 sets** (7,060 draws,
-  4,280 write-backs, 9 submissions); `chain9` profiles it (`NXGFX_PROFILE=1` -> `c9_dkb.out`).
-- **Wonder's first-run level-entry frame:** the cause was the shader-part budget: `vk shader parts` stopped at 22 s
-  ("private memory grew 2048 MB") with 3,955 of 14,603 programs made, because the budget counted the game's own
-  loading too. Now each job's own growth is counted (shared among jobs running beside it) against
-  `NXGFX_PREWARM_BUDGET_MB` or a twelfth of the machine's memory within 2-6 GB, and the part threads are a quarter of
-  the CPU's threads (2-4, below normal priority). `chain8` reruns the first run (keys and cache set aside) ->
-  `c8_wonder.out`.
+  4,280 write-backs, 9 submissions).
+- **DKB descriptor sets: a set cache** (`exec.rs set_key`, `QState.sets`; `NXGFX_SET_CACHE=0` off): a stage's set is
+  reused (its descriptor-buffer offset bound again, nothing built or written) when the module, the stage's bank
+  generations (c0 storage buffers, c2 handles), its uniform bindings, the push-constant generation, the pass size,
+  the pool bases, the dispatch size / base instance, the submission and the descriptor-buffer chunk are the same as
+  for the stage's last set. Not cached: bindless handles (from a uniform or storage buffer), buffer textures, the
+  resolution scale, pass dumps. `-G4-dkb-prof` (`NXGFX_PROFILE=1`): **7,820 of 13,070 sets a frame reused, sets 27 ->
+  15 ms** (memory lookups 7.5, descriptor writes 4.2, banks 2.1); the replay 40.7 ms a frame against a 16.8 ms GPU,
+  15-23 FPS (the fine timers cost some). Left on the replay: pool sync 11-13 ms, sets 15, vertex input 5. GPU tests
+  all pass with it. Counter `sets_reused` (the per-frame line says "(N reused)").
+- **Wonder's first-run level-entry frame: not fixed.** `vk shader parts` stopped at 22 s ("private memory grew 2048
+  MB") with 3,955 of 14,603 programs made, the budget counting the game's own loading too. Tried: each job's own growth
+  counted, the budget a twelfth of RAM (6 GB here) and 4 part threads (`-G4-wonder-first2`): 19,441 parts by 102 s,
+  but the level entry still took 2.3 s (965 ms of pipeline lookups) and the run had many multi-second frames (up to
+  11.9 s, most with the replay idle): worse. Kept: the per-job growth count with the 2 GB default and 2 threads.
+  Making ahead everything a profile names does not cover a first level; what is left is whole pipelines (the parts
+  alone still left 965 ms of lookups) or a second run (keys known).
 - **Ray tracing, NVN2 argument layouts: not obtainable from the owner's games.** In MKW's and DKB's `main` the
   ray-tracing names (`nvnCommandBufferDispatchRays` …) appear only in the game's proc loader (name -> GetProcAddress
   -> a global pointer: MKW `main+0xdd4f84`, pointer via GOT `0x36e0208`; DKB `main+0x5de2ec`, GOT `0x245a680`); no code
   in either game loads that pointer again (no call site), and the implementation is the system's NVN driver, not in
   `main` or `sdk` (sdk exports only `nvnBootstrapLoader`, no `nvnCommandBuffer*`). So there is no caller to read the
   arguments from and no callee to disassemble; a game that traces rays is needed.
+- **MK8D lap with both async fixes (`-G4-mk8d-asyncfix`, 59.7 FPS, exit 0):** the command-buffer sync fix is exercised
+  (MK8D fences syncs inside its command buffers), but the stretch past the grandstand still comes out **black with only
+  the lights' glow** (`0016`, `0019`; `0024` later in the lap is right). So that was not the race.
+- **Conditional rendering ported from Turbo (`counters.rs rc_*`, exec `RENDER_COND`, clears): very likely the black
+  world.** SetRenderEnableConditional compares the counters at addr and **addr + 16** (we compared addr + 8, the first
+  report's timestamp); a timestamp report's counter field is **0** (we wrote the time); a timestamp report replayed but
+  not landed yet counts as 0 (it lands at completion: how late depends on the async lag, which is why only async
+  showed it); an address a samples-passed report writes is unknown at replay and keeps drawing; and **colour / depth
+  clears obey the condition** (they ignored it). agl wraps its clears this way (clear once, then a TIMESTAMP_TOP report
+  on the record); Turbo's note on the same bug: "the second clear ran and wiped the lit scene ... came out black".
+  GPU test `conditional_clear_runs_once_after_a_timestamp_report`. MK8D lap queued (`chain11` -> `c11_mk8d.out`).
+- **Pipelines replaced by their optimized build are destroyed** (`pipe.rs retire`, once the work recorded with them
+  has run; `NXGFX_RETIRE_KEEP=1` keeps them): they were kept for the session (part of MKW's growth in play).
 - **MK8D kart blob:** pass 31's pixel shader `044c744ceb0df7c2` reads the screen-space shadow mask (`fp_t_tcb_26`,
   sampled at the projected position) as `.x` only. With its texture and view swizzles both (G, B, A, R), `.x` is B
   composed (Turbo's rule) or G with the view replacing; neither is R, where passes 29 / 30 put the karts' blobs. The

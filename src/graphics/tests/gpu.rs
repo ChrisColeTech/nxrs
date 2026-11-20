@@ -1144,3 +1144,41 @@ fn reused_command_buffer_sync_covers_the_new_submission() {
     }
     assert_eq!(validation_errors(), e0, "validation errors");
 }
+
+/// agl's "clear once" (Turbo's render_cond): a clear wrapped in SetRenderEnableConditional(equal) on a record the CPU
+/// set to 1 and a reference of 1 at +16, followed by ReportCounter(TIMESTAMP_TOP) on that record: the second wrapped
+/// clear of the same target is skipped, since the timestamp's counter field (0) no longer equals the reference, even
+/// though the report has not landed yet when the replay reaches the second condition.
+#[test]
+fn conditional_clear_runs_once_after_a_timestamp_report() {
+    use nxgfx::nvn::cmd2::*;
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let rt = n.texture(W, H, f::RGBA8, 0, false);
+    let (roff, rec) = n.data.alloc(32, 32);
+    {
+        let m = n.data.mem.slice();
+        m[roff..roff + 32].fill(0);
+        m[roff..roff + 8].copy_from_slice(&1u64.to_le_bytes());
+        m[roff + 16..roff + 24].copy_from_slice(&1u64.to_le_bytes());
+    }
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    clear(&mut n, [0.0, 0.0, 0.0, 1.0]);
+    unsafe {
+        nvnCommandBufferSetRenderEnableConditional(n.c(), 0, rec);
+        nvnCommandBufferClearColor(n.c(), 0, [1.0f32, 0.0, 0.0, 1.0].as_ptr(), 0xf);
+        nvnCommandBufferSetRenderEnable(n.c(), 1);
+        nvnCommandBufferReportCounter(n.c(), 16, rec);
+        nvnCommandBufferSetRenderEnableConditional(n.c(), 0, rec);
+        nvnCommandBufferClearColor(n.c(), 0, [0.0f32, 0.0, 1.0, 1.0].as_ptr(), 0xf);
+        nvnCommandBufferSetRenderEnable(n.c(), 1);
+    }
+    n.submit_wait();
+    let got = n.read_rgba8(&rt, W, H);
+    let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|_| Some([255, 0, 0, 255])).collect();
+    check("conditional clear once", &got, &want, 0);
+    assert_eq!(&n.data.mem.slice()[roff..roff + 8], &0u64.to_le_bytes(), "the timestamp's counter field");
+    assert_eq!(validation_errors(), e0, "validation errors");
+}

@@ -105,6 +105,17 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
         if cd.is_empty() {
             crate::log::red("  no checkpoint was reached");
         }
+        // the pass the last started work draws into (NXGFX_CHECKPOINTS=all marks each pass's targets)
+        let top = hi.max(lo);
+        if top != 0 {
+            let r = RING.lock().unwrap();
+            for s in (top.saturating_sub(N as u64 - 1)..=top).rev() {
+                if let Some(c) = r.get(s as usize % N).filter(|c| c.seq == s && c.what.starts_with("a pass")) {
+                    crate::log::red(&format!("  in the pass #{s} {}", c.what));
+                    break;
+                }
+            }
+        }
         if lo != 0 {
             for s in lo + 1..=hi.min(lo + 64) {
                 crate::log::red(&format!("  in flight: {}", text(s)));
@@ -112,6 +123,15 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
         }
     } else {
         crate::log::red("  (no checkpoints: VK_NV_device_diagnostic_checkpoints is not offered, or NXGFX_CHECKPOINTS=0)");
+    }
+    {
+        let r = GONE.lock().unwrap();
+        if !r.is_empty() {
+            crate::log::red(&format!("  the last {} images and buffers handed to be destroyed (newest last):", r.len()));
+            for (t, w) in r.iter() {
+                crate::log::red(&format!("    {t:.2} s: {w}"));
+            }
+        }
     }
     if g.d.caps.device_fault {
         let f = g.d.fault.fp().get_device_fault_info_ext;
@@ -148,4 +168,19 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
     crate::log::red("the device is lost: the game cannot go on; exiting (exit code 71)");
     std::thread::sleep(std::time::Duration::from_millis(200));
     std::process::exit(71)
+}
+
+/// The last resources handed to be destroyed (an "invalid write" fault names freed memory: is it one of these?).
+static GONE: std::sync::Mutex<std::collections::VecDeque<(f64, String)>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+
+/// Notes a resource handed to be destroyed once the GPU is past it (kept: the last 48).
+pub fn note_gone(what: impl FnOnce() -> String) {
+    if level() == 0 {
+        return;
+    }
+    let mut r = GONE.lock().unwrap();
+    if r.len() >= 48 {
+        r.pop_front();
+    }
+    r.push_back((crate::log::elapsed(), what()));
 }

@@ -632,9 +632,8 @@ pub fn prebuild(g: &'static Gpu, keys: Vec<ShaderKey>) {
     if tx.is_none() {
         let (s, r) = std::sync::mpsc::channel::<Vec<ShaderKey>>();
         let r = Arc::new(Mutex::new(r));
-        // a quarter of the CPU's threads, 2 to 4 (below normal priority)
-        let n = std::thread::available_parallelism().map(|n| n.get() / 4).unwrap_or(2).clamp(2, 4);
-        for i in 0..n {
+        // two (four on the 16-core test machine made Super Mario Bros. Wonder's first run worse: multi-second frames)
+        for i in 0..2 {
             let r = r.clone();
             let _ = std::thread::Builder::new().name(format!("vk shader parts {i}")).spawn(move || {
                 low_priority();
@@ -707,14 +706,23 @@ impl Drop for Grew {
     }
 }
 
-/// The shader parts' memory budget: NXGFX_PREWARM_BUDGET_MB, else a twelfth of the machine's memory within 2-6 GB (the
-/// 2 GB that was the default stopped Super Mario Bros. Wonder's first run at a quarter of its programs, and the first
-/// level then compiled 61 pipelines in one 2.5 s frame).
+/// The shader parts' memory budget: NXGFX_PREWARM_BUDGET_MB, default 2 GB of the parts' own growth. (6 GB with 4
+/// threads, `-G4-wonder-first2`: 19,441 parts by 102 s, still a 2.3 s frame at the level entry and many multi-second
+/// frames: worse than 2 GB of growth counted with the game's loading, `-G4-wonder-first`.)
 fn parts_budget() -> u64 {
-    if let Some(mb) = std::env::var("NXGFX_PREWARM_BUDGET_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
-        return mb << 20;
+    std::env::var("NXGFX_PREWARM_BUDGET_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2048) << 20
+}
+
+/// A pipeline replaced (its optimized build took its place, or another thread made the same one first): destroyed once
+/// the work recorded with it has run. They were kept to the end of the session: the driver's memory for each linked
+/// pipeline stayed (Mario Kart World's private memory grew with every pipeline made in play).
+fn retire(g: &Gpu, p: vk::Pipeline) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("NXGFX_RETIRE_KEEP").as_deref() != Ok("1")) {
+        g.pipes.retired.lock().unwrap().push(p);
+        return;
     }
-    (super::total_phys() / 12).clamp(2 << 30, 6 << 30)
+    g.q.defer_after_use(Box::new(move |g: &Gpu| unsafe { g.dev().destroy_pipeline(p, None) }));
 }
 
 /// The background builders of the whole pipelines that replace linked ones (below normal priority).
@@ -740,7 +748,7 @@ fn queue_optimize(g: &'static Gpu, at: GfxKey, k: GfxKey, mods: Vec<Arc<Module>>
                     if let Ok(p) = build_gfx(g, &k, &mods) {
                         let old = g.pipes.map.lock().unwrap().insert(Key::Gfx(at), p);
                         if let Some(o) = old {
-                            g.pipes.retired.lock().unwrap().push(o);
+                            retire(g, o);
                         }
                         g.pipes.optimized.fetch_add(1, Ordering::Relaxed);
                     }
@@ -869,7 +877,7 @@ impl Gpu {
                     // made meanwhile by another thread (the prewarm): that one stays
                     if let Some(&there) = m.get(&key) {
                         drop(m);
-                        self.pipes.retired.lock().unwrap().push(p);
+                        retire(self, p);
                         return Some(there);
                     }
                     m.insert(key, p);

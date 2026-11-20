@@ -144,6 +144,9 @@ struct SetKey {
     base_instance: u32,
     serial: u64,
     chunk: usize,
+    /// a task / mesh shader's draw records (`Res::MeshDraw`): each mesh draw stages its own {count, first}, so a set
+    /// reused from an earlier draw read that draw's `first` (lane K2)
+    mesh: (u64, u64, u64),
 }
 
 /// The key of stage set `m` for this draw, or None when the set reads something the key does not cover: texture
@@ -176,6 +179,10 @@ fn set_key(sub: &Sub, qs: &QState, m: &Module, dispatch: [u32; 3], base_instance
         base_instance: bi,
         serial: sub.serial,
         chunk: sub.db_cur,
+        mesh: match qs.mesh_rec {
+            Some((b, o, r)) if m.res.iter().any(|(_, r)| matches!(r, Res::MeshDraw)) => (vk::Handle::as_raw(b), o, r),
+            _ => (0, 0, 0),
+        },
     })
 }
 
@@ -769,7 +776,7 @@ fn clamped_draw_record(g: &Gpu, sub: &mut Sub, qs: &mut QState, ind: u64, rec: u
 }
 
 fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mesh) {
-    checkpoint(g, sub, qs, false, || "a mesh draw".to_string());
+    checkpoint(g, sub, qs, false, || format!("a mesh draw ({}, {} {}x{}x{}, first {}, n {}, stride {})", if m.ind != 0 { "indirect" } else { "direct" }, if m.three_d != 0 { "3D" } else { "1D" }, m.x, m.y, m.z, m.first, m.n, m.stride));
     // a mesh pipeline has no vertex input: the next draw sets it again
     qs.vin_last.borrow_mut().0 = 0;
     if !g.d.caps.mesh {
@@ -785,7 +792,14 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
     let mode = REF.get_or_init(|| std::env::var("NXGFX_MESH_REF").is_ok_and(|v| v == "1" || v == "skip"));
     static FIRST0: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let first0 = *FIRST0.get_or_init(|| std::env::var("NXGFX_MESH_REF").is_ok_and(|v| v == "1" || v == "first0"));
-    if *mode && (indirect || m.three_d != 0) {
+    // skipind / skip3d (diagnosis): only the indirect, or only the 3D, mesh draws skipped
+    static PART: std::sync::OnceLock<(bool, bool)> = std::sync::OnceLock::new();
+    let (skip_ind, skip_3d) = *PART.get_or_init(|| match std::env::var("NXGFX_MESH_REF").as_deref() {
+        Ok("skipind") => (true, false),
+        Ok("skip3d") => (false, true),
+        _ => (false, false),
+    });
+    if (*mode && (indirect || m.three_d != 0)) || (skip_ind && indirect) || (skip_3d && m.three_d != 0) {
         crate::log::red_once("NXGFX_MESH_REF: indirect / 3D mesh draws skipped (mkw-recomp's rule)");
         super::perf::inc(super::perf::C::DrawsSkipped);
         return;
@@ -793,6 +807,7 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
     let m = if first0 { crate::nvn::cmd2::p_mesh { first: 0, ..m } } else { m };
     // indirect: build {x, y, z} records first (a copy is not allowed inside a pass)
     let mut args: Option<(vk::Buffer, u64, u32)> = None;
+    let mut rec_copy: Option<(vk::Buffer, u64, u64)> = None;
     if indirect {
         let n = m.n.max(1) as u32;
         let src_stride = if m.stride > 0 { m.stride as u64 } else if m.three_d != 0 { 12 } else { 8 };
@@ -810,6 +825,11 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
             .map(|i| vk::BufferCopy { src_offset: so + i * src_stride, dst_offset: ao + i * 12, size: if m.three_d != 0 { 12 } else { 4 } })
             .collect();
         unsafe { dev.cmd_copy_buffer(sub.main, sb, ab, &regions) };
+        // the records the task shader reads `first` from: a copy of their own, taken here with the counts (an aligned
+        // binding, and the values the draw's counts came from)
+        let (rb, ro) = sub.stage_bytes_fresh(g, &vec![0u8; span as usize]);
+        unsafe { dev.cmd_copy_buffer(sub.main, sb, rb, &[vk::BufferCopy { src_offset: so, dst_offset: ro, size: span }]) };
+        rec_copy = Some((rb, ro, span));
         barrier(g, sub);
         // the game's counts held to the device's limits (GPU resets in Mario Kart World's mesh draws)
         let l = mesh_limits(g);
@@ -820,8 +840,7 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
     // constant byte 12): the game's records for an indirect draw, a staged {count, first} for a direct one, zero for 3D
     if indirect {
         let src_stride = if m.stride > 0 { m.stride as u64 } else if m.three_d != 0 { 12 } else { 8 };
-        let span = src_stride * (m.n.max(1) as u64 - 1) + if m.three_d != 0 { 12 } else { 8 };
-        qs.mesh_rec = super::mem::resolve(g, sub, m.ind, span).map(|(b, o, _)| (b, o, span));
+        qs.mesh_rec = rec_copy;
         qs.mesh_stride = if m.three_d != 0 { 0 } else { (src_stride / 4) as u32 };
         if m.three_d != 0 {
             let (b, o) = sub.stage_bytes(g, &[0u8; 16]);
@@ -1253,6 +1272,35 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
             ri = ri.stencil_attachment(&da_arr[0]);
         }
     }
+    // NXGFX_CHECKPOINTS=all: the pass's targets (texture serial, address, view)
+    super::lost::checkpoint(g, sub.main, true, || {
+        let mut d: Vec<String> = Vec::new();
+        let imgs = g.images.lock().unwrap();
+        let img = |t: &tex_t| match imgs.by_serial.get(&t.serial) {
+            Some(im) => format!(
+                "image {:#x} {}x{}x{} levels {} {:?}{}{}",
+                vk::Handle::as_raw(im.image),
+                im.extent.width,
+                im.extent.height,
+                im.layers,
+                im.levels,
+                im.format,
+                if im.alias_of.is_some() { " alias" } else { "" },
+                if im.sparse.is_some() { " sparse" } else { "" }
+            ),
+            None => "no image".to_string(),
+        };
+        for i in 0..qs.rt_n {
+            if let Some(t) = qs.rt[i].tex {
+                d.push(format!("c{i} ser{} at {:#x} view {:#x} {}", t.serial, t.mem as u64, vk::Handle::as_raw(colors[i].image_view), img(&t)));
+            }
+        }
+        if let (Some(t), Some((v, _))) = (qs.rt_depth.tex, depth) {
+            d.push(format!("depth ser{} at {:#x} view {:#x} {}", t.serial, t.mem as u64, vk::Handle::as_raw(v), img(&t)));
+        }
+        drop(imgs);
+        format!("a pass {}x{} into [{}]", extent.width, extent.height, d.join(", "))
+    });
     unsafe { g.dev().cmd_begin_rendering(sub.main, &ri) };
     super::perf::inc(super::perf::C::Passes);
     super::perf::render_size(extent.width, extent.height, depth.is_some());
@@ -2890,6 +2938,10 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             }
         }
         op::CLEAR_COLOR => {
+            // conditional rendering covers clears too (agl's clear-once records; Turbo render_skip)
+            if !qs.render_on {
+                return true;
+            }
             super::perf::inc(super::perf::C::Clears);
             let c: p_clear_color = rd_payload(rec);
             let i = c.index.clamp(0, 7) as usize;
@@ -2912,6 +2964,9 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             }
         }
         op::CLEAR_DS => {
+            if !qs.render_on {
+                return true;
+            }
             super::perf::inc(super::perf::C::Clears);
             let c: p_clear_ds = rd_payload(rec);
             let Some(t) = qs.rt_depth.tex else { return true };
@@ -3287,6 +3342,7 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
         op::REPORT_COUNTER => {
             let (kind, addr): (u64, u64) = unsafe { (rd_at(rec, 0), rd_at(rec, 8)) };
             let kind = kind as u32;
+            super::counters::rc_note(addr, kind == counter::TIMESTAMP || kind == counter::TIMESTAMP_TOP);
             if kind == counter::SAMPLES_PASSED {
                 end_query(g, sub, qs);
                 sub.post.push(Post::OcclReport { addr });
@@ -3342,9 +3398,17 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
                 2 => true,
                 3 => false,
                 m if r.addr != 0 => {
-                    // the two 64-bit values the condition compares, as the queue reaches it (reports land at completion)
-                    let v: [u64; 2] = unsafe { core::ptr::read_unaligned(r.addr as *const [u64; 2]) };
-                    if m == 0 { v[0] == v[1] } else { v[0] != v[1] }
+                    // the counters at addr and addr + 16 as the GPU will find them (counters.rs rc_value); not known: drawn
+                    match (super::counters::rc_value(r.addr), super::counters::rc_value(r.addr + 16)) {
+                        (Some(x), Some(y)) => {
+                            if m == 0 {
+                                x == y
+                            } else {
+                                x != y
+                            }
+                        }
+                        _ => true,
+                    }
                 }
                 _ => true,
             };

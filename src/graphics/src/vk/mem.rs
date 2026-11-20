@@ -166,7 +166,20 @@ mod watch {
         BUF.with(|b| {
             let mut b = b.borrow_mut();
             let mut out = Vec::new();
+            // a full buffer asks again from the page after the last one it returned (pages come in address order):
+            // asking from `lo` again walked the whole range once per 4,096 written pages, so a scene that wrote
+            // gigabytes of a pool held the replay for 28-34 s (Mario Kart World, lane K2)
+            let (lo0, t0, mut calls) = (lo, std::time::Instant::now(), 0u32);
+            let slow = |out: &Vec<u64>, calls: u32| {
+                static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let ms = t0.elapsed().as_secs_f64() * 1e3;
+                if ms > 100.0 && N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+                    crate::vklog!("write watch: {:#x}+{} MB took {ms:.0} ms ({} written pages, {calls} calls)", lo0, (hi - lo0) >> 20, out.len());
+                }
+            };
+            let mut lo = lo;
             loop {
+                calls += 1;
                 let mut count = CAP;
                 let mut gran = 0u32;
                 let r = unsafe {
@@ -177,6 +190,12 @@ mod watch {
                 }
                 out.extend(b[..count].iter().map(|&p| p as u64));
                 if count < CAP || !reset {
+                    slow(&out, calls);
+                    return Some(out);
+                }
+                lo = b[count - 1] as u64 + gran.max(4096) as u64;
+                if lo >= hi {
+                    slow(&out, calls);
                     return Some(out);
                 }
             }
@@ -377,6 +396,7 @@ fn release(g: &Gpu, p: Pool) {
         }
     }
     if let Some(b) = p.buf {
+        super::lost::note_gone(|| format!("pool buffer {:#x} of pool {:#x} (+{:#x}), device address {:#x}", vk::Handle::as_raw(b.buf), p.base, p.size, p.da));
         g.q.defer_after_use(Box::new(move |g: &Gpu| g.free_buffer(b)));
     }
 }

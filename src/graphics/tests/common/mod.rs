@@ -29,6 +29,15 @@ pub struct GuestMem {
 }
 unsafe impl Send for GuestMem {}
 impl GuestMem {
+    #[cfg(target_os = "linux")]
+    pub fn new(size: usize) -> GuestMem {
+        // the runtime's reservation under its userfaultfd write watch, committed
+        let size = (size + 0xffff) & !0xffff;
+        let a = nxrt::mem::reserve_anywhere(size as u64, true).expect("reserve");
+        assert!(nxrt::mem::commit(a, size as u64), "commit");
+        GuestMem { ptr: a as *mut u8, size }
+    }
+    #[cfg(windows)]
     pub fn new(size: usize) -> GuestMem {
         use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
         const MEM_WRITE_WATCH: u32 = 0x200000;
@@ -46,8 +55,13 @@ impl GuestMem {
 }
 impl Drop for GuestMem {
     fn drop(&mut self) {
-        use windows_sys::Win32::System::Memory::{VirtualFree, MEM_RELEASE};
-        unsafe { VirtualFree(self.ptr as *mut _, 0, MEM_RELEASE) };
+        #[cfg(target_os = "linux")]
+        nxrt::mem::release(self.ptr as u64);
+        #[cfg(windows)]
+        {
+            use windows_sys::Win32::System::Memory::{VirtualFree, MEM_RELEASE};
+            unsafe { VirtualFree(self.ptr as *mut _, 0, MEM_RELEASE) };
+        }
     }
 }
 
