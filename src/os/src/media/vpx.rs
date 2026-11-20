@@ -208,7 +208,11 @@ pub fn vp8_key_frame_size(p: &[u8]) -> Option<(u32, u32)> {
 mod tests {
     #[test]
     fn opens() {
+        // Windows links the bundled libvpx 1.14; Linux uses the system's (1.14 or newer)
+        #[cfg(windows)]
         assert!(super::version().starts_with("v1.14"), "{}", super::version());
+        #[cfg(not(windows))]
+        assert!(super::version().starts_with("v1."), "{}", super::version());
         let mut d = super::Vpx::vp9(64, 64).unwrap();
         assert!(d.decode(&[0u8; 4], 0).is_err(), "garbage is refused, not a black picture");
     }
