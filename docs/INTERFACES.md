@@ -2193,9 +2193,44 @@ VK_EXT_device_address_binding_report now names the faulting address's object (`N
 `NXGFX_CHECKPOINTS=all`), which may help the mesh-draw faults too. Pool sync: G4 is on it (`NXGFX_PROFILE=1` logs the
 write-watch calls and their time every 600 submissions).
 
-**Left (lane K2):** the direct mesh-draw fault (task fea1d6ca04512de1); then all mesh draws on (`NXGFX_MESH_REF`
-unset); a race of 10 minutes; FPS (pool sync); the untested hooks (seed, output size, frame rate, resolution
-overlay); the picture against mkw-recomp; memory (G4).
+**Lane K2, round 2 (07:25-08:10): the device losses.**
+- **Destroyed textures are not it.** `NXGFX_DESTROY_DELAY=<presents>` (graphics `vk/image.rs`, diagnosis) holds a
+  released image's and its views' destruction that many presents past its last use. `K2-mkw8-delay-cold` (64
+  presents): the same direct mesh draw faulted at 14.4 s (#2270, shaders [1:3cc3501255bb2d74 3:fea1d6ca04512de1
+  4:ddc034e8e009ebfc], invalid read 0x37b756000). That draw's three shaders sample no texture at all (task: storage
+  buffers c0 table s0 / s1, banks c0 / c3 / c4, the draw records; mesh: c3 + support; pixel: c3 + support). mkw-recomp
+  #468 is the opposite case (released copies kept too long: a leak); nxrs drops parked images after 8 frames.
+- **The translated mesh shaders read primitive indices from shared memory that is never cleared.** Ryujinx's mesh
+  shaders (via dmsh_xlate) declare 32 vertices / 16 primitives, set the primitive count from shared word 580 and take
+  each primitive's three indices from shared memory, 8 bits each (0..255); the task shader emits `min(shared[357],
+  65535)` mesh groups. Vulkan shared memory starts undefined; mkw-recomp's translator zeroes its index array before a
+  mesh shader runs (head.py `mib[k] = 0`) and bounds every payload / index store. Two passes (graphics
+  `vk/spvfix.rs`, called in `vk/shader.rs`; 19 mesh + 7 task modules of MKW rewritten, all pass spirv-val vulkan1.3,
+  unit-tested): `mesh_indices` ANDs every stored primitive index with OutputVertices - 1 (`NXGFX_MESH_INDEX_FIX=0`
+  off); `zero_workgroup` gives task / mesh shaders' Workgroup variables a null initializer, with the device's
+  shaderZeroInitializeWorkgroupMemory now enabled (`vk/device.rs`; `NXGFX_ZERO_SHARED=0` off). `K2-mkw9-meshfix`
+  (skip mode, `NXGFX_CHECKPOINTS=all NXGFX_ADDR_REPORT=1`, destruction delayed): no mesh-draw fault in 55 s
+  (24,577 mesh draws; the two runs before it faulted in mesh draws at 14.4 / 14.6 s). Then a device loss **outside
+  the mesh path**: "in the pass #632904 a pass 128x128 into [c0 ser28824 at 0x26b7b3000 ... 128x128x5
+  R16G16B16A16_SFLOAT]", invalid read at 0xe93d56000, "in no memory bound or unbound since the start" (G4's address
+  report; its unbound ring keeps 8,192, so an old unbind may have left it). Every MKW fault address so far
+  (0x37b756000, 0x6cad56000, 0xca19c6000, 0xcbf689000, 0xce3266000, 0xe0145e000, 0xe93d56000) is a page in the range of
+  the game's own GPU addresses (its pools sit at 0x1_xxxx_xxxx-0x2_xxxx_xxxx and up): worth checking whether a guest
+  GPU address reaches the device as a device address somewhere (only c9a56f796ea4a4cd / ce770ef0597876ca use the raw
+  global-memory table, and none of the faulting programs). One fault in 55 s is not proof the mesh faults are gone.
+- **Menu text (offline):** two candidates fixed or instrumented, neither proven yet: (1) a buffer -> texture copy whose
+  source lies in a cold pool now takes the CPU's writes to that range first (`mem::sync_range`, called from exec's
+  COPY_B2T; `NXGFX_COPY_SYNC=0` off; the first 4 logged); (2) a page the CPU wrote since its pool was last asked is no
+  longer held on the device by the lazy write-back (`apply_writebacks`, a write-watch peek; `NXGFX_LAZY_CPU_CHECK=0`
+  off): bringing such a page back put the buffer's copy over the CPU's bytes. Diagnosis line: `CPU write kept out of
+  GPU-written texture` (a CPU write under half of a texture the GPU wrote is not uploaded: the rule in `image.rs`); not
+  seen in `K2-mkw9` before its fault at 55 s.
+- Runs `K2-mkw7` (07:22), `K2-mkw8` (07:32), `K2-mkw9` (08:03) each reset the display driver; next MKW run waits for
+  G4's Smash address-report run.
+
+**Left (lane K2):** the 128x128x5 pass fault (and whether direct mesh draws are clean); then all mesh draws on
+(`NXGFX_MESH_REF` unset); menu text; a race of 10 minutes; FPS (pool sync, G4); the untested hooks (seed, output
+size, frame rate, resolution overlay); the picture against mkw-recomp.
 
 ## Linux (lane L, M10, 2026-11-20)
 

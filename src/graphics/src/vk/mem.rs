@@ -896,7 +896,18 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8)]) 
         let Some(p) = m.by_base.get_mut(&pool) else { continue };
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let tl = std::time::Instant::now();
-        let lazy = if p.watched { super::lazy::take_lazy(a, n) } else { vec![] };
+        let mut lazy = if p.watched { super::lazy::take_lazy(a, n) } else { vec![] };
+        // a page the CPU wrote since its pool was last asked (a cold pool is asked once a frame) is not held on the
+        // device: its buffer copy lacks those bytes, and bringing it back would put the buffer's page over them (lane
+        // K2: the bytes of a page the GPU and the CPU both write, as MKW's glyph pages may be; mkw-recomp #250)
+        if !lazy.is_empty() && std::env::var("NXGFX_LAZY_CPU_CHECK").as_deref() != Ok("0") {
+            let (lo, hi) = page_range(a, n);
+            if let Some(cpu) = watch::take(lo, hi, false) {
+                if !cpu.is_empty() {
+                    lazy.retain(|pg| cpu.binary_search(pg).is_err());
+                }
+            }
+        }
         super::lazy::T_TAKE.fetch_add(tl.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if !lazy.is_empty() {
             let (buf, off0) = (p.buf.as_ref().map(|b| b.buf).unwrap_or_default(), p.buf_off);
