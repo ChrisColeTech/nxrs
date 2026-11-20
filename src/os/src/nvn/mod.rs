@@ -41,6 +41,7 @@ pub fn note_present(window: u64, index: u32) {
         crate::log!("nvn: first present (window {window:#x}, texture {index}), {:.3} s after start", crate::log::secs());
     }
     frame_row(n + 1);
+    crate::fpslock::tick();
 }
 
 /// metrics=1: one `frames-*.csv` row a present: its number, the guest clock (s), the time since the last present

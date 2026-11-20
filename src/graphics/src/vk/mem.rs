@@ -62,7 +62,10 @@ pub static POOL_GEN: AtomicU64 = AtomicU64::new(1);
 
 /// The pool buffers' usage: with shader device addresses when the device has them (raw global memory).
 fn buf_usage(g: &Gpu) -> vk::BufferUsageFlags {
-    if g.d.caps.bda {
+    if g.d.caps.rt {
+        // pool memory is also ray-tracing geometry and instance input (vk/rt.rs)
+        BUF_USAGE | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+    } else if g.d.caps.bda {
         BUF_USAGE | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
     } else {
         BUF_USAGE
@@ -649,7 +652,11 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
         let mut i = 0;
         while i < watched.len() {
             let (mut j, lo, mut hi, ab) = (i + 1, watched[i].1, watched[i].2, watched[i].3);
-            while j < watched.len() && (watched[j].1 <= hi || (ab != 0 && watched[j].3 == ab)) {
+            // a gap inside one allocation joins the run only while the pools cover most of the span (GetWriteWatch
+            // walks every page of its range: Mario Kart World's pools sit far apart in one large reservation)
+            let mut covered = hi - lo;
+            while j < watched.len() && (watched[j].1 <= hi || (ab != 0 && watched[j].3 == ab && watched[j].1 - hi <= (covered / 2).max(4 << 20))) {
+                covered += watched[j].2.saturating_sub(hi.max(watched[j].1));
                 hi = hi.max(watched[j].2);
                 j += 1;
             }

@@ -1717,3 +1717,14 @@ against nxrs's graphics in this lane.
 - **Not done** (lane O3): FRAME_STEP / STUBS, observation gates and the Trinity fence; the engine frame lock;
   the cheats engine; `bp`; the user-select dialog; shader facts read by the shaders crate (G4's crate; graphics'
   prewarm reader exists in `vk/pipe.rs prewarm_profile`); AudioIn's real-device half (needs a microphone).
+
+**Lane O3 (2026-11-20, after 44ae629): PC-app settings and the frame lock.**
+- New ini options (config `options.rs`, written with comments, read live): `pause_on_focus_loss` (0: the game is
+  always in focus; 1: told it lost the focus when its window is in the background or a host prompt is open),
+  `controller_prompt` (1), `home_quit` (1), `keyboard_box` (1). Lane Q: the launcher toggles. `NXRS_KEEP_FOCUS=1`,
+  `NXOS_CTRL_PROMPT=0`, `NXOS_HOME_QUIT=0`, `NXOS_SWKBD=auto` stay the harness overrides.
+- Engine frame lock: `os/src/fpslock.rs` (`fpslock::tick` at every present; `NXOS_FPS_TARGET` overrides the
+  profile's `fps_target`).
+- Jamboree: the two stand-ins on its hub path answer as Turbo / nxnative do: `nifm::IsNetworkAvailable` false (Turbo's
+  IRequest state 1 "free" and GetResult 110-300: no network), `friends::TryPopFriendInvitationNotificationInfo`
+  0 = none (nxnative's own stub; Turbo's friend service has no invitation either). Neither explains the fade.

@@ -2514,6 +2514,20 @@ pub fn wait_passes(g: &Gpu, stream: &[u8]) -> bool {
     event_wait_passes(g, addr, mode, value)
 }
 
+/// What a parked stream waits for (its first record), for the log.
+pub fn wait_desc(stream: &[u8]) -> String {
+    if stream.len() < 24 {
+        return "a sync of another parked queue".into();
+    }
+    let h = unsafe { rd::<op_hdr>(stream.as_ptr()) };
+    if h.op != op::WAIT_EVENT {
+        return format!("record {} first", h.op);
+    }
+    let (addr, mode, value): (u64, u32, u32) = unsafe { (rd_at(stream, 0), rd_at(stream, 8), rd_at(stream, 12)) };
+    let cur = unsafe { (*(addr as *const std::sync::atomic::AtomicU32)).load(std::sync::atomic::Ordering::Acquire) };
+    format!("event at {addr:#x} holds {cur:#x}, the wait wants mode {mode} value {value:#x} ({} bytes of records behind it)", stream.len())
+}
+
 fn event_wait_passes(g: &Gpu, addr: u64, mode: u32, value: u32) -> bool {
     let cur = unsafe { (*(addr as *const std::sync::atomic::AtomicU32)).load(std::sync::atomic::Ordering::Acquire) };
     if crate::nvn::sync::event_passes(cur, mode, value) {

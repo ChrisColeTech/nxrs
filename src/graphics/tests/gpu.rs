@@ -832,3 +832,98 @@ fn vram_budget_frees_parked_images() {
     eprintln!("VRAM budget: {} KB of parked images freed", freed >> 10);
     assert!(freed >= 256 * 256 * 4, "the finalized texture's parked image");
 }
+
+/// Ray tracing (`vk/rt.rs`): a bottom level from NVN2's build description of one triangle in guest memory, a top level
+/// from an instance record naming it by its guest address, then rays from a 32x32 grid traced against it with ray
+/// queries: the half of the grid under the triangle hits, the rest misses.
+#[test]
+fn ray_query_traces_a_triangle() {
+    use nxgfx::nvn::query::{AsBuild, AsGeometry};
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let g = nxgfx::vk::Gpu::get().unwrap();
+    if !g.d.caps.rt {
+        eprintln!("ray tracing: the device has no acceleration structures, skipped");
+        return;
+    }
+    let tri: [f32; 9] = [-1.0, -1.0, 0.0, 1.0, -1.0, 0.0, -1.0, 1.0, 0.0];
+    let va = n.data.put(&tri, 256);
+    let (_, blas_at) = n.data.alloc(256, 256);
+    let (_, tlas_at) = n.data.alloc(256, 256);
+    let mut inst = [0u8; 64];
+    for (i, v) in [1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0].iter().enumerate() {
+        inst[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    inst[48..52].copy_from_slice(&(0xffu32 << 24).to_le_bytes());
+    inst[56..64].copy_from_slice(&blas_at.to_le_bytes());
+    let ia = n.data.put(&inst, 256);
+    let tri_geo = AsGeometry { kind: 1, _pad: 0, w: [va, 3 | 34 << 32, 12, 0, 0, 0, 0] };
+    let inst_geo = AsGeometry { kind: 3, _pad: 0, w: [ia, 1, 0, 0, 0, 0, 0] };
+    let mk = |geo: &AsGeometry, dst: u64| AsBuild { flags: 0, operation: 0, geometries: geo, count: 1, _pad: 0, source: 0, destination: dst, destination_size: 0, scratch: 0, scratch_size: 0 };
+    let (bl, tl) = (mk(&tri_geo, blas_at), mk(&inst_geo, tlas_at));
+    let f = nxgfx::vk::queue::oneoff(g, |g, sub, _| nxgfx::vk::rt::build(g, sub, &bl).expect("bottom level"));
+    nxgfx::vk::queue::wait_fence(f, u64::MAX);
+    let f = nxgfx::vk::queue::oneoff(g, |g, sub, _| nxgfx::vk::rt::build(g, sub, &tl).expect("top level"));
+    nxgfx::vk::queue::wait_fence(f, u64::MAX);
+    let (tlas, _) = nxgfx::vk::rt::lookup(tlas_at).expect("the top level by its guest address");
+    // the tracing kernel, with its own layout
+    use ash::vk;
+    let dev = g.dev();
+    let binds = [
+        vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE),
+        vk::DescriptorSetLayoutBinding::default().binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE),
+    ];
+    let out = g.buffer(32 * 32 * 4, vk::BufferUsageFlags::STORAGE_BUFFER, gpu_allocator::MemoryLocation::GpuToCpu, "rt test out").unwrap();
+    unsafe {
+        let dsl = dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&binds), None).unwrap();
+        let sl = [dsl];
+        let pl = dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&sl), None).unwrap();
+        let code = spv("rq_comp");
+        let words: Vec<u32> = code.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let m = dev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None).unwrap();
+        let st = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(m).name(c"main");
+        let pipe = dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(st).layout(pl)], None).unwrap()[0];
+        let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR, descriptor_count: 1 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 1 }];
+        let pool = dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None).unwrap();
+        let set = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&sl)).unwrap()[0];
+        let ases = [tlas];
+        let mut asw = vk::WriteDescriptorSetAccelerationStructureKHR::default().acceleration_structures(&ases);
+        let bi = [vk::DescriptorBufferInfo { buffer: out.buf, offset: 0, range: vk::WHOLE_SIZE }];
+        let mut w0 = vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0).descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).push_next(&mut asw);
+        w0.descriptor_count = 1;
+        let w1 = vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&bi);
+        dev.update_descriptor_sets(&[w0, w1], &[]);
+        let f = nxgfx::vk::queue::oneoff(g, |g, sub, _| {
+            let d = g.dev();
+            d.cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe);
+            d.cmd_bind_descriptor_sets(sub.main, vk::PipelineBindPoint::COMPUTE, pl, 0, &[set], &[]);
+            d.cmd_dispatch(sub.main, 4, 4, 1);
+            nxgfx::vk::queue::full_barrier(g, sub.main);
+        });
+        nxgfx::vk::queue::wait_fence(f, u64::MAX);
+        let hits = core::slice::from_raw_parts(out.ptr as *const u32, 32 * 32);
+        let mut bad = 0;
+        let mut n_hit = 0;
+        for y in 0..32usize {
+            for x in 0..32usize {
+                let (fx, fy) = ((x as f32 + 0.5) / 16.0 - 1.0, (y as f32 + 0.5) / 16.0 - 1.0);
+                // inside the triangle (-1,-1) (1,-1) (-1,1): x + y < 0; the diagonal itself left out
+                let want = if (fx + fy).abs() < 0.07 { None } else { Some(fx + fy < 0.0) };
+                let got = hits[y * 32 + x] == 1;
+                n_hit += got as u32;
+                if want.is_some_and(|w| w != got) {
+                    bad += 1;
+                }
+            }
+        }
+        eprintln!("ray query: 1024 rays, {n_hit} hit the triangle, {bad} wrong");
+        assert_eq!(bad, 0, "rays traced against the triangle");
+        dev.destroy_pipeline(pipe, None);
+        dev.destroy_shader_module(m, None);
+        dev.destroy_descriptor_pool(pool, None);
+        dev.destroy_pipeline_layout(pl, None);
+        dev.destroy_descriptor_set_layout(dsl, None);
+    }
+    assert_eq!(validation_errors(), e0, "validation errors");
+}

@@ -583,10 +583,10 @@ hidfn!(controller_support, |a| {
         }
     }
     // still too few: the player screen a Switch shows, as a host prompt the game's thread waits on until enough
-    // controllers joined or the player closes it (nxnative ctrl_prompt.h); NXOS_CTRL_PROMPT=0 answers at once
-    // (scripted runs), as does a run with no game window
+    // controllers joined or the player closes it (nxnative ctrl_prompt.h); the ini's controller_prompt=0 (or
+    // NXOS_CTRL_PROMPT=0, scripted runs) answers at once
     let mut canceled = min > count;
-    if canceled && crate::options::get("ctrl_prompt").trim() != "0" && std::env::var("NXOS_CTRL_PROMPT").as_deref() != Ok("0") {
+    if canceled && nxconfig::flag("controller_prompt") && std::env::var("NXOS_CTRL_PROMPT").as_deref() != Ok("0") {
         let ok = crate::sched::without_core(|| ctrl_prompt(min, max, count));
         count = players_reported();
         canceled = !ok || min > count;

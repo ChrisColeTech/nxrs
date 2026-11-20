@@ -145,11 +145,11 @@ pub fn poll_input() {
 }
 
 /// Home held 2 s on a controller: "Quit the game?" over it (nxnative home_quit.h); A / Return quits, B / Escape /
-/// Home closes it. `NXOS_HOME_QUIT=0` turns it off.
+/// Home closes it. The ini's `home_quit=0` (or `NXOS_HOME_QUIT=0`) turns it off.
 fn home_quit() {
     use nxos::ui::{HomeQuit, HqPhase};
     static Q: Mutex<Option<(HomeQuit, std::time::Instant)>> = Mutex::new(None);
-    if std::env::var("NXOS_HOME_QUIT").as_deref() == Ok("0") {
+    if !nxconfig::flag("home_quit") || std::env::var("NXOS_HOME_QUIT").as_deref() == Ok("0") {
         return;
     }
     let mut g = Q.lock().unwrap();

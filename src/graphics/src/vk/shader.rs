@@ -596,6 +596,9 @@ impl Library {
         let (w, res, pool, c1) = remap(words, &r, json)?;
         // a vertex shader's outputs written once at the end (`spvfix`; NXGFX_LATE_OUTPUTS=0: as translated)
         let w = if r.stage == 0 && r.mesh == 0 && std::env::var("NXGFX_LATE_OUTPUTS").as_deref() != Ok("0") { super::spvfix::late_outputs(&w).unwrap_or(w) } else { w };
+        // integer abs as a product, which NVIDIA's compiler does not turn into a GPU fault (mkw-recomp #395 / #22;
+        // NXGFX_SABS_FIX=0 off)
+        let w = if std::env::var("NXGFX_SABS_FIX").as_deref() != Ok("0") { super::spvfix::sabs_product(&w).unwrap_or(w) } else { w };
         // NVN's warp-aggregated atomic add made per lane (the RTX 50 ballot hang, Turbo #12; NXGFX_BALLOT_FIX=0 off)
         let w = if std::env::var("NXGFX_BALLOT_FIX").as_deref() != Ok("0") {
             match shaders::link::ballot_per_lane(&w) {

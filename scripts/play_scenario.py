@@ -47,6 +47,10 @@ SCENARIOS = {
     'mkw': dict(seconds=230, window=(150, 185), steps=[
         ('shot', 44, 'boot'), ('lr', 5, 'title')] + [('a', 6, 'menu')] * 8 + [
         ('replay', 42, 'race', 'mkw_drive.txt'), ('replay', 42, 'race', 'mkw_drive.txt')]),
+    # MKW to a race the way mkw-recomp's tools/run/race.sh does (press-race.txt: A every 1.5 s from 12 s, the Grand
+    # Prix of the save's last cup; A also accelerates), with the presses from the game's own input script: run with
+    # --env NXRS_KEYS=12:A*400/1.5. A picture every 20 s (lane K)
+    'mkw-race': dict(seconds=600, window=(300, 580), steps=[('shot', 20, 'race')] * 29),
     'plza': dict(seconds=150, window=(45, 84), steps=[
         ('shot', 12, 'boot'), ('a', 30, 'title'), ('shot', 8, 'station'), ('replay', 10, 'walk', 'plza_walk.txt'),
         ('shot', 5, 'walked'), ('replay', 10, 'walk', 'plza_walk.txt'), ('shot', 5, 'walked')]),

@@ -29,6 +29,7 @@ pub mod pcache;
 pub mod perf;
 pub mod pipe;
 pub mod present;
+pub mod rt;
 pub mod queue;
 pub mod scale;
 pub mod spvfix;

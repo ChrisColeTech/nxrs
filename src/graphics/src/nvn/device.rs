@@ -30,7 +30,7 @@ const RT: i32 = -1;
 /// padding, 32 separate sampler bindings, and items up to 0xA9. `RT` items keep the X1 value below 0x60 and answer 0
 /// (with a red line) above it.
 pub const DEVINFO2: [i32; 0xAA] = [
-    231, 39, 14, 65536, 256, 8, 16, 4, 16, 32, 16, 4, 4, 4, 32, 32, // 0x00
+    231, 39, 14, 65536, 256, 8, 32, 4, 16, 32, 16, 4, 4, 4, 32, 32, // 0x00 (0x06: 32, the 1.8.0 driver as mkw-recomp reads it; not a constant case of its switch)
     32, 256, 256, 4, 8, 512, 256, RT, RT, 4096, 16384, 16, 1024, 1024, 64, 1024, // 0x10
     2147483647, 65535, 65535, 8, 1048576, 4096, 16, 4096, 1, 1, 1, RT, 16, RT, 201, 201, // 0x20
     20, 0, 1, 8, 8, 4, 32, RT, RT, 128, RT, 1, 4, RT, RT, RT, // 0x30

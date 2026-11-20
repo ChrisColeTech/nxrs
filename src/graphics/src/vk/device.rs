@@ -59,6 +59,8 @@ pub struct Caps {
     pub mem_budget: bool,
     /// dual-source blending (a pixel shader's output 1 as target 0's second source)
     pub dual_src: bool,
+    /// acceleration structures and ray queries (NVN2 ray tracing, `vk/rt.rs`; `NXGFX_RT=0` off)
+    pub rt: bool,
     /// VK_EXT_mesh_shader's task and mesh stages (NVN2's DrawMeshTasks*)
     pub mesh: bool,
     /// VK_EXT_transform_feedback (NVN's transform feedback)
@@ -95,6 +97,7 @@ pub struct Device {
     pub vin: ash::ext::vertex_input_dynamic_state::Device,
     pub emh: ash::ext::external_memory_host::Device,
     pub mesh: ash::ext::mesh_shader::Device,
+    pub accel: ash::khr::acceleration_structure::Device,
     pub xfb: ash::ext::transform_feedback::Device,
     pub push_desc: ash::khr::push_descriptor::Device,
     pub db: ash::ext::descriptor_buffer::Device,
@@ -221,7 +224,10 @@ impl Device {
             }
         }
         let mut dexts: Vec<*const i8> = required.iter().map(|n| n.as_ptr()).collect();
-        let optional: [&CStr; 12] = [
+        let optional: [&CStr; 15] = [
+            ash::khr::acceleration_structure::NAME,
+            ash::khr::ray_query::NAME,
+            ash::khr::deferred_host_operations::NAME,
             ash::ext::memory_budget::NAME,
             ash::ext::descriptor_buffer::NAME,
             ash::khr::pipeline_library::NAME,
@@ -254,6 +260,8 @@ impl Device {
         let mut f_xfb = vk::PhysicalDeviceTransformFeedbackFeaturesEXT::default();
         let mut f_gpl = vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT::default();
         let mut f_db = vk::PhysicalDeviceDescriptorBufferFeaturesEXT::default();
+        let mut f_as = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
+        let mut f_rq = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
         let mut f12 = vk::PhysicalDeviceVulkan12Features::default();
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default();
         let mut f11 = vk::PhysicalDeviceVulkan11Features::default();
@@ -272,7 +280,9 @@ impl Device {
             .push_next(&mut f_ms)
             .push_next(&mut f_xfb)
             .push_next(&mut f_gpl)
-            .push_next(&mut f_db);
+            .push_next(&mut f_db)
+            .push_next(&mut f_as)
+            .push_next(&mut f_rq);
         unsafe { instance.get_physical_device_features2(pdev, &mut f2) };
         let base = f2.features;
         let need = |ok: u32, what: &str| -> Result<(), String> { if ok != 0 { Ok(()) } else { Err(format!("device {name} lacks {what}")) } };
@@ -312,6 +322,13 @@ impl Device {
             occlusion_precise: base.occlusion_query_precise != 0,
             depth_bounds: base.depth_bounds != 0,
             dual_src: base.dual_src_blend != 0,
+            rt: has(ash::khr::acceleration_structure::NAME)
+                && has(ash::khr::ray_query::NAME)
+                && has(ash::khr::deferred_host_operations::NAME)
+                && f_as.acceleration_structure != 0
+                && f_rq.ray_query != 0
+                && f12.buffer_device_address != 0
+                && env_on("NXGFX_RT").unwrap_or(true),
             mem_budget: has(ash::ext::memory_budget::NAME),
             mesh: has(ash::ext::mesh_shader::NAME) && f_ms.mesh_shader != 0 && f_ms.task_shader != 0 && env_on("NXGFX_MESH").unwrap_or(true),
             xfb: has(ash::ext::transform_feedback::NAME) && f_xfb.transform_feedback != 0,
@@ -451,6 +468,13 @@ impl Device {
         if !caps.gpl {
             dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::graphics_pipeline_library::NAME && unsafe { CStr::from_ptr(n) } != ash::khr::pipeline_library::NAME);
         }
+        let mut e_as = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
+        let mut e_rq = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
+        if !caps.rt {
+            for x in [ash::khr::acceleration_structure::NAME, ash::khr::ray_query::NAME, ash::khr::deferred_host_operations::NAME] {
+                dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != x);
+            }
+        }
         let mut e_xfb = vk::PhysicalDeviceTransformFeedbackFeaturesEXT::default()
             .transform_feedback(caps.xfb)
             .geometry_streams(caps.xfb && f_xfb.geometry_streams != 0);
@@ -491,6 +515,9 @@ impl Device {
         if caps.xfb {
             dci = dci.push_next(&mut e_xfb);
         }
+        if caps.rt {
+            dci = dci.push_next(&mut e_as).push_next(&mut e_rq);
+        }
         let dev = unsafe { instance.create_device(pdev, &dci, None) }.map_err(|e| format!("vkCreateDevice: {e}"))?;
         let queue = unsafe { dev.get_device_queue(qfam, 0) };
         // deferred recording: the device and its loaders through the shims (vk/defer.rs)
@@ -524,6 +551,7 @@ impl Device {
             vin: ash::ext::vertex_input_dynamic_state::Device::new(li, &dev),
             emh: ash::ext::external_memory_host::Device::new(li, &dev),
             mesh: ash::ext::mesh_shader::Device::new(li, &dev),
+            accel: ash::khr::acceleration_structure::Device::new(li, &dev),
             xfb: ash::ext::transform_feedback::Device::new(li, &dev),
             push_desc: ash::khr::push_descriptor::Device::new(li, &dev),
             db: ash::ext::descriptor_buffer::Device::new(li, &dev),

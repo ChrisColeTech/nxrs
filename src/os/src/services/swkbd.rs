@@ -33,7 +33,7 @@ fn u16s(a: u64, max: usize) -> String {
 
 /// The text the player gives (or the default, with no window); None = cancelled.
 pub fn ask(title: &str, default: &str, max: usize) -> Option<String> {
-    let auto = std::env::var("NXOS_SWKBD").is_ok_and(|v| v == "auto") || std::env::var("NXGFX_HEADLESS").is_ok();
+    let auto = !nxconfig::flag("keyboard_box") || std::env::var("NXOS_SWKBD").is_ok_and(|v| v == "auto") || std::env::var("NXGFX_HEADLESS").is_ok();
     crate::services::oe::applet_enter("swkbd");
     let r = if auto { Some(default.to_string()) } else { without_core(|| window::input(title, default, max)) };
     crate::services::oe::applet_leave();

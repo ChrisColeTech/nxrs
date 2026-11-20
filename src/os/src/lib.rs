@@ -6,6 +6,7 @@
 pub mod log;
 pub mod boot;
 pub mod clock;
+pub mod fpslock;
 pub mod gamefix;
 pub mod guest;
 pub mod hle;

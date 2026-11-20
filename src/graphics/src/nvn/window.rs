@@ -167,8 +167,12 @@ nvn_fns! {
         o.ticket[i as usize & 3] = 0;
         if !s.is_null() {
             let so = &mut *(s as *mut sync_t);
+            // the texture is the game's once its last present is done (present_wait above): the sync is satisfied at
+            // once, as mkw-recomp's (fenced, fence 0). A fence over every queue's work so far made Mario Kart World's
+            // frame update (main+0x69d034, an infinite nvnSyncWait) wait for a queue parked on another queue's GPU
+            // event the next frame would signal: one frame every ~13 s after the course map (lane K)
             so.fenced = 2;
-            so.fence = vk::queue::queue_fence(0);
+            so.fence = 0;
         }
         0
     }

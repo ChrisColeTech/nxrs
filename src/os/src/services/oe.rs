@@ -99,11 +99,29 @@ fn focus_notifies() -> bool {
     m != 0 && m != 3
 }
 
+/// `pause_on_focus_loss` (the player's setting, default 0): a PC app keeps running behind other windows, so the game
+/// is always in focus; at 1 it is told it lost the focus when the window is behind another or minimised, or a host
+/// prompt is open over it (it may pause, as a console game would). `NXRS_KEEP_FOCUS=1` (the harness) forces in focus.
+fn pause_on_focus_loss() -> bool {
+    !crate::input::env_flag("NXRS_KEEP_FOCUS") && nxconfig::flag("pause_on_focus_loss")
+}
+
+/// The focus the game sees from the window's state and the host prompts open.
+fn seen_focus(window: i32, applets: i32, pause: bool) -> i32 {
+    if !pause {
+        1
+    } else if window == 1 && applets > 0 {
+        2
+    } else {
+        window
+    }
+}
+
 fn focus_sync(applets: i32, why: &str) {
     let mut g = APPLETS.lock().unwrap();
     *g = (*g + applets).max(0);
     let w = FRONT_FOCUS.load(Ordering::Relaxed);
-    let seen = if w == 1 && *g > 0 { 2 } else { w };
+    let seen = seen_focus(w, *g, pause_on_focus_loss());
     let changed = FOCUS.swap(seen, Ordering::Relaxed) != seen;
     drop(g);
     if changed {
@@ -114,14 +132,17 @@ fn focus_sync(applets: i32, why: &str) {
     }
 }
 
-/// The front end: its window's focus (1 in front, 2 behind another window, 3 minimised). `NXRS_KEEP_FOCUS=1` keeps
-/// the game in focus whatever the window does (scripted runs in the background).
+/// The front end: its window's focus (1 in front, 2 behind another window, 3 minimised), at every poll; what the game
+/// sees follows `pause_on_focus_loss` (read live).
 pub fn set_focus(state: i32) {
-    if !(1..=3).contains(&state) || crate::input::env_flag("NXRS_KEEP_FOCUS") {
+    if !(1..=3).contains(&state) {
         return;
     }
-    if FRONT_FOCUS.swap(state, Ordering::Relaxed) != state {
-        focus_sync(0, "the window");
+    static PAUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let pause = pause_on_focus_loss();
+    let setting_changed = PAUSE.swap(pause, Ordering::Relaxed) != pause;
+    if FRONT_FOCUS.swap(state, Ordering::Relaxed) != state || setting_changed {
+        focus_sync(0, if setting_changed { "pause_on_focus_loss changed" } else { "the window" });
     }
 }
 
@@ -478,6 +499,7 @@ mod tests {
     fn focus_changes_notify_the_game() {
         let _g = QUEUE_TESTS.lock().unwrap_or_else(|p| p.into_inner());
         while try_pop().is_some() {}
+        assert!(nxconfig::apply_arg("--pause_on_focus_loss=1"));
         FOCUS_MODE.store(-1, Ordering::Relaxed);
         set_focus(1);
         assert_eq!(focus(), 1);
@@ -494,6 +516,25 @@ mod tests {
         set_focus(1);
         FOCUS_MODE.store(-1, Ordering::Relaxed);
         while try_pop().is_some() {}
+
+        // pause_on_focus_loss=0 (the PC default): always in focus, whatever the window or a host prompt does
+        assert!(nxconfig::apply_arg("--pause_on_focus_loss=0"));
+        set_focus(2);
+        assert_eq!(focus(), 1);
+        applet_enter("swkbd");
+        assert_eq!(focus(), 1);
+        applet_leave();
+        set_focus(3);
+        assert_eq!((focus(), try_pop()), (1, None), "never told it lost the focus");
+        // switched live to 1: the background window counts at the next poll
+        assert!(nxconfig::apply_arg("--pause_on_focus_loss=1"));
+        set_focus(3);
+        assert_eq!((focus(), try_pop()), (3, Some(MSG_FOCUS)));
+        assert!(nxconfig::apply_arg("--pause_on_focus_loss=0"));
+        set_focus(1);
+        while try_pop().is_some() {}
+        assert_eq!(seen_focus(2, 1, false), 1);
+        assert_eq!(seen_focus(1, 1, true), 2);
     }
 
     #[test]

@@ -184,3 +184,160 @@ pub fn late_outputs(words: &[u32]) -> Option<Vec<u32>> {
     out[3] = bound;
     Some(out)
 }
+
+/// `sabs_product`: every 32-bit GLSL.std.450 SAbs written as `x * ((x >> 31) | 1)` (mkw-recomp's translator, #395 /
+/// #22: NVIDIA's compiler turns an integer abs of a small select followed by an add or xor into code that faults the GPU
+/// with "instruction pointer invalid", device lost; it reads `x < 0 ? -x : x`, `max(x, -x)` and `(x ^ m) - m` as that
+/// abs too, and leaves the product alone; bit-exact for every 32-bit input). Mario Kart World 1.8.0 lost the device on
+/// the title screen 30 s in (lane K; 1,451 of its 11,609 shaders use SAbs). None when the module has none.
+pub fn sabs_product(words: &[u32]) -> Option<Vec<u32>> {
+    const OP_EXT_INST_IMPORT: u32 = 11;
+    const OP_TYPE_INT: u32 = 21;
+    const OP_TYPE_VECTOR: u32 = 23;
+    const OP_CONSTANT: u32 = 43;
+    const OP_CONSTANT_COMPOSITE: u32 = 44;
+    const OP_IMUL: u32 = 132;
+    const OP_SHIFT_RIGHT_ARITHMETIC: u32 = 195;
+    const OP_BITWISE_OR: u32 = 197;
+    const GLSL_SABS: u32 = 5;
+    if words.len() < 5 || words[0] != 0x0723_0203 {
+        return None;
+    }
+    // (offset, opcode, word count) of every instruction
+    let mut v = vec![];
+    let mut i = 5;
+    while i < words.len() {
+        let n = (words[i] >> 16) as usize;
+        if n == 0 || i + n > words.len() {
+            return None;
+        }
+        v.push((i, words[i] & 0xffff, n));
+        i += n;
+    }
+    let mut glsl = vec![];
+    // 32-bit int types: id -> (component count, scalar type id)
+    let mut ints: HashMap<u32, (u32, u32)> = HashMap::new();
+    let mut first_fn = 0;
+    let mut sites = 0;
+    for &(i, op, n) in &v {
+        match op {
+            OP_EXT_INST_IMPORT if n >= 3 => {
+                let name: Vec<u8> = words[i + 2..i + n].iter().flat_map(|w| w.to_le_bytes()).take_while(|&b| b != 0).collect();
+                if name == b"GLSL.std.450" {
+                    glsl.push(words[i + 1]);
+                }
+            }
+            OP_TYPE_INT if n == 4 && words[i + 2] == 32 => {
+                ints.insert(words[i + 1], (1, words[i + 1]));
+            }
+            OP_TYPE_VECTOR if n == 4 => {
+                if let Some(&(1, s)) = ints.get(&words[i + 2]) {
+                    ints.insert(words[i + 1], (words[i + 3], s));
+                }
+            }
+            OP_FUNCTION if first_fn == 0 => first_fn = i,
+            OP_EXT_INST if n == 6 && glsl.contains(&words[i + 3]) && words[i + 4] == GLSL_SABS && ints.contains_key(&words[i + 1]) => {
+                sites += 1;
+            }
+            _ => {}
+        }
+    }
+    if sites == 0 || first_fn == 0 {
+        return None;
+    }
+    let mut bound = words[3];
+    let mut fresh = || {
+        bound += 1;
+        bound - 1
+    };
+    // the constants 31 and 1 of each type an SAbs returns, declared before the first function
+    let mut consts: HashMap<u32, (u32, u32)> = HashMap::new();
+    let mut decl = vec![];
+    let mut scalar: HashMap<u32, (u32, u32)> = HashMap::new();
+    for &(i, op, n) in &v {
+        if op != OP_EXT_INST || n != 6 || !glsl.contains(&words[i + 3]) || words[i + 4] != GLSL_SABS {
+            continue;
+        }
+        let t = words[i + 1];
+        let Some(&(count, s)) = ints.get(&t) else { continue };
+        if consts.contains_key(&t) {
+            continue;
+        }
+        let (s31, s1) = *scalar.entry(s).or_insert_with(|| {
+            let (a, b) = (fresh(), fresh());
+            decl.extend(ins(OP_CONSTANT, &[s, a, 31]));
+            decl.extend(ins(OP_CONSTANT, &[s, b, 1]));
+            (a, b)
+        });
+        if count == 1 {
+            consts.insert(t, (s31, s1));
+        } else {
+            let (a, b) = (fresh(), fresh());
+            let mut o31 = vec![t, a];
+            let mut o1 = vec![t, b];
+            for _ in 0..count {
+                o31.push(s31);
+                o1.push(s1);
+            }
+            decl.extend(ins(OP_CONSTANT_COMPOSITE, &o31));
+            decl.extend(ins(OP_CONSTANT_COMPOSITE, &o1));
+            consts.insert(t, (a, b));
+        }
+    }
+    let mut out = Vec::with_capacity(words.len() + decl.len() + sites * 9);
+    out.extend_from_slice(&words[..5]);
+    for &(i, op, n) in &v {
+        if i == first_fn {
+            out.extend_from_slice(&decl);
+        }
+        if op == OP_EXT_INST && n == 6 && glsl.contains(&words[i + 3]) && words[i + 4] == GLSL_SABS {
+            if let Some(&(c31, c1)) = consts.get(&words[i + 1]) {
+                let (t, r, x) = (words[i + 1], words[i + 2], words[i + 5]);
+                let (sh, or) = (fresh(), fresh());
+                out.extend(ins(OP_SHIFT_RIGHT_ARITHMETIC, &[t, sh, x, c31]));
+                out.extend(ins(OP_BITWISE_OR, &[t, or, sh, c1]));
+                out.extend(ins(OP_IMUL, &[t, r, x, or]));
+                continue;
+            }
+        }
+        out.extend_from_slice(&words[i..i + n]);
+    }
+    out[3] = bound;
+    Some(out)
+}
+
+#[cfg(test)]
+mod sabs_tests {
+    use super::*;
+
+    /// A module with `%r = SAbs %x` on an int and on an ivec2 comes out with the product and its constants, and the
+    /// product gives abs for every sign (checked on the formula the words encode).
+    #[test]
+    fn sabs_becomes_a_product() {
+        let mut w = vec![0x0723_0203, 0x0001_0000, 0, 100, 0];
+        w.extend(ins(11, &[1, u32::from_le_bytes(*b"GLSL"), u32::from_le_bytes(*b".std"), u32::from_le_bytes(*b".450"), 0]));
+        w.extend(ins(21, &[2, 32, 1])); // int
+        w.extend(ins(23, &[3, 2, 2])); // ivec2
+        w.extend(ins(OP_FUNCTION, &[2, 10, 0, 11]));
+        w.extend(ins(OP_EXT_INST, &[2, 20, 1, 5, 21]));
+        w.extend(ins(OP_EXT_INST, &[3, 22, 1, 5, 23]));
+        w.extend(ins(OP_EXT_INST, &[2, 24, 1, 4, 21])); // FAbs-numbered other instruction stays
+        let out = sabs_product(&w).unwrap();
+        let ops: Vec<u32> = {
+            let mut v = vec![];
+            let mut i = 5;
+            while i < out.len() {
+                v.push(out[i] & 0xffff);
+                i += (out[i] >> 16) as usize;
+            }
+            v
+        };
+        // import, int, ivec2, 31, 1, ivec2(31), ivec2(1), function, 2 x (shift, or, mul), the other ext inst
+        assert_eq!(ops, [11, 21, 23, 43, 43, 44, 44, 54, 195, 197, 132, 195, 197, 132, 12]);
+        assert_eq!(out[3], 100 + 4 + 4);
+        assert!(sabs_product(&out).is_none(), "nothing left to rewrite");
+        for x in [0i32, 1, -1, 7, -7, i32::MAX, i32::MIN, -2_000_000_000] {
+            assert_eq!(x.wrapping_mul((x >> 31) | 1), x.wrapping_abs());
+        }
+    }
+}

@@ -690,7 +690,14 @@ fn request_retry(g: &'static Gpu) {
                 {
                     let mut f = g.q.retry_mu.lock().unwrap();
                     while !*f {
-                        f = g.q.retry_cv.wait(f).unwrap();
+                        // every second: a queue parked for 2 s is logged once with what it waits for (diagnostics only)
+                        let (ff, to) = g.q.retry_cv.wait_timeout(f, std::time::Duration::from_secs(1)).unwrap();
+                        f = ff;
+                        if to.timed_out() {
+                            drop(f);
+                            log_parked(g);
+                            f = g.q.retry_mu.lock().unwrap();
+                        }
                     }
                     *f = false;
                 }
@@ -1034,6 +1041,8 @@ fn run_stream(g: &'static Gpu, st: &mut SubmitState, qserial: u64, origin_ll: bo
         // parked again: its receipts wait for the rest
         Some(off) => {
             st.parked.insert(qserial, Parked { stream: stream[off..].to_vec(), receipts, wait_receipt: None, presents: Vec::new() });
+            // the retry thread (it also logs a queue parked for long)
+            request_retry(g);
         }
         None if !receipts.is_empty() => {
             let mut r = g.q.receipts.lock().unwrap();
@@ -1044,6 +1053,24 @@ fn run_stream(g: &'static Gpu, st: &mut SubmitState, qserial: u64, origin_ll: bo
             g.q.done_cv.notify_all();
         }
         None => {}
+    }
+}
+
+/// A queue parked for 2 s or more, logged once per park with its wait (the retry thread, every second).
+fn log_parked(g: &Gpu) {
+    static SEEN: Mutex<Option<HashMap<u64, (std::time::Instant, bool)>>> = Mutex::new(None);
+    let Ok(st) = g.q.sub.try_lock() else { return };
+    let mut seen = SEEN.lock().unwrap();
+    let m = seen.get_or_insert_with(HashMap::new);
+    m.retain(|q, _| st.parked.contains_key(q));
+    let now = std::time::Instant::now();
+    for (q, p) in st.parked.iter() {
+        let e = m.entry(*q).or_insert((now, false));
+        if !e.1 && now.duration_since(e.0).as_secs() >= 2 {
+            e.1 = true;
+            let what = if p.wait_receipt.is_some() && p.stream.is_empty() { "a sync of another parked queue".to_string() } else { exec::wait_desc(&p.stream) };
+            crate::log::red(&format!("queue {q:#x} parked for 2 s: {what}"));
+        }
     }
 }
 

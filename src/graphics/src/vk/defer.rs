@@ -343,6 +343,7 @@ drained! {
     "vkCmdBindVertexBuffers2" => d_bind_vb2(f: u32, n: u32, b: P, o: P, sz: P, st: P);
     "vkCmdSetViewport" => d_set_vp(f: u32, n: u32, v: P);
     "vkCmdSetScissor" => d_set_sc(f: u32, n: u32, v: P);
+    "vkCmdBuildAccelerationStructuresKHR" => d_build_as(n: u32, i: P, r: P);
 }
 
 /// Commands with arrays: queued with copies.
