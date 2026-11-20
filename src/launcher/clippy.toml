@@ -1,0 +1,4 @@
+# tests may fail loudly (unwrap/expect/panic are for tests), as in the family
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+allow-panic-in-tests = true

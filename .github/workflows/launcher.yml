@@ -1,0 +1,78 @@
+# nxrs launcher CI: its own cargo workspace (src/launcher), run only when the launcher changes. Format, clippy with
+# warnings as errors, the tests (seconds: the fake engine stands in for nxrs-build; the window tests use egui_kittest,
+# the CLI's --screenshot round trip opens a real window, under Xvfb on Linux) and a release build uploaded as an artifact.
+name: Launcher
+on:
+  push:
+    branches: [main]
+    paths: ['src/launcher/**', '.github/workflows/launcher.yml']
+  pull_request:
+    branches: [main]
+    paths: ['src/launcher/**', '.github/workflows/launcher.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: launcher-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: '1.99.0'
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+
+defaults:
+  run:
+    working-directory: src/launcher
+
+jobs:
+  launcher:
+    name: launcher (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-24.04]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust ${{ env.RUST_VERSION }}
+        shell: bash
+        run: |
+          rustup toolchain install "$RUST_VERSION" --profile minimal --component rustfmt,clippy
+          rustup default "$RUST_VERSION"
+      - name: Linux libraries (windowing, GTK file dialogs, a software Vulkan/GL driver, Xvfb)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends libgtk-3-dev libxkbcommon-dev libwayland-dev \
+            libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev mesa-vulkan-drivers libgl1-mesa-dri xvfb
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            src/launcher/target
+          key: launcher-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('src/launcher/Cargo.lock') }}
+          restore-keys: launcher-${{ runner.os }}-${{ env.RUST_VERSION }}-
+      - name: Format
+        run: cargo fmt --check
+      - name: Clippy
+        run: cargo clippy --locked --all-targets --jobs 4 -- -D warnings
+      - name: Tests (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test --locked --jobs 4
+      - name: Tests (Linux, under Xvfb)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a cargo test --locked --jobs 4
+      - name: Release build
+        run: cargo build --locked --release --jobs 4
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nxrs-launcher-${{ runner.os }}
+          path: |
+            src/launcher/target/release/nxrs
+            src/launcher/target/release/nxrs.exe
+          if-no-files-found: error

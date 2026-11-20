@@ -1,0 +1,109 @@
+//! Play and Stop (`Window::play`, `Window::stop`): the guards, the DLC sync first when needed, the
+//! one-time offer of the Turbo build's saves, the INI settings, the detached start.
+
+use super::{Action, App, DlcReason};
+use crate::constants::{engine as e, words_play as w};
+use crate::model::dates;
+use crate::model::fill::fill;
+use crate::services::{dlc_files, ini_file, platform, saves};
+
+impl App {
+    pub fn play(&mut self) {
+        let Some(id) = self.selected_id() else { return };
+        let f = self.facts_of(&id);
+        if self.demo || !f.playable() || self.busy(&id) {
+            return;
+        }
+        if f.source_offline() {
+            self.message(w::OFFLINE_TITLE, w::OFFLINE, true);
+            return;
+        }
+        if self.dlc_busy() {
+            return;
+        }
+        // add-on content: the data folder holds the game's DLC list before the game starts
+        let adopted = self
+            .lib
+            .find_mut(&id)
+            .is_some_and(dlc_files::adopt_installed);
+        if adopted {
+            self.save();
+        }
+        if !self.lib.find(&id).is_some_and(dlc_files::up_to_date) {
+            self.start_dlc_sync(&id, DlcReason::Play);
+            return;
+        }
+        // the Turbo build's saves are offered once (a copy, after a backup of this build's)
+        let offer = self
+            .lib
+            .find(&id)
+            .filter(|g| g.saves_offered.is_empty() && saves::turbo_build_has_saves(g))
+            .map(|g| g.title.clone());
+        if let Some(title) = offer {
+            if let Some(g) = self.lib.find_mut(&id) {
+                g.saves_offered = e::ENGINE_TURBO.into();
+            }
+            self.save();
+            let text = fill(w::COPY_OFFER, &[&title]);
+            self.question(
+                w::COPY_TITLE,
+                &text,
+                Action::OfferedCopy(id.clone(), true),
+                Some(Action::OfferedCopy(id, false)),
+                true,
+            );
+            return;
+        }
+        self.launch();
+    }
+
+    /// Writes the game's settings and starts it detached; records its pid and when it was played.
+    pub(super) fn launch(&mut self) {
+        let Some(game) = self.selected_game().cloned() else {
+            return;
+        };
+        if let Err(err) =
+            ini_file::write_game_settings(&game, &self.lib.button_layout, &self.lib.play())
+        {
+            self.message(w::NO_SETTINGS, &err, true);
+            return;
+        }
+        match platform::launch_detached(
+            &game.executable(),
+            &game.build_dir,
+            &self.tools.environment(),
+        ) {
+            Err(err) => self.message(w::NOT_LAUNCHED, &err, true),
+            Ok(pid) => {
+                self.running.insert(game.id.clone(), pid);
+                if let Some(g) = self.lib.find_mut(&game.id) {
+                    g.last_played = Some(dates::now());
+                }
+                self.save();
+                self.job_label = w::LAUNCHED.into();
+            }
+        }
+    }
+
+    /// Cancels the selected game's build, or asks the running game to close (never forces).
+    pub fn stop(&mut self) {
+        let Some(id) = self.selected_id() else { return };
+        if self.is_building(&id) {
+            self.cancel_build();
+            return;
+        }
+        let Some(pid) = self.running.get(&id).copied() else {
+            return;
+        };
+        let exe = self
+            .lib
+            .find(&id)
+            .map(|g| g.executable())
+            .unwrap_or_default();
+        if platform::request_close(pid, &exe) {
+            self.job_label = w::CLOSE_ASKED.into();
+        } else {
+            self.message(w::NO_CLOSE_TITLE, w::NO_CLOSE, false);
+        }
+    }
+}

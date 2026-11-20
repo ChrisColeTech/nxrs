@@ -1,0 +1,3 @@
+// nxrs: the Windows executable icon and manifest
+1 ICON "app.ico"
+1 24 "nxrs.manifest"
