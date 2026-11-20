@@ -87,6 +87,17 @@ impl Mouse {
             self.rx = (dx * scale).clamp(-32767.0, 32767.0) as i32;
             self.ry = (-dy * scale).clamp(-32767.0, 32767.0) as i32;
             self.last = Some(now);
+            // the first deflections of each burst of motion, logged (a run shows the mouse reaching the stick)
+            static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if (dx != 0.0 || dy != 0.0) && SAID.fetch_add(1, Ordering::Relaxed) < 24 {
+                crate::flog!(
+                    "input: mouse raw motion {dx:+} {dy:+} over {:.1} ms -> right stick {} {} (sensitivity {pct:.0}%; invert {} applied after)",
+                    el / 1e6,
+                    self.rx,
+                    self.ry,
+                    nxconfig::int("mouse_invert") & 3
+                );
+            }
         }
         let inv = nxconfig::int("mouse_invert") & 3;
         (if inv & 1 != 0 { -self.rx } else { self.rx }, if inv & 2 != 0 { -self.ry } else { self.ry })

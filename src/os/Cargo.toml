@@ -18,6 +18,9 @@ path = "src/bin/nxos_dev.rs"
 [dependencies]
 cpal = "0.18"
 lewton = "0.10"
+# gamefix: Mario Kart World's zstd decoder on the host (the buffer-less streaming API is in the experimental bindings)
+zstd-sys = { version = "2", features = ["experimental"] }
+zstd = "0.13"
 windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Foundation", "Foundation_Collections", "Devices", "Devices_Bluetooth", "Devices_Bluetooth_Advertisement", "Devices_Bluetooth_GenericAttributeProfile", "Storage", "Storage_Streams"] }
 runtime = { path = "../runtime" }
 profiles = { path = "../profiles" }

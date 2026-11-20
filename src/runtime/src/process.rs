@@ -329,21 +329,97 @@ pub fn load(exefs: &Path, modules: Vec<Module>) -> Result<Process, String> {
 /// Starts the kernel (and start-up's decisions) and the main thread at `entry`, with main.npdm's priority, core and
 /// stack size. Returns the main thread's handle.
 pub fn start(p: &Process, entry: Entry) -> Result<u32, String> {
-    let (prio, core, stack_size) = crate::loader::npdm_main_thread(p.npdm.as_deref());
-    let stack = p.space.alloc_stack(stack_size)?;
     let first = |name: &str| p.modules.iter().find(|m| m.name == name).map(|m| m.entry());
+    let entry = match entry {
+        Entry::Main => Entry::Address(first("main").or(p.modules.first().map(|m| m.entry())).unwrap()),
+        Entry::Module(n) => Entry::Address(first(&n).ok_or_else(|| format!("no module {n} to start in"))?),
+        e => e,
+    };
+    start_main(p.space, p.npdm.as_deref(), entry, |_| {})
+}
+
+/// The main thread a host that loads the modules itself starts (the os layer): the kernel and start-up's decisions,
+/// then `setup(MainThread)` (the host's scheduler, counter rate: before any guest thread exists), then the main
+/// thread at `entry` (`Address` or `Host`) with main.npdm's priority, core and stack size. Returns its handle.
+pub fn start_main(space: &'static Space, npdm: Option<&[u8]>, entry: Entry, setup: impl FnOnce(&MainThread)) -> Result<u32, String> {
+    let (prio, core, stack_size) = crate::loader::npdm_main_thread(npdm);
+    let stack = space.alloc_stack(stack_size)?;
     let pc = match entry {
-        Entry::Main => first("main").or(p.modules.first().map(|m| m.entry())).unwrap(),
-        Entry::Module(n) => first(&n).ok_or_else(|| format!("no module {n} to start in"))?,
         Entry::Address(a) => a,
         Entry::Host(f) => crate::hostfn::register("the main thread's start", f),
+        Entry::Main | Entry::Module(_) => return Err("start_main: a module entry needs the loaded process (process::start)".into()),
     };
-    let k = crate::kernel::init(p.space);
+    let k = crate::kernel::init(space);
+    setup(&MainThread { priority: prio, core, stack_size });
     Ok(k.create_main(pc, stack + crate::mem::align_up(stack_size, crate::mem::PAGE), prio, core))
+}
+
+/// The main thread `start_main` is about to create, as main.npdm describes it.
+#[derive(Clone, Copy, Debug)]
+pub struct MainThread {
+    pub priority: i32,
+    pub core: i32,
+    pub stack_size: u64,
 }
 
 fn run(exefs: &Path, modules: Vec<Module>) -> Result<(), String> {
     let p = load(exefs, modules)?;
     start(&p, Entry::Main)?;
     Ok(())
+}
+
+#[cfg(test)]
+mod option_tests {
+    //! The ini options the runtime honours at start-up (Turbo runtime/main.c's option table): one test each.
+    use super::*;
+
+    /// `memory_gb`: 0 automatic (the console's 3285 MB, Tears of the Kingdom 5.2 GB, a Switch 2 program 9 GB), 4 the
+    /// console's, 6 / 8 the extended layouts; the pool is what GetInfo and the memory cap use.
+    #[test]
+    fn memory_gb_sets_the_application_pool() {
+        let s1 = Program { program_id: 0x0100_1520_0002_2000 };
+        let totk = Program { program_id: 0x0100_F2C0_115B_6000 };
+        let s2 = Program { program_id: 0x0400_C3F0_0006_E000 };
+        for (gb, want, want_totk, want_s2) in [
+            ("0", 0xCD50_0000u64, 0x1_4D50_0000u64, 0x2_4000_0000u64),
+            ("4", 0xCD50_0000, 0xCD50_0000, 0xCD50_0000),
+            ("6", 0x1_4D50_0000, 0x1_4D50_0000, 0x1_4D50_0000),
+            ("8", 0x1_CD50_0000, 0x1_CD50_0000, 0x1_CD50_0000),
+        ] {
+            assert!(nxconfig::apply_arg(&format!("--memory_gb={gb}")));
+            assert_eq!((app_pool(s1), app_pool(totk), app_pool(s2)), (want, want_totk, want_s2), "memory_gb={gb}");
+        }
+        assert!(nxconfig::apply_arg("--memory_gb=0"));
+    }
+
+    /// `null_trap`: Turbo makes the guest's page 0 (its first 64 KB) read-only so a write through NULL stops the
+    /// game with a log. Guest addresses are host addresses here and Windows maps nothing below 64 KB, so such a
+    /// write always faults (the fault handler reports it): the option is on by construction, and start-up says so.
+    #[test]
+    fn null_trap_page_zero_never_maps() {
+        assert!(nxconfig::apply_arg("--null_trap=1"));
+        assert!(nxconfig::flag("null_trap"));
+        for a in [0u64, 0x1000, 0x8000, 0xF000] {
+            assert!(!crate::mem::readable(a, 8), "{a:#x} is mapped");
+        }
+    }
+
+    /// `log`: 2 turns every trace on (Turbo's g_verbose), 1 none; `NXRT_TRACE` names its own set over it.
+    #[test]
+    fn log_two_traces_everything() {
+        assert_eq!(crate::rt::trace_spec(None, 1), "");
+        assert_eq!(crate::rt::trace_spec(None, 2), "all");
+        assert_eq!(crate::rt::trace_spec(Some(String::new()), 2), "all");
+        assert_eq!(crate::rt::trace_spec(Some("svc,host".into()), 2), "svc,host");
+        assert!(nxconfig::apply_arg("--log=2"));
+        assert_eq!(crate::rt::trace_spec(None, nxconfig::int("log")), "all");
+    }
+
+    /// `profile`: 1 starts the sampling profiler (profile.txt every 10 s).
+    #[test]
+    fn profile_starts_the_profiler() {
+        assert!(nxconfig::apply_arg("--profile=1"));
+        crate::profile::start(nxconfig::flag("profile"));
+        assert!(crate::profile::on());
+    }
 }

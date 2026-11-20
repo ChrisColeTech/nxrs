@@ -55,6 +55,8 @@ pub struct Caps {
     pub storage_align: u64,
     pub occlusion_precise: bool,
     pub depth_bounds: bool,
+    /// VK_EXT_memory_budget: the device-local heap's budget and use (VRAM eviction, `image.rs vram_budget`)
+    pub mem_budget: bool,
     /// dual-source blending (a pixel shader's output 1 as target 0's second source)
     pub dual_src: bool,
     /// VK_EXT_mesh_shader's task and mesh stages (NVN2's DrawMeshTasks*)
@@ -219,7 +221,8 @@ impl Device {
             }
         }
         let mut dexts: Vec<*const i8> = required.iter().map(|n| n.as_ptr()).collect();
-        let optional: [&CStr; 11] = [
+        let optional: [&CStr; 12] = [
+            ash::ext::memory_budget::NAME,
             ash::ext::descriptor_buffer::NAME,
             ash::khr::pipeline_library::NAME,
             ash::ext::graphics_pipeline_library::NAME,
@@ -309,6 +312,7 @@ impl Device {
             occlusion_precise: base.occlusion_query_precise != 0,
             depth_bounds: base.depth_bounds != 0,
             dual_src: base.dual_src_blend != 0,
+            mem_budget: has(ash::ext::memory_budget::NAME),
             mesh: has(ash::ext::mesh_shader::NAME) && f_ms.mesh_shader != 0 && f_ms.task_shader != 0 && env_on("NXGFX_MESH").unwrap_or(true),
             xfb: has(ash::ext::transform_feedback::NAME) && f_xfb.transform_feedback != 0,
             push_desc: has(ash::khr::push_descriptor::NAME),
@@ -489,6 +493,13 @@ impl Device {
         }
         let dev = unsafe { instance.create_device(pdev, &dci, None) }.map_err(|e| format!("vkCreateDevice: {e}"))?;
         let queue = unsafe { dev.get_device_queue(qfam, 0) };
+        // deferred recording: the device and its loaders through the shims (vk/defer.rs)
+        let shadow = super::defer::wanted().then(|| super::defer::shadow_instance(&instance, dev.handle()));
+        let dev = match &shadow {
+            Some(s) => unsafe { ash::Device::load(s.fp_v1_0(), dev.handle()) },
+            None => dev,
+        };
+        let li = shadow.as_ref().unwrap_or(&instance);
         crate::vklog!(
             "device {name} (Vulkan {}.{}.{}), validation {}, host import {} (align {:#x}), divisor {}, index u8 {}, mesh shaders {}, transform feedback {}, pipeline libraries {}, descriptor buffers {}",
             vk::api_version_major(props.api_version),
@@ -507,15 +518,15 @@ impl Device {
         Ok(Device {
             surface_i: ash::khr::surface::Instance::new(&entry, &instance),
             win32_i: ash::khr::win32_surface::Instance::new(&entry, &instance),
-            swapchain: ash::khr::swapchain::Device::new(&instance, &dev),
-            eds3: ash::ext::extended_dynamic_state3::Device::new(&instance, &dev),
-            eds2: ash::ext::extended_dynamic_state2::Device::new(&instance, &dev),
-            vin: ash::ext::vertex_input_dynamic_state::Device::new(&instance, &dev),
-            emh: ash::ext::external_memory_host::Device::new(&instance, &dev),
-            mesh: ash::ext::mesh_shader::Device::new(&instance, &dev),
-            xfb: ash::ext::transform_feedback::Device::new(&instance, &dev),
-            push_desc: ash::khr::push_descriptor::Device::new(&instance, &dev),
-            db: ash::ext::descriptor_buffer::Device::new(&instance, &dev),
+            swapchain: ash::khr::swapchain::Device::new(li, &dev),
+            eds3: ash::ext::extended_dynamic_state3::Device::new(li, &dev),
+            eds2: ash::ext::extended_dynamic_state2::Device::new(li, &dev),
+            vin: ash::ext::vertex_input_dynamic_state::Device::new(li, &dev),
+            emh: ash::ext::external_memory_host::Device::new(li, &dev),
+            mesh: ash::ext::mesh_shader::Device::new(li, &dev),
+            xfb: ash::ext::transform_feedback::Device::new(li, &dev),
+            push_desc: ash::khr::push_descriptor::Device::new(li, &dev),
+            db: ash::ext::descriptor_buffer::Device::new(li, &dev),
             db_props,
             entry,
             instance,

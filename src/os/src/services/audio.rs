@@ -742,6 +742,72 @@ pub fn register(r: &mut Registry) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    unsafe fn call(f: unsafe fn(*mut Cpu), args: &[u64]) -> u64 {
+        let mut cpu: Box<Cpu> = Box::new(std::mem::zeroed());
+        cpu.x[..args.len()].copy_from_slice(args);
+        f(&mut *cpu);
+        cpu.x[0]
+    }
+
+    /// AudioIn through the service's takeovers on the PC's real capture device: listed, opened (48 kHz, 2
+    /// channels), started, two 10 ms buffers appended and released full by the device, stopped, closed. Then with
+    /// no device (the PC's own absence, or the device hidden): nothing listed and the open fails, as audin answers
+    /// on a console without a microphone. A PC with no capture device runs only the second half (logged).
+    #[test]
+    fn audio_in_on_the_real_capture_device_and_without_one() {
+        unsafe {
+            let mut names = vec![0u8; 256];
+            let mut param = [0u8; 8];
+            param[..4].copy_from_slice(&RATE.to_le_bytes());
+            param[4..6].copy_from_slice(&2u16.to_le_bytes());
+            let dev = mic::device();
+            if dev.is_none() {
+                eprintln!("test: this PC has no capture device: only the no-device answer is checked");
+            }
+            if let Some(dev) = dev {
+                assert_eq!(call(ai_list, &[names.as_mut_ptr() as u64, 1]), 1);
+                assert!(names.starts_with(b"BuiltInHeadset\0"));
+                let mut obj = vec![0u64; 8];
+                let o = obj.as_mut_ptr() as u64;
+                assert_eq!(call(ai_open_noev, &[o, 0, param.as_ptr() as u64]), RES_OK);
+                assert_eq!((r32(o), r32(o + 4)), (RATE, 2));
+                assert_eq!(call(ai_start, &[o]), RES_OK, "the capture stream starts");
+                assert_eq!(call(ai_state, &[o]), STATE_STARTED as u64);
+                // AudioInBuffer: +8 data, +0x10 capacity, +0x18 size (written back as the bytes filled)
+                let mut pcm = vec![vec![0i16; 480 * 2]; 2];
+                let mut bufs = vec![[0u64; 5]; 2];
+                for (b, p) in bufs.iter_mut().zip(&mut pcm) {
+                    b[1] = p.as_mut_ptr() as u64;
+                    b[2] = (p.len() * 2) as u64;
+                    b[3] = (p.len() * 2) as u64;
+                    assert_eq!(call(ai_append, &[o, b.as_ptr() as u64]), 1);
+                }
+                let t0 = std::time::Instant::now();
+                let mut got = vec![];
+                while got.len() < 2 && t0.elapsed().as_secs() < 5 {
+                    match call(ai_released, &[o]) {
+                        0 => std::thread::sleep(std::time::Duration::from_millis(2)),
+                        t => got.push(t),
+                    }
+                }
+                assert_eq!(got, vec![bufs[0].as_ptr() as u64, bufs[1].as_ptr() as u64], "both buffers come back full, in order");
+                assert_eq!(bufs[0][3], 480 * 4, "10 ms of 48 kHz stereo PCM16 captured");
+                call(ai_stop, &[o]);
+                assert_eq!(call(ai_state, &[o]), STATE_STOPPED as u64);
+                call(ai_close, &[o]);
+                crate::log!("test: AudioIn captured from {dev}");
+            }
+
+            mic::HIDE_DEVICE.store(true, std::sync::atomic::Ordering::SeqCst);
+            assert_eq!(call(ai_list, &[names.as_mut_ptr() as u64, 1]), 0, "no device listed");
+            let mut obj2 = vec![0u64; 8];
+            assert_eq!(call(ai_open_noev, &[obj2.as_mut_ptr() as u64, 0, param.as_ptr() as u64]), RES_FAIL, "the open fails");
+            mic::HIDE_DEVICE.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
     #[test]
     fn downmix() {
         let v = super::to_stereo(&[16384, -16384, 0, 0, 0, 0], 6, 1.0);

@@ -10,6 +10,7 @@ engine reads no files for it. API: [docs/INTERFACES.md](../../docs/INTERFACES.md
 | `games/<title id>/game.tsv` | nxnative's profile, byte for byte: identity, `build` rows (version, display version, module build ids), modules, memory layout, per-game settings |
 | `games/<title id>/patches.toml` | its `patches.py` as data (27 games) |
 | `games/<title id>/engine.tsv` | keys the engine's lanes keep by hand from their runs, in game.tsv's format, read before game.tsv's (a key takes its first row): `present_interval display` for a game that keeps its speed at 60, `fps60` (the 60 FPS test result: `safe`, `double speed`, `needs a patch`) |
+| `games/<title id>/recomp.txt` | a static recompilation's code patch table in the translator's own format (`set` / `site` / `span` / `spin`), for the module build its `build <module> <id>` line names: Mario Kart World 1.8.0's is mkw-recomp's `patches-mkw-180.txt` (97 spin waits, 43 sites in 9 sets; host side os `gamefix`) |
 | `games/<title id>/turbo.toml` | the owner's patches from Turbo, kept by hand (Pokémon Legends: Z-A: base frame rate 60, build `b1f12fd9…`) |
 | `shared/sdk_patches.toml`, `engine_patches.toml` | nxnative's patches of Nintendo SDK modules and of middleware, for any game |
 | `shared/settings.tsv` | nxnative's player-facing settings list |

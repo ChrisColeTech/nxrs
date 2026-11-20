@@ -36,10 +36,13 @@ static TRACE: OnceLock<String> = OnceLock::new();
 /// `NXRT_TRACE=svc,host,sjlj,thread,load` (or `all`).
 pub fn trace(what: &str) -> bool {
     // NXRT_TRACE, else the ini's log=2 ("everything", slow): every trace
-    let t = TRACE.get_or_init(|| {
-        std::env::var("NXRT_TRACE").ok().filter(|v| !v.is_empty()).unwrap_or_else(|| if nxconfig::int("log") >= 2 { "all".into() } else { String::new() })
-    });
+    let t = TRACE.get_or_init(|| trace_spec(std::env::var("NXRT_TRACE").ok(), nxconfig::int("log")));
     !t.is_empty() && (t == "all" || t.split(',').any(|w| w == what))
+}
+
+/// The traces on: `NXRT_TRACE` when set, else everything for the ini's `log=2` (Turbo's g_verbose), else none.
+pub fn trace_spec(env: Option<String>, log: i64) -> String {
+    env.filter(|v| !v.is_empty()).unwrap_or_else(|| if log >= 2 { "all".into() } else { String::new() })
 }
 
 /// "[nxrt] msg" on stderr, in one write.

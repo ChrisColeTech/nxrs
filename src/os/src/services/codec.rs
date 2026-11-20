@@ -559,3 +559,131 @@ pub fn register(r: &mut Registry) {
     }
     let _ = w32;
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ipc::hipc::{self, Buf, Builder, T_REQUEST};
+
+    /// The Opus packets of an Ogg Opus file (RFC 7845): (pre-skip, audio packets).
+    fn ogg_opus_packets(b: &[u8]) -> (usize, Vec<Vec<u8>>) {
+        let (mut packets, mut cur, mut o) = (vec![], vec![], 0);
+        while o + 27 <= b.len() {
+            assert_eq!(&b[o..o + 4], b"OggS", "page at {o}");
+            let nseg = b[o + 26] as usize;
+            let lace = &b[o + 27..o + 27 + nseg];
+            let mut p = o + 27 + nseg;
+            for &l in lace {
+                cur.extend_from_slice(&b[p..p + l as usize]);
+                p += l as usize;
+                if l < 255 {
+                    packets.push(std::mem::take(&mut cur));
+                }
+            }
+            o = p;
+        }
+        assert_eq!(&packets[0][..8], b"OpusHead");
+        assert_eq!(&packets[1][..8], b"OpusTags");
+        let pre_skip = u16::from_le_bytes([packets[0][10], packets[0][11]]) as usize;
+        (pre_skip, packets.split_off(2))
+    }
+
+    /// The Switch's framing of one packet: size and final range (big-endian), then the packet.
+    fn framed(p: &[u8]) -> Vec<u8> {
+        let mut v = (p.len() as u32).to_be_bytes().to_vec();
+        v.extend_from_slice(&0u32.to_be_bytes());
+        v.extend_from_slice(p);
+        v
+    }
+
+    fn send(h: u32, cmd: u32, data: Vec<u8>, a: &[u8], b: &mut [u8]) -> hipc::Response {
+        let bd = |addr: u64, size: usize| Buf { addr, size: size as u64, tag: 0 };
+        let mut m = Builder {
+            ty: T_REQUEST,
+            cmd,
+            data,
+            a: if a.is_empty() { vec![] } else { vec![bd(a.as_ptr() as u64, a.len())] },
+            b: if b.is_empty() { vec![] } else { vec![bd(b.as_mut_ptr() as u64, b.len())] },
+            ..Default::default()
+        }
+        .build();
+        crate::ipc::process(h, &mut m);
+        hipc::parse_response(&m, false).unwrap()
+    }
+
+    /// Every packet of the file through a hwopus decoder session: the PCM it wrote, interleaved.
+    fn decode_ipc(dec: u32, cmd: u32, packets: &[Vec<u8>]) -> Vec<i16> {
+        let mut pcm = vec![];
+        let mut out = vec![0u8; 5760 * 2 * 2];
+        for (i, p) in packets.iter().enumerate() {
+            let input = framed(p);
+            let data = if cmd >= 6 { vec![(i == 0) as u8, 0, 0, 0] } else { vec![] };
+            let r = send(dec, cmd, data, &input, &mut out);
+            assert_eq!(r.result, 0, "packet {i}");
+            let consumed = u32::from_le_bytes(r.data[0..4].try_into().unwrap()) as usize;
+            let samples = u32::from_le_bytes(r.data[4..8].try_into().unwrap()) as usize;
+            assert_eq!(consumed, input.len(), "packet {i}: the whole frame is consumed");
+            assert_eq!(samples, 960, "packet {i}: 20 ms at 48 kHz");
+            assert!(cmd < 4 || r.data.len() >= 16, "the WithPerf commands add the decode time");
+            pcm.extend(out[..samples * 4].chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]])));
+        }
+        pcm
+    }
+
+    /// Real Opus (ffmpeg + libopus: a 440 Hz left / 660 Hz right tone, 2 s, 96 kb/s, `testdata/media/tone.opus`)
+    /// through the hwopus IPC service: single- and multi-stream sessions, the PCM checked sample for sample against
+    /// libopus decoding the same packets, and against the tone itself.
+    #[test]
+    fn hwopus_ipc_decodes_real_opus_as_libopus() {
+        let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/media/tone.opus")).unwrap();
+        let (pre_skip, packets) = ogg_opus_packets(&file);
+        assert!(packets.len() >= 100, "{} packets", packets.len());
+
+        // libopus on its own
+        let mut lib = Decoder::new(48000, 2).unwrap();
+        let mut want = vec![];
+        for p in &packets {
+            let mut pcm = vec![0i16; 5760 * 2];
+            let n = lib.decode(p, &mut pcm).unwrap();
+            want.extend_from_slice(&pcm[..n * 2]);
+        }
+
+        let mgr = crate::ipc::open(Box::new(HwOpus));
+        let mut none = [0u8; 0];
+        let rate_ch = [48000u32.to_le_bytes(), 2u32.to_le_bytes()].concat();
+        let r = send(mgr, 1, rate_ch.clone(), &[], &mut none);
+        assert_eq!(r.result, 0);
+        assert!(u32::from_le_bytes(r.data[..4].try_into().unwrap()) >= Decoder::size(2) as u32);
+
+        // OpenHardwareOpusDecoder(48000, 2), DecodeInterleavedOld
+        let r = send(mgr, 0, [rate_ch.clone(), 0x1000u32.to_le_bytes().to_vec()].concat(), &[], &mut none);
+        assert_eq!((r.result, r.moved.len()), (0, 1));
+        let got = decode_ipc(r.moved[0], 0, &packets);
+        assert_eq!(got.len(), want.len());
+        assert!(got == want, "hwopus PCM differs from libopus at sample {:?}", got.iter().zip(&want).position(|(a, b)| a != b));
+
+        // OpenHardwareOpusDecoderForMultiStream (one coupled stream, mapping 0 1), DecodeInterleaved with reset
+        let mut params = [48000u32, 2, 1, 1].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+        params.extend_from_slice(&[0, 1]);
+        params.resize(0x110, 0);
+        let mut m = Builder { ty: T_REQUEST, cmd: 2, data: 0x1000u32.to_le_bytes().to_vec(), x: vec![Buf { addr: params.as_ptr() as u64, size: params.len() as u64, tag: 0 }], ..Default::default() }.build();
+        crate::ipc::process(mgr, &mut m);
+        let r = hipc::parse_response(&m, false).unwrap();
+        assert_eq!((r.result, r.moved.len()), (0, 1));
+        let got_ms = decode_ipc(r.moved[0], 8, &packets);
+        assert!(got_ms == want, "multi-stream PCM differs from libopus");
+
+        // and it is the tone: after the encoder's delay, each channel against its sine (ffmpeg's amplitude 1/8)
+        let (mut sig, mut err) = (0f64, 0f64);
+        for (ch, f) in [(0usize, 440f64), (1, 660f64)] {
+            for k in 4800..96000 - pre_skip {
+                let s = (2.0 * std::f64::consts::PI * f * k as f64 / 48000.0).sin() * 32768.0 / 8.0;
+                let d = got[(k + pre_skip) * 2 + ch] as f64;
+                sig += s * s;
+                err += (d - s) * (d - s);
+            }
+        }
+        let snr = 10.0 * (sig / err).log10();
+        assert!(snr > 20.0, "decoded tone SNR {snr:.1} dB");
+    }
+}

@@ -26,6 +26,8 @@ pub const R_INVALID_STATE: u64 = 0xD401;
 pub const R_OUT_OF_MEMORY: u64 = 0xD001;
 pub const R_LIMIT_REACHED: u64 = 0x10801;
 pub const R_OUT_OF_RESOURCE: u64 = 0xCE01;
+pub const R_INVALID_NEW_PERMISSION: u64 = 0xD801;
+pub const R_INVALID_COMBINATION: u64 = 0xE801;
 
 pub const ST_FREE: u32 = 0;
 pub const ST_NORMAL: u32 = 5;
@@ -50,6 +52,19 @@ struct State {
     phys_bytes: u64,
     /// Shared memory views: (address, size).
     shared: Vec<(u64, u64)>,
+    /// What SetMemoryPermission / SetMemoryAttribute / SetGpuMemoryAttribute recorded, as sorted non-overlapping
+    /// runs: QueryMemory reports them over the region's own permission and attribute.
+    marks: Vec<Mark>,
+}
+
+/// A run of pages with a recorded permission and attribute bits.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Mark {
+    base: u64,
+    size: u64,
+    perm: Option<u32>,
+    attr_mask: u32,
+    attr: u32,
 }
 
 /// The process memory figures a title's profile gives.
@@ -319,8 +334,118 @@ impl Memory {
         rmem::decommit(a, size);
     }
 
+    /// Records a permission (`perm`) or attribute bits (`mask` / `value`) over [a, a + n), splitting the runs it
+    /// overlaps.
+    fn mark(&self, a: u64, n: u64, perm: Option<u32>, mask: u32, value: u32) {
+        let mut st = self.st.lock().unwrap();
+        let end = a + n;
+        let mut out: Vec<Mark> = vec![];
+        let mut covered: Vec<(u64, u64)> = vec![];
+        for m in st.marks.drain(..) {
+            let me = m.base + m.size;
+            if me <= a || m.base >= end {
+                out.push(m);
+                continue;
+            }
+            if m.base < a {
+                out.push(Mark { size: a - m.base, ..m });
+            }
+            if me > end {
+                out.push(Mark { base: end, size: me - end, ..m });
+            }
+            let (lo, hi) = (m.base.max(a), me.min(end));
+            let mut x = Mark { base: lo, size: hi - lo, ..m };
+            if perm.is_some() {
+                x.perm = perm;
+            }
+            x.attr = (x.attr & !mask) | (value & mask);
+            x.attr_mask |= mask;
+            out.push(x);
+            covered.push((lo, hi));
+        }
+        // the parts no run covered yet
+        covered.sort();
+        let mut at = a;
+        for (lo, hi) in covered.into_iter().chain(std::iter::once((end, end))) {
+            if lo > at {
+                out.push(Mark { base: at, size: lo - at, perm, attr_mask: mask, attr: value & mask });
+            }
+            at = at.max(hi);
+        }
+        out.retain(|m| m.size > 0 && (m.perm.is_some() || m.attr_mask != 0));
+        out.sort_by_key(|m| m.base);
+        st.marks = out;
+    }
+
+    /// svcSetMemoryPermission: the permission is recorded (the host's protection stays read-write).
+    pub fn set_permission(&self, a: u64, n: u64, perm: u32) -> u64 {
+        if a & (PAGE - 1) != 0 {
+            return R_INVALID_ADDRESS;
+        }
+        if n == 0 || n & (PAGE - 1) != 0 || a.checked_add(n).is_none() {
+            return R_INVALID_SIZE;
+        }
+        if !matches!(perm, 0 | 1 | 3) {
+            return R_INVALID_NEW_PERMISSION;
+        }
+        self.mark(a, n, Some(perm), 0, 0);
+        0
+    }
+
+    /// svcSetMemoryAttribute (`mask` / `value` of the uncached bit 8 and the Switch 2's bit 0x20) and
+    /// SetGpuMemoryAttribute (`gpu`: only bit 0x20).
+    pub fn set_attribute(&self, a: u64, n: u64, mask: u32, value: u32, gpu: bool) -> u64 {
+        if a & (PAGE - 1) != 0 {
+            return R_INVALID_ADDRESS;
+        }
+        if n == 0 || n & (PAGE - 1) != 0 || a.checked_add(n).is_none() {
+            return R_INVALID_SIZE;
+        }
+        // SetMemoryAttribute's bits include 0x10 PermissionLocked, the RELRO lock every SDK module's init sets (MKW
+        // 1.8.0 aborted at main's DT_INIT with 0xE801 when it was refused, lane K) and DKB's at 0.9 s; nothing is refused.
+        // SetGpuMemoryAttribute takes only bit 0x20 (Turbo: 0xE801 otherwise); SetMemoryAttribute records whatever
+        // bits the game names, as Turbo's mem_set_attr does (Donkey Kong Bananza's SDK aborts at 0.9 s on a refusal)
+        if gpu && (value & !mask != 0 || (mask | value) & !0x20 != 0) {
+            return R_INVALID_COMBINATION;
+        }
+        self.mark(a, n, None, mask, value);
+        0
+    }
+
+    /// The recorded permission and attribute over `info` (the block cut to the run that holds its address).
+    fn with_marks(&self, a: u64, mut info: MemoryInfo) -> MemoryInfo {
+        let st = self.st.lock().unwrap();
+        let (mut lo, mut hi) = (info.addr, info.addr.saturating_add(info.size));
+        for m in &st.marks {
+            let me = m.base + m.size;
+            if m.base <= a && a < me {
+                lo = lo.max(m.base);
+                hi = hi.min(me);
+                if let Some(p) = m.perm {
+                    info.perm = p;
+                }
+                info.attr = (info.attr & !m.attr_mask) | m.attr;
+            } else if me <= a && me > lo {
+                lo = me;
+            } else if m.base > a && m.base < hi {
+                hi = m.base;
+            }
+        }
+        info.addr = lo;
+        info.size = hi - lo;
+        info
+    }
+
     /// svcQueryMemory.
     pub fn query(&self, a: u64) -> MemoryInfo {
+        let info = self.query_regions(a);
+        if info.state == ST_FREE || info.state == 0x10 {
+            return info;
+        }
+        self.with_marks(a, info)
+    }
+
+    fn query_regions(&self, a: u64) -> MemoryInfo {
         let st = self.st.lock().unwrap();
         let mut own: Vec<(Range, u32, u32, u32)> = vec![];
         if st.heap_size > 0 {
@@ -427,7 +552,7 @@ fn prepare_locked(m: &Memory, st: &State, a: u64, n: u64) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// One space for the whole test binary (reservations are process-wide).
@@ -438,6 +563,52 @@ mod tests {
             let space: &'static Space = Box::leak(Box::new(Space::new(mods, 0x6D_0000_0000, false).expect("space")));
             init(space, Figures { pool: 0xCD50_0000, used_beside_heap: 64 << 20, sys_resource: 0 })
         })
+    }
+
+    /// The runtime kernel over the test space, once (kernel objects: the events services hand out).
+    pub(crate) fn test_kernel() -> &'static nxrt::kernel::Kernel {
+        static K: OnceLock<&'static nxrt::kernel::Kernel> = OnceLock::new();
+        K.get_or_init(|| nxrt::kernel::init(test_memory().space))
+    }
+
+    /// SetMemoryPermission / SetMemoryAttribute / SetGpuMemoryAttribute are recorded and QueryMemory reports them
+    /// (Turbo kernel.c: mem_set_state / mem_set_attr), with Horizon's checks; the block is cut around a marked run.
+    #[test]
+    fn permissions_and_attributes_are_recorded() {
+        let m = test_memory();
+        let s = m.space.stack.base + 0x100_0000;
+        let mut lent = vec![0u8; 0x8000];
+        let src = (lent.as_mut_ptr() as u64 + 0xFFF) & !0xFFF;
+        let _ = src;
+        // marks are kept per range whatever the region; a heap-sized test region keeps it simple
+        let a = s;
+        assert_eq!(m.set_permission(a, 0x2000, 1), 0);
+        assert_eq!(m.set_attribute(a + 0x1000, 0x2000, 0x20, 0x20, true), 0, "GPU attribute");
+        let st = m.st.lock().unwrap();
+        let marks = st.marks.clone();
+        drop(st);
+        assert_eq!(marks.len(), 3, "{marks:?}");
+        assert_eq!((marks[0].base, marks[0].size, marks[0].perm, marks[0].attr), (a, 0x1000, Some(1), 0));
+        assert_eq!((marks[1].base, marks[1].size, marks[1].perm, marks[1].attr), (a + 0x1000, 0x1000, Some(1), 0x20));
+        assert_eq!((marks[2].base, marks[2].size, marks[2].perm, marks[2].attr), (a + 0x2000, 0x1000, None, 0x20));
+        let info = MemoryInfo { addr: a - 0x10000, size: 0x40000, state: ST_STACK, perm: 3, ..Default::default() };
+        let q = m.with_marks(a + 0x1800, info);
+        assert_eq!((q.addr, q.size, q.perm, q.attr), (a + 0x1000, 0x1000, 1, 0x20), "both recorded on the overlap");
+        let q = m.with_marks(a + 0x2000, info);
+        assert_eq!((q.addr, q.size, q.perm, q.attr), (a + 0x2000, 0x1000, 3, 0x20));
+        let q = m.with_marks(a - 0x1000, info);
+        assert_eq!((q.addr, q.addr + q.size, q.perm), (a - 0x10000, a, 3), "the block ends where the runs start");
+        assert_eq!(m.set_attribute(a + 0x1000, 0x2000, 0x20, 0, true), 0, "cleared");
+        assert_eq!(m.with_marks(a + 0x2000, info).attr, 0);
+        assert_eq!(m.set_permission(a + 1, 0x1000, 1), R_INVALID_ADDRESS);
+        assert_eq!(m.set_permission(a, 0x1001, 1), R_INVALID_SIZE);
+        assert_eq!(m.set_permission(a, 0x1000, 7), R_INVALID_NEW_PERMISSION);
+        assert_eq!(m.set_attribute(a, 0x1000, 0x20, 0x40, true), R_INVALID_COMBINATION);
+        assert_eq!(m.set_attribute(a, 0x1000, 0x08, 0x08, true), R_INVALID_COMBINATION, "SetGpuMemoryAttribute takes only 0x20");
+        assert_eq!(m.set_attribute(a, 0x1000, 0xff, 0x48, false), 0, "SetMemoryAttribute records any bits (Turbo; DKB)");
+        assert_eq!(m.set_permission(a, 0x2000, 3), 0);
+        m.st.lock().unwrap().marks.clear();
+        drop(lent);
     }
 
     #[test]

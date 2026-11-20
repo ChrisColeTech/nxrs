@@ -956,6 +956,49 @@ impl Gpu {
         }
     }
 
+    /// VRAM budget (Turbo `vk_budget`, its default; `NXGFX_VRAM_EVICT=0` off): once a frame, the device-local heaps'
+    /// use against their budget (VK_EXT_memory_budget). Over 90% every parked image is freed (the render targets and
+    /// textures kept for a re-initialization the same way, which the game has let go), then the pipeline cache's
+    /// retired pipelines are left as they are. Returns the bytes freed.
+    pub fn vram_budget(&self) -> u64 {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !self.d.caps.mem_budget || !*ON.get_or_init(|| std::env::var("NXGFX_VRAM_EVICT").as_deref() != Ok("0")) {
+            return 0;
+        }
+        let mut b = vk::PhysicalDeviceMemoryBudgetPropertiesEXT::default();
+        let mut p2 = vk::PhysicalDeviceMemoryProperties2::default().push_next(&mut b);
+        unsafe { self.d.instance.get_physical_device_memory_properties2(self.d.pdev, &mut p2) };
+        let mp = p2.memory_properties;
+        let (mut used, mut budget) = (0u64, 0u64);
+        for h in 0..mp.memory_heap_count as usize {
+            if mp.memory_heaps[h].flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL) {
+                used += b.heap_usage[h];
+                budget += b.heap_budget[h];
+            }
+        }
+        let pct = std::env::var("NXGFX_VRAM_EVICT_PCT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(90);
+        if budget == 0 || used * 100 < budget * pct {
+            return 0;
+        }
+        let mut imgs = self.images.lock().unwrap();
+        let mut gone = Vec::new();
+        for (_, v) in imgs.parked.drain() {
+            gone.extend(v.into_iter().map(|x| x.0));
+        }
+        imgs.parked_n = 0;
+        drop(imgs);
+        let n = gone.len();
+        let bytes: u64 = gone.iter().filter_map(|im| im.alloc.as_ref().map(|a| a.size())).sum();
+        for im in gone {
+            self.destroy_released(im);
+        }
+        static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 16 {
+            crate::vklog!("VRAM: {} of {} MB in use (over {pct}% of the budget): {n} parked images freed ({} MB)", used >> 20, budget >> 20, bytes >> 20);
+        }
+        bytes
+    }
+
     /// Parked images older than PARK_FRAMES frames, or the oldest past PARK_MAX: taken out to be destroyed.
     fn evict_parked(&self, imgs: &mut Images, frame: u64) -> Vec<Image> {
         let mut out = Vec::new();

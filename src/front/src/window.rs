@@ -129,6 +129,10 @@ pub fn poll_input() {
     static MOUSE: Mutex<keys::Mouse> = Mutex::new(keys::Mouse::new());
     let f = focused();
     nxos::input::set_focus(f);
+    // the game's focus state (oe message 15): in front 1, behind another window 2, minimised 3
+    let h = hwnd();
+    let st = if !h.is_null() && unsafe { IsIconic(h) } != 0 { 3 } else if f { 1 } else { 2 };
+    nxos::services::oe::set_focus(st);
     // NXRS_CONTROLLER_BACKGROUND=1: the keyboard counts out of focus too (keys posted by a test script)
     static BG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let f = f || *BG.get_or_init(|| nxos::input::env_flag("NXRS_CONTROLLER_BACKGROUND"));
@@ -159,6 +163,14 @@ pub fn diag_dump() {
         s.push_str(&format!("{k:?}\t{w}\t{n}\n"));
     }
     s.push_str(&nxconfig::ctl::run("pads"));
+    // every guest thread: what it waits for, the host function it is in, its guest frames (Turbo's F5)
+    let threads = nxrt::kernel::try_get().map(|_| nxrt::kernel::dump_threads()).unwrap_or_default();
+    crate::flog!("F5: guest threads
+{threads}");
+    s.push_str("
+# guest threads
+");
+    s.push_str(&threads);
     let _ = std::fs::write(dir.join("threads.txt"), s);
 }
 
@@ -206,6 +218,24 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
             }
         }
         WM_DEVICECHANGE => nxos::input::device_changed(),
+        // the mouse's left button as the touch screen (not while the mouse is the right stick)
+        WM_LBUTTONDOWN | WM_MOUSEMOVE | WM_LBUTTONUP if !mouse_mode() => {
+            let down = m == WM_LBUTTONDOWN || (m == WM_MOUSEMOVE && w & 1 != 0); // MK_LBUTTON
+            if m == WM_LBUTTONDOWN {
+                SetCapture(h);
+            } else if m == WM_LBUTTONUP {
+                ReleaseCapture();
+            }
+            if m != WM_MOUSEMOVE || down {
+                let (x, y) = ((l & 0xffff) as i16 as i32, ((l >> 16) & 0xffff) as i16 as i32);
+                let mut cr: RECT = std::mem::zeroed();
+                GetClientRect(h, &mut cr);
+                let sx = (x.max(0) as i64 * 1280 / cr.right.max(1) as i64) as u32;
+                let sy = (y.max(0) as i64 * 720 / cr.bottom.max(1) as i64) as u32;
+                nxos::input::set_touch(down, sx, sy);
+            }
+            return 0;
+        }
         WM_MOVE | WM_SETFOCUS | WM_KILLFOCUS | WM_ACTIVATEAPP => {
             if m == WM_KILLFOCUS {
                 keys::HELD.store(0, Ordering::Release);

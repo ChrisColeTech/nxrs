@@ -472,6 +472,11 @@ pub fn current_handle() -> Option<u32> {
 impl Kernel {
     /// A new event as svcCreateEvent makes it: (write handle, read handle). Host code signals it with
     /// [`Kernel::signal_event`]; the guest waits on the read handle.
+    /// The process's live guest threads (GetResourceLimitCurrentValue's thread count).
+    pub fn thread_count(&self) -> usize {
+        lock(&self.g).threads.iter().filter(|t| t.is_some()).count()
+    }
+
     pub fn create_event(&self) -> (u32, u32) {
         let mut g = lock(&self.g);
         let e = g.events.iter().position(|e| e.is_none()).unwrap_or_else(|| {
@@ -691,14 +696,42 @@ fn thread_body(slot: usize) {
 /// `block_leave`.
 pub fn svc(c: &mut Cpu, imm: u32) -> bool {
     let blocking = matches!(imm, 0x0B | 0x18 | 0x1A | 0x1C | 0x34);
-    if blocking {
-        sched().block_enter();
+    if !blocking {
+        return svc_inner(c, imm);
     }
+    sched().block_enter();
+    let t0 = std::time::Instant::now();
     let r = svc_inner(c, imm);
-    if blocking {
-        sched().block_leave();
-    }
+    let us = t0.elapsed().as_micros() as u64;
+    sched().block_leave();
+    // metrics (Turbo kernel.c's waits by kind): how many waits and how long, per second in metrics-*.csv
+    let (n, t) = wait_counters(imm);
+    nxconfig::metrics::add(n, 1);
+    nxconfig::metrics::add(t, us);
     r
+}
+
+/// The metrics counters of a blocking SVC's kind: (waits, microseconds waited).
+fn wait_counters(imm: u32) -> (&'static std::sync::atomic::AtomicU64, &'static std::sync::atomic::AtomicU64) {
+    use nxconfig::metrics::counter;
+    type C2 = (&'static std::sync::atomic::AtomicU64, &'static std::sync::atomic::AtomicU64);
+    static C: OnceLock<[C2; 5]> = OnceLock::new();
+    let c = C.get_or_init(|| {
+        [
+            (counter("wait_sleep"), counter("wait_sleep_us")),
+            (counter("wait_sync"), counter("wait_sync_us")),
+            (counter("wait_mutex"), counter("wait_mutex_us")),
+            (counter("wait_condvar"), counter("wait_condvar_us")),
+            (counter("wait_address"), counter("wait_address_us")),
+        ]
+    });
+    c[match imm {
+        0x0B => 0,
+        0x18 => 1,
+        0x1A => 2,
+        0x1C => 3,
+        _ => 4,
+    }]
 }
 
 fn svc_inner(c: &mut Cpu, imm: u32) -> bool {

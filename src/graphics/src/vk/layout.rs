@@ -112,7 +112,7 @@ impl Layout {
         let lim = &d.props.limits;
         // Mario Kart World registers texture IDs up to ~131,400 (its texture pool's; 65,536 left the rest unbound)
         let tex_cap = env_u32("NXGFX_TEX_CAP", 262144).min(lim.max_per_stage_descriptor_sampled_images / 2).max(256);
-        let samp_cap = env_u32("NXGFX_SAMP_CAP", 4096).min(lim.max_per_stage_descriptor_samplers / 2).max(64);
+        let samp_cap = env_u32("NXGFX_SAMP_CAP", 16384).min(lim.max_per_stage_descriptor_samplers / 2).max(64);
         let all = vk::ShaderStageFlags::ALL;
         let binds = [
             vk::DescriptorSetLayoutBinding::default().binding(B_TEX).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).descriptor_count(tex_cap).stage_flags(all),

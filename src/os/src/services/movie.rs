@@ -237,6 +237,11 @@ impl Dec {
 }
 
 static DECS: Mutex<Option<HashMap<u64, Arc<Dec>>>> = Mutex::new(None);
+
+/// Whether a movie decoder is open (a movie plays): game fixes keep a movie's own picture (os `gamefix`).
+pub fn playing() -> bool {
+    DECS.lock().unwrap().as_ref().is_some_and(|m| !m.is_empty())
+}
 static NEXT: AtomicU64 = AtomicU64::new(1);
 
 fn dec_of(self_: u64) -> Option<Arc<Dec>> {
@@ -749,6 +754,12 @@ unsafe fn construct(c: *mut Cpu, self_: u64, ty: i32, fmt: i32, mode: i32, prio:
         return;
     }
     ensure_signaller(c);
+    make(self_, ty, fmt, mode, prio, out_align);
+}
+
+/// The host's decoder behind client object `self_` (its id at +8), with its decoding thread.
+fn make(self_: u64, ty: i32, fmt: i32, mode: i32, prio: i32, out_align: i32) -> Arc<Dec> {
+    let audio = (ty == T_VORBIS || ty == T_AAC) && fmt == FMT_PCM16;
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
     let nout = if !audio { NOUT_VIDEO } else if ty == T_AAC { NOUT_AAC } else { NOUT };
     let d = Arc::new(Dec {
@@ -770,6 +781,7 @@ unsafe fn construct(c: *mut Cpu, self_: u64, ty: i32, fmt: i32, mode: i32, prio:
     let dw = d.clone();
     std::thread::Builder::new().name("nxos movie decoder".into()).stack_size(4 << 20).spawn(move || worker(dw)).expect("movie decoder thread");
     crate::log!("[movie] decoder {self_:#x}: type {ty} output {fmt} mode {mode} priority {prio}");
+    d
 }
 
 unsafe fn ctor(c: *mut Cpu) {
@@ -1216,7 +1228,6 @@ mfn!(get_output, |c, a, d| {
         crate::log!("[RED] movie: the client's output buffer is {cap} bytes, a frame needs {need}");
         return BAD_ARG;
     }
-    let out = crate::guest::bytes_mut(p, need as u64);
     let pic = st.out[i].pic && st.out[i].frm.len() >= need;
     // NXOS_MOVIE_DUMP=<dir>: the first pictures handed out, as PNG (a check of what the game was given)
     if pic {
@@ -1232,17 +1243,26 @@ mfn!(get_output, |c, a, d| {
             }
         }
     }
-    if pic {
-        out.copy_from_slice(&st.out[i].frm[..need]);
-    } else {
-        out[..w * h].fill(16);
-        out[w * h..].fill(128);
-    }
+    nv12_out(&st, i, w, h, crate::guest::bytes_mut(p, need as u64));
     drop(st);
     let _ = crate::guest::call(c, g().set_range, &[buf, 0, need as u64]);
     d.trace(12, || format!("GetOutputBuffer index {i} -> {need} bytes{}", if pic { "" } else { " (no picture in this output: end of stream)" }));
     0
 });
+
+/// Output slot `i`'s NV12 picture (w x h, stride w) into the client's buffer; black when the slot has none (end of
+/// stream). True when it had a picture.
+fn nv12_out(st: &St, i: usize, w: usize, h: usize, out: &mut [u8]) -> bool {
+    let need = w * h * 3 / 2;
+    let pic = st.out[i].pic && st.out[i].frm.len() >= need;
+    if pic {
+        out[..need].copy_from_slice(&st.out[i].frm[..need]);
+    } else {
+        out[..w * h].fill(16);
+        out[w * h..need].fill(128);
+    }
+    pic
+}
 
 unsafe fn get_output_fmt(c: *mut Cpu) {
     let md = (*c).x[3];
@@ -1378,10 +1398,132 @@ pub fn register(r: &mut Registry) {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use crate::services::codec_video::tests::{clip, fnv, h264_access_units, ivf_frames, reference, H, W};
+
     #[test]
     fn avcc_to_annexb() {
         let avcc = [1, 0x64, 0, 0x28, 0xff, 0xe1, 0, 2, 0x67, 0x64, 1, 0, 2, 0x68, 0xee];
         assert_eq!(super::avcc_annexb(&avcc), vec![0, 0, 0, 1, 0x67, 0x64, 0, 0, 0, 1, 0x68, 0xee]);
         assert_eq!(super::aac_shape(&[0x11, 0x90], 0, 0), (48000, 2));
+    }
+
+    unsafe fn call(f: unsafe fn(*mut Cpu), args: &[u64]) -> u64 {
+        let mut cpu: Box<Cpu> = Box::new(std::mem::zeroed());
+        cpu.x[..args.len()].copy_from_slice(args);
+        f(&mut *cpu);
+        cpu.x[0]
+    }
+    fn p<T>(v: &mut T) -> u64 {
+        v as *mut T as u64
+    }
+
+    /// One clip through movie::Decoder as its client drives it (CPU mode, NV12): AcquireInputBufferIndex, the
+    /// packet into that input buffer, SendInputBufferForDecode (end of stream on the last), AcquireOutputBufferIndex,
+    /// the output buffer's NV12, ReleaseOutputBufferIndex. The SDK's MediaData / Buffer helpers are the game's code,
+    /// so the test sets the size Configure would read and copies the input / output the way they hand them over.
+    /// The client keeps its first 16 outputs (every slot) before it releases any: then packets stay queued, no
+    /// input buffer is free and no output comes (MediaCodec's back-pressure) until it releases them.
+    /// Returns the pictures' FNV in output order, whether end of stream was flagged, and whether back-pressure held.
+    unsafe fn run(ty: i32, packets: &[Vec<u8>]) -> (Vec<u64>, bool, bool) {
+        let mut obj = [0u64; 4];
+        let o = obj.as_mut_ptr() as u64;
+        let d = make(o, ty, FMT_NV12, 1, 0, 0);
+        if ty == T_AVC {
+            let mut st = d.st.lock().unwrap();
+            st.w = W as i32;
+            st.h = H as i32;
+        }
+        assert_eq!(call(start, &[o]), 0);
+        let (mut next, mut sums, mut eos_seen) = (0usize, vec![], false);
+        let (mut held, mut pressure) = (vec![], None);
+        let (w, h) = (W as usize, H as usize);
+        let mut frame = vec![0u8; w * h * 3 / 2];
+        let t0 = Instant::now();
+        while !eos_seen {
+            assert!(t0.elapsed().as_secs() < 30, "type {ty}: {next} packets in, {} pictures out", sums.len());
+            if next < packets.len() {
+                let (mut idx, mut left) = (0u32, 0u32);
+                match call(acquire_input, &[o, p(&mut idx), p(&mut left)]) {
+                    0 => {
+                        let pk = &packets[next];
+                        crate::guest::write_bytes(d.input_addr(idx as usize), pk);
+                        let flags = if next + 1 == packets.len() { EOS as u64 } else { 0 };
+                        let pts_us = (next as u64 * 1_000_000) / 24;
+                        assert_eq!(call(send_input, &[o, idx as u64, 0, pk.len() as u64, pts_us, flags]), 0);
+                        next += 1;
+                    }
+                    NO_INPUT => {}
+                    r => panic!("AcquireInputBufferIndex {r:#x}"),
+                }
+            }
+            let (mut idx, mut pts, mut flags, mut left) = (0u32, 0u64, 0u32, 0u32);
+            match call(acquire_output, &[o, p(&mut idx), p(&mut pts), p(&mut flags), p(&mut left)]) {
+                0 => {
+                    let pic = nv12_out(&d.st.lock().unwrap(), idx as usize, w, h, &mut frame);
+                    if pic {
+                        sums.push(fnv(&frame));
+                    }
+                    eos_seen = flags & EOS != 0;
+                    held.push(idx);
+                    if pressure.is_none() && held.len() < NOUT_VIDEO && !eos_seen {
+                        continue;
+                    }
+                    if pressure.is_none() && !eos_seen {
+                        // every slot held: no output, and the inputs run out, for as long as the client keeps them
+                        let mut no_input = 0;
+                        let t1 = Instant::now();
+                        let mut outs = 0;
+                        while t1.elapsed().as_millis() < 300 {
+                            let (mut i2, mut l2) = (0u32, 0u32);
+                            if call(acquire_input, &[o, p(&mut i2), p(&mut l2)]) == 0 && next < packets.len() {
+                                let pk = &packets[next];
+                                crate::guest::write_bytes(d.input_addr(i2 as usize), pk);
+                                assert_eq!(call(send_input, &[o, i2 as u64, 0, pk.len() as u64, (next as u64 * 1_000_000) / 24, 0]), 0);
+                                next += 1;
+                            } else {
+                                no_input += 1;
+                            }
+                            let (mut a, mut b, mut c2, mut e) = (0u32, 0u64, 0u32, 0u32);
+                            if call(acquire_output, &[o, p(&mut a), p(&mut b), p(&mut c2), p(&mut e)]) == 0 {
+                                outs += 1;
+                            }
+                            std::thread::sleep(std::time::Duration::from_millis(1));
+                        }
+                        pressure = Some(outs == 0 && no_input > 0 && d.st.lock().unwrap().pend.len() == NIN);
+                    }
+                    for i in held.drain(..) {
+                        assert_eq!(call(release_output, &[o, i as u64]), 0);
+                    }
+                }
+                NO_OUTPUT => std::thread::sleep(std::time::Duration::from_micros(200)),
+                r => panic!("AcquireOutputBufferIndex {r:#x}"),
+            }
+        }
+        assert_eq!(next, packets.len());
+        free(o);
+        (sums, eos_seen, pressure == Some(true))
+    }
+
+    fn check(ty: i32, name: &str, packets: Vec<Vec<u8>>) {
+        let want = reference(name);
+        let (got, eos, pressure) = unsafe { run(ty, &packets) };
+        assert!(eos, "type {ty}: end of stream flagged");
+        assert_eq!(got.len(), want.len(), "type {ty}: pictures out");
+        let bad: Vec<usize> = (0..want.len()).filter(|&i| got[i] != want[i]).collect();
+        assert!(bad.is_empty(), "type {ty}: pictures {bad:?} differ from ffmpeg's decode");
+        assert!(pressure, "type {ty}: with every output slot held, packets stay queued and no output comes");
+    }
+
+    /// Real clips (ffmpeg, `testdata/media`) through the movie decoder's service path, every picture checked
+    /// against ffmpeg's decode.
+    #[test]
+    fn movie_vp9_clip_decodes_as_ffmpeg() {
+        check(T_VP9, "clip_vp9.ivf", ivf_frames(&clip("clip_vp9.ivf")));
+    }
+
+    #[test]
+    fn movie_h264_clip_decodes_as_ffmpeg() {
+        check(T_AVC, "clip_h264.h264", h264_access_units(&clip("clip_h264.h264")));
     }
 }

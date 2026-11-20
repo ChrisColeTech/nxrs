@@ -36,9 +36,31 @@ pub fn presents() -> u64 {
 
 /// Called by whichever `nvnQueuePresentTexture` runs.
 pub fn note_present(window: u64, index: u32) {
-    if PRESENTS.fetch_add(1, Ordering::Relaxed) == 0 {
+    let n = PRESENTS.fetch_add(1, Ordering::Relaxed);
+    if n == 0 {
         crate::log!("nvn: first present (window {window:#x}, texture {index}), {:.3} s after start", crate::log::secs());
     }
+    frame_row(n + 1);
+}
+
+/// metrics=1: one `frames-*.csv` row a present: its number, the guest clock (s), the time since the last present
+/// (ms), the queue submits and NVN calls since then, the guest threads alive.
+fn frame_row(n: u64) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(nxconfig::metrics::enabled) {
+        return;
+    }
+    static LAST: Mutex<(u64, u64, u64)> = Mutex::new((0, 0, 0));
+    let now = crate::svc::guest_ns();
+    let (s, c) = (submits(), calls());
+    let mut l = LAST.lock().unwrap();
+    if n == 1 {
+        nxconfig::metrics::frame("#present,guest_s,frame_ms,submits,nvn_calls,threads".into());
+    }
+    let dt = if l.0 == 0 { 0.0 } else { (now - l.0) as f64 / 1e6 };
+    let threads = nxrt::kernel::try_get().map_or(0, |k| k.thread_count());
+    nxconfig::metrics::frame(format!("{n},{:.4},{dt:.3},{},{},{threads}", now as f64 / 1e9, s - l.1, c - l.2));
+    *l = (now, s, c);
 }
 
 pub fn submits() -> u64 {
@@ -195,6 +217,15 @@ fn sdk_major(data: &std::path::Path, switch2: bool) -> i32 {
 /// The hand-off to the graphics layer (docs/INTERFACES.md, graphics): every NVN proc the game asks for is the
 /// graphics layer's, on the real Vulkan device; its waits give the virtual core up; its present and submit marks
 /// come here. The game's host window opens now (until the front end owns it).
+/// 5A.6: the profile's forced present interval (engine.tsv `present_interval display`: a game that keeps its speed
+/// at 60; or the data folder's profile.tsv) to graphics' pacing; the ini's `present_interval` still wins there.
+pub fn apply_present_interval(p: &crate::profile::Profile) {
+    nxgfx::nvn::window::set_profile_interval(p.present_interval);
+    if p.present_interval > 0 {
+        crate::log!("profile: present interval {} forced (present_interval in the game's profile; the ini's present_interval=0 leaves it so)", p.present_interval);
+    }
+}
+
 fn bind_graphics() {
     for e in nxgfx::nvn::procs() {
         register(e.name, e.f);
@@ -202,10 +233,7 @@ fn bind_graphics() {
     nxgfx::nvn::set_proc_resolver(proc_address);
     nxgfx::nvn::set_guest_caller(crate::guest::call_current);
     nxgfx::vk::counters::set_guest_clock(crate::svc::guest_ns);
-    // the profile's `present_interval display` (engine.tsv: a game that keeps its speed at 60) forces every vsync
-    if profiles::by_title(crate::profile::get().program_id).is_some_and(|p| p.settings.present_interval == "display") {
-        nxgfx::nvn::window::set_profile_interval(1);
-    }
+    apply_present_interval(crate::profile::get());
     nxgfx::register_controls();
     nxgfx::nvn::set_hooks(nxgfx::nvn::Hooks { submit: note_submit, present: note_present, blocking: |f| crate::sched::without_core(f) });
     let prof = crate::profile::get();

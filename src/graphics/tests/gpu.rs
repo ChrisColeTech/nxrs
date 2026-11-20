@@ -814,3 +814,21 @@ fn ballot_counter_made_per_lane_counts_right() {
     assert_eq!(got, want);
     assert_eq!(validation_errors(), e0, "validation errors");
 }
+
+/// VRAM eviction (Turbo `vk_budget`): over the budget's threshold (`NXGFX_VRAM_EVICT_PCT`, 0 here so any use is
+/// over it) the images parked for a re-initialization are freed.
+#[test]
+fn vram_budget_frees_parked_images() {
+    let _g = setup();
+    let mut n = Nvn::new();
+    let t = n.texture(256, 256, f::RGBA8, 0, false);
+    n.register_texture(11, &t);
+    let mut t = t;
+    unsafe { nxgfx::nvn::tex::nvnTextureFinalize(&mut *t) };
+    let g = nxgfx::vk::Gpu::get().unwrap();
+    std::env::set_var("NXGFX_VRAM_EVICT_PCT", "0");
+    let freed = g.vram_budget();
+    std::env::remove_var("NXGFX_VRAM_EVICT_PCT");
+    eprintln!("VRAM budget: {} KB of parked images freed", freed >> 10);
+    assert!(freed >= 256 * 256 * 4, "the finalized texture's parked image");
+}

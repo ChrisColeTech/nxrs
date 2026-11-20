@@ -5,9 +5,17 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Tests: the PC's capture device hidden, to check the answer without one.
+#[cfg(test)]
+pub static HIDE_DEVICE: AtomicBool = AtomicBool::new(false);
+
 /// The default capture device's name, or None when the PC has none.
 pub fn device() -> Option<String> {
     use cpal::traits::HostTrait;
+    #[cfg(test)]
+    if HIDE_DEVICE.load(Ordering::SeqCst) {
+        return None;
+    }
     let host = cpal::default_host();
     let d = host.default_input_device()?;
     Some(d.to_string())

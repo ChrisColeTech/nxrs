@@ -28,7 +28,7 @@ struct Cli {
 
 #[derive(Args, Clone, Default)]
 struct Pkg {
-    /// prod.keys (default: SWR_PROD_KEYS, else %LOCALAPPDATA%\RecompLauncher\RecompLauncher\keys\prod.keys)
+    /// prod.keys (default: SWR_PROD_KEYS, else %LOCALAPPDATA%\nxrs\keys\prod.keys, then %LOCALAPPDATA%\RecompLauncher\RecompLauncher\keys\prod.keys)
     #[arg(long, global = true)]
     keys: Option<PathBuf>,
     /// Apply the game update in this package of its own (.nsp, .xci, or .nca with its .tik beside it)

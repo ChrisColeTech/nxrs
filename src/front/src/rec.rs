@@ -1,4 +1,6 @@
-//! F7: video recording. The window's picture (`capture::grab`) at `recording_fps` (15..60) as H.264 and the mixed
+//! F7: video recording. The game's own presented picture (graphics' frame sink, `nxgfx::vk::shot::set_frame_sink`:
+//! read back at the present, so overlays, other windows and DWM never get in; Turbo's F7) at `recording_fps` (15..60)
+//! as H.264 and the mixed
 //! game sound (the os layer's output tap, 48 kHz stereo) as AAC, in an MP4 written by Media Foundation's sink writer
 //! (QuickSync / NVENC / VCE when the system has them): `recordings\recording_<date>_<time>.mp4` beside the game. The
 //! title bar says RECORDING while it runs.
@@ -24,6 +26,25 @@ static BUSY: AtomicBool = AtomicBool::new(false);
 static THREAD: Mutex<Option<std::thread::JoinHandle<()>>> = Mutex::new(None);
 /// Mixed audio from the tap, waiting to be written: (samples, rate, channels).
 static AUDIO: Mutex<VecDeque<(Vec<f32>, u32, u32, f64)>> = Mutex::new(VecDeque::new());
+/// The newest game picture graphics handed over, and how many came so far.
+static LATEST: Mutex<(Option<crate::capture::Frame>, u64)> = Mutex::new((None, 0));
+
+/// Graphics' frame sink (its completion thread): the presented picture, BGRA top-down.
+fn game_frame(bgra: &[u8], w: u32, h: u32) {
+    let mut l = LATEST.lock().unwrap();
+    l.0 = Some(crate::capture::Frame { w, h, bgra: bgra.to_vec() });
+    l.1 += 1;
+}
+
+/// The newest game picture after the `seen`-th (None while no newer one came).
+fn newer_frame(seen: u64) -> Option<(crate::capture::Frame, u64)> {
+    let mut l = LATEST.lock().unwrap();
+    if l.1 > seen {
+        let n = l.1;
+        return l.0.take().map(|f| (f, n));
+    }
+    None
+}
 
 pub fn recording() -> bool {
     ON.load(Ordering::Acquire)
@@ -218,10 +239,21 @@ fn start() {
     let fps = nxconfig::int("recording_fps").clamp(15, 60) as u32;
     let smooth = nxconfig::flag("smooth_recording");
     let g = std::time::Instant::now();
-    let first = crate::capture::grab();
+    *LATEST.lock().unwrap() = (None, 0);
+    nxgfx::vk::shot::set_frame_sink(fps, Some(game_frame));
+    // the first picture: the next present's (at most 3 s: a game showing nothing records nothing)
+    let mut first = None;
+    while g.elapsed().as_secs_f64() < 3.0 {
+        if let Some((f, _)) = newer_frame(0) {
+            first = Some(f);
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
     let first_s = g.elapsed().as_secs_f64();
     let Some(first) = first else {
-        crate::flog!("[RED] F7: the window could not be captured; no recording");
+        nxgfx::vk::shot::set_frame_sink(0, None);
+        crate::flog!("[RED] F7: no game picture came in 3 s; no recording");
         return;
     };
     let dir = crate::game().exe_dir.join("recordings");
@@ -250,7 +282,7 @@ fn start() {
             crate::window::set_state(1, "RECORDING (F7 to stop)");
             let g0 = nxos::clock::now_ns();
             let mut last = first;
-            let (mut grabbed, mut grab_s, mut repeats) = (0u64, 0f64, 0u64);
+            let (mut grabbed, mut grab_s, mut repeats, mut seen) = (0u64, 0f64, 0u64, 1u64);
             let (mut win_t, mut win_presents, mut win_grabs) = (std::time::Instant::now(), nxos::nvn::presents(), 0u64);
             // smooth: start at the rate the first grab allows, not at real time (the sound would run ahead)
             let mut rate = if smooth { (1.0 / first_s.max(1e-3) / fps as f64 * 0.95).clamp(0.05, 1.0) } else { 1.0 };
@@ -266,8 +298,12 @@ fn start() {
                 }
                 let t = std::time::Instant::now();
                 let presents = nxos::nvn::presents();
-                if let Some(f) = crate::capture::grab() {
-                    last = f;
+                if let Some((f, n)) = newer_frame(seen) {
+                    seen = n;
+                    // a picture of another size (the game changed its resolution) is left out: the file keeps one
+                    if (f.w & !1, f.h & !1) == (w, h) {
+                        last = f;
+                    }
                     grabbed += 1;
                     win_grabs += 1;
                     grab_s += t.elapsed().as_secs_f64();
@@ -304,6 +340,7 @@ fn start() {
                 }
             }
             nxos::media::sink::set_tap(None);
+            nxgfx::vk::shot::set_frame_sink(0, None);
             nxos::clock::set_rate(1.0);
             let (frames, samples) = (wr.frame, wr.samples);
             match unsafe { wr.finish() } {

@@ -108,7 +108,19 @@ pub fn apply_bytes(loaded: &[(String, u64, u64)]) {
 /// The enabled mods' RomFS folders, the first given the most weight (folder order reversed: a later folder name wins
 /// as in Ryujinx's load order).
 fn layers() -> Vec<&'static Path> {
-    MODS.get().map_or(vec![], |m| m.mods.iter().rev().filter(|r| r.on).filter_map(|r| r.romfs.as_deref()).collect())
+    let mut v: Vec<&'static Path> = OVERLAYS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+    v.extend(MODS.get().map_or(vec![], |m| m.mods.iter().rev().filter(|r| r.on).filter_map(|r| r.romfs.as_deref()).collect::<Vec<_>>()));
+    v
+}
+
+/// RomFS folders a game fix writes at start (os `gamefix`: Mario Kart World's resolution overlay), layered over the
+/// game's RomFS and the player's mods, the latest added first.
+static OVERLAYS: std::sync::Mutex<Vec<&'static Path>> = std::sync::Mutex::new(Vec::new());
+
+/// Layers `dir` (a RomFS-shaped folder) over the game's RomFS, above every mod.
+pub fn add_overlay(dir: PathBuf) {
+    let d: &'static Path = Box::leak(dir.into_boxed_path());
+    OVERLAYS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(0, d);
 }
 
 /// A mod's file for this path of the game's RomFS (`a/b.bin`), if one replaces or adds it.

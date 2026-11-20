@@ -34,7 +34,9 @@ fn u16s(a: u64, max: usize) -> String {
 /// The text the player gives (or the default, with no window); None = cancelled.
 pub fn ask(title: &str, default: &str, max: usize) -> Option<String> {
     let auto = std::env::var("NXOS_SWKBD").is_ok_and(|v| v == "auto") || std::env::var("NXGFX_HEADLESS").is_ok();
+    crate::services::oe::applet_enter("swkbd");
     let r = if auto { Some(default.to_string()) } else { without_core(|| window::input(title, default, max)) };
+    crate::services::oe::applet_leave();
     let r = r.map(|t| t.chars().take(if max > 0 { max } else { 500 }).collect::<String>());
     crate::log!("swkbd: \"{title}\" -> {}", match &r {
         Some(t) => format!("OK '{t}'"),
@@ -426,4 +428,43 @@ pub fn register(r: &mut Registry) {
         r.force(&n, W, f);
     }
     let _ = w64;
+}
+
+#[cfg(test)]
+mod tests {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CHAR};
+
+    /// Types into the real Win32 text box: `keys` posted as WM_CHAR to the window once it is up.
+    fn type_into(keys: &'static [u16]) {
+        std::thread::spawn(move || unsafe {
+            let cls: Vec<u16> = "nxos keyboard\0".encode_utf16().collect();
+            for _ in 0..500 {
+                let h = FindWindowW(cls.as_ptr(), std::ptr::null());
+                if !h.is_null() {
+                    for &k in keys {
+                        PostMessageW(h, WM_CHAR, k as usize, 0);
+                    }
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+        });
+    }
+
+    /// The text box path itself (a real window, its message loop and WM_CHAR handling): typed text replaces the
+    /// selected default, Backspace edits, Enter answers it; Esc keeps the default. One test: one box at a time.
+    /// Opt-in (`cargo test -p os -- --ignored win32_text_box`): it opens a real topmost window on the desktop, which
+    /// a default test run must not do while someone uses the PC; with no interactive desktop the box cannot open and
+    /// the default comes back.
+    #[test]
+    #[ignore]
+    fn win32_text_box_answers_what_was_typed() {
+        type_into(&[b'A' as u16, b'x' as u16, 0x08, b'b' as u16, 0x0d]);
+        assert_eq!(super::window::input("Your name", "Player", 10).as_deref(), Some("Ab"));
+        type_into(&[b'Z' as u16, 0x1b]);
+        assert_eq!(super::window::input("Your name", "Player", 10).as_deref(), Some("Player"));
+        // the length limit
+        type_into(&[b'1' as u16, b'2' as u16, b'3' as u16, 0x0d]);
+        assert_eq!(super::window::input("Your name", "", 2).as_deref(), Some("12"));
+    }
 }

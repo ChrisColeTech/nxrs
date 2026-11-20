@@ -187,3 +187,69 @@ pub fn register() {
     ipc::register("bsd:s", || Box::new(Bsd("bsd:s")));
     ipc::register("bsd:a", || Box::new(Bsd("bsd:a")));
 }
+
+#[cfg(test)]
+mod tests {
+    use crate::ipc::hipc::{self, Buf, Builder, T_REQUEST};
+
+    fn send(h: u32, cmd: u32, data: Vec<u8>, a: Vec<Buf>, b: Vec<Buf>) -> hipc::Response {
+        let mut m = Builder { ty: T_REQUEST, cmd, data, a, b, ..Default::default() }.build();
+        crate::ipc::process(h, &mut m);
+        hipc::parse_response(&m, false).unwrap()
+    }
+    fn ret(r: &hipc::Response) -> (i32, i32) {
+        (i32::from_le_bytes(r.data[0..4].try_into().unwrap()), i32::from_le_bytes(r.data[4..8].try_into().unwrap()))
+    }
+
+    /// btm:u as Turbo 13a2693 answers it: command 0 hands out IBtmUserCore; its four Acquire...Event commands (0,
+    /// 17, 26, 33) answer true with an event; the rest succeed with nothing.
+    #[test]
+    fn btm_u_hands_out_its_interface() {
+        crate::mem::tests::test_kernel();
+        super::register();
+        let h = crate::ipc::connect("btm:u").unwrap();
+        let r = send(h, 0, vec![], vec![], vec![]);
+        assert_eq!((r.result, r.moved.len()), (0, 1));
+        let core = r.moved[0];
+        for cmd in [0, 17, 26, 33] {
+            let r = send(core, cmd, vec![], vec![], vec![]);
+            assert_eq!((r.result, r.data[0], r.copy.len()), (0, 1, 1), "Acquire...Event {cmd}");
+        }
+        let r = send(core, 5, vec![], vec![], vec![]);
+        assert_eq!((r.result, r.copy.len()), (0, 0));
+    }
+
+    /// bsd event descriptors over IPC (Turbo 362b172): EventFd, Write adds to the counter, Poll reports it readable
+    /// (and writable), Read takes it (then, non-blocking, EAGAIN 35), Close; the registrations past command 33 succeed.
+    #[test]
+    fn bsd_event_descriptors() {
+        super::register();
+        let h = crate::ipc::connect("bsd:s").unwrap();
+        // non-blocking (EFD_NONBLOCK, 4): a read with no count answers EAGAIN instead of waiting
+        let r = send(h, 31, [5u64.to_le_bytes().to_vec(), 4u32.to_le_bytes().to_vec()].concat(), vec![], vec![]);
+        let (fd, e) = ret(&r);
+        assert!(fd >= 0 && e == 0, "EventFd -> {fd}, errno {e}");
+        let three = 3u64.to_le_bytes();
+        let r = send(h, 24, (fd as u32).to_le_bytes().to_vec(), vec![Buf { addr: three.as_ptr() as u64, size: 8, tag: 0 }], vec![]);
+        assert_eq!(ret(&r), (8, 0), "Write");
+        let mut fds = [0u8; 8];
+        fds[..4].copy_from_slice(&fd.to_le_bytes());
+        fds[4..6].copy_from_slice(&(1i16 | 4).to_le_bytes());
+        let mut out = [0u8; 8];
+        let r = send(h, 6, [1u32.to_le_bytes(), 0u32.to_le_bytes()].concat(), vec![Buf { addr: fds.as_ptr() as u64, size: 8, tag: 0 }], vec![Buf { addr: out.as_mut_ptr() as u64, size: 8, tag: 0 }]);
+        assert_eq!(ret(&r), (1, 0), "Poll: one ready");
+        assert_eq!(i16::from_le_bytes([out[6], out[7]]), 1 | 4, "POLLIN with a count, POLLOUT always");
+        let mut v = [0u8; 8];
+        let r = send(h, 25, (fd as u32).to_le_bytes().to_vec(), vec![], vec![Buf { addr: v.as_mut_ptr() as u64, size: 8, tag: 0 }]);
+        assert_eq!((ret(&r), u64::from_le_bytes(v)), ((8, 0), 8), "Read takes the whole count");
+        let r = send(h, 25, (fd as u32).to_le_bytes().to_vec(), vec![], vec![Buf { addr: v.as_mut_ptr() as u64, size: 8, tag: 0 }]);
+        assert_eq!(ret(&r), (-1, 35), "then EAGAIN");
+        let r = send(h, 6, [1u32.to_le_bytes(), 0u32.to_le_bytes()].concat(), vec![Buf { addr: fds.as_ptr() as u64, size: 8, tag: 0 }], vec![Buf { addr: out.as_mut_ptr() as u64, size: 8, tag: 0 }]);
+        assert_eq!(i16::from_le_bytes([out[6], out[7]]), 4, "no count: only POLLOUT");
+        let _ = r;
+        assert_eq!(ret(&send(h, 26, (fd as u32).to_le_bytes().to_vec(), vec![], vec![])), (0, 0), "Close");
+        assert_eq!(ret(&send(h, 36, vec![], vec![], vec![])), (0, 0), "SDK 22's registration");
+        let r = send(h, 2, [2u32, 1, 0].iter().flat_map(|v| v.to_le_bytes()).collect(), vec![], vec![]);
+        assert_eq!(ret(&r).0, -1, "a TCP socket: no network");
+    }
+}

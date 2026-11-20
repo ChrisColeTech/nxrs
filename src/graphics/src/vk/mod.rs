@@ -14,6 +14,7 @@
 //! | `present` | the host window's swap chain and the pacing log |
 
 pub mod counters;
+pub mod defer;
 pub mod device;
 pub mod exec;
 pub mod framegen;

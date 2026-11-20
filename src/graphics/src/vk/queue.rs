@@ -423,6 +423,7 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
         g.dev().reset_command_buffer(s.main, vk::CommandBufferResetFlags::empty()).unwrap();
         g.dev().begin_command_buffer(s.pre, &bi).unwrap();
         g.dev().begin_command_buffer(s.main, &bi).unwrap();
+        super::defer::begin(s.main);
         g.dev().cmd_reset_query_pool(s.pre, s.query, 0, 256);
         g.dev().cmd_reset_query_pool(s.pre, s.occl, 0, 256);
         g.dev().cmd_write_timestamp2(s.main, vk::PipelineStageFlags2::TOP_OF_PIPE, s.query, 0);
@@ -494,6 +495,7 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
     unsafe {
         g.dev().cmd_write_timestamp2(s.main, vk::PipelineStageFlags2::ALL_COMMANDS, s.query, 1);
         g.dev().end_command_buffer(s.pre).unwrap();
+        super::defer::end(s.main);
         g.dev().end_command_buffer(s.main).unwrap();
     }
     let _x = super::pipe::driver_exclusive(g).then(|| super::pipe::EXCLUSIVE.lock().unwrap());
@@ -788,7 +790,11 @@ fn aq(g: &'static Gpu) -> &'static Aq {
 
 /// Ops queued and not replayed at most (Turbo's AQ_N), presents among them at most (AQ_PRESENTS: frames in flight).
 const AQ_MAX: u64 = 64;
-const AQ_MAX_PRESENTS: u64 = 2;
+/// `NXGFX_ASYNC_PRESENTS` (default 2): presents queued at most.
+fn aq_max_presents() -> u64 {
+    static N: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *N.get_or_init(|| std::env::var("NXGFX_ASYNC_PRESENTS").ok().and_then(|v| v.parse().ok()).unwrap_or(2u64).max(1))
+}
 static AQ_PRESENTS: AtomicU64 = AtomicU64::new(0);
 
 /// Before a submit or present is queued: waits while the replay thread is that far behind (the game's thread, inside
@@ -799,7 +805,7 @@ pub fn aq_wait_room(present: bool) {
     }
     let Some(a) = AQ.get() else { return };
     let full = || {
-        a.tail.load(Ordering::Acquire) - a.done.load(Ordering::Acquire) >= AQ_MAX - 1 || (present && AQ_PRESENTS.load(Ordering::Acquire) >= AQ_MAX_PRESENTS)
+        a.tail.load(Ordering::Acquire) - a.done.load(Ordering::Acquire) >= AQ_MAX - 1 || (present && AQ_PRESENTS.load(Ordering::Acquire) >= aq_max_presents())
     };
     if !full() {
         return;

@@ -24,7 +24,8 @@ fn threads() -> &'static Mutex<Threads> {
 
 static ON: OnceLock<bool> = OnceLock::new();
 
-fn on() -> bool {
+/// Whether the profiler runs (the ini's `profile`, read once at start-up).
+pub fn on() -> bool {
     *ON.get().unwrap_or(&false)
 }
 

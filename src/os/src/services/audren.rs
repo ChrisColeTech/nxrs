@@ -134,7 +134,7 @@ fn in_process() -> bool {
     *V.get_or_init(|| {
         let v = crate::hle::sym(EXEC).is_some();
         if !v {
-            crate::log!("[RED] audren: the SDK has no renderer of its own: its client talks to audren:u, which the host does not serve yet");
+            crate::log!("audren: the SDK has no renderer of its own (SDK 1.x): its client talks to audren:u, mixed by the host (audren_ipc)");
         }
         v
     })

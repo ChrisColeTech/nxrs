@@ -188,6 +188,7 @@ impl Stream {
             if !st.dry {
                 st.dry = true;
                 st.underruns += 1;
+                crate::metric!("audio_underruns", 1);
             }
             out[0] += st.prev[0] * st.env;
             out[1] += st.prev[1] * st.env;
@@ -219,6 +220,7 @@ impl Stream {
             st.rate += (target - st.rate) * 0.0005;
             if st.rate < 0.999 {
                 st.slowed += 1;
+                crate::metric!("audio_slowed_frames", 1);
             }
         } else {
             st.rate = 1.0;

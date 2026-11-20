@@ -2,7 +2,8 @@
 //! guest code runs): the memory, IPC, information and counter SVCs are answered here; the kernel's (threads,
 //! synchronization) go to `nxrt::kernel::svc`, which tells the scheduler (`sched.rs`) about blocking waits; ExitThread,
 //! ExitProcess and Break are left to the runtime. After every SVC answered here comes the scheduler's checkpoint. An
-//! SVC nobody handles (the runtime's fallback) answers success with an `UNIMPL Svc` gap line, as on nxnative.
+//! SVC nobody handles (the runtime's fallback) answers NotImplemented (0xF601) with an `UNIMPL Svc` gap line, as
+//! Turbo does (audit 2026-11-20: answering success was a fake).
 //!
 //! The counter (CNTPCT/CNTVCT and GetSystemTick, the runtime's `rt_ticks`) runs at the title's rate (19.2 MHz on
 //! Switch 1, 31.25 MHz on Switch 2: the runtime's `rt_tick_hz`, also what CNTFRQ reads) on the guest clock
@@ -61,7 +62,7 @@ pub fn counts() -> Vec<(u32, u64)> {
 const SERVED: &[u8] = &[
     0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
     0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x21, 0x22, 0x24, 0x25, 0x26, 0x27, 0x29, 0x2C, 0x2D,
-    0x34, 0x35, 0x36, 0x45,
+    0x2E, 0x2F, 0x30, 0x31, 0x34, 0x35, 0x36, 0x37, 0x45, 0x6F, 0x80,
 ];
 
 /// Registers os's SVCs, the fallback and the counter's clock with the runtime (before any guest code runs).
@@ -97,6 +98,11 @@ pub fn name(imm: u32) -> &'static str {
         0x2D => "UnmapPhysicalMemory",
         0x30 => "GetResourceLimitLimitValue",
         0x31 => "GetResourceLimitCurrentValue",
+        0x2E => "GetDebugFutureThreadInfo",
+        0x2F => "GetLastThreadInfo",
+        0x37 => "GetResourceLimitPeakValue",
+        0x6F => "GetSystemInfo",
+        0x80 => "SetGpuMemoryAttribute",
         0x32 => "SetThreadActivity",
         0x33 => "GetThreadContext3",
         0x36 => "SynchronizePreemptionState",
@@ -106,6 +112,37 @@ pub fn name(imm: u32) -> &'static str {
         0x51 => "MapTransferMemory",
         0x52 => "UnmapTransferMemory",
         _ => "?",
+    }
+}
+
+/// Horizon's kernel results for an SVC the host does not serve (Turbo kernel.c R_NOTIMPL / R_NOTFOUND).
+pub const R_NOT_IMPLEMENTED: u64 = 0xF601;
+pub const R_NOT_FOUND: u64 = 0xF201;
+
+/// A resource limit's limit (and peak) value (Turbo kernel.c): 0 physical memory (the pool), 1 threads 800,
+/// 2 events 800, 3 transfer memories 256, the rest (sessions) 64.
+pub fn resource_limit(which: u32) -> u64 {
+    match which {
+        0 => crate::mem::try_get().and_then(|m| m.info(6)).unwrap_or(0),
+        1 | 2 => 800,
+        3 => 256,
+        _ => 64,
+    }
+}
+
+/// GetSystemInfo(type, subtype) (Turbo kernel.c): type 0 a pool's physical size (the application's, then the
+/// applet, system and unsafe pools), 1 its use, 2 the initial process id range.
+pub fn system_info(ty: u32, sub: u64, pool: u64, used: u64) -> u64 {
+    match (ty, sub) {
+        (0, 0) => pool,
+        (0, 1) => 0x1FB0_0000,
+        (0, 2) => 0x29D0_0000,
+        (0, _) => 0x600_0000,
+        (1, 0) => used,
+        (1, _) => 0x100_0000,
+        (2, 0) => 1,
+        (2, _) => 0x50,
+        _ => 0,
     }
 }
 
@@ -154,8 +191,8 @@ fn unhandled(cpu: &mut Cpu, imm: u32) -> bool {
         n.fetch_add(1, Ordering::Relaxed);
     }
     let pc = nxrt::svc::caller_pc();
-    crate::log::gap(Gap::Svc, &format!("svc {imm:#x} {}", name(imm)), &format!("at {}, answered success", nxrt::dispatch::guest_name(pc)));
-    cpu.x[0] = 0;
+    crate::log::gap(Gap::Svc, &format!("svc {imm:#x} {}", name(imm)), &format!("at {}, answered NotImplemented", nxrt::dispatch::guest_name(pc)));
+    cpu.x[0] = R_NOT_IMPLEMENTED;
     crate::sched::checkpoint(false);
     true
 }
@@ -181,7 +218,34 @@ unsafe fn svc(cpu: &mut Cpu, imm: u32, pc: u64) -> bool {
             }
             Err(r) => cpu.x[0] = r,
         },
-        0x02 | 0x03 => cpu.x[0] = 0,
+        0x02 => cpu.x[0] = m.set_permission(cpu.x[0], cpu.x[1], cpu.x[2] as u32),
+        0x03 => cpu.x[0] = m.set_attribute(cpu.x[0], cpu.x[1], cpu.x[2] as u32, cpu.x[3] as u32, false),
+        0x80 => {
+            let r = m.set_attribute(cpu.x[0], cpu.x[1], cpu.x[2] as u32, cpu.x[3] as u32, true);
+            crate::log_once!("svc 0x80", "svc SetGpuMemoryAttribute {:#x}+{:#x} {:#x}/{:#x}: recorded (result {r:#x})", cpu.x[0], cpu.x[1], cpu.x[3], cpu.x[2]);
+            cpu.x[0] = r;
+        }
+        0x30 | 0x37 => {
+            // GetResourceLimitLimitValue / PeakValue(handle, which)
+            cpu.x[1] = resource_limit(cpu.x[2] as u32);
+            cpu.x[0] = 0;
+        }
+        0x31 => {
+            // GetResourceLimitCurrentValue: memory in use, live threads, 16 of the rest
+            cpu.x[1] = match cpu.x[2] as u32 {
+                0 => m.info(7).unwrap_or(0),
+                1 => nxrt::kernel::get().thread_count() as u64,
+                _ => 16,
+            };
+            cpu.x[0] = 0;
+        }
+        0x6F => {
+            // GetSystemInfo(type, handle, subtype): newer SDKs abort at boot on 0
+            cpu.x[1] = system_info(cpu.x[1] as u32, cpu.x[3], m.info(6).unwrap_or(0), m.info(7).unwrap_or(0));
+            cpu.x[0] = 0;
+        }
+        // GetDebugFutureThreadInfo / GetLastThreadInfo: no debugger
+        0x2E | 0x2F => cpu.x[0] = R_NOT_FOUND,
         0x04 => cpu.x[0] = m.map_memory(cpu.x[0], cpu.x[1], cpu.x[2]),
         0x05 => cpu.x[0] = m.unmap_memory(cpu.x[0], cpu.x[1], cpu.x[2]),
         0x06 => {
@@ -366,4 +430,26 @@ pub(crate) fn write_info(a: u64, base: u64, size: u64, state: u32) {
     w64(a, base);
     w64(a + 8, size);
     w32(a + 16, state);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Turbo's answers (kernel.c): resource limits, GetSystemInfo, and NotImplemented / NotFound for what the host
+    /// does not serve; the unhandled path no longer answers success.
+    #[test]
+    fn unserved_svcs_answer_as_turbo() {
+        assert_eq!((resource_limit(1), resource_limit(2), resource_limit(3), resource_limit(4)), (800, 800, 256, 64));
+        assert_eq!(system_info(0, 0, 0xCD50_0000, 0), 0xCD50_0000);
+        assert_eq!((system_info(0, 1, 0, 0), system_info(0, 2, 0, 0), system_info(0, 3, 0, 0)), (0x1FB0_0000, 0x29D0_0000, 0x600_0000));
+        assert_eq!((system_info(1, 0, 0, 0x1234), system_info(1, 1, 0, 0)), (0x1234, 0x100_0000));
+        assert_eq!((system_info(2, 0, 0, 0), system_info(2, 1, 0, 0)), (1, 0x50));
+        let mut cpu: Box<Cpu> = Box::new(unsafe { std::mem::zeroed() });
+        assert!(unhandled(&mut cpu, 0x4B));
+        assert_eq!(cpu.x[0], R_NOT_IMPLEMENTED);
+        for imm in [0x02u8, 0x03, 0x2E, 0x2F, 0x30, 0x31, 0x37, 0x6F, 0x80] {
+            assert!(SERVED.contains(&imm), "{imm:#x} is served, not answered by the fallback");
+        }
+    }
 }

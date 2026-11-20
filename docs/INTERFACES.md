@@ -1648,3 +1648,39 @@ compiled code).
 `cache` <-> `cache0`; backup `save-backup-<time>`), `nxrs --select-title <g> --copy-saves`. `.xci` sources (nxrs only).
 release.yml: engine bundle behind `nxrs_engine` / `NXRS_ENGINE_IN_RELEASE` (off).
 
+- **Audit rows (lane O3, later the same night):** focus (`oe::{set_focus, applet_enter, applet_leave, focus}`;
+  FocusStateChanged queued at boot as Turbo; **a window behind others is now OutOfFocus for the game**, so
+  background scripted runs may want `NXRS_KEEP_FOCUS=1`), touch (`input::{set_touch, touch_now}`, control `touch`
+  / `drag`), control `addr` / `memdump` / `env` / `speed` / `focus`, F3 / F7 from graphics' shot and frame sink, F5
+  thread states, DLC with missing data not offered, Turbo `save\user` adopted as user 1, keys under
+  `%LOCALAPPDATA%\nxrs\keys` first. SetMemoryAttribute records any bits (Turbo); only SetGpuMemoryAttribute refuses
+  bits other than 0x20 (the DKB 0xE801 abort at 0.9 s: DKB and Wonder start clean, `*-O3-dkb-svc`, `*-O3-wonder-svc`).
+- **Jamboree (for the coordinator / lane G4):** with the boot FocusStateChanged and `NXRS_KEEP_FOCUS=1`
+  (`build/I/runs/20261120-030909-O3-jamboree-focus`, current tree incl. G4's uncommitted graphics), the game ran
+  60 FPS through the L+R / A steps, then at 103 s (entering the hub) presents stopped: frame 4731 took 2.5 s and the
+  main thread sits in `nvnQueueFinish` (thread dump in the run's actions.jsonl). Whether the focus message changed the
+  fade is not known yet: the follow-up run was closed from outside at 19 s (the owner is at the PC and closes game
+  windows), so lane O3 stopped running games. Next: one run of the same steps with `NXGFX_ASYNC=0` / the last
+  committed graphics, to tell the GPU hang from the fade.
+
+**Where MKW stands now (lane K, 2026-11-20 03:20).** No crash. `K-mkw5-cores6`: the course-map loading screen
+(picture right, 2560x1440 from the game's own capture, `0001-shot_boot.png`). `K-mkw6-race` (scenario `mkw`, 230 s)
+and `K-mkw7-sync` (`NXGFX_ASYNC=0`): presents stop at 31-40 s (frames 168-216, the next scene after the map) and
+never resume; every guest thread waits, the main thread sits in **`nvnSyncWait` called from the frame update
+(main+0x69d038, frames main+0x69cd74 / 0xe5bfd4 / 0x69a6a8)**; the same with async and sync replay; no fault, no GPU
+error line, no "wait expired" red (so its waits are short and repeated). The race is not reached; FPS and the
+10-minute run are not measured yet. **For lane G4 (most likely theirs):** a queue parked on a `WAIT_EVENT` whose
+event is never released (the retry runs only on `nvnEventSignal` and on submissions: an event the guest writes with
+a plain store, or one a parked queue's own later record signals, parks for good), so the fence the frame update
+waits for never completes. A log line when a queue parks / is still parked at the os stall dump would settle it.
+Earlier (`K-mkw5`) the window losing focus paused the game (FocusHandlingMode 2, as on a console): scripted MKW runs
+need `NXRS_KEEP_FOCUS=1`.
+
+**Not ported (and why):** mkw-recomp's button-icon sheet redraw (#19, its own UI textures), Discord presence, its
+launcher / setup / settings menu, LAN sockets (no LAN layer in nxrs; the `lan` set is there, off). The 1.8.0
+rendering fixes of its CHANGELOG are graphics / shader work, filed for **lane G4**: #423 / #485 push constants reach
+every stage and bank c24 (the upscale pass and SMAA; 1.8.0's docked picture was cropped and blurred without it), #441
+compute writes of the water height map reaching guest memory at the fence, #291 pitch textures of any size written
+back at a fence wait, #468 released textures overwritten by a later image dropped, #22 constant-bank reads through
+a storage view, #395 integer abs written as `x * ((x >> 31) | 1)`, photo mode's compute push (#384). Not checked
+against nxrs's graphics in this lane.

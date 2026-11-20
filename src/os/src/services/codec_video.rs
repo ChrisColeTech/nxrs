@@ -972,7 +972,186 @@ pub fn register(r: &mut Registry) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
+    use super::*;
+
+    /// Real clips made with ffmpeg (`testdata/media`, 192x112, 72 frames at 24 FPS, testsrc2): VP9 and AV1 in IVF,
+    /// H.264 (x264, B-frames, access unit delimiters) as an Annex B stream; `<clip>.nv12.fnv` is ffmpeg's own
+    /// decode of each, one FNV-1a 64 of the NV12 picture a line, in display order.
+    pub const W: u32 = 192;
+    pub const H: u32 = 112;
+
+    pub fn clip(name: &str) -> Vec<u8> {
+        std::fs::read(format!("{}/testdata/media/{name}", env!("CARGO_MANIFEST_DIR"))).unwrap()
+    }
+    pub fn reference(name: &str) -> Vec<u64> {
+        let t = std::fs::read_to_string(format!("{}/testdata/media/{name}.nv12.fnv", env!("CARGO_MANIFEST_DIR"))).unwrap();
+        t.lines().filter(|l| !l.starts_with('#')).map(|l| u64::from_str_radix(l.trim(), 16).unwrap()).collect()
+    }
+    pub fn fnv(b: &[u8]) -> u64 {
+        b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| (h ^ x as u64).wrapping_mul(0x100_0000_01b3))
+    }
+    /// An IVF file's frames.
+    pub fn ivf_frames(b: &[u8]) -> Vec<Vec<u8>> {
+        assert_eq!(&b[..4], b"DKIF");
+        let mut o = u16::from_le_bytes([b[6], b[7]]) as usize;
+        let mut v = vec![];
+        while o + 12 <= b.len() {
+            let n = u32::from_le_bytes(b[o..o + 4].try_into().unwrap()) as usize;
+            v.push(b[o + 12..o + 12 + n].to_vec());
+            o += 12 + n;
+        }
+        v
+    }
+    /// An Annex B H.264 stream cut into access units at its delimiters (NAL type 9).
+    pub fn h264_access_units(b: &[u8]) -> Vec<Vec<u8>> {
+        let mut cuts = vec![];
+        for i in 0..b.len().saturating_sub(4) {
+            if b[i..i + 3] == [0, 0, 1] && b[i + 3] & 0x1f == 9 {
+                cuts.push(if i > 0 && b[i - 1] == 0 { i - 1 } else { i });
+            }
+        }
+        cuts.push(b.len());
+        cuts.windows(2).map(|w| b[w[0]..w[1]].to_vec()).collect()
+    }
+
+    /// A host function called as the guest calls it: x0..x7, the rest on a stack.
+    unsafe fn call(f: unsafe fn(*mut Cpu), args: &[u64]) -> u64 {
+        let mut cpu: Box<Cpu> = Box::new(std::mem::zeroed());
+        let stack: Vec<u64> = args.iter().skip(8).copied().chain([0; 8]).collect();
+        for (i, a) in args.iter().take(8).enumerate() {
+            cpu.x[i] = *a;
+        }
+        cpu.sp = stack.as_ptr() as u64;
+        f(&mut *cpu);
+        cpu.x[0]
+    }
+
+    fn p<T>(v: &mut T) -> u64 {
+        v as *mut T as u64
+    }
+
+    /// One clip through a decoder the way an SDK client drives it: one image pool per picture (8), registered;
+    /// packets submitted until the decoder answers busy (3603), each output buffer acquired, its sync handle waited
+    /// on (nn::gs::TryWaitNativeSync), its properties read, its picture read as NV12, released again. Returns the
+    /// pictures' FNV in output order, their times, whether end of stream was flagged, and how often the decoder
+    /// pushed back.
+    unsafe fn run(kind: Kind, packets: &[Vec<u8>]) -> (Vec<u64>, Vec<i64>, bool, u32) {
+        const N: usize = 8;
+        const FRAME_NS: u64 = 1_000_000_000 / 24;
+        let mut t = vec![0u64; 0x40];
+        let tp = t.as_mut_ptr() as u64;
+        let mut cpu: Box<Cpu> = Box::new(std::mem::zeroed());
+        assert_eq!(dec_init(&mut *cpu, tp, kind, W, H, 0, 0, 0, 0), 0);
+        // image pools: MakeDecodeImagePreference, CalculateDecoderImagePoolBuffer, InitializeDecoderImagePool
+        let mut pref_buf = [0u8; 24];
+        let mut c2: Box<Cpu> = Box::new(std::mem::zeroed());
+        c2.x[..4].copy_from_slice(&[W as u64, H as u64, 0, 0]);
+        c2.x[8] = pref_buf.as_mut_ptr() as u64;
+        pref(&mut *c2);
+        let (mut size, mut align) = (0u64, 0u64);
+        call(pool_size, &[p(&mut size), p(&mut align), pref_buf.as_ptr() as u64, 1]);
+        assert!(size >= (W * H * 4) as u64 && align > 0);
+        let mut pools = vec![[0u64; 4]; N];
+        let mut mem = vec![vec![0u8; size as usize]; N];
+        for i in 0..N {
+            assert_eq!(call(pool_init, &[pools[i].as_mut_ptr() as u64, mem[i].as_mut_ptr() as u64, size, pref_buf.as_ptr() as u64, 1]), 0);
+            assert_eq!(call(reg, &[tp, i as u64, pools[i].as_ptr() as u64, 0]), 0);
+        }
+        assert_eq!(call(start, &[tp]), 0);
+        let (mut idx, mut sync) = (0u32, [0u32; 4]);
+        let (ip, sp) = (p(&mut idx), sync.as_mut_ptr() as u64);
+        // every buffer to the decoder once (their first sync handles are already signalled)
+        for _ in 0..N {
+            assert_eq!(call(acquire, &[ip, sp, tp]), 0);
+            assert_eq!(call(trywait_native, &[sp]), 1);
+            call(release, &[tp, idx as u64]);
+        }
+        let (mut next, mut busy, mut out) = (0usize, 0u32, 0u64);
+        let op = p(&mut out);
+        let (mut sums, mut times, mut eos_seen) = (vec![], vec![], false);
+        let submit_some = |next: &mut usize, busy: &mut u32| {
+            while *next < packets.len() {
+                let pk = &packets[*next];
+                let last = *next + 1 == packets.len();
+                let r = call(submit, &[op, tp, pk.as_ptr() as u64, pk.len() as u64, *next as u64 * FRAME_NS, last as u64]);
+                if r == BUSY {
+                    *busy += 1;
+                    return;
+                }
+                assert_eq!(r, 0, "submit {next}");
+                *next += 1;
+            }
+        };
+        let (mut y, mut uv) = (vec![0u8; (W * H) as usize], vec![0u8; (W * H / 2) as usize]);
+        while !eos_seen {
+            submit_some(&mut next, &mut busy);
+            assert_eq!(call(acquire, &[ip, sp, tp]), 0, "an output buffer to acquire");
+            let t0 = Instant::now();
+            while call(trywait_native, &[sp]) == 0 {
+                assert!(t0.elapsed().as_secs() < 20, "{kind:?}: no picture after {} packets, {} pictures", next, sums.len());
+                submit_some(&mut next, &mut busy);
+                std::thread::sleep(std::time::Duration::from_millis(1));
+            }
+            let (mut w, mut h, mut cw, mut ch, mut ts, mut eos) = (0u16, 0u16, 0u16, 0u16, 0i64, 0u8);
+            let r = call(props, &[p(&mut w), p(&mut h), p(&mut cw), p(&mut ch), p(&mut ts), p(&mut eos), tp, idx as u64]);
+            assert_eq!(r, 0);
+            if w > 0 {
+                assert_eq!((w as u32, h as u32), (W, H));
+                let pool = pools[idx as usize].as_ptr() as u64;
+                let args = [pool, 0, 0, 0, W as u64, H as u64, y.as_mut_ptr() as u64, W as u64, y.len() as u64, uv.as_mut_ptr() as u64, W as u64, uv.len() as u64];
+                assert_eq!(call(read_nv12, &args), 0);
+                let mut nv12 = y.clone();
+                nv12.extend_from_slice(&uv);
+                sums.push(fnv(&nv12));
+                times.push(ts);
+            }
+            eos_seen = eos != 0;
+            call(release, &[tp, idx as u64]);
+        }
+        assert_eq!(next, packets.len(), "every packet submitted before the end of stream");
+        dec_fin(&mut *cpu, tp);
+        for pl in &mut pools {
+            call(pool_fin, &[pl.as_mut_ptr() as u64]);
+        }
+        drop(mem);
+        (sums, times, eos_seen, busy)
+    }
+
+    fn check(kind: Kind, name: &str, packets: Vec<Vec<u8>>) {
+        let want = reference(name);
+        assert_eq!(want.len(), 72);
+        let (got, times, eos, busy) = unsafe { run(kind, &packets) };
+        assert!(eos, "{kind:?}: end of stream flagged");
+        assert_eq!(got.len(), want.len(), "{kind:?}: pictures out");
+        let bad: Vec<usize> = (0..want.len()).filter(|&i| got[i] != want[i]).collect();
+        assert!(bad.is_empty(), "{kind:?}: pictures {bad:?} differ from ffmpeg's decode");
+        // each picture carries its packet's time (H.264: packets come in decode order, pictures in display order)
+        let mut sorted = times.clone();
+        sorted.sort();
+        let sent: Vec<i64> = (0..72).map(|i| i * (1_000_000_000 / 24)).collect();
+        assert!(sorted.iter().zip(&sent).all(|(a, b)| (a - b).abs() < 1000), "{kind:?}: picture times {times:?}");
+        if kind != Kind::H264 {
+            assert!(times.windows(2).all(|t| t[1] > t[0]), "{kind:?}: pictures in packet order: {times:?}");
+        }
+        assert!(busy > 0, "{kind:?}: the decoder pushed back (3603) at least once with 72 packets submitted ahead");
+    }
+
+    #[test]
+    fn vp9_clip_decodes_as_ffmpeg() {
+        check(Kind::Vp9, "clip_vp9.ivf", ivf_frames(&clip("clip_vp9.ivf")));
+    }
+
+    #[test]
+    fn av1_clip_decodes_as_ffmpeg() {
+        check(Kind::Av1, "clip_av1.ivf", ivf_frames(&clip("clip_av1.ivf")));
+    }
+
+    #[test]
+    fn h264_clip_decodes_as_ffmpeg() {
+        check(Kind::H264, "clip_h264.h264", h264_access_units(&clip("clip_h264.h264")));
+    }
+
     #[test]
     fn names_match_the_sdk() {
         let mut r = crate::hle::Registry::default();

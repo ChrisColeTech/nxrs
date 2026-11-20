@@ -36,6 +36,7 @@ pub fn run() {
             })
             .collect()
     });
+    register_debug_commands();
     let (mut seen, mut since, mut dumped) = (0u64, Instant::now(), false);
     loop {
         let p = crate::nvn::presents();
@@ -81,4 +82,77 @@ pub fn run() {
             nxrt::process::exit(0);
         }
     }
+}
+
+fn hex(s: &str) -> Option<u64> {
+    u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()
+}
+
+/// The control pipe's debugging commands on the os side (Turbo vk_ctl.c / nxnative DM_CTL): symbols, memory to a
+/// file, the environment, the guest clock's speed, focus and touch gestures for scripted runs.
+pub fn register_debug_commands() {
+    nxconfig::ctl::register("addr", "<mangled name>: the guest address a loaded module defines it at (and its host takeover, if any)", |a| {
+        let Some(n) = a.first() else { return "addr <mangled name>\n".into() };
+        match crate::hle::sym(n) {
+            Some(v) => format!("{n} = {v:#x} ({})\n", nxrt::dispatch::guest_name(v)),
+            None => format!("{n}: not defined by the loaded modules\n"),
+        }
+    });
+    nxconfig::ctl::register("memdump", "<address hex> <bytes hex> <file>: guest memory into a file (readable pages only)", |a| {
+        let (Some(at), Some(n), Some(f)) = (a.first().and_then(|s| hex(s)), a.get(1).and_then(|s| hex(s)), a.get(2)) else {
+            return "memdump <address hex> <bytes hex> <file>\n".into();
+        };
+        let n = n.min(256 << 20);
+        let (mut out, mut p) = (Vec::with_capacity(n as usize), at);
+        while p < at + n {
+            let info = crate::mem::get().query(p);
+            let end = (info.addr + info.size).min(at + n);
+            if info.perm & 1 == 0 || info.state == crate::mem::ST_FREE || !nxrt::mem::readable(p, end - p) {
+                break;
+            }
+            out.extend_from_slice(crate::guest::bytes(p, end - p));
+            p = end;
+        }
+        match std::fs::write(f, &out) {
+            Ok(()) => format!("{:#x} bytes from {at:#x} into {f}{}\n", out.len(), if (out.len() as u64) < n { " (stopped at an unreadable page)" } else { "" }),
+            Err(e) => format!("{f}: {e}\n"),
+        }
+    });
+    nxconfig::ctl::register("env", "<NAME>: an environment variable of the game's process", |a| match a.first() {
+        Some(n) => format!("{n}={}\n", std::env::var(n).unwrap_or_default()),
+        None => "env <NAME>\n".into(),
+    });
+    nxconfig::ctl::register("speed", "[rate]: the guest clock's rate (1 = real time, 0.05..4); none: the rate now", |a| {
+        if let Some(r) = a.first().and_then(|v| v.parse::<f64>().ok()) {
+            crate::clock::set_rate(r);
+        }
+        format!("clock rate {}\n", crate::clock::rate())
+    });
+    nxconfig::ctl::register("focus", "<1|2|3>: the window's focus as the game sees it (1 in focus, 2 out, 3 background)", |a| {
+        match a.first().and_then(|v| v.parse::<i32>().ok()) {
+            Some(st @ 1..=3) => {
+                crate::services::oe::set_focus(st);
+                format!("focus {}\n", crate::services::oe::focus())
+            }
+            _ => format!("focus {} (focus <1|2|3> to change it)\n", crate::services::oe::focus()),
+        }
+    });
+    nxconfig::ctl::register("drag", "<x0> <y0> <x1> <y1> [seconds]: a finger dragged on the touch screen (1280x720), 0.3 s by default", |a| {
+        let v: Vec<u32> = a.iter().take(4).filter_map(|s| s.parse().ok()).collect();
+        if v.len() < 4 {
+            return "drag <x0> <y0> <x1> <y1> [seconds]\n".into();
+        }
+        let secs = a.get(4).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.3).clamp(0.05, 10.0);
+        let (x0, y0, x1, y1) = (v[0] as f64, v[1] as f64, v[2] as f64, v[3] as f64);
+        std::thread::spawn(move || {
+            let steps = (secs * 120.0) as u32;
+            for i in 0..=steps {
+                let t = i as f64 / steps.max(1) as f64;
+                crate::input::set_touch(true, (x0 + (x1 - x0) * t) as u32, (y0 + (y1 - y0) * t) as u32);
+                std::thread::sleep(Duration::from_secs_f64(secs / steps.max(1) as f64));
+            }
+            crate::input::set_touch(false, x1 as u32, y1 as u32);
+        });
+        format!("dragging {x0} {y0} -> {x1} {y1} over {secs} s\n")
+    });
 }

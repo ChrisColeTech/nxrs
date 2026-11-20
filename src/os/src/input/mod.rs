@@ -178,6 +178,71 @@ fn motion_gain() -> f32 {
     *G.get_or_init(|| env_str("NXRS_MOTION_GAIN").and_then(|v| v.parse().ok()).unwrap_or(0.5))
 }
 
+/// The touch screen as the front end reports it (the mouse's left button over the window, or `touch` from the control
+/// pipe), in the console's 1280x720 screen coordinates. A press shorter than `TOUCH_LATCH` is kept that long, so a
+/// quick click is a tap the game samples at least a few times (nxnative hle_touch.c's short-press latch).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Touch {
+    pub x: u32,
+    pub y: u32,
+    /// Counts presses: each new press is a new finger (the SDK tracks fingers by id).
+    pub finger: u32,
+    /// The press started since the last read (TouchAttribute Start).
+    pub start: bool,
+    /// The press ended (TouchAttribute End): the last sample of this finger.
+    pub end: bool,
+}
+
+const TOUCH_LATCH: std::time::Duration = std::time::Duration::from_millis(60);
+
+struct TouchSt {
+    down: bool,
+    x: u32,
+    y: u32,
+    finger: u32,
+    since: Option<std::time::Instant>,
+    started: bool,
+    released_at: Option<std::time::Instant>,
+}
+static TOUCH: Mutex<TouchSt> = Mutex::new(TouchSt { down: false, x: 0, y: 0, finger: 0, since: None, started: false, released_at: None });
+
+/// The front end: the touch screen pressed at (x, y) (1280x720 space), or released.
+pub fn set_touch(down: bool, x: u32, y: u32) {
+    let mut t = TOUCH.lock().unwrap();
+    let now = std::time::Instant::now();
+    if down {
+        if !t.down || t.released_at.is_some() {
+            t.finger = t.finger.wrapping_add(1);
+            t.since = Some(now);
+            t.started = false;
+            crate::log_once!("touch first", "input: touch screen from the mouse / control pipe (first press at {x}, {y})");
+        }
+        t.down = true;
+        t.released_at = None;
+        t.x = x.min(1279);
+        t.y = y.min(719);
+    } else if t.down && t.released_at.is_none() {
+        t.released_at = Some(now);
+    }
+}
+
+/// The touch the game reads now (None: nothing on the screen).
+pub fn touch_now() -> Option<Touch> {
+    let mut t = TOUCH.lock().unwrap();
+    if !t.down {
+        return None;
+    }
+    let now = std::time::Instant::now();
+    let held_long_enough = t.since.is_some_and(|s| now.duration_since(s) >= TOUCH_LATCH);
+    let end = t.released_at.is_some() && held_long_enough;
+    let start = !t.started;
+    t.started = true;
+    if end {
+        t.down = false;
+    }
+    Some(Touch { x: t.x, y: t.y, finger: t.finger, start, end })
+}
+
 /// The front end: player 1's keyboard and mouse state (guest buttons, sticks).
 pub fn set_keyboard(buttons: u64, axes: [i32; 4]) {
     KEYS.set(buttons, axes);
@@ -1033,5 +1098,28 @@ mod tests {
         assert_eq!(p.take().0, 1, "a press shorter than a read still reaches it");
         assert_eq!(p.take().0, 0);
         assert_eq!(unpack(pack([-32768, 32767, 5, -5])), [-32768, 32767, 5, -5]);
+    }
+}
+
+#[cfg(test)]
+mod touch_tests {
+    /// The touch screen the front end feeds: a press is one finger with Start on its first sample; a quick click
+    /// stays down for the latch so the game samples it; End on the last sample; then nothing.
+    #[test]
+    fn touch_press_latch_and_release() {
+        super::set_touch(true, 100, 200);
+        super::set_touch(false, 100, 200);
+        let a = super::touch_now().unwrap();
+        assert!(a.start && !a.end && (a.x, a.y) == (100, 200), "{a:?}");
+        let b = super::touch_now().unwrap();
+        assert!(!b.start && !b.end, "a quick click is latched: still down");
+        std::thread::sleep(super::TOUCH_LATCH);
+        let c = super::touch_now().unwrap();
+        assert!(c.end && c.finger == a.finger, "{c:?}");
+        assert_eq!(super::touch_now(), None);
+        super::set_touch(true, 5000, 5000);
+        let d = super::touch_now().unwrap();
+        assert!(d.start && d.finger == a.finger + 1 && (d.x, d.y) == (1279, 719), "a new finger, clamped: {d:?}");
+        super::set_touch(false, 0, 0);
     }
 }

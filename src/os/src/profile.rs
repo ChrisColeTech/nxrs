@@ -22,6 +22,9 @@ pub struct Profile {
     pub switch2: bool,
     /// A map past the application pool fails with ResultLimitReached (`mem_map_limit on`).
     pub map_limit: bool,
+    /// The present interval the profile forces (5A.6: `present_interval display` = every vsync, or 1..3), 0 = the
+    /// game's own.
+    pub present_interval: i32,
 }
 
 impl Default for Profile {
@@ -36,6 +39,7 @@ impl Default for Profile {
             core_mask: 0x7,
             switch2: false,
             map_limit: false,
+            present_interval: 0,
         }
     }
 }
@@ -45,6 +49,15 @@ const BUILTIN: &[(u64, &str)] = &[(
     0x0100_1520_0002_2000,
     "name\tMario Kart 8 Deluxe\napp_pool\t0xCD500000\nsys_resource\t0x0\n",
 )];
+
+/// A profile's `present_interval`: `display` forces every vsync (1), a number 1..3 that interval, `game` (or
+/// anything else) leaves the game's own.
+fn present_interval(v: &str) -> i32 {
+    match v.trim() {
+        "display" => 1,
+        n => n.parse::<i32>().ok().filter(|n| (1..=3).contains(n)).unwrap_or(0),
+    }
+}
 
 fn num(v: &str) -> Option<u64> {
     let v = v.trim();
@@ -71,6 +84,7 @@ impl Profile {
                 "tick_hz" => self.tick_hz = num(v).unwrap_or(self.tick_hz as u64) as u32,
                 "core_mask" => self.core_mask = num(v).unwrap_or(self.core_mask),
                 "mem_map_limit" => self.map_limit = v.trim() == "on",
+                "present_interval" => self.present_interval = present_interval(v),
                 "switch2" => {
                     self.switch2 = v.trim() == "1";
                     if self.switch2 {
@@ -96,6 +110,7 @@ impl Profile {
             }
             self.sys_resource = pr.memory.sys_resource;
             self.map_limit = pr.memory.map_limit;
+            self.present_interval = present_interval(&pr.settings.present_interval);
         }
         if program.switch2() {
             self.switch2 = true;
@@ -123,11 +138,39 @@ impl Profile {
                 p.from_profiles(id);
             }
         }
+        // a Switch 2 program's cores are its NPDM's (ThreadInfo: Mario Kart World's are 0-5, GetInfo CoreMask 0x3f as
+        // mkw-recomp's kernel answers); a Switch 1 program keeps cores 0-2
+        if p.switch2 {
+            if let Some(m) = npdm.and_then(npdm_core_mask) {
+                p.core_mask = m;
+            }
+        }
         if let Some(t) = override_tsv {
             p.apply(t);
         }
         p
     }
+}
+
+/// The core mask of an NPDM's ThreadInfo kernel capability (ACI0, low bits 0b0111: lowest and highest core at bits
+/// 16-23 and 24-31).
+pub fn npdm_core_mask(npdm: &[u8]) -> Option<u64> {
+    let rd = |o: usize| -> Option<u32> { Some(u32::from_le_bytes(npdm.get(o..o + 4)?.try_into().ok()?)) };
+    let aci = rd(0x70)? as usize;
+    if npdm.get(aci..aci + 4)? != b"ACI0" {
+        return None;
+    }
+    let (off, size) = (aci + rd(aci + 0x30)? as usize, rd(aci + 0x34)? as usize);
+    for i in 0..size / 4 {
+        let c = rd(off + 4 * i)?;
+        if c & 0xF == 0x7 {
+            let (lo, hi) = ((c >> 16) & 0xFF, (c >> 24) & 0xFF);
+            if lo <= hi && hi < 8 {
+                return Some(((1u64 << (hi + 1)) - 1) & !((1u64 << lo) - 1));
+            }
+        }
+    }
+    None
 }
 
 /// The program id of an NPDM (META → ACI0 at +0x70, its program id at +0x10).
@@ -175,5 +218,23 @@ mod tests {
         assert_eq!(Profile::load(Some(&npdm), None).sys_resource, 0x100_0000);
         let s2 = Profile::load(None, Some("switch2\t1\n"));
         assert_eq!(s2.tick_hz, 31_250_000);
+    }
+
+    /// 5A.6: the profile's `present_interval` reaches graphics' forced interval (`set_profile_interval`) when the
+    /// ini leaves it to the profile (`present_interval=0`), and the ini's own value wins over it.
+    #[test]
+    fn present_interval_reaches_graphics() {
+        assert_eq!(Profile::load(None, Some("present_interval\tdisplay\n")).present_interval, 1);
+        assert_eq!(Profile::load(None, Some("present_interval\t2\n")).present_interval, 2);
+        assert_eq!(Profile::load(None, Some("present_interval\tgame\n")).present_interval, 0);
+        assert_eq!(Profile::load(None, None).present_interval, 0, "off by default");
+        let p = Profile::load(None, Some("present_interval\tdisplay\n"));
+        crate::nvn::apply_present_interval(&p);
+        assert_eq!(nxgfx::nvn::window::forced_interval(), Some(1));
+        assert!(nxconfig::apply_arg("--present_interval=2"));
+        assert_eq!(nxgfx::nvn::window::forced_interval(), Some(2), "the ini wins");
+        assert!(nxconfig::apply_arg("--present_interval=0"));
+        crate::nvn::apply_present_interval(&Profile::default());
+        assert_eq!(nxgfx::nvn::window::forced_interval(), None);
     }
 }

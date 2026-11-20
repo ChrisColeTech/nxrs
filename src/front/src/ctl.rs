@@ -132,6 +132,18 @@ fn register() {
         unsafe { windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(crate::window::hwnd(), crate::window::WM_APP_FULLSCREEN, on as usize, 0) };
         format!("fullscreen {}", on as u8)
     });
+    register("touch", "<x> <y> [seconds]: a press on the touch screen (1280x720) held that long (0.1)", |a| {
+        let (Some(x), Some(y)) = (a.first().and_then(|v| v.parse::<u32>().ok()), a.get(1).and_then(|v| v.parse::<u32>().ok())) else {
+            return "usage: touch <x> <y> [seconds]\n".into();
+        };
+        let secs = a.get(2).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.1).clamp(0.0, 30.0);
+        nxos::input::set_touch(true, x, y);
+        std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+            nxos::input::set_touch(false, x, y);
+        });
+        format!("touched {x} {y} for {secs} s\n")
+    });
     register("counters", ": every engine counter", |_| nxconfig::metrics::snapshot().iter().map(|(k, v)| format!("{k} {v}\n")).collect());
     register("quit", ": ends the game", |_| {
         std::thread::spawn(|| {

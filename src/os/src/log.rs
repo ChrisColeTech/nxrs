@@ -56,7 +56,18 @@ pub enum Gap {
 static GAPS: Mutex<BTreeMap<(Gap, String), u64>> = Mutex::new(BTreeMap::new());
 
 /// Records a gap: the first time it is logged with `UNIMPL`, later hits are counted.
+/// A metrics counter (`nxconfig::metrics`), looked up once per call site.
+#[macro_export]
+macro_rules! metric {
+    ($name:literal, $n:expr) => {{
+        static C: std::sync::OnceLock<&'static std::sync::atomic::AtomicU64> = std::sync::OnceLock::new();
+        nxconfig::metrics::add(C.get_or_init(|| nxconfig::metrics::counter($name)), $n as u64);
+    }};
+}
+
 pub fn gap(kind: Gap, what: &str, detail: &str) {
+    // dropped work: every request answered by a stand-in (an unimplemented command, SVC or service)
+    crate::metric!("gap_answers", 1);
     let mut g = GAPS.lock().unwrap();
     let n = g.entry((kind, what.to_string())).or_insert(0);
     *n += 1;

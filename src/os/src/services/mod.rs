@@ -4,8 +4,10 @@
 use crate::hle::Registry;
 
 pub mod account;
+pub mod applet;
 pub mod audio;
 pub mod audren;
+pub mod audren_ipc;
 pub mod codec;
 pub mod codec_video;
 pub mod fs;
@@ -52,6 +54,8 @@ pub fn register(r: &mut Registry) {
     codec_video::register(r);
     swkbd::register(r);
     net::register();
+    audren_ipc::register();
+    applet::register();
     socket::register(r);
     offline::register(r);
     ro::register(r);

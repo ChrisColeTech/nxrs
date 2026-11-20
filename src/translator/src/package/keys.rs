@@ -93,21 +93,32 @@ pub fn keys_path(explicit: Option<&Path>) -> Result<PathBuf> {
     }
 }
 
-/// env SWR_PROD_KEYS, else %LOCALAPPDATA%\RecompLauncher\RecompLauncher\keys\prod.keys if it exists.
+/// env SWR_PROD_KEYS, else the launcher's data folder's `keys\prod.keys`: %LOCALAPPDATA%\nxrs (launcher d538b31),
+/// then the older %LOCALAPPDATA%\RecompLauncher\RecompLauncher; the first that exists.
 pub fn default_keys_path() -> Option<PathBuf> {
     if let Some(p) = std::env::var_os("SWR_PROD_KEYS") {
         if !p.is_empty() {
             return Some(PathBuf::from(p));
         }
     }
-    let local = std::env::var_os("LOCALAPPDATA")?;
-    let p = PathBuf::from(local).join("RecompLauncher").join("RecompLauncher").join("keys").join("prod.keys");
-    p.is_file().then_some(p)
+    keys_candidates(&PathBuf::from(std::env::var_os("LOCALAPPDATA")?)).into_iter().find(|p| p.is_file())
+}
+
+/// Where the launcher keeps prod.keys under %LOCALAPPDATA%, the current layout first.
+pub fn keys_candidates(local: &Path) -> Vec<PathBuf> {
+    vec![local.join("nxrs").join("keys").join("prod.keys"), local.join("RecompLauncher").join("RecompLauncher").join("keys").join("prod.keys")]
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keys_found_in_the_launchers_data_folder() {
+        let c = keys_candidates(Path::new("L"));
+        assert_eq!(c[0], Path::new("L").join("nxrs").join("keys").join("prod.keys"), "launcher d538b31's folder first");
+        assert_eq!(c[1], Path::new("L").join("RecompLauncher").join("RecompLauncher").join("keys").join("prod.keys"));
+    }
 
     #[test]
     fn parses_keys_text() {

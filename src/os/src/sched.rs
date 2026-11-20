@@ -23,7 +23,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
-const MAX_CORES: usize = 4;
+const MAX_CORES: usize = 8; // a Switch 2 program has 6 (its NPDM's cores 0-5)
 const STEAL_WORSE: Duration = Duration::from_millis(2);
 const STEAL_ANY: Duration = Duration::from_millis(20);
 

@@ -163,10 +163,12 @@ pub fn screenshot_to(path: &std::path::Path) -> bool {
     }
 }
 
-/// F3.
+/// F3: the game's own picture at the next present (graphics reads the presented image back), as Turbo's F3; the
+/// window grab stays for the control pipe's `shot`.
 pub fn screenshot() {
     let p = captures_dir().join(format!("screenshot_{}.png", stamp()));
-    screenshot_to(&p);
+    crate::flog!("F3: the game's picture at the next present -> {}", p.display());
+    nxgfx::vk::shot::request(&p.display().to_string());
 }
 
 /// F8: the game's picture at its own resolution, from graphics at the next present.

@@ -188,6 +188,9 @@ miifn!(build_default, |a| {
 miifn!(ok, |a| { RES_OK });
 miifn!(test_mode, |a| { RES_TEST_MODE });
 miifn!(append, |a| {
+    // the Mii editor applet takes the focus while it is open
+    crate::services::oe::applet_enter("MiiEdit");
+    crate::services::oe::applet_leave();
     let mut db = DB.lock().unwrap();
     if db.len() >= MAX {
         return RES_CANCELED;

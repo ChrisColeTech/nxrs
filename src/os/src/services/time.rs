@@ -365,8 +365,13 @@ fn steady_base() -> i64 {
 
 fn page_new() -> Page {
     let shm = crate::svc::new_shared(SHM_SIZE as u64);
+    page_fill(shm, steady_base(), crate::svc::guest_ns() as i64)
+}
+
+/// The page's first contents: the steady clock from `base`, both system clock contexts, automatic correction on,
+/// the ContinuousAdjustmentTimePoint set up at system counter `now_ns`.
+fn page_fill(shm: &'static crate::svc::SharedMem, base: i64, now_ns: i64) -> Page {
     let mut p = Page { shm, img: vec![0; SHM_SIZE], filled: vec![], ctx: context_bytes() };
-    let base = steady_base();
     let mut steady = [0u8; 0x18];
     steady[0..8].copy_from_slice(&base.to_le_bytes());
     steady[8..24].copy_from_slice(STEADY_ID);
@@ -376,7 +381,7 @@ fn page_new() -> Page {
     p.put(&[], 0x80, 8, 0x20, &ctx);
     p.put(&[], 0xC8, 4, 1, &[1]);
     let mut adj = [0u8; 0x38];
-    adj[0..8].copy_from_slice(&(crate::svc::guest_ns() as i64).to_le_bytes());
+    adj[0..8].copy_from_slice(&now_ns.to_le_bytes());
     adj[0x18..0x20].copy_from_slice(&base.to_le_bytes());
     adj[0x20..0x28].copy_from_slice(&base.to_le_bytes());
     adj[0x28..0x38].copy_from_slice(STEADY_ID);
@@ -658,5 +663,31 @@ mod tests {
         adj[0x28..0x38].copy_from_slice(STEADY_ID);
         p.put(&[], 0xD0, 8, 0x38, &adj);
         assert_eq!(&p.img[0x110 + 0x28..0x110 + 0x38], STEADY_ID, "the adjustment's clock source id at +0x28");
+    }
+
+    /// The page as Turbo 1f12977 lays it out, read the way SDK 22's SharedMemoryClient does: the local context's
+    /// current copy (counter & 1), the ContinuousAdjustmentTimePoint at 0xD0 with 0x38-byte entries at 0xD8 / 0x110,
+    /// the current one picked by counter & 1, its clock source id at +0x28 equal to the context's (a mismatch is
+    /// result 52340 and clock_gettime(CLOCK_REALTIME) fails), multiplier and shift 0; and the steady clock's id.
+    #[test]
+    fn shared_page_layout_as_turbo() {
+        let shm: &'static crate::svc::SharedMem = Box::leak(Box::new(crate::svc::SharedMem { handle: 0, size: 0x1000, views: Mutex::new(vec![]) }));
+        let p = page_fill(shm, 1_000_000_000, 123_456);
+        let img = &p.img;
+        let rd32 = |o: usize| u32::from_le_bytes(img[o..o + 4].try_into().unwrap());
+        let rd64 = |o: usize| i64::from_le_bytes(img[o..o + 8].try_into().unwrap());
+        let pick = |off: usize, align: usize, size: usize| off + align + (rd32(off) as usize & 1) * size;
+        let steady = pick(0x00, 8, 0x18);
+        assert_eq!((rd64(steady), &img[steady + 8..steady + 24]), (1_000_000_000, &STEADY_ID[..]));
+        let local = pick(0x38, 8, 0x20);
+        let ctx_id = &img[local + 0x10..local + 0x20];
+        assert_eq!(ctx_id, STEADY_ID);
+        assert_eq!(img[pick(0xC8, 4, 1)], 1, "automatic correction on");
+        assert_eq!(rd32(0xD0), 1, "the adjustment's counter");
+        let adj = pick(0xD0, 8, 0x38);
+        assert_eq!(adj, 0xD8 + 0x38, "counter 1: the second 0x38-byte entry");
+        assert_eq!(&img[adj + 0x28..adj + 0x38], ctx_id, "the entry's id at +0x28 is the context's");
+        assert_eq!((rd64(adj), rd64(adj + 8), rd64(adj + 0x10)), (123_456, 0, 0), "set up now, multiplier 0, shift 0");
+        assert!(img[0xD8..0xD8 + 0x38].iter().all(|&b| b == 0), "the other entry untouched");
     }
 }

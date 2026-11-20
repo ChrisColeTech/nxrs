@@ -774,18 +774,39 @@ fn aoc_romfs(index: u32) -> Option<Arc<RomFs>> {
     }
 }
 
-/// The add-on content indices installed in the data folder.
+/// The add-on content indices installed in the data folder whose data the host can read (Turbo 2cdeabd): a title in
+/// the manifest whose package was moved or whose image was deleted is left out with a warning (a game told about DLC
+/// it then cannot read can hang: Mario Kart 8 Deluxe on its loading screen); a `stub` line is listed regardless (an
+/// empty RomFS, for diagnostics). Decided once, at the first question.
 pub fn aoc_indices() -> Vec<u32> {
-    let base = crate::profile::get().program_id + 0x1000;
-    let mut v: Vec<u32> = translator::package::dlc::read_manifest(&data_dir())
-        .iter()
-        .filter_map(|e| {
-            let id = e.0;
-            (id > base && id < base + 0x1000).then(|| (id - base) as u32)
-        })
-        .collect();
+    static V: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
+    V.get_or_init(|| {
+        let base = crate::profile::get().program_id + 0x1000;
+        aoc_offered(base, &translator::package::dlc::read_manifest(&data_dir()), |i| aoc_romfs(i).is_some())
+    })
+    .clone()
+}
+
+/// The indices of the manifest's titles owned by the game (`base` = its program id + 0x1000) to offer: stubs, and
+/// titles `readable` says have data.
+fn aoc_offered(base: u64, manifest: &[translator::package::dlc::Entry], readable: impl Fn(u32) -> bool) -> Vec<u32> {
+    let mut v: Vec<u32> = vec![];
+    for e in manifest {
+        let id = e.0;
+        if id <= base || id >= base + 0x1000 {
+            continue;
+        }
+        let index = (id - base) as u32;
+        if v.contains(&index) {
+            continue;
+        }
+        if e.2 == "stub" || readable(index) {
+            v.push(index);
+        } else {
+            crate::log!("[RED] dlc: {id:016X} is installed but its data is missing ({}): not offered to the game. Install it again", e.3);
+        }
+    }
     v.sort();
-    v.dedup();
     v
 }
 
@@ -962,8 +983,32 @@ fsfn!(mount_cache, |a| {
 fsfn!(mount_save, |a| {
     let name = cstr(a.x(0), 32);
     let Some(user) = crate::services::account::user_of(a.x(1)) else { return RES_TARGET_NOT_FOUND };
-    mount_dir(&name, save_dir().join(format!("user{}", user + 1)), false, true)
+    let dir = save_dir().join(format!("user{}", user + 1));
+    if user == 0 {
+        adopt_turbo_save(&save_dir(), &dir);
+    }
+    mount_dir(&name, dir, false, true)
 });
+
+/// A Turbo build of the same game keeps the account save in `save\user` (older ones in `save\system`); an nxrs build
+/// keeps one per user (`save\user<N>`). The first time user 1's save opens and there is none, Turbo's is copied in
+/// (left where it was), so a player moving from a Turbo build keeps their progress (as Turbo svc_fs.c copies its own
+/// older `save\system`).
+fn adopt_turbo_save(root: &Path, dir: &Path) {
+    if dir.exists() {
+        return;
+    }
+    for old in ["user", "system"] {
+        let from = root.join(old);
+        if from.is_dir() && std::fs::read_dir(&from).is_ok_and(|mut d| d.next().is_some()) {
+            match copy_tree(&from, dir) {
+                Ok(()) => crate::log!("fs: {} is a Turbo build's save: copied to {} (the original is kept)", from.display(), dir.display()),
+                Err(e) => crate::log!("[RED] fs: copying the Turbo save {} to {}: {e}", from.display(), dir.display()),
+            }
+            return;
+        }
+    }
+}
 fsfn!(mount_save_ro, |a| {
     let (name, app) = (cstr(a.x(0), 32), a.x(1));
     if app != crate::profile::get().program_id {
@@ -1231,6 +1276,38 @@ pub fn register(r: &mut Registry) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// A Turbo build's `save\user` (or older `save\system`) becomes user 1's save the first time, once.
+    #[test]
+    fn turbo_save_is_adopted() {
+        let root = std::env::temp_dir().join(format!("nxos-turbo-save-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("user/sub")).unwrap();
+        std::fs::write(root.join("user/sub/main"), b"turbo").unwrap();
+        let dir = root.join("user1");
+        adopt_turbo_save(&root, &dir);
+        assert_eq!(std::fs::read(dir.join("sub/main")).unwrap(), b"turbo");
+        assert!(root.join("user/sub/main").exists(), "the original stays");
+        std::fs::write(root.join("user/sub/main"), b"newer").unwrap();
+        adopt_turbo_save(&root, &dir);
+        assert_eq!(std::fs::read(dir.join("sub/main")).unwrap(), b"turbo", "only when user 1 has no save yet");
+        let _ = std::fs::remove_dir_all(&root);
+    }
+
+    /// Turbo 2cdeabd: a manifest title whose data is gone is not offered; a stub line is; other titles' DLC and
+    /// duplicates are left out.
+    #[test]
+    fn dlc_with_missing_data_is_not_offered() {
+        let base = 0x0100_1520_0002_2000u64 + 0x1000;
+        let m: Vec<translator::package::dlc::Entry> = vec![
+            (base + 1, 1, "data".into(), "P:/gone.nsp".into()),
+            (base + 2, 1, "data".into(), "P:/here.nsp".into()),
+            (base + 3, 1, "stub".into(), String::new()),
+            (base + 2, 1, "data".into(), "P:/here.nsp".into()),
+            (0x0100_0000_0001_1001, 1, "data".into(), "P:/other.nsp".into()),
+        ];
+        assert_eq!(aoc_offered(base, &m, |i| i == 2), vec![2, 3]);
+    }
 
     #[test]
     fn paths() {

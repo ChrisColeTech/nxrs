@@ -86,6 +86,58 @@ pub fn push(m: u32) {
     event_sync();
 }
 
+// Focus (FocusState 1 in focus, 2 out of focus, 3 background). The front end reports its window; a library applet
+// the host shows (keyboard box, controller applet, Mii editor stand-in) takes the focus while it is open, as am does
+// on a console. The game sees the window's state, or 2 while an applet is open over a window in focus; each change
+// of what it sees is one message 15, when its focus handling mode asks for them (no mode set, 1 or 2; under 0 and 3
+// the system would suspend it instead and it hears nothing).
+static FRONT_FOCUS: AtomicI32 = AtomicI32::new(1);
+static APPLETS: Mutex<i32> = Mutex::new(0);
+
+fn focus_notifies() -> bool {
+    let m = FOCUS_MODE.load(Ordering::Relaxed);
+    m != 0 && m != 3
+}
+
+fn focus_sync(applets: i32, why: &str) {
+    let mut g = APPLETS.lock().unwrap();
+    *g = (*g + applets).max(0);
+    let w = FRONT_FOCUS.load(Ordering::Relaxed);
+    let seen = if w == 1 && *g > 0 { 2 } else { w };
+    let changed = FOCUS.swap(seen, Ordering::Relaxed) != seen;
+    drop(g);
+    if changed {
+        crate::log!("oe: focus state {seen} ({why}){}", if focus_notifies() { "" } else { ", not notified: the game's focus handling mode" });
+        if focus_notifies() {
+            push(MSG_FOCUS);
+        }
+    }
+}
+
+/// The front end: its window's focus (1 in front, 2 behind another window, 3 minimised). `NXRS_KEEP_FOCUS=1` keeps
+/// the game in focus whatever the window does (scripted runs in the background).
+pub fn set_focus(state: i32) {
+    if !(1..=3).contains(&state) || crate::input::env_flag("NXRS_KEEP_FOCUS") {
+        return;
+    }
+    if FRONT_FOCUS.swap(state, Ordering::Relaxed) != state {
+        focus_sync(0, "the window");
+    }
+}
+
+/// A library applet the host shows over the game opens / closes (the focus goes to it and comes back).
+pub fn applet_enter(name: &str) {
+    focus_sync(1, &format!("library applet {name} open"));
+}
+pub fn applet_leave() {
+    focus_sync(-1, "library applet closed");
+}
+
+/// What the game sees as its focus state.
+pub fn focus() -> i32 {
+    FOCUS.load(Ordering::Relaxed)
+}
+
 fn try_pop() -> Option<u32> {
     let m = QUEUE.lock().unwrap().pop_front();
     if let Some(m) = m {
@@ -344,6 +396,15 @@ pub fn register_switch2(r: &mut Registry) {
 
 pub fn register(r: &mut Registry) {
     register_switch2(r);
+    // am tells an application it has the focus as it starts (Turbo svc_core.c pushes FocusStateChanged at boot; its
+    // ChangeIntoForeground is the SDK's own and never reaches nn::oe): a game that fades in once it is told
+    // (focus handling mode 1 / 2) waits for it
+    {
+        let mut q = QUEUE.lock().unwrap();
+        if q.is_empty() {
+            q.push_back(MSG_FOCUS);
+        }
+    }
     const W: &str = "am/oe: the host runs one application in the foreground";
     for (n, f) in [
         ("_ZN2nn2oe20SwitchLcdBacklightOnEv", nothing as unsafe fn(*mut Cpu)),
@@ -408,8 +469,37 @@ pub fn register(r: &mut Registry) {
 mod tests {
     use super::*;
 
+    /// The focus the game sees and its message 15: the window's state, 2 while a host applet is open over it, one
+    /// message per change, none under focus handling modes 0 / 3 (nxnative hle_oe.c).
+    /// The notification queue is one for the process: its tests take turns.
+    static QUEUE_TESTS: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn focus_changes_notify_the_game() {
+        let _g = QUEUE_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        while try_pop().is_some() {}
+        FOCUS_MODE.store(-1, Ordering::Relaxed);
+        set_focus(1);
+        assert_eq!(focus(), 1);
+        set_focus(2);
+        assert_eq!((focus(), try_pop()), (2, Some(MSG_FOCUS)));
+        set_focus(1);
+        applet_enter("swkbd");
+        assert_eq!((focus(), try_pop(), try_pop()), (2, Some(MSG_FOCUS), None), "back in focus and into the applet: one queued 15");
+        applet_leave();
+        assert_eq!((focus(), try_pop()), (1, Some(MSG_FOCUS)));
+        FOCUS_MODE.store(3, Ordering::Relaxed);
+        set_focus(3);
+        assert_eq!((focus(), try_pop()), (3, None), "mode 3: suspended, no message");
+        set_focus(1);
+        FOCUS_MODE.store(-1, Ordering::Relaxed);
+        while try_pop().is_some() {}
+    }
+
     #[test]
     fn queue_dedups_focus() {
+        let _g = QUEUE_TESTS.lock().unwrap_or_else(|p| p.into_inner());
+        while try_pop().is_some() {}
         push(MSG_FOCUS);
         push(MSG_FOCUS);
         push(99);

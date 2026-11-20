@@ -245,6 +245,7 @@ pub fn duplicate(h: u32) -> Option<u32> {
 /// Answers the request in `msg` (the client's message buffer) on session `h`. Returns the SVC result (the
 /// command's own result is in the answer).
 pub fn process(h: u32, msg: &mut [u8]) -> u32 {
+    crate::metric!("ipc_requests", 1);
     let Some(sess) = session(h) else {
         crate::log_once!(format!("bad session {h:#x}"), "[RED] ipc: request on {h:#x}, not a host session");
         return R_INVALID_HANDLE;

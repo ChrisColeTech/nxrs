@@ -568,6 +568,9 @@ hidfn!(controller_support, |a| {
         count = max;
     }
     crate::log!("hid: controller applet: {min} to {max} players wanted, {count} connected{}", if canceled { ": too few, closed as the player would (canceled)" } else { "" });
+    // the applet takes the focus while open (MK8D applies its answer only after the InFocus message 15)
+    crate::services::oe::applet_enter("controller");
+    crate::services::oe::applet_leave();
     if out != 0 {
         w8(out, count as u8);
         w32(out + 4, connected_id());
@@ -788,15 +791,29 @@ hidfn!(vib_actual, |a| {
 
 // TouchScreenState<N> = { i64 sampling number; i32 count; i32 reserved; TouchState[N] (0x28 each) }: every
 // template the SDK instantiates (N = 1..16) is taken over, each writing its own size (Donkey Kong Bananza reads
-// GetTouchScreenState<1>, whose SDK version aborts with Result 0x52ca without the hid service). The screen is idle:
-// docked it is out of reach, and the host has no touch panel.
+// GetTouchScreenState<1>, whose SDK version aborts with Result 0x52ca without the hid service). The touch comes from
+// the front end (`input::touch_now`: the mouse's left button over the window, or the control pipe's `touch`).
+// TouchState { u64 delta time; u32 attributes (1 Start, 2 End); u32 finger id; u32 x, y; u32 diameter x, y;
+// u32 rotation; u32 reserved }.
 fn touch_fill(out: u64, n: u64, count: i32) -> u64 {
     let stride = 0x10 + 0x28 * n;
     let num = SAMPLING.fetch_add(1, Ordering::Relaxed) as u64 + 1;
-    let k = count.clamp(0, 1) as u64; // one idle sample: the newest
+    let k = count.clamp(0, 1) as u64; // the newest sample
+    let touch = if k > 0 { crate::input::touch_now() } else { None };
     for i in 0..k {
-        crate::guest::zero(out + i * stride, stride);
-        w64(out + i * stride, num);
+        let s = out + i * stride;
+        crate::guest::zero(s, stride);
+        w64(s, num);
+        if let (Some(t), true) = (touch, n >= 1) {
+            w32(s + 8, 1);
+            let e = s + 0x10;
+            w32(e + 8, t.start as u32 | (t.end as u32) << 1);
+            w32(e + 0xc, t.finger);
+            w32(e + 0x10, t.x);
+            w32(e + 0x14, t.y);
+            w32(e + 0x18, 15);
+            w32(e + 0x1c, 15);
+        }
     }
     k
 }
