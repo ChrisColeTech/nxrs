@@ -16,6 +16,7 @@
 //!
 //! Credits and licenses: the repository's README.md.
 
+pub mod facts;
 pub mod fixes;
 pub mod formats;
 pub mod job;

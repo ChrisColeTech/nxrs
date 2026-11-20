@@ -33,11 +33,13 @@ pub struct Options {
     pub job: JobOptions,
     /// Jobs per translator process.
     pub batch: usize,
+    /// Where the profile's translation facts are (`facts`; None: `<out_dir>/profile`).
+    pub facts_dir: Option<PathBuf>,
 }
 
 impl Default for Options {
     fn default() -> Self {
-        Options { keys: None, update: UpdateChoice::Embedded, jobs: 4, scan_jobs: 8, scan_only: false, limit: None, job: JobOptions::default(), batch: 64 }
+        Options { keys: None, update: UpdateChoice::Embedded, jobs: 4, scan_jobs: 8, scan_only: false, limit: None, job: JobOptions::default(), batch: 64, facts_dir: None }
     }
 }
 
@@ -52,6 +54,8 @@ pub struct Report {
     pub skipped: usize,
     /// Ray-tracing modules translated as part of the game's one RT library (`rt_library`).
     pub in_library: usize,
+    /// Jobs that took answers from the profile's translation facts (`facts`).
+    pub with_facts: usize,
     pub valid: usize,
     pub invalid: usize,
     pub scan_problems: usize,
@@ -278,7 +282,8 @@ pub fn translate_one(ctl: &[u8], code: &[u8], out_dir: &Path) -> Result<String, 
         zstd_dicts: 0,
         oodle_streams: 0,
     };
-    let opts = Options { jobs: 1, ..Default::default() };
+    // the profile's facts are in the shader folder (`<shaders>/profile`), beside the live translations' folder
+    let opts = Options { jobs: 1, facts_dir: out_dir.parent().map(|p| p.join("profile")), ..Default::default() };
     let r = build_from_scan(rep, &out_dir.join(&key), &opts, &|_| {}, Instant::now())?;
     if r.valid == 1 {
         Ok(key)
@@ -305,6 +310,10 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
     say(&format!("shaders: {} found in {:.1} s ({} files, {:.0} MB read, {} problems)", report.found, scan.seconds, scan.files, scan.bytes_read as f64 / 1e6, scan.problems.len()));
     let io = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
     let spv_dir = out_dir.join("spv");
+    let facts = crate::facts::load(&opts.facts_dir.clone().unwrap_or_else(|| out_dir.join("profile")));
+    if !facts.is_empty() {
+        say(&format!("shaders: {} keys have translation facts from the profile", facts.len()));
+    }
     std::fs::create_dir_all(&spv_dir).map_err(|e| io(&spv_dir, e))?;
     let write_lists = |manifest_rows: &[String], report: &Report| -> Result<(), String> {
         let mut pairs = String::from("# vertex (or mesh) key\tpixel key\tkind (var: the same program variation; prog: an agl program's variation)\n");
@@ -402,7 +411,7 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
             rows.insert(s.key.clone(), row(s, None, st, 0));
             continue;
         }
-        let j = match job::job_for(&s.key, s.stage, &s.ctl, &s.code, opts.job) {
+        let mut j = match job::job_for(&s.key, s.stage, &s.ctl, &s.code, opts.job) {
             Ok(j) => j,
             Err(e) => {
                 let st = if s.stage == Stage::Rt { "skipped" } else { "failed" };
@@ -417,6 +426,14 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
                 continue;
             }
         };
+        if let Some(row) = facts.get(&s.key) {
+            if crate::facts::apply(&mut j.json, row) > 0 {
+                report.with_facts += 1;
+                if let Some(l) = j.json.get("local") {
+                    j.extra.insert("local".into(), l.clone());
+                }
+            }
+        }
         let mut jj = j.json.clone();
         jj.remove("code");
         let mesh_v = if j.extra.contains_key("mesh_stage") { crate::mesh::VERSION } else { "" };

@@ -130,6 +130,7 @@ fn main() {
                 limit,
                 job: shaders::job::JobOptions { debug: !optimize, reduced: true },
                 batch,
+                facts_dir: None,
             };
             let say = |s: &str| println!("{s}");
             match prebuild(&game, &out, &opts, &say) {

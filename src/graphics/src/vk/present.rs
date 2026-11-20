@@ -482,6 +482,118 @@ pub fn queue_present(g: &Gpu, p: PendingPresent) {
     g.present.lock().unwrap().presented += 1;
 }
 
+// ---------- a picture made on the CPU ----------
+
+/// The host image `present_rgba` uploads into (made again when the size changes).
+struct CpuImage {
+    image: vk::Image,
+    alloc: Option<gpu_allocator::vulkan::Allocation>,
+    w: u32,
+    h: u32,
+}
+static CPU_IMAGE: Mutex<Option<CpuImage>> = Mutex::new(None);
+
+/// Shows a picture made on the CPU (RGBA8, `w` x `h`, rows packed, top row first) in the window, letterboxed like a
+/// game's frame, in queue order after the work submitted before it: the present of a buffer a raw vi client queues
+/// through IHOSBinderDriver (os `vi_ipc.rs`), whose pixels are guest memory written by the CPU, not an NVN texture.
+/// Returns the submission's fence (0: no device or window, nothing shown).
+pub fn present_rgba(w: u32, h: u32, rgba: &[u8]) -> u64 {
+    use gpu_allocator::vulkan::{AllocationCreateDesc, AllocationScheme};
+    let Some(g) = Gpu::try_get() else { return 0 };
+    if w == 0 || h == 0 || rgba.len() < (w * h * 4) as usize {
+        return 0;
+    }
+    let hwnd = g.present.lock().unwrap().hwnd;
+    if hwnd == 0 || minimised(hwnd) {
+        return 0;
+    }
+    let image = {
+        let mut ci = CPU_IMAGE.lock().unwrap();
+        if ci.as_ref().is_some_and(|c| c.w != w || c.h != h) {
+            super::queue::wait_fence(g.q.last_fence(), u64::MAX);
+            let mut old = ci.take().unwrap();
+            unsafe { g.dev().destroy_image(old.image, None) };
+            if let Some(a) = old.alloc.take() {
+                let _ = g.alloc.lock().unwrap().free(a);
+            }
+        }
+        if ci.is_none() {
+            let info = vk::ImageCreateInfo::default()
+                .image_type(vk::ImageType::TYPE_2D)
+                .format(vk::Format::R8G8B8A8_UNORM)
+                .extent(vk::Extent3D { width: w, height: h, depth: 1 })
+                .mip_levels(1)
+                .array_layers(1)
+                .samples(vk::SampleCountFlags::TYPE_1)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(vk::ImageUsageFlags::TRANSFER_DST | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::SAMPLED)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+            let made = (|| -> Result<CpuImage, String> {
+                let image = unsafe { g.dev().create_image(&info, None) }.map_err(|e| e.to_string())?;
+                let req = unsafe { g.dev().get_image_memory_requirements(image) };
+                let a = g
+                    .alloc
+                    .lock()
+                    .unwrap()
+                    .allocate(&AllocationCreateDesc { name: "cpu picture", requirements: req, location: gpu_allocator::MemoryLocation::GpuOnly, linear: false, allocation_scheme: AllocationScheme::GpuAllocatorManaged })
+                    .map_err(|e| e.to_string())?;
+                unsafe { g.dev().bind_image_memory(image, a.memory(), a.offset()) }.map_err(|e| e.to_string())?;
+                Ok(CpuImage { image, alloc: Some(a), w, h })
+            })();
+            match made {
+                Ok(c) => {
+                    crate::vklog!("present: pictures made on the CPU, {w}x{h} RGBA8 (vi's buffer queue)");
+                    *ci = Some(c)
+                }
+                Err(e) => {
+                    crate::log::red_once(&format!("present_rgba: {e}"));
+                    return 0;
+                }
+            }
+        }
+        ci.as_ref().unwrap().image
+    };
+    note_present();
+    let bytes = &rgba[..(w * h * 4) as usize];
+    super::queue::oneoff(g, |g, sub, _| {
+        let (buf, off) = sub.stage_bytes_fresh(g, bytes);
+        let dev = g.dev();
+        let range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
+        let to_dst = [vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .src_access_mask(vk::AccessFlags2::MEMORY_READ)
+            .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .image(image)
+            .subresource_range(range)];
+        let to_general = [vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+            .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
+            .dst_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
+            .dst_access_mask(vk::AccessFlags2::TRANSFER_READ)
+            .old_layout(vk::ImageLayout::TRANSFER_DST_OPTIMAL)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .image(image)
+            .subresource_range(range)];
+        let region = vk::BufferImageCopy {
+            buffer_offset: off,
+            buffer_row_length: 0,
+            buffer_image_height: 0,
+            image_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+            image_offset: vk::Offset3D::default(),
+            image_extent: vk::Extent3D { width: w, height: h, depth: 1 },
+        };
+        unsafe {
+            dev.cmd_pipeline_barrier2(sub.main, &vk::DependencyInfo::default().image_memory_barriers(&to_dst));
+            dev.cmd_copy_buffer_to_image(sub.main, buf, image, vk::ImageLayout::TRANSFER_DST_OPTIMAL, &[region]);
+            dev.cmd_pipeline_barrier2(sub.main, &vk::DependencyInfo::default().image_memory_barriers(&to_general));
+        }
+        present_image(g, sub, image, vk::Format::R8G8B8A8_UNORM, false, [0, 0, w as i32, h as i32]);
+    })
+}
+
 // ---------- pacing log ----------
 struct Pace {
     last: Option<Instant>,
