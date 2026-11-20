@@ -570,5 +570,5 @@ Option C (phase out) = A now plus about 1 day at removal.
 
 - Engine: the Rust launcher drives only the nxrs engine (no Turbo). Use the 'Turbo dropped' estimates (~19 agent-days + contingency).
 - Location: engine repo, src/launcher, its own cargo workspace (MIT); may be renamed later.
-- Fix the four Qt problems: hintsBuilt recording (window.cpp:874), nxrs games allowed on Linux, one 'source offline' rule (the cards'), one home per control (no command strip, no status-bar Settings). Drop the dead 'Build options...' entry.
+- Fix the four Qt problems: hintsBuilt recording (window.cpp:874), nxrs games allowed on Linux, one 'source offline' rule (the cards'), Drop the dead 'Build options...' entry. Correction (owner): keep the Qt layout as is: the top bar (Add game with its drop-down, Search & Filter) and the status-bar Settings button stay; the port replicates the Qt UI, it does not redesign it.
 
