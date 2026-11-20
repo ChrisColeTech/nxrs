@@ -1,0 +1,16 @@
+# Exported by src/profiles/tools/export.py from nxnative dm/games/0100BF00112C0000/patches.py; do not edit (re-run the exporter).
+source = "nxnative dm/games/0100BF00112C0000/patches.py"
+
+[[binding]]
+what = "Catherine 60 fps startup and simulation"
+now = "game"
+goal = "game"
+purpose = "frame rate"
+checked = "1.0.1a startup, tick callback and timing getter verified by disassembly"
+why = "GFD already accepts 60 at startup, but the title also selects its own fixed steps. Both sites must match together; no SDK or host setting selects the title’s timing mode."
+
+[[match]]
+kind = "cuts"
+module = "main"
+name = "Catherine 60 fps startup and simulation"
+functions = [{ size = 0xf0, fingerprints = ["966cc9817a3a57178dd0c34b1b2e395c10b0dc2d77fafd0569591870f0dab82b"], cuts = [{ delta = 0x84, original = "e80f1f32", replacement = "88078052", reason = "configure GFD for 60 fps" }] }, { size = 0xc, fingerprints = ["b97c00f11cf12cbd431bf2acae8edd252d54bff76014491cf77bffccfd5da6cd"], cuts = [{ delta = 0x4, original = "00814d39", replacement = "20008052", reason = "select the one-tick and half-step simulation branches" }] }]

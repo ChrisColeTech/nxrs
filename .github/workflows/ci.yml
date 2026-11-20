@@ -1,0 +1,217 @@
+# nxrs-engine CI: the workspace builds and its tests that need no GPU and no game data pass (PORT_PLAN M0).
+# GPU tests sit behind graphics' `gpu-tests` feature; tests that read a game are #[ignore] or wait for an environment
+# variable naming their data, so a plain `cargo test` runs neither. The oracle job (T-lane: lifted C vs dynarmic)
+# runs only when asked for (Actions > CI > Run workflow > oracle).
+name: CI
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      oracle:
+        description: 'Also run the dynarmic oracle (T-lane)'
+        type: boolean
+        default: false
+      oracle_cases:
+        description: 'Oracle cases per instruction class (2000 = the default run; 1000000 = the nightly size)'
+        type: string
+        default: '2000'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: '1.99.0'
+  GLSLANG_VERSION: '15.1.0'
+  LLVM_MINGW: '20261104'
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: '0'
+
+jobs:
+  test:
+    name: build + tests (msvc)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust ${{ env.RUST_VERSION }}
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_VERSION --profile minimal
+          rustup default $env:RUST_VERSION
+      # graphics' build.rs compiles its GLSL with glslangValidator (VULKAN_SDK, NXGFX_GLSLANG or PATH)
+      - name: glslang cache
+        id: glslang
+        uses: actions/cache@v4
+        with:
+          path: C:\glslang
+          key: glslang-${{ env.GLSLANG_VERSION }}-windows
+      - name: Build glslangValidator
+        if: steps.glslang.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:GLSLANG_VERSION https://github.com/KhronosGroup/glslang.git C:\glslang-src
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake -S C:\glslang-src -B C:\glslang-build -A x64 -DENABLE_OPT=OFF -DENABLE_HLSL=OFF -DBUILD_TESTING=OFF -DENABLE_GLSLANG_BINARIES=ON
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build C:\glslang-build --config Release --parallel 4
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force C:\glslang | Out-Null
+          $exe = Get-ChildItem C:\glslang-build\StandAlone\Release -Filter *.exe | Where-Object { $_.Name -match '^glslang(Validator)?\.exe$' } | Select-Object -First 1
+          Copy-Item $exe.FullName C:\glslang\glslangValidator.exe
+          C:\glslang\glslangValidator.exe --version
+      - name: cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-msvc-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-msvc-${{ env.RUST_VERSION }}-
+      - name: cargo build
+        env:
+          NXGFX_GLSLANG: C:\glslang\glslangValidator.exe
+        run: cargo build --workspace --locked --jobs 4
+      - name: cargo test (no GPU, no game data)
+        env:
+          NXGFX_GLSLANG: C:\glslang\glslangValidator.exe
+          NXRT_CLANG: C:\Program Files\LLVM\bin\clang.exe
+        run: cargo test --workspace --locked --jobs 4 --lib --bins --tests
+      - name: PORT_MAP.tsv rows
+        run: python -I scripts/port_map.py --check --format-only
+
+  gnullvm:
+    name: engine for x86_64-pc-windows-gnullvm (llvm-mingw)
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust ${{ env.RUST_VERSION }} + gnullvm target
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_VERSION --profile minimal --target x86_64-pc-windows-gnullvm
+          rustup default $env:RUST_VERSION
+      - name: llvm-mingw cache
+        id: llvmmingw
+        uses: actions/cache@v4
+        with:
+          path: C:\llvm-mingw
+          key: llvm-mingw-${{ env.LLVM_MINGW }}-ucrt-x86_64
+      - name: Download llvm-mingw ${{ env.LLVM_MINGW }}
+        if: steps.llvmmingw.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $name = "llvm-mingw-$env:LLVM_MINGW-ucrt-x86_64"
+          Invoke-WebRequest "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW/$name.zip" -OutFile llvm-mingw.zip
+          Expand-Archive llvm-mingw.zip -DestinationPath C:\
+          Rename-Item "C:\$name" C:\llvm-mingw
+      - name: glslang cache
+        id: glslang
+        uses: actions/cache@v4
+        with:
+          path: C:\glslang
+          key: glslang-${{ env.GLSLANG_VERSION }}-windows
+      - name: Build glslangValidator
+        if: steps.glslang.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          git clone --depth 1 --branch $env:GLSLANG_VERSION https://github.com/KhronosGroup/glslang.git C:\glslang-src
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake -S C:\glslang-src -B C:\glslang-build -A x64 -DENABLE_OPT=OFF -DENABLE_HLSL=OFF -DBUILD_TESTING=OFF -DENABLE_GLSLANG_BINARIES=ON
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          cmake --build C:\glslang-build --config Release --parallel 4
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          New-Item -ItemType Directory -Force C:\glslang | Out-Null
+          $exe = Get-ChildItem C:\glslang-build\StandAlone\Release -Filter *.exe | Where-Object { $_.Name -match '^glslang(Validator)?\.exe$' } | Select-Object -First 1
+          Copy-Item $exe.FullName C:\glslang\glslangValidator.exe
+          C:\glslang\glslangValidator.exe --version
+      - name: cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-gnullvm-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-gnullvm-${{ env.RUST_VERSION }}-
+      # what a release ships in gnu\ (src/cli/README.md): the front end + engine and the runtime, as static libraries
+      - name: cargo build --target x86_64-pc-windows-gnullvm
+        shell: pwsh
+        env:
+          NXGFX_GLSLANG: C:\glslang\glslangValidator.exe
+          CC_x86_64_pc_windows_gnullvm: x86_64-w64-mingw32-clang
+        run: |
+          $env:PATH = "C:\llvm-mingw\bin;$env:PATH"
+          cargo build --locked --release --jobs 4 --target x86_64-pc-windows-gnullvm -p front -p runtime
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+          Get-Item target\x86_64-pc-windows-gnullvm\release\libnxfront.a, target\x86_64-pc-windows-gnullvm\release\libnxrt.a
+
+  oracle:
+    name: dynarmic oracle (T-lane, on request)
+    if: github.event_name == 'workflow_dispatch' && inputs.oracle
+    runs-on: windows-latest
+    timeout-minutes: 240
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust ${{ env.RUST_VERSION }}
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_VERSION --profile minimal
+          rustup default $env:RUST_VERSION
+      - name: Boost headers (dynarmic needs them)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://archives.boost.io/release/1.86.0/source/boost_1_86_0.tar.gz -OutFile boost.tar.gz
+          New-Item -ItemType Directory -Force C:\boost | Out-Null
+          tar -xzf boost.tar.gz -C C:\boost boost_1_86_0/boost
+          if ($LASTEXITCODE) { exit $LASTEXITCODE }
+      - name: llvm-mingw cache
+        id: llvmmingw
+        uses: actions/cache@v4
+        with:
+          path: C:\llvm-mingw
+          key: llvm-mingw-${{ env.LLVM_MINGW }}-ucrt-x86_64
+      - name: Download llvm-mingw ${{ env.LLVM_MINGW }}
+        if: steps.llvmmingw.outputs.cache-hit != 'true'
+        shell: pwsh
+        run: |
+          $name = "llvm-mingw-$env:LLVM_MINGW-ucrt-x86_64"
+          Invoke-WebRequest "https://github.com/mstorsjo/llvm-mingw/releases/download/$env:LLVM_MINGW/$name.zip" -OutFile llvm-mingw.zip
+          Expand-Archive llvm-mingw.zip -DestinationPath C:\
+          Rename-Item "C:\$name" C:\llvm-mingw
+      - name: cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            src/oracle/target
+          key: cargo-oracle-${{ env.RUST_VERSION }}-${{ hashFiles('src/oracle/Cargo.lock', 'Cargo.lock') }}
+      - uses: ilammy/msvc-dev-cmd@v1
+      - name: Build and run the oracle
+        shell: pwsh
+        env:
+          BOOST_ROOT: C:\boost\boost_1_86_0
+          NXRS_LLVM_MINGW: C:\llvm-mingw
+          CMAKE_BUILD_PARALLEL_LEVEL: '4'
+        run: |
+          cargo run --locked --release --jobs 4 --manifest-path src/oracle/Cargo.toml -- --cases ${{ inputs.oracle_cases }} --out oracle-out
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: oracle-report
+          path: |
+            oracle-out/mismatches.tsv
+            oracle-out/*/refused.txt
+            oracle-out/*/compile.log
+          if-no-files-found: ignore

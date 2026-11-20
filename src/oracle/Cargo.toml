@@ -1,0 +1,23 @@
+# The T-lane oracle: the translator's lifted C against dynarmic, per instruction class (docs/PORT_PLAN.md, T-lane).
+# Not a member of the engine workspace: dynarmic is C++ built with CMake, Ninja and Boost headers, which a plain
+# `cargo build` of the engine must not need. Run: `cargo run --release --manifest-path src/oracle/Cargo.toml`.
+[package]
+name = "oracle"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[workspace]
+
+[[bin]]
+name = "nx-oracle"
+path = "src/main.rs"
+
+[dependencies]
+translator = { path = "../translator" }
+dynarmic-sys = { package = "dynarmic-sys-mythrax", version = "=0.3.7" }
+libloading = "0.8"
+windows-sys = { version = "0.61", features = ["Win32_System_Memory"] }
+
+[profile.release]
+debug = 1

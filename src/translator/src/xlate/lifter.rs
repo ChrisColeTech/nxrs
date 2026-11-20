@@ -517,6 +517,10 @@ impl Lifter {
         if opc == 3 {
             return unsup("pair opc 3");
         }
+        // opc 01 without L is STGP (MTE, ARMv8.5), not a 32-bit STP; opc 01 L with no-allocate (mode 0) is unallocated
+        if opc == 1 && (l == 0 || mode == 0) {
+            return unsup("pair opc 1 (STGP / unallocated)");
+        }
         let scale = if opc == 2 { 3 } else { 2 };
         let off = imm7 << scale;
         let base = xs(rn);
@@ -864,6 +868,14 @@ mod tests {
         assert_eq!(op(0xd5033bbf, 0), "__atomic_thread_fence(__ATOMIC_SEQ_CST);");
         // svc #0x1
         assert_eq!(op(0xd4000021, 0x10), "rt_svc(c, 1, 0x10ull);");
+    }
+
+    #[test]
+    fn stgp_is_not_a_32_bit_stp() {
+        // stgp x11, x14, [x23] (MTE): found by the dynarmic oracle lowered as `stp w11, w14, [x23]`
+        assert_eq!(Lifter.lift_or_trap(0x69003aeb, 0x20).kind, Kind::Trap);
+        // ldpsw x1, x2, [x3, #8] stays a pair load
+        assert_eq!(Lifter.lift_or_trap(0x69410861, 0x20).kind, Kind::Op);
     }
 
     #[test]

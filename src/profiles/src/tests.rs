@@ -5,10 +5,10 @@ use patches::{Layout, PatchFile};
 fn every_profile_parses() {
     let (n, errors) = check();
     assert!(errors.is_empty(), "{errors:#?}");
-    assert_eq!(n, 187, "nxnative e4b0d9b has 187 profiles (dm/games holds 192 entries: the 187 folders and 5 files)");
+    assert_eq!(n, 207, "nxnative 7ebb76e has 207 profiles (dm/games holds 212 entries: the 207 folders and 5 files)");
     assert_eq!(all().len(), n);
     let with_patches = all().iter().filter(|p| p.patches.is_some()).count();
-    assert_eq!(with_patches, 27, "27 patches.py");
+    assert_eq!(with_patches, 29, "29 patches.py");
 }
 
 /// The owner's seven games, with the main build ids of the owner's own packages (read with `nxrs profile
@@ -57,7 +57,7 @@ fn patch_tables_round_trip() {
         assert_eq!(&back, *f, "{}", f.source);
         entries += f.cut.len() + f.obs.len() + f.stub.len() + f.matches.len() + f.capability.len() + f.binding.len();
     }
-    assert_eq!(files.len(), 27 + 1 + 2, "27 patches.py, the owner's turbo.toml, sdk + engine");
+    assert_eq!(files.len(), 29 + 1 + 2, "29 patches.py, the owner's turbo.toml (Z-A; MKW's patches are its recomp.txt), sdk + engine");
     assert!(entries > 150, "{entries}");
 }
 
@@ -128,4 +128,20 @@ fn engine_tsv_rows_come_first() {
     let a = by_title(0x0100_1F50_10DF_A000).expect("Arceus");
     assert_eq!(a.get("fps60").as_deref(), Some("double_speed"));
     assert_eq!(a.name, "Pokémon Legends: Arceus", "game.tsv's rows still apply");
+}
+
+/// Mario Kart World 1.8.0's table from mkw-recomp: every set, site and spin wait goes to the translator for that main
+/// build, and to no other build.
+#[test]
+fn mkw_180_recomp_table() {
+    let mkw = get("0400C3F00006E000").unwrap();
+    let t = mkw.recomp.as_ref().expect("recomp.txt");
+    assert_eq!(t.counts(), (9, 43, 97));
+    let (text, said) = translator_patches(&[("main", "d00e4f399e411d0613aa8d26b1c02fef00000000")]).unwrap();
+    assert!(text.contains("set shadow NXRS_PATCH_MKW_SHADOW 1\n"), "{text}");
+    assert!(text.contains("site output main dce850 d281e00a @page:x10 f947e94a"), "{text}");
+    assert!(text.contains("spin sdk 70c68c 70c7b8 70c7c8"), "{text}");
+    assert_eq!(said.len(), 1);
+    let (text, _) = translator_patches(&[("main", "9e244438c3d8ef1c703a6a85ef99c4f0")]).unwrap();
+    assert!(text.is_empty());
 }

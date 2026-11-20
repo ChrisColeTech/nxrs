@@ -25,6 +25,8 @@ pub struct RawProfile {
     pub engine_tsv: Option<&'static str>,
     pub patches: Option<&'static str>,
     pub turbo: Option<&'static str>,
+    /// `games/<id>/recomp.txt`: a static recompilation's code patch table (the translator's format) for one build
+    pub recomp: Option<&'static str>,
     /// nxnative's shader tables, zstd-compressed (`tools/export_shaders.py`)
     pub shaders: Option<&'static [u8]>,
 }
@@ -160,6 +162,9 @@ pub struct Profile {
     pub patches: Option<PatchFile>,
     /// The owner's patches for this game (Turbo's), applied by nxrs builds
     pub turbo: Option<PatchFile>,
+    /// A code patch table in the translator's own format (`recomp.txt`, ported from a static recompilation such as
+    /// mkw-recomp), applied by nxrs builds of the module build it names
+    pub recomp: Option<RecompTable>,
     /// Every row in file order (keys such as `build` repeat)
     pub rows: Vec<(String, Vec<String>)>,
 }
@@ -209,6 +214,7 @@ impl Profile {
             program_of: None,
             patches: None,
             turbo: None,
+            recomp: None,
             rows,
         };
         let need = |k: &str| p.get(k).ok_or_else(|| format!("{id}: game.tsv has no key {k}"));
@@ -478,6 +484,7 @@ fn db() -> &'static Db {
             let parsed = Profile::parse(r.id, &text).and_then(|mut p| {
                 p.patches = r.patches.map(PatchFile::parse).transpose().map_err(|e| format!("{}: patches.toml: {e}", r.id))?;
                 p.turbo = r.turbo.map(PatchFile::parse).transpose().map_err(|e| format!("{}: turbo.toml: {e}", r.id))?;
+                p.recomp = r.recomp.map(RecompTable::parse).transpose().map_err(|e| format!("{}: recomp.txt: {e}", r.id))?;
                 Ok(p)
             });
             match parsed {
@@ -629,6 +636,46 @@ pub fn patches_for(build_id: &str) -> Vec<(&'static str, Entry<'static>)> {
     out
 }
 
+/// `games/<id>/recomp.txt`: a code patch table in the translator's own format (`set`, `site`, `span`, `spin`), for
+/// the module build its `build <module> <build id>` line names (the line is not passed on).
+#[derive(Debug, Clone, PartialEq)]
+pub struct RecompTable {
+    pub module: String,
+    pub build: String,
+    /// The table without its `build` line
+    pub text: String,
+}
+
+impl RecompTable {
+    pub fn parse(text: &str) -> Result<RecompTable, String> {
+        let mut key = None;
+        let mut body = String::new();
+        for line in text.lines() {
+            let f: Vec<&str> = line.split('#').next().unwrap_or("").split_whitespace().collect();
+            if f.first() == Some(&"build") {
+                if f.len() != 3 || key.is_some() {
+                    return Err(format!("bad or second build line: {line:?}"));
+                }
+                key = Some((f[1].to_string(), f[2].to_ascii_lowercase()));
+                continue;
+            }
+            body.push_str(line);
+            body.push('\n');
+        }
+        let (module, build) = key.ok_or("no `build <module> <build id>` line")?;
+        if build.len() < 32 {
+            return Err(format!("build id {build} is shorter than 32 digits"));
+        }
+        Ok(RecompTable { module, build, text: body })
+    }
+
+    /// (sets, sites and spans, spin waits) as the translator counts them
+    pub fn counts(&self) -> (usize, usize, usize) {
+        let n = |k: &str| self.text.lines().filter(|l| l.split_whitespace().next() == Some(k)).count();
+        (n("set"), n("site") + n("span"), n("spin"))
+    }
+}
+
 /// The translator's patch table (src/translator `aot/patches.rs` format) for the cuts nxrs applies at build time
 /// (`apply = "build"`) to these modules (name, build id): one `set` per patch set, then its `site` lines. Empty
 /// when nothing applies. A cut that is not whole words is an error: the translator patches instructions.
@@ -658,7 +705,16 @@ pub fn translator_patches(modules: &[(&str, &str)]) -> Result<(String, Vec<Strin
             }
         }
     }
-    if sites.is_empty() {
+    let mut tables = vec![];
+    for p in all() {
+        let Some(t) = &p.recomp else { continue };
+        if modules.iter().any(|(m, bid)| *m == t.module && patches::build_matches(&t.build, bid)) {
+            let (k, n, spins) = t.counts();
+            said.push(format!("{}: {k} code patch sets, {n} sites, {spins} spin waits (recomp.txt)", p.name));
+            tables.push(t.text.as_str());
+        }
+    }
+    if sites.is_empty() && tables.is_empty() {
         return Ok((String::new(), said));
     }
     let mut s = String::from("# Written by nxrs from the game's profile: the patches applied at build time.\n");
@@ -668,6 +724,9 @@ pub fn translator_patches(modules: &[(&str, &str)]) -> Result<(String, Vec<Strin
     for l in sites {
         s.push_str(&l);
         s.push('\n');
+    }
+    for t in tables {
+        s.push_str(t);
     }
     Ok((s, said))
 }

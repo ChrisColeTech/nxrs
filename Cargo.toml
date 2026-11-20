@@ -1,6 +1,8 @@
 [workspace]
 resolver = "2"
 members = ["src/translator", "src/runtime", "src/graphics", "src/shaders", "src/os", "src/cli", "src/profiles", "src/config", "src/front"]
+# the T-lane oracle builds dynarmic (C++, CMake, Boost): its own workspace, run on demand (src/oracle/Cargo.toml)
+exclude = ["src/oracle"]
 
 [profile.release]
 debug = 1

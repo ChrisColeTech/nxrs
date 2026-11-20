@@ -1552,3 +1552,99 @@ which has no music; the music plays once the game starts.
   open. AudioIn: this PC has no capture endpoint now (DualSense mic disconnected). The owner was at the PC during
   the mouse run (raw motion logged at 4 s, the window closed at 41 s): mouse runs move the real cursor, do them
   only when the owner agrees.
+
+## MKW (lane K, M7)
+
+Engine `target\K` (`cargo build --release -p cli -p front`), game rebuilt with `nxrs-build build <NUP> -o mkw --outdir
+build\games\mkw` (log `build\games\mkw.buildK.log`), relinked by `build\K\relink.sh mkw`. Runs:
+`build\I\runs\*-K-mkw*` through `scripts\play_scenario.py` (`NXRS_LANE=K NXRS_ESC_QUIT=0 NXRS_CLOSE_QUIT=0
+NXRS_KEEP_FOCUS=1 NXRS_NO_ACTIVATE=1`). Saves backed up in `build\K\mkw-save-backup-*`.
+
+**What fixed the 15.5 s crash: the core mask.** MKW's NPDM gives its threads cores 0-5 (ACI0 ThreadInfo; mkw-recomp's
+kernel answers GetInfo CoreMask 0x3f); nxrs gave every program 0x7 (3 virtual cores, nxnative's Switch 1 value). With
+3 cores the game's render job system ran one view's phase events on four render contexts (lane X2's trace: two phase
+0xf, the double free; stage 9 never reached). Fix (os, O3's files, small and separate): `profile.rs` reads a Switch 2
+program's core mask from its NPDM (`npdm_core_mask`; Switch 1 programs keep 0x7), `sched.rs` `MAX_CORES` 4 -> 8.
+`K-mkw5-cores6`: "core mask 0x3f", "6 virtual cores", past 15.5 s to the course-map loading screen with no fault.
+**For O3:** please keep both; DKB (also Switch 2) gets its NPDM's cores too now.
+
+**Also fixed in O3's in-progress `mem.rs` (one token, lane K):** `set_attribute` rejected attribute 0x10
+(PermissionLocked, the RELRO lock every SDK module's DT_INIT sets): MKW aborted at main's DT_INIT (Result 0xE801,
+main+0xf42348 -> sdk+0x1793a0). Allowed for svcSetMemoryAttribute now (mkw-recomp memory.c `ATTR_PERMISSION_LOCKED`).
+
+**Patch layer.** mkw-recomp's `recomp/patches-mkw-180.txt` is the profile's `games/0400C3F00006E000/recomp.txt`
+(the translator's own table format, which is that file's; new profile file kind `RecompTable`, keyed by `build main
+d00e4f39…`, appended by `profiles::translator_patches`; MKW's `turbo.toml` is gone, its four shadow sites are in the
+table). 149 entries: 97 spin waits + 43 sites in 9 sets + 9 set lines; every original word checked at build ("patch
+applied: Mario Kart World: 9 code patch sets, 43 sites, 97 spin waits"). Host side: os `gamefix.rs` +
+`gamefix/mkw.rs`, `mkw_zstd.rs`, `mkw_view.rs`, `mkw_romfs.rs`. os `Cargo.toml` gets `zstd-sys` (experimental
+bindings) and `zstd`. `movie.rs` gets `playing()`; `mods.rs` gets `add_overlay` (a game fix's RomFS layer).
+
+| mkw-recomp entry | What it does | nxrs equivalent | Status |
+|---|---|---|---|
+| 97 `spin` lines (main 81, subsdk0 2, subsdk1 10, sdk 4) | back edge of a spin wait: a scheduling checkpoint | recomp.txt `spin` -> translator `rt_spin_gate` | Ported, built |
+| `lan` set, 1 site (main+0xbdfc2c) | title menu opens with LAN Play chosen | `NXRS_PATCH_MKW_LAN` (default 0) | Ported (no LAN service yet: off) |
+| `zstd` set, 3 sites (main+0xe1cf4, 0xf0c34, 0xdec5c) | ZSTD_decompressMultiFrame and the loads' stream on host libzstd (`ov_zstd.c`) | `NXRS_PATCH_MKW_ZSTD` (1), `gamefix/mkw_zstd.rs` (page 0xff0 / 0xfe0), `NXRS_MKW_ZSTD_CHECK=1` | Ported, runs (`K-mkw3`: 184 MB of stream in 158 ms, 0 guest fallbacks) |
+| `output` set, 2 sites (main+0xdce850/4) | GraphicsSystem's output size from the patch page | `NXRS_PATCH_MKW_OUTPUT` (0) + `NXRS_MKW_RESOLUTION` / `NXRS_MKW_ASPECT`, page 0xfd0 (committed only then) | Ported, not run |
+| `camera` set, 2 sites (main+0xcdc344, 0xcdc34c) | camera service not opened; its event a real one that never fires; stand-in service (0x7c4 slot 0xd8, else 0x5c4) at main+0x378ecb8 | `NXRS_PATCH_MKW_CAMERA` (1), page 0xf50 | Ported, runs ("no camera: the camera service is a stand-in") |
+| `aspect` set, 8 sites | Hor+ cameras (0xf80), 2D projection (0xf70, 0xf40), vfx2 screen effects (0xf20), pane masks / prompts (0xdf0) | `NXRS_PATCH_MKW_ASPECT` (0) + `NXRS_MKW_ASPECT=21:9`, `gamefix/mkw_view.rs` | Ported, not run (`window` shape not supported: logged) |
+| `vertplus` set, 1 site (main+0x894a4) | race FOV for a taller output (0xf30) | `NXRS_PATCH_MKW_VERTPLUS` (0) | Ported, not run |
+| `display` set, 3 sites | display size fitted to the output's shape (0xf10, 0xf00) | `NXRS_PATCH_MKW_DISPLAY` (0) | Ported, not run |
+| `shadow` set, 4 sites | render-buffer allocator's second pool at the first shadow map; `MKW_SHADOW_SIZE` | `NXRS_PATCH_MKW_SHADOW` (1, was `NXRS_PATCH_MKW_RBPOOL`), `NXRS_MKW_SHADOW_SIZE`, `NXRS_MKW_RB_EXTRA_MIB`; mkw-recomp's timing and size rule (0xb600000 at the console's lines) | Ported, runs (`NXRS_MKW_POOL_MODE=early` keeps X2's experiment) |
+| `seed` set, 18 sites | fixed random seeds (`seed.c`, 0xfb0) | `NXRS_PATCH_MKW_SEED` (0) + `NXRS_MKW_SEED` | Ported, not run (the clock / GetInfo 11 parts of seed.c: not ported, they live in time / svc) |
+| game.c frame update (vtable main+0x367aac0, 0xfa0) + fps_auto.c | `MKW_FPS` auto / 60 / 30 / 20 / 15, game speed log | `NXRS_MKW_FPS` (unset = the game's own choice, as mkw-recomp's auto at full speed) | Ported, not run |
+| race_scene.c (14 node vtables, 0xe00..) | in-a-race flag for 20 / 15 fps | installed with `NXRS_MKW_FPS` auto / 20 / 15 | Ported, not run |
+| `tools/romfs/resolution.py`, `romfs_res.c` | For3D / Screen lines (and LODDistanceRatio) in general_format's GamePerformanceGraphicsConfigGParam | `NXRS_MKW_RESOLUTION=<lines>`, `NXRS_MKW_DETAIL_DISTANCE`, `gamefix/mkw_romfs.rs` -> `<data>\cache\resolution-<L>\` layered by `mods::add_overlay` | Ported, compiles; not run yet |
+
+**SDK answers diffed (mkw-recomp's 321 replaced SDK names against nxrs's os / graphics):** 245 have a named nxrs
+counterpart; the other 76 (hid Npad / six-axis / vibration, touch, VP9 decoder internals, nv allocators, a few
+applet / os observers) are answered below the SDK by nxrs's services, not by name. Differences found:
+- **GetInfo CoreMask 0x7 vs 0x3f** (the NPDM's): fixed above. This was the crash.
+- **oe::GetCurrentGraphicsScale**: nxrs 0 (nxnative: the whole GPU), mkw-recomp 10 (its own placeholder). 10 did not
+  change the crash (`K-mkw4-scale10`); left at 0.
+- **nvnSyncWait on a sync never fenced**: nxrs ALREADY_SIGNALED, mkw-recomp TIMEOUT_EXPIRED. For lane G4 (not changed).
+- **nvnDeviceGetInteger** (`build\K\devinfo_diff.py`): equal to mkw-recomp's 1.8.0 table but item 0x6 (table 16 vs
+  32; nxrs prefers the sdk switch's own constant, so only if that switch has none). For G4 to confirm.
+- oe performance mode (1 docked), operation mode, focus (1, messages after a window change), display version, time,
+  account, fs synchronous: same.
+
+## Infrastructure, tests, launcher (lane Q, 2026-11-20)
+
+**Profiles.** `src/profiles` now holds nxnative 7ebb76e's 207 profiles (20 new, `shared/source.txt`); nothing in
+the 187 existing folders changed. Re-import: `py -I src/profiles/tools/export.py <nxnative>` and
+`uv run --no-project --python 3.14 src/profiles/tools/export_shaders.py <nxnative>` (a sparse clone of upstream is at
+`build\Q\nxnative-up`), then `--check`.
+
+**PORT_MAP.tsv** (repository root): one row per file of nxnative (`NX`), Turbo (`TB`) and the mkw-recomp donor files
+(`MR`): lines, destination crate/module, action, status, note. `scripts/port_map.py` writes it from ordered rules
+(edit a rule, not the TSV) and `--check` compares with the trees (defaults: `build\Q\nxnative-up`, else
+`D:\Projects\nxnative`; `D:\Projects\Switch2RECOMP-main`; `D:\Projects\mkw-recomp-main`; `--format-only` in CI);
+`cargo test -p profiles --test port_map` checks the format. **Every lane: when a row's work lands, change its rule's
+status in `scripts/port_map.py` and regenerate.**
+
+**CI** (`.github/workflows/ci.yml`, not pushed by lane Q): `cargo build --workspace --locked`, `cargo test --workspace
+--locked --lib --bins --tests` (doc tests are not run: graphics' docs have a non-compiling block), the PORT_MAP format
+check; a gnullvm job (`-p front -p runtime`, llvm-mingw 20261104); the oracle on request. **Test rules for every lane:**
+a test that needs a GPU goes behind graphics' `gpu-tests` feature; one that needs a game, keys or a dump is `#[ignore]`
+or returns early unless an environment variable names its data; a test never hangs (CI has no GPU, no games).
+**Lane O3:** two uncommitted os tests break that today: `services::time::tests::shared_page_layout_as_turbo` fails and
+`services::net::tests::bsd_event_descriptors` hangs (killed after minutes); fix or gate them before committing.
+
+**Oracle** (`src/oracle`, binary `nx-oracle`; not a workspace member). Build: Visual Studio's environment, CMake and
+Ninja, `BOOST_ROOT` = Boost headers (1.86 at `build\Q\boost\boost_1_86_0`); lane Q's script `build\Q\oracle-build.bat`.
+Run: `nx-oracle [--cases 2000] [--states 8] [--class a,b] [--out DIR] [--mutate]` (llvm-mingw from
+`NXRS_LLVM_MINGW` or `build\tools\llvm-mingw`). Each class: random words of its encoding group that `Lifter::lift`
+lowers and dynarmic runs, `Lifter`'s raw C compiled into a DLL with the game flags, run from random register / vector /
+flag / memory states on both sides at the same addresses (data window at 0x10_0000_0000, code at 0x20_0000_0000),
+compared: X0-X30, SP, next PC, NZCV, V0-V31, TPIDR_EL0, memory. Output `<out>\mismatches.tsv`. **Lane T / anyone
+touching `src/translator/src/xlate`: run it** (11 s, 0 mismatches expected). Found and fixed: STGP lowered as STP W.
+By design: `RET Xn` (n != 30) is a return to the caller; PACGA's value. Not modelled: FPSR cumulative flags (soft
+count only); FPCR other than 0. The lifter lowers many unallocated encodings dynarmic rejects (harmless: never in
+compiled code).
+
+**Launcher (D:\Projects\RecompLauncher, uncommitted).** `doctor` shown in Settings > Engine (`nxrsDoctorArguments`,
+`parseNxrsDoctor`: keep the `ok   ` / `FAIL ` line prefixes and exit code 0 / 1 of `nxrs-build doctor` stable);
+`nxrs --nxrs-doctor`. Save copy between Turbo and nxrs builds (Turbo `save\user` <-> nxrs `save\user1`, `device`,
+`cache` <-> `cache0`; backup `save-backup-<time>`), `nxrs --select-title <g> --copy-saves`. `.xci` sources (nxrs only).
+release.yml: engine bundle behind `nxrs_engine` / `NXRS_ENGINE_IN_RELEASE` (off).
+

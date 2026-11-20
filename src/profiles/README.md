@@ -1,8 +1,8 @@
 # profiles
 
 Game profiles: what the engine knows about each game, as data, and the lookup by title id and module build id.
-The data is nxnative's `dm/games` (187 profiles; its `dm/games` folder has 192 entries: the 187 profile folders and
-five files), imported by `tools/export.py`, plus the owner's patches. Everything is embedded at compile time; the
+The data is nxnative's `dm/games` (207 profiles at 7ebb76e; its `dm/games` folder has 212 entries: the 207 profile folders
+and five files; the plan's old "192 profiles" counted e4b0d9b's 187 folders plus those five files), imported by `tools/export.py`, plus the owner's patches. Everything is embedded at compile time; the
 engine reads no files for it. API: [docs/INTERFACES.md](../../docs/INTERFACES.md#profiles-srcprofiles).
 
 | Path | What |
@@ -38,7 +38,7 @@ time leaves it out).
 
 ## Verification
 
-`cargo test -p profiles` (0.05 s): 187/187 profiles parse and pass `game.py header`'s checks; the owner's seven games
+`cargo test -p profiles` (0.05 s): 207/207 profiles parse and pass `game.py header`'s checks; the owner's seven games
 resolve (by the main build ids of the owner's own packages: MK8D 4.0.1, DKB v458752, OoT v131072, Z-A 2.0.2 and Arceus
 1.1.1 by registered build; MKW, whose NUP holds the 1.8.0 program, and Violet v786432 by title, their profiles
 registering other builds); every patch table round-trips TOML → Rust → TOML → Rust unchanged; every recorded stub
