@@ -33,6 +33,7 @@ pub mod pipe;
 pub mod present;
 pub mod rt;
 pub mod rtclass;
+pub mod screen;
 pub mod queue;
 pub mod scale;
 pub mod spvfix;

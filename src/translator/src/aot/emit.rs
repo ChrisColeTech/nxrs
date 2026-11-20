@@ -64,6 +64,8 @@ pub struct Emitter<'m> {
     patched: BTreeMap<u64, (usize, Vec<u32>)>,
     spins: BTreeMap<u64, u64>,
     spanned: BTreeMap<u64, (usize, u64)>,
+    /// Probe points: `rt_probe` before each (`with_probes`).
+    probes: BTreeSet<u64>,
     reg_locals: usize,
     kept: BTreeSet<u32>,
     /// Functions a non-local jump may re-enter: setjmp callers and holders of a C++ landing pad. They are built
@@ -93,6 +95,7 @@ impl<'m> Emitter<'m> {
             patched,
             spins,
             spanned,
+            probes: BTreeSet::new(),
             reg_locals: opts.reg_locals,
             kept: if opts.callee_saved { regs::callee_saved() } else { BTreeSet::new() },
             sj_owners: {
@@ -107,6 +110,13 @@ impl<'m> Emitter<'m> {
             stats: BTreeMap::new(),
             unsupported: BTreeMap::new(),
         }
+    }
+
+    /// The probe points of this module (absolute): the registers go to the guest state and `rt_probe(c)` runs
+    /// before the instruction at each.
+    pub fn with_probes(mut self, probes: BTreeSet<u64>) -> Self {
+        self.probes = probes;
+        self
     }
 
     fn stat(&mut self, k: &'static str, n: u64) {
@@ -448,7 +458,7 @@ impl<'m> Emitter<'m> {
 
         let mut open_span: Option<u64> = None;
         let mut k = None;
-        let (mut spin_gates, mut loop_barriers, mut patched_sites) = (0, 0, 0);
+        let (mut spin_gates, mut loop_barriers, mut patched_sites, mut probes) = (0, 0, 0, 0);
         let mut uses_patches = false;
         for (i, ins) in insns.iter().enumerate() {
             let a = entry + 4 * i as u64;
@@ -463,6 +473,10 @@ impl<'m> Emitter<'m> {
             }
             if labels.contains(&a) {
                 body.push((None, format!("L_{a:x}:;")));
+            }
+            if self.probes.contains(&a) {
+                body.push((None, format!("    {spill}c->pc = {}; rt_probe(c);", hx(a))));
+                probes += 1;
             }
             k = Some(ins.kind);
             if let Some((set, words)) = self.patched.get(&a) {
@@ -585,6 +599,7 @@ impl<'m> Emitter<'m> {
         self.stat("external_branches", external_branches);
         self.stat("external_calls", external_calls);
         self.stat("spin_gates", spin_gates);
+        self.stat("probes", probes);
         self.stat("loop_barriers", loop_barriers);
         self.stat("patched_sites", patched_sites);
         self.stat("spans", nspans);
@@ -685,6 +700,36 @@ mod tests {
 
     /// A frame-step stub end to end: main's site branches to the stubs module when its set is on, the stubs
     /// module's code comes back to the instruction after the site, which discovery made a function start.
+    /// A probe point (`probe main 4`): the registers go to the guest state and rt_probe(c) runs with c->pc at the
+    /// probed instruction, before it; the instruction itself is lifted as before. Probes outside .text or unaligned
+    /// are refused.
+    #[test]
+    fn probe_points_call_rt_probe_before_the_instruction() {
+        use crate::aot::discover::discover;
+        use crate::aot::patches::Table;
+        use crate::loader::{ModLayout, Module};
+        let base = 0x70_0000_0000u64;
+        let words = vec![0x1100_0508u32, 0x1100_0508, 0x5280_0020, 0xD65F_03C0];
+        let lay = vec![ModLayout { name: "main".into(), base, size: 0x10_0000 }];
+        let t = Table::parse("probe main 4 8\n", "t", &lay).unwrap();
+        let main = Module::code("main", base, base, words, vec![]);
+        t.check(&main, "main").unwrap();
+        assert_eq!(t.probes_for("main", base).into_iter().collect::<Vec<_>>(), vec![base + 4, base + 8]);
+        let starts: Vec<u64> = discover(&main).0.iter().map(|&s| main.lo + 4 * s as u64).collect();
+        let mut e = Emitter::new(&main, &starts, Default::default(), Default::default(), Default::default(), &EmitOptions::default())
+            .with_probes(t.probes_for("main", base));
+        let (c, _) = e.function(base, base + 16).unwrap();
+        let c = c.join("\n");
+        let probe4 = c.find(&format!("c->pc = {}; rt_probe(c);", hx(base + 4))).expect(&c);
+        let probe8 = c.find(&format!("c->pc = {}; rt_probe(c);", hx(base + 8))).expect(&c);
+        assert!(probe4 < probe8 && c.matches("rt_probe(c)").count() == 2, "{c}");
+        assert_eq!(e.stats.get("probes"), Some(&2));
+        assert!(Table::parse("probe main 6\n", "t", &lay).is_err(), "unaligned");
+        assert!(Table::parse("probe nope 4\n", "t", &lay).is_err(), "unknown module");
+        let far = Table::parse("probe main 0x8000\n", "t", &lay).unwrap();
+        assert!(far.check(&main, "main").is_err(), "outside .text");
+    }
+
     #[test]
     fn stub_site_branches_to_the_area_and_back() {
         use crate::aot::discover::discover;

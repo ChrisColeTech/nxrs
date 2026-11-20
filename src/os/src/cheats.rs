@@ -28,6 +28,25 @@ pub struct Cheat {
     /// Why it cannot run (an unsupported or malformed instruction): off for good until a reload.
     pub broken: Option<String>,
     failed: u64,
+    // ---- from `<build>.meta.tsv` (all empty without one)
+    pub section: String,
+    pub note: String,
+    /// The value's type ("u32", "s16", "f32"...).
+    pub ty: String,
+    /// "set": runs one pass, then turns itself off.
+    pub once: bool,
+    /// The off half of an on / off pair just switched off: runs one pass (the restore), then off.
+    pub restore_once: bool,
+    /// The off (restore) half of a pair, and the index of its partner.
+    pub pair_off: bool,
+    pub pair: Option<usize>,
+    pub pair_name: String,
+    /// "ask": a value the player may set (bounds), held in the program words `vw` (an 8-byte value: high, low).
+    pub ask: Option<(Option<f64>, Option<f64>)>,
+    pub vw: Vec<usize>,
+    /// Never-decrease: (region 0 main / 1 heap, offset) of a typed value the host keeps at its highest.
+    pub nd: Option<(u32, u64)>,
+    pub nd_max: Option<u64>,
 }
 
 /// A cheat file's entries (labels, entries without code, left out).
@@ -608,13 +627,24 @@ impl Vm {
     }
 
     /// One pass: registers reset, then each cheat in order (`cheats`: the masters and the enabled ones).
-    pub fn pass(&mut self, cheats: &mut [Cheat], mem: &mut dyn Mem, held: u64) {
+    /// One pass; true when a one-pass cheat ("set", a pair's restore) turned itself off (the toggles to save).
+    pub fn pass(&mut self, cheats: &mut [Cheat], mem: &mut dyn Mem, held: u64) -> bool {
         self.reg = [0; 16];
         self.saved = [0; 16];
         self.held = held;
+        let mut fired = false;
         for c in cheats.iter_mut() {
-            if !c.enabled || c.broken.is_some() {
+            if !(c.enabled || c.restore_once) || c.broken.is_some() {
                 continue;
+            }
+            if c.nd.is_some() {
+                nd_step(c, mem);
+                continue;
+            }
+            if (c.once || c.restore_once) && !c.master {
+                c.enabled = false;
+                c.restore_once = false;
+                fired = true;
             }
             let before = c.failed;
             if let Err(e) = self.run(&c.words, mem, &mut c.failed) {
@@ -626,6 +656,7 @@ impl Vm {
             }
         }
         self.keyold = held;
+        fired
     }
 }
 
@@ -708,6 +739,8 @@ struct State {
     file: std::path::PathBuf,
     build: String,
     cheats: Vec<Cheat>,
+    /// Cheats the meta file says its compiler left out: (name, why).
+    unresolved: Vec<(String, String)>,
     vm: Vm,
     mem: GuestMem,
 }
@@ -727,10 +760,14 @@ fn load() -> Option<State> {
     let file = candidates.into_iter().find(|p| p.is_file())?;
     let text = std::fs::read_to_string(&file).ok()?;
     let mut cheats = parse(&text);
+    let meta = std::fs::read_to_string(file.with_extension("meta.tsv")).unwrap_or_default();
+    let unresolved = meta_load(&mut cheats, &meta);
+    link_pairs(&mut cheats);
+    values_load(&mut cheats, &std::fs::read_to_string(file.with_extension("values")).unwrap_or_default());
     let enabled: Vec<String> = std::fs::read_to_string(file.with_extension("enabled")).unwrap_or_default().lines().map(|l| l.trim().to_string()).collect();
     let on: Vec<String> = std::env::var("NXOS_CHEATS_ON").unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
     for c in cheats.iter_mut() {
-        if !c.master && (enabled.contains(&c.name) || on.contains(&c.name)) {
+        if !c.master && !c.pair_off && (enabled.contains(&c.name) || on.contains(&c.name)) {
             c.enabled = true;
         }
     }
@@ -743,12 +780,16 @@ fn load() -> Option<State> {
         cheats.iter().filter(|c| c.master).count(),
         if broken.is_empty() { String::new() } else { format!("; off for good: {}", broken.join(", ")) }
     );
-    Some(State { file, build, cheats, vm: Vm::default(), mem: GuestMem { main: m.base, main_text: (m.base, m.base + m.text_end) } })
+    Some(State { file, build, cheats, unresolved, vm: Vm::default(), mem: GuestMem { main: m.base, main_text: (m.base, m.base + m.text_end) } })
 }
 
 fn save_enabled(st: &State) {
-    let names: Vec<&str> = st.cheats.iter().filter(|c| c.enabled && !c.master).map(|c| c.name.as_str()).collect();
+    let names: Vec<&str> = st.cheats.iter().filter(|c| c.enabled && !c.master && !c.once && !c.pair_off).map(|c| c.name.as_str()).collect();
     let _ = std::fs::write(st.file.with_extension("enabled"), names.join("\n") + "\n");
+    let vals: Vec<String> = st.cheats.iter().filter(|c| c.ask.is_some()).filter_map(|c| value_get(c).map(|v| format!("{}\t{v}", c.name))).collect();
+    if !vals.is_empty() {
+        let _ = std::fs::write(st.file.with_extension("values"), vals.join("\n") + "\n");
+    }
 }
 
 /// Each present: one pass of the masters and the enabled cheats.
@@ -758,7 +799,9 @@ pub fn present() {
     let Some(st) = st.as_mut() else { return };
     let held = held_keys();
     let State { cheats, vm, mem, .. } = st;
-    vm.pass(cheats, mem, held);
+    if vm.pass(cheats, mem, held) {
+        save_enabled(st);
+    }
 }
 
 /// The control pipe's cheat commands.
@@ -773,31 +816,340 @@ pub fn register_commands() {
             Some(st) => {
                 let mut s = format!("{} (build {})\n", st.file.display(), st.build);
                 for c in &st.cheats {
+                    let mut extra = String::new();
+                    if !c.section.is_empty() {
+                        extra.push_str(&format!(" [{}]", c.section));
+                    }
+                    if c.once {
+                        extra.push_str(" (one pass)");
+                    }
+                    if c.pair_off {
+                        extra.push_str(" (the restore of its pair)");
+                    }
+                    if c.nd.is_some() {
+                        extra.push_str(&format!(" (never decreases, {})", c.ty));
+                    }
+                    if let Some(v) = value_get(c) {
+                        extra.push_str(&format!(" = {v} {}", c.ty));
+                    }
+                    if !c.note.is_empty() {
+                        extra.push_str(&format!(" -- {}", c.note));
+                    }
                     s.push_str(&format!(
-                        "{} {}{}\n",
+                        "{} {}{extra}{}\n",
                         if c.master { "master" } else if c.enabled { "on    " } else { "off   " },
                         c.name,
                         c.broken.as_ref().map(|b| format!(" (off: {b})")).unwrap_or_default()
                     ));
                 }
+                for (n, why) in &st.unresolved {
+                    s.push_str(&format!("left out {n}: {why}\n"));
+                }
                 s
             }
         }
     });
-    nxconfig::ctl::register("cheat", "on|off <name>: turn a cheat on or off (kept in <build>.enabled)", |a| {
+    nxconfig::ctl::register("cheat", "on|off <name> | set <name> <value>: turn a cheat on or off (kept in <build>.enabled), set an ask cheat's value (<build>.values)", |a| {
         let (Some(what), name) = (a.first(), a[1.min(a.len())..].join(" ")) else { return "cheat on|off <name>\n".into() };
         let mut g = STATE.lock().unwrap();
         let Some(Some(st)) = g.as_mut() else { return "no cheats loaded\n".into() };
-        let Some(c) = st.cheats.iter_mut().find(|c| c.name == name && !c.master) else { return format!("no cheat {name:?}\n") };
-        if c.broken.is_some() {
-            return format!("{name}: cannot run ({})\n", c.broken.as_ref().unwrap());
-        }
-        c.enabled = *what == "on";
-        let r = format!("{name}: {}\n", if c.enabled { "on" } else { "off" });
+        let r = match *what {
+            "set" => {
+                let (name, value) = name.rsplit_once(' ').unwrap_or((name.as_str(), ""));
+                match st.cheats.iter_mut().find(|c| c.name == name) {
+                    Some(c) => match value_set(c, value) {
+                        Ok(()) => format!("{name} = {value}\n"),
+                        Err(e) => return format!("{name}: {e}\n"),
+                    },
+                    None => return format!("no cheat {name:?}\n"),
+                }
+            }
+            _ => match toggle(&mut st.cheats, &name, *what == "on") {
+                Ok(r) => r,
+                Err(e) => return e,
+            },
+        };
         save_enabled(st);
         crate::log!("cheats: {}", r.trim());
         r
     });
+}
+
+// ---- `<build>.meta.tsv` (nxnative hle_cheats.c meta_load; nxnative's scripts/cheat_anchor.py writes it beside a
+// compiled <build>.txt): per entry its section, note, type, an on / off pair, a value the player may set ("ask", kept
+// in <build>.values), "set" cheats that run one pass and turn themselves off, and never-decrease, a host action that
+// keeps a typed value at the highest seen. Columns are read by their header names; rows go to the entries of the same
+// name in file order; "unresolved" rows (cheats the compiler left out) are listed.
+
+/// A meta type's width in bytes ("u8" .. "u64", "s16", "f32", "f64"); 0 unknown.
+fn type_width(t: &str) -> u32 {
+    match t.get(1..).and_then(|b| b.parse::<u32>().ok()) {
+        Some(b @ (8 | 16 | 32 | 64)) => b / 8,
+        _ => 0,
+    }
+}
+
+/// Whether program word `k` is a value word (an immediate of opcodes 0 / 1 / 4 / 6 / 7, C0's immediate form, 9's
+/// immediate): a value set may never rewrite an opcode word.
+fn value_word(words: &[u32], k: usize) -> bool {
+    let mut a = 0;
+    while a < words.len() {
+        let Ok(i) = decode(&words[a..]) else { return false };
+        let first = match i.op {
+            0 | 1 => Some(a + 2),
+            4 | 6 | 7 => Some(a + 1),
+            0xC0 if i.o == 4 => Some(a + 1),
+            9 if i.flags != 0 => Some(a + 1),
+            _ => None,
+        };
+        if first.is_some_and(|f| k >= f && k < a + i.len) {
+            return true;
+        }
+        a += i.len;
+    }
+    false
+}
+
+/// Applies a meta file's rows to the cheats; returns the unresolved ones (name, why).
+pub fn meta_load(cheats: &mut Vec<Cheat>, text: &str) -> Vec<(String, String)> {
+    let mut unresolved = vec![];
+    let cols = ["name", "kind", "section", "type", "action", "ask", "value_words", "once", "pair", "resolved", "note", "address"];
+    let mut at: Option<Vec<Option<usize>>> = None;
+    let mut cursor = 0;
+    for line in text.lines() {
+        if line.starts_with('#') || line.trim().is_empty() {
+            continue;
+        }
+        let f: Vec<&str> = line.split('\t').map(|x| x.trim_end_matches('\r')).collect();
+        let Some(idx) = at.as_ref() else {
+            let h: Vec<Option<usize>> = cols.iter().map(|c| f.iter().position(|x| x == c)).collect();
+            if h[0].is_none() {
+                break;
+            }
+            at = Some(h);
+            continue;
+        };
+        let col = |k: usize| idx[k].and_then(|i| f.get(i).copied()).unwrap_or("");
+        let (name, kind) = (col(0), col(1));
+        if kind == "unresolved" {
+            unresolved.push((name.to_string(), col(10).to_string()));
+            continue;
+        }
+        let j = match (cursor..cheats.len()).find(|&j| cheats[j].name == name) {
+            Some(j) => j,
+            // a never-decrease entry has no code words (the file's entry is empty, so parsing left it out)
+            None if col(4) == "never-decrease" => {
+                cheats.push(Cheat { name: name.to_string(), ..Default::default() });
+                cheats.len() - 1
+            }
+            None => continue,
+        };
+        cursor = j + 1;
+        let c = &mut cheats[j];
+        if c.section.is_empty() {
+            c.section = col(2).to_string();
+        }
+        c.ty = col(3).to_string();
+        c.once = col(7) == "1";
+        c.pair_off = kind == "patch-off";
+        let (res, note) = (col(9), col(10));
+        c.note = [res, note].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("; ");
+        if !col(5).is_empty() {
+            let a = col(5);
+            let (lo, hi) = a.split_once("..").unwrap_or((a, ""));
+            c.ask = Some((lo.trim().parse().ok(), hi.trim().parse().ok()));
+            c.vw = col(6).split(|ch: char| !ch.is_ascii_digit()).filter_map(|s| s.parse().ok()).filter(|&v: &usize| v < c.words.len()).collect();
+            let w = type_width(&c.ty);
+            if w == 0 || c.vw.is_empty() || (w == 8 && c.vw.len() % 2 != 0) || c.broken.is_some() || !c.vw.iter().all(|&k| value_word(&c.words, k)) {
+                c.ask = None;
+            }
+        }
+        if col(4) == "never-decrease" && c.words.is_empty() {
+            if let Some((r, off)) = col(11).split_once(':') {
+                let off = u64::from_str_radix(off.trim_start_matches("0x").trim_start_matches("0X"), 16).ok();
+                if let (Ok(r @ 0..=1), Some(off), true) = (r.trim().parse::<u32>(), off, type_width(&c.ty) != 0) {
+                    c.nd = Some((r, off));
+                }
+            }
+        }
+        c.pair_name = col(8).to_string();
+    }
+    // pairs named by the meta file
+    for i in 0..cheats.len() {
+        if !cheats[i].pair_name.is_empty() {
+            cheats[i].pair = cheats.iter().position(|c| c.name == cheats[i].pair_name);
+        }
+    }
+    unresolved
+}
+
+/// "X - on" / "X - off" (also "X on", "X: off", "X (off)"): the base name and whether it is the off half.
+fn onoff_split(name: &str) -> Option<(String, bool)> {
+    let n = name.trim_end();
+    let n = n.strip_suffix(')').or_else(|| n.strip_suffix(']')).unwrap_or(n);
+    let low = n.to_ascii_lowercase();
+    let (rest, off) = if low.ends_with("off") { (&n[..n.len() - 3], true) } else if low.ends_with("on") { (&n[..n.len() - 2], false) } else { return None };
+    let base = rest.trim_end_matches([' ', '-', ':', '_', '(', '[']);
+    (base.len() < rest.len() && !base.is_empty()).then(|| (base.to_string(), off))
+}
+
+/// Links on / off pairs: the meta file's first, then the naming convention; both halves plain runnable cheats.
+pub fn link_pairs(cheats: &mut [Cheat]) {
+    for i in 0..cheats.len() {
+        if cheats[i].pair.is_some() || cheats[i].master {
+            continue;
+        }
+        let Some((base, off)) = onoff_split(&cheats[i].name) else { continue };
+        let j = (0..cheats.len()).find(|&j| j != i && !cheats[j].master && onoff_split(&cheats[j].name).is_some_and(|(b, o)| b.eq_ignore_ascii_case(&base) && o != off));
+        if let Some(j) = j {
+            cheats[i].pair = Some(j);
+            cheats[i].pair_off = off;
+        }
+    }
+    for i in 0..cheats.len() {
+        if let Some(j) = cheats[i].pair {
+            if cheats[j].pair.is_none() {
+                cheats[j].pair = Some(i);
+                cheats[j].pair_off = !cheats[i].pair_off;
+            }
+        }
+    }
+}
+
+/// Turns a cheat on or off: turning the on half of a pair off runs its off half once (the restore); the off half is
+/// never on by itself (turning it on or off acts on its partner). The reply line, or why not.
+pub fn toggle(cheats: &mut [Cheat], name: &str, on: bool) -> Result<String, String> {
+    let Some(mut i) = cheats.iter().position(|c| c.name == name && !c.master) else { return Err(format!("no cheat {name:?}\n")) };
+    if cheats[i].pair_off {
+        if let Some(j) = cheats[i].pair {
+            i = j;
+        }
+    }
+    if let Some(b) = &cheats[i].broken {
+        return Err(format!("{}: cannot run ({b})\n", cheats[i].name));
+    }
+    let was = cheats[i].enabled;
+    cheats[i].enabled = on;
+    if cheats[i].nd.is_some() && on && !was {
+        cheats[i].nd_max = None;
+    }
+    if let Some(j) = cheats[i].pair {
+        cheats[j].enabled = false;
+        cheats[j].restore_once = was && !on;
+    }
+    Ok(format!("{}: {}{}\n", cheats[i].name, if on { "on" } else { "off" }, if was && !on && cheats[i].pair.is_some() { " (its restore runs once)" } else { "" }))
+}
+
+fn width_bits(w: u32) -> u64 {
+    if w >= 8 { u64::MAX } else { (1u64 << (8 * w)) - 1 }
+}
+
+/// Sets an ask cheat's value from text in its type, within its bounds ("0x" hexadecimal, else decimal).
+pub fn value_set(c: &mut Cheat, text: &str) -> Result<(), String> {
+    let w = type_width(&c.ty);
+    let Some((lo, hi)) = c.ask else { return Err("takes no value".into()) };
+    let t = text.trim();
+    let int = |t: &str| -> Option<i128> {
+        let (neg, d) = match t.strip_prefix('-') {
+            Some(d) => (true, d),
+            None => (false, t.strip_prefix('+').unwrap_or(t)),
+        };
+        let v = match d.strip_prefix("0x").or_else(|| d.strip_prefix("0X")) {
+            Some(h) => i128::from_str_radix(h, 16).ok()?,
+            None => d.parse::<i128>().ok()?,
+        };
+        Some(if neg { -v } else { v })
+    };
+    let (raw, d): (u64, f64) = match c.ty.chars().next() {
+        Some('f') => {
+            let d: f64 = t.parse().map_err(|_| format!("not a number: {t}"))?;
+            (if w == 4 { (d as f32).to_bits() as u64 } else { d.to_bits() }, d)
+        }
+        Some('s') => {
+            let v = int(t).ok_or(format!("not a number: {t}"))?;
+            let b = 8 * w as i128;
+            if v < -(1i128 << (b - 1)) || v >= 1i128 << (b - 1) {
+                return Err(format!("{t} does not fit {}", c.ty));
+            }
+            (v as u64 & width_bits(w), v as f64)
+        }
+        _ => {
+            let v = int(t).ok_or(format!("not a number: {t}"))?;
+            if v < 0 || v > width_bits(w) as i128 {
+                return Err(format!("{t} does not fit {}", c.ty));
+            }
+            (v as u64, v as f64)
+        }
+    };
+    if lo.is_some_and(|m| d < m) || hi.is_some_and(|m| d > m) {
+        return Err(format!("{t} is out of bounds"));
+    }
+    let per = if w == 8 { 2 } else { 1 };
+    for k in c.vw.chunks(per).filter(|k| k.len() == per) {
+        if per == 2 {
+            c.words[k[0]] = (raw >> 32) as u32;
+            c.words[k[1]] = raw as u32;
+        } else {
+            c.words[k[0]] = raw as u32;
+        }
+    }
+    Ok(())
+}
+
+/// An ask cheat's value as text in its type.
+pub fn value_get(c: &Cheat) -> Option<String> {
+    let w = type_width(&c.ty);
+    c.ask?;
+    let raw = if w == 8 { (c.words[*c.vw.first()?] as u64) << 32 | c.words[*c.vw.get(1)?] as u64 } else { c.words[*c.vw.first()?] as u64 & width_bits(w) };
+    Some(match c.ty.chars().next() {
+        Some('f') if w == 4 => format!("{}", f32::from_bits(raw as u32)),
+        Some('f') => format!("{}", f64::from_bits(raw)),
+        Some('s') => format!("{}", ((raw << (64 - 8 * w)) as i64) >> (64 - 8 * w)),
+        _ => format!("{raw}"),
+    })
+}
+
+/// `<build>.values`: one "name<TAB>value" a line (a value that no longer fits keeps the file's program words).
+fn values_load(cheats: &mut [Cheat], text: &str) {
+    for l in text.lines() {
+        if let Some((n, v)) = l.split_once('\t') {
+            if let Some(c) = cheats.iter_mut().find(|c| c.name == n && c.ask.is_some()) {
+                let _ = value_set(c, v);
+            }
+        }
+    }
+}
+
+/// a < b in the cheat's type: unsigned, signed or float (a NaN compares false, so it is never written back).
+fn value_less(ty: &str, w: u32, a: u64, b: u64) -> bool {
+    match ty.chars().next() {
+        Some('f') if w == 4 => f32::from_bits(a as u32) < f32::from_bits(b as u32),
+        Some('f') => f64::from_bits(a) < f64::from_bits(b),
+        Some('s') => {
+            let sh = 64 - 8 * w;
+            ((a << sh) as i64 >> sh) < ((b << sh) as i64 >> sh)
+        }
+        _ => a < b,
+    }
+}
+
+/// One never-decrease pass: the first notes the value; then a lower one is put back to the highest seen, a higher one
+/// becomes the highest (the VM keeps no state between passes, so this is the host's action).
+fn nd_step(c: &mut Cheat, mem: &mut dyn Mem) {
+    let Some((r, off)) = c.nd else { return };
+    let w = type_width(&c.ty);
+    let base = mem.base(r);
+    if w == 0 || base == 0 {
+        return;
+    }
+    let a = base + off;
+    let Some(cur) = mem.read(a, w) else { return };
+    match c.nd_max {
+        Some(m) if value_less(&c.ty, w, cur, m) => {
+            mem.write(a, w, m);
+        }
+        _ => c.nd_max = Some(cur),
+    }
 }
 
 #[cfg(test)]
@@ -897,5 +1249,74 @@ mod tests {
         assert_eq!(f32::from_bits(vm.reg[0] as u32), 3.75);
         // an else at depth 0 turns the cheat off
         assert!(Vm::default().run(&[0x2100_0000], &mut m, &mut failed).is_err());
+    }
+
+    /// <build>.meta.tsv as nxnative reads it: section / type / note, an ask value (bounds, value words, set and read
+    /// back, <build>.values), a one-pass "set" cheat, an on / off pair by name (turning it off runs the restore once),
+    /// a never-decrease host action on an entry with no code, and the compiler's unresolved list.
+    #[test]
+    fn meta_tsv() {
+        let txt = "[Coins]
+04000000 00000010 00000005
+[Max once]
+04000000 00000014 00000007
+[Infinite HP - on]
+04000000 00000018 000003E7
+[Infinite HP - off]
+04000000 00000018 00000064
+[Score floor]
+";
+        let meta = "# build 0123456789ABCDEF 1.0.0
+name	kind	section	type	action	ask	value_words	once	pair	resolved	note	address
+Coins	cheat	Items	u32		0..9999	2			strong	the purse	
+Max once	cheat		u32				1				
+Score floor	cheat		u32	never-decrease							0:0x20
+Lost one	unresolved									no anchor	
+";
+        let mut c = parse(txt);
+        assert_eq!(c.len(), 4, "the empty entry is left out by the parser");
+        let un = meta_load(&mut c, meta);
+        link_pairs(&mut c);
+        assert_eq!(un, vec![("Lost one".to_string(), "no anchor".to_string())]);
+        assert_eq!((c[0].section.as_str(), c[0].ty.as_str(), c[0].note.as_str()), ("Items", "u32", "strong; the purse"));
+        assert_eq!((c[0].ask, c[0].vw.clone()), (Some((Some(0.0), Some(9999.0))), vec![2]));
+        assert_eq!(value_get(&c[0]).as_deref(), Some("5"));
+        assert!(value_set(&mut c[0], "10000").is_err() && value_set(&mut c[0], "-1").is_err());
+        values_load(&mut c, "Coins	0x4D2
+");
+        assert_eq!(c[0].words[2], 1234);
+        assert!(c[1].once);
+        assert_eq!((c[2].pair, c[2].pair_off, c[3].pair, c[3].pair_off), (Some(3), false, Some(2), true));
+        let nd = c.iter().position(|x| x.name == "Score floor").unwrap();
+        assert_eq!(c[nd].nd, Some((0, 0x20)));
+
+        let mut m = fake();
+        let mut vm = Vm::default();
+        let rd = |m: &mut Fake, o: u64| m.read(0x1000_0000 + o, 4).unwrap();
+        c[1].enabled = true;
+        assert!(vm.pass(&mut c, &mut m, 0), "a one-pass cheat turned itself off");
+        assert_eq!((rd(&mut m, 0x14), c[1].enabled), (7, false));
+        toggle(&mut c, "Infinite HP - on", true).unwrap();
+        vm.pass(&mut c, &mut m, 0);
+        assert_eq!(rd(&mut m, 0x18), 999);
+        assert!(toggle(&mut c, "Infinite HP - on", false).unwrap().contains("restore"));
+        assert!(vm.pass(&mut c, &mut m, 0));
+        assert_eq!(rd(&mut m, 0x18), 100, "the restore ran");
+        m.write(0x1000_0018, 4, 5);
+        vm.pass(&mut c, &mut m, 0);
+        assert_eq!(rd(&mut m, 0x18), 5, "once only");
+        toggle(&mut c, "Score floor", true).unwrap();
+        m.write(0x1000_0020, 4, 50);
+        vm.pass(&mut c, &mut m, 0);
+        m.write(0x1000_0020, 4, 30);
+        vm.pass(&mut c, &mut m, 0);
+        assert_eq!(rd(&mut m, 0x20), 50, "put back to the highest");
+        m.write(0x1000_0020, 4, 80);
+        vm.pass(&mut c, &mut m, 0);
+        m.write(0x1000_0020, 4, 79);
+        vm.pass(&mut c, &mut m, 0);
+        assert_eq!(rd(&mut m, 0x20), 80);
+        assert_eq!(onoff_split("God mode (off)"), Some(("God mode".to_string(), true)));
+        assert_eq!(onoff_split("Wagon"), None);
     }
 }

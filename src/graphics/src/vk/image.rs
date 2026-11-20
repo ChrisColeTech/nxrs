@@ -352,6 +352,38 @@ pub struct Images {
     released: HashMap<u64, tex_t>,
 }
 
+impl Images {
+    /// The render targets (colour and depth attachments) as lines for a diagnostic dump: serial, size, layers,
+    /// levels, samples, Vulkan and NVN formats, scale, storage address, largest first.
+    pub fn render_targets(&self) -> Vec<String> {
+        let mut v: Vec<&Image> = self
+            .by_serial
+            .values()
+            .filter(|im| im.usage.intersects(vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT))
+            .collect();
+        v.sort_by_key(|im| (std::cmp::Reverse(im.extent.width as u64 * im.extent.height as u64), im.tex.serial));
+        v.iter()
+            .map(|im| {
+                format!(
+                    "ser{}\t{}x{}x{}\tlayers {}\tlevels {}\tsamples {}\t{:?}\tNVN {:#x}\tscale {}\tat {:#x}{}",
+                    im.tex.serial,
+                    im.extent.width,
+                    im.extent.height,
+                    im.extent.depth,
+                    im.layers,
+                    im.levels,
+                    im.samples.as_raw(),
+                    im.format,
+                    im.tex.d.format,
+                    im.scale,
+                    im.tex.mem as u64,
+                    if im.gpu_owned { "\tGPU-written" } else { "" }
+                )
+            })
+            .collect()
+    }
+}
+
 /// What a texture object is, without its serial: the key a released image is found again by.
 fn tex_identity(t: &tex_t) -> u128 {
     // the storage, the description (size, format, target, levels, flags) and the layout; not the swizzle, the pool

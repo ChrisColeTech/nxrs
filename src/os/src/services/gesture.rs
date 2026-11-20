@@ -315,7 +315,11 @@ mod tests {
         r.sample(&at(20.0), 20 * ms);
         let e = *r.hist.last().unwrap();
         assert_eq!(e.ty, ROTATE, "{:?}", types(&r));
-        assert!((e.rot - 20.0).abs() < 1.5, "{} degrees", e.rot);
+        // yuzu's and nxnative's angle step, atan((a1 - a0) / (1 + a1 a0)) of the first finger's angles about the mid
+        // point (180 degrees, then -160), not the plain 20 degrees
+        let (a0, a1) = (props(&at(0.0)).angle, props(&at(20.0)).angle);
+        let want = ((a1 - a0) / (1.0 + a1 * a0)).atan().to_degrees();
+        assert!((e.rot - want).abs() < 1e-4 && e.rot > 30.0, "{} degrees, want {want}", e.rot);
         assert_eq!(e.scale, 0.0);
 
         // the finger count changes: Cancel, and the next touch has no IsNewTouch

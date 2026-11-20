@@ -85,6 +85,10 @@ impl Stream {
     }
     /// Queues a block of stereo float samples.
     pub fn append(&self, tag: u64, pcm: Vec<f32>) {
+        // F7's copy of the game's own sound, before the slowdown and the limiter
+        if pcm.len() >= 2 {
+            pre_tap(self as *const Stream as usize, &pcm);
+        }
         let mut st = self.st.lock().unwrap();
         let n = pcm.len() / 2;
         if n == 0 {
@@ -362,6 +366,104 @@ pub fn report() -> Vec<String> {
         v.push(stats_line(&st.name, &st.st.lock().unwrap()));
     }
     v
+}
+
+/// The game's sound as it produced it, for F7 (Turbo rec_audio_time.h's design, reimplemented): every stream's
+/// appended blocks are mixed on the game clock's timeline, before the slowdown (which stretches what the sound card
+/// plays) and the device's limiter. A block is placed so that it ends now; when that is within 10 ms of where the
+/// stream's last block ended, it follows it (the event jitter snaps to the sample clock, real gaps stay). Mixed
+/// frames older than `LAG` go to the tap, peak-limited for the recording on their own.
+pub struct Timeline {
+    /// The frame index of `buf[0]` on the game clock's 48 kHz timeline.
+    base: u64,
+    buf: VecDeque<[f32; 2]>,
+    /// Each stream's end on the timeline.
+    next: std::collections::HashMap<usize, u64>,
+    gain: f32,
+}
+
+impl Timeline {
+    pub const LAG: u64 = RATE as u64 / 5; // 200 ms for every stream's block of that time to arrive
+    const JITTER: u64 = 480; // 10 ms
+    const CAP: u64 = RATE as u64 * 4; // a block further ahead is cut
+
+    pub fn new(now: u64) -> Timeline {
+        Timeline { base: now, buf: VecDeque::new(), next: Default::default(), gain: 1.0 }
+    }
+
+    /// Where a block of `frames` that arrives at `now` starts, for a stream that ended at `next`.
+    pub fn place(now: u64, frames: u64, next: Option<u64>) -> u64 {
+        let start = now.saturating_sub(frames);
+        match next {
+            Some(n) if start <= n + Self::JITTER => n,
+            _ => start,
+        }
+    }
+
+    /// Stream `id`'s block (stereo, interleaved) arriving at `now`; returns the mixed frames now due (interleaved).
+    pub fn add(&mut self, id: usize, pcm: &[f32], now: u64) -> Vec<f32> {
+        let n = (pcm.len() / 2) as u64;
+        let at = Self::place(now, n, self.next.get(&id).copied());
+        self.next.insert(id, at + n);
+        for f in 0..n {
+            let i = at + f;
+            if i < self.base || i >= self.base + Self::CAP {
+                continue; // already handed over, or absurdly far ahead
+            }
+            let k = (i - self.base) as usize;
+            if k >= self.buf.len() {
+                self.buf.resize(k + 1, [0.0; 2]);
+            }
+            let s = &mut self.buf[k];
+            for c in 0..2 {
+                let x = pcm[2 * f as usize + c];
+                s[c] += if x.is_finite() { x } else { 0.0 };
+            }
+        }
+        self.due(now)
+    }
+
+    /// The frames before `now - LAG`, peak-limited (instant attack to 0.95, 100 ms release).
+    pub fn due(&mut self, now: u64) -> Vec<f32> {
+        let upto = now.saturating_sub(Self::LAG);
+        if upto <= self.base {
+            return vec![];
+        }
+        let k = ((upto - self.base) as usize).min(self.buf.len());
+        let mut out: Vec<f32> = self.buf.drain(..k).flat_map(|s| s).collect();
+        out.resize(2 * (upto - self.base) as usize, 0.0); // a stretch no stream wrote is silence
+        self.base = upto;
+        let peak = out.iter().fold(0f32, |m, &x| m.max(x.abs()));
+        let ceiling = if peak > 0.95 { 0.95 / peak } else { 1.0 };
+        let released = 1.0 - (1.0 - self.gain) * (-((out.len() / 2) as f32) / 4800.0).exp();
+        self.gain = ceiling.min(released);
+        for x in &mut out {
+            *x *= self.gain;
+        }
+        out
+    }
+}
+
+static PRE_TAP: Mutex<Option<(Tap, Timeline)>> = Mutex::new(None);
+
+/// Sets (or clears) the tap of the game's sound before the slowdown and the limiter (`Timeline`): called with
+/// stretches of the mix on the game clock as the streams append, (samples, rate, channels).
+pub fn set_pre_tap(f: Option<Tap>) {
+    *PRE_TAP.lock().unwrap() = f.map(|f| (f, Timeline::new(clock_frames())));
+}
+
+fn clock_frames() -> u64 {
+    crate::clock::now_ns() / 1000 * RATE as u64 / 1_000_000
+}
+
+fn pre_tap(id: usize, pcm: &[f32]) {
+    let mut g = PRE_TAP.lock().unwrap();
+    if let Some((f, tl)) = g.as_mut() {
+        let out = tl.add(id, pcm, clock_frames());
+        if !out.is_empty() {
+            f(&out, RATE, 2);
+        }
+    }
 }
 
 /// A tap of the mixed output (48 kHz stereo floats, after the limiter): the front end's recordings.
@@ -778,6 +880,39 @@ fn open_device(lost: Arc<AtomicBool>) -> Result<(cpal::Stream, String), String> 
 mod tests {
     use super::*;
 
+    /// F7's timeline (Turbo rec_audio_time.h's rules): a block ends where it arrives, follows its stream's last one
+    /// when that is within 10 ms, real gaps stay; two streams mix; frames come out LAG behind, gaps silent.
+    #[test]
+    fn timeline_mixes_streams_on_the_game_clock() {
+        assert_eq!(Timeline::place(10_000, 960, None), 9_040);
+        assert_eq!(Timeline::place(10_000, 960, Some(9_000)), 9_000, "40 frames of jitter: contiguous");
+        assert_eq!(Timeline::place(20_000, 960, Some(9_000)), 19_040, "a real gap stays");
+        let lag = Timeline::LAG;
+        let mut tl = Timeline::new(0);
+        let a = vec![0.25f32; 2 * 960];
+        let b = vec![0.5f32; 2 * 480];
+        assert!(tl.add(1, &a, 960).is_empty(), "nothing is due before LAG");
+        assert!(tl.add(2, &b, 960).is_empty());
+        let out = tl.due(960 + lag);
+        assert_eq!(out.len(), 2 * 960);
+        assert_eq!(out[0], 0.25, "stream 1 alone");
+        assert_eq!(out[2 * 600], 0.75, "both streams over 480..960");
+        // nothing more appended: the next stretch is silence
+        let out = tl.due(2000 + lag);
+        assert_eq!(out.len(), 2 * (2000 - 960));
+        assert!(out.iter().all(|&x| x == 0.0));
+        // a block that lands in frames already handed over is cut, the rest kept
+        let out = tl.add(1, &a, 2500);
+        assert!(out.is_empty());
+        let out = tl.due(3000 + lag);
+        assert_eq!(out.len(), 2 * 1000);
+        // too loud: limited to 0.95
+        let mut tl = Timeline::new(0);
+        tl.add(1, &vec![0.8f32; 2 * 480], 480);
+        tl.add(2, &vec![0.8f32; 2 * 480], 480);
+        let out = tl.due(480 + lag);
+        assert!(out.iter().all(|&x| x <= 0.95 + 1e-6) && out[0] > 0.9);
+    }
     fn st() -> Stream {
         Stream { name: "t".into(), st: Mutex::new(St { rate: 1.0, env: 1.0, ..Default::default() }), cv: Condvar::new(), hook: Mutex::new(None) }
     }

@@ -73,6 +73,72 @@ pub fn guest_fatal(c: *const Cpu, msg: &str) -> ! {
     std::process::exit(70);
 }
 
+/// The printable text a guest pointer points to (at most 64 bytes, readable pages only), for a probe line.
+pub fn guest_cstr(p: u64) -> Option<String> {
+    if p < 0x1_0000 || !crate::mem::readable(p, 1) {
+        return None;
+    }
+    let mut s = String::new();
+    for i in 0..64u64 {
+        if !crate::mem::readable(p + i, 1) {
+            break;
+        }
+        // SAFETY: checked readable
+        let b = unsafe { *((p + i) as *const u8) };
+        if b == 0 {
+            break;
+        }
+        if !(0x20..0x7f).contains(&b) {
+            return None;
+        }
+        s.push(b as char);
+    }
+    (s.len() >= 2).then_some(s)
+}
+
+/// Which hits of a probe print (nxnative DM_PROBE_LIMIT / DM_PROBE_EVERY): every `every`-th, at most `limit`
+/// printed (0: no limit). `hit` counts from 1.
+pub fn probe_prints(hit: u64, every: u64, limit: u64) -> bool {
+    let every = every.max(1);
+    hit % every == 0 && (limit == 0 || hit / every <= limit)
+}
+
+/// A probe point (nxrs-build `NXRS_PROBE=<module>:<offset>,...`, nxnative probe.c's DM_PROBE, here placed by the
+/// translator): the thread, x0..x3 (`NXRT_PROBE_ALL=1`: x0..x18) with the strings they point to, and the guest
+/// registers' frame chain; then the instruction runs on. `NXRT_PROBE_EVERY=N` prints every N-th hit (its `#` the
+/// true count), `NXRT_PROBE_LIMIT=N` at most N printed per probe (20 by default; 0 no limit).
+#[no_mangle]
+pub extern "C" fn rt_probe(c: *mut Cpu) {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static HITS: Mutex<Option<HashMap<u64, u64>>> = Mutex::new(None);
+    static CFG: OnceLock<(u64, u64, bool)> = OnceLock::new();
+    let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(d);
+    let &(every, limit, all) = CFG.get_or_init(|| (env("NXRT_PROBE_EVERY", 1), env("NXRT_PROBE_LIMIT", 20), env("NXRT_PROBE_ALL", 0) != 0));
+    // SAFETY: the calling guest thread's own state (generated code passes `c`)
+    let c = unsafe { &*c };
+    let hit = {
+        let mut g = HITS.lock().unwrap_or_else(|p| p.into_inner());
+        let n = g.get_or_insert_with(HashMap::new).entry(c.pc).or_insert(0);
+        *n += 1;
+        *n
+    };
+    if !probe_prints(hit, every, limit) {
+        return;
+    }
+    let thread = crate::kernel::current_handle().map_or("host".to_string(), |h| format!("{h:#x}"));
+    let mut s = format!("probe {} #{hit} thread {thread}\n", crate::dispatch::guest_name(c.pc));
+    for r in 0..if all { 19 } else { 4 } {
+        s.push_str(&format!("  x{r:<2} {:#018x}", c.x[r]));
+        if let Some(t) = guest_cstr(c.x[r]) {
+            s.push_str(&format!("  \"{t}\""));
+        }
+        s.push('\n');
+    }
+    s.push_str(&guest_report(c));
+    log(&s);
+}
+
 /// Registers and the frame-pointer chain of a guest state.
 pub fn guest_report(c: &Cpu) -> String {
     let mut s = String::new();
@@ -245,6 +311,26 @@ pub extern "C" fn fnprof_hit(_addr: u64, _lr: u64, _x0: u64) {}
 
 #[cfg(test)]
 mod tests {
+    /// nxnative DM_PROBE_EVERY / DM_PROBE_LIMIT: every N-th hit prints, at most LIMIT of them; probe strings are
+    /// printable text the registers point to.
+    #[test]
+    fn probe_hits_and_strings() {
+        let printed = |every, limit| (1..=100u64).filter(|&h| super::probe_prints(h, every, limit)).collect::<Vec<_>>();
+        assert_eq!(printed(1, 20).len(), 20);
+        assert_eq!(printed(10, 0), (1..=10).map(|k| 10 * k).collect::<Vec<_>>());
+        assert_eq!(printed(10, 3), vec![10, 20, 30]);
+        let s = b"rom:/Layout/title.bflyt\0";
+        assert_eq!(super::guest_cstr(s.as_ptr() as u64).as_deref(), Some("rom:/Layout/title.bflyt"));
+        let bin = [1u8, 2, 3, 0];
+        assert_eq!(super::guest_cstr(bin.as_ptr() as u64), None);
+        assert_eq!(super::guest_cstr(0x10), None);
+        let mut c = crate::cpu::Cpu::new_boxed();
+        c.pc = 0x1234;
+        c.x[0] = s.as_ptr() as u64;
+        super::rt_probe(&mut *c); // logs, changes nothing
+        assert_eq!((c.pc, c.x[0]), (0x1234, s.as_ptr() as u64));
+    }
+
     #[test]
     fn ticks_advance_at_the_rate() {
         let (t0, n0) = (super::rt_ticks(), super::now_ns());

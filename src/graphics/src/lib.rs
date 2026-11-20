@@ -23,6 +23,28 @@ pub fn set_shader_dir(p: std::path::PathBuf) {
     }
 }
 
+/// The profile's `shader_key_skip` (control bytes shader keys hash as zeros), set before any program is keyed.
+pub fn set_shader_key_skip(skip: Option<(u32, u32)>) {
+    if let Some((o, l)) = skip {
+        crate::nvnlog!("shader keys hash control bytes {o:#x}+{l:#x} as zeros (profile shader_key_skip)");
+    }
+    shaders::nvn::set_key_skip(skip);
+}
+
+/// F5's graphics part (Turbo's `gpu_gl_dump_rts`): the render targets that exist now, as text, and a pass dump of
+/// the next frame (each pass's colour targets as PNGs in `captures`, `vk::exec::passdump`).
+pub fn diag_dump() -> String {
+    let Some(g) = vk::Gpu::try_get() else { return String::new() };
+    vk::exec::passdump::request_now();
+    let rts = g.images.lock().unwrap().render_targets();
+    let mut s = format!("# render targets ({}; the next frame's passes are dumped as PNGs into captures)\n", rts.len());
+    for l in rts {
+        s += &l;
+        s.push('\n');
+    }
+    s
+}
+
 /// Where the pipeline key file and pipeline cache live (the game's `_data`).
 pub fn set_cache_dir(p: std::path::PathBuf) {
     tex::astc_cache::set_dir(&p);

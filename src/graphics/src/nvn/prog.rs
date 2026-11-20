@@ -60,6 +60,11 @@ pub unsafe fn shader_key(sd: &NVNshaderData, need_mapped: bool) -> Option<Shader
         core::ptr::copy_nonoverlapping(sd.control, ctl.as_mut_ptr(), NVN2_KEY_CTL);
         ctl[0x30..0x34].fill(0);
         h.update(ctl);
+    } else if shaders::nvn::key_skip().is_some() {
+        // the profile's shader_key_skip: those control bytes hash as zeros, as the build's keys do
+        let mut ctl = core::slice::from_raw_parts(sd.control, nctl).to_vec();
+        shaders::nvn::apply_key_skip(&mut ctl);
+        h.update(&ctl);
     } else {
         h.update(core::slice::from_raw_parts(sd.control, nctl));
     }

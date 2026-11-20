@@ -37,6 +37,11 @@ name = "window"
 harness = false
 required-features = ["gpu-tests"]
 
+[[test]]
+name = "present_rgba"
+harness = false
+required-features = ["gpu-tests"]
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
@@ -47,6 +52,8 @@ windows-sys = { version = "0.61", features = [
     "Win32_System_Performance",
     "Win32_Media",
     "Win32_Security",
+    "Win32_Graphics_Gdi",
+    "Win32_UI_WindowsAndMessaging",
 ] }
 
 [target.'cfg(target_os = "linux")'.dependencies]

@@ -143,6 +143,34 @@ pub fn snapshot() -> Vec<(&'static str, u64)> {
     (0..C::N as usize).map(|i| (NAMES[i], COUNT[i].load(Ordering::Relaxed))).collect()
 }
 
+/// Graphics' columns of the per-frame metrics CSV (`frames-*.csv`, os `frame_row`): the header part.
+pub const FRAME_COLUMNS: &str = "draws,draws_skipped,passes,dispatches,gpu_ms,replay_ms,acquire_wait_ms,tex_upload_ms,pipelines_made";
+
+/// Graphics' columns of one row: what the counters moved since the previous row (one row a present).
+pub fn frame_columns() -> String {
+    const CS: [C; 9] = [C::Draws, C::DrawsSkipped, C::Passes, C::Dispatches, C::GpuNs, C::ReplayNs, C::WaitAcquireNs, C::TexUploadNs, C::PipesGfx];
+    static LAST: std::sync::Mutex<[u64; 9]> = std::sync::Mutex::new([0; 9]);
+    let mut l = LAST.lock().unwrap();
+    let mut out = String::new();
+    for (i, c) in CS.iter().enumerate() {
+        let mut v = get(*c);
+        if matches!(c, C::PipesGfx) {
+            v += get(C::PipesCompute);
+        }
+        let d = v.saturating_sub(l[i]);
+        l[i] = v;
+        if i > 0 {
+            out.push(',');
+        }
+        if matches!(c, C::GpuNs | C::ReplayNs | C::WaitAcquireNs | C::TexUploadNs) {
+            out += &format!("{:.3}", d as f64 / 1e6);
+        } else {
+            out += &d.to_string();
+        }
+    }
+    out
+}
+
 /// A submission's GPU time (completion thread).
 pub fn gpu_time(ns: u64) {
     add(C::GpuNs, ns);
@@ -429,6 +457,18 @@ pub fn frame(frame: u64) {
 
 #[cfg(test)]
 mod tests {
+    /// One row of graphics' frame columns: as many values as the header names, the counters' moves since the last row.
+    #[test]
+    fn frame_columns_are_deltas_matching_the_header() {
+        let _ = super::frame_columns();
+        super::add(super::C::Draws, 7);
+        super::add(super::C::GpuNs, 2_500_000);
+        let row = super::frame_columns();
+        let f: Vec<&str> = row.split(',').collect();
+        assert_eq!(f.len(), super::FRAME_COLUMNS.split(',').count());
+        assert!(f[0].parse::<u64>().unwrap() >= 7, "draws {row}");
+        assert!(f[4].parse::<f64>().unwrap() >= 2.5, "gpu_ms {row}");
+    }
     #[test]
     fn render_sizes_are_listed_most_used_first() {
         super::render_size(1920, 1080, true);

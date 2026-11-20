@@ -84,6 +84,7 @@ NXGFX_SAMP_LINEAR	switch	NXGFX_SAMP_LINEAR=1 (diagnosis): every sampler filters 
 NXGFX_SBUF0_MB	switch	The size a storage buffer bound with size 0 gets at most (`NXGFX_SBUF0_MB`, default 1 MB).	src/graphics/src/vk/exec.rs
 NXGFX_SBUF_TO_END	switch	NXGFX_SBUF_TO_END=0: read-only storage buffers bound with the size the game gave (as before lane K3).	src/graphics/src/vk/exec.rs
 NXGFX_SCISSOR_CLAMP	switch	scissor: "invalid write" just past a memory block, in no memory of ours, and the device lost; NXGFX_SCISSOR_CLAMP=0 off)	src/graphics/src/vk/exec.rs
+NXGFX_SCREEN_MATCH	switch	it back at once. A window keeps the screen's rate. `NXGFX_SCREEN_MATCH=0` keeps the rate in fullscreen too.	src/graphics/src/vk/screen.rs
 NXGFX_SCRUB_SLOTS	switch	MKW's device losses at addresses no live allocation held). `NXGFX_SCRUB_SLOTS=0` off.	src/graphics/src/vk/image.rs
 NXGFX_SET_CACHE	switch	`0` writes every draw's descriptor sets again instead of reusing equal ones	src/graphics/src/vk/exec.rs
 NXGFX_SHADERS	path	the translated shader folder (default: `<data>\shaders`)	src/graphics/src/vk/shader.rs, src/os/src/nvn/mod.rs
@@ -204,6 +205,7 @@ NXRS_PATCH_MKW_VERTPLUS	switch	without stretching; a taller shape (with `NXRS_PA
 NXRS_PATCH_MKW_ZSTD	switch	profile's `zstd` set, `NXRS_PATCH_MKW_ZSTD`, on by default). Most RomFS files are zstd frames, many with a	src/os/src/gamefix/mkw.rs
 NXRS_PATCH_PROFILE	switch	`0` turns off a profile's code patches that name no switch of their own	src/profiles/src/lib.rs
 NXRS_PREV_PROGRAM	switch	The program that started this one with ExecuteProgram (`NXRS_PREV_PROGRAM`), else -1.	src/os/src/services/oe.rs
+NXRS_PROBE	switch	`NXRS_PROBE=<module>:<offset>[,...]` (nxnative's DM_PROBE syntax, hex offsets): the patch table's `probe` lines.	src/cli/src/pipeline.rs
 NXRS_PROGRAM_INDEX	switch	unless `NXRS_PROGRAM_INDEX` (the cli's `--program`) names another	src/cli/src/main.rs, src/translator/src/package/app.rs
 NXRS_RELAUNCH	switch	index (`NXRS_PREV_PROGRAM`); a relaunch (`param` None) passes neither (`NXRS_RELAUNCH=1`).	src/os/src/services/oe.rs
 NXRS_RUNTIME_LIB	switch	The runtime library the code DLL links: `NXRS_RUNTIME_LIB`, else `nxrt.lib` beside nxrs (`gnu\libnxrt.a`).	src/cli/src/cc.rs
@@ -223,6 +225,9 @@ NXRT_LLVM	switch	(`clang\bin`, `..\toolchain\clang\bin`); `NXRT_LLVM` (the runti
 NXRT_MINIDUMP	diagnostic	Which minidump a crash writes (`NXRT_MINIDUMP`): `0` none, `full` with the memory the threads' stacks point to,	src/runtime/src/fault.rs
 NXRT_MKW_PYTHON	test	the Python nxrt_dev runs Mario Kart World's scripts with	src/runtime/src/bin/nxrt_dev.rs
 NXRT_PANIC_CHILD	test	set in the child process of the boundary panic test (internal)	src/runtime/src/boundary.rs
+NXRT_PROBE_ALL	switch	translator): the thread, x0..x3 (`NXRT_PROBE_ALL=1`: x0..x18) with the strings they point to, and the guest	src/runtime/src/rt.rs
+NXRT_PROBE_EVERY	switch	registers' frame chain; then the instruction runs on. `NXRT_PROBE_EVERY=N` prints every N-th hit (its `#` the	src/runtime/src/rt.rs
+NXRT_PROBE_LIMIT	switch	true count), `NXRT_PROBE_LIMIT=N` at most N printed per probe (20 by default; 0 no limit).	src/runtime/src/rt.rs
 NXRT_TRACE	diagnostic	`NXRT_TRACE=svc,host,sjlj,thread,load` (or `all`).	src/runtime/src/rt.rs
 NXSHADERS_NRO_DIR	path	own): NXSHADERS_NRO_DIR, scanned like main	src/shaders/src/scan.rs
 NXSHADERS_SPIRV_VAL	switch	its paired pixel shaders made per-primitive and checked with spirv-val (`NXSHADERS_SPIRV_VAL`).	src/shaders/src/mesh.rs, src/shaders/src/xlate.rs

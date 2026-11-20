@@ -228,6 +228,11 @@ pub fn diag_dump() {
 # guest threads
 ");
     s.push_str(&threads);
+    // the render targets, and a pass dump of the next frame (Turbo's F5 gpu_gl_dump_rts)
+    let rts = nxgfx::diag_dump();
+    crate::flog!("F5: {}", rts.lines().next().unwrap_or("no graphics"));
+    s.push('\n');
+    s.push_str(&rts);
     let _ = std::fs::write(dir.join("threads.txt"), s);
 }
 

@@ -121,12 +121,64 @@ pub fn ctl_len(ctl: &[u8]) -> usize {
     }
 }
 
+/// The profile's `shader_key_skip` (nxnative hle_nvn.c keys_hash, shader_split.py key_ctl): control-section bytes the
+/// keys of an NVN control section hash as zeros, `offset << 32 | length` (0: none). Batman: Arkham Knight's engine
+/// shares one control section among shaders whose GLSLC compile information differs (0x770+0x78).
+static KEY_SKIP: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Sets the game's `shader_key_skip` (the build's shader step and the graphics layer at boot, from the profile).
+pub fn set_key_skip(skip: Option<(u32, u32)>) {
+    let v = skip.map_or(0, |(o, l)| (o as u64) << 32 | l as u64);
+    KEY_SKIP.store(v, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The game's `shader_key_skip`: (offset, length), or None.
+pub fn key_skip() -> Option<(usize, usize)> {
+    let v = KEY_SKIP.load(std::sync::atomic::Ordering::Relaxed);
+    (v != 0).then(|| ((v >> 32) as usize, (v & 0xffff_ffff) as usize))
+}
+
+/// Zeroes the `shader_key_skip` bytes of an NVN control section's key bytes (`c`, the bytes hashed) in place.
+pub fn apply_key_skip(c: &mut [u8]) {
+    skip_bytes(c, key_skip());
+}
+
+/// Zeroes `skip` (offset, length) of `c` when it lies inside it.
+pub fn skip_bytes(c: &mut [u8], skip: Option<(usize, usize)>) {
+    if let Some((o, l)) = skip {
+        if l > 0 && o + l <= c.len() {
+            c[o..o + l].fill(0);
+        }
+    }
+}
+
+#[cfg(test)]
+mod key_skip_tests {
+    /// Two control sections that differ only in the skipped bytes key alike; elsewhere they do not.
+    #[test]
+    fn skipped_control_bytes_hash_as_zeros() {
+        let (ctl, _) = super::synth::nvn1_ps(1);
+        let mut other = ctl.clone();
+        other[0x780] ^= 0x5a;
+        let (mut a, mut b) = (ctl.clone(), other.clone());
+        super::skip_bytes(&mut a, Some((0x770, 0x78)));
+        super::skip_bytes(&mut b, Some((0x770, 0x78)));
+        assert_eq!(a, b, "the compile information is not part of the key");
+        assert_ne!(ctl, other);
+        let mut c = ctl.clone();
+        super::skip_bytes(&mut c, Some((ctl.len(), 8)));
+        assert_eq!(c, ctl, "a skip past the section changes nothing");
+    }
+}
+
 /// The control bytes the key hashes.
 pub fn key_ctl(ctl: &[u8]) -> Vec<u8> {
     let n = ctl_len(ctl).min(ctl.len());
     let mut c = ctl[..n].to_vec();
     if nvn2_ctl(ctl) {
         c[0x30..0x34].fill(0);
+    } else {
+        apply_key_skip(&mut c);
     }
     c
 }

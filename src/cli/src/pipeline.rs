@@ -371,6 +371,8 @@ fn shaders_step(out: &Out, data: &Path, profile: Option<&str>, a: &BuildArgs) {
     if let Err(e) = shader_tables(out, data, profile) {
         out.say(&format!("shaders: the profile's tables not written ({e}); the game runs without its prewarm seed"));
     }
+    // the profile's shader_key_skip: the keys the build writes are the ones the game's graphics computes
+    shaders::nvn::set_key_skip(profile.and_then(profiles::get).and_then(|p| p.settings.shader_key_skip));
     let opts = shaders::Options { keys: a.keys.clone(), jobs: a.jobs.clamp(1, 4), ..shaders::Options::default() };
     // the prebuild's own lines give the real counts: `@progress shaders <done> <found>` as they are translated
     let counts = std::sync::Mutex::new(ShaderCounts::default());
@@ -432,6 +434,19 @@ fn shader_tables(out: &Out, data: &Path, profile: Option<&str>) -> Result<()> {
     Ok(())
 }
 
+/// `NXRS_PROBE=<module>:<offset>[,...]` (nxnative's DM_PROBE syntax, hex offsets): the patch table's `probe` lines.
+pub fn probe_lines(spec: &str) -> Result<Vec<String>> {
+    let mut out = vec![];
+    for p in spec.split([',', ' ']).map(str::trim).filter(|p| !p.is_empty()) {
+        let (m, o) = p.split_once(':').ok_or_else(|| anyhow!("NXRS_PROBE: {p:?} is not <module>:<offset>"))?;
+        let off = u64::from_str_radix(o.trim_start_matches("0x"), 16).map_err(|_| anyhow!("NXRS_PROBE: {p:?}: the offset is not hex"))?;
+        if off % 4 != 0 {
+            bail!("NXRS_PROBE: {p:?}: not an instruction (4-byte aligned)");
+        }
+        out.push(format!("probe {m} {off:#x}"));
+    }
+    Ok(out)
+}
 /// `SWR_CFLAGS` (switchrecomp.py:769): extra compiler flags for the game code, split on white space (e.g. `-march`
 /// for another machine's processor). They join the object keys, so changing them recompiles.
 pub fn extra_cflags(env: Option<&str>) -> Vec<String> {
@@ -494,6 +509,12 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         }
         crate::profile::with_lines(crate::profile::with_lines(text, &st.lines), &fence)
     };
+    // NXRS_PROBE=<module>:<offset>,...: probe points the translator places (rt_probe logs the registers there)
+    let probes = probe_lines(&std::env::var("NXRS_PROBE").unwrap_or_default())?;
+    for l in &probes {
+        out.say(&format!("probe: {l}"));
+    }
+    let patch_text = crate::profile::with_lines(patch_text, &probes);
     let title = a
         .name
         .clone()
@@ -804,6 +825,14 @@ mod tests {
         assert_eq!(c.line("shaders: translated 11608 of 11608 (44 a second)"), Some((11609, 11609)));
         assert_eq!(c.line("shaders: 11609 found, 11608 translated (1 reused), 0 failed, 0 skipped, 1 valid, 0 invalid; 263 s"), None);
         assert_eq!(c.line("shaders: validated 3 of 9"), None);
+    }
+
+    /// nxnative DM_PROBE's syntax: <module>:<offset> pairs, hex; a probe line each for the translator.
+    #[test]
+    fn probe_points_from_the_environment() {
+        assert_eq!(probe_lines("main:0x1234, sdk:abc0").unwrap(), vec!["probe main 0x1234", "probe sdk 0xabc0"]);
+        assert!(probe_lines("").unwrap().is_empty());
+        assert!(probe_lines("main:0x1235").is_err() && probe_lines("main").is_err() && probe_lines("main:zz").is_err());
     }
 
     #[test]

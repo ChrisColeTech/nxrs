@@ -59,11 +59,13 @@ fn frame_row(n: u64) {
     let (s, c) = (submits(), calls());
     let mut l = LAST.lock().unwrap();
     if n == 1 {
-        nxconfig::metrics::frame("#present,guest_s,frame_ms,submits,nvn_calls,threads".into());
+        nxconfig::metrics::frame(format!("#present,guest_s,frame_ms,submits,nvn_calls,threads,{}", nxgfx::vk::perf::FRAME_COLUMNS));
     }
     let dt = if l.0 == 0 { 0.0 } else { (now - l.0) as f64 / 1e6 };
     let threads = nxrt::kernel::try_get().map_or(0, |k| k.thread_count());
-    nxconfig::metrics::frame(format!("{n},{:.4},{dt:.3},{},{},{threads}", now as f64 / 1e9, s - l.1, c - l.2));
+    // graphics' own columns: draws, passes, GPU / replay / wait times since the previous row
+    let gfx = nxgfx::vk::perf::frame_columns();
+    nxconfig::metrics::frame(format!("{n},{:.4},{dt:.3},{},{},{threads},{gfx}", now as f64 / 1e9, s - l.1, c - l.2));
     *l = (now, s, c);
 }
 
@@ -250,6 +252,9 @@ fn bind_graphics() {
     if !shaders.join("manifest.tsv").is_file() {
         crate::log!("[RED] graphics: no translated shaders at {} (nxshaders prebuild-data): draws with a missing shader wait for none", shaders.display());
     }
+    // the profile's shader_key_skip: the keys graphics computes are the build's
+    let skip = profiles::by_title(prof.program_id).and_then(|p| p.settings.shader_key_skip);
+    nxgfx::set_shader_key_skip(skip);
     nxgfx::set_shader_dir(shaders.clone());
     nxgfx::set_cache_dir(data.clone());
     crate::log!("graphics: NVN on Vulkan, {} procs, SDK {major}{}, shaders {}", nxgfx::nvn::procs().len(), if prof.switch2 { ", NVN2" } else { "" }, shaders.display());

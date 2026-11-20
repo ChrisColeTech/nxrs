@@ -128,6 +128,9 @@ pub struct Table {
     pub state: u64,
     /// {module: (its stubs module's base, the address of its code)}
     pub area_at: BTreeMap<String, (u64, u64)>,
+    /// Probe points (`probe <module> <offset>...`, nxrs-build's `NXRS_PROBE`): before the instruction at each, the
+    /// lifted code calls the runtime's `rt_probe` (nxnative probe.c's DM_PROBE, as translated code).
+    pub probes: BTreeMap<String, std::collections::BTreeSet<u64>>,
 }
 
 pub fn adrp(pc: u64, target: u64, rd: u32) -> Result<u32, PatchError> {
@@ -251,6 +254,18 @@ impl Table {
                     }
                     a.relocs.insert(i, r);
                 }
+                ("probe", n) if n >= 3 => {
+                    if !bases.contains_key(f[1]) {
+                        return perr(format!("{wh}: module {} not in the layout", f[1]));
+                    }
+                    for o in &f[2..] {
+                        let o = hex(o).map_err(bad)?;
+                        if o % 4 != 0 {
+                            return perr(format!("{wh}: probe {}+{o:#x} is not an instruction (4-byte aligned)", f[1]));
+                        }
+                        t.probes.entry(f[1].into()).or_default().insert(o);
+                    }
+                }
                 ("spin", n) if n >= 4 => {
                     if !bases.contains_key(f[1]) {
                         return perr(format!("{wh}: module {} not in the layout", f[1]));
@@ -317,6 +332,11 @@ impl Table {
         out
     }
 
+    /// The probe points of `name`, absolute.
+    pub fn probes_for(&self, name: &str, base: u64) -> std::collections::BTreeSet<u64> {
+        self.probes.get(name).into_iter().flatten().map(|o| base + o).collect()
+    }
+
     /// {absolute back-edge: absolute head}.
     pub fn spins_for(&self, name: &str, base: u64) -> BTreeMap<u64, u64> {
         self.spins.get(name).into_iter().flatten().map(|(b, h)| (base + b, base + h)).collect()
@@ -376,6 +396,11 @@ impl Table {
                         off + 4 * i as u64
                     ));
                 }
+            }
+        }
+        for o in self.probes.get(name).into_iter().flatten() {
+            if !m.in_text(m.base + o) {
+                return perr(format!("{name}+{o:#x}: probe outside .text"));
             }
         }
         for (b, head) in self.spins.get(name).into_iter().flatten() {

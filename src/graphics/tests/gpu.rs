@@ -1379,3 +1379,22 @@ fn texture_upload_goes_through_the_gpu_deswizzle() {
     assert!(moved >= (w * h * 4) as u64, "the upload took the GPU deswizzle ({moved} bytes)");
     assert_eq!(validation_errors(), e0, "validation errors");
 }
+
+/// F5's graphics part lists the render targets that exist (a 64x64 RGBA8 target drawn into here) and asks for a pass
+/// dump of the next frame.
+#[test]
+fn diagnostic_dump_lists_the_render_targets() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let rt = n.texture(W, H, f::RGBA8, 0, false);
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    clear(&mut n, [0.0, 0.5, 0.0, 1.0]);
+    n.submit_wait();
+    let d = nxgfx::diag_dump();
+    eprintln!("{d}");
+    assert!(d.starts_with("# render targets ("), "{d}");
+    assert!(d.lines().any(|l| l.contains("64x64x1") && l.contains("R8G8B8A8")), "the target is listed: {d}");
+    assert_eq!(validation_errors(), e0, "validation errors");
+}

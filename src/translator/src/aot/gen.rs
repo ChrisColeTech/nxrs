@@ -242,6 +242,7 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
         .iter()
         .map(|m| Ok((table.for_module(&m.name, m.base)?, table.spins_for(&m.name, m.base), table.spans_for(&m.name, m.base))))
         .collect::<Result<_>>()?;
+    let probes: Vec<std::collections::BTreeSet<u64>> = modules.iter().map(|m| table.probes_for(&m.name, m.base)).collect();
     std::thread::scope(|scope| {
         for _ in 0..opts.jobs.max(1) {
             scope.spawn(|| {
@@ -258,7 +259,7 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
                         // --limit: only the emitted functions are called directly; the rest go through rt_dispatch
                         // (the runtime interprets them), so a partial build links and runs
                         let starts = if opts.limit == 0 { &starts_abs[task.module] } else { &emitted[task.module] };
-                        Emitter::new(&modules[task.module], starts, p, s, sp, &opts.emit)
+                        Emitter::new(&modules[task.module], starts, p, s, sp, &opts.emit).with_probes(probes[task.module].clone())
                     });
                     e.stats.clear();
                     e.unsupported.clear();

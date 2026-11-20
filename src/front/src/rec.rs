@@ -1,7 +1,7 @@
 //! F7: video recording. The game's own presented picture (graphics' frame sink, `nxgfx::vk::shot::set_frame_sink`:
 //! read back at the present, so overlays, other windows and DWM never get in; Turbo's F7) at `recording_fps` (15..60)
 //! as H.264 and the mixed
-//! game sound (the os layer's output tap, 48 kHz stereo) as AAC, in an MP4 written by Media Foundation's sink writer
+//! game sound (the os layer's pre-slowdown tap: every stream as the game produced it, mixed on the game clock, 48 kHz\n//! stereo) as AAC, in an MP4 written by Media Foundation's sink writer
 //! (QuickSync / NVENC / VCE when the system has them): `recordings\recording_<date>_<time>.mp4` beside the game. The
 //! title bar says RECORDING while it runs.
 //!
@@ -80,7 +80,7 @@ pub fn tick() {
     if recording() && stalled(now_ms(), STARTED_MS.load(Ordering::Acquire), PROGRESS_MS.load(Ordering::Acquire)) {
         crate::flog!("[RED] F7: the encoder made no progress for 5 seconds; the recording stops (its file may be incomplete)");
         ON.store(false, Ordering::Release);
-        nxos::media::sink::set_tap(None);
+        nxos::media::sink::set_pre_tap(None);
         nxgfx::vk::shot::set_frame_sink(0, None);
         nxos::clock::set_rate(1.0);
         crate::window::set_state(1, "Recording stopped: the encoder stalled");
@@ -96,11 +96,12 @@ pub fn tick() {
     }
 }
 
+/// The game's sound as it produced it, on the game clock (`sink::set_pre_tap`: before the slowdown and the device's
+/// limiter, Turbo's recording), so it is already in game time: no stretching for a slowed clock.
 fn audio_tap(s: &[f32], rate: u32, ch: u32) {
     let mut q = AUDIO.lock().unwrap();
     if q.len() < 4096 {
-        // with the game's clock slowed (smooth_recording), a real second of sound holds `rate` seconds of game time
-        q.push_back((s.to_vec(), rate, ch, nxos::clock::rate()));
+        q.push_back((s.to_vec(), rate, ch, 1.0));
     }
 }
 
@@ -311,7 +312,7 @@ fn start() {
                 }
             };
             if wr.audio.is_some() {
-                nxos::media::sink::set_tap(Some(audio_tap));
+                nxos::media::sink::set_pre_tap(Some(audio_tap));
             }
             crate::flog!("F7: recording {w}x{h} at {fps} FPS{} to {} (smooth_recording={})", if wr.audio.is_some() { " with sound" } else { "" }, path.display(), smooth as u8);
             crate::window::set_state(1, "RECORDING (F7 to stop)");
@@ -375,7 +376,7 @@ fn start() {
                     win_grabs = 0;
                 }
             }
-            nxos::media::sink::set_tap(None);
+            nxos::media::sink::set_pre_tap(None);
             nxgfx::vk::shot::set_frame_sink(0, None);
             nxos::clock::set_rate(1.0);
             let (frames, samples) = (wr.frame, wr.samples);

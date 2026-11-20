@@ -1312,10 +1312,14 @@ mod tests {
 
 #[cfg(test)]
 mod touch_tests {
+    /// The touch screen is one global: its tests take turns.
+    static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// The touch screen the front end feeds: a press is one finger with Start on its first sample; a quick click
     /// stays down for the latch so the game samples it; End on the last sample; then nothing.
     #[test]
     fn touch_press_latch_and_release() {
+        let _l = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         super::set_touch(true, 100, 200);
         super::set_touch(false, 100, 200);
         let a = super::touch_now().unwrap();
@@ -1336,6 +1340,7 @@ mod touch_tests {
     /// view sees both.
     #[test]
     fn two_fingers_read_together() {
+        let _l = LOCK.lock().unwrap_or_else(|e| e.into_inner());
         super::set_finger(2, true, 100, 100);
         super::set_finger(3, true, 300, 100);
         let peek = super::touches_peek();

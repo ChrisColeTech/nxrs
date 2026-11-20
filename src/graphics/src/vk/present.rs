@@ -202,6 +202,7 @@ pub fn close_window() {
         p.surface = vk::SurfaceKHR::null();
     }
     p.hwnd = 0;
+    super::screen::restore();
 }
 
 fn destroy_swapchain(g: &Gpu, p: &mut Presenter) {
@@ -313,6 +314,8 @@ pub fn record_present(g: &Gpu, sub: &mut Sub, t: &tex_t, origin_ll: bool, crop: 
         MINIMISED_SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return;
     }
+    // the screen's refresh rate matched to the game's in fullscreen (screen.rs)
+    super::screen::tick(hwnd);
     // the source first: once an image is acquired this submission must wait for it
     let Some(src) = ({
         let mut imgs = g.images.lock().unwrap();

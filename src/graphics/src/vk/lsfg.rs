@@ -172,6 +172,33 @@ fn make(g: &Gpu, w: u32, h: u32, f: vk::Format, owned: &mut Vec<(vk::Image, vk::
 }
 
 /// Bindings a module declares at 0 (its constant buffer).
+/// The size the LSFG passes work at for a game region of `w` x `h`: at most `lsfg_resolution` rows (240..2160, Turbo
+/// gpu_gl.c: min(content, lsfg_resolution) high, the width in proportion and even); the region's own size when it is
+/// smaller or the key is 0.
+pub fn work_size(w: u32, h: u32, res: i64) -> (u32, u32) {
+    if res <= 0 || h == 0 {
+        return (w, h);
+    }
+    let lim = res.clamp(240, 2160) as u32;
+    if h <= lim {
+        return (w, h);
+    }
+    let nw = ((lim as u64 * w as u64 / h as u64) as u32 & !1).max(16);
+    (nw, lim)
+}
+
+#[cfg(test)]
+mod work_tests {
+    #[test]
+    fn lsfg_works_at_its_resolution() {
+        assert_eq!(super::work_size(2560, 1440, 720), (1280, 720));
+        assert_eq!(super::work_size(1280, 720, 720), (1280, 720), "not larger than the game");
+        assert_eq!(super::work_size(1920, 1080, 100), (426, 240), "at least 240 rows");
+        assert_eq!(super::work_size(3840, 2160, 0), (3840, 2160), "0: the game's size");
+        assert_eq!(super::work_size(1001, 1080, 720), (666, 720), "even width");
+    }
+}
+
 fn has_ubo(w: &[u32]) -> bool {
     let mut i = 5;
     while i < w.len() {
@@ -391,7 +418,8 @@ impl Lsfg {
     /// passes, and `ngen` generated frames. Returns the generated images (oldest first) and the frame's own copy.
     #[allow(clippy::too_many_arguments)]
     pub fn process(&mut self, g: &Gpu, sub: &mut Sub, src: vk::Image, r: [i32; 4], ngen: usize, flow: f32) -> Result<(Vec<vk::Image>, vk::Image, u32, u32), String> {
-        let (w, h) = ((r[2] - r[0]).unsigned_abs(), (r[3] - r[1]).unsigned_abs());
+        let (rw, rh) = ((r[2] - r[0]).unsigned_abs(), (r[3] - r[1]).unsigned_abs());
+        let (w, h) = work_size(rw, rh, nxconfig::int("lsfg_resolution"));
         self.ctx(g, w, h, flow)?;
         let cb = sub.main;
         let dev = g.dev();
@@ -432,7 +460,8 @@ impl Lsfg {
             dst_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
             dst_offsets: [vk::Offset3D::default(), vk::Offset3D { x: w as i32, y: h as i32, z: 1 }],
         };
-        unsafe { dev.cmd_blit_image(cb, src, vk::ImageLayout::GENERAL, input.image, vk::ImageLayout::GENERAL, &[blit], vk::Filter::NEAREST) };
+        let filter = if (w, h) == (rw, rh) { vk::Filter::NEAREST } else { vk::Filter::LINEAR };
+        unsafe { dev.cmd_blit_image(cb, src, vk::ImageLayout::GENERAL, input.image, vk::ImageLayout::GENERAL, &[blit], filter) };
         super::queue::full_barrier(g, cb);
         let q = |n: u32, d: u32| n.div_ceil(d);
         let u0 = self.ubo(g, 0.0, false, false, inv_flow);
