@@ -2447,6 +2447,39 @@ ground are black (a material or lighting input still missing).
   portrait a black silhouette; "1st" HUD text right. Menu text still drops letters; the glyph path is not identified.
 - FPS 8-9 in the race.
 
+**`K2-mkw17-diag` (11:13, all mesh draws, write-back off, both diagnostics): GPU reset at 17.7 s**, no checkpoint line
+at all (the GPU had started none it could name), "invalid read at 0xd47330000 ... inside BUFFER 0x1f95b358050 "scratch"
+(bound at 16.32 s: 0xd47000000 +0x4000000), **still bound**". "scratch" is a submission's 64 MB device-local arena
+(`Sub::gpu_scratch`), used only by the ASTC decoder (`tex/astc.rs`: decoded texels and BC7 blocks, recorded in
+`sub.pre`). A read faulting inside a live, bound buffer is not a freed-memory read; with `K2-mkw15`'s ("staging"-sized,
+8 MB, freed 2.5 s before) both faults are in a submission's own transient buffers. **For G4 / G5 (address report,
+async):** the fault comes while texture streaming is heavy (the course loading); the instruction pointer's nearest
+range is an image (0x1f831800 +0x4c0000) as in `K2-mkw15`. Lane K2 cannot place it further from the reports.
+**For G5 (async black, lane G5 owns it):** MKW's race picture is hazy / overexposed with a black character portrait
+(`K2-mkw12` `0008`, `K2-mkw16` `0011`, near white); lane K2's next MKW run is `NXGFX_ASYNC=0` to compare (with a pass
+dump at 63 s for the menu-text glyphs). If the race clears with sync replay, MKW joins G5's async-black case.
+
+**`K2-mkw18-sync-dump` (11:34, `NXGFX_ASYNC=0`, dump at 62 s): GPU reset at 16.0 s, before the dump and the race**,
+in the 128x128x5 pass again (#12129, c0 ser28824): "invalid read at 0x6cee5a000 ... inside BUFFER 0x2995c7f6550
+**"staging"** (bound at 12.35 s: 0x6ce906040 +0x800000), UNBOUND at 12.39 s". So the pass's fault is a read of a
+submission's staging chunk freed 3.6 s before (an extra chunk, freed when its `Sub` is reused: `new_sub` keeps one
+ordinary chunk), with sync replay as with async. Something keeps a staged (buffer, offset) past its submission; every
+cache lane K2 has read (stage banks, `scache`, vertex binds, the set cache, mesh records, `memo_bytes`) is keyed to the
+submission or cleared with it, so the holder is not found yet. Diagnosis switch: `NXGFX_STAGE_HOLD=<s>` (`queue.rs`
+`new_sub`) frees those chunks that many seconds later instead; if the pass faults stop with it, the reference is
+confirmed stale and the holder is the next search. Three early resets in a row (14-17 s, course loading:
+`K2-mkw15`, `-17`, `-18`) against four full 240 s runs before.
+
+**`K2-mkw19-hold` (12:13, `NXGFX_STAGE_HOLD=30`, both diagnostics, pass dump at 62 s): 240 s, no GPU fault.** With
+the extra staging chunks freed 30 s late instead of at the `Sub`'s reuse, the 128x128x5 pass read nothing freed.
+Supports "a staged range is used past its submission" (`K2-mkw15` / `-18`), not proof (4 of the 8 runs before were
+clean too). The holder is still to find; until then `NXGFX_STAGE_HOLD` is the stand-in (off by default).
+- The dump's last pass (903/48, the 3840x2160 output, `build\K2\dump19\pass-000903-048-...png`) shows the race's
+  opening flyover **lit and right** (course, karts, sky; no haze in that frame), with the prompt "A Skip" drawn as
+  "A S i": the glyph loss is in the UI pass. Its draws logged no texture bindings in the dump (the UI's textures come
+  through the pool, not a plain binding), so the glyph sheet is not named yet; next: `NXGFX_DUMP_TEX=<w>x<h>` on the
+  font sheet once found, comparing the GPU image with its storage.
+
 **For G4 (texture code, lane K2's change, contained): GPU-written textures go back to their storage.**
 `image.rs` `tex_writeback` / `tex_writeback_land`, `queue.rs` `Sub::tex_wb`, `exec.rs` `target_image`, `mem.rs`
 `cpu_written`. A texture written as a render target or copy destination (`target_image`) is listed for its

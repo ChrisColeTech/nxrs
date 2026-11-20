@@ -444,10 +444,27 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
     s.occl_n = 0;
     barrier_all(g, s.main);
     s.stage_used = 0;
-    // keep one staging chunk of the ordinary size; the rest (and an outsized one: a big upload's) go
+    // keep one staging chunk of the ordinary size; the rest (and an outsized one: a big upload's) go.
+    // NXGFX_STAGE_HOLD=<s> (diagnosis, lane K2): they are freed that many seconds later instead (MKW's 128x128x5 pass
+    // read a staging chunk freed here 3.6 s before: something keeps a staged range past its submission)
+    static HOLD: std::sync::OnceLock<f64> = std::sync::OnceLock::new();
+    static HELD: Mutex<Vec<(f64, Buf)>> = Mutex::new(Vec::new());
+    let hold = *HOLD.get_or_init(|| std::env::var("NXGFX_STAGE_HOLD").ok().and_then(|v| v.parse().ok()).unwrap_or(0.0));
+    let now = crate::log::elapsed();
     while s.stage.len() > 1 || s.stage.last().is_some_and(|b| b.size > STAGE_CHUNK) {
         let b = s.stage.pop().unwrap();
-        g.free_buffer(b);
+        if hold > 0.0 {
+            HELD.lock().unwrap().push((now, b));
+        } else {
+            g.free_buffer(b);
+        }
+    }
+    if hold > 0.0 {
+        let mut h = HELD.lock().unwrap();
+        while h.first().is_some_and(|(t, _)| now - *t > hold) {
+            let (_, b) = h.remove(0);
+            g.free_buffer(b);
+        }
     }
     s
 }
