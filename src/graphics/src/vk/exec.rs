@@ -38,6 +38,8 @@ pub struct QState {
     nvattr: usize,
     vstream: [vs_st; 16],
     vbuf: [(u64, u64); 16],
+    /// counts the vertex attribute / stream / buffer binds (vertex input skipped while nothing of it changed)
+    vgen: u64,
     ubo: [[(u64, u64); 16]; 7],
     ssbo: [[(u64, u64); 16]; 7],
     tex: [[u32; 256]; 7],
@@ -110,6 +112,10 @@ pub struct QState {
     /// the vertex input and vertex buffers last set in this queue's command buffer: (submission, layout words,
     /// buffers by stream) (Pokemon Legends Z-A's draws repeat them: they were set again at every draw)
     vin_last: std::cell::RefCell<(u64, u64, [(vk::Buffer, u64); 32])>,
+    /// what the vertex input last set in submission `vin_last.0` was made from: (vertex binds' generation, the vertex
+    /// shader's inputs, the pools' generation); the same again sets nothing (Donkey Kong Bananza: 4.4 ms a frame of
+    /// vertex input over ~4,500 draws, most repeating the draw before)
+    vin_from: std::cell::Cell<(u64, usize, u64)>,
     /// push constants' generation (new at every PushConstants)
     pgen: u64,
     /// staged constant blocks by (kind, key): where they are in submission `serial` (support buffer by pass size,
@@ -321,6 +327,7 @@ impl QState {
             nvattr: 0,
             vstream: [vs_st::default(); 16],
             vbuf: [(0, 0); 16],
+            vgen: 0,
             ubo: [[(0, 0); 16]; 7],
             ssbo: [[(0, 0); 16]; 7],
             tex: [[0; 256]; 7],
@@ -354,6 +361,7 @@ impl QState {
             sets: Default::default(),
             c2id: Default::default(),
             vin_last: std::cell::RefCell::new((0, 0, [(vk::Buffer::null(), u64::MAX); 32])),
+            vin_from: std::cell::Cell::new((u64::MAX, 0, 0)),
             pgen: new_bgen(),
             scache: Default::default(),
             vis_on: false,
@@ -880,6 +888,7 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
                     None => crate::log::red_once(&format!("mesh draw count at {:#x} is in no memory pool: draw skipped", m.cnt)),
                 }
             } else {
+                stale_check(sub, ab, "mesh draw records");
                 unsafe { ms.cmd_draw_mesh_tasks_indirect(sub.main, ab, ao, n, 12) };
             }
         }
@@ -945,6 +954,7 @@ fn draw_texture(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: crate::nvn::cmd2::p_
         crate::log::red_once("DrawTexture of an unregistered texture");
         return;
     };
+    let serial = g.images.lock().unwrap().live(serial);
     let Some(Rt { tex: Some(dst), view }) = qs.rt.first().copied() else { return };
     end_pass(g, sub, qs);
     let src_img = {
@@ -1410,6 +1420,19 @@ fn topology(p: i32) -> vk::PrimitiveTopology {
 
 /// A zero-filled buffer that stands in for unbound uniform, storage and vertex bindings.
 static ZERO: std::sync::OnceLock<super::Buf> = std::sync::OnceLock::new();
+/// (diagnosis, lane K2; with `NXGFX_ADDR_REPORT`) a buffer named "staging" or "scratch" that is not this submission's
+/// own, about to be read by the GPU: the stale staged range MKW's early faults read (a red line with what binds it)
+fn stale_check(sub: &Sub, b: vk::Buffer, what: &str) {
+    if let Some(n) = super::lost::buf_name(vk::Handle::as_raw(b)) {
+        if (n == "staging" || n == "scratch") && !sub.owns(b) {
+            static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 {
+                crate::log::red(&format!("stale {n} buffer {:#x} bound by {what} in submission {} (not its own)", vk::Handle::as_raw(b), sub.serial));
+            }
+        }
+    }
+}
+
 fn zero_buffer(g: &Gpu, sub: &mut Sub) -> vk::Buffer {
     let mut fresh = false;
     let b = ZERO.get_or_init(|| {
@@ -1553,6 +1576,7 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
     g.materialize(id);
     if let Some((serial, view)) = g.tables.tex_at(id) {
         let mut imgs = g.images.lock().unwrap();
+        let serial = imgs.live(serial);
         // bound as an image without the IMAGE flag (`image_noflag`): its image gets storage use now
         if storage {
             if let Some(t) = imgs.by_serial.get(&serial).filter(|im| !im.usage.contains(vk::ImageUsageFlags::STORAGE)).map(|im| im.tex) {
@@ -1608,9 +1632,20 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
         }
     }
     {
-        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 16 {
-            crate::vklog!("texture ID {id} (target {want}{}) has no registered texture: a zero stand-in is bound", if storage { ", image" } else { "" });
+        // each ID logged at most once every 600 frames, with what its slot holds (no registration, or a texture whose
+        // image is gone: Mario Kart 8 Deluxe's black stretches are a tone-mapping input bound as the stand-in)
+        static LAST: std::sync::Mutex<Option<std::collections::HashMap<i32, u64>>> = std::sync::Mutex::new(None);
+        let f = super::present::frames();
+        let mut l = LAST.lock().unwrap();
+        let m = l.get_or_insert_with(Default::default);
+        let due = m.get(&id).is_none_or(|&at| f >= at + 600);
+        if due && m.len() < 4096 {
+            m.insert(id, f);
+            let what = match g.tables.tex_at(id) {
+                Some((serial, _)) => format!("its slot names texture ser{serial}, which has no image now"),
+                None => "nothing is registered there".to_string(),
+            };
+            crate::vklog!("texture ID {id} (target {want}{}) at frame {f}: {what}: a zero stand-in is bound", if storage { ", image" } else { "" });
         }
     }
     dummy_view(g, sub, want, storage)
@@ -1753,7 +1788,7 @@ fn binding_scales(g: &Gpu, qs: &QState, st: usize, m: &Module, c0: &[u8], c2: &[
         let word = bank_word(qs, st, m, c0, c2, tex_slots(cbuf_slot).0, handle & 0x3fff);
         let tid = (word & 0xfffff) as i32 + tb;
         if let Some((serial, _)) = g.tables.tex_at(tid) {
-            if let Some(im) = imgs.by_serial.get(&serial) {
+            if let Some(im) = imgs.by_serial.get(&imgs.live(serial)) {
                 if im.scale != 1.0 {
                     v[1 + idx] = if st == 1 { -im.scale } else { im.scale };
                 }
@@ -1957,6 +1992,7 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                     if *WB.get_or_init(|| std::env::var("NXGFX_TEX_WB").as_deref() == Ok("1")) {
                         if let Some((serial, _)) = g.tables.tex_at(tid) {
                             let mut imgs = g.images.lock().unwrap();
+                            let serial = imgs.live(serial);
                             if imgs.by_serial.get(&serial).is_some_and(|im| im.tex.l.size <= 512 << 10) {
                                 g.tex_gpu_written(&mut imgs, serial);
                                 drop(imgs);
@@ -1974,7 +2010,9 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                         .tables
                         .tex_at(tid)
                         .and_then(|(serial, v)| {
-                            g.images.lock().unwrap().by_serial.get(&serial).map(|im| {
+                            let imgs = g.images.lock().unwrap();
+                            let serial = imgs.live(serial);
+                            imgs.by_serial.get(&serial).map(|im| {
                                 let d = &im.tex.d;
                                 format!("ser{serial} fmt{:#x} {}x{}x{} levels {} t{} at {:#x} v{:?}", d.format, d.width, d.height, d.depth, d.levels, d.target, im.tex.mem as u64, v.map(|v| (v.base_level, v.min_layer, v.format)))
                             })
@@ -1987,14 +2025,17 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                         .tables
                         .tex_at(tid)
                         .and_then(|(serial, v)| {
-                            g.images.lock().unwrap().by_serial.get(&serial).map(|im| {
+                            let imgs = g.images.lock().unwrap();
+                            let serial = imgs.live(serial);
+                            imgs.by_serial.get(&serial).map(|im| {
                                 let d = &im.tex.d;
                                 passdump::want_tex(serial, d.width, d.height);
                                 format!("ser{serial} fmt{:#x} {}x{}x{} t{} v{:?}", d.format, d.width, d.height, d.depth, d.target, v.map(|v| (v.bits, v.target, v.base_level, v.min_layer, v.format, v.swz, im.tex.swizzle(), im.format)))
                             })
                         })
                         .unwrap_or_else(|| "none".into());
-                    said.push(format!("{}{b}=id{tid}/s{sid} ty{ty}: {what}", if is_img { "img" } else { "tex" }));
+                    let filt = g.tables.samp_filters(sid).map(|(mi, ma)| format!("(min {mi} mag {ma})")).unwrap_or_default();
+                    said.push(format!("{}{b}=id{tid}/s{sid}{filt} ty{ty}: {what}", if is_img { "img" } else { "tex" }));
                 }
                 if is_img {
                     imgs.push((b, vk::DescriptorType::STORAGE_IMAGE, vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: view, image_layout: vk::ImageLayout::GENERAL }));
@@ -2091,6 +2132,7 @@ fn write_db_set(g: &Gpu, sub: &mut Sub, bufs: &[(u32, vk::DescriptorType, vk::De
     let mut seen: [(vk::Buffer, u64); 8] = [(vk::Buffer::null(), 0); 8];
     let mut ns = 0;
     for (b, ty, info) in bufs {
+        stale_check(sub, info.buffer, "a descriptor");
         let base = match seen[..ns].iter().find(|x| x.0 == info.buffer) {
             Some(x) => x.1,
             None => {
@@ -2569,6 +2611,12 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
 }
 
 fn vertex_input(g: &Gpu, sub: &mut Sub, qs: &QState, vs: &Module) {
+    let from = (qs.vgen, vs.inputs.as_ptr() as usize ^ (vs.inputs.len() << 48), super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire));
+    if qs.vin_last.borrow().0 == sub.serial && qs.vin_from.get() == from && vin_skip_on() {
+        super::perf::inc(super::perf::C::VinSkipped);
+        return;
+    }
+    qs.vin_from.set(from);
     let mut binds: Vec<vk::VertexInputBindingDescription2EXT> = Vec::new();
     let mut attrs: Vec<vk::VertexInputAttributeDescription2EXT> = Vec::new();
     let mut streams_used = 0u32;
@@ -2645,11 +2693,18 @@ fn vertex_input(g: &Gpu, sub: &mut Sub, qs: &QState, vs: &Module) {
         }
         for (s, b, o) in bufs {
             if last.2[s as usize] != (b, o) {
+                stale_check(sub, b, "a vertex buffer");
                 g.dev().cmd_bind_vertex_buffers(sub.main, s, &[b], &[o]);
                 last.2[s as usize] = (b, o);
             }
         }
     }
+}
+
+/// NXGFX_VIN_SKIP=0: vertex input set up at every draw.
+fn vin_skip_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_VIN_SKIP").as_deref() != Ok("0"))
 }
 
 /// Index data of a quads draw as triangles (u32), from a vertex range or from the game's index buffer.
@@ -2683,6 +2738,7 @@ fn draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw) {
     let dev = g.dev();
     if d.ind != 0 {
         if let Some((b, o)) = rec {
+            stale_check(sub, b, "an indirect draw record");
             unsafe { dev.cmd_draw_indirect(sub.main, b, o, 1, 16) };
         }
         return;
@@ -2758,9 +2814,11 @@ fn draw_idx(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw_idx) {
     let n = if d.ind != 0 { 1u64 << 20 } else { d.count.max(0) as u64 * isz };
     let Some((ib, io, _)) = super::mem::resolve(g, sub, d.ibuf, n.max(1).min(1 << 20)) else { return };
     unsafe {
+        stale_check(sub, ib, "an index buffer");
         dev.cmd_bind_index_buffer(sub.main, ib, io, ity);
         if d.ind != 0 {
             if let Some((b, o)) = rec {
+                stale_check(sub, b, "an indexed indirect record");
                 dev.cmd_draw_indexed_indirect(sub.main, b, o, 1, 20);
             }
         } else {
@@ -2786,6 +2844,7 @@ fn dispatch(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
     unsafe {
         if d.ind != 0 {
             if let Some((b, o)) = ind {
+                stale_check(sub, b, "an indirect dispatch record");
                 g.dev().cmd_dispatch_indirect(sub.main, b, o);
             }
         } else {
@@ -2989,6 +3048,37 @@ fn tf_end(g: &Gpu, sub: &mut Sub, qs: &mut QState) {
 
 fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool {
     let dev = g.dev();
+    // a pass dump also names the work between draws that writes images or memory (clears, copies, dispatches, render
+    // conditions), so a target's content that no draw explains can be traced to its op
+    if passdump::active() {
+        let name = match opc {
+            op::CLEAR_COLOR => "clear colour",
+            op::CLEAR_DS => "clear depth / stencil",
+            op::CLEAR_TEX => "clear texture",
+            op::CLEAR_BUF => "clear buffer",
+            op::COPY_B2B => "copy buffer to buffer",
+            op::COPY_B2T => "copy buffer to texture",
+            op::COPY_T2B => "copy texture to buffer",
+            op::COPY_T2T => "copy texture to texture",
+            op::COPY_STRIDE => "strided copy",
+            op::DISPATCH => "dispatch",
+            op::RENDER_COND => "render condition",
+            op::DOWNSAMPLE => "downsample",
+            op::RESOLVE_DEPTH => "resolve depth",
+            op::DRAW_TEX => "draw texture",
+            _ => "",
+        };
+        if !name.is_empty() {
+            let head: Vec<String> = rec.chunks_exact(4).take(8).map(|c| format!("{:x}", u32::from_le_bytes(c.try_into().unwrap()))).collect();
+            let rect = if matches!(opc, op::CLEAR_COLOR | op::CLEAR_DS) {
+                let r = clear_rect(qs).rect;
+                format!(" rect {},{} {}x{}", r.offset.x, r.offset.y, r.extent.width, r.extent.height)
+            } else {
+                String::new()
+            };
+            crate::vklog!("pass dump {}: op {name} [{}]{rect}{}", passdump::pass_no(), head.join(" "), if !qs.render_on { " (render condition false)" } else { "" });
+        }
+    }
     match opc {
         op::END => {}
         op::SET_RT => {
@@ -3151,12 +3241,14 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
                 qs.vattr[i] = unsafe { rd_at(rec, 8 + 4 * i) };
             }
             qs.nvattr = n;
+            qs.vgen += 1;
         }
         op::BIND_VSTREAM => {
             let n: i32 = unsafe { rd_at(rec, 4) };
             for i in 0..n.clamp(0, 16) as usize {
                 qs.vstream[i] = unsafe { rd_at(rec, 8 + 8 * i) };
             }
+            qs.vgen += 1;
         }
         op::BIND_VBUF => {
             let first: i32 = unsafe { rd_at(rec, 0) };
@@ -3168,12 +3260,14 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
                     qs.vbuf[k] = (r.address, r.size);
                 }
             }
+            qs.vgen += 1;
         }
         op::BIND_VBUF1 => {
             let b: p_bind_vbuf1 = rd_payload(rec);
             if (b.index as usize) < 16 {
                 qs.vbuf[b.index as usize] = (b.addr, b.size as u64);
             }
+            qs.vgen += 1;
         }
         op::BIND_UBO | op::BIND_UBO_SMALL => {
             let b: p_bind_buf = if opc == op::BIND_UBO {

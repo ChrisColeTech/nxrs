@@ -870,6 +870,12 @@ pub static WATCH_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static WATCH_NS: AtomicU64 = AtomicU64::new(0);
 pub static WATCH_SUBS: AtomicU64 = AtomicU64::new(0);
 pub static WATCH_POOLS: AtomicU64 = AtomicU64::new(0);
+/// Bytes scanned in pools the CPU wrote in this or the last frame (warm) and in the others (lukewarm: 2-60 frames ago);
+/// writes found in a lukewarm pool after a frame's first submission (what scanning lukewarm pools only once a frame would
+/// have delayed to the next frame). Pool sync's breakdown with NXGFX_PROFILE=1.
+pub static WATCH_WARM_B: AtomicU64 = AtomicU64::new(0);
+pub static WATCH_LUKE_B: AtomicU64 = AtomicU64::new(0);
+pub static WATCH_LUKE_HITS: AtomicU64 = AtomicU64::new(0);
 struct WatchTimer(std::time::Instant);
 impl Drop for WatchTimer {
     fn drop(&mut self) {
@@ -888,6 +894,8 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
     // most of them neighbours: one GetWriteWatch each was 3.5 ms a frame of `pools`; Mario Kart World 21 ms)
     let mut taken: HashMap<u64, Vec<u64>> = HashMap::new();
     let cold_skipped: std::collections::HashSet<u64>;
+    // a later submission of this frame (its first one asked every pool already)
+    let mid_frame;
     {
         // cold pools (no CPU write for 60 frames) are asked once a frame, not at every submission: GetWriteWatch walks
         // every page of its range, and Donkey Kong Bananza's ~1,300 mirrors (1.9 GB) at 9 submissions a frame cost
@@ -897,6 +905,7 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
         static COLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
         let cold_on = *COLD.get_or_init(|| std::env::var("NXGFX_POOL_COLD").as_deref() != Ok("0"));
         let new_frame = m.scan_frame != frame;
+        mid_frame = !new_frame;
         m.scan_frame = frame;
         let skip = |p: &Pool| cold_on && !new_frame && frame.saturating_sub(p.dirty_frame) > 60;
         cold_skipped = m.by_base.values().filter(|p| p.watched && skip(p)).map(|p| p.base).collect();
@@ -910,10 +919,24 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
             })
             .collect();
         WATCH_POOLS.fetch_add(watched.len() as u64, Ordering::Relaxed);
+        if super::perf::fine() {
+            for p in m.by_base.values().filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host) && !skip(p)) {
+                let warm = frame.saturating_sub(p.dirty_frame) <= 1;
+                (if warm { &WATCH_WARM_B } else { &WATCH_LUKE_B }).fetch_add(p.size, Ordering::Relaxed);
+            }
+        }
         let subs = WATCH_SUBS.fetch_add(1, Ordering::Relaxed) + 1;
         if subs % 600 == 0 && super::perf::fine() {
             let (c, ns, np) = (WATCH_CALLS.swap(0, Ordering::Relaxed), WATCH_NS.swap(0, Ordering::Relaxed), WATCH_POOLS.swap(0, Ordering::Relaxed));
-            crate::vklog!("pool sync, last 600 submissions: {:.0} watched pools, {:.0} write-watch calls, {:.2} ms in them a submission", np as f64 / 600.0, c as f64 / 600.0, ns as f64 / 600.0 / 1e6);
+            let (wb, lb, lh) = (WATCH_WARM_B.swap(0, Ordering::Relaxed), WATCH_LUKE_B.swap(0, Ordering::Relaxed), WATCH_LUKE_HITS.swap(0, Ordering::Relaxed));
+            crate::vklog!(
+                "pool sync, last 600 submissions: {:.0} watched pools, {:.0} write-watch calls, {:.2} ms in them a submission; scanned a submission {:.0} MB in pools written this / last frame, {:.0} MB in pools written 2-60 frames ago ({lh} later-submission writes found in those)",
+                np as f64 / 600.0,
+                c as f64 / 600.0,
+                ns as f64 / 600.0 / 1e6,
+                wb as f64 / 600.0 / 1048576.0,
+                lb as f64 / 600.0 / 1048576.0
+            );
         }
         // a run: pools whose pages touch, or pools of one allocation with gaps between them (one call over the run
         // instead of one per pool: Donkey Kong Bananza has ~1,300 mirrors, 9 submissions a frame)
@@ -970,7 +993,11 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
             }
         }
         if !ranges.is_empty() {
-            p.dirty_frame = super::present::frames();
+            let f = super::present::frames();
+            if super::perf::fine() && f.saturating_sub(p.dirty_frame) > 1 && mid_frame {
+                WATCH_LUKE_HITS.fetch_add(1, Ordering::Relaxed);
+            }
+            p.dirty_frame = f;
         }
         if let Some(b) = p.buf.as_ref() {
             if p.placement == Placement::Mirror || p.placement == Placement::Vram {

@@ -282,6 +282,10 @@ pub fn name_object(handle: u64, name: &str) {
     }
     m.insert(handle, name.to_string());
 }
+/// The name a buffer was made with (address report on), if known.
+pub fn buf_name(handle: u64) -> Option<String> {
+    NAMES.lock().unwrap().as_ref().and_then(|m| m.get(&handle).cloned())
+}
 fn name_of(handle: u64) -> String {
     NAMES.lock().unwrap().as_ref().and_then(|m| m.get(&handle)).map(|n| format!(" \"{n}\"")).unwrap_or_default()
 }

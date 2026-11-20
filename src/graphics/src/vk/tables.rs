@@ -58,6 +58,8 @@ struct Inner {
     /// host texture ID -> (serial, view) as registered
     tex: HashMap<i32, (u64, Option<view_t>)>,
     samp: HashMap<i32, vk::Sampler>,
+    /// each sampler ID's filters as registered (min, mag; pass dumps)
+    samp_filt: HashMap<i32, (u8, u8)>,
     /// buffer textures by host texture ID (no image: a texel buffer view over their pool's memory)
     buf_tex: HashMap<i32, crate::nvn::obj::tex_t>,
     /// buffer textures whose pool-set texel buffer views are still to be made (at the next submission)
@@ -213,6 +215,10 @@ impl Tables {
             _ => (vk::Filter::LINEAR, vk::SamplerMipmapMode::LINEAR, false),
         };
         let mag = if p.magf == 0 { vk::Filter::NEAREST } else { vk::Filter::LINEAR };
+        // NXGFX_SAMP_LINEAR=1 (diagnosis): every sampler filters linearly (is a picture's banding a nearest read?)
+        static LIN: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let lin = *LIN.get_or_init(|| std::env::var("NXGFX_SAMP_LINEAR").as_deref() == Ok("1"));
+        let (min, mag) = if lin { (vk::Filter::LINEAR, vk::Filter::LINEAR) } else { (min, mag) };
         let min_lod = p.lod_min.max(0.0);
         let max_lod = if nomip { min_lod + 0.25 } else { p.lod_max.max(min_lod) };
         let aniso = p.aniso > 1.0;
@@ -277,6 +283,10 @@ impl Tables {
     pub fn tex_at(&self, id: i32) -> Option<(u64, Option<view_t>)> {
         self.inner.lock().unwrap().tex.get(&id).copied()
     }
+    /// A sampler ID's (min, mag) filters as registered (NVN values).
+    pub fn samp_filters(&self, id: i32) -> Option<(u8, u8)> {
+        self.inner.lock().unwrap().samp_filt.get(&id).copied()
+    }
     pub fn samp_at(&self, id: i32) -> Option<vk::Sampler> {
         self.inner.lock().unwrap().samp.get(&id).copied()
     }
@@ -334,6 +344,7 @@ impl super::Gpu {
             return;
         }
         let s = self.tables.sampler(&self.d, p);
+        self.tables.inner.lock().unwrap().samp_filt.insert(id, (p.minf, p.magf));
         self.tables.write_sampler(&self.d, id, s);
     }
 }

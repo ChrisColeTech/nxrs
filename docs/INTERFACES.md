@@ -1038,6 +1038,83 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   `NXGFX_DEFER=1` the replay's CPU time is 8.2-9.7 ms a frame against 5.8-6.4 off, both at 59.7 FPS. **It stays off**
   (PORT_PLAN row).
 
+**Lane G5 (2026-11-20 11:00-, takes over from G4; uncommitted).** Engine `target/G5`; links `build/G5/<game>t`
+(`build/G5/link.sh <game>`, G4's script on G5's engine); runs `build/I/runs/*-G5-*` through `build/G5/run.sh <out>
+<script args>` (one start, waits for its turn); captures `build/G5/*.cap`, replays `build/G5/replay.sh <cap> <dir>
+[ENV=..]` (`SHADERS=<data>/shaders` for a game other than MK8D), pixel probe `build/G5/px.py <dir> x,y ...` (one pixel
+through every 1920x1080 pass dump).
+- **Capture / replay now reproduces a frame.** The capture takes every GPU-drawn image whole (`capture.rs` `WIMG`:
+  every aspect, level, layer and 3D slice as the image holds them, raw; multisampled and block-compressed ones are
+  counted and skipped; replay restores them into an image of the same shape and marks it GPU-owned, so later objects
+  over the same storage take it over as in the game). Committed by the coordinator with K2's 78cc0fa. Two more fixes:
+  **registrations stay in the capture after their texture is finalized** (a pool slot keeps naming what was
+  registered: MK8D's tone-mapping input, ID 4354, was registered once and its object finalized later; without it the
+  replay bound the zero stand-in), and **G4's "white" replays were transparent black**: the window target's alpha is 0
+  and an image viewer shows that as white (check pixels, not the preview). `build/G5/rA2/frame-1.png`
+  (`mk8d_async2.cap`, present 7150) is the game's frame, HUD and 3D, made offline. Pass dumps of a replay now also log
+  the non-draw work between draws (`pass dump N: op clear colour [...] rect x,y wxh`, copies, dispatches, render
+  conditions) and each sampler's filters (`/s352(min 3 mag 1)`).
+- **MK8D black stretches (async): cause found and fixed.** A per-ID log of zero stand-in binds (`exec.rs`, every ID at
+  most once per 600 frames, with what its slot holds) in `-G5-mk8d-lap-standin` (black lap shots 0016, 0025, 0026):
+  `texture ID 4354 ... its slot names texture ser6754, which has no image now`, and ~20 more IDs naming ser6754 /
+  ser391701. ser6754 is the scene's HDR target, a texture object the game keeps and registers into new pool slots
+  every frame, while it also makes new objects over the same storage; `ensure_image` lets a newer GPU-drawn object with
+  the same description **take the image over** (G's fix for MK8D's per-frame objects that are never finalized), which
+  removed ser6754 from the image table, so every slot naming it bound the stand-in until ser6754 was made again: the
+  tone-mapping pass read zero, the bloom (another path) stayed. Async replay only changed when a take-over landed
+  between registration and use. Fix: `Images::forward` / `Images::live` (`image.rs`): a take-over leaves the old serial
+  forwarded to the new one, and every lookup by a slot's serial (`tex_view`, DrawTexture, resolution-scale and
+  pass-dump lookups) follows it; `NXGFX_TAKEOVER_FORWARD=0` off. GPU test
+  `a_taken_over_texture_object_still_finds_its_image`. Verification lap: see the next line.
+  - LAP_RESULT_PLACEHOLDER
+- **MK8D kart blob (item 5): narrowed with the replay, not fixed.** In `rA2` the cyan under the karts comes from the
+  lighting pass (37) where the screen-space shadow mask (R8G8B8A8 at 0x15cf60600, passes 33-36) has G = 0: lit cyan
+  (40, 211, 255) instead of dark. With `NXGFX_SWZ_OVERRIDE=1` (view swizzle replacing the texture's) it is dimmer but
+  still cyan. Also seen: the scene target ser6754 is cleared at the start of the frame with a 16x16 scissor left over
+  from the light-probe passes (pass 21, `rect 0,0 16x16`); clearing it whole changes nothing at the blob, so not the
+  cause. The G-buffer passes 27/28 bind one image (ser149345) as colour targets 3 and 4 (G3's note): the normals at the
+  blob differ from the road's; next suspect.
+- **DKB speed (item 2):** **vertex input skipped when nothing of it changed** (`exec.rs vertex_input`, `QState::vgen`,
+  `vin_from`; `NXGFX_VIN_SKIP=0` off): 1,135 of ~4,000 draws a frame. `-G5-dkb-prof` at the frame G4 measured (6,900):
+  replay CPU **20.98 ms against 25.79** (vertex input 4.39 -> 3.36, sets 8.23 -> 6.62). The 100-150 s
+  window stays ~20 FPS (19.7 vs 20.3): DKB picks present interval 3 itself whenever a frame passes ~33 ms, and the
+  replay there is 27-40 ms; it went to interval 2 (29-30 FPS) where the replay was 15-16 ms (120-123 s). Pool sync
+  measured (`pool sync, last 600 submissions: ...` now splits it): ~240 MB a submission in pools written this / last
+  frame and ~208 MB in pools written 2-60 frames ago, and **~1 write a submission lands in those older pools after the
+  frame's first submission**, so scanning them once a frame would delay real writes; tried anyway
+  (`-G5-dkb-warm`): pool sync 9.3 -> 8.3 ms only, removed. Turbo instead write-protects pools and takes faults
+  (`nvn_dirty.c`, hot pages copied each submission); that needs a host pre-write hook in os (file reads into guest
+  memory would fail on protected pages) and is not done. "dropped work" in the replay line counted reused sets and
+  other plain counts: it now sums only the drop counters.
+- **Smash / Anime Girls banding (item 3):** Smash on G4's last run (`-G4-smash-fault5/0012`) shows none. **Anime Girls
+  still bands on HEAD** (`-G5-agsob-band/0008`). Pass dump (`build/G5/agdump`, `-G5-agsob-dump`): the scene (pass 42,
+  B10G11R11) is smooth and the banding appears in pass 56, Unity's uber pass, which grades through a 256x16 RGBA8 LUT
+  (ser1045, made in pass 10) with sampler 352 shared with the scene texture. The LUT itself has steps of ~45 levels
+  between neighbouring entries (it saturates at entry 9 of 16), so the bands are what a LUT read without interpolation
+  between entries gives. Next: a capture of that frame (queued) to read sampler 352's filters in the replay and test
+  the LUT reads offline.
+- **Jamboree white layer (item 4): still white on HEAD**, now with **handle-table texture arrays** (see below) that let
+  the game's character / board shaders draw (`-G5-jamboree-ht`, 0004-0018 white). The title before L+R is drawn
+  (`0003`). The white stays a game-state question (the quad's colour is (1, 1, 1, 1) in guest memory).
+- **Handle-table texture arrays** (`shaders::link::handle_tables`, applied in `shader.rs remap`;
+  `NXGFX_HANDLE_TABLES=0` off): a `combined_image_sampler[8192]` the translator declares for a texture handle picked
+  out of a constant buffer by a computed index (Jamboree: **1,413 of its shaders were refused** for it, "texture array
+  of 8192 (handle tables) is not bound yet"; OoT has 7) is rewritten: at each load of element i the handle word
+  `handle + i` is read from the constant buffer the shader declares, and the image (ID bits 0-19) and sampler (bits
+  20-31) come from the pool set's arrays (declared at the layout's lengths, IDs past them read element 0). Unit test
+  `handle_table_elements_come_from_the_pools`; lane C's pipeline test on 1,500 Jamboree pairs: 1,499 built, 0
+  validation errors (the one left needs a stage the layout cannot bind). **For lane S:** this could move into the
+  translator.
+- **Lane K2's staging fault (coordinator's question):** read through: every cached staged range (`QState::staged`,
+  `CBank::staged`, the stage-set cache's key, `tpart`, `vin_last`, `gmem`) carries the submission's serial and is
+  only used in that submission; `mesh_rec` is set and cleared inside one mesh draw; staging chunks go only in
+  `new_sub` of a recycled `Sub`, which completion recycles after that submission's timeline value; merged submits are
+  one `Sub` and one value. Nothing found that carries a staged (buffer, offset) into a later submission.
+- **Z-A (item 6):** not run this round (its last run, `-X-x2-plza11-gates`, 59.7 FPS, 134 s at 58+).
+- **Also seen:** a start that died at 0.3 s with `memory: the kernel region is taken` (`-G5-mk8d-sync-cap`, right
+  after another game exited): the runtime's fixed kernel-region reservation was taken in that process (lane O / T).
+  K2's MKW runs reset the display driver at 11:13, 11:34, 12:20 and 12:41; each cooldown held these runs 20-30 min.
+
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
 
@@ -2488,6 +2565,32 @@ Read and ruled out since: index / vertex / indirect binds (resolved per draw int
 (keyed to the submission), the pool table's texel descriptors (pools, rewritten with a stand-in when gone), ASTC
 (classic sets from the submission's own pools, its staging and scratch). Lane K2's runs with the stage hold: 1 of 1
 clean; without it since 10:53 on these builds: 4 of 6 faulted at 14-17 s.
+
+**`K2-mkw21-stale` (12:41, both diagnostics + a stale-buffer check): GPU reset at 15.5 s.** New check (`exec.rs`
+`stale_check`, with `NXGFX_ADDR_REPORT`): every vertex / index / indirect / descriptor binding of a buffer named
+"staging" or "scratch" that is not the recording submission's own logs a red line. **None fired.** The fault: "invalid
+read at 0x38c356000 ... inside BUFFER "pool" (bound at 12.61 s: 0x38be00000 +0x800000), UNBOUND at 12.72 s" — **the
+same VA (0x38be00000, 8 MB) that `K2-mkw15`'s report named as a "staging" chunk**. So the name is only the last owner
+of the range: the reader holds an address in a recycled 8 MB VA range, freed 1-3 s before, whatever lived there. And
+**no checkpoint had started** (with `NXGFX_CHECKPOINTS=all` every draw and dispatch has one): the faulting GPU work is
+uncheckpointed, i.e. not a draw or dispatch of the replay's main command buffer. Candidates: the `pre` command buffer
+(uploads, ASTC decode dispatches, pool fills), the write-back copies at a submission's end, the lazy page reader's own
+submission. The earlier "in the pass #N" lines named only the newest started checkpoint. Next: checkpoints in `pre`
+and around the write-back copies and the lazy reader, so the next fault names its command.
+
+**`K2-mkw22-ckpre` (13:04, checkpoints added in `pre` (uploads, texture copies, ASTC decodes), around the write-back
+copies and in the lazy reader): GPU reset at 15.5 s, "invalid read at 0xd3f756000 ... inside BUFFER "staging" (bound
+13.39 s, UNBOUND 13.49 s)".** Correction to the two notes above: lane K2's grep had hidden the checkpoint lines; every
+one of these faults (`K2-mkw15`, `-17`, `-18`, `-20`, `-21`, `-22`) reports **"the GPU started #N a pass 128x128 into
+[c0 ser28824 at 0x26b7b3000 ... 128x128x5 R16G16B16A16_SFLOAT]" and "finished everything before #N"**, and no draw
+inside it started (with `all` every draw has its own checkpoint after the pass's). So the faulting read comes **at that
+pass's start, before its first draw: the attachment load of ser28824** (the image at guest 0x26b7b3000, a 5-layer
+RGBA16F array) or the pass's clears, reading memory that is not the image's (a VA range a staging chunk or a pool held
+1-3 s before; the report finds no live binding there). The report's description of that image shows no "in memory ..."
+part (its memory is not found among the bound ranges). **For G4:** the image ser28824 / its view look dead at that
+pass (its memory freed or rebound under it, or a view of an image that was replaced); next is the history of ser28824
+(creation, aliasing, parking, upgrade, the view used) logged at each change. The early faults come only at the course's
+first load (14-17 s), so this pass may be the first use of ser28824 after a reload.
 
 **For G4 (texture code, lane K2's change, contained): GPU-written textures go back to their storage.**
 `image.rs` `tex_writeback` / `tex_writeback_land`, `queue.rs` `Sub::tex_wb`, `exec.rs` `target_image`, `mem.rs`

@@ -1272,3 +1272,46 @@ fn frame_generation_skips_duplicates_and_scene_cuts() {
     assert_eq!(frame(&b2), Some(0), "a small change once warm: interpolated");
     assert!(nxconfig::apply_arg("--lsfg=0"));
 }
+
+/// A texture object whose image a newer object over the same storage took over (Mario Kart 8 Deluxe makes new objects
+/// over its render targets every frame while it still registers the old one into new pool slots) is found through the
+/// newer one: the slot naming the old object binds the image, not the zero stand-in (its black lap stretches).
+#[test]
+fn a_taken_over_texture_object_still_finds_its_image() {
+    let _g = setup();
+    let mut n = Nvn::new();
+    let (w, h) = (32u32, 16u32);
+    let a = n.texture(w, h, f::RGBA8, 0, false);
+    let g = nxgfx::vk::Gpu::get().unwrap();
+    let ta = unsafe { *(&*a as *const NVNtexture as *const nxgfx::nvn::obj::tex_t) };
+    {
+        let mut imgs = g.images.lock().unwrap();
+        assert!(g.ensure_image(&mut imgs, &ta));
+        // drawn by the GPU (what a render target is)
+        imgs.by_serial.get_mut(&ta.serial).unwrap().gpu_owned = true;
+    }
+    // a new object over the same storage and description
+    let b = unsafe {
+        let mut tb = NVNtextureBuilder::boxed();
+        let mut t = NVNtexture::boxed();
+        nvnTextureBuilderSetDevice(&mut *tb, n.d());
+        nvnTextureBuilderSetDefaults(&mut *tb);
+        nvnTextureBuilderSetSize2D(&mut *tb, w as i32, h as i32);
+        nvnTextureBuilderSetFormat(&mut *tb, f::RGBA8);
+        nvnTextureBuilderSetStorage(&mut *tb, nvnTextureGetMemoryPool(&*a), nvnTextureGetMemoryOffset(&*a));
+        assert_eq!(nvnTextureInitialize(&mut *t, &*tb), 1);
+        t
+    };
+    let tb_ = unsafe { *(&*b as *const NVNtexture as *const nxgfx::nvn::obj::tex_t) };
+    let mut imgs = g.images.lock().unwrap();
+    let image_a = imgs.by_serial[&ta.serial].image;
+    assert!(g.ensure_image(&mut imgs, &tb_));
+    assert!(!imgs.by_serial.contains_key(&ta.serial), "the newer object took the image over");
+    assert_eq!(imgs.by_serial[&tb_.serial].image, image_a, "with its content");
+    assert_eq!(imgs.live(ta.serial), tb_.serial, "the older object finds it through the newer one");
+    assert_eq!(imgs.live(tb_.serial), tb_.serial);
+    // the older object made again takes it back: no forwarding left for it
+    assert!(g.ensure_image(&mut imgs, &ta));
+    assert_eq!(imgs.live(ta.serial), ta.serial);
+    assert_eq!(imgs.live(tb_.serial), ta.serial);
+}

@@ -245,6 +245,12 @@ struct JRefl {
     per_primitive_locations: Vec<u32>,
 }
 
+/// NXGFX_HANDLE_TABLES=0: shaders with handle-table texture arrays are refused as before.
+fn handle_tables_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_HANDLE_TABLES").as_deref() != Ok("0"))
+}
+
 fn hex_bytes(h: &str) -> Option<Vec<u8>> {
     (0..h.len() / 2).map(|i| u8::from_str_radix(&h[2 * i..2 * i + 2], 16).ok()).collect()
 }
@@ -293,10 +299,16 @@ pub fn remap(words: &[u32], refl: &Refl, json: Option<&str>) -> Result<(Vec<u32>
     }
     let (mut nsb, mut ntex, mut nimg, mut ntb, mut nib) = (0u32, 0u32, 0u32, 0u32, 0u32);
     let mut map: HashMap<(u32, u32), (u32, u32)> = HashMap::new();
+    // handle tables: ((set, binding), constant buffer slot, first handle word), rewritten onto the pools below
+    let mut tables: Vec<((u32, u32), i64, u32)> = Vec::new();
     for jb in &jr.bindings {
         let r = &jb.resource;
         let kind = r.get("kind").and_then(|k| k.as_str()).unwrap_or("");
         let array = iv(r, "array");
+        if kind == "texture" && jb.ty == "combined_image_sampler" && array > 1 && array != 1 << 20 && array != 4096 && handle_tables_on() {
+            tables.push(((jb.set, jb.binding), iv(r, "cbuf_slot"), (iv(r, "handle") & 0x3fff) as u32));
+            continue;
+        }
         let (set, b, what) = match (kind, jb.ty.as_str()) {
             ("support", _) => (st, L::SUPPORT, Some(Res::Support)),
             ("mesh_draw", "storage_buffer") => {
@@ -366,10 +378,32 @@ pub fn remap(words: &[u32], refl: &Refl, json: Option<&str>) -> Result<(Vec<u32>
             res.push((b, what));
         }
     }
+    let var_at = |set: u32, binding: u32| refl.vars.iter().find(|v| v.1 == set && v.2 == binding).map(|v| v.0);
+    let mut ht = Vec::new();
+    for &((set, binding), slot, first_word) in &tables {
+        let Some(var) = var_at(set, binding) else { return Err(format!("handle table at set {set} binding {binding} has no variable")) };
+        let cb = jr.bindings.iter().find(|b| b.resource.get("kind").and_then(|k| k.as_str()) == Some("cbuf") && iv(&b.resource, "slot") == slot);
+        let Some(cbuf) = cb.and_then(|b| var_at(b.set, b.binding)) else {
+            return Err(format!("texture array (handle table in c{slot}) whose constant buffer the shader does not declare"));
+        };
+        ht.push(shaders::link::HandleTable { var, cbuf, first_word });
+    }
     for &(id, s, b) in &refl.vars {
+        if ht.iter().any(|t| t.var == id) {
+            continue;
+        }
         match map.get(&(s, b)) {
             Some(&(ns, nb)) => redecorate(&mut w, id, ns, nb),
             None => return Err(format!("variable at set {s} binding {b} is not in the reflection")),
+        }
+    }
+    if !ht.is_empty() {
+        let caps = super::Gpu::try_get().map(|g| (g.layout.tex_cap, g.layout.samp_cap)).unwrap_or((262144, 16384));
+        w = shaders::link::handle_tables(&w, &ht, L::POOL_SET, L::B_TEX, L::B_SAMP, caps.0, caps.1).ok_or("a texture array (handle table) used other than by loading its elements")?;
+        pool = true;
+        static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) == 0 {
+            crate::vklog!("texture arrays read through handle tables in constant buffers: sampled from the texture and sampler pools by the handles (NXGFX_HANDLE_TABLES=0 off)");
         }
     }
     let c1 = jr.c1.as_deref().and_then(hex_bytes);

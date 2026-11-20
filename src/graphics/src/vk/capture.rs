@@ -164,7 +164,10 @@ pub fn tex_release(serial: u64) {
         return;
     }
     with(|s| {
-        s.boot.tex.retain(|_, (t, _, _)| t.serial != serial);
+        // the registrations stay: a texture pool slot keeps naming what was registered there until something else is
+        // (Mario Kart 8 Deluxe's tone-mapping input, ID 4354, was registered once with a texture object it finalized
+        // later; its image lives on under the objects made over the same storage each frame, so the slot still shows
+        // the frame in the game, and a replay without it bound the zero stand-in)
         if let Some(l) = s.live.as_mut() {
             put(l, rec::TEXREL, &[&serial.to_le_bytes()]);
         }

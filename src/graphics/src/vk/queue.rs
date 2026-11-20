@@ -311,6 +311,7 @@ impl Sub {
         }
         let (sb, so) = self.stage_bytes(g, src);
         let r = [vk::BufferCopy { src_offset: so, dst_offset: off, size: src.len() as u64 }];
+        super::lost::checkpoint(g, self.pre, true, || format!("an upload of {:#x} bytes into buffer {:#x} at {off:#x}", src.len(), vk::Handle::as_raw(dst)));
         unsafe { g.dev().cmd_copy_buffer(self.pre, sb, dst, &r) };
     }
     /// A descriptor set of the given stage set layout, from this submission's pools.
@@ -356,6 +357,10 @@ impl Sub {
         let off = self.db_used;
         self.db_used += size;
         off
+    }
+    /// A staging or scratch buffer of this submission's own.
+    pub fn owns(&self, buf: vk::Buffer) -> bool {
+        self.stage.iter().chain(self.arena.iter()).any(|b| b.buf == buf)
     }
     /// The device address of a buffer of this submission's own (staging, scratch).
     pub fn addr_of(&self, buf: vk::Buffer) -> Option<u64> {
@@ -499,6 +504,7 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
             barrier_all(g, s.pre);
         }
         let mut off = 0;
+        super::lost::checkpoint(g, s.main, false, || format!("the write-back copies of {} range(s)", s.writebacks.len()));
         for &(pool, a, n, buf, boff) in &s.writebacks {
             let r = [vk::BufferCopy { src_offset: boff, dst_offset: off, size: n }];
             unsafe { g.dev().cmd_copy_buffer(s.main, buf, rb.buf, &r) };

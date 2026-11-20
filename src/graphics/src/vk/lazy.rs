@@ -349,6 +349,7 @@ fn read_page(g: &Gpu, buf: vk::Buffer, off: u64) -> Vec<u8> {
         d.reset_command_buffer(r.cb, vk::CommandBufferResetFlags::empty()).ok();
         d.begin_command_buffer(r.cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).ok();
         super::queue::full_barrier(g, r.cb);
+        super::lost::checkpoint(g, r.cb, false, || format!("a lazy page read from buffer {:#x} at {off:#x}", vk::Handle::as_raw(buf)));
         d.cmd_copy_buffer(r.cb, buf, r.stage.buf, &[vk::BufferCopy { src_offset: off, dst_offset: 0, size: PAGE }]);
         let mb = [vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)

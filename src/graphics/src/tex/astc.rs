@@ -201,6 +201,7 @@ fn dispatch(g: &Gpu, sub: &mut Sub, blocks: &[u8], w: u32, h: u32, slices: u32, 
     let wr: Vec<_> = (0..3)
         .map(|i| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(i as u32).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&bi[i..i + 1]))
         .collect();
+    crate::vk::lost::checkpoint(g, sub.pre, false, || format!("an ASTC decode {w}x{h}x{slices} ({bw}x{bh} blocks)"));
     unsafe {
         dev.update_descriptor_sets(&wr, &[]);
         dev.cmd_bind_pipeline(sub.pre, vk::PipelineBindPoint::COMPUTE, a.decode);

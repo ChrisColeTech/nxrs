@@ -67,6 +67,7 @@ pub enum C {
     GmemLearned,
     TfCaptures,
     SetsReused,
+    VinSkipped,
     N,
 }
 
@@ -118,6 +119,7 @@ const NAMES: [&str; C::N as usize] = [
     "gmem_pages_learned",
     "tf_captures",
     "sets_reused",
+    "vertex_input_skipped",
 ];
 
 static COUNT: [AtomicU64; C::N as usize] = [const { AtomicU64::new(0) }; C::N as usize];
@@ -285,7 +287,8 @@ fn breakdown(cur: &[u64; C::N as usize], base: &[u64; C::N as usize], frames: f6
 }
 
 fn dropped_total() -> u64 {
-    (C::TexNoFormat as usize..C::N as usize).map(|i| COUNT[i].load(Ordering::Relaxed)).sum()
+    // the counters of work not done (texture formats .. unsupported primitives), not the plain counts after them
+    (C::TexNoFormat as usize..=C::DrawPrim as usize).map(|i| COUNT[i].load(Ordering::Relaxed)).sum()
 }
 
 struct FrameState {
@@ -376,7 +379,7 @@ pub fn frame(frame: u64) {
         );
     }
     crate::vklog!(
-        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets ({:.1} reused), {:.1} write-backs; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms; {} linked from parts, {} of them optimized since, {} shader parts made ahead); dropped work {}",
+        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets ({:.1} reused), {:.1} vertex inputs unchanged, {:.1} write-backs; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms; {} linked from parts, {} of them optimized since, {} shader parts made ahead); dropped work {}",
         d(C::Draws, &p) as f64 / df,
         d(C::DrawsSkipped, &p) as f64 / df,
         cur[C::SkipNoShader as usize],
@@ -389,6 +392,7 @@ pub fn frame(frame: u64) {
         d(C::BufCopies, &p) as f64 / df,
         d(C::DescSets, &p) as f64 / df,
         d(C::SetsReused, &p) as f64 / df,
+        d(C::VinSkipped, &p) as f64 / df,
         d(C::Writebacks, &p) as f64 / df,
         cur[C::PipesGfx as usize],
         cur[C::PipesCompute as usize],

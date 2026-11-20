@@ -91,6 +91,12 @@ unsafe impl Send for WbLanding {}
 static WB_LANDING: std::sync::Mutex<Vec<WbLanding>> = std::sync::Mutex::new(Vec::new());
 
 /// Read at each use (a texture registered or bound as an image without the flag; rare), so it can change live.
+/// NXGFX_TAKEOVER_FORWARD=0: a texture object whose image another took over has none (as before).
+fn forward_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_TAKEOVER_FORWARD").as_deref() != Ok("0"))
+}
+
 pub fn image_noflag_on() -> bool {
     match std::env::var("NXGFX_IMAGE_NOFLAG") {
         Ok(v) => v != "0",
@@ -317,6 +323,11 @@ pub struct Images {
     /// a new one uploaded from storage (Mario Kart 8 Deluxe: ~2 a frame, 15 ms of uploads). (image, present frame)
     parked: HashMap<u128, Vec<(Image, u64)>>,
     parked_n: usize,
+    /// a texture object whose image a newer object over the same storage took over -> that object: the older one is
+    /// still the game's (Mario Kart 8 Deluxe registers its scene target, ser6754, into new texture pool slots every
+    /// frame while it also makes new objects over the same storage; once one of those took the image, every slot
+    /// naming ser6754 bound the zero stand-in: the black stretches of its laps, async replay only by timing)
+    forward: HashMap<u64, u64>,
 }
 
 /// What a texture object is, without its serial: the key a released image is found again by.
@@ -344,6 +355,22 @@ const PARK_MAX: usize = 512;
 
 impl Images {
     pub fn drop_pool(&mut self, _base: u64, _size: u64) {}
+
+    /// The serial whose image texture object `serial` now views: itself, or the object that took its image over
+    /// (followed through later take-overs).
+    pub fn live(&self, serial: u64) -> u64 {
+        let mut s = serial;
+        for _ in 0..16 {
+            if self.by_serial.contains_key(&s) {
+                return s;
+            }
+            match self.forward.get(&s) {
+                Some(&n) => s = n,
+                None => return serial,
+            }
+        }
+        serial
+    }
 }
 
 fn view_type(t: i32) -> vk::ImageViewType {
@@ -655,6 +682,12 @@ impl Gpu {
             if let Some(v) = imgs.by_addr.get_mut(&(t.mem as u64)) {
                 v.retain(|s| *s != old);
             }
+            if forward_on() {
+                if imgs.forward.len() >= 1 << 16 {
+                    imgs.forward.clear();
+                }
+                imgs.forward.insert(old, t.serial);
+            }
             for a in imgs.by_serial.values_mut() {
                 if a.alias_of == Some(old) {
                     a.alias_of = Some(t.serial);
@@ -682,6 +715,7 @@ impl Gpu {
                 imgs.max_size = imgs.max_size.max(t.l.size);
             }
         }
+        imgs.forward.remove(&t.serial);
         imgs.by_serial.insert(t.serial, im);
         true
     }
@@ -2022,6 +2056,7 @@ impl Gpu {
 /// of the texture's size when the image is scaled (resolution scale).
 pub fn copy_buf_img(g: &Gpu, cb: vk::CommandBuffer, im: &Image, buf: vk::Buffer, r: vk::BufferImageCopy, to_image: bool) {
     let dev = g.dev();
+    super::lost::checkpoint(g, cb, true, || format!("a copy {} texture ser{} ({}x{}) {} buffer {:#x} at {:#x}", if to_image { "into" } else { "out of" }, im.tex.serial, r.image_extent.width, r.image_extent.height, if to_image { "from" } else { "to" }, vk::Handle::as_raw(buf), r.buffer_offset));
     if im.scale == 1.0 {
         unsafe {
             if to_image {
