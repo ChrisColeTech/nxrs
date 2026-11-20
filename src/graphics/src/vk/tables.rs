@@ -148,10 +148,10 @@ impl Tables {
         let _g = self.inner.lock().unwrap();
         unsafe {
             let gi = vk::DescriptorGetInfoEXT::default().ty(vk::DescriptorType::UNIFORM_TEXEL_BUFFER).data(vk::DescriptorDataEXT { p_uniform_texel_buffer: &u });
-            put_descriptor(d, db.ptr, l.db_pool_off[layout::B_TBUF as usize] + id as u64 * p.uniform_texel_buffer_descriptor_size as u64, &gi, p.uniform_texel_buffer_descriptor_size);
+            put_descriptor(d, db.ptr, l.db_pool_off[layout::B_TBUF as usize] + id as u64 * super::device::desc_size(p, vk::DescriptorType::UNIFORM_TEXEL_BUFFER) as u64, &gi, super::device::desc_size(p, vk::DescriptorType::UNIFORM_TEXEL_BUFFER));
             if let Some(s) = s {
                 let gi = vk::DescriptorGetInfoEXT::default().ty(vk::DescriptorType::STORAGE_TEXEL_BUFFER).data(vk::DescriptorDataEXT { p_storage_texel_buffer: &s });
-                put_descriptor(d, db.ptr, l.db_pool_off[layout::B_IBUF as usize] + id as u64 * p.storage_texel_buffer_descriptor_size as u64, &gi, p.storage_texel_buffer_descriptor_size);
+                put_descriptor(d, db.ptr, l.db_pool_off[layout::B_IBUF as usize] + id as u64 * super::device::desc_size(p, vk::DescriptorType::STORAGE_TEXEL_BUFFER) as u64, &gi, super::device::desc_size(p, vk::DescriptorType::STORAGE_TEXEL_BUFFER));
             }
         }
     }

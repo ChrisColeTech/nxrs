@@ -372,6 +372,8 @@ impl Device {
         }
 
         // Enable: exactly the queried support for the parts we use.
+        // with robustBufferAccess on, buffer descriptors in descriptor buffers are written at the robust sizes (`desc_size`)
+        ROBUST_BUFFERS.store(env_on("NXGFX_ROBUST").unwrap_or(props.vendor_id == 0x10de) && base.robust_buffer_access != 0, std::sync::atomic::Ordering::Relaxed);
         let en_base = vk::PhysicalDeviceFeatures {
             // reads past a bound buffer's range return in-range data or zero instead of faulting the GPU: on by default on
             // NVIDIA (Turbo, Ryujinx). Mario Kart World's GPU resets were a task shader's read of 0xca19c6000 (a device
@@ -612,5 +614,21 @@ impl Device {
 
     pub fn mem_type(&self, bits: u32, want: vk::MemoryPropertyFlags) -> Option<u32> {
         (0..self.mem_props.memory_type_count).find(|&i| bits & (1 << i) != 0 && self.mem_props.memory_types[i as usize].property_flags.contains(want))
+    }
+}
+
+/// robustBufferAccess is enabled: descriptor-buffer writes of buffer and texel-buffer descriptors take the robust sizes
+/// (VK_EXT_descriptor_buffer requires them then; the plain ones may be shorter and truncate the descriptor).
+pub static ROBUST_BUFFERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The size a buffer or texel-buffer descriptor of type `ty` takes in a descriptor buffer (robust when robustness is on).
+pub fn desc_size(p: &vk::PhysicalDeviceDescriptorBufferPropertiesEXT, ty: vk::DescriptorType) -> usize {
+    let r = ROBUST_BUFFERS.load(std::sync::atomic::Ordering::Relaxed);
+    match ty {
+        vk::DescriptorType::UNIFORM_BUFFER => if r { p.robust_uniform_buffer_descriptor_size } else { p.uniform_buffer_descriptor_size },
+        vk::DescriptorType::STORAGE_BUFFER => if r { p.robust_storage_buffer_descriptor_size } else { p.storage_buffer_descriptor_size },
+        vk::DescriptorType::UNIFORM_TEXEL_BUFFER => if r { p.robust_uniform_texel_buffer_descriptor_size } else { p.uniform_texel_buffer_descriptor_size },
+        vk::DescriptorType::STORAGE_TEXEL_BUFFER => if r { p.robust_storage_texel_buffer_descriptor_size } else { p.storage_texel_buffer_descriptor_size },
+        _ => 0,
     }
 }

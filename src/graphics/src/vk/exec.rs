@@ -103,6 +103,8 @@ pub struct QState {
     cbank: std::cell::RefCell<[[Option<CBank>; 2]; 7]>,
     /// a stage's texture and image descriptors as last resolved (`TexPart`)
     tpart: std::cell::RefCell<[Option<TexPart>; 7]>,
+    /// a stage's whole set as last written into the descriptor buffer, and what it was made from (`SetKey`)
+    sets: std::cell::RefCell<[Option<(SetKey, u64)>; 7]>,
     /// the id of the c2 bank `banks` returned last
     c2id: std::cell::Cell<u64>,
     /// the vertex input and vertex buffers last set in this queue's command buffer: (submission, layout words,
@@ -125,6 +127,56 @@ struct TexPart {
     pools: (i32, i32),
     serial: u64,
     imgs: Vec<(u32, vk::DescriptorType, vk::DescriptorImageInfo)>,
+}
+
+/// What a stage's descriptor set is made from, when nothing else goes into it (`set_key`): the same key in the same
+/// submission and descriptor-buffer chunk is the same set, and its offset is bound again instead of building and
+/// writing it (Donkey Kong Bananza: 15,400 sets a frame, 27 ms, most of them the set of the draw before).
+#[derive(Clone, Copy, PartialEq)]
+struct SetKey {
+    module: (usize, crate::nvn::prog::ShaderKey),
+    bgen: [u64; 2],
+    ubo: [(u64, u64); 16],
+    pgen: u64,
+    extent: (u32, u32),
+    pools: (i32, i32),
+    dispatch: [u32; 3],
+    base_instance: u32,
+    serial: u64,
+    chunk: usize,
+}
+
+/// The key of stage set `m` for this draw, or None when the set reads something the key does not cover: texture
+/// handles from a uniform buffer or a bound buffer (bindless), buffer textures, the resolution scale, a pass dump.
+fn set_key(sub: &Sub, qs: &QState, m: &Module, dispatch: [u32; 3], base_instance: u32) -> Option<SetKey> {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("NXGFX_SET_CACHE").as_deref() != Ok("0")) || passdump::active() || super::scale::active() {
+        return None;
+    }
+    let plain = m.res.iter().all(|(_, r)| match r {
+        Res::Tex { cbuf_slot, ty, .. } | Res::Img { cbuf_slot, ty, .. } => {
+            let (t, s) = tex_slots(*cbuf_slot);
+            (t == 2 || t == -1) && (s == 2 || s == -1) && *ty != 2
+        }
+        _ => true,
+    });
+    if !plain {
+        return None;
+    }
+    let st = m.stage as usize;
+    let (di, bi) = if st == 5 { (dispatch, 0) } else { ([0; 3], base_instance) };
+    Some(SetKey {
+        module: (m as *const Module as usize, m.key),
+        bgen: qs.bgen[st],
+        ubo: qs.ubo[st],
+        pgen: qs.pgen,
+        extent: (qs.pass_extent.width, qs.pass_extent.height),
+        pools: pool_bases(qs),
+        dispatch: di,
+        base_instance: bi,
+        serial: sub.serial,
+        chunk: sub.db_cur,
+    })
 }
 
 /// A stage's c0 or c2 as last built: valid while its generation (and for c0 the dispatch size and base instance)
@@ -292,6 +344,7 @@ impl QState {
             bgen: core::array::from_fn(|_| [new_bgen(), new_bgen()]),
             cbank: Default::default(),
             tpart: Default::default(),
+            sets: Default::default(),
             c2id: Default::default(),
             vin_last: std::cell::RefCell::new((0, 0, [(vk::Buffer::null(), u64::MAX); 32])),
             pgen: new_bgen(),
@@ -1958,9 +2011,9 @@ fn write_db_set(g: &Gpu, sub: &mut Sub, bufs: &[(u32, vk::DescriptorType, vk::De
         let (a, range) = if base != 0 { (base + info.offset, info.range) } else { (zero, 65536) };
         let ai = vk::DescriptorAddressInfoEXT::default().address(a).range(range);
         let (gi, size) = if *ty == vk::DescriptorType::UNIFORM_BUFFER {
-            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_uniform_buffer: &ai }), p.uniform_buffer_descriptor_size)
+            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_uniform_buffer: &ai }), super::device::desc_size(p, vk::DescriptorType::UNIFORM_BUFFER))
         } else {
-            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_storage_buffer: &ai }), p.storage_buffer_descriptor_size)
+            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_storage_buffer: &ai }), super::device::desc_size(p, vk::DescriptorType::STORAGE_BUFFER))
         };
         unsafe { super::tables::put_descriptor(&g.d, ptr, off + l.db_stage_off[*b as usize], &gi, size) };
     }
@@ -1974,9 +2027,9 @@ fn write_db_set(g: &Gpu, sub: &mut Sub, bufs: &[(u32, vk::DescriptorType, vk::De
     }
     for (b, ty, ai) in taddrs {
         let (gi, size) = if *ty == vk::DescriptorType::UNIFORM_TEXEL_BUFFER {
-            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_uniform_texel_buffer: ai }), p.uniform_texel_buffer_descriptor_size)
+            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_uniform_texel_buffer: ai }), super::device::desc_size(p, vk::DescriptorType::UNIFORM_TEXEL_BUFFER))
         } else {
-            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_storage_texel_buffer: ai }), p.storage_texel_buffer_descriptor_size)
+            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_storage_texel_buffer: ai }), super::device::desc_size(p, vk::DescriptorType::STORAGE_TEXEL_BUFFER))
         };
         unsafe { super::tables::put_descriptor(&g.d, ptr, off + l.db_stage_off[*b as usize], &gi, size) };
     }
@@ -2017,7 +2070,23 @@ fn bind_sets(g: &Gpu, sub: &mut Sub, qs: &QState, mods: &[Arc<Module>], bp: vk::
             sub.db_bound = Some(sub.db_cur);
         }
         for m in mods {
-            let set = super::perf::timed(super::perf::C::SetNs, || stage_set(g, sub, qs, m, dispatch, base_instance));
+            let st = m.stage as usize;
+            let key = set_key(sub, qs, m, dispatch, base_instance);
+            let hit = key.and_then(|k| qs.sets.borrow()[st].filter(|(c, _)| *c == k).map(|(_, off)| off));
+            let set = match hit {
+                Some(off) => {
+                    super::perf::inc(super::perf::C::SetsReused);
+                    SetRef::Buf(off)
+                }
+                None => {
+                    let set = super::perf::timed(super::perf::C::SetNs, || stage_set(g, sub, qs, m, dispatch, base_instance));
+                    // the key again: building the set may have moved to a new descriptor-buffer chunk
+                    if let (SetRef::Buf(off), Some(_)) = (set, key) {
+                        qs.sets.borrow_mut()[st] = set_key(sub, qs, m, dispatch, base_instance).map(|k| (k, off));
+                    }
+                    set
+                }
+            };
             if let SetRef::Buf(off) = set {
                 unsafe { g.d.db.cmd_set_descriptor_buffer_offsets(sub.main, bp, g.layout.pipeline, m.stage, &[1], &[off]) };
             }

@@ -2013,3 +2013,16 @@ lane K's; G4 please review).**
   main+0x17bdc34 / 0x17bb13c / 0x17bc0d4 / 0x17b5270 / 0x17b4f30 / 0x17d6028 / 0x15081c / 0x147d2c / 0x465aa4) and
   never finishes its job. One dump only, so whether it loops there is not known yet. Not seen in `K-mkw16` (mesh
   draws off, 383 s).
+- **The 71 s stall, lane K (05:45, `K-mkw20-dumps`, same settings as `K-mkw19`):** reproduced at the same place
+  (presents stop ~70 s; main waits on a job word from the frame update). The busy worker sits under the same caller
+  in both runs: `K-mkw19` worker 0x1016 in main+0x17bf530, `K-mkw20` worker 0x1012 in main+0x17c0c00, both returning to
+  main+0x17bdd78. That caller is a spawn loop (main+0x17bdb80..0x17bdcbc, an LCG-random spawn function main+0x17bdd00
+  per item, particles by its look): it runs `w20 = (w10 - fcvtzs(s8 * ucvtf(s0) * 0.01 * ucvtf(w10))) * w20` times.
+  The lifted FCVTZS saturates as ARM does (`simd_fp.h` `toint`: NaN 0, out of range INT_MAX / INT_MIN), so a C-cast
+  wrap is not it. MKW sets FPCR.FZ (bit 24) at start (main+0xca8518, 0x185069c). Not settled yet: whether the loop
+  never ends or runs very long (the repeated pipe dumps kept only their first line; `build\K\dumps.py` now keeps
+  them whole); then the oracle with FPCR = 0x1000000 over the loop's float instructions (`ucvtf s0, s0`, `fmul`,
+  `fcvtzs`, the spawn function's) needs the oracle's word-list / FPCR options, which it does not have yet.
+- **Descriptor-buffer robust sizes (lane K, `vk/device.rs` `desc_size`, `vk/exec.rs`, `vk/tables.rs`):** with
+  robustBufferAccess on (G4's default), buffer and texel-buffer descriptors are now written at the robust sizes, as
+  VK_EXT_descriptor_buffer requires; the plain sizes were used before.
