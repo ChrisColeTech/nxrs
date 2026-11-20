@@ -841,8 +841,13 @@ pub fn aq_wait_room(present: bool) {
         return;
     }
     let Some(a) = AQ.get() else { return };
+    // a game whose frames read occlusion (samples-passed) results: before its present every earlier op has been
+    // replayed, so those results come back as soon as with replay on the game's thread (a game that culls on last
+    // frame's results otherwise read them two presents late: Mario Kart 8 Deluxe's black stretches). NXGFX_OCCL_SYNC=0 off
+    let occl = present && occl_sync();
     let full = || {
-        a.tail.load(Ordering::Acquire) - a.done.load(Ordering::Acquire) >= AQ_MAX - 1 || (present && AQ_PRESENTS.load(Ordering::Acquire) >= aq_max_presents())
+        let behind = a.tail.load(Ordering::Acquire) - a.done.load(Ordering::Acquire);
+        behind >= AQ_MAX - 1 || (present && AQ_PRESENTS.load(Ordering::Acquire) >= aq_max_presents()) || (occl && behind > 0)
     };
     if !full() {
         return;
@@ -855,6 +860,19 @@ pub fn aq_wait_room(present: bool) {
 
 fn aq_push(g: &'static Gpu, op: Op) -> u64 {
     aq_push_with(g, op, |_| {})
+}
+
+/// The present frame a samples-passed (occlusion) report was last replayed at (0: never).
+pub static OCCL_FRAME: AtomicU64 = AtomicU64::new(0);
+
+/// Occlusion results in use lately (a report in the last 120 presents): presents wait for the replay to catch up.
+fn occl_sync() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("NXGFX_OCCL_SYNC").as_deref() != Ok("0")) {
+        return false;
+    }
+    let f = OCCL_FRAME.load(Ordering::Relaxed);
+    f != 0 && super::present::frames().saturating_sub(f) < 120
 }
 
 /// As `aq_push`; `before` runs with the op's sequence number before the replay thread can see the op.
@@ -1446,4 +1464,18 @@ pub fn oneoff(_g: &Gpu, f: impl FnOnce(&Gpu, &mut Sub, &mut super::image::Images
         f(g, &mut sub, &mut imgs);
     }
     submit_sub(g, sub)
+}
+
+#[cfg(test)]
+mod occl_tests {
+    use super::*;
+    /// Presents wait for the replay to catch up only while occlusion results were used in the last 120 presents.
+    #[test]
+    fn occlusion_results_keep_the_replay_caught_up() {
+        OCCL_FRAME.store(0, Ordering::Relaxed);
+        assert!(!occl_sync(), "never used: async lag as usual");
+        OCCL_FRAME.store(super::super::present::frames().max(1), Ordering::Relaxed);
+        assert!(occl_sync(), "used just now: presents wait for the replay");
+        OCCL_FRAME.store(0, Ordering::Relaxed);
+    }
 }

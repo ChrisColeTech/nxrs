@@ -2346,6 +2346,21 @@ pass fault and the mesh faults are gone as far as it shows; not yet run with ind
 - 8 "GPU address ... is in no memory pool" lines at 9 s (1 MB reads at 0x13ba32000.. / 0x2a9204fd0, skipped binds).
 - FPS: 13-19 in menus, 8 in the race (prep / pool sync, G4).
 
+**`K2-mkw11-meshall` (09:46, all mesh draws on, `NXGFX_TEX_WB=0`, both diagnostics): GPU reset at 105 s in the race.**
+Through the menus and course map with indirect / 3D mesh draws drawn, no mesh fault; then "invalid read at 0xdfc3b6000
+... inside BUFFER 0x176e98e0550 (bound at 71.10 s: 0xdfc250000 +0x800000), UNBOUND at 71.56 s": a GPU read 34 s after
+an 8 MB buffer was freed; the checkpoint was "no longer kept" (the ring held 4,096; with `all` the GPU runs more than
+that behind the replay in a race: now 262,144, `vk/lost.rs` `N`). **Cause found by reading (lane K2, graphics
+`vk/mem.rs` `release`):** pages a pool's buffer held on the device (lazy write-back) stayed in the lazy table when the
+pool went (nvnMemoryPoolFinalize, or a new pool over the same base): they named the freed buffer, and the next touch of
+those pages (the CPU's, or a new pool's buffer over the same memory, `ensure_buffer` brings its range back first) had
+the lazy reader copy from it on the GPU. The reader's submission has no checkpoints, which is why the report named only
+the last draw's. **Fix:** `release` brings the pool's held pages back (`lazy::touch`) while its buffer still exists.
+The same freed-buffer read may be `K2-mkw9`'s "never bound" address (its unbind ring keeps 8,192). Not run yet.
+Picture with all mesh draws on (`K2-mkw11` `0004`, 85 s, the race's opening flyover behind a wipe): the course terrain
+is drawn and lit (sand, grass, hills, sky) where the skip-mode runs showed flat sky; the road and many patches of
+ground are black (a material or lighting input still missing).
+
 **For G4 (texture code, lane K2's change, contained): GPU-written textures go back to their storage.**
 `image.rs` `tex_writeback` / `tex_writeback_land`, `queue.rs` `Sub::tex_wb`, `exec.rs` `target_image`, `mem.rs`
 `cpu_written`. A texture written as a render target or copy destination (`target_image`) is listed for its

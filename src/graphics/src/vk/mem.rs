@@ -393,6 +393,13 @@ pub fn pool_add(p: &pool_t) {
 
 fn release(g: &Gpu, p: Pool) {
     POOL_GEN.fetch_add(1, Ordering::Relaxed);
+    // pages of it held on the device (lazy write-back) come back now, from this buffer, while it still exists: left
+    // in the lazy table they named a freed buffer, and the next touch of those pages (a new pool's buffer over the
+    // same memory brings its range back first) copied from it on the GPU: an invalid read inside a buffer unbound
+    // 34 s before (MKW `K2-mkw11`, lane K2)
+    if p.buf.is_some() {
+        super::lazy::touch(p.base, p.size);
+    }
     if let Some(b) = &p.buf {
         if let Some(m) = ADDRS.write().unwrap().as_mut() {
             m.remove(&vk::Handle::as_raw(b.buf));

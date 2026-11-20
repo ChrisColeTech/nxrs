@@ -3423,7 +3423,8 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             super::counters::rc_note(addr, kind == counter::TIMESTAMP || kind == counter::TIMESTAMP_TOP);
             if kind == counter::SAMPLES_PASSED {
                 static SAID: std::sync::Once = std::sync::Once::new();
-                SAID.call_once(|| crate::vklog!("samples-passed (occlusion) reports in use: their results land when the GPU completes the submission"));
+                SAID.call_once(|| crate::vklog!("samples-passed (occlusion) reports in use: each present now waits for the replay to catch up, so their results come back as without asynchronous replay (NXGFX_OCCL_SYNC=0 off)"));
+                super::queue::OCCL_FRAME.store(super::present::frames().max(1), std::sync::atomic::Ordering::Relaxed);
                 end_query(g, sub, qs);
                 sub.post.push(Post::OcclReport { addr });
             } else {
