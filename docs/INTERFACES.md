@@ -2480,6 +2480,15 @@ clean too). The holder is still to find; until then `NXGFX_STAGE_HOLD` is the st
   through the pool, not a plain binding), so the glyph sheet is not named yet; next: `NXGFX_DUMP_TEX=<w>x<h>` on the
   font sheet once found, comparing the GPU image with its storage.
 
+**`K2-mkw20-nomerge` (12:20, `NXGFX_AQ_MERGE=0`, both diagnostics, no stage hold): GPU reset at 15.4 s**, "invalid read
+at 0x6cf54d000 ... inside BUFFER "staging" (bound at 13.18 s: 0x6ceff8000 +0x800000), UNBOUND at 13.34 s". **Submit
+merging is not the cause** (merged submits replay as one stream into one `Sub`, one Vulkan submission and one
+completion; read in `aq_main`). The fault is again a read of a staging chunk freed ~2 s before, during course loading.
+Read and ruled out since: index / vertex / indirect binds (resolved per draw into pools), `vin_last` / `vin_from`
+(keyed to the submission), the pool table's texel descriptors (pools, rewritten with a stand-in when gone), ASTC
+(classic sets from the submission's own pools, its staging and scratch). Lane K2's runs with the stage hold: 1 of 1
+clean; without it since 10:53 on these builds: 4 of 6 faulted at 14-17 s.
+
 **For G4 (texture code, lane K2's change, contained): GPU-written textures go back to their storage.**
 `image.rs` `tex_writeback` / `tex_writeback_land`, `queue.rs` `Sub::tex_wb`, `exec.rs` `target_image`, `mem.rs`
 `cpu_written`. A texture written as a render target or copy destination (`target_image`) is listed for its
