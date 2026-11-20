@@ -59,15 +59,17 @@ ps.SCENARIOS.update({
                         + [('replay', 30, 'run', 'spindash.txt')] + [('shot', 30, 'play +%d s' % (30 * m)) for m in range(1, 22)]),
     # Shadow Generations: title, New Game, the story intro skipped (tap A, then hold it: skip_hold.txt), then play (run_jump.txt)
     'shadow_skip': dict(seconds=900, window=(200, 880), steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('right', 3, 'shadow'),
-                        ('a', 25, 'shadow start'), ('down', 3, 'new game row'), ('a', 20, 'new game')] + [('replay', 18, 'skip %d' % i, 'skip_hold.txt') for i in range(5)]
+                        ('a', 25, 'shadow start'), ('down', 3, 'new game row'), ('a', 20, 'new game'), ('a', 20, 'save slot 1')] + [('replay', 18, 'skip %d' % i, 'skip_hold.txt') for i in range(5)]
                         + [('replay', 30, 'run', 'run_jump.txt')] + [('shot', 30, 'play +%d s' % (30 * m)) for m in range(1, 20)]),
     # a visual novel (Beach Bounce Remastered): A every 4 s for ~11 min, a shot each minute
     'vn': dict(seconds=900, window=(60, 720), steps=[('shot', 30, 'boot')] + [x for m in range(11) for x in
                ([('a', 4, 'a %d.%d' % (m, i)) for i in range(14)] + [('shot', 4, 'min %d' % (m + 1))])]),
-    # Shadow Generations: New Game, then the story intro left to play with no input (does it end?), a shot a minute
+    # Shadow Generations: title, Shadow, Down + A (New Game), A (save slot 1), the short intro, then boost_run.txt in the
+    # first stage (stick forward, ZR boost, B, A), a shot a minute
     'shadow_watch': dict(seconds=1500, window=(300, 1440), steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('right', 3, 'shadow'),
-                         ('a', 25, 'shadow start'), ('down', 3, 'new game row'), ('a', 20, 'new game')]
-                         + [('shot', 60, 'watch +%d min' % m) for m in range(1, 23)]),
+                         ('a', 25, 'shadow start'), ('down', 3, 'new game row'), ('a', 20, 'new game'),
+                         ('a', 20, 'save slot 1'), ('replay', 30, 'play', 'boost_run.txt')]
+                         + [('shot', 60, 'play +%d min' % m) for m in range(1, 22)]),
     # Smash: smash_match for 20 min (the memory trend)
     'smash_long': dict(seconds=1500, window=(150, 1440), steps=[('shot', 40, 'boot')] + [('a', 8, 'menu %d' % i) for i in range(7)]
                        + [('shot', 3, 'character select'), ('replay', 30, 'fight', 'smash_fight.txt')]

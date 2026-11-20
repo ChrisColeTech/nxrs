@@ -393,6 +393,11 @@ impl Space {
         Ok(b)
     }
 
+    /// Committed bytes of the heap and of the alias region (physical memory maps), for the memory report.
+    pub fn committed(&self) -> (u64, u64) {
+        (Self::committed_in(self.heap.base, self.heap.size), Self::committed_in(self.alias.base, self.alias.size))
+    }
+
     /// Committed bytes of [a, a+n).
     fn committed_in(a: u64, n: u64) -> u64 {
         let mut total = 0;

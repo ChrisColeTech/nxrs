@@ -195,13 +195,15 @@ unsafe fn finalize(c: *mut Cpu) {
     release(&g);
 }
 
-/// Deletes a fiber's host fiber when its stack holds no live Rust frame (never started, or finished: only
-/// `nxrt_fiber_entry` and SwitchToFiber remain). A fiber suspended inside its function keeps host frames of ours
-/// (the SwitchToFiber host call); it is left allocated rather than deleted under them.
+/// Deletes a fiber's host fiber (its host stack). A fiber finalized while suspended inside its function (as Horizon
+/// allows: its stack is simply abandoned) still has frames of ours on that stack: the SwitchToFiber host call, the
+/// guest call and `nxrt_fiber_run`. None of them holds a lock while suspended (`switch_to` takes none across the
+/// switch) and nothing can resume them once the fiber left the table, so the stack is freed under them; what they
+/// own (the fiber's `Arc`, its `Cpu`, which a thread record may still name) is leaked, not freed. Keeping every such
+/// host fiber cost Super Smash Bros. Ultimate ~100 MB of committed stack a minute (11,471 fibers in 14 min).
 unsafe fn release(g: &Fiber) {
-    if g.state == St::Started {
-        crate::rt::log(&format!("fiber {:#x}: finalized while suspended; its host fiber is kept", g.addr));
-        return;
+    if g.state == St::Started && crate::rt::trace("fiber") {
+        crate::rt::log(&format!("fiber {:#x}: finalized while suspended; its host stack is freed", g.addr));
     }
     DeleteFiber(g.host as *const _);
 }

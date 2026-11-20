@@ -569,7 +569,30 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   1 / 2 / 3 / 8 / position do not; Invariant, flat / centroid, location order (all ten reversed in both stages),
   SPIR-V 1.0 (refused: the translator declares GroupNonUniform* capabilities in every module, unused here) and
   `spirv-opt -O` (101 KB -> 35 KB, still crashes) change nothing. `spirv-reduce` is shrinking the optimized module
-  with `build/G/g3/interesting.bat` (the part still crashes) as the test: {REDUCE}
+  with `build/G/g3/interesting.bat` (the part still crashes) as the test: it only got to 31.6 KB (almost any removal
+  makes the crash go away).
+- **DKB's crashing pair: fixed (rev 9), in graphics at module load.** Writing the vertex shader's Location outputs
+  once at the end instead of where the translated code writes them (inside branches) makes NVIDIA's compiler build
+  both the library part and the whole pair (offline `one_program_pair_builds`; the exact transform tried first by hand
+  with spirv-dis / spirv-as). `vk/spvfix.rs` `late_outputs` does this for every vertex shader when its module is made
+  (private copies, stored to the outputs before each return; a module using an output any other way is left as it
+  is); `NXGFX_LATE_OUTPUTS=0` turns it off. Lane C's pipeline test on 300 pairs each of MK8D, DKB and Z-A builds them
+  all with the same validation errors as without it (10 / 12 / 20, all `maxCombinedClipAndCullDistances`: the
+  translator's gl_PerVertex declares more clip + cull distances than the device allows; lane S). DKB `d12` / `d13`
+  with the crash lists cleared: the pair compiles, no fault, nothing skipped. The crash list stays as a safety net.
+  Lane S could emit this form itself (then graphics' pass finds nothing to do).
+- **Z-A:** `z10` (all of the above, `NXRS_EXCLUSIVE=1`): 58.5-60 FPS in most windows after the first 15 s (was
+  53.5-58 in `z8`); `z11` with `NXGFX_LATE_OUTPUTS=0` was running when the loop stopped (its log is in
+  `build/G/runs/z11`): what made the difference (the late outputs, or the newer os layer this link has) is not
+  settled.
+- **Wonder's first-entry stutter: not worked on.** As in rev 7 (`x2`): the 0.3 / 2.5 / 0.26 s frames at the first
+  entry into a level are shaders compiled at their first draw; a second session prewarms them from the key file.
+  Next: make the shader parts ahead for a level's programs when they are registered (ProgramSetShaders already does
+  for the parts; the whole pipelines it links are not made until the draw).
+- **MK8D shadow map: open.** See above (the 2048x2048 RG32F texture is zero on the GPU and in memory, nothing writes
+  its address). Next: find the shader that turns shadowed ground cyan (the screen-space shadow pass samples it with
+  the depth and the D16 cascade array) and read what it expects there; check whether lane W2's Smash / Anime Girls
+  banding goes through the same pass.
 - **DKB at 13-17 FPS after the opening:** 4,072 draws, 2,573 write-backs and 9 submissions a frame, 1,275 mirror
   pools (1.9 GB); the pool sync (write watch over the mirrors, every submission) takes 33.8 ms a frame and the
   completion waits 8.4 ms a frame for the pool table. Not changed yet. The purple world: not looked at yet.
@@ -1212,6 +1235,30 @@ files of the moment); every lane W game relinked from it. Runs go through `scrip
     changed nothing), failed file opens, and the game logic itself (the hub's BGM plays; the fade quad's colour is
     (1, 1, 1, 1) in guest memory, so the game does not wait with the screen faded: it draws a white layer that should
     not show).
+  - **Open findings at the stop (2026-11-20 02:05):**
+    - **Smash memory: the cause found and fixed, not yet re-measured.** The growth was runtime `fiber.rs`: a fiber
+      finalized while suspended kept its host fiber (stack committed, 256 MB reserved) so it would not be freed under
+      live frames; Smash finalizes suspended job fibers all the time (11,471 in 14 min of `-smash-match5`, ~100 MB a
+      minute). Now the host stack is freed (no lock is held across a switch and nothing can resume a finalized fiber;
+      the fiber's `Arc` and `Cpu` are leaked, a few KB). The guest side is flat: physical maps 1.57 -> 1.79 GB in the
+      first 4 min, then flat (new log line each minute: `memory: guest heap N MB committed, physical maps N MB`, os
+      `watch.rs` + runtime `mem.rs Space::committed`). **The 20-min check could not be done: every Smash run since
+      01:40 hit `VK_ERROR_DEVICE_LOST` 150-310 s in** (`20261120-014239-W2-smash-long`, `-014751-W2-smash-long2`,
+      `-015904-W2-smash-long3-noasync` with `NXGFX_ASYNC=0` too), at new-pipeline hitches (pipeline lookups 440 ms);
+      other lanes' games ran on the GPU at the same time. For lane G: reproduce Smash alone; the 23:50 run on the
+      build before lane G3's e503854 played 14 min without it.
+    - **Shadow Generations has no video end-of-stream problem** (the "loop" was the script walking back through
+      menus; see above); its open items are only the sound check and the owner's hand test.
+    - **Jamboree fade: handed to lane G** (the white quad the game sets to (1, 1, 1, 1) should not cover the hub:
+      blend / write mask of pass 108; lane G findings).
+    - **Sound re-check owed:** since ~23:30 the PC has no default output device (`[RED] audio: no output device` in
+      every run log), so the sink's wall-clock release (Sonic's stretched sound, Beach Bounce's ~38 underruns a
+      second) has no evidence with a real device yet. Before counting a run as sound evidence, check its log for
+      `audio: output on <device>`. Beach Bounce's remaining underruns (~0.8 a second on the clock fallback) still need
+      comparing against its 65 ms frame hitches on a run with a device.
+    - Sonic Generations: a recorded human route (`NXRS_INPUT_RECORD`) is requested to finish Green Hill; the scripted
+      spin dash stops at a ledge ~1:30 in.
+    - MK8D, Anime Girls: re-check after lane G's posterization fix.
   - **New tools:** control command `peek <address> [bytes]` (os `watch.rs`: guest memory as hex words, readable pages
     only; how the lock owner above was read); `library_play.py` scenarios `sonic_gens2` (spin dash), `shadow_skip`,
     `vn` (A every 4 s for 11 min, shots each minute); replays `spindash.txt`, `run_jump.txt`, `skip_hold.txt`.

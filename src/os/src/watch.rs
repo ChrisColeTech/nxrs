@@ -61,6 +61,9 @@ pub fn run() {
                 crate::sched::stats()
             );
             if crate::log::secs() as u64 % 60 < beat as u64 + 1 {
+                // where the process's private memory is: the guest's heap and physical maps (committed pages)
+                let (heap, alias) = nxrt::kernel::get().space.committed();
+                crate::log!("memory: guest heap {} MB committed, physical maps {} MB", heap >> 20, alias >> 20);
                 for l in crate::services::audio::report() {
                     crate::log!("{l}");
                 }
