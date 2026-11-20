@@ -1078,8 +1078,11 @@ through every 1920x1080 pass dump).
   (40, 211, 255) instead of dark. With `NXGFX_SWZ_OVERRIDE=1` (view swizzle replacing the texture's) it is dimmer but
   still cyan. Also seen: the scene target ser6754 is cleared at the start of the frame with a 16x16 scissor left over
   from the light-probe passes (pass 21, `rect 0,0 16x16`); clearing it whole changes nothing at the blob, so not the
-  cause. The G-buffer passes 27/28 bind one image (ser149345) as colour targets 3 and 4 (G3's note): the normals at the
-  blob differ from the road's; next suspect.
+  cause. **Not the double binding either:** passes 27/28 bind one image (ser149345) as colour targets 3 and 4, but
+  every draw there has colour mask 0xf000 (target 3 only), so target 4 is never written. What differs at the blob is
+  the G-buffer target 3 (A2B10G10R10): (93, 250, 142, alpha 3) under the blob against (192, 238, 129, alpha 0) on the
+  road, i.e. a decal draw writes the blob into the normal / material target with its 2-bit flag set, and the lighting
+  pass lights that as cyan. Next: that decal draw's shader and what it means to write there.
 - **DKB speed (item 2):** **vertex input skipped when nothing of it changed** (`exec.rs vertex_input`, `QState::vgen`,
   `vin_from`; `NXGFX_VIN_SKIP=0` off): 1,135 of ~4,000 draws a frame. `-G5-dkb-prof` at the frame G4 measured (6,900):
   replay CPU **20.98 ms against 25.79** (vertex input 4.39 -> 3.36, sets 8.23 -> 6.62). The 100-150 s
@@ -1097,11 +1100,16 @@ through every 1920x1080 pass dump).
   B10G11R11) is smooth and the banding appears in pass 56, Unity's uber pass, which grades through a 256x16 RGBA8 LUT
   (ser1045, made in pass 10) with sampler 352 shared with the scene texture. The LUT itself has steps of ~45 levels
   between neighbouring entries (it saturates at entry 9 of 16), so the bands are what a LUT read without interpolation
-  between entries gives. **Not the sampler:** a capture of the beach (`build/G5/agsob.cap`, present 6800) replays the
-  banded frame offline (`build/G5/rAG/frame-1.png`), and the same replay with every sampler forced linear
-  (`NXGFX_SAMP_LINEAR=1`, diagnostic in `tables.rs`) is identical (`rAGL`). The scene target is B10G11R11 (NVN 0x3f,
-  the same format on the console); next: the uber shader's LUT coordinates and the dither texture (ser36, 16x16), with
-  the replay.
+  between entries gives. A capture of the beach (`build/G5/agsob.cap`, present 6800) does **not** replay this game:
+  its shaders are translated live in the game (Unity), the replay finds ~20 keys in no library ("the shader's stage
+  cannot be told"), and its frame-1 is the restored image, not a new picture; so the replay with every sampler forced
+  linear (`NXGFX_SAMP_LINEAR=1`, diagnostic in `tables.rs`) proves nothing (an earlier note here said it did). The LUT
+  is RGBA8 UNORM (NVN 0x25) both where pass 10 renders it and where pass 56 samples it, the scene B10G11R11 (0x3f, the
+  console's format too). A live pass dump with the filters printed (`-G5-agsob-dump2`, `build/G5/agdump2`): the uber
+  pass samples the scene, the dither texture (ser36) and the LUT (ser987) all through sampler 352, **min 3 (linear)
+  mag 1 (linear)**, so the LUT is filtered; its parameters c3 = (1/256, 1/16, 15) are Unity's for a 16^3 strip. Still
+  open; next: the uber shader's translated LUT and colour math against Unity's `ApplyLut2D` / LDR path, and teaching
+  the replay to translate a capture's live shaders so it can be tried offline.
 - **Jamboree white layer (item 4): still white on HEAD**, now with **handle-table texture arrays** (see below) that let
   the game's character / board shaders draw (`-G5-jamboree-ht`, 0004-0018 white). The title before L+R is drawn
   (`0003`). The white stays a game-state question (the quad's colour is (1, 1, 1, 1) in guest memory).
@@ -1133,10 +1141,26 @@ through every 1920x1080 pass dump).
   attachments of its 5 layers every frame, never released, parked, taken over or made again. So on this tree its image
   was alive throughout; what differs from K2's runs is G5's tree (image forwarding, vertex-input skip, handle tables)
   and K2's `NXRS_DUMP_FRAMES`. One clean run is not proof; the switch stays for K2's next runs.
-- **Z-A (item 6):** not run this round (its last run, `-X-x2-plza11-gates`, 59.7 FPS, 134 s at 58+).
+- **MK8D at the 5B bar (coordinator, 13:50):** `-G5-mk8d-m5` on HEAD 6bdccef, exclusive, boot into a Mushroom Cup
+  race (200 s): all 16 race shots right (black fraction 0.002-0.14, the highest a night shot with star power), 59.65
+  FPS over 100-190 s, exit 0: **marked Playable (M5) in PORT_PLAN**, with the cyan kart blob as the known issue.
+- **DKB pool sync, Turbo's write-protect design (coordinator item 4): not implemented this round.** What it needs here,
+  read through: pools not written in the last frame made read-only and left out of every scan until a write faults
+  (one VEH, first in the chain, unprotects the pool and marks it for the next scan; GetWriteWatch still holds the
+  write). Host writes are user-mode copies (fs reads come back as host buffers and are copied; HID ReadFile reads into
+  host memory; `runtime::Space::ensure_committed`, the documented hook for ReadFile into guest memory, has no caller),
+  so they fault and are caught like the game's; no os change is needed for them. The parts that need care, and why it
+  was not done in the time left: lazy write-back pages (`lazy.rs`) live inside the same pools as PAGE_NOACCESS and are
+  made readable again by their own handler, which would open a protected pool's page without telling the scan; the
+  completion thread's write-backs and texture write-backs write into those pools (a fault each, then a needless scan);
+  and pages two pools share. Expected gain on DKB: ~208 of ~450 MB scanned a submission (the pools written 2-60 frames
+  ago), about 4 of its 9.3 ms of pool sync.
+- **Z-A (item 6): not run.** `build/G5/plzat` is linked; the run waited from 13:59 to 14:34 through three cooldowns
+  after other lanes' MKW runs reset the driver (13:58, 14:12, 14:32) and was stopped. Its last run stays
+  `-X-x2-plza11-gates` (59.7 FPS, 134 s at 58+).
 - **Also seen:** a start that died at 0.3 s with `memory: the kernel region is taken` (`-G5-mk8d-sync-cap`, right
   after another game exited): the runtime's fixed kernel-region reservation was taken in that process (lane O / T).
-  K2's MKW runs reset the display driver at 11:13, 11:34, 12:20 and 12:41; each cooldown held these runs 20-30 min.
+  MKW runs (K2, then K3) reset the display driver at 11:13, 11:34, 12:20, 12:41, 13:05, 13:58, 14:12 and 14:32; each cooldown held these runs 20-30 min.
 
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
@@ -2642,6 +2666,84 @@ texture came (`gpu_seq`), the CPU wrote the storage meanwhile (write-watch peek)
 the 128x128x5 pass fault (slot scrub to verify) and whether direct mesh draws are clean; then all mesh draws on
 (`NXGFX_MESH_REF` unset); menu text; FPS (pool sync, G4); the frame-rate / resolution hooks where they serve the FPS
 target. No 10-minute race, no side-by-side play.
+
+## MKW (lane K3, M7, 2026-11-20)
+
+Lane K3 takes over from lane K2. Engine `target\K3`; game relinked by `build\K3\relink.sh mkw`; one start per test
+through `build\K3\run.sh <label> <seconds> [--env ...]` (K2's script with `NXRS_LANE=K3`, saves backed up to
+`build\K3\mkw-save-backup-*`). Runs `build\I\runs\*-K3-mkw*`. **Three runs, three display-driver resets (13:58, 14:12,
+14:32); the coordinator stopped MKW runs at 14:35: the next one needs a fix candidate written here first.**
+
+**The early fault is not the 128x128x5 pass and not ser28824: it is a direct mesh draw.**
+- `K3-mkw1-life` (HEAD 6bdccef with G5's release order, both diagnostics, `NXGFX_WATCH_ADDR=26b7b3000`): GPU reset at
+  96.8 s, in the race (later than K2's 14-17 s, same report). ser28824's lifetime log: made once at 9.35 s (a new
+  image with its own memory), then only used as 1-layer attachments every frame; never released, parked, taken over
+  or made again. Its image was alive throughout (as in G5's run).
+- **Why every report named that pass:** a pass begins lazily inside its first draw's setup (`draw_setup_ex` ->
+  `begin_pass`), *after* that draw's checkpoint. So "the GPU started #N a pass ..." with "finished everything before
+  #N" means the faulting work is the draw whose checkpoint is #N-1. The loss report now prints the three checkpoints
+  before the last started one (`lost.rs`, "before it:").
+- `K3-mkw2-diag` (67.5 s): #N-1 was **a mesh draw (direct, 1D 6x1x1, first 0)** with shaders [1:3cc3501255bb2d74
+  3:fea1d6ca04512de1 4:ddc034e8e009ebfc], the program K2 already saw fault in skip mode. `K3-mkw3-sets` (16.7 s):
+  again a direct mesh draw, of another program [1:1e3e40ea043238db 3:6098504f5d12ea03 4:1de24686294997d8], in a
+  pass 832x466, ~30 such draws in flight.
+- **The fault addresses sit at one offset of a recycled 8 MB range:** ~0x556000 past the start of a range that a
+  "staging" chunk (or a pool / write-back buffer: whatever held that VA last) occupied and freed 2-2.5 s before:
+  K3-mkw1 0xe66d3a000 (range 0xe667e40c0), K3-mkw2 0xe0bd3a000 (0xe0b7e40c0), K3-mkw3 0xd3f152000 (0xd3ebfc000); K2's
+  0xd3f756000 (0xd3f200000), 0x38c356000 (0x38be00000), 0x6cf54d000 (0x6ceff8000) the same. The instruction pointer
+  is in shader code each time.
+- **New diagnostics (graphics, small; only at `NXGFX_CHECKPOINTS=all` with the address report):** `lost::note_use`
+  records every device range the replay hands the GPU (uniform / storage / texel descriptors written into descriptor
+  buffers, vertex and index buffers, indirect records) with the checkpoint it follows; `lost::note_set` records each
+  stage set written or reused from the set cache (submission, chunk, offset) and each descriptor-buffer chunk bind.
+  The loss report lists the recorded ranges holding a faulting address, every earlier unbound owner of it (not only
+  the newest), and the stage sets around the last started checkpoint.
+- **What they showed (`K3-mkw3`):** the faulting draw's three stage sets were **written fresh** in its own submission
+  (stages 3 / 4 / 1 at chunk 0, offsets 0x3c280 / 0x3c8c0 / 0x3cf00; no set-cache reuse), and **no range the replay
+  handed out holds the faulting address** (0 of the last 1M recorded; in `K3-mkw2` only a support-buffer descriptor of
+  a submission 22,000 checkpoints older). So the mesh draw reads an address no binding of its own covers: an
+  out-of-range access by the task / mesh shader that robustness did not stop, at the same ~5.3 MB distance from some
+  base in every fault, across two programs. Ruled out on the way: a stale set offset or set-cache hit (fresh writes),
+  non-coherent descriptor memory (`desc_buffer` is HOST_COHERENT), a stale staged range (none recorded), ser28824.
+- **Fix candidate (not run):** the device enables only `robustBufferAccess` (v1, `device.rs`), not VK_EXT_robustness2's
+  `robustBufferAccess2`. Under v1 an out-of-bounds access is only held to "the memory bound to the buffer", which an
+  implementation may take as the whole VkBuffer (a pool or staging chunk) rather than the descriptor's range; MKW's
+  task shaders index their buffers with values from shared memory and from the game's buffers. The candidate: enable
+  `robustBufferAccess2` (+ `robustImageAccess2`) where offered (descriptor sizes already use the robust ones), so
+  every access is held to its descriptor's range. **Before it is run**, offline: read the SPIR-V of task shaders
+  fea1d6ca04512de1 and 6098504f5d12ea03 (and their mesh shaders) for buffer accesses with computed indices and which
+  binding a ~5.3 MB offset could come from (s0 / s1, now bound to the end of their pool by K3's change below; the
+  c0 / c3 / c4 uniform banks); if the access is an address the translator builds itself, the fix is in the translator
+  (lane S) instead.
+
+**Menu text: the glyph sheet's missing letters are uploads that never happened (found; fix built, not run).**
+`K3-mkw2`'s dump at 62 s read ser31877 (1024x8192 R8, pitch-linear storage at 0x2900b5000) back: storage and image are
+byte-identical except rows 7146-7998, where the storage holds glyphs the image does not (`build\K3\dump2\cmp.png`,
+left GPU, right storage; `build\K3\texcmp.py`). Cause read in `image.rs`: a texture the CPU writes again keeps page
+hashes, and they were taken **after** the upload read the storage (the multi-threaded decode-ahead reads it even
+earlier). The game's font thread adds glyphs while the replay runs: a glyph written between the read and the hashing
+went into the hashes but not into the image; its write-watch hit at the next submission then found the page
+"unchanged" ("uploads skipped (same bytes)"), and the glyph was never uploaded. **Fix:** the hashes are taken before
+the storage is read (`image_begin_submit` before `decode_many`, `Image::hashed_early`; otherwise in `prepare_image_in`
+before `upload_from_storage`), so a write in between shows as a change and uploads again.
+Also built (mkw-recomp `vk_exec_bind.c`): **read-only storage buffers bound to the end of their pool** (`exec.rs`,
+`NXGFX_SBUF_TO_END=0` off): MKW's text vertex shader 4cb2f674ba19f335 reads one 64-byte glyph record per instance from
+s0, which the game binds with a small size; mkw-recomp found records past the fourth read zero there. Neither is
+verified on screen: `K3-mkw3` (both in) reset at 16.7 s. In `K3-mkw1` (neither) the course map's "Mario Bros. Circuit"
+label was whole and the race banner "1st Race" drew as "1st a e".
+
+**Race picture and speed (`K3-mkw1`, all mesh draws, write-back off, checkpoints on):** the race intro at 92 s washed
+out to a pale green haze with the HUD drawn (`0004`); 7-9 FPS in the race. A race frame: 125-140 ms, of which **pool
+sync 65-79 ms** (`prep / pools`, 11 submissions a frame, GetWriteWatch over MKW's ~3.3 GB of mirror pools at each),
+stage sets 24 ms, passes 5 ms; GPU 18-20 ms. Pool sync is the cost to remove for the FPS target: G5's write-protect
+design (lane G5, "DKB pool sync") applies; lane K3 did not start it.
+
+**Files changed (graphics, small):** `vk/lost.rs` (use / set records, earlier owners, "before it" lines), `vk/exec.rs`
+(`use_note`, `note_set` calls, `sbuf_to_end`), `vk/image.rs` (page hashes before the upload read, `hashed_early`).
+Tools: `build\K3\run.sh`, `relink.sh`, `stallwatch.py`, `texcmp.py`.
+
+**Left:** the mesh-draw fault (offline SPIR-V read, then the robustness2 candidate as the one run); the glyph fix on
+screen; the haze; pool sync (G5's design) for the FPS target.
 
 ## Linux (lane L, M10, 2026-11-20)
 
