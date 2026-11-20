@@ -2004,3 +2004,12 @@ lane K's; G4 please review).**
   scratch 0.5 GB, pools 0.3 GB), guest heap 3.1 GB, physical maps 1.0 GB. The pipeline prewarm alone added 2.4 GB for
   334 pipelines (~7 MB each: NVIDIA keeps compiled pipelines in process memory), and pipelines made during play add
   the same way. Not a released-texture build-up like mkw-recomp's #468: nxrs drops parked images after 8 frames.
+- **`K-mkw19-skip-robimg` (`NXGFX_MESH_REF=skip`, robustImageAccess on, `NXGFX_PREWARM_BUDGET_MB=512`; 05:27):**
+  **no device loss in 373+ s.** So (1) the mesh faults come from nxrs's indirect / 3D mesh draws (skipped here,
+  `first` kept and drawn), not from `first`; (2) the cube-map pass ran without faulting with image robustness on.
+  New stop: presents end at 71 s (frame 683) and never resume. The main thread waits on an address (0x15b54b4d4, in
+  worker 0x1016's job record) from the frame update (main+0x69c9ac -> 0x45e5dc / 0x45ebf0); every other worker waits
+  on its own job word; worker 0x1016 runs guest code (in main+0x17bf530, a float-math function using pi, called from
+  main+0x17bdc34 / 0x17bb13c / 0x17bc0d4 / 0x17b5270 / 0x17b4f30 / 0x17d6028 / 0x15081c / 0x147d2c / 0x465aa4) and
+  never finishes its job. One dump only, so whether it loops there is not known yet. Not seen in `K-mkw16` (mesh
+  draws off, 383 s).
