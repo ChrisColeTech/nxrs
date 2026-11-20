@@ -1,7 +1,10 @@
 //! The sound card: every audio stream of the game (each audio renderer's output, each AudioOut) is a queue of
 //! 48 kHz stereo blocks that one output device plays, mixed. The device is the system's default output through
 //! WASAPI (cpal), in its own format and rate (resampled linearly from 48 kHz). A block goes back to its producer
-//! (released, with its tag) once it has played, and the producer's release hook runs on a host thread.
+//! (released, with its tag) once a nominal 48 kHz clock has gone past its end (as Turbo's audout: the guest's
+//! buffers come back in real time, not when the slowed-down playback reaches them; the samples were copied at
+//! append), and the producer's release hook runs on a host thread. A producer paced by its releases so keeps
+//! real time, and its queue fills the playback's reserve instead of draining it.
 //!
 //! Smooth slowdown (`audio_slowdown`, Turbo's option, on by default): when a stream runs short because the PC
 //! cannot produce its sound in real time, it plays slower, eased toward the fill of its queue, instead of breaking
@@ -26,7 +29,6 @@ const CHUNK: usize = 240;
 type Hook = Box<dyn Fn() + Send + Sync>;
 
 struct Block {
-    tag: u64,
     pcm: Vec<f32>, // stereo, interleaved
     at: usize,     // frames already played
 }
@@ -38,6 +40,9 @@ struct St {
     blocks: VecDeque<Block>,
     queued: usize, // frames not yet played
     released: VecDeque<u64>,
+    pending: VecDeque<(u64, u64)>, // blocks not released yet: (tag, end on the appended timeline)
+    appended: u64,                 // frames appended so far
+    paced: u64,                    // the nominal clock: frames due by now (never past `appended`)
     high: f64,     // the queue's high-water mark, decaying (the slowdown's reserve)
     primed: bool,
     waiting: u32,
@@ -77,11 +82,14 @@ impl Stream {
             return;
         }
         st.queued += n;
+        st.appended += n as u64;
+        let end = st.appended;
+        st.pending.push_back((tag, end));
         let q = st.queued as f64;
         if q > st.high {
             st.high = q;
         }
-        st.blocks.push_back(Block { tag, pcm, at: 0 });
+        st.blocks.push_back(Block { pcm, at: 0 });
     }
     pub fn start(&self) {
         let mut st = self.st.lock().unwrap();
@@ -95,9 +103,11 @@ impl Stream {
     pub fn stop(&self) {
         let mut st = self.st.lock().unwrap();
         st.started = false;
-        while let Some(b) = st.blocks.pop_front() {
-            st.released.push_back(b.tag);
+        st.blocks.clear();
+        while let Some((tag, _)) = st.pending.pop_front() {
+            st.released.push_back(tag);
         }
+        st.paced = st.appended;
         st.queued = 0;
         drop(st);
         self.cv.notify_all();
@@ -114,13 +124,13 @@ impl Stream {
     pub fn queued(&self) -> usize {
         self.st.lock().unwrap().queued
     }
-    /// Blocks queued (playing or waiting).
+    /// Blocks queued and not released yet.
     pub fn blocks(&self) -> usize {
-        self.st.lock().unwrap().blocks.len()
+        self.st.lock().unwrap().pending.len()
     }
     pub fn contains(&self, tag: u64) -> bool {
         let st = self.st.lock().unwrap();
-        st.blocks.iter().any(|b| b.tag == tag) || st.released.contains(&tag)
+        st.pending.iter().any(|b| b.0 == tag) || st.released.contains(&tag)
     }
     /// Waits up to `ms` for a release (or the stream's close).
     pub fn wait(&self, ms: u64) {
@@ -157,7 +167,10 @@ impl Stream {
         if !st.started {
             return false;
         }
-        let mut finished = false;
+        // the nominal clock runs from the first sample on, so the audible playback trails it by the priming (up
+        // to 50 ms): the reserve that keeps a release-paced producer ahead
+        let paced_now = st.queued > 0 && !st.primed;
+        let mut finished = paced_now && pace(st);
         if !st.primed {
             st.waiting += 1;
             if st.queued > 0 && (st.queued as u32 >= PRIME || st.waiting >= PRIME) {
@@ -168,8 +181,11 @@ impl Stream {
                 finished |= take(st);
                 st.prev = st.cur;
             } else {
-                return false;
+                return finished;
             }
+        }
+        if !paced_now {
+            finished |= pace(st);
         }
         if st.queued == 0 && st.blocks.is_empty() {
             if !st.dry {
@@ -234,11 +250,23 @@ fn take(st: &mut St) -> bool {
     b.at += 1;
     st.queued -= 1;
     if b.at * 2 >= b.pcm.len() {
-        let b = st.blocks.pop_front().unwrap();
-        st.released.push_back(b.tag);
-        return true;
+            st.blocks.pop_front();
     }
     false
+}
+
+/// The nominal clock's frame: blocks whose end it reached go back to the producer. True if one did.
+fn pace(st: &mut St) -> bool {
+    if st.paced < st.appended {
+        st.paced += 1;
+    }
+    let mut any = false;
+    while st.pending.front().is_some_and(|&(_, end)| end <= st.paced) {
+        let (tag, _) = st.pending.pop_front().unwrap();
+        st.released.push_back(tag);
+        any = true;
+    }
+    any
 }
 
 fn stats_line(name: &str, st: &St) -> String {
@@ -566,5 +594,34 @@ mod tests {
         }
         assert!(n >= 2400, "every sample played ({n} pulls)");
         assert_eq!(st.released.len(), 1);
+    }
+
+    #[test]
+    fn releases_in_real_time_while_playback_slows() {
+        // a shallow queue (two 10 ms blocks) slows the playback down; the blocks still go back at 48 kHz
+        let s = st();
+        s.start();
+        s.append(1, vec![0.25; 2 * 480]);
+        s.append(2, vec![0.25; 2 * 480]);
+        let mut st = s.st.lock().unwrap();
+        for _ in 0..PRIME as usize + 960 {
+            let mut o = [0f32; 2];
+            s.pull(&mut st, &mut o, true);
+        }
+        assert_eq!(st.released.iter().copied().collect::<Vec<_>>(), vec![1, 2]);
+        assert!(st.queued > 0, "the slowed playback still holds samples");
+    }
+
+    #[test]
+    fn a_release_before_priming_is_announced() {
+        // Beach Bounce: two 256-frame buffers, then nothing until one comes back; the stream never reaches 50 ms
+        let s = st();
+        s.start();
+        s.append(1, vec![0.1; 2 * 256]);
+        s.append(2, vec![0.1; 2 * 256]);
+        let mut st = s.st.lock().unwrap();
+        let fired = (0..300).any(|_| s.pull(&mut st, &mut [0f32; 2], true));
+        assert!(fired, "the first release is announced to the producer");
+        assert_eq!(st.released.front(), Some(&1));
     }
 }

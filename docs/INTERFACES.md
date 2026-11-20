@@ -409,7 +409,7 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   queue (when its parked work has run). Also from Turbo: at most 64 ops and 2 presents queued (the game's thread waits
   in the OS's blocking hook), a SyncWait on a sync no queued command buffer has fenced yet waits only with a timeout
   and only until it is fenced or the queue runs dry. Runs: MK8D's demo 300 s at 60 FPS (`a1`, before the receipt fix;
-  r22 / r24's stops did not come back), Z-A `z6` above, and with the receipt fix {Z7}.
+  r22 / r24's stops did not come back), Z-A `z6` above, and with the receipt fix Z-A `z7` 49-52.4 FPS for 58 s (then its window was closed from outside, as in `v9`: lane G3's runs now set `NXRS_CLOSE_QUIT=0`).
 - **MK8D's menu preview (item 3) fixed.** `nvnTextureWriteTexels` (the movie decoder's frames) writes the texture's
   storage, swizzled (Turbo's `write_texels`), and every image over that storage uploads from it again; it wrote only the
   one object's image, and the menu samples its own texture object over the same memory. Picture:

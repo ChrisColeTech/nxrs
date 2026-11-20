@@ -481,7 +481,7 @@ pub mod passdump {
         for i in 0..qs.rt_n {
             let Some(t) = qs.rt[i].tex else { continue };
             let Some(tf) = crate::tex::format::tex_format(t.d.format) else { continue };
-            desc.push(format!("{i}:{:?} {}x{}", tf.vk, t.d.width, t.d.height));
+            desc.push(format!("{i}:{:?} {}x{} ser{} @{:p}", tf.vk, t.d.width, t.d.height, t.serial, t.mem));
             let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(t.d.format);
             if bw != 1 || bh != 1 || bpb == 0 || !matches!(tf.kind, Kind::Float | Kind::Uint | Kind::Sint) {
                 continue;
@@ -519,7 +519,7 @@ pub mod passdump {
                 }
             })));
         }
-        let ds = qs.rt_depth.tex.map(|t| format!(" depth {}x{} fmt {:#x}", t.d.width, t.d.height, t.d.format)).unwrap_or_default();
+        let ds = qs.rt_depth.tex.map(|t| format!(" depth {}x{} fmt {:#x} ser{} @{:p}", t.d.width, t.d.height, t.d.format, t.serial, t.mem)).unwrap_or_default();
         crate::vklog!("pass dump {f}/{p}: extent {}x{}, targets [{}]{ds}", qs.pass_extent.width, qs.pass_extent.height, desc.join(", "));
     }
 }
@@ -1884,6 +1884,20 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
         dev.cmd_set_front_face(cb, if vk_ccw { vk::FrontFace::COUNTER_CLOCKWISE } else { vk::FrontFace::CLOCKWISE });
         if !mesh {
             dev.cmd_set_primitive_topology(cb, topology(prim_ty));
+        }
+        if passdump::active() {
+            crate::vklog!(
+                "pass dump {}: depth test {} write {} func {} stencil test {}, cull {:#x}, color mask {:#x} output map {:#x}, blend enables {:#x}",
+                passdump::pass_no(),
+                ds.get(ds_field::DT),
+                ds.get(ds_field::DW),
+                ds.get(ds_field::DF),
+                ds.get(ds_field::ST),
+                poly.cull(),
+                qs.chmask,
+                qs.prog[1].as_ref().and_then(|m| m.omap).unwrap_or(u32::MAX),
+                qs.color.blend_en()
+            );
         }
         dev.cmd_set_depth_test_enable(cb, ds.get(ds_field::DT) != 0);
         dev.cmd_set_depth_write_enable(cb, ds.get(ds_field::DW) != 0);
