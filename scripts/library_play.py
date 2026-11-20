@@ -30,6 +30,23 @@ ps.SCENARIOS.update({
     # presses only, no screenshot (a pending screenshot can hang a present: INTERFACES lane G)
     'presses': dict(seconds=330, window=(60, 300), steps=[('a', 8, 'a%d' % i) for i in range(38)]),
     'probe': dict(seconds=420, window=(60, 400), steps=[('shot', 30, 'boot')] + [('shot', 60, 'min %d' % m) for m in range(1, 7)]),
+    # Sonic X Shadow Generations: the title, then Shadow Generations (right on the game choice; Sonic Generations is
+    # program 1, started by oe::ExecuteProgram), then A through its intro and a run to the right with jumps
+    'sonic_shadow': dict(seconds=900, window=(150, 880), steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('right', 3, 'shadow'),
+                         ('a', 20, 'shadow start')] + [('a', 8, 'intro %d' % i) for i in range(8)]
+                         + [('replay', 30, 'run', 'run_right.txt')] + [('shot', 60, 'play +%d min' % m) for m in range(1, 11)]),
+    # Sonic Generations: the title, A on the game choice (program 1, a successor process the harness follows), A
+    # through its intro, then a run to the right with jumps
+    'sonic_gens': dict(seconds=900, window=(150, 880), steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('a', 45, 'program 1')]
+                       + [('a', 8, 'intro %d' % i) for i in range(10)]
+                       + [('replay', 30, 'run', 'run_right.txt')] + [('shot', 60, 'play +%d min' % m) for m in range(1, 11)]),
+    # Super Mario Party Jamboree: the opening movie (+ to skip), the title (L+R), then A through the first-time
+    # menus toward a party or a minigame
+    'jamboree': dict(seconds=900, window=(300, 880), steps=[('shot', 40, 'boot'), ('plus', 10, 'skip'), ('plus', 10, 'skip2')]
+                     + [x for i in range(45) for x in (('lr', 3, 'lr %d' % i), ('a', 6, 'a %d' % i))]
+                     + [('shot', 30, 'end')]),
+    # boot only, for a trace (NXOS_TRACE): shots at 60 / 150 / 190 s
+    'boot': dict(seconds=200, window=(10, 190), steps=[('shot', 60, 'boot 60 s'), ('shot', 90, 'boot 150 s'), ('shot', 40, 'boot 190 s')]),
     'menus': dict(seconds=420, window=(60, 400), steps=[('shot', 40, 'boot')] + [('a', 8, 'a%d' % i) for i in range(40)]),
 })
 

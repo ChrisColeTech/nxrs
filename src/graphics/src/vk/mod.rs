@@ -17,6 +17,7 @@ pub mod counters;
 pub mod device;
 pub mod exec;
 pub mod framegen;
+pub mod gmem;
 pub mod image;
 pub mod layout;
 pub mod lazy;
@@ -28,6 +29,7 @@ pub mod perf;
 pub mod pipe;
 pub mod present;
 pub mod queue;
+pub mod scale;
 pub mod shader;
 pub mod shot;
 pub mod sparse;
@@ -49,6 +51,8 @@ pub struct Buf {
     pub mem: vk::DeviceMemory,
     pub size: u64,
     pub ptr: *mut u8,
+    /// the buffer's device address (0: none; descriptor buffers point at buffers by address)
+    pub addr: u64,
 }
 unsafe impl Send for Buf {}
 unsafe impl Sync for Buf {}
@@ -99,7 +103,7 @@ impl Gpu {
             device: d.dev.clone(),
             physical_device: d.pdev,
             debug_settings: Default::default(),
-            buffer_device_address: false,
+            buffer_device_address: d.caps.bda,
             allocation_sizes: Default::default(),
         })
         .map_err(|e| format!("allocator: {e}"))?;
@@ -143,6 +147,9 @@ impl Gpu {
                 return Err(format!("{name}: over the system memory cap"));
             }
         }
+        // buffers a shader reads get a device address (descriptor buffers name them by it)
+        let bound = vk::BufferUsageFlags::UNIFORM_BUFFER | vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER | vk::BufferUsageFlags::STORAGE_TEXEL_BUFFER;
+        let usage = if self.d.caps.bda && usage.intersects(bound) { usage | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS } else { usage };
         let ci = vk::BufferCreateInfo::default().size(size).usage(usage).sharing_mode(vk::SharingMode::EXCLUSIVE);
         let buf = unsafe { self.dev().create_buffer(&ci, None) }.map_err(|e| format!("vkCreateBuffer {name}: {e}"))?;
         let req = unsafe { self.dev().get_buffer_memory_requirements(buf) };
@@ -157,7 +164,8 @@ impl Gpu {
         if !ptr.is_null() {
             HOST_LIVE.fetch_add(a.size(), std::sync::atomic::Ordering::Relaxed);
         }
-        Ok(Buf { buf, alloc: Some(a), mem: vk::DeviceMemory::null(), size, ptr })
+        let addr = if usage.contains(vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS) { unsafe { self.dev().get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buf)) } } else { 0 };
+        Ok(Buf { buf, alloc: Some(a), mem: vk::DeviceMemory::null(), size, ptr, addr })
     }
 
     pub fn free_buffer(&self, b: Buf) {

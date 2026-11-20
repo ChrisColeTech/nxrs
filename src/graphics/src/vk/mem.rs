@@ -20,10 +20,12 @@ use crate::nvn::obj::pool_t;
 use crate::nvn::types::mem_flags;
 use ash::vk;
 use gpu_allocator::MemoryLocation;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub const PAGE: u64 = 4096;
+/// Guest bytes the CPU changed inside a write-back's range while the GPU worked, kept (`land_changed`).
+pub static WRITEBACK_KEPT: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Placement {
@@ -48,6 +50,20 @@ pub struct Pool {
     pub page_lo: u64,
     /// ranges to upload at the next submission whatever the watch says (flushes, CPU writes kept across a write-back)
     pub pending: Vec<(u64, u64)>,
+    /// the device address of `base` in its buffer (0: none yet; raw global memory's pool table, `gmem`)
+    pub da: u64,
+}
+
+/// Moves whenever a pool comes, goes or gets its GPU buffer (the raw global memory table is written again).
+pub static POOL_GEN: AtomicU64 = AtomicU64::new(1);
+
+/// The pool buffers' usage: with shader device addresses when the device has them (raw global memory).
+fn buf_usage(g: &Gpu) -> vk::BufferUsageFlags {
+    if g.d.caps.bda {
+        BUF_USAGE | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+    } else {
+        BUF_USAGE
+    }
 }
 
 #[derive(Default)]
@@ -118,17 +134,31 @@ mod watch {
         out.into_iter().map(|(a, b, _)| (a, b)).collect()
     }
     fn take_one(lo: u64, hi: u64, reset: bool) -> Option<Vec<u64>> {
-        let n = ((hi - lo) / super::PAGE) as usize;
-        let mut addrs: Vec<*mut core::ffi::c_void> = vec![core::ptr::null_mut(); n.max(1)];
-        let mut count = addrs.len();
-        let mut gran = 0u32;
-        let r = unsafe {
-            GetWriteWatch(if reset { WRITE_WATCH_FLAG_RESET } else { 0 }, lo as *const _, (hi - lo) as usize, addrs.as_mut_ptr(), &mut count, &mut gran)
-        };
-        if r != 0 {
-            return None;
+        // one buffer of the thread's, reused (a buffer sized to the pool, zeroed at every call, was most of the cost
+        // over hundreds of pools a submission: Pokemon Legends Z-A, ~400 mirrors); a full buffer asks again (with the
+        // reset flag the pages it returned are not returned again), a peek takes what fits
+        const CAP: usize = 4096;
+        thread_local! {
+            static BUF: std::cell::RefCell<Vec<usize>> = std::cell::RefCell::new(vec![0; CAP]);
         }
-        Some(addrs[..count].iter().map(|p| *p as u64).collect())
+        BUF.with(|b| {
+            let mut b = b.borrow_mut();
+            let mut out = Vec::new();
+            loop {
+                let mut count = CAP;
+                let mut gran = 0u32;
+                let r = unsafe {
+                    GetWriteWatch(if reset { WRITE_WATCH_FLAG_RESET } else { 0 }, lo as *const _, (hi - lo) as usize, b.as_mut_ptr() as *mut *mut core::ffi::c_void, &mut count, &mut gran)
+                };
+                if r != 0 {
+                    return None;
+                }
+                out.extend(b[..count].iter().map(|&p| p as u64));
+                if count < CAP || !reset {
+                    return Some(out);
+                }
+            }
+        })
     }
     pub fn reset(lo: u64, hi: u64) {
         if unsafe { ResetWriteWatch(lo as *const _, (hi - lo) as usize) } == 0 {
@@ -263,17 +293,25 @@ pub fn pool_add(p: &pool_t) {
         page_gen: vec![0; ((hi - lo) / PAGE) as usize],
         page_lo: lo,
         pending: Vec::new(),
+        da: 0,
     };
     if std::env::var("NXGFX_POOL_LOG").is_ok() {
         crate::vklog!("pool {base:#x} size {:#x} flags {:#x}: {placement:?}{}", p.size, p.flags, if watched { " (write watch)" } else { "" });
     }
     let old = g.mem.lock().unwrap().by_base.insert(base, pool);
+    POOL_GEN.fetch_add(1, Ordering::Relaxed);
     if let Some(o) = old {
         release(g, o);
     }
 }
 
 fn release(g: &Gpu, p: Pool) {
+    POOL_GEN.fetch_add(1, Ordering::Relaxed);
+    if let Some(b) = &p.buf {
+        if let Some(m) = ADDRS.write().unwrap().as_mut() {
+            m.remove(&vk::Handle::as_raw(b.buf));
+        }
+    }
     if let Some(b) = p.buf {
         g.q.defer_after_use(Box::new(move |g: &Gpu| g.free_buffer(b)));
     }
@@ -283,6 +321,7 @@ fn release(g: &Gpu, p: Pool) {
 pub fn pool_del(base: u64) {
     let Some(g) = Gpu::try_get() else { return };
     let p = g.mem.lock().unwrap().by_base.remove(&base);
+    POOL_GEN.fetch_add(1, Ordering::Relaxed);
     if let Some(p) = p {
         g.images.lock().unwrap().drop_pool(base, p.size);
         release(g, p);
@@ -349,6 +388,7 @@ impl Pool {
                 Ok((b, off)) => {
                     self.buf = Some(b);
                     self.buf_off = off;
+                    self.note_address(g);
                     return Ok(());
                 }
                 Err(e) => {
@@ -360,7 +400,7 @@ impl Pool {
             },
             _ => {}
         }
-        let b = g.buffer(self.size, BUF_USAGE, MemoryLocation::GpuOnly, "pool")?;
+        let b = g.buffer(self.size, buf_usage(g), MemoryLocation::GpuOnly, "pool")?;
         // The storage now: a Vram pool's initial content, a mirror's current one. Only the committed parts of the
         // guest's memory hold anything (a large pool the game has not written yet is zero and is not read here: reading
         // it would commit it, and staging it would double it in host memory; Mario Kart World's pools)
@@ -389,18 +429,33 @@ impl Pool {
             }
         }
         self.buf = Some(b);
+        self.note_address(g);
         Ok(())
     }
 
-    /// CPU-written ranges since the last call (absolute addresses), page generations bumped.
-    fn take_cpu_writes(&mut self, gen: u32) -> Vec<(u64, u64)> {
+    /// The buffer's device address (raw global memory) once it has one.
+    fn note_address(&mut self, g: &Gpu) {
+        if g.d.caps.bda {
+            if let Some(b) = &self.buf {
+                let ai = vk::BufferDeviceAddressInfo::default().buffer(b.buf);
+                let start = unsafe { g.dev().get_buffer_device_address(&ai) };
+                self.da = start + self.buf_off;
+                ADDRS.write().unwrap().get_or_insert_with(HashMap::new).insert(vk::Handle::as_raw(b.buf), start);
+            }
+        }
+        POOL_GEN.fetch_add(1, Ordering::Relaxed);
+    }
+
+    /// CPU-written ranges since the last call (absolute addresses), page generations bumped. `watched_pages`: this
+    /// pool's written pages already taken from the write watch (`begin_submit` asks once for neighbouring pools).
+    fn take_cpu_writes(&mut self, gen: u32, watched_pages: Option<Vec<u64>>) -> Vec<(u64, u64)> {
         let mut out: Vec<(u64, u64)> = std::mem::take(&mut self.pending);
         if !matches!(self.placement, Placement::Mirror | Placement::Host) {
             return out;
         }
         let (lo, hi) = page_range(self.base, self.size);
         if self.watched {
-            if let Some(pages) = watch::take(lo, hi, true) {
+            if let Some(pages) = watched_pages.or_else(|| watch::take(lo, hi, true)) {
                 for p in pages {
                     out.push((p, PAGE));
                 }
@@ -465,23 +520,36 @@ fn import(g: &Gpu, base: u64, size: u64) -> Result<(Buf, u64), String> {
         return Err(format!("host pointer properties: {r}"));
     }
     let mut ext = vk::ExternalMemoryBufferCreateInfo::default().handle_types(ht);
-    let ci = vk::BufferCreateInfo::default().size(hi - lo).usage(BUF_USAGE).push_next(&mut ext);
+    let ci = vk::BufferCreateInfo::default().size(hi - lo).usage(buf_usage(g)).push_next(&mut ext);
     let buf = unsafe { g.dev().create_buffer(&ci, None) }.map_err(|e| format!("{e}"))?;
     let req = unsafe { g.dev().get_buffer_memory_requirements(buf) };
     let ty = g.d.mem_type(req.memory_type_bits & hp.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE).ok_or("no memory type")?;
     let mut imp = vk::ImportMemoryHostPointerInfoEXT::default().handle_type(ht).host_pointer(lo as *mut core::ffi::c_void);
-    let ai = vk::MemoryAllocateInfo::default().allocation_size(hi - lo).memory_type_index(ty).push_next(&mut imp);
+    let mut fl = vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+    let mut ai = vk::MemoryAllocateInfo::default().allocation_size(hi - lo).memory_type_index(ty).push_next(&mut imp);
+    if g.d.caps.bda {
+        ai = ai.push_next(&mut fl);
+    }
     let mem = unsafe { g.dev().allocate_memory(&ai, None) }.map_err(|e| {
         unsafe { g.dev().destroy_buffer(buf, None) };
         format!("import: {e}")
     })?;
     unsafe { g.dev().bind_buffer_memory(buf, mem, 0) }.map_err(|e| format!("{e}"))?;
-    Ok((Buf { buf, alloc: None, mem, size: hi - lo, ptr: lo as *mut u8 }, base - lo))
+    let addr = if g.d.caps.bda { unsafe { g.dev().get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buf)) } } else { 0 };
+    Ok((Buf { buf, alloc: None, mem, size: hi - lo, ptr: lo as *mut u8, addr }, base - lo))
+}
+
+/// Pool buffers' device addresses by handle (entered when a pool gets its buffer, removed when it goes).
+static ADDRS: std::sync::RwLock<Option<HashMap<u64, u64>>> = std::sync::RwLock::new(None);
+
+/// The device address of a pool's buffer (descriptor buffers).
+pub fn buffer_address(buf: vk::Buffer) -> Option<u64> {
+    ADDRS.read().unwrap().as_ref().and_then(|m| m.get(&vk::Handle::as_raw(buf)).copied())
 }
 
 /// A GPU address range as (buffer, offset, pool base); creates the pool's buffer at its first use.
 pub fn resolve(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(vk::Buffer, u64, u64)> {
-    super::perf::timed(super::perf::C::ResolveNs, || resolve_in(g, sub, a, n))
+    super::perf::timed_fine(super::perf::C::ResolveNs, || resolve_in(g, sub, a, n))
 }
 
 fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(vk::Buffer, u64, u64)> {
@@ -497,8 +565,23 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
     } else {
         a
     };
+    // the pools this thread resolved last, while no pool came, went or got its buffer (thousands of draws a frame bind
+    // ranges of the same few: the pool lock and lookup were most of the replay's 1.1 ms of `memory` in Z-A; Turbo's
+    // vkm_use fast path)
+    thread_local! {
+        // (generation, pool base, pool size, the next pool's base, buffer, buffer offset of base)
+        static LAST: std::cell::Cell<[(u64, u64, u64, u64, vk::Buffer, u64); 4]> = const { std::cell::Cell::new([(0, 0, 0, 0, vk::Buffer::null(), 0); 4]) };
+    }
+    let gen = POOL_GEN.load(Ordering::Acquire);
+    let n1 = n.max(1);
+    // `find` takes the pool with the highest base at or below the address (pools laid over each other): a hit only
+    // below the next pool's base
+    let hit = LAST.with(|l| l.get().iter().find(|e| e.0 == gen && a >= e.1 && a + n1 <= e.1 + e.2 && a < e.3 && e.4 != vk::Buffer::null()).copied());
+    if let Some((_, base, _, _, buf, off)) = hit {
+        return Some((buf, off + (a - base), base));
+    }
     let mut m = g.mem.lock().unwrap();
-    let Some(b) = find(&m, a, n.max(1)) else {
+    let Some(b) = find(&m, a, n1) else {
         static N: AtomicU64 = AtomicU64::new(0);
         if N.fetch_add(1, Ordering::Relaxed) < 8 {
             crate::log::red(&format!("GPU address {a:#x} (+{n:#x}) is in no memory pool"));
@@ -510,7 +593,19 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
         crate::log::red_once(&e);
         return None;
     }
-    Some((p.buf.as_ref().unwrap().buf, p.buf_off + (a - p.base), b))
+    let (buf, off) = (p.buf.as_ref().unwrap().buf, p.buf_off);
+    // the generation after the buffer exists (its creation moved it)
+    let gen = POOL_GEN.load(Ordering::Acquire);
+
+    let (pb, ps) = (p.base, p.size);
+    let next = m.by_base.range(pb + 1..).next().map(|(k, _)| *k).unwrap_or(u64::MAX);
+    LAST.with(|l| {
+        let mut v = l.get();
+        v.rotate_right(1);
+        v[0] = (gen, pb, ps, next, buf, off);
+        l.set(v);
+    });
+    Some((buf, off + (a - pb), b))
 }
 
 /// Start of a submission: every CPU write since the last one goes up to the mirrors (recorded into the
@@ -520,11 +615,45 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
     m.gen = m.gen.wrapping_add(1);
     let gen = m.gen;
     let mut all = Vec::new();
+    // the write watch asked once per run of watched pools whose pages touch (Pokemon Legends Z-A has ~400 mirrors,
+    // most of them neighbours: one GetWriteWatch each was 3.5 ms a frame of `pools`; Mario Kart World 21 ms)
+    let mut taken: HashMap<u64, Vec<u64>> = HashMap::new();
+    {
+        let watched: Vec<(u64, u64, u64)> = m
+            .by_base
+            .values()
+            .filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host))
+            .map(|p| {
+                let (lo, hi) = page_range(p.base, p.size);
+                (p.base, lo, hi)
+            })
+            .collect();
+        let mut i = 0;
+        while i < watched.len() {
+            let (mut j, lo, mut hi) = (i + 1, watched[i].1, watched[i].2);
+            while j < watched.len() && watched[j].1 <= hi {
+                hi = hi.max(watched[j].2);
+                j += 1;
+            }
+            if j - i > 1 {
+                if let Some(pages) = watch::take(lo, hi, true) {
+                    // each pool its own pages (a page two pools share goes to both)
+                    for &(base, plo, phi) in &watched[i..j] {
+                        let a = pages.partition_point(|&p| p < plo);
+                        let b = pages.partition_point(|&p| p < phi);
+                        taken.insert(base, pages[a..b].to_vec());
+                    }
+                }
+            }
+            i = j;
+        }
+    }
     for p in m.by_base.values_mut() {
         if !matches!(p.placement, Placement::Mirror | Placement::Host) && p.pending.is_empty() {
             continue;
         }
-        let ranges = p.take_cpu_writes(gen);
+        let pre = taken.remove(&p.base);
+        let ranges = p.take_cpu_writes(gen, pre);
         if let Some(b) = p.buf.as_ref() {
             if p.placement == Placement::Mirror || p.placement == Placement::Vram {
                 for &(a, n) in &ranges {
@@ -575,13 +704,13 @@ pub fn note_gpu_write(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
 
 /// Completion of a submission: its write-backs land in guest memory. CPU writes the game made meanwhile to the same
 /// pages stay marked for the next upload; the write-back's own stores are not taken for CPU writes.
-pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8)]) {
+pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8)]) {
     if wbs.is_empty() {
         return;
     }
     let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
-    for &(pool, a, n, src) in wbs {
+    for &(pool, a, n, src, pre) in wbs {
         let Some(p) = m.by_base.get_mut(&pool) else { continue };
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let lazy = if p.watched { super::lazy::take_lazy(a, n) } else { vec![] };
@@ -592,20 +721,33 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8)]) {
             for &pg in lazy.iter().chain(std::iter::once(&(a + n))) {
                 let end = pg.min(a + n);
                 if end > at {
-                    land(p, at, end - at, unsafe { src.add((at - a) as usize) });
+                    land(p, at, end - at, unsafe { src.add((at - a) as usize) }, if pre.is_null() { pre } else { unsafe { pre.add((at - a) as usize) } });
                 }
                 at = (pg + PAGE).min(a + n).max(at);
             }
             super::lazy::make_lazy(&lazy, buf, base, off0);
             continue;
         }
-        land(p, a, n, src);
+        land(p, a, n, src, pre);
     }
     WRITEBACK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
 /// One write-back's bytes into guest memory (pages held on the device are read back first).
-fn land(p: &mut Pool, a: u64, n: u64, src: *const u8) {
+fn land(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
+    // pages held on the device (lazy write-back): its buffer has their newest bytes, this write-back's among them, so
+    // they stay there; bringing them back here made the completion thread wait for all the GPU work submitted since
+    // (Pokemon Violet: 48 ms of write-back a frame, 12 FPS)
+    if let Some(runs) = super::lazy::outside(a, n) {
+        for (o, m) in runs {
+            let at = |q: *const u8| if q.is_null() { q } else { unsafe { q.add(o as usize) } };
+            land(p, a + o, m, at(src), at(base));
+        }
+        return;
+    }
+    if !base.is_null() {
+        return land_changed(p, a, n, src, base);
+    }
     {
         super::lazy::touch(a, n);
         let (lo, hi) = page_range(a, n);
@@ -627,6 +769,51 @@ fn land(p: &mut Pool, a: u64, n: u64, src: *const u8) {
     }
 }
 
+/// Bytes the GPU changed in a write-back's range (where `src`, the device after the submission, differs from `base`,
+/// the device before its work) land in guest memory; the rest of the range keeps what the CPU has, including what it
+/// wrote while the GPU worked (Turbo's `wr_land`: a storage buffer is written in part). Pages the GPU left alone are
+/// not touched. Counts the guest bytes the CPU had changed meanwhile that a whole-range landing would have reverted.
+fn land_changed(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
+    let (s, b) = unsafe { (core::slice::from_raw_parts(src, n as usize), core::slice::from_raw_parts(base, n as usize)) };
+    let mut at = 0u64;
+    let mut kept = 0u64;
+    while at < n {
+        let pg_end = (((a + at) / PAGE + 1) * PAGE - a).min(n);
+        let (lo, hi) = (at as usize, pg_end as usize);
+        if s[lo..hi] != b[lo..hi] {
+            super::lazy::touch(a + at, pg_end - at);
+            let (plo, phi) = page_range(a + at, pg_end - at);
+            if p.watched {
+                if let Some(pages) = watch::take(plo, phi, true) {
+                    for pg in pages {
+                        p.pending.push((pg, PAGE));
+                    }
+                }
+            }
+            let g = unsafe { core::slice::from_raw_parts_mut((a + at) as *mut u8, hi - lo) };
+            for i in 0..hi - lo {
+                let (nv, ov) = (s[lo + i], b[lo + i]);
+                if nv != ov {
+                    g[i] = nv;
+                } else if g[i] != ov {
+                    kept += 1;
+                }
+            }
+            if p.watched {
+                watch::reset(plo, phi);
+            } else if let Some(snap) = p.snapshot.as_mut() {
+                let o = (a + at - p.base) as usize;
+                snap[o..o + (hi - lo)].copy_from_slice(&g[..]);
+            }
+            WRITEBACK_BYTES.fetch_add(pg_end - at, Ordering::Relaxed);
+        }
+        at = pg_end;
+    }
+    if kept > 0 {
+        WRITEBACK_KEPT.fetch_add(kept, Ordering::Relaxed);
+    }
+}
+
 /// One line of placement and traffic (with the pacing line).
 pub fn summary(g: &Gpu, frames: u64) -> String {
     let m = g.mem.lock().unwrap();
@@ -643,8 +830,9 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
     let up = UPLOAD_BYTES.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
     let wb = WRITEBACK_BYTES.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
     let wbms = WRITEBACK_NS.swap(0, Ordering::Relaxed) as f64 / f / 1e6;
+    let kept = WRITEBACK_KEPT.load(Ordering::Relaxed);
     format!(
-        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms; {sn} mirrors without write watch ({} MB)",
+        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms ({kept} CPU-written bytes inside write-backs kept so far); {sn} mirrors without write watch ({} MB)",
         cnt[0],
         bytes[0] >> 20,
         cnt[1],
@@ -653,5 +841,5 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         bytes[2] >> 20,
         cnt[3],
         sb >> 20
-    )
+    ) + &super::lazy::summary(f)
 }

@@ -12,7 +12,42 @@ use std::sync::Mutex;
 pub struct Tables {
     pub pool: vk::DescriptorPool,
     pub set: vk::DescriptorSet,
+    /// descriptor buffers (`caps.descbuf`): the pool set is this buffer, written in place (host-visible, mapped)
+    pub db: Option<DescBuf>,
     inner: Mutex<Inner>,
+}
+
+/// A host-visible descriptor buffer with its mapping and device address.
+pub struct DescBuf {
+    pub buf: vk::Buffer,
+    pub mem: vk::DeviceMemory,
+    pub ptr: usize,
+    pub addr: u64,
+    pub size: u64,
+}
+
+/// A descriptor buffer of `size` bytes in host-visible memory (device-local where the device has such: resizable BAR).
+pub fn desc_buffer(d: &Device, size: u64) -> Result<DescBuf, String> {
+    let usage = vk::BufferUsageFlags::RESOURCE_DESCRIPTOR_BUFFER_EXT | vk::BufferUsageFlags::SAMPLER_DESCRIPTOR_BUFFER_EXT | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS;
+    let buf = unsafe { d.dev.create_buffer(&vk::BufferCreateInfo::default().size(size.max(256)).usage(usage), None) }.map_err(|e| format!("descriptor buffer: {e}"))?;
+    let req = unsafe { d.dev.get_buffer_memory_requirements(buf) };
+    let host = vk::MemoryPropertyFlags::HOST_VISIBLE | vk::MemoryPropertyFlags::HOST_COHERENT;
+    let ty = d.mem_type(req.memory_type_bits, host | vk::MemoryPropertyFlags::DEVICE_LOCAL).or_else(|| d.mem_type(req.memory_type_bits, host)).ok_or("descriptor buffer: no host-visible memory")?;
+    let mut fl = vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+    let mem = unsafe { d.dev.allocate_memory(&vk::MemoryAllocateInfo::default().allocation_size(req.size).memory_type_index(ty).push_next(&mut fl), None) }
+        .map_err(|e| format!("descriptor buffer memory: {e}"))?;
+    unsafe { d.dev.bind_buffer_memory(buf, mem, 0) }.map_err(|e| format!("descriptor buffer bind: {e}"))?;
+    let ptr = unsafe { d.dev.map_memory(mem, 0, vk::WHOLE_SIZE, vk::MemoryMapFlags::empty()) }.map_err(|e| format!("descriptor buffer map: {e}"))? as usize;
+    let addr = unsafe { d.dev.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buf)) };
+    Ok(DescBuf { buf, mem, ptr, addr, size: req.size })
+}
+
+/// Writes one descriptor (vkGetDescriptorEXT) at `at` bytes into a mapped descriptor buffer.
+/// # Safety
+/// `ptr + at` .. `+ size` lies inside the buffer's mapping.
+pub unsafe fn put_descriptor(d: &Device, ptr: usize, at: u64, gi: &vk::DescriptorGetInfoEXT, size: usize) {
+    let dst = core::slice::from_raw_parts_mut((ptr + at as usize) as *mut u8, size);
+    d.db.get_descriptor(gi, dst);
 }
 
 #[derive(Default)]
@@ -64,6 +99,11 @@ pub fn compare_op(f: u32) -> vk::CompareOp {
 
 impl Tables {
     pub fn new(d: &Device, l: &Layout) -> Result<Tables, String> {
+        if d.caps.descbuf {
+            let db = desc_buffer(d, l.db_pool_size)?;
+            unsafe { core::ptr::write_bytes(db.ptr as *mut u8, 0, l.db_pool_size as usize) };
+            return Ok(Tables { pool: vk::DescriptorPool::null(), set: vk::DescriptorSet::null(), db: Some(db), inner: Mutex::new(Inner::default()) });
+        }
         let sizes = [
             vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLED_IMAGE, descriptor_count: l.tex_cap },
             vk::DescriptorPoolSize { ty: vk::DescriptorType::SAMPLER, descriptor_count: l.samp_cap },
@@ -76,7 +116,7 @@ impl Tables {
         let sl = [l.pool_set];
         let ai = vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&sl);
         let set = unsafe { d.dev.allocate_descriptor_sets(&ai) }.map_err(|e| format!("pool set: {e}"))?[0];
-        Ok(Tables { pool, set, inner: Mutex::new(Inner::default()) })
+        Ok(Tables { pool, set, db: None, inner: Mutex::new(Inner::default()) })
     }
 
     /// A buffer texture registered at host ID `id`.
@@ -93,6 +133,22 @@ impl Tables {
         std::mem::take(&mut self.inner.lock().unwrap().buf_pending)
     }
     /// Writes the pool set's texel buffer views of buffer texture `id` (uniform, and storage when the format allows).
+    /// Descriptor buffers: buffer texture `id`'s texel buffer descriptors (uniform, and storage when the format allows)
+    /// from its memory's device address.
+    pub fn write_texel_addrs(&self, d: &Device, l: &Layout, id: i32, u: vk::DescriptorAddressInfoEXT, s: Option<vk::DescriptorAddressInfoEXT>) {
+        let Some(db) = self.db.as_ref() else { return };
+        let p = &d.db_props;
+        let _g = self.inner.lock().unwrap();
+        unsafe {
+            let gi = vk::DescriptorGetInfoEXT::default().ty(vk::DescriptorType::UNIFORM_TEXEL_BUFFER).data(vk::DescriptorDataEXT { p_uniform_texel_buffer: &u });
+            put_descriptor(d, db.ptr, l.db_pool_off[layout::B_TBUF as usize] + id as u64 * p.uniform_texel_buffer_descriptor_size as u64, &gi, p.uniform_texel_buffer_descriptor_size);
+            if let Some(s) = s {
+                let gi = vk::DescriptorGetInfoEXT::default().ty(vk::DescriptorType::STORAGE_TEXEL_BUFFER).data(vk::DescriptorDataEXT { p_storage_texel_buffer: &s });
+                put_descriptor(d, db.ptr, l.db_pool_off[layout::B_IBUF as usize] + id as u64 * p.storage_texel_buffer_descriptor_size as u64, &gi, p.storage_texel_buffer_descriptor_size);
+            }
+        }
+    }
+
     pub fn write_texel_views(&self, d: &Device, id: i32, uv: vk::BufferView, sv: Option<vk::BufferView>) {
         let u = [uv];
         let s = [sv.unwrap_or(uv)];
@@ -204,6 +260,13 @@ impl Tables {
     pub fn note_tex(&self, id: i32, serial: u64, view: Option<view_t>) {
         self.inner.lock().unwrap().tex.insert(id, (serial, view));
     }
+    /// The texture IDs registered with one of `serials`: (ID, serial, view).
+    pub fn ids_of(&self, serials: &std::collections::HashSet<u64>) -> Vec<(i32, u64, Option<view_t>)> {
+        if serials.is_empty() {
+            return Vec::new();
+        }
+        self.inner.lock().unwrap().tex.iter().filter(|(_, (s, _))| serials.contains(s)).map(|(id, (s, v))| (*id, *s, *v)).collect()
+    }
     pub fn tex_at(&self, id: i32) -> Option<(u64, Option<view_t>)> {
         self.inner.lock().unwrap().tex.get(&id).copied()
     }
@@ -213,6 +276,14 @@ impl Tables {
 
     pub fn write_sampler(&self, d: &Device, id: i32, s: vk::Sampler) {
         self.inner.lock().unwrap().samp.insert(id, s);
+        if let Some(db) = self.db.as_ref() {
+            let Some(g) = super::Gpu::try_get() else { return };
+            let p = &d.db_props;
+            let gi = vk::DescriptorGetInfoEXT::default().ty(vk::DescriptorType::SAMPLER).data(vk::DescriptorDataEXT { p_sampler: &s });
+            let _g = self.inner.lock().unwrap();
+            unsafe { put_descriptor(d, db.ptr, g.layout.db_pool_off[layout::B_SAMP as usize] + id as u64 * p.sampler_descriptor_size as u64, &gi, p.sampler_descriptor_size) };
+            return;
+        }
         let ii = [vk::DescriptorImageInfo::default().sampler(s)];
         let w = [vk::WriteDescriptorSet::default().dst_set(self.set).dst_binding(layout::B_SAMP).dst_array_element(id as u32).descriptor_type(vk::DescriptorType::SAMPLER).image_info(&ii)];
         let _g = self.inner.lock().unwrap();
@@ -220,6 +291,22 @@ impl Tables {
     }
 
     pub fn write_image(&self, d: &Device, id: i32, view: vk::ImageView, storage: Option<vk::ImageView>) {
+        if let Some(db) = self.db.as_ref() {
+            let Some(g) = super::Gpu::try_get() else { return };
+            let p = &d.db_props;
+            let ii = vk::DescriptorImageInfo::default().image_view(view).image_layout(vk::ImageLayout::GENERAL);
+            let _g = self.inner.lock().unwrap();
+            unsafe {
+                let gi = vk::DescriptorGetInfoEXT::default().ty(vk::DescriptorType::SAMPLED_IMAGE).data(vk::DescriptorDataEXT { p_sampled_image: &ii });
+                put_descriptor(d, db.ptr, g.layout.db_pool_off[layout::B_TEX as usize] + id as u64 * p.sampled_image_descriptor_size as u64, &gi, p.sampled_image_descriptor_size);
+                let si = vk::DescriptorImageInfo::default().image_view(storage.unwrap_or(view)).image_layout(vk::ImageLayout::GENERAL);
+                if storage.is_some() {
+                    let gi = vk::DescriptorGetInfoEXT::default().ty(vk::DescriptorType::STORAGE_IMAGE).data(vk::DescriptorDataEXT { p_storage_image: &si });
+                    put_descriptor(d, db.ptr, g.layout.db_pool_off[layout::B_IMG as usize] + id as u64 * p.storage_image_descriptor_size as u64, &gi, p.storage_image_descriptor_size);
+                }
+            }
+            return;
+        }
         let ii = [vk::DescriptorImageInfo::default().image_view(view).image_layout(vk::ImageLayout::GENERAL)];
         let si = [vk::DescriptorImageInfo::default().image_view(storage.unwrap_or(view)).image_layout(vk::ImageLayout::GENERAL)];
         let mut w = vec![vk::WriteDescriptorSet::default().dst_set(self.set).dst_binding(layout::B_TEX).dst_array_element(id as u32).descriptor_type(vk::DescriptorType::SAMPLED_IMAGE).image_info(&ii)];

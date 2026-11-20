@@ -288,6 +288,10 @@ struct PkgArgs {
     /// leave out the update a combined package holds
     #[arg(long)]
     no_update: bool,
+    /// build program N of a multi-program application (title id + N; the game starts it with oe::ExecuteProgram);
+    /// name it `<name>_p<N>` beside program 0's `<name>` so the engine finds it
+    #[arg(long)]
+    program: Option<u32>,
 }
 
 #[derive(Subcommand)]
@@ -408,6 +412,9 @@ fn run_v2(args: Vec<String>) -> i32 {
             0
         }
         Cmd::Build { input, out, outdir, jobs, pkg, cc, no_build, no_shaders, chunk, native, quiet, machine } => {
+            if let Some(n) = pkg.program {
+                std::env::set_var("NXRS_PROGRAM_INDEX", n.to_string());
+            }
             let o = Out::new(quiet, machine);
             let b = pipeline::BuildArgs {
                 input,

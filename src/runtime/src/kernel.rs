@@ -995,6 +995,41 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
             }
             c.x[0] = R_OK;
         }
+        // SetThreadActivity(w0 handle, w1 pause / run): accepted, the thread keeps running (as Turbo). Unity's
+        // garbage collector pauses every thread around GetThreadContext3.
+        0x32 => {
+            let g = lock(&k.g);
+            c.x[0] = if g.thread_of(c.x[0] as u32).is_some() { R_OK } else { R_BAD_HANDLE };
+        }
+        // GetThreadContext3(x0 ThreadContext, w1 handle): the thread's registers as its `Cpu` holds them (x0-x28,
+        // fp, lr, sp, pc, pstate, v0-v31, fpcr, fpsr, tpidr; 0x320 bytes)
+        0x33 => {
+            let g = lock(&k.g);
+            let cpu = g.thread_of(c.x[1] as u32).map(|i| g.threads[i].as_ref().unwrap().cpu).filter(|p| !p.is_null());
+            c.x[0] = match cpu {
+                Some(p) => {
+                    let mut b = [0u8; 0x320];
+                    // SAFETY: the thread's Cpu stays allocated while the kernel lock is held and the thread object lives
+                    let t = unsafe { &*p };
+                    for i in 0..31 {
+                        b[8 * i..8 * i + 8].copy_from_slice(&t.x[i].to_le_bytes());
+                    }
+                    b[0xf8..0x100].copy_from_slice(&t.sp.to_le_bytes());
+                    b[0x100..0x108].copy_from_slice(&t.pc.to_le_bytes());
+                    b[0x108..0x10c].copy_from_slice(&(t.nzcv as u32).to_le_bytes());
+                    for i in 0..32 {
+                        b[0x110 + 16 * i..0x120 + 16 * i].copy_from_slice(&t.v[i].to_le_bytes());
+                    }
+                    b[0x310..0x314].copy_from_slice(&(t.fpcr as u32).to_le_bytes());
+                    b[0x314..0x318].copy_from_slice(&(t.fpsr as u32).to_le_bytes());
+                    b[0x318..0x320].copy_from_slice(&t.tpidr.to_le_bytes());
+                    // SAFETY: the guest's output buffer
+                    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), c.x[0] as *mut u8, b.len()) };
+                    R_OK
+                }
+                None => R_BAD_HANDLE,
+            };
+        }
         _ => return false,
     }
     true

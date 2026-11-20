@@ -53,6 +53,9 @@ pub struct Image {
     pub page_hash: Vec<u64>,
     /// uploads again because the CPU wrote its pages (its page hashes are kept from the second on)
     pub rewrites: u32,
+    /// the resolution scale of this image (a render target's; 1 for everything else): `extent` is the texture's size
+    /// times it
+    pub scale: f32,
 }
 unsafe impl Send for Image {}
 
@@ -147,11 +150,13 @@ fn decode_parts(im: &Image, storage: &[u8]) -> Vec<Part> {
     let (bpb, bw, bh) = layout::fmt_bpb(d.format);
     let linear = d.flags as u32 & (tex_flags::LINEAR | tex_flags::LINEAR_RENDER_TARGET) != 0;
     let mut out = Vec::new();
+    // the texture's own size (a scaled render target's image is larger)
+    let native = shape(&t).1;
     for layer in 0..im.layers {
         for level in 0..im.levels {
-            let lw = (im.extent.width >> level).max(1);
-            let lh = (im.extent.height >> level).max(1);
-            let ld = (im.extent.depth >> level).max(1);
+            let lw = (native.width >> level).max(1);
+            let lh = (native.height >> level).max(1);
+            let ld = (native.depth >> level).max(1);
             let (rows_data, slices) = if linear {
                 if level > 0 {
                     continue;
@@ -224,8 +229,6 @@ pub struct Images {
     /// storage start -> serials (CPU-written textures)
     by_addr: BTreeMap<u64, Vec<u64>>,
     max_size: u64,
-    /// texel writes waiting for the next submission: (serial, level, layer, offset, extent, linear rows)
-    writes: Vec<(u64, u32, u32, vk::Offset3D, vk::Extent3D, Vec<u8>)>,
     /// the virtual pool mapping generation the sparse textures were last checked at
     sparse_seen: u64,
     /// released images by what they were (storage, description, layout): a game that initializes its transient
@@ -356,8 +359,13 @@ impl Gpu {
             crate::log::red_once("buffer textures are not implemented yet");
             return None;
         }
-        let (ty, extent, layers) = shape(t);
+        let (ty, mut extent, layers) = shape(t);
         let levels = t.d.levels.max(1);
+        let scale = super::scale::for_new(t);
+        if scale != 1.0 {
+            extent.width = super::scale::dim(extent.width, scale);
+            extent.height = super::scale::dim(extent.height, scale);
+        }
         let mut bc7 = false;
         if let Some((_, _, srgb)) = tf.astc {
             let big = extent.width >= 256 && extent.height >= 256 && std::env::var("NXGFX_ASTC").as_deref() != Ok("rgba8");
@@ -431,7 +439,8 @@ impl Gpu {
                     decoded: None,
                     sparse: None,
                     page_hash: Vec::new(),
-            rewrites: 0,
+                    rewrites: 0,
+                    scale: 1.0,
                 });
             }
         }
@@ -471,6 +480,7 @@ impl Gpu {
             sparse: None,
             page_hash: Vec::new(),
             rewrites: 0,
+            scale,
         })
     }
 
@@ -757,6 +767,138 @@ impl Gpu {
         out
     }
 
+    /// A new resolution scale: every scaled render target is made again at `s` (its levels blitted over, a
+    /// multisampled one cleared), parked ones dropped, and the texture pool's descriptors of them written again.
+    /// Returns how many were made again. The submission state is held (the start of a submission).
+    pub fn rescale_images(&self, sub: &mut Sub, s: f32) -> usize {
+        let mut imgs = self.images.lock().unwrap();
+        // parked render targets go (a later initialization makes them at the new scale)
+        let mut gone = Vec::new();
+        for v in imgs.parked.values_mut() {
+            let mut i = 0;
+            while i < v.len() {
+                if super::scale::candidate(&v[i].0.tex) {
+                    gone.push(v.remove(i).0);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+        imgs.parked.retain(|_, v| !v.is_empty());
+        imgs.parked_n -= gone.len();
+        let serials: Vec<u64> = imgs.by_serial.iter().filter(|(_, im)| im.scale != s && super::scale::candidate(&im.tex) && im.sparse.is_none()).map(|(k, _)| *k).collect();
+        let mut done = std::collections::HashSet::new();
+        for serial in serials {
+            let im = imgs.by_serial.get_mut(&serial).unwrap();
+            let (_, native, _) = shape(&im.tex);
+            let ext = vk::Extent3D { width: super::scale::dim(native.width, s), height: super::scale::dim(native.height, s), depth: native.depth };
+            let mut flags = vk::ImageCreateFlags::empty();
+            if !matches!(im.tf.kind, Kind::Depth | Kind::DepthStencil | Kind::Stencil) {
+                flags |= vk::ImageCreateFlags::MUTABLE_FORMAT;
+            }
+            if ext.width == ext.height && im.layers >= 6 && im.layers % 6 == 0 && im.samples == vk::SampleCountFlags::TYPE_1 {
+                flags |= vk::ImageCreateFlags::CUBE_COMPATIBLE;
+            }
+            let ci = vk::ImageCreateInfo::default()
+                .flags(flags)
+                .image_type(im.ty)
+                .format(im.format)
+                .extent(ext)
+                .mip_levels(im.levels)
+                .array_layers(im.layers)
+                .samples(im.samples)
+                .tiling(vk::ImageTiling::OPTIMAL)
+                .usage(im.usage)
+                .initial_layout(vk::ImageLayout::UNDEFINED);
+            let Ok(image) = (unsafe { self.dev().create_image(&ci, None) }) else { continue };
+            let req = unsafe { self.dev().get_image_memory_requirements(image) };
+            let Ok(a) = self.alloc.lock().unwrap().allocate(&AllocationCreateDesc { name: "texture", requirements: req, location: MemoryLocation::GpuOnly, linear: false, allocation_scheme: AllocationScheme::GpuAllocatorManaged }) else {
+                unsafe { self.dev().destroy_image(image, None) };
+                continue;
+            };
+            if unsafe { self.dev().bind_image_memory(image, a.memory(), a.offset()) }.is_err() {
+                continue;
+            }
+            let asp = aspect(&im.tf);
+            let range = vk::ImageSubresourceRange { aspect_mask: asp, base_mip_level: 0, level_count: im.levels, base_array_layer: 0, layer_count: im.layers };
+            let b = [vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .image(image)
+                .subresource_range(range)];
+            unsafe { self.dev().cmd_pipeline_barrier2(sub.pre, &vk::DependencyInfo::default().image_memory_barriers(&b)) };
+            if im.samples == vk::SampleCountFlags::TYPE_1 && !im.needs_init {
+                // the content at the new size (blits cannot read multisampled images: those start cleared)
+                let flt = super::scale::filter(self, im.format, im.tf.kind);
+                for lv in 0..im.levels {
+                    let sl = vk::ImageSubresourceLayers { aspect_mask: asp, mip_level: lv, base_array_layer: 0, layer_count: im.layers };
+                    let (ow, oh) = ((im.extent.width >> lv).max(1) as i32, (im.extent.height >> lv).max(1) as i32);
+                    let (nw, nh) = ((ext.width >> lv).max(1) as i32, (ext.height >> lv).max(1) as i32);
+                    let r = vk::ImageBlit {
+                        src_subresource: sl,
+                        src_offsets: [vk::Offset3D::default(), vk::Offset3D { x: ow, y: oh, z: 1 }],
+                        dst_subresource: sl,
+                        dst_offsets: [vk::Offset3D::default(), vk::Offset3D { x: nw, y: nh, z: 1 }],
+                    };
+                    unsafe { self.dev().cmd_blit_image(sub.pre, im.image, vk::ImageLayout::GENERAL, image, vk::ImageLayout::GENERAL, &[r], flt) };
+                }
+            } else if !im.needs_init {
+                if matches!(im.tf.kind, Kind::Depth | Kind::DepthStencil | Kind::Stencil) {
+                    let v = vk::ClearDepthStencilValue { depth: 0.0, stencil: 0 };
+                    unsafe { self.dev().cmd_clear_depth_stencil_image(sub.pre, image, vk::ImageLayout::GENERAL, &v, &[range]) };
+                } else {
+                    let v = vk::ClearColorValue { uint32: [0; 4] };
+                    unsafe { self.dev().cmd_clear_color_image(sub.pre, image, vk::ImageLayout::GENERAL, &v, &[range]) };
+                }
+            }
+            let old = Image {
+                tex: im.tex,
+                image: std::mem::replace(&mut im.image, image),
+                alloc: std::mem::replace(&mut im.alloc, Some(a)),
+                format: im.format,
+                tf: im.tf,
+                ty: im.ty,
+                extent: im.extent,
+                levels: im.levels,
+                layers: im.layers,
+                samples: im.samples,
+                usage: im.usage,
+                views: std::mem::take(&mut im.views),
+                gpu_owned: true,
+                needs_init: false,
+                needs_upload: false,
+                bc7: im.bc7,
+                decoded: None,
+                sparse: None,
+                page_hash: Vec::new(),
+                rewrites: 0,
+                scale: im.scale,
+            };
+            im.extent = ext;
+            im.scale = s;
+            gone.push(old);
+            done.insert(serial);
+        }
+        super::queue::full_barrier(self, sub.pre);
+        // the texture pool's descriptors of the images made again
+        for (id, serial, v) in self.tables.ids_of(&done) {
+            if let Some(im) = imgs.by_serial.get_mut(&serial) {
+                if let Some(view) = self.image_view(im, v.as_ref(), false) {
+                    self.tables.write_image(&self.d, id, view, None);
+                }
+            }
+        }
+        drop(imgs);
+        for im in gone {
+            self.destroy_released(im);
+        }
+        done.len()
+    }
+
     fn destroy_released(&self, im: Image) {
         {
             self.q.defer_after_use(
@@ -820,6 +962,32 @@ impl Gpu {
         Some(v)
     }
 
+    /// Descriptor buffers: a buffer texture's texel buffer as (device address, bytes, format), the checks of
+    /// `texel_view`.
+    pub fn texel_addr(&self, sub: &mut Sub, t: &tex_t, storage: bool) -> Option<vk::DescriptorAddressInfoEXT<'static>> {
+        let tf = format::tex_format(t.d.format)?;
+        let (bpb, bw, bh) = layout::fmt_bpb(t.d.format);
+        if bw != 1 || bh != 1 || bpb == 0 || tf.expand3 != 0 {
+            return None;
+        }
+        let need = if storage { vk::FormatFeatureFlags::STORAGE_TEXEL_BUFFER } else { vk::FormatFeatureFlags::UNIFORM_TEXEL_BUFFER };
+        let ff = unsafe { self.d.instance.get_physical_device_format_properties(self.d.pdev, tf.vk) }.buffer_features;
+        if !ff.contains(need) {
+            return None;
+        }
+        let n = (t.d.width as u64).min(self.d.props.limits.max_texel_buffer_elements as u64) * bpb as u64;
+        if n == 0 || t.mem.is_null() {
+            return None;
+        }
+        let (buf, off, _) = super::mem::resolve(self, sub, t.mem as u64, n)?;
+        if off % self.d.props.limits.min_texel_buffer_offset_alignment != 0 {
+            crate::log::red_once(&format!("buffer texture at an offset Vulkan cannot view ({off:#x})"));
+            return None;
+        }
+        let base = super::mem::buffer_address(buf)?;
+        Some(vk::DescriptorAddressInfoEXT::default().address(base + off).range(n).format(tf.vk))
+    }
+
     fn texel_view_persistent(&self, sub: &mut Sub, t: &tex_t, storage: bool) -> Option<vk::BufferView> {
         let v = self.texel_view(sub, t, storage)?;
         // the pool set holds it past this submission: it is taken out of the submission's list and kept
@@ -831,6 +999,13 @@ impl Gpu {
         // buffer textures registered since the last submission: their pool-set views
         for id in self.tables.take_buf_pending() {
             let Some(t) = self.tables.buf_tex_at(id) else { continue };
+            if self.d.caps.descbuf {
+                if let Some(u) = self.texel_addr(sub, &t, false) {
+                    let s = self.texel_addr(sub, &t, true);
+                    self.tables.write_texel_addrs(&self.d, &self.layout, id, u, s);
+                }
+                continue;
+            }
             let Some(uv) = self.texel_view_persistent(sub, &t, false) else { continue };
             let sv = self.texel_view_persistent(sub, &t, true);
             self.tables.write_texel_views(&self.d, id, uv, sv);
@@ -967,21 +1142,6 @@ impl Gpu {
         if t_up > 0.5 {
             crate::vklog!("textures at a submission: {t_up:.2} s for {} images due: CPU writes checked {t_scan:.2} s, decoded ahead {:.2} s, initialized {:.2} s, uploaded {:.2} s", serials.len(), t_dec - t_scan, t_init - t_dec, t_up - t_init);
         }
-        let writes = std::mem::take(&mut imgs.writes);
-        for (s, level, layer, off, ext, data) in writes {
-            if let Some(im) = imgs.by_serial.get(&s) {
-                let (buf, bo) = sub.stage_bytes(self, &data);
-                let r = vk::BufferImageCopy {
-                    buffer_offset: bo,
-                    buffer_row_length: 0,
-                    buffer_image_height: 0,
-                    image_subresource: vk::ImageSubresourceLayers { aspect_mask: aspect(&im.tf), mip_level: level, base_array_layer: layer, layer_count: 1 },
-                    image_offset: off,
-                    image_extent: ext,
-                };
-                unsafe { self.dev().cmd_copy_buffer_to_image(sub.pre, buf, im.image, vk::ImageLayout::GENERAL, &[r]) };
-            }
-        }
     }
 
     /// Layout and contents of an image, in the submission's upload command buffer (also used mid-replay for a render
@@ -1108,43 +1268,45 @@ impl Gpu {
             ));
         }
         for (buf, r) in copies {
-            unsafe { self.dev().cmd_copy_buffer_to_image(sub.pre, buf, im.image, vk::ImageLayout::GENERAL, &[r]) };
+            copy_buf_img(self, sub.pre, im, buf, r, true);
         }
     }
 
     /// nvnTextureWriteTexels: into the storage (block-linear or linear) and into the image at the next submission.
     pub fn write_texels(&self, t: &tex_t, v: Option<view_t>, r: &NVNcopyRegion, data: *const u8, row: usize, img: usize) {
+        // Turbo's write_texels: the texels go into the texture's storage and every image over that storage uploads
+        // from it again. Written into the image alone they were lost to the next upload from the storage and never
+        // reached another texture object over the same memory (Mario Kart 8 Deluxe's mode-select preview: the movie
+        // decoder writes its frames into the client's texture, the menu samples the game's own object: black).
         let level = v.filter(|v| v.bits & VW_LEVELS != 0).map(|v| v.base_level as u32).unwrap_or(0);
         let layer0 = v.filter(|v| v.bits & VW_LAYERS != 0).map(|v| v.min_layer as u32).unwrap_or(0);
-        let (bpb, bw, bh) = layout::fmt_bpb(t.d.format);
-        let rb = (r.width.max(0) as u32).div_ceil(bw) as usize * bpb as usize;
-        let rows = (r.height.max(0) as u32).div_ceil(bh) as usize;
-        let depth = r.depth.max(1) as usize;
-        let mut imgs = self.images.lock().unwrap();
-        if !self.ensure_image(&mut imgs, t) {
+        if t.mem.is_null() || t.l.size == 0 {
+            crate::log::red_once("WriteTexels: the texture has no storage");
             return;
         }
-        let is3d = t.d.target == target::T3D;
-        for z in 0..depth {
-            let mut lin = vec![0u8; rb * rows];
-            for y in 0..rows {
-                let src = unsafe { data.add(z * img + y * row) };
-                unsafe { core::ptr::copy_nonoverlapping(src, lin.as_mut_ptr().add(y * rb), rb) };
-            }
-            let layer = if is3d { layer0 } else { layer0 + r.zoffset as u32 + z as u32 };
-            let zoff = if is3d { r.zoffset + z as i32 } else { 0 };
-            imgs.writes.push((
-                t.serial,
-                level,
-                layer,
-                vk::Offset3D { x: r.xoffset, y: r.yoffset, z: zoff },
-                vk::Extent3D { width: r.width as u32, height: r.height as u32, depth: 1 },
-                lin,
+        if write_storage(t, level, layer0, r, data, row, img).is_none() {
+            crate::log::red_once(&format!(
+                "WriteTexels: region {},{},{} {}x{}x{} of level {level} (layer {layer0}) does not fit texture {}x{}x{} format {:#x} target {} flags {:#x}: not written",
+                r.xoffset, r.yoffset, r.zoffset, r.width, r.height, r.depth, t.d.width, t.d.height, t.d.depth, t.d.format, t.d.target, t.d.flags
             ));
+            return;
         }
-        if let Some(im) = imgs.by_serial.get_mut(&t.serial) {
-            if im.tf.expand3 != 0 || im.tf.astc.is_some() {
-                crate::log::red_once("WriteTexels into an RGB or ASTC texture: not converted yet");
+        self.storage_written(t.mem as u64, t.l.size);
+    }
+
+    /// The CPU wrote [lo, lo + n) behind the graphics layer's back (WriteTexels, a host decoder): every image over
+    /// it uploads from its storage at the next submission, also one the GPU wrote before.
+    pub fn storage_written(&self, lo: u64, n: u64) {
+        let mut imgs = self.images.lock().unwrap();
+        let max = imgs.max_size;
+        let hit: Vec<u64> = imgs.by_addr.range(lo.saturating_sub(max)..lo + n).flat_map(|(_, ss)| ss.iter().copied()).collect();
+        for s in hit {
+            if let Some(im) = imgs.by_serial.get_mut(&s) {
+                let (a, b) = (im.tex.mem as u64, im.tex.mem as u64 + im.tex.l.size);
+                if a < lo + n && lo < b && im.sparse.is_none() {
+                    im.gpu_owned = false;
+                    im.needs_upload = true;
+                }
             }
         }
     }
@@ -1179,7 +1341,7 @@ impl Gpu {
                 image_offset: vk::Offset3D { x: r.xoffset, y: r.yoffset, z: if is3d { r.zoffset } else { 0 } },
                 image_extent: vk::Extent3D { width: r.width as u32, height: r.height as u32, depth: if is3d { depth as u32 } else { 1 } },
             };
-            unsafe { g.dev().cmd_copy_image_to_buffer(sub.main, im.image, vk::ImageLayout::GENERAL, rbuf.buf, &[reg]) };
+            copy_buf_img(g, sub.main, im, rbuf.buf, reg, false);
         });
         super::queue::wait_fence(f, u64::MAX);
         for z in 0..depth {
@@ -1188,6 +1350,44 @@ impl Gpu {
             }
         }
         self.free_buffer(rbuf);
+    }
+}
+
+/// A buffer <-> image copy (`to_image`: into the image), its region in the texture's texels: through a bounce image
+/// of the texture's size when the image is scaled (resolution scale).
+pub fn copy_buf_img(g: &Gpu, cb: vk::CommandBuffer, im: &Image, buf: vk::Buffer, r: vk::BufferImageCopy, to_image: bool) {
+    let dev = g.dev();
+    if im.scale == 1.0 {
+        unsafe {
+            if to_image {
+                dev.cmd_copy_buffer_to_image(cb, buf, im.image, vk::ImageLayout::GENERAL, &[r]);
+            } else {
+                dev.cmd_copy_image_to_buffer(cb, im.image, vk::ImageLayout::GENERAL, buf, &[r]);
+            }
+        }
+        return;
+    }
+    let sl = r.image_subresource;
+    let e = vk::Extent3D { width: r.image_extent.width, height: r.image_extent.height, depth: 1 };
+    let Some(b) = super::scale::bounce(g, im.format, e, sl.layer_count) else {
+        crate::log::red_once("resolution scale: no bounce image for a copy of a scaled render target: not copied");
+        return;
+    };
+    let bl = vk::ImageSubresourceLayers { aspect_mask: sl.aspect_mask, mip_level: 0, base_array_layer: 0, layer_count: sl.layer_count };
+    let br = vk::BufferImageCopy { image_subresource: bl, image_offset: vk::Offset3D::default(), image_extent: e, ..r };
+    let flt = super::scale::filter(g, im.format, im.tf.kind);
+    let asp = aspect(&im.tf);
+    super::scale::general(g, cb, b, asp, sl.layer_count, true);
+    unsafe {
+        if to_image {
+            dev.cmd_copy_buffer_to_image(cb, buf, b, vk::ImageLayout::GENERAL, &[br]);
+            super::scale::general(g, cb, b, asp, sl.layer_count, false);
+            super::scale::blit(g, cb, b, 1.0, bl, vk::Offset3D::default(), im.image, im.scale, sl, r.image_offset, e, flt);
+        } else {
+            super::scale::blit(g, cb, im.image, im.scale, sl, r.image_offset, b, 1.0, bl, vk::Offset3D::default(), e, flt);
+            super::scale::general(g, cb, b, asp, sl.layer_count, false);
+            dev.cmd_copy_image_to_buffer(cb, b, vk::ImageLayout::GENERAL, buf, &[br]);
+        }
     }
 }
 
@@ -1236,4 +1436,62 @@ pub mod upload_stats {
         let top: Vec<String> = v.iter().take(6).map(|e| format!("{} x{:.2}/frame {:.2} ms/frame", e.0, e.1 as f64 / f, e.2 as f64 / 1e6 / f)).collect();
         Some(format!("uploads from storage: {} textures, {:.2} ms per frame; most: {}", v.len(), total as f64 / 1e6 / f, top.join("; ")))
     }
+}
+
+/// WriteTexels' bytes (rows of `row` bytes, images of `img`) into a texture's storage: block-linear levels through
+/// the swizzle (a level-layer the region does not cover whole is read first), linear ones row by row at its stride.
+fn write_storage(t: &tex_t, level: u32, layer0: u32, r: &NVNcopyRegion, data: *const u8, row: usize, img: usize) -> Option<()> {
+    let (bpb, bw, bh) = layout::fmt_bpb(t.d.format);
+    if bpb == 0 || r.xoffset < 0 || r.yoffset < 0 || r.zoffset < 0 || r.width <= 0 || r.height <= 0 {
+        return None;
+    }
+    let rb = (r.width as u32).div_ceil(bw) as usize * bpb as usize;
+    let rows = (r.height as u32).div_ceil(bh) as usize;
+    let (x0, y0) = ((r.xoffset as u32 / bw * bpb) as usize, (r.yoffset as u32 / bh) as usize);
+    let depth = r.depth.max(1) as usize;
+    let is3d = t.d.target == target::T3D;
+    // SAFETY: the texture's storage is guest memory of l.size bytes the game keeps while the texture is live
+    let storage = unsafe { core::slice::from_raw_parts_mut(t.mem, t.l.size as usize) };
+    if t.d.flags as u32 & tex_flags::LINEAR != 0 {
+        let stride = if t.d.stride != 0 { t.d.stride as usize } else { (t.d.width.div_ceil(bw) * bpb) as usize };
+        if level != 0 || depth != 1 || x0 + rb > stride {
+            return None;
+        }
+        let base = layer0 as usize * t.l.layer_size as usize;
+        for y in 0..rows {
+            let o = base + (y0 + y) * stride + x0;
+            if o + rb > storage.len() {
+                return None;
+            }
+            storage[o..o + rb].copy_from_slice(unsafe { core::slice::from_raw_parts(data.add(y * row), rb) });
+        }
+        return Some(());
+    }
+    // block-linear: one level-layer (3D: all its slices) at a time
+    let groups: Vec<(u32, Vec<usize>)> = if is3d { vec![(layer0, (0..depth).collect())] } else { (0..depth).map(|z| (layer0 + r.zoffset as u32 + z as u32, vec![z])).collect() };
+    for (layer, zs) in groups {
+        let g = deswizzle::geom(&t.d, level, layer)?;
+        let pitch = g.row_bytes as usize;
+        if x0 + rb > pitch || y0 + rows > g.rows as usize {
+            return None;
+        }
+        let z_first = if is3d { r.zoffset as usize } else { 0 };
+        if z_first + zs.len() > g.slices as usize {
+            return None;
+        }
+        let mut lin = vec![0u8; pitch * g.rows as usize * g.slices as usize];
+        let whole = x0 == 0 && rb == pitch && y0 == 0 && rows == g.rows as usize && zs.len() == g.slices as usize;
+        if !whole {
+            deswizzle::deswizzle(&t.d, level, layer, storage, &mut lin, pitch)?;
+        }
+        for &z in &zs {
+            let slice = if is3d { z_first + z } else { 0 };
+            for y in 0..rows {
+                let o = (slice * g.rows as usize + y0 + y) * pitch + x0;
+                lin[o..o + rb].copy_from_slice(unsafe { core::slice::from_raw_parts(data.add(z * img + y * row), rb) });
+            }
+        }
+        deswizzle::swizzle(&t.d, level, layer, &lin, pitch, storage)?;
+    }
+    Some(())
 }

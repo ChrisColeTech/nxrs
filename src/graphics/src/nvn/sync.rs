@@ -54,9 +54,11 @@ nvn_fns! {
         1
     }
     fn nvnSyncWait(s: *const NVNsync, timeout: u64) -> u32 {
-        // a fence recorded in a command buffer still queued for the replay thread is set once that replays
-        if (*(s as *const sync_t)).fenced == 0 && vk::queue::aq_busy() {
-            super::blocking(vk::queue::aq_drain);
+        // a fence recorded in a command buffer still queued for the replay thread is set once that replays (Turbo's
+        // aq_wait_fenced: until the sync is fenced or the queue has run dry, within the timeout; a poll does not wait)
+        if (*(s as *const sync_t)).fenced == 0 && timeout > 0 && vk::queue::aq_busy() {
+            let fenced = &(*(s as *const sync_t)).fenced as *const u32 as usize;
+            super::blocking(|| vk::queue::aq_wait_until(timeout, || unsafe { core::ptr::read_volatile(fenced as *const u32) } != 0));
         }
         let o = &*(s as *const sync_t);
         if o.fenced == 0 || vk::queue::fence_done(o.fence) {
@@ -64,7 +66,9 @@ nvn_fns! {
         }
         let t0 = std::time::Instant::now();
         let fence = o.fence;
-        if super::blocking(|| vk::queue::wait_fence(fence, timeout)) {
+        let ok = super::blocking(|| vk::queue::wait_fence(fence, timeout));
+        vk::perf::add(vk::perf::C::WaitSyncNs, t0.elapsed().as_nanos() as u64);
+        if ok {
             sync_wait::CONDITION_SATISFIED
         } else {
             if timeout >= 1_000_000_000 {

@@ -260,7 +260,7 @@ nvn_fns! {
     fn nvnCommandBufferTiledDownsample(c: *mut NVNcommandBuffer, s: *const NVNtexture, d: *const NVNtexture) { tex_pair(c, op::DOWNSAMPLE, 0, s, core::ptr::null(), d, core::ptr::null()); }
     fn nvnCommandBufferTiledDownsampleTextureView(c: *mut NVNcommandBuffer, s: *const NVNtexture, sv: *const NVNtextureView, d: *const NVNtexture, dv: *const NVNtextureView) { tex_pair(c, op::DOWNSAMPLE, 0, s, sv, d, dv); }
     fn nvnCommandBufferResolveDepthBuffer(c: *mut NVNcommandBuffer) {
-        // NVN resolves the bound multisample depth target into its single-sample alias (the driver's depth resolve)
+        // the bound depth target's writes made visible to later reads as a texture (the replay ends its pass there)
         rec(c, op::RESOLVE_DEPTH, 8);
     }
 }

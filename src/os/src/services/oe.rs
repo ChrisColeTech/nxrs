@@ -165,11 +165,44 @@ oefn!(device_id, |a| {
     crate::guest::write_bytes(a.x(0), &[0x78, 0x62, 0x6c, 0x00, 0x53, 0x57, 0x4e, 0x41, 0x54, 0x49, 0x56, 0x45, 0x31, 0x30, 0x30, 0x31]);
     0
 });
+// TryPopLaunchParameter(size_t* out, void* buffer, size_t size) -> bool: the parameter the program that started
+// this one passed to ExecuteProgram (`NXRS_LAUNCH_PARAM`, a file), once
 oefn!(launch_param, |a| {
-    crate::guest::out(a.x(0), 0u64);
-    0
+    static POPPED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+    let data = std::env::var_os("NXRS_LAUNCH_PARAM").and_then(|p| std::fs::read(p).ok());
+    match data {
+        Some(d) if !POPPED.swap(true, Ordering::Relaxed) => {
+            let n = d.len().min(a.x(2) as usize);
+            crate::guest::write_bytes(a.x(1), &d[..n]);
+            crate::guest::out(a.x(0), n as u64);
+            crate::log!("oe: launch parameter of {} bytes from program {}", d.len(), previous_program());
+            1
+        }
+        _ => {
+            crate::guest::out(a.x(0), 0u64);
+            0
+        }
+    }
 });
-oefn!(prev_program, |a| { u64::MAX });
+oefn!(prev_program, |a| { previous_program() as i64 as u64 });
+
+/// The program that started this one with ExecuteProgram (`NXRS_PREV_PROGRAM`), else -1.
+fn previous_program() -> i32 {
+    std::env::var("NXRS_PREV_PROGRAM").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(-1)
+}
+
+/// This build's program index and the executable of program `index`: program 0 is `<name>.exe`, program N
+/// `<name>_p<N>.exe` in the same folder (`nxrs-build build --program N -o <name>_p<N>`).
+fn program_exe(index: i32) -> Option<(i32, std::path::PathBuf)> {
+    let exe = std::env::current_exe().ok()?;
+    let stem = exe.file_stem()?.to_string_lossy().into_owned();
+    let (base, cur) = match stem.rsplit_once("_p") {
+        Some((b, n)) if !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => (b.to_string(), n.parse().unwrap_or(0)),
+        _ => (stem.clone(), 0),
+    };
+    let name = if index == 0 { base } else { format!("{base}_p{index}") };
+    Some((cur, exe.with_file_name(format!("{name}.exe"))))
+}
 oefn!(default_res, |a| {
     let docked = opmode() == 1;
     crate::guest::out(a.x(0), if docked { 1920u32 } else { 1280 });
@@ -248,9 +281,34 @@ oefn!(demo_exit, |a| {
     crate::log_once!("demo exit", "[RED] oe: ExitApplicationAndGoBackToInStoreDemoMenu: ignored (no in-store demo menu)");
     0
 });
+// ExecuteProgram(int index, const void* param, size_t size): this program ends and program `index` of the same
+// application starts with the parameter (a successor process, `program_exe`; its log goes to the same output, and the
+// harness follows it by the `exec:` line)
 oefn!(execute_program, |a| {
-    crate::log!("[RED] oe::ExecuteProgram {} ({} bytes of parameters): the host runs one program; the run ends here", a.i(0), a.x(2));
+    let (index, param, size) = (a.i(0), a.x(1), a.x(2));
     crate::log::report_gaps("ExecuteProgram");
+    match program_exe(index) {
+        Some((cur, exe)) if exe.is_file() => {
+            let pfile = std::env::temp_dir().join(format!("nxrs_launch_{}_{index}.bin", std::process::id()));
+            let bytes = if param != 0 && size != 0 { crate::guest::bytes(param, size).to_vec() } else { vec![] };
+            let _ = std::fs::write(&pfile, &bytes);
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.args(std::env::args_os().skip(1))
+                .current_dir(exe.parent().unwrap())
+                .env_remove("NXRS_DATA")
+                .env_remove("NXRT_EXEFS")
+                .env("NXRS_LAUNCH_PARAM", &pfile)
+                .env("NXRS_PREV_PROGRAM", cur.to_string());
+            match cmd.spawn() {
+                Ok(child) => {
+                    crate::log!("exec: program {cur} -> program {index} ({} bytes of parameters): {} started as process {}", bytes.len(), exe.display(), child.id());
+                }
+                Err(e) => crate::log!("[RED] oe::ExecuteProgram {index}: {} did not start: {e}", exe.display()),
+            }
+        }
+        Some((_, exe)) => crate::log!("[RED] oe::ExecuteProgram {index} ({size} bytes of parameters): {} is not built (nxrs-build build --program {index}); the run ends here", exe.display()),
+        None => crate::log!("[RED] oe::ExecuteProgram {index}: no executable path; the run ends here"),
+    }
     nxrt::process::exit(0);
 });
 pub const MSG_STARTUP_LOGO: u32 = 95;

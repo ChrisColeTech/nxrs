@@ -219,7 +219,13 @@ impl Package {
         if programs.is_empty() {
             return fmt(format!("{p}: no decryptable Program NCA; check the installed keys"));
         }
-        let title_id = programs.iter().map(|n| n.title_id).min().unwrap();
+        // a multi-program application (programs at title id + index, started by oe::ExecuteProgram): program 0
+        // unless `NXRS_PROGRAM_INDEX` (the cli's `--program`) names another
+        let index = std::env::var("NXRS_PROGRAM_INDEX").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+        let title_id = programs.iter().map(|n| n.title_id).min().unwrap() + index;
+        if !programs.iter().any(|n| n.title_id == title_id) {
+            return fmt(format!("{p}: no program {index} (title {title_id:016x}) in the package"));
+        }
         let mut programs: Vec<Arc<Nca>> = programs.into_iter().filter(|n| n.title_id == title_id).collect();
         let patches: Vec<Arc<Nca>> = programs.iter().filter(|n| is_patch(n)).cloned().collect();
         let bases: Vec<Arc<Nca>> = programs.iter().filter(|n| !is_patch(n)).cloned().collect();

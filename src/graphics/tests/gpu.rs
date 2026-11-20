@@ -8,6 +8,7 @@ use nxgfx::nvn::cmd::*;
 
 use nxgfx::nvn::state::*;
 use nxgfx::nvn::types::*;
+use nxgfx::nvn::tex::*;
 
 const W: u32 = 64;
 const H: u32 = 64;
@@ -429,5 +430,80 @@ fn event_wait_parks_a_queue_until_another_queue_signals() {
         nvnCommandBufferFinalize(&mut *cmd_b);
         nvnQueueFinalize(&mut *qb_obj);
     }
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// WriteTexels lands in the texture's storage: another texture object over the same storage reads it (Mario Kart 8
+/// Deluxe's menu preview: the movie decoder writes the client's texture, the menu samples its own), also after its
+/// image exists (a later frame), and a partial region keeps the rest.
+#[test]
+fn write_texels_reach_every_texture_over_the_storage() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let (w, h) = (40u32, 24u32);
+    let a = n.texture(w, h, f::RGBA8, 0, true);
+    // a second object over the same storage (as a game initializes its own over the decoder's buffer)
+    let b = unsafe {
+        let mut tb = NVNtextureBuilder::boxed();
+        let mut t = NVNtexture::boxed();
+        nvnTextureBuilderSetDevice(&mut *tb, n.d());
+        nvnTextureBuilderSetDefaults(&mut *tb);
+        nvnTextureBuilderSetSize2D(&mut *tb, w as i32, h as i32);
+        nvnTextureBuilderSetFormat(&mut *tb, f::RGBA8);
+        nvnTextureBuilderSetStorage(&mut *tb, nvnTextureGetMemoryPool(&*a), nvnTextureGetMemoryOffset(&*a));
+        assert_eq!(nvnTextureInitialize(&mut *t, &*tb), 1);
+        t
+    };
+    let frame = |k: u8| -> Vec<u8> { (0..w * h).flat_map(|i| [(i % 251) as u8, k, (i / w) as u8, 255]).collect() };
+    let whole = NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: w as i32, height: h as i32, depth: 1 };
+    let f1 = frame(10);
+    unsafe { nvnTextureWriteTexels(&*a, core::ptr::null(), &whole, f1.as_ptr()) };
+    assert!(n.read_rgba8(&b, w, h) == f1, "first frame through the other object");
+    let f2 = frame(20);
+    unsafe { nvnTextureWriteTexelsStrided(&*a, core::ptr::null(), &whole, f2.as_ptr(), (w * 4) as isize, 0) };
+    assert!(n.read_rgba8(&b, w, h) == f2, "second frame: the existing image uploads again");
+    // a 5x3 region at (7, 9), rows of 5 texels
+    let part: Vec<u8> = (0..15).flat_map(|_| [1u8, 2, 3, 4]).collect();
+    let r = NVNcopyRegion { xoffset: 7, yoffset: 9, zoffset: 0, width: 5, height: 3, depth: 1 };
+    unsafe { nvnTextureWriteTexels(&*a, core::ptr::null(), &r, part.as_ptr()) };
+    let got = n.read_rgba8(&b, w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let i = ((y * w + x) * 4) as usize;
+            let inside = (7..12).contains(&x) && (9..12).contains(&y);
+            let want = if inside { [1u8, 2, 3, 4] } else { [f2[i], f2[i + 1], f2[i + 2], f2[i + 3]] };
+            assert_eq!(&got[i..i + 4], &want, "texel {x},{y}");
+        }
+    }
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// Resolution scale 2: a compressible target is drawn at twice its size (viewport scaled) and read back at the
+/// game's size through the bounce image; the picture matches the unscaled one away from the triangle's edges.
+#[test]
+fn resolution_scale_renders_at_twice_the_size() {
+    let _g = setup();
+    let e0 = validation_errors();
+    nxconfig::set("resolution", "2");
+    let mut n = Nvn::new();
+    let rt = n.texture(W, H, f::RGBA8, nxgfx::nvn::types::tex_flags::COMPRESSIBLE, false);
+    let prog = tri_program(&mut n);
+    let tri = [[-0.8f32, -0.6], [0.7, -0.5], [0.0, 0.9]];
+    let color = [0.0, 1.0, 0.0, 1.0];
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    clear(&mut n, [0.0, 0.0, 1.0, 1.0]);
+    bind_program(&mut n, &prog);
+    draw_tri(&mut n, tri.map(|p| [p[0], p[1], 0.0]), color);
+    n.submit_wait();
+    assert!(nxgfx::vk::scale::active(), "the target was made scaled");
+    let got = n.read_rgba8(&rt, W, H);
+    let want: Vec<Option<[u8; 4]>> = tri_cover(tri, W, H, false)
+        .into_iter()
+        .map(|c| c.map(|inside| if inside { rgba8(color) } else { [0, 0, 255, 255] }))
+        .collect();
+    nxconfig::set("resolution", "1");
+    check("triangle at resolution x2", &got, &want, 0);
     assert_eq!(validation_errors(), e0, "validation errors");
 }

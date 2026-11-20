@@ -381,14 +381,13 @@ pub fn record_sink(g: &Gpu, sub: &mut super::queue::Sub, t: &tex_t, crop: Option
         Some([x, y, w, h]) if w > 0 && h > 0 && x >= 0 && y >= 0 && x + w <= tw && y + h <= th => [x, y, w, h],
         _ => [0, 0, tw, th],
     };
-    let image = {
+    {
         let mut imgs = g.images.lock().unwrap();
         if !g.ensure_image(&mut imgs, t) {
             return;
         }
         g.prepare_image(&mut imgs, t.serial, sub);
-        imgs.by_serial[&t.serial].image
-    };
+    }
     let n = w as u64 * h as u64 * bpb as u64;
     let Ok(buf) = g.buffer(n, vk::BufferUsageFlags::TRANSFER_DST, gpu_allocator::MemoryLocation::GpuToCpu, "frame sink") else { return };
     let r = vk::BufferImageCopy {
@@ -399,9 +398,11 @@ pub fn record_sink(g: &Gpu, sub: &mut super::queue::Sub, t: &tex_t, crop: Option
         image_offset: vk::Offset3D { x, y, z: 0 },
         image_extent: vk::Extent3D { width: w as u32, height: h as u32, depth: 1 },
     };
-    unsafe {
-        super::queue::full_barrier(g, sub.main);
-        g.dev().cmd_copy_image_to_buffer(sub.main, image, vk::ImageLayout::GENERAL, buf.buf, &[r]);
+    super::queue::full_barrier(g, sub.main);
+    {
+        // at the game's size also from a scaled render target (resolution scale)
+        let imgs = g.images.lock().unwrap();
+        super::image::copy_buf_img(g, sub.main, &imgs.by_serial[&t.serial], buf.buf, r, false);
     }
     let ptr = buf.ptr as usize;
     let fmt = tf.vk;

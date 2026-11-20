@@ -175,6 +175,19 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
             return 0;
         }
         WM_CLOSE => {
+            // NXRS_CLOSE_QUIT=0 (scripted runs): a single close is logged and ignored; a second one within 10 s
+            // closes the game (whoever insists gets the window closed)
+            if std::env::var("NXRS_CLOSE_QUIT").is_ok_and(|v| v.trim() == "0") {
+                static LAST: Mutex<Option<std::time::Instant>> = Mutex::new(None);
+                let mut last = LAST.lock().unwrap();
+                let again = last.is_some_and(|t| t.elapsed().as_secs_f64() < 10.0);
+                if !again {
+                    *last = Some(std::time::Instant::now());
+                    let fg = GetForegroundWindow() == h;
+                    crate::flog!("window: close ignored (NXRS_CLOSE_QUIT=0; window in the foreground: {fg}); a second close within 10 s quits");
+                    return 0;
+                }
+            }
             crate::flog!("window: closed by the user or the system");
             std::thread::spawn(|| crate::quit("the window was closed"));
             return 0;
@@ -319,13 +332,20 @@ pub fn open(title: &str) {
             let mut r = RECT { left: 0, top: 0, right: cw.max(640), bottom: ch.max(360) };
             AdjustWindowRectEx(&mut r, WS_OVERLAPPEDWINDOW, 0, 0);
             let t = title_text().encode_wide_z();
-            let h = CreateWindowExW(0, class.as_ptr(), t.as_ptr(), WS_OVERLAPPEDWINDOW | WS_VISIBLE, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, std::ptr::null_mut(), std::ptr::null_mut(), hi, std::ptr::null());
+            // NXRS_NO_ACTIVATE=1 (scripted runs): the window shows without taking the focus from whoever works at the PC
+            let no_activate = std::env::var("NXRS_NO_ACTIVATE").is_ok_and(|v| v.trim() == "1");
+            let style = if no_activate { WS_OVERLAPPEDWINDOW } else { WS_OVERLAPPEDWINDOW | WS_VISIBLE };
+            let h = CreateWindowExW(0, class.as_ptr(), t.as_ptr(), style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, std::ptr::null_mut(), std::ptr::null_mut(), hi, std::ptr::null());
             if h.is_null() {
                 crate::flog!("[RED] window: CreateWindowExW failed ({})", GetLastError());
                 let _ = tx.send(());
                 return;
             }
             HWND_.store(h as isize, Ordering::Release);
+            if no_activate {
+                ShowWindow(h, SW_SHOWNOACTIVATE);
+                crate::flog!("window: shown without taking the focus (NXRS_NO_ACTIVATE=1)");
+            }
             let rid = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: 0, hwndTarget: h };
             RegisterRawInputDevices(&rid, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32);
             if nxconfig::flag("fullscreen") {

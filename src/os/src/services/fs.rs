@@ -992,7 +992,11 @@ fsfn!(open_file_fn, |a| {
     }
 });
 unsafe fn read_into(h: u64, off: u64, buf: u64, n: u64) -> Result<u64, u64> {
+    let t = std::time::Instant::now();
     let data = read_file(h, off, n)?;
+    if crate::trace::on("fsread") {
+        crate::log!("fs read {h:#x} at {off:#x} {n:#x} bytes: {:#x} in {:.2} ms", data.len(), t.elapsed().as_secs_f64() * 1e3);
+    }
     crate::guest::write_bytes(buf, &data);
     Ok(data.len() as u64)
 }

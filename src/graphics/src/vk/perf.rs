@@ -49,6 +49,13 @@ pub enum C {
     ImagesReused,
     PoolSyncNs,
     HashNs,
+    BankNs,
+    SetKeyNs,
+    SetWriteNs,
+    // the game's threads blocked on the GPU side (nvnSyncWait, the window's acquire, nvnQueueFinish)
+    WaitSyncNs,
+    WaitAcquireNs,
+    WaitFinishNs,
     // dropped or degraded work
     TexNoFormat,
     TexCreateFailed,
@@ -94,6 +101,12 @@ const NAMES: [&str; C::N as usize] = [
     "images_reused",
     "pool_sync_ns",
     "hash_ns",
+    "bank_ns",
+    "set_key_ns",
+    "set_write_ns",
+    "wait_sync_ns",
+    "wait_acquire_ns",
+    "wait_finish_ns",
     "tex_no_format",
     "tex_create_failed",
     "view_failed",
@@ -130,6 +143,23 @@ pub fn snapshot() -> Vec<(&'static str, u64)> {
 pub fn gpu_time(ns: u64) {
     add(C::GpuNs, ns);
     inc(C::GpuSubs);
+}
+
+/// The fine-grained timers inside the descriptor work (memory lookups, views, banks, keys, writes): thousands a
+/// frame, a clock read each side (~1-2 ms a frame in Pokemon Legends Z-A). `NXGFX_PROFILE=1` turns them on.
+pub fn fine() -> bool {
+    static V: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("NXGFX_PROFILE").as_deref() == Ok("1"))
+}
+
+/// Times `f` into counter `c` when the fine timers are on (`fine`).
+#[inline]
+pub fn timed_fine<R>(c: C, f: impl FnOnce() -> R) -> R {
+    if fine() {
+        timed(c, f)
+    } else {
+        f()
+    }
 }
 
 /// Times `f` into counter `c`.
@@ -233,13 +263,16 @@ fn csv_start() {
 fn breakdown(cur: &[u64; C::N as usize], base: &[u64; C::N as usize], frames: f64) -> String {
     let d = |c: C| (cur[c as usize] - base[c as usize]) as f64 / 1e6 / frames;
     format!(
-        "prep {:.2} (pools {:.2}, texture hashes {:.2}), sets {:.2} (memory {:.2}, views {:.2}), pipeline lookups {:.2}, passes {:.2}, vertex input {:.2}, uploads {:.2} ms, {:.1} uploads skipped (same bytes), {:.1} images reused",
+        "prep {:.2} (pools {:.2}, texture hashes {:.2}), sets {:.2} (memory {:.2}, views {:.2}, banks {:.2}, keys {:.2}, writes {:.2}), pipeline lookups {:.2}, passes {:.2}, vertex input {:.2}, uploads {:.2} ms, {:.1} uploads skipped (same bytes), {:.1} images reused",
         d(C::PrepNs),
         d(C::PoolSyncNs),
         d(C::HashNs),
         d(C::SetNs),
         d(C::ResolveNs),
         d(C::TexViewNs),
+        d(C::BankNs),
+        d(C::SetKeyNs),
+        d(C::SetWriteNs),
         d(C::PipeLookNs),
         d(C::PassNs),
         d(C::VtxNs),
@@ -328,16 +361,20 @@ pub fn frame(frame: u64) {
     let subs = d(C::GpuSubs, &p);
     if subs > 0 {
         crate::vklog!(
-            "GPU time up to frame {frame}: {:.2} ms per frame ({:.2} ms per submission, {:.1} submissions per frame); replay on the CPU {:.2} ms per frame ({})",
+            "GPU time up to frame {frame}: {:.2} ms per frame ({:.2} ms per submission, {:.1} submissions per frame); replay on the CPU {:.2} ms per frame ({}); the game waited {:.2} ms per frame (sync {:.2}, acquire {:.2}, finish {:.2})",
             d(C::GpuNs, &p) as f64 / 1e6 / df,
             d(C::GpuNs, &p) as f64 / 1e6 / subs as f64,
             subs as f64 / df,
             d(C::ReplayNs, &p) as f64 / 1e6 / df,
-            breakdown(&cur, &p, df)
+            breakdown(&cur, &p, df),
+            (d(C::WaitSyncNs, &p) + d(C::WaitAcquireNs, &p) + d(C::WaitFinishNs, &p)) as f64 / 1e6 / df,
+            d(C::WaitSyncNs, &p) as f64 / 1e6 / df,
+            d(C::WaitAcquireNs, &p) as f64 / 1e6 / df,
+            d(C::WaitFinishNs, &p) as f64 / 1e6 / df
         );
     }
     crate::vklog!(
-        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets, {:.1} write-backs; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms); dropped work {}",
+        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets, {:.1} write-backs; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms; {} linked from parts, {} of them optimized since, {} shader parts made ahead); dropped work {}",
         d(C::Draws, &p) as f64 / df,
         d(C::DrawsSkipped, &p) as f64 / df,
         cur[C::SkipNoShader as usize],
@@ -354,6 +391,9 @@ pub fn frame(frame: u64) {
         cur[C::PipesCompute as usize],
         cur[C::PipeNs as usize] as f64 / 1e6,
         cur[C::PipeMaxNs as usize] as f64 / 1e6,
+        super::Gpu::try_get().map(|g| g.pipes.linked.load(Ordering::Relaxed)).unwrap_or(0),
+        super::Gpu::try_get().map(|g| g.pipes.optimized.load(Ordering::Relaxed)).unwrap_or(0),
+        super::Gpu::try_get().map(|g| g.pipes.prebuilt.load(Ordering::Relaxed)).unwrap_or(0),
         dropped_total()
     );
     st.prev = cur;

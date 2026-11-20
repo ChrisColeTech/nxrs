@@ -22,6 +22,96 @@ pub const DEVINFO: [i32; 0x69] = [
     4096, 1, 4, 2, 0, 4096, 16384, 4096, 128, 32, 65535, 1, 32, 256, 16, 65535, 65535, 256, 16383,
 ];
 
+/// An NVN2 item the driver reads from the GPU's own description at run time (not knowable from the binary).
+const RT: i32 = -1;
+/// The Switch 2's answers (Turbo's g_devinfo2: NVN2 compiled into the game's sdk answers from constants, read from
+/// Donkey Kong Bananza's sdk 20.5.19 and SDK 21.4.4's). Ampere differs from the X1 in 32 vertex bindings, 1,024
+/// compute threads, an unbounded dispatch width, 16 texture levels, 16 KB scratch granularity, 2 KB shader code
+/// padding, 32 separate sampler bindings, and items up to 0xA9. `RT` items keep the X1 value below 0x60 and answer 0
+/// (with a red line) above it.
+pub const DEVINFO2: [i32; 0xAA] = [
+    231, 39, 14, 65536, 256, 8, 16, 4, 16, 32, 16, 4, 4, 4, 32, 32, // 0x00
+    32, 256, 256, 4, 8, 512, 256, RT, RT, 4096, 16384, 16, 1024, 1024, 64, 1024, // 0x10
+    2147483647, 65535, 65535, 8, 1048576, 4096, 16, 4096, 1, 1, 1, RT, 16, RT, 201, 201, // 0x20
+    20, 0, 1, 8, 8, 4, 32, RT, RT, 128, RT, 1, 4, RT, RT, RT, // 0x30
+    RT, RT, 1, 1, 1, 1, 5, 1, 1, 1, 1, 1, 1, 16, 2048, 32, // 0x40
+    4096, 65536, 65536, 256, 16384, 262144, 4096, 1, 4, 2, 0, 4096, 16384, 4096, 128, 32, // 0x50
+    65535, 1, RT, 256, 16, 65535, 65535, 256, 1, 16, 16, 16, 1, 1, 1, 256, // 0x60
+    0, 16, 8, 16, 32, 31, 536870912, 16777216, 16777216, 1073741824, 32, 1, 64, RT, 1, 2147483647, // 0x70
+    32, 32, 4194303, 512, 256, 32, 16383, RT, 8, 0, 0, 4, 256, 16, 0, 1, // 0x80
+    31, 0, 64, 1, 58368, 24576, 0, 256, 262144, RT, RT, 0, 201, 14, 201, 20, // 0x90
+    163840, 8, 4, 256, 256, 4, 65536, 201, 5, 1, // 0xA0
+];
+
+/// The constants of NVN2's own nvnDeviceGetInteger, read from the game's sdk (`set_sdk_image`): its API and GPU code
+/// versions move with the SDK (20.5.19: API 231.30; 21.4.4: 231.39) and games check them.
+static NVN2_ITEMS: std::sync::OnceLock<Vec<Option<i32>>> = std::sync::OnceLock::new();
+
+/// The game's sdk module as loaded (text and data at their offsets from the module's start): the Switch 2's device
+/// answers come from its driver's switch where it has a constant case (Turbo's dm_sdk_nvn2_item). os calls this once
+/// before nvnDeviceInitialize; without it the table above answers.
+pub fn set_sdk_image(img: &[u8]) {
+    let items = nvn2_items(img);
+    match &items {
+        Some(v) => crate::nvnlog!("sdk: NVN2's nvnDeviceGetInteger switch found ({} items, {} constant)", v.len(), v.iter().filter(|x| x.is_some()).count()),
+        None if SWITCH2.load(Ordering::Relaxed) => crate::log::red("sdk: NVN2's nvnDeviceGetInteger switch not found; the device answers the newest versions known"),
+        None => {}
+    }
+    let _ = NVN2_ITEMS.set(items.unwrap_or_default());
+}
+
+/// The driver's switch over the items loads w0 with the major (mov w0, #231) and jumps through a byte table: cmp wN,
+/// #last / adr (the cases) / adrp + add (the table) / ldrb / add, lsl #2 / br. A constant case is `mov w0, #v; b`.
+fn nvn2_items(img: &[u8]) -> Option<Vec<Option<i32>>> {
+    let n = img.len() / 4;
+    let w = |i: usize| u32::from_le_bytes(img[i * 4..i * 4 + 4].try_into().unwrap());
+    let imm21 = |x: u32| -> i64 {
+        let v = ((x >> 3) & 0x1FFFFC) as i64 | ((x >> 29) & 3) as i64;
+        if v & 0x100000 != 0 { v - 0x200000 } else { v }
+    };
+    for p in 8..n.saturating_sub(9) {
+        if w(p) != 0x52801CE0 {
+            continue;
+        }
+        let (mut tb, mut adr, mut lim, mut ldrb, mut br) = (None::<usize>, None::<usize>, None::<usize>, false, false);
+        for q in p - 8..=p + 8 {
+            let x = w(q);
+            if x & 0xFFC0001F == 0x7100001F {
+                lim = Some(((x >> 10) & 0xFFF) as usize);
+            } else if x & 0x9F000000 == 0x90000000 && w(q + 1) & 0xFFC00000 == 0x91000000 {
+                let page = (q * 4) as i64 & !0xFFF;
+                tb = usize::try_from(page + imm21(x) * 4096 + ((w(q + 1) >> 10) & 0xFFF) as i64).ok();
+            } else if x & 0x9F000000 == 0x10000000 {
+                adr = usize::try_from((q * 4) as i64 + imm21(x)).ok();
+            } else if x & 0xFFE0FC00 == 0x38606800 {
+                ldrb = true;
+            } else if x & 0xFFFFFC1F == 0xD61F0000 {
+                br = true;
+            }
+        }
+        let (Some(tb), Some(adr), Some(lim)) = (tb, adr, lim) else { continue };
+        if lim <= 1 || !ldrb || !br || tb + lim >= img.len() {
+            continue;
+        }
+        let items = (0..=lim)
+            .map(|item| {
+                let c = adr + 4 * img[tb + item] as usize;
+                if c + 8 > img.len() {
+                    return None;
+                }
+                let (c0, c1) = (u32::from_le_bytes(img[c..c + 4].try_into().unwrap()), u32::from_le_bytes(img[c + 4..c + 8].try_into().unwrap()));
+                (c0 & 0xFFE0001F == 0x52800000 && c1 & 0xFC000000 == 0x14000000).then_some(((c0 >> 5) & 0xFFFF) as i32)
+            })
+            .collect();
+        return Some(items);
+    }
+    None
+}
+
+fn nvn2_item(w: usize) -> Option<i32> {
+    NVN2_ITEMS.get().and_then(|v| v.get(w).copied().flatten())
+}
+
 /// NVN counter timestamps: 614.4 MHz ticks on the Switch, nanoseconds on the Switch 2.
 pub fn timestamp_from_ns(ns: u64) -> u64 {
     if SWITCH2.load(Ordering::Relaxed) { ns } else { (ns as u128 * 384 / 625) as u64 }
@@ -37,7 +127,7 @@ pub fn now_ns() -> u64 {
 
 fn api() -> (i32, i32) {
     if SWITCH2.load(Ordering::Relaxed) {
-        return (231, 39);
+        return (231, nvn2_item(1).unwrap_or(DEVINFO2[1]));
     }
     let m = SDK_MAJOR.load(Ordering::Relaxed);
     if m != 0 && m <= 10 {
@@ -70,9 +160,21 @@ nvn_fns! {
     fn nvnDeviceGetInteger(d: *const NVNdevice, what: i32, out: *mut i32) {
         let _ = d;
         let w = what as u32 as usize;
+        let s2 = SWITCH2.load(Ordering::Relaxed);
         let v = if w <= 1 {
             let a = api();
             if w == 0 { a.0 } else { a.1 }
+        } else if s2 && w < DEVINFO2.len() && (DEVINFO2[w] != RT || w >= 0x60) {
+            // the Switch 2's driver: its own constant where its switch has one (GPU code versions move with the SDK)
+            if DEVINFO2[w] == RT && nvn2_item(w).is_none() {
+                crate::log::red_once(&format!("nvnDeviceGetInteger item {w:#x}: NVN2 reads it from the GPU at run time, not known here; returning 0"));
+                0
+            } else {
+                nvn2_item(w).unwrap_or(DEVINFO2[w])
+            }
+        } else if w == 0x67 {
+            // SDK 19 (FINAL FANTASY TACTICS): the alignment of its copies of a shader's control section and code
+            256
         } else if w == 0x2E || w == 0x30 {
             // the GPU code version the shader translation reads (1.16)
             if w == 0x2E { 1 } else { 16 }

@@ -54,10 +54,23 @@ static CV: Condvar = Condvar::new();
 static OFF: OnceLock<bool> = OnceLock::new();
 pub static HANDOFFS: AtomicU64 = AtomicU64::new(0);
 pub static STEALS: AtomicU64 = AtomicU64::new(0);
+/// Steals from an equal or better holder (no Horizon equivalent: such a holder keeps its core until it blocks).
+pub static STEALS_ANY: AtomicU64 = AtomicU64::new(0);
 static STARTED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static ME: Cell<Option<usize>> = const { Cell::new(None) };
+}
+
+/// `NXOS_STEAL_ANY_MS=<ms>` (debugging): how long a waiter waits before it takes a core from an equal or better holder
+/// (default 20; 0 = never, as Horizon, where an equal priority holder keeps its core until it blocks or yields).
+fn steal_any() -> Option<Duration> {
+    static V: OnceLock<Option<Duration>> = OnceLock::new();
+    *V.get_or_init(|| match std::env::var("NXOS_STEAL_ANY_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => Some(STEAL_ANY),
+    })
 }
 
 fn off() -> bool {
@@ -148,11 +161,21 @@ fn acquire(i: usize) {
             // a core the waiter may use, held by a thread worse than it (or any holder after STEAL_ANY)
             let me = st.threads[i].clone();
             let pick = (0..st.ncores).filter(|&c| me.mask >> c & 1 != 0).find(|&c| {
-                st.owner[c].is_some_and(|o| st.threads[o].prio > me.prio || waited >= STEAL_ANY) && best_waiter(&st, c) == Some(i)
+                st.owner[c].is_some_and(|o| st.threads[o].prio > me.prio || steal_any().is_some_and(|d| waited >= d)) && best_waiter(&st, c) == Some(i)
             });
             if let Some(c) = pick {
                 if let Some(o) = st.owner[c] {
                     st.threads[o].displaced = true;
+                    if st.threads[o].prio <= me.prio && STEALS_ANY.fetch_add(1, Ordering::Relaxed) < 16 {
+                        crate::log!(
+                            "scheduler: thread {:#x} (priority {}) took core {c} from thread {:#x} (priority {}) after {:.1} ms: the holder runs on until its next checkpoint",
+                            me.handle,
+                            me.prio,
+                            st.threads[o].handle,
+                            st.threads[o].prio,
+                            waited.as_secs_f64() * 1e3
+                        );
+                    }
                 }
                 st.owner[c] = Some(i);
                 let t = &mut st.threads[i];
@@ -352,7 +375,13 @@ pub fn stats() -> String {
     let st = ST.lock().unwrap();
     let held: Vec<String> = st.owner[..st.ncores].iter().map(|o| o.map_or("-".into(), |i| format!("{:#x}", st.threads[i].handle))).collect();
     let waiting = st.threads.iter().filter(|t| t.waiting).count();
-    format!("cores [{}], {waiting} waiting, {} handoffs, {} steals", held.join(" "), HANDOFFS.load(Ordering::Relaxed), STEALS.load(Ordering::Relaxed))
+    format!(
+        "cores [{}], {waiting} waiting, {} handoffs, {} steals ({} from an equal or better holder)",
+        held.join(" "),
+        HANDOFFS.load(Ordering::Relaxed),
+        STEALS.load(Ordering::Relaxed),
+        STEALS_ANY.load(Ordering::Relaxed)
+    )
 }
 
 #[cfg(test)]

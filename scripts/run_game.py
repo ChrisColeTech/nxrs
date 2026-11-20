@@ -56,6 +56,34 @@ def kill_pid(pid):
     ps('Stop-Process -Id %d -Force' % pid)
 
 
+# The process being watched: the one run() started, or the successor it handed over to (oe::ExecuteProgram: the game
+# logs `exec: ... started as process N` and exits; the watch, the lock and the scenario's pipe follow process N).
+CURRENT = {'pid': None}
+
+
+def current(pid):
+    return CURRENT['pid'] or pid
+
+
+def successor(logp, after):
+    """The successor process the game's log names after byte offset `after` (None if none)."""
+    import re
+    try:
+        with open(logp, 'rb') as f:
+            f.seek(after)
+            t = f.read().decode('utf-8', 'replace')
+    except OSError:
+        return None
+    m = None
+    for m in re.finditer(r'exec: program \d+ -> program \d+ .*?: (.+?) started as process (\d+)', t):
+        pass
+    return (m.group(1).strip(), int(m.group(2))) if m else None
+
+
+def alive(pid):
+    return ps("if (Get-Process -Id %d -ErrorAction SilentlyContinue) { 1 } else { 0 }" % pid) == '1'
+
+
 def run(exe, logp, hard, args=(), env=None, during=None, say=print):
     """One guarded run. `during(pid)` (optional) runs on a thread while the game runs (a scenario's steps).
     Returns dict(why, exit, peak_mb, seconds) or raises SystemExit with the reason it could not start."""
@@ -91,23 +119,42 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
     try:
         with open(logp, 'wb') as lf:
             p = subprocess.Popen([exe] + list(args), stdout=lf, stderr=subprocess.STDOUT, cwd=os.path.dirname(exe), env=env)
+            CURRENT['pid'] = p.pid
             if during:
                 threading.Thread(target=during, args=(p.pid,), daemon=True).start()
-            while p.poll() is None:
-                time.sleep(2)
-                m = priv_mb(p.pid)
-                peak = max(peak, m)
-                fc = free_commit_mb()
-                if m > PRIVATE_LIMIT_MB or fc < COMMIT_MIN_RUN_MB:
-                    why = 'WATCHDOG: private %d MB, free commit %d MB' % (m, fc)
-                    kill_pid(p.pid)
+            pid, running, seen = p.pid, (lambda: p.poll() is None), 0
+            while True:
+                while running():
+                    time.sleep(2)
+                    m = priv_mb(pid)
+                    peak = max(peak, m)
+                    fc = free_commit_mb()
+                    if m > PRIVATE_LIMIT_MB or fc < COMMIT_MIN_RUN_MB:
+                        why = 'WATCHDOG: private %d MB, free commit %d MB' % (m, fc)
+                        kill_pid(pid)
+                        break
+                    if time.time() - t0 > hard:
+                        why = 'hard timeout %.0f s' % hard
+                        kill_pid(pid)
+                        break
+                if pid == p.pid:
+                    p.wait()
+                    rc = p.returncode
+                if why != 'exited':
                     break
-                if time.time() - t0 > hard:
-                    why = 'hard timeout %.0f s' % hard
-                    kill_pid(p.pid)
+                lf.flush()
+                nxt = successor(logp, seen)
+                if not nxt or nxt[1] == pid or not alive(nxt[1]):
                     break
-            p.wait()
-            rc = p.returncode
+                seen = os.path.getsize(logp)
+                pid = nxt[1]
+                CURRENT['pid'] = pid
+                mine_new = '%s | %s | %s\n' % (os.environ.get('NXRS_LANE', 'agent'), os.path.basename(nxt[0]), datetime.datetime.now().isoformat(timespec='seconds'))
+                with open(LOCK, 'w') as fl:
+                    fl.write(mine_new)
+                mine = mine_new
+                say('the game handed over to %s (process %d); watching it' % (os.path.basename(nxt[0]), pid))
+                running = (lambda q=pid: alive(q))
     finally:
         for _ in range(20):
             if not other_games():

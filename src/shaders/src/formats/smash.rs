@@ -13,6 +13,13 @@
 //! section, ...), child hashes (8), file infos (16: path, path-to-info, info-to-data index, flags; 0x8000 regional),
 //! info-to-data (12: directory offset index, file data index, load type), file data (16: offset / 4, stored size,
 //! size, flags).
+//!
+//! Version 1.0.0 stores the table uncompressed (it starts with its size, not 0x10) in an older layout: a 0x34-byte
+//! header (table size, directory count, directory offset count, file info count, file data count, ..., child hash
+//! count, ..., second directory offset count, second file data count, 0x10, 0x10, +0x30 u8 region count), the stream
+//! header and tables as later, the regions (12 each), the directory infos (0x34, their hashes inside), the directory
+//! offsets (0x1c), child hashes (8), file infos (0x28: path, extension, parent and name hashes, file data index,
+//! flags), file data (16). Each directory offset names its range of file data, whose offsets are relative to it.
 
 use super::archive;
 use crate::nvn::*;
@@ -27,6 +34,13 @@ pub fn files(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, label: &str) -> R<Vec<(u64, 
     }
     let (file_off, fs_off) = (u64_at(&h, 0x10).unwrap(), u64_at(&h, 0x20).unwrap());
     let th = read(fs_off, 16)?;
+    if u32_at(&th, 0) != Some(0x10) {
+        let size = u32_at(&th, 0).unwrap() as u64;
+        if !(0x44..1 << 31).contains(&size) {
+            return Err(format!("{label}: the file system table's size {size:#x} is not one this reader knows"));
+        }
+        return files_v1(&read(fs_off, size)?, file_off, label);
+    }
     let (size, stored) = (u32_at(&th, 4).unwrap() as usize, u32_at(&th, 8).unwrap() as u64);
     let fs = archive::unzstd(&read(fs_off + 16, stored)?, &Default::default(), label)?;
     if fs.len() != size {
@@ -89,6 +103,49 @@ pub fn files(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, label: &str) -> R<Vec<(u64, 
                 continue;
             }
             out.push((c | ((wd as u64 & 0xff) << 32), at, csz, usz));
+        }
+    }
+    out.sort_by_key(|e| e.1);
+    Ok(out)
+}
+
+/// Version 1.0.0's uncompressed table: every directory offset's file data, labelled with the path of the file info
+/// that names it (else its file data index).
+fn files_v1(fs: &[u8], file_off: u64, label: &str) -> R<Vec<(u64, u64, u64, u64)>> {
+    let w = |o: usize| u32_at(fs, o).map(|x| x as usize).ok_or_else(|| format!("{label}: the file system table is cut short at {o:#x}"));
+    let (n_dirs, n_off1, n_info, n_data, n_hfold, n_off2, n_data2) = (w(4)?, w(8)?, w(12)?, w(16)?, w(24)?, w(32)?, w(36)?);
+    let regions = *fs.get(0x30).ok_or("cut short")? as usize;
+    let mut o = 0x34;
+    let (qd, sh, sfi, soe) = (w(o)?, w(o + 4)?, w(o + 8)?, w(o + 12)?);
+    o += 16 + qd * 12 + sh * 20 + sfi * 4 + soe * 16 + regions * 12 + n_dirs * 0x34;
+    let dof = o;
+    let n_do = n_off1 + n_off2;
+    o += n_do * 0x1c + n_hfold * 8;
+    let fi = o;
+    o += n_info * 0x28;
+    let fd = o;
+    let n_fd = n_data + n_data2;
+    o += n_fd * 16;
+    if o > fs.len() {
+        return Err(format!("{label}: version 1.0 file system table: the layout runs past its end ({o:#x} > {:#x})", fs.len()));
+    }
+    let r32 = |o: usize| u32_at(fs, o).unwrap() as usize;
+    let mut name = std::collections::HashMap::new();
+    for i in 0..n_info {
+        let (c, wd, fdi) = (r32(fi + 0x28 * i) as u64, r32(fi + 0x28 * i + 4), r32(fi + 0x28 * i + 0x20));
+        name.entry(fdi).or_insert(c | ((wd as u64 & 0xff) << 32));
+    }
+    let mut out = vec![];
+    let mut seen = std::collections::HashSet::new();
+    for j in 0..n_do {
+        let (base, start, count) = (u64_at(fs, dof + 0x1c * j).unwrap(), r32(dof + 0x1c * j + 16), r32(dof + 0x1c * j + 20));
+        for k in start..(start + count).min(n_fd) {
+            let (off_in, csz, usz) = (r32(fd + 16 * k) as u64, r32(fd + 16 * k + 4) as u64, r32(fd + 16 * k + 8) as u64);
+            let at = file_off + base + 4 * off_in;
+            if csz == 0 || !seen.insert(at) {
+                continue;
+            }
+            out.push((name.get(&k).copied().unwrap_or(k as u64), at, csz, usz));
         }
     }
     out.sort_by_key(|e| e.1);
@@ -159,5 +216,39 @@ mod tests {
         let f = files(&read, "/data.arc").unwrap();
         assert_eq!(f, vec![(0x11_deadbeef, 0x150, 9, 9)]);
         assert_eq!(read_file(&read, &f[0], "x").unwrap(), b"shaderdb!");
+    }
+
+    #[test]
+    fn table_v1() {
+        // 1.0.0: uncompressed; one directory, one directory offset, one file info, one file data; no streams, regions
+        let set = |fs: &mut Vec<u8>, o: usize, v: u32| fs[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        let mut fs = vec![0u8; 0x44];
+        for (o, v) in [(4, 1u32), (8, 1), (12, 1), (16, 1), (0x28, 0x10), (0x2c, 0x10)] {
+            set(&mut fs, o, v);
+        }
+        fs.extend_from_slice(&[0; 0x34]); // the directory
+        let mut dofs = vec![0u8; 0x1c];
+        dofs[..8].copy_from_slice(&0x100u64.to_le_bytes());
+        dofs[20..24].copy_from_slice(&1u32.to_le_bytes()); // file data 0, one
+        fs.extend_from_slice(&dofs);
+        let mut info = vec![0u8; 0x28];
+        info[..8].copy_from_slice(&0x11_deadbeefu64.to_le_bytes());
+        fs.extend_from_slice(&info);
+        for x in [4u32, 9, 9, 0] {
+            fs.extend_from_slice(&x.to_le_bytes());
+        }
+        let n = fs.len() as u32;
+        set(&mut fs, 0, n);
+        let mut arc = MAGIC.to_vec();
+        arc.resize(0x38, 0);
+        arc[0x10..0x18].copy_from_slice(&0x40u64.to_le_bytes());
+        let fs_off = 0x200u64;
+        arc[0x20..0x28].copy_from_slice(&fs_off.to_le_bytes());
+        arc.resize(0x150, 0);
+        arc.extend_from_slice(b"shaderdb!");
+        arc.resize(fs_off as usize, 0);
+        arc.extend_from_slice(&fs);
+        let read = |o: u64, n: u64| Ok(arc[o as usize..(o + n) as usize].to_vec());
+        assert_eq!(files(&read, "/data.arc").unwrap(), vec![(0x11_deadbeef, 0x150, 9, 9)]);
     }
 }

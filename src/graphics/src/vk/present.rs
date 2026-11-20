@@ -204,21 +204,27 @@ pub fn record_present(g: &Gpu, sub: &mut Sub, t: &tex_t, origin_ll: bool, crop: 
         return;
     }
     // the source first: once an image is acquired this submission must wait for it
-    let Some((src, sext)) = ({
+    let Some(src) = ({
         let mut imgs = g.images.lock().unwrap();
         if g.ensure_image(&mut imgs, t) {
             g.prepare_image(&mut imgs, t.serial, sub);
             let im = &imgs.by_serial[&t.serial];
-            Some((im.image, im.extent))
+            Some((im.image, im.extent, im.scale))
         } else {
             None
         }
     }) else {
         return;
     };
+    let (src, sext, sscale) = (src.0, src.1, src.2);
     let srgb = crate::tex::format::tex_format(t.d.format).map(|f| f.srgb).unwrap_or(false);
     // source region (crop); NVN's lower-left origin: row 0 is the bottom of the picture
     let (cx, cy, cw, ch) = match crop {
+        // the crop in the game's pixels, the image at its resolution scale
+        Some([x, y, w, h]) if sscale != 1.0 => {
+            let c = |v: i32| super::scale::coord(v, sscale);
+            (c(x), c(y), c(x + w) - c(x), c(y + h) - c(y))
+        }
         Some([x, y, w, h]) => (x, y, w, h),
         None => (0, 0, sext.width as i32, sext.height as i32),
     };

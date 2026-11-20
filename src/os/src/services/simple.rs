@@ -58,8 +58,32 @@ unsafe fn answer(c: *mut Cpu) {
     for &i in s.signal {
         crate::services::os::signal_system_event(c, arg(i));
     }
-    crate::log_once!(format!("simple {name}"), "offline stand-in: {name} -> {:#x}", s.ret);
-    (*c).x[0] = s.ret;
+    let ret = match name.as_str() {
+        "_ZN2nn3ssl10InitializeEv" | "_ZN2nn3ssl8FinalizeEv" => ssl_count(name.ends_with("InitializeEv")),
+        _ => s.ret,
+    };
+    crate::log_once!(format!("simple {name}"), "offline stand-in: {name} -> {ret:#x}");
+    (*c).x[0] = ret;
+}
+
+/// nn::ssl keeps an initialization count: Finalize fails once it is back at zero. Games finalize in a loop until it
+/// fails (Sonic X Shadow Generations: `while (nn::ssl::Finalize().IsSuccess())`).
+fn ssl_count(init: bool) -> u64 {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static N: AtomicU32 = AtomicU32::new(0);
+    if init {
+        N.fetch_add(1, Ordering::Relaxed);
+        return 0;
+    }
+    let mut n = N.load(Ordering::Relaxed);
+    while n > 0 {
+        match N.compare_exchange(n, n - 1, Ordering::Relaxed, Ordering::Relaxed) {
+            Ok(_) => return 0,
+            Err(v) => n = v,
+        }
+    }
+    // ResultLibraryNotInitialized (module 123, ssl)
+    123 | (201 << 9)
 }
 
 pub fn register(r: &mut Registry) {

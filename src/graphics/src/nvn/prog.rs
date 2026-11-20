@@ -163,6 +163,10 @@ nvn_fns! {
                 rec.ctl[i] = Some(core::slice::from_raw_parts(s.control, nctl).to_vec());
             }
         }
+        // its pipeline-library parts made ahead (vk::pipe::prebuild)
+        if let Some(g) = crate::vk::Gpu::try_get() {
+            crate::vk::pipe::prebuild(g, rec.key.iter().flatten().copied().collect());
+        }
         KEYS.lock().unwrap().get_or_insert_with(HashMap::new).insert(o.serial, rec);
         super::prog2::note_program(o.serial, core::slice::from_raw_parts(sd, n as usize));
         1

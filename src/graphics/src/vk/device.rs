@@ -63,6 +63,12 @@ pub struct Caps {
     pub push_desc: bool,
     /// sparse 2D images with aliased residency on the graphics queue (sparse textures)
     pub sparse: bool,
+    /// VK_EXT_graphics_pipeline_library with fast linking: a new pipeline is linked from parts compiled once each
+    pub gpl: bool,
+    /// buffer device addresses (raw global memory: the memory pool table's deltas)
+    pub bda: bool,
+    /// VK_EXT_descriptor_buffer: the replay's descriptor sets are written into buffers (`descbuf`)
+    pub descbuf: bool,
 }
 
 pub struct Device {
@@ -87,6 +93,9 @@ pub struct Device {
     pub mesh: ash::ext::mesh_shader::Device,
     pub xfb: ash::ext::transform_feedback::Device,
     pub push_desc: ash::khr::push_descriptor::Device,
+    pub db: ash::ext::descriptor_buffer::Device,
+    /// VK_EXT_descriptor_buffer's descriptor sizes and alignment
+    pub db_props: vk::PhysicalDeviceDescriptorBufferPropertiesEXT<'static>,
 }
 
 fn env_on(name: &str) -> Option<bool> {
@@ -208,7 +217,10 @@ impl Device {
             }
         }
         let mut dexts: Vec<*const i8> = required.iter().map(|n| n.as_ptr()).collect();
-        let optional: [&CStr; 8] = [
+        let optional: [&CStr; 11] = [
+            ash::ext::descriptor_buffer::NAME,
+            ash::khr::pipeline_library::NAME,
+            ash::ext::graphics_pipeline_library::NAME,
             ash::khr::push_descriptor::NAME,
             ash::ext::external_memory_host::NAME,
             ash::ext::vertex_attribute_divisor::NAME,
@@ -235,6 +247,8 @@ impl Device {
         let mut f_il = vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT::default();
         let mut f_ms = vk::PhysicalDeviceMeshShaderFeaturesEXT::default();
         let mut f_xfb = vk::PhysicalDeviceTransformFeedbackFeaturesEXT::default();
+        let mut f_gpl = vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT::default();
+        let mut f_db = vk::PhysicalDeviceDescriptorBufferFeaturesEXT::default();
         let mut f12 = vk::PhysicalDeviceVulkan12Features::default();
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default();
         let mut f11 = vk::PhysicalDeviceVulkan11Features::default();
@@ -251,7 +265,9 @@ impl Device {
             .push_next(&mut f_cb)
             .push_next(&mut f_il)
             .push_next(&mut f_ms)
-            .push_next(&mut f_xfb);
+            .push_next(&mut f_xfb)
+            .push_next(&mut f_gpl)
+            .push_next(&mut f_db);
         unsafe { instance.get_physical_device_features2(pdev, &mut f2) };
         let base = f2.features;
         let need = |ok: u32, what: &str| -> Result<(), String> { if ok != 0 { Ok(()) } else { Err(format!("device {name} lacks {what}")) } };
@@ -290,6 +306,14 @@ impl Device {
             mesh: has(ash::ext::mesh_shader::NAME) && f_ms.mesh_shader != 0 && f_ms.task_shader != 0 && env_on("NXGFX_MESH").unwrap_or(true),
             xfb: has(ash::ext::transform_feedback::NAME) && f_xfb.transform_feedback != 0,
             push_desc: has(ash::khr::push_descriptor::NAME),
+            bda: f12.buffer_device_address != 0,
+            descbuf: has(ash::ext::descriptor_buffer::NAME) && f_db.descriptor_buffer != 0 && f12.buffer_device_address != 0 && env_on("NXGFX_DESCBUF").unwrap_or(true),
+            gpl: has(ash::ext::graphics_pipeline_library::NAME) && has(ash::khr::pipeline_library::NAME) && f_gpl.graphics_pipeline_library != 0 && {
+                let mut gp = vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT::default();
+                let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut gp);
+                unsafe { instance.get_physical_device_properties2(pdev, &mut p2) };
+                gp.graphics_pipeline_library_fast_linking != 0
+            } && env_on("NXGFX_GPL").unwrap_or(true),
             sparse: base.sparse_binding != 0
                 && base.sparse_residency_image2_d != 0
                 && base.sparse_residency_aliased != 0
@@ -403,6 +427,20 @@ impl Device {
         }
         // task and mesh shaders alone (multiview, shading rate and queries would need features not enabled here)
         let mut e_ms = vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(caps.mesh).task_shader(caps.mesh);
+        let mut e_gpl = vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT::default().graphics_pipeline_library(caps.gpl);
+        let mut e_db = vk::PhysicalDeviceDescriptorBufferFeaturesEXT::default().descriptor_buffer(caps.descbuf);
+        if !caps.descbuf {
+            dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::descriptor_buffer::NAME);
+        }
+        let mut db_props = vk::PhysicalDeviceDescriptorBufferPropertiesEXT::default();
+        if caps.descbuf {
+            let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut db_props);
+            unsafe { instance.get_physical_device_properties2(pdev, &mut p2) };
+            db_props.p_next = core::ptr::null_mut();
+        }
+        if !caps.gpl {
+            dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::graphics_pipeline_library::NAME && unsafe { CStr::from_ptr(n) } != ash::khr::pipeline_library::NAME);
+        }
         let mut e_xfb = vk::PhysicalDeviceTransformFeedbackFeaturesEXT::default()
             .transform_feedback(caps.xfb)
             .geometry_streams(caps.xfb && f_xfb.geometry_streams != 0);
@@ -434,13 +472,19 @@ impl Device {
         if caps.mesh {
             dci = dci.push_next(&mut e_ms);
         }
+        if caps.gpl {
+            dci = dci.push_next(&mut e_gpl);
+        }
+        if caps.descbuf {
+            dci = dci.push_next(&mut e_db);
+        }
         if caps.xfb {
             dci = dci.push_next(&mut e_xfb);
         }
         let dev = unsafe { instance.create_device(pdev, &dci, None) }.map_err(|e| format!("vkCreateDevice: {e}"))?;
         let queue = unsafe { dev.get_device_queue(qfam, 0) };
         crate::vklog!(
-            "device {name} (Vulkan {}.{}.{}), validation {}, host import {} (align {:#x}), divisor {}, index u8 {}, mesh shaders {}, transform feedback {}",
+            "device {name} (Vulkan {}.{}.{}), validation {}, host import {} (align {:#x}), divisor {}, index u8 {}, mesh shaders {}, transform feedback {}, pipeline libraries {}, descriptor buffers {}",
             vk::api_version_major(props.api_version),
             vk::api_version_minor(props.api_version),
             vk::api_version_patch(props.api_version),
@@ -450,7 +494,9 @@ impl Device {
             caps.divisor,
             caps.index_u8,
             caps.mesh,
-            caps.xfb
+            caps.xfb,
+            caps.gpl,
+            caps.descbuf
         );
         Ok(Device {
             surface_i: ash::khr::surface::Instance::new(&entry, &instance),
@@ -463,6 +509,8 @@ impl Device {
             mesh: ash::ext::mesh_shader::Device::new(&instance, &dev),
             xfb: ash::ext::transform_feedback::Device::new(&instance, &dev),
             push_desc: ash::khr::push_descriptor::Device::new(&instance, &dev),
+            db: ash::ext::descriptor_buffer::Device::new(&instance, &dev),
+            db_props,
             entry,
             instance,
             debug,

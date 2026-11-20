@@ -55,13 +55,18 @@ nvn_fns! {
         if let Some(h) = super::hooks() {
             (h.submit)(q as u64, n.max(0) as u64);
         }
+        if vk::queue::aq_on() {
+            super::blocking(|| vk::queue::aq_wait_room(false));
+        }
         vk::queue::submit(o.serial, o.origin_ll != 0, &hs);
     }
     fn nvnQueueFlush(q: *mut NVNqueue) { let _ = q; }
     /// Waits for the GPU work submitted so far (not for the display).
     fn nvnQueueFinish(q: *mut NVNqueue) {
         let _ = q;
+        let t0 = std::time::Instant::now();
         super::blocking(vk::queue::finish);
+        vk::perf::add(vk::perf::C::WaitFinishNs, t0.elapsed().as_nanos() as u64);
     }
     fn nvnQueuePresentTexture(q: *mut NVNqueue, w: *mut NVNwindow, idx: i32) {
         let o = &*(q as *const queue_t);

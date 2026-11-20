@@ -219,7 +219,7 @@ def scenario(a, sc, run, exe):
             count[0] += 1
             p = run / ('%04d-%s.png' % (count[0], re.sub(r'[^A-Za-z0-9]+', '_', name)[:40]))
             try:
-                gamectl.pipe(pid, '%s %s' % (SHOT_CMD, p), timeout=20)
+                gamectl.pipe(run_game.current(pid), '%s %s' % (SHOT_CMD, p), timeout=20)
             except OSError as e:
                 record(screenshot=None, name=name, note='control pipe: %s' % e)
                 if str(e).startswith('refused'):
@@ -244,10 +244,10 @@ def scenario(a, sc, run, exe):
                 if action == 'replay':
                     shutil.copyfile(INPUTS / st[3], run / 'replay.txt')
                 elif action in KEYS:
-                    record(ctl=gamectl.pipe(pid, 'press %s~0.2' % KEYS[action]).strip())
+                    record(ctl=gamectl.pipe(run_game.current(pid), 'press %s~0.2' % KEYS[action]).strip())
                 time.sleep(settle)
                 shot('%s-%s' % (action, observed))
-            record(ctl=gamectl.pipe(pid, 'quit').strip())
+            record(ctl=gamectl.pipe(run_game.current(pid), 'quit').strip())
         except Exception as e:
             record(error='%s: %s' % (type(e).__name__, e))
     env = dict(os.environ, NXRS_METRICS=str(run), NXRS_INPUT_REPLAY=str(run / 'replay.txt'))

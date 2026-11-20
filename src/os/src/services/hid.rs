@@ -830,7 +830,7 @@ macro_rules! idle_dev {
     };
 }
 idle_dev!(debugpad_state, debugpad_states, 0x20);
-idle_dev!(keyboard_state, keyboard_states, 0x38);
+idle_dev!(keyboard_state, keyboard_states, 0x30); // KeyboardState is 0x30 bytes (nxnative, yuzu); 0x38 overran the caller's by 8
 idle_dev!(mouse_state, mouse_states, 0x28);
 hidfn!(gestures, |a| { 0 });
 hidfn!(handheld_mode, |a| { 0 });

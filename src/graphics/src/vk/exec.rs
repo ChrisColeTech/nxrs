@@ -63,6 +63,8 @@ pub struct QState {
     // per submission
     in_pass: bool,
     pass_extent: vk::Extent2D,
+    /// the resolution scale of the open pass's targets (1 unless `resolution` scales render targets)
+    pass_scale: f32,
     pass_formats: ([i32; 8], usize, i32, u8),
     /// SAMPLES_PASSED counting is on (ResetCounter); the occlusion query open in the current pass
     vis_on: bool,
@@ -93,9 +95,17 @@ pub struct QState {
     missing: Vec<(crate::nvn::prog::ShaderKey, u32)>,
     /// block aliases of compressed targets to copy into their images when the pass ends
     copyback: Vec<(vk::Image, vk::Image, u32, u32, vk::Extent2D, vk::Extent2D, u32)>,
-    /// a stage's bindings generation (new at every bind for it) and its driver constant banks c0 / c2 built for it
-    bgen: [u64; 7],
-    cbank: std::cell::RefCell<[Option<CBank>; 7]>,
+    /// a stage's generations of what its driver banks hold (c0: storage buffers, compute's uniform table, dispatch
+    /// size; c2: texture, sampler and image handles), new at every bind that changes them, and the banks built for them
+    bgen: [[u64; 2]; 7],
+    cbank: std::cell::RefCell<[[Option<CBank>; 2]; 7]>,
+    /// a stage's texture and image descriptors as last resolved (`TexPart`)
+    tpart: std::cell::RefCell<[Option<TexPart>; 7]>,
+    /// the id of the c2 bank `banks` returned last
+    c2id: std::cell::Cell<u64>,
+    /// the vertex input and vertex buffers last set in this queue's command buffer: (submission, layout words,
+    /// buffers by stream) (Pokemon Legends Z-A's draws repeat them: they were set again at every draw)
+    vin_last: std::cell::RefCell<(u64, Vec<u32>, [(vk::Buffer, u64); 32])>,
     /// push constants' generation (new at every PushConstants)
     pgen: u64,
     /// staged constant blocks by (kind, key): where they are in submission `serial` (support buffer by pass size,
@@ -103,17 +113,35 @@ pub struct QState {
     scache: std::cell::RefCell<std::collections::HashMap<(u8, u64), (u64, (vk::Buffer, u64))>>,
 }
 
-/// A stage's c0 / c2 as last built: valid while its bindings generation, dispatch size and base instance stand; where
-/// they were staged in submission `sub` (Pokemon Legends: Z-A, ~1,700 draws a frame: building, hashing and staging
-/// 5 KB a stage a draw was most of the 8 ms of descriptor work a frame)
+/// A stage's texture / image descriptors as last resolved: valid for the same module while its handle bank (c2), the
+/// pools' bases and the submission stand (Pokemon Legends Z-A binds new uniform buffers at nearly every draw and its
+/// textures far less often: their views and samplers were looked up again at each, ~2 ms a frame). Not kept for a
+/// shader that reads handles from a uniform buffer (bindless) or for buffer textures.
+struct TexPart {
+    module: (usize, crate::nvn::prog::ShaderKey),
+    gen: u64,
+    pools: (i32, i32),
+    serial: u64,
+    imgs: Vec<(u32, vk::DescriptorType, vk::DescriptorImageInfo)>,
+}
+
+/// A stage's c0 or c2 as last built: valid while its generation (and for c0 the dispatch size and base instance)
+/// stands; where it was staged in submission `serial` (Pokemon Legends: Z-A, ~1,700 draws a frame: building, hashing
+/// and staging 5 KB a stage a draw was most of the descriptor work; a uniform buffer bind, the most common one, changes
+/// neither bank of a graphics stage, and a texture bind only c2)
 struct CBank {
     gen: u64,
     dispatch: [u32; 3],
     base_instance: u32,
-    c0: Arc<Vec<u8>>,
-    c2: Arc<Vec<u8>>,
-    staged: Option<(u64, (vk::Buffer, u64), (vk::Buffer, u64))>,
+    bytes: Arc<Vec<u8>>,
+    staged: Option<(u64, (vk::Buffer, u64))>,
+    /// c2's sources as built (texture, sampler, image handles): a bind of the same handles keeps the bank unbuilt
+    src: Option<Box<C2Src>>,
+    /// new whenever the bytes change (what depends on them is kept by it)
+    id: u64,
 }
+
+type C2Src = ([u32; 256], [u32; 128], [u32; 32]);
 
 fn new_bgen() -> u64 {
     static G: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -137,37 +165,67 @@ impl QState {
         r
     }
 
-    fn bump(&mut self, st: usize) {
+    /// c0 of stage `st` changes (storage buffers; compute's uniform buffers)
+    fn bump0(&mut self, st: usize) {
         if st < 7 {
-            self.bgen[st] = new_bgen();
+            self.bgen[st][0] = new_bgen();
+        }
+    }
+    /// c2 of stage `st` changes (texture, sampler, image handles)
+    fn bump2(&mut self, st: usize) {
+        if st < 7 {
+            self.bgen[st][1] = new_bgen();
         }
     }
 
     /// c0 / c2 of stage `st` and where they are staged in `sub` (built and staged again only when they changed).
     fn banks(&self, g: &Gpu, sub: &mut Sub, st: usize, dispatch: [u32; 3], base_instance: u32) -> (Arc<Vec<u8>>, Arc<Vec<u8>>, (vk::Buffer, u64), (vk::Buffer, u64)) {
         let mut cb = self.cbank.borrow_mut();
-        let ok = cb[st].as_ref().is_some_and(|c| c.gen == self.bgen[st] && c.dispatch == dispatch && c.base_instance == base_instance);
-        if !ok {
-            cb[st] = Some(CBank {
-                gen: self.bgen[st],
-                dispatch,
-                base_instance,
-                c0: Arc::new(c0_bytes(self, st, dispatch, base_instance)),
-                c2: Arc::new(c2_bytes(self, st)),
-                staged: None,
-            });
-        }
-        let c = cb[st].as_mut().unwrap();
-        let (s0, s2) = match c.staged {
-            Some((serial, s0, s2)) if serial == sub.serial => (s0, s2),
-            _ => {
-                let s0 = sub.stage_bytes(g, &c.c0);
-                let s2 = sub.stage_bytes(g, &c.c2);
-                c.staged = Some((sub.serial, s0, s2));
-                (s0, s2)
+        let [b0, b2] = &mut cb[st];
+        // c2 does not depend on the dispatch size or base instance
+        let (di, bi) = if st == 5 { (dispatch, 0) } else { ([0; 3], base_instance) };
+        // a bind that leaves the bytes as they were (the same handles bound again) keeps the staged copy
+        let renew = |slot: &mut Option<CBank>, gen: u64, di: [u32; 3], bi: u32, build: &dyn Fn() -> Vec<u8>| {
+            if slot.as_ref().is_some_and(|c| c.gen == gen && c.dispatch == di && c.base_instance == bi) {
+                return;
+            }
+            let bytes = build();
+            match slot {
+                Some(c) if *c.bytes == bytes => {
+                    c.gen = gen;
+                    c.dispatch = di;
+                    c.base_instance = bi;
+                }
+                _ => *slot = Some(CBank { gen, dispatch: di, base_instance: bi, bytes: Arc::new(bytes), staged: None, src: None, id: new_bgen() }),
             }
         };
-        (c.c0.clone(), c.c2.clone(), s0, s2)
+        renew(b0, self.bgen[st][0], di, bi, &|| c0_bytes(self, st, dispatch, base_instance));
+        // c2: the handles themselves compared first (a few hundred words; building the bank wrote 2.5 KB)
+        let gen2 = self.bgen[st][1];
+        if let Some(c) = b2.as_mut() {
+            if c.gen != gen2 && c.src.as_ref().is_some_and(|s| s.0 == self.tex[st] && s.1 == self.samp[st] && s.2 == self.img[st]) {
+                c.gen = gen2;
+            }
+        }
+        if !b2.as_ref().is_some_and(|c| c.gen == gen2) {
+            renew(b2, gen2, [0; 3], 0, &|| c2_bytes(self, st));
+            if let Some(c) = b2.as_mut() {
+                c.src = Some(Box::new((self.tex[st], self.samp[st], self.img[st])));
+            }
+        }
+        // staged once per submission (equal bytes staged earlier in it are shared: equal sets are bound again)
+        let mut staged = |c: &mut CBank| match c.staged {
+            Some((serial, s)) if serial == sub.serial => s,
+            _ => {
+                let s = sub.stage_bytes(g, &c.bytes);
+                c.staged = Some((sub.serial, s));
+                s
+            }
+        };
+        let (c0, c2) = (b0.as_mut().unwrap(), b2.as_mut().unwrap());
+        let (s0, s2) = (staged(c0), staged(c2));
+        self.c2id.set(c2.id);
+        (c0.bytes.clone(), c2.bytes.clone(), s0, s2)
     }
 
     pub fn new(origin_ll: bool) -> QState {
@@ -226,10 +284,14 @@ impl QState {
             patch: 3,
             in_pass: false,
             pass_extent: vk::Extent2D::default(),
+            pass_scale: 1.0,
             pass_formats: ([0; 8], 0, 0, 1),
             copyback: Vec::new(),
-            bgen: core::array::from_fn(|_| new_bgen()),
+            bgen: core::array::from_fn(|_| [new_bgen(), new_bgen()]),
             cbank: Default::default(),
+            tpart: Default::default(),
+            c2id: Default::default(),
+            vin_last: std::cell::RefCell::new((0, Vec::new(), [(vk::Buffer::null(), u64::MAX); 32])),
             pgen: new_bgen(),
             scache: Default::default(),
             vis_on: false,
@@ -467,6 +529,8 @@ pub mod passdump {
 /// submission, so the workgroup counts are copied on the GPU into Vulkan's {x, y, z} records (outside the pass) and
 /// drawn from there; with a count buffer, MultiDraw…IndirectCount reads the draw count on the GPU too.
 fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mesh) {
+    // a mesh pipeline has no vertex input: the next draw sets it again
+    qs.vin_last.borrow_mut().0 = 0;
     if !g.d.caps.mesh {
         crate::log::red_once("task and mesh draws: the device has no VK_EXT_mesh_shader, they are not drawn");
         super::perf::inc(super::perf::C::DrawsSkipped);
@@ -600,12 +664,13 @@ fn draw_texture(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: crate::nvn::cmd2::p_
     let Some((si, stf)) = src_img else { return };
     let Some((di, _, _, _)) = target_image(g, sub, &dst) else { return };
     let level = view.filter(|v| v.bits & VW_LEVELS != 0).map(|v| v.base_level as u32).unwrap_or(0);
-    let o = |v: [f32; 4], i: usize| vk::Offset3D { x: v[i] as i32, y: v[i + 1] as i32, z: i as i32 / 2 };
+    let (ss, ds) = (img_scale(g, serial), img_scale(g, dst.serial));
+    let o = |v: [f32; 4], i: usize, s: f32| vk::Offset3D { x: (v[i] * s) as i32, y: (v[i + 1] * s) as i32, z: i as i32 / 2 };
     let r = vk::ImageBlit {
         src_subresource: vk::ImageSubresourceLayers { aspect_mask: super::image::upload_aspect(&stf), mip_level: 0, base_array_layer: 0, layer_count: 1 },
-        src_offsets: [o(d.src, 0), o(d.src, 2)],
+        src_offsets: [o(d.src, 0, ss), o(d.src, 2, ss)],
         dst_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: level, base_array_layer: 0, layer_count: 1 },
-        dst_offsets: [o(d.dst, 0), o(d.dst, 2)],
+        dst_offsets: [o(d.dst, 0, ds), o(d.dst, 2, ds)],
     };
     unsafe { g.dev().cmd_blit_image(sub.main, si, vk::ImageLayout::GENERAL, di, vk::ImageLayout::GENERAL, &[r], vk::Filter::LINEAR) };
     barrier(g, sub);
@@ -670,6 +735,14 @@ fn source_image(g: &Gpu, sub: &mut Sub, t: &tex_t) -> Option<(vk::Image, format:
     let im = &imgs.by_serial[&t.serial];
     Some((im.image, im.tf, im.extent))
 }
+/// The resolution scale of a texture's image (1 when nothing is scaled).
+fn img_scale(g: &Gpu, serial: u64) -> f32 {
+    if !super::scale::active() {
+        return 1.0;
+    }
+    g.images.lock().unwrap().by_serial.get(&serial).map(|im| im.scale).unwrap_or(1.0)
+}
+
 /// The layers a render target's view covers (a layered pass draws into all of them).
 fn attach_layers(im: &super::image::Image, v: Option<&view_t>) -> u32 {
     let lvl = v.filter(|v| v.bits & VW_LEVELS != 0).map(|v| v.base_level as u32).unwrap_or(0);
@@ -808,6 +881,20 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
         crate::log::red_once("a draw or clear with no render target bound");
         return false;
     }
+    // the targets' resolution scale (render targets are scaled together; a pass mixing scales draws at the first's)
+    qs.pass_scale = 1.0;
+    if super::scale::active() {
+        let mut ss: Vec<f32> = qs.rt[..qs.rt_n].iter().filter_map(|r| r.tex).map(|t| img_scale(g, t.serial)).collect();
+        if let Some(t) = qs.rt_depth.tex {
+            ss.push(img_scale(g, t.serial));
+        }
+        if let Some(&s0) = ss.first() {
+            qs.pass_scale = s0;
+            if ss.iter().any(|&s| s != s0) {
+                crate::log::red_once("resolution scale: a pass draws into targets of different scales (a target the game did not make compressible): drawn at the first one's");
+            }
+        }
+    }
     let da = depth.map(|(v, _)| {
         vk::RenderingAttachmentInfo::default().image_view(v).image_layout(vk::ImageLayout::GENERAL).load_op(vk::AttachmentLoadOp::LOAD).store_op(vk::AttachmentStoreOp::STORE)
     });
@@ -903,8 +990,8 @@ fn topology(p: i32) -> vk::PrimitiveTopology {
 }
 
 /// A zero-filled buffer that stands in for unbound uniform, storage and vertex bindings.
+static ZERO: std::sync::OnceLock<super::Buf> = std::sync::OnceLock::new();
 fn zero_buffer(g: &Gpu, sub: &mut Sub) -> vk::Buffer {
-    static ZERO: std::sync::OnceLock<super::Buf> = std::sync::OnceLock::new();
     let mut fresh = false;
     let b = ZERO.get_or_init(|| {
         fresh = true;
@@ -1173,26 +1260,99 @@ fn support_bytes(w: f32, h: f32) -> Vec<u8> {
     v
 }
 
+/// The support buffer with render scales: [0] the pass's (pixel shaders), then one per texture / image binding.
+fn support_bytes_scaled(w: f32, h: f32, scales: &[f32]) -> Vec<u8> {
+    let mut v = support_bytes(w, h);
+    for (i, s) in scales.iter().enumerate().take(73) {
+        v[192 + 16 * i..196 + 16 * i].copy_from_slice(&s.to_le_bytes());
+    }
+    v
+}
+
+/// The render scales a stage's shader reads (the translator's TexelFetchScale): index 0 the pass's, 1 + k the k-th
+/// texture binding's image, then the images'. A pixel shader gets them negative (its fetches keep their sub-texel).
+fn binding_scales(g: &Gpu, qs: &QState, st: usize, m: &Module, c0: &[u8], c2: &[u8], pass: f32) -> Vec<f32> {
+    let (tb, _) = pool_bases(qs);
+    let ntex = m.res.iter().filter(|(b, r)| matches!(r, Res::Tex { .. }) && (L::TEX_BASE..L::TEX_BASE + L::TEX_N).contains(b)).count();
+    let mut v = vec![1.0f32; 1 + ntex + L::IMG_N as usize];
+    v[0] = pass;
+    let imgs = g.images.lock().unwrap();
+    for (b, r) in &m.res {
+        let (handle, cbuf_slot, ty, idx) = match r {
+            Res::Tex { handle, cbuf_slot, ty } if (L::TEX_BASE..L::TEX_BASE + L::TEX_N).contains(b) => (*handle, *cbuf_slot, *ty, (b - L::TEX_BASE) as usize),
+            Res::Img { handle, cbuf_slot, ty } if (L::IMG_BASE..L::IMG_BASE + L::IMG_N).contains(b) => (*handle, *cbuf_slot, *ty, ntex + (b - L::IMG_BASE) as usize),
+            _ => continue,
+        };
+        if ty == 2 || 1 + idx >= v.len() {
+            continue;
+        }
+        let word = bank_word(qs, st, m, c0, c2, cbuf_slot, handle & 0x3fff);
+        let tid = (word & 0xfffff) as i32 + tb;
+        if let Some((serial, _)) = g.tables.tex_at(tid) {
+            if let Some(im) = imgs.by_serial.get(&serial) {
+                if im.scale != 1.0 {
+                    v[1 + idx] = if st == 1 { -im.scale } else { im.scale };
+                }
+            }
+        }
+    }
+    v
+}
+
 /// The descriptor set of one stage of the draw or dispatch.
-fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3], base_instance: u32) -> vk::DescriptorSet {
+fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3], base_instance: u32) -> SetRef {
     let st = m.stage as usize;
 
     let zero = zero_buffer(g, sub);
     let max_ubo = (g.d.props.limits.max_uniform_buffer_range as u64).min(65536);
-    let (c0, c2, c0s, c2s) = qs.banks(g, sub, st, dispatch, base_instance);
+    let (c0, c2, c0s, c2s) = super::perf::timed_fine(super::perf::C::BankNs, || qs.banks(g, sub, st, dispatch, base_instance));
+    // the handle bank's identity (its bytes are kept while they stay the same)
+    let c2id = qs.c2id.get();
     let (c0, c2) = (&c0[..], &c2[..]);
     let (tb, sb) = pool_bases(qs);
     let mut bufs: Vec<(u32, vk::DescriptorType, vk::DescriptorBufferInfo)> = Vec::new();
     let mut imgs: Vec<(u32, vk::DescriptorType, vk::DescriptorImageInfo)> = Vec::new();
     let mut tbufs: Vec<(u32, vk::DescriptorType, vk::BufferView)> = Vec::new();
+    // descriptor buffers: buffer textures by address
+    let mut taddrs: Vec<(u32, vk::DescriptorType, vk::DescriptorAddressInfoEXT)> = Vec::new();
     let dumping = passdump::active();
     let mut said: Vec<String> = Vec::new();
+    // the texture part of the last set of this stage, when nothing it depends on changed
+    let cacheable = !dumping
+        && m.res.iter().all(|(_, r)| match r {
+            Res::Tex { cbuf_slot, ty, .. } | Res::Img { cbuf_slot, ty, .. } => (*cbuf_slot == 2 || *cbuf_slot == -1) && *ty != 2,
+            _ => true,
+        });
+    let mkey = (m as *const Module as usize, m.key);
+    let cached = cacheable
+        && qs.tpart.borrow()[st].as_ref().is_some_and(|t| t.module == mkey && t.gen == c2id && t.pools == (tb, sb) && t.serial == sub.serial);
+    if cached {
+        imgs.extend_from_slice(&qs.tpart.borrow()[st].as_ref().unwrap().imgs);
+    }
     for (b, r) in &m.res {
         let b = *b;
+        if cached && matches!(r, Res::Tex { .. } | Res::Img { .. }) {
+            continue;
+        }
         match r {
             Res::Support => {
                 let (wi, hi) = (qs.pass_extent.width.max(1), qs.pass_extent.height.max(1));
-                let (buf, off) = qs.staged(g, sub, 0, (wi as u64) << 32 | hi as u64, || support_bytes(wi as f32, hi as f32).to_vec());
+                let (buf, off) = if super::scale::active() {
+                    // the render scale of the pass and of each texture / image binding (resolution scale)
+                    let ps = if st == 1 { qs.pass_scale } else { 1.0 };
+                    let (wi, hi) = (((wi as f32 / qs.pass_scale).round() as u32).max(1), ((hi as f32 / qs.pass_scale).round() as u32).max(1));
+                    let sc = binding_scales(g, qs, st, m, &c0, &c2, ps);
+                    let mut key = Vec::with_capacity(8 + 4 * sc.len());
+                    key.extend_from_slice(&wi.to_le_bytes());
+                    key.extend_from_slice(&hi.to_le_bytes());
+                    for s in &sc {
+                        key.extend_from_slice(&s.to_bits().to_le_bytes());
+                    }
+                    let k = super::queue::memo_hash(&key) as u64;
+                    qs.staged(g, sub, 31, k, || support_bytes_scaled(wi as f32, hi as f32, &sc))
+                } else {
+                    qs.staged(g, sub, 0, (wi as u64) << 32 | hi as u64, || support_bytes(wi as f32, hi as f32).to_vec())
+                };
                 bufs.push((b, vk::DescriptorType::UNIFORM_BUFFER, vk::DescriptorBufferInfo { buffer: buf, offset: off, range: 1392 }));
             }
             Res::Cbuf { bank } => {
@@ -1246,6 +1406,11 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                 };
                 bufs.push((b, vk::DescriptorType::UNIFORM_BUFFER, info));
             }
+            Res::Sbuf { cb_slot: super::gmem::CB_SLOT, cb_off, .. } => {
+                // raw global memory: the memory pool table (word 0) and its write log (word 1)
+                let info = super::gmem::binding(g, sub, *cb_off / 4).unwrap_or(vk::DescriptorBufferInfo { buffer: zero, offset: 0, range: 65536 });
+                bufs.push((b, vk::DescriptorType::STORAGE_BUFFER, info));
+            }
             Res::Sbuf { cb_slot, cb_off, written } => {
                 let (a, mut n) = bank_u64(qs, st, m, &c0, &c2, *cb_slot, *cb_off);
                 // A buffer bound with size 0 is still the memory at its address: an NVN shader holds the address and
@@ -1285,6 +1450,15 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                     // a buffer texture / buffer image: a texel buffer view over its memory
                     let dt = if is_img { vk::DescriptorType::STORAGE_TEXEL_BUFFER } else { vk::DescriptorType::UNIFORM_TEXEL_BUFFER };
                     if let Some(t) = g.tables.buf_tex_at(tid) {
+                        if g.d.caps.descbuf {
+                            if let Some(ai) = g.texel_addr(sub, &t, is_img) {
+                                if is_img {
+                                    super::mem::note_gpu_write(g, sub, t.mem as u64, t.d.width as u64 * crate::tex::layout::fmt_bpb(t.d.format).0 as u64);
+                                }
+                                taddrs.push((b, dt, ai));
+                            }
+                            continue;
+                        }
                         if let Some(v) = g.texel_view(sub, &t, is_img) {
                             if is_img {
                                 super::mem::note_gpu_write(g, sub, t.mem as u64, t.d.width as u64 * crate::tex::layout::fmt_bpb(t.d.format).0 as u64);
@@ -1303,7 +1477,7 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                         0
                     }
                 } + sb;
-                let view = super::perf::timed(super::perf::C::TexViewNs, || tex_view(g, sub, tid, *ty, is_img));
+                let view = super::perf::timed_fine(super::perf::C::TexViewNs, || tex_view(g, sub, tid, *ty, is_img));
                 if dumping {
                     let what = g
                         .tables
@@ -1337,11 +1511,18 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
             }
         }
     }
+    if cacheable && !cached {
+        qs.tpart.borrow_mut()[st] = Some(TexPart { module: mkey, gen: c2id, pools: (tb, sb), serial: sub.serial, imgs: imgs.clone() });
+    }
     if dumping {
         let k: String = m.key.iter().map(|b| format!("{b:02x}")).collect();
         crate::vklog!("pass dump {}: stage {st} {k}: {}", passdump::pass_no(), said.join("; "));
     }
+    if g.d.caps.descbuf {
+        return SetRef::Buf(write_db_set(g, sub, &bufs, &imgs, &taddrs));
+    }
     // the same writes for the same stage layout earlier in this submission: that set is bound again
+    let tk = super::perf::fine().then(std::time::Instant::now);
     let mut key: Vec<u8> = Vec::with_capacity(16 + 32 * (bufs.len() + imgs.len() + tbufs.len()));
     key.extend_from_slice(&(st as u64).to_le_bytes());
     for (b, ty, i) in &bufs {
@@ -1360,8 +1541,12 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
         key.extend_from_slice(&vk::Handle::as_raw(*v).to_le_bytes());
     }
     let kh = super::queue::memo_hash(&key);
+    let tw = super::perf::fine().then(std::time::Instant::now);
+    if let (Some(tk), Some(tw)) = (tk, tw) {
+        super::perf::add(super::perf::C::SetKeyNs, (tw - tk).as_nanos() as u64);
+    }
     if let Some(&set) = sub.memo_sets.get(&kh) {
-        return set;
+        return SetRef::Set(set);
     }
     let set = sub.alloc_set(g, g.layout.stage_sets[st]);
     super::perf::inc(super::perf::C::DescSets);
@@ -1373,7 +1558,78 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
     writes.extend(imgs.iter().map(|(b, ty, i)| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(*b).descriptor_type(*ty).image_info(std::slice::from_ref(i))));
     writes.extend(tbufs.iter().map(|(b, ty, v)| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(*b).descriptor_type(*ty).texel_buffer_view(std::slice::from_ref(v))));
     unsafe { g.dev().update_descriptor_sets(&writes, &[]) };
-    set
+    if let Some(tw) = tw {
+        super::perf::add(super::perf::C::SetWriteNs, tw.elapsed().as_nanos() as u64);
+    }
+    SetRef::Set(set)
+}
+
+/// A stage's descriptors: a set (classic) or its offset in the submission's descriptor buffer.
+#[derive(Clone, Copy)]
+enum SetRef {
+    Set(vk::DescriptorSet),
+    Buf(u64),
+}
+
+/// Descriptor buffers: a stage set written into the submission's current chunk (vkGetDescriptorEXT: a few
+/// nanoseconds a descriptor, against ~40 ns for a vkUpdateDescriptorSets write and a set allocation; 2,170 sets of
+/// 15 uniform buffers took 0.12 ms against 1.8 ms on this machine's RTX 5090, tests/desc_bench.rs). Every set is
+/// written: no key, no hash.
+fn write_db_set(g: &Gpu, sub: &mut Sub, bufs: &[(u32, vk::DescriptorType, vk::DescriptorBufferInfo)], imgs: &[(u32, vk::DescriptorType, vk::DescriptorImageInfo)], taddrs: &[(u32, vk::DescriptorType, vk::DescriptorAddressInfoEXT)]) -> u64 {
+    let tw = super::perf::fine().then(std::time::Instant::now);
+    let l = &g.layout;
+    let p = &g.d.db_props;
+    let off = sub.db_alloc(l.db_stage_size);
+    let ptr = sub.db[sub.db_cur].ptr;
+    let zero = ZERO.get().map(|b| b.addr).unwrap_or(0);
+    // the distinct buffers' addresses (a set names a few: a staging chunk, the zero buffer, some pools)
+    let mut seen: [(vk::Buffer, u64); 8] = [(vk::Buffer::null(), 0); 8];
+    let mut ns = 0;
+    for (b, ty, info) in bufs {
+        let base = match seen[..ns].iter().find(|x| x.0 == info.buffer) {
+            Some(x) => x.1,
+            None => {
+                let a = sub.addr_of(info.buffer).or_else(|| (ZERO.get().map(|z| z.buf) == Some(info.buffer)).then_some(zero)).or_else(|| super::mem::buffer_address(info.buffer)).unwrap_or(0);
+                if ns < seen.len() {
+                    seen[ns] = (info.buffer, a);
+                    ns += 1;
+                }
+                a
+            }
+        };
+        if base == 0 {
+            crate::log::red_once("descriptor buffers: a buffer bound to a shader has no device address: zeros bound");
+        }
+        let (a, range) = if base != 0 { (base + info.offset, info.range) } else { (zero, 65536) };
+        let ai = vk::DescriptorAddressInfoEXT::default().address(a).range(range);
+        let (gi, size) = if *ty == vk::DescriptorType::UNIFORM_BUFFER {
+            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_uniform_buffer: &ai }), p.uniform_buffer_descriptor_size)
+        } else {
+            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_storage_buffer: &ai }), p.storage_buffer_descriptor_size)
+        };
+        unsafe { super::tables::put_descriptor(&g.d, ptr, off + l.db_stage_off[*b as usize], &gi, size) };
+    }
+    for (b, ty, info) in imgs {
+        let (gi, size) = if *ty == vk::DescriptorType::COMBINED_IMAGE_SAMPLER {
+            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_combined_image_sampler: info }), p.combined_image_sampler_descriptor_size)
+        } else {
+            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_storage_image: info }), p.storage_image_descriptor_size)
+        };
+        unsafe { super::tables::put_descriptor(&g.d, ptr, off + l.db_stage_off[*b as usize], &gi, size) };
+    }
+    for (b, ty, ai) in taddrs {
+        let (gi, size) = if *ty == vk::DescriptorType::UNIFORM_TEXEL_BUFFER {
+            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_uniform_texel_buffer: ai }), p.uniform_texel_buffer_descriptor_size)
+        } else {
+            (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_storage_texel_buffer: ai }), p.storage_texel_buffer_descriptor_size)
+        };
+        unsafe { super::tables::put_descriptor(&g.d, ptr, off + l.db_stage_off[*b as usize], &gi, size) };
+    }
+    super::perf::inc(super::perf::C::DescSets);
+    if let Some(tw) = tw {
+        super::perf::add(super::perf::C::SetWriteNs, tw.elapsed().as_nanos() as u64);
+    }
+    off
 }
 
 fn pool_bases(qs: &QState) -> (i32, i32) {
@@ -1391,9 +1647,36 @@ fn push_constants(g: &Gpu, sub: &Sub, qs: &QState, flipped: bool) {
 
 fn bind_sets(g: &Gpu, sub: &mut Sub, qs: &QState, mods: &[Arc<Module>], bp: vk::PipelineBindPoint, dispatch: [u32; 3], base_instance: u32) {
     let mut pool = false;
+    if g.d.caps.descbuf {
+        // descriptor buffers: the draw's sets in one chunk, the pool set's buffer and that chunk bound, then offsets
+        sub.db_reserve(g, g.layout.db_stage_size * mods.len().max(1) as u64);
+        if sub.db_bound != Some(sub.db_cur) {
+            let usage = vk::BufferUsageFlags::RESOURCE_DESCRIPTOR_BUFFER_EXT | vk::BufferUsageFlags::SAMPLER_DESCRIPTOR_BUFFER_EXT;
+            let pool_db = g.tables.db.as_ref().unwrap();
+            let infos = [
+                vk::DescriptorBufferBindingInfoEXT::default().address(pool_db.addr).usage(usage),
+                vk::DescriptorBufferBindingInfoEXT::default().address(sub.db[sub.db_cur].addr).usage(usage),
+            ];
+            unsafe { g.d.db.cmd_bind_descriptor_buffers(sub.main, &infos) };
+            sub.db_bound = Some(sub.db_cur);
+        }
+        for m in mods {
+            let set = super::perf::timed(super::perf::C::SetNs, || stage_set(g, sub, qs, m, dispatch, base_instance));
+            if let SetRef::Buf(off) = set {
+                unsafe { g.d.db.cmd_set_descriptor_buffer_offsets(sub.main, bp, g.layout.pipeline, m.stage, &[1], &[off]) };
+            }
+            pool |= m.uses_pool;
+        }
+        if pool {
+            unsafe { g.d.db.cmd_set_descriptor_buffer_offsets(sub.main, bp, g.layout.pipeline, L::POOL_SET, &[0], &[0]) };
+        }
+        return;
+    }
     for m in mods {
         let set = super::perf::timed(super::perf::C::SetNs, || stage_set(g, sub, qs, m, dispatch, base_instance));
-        unsafe { g.dev().cmd_bind_descriptor_sets(sub.main, bp, g.layout.pipeline, m.stage, &[set], &[]) };
+        if let SetRef::Set(set) = set {
+            unsafe { g.dev().cmd_bind_descriptor_sets(sub.main, bp, g.layout.pipeline, m.stage, &[set], &[]) };
+        }
         pool |= m.uses_pool;
     }
     if pool {
@@ -1440,7 +1723,8 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
         // shaders the build did not translate: wait for the live translator (once per set), then bind what came
         let keys: Vec<_> = qs.missing.iter().map(|m| m.0).collect();
         let dev = g.dev();
-        super::live::wait_for(&keys, || keys.iter().all(|k| g.shaders.get_ex(dev, k, true).is_some()));
+        // a shader that came but cannot be built (refused) ends the wait as well
+        super::live::wait_for(&keys, || keys.iter().all(|k| g.shaders.get_ex(dev, k, true).is_some() || g.shaders.refused(k)));
         let missing = std::mem::take(&mut qs.missing);
         for (k, stages) in missing {
             match g.shaders.get(dev, &k) {
@@ -1544,13 +1828,19 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
     let upper_left = o;
     push_constants(g, sub, qs, upper_left);
     let [x, y, w, h] = qs.vp[0];
-    let (w, h) = if w == 0.0 || h == 0.0 { (qs.pass_extent.width as f32, qs.pass_extent.height as f32) } else { (w, h) };
+    let ps = qs.pass_scale;
+    let (x, y, w, h) = if w == 0.0 || h == 0.0 { (x * ps, y * ps, qs.pass_extent.width as f32, qs.pass_extent.height as f32) } else { (x * ps, y * ps, w * ps, h * ps) };
     let vp = if upper_left {
         vk::Viewport { x, y: y + h, width: w, height: -h, min_depth: qs.depth_range[0].clamp(0.0, 1.0), max_depth: qs.depth_range[1].clamp(0.0, 1.0) }
     } else {
         vk::Viewport { x, y, width: w, height: h, min_depth: qs.depth_range[0].clamp(0.0, 1.0), max_depth: qs.depth_range[1].clamp(0.0, 1.0) }
     };
     let sc = match qs.scissor {
+        Some([sx, sy, sw, sh]) if ps != 1.0 => {
+            let (x0, y0) = (super::scale::coord(sx.max(0), ps), super::scale::coord(sy.max(0), ps));
+            let (x1, y1) = (super::scale::coord((sx + sw).max(0), ps), super::scale::coord((sy + sh).max(0), ps));
+            vk::Rect2D { offset: vk::Offset2D { x: x0, y: y0 }, extent: vk::Extent2D { width: (x1 - x0).max(0) as u32, height: (y1 - y0).max(0) as u32 } }
+        }
         Some([sx, sy, sw, sh]) => vk::Rect2D { offset: vk::Offset2D { x: sx.max(0), y: sy.max(0) }, extent: vk::Extent2D { width: sw.max(0) as u32, height: sh.max(0) as u32 } },
         None => vk::Rect2D { offset: vk::Offset2D::default(), extent: qs.pass_extent },
     };
@@ -1722,10 +2012,29 @@ fn vertex_input(g: &Gpu, sub: &mut Sub, qs: &QState, vs: &Module) {
         let z = zero_buffer(g, sub);
         bufs.push((31, z, 0));
     }
+    // what this command buffer has set already is not set again
+    let mut key: Vec<u32> = Vec::with_capacity(4 * binds.len() + 4 * attrs.len() + 1);
+    for b in &binds {
+        key.extend_from_slice(&[b.binding, b.stride, b.input_rate.as_raw() as u32, b.divisor]);
+    }
+    key.push(u32::MAX);
+    for a in &attrs {
+        key.extend_from_slice(&[a.location, a.binding, a.format.as_raw() as u32, a.offset]);
+    }
+    let mut last = qs.vin_last.borrow_mut();
+    if last.0 != sub.serial {
+        *last = (sub.serial, Vec::new(), [(vk::Buffer::null(), u64::MAX); 32]);
+    }
     unsafe {
-        g.d.vin.cmd_set_vertex_input(sub.main, &binds, &attrs);
+        if last.1 != key {
+            g.d.vin.cmd_set_vertex_input(sub.main, &binds, &attrs);
+            last.1 = key;
+        }
         for (s, b, o) in bufs {
-            g.dev().cmd_bind_vertex_buffers(sub.main, s, &[b], &[o]);
+            if last.2[s as usize] != (b, o) {
+                g.dev().cmd_bind_vertex_buffers(sub.main, s, &[b], &[o]);
+                last.2[s as usize] = (b, o);
+            }
         }
     }
 }
@@ -1868,7 +2177,12 @@ fn dispatch(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
 
 fn clear_rect(qs: &QState) -> vk::ClearRect {
     let full = vk::Rect2D { offset: vk::Offset2D::default(), extent: qs.pass_extent };
-    let rect = match qs.scissor {
+    let ps = qs.pass_scale;
+    let sc = qs.scissor.map(|[x, y, w, h]| if ps == 1.0 { [x, y, w, h] } else {
+        let (x0, y0) = (super::scale::coord(x, ps), super::scale::coord(y, ps));
+        [x0, y0, super::scale::coord(x + w, ps) - x0, super::scale::coord(y + h, ps) - y0]
+    });
+    let rect = match sc {
         Some([x, y, w, h]) => {
             let x0 = x.max(0) as u32;
             let y0 = y.max(0) as u32;
@@ -2229,22 +2543,24 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             };
             if (b.stage as usize) < 7 && (b.index as usize) < 16 {
                 qs.ubo[b.stage as usize][b.index as usize] = (b.addr, b.size);
-                qs.bump(b.stage as usize);
-                qs.bump(5);
+                // only compute's c0 carries a uniform table
+                if b.stage == 5 {
+                    qs.bump0(5);
+                }
             }
         }
         op::BIND_SSBO => {
             let b: p_bind_buf = rd_payload(rec);
             if (b.stage as usize) < 7 && (b.index as usize) < 16 {
                 qs.ssbo[b.stage as usize][b.index as usize] = (b.addr, b.size);
-                qs.bump(b.stage as usize);
+                qs.bump0(b.stage as usize);
             }
         }
         op::BIND_TEX | op::BIND_SAMP | op::BIND_IMG => {
             let (stage, first, n): (i32, i32, i32) = unsafe { (rd_at(rec, 0), rd_at(rec, 4), rd_at(rec, 8)) };
             let (defer, src): (i32, u64) = unsafe { (rd_at(rec, 12), rd_at(rec, 16)) };
             if (stage as usize) < 7 {
-                qs.bump(stage as usize);
+                qs.bump2(stage as usize);
                 for i in 0..n.clamp(0, 32) as usize {
                     // a deferred bind reads the game's handle array now, as the queue runs it
                     let h: u64 = if defer != 0 && src != 0 { unsafe { core::ptr::read_unaligned((src + 8 * i as u64) as *const u64) } } else { unsafe { rd_at(rec, 24 + 8 * i) } };
@@ -2262,7 +2578,7 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             let b: p_bind_tex1 = rd_payload(rec);
             if (b.stage as usize) < 7 && (b.slot as usize) < 256 {
                 qs.tex[b.stage as usize][b.slot as usize] = b.h as u32;
-                qs.bump(b.stage as usize);
+                qs.bump2(b.stage as usize);
             }
         }
         op::SET_TEX_POOL => qs.tex_pool = rd_payload::<usize>(rec),
@@ -2349,12 +2665,19 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             let Some((b, o, _)) = super::mem::resolve(g, sub, c.src, bytes) else { return true };
             let (sl, off, ext) = region_copy(&t, view.as_ref(), &c.r, &tf);
             let r = vk::BufferImageCopy { buffer_offset: o, buffer_row_length: row, buffer_image_height: img_rows, image_subresource: sl, image_offset: off, image_extent: ext };
+            if img_scale(g, t.serial) != 1.0 {
+                let imgs = g.images.lock().unwrap();
+                if let Some(im) = imgs.by_serial.get(&t.serial) {
+                    super::image::copy_buf_img(g, sub.main, im, b, r, opc == op::COPY_B2T);
+                }
+            } else {
             unsafe {
                 if opc == op::COPY_B2T {
                     dev.cmd_copy_buffer_to_image(sub.main, b, image, vk::ImageLayout::GENERAL, &[r]);
                 } else {
                     dev.cmd_copy_image_to_buffer(sub.main, image, vk::ImageLayout::GENERAL, b, &[r]);
                 }
+            }
             }
             if opc == op::COPY_T2B {
                 super::mem::note_gpu_write(g, sub, c.src, bytes);
@@ -2373,6 +2696,17 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             let Some((di, dtf, _, _)) = target_image(g, sub, &d) else { return true };
             let (ssl, soff, sext) = region_copy(&s, (c.has_sv != 0).then_some(&c.sv), &c.sr, &stf);
             let (dsl, doff, dext) = region_copy(&d, (c.has_dv != 0).then_some(&c.dv), &c.dr, &dtf);
+            let (ss, ds) = (img_scale(g, s.serial), img_scale(g, d.serial));
+            if ss != 1.0 || ds != 1.0 {
+                // resolution scale: a blit of the regions at each image's scale (the game's region sizes kept)
+                let flt = if c.flags & 1 != 0 || ss != ds { super::scale::filter(g, dtf.vk, dtf.kind) } else { vk::Filter::NEAREST };
+                let at = |o: vk::Offset3D, s: f32| vk::Offset3D { x: super::scale::coord(o.x, s), y: super::scale::coord(o.y, s), z: o.z };
+                let end = |o: vk::Offset3D, e: vk::Extent3D, s: f32| vk::Offset3D { x: super::scale::coord(o.x + e.width as i32, s), y: super::scale::coord(o.y + e.height as i32, s), z: o.z + e.depth as i32 };
+                let r = vk::ImageBlit { src_subresource: ssl, src_offsets: [at(soff, ss), end(soff, sext, ss)], dst_subresource: dsl, dst_offsets: [at(doff, ds), end(doff, dext, ds)] };
+                unsafe { dev.cmd_blit_image(sub.main, si, vk::ImageLayout::GENERAL, di, vk::ImageLayout::GENERAL, &[r], flt) };
+                barrier(g, sub);
+                return true;
+            }
             unsafe {
                 if sext == dext && stf.vk == dtf.vk {
                     let r = vk::ImageCopy { src_subresource: ssl, src_offset: soff, dst_subresource: dsl, dst_offset: doff, extent: sext };
@@ -2474,8 +2808,9 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
         op::BUFS_DEFERRED => {
             let b: crate::nvn::cmd2::p_bufs_deferred = rd_payload(rec);
             if (b.stage as usize) < 7 {
-                qs.bump(b.stage as usize);
-                qs.bump(5);
+                if b.ssbo != 0 || b.stage == 5 {
+                    qs.bump0(b.stage as usize);
+                }
                 for i in 0..b.n.clamp(0, 16) {
                     let k = (b.first + i) as usize;
                     if k >= 16 {
@@ -2597,17 +2932,30 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             let (ow, oh) = (if d.ow > 0 { d.ow } else { dext.width as i32 }, if d.oh > 0 { d.oh } else { dext.height as i32 });
             let asp = super::image::upload_aspect(&stf);
             let sl = vk::ImageSubresourceLayers { aspect_mask: asp, mip_level: 0, base_array_layer: 0, layer_count: 1 };
+            // the game's rectangles at each image's resolution scale
+            let (ss, ds) = (img_scale(g, d.color.serial), img_scale(g, d.out.serial));
+            let (iw, ih) = if d.iw > 0 { (iw, ih) } else { ((iw as f32 / ss) as i32, (ih as f32 / ss) as i32) };
+            let (ow, oh) = if d.ow > 0 { (ow, oh) } else { ((ow as f32 / ds) as i32, (oh as f32 / ds) as i32) };
+            let c = |v: i32, s: f32| super::scale::coord(v, s);
             let r = vk::ImageBlit {
                 src_subresource: sl,
-                src_offsets: [vk::Offset3D { x: d.cbase[0], y: d.cbase[1], z: 0 }, vk::Offset3D { x: (d.cbase[0] + iw).min(sext.width as i32), y: (d.cbase[1] + ih).min(sext.height as i32), z: 1 }],
+                src_offsets: [vk::Offset3D { x: c(d.cbase[0], ss), y: c(d.cbase[1], ss), z: 0 }, vk::Offset3D { x: c(d.cbase[0] + iw, ss).min(sext.width as i32), y: c(d.cbase[1] + ih, ss).min(sext.height as i32), z: 1 }],
                 dst_subresource: sl,
-                dst_offsets: [vk::Offset3D { x: d.obase[0], y: d.obase[1], z: 0 }, vk::Offset3D { x: (d.obase[0] + ow).min(dext.width as i32), y: (d.obase[1] + oh).min(dext.height as i32), z: 1 }],
+                dst_offsets: [vk::Offset3D { x: c(d.obase[0], ds), y: c(d.obase[1], ds), z: 0 }, vk::Offset3D { x: c(d.obase[0] + ow, ds).min(dext.width as i32), y: c(d.obase[1] + oh, ds).min(dext.height as i32), z: 1 }],
             };
             unsafe { dev.cmd_blit_image(sub.main, si, vk::ImageLayout::GENERAL, di, vk::ImageLayout::GENERAL, &[r], vk::Filter::LINEAR) };
             barrier(g, sub);
         }
         op::RESOLVE_DEPTH => {
-            crate::log::red_once("ResolveDepthBuffer: a multisample depth resolve is not replayed yet");
+            // NVN's depth resolve finishes the bound depth target's compressed / culled state so it can be read as a
+            // texture (Turbo leaves it a stub). Vulkan keeps no such state: what remains is that its writes so far are
+            // done and visible to what follows: the pass ends there and a barrier follows.
+            end_pass(g, sub, qs);
+            barrier(g, sub);
+            static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+            if !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                crate::vklog!("ResolveDepthBuffer: the depth target's writes are made visible to later reads (end of pass, barrier; later ones are not logged)");
+            }
         }
         op::RESET_COUNTER => {
             let kind: u64 = unsafe { rd_at(rec, 0) };

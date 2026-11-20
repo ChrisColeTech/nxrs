@@ -202,11 +202,13 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   MB and ms per frame).
 - Switches: `NXGFX_VALIDATION=1` (Vulkan validation layer), `NXGFX_GPU=<name part>`, `NXGFX_POOL=mirror|host|vram`,
   `NXGFX_PRESENT=fifo|mailbox|immediate`, `NXGFX_ASTC=rgba8` (no BC7 re-encode), `NXGFX_TEX_CAP` / `NXGFX_SAMP_CAP`
-  (pool set size, 65536 / 4096), `NXGFX_SHADERS`, `NXGFX_CACHE`, `NXGFX_POOL_LOG=1`.
+  (pool set size, 262144 / 4096), `NXGFX_SHADERS`, `NXGFX_CACHE`, `NXGFX_POOL_LOG=1`.
   Added by lane G (rev 4): `NXGFX_SHADER_WAIT_MS` (3000: a draw's longest wait for the live translator; 0 = skip),
   `NXGFX_LIVE=0` / `NXGFX_LIVE_JOBS` (live translator off / threads, 4), `NXGFX_WB_LAZY=0` (write-back on demand
   off), `NXGFX_APPEND_RESET=0`, `NXGFX_A2C=0`, `NXGFX_SLOW_MS` (50), `NXGFX_FRAME_CSV=<path>`,
   `NXGFX_PCACHE_QUIET_MS` (2000), `NXGFX_HEADLESS=1` (no host window), `NXGFX_PREWARM_THREADS` (4).
+  Added by lane G3 (rev 7): `NXGFX_DESCBUF=0` (classic descriptor sets instead of descriptor buffers), `NXGFX_GPL=0`
+  (whole pipelines only, no linking from parts), `NXGFX_PROFILE=1` (the fine timers inside `sets`).
 - Options graphics reads from nxconfig (lane I's table), live: `fps_limit`, `forced_vsync`, `shadows`,
   `game_dynamic_resolution`. Control commands it registers (`nxgfx::register_controls`, called by os's bind):
   `shot [path]`, `a2c 0|1`, `pcache`, `gfx`.
@@ -373,6 +375,70 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
 - **Compressible textures (render targets) are not uploaded from storage** on creation. MK8D's dynamic resolution makes
   new targets of 1880x1057 .. 1920x1080 every frame, and each was uploaded: 20-50 ms a frame in races (`r28`).
 
+**Lane G3, rev 7 (2026-11-19, uncommitted).** Runs in `build/G/runs/` (`z3`..`z7`, `a1`, `m2`, `w12`, `x1`, `x2`,
+`v6`..`v8`) and `build/I/runs/20261119-183639-G3-mk8d-movie`; lane G3's run scripts are `build/G/g3/run.sh <game> <run>
+<s> [NAME=VALUE ...]` (its own links in `build/G/<game>t`, relinked when `target/G` is newer, saves backed up) and
+`build/G/g3/press_run.py` (`PRESS=0`, `CTL="t:command;..."` control commands at given seconds).
+- **Descriptor work (Z-A, item 1).** Measured first (fine timers, now opt-in with `NXGFX_PROFILE=1`, they cost 1-2 ms a
+  frame themselves): of `sets` 9-12 ms a frame, allocating and writing the ~2,150 sets was 1.5-1.8 ms, rebuilding the
+  c0 / c2 driver banks 2.5 ms, texture views 1.5-2 ms, memory lookups 1 ms, set keys 0.5 ms. `tests/desc_bench.rs`
+  (ignored tests): 2,170 classic sets of 15 uniform buffers 1.8 ms; the same descriptors by `vkGetDescriptorEXT` 0.12 ms.
+  Push descriptors do not fit the layout (32 descriptors at most in the one push set a layout may have; a stage set has
+  176 bindings and a draw binds two to five sets). **Descriptor buffers** (VK_EXT_descriptor_buffer) are on when the
+  device has them (`NXGFX_DESCBUF=0`: classic sets): the stage sets are written into a per-submission ring (4 MB
+  chunks, one draw's sets in one chunk, no key / hash), the pool set is a mapped buffer written in place at
+  registration (texel buffers by address), every pipeline of the shared layout has the descriptor-buffer flag, buffers
+  a shader reads have device addresses (`Buf::addr`, pools' in `mem::buffer_address`). Also: c0 and c2 have generations
+  of their own (a uniform-buffer bind, the most common, changes neither for a graphics stage), c2 is rebuilt only when
+  its handles changed, a stage's texture / image descriptors are kept while its handle bank, pools and submission stand
+  (`TexPart`), the pool lookup has a per-thread cache (`mem::resolve`, invalidated by `POOL_GEN`, overlapping pools
+  respected), neighbouring pools share one `GetWriteWatch` call, vertex input and vertex buffers are not set again when
+  unchanged. Result: see `z5` / `z7` below.
+- **Z-A waits for every frame.** With the replay on its own thread (`z4`, async) Lumiose stays at 34-38 FPS: the game's
+  thread waits for each frame's GPU work before it starts the next (the replay line now ends with `the game waited X ms
+  per frame (sync, acquire, finish)`), so the replay's CPU time adds to the game's whatever thread it runs on. 59 FPS
+  needs the replay itself (plus the game's ~12 ms) inside 16.7 ms.
+- **Asynchronous replay (item 2).** MK8D's title demo with `NXGFX_ASYNC=1` ran 300 s at 60 FPS with no stall (`a1`; r24
+  stopped at 121 s, r22 after 2 presents, both with lazy write-back on and before the screenshot deadlock fix; neither
+  stop came back). Ported from Turbo besides: at most 64 ops and 2 presents queued (the game's thread waits in the OS's
+  blocking hook), a SyncWait on a sync no queued command buffer has fenced yet waits only with a timeout and only until
+  it is fenced or the queue runs dry. **Stays off by default**: no game measured gains from it (Z-A waits per frame, MK8D
+  is at 60 either way), and its remaining risk is unmeasured on the rest of the library.
+- **MK8D's menu preview (item 3) fixed.** `nvnTextureWriteTexels` (the movie decoder's frames) writes the texture's
+  storage, swizzled (Turbo's `write_texels`), and every image over that storage uploads from it again; it wrote only the
+  one object's image, and the menu samples its own texture object over the same memory. Picture:
+  `build/I/runs/20261119-183639-G3-mk8d-movie/0004-a_first_Mii.png` (the Grand Prix panel plays the race movie). GPU test
+  `write_texels_reach_every_texture_over_the_storage`.
+- **Wonder's long frames (item 4).** Lane X's run: 63 frames over 50 ms in 240 s, 6.2 s of pipeline creation inside them
+  (single frames of 0.3-2.1 s at new places), texture streaming 40-60 ms, and the 2.8-3.0 s frames at 200 / 263 / 322 s
+  were its own pass dumps (`NXGFX_DUMP_AT_S`). Pipelines are now linked from parts (VK_EXT_graphics_pipeline_library,
+  Turbo's `NXRT_VK_GPL`, here on by default: `NXGFX_GPL=0` off): a new combination of known shaders links in about a
+  millisecond, the optimized whole pipeline is built on two background threads and replaces it; and a program's shader
+  parts are made ahead on two background threads when the game sets it (`nvnProgramSetShaders`, for the depth formats
+  and sample counts seen lately; within the prewarm's memory budget). `x1` (parts, nothing made ahead): 22 slow frames,
+  pacing windows under 58 FPS 3 of 44 (lane X: 17 of 44); `x2` (made ahead): see below.
+- **Lazy write-back (item 5).** `v6` (lazy on): no fault in 150 s, but 10-13 FPS: an eager write-back landing on a page
+  held on the device brought it back first, which made the completion thread wait for all GPU work submitted since
+  (48 ms of write-back a frame). Such pages now stay on the device (its buffer has the newest bytes, this write-back's
+  among them). The pools line shows `lazy write-back: N pages on the device, … brought back …` when it is on. Decision:
+  see `v7` / `v8` below.
+- **MKW null command buffer (item 6).** Graphics now answers NVN2's device integers as Turbo does (`DEVINFO2`, 0xAA
+  items, and the constants of the driver compiled into the game's sdk: `nvn::device::set_sdk_image`, called by os with
+  the sdk module's image; MKW's sdk gives API 231.39, GPU code 201.20). The queue memory sizes, texture storage sizes and
+  alignments and command memory already matched Turbo. MKW still faults the same way 3.7 s after its first present
+  (`w12`: `main+0xa66e0 +0x2df5 (read of 0xa0)`): the sizes graphics reports are not the cause.
+- **5A.4 rows:** raw global memory (`vk/gmem.rs`: the 8,192-entry memory pool table with 2 MiB hints and the write log
+  under constant slot 255, pools copied back after a shader wrote them through a loaded pointer, at most 64 MB each);
+  resolution scale and the host's dynamic resolution (`vk/scale.rs`, the module's notes; GPU test
+  `resolution_scale_renders_at_twice_the_size`); `nvnCommandBufferResolveDepthBuffer` (the pass ends, a barrier: the
+  depth target's writes visible to later reads; Turbo leaves it a stub); per-title texture rewrites are every title's
+  here (CPU writes to a texture's storage reload it for all games, Turbo's two titles included); ray tracing not done
+  (PORT_PLAN 5A.4).
+- **Texture pool set: 262,144 IDs** by default (`NXGFX_TEX_CAP`; MKW registers up to ~131,400).
+- **For the lane that edits `vk/queue.rs` / `vk/mem.rs` write-backs (the `base` copy and `land_changed`, not lane
+  G3's):** `v6` measured 48 ms of write-back a frame in Violet with lazy write-back on; part of it was lazy pages (fixed
+  above). `land_changed` calls `watch::take` / `watch::reset` per changed page.
+
 **Shaders (agreed with shaders, lane C):** graphics reads lane C's output as written above: `<data>/shaders/spv/
 <key>.spv` + `.json` (`status` "ok"), the shader key as defined there (`nxgfx::nvn::prog::shader_key` computes it at
 `nvnProgramSetShaders`). Nothing in lane C's output needs to change for the binding model: at module load graphics
@@ -425,6 +491,25 @@ shared by every program** (no per-program layouts, so pipelines key only on shad
   different places 30-35 s in (main+0x8a2d80 reading 0x100000001, main+0x26c620 reading 0x48) and once ran 89 s
   clean. `SWR_XMON=1` and `NXGFX_WB_LAZY=0` do not change either; `NXGFX_POOL=host` does not change MKW (DKB ran 120 s
   clean with it, but that run also never committed its save, so it proves nothing yet). Details: lane X section.
+
+**Lane W2 findings for lane G (2026-11-19, engine built from the main tree at 120a8a0 + lane W2's files):**
+- **MK8D races are posterized** (`build\I\runs\20261119-175850-W2-mk8d-gp3`, `build\games\mk8dw`, `lsfg=0`): the blue
+  tint and black road are gone, but every race picture has hard colour bands (cel-like steps in the sky, grass and
+  water, `0015-shot_race_1_min.png` Mario Kart Stadium, `0020`/`0021` Water Park, `0025` Sweet Sweet Canyon with a dark
+  teal road) and the karts / characters look darker than lane G's `build\G\runs\r28\shot-006400.png`, which is smooth.
+  The menus are clean (`0005`, `0006`). The Grand Prix preview movie panel now plays (`0004-a_first_Mii.png`, the
+  panel shows the race clip, with the same banding), so the black panel is gone. The battle run on the same build
+  (`20261119-174606-W2-mk8d-gp`, `0007-a_menu3.png`, Balloon Battle in Urchin Underpass) shows the banding too.
+- **MK8D FPS in the Grand Prix with two game builds compiling beside it** (8 clang processes): 48.7 FPS over 120-760 s
+  (p95 56 ms), slow frames from new pipelines (`pipeline lookups 101.6 ms`, 1 made) at race starts. Lane W2 re-measures
+  without builds; this number is not graphics' alone.
+- **Beach Bounce Remastered presents black** (`build\I\runs\20261119-182618-W2-bbounce-menus`, pass dump at 86 s in
+  `build\games\bbounce\captures\pass-004785-*`): the game (Ren'Py on its own MNX engine) draws its scene correctly into
+  a 1920x1080 RGBA8 target (passes 0-47, one quad each: `pass-004785-020-...png` is the hospital scene with Grandma
+  Umi's dialogue), then the last pass (48: vertex `ae00dca5e2d1ea98`, pixel `317416f793e1251a`, one texture id260 of
+  1920x1080, **with a 1920x1080 depth attachment, format 0x36**) blits it to the window texture and writes all zeros
+  (centre pixel 00000000; every `fullres` is black). Likely the depth (test against an uncleared / wrong-cleared depth)
+  or the sampled texture id260 not being the scene target. 60 FPS meanwhile.
 
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
@@ -912,3 +997,76 @@ Not `fullres`/F8 (deadlocks, lane G section) and never a screen grab (it reads w
   `build\X\inputs\wonder_run.txt` (run right, jump) ten times), exit 0, pictures right (pass dumps at 60..700 s),
   674 s of sound, 0 underruns. Left for Playable: FPS (pacing median 59.6, per minute 54-59.6, p10 52.7: single long
   frames, not yet attributed) and memory in the first 5 minutes (3.7 → 4.8 GB, then flat for 7 minutes).
+
+## Switch 2 and Pokémon gameplay (lane X2, 5B / M6)
+
+Engine: `target\X` (main tree at 120a8a0 + the working tree), games relinked with a PDB by `build\X\relink.sh <game>`
+(`build\games\{mkw,dkb,wonder,arceus,violet,plza}`). Runs: `build\I\runs\<time>-X-x2-<label>\` through
+`build\X\xplay.py` / `build\X\xq2.sh` (lane `X2`; `NXRS_ESC_QUIT=0`, `NXRS_NO_SONY_HID=1` by default; `shot NAME` is
+graphics' own `fullres` now; new step `interactive S`: lines appended to `<run>\cmds.txt` are sent to the PID the run
+started: `press BTN`, `hold BTN S`, `shot NAME`, `replay FILE`, `raw <pipe command>`, `end`). Saves backed up in
+`build\X\saves\`.
+
+**Debug instrumentation of lifted code (lane X2 tool, never in a game's own build):** `build\X\inst\inst.py <game>
+<dir> <addr>:<mode>...` copies the chunk of each lifted function, compiles it with the game flags and writes a
+`link.rsp`; `build\X\ilink.sh <game> <dir>` links it with `target\X` and a PDB; run it with `NXRS_DATA` /
+`NXRT_EXEFS` set to the game's data (read only). Modes: `null` (log calls returning 0 with x0..x7 and lr), `all`,
+`allN` (also dump 8 qwords at xN and at the result + 0x40), `line` (line tables: `llvm-symbolizer` maps a crash's host
+address to the C line, i.e. the guest instruction), `crumbs:<reg>` (per-thread ring of the last 64 labels with the
+register's value, dumped when the function dereferences that register while it is 0; `INST_DUMPS=<label>,<reg>,<lo>,<hi>`
+dumps memory at a label). `build\X\dis\` has the flat images of MKW / DKB `main` for `llvm-objdump`.
+
+**Mario Kart World's crash, root cause (os/runtime side done; for lane G3):** the null is not an OS allocation. Over
+three instrumented runs no sead heap allocation (`main+0x3e3550`), GPU memory block (`main+0x5d6840` / `+0x5d72f0`) or
+free-list allocation (`main+0xcff680`) returned 0. The crash path (`x2-mkw9-crumbs`, labels of `main+0xa66e0`): the
+render thread asks **agl::utl::DynamicTextureAllocator** (the object at `[sp+0x90]`, initialised by `main+0xeb1870`
+from `main+0xd65530`) for a render target; its fixed pool is the 285 MB virtual pool aliased at 1.1 s
+(`0x11d00000`, ctx+0x2a70), full; it may grow only with a heap (ctx+0x2a78) and a chunk size (ctx+0x2a80, 32 MB), and
+the game's init struct passes heap 0 (`x2-mkw15-initparams`: struct+0x10 = 0, from `[obj+0x5a0]`, zeroed in its
+constructor `main+0xde5908` and never set), so `main+0xa7f14` takes the out-of-memory path (`main+0xa7ffc`: seven
+`main+0x25e0e60` purges, then x22 = 0) and `[x22+0xa0]` faults (`main+0xa7234`), or the null command buffer of the
+next event reaches `nvnCommandBufferWaitEvent`. The requests before it (`x2-mkw13-allocs`, every call of `main+0xa66e0`
+with its descriptor and result): 45 distinct targets, **319 MB of storage by our `nvnTextureBuilderGetStorageSize`**
+against the 285 MB pool, e.g. 2560x1440 RGBA8 = 0xf00000 (1536 rows: 16-GOB blocks), 2560x1440 8-byte = 0x1e00000,
+3072x3072 = 0x3600000, 1280x720 = 0x3c0000. Handheld (`--option docked=0`, `x2-mkw14-handheld`) and
+`NXOS_GFX_SCALE=1` (2048x1152 targets, `x2-mkw12-scale1`) crash the same way. So either our storage sizes / alignments
+for NVN2 render targets are larger than the driver's (the pool fits on the console), or the game creates more targets
+than on the console (something it reads decides their count / size), or it frees them later (they are released by a
+GPU-progress check). Not the scheduler (`NXOS_STEAL_ANY_MS=0`, `x2-mkw3-nosteal`), not the write-back (below).
+**For lane G3:** the sizes above against the real NVN2 driver; the entries' reuse (ids `7d05`.. come back, offsets are
+reused) suggests frees do happen.
+
+**Write-back lands only what the GPU changed (graphics, lane X2, Turbo parity; lane G please review):**
+`vk/queue.rs submit_sub` copies each write-back range as the device had it before the submission's work (into a
+"write-back base" buffer, recorded in `pre` after the uploads), and `vk/mem.rs land_changed` writes into guest memory
+only the bytes where the device's result differs from that base, page by page (Turbo `vk_mem.c wr_land`, "a storage
+buffer is written in part"). Landing the whole range put stale device bytes over what the CPU wrote meanwhile
+(a read-write storage buffer over a pool the CPU also writes; a size-0 one runs to the end of its pool, up to 1 MB).
+The pools line now counts them: `(N CPU-written bytes inside write-backs kept so far)`; Super Mario Bros. Wonder kept
+1,936 in its first 4 minutes (`x2-wonder1-10min`), DKB 0. It is not the MKW / DKB crash.
+
+**os `sched.rs`:** `NXOS_STEAL_ANY_MS=<ms>` (debugging; default 20, 0 = never): how long a waiter waits before it
+takes a core from an equal or better holder (Horizon never does). The stats line counts those steals separately
+(`N steals (M from an equal or better holder)`) and the first 16 are logged with both threads. **os `hid.rs`:**
+`KeyboardState` is 0x30 bytes (nxnative, yuzu); 0x38 wrote 8 bytes past the caller's (no Switch 2 game here imports
+it).
+
+**Lane X2 status (2026-11-19 19:45):**
+- Mario Kart World: crashes 4-5 s after its first frame (root cause above); blocked on lane G3's sizes.
+- Donkey Kong Bananza: crashes within 0.2 s of the second A on the title (the first A commits the save), at a new
+  place each run: `main+0x1943c0` write of 0 (`x2-dkb1-wbfix`), `main+0x454cb4` read of -1 (`x2-dkb2-lines`),
+  `main+0x372de4` (`x2-dkb-nosteal`, no equal-priority steals); with `NXOS_FREE_CORES=1` it dies at 11 s
+  (`x2-dkb-free`), so it is corruption that depends on how threads interleave. Ruled out: the write-back (0 CPU bytes
+  kept), equal-priority steals, the HID state sizes it imports (touch, Npad, six-axis, Jcms checked against
+  nxnative). The address arbiter and condvar SVCs match Turbo's `kernel.c`. Next: crumbs on the faulting functions'
+  pointers at the moment of the second press; Turbo runs this game with every thread free, so compare its loader
+  and file reads around the save load. Title music: the BGM stream is never opened (0.9 s of renderer sound in 60 s).
+- Super Mario Bros. Wonder: 12.7 min, no crash, picture right, sound, memory flat after minute 5; FPS median 59.8 /
+  p10 54.7 (another lane's build ran during minutes 2-5). Not marked Playable.
+- Arceus: Jubilife Village right with `lsfg=0` (the garbled village was frame generation); 30.0 FPS, 620 s.
+- Violet: in-house gameplay 20 min, 30.0 FPS, sound, flat memory; the story step that opens the front door was not
+  found (the game answers "You're not quite ready to go to school yet").
+- Z-A: 600 s to the Lumiose station platform, no crash, sound, memory flat, 46.7 FPS median (p10 43.5): FPS is
+  lane G3's (`x2-plza2-lumiose`).
+- **Windows closed from outside (for the coordinator):** Z-A `x2-plza1-lumiose` ended at 157.7 s with
+  `window: closed by the user or the system` while only control-pipe presses were being sent (as lane W saw).

@@ -5,6 +5,12 @@
 //! layout (`layout`). That keeps the pipeline count close to the program count, which is what bounds the driver's
 //! memory: NVIDIA's driver grew to 61 GB when one game's pipelines multiplied per state.
 //!
+//! A pipeline nothing built yet is linked from four parts (VK_EXT_graphics_pipeline_library, Turbo's NXRT_VK_GPL):
+//! vertex input, pre-rasterization shaders, fragment shader, fragment output, each compiled once and kept by what it
+//! depends on; a new combination of known parts is only linked (about a millisecond against 50-250 ms for a whole
+//! pipeline: Super Mario Bros. Wonder's frames of 60-2,000 ms at every new place). The whole, optimized pipeline is
+//! then built on a background thread and takes the linked one's place. `NXGFX_GPL=0`: whole pipelines only.
+//!
 //! New keys are appended to a key file; `prewarm` builds the keys of earlier runs on background threads, stopping at a
 //! private-memory budget (`NXGFX_PREWARM_BUDGET_MB`, default 2048) or a count cap. A VkPipelineCache is kept on disk.
 
@@ -91,6 +97,16 @@ impl Key {
 
 pub struct Pipes {
     map: Mutex<HashMap<Key, vk::Pipeline>>,
+    /// pipeline-library parts by what they depend on (vk::Pipeline::null(): it could not be made)
+    parts: Mutex<HashMap<Vec<u8>, vk::Pipeline>>,
+    /// linked pipelines an optimized one has replaced (a recorded command buffer may still use them)
+    retired: Mutex<Vec<vk::Pipeline>>,
+    /// keys whose whole pipeline the background builder is to make
+    optimize: Mutex<Option<std::sync::mpsc::Sender<(GfxKey, Vec<Arc<Module>>)>>>,
+    pub linked: AtomicU64,
+    pub optimized: AtomicU64,
+    /// shader parts made ahead (`prebuild`)
+    pub prebuilt: AtomicU64,
     pub cache: vk::PipelineCache,
     dir: Mutex<Option<PathBuf>>,
     known: Mutex<std::collections::HashSet<Key>>,
@@ -113,6 +129,12 @@ impl Pipes {
             .expect("pipeline cache");
         Pipes {
             map: Mutex::new(HashMap::new()),
+            parts: Mutex::new(HashMap::new()),
+            retired: Mutex::new(Vec::new()),
+            optimize: Mutex::new(None),
+            linked: AtomicU64::new(0),
+            optimized: AtomicU64::new(0),
+            prebuilt: AtomicU64::new(0),
             cache,
             dir: Mutex::new(dir),
             known: Mutex::new(Default::default()),
@@ -153,6 +175,9 @@ impl Pipes {
         super::queue::finish();
         let mut m = self.map.lock().unwrap();
         for (_, p) in m.drain() {
+            unsafe { g.dev().destroy_pipeline(p, None) };
+        }
+        for p in self.retired.lock().unwrap().drain(..) {
             unsafe { g.dev().destroy_pipeline(p, None) };
         }
     }
@@ -274,6 +299,7 @@ fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, 
         .depth_attachment_format(if depth_has_depth(df) { df } else { vk::Format::UNDEFINED })
         .stencil_attachment_format(if depth_has_stencil(df) { df } else { vk::Format::UNDEFINED });
     let mut ci = vk::GraphicsPipelineCreateInfo::default()
+        .flags(db_flag(g))
         .stages(&stages)
         .viewport_state(&vp)
         .rasterization_state(&rs)
@@ -294,10 +320,274 @@ fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, 
     Ok(p[0])
 }
 
+/// Pipelines of the shared layout read descriptor buffers when the device has them (`caps.descbuf`).
+fn db_flag(g: &Gpu) -> vk::PipelineCreateFlags {
+    if g.d.caps.descbuf {
+        vk::PipelineCreateFlags::DESCRIPTOR_BUFFER_EXT
+    } else {
+        vk::PipelineCreateFlags::empty()
+    }
+}
+
+/// One pipeline-library part, made once for its key.
+fn gpl_part(g: &Gpu, key: Vec<u8>, what: vk::GraphicsPipelineLibraryFlagsEXT, ci: vk::GraphicsPipelineCreateInfo) -> Option<vk::Pipeline> {
+    if let Some(&p) = g.pipes.parts.lock().unwrap().get(&key) {
+        return (p != vk::Pipeline::null()).then_some(p);
+    }
+    let mut li = vk::GraphicsPipelineLibraryCreateInfoEXT::default().flags(what);
+    let ci = ci.flags(vk::PipelineCreateFlags::LIBRARY_KHR | vk::PipelineCreateFlags::RETAIN_LINK_TIME_OPTIMIZATION_INFO_EXT | db_flag(g)).push_next(&mut li);
+    let p = match unsafe { g.dev().create_graphics_pipelines(g.pipes.cache, &[ci], None) } {
+        Ok(v) => v[0],
+        Err((_, e)) => {
+            static N: AtomicU64 = AtomicU64::new(0);
+            if N.fetch_add(1, Ordering::Relaxed) < 8 {
+                crate::log::red(&format!("pipeline part {what:?} could not be made ({e}): whole pipelines for it"));
+            }
+            vk::Pipeline::null()
+        }
+    };
+    let mut m = g.pipes.parts.lock().unwrap();
+    if let Some(&there) = m.get(&key) {
+        if there != vk::Pipeline::null() && p != vk::Pipeline::null() {
+            unsafe { g.dev().destroy_pipeline(p, None) };
+            return Some(there);
+        }
+    }
+    m.insert(key, p);
+    (p != vk::Pipeline::null()).then_some(p)
+}
+
+/// A graphics pipeline linked from its four parts (the shared layout, no link-time optimization: fast).
+fn link_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Option<vk::Pipeline> {
+    let _x = driver_exclusive(g).then(|| EXCLUSIVE.lock().unwrap());
+    let mesh = mods.iter().any(|m| m.mesh != 0);
+    let tess = !mesh && mods.iter().any(|m| m.stage == 3 || m.stage == 4);
+    let dyns = dynamic_states(g, tess, mesh);
+    let dy = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
+    let colors: Vec<vk::Format> = k.colors[..k.ncolor as usize].iter().map(|&f| vk::Format::from_raw(f)).collect();
+    let df = vk::Format::from_raw(k.depth);
+    let ri = || {
+        vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&colors)
+            .depth_attachment_format(if depth_has_depth(df) { df } else { vk::Format::UNDEFINED })
+            .stencil_attachment_format(if depth_has_stencil(df) { df } else { vk::Format::UNDEFINED })
+    };
+    let mask = [u32::MAX];
+    let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples_flag(k.samples)).sample_mask(&mask);
+    let flags = [tess as u8, mesh as u8];
+    let mut parts = Vec::with_capacity(4);
+    // vertex input: the input assembly (the vertex layout and topology are dynamic)
+    if !mesh {
+        let vi = vk::PipelineVertexInputStateCreateInfo::default();
+        let ia = vk::PipelineInputAssemblyStateCreateInfo::default().topology(if tess { vk::PrimitiveTopology::PATCH_LIST } else { vk::PrimitiveTopology::TRIANGLE_LIST });
+        let ci = vk::GraphicsPipelineCreateInfo::default().vertex_input_state(&vi).input_assembly_state(&ia).dynamic_state(&dy);
+        parts.push(gpl_part(g, vec![1, flags[0], flags[1]], vk::GraphicsPipelineLibraryFlagsEXT::VERTEX_INPUT_INTERFACE, ci)?);
+    }
+    // the shaders' parts: pre-rasterization and fragment shader (made ahead when the game sets a program: `prebuild`)
+    let [pre, frag] = shader_parts(g, k, mods)?;
+    parts.push(pre);
+    parts.push(frag);
+    // fragment output: the targets' formats, blending, multisampling
+    {
+        let mut key = vec![4, flags[0], flags[1], k.samples, k.ncolor];
+        for c in &k.colors[..k.ncolor as usize] {
+            key.extend_from_slice(&c.to_le_bytes());
+        }
+        key.extend_from_slice(&k.depth.to_le_bytes());
+        let att: Vec<vk::PipelineColorBlendAttachmentState> =
+            (0..k.ncolor).map(|_| vk::PipelineColorBlendAttachmentState::default().color_write_mask(vk::ColorComponentFlags::RGBA)).collect();
+        let cb = vk::PipelineColorBlendStateCreateInfo::default().attachments(&att);
+        let mut r = ri();
+        let ci = vk::GraphicsPipelineCreateInfo::default().multisample_state(&ms).color_blend_state(&cb).dynamic_state(&dy).push_next(&mut r);
+        parts.push(gpl_part(g, key, vk::GraphicsPipelineLibraryFlagsEXT::FRAGMENT_OUTPUT_INTERFACE, ci)?);
+    }
+    let mut li = vk::PipelineLibraryCreateInfoKHR::default().libraries(&parts);
+    let ci = vk::GraphicsPipelineCreateInfo::default().flags(db_flag(g)).layout(g.layout.pipeline).push_next(&mut li);
+    match unsafe { g.dev().create_graphics_pipelines(vk::PipelineCache::null(), &[ci], None) } {
+        Ok(v) => Some(v[0]),
+        Err((_, e)) => {
+            static N: AtomicU64 = AtomicU64::new(0);
+            if N.fetch_add(1, Ordering::Relaxed) < 8 {
+                crate::log::red(&format!("a pipeline could not be linked from its parts ({e}): made whole"));
+            }
+            None
+        }
+    }
+}
+
+/// The pre-rasterization part (every stage but the fragment shader, viewport, rasterization, tessellation) and the
+/// fragment shader part (its stage, depth / stencil, multisampling) of a pipeline: what costs the shader compiles.
+fn shader_parts(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Option<[vk::Pipeline; 2]> {
+    let mesh = mods.iter().any(|m| m.mesh != 0);
+    let tess = !mesh && mods.iter().any(|m| m.stage == 3 || m.stage == 4);
+    let dyns = dynamic_states(g, tess, mesh);
+    let dy = vk::PipelineDynamicStateCreateInfo::default().dynamic_states(&dyns);
+    let df = vk::Format::from_raw(k.depth);
+    let colors: Vec<vk::Format> = k.colors[..k.ncolor as usize].iter().map(|&f| vk::Format::from_raw(f)).collect();
+    let ri = || {
+        vk::PipelineRenderingCreateInfo::default()
+            .color_attachment_formats(&colors)
+            .depth_attachment_format(if depth_has_depth(df) { df } else { vk::Format::UNDEFINED })
+            .stencil_attachment_format(if depth_has_stencil(df) { df } else { vk::Format::UNDEFINED })
+    };
+    let mask = [u32::MAX];
+    let ms = vk::PipelineMultisampleStateCreateInfo::default().rasterization_samples(samples_flag(k.samples)).sample_mask(&mask);
+    let flags = [tess as u8, mesh as u8];
+    let pre = {
+        let stages: Vec<vk::PipelineShaderStageCreateInfo> = mods
+            .iter()
+            .filter(|m| m.stage != 1)
+            .map(|m| vk::PipelineShaderStageCreateInfo::default().stage(m.vk_stage()).module(m.module).name(&m.entry))
+            .collect();
+        let mut key = vec![2, flags[0], flags[1]];
+        for (i, s) in k.shaders.iter().enumerate() {
+            if i != 1 {
+                key.extend_from_slice(s);
+            }
+        }
+        let vp = vk::PipelineViewportStateCreateInfo::default();
+        let rs = vk::PipelineRasterizationStateCreateInfo::default().polygon_mode(vk::PolygonMode::FILL).line_width(1.0);
+        let ts = vk::PipelineTessellationStateCreateInfo::default().patch_control_points(3);
+        let mut r = ri();
+        let mut ci = vk::GraphicsPipelineCreateInfo::default().stages(&stages).viewport_state(&vp).rasterization_state(&rs).dynamic_state(&dy).layout(g.layout.pipeline).push_next(&mut r);
+        if tess {
+            ci = ci.tessellation_state(&ts);
+        }
+        gpl_part(g, key, vk::GraphicsPipelineLibraryFlagsEXT::PRE_RASTERIZATION_SHADERS, ci)?
+    };
+    let frag = {
+        let stages: Vec<vk::PipelineShaderStageCreateInfo> = mods
+            .iter()
+            .filter(|m| m.stage == 1)
+            .map(|m| vk::PipelineShaderStageCreateInfo::default().stage(m.vk_stage()).module(m.module).name(&m.entry))
+            .collect();
+        let mut key = vec![3, flags[0], flags[1], k.samples];
+        key.extend_from_slice(&k.shaders[1]);
+        key.extend_from_slice(&k.depth.to_le_bytes());
+        let ds = vk::PipelineDepthStencilStateCreateInfo::default();
+        let mut r = ri();
+        let ci = vk::GraphicsPipelineCreateInfo::default().stages(&stages).multisample_state(&ms).depth_stencil_state(&ds).dynamic_state(&dy).layout(g.layout.pipeline).push_next(&mut r);
+        gpl_part(g, key, vk::GraphicsPipelineLibraryFlagsEXT::FRAGMENT_SHADER, ci)?
+    };
+    Some([pre, frag])
+}
+
+/// The (sample count, depth format) pairs pipelines were made for lately (the fragment parts made ahead use them).
+static TARGETS: Mutex<Vec<(u8, i32)>> = Mutex::new(Vec::new());
+
+fn note_targets(k: &GfxKey) {
+    let mut t = TARGETS.lock().unwrap();
+    if let Some(i) = t.iter().position(|&x| x == (k.samples, k.depth)) {
+        let x = t.remove(i);
+        t.insert(0, x);
+    } else {
+        t.insert(0, (k.samples, k.depth));
+        t.truncate(4);
+    }
+}
+
+/// nvnProgramSetShaders: the program's shader parts are made ahead on a background thread (a pipeline of it is then
+/// only linked at its first draw: a new place in a game no longer waits for its shaders to compile there). The
+/// fragment part for the depth formats and sample counts pipelines were made for lately.
+pub fn prebuild(g: &'static Gpu, keys: Vec<ShaderKey>) {
+    if !g.d.caps.gpl || keys.is_empty() {
+        return;
+    }
+    static TX: Mutex<Option<std::sync::mpsc::Sender<Vec<ShaderKey>>>> = Mutex::new(None);
+    let mut tx = TX.lock().unwrap();
+    if tx.is_none() {
+        let (s, r) = std::sync::mpsc::channel::<Vec<ShaderKey>>();
+        let r = Arc::new(Mutex::new(r));
+        for i in 0..2 {
+            let r = r.clone();
+            let _ = std::thread::Builder::new().name(format!("vk shader parts {i}")).spawn(move || {
+                low_priority();
+                // the driver's memory bounds it, as the prewarm's (NXGFX_PREWARM_BUDGET_MB of private memory growth)
+                let budget = std::env::var("NXGFX_PREWARM_BUDGET_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2048) << 20;
+                static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+                let base = *BASE.get_or_init(private_bytes);
+                loop {
+                    let job = r.lock().unwrap().recv();
+                    let Ok(keys) = job else { return };
+                    if g.pipes.stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if private_bytes().saturating_sub(base) > budget {
+                        static SAID: AtomicBool = AtomicBool::new(false);
+                        if !SAID.swap(true, Ordering::Relaxed) {
+                            crate::vklog!("shader parts are no longer made ahead: private memory grew {} MB (NXGFX_PREWARM_BUDGET_MB)", budget >> 20);
+                        }
+                        continue;
+                    }
+                    let _x = driver_exclusive(g).then(|| EXCLUSIVE.lock().unwrap());
+                    let mut k = GfxKey::default();
+                    let mut mods = Vec::new();
+                    for key in keys {
+                        // a shader not translated yet is made when its draw comes (the live translator)
+                        let Some(m) = g.shaders.get(g.dev(), &key) else { continue };
+                        if (m.stage as usize) < 5 {
+                            k.shaders[m.stage as usize] = m.key;
+                            mods.push(m);
+                        }
+                    }
+                    if mods.is_empty() {
+                        continue;
+                    }
+                    let targets = TARGETS.lock().unwrap().clone();
+                    for (samples, depth) in if targets.is_empty() { vec![(1, 0)] } else { targets } {
+                        k.samples = samples;
+                        k.depth = depth;
+                        if shader_parts(g, &k, &mods).is_some() {
+                            g.pipes.prebuilt.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+            });
+        }
+        *tx = Some(s);
+    }
+    let _ = tx.as_ref().unwrap().send(keys);
+}
+
+/// The background builders of the whole pipelines that replace linked ones (below normal priority).
+fn queue_optimize(g: &'static Gpu, k: GfxKey, mods: Vec<Arc<Module>>) {
+    let mut tx = g.pipes.optimize.lock().unwrap();
+    if tx.is_none() {
+        let (s, r) = std::sync::mpsc::channel::<(GfxKey, Vec<Arc<Module>>)>();
+        let r = Arc::new(Mutex::new(r));
+        for i in 0..2 {
+            let r = r.clone();
+            let _ = std::thread::Builder::new().name(format!("vk pipeline optimizer {i}")).spawn(move || {
+                #[cfg(windows)]
+                unsafe {
+                    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
+                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
+                }
+                loop {
+                    let job = r.lock().unwrap().recv();
+                    let Ok((k, mods)) = job else { return };
+                    if g.pipes.stop.load(Ordering::Relaxed) {
+                        return;
+                    }
+                    if let Ok(p) = build_gfx(g, &k, &mods) {
+                        let old = g.pipes.map.lock().unwrap().insert(Key::Gfx(k), p);
+                        if let Some(o) = old {
+                            g.pipes.retired.lock().unwrap().push(o);
+                        }
+                        g.pipes.optimized.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
+            });
+        }
+        *tx = Some(s);
+    }
+    let _ = tx.as_ref().unwrap().send((k, mods));
+}
+
 fn build_compute(g: &Gpu, m: &Module) -> Result<vk::Pipeline, String> {
     let _x = driver_exclusive(g).then(|| EXCLUSIVE.lock().unwrap());
     let st = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(m.module).name(&m.entry);
-    let ci = vk::ComputePipelineCreateInfo::default().stage(st).layout(g.layout.pipeline);
+    let ci = vk::ComputePipelineCreateInfo::default().flags(db_flag(g)).stage(st).layout(g.layout.pipeline);
     let p = unsafe { g.dev().create_compute_pipelines(g.pipes.cache, &[ci], None) }.map_err(|(_, e)| format!("vkCreateComputePipelines: {e}"))?;
     super::pcache::note_created(1);
     Ok(p[0])
@@ -321,7 +611,12 @@ impl Gpu {
             return Some(*p);
         }
         let t0 = std::time::Instant::now();
-        let r = build_gfx(self, k, mods);
+        note_targets(k);
+        let linked = if self.d.caps.gpl { link_gfx(self, k, mods) } else { None };
+        let r = match linked {
+            Some(p) => Ok(p),
+            None => build_gfx(self, k, mods),
+        };
         let ns = t0.elapsed().as_nanos() as u64;
         super::perf::add(super::perf::C::PipeNs, ns);
         super::perf::max(super::perf::C::PipeMaxNs, ns);
@@ -329,8 +624,23 @@ impl Gpu {
             Ok(p) => {
                 super::perf::inc(super::perf::C::PipesGfx);
                 self.pipes.created_sync.fetch_add(1, Ordering::Relaxed);
-                self.pipes.map.lock().unwrap().insert(key, p);
+                {
+                    let mut m = self.pipes.map.lock().unwrap();
+                    // made meanwhile by another thread (the prewarm): that one stays
+                    if let Some(&there) = m.get(&key) {
+                        drop(m);
+                        self.pipes.retired.lock().unwrap().push(p);
+                        return Some(there);
+                    }
+                    m.insert(key, p);
+                }
                 self.pipes.note_key(key);
+                if linked.is_some() {
+                    self.pipes.linked.fetch_add(1, Ordering::Relaxed);
+                    if let Some(g) = Gpu::try_get() {
+                        queue_optimize(g, *k, mods.to_vec());
+                    }
+                }
                 Some(p)
             }
             Err(e) => {

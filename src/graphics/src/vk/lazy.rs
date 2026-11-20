@@ -42,6 +42,19 @@ struct St {
 static ST: Mutex<Option<St>> = Mutex::new(None);
 static HANDLER: AtomicBool = AtomicBool::new(false);
 pub static PAGES_IN: AtomicU64 = AtomicU64::new(0);
+/// time spent bringing pages back (the faulting threads' and the completion thread's)
+pub static BACK_NS: AtomicU64 = AtomicU64::new(0);
+
+/// The pools line's part (`NXGFX_WB_LAZY=1` only): pages held on the device, brought back per frame and their time.
+pub fn summary(frames: f64) -> String {
+    if !enabled() {
+        return String::new();
+    }
+    let n = PAGES_IN.swap(0, Ordering::Relaxed) as f64 / frames;
+    let ms = BACK_NS.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
+    let skip = SKIP_BYTES.swap(0, Ordering::Relaxed) as f64 / frames / 1048576.0;
+    format!("; lazy write-back: {} pages on the device, {skip:.2} MB a frame not copied back, {n:.1} pages a frame brought back in {ms:.2} ms", pages())
+}
 pub static SKIP_BYTES: AtomicU64 = AtomicU64::new(0);
 
 pub fn enabled() -> bool {
@@ -115,6 +128,38 @@ fn protect(p: u64, access: bool) {
 fn protect(_p: u64, _access: bool) {}
 
 /// Whether any page of [a, a + n) is held on the device (the host is about to touch it: read it back first).
+/// The parts of [a, a + n) outside the pages held on the device, as (offset, length); None when none is held.
+pub fn outside(a: u64, n: u64) -> Option<Vec<(u64, u64)>> {
+    let g = ST.lock().unwrap();
+    let st = g.as_ref()?;
+    if st.lazy.is_empty() && st.returning.is_empty() {
+        return None;
+    }
+    let held = |p: u64| st.lazy.contains_key(&p) || st.returning.contains(&p);
+    let mut p = a & !(PAGE - 1);
+    let mut any = false;
+    while p < a + n {
+        any |= held(p);
+        p += PAGE;
+    }
+    if !any {
+        return None;
+    }
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    let mut p = a & !(PAGE - 1);
+    while p < a + n {
+        let (lo, hi) = (p.max(a), (p + PAGE).min(a + n));
+        if !held(p) {
+            match out.last_mut() {
+                Some(l) if l.0 + l.1 == lo - a => l.1 += hi - lo,
+                _ => out.push((lo - a, hi - lo)),
+            }
+        }
+        p += PAGE;
+    }
+    Some(out)
+}
+
 pub fn touch(a: u64, n: u64) {
     if n == 0 || ST.lock().unwrap().as_ref().is_none_or(|s| s.lazy.is_empty()) {
         return;
@@ -159,7 +204,9 @@ pub fn bring_back(p: u64) -> bool {
         done();
         return true;
     };
+    let t0 = std::time::Instant::now();
     let data = read_page(g, l.buf, l.off);
+    BACK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     protect(p, true);
     // SAFETY: the guest page, accessible again; other threads' faults on it wait in `returning` until it is filled
     unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, PAGE as usize) };

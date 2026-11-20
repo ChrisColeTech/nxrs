@@ -164,7 +164,7 @@ unsafe fn bootstrap_loader(c: *mut Cpu) {
 /// The game's NintendoSDK major from its `sdk` module's "NintendoSdk_nnSdk-<major>_<minor>_<micro>-Release" (Turbo
 /// 2f8f44e): it picks the NVN API the device reports (SDK 10 and older are API 53; Mario Kart 8 Deluxe, SDK 4.4.0,
 /// creates no graphics system on another). 19 when the string is absent. (Read from the module file before the load: the parsed image, or the raw file.)
-fn sdk_major(data: &std::path::Path) -> i32 {
+fn sdk_major(data: &std::path::Path, switch2: bool) -> i32 {
     fn scan(b: &[u8]) -> Option<i32> {
         let pat = b"NintendoSdk_nnSdk-";
         let i = b.windows(pat.len()).position(|w| w == pat)?;
@@ -178,7 +178,13 @@ fn sdk_major(data: &std::path::Path) -> i32 {
         digits.parse().ok()
     }
     let v = std::fs::read(data.join("exefs").join("sdk")).ok().and_then(|raw| match nxrt::loader::parse(&raw) {
-        Ok(img) => scan(&img.bytes),
+        Ok(img) => {
+            // NVN2's device answers are constants of the driver in the sdk (graphics reads its switch)
+            if switch2 {
+                nxgfx::nvn::device::set_sdk_image(&img.bytes);
+            }
+            scan(&img.bytes)
+        }
         Err(_) => scan(&raw),
     });
     let major = v.unwrap_or(19);
@@ -204,8 +210,8 @@ fn bind_graphics() {
     nxgfx::nvn::set_hooks(nxgfx::nvn::Hooks { submit: note_submit, present: note_present, blocking: |f| crate::sched::without_core(f) });
     let prof = crate::profile::get();
     let data = crate::boot::process().data_dir.clone();
-    let major = sdk_major(&data);
     nxgfx::nvn::device::SWITCH2.store(prof.switch2, Ordering::Relaxed);
+    let major = sdk_major(&data, prof.switch2);
     nxgfx::nvn::device::SDK_MAJOR.store(major, Ordering::Relaxed);
     nxgfx::nvn::vpool::APP_POOL.store(prof.pool, Ordering::Relaxed);
     let shaders = std::env::var("NXGFX_SHADERS").map(std::path::PathBuf::from).unwrap_or_else(|_| data.join("shaders"));

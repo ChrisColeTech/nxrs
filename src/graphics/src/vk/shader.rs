@@ -431,6 +431,11 @@ impl Library {
     }
 
     /// As `get`; `force`: a missing key is looked for again now (a draw waiting for the live translator).
+    /// Whether `key` was loaded and refused (its module cannot be built): waiting for it is pointless.
+    pub fn refused(&self, key: &ShaderKey) -> bool {
+        self.modules.lock().unwrap().get(key).is_some_and(|m| m.is_none())
+    }
+
     pub fn get_ex(&self, dev: &ash::Device, key: &ShaderKey, force: bool) -> Option<Arc<Module>> {
         if let Some(m) = self.modules.lock().unwrap().get(key) {
             return m.clone();

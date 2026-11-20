@@ -63,6 +63,9 @@ pub fn present(q: &queue_t, w: &mut win_t, idx: i32) {
     let t = unsafe { *(w.tex[idx as usize] as *const tex_t) };
     let crop = if w.crop[2] > 0 && w.crop[3] > 0 { Some(w.crop) } else { None };
     w.presents += 1;
+    if vk::queue::aq_on() {
+        super::blocking(|| vk::queue::aq_wait_room(true));
+    }
     w.ticket[idx as usize] = vk::queue::present(q.serial, q.origin_ll != 0, &t, crop);
 }
 
@@ -156,7 +159,10 @@ nvn_fns! {
         let until = o.pace;
         super::blocking(|| {
             if wait > 0 { sleep_until(until); }
+            // the GPU side only: the vsync pacing above is not the GPU's
+            let t0 = std::time::Instant::now();
             if tk != 0 { vk::queue::present_wait(tk); }
+            vk::perf::add(vk::perf::C::WaitAcquireNs, t0.elapsed().as_nanos() as u64);
         });
         o.ticket[i as usize & 3] = 0;
         if !s.is_null() {
