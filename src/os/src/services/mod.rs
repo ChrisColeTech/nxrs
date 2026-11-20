@@ -22,6 +22,7 @@ pub mod offline;
 pub mod ro;
 pub mod socket;
 pub mod misc;
+pub mod notice;
 pub mod oe;
 pub mod os;
 pub mod sdkinit;

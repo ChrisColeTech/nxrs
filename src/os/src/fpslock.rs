@@ -27,6 +27,8 @@ pub enum Kind {
     SecsF32,
     ModeU32,
     FpsF64,
+    /// vsyncs, 0 meaning the engine's default of 2 (Monolith's frame interval)
+    VsyncsDefault2I32,
 }
 use Kind::*;
 
@@ -163,6 +165,16 @@ pub fn want(kind: Kind, scale: u32, cur: u32, target: u32) -> Option<u32> {
                 return None;
             }
             if target > 60 { 1 } else { 60 / target }
+        }
+        VsyncsDefault2I32 => {
+            if cur > 4 {
+                return None;
+            }
+            let w = if target > 60 { 1 } else { 60 / target };
+            if cur == 0 && w == 2 {
+                return None; // 0 already means 2
+            }
+            w
         }
         FpsF64 => return None,
     };
@@ -436,6 +448,10 @@ struct State {
     fb: Option<Frostbite>,
     /// the generic target frame rate: (the global's offset, the field's offset)
     tf: Option<(u64, u32)>,
+    /// Unity's QualitySettings walk: (global, level index, levels, level size, count)
+    unity_qs: Option<(u64, u32, u32, u32, u32)>,
+    /// Unreal's fixed frame rate: (GEngine, FixedFrameRate, flag byte << 8 | bit)
+    ue_fixed: Option<(u64, u32, u32)>,
     target: u32,
     logs: Vec<u32>,
 }
@@ -484,7 +500,9 @@ fn find() -> Option<State> {
             None
         }
     };
-    if rows.is_empty() && nier.is_none() && fb.is_none() && tf.is_none() {
+    let mut rows = rows;
+    let (unity_qs, ue_fixed) = engine_places(&mut rows);
+    if rows.is_empty() && nier.is_none() && fb.is_none() && tf.is_none() && unity_qs.is_none() && ue_fixed.is_none() {
         return None;
     }
     let target = target();
@@ -495,7 +513,60 @@ fn find() -> Option<State> {
         return None;
     }
     let n = rows.len();
-    Some(State { rows, nier, fb, tf, target, logs: vec![0; n] })
+    Some(State { rows, nier, fb, tf, unity_qs, ue_fixed, target, logs: vec![0; n] })
+}
+
+/// The places `nxrs-build` found in main (`<data>\fps_lock.txt`, cli `fpsfind`): rows for the simple ones, and
+/// Unity's quality-level walk and Unreal's flagged fixed rate apart.
+#[allow(clippy::type_complexity)]
+fn engine_places(rows: &mut Vec<Lock>) -> (Option<(u64, u32, u32, u32, u32)>, Option<(u64, u32, u32)>) {
+    let text = crate::boot::try_process().and_then(|p| std::fs::read_to_string(p.data_dir.join("fps_lock.txt")).ok()).unwrap_or_default();
+    let fps_cvar = profiles::by_title(crate::profile::get().program_id).map_or("t.MaxFPS".to_string(), |p| p.settings.ue_fps_cvar.clone());
+    parse_places(&text, &fps_cvar, rows)
+}
+
+#[allow(clippy::type_complexity)]
+pub fn parse_places(text: &str, fps_cvar: &str, rows: &mut Vec<Lock>) -> (Option<(u64, u32, u32, u32, u32)>, Option<(u64, u32, u32)>) {
+    let h = |v: &str| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok();
+    let leak = |s: String| -> &'static str { Box::leak(s.into_boxed_str()) };
+    let (mut qs, mut fixed) = (None, None);
+    let row = |what: &'static str, ptr_off: u64, field: u32, kind: Kind, copies: u32| Lock { build: "", what, ptr_off, field, kind, copies, scale: 0 };
+    for l in text.lines().filter(|l| !l.starts_with('#')) {
+        let f: Vec<&str> = l.split_whitespace().collect();
+        match f.as_slice() {
+            ["unity_target", g] => {
+                if let Some(g) = h(g) {
+                    rows.push(row("Unity Application.targetFrameRate", 0, g as u32, FpsI32, 1));
+                }
+            }
+            ["unity_vsync", q, i, a, s, v] => {
+                if let (Some(q), Some(i), Some(a), Some(s), Some(v)) = (h(q), h(i), h(a), h(s), h(v)) {
+                    qs = Some((q, i as u32, a as u32, s as u32, v as u32));
+                }
+            }
+            ["ue_cvar", name, o] => {
+                let Some(o) = h(o) else { continue };
+                let fps = *name == fps_cvar;
+                if !fps && *name != "rhi.SyncInterval" && *name != "nvn.SyncInterval" {
+                    continue;
+                }
+                // the value pointer at +0x10: the game thread's copy, then the render thread's
+                rows.push(row(leak(format!("Unreal {name}")), o + 0x10, 0, if fps { FpsF32 } else { VsyncsI32 }, 2));
+            }
+            ["ue_fixed", g, fl, flag] => {
+                if let (Some(g), Some(fl), Some(flag)) = (h(g), h(fl), h(flag)) {
+                    fixed = Some((g, fl as u32, flag as u32));
+                }
+            }
+            ["monolith", o] => {
+                if let Some(o) = h(o) {
+                    rows.push(row("Monolith frame interval", 0, o as u32, VsyncsDefault2I32, 1));
+                }
+            }
+            _ => {}
+        }
+    }
+    (qs, fixed)
 }
 
 /// Each present: the engine limiters of this main set to the target.
@@ -535,6 +606,38 @@ pub fn tick() {
                 if cur != target && (cur == 30 || cur == 60) {
                     wr32(obj + f as u64, target);
                     crate::log_once!("target field", "fps lock: the game's target frame rate {cur} -> {target}");
+                }
+            }
+        }
+    }
+    if let Some((q, idx, arr, size, vs)) = st.unity_qs {
+        // the current quality level's vSyncCount (0: the game paces by targetFrameRate instead, left)
+        let want = if target > 60 { 1 } else { 60 / target };
+        if let Some(obj) = rd64(base + q).filter(|&o| o != 0) {
+            if let (Some(lvl), Some(levels)) = (rd32(obj + idx as u64), rd64(obj + arr as u64).filter(|&a| a != 0)) {
+                if (lvl as i32) >= 0 && lvl <= 64 {
+                    let a = levels + lvl as u64 * size as u64 + vs as u64;
+                    if let Some(cur) = rd32(a) {
+                        if cur != want && (1..=4).contains(&cur) {
+                            wr32(a, want);
+                            crate::log_once!("unity vsync", "fps lock: Unity QualitySettings.vSyncCount (level {lvl}) {cur} -> {want} vsyncs ({target} fps)");
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if let Some((g, f, flag)) = st.ue_fixed {
+        // written only while the engine's bUseFixedFrameRate is set (an engine stepping by real time stays so)
+        if let Some(eng) = rd64(base + g).filter(|&o| o != 0) {
+            let (byte, bit) = ((flag >> 8) as u64, flag & 0xFF);
+            let on = rd32((eng + byte) & !3).map(|w| (w >> (8 * ((eng + byte) & 3))) & bit != 0) == Some(true);
+            if on {
+                if let Some(cur) = rd32(eng + f as u64) {
+                    if let Some(w) = want(FpsF32, 0, cur, target) {
+                        wr32(eng + f as u64, w);
+                        crate::log_once!("ue fixed", "fps lock: Unreal FixedFrameRate {} -> {target} fps", f32::from_bits(cur));
+                    }
                 }
             }
         }
@@ -599,6 +702,27 @@ mod tests {
 
     /// The generic target frame rate: 8 readers of 60 / [[global]+0x10] and a store of 30 there make the field; 7
     /// readers do not.
+    /// fps_lock.txt's places become rows (Unreal's frame-limit variable as frames a second, its intervals as vsyncs,
+    /// Monolith's interval with 0 meaning 2) and the two walks apart.
+    #[test]
+    fn engine_places_from_the_build() {
+        let text = "# x\nunity_target 0x9000\nunity_vsync 0x9100 0x64 0x20 0x100 0x88\nue_cvar t.MaxFPS 0xa000\nue_cvar rhi.SyncInterval 0xa100\nue_cvar r.Other 0xa200\nue_fixed 0xb000 0x7a8 0x7a440\nmonolith 0xc000\n";
+        let mut rows = vec![];
+        let (qs, fixed) = parse_places(text, "t.MaxFPS", &mut rows);
+        assert_eq!(qs, Some((0x9100, 0x64, 0x20, 0x100, 0x88)));
+        assert_eq!(fixed, Some((0xb000, 0x7a8, 0x7a440)));
+        let got: Vec<(&str, u64, u32, Kind, u32)> = rows.iter().map(|r| (r.what, r.ptr_off, r.field, r.kind, r.copies)).collect();
+        assert_eq!(got, vec![
+            ("Unity Application.targetFrameRate", 0, 0x9000, FpsI32, 1),
+            ("Unreal t.MaxFPS", 0xa010, 0, FpsF32, 2),
+            ("Unreal rhi.SyncInterval", 0xa110, 0, VsyncsI32, 2),
+            ("Monolith frame interval", 0, 0xc000, VsyncsDefault2I32, 1),
+        ]);
+        assert_eq!(want(VsyncsDefault2I32, 0, 0, 60), Some(1));
+        assert_eq!(want(VsyncsDefault2I32, 0, 0, 30), None, "0 already means 2");
+        assert_eq!(want(VsyncsDefault2I32, 0, 1, 30), Some(2));
+    }
+
     #[test]
     fn target_field_by_its_readers() {
         let adrp = |pc: u32, target: u32, rd: u32| -> u32 {

@@ -516,16 +516,28 @@ unsafe fn ngc_ctor(c: *mut Cpu) {
 
 mfn!(err_show, |a| {
     let r = a.w(0);
-    crate::log!("[RED] err::ShowError Result {r:#x} (module {}, description {}): the host shows no error applet", r & 0x1ff, (r >> 9) & 0x1fff);
+    crate::services::notice::error(crate::services::notice::Shown::Result(r));
     0
 });
 unsafe fn err_log(c: *mut Cpu) {
     let name = nxrt::hostfn::name_of((*c).pc).unwrap_or_default();
-    let what = if name.contains("9ShowErrorENS0_9ErrorCodeE") {
+    use crate::services::notice::{error, Shown};
+    if name.contains("9ShowErrorENS0_9ErrorCodeE") {
         let code = (*c).x[0];
-        format!("error code {:04}-{:04}", code & 0xffff_ffff, code >> 32)
-    } else if name.contains("ApplicationError") {
-        "an application error (ApplicationErrorArg)".into()
+        error(Shown::Code(code as u32, (code >> 32) as u32));
+        (*c).x[0] = 0;
+        return;
+    }
+    if name.contains("ApplicationError") {
+        // nn::err::ApplicationErrorArg: its message text after the header, error number and language (+0x14)
+        let arg = (*c).x[0];
+        let msg = (arg != 0).then(|| crate::guest::cstr(arg + 0x14, 0x800)).filter(|m| m.len() >= 2 && !m.chars().any(|ch| ch.is_control() && ch != '\n'));
+        error(Shown::Application(msg.as_deref()));
+        (*c).x[0] = 0;
+        return;
+    }
+    let what = if false {
+        String::new()
     } else if name.contains("ForUpgradeVersion") {
         "its upgrade add-on content is older than this program needs (install the add-on of the game's version)".into()
     } else if name.contains("AddOnContentVersion") {
@@ -537,7 +549,7 @@ unsafe fn err_log(c: *mut Cpu) {
     } else {
         "an error (ErrorResultVariant)".into()
     };
-    crate::log!("[RED] the game asks to show {what}: the host shows no error applet");
+    crate::services::notice::error(crate::services::notice::Shown::Other(&what));
     (*c).x[0] = 0;
 }
 mfn!(shop, |a| {

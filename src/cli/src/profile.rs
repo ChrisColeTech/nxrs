@@ -177,10 +177,11 @@ pub fn stubs(prof: &Option<Match>, exefs: &BTreeMap<String, Vec<u8>>, builds: &[
         let nso = nsos.entry(module.clone()).or_insert_with(|| exefs.get(module).and_then(|r| translator::loader::nso::Nso::parse(r).ok()));
         let Some(nso) = nso.as_ref() else { continue };
         let end = nso.text.0 + nso.text.1;
-        let mut bodies: Vec<(String, &str, &profiles::patches::StubBody, BTreeMap<String, u64>)> = vec![];
+        #[allow(clippy::type_complexity)]
+        let mut bodies: Vec<(String, &str, &profiles::patches::StubBody, BTreeMap<String, u64>, String, Option<String>)> = vec![];
         for f in &files {
             for s in f.stub.iter().filter(|s| profiles::patches::build_matches(&s.build, bid) && module == "main") {
-                bodies.push((format!("{} {}", s.kind, &s.build[..8.min(s.build.len())]), s.kind.as_str(), &s.body, BTreeMap::new()));
+                bodies.push((format!("{} {}", s.kind, &s.build[..8.min(s.build.len())]), s.kind.as_str(), &s.body, BTreeMap::new(), s.build.clone(), None));
             }
         }
         let has_own_fstep = bodies.iter().any(|b| b.1 == "frame_step");
@@ -202,7 +203,9 @@ pub fn stubs(prof: &Option<Match>, exefs: &BTreeMap<String, Vec<u8>>, builds: &[
                 }
                 let i = img.as_mut().unwrap();
                 let mut at = BTreeMap::new();
-                let found = i.locate(r.size.unwrap_or(0) as usize, &r.fingerprints).map(|s| at.insert("base".to_string(), s as u64));
+                // an anchored rule (the caller of an import) is found by its generator
+                let anchored = r.fingerprints.is_empty() && r.calls.is_some();
+                let found = if anchored { Ok(None) } else { i.locate(r.size.unwrap_or(0) as usize, &r.fingerprints).map(|s| at.insert("base".to_string(), s as u64)) };
                 if found.is_err() {
                     continue; // not this build's function: quietly, as the cuts
                 }
@@ -219,14 +222,31 @@ pub fn stubs(prof: &Option<Match>, exefs: &BTreeMap<String, Vec<u8>>, builds: &[
                     st.said.push(format!("[RED] {} {:?} on {module}: not applied ({m})", r.kind, r.name));
                     continue;
                 }
-                bodies.push((format!("{} {:?}", r.kind, r.name), if r.kind == "stubs" { "stub" } else { "frame_step" }, body, at));
+                bodies.push((format!("{} {:?}", r.kind, r.name), if r.kind == "stubs" { "stub" } else { "frame_step" }, body, at, r.name.clone(), r.calls.clone()));
             }
         }
-        for (what, kind, b, at) in bodies {
-            if !b.evaluated {
-                st.said.push(format!("[RED] {what} on {module}: not applied (its body reads the module: {})", b.needs.as_deref().unwrap_or("?")));
-                continue;
-            }
+        for (what, kind, b, at, key, calls) in bodies {
+            // a body that reads the module: its generator, run against this main (crate::stubgen)
+            let generated;
+            let b = if b.evaluated {
+                b
+            } else {
+                let others: BTreeMap<String, u64> = at.iter().filter_map(|(k, v)| k.strip_prefix("other:").map(|l| (l.to_string(), *v))).collect();
+                match crate::stubgen::generate(&key, nso, at.get("base").copied().unwrap_or(0), &others, calls.as_deref()) {
+                    Some(Ok(g)) => {
+                        generated = g;
+                        &generated
+                    }
+                    Some(Err(e)) => {
+                        st.said.push(format!("[RED] {what} on {module}: not applied ({e})"));
+                        continue;
+                    }
+                    None => {
+                        st.said.push(format!("[RED] {what} on {module}: not applied (its body reads the module: {})", b.needs.as_deref().unwrap_or("?")));
+                        continue;
+                    }
+                }
+            };
             let place = |base: &str| -> Option<u64> {
                 if base == "module" {
                     Some(0)

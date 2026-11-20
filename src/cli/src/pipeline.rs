@@ -500,6 +500,23 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             let _ = std::fs::remove_file(&fs_txt);
         }
     }
+    // the engines' frame-rate places in main (Unity, Unreal, Monolith) for the host's frame lock
+    let fl_txt = data.join("fps_lock.txt");
+    let found = game.exefs.files.get("main").and_then(|r| translator::loader::nso::Nso::parse(r).ok()).map(|n| crate::fpsfind::find_all(&n));
+    match found {
+        Some((lines, said)) if !lines.is_empty() || !said.is_empty() => {
+            for l in &said {
+                out.say(&format!("fps lock: {l}"));
+            }
+            let text = format!("# Written by nxrs: engine frame-rate places in main (os fpslock writes fps_target there).
+{}", lines.iter().map(|l| format!("{l}
+")).collect::<String>());
+            std::fs::write(&fl_txt, text).with_context(|| format!("{}", fl_txt.display()))?;
+        }
+        _ => {
+            let _ = std::fs::remove_file(&fl_txt);
+        }
+    }
     let nro_tsv = data.join("nro.tsv");
     if nros.nros.is_empty() && nros.refused.is_empty() {
         let _ = std::fs::remove_file(&nro_tsv);

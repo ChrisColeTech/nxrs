@@ -212,6 +212,7 @@ unsafe fn web_start(c: *mut Cpu, arg: u64) {
     // the stand-in's ready message: a game waits for any message before Appear
     w.msgs.push_back(vec![]);
     crate::log!("web: offline page {doc}: the host has no web view; the stand-in answers (it loads at once and closes when it appears)");
+    crate::services::notice::offline_page(&doc);
 }
 
 /// The ended page's result into the OfflineHtmlPageReturnValue {u64 exit reason, last URL[0x1000], u64 URL size};

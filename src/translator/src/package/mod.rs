@@ -320,6 +320,24 @@ impl Game {
                 std::fs::write(&p, b).map_err(io_err(&p))?;
             }
         }
+        // the offline HTML documents (nn::web's offline pages open them in the PC's browser)
+        let html = datadir.join("html-document");
+        let _ = std::fs::remove_dir_all(&html);
+        let mut docs = 0;
+        for (name, b) in self.control.iter().filter(|(k, _)| k.starts_with("html-document/")) {
+            if name.split('/').any(|c| c == ".." || c.is_empty()) || name.contains(':') || name.contains('\\') {
+                continue;
+            }
+            let p = datadir.join(name);
+            if let Some(d) = p.parent() {
+                std::fs::create_dir_all(d).map_err(io_err(d))?;
+            }
+            std::fs::write(&p, b).map_err(io_err(&p))?;
+            docs += 1;
+        }
+        if docs > 0 {
+            say(&format!("Manual: {docs} offline HTML files staged in html-document/"));
+        }
         let v = self.exefs.version.unwrap_or(0);
         let display = self.display_version.clone().unwrap_or_default();
         match &self.applied {

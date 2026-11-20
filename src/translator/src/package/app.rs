@@ -159,6 +159,57 @@ fn metadata(ncas: &[Arc<Nca>], title_id: u64, updated: bool) -> (u32, Vec<u64>, 
     (version, addons, control.get(&want).cloned())
 }
 
+/// The game's offline HTML documents (its Manual NCA's `html-document/` tree, which nn::web's offline pages open),
+/// keyed `html-document/<path>`; at most 64 MB. Empty when the package has none.
+pub(crate) fn manual_files(ncas: &[Arc<Nca>], title_id: u64) -> BTreeMap<String, Vec<u8>> {
+    fn walk(n: &crate::package::romfs::Node, dir: &str, image: &[u8], out: &mut BTreeMap<String, Vec<u8>>) {
+        for k in n.children() {
+            let path = if dir.is_empty() { k.name.clone() } else { format!("{dir}/{}", k.name) };
+            match &k.kind {
+                NodeKind::Dir(_) => walk(k, &path, image, out),
+                NodeKind::File { size, loc: crate::package::romfs::FileLoc::Image(o) } => {
+                    if let Some(b) = image.get(*o as usize..(*o + *size) as usize) {
+                        out.insert(path, b.to_vec());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for nca in ncas {
+        if nca.content_type != 3 || cnmt::base_of(nca.title_id) != cnmt::base_of(title_id) {
+            continue;
+        }
+        let Some(si) = nca.section(3, 0) else { continue };
+        let s = &nca.sections[si];
+        if s.patch || s.sparse {
+            continue;
+        }
+        let files = (|| -> Result<BTreeMap<String, Vec<u8>>> {
+            let view = section_data(nca, si, &nca.blob.path.display().to_string())?;
+            let (at, mut size) = nca.ivfc_data(s)?;
+            if s.compressed {
+                size = view.size().saturating_sub(at);
+            }
+            if size > 64 << 20 || at > view.size() || size > view.size() - at {
+                return fmt("skip");
+            }
+            let image = view.read(at, size)?;
+            let read = |o: u64, n: u64| image.get(o as usize..(o + n) as usize).map(|x| x.to_vec()).ok_or_else(|| PackageError::Format("cut".into()));
+            let root = image_tree(&nca.blob.path.display().to_string(), size, &read)?;
+            let mut out = BTreeMap::new();
+            walk(&root, "", &image, &mut out);
+            Ok(out)
+        })();
+        let Ok(files) = files else { continue };
+        let html: BTreeMap<String, Vec<u8>> = files.into_iter().filter(|(k, _)| k.starts_with("html-document/")).collect();
+        if !html.is_empty() {
+            return html;
+        }
+    }
+    BTreeMap::new()
+}
+
 /// The Control NCA's files (control.nacp, icons): the one `wanted` names, else the first of the title.
 fn control_files(ncas: &[Arc<Nca>], title_id: u64, wanted: Option<&str>) -> (BTreeMap<String, Vec<u8>>, Option<String>) {
     let mut found: Option<BTreeMap<String, Vec<u8>>> = None;
@@ -354,6 +405,12 @@ impl Package {
         if control.is_empty() && update_path.is_some() {
             (control, display_version) = control_files(&ncas, title_id, base_wanted.as_deref());
         }
+        // the offline HTML documents ride with the control files (staged under html-document/)
+        let mut manual = manual_files(meta_ncas, title_id);
+        if manual.is_empty() {
+            manual = manual_files(&ncas, title_id);
+        }
+        control.extend(manual);
         Ok(Package {
             keys_path: keys.path.clone(),
             path,
