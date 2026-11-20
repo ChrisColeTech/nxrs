@@ -557,6 +557,31 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   (the game waited 15.6 ms a frame against 18.0). MK8D's demo with it on: 60 FPS, nothing held (`m5`).
 - **Not reached this round:** Wonder's first-entry stutter, ray tracing / the rest of 5A.4.
 
+**Lane G3, rev 9 (2026-11-20, uncommitted).**
+- **DKB dying at 2.8 s in every session after the first (lane X2): fixed.** The vertex shader `d87ccbede95b9f2c`
+  crashes the compiler **on its own as a pipeline-library pre-rasterization part** (offline: with any pixel shader,
+  `NXGFX_GPL=1`); the shader parts made ahead at ProgramSetShaders compile it at start-up, outside the rev 8 guard.
+  The crash list now covers library parts too: a part under way when the process died is recorded (a marker key
+  per part: pre-rasterization shaders / pixel shader) and not made again, its programs are compiled whole instead
+  (which works for this vertex shader with every pixel shader but `6655320127e098d6`). `build/G/runs/d9` dies at
+  5.5 s (the part), `d10` / `d11` run 90 s without a fault. Still open: the pair itself (its draws stay skipped).
+  Bisecting so far: zeroing any one of the vertex shader's outputs 0 / 4 / 5 / 6 / 7 / 9 makes the part compile,
+  1 / 2 / 3 / 8 / position do not; Invariant, flat / centroid, location order (all ten reversed in both stages),
+  SPIR-V 1.0 (refused: the translator declares GroupNonUniform* capabilities in every module, unused here) and
+  `spirv-opt -O` (101 KB -> 35 KB, still crashes) change nothing. `spirv-reduce` is shrinking the optimized module
+  with `build/G/g3/interesting.bat` (the part still crashes) as the test: {REDUCE}
+- **DKB at 13-17 FPS after the opening:** 4,072 draws, 2,573 write-backs and 9 submissions a frame, 1,275 mirror
+  pools (1.9 GB); the pool sync (write watch over the mirrors, every submission) takes 33.8 ms a frame and the
+  completion waits 8.4 ms a frame for the pool table. Not changed yet. The purple world: not looked at yet.
+- **MK8D's shadow texture (item 1): read back, all zeros.** New `NXGFX_DUMP_TEX=<w>x<h>` (with a pass dump): a
+  sampled texture of that size is read back (`tex-<frame>-ser<n>-gpu.bin`, level 0 as the GPU has it) along with its
+  guest storage (`-mem.bin`). The 2048x2048 R32G32_SFLOAT texture the shadow pass samples is zero in both, at 120 s
+  and 130 s. `NXGFX_WATCH_ADDR=<hex>` (new: images made / released over an address, and GPU writes into it) shows
+  only plain texture objects (flags 0, never drawn) made over its storage at the course load, and **no GPU write
+  into its 32 MB at all**; nothing else is drawn there in the dumped frames. So either the game really leaves it
+  zero (and the cyan comes from elsewhere in the shadow pass), or it is filled through memory we do not see as this
+  address (another pool mapping the same pages). Not settled.
+
 **Shaders (agreed with shaders, lane C):** graphics reads lane C's output as written above: `<data>/shaders/spv/
 <key>.spv` + `.json` (`status` "ok"), the shader key as defined there (`nxgfx::nvn::prog::shader_key` computes it at
 `nvnProgramSetShaders`). Nothing in lane C's output needs to change for the binding model: at module load graphics
@@ -641,11 +666,16 @@ shared by every program** (no per-program layouts, so pipelines key only on shad
   `20261119-200906-W2-sonic-shadow\0012-a_intro_7.png`): the title and story scenes are recognisable but every colour
   is wrong (wrapping bands, as if a float or 10-bit target were read as UNORM8 or the other way). Program 1 (Sonic
   Generations, `sonic_p1.exe`) at 1920x1080 is right (`20261119-204133-W2-sonic-gens\0013-shot_play_1_min.png`).
-- **Super Mario Party Jamboree**: the opening movie and title are posterized like MK8D, characters at the title draw
-  as black silhouettes (`20261119-193959-W2-jamboree-menus\0031-a_a29.png`), 23 pixel shaders are refused (`texture
-  array of 8192 (handle tables) is not bound yet`), and after the title (L+R) the picture is plain white for 75 s+
-  while 360 draws a frame run (`20261119-202422-W2-jamboree-play\0034-*.png`). Its textures take 11.6 GB of the
-  allocator (2,850 textures; private 15.2 GB, flat after the first minute).
+- **Super Mario Party Jamboree: the white screen after the title is most likely a blend state (lane G).** The opening
+  movie and title are posterized like MK8D; after L+R the hub (Party Plaza) is drawn right (pass 96) and the last
+  pass (108: vertex `ce7eacf81c6e4ffc`, pixel `7f4356c21967c962`, one draw over 1920x1080 R8G8B8A8_SRGB with a depth
+  attachment) covers it with plain white. That quad's colour bank c3 at guest 0x1d98ad300 reads (1, 1, 1, 1) **in
+  guest memory too** (`peek 1d98ad300 40` while the screen is white, run `build\I\runs\20261120-013909-W2-jamboree-fade`), and
+  its texture is id2709, an 8x8 BC4 with swizzle (ONE, ONE, ONE, R): the game asks for an opaque white quad on purpose.
+  A screen-wide white quad the game keeps drawing during play only leaves the picture unchanged if it is blended
+  multiplicatively (DST_COLOR / ZERO, or min) or masked; so this draw's blend (or colour write mask / depth test) is
+  probably not what the game set. Meanwhile the game runs: the hub's music plays (renderer 0 not silent), the job
+  threads idle. Lane W2 checked: no service, nifm, save or executor wait explains it (lane W2 section).
 - **Fixed by lane W2 in graphics (small):** texture slot pairs (`tex_slots`, Anime Girls drew every texture as id 0)
   and no 3 s wait for a refused shader (Jamboree's 70 s stop); see the lane W2 section.
 
@@ -1169,23 +1199,19 @@ files of the moment); every lane W game relinked from it. Runs go through `scrip
     rings kept, no death in 5 min: `-sonic-gens5`, `-sonic-gens4`), but Classic Sonic stops at a ledge behind a
     totem pole ~1:30 into Green Hill and the script does not get him up it; finishing the act needs a recorded route
     (`NXRS_INPUT_RECORD` from a person's play, then replayed). 31.5 FPS, picture right, memory flat.
-  - **Shadow Generations:** colours right on lane G3's build. At the Shadow title the cursor sits on the "Shadow's
-    Story" header: **Down, then A** starts New Game (A alone is ignored; `shadow_skip` now presses Down;
-    `20261120-005550-W2-shadow-skip4`). The story intro is a chain of VP9 movies (`[movie]` decoders, 1280x720); a
-    tap then a held A (6 s / 15 s) does not skip it, and after 9 min it was still playing: the same 2,906-packet movie
-    ran twice back to back (decoders destroyed at 521 s and 621 s) and earlier captions came back
-    (`0029-shot_play_540_s.png`). Lead: the game restarts a movie whose end it did not see (end-of-stream flags /
-    the last output buffer's flags from os's movie decoder), or the held A restarts the scene instead of skipping.
-  - **Jamboree white screen (not solved).** What it is not: the network check (main+0x50ddf0 polls
-    `nn::nifm::IsNetworkRequestOnHold` every 16 ms, sees "not on hold", then `IsNetworkAvailable` false: it finishes);
-    a lost wake-up of the nn::async executor (thread 0x1023 holds its lock 0x1474240e0, word 0x40001023, and waits in
-    `WorkItemMultiWait::WaitAny` on no kernel object; thread 0x1024 waits for that lock; waking zero-handle waits as
-    cancelled every 50 ms, a diagnostic tried and removed, changed nothing: `20261120-000804-W2-jamboree-poll`). The
-    six job fibers' threads wait for work, the main thread renders (pass 108: a white 1920x1080 quad at alpha 1 over a
-    correct hub, `build\games\jamboree\captures-W2`). After the title it opens the
-    menu NRO (menu00), the hub's archives, BGM streams and `savedata0:/bqSaveData` for write (64 s); nothing fails.
-    Next: what the game's state machine polls (its fade controller's condition) from the menu NRO's code; the shared
-    font stand-in (`pl`: Arial instead of the system font) is a suspect if the hub waits for a text layout.
+  - **Shadow Generations: gameplay reached; the intro never looped.** The flow is title -> Shadow -> Down (the cursor
+    starts on the "Shadow's Story" header) -> A (New Game) -> **a save-slot chooser** -> A (slot 1) -> a short intro ->
+    the first stage (Space Colony ARK). The earlier "loop" was the skip script's A presses walking back through the
+    chooser and the story menu, not the movie decoder: the game feeds every VP9 packet with time 0 and no EOS flag and
+    Stops the decoder itself, which os answers correctly. Run `20261120-011106-W2-shadow-watch` (`shadow_watch`, then
+    `boost_run.txt`: stick forward, ZR boost, B, A): **18 min of the stage**, 30.0 FPS (the game's target; p95 37 ms),
+    private memory flat (6.86 -> 7.07 GB), picture right, quit cleanly; Shadow reaches a robot fight (`B -> Y` prompt)
+    and the script stops there. No output device on the PC: no sound evidence.
+  - **Jamboree white screen: handed to lane G (blend state of the last pass, lane G findings above).** Ruled out
+    first: the nifm network check (it finishes), a lost wake-up in the nn::async executor (forced 50 ms wake-ups
+    changed nothing), failed file opens, and the game logic itself (the hub's BGM plays; the fade quad's colour is
+    (1, 1, 1, 1) in guest memory, so the game does not wait with the screen faded: it draws a white layer that should
+    not show).
   - **New tools:** control command `peek <address> [bytes]` (os `watch.rs`: guest memory as hex words, readable pages
     only; how the lock owner above was read); `library_play.py` scenarios `sonic_gens2` (spin dash), `shadow_skip`,
     `vn` (A every 4 s for 11 min, shots each minute); replays `spindash.txt`, `run_jump.txt`, `skip_hold.txt`.
@@ -1373,3 +1399,9 @@ which has no music; the music plays once the game starts.
 - Arceus: Jubilife Village, objective "Head to the Wallflower" (the game's autosave at 2026-11-19 15:49; no menu / Save yet at this step). Save: `build\X\saves\arceus-0033\`. A hand play to the first night (Survey Corps quarters) and on into the Obsidian Fieldlands, then an in-game Save once the menu has it, gets M6's place.
 - Violet: the house at the start, in uniform; the menu has Options / Save only (no Rotom Phone), Mom is in no room we found, and the step down to the entrance answers "You're not quite ready to go to school yet." Save (in-game Save of 00:45): `build\X\saves\violet-stuck-house\`.
 - Z-A: Lumiose station platform after "Lumiose City! We made it!" (60 FPS there); the platform ends at a fence and walking right toward the station building leaves the camera fixed with the player out of view (`x2-plza4-gate`). Save: `build\X\saves\plza-0118\`.
+
+**Lane X2 2026-11-20 01:45, follow-up on the stuck points and MKW:**
+- New debug switch, os `services/fs.rs`: `NXOS_FS_TRACE=1` logs every file open (and failed entry-type checks), `=miss` only the failures.
+- Violet (`x2-violet7-fs`): no failed load behind the missing Mom. Opens: `arc/data.trpfs` + `.trpfd` (the game reads its field, NPC and script data out of that one archive, so file-level opens cannot show them), the wwise banks, `event/trevt/bin/event.trevt`, `aoc1:/keyfile.dat`, `save0:/main`. Misses are all fallbacks: `config/trinity_config/data.trowc`, the localized `English(US)/*.bnk` (the root banks then open), `appli/data/*_eng.arc` existence checks, `save0:/poke_trade`. No ro / NRO use, no script-module load, no red line besides 20 shaders not in the library at boot. Not proven either way: Mom may be spawned and not drawn (a missing shader), or the save is past her scene. Next check: walk the living room for a "Talk" prompt.
+- Z-A (`x2-plza5-fs` .. `x2-plza8-gates`): **not a stall.** The game keeps running (60 FPS, threads in their normal waits, `t0`/`t1`/`t2` thread dumps), the menu opens and shows the objective **"Head through the ticket gates to leave the train station."**, and walking back left brings the player into view: walking right / past the platform end leaves the camera where it was (the draw count drops 935 -> 220 because the view no longer holds the crowd). No file misses but `world/scene/startup/startup_0.trscn` (existence check). Whether the camera should follow there is open; the ticket gates are in the station hall to the right of the arrival point.
+- MKW: the view release `main+0x47fca0` (clears bit 4 at `main+0x47fd90`) is called only from `main+0x47ed60`, which is called only from `main+0x47f470`, the render stage with code 9 (dispatched by `main+0x76f60` at `main+0x77808`, and by tail branches at `main+0x47e6b0` / `main+0x26280e0`). Instrumented (`x2-mkw52-rel`, `x2-mkw53-prep`): **neither `main+0x47ed60` nor `main+0x47f470` runs at all before the crash**, while the stage that sends the phase events (`main+0xb5080`) does. So the stage list never contains stage 9 for that view, or `main+0x76f60` takes another branch; `x2-mkw54-stage` logs the stage codes seen at `main+0x771a4` (0..0xa, 9 once) but the code-9 path at `main+0x777c0` is not reached. Next: why `main+0x76f60` skips its code-9 entry (the comparison chain before `main+0x777c0`), then what fills that stage list.

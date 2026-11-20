@@ -250,7 +250,27 @@ fn new_handle(st: &mut State) -> u64 {
 
 // ---- the operations (unit-testable without the guest)
 
+/// `NXOS_FS_TRACE=1` (debugging): every file open with its result, `=miss` only the failed ones.
+fn fs_trace() -> u8 {
+    static T: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *T.get_or_init(|| match std::env::var("NXOS_FS_TRACE").as_deref() {
+        Ok("1") => 2,
+        Ok("miss") => 1,
+        _ => 0,
+    })
+}
+
 pub fn open_file(path: &str, mode: u32) -> Result<u64, u64> {
+    let r = open_file_at(path, mode);
+    match (fs_trace(), &r) {
+        (2, Ok(_)) => crate::log!("fs trace: open {path}"),
+        (1..=2, Err(e)) => crate::log!("fs trace: open {path} -> {e:#x}"),
+        _ => {}
+    }
+    r
+}
+
+fn open_file_at(path: &str, mode: u32) -> Result<u64, u64> {
     match resolve(path)? {
         Target::Rom(fs, p) => {
             if mode & (MODE_WRITE | MODE_APPEND) != 0 {
@@ -437,6 +457,16 @@ pub fn rename(from: &str, to: &str) -> u64 {
 
 /// GetEntryType: Some(true) for a directory.
 pub fn entry_type(path: &str) -> Result<bool, u64> {
+    let r = entry_type_at(path);
+    if fs_trace() > 0 {
+        if let Err(e) = &r {
+            crate::log!("fs trace: entry type {path} -> {e:#x}");
+        }
+    }
+    r
+}
+
+fn entry_type_at(path: &str) -> Result<bool, u64> {
     match resolve(path)? {
         Target::Rom(fs, p) => {
             if is_game(&fs) {
