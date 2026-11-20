@@ -4,8 +4,9 @@ Several games may run at once (one per lane). Each run writes its lane's claim f
 pid), checks free commit > 40 GB, starts the exe, watches it BY PID (kill if private bytes > 20 GB or free commit
 < 25 GB, or past the hard timeout) and deletes its claim once it exited. The claim is what gamectl.py checks before it
 sends a key or command, so a lane only ever drives its own game.
-NXRS_EXCLUSIVE=1: the run needs the machine to itself (FPS measurements): it starts only when no other game runs, and
-other lanes refuse to start while it runs. The old single GAME_LOCK, if another tool holds it, counts as exclusive.
+One game at a time by default (every run is exclusive; NXRS_CONCURRENT=1 opts out): it starts only when no other game
+runs, and other runs refuse to start while it runs. A display-driver reset (GPU hang) stops the game and blocks new
+starts for 10 minutes. The old single GAME_LOCK, if another tool holds it, counts as exclusive.
 Environment: NXRS_LANE names the lane. scripts/play_scenario.py runs games through `run()` here.
 """
 import datetime
@@ -126,10 +127,28 @@ def alive(pid):
     return ps("if (Get-Process -Id %d -ErrorAction SilentlyContinue) { 1 } else { 0 }" % pid) == '1'
 
 
+GPU_COOLDOWN_S = 600
+
+
+def gpu_resets_since(t):
+    """Times of NVIDIA driver resets (nvlddmkm event 153, the TDR that precedes 'display driver stopped responding')
+    logged since epoch time `t`. Repeated GPU hangs preceded every hard crash of this PC (2026-11-18, -19, -20)."""
+    since = datetime.datetime.fromtimestamp(t).strftime('%Y-%m-%dT%H:%M:%S')
+    out = ps("Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='nvlddmkm'; Id=153; StartTime=[datetime]'%s'} "
+             "-ErrorAction SilentlyContinue | ForEach-Object { $_.TimeCreated.ToString('HH:mm:ss') }" % since)
+    return [l for l in out.splitlines() if l.strip()]
+
+
 def run(exe, logp, hard, args=(), env=None, during=None, say=print):
     """One guarded run. `during(pid)` (optional) runs on a thread while the game runs (a scenario's steps).
     Returns dict(why, exit, peak_mb, seconds) or raises SystemExit with the reason it could not start."""
-    exclusive = os.environ.get('NXRS_EXCLUSIVE') == '1'
+    # One game at a time again (owner, 2026-11-20: the PC hard-crashed with three games running after a series of GPU
+    # resets). Every run is exclusive unless NXRS_CONCURRENT=1.
+    exclusive = os.environ.get('NXRS_CONCURRENT') != '1'
+    recent = gpu_resets_since(time.time() - GPU_COOLDOWN_S)
+    if recent:
+        raise SystemExit('GPU cooldown: the display driver reset at %s (within %d s); no game starts until it has been '
+                         'quiet that long' % (', '.join(recent), GPU_COOLDOWN_S))
     others = other_claims()
     if any(c['exclusive'] for c in others):
         raise SystemExit('locked: an exclusive run holds the machine: %s' % [c for c in others if c['exclusive']])
@@ -194,9 +213,23 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
             if during:
                 threading.Thread(target=during, args=(p.pid,), daemon=True).start()
             pid, running, seen = p.pid, (lambda: p.poll() is None), 0
+            last_gpu_check = time.time()
             while True:
                 while running():
                     time.sleep(2)
+                    if time.time() - last_gpu_check >= 10:
+                        last_gpu_check = time.time()
+                        resets = gpu_resets_since(t0)
+                        if resets:
+                            why = 'GPU RESET: the display driver reset at %s; game stopped (a GPU hang to fix)' % ', '.join(resets)
+                            kill_pid(pid)
+                            try:
+                                with open(os.path.join(EVIDENCE, 'GPU_RESETS.log'), 'a') as gl:
+                                    gl.write('%s | %s | %s | %s\n' % (datetime.datetime.now().isoformat(timespec='seconds'),
+                                                                     lane, os.path.basename(exe), ', '.join(resets)))
+                            except OSError:
+                                pass
+                            break
                     if not os.path.exists(LOCK):
                         # another lane's stale-claim sweep can read the claim just before a hand-over rewrites it
                         # (the old pid is gone) and remove it after: write it again while the game runs
