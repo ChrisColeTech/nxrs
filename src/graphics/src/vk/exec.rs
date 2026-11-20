@@ -1278,17 +1278,23 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
         let mut d: Vec<String> = Vec::new();
         let imgs = g.images.lock().unwrap();
         let img = |t: &tex_t| match imgs.by_serial.get(&t.serial) {
-            Some(im) => format!(
-                "image {:#x} {}x{}x{} levels {} {:?}{}{}",
-                vk::Handle::as_raw(im.image),
-                im.extent.width,
-                im.extent.height,
-                im.layers,
-                im.levels,
-                im.format,
-                if im.alias_of.is_some() { " alias" } else { "" },
-                if im.sparse.is_some() { " sparse" } else { "" }
-            ),
+            Some(im) => {
+                let aliased = imgs.by_serial.values().filter(|a| a.alias_of == Some(t.serial)).count();
+                let at = super::lost::bound_at(vk::Handle::as_raw(im.image)).map(|(a, n)| format!(" bound at {a:#x} +{n:#x}")).unwrap_or_default();
+                format!(
+                    "image {:#x} {}x{}x{} levels {} {:?}{}{}{}{}",
+                    vk::Handle::as_raw(im.image),
+                    im.extent.width,
+                    im.extent.height,
+                    im.layers,
+                    im.levels,
+                    im.format,
+                    if im.alias_of.is_some() { " alias" } else { "" },
+                    if aliased > 0 { format!(", {aliased} alias image(s) over its memory") } else { String::new() },
+                    if im.sparse.is_some() { " sparse" } else { "" },
+                    at
+                )
+            }
             None => "no image".to_string(),
         };
         for i in 0..qs.rt_n {

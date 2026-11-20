@@ -1184,3 +1184,23 @@ fn conditional_clear_runs_once_after_a_timestamp_report() {
     assert_eq!(&n.data.mem.slice()[roff..roff + 8], &0u64.to_le_bytes(), "the timestamp's counter field");
     assert_eq!(validation_errors(), e0, "validation errors");
 }
+
+/// The address binding report (`NXGFX_ADDR_REPORT`) sees the device's memory bindings (a loss names the faulting
+/// address's owner from them). Runs only when the report is on.
+#[test]
+fn address_binding_report_sees_bindings() {
+    let _g = setup();
+    if !nxgfx::vk::lost::addr_report_wanted() {
+        eprintln!("NXGFX_ADDR_REPORT not set: skipped");
+        return;
+    }
+    let mut n = Nvn::new();
+    let rt = n.texture(W, H, f::RGBA8, 0, false);
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    clear(&mut n, [0.0, 0.0, 1.0, 1.0]);
+    n.submit_wait();
+    let (live, _) = nxgfx::vk::lost::binding_counts();
+    eprintln!("address binding report: {live} ranges bound");
+    assert!(live > 0, "no binding reported");
+}

@@ -156,7 +156,8 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
                     if let Some(o) = addr_owner(a.reported_address) {
                         crate::log::red(&format!("    {o}"));
                     } else if addr_report_wanted() {
-                        crate::log::red("    in no memory bound or unbound since the start (the address binding report)");
+                        let (l, u) = binding_counts();
+                        crate::log::red(&format!("    in no memory bound or unbound since the start (the address binding report: {l} ranges bound now, {u} unbound kept)"));
                     }
                 }
                 for v in vi.iter().take(c.vendor_info_count as usize) {
@@ -244,6 +245,17 @@ pub unsafe fn on_binding(data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>
         }
         s.gone.push_back((b.base_address, x, at));
     }
+}
+
+/// Where the report saw object `handle` bound (address, size), for the loss report's pass line.
+pub fn bound_at(handle: u64) -> Option<(u64, u64)> {
+    let g = BINDS.lock().unwrap();
+    g.as_ref()?.live.iter().find(|(_, b)| b.handle == handle).map(|(a, b)| (*a, b.size))
+}
+
+/// Bindings the report has seen: (live, unbound kept).
+pub fn binding_counts() -> (usize, usize) {
+    BINDS.lock().unwrap().as_ref().map(|b| (b.live.len(), b.gone.len())).unwrap_or((0, 0))
 }
 
 /// What address `a` was in: the live binding holding it, else the last binding there that was unbound.

@@ -923,6 +923,16 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   nothing links parts with link-time optimization (the optimized pipeline is built whole from the modules), so the
   retained information only made each part bigger and slower (MKW's prewarm: ~7 MB a pipeline). Wonder first run
   queued to measure (`chain20` -> `c20_wonder.out`).
+- **Smash with the address binding report (`-G4-smash-fault4`, 132.6 s, 08:26 reset):** the same draw again (the
+  full-screen triangle into ser6168, a live 1920x1080 R8G8B8A8_SRGB image), *invalid write at 0x300002000*, and that
+  address was **never bound to anything this layer created** (no image, buffer or memory of ours was there, then or
+  before; the report sees bindings: GPU test `address_binding_report_sees_bindings`). So the write lands in memory
+  the driver keeps for itself while writing our target, not in a freed allocation of ours. Leading suspect: the
+  **alias images** (`image.rs alias_image`: a second VkImage of another format bound over the same memory instead of a
+  view of one image); with NVIDIA's colour compression, two images over one memory can disagree about its
+  compression state. Queued `chain22`: Smash with `NXGFX_ALIAS=0` (alias images off) and the full report, which now
+  also gives the target image's bound address and how many alias images lie over its memory (`c22_smash.out`).
+  MKW's indirect-dispatch fault (0x300001000) is the same kind of address.
 - **Queue (07:40):** `chain19` = Smash with the address report (`c16_smash.out`), MK8D occlusion log + capture
   (`c14_mk8d.out`, `build/G4/mk8d.cap`), DKB profile (`c18_dkb.out`); then `chain20` Wonder first run. run_game's
   cooldown after 5 resets in the hour was 50 minutes at 07:37.
@@ -2239,6 +2249,12 @@ write-watch calls and their time every 600 submissions).
   later. **Fix (graphics `vk/image.rs` `scrub_slots`, `vk/exec.rs` `dummy_view_ready`):** when a parked or evicted
   image (or an alias's views) goes, every pool slot naming its texture first gets the zero stand-in's view (the
   console would show the old bytes; nxrs shows zeros, no fault). `NXGFX_SCRUB_SLOTS=0` off. Not run yet.
+- **For G4 (Smash):** if the slot scrub holds for MKW, Smash's faults (an invalid write into a live 1920x1080 target)
+  may share the cause through a **storage-image** slot: `write_image` writes the pool's B_IMG descriptor too, so a
+  finalized texture's storage slot keeps naming its image's view after the image goes; a compute pass or a shader
+  storing through that slot then writes freed (or, once reused, someone else's live) memory. `scrub_slots` rewrites
+  both the sampled and the storage descriptor with the stand-in's views; a Smash run with `NXGFX_SCRUB_SLOTS=0` /
+  unset against the same scenario would tell.
 - Runs `K2-mkw7` (07:22), `K2-mkw8` (07:32), `K2-mkw9` (08:03) each reset the display driver; next MKW run waits for
   G4's Smash address-report run.
 
