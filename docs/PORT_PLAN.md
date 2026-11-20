@@ -31,7 +31,7 @@ Agents update their own rows when they finish.
 | M8 | Ocarina of Time | Deferred: next after 5B | | Owner 2026-11-19: after the other games are validated; deferred is not excluded. Builds (ZBIC done); stops at a static-init fault (main+0x946a20). The rows that need it (unrouted voices, its movies, its graphics needs) stay Partial until it runs |
 | M9 | Launcher contract v2 | Partial | launcher c599914, lane Q (uncommitted, both repos) | **MKW through the launcher (lane Q, 2026-11-20):** built by the launcher itself (a scratch build of it, temporary library `build\Q\lib`, `nxrs --select-title "Mario Kart World" --build`, contract v2 `build ... --machine`) into `build\Q\games-head\Mario Kart World [nxrs]` with the engine at a9d15ba: `@result ok` in 522 s (translate 21 s, shaders 127 s, compile 373 s); `run_game.py` 60 s (NXRS_LANE=Q): boots, presents 120 frames, then the known stop at ~14.5 s (host access violation, lane O3's). The same build from the working tree at 02:40 stopped at 1 s (`rt_dispatch` at patch page +0xff0: lanes O3 / X2's uncommitted move of the MKW patch to `recomp.txt` and `gamefix.rs`, half landed at that time). **Launcher (lane Q):** `doctor` in Settings > Engine and `nxrs --nxrs-doctor`; Game > Copy saves from the Turbo / nxrs build (Turbo `save\user` <-> nxrs `save\user1`, backup first, offered once on Play); `.xci` accepted (nxrs only); release.yml bundles the engine behind `nxrs_engine` / `NXRS_ENGINE_IN_RELEASE`, off (owner decision: token and publishing). Launcher tests 32/32 + UI 10/10. Open: owner decision on OpenGL for nxrs games; the keys fallback path is lane O3's |
 | M10 | Linux | Partial | lane L (uncommitted; its graphics part went in with 792f907) | **Lane L 2026-11-20:** the whole engine builds and runs on x86-64 Linux behind `cfg(target_os = "linux")`, Windows untouched (INTERFACES "Linux (lane L)": every Windows piece and its Linux equivalent). Runtime: mmap guest memory, userfaultfd + PAGEMAP_SCAN write watch, one signal handler with fault hooks, System V assembly boundary, own fiber switch, SIGPROF samples, cgroup / watchdog memory cap. Graphics: Xlib / XCB / Wayland surfaces. os: hidraw, SDL2 pads, BlueZ Switch 2 pads, FFmpeg H.264 / AAC, system opus / vpx / dav1d, ALSA through cpal, zenity / kdialog dialogs. Front: winit window, Unix-socket control channel, ffmpeg F7. cli: clang + ld.lld, `<name>` + `<name>_code.so`; Linux `dmsh_xlate` (same source hash). CI: `linux` job (ubuntu-latest). **Verified in WSL (Ubuntu 24.04):** `cargo test` 349 green; homebrew e2e 8/8, 200/200 repeated; `nxrs-build doctor`; Beach Bounce built (189 s) and run under Xvfb on llvmpipe (the only Vulkan device WSL has here): title at ~56 FPS, A presses through the control socket into the story, F7 MP4 (H.264 + AAC); Anime Girls built with its 53,109 shaders by the Linux dmsh_xlate (all valid, sampled SPIR-V byte-identical to Windows) and its 3D title drawn on llvmpipe (with the profile prewarm off: llvmpipe crashes in a pipeline-library part, noted for lane G4). **Not verified:** a real GPU (no dzn / GPU driver in this WSL), real sound (no sound server), real controllers / Bluetooth, Wayland, the cgroup cap (WSL refuses it; the watchdog ran). Exit criterion (M5 on Linux: MK8D at 60) needs a Linux PC with a GPU |
-| 5B | The library: gameplay per game | In progress | | 1 of 12 Playable (Wonder). Per-game rows in 5B. Final acceptance pass once lanes O3 / G4 / Q finish, with the owner's hand plays (Pokémon story points, Sonic's route) |
+| 5B | The library: gameplay per game | In progress | | Bar (owner 2026-11-20): past the intro videos into first controllable gameplay, short run, no story progression, no hand plays. The "Gameplay target" column's longer targets are superseded by that bar. By it: Wonder, Arceus, Violet, Z-A, Sonic Generations, Shadow Generations, Beach Bounce, Anime Girls, Smash reach gameplay (picture / FPS / crash issues listed per row); MK8D (picture), Jamboree (white layer), MKW, DKB not yet |
 
 ## What changed
 
@@ -735,12 +735,14 @@ frame (not by measured time) runs at double speed when unlocked. Three layers, f
 
 ## 5B. The LIBRARY phase: every game in the owner's library, played past the title
 
-Owner, 2026-11-19: get the rest of the library working on the nxrs engine and validate **gameplay**, not just the
-title screen and movies. A game counts as **Playable** only when a run shows: controllable gameplay reached (scripted
-input through the control pipe moves the player / kart / character), 10 minutes of that gameplay without a crash, the
-picture correct (screenshots checked; FLIP against a Turbo capture where one exists), memory flat (no growth trend
-over the 10 minutes, under the watchdog), sound playing with no underruns, and FPS from the pacing line at the game's
-target. Then the owner plays it by hand. Sources are the owner's library entries (read only).
+Owner, 2026-11-20 (supersedes the 2026-11-19 wording): the goal is to **finish development**; the library check is
+that each game **gets past its intro videos into its first controllable gameplay**, not to play the game's story. A
+game counts as **Playable** when a short run (a few minutes) shows: boot, intro videos and title passed, the first
+controllable scene reached (scripted input through the control pipe moves the player / kart / character), no crash,
+the picture correct (screenshots checked), memory under the watchdog, sound playing, and FPS from the pacing line at
+the game's target. **No story progression** (no "reach the first town / the Fieldlands / a race 10 minutes"), no
+scripted walkthroughs, no owner hand plays. Agents spend their time on engine development; a game run exists only to
+reproduce or verify a specific engine fix. Sources are the owner's library entries (read only).
 
 | Game | Package | Lane | Gameplay target | Status |
 |---|---|---|---|---|
