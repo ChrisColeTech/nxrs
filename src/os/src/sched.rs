@@ -414,6 +414,13 @@ impl nxrt::kernel::Scheduler for Cores {
             checkpoint(false);
         }
     }
+    fn host_suspend(&self) -> bool {
+        let inside = ME_HOST.with(|m| m.borrow().as_ref().is_some_and(|(h, _)| h.load(Ordering::SeqCst) > 0));
+        if inside {
+            self.host_leave();
+        }
+        inside
+    }
 }
 
 /// SetThreadPriority / SetThreadCoreMask applied by the kernel: the scheduler's copy follows the kernel's.

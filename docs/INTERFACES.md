@@ -1258,18 +1258,36 @@ address: Switch 2 games pass no pool (DKB: 0 bytes at 0x0) and DKB calls InitChe
 opening movie starts; it was a fatal. The "nearly silent title" was the new-save mode selection (Normal / Assist),
 which has no music; the music plays once the game starts.
 
-**Lane X2 (2026-11-20 00:10): MKW 1.8.0 render-buffer pool patch ported, not yet sufficient.**
+**Lane X2 (2026-11-20 00:45): MKW 1.8.0 render-buffer pool patch ported; MKW still stops at 15.5 s.**
 - Profile `src/profiles/games/0400C3F00006E000/turbo.toml` (set `mkw_rbpool`, `NXRS_PATCH_MKW_RBPOOL`, build
   d00e4f399e411d06): mkw-recomp's four sites (pool table 2 slots; `bl` at main+0xd65720 / main+0xb6f90 to the patch
   page + 0xf90 / 0xfc0). nxrs applies them at build ("patch applied" x4 in `build\games\mkw.buildX2.log`).
 - Runtime `hostfn::alias` / `aliased` + `dispatch.rs`: a guest address outside the host window (the patch page)
-  runs a host function. Os `gamefix.rs` (new): `shadow_pool` keeps the allocator and runs its init; `shadow_rb` makes
-  the second pool at the first shadow map (ExpHeap::create main+0xbeb4e0 over memory reserved at 0x60_0000_0000 in
-  the guest's 39-bit space, operator new main+0x3e3550, pool init main+0xeb1e60 as mkw-recomp: (pool, 0, 1, 7, count,
-  size, flags, heap)), 0xb600000 bytes, stored in slot 1.
-- Result (`build\I\runs\20261120-0006*-X-x2-mkw21-pools`): the second pool is made at 14 s and the allocator walks it
-  (crumbs `x2-mkw19-crumbs`: pool 0's free list, then pool 1's, then the out-of-memory path), but its regions hold no
-  free bytes (region +0x30 / +0x38 = 0, pool 0's region 0 has 0x7819800), so the same null block comes. Same with the
-  pool at a 41-bit host address. Open: why the regions of a pool made by `main+0xeb1e60` this way start empty here
-  (compare the pool's +0x10 field: 8 for the game's pool, 0x939 for ours; it is `[mem+0x10c]` of the GPU memory block
-  `main+0x5d6420` returns).
+  runs a host function. Os `gamefix.rs`: the hook diffed line by line against mkw-recomp's `patches.c`
+  (`shadow_second_pool`): same calls, same arguments (ExpHeap::create main+0xbeb4e0 (region, size + 2 MiB, name, 1, 0),
+  operator new main+0x3e3550 (0x58, heap, 8), pool init main+0xeb1e60 (pool, 0, 1, 7, count, size, 0x104 or 4, heap)).
+  The pool's +0x10 field (8 vs 0x939) is not a flag: it is the GPU memory pool's serial number (`main+0x25b1290`
+  `ldadd` on a global counter, stored at the pool object's +0x10c), so 0x939 is just the 2361st pool. The "empty
+  regions" were a fresh pool: region +0x30 / +0x38 count bytes in use.
+- Fixes since: (1) **runtime `boundary.rs call_guest`** now leaves the "inside a host function" state for the guest
+  code it runs (`Scheduler::host_suspend`, os `sched.rs`) and re-enters after: a host function calling guest code
+  (gamefix, HLE callbacks, the graphics layer's command-memory callbacks) was stealable for the whole call, so two
+  threads could run guest code on one virtual core (the DKB race class). (2) The second pool is sized by mkw-recomp's
+  rule for the scene's lines (`NXRS_MKW_SCENE_LINES`, default 2160 docked / 1440 handheld: 0x24b00000 docked) and made
+  right after the allocator's init (`NXRS_MKW_POOL_MODE=map` for mkw-recomp's first-shadow-map timing; `grow` gives
+  the allocator a growth heap at ctx+0x2a78 instead, the game's own path `main+0xa7f14`: it adds one 32 MiB pool and
+  then fills both slots). Pool 0 fills before the first shadow map here, so the map timing never helped.
+- Result: with the early pool, allocations that miss pool 0 now land in pool 1 (`x2-mkw35-free`: three pool-0 misses,
+  no pool-1 miss, no out-of-memory path), and MKW stops at the same 15.5 s mark (docked and handheld, `x2-mkw46`) on a
+  **double free** instead: `main+0xa14e8` (scene event 0xf in `main+0xa13b0`, called by `main+0xa07b0`) frees the
+  render buffer at `[x21+0x98]` twice with no allocation between (`x2-mkw42-rb`: the same buffer freed twice in a
+  row, its block +0xc0 cleared by the first free; pool index 0), and `main+0x47ff40` reads the null block. Other runs
+  fault at main+0xcbfb0 / main+0x26bd20 on a render buffer without its texture, the same family. The sizes of the
+  pool are not the cause (a 0x4f040000 second pool stops the same way). Next: why `main+0xa07b0` with event 0xf runs
+  twice without its allocating branch (`main+0xa0bfc`: three flag tests at main+0xa0c94..0xa0cc4) and what
+  `[[0x36cd6b8]+0x424]` (the test that skips the free at main+0xa14a0) reads; it is the same 15.5 s mark with the
+  patch off, where the out-of-memory comes first.
+- Display: MKW 1.8.0 makes its 3840x2160 swap chain at 0.8 s before any display query; `NXOS_DISPLAY_MAX=0..3` (new,
+  os `vi.rs`) caps QueryDisplayBufferMaxResolution for tests (MKW never calls it).
+
+**Lane X2 (2026-11-20 00:50), other games.** Super Mario Bros. Wonder, exclusive 229 s on the new scheduler (`x2-wonder-sched2`): median 60.0 / p10 59.9, memory flat, no crash; with the `call_guest` change relinked (`x2-wonder-suspend`, 150 s) 59.3-60.0 per minute, no crash. Arceus "lost progress": the game's, not ours (the 21.7 min run wrote nothing to the save or its work tree; at that story step the game has no menu Save, only its autosave points). Violet: in-game Save commits (`fs: commit save0`, `x2-violet5-obj`); still no way out of the house (menu has Options / Save only, Mom not found). Saves backed up in `build\X\saves\` before each run. **Concurrent runs in one lane share its claim file:** an exclusive run of mine waited while my own non-exclusive runs rewrote and removed `GAME_LOCK.X2`, and run_game's give-up path then failed on `os.remove` (FileNotFoundError). Exclusive runs now use their own lane name (`X2W`).

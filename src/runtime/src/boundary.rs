@@ -55,7 +55,15 @@ pub unsafe fn call_guest(c: *mut Cpu, addr: u64) -> GuestCall {
     (*c).x[30] = crate::hostfn::RET_HOST;
     (*c).pc = addr;
     (*c).sync_mxcsr();
-    match asm::nxrt_call_guest(c) {
+    // guest code from inside a host function: the thread holds its core again for the call (the scheduler takes a
+    // core only from a thread inside a host function, so it must not see this one as one meanwhile)
+    let sc = crate::kernel::sched();
+    let inside = sc.host_suspend();
+    let r = asm::nxrt_call_guest(c);
+    if inside {
+        sc.host_enter();
+    }
+    match r {
         0 => GuestCall::Returned,
         1 => {
             PENDING.set(1);

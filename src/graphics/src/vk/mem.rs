@@ -710,10 +710,13 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8)]) 
     }
     let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
+    super::lazy::T_LOCK.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     for &(pool, a, n, src, pre) in wbs {
         let Some(p) = m.by_base.get_mut(&pool) else { continue };
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
+        let tl = std::time::Instant::now();
         let lazy = if p.watched { super::lazy::take_lazy(a, n) } else { vec![] };
+        super::lazy::T_TAKE.fetch_add(tl.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if !lazy.is_empty() {
             let (buf, off0) = (p.buf.as_ref().map(|b| b.buf).unwrap_or_default(), p.buf_off);
             let base = p.base;
@@ -725,10 +728,14 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8)]) 
                 }
                 at = (pg + PAGE).min(a + n).max(at);
             }
+            let tm = std::time::Instant::now();
             super::lazy::make_lazy(&lazy, buf, base, off0);
+            super::lazy::T_MAKE.fetch_add(tm.elapsed().as_nanos() as u64, Ordering::Relaxed);
             continue;
         }
+        let tl = std::time::Instant::now();
         land(p, a, n, src, pre);
+        super::lazy::T_LAND.fetch_add(tl.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
     WRITEBACK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }

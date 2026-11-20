@@ -60,17 +60,74 @@ fn map_bytes(size: u64) -> u64 {
     3 * 2 * size * size // 3 cascades of D16
 }
 
+/// The scene targets' lines: docked, 1.8.0 takes its 2160 layer (3840x2160 targets); handheld 1440 at most.
+/// `NXRS_MKW_SCENE_LINES` overrides.
+fn scene_lines() -> u64 {
+    std::env::var("NXRS_MKW_SCENE_LINES").ok().and_then(|v| v.parse().ok())
+        .unwrap_or(if crate::services::oe::opmode() == 1 { 2160 } else { 1440 })
+}
+
+/// mkw-recomp's 1.8.0 rule (second_pool_bytes) with the console's 3072 map: photo mode's 128 MiB at 1440 lines growing
+/// with the pixels, a whole second map, and over 1440 lines the game's 250 MiB less its map growing with the pixels.
 fn second_pool_bytes() -> u64 {
-    // mkw-recomp's 1.8.0 rule at the console's 1440 lines and 3072 map
-    let b = (PHOTO_MIB_1440 << 20) + map_bytes(3072);
+    let lines = scene_lines();
+    let px = lines * lines;
+    let base = 1440 * 1440;
+    let mut b = (PHOTO_MIB_1440 << 20) * px / base + map_bytes(3072);
+    if lines > 1440 {
+        b += ((250u64 << 20) - map_bytes(3072)) * (px - base) / base;
+    }
     (b + 0xffff) & !0xffff
 }
 
-/// The allocator's init (main+0xeb1870): remember the allocator, then run it.
+/// Guest memory for a heap of the game's class: reserved and committed in the guest's 39-bit space below the kernel
+/// region, an ExpHeap::create over it. 0 on failure.
+unsafe fn host_heap(c: *mut Cpu, region_size: u64, text: &'static [u8]) -> u64 {
+    let mut region = 0u64;
+    let mut at = 0x60_0000_0000u64;
+    while at + region_size < nxrt::mem::KERNEL_BASE {
+        if nxrt::mem::reserve(at, region_size, false) {
+            if nxrt::mem::commit(at, region_size) {
+                region = at;
+            }
+            break;
+        }
+        at += 1 << 30;
+    }
+    if region == 0 {
+        return 0;
+    }
+    let name = nxrt::kernel::get().space.kernel_alloc(8 + text.len() as u64, 8);
+    core::ptr::copy_nonoverlapping(text.as_ptr(), (name + 8) as *mut u8, text.len());
+    guest::w64(name, name + 8);
+    guest::call(c, main_addr(EXPHEAP_CREATE), &[region, region_size, name, 1, 0]).unwrap_or(0)
+}
+
+/// The allocator's init (main+0xeb1870): remember the allocator, then run it. With
+/// `NXRS_MKW_POOL_MODE=grow` (an experiment; mkw-recomp's second pool at the first shadow map is the default) the init's config gets a
+/// growth heap at +0x30 (MKW passes 0) over 512 MiB of the host's, so the allocator's own path adds a pool of its
+/// chunk size (config +0x10, 32 MiB) or the request's when the 285 MiB one is full (main+0xa7f14..0xa7fa4).
 unsafe fn shadow_pool(c: *mut Cpu) {
     RB_OBJ.store((*c).x[0], Ordering::Relaxed);
     let (a0, a1) = ((*c).x[0], (*c).x[1]);
-    if let Some(r) = guest::call(c, main_addr(RB_ALLOC_INIT), &[a0, a1]) {
+    let r = guest::call(c, main_addr(RB_ALLOC_INIT), &[a0, a1]);
+    // the second pool at once (default): docked, 1.8.0's 2160-line targets fill the game's pool at the title, before
+    // the first shadow map (x2-mkw31: two full-pool misses, then main+0x47ff40 frees a null block). The pool's memory
+    // is the host's, so unlike mkw-recomp's at this point it takes nothing from the game's heaps.
+    // `NXRS_MKW_POOL_MODE=map` waits for the first shadow map as mkw-recomp does.
+    let mode = std::env::var("NXRS_MKW_POOL_MODE").unwrap_or_default();
+    if mode == "grow" {
+        // the allocator's own growth (main+0xa7f14): a heap at +0x2a78 (MKW's is 0), pools of +0x2a80 (32 MiB) or
+        // the request into its table's free slot
+        let heap = host_heap(c, 768 << 20, b"nxrs render-buffer growth heap\0");
+        guest::w64(a0 + 0x2a78, heap);
+        POOL_DONE.store(true, Ordering::Relaxed);
+        crate::log!("gamefix: render-buffer allocator: growth heap {heap:#x} (768 MiB of the host's), chunk {:#x}", guest::r64(a0 + 0x2a80));
+    }
+    if mode.is_empty() && !POOL_DONE.swap(true, Ordering::Relaxed) {
+        second_pool(c);
+    }
+    if let Some(r) = r {
         (*c).x[0] = r;
     }
 }
@@ -125,9 +182,15 @@ unsafe fn second_pool(c: *mut Cpu) {
     let heap = guest::call(c, main_addr(EXPHEAP_CREATE), &[region, region_size, name, 1, 0]).unwrap_or(0);
     let pool = if heap != 0 { guest::call(c, main_addr(RB_POOL_NEW), &[0x58, heap, 8]).unwrap_or(0) } else { 0 };
     if pool != 0 {
-        let count = guest::r32(rb + 0x11c0) as u64;
+        // the block records a region has: the game's pool 0 regions' count (+0x48 of a region; [rb+0x11c0] is set
+        // only later, 0 at the allocator's init, and a region without records "allocates" null blocks)
+        let r0 = guest::r64(guest::r64(table) + 0x50);
+        let count = (guest::r32(rb + 0x11c0) as u64).max(guest::r32(r0 + 0x48) as u64).max(0x100);
+        crate::log!("gamefix: block records a region: {count:#x} (allocator {:#x}, pool 0 region {:#x})", guest::r32(rb + 0x11c0), guest::r32(r0 + 0x48));
         let flags = if guest::r8(rb + 0x2a68) & 0x80 != 0 { 0x104 } else { 4 };
-        guest::call(c, main_addr(RB_POOL_INIT), &[pool, 0, 1, 7, count, size, flags, heap]);
+        let kind = std::env::var("NXRS_MKW_POOL_KIND").ok().and_then(|v| v.parse().ok()).unwrap_or(0u64);
+        let regions = std::env::var("NXRS_MKW_POOL_REGIONS").ok().and_then(|v| v.parse().ok()).unwrap_or(7u64);
+        guest::call(c, main_addr(RB_POOL_INIT), &[pool, kind, 1, regions, count, size, flags, heap]);
         guest::w64(table + 8, pool);
         let dump = |what: &str, a: u64| {
             let w: Vec<String> = (0..11).map(|i| format!("{:x}", guest::r64(a + 8 * i))).collect();

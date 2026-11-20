@@ -176,6 +176,10 @@ vifn!(buffer_max_res, |a| {
             }
         }
     }
+    // NXOS_DISPLAY_MAX=0..3 caps it (debug: a game's 2160 layer against its 1440 one)
+    if let Some(m) = std::env::var("NXOS_DISPLAY_MAX").ok().and_then(|v| v.parse::<usize>().ok()) {
+        r = r.min(m.min(3));
+    }
     crate::log_once!("vi bufmax", "vi::QueryDisplayBufferMaxResolution: {}x{} ({}, display {w}x{h})", K[r].0, K[r].1, if crate::services::oe::opmode() == 1 { "docked" } else { "handheld" });
     if a.x(0) != 0 {
         w32(a.x(0), r as u32);

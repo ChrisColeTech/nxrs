@@ -311,7 +311,7 @@ fn crashed(g: &Gpu, k: &GfxKey) -> bool {
                 }
                 let _ = std::fs::write(&list, all);
                 crate::log::red(&format!(
-                    "{} pipeline(s) were compiling when the last session ended (a compiler crash): from now on linked from their parts only ({})",
+                    "{} pipeline(s) were compiling when the last session ended (a compiler crash): not compiled again, their draws skipped ({})",
                     new.len(),
                     list.display()
                 ));
@@ -323,7 +323,7 @@ fn crashed(g: &Gpu, k: &GfxKey) -> bool {
                 }
             }
             if !set.is_empty() {
-                crate::vklog!("pipelines compiled from parts only (an earlier compiler crash): {}", set.len());
+                crate::vklog!("pipelines not compiled (they crashed the compiler in an earlier session): {}", set.len());
             }
         }
         *c = Some(set);

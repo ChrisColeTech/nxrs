@@ -53,8 +53,20 @@ pub fn summary(frames: f64) -> String {
     let n = PAGES_IN.swap(0, Ordering::Relaxed) as f64 / frames;
     let ms = BACK_NS.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
     let skip = SKIP_BYTES.swap(0, Ordering::Relaxed) as f64 / frames / 1048576.0;
-    format!("; lazy write-back: {} pages on the device, {skip:.2} MB a frame not copied back, {n:.1} pages a frame brought back in {ms:.2} ms", pages())
+    let t = |a: &AtomicU64| a.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
+    let (lk, tk, mk, ld, tc) = (t(&T_LOCK), t(&T_TAKE), t(&T_MAKE), t(&T_LAND), t(&T_TOUCH));
+    format!(
+        "; lazy write-back: {} pages on the device, {skip:.2} MB a frame not copied back, {n:.1} pages a frame brought back in {ms:.2} ms (completion: pool lock {lk:.2} ms, pages chosen {tk:.2}, held {mk:.2}, whole write-backs landed {ld:.2}, pages touched {tc:.2})",
+        pages()
+    )
 }
+/// Where the completion's write-back time goes with lazy write-back on (ns): waiting for the pool table, choosing the
+/// pages that stay, holding them.
+pub static T_LOCK: AtomicU64 = AtomicU64::new(0);
+pub static T_TAKE: AtomicU64 = AtomicU64::new(0);
+pub static T_MAKE: AtomicU64 = AtomicU64::new(0);
+pub static T_LAND: AtomicU64 = AtomicU64::new(0);
+pub static T_TOUCH: AtomicU64 = AtomicU64::new(0);
 pub static SKIP_BYTES: AtomicU64 = AtomicU64::new(0);
 
 pub fn enabled() -> bool {
@@ -193,11 +205,27 @@ pub fn touch(a: u64, n: u64) {
     if n == 0 || ST.lock().unwrap().as_ref().is_none_or(|s| s.lazy.is_empty()) {
         return;
     }
-    let mut p = a & !(PAGE - 1);
-    while p < a + n {
+    let t0 = std::time::Instant::now();
+    // only the held pages (and those coming back) of the range: touching every page of a pool or a texture locked the
+    // state and asked the OS about each one (Pokemon Violet: ~30 ms a frame)
+    let lo = a & !(PAGE - 1);
+    let hi = a + n;
+    let mut pages: Vec<u64> = {
+        let g = ST.lock().unwrap();
+        let Some(st) = g.as_ref() else { return };
+        let span = (hi - lo).div_ceil(PAGE) as usize;
+        if span <= st.lazy.len() + st.returning.len() {
+            (0..span as u64).map(|i| lo + i * PAGE).filter(|p| st.lazy.contains_key(p) || st.returning.contains(p)).collect()
+        } else {
+            st.lazy.keys().chain(st.returning.iter()).copied().filter(|&p| p >= lo && p < hi).collect()
+        }
+    };
+    pages.sort_unstable();
+    pages.dedup();
+    for p in pages {
         bring_back(p);
-        p += PAGE;
     }
+    T_TOUCH.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
 /// The page at `p` read back from the device, made accessible again. False when it is not a lazy page. A page another

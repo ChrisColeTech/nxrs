@@ -166,7 +166,7 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
     others = other_claims()
     ex = [c for c in others if c['exclusive']]
     if ex and (not exclusive or any(c['lane'] < lane for c in ex)):
-        os.remove(LOCK)
+        if os.path.exists(LOCK): os.remove(LOCK)
         raise SystemExit('locked: an exclusive run holds the machine: %s' % ex)
     if exclusive:
         for i in range(121):
@@ -174,7 +174,7 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
             if not busy:
                 break
             if i == 120:
-                os.remove(LOCK)
+                if os.path.exists(LOCK): os.remove(LOCK)
                 raise SystemExit('exclusive run gave up: games still running after 20 minutes: %s' % busy)
             if i == 0:
                 say('exclusive claim stands; waiting for running games to end: %s' % busy)
@@ -237,7 +237,7 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
                 break
             time.sleep(1)
         if os.path.exists(LOCK) and open(LOCK).read() == mine:
-            os.remove(LOCK)
+            if os.path.exists(LOCK): os.remove(LOCK)
     r = dict(why=why, exit=rc, peak_mb=peak, seconds=round(time.time() - t0, 1))
     say('run done: %s, exit %s, peak private %d MB; lock released' % (why, rc, peak))
     return r
