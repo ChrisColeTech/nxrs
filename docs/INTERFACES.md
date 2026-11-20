@@ -2169,6 +2169,16 @@ cut), and the title sky was not seen again.
 **FPS: 8-20 in menus and the flyover** (`K2-mkw6` pacing 10-20). The replay's `prep / pools` is 50-60 ms a frame
 (the per-submission write-watch pool sync over ~3,500 mirror pools, 3.3 GB): the largest single cost, for G4.
 
+**G4's review of K2's changes (07:30):** `lazy.rs` (no self-wait on the page a thread brings back; `protect` returns
+whether it worked, a page that cannot be made accessible is dropped): right. `mem.rs` write watch resuming after the
+last returned page when the buffer fills (with `reset` the returned pages are not returned again): right, and the
+peek path still stops at a full buffer as before. `exec.rs` mesh record in `SetKey`: right (each mesh draw stages its
+own {count, first}; a reused set read the earlier draw's). G4 also sees the same *invalid write at 0x3 / 0x4_0000_xxxx*
+class in Smash (a full-screen draw into a live 1920x1080 image) and in G4's MKW run (an indirect dispatch, 185.8 s):
+VK_EXT_device_address_binding_report now names the faulting address's object (`NXGFX_ADDR_REPORT=1`, on with
+`NXGFX_CHECKPOINTS=all`), which may help the mesh-draw faults too. Pool sync: G4 is on it (`NXGFX_PROFILE=1` logs the
+write-watch calls and their time every 600 submissions).
+
 **Left (lane K2):** the direct mesh-draw fault (task fea1d6ca04512de1); then all mesh draws on (`NXGFX_MESH_REF`
 unset); a race of 10 minutes; FPS (pool sync); the untested hooks (seed, output size, frame rate, resolution
 overlay); the picture against mkw-recomp; memory (G4).

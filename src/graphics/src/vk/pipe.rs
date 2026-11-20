@@ -536,6 +536,11 @@ fn link_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Option<vk::Pipeline> {
 /// The pre-rasterization part (every stage but the fragment shader, viewport, rasterization, tessellation) and the
 /// fragment shader part (its stage, depth / stencil, multisampling) of a pipeline: what costs the shader compiles.
 fn shader_parts(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Option<[vk::Pipeline; 2]> {
+    // a pre-rasterization part needs its vertex (or mesh) shader: a program made ahead whose vertex shader is not
+    // translated yet had none, and an empty pre-rasterization library is invalid (llvmpipe crashed on it: lane L)
+    if !mods.iter().any(|m| m.stage != 1) {
+        return None;
+    }
     let mesh = mods.iter().any(|m| m.mesh != 0);
     let tess = !mesh && mods.iter().any(|m| m.stage == 3 || m.stage == 4);
     let dyns = dynamic_states(g, tess, mesh);

@@ -608,6 +608,8 @@ impl Library {
         // integer abs as a product, which NVIDIA's compiler does not turn into a GPU fault (mkw-recomp #395 / #22;
         // NXGFX_SABS_FIX=0 off)
         let w = if std::env::var("NXGFX_SABS_FIX").as_deref() != Ok("0") { super::spvfix::sabs_product(&w).unwrap_or(w) } else { w };
+        // primitive indices held below the vertex count (NXGFX_MESH_INDEX_FIX=0 off; MKW's mesh-draw device losses)
+        let w = if r.mesh == 2 && std::env::var("NXGFX_MESH_INDEX_FIX").as_deref() != Ok("0") { super::spvfix::mesh_indices(&w).unwrap_or(w) } else { w };
         // NVN's warp-aggregated atomic add made per lane (the RTX 50 ballot hang, Turbo #12; NXGFX_BALLOT_FIX=0 off)
         let w = if std::env::var("NXGFX_BALLOT_FIX").as_deref() != Ok("0") {
             match shaders::link::ballot_per_lane(&w) {

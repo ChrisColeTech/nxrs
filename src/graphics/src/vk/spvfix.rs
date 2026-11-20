@@ -529,13 +529,174 @@ fn spvfix_folder() {
         let w: Vec<u32> = b.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
         let k = kill_demote(&w);
         let s = sabs_product(k.as_deref().unwrap_or(&w));
-        if k.is_none() && s.is_none() {
+        let m = mesh_indices(s.as_deref().or(k.as_deref()).unwrap_or(&w));
+        if k.is_none() && s.is_none() && m.is_none() {
             continue;
         }
-        let out = s.or(k).unwrap();
+        let out = m.or(s).or(k).unwrap();
         let bytes: Vec<u8> = out.iter().flat_map(|x| x.to_le_bytes()).collect();
         std::fs::write(std::path::Path::new(&o).join(e.file_name()), bytes).unwrap();
         n += 1;
     }
     eprintln!("{n} modules rewritten");
+}
+
+/// `mesh_indices`: a mesh shader's primitive indices held below its vertex count (each stored index AND
+/// (OutputVertices - 1); the vertex count a power of two, as the translator declares it). The translated mesh shaders
+/// take each primitive's three indices from shared memory, eight bits each (0..255), against 32 vertices declared, and
+/// a primitive whose indices the game did not write there (shared memory starts undefined) named a vertex past the
+/// outputs; mkw-recomp's translator zeroes its index array first and its count stays inside it. Mario Kart World lost
+/// the device in direct mesh draws with an "invalid read" while indirect / 3D ones were skipped (lane K2). Indices
+/// already in range are unchanged. None when the module stores no primitive indices.
+pub fn mesh_indices(words: &[u32]) -> Option<Vec<u32>> {
+    const OP_EXECUTION_MODE: u32 = 16;
+    const OP_TYPE_INT: u32 = 21;
+    const OP_TYPE_VECTOR: u32 = 23;
+    const OP_CONSTANT: u32 = 43;
+    const OP_CONSTANT_COMPOSITE: u32 = 44;
+    const OP_BITWISE_AND: u32 = 199;
+    const MODE_OUTPUT_VERTICES: u32 = 26;
+    const DEC_BUILTIN: u32 = 11;
+    // PrimitivePointIndicesEXT, PrimitiveLineIndicesEXT, PrimitiveTriangleIndicesEXT
+    const INDEX_BUILTINS: [u32; 3] = [5294, 5295, 5296];
+    if words.len() < 5 || words[0] != 0x0723_0203 {
+        return None;
+    }
+    let mut v = vec![];
+    let mut i = 5;
+    while i < words.len() {
+        let n = (words[i] >> 16) as usize;
+        if n == 0 || i + n > words.len() {
+            return None;
+        }
+        v.push((i, words[i] & 0xffff, n));
+        i += n;
+    }
+    let mut verts = 0u32;
+    let mut index_vars: Vec<u32> = vec![];
+    let mut uints: HashMap<u32, ()> = HashMap::new();
+    let mut vecs: HashMap<u32, (u32, u32)> = HashMap::new();
+    let mut ptrs: HashMap<u32, u32> = HashMap::new();
+    let mut first_fn = 0;
+    for &(i, op, n) in &v {
+        match op {
+            OP_EXECUTION_MODE if n >= 4 && words[i + 2] == MODE_OUTPUT_VERTICES => verts = words[i + 3],
+            OP_DECORATE if n >= 4 && words[i + 2] == DEC_BUILTIN && INDEX_BUILTINS.contains(&words[i + 3]) => index_vars.push(words[i + 1]),
+            OP_TYPE_INT if n == 4 && words[i + 2] == 32 && words[i + 3] == 0 => {
+                uints.insert(words[i + 1], ());
+            }
+            OP_TYPE_VECTOR if n == 4 => {
+                vecs.insert(words[i + 1], (words[i + 2], words[i + 3]));
+            }
+            OP_TYPE_POINTER if n == 4 => {
+                ptrs.insert(words[i + 1], words[i + 3]);
+            }
+            OP_FUNCTION if first_fn == 0 => first_fn = i,
+            _ => {}
+        }
+    }
+    if index_vars.is_empty() || verts == 0 || !verts.is_power_of_two() || first_fn == 0 {
+        return None;
+    }
+    // access chains into the index arrays: result id -> pointee type
+    let mut chains: HashMap<u32, u32> = HashMap::new();
+    for &(i, op, n) in &v {
+        if (op == OP_ACCESS_CHAIN || op == OP_IN_BOUNDS_ACCESS_CHAIN) && n >= 4 && index_vars.contains(&words[i + 3]) {
+            chains.insert(words[i + 2], *ptrs.get(&words[i + 1])?);
+        }
+    }
+    let mut bound = words[3];
+    let mut fresh = || {
+        bound += 1;
+        bound - 1
+    };
+    let mut consts: HashMap<u32, u32> = HashMap::new();
+    let mut scalar: HashMap<u32, u32> = HashMap::new();
+    let mut decl = vec![];
+    let mut sites = 0;
+    for &(i, op, n) in &v {
+        if op != OP_STORE || n < 3 {
+            continue;
+        }
+        if index_vars.contains(&words[i + 1]) {
+            return None; // the whole array stored at once: not rewritten
+        }
+        let Some(&t) = chains.get(&words[i + 1]) else { continue };
+        let s = if uints.contains_key(&t) { t } else { vecs.get(&t).filter(|(c, _)| uints.contains_key(c)).map(|(c, _)| *c)? };
+        if !consts.contains_key(&t) {
+            let sc = *scalar.entry(s).or_insert_with(|| {
+                let c = fresh();
+                decl.extend(ins(OP_CONSTANT, &[s, c, verts - 1]));
+                c
+            });
+            let c = if t == s {
+                sc
+            } else {
+                let c = fresh();
+                let mut o = vec![t, c];
+                o.extend(std::iter::repeat_n(sc, vecs[&t].1 as usize));
+                decl.extend(ins(OP_CONSTANT_COMPOSITE, &o));
+                c
+            };
+            consts.insert(t, c);
+        }
+        sites += 1;
+    }
+    if sites == 0 {
+        return None;
+    }
+    let mut out = Vec::with_capacity(words.len() + decl.len() + sites * 5);
+    out.extend_from_slice(&words[..5]);
+    for &(i, op, n) in &v {
+        if i == first_fn {
+            out.extend_from_slice(&decl);
+        }
+        if op == OP_STORE && n >= 3 {
+            if let Some(t) = chains.get(&words[i + 1]) {
+                let r = fresh();
+                out.extend(ins(OP_BITWISE_AND, &[*t, r, words[i + 2], consts[t]]));
+                let mut st = words[i..i + n].to_vec();
+                st[2] = r;
+                out.extend(st);
+                continue;
+            }
+        }
+        out.extend_from_slice(&words[i..i + n]);
+    }
+    out[3] = bound;
+    Some(out)
+}
+
+#[cfg(test)]
+mod mesh_index_tests {
+    use super::*;
+
+    /// A store of a uvec3 into gl_PrimitiveTriangleIndicesEXT[i] gets an AND with uvec3(31) first (32 vertices).
+    #[test]
+    fn primitive_indices_are_held_below_the_vertex_count() {
+        let mut w = vec![0x0723_0203, 0x0001_0000, 0, 100, 0];
+        w.extend(ins(16, &[1, 26, 32])); // OutputVertices 32
+        w.extend(ins(OP_DECORATE, &[9, 11, 5296]));
+        w.extend(ins(21, &[2, 32, 0])); // uint
+        w.extend(ins(23, &[3, 2, 3])); // uvec3
+        w.extend(ins(OP_TYPE_POINTER, &[4, 3, 3])); // Output uvec3*
+        w.extend(ins(OP_FUNCTION, &[2, 10, 0, 11]));
+        w.extend(ins(OP_ACCESS_CHAIN, &[4, 20, 9, 21]));
+        w.extend(ins(OP_STORE, &[20, 22]));
+        w.extend(ins(OP_STORE, &[30, 22])); // another store stays
+        let out = mesh_indices(&w).unwrap();
+        let ops: Vec<u32> = {
+            let mut v = vec![];
+            let mut i = 5;
+            while i < out.len() {
+                v.push(out[i] & 0xffff);
+                i += (out[i] >> 16) as usize;
+            }
+            v
+        };
+        // mode, decorate, uint, uvec3, pointer, 31, uvec3(31), function, chain, and, store, store
+        assert_eq!(ops, [16, 71, 21, 23, 32, 43, 44, 54, 65, 199, 62, 62]);
+        assert!(out.windows(3).any(|x| x == [2, 100, 31]), "the constant 31");
+        assert_eq!(out[3], 103);
+    }
 }

@@ -178,8 +178,10 @@ mod watch {
                 }
             };
             let mut lo = lo;
+            let _t = super::WatchTimer(std::time::Instant::now());
             loop {
                 calls += 1;
+                super::WATCH_CALLS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 let mut count = CAP;
                 let mut gran = 0u32;
                 let r = unsafe {
@@ -652,12 +654,12 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
     } else {
         a
     };
-    // the pools this thread resolved last, while no pool came, went or got its buffer (thousands of draws a frame bind
-    // ranges of the same few: the pool lock and lookup were most of the replay's 1.1 ms of `memory` in Z-A; Turbo's
+    // the 16 pools this thread resolved last, while no pool came, went or got its buffer (thousands of draws a frame bind
+    // ranges of the same few (Donkey Kong Bananza: dozens, 7.5 ms of lookups a frame with 4 kept): the pool lock and lookup were most of the replay's 1.1 ms of `memory` in Z-A; Turbo's
     // vkm_use fast path)
     thread_local! {
         // (generation, pool base, pool size, the next pool's base, buffer, buffer offset of base)
-        static LAST: std::cell::Cell<[(u64, u64, u64, u64, vk::Buffer, u64); 4]> = const { std::cell::Cell::new([(0, 0, 0, 0, vk::Buffer::null(), 0); 4]) };
+        static LAST: std::cell::Cell<[(u64, u64, u64, u64, vk::Buffer, u64); 16]> = const { std::cell::Cell::new([(0, 0, 0, 0, vk::Buffer::null(), 0); 16]) };
     }
     let gen = POOL_GEN.load(Ordering::Acquire);
     let n1 = n.max(1);
@@ -695,6 +697,18 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
     Some((buf, off + (a - pb), b))
 }
 
+/// GetWriteWatch calls and their time (pool sync's breakdown, logged with NXGFX_PROFILE=1).
+pub static WATCH_CALLS: AtomicU64 = AtomicU64::new(0);
+pub static WATCH_NS: AtomicU64 = AtomicU64::new(0);
+pub static WATCH_SUBS: AtomicU64 = AtomicU64::new(0);
+pub static WATCH_POOLS: AtomicU64 = AtomicU64::new(0);
+struct WatchTimer(std::time::Instant);
+impl Drop for WatchTimer {
+    fn drop(&mut self) {
+        WATCH_NS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+}
+
 /// Start of a submission: every CPU write since the last one goes up to the mirrors (recorded into the
 /// submission's upload command buffer). Returns the written ranges (textures over them may need a new upload).
 pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
@@ -727,6 +741,12 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
                 (p.base, lo, hi, p.alloc_base)
             })
             .collect();
+        WATCH_POOLS.fetch_add(watched.len() as u64, Ordering::Relaxed);
+        let subs = WATCH_SUBS.fetch_add(1, Ordering::Relaxed) + 1;
+        if subs % 600 == 0 && super::perf::fine() {
+            let (c, ns, np) = (WATCH_CALLS.swap(0, Ordering::Relaxed), WATCH_NS.swap(0, Ordering::Relaxed), WATCH_POOLS.swap(0, Ordering::Relaxed));
+            crate::vklog!("pool sync, last 600 submissions: {:.0} watched pools, {:.0} write-watch calls, {:.2} ms in them a submission", np as f64 / 600.0, c as f64 / 600.0, ns as f64 / 600.0 / 1e6);
+        }
         // a run: pools whose pages touch, or pools of one allocation with gaps between them (one call over the run
         // instead of one per pool: Donkey Kong Bananza has ~1,300 mirrors, 9 submissions a frame)
         let mut i = 0;

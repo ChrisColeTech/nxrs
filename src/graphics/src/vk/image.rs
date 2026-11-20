@@ -973,7 +973,7 @@ impl Gpu {
             }
             let views: Vec<vk::ImageView> = im.views.drain().map(|(_, v)| v).collect();
             drop(imgs);
-            self.q.defer_after_use(Box::new(move |g: &Gpu| unsafe {
+            self.defer_image_free(Box::new(move |g: &Gpu| unsafe {
                 for v in views {
                     g.dev().destroy_image_view(v, None);
                 }
@@ -1321,6 +1321,31 @@ impl Gpu {
         n
     }
 
+    /// An image's (or its views') destruction after the GPU is past its last use; `NXGFX_DESTROY_DELAY=<frames>`
+    /// (diagnosis, lane K2) holds it that many presents longer first (MKW's mesh-draw faults: a freed image still read?).
+    fn defer_image_free(&self, f: Box<dyn FnOnce(&Gpu) + Send>) {
+        static DELAY: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+        static HELD: std::sync::Mutex<Vec<(u64, Box<dyn FnOnce(&Gpu) + Send>)>> = std::sync::Mutex::new(Vec::new());
+        let d = *DELAY.get_or_init(|| std::env::var("NXGFX_DESTROY_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(0));
+        if d == 0 {
+            self.q.defer_after_use(f);
+            return;
+        }
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| crate::vklog!("NXGFX_DESTROY_DELAY: released images are destroyed {d} presents later than their last use"));
+        let now = super::present::frames();
+        let due: Vec<Box<dyn FnOnce(&Gpu) + Send>> = {
+            let mut h = HELD.lock().unwrap();
+            h.push((now + d, f));
+            let (due, keep): (Vec<_>, Vec<_>) = std::mem::take(&mut *h).into_iter().partition(|(at, _)| *at <= now);
+            *h = keep;
+            due.into_iter().map(|(_, f)| f).collect()
+        };
+        for f in due {
+            self.q.defer_after_use(f);
+        }
+    }
+
     fn destroy_released(&self, im: Image) {
         super::lost::note_gone(|| {
             format!(
@@ -1335,7 +1360,7 @@ impl Gpu {
             )
         });
         {
-            self.q.defer_after_use(
+            self.defer_image_free(
                 Box::new(move |g: &Gpu| unsafe {
                     for v in im.views.values() {
                         g.dev().destroy_image_view(*v, None);
