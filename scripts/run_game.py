@@ -145,10 +145,18 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
     # One game at a time again (owner, 2026-11-20: the PC hard-crashed with three games running after a series of GPU
     # resets). Every run is exclusive unless NXRS_CONCURRENT=1.
     exclusive = os.environ.get('NXRS_CONCURRENT') != '1'
-    recent = gpu_resets_since(time.time() - GPU_COOLDOWN_S)
+    # The cooldown grows with the resets of the last hour (each reset counted once; a TDR logs two events seconds
+    # apart): 10 minutes per reset, so a burst of hangs (what preceded every hard crash) spaces the next runs out.
+    hour = gpu_resets_since(time.time() - 3600)
+    distinct = []
+    for t in sorted(hour):
+        if not distinct or (datetime.datetime.strptime(t, '%H:%M:%S') - datetime.datetime.strptime(distinct[-1], '%H:%M:%S')).seconds > 30:
+            distinct.append(t)
+    cooldown = GPU_COOLDOWN_S * max(1, len(distinct))
+    recent = gpu_resets_since(time.time() - cooldown)
     if recent:
-        raise SystemExit('GPU cooldown: the display driver reset at %s (within %d s); no game starts until it has been '
-                         'quiet that long' % (', '.join(recent), GPU_COOLDOWN_S))
+        raise SystemExit('GPU cooldown: %d display-driver reset(s) in the last hour (latest %s); no game starts until '
+                         'the driver has been quiet for %d minutes' % (len(distinct), max(recent), cooldown // 60))
     others = other_claims()
     if any(c['exclusive'] for c in others):
         raise SystemExit('locked: an exclusive run holds the machine: %s' % [c for c in others if c['exclusive']])
