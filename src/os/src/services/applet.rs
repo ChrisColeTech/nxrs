@@ -291,9 +291,11 @@ mod tests {
         assert_eq!(send(a, 101, vec![], vec![], vec![]).result, R_NO_DATA, "the output pops once");
         // a read past the end
         assert_eq!(send(out_acc, 11, 0x101u64.to_le_bytes().to_vec(), vec![], vec![]).result, R_OUT_OF_RANGE);
-        // PlayerSelect gives the console user
+        // PlayerSelect gives the PC's player (option `pc_user`; account's pc_user_option test changes it in parallel,
+        // so read the slot rather than assuming user 1)
         let p = applet_output(PLAYER_SELECT);
         assert_eq!((p.len(), u64::from_le_bytes(p[..8].try_into().unwrap())), (0x18, 0));
-        assert_eq!(u64::from_le_bytes(p[8..16].try_into().unwrap()), crate::services::account::UID0);
+        let uid = u64::from_le_bytes(p[8..16].try_into().unwrap());
+        assert!((crate::services::account::UID0..crate::services::account::UID0 + crate::services::account::USERS).contains(&uid));
     }
 }
