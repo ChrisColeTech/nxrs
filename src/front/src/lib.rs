@@ -295,6 +295,8 @@ pub fn start() {
 /// `int nxfront_main(int argc, char **argv, const RtModule *mods, int count)`: the game's entry.
 #[no_mangle]
 pub unsafe extern "C" fn nxfront_main(argc: i32, argv: *const *const core::ffi::c_char, mods: *const nxrt::dispatch::RtModule, count: i32) -> i32 {
+    // the guest map's fixed regions first, before the window and the GPU driver take address space
+    nxrt::process::claim_fixed_regions(mods, count);
     let args: Vec<String> = (0..argc as usize).map(|i| std::ffi::CStr::from_ptr(*argv.add(i)).to_string_lossy().into_owned()).collect();
     let rest = setup(&args);
     start();

@@ -241,7 +241,8 @@ impl Device {
             }
         }
         let mut dexts: Vec<*const i8> = required.iter().map(|n| n.as_ptr()).collect();
-        let optional: [&CStr; 18] = [
+        let optional: [&CStr; 19] = [
+            ash::ext::robustness2::NAME,
             ash::ext::device_address_binding_report::NAME,
             ash::nv::device_diagnostic_checkpoints::NAME,
             ash::ext::device_fault::NAME,
@@ -284,6 +285,7 @@ impl Device {
         let mut f_rq = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
         let mut f_fault = vk::PhysicalDeviceFaultFeaturesEXT::default();
         let mut f_abr = vk::PhysicalDeviceAddressBindingReportFeaturesEXT::default();
+        let mut f_r2 = vk::PhysicalDeviceRobustness2FeaturesEXT::default();
         let mut f12 = vk::PhysicalDeviceVulkan12Features::default();
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default();
         let mut f11 = vk::PhysicalDeviceVulkan11Features::default();
@@ -306,7 +308,8 @@ impl Device {
             .push_next(&mut f_as)
             .push_next(&mut f_rq)
             .push_next(&mut f_fault)
-            .push_next(&mut f_abr);
+            .push_next(&mut f_abr)
+            .push_next(&mut f_r2);
         unsafe { instance.get_physical_device_features2(pdev, &mut f2) };
         let base = f2.features;
         let abr = addr_report && has(ash::ext::device_address_binding_report::NAME) && f_abr.report_address_binding != 0;
@@ -516,6 +519,19 @@ impl Device {
             dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::device_fault::NAME);
         }
         let mut e_abr = vk::PhysicalDeviceAddressBindingReportFeaturesEXT::default().report_address_binding(true);
+        // VK_EXT_robustness2 (with robust access on, NVIDIA by default; NXGFX_ROBUST2=0 off): every buffer access held to
+        // its descriptor's range (reads past it give zero, writes are dropped), images likewise. robustBufferAccess (v1)
+        // only holds an access to the memory bound to the buffer: MKW's task shaders index a game-sized ring of 48-byte
+        // records in a storage buffer with counts from the game's constants, and their device losses were reads ~5.3 MB
+        // past a binding into a freed range (lane K3)
+        let r2_on = has(ash::ext::robustness2::NAME) && en_base.robust_buffer_access != 0 && env_on("NXGFX_ROBUST2").unwrap_or(true);
+        let r2_buf = r2_on && f_r2.robust_buffer_access2 != 0;
+        let r2_img = r2_on && f_r2.robust_image_access2 != 0;
+        let mut e_r2 = vk::PhysicalDeviceRobustness2FeaturesEXT::default().robust_buffer_access2(r2_buf).robust_image_access2(r2_img);
+        if !(r2_buf || r2_img) {
+            dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::robustness2::NAME);
+        }
+        crate::vklog!("robustness: buffer access {} (v2 {r2_buf}), image access v2 {r2_img}", en_base.robust_buffer_access != 0);
         if !abr {
             dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::device_address_binding_report::NAME);
         }
@@ -571,6 +587,9 @@ impl Device {
         }
         if caps.device_fault {
             dci = dci.push_next(&mut e_fault);
+        }
+        if r2_buf || r2_img {
+            dci = dci.push_next(&mut e_r2);
         }
         if abr {
             dci = dci.push_next(&mut e_abr);

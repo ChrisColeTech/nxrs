@@ -292,23 +292,109 @@ pub const R_INVALID_SIZE: u32 = 0xca01;
 pub const R_INVALID_STATE: u32 = 0xd401;
 pub const R_INVALID_ADDRESS: u32 = 0xcc01;
 
+// ---- the fixed regions, claimed before anything else in the process
+
+/// Fixed regions reserved by `claim_fixed` and not yet taken over by `Space::new`.
+static EARLY: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+
+/// The module window `Space::new` reserves for modules spanning `mods`.
+fn module_window(mods: Range) -> Range {
+    Range { base: mods.base & !0xFFFF, size: align_up(mods.end(), 0x10000) - (mods.base & !0xFFFF) }
+}
+
+/// Reserves the regions of the guest map that cannot move (the module window for `mods`, the kernel region, the
+/// host-function window) at once, at the very start of the process: the front end creates the window and the Vulkan
+/// device before the space is built, and a GPU driver's own reservations can land there (a start died with "the kernel
+/// region is taken" at 0.3 s, right after another game had exited). `Space::new` takes these reservations over.
+pub fn claim_fixed(mods: Range) {
+    let w = module_window(mods);
+    let mut e = EARLY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (a, n) in [(w.base, w.size), (KERNEL_BASE, KERNEL_SIZE), (crate::hostfn::HOSTFN_BASE, crate::hostfn::HOSTFN_SIZE)] {
+        if !e.contains(&(a, n)) && reserve(a, n, false) {
+            e.push((a, n));
+        }
+    }
+}
+
+/// Reserves [addr, addr+n) unwatched, or takes over `claim_fixed`'s reservation of exactly that range.
+fn reserve_fixed(addr: u64, n: u64) -> bool {
+    let mut e = EARLY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    if let Some(i) = e.iter().position(|&r| r == (addr, n)) {
+        e.remove(i);
+        return true;
+    }
+    drop(e);
+    reserve(addr, n, false)
+}
+
+/// What holds the address (for the "taken" errors): the reservation's base, size, state and owner.
+#[cfg(windows)]
+pub fn describe_taken(addr: u64) -> String {
+    let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+    if unsafe { VirtualQuery(addr as _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+        return String::new();
+    }
+    let state = match mbi.State {
+        MEM_COMMIT => "committed",
+        MEM_RESERVE => "reserved",
+        _ => "free",
+    };
+    let kind = match mbi.Type {
+        MEM_IMAGE => "image",
+        MEM_MAPPED => "mapped",
+        MEM_PRIVATE => "private",
+        _ => "",
+    };
+    let mut name = [0u16; 260];
+    let n = unsafe {
+        windows_sys::Win32::System::ProcessStatus::GetMappedFileNameW(
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            addr as _,
+            name.as_mut_ptr(),
+            260,
+        )
+    } as usize;
+    format!(
+        " (held by a {state} {kind} allocation at {:#x}, region {:#x}+{:#x}{})",
+        mbi.AllocationBase as u64,
+        mbi.BaseAddress as u64,
+        mbi.RegionSize,
+        if n > 0 { format!(", {}", String::from_utf16_lossy(&name[..n])) } else { String::new() }
+    )
+}
+
+/// What holds the address: its /proc/self/maps line.
+#[cfg(target_os = "linux")]
+pub fn describe_taken(addr: u64) -> String {
+    let maps = std::fs::read_to_string("/proc/self/maps").unwrap_or_default();
+    for l in maps.lines() {
+        let Some((r, _)) = l.split_once(' ') else { continue };
+        let Some((a, b)) = r.split_once('-') else { continue };
+        let (Ok(a), Ok(b)) = (u64::from_str_radix(a, 16), u64::from_str_radix(b, 16)) else { continue };
+        if addr < b && addr + KERNEL_SIZE > a {
+            return format!(" (held by: {l})");
+        }
+    }
+    String::new()
+}
+
 impl Space {
     /// Claims the address map: the module window [mods.base, mods.end), the kernel region, the host-function window,
     /// then a stack+heap block searched from 4 GiB up below the modules, and the alias region above it.
     /// `kernel_base` is `KERNEL_BASE` in a game process (tests pass their own).
     pub fn new(mods: Range, kernel_base: u64, reserve_hostfn: bool) -> Result<Space, String> {
-        let mods = Range { base: mods.base & !0xFFFF, size: align_up(mods.end(), 0x10000) - (mods.base & !0xFFFF) };
+        let mods = module_window(mods);
         if mods.end() > kernel_base || kernel_base + KERNEL_SIZE > ADDRESS_LIMIT {
             return Err(format!("memory: modules end at {:#x}, inside the kernel region", mods.end()));
         }
-        if !reserve(mods.base, mods.size, false) {
-            return Err(format!("memory: the module window {:#x}+{:#x} is taken", mods.base, mods.size));
+        if !reserve_fixed(mods.base, mods.size) {
+            return Err(format!("memory: the module window {:#x}+{:#x} is taken{}", mods.base, mods.size, describe_taken(mods.base)));
         }
-        if !reserve(kernel_base, KERNEL_SIZE, false) {
-            return Err("memory: the kernel region is taken".into());
+        if !reserve_fixed(kernel_base, KERNEL_SIZE) {
+            return Err(format!("memory: the kernel region {kernel_base:#x}+{KERNEL_SIZE:#x} is taken{}", describe_taken(kernel_base)));
         }
-        if reserve_hostfn && !reserve(crate::hostfn::HOSTFN_BASE, crate::hostfn::HOSTFN_SIZE, false) {
-            return Err("memory: the host-function window is taken".into());
+        if reserve_hostfn && !reserve_fixed(crate::hostfn::HOSTFN_BASE, crate::hostfn::HOSTFN_SIZE) {
+            return Err(format!("memory: the host-function window is taken{}", describe_taken(crate::hostfn::HOSTFN_BASE)));
         }
         let mut low = 0;
         let mut at = LOW_SEARCH_FROM;
@@ -634,6 +720,20 @@ pub fn align_up(v: u64, a: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A fixed region claimed early (`claim_fixed`) is the space's to take, once; anyone else finds it taken, and the
+    /// error says what holds it.
+    #[test]
+    fn early_claims_are_taken_over() {
+        let n = 1 << 20;
+        let a = reserve_anywhere(n, false).unwrap();
+        EARLY.lock().unwrap().push((a, n));
+        assert!(!reserve(a, n, false), "taken for everyone else");
+        assert!(reserve_fixed(a, n), "the space takes its own claim over");
+        assert!(!reserve_fixed(a, n), "once");
+        #[cfg(windows)]
+        assert!(describe_taken(a).contains("reserved private allocation"), "{}", describe_taken(a));
+    }
 
     #[test]
     fn memory_info_is_horizons() {

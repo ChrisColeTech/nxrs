@@ -120,6 +120,17 @@ impl Cpu {
                 _mm_setcsr(want);
             }
         }
+        // AArch64: the host FPCR mirrors FPCR.FZ (bit 24 on both: the host's FZ flushes inputs and results as the
+        // guest's does) with RMode = nearest (mkw-recomp cpu.h `rt_fpcr_sync`, AArch64 branch)
+        #[cfg(target_arch = "aarch64")]
+        unsafe {
+            let cur: u64;
+            core::arch::asm!("mrs {}, fpcr", out(reg) cur, options(nomem, nostack));
+            let want = (cur & !((1u64 << 24) | (3u64 << 22))) | (self.fpcr & (1 << 24));
+            if cur != want {
+                core::arch::asm!("msr fpcr, {}", in(reg) want, options(nomem, nostack));
+            }
+        }
     }
 }
 

@@ -46,11 +46,37 @@ fn csr_set(v: u32) {
     unsafe { core::arch::asm!("ldmxcsr [{}]", in(reg) &v, options(nostack)) };
 }
 
-/// Sets RC from FPCR.RMode (RN 00, RP 10, RM 01, RZ 11); returns the previous MXCSR.
+// AArch64: the host's own FPCR, whose RMode field (bits 22-23) is the guest's encoding
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn csr_get() -> u32 {
+    let v: u64;
+    // SAFETY: reads FPCR
+    unsafe { core::arch::asm!("mrs {}, fpcr", out(reg) v, options(nomem, nostack)) };
+    v as u32
+}
+#[cfg(target_arch = "aarch64")]
+#[inline(always)]
+fn csr_set(v: u32) {
+    // SAFETY: writes FPCR with only the RMode bits changed from the current value
+    unsafe { core::arch::asm!("msr fpcr, {}", in(reg) v as u64, options(nomem, nostack)) };
+}
+
+/// The host's rounding-mode field and its value per FPCR.RMode (RN 00, RP 01, RM 10, RZ 11): MXCSR.RC on x86-64
+/// (RN 00, RP 10, RM 01, RZ 11 there), FPCR.RMode itself on AArch64.
+#[cfg(target_arch = "x86_64")]
+const RC_MASK: u32 = 0x6000;
+#[cfg(target_arch = "x86_64")]
+const RC: [u32; 4] = [0x0000, 0x4000, 0x2000, 0x6000];
+#[cfg(target_arch = "aarch64")]
+const RC_MASK: u32 = 3 << 22;
+#[cfg(target_arch = "aarch64")]
+const RC: [u32; 4] = [0, 1 << 22, 2 << 22, 3 << 22];
+
+/// Sets the host rounding mode from FPCR.RMode; returns the previous control word.
 pub fn rm_enter(fpcr: u64) -> u32 {
-    const RC: [u32; 4] = [0x0000, 0x4000, 0x2000, 0x6000];
     let cur = csr_get();
-    let want = (cur & !0x6000) | RC[((fpcr >> 22) & 3) as usize];
+    let want = (cur & !RC_MASK) | RC[((fpcr >> 22) & 3) as usize];
     if want != cur {
         csr_set(want);
     }
@@ -59,15 +85,15 @@ pub fn rm_enter(fpcr: u64) -> u32 {
 /// Forces toward zero.
 pub fn rm_rz() {
     let cur = csr_get();
-    if cur & 0x6000 != 0x6000 {
-        csr_set(cur | 0x6000);
+    if cur & RC_MASK != RC[3] {
+        csr_set((cur & !RC_MASK) | RC[3]);
     }
 }
-/// Restores the RC saved by `rm_enter`.
+/// Restores the rounding mode saved by `rm_enter`.
 pub fn rm_leave(old: u32) {
     let cur = csr_get();
-    if (cur & 0x6000) != (old & 0x6000) {
-        csr_set((cur & !0x6000) | (old & 0x6000));
+    if (cur & RC_MASK) != (old & RC_MASK) {
+        csr_set((cur & !RC_MASK) | (old & RC_MASK));
     }
 }
 
@@ -91,20 +117,21 @@ unsafe fn fma_f64(a: f64, b: f64, c: f64) -> f64 {
 
 /// a * b + c, one rounding in the current mode (the hardware FMA the game code is built for; x86-64-v3).
 pub fn fma32(a: f32, b: f32, c: f32) -> f32 {
+    // AArch64: mul_add is the fused instruction (FMADD)
+    #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("fma") {
         // SAFETY: the CPU has FMA
-        unsafe { fma_f32(a, b, c) }
-    } else {
-        a.mul_add(b, c)
+        return unsafe { fma_f32(a, b, c) };
     }
+    a.mul_add(b, c)
 }
 pub fn fma64(a: f64, b: f64, c: f64) -> f64 {
+    #[cfg(target_arch = "x86_64")]
     if std::arch::is_x86_feature_detected!("fma") {
         // SAFETY: the CPU has FMA
-        unsafe { fma_f64(a, b, c) }
-    } else {
-        a.mul_add(b, c)
+        return unsafe { fma_f64(a, b, c) };
     }
+    a.mul_add(b, c)
 }
 
 fn is_minmax(op: u32) -> bool {

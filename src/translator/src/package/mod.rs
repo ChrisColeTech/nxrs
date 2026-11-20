@@ -271,6 +271,18 @@ pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
     }
 }
 
+/// An ExeFS name that is safe as a file in the data folder on Windows (switchrecomp.py:440): no separators or drive
+/// colon, not `.` / `..`, no trailing dot or space (Windows drops them), and not a reserved device name (CON, PRN,
+/// AUX, NUL, COM1-9, LPT1-9, with or without an extension).
+pub fn safe_exefs_name(name: &str) -> bool {
+    if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." || name != name.trim_end_matches([' ', '.']) {
+        return false;
+    }
+    let base = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+    let numbered = |p: &str| base.len() == 4 && base.starts_with(p) && matches!(base.as_bytes()[3], b'1'..=b'9');
+    !(matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT"))
+}
+
 impl Game {
     /// Stage the data folder a build hands the runtime (switchrecomp.py `copy_data`): `exefs/` (modules only the
     /// other version had are removed), the RomFS marker (the other markers removed), `control.nacp` and the icon.
@@ -283,7 +295,7 @@ impl Game {
         let ex = datadir.join("exefs");
         std::fs::create_dir_all(&ex).map_err(io_err(&ex))?;
         for (name, data) in &self.exefs.files {
-            if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." {
+            if !safe_exefs_name(name) {
                 return fmt(format!("unsafe ExeFS name in {}: {name:?}", self.path.display()));
             }
             let dst = ex.join(name);
@@ -393,5 +405,16 @@ mod tests {
         nso[0x40..0x48].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0, 1, 0, 0]);
         assert_eq!(nso_build_id(&nso).unwrap(), vec![0xde, 0xad, 0xbe, 0xef, 0, 1]);
         assert!(nso_build_id(b"NSO0").is_none());
+    }
+
+    /// switchrecomp.py:440: names Windows cannot hold as files are refused, ordinary module names pass.
+    #[test]
+    fn reserved_windows_names_refused() {
+        for ok in ["main", "rtld", "sdk", "subsdk0", "main.npdm", "COM10", "console", "nul0", "LPT0"] {
+            assert!(safe_exefs_name(ok), "{ok}");
+        }
+        for bad in ["", ".", "..", "a/b", "a\\b", "c:x", "CON", "con", "Nul.txt", "aux.npdm", "PRN", "COM1", "lpt9", "main.", "main "] {
+            assert!(!safe_exefs_name(bad), "{bad:?}");
+        }
     }
 }

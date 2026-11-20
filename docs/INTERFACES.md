@@ -2742,8 +2742,27 @@ design (lane G5, "DKB pool sync") applies; lane K3 did not start it.
 (`use_note`, `note_set` calls, `sbuf_to_end`), `vk/image.rs` (page hashes before the upload read, `hashed_early`).
 Tools: `build\K3\run.sh`, `relink.sh`, `stallwatch.py`, `texcmp.py`.
 
-**Left:** the mesh-draw fault (offline SPIR-V read, then the robustness2 candidate as the one run); the glyph fix on
-screen; the haze; pool sync (G5's design) for the FPS target.
+**The offline SPIR-V read (approved by the coordinator, 14:50; `build\K3\spv\*.glsl`, spirv-cross of the library's
+modules).** Neither task shader builds an address itself (no global-memory table, no bindless, no physical pointers;
+payload and shared-memory indices are constant or masked): every access goes through a bound buffer, so it is not a
+translator fix.
+- fea1d6ca04512de1 (32 threads a group): item i = group x 32 + thread, kept below c4[0].x; reads s0 at i x 48 + 0..44
+  and s1 at i x 8 (a 48-byte box per item, 8 bytes of data), and c3 at an index taken from c3[16].z. For a direct
+  6x1x1 draw from group 0 that is at most 9 KB into s0: not 5.3 MB, unless c3[16].z is large (a c3 read can reach far,
+  but c3 is a 64 KB-at-most uniform binding of a pool, not a freed range).
+- **6098504f5d12ea03 (writes s0, flags 1): s0 is a ring of 48-byte records indexed with the game's own counts**:
+  writes at c4[0].w x 48, reads and writes at ((start + k) mod c4[0].z) x 48 + 0..44. 5.3 MB / 48 = ~116,000 records:
+  a ring that size, or garbage counts, put the access megabytes past s0's base. s0 is bound with the game's size (or,
+  when the game gives 0, at most 1 MB of its pool), and under robustBufferAccess v1 the driver only has to keep an
+  access inside the memory bound to the VkBuffer, which for a mirror suballocation is a block that also held the freed
+  staging chunks.
+- **So the run tests:** robustBufferAccess2 + robustImageAccess2 (device.rs, on with robust access, NXGFX_ROBUST2=0
+  off): every access held to its descriptor's range. If the faults stop, the second question is whether those records
+  were *meant* to be reachable (the game binding s0 with size 0 and a ring bigger than the 1 MB cap: then dropped writes
+  lose geometry, and the cap should go up, `NXGFX_SBUF0_MB=<n>`). New log line for that: each task shader's storage
+  buffers as bound (address, size, room to the pool's end, written), once per shader and slot.
+
+**Left:** the one robustness2 run (with the 62 s glyph dump); the haze; pool sync (G5's design) for the FPS target.
 
 ## Linux (lane L, M10, 2026-11-20)
 
@@ -2906,3 +2925,32 @@ runs use it).
 lifted -> interpreted -> lifted calls, an SVC, a host function, a lifted tail call, discovered.tsv written once and
 read back); `nxrt-dev e2e` with `NXRS_INTERP_ONLY=1`; `cargo test -p translator --lib hints`; os `input::layout`,
 `media::sink::tests::mute_fades_to_silence_and_back`, `ui::tests::user_picker`, `ui_text`, `ro::capture_tests`.
+
+**Lane J, 2026-11-20 afternoon: the start failure (fixed) and Jamboree's fade (parked by the owner).**
+- **"memory: the kernel region is taken" (G5, `build/I/runs/20261120-115734-G5-mk8d-sync-cap`, 0.338 s): fixed.** Not a
+  leftover of the game that had exited (every process has its own address space): the front end creates the window
+  and the Vulkan device before the guest map is claimed (the log shows the device at 0.00 s, the space at 0.338 s),
+  and the NVIDIA driver's own reservations (descriptor buffers, host import) can land at 0x7F_0000_0000. Now
+  `nxfront_main` / `nxrt_main` first call `process::claim_fixed_regions` -> `mem::claim_fixed`: the module window,
+  the kernel region and the host-function window are reserved before anything else, and `Space::new` takes those
+  reservations over (`reserve_fixed`). A region still taken names its holder (`mem::describe_taken`: allocation base,
+  region, state, type and mapped file; /proc/self/maps on Linux). Test `mem::tests::early_claims_are_taken_over`
+  (Windows and Linux); homebrew e2e 8/8.
+- **Jamboree white fade: parked (owner 2026-11-20), no run made** (every start refused by the GPU cooldown: other
+  lanes' driver resets at 13:58, 14:12, 14:32). What is known, for whoever picks it up:
+  - The white comes right after the title's L+R (`20261120-013909-W2-jamboree-fade` 0004 at 69.7 s), as the hub's
+    module loads (`ro::UnloadModule nro_135`, `ro::LoadModule nro_088` at 64 s in `-G5-jamboree-ht`); after that the
+    log has no service call, gap or red line other than graphics' (`storage buffer 0:0x130 at 0x0 is in no memory
+    pool` for ~40 hub shaders: a storage buffer the game has not set yet, or one set where nxrs does not look).
+  - The thread dumps of both O3 runs at the white (`-030909-O3-jamboree-focus` 125.9 s, `-032440-O3-jamboree-focus3`
+    142.2 s) are the same: threads 0x1023 / 0x1025 in `nn::async::detail::GroupWait::Wait` (sdk+0x8c09c, under
+    `ExecutionScheduler::WaitForSignal` / `QueuingExecutor::LoopExecution`) in WaitSynchronization on 0 handles, 0x1024
+    on the scheduler's wait mutex (`DequeueAndCall` sdk+0x8b3bc locks `this+0xc0`): nn::async's normal idle shape (one
+    worker waits for a signal holding that mutex, the others queue on it), consistent with W2's forced wake-ups
+    changing nothing. Every other worker sits in a condvar wait. Nothing visibly blocked on a service.
+  - Ready to run (one short run once the GPU is quiet): `py build/J/jprobe.py j_fade1 --exe build/J/jamboreet/jamboree.exe`
+    (lane J's link of the W2 build, `build/J/link.sh jamboree`): to the white, then `threads` x2 (the dump now prints
+    each wait's time limit and a lock's owner word), `peek` of the wait mutex and of c3, and **`wtrace` over c3's page
+    (0x1d98ad000)**: who writes the fade colour each frame is the next fact needed (no writer = the colour is set once
+    and the quad is simply never removed: look for what removes the fade layer; a writer = follow its alpha source).
+    `play_scenario.py` has a new step `('ctl', settle, name, command)` for such probes (the reply goes to actions.jsonl).

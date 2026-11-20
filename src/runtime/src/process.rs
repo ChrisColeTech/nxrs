@@ -279,9 +279,27 @@ fn usage() -> ! {
     exit(2);
 }
 
+/// Reserves the guest map's fixed regions for the modules the generated code lists (`mem::claim_fixed`): called first
+/// thing by the entry points, before anything else can take that address space.
+///
+/// # Safety
+/// `mods` points to `count` modules (the generated code's table).
+pub unsafe fn claim_fixed_regions(mods: *const RtModule, count: i32) {
+    if mods.is_null() || count <= 0 {
+        return;
+    }
+    let ms = std::slice::from_raw_parts(mods, count as usize);
+    let lo = ms.iter().map(|m| m.base).min().unwrap_or(0);
+    let hi = ms.iter().map(|m| m.base + m.size).max().unwrap_or(0);
+    if hi > lo {
+        crate::mem::claim_fixed(Range { base: lo, size: hi - lo });
+    }
+}
+
 /// `int nxrt_main(int argc, char **argv, const RtModule *mods, int count)`
 #[no_mangle]
 pub unsafe extern "C" fn nxrt_main(argc: i32, argv: *const *const core::ffi::c_char, mods: *const RtModule, count: i32) -> i32 {
+    claim_fixed_regions(mods, count);
     let args: Vec<String> = (0..argc as usize).map(|i| std::ffi::CStr::from_ptr(*argv.add(i)).to_string_lossy().into_owned()).collect();
     // the first argument that is not a --key=value setting names the ExeFS folder
     let exefs = match args.iter().skip(1).find(|a| !(a.starts_with("--") && a.contains('='))) {

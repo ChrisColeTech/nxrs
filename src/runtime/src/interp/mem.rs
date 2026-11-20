@@ -141,6 +141,7 @@ pub unsafe fn stl(sz: u32, a: u64, v: u64) {
 }
 
 /// lock cmpxchg16b: (success, the value found).
+#[cfg(target_arch = "x86_64")]
 pub unsafe fn cas128(a: u64, expected: u128, new: u128) -> (bool, u128) {
     let (mut lo, mut hi) = (expected as u64, (expected >> 64) as u64);
     let ok: u8;
@@ -155,6 +156,41 @@ pub unsafe fn cas128(a: u64, expected: u128, new: u128) -> (bool, u128) {
         inout("rax") lo,
         inout("rdx") hi,
         in("rcx") (new >> 64) as u64,
+        options(nostack),
+    );
+    (ok != 0, (hi as u128) << 64 | lo as u128)
+}
+
+/// AArch64: an LDAXP / STLXP loop (no LSE needed): (success, the value found). A failed compare stores the value read
+/// back, so the 16 bytes were read in one atomic access either way.
+#[cfg(target_arch = "aarch64")]
+pub unsafe fn cas128(a: u64, expected: u128, new: u128) -> (bool, u128) {
+    let (lo, hi): (u64, u64);
+    let ok: u64;
+    core::arch::asm!(
+        "2:",
+        "ldaxp {lo}, {hi}, [{p}]",
+        "cmp {lo}, {elo}",
+        "ccmp {hi}, {ehi}, #0, eq",
+        "b.ne 3f",
+        "stlxp {st:w}, {nlo}, {nhi}, [{p}]",
+        "cbnz {st:w}, 2b",
+        "mov {ok}, #1",
+        "b 4f",
+        "3:",
+        "stlxp {st:w}, {lo}, {hi}, [{p}]",
+        "cbnz {st:w}, 2b",
+        "mov {ok}, #0",
+        "4:",
+        p = in(reg) a,
+        elo = in(reg) expected as u64,
+        ehi = in(reg) (expected >> 64) as u64,
+        nlo = in(reg) new as u64,
+        nhi = in(reg) (new >> 64) as u64,
+        lo = out(reg) lo,
+        hi = out(reg) hi,
+        st = out(reg) _,
+        ok = out(reg) ok,
         options(nostack),
     );
     (ok != 0, (hi as u128) << 64 | lo as u128)

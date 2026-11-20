@@ -9,7 +9,7 @@
 //!
 //! Contract v2 (subcommands; `--machine` adds `@progress` / `@result` lines):
 //!
-//!   nxrs-build build <input> [-o <name>] [--outdir <dir>] [--jobs 4] [--update <pkg> | --no-update] [--keys <prod.keys>]
+//!   nxrs-build build <input> [-o <name>] [--outdir <dir>] [--jobs N (the CPU count)] [--update <pkg> | --no-update] [--keys <prod.keys>]
 //!   nxrs-build update-info [--game <game>] <package>...
 //!   nxrs-build dlc install|sync|remove|list --datadir <dir> [package or title id...]
 //!   nxrs-build profile <title id> [<main build id>]
@@ -59,7 +59,7 @@ struct V1 {
     /// ignored: the game code is compiled at one measured flag set
     #[arg(short = 'O')]
     opt: Option<String>,
-    #[arg(long, default_value_t = 4)]
+    #[arg(long, default_value_t = pipeline::default_jobs())]
     jobs: usize,
     /// ARM instructions per C file (default: the translator sizes its chunks itself)
     #[arg(long)]
@@ -305,7 +305,7 @@ enum Cmd {
         out: Option<String>,
         #[arg(long)]
         outdir: Option<PathBuf>,
-        #[arg(long, default_value_t = 4)]
+        #[arg(long, default_value_t = pipeline::default_jobs())]
         jobs: usize,
         #[command(flatten)]
         pkg: PkgArgs,
@@ -367,7 +367,7 @@ enum Cmd {
         data: Option<PathBuf>,
         #[command(flatten)]
         pkg: PkgArgs,
-        #[arg(long, default_value_t = 4)]
+        #[arg(long, default_value_t = pipeline::default_jobs())]
         jobs: usize,
     },
 }

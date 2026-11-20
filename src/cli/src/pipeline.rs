@@ -359,30 +359,55 @@ pub fn units(clang: &Clang, gen: &Path, obj: &Path, mods: &[(String, String, Str
 /// The shader step: every shader the game ships, found and translated to SPIR-V into `<data>\shaders\`
 /// (`shaders::prebuild_data`: the ExeFS, the RomFS the marker names and the add-on content installed there), and the
 /// profile's shader tables (nxnative's prewarm seed, pairs and translation answers) into `<data>\shaders\profile\`.
-/// A rebuild reuses every translated shader whose inputs and tools are unchanged.
-fn shaders_step(out: &Out, data: &Path, profile: Option<&str>, a: &BuildArgs) -> Result<()> {
+/// A rebuild reuses every translated shader whose inputs and tools are unchanged. It runs beside the compile
+/// (Turbo 6d04b3b `start_shader_prebuild`, at most 4 translators so the compile keeps the CPU) and is never fatal:
+/// a failure is a warning, the game's live translator covers what the build did not translate.
+fn shaders_step(out: &Out, data: &Path, profile: Option<&str>, a: &BuildArgs) {
     if a.no_shaders {
         out.say("shaders: not translated (--no-shaders); a game built so draws only the shaders an earlier build left in its data folder");
-        return Ok(());
+        return;
     }
     out.progress("shaders", 0, 0);
-    let prof_dir = data.join("shaders").join("profile");
-    if let Some(id) = profile {
-        let tables = profiles::shader_tables(id).map_err(|e| anyhow!(e))?;
-        if !tables.is_empty() {
-            std::fs::create_dir_all(&prof_dir)?;
-            for (name, text) in &tables {
-                crate::write_if_changed(&prof_dir.join(name), text.as_bytes())?;
-            }
-            let names: Vec<&str> = tables.iter().map(|(n, _)| n.as_str()).collect();
-            out.say(&format!("shaders: the profile's tables ({}) in {}", names.join(", "), prof_dir.display()));
-        }
+    if let Err(e) = shader_tables(out, data, profile) {
+        out.say(&format!("shaders: the profile's tables not written ({e}); the game runs without its prewarm seed"));
     }
-    let opts = shaders::Options { keys: a.keys.clone(), jobs: a.jobs.max(1), ..shaders::Options::default() };
+    let opts = shaders::Options { keys: a.keys.clone(), jobs: a.jobs.clamp(1, 4), ..shaders::Options::default() };
     let say = |m: &str| out.say(&format!("  {m}"));
-    out.say("Translating the shaders...");
-    shaders::prebuild_data(data, &opts, &say).map_err(|e| anyhow!("shaders: {e} (--no-shaders builds without them)"))?;
+    out.say("Translating the shaders (beside the compile)...");
+    match shaders::prebuild_data(data, &opts, &say) {
+        Ok(rep) => {
+            let done = rep.translated + rep.reused + rep.in_library;
+            out.progress("shaders", done, rep.found);
+            out.say(&format!("shaders: {} found, {} translated, {} reused, {} failed ({:.1}s)", rep.found, rep.translated, rep.reused, rep.failed, rep.total_seconds));
+        }
+        Err(e) => out.say(&format!("shaders: not translated at build time ({e}); the game translates them while it runs")),
+    }
+}
+
+fn shader_tables(out: &Out, data: &Path, profile: Option<&str>) -> Result<()> {
+    let Some(id) = profile else { return Ok(()) };
+    let prof_dir = data.join("shaders").join("profile");
+    let tables = profiles::shader_tables(id).map_err(|e| anyhow!(e))?;
+    if !tables.is_empty() {
+        std::fs::create_dir_all(&prof_dir)?;
+        for (name, text) in &tables {
+            crate::write_if_changed(&prof_dir.join(name), text.as_bytes())?;
+        }
+        let names: Vec<&str> = tables.iter().map(|(n, _)| n.as_str()).collect();
+        out.say(&format!("shaders: the profile's tables ({}) in {}", names.join(", "), prof_dir.display()));
+    }
     Ok(())
+}
+
+/// `SWR_CFLAGS` (switchrecomp.py:769): extra compiler flags for the game code, split on white space (e.g. `-march`
+/// for another machine's processor). They join the object keys, so changing them recompiles.
+pub fn extra_cflags(env: Option<&str>) -> Vec<String> {
+    env.map(|s| s.split_whitespace().map(String::from).collect()).unwrap_or_default()
+}
+
+/// `--jobs` when none is given: the processor count (switchrecomp.py:634), 4 if it cannot be read.
+pub fn default_jobs() -> usize {
+    std::thread::available_parallelism().map_or(4, |n| n.get())
 }
 
 pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
@@ -616,49 +641,67 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     }
     let (clang, engine) = (clang.unwrap(), engine.unwrap());
 
-    // ---- shaders
-    let t = Instant::now();
-    shaders_step(out, &data, prof.as_ref().map(|m| m.profile.id.as_str()), a)?;
-    timings.push(("shaders", t.elapsed().as_secs_f64()));
-
-    // ---- compile and link
-    let t = Instant::now();
-    let mods = layout_modules(&gen)?;
-    let mut units = units(&clang, &gen, &obj, &mods, &engine)?;
-    if a.native {
+    // ---- shaders (on a thread beside the compile) and compile and link
+    let profile_id = prof.as_ref().map(|m| m.profile.id.as_str());
+    let compile_link = |timings: &mut Vec<(&'static str, f64)>| -> Result<()> {
+        let t = Instant::now();
+        let mods = layout_modules(&gen)?;
+        let mut units = units(&clang, &gen, &obj, &mods, &engine)?;
+        let extra = extra_cflags(std::env::var("SWR_CFLAGS").ok().as_deref());
         for u in &mut units {
             for f in &mut u.flags {
-                if f == "-march=x86-64-v3" {
+                if a.native && f == "-march=x86-64-v3" {
                     *f = "-march=native".into();
                 }
             }
+            u.flags.extend(extra.iter().cloned());
         }
-    }
-    out.say(&format!(
-        "Compiling with {} {} (-O1{}, {} at a time)...",
-        clang.path.file_name().unwrap().to_string_lossy(),
-        clang.version.trim_start_matches("clang version "),
-        if a.native { ", -march=native" } else { "" },
-        a.jobs.max(1)
-    ));
-    let total = units.len();
-    let rep = cc::compile(&clang, &units, &build_dir, a.jobs.max(1), &|line: &str| {
-        out.say(line);
-        if let Some((d, n)) = line.trim().strip_prefix("compiled ").and_then(|r| r.split_once(' ')).and_then(|(dn, _)| dn.split_once('/')) {
-            out.progress("compile", d.parse().unwrap_or(0), n.parse().unwrap_or(total));
+        out.say(&format!(
+            "Compiling with {} {} (-O1{}{}, {} at a time)...",
+            clang.path.file_name().unwrap().to_string_lossy(),
+            clang.version.trim_start_matches("clang version "),
+            if a.native { ", -march=native" } else { "" },
+            if extra.is_empty() { String::new() } else { format!(", SWR_CFLAGS {}", extra.join(" ")) },
+            a.jobs.max(1)
+        ));
+        let total = units.len();
+        let rep = cc::compile(&clang, &units, &build_dir, a.jobs.max(1), &|line: &str| {
+            out.say(line);
+            if let Some((d, n)) = line.trim().strip_prefix("compiled ").and_then(|r| r.split_once(' ')).and_then(|(dn, _)| dn.split_once('/')) {
+                out.progress("compile", d.parse().unwrap_or(0), n.parse().unwrap_or(total));
+            }
+        })?;
+        cc::remove_stale_objects(&obj, &units);
+        out.say(&format!("  compile: {} of {} units compiled, the rest reused ({:.1}s)", rep.compiled, rep.units, rep.seconds));
+        timings.push(("compile", t.elapsed().as_secs_f64()));
+        let t = Instant::now();
+        out.say(&format!("Linking {} ...", dll.file_name().unwrap().to_string_lossy()));
+        out.progress("link", 0, 0);
+        let objs: Vec<PathBuf> = units.iter().map(|u| u.obj.clone()).collect();
+        out.say(&format!("  with {} ({})", engine.lib.file_name().unwrap().to_string_lossy(), engine.entry()));
+        cc::link_dll(&clang, &objs, &engine, &obj, &dll)?;
+        cc::link_exe(&clang, &obj, &exe)?;
+        timings.push(("link", t.elapsed().as_secs_f64()));
+        Ok(())
+    };
+    let (built, shader_secs) = std::thread::scope(|s| {
+        let data = &data;
+        let sh = std::thread::Builder::new()
+            .name("shader prebuild".into())
+            .spawn_scoped(s, move || {
+                let t = Instant::now();
+                shaders_step(out, data, profile_id, a);
+                t.elapsed().as_secs_f64()
+            })
+            .expect("shader prebuild thread");
+        let r = compile_link(&mut timings);
+        if r.is_ok() && !sh.is_finished() {
+            out.say("The game is built; its shaders are still being translated...");
         }
-    })?;
-    cc::remove_stale_objects(&obj, &units);
-    out.say(&format!("  compile: {} of {} units compiled, the rest reused ({:.1}s)", rep.compiled, rep.units, rep.seconds));
-    timings.push(("compile", t.elapsed().as_secs_f64()));
-    let t = Instant::now();
-    out.say(&format!("Linking {} ...", dll.file_name().unwrap().to_string_lossy()));
-    out.progress("link", 0, 0);
-    let objs: Vec<PathBuf> = units.iter().map(|u| u.obj.clone()).collect();
-    out.say(&format!("  with {} ({})", engine.lib.file_name().unwrap().to_string_lossy(), engine.entry()));
-    cc::link_dll(&clang, &objs, &engine, &obj, &dll)?;
-    cc::link_exe(&clang, &obj, &exe)?;
-    timings.push(("link", t.elapsed().as_secs_f64()));
+        (r, sh.join().unwrap_or(0.0))
+    });
+    built?;
+    timings.push(("shaders", shader_secs));
     timings.push(("total", t_all.elapsed().as_secs_f64()));
     // NROs the game's NRRs register and no file holds: the game decodes them at run time. Boot it once to capture
     // them (nxnative's capture boot), then build again with them
@@ -702,6 +745,14 @@ mod tests {
         #[cfg(not(windows))]
         let (input, want) = ("/dumps/X/x.nsp", "/dumps/X/SwitchRecomp Builds/X");
         assert_eq!(default_outdir(Path::new(input), "X"), PathBuf::from(want));
+    }
+
+    /// switchrecomp.py:634 / :769: `--jobs` defaults to the CPU count; SWR_CFLAGS adds white-space separated flags.
+    #[test]
+    fn swr_cflags_and_default_jobs() {
+        assert_eq!(extra_cflags(Some(" -march=znver4  -mtune=znver4\t")), vec!["-march=znver4", "-mtune=znver4"]);
+        assert!(extra_cflags(None).is_empty() && extra_cflags(Some("  ")).is_empty());
+        assert_eq!(default_jobs(), std::thread::available_parallelism().unwrap().get());
     }
 
     #[test]

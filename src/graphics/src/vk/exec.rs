@@ -1423,6 +1423,12 @@ fn topology(p: i32) -> vk::PrimitiveTopology {
 static ZERO: std::sync::OnceLock<super::Buf> = std::sync::OnceLock::new();
 /// (diagnosis, lane K2; with `NXGFX_ADDR_REPORT`) a buffer named "staging" or "scratch" that is not this submission's
 /// own, about to be read by the GPU: the stale staged range MKW's early faults read (a red line with what binds it)
+/// The size a storage buffer bound with size 0 gets at most (`NXGFX_SBUF0_MB`, default 1 MB).
+fn sbuf0_cap() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("NXGFX_SBUF0_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(1) << 20)
+}
+
 /// NXGFX_SBUF_TO_END=0: read-only storage buffers bound with the size the game gave (as before lane K3).
 fn sbuf_to_end() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -1935,9 +1941,22 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                 let (a, mut n) = bank_u64(qs, st, m, &c0, &c2, *cb_slot, *cb_off);
                 // A buffer bound with size 0 is still the memory at its address: an NVN shader holds the address and
                 // reads and writes through it, the size is only what the driver tells it. Donkey Kong Bananza binds the
-                // list its depth-sampling dispatch appends to this way. It runs to the end of its pool, at most 1 MB.
+                // list its depth-sampling dispatch appends to this way. It runs to the end of its pool, at most 1 MB
+                // (NXGFX_SBUF0_MB=<n> another cap; with robustBufferAccess2 an access past it is dropped, lane K3).
+                if st == 3 && a != 0 {
+                    // (diagnosis, lane K3: MKW's task shaders index a ring of 48-byte records in s0 with the game's
+                    // counts) each task shader's storage buffers as the game binds them, once per shader and slot
+                    static SEEN: std::sync::Mutex<Vec<([u8; 8], u32)>> = std::sync::Mutex::new(Vec::new());
+                    let mut s = SEEN.lock().unwrap();
+                    let id = (m.key, *cb_off);
+                    if s.len() < 64 && !s.contains(&id) {
+                        s.push(id);
+                        let k: String = m.key.iter().map(|b| format!("{b:02x}")).collect();
+                        crate::vklog!("task shader {k}: storage buffer c0+{cb_off:#x} at {a:#x}, size {n:#x} as bound, {:#x} to its pool's end, written {written}", super::mem::room(a));
+                    }
+                }
                 if a != 0 && n == 0 {
-                    n = super::mem::room(a).min(1 << 20);
+                    n = super::mem::room(a).min(sbuf0_cap());
                     super::perf::inc(super::perf::C::SbufSize0);
                     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
                     if n > 0 && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -2338,7 +2357,23 @@ fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instan
 }
 
 /// As `draw_setup`; `mesh`: a task / mesh draw (NVN2), its program's task and mesh shaders in places 3 and 4.
+/// `NXGFX_SKIP_PS=<key>[,<key>...]` (diagnosis, with a replay): draws with one of these pixel shaders are skipped, to
+/// find which draw puts something into a target.
+fn skip_ps(qs: &QState) -> bool {
+    static KEYS: std::sync::OnceLock<Vec<String>> = std::sync::OnceLock::new();
+    let keys = KEYS.get_or_init(|| std::env::var("NXGFX_SKIP_PS").map(|v| v.split(',').map(|x| x.trim().to_lowercase()).filter(|x| !x.is_empty()).collect()).unwrap_or_default());
+    if keys.is_empty() {
+        return false;
+    }
+    let Some(m) = qs.prog[1].as_ref() else { return false };
+    let k: String = m.key.iter().map(|b| format!("{b:02x}")).collect();
+    keys.iter().any(|x| *x == k)
+}
+
 fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instance: u32, mesh: bool) -> bool {
+    if skip_ps(qs) {
+        return false;
+    }
     if !qs.missing.is_empty() {
         // shaders the build did not translate: wait for the live translator (once per set), then bind what came
         let keys: Vec<_> = qs.missing.iter().map(|m| m.0).collect();

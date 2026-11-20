@@ -84,6 +84,8 @@ struct Thread {
     wseq: u64,
     wobjs: Vec<SyncRef>,
     widx: Option<usize>,
+    /// When the current wait times out (None: no time limit), for the thread dump.
+    wuntil: Option<Instant>,
     cv: Arc<Condvar>,
     tls: u64,
     cpu: *mut Cpu,
@@ -401,6 +403,7 @@ fn block<'a>(mut g: MutexGuard<'a, State>, i: usize, kind: Wait, ns: i64) -> (Mu
     }
     let cv = t.cv.clone();
     let deadline = (ns > 0).then(|| Instant::now() + Duration::from_nanos(ns as u64));
+    t.wuntil = deadline;
     while !g.t(i).woke {
         match deadline {
             None => g = cv.wait(g).unwrap_or_else(PoisonError::into_inner),
@@ -436,12 +439,19 @@ pub fn dump_threads() -> String {
         }
         let w = match t.wkind {
             Wait::None => "running or sleeping".to_string(),
+            // the lock word holds the owner's handle (bit 30: waiters)
+            Wait::Lock if crate::mem::readable(t.waddr, 4) => format!("lock {:#x} (word {:#x})", t.waddr, unsafe { *(t.waddr as *const u32) }),
             Wait::Lock => format!("lock {:#x}", t.waddr),
             Wait::CondVar => format!("condvar key {:#x} (lock {:#x})", t.wkey, t.waddr),
             Wait::Address => format!("address {:#x}", t.waddr),
             Wait::Sync => format!("sync on {} objects", t.wobjs.len()),
         };
-        out.push_str(&format!("thread {:#x} prio {} core {} entry {:#x}: {w}", t.handle, t.prio, t.core, t.entry));
+        let until = match (t.wkind, t.wuntil) {
+            (Wait::None, _) => String::new(),
+            (_, None) => " (no time limit)".into(),
+            (_, Some(d)) => format!(" (time limit in {} ms)", d.saturating_duration_since(Instant::now()).as_millis()),
+        };
+        out.push_str(&format!("thread {:#x} prio {} core {} entry {:#x}: {w}{until}", t.handle, t.prio, t.core, t.entry));
         if !t.cpu.is_null() {
             let c = unsafe { &*t.cpu };
             out.push_str(&format!("; pc {:#x}", c.pc));
@@ -573,6 +583,7 @@ impl Kernel {
             waddr: 0,
             wkey: 0,
             wtag: 0,
+            wuntil: None,
             wres: 0,
             wseq: 0,
             wobjs: vec![],
@@ -1116,6 +1127,7 @@ mod tests {
                 waddr: 0,
                 wkey: 0,
                 wtag: 0,
+            wuntil: None,
                 wres: 0,
                 wseq: 0,
                 wobjs: vec![],

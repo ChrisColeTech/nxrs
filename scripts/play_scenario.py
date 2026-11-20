@@ -252,6 +252,11 @@ def scenario(a, sc, run, exe):
                 record(action=action, observed_before=observed)
                 if action == 'replay':
                     shutil.copyfile(INPUTS / st[3], run / 'replay.txt')
+                elif action == 'ctl':
+                    # ('ctl', settle, name, command): a control-pipe command, its reply recorded (threads, peek, wtrace...)
+                    record(ctl_cmd=st[3], reply=gamectl.pipe(run_game.current(pid), st[3], timeout=20))
+                    time.sleep(settle)
+                    continue
                 elif action in KEYS:
                     record(ctl=gamectl.pipe(run_game.current(pid), 'press %s~0.2' % KEYS[action]).strip())
                 time.sleep(settle)
