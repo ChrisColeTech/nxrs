@@ -26,6 +26,9 @@ pub const SECTIONS: &[Section] = &[
             o!("fullscreen", "1", "1 = start in fullscreen (F11 or Alt+Enter switches while playing; the choice is kept here)"),
             o!("language", "1", "Game language: 0 Japanese, 1 English (US), 2 French, 3 German, 4 Italian, 5 Spanish,\n;   6 Chinese, 7 Korean, 8 Dutch, 9 Portuguese, 10 Russian, 11 Taiwanese, 12 English (UK),\n;   13 French (Canada), 14 Spanish (Latin America)"),
             o!("keyboard_text", "Player", "The text the on-screen keyboard answers when the game asks for one (a name...)"),
+            o!("error_notice", "1", "1 = when the game shows an error (its error screen on the console) a message box shows it beside the game
+;   (the game goes on); 0 = logged only"),
+            o!("offline_pages_in_browser", "1", "1 = the game's own HTML pages (its manual, offline web pages) open in the PC's browser; 0 = not opened"),
             o!("keyboard_box", "1", "1 = when the game asks for text a box opens over it to type in (keyboard_text already in it);
 ;   0 = keyboard_text is answered at once"),
         ],

@@ -927,3 +927,74 @@ fn ray_query_traces_a_triangle() {
     }
     assert_eq!(validation_errors(), e0, "validation errors");
 }
+
+/// The loop bound (GPU hangs; `shaders::link::loop_guard`, `NXGFX_LOOP_GUARD`, 65536 back-edges a call): a loop of a
+/// million iterations ends after 65,536 of them.
+#[test]
+fn loops_are_bounded() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let mut out = Pool::new(n.d(), 1 << 16, CPU_POOL);
+    let (off, addr) = out.alloc(256, 256);
+    let ub = n.data.put(&[1_000_000u32, 0, 0, 0], 256);
+    let cs = spv("longloop_comp");
+    let cj = json(
+        "cs",
+        r#"{"set": 5, "binding": 1, "type": "storage_buffer", "count": 1, "name": "o", "resource": {"kind": "sbuf", "slot": 0, "cb_slot": 0, "cb_offset": 196, "flags": 1}},
+           {"set": 5, "binding": 2, "type": "uniform_buffer", "count": 1, "name": "c3", "resource": {"kind": "cbuf", "slot": 3, "fixed": 0}}"#,
+    );
+    let prog = n.program(&[(&cs, &cj)]);
+    n.begin();
+    unsafe {
+        nvnCommandBufferBindProgram(n.c(), &*prog, 0x20);
+        nvnCommandBufferBindStorageBuffer(n.c(), stage::COMPUTE as i32, 0, addr, 256);
+        nvnCommandBufferBindUniformBuffer(n.c(), stage::COMPUTE as i32, 0, ub, 16);
+        nvnCommandBufferDispatchCompute(n.c(), 1, 1, 1);
+        nvnCommandBufferBarrier(n.c(), barrier::ORDER_PRIMITIVES as i32);
+    }
+    n.submit_wait();
+    let got = u32::from_le_bytes(out.mem.slice()[off..off + 4].try_into().unwrap());
+    let cap = nxgfx::vk::shader::loop_cap();
+    eprintln!("loop bound: {got} iterations of 1,000,000 (bound {cap})");
+    if cap == 0 {
+        assert_eq!(got, 1_000_000);
+    } else {
+        assert!(got < cap + 2 && got + 2 >= cap, "the loop ended at the bound");
+    }
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// An indirect dispatch reads its group counts through the clamp (`clamped_indirect`: held to the device's limits
+/// before the dispatch, GPU resets): 4 groups of 64 fill 256 words.
+#[test]
+fn indirect_dispatch_through_the_count_clamp() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let mut out = Pool::new(n.d(), 1 << 16, CPU_POOL);
+    let (soff, saddr) = out.alloc(1024, 256);
+    let ub = n.data.put(&[7u32, 0, 0, 0], 256);
+    let args = n.data.put(&[4u32, 1, 1, 0], 256);
+    let cs = spv("fill_comp");
+    let cj = json(
+        "cs",
+        r#"{"set": 5, "binding": 1, "type": "storage_buffer", "count": 1, "name": "s0", "resource": {"kind": "sbuf", "slot": 0, "cb_slot": 0, "cb_offset": 196, "flags": 1}},
+           {"set": 5, "binding": 2, "type": "uniform_buffer", "count": 1, "name": "c3", "resource": {"kind": "cbuf", "slot": 3, "fixed": 0}}"#,
+    );
+    let prog = n.program(&[(&cs, &cj)]);
+    n.begin();
+    unsafe {
+        nvnCommandBufferBindProgram(n.c(), &*prog, 0x20);
+        nvnCommandBufferBindStorageBuffer(n.c(), stage::COMPUTE as i32, 0, saddr, 1024);
+        nvnCommandBufferBindUniformBuffer(n.c(), stage::COMPUTE as i32, 0, ub, 16);
+        nvnCommandBufferDispatchComputeIndirect(n.c(), args);
+        nvnCommandBufferBarrier(n.c(), barrier::ORDER_PRIMITIVES as i32);
+    }
+    n.submit_wait();
+    let s = &out.mem.slice()[soff..soff + 1024];
+    let bad = (0..256).filter(|&i| u32::from_le_bytes(s[4 * i..4 * i + 4].try_into().unwrap()) != i as u32 * 3 + 7).count();
+    eprintln!("indirect dispatch: 256 words, {bad} wrong");
+    assert_eq!(bad, 0);
+    assert_eq!(validation_errors(), e0, "validation errors");
+}

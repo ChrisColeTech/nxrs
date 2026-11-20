@@ -158,6 +158,12 @@ impl Layout {
             nxconfig::frame_skip()
         );
         crate::vklog!(
+            "if the GPU stops responding: checkpoints {} (NXGFX_CHECKPOINTS), the driver's fault report {}, loops bounded at {} back-edges a call (NXGFX_LOOP_GUARD); a lost device ends the game with exit code 71",
+            if !d.caps.checkpoints { "off" } else if super::lost::level() >= 2 { "before every draw and dispatch" } else { "before dispatches and indirect draws" },
+            if d.caps.device_fault { "on" } else { "not available" },
+            super::shader::loop_cap()
+        );
+        crate::vklog!(
             "shared pipeline layout: 6 stage sets of {STAGE_BINDINGS} bindings, pool set of {tex_cap} textures / {samp_cap} samplers{}",
             if d.caps.descbuf { format!("; descriptor buffers: a stage set {db_stage_size} bytes, the pool set {} KB", db_pool_size >> 10) } else { String::new() }
         );

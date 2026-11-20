@@ -119,6 +119,9 @@ pub struct SubmitState {
     pub qstates: HashMap<u64, QState>,
     parked: HashMap<u64, Parked>,
     cmd_pool: vk::CommandPool,
+    /// the main buffers' pool of their own: with deferred recording (vk/defer.rs) a main buffer is recorded on the
+    /// recorder thread while the replay thread records the upload buffer, and a pool's buffers may not be recorded at once
+    main_pool: vk::CommandPool,
     free_subs: Vec<Sub>,
 }
 
@@ -153,9 +156,10 @@ impl Queue {
         let timeline = unsafe { d.dev.create_semaphore(&sci, None) }.map_err(|e| format!("timeline: {e}"))?;
         let pci = vk::CommandPoolCreateInfo::default().queue_family_index(d.qfam).flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let cmd_pool = unsafe { d.dev.create_command_pool(&pci, None) }.map_err(|e| format!("command pool: {e}"))?;
+        let main_pool = unsafe { d.dev.create_command_pool(&pci, None) }.map_err(|e| format!("command pool: {e}"))?;
         Ok(Queue {
             timeline,
-            sub: Mutex::new(SubmitState { qstates: HashMap::new(), parked: HashMap::new(), cmd_pool, free_subs: Vec::new() }),
+            sub: Mutex::new(SubmitState { qstates: HashMap::new(), parked: HashMap::new(), cmd_pool, main_pool, free_subs: Vec::new() }),
             pending_signals: Mutex::new(HashMap::new()),
             retry: AtomicBool::new(false),
             retry_mu: Mutex::new(false),
@@ -377,8 +381,11 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
     let mut s = if let Some(s) = st.free_subs.pop() {
         s
     } else {
-        let ai = vk::CommandBufferAllocateInfo::default().command_pool(st.cmd_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(2);
-        let cbs = unsafe { g.dev().allocate_command_buffers(&ai) }.expect("command buffers");
+        let ai = vk::CommandBufferAllocateInfo::default().command_pool(st.cmd_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
+        let pre = unsafe { g.dev().allocate_command_buffers(&ai) }.expect("command buffers")[0];
+        let ai = vk::CommandBufferAllocateInfo::default().command_pool(st.main_pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
+        let main = unsafe { g.dev().allocate_command_buffers(&ai) }.expect("command buffers")[0];
+        let cbs = [pre, main];
         let qi = vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::TIMESTAMP).query_count(256);
         let query = unsafe { g.dev().create_query_pool(&qi, None) }.expect("query pool");
         let oi = vk::QueryPoolCreateInfo::default().query_type(vk::QueryType::OCCLUSION).query_count(256);
@@ -443,7 +450,10 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
 /// A submission of the host's own (the lazy page reader), in queue order with the replay's.
 pub fn submit_raw(g: &Gpu, si: &[vk::SubmitInfo2], fence: vk::Fence) {
     let _vq = g.q.vkq.lock().unwrap();
-    unsafe { g.dev().queue_submit2(g.d.queue, si, fence) }.unwrap_or_else(|e| panic!("vkQueueSubmit2: {e}"));
+    unsafe { g.dev().queue_submit2(g.d.queue, si, fence) }.unwrap_or_else(|e| {
+        super::lost::check(g, e, "vkQueueSubmit2");
+        panic!("vkQueueSubmit2: {e}")
+    });
 }
 
 /// Ends and submits a recorded submission; returns its timeline value.
@@ -513,7 +523,10 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         sig.push(vk::SemaphoreSubmitInfo::default().semaphore(p.rendered).stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS));
     }
     let si = [vk::SubmitInfo2::default().command_buffer_infos(&cbs).signal_semaphore_infos(&sig).wait_semaphore_infos(&wait)];
-    unsafe { g.dev().queue_submit2(g.d.queue, &si, vk::Fence::null()) }.unwrap_or_else(|e| panic!("vkQueueSubmit2: {e}"));
+    unsafe { g.dev().queue_submit2(g.d.queue, &si, vk::Fence::null()) }.unwrap_or_else(|e| {
+        super::lost::check(g, e, "vkQueueSubmit2");
+        panic!("vkQueueSubmit2: {e}")
+    });
     q.last.store(value, Ordering::Release);
     {
         let mut l = q.after_current.lock().unwrap();
@@ -569,7 +582,10 @@ fn completion_loop(g: &'static Gpu) {
             match unsafe { g.dev().wait_semaphores(&wi, 5_000_000_000) } {
                 Ok(()) => break,
                 Err(vk::Result::TIMEOUT) => crate::log::red(&format!("GPU submission {} has not completed after 5 s", item.value)),
-                Err(e) => panic!("vkWaitSemaphores: {e}"),
+                Err(e) => {
+                    super::lost::check(g, e, "the wait for a submission");
+                    panic!("vkWaitSemaphores: {e}")
+                }
             }
         }
         let mut signalled = false;

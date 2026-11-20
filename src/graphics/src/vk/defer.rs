@@ -227,12 +227,14 @@ macro_rules! scalar {
                 type F = unsafe extern "system" fn(vk::CommandBuffer $(, $t)*);
                 let real = real_of($vk);
                 if deferring(cb) {
+                    #[allow(unused_variables, unused_mut)]
                     unsafe fn exec(real: usize, cb: vk::CommandBuffer, a: &[u64; 8]) {
                         let mut _i = 0usize;
                         $( let $a: $t = { let v = <$t as W>::f(a[_i]); _i += 1; v }; )*
                         let f: F = core::mem::transmute(real);
                         f(cb $(, $a)*)
                     }
+                    #[allow(unused_mut)]
                     let mut a = [0u64; 8];
                     let mut _i = 0usize;
                     $( a[_i] = $a.w(); _i += 1; )*
@@ -309,26 +311,17 @@ scalar! {
     "vkCmdSetLogicOpEnableEXT" => s_logic_en(e: B32);
     "vkCmdSetDepthClampEnableEXT" => s_dclamp(e: B32);
     "vkCmdSetDepthClipNegativeOneToOneEXT" => s_dclip(e: B32);
+    "vkCmdSetCheckpointNV" => s_checkpoint(m: u64);
+    "vkCmdFillBuffer" => s_fill(b: u64, o: u64, n: u64, v: u32);
+    "vkCmdWriteTimestamp2" => s_ts2(st: u64, q: u64, i: u32);
+    "vkCmdResetQueryPool" => s_reset_q(q: u64, f: u32, n: u32);
+    "vkCmdBeginQuery" => s_begin_q(q: u64, i: u32, f: u32);
+    "vkCmdEndQuery" => s_end_q(q: u64, i: u32);
+    "vkCmdEndRendering" => s_end_r();
 }
 
 drained! {
-    "vkCmdPipelineBarrier2" => d_barrier2(i: P);
-    "vkCmdBlitImage" => d_blit(s: u64, sl: i32, d: u64, dl: i32, n: u32, r: P, f: i32);
-    "vkCmdCopyImageToBuffer" => d_copy_i2b(s: u64, sl: i32, d: u64, n: u32, r: P);
-    "vkCmdCopyBufferToImage" => d_copy_b2i(s: u64, d: u64, dl: i32, n: u32, r: P);
-    "vkCmdCopyBuffer" => d_copy_buf(s: u64, d: u64, n: u32, r: P);
-    "vkCmdCopyImage" => d_copy_img(s: u64, sl: i32, d: u64, dl: i32, n: u32, r: P);
-    "vkCmdClearColorImage" => d_clear_color(i: u64, l: i32, c: P, n: u32, r: P);
-    "vkCmdClearDepthStencilImage" => d_clear_ds(i: u64, l: i32, c: P, n: u32, r: P);
-    "vkCmdClearAttachments" => d_clear_att(n: u32, a: P, nr: u32, r: P);
-    "vkCmdFillBuffer" => d_fill(b: u64, o: u64, n: u64, v: u32);
     "vkCmdUpdateBuffer" => d_update(b: u64, o: u64, n: u64, d: P);
-    "vkCmdWriteTimestamp2" => d_ts2(s: u64, q: u64, i: u32);
-    "vkCmdResetQueryPool" => d_reset_q(q: u64, f: u32, n: u32);
-    "vkCmdBeginQuery" => d_begin_q(q: u64, i: u32, f: u32);
-    "vkCmdEndQuery" => d_end_q(q: u64, i: u32);
-    "vkCmdBeginRendering" => d_begin_r(i: P);
-    "vkCmdEndRendering" => d_end_r();
     "vkCmdPushDescriptorSetKHR" => d_push_desc(bp: i32, l: u64, s: u32, n: u32, w: P);
     "vkCmdBindDescriptorBuffersEXT" => d_bind_db(n: u32, i: P);
     "vkCmdBindTransformFeedbackBuffersEXT" => d_xfb_bind(f: u32, n: u32, b: P, o: P, s: P);
@@ -468,8 +461,134 @@ unsafe extern "system" fn a_vertex_input(cb: vk::CommandBuffer, nb: u32, b: *con
     })));
 }
 
+
+macro_rules! regions {
+    ($shim:ident, $vk:literal, $rt:ty, ($($a:ident : $t:ty),*)) => {
+        unsafe extern "system" fn $shim(cb: vk::CommandBuffer $(, $a: $t)*, n: u32, r: *const $rt) {
+            let f = real!($vk $(, $t)*, u32, *const $rt);
+            if !deferring(cb) {
+                return f(cb $(, $a)*, n, r);
+            }
+            let r = SendVec(copy(r, n));
+            push(Cmd::Owned(Box::new(move || {
+                let r = r;
+                f(cb $(, $a)*, n, r.0.as_ptr())
+            })));
+        }
+    };
+}
+regions!(a_copy_buf, "vkCmdCopyBuffer", vk::BufferCopy, (s: vk::Buffer, d: vk::Buffer));
+regions!(a_copy_img, "vkCmdCopyImage", vk::ImageCopy, (s: vk::Image, sl: vk::ImageLayout, d: vk::Image, dl: vk::ImageLayout));
+regions!(a_copy_b2i, "vkCmdCopyBufferToImage", vk::BufferImageCopy, (s: vk::Buffer, d: vk::Image, dl: vk::ImageLayout));
+regions!(a_copy_i2b, "vkCmdCopyImageToBuffer", vk::BufferImageCopy, (s: vk::Image, sl: vk::ImageLayout, d: vk::Buffer));
+
+#[allow(clippy::too_many_arguments)]
+unsafe extern "system" fn a_blit(cb: vk::CommandBuffer, s: vk::Image, sl: vk::ImageLayout, d: vk::Image, dl: vk::ImageLayout, n: u32, r: *const vk::ImageBlit, flt: vk::Filter) {
+    let f = real!("vkCmdBlitImage", vk::Image, vk::ImageLayout, vk::Image, vk::ImageLayout, u32, *const vk::ImageBlit, vk::Filter);
+    if !deferring(cb) {
+        return f(cb, s, sl, d, dl, n, r, flt);
+    }
+    let r = SendVec(copy(r, n));
+    push(Cmd::Owned(Box::new(move || {
+        let r = r;
+        f(cb, s, sl, d, dl, n, r.0.as_ptr(), flt)
+    })));
+}
+unsafe extern "system" fn a_clear_color(cb: vk::CommandBuffer, i: vk::Image, l: vk::ImageLayout, c: *const vk::ClearColorValue, n: u32, r: *const vk::ImageSubresourceRange) {
+    let f = real!("vkCmdClearColorImage", vk::Image, vk::ImageLayout, *const vk::ClearColorValue, u32, *const vk::ImageSubresourceRange);
+    if !deferring(cb) {
+        return f(cb, i, l, c, n, r);
+    }
+    let (c, r) = (*c, SendVec(copy(r, n)));
+    push(Cmd::Owned(Box::new(move || {
+        let r = r;
+        f(cb, i, l, &c, n, r.0.as_ptr())
+    })));
+}
+unsafe extern "system" fn a_clear_ds(cb: vk::CommandBuffer, i: vk::Image, l: vk::ImageLayout, c: *const vk::ClearDepthStencilValue, n: u32, r: *const vk::ImageSubresourceRange) {
+    let f = real!("vkCmdClearDepthStencilImage", vk::Image, vk::ImageLayout, *const vk::ClearDepthStencilValue, u32, *const vk::ImageSubresourceRange);
+    if !deferring(cb) {
+        return f(cb, i, l, c, n, r);
+    }
+    let (c, r) = (*c, SendVec(copy(r, n)));
+    push(Cmd::Owned(Box::new(move || {
+        let r = r;
+        f(cb, i, l, &c, n, r.0.as_ptr())
+    })));
+}
+unsafe extern "system" fn a_clear_att(cb: vk::CommandBuffer, n: u32, a: *const vk::ClearAttachment, nr: u32, r: *const vk::ClearRect) {
+    let f = real!("vkCmdClearAttachments", u32, *const vk::ClearAttachment, u32, *const vk::ClearRect);
+    if !deferring(cb) {
+        return f(cb, n, a, nr, r);
+    }
+    let (a, r) = (SendVec(copy(a, n)), SendVec(copy(r, nr)));
+    push(Cmd::Owned(Box::new(move || {
+        let (a, r) = (a, r);
+        f(cb, n, a.0.as_ptr(), nr, r.0.as_ptr())
+    })));
+}
+/// A barrier: its three arrays copied (this layer chains nothing to them; a chained one is drained instead).
+unsafe extern "system" fn a_barrier2(cb: vk::CommandBuffer, d: *const vk::DependencyInfo<'static>) {
+    let f = real!("vkCmdPipelineBarrier2", *const vk::DependencyInfo<'static>);
+    if !deferring(cb) {
+        return f(cb, d);
+    }
+    if !(*d).p_next.is_null() {
+        drain();
+        return f(cb, d);
+    }
+    let di = *d;
+    let m = SendVec(copy(di.p_memory_barriers, di.memory_barrier_count));
+    let b = SendVec(copy(di.p_buffer_memory_barriers, di.buffer_memory_barrier_count));
+    let i = SendVec(copy(di.p_image_memory_barriers, di.image_memory_barrier_count));
+    let flags = di.dependency_flags;
+    push(Cmd::Owned(Box::new(move || {
+        let (m, b, i) = (m, b, i);
+        let mut d = vk::DependencyInfo::default();
+        d.dependency_flags = flags;
+        (d.memory_barrier_count, d.p_memory_barriers) = (m.0.len() as u32, m.0.as_ptr());
+        (d.buffer_memory_barrier_count, d.p_buffer_memory_barriers) = (b.0.len() as u32, b.0.as_ptr());
+        (d.image_memory_barrier_count, d.p_image_memory_barriers) = (i.0.len() as u32, i.0.as_ptr());
+        f(cb, &d)
+    })));
+}
+/// A pass: its attachments copied (a chained pass info is drained instead).
+unsafe extern "system" fn a_begin_rendering(cb: vk::CommandBuffer, ri: *const vk::RenderingInfo<'static>) {
+    let f = real!("vkCmdBeginRendering", *const vk::RenderingInfo<'static>);
+    if !deferring(cb) {
+        return f(cb, ri);
+    }
+    if !(*ri).p_next.is_null() {
+        drain();
+        return f(cb, ri);
+    }
+    let r = *ri;
+    let colors = SendVec(copy(r.p_color_attachments, r.color_attachment_count));
+    let depth = SendVec(if r.p_depth_attachment.is_null() { vec![] } else { vec![*r.p_depth_attachment] });
+    let stencil = SendVec(if r.p_stencil_attachment.is_null() { vec![] } else { vec![*r.p_stencil_attachment] });
+    let (flags, area, layers, mask) = (r.flags, r.render_area, r.layer_count, r.view_mask);
+    push(Cmd::Owned(Box::new(move || {
+        let (colors, depth, stencil) = (colors, depth, stencil);
+        let mut ri = vk::RenderingInfo::default().flags(flags).render_area(area).layer_count(layers).view_mask(mask);
+        (ri.color_attachment_count, ri.p_color_attachments) = (colors.0.len() as u32, colors.0.as_ptr());
+        ri.p_depth_attachment = depth.0.first().map_or(core::ptr::null(), |d| d as *const _);
+        ri.p_stencil_attachment = stencil.0.first().map_or(core::ptr::null(), |s| s as *const _);
+        f(cb, &ri)
+    })));
+}
+
 fn array_table() -> Vec<(&'static str, usize)> {
     vec![
+    ("vkCmdCopyBuffer", a_copy_buf as *const () as usize),
+    ("vkCmdCopyImage", a_copy_img as *const () as usize),
+    ("vkCmdCopyBufferToImage", a_copy_b2i as *const () as usize),
+    ("vkCmdCopyImageToBuffer", a_copy_i2b as *const () as usize),
+    ("vkCmdBlitImage", a_blit as *const () as usize),
+    ("vkCmdClearColorImage", a_clear_color as *const () as usize),
+    ("vkCmdClearDepthStencilImage", a_clear_ds as *const () as usize),
+    ("vkCmdClearAttachments", a_clear_att as *const () as usize),
+    ("vkCmdPipelineBarrier2", a_barrier2 as *const () as usize),
+    ("vkCmdBeginRendering", a_begin_rendering as *const () as usize),
     ("vkCmdSetViewportWithCount", a_viewports as *const () as usize),
     ("vkCmdSetScissorWithCount", a_scissors as *const () as usize),
     ("vkCmdSetBlendConstants", a_blend_constants as *const () as usize),

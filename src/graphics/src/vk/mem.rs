@@ -55,6 +55,8 @@ pub struct Pool {
     /// the allocation (VirtualQuery's allocation base) its first page is in, when it lies in one: watched pools of one
     /// allocation share one GetWriteWatch call a submission
     pub alloc_base: u64,
+    /// the frame its CPU writes were last seen (cold pools are asked once a frame: `begin_submit`)
+    pub dirty_frame: u64,
 }
 
 /// Moves whenever a pool comes, goes or gets its GPU buffer (the raw global memory table is written again).
@@ -76,6 +78,8 @@ fn buf_usage(g: &Gpu) -> vk::BufferUsageFlags {
 pub struct Pools {
     pub by_base: BTreeMap<u64, Pool>,
     pub gen: u32,
+    /// the frame the last submission's pool sync was in
+    pub scan_frame: u64,
 }
 
 pub static UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -313,6 +317,7 @@ pub fn pool_add(p: &pool_t) {
         pending: Vec::new(),
         da: 0,
         alloc_base: if watched { watch::alloc_of(lo, hi) } else { 0 },
+        dirty_frame: super::present::frames(),
     };
     if std::env::var("NXGFX_POOL_LOG").is_ok() {
         crate::vklog!("pool {base:#x} size {:#x} flags {:#x}: {placement:?}{}", p.size, p.flags, if watched { " (write watch)" } else { "" });
@@ -637,11 +642,23 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
     // the write watch asked once per run of watched pools whose pages touch (Pokemon Legends Z-A has ~400 mirrors,
     // most of them neighbours: one GetWriteWatch each was 3.5 ms a frame of `pools`; Mario Kart World 21 ms)
     let mut taken: HashMap<u64, Vec<u64>> = HashMap::new();
+    let cold_skipped: std::collections::HashSet<u64>;
     {
+        // cold pools (no CPU write for 60 frames) are asked once a frame, not at every submission: GetWriteWatch walks
+        // every page of its range, and Donkey Kong Bananza's ~1,300 mirrors (1.9 GB) at 9 submissions a frame cost
+        // ~33 ms a frame. A write to a cold pool reaches the GPU at the next frame's first submission (the pool is hot
+        // from then on). NXGFX_POOL_COLD=0: every pool at every submission.
+        let frame = super::present::frames();
+        static COLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        let cold_on = *COLD.get_or_init(|| std::env::var("NXGFX_POOL_COLD").as_deref() != Ok("0"));
+        let new_frame = m.scan_frame != frame;
+        m.scan_frame = frame;
+        let skip = |p: &Pool| cold_on && !new_frame && frame.saturating_sub(p.dirty_frame) > 60;
+        cold_skipped = m.by_base.values().filter(|p| p.watched && skip(p)).map(|p| p.base).collect();
         let watched: Vec<(u64, u64, u64, u64)> = m
             .by_base
             .values()
-            .filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host))
+            .filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host) && !skip(p))
             .map(|p| {
                 let (lo, hi) = page_range(p.base, p.size);
                 (p.base, lo, hi, p.alloc_base)
@@ -677,8 +694,14 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
         if !matches!(p.placement, Placement::Mirror | Placement::Host) && p.pending.is_empty() {
             continue;
         }
+        if p.pending.is_empty() && cold_skipped.contains(&p.base) {
+            continue;
+        }
         let pre = taken.remove(&p.base);
         let ranges = p.take_cpu_writes(gen, pre);
+        if !ranges.is_empty() {
+            p.dirty_frame = super::present::frames();
+        }
         if let Some(b) = p.buf.as_ref() {
             if p.placement == Placement::Mirror || p.placement == Placement::Vram {
                 for &(a, n) in &ranges {

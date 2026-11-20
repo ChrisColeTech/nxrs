@@ -1113,6 +1113,164 @@ pub fn ballot_per_lane(w: &[u32]) -> Option<(Vec<u32>, u32)> {
     Some((o, nrw))
 }
 
+/// A bound on every loop (GPU hangs): a translated loop whose exit depends on data that came out garbage (an unbound
+/// bank read as zeros, a count from memory nobody wrote) never ends, the driver resets the GPU after ~2 s and the
+/// device is lost. Each function gets a counter of back-edges taken (a Function variable starting at 0); at every
+/// loop's back-edge the counter goes up and, once it reaches `cap`, the back-edge goes to the loop's merge block
+/// instead (the loop ends as if its condition had failed). → (the new words, loops guarded); None when nothing
+/// changed. Loops whose back-edge is not a plain or two-way branch to the header / merge are left as they are.
+pub fn loop_guard(w: &[u32], cap: u32) -> Option<(Vec<u32>, u32)> {
+    const OP_TYPE_BOOL: u32 = 20;
+    const OP_FUNCTION_END: u32 = 56;
+    const OP_LABEL: u32 = 248;
+    const OP_BRANCH: u32 = 249;
+    const OP_BRANCH_COND: u32 = 250;
+    const OP_LOOP_MERGE: u32 = 246;
+    const OP_IADD: u32 = 128;
+    const OP_ULESS_THAN: u32 = 176;
+    const OP_LOGICAL_AND: u32 = 167;
+    const OP_LOGICAL_OR: u32 = 166;
+    const OP_LOGICAL_NOT: u32 = 168;
+    const SC_FUNCTION: u32 = 7;
+    let v = walk(w)?;
+    // loops: header label -> merge label, per function (labels are unique in the module)
+    let mut merge_of: std::collections::HashMap<u32, u32> = Default::default();
+    let mut cur_label = 0u32;
+    for &(i, op, _) in &v {
+        if op == OP_LABEL {
+            cur_label = w[i + 1];
+        }
+        if op == OP_LOOP_MERGE {
+            merge_of.insert(cur_label, w[i + 1]);
+        }
+    }
+    if merge_of.is_empty() {
+        return None;
+    }
+    // back-edges: a block after its loop's header whose terminator branches to the header
+    let mut seen_labels = std::collections::HashSet::new();
+    let mut edges: Vec<(usize, u32)> = vec![]; // (terminator index, header)
+    for &(i, op, n) in &v {
+        match op {
+            OP_LABEL => {
+                seen_labels.insert(w[i + 1]);
+            }
+            OP_BRANCH if n == 2 && merge_of.contains_key(&w[i + 1]) && seen_labels.contains(&w[i + 1]) => edges.push((i, w[i + 1])),
+            OP_BRANCH_COND if n >= 4 => {
+                let (t, f) = (w[i + 2], w[i + 3]);
+                for h in [t, f] {
+                    if let Some(&m) = merge_of.get(&h) {
+                        let other = if h == t { f } else { t };
+                        if seen_labels.contains(&h) && other == m {
+                            edges.push((i, h));
+                        }
+                    }
+                }
+            }
+            OP_FUNCTION => seen_labels.clear(),
+            _ => {}
+        }
+    }
+    if edges.is_empty() {
+        return None;
+    }
+    let bound0 = w[3];
+    let mut bound = bound0;
+    let mut id = || {
+        let x = bound;
+        bound += 1;
+        x
+    };
+    let find = |op: u32, ops: &[u32]| -> Option<u32> { v.iter().find(|&&(i, o, n)| o == op && n == ops.len() + 2 && &w[i + 2..i + n] == ops).map(|&(i, _, _)| w[i + 1]) };
+    let mut globals: Vec<u32> = vec![];
+    let u32t = match find(OP_TYPE_INT, &[32, 0]) {
+        Some(t) => t,
+        None => {
+            let t = id();
+            globals.extend(ins(OP_TYPE_INT, &[t, 32, 0]));
+            t
+        }
+    };
+    let boolt = match v.iter().find(|&&(_, o, n)| o == OP_TYPE_BOOL && n == 2) {
+        Some(&(i, _, _)) => w[i + 1],
+        None => {
+            let t = id();
+            globals.extend(ins(OP_TYPE_BOOL, &[t]));
+            t
+        }
+    };
+    let ptr = match find(OP_TYPE_POINTER, &[SC_FUNCTION, u32t]) {
+        Some(t) => t,
+        None => {
+            let t = id();
+            globals.extend(ins(OP_TYPE_POINTER, &[t, SC_FUNCTION, u32t]));
+            t
+        }
+    };
+    let (c0, c1, ccap) = (id(), id(), id());
+    globals.extend(ins(OP_CONSTANT, &[u32t, c0, 0]));
+    globals.extend(ins(OP_CONSTANT, &[u32t, c1, 1]));
+    globals.extend(ins(OP_CONSTANT, &[u32t, ccap, cap]));
+    let first_fn = v.iter().find(|x| x.1 == OP_FUNCTION).map(|x| x.0)?;
+    let edge_at: std::collections::HashMap<usize, u32> = edges.iter().copied().collect();
+    let mut o = w[..5].to_vec();
+    let mut counter = 0u32; // this function's counter variable
+    let mut want_var = false; // the next label is the function's first block
+    let mut pending_var = false; // insert the variable once the first block's variables are past
+    let mut n_guard = 0u32;
+    for &(i, op, n) in &v {
+        if i == first_fn {
+            o.extend_from_slice(&globals);
+        }
+        if pending_var && op != OP_VARIABLE {
+            o.extend(ins(OP_VARIABLE, &[ptr, counter, SC_FUNCTION, c0]));
+            pending_var = false;
+        }
+        if op == OP_FUNCTION {
+            counter = id();
+            want_var = true;
+        }
+        if let Some(&h) = edge_at.get(&i) {
+            let m = merge_of[&h];
+            let (ld, add, ok) = (id(), id(), id());
+            o.extend(ins(OP_LOAD, &[u32t, ld, counter]));
+            o.extend(ins(OP_IADD, &[u32t, add, ld, c1]));
+            o.extend(ins(OP_STORE, &[counter, add]));
+            o.extend(ins(OP_ULESS_THAN, &[boolt, ok, add, ccap]));
+            if op == OP_BRANCH {
+                o.extend(ins(OP_BRANCH_COND, &[ok, h, m]));
+            } else {
+                let (c, t) = (w[i + 1], w[i + 2]);
+                let nc = id();
+                if t == h {
+                    // c ? header : merge  ->  (c && ok) ? header : merge
+                    o.extend(ins(OP_LOGICAL_AND, &[boolt, nc, c, ok]));
+                } else {
+                    // c ? merge : header  ->  (c || !ok) ? merge : header
+                    let nok = id();
+                    o.extend(ins(OP_LOGICAL_NOT, &[boolt, nok, ok]));
+                    o.extend(ins(OP_LOGICAL_OR, &[boolt, nc, c, nok]));
+                }
+                let mut x = w[i..i + n].to_vec();
+                x[1] = nc;
+                o.extend(x);
+            }
+            n_guard += 1;
+            continue;
+        }
+        o.extend_from_slice(&w[i..i + n]);
+        if op == OP_LABEL && want_var {
+            want_var = false;
+            pending_var = true;
+        }
+        if op == OP_FUNCTION_END {
+            want_var = false;
+        }
+    }
+    o[3] = bound;
+    Some((o, n_guard))
+}
+
 /// The scalar kind (0 float, 1 signed, 2 unsigned; `Varying::kind`) of each output location 0..8 of a pixel shader
 /// (None where it has none).
 pub fn output_kinds(w: &[u32]) -> [Option<u8>; 8] {

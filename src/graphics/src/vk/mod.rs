@@ -23,6 +23,7 @@ pub mod image;
 pub mod layout;
 pub mod lazy;
 pub mod live;
+pub mod lost;
 pub mod lsfg;
 pub mod mem;
 pub mod pcache;

@@ -800,8 +800,12 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
 - **MK8D shadowed ground:** with `NXGFX_ASYNC=0` (`-G4-mk8d-sync2`) the stretch past the grandstand is right (no cyan
   road, no black), so the cyan / black there comes from asynchronous replay (a race or the replay reading memory the
   game has rewritten by then); the karts' own shadow stays a cyan blob either way (the swizzle question above).
-  `NXGFX_ASYNC_PRESENTS=1` (one present queued at most) was queued to tell lag from a race; not run yet (GPU resets'
-  cooldowns).
+  `NXGFX_ASYNC_PRESENTS=1` (one present queued at most) is queued to tell lag from a race. **Queued when G4 stopped (the
+  machine was held by other lanes' exclusive runs):** `build/G4/chain3.sh` (MK8D lap with `NXGFX_ASYNC_PRESENTS=1` and
+  `NXGFX_CHECKPOINTS=all` -> `build/G4/c3_mk8d.out`, then Smash 360 s -> `c3_smash.out`) and `chain4.sh` (DKB with
+  cold-pool scanning, exclusive -> `c4_dkb.out`); each starts once, waiting while the machine is held. Note: the 03:51
+  crash came during G4's earlier MK8D run with `NXGFX_ASYNC_PRESENTS=1` (`-G4-mk8d-aq1`: device lost at 130 s, no
+  checkpoints then).
 
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
@@ -1615,9 +1619,13 @@ which has no music; the music plays once the game starts.
   `pc_user_name` "Player" (`NXOS_NICK` overrides); test `account::tests::pc_user_option`.
 - **Library applets, the call per applet** (owner rule: a host UI only where a PC player needs one):
   Controller (0x0C): host prompt, done (`controller_prompt`). Software keyboard (0x11): host text box, done
-  (`keyboard_box`). PlayerSelect (0x10): no UI, the `pc_user` option answers. Error (0x0E): **warranted** (the game's
-  message to the player: a host notice, non-blocking), not built yet. OfflineWeb (0x17, game manuals in the
-  game's own HTML): **warranted** (open it in the PC's browser), not built yet. Auth (0x0A, parental PIN): no UI,
+  (`keyboard_box`). PlayerSelect (0x10): no UI, the `pc_user` option answers. Error (0x0E): **built**, a message
+  box beside the game on its own thread (`error_notice` 1; nn::err's ShowError Result / ErrorCode /
+  ApplicationErrorArg message / the SDK's version errors; os `services::notice`). OfflineWeb (0x17): **built**,
+  the game's page opens in the PC's browser (`offline_pages_in_browser` 1): `nxrs-build` now stages the Manual
+  NCA's `html-document/` tree in the data folder (translator `package::app::manual_files`), nn::web's offline page
+  start resolves the document path there. Neither opens under `NXRS_NO_ACTIVATE` or headless (logged). Tests
+  `notice::tests::{error_texts, offline_page_files}`. Auth (0x0A, parental PIN): no UI,
   a PC has no parental lock. Cabinet (0x0B, amiibo): no UI until there is an amiibo-file option. DataErase (0x0D),
   Set (0x16), PhotoViewer (0x15): console settings / album, closed. NetConnect (0x0F), Web (0x13), Shop (0x14),
   LoginShare (0x18), WifiWebAuth (0x19), MyPage (0x1A): online, closed. MiiEdit (0x12): no UI, cancelled (the game
@@ -1628,19 +1636,31 @@ which has no music; the music plays once the game starts.
   records an `[[obs]]` entry. A gate mechanism with no caller would be a fake feature; when a game needs one, the
   translator's site + host function call is the place.
 - **Frame lock finders:** the generic target frame rate (nxnative `fps_target.py`) is in os `fpslock`
-  (`target_field_find`, run on main as loaded, written each present; test `target_field_by_its_readers`). Left:
-  Unreal console variables / fixed frame rate, Unity targetFrameRate / vSyncCount, Monolith's interval (no game of
-  the owner's here uses those engines, so nothing could check them).
-- **Stubs that read the module at export** (4 bodies: HW Age of Calamity's matched frame step, Xenoblade X DE,
-  01008DD013200000, 0100A00019DE0000): left. Their Python assembles code from addresses it reads out of the module
-  (values that land in immediates, not only relocations), so each needs its generator ported; none of those games
-  is here to check one against.
+  (`target_field_find`, on main as loaded). Unity (internal-call table or code registration: targetFrameRate,
+  QualitySettings.vSyncCount's walk), Unreal (t.MaxFPS / rhi / nvn.SyncInterval / Project.FrameRateLimit
+  TAutoConsoleVariables; UEngine::FixedFrameRate on GEngine with its bUseFixedFrameRate bit) and Monolith (its
+  reviewed wait / duration / setter fingerprints) run at build time in cli `fpsfind` and go to `<data>ps_lock.txt`,
+  which os `fpslock` writes each present (the profile's `ue_fps_cvar`; Monolith's 0 = 2 vsyncs; Unreal's fixed rate
+  only while the flag is set). Synthetic tests per finder (`fpsfind::tests`, `fpslock::tests::engine_places_from_the_build`).
+  **Anime Girls: Sun of a Beach** (Unity 2021.3.28f1): no places, as nxnative's finder would say: its IL2CPP side
+  resolves the call by name at run time (main+0x1827400) and the engine registers it in neither reviewed form.
+- **Stubs that read the module at export: ported** (cli `stubgen`: nxnative's ctx here / emit / site / put /
+  address, run at build time on the game's main): Hyrule Warriors: Age of Calamity's frame step (matched rule;
+  the port run at 1.3.0's addresses gives exactly the build entry nxnative recorded:
+  `hwaoc_matches_the_recorded_build_entry`), Ori and the Will of the Wisps' constant-buffer table lock, Xenoblade X
+  DE's camera step, 0100A00019DE0000's render size (with its anchored find: the one caller of nn::vi::CreateLayer
+  through its PLT stub). Synthetic-module tests for the last three (no recorded output exists for them).
 - **Violet new save, stick replay (2026-11-20 04:37, `build/I/runs/20261120-043726-O3-violet-new5`)**: control-pipe stick
   presses (`ctl press LDown~1.5` ...) get the player up from the desk and walking the bedroom (shots 0005-0010);
   first save commit at 317 s; no Mom in the bedroom, and the replay did not reach the stairs, so "Mom missing" is
   still open (next: walk to the room's exit). Original save restored and diffed; the new save is in
   `build/O3/saves/violet-newgame-run5`. Three earlier attempts (04:03, 04:13, 04:24) were blocked by GPU-reset
   cooldowns from lane K's MKW runs (mkw13 / mkw14 / mkw15, started seconds before each).
+- **Violet, walk to the stairs (04:51, `build/I/runs/20261120-045122-O3-violet-new6`)**: the player walks to the
+  stairwell's brick railing and inspects the Skwovet plush (shots 0004-0013): input and game logic work. The stair
+  opening is at the railing's north end, by the green mat under the window; this replay walked along its south
+  side, so "Mom missing" is still not settled (next: from the desk, up toward the window, then left down the
+  stairs). Save restored and diffed; new save in `build/O3/saves/violet-newgame-run6`.
 - **Findings**: Violet new game passes name entry with `NXOS_SWKBD=auto` (the old run's gradient was the opening's
   wait, not the keyboard: no swkbd call had happened); the opening runs past 5 minutes, so "Mom missing" is still
   open. AudioIn: this PC has no capture endpoint now (DualSense mic disconnected). The owner was at the PC during
@@ -1904,3 +1924,21 @@ lane K's; G4 please review).**
   - So the two differences left against the reference: the shader translation itself (Ryujinx via dmsh_xlate against
     mkw-recomp's sm86 translator) and the `first` / indirect handling. Next test: mkw-recomp's rule (draw direct mesh
     draws from group 0, skip indirect / 3D / multi), behind a switch, to see whether the device loss goes.
+- **`K-mkw16-nomesh` (`NXGFX_MESH=0`, 383 s, no GPU reset): the hang is confined to the mesh path, and MKW reaches a
+  race.** With A every 1.5 s (mkw-recomp's press-race cadence) it went through the title, menus and course select
+  into a Grand Prix race: `0016-shot_race.png` shows the race HUD (5 coins, lap 1/3, 24th, the minimap with the
+  racers), the 3D scene nearly all black (the mesh draws carry much of it). The title scene before it is overexposed
+  with a black rectangle at the top left (`0003`). 8-11 FPS throughout. The run ended on the memory watchdog at 20.0 GB
+  private (graphics allocator 12.2 GB in blocks, 38,789 textures = 7.3 GB; guest heap 3.1 GB): memory grows without
+  the mesh draws too.
+- **`K-mkw17-meshref` (`NXGFX_MESH_REF=1`: mkw-recomp's mesh rule, direct mesh draws from group 0, indirect / 3D
+  skipped; GPU RESET at 05:00):** no mesh draw faulted (65 s, where every earlier run's mesh fault came at 18-45 s), so
+  nxrs's indirect / 3D mesh draws or its `first` record are the likely mesh-fault cause. Instead, at 65 s:
+  "the GPU started #93513 a dispatch of 2x2x6 groups ... 5:881a4d611e825d6c", **invalid write at 0x1000**. That
+  compute shader (256 threads) writes six storage images (handles 72..84, format Unknown, type 259; one per cube
+  face: a cube-map / mip pass): a storage-image descriptor whose image is not bound or already released. The
+  mesh-off run (`K-mkw16`) did not hit it in 383 s.
+- **Next (lane K):** (1) narrow the mesh fault between "indirect / 3D draws" and "`first` through the record" (two
+  switches on `NXGFX_MESH_REF`); (2) the cube-map compute write: log the storage images bound to 881a4d611e825d6c (handle,
+  registered texture, view size) when it is dispatched; mkw-recomp's #468 (a released texture a later image was written
+  over) is the reference to diff against; (3) the 20 GB memory growth (`K-mkw16`, watchdog at 383 s).

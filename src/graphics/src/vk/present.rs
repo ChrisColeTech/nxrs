@@ -293,6 +293,7 @@ fn present_image(g: &Gpu, sub: &mut Sub, src: vk::Image, fmt: vk::Format, srgb: 
             return false;
         }
         Err(e) => {
+            super::lost::check(g, e, "vkAcquireNextImageKHR");
             crate::log::red_once(&format!("vkAcquireNextImageKHR: {e}"));
             return false;
         }
@@ -363,7 +364,10 @@ pub fn queue_present(g: &Gpu, p: PendingPresent) {
     match unsafe { g.d.swapchain.queue_present(g.d.queue, &pi) } {
         Ok(false) => {}
         Ok(true) | Err(vk::Result::ERROR_OUT_OF_DATE_KHR) => g.present.lock().unwrap().stale = true,
-        Err(e) => crate::log::red_once(&format!("vkQueuePresentKHR: {e}")),
+        Err(e) => {
+            super::lost::check(g, e, "vkQueuePresentKHR");
+            crate::log::red_once(&format!("vkQueuePresentKHR: {e}"))
+        }
     }
     g.present.lock().unwrap().presented += 1;
 }

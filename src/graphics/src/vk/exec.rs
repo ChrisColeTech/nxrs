@@ -636,6 +636,59 @@ fn mesh_limits(g: &Gpu) -> [u32; 3] {
     })
 }
 
+static CLAMP_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/clamp_counts_comp.spv"));
+
+/// The clamp kernel (`shaders/clamp_counts.comp`): (layout, pipeline), made once; None when it cannot be.
+fn clamp_pipe(g: &Gpu) -> Option<(vk::PipelineLayout, vk::Pipeline)> {
+    static P: std::sync::OnceLock<Option<(vk::PipelineLayout, vk::Pipeline)>> = std::sync::OnceLock::new();
+    *P.get_or_init(|| unsafe {
+        if !g.d.caps.bda {
+            return None;
+        }
+        let pcr = [vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::COMPUTE).size(32)];
+        let layout = g.dev().create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().push_constant_ranges(&pcr), None).ok()?;
+        let w: Vec<u32> = CLAMP_SPV.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+        let m = g.dev().create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&w), None).ok()?;
+        let st = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(m).name(c"main");
+        let flags = if g.d.caps.descbuf { vk::PipelineCreateFlags::DESCRIPTOR_BUFFER_EXT } else { vk::PipelineCreateFlags::empty() };
+        let p = g.dev().create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().flags(flags).stage(st).layout(layout)], None).ok()?[0];
+        g.dev().destroy_shader_module(m, None);
+        Some((layout, p))
+    })
+}
+
+/// Indirect records `n` x `stride` bytes at (b, o) copied into staging with their first three words held to `maxv`
+/// (outside a pass: a copy and a dispatch). A count from garbage made the GPU fault or work for ever (GPU resets).
+/// `NXGFX_CLAMP_INDIRECT=0`: the records as they are. Returns where to read them from.
+fn clamped_indirect(g: &Gpu, sub: &mut Sub, b: vk::Buffer, o: u64, n: u32, stride: u32, maxv: [u32; 3]) -> (vk::Buffer, u64) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("NXGFX_CLAMP_INDIRECT").as_deref() != Ok("0")) || n == 0 || stride % 4 != 0 {
+        return (b, o);
+    }
+    let Some((layout, pipe)) = clamp_pipe(g) else { return (b, o) };
+    let bytes = n as u64 * stride as u64;
+    let (sb, so) = sub.stage_bytes_fresh(g, &vec![0u8; bytes as usize]);
+    let Some(addr) = sub.addr_of(sb).map(|a| a + so) else { return (b, o) };
+    let dev = g.dev();
+    unsafe {
+        dev.cmd_copy_buffer(sub.main, b, sb, &[vk::BufferCopy { src_offset: o, dst_offset: so, size: bytes }]);
+        super::queue::full_barrier(g, sub.main);
+        dev.cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe);
+        let pc: [u32; 8] = [addr as u32, (addr >> 32) as u32, n, stride / 4, maxv[0], maxv[1], maxv[2], 0];
+        dev.cmd_push_constants(sub.main, layout, vk::ShaderStageFlags::COMPUTE, 0, core::slice::from_raw_parts(pc.as_ptr() as *const u8, 32));
+        dev.cmd_dispatch(sub.main, 1, 1, 1);
+        super::queue::full_barrier(g, sub.main);
+    }
+    static SAID: std::sync::Once = std::sync::Once::new();
+    SAID.call_once(|| crate::vklog!("indirect counts are held to the device's limits before they are read (NXGFX_CLAMP_INDIRECT=0 off)"));
+    (sb, so)
+}
+
+/// The device's compute workgroup count limits.
+fn compute_limits(g: &Gpu) -> [u32; 3] {
+    g.d.props.limits.max_compute_work_group_count
+}
+
 fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mesh) {
     checkpoint(g, sub, qs, false, || "a mesh draw".to_string());
     // a mesh pipeline has no vertex input: the next draw sets it again
@@ -646,6 +699,16 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
         return;
     }
     let indirect = m.ind != 0;
+    // NXGFX_MESH_REF=1 (diagnosis, lane K): mkw-recomp's rule for MKW's mesh draws: only direct 1D draws, from group 0
+    // (its `first` ignored); indirect, 3D and multi draws skipped
+    static REF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let refm = *REF.get_or_init(|| std::env::var("NXGFX_MESH_REF").is_ok_and(|v| v == "1"));
+    if refm && (indirect || m.three_d != 0) {
+        crate::log::red_once("NXGFX_MESH_REF: indirect / 3D mesh draws skipped (mkw-recomp's rule)");
+        super::perf::inc(super::perf::C::DrawsSkipped);
+        return;
+    }
+    let m = if refm { crate::nvn::cmd2::p_mesh { first: 0, ..m } } else { m };
     // indirect: build {x, y, z} records first (a copy is not allowed inside a pass)
     let mut args: Option<(vk::Buffer, u64, u32)> = None;
     if indirect {
@@ -666,6 +729,8 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
             .collect();
         unsafe { dev.cmd_copy_buffer(sub.main, sb, ab, &regions) };
         barrier(g, sub);
+        // the game's counts held to the device's limits (GPU resets in Mario Kart World's mesh draws)
+        let (ab, ao) = clamped_indirect(g, sub, ab, ao, n, 12, mesh_limits(g));
         args = Some((ab, ao, n));
     }
     // the draw records the task / mesh shader reads its first workgroup from (lane S: `mesh_draw`, stride at push
@@ -2464,13 +2529,15 @@ fn dispatch(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
         return;
     };
     let Some(pipe) = g.compute_pipeline(&cs) else { return };
+    // an indirect dispatch's group counts held to the device's limits, before the dispatch's own bindings
+    let ind = if d.ind != 0 { super::mem::resolve(g, sub, d.ind, 12).map(|(b, o, _)| clamped_indirect(g, sub, b, o, 1, 12, compute_limits(g))) } else { None };
     super::perf::inc(super::perf::C::Dispatches);
     unsafe { g.dev().cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe) };
     bind_sets(g, sub, qs, std::slice::from_ref(&cs), vk::PipelineBindPoint::COMPUTE, [d.x as u32, d.y as u32, d.z as u32], 0);
     push_constants(g, sub, qs, false);
     unsafe {
         if d.ind != 0 {
-            if let Some((b, o, _)) = super::mem::resolve(g, sub, d.ind, 12) {
+            if let Some((b, o)) = ind {
                 g.dev().cmd_dispatch_indirect(sub.main, b, o);
             }
         } else {

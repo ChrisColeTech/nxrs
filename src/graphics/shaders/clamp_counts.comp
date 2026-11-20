@@ -1,0 +1,17 @@
+#version 460
+// Indirect counts held to the device's limits before an indirect draw or dispatch reads them (a count from garbage makes
+// the GPU fault or work for ever): n records of stride words, their first three words clamped. One invocation.
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference_uvec2 : require
+layout(local_size_x = 1) in;
+layout(buffer_reference, std430, buffer_reference_align = 4) buffer W { uint v[]; };
+layout(push_constant) uniform P { uvec2 addr; uint n; uint stride; uvec4 maxv; } p;
+void main() {
+    W w = W(p.addr);
+    for (uint i = 0u; i < p.n; i++) {
+        for (uint c = 0u; c < 3u; c++) {
+            uint k = i * p.stride + c;
+            w.v[k] = min(w.v[k], p.maxv[c]);
+        }
+    }
+}

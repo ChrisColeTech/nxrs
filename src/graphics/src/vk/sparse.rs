@@ -698,6 +698,7 @@ pub fn flush(g: &Gpu, last: u64, timeline_main: vk::Semaphore, fence_next: u64) 
         let bi = vk::BindSparseInfo::default().wait_semaphores(&waits).signal_semaphores(&sigs).image_binds(&ib).image_opaque_binds(&ob).push_next(&mut tl);
         let t0 = std::time::Instant::now();
         if let Err(e) = unsafe { dev.queue_bind_sparse(g.d.queue, &[bi], vk::Fence::null()) } {
+            super::lost::check(g, e, "vkQueueBindSparse");
             crate::log::red(&format!("vkQueueBindSparse: {e}"));
         } else {
             st.value = sig;
