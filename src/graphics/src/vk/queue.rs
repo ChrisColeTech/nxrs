@@ -32,6 +32,8 @@ pub struct Sub {
     pub dpool_i: usize,
     /// (pool base, guest address, bytes, pool buffer, buffer offset)
     pub writebacks: Vec<(u64, u64, u64, vk::Buffer, u64)>,
+    /// textures this submission wrote that go back to their storage at completion (`image.rs` `tex_writeback`)
+    pub tex_wb: Vec<u64>,
     pub post: Vec<Post>,
     pub query: vk::QueryPool,
     /// timestamp queries used (0 and 1: the submission's start and end)
@@ -400,6 +402,7 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
             dpools: Vec::new(),
             dpool_i: 0,
             writebacks: Vec::new(),
+            tex_wb: Vec::new(),
             post: Vec::new(),
             query,
             queries: 2,
@@ -494,6 +497,11 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         }
         readback = Some(rb);
         before = bf;
+    }
+    // small textures this submission wrote: copied out for their storage at completion
+    if !s.tex_wb.is_empty() {
+        let list = std::mem::take(&mut s.tex_wb);
+        g.tex_writeback(&mut s, &list);
     }
     // host reads of anything this submission wrote
     let mb = [vk::MemoryBarrier2::default()
@@ -671,6 +679,7 @@ fn completion_loop(g: &'static Gpu) {
         sub.memo_sets.clear();
         sub.memo_views.clear();
         sub.writebacks.clear();
+        sub.tex_wb.clear();
         sub.queries = 2;
         sub.occl_n = 0;
         q.recycled.lock().unwrap().push(sub);

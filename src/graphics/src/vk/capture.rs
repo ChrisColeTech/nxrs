@@ -40,9 +40,10 @@ pub mod rec {
 }
 
 const PAGE: u64 = 0x1000;
-/// The guest's heap and alias regions (runtime mem.rs: searched from 4 GiB; modules from 0x70_0000_0000).
+/// The guest's heap and alias regions (runtime mem.rs: searched from 4 GiB) and its modules (from 0x70_0000_0000: the
+/// game's own data holds NVN objects too, memory pools among them), below the kernel region.
 const GUEST_LO: u64 = 0x1_0000_0000;
-const GUEST_HI: u64 = 0x70_0000_0000;
+const GUEST_HI: u64 = 0x7F_0000_0000;
 
 #[derive(Default)]
 struct Boot {
@@ -443,11 +444,19 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path) -> Result<u64, Stri
     let g = super::Gpu::get()?;
     let _ = std::fs::create_dir_all(out);
     let (mut frames, mut subs, mut failed_regions) = (0u64, 0u64, 0u64);
+    let trace = std::env::var("NXGFX_REPLAY_TRACE").is_ok();
+    let mut n_rec = 0u64;
     while let Some((ty, p)) = r.next() {
+        n_rec += 1;
+        if trace {
+            eprintln!("replay: record {n_rec} type {ty} ({} bytes){}", p.len(), if p.len() >= 8 { format!(" first word {:#x}", u64_at(&p, 0)) } else { String::new() });
+        }
         match ty {
             rec::REGION => {
-                if !map_region(u64_at(&p, 0), u64_at(&p, 8)) {
+                let (b, n) = (u64_at(&p, 0), u64_at(&p, 8));
+                if !map_region(b, n) {
                     failed_regions += 1;
+                    crate::log::red(&format!("replay: the capture's region {b:#x} +{n:#x} could not be reserved at its address (this process holds memory there)"));
                 }
             }
             rec::MEM => {
@@ -459,6 +468,7 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path) -> Result<u64, Stri
                 // SAFETY: committed just now, inside a region reserved above (a page the capture read)
                 unsafe { core::ptr::copy_nonoverlapping(p[8..].as_ptr(), a as *mut u8, p.len() - 8) };
             }
+            rec::DPOOL if failed_regions > 0 => return Err(format!("{failed_regions} of the capture's memory regions could not be placed at their addresses")),
             rec::DPOOL => {
                 let (tex, pool, base) = (u64_at(&p, 0) != 0, u64_at(&p, 8) as usize, u64_at(&p, 16) as i64 as i32);
                 let n = unsafe { (*(pool as *const crate::nvn::obj::dpool_t)).n };

@@ -9,6 +9,11 @@ layout(binding = 0) uniform sampler2D cur;
 layout(binding = 1) uniform sampler2D prev;
 layout(binding = 2) uniform sampler2D flow;
 layout(binding = 3, rgba16f) uniform writeonly image2D dst;
+// the whole-frame check (fg_stats.comp): 0 interpolate; 1 duplicate, 2 scene cut, 3 warming up after one: the
+// previous frame as it is
+layout(binding = 4, std430) readonly buffer S {
+    uint mode;
+} s;
 layout(push_constant) uniform P {
     ivec2 size;
     vec2 inv_size;
@@ -34,6 +39,10 @@ void main() {
     ivec2 y = ivec2(gl_GlobalInvocationID.xy);
     if (y.x >= p.size.x || y.y >= p.size.y) return;
     vec2 uv = (vec2(y) + 0.5) * p.inv_size;
+    if (s.mode != 0u) {
+        imageStore(dst, y, vec4(textureLod(prev, uv, 0.0).rgb, 1.0));
+        return;
+    }
     vec2 ft = 1.0 / vec2(textureSize(flow, 0));
     const vec2 offs[5] = vec2[](vec2(0.0), vec2(2.0, 0.0), vec2(-2.0, 0.0), vec2(0.0, 2.0), vec2(0.0, -2.0));
     // no motion first: what stands still (the HUD, text, a still camera) is never warped when it agrees as it is

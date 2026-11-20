@@ -12,7 +12,9 @@ use ash::vk;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
-const N: usize = 4096;
+/// checkpoints kept (with `all` the GPU ran more than 4,096 draws behind the replay in MKW races: the faulting one was
+/// gone, lane K2)
+const N: usize = 1 << 18;
 
 #[derive(Clone, Default)]
 struct Ck {
@@ -156,6 +158,9 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
                     if let Some(o) = addr_owner(a.reported_address) {
                         crate::log::red(&format!("    {o}"));
                     } else if addr_report_wanted() {
+                        if let Some(n) = nearest_below(a.reported_address) {
+                            crate::log::red(&format!("    the nearest bound range below it: {n}"));
+                        }
                         let (l, u) = binding_counts();
                         crate::log::red(&format!("    in no memory bound or unbound since the start (the address binding report: {l} ranges bound now, {u} unbound kept)"));
                     }
@@ -212,7 +217,8 @@ struct Bind {
 #[derive(Default)]
 struct Binds {
     live: std::collections::BTreeMap<u64, Bind>,
-    gone: std::collections::VecDeque<(u64, Bind, f64)>,
+    /// the last binding unbound at each base address (every one since the start: a fault can name memory freed long ago)
+    gone: std::collections::BTreeMap<u64, (Bind, f64)>,
 }
 static BINDS: Mutex<Option<Binds>> = Mutex::new(None);
 
@@ -240,10 +246,7 @@ pub unsafe fn on_binding(data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>
     if b.binding_type == vk::DeviceAddressBindingTypeEXT::BIND {
         s.live.insert(b.base_address, Bind { size: b.size, ty, handle, at });
     } else if let Some(x) = s.live.remove(&b.base_address) {
-        if s.gone.len() >= 8192 {
-            s.gone.pop_front();
-        }
-        s.gone.push_back((b.base_address, x, at));
+        s.gone.insert(b.base_address, (x, at));
     }
 }
 
@@ -251,6 +254,13 @@ pub unsafe fn on_binding(data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>
 pub fn bound_at(handle: u64) -> Option<(u64, u64)> {
     let g = BINDS.lock().unwrap();
     g.as_ref()?.live.iter().find(|(_, b)| b.handle == handle).map(|(a, b)| (*a, b.size))
+}
+
+/// The live binding nearest below `a` (where its end is, against the faulting address).
+fn nearest_below(a: u64) -> Option<String> {
+    let g = BINDS.lock().unwrap();
+    let (&base, x) = g.as_ref()?.live.range(..=a).next_back()?;
+    Some(format!("{:?} {:#x} at {base:#x} +{:#x} (ends {:#x}, {:#x} before the fault)", x.ty, x.handle, x.size, base + x.size, a.saturating_sub(base + x.size)))
 }
 
 /// Bindings the report has seen: (live, unbound kept).
@@ -266,8 +276,8 @@ fn addr_owner(a: u64) -> Option<String> {
         return Some(format!("inside {:?} {:#x} (bound at {:.2} s: {:#x} +{:#x}), still bound", x.ty, x.handle, x.at, base, x.size));
     }
     s.gone
-        .iter()
+        .range(..=a)
         .rev()
-        .find(|(base, x, _)| a >= *base && a < base + x.size)
-        .map(|(base, x, t)| format!("inside {:?} {:#x} (bound at {:.2} s: {:#x} +{:#x}), UNBOUND at {:.2} s", x.ty, x.handle, x.at, base, x.size, t))
+        .find(|(base, (x, _))| a < **base + x.size)
+        .map(|(base, (x, t))| format!("inside {:?} {:#x} (bound at {:.2} s: {:#x} +{:#x}), UNBOUND at {:.2} s", x.ty, x.handle, x.at, base, x.size, t))
 }

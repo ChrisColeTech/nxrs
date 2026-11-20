@@ -28,6 +28,7 @@ use std::time::{Duration, Instant};
 static LUMA_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/fg_luma_comp.spv"));
 static FLOW_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/fg_flow_comp.spv"));
 static INTERP_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/fg_interp_comp.spv"));
+static STATS_SPV: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/spv/fg_stats_comp.spv"));
 
 const HIST_FMT: vk::Format = vk::Format::R16G16B16A16_SFLOAT;
 const MAX_GEN: usize = 3;
@@ -166,6 +167,8 @@ struct Frames {
     /// the flow at each level (finest first)
     flow: [Img; LEVELS],
     gen: Vec<Img>,
+    /// the whole-frame check's state (fg_stats.comp): mode, warm-up frames left, changed and big-change counts
+    state: super::Buf,
     cur: usize,
     have_prev: bool,
     fresh: bool,
@@ -178,6 +181,7 @@ struct H {
     luma: vk::Pipeline,
     flow: vk::Pipeline,
     interp: vk::Pipeline,
+    stats: vk::Pipeline,
     sampler: vk::Sampler,
 }
 
@@ -203,8 +207,12 @@ fn words(b: &[u8]) -> Vec<u32> {
 impl Fg {
     fn new(g: &Gpu) -> Result<Fg, String> {
         let dev = g.dev();
-        let ty = |b: u32| if b == 3 { vk::DescriptorType::STORAGE_IMAGE } else { vk::DescriptorType::COMBINED_IMAGE_SAMPLER };
-        let binds: Vec<_> = (0..4).map(|b| vk::DescriptorSetLayoutBinding::default().binding(b).descriptor_type(ty(b)).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE)).collect();
+        let ty = |b: u32| match b {
+            3 => vk::DescriptorType::STORAGE_IMAGE,
+            4 => vk::DescriptorType::STORAGE_BUFFER,
+            _ => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
+        };
+        let binds: Vec<_> = (0..5).map(|b| vk::DescriptorSetLayoutBinding::default().binding(b).descriptor_type(ty(b)).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE)).collect();
         let set_layout = unsafe { dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&binds), None) }.map_err(|e| e.to_string())?;
         let pcr = [vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::COMPUTE).size(32)];
         let sl = [set_layout];
@@ -226,7 +234,7 @@ impl Fg {
             .max_lod(0.0);
         let sampler = unsafe { dev.create_sampler(&sci, None) }.map_err(|e| e.to_string())?;
         Ok(Fg {
-            h: H { set_layout, layout, luma: mk(LUMA_SPV)?, flow: mk(FLOW_SPV)?, interp: mk(INTERP_SPV)?, sampler },
+            h: H { set_layout, layout, luma: mk(LUMA_SPV)?, flow: mk(FLOW_SPV)?, interp: mk(INTERP_SPV)?, stats: mk(STATS_SPV)?, sampler },
             frames: None,
             pacer: Pacer { last: None, avg: 0.0, credit: 0.0, hold_until: None },
             t_line: Instant::now(),
@@ -250,6 +258,7 @@ fn ensure_frames<'a>(g: &Gpu, frames: &'a mut Option<Frames>, w: u32, h: u32) ->
             for i in f.hist.into_iter().chain(f.luma.into_iter().flatten()).chain(f.flow).chain(f.gen) {
                 free_image(g, i);
             }
+            g.free_buffer(f.state);
         }
         if this.is_none() {
             let lvl = |k: usize| ((w >> (k + 1)).max(1), (h >> (k + 1)).max(1));
@@ -267,6 +276,13 @@ fn ensure_frames<'a>(g: &Gpu, frames: &'a mut Option<Frames>, w: u32, h: u32) ->
                 luma: [mk_luma(0)?, mk_luma(1)?],
                 flow: [fl(0)?, fl(1)?, fl(2)?],
                 gen: (0..MAX_GEN).map(|i| make_image(g, w, h, HIST_FMT, &format!("fg generated {i}"))).collect::<Result<_, _>>()?,
+                state: {
+                    let b = g.buffer(64, vk::BufferUsageFlags::STORAGE_BUFFER, MemoryLocation::GpuToCpu, "fg state")?;
+                    if !b.ptr.is_null() {
+                        unsafe { core::ptr::write_bytes(b.ptr, 0, 64) };
+                    }
+                    b
+                },
                 cur: 0,
                 have_prev: false,
                 fresh: true,
@@ -278,12 +294,14 @@ fn ensure_frames<'a>(g: &Gpu, frames: &'a mut Option<Frames>, w: u32, h: u32) ->
     }
 }
 
-fn set_for(g: &Gpu, sub: &mut Sub, fg: &H, inputs: [vk::ImageView; 3], out: vk::ImageView) -> vk::DescriptorSet {
+fn set_for(g: &Gpu, sub: &mut Sub, fg: &H, inputs: [vk::ImageView; 3], out: vk::ImageView, state: vk::Buffer) -> vk::DescriptorSet {
     let set = sub.alloc_set(g, fg.set_layout);
     let ii: Vec<[vk::DescriptorImageInfo; 1]> = inputs.iter().map(|&v| [vk::DescriptorImageInfo { sampler: fg.sampler, image_view: v, image_layout: vk::ImageLayout::GENERAL }]).collect();
     let oi = [vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: out, image_layout: vk::ImageLayout::GENERAL }];
     let mut w: Vec<vk::WriteDescriptorSet> = (0..3).map(|b| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(b as u32).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&ii[b])).collect();
     w.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(3).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).image_info(&oi));
+    let bi = [vk::DescriptorBufferInfo { buffer: state, offset: 0, range: 64 }];
+    w.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(4).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&bi));
     unsafe { g.dev().update_descriptor_sets(&w, &[]) };
     set
 }
@@ -317,6 +335,14 @@ struct PFlow {
     size: [i32; 2],
     radius: i32,
     has_coarse: i32,
+}
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PStats {
+    size: [i32; 2],
+    same: f32,
+    cut_d: f32,
+    cut_f: f32,
 }
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -443,7 +469,7 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
     for k in 0..LEVELS {
         let (src_view, sw, sh, rgb) = if k == 0 { (frames.hist[cur].view, w, h, 1) } else { (frames.luma[cur][k - 1].view, frames.luma[cur][k - 1].w, frames.luma[cur][k - 1].h, 0) };
         let d = &frames.luma[cur][k];
-        let set = set_for(g, sub, fg_ro, [src_view; 3], d.view);
+        let set = set_for(g, sub, fg_ro, [src_view; 3], d.view, frames.state.buf);
         let p = PLuma { size: [d.w as i32, d.h as i32], inv_src: [1.0 / sw as f32, 1.0 / sh as f32], from_rgb: rgb };
         dispatch(g, sub, fg_ro, fg_ro.luma, set, &bytes(&p), d.w, d.h);
     }
@@ -452,19 +478,35 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
     let had_prev = std::mem::replace(&mut frames.have_prev, true);
     let gens = if had_prev { gens_wanted } else { 0 };
     let prev = cur ^ 1;
+    if had_prev {
+        // the whole-frame check on the coarsest luma (a duplicate, a scene cut and its warm-up show the previous frame
+        // in between instead of a warped guess: Eglantine's duplicate skip and warm-up; the cut test is new)
+        let k = LEVELS - 1;
+        let d = &frames.luma[cur][k];
+        let set = set_for(g, sub, fg_ro, [frames.luma[cur][k].view, frames.luma[prev][k].view, d.view], d.view, frames.state.buf);
+        let p = PStats { size: [d.w as i32, d.h as i32], same: 1.0 / 512.0, cut_d: 0.2, cut_f: 0.5 };
+        let dev = g.dev();
+        unsafe {
+            dev.cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, fg_ro.stats);
+            dev.cmd_bind_descriptor_sets(sub.main, vk::PipelineBindPoint::COMPUTE, fg_ro.layout, 0, &[set], &[]);
+            dev.cmd_push_constants(sub.main, fg_ro.layout, vk::ShaderStageFlags::COMPUTE, 0, &bytes(&p));
+            dev.cmd_dispatch(sub.main, 1, 1, 1);
+        }
+        super::queue::full_barrier(g, sub.main);
+    }
     if gens > 0 {
         // the flow, coarse to fine
         for k in (0..LEVELS).rev() {
             let d = &frames.flow[k];
             let coarse = if k + 1 < LEVELS { frames.flow[k + 1].view } else { frames.flow[k].view };
-            let set = set_for(g, sub, fg_ro, [frames.luma[cur][k].view, frames.luma[prev][k].view, coarse], d.view);
+            let set = set_for(g, sub, fg_ro, [frames.luma[cur][k].view, frames.luma[prev][k].view, coarse], d.view, frames.state.buf);
             let p = PFlow { size: [d.w as i32, d.h as i32], radius: if k + 1 == LEVELS { 4 } else { 1 }, has_coarse: (k + 1 < LEVELS) as i32 };
             dispatch(g, sub, fg_ro, fg_ro.flow, set, &bytes(&p), d.w, d.h);
         }
         for i in 0..gens {
             let t = (i + 1) as f32 / (gens + 1) as f32;
             let o = &frames.gen[i];
-            let set = set_for(g, sub, fg_ro, [frames.hist[cur].view, frames.hist[prev].view, frames.flow[0].view], o.view);
+            let set = set_for(g, sub, fg_ro, [frames.hist[cur].view, frames.hist[prev].view, frames.flow[0].view], o.view, frames.state.buf);
             let p = PInterp { size: [w as i32, h as i32], inv_size: [1.0 / w as f32, 1.0 / h as f32], t, flow_scale: 2.0 };
             dispatch(g, sub, fg_ro, fg_ro.interp, set, &bytes(&p), w, h);
         }
@@ -478,6 +520,19 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
     let out = Output { gens: frames.gen[..gens].iter().map(|i| i.image).collect(), real, w, h };
     note_stats(fg, &s, gens, if s.lsfg { "built-in (LSFG not available)" } else { "built-in" });
     Some(out)
+}
+
+/// The whole-frame check's last answer (fg_stats.comp: 0 interpolate, 1 duplicate, 2 scene cut, 3 warming up) and
+/// its counts (changed, big changes), once the submission that made it has completed. Tests and diagnosis.
+pub fn last_check() -> Option<(u32, u32, u32)> {
+    let l = FG.lock().unwrap();
+    let f = l.as_ref()?.frames.as_ref()?;
+    if f.state.ptr.is_null() {
+        return None;
+    }
+    // SAFETY: the state buffer's mapped words (written by the GPU, read after its fence)
+    let w = unsafe { core::slice::from_raw_parts(f.state.ptr as *const u32, 4) };
+    Some((w[0], w[2], w[3]))
 }
 
 /// Counts a game frame and its generated frames; a line every 5 s.

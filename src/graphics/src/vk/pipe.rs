@@ -452,6 +452,15 @@ fn gpl_part(g: &Gpu, key: Vec<u8>, what: vk::GraphicsPipelineLibraryFlagsEXT, ci
     if let Some(&p) = g.pipes.parts.lock().unwrap().get(&key) {
         return (p != vk::Pipeline::null()).then_some(p);
     }
+    // a part made on the replay's thread (a draw waits for it): what it was, so a first run shows why the ones made
+    // ahead did not cover it (NXGFX_PIPE_LOG=1)
+    if std::env::var("NXGFX_PIPE_LOG").as_deref() == Ok("1") && !std::thread::current().name().is_some_and(|n| n.starts_with("vk shader parts")) {
+        static N: AtomicU64 = AtomicU64::new(0);
+        if N.fetch_add(1, Ordering::Relaxed) < 400 {
+            let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+            crate::vklog!("pipeline part {what:?} made at its draw on {}: key {hex}", std::thread::current().name().unwrap_or("?"));
+        }
+    }
     let mut li = vk::GraphicsPipelineLibraryCreateInfoEXT::default().flags(what);
     // no RETAIN_LINK_TIME_OPTIMIZATION_INFO: nothing links these with LINK_TIME_OPTIMIZATION (the optimized pipeline is
     // built whole from the modules, `build_gfx`), and the retained information made each part bigger and slower to
@@ -648,23 +657,21 @@ pub fn prebuild(g: &'static Gpu, keys: Vec<ShaderKey>) {
             let r = r.clone();
             let _ = std::thread::Builder::new().name(format!("vk shader parts {i}")).spawn(move || {
                 low_priority();
-                // the driver's memory bounds it: the private memory the parts' own jobs grew it by (the game's loading
-                // around them no longer counts), at most parts_budget()
-                let budget = parts_budget();
+                // the driver's memory bounds it: the process's private memory, at most parts_cap()
+                let cap = parts_cap();
                 loop {
                     let job = r.lock().unwrap().recv();
                     let Ok(keys) = job else { return };
                     if g.pipes.stop.load(Ordering::Relaxed) {
                         return;
                     }
-                    if PARTS_GROWTH.load(Ordering::Relaxed) > budget {
+                    if private_bytes() > cap {
                         static SAID: AtomicBool = AtomicBool::new(false);
                         if !SAID.swap(true, Ordering::Relaxed) {
-                            crate::vklog!("shader parts are no longer made ahead: they grew private memory by {} MB (NXGFX_PREWARM_BUDGET_MB)", budget >> 20);
+                            crate::vklog!("shader parts are no longer made ahead: the process's private memory is past {} MB (NXGFX_PARTS_PRIVATE_MB)", cap >> 20);
                         }
                         continue;
                     }
-                    let _grew = Grew::start();
                     let _x = driver_exclusive(g).then(|| EXCLUSIVE.lock().unwrap());
                     let mut k = GfxKey::default();
                     let mut mods = Vec::new();
@@ -696,32 +703,11 @@ pub fn prebuild(g: &'static Gpu, keys: Vec<ShaderKey>) {
     let _ = tx.as_ref().unwrap().send(keys);
 }
 
-/// Private memory the shader-part jobs grew the process by (each job's own growth, summed).
-static PARTS_GROWTH: AtomicU64 = AtomicU64::new(0);
-
-static PARTS_JOBS: AtomicU64 = AtomicU64::new(0);
-
-/// Adds a job's growth to PARTS_GROWTH when it ends (shared among the jobs that ran beside it: each one's window sees
-/// the others' growth too).
-struct Grew(u64, u64);
-impl Grew {
-    fn start() -> Grew {
-        let n = PARTS_JOBS.fetch_add(1, Ordering::Relaxed) + 1;
-        Grew(private_bytes(), n)
-    }
-}
-impl Drop for Grew {
-    fn drop(&mut self) {
-        let n = PARTS_JOBS.fetch_sub(1, Ordering::Relaxed).max(self.1).max(1);
-        PARTS_GROWTH.fetch_add(private_bytes().saturating_sub(self.0) / n, Ordering::Relaxed);
-    }
-}
-
-/// The shader parts' memory budget: NXGFX_PREWARM_BUDGET_MB, default 2 GB of the parts' own growth. (6 GB with 4
-/// threads, `-G4-wonder-first2`: 19,441 parts by 102 s, still a 2.3 s frame at the level entry and many multi-second
-/// frames: worse than 2 GB of growth counted with the game's loading, `-G4-wonder-first`.)
-fn parts_budget() -> u64 {
-    std::env::var("NXGFX_PREWARM_BUDGET_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2048) << 20
+/// The private memory past which no more shader parts are made ahead: NXGFX_PARTS_PRIVATE_MB, default 6 GB. (A
+/// budget on the parts' own growth stopped them at 4.3 s in Super Mario Bros. Wonder's first run, the game's boot
+/// loading counted with them: 3,100 parts, the process at 2.4 GB, and the first level compiled 61 pipelines in 2 s.)
+fn parts_cap() -> u64 {
+    std::env::var("NXGFX_PARTS_PRIVATE_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(6144) << 20
 }
 
 /// A pipeline replaced (its optimized build took its place, or another thread made the same one first): destroyed once

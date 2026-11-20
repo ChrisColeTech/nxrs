@@ -60,6 +60,8 @@ pub struct Image {
     /// neither the image nor its memory (Beach Bounce draws its scene into one texture object and samples it through
     /// another over the same storage)
     pub alias_of: Option<u64>,
+    /// counts the GPU writes of the texture (a write-back lands only if no later GPU write came)
+    pub gpu_seq: u64,
 }
 unsafe impl Send for Image {}
 
@@ -547,6 +549,7 @@ impl Gpu {
                     page_hash: Vec::new(),
                     rewrites: 0,
                     alias_of: None,
+                    gpu_seq: 0,
                     scale: 1.0,
                 });
             }
@@ -589,6 +592,7 @@ impl Gpu {
             rewrites: 0,
             scale,
             alias_of: None,
+            gpu_seq: 0,
         })
     }
 
@@ -733,6 +737,7 @@ impl Gpu {
             rewrites: 0,
             scale: o.scale,
             alias_of: Some(owner),
+            gpu_seq: 0,
         })
     }
 
@@ -1171,6 +1176,7 @@ impl Gpu {
                 rewrites: 0,
                 scale: im.scale,
                 alias_of: None,
+                gpu_seq: 0,
             };
             im.extent = ext;
             im.scale = s;
@@ -1281,6 +1287,7 @@ impl Gpu {
                 rewrites: 0,
                 scale: im.scale,
                 alias_of: None,
+                gpu_seq: 0,
             };
             gone.push(old);
             done.insert(serial);
@@ -1408,11 +1415,104 @@ impl Gpu {
         }
     }
 
+    /// Small textures the GPU wrote in this submission, copied out at its end and written into their storage at its
+    /// completion, so a later CPU write to part of one merges with what the GPU drew (the texture is uploaded from its
+    /// storage again, which now holds both). Without it a texture the GPU wrote kept every CPU write under half of it
+    /// out for good (MKW's CPU-updated RGBA16F tables, lane K2); mkw-recomp writes GPU-written textures back at the
+    /// fence (`vk_tex_alias.c` `gpu_written_locked`, `wb_at_fence`). Only single-level, single-layer, uncompressed 2D
+    /// textures of at most 512 KB whose image is the storage's size; a CPU write to the storage in the meantime keeps
+    /// the old behaviour for that texture (the write-back is dropped). `NXGFX_TEX_WB=0` off.
+    pub fn tex_writeback(&self, sub: &mut Sub, serials: &[u64]) {
+        let mut seen = std::collections::HashSet::new();
+        let imgs = self.images.lock().unwrap();
+        let mut jobs = Vec::new();
+        for &s in serials {
+            if !seen.insert(s) || jobs.len() >= 64 {
+                continue;
+            }
+            let Some(im) = imgs.by_serial.get(&s) else { continue };
+            let t = im.tex;
+            let (bpb, bw, bh) = layout::fmt_bpb(t.d.format);
+            let depthy = matches!(im.tf.kind, Kind::Depth | Kind::DepthStencil | Kind::Stencil);
+            if t.mem.is_null() || t.l.size == 0 || t.l.size > 512 << 10 || bpb == 0 || bw != 1 || bh != 1 || depthy || im.tf.astc.is_some() || im.bc7 || im.tf.expand3 != 0 {
+                continue;
+            }
+            if im.levels != 1 || im.layers != 1 || im.ty != vk::ImageType::TYPE_2D || im.samples != vk::SampleCountFlags::TYPE_1 || im.sparse.is_some() || im.scale != 1.0 {
+                continue;
+            }
+            if im.extent.width != t.d.width as u32 || im.extent.height != t.d.height as u32 || crate::nvn::vpool::is_sparse(t.mem as u64) {
+                continue;
+            }
+            jobs.push((s, im.image, im.gpu_seq, t, bpb));
+        }
+        drop(imgs);
+        if jobs.is_empty() {
+            return;
+        }
+        super::queue::full_barrier(self, sub.main);
+        for (serial, image, seq, t, bpb) in jobs {
+            let (w, h) = (t.d.width as u32, t.d.height as u32);
+            let n = w as u64 * h as u64 * bpb as u64;
+            let Ok(b) = self.buffer(n, vk::BufferUsageFlags::TRANSFER_DST, gpu_allocator::MemoryLocation::GpuToCpu, "texture write-back") else { continue };
+            let aspect = vk::ImageAspectFlags::COLOR;
+            let r = vk::BufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers { aspect_mask: aspect, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+                image_offset: vk::Offset3D::default(),
+                image_extent: vk::Extent3D { width: w, height: h, depth: 1 },
+            };
+            unsafe { self.dev().cmd_copy_image_to_buffer(sub.main, image, vk::ImageLayout::GENERAL, b.buf, &[r]) };
+            struct Job(super::Buf, tex_t, u64, u64, vk::Image, u32);
+            unsafe impl Send for Job {}
+            let job = Job(b, t, serial, seq, image, bpb);
+            sub.post.push(super::queue::Post::Callback(Box::new(move |g: &Gpu| {
+                let Job(b, t, serial, seq, image, bpb) = job;
+                g.tex_writeback_land(&t, serial, seq, image, bpb, b.ptr as *const u8);
+                g.free_buffer(b);
+            })));
+        }
+    }
+
+    /// At completion: the copied texture into its storage, if it is still the texture the GPU wrote last and the CPU
+    /// has not written its storage since (then its storage is the texture's content again: not GPU-owned).
+    fn tex_writeback_land(&self, t: &tex_t, serial: u64, seq: u64, image: vk::Image, bpb: u32, data: *const u8) {
+        // the completion thread never waits for the image table (a thread holding it may wait for this completion):
+        // busy, this write-back is dropped (the texture stays the GPU's, as without write-backs)
+        let Ok(mut imgs) = self.images.try_lock() else { return };
+        let Some(im) = imgs.by_serial.get_mut(&serial) else { return };
+        if im.image != image || im.gpu_seq != seq || im.tex.mem != t.mem {
+            return;
+        }
+        let (lo, hi) = (t.mem as u64 & !0xfff, (t.mem as u64 + t.l.size + 0xfff) & !0xfff);
+        // CPU writes since (or pages held on the device): the old behaviour for this one
+        if super::mem::cpu_written(lo, hi - lo) || super::lazy::outside(t.mem as u64, t.l.size).is_some() {
+            return;
+        }
+        let (w, h) = (t.d.width as u32, t.d.height as u32);
+        let r = NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: w as i32, height: h as i32, depth: 1 };
+        let row = w as usize * bpb as usize;
+        if write_storage(t, 0, 0, &r, data, row, row * h as usize).is_none() {
+            return;
+        }
+        super::mem::reset_watch(lo, hi - lo);
+        im.gpu_owned = false;
+        im.needs_upload = false;
+        // the page hashes named the old storage bytes: a later CPU write uploads the whole texture
+        im.page_hash.clear();
+        static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 4 {
+            crate::vklog!("texture write-back: ser{serial} {w}x{h} fmt {:#x} back in its storage at {:#x} (NXGFX_TEX_WB=0 off)", t.d.format, t.mem as u64);
+        }
+    }
+
     /// The GPU writes a texture: its storage no longer holds its content.
     pub fn tex_gpu_written(&self, imgs: &mut Images, serial: u64) {
         let Some(im) = imgs.by_serial.get_mut(&serial) else { return };
         im.gpu_owned = true;
         im.needs_upload = false;
+        im.gpu_seq += 1;
         // the texture objects sharing its image
         let (image, at) = (im.image, im.tex.mem as u64);
         let Some(group) = imgs.by_addr.get(&at) else { return };

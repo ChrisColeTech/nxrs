@@ -1204,3 +1204,71 @@ fn address_binding_report_sees_bindings() {
     eprintln!("address binding report: {live} ranges bound");
     assert!(live > 0, "no binding reported");
 }
+
+/// A scissor larger than the pass's targets (a game's full-screen scissor over a smaller target) is held to them: the
+/// draw covers the target and nothing is written outside it (NVIDIA wrote past the image: Smash's device loss).
+#[test]
+fn scissor_past_the_target_is_held_to_it() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let rt = n.texture(W, H, f::RGBA8, 0, false);
+    let prog = tri_program(&mut n);
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    clear(&mut n, [0.0, 0.0, 1.0, 1.0]);
+    bind_program(&mut n, &prog);
+    unsafe { nvnCommandBufferSetScissor(n.c(), -16, -16, 8192, 8192) };
+    draw_tri(&mut n, [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]], [0.0, 1.0, 0.0, 1.0]);
+    n.submit_wait();
+    let got = n.read_rgba8(&rt, W, H);
+    let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|_| Some([0, 255, 0, 255])).collect();
+    check("scissor past the target", &got, &want, 0);
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// Frame generation's whole-frame check (`framegen.rs`, `fg_stats.comp`; docs/DECISIONS.md 1): the same frame twice is
+/// a duplicate, a completely different one a scene cut followed by two warm-up frames, and a small change is
+/// interpolated.
+#[test]
+fn frame_generation_skips_duplicates_and_scene_cuts() {
+    let _g = setup();
+    assert!(nxconfig::apply_arg("--lsfg=1"));
+    assert!(nxconfig::apply_arg("--frame_gen_type=builtin"));
+    assert!(nxconfig::apply_arg("--lsfg_target=0"));
+    let mut n = Nvn::new();
+    let g = nxgfx::vk::Gpu::get().unwrap();
+    let mk = |n: &mut Nvn, rgba: [f32; 4], _: bool| {
+        let t = n.texture(W, H, f::RGBA8, 0, false);
+        n.begin();
+        n.set_target(&t, None, W, H);
+        clear(n, rgba);
+        n.submit_wait();
+        t
+    };
+    let a = mk(&mut n, [0.2, 0.2, 0.2, 1.0], false);
+    let b = mk(&mut n, [0.9, 0.8, 0.1, 1.0], false);
+    // a small change: the same picture a little brighter (no pixel changes by a cut's amount)
+    let b2 = mk(&mut n, [0.95, 0.85, 0.15, 1.0], false);
+    let image = |t: &NVNtexture| {
+        let s = unsafe { (*(t as *const NVNtexture as *const nxgfx::nvn::obj::tex_t)).serial };
+        g.images.lock().unwrap().by_serial[&s].image
+    };
+    let frame = |t: &NVNtexture| {
+        let img = image(t);
+        std::thread::sleep(std::time::Duration::from_millis(16));
+        let f = nxgfx::vk::queue::oneoff(g, |g, sub, _| {
+            let _ = nxgfx::vk::framegen::process(g, sub, img, 0, 0, W as i32, H as i32);
+        });
+        assert!(nxgfx::vk::queue::wait_fence(f, 5_000_000_000));
+        nxgfx::vk::framegen::last_check().map(|c| c.0)
+    };
+    frame(&a);
+    assert_eq!(frame(&a), Some(1), "the same frame again: a duplicate");
+    assert_eq!(frame(&b), Some(2), "a different picture: a scene cut");
+    assert_eq!(frame(&b), Some(1), "after the cut, the same again: a duplicate");
+    assert_eq!(frame(&b2), Some(3), "warming up after the cut (a small change)");
+    assert_eq!(frame(&b), Some(3), "warming up, the second frame");
+    assert_eq!(frame(&b2), Some(0), "a small change once warm: interpolated");
+    assert!(nxconfig::apply_arg("--lsfg=0"));
+}

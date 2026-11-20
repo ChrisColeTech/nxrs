@@ -279,9 +279,38 @@ fn create_swapchain(g: &Gpu, p: &mut Presenter, srgb: bool) -> Result<(), String
     Ok(())
 }
 
+/// Presents skipped because the window was minimised.
+pub static MINIMISED_SKIPS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether window `hwnd` is minimised (Windows: IsIconic; elsewhere the front end says, `set_minimised`).
+#[cfg(windows)]
+pub fn minimised(hwnd: isize) -> bool {
+    #[link(name = "user32")]
+    extern "system" {
+        fn IsIconic(h: isize) -> i32;
+    }
+    FORCE_MIN.load(std::sync::atomic::Ordering::Relaxed) || unsafe { IsIconic(hwnd) } != 0
+}
+#[cfg(not(windows))]
+pub fn minimised(_hwnd: isize) -> bool {
+    FORCE_MIN.load(std::sync::atomic::Ordering::Relaxed)
+}
+static FORCE_MIN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The front end's minimised state where the window system is not asked here (Linux), and tests.
+pub fn set_minimised(on: bool) {
+    FORCE_MIN.store(on, std::sync::atomic::Ordering::Relaxed);
+}
+
 /// Records a present of `t` into `sub` (acquire, blit, layout for present); the queue presents after submitting.
 pub fn record_present(g: &Gpu, sub: &mut Sub, t: &tex_t, origin_ll: bool, crop: Option<[i32; 4]>) {
-    if !t.valid() || g.present.lock().unwrap().hwnd == 0 || !show(Instant::now()) {
+    let hwnd = g.present.lock().unwrap().hwnd;
+    if !t.valid() || hwnd == 0 || !show(Instant::now()) {
+        return;
+    }
+    // nothing shown while the window is minimised (the game goes on; whether it is told is `pause_on_focus_loss`'s):
+    // no acquire, blit or present, no GPU time for a picture nobody sees (DECISIONS.md 8)
+    if minimised(hwnd) {
+        MINIMISED_SKIPS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         return;
     }
     // the source first: once an image is acquired this submission must wait for it

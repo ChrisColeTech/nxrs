@@ -1083,6 +1083,10 @@ fn target_image(g: &Gpu, sub: &mut Sub, t: &tex_t) -> Option<(vk::Image, format:
     }
     g.tex_gpu_written(&mut imgs, t.serial);
     g.prepare_image(&mut imgs, t.serial, sub);
+    static WB: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if *WB.get_or_init(|| std::env::var("NXGFX_TEX_WB").as_deref() != Ok("0")) && t.l.size <= 512 << 10 {
+        sub.tex_wb.push(t.serial);
+    }
     let im = &imgs.by_serial[&t.serial];
     Some((im.image, im.tf, im.extent, im.samples))
 }
@@ -1280,7 +1284,15 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
         let img = |t: &tex_t| match imgs.by_serial.get(&t.serial) {
             Some(im) => {
                 let aliased = imgs.by_serial.values().filter(|a| a.alias_of == Some(t.serial)).count();
-                let at = super::lost::bound_at(vk::Handle::as_raw(im.image)).map(|(a, n)| format!(" bound at {a:#x} +{n:#x}")).unwrap_or_default();
+                // the image's memory: its allocation's device memory (as the address binding report saw it) + offset
+                let at = im
+                    .alloc
+                    .as_ref()
+                    .and_then(|al| {
+                        let mem = unsafe { al.memory() };
+                        super::lost::bound_at(vk::Handle::as_raw(mem)).map(|(a, n)| format!(" in memory {:#x} at {:#x} (+{:#x} of {:#x})", vk::Handle::as_raw(mem), a + al.offset(), al.offset(), n))
+                    })
+                    .unwrap_or_default();
                 format!(
                     "image {:#x} {}x{}x{} levels {} {:?}{}{}{}{}",
                     vk::Handle::as_raw(im.image),
@@ -1939,6 +1951,20 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                     }
                 } + sb;
                 let view = super::perf::timed_fine(super::perf::C::TexViewNs, || tex_view(g, sub, tid, *ty | (ifmt as u32) << 16, is_img));
+                // an image bound for stores: the GPU writes it in this submission (its write-back at completion)
+                if is_img {
+                    static WB: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                    if *WB.get_or_init(|| std::env::var("NXGFX_TEX_WB").as_deref() != Ok("0")) {
+                        if let Some((serial, _)) = g.tables.tex_at(tid) {
+                            let mut imgs = g.images.lock().unwrap();
+                            if imgs.by_serial.get(&serial).is_some_and(|im| im.tex.l.size <= 512 << 10) {
+                                g.tex_gpu_written(&mut imgs, serial);
+                                drop(imgs);
+                                sub.tex_wb.push(serial);
+                            }
+                        }
+                    }
+                }
                 // NXGFX_LOG_SHADER=<key> (diagnosis, lane K): every texture / image this shader is bound to, with its image
                 static LOGK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
                 static LOGN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
@@ -2214,6 +2240,25 @@ fn shadows_on() -> bool {
     ON.load(Ordering::Relaxed)
 }
 
+fn scissor_clamp() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_SCISSOR_CLAMP").as_deref() != Ok("0"))
+}
+
+/// `r` intersected with [0, e) (an empty rectangle when they do not meet).
+fn clamp_rect(r: vk::Rect2D, e: vk::Extent2D) -> vk::Rect2D {
+    let x0 = (r.offset.x.max(0) as u32).min(e.width);
+    let y0 = (r.offset.y.max(0) as u32).min(e.height);
+    let x1 = ((r.offset.x.max(0) as u64 + r.extent.width as u64).min(e.width as u64)) as u32;
+    let y1 = ((r.offset.y.max(0) as u64 + r.extent.height as u64).min(e.height as u64)) as u32;
+    let changed = x0 as i32 != r.offset.x || y0 as i32 != r.offset.y || x1 - x0.min(x1) != r.extent.width || y1 - y0.min(y1) != r.extent.height;
+    if changed {
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| crate::vklog!("a scissor past its pass's targets ({:?} in {}x{}): held to them (later ones are not logged)", r, e.width, e.height));
+    }
+    vk::Rect2D { offset: vk::Offset2D { x: x0 as i32, y: y0 as i32 }, extent: vk::Extent2D { width: x1.saturating_sub(x0), height: y1.saturating_sub(y0) } }
+}
+
 /// Everything a draw needs bound; false when it cannot be drawn (it is skipped).
 fn draw_setup(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_instance: u32) -> bool {
     draw_setup_ex(g, sub, qs, prim_ty, base_instance, false)
@@ -2377,6 +2422,10 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
         Some([sx, sy, sw, sh]) => vk::Rect2D { offset: vk::Offset2D { x: sx.max(0), y: sy.max(0) }, extent: vk::Extent2D { width: sw.max(0) as u32, height: sh.max(0) as u32 } },
         None => vk::Rect2D { offset: vk::Offset2D::default(), extent: qs.pass_extent },
     };
+    // held inside the pass's render area: Vulkan leaves fragments outside it undefined, and NVIDIA writes them, past
+    // the end of the target's image (Super Smash Bros. Ultimate's full-screen pass into a 1920x1080 target with a larger
+    // scissor: "invalid write" just past a memory block, in no memory of ours, and the device lost; NXGFX_SCISSOR_CLAMP=0 off)
+    let sc = if scissor_clamp() { clamp_rect(sc, qs.pass_extent) } else { sc };
     let ds = qs.ds;
     let poly = qs.poly;
     unsafe {

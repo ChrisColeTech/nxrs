@@ -18,8 +18,9 @@ use std::sync::{Mutex, RwLock};
 use std::time::SystemTime;
 
 /// The current settings version (Turbo's `settings_version`): 2 moved docked to 1, 3 moved game_dynamic_resolution
-/// to auto. An ini below a version gets that change once.
-pub const SETTINGS_VERSION: u32 = 3;
+/// to auto, 4 moved lsfg from the old default 1 to 0 (frame generation off by default, one global setting:
+/// docs/DECISIONS.md 1). An ini below a version gets that change once.
+pub const SETTINGS_VERSION: u32 = 4;
 
 struct Store {
     /// Values from the file (and changes made in the game), as written.
@@ -256,6 +257,10 @@ pub fn open(path: &Path, title: &str) -> std::io::Result<()> {
     if v < 3 {
         store_file("game_dynamic_resolution", "auto");
     }
+    // the old default (1) only: a player's own 0 stays (an explicit 1 written before can not be told from it)
+    if v < 4 && string("lsfg").trim() == "1" {
+        store_file("lsfg", "0");
+    }
     if v < SETTINGS_VERSION as i64 {
         store_file("settings_version", &SETTINGS_VERSION.to_string());
     }
@@ -327,7 +332,7 @@ mod tests {
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.contains("\r\n; Game language"), "comments above the keys");
         assert!(text.contains("[Other]\r\nmy_key=hello"), "unknown keys kept");
-        assert!(text.contains("settings_version=3"));
+        assert!(text.contains("settings_version=4"));
         assert!(!text.contains("vsync=1"), "a removed key is dropped");
         assert!(!text.contains("modo_tv"), "aliases are written under the current name");
         // a game-side change
@@ -341,6 +346,17 @@ mod tests {
         assert!(!std::fs::read_to_string(&p).unwrap().contains("resolution=2"));
         assert!(apply_arg("--fps_target=120"));
         assert_eq!(lsfg(), (true, 2, 120.0));
+        assert!(apply_arg("--fps_target=0"));
+        // lsfg: the old default 1 moves to 0 once (frame generation off by default); a later 1 stays
+        let p = d.join("g2.ini");
+        std::fs::write(&p, "settings_version=3\nlsfg=1\n").unwrap();
+        open(&p, "Game").unwrap();
+        assert_eq!(string("lsfg"), "0", "the old default 1 becomes 0 once");
+        assert!(!lsfg().0);
+        std::fs::write(&p, "settings_version=4\nlsfg=1\n").unwrap();
+        open(&p, "Game").unwrap();
+        assert_eq!(string("lsfg"), "1", "a player's 1 after the migration stays");
+        assert!(lsfg().0);
         let _ = std::fs::remove_dir_all(&d);
     }
 }

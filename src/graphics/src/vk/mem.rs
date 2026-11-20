@@ -449,6 +449,12 @@ pub fn room(a: u64) -> u64 {
 }
 
 /// The OS write watch of [a, a + n) reset (the host wrote it, not the game).
+/// Whether the CPU wrote any page of [a, a + n) since the write watch was last taken there (a peek: nothing reset).
+pub fn cpu_written(a: u64, n: u64) -> bool {
+    let (lo, hi) = page_range(a, n);
+    watch::take(lo, hi, false).is_some_and(|p| !p.is_empty())
+}
+
 pub fn reset_watch(a: u64, n: u64) {
     let (lo, hi) = page_range(a, n);
     watch::reset(lo, hi);

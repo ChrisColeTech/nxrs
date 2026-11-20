@@ -40,6 +40,8 @@ impl ApplicationHandler for App {
 }
 
 const FRAMES: u32 = 300;
+/// frames at the end shown as if the window were minimised (nothing presented)
+const MIN: u32 = 30;
 
 fn main() {
     let _g = setup();
@@ -87,6 +89,10 @@ fn main() {
         if app.closed {
             break;
         }
+        // the last MIN frames as if the window were minimised: nothing is presented, the game goes on
+        if f == FRAMES - MIN {
+            nxgfx::vk::present::set_minimised(true);
+        }
         let mut idx = 0i32;
         unsafe { nvnWindowAcquireTexture(&mut *win, &mut *acq, &mut idx) };
         let t = &*texs[idx as usize];
@@ -120,6 +126,8 @@ fn main() {
     let secs = start.elapsed().as_secs_f64();
     n.finish();
     let presented = nxgfx::vk::present::presented();
+    nxgfx::vk::present::set_minimised(false);
+    let skipped = nxgfx::vk::present::MINIMISED_SKIPS.load(std::sync::atomic::Ordering::Relaxed);
     unsafe { nvnWindowFinalize(&mut *win) };
     nxgfx::close_window();
     drop(app.window.take());
@@ -140,7 +148,8 @@ fn main() {
     }
     let errs = validation_errors() - e0;
     eprintln!("window: {FRAMES} frames in {secs:.2} s ({:.1} per s), {presented} presented, {paced} pacing lines, {errs} validation errors", FRAMES as f64 / secs);
-    assert!(presented >= FRAMES as u64 - 1, "presents reached the swap chain: {presented}");
+    assert!(presented >= (FRAMES - MIN) as u64 - 1 && presented <= (FRAMES - MIN) as u64 + 1, "presents reached the swap chain, none while minimised: {presented}");
+    assert!(skipped >= MIN as u64 - 1, "presents skipped while minimised: {skipped}");
     assert!(paced >= 3, "pacing lines: {paced}");
     assert_eq!(errs, 0, "validation errors");
     eprintln!("window test: ok");

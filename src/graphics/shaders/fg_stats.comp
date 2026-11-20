@@ -1,0 +1,60 @@
+#version 450
+// Frame generation, the whole-frame check (between the luma pyramids and the flow): how many pixels of the coarsest
+// luma level changed at all and how many changed a lot. Nothing changed: a duplicate frame (mode 1). Most of it
+// changed a lot: a scene cut, a menu opening, a box over the screen (mode 2), and the next two frames are only
+// warming up (mode 3). The in-between frames then show the previous frame as it is instead of a warped guess
+// (fg_interp.comp). Mode 0: interpolate. One workgroup.
+layout(local_size_x = 256) in;
+layout(binding = 0) uniform sampler2D cur;
+layout(binding = 1) uniform sampler2D prev;
+layout(binding = 4, std430) buffer S {
+    uint mode;
+    uint warm;
+    uint changed;
+    uint big;
+} s;
+layout(push_constant) uniform P {
+    ivec2 size;
+    float same;    // a difference above this is a change
+    float cut_d;   // a difference above this is a big change
+    float cut_f;   // the fraction of big changes that makes a cut
+} p;
+
+shared uint sc[256];
+shared uint sb[256];
+
+void main() {
+    uint n = uint(p.size.x * p.size.y);
+    uint c = 0u, b = 0u;
+    for (uint i = gl_LocalInvocationIndex; i < n; i += 256u) {
+        ivec2 y = ivec2(int(i % uint(p.size.x)), int(i / uint(p.size.x)));
+        float d = abs(texelFetch(cur, y, 0).r - texelFetch(prev, y, 0).r);
+        if (d > p.same) c++;
+        if (d > p.cut_d) b++;
+    }
+    sc[gl_LocalInvocationIndex] = c;
+    sb[gl_LocalInvocationIndex] = b;
+    barrier();
+    for (uint k = 128u; k > 0u; k >>= 1) {
+        if (gl_LocalInvocationIndex < k) {
+            sc[gl_LocalInvocationIndex] += sc[gl_LocalInvocationIndex + k];
+            sb[gl_LocalInvocationIndex] += sb[gl_LocalInvocationIndex + k];
+        }
+        barrier();
+    }
+    if (gl_LocalInvocationIndex == 0u) {
+        s.changed = sc[0];
+        s.big = sb[0];
+        if (sc[0] == 0u) {
+            s.mode = 1u;
+        } else if (float(sb[0]) > p.cut_f * float(n)) {
+            s.mode = 2u;
+            s.warm = 2u;
+        } else if (s.warm > 0u) {
+            s.warm -= 1u;
+            s.mode = 3u;
+        } else {
+            s.mode = 0u;
+        }
+    }
+}

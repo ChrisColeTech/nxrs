@@ -80,7 +80,7 @@ pub const SECTIONS: &[Section] = &[
     Section {
         title: "Frame generation",
         opts: &[
-            o!("lsfg", "1", "Frame generation: in-between frames shown while the game is below lsfg_target (1 = on, 0 = off)"),
+            o!("lsfg", "0", "Frame generation: in-between frames shown while the game is below lsfg_target (1 = on, 0 = off)"),
             o!("frame_gen_type", "builtin", "builtin = the engine's own (motion estimated on the shown frames, needs nothing else);
 ;   lsfg = LSFG with the Lossless.dll of YOUR Lossless Scaling (copied beside the game, set in lsfg_dll, or found in Steam);
 ;   without a usable Lossless.dll the built-in one is used"),

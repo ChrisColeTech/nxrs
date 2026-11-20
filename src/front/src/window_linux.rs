@@ -110,6 +110,8 @@ pub fn poll_input() {
     // the game's focus state (oe message 15): in front 1, behind another window 2, minimised 3
     let st = if minimized() { 3 } else if f { 1 } else { 2 };
     nxos::services::oe::set_focus(st);
+    // nothing is presented while minimised (graphics asks Windows itself)
+    nxgfx::vk::present::set_minimised(st == 3);
     // NXRS_CONTROLLER_BACKGROUND=1: the keyboard counts out of focus too (keys posted by a test script)
     static BG: OnceLock<bool> = OnceLock::new();
     let f = f || *BG.get_or_init(|| nxos::input::env_flag("NXRS_CONTROLLER_BACKGROUND"));
