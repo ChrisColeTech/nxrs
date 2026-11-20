@@ -105,7 +105,7 @@ pub struct QState {
     c2id: std::cell::Cell<u64>,
     /// the vertex input and vertex buffers last set in this queue's command buffer: (submission, layout words,
     /// buffers by stream) (Pokemon Legends Z-A's draws repeat them: they were set again at every draw)
-    vin_last: std::cell::RefCell<(u64, Vec<u32>, [(vk::Buffer, u64); 32])>,
+    vin_last: std::cell::RefCell<(u64, u64, [(vk::Buffer, u64); 32])>,
     /// push constants' generation (new at every PushConstants)
     pgen: u64,
     /// staged constant blocks by (kind, key): where they are in submission `serial` (support buffer by pass size,
@@ -291,7 +291,7 @@ impl QState {
             cbank: Default::default(),
             tpart: Default::default(),
             c2id: Default::default(),
-            vin_last: std::cell::RefCell::new((0, Vec::new(), [(vk::Buffer::null(), u64::MAX); 32])),
+            vin_last: std::cell::RefCell::new((0, 0, [(vk::Buffer::null(), u64::MAX); 32])),
             pgen: new_bgen(),
             scache: Default::default(),
             vis_on: false,
@@ -2026,17 +2026,25 @@ fn vertex_input(g: &Gpu, sub: &mut Sub, qs: &QState, vs: &Module) {
         bufs.push((31, z, 0));
     }
     // what this command buffer has set already is not set again
-    let mut key: Vec<u32> = Vec::with_capacity(4 * binds.len() + 4 * attrs.len() + 1);
+    // the layout as one hash (no allocation: this runs at every draw)
+    let mut key = 0xcbf29ce484222325u64;
+    let mut mix = |v: u32| key = (key ^ v as u64).wrapping_mul(0x100000001b3);
     for b in &binds {
-        key.extend_from_slice(&[b.binding, b.stride, b.input_rate.as_raw() as u32, b.divisor]);
+        mix(b.binding);
+        mix(b.stride);
+        mix(b.input_rate.as_raw() as u32);
+        mix(b.divisor);
     }
-    key.push(u32::MAX);
+    mix(u32::MAX);
     for a in &attrs {
-        key.extend_from_slice(&[a.location, a.binding, a.format.as_raw() as u32, a.offset]);
+        mix(a.location);
+        mix(a.binding);
+        mix(a.format.as_raw() as u32);
+        mix(a.offset);
     }
     let mut last = qs.vin_last.borrow_mut();
     if last.0 != sub.serial {
-        *last = (sub.serial, Vec::new(), [(vk::Buffer::null(), u64::MAX); 32]);
+        *last = (sub.serial, 0, [(vk::Buffer::null(), u64::MAX); 32]);
     }
     unsafe {
         if last.1 != key {

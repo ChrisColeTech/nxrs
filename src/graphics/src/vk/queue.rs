@@ -753,11 +753,10 @@ static AQ: std::sync::OnceLock<Aq> = std::sync::OnceLock::new();
 pub fn aq_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        // off by default for now: MK8D stopped submitting ~2 minutes into two runs with it on (r22, r24), cause open
-        let on = std::env::var("NXGFX_ASYNC").as_deref() == Ok("1");
-        if on {
-            crate::vklog!("asynchronous submission: submissions and presents are replayed on a thread of their own (NXGFX_ASYNC=1)");
-        }
+        // on by default (Turbo's default): Pokemon Legends Z-A in Lumiose 49.5-52.4 FPS against 42.5-48 replayed on the
+        // game's thread (lane G3 z6 / z5), MK8D's demo 300 s at 60 with no stall (a1). NXGFX_ASYNC=0: on the game's thread
+        let on = std::env::var("NXGFX_ASYNC").as_deref() != Ok("0");
+        crate::vklog!("asynchronous submission: {}", if on { "submissions and presents are replayed on a thread of their own (NXGFX_ASYNC=0: on the game's thread)" } else { "off (NXGFX_ASYNC=0)" });
         on
     })
 }
@@ -879,6 +878,11 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
             }
         };
         let t0 = std::time::Instant::now();
+        // the NVN queue of a submit or present: its fence is a receipt while that queue stays parked
+        let opq = match &op {
+            Op::Submit { q, .. } | Op::Present { q, .. } | Op::WaitReceipt { q, .. } => Some(*q),
+            _ => None,
+        };
         match op {
             Op::Submit { q, ll, stream } => {
                 let mut st = g.q.sub.lock().unwrap();
@@ -910,9 +914,22 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
             }
         }
         a.ns.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        // the op's fence: the timeline after it, or, when its queue is parked at an event wait, a receipt of that
+        // queue's (resolved once its parked work has run: a SyncWait on it must not pass before)
+        let fence = {
+            let mut st = g.q.sub.lock().unwrap();
+            match opq.and_then(|q| st.parked.get_mut(&q)) {
+                Some(p) => {
+                    let id = RECEIPT | g.q.next_receipt.fetch_add(1, Ordering::Relaxed);
+                    p.receipts.push(id);
+                    id
+                }
+                None => g.q.last_fence(),
+            }
+        };
         {
             let mut f = a.fences.lock().unwrap();
-            f.insert(seq, g.q.last_fence());
+            f.insert(seq, fence);
             while f.len() > 4096 {
                 let k = *f.keys().next().unwrap();
                 f.remove(&k);
@@ -936,9 +953,16 @@ fn aq_physical(f: u64) -> Option<u64> {
     if a.done.load(Ordering::Acquire) < seq {
         return None;
     }
-    let m = a.fences.lock().unwrap();
-    // an op older than the ones kept: long done, its fence at most the oldest kept one's
-    Some(m.range(seq..).next().map(|(_, v)| *v).unwrap_or(0))
+    let v = {
+        let m = a.fences.lock().unwrap();
+        // an op older than the ones kept: long done, its fence at most the oldest kept one's
+        m.range(seq..).next().map(|(_, v)| *v).unwrap_or(0)
+    };
+    if v & RECEIPT != 0 {
+        // a parked queue's: its timeline value once that work has run
+        return Gpu::try_get().and_then(|g| g.q.receipts.lock().unwrap().get(&v).copied());
+    }
+    Some(v)
 }
 
 /// Runs `f` after every op queued so far (on the replay thread), or now when nothing is queued.
@@ -951,13 +975,17 @@ pub fn after_queued(f: Box<dyn FnOnce(&'static Gpu) + Send>) {
     }
 }
 
+/// The last op queued for each NVN queue (its fences name it).
+static LAST_SEQ: Mutex<Option<HashMap<u64, u64>>> = Mutex::new(None);
+
 /// nvnQueueSubmitCommands.
 pub fn submit(qserial: u64, origin_ll: bool, handles: &[u64]) {
     let Some(g) = Gpu::try_get() else { return };
     if aq_on() {
         let mut stream = Vec::new();
         unsafe { crate::nvn::cmd::for_each_record(handles, |_, r| stream.extend_from_slice(r)) };
-        aq_push(g, Op::Submit { q: qserial, ll: origin_ll, stream });
+        let seq = aq_push(g, Op::Submit { q: qserial, ll: origin_ll, stream });
+        LAST_SEQ.lock().unwrap().get_or_insert_with(HashMap::new).insert(qserial, seq);
         return;
     }
     let mut st = g.q.sub.lock().unwrap();
@@ -1069,9 +1097,11 @@ pub fn event_signalled() {
 pub fn queue_fence(qserial: u64) -> u64 {
     let Some(g) = Gpu::try_get() else { return 0 };
     if let Some(a) = AQ.get() {
+        // the queue's own last op (Turbo's last_seq: another queue's parked work is not waited for); 0: every queue's
         let t = a.tail.load(Ordering::Acquire);
-        if a.done.load(Ordering::Acquire) < t && !on_replay_thread() {
-            return ASYNC | t;
+        let s = if qserial != 0 { LAST_SEQ.lock().unwrap().as_ref().and_then(|m| m.get(&qserial).copied()).unwrap_or(t) } else { t };
+        if !on_replay_thread() && (a.done.load(Ordering::Acquire) < s || aq_physical(ASYNC | s).is_none()) {
+            return ASYNC | s;
         }
     }
     let mut st = g.q.sub.lock().unwrap();

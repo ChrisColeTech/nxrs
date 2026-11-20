@@ -69,8 +69,9 @@ thread_local! {
 }
 
 /// A holder running guest code keeps its core this long against any waiter (Horizon would pause it; here it would run
-/// on beside the taker): past it the waiter takes the core anyway (a holder spinning with no checkpoint).
-const STEAL_GUEST: Duration = Duration::from_millis(200);
+/// on beside the taker): past it the waiter takes the core anyway (a holder spinning with no checkpoint). 200 ms broke
+/// Donkey Kong Bananza: its loaders run longer than that between SVCs.
+const STEAL_GUEST: Duration = Duration::from_millis(5000);
 pub static STEALS_GUEST: AtomicU64 = AtomicU64::new(0);
 
 /// `NXOS_STEAL_ANY_MS=<ms>` (debugging): how long a waiter waits before it takes a core from an equal or better holder

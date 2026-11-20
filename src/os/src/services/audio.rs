@@ -188,6 +188,12 @@ afn!(ao_append, |a| {
         vec![]
     };
     let gain = *o.volume.lock().unwrap();
+    if crate::trace::on("audio") {
+        static N: AtomicU32 = AtomicU32::new(0);
+        if N.fetch_add(1, Ordering::Relaxed) < 200 {
+            crate::log!("audio: AudioOut #{} append {} frames ({} blocks, {} frames queued before)", o.id, pcm.len() / o.ch.max(1) as usize, o.stream.blocks(), o.stream.queued());
+        }
+    }
     o.stream.append(buf, to_stereo(&pcm, o.ch as usize, gain));
     1
 });

@@ -37,6 +37,16 @@ pub fn describe_host(rip: u64) -> String {
     }
 }
 
+/// "name.dll+0x1234" for an address in a loaded module (the foreign-fault lines).
+fn module_name(a: u64) -> String {
+    let Some(m) = module_of(a) else { return format!("{a:#x}") };
+    let mut buf = [0u16; 260];
+    let n = unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW(m, buf.as_mut_ptr(), 260) } as usize;
+    let path = String::from_utf16_lossy(&buf[..n]);
+    let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
+    format!("{name}+{:#x}", a - m as u64)
+}
+
 fn module_of(a: u64) -> Option<HMODULE> {
     let mut m: HMODULE = core::ptr::null_mut();
     let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
@@ -77,6 +87,38 @@ unsafe fn report(ep: *mut EXCEPTION_POINTERS) -> i32 {
     let ctx = &*(*ep).ContextRecord;
     let rip = ctx.Rip;
     if !ours(rip) {
+        // `NXRT_FOREIGN_FAULTS=1` (debugging): a fault in another module (a system DLL's memcpy under host code, a
+        // driver) is left to its handlers, but its first lines are logged with the caller chain, since the process may
+        // then die with no report (0xc0000005)
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if std::env::var("NXRT_FOREIGN_FAULTS").is_ok_and(|v| v == "1") && N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+            let mut s = format!("fault in another module ({what}) at {}", module_name(rip));
+            if er.NumberParameters >= 2 {
+                s.push_str(&format!(" (access {} of {:#x})", er.ExceptionInformation[0], er.ExceptionInformation[1]));
+            }
+            let mut c: CONTEXT = *ctx;
+            for n in 0..16 {
+                let mut base = 0u64;
+                let f = RtlLookupFunctionEntry(c.Rip, &mut base, core::ptr::null_mut());
+                if f.is_null() {
+                    if c.Rsp == 0 || !crate::mem::readable(c.Rsp, 8) {
+                        break;
+                    }
+                    c.Rip = *(c.Rsp as *const u64);
+                    c.Rsp += 8;
+                } else {
+                    let mut hd = core::ptr::null_mut();
+                    let mut est = 0u64;
+                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, f, &mut c, &mut hd, &mut est, core::ptr::null_mut());
+                }
+                if c.Rip == 0 {
+                    break;
+                }
+                s.push_str(&format!("
+  frame {n:2}: {} {}", module_name(c.Rip), describe_host(c.Rip)));
+            }
+            crate::rt::log(&s);
+        }
         return EXCEPTION_CONTINUE_SEARCH;
     }
     let _ = std::io::stdout().flush();

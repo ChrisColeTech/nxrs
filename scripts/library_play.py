@@ -50,6 +50,9 @@ ps.SCENARIOS.update({
     'smash_match': dict(seconds=900, window=(150, 840), steps=[('shot', 40, 'boot')] + [('a', 8, 'menu %d' % i) for i in range(7)]
                         + [('shot', 3, 'character select'), ('replay', 30, 'fight', 'smash_fight.txt')]
                         + [('shot', 30, 'fight +%d s' % (30 * m)) for m in range(1, 23)]),
+    # Anime Girls: Sun of a Beach: A through the start to the beach, then shooter.txt (walk, turn, fire, jump), ~11 min
+    'agsob': dict(seconds=900, window=(120, 840), steps=[('shot', 40, 'boot')] + [('a', 6, 'start %d' % i) for i in range(6)]
+                  + [('replay', 30, 'play', 'shooter.txt')] + [('shot', 60, 'play +%d min' % m) for m in range(1, 13)]),
     # boot only, for a trace (NXOS_TRACE): shots at 60 / 150 / 190 s
     'boot': dict(seconds=200, window=(10, 190), steps=[('shot', 60, 'boot 60 s'), ('shot', 90, 'boot 150 s'), ('shot', 40, 'boot 190 s')]),
     'menus': dict(seconds=420, window=(60, 400), steps=[('shot', 40, 'boot')] + [('a', 8, 'a%d' % i) for i in range(40)]),

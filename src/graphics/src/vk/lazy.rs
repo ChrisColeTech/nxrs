@@ -108,15 +108,44 @@ pub fn make_lazy(pages: &[u64], buf: vk::Buffer, base: u64, off0: u64) {
     install();
     let mut g = ST.lock().unwrap();
     let st = g.as_mut().unwrap();
+    // pages already held stay protected (they were protected again at every frame: one VirtualProtect a page, ~20 ms a
+    // frame in Pokemon Violet); new ones are protected in runs of neighbours
+    let mut fresh: Vec<u64> = Vec::new();
     for &p in pages {
         if st.returning.contains(&p) {
             continue; // being read back for a CPU access right now: stays eager
         }
-        st.lazy.insert(p, Lazy { buf, off: off0 + (p - base) });
-        protect(p, false);
+        if st.lazy.insert(p, Lazy { buf, off: off0 + (p - base) }).is_none() {
+            fresh.push(p);
+        }
         SKIP_BYTES.fetch_add(PAGE, Ordering::Relaxed);
     }
+    fresh.sort_unstable();
+    let mut i = 0;
+    while i < fresh.len() {
+        let mut j = i + 1;
+        while j < fresh.len() && fresh[j] == fresh[j - 1] + PAGE {
+            j += 1;
+        }
+        protect_n(fresh[i], (j - i) as u64, false);
+        i = j;
+    }
 }
+
+#[cfg(windows)]
+fn protect_n(p: u64, n: u64, access: bool) {
+    use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_NOACCESS, PAGE_READWRITE};
+    let mut old = 0u32;
+    let prot = if access { PAGE_READWRITE } else { PAGE_NOACCESS };
+    // a run over two allocations is refused as a whole: page by page then
+    if unsafe { VirtualProtect(p as *const _, (n * PAGE) as usize, prot, &mut old) } == 0 {
+        for k in 0..n {
+            unsafe { VirtualProtect((p + k * PAGE) as *const _, PAGE as usize, prot, &mut old) };
+        }
+    }
+}
+#[cfg(not(windows))]
+fn protect_n(_p: u64, _n: u64, _access: bool) {}
 
 #[cfg(windows)]
 fn protect(p: u64, access: bool) {
