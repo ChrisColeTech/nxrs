@@ -44,6 +44,22 @@ fn steady_secs() -> i64 {
 }
 
 /// The host's offset from UTC now, in seconds (daylight saving included), and its zone abbreviation.
+#[cfg(target_os = "linux")]
+pub fn local_offset() -> (i64, String) {
+    // localtime_r: the zone the TZ variable or /etc/localtime names, daylight saving included
+    let off = unsafe {
+        let t = libc::time(core::ptr::null_mut());
+        let mut tm: libc::tm = core::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        tm.tm_gmtoff
+    };
+    let h = off / 3600;
+    let name = if off == 0 { "UTC".to_string() } else { format!("UTC{h:+}") };
+    (off, name)
+}
+
+/// The host's offset from UTC now, in seconds (daylight saving included), and its zone abbreviation.
+#[cfg(windows)]
 pub fn local_offset() -> (i64, String) {
     use windows_sys::Win32::System::Time::{GetTimeZoneInformation, TIME_ZONE_INFORMATION};
     let mut tz: TIME_ZONE_INFORMATION = unsafe { core::mem::zeroed() };

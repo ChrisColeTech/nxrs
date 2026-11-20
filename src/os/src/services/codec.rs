@@ -666,6 +666,19 @@ mod tests {
         let mut params = [48000u32, 2, 1, 1].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
         params.extend_from_slice(&[0, 1]);
         params.resize(0x110, 0);
+        // an X descriptor carries a 39-bit address, as any guest buffer has: the parameters go below 2^39 (a Linux
+        // heap lies above it)
+        let params = {
+            let n = 0x1000u64;
+            let mut at = 0x20_0000_0000u64;
+            while !nxrt::mem::reserve(at, n, false) {
+                at += 0x100_0000;
+            }
+            assert!(nxrt::mem::commit(at, n));
+            let s = unsafe { std::slice::from_raw_parts_mut(at as *mut u8, params.len()) };
+            s.copy_from_slice(&params);
+            s
+        };
         let mut m = Builder { ty: T_REQUEST, cmd: 2, data: 0x1000u32.to_le_bytes().to_vec(), x: vec![Buf { addr: params.as_ptr() as u64, size: params.len() as u64, tag: 0 }], ..Default::default() }.build();
         crate::ipc::process(mgr, &mut m);
         let r = hipc::parse_response(&m, false).unwrap();

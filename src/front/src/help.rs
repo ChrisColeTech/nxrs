@@ -3,19 +3,32 @@
 //! saved into the ini, and the keyboard and hotkey tables. Esc, F1 or Backspace goes back; the game reads no pads
 //! meanwhile and a fullscreen game is windowed while it is open.
 
+#[cfg(windows)]
 use crate::WideZ;
-use std::sync::atomic::{AtomicUsize, Ordering};
+#[cfg(windows)]
+use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::Ordering;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::*;
+#[cfg(windows)]
 use windows_sys::Win32::Graphics::Gdi::*;
+#[cfg(windows)]
 use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+#[cfg(windows)]
 use windows_sys::Win32::UI::Input::KeyboardAndMouse::*;
+#[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
+#[cfg(windows)]
 const W: i32 = 760;
+#[cfg(windows)]
 const H: i32 = 620;
+#[cfg(windows)]
 const ROW: i32 = 46;
+#[cfg(windows)]
 const LIST_Y: i32 = 84;
 const NOPT: usize = 4;
+#[cfg(windows)]
 static SEL: AtomicUsize = AtomicUsize::new(0);
 
 const NAMES: [&str; NOPT] = ["Right stick", "Mouse direction", "Mouse sensitivity", "Smooth audio slowdown"];
@@ -52,6 +65,7 @@ fn value(i: usize) -> String {
     }
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn change(i: usize, dir: i32) {
     match i {
         0 => nxconfig::set("mouse_right_stick", if nxconfig::flag("mouse_right_stick") { "0" } else { "1" }),
@@ -66,16 +80,19 @@ fn change(i: usize, dir: i32) {
     crate::window::mouse_capture();
 }
 
+#[cfg(windows)]
 unsafe fn font(px: i32, weight: i32) -> HFONT {
     let face = "Segoe UI".encode_wide_z();
     CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, CLIP_DEFAULT_PRECIS as u32, CLEARTYPE_QUALITY as u32, DEFAULT_PITCH as u32, face.as_ptr())
 }
+#[cfg(windows)]
 unsafe fn rect(dc: HDC, x: i32, y: i32, w: i32, h: i32, c: u32) {
     let r = RECT { left: x, top: y, right: x + w, bottom: y + h };
     let b = CreateSolidBrush(c);
     FillRect(dc, &r, b);
     DeleteObject(b as _);
 }
+#[cfg(windows)]
 unsafe fn text(dc: HDC, f: HFONT, t: &str, x: i32, y: i32, w: i32, h: i32, fmt: u32, c: u32) {
     let mut r = RECT { left: x, top: y, right: x + w, bottom: y + h };
     SelectObject(dc, f as _);
@@ -83,10 +100,12 @@ unsafe fn text(dc: HDC, f: HFONT, t: &str, x: i32, y: i32, w: i32, h: i32, fmt: 
     let mut s: Vec<u16> = t.encode_utf16().collect();
     DrawTextW(dc, s.as_mut_ptr(), s.len() as i32, &mut r, fmt | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
 }
+#[cfg(windows)]
 const fn rgb(r: u32, g: u32, b: u32) -> u32 {
     r | g << 8 | b << 16
 }
 
+#[cfg(windows)]
 unsafe fn paint(h: HWND) {
     let mut ps: PAINTSTRUCT = std::mem::zeroed();
     let wdc = BeginPaint(h, &mut ps);
@@ -138,6 +157,7 @@ unsafe fn paint(h: HWND) {
     EndPaint(h, &ps);
 }
 
+#[cfg(windows)]
 unsafe extern "system" fn proc_(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESULT {
     match m {
         WM_ERASEBKGND => return 1,
@@ -194,6 +214,7 @@ unsafe extern "system" fn proc_(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESUL
 }
 
 /// Shows the page over `parent` and returns when it closes (runs on the window thread, its own message loop).
+#[cfg(windows)]
 pub fn show(parent: HWND) {
     use crate::window::{fullscreen, set_fullscreen, HELP_OPEN};
     unsafe {
@@ -238,4 +259,73 @@ pub fn show(parent: HWND) {
         crate::keys::HELD.store(0, Ordering::Release);
         crate::window::mouse_capture();
     }
+}
+
+/// F1 on Linux: the same page as the desktop's form dialog (zenity: the four options as lists, the keyboard and hotkey
+/// tables above them; kdialog: the tables), on a thread of its own. The game reads no pads while it is open and a
+/// fullscreen game is windowed meanwhile, as on Windows.
+#[cfg(target_os = "linux")]
+pub fn show() {
+    use crate::window::{fullscreen, set_fullscreen, HELP_OPEN};
+    if HELP_OPEN.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    std::thread::spawn(|| {
+        let fs = fullscreen();
+        crate::keys::HELD.store(0, Ordering::Release);
+        crate::window::mouse_capture();
+        if fs {
+            set_fullscreen(false);
+        }
+        crate::flog!("F1: the controls page");
+        let mut table = String::from("Keyboard\n");
+        for (a, b) in KEYS {
+            table.push_str(&format!("    {a:<14} {b}\n"));
+        }
+        table.push_str("\nHotkeys\n");
+        for (a, b) in FKEYS {
+            table.push_str(&format!("    {a:<14} {b}\n"));
+        }
+        table.push_str("\nNow: ");
+        table.push_str(&(0..NOPT).map(|i| format!("{} {}", NAMES[i], value(i).trim_matches(|c| c == '<' || c == '>' || c == ' '))).collect::<Vec<_>>().join(", "));
+        match nxos::desk::tool() {
+            Some("zenity") => {
+                let sens: Vec<String> = (1..=50).map(|i| format!("{}%", i * 10)).collect();
+                let out = std::process::Command::new("zenity")
+                    .args(["--forms", "--title", "nxrs - Controls", "--text", &table, "--separator", "|"])
+                    .args(["--add-combo", NAMES[0], "--combo-values", "I J K L keys|Mouse"])
+                    .args(["--add-combo", NAMES[1], "--combo-values", &INVERSION.join("|")])
+                    .args(["--add-combo", NAMES[2], "--combo-values", &sens.join("|")])
+                    .args(["--add-combo", NAMES[3], "--combo-values", "Off|On"])
+                    .stdin(std::process::Stdio::null())
+                    .output();
+                if let Some(o) = out.ok().filter(|o| o.status.success()) {
+                    let s = String::from_utf8_lossy(&o.stdout);
+                    let v: Vec<&str> = s.trim_end_matches('\n').split('|').map(str::trim).collect();
+                    if let Some(x) = v.first().filter(|x| !x.is_empty()) {
+                        nxconfig::set("mouse_right_stick", if *x == "Mouse" { "1" } else { "0" });
+                    }
+                    if let Some(i) = v.get(1).and_then(|x| INVERSION.iter().position(|n| n == x)) {
+                        nxconfig::set("mouse_invert", &i.to_string());
+                    }
+                    if let Some(p) = v.get(2).and_then(|x| x.trim_end_matches('%').parse::<i32>().ok()) {
+                        nxconfig::set("mouse_sensitivity", &format!("{:.2}", p.clamp(10, 500) as f32 / 100.0));
+                    }
+                    if let Some(x) = v.get(3).filter(|x| !x.is_empty()) {
+                        nxconfig::set("audio_slowdown", if *x == "On" { "1" } else { "0" });
+                    }
+                }
+            }
+            Some(_) => {
+                let _ = std::process::Command::new("kdialog").args(["--title", "nxrs - Controls", "--msgbox", &table]).stdin(std::process::Stdio::null()).status();
+            }
+            None => crate::flog!("F1: no dialog on this desktop (no display, or neither zenity nor kdialog):\n{table}"),
+        }
+        if fs {
+            set_fullscreen(true);
+        }
+        HELP_OPEN.store(false, Ordering::Release);
+        crate::keys::HELD.store(0, Ordering::Release);
+        crate::window::mouse_capture();
+    });
 }

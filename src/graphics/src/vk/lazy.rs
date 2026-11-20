@@ -169,14 +169,14 @@ fn protect_n(p: u64, n: u64, access: bool) {
 }
 
 #[cfg(windows)]
-fn protect(p: u64, access: bool) {
+fn protect(p: u64, access: bool) -> bool {
     use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_NOACCESS, PAGE_READWRITE};
     let mut old = 0u32;
-    unsafe { VirtualProtect(p as *const _, PAGE as usize, if access { PAGE_READWRITE } else { PAGE_NOACCESS }, &mut old) };
+    unsafe { VirtualProtect(p as *const _, PAGE as usize, if access { PAGE_READWRITE } else { PAGE_NOACCESS }, &mut old) != 0 }
 }
 #[cfg(target_os = "linux")]
-fn protect(p: u64, access: bool) {
-    nxrt::mem::protect(p, PAGE, if access { nxrt::mem::Prot::ReadWrite } else { nxrt::mem::Prot::None });
+fn protect(p: u64, access: bool) -> bool {
+    nxrt::mem::protect(p, PAGE, if access { nxrt::mem::Prot::ReadWrite } else { nxrt::mem::Prot::None })
 }
 
 /// Whether any page of [a, a + n) is held on the device (the host is about to touch it: read it back first).
@@ -243,6 +243,16 @@ pub fn touch(a: u64, n: u64) {
 /// thread is reading back is waited for (true: the access can go on once it is back).
 pub fn bring_back(p: u64) -> bool {
     let p = p & !(PAGE - 1);
+    // the page this thread is bringing back right now: a fault on it from inside that (the copy into the page) is not
+    // waited for (it waited for itself for ever: Mario Kart World's job worker at ~70 s, lane K2), it goes on to the
+    // other handlers
+    thread_local! {
+        static MINE: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
+    }
+    if MINE.with(|m| m.get()) == p {
+        crate::log::red(&format!("lazy write-back: page {p:#x} faulted again while this thread brought it back"));
+        return false;
+    }
     let l = loop {
         let mut g = ST.lock().unwrap();
         let Some(st) = g.as_mut() else { return false };
@@ -263,19 +273,27 @@ pub fn bring_back(p: u64) -> bool {
         break l;
     };
     let done = || {
+        MINE.with(|m| m.set(u64::MAX));
         if let Some(st) = ST.lock().unwrap().as_mut() {
             st.returning.remove(&p);
         }
     };
+    MINE.with(|m| m.set(p));
     let Some(g) = Gpu::try_get() else {
-        protect(p, true);
+        let ok = protect(p, true);
         done();
-        return true;
+        return ok;
     };
     let t0 = std::time::Instant::now();
     let data = read_page(g, l.buf, l.off);
     BACK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    protect(p, true);
+    if !protect(p, true) || !accessible(p) {
+        // the page is no longer the one made lazy (unmapped or decommitted since): nothing to bring back; the access
+        // goes on to the other handlers
+        crate::log::red(&format!("lazy write-back: page {p:#x} can no longer be made accessible (its memory changed while it was held on the device): dropped"));
+        done();
+        return false;
+    }
     // SAFETY: the guest page, accessible again; other threads' faults on it wait in `returning` until it is filled
     unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, PAGE as usize) };
     super::mem::reset_watch(p, PAGE);

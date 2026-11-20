@@ -53,6 +53,21 @@ fn dpool_add(m: &Mutex<DpoolBases>, pool: usize, n: i32, kind: &str) -> i32 {
 fn dpool_base(m: &Mutex<DpoolBases>, pool: usize) -> i32 {
     m.lock().unwrap().t.iter().find(|e| e.0 == pool).map(|e| e.1).unwrap_or(0)
 }
+/// The texture (tex = true) or sampler descriptor pools initialized so far: (pool object address, host table base).
+pub fn dpool_list(tex: bool) -> Vec<(usize, i32)> {
+    (if tex { &TEX_BASES } else { &SAMP_BASES }).lock().unwrap().t.clone()
+}
+/// A descriptor pool numbered from `base` as a capture recorded it (vk::capture's replay).
+pub fn dpool_restore(tex: bool, pool: usize, base: i32, n: i32) {
+    let mut g = (if tex { &TEX_BASES } else { &SAMP_BASES }).lock().unwrap();
+    if g.t.iter().any(|e| e.0 == pool) {
+        return;
+    }
+    g.t.push((pool, base));
+    g.next = g.next.max(base + ((n + 255) & !255));
+    g.end = g.end.max(base + n);
+}
+
 /// The host table base of a texture (tex = true) or sampler descriptor pool: the replay's bound pools.
 pub fn dpool_base_of(pool: *const dpool_t, tex: bool) -> i32 {
     if tex { dpool_base(&TEX_BASES, pool as usize) } else { dpool_base(&SAMP_BASES, pool as usize) }

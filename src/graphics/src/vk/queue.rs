@@ -845,12 +845,18 @@ pub fn aq_wait_room(present: bool) {
 }
 
 fn aq_push(g: &'static Gpu, op: Op) -> u64 {
+    aq_push_with(g, op, |_| {})
+}
+
+/// As `aq_push`; `before` runs with the op's sequence number before the replay thread can see the op.
+fn aq_push_with(g: &'static Gpu, op: Op, before: impl FnOnce(u64)) -> u64 {
     let a = aq(g);
     if matches!(op, Op::Present { .. }) {
         AQ_PRESENTS.fetch_add(1, Ordering::AcqRel);
     }
     let mut q = a.ops.lock().unwrap();
     let seq = a.tail.fetch_add(1, Ordering::AcqRel) + 1;
+    before(seq);
     q.push_back((seq, op));
     drop(q);
     a.cv.notify_one();
@@ -1024,7 +1030,7 @@ static LAST_SEQ: Mutex<Option<HashMap<u64, u64>>> = Mutex::new(None);
 /// nvnQueueSubmitCommands.
 pub fn submit(qserial: u64, origin_ll: bool, handles: &[u64]) {
     let Some(g) = Gpu::try_get() else { return };
-    if aq_on() {
+    if aq_on() || super::capture::on() {
         let mut stream = Vec::new();
         let mut syncs = Vec::new();
         unsafe {
@@ -1035,20 +1041,29 @@ pub fn submit(qserial: u64, origin_ll: bool, handles: &[u64]) {
                 stream.extend_from_slice(r)
             })
         };
-        let seq = aq_push(g, Op::Submit { q: qserial, ll: origin_ll, stream });
-        // a sync fenced inside these command buffers covers this submission from now: one reused every frame still held
-        // last frame's (done) fence until the replay thread reached it, so a wait on it passed while this frame's work was
-        // still queued and the game rewrote memory that work reads (Turbo fences at submit; NXGFX_ASYNC=0 replays at once)
+        super::capture::submit(qserial, origin_ll, &stream);
+        if !aq_on() {
+            submit_stream(qserial, origin_ll, stream);
+            return;
+        }
         if !syncs.is_empty() && !CB_FENCE_LOGGED.swap(true, Ordering::Relaxed) {
             crate::vklog!("command-buffer fence syncs: fenced when submitted (their replay sets the exact value)");
         }
-        for s in syncs.into_iter().filter(|&s| s != 0) {
-            let so = s as *mut crate::nvn::obj::sync_t;
-            unsafe {
-                core::ptr::write_volatile(&mut (*so).fence, ASYNC | seq);
-                core::ptr::write_volatile(&mut (*so).fenced, 1);
+        // a sync fenced inside these command buffers covers this submission from now: one reused every frame still held
+        // last frame's (done) fence until the replay thread reached it, so a wait on it passed while this frame's work was
+        // still queued and the game rewrote memory that work reads (Turbo fences at submit; NXGFX_ASYNC=0 replays at
+        // once). Written before the replay thread can see the op: its exact value (set when the replay reaches the
+        // record, before a later event wait parks the queue) must not be overwritten by this one (that waited for the
+        // parked rest: Donkey Kong Bananza's main thread held 15 s in nvnSyncWait)
+        let seq = aq_push_with(g, Op::Submit { q: qserial, ll: origin_ll, stream }, |seq| {
+            for &s in syncs.iter().filter(|&&s| s != 0) {
+                let so = s as *mut crate::nvn::obj::sync_t;
+                unsafe {
+                    core::ptr::write_volatile(&mut (*so).fence, ASYNC | seq);
+                    core::ptr::write_volatile(&mut (*so).fenced, 1);
+                }
             }
-        }
+        });
         LAST_SEQ.lock().unwrap().get_or_insert_with(HashMap::new).insert(qserial, seq);
         return;
     }
@@ -1061,6 +1076,22 @@ pub fn submit(qserial: u64, origin_ll: bool, handles: &[u64]) {
     }
     let mut stream = Vec::new();
     unsafe { crate::nvn::cmd::for_each_record(handles, |_, r| stream.extend_from_slice(r)) };
+    run_stream(g, &mut st, qserial, origin_ll, stream, Vec::new());
+}
+
+/// A submission given as its flattened records (the capture's replay; `submit` without async replay).
+pub fn submit_stream(qserial: u64, origin_ll: bool, stream: Vec<u8>) {
+    let Some(g) = Gpu::try_get() else { return };
+    if aq_on() && !on_replay_thread() {
+        aq_push(g, Op::Submit { q: qserial, ll: origin_ll, stream });
+        return;
+    }
+    let mut st = g.q.sub.lock().unwrap();
+    take_recycled(g, &mut st);
+    if let Some(p) = st.parked.get_mut(&qserial) {
+        p.stream.extend_from_slice(&stream);
+        return;
+    }
     run_stream(g, &mut st, qserial, origin_ll, stream, Vec::new());
 }
 
@@ -1302,6 +1333,7 @@ pub fn queue_forget(qserial: u64) {
 /// nvnQueuePresentTexture: in queue order after the work submitted before it. Returns a ticket for `present_wait`.
 pub fn present(qserial: u64, origin_ll: bool, t: &crate::nvn::obj::tex_t, crop: Option<[i32; 4]>) -> u64 {
     let Some(g) = Gpu::try_get() else { return 0 };
+    super::capture::present(qserial, origin_ll, t, crop);
     if aq_on() {
         return ASYNC | aq_push(g, Op::Present { q: qserial, ll: origin_ll, t: *t, crop });
     }

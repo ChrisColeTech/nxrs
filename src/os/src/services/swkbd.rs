@@ -250,8 +250,28 @@ unsafe fn ikb_calc(c: *mut Cpu) {
     (*c).x[0] = 1;
 }
 
+/// The keyboard on Linux: the desktop's text box (zenity / kdialog, `desk.rs`) with the game's title and the default
+/// text, typed on the PC's keyboard; OK = the text, Cancel / Escape = keep the default (as the Win32 window does).
+/// With no display or no dialog tool the default is answered at once.
+#[cfg(target_os = "linux")]
+mod window {
+    pub fn input(title: &str, default: &str, max: usize) -> Option<String> {
+        let prompt = if max > 0 { format!("Up to {max} characters (Enter: OK, Esc: keep the default)") } else { "Enter: OK, Esc: keep the default".to_string() };
+        let title = if title.trim().is_empty() { "Enter text" } else { title };
+        match crate::desk::entry(title, &prompt, default) {
+            Ok(Some(t)) => Some(t),
+            Ok(None) => Some(default.to_string()),
+            Err(e) => {
+                crate::log!("swkbd: no text box ({e}): the default is answered");
+                Some(default.to_string())
+            }
+        }
+    }
+}
+
 /// The keyboard window (Win32): a dark panel over the game's window with the game's title, the text in the Hind
 /// font (the default selected: the first key typed replaces it), Enter = OK, Esc = keep the default.
+#[cfg(windows)]
 mod window {
     use std::sync::mpsc;
     use windows_sys::Win32::Foundation::*;
@@ -430,7 +450,8 @@ pub fn register(r: &mut Registry) {
     let _ = w64;
 }
 
-#[cfg(test)]
+// the Win32 text box itself (Linux answers through the desktop's dialog: desk.rs)
+#[cfg(all(test, windows))]
 mod tests {
     use windows_sys::Win32::UI::WindowsAndMessaging::{FindWindowW, PostMessageW, WM_CHAR};
 

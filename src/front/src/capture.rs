@@ -3,9 +3,17 @@
 //! render resolution, read back by graphics (`nxgfx::vk::shot`), as `captures\fullres_<date>_<time>.png`. The window
 //! grab also feeds the F7 recorder (`grab`).
 
+//!
+//! Linux: no system call reads another window's pixels on Wayland (and X11's XGetImage reads what covers it), so the
+//! window grab is the presented picture read back by graphics at the next present, the picture the window shows.
+
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::*;
+#[cfg(windows)]
 use windows_sys::Win32::Graphics::Gdi::*;
+#[cfg(windows)]
 use windows_sys::Win32::Storage::Xps::*;
+#[cfg(windows)]
 use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
 pub struct Frame {
@@ -17,6 +25,7 @@ pub struct Frame {
 
 /// The window's client area now: from the screen (a fast copy of what DWM shows) while the window is in front and
 /// visible, else through PrintWindow (slow, but works covered or minimised).
+#[cfg(windows)]
 pub fn grab() -> Option<Frame> {
     let h = crate::window::hwnd();
     // Never copy from the screen: anything over the window (another app, a notification) would be captured. Only the
@@ -29,6 +38,7 @@ pub fn grab() -> Option<Frame> {
     grab_print()
 }
 
+#[cfg(windows)]
 fn grab_screen(h: HWND) -> Option<Frame> {
     unsafe {
         let mut r: RECT = std::mem::zeroed();
@@ -71,6 +81,7 @@ fn grab_screen(h: HWND) -> Option<Frame> {
 }
 
 /// The window through PrintWindow (PW_CLIENTONLY | PW_RENDERFULLCONTENT).
+#[cfg(windows)]
 pub fn grab_print() -> Option<Frame> {
     let h = crate::window::hwnd();
     if h.is_null() {
@@ -130,6 +141,17 @@ pub fn write_png(path: &std::path::Path, f: &Frame) -> std::io::Result<()> {
     Ok(())
 }
 
+#[cfg(target_os = "linux")]
+pub fn stamp() -> String {
+    unsafe {
+        let t = libc::time(std::ptr::null_mut());
+        let mut tm: libc::tm = std::mem::zeroed();
+        libc::localtime_r(&t, &mut tm);
+        format!("{:04}{:02}{:02}_{:02}{:02}{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
+    }
+}
+
+#[cfg(windows)]
 pub fn stamp() -> String {
     unsafe {
         let mut t: windows_sys::Win32::Foundation::SYSTEMTIME = std::mem::zeroed();
@@ -144,7 +166,26 @@ pub fn captures_dir() -> std::path::PathBuf {
     d
 }
 
+/// The window to `path` (PNG): Linux reads the presented picture back at the next present and waits for it (2 s).
+#[cfg(target_os = "linux")]
+pub fn screenshot_to(path: &std::path::Path) -> bool {
+    let t = std::time::Instant::now();
+    let _ = std::fs::remove_file(path);
+    let before = nxgfx::vk::shot::count();
+    nxgfx::vk::shot::request(&path.display().to_string());
+    while t.elapsed() < std::time::Duration::from_secs(2) {
+        if nxgfx::vk::shot::count() > before && path.is_file() {
+            crate::flog!("screenshot: {} ({:.0} ms)", path.display(), t.elapsed().as_secs_f64() * 1000.0);
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(5));
+    }
+    crate::flog!("[RED] screenshot: no present within 2 s to capture");
+    false
+}
+
 /// The window to `path` (PNG).
+#[cfg(windows)]
 pub fn screenshot_to(path: &std::path::Path) -> bool {
     let t = std::time::Instant::now();
     match grab() {

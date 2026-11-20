@@ -194,6 +194,13 @@ pub unsafe fn spawn(c: *mut Cpu, name: &str, entry: nxrt::hostfn::HostFn, arg: u
 }
 
 /// True when `a` is committed, readable memory (a pointer the guest handed over that may be stale).
+#[cfg(target_os = "linux")]
+pub fn readable(a: u64, n: u64) -> bool {
+    a >= 0x1000 && nxrt::mem::readable(a, n)
+}
+
+/// True when `a` is committed, readable memory (a pointer the guest handed over that may be stale).
+#[cfg(windows)]
 pub fn readable(a: u64, n: u64) -> bool {
     use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS};
     if a < 0x1000 {

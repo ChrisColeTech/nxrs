@@ -151,6 +151,22 @@ pub fn c_code() -> String {
         let esc: String = folder.chars().flat_map(|c| if c == '"' || c == '\\' { vec!['\\', c] } else { vec![c] }).collect();
         s.push_str(&format!("        {{\"{env}\", \"{esc}\"}},\n"));
     }
+    if !cfg!(windows) {
+        // Linux: the executable's folder from /proc/self/exe, '/' separators, stat() for the marker
+        s.push_str(
+            "    };\n\
+             \x20   char exe[1024];\n\
+             \x20   long n = readlink(\"/proc/self/exe\", exe, sizeof exe - 1);\n\
+             \x20   if (n <= 0) return;\n\
+             \x20   while (n > 0 && exe[n - 1] != '/') n--;\n\
+             \x20   exe[n] = 0;\n\
+             #define NXRS_MARK(i, name, env, def) { const char *v = getenv(env); if (!(v && v[0])) for (unsigned k = 0; k < sizeof dirs / sizeof dirs[0]; k++) if (!strcmp(dirs[k][0], env)) { char p[1400]; struct stat st; snprintf(p, sizeof p, \"%smods/%s/disabled\", exe, dirs[k][1]); if (stat(p, &st) == 0) rt_patch_on[i] = 0; } }\n\
+             \x20   RT_PATCH_SETS(NXRS_MARK)\n\
+             #undef NXRS_MARK\n\
+             }\n\n",
+        );
+        return s;
+    }
     s.push_str(
         "    };\n\
          \x20   char exe[1024];\n\
@@ -167,6 +183,10 @@ pub fn c_code() -> String {
 }
 
 /// The declarations c_code needs.
+#[cfg(windows)]
 pub const C_DECLS: &str = "#include <stdio.h>\n#include <string.h>\n\
 __declspec(dllimport) unsigned long __stdcall GetModuleFileNameA(void *module, char *name, unsigned long size);\n\
 __declspec(dllimport) unsigned long __stdcall GetFileAttributesA(const char *name);\n";
+/// The declarations c_code needs (Linux: readlink and stat).
+#[cfg(not(windows))]
+pub const C_DECLS: &str = "#include <stdio.h>\n#include <string.h>\n#include <stdlib.h>\n#include <unistd.h>\n#include <sys/stat.h>\n";

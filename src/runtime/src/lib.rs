@@ -11,6 +11,8 @@ pub mod fault;
 pub mod fiber;
 pub mod hostfn;
 pub mod kernel;
+#[cfg(target_os = "linux")]
+pub mod linux;
 pub mod loader;
 pub mod mem;
 pub mod process;

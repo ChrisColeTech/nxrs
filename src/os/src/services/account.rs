@@ -261,8 +261,12 @@ mod tests {
     use super::*;
 
     /// The PC's player is an option: its slot is registered and named, the picker and the launch answer with it.
+    /// pc_user_option changes the PC's user for a moment: the tests that read the users wait for it.
+    static PC_USER: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn pc_user_option() {
+        let _g = PC_USER.lock().unwrap_or_else(|p| p.into_inner());
         assert!(nxconfig::apply_arg("--pc_user=3") && nxconfig::apply_arg("--pc_user_name=Chris"));
         assert_eq!(pc_user(), 2);
         assert_ne!(registered() & 0b100, 0);
@@ -276,6 +280,7 @@ mod tests {
 
     #[test]
     fn handles_and_uids() {
+        let _g = PC_USER.lock().unwrap_or_else(|p| p.into_inner());
         let mut h = [0u64; 3];
         let a = h.as_mut_ptr() as u64;
         assert_eq!(open_user(a, 0), RES_OK);

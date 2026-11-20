@@ -130,7 +130,11 @@ mod tests {
 
     #[test]
     fn decodes_a_packet() {
+        // the vendored libopus 1.5 on Windows; the system's 1.x on Linux
+        #[cfg(windows)]
         assert!(version().starts_with("libopus 1.5"), "{}", version());
+        #[cfg(target_os = "linux")]
+        assert!(version().starts_with("libopus 1."), "{}", version());
         let mut d = Decoder::new(48000, 2).unwrap();
         // TOC 0xfc: CELT fullband 20 ms, stereo, one frame; an empty frame decodes as silence of its length
         let mut pcm = vec![0i16; 960 * 2];

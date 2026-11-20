@@ -881,8 +881,42 @@ impl Gpu {
         Some(view)
     }
 
-    /// nvnTexturePoolRegisterTexture / RegisterImage at host ID `id`.
+    /// nvnTexturePoolRegisterTexture / RegisterImage at host ID `id`. A texture registered for sampling whose image does
+    /// not exist yet gets it at its first use (`materialize`, mkw-recomp's slots): Mario Kart World registers ~38,800
+    /// textures, 7.2 GB of images, most never drawn in a race. `NXGFX_LAZY_IMAGES=0`: every image at registration.
     pub fn reg_tex(&self, id: i32, t: &tex_t, v: Option<view_t>, as_image: bool) {
+        super::capture::tex_reg(id, t, v, as_image);
+        lazy::forget_id(id);
+        if !as_image && t.valid() && t.d.target != target::BUFFER && lazy::on() && !self.images.lock().unwrap().by_serial.contains_key(&t.serial) {
+            self.tables.note_tex(id, t.serial, v);
+            lazy::put(id, *t, v);
+            return;
+        }
+        self.reg_tex_now(id, t, v, as_image);
+    }
+
+    /// The image of texture ID `id` registered lazily, made now (its first use). Cheap when nothing waits.
+    pub fn materialize(&self, id: i32) {
+        if let Some((t, v)) = lazy::take(id) {
+            self.reg_tex_now(id, &t, v, false);
+        }
+    }
+
+    /// Every lazily registered texture made now (a shader indexes the texture pool itself: any ID may be read).
+    pub fn materialize_all(&self) {
+        let all = lazy::take_all();
+        if all.is_empty() {
+            return;
+        }
+        let n = all.len();
+        for (id, (t, v)) in all {
+            self.reg_tex_now(id, &t, v, false);
+        }
+        static SAID: std::sync::Once = std::sync::Once::new();
+        SAID.call_once(|| crate::vklog!("lazy images: a shader indexing the texture pool made the {n} waiting ones"));
+    }
+
+    fn reg_tex_now(&self, id: i32, t: &tex_t, v: Option<view_t>, as_image: bool) {
         if !t.valid() {
             crate::log::red_once("RegisterTexture of an uninitialized texture object");
             return;
@@ -917,6 +951,8 @@ impl Gpu {
 
     /// nvnTextureFinalize: the image goes once the GPU no longer uses it.
     pub fn tex_release(&self, serial: u64) {
+        super::capture::tex_release(serial);
+        lazy::forget_serial(serial);
         let mut imgs = self.images.lock().unwrap();
         let Some(mut im) = imgs.by_serial.remove(&serial) else { return };
         watch_log("released", &im.tex, Some(im.gpu_owned));
@@ -1934,4 +1970,82 @@ fn write_storage(t: &tex_t, level: u32, layer0: u32, r: &NVNcopyRegion, data: *c
         deswizzle::swizzle(&t.d, level, layer, &lin, pitch, storage)?;
     }
     Some(())
+}
+
+/// Texture registrations waiting for their image (`Gpu::reg_tex`).
+mod lazy {
+    use crate::nvn::obj::{tex_t, view_t};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::Mutex;
+
+    #[derive(Default)]
+    struct L {
+        by_id: HashMap<i32, (tex_t, Option<view_t>)>,
+        by_serial: HashMap<u64, Vec<i32>>,
+    }
+    static ST: Mutex<Option<L>> = Mutex::new(None);
+    static N: AtomicUsize = AtomicUsize::new(0);
+
+    pub fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("NXGFX_LAZY_IMAGES").as_deref() != Ok("0"))
+    }
+    pub fn put(id: i32, t: tex_t, v: Option<view_t>) {
+        let mut g = ST.lock().unwrap();
+        let l = g.get_or_insert_with(L::default);
+        l.by_serial.entry(t.serial).or_default().push(id);
+        if l.by_id.insert(id, (t, v)).is_none() {
+            N.fetch_add(1, Ordering::Relaxed);
+        }
+    }
+    pub fn take(id: i32) -> Option<(tex_t, Option<view_t>)> {
+        if N.load(Ordering::Relaxed) == 0 {
+            return None;
+        }
+        let mut g = ST.lock().unwrap();
+        let l = g.as_mut()?;
+        let (t, v) = l.by_id.remove(&id)?;
+        N.fetch_sub(1, Ordering::Relaxed);
+        if let Some(ids) = l.by_serial.get_mut(&t.serial) {
+            ids.retain(|&i| i != id);
+            if ids.is_empty() {
+                l.by_serial.remove(&t.serial);
+            }
+        }
+        Some((t, v))
+    }
+    pub fn forget_id(id: i32) {
+        let _ = take(id);
+    }
+    pub fn forget_serial(serial: u64) {
+        if N.load(Ordering::Relaxed) == 0 {
+            return;
+        }
+        let mut g = ST.lock().unwrap();
+        let Some(l) = g.as_mut() else { return };
+        for id in l.by_serial.remove(&serial).unwrap_or_default() {
+            if l.by_id.get(&id).is_some_and(|(t, _)| t.serial == serial) {
+                l.by_id.remove(&id);
+                N.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+    }
+    pub fn take_all() -> Vec<(i32, (tex_t, Option<view_t>))> {
+        if N.load(Ordering::Relaxed) == 0 {
+            return Vec::new();
+        }
+        let mut g = ST.lock().unwrap();
+        let Some(l) = g.as_mut() else { return Vec::new() };
+        N.store(0, Ordering::Relaxed);
+        l.by_serial.clear();
+        l.by_id.drain().collect()
+    }
+    /// Registrations waiting (the memory line).
+    pub fn waiting() -> usize {
+        N.load(Ordering::Relaxed)
+    }
+}
+pub fn lazy_waiting() -> usize {
+    lazy::waiting()
 }

@@ -26,6 +26,7 @@
 
 use crate::cpu::Cpu;
 
+#[cfg(windows)]
 macro_rules! frame_asm {
     // The common frame of rt_sj_owner and nxrt_call_guest: 8 pushes, 264 bytes: shadow space at rsp+0, the SjSlot
     // at rsp+32..96, xmm6-15 at rsp+96..256.
@@ -60,6 +61,7 @@ macro_rules! frame_asm {
     };
 }
 
+#[cfg(windows)]
 core::arch::global_asm!(
     ".text",
     // void rt_dispatch(Cpu *c): jump to the lifted function for c->pc.
@@ -220,6 +222,231 @@ core::arch::global_asm!(
     ".seh_endproc",
 );
 
+// The same boundary for the System V ABI (Linux): arguments in rdi, rsi, rdx, rcx; no shadow space is needed, but the
+// frame of rt_sj_owner / nxrt_call_guest keeps the Windows layout (the SjSlot at rsp+32) so `SjSlot` is one type.
+// The frames save rbx, rbp, r12-r15 (the System V callee-saved set) and, harmlessly, rsi, rdi and xmm6-15 as well.
+#[cfg(target_os = "linux")]
+macro_rules! frame_asm_sysv {
+    (prologue $name:literal) => {
+        concat!(
+            ".type ", $name, ",@function\n", $name, ":\n",
+            ".cfi_startproc\n",
+            "push rbp\n.cfi_adjust_cfa_offset 8\n.cfi_offset rbp, -16\n",
+            "push rbx\n.cfi_adjust_cfa_offset 8\n.cfi_offset rbx, -24\n",
+            "push rsi\n.cfi_adjust_cfa_offset 8\npush rdi\n.cfi_adjust_cfa_offset 8\n",
+            "push r12\n.cfi_adjust_cfa_offset 8\n.cfi_offset r12, -48\n",
+            "push r13\n.cfi_adjust_cfa_offset 8\n.cfi_offset r13, -56\n",
+            "push r14\n.cfi_adjust_cfa_offset 8\n.cfi_offset r14, -64\n",
+            "push r15\n.cfi_adjust_cfa_offset 8\n.cfi_offset r15, -72\n",
+            "sub rsp, 264\n.cfi_adjust_cfa_offset 264\n",
+            "movaps xmmword ptr [rsp + 96], xmm6\nmovaps xmmword ptr [rsp + 112], xmm7\n",
+            "movaps xmmword ptr [rsp + 128], xmm8\nmovaps xmmword ptr [rsp + 144], xmm9\n",
+            "movaps xmmword ptr [rsp + 160], xmm10\nmovaps xmmword ptr [rsp + 176], xmm11\n",
+            "movaps xmmword ptr [rsp + 192], xmm12\nmovaps xmmword ptr [rsp + 208], xmm13\n",
+            "movaps xmmword ptr [rsp + 224], xmm14\nmovaps xmmword ptr [rsp + 240], xmm15\n",
+        )
+    };
+    (epilogue $name:literal) => {
+        concat!(
+            "movaps xmm6, xmmword ptr [rsp + 96]\nmovaps xmm7, xmmword ptr [rsp + 112]\n",
+            "movaps xmm8, xmmword ptr [rsp + 128]\nmovaps xmm9, xmmword ptr [rsp + 144]\n",
+            "movaps xmm10, xmmword ptr [rsp + 160]\nmovaps xmm11, xmmword ptr [rsp + 176]\n",
+            "movaps xmm12, xmmword ptr [rsp + 192]\nmovaps xmm13, xmmword ptr [rsp + 208]\n",
+            "movaps xmm14, xmmword ptr [rsp + 224]\nmovaps xmm15, xmmword ptr [rsp + 240]\n",
+            "add rsp, 264\npop r15\npop r14\npop r13\npop r12\npop rdi\npop rsi\npop rbx\npop rbp\nret\n",
+            ".cfi_endproc\n.size ", $name, ", .-", $name, "\n",
+        )
+    };
+}
+
+#[cfg(target_os = "linux")]
+core::arch::global_asm!(
+    ".text",
+    // void rt_dispatch(Cpu *c): jump to the lifted function for c->pc.
+    ".globl rt_dispatch",
+    ".type rt_dispatch,@function",
+    ".p2align 4",
+    "rt_dispatch:",
+    "mov rax, qword ptr [rdi + 264]",
+    "sub rax, qword ptr [rip + NXRT_DISPATCH]",
+    "ror rax, 2",
+    "cmp rax, qword ptr [rip + NXRT_DISPATCH + 8]",
+    "jae 2f",
+    "mov rdx, qword ptr [rip + NXRT_DISPATCH + 16]",
+    "mov eax, dword ptr [rdx + rax * 4]",
+    "test eax, eax",
+    "jz 2f",
+    "add rax, qword ptr [rip + NXRT_DISPATCH + 24]",
+    "jmp rax",
+    "2:",
+    "jmp nxrt_dispatch_slow",
+    ".size rt_dispatch, .-rt_dispatch",
+    "",
+    ".globl nxrt_dispatch_slow",
+    ".type nxrt_dispatch_slow,@function",
+    ".p2align 4",
+    "nxrt_dispatch_slow:",
+    ".cfi_startproc",
+    "push rdi",
+    ".cfi_adjust_cfa_offset 8",
+    "call nxrt_dispatch_resolve",
+    "pop rdi",
+    ".cfi_adjust_cfa_offset -8",
+    "jmp rax",
+    ".cfi_endproc",
+    ".size nxrt_dispatch_slow, .-nxrt_dispatch_slow",
+    "",
+    // void rt_sj_owner(Cpu *c, GuestFn body, uint64_t lo, uint64_t hi)
+    ".globl rt_sj_owner",
+    ".p2align 4",
+    frame_asm_sysv!(prologue "rt_sj_owner"),
+    "mov rax, qword ptr [rdi + 344]",
+    "mov qword ptr [rsp + 32], rax",     // up
+    "mov qword ptr [rsp + 40], rdx",     // lo
+    "mov qword ptr [rsp + 48], rcx",     // hi
+    "mov qword ptr [rsp + 56], rsp",     // rsp
+    "mov qword ptr [rsp + 64], rdi",     // c
+    "mov qword ptr [rsp + 72], rsi",     // body
+    "lea rax, [rip + 3f]",
+    "mov qword ptr [rsp + 80], rax",     // resume
+    "mov qword ptr [rsp + 88], 0",       // status
+    "lea rax, [rsp + 32]",
+    "mov qword ptr [rdi + 344], rax",
+    "3:",
+    "mov rdi, qword ptr [rsp + 64]",
+    "call qword ptr [rsp + 72]",
+    "mov rdi, qword ptr [rsp + 64]",
+    "mov rax, qword ptr [rsp + 32]",
+    "mov qword ptr [rdi + 344], rax",
+    frame_asm_sysv!(epilogue "rt_sj_owner"),
+    "",
+    // uint64_t nxrt_call_guest(Cpu *c)
+    ".globl nxrt_call_guest",
+    ".p2align 4",
+    frame_asm_sysv!(prologue "nxrt_call_guest"),
+    "mov rax, qword ptr [rdi + 344]",
+    "mov qword ptr [rsp + 32], rax",
+    "mov qword ptr [rsp + 40], 0",
+    "mov qword ptr [rsp + 48], 0",
+    "mov qword ptr [rsp + 56], rsp",
+    "mov qword ptr [rsp + 64], rdi",
+    "mov qword ptr [rsp + 72], 0",
+    "lea rax, [rip + 5f]",
+    "mov qword ptr [rsp + 80], rax",
+    "mov qword ptr [rsp + 88], 0",
+    "lea rax, [rsp + 32]",
+    "mov qword ptr [rdi + 344], rax",
+    "call rt_dispatch",
+    "xor eax, eax",
+    "5:",
+    "mov rdi, qword ptr [rsp + 64]",
+    "mov rdx, qword ptr [rsp + 32]",
+    "mov qword ptr [rdi + 344], rdx",
+    frame_asm_sysv!(epilogue "nxrt_call_guest"),
+    "",
+    // noreturn void nxrt_sj_jump(SjSlot *slot)
+    ".globl nxrt_sj_jump",
+    ".type nxrt_sj_jump,@function",
+    ".p2align 4",
+    "nxrt_sj_jump:",
+    "mov rsp, qword ptr [rdi + 24]",
+    "mov rax, qword ptr [rdi + 56]",
+    "jmp qword ptr [rdi + 48]",
+    ".size nxrt_sj_jump, .-nxrt_sj_jump",
+    "",
+    ".globl nxrt_jump_pending",
+    ".type nxrt_jump_pending,@function",
+    ".p2align 4",
+    "nxrt_jump_pending:",
+    "mov rdi, qword ptr [rdi + 344]",
+    "jmp nxrt_sj_jump",
+    ".size nxrt_jump_pending, .-nxrt_jump_pending",
+    "",
+    // void rt_svc(Cpu *c, uint32_t imm, uint64_t pc): its arguments are nxrt_svc_impl's already
+    ".globl rt_svc",
+    ".type rt_svc,@function",
+    ".p2align 4",
+    "rt_svc:",
+    ".cfi_startproc",
+    "push rdi",
+    ".cfi_adjust_cfa_offset 8",
+    "call nxrt_svc_impl",
+    "pop rdi",
+    ".cfi_adjust_cfa_offset -8",
+    "test eax, eax",
+    "jnz 6f",
+    "ret",
+    "6:",
+    "cmp eax, 1",
+    "je rt_dispatch",
+    "jmp nxrt_jump_pending",
+    ".cfi_endproc",
+    ".size rt_svc, .-rt_svc",
+    "",
+    ".globl nxrt_host_entry",
+    ".type nxrt_host_entry,@function",
+    ".p2align 4",
+    "nxrt_host_entry:",
+    ".cfi_startproc",
+    "push rdi",
+    ".cfi_adjust_cfa_offset 8",
+    "call nxrt_host_invoke",
+    "pop rdi",
+    ".cfi_adjust_cfa_offset -8",
+    "test eax, eax",
+    "jnz 7f",
+    "ret",
+    "7:",
+    "cmp eax, 1",
+    "je rt_dispatch",
+    "jmp nxrt_jump_pending",
+    ".cfi_endproc",
+    ".size nxrt_host_entry, .-nxrt_host_entry",
+    "",
+    // A host fiber's first frame (fiber.rs builds its stack so that nxrt_ctx_switch returns here with the fiber's
+    // parameter in rbx): runs the fiber's guest function, then switches to the host fiber it returns for good.
+    ".globl nxrt_fiber_entry",
+    ".type nxrt_fiber_entry,@function",
+    ".p2align 4",
+    "nxrt_fiber_entry:",
+    "sub rsp, 8",
+    "mov rdi, rbx",
+    "call nxrt_fiber_run",
+    "mov rdi, rax",
+    "call nxrt_fiber_leave",
+    "call nxrt_fiber_resumed_dead",
+    "ud2",
+    ".size nxrt_fiber_entry, .-nxrt_fiber_entry",
+    "",
+    // void nxrt_ctx_switch(size_t *save, size_t to)
+    ".globl nxrt_ctx_switch",
+    ".type nxrt_ctx_switch,@function",
+    ".p2align 4",
+    "nxrt_ctx_switch:",
+    "push rbp",
+    "push rbx",
+    "push r12",
+    "push r13",
+    "push r14",
+    "push r15",
+    "sub rsp, 8",
+    "stmxcsr dword ptr [rsp]",
+    "fnstcw word ptr [rsp + 4]",
+    "mov qword ptr [rdi], rsp",
+    "mov rsp, rsi",
+    "ldmxcsr dword ptr [rsp]",
+    "fldcw word ptr [rsp + 4]",
+    "add rsp, 8",
+    "pop r15",
+    "pop r14",
+    "pop r13",
+    "pop r12",
+    "pop rbx",
+    "pop rbp",
+    "ret",
+    ".size nxrt_ctx_switch, .-nxrt_ctx_switch",
+);
+
 extern "C" {
     pub fn rt_dispatch(c: *mut Cpu);
     pub fn rt_sj_owner(c: *mut Cpu, body: crate::cpu::GuestFn, lo: u64, hi: u64);
@@ -229,6 +456,14 @@ extern "C" {
     pub fn rt_svc(c: *mut Cpu, imm: u32, pc: u64);
     pub fn nxrt_fiber_entry(param: *mut core::ffi::c_void);
 }
+
+#[cfg(target_os = "linux")]
+extern "C" {
+    /// Saves the callee-saved registers, MXCSR and the x87 control word on the current stack, stores the stack
+    /// pointer in `*save`, and resumes the context whose stack pointer is `to` (a host fiber switch).
+    pub fn nxrt_ctx_switch(save: *mut usize, to: usize);
+}
+
 
 /// Status codes of the shims (`nxrt_svc_impl`, `nxrt_host_invoke`).
 pub const ST_RETURN: u32 = 0;
@@ -270,6 +505,7 @@ pub struct DispatchHot {
 pub static mut NXRT_DISPATCH: DispatchHot = DispatchHot { lo: 0, slots: 0, slot: core::ptr::null(), anchor: 0 };
 
 /// SwitchToFiber, for `nxrt_fiber_entry` (set by `fiber.rs`).
+#[cfg(windows)]
 #[no_mangle]
 pub static mut NXRT_SWITCH_TO_FIBER: usize = 0;
 

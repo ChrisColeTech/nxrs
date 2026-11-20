@@ -16,9 +16,12 @@
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
+#[cfg(windows)]
 use windows_sys::Win32::System::Memory::*;
 // Not in windows-sys' Memory module: SystemServices values.
+#[cfg(windows)]
 const MEM_WRITE_WATCH: u32 = 0x20_0000;
+#[cfg(windows)]
 const WRITE_WATCH_FLAG_RESET: u32 = 1;
 
 pub const PAGE: u64 = 0x1000;
@@ -55,6 +58,7 @@ pub const PERM_RX: u32 = 5;
 // ---- the platform layer (win32_mem.c)
 
 /// Reserves [addr, addr+n) exactly there (no access), optionally write-watched.
+#[cfg(windows)]
 pub fn reserve(addr: u64, n: u64, watch: bool) -> bool {
     let flags = MEM_RESERVE | if watch { MEM_WRITE_WATCH } else { 0 };
     let p = unsafe { VirtualAlloc(addr as _, n as usize, flags, PAGE_NOACCESS) };
@@ -66,20 +70,24 @@ pub fn reserve(addr: u64, n: u64, watch: bool) -> bool {
 }
 
 /// Reserves n bytes wherever the OS likes (for tests and host tables), optionally write-watched.
+#[cfg(windows)]
 pub fn reserve_anywhere(n: u64, watch: bool) -> Option<u64> {
     let flags = MEM_RESERVE | if watch { MEM_WRITE_WATCH } else { 0 };
     let p = unsafe { VirtualAlloc(core::ptr::null(), n as usize, flags, PAGE_NOACCESS) };
     (!p.is_null()).then_some(p as u64)
 }
 
+#[cfg(windows)]
 pub fn release(addr: u64) {
     unsafe { VirtualFree(addr as _, 0, MEM_RELEASE) };
 }
 
+#[cfg(windows)]
 pub fn commit(addr: u64, n: u64) -> bool {
     n == 0 || !unsafe { VirtualAlloc(addr as _, n as usize, MEM_COMMIT, PAGE_READWRITE) }.is_null()
 }
 
+#[cfg(windows)]
 pub fn decommit(addr: u64, n: u64) -> bool {
     n == 0 || unsafe { VirtualFree(addr as _, n as usize, MEM_DECOMMIT) } != 0
 }
@@ -91,6 +99,7 @@ pub enum Prot {
     ReadWrite,
 }
 
+#[cfg(windows)]
 pub fn protect(addr: u64, n: u64, p: Prot) -> bool {
     let p = match p {
         Prot::None => PAGE_NOACCESS,
@@ -102,11 +111,13 @@ pub fn protect(addr: u64, n: u64, p: Prot) -> bool {
 }
 
 /// Zeroed host memory (committed on first touch by the OS), for the runtime's own tables.
+#[cfg(windows)]
 pub fn host_alloc(n: u64) -> Option<*mut u8> {
     let p = unsafe { VirtualAlloc(core::ptr::null(), n as usize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) };
     (!p.is_null()).then_some(p as *mut u8)
 }
 
+#[cfg(windows)]
 pub fn host_protect_readonly(addr: u64, n: u64) {
     if !protect(addr, n, Prot::Read) {
         crate::rt::fatal("memory: sealing a host table failed");
@@ -114,6 +125,7 @@ pub fn host_protect_readonly(addr: u64, n: u64) {
 }
 
 /// Every byte of [addr, addr+n) is committed and readable.
+#[cfg(windows)]
 pub fn readable(addr: u64, n: u64) -> bool {
     let mut a = addr;
     let end = addr.saturating_add(n.max(1));
@@ -132,6 +144,7 @@ pub fn readable(addr: u64, n: u64) -> bool {
 
 /// The pages of [addr, addr+n) written since the last reset (GetWriteWatch; the range must lie in one write-watched
 /// reservation). `reset` clears the record.
+#[cfg(windows)]
 pub fn written_pages(addr: u64, n: u64, reset: bool) -> Option<Vec<u64>> {
     let max = n.div_ceil(PAGE) as usize;
     let mut pages = vec![0u64; max.max(1)];
@@ -152,6 +165,55 @@ pub fn written_pages(addr: u64, n: u64, reset: bool) -> Option<Vec<u64>> {
     }
     pages.truncate(got);
     Some(pages)
+}
+
+
+// The same layer on Linux (`linux.rs`: mmap / mprotect, a userfaultfd write watch).
+#[cfg(target_os = "linux")]
+pub fn reserve(addr: u64, n: u64, watch: bool) -> bool {
+    crate::linux::reserve(addr, n, watch)
+}
+#[cfg(target_os = "linux")]
+pub fn reserve_anywhere(n: u64, watch: bool) -> Option<u64> {
+    crate::linux::reserve_anywhere(n, watch)
+}
+#[cfg(target_os = "linux")]
+pub fn release(addr: u64) {
+    crate::linux::release(addr)
+}
+#[cfg(target_os = "linux")]
+pub fn commit(addr: u64, n: u64) -> bool {
+    crate::linux::commit(addr, n)
+}
+#[cfg(target_os = "linux")]
+pub fn decommit(addr: u64, n: u64) -> bool {
+    crate::linux::decommit(addr, n)
+}
+#[cfg(target_os = "linux")]
+pub fn protect(addr: u64, n: u64, p: Prot) -> bool {
+    crate::linux::protect(addr, n, match p {
+        Prot::None => 0,
+        Prot::Read => 1,
+        Prot::ReadWrite => 2,
+    })
+}
+#[cfg(target_os = "linux")]
+pub fn host_alloc(n: u64) -> Option<*mut u8> {
+    crate::linux::host_alloc(n)
+}
+#[cfg(target_os = "linux")]
+pub fn host_protect_readonly(addr: u64, n: u64) {
+    if !protect(addr, n, Prot::Read) {
+        crate::rt::fatal("memory: sealing a host table failed");
+    }
+}
+#[cfg(target_os = "linux")]
+pub fn readable(addr: u64, n: u64) -> bool {
+    crate::linux::readable(addr, n)
+}
+#[cfg(target_os = "linux")]
+pub fn written_pages(addr: u64, n: u64, reset: bool) -> Option<Vec<u64>> {
+    crate::linux::written_pages(addr, n, reset)
 }
 
 // ---- the guest address space (memory.c)
@@ -399,6 +461,13 @@ impl Space {
     }
 
     /// Committed bytes of [a, a+n).
+    #[cfg(target_os = "linux")]
+    fn committed_in(a: u64, n: u64) -> u64 {
+        crate::linux::committed_in(a, n)
+    }
+
+    /// Committed bytes of [a, a+n).
+    #[cfg(windows)]
     fn committed_in(a: u64, n: u64) -> u64 {
         let mut total = 0;
         let mut p = a;

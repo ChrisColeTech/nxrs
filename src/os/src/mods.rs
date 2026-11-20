@@ -87,6 +87,29 @@ pub fn apply_bytes(loaded: &[(String, u64, u64)]) {
             continue;
         }
         let a = base + off;
+        #[cfg(target_os = "linux")]
+        {
+            let old = match nxrt::linux::query(a) {
+                Some((true, p, _, _)) => p,
+                _ => {
+                    crate::log!("[RED] mods: {module}+{off:#x} cannot be written");
+                    continue;
+                }
+            };
+            let page = a & !0xfff;
+            let prot = |p: u8| match p {
+                0 => nxrt::mem::Prot::None,
+                1 => nxrt::mem::Prot::Read,
+                _ => nxrt::mem::Prot::ReadWrite,
+            };
+            if !nxrt::mem::protect(page, 0x1000, nxrt::mem::Prot::ReadWrite) {
+                crate::log!("[RED] mods: {module}+{off:#x} cannot be written");
+                continue;
+            }
+            unsafe { *(a as *mut u8) = *b };
+            nxrt::mem::protect(page, 0x1000, prot(old));
+        }
+        #[cfg(windows)]
         unsafe {
             use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_READWRITE};
             let mut old = 0u32;

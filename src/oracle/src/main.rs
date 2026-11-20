@@ -1,6 +1,11 @@
 //! nx-oracle: the translator's lifted C against dynarmic (docs/PORT_PLAN.md, T-lane).
 //!
 //!     nx-oracle [--cases 2000] [--states 8] [--seed N] [--class a,b] [--out DIR] [--jobs 4] [--cc CLANG] [--report-only]
+//!               [--fpcr HEX] [--words HEX,HEX,...]
+//!
+//! `--fpcr`: every state starts with this FPCR (and the host MXCSR set from it as the runtime sets it: FTZ|DAZ =
+//! FPCR.FZ), on both sides. `--words`: one class `words` of exactly these instruction words (no other class),
+//! each from `--states` random states (no memory operands).
 //!
 //! Per instruction class (classes.rs): random words of the class's encoding group that the lifter lowers
 //! (`Lifter::lift`, the raw per-instruction C before the function-local flag and register passes) are compiled into
@@ -112,6 +117,8 @@ struct Opts {
     report_only: bool,
     /// Self-test: every lowered word gets a wrong extra statement; every class must then mismatch.
     mutate: bool,
+    fpcr: u64,
+    words: Vec<u32>,
 }
 
 fn parse() -> (Opts, Option<String>) {
@@ -128,6 +135,8 @@ fn parse() -> (Opts, Option<String>) {
         cc: val("--cc").map(PathBuf::from),
         report_only: a.iter().any(|x| x == "--report-only"),
         mutate: a.iter().any(|x| x == "--mutate"),
+        fpcr: val("--fpcr").and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0),
+        words: val("--words").map(|v| v.split(',').filter_map(|w| u32::from_str_radix(w.trim().trim_start_matches("0x"), 16).ok()).collect()).unwrap_or_default(),
     };
     (o, val("--child"))
 }
@@ -156,8 +165,11 @@ fn find_cc(o: &Opts) -> PathBuf {
 }
 
 /// The words of a class: drawn until `n` are lowered by the lifter (not a trap, no runtime call).
-fn draw(class: &Class, n: usize, rng: &mut Rng) -> Vec<(u32, translator::xlate::Insn)> {
+fn draw(class: &Class, n: usize, rng: &mut Rng, exact: &[u32]) -> Vec<(u32, translator::xlate::Insn)> {
     let lifter = Lifter::new();
+    if !exact.is_empty() {
+        return exact.iter().filter_map(|&w| lifter.lift(w, PC).ok().filter(|i| i.kind != Kind::Trap).map(|i| (w, i))).collect();
+    }
     let mut seen = std::collections::HashSet::new();
     let mut out = vec![];
     for _ in 0..n * 400 {
@@ -259,7 +271,7 @@ fn alloc(addr: u64, size: u64) -> &'static mut [u8] {
 }
 
 /// One random starting state for a word of a class: registers, flags, vectors; addresses where the class needs them.
-fn state(class: &Class, w: u32, rng: &mut Rng) -> Cpu {
+fn state(class: &Class, w: u32, rng: &mut Rng, fpcr: u64) -> Cpu {
     // SAFETY: Cpu is plain data
     let mut c: Cpu = unsafe { core::mem::zeroed() };
     for i in 0..31 {
@@ -269,6 +281,7 @@ fn state(class: &Class, w: u32, rng: &mut Rng) -> Cpu {
     for i in 0..32 {
         c.v[i] = rng.lane() as u128 | (rng.lane() as u128) << 64;
     }
+    c.fpcr = fpcr;
     c.tpidr = rng.next();
     c.tpidrro = rng.next();
     let mid = DATA + DATA_SIZE / 2;
@@ -349,7 +362,7 @@ fn run_class(o: &Opts, class: &Class) -> String {
     let mut rng = Rng(o.seed ^ class.value as u64 ^ (class.mask as u64) << 32);
     // at most 2,500 words a class (one DLL each): a larger run (the 1 M nightly) takes more states per word instead
     let states = o.states.max(o.cases.div_ceil(2500));
-    let nwords = o.cases.div_ceil(states).max(1);
+    let nwords = if o.words.is_empty() { o.cases.div_ceil(states).max(1) } else { o.words.len() };
     let data = alloc(DATA, DATA_SIZE);
     let code = alloc(CODE, CODE_SIZE);
     for b in data.iter_mut().chain(code.iter_mut()) {
@@ -370,12 +383,12 @@ fn run_class(o: &Opts, class: &Class) -> String {
     // words the lifter lowers, then those dynarmic runs (an exception at the word: unallocated or not modelled there)
     let mut words = vec![];
     let mut refused_words = vec![];
-    for (w, insn) in draw(class, nwords * 40, &mut rng) {
+    for (w, insn) in draw(class, nwords * 40, &mut rng, &o.words) {
         if words.len() >= nwords {
             break;
         }
         place(code, w);
-        let probe = state(class, w, &mut rng);
+        let probe = state(class, w, &mut rng, o.fpcr);
         if jit.run(&context(&probe), 1).pc == PC {
             refused_words.push(w);
         } else {
@@ -413,7 +426,7 @@ fn run_class(o: &Opts, class: &Class) -> String {
         eprintln!("at\t{w:08x}");
         place(code, *w);
         for s in 0..states {
-            let before = state(class, *w, &mut rng);
+            let before = state(class, *w, &mut rng, o.fpcr);
             let ctx = context(&before);
             let d = jit.run(&ctx, 1);
             if d.pc == PC {
@@ -422,7 +435,9 @@ fn run_class(o: &Opts, class: &Class) -> String {
                 continue;
             }
             let mut l = before;
+            let old = mxcsr_enter(o.fpcr);
             fns[i](&mut l);
+            mxcsr_leave(old);
             cases += 1;
             let (mut diffs, fpsr) = compare(&before, &l, &d);
             fpsr_diffs += fpsr as usize;
@@ -460,10 +475,30 @@ fn run_class(o: &Opts, class: &Class) -> String {
     )
 }
 
+/// The host MXCSR of a thread running guest code under `fpcr` (runtime `Cpu::sync_mxcsr`: FTZ|DAZ = FPCR.FZ, RC
+/// nearest); returns the old value.
+#[allow(deprecated)]
+fn mxcsr_enter(fpcr: u64) -> u32 {
+    use core::arch::x86_64::{_mm_getcsr, _mm_setcsr};
+    // SAFETY: MXCSR control bits only
+    unsafe {
+        let cur = _mm_getcsr();
+        _mm_setcsr((cur & !0xE040) | if fpcr & (1 << 24) != 0 { 0x8040 } else { 0 });
+        cur
+    }
+}
+#[allow(deprecated)]
+fn mxcsr_leave(old: u32) {
+    // SAFETY: restores the value read by mxcsr_enter
+    unsafe { core::arch::x86_64::_mm_setcsr(old) }
+}
+
+static WORDS: Class = Class { name: "words", mask: 0, value: 0, mem: Mem::None, words: &[] };
+
 fn main() {
     let (o, child) = parse();
     if let Some(name) = child {
-        let class = CLASSES.iter().find(|c| c.name == name).expect("class");
+        let class = if name == "words" { &WORDS } else { CLASSES.iter().find(|c| c.name == name).expect("class") };
         let line = run_class(&o, class);
         println!("{line}");
         std::io::stdout().flush().unwrap();
@@ -471,7 +506,11 @@ fn main() {
         std::process::exit(0);
     }
     let _ = std::fs::create_dir_all(&o.out);
-    let classes: Vec<&Class> = CLASSES.iter().filter(|c| o.only.is_empty() || o.only.iter().any(|n| n == c.name)).collect();
+    let classes: Vec<&Class> = if o.words.is_empty() {
+        CLASSES.iter().filter(|c| o.only.is_empty() || o.only.iter().any(|n| n == c.name)).collect()
+    } else {
+        vec![&WORDS]
+    };
     let exe = std::env::current_exe().unwrap();
     let t0 = std::time::Instant::now();
     let results = std::sync::Mutex::new(vec![]);

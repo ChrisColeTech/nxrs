@@ -328,6 +328,7 @@ impl Tables {
 impl super::Gpu {
     /// nvnSamplerPoolRegisterSampler at host ID `id`.
     pub fn reg_samp(&self, id: i32, p: &samp_par) {
+        super::capture::samp_reg(id, p);
         if id < 0 || id as u32 >= self.layout.samp_cap {
             crate::log::red_once(&format!("sampler ID {id} past the pool set"));
             return;

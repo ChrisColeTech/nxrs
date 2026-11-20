@@ -16,6 +16,10 @@ pub mod keys;
 pub mod lsfg;
 pub mod metrics;
 pub mod rec;
+#[cfg(windows)]
+pub mod window;
+#[cfg(target_os = "linux")]
+#[path = "window_linux.rs"]
 pub mod window;
 
 use std::path::{Path, PathBuf};
@@ -65,6 +69,28 @@ fn title_of(data: &Path, name: &str) -> String {
 
 /// A GUI-subsystem process started without redirected output has no stdout / stderr: the log goes to
 /// `<name>.log` beside the executable (Turbo's place), so a player's run always leaves one.
+#[cfg(target_os = "linux")]
+fn log_to_file_when_detached(dir: &Path, name: &str) {
+    // Linux: started from a desktop entry or a file manager, stderr is /dev/null (or closed): the log goes to the file
+    // then. A terminal, a pipe or a file keeps it.
+    unsafe {
+        let mut st: libc::stat = std::mem::zeroed();
+        let open = libc::fstat(2, &mut st) == 0;
+        let devnull = open && (st.st_mode & libc::S_IFMT) == libc::S_IFCHR && libc::isatty(2) == 0;
+        if open && !devnull {
+            return;
+        }
+        let p = std::ffi::CString::new(dir.join(format!("{name}.log")).as_os_str().as_encoded_bytes()).unwrap_or_default();
+        let fd = libc::open(p.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC, 0o644);
+        if fd >= 0 {
+            libc::dup2(fd, 1);
+            libc::dup2(fd, 2);
+            libc::close(fd);
+        }
+    }
+}
+
+#[cfg(windows)]
 fn log_to_file_when_detached(dir: &Path, name: &str) {
     use windows_sys::Win32::Foundation::*;
     use windows_sys::Win32::Storage::FileSystem::*;
@@ -87,9 +113,14 @@ pub trait WideZ {
     fn encode_wide_z(&self) -> Vec<u16>;
 }
 impl WideZ for std::ffi::OsStr {
+    #[cfg(windows)]
     fn encode_wide_z(&self) -> Vec<u16> {
         use std::os::windows::ffi::OsStrExt;
         self.encode_wide().chain(std::iter::once(0)).collect()
+    }
+    #[cfg(not(windows))]
+    fn encode_wide_z(&self) -> Vec<u16> {
+        self.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect()
     }
 }
 impl WideZ for str {
@@ -108,14 +139,23 @@ pub fn quit(why: &str) -> ! {
         nxconfig::flush();
         nxgfx::save_caches();
         nxos::log::report_gaps("exit");
+        ctl::cleanup();
         flog!("Exit.");
         use std::io::Write;
         let _ = std::io::stdout().flush();
         let _ = std::io::stderr().flush();
     }
+    #[cfg(windows)]
     unsafe {
         windows_sys::Win32::System::Threading::TerminateProcess(windows_sys::Win32::System::Threading::GetCurrentProcess(), 0);
     }
+    // Linux: _exit ends the process at once, without joining the guest threads or running exit handlers (the drivers'
+    // atexit work under a live device can hang)
+    #[cfg(target_os = "linux")]
+    unsafe {
+        libc::_exit(0);
+    }
+    #[allow(unreachable_code)]
     std::process::exit(0)
 }
 

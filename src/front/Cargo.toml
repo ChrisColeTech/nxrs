@@ -17,6 +17,8 @@ nxgfx = { package = "graphics", path = "../graphics" }
 nxrt = { package = "runtime", path = "../runtime" }
 nxconfig = { package = "config", path = "../config" }
 png = "0.18"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_Graphics_Gdi",
@@ -46,3 +48,9 @@ windows = { version = "0.62", features = [
     "Win32_System_Variant",
     "Win32_System_Com_StructuredStorage",
 ] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+# the game window on Linux (X11 / Wayland), as graphics' own host window uses
+winit = "0.30"
+raw-window-handle = "0.6"

@@ -18,6 +18,13 @@ pub fn device() -> Option<String> {
     }
     let host = cpal::default_host();
     let d = host.default_input_device()?;
+    // Linux: ALSA names a "default" capture PCM even with no sound server or card behind it; a device is there only
+    // when it can be opened (its default configuration answers)
+    #[cfg(target_os = "linux")]
+    {
+        use cpal::traits::DeviceTrait;
+        d.default_input_config().ok()?;
+    }
     Some(d.to_string())
 }
 

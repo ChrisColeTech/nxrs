@@ -13,8 +13,11 @@
 
 use nxrt::mem::{self as rmem, MemoryInfo, Range, Space};
 use std::sync::{Mutex, OnceLock};
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{EXCEPTION_ACCESS_VIOLATION, NTSTATUS};
+#[cfg(windows)]
 use windows_sys::Win32::System::Diagnostics::Debug::{AddVectoredExceptionHandler, EXCEPTION_POINTERS};
+#[cfg(windows)]
 use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 
 pub const PAGE: u64 = 0x1000;
@@ -96,8 +99,20 @@ pub fn init(space: &'static Space, fig: Figures) -> &'static Memory {
 
 /// Installs the first-touch commit handler. Vectored handlers added later run first: this goes in after the
 /// runtime's crash reporter, so a heap page's first touch never reaches the reporter.
+#[cfg(windows)]
 pub fn install_fault_handler() {
     unsafe { AddVectoredExceptionHandler(1, Some(veh)) };
+}
+
+/// The same on Linux: a fault hook in the runtime's SIGSEGV handler, newest first.
+#[cfg(target_os = "linux")]
+pub fn install_fault_handler() {
+    nxrt::linux::add_fault_hook(lazy_hook);
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn lazy_hook(f: &mut nxrt::linux::Fault) -> bool {
+    f.sig == libc::SIGSEGV && first_touch(f.addr)
 }
 
 pub fn get() -> &'static Memory {
@@ -108,6 +123,19 @@ pub fn try_get() -> Option<&'static Memory> {
     MEM.get()
 }
 
+#[cfg(target_os = "linux")]
+fn commit_rw(a: u64, n: u64) -> bool {
+    if n == 0 {
+        return true;
+    }
+    if nxrt::linux::query(a).is_some() {
+        return rmem::commit(a, n);
+    }
+    // Outside the runtime's reservations: reserve and commit there.
+    rmem::reserve(a, n, false) && rmem::commit(a, n)
+}
+
+#[cfg(windows)]
 fn commit_rw(a: u64, n: u64) -> bool {
     if n == 0 {
         return true;
@@ -132,6 +160,7 @@ pub fn prepare(a: u64, n: u64) {
     }
 }
 
+#[cfg(windows)]
 unsafe extern "system" fn veh(info: *mut EXCEPTION_POINTERS) -> i32 {
     const CONTINUE_EXECUTION: i32 = -1;
     const CONTINUE_SEARCH: i32 = 0;
@@ -139,23 +168,28 @@ unsafe extern "system" fn veh(info: *mut EXCEPTION_POINTERS) -> i32 {
     if rec.ExceptionCode != EXCEPTION_ACCESS_VIOLATION as NTSTATUS || rec.NumberParameters < 2 {
         return CONTINUE_SEARCH;
     }
-    let a = rec.ExceptionInformation[1] as u64;
-    let Some(m) = MEM.get() else { return CONTINUE_SEARCH };
-    let hb = m.space.heap.base;
-    if a < hb || a >= hb + m.space.heap.size {
-        return CONTINUE_SEARCH;
-    }
-    let hs = m.st.lock().map(|s| s.heap_size).unwrap_or(0);
-    if a >= hb + hs {
-        return CONTINUE_SEARCH;
-    }
-    let lo = (a & !(LAZY_CHUNK - 1)).max(hb);
-    let hi = ((a & !(LAZY_CHUNK - 1)) + LAZY_CHUNK).min(hb + hs);
-    if commit_rw(lo, hi - lo) {
+    if first_touch(rec.ExceptionInformation[1] as u64) {
         CONTINUE_EXECUTION
     } else {
         CONTINUE_SEARCH
     }
+}
+
+/// A fault at `a`: a heap page inside the heap's size that is not committed yet is committed (its 64 KiB group).
+/// True when the access can be retried.
+fn first_touch(a: u64) -> bool {
+    let Some(m) = MEM.get() else { return false };
+    let hb = m.space.heap.base;
+    if a < hb || a >= hb + m.space.heap.size {
+        return false;
+    }
+    let hs = m.st.lock().map(|s| s.heap_size).unwrap_or(0);
+    if a >= hb + hs {
+        return false;
+    }
+    let lo = (a & !(LAZY_CHUNK - 1)).max(hb);
+    let hi = ((a & !(LAZY_CHUNK - 1)) + LAZY_CHUNK).min(hb + hs);
+    commit_rw(lo, hi - lo)
 }
 
 impl Memory {

@@ -2,10 +2,18 @@
 //! write to them is logged with the guest function that made it (`nxrt::fault::describe_host`) and the value range,
 //! then the page is guarded again after that one instruction (single step). At most 600 lines a watch.
 
+//!
+//! Linux: a watched page is made read-only instead of a guard page (only writes fault, which is all the watch logs);
+//! the write fault logs, opens the page and sets the trap flag; the SIGTRAP after the instruction closes it again.
+//! A system call writing a watched page (a read() into it) fails with EFAULT meanwhile.
+
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{EXCEPTION_SINGLE_STEP, NTSTATUS, STATUS_GUARD_PAGE_VIOLATION};
+#[cfg(windows)]
 use windows_sys::Win32::System::Diagnostics::Debug::{AddVectoredExceptionHandler, EXCEPTION_POINTERS};
+#[cfg(windows)]
 use windows_sys::Win32::System::Memory::{VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_GUARD};
 
 const PAGE: u64 = 0x1000;
@@ -24,6 +32,53 @@ fn watched(a: u64) -> bool {
     RANGES.lock().map(|r| r.iter().any(|&(s, e)| a >= s && a < e)).unwrap_or(false)
 }
 
+#[cfg(target_os = "linux")]
+fn guard(page: u64) -> bool {
+    // committed read-write pages only (a read-only page faults on writes by itself)
+    matches!(nxrt::linux::query(page), Some((true, 2, _, _))) && nxrt::mem::protect(page, PAGE, nxrt::mem::Prot::Read)
+}
+
+#[cfg(target_os = "linux")]
+fn unguard(page: u64) {
+    if matches!(nxrt::linux::query(page), Some((true, 1, _, _))) {
+        nxrt::mem::protect(page, PAGE, nxrt::mem::Prot::ReadWrite);
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn hook(f: &mut nxrt::linux::Fault) -> bool {
+    if f.sig == libc::SIGSEGV && f.write {
+        let a = f.addr;
+        if !watched(a) {
+            return false;
+        }
+        let n = LINES.fetch_add(1, Ordering::Relaxed);
+        if n < MAX_LINES {
+            crate::log!("wwatch: write to {a:#x} by {}", nxrt::fault::describe_host(f.rip()));
+        } else if n == MAX_LINES {
+            crate::log!("wwatch: {MAX_LINES} writes logged: the watch stops");
+        }
+        let page = a & !(PAGE - 1);
+        nxrt::mem::protect(page, PAGE, nxrt::mem::Prot::ReadWrite);
+        if LINES.load(Ordering::Relaxed) <= MAX_LINES {
+            REARM.with(|r| r.set(page));
+            f.set_trap(true); // trap after this instruction
+        }
+        return true;
+    }
+    if f.sig == libc::SIGTRAP {
+        let p = REARM.with(|r| r.replace(0));
+        if p == 0 {
+            return false;
+        }
+        f.set_trap(false);
+        guard(p);
+        return true;
+    }
+    false
+}
+
+#[cfg(windows)]
 fn guard(page: u64) -> bool {
     unsafe {
         let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
@@ -35,6 +90,7 @@ fn guard(page: u64) -> bool {
     }
 }
 
+#[cfg(windows)]
 unsafe extern "system" fn veh(info: *mut EXCEPTION_POINTERS) -> i32 {
     const CONTINUE_EXECUTION: i32 = -1;
     const CONTINUE_SEARCH: i32 = 0;
@@ -73,9 +129,12 @@ unsafe extern "system" fn veh(info: *mut EXCEPTION_POINTERS) -> i32 {
 /// Watches the guest range [lo, hi) for writes (its committed pages; a page committed later is not watched).
 pub fn arm(lo: u64, hi: u64) -> String {
     static HANDLER: std::sync::Once = std::sync::Once::new();
+    #[cfg(windows)]
     HANDLER.call_once(|| unsafe {
         AddVectoredExceptionHandler(1, Some(veh));
     });
+    #[cfg(target_os = "linux")]
+    HANDLER.call_once(|| nxrt::linux::add_fault_hook(hook));
     let (lo, hi) = (lo & !(PAGE - 1), (hi + PAGE - 1) & !(PAGE - 1));
     if hi <= lo || hi - lo > 64 << 20 {
         return "wwatch: a range of 1 page to 64 MB\n".into();
@@ -98,6 +157,9 @@ pub fn disarm() -> String {
     for (lo, hi) in ranges {
         let mut p = lo;
         while p < hi {
+            #[cfg(target_os = "linux")]
+            unguard(p);
+            #[cfg(windows)]
             unsafe {
                 let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
                 if VirtualQuery(p as *const _, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0 && mbi.Protect & PAGE_GUARD != 0 {
@@ -116,9 +178,18 @@ mod tests {
     /// A watched page reports a write, keeps working and stays watched for the next one.
     #[test]
     fn writes_are_seen_and_the_page_rearmed() {
-        use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
         // a page of its own (a heap page would be shared with other tests' allocations)
-        let base = unsafe { VirtualAlloc(std::ptr::null(), 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) } as u64;
+        #[cfg(windows)]
+        let base = {
+            use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+            unsafe { VirtualAlloc(std::ptr::null(), 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) as u64 }
+        };
+        #[cfg(target_os = "linux")]
+        let base = {
+            let a = nxrt::mem::reserve_anywhere(0x1000, false).unwrap();
+            assert!(nxrt::mem::commit(a, 0x1000));
+            a
+        };
         super::arm(base, base + 0x1000);
         let before = super::LINES.load(super::Ordering::Relaxed);
         unsafe {

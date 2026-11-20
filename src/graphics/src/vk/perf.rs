@@ -443,12 +443,13 @@ pub fn memory_line() -> String {
     let top: Vec<String> = v.iter().take(8).map(|(n, (c, b))| format!("{n} {c} = {} MB", b >> 20)).collect();
     let (ni, parked) = g.image_counts();
     format!(
-        "memory: private {private} MB; allocator {} MB in blocks, {} MB allocated ({}); this layer's system memory {} MB ({} refused over its cap); images {ni}, parked {parked}; replay queue {} ops behind",
+        "memory: private {private} MB; allocator {} MB in blocks, {} MB allocated ({}); this layer's system memory {} MB ({} refused over its cap); images {ni}, parked {parked}, {} registered without one yet; replay queue {} ops behind",
         rep.total_reserved_bytes >> 20,
         rep.total_allocated_bytes >> 20,
         top.join(", "),
         super::HOST_LIVE.load(std::sync::atomic::Ordering::Relaxed) >> 20,
         super::HOST_REFUSED.load(std::sync::atomic::Ordering::Relaxed),
+        super::image::lazy_waiting(),
         super::queue::aq_backlog()
     )
 }

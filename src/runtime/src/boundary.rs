@@ -128,6 +128,7 @@ mod tests {
     //   test_owner_body: on re-entry (c->pc == TARGET) sets x0 = 42 and returns; first time it calls the host
     //                    function at c->x[1] through rt_dispatch (as an import's PLT stub does).
     //   test_longjmp:    a guest callback that longjmps: c->pc = TARGET, then BR (rt_dispatch).
+    #[cfg(windows)]
     core::arch::global_asm!(
         ".globl nxrt_test_owner_body",
         ".p2align 4",
@@ -157,6 +158,34 @@ mod tests {
         "nxrt_test_longjmp:",
         "mov rax, 0x7A0000000108",
         "mov qword ptr [rcx + 264], rax",
+        "jmp rt_dispatch",
+    );
+    #[cfg(target_os = "linux")]
+    core::arch::global_asm!(
+        ".globl nxrt_test_owner_body",
+        ".p2align 4",
+        "nxrt_test_owner_body:",
+        "sub rsp, 24",
+        "mov rax, 0x7A0000000108",
+        "cmp qword ptr [rdi + 264], rax",
+        "jne 2f",
+        "mov qword ptr [rdi], 42",
+        "add rsp, 24",
+        "ret",
+        "2:",
+        "mov qword ptr [rsp + 8], rdi",
+        "mov rax, qword ptr [rdi + 8]",
+        "mov qword ptr [rdi + 264], rax",
+        "call rt_dispatch",
+        "mov rdi, qword ptr [rsp + 8]",
+        "mov qword ptr [rdi], 7",   // only if the host function returned: wrong
+        "add rsp, 24",
+        "ret",
+        ".globl nxrt_test_longjmp",
+        ".p2align 4",
+        "nxrt_test_longjmp:",
+        "mov rax, 0x7A0000000108",
+        "mov qword ptr [rdi + 264], rax",
         "jmp rt_dispatch",
     );
     extern "C" {

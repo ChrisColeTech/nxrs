@@ -7,7 +7,8 @@
 //!
 //! The guest side is built with clang for aarch64-none-elf and ld.lld (linker script `guest/link.ld`), and each ELF
 //! becomes an NSO (lz4-compressed segments, MOD0 from `guest/crt0.S`). The host side uses clang for
-//! x86_64-pc-windows-msvc with the generated-code flag set the translated games use.
+//! x86_64-pc-windows-msvc with the generated-code flag set the translated games use; on Linux clang for the host
+//! (x86_64-unknown-linux-gnu) with `libnxrt.a`, PATH's clang and ld.lld unless NXRT_LLVM names their folder.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -21,6 +22,15 @@ fn root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
 }
 
+#[cfg(not(windows))]
+fn llvm(tool: &str) -> PathBuf {
+    match std::env::var("NXRT_LLVM") {
+        Ok(d) => Path::new(&d).join(tool),
+        Err(_) => tool.into(),
+    }
+}
+
+#[cfg(windows)]
 fn llvm(tool: &str) -> PathBuf {
     if let Ok(d) = std::env::var("NXRT_LLVM") {
         return Path::new(&d).join(format!("{tool}.exe"));
@@ -293,7 +303,7 @@ fn modules_c(gen: &Path) -> R<String> {
 
 fn nxrt_lib() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
-    exe.parent().unwrap().join("nxrt.lib")
+    exe.parent().unwrap().join(if cfg!(windows) { "nxrt.lib" } else { "libnxrt.a" })
 }
 
 fn link(gen: &Path, out: &Path) -> R<()> {
@@ -318,7 +328,7 @@ fn link(gen: &Path, out: &Path) -> R<()> {
     for (i, src) in srcs.iter().enumerate() {
         let o = obj.join(format!("{i:04}_{}.o", src.file_stem().unwrap().to_string_lossy()));
         let mut c = Command::new(llvm("clang"));
-        c.args(GEN_FLAGS);
+        c.args(GEN_FLAGS.iter().filter(|f| cfg!(windows) || !f.starts_with("-fms-runtime-lib")));
         for inc in &incs {
             c.arg(format!("-I{}", inc.display()));
         }
@@ -332,13 +342,18 @@ fn link(gen: &Path, out: &Path) -> R<()> {
         return Err(format!("{} missing: cargo build -p runtime", lib.display()));
     }
     let mut c = Command::new(llvm("clang"));
-    c.arg("-fuse-ld=lld")
-        .arg("-fms-runtime-lib=dll")
-        .args(&objs)
-        .arg(&lib)
-        .args(["-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp", "-ladvapi32", "-lbcrypt", "-lsynchronization"])
-        .arg("-o")
-        .arg(out);
+    c.arg("-fuse-ld=lld");
+    if cfg!(windows) {
+        c.arg("-fms-runtime-lib=dll")
+            .args(&objs)
+            .arg(&lib)
+            .args(["-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp", "-ladvapi32", "-lbcrypt", "-lsynchronization"]);
+    } else {
+        // the runtime's system libraries (--print native-static-libs); the test executable's main stack is the
+        // process's own
+        c.args(&objs).arg(&lib).args(["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"]);
+    }
+    c.arg("-o").arg(out);
     run(&mut c).map(|_| ())
 }
 
@@ -365,7 +380,7 @@ fn e2e(work: &Path, generator: &str, nxrs: &Path, tests: &[String]) -> R<bool> {
     for t in tests {
         let dir = work.join(t);
         let gen = dir.join(format!("gen-{generator}"));
-        let exe = dir.join(format!("{t}-{generator}.exe"));
+        let exe = dir.join(format!("{t}-{generator}{}", std::env::consts::EXE_SUFFIX));
         let step = translate(generator, nxrs, &dir, &gen).and_then(|_| link(&gen, &exe));
         if let Err(e) = step {
             println!("[{t}] BUILD FAILED: {e}");
@@ -424,7 +439,7 @@ fn main() {
             let work = PathBuf::from(arg(&args, "--work").unwrap_or_else(|| root().join("../../build/runtime-e2e").display().to_string()));
             let generator = arg(&args, "--generator").unwrap_or("rust".into());
             let nxrs = PathBuf::from(arg(&args, "--nxrs").unwrap_or_else(|| {
-                std::env::current_exe().unwrap().parent().unwrap().join("nxrs-build.exe").display().to_string()
+                std::env::current_exe().unwrap().parent().unwrap().join(format!("nxrs-build{}", std::env::consts::EXE_SUFFIX)).display().to_string()
             }));
             let mut tests = positional(&["--work", "--generator", "--nxrs"]);
             if tests.is_empty() {

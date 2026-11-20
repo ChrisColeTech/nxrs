@@ -21,12 +21,17 @@ lewton = "0.10"
 # gamefix: Mario Kart World's zstd decoder on the host (the buffer-less streaming API is in the experimental bindings)
 zstd-sys = { version = "2", features = ["experimental"] }
 zstd = "0.13"
-windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Foundation", "Foundation_Collections", "Devices", "Devices_Bluetooth", "Devices_Bluetooth_Advertisement", "Devices_Bluetooth_GenericAttributeProfile", "Storage", "Storage_Streams"] }
 runtime = { path = "../runtime" }
 profiles = { path = "../profiles" }
 translator = { path = "../translator" }
 nxgfx = { package = "graphics", path = "../graphics" }
 nxconfig = { package = "config", path = "../config" }
+
+[[bin]]
+name = "nxinput"
+path = "src/bin/nxinput.rs"
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Memory",
@@ -48,7 +53,15 @@ windows-sys = { version = "0.61", features = [
     "Win32_UI_Input_KeyboardAndMouse",
     "Win32_Graphics_Gdi",
 ] }
+windows = { version = "0.62", features = ["Win32_Foundation", "Win32_Media_MediaFoundation", "Win32_System_Com", "Foundation", "Foundation_Collections", "Devices", "Devices_Bluetooth", "Devices_Bluetooth_Advertisement", "Devices_Bluetooth_GenericAttributeProfile", "Storage", "Storage_Streams"] }
 
-[[bin]]
-name = "nxinput"
-path = "src/bin/nxinput.rs"
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"
+# Switch 2 controllers over Bluetooth LE: BlueZ's D-Bus API (input/switch2_ble.rs)
+zbus = "5"
+
+# Linux: the FFmpeg shim (src/media/ffdec.c) is compiled with cc against the system's libavcodec, found with
+# pkg-config like the system libopus, libvpx and libdav1d (build.rs)
+[build-dependencies]
+cc = "1"
+pkg-config = "0.3"

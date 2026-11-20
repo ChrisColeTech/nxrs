@@ -450,14 +450,27 @@ pub fn dump_threads() -> String {
             }
             out.push_str(&format!(" lr {:#x} frames", c.x[30]));
             let mut fp = c.x[29];
+            // NXRS_DUMP_FRAMES=<ret>[,<ret>..]: the 16 words at the frame record of a frame returning there (its
+            // saved registers: a stall's loop counters)
+            let peek: Vec<u64> = std::env::var("NXRS_DUMP_FRAMES")
+                .map(|v| v.split(',').filter_map(|s| u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()).collect())
+                .unwrap_or_default();
+            let mut words = String::new();
             for _ in 0..12 {
                 if fp == 0 || fp & 7 != 0 || !crate::mem::readable(fp, 16) {
                     break;
                 }
                 let ret = unsafe { *((fp + 8) as *const u64) };
                 out.push_str(&format!(" {ret:#x}"));
+                if peek.contains(&ret) && crate::mem::readable(fp, 128) {
+                    words.push_str(&format!("; at {ret:#x} fp {fp:#x}:"));
+                    for i in 0..16u64 {
+                        words.push_str(&format!(" {:x}", unsafe { *((fp + i * 8) as *const u64) }));
+                    }
+                }
                 fp = unsafe { *(fp as *const u64) };
             }
+            out.push_str(&words);
         }
         out.push('\n');
     }

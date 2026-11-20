@@ -823,9 +823,11 @@ fn vram_budget_frees_parked_images() {
     let mut n = Nvn::new();
     let t = n.texture(256, 256, f::RGBA8, 0, false);
     n.register_texture(11, &t);
+    let g = nxgfx::vk::Gpu::get().unwrap();
+    // registration alone makes no image (lazy images): its first use does
+    g.materialize(11 + n.tex_base());
     let mut t = t;
     unsafe { nxgfx::nvn::tex::nvnTextureFinalize(&mut *t) };
-    let g = nxgfx::vk::Gpu::get().unwrap();
     std::env::set_var("NXGFX_VRAM_EVICT_PCT", "0");
     let freed = g.vram_budget();
     std::env::remove_var("NXGFX_VRAM_EVICT_PCT");

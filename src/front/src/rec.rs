@@ -15,8 +15,11 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
+#[cfg(windows)]
 use windows::core::{HSTRING, PCWSTR};
+#[cfg(windows)]
 use windows::Win32::Media::MediaFoundation::*;
+#[cfg(windows)]
 use windows::Win32::System::Com::{CoInitializeEx, COINIT_MULTITHREADED};
 
 static ON: AtomicBool = AtomicBool::new(false);
@@ -78,6 +81,10 @@ fn audio_tap(s: &[f32], rate: u32, ch: u32) {
 
 const AUDIO_RATE: u32 = 48000;
 
+#[cfg(target_os = "linux")]
+include!("rec_linux.rs");
+
+#[cfg(windows)]
 struct Writer {
     w: IMFSinkWriter,
     video: u32,
@@ -90,6 +97,7 @@ struct Writer {
     samples: u64,
 }
 
+#[cfg(windows)]
 impl Writer {
     unsafe fn new(path: &std::path::Path, width: u32, height: u32, fps: u32) -> windows::core::Result<Writer> {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);

@@ -356,6 +356,7 @@ fn placement_for(flags: u32) -> Placement {
 
 /// nvnMemoryPoolInitialize: the pool's placement (its GPU buffer comes at its first GPU use).
 pub fn pool_add(p: &pool_t) {
+    super::capture::pool_add(p);
     let Ok(g) = Gpu::get() else { return };
     let base = p.mem as u64;
     let placement = placement_for(p.flags);
@@ -403,6 +404,7 @@ fn release(g: &Gpu, p: Pool) {
 
 /// nvnMemoryPoolFinalize.
 pub fn pool_del(base: u64) {
+    super::capture::pool_del(base);
     let Some(g) = Gpu::try_get() else { return };
     let p = g.mem.lock().unwrap().by_base.remove(&base);
     POOL_GEN.fetch_add(1, Ordering::Relaxed);

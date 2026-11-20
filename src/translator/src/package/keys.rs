@@ -101,6 +101,18 @@ pub fn default_keys_path() -> Option<PathBuf> {
             return Some(PathBuf::from(p));
         }
     }
+    #[cfg(not(windows))]
+    {
+        // Linux: the launcher's data folder under XDG_DATA_HOME (~/.local/share), then the common ~/.switch
+        let home = std::env::var_os("HOME").map(PathBuf::from);
+        let data = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| home.as_ref().map(|h| h.join(".local/share")));
+        let mut c = data.map(|d| keys_candidates(&d)).unwrap_or_default();
+        if let Some(h) = home {
+            c.push(h.join(".switch").join("prod.keys"));
+        }
+        return c.into_iter().find(|p| p.is_file());
+    }
+    #[allow(unreachable_code)]
     keys_candidates(&PathBuf::from(std::env::var_os("LOCALAPPDATA")?)).into_iter().find(|p| p.is_file())
 }
 

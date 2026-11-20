@@ -88,6 +88,60 @@ jobs:
       - name: PORT_MAP.tsv rows
         run: python -I scripts/port_map.py --check --format-only
 
+  # M10 (lane L): the whole engine on x86-64 Linux: the workspace builds (nxrs-build, the runtime and the engine's
+  # static libraries a game links) and every test that needs no GPU and no game data passes.
+  linux:
+    name: build + tests (x86-64 Linux)
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages (clang + lld, ALSA, the codec and FFmpeg libraries, Vulkan headers)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld cmake pkg-config libvulkan-dev libasound2-dev \
+            libopus-dev libvpx-dev libdav1d-dev libavcodec-dev libavutil-dev libsdl2-2.0-0
+      - name: Rust ${{ env.RUST_VERSION }}
+        run: |
+          rustup toolchain install $RUST_VERSION --profile minimal
+          rustup default $RUST_VERSION
+      - name: glslang cache
+        id: glslang
+        uses: actions/cache@v4
+        with:
+          path: ~/glslang
+          key: glslang-${{ env.GLSLANG_VERSION }}-linux
+      - name: Build glslangValidator
+        if: steps.glslang.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch $GLSLANG_VERSION https://github.com/KhronosGroup/glslang.git ~/glslang-src
+          cmake -S ~/glslang-src -B ~/glslang-build -DCMAKE_BUILD_TYPE=Release -DENABLE_OPT=OFF -DENABLE_HLSL=OFF -DBUILD_TESTING=OFF -DENABLE_GLSLANG_BINARIES=ON
+          cmake --build ~/glslang-build --parallel 4
+          mkdir -p ~/glslang
+          cp ~/glslang-build/StandAlone/glslang ~/glslang/glslangValidator
+          ~/glslang/glslangValidator --version
+      - name: cargo cache
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: cargo-linux-${{ env.RUST_VERSION }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-linux-${{ env.RUST_VERSION }}-
+      - name: cargo build
+        run: |
+          export NXGFX_GLSLANG=$HOME/glslang/glslangValidator
+          cargo build --workspace --locked --jobs 4
+      - name: cargo test (no GPU, no game data)
+        run: |
+          export NXGFX_GLSLANG=$HOME/glslang/glslangValidator
+          export NXRT_CLANG=$(command -v clang)
+          cargo test --workspace --locked --jobs 4 --lib --bins --tests
+      - name: nxrs-build doctor
+        run: ./target/debug/nxrs-build doctor || true
+
   gnullvm:
     name: engine for x86_64-pc-windows-gnullvm (llvm-mingw)
     runs-on: windows-latest

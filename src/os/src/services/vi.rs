@@ -152,9 +152,20 @@ vifn!(vrr_supported, |a| {
     }
     RES_OK
 });
+#[cfg(windows)]
 fn screen_pixels() -> (i32, i32) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{GetSystemMetrics, SM_CXSCREEN, SM_CYSCREEN};
     unsafe { (GetSystemMetrics(SM_CXSCREEN), GetSystemMetrics(SM_CYSCREEN)) }
+}
+
+/// The primary monitor's size in pixels, as the front end's window system reports it (Linux has no system-wide
+/// query without a window connection): width << 32 | height, 0 unknown.
+pub static HOST_SCREEN: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[cfg(not(windows))]
+fn screen_pixels() -> (i32, i32) {
+    let v = HOST_SCREEN.load(std::sync::atomic::Ordering::Acquire);
+    ((v >> 32) as i32, v as u32 as i32)
 }
 // BufferMaxResolution: 0 1280x720, 1 1920x1080, 2 2560x1440, 3 3840x2160. Handheld: the Switch 2's own 1080p screen;
 // docked: the largest of the four the host's display holds (1080p when unknown).

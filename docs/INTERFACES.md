@@ -882,6 +882,37 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   blob reaches the picture through another shader; not traced further this round.
 - **Capture / replay: not started** (no nxnative capture source in reach; lower than the hangs and the races).
 
+**Lane G4, round 4 (2026-11-20 06:15-, uncommitted).**
+- **MK8D after the conditional-rendering port (`-G4-mk8d-rcond`, 59.7 FPS):** still black stretches in the lap (shots
+  0013-0017 and 0020 at 0.55-0.78 black). Not new: `-G4-mk8d-nodefer2` (03:39) had them too (lap shots at 0.61 /
+  0.77), `-G4-mk8d-sync2` (async off) none. So it stays an async-replay effect and neither the command-buffer syncs
+  nor conditional rendering was it. Candidate being checked: occlusion results (samples passed) that land later in
+  async mode, read by the CPU for culling (a one-time log line now says whether MK8D uses them; `c14_mk8d.out`).
+  Not tried: `NXGFX_ASYNC_PRESENTS=1` (one present ahead), held off as asked.
+- **Smash: the faulting pass is known** (`-G4-smash-fault3`, 166.96 s): the full-screen draw renders into **ser6166 at
+  0x471074000, a 1920x1080 R8G8B8A8_SRGB image (image 0x224befa00d0, one level, not an alias, not sparse)** that is
+  live in the image table, and the GPU's write faults at 0x400001000. The memory under a live image is invalid, so
+  something freed or moved its allocation. **VK_EXT_device_address_binding_report** is now used with
+  `NXGFX_CHECKPOINTS=all` (or `NXGFX_ADDR_REPORT=1`): every address range bound / unbound is kept and a loss names
+  the object the faulting address belongs to, or the one last unbound there (`lost.rs on_binding`, `addr_owner`).
+  `c16_smash.out` will say which.
+- **Lazy images** (`image.rs reg_tex` / `materialize` / `materialize_all`, `NXGFX_LAZY_IMAGES=0` off): see the MKW (lane
+  K) section. GPU test `vram_budget_frees_parked_images` makes its image through first use now (`Nvn::tex_base`).
+- **DKB's 15-17 s frames** (`-G4-dkb-prof`: four of 6-17 s, the main thread in `nvnSyncWait` all the time, the replay
+  idle): the command-buffer sync fix wrote the submission's fence *after* queuing it, so when the replay thread had
+  already reached the record (and set the exact value, before an event wait parked the rest) the later write made the
+  wait cover the parked rest too. Now written before the op is visible to the replay thread (`aq_push_with`).
+  `-G4-dkb-cold` (before that fix) had 4-5 s frames already. `c15_dkb.out` measures.
+- **Capture / replay** (`vk/capture.rs`, bin `nxgfx-replay`; mkw-recomp `runtime/gfx/cap` design): `NXGFX_CAPTURE=<file>`
+  keeps pools, texture / sampler registrations and descriptor pools from the boot; at present `NXGFX_CAPTURE_AT`
+  (600) it writes the guest's allocations (4 GiB .. 0x70_0000_0000) and their committed bytes, then each submission's
+  flattened records, texture release and present for `NXGFX_CAPTURE_FRAMES` (2) presents, each preceded by the pages
+  that changed (4 KiB hashes on 8 threads); one zstd stream. `nxgfx-replay <file> --shaders <data>/shaders --out <dir>`
+  maps the allocations at their own addresses, restores state and memory, replays and writes `frame-<n>.png` per
+  present. Not captured: what only the GPU held at the start (earlier render targets, device-local pools the GPU
+  wrote) and sparse mappings. First capture queued on MK8D (`build/G4/mk8d.cap`, `c14_mk8d.out`); not replayed yet.
+- **Wonder's level-entry frame:** not worked on this round.
+
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
 
@@ -2026,6 +2057,13 @@ lane K's; G4 please review).**
   leaves them undefined without `robustImageAccess`, which nxrs did not enable (mkw-recomp enables every feature the
   driver offers). **Fix (`vk/device.rs`, small, lane K):** `robustImageAccess` on with G4's buffer robustness (same
   `NXGFX_ROBUST` switch, default on for NVIDIA). Verifying in `K-mkw19`.
+- **G4 for K2 (2026-11-20 06:45): lazy images in the tree** (`image.rs reg_tex` / `materialize`, `NXGFX_LAZY_IMAGES=0`
+  off): a texture registered for sampling gets its image at its first use (a draw's handle, DrawTexture), not at
+  RegisterTexture; a shader that indexes the texture pool itself makes all waiting ones first. MKW's shaders take
+  every handle from c2 (one from a uniform bank), none index the pool. The memory line now ends "N registered without
+  one yet". **One G4 MKW run queued** to measure it (`build/G4/chain13.sh`: `mkw-race` 330 s, `NXGFX_MESH_REF=skip`,
+  `build/G4/mkwt`, label `G4-mkw-lazy`) after G4's Smash run; it waits on the machine lock like any run. Replaced
+  pipelines are now destroyed too (`pipe.rs retire`).
 - **Memory (for G4, numbers from `K-mkw16` / `K-mkw18`):** private memory jumps by 6-8 GB within 10 s when the title
   scene first loads, to 16-17 GB, then grows ~0.6 GB a minute to the 20 GB watchdog (mkw-recomp: 10.6 GB private in a
   race on Windows). At 93 s: graphics allocator 10.6 GB in blocks (textures 36,958 = 6.6 GB, sparse tiles 1.7 GB,
@@ -2054,3 +2092,101 @@ lane K's; G4 please review).**
 - **Descriptor-buffer robust sizes (lane K, `vk/device.rs` `desc_size`, `vk/exec.rs`, `vk/tables.rs`):** with
   robustBufferAccess on (G4's default), buffer and texel-buffer descriptors are now written at the robust sizes, as
   VK_EXT_descriptor_buffer requires; the plain sizes were used before.
+
+## Linux (lane L, M10, 2026-11-20)
+
+The whole engine builds and runs on x86-64 Linux: `nxrs-build` (translator, shaders, clang + ld.lld), the runtime and
+`libnxfront.a` a game links. Every Linux piece sits behind `cfg(target_os = "linux")`; the Windows code paths are
+unchanged (wrapped in `cfg(windows)`, nothing restructured). The windows / windows-sys crates are now
+`[target.'cfg(windows)'.dependencies]`; Linux adds `libc`, `zbus` (os, BlueZ), `winit` + `raw-window-handle` (front),
+`cc` + `pkg-config` (os build).
+
+**Windows piece -> Linux equivalent** (file: what replaced it):
+
+| Windows | Linux | Where |
+|---|---|---|
+| VirtualAlloc reservations at fixed addresses, commit / decommit, VirtualProtect, VirtualQuery | `mmap` PROT_NONE + MAP_NORESERVE + MAP_FIXED_NOREPLACE; commit = `mprotect` RW, decommit = `MADV_DONTNEED` + PROT_NONE; a byte-per-page state map over the 39-bit space and a reservation table stand for VirtualQuery (`query`, `committed_runs`, `allocation_of`, `writable`); `readable` / `read_nofault` through `process_vm_readv` (ReadProcessMemory) | runtime `linux.rs`, `mem.rs`; graphics `vk/mem.rs` (`committed`, `guest_bytes`), `nvn/vpool.rs` |
+| GetWriteWatch / ResetWriteWatch (MEM_WRITE_WATCH) | userfaultfd in asynchronous write-protect mode (UFFD_FEATURE_WP_ASYNC, Linux 6.7) over the watched reservations + PAGEMAP_SCAN (mkw-recomp's `linux_mem.c` design): kernel writes (a `read()` into guest memory) are seen too; no watch -> `None`, callers compare snapshots as before | runtime `linux.rs` `written_pages` / `watched`; graphics `vk/mem.rs` `watch` |
+| Vectored exception handlers (crash reporter, heap first touch, lazy write-back pages, debug write watches) | one SIGSEGV / SIGBUS / SIGILL / SIGFPE / SIGTRAP handler (SA_ONSTACK, alt stacks) with a hook list run newest first (`nxrt::linux::add_fault_hook`, AddVectoredExceptionHandler(1, ..)'s order); unclaimed faults chain to the previous handler (Rust's stack-overflow report) or the default action; `Fault` gives rip / rsp / the write bit (REG_ERR) / the trap flag | runtime `linux.rs`, `fault.rs`; os `mem.rs`, `wwatch.rs` (read-only page + single step instead of PAGE_GUARD); graphics `vk/lazy.rs` |
+| Crash report stack walk (RtlVirtualUnwind) | glibc `backtrace()` through the signal frame (.eh_frame), modules by `dladdr` | runtime `fault.rs` |
+| Windows x64 ABI assembly boundary (rt_dispatch, rt_sj_owner, nxrt_call_guest, rt_svc, host entry; SEH unwind info) | the same shims for System V (rdi / rsi / rdx / rcx, same frame layout so `SjSlot` is one type, CFI instead of SEH) | runtime `asm.rs`, `boundary.rs` (test asm) |
+| Fibers (ConvertThreadToFiberEx / CreateFiberEx / SwitchToFiber / DeleteFiber) | the same four calls over `nxrt_ctx_switch` (asm: callee-saved registers, MXCSR, x87 control word) and mmap'd stacks with a guard page | runtime `fiber.rs` (`host` module), `asm.rs` |
+| SuspendThread + GetThreadContext (profiler samples), GetThreadTimes | SIGPROF to the thread, the pc copied from its signal context; `pthread_getcpuclockid` | runtime `linux.rs`, `profile.rs` |
+| QueryPerformanceCounter | CLOCK_MONOTONIC | runtime `rt.rs` |
+| Job object memory cap | a cgroup v2 of the process's own with `memory.max` (where the user's tree delegates the memory controller), else a watchdog thread on resident + swapped memory that stops the game with the reason in the log | runtime `linux.rs` `memory_cap`, `process.rs` |
+| SetProcessAffinityMask (NXOS_HOST_CPUS) | `sched_setaffinity` on every thread | os `boot.rs` |
+| SetThreadPriority (shader threads), CreateWaitableTimerEx (frame pacing) | per-thread nice (`setpriority`), `clock_nanosleep` TIMER_ABSTIME | graphics `vk/pipe.rs`, `vk/present.rs` |
+| GlobalMemoryStatusEx, GetProcessMemoryInfo, GetProcessTimes | `sysconf`, `/proc/self/status` (VmRSS + VmSwap), CLOCK_PROCESS_CPUTIME_ID | graphics `vk/mod.rs`, `vk/perf.rs`, `vk/pipe.rs`; front `metrics.rs` |
+| Named pipe control channel `\\.\pipe\nxrs_ctl_<pid>` (+ `swr_ctl_<pid>`) | Unix domain socket `$XDG_RUNTIME_DIR/nxrs_ctl_<pid>` (+ `swr_ctl_<pid>`; /tmp without XDG_RUNTIME_DIR), same one-line protocol, removed at exit | front `ctl.rs` |
+| WASAPI output and capture (cpal) | cpal's ALSA backend (PulseAudio / PipeWire through ALSA's default device); a capture device counts only when it opens (ALSA always names "default") | os `media/sink.rs`, `media/mic.rs` |
+| MMCSS | none needed (no equivalent call; real-time scheduling would need privileges): not ported | - |
+| XInput pads | SDL2 game controllers loaded at run time (libSDL2-2.0.so.0), as Turbo's Linux backend; SDL's own PS4 / PS5 / Switch HID drivers off so the native HID path keeps those pads | os `input/xinput.rs` |
+| WinMM joysticks (fallback) | SDL2 joysticks | os `input/winmm.rs` |
+| Raw HID (SetupAPI + HidD_*: DualSense / DS4, Switch Pro, Joy-Con, NSO pads) | hidraw: `/sys/class/hidraw` (uevent HID_ID / HID_NAME, bus 5 = Bluetooth), usages and report lengths from the report descriptor (report-id byte counted as HidP_GetCaps does), non-blocking read, 30 ms bounded write, HIDIOCGFEATURE | os `input/hidio.rs` |
+| Switch 2 controllers over Bluetooth LE (WinRT) | BlueZ over D-Bus (zbus): discovery, Nintendo manufacturer data, connect, GATT by UUID, AcquireNotify / AcquireWrite with StartNotify / WriteValue fallbacks | os `input/switch2_ble.rs` |
+| Win32 game window (+ raw mouse, ClipCursor, borderless fullscreen) | winit window on its own thread (X11 or native Wayland): F1-F11 / Esc / Alt+Enter, keys by position as virtual-key codes, raw mouse motion, cursor grab, borderless fullscreen, close / focus handling, NXRS_NO_ACTIVATE | front `window_linux.rs` |
+| Vulkan Win32 surface | VK_KHR_xlib_surface / xcb_surface / wayland_surface from raw-window-handle (`nxgfx::set_window_raw`, `set_window_unix`) | graphics `vk/present.rs`, `vk/device.rs` (instance extensions, filtered by what the loader has), `host_window.rs` |
+| Media Foundation H.264 and AAC decoders | FFmpeg libavcodec through a small C shim compiled against the system headers (`media/ffdec.c`, `media/ff.rs`, same `mf::{H264, Aac}` API); libopus / libvpx / libdav1d from the system (pkg-config) instead of the MinGW archives | os `media/`, `build.rs` |
+| Media Foundation sink writer (F7 recording) | the `ffmpeg` program: BGRA frames on its stdin (libx264, else libopenh264 / NVENC / VA-API), the sound as 48 kHz s16 beside it, muxed with AAC when the recording stops | front `rec_linux.rs` |
+| PrintWindow capture (control `shot`, `shot=`) | the presented picture read back by graphics at the next present (Wayland lets no program read another window) | front `capture.rs` |
+| MessageBox, the swkbd text box, the prompt window, F1 page (GDI) | the desktop's dialogs (zenity, else kdialog) as Turbo's `plat_message`: message box, `--entry` text box, `--question` prompt (closed by PID when the pads answer), `--forms` F1 page with the four options; ShellExecute -> `xdg-open` | os `desk.rs`, `services/notice.rs`, `services/swkbd.rs`, `ui.rs`; front `help.rs` |
+| Lossless Scaling app launch / registry Steam path | Steam's Linux library folders for Lossless.dll (in-engine LSFG); the Windows app itself is not started (it captures Windows windows only) | front `lsfg.rs` |
+| GetTimeZoneInformation, GetLocalTime | `localtime_r` (`tm_gmtoff`) | os `services/time.rs`; front `capture.rs` |
+| GetSystemMetrics (screen size) | the window system's primary monitor through winit (`services::vi::HOST_SCREEN`) | os `services/vi.rs`, front `window_linux.rs` |
+| TerminateProcess at quit | `_exit` | front `lib.rs` |
+| GUI-subsystem log redirect | stderr at /dev/null or closed -> `<name>.log` beside the game | front `lib.rs` |
+| ExecuteProgram (`<name>_p<N>.exe`) | the same `std::process` launch (fork / exec), no extension | os `services/oe.rs` |
+| seek_read / seek_write | `pread` / `pwrite` | os `services/fs.rs` (`posio`) |
+| Keys under %LOCALAPPDATA% | `$XDG_DATA_HOME` (~/.local/share)`/nxrs/keys/prod.keys`, the launcher's layout, then `~/.switch/prod.keys`; SWR_PROD_KEYS first as before | translator `package/keys.rs` |
+| clang for x86_64-pc-windows-msvc / llvm-mingw, `<name>.exe` + `<name>_code.dll` | clang for x86_64-unknown-linux-gnu + ld.lld: `<name>` (loader: dlopen of `<name>_code.so`, NXRS_DATA / NXRT_EXEFS, a 16 MB main stack by setrlimit + re-exec) and `<name>_code.so` (-fPIC objects, `-Bsymbolic` so the generated code's runtime calls bind without a PLT, `--no-undefined`; system libraries: `-lopus -lvpx -ldav1d -lavcodec -lavutil -lasound -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc`); `nxrs_game_main` exported with default visibility; the mods' disabled markers read through /proc/self/exe | cli `cc.rs`, `pipeline.rs`, `mods.rs` |
+| dmsh_xlate.exe, spirv-val.exe (shader build tools) | `build/tools/dmsh_xlate-linux/dmsh_xlate` (NativeAOT linux-x64, `src/shaders/tools/build_dmsh_xlate.sh`: same source, same `--source-sha` e11dc43d4ddc5b58 as the Windows tool), `spirv-val` from PATH (spirv-tools) | shaders `xlate.rs` |
+| nxrt-dev (homebrew e2e) toolchain | PATH clang / ld.lld, `libnxrt.a` | runtime `bin/nxrt_dev.rs` |
+
+**Using it.** Build the engine with `cargo build --release -p cli -p front -p runtime` (needs clang, lld, pkg-config,
+libasound2-dev, libopus-dev, libvpx-dev, libdav1d-dev, libavcodec-dev, libavutil-dev, a glslangValidator); put
+`libnxfront.a` / `libnxrt.a` beside `nxrs-build` (the release folder has them) and run `nxrs-build <package> -o <name>
+--outdir <dir>`. `nxrs-build doctor` checks the Linux pieces (clang, ld.lld, the engine libraries, libvulkan, ALSA, the
+codec / FFmpeg libraries, a display, SDL2, zenity / kdialog, ffmpeg for F7, Vulkan devices, disk, keys). `--target
+linux` is accepted on Linux, refused on Windows (and `--target windows` the other way). A game needs at run time:
+libvulkan + a Vulkan 1.3 driver, ALSA, libopus, libvpx, libdav1d, libavcodec, libavutil; optional SDL2 (pads), zenity or
+kdialog (dialogs), ffmpeg (F7); hidraw access for native HID pads (the usual udev rules, e.g. Steam's).
+
+**Verified (WSL 2, Ubuntu 24.04, kernel 6.18, 2026-11-20).** WSL here has no GPU driver for Vulkan (Mesa without
+dzn; no WSLg session), so the only Vulkan device is **llvmpipe** (Mesa's CPU rasterizer), and the game window ran on an
+X server of its own (Xvfb :91). What that proves and what it does not is listed apart.
+- `cargo build --workspace` and `cargo test --workspace --lib --bins --tests`: **349 passed**, 0 failed (runtime 30 incl.
+  the write watch, fault hooks, thread samples and the longjmp boundary; os 114 incl. 27 input tests and the FFmpeg /
+  opus / vpx / dav1d decoders bit-exact; shaders 65; translator 65). Windows: `cargo check --workspace --tests` and the
+  touched crates' tests green after every change.
+- Homebrew e2e (`nxrt-dev e2e`: guest NROs translated and linked against `libnxrt.a`): **8/8** (hello, threads, atomics,
+  TLS, fiber, setjmp, C++ exceptions, float printf); each re-run 25 times: **200/200**.
+- `nxrs-build doctor`: every check green but the display (none in a plain WSL shell) and the keys (none under ~).
+- **Beach Bounce Remastered** (01004060145C0000) built from the dump in place (SWR_PROD_KEYS, read-only): 73,066
+  functions, 397 MB of C, compile 179 s, link 0.8 s, total 189 s; a rebuild relinks in 3.5 s (every object reused).
+  `<name>` 9 KB loader + `<name>_code.so` 294 MB. Run 60 s (`~/nxrs-games/runs/bbounce-r1`): window 1440x810 (Xlib),
+  first present at 2.0 s, **3,343 frames in 60 s** on the title menu (picture right), the 16 shaders Unity makes at
+  run time translated live (as on Windows), audio: no output device (WSL has no sound server) so the clock fallback ran.
+  Run 75 s (`-r2`): control socket `/tmp/nxrs_ctl_<pid>`: `status`, `pads` ("no controllers"), six `press A~0.2` took
+  the game from the title into the story (screenshot through `shot`). Run 45 s (`-r3`): `record start` / `stop`: an MP4
+  with H.264 1920x1080 60 FPS (libx264) and AAC 48 kHz stereo, 9.0 s.
+- **Anime Girls: Sun of a Beach** (0100C6801E0FA000) built (1,471 s: shaders 744 s, compile 708 s): **53,109 shaders
+  found, translated by the Linux dmsh_xlate and all 53,109 valid** under spirv-val, as the Windows build; the same
+  106,218 files, and every 10th SPIR-V module (5,311) **byte-identical** to the Windows build's (the json sidecars
+  differ only by the tool binary's hash). Run 60 s with `NXGFX_PROFILE_PREWARM=0`: the 3D title screen right, ~1.5 FPS
+  (llvmpipe renders on the CPU).
+- **For lane G4 (llvmpipe only, not seen on NVIDIA):** with the first-run profile prewarm on, Anime Girls dies at
+  ~1.4 s inside llvmpipe's `vkCreateGraphicsPipelines` (libvulkan_lvp.so+0xfcef5, read of 0x8) for a pipeline-library
+  part from `vk/pipe.rs` `gpl_part` <- `shader_parts` (the fragment-shader part, pipe.rs:580) <- `prebuild`. Either a
+  Mesa GPL bug or a create info NVIDIA tolerates (worth a run with the validation layer on a Linux GPU); the in-flight
+  part guard did not stop the next session from crashing on another part. `NXRT_FOREIGN_FAULTS=1` logged it.
+
+**Not verified (no hardware for it in WSL):** a real GPU driver (NVIDIA / AMD / Intel Vulkan on Linux; the GPU-heavy
+paths ran only on llvmpipe), real sound (ALSA / PulseAudio / PipeWire output and capture), real controllers (hidraw
+pads, SDL2 pads, BlueZ Switch 2 pads: built and unit-tested; SDL2 loads, BlueZ answers "not running"), a native
+Wayland session (only X11 through Xvfb ran), the cgroup memory cap (WSL refuses the cgroup; the watchdog path ran),
+the F1 / swkbd / prompt dialogs on a desktop (zenity present, not driven), and gameplay at a frame-rate goal. The M10
+exit criterion (M5 on Linux: MK8D at 60) needs a Linux PC with a GPU.
+
+**Left:** run on a Linux PC with a GPU (MK8D at 60, then the library), sound and controllers there; a Linux release
+package (the launcher's Linux CI builds Turbo games; shipping `nxrs-build` + `libnxfront.a` + `libnxrt.a` + the Linux
+`dmsh_xlate` with it is the launcher's part); MMCSS has no counterpart (not ported).

@@ -6,14 +6,21 @@
 use std::collections::HashMap;
 use std::sync::{Mutex, OnceLock};
 use std::time::{Duration, Instant};
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAME_ACCESS, HANDLE};
+#[cfg(windows)]
 use windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, CONTEXT};
+#[cfg(windows)]
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread, ResumeThread, SuspendThread};
 
 /// CONTEXT_AMD64 | CONTEXT_CONTROL
+#[cfg(windows)]
 const CONTEXT_CONTROL: u32 = 0x0010_0001;
 
+#[cfg(windows)]
 struct Threads(Vec<(u32, usize)>);
+#[cfg(target_os = "linux")]
+struct Threads(Vec<(u32, crate::linux::HostThread)>);
 // SAFETY: the handles are plain kernel handles, usable from any thread.
 unsafe impl Send for Threads {}
 
@@ -31,6 +38,7 @@ pub fn on() -> bool {
 
 /// The calling host thread runs guest thread `handle`: kept for the profiler's samples and the per-thread CPU
 /// figures (`thread_cpu`).
+#[cfg(windows)]
 pub fn add_current(handle: u32) {
     let mut d: HANDLE = core::ptr::null_mut();
     // SAFETY: duplicating our own thread's pseudo-handle into a real one
@@ -41,6 +49,7 @@ pub fn add_current(handle: u32) {
 }
 
 /// Guest thread `handle` is done on this host thread.
+#[cfg(windows)]
 pub fn remove(handle: u32) {
     let mut t = threads().lock().unwrap_or_else(|p| p.into_inner());
     if let Some(i) = t.0.iter().position(|(h, _)| *h == handle) {
@@ -52,6 +61,7 @@ pub fn remove(handle: u32) {
 
 /// Every live guest thread's CPU time so far (user + kernel, seconds), by its handle (Turbo kernel.c's per-thread
 /// guest CPU).
+#[cfg(windows)]
 pub fn thread_cpu() -> Vec<(u32, f64)> {
     use windows_sys::Win32::Foundation::FILETIME;
     use windows_sys::Win32::System::Threading::GetThreadTimes;
@@ -68,6 +78,7 @@ pub fn thread_cpu() -> Vec<(u32, f64)> {
 }
 
 /// The host pc of a thread: suspended, read, resumed, nothing else in between (it may hold any lock).
+#[cfg(windows)]
 fn pc_of(h: HANDLE) -> Option<u64> {
     // SAFETY: a thread handle with suspend and context rights; the CONTEXT is 16-aligned by its type
     unsafe {
@@ -98,8 +109,16 @@ pub fn start(on: bool) {
             let mut last = Instant::now();
             loop {
                 std::thread::sleep(Duration::from_millis(1));
-                let hs: Vec<usize> = threads().lock().unwrap_or_else(|p| p.into_inner()).0.iter().map(|(_, h)| *h).collect();
-                let pcs: Vec<u64> = hs.iter().filter_map(|&h| pc_of(h as HANDLE)).collect();
+                #[cfg(windows)]
+                let pcs: Vec<u64> = {
+                    let hs: Vec<usize> = threads().lock().unwrap_or_else(|p| p.into_inner()).0.iter().map(|(_, h)| *h).collect();
+                    hs.iter().filter_map(|&h| pc_of(h as HANDLE)).collect()
+                };
+                #[cfg(target_os = "linux")]
+                let pcs: Vec<u64> = {
+                    let hs: Vec<crate::linux::HostThread> = threads().lock().unwrap_or_else(|p| p.into_inner()).0.iter().map(|(_, h)| *h).collect();
+                    hs.into_iter().filter_map(crate::linux::thread_pc).collect()
+                };
                 let table = crate::dispatch::table();
                 for rip in pcs {
                     total += 1;
@@ -125,4 +144,25 @@ pub fn start(on: bool) {
             }
         })
         .ok();
+}
+
+/// The calling host thread runs guest thread `handle` (Linux: its pthread, sampled with SIGPROF).
+#[cfg(target_os = "linux")]
+pub fn add_current(handle: u32) {
+    threads().lock().unwrap_or_else(|p| p.into_inner()).0.push((handle, crate::linux::current_thread()));
+}
+
+#[cfg(target_os = "linux")]
+pub fn remove(handle: u32) {
+    let mut t = threads().lock().unwrap_or_else(|p| p.into_inner());
+    if let Some(i) = t.0.iter().position(|(h, _)| *h == handle) {
+        t.0.remove(i);
+    }
+}
+
+/// Every live guest thread's CPU time so far (user + system, seconds), by its handle.
+#[cfg(target_os = "linux")]
+pub fn thread_cpu() -> Vec<(u32, f64)> {
+    let t = threads().lock().unwrap_or_else(|p| p.into_inner());
+    t.0.iter().filter_map(|&(h, th)| crate::linux::thread_cpu_seconds(th).map(|s| (h, s))).collect()
 }

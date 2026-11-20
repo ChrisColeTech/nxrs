@@ -201,6 +201,57 @@ pub fn keys() -> (bool, bool) {
     (CONFIRM.swap(false, Ordering::SeqCst), CANCEL.swap(false, Ordering::SeqCst))
 }
 
+/// The prompt on Linux: the desktop's question dialog (zenity / kdialog, `desk.rs`) with the title and the line;
+/// OK = Return (confirm), Cancel / closing it = Escape (cancel). The pads answer through the state machines as on
+/// Windows, and `hide` closes the dialog. With no display or no dialog tool nothing opens (the pads still answer).
+#[cfg(target_os = "linux")]
+mod window {
+    use super::*;
+    use std::sync::atomic::AtomicU64;
+
+    static GEN: AtomicU64 = AtomicU64::new(0);
+
+    pub fn repaint() {
+        GEN.fetch_add(1, Ordering::SeqCst);
+    }
+
+    fn text(v: &[u16]) -> String {
+        String::from_utf16_lossy(&v[..v.len().saturating_sub(1)])
+    }
+
+    pub fn run() {
+        let mut cur: Option<(Vec<u16>, Vec<u16>)> = None;
+        let mut q: Option<crate::desk::Question> = None;
+        let mut warned = false;
+        loop {
+            std::thread::sleep(std::time::Duration::from_millis(30));
+            let want = SHOWN.lock().unwrap().as_ref().map(|s| (s.title.clone(), s.text.clone()));
+            if want != cur {
+                if let Some(old) = q.take() {
+                    old.close();
+                }
+                if let Some((t, x)) = &want {
+                    q = crate::desk::Question::open(&text(t), &text(x));
+                    if q.is_none() && !warned {
+                        warned = true;
+                        crate::log!("prompt: no dialog on this desktop (no display, or neither zenity nor kdialog): the controllers answer it");
+                    }
+                }
+                cur = want;
+            }
+            if let Some(a) = q.as_mut().and_then(|d| d.answer()) {
+                if a {
+                    CONFIRM.store(true, Ordering::SeqCst);
+                } else {
+                    CANCEL.store(true, Ordering::SeqCst);
+                }
+                q = None;
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
 mod window {
     use super::*;
     use std::sync::atomic::AtomicIsize;

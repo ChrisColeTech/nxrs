@@ -12,7 +12,10 @@ use crate::boundary;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+#[cfg(windows)]
 use windows_sys::Win32::System::Threading::{ConvertThreadToFiberEx, CreateFiberEx, DeleteFiber, SwitchToFiber};
+#[cfg(target_os = "linux")]
+use host::{ConvertThreadToFiberEx, CreateFiberEx, DeleteFiber, SwitchToFiber};
 
 const FIBER_FLAG_FLOAT_SWITCH: u32 = 1;
 const HOST_STACK: usize = 256 << 20;
@@ -172,7 +175,10 @@ unsafe fn initialize(c: *mut Cpu) {
     }
     let cpu = Box::into_raw(Cpu::new_boxed());
     let f = Arc::new(Mutex::new(Fiber { addr, func: c.x[1], arg: c.x[2], stack: c.x[3], size: c.x[4], cpu, host: 0, state: St::New, running: false }));
+    #[cfg(windows)]
     let entry: unsafe extern "system" fn(*mut core::ffi::c_void) = core::mem::transmute(crate::asm::nxrt_fiber_entry as *const () as usize);
+    #[cfg(target_os = "linux")]
+    let entry: unsafe extern "C" fn(*mut core::ffi::c_void) = crate::asm::nxrt_fiber_entry;
     let host = CreateFiberEx(64 << 10, HOST_STACK, FIBER_FLAG_FLOAT_SWITCH, Some(entry), Arc::into_raw(f.clone()) as *const _);
     if host.is_null() {
         crate::rt::fatal("fiber: cannot create a host fiber");
@@ -240,9 +246,91 @@ unsafe fn current(c: *mut Cpu) {
 
 pub fn register() {
     // SAFETY: written before any fiber exists.
-    unsafe { crate::asm::NXRT_SWITCH_TO_FIBER = SwitchToFiber as *const () as usize };
+    #[cfg(windows)]
+    unsafe {
+        crate::asm::NXRT_SWITCH_TO_FIBER = SwitchToFiber as *const () as usize
+    };
     crate::hostfn::add_override(SYM_INITIALIZE, initialize);
     crate::hostfn::add_override(SYM_FINALIZE, finalize);
     crate::hostfn::add_override(SYM_SWITCH, switch);
     crate::hostfn::add_override(SYM_CURRENT, current);
+}
+
+/// Host fibers on Linux, with the Win32 calls' shape: a fiber is a stack of its own (mmap, a guard page below it) and
+/// the stack pointer it was left at; `nxrt_ctx_switch` (asm.rs) saves the callee-saved registers, MXCSR and the x87
+/// control word (FIBER_FLAG_FLOAT_SWITCH's state) on the stack it leaves.
+#[cfg(target_os = "linux")]
+#[allow(non_snake_case)]
+mod host {
+    use std::cell::Cell;
+
+    pub struct HostFiber {
+        sp: usize,
+        stack: usize,
+        size: usize,
+    }
+
+    thread_local! {
+        /// The host fiber running on this thread.
+        static CUR: Cell<*mut HostFiber> = const { Cell::new(core::ptr::null_mut()) };
+    }
+
+    pub unsafe fn ConvertThreadToFiberEx(_p: *const core::ffi::c_void, _flags: u32) -> *mut core::ffi::c_void {
+        let f = Box::into_raw(Box::new(HostFiber { sp: 0, stack: 0, size: 0 }));
+        CUR.set(f);
+        f as *mut _
+    }
+
+    pub unsafe fn CreateFiberEx(
+        _commit: usize,
+        reserve: usize,
+        _flags: u32,
+        entry: Option<unsafe extern "C" fn(*mut core::ffi::c_void)>,
+        param: *const core::ffi::c_void,
+    ) -> *mut core::ffi::c_void {
+        const GUARD: usize = 0x1000;
+        let size = reserve + GUARD;
+        let p = libc::mmap(core::ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE | libc::MAP_STACK, -1, 0);
+        if p == libc::MAP_FAILED {
+            return core::ptr::null_mut();
+        }
+        libc::mprotect(p, GUARD, libc::PROT_NONE);
+        // the first switch "returns" into the entry with the parameter in rbx (asm.rs nxrt_fiber_entry):
+        // top-8 a null return address, top-16 the entry, then rbp rbx r12 r13 r14 r15 and MXCSR / x87 control word
+        let top = (p as usize + size) & !15;
+        let w = |off: usize, v: u64| *((top - off) as *mut u64) = v;
+        w(8, 0);
+        w(16, entry.map_or(0, |e| e as usize as u64));
+        w(24, 0); // rbp
+        w(32, param as u64); // rbx
+        for off in [40, 48, 56, 64] {
+            w(off, 0); // r12-r15
+        }
+        w(72, 0x1F80 | (0x037F << 32)); // MXCSR default, x87 control word default
+        let f = Box::into_raw(Box::new(HostFiber { sp: top - 72, stack: p as usize, size }));
+        f as *mut _
+    }
+
+    pub unsafe fn DeleteFiber(f: *const core::ffi::c_void) {
+        let f = Box::from_raw(f as *mut HostFiber);
+        if f.stack != 0 {
+            libc::munmap(f.stack as *mut _, f.size);
+        }
+    }
+
+    pub unsafe fn SwitchToFiber(to: *const core::ffi::c_void) {
+        let from = CUR.get();
+        let to = to as *mut HostFiber;
+        if from.is_null() || from == to {
+            return;
+        }
+        CUR.set(to);
+        crate::asm::nxrt_ctx_switch(&mut (*from).sp, (*to).sp);
+    }
+
+    /// A fiber's function returned for good (nxrt_fiber_entry): on to the host fiber it named.
+    #[no_mangle]
+    unsafe extern "C" fn nxrt_fiber_leave(to: usize) {
+        SwitchToFiber(to as *const _);
+    }
 }

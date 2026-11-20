@@ -181,7 +181,35 @@ pub fn identify(dll: &Path, res: Vec<(u32, Vec<u8>)>, quality: bool) -> Result<S
     Ok(Set { dll: dll.to_path_buf(), mip: sv[m].clone(), generate: gen.clone(), passes: sv[base..base + 23].to_vec(), quality })
 }
 
+/// Steam's library folders on Linux: the native install (~/.steam/steam, ~/.local/share/Steam), the Flatpak one,
+/// and every library their libraryfolders.vdf lists (where the Windows Lossless Scaling installs under Proton too).
+#[cfg(target_os = "linux")]
+pub fn steam_libraries() -> Vec<PathBuf> {
+    let mut libs = vec![];
+    if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        for d in [".steam/steam", ".local/share/Steam", ".var/app/com.valvesoftware.Steam/.local/share/Steam"] {
+            let p = home.join(d);
+            if p.is_dir() {
+                libs.push(p.canonicalize().unwrap_or(p));
+            }
+        }
+    }
+    let roots = libs.clone();
+    for r in roots {
+        if let Ok(vdf) = std::fs::read_to_string(r.join("steamapps").join("libraryfolders.vdf")) {
+            for l in vdf.lines() {
+                if let Some(rest) = l.trim().strip_prefix("\"path\"") {
+                    libs.push(PathBuf::from(rest.trim().trim_matches('"').replace("\\\\", "\\")));
+                }
+            }
+        }
+    }
+    libs.dedup();
+    libs
+}
+
 /// Steam's library folders (the registry's SteamPath, its libraryfolders.vdf, the default places).
+#[cfg(windows)]
 pub fn steam_libraries() -> Vec<PathBuf> {
     let mut libs = vec![];
     if let Some(p) = reg_string("Software\\Valve\\Steam", "SteamPath") {
@@ -202,6 +230,7 @@ pub fn steam_libraries() -> Vec<PathBuf> {
     libs
 }
 
+#[cfg(windows)]
 fn reg_string(key: &str, value: &str) -> Option<String> {
     use crate::WideZ;
     use windows_sys::Win32::System::Registry::*;
@@ -294,7 +323,17 @@ pub fn start() {
         .ok();
 }
 
+/// `lossless_scaling=1` on Linux: the Lossless Scaling app is a Windows program that captures a Windows window; here
+/// frame generation runs its shaders inside the engine instead (`lsfg=1`, found in the same Steam install).
+#[cfg(target_os = "linux")]
+pub fn launch_app() {
+    if nxconfig::flag("lossless_scaling") {
+        crate::flog!("lossless scaling: the app captures Windows windows only; on Linux use lsfg=1 (the engine runs its frame generation shaders from {})", find_dll().map(|p| p.display().to_string()).unwrap_or_else(|| "Lossless.dll, not found".into()));
+    }
+}
+
 /// `lossless_scaling=1`: starts the Lossless Scaling app (minimised, it captures the game's window) unless it runs.
+#[cfg(windows)]
 pub fn launch_app() {
     if !nxconfig::flag("lossless_scaling") {
         return;

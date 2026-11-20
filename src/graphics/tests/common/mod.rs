@@ -231,6 +231,10 @@ impl Nvn {
         v
     }
 
+    /// The host ID of this device's texture pool entry 0 (texture IDs are per pool; the replay adds the pool's base).
+    pub fn tex_base(&self) -> i32 {
+        nxgfx::nvn::pool::dpool_base_of(&*self.tex_pool as *const NVNtexturePool as *const nxgfx::nvn::obj::dpool_t, true)
+    }
     pub fn register_texture(&mut self, id: i32, t: &NVNtexture) {
         unsafe { nvnTexturePoolRegisterTexture(&*self.tex_pool, id, t, core::ptr::null()) };
     }

@@ -13,6 +13,7 @@
 //! | `queue` | submissions, the timeline, completion and its CPU-visible effects, queue parking, presents |
 //! | `present` | the host window's swap chain and the pacing log |
 
+pub mod capture;
 pub mod counters;
 pub mod defer;
 pub mod device;

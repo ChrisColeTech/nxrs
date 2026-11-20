@@ -6,6 +6,8 @@
 pub mod log;
 pub mod boot;
 pub mod cheats;
+#[cfg(target_os = "linux")]
+pub mod desk;
 pub mod clock;
 pub mod fpslock;
 pub mod fstep;

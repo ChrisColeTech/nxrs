@@ -43,7 +43,7 @@ pub const CONTRACT: &str = "nxrs-contract 2";
 
 /// Turbo's switchrecomp.py options, as the launcher passes them.
 #[derive(Parser, Debug)]
-#[command(name = "nxrs-build", about = "Builds a Switch game into a native Windows program (contract v1; `nxrs-build help` for the subcommands).")]
+#[command(name = "nxrs-build", about = "Builds a Switch game into a native x86-64 program for this system, Windows or Linux (contract v1; `nxrs-build help` for the subcommands).")]
 struct V1 {
     /// game folder (exefs/ + romfs/), .nsp or .nup package
     input: Option<PathBuf>,
@@ -64,7 +64,8 @@ struct V1 {
     /// ARM instructions per C file (default: the translator sizes its chunks itself)
     #[arg(long)]
     chunk: Option<u64>,
-    /// ignored unless it is linux: nxrs builds Windows x86-64 programs
+    /// windows | linux: nxrs-build builds for the system it runs on (a Linux build runs nxrs-build on Linux); the
+    /// other one is refused
     #[arg(long)]
     target: Option<String>,
     /// ignored
@@ -200,11 +201,12 @@ fn run_v1(args: Vec<String>) -> i32 {
     if a.interp_only {
         return fail(&anyhow!("--interp-only: nxrs has no interpreter; every function is translated"));
     }
-    if a.target.as_deref() == Some("linux") {
-        return fail(&anyhow!("--target linux: nxrs builds Windows x86-64 programs"));
+    let host = if cfg!(target_os = "linux") { "linux" } else { "windows" };
+    if a.target.as_deref().is_some_and(|t| (t == "linux" || t == "windows") && t != host) {
+        return fail(&anyhow!("--target {}: nxrs-build builds {host} x86-64 programs here; build on {} for that", a.target.as_deref().unwrap_or(""), a.target.as_deref().unwrap_or("")));
     }
     let ignored: Vec<String> = [
-        a.target.as_ref().map(|v| format!("--target {v}")),
+        a.target.as_ref().filter(|v| v.as_str() != host).map(|v| format!("--target {v}")),
         a.backend.as_ref().map(|v| format!("--backend {v}")),
         a.cc.as_ref().filter(|c| !c.to_lowercase().contains("clang")).map(|v| format!("--cc {v}")),
         a.opt.as_ref().map(|v| format!("-O {v}")),
@@ -511,13 +513,27 @@ fn doctor() -> i32 {
     let gnu = cc::use_gnu();
     out::line(&format!(
         "     toolchain: {} (NXRS_TOOLCHAIN=msvc|gnu decides)",
-        if gnu { "llvm-mingw + the gnullvm engine (no Visual Studio)" } else { "clang + Visual Studio's libraries (MSVC ABI)" }
+        if cfg!(target_os = "linux") {
+            "clang + ld.lld for x86_64-unknown-linux-gnu, the engine's libnxfront.a / libnxrt.a"
+        } else if gnu {
+            "llvm-mingw + the gnullvm engine (no Visual Studio)"
+        } else {
+            "clang + Visual Studio's libraries (MSVC ABI)"
+        }
     ));
     match cc::find_clang(None) {
         Ok(c) => check(true, format!("compiler: {} ({}, {})", c.path.display(), c.version, c.target())),
         Err(e) => check(false, format!("compiler: {e}")),
     }
-    if !gnu {
+    if cfg!(target_os = "linux") {
+        match cc::find_clang(None) {
+            Ok(c) => match cc::find_lld(&c) {
+                Some(l) => check(true, format!("linker: {}", l.display())),
+                None => check(false, "linker: ld.lld not found (install lld)".into()),
+            },
+            Err(_) => check(false, "linker: no clang to drive ld.lld".into()),
+        }
+    } else if !gnu {
         check(cc::have_visual_studio(), "Visual Studio C++ build tools (the MSVC libraries)".into());
     }
     match cc::find_runtime_lib(gnu) {
@@ -528,8 +544,12 @@ fn doctor() -> i32 {
         Ok(e) => check(true, format!("engine library: {}", e.lib.display())),
         Err(e) => check(false, format!("engine library: {e}")),
     }
-    let sys = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| r"C:\Windows".into());
-    check(sys.join(r"System32\vulkan-1.dll").is_file(), "Vulkan loader (vulkan-1.dll)".into());
+    if cfg!(target_os = "linux") {
+        linux_checks(&mut check);
+    } else {
+        let sys = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| r"C:\Windows".into());
+        check(sys.join(r"System32\vulkan-1.dll").is_file(), "Vulkan loader (vulkan-1.dll)".into());
+    }
     match vulkan_devices() {
         Ok(devs) if devs.is_empty() => check(false, "Vulkan: no device".into()),
         Ok(devs) => {
@@ -569,6 +589,34 @@ fn doctor() -> i32 {
         None => check(false, "keys: none installed (SWR_PROD_KEYS or the launcher's keys folder); NSP games need them".into()),
     }
     i32::from(bad > 0)
+}
+
+/// What a game on Linux loads at run time: the Vulkan loader, the shared libraries the engine links (sound, codecs),
+/// a display, and the optional pieces (SDL2 for controllers, zenity / kdialog for dialogs, ffmpeg for F7).
+fn linux_checks(check: &mut dyn FnMut(bool, String)) {
+    let dirs = ["/usr/lib/x86_64-linux-gnu", "/usr/lib64", "/usr/lib", "/lib/x86_64-linux-gnu", "/lib64"];
+    let has_lib = |prefix: &str| {
+        dirs.iter().any(|d| {
+            std::fs::read_dir(d).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with(prefix))
+        })
+    };
+    let on_path = |n: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(n).is_file()));
+    check(has_lib("libvulkan.so.1"), "Vulkan loader (libvulkan.so.1)".into());
+    for (lib, what) in [
+        ("libasound.so.2", "ALSA (sound; PulseAudio / PipeWire through its default device)"),
+        ("libopus.so.0", "libopus (Opus sound)"),
+        ("libvpx.so", "libvpx (VP8 / VP9 movies)"),
+        ("libdav1d.so", "dav1d (AV1 movies)"),
+        ("libavcodec.so", "FFmpeg libavcodec (H.264 movies, AAC)"),
+        ("libavutil.so", "FFmpeg libavutil"),
+    ] {
+        check(has_lib(lib), format!("{what}: {lib}"));
+    }
+    let display = std::env::var_os("WAYLAND_DISPLAY").map(|v| format!("Wayland {}", v.to_string_lossy())).or_else(|| std::env::var_os("DISPLAY").map(|v| format!("X11 {}", v.to_string_lossy())));
+    check(display.is_some(), format!("display: {}", display.unwrap_or_else(|| "none (DISPLAY / WAYLAND_DISPLAY unset): a game cannot open its window".into())));
+    out::line(&format!("     controllers: SDL2 {}", if has_lib("libSDL2-2.0.so.0") { "found (Xbox and other pads)" } else { "not found (install libsdl2: only native HID pads and the keyboard)" }));
+    out::line(&format!("     dialogs: {}", if on_path("zenity") { "zenity" } else if on_path("kdialog") { "kdialog" } else { "neither zenity nor kdialog (messages and the keyboard go to the log)" }));
+    out::line(&format!("     recording (F7): {}", if on_path("ffmpeg") { "ffmpeg found" } else { "ffmpeg not found (F7 needs it)" }));
 }
 
 /// Every Vulkan device: (name, API version, driver version as its vendor writes it, discrete).
@@ -613,7 +661,17 @@ fn disk_checks() -> Vec<(&'static str, PathBuf, u64)> {
     v
 }
 
+/// Free bytes for this user on the volume of `dir` (statvfs: the blocks available to an unprivileged user).
+#[cfg(unix)]
+fn free_bytes(dir: &Path) -> Option<u64> {
+    let p = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
+    let mut st: libc::statvfs = unsafe { core::mem::zeroed() };
+    // SAFETY: a NUL-terminated path and our output variable
+    (unsafe { libc::statvfs(p.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
+}
+
 /// Free bytes for this user on the volume of `dir`.
+#[cfg(windows)]
 fn free_bytes(dir: &Path) -> Option<u64> {
     use std::os::windows::ffi::OsStrExt;
     let w: Vec<u16> = dir.as_os_str().encode_wide().chain([0]).collect();

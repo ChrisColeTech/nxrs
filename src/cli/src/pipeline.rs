@@ -236,7 +236,9 @@ pub fn modules_c(mods: &[(String, String, String)], entry: &str) -> String {
             "extern const uint64_t {n}_fn_addrs[];\nextern const GuestFn {n}_fn_ptrs[];\nextern const uint64_t {n}_fn_count;\n"
         ));
     }
-    s.push_str("\n__declspec(dllexport) int nxrs_game_main(int argc, char **argv) {\n    nxrs_patch_sets();\n    nxrs_mod_markers();\n    RtModule mods[] = {\n");
+    // the code library's one export: dllexport on Windows, default visibility in the Linux shared object
+    let export = if cfg!(windows) { "__declspec(dllexport)" } else { "__attribute__((visibility(\"default\")))" };
+    s.push_str(&format!("\n{export} int nxrs_game_main(int argc, char **argv) {{\n    nxrs_patch_sets();\n    nxrs_mod_markers();\n    RtModule mods[] = {{\n"));
     for (n, b, z) in mods {
         s.push_str(&format!("        {{\"{n}\", {b}ull, {z}ull, {n}_fn_addrs, {n}_fn_ptrs, 0}},\n"));
     }
@@ -393,7 +395,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     std::fs::create_dir_all(&outdir).with_context(|| format!("creating {}", outdir.display()))?;
     let base = outdir.join(&name);
     let with = |suffix: &str| PathBuf::from(format!("{}{suffix}", base.display()));
-    let (exe, dll, data) = (with(".exe"), with("_code.dll"), with("_data"));
+    // Linux: `<name>` and `<name>_code.so`
+    let (exe, dll, data) = if cfg!(target_os = "linux") { (with(""), with("_code.so"), with("_data")) } else { (with(".exe"), with("_code.dll"), with("_data")) };
     // the player's mods: their code patches join the profile's table, their data bytes and RomFS go to the run
     let patch_text = crate::mods::prepare(&outdir, &game.exefs.files, &data, patch_text, out)?;
     if !a.no_build {
@@ -612,14 +615,17 @@ mod tests {
 
     #[test]
     fn default_outdir_is_beside_the_input() {
-        let d = default_outdir(Path::new(r"P:\Dumps\X\x.nsp"), "X");
-        assert_eq!(d, PathBuf::from(r"P:\Dumps\X\SwitchRecomp Builds\X"));
+        #[cfg(windows)]
+        let (input, want) = (r"P:\Dumps\X\x.nsp", r"P:\Dumps\X\SwitchRecomp Builds\X");
+        #[cfg(not(windows))]
+        let (input, want) = ("/dumps/X/x.nsp", "/dumps/X/SwitchRecomp Builds/X");
+        assert_eq!(default_outdir(Path::new(input), "X"), PathBuf::from(want));
     }
 
     #[test]
     fn modules_c_exports_the_entry() {
         let s = modules_c(&[("main".into(), "0x7000000000".into(), "0x1000".into())], "nxrt_main");
-        assert!(s.contains("__declspec(dllexport) int nxrs_game_main"));
+        assert!(s.contains(if cfg!(windows) { "__declspec(dllexport) int nxrs_game_main" } else { "__attribute__((visibility(\"default\"))) int nxrs_game_main" }));
         assert!(s.contains("{\"main\", 0x7000000000ull, 0x1000ull, main_fn_addrs, main_fn_ptrs, 0}"));
         assert!(s.contains("mods[0].count = main_fn_count;"));
     }

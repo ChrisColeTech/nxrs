@@ -54,6 +54,11 @@ pub fn error(e: Shown) {
         return;
     }
     crate::log!("[RED] error applet: {first} (shown in a message box)");
+    #[cfg(target_os = "linux")]
+    if !crate::desk::message(&title, &text, true) {
+        crate::log!("error applet: no message box on this desktop (no display, or neither zenity nor kdialog)");
+    }
+    #[cfg(windows)]
     std::thread::spawn(move || {
         use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK, MB_TOPMOST};
         let w = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
@@ -86,10 +91,17 @@ pub fn offline_page(doc: &str) {
         return;
     }
     crate::log!("web: offline page {} opened in the PC's browser", file.display());
+    #[cfg(target_os = "linux")]
+    if !crate::desk::open(&file) {
+        crate::log!("[RED] web: xdg-open could not be started");
+    }
+    #[cfg(windows)]
+    {
     let wide: Vec<u16> = file.as_os_str().to_string_lossy().encode_utf16().chain([0]).collect();
     let open: Vec<u16> = "open".encode_utf16().chain([0]).collect();
     unsafe {
         windows_sys::Win32::UI::Shell::ShellExecuteW(std::ptr::null_mut(), open.as_ptr(), wide.as_ptr(), std::ptr::null(), std::ptr::null(), 1);
+    }
     }
 }
 

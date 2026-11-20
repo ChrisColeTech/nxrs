@@ -940,6 +940,7 @@ fn draw_texture(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: crate::nvn::cmd2::p_
     }
     let (tb, _) = pool_bases(qs);
     let id = (d.handle & 0xfffff) as i32 + tb;
+    g.materialize(id);
     let Some((serial, _)) = g.tables.tex_at(id) else {
         crate::log::red_once("DrawTexture of an unregistered texture");
         return;
@@ -1531,6 +1532,7 @@ fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::Imag
 fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::ImageView {
     let (ty, ifmt) = (ty & 0xffff, (ty >> 16) as u16);
     let want = target_of(ty);
+    g.materialize(id);
     if let Some((serial, view)) = g.tables.tex_at(id) {
         let mut imgs = g.images.lock().unwrap();
         // bound as an image without the IMAGE flag (`image_noflag`): its image gets storage use now
@@ -2141,6 +2143,8 @@ fn bind_sets(g: &Gpu, sub: &mut Sub, qs: &QState, mods: &[Arc<Module>], bp: vk::
             pool |= m.uses_pool;
         }
         if pool {
+            // a shader indexing the texture pool itself: every lazily registered texture gets its image first
+            g.materialize_all();
             unsafe { g.d.db.cmd_set_descriptor_buffer_offsets(sub.main, bp, g.layout.pipeline, L::POOL_SET, &[0], &[0]) };
         }
         return;
@@ -2153,6 +2157,7 @@ fn bind_sets(g: &Gpu, sub: &mut Sub, qs: &QState, mods: &[Arc<Module>], bp: vk::
         pool |= m.uses_pool;
     }
     if pool {
+        g.materialize_all();
         unsafe { g.dev().cmd_bind_descriptor_sets(sub.main, bp, g.layout.pipeline, L::POOL_SET, &[g.tables.set], &[]) };
     }
 }
@@ -3344,6 +3349,8 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             let kind = kind as u32;
             super::counters::rc_note(addr, kind == counter::TIMESTAMP || kind == counter::TIMESTAMP_TOP);
             if kind == counter::SAMPLES_PASSED {
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| crate::vklog!("samples-passed (occlusion) reports in use: their results land when the GPU completes the submission"));
                 end_query(g, sub, qs);
                 sub.post.push(Post::OcclReport { addr });
             } else {

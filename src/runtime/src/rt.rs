@@ -153,6 +153,7 @@ fn peek(c: &Cpu, chain: &str) -> String {
     s
 }
 
+#[cfg(windows)]
 fn qpc() -> (u64, u64) {
     use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
     static FREQ: OnceLock<u64> = OnceLock::new();
@@ -167,9 +168,22 @@ fn qpc() -> (u64, u64) {
 }
 
 /// Host nanoseconds since an arbitrary start.
+#[cfg(windows)]
 pub fn now_ns() -> u64 {
     let (n, f) = qpc();
     (n as u128 * 1_000_000_000 / f as u128) as u64
+}
+
+/// Host nanoseconds since an arbitrary start (CLOCK_MONOTONIC).
+#[cfg(target_os = "linux")]
+pub fn now_ns() -> u64 {
+    crate::linux::now_ns()
+}
+
+/// The monotonic clock as (count, rate): QueryPerformanceCounter's shape, in ns.
+#[cfg(target_os = "linux")]
+fn qpc() -> (u64, u64) {
+    (crate::linux::now_ns(), 1_000_000_000)
 }
 
 static CLOCK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);

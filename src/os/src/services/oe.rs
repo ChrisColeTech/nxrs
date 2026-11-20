@@ -265,7 +265,8 @@ fn previous_program() -> i32 {
 }
 
 /// This build's program index and the executable of program `index`: program 0 is `<name>.exe`, program N
-/// `<name>_p<N>.exe` in the same folder (`nxrs-build build --program N -o <name>_p<N>`).
+/// `<name>_p<N>.exe` in the same folder (`nxrs-build build --program N -o <name>_p<N>`); on Linux the same names
+/// without the `.exe`.
 fn program_exe(index: i32) -> Option<(i32, std::path::PathBuf)> {
     let exe = std::env::current_exe().ok()?;
     let stem = exe.file_stem()?.to_string_lossy().into_owned();
@@ -274,7 +275,7 @@ fn program_exe(index: i32) -> Option<(i32, std::path::PathBuf)> {
         _ => (stem.clone(), 0),
     };
     let name = if index == 0 { base } else { format!("{base}_p{index}") };
-    Some((cur, exe.with_file_name(format!("{name}.exe"))))
+    Some((cur, exe.with_file_name(format!("{name}{}", std::env::consts::EXE_SUFFIX))))
 }
 oefn!(default_res, |a| {
     let docked = opmode() == 1;

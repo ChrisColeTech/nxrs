@@ -212,7 +212,11 @@ impl Drop for Av1 {
 mod tests {
     #[test]
     fn opens() {
+        // the vendored dav1d 1.5 on Windows; the system's (1.x, the same API and structs) on Linux
+        #[cfg(windows)]
         assert!(super::version().starts_with("1.5"), "{}", super::version());
+        #[cfg(target_os = "linux")]
+        assert!(super::version().starts_with("1."), "{}", super::version());
         let mut d = super::Av1::new(2, 2).unwrap();
         assert!(d.feed(&[0x12, 0x00, 0x0a, 0x0b], 0).is_empty());
         let _ = d.drain();

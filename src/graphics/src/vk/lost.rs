@@ -153,6 +153,11 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
                 for a in ai.iter().take(c.address_info_count as usize) {
                     let t = TY.get(a.address_type.as_raw() as usize).copied().unwrap_or("?");
                     crate::log::red(&format!("  fault address: {t} at {:#x} (within {:#x})", a.reported_address, a.address_precision));
+                    if let Some(o) = addr_owner(a.reported_address) {
+                        crate::log::red(&format!("    {o}"));
+                    } else if addr_report_wanted() {
+                        crate::log::red("    in no memory bound or unbound since the start (the address binding report)");
+                    }
                 }
                 for v in vi.iter().take(c.vendor_info_count as usize) {
                     let d = v.description_as_c_str().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
@@ -183,4 +188,74 @@ pub fn note_gone(what: impl FnOnce() -> String) {
         r.pop_front();
     }
     r.push_back((crate::log::elapsed(), what()));
+}
+
+/// VK_EXT_device_address_binding_report (`NXGFX_ADDR_REPORT=1`, on with `NXGFX_CHECKPOINTS=all`): every device address
+/// range bound and unbound, so a faulting address is named on a device loss (the object it is in, or the one unbound
+/// there last).
+pub fn addr_report_wanted() -> bool {
+    match std::env::var("NXGFX_ADDR_REPORT").as_deref() {
+        Ok("1") => true,
+        Ok("0") => false,
+        _ => level() >= 2,
+    }
+}
+
+#[derive(Clone, Copy)]
+struct Bind {
+    size: u64,
+    ty: vk::ObjectType,
+    handle: u64,
+    at: f64,
+}
+#[derive(Default)]
+struct Binds {
+    live: std::collections::BTreeMap<u64, Bind>,
+    gone: std::collections::VecDeque<(u64, Bind, f64)>,
+}
+static BINDS: Mutex<Option<Binds>> = Mutex::new(None);
+
+/// The debug messenger's address-binding message.
+pub unsafe fn on_binding(data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>) {
+    if data.is_null() {
+        return;
+    }
+    let d = &*data;
+    // the binding description in the message's chain
+    let mut p = d.p_next as *const vk::BaseInStructure<'_>;
+    let mut b: Option<&vk::DeviceAddressBindingCallbackDataEXT<'_>> = None;
+    while !p.is_null() {
+        if (*p).s_type == vk::StructureType::DEVICE_ADDRESS_BINDING_CALLBACK_DATA_EXT {
+            b = Some(&*(p as *const vk::DeviceAddressBindingCallbackDataEXT<'_>));
+            break;
+        }
+        p = (*p).p_next;
+    }
+    let Some(b) = b else { return };
+    let (ty, handle) = if d.object_count > 0 && !d.p_objects.is_null() { ((*d.p_objects).object_type, (*d.p_objects).object_handle) } else { (vk::ObjectType::UNKNOWN, 0) };
+    let at = crate::log::elapsed();
+    let mut g = BINDS.lock().unwrap();
+    let s = g.get_or_insert_with(Binds::default);
+    if b.binding_type == vk::DeviceAddressBindingTypeEXT::BIND {
+        s.live.insert(b.base_address, Bind { size: b.size, ty, handle, at });
+    } else if let Some(x) = s.live.remove(&b.base_address) {
+        if s.gone.len() >= 8192 {
+            s.gone.pop_front();
+        }
+        s.gone.push_back((b.base_address, x, at));
+    }
+}
+
+/// What address `a` was in: the live binding holding it, else the last binding there that was unbound.
+fn addr_owner(a: u64) -> Option<String> {
+    let g = BINDS.lock().unwrap();
+    let s = g.as_ref()?;
+    if let Some((&base, x)) = s.live.range(..=a).next_back().filter(|(&base, x)| a < base + x.size) {
+        return Some(format!("inside {:?} {:#x} (bound at {:.2} s: {:#x} +{:#x}), still bound", x.ty, x.handle, x.at, base, x.size));
+    }
+    s.gone
+        .iter()
+        .rev()
+        .find(|(base, x, _)| a >= *base && a < base + x.size)
+        .map(|(base, x, t)| format!("inside {:?} {:#x} (bound at {:.2} s: {:#x} +{:#x}), UNBOUND at {:.2} s", x.ty, x.handle, x.at, base, x.size, t))
 }

@@ -668,6 +668,12 @@ impl Mem for GuestMem {
     }
 }
 
+#[cfg(target_os = "linux")]
+fn writable(a: u64, n: u64) -> bool {
+    nxrt::linux::writable(a, n)
+}
+
+#[cfg(windows)]
 fn writable(a: u64, n: u64) -> bool {
     use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PAGE_WRITECOPY};
     let mut p = a;

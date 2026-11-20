@@ -34,6 +34,23 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use translator::package::RomFs;
 
+/// Positioned reads and writes on Linux with the names Windows' `FileExt` gives them (pread / pwrite).
+#[cfg(unix)]
+pub(crate) mod posio {
+    pub trait FileExt {
+        fn seek_read(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize>;
+        fn seek_write(&self, buf: &[u8], offset: u64) -> std::io::Result<usize>;
+    }
+    impl FileExt for std::fs::File {
+        fn seek_read(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+            std::os::unix::fs::FileExt::read_at(self, buf, offset)
+        }
+        fn seek_write(&self, buf: &[u8], offset: u64) -> std::io::Result<usize> {
+            std::os::unix::fs::FileExt::write_at(self, buf, offset)
+        }
+    }
+}
+
 pub const RES_PATH_NOT_FOUND: u64 = 0x202;
 pub const RES_PATH_EXISTS: u64 = 0x402;
 pub const RES_TARGET_NOT_FOUND: u64 = 0x7D402;
@@ -329,7 +346,10 @@ pub fn read_file(h: u64, off: u64, len: u64) -> Result<Vec<u8>, u64> {
         });
     }
     let f = file.ok_or(RES_FAIL)?;
+    #[cfg(windows)]
     use std::os::windows::fs::FileExt;
+    #[cfg(unix)]
+    use crate::services::fs::posio::FileExt;
     let mut buf = vec![0u8; len as usize];
     let mut got = 0usize;
     while got < buf.len() {
@@ -349,7 +369,10 @@ pub fn write_file(h: u64, off: u64, data: &[u8]) -> u64 {
         _ => None,
     });
     let Some(f) = f else { return RES_FAIL };
+    #[cfg(windows)]
     use std::os::windows::fs::FileExt;
+    #[cfg(unix)]
+    use crate::services::fs::posio::FileExt;
     let mut put = 0usize;
     while put < data.len() {
         match f.seek_write(&data[put..], off + put as u64) {
@@ -679,7 +702,10 @@ impl translator::package::storage::Storage for ImageFile {
         self.size
     }
     fn read(&self, offset: u64, size: u64) -> std::result::Result<Vec<u8>, translator::package::PackageError> {
+        #[cfg(windows)]
         use std::os::windows::fs::FileExt;
+        #[cfg(unix)]
+        use crate::services::fs::posio::FileExt;
         if offset.checked_add(size).is_none_or(|e| e > self.size) {
             return Err(translator::package::PackageError::Format("read past the end of the RomFS image".into()));
         }

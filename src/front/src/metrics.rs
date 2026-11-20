@@ -5,8 +5,11 @@
 
 use std::io::Write;
 use std::sync::Mutex;
+#[cfg(windows)]
 use windows_sys::Win32::Foundation::FILETIME;
+#[cfg(windows)]
 use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+#[cfg(windows)]
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetProcessTimes};
 
 struct M {
@@ -21,6 +24,22 @@ struct M {
 }
 static M_: Mutex<Option<M>> = Mutex::new(None);
 
+/// The process's CPU time (user + system), seconds.
+#[cfg(target_os = "linux")]
+pub fn cpu_seconds() -> f64 {
+    let mut ts: libc::timespec = unsafe { std::mem::zeroed() };
+    unsafe { libc::clock_gettime(libc::CLOCK_PROCESS_CPUTIME_ID, &mut ts) };
+    ts.tv_sec as f64 + ts.tv_nsec as f64 / 1e9
+}
+
+/// The process's memory in MB (resident + swapped out: Linux's nearest to Windows' private bytes).
+#[cfg(target_os = "linux")]
+pub fn private_mb() -> f64 {
+    let (rss, swap) = nxrt::linux::process_memory();
+    (rss + swap) as f64 / 1048576.0
+}
+
+#[cfg(windows)]
 pub fn cpu_seconds() -> f64 {
     unsafe {
         let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) = std::mem::zeroed();
@@ -30,6 +49,7 @@ pub fn cpu_seconds() -> f64 {
     }
 }
 
+#[cfg(windows)]
 pub fn private_mb() -> f64 {
     unsafe {
         let mut pm: PROCESS_MEMORY_COUNTERS_EX = std::mem::zeroed();

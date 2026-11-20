@@ -137,6 +137,7 @@ static MEMORY_CAP: OnceLock<u64> = OnceLock::new();
 /// program. On 2026-11-18 Ocarina of Time's process grew by 1 GB a second (the NVIDIA driver's own allocations while
 /// pipelines were made) and Windows went down with it. The limit: half of the machine's memory, at least 12 GB and
 /// at most 32 GB; `SWR_MEMORY_CAP_GB` sets it, 0 turns it off.
+#[cfg(windows)]
 pub fn memory_cap(pool: u64) {
     use windows_sys::Win32::System::JobObjects::*;
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
@@ -181,6 +182,32 @@ pub fn memory_cap(pool: u64) {
     } else {
         let e = unsafe { windows_sys::Win32::Foundation::GetLastError() };
         crate::rt::log(&format!("[RED] process memory cap: could not be set (error {e}): this game's memory is not limited"));
+    }
+}
+
+/// The same cap on Linux (`linux::memory_cap`: a cgroup with memory.max, else a watchdog on the resident size).
+#[cfg(target_os = "linux")]
+pub fn memory_cap(pool: u64) {
+    if MEMORY_CAP.get().is_some() {
+        return;
+    }
+    let total = crate::linux::total_memory();
+    let mut cap = (total / 2).clamp(12 << 30, 32 << 30).max((pool + (8 << 30)).min(total));
+    if let Some(gb) = std::env::var("SWR_MEMORY_CAP_GB").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+        cap = gb << 30;
+    }
+    let _ = MEMORY_CAP.set(cap);
+    if cap == 0 {
+        crate::rt::log("process memory cap: off (SWR_MEMORY_CAP_GB=0)");
+        return;
+    }
+    match crate::linux::memory_cap(cap) {
+        Ok(how) => crate::rt::log(&format!(
+            "process memory cap: {} MB ({how}; half of the machine's {} MB, between 12 and 32 GB; SWR_MEMORY_CAP_GB sets it, 0 = off). Past it this game stops instead of the machine",
+            cap >> 20,
+            total >> 20
+        )),
+        Err(e) => crate::rt::log(&format!("[RED] process memory cap: could not be set ({e}): this game's memory is not limited")),
     }
 }
 

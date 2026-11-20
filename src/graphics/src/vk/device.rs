@@ -15,6 +15,10 @@ unsafe extern "system" fn debug_cb(
     data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>,
     _user: *mut c_void,
 ) -> vk::Bool32 {
+    if ty.contains(vk::DebugUtilsMessageTypeFlagsEXT::DEVICE_ADDRESS_BINDING) {
+        super::lost::on_binding(data);
+        return vk::FALSE;
+    }
     let msg = if data.is_null() || (*data).p_message.is_null() {
         String::from("?")
     } else {
@@ -163,11 +167,15 @@ impl Device {
             )
             .pfn_user_callback(Some(debug_cb));
         let mut ci = vk::InstanceCreateInfo::default().application_info(&app_info).enabled_layer_names(&layers).enabled_extension_names(&exts);
-        if has_debug && !layers.is_empty() {
+        let addr_report = has_debug && super::lost::addr_report_wanted();
+        if addr_report {
+            dbg_info = dbg_info.message_type(dbg_info.message_type | vk::DebugUtilsMessageTypeFlagsEXT::DEVICE_ADDRESS_BINDING).message_severity(dbg_info.message_severity | vk::DebugUtilsMessageSeverityFlagsEXT::INFO);
+        }
+        if has_debug && (!layers.is_empty() || addr_report) {
             ci = ci.push_next(&mut dbg_info);
         }
         let instance = unsafe { entry.create_instance(&ci, None) }.map_err(|e| format!("vkCreateInstance: {e}"))?;
-        let debug = if has_debug && !layers.is_empty() {
+        let debug = if has_debug && (!layers.is_empty() || addr_report) {
             let du = debug_utils::Instance::new(&entry, &instance);
             let m = unsafe { du.create_debug_utils_messenger(&dbg_info, None) }.map_err(|e| format!("debug messenger: {e}"))?;
             Some((du, m))
@@ -233,7 +241,8 @@ impl Device {
             }
         }
         let mut dexts: Vec<*const i8> = required.iter().map(|n| n.as_ptr()).collect();
-        let optional: [&CStr; 17] = [
+        let optional: [&CStr; 18] = [
+            ash::ext::device_address_binding_report::NAME,
             ash::nv::device_diagnostic_checkpoints::NAME,
             ash::ext::device_fault::NAME,
             ash::khr::acceleration_structure::NAME,
@@ -274,6 +283,7 @@ impl Device {
         let mut f_as = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default();
         let mut f_rq = vk::PhysicalDeviceRayQueryFeaturesKHR::default();
         let mut f_fault = vk::PhysicalDeviceFaultFeaturesEXT::default();
+        let mut f_abr = vk::PhysicalDeviceAddressBindingReportFeaturesEXT::default();
         let mut f12 = vk::PhysicalDeviceVulkan12Features::default();
         let mut f13 = vk::PhysicalDeviceVulkan13Features::default();
         let mut f11 = vk::PhysicalDeviceVulkan11Features::default();
@@ -295,9 +305,11 @@ impl Device {
             .push_next(&mut f_db)
             .push_next(&mut f_as)
             .push_next(&mut f_rq)
-            .push_next(&mut f_fault);
+            .push_next(&mut f_fault)
+            .push_next(&mut f_abr);
         unsafe { instance.get_physical_device_features2(pdev, &mut f2) };
         let base = f2.features;
+        let abr = addr_report && has(ash::ext::device_address_binding_report::NAME) && f_abr.report_address_binding != 0;
         let need = |ok: u32, what: &str| -> Result<(), String> { if ok != 0 { Ok(()) } else { Err(format!("device {name} lacks {what}")) } };
         need(f13.dynamic_rendering, "dynamicRendering")?;
         need(f13.synchronization2, "synchronization2")?;
@@ -501,6 +513,10 @@ impl Device {
         if !caps.device_fault {
             dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::device_fault::NAME);
         }
+        let mut e_abr = vk::PhysicalDeviceAddressBindingReportFeaturesEXT::default().report_address_binding(true);
+        if !abr {
+            dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::device_address_binding_report::NAME);
+        }
         let mut e_as = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
         let mut e_rq = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
         if !caps.rt {
@@ -553,6 +569,10 @@ impl Device {
         }
         if caps.device_fault {
             dci = dci.push_next(&mut e_fault);
+        }
+        if abr {
+            dci = dci.push_next(&mut e_abr);
+            crate::vklog!("device address binding report on (the memory a faulting address belonged to is named on a device loss)");
         }
         let dev = unsafe { instance.create_device(pdev, &dci, None) }.map_err(|e| format!("vkCreateDevice: {e}"))?;
         let queue = unsafe { dev.get_device_queue(qfam, 0) };

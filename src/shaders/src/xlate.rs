@@ -26,8 +26,24 @@ fn command(exe: &Path) -> Command {
         use std::os::windows::process::CommandExt;
         c.creation_flags(BELOW_NORMAL | NO_WINDOW);
     }
+    // Linux: below normal priority as on Windows (nice 5 in the child before it runs the tool)
+    #[cfg(target_os = "linux")]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setpriority is async-signal-safe
+        unsafe {
+            c.pre_exec(|| {
+                libc::setpriority(libc::PRIO_PROCESS, 0, 5);
+                Ok(())
+            })
+        };
+    }
     c
 }
+
+/// The tools' file names: `dmsh_xlate.exe` / `spirv-val.exe` on Windows, without the extension elsewhere.
+const XLATE: &str = if cfg!(windows) { "dmsh_xlate.exe" } else { "dmsh_xlate" };
+const SPIRV_VAL: &str = if cfg!(windows) { "spirv-val.exe" } else { "spirv-val" };
 
 /// Where the tools are: `dmsh_xlate.exe` (built from nxnative's source into build/tools/dmsh_xlate) and the Vulkan
 /// SDK's `spirv-val.exe`.
@@ -47,23 +63,40 @@ impl Tools {
             xl.push(p.into());
         }
         if let Some(d) = &exe_dir {
-            xl.push(d.join("tools").join("dmsh_xlate.exe"));
-            xl.push(d.join("dmsh_xlate.exe"));
+            xl.push(d.join("tools").join(XLATE));
+            xl.push(d.join(XLATE));
             for up in d.ancestors().take(5) {
-                xl.push(up.join("build").join("tools").join("dmsh_xlate").join("dmsh_xlate.exe"));
+                xl.push(up.join("build").join("tools").join("dmsh_xlate").join(XLATE));
             }
         }
-        xl.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build/tools/dmsh_xlate/dmsh_xlate.exe"));
-        let xlate = xl.into_iter().find(|p| p.is_file()).ok_or("dmsh_xlate.exe not found (set NXSHADERS_XLATE, or build it: src/shaders/tools/build_dmsh_xlate.ps1)")?;
+        xl.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build/tools/dmsh_xlate").join(XLATE));
+        // Linux: the linux-x64 build of the tool (build_dmsh_xlate.sh) under build/tools/dmsh_xlate-linux
+        #[cfg(not(windows))]
+        xl.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build/tools/dmsh_xlate-linux").join(XLATE));
+        let xlate = xl
+            .into_iter()
+            .find(|p| p.is_file())
+            .ok_or(if cfg!(windows) { "dmsh_xlate.exe not found (set NXSHADERS_XLATE, or build it: src/shaders/tools/build_dmsh_xlate.ps1)" } else { "dmsh_xlate not found (set NXSHADERS_XLATE, or build it: src/shaders/tools/build_dmsh_xlate.sh)" })?;
         let mut sv: Vec<PathBuf> = vec![];
         if let Ok(p) = std::env::var("NXSHADERS_SPIRV_VAL") {
             sv.push(p.into());
         }
         if let Ok(p) = std::env::var("VULKAN_SDK") {
-            sv.push(Path::new(&p).join("Bin").join("spirv-val.exe"));
+            sv.push(Path::new(&p).join("Bin").join(SPIRV_VAL));
+            sv.push(Path::new(&p).join("bin").join(SPIRV_VAL));
         }
-        sv.push(PathBuf::from(r"C:\VulkanSDK\1.3.268.0\Bin\spirv-val.exe"));
-        let spirv_val = sv.into_iter().find(|p| p.is_file()).ok_or("spirv-val.exe not found (set NXSHADERS_SPIRV_VAL or VULKAN_SDK)")?;
+        if cfg!(windows) {
+            sv.push(PathBuf::from(r"C:\VulkanSDK\1.3.268.0\Bin\spirv-val.exe"));
+        } else {
+            // the distribution's SPIRV-Tools (spirv-tools on Debian / Ubuntu / Fedora / Arch)
+            if let Some(p) = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(SPIRV_VAL)).find(|p| p.is_file())) {
+                sv.push(p);
+            }
+        }
+        let spirv_val = sv
+            .into_iter()
+            .find(|p| p.is_file())
+            .ok_or(if cfg!(windows) { "spirv-val.exe not found (set NXSHADERS_SPIRV_VAL or VULKAN_SDK)" } else { "spirv-val not found (install spirv-tools, or set NXSHADERS_SPIRV_VAL or VULKAN_SDK)" })?;
         Ok(Tools { xlate: dunce(xlate), spirv_val })
     }
 

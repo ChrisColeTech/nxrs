@@ -12,6 +12,12 @@
 //!
 //! The executable carries no runtime at all: it loads `<its name>_code.dll` from its folder and calls the DLL's one
 //! export, `nxrs_game_main`, so the same small file serves every game.
+//!
+//! Linux (x86-64): the same split as `<name>` (an ELF loader, no extension) and `<name>_code.so`, built with clang for
+//! `x86_64-unknown-linux-gnu` and linked by ld.lld: the objects position-independent (`-fPIC`), the shared object
+//! linked `-Bsymbolic` (the generated code's calls into the runtime bind inside the image, no PLT on `rt_dispatch`)
+//! and `--no-undefined`, with the engine's `libnxfront.a` / `libnxrt.a` beside nxrs-build. The loader raises its
+//! stack limit to 16 MB and runs itself again when the limit was lower (the main thread's stack is sized at exec).
 
 use anyhow::{anyhow, bail, Context, Result};
 use sha2::{Digest, Sha256};
@@ -26,6 +32,8 @@ pub const TARGET: &str = "x86_64-pc-windows-msvc";
 /// On a machine without Visual Studio: the bundled llvm-mingw and the engine built for `x86_64-pc-windows-gnullvm`
 /// (`gnu\libnxfront.a`, `gnu\libnxrt.a`), linked against the UCRT that every Windows 10 has.
 pub const TARGET_GNU: &str = "x86_64-w64-windows-gnu";
+/// Linux: the system's C library, the engine built for the host (`libnxfront.a`, `libnxrt.a`).
+pub const TARGET_LINUX: &str = "x86_64-unknown-linux-gnu";
 
 /// The game-code flags: -O1 without the vectorizers, frame pointers or debug info (measured: fewer instructions than
 /// either compiler's defaults), for x86-64-v3 (AVX2, FMA, BMI2). `-fms-runtime-lib=dll` matches the CRT the Rust
@@ -69,18 +77,33 @@ pub struct Clang {
 
 impl Clang {
     pub fn target(&self) -> &'static str {
-        if self.gnu { TARGET_GNU } else { TARGET }
+        if cfg!(target_os = "linux") {
+            TARGET_LINUX
+        } else if self.gnu {
+            TARGET_GNU
+        } else {
+            TARGET
+        }
     }
 
-    /// The game-code flags for this toolchain (the MSVC CRT choice only applies to the MSVC target).
+    /// The game-code flags for this toolchain (the MSVC CRT choice only applies to the MSVC target; Linux objects go
+    /// into a shared object: position-independent).
     pub fn gen_flags(&self) -> Vec<String> {
-        GEN_FLAGS.iter().filter(|f| !(self.gnu && f.starts_with("-fms-runtime-lib"))).map(|s| s.to_string()).collect()
+        let linux = cfg!(target_os = "linux");
+        let mut v: Vec<String> = GEN_FLAGS.iter().filter(|f| !((self.gnu || linux) && f.starts_with("-fms-runtime-lib"))).map(|s| s.to_string()).collect();
+        if linux {
+            v.push("-fPIC".into());
+        }
+        v
     }
 }
 
 /// Whether Visual Studio's C++ build tools (the MSVC libraries the MSVC-ABI engine links) are installed: vswhere's
 /// answer, or a developer prompt's `VCToolsInstallDir`.
 pub fn have_visual_studio() -> bool {
+    if cfg!(not(windows)) {
+        return false;
+    }
     if std::env::var_os("VCToolsInstallDir").is_some() {
         return true;
     }
@@ -112,6 +135,9 @@ pub fn llvm_mingw_clang() -> Option<PathBuf> {
 /// found, the MSVC engine library beside nxrs-build or `NXRS_ENGINE_LIB`), else the bundled llvm-mingw when it is
 /// there. A release may ship only the gnullvm engine: then a machine with Visual Studio builds with llvm-mingw too.
 pub fn use_gnu() -> bool {
+    if cfg!(target_os = "linux") {
+        return false; // one toolchain on Linux: the system's clang and lld
+    }
     match std::env::var("NXRS_TOOLCHAIN").ok().as_deref().map(str::trim) {
         Some("gnu") | Some("mingw") | Some("gnullvm") => true,
         Some("msvc") => false,
@@ -153,6 +179,9 @@ fn which(exe: &str) -> Option<PathBuf> {
 /// (`clang\bin`, `..\toolchain\clang\bin`); `NXRT_LLVM` (the runtime's own tools use it); LLVM's installer's folder;
 /// PATH.
 pub fn candidates(cc_hint: Option<&str>) -> Vec<PathBuf> {
+    if cfg!(target_os = "linux") {
+        return candidates_linux(cc_hint);
+    }
     let mut v = vec![];
     if let Some(p) = std::env::var_os("NXRS_CLANG") {
         v.push(PathBuf::from(p));
@@ -175,6 +204,39 @@ pub fn candidates(cc_hint: Option<&str>) -> Vec<PathBuf> {
         v.push(p);
     }
     v
+}
+
+/// Linux: `NXRS_CLANG`; `--cc` when it names a clang; the bundled one beside nxrs-build (`clang/bin/clang`,
+/// `../toolchain/clang/bin/clang`); `NXRT_LLVM`; PATH's `clang`, then its versioned names (`clang-21` .. `clang-15`).
+fn candidates_linux(cc_hint: Option<&str>) -> Vec<PathBuf> {
+    let mut v = vec![];
+    if let Some(p) = std::env::var_os("NXRS_CLANG") {
+        v.push(PathBuf::from(p));
+    }
+    if let Some(cc) = cc_hint {
+        if Path::new(cc).file_name().is_some_and(|n| n.to_string_lossy().contains("clang")) {
+            v.push(PathBuf::from(cc));
+        }
+    }
+    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+        v.push(dir.join("clang/bin/clang"));
+        v.push(dir.join("../toolchain/clang/bin/clang"));
+    }
+    if let Some(d) = std::env::var_os("NXRT_LLVM") {
+        v.push(Path::new(&d).join("clang"));
+    }
+    for n in std::iter::once("clang".to_string()).chain((15..=21).rev().map(|k| format!("clang-{k}"))) {
+        if let Some(p) = which(&n) {
+            v.push(p);
+        }
+    }
+    v
+}
+
+/// The linker clang drives on Linux (`-fuse-ld=lld`): ld.lld beside that clang or on PATH.
+pub fn find_lld(clang: &Clang) -> Option<PathBuf> {
+    let beside = clang.path.parent().map(|d| d.join("ld.lld")).filter(|p| p.is_file());
+    beside.or_else(|| which("ld.lld")).or_else(|| (15..=21).rev().find_map(|k| which(&format!("ld.lld-{k}"))))
 }
 
 pub fn find_clang(cc_hint: Option<&str>) -> Result<Clang> {
@@ -222,7 +284,14 @@ pub fn find_engine(sdk_title: bool, gnu: bool) -> Result<Engine> {
         let p = PathBuf::from(p);
         return if p.is_file() { Ok(Engine { lib: p, front: true }) } else { Err(anyhow!("NXRS_ENGINE_LIB={} does not exist", p.display())) };
     }
-    let p = if gnu { gnu_lib_dir()?.join("libnxfront.a") } else { std::env::current_exe()?.parent().unwrap().join("nxfront.lib") };
+    let here = std::env::current_exe()?.parent().unwrap().to_path_buf();
+    let p = if cfg!(target_os = "linux") {
+        here.join("libnxfront.a")
+    } else if gnu {
+        gnu_lib_dir()?.join("libnxfront.a")
+    } else {
+        here.join("nxfront.lib")
+    };
     if p.is_file() {
         Ok(Engine { lib: p, front: true })
     } else {
@@ -244,7 +313,13 @@ pub fn find_runtime_lib(gnu: bool) -> Result<PathBuf> {
         return if p.is_file() { Ok(p) } else { Err(anyhow!("NXRS_RUNTIME_LIB={} does not exist", p.display())) };
     }
     let exe = std::env::current_exe()?;
-    let p = if gnu { gnu_lib_dir()?.join("libnxrt.a") } else { exe.parent().unwrap().join("nxrt.lib") };
+    let p = if cfg!(target_os = "linux") {
+        exe.parent().unwrap().join("libnxrt.a")
+    } else if gnu {
+        gnu_lib_dir()?.join("libnxrt.a")
+    } else {
+        exe.parent().unwrap().join("nxrt.lib")
+    };
     if p.is_file() {
         Ok(p)
     } else {
@@ -478,7 +553,45 @@ fn extra_libs(front: bool, gnu: bool) -> Vec<String> {
 
 /// `<dll>`: every object and the runtime library, through a response file (hundreds of objects pass the command
 /// line's limit). Written as `<dll>.part` and renamed, so a failed link leaves the previous DLL whole.
+/// Linux: what the engine's static libraries need of the system (`cargo rustc --crate-type staticlib --
+/// --print native-static-libs`): the runtime's, and for the whole engine ALSA (cpal's sound), the codec libraries
+/// (opus, libvpx, dav1d) and FFmpeg's libavcodec / libavutil (H.264 and AAC).
+const LINUX_SYS_LIBS: &[&str] = &["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"];
+const LINUX_ENGINE_LIBS: &[&str] = &["-lopus", "-lvpx", "-ldav1d", "-lavcodec", "-lavutil", "-lasound"];
+
+/// `<name>_code.so` on Linux: every object and the engine library, `-Bsymbolic`, nothing left undefined.
+fn link_so(clang: &Clang, objs: &[PathBuf], engine: &Engine, obj_dir: &Path, so: &Path) -> Result<()> {
+    let rsp = obj_dir.join("link.rsp");
+    std::fs::write(&rsp, response_file(objs))?;
+    let part = so.with_file_name(format!("{}.part", so.file_name().unwrap().to_string_lossy()));
+    let mut args: Vec<String> = vec![
+        "-shared".into(),
+        "-fuse-ld=lld".into(),
+        "-o".into(),
+        part.display().to_string(),
+        format!("@{}", rsp.display()),
+        engine.lib.display().to_string(),
+        "-Wl,-Bsymbolic".into(),
+        "-Wl,--no-undefined".into(),
+        "-Wl,-z,noexecstack".into(),
+        format!("-Wl,-soname,{}", so.file_name().unwrap().to_string_lossy()),
+    ];
+    if engine.front {
+        args.extend(LINUX_ENGINE_LIBS.iter().map(|s| s.to_string()));
+    }
+    args.extend(LINUX_SYS_LIBS.iter().map(|s| s.to_string()));
+    if let Ok(more) = std::env::var("NXRS_LINK_LIBS") {
+        args.extend(more.split_whitespace().map(String::from));
+    }
+    run_link(clang, &args, obj_dir)?;
+    rename_retry(&part, so).with_context(|| format!("{} is in use. Close the game and try again.", so.display()))?;
+    Ok(())
+}
+
 pub fn link_dll(clang: &Clang, objs: &[PathBuf], engine: &Engine, obj_dir: &Path, dll: &Path) -> Result<()> {
+    if cfg!(target_os = "linux") {
+        return link_so(clang, objs, engine, obj_dir, dll);
+    }
     let rsp = obj_dir.join("link.rsp");
     std::fs::write(&rsp, response_file(objs))?;
     let part = dll.with_file_name(format!("{}.part", dll.file_name().unwrap().to_string_lossy()));
@@ -543,8 +656,81 @@ int main(int argc, char **argv) {
 }
 "#;
 
+/// The loader on Linux: `<name>` loads `<name>_code.so` beside it (dlopen) and calls `nxrs_game_main(argc, argv)`,
+/// with `NXRS_DATA` / `NXRT_EXEFS` set as on Windows. The main thread's stack is 16 MB as there: a lower limit is raised
+/// and the loader runs itself again (the main stack is sized when a program starts). A failure before the game's
+/// own log exists goes to stderr and, without a terminal, to the desktop's message box (zenity / kdialog).
+pub const STUB_C_LINUX: &str = r#"#define _GNU_SOURCE
+#include <dlfcn.h>
+#include <limits.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/resource.h>
+#include <sys/wait.h>
+#include <spawn.h>
+#include <unistd.h>
+
+extern char **environ;
+typedef int (*nxrs_entry)(int argc, char **argv);
+
+static void fail(const char *what, const char *path, const char *why) {
+    char msg[8192];
+    snprintf(msg, sizeof msg, "%s: %s (%s)", what, path, why ? why : "");
+    fprintf(stderr, "%s\n", msg);
+    if (!isatty(2) && (getenv("DISPLAY") || getenv("WAYLAND_DISPLAY"))) {
+        char *z[] = {"zenity", "--error", "--no-markup", "--title=nxrs", "--text", msg, NULL};
+        char *k[] = {"kdialog", "--title", "nxrs", "--error", msg, NULL};
+        pid_t pid;
+        if (!posix_spawnp(&pid, z[0], NULL, NULL, z, environ) || !posix_spawnp(&pid, k[0], NULL, NULL, k, environ)) {
+            int st;
+            waitpid(pid, &st, 0);
+        }
+    }
+}
+
+int main(int argc, char **argv) {
+    static char self[PATH_MAX], lib[PATH_MAX + 16], data[PATH_MAX + 16], exefs[PATH_MAX + 32];
+    ssize_t n = readlink("/proc/self/exe", self, sizeof self - 1);
+    if (n <= 0) { fail("cannot read the executable's path", "/proc/self/exe", NULL); return 1; }
+    self[n] = 0;
+    /* the game's start-up runs on the main thread: 16 MB of stack, as the Windows loader links it */
+    struct rlimit rl;
+    const rlim_t want = 16u << 20;
+    if (!getrlimit(RLIMIT_STACK, &rl) && rl.rlim_cur != RLIM_INFINITY && rl.rlim_cur < want && !getenv("NXRS_STACK_SET")) {
+        rl.rlim_cur = (rl.rlim_max == RLIM_INFINITY || rl.rlim_max >= want) ? want : rl.rlim_max;
+        if (!setrlimit(RLIMIT_STACK, &rl)) {
+            setenv("NXRS_STACK_SET", "1", 1);
+            execv(self, argv);
+        }
+    }
+    unsetenv("NXRS_STACK_SET");
+    snprintf(lib, sizeof lib, "%s_code.so", self);
+    snprintf(data, sizeof data, "%s_data", self);
+    snprintf(exefs, sizeof exefs, "%s_data/exefs", self);
+    setenv("NXRS_DATA", data, 0);
+    setenv("NXRT_EXEFS", exefs, 0);
+    void *code = dlopen(lib, RTLD_NOW | RTLD_LOCAL);
+    if (!code) { fail("cannot load the game code", lib, dlerror()); return 1; }
+    nxrs_entry entry = (nxrs_entry)dlsym(code, "nxrs_game_main");
+    if (!entry) { fail("the game code has no nxrs_game_main (rebuild the game)", lib, dlerror()); return 1; }
+    return entry(argc, argv);
+}
+"#;
+
 /// Builds the loader into `exe` (the object is cached under its key in `obj_dir`).
 pub fn link_exe(clang: &Clang, obj_dir: &Path, exe: &Path) -> Result<()> {
+    if cfg!(target_os = "linux") {
+        let src = obj_dir.join("nxrs_loader.c");
+        crate::write_if_changed(&src, STUB_C_LINUX.as_bytes())?;
+        let unit = Unit { src, obj: obj_dir.join("nxrs_loader.o"), flags: vec!["-std=gnu11".into(), "-O2".into(), "-w".into()], headers: headers_key(clang, &[])? };
+        compile(clang, std::slice::from_ref(&unit), obj_dir, 1, &|_| {})?;
+        let part = exe.with_file_name(format!("{}.part", exe.file_name().unwrap().to_string_lossy()));
+        let args: Vec<String> = vec!["-fuse-ld=lld".into(), "-o".into(), part.display().to_string(), unit.obj.display().to_string(), "-ldl".into()];
+        run_link(clang, &args, obj_dir)?;
+        rename_retry(&part, exe).with_context(|| format!("{} is in use. Close the game and try again.", exe.display()))?;
+        return Ok(());
+    }
     let src = obj_dir.join("nxrs_loader.c");
     crate::write_if_changed(&src, STUB_C.as_bytes())?;
     let unit = Unit {
