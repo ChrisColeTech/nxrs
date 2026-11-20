@@ -2592,6 +2592,18 @@ pass (its memory freed or rebound under it, or a view of an image that was repla
 (creation, aliasing, parking, upgrade, the view used) logged at each change. The early faults come only at the course's
 first load (14-17 s), so this pass may be the first use of ser28824 after a reload.
 
+**The glyph sheet (offline, from `K2-mkw19-hold`'s pass dump at 62 s, frame 903):** the UI draws of the output pass
+(the "A Skip" prompt drawn as "A S i") use pixel shader **c529a5d4cd8a2440** sampling **ser31877: 1024x8192 R8_UNORM
+(NVN format 0x1), 2D, pool texture ID 29360, view swizzle (1, 1, 1, R)**: white glyphs with the coverage in alpha, the
+layout of a font texture cache the CPU fills as new glyphs are needed (8 MB); the button icon beside it is ser31879
+(1024x1024 RGBA8 sRGB, ID 29361, shader 75b7918cfc8d5429). Paths that keep CPU-written texels from such a texture,
+read so far: a GPU-owned texture keeps CPU writes under half of it out (`image.rs`, the half-covered rule; no
+`CPU write kept out` line named ser31877 in `K2-mkw10`, so not that); a cold pool reports its writes one frame late
+(transient, not the persistent loss seen). **The one targeted run, once MKW runs resume:** `NXGFX_DUMP_AT_S=62
+NXGFX_DUMP_TEX=1024x8192` (the pass dump reads ser31877 back: `tex-903-ser31877-gpu.bin`, the image as the GPU has it,
+and `-mem.bin`, its storage as the game wrote it). Glyphs present in `-mem` and missing in `-gpu` = an upload that did
+not happen; missing in both = the glyphs never written (font / host side).
+
 **For G4 (texture code, lane K2's change, contained): GPU-written textures go back to their storage.**
 `image.rs` `tex_writeback` / `tex_writeback_land`, `queue.rs` `Sub::tex_wb`, `exec.rs` `target_image`, `mem.rs`
 `cpu_written`. A texture written as a render target or copy destination (`target_image`) is listed for its
