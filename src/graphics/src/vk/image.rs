@@ -328,6 +328,10 @@ pub struct Images {
     /// frame while it also makes new objects over the same storage; once one of those took the image, every slot
     /// naming ser6754 bound the zero stand-in: the black stretches of its laps, async replay only by timing)
     forward: HashMap<u64, u64>,
+    /// released texture objects (what pool slots may still name): on the console a slot's descriptor keeps naming the
+    /// memory, so it shows what the live object over the same storage holds (MK8D finalizes its scene target's object,
+    /// ser6754, while slots registered with it are still sampled: 88 stand-in binds a lap, the black stretches)
+    released: HashMap<u64, tex_t>,
 }
 
 /// What a texture object is, without its serial: the key a released image is found again by.
@@ -356,6 +360,19 @@ const PARK_MAX: usize = 512;
 impl Images {
     pub fn drop_pool(&mut self, _base: u64, _size: u64) {}
 
+    /// Where texture object `serial`'s image is (diagnostics): live, parked after its release, or gone.
+    pub fn whereabouts(&self, serial: u64) -> &'static str {
+        if self.by_serial.contains_key(&serial) {
+            "live"
+        } else if self.parked.values().any(|v| v.iter().any(|(im, _)| im.tex.serial == serial)) {
+            if self.live(serial) != serial { "released, its image parked; a live object over its storage is used" } else { "released, its image parked" }
+        } else if self.forward.contains_key(&serial) {
+            "forwarded to an object that is gone"
+        } else {
+            "released or never made"
+        }
+    }
+
     /// The serial whose image texture object `serial` now views: itself, or the object that took its image over
     /// (followed through later take-overs).
     pub fn live(&self, serial: u64) -> u64 {
@@ -366,7 +383,26 @@ impl Images {
             }
             match self.forward.get(&s) {
                 Some(&n) => s = n,
-                None => return serial,
+                None => break,
+            }
+        }
+        if self.by_serial.contains_key(&s) {
+            return s;
+        }
+        // released: the newest live object over the same storage with the same description (the memory the slot names)
+        if let Some(t) = self.released.get(&serial).or_else(|| self.released.get(&s)) {
+            if forward_on() && !t.mem.is_null() {
+                let key = tex_identity(t);
+                let at = self.by_addr.get(&(t.mem as u64));
+                // the same description over the same storage
+                let same = at.and_then(|v| v.iter().rev().copied().find(|x| self.by_serial.get(x).is_some_and(|im| tex_identity(&im.tex) == key)));
+                if let Some(n) = same {
+                    static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                        crate::vklog!("a pool slot names released texture ser{serial} ({}x{} format {:#x} at {:#x}): the live ser{n} over the same storage is bound (NXGFX_TAKEOVER_FORWARD=0 off)", t.d.width, t.d.height, t.d.format, t.mem as u64);
+                    }
+                    return n;
+                }
             }
         }
         serial
@@ -446,6 +482,31 @@ pub fn watch_log(what: &str, t: &tex_t, gpu: Option<bool>) {
         t.l.size,
         gpu.map(|g| format!(", drawn by the GPU: {g}")).unwrap_or_default()
     );
+}
+
+/// The texture's life over `NXGFX_WATCH_ADDR` (made, aliased, taken over, parked, reused, handed to an heir, made again
+/// with storage use, destroyed, a pass's attachment): one line each with the Vulkan image, for a dead image a pass reads.
+pub fn life_log(t: &tex_t, what: impl FnOnce() -> String) {
+    static W: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let Some(a) = *W.get_or_init(|| std::env::var("NXGFX_WATCH_ADDR").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())) else { return };
+    let lo = t.mem as u64;
+    if t.mem.is_null() || a < lo || a >= lo + t.l.size.max(1) {
+        return;
+    }
+    crate::vklog!("life {a:#x}: ser{} at frame {}: {}", t.serial, super::present::frames(), what());
+}
+
+fn img_desc(im: &Image) -> String {
+    format!(
+        "image {:#x}{}{} {}x{}x{} gpu_owned {}",
+        vk::Handle::as_raw(im.image),
+        if im.alloc.is_some() { " with its memory" } else { " no memory of its own" },
+        im.alias_of.map(|o| format!(" (alias of ser{o})")).unwrap_or_default(),
+        im.extent.width,
+        im.extent.height,
+        im.layers,
+        im.gpu_owned
+    )
 }
 
 fn shape(t: &tex_t) -> (vk::ImageType, vk::Extent3D, u32) {
@@ -647,10 +708,18 @@ impl Gpu {
             return true;
         }
         watch_log("image", t, None);
+        let how = std::cell::Cell::new("made new");
         // the same texture initialized again over the same memory: its released image, with its content
         let key = tex_identity(t);
         let reused = imgs.parked.get_mut(&key).and_then(|v| v.pop()).map(|(mut im, _)| {
             imgs.parked_n -= 1;
+            // pool slots registered with the released object find the image through the new one
+            if forward_on() && im.tex.serial != t.serial {
+                if imgs.forward.len() >= 1 << 16 {
+                    imgs.forward.clear();
+                }
+                imgs.forward.insert(im.tex.serial, t.serial);
+            }
             if im.tex.swz != t.swz || im.tex.bits != t.bits {
                 // views carry the swizzle: made again
                 let views: Vec<vk::ImageView> = im.views.drain().map(|(_, v)| v).collect();
@@ -670,6 +739,7 @@ impl Gpu {
                 im.needs_upload = from_storage(t);
             }
             super::perf::inc(super::perf::C::ImagesReused);
+            how.set("a parked image reused");
             im
         });
         // a live image of a texture object with the same storage and description, drawn by the GPU: the new
@@ -703,10 +773,19 @@ impl Gpu {
             }
             im.tex = *t;
             super::perf::inc(super::perf::C::ImagesReused);
+            how.set("taken over from an older object");
+            life_log(t, || format!("takes over the image of ser{old}"));
             Some(im)
         });
-        let reused = reused.or_else(|| self.alias_image(imgs, t));
+        let reused = reused.or_else(|| {
+            let a = self.alias_image(imgs, t);
+            if a.is_some() {
+                how.set("an alias image");
+            }
+            a
+        });
         let Some(im) = reused.or_else(|| self.create_image(t)) else { return false };
+        life_log(t, || format!("{}: {}", how.get(), img_desc(&im)));
         if !t.mem.is_null() {
             // textures of sparse virtual pools are checked through their pages, not by address (a 5.8 GB terrain
             // array in this map made every CPU write scan every image: Mario Kart World's first frame took 76 s)
@@ -716,6 +795,7 @@ impl Gpu {
             }
         }
         imgs.forward.remove(&t.serial);
+        imgs.released.remove(&t.serial);
         imgs.by_serial.insert(t.serial, im);
         true
     }
@@ -1002,19 +1082,38 @@ impl Gpu {
 
     /// nvnTextureFinalize: the image goes once the GPU no longer uses it.
     pub fn tex_release(&self, serial: u64) {
+        // in queue order: the work the game queued before finalizing the texture still binds it (asynchronous replay
+        // runs behind the game; released at once, Mario Kart 8 Deluxe's scene target ser6754 went from the table while
+        // that frame's tone mapping, still queued, read it through its pool slots: the black stretches).
+        // NXGFX_RELEASE_ORDER=0: at once, as before.
+        static ORDER: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *ORDER.get_or_init(|| std::env::var("NXGFX_RELEASE_ORDER").as_deref() != Ok("0")) && super::queue::aq_busy() {
+            super::queue::after_queued(Box::new(move |g: &'static Gpu| g.tex_release_now(serial)));
+            return;
+        }
+        self.tex_release_now(serial);
+    }
+
+    fn tex_release_now(&self, serial: u64) {
         super::capture::tex_release(serial);
         lazy::forget_serial(serial);
         let mut imgs = self.images.lock().unwrap();
         let Some(mut im) = imgs.by_serial.remove(&serial) else { return };
         watch_log("released", &im.tex, Some(im.gpu_owned));
+        if imgs.released.len() >= 1 << 16 {
+            imgs.released.clear();
+        }
+        imgs.released.insert(serial, im.tex);
         if let Some(v) = imgs.by_addr.get_mut(&(im.tex.mem as u64)) {
             v.retain(|s| *s != serial);
         }
         // an image shared with other texture objects: an alias only drops its views; an owner hands the image and its
         // memory to the first of its aliases
         let aliases: Vec<u64> = imgs.by_serial.iter().filter(|(_, a)| a.alias_of == Some(serial)).map(|(k, _)| *k).collect();
+        life_log(&im.tex, || format!("released ({} aliases): {}", aliases.len(), img_desc(&im)));
         if im.alias_of.is_some() || !aliases.is_empty() {
             if let Some((&heir, rest)) = aliases.split_first() {
+                life_log(&im.tex, || format!("its image and memory go to ser{heir}"));
                 let a = imgs.by_serial.get_mut(&heir).unwrap();
                 a.alias_of = None;
                 a.alloc = im.alloc.take();
@@ -1035,6 +1134,7 @@ impl Gpu {
         // kept a few frames for a texture initialized again the same way (ensure_image)
         let key = tex_identity(&im.tex);
         let frame = super::present::frames();
+        life_log(&im.tex, || "parked".to_string());
         imgs.parked.entry(key).or_default().push((im, frame));
         imgs.parked_n += 1;
         let old = self.evict_parked(&mut imgs, frame);
@@ -1335,6 +1435,7 @@ impl Gpu {
                 alias_of: None,
                 gpu_seq: 0,
             };
+            life_log(&im.tex, || format!("made again with storage use: {}", img_desc(im)));
             gone.push(old);
             done.insert(serial);
         }
@@ -1433,6 +1534,7 @@ impl Gpu {
     }
 
     fn destroy_released(&self, im: Image) {
+        life_log(&im.tex, || format!("destroyed (after its last use): {}", img_desc(&im)));
         super::lost::note_gone(|| {
             format!(
                 "image {:#x} of texture ser{} at {:#x} ({}x{}, {} views, {})",

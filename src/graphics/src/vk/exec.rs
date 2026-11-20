@@ -1156,6 +1156,7 @@ fn attach_view_layers(g: &Gpu, sub: &mut Sub, qs: &mut QState, t: &tex_t, v: Opt
     let fmt = g.view_format(im, v);
     let layers = attach_layers(im, v);
     let view = g.image_view(im, v, true)?;
+    super::image::life_log(t, || format!("a pass's attachment: view {:#x} of image {:#x} ({} layers)", vk::Handle::as_raw(view), vk::Handle::as_raw(im.image), layers));
     Some(((view, fmt, e, samples, kind), layers))
 }
 
@@ -1642,7 +1643,7 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
         if due && m.len() < 4096 {
             m.insert(id, f);
             let what = match g.tables.tex_at(id) {
-                Some((serial, _)) => format!("its slot names texture ser{serial}, which has no image now"),
+                Some((serial, _)) => format!("its slot names texture ser{serial}, which has no image now ({})", g.images.lock().unwrap().whereabouts(serial)),
                 None => "nothing is registered there".to_string(),
             };
             crate::vklog!("texture ID {id} (target {want}{}) at frame {f}: {what}: a zero stand-in is bound", if storage { ", image" } else { "" });

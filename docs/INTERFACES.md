@@ -1055,18 +1055,24 @@ through every 1920x1080 pass dump).
   the non-draw work between draws (`pass dump N: op clear colour [...] rect x,y wxh`, copies, dispatches, render
   conditions) and each sampler's filters (`/s352(min 3 mag 1)`).
 - **MK8D black stretches (async): cause found and fixed.** A per-ID log of zero stand-in binds (`exec.rs`, every ID at
-  most once per 600 frames, with what its slot holds) in `-G5-mk8d-lap-standin` (black lap shots 0016, 0025, 0026):
-  `texture ID 4354 ... its slot names texture ser6754, which has no image now`, and ~20 more IDs naming ser6754 /
-  ser391701. ser6754 is the scene's HDR target, a texture object the game keeps and registers into new pool slots
-  every frame, while it also makes new objects over the same storage; `ensure_image` lets a newer GPU-drawn object with
-  the same description **take the image over** (G's fix for MK8D's per-frame objects that are never finalized), which
-  removed ser6754 from the image table, so every slot naming it bound the stand-in until ser6754 was made again: the
-  tone-mapping pass read zero, the bloom (another path) stayed. Async replay only changed when a take-over landed
-  between registration and use. Fix: `Images::forward` / `Images::live` (`image.rs`): a take-over leaves the old serial
-  forwarded to the new one, and every lookup by a slot's serial (`tex_view`, DrawTexture, resolution-scale and
-  pass-dump lookups) follows it; `NXGFX_TAKEOVER_FORWARD=0` off. GPU test
-  `a_taken_over_texture_object_still_finds_its_image`. Verification lap: see the next line.
-  - LAP_RESULT_PLACEHOLDER
+  most once per 600 frames, with what its slot holds and where that texture's image is) in `-G5-mk8d-lap-standin`
+  (black lap shots 0016, 0025, 0026): `texture ID 4354 ... its slot names texture ser6754, which has no image now`,
+  and ~20 more IDs naming ser6754. ser6754 is the scene's HDR target; the tone-mapping pass reads it through pool
+  slots, so it read zero while the bloom (another path) stayed: the black-with-glow picture. The cause:
+  **`nvnTextureFinalize` released the image on the game's thread at once**, while asynchronous replay still had that
+  frame's work queued, work that binds ser6754 (the image was parked, the slots bound the stand-in); synchronous replay
+  had always run that work first. **Fix: the release runs in queue order** (`image.rs tex_release` through
+  `queue::after_queued`; `NXGFX_RELEASE_ORDER=0` off). Verified: `-G5-mk8d-lap-order` (async, 230 s): **no black lap
+  shot (14 of 14 below 0.1)**, 59.7 FPS, no stand-in for ser6754 (`0016-shot_lap.png`, the grandstand stretch, lit);
+  the four laps before it on the same build without the fix had 3-6 black shots each (`-standin`, `-forward`,
+  `-forward2`, `-released`, `-released2`).
+  Kept from the way there (each right on its own): **serial forwarding** (`Images::forward` / `Images::live`): when a
+  newer object over the same storage takes an image over, or reuses a parked one, the old serial is forwarded to it,
+  and a released serial resolves to a live object of the same description over the same storage; every lookup by a
+  slot's serial (`tex_view`, DrawTexture, resolution-scale and pass-dump lookups) follows it
+  (`NXGFX_TAKEOVER_FORWARD=0` off; GPU test `a_taken_over_texture_object_still_finds_its_image`). **For lane K2:**
+  textures used to leave the table on the game's thread ahead of the replay; that is gone with this fix, so MKW's
+  early fault may behave differently on this tree.
 - **MK8D kart blob (item 5): narrowed with the replay, not fixed.** In `rA2` the cyan under the karts comes from the
   lighting pass (37) where the screen-space shadow mask (R8G8B8A8 at 0x15cf60600, passes 33-36) has G = 0: lit cyan
   (40, 211, 255) instead of dark. With `NXGFX_SWZ_OVERRIDE=1` (view swizzle replacing the texture's) it is dimmer but
@@ -1091,8 +1097,11 @@ through every 1920x1080 pass dump).
   B10G11R11) is smooth and the banding appears in pass 56, Unity's uber pass, which grades through a 256x16 RGBA8 LUT
   (ser1045, made in pass 10) with sampler 352 shared with the scene texture. The LUT itself has steps of ~45 levels
   between neighbouring entries (it saturates at entry 9 of 16), so the bands are what a LUT read without interpolation
-  between entries gives. Next: a capture of that frame (queued) to read sampler 352's filters in the replay and test
-  the LUT reads offline.
+  between entries gives. **Not the sampler:** a capture of the beach (`build/G5/agsob.cap`, present 6800) replays the
+  banded frame offline (`build/G5/rAG/frame-1.png`), and the same replay with every sampler forced linear
+  (`NXGFX_SAMP_LINEAR=1`, diagnostic in `tables.rs`) is identical (`rAGL`). The scene target is B10G11R11 (NVN 0x3f,
+  the same format on the console); next: the uber shader's LUT coordinates and the dither texture (ser36, 16x16), with
+  the replay.
 - **Jamboree white layer (item 4): still white on HEAD**, now with **handle-table texture arrays** (see below) that let
   the game's character / board shaders draw (`-G5-jamboree-ht`, 0004-0018 white). The title before L+R is drawn
   (`0003`). The white stays a game-state question (the quad's colour is (1, 1, 1, 1) in guest memory).
@@ -1110,6 +1119,20 @@ through every 1920x1080 pass dump).
   only used in that submission; `mesh_rec` is set and cleared inside one mesh draw; staging chunks go only in
   `new_sub` of a recycled `Sub`, which completion recycles after that submission's timeline value; merged submits are
   one `Sub` and one value. Nothing found that carries a staged (buffer, offset) into a later submission.
+- **MKW's early fault at the pass into ser28824 (coordinator, 13:10): a lifetime log, one run.** `NXGFX_WATCH_ADDR=<hex>`
+  now also logs, for a texture over that address, `life <addr>: serN at frame F: ...`: how its image was got (made new,
+  a parked image reused, taken over from an older object, an alias image) with the Vulkan image and whether it has
+  memory of its own, its release (aliases, heir, parked), destruction, a remake with storage use, and every pass
+  attachment view (`image.rs life_log`, `exec.rs attach_view_layers`). Code read for the suspects named: attachment
+  views are not cached across passes (every pass takes them from the live image's `views`); a released owner hands its
+  image and memory to an alias heir, a parked image is only reused by an object of the same identity and only
+  destroyed after its last queued use; storage and resolution-scale remakes repoint aliases and rewrite pool slots.
+  **One MKW run on G5's tree** (`-G5-mkw-life`, `NXGFX_CHECKPOINTS=all NXGFX_ADDR_REPORT=1
+  NXGFX_WATCH_ADDR=0x26b7b3000`, K2's keys, 45 s): **no fault, no driver reset** (K2's last six faulted at 14-17 s);
+  ser28824 was made once at 9.57 s (frame 153) as a new image with its own memory, then only used as 1-layer
+  attachments of its 5 layers every frame, never released, parked, taken over or made again. So on this tree its image
+  was alive throughout; what differs from K2's runs is G5's tree (image forwarding, vertex-input skip, handle tables)
+  and K2's `NXRS_DUMP_FRAMES`. One clean run is not proof; the switch stays for K2's next runs.
 - **Z-A (item 6):** not run this round (its last run, `-X-x2-plza11-gates`, 59.7 FPS, 134 s at 58+).
 - **Also seen:** a start that died at 0.3 s with `memory: the kernel region is taken` (`-G5-mk8d-sync-cap`, right
   after another game exited): the runtime's fixed kernel-region reservation was taken in that process (lane O / T).
