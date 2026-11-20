@@ -1315,3 +1315,67 @@ fn a_taken_over_texture_object_still_finds_its_image() {
     assert_eq!(imgs.live(ta.serial), ta.serial);
     assert_eq!(imgs.live(tb_.serial), ta.serial);
 }
+
+/// Block-linear storage deswizzled by the GPU (`tex::deswizzle_gpu`) gives the CPU deswizzle's rows, byte for byte:
+/// mips, array layers, a 3D texture with deep blocks, compressed formats, and both GOB orders (Switch, Switch 2).
+#[test]
+fn block_linear_textures_deswizzle_on_the_gpu_as_on_the_cpu() {
+    use nxgfx::tex::deswizzle::{deswizzle, geom, GOB_SWITCH2};
+    use nxgfx::tex::layout::{tex_layout, TexDesc};
+    let _g = setup();
+    let e0 = validation_errors();
+    let _n = Nvn::new();
+    let g = nxgfx::vk::Gpu::get().unwrap();
+    let mut levels_checked = 0;
+    for s2 in [false, true] {
+        GOB_SWITCH2.store(s2, std::sync::atomic::Ordering::Relaxed);
+        // (format, width, height, depth, levels, target): RGBA8 2D with mips, an RGBA8 array, R8 (rows of 1-byte
+        // texels), BC1 and BC7 (8- and 16-byte blocks), RGBA16F 3D
+        for (fmt, w, h, depth, levels, target) in [(0x25, 300, 200, 1, 5, 1), (0x25, 64, 48, 6, 3, 4), (0x01, 516, 37, 1, 2, 1), (0x42, 256, 128, 1, 4, 1), (0x49, 96, 160, 1, 3, 1), (0x29, 40, 24, 20, 2, 2)] {
+            let d = TexDesc { target, format: fmt, width: w, height: h, depth, levels, ..Default::default() };
+            let l = tex_layout(&d);
+            let storage: Vec<u8> = (0..l.size as u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+            for layer in 0..if target == 2 { 1 } else { l.layers } {
+                for lv in 0..levels {
+                    let gm = geom(&d, lv, layer).unwrap();
+                    if gm.row_bytes % 4 != 0 {
+                        continue;
+                    }
+                    let n = gm.row_bytes as usize * gm.rows as usize * gm.slices as usize;
+                    let mut want = vec![0u8; n];
+                    deswizzle(&d, lv, layer, &storage, &mut want, gm.row_bytes as usize).unwrap();
+                    let got = nxgfx::tex::deswizzle_gpu::deswizzle_on_gpu(g, &d, lv, layer, &storage).expect("GPU deswizzle");
+                    assert!(got == want, "format {fmt:#x} {w}x{h}x{depth} level {lv} layer {layer} switch2 {s2}");
+                    levels_checked += 1;
+                }
+            }
+        }
+    }
+    GOB_SWITCH2.store(false, std::sync::atomic::Ordering::Relaxed);
+    eprintln!("{levels_checked} levels / layers deswizzled on the GPU, all equal to the CPU's");
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// A texture the CPU writes (nvnTextureWriteTexels: its storage) is uploaded through the GPU deswizzle and reads back
+/// as written.
+#[test]
+fn texture_upload_goes_through_the_gpu_deswizzle() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let (w, h) = (512u32, 384u32);
+    let tex = n.texture(w, h, f::RGBA8, 0, true);
+    let src: Vec<u8> = (0..w * h * 4).map(|i| (i.wrapping_mul(2246822519) >> 11) as u8).collect();
+    let before = nxgfx::vk::image::GPU_DESWIZZLED.load(std::sync::atomic::Ordering::Relaxed);
+    unsafe {
+        let r = NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: w as i32, height: h as i32, depth: 1 };
+        nvnTextureWriteTexels(&*tex, core::ptr::null(), &r, src.as_ptr());
+    }
+    n.begin();
+    n.submit_wait();
+    let got = n.read_rgba8(&tex, w, h);
+    assert!(got == src, "texels read back as written");
+    let moved = nxgfx::vk::image::GPU_DESWIZZLED.load(std::sync::atomic::Ordering::Relaxed) - before;
+    assert!(moved >= (w * h * 4) as u64, "the upload took the GPU deswizzle ({moved} bytes)");
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
