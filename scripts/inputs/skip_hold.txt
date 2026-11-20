@@ -1,5 +1,5 @@
-# Tap A (shows the "(Hold) Skip" prompt), then hold A for 6 s
+# Tap A (shows the "(Hold) Skip" prompt), then hold A for 15 s
 0 1 0 0 0 0
 200 0 0 0 0 0
 1200 1 0 0 0 0
-7200 0 0 0 0 0
+16200 0 0 0 0 0

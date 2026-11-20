@@ -520,6 +520,41 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
     translator only for a shader not yet loaded; one that failed to build is not waited for: `None` in `modules` is
     stored only after a build error). Its doc comment had displaced `get_ex`'s: put back.
 
+**Lane G3, rev 8 (2026-11-20, uncommitted).** Runs in `build/G/runs/` and `build/I/runs/*-G3-mk8d-race`.
+- **MK8D's cyan road (M5): narrowed again, not fixed.** New scenario `mk8d-lap` (play_scenario: the mk8d steps, then a
+  shot every 5 s for 70 s) and pass-dump controls (`NXGFX_DUMP_PNG=0`: log lines only; `=<w>x<h>`: pictures of
+  targets of that size only; target lines now show each target's layers and view). Findings:
+  - The two suspects are cleared. Colour targets 0 and 1 of the point-light passes are **layers 0 and 1 of one
+    2-layer array** (view `L0+1` / `L1+1`), not one image twice; the 6-target probe passes are a cube's 6 faces.
+    The address holding four targets a frame holds them one after another (normals, then two RGBA8, then a half-size
+    one); same-shape ones share an image now (rev 7), as the memory does on the console.
+  - It is not the resolution either: the game's own dynamic resolution drops to 1440x810 when its frame is slow (the
+    dumps themselves made it slow), and the dumped 1440 frames are cyan, but with `game_dynamic_resolution=0` at
+    1920x1080 the same turn is just as cyan (`…-002736`). (Tried and reverted: leaving the GPU's idle time between
+    submissions out of the timestamp reports; the game still dropped to 1440 under the dumps' slowdown.)
+  - What is wrong is **shadowed ground**: the cyan is wherever a shadow falls (the kart's own shadow is a cyan blob
+    in every frame; the "bad turn" is the stretch under the grandstand roof). It is already cyan in the G-buffer
+    pass's colour target. The shadowing reads a **2048x2048 R32G32_SFLOAT texture (a variance shadow map, view
+    swizzle R G 0 1) that no pass draws** (it is uploaded from its storage, `uploads from storage: … 2048x2048 fmt
+    0x16`) and a 2-layer D16 cascade array that passes 65-67 draw. Next: read the R32G32 texture back (its content,
+    and whether the game fills it from the GPU through a copy we miss or from the CPU), and the light pass's use of
+    it.
+- **Donkey Kong Bananza survives its compiler crash.** The NVIDIA compiler faults on vertex `d87ccbede95b9f2c` +
+  pixel `6655320127e098d6` whole **and** linked from parts (pipeline libraries do not avoid it; the offline test with
+  `NXGFX_VALIDATION=0 NXGFX_GPL=1` crashes too). Bisecting by zeroing the vertex shader's outputs: zeroing any one of
+  locations 0, 4, 5, 6, 7 or 9 makes it build; 1, 2, 3, 8 or the position do not; flat / centroid decorations do not
+  matter. So it is the compiler on the two programs together, not one bad construct found yet. Graphics now records
+  a pipeline whose compile was under way when the process died (`<data>/pipeline-compiling.bin`, written around each
+  compile, whole or linked) into `<data>/pipeline-crashed.bin` at the next start and never compiles it again: its
+  draws are skipped with a red line. DKB: `d7` crashes once (as before), `d8` runs 150 s past that point (it is at
+  13-17 FPS there and draws the world purple: separate problems, `shot-002500.png`). New ignored test
+  `one_program_pair_builds` + `NXGFX_PIPE_LOG=1` find such a pair; `build/G/dkbpair` holds this one.
+- **Lazy write-back: fixed, on by default** (`NXGFX_WB_LAZY=0` off). The 28 ms a frame was `lazy::touch`: every
+  write-back landing, texture upload and pool sync "touched" every page of its range, each a lock and a VirtualQuery
+  (64 ms a frame of it in `v11`, timers added to the pools line). It now visits only the held pages in the range.
+  Violet `v12`: 150 s clean at its 30 FPS cap, write-back 0.5 ms a frame (1.3 ms copied back eagerly, `v7`). Z-A
+  (`NXRS_EXCLUSIVE=1`): `z8` lazy on 53.5-58 FPS, `z9` lazy off {Z9}.
+
 **Shaders (agreed with shaders, lane C):** graphics reads lane C's output as written above: `<data>/shaders/spv/
 <key>.spv` + `.json` (`status` "ok"), the shader key as defined there (`nxgfx::nvn::prog::shader_key` computes it at
 `nvnProgramSetShaders`). Nothing in lane C's output needs to change for the binding model: at module load graphics
@@ -1107,22 +1142,59 @@ files of the moment); every lane W game relinked from it. Runs go through `scrip
   `boot` (a trace run); replays in `scripts/inputs`: `run_right.txt` (platformer: right + jump), `hold_a.txt` (A held 3
   s), `smash_fight.txt` (character pick from the top-left corner, then moves and attacks in 20 s blocks, no B),
   `shooter.txt` (walk, turn, ZR, jump). The replay's ly is positive up (Smash's first pick moved the hand up).
-- **Where each game stands (2026-11-19 22:30) and what is next:**
-  - MK8D: everything in 5B passes but the picture (posterized races, lane G): `-mk8d-gp4`.
-  - Anime Girls: 12 min of scripted play at 59.9 FPS (`-agsob-play`); the same colour bands (lane G).
-  - Sonic Generations (program 1): 10 min of Green Hill at 31.5 FPS, picture right (`-sonic-gens`). Open: its sound is
-    "slowed down" the whole run (the sink stretches it: the game feeds less than real time; same in Beach Bounce),
-    and a run that clears the act instead of dying on badniks (the script only runs right and jumps).
-    Shadow Generations (program 0): false colours (lane G); its story intro is not skipped by a held A.
-  - Smash: matches play (60 FPS once its pipelines are cached); next: `smash_match` with the new `smash_fight.txt`
-    for 10 min of back-to-back matches.
-  - Jamboree: the white fade after the title is the game waiting (pass dump above): next, find what its fiber
-    scheduler waits for (thread dump `20261119-213830-W2-jamboree-play2\threads-white.txt`).
-  - Beach Bounce: black output (lane G) and AudioOut #1 underrunning ~38 a second without any build running
-    (`20261119-214935-W2-bbounce-presses`); `NXOS_TRACE=audio` (new, os `audio.rs`: the first 200 appends with their
-    size and the queue) is built in for the next run.
-  - Once, gamectl refused the game's own PID ("pid 7024 is None", `-smash-match3` at 41 s): `image_of` found no
-    process for a live game; a transient lookup failure, worth a retry in `check_owned`.
+- **Lane W2, second round (2026-11-20 00:55).**
+  - **os `media/sink.rs`: AudioOut buffers go back on a wall clock (Turbo's audout clock).** A block was released
+    when the device's playback reached its end. Two consequences: a producer that keeps two 5 ms buffers in flight
+    and refills on release (Beach Bounce, AudioOut #1) saw its queue drain at every device period (10 ms+ callbacks):
+    ~38 underruns a second; and once the smooth slowdown slowed playback down, the releases slowed too, the producer
+    slowed with them and the stream stayed slowed (Sonic Generations: "slowed down" for the whole 723 s run). Now a
+    "nxos audio clock" thread (every 2 ms) releases each block once 48 kHz of wall time from the stream's first
+    frame has passed its end (the clock waits, not bursts, when the producer is late); the samples were copied at
+    append and the device plays them from the queue as before. Tests: `releases_on_the_wall_clock`,
+    `the_clock_waits_for_a_late_producer`. Results (the PC had **no output device** from ~23:30 on: these runs were
+    consumed by the sink's real-time clock, so a run with a device is still owed): Sonic Generations 1 underrun,
+    16.6 s slowed in 303 s (was the whole run; `20261120-003954-W2-sonic-gens5`); Beach Bounce 582 underruns, 5.2 s
+    slowed in 719 s (was ~38 a second and the whole run slowed; `20261120-002042-W2-bbounce-vn`; what is left
+    follows its own frame hitches, up to 65 ms).
+  - **Smash: 10+ min of back-to-back matches** (`20261119-235023-W2-smash-match5`, `smash_fight.txt`: B, then the pick
+    from the top-left corner every 20 s, so the character select after each match is passed): 3+ matches vs CPU
+    (Pikachu, Link, Donkey Kong) on different stages, 58.2 FPS over 150-840 s (569 of 676 s at 58+; p99 213 ms from
+    pipeline builds when a new stage or fighter appears), no crash, quit cleanly, sound 15 underruns in 784 s.
+    **Open: private memory 5.6 -> 6.9 GB (+108 MB/min)** while graphics' allocator stays at ~680 MB: the growth is
+    outside the vk allocator (driver pipeline objects for each new stage / fighter, or the game's heap commits);
+    a longer run tells whether it levels off.
+  - **Sonic Generations:** `spindash.txt` (run + full jump, then a spin dash, 3.8 s cycles) survives the badniks (14
+    rings kept, no death in 5 min: `-sonic-gens5`, `-sonic-gens4`), but Classic Sonic stops at a ledge behind a
+    totem pole ~1:30 into Green Hill and the script does not get him up it; finishing the act needs a recorded route
+    (`NXRS_INPUT_RECORD` from a person's play, then replayed). 31.5 FPS, picture right, memory flat.
+  - **Shadow Generations:** colours right on lane G3's build. At the Shadow title the cursor sits on the "Shadow's
+    Story" header: **Down, then A** starts New Game (A alone is ignored; `shadow_skip` now presses Down;
+    `20261120-005550-W2-shadow-skip4`). The story intro is a chain of VP9 movies (`[movie]` decoders, 1280x720); a
+    tap then a held A (6 s / 15 s) does not skip it, and after 9 min it was still playing: the same 2,906-packet movie
+    ran twice back to back (decoders destroyed at 521 s and 621 s) and earlier captions came back
+    (`0029-shot_play_540_s.png`). Lead: the game restarts a movie whose end it did not see (end-of-stream flags /
+    the last output buffer's flags from os's movie decoder), or the held A restarts the scene instead of skipping.
+  - **Jamboree white screen (not solved).** What it is not: the network check (main+0x50ddf0 polls
+    `nn::nifm::IsNetworkRequestOnHold` every 16 ms, sees "not on hold", then `IsNetworkAvailable` false: it finishes);
+    a lost wake-up of the nn::async executor (thread 0x1023 holds its lock 0x1474240e0, word 0x40001023, and waits in
+    `WorkItemMultiWait::WaitAny` on no kernel object; thread 0x1024 waits for that lock; waking zero-handle waits as
+    cancelled every 50 ms, a diagnostic tried and removed, changed nothing: `20261120-000804-W2-jamboree-poll`). The
+    six job fibers' threads wait for work, the main thread renders (pass 108: a white 1920x1080 quad at alpha 1 over a
+    correct hub, `build\games\jamboree\captures-W2`). After the title it opens the
+    menu NRO (menu00), the hub's archives, BGM streams and `savedata0:/bqSaveData` for write (64 s); nothing fails.
+    Next: what the game's state machine polls (its fade controller's condition) from the menu NRO's code; the shared
+    font stand-in (`pl`: Arial instead of the system font) is a suspect if the hub waits for a text layout.
+  - **New tools:** control command `peek <address> [bytes]` (os `watch.rs`: guest memory as hex words, readable pages
+    only; how the lock owner above was read); `library_play.py` scenarios `sonic_gens2` (spin dash), `shadow_skip`,
+    `vn` (A every 4 s for 11 min, shots each minute); replays `spindash.txt`, `run_jump.txt`, `skip_hold.txt`.
+  - **scripts `run_game.py` (lane W2):** a run that handed over to a successor (ExecuteProgram) lost its claim to
+    another lane's stale-claim sweep (it read the claim just before the hand-over rewrote it with the new pid); the
+    watch now writes the claim again whenever it is missing while the game runs.
+  - **Beach Bounce:** the window shows the scenes now (lane G3's shared images), 11 min of the story at 59.6 FPS,
+    memory 1.80 -> 1.94 GB, no crash (`20261120-002042-W2-bbounce-vn`); the run hit the scenario's hard timeout
+    (780 s, now 900 s) instead of quitting.
+  - MK8D and Anime Girls: waiting for lane G's posterization fix; Smash's last match (`-smash-match5/0024`, Donkey
+    Kong) shows the same bands.
 
 ## Switch 2 library (lane X, 5B)
 
