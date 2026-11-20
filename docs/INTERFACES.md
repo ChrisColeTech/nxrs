@@ -1006,7 +1006,15 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   2 submissions, 2 presents, `frame-0/1.png` in `build/G4/replay2`. The regions are reserved before the device is
   made (the driver's own mappings sat where the guest's were). The HUD is right; the 3D scene is white, as expected
   from what a capture leaves out (the GPU-only state of earlier frames: exposure and other history targets).
-- **K2's e2496aa reviewed** (MKW (lane K2) section). Smash rerun with it queued (`chain27` -> `c25_smash.out`).
+- **Smash: no device loss with K2's lazy-page fix.** `-G4-smash-fault5` (K2's e2496aa: a pool's lazily held pages are
+  brought back before its buffer goes; with `NXGFX_CHECKPOINTS=all` and the full address report): 240 s, the match
+  played at 60 FPS (`0013-shot_fight_90_s.png`), **no device loss**, where the four runs before it lost the device
+  at 131-204 s in the same draw. The "invalid write in no memory of ours" was that freed buffer.
+- **MK8D with the write-back upload guard as well (`-G4-mk8d-wbguard`, 59.7 FPS): not fixed.** Lap shots black at
+  0.62 / 0.76 / 0.82 (+ two at 0.24-0.26) of 14: no better than before (`-occlsync` had 1, the runs before 3-5; the
+  lap differs run to run). Both changes stay (each is right on its own), but the black stretches are still an async
+  effect without a known cause: `NXGFX_ASYNC=0` (`-G4-mk8d-sync2`) is still the only clean lap.
+- **K2's e2496aa reviewed** (MKW (lane K2) section).
 
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.

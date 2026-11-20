@@ -497,6 +497,7 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         }
         readback = Some(rb);
         before = bf;
+        super::mem::inflight_add(&wb.iter().map(|w| (w.1, w.2)).collect::<Vec<_>>());
     }
     // small textures this submission wrote: copied out for their storage at completion
     if !s.tex_wb.is_empty() {

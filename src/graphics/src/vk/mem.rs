@@ -749,6 +749,99 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
     Some((buf, off + (a - pb), b))
 }
 
+/// Guest ranges a submission in flight writes on the GPU and lands back in guest memory at its completion (its
+/// write-backs): (address, bytes, count of submissions writing it). A CPU-dirty page over one is not uploaded while
+/// it is in flight: the guest bytes there are older than the GPU's, and uploading them overwrote the GPU's result
+/// before it came back (asynchronous replay made the window wide: Mario Kart 8 Deluxe's GPU-computed values read as
+/// stale, the black stretches). Those pieces upload once it has landed (NXGFX_WB_GUARD=0: uploaded at once, as before).
+static INFLIGHT: std::sync::Mutex<Inflight> = std::sync::Mutex::new(Inflight { by_start: std::collections::BTreeMap::new(), max_len: 0 });
+
+/// The in-flight write-back ranges by start: ((start, end) -> how many submissions), and the longest one's length.
+struct Inflight {
+    by_start: std::collections::BTreeMap<(u64, u64), u32>,
+    max_len: u64,
+}
+impl Inflight {
+    /// The ranges overlapping [lo, hi).
+    fn overlapping(&self, lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        self.by_start
+            .range((lo.saturating_sub(self.max_len), 0)..(hi, 0))
+            .filter(|((s, e), _)| *s < hi && *e > lo)
+            .map(|((s, e), _)| (*s, e - s))
+            .collect()
+    }
+}
+
+fn wb_guard() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_WB_GUARD").as_deref() != Ok("0"))
+}
+
+/// A submission with these write-backs is going to the GPU.
+pub fn inflight_add(wbs: &[(u64, u64)]) {
+    if wb_guard() && !wbs.is_empty() {
+        let mut v = INFLIGHT.lock().unwrap();
+        for &(a, n) in wbs {
+            *v.by_start.entry((a, a + n)).or_insert(0) += 1;
+            v.max_len = v.max_len.max(n);
+        }
+    }
+}
+
+/// Its write-backs landed.
+fn inflight_remove(wbs: &[(u64, u64)]) {
+    if !wb_guard() || wbs.is_empty() {
+        return;
+    }
+    let mut v = INFLIGHT.lock().unwrap();
+    for &(a, n) in wbs {
+        if let Some(c) = v.by_start.get_mut(&(a, a + n)) {
+            *c -= 1;
+            if *c == 0 {
+                v.by_start.remove(&(a, a + n));
+            }
+        }
+    }
+    if v.by_start.is_empty() {
+        v.max_len = 0;
+    }
+}
+
+/// [a, a + n) split into what may upload now and what waits for in-flight write-backs.
+fn split_inflight(a: u64, n: u64, inflight: &[(u64, u64)]) -> (Vec<(u64, u64)>, Vec<(u64, u64)>) {
+    let mut now = vec![(a, a + n)];
+    let mut later = Vec::new();
+    for &(wa, wn) in inflight {
+        let (ws, we) = (wa, wa + wn);
+        let mut next = Vec::with_capacity(now.len() + 1);
+        for (s, e) in now {
+            if we <= s || ws >= e {
+                next.push((s, e));
+                continue;
+            }
+            if s < ws {
+                next.push((s, ws));
+            }
+            if we < e {
+                next.push((we, e));
+            }
+            later.push((s.max(ws), e.min(we)));
+        }
+        now = next;
+    }
+    (now.into_iter().map(|(s, e)| (s, e - s)).collect(), later.into_iter().map(|(s, e)| (s, e - s)).collect())
+}
+
+/// Uploads held back for an in-flight write-back (submissions that had some).
+pub static WB_DEFERRED: AtomicU64 = AtomicU64::new(0);
+/// Removes landed write-backs from INFLIGHT when the landing is over (after the guest bytes are written).
+struct InflightDone(Vec<(u64, u64)>);
+impl Drop for InflightDone {
+    fn drop(&mut self) {
+        inflight_remove(&self.0);
+    }
+}
+
 /// GetWriteWatch calls and their time (pool sync's breakdown, logged with NXGFX_PROFILE=1).
 pub static WATCH_CALLS: AtomicU64 = AtomicU64::new(0);
 pub static WATCH_NS: AtomicU64 = AtomicU64::new(0);
@@ -833,7 +926,26 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
             continue;
         }
         let pre = taken.remove(&p.base);
-        let ranges = p.take_cpu_writes(gen, pre);
+        let mut ranges = p.take_cpu_writes(gen, pre);
+        // pieces under a write-back still in flight wait (in `pending`) until it has landed
+        if wb_guard() {
+            let inflight = INFLIGHT.lock().unwrap();
+            if !inflight.by_start.is_empty() && !ranges.is_empty() {
+                let mine = inflight.overlapping(p.base, p.base + p.size);
+                if !mine.is_empty() {
+                    let mut keep = Vec::new();
+                    for &(a, n) in &ranges {
+                        let (now, later) = split_inflight(a, n, &mine);
+                        keep.extend(now);
+                        p.pending.extend(later);
+                    }
+                    if !p.pending.is_empty() {
+                        WB_DEFERRED.fetch_add(1, Ordering::Relaxed);
+                    }
+                    ranges = keep;
+                }
+            }
+        }
         if !ranges.is_empty() {
             p.dirty_frame = super::present::frames();
         }
@@ -902,6 +1014,8 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8)]) 
     if wbs.is_empty() {
         return;
     }
+    let landed: Vec<(u64, u64)> = wbs.iter().map(|w| (w.1, w.2)).collect();
+    let _done = InflightDone(landed);
     let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
     super::lazy::T_LOCK.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -1054,4 +1168,17 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         cnt[3],
         sb >> 20
     ) + &super::lazy::summary(f)
+}
+
+#[cfg(test)]
+mod inflight_tests {
+    /// A CPU-dirty range over in-flight write-backs: the parts outside upload now, the parts over them later.
+    #[test]
+    fn dirty_ranges_split_around_inflight_writebacks() {
+        let (now, later) = super::split_inflight(0x1000, 0x3000, &[(0x1800, 0x800), (0x3800, 0x1000)]);
+        assert_eq!(now, vec![(0x1000, 0x800), (0x2000, 0x1800)]);
+        assert_eq!(later, vec![(0x1800, 0x800), (0x3800, 0x800)]);
+        let (now, later) = super::split_inflight(0x1000, 0x1000, &[]);
+        assert_eq!((now, later), (vec![(0x1000, 0x1000)], vec![]));
+    }
 }

@@ -28,11 +28,8 @@ fn main() {
         std::process::exit(2);
     };
     nxgfx::log::set_sink(|l| eprintln!("{l}"));
-    if let Some(s) = shaders {
-        nxgfx::set_shader_dir(s);
-    }
     let out = out.unwrap_or_else(|| cap.parent().map(|p| p.to_path_buf()).unwrap_or_default());
-    match nxgfx::vk::capture::replay(&cap, &out) {
+    match nxgfx::vk::capture::replay(&cap, &out, shaders) {
         Ok(n) => println!("{n} frames written to {}", out.display()),
         Err(e) => {
             eprintln!("replay: {e}");

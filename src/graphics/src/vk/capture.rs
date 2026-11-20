@@ -435,40 +435,53 @@ fn commit(_: u64, _: u64) -> bool {
 
 /// Replays capture `path` on this process's back end (`set_shader_dir` first); writes each present to
 /// `<out>/frame-<n>.png`. Returns the presents written.
-pub fn replay(path: &std::path::Path, out: &std::path::Path) -> Result<u64, String> {
+pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std::path::PathBuf>) -> Result<u64, String> {
     let mut r = Reader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let (ty, meta) = r.next().ok_or("an empty capture")?;
     if ty != rec::META || u64_at(&meta, 0) != MAGIC {
         return Err("not a capture of this format".into());
     }
+    // the guest's regions first, before the device exists (the driver maps memory of its own where they were)
+    let mut failed_regions = 0u64;
+    let mut pending: Option<(u32, Vec<u8>)> = None;
+    while let Some((ty, p)) = r.next() {
+        if ty != rec::REGION {
+            pending = Some((ty, p));
+            break;
+        }
+        let (b, n) = (u64_at(&p, 0), u64_at(&p, 8));
+        if !map_region(b, n) {
+            failed_regions += 1;
+            crate::log::red(&format!("replay: the capture's region {b:#x} +{n:#x} could not be reserved at its address (this process holds memory there)"));
+        }
+    }
+    if failed_regions > 0 {
+        return Err(format!("{failed_regions} of the capture's memory regions could not be placed at their addresses"));
+    }
+    if let Some(s) = shaders {
+        crate::set_shader_dir(s);
+    }
     let g = super::Gpu::get()?;
     let _ = std::fs::create_dir_all(out);
-    let (mut frames, mut subs, mut failed_regions) = (0u64, 0u64, 0u64);
+    let (mut frames, mut subs) = (0u64, 0u64);
     let trace = std::env::var("NXGFX_REPLAY_TRACE").is_ok();
     let mut n_rec = 0u64;
-    while let Some((ty, p)) = r.next() {
+    while let Some((ty, p)) = pending.take().or_else(|| r.next()) {
         n_rec += 1;
         if trace {
             eprintln!("replay: record {n_rec} type {ty} ({} bytes){}", p.len(), if p.len() >= 8 { format!(" first word {:#x}", u64_at(&p, 0)) } else { String::new() });
         }
         match ty {
-            rec::REGION => {
-                let (b, n) = (u64_at(&p, 0), u64_at(&p, 8));
-                if !map_region(b, n) {
-                    failed_regions += 1;
-                    crate::log::red(&format!("replay: the capture's region {b:#x} +{n:#x} could not be reserved at its address (this process holds memory there)"));
-                }
-            }
+            rec::REGION => {}
             rec::MEM => {
                 let a = u64_at(&p, 0);
                 if !commit(a, (p.len() - 8) as u64) {
-                    failed_regions += 1;
+                    crate::log::red_once(&format!("replay: guest memory at {a:#x} could not be committed"));
                     continue;
                 }
                 // SAFETY: committed just now, inside a region reserved above (a page the capture read)
                 unsafe { core::ptr::copy_nonoverlapping(p[8..].as_ptr(), a as *mut u8, p.len() - 8) };
             }
-            rec::DPOOL if failed_regions > 0 => return Err(format!("{failed_regions} of the capture's memory regions could not be placed at their addresses")),
             rec::DPOOL => {
                 let (tex, pool, base) = (u64_at(&p, 0) != 0, u64_at(&p, 8) as usize, u64_at(&p, 16) as i64 as i32);
                 let n = unsafe { (*(pool as *const crate::nvn::obj::dpool_t)).n };
