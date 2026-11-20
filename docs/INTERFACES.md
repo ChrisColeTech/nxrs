@@ -937,6 +937,37 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   (`c14_mk8d.out`, `build/G4/mk8d.cap`), DKB profile (`c18_dkb.out`); then `chain20` Wonder first run. run_game's
   cooldown after 5 resets in the hour was 50 minutes at 07:37.
 
+**Lane G4, round 5 (2026-11-20 08:50-, uncommitted).**
+- **Smash's device loss: likely found.** With alias images off (`-G4-smash-noalias`, 134.1 s) the same draw still
+  faulted (*invalid write at 0x300001000*, again in no memory of ours: 126 memory ranges bound, 2,019 unbound kept by
+  the report), so not the aliases. What the faulting address does fit: one to two pages past a memory block, right
+  after a full-screen draw into a 1920x1080 target. **The scissor was never held to the pass's render area**: a
+  game scissor larger than the target (or one starting outside it) went to Vulkan as it was, fragments outside the
+  render area are undefined, and NVIDIA writes them past the end of the target's image. Now `clamp_rect` holds the
+  scissor to the render area (`NXGFX_SCISSOR_CLAMP=0` off; logged once: "a scissor past its pass's targets"). GPU test
+  `scissor_past_the_target_is_held_to_it`. MKW's indirect-dispatch fault (0x300001000) may be another out-of-range
+  write; not checked. **Verification queued** (`chain23` -> `c23_smash.out`: 240 s with `NXGFX_CHECKPOINTS=all`; the
+  three runs before it all lost the device at 131-204 s).
+- **MK8D (`-G4-mk8d-occl`, 58.0 FPS):** MK8D **does use samples-passed (occlusion) reports**, from the race start
+  (60.7 s). In async replay their results land up to two presents later than in sync mode; if the game reads them
+  without waiting (culling on last frame's result), objects are culled: the black stretches (lap shots 0.62 / 0.81 /
+  0.70 black). Not changed yet: the natural test is `NXGFX_ASYNC_PRESENTS=1` (one present ahead), held off as asked;
+  waiting for a go-ahead.
+- **DKB (`-G4-dkb-poolprof`, 17.8 FPS with the fine timers):** **no multi-second frames any more** (the sync written
+  before the op is visible fixed the 15-17 s nvnSyncWait). Pool sync 9.9 ms a frame: 0.87 ms a submission x 9, of it
+  ~58 write-watch calls over ~255 hot pools (~0.7 GB scanned a submission). Submits are never merged here (the game
+  waits for each one: no backlog). Sets 11.3 ms (lookups 5.3, writes 4.0), vertex input 4.7, replay 32.9 ms a frame.
+- **Wonder first run (`-G4-wonder-first3`, 120 s):** the parts stopped at 4.3 s (3,100 made, the per-job growth count
+  took the game's boot loading for theirs: the process was at 2.4 GB), and the level entry made 61 pipelines in 2.0 s.
+  Now the parts stop at **6 GB of the process's private memory** (`NXGFX_PARTS_PRIVATE_MB`), and a part made on the
+  replay's thread is logged with its key (`NXGFX_PIPE_LOG=1`) to see why the ones made ahead did not cover a level.
+  Rerun queued (`chain24` -> `c24_wonder.out`, 120 s).
+- **Capture / replay, first try:** MK8D's capture (`build/G4/mk8d.cap`, at present 6500: 83 regions, 1.6 GB of guest
+  memory, 1,657 pools, 5,805 textures, 132 samplers, 2.4 s; 281 MB on disk) replays until its first pool, which is
+  in the game's module data (0x70013465f0): the capture left the modules out. Now it takes everything below the
+  kernel region (0x7F_0000_0000); `nxgfx-replay` reserves regions and commits pages as they come, says which regions
+  it could not place, and `NXGFX_REPLAY_TRACE=1` lists the records. New capture queued (`chain23` -> `mk8d2.cap`).
+
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
 
@@ -2258,9 +2289,30 @@ write-watch calls and their time every 600 submissions).
 - Runs `K2-mkw7` (07:22), `K2-mkw8` (07:32), `K2-mkw9` (08:03) each reset the display driver; next MKW run waits for
   G4's Smash address-report run.
 
-**Left (lane K2):** the 128x128x5 pass fault (and whether direct mesh draws are clean); then all mesh draws on
-(`NXGFX_MESH_REF` unset); menu text; a race of 10 minutes; FPS (pool sync, G4); the untested hooks (seed, output
-size, frame rate, resolution overlay); the picture against mkw-recomp.
+**`K2-mkw10-scrub` (09:18, the one run: `NXGFX_MESH_REF=skip NXGFX_CHECKPOINTS=all NXGFX_ADDR_REPORT=1`, slot scrub,
+mesh shared-memory fixes, lazy CPU-write check; 240 s to its hard timeout): no GPU fault, no stall.** The first MKW
+run since the set cache (48b009b) to go its whole length without a device loss: 139,265 direct mesh draws, past the
+55 s point where `K2-mkw9` lost the 128x128x5 pass, through the course map (63 s) into the race (85 s on). The scrub
+fired ("texture pool: 1 slot(s) of an image that goes now name the zero stand-in", from 11.9 s). One clean run: the
+pass fault and the mesh faults are gone as far as it shows; not yet run with indirect / 3D mesh draws on.
+- **Picture:** the course map lit and right (`0003`); in the race (`0004`-`0011`) the 3D view is flat sky blue with a
+  black-silhouette character portrait and a faint HUD: with indirect / 3D mesh draws skipped most of the course is not
+  drawn, so the next run is `NXGFX_MESH_REF` unset (all mesh draws), the step that serves the bar.
+- **Menu text still drops letters** ("zlario ros Cir it" for Mario Bros. Circuit): the cold-pool copy sync never fired
+  (no buffer -> texture copy from a cold pool) and the lazy CPU-write check did not change it. Not the glyphs: the
+  `CPU write kept out of GPU-written texture` lines named five RGBA16F textures of 11x1516 / 13x1211 at 0x2434b0000..
+  0x2437ad000 (4-8 KB of 151-189 KB written by the CPU, not uploaded: the half-covered rule in `image.rs`). Those are
+  CPU-updated tables the GPU wrote once; their rows stay stale (a candidate for the black portraits). mkw-recomp writes
+  a GPU-written texture back to its storage at the fence and merges later CPU writes (`vk_tex_alias.c`
+  `gpu_written_locked`); nxrs has no texture write-back, so the fix is either that or uploading the CPU-written rows
+  only. The glyph path itself is not identified yet.
+- 8 "GPU address ... is in no memory pool" lines at 9 s (1 MB reads at 0x13ba32000.. / 0x2a9204fd0, skipped binds).
+- FPS: 13-19 in menus, 8 in the race (prep / pool sync, G4).
+
+**Left (lane K2; bar per plan 5B 2afe332: a race start with the right picture, no GPU fault, at the FPS target):**
+the 128x128x5 pass fault (slot scrub to verify) and whether direct mesh draws are clean; then all mesh draws on
+(`NXGFX_MESH_REF` unset); menu text; FPS (pool sync, G4); the frame-rate / resolution hooks where they serve the FPS
+target. No 10-minute race, no side-by-side play.
 
 ## Linux (lane L, M10, 2026-11-20)
 
