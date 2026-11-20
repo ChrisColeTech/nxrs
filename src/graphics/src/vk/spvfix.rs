@@ -530,10 +530,20 @@ fn spvfix_folder() {
         let k = kill_demote(&w);
         let s = sabs_product(k.as_deref().unwrap_or(&w));
         let m = mesh_indices(s.as_deref().or(k.as_deref()).unwrap_or(&w));
-        if k.is_none() && s.is_none() && m.is_none() {
+        // shared memory zeroed: task / mesh shaders only (as shader.rs applies it)
+        let is_mesh = {
+            let (mut i, mut f) = (5, false);
+            while i < w.len() && w[i] >> 16 != 0 {
+                f |= w[i] & 0xffff == OP_ENTRY_POINT && (w[i + 1] == 5364 || w[i + 1] == 5365);
+                i += (w[i] >> 16) as usize;
+            }
+            f
+        };
+        let z = if is_mesh { zero_workgroup(m.as_deref().or(s.as_deref()).or(k.as_deref()).unwrap_or(&w)) } else { None };
+        if k.is_none() && s.is_none() && m.is_none() && z.is_none() {
             continue;
         }
-        let out = m.or(s).or(k).unwrap();
+        let out = z.or(m).or(s).or(k).unwrap();
         let bytes: Vec<u8> = out.iter().flat_map(|x| x.to_le_bytes()).collect();
         std::fs::write(std::path::Path::new(&o).join(e.file_name()), bytes).unwrap();
         n += 1;
@@ -698,5 +708,86 @@ mod mesh_index_tests {
         assert_eq!(ops, [16, 71, 21, 23, 32, 43, 44, 54, 65, 199, 62, 62]);
         assert!(out.windows(3).any(|x| x == [2, 100, 31]), "the constant 31");
         assert_eq!(out[3], 103);
+    }
+}
+
+/// The device has shaderZeroInitializeWorkgroupMemory (set when the device is made): `zero_workgroup` may run.
+pub static ZERO_WG: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// `zero_workgroup`: every Workgroup variable (shared memory, task payload staging) without an initializer gets a
+/// null one, so a word the program reads before writing it reads 0, not what the last workgroup on that SM left there.
+/// The translated task / mesh shaders take counts and indices from shared memory (a task's mesh-group count at word
+/// 357, a mesh shader's primitive count and indices); mkw-recomp's translator zeroes its index array before a mesh
+/// shader runs. None when the module has no such variable.
+pub fn zero_workgroup(words: &[u32]) -> Option<Vec<u32>> {
+    const SC_WORKGROUP: u32 = 4;
+    if words.len() < 5 || words[0] != 0x0723_0203 {
+        return None;
+    }
+    let mut v = vec![];
+    let mut i = 5;
+    while i < words.len() {
+        let n = (words[i] >> 16) as usize;
+        if n == 0 || i + n > words.len() {
+            return None;
+        }
+        v.push((i, words[i] & 0xffff, n));
+        i += n;
+    }
+    let mut ptrs: HashMap<u32, u32> = HashMap::new();
+    let mut sites = 0;
+    for &(i, op, n) in &v {
+        if op == OP_TYPE_POINTER && n == 4 {
+            ptrs.insert(words[i + 1], words[i + 3]);
+        }
+        if op == OP_FUNCTION {
+            break;
+        }
+        if op == OP_VARIABLE && n == 4 && words[i + 3] == SC_WORKGROUP {
+            sites += 1;
+        }
+    }
+    if sites == 0 {
+        return None;
+    }
+    let mut bound = words[3];
+    let mut out = Vec::with_capacity(words.len() + sites * 8);
+    out.extend_from_slice(&words[..5]);
+    let mut in_fn = false;
+    for &(i, op, n) in &v {
+        in_fn |= op == OP_FUNCTION;
+        if !in_fn && op == OP_VARIABLE && n == 4 && words[i + 3] == SC_WORKGROUP {
+            if let Some(&t) = ptrs.get(&words[i + 1]) {
+                let z = bound;
+                bound += 1;
+                out.extend(ins(OP_CONSTANT_NULL, &[t, z]));
+                out.extend(ins(OP_VARIABLE, &[words[i + 1], words[i + 2], SC_WORKGROUP, z]));
+                continue;
+            }
+        }
+        out.extend_from_slice(&words[i..i + n]);
+    }
+    out[3] = bound;
+    Some(out)
+}
+
+#[cfg(test)]
+mod zero_wg_tests {
+    use super::*;
+
+    #[test]
+    fn workgroup_variables_get_a_null_initializer() {
+        let mut w = vec![0x0723_0203, 0x0001_0000, 0, 50, 0];
+        w.extend(ins(21, &[2, 32, 0]));
+        w.extend(ins(OP_TYPE_POINTER, &[3, 4, 2])); // Workgroup uint*
+        w.extend(ins(OP_TYPE_POINTER, &[4, 3, 2])); // Output uint*
+        w.extend(ins(OP_VARIABLE, &[3, 10, 4]));
+        w.extend(ins(OP_VARIABLE, &[4, 11, 3]));
+        w.extend(ins(OP_FUNCTION, &[2, 12, 0, 13]));
+        let out = zero_workgroup(&w).unwrap();
+        assert!(out.windows(4).any(|x| x == [(3 << 16) | 46, 2, 50, (5 << 16) | 59]), "null constant before the variable");
+        assert!(out.windows(4).any(|x| x == [3, 10, 4, 50]), "the variable initialized with it");
+        assert!(out.windows(3).any(|x| x == [4, 11, 3]), "the output variable untouched");
+        assert_eq!(out[3], 51);
     }
 }

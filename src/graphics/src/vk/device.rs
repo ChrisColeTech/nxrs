@@ -314,6 +314,7 @@ impl Device {
         need(f13.dynamic_rendering, "dynamicRendering")?;
         need(f13.synchronization2, "synchronization2")?;
         super::spvfix::DEMOTE.store(f13.shader_demote_to_helper_invocation != 0, std::sync::atomic::Ordering::Relaxed);
+        super::spvfix::ZERO_WG.store(f13.shader_zero_initialize_workgroup_memory != 0, std::sync::atomic::Ordering::Relaxed);
         need(f12.timeline_semaphore, "timelineSemaphore")?;
         need(f12.descriptor_binding_partially_bound, "descriptorBindingPartiallyBound")?;
         need(f12.descriptor_binding_sampled_image_update_after_bind, "descriptorBindingSampledImageUpdateAfterBind")?;
@@ -452,6 +453,7 @@ impl Device {
             .synchronization2(true)
             .maintenance4(f13.maintenance4 != 0)
             .shader_demote_to_helper_invocation(f13.shader_demote_to_helper_invocation != 0)
+            .shader_zero_initialize_workgroup_memory(f13.shader_zero_initialize_workgroup_memory != 0)
             // image stores past an image's size are discarded, as the console's surface stores ignore them: MKW 1.8.0's
             // cube-map mip pass (881a4d611e825d6c) runs the same 2x2x6 groups for every level, down to 2x2, and lost the
             // device with an invalid write (lane K); mkw-recomp enables every feature the driver offers

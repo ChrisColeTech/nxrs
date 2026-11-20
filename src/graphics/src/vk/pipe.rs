@@ -453,7 +453,13 @@ fn gpl_part(g: &Gpu, key: Vec<u8>, what: vk::GraphicsPipelineLibraryFlagsEXT, ci
         return (p != vk::Pipeline::null()).then_some(p);
     }
     let mut li = vk::GraphicsPipelineLibraryCreateInfoEXT::default().flags(what);
-    let ci = ci.flags(vk::PipelineCreateFlags::LIBRARY_KHR | vk::PipelineCreateFlags::RETAIN_LINK_TIME_OPTIMIZATION_INFO_EXT | db_flag(g)).push_next(&mut li);
+    // no RETAIN_LINK_TIME_OPTIMIZATION_INFO: nothing links these with LINK_TIME_OPTIMIZATION (the optimized pipeline is
+    // built whole from the modules, `build_gfx`), and the retained information made each part bigger and slower to
+    // make (NXGFX_PART_LTO=1: retained, as before)
+    static LTO: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let lto = *LTO.get_or_init(|| std::env::var("NXGFX_PART_LTO").as_deref() == Ok("1"));
+    let f = vk::PipelineCreateFlags::LIBRARY_KHR | db_flag(g) | if lto { vk::PipelineCreateFlags::RETAIN_LINK_TIME_OPTIMIZATION_INFO_EXT } else { vk::PipelineCreateFlags::empty() };
+    let ci = ci.flags(f).push_next(&mut li);
     let p = match unsafe { g.dev().create_graphics_pipelines(g.pipes.cache, &[ci], None) } {
         Ok(v) => v[0],
         Err((_, e)) => {

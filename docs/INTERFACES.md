@@ -912,6 +912,20 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   present. Not captured: what only the GPU held at the start (earlier render targets, device-local pools the GPU
   wrote) and sparse mappings. First capture queued on MK8D (`build/G4/mk8d.cap`, `c14_mk8d.out`); not replayed yet.
 - **Wonder's level-entry frame:** not worked on this round.
+- **Pool sync measured offline** (GetWriteWatch, this machine): ~2.2 us a call + ~0.95 us a MB scanned (committed or
+  not); 3,500 small calls 8.7 ms; on 2-8 threads slower (16-23 ms: the kernel serializes them). So a scan of every
+  mirror costs ~10 ms a submission for MKW's ~3,500 pools however it is split; fewer scans is what helps.
+  **Consecutive queued submits of one queue now replay as one submission** (`queue.rs aq_main`, up to 8 / 64 MB;
+  `NXGFX_AQ_MERGE=0` off): one pool sync and one vkQueueSubmit for all of them; each keeps its own fence (resolved to
+  the merged submission's). The memory line ends "N submits replayed with the one before". GPU tests pass.
+  `NXGFX_PROFILE=1` logs the write-watch calls / time per submission every 600 submissions.
+- **Pipeline parts without RETAIN_LINK_TIME_OPTIMIZATION_INFO** (`pipe.rs gpl_part`; `NXGFX_PART_LTO=1` keeps it):
+  nothing links parts with link-time optimization (the optimized pipeline is built whole from the modules), so the
+  retained information only made each part bigger and slower (MKW's prewarm: ~7 MB a pipeline). Wonder first run
+  queued to measure (`chain20` -> `c20_wonder.out`).
+- **Queue (07:40):** `chain19` = Smash with the address report (`c16_smash.out`), MK8D occlusion log + capture
+  (`c14_mk8d.out`, `build/G4/mk8d.cap`), DKB profile (`c18_dkb.out`); then `chain20` Wonder first run. run_game's
+  cooldown after 5 resets in the hour was 50 minutes at 07:37.
 
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.

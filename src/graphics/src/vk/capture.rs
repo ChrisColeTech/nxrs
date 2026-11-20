@@ -411,15 +411,24 @@ fn read_t<T: Copy>(p: &[u8], o: usize) -> T {
     unsafe { core::ptr::read_unaligned(p[o..o + core::mem::size_of::<T>()].as_ptr() as *const T) }
 }
 
-/// Maps a captured allocation at its own address (reserve + commit).
+/// Reserves a captured allocation at its own address (its pages are committed as their bytes come: `commit`).
 #[cfg(windows)]
 fn map_region(base: u64, size: u64) -> bool {
-    use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
-    let p = unsafe { VirtualAlloc(base as *const _, size as usize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) };
+    use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_RESERVE, PAGE_READWRITE};
+    let p = unsafe { VirtualAlloc(base as *const _, size as usize, MEM_RESERVE, PAGE_READWRITE) };
     p as u64 == base
 }
 #[cfg(not(windows))]
 fn map_region(_: u64, _: u64) -> bool {
+    false
+}
+#[cfg(windows)]
+fn commit(a: u64, n: u64) -> bool {
+    use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, PAGE_READWRITE};
+    !unsafe { VirtualAlloc(a as *const _, n as usize, MEM_COMMIT, PAGE_READWRITE) }.is_null()
+}
+#[cfg(not(windows))]
+fn commit(_: u64, _: u64) -> bool {
     false
 }
 
@@ -443,7 +452,11 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path) -> Result<u64, Stri
             }
             rec::MEM => {
                 let a = u64_at(&p, 0);
-                // SAFETY: inside a region mapped above (a page the capture read)
+                if !commit(a, (p.len() - 8) as u64) {
+                    failed_regions += 1;
+                    continue;
+                }
+                // SAFETY: committed just now, inside a region reserved above (a page the capture read)
                 unsafe { core::ptr::copy_nonoverlapping(p[8..].as_ptr(), a as *mut u8, p.len() - 8) };
             }
             rec::DPOOL => {

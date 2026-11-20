@@ -463,6 +463,45 @@ pub fn cpu_flushed(a: u64, n: u64) {
     }
 }
 
+/// The CPU's writes to [a, a + n) of a cold pool, taken now: a buffer -> texture copy reads them in this submission.
+/// `begin_submit` asks a cold pool (no CPU write for 60 frames) once a frame only, so a texture copied from memory the
+/// CPU wrote since kept the old bytes for good (the copy's texture is the GPU's from then on): Mario Kart World's menu
+/// text lost letters, the glyphs it writes into a cold pool just before copying them (mkw-recomp #250, lane K2).
+/// `NXGFX_COPY_SYNC=0` off.
+pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("NXGFX_COPY_SYNC").as_deref() != Ok("0")) || n == 0 {
+        return;
+    }
+    let frame = super::present::frames();
+    let mut m = g.mem.lock().unwrap();
+    let gen = m.gen;
+    let Some(b) = find(&m, a, n) else { return };
+    let p = m.by_base.get_mut(&b).unwrap();
+    // a hot pool was asked at this submission's start; only a watched mirror's pages are taken here
+    if !p.watched || p.placement != Placement::Mirror || frame.saturating_sub(p.dirty_frame) <= 60 {
+        return;
+    }
+    let (lo, hi) = page_range(a, n);
+    let Some(pages) = watch::take(lo, hi, true) else { return };
+    if pages.is_empty() {
+        return;
+    }
+    let ranges = p.take_cpu_writes(gen, Some(pages));
+    p.dirty_frame = frame;
+    if let Some(buf) = p.buf.as_ref() {
+        for &(ra, rn) in &ranges {
+            let src = unsafe { core::slice::from_raw_parts(ra as *const u8, rn as usize) };
+            sub.upload(g, src, buf.buf, p.buf_off + (ra - p.base));
+            UPLOAD_BYTES.fetch_add(rn, Ordering::Relaxed);
+        }
+    }
+    static N: AtomicU64 = AtomicU64::new(0);
+    if N.fetch_add(1, Ordering::Relaxed) < 4 {
+        crate::vklog!("a texture copy's source {a:#x} (+{n:#x}) in a cold pool: {} CPU-written range(s) taken first", ranges.len());
+    }
+}
+
 /// nvnMemoryPoolInvalidateMappedRange: GPU writes reach guest memory at their fence, before SyncWait returns.
 pub fn cpu_invalidate(_a: u64, _n: u64) {}
 

@@ -1584,6 +1584,14 @@ impl Gpu {
                             continue;
                         }
                     }
+                    if covered > 0 && im.gpu_owned && covered * 2 < hi - lo {
+                        // (diagnosis, lane K2: MKW's menu text misses letters) a CPU write the GPU-written texture keeps
+                        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 24 {
+                            let d = &im.tex.d;
+                            crate::vklog!("CPU write kept out of GPU-written texture ser{s} {}x{}x{} fmt {:#x} at {lo:#x}: {} of {} KB written", d.width, d.height, d.depth, d.format, covered >> 10, (hi - lo) >> 10);
+                        }
+                    }
                     if covered > 0 && (!im.gpu_owned || covered * 2 >= hi - lo) {
                         im.rewrites += 1;
                         // the CPU wrote the storage: its bytes are the texture's newest content, also when the GPU

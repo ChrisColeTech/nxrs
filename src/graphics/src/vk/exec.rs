@@ -3233,6 +3233,9 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
                 crate::log::red_once("buffer <-> texture copy of an RGB or ASTC texture is not converted yet");
                 return true;
             }
+            if opc == op::COPY_B2T {
+                super::mem::sync_range(g, sub, c.src, bytes);
+            }
             let Some((b, o, _)) = super::mem::resolve(g, sub, c.src, bytes) else { return true };
             let (sl, off, ext) = region_copy(&t, view.as_ref(), &c.r, &tf);
             let r = vk::BufferImageCopy { buffer_offset: o, buffer_row_length: row, buffer_image_height: img_rows, image_subresource: sl, image_offset: off, image_extent: ext };

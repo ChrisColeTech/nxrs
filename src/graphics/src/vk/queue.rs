@@ -908,7 +908,9 @@ pub fn aq_ns() -> u64 {
 
 fn aq_main(g: &'static Gpu, a: &'static Aq) {
     loop {
-        let (seq, op) = {
+        // the op, and the sequence numbers of the submits of the same queue queued right behind it and taken with it
+        let mut merged: Vec<u64> = Vec::new();
+        let (mut seq, mut op) = {
             let mut q = a.ops.lock().unwrap();
             loop {
                 if let Some(x) = q.pop_front() {
@@ -917,6 +919,27 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
                 q = a.cv.wait(q).unwrap();
             }
         };
+        // submits of one queue already waiting one after another replay as one submission: one pool sync (a write-
+        // watch scan of every mirror: Mario Kart World's ~3,500 pools cost ~10 ms a submission) and one queue submit
+        // for all of them. Their fences all resolve to the merged submission's (later for the first: conservative).
+        // NXGFX_AQ_MERGE=0: one submission each.
+        if let Op::Submit { q: oq, stream: ref mut s0, .. } = op {
+            static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if *ON.get_or_init(|| std::env::var("NXGFX_AQ_MERGE").as_deref() != Ok("0")) {
+                let mut q = a.ops.lock().unwrap();
+                while merged.len() < 7 && s0.len() < 64 << 20 {
+                    match q.front() {
+                        Some((_, Op::Submit { q: nq, .. })) if *nq == oq => {}
+                        _ => break,
+                    }
+                    let Some((ns, Op::Submit { stream, .. })) = q.pop_front() else { break };
+                    merged.push(seq);
+                    seq = ns;
+                    s0.extend_from_slice(&stream);
+                    AQ_MERGED.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
         let t0 = std::time::Instant::now();
         // the NVN queue of a submit or present: its fence is a receipt while that queue stays parked
         let opq = match &op {
@@ -975,6 +998,9 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
         };
         {
             let mut f = a.fences.lock().unwrap();
+            for &m in &merged {
+                f.insert(m, fence);
+            }
             f.insert(seq, fence);
             while f.len() > 4096 {
                 let k = *f.keys().next().unwrap();
@@ -1021,6 +1047,8 @@ pub fn after_queued(f: Box<dyn FnOnce(&'static Gpu) + Send>) {
     }
 }
 
+/// Submits replayed together with the one before them (`aq_main`).
+pub static AQ_MERGED: AtomicU64 = AtomicU64::new(0);
 static ASYNC_WAIT_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 static CB_FENCE_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
