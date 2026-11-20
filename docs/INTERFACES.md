@@ -2064,6 +2064,12 @@ lane K's; G4 please review).**
   one yet". **One G4 MKW run queued** to measure it (`build/G4/chain13.sh`: `mkw-race` 330 s, `NXGFX_MESH_REF=skip`,
   `build/G4/mkwt`, label `G4-mkw-lazy`) after G4's Smash run; it waits on the machine lock like any run. Replaced
   pipelines are now destroyed too (`pipe.rs retire`).
+  **Measured (`-G4-mkw-lazy`, title demo, 185 s):** private memory **10.6 GB at 49 s, 12.1 GB at 102 s, 12.0 GB at
+  153 s** (`K-mkw16` at 93 s: 16.7 GB, then 18.5 at 162 s); textures **2,850-3,065 images = 3.0-3.3 GB** (was 36,958 =
+  6.6 GB) with ~36,000 registrations never drawn; allocator 6.3 GB in blocks (was 10.6), sparse tiles still 1.7 GB.
+  The title's pictures look right (`0008-shot_race.png`). The run then lost the device at 185.8 s (07:11 reset) in an
+  **indirect dispatch** (compute `532f4107bf53157e`, indirect at 0x2a8108004): *invalid write at 0x300001000*, the same
+  0x3 / 0x4_0000_xxxx write fault as Smash's (lane G4 round 4): being chased with the address binding report.
 - **Memory (for G4, numbers from `K-mkw16` / `K-mkw18`):** private memory jumps by 6-8 GB within 10 s when the title
   scene first loads, to 16-17 GB, then grows ~0.6 GB a minute to the 20 GB watchdog (mkw-recomp: 10.6 GB private in a
   race on Windows). At 93 s: graphics allocator 10.6 GB in blocks (textures 36,958 = 6.6 GB, sparse tiles 1.7 GB,
@@ -2092,6 +2098,80 @@ lane K's; G4 please review).**
 - **Descriptor-buffer robust sizes (lane K, `vk/device.rs` `desc_size`, `vk/exec.rs`, `vk/tables.rs`):** with
   robustBufferAccess on (G4's default), buffer and texel-buffer descriptors are now written at the robust sizes, as
   VK_EXT_descriptor_buffer requires; the plain sizes were used before.
+
+## MKW (lane K2, M7, 2026-11-20)
+
+Lane K2 takes over from lane K. Engine `target\K2`; game relinked by `build\K2\relink.sh mkw` (target\K2's
+`nxfront.lib`); one start per test through `build\K2\run.sh <label> <seconds> [--env ...]` (play_scenario `mkw-race`,
+A every 1.5 s, `NXRS_LANE=K2`, saves backed up to `build\K2\mkw-save-backup-*` first, `build\K2\stallwatch.py`
+alongside). Runs `build\I\runs\*-K2-mkw*`.
+
+**The "70 s particle-loop stall" was a lazy write-back deadlock, not a float bug.**
+- `K2-mkw4` / `K2-mkw5` reproduced it (~64 s, worker 0x1015 / 0x1012 under main+0x17bdd78). New dump switch
+  (runtime `kernel.rs` `dump_threads`): `NXRS_DUMP_FRAMES=<ret>[,<ret>]` prints the 16 words at the frame record of a
+  frame returning there. At main+0x17bdc34 (the spawn function's frame): loop index w23 = 0, count w20 = 4, the same
+  in two dumps 7 s apart. So the spawn loop never looped: one call never came back. Lane K's count formula reading was
+  right but the count is 4.
+- The worker's host stack (cdb, non-invasive, `build\K2\stallwatch.py`: `~*kc` of every thread when no frame arrives
+  for 10 s; `cdb-*.txt` in the run folder) showed it: guest store in f_70017bdd00 -> access violation -> graphics
+  `vk::lazy::veh` -> `bring_back(p)` -> its `memmove` into the page faulted again -> `veh` -> `bring_back(p)` -> waits
+  in a yield loop for `returning` to drop p, which only the outer call on the same thread can do. The thread waited
+  for itself for ever; main waited for its job.
+- **Fix (graphics `vk/lazy.rs`, small):** a thread never waits for a page it is bringing back itself (a thread-local
+  marks it; a second fault on it goes on to the other handlers with a red line), and `protect` now says whether
+  VirtualProtect worked: a page that can no longer be made accessible (its memory changed while it was held on the
+  device) is dropped with a red line instead of copied into. **For G4:** the red lines `lazy write-back: page ...`
+  will name the case when it happens again; `K2-mkw6` passed the stall point (course flyover at 63.8 s) without
+  either line, so the exact cause of the second fault is not caught yet.
+- **The oracle checked the float side anyway** (`src/oracle`: new `--words HEX,..` (exactly these words, no other
+  class) and `--fpcr HEX` (every state's FPCR, the host MXCSR set from it as the runtime does: FTZ|DAZ = FPCR.FZ);
+  build `build\K2\oracle-build.bat` into `target\K2o`). The loop's 11 float words and all 1,765 FP / SIMD words of
+  main+0x17ac000..0x17c4000 (the spawn code and its callees: fmul, fmla, fmadd, ucvtf #32, fcvtzs, frecpe / frsqrte,
+  fcsel, ...): 0 mismatches against dynarmic at FPCR 0 and at 0x1000000 (706,000 cases each). mkw-recomp's FZ handling
+  is the same as nxrs's (cpu.h `rt_fpcr_sync` identical: FTZ|DAZ = FPCR.FZ on MSR FPCR, thread / fiber entry,
+  host->guest calls). Tool: `build\K2\nsotext.py <nso> <out>` (the NSO's decompressed .text, for llvm-objdump).
+
+**28-34 s present gaps: the write watch walked its range once per 4,096 written pages (graphics `vk/mem.rs`
+`watch::take_one`, small).** `K2-mkw1` / `K2-mkw2`: frames of 9-34 s (presents stop, main in nvnSyncWait, every
+worker idle); cdb: the replay thread inside `mem::begin_submit` -> `GetWriteWatch`. A full 4,096-page buffer asked
+again from the range's start, so a pool with N written pages cost N / 4,096 walks of the whole range. It now asks
+again from the page after the last one returned. After it: no frame over 5 s in `K2-mkw4` / `-5` / `-6` (was 8.9 /
+11.3 / 27.6 s in `K2-mkw2`). A `write watch: ... took N ms` line logs any call over 100 ms (none since).
+
+**Set cache and mesh draws (graphics `vk/exec.rs`, small).** G4's per-stage set cache (48b009b) keyed a task shader's
+set without its draw records (`Res::MeshDraw`, each mesh draw stages its own `{count, first}`): a later mesh draw of
+the same program reused the earlier draw's `first`. `SetKey` now has the mesh records. Indirect mesh draws copy the
+game's records into staging with the counts (an aligned binding of the values the counts came from) instead of
+binding the game's memory. `NXGFX_MESH_REF=skipind` / `skip3d` (only indirect / only 3D skipped) added for the next
+narrowing; the mesh checkpoint names the draw (direct / indirect, 1D / 3D, counts, first).
+
+**Mesh faults are not only indirect / 3D.** With `NXGFX_MESH_REF=skip` (indirect / 3D skipped) the GPU still faulted
+twice in direct draws of the same program as `K-mkw13`: `K2-mkw3` at 21 s (#7129, invalid read 0xce3266000) and
+`K2-mkw6` at 72.7 s (#184544, "direct, 1D 6x1x1, first 0", invalid read 0xe0145e000), shaders [1:3cc3501255bb2d74
+3:fea1d6ca04512de1 4:ddc034e8e009ebfc], robust buffer + image access on, no buffer destroyed in the report. Lane K's
+`K-mkw19` / `-20` (373 + 150 s, no fault) ran before the set cache and the robust descriptor sizes (a7ebd79 / 48b009b).
+`K2-mkw7-nocache` (`NXGFX_SET_CACHE=0`, skip): GPU reset at 14.6 s in a direct mesh draw of another, mesh-only
+program (#2715, "direct, 1D 1x1x1, first 0", shaders [1:3cafb02cdf0d87fb 4:11ed01f0618a65a3], invalid read at
+0x6cad56000). So neither the set cache nor the task shader nor `first` is the cause: direct mesh draws of several
+programs read an unmapped page. The checkpoint covers the whole draw, the pixel stage included; `K2-mkw3`'s report
+listed ~48 textures handed to be destroyed 2 s before its fault. Next: the mesh / pixel shaders' texture and storage
+bindings at the faulting draw (`NXGFX_CHECKPOINTS=all` + `NXGFX_LOG_SHADER=<key>`), and whether a texture destroyed
+in that window is still in the bindless table (mkw-recomp #468 is the reference). Three GPU resets in this lane's
+session (06:24, 06:58, 07:22), all in mesh draws.
+
+**Picture.** Since the 06:45 build the course-select map, the menus and the course flyover draw lit and right
+(`K2-mkw6` `0002`, `0003`: Mario Bros. Circuit at 63.8 s), where `K2-mkw2` / `-5` (06:06 / 06:41) still had the black
+world map and black-silhouette characters on an overexposed backdrop. Not isolated: that span holds G4's conditional
+rendering change (48b009b, "MK8D black world") and lane K2's lazy / write-watch / set-key changes; the conditional
+rendering change is the likely one. Still wrong: menu text misses glyphs ("L s roo C" for Mushroom Cup, course names
+cut), and the title sky was not seen again.
+
+**FPS: 8-20 in menus and the flyover** (`K2-mkw6` pacing 10-20). The replay's `prep / pools` is 50-60 ms a frame
+(the per-submission write-watch pool sync over ~3,500 mirror pools, 3.3 GB): the largest single cost, for G4.
+
+**Left (lane K2):** the direct mesh-draw fault (task fea1d6ca04512de1); then all mesh draws on (`NXGFX_MESH_REF`
+unset); a race of 10 minutes; FPS (pool sync); the untested hooks (seed, output size, frame rate, resolution
+overlay); the picture against mkw-recomp; memory (G4).
 
 ## Linux (lane L, M10, 2026-11-20)
 
@@ -2179,6 +2259,11 @@ X server of its own (Xvfb :91). What that proves and what it does not is listed 
   part from `vk/pipe.rs` `gpl_part` <- `shader_parts` (the fragment-shader part, pipe.rs:580) <- `prebuild`. Either a
   Mesa GPL bug or a create info NVIDIA tolerates (worth a run with the validation layer on a Linux GPU); the in-flight
   part guard did not stop the next session from crashing on another part. `NXRT_FOREIGN_FAULTS=1` logged it.
+  - **G4 (round 4): likely an invalid create info of ours.** pipe.rs:580 is the *pre-rasterization* part. A program
+    made ahead (`prebuild` / first-run profile prewarm) whose vertex shader is not translated yet kept only its pixel
+    shader, and its pre-rasterization library was created with **no shader stage** (invalid; NVIDIA tolerated it).
+    `shader_parts` now makes no parts without a vertex / mesh stage (the program is made whole at its draw). Not run on
+    llvmpipe here.
 
 **Not verified (no hardware for it in WSL):** a real GPU driver (NVIDIA / AMD / Intel Vulkan on Linux; the GPU-heavy
 paths ran only on llvmpipe), real sound (ALSA / PulseAudio / PipeWire output and capture), real controllers (hidraw
