@@ -58,6 +58,8 @@ pub struct Sub {
     pub memo_views: std::collections::HashMap<(i32, u32, bool), vk::ImageView>,
     /// which recording this is (a stage's staged driver constants are reused by it while they stand)
     pub serial: u64,
+    /// the present count when it was recorded (counter reports: the frame it belongs to)
+    pub frame: u64,
     /// raw global memory (`gmem`): the staged memory pool table, the write log and the table's ranges
     pub gmem: Option<((vk::Buffer, u64), (vk::Buffer, u64), std::sync::Arc<Vec<(u64, u64)>>)>,
     /// descriptor buffers: the stage sets written for this submission (chunks), the bytes used of the current one,
@@ -424,6 +426,7 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
             memo_sets: Default::default(),
             memo_views: Default::default(),
             serial: 0,
+            frame: 0,
             gmem: None,
             db: Vec::new(),
             db_cur: 0,
@@ -433,6 +436,7 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
     };
     static SUB_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     s.serial = SUB_SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
+    s.frame = super::present::frames();
     g.q.recording.store(true, Ordering::Release);
     let bi = vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT);
     unsafe {
@@ -634,7 +638,7 @@ fn completion_loop(g: &'static Gpu) {
         };
         let (t0, t1) = (ts[0], ts[1]);
         if t1 >= t0 && t1 > 0 {
-            super::counters::part(t0, t1);
+            super::counters::part(super::counters::part_key(sub.frame, sub.serial), t0, t1);
             super::perf::gpu_time(t1 - t0);
             super::scale::note_gpu(t1 - t0);
         }

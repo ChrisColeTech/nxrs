@@ -259,6 +259,21 @@ fn control_files(ncas: &[Arc<Nca>], title_id: u64, wanted: Option<&str>) -> (BTr
     (found, Some(display))
 }
 
+/// The program indices of a package's Program NCAs (a multi-program application: programs at the lowest title id +
+/// index; a base and its update share one), ascending.
+pub fn program_indices_of(title_ids: impl IntoIterator<Item = u64>) -> Vec<u64> {
+    let ids: std::collections::BTreeSet<u64> = title_ids.into_iter().collect();
+    let Some(&min) = ids.iter().next() else { return vec![] };
+    ids.iter().map(|t| t - min).collect()
+}
+
+/// The programs a package holds (see `program_indices_of`).
+pub fn program_indices(path: &Path, keys: &Keys) -> Result<Vec<u64>> {
+    let blob = Arc::new(Blob::open(&abspath(path))?);
+    let (ncas, _) = open_ncas(&blob, keys)?;
+    Ok(program_indices_of(ncas.iter().filter(|n| n.content_type == 0).map(|n| n.title_id)))
+}
+
 impl Package {
     /// nca.py `Package(path, keys, update, embedded)`.
     pub fn open(path: &Path, keys: &Keys, choice: &UpdateChoice) -> Result<Package> {
@@ -603,4 +618,16 @@ pub fn update_info(path: &Path, keys: Option<&Path>, game: Option<&Path>) -> Res
     let (version, _, wanted) = metadata(&ncas, title_id, true);
     let (_, display) = control_files(&ncas, title_id, wanted.as_deref());
     Ok(UpdateInfo { path, title_id, version, display: display.unwrap_or_default() })
+}
+
+#[cfg(test)]
+mod tests {
+    /// Sonic X Shadow Generations: programs 0 and 1 (title id + 1); a base and its update count once.
+    #[test]
+    fn program_indices_from_title_ids() {
+        assert_eq!(super::program_indices_of([0x0100_A1B0_0000_0000, 0x0100_A1B0_0000_0001, 0x0100_A1B0_0000_0000]), vec![0, 1]);
+        assert_eq!(super::program_indices_of([0x0100_4990_0F54_6002, 0x0100_4990_0F54_6000, 0x0100_4990_0F54_6001]), vec![0, 1, 2]);
+        assert_eq!(super::program_indices_of([0x0100_9650_1733_8000]), vec![0]);
+        assert!(super::program_indices_of([]).is_empty());
+    }
 }

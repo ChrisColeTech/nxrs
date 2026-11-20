@@ -99,6 +99,8 @@ enum Item {
     Zip(usize, String, Vec<packs::ZipEntry>),
     /// Members of a Larian LSPK package (its first part's path).
     Lspk(usize, String, Vec<packs::LspkEntry>),
+    /// `.nnx_shaders` members of a TT Games CC4 DAT.
+    TtDat(usize, String, Vec<formats::ttgames::TtEntry>),
     /// Members of a Virtuos SRYK (VBF) archive.
     Vbf(usize, String, Vec<packs::VbfEntry>),
     /// CompiledBytecode resources of a Frostbite cas file: (offset, stored, size, name).
@@ -133,6 +135,7 @@ impl Item {
             Item::Range(_, _, a, b, _) => b - a,
             Item::Zip(_, _, e) => e.iter().map(|x| x.stored).sum(),
             Item::Lspk(_, _, e) => e.iter().map(|x| x.3).sum(),
+            Item::TtDat(_, _, e) => e.iter().map(|x| x.2).sum(),
             Item::Vbf(_, _, e) => e.iter().map(|x| x.1).sum(),
             Item::Fb(_, _, e) => e.iter().map(|x| x.1).sum(),
         }
@@ -748,6 +751,24 @@ fn folder_formats(ri: usize, pre: &str, romfs: &RomFs, files: &[(String, u64)]) 
             problems.push(format!("/{pre}{p}: Frostbite: {e}; not scanned"));
         }
     }
+    // TT Games' CC4 DATs (Skywalker Saga): only their indexed .nnx_shaders members are read
+    for (p, size) in files.iter().filter(|(p, _)| p.to_lowercase().ends_with(".dat")) {
+        if taken.contains(p) {
+            continue;
+        }
+        let read = |o: u64, n: u64| romfs.read(p, o, n).map_err(|e| e.to_string());
+        match formats::ttgames::entries(&read, *size, &format!("/{pre}{p}")) {
+            Ok(None) => {}
+            Ok(Some(ents)) => {
+                taken.insert(p.clone());
+                group(ents, |e| e.2, |c| Item::TtDat(ri, p.clone(), c), &mut items);
+            }
+            Err(e) => {
+                taken.insert(p.clone());
+                problems.push(format!("{e}; not scanned"));
+            }
+        }
+    }
     // Larian LSPK packages (footer-indexed, in numbered parts): only their BSHD members are read
     for (p, size) in files.iter().filter(|(p, _)| p.to_lowercase().ends_with(".pak")) {
         if taken.contains(p) {
@@ -1197,6 +1218,21 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
                 match packs::lspk_read(&read, e, &label).and_then(|d| studios::bshd(&d, &label)) {
                     Ok(f) => {
                         bytes.fetch_add(e.3, Ordering::Relaxed);
+                        out.found.extend(f);
+                    }
+                    Err(x) => out.problems.push(x),
+                }
+            }
+        }
+        Item::TtDat(ri, path, ents) => {
+            let (pre, romfs) = (&roms[*ri].0, roms[*ri].1);
+            let read = |o: u64, n: u64| romfs.read(path, o, n).map_err(|e| e.to_string());
+            for e in ents {
+                let label = format!("/{pre}{path}/{}", e.0);
+                match formats::ttgames::read_member(&read, e, &label) {
+                    Ok(d) => {
+                        bytes.fetch_add(e.2, Ordering::Relaxed);
+                        let f = formats::ttgames::programs(&d, &label, &mut out.problems);
                         out.found.extend(f);
                     }
                     Err(x) => out.problems.push(x),

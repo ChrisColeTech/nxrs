@@ -121,6 +121,38 @@ pub fn spv_dir(key: &ShaderKey) -> Option<PathBuf> {
 
 static WAITED: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
 
+/// A frame's shader waits end after this many ms (Turbo 283c6b6: five new shader sets in one frame of a race were a
+/// stop of 2.3 s): the rest of the frame's draws that lack shaders are skipped and looked at again in the next frame.
+/// `NXGFX_SHADER_WAIT_FRAME_MS` (default 1500; 0: no cap).
+pub fn frame_cap_ms() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| std::env::var("NXGFX_SHADER_WAIT_FRAME_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500))
+}
+
+/// (frame, ms waited in it so far)
+static FRAME_WAIT: Mutex<(u64, u64)> = Mutex::new((0, 0));
+
+/// How long a wait may take now in frame `frame`: the per-wait limit `ms`, within what is left of the frame's cap
+/// (0: none left).
+pub fn budget(frame: u64, ms: u64, cap: u64) -> u64 {
+    let f = FRAME_WAIT.lock().unwrap();
+    let used = if f.0 == frame { f.1 } else { 0 };
+    if cap == 0 {
+        ms
+    } else {
+        ms.min(cap.saturating_sub(used))
+    }
+}
+
+/// `waited` ms were spent waiting in frame `frame`.
+pub fn spent(frame: u64, waited: u64) {
+    let mut f = FRAME_WAIT.lock().unwrap();
+    if f.0 != frame {
+        *f = (frame, 0);
+    }
+    f.1 += waited;
+}
+
 /// A draw that lacks shaders it needs: waits (once per set of keys) for the live translator, calling `look` every
 /// 5 ms until it answers true or the wait runs out. Returns whether they came.
 pub fn wait_for(keys: &[ShaderKey], mut look: impl FnMut() -> bool) -> bool {
@@ -134,9 +166,17 @@ pub fn wait_for(keys: &[ShaderKey], mut look: impl FnMut() -> bool) -> bool {
             h = (h ^ *b as u64).wrapping_mul(1099511628211);
         }
     }
-    if !WAITED.lock().unwrap().get_or_insert_with(HashSet::new).insert(h) {
+    if WAITED.lock().unwrap().get_or_insert_with(HashSet::new).contains(&h) {
         return false; // waited for once: a shader that never comes is skipped from then on
     }
+    // the frame's waits so far: none left, the draw is skipped and the set waited for in a later frame
+    let frame = super::present::frames();
+    let ms = budget(frame, ms, frame_cap_ms());
+    if ms == 0 {
+        prioritize(keys);
+        return false;
+    }
+    WAITED.lock().unwrap().get_or_insert_with(HashSet::new).insert(h);
     prioritize(keys);
     let t0 = Instant::now();
     let mut came = false;
@@ -150,6 +190,7 @@ pub fn wait_for(keys: &[ShaderKey], mut look: impl FnMut() -> bool) -> bool {
         }
         std::thread::sleep(Duration::from_millis(5));
     }
+    spent(frame, t0.elapsed().as_millis() as u64);
     static TOTAL: Mutex<(u64, f64, Option<Instant>)> = Mutex::new((0, 0.0, None));
     let mut t = TOTAL.lock().unwrap();
     t.0 += 1;
@@ -165,4 +206,20 @@ pub fn wait_for(keys: &[ShaderKey], mut look: impl FnMut() -> bool) -> bool {
         );
     }
     came
+}
+
+#[cfg(test)]
+mod tests {
+    /// A frame's waits end at its cap; the next frame has the whole cap again.
+    #[test]
+    fn a_frames_shader_waits_are_capped() {
+        let f = 1_000_000_007;
+        assert_eq!(super::budget(f, 3000, 1500), 1500, "one wait at most the frame's cap");
+        super::spent(f, 1200);
+        assert_eq!(super::budget(f, 3000, 1500), 300, "what is left of it");
+        super::spent(f, 400);
+        assert_eq!(super::budget(f, 3000, 1500), 0, "none left: skipped this frame");
+        assert_eq!(super::budget(f + 1, 3000, 1500), 1500, "the next frame");
+        assert_eq!(super::budget(f, 3000, 0), 3000, "no cap");
+    }
 }

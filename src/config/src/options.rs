@@ -260,3 +260,36 @@ mod tests {
         assert_eq!(canonical("idioma"), "language");
     }
 }
+
+/// docs/settings.md: every ini key by section, its default and what it does (nxnative's docs/settings.md for this
+/// engine's ini). Written from `SECTIONS`, so the page is the table; `settings_page_is_current` checks it.
+pub fn settings_markdown() -> String {
+    let mut s = String::from(
+        "# Settings\n\nThe game's ini (`<game>.ini` beside the executable; `NXRS_INI` names another) holds these keys. A missing key takes its\ndefault; values outside a key's range are brought into it when read. Turbo's Spanish key names are still read and written\nback under these names. Environment switches for diagnostics and tests are listed in [env_switches.tsv](env_switches.tsv).\n\nThis page is generated from `src/config/src/options.rs` (`cargo test -p config settings_page_is_current` checks it).\n",
+    );
+    for sec in SECTIONS {
+        s += &format!("\n## {}\n\n| Key | Default | What it does |\n|---|---|---|\n", sec.title);
+        for o in sec.opts {
+            let help = o.help.replace("\n;   ", " ").replace('\n', " ").replace('|', "\\|");
+            let d = if o.default.is_empty() { "(empty)".to_string() } else { format!("`{}`", o.default) };
+            s += &format!("| `{}` | {d} | {help} |\n", o.key);
+        }
+    }
+    s
+}
+
+#[cfg(test)]
+mod settings_doc {
+    /// docs/settings.md is what `settings_markdown` writes (a missing or stale page is written again, then the test
+    /// fails once so the change is seen).
+    #[test]
+    fn settings_page_is_current() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/settings.md");
+        let want = super::settings_markdown();
+        let have = std::fs::read_to_string(&p).unwrap_or_default().replace("\r\n", "\n");
+        if have != want {
+            std::fs::write(&p, &want).unwrap();
+            panic!("docs/settings.md was out of date and has been written again: check it in");
+        }
+    }
+}

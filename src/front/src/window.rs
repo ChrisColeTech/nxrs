@@ -287,9 +287,20 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
                 let (x, y) = ((l & 0xffff) as i16 as i32, ((l >> 16) & 0xffff) as i16 as i32);
                 let mut cr: RECT = std::mem::zeroed();
                 GetClientRect(h, &mut cr);
-                let sx = (x.max(0) as i64 * 1280 / cr.right.max(1) as i64) as u32;
-                let sy = (y.max(0) as i64 * 720 / cr.bottom.max(1) as i64) as u32;
-                nxos::input::set_touch(down, sx, sy);
+                let sx = (x.max(0) as i64 * 1280 / cr.right.max(1) as i64) as i32;
+                let sy = (y.max(0) as i64 * 720 / cr.bottom.max(1) as i64) as i32;
+                // the two-finger mouse: Ctrl + drag pinches (a second finger mirrored about the press point),
+                // Shift + drag rotates (two fingers turned about it), chosen when the button goes down
+                use nxos::input::MouseTouch;
+                static TWO: Mutex<(MouseTouch, (i32, i32))> = Mutex::new((MouseTouch::One, (0, 0)));
+                let mut two = TWO.lock().unwrap();
+                if m == WM_LBUTTONDOWN {
+                    let (ctrl, shift) = (GetKeyState(VK_CONTROL as i32) < 0, GetKeyState(VK_SHIFT as i32) < 0);
+                    *two = (if ctrl { MouseTouch::Pinch } else if shift { MouseTouch::Rotate } else { MouseTouch::One }, (sx, sy));
+                }
+                for (k, (fx, fy)) in nxos::input::mouse_fingers(two.0, two.1, (sx, sy)).into_iter().enumerate() {
+                    nxos::input::set_finger(k, down, fx, fy);
+                }
             }
             return 0;
         }

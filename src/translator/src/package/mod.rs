@@ -149,6 +149,17 @@ fn detect(input: &Path) -> Result<Detected> {
 }
 
 /// Open a game: a dumped folder, an NSP, an XCI (card image) or a NUP, applying the update `opts.update` chooses.
+/// The program indices a package holds (a multi-program application started program by program through
+/// oe::ExecuteProgram: Sonic X Shadow Generations, Super Mario 3D All-Stars); `[0]` for a folder, NRO or NUP.
+pub fn program_indices(input: &Path, keys_file: Option<&Path>) -> Result<Vec<u64>> {
+    let path = io::abspath(input);
+    if !matches!(detect(&path)?, Detected::Nsp) {
+        return Ok(vec![0]);
+    }
+    let keys = keys::Keys::load(&keys::keys_path(keys_file)?)?;
+    app::program_indices(&path, &keys)
+}
+
 pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
     let path = io::abspath(input);
     let detected = detect(&path)?;

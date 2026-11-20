@@ -172,6 +172,42 @@ pub fn register_debug_commands() {
         });
         format!("dragging {x0} {y0} -> {x1} {y1} over {secs} s\n")
     });
+    // two fingers either side of a centre: their spread from r0 to r1 (pinch), or their angle from a0 to a1 (rotate)
+    let two = |cx: f64, cy: f64, r: (f64, f64), deg: (f64, f64), secs: f64| {
+        std::thread::spawn(move || {
+            let steps = ((secs * 120.0) as u32).max(1);
+            let mut last = [(0, 0); 2];
+            for i in 0..=steps {
+                let t = i as f64 / steps as f64;
+                last = crate::input::two_fingers(cx, cy, r.0 + (r.1 - r.0) * t, deg.0 + (deg.1 - deg.0) * t);
+                for (k, &(x, y)) in last.iter().enumerate() {
+                    crate::input::set_finger(k, true, x, y);
+                }
+                std::thread::sleep(Duration::from_secs_f64(secs / steps as f64));
+            }
+            for (k, &(x, y)) in last.iter().enumerate() {
+                crate::input::set_finger(k, false, x, y);
+            }
+        });
+    };
+    nxconfig::ctl::register("pinch", "<x> <y> <r0> <r1> [seconds]: two fingers either side of (x, y) spread from r0 to r1 px (1280x720), 0.5 s by default", move |a| {
+        let v: Vec<f64> = a.iter().take(4).filter_map(|s| s.parse().ok()).collect();
+        if v.len() < 4 {
+            return "pinch <x> <y> <r0> <r1> [seconds]\n".into();
+        }
+        let secs = a.get(4).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.5).clamp(0.05, 10.0);
+        two(v[0], v[1], (v[2], v[3]), (0.0, 0.0), secs);
+        format!("pinching at {} {}: {} -> {} px over {secs} s\n", v[0], v[1], v[2], v[3])
+    });
+    nxconfig::ctl::register("rotate", "<x> <y> <r> <deg0> <deg1> [seconds]: two fingers r px either side of (x, y) turned from deg0 to deg1, 0.5 s by default", move |a| {
+        let v: Vec<f64> = a.iter().take(5).filter_map(|s| s.parse().ok()).collect();
+        if v.len() < 5 {
+            return "rotate <x> <y> <r> <deg0> <deg1> [seconds]\n".into();
+        }
+        let secs = a.get(5).and_then(|s| s.parse::<f64>().ok()).unwrap_or(0.5).clamp(0.05, 10.0);
+        two(v[0], v[1], (v[2], v[2]), (v[3], v[4]), secs);
+        format!("rotating at {} {}: {} -> {} degrees over {secs} s\n", v[0], v[1], v[3], v[4])
+    });
 }
 
 /// The stall dumps (Turbo main.c's front loop): presents stopped after the first one -> a thread dump after 6 s

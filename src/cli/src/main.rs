@@ -236,6 +236,15 @@ fn fail(e: &anyhow::Error) -> i32 {
     1
 }
 
+/// The other programs of a multi-program application, built beside program 0 so oe::ExecuteProgram finds them:
+/// (index, `<name>_p<index>`) for every index but 0. Nothing when a program was named (`--program`).
+pub fn other_programs(indices: &[u64], name: &str, chosen: bool) -> Vec<(u64, String)> {
+    if chosen {
+        return vec![];
+    }
+    indices.iter().filter(|&&i| i != 0).map(|&i| (i, format!("{name}_p{i}"))).collect()
+}
+
 fn build(o: &Out, b: &pipeline::BuildArgs) -> i32 {
     match pipeline::build(b, o) {
         Ok(built) => {
@@ -245,6 +254,22 @@ fn build(o: &Out, b: &pipeline::BuildArgs) -> i32 {
                 o.say(&format!("Done (C and data only): {}", built.data.display()));
             } else {
                 o.say(&format!("Done: {}", built.exe.display()));
+            }
+            // a multi-program application (the profile's `programs`, the package's Program NCAs): every program,
+            // each `<name>_p<N>` in the same folder (nxnative builds them all into one app)
+            let chosen = std::env::var("NXRS_PROGRAM_INDEX").is_ok_and(|v| !v.trim().is_empty());
+            let indices = package::program_indices(&b.input, b.keys.as_deref()).unwrap_or_else(|_| vec![0]);
+            let name = built.exe.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            for (i, pname) in other_programs(&indices, &name, chosen) {
+                o.say(&format!("Program {i} of {} (started by the game with oe::ExecuteProgram): {pname}", indices.len()));
+                std::env::set_var("NXRS_PROGRAM_INDEX", i.to_string());
+                let pb = pipeline::BuildArgs { name: Some(pname), outdir: built.exe.parent().map(Path::to_path_buf), ..b.clone() };
+                let r = pipeline::build(&pb, o);
+                std::env::remove_var("NXRS_PROGRAM_INDEX");
+                if let Err(e) = r {
+                    o.result(false, &format!("program {i}: {e:#}").replace(['\r', '\n'], " "));
+                    return fail(&e);
+                }
             }
             o.result(true, &built.exe.display().to_string());
             0
@@ -706,4 +731,17 @@ fn main() {
         _ => run_v1(args),
     };
     std::process::exit(code);
+}
+
+#[cfg(test)]
+mod program_tests {
+    /// Program 0's build makes the others beside it as `<name>_p<N>` (the names oe::ExecuteProgram starts); a build of
+    /// one named program (`--program`) makes only that one.
+    #[test]
+    fn other_programs_are_built_beside_program_0() {
+        assert_eq!(super::other_programs(&[0, 1], "Sonic", false), vec![(1, "Sonic_p1".to_string())]);
+        assert_eq!(super::other_programs(&[0, 1, 2], "3DAS", false).len(), 2);
+        assert!(super::other_programs(&[0], "MK8D", false).is_empty());
+        assert!(super::other_programs(&[0, 1], "Sonic", true).is_empty());
+    }
 }

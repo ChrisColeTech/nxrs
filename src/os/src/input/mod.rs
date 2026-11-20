@@ -231,7 +231,10 @@ pub struct Touch {
 }
 
 const TOUCH_LATCH: std::time::Duration = std::time::Duration::from_millis(60);
+/// Fingers the host keeps (nxnative's gesture reads at most four).
+pub const FINGERS: usize = 4;
 
+#[derive(Clone, Copy)]
 struct TouchSt {
     down: bool,
     x: u32,
@@ -241,15 +244,32 @@ struct TouchSt {
     started: bool,
     released_at: Option<std::time::Instant>,
 }
-static TOUCH: Mutex<TouchSt> = Mutex::new(TouchSt { down: false, x: 0, y: 0, finger: 0, since: None, started: false, released_at: None });
+const UP: TouchSt = TouchSt { down: false, x: 0, y: 0, finger: 0, since: None, started: false, released_at: None };
+/// The fingers by slot (slot 0: the mouse or `touch`; more for `pinch` / `rotate` and the two-finger mouse) and the
+/// last finger id handed out.
+static TOUCH: Mutex<([TouchSt; FINGERS], u32)> = Mutex::new(([UP; FINGERS], 0));
 
 /// The front end: the touch screen pressed at (x, y) (1280x720 space), or released.
 pub fn set_touch(down: bool, x: u32, y: u32) {
-    let mut t = TOUCH.lock().unwrap();
+    set_finger(0, down, x, y);
+}
+
+/// Finger `slot` (0..FINGERS) pressed at (x, y), moved there, or released.
+pub fn set_finger(slot: usize, down: bool, x: u32, y: u32) {
+    if slot >= FINGERS {
+        return;
+    }
+    let mut g = TOUCH.lock().unwrap();
     let now = std::time::Instant::now();
+    let fresh = down && (!g.0[slot].down || g.0[slot].released_at.is_some());
+    if fresh {
+        g.1 = g.1.wrapping_add(1);
+    }
+    let id = g.1;
+    let t = &mut g.0[slot];
     if down {
-        if !t.down || t.released_at.is_some() {
-            t.finger = t.finger.wrapping_add(1);
+        if fresh {
+            t.finger = id;
             t.since = Some(now);
             t.started = false;
             crate::log_once!("touch first", "input: touch screen from the mouse / control pipe (first press at {x}, {y})");
@@ -263,28 +283,73 @@ pub fn set_touch(down: bool, x: u32, y: u32) {
     }
 }
 
-/// Where the finger is, without taking a sample (the gesture recognizer's view): down, or released but still inside
-/// its latch.
-pub fn touch_peek() -> Option<(u32, u32)> {
-    let t = TOUCH.lock().unwrap();
-    t.down.then_some((t.x, t.y))
+/// Every finger down without taking a sample (the gesture recognizer's view): down, or released but still inside its
+/// latch, in slot order.
+pub fn touches_peek() -> Vec<(u32, u32)> {
+    TOUCH.lock().unwrap().0.iter().filter(|t| t.down).map(|t| (t.x, t.y)).collect()
 }
 
-/// The touch the game reads now (None: nothing on the screen).
-pub fn touch_now() -> Option<Touch> {
-    let mut t = TOUCH.lock().unwrap();
-    if !t.down {
-        return None;
-    }
+/// The first finger, as `touches_peek`.
+pub fn touch_peek() -> Option<(u32, u32)> {
+    touches_peek().first().copied()
+}
+
+/// The touches the game reads now, in slot order (each finger's Start on its first read, End on its last).
+pub fn touches_now() -> Vec<Touch> {
+    let mut g = TOUCH.lock().unwrap();
     let now = std::time::Instant::now();
-    let held_long_enough = t.since.is_some_and(|s| now.duration_since(s) >= TOUCH_LATCH);
-    let end = t.released_at.is_some() && held_long_enough;
-    let start = !t.started;
-    t.started = true;
-    if end {
-        t.down = false;
+    let mut v = vec![];
+    for t in g.0.iter_mut().filter(|t| t.down) {
+        let held_long_enough = t.since.is_some_and(|s| now.duration_since(s) >= TOUCH_LATCH);
+        let end = t.released_at.is_some() && held_long_enough;
+        let start = !t.started;
+        t.started = true;
+        if end {
+            t.down = false;
+        }
+        v.push(Touch { x: t.x, y: t.y, finger: t.finger, start, end });
     }
-    Some(Touch { x: t.x, y: t.y, finger: t.finger, start, end })
+    v
+}
+
+/// The first touch the game reads now (None: nothing on the screen).
+pub fn touch_now() -> Option<Touch> {
+    touches_now().first().copied()
+}
+
+/// The two-finger mouse: Ctrl + left drag puts a second finger mirrored about where the button went down (moving
+/// away or toward it pinches, around it rotates); Shift + left drag keeps two fingers `ROTATE_R` px from that point,
+/// turned by the mouse's angle around it (a rotation only).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseTouch {
+    One,
+    Pinch,
+    Rotate,
+}
+pub const ROTATE_R: f64 = 100.0;
+
+/// The fingers for the mouse at `m`, the button having gone down at `anchor` (1280x720 space).
+pub fn mouse_fingers(mode: MouseTouch, anchor: (i32, i32), m: (i32, i32)) -> Vec<(u32, u32)> {
+    let c = |v: f64, hi: f64| v.round().clamp(0.0, hi) as u32;
+    let (ax, ay) = (anchor.0 as f64, anchor.1 as f64);
+    let (mx, my) = (m.0 as f64, m.1 as f64);
+    match mode {
+        MouseTouch::One => vec![(c(mx, 1279.0), c(my, 719.0))],
+        MouseTouch::Pinch => vec![(c(mx, 1279.0), c(my, 719.0)), (c(2.0 * ax - mx, 1279.0), c(2.0 * ay - my, 719.0))],
+        MouseTouch::Rotate => {
+            let a = (my - ay).atan2(mx - ax);
+            let (dx, dy) = (ROTATE_R * a.cos(), ROTATE_R * a.sin());
+            vec![(c(ax + dx, 1279.0), c(ay + dy, 719.0)), (c(ax - dx, 1279.0), c(ay - dy, 719.0))]
+        }
+    }
+}
+
+/// Two fingers `r` px either side of (cx, cy) at `deg` degrees (the control pipe's `pinch` and `rotate`).
+pub fn two_fingers(cx: f64, cy: f64, r: f64, deg: f64) -> [(u32, u32); 2] {
+    let a = deg.to_radians();
+    let (dx, dy) = (r * a.cos(), r * a.sin());
+    let c = |v: f64, hi: f64| v.round().clamp(0.0, hi) as u32;
+    [(c(cx + dx, 1279.0), c(cy + dy, 719.0)), (c(cx - dx, 1279.0), c(cy - dy, 719.0))]
 }
 
 /// The front end: player 1's keyboard and mouse state (guest buttons, sticks).
@@ -1265,5 +1330,38 @@ mod touch_tests {
         let d = super::touch_now().unwrap();
         assert!(d.start && d.finger == a.finger + 1 && (d.x, d.y) == (1279, 719), "a new finger, clamped: {d:?}");
         super::set_touch(false, 0, 0);
+    }
+
+    /// Two fingers at once (slots 2 and 3 here): two touches with their own ids, released one by one; the gesture
+    /// view sees both.
+    #[test]
+    fn two_fingers_read_together() {
+        super::set_finger(2, true, 100, 100);
+        super::set_finger(3, true, 300, 100);
+        let peek = super::touches_peek();
+        assert!(peek.contains(&(100, 100)) && peek.contains(&(300, 100)));
+        let v: Vec<_> = super::touches_now().into_iter().filter(|t| t.y == 100).collect();
+        assert_eq!(v.len(), 2);
+        assert!(v[0].start && v[1].start && v[0].finger != v[1].finger);
+        super::set_finger(2, false, 100, 100);
+        super::set_finger(3, false, 300, 100);
+        std::thread::sleep(super::TOUCH_LATCH);
+        let v: Vec<_> = super::touches_now().into_iter().filter(|t| t.y == 100).collect();
+        assert!(v.len() == 2 && v.iter().all(|t| t.end));
+        assert!(super::touches_now().iter().all(|t| t.y != 100));
+    }
+
+    /// Ctrl + drag mirrors a second finger about the press point (pinch / rotate); Shift + drag keeps both 100 px
+    /// out, turned by the mouse's angle; the control pipe's two fingers either side of a centre.
+    #[test]
+    fn mouse_and_pipe_fingers() {
+        use super::{mouse_fingers, two_fingers, MouseTouch};
+        assert_eq!(mouse_fingers(MouseTouch::One, (0, 0), (50, 60)), vec![(50, 60)]);
+        assert_eq!(mouse_fingers(MouseTouch::Pinch, (640, 360), (700, 360)), vec![(700, 360), (580, 360)]);
+        assert_eq!(mouse_fingers(MouseTouch::Pinch, (10, 10), (100, 100)), vec![(100, 100), (0, 0)], "clamped to the screen");
+        assert_eq!(mouse_fingers(MouseTouch::Rotate, (640, 360), (900, 360)), vec![(740, 360), (540, 360)]);
+        assert_eq!(mouse_fingers(MouseTouch::Rotate, (640, 360), (640, 400)), vec![(640, 460), (640, 260)]);
+        assert_eq!(two_fingers(640.0, 360.0, 50.0, 0.0), [(690, 360), (590, 360)]);
+        assert_eq!(two_fingers(640.0, 360.0, 50.0, 90.0), [(640, 410), (640, 310)]);
     }
 }

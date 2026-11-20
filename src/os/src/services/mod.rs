@@ -35,6 +35,7 @@ pub mod system;
 pub mod sf;
 pub mod time;
 pub mod vi;
+pub mod vi_ipc;
 
 /// Every service's registrations.
 pub fn register(r: &mut Registry) {
@@ -64,6 +65,7 @@ pub fn register(r: &mut Registry) {
     applet::register();
     system::register();
     fsp::register();
+    vi_ipc::register();
     socket::register(r);
     offline::register(r);
     ro::register(r);

@@ -38,15 +38,45 @@ struct Clock {
     have: bool,
     off: i64,
     last: u64,
+    /// the part (frame, or submission) the idle time is counted in, the GPU's idle time in it so far and where the
+    /// last submission of it ended (GPU clock, ns)
+    key: u64,
+    idle: u64,
+    prev_end: u64,
 }
-static CLOCK: Mutex<Clock> = Mutex::new(Clock { have: false, off: 0, last: 0 });
+static CLOCK: Mutex<Clock> = Mutex::new(Clock { have: false, off: 0, last: 0, key: 0, idle: 0, prev_end: 0 });
 
-/// A submission ran on the GPU from `t0` to `t1` (GPU clock, ns); called at its completion.
-pub fn part(_t0: u64, t1: u64) {
+/// Which idle time reports leave out (Turbo 283c6b6 `rep_gaps`): the time the GPU sat idle between the submissions of
+/// one frame (2, the default: present to present), or only inside one submission (1, nxnative's rule:
+/// `NXGFX_REP_GAPS=1`). A game that spans its frame with two reports read the host's translation between its
+/// submissions as GPU time with the second (Donkey Kong Bananza, 8 submissions a frame, sat at its smallest size).
+pub fn rep_gaps() -> u32 {
+    static V: OnceLock<u32> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("NXGFX_REP_GAPS").ok().and_then(|v| v.parse().ok()).unwrap_or(2))
+}
+
+/// The key of the part a submission's idle time is counted in: its frame (`rep_gaps` 2) or itself.
+pub fn part_key(frame: u64, serial: u64) -> u64 {
+    if rep_gaps() >= 2 {
+        frame
+    } else {
+        serial | 1 << 63
+    }
+}
+
+/// A submission of part `key` ran on the GPU from `t0` to `t1` (GPU clock, ns); called at its completion, in order.
+pub fn part(key: u64, t0: u64, t1: u64) {
     let mut c = CLOCK.lock().unwrap();
+    if !c.have || c.key != key {
+        c.idle = 0;
+    } else if t0 > c.prev_end {
+        c.idle += t0 - c.prev_end;
+    }
     let cand = guest_ns() as i64 - t1 as i64;
     c.off = if !c.have || cand < c.off + 2000 { cand } else { c.off + 2000 };
     c.have = true;
+    c.key = key;
+    c.prev_end = t1;
 }
 
 /// A timestamp report's time in NVN units: `stamp` (GPU clock, ns) clamped to its submission's [t0, t1], on the
@@ -58,7 +88,8 @@ pub fn report_time(stamp: Option<u64>, t0: u64, t1: u64) -> u64 {
     } else {
         match stamp {
             Some(s) if c.have && t1 >= t0 && t1 > 0 => {
-                let x = s.clamp(t0, t1) as i64 + c.off;
+                // the GPU's idle time earlier in this frame is left out
+                let x = s.clamp(t0, t1) as i64 + c.off - c.idle as i64;
                 x.max(0) as u64
             }
             _ => guest_ns(),
@@ -148,9 +179,41 @@ pub fn write_record(addr: u64, counter: u64, t: u64) {
 
 #[cfg(test)]
 mod tests {
+    static T: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Two submissions of one frame with the GPU idle 5 ms between them: a report at the end of the second is 5 ms
+    /// earlier than its stamp says (the host's translation between them is not GPU time); a new frame counts again.
+    #[test]
+    fn idle_time_between_a_frames_submissions_is_left_out() {
+        let _l = T.lock().unwrap_or_else(|e| e.into_inner());
+        if !super::drs() {
+            return;
+        }
+        let now = || crate::nvn::device::now_ns() + 1_000_000_000;
+        let k = super::part_key(7, 100);
+        let t1 = now();
+        super::part(k, t1 - 2_000_000, t1);
+        let a = super::report_time(Some(t1), t1 - 2_000_000, t1);
+        let s = now();
+        while now() - s < 7_000_000 {
+            std::hint::spin_loop();
+        }
+        let t2 = now();
+        super::part(k, t2 - 2_000_000, t2);
+        let b = super::report_time(Some(t2), t2 - 2_000_000, t2);
+        let idle = super::CLOCK.lock().unwrap().idle;
+        assert!(idle >= 5_000_000 && idle < 6_000_000, "idle {idle}");
+        let d = crate::nvn::device::timestamp_to_ns(b) as i64 - crate::nvn::device::timestamp_to_ns(a) as i64;
+        let want = (t2 - t1) as i64 - idle as i64;
+        assert!((d - want).abs() < 200_000, "the frame's GPU time without its idle gap: {d} ns, want {want}");
+        super::part(super::part_key(8, 101), now() - 1_000, now());
+        assert_eq!(super::CLOCK.lock().unwrap().idle, 0, "a new frame");
+    }
+
     #[test]
     fn report_times_follow_the_gpu_and_never_go_back() {
-        super::part(1_000, 2_000);
+        let _l = T.lock().unwrap_or_else(|e| e.into_inner());
+        super::part(super::part_key(1, 1), 1_000, 2_000);
         let a = super::report_time(Some(1_500), 1_000, 2_000);
         let b = super::report_time(Some(1_200), 1_000, 2_000);
         assert!(b >= a);

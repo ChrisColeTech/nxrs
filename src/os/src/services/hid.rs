@@ -847,14 +847,16 @@ fn touch_fill(out: u64, n: u64, count: i32) -> u64 {
     let stride = 0x10 + 0x28 * n;
     let num = SAMPLING.fetch_add(1, Ordering::Relaxed) as u64 + 1;
     let k = count.clamp(0, 1) as u64; // the newest sample
-    let touch = if k > 0 { crate::input::touch_now() } else { None };
+    let touches = if k > 0 { crate::input::touches_now() } else { vec![] };
     for i in 0..k {
         let s = out + i * stride;
         crate::guest::zero(s, stride);
         w64(s, num);
-        if let (Some(t), true) = (touch, n >= 1) {
-            w32(s + 8, 1);
-            let e = s + 0x10;
+        // every finger on the screen (two for a pinch or a rotation), as many as the state holds
+        let shown = touches.len().min(n as usize);
+        w32(s + 8, shown as u32);
+        for (j, t) in touches.iter().take(shown).enumerate() {
+            let e = s + 0x10 + 0x28 * j as u64;
             w32(e + 8, t.start as u32 | (t.end as u32) << 1);
             w32(e + 0xc, t.finger);
             w32(e + 0x10, t.x);
@@ -901,7 +903,7 @@ idle_dev!(mouse_state, mouse_states, 0x28);
 // first, 16 kept), built from the touch screen (`gesture.rs`, nxnative hle_touch.c / yuzu's rules).
 hidfn!(gestures, |a| {
     let (out, n) = (a.x(0), a.i(1).clamp(0, 16) as usize);
-    let entries = crate::services::gesture::fill(n, crate::input::touch_peek(), crate::clock::now_ns());
+    let entries = crate::services::gesture::fill(n, &crate::input::touches_peek(), crate::clock::now_ns());
     for (i, e) in entries.iter().enumerate() {
         crate::guest::write_bytes(out + 0x60 * i as u64, e);
     }

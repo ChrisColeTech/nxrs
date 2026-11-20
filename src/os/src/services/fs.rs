@@ -722,11 +722,35 @@ impl translator::package::storage::Storage for ImageFile {
     }
 }
 
-/// Another program's RomFS image (`romfs_programs/<index>.img` beside the game's data), if there is one.
+/// The data folder of program `index` of the same application, beside this program's: `<name>_data` is program 0,
+/// `<name>_p<N>_data` program N (what `nxrs-build` writes for every program of a package).
+pub fn program_data_dir(data: &Path, index: u32) -> Option<PathBuf> {
+    let file = data.file_name()?.to_str()?;
+    let stem = file.strip_suffix("_data")?;
+    let base = match stem.rsplit_once("_p") {
+        Some((b, n)) if !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => b,
+        _ => stem,
+    };
+    let name = if index == 0 { format!("{base}_data") } else { format!("{base}_p{index}_data") };
+    Some(data.with_file_name(name))
+}
+
+/// Another program's RomFS: `romfs_programs/<index>.img` beside the game's data, else that program's own build
+/// beside this one (`program_data_dir`, its RomFS marker read as the game's is).
 fn program_romfs(index: i32) -> Option<Arc<RomFs>> {
     let img = data_dir().join("romfs_programs").join(format!("{index}.img"));
     if !img.is_file() {
-        return None;
+        let dir = program_data_dir(&data_dir(), u32::try_from(index).ok()?).filter(|d| d.is_dir() && *d != data_dir())?;
+        return match translator::package::open_data_dir(&dir, None) {
+            Ok(r) => {
+                crate::log!("fs: program {index}'s RomFS from its build ({})", r.source);
+                Some(Arc::new(r))
+            }
+            Err(e) => {
+                crate::log!("[RED] fs: program {index}'s RomFS ({}): {e}", dir.display());
+                None
+            }
+        };
     }
     let file = File::open(&img).ok()?;
     let size = file.metadata().ok()?.len();
@@ -1302,6 +1326,19 @@ pub fn register(r: &mut Registry) {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    /// MountRom(name, N) of a multi-program application finds program N's build beside this one.
+    #[test]
+    fn other_programs_data_folders() {
+        let d = Path::new(r"D:\b\Sonic_data");
+        assert_eq!(program_data_dir(d, 1).unwrap(), Path::new(r"D:\b\Sonic_p1_data"));
+        assert_eq!(program_data_dir(d, 0).unwrap(), d);
+        let p1 = Path::new(r"D:\b\Sonic_p1_data");
+        assert_eq!(program_data_dir(p1, 0).unwrap(), d);
+        assert_eq!(program_data_dir(p1, 2).unwrap(), Path::new(r"D:\b\Sonic_p2_data"));
+        assert_eq!(program_data_dir(Path::new(r"D:\b\Top_pad_data"), 1).unwrap(), Path::new(r"D:\b\Top_pad_p1_data"));
+        assert!(program_data_dir(Path::new(r"D:\b\other"), 1).is_none());
+    }
 
     /// A Turbo build's `save\user` (or older `save\system`) becomes user 1's save the first time, once.
     #[test]

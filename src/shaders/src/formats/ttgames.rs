@@ -310,7 +310,7 @@ mod tests {
     /// A CC4 v2 DAT built by hand: one folder, a shader member stored and one in a DFLT chunk, a texture skipped.
     fn dat(members: &[(&str, Vec<u8>, bool)]) -> Vec<u8> {
         let mut strings = Vec::new();
-        let mut name_recs: Vec<(u32, u16, u16)> = vec![(0, 0, 0)]; // record 0: the root folder (no name)
+        let mut name_recs: Vec<(u32, u16, u16)> = vec![(0xffff_ffff, 0, 0)]; // record 0: the root (no name record)
         strings.extend_from_slice(b"\0");
         let folder_no = strings.len() as u32;
         strings.extend_from_slice(b"SHADERS\0");
@@ -383,7 +383,7 @@ mod tests {
 
     #[test]
     fn cc4_dat_members_and_adjacent_programs() {
-        let (ctl, code) = synth::nvn1_ps(3);
+        let (ctl, code) = crate::nvn::synth::nvn1_ps(3);
         let mut program = vec![0u8; 32];
         program.extend_from_slice(&ctl);
         while program.len() % 16 != 0 {

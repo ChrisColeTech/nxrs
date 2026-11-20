@@ -292,6 +292,31 @@ pub fn translate_one(ctl: &[u8], code: &[u8], out_dir: &Path) -> Result<String, 
     }
 }
 
+/// Shaders the last build's lists found valid and the new ones do not: (key, stage, status before, status now).
+/// Manifests are `key stage translated_as arch status ...` rows (`#` lines and the header left out); a key the new
+/// build no longer lists is not a regression (the game changed). nxnative's `shader_regressions.py`.
+pub fn regressions(old: &str, new: &str) -> Vec<(String, String, String, String)> {
+    let rows = |t: &str| -> BTreeMap<String, (String, String)> {
+        t.lines()
+            .filter(|l| !l.starts_with('#') && !l.starts_with("key\t"))
+            .filter_map(|l| {
+                let f: Vec<&str> = l.split('\t').collect();
+                (f.len() >= 5).then(|| (f[0].to_string(), (f[1].to_string(), f[4].to_string())))
+            })
+            .collect()
+    };
+    let (a, b) = (rows(old), rows(new));
+    b.iter()
+        .filter_map(|(k, (st, now))| {
+            let (_, was) = a.get(k)?;
+            (was == "ok" && now != "ok").then(|| (k.clone(), st.clone(), was.clone(), now.clone()))
+        })
+        .collect()
+}
+
+/// Regressions the last build found (`regressions`).
+pub static REGRESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
 /// Translate and write what a scan found (used by [`prebuild`]).
 pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(dyn Fn(&str) + Sync), t0: Instant) -> Result<Report, String> {
     let mut report = Report {
@@ -331,6 +356,19 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
         m += "key\tstage\ttranslated_as\tarch\tstatus\tspv_bytes\tsource\n";
         for r in manifest_rows {
             m += r;
+        }
+        // shaders that translated in the previous build of this folder and fail now (nxnative shader_regressions.py)
+        if !opts.scan_only {
+            if let Ok(old) = std::fs::read_to_string(out_dir.join("manifest.tsv")) {
+                let reg = regressions(&old, &m);
+                let mut t = String::from("# key\tstage\tbefore\tnow (shaders valid in the previous build that are not now)\n");
+                for (k, st, a, b) in &reg {
+                    say(&format!("[RED] shader regression: {k} ({st}) was {a} in the previous build, {b} now"));
+                    t += &format!("{k}\t{st}\t{a}\t{b}\n");
+                }
+                REGRESSIONS.store(reg.len(), std::sync::atomic::Ordering::Relaxed);
+                write_atomic(&out_dir.join("regressions.tsv"), t.as_bytes()).map_err(|e| io(out_dir, e))?;
+            }
         }
         write_atomic(&out_dir.join("manifest.tsv"), m.as_bytes()).map_err(|e| io(out_dir, e))
     };
@@ -626,4 +664,16 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
         report.found, report.translated, report.reused, report.failed, report.skipped, report.valid, report.invalid, report.total_seconds
     ));
     Ok(report)
+}
+
+#[cfg(test)]
+mod regression_tests {
+    #[test]
+    fn a_shader_valid_before_and_failed_now_is_a_regression() {
+        let h = "# nxshaders 1\nkey\tstage\ttranslated_as\tarch\tstatus\tspv_bytes\tsource\n";
+        let old = format!("{h}aa\tps\tps\tmaxwell\tok\t10\tx\nbb\tvs\tvs\tmaxwell\tok\t10\tx\ncc\tcs\tcs\tmaxwell\tfailed\t0\tx\ndd\tps\tps\tmaxwell\tok\t1\tx\n");
+        let new = format!("{h}aa\tps\tps\tmaxwell\tok\t10\tx\nbb\tvs\tvs\tmaxwell\tinvalid\t10\tx\ncc\tcs\tcs\tmaxwell\tfailed\t0\tx\nee\tps\tps\tmaxwell\tfailed\t0\tx\n");
+        let r = super::regressions(&old, &new);
+        assert_eq!(r, vec![("bb".to_string(), "vs".to_string(), "ok".to_string(), "invalid".to_string())]);
+    }
 }
