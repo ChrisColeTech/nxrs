@@ -271,6 +271,17 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
             time.sleep(1)
         if os.path.exists(LOCK) and open(LOCK).read() == mine:
             if os.path.exists(LOCK): os.remove(LOCK)
+    # the engine exits on its own when the GPU is lost (exit 71), often before the in-run check: check once more
+    if not why.startswith('GPU RESET'):
+        late = gpu_resets_since(t0)
+        if late:
+            why = 'GPU RESET: the display driver reset at %s (exit %s)' % (', '.join(late), rc)
+            try:
+                with open(os.path.join(EVIDENCE, 'GPU_RESETS.log'), 'a') as gl:
+                    gl.write('%s | %s | %s | %s\n' % (datetime.datetime.now().isoformat(timespec='seconds'),
+                                                     lane, os.path.basename(exe), ', '.join(late)))
+            except OSError:
+                pass
     r = dict(why=why, exit=rc, peak_mb=peak, seconds=round(time.time() - t0, 1))
     say('run done: %s, exit %s, peak private %d MB; lock released' % (why, rc, peak))
     return r
