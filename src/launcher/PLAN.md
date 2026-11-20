@@ -565,3 +565,10 @@ Option C (phase out) = A now plus about 1 day at removal.
 4. **Source inconsistencies** (1.13): `hintsAtStart` (recommend fix), nxrs on Linux (port or allow), "Source offline"
    rule (recommend unify), dead "Build options…" action (recommend drop).
 5. **Title bar fallback**, only if the phase 0 spike fails.
+
+## Owner decisions (2026-11-20)
+
+- Engine: the Rust launcher drives only the nxrs engine (no Turbo). Use the 'Turbo dropped' estimates (~19 agent-days + contingency).
+- Location: engine repo, src/launcher, its own cargo workspace (MIT); may be renamed later.
+- Fix the four Qt problems: hintsBuilt recording (window.cpp:874), nxrs games allowed on Linux, one 'source offline' rule (the cards'), one home per control (no command strip, no status-bar Settings). Drop the dead 'Build options...' entry.
+
