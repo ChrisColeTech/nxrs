@@ -81,6 +81,10 @@ impl Tools {
         if let Ok(p) = std::env::var("NXSHADERS_SPIRV_VAL") {
             sv.push(p.into());
         }
+        // a release's nxrs-engine/tools/ (scripts/package_engine.py, the launcher's package-release.py)
+        if let Some(d) = &exe_dir {
+            sv.push(d.join("tools").join(SPIRV_VAL));
+        }
         if let Ok(p) = std::env::var("VULKAN_SDK") {
             sv.push(Path::new(&p).join("Bin").join(SPIRV_VAL));
             sv.push(Path::new(&p).join("bin").join(SPIRV_VAL));

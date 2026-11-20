@@ -30,6 +30,8 @@ env:
   RUST_VERSION: '1.99.0'
   GLSLANG_VERSION: '15.1.0'
   LLVM_MINGW: '20261104'
+  # nxnative commit the shader translator (dmsh_xlate) is built from: the one the Windows tool was built from
+  NXNATIVE_XLATE: 'e4b0d9b75d39c41c10fdcfec2f0b070df496d7e5'
   CARGO_TERM_COLOR: never
   CARGO_INCREMENTAL: '0'
 
@@ -141,6 +143,42 @@ jobs:
           cargo test --workspace --locked --jobs 4 --lib --bins --tests
       - name: nxrs-build doctor
         run: ./target/debug/nxrs-build doctor || true
+      # ---- the Linux engine bundle (nxrs-engine/, as the Windows one): built and packaged on every run, no hardware
+      # test gate (owner 2026-11-20, as Eglantine: docs/DECISIONS.md 10). x86-64 only (the runtime's asm boundary).
+      - name: Engine release build
+        run: |
+          export NXGFX_GLSLANG=$HOME/glslang/glslangValidator
+          cargo build --release --locked --jobs 4 -p cli -p front -p runtime
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: dmsh_xlate for Linux (nxnative's shader translator, the same source as the Windows tool)
+        run: |
+          sudo apt-get install -y --no-install-recommends zlib1g-dev spirv-tools
+          git init -q ~/nxnative && cd ~/nxnative
+          git config core.autocrlf true   # the CRLF files the Windows tool was built from: the same --source-sha (e11dc43d4ddc5b58)
+          git remote add origin https://github.com/seedds/nxnative.git
+          git sparse-checkout set dm/gfx/tools/dmsh_xlate dm/third_party/ryujinx
+          git fetch -q --depth 1 --filter=blob:none origin $NXNATIVE_XLATE
+          git checkout -q FETCH_HEAD
+          cd "$GITHUB_WORKSPACE"
+          bash src/shaders/tools/build_dmsh_xlate.sh ~/nxnative build/tools/dmsh_xlate-linux
+      - name: Package the Linux engine bundle
+        run: |
+          python3 -I scripts/package_engine.py --platform linux --target target/release \
+            --xlate build/tools/dmsh_xlate-linux/dmsh_xlate --spirv-val "$(command -v spirv-val)" --out dist
+          # the bundle as a player gets it: unpacked elsewhere, it answers the contract and runs its checks
+          mkdir -p ~/bundle && tar -xzf dist/nxrs-engine-linux-x64.tar.gz -C ~/bundle
+          ~/bundle/nxrs-engine/nxrs-build contract
+          ~/bundle/nxrs-engine/nxrs-build doctor || true
+          ~/bundle/nxrs-engine/tools/dmsh_xlate --source-sha
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nxrs-engine-linux-x64
+          path: |
+            dist/nxrs-engine-linux-x64.tar.gz
+            dist/nxrs-engine-linux-x64.tar.gz.sha256
+          if-no-files-found: error
 
   gnullvm:
     name: engine for x86_64-pc-windows-gnullvm (llvm-mingw)

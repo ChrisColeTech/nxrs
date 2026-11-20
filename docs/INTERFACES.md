@@ -948,6 +948,12 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   `scissor_past_the_target_is_held_to_it`. MKW's indirect-dispatch fault (0x300001000) may be another out-of-range
   write; not checked. **Verification queued** (`chain23` -> `c23_smash.out`: 240 s with `NXGFX_CHECKPOINTS=all`; the
   three runs before it all lost the device at 131-204 s).
+  **Verified: not the cause.** `-G4-smash-scissor` (09:26 reset): the clamp did trigger (a 200x200 scissor at
+  1741,898 in 1920x1080, from 4.7 s), and the device was still lost at 193.3 s in the same draw (ser6170), *invalid
+  write at 0x300000000*. The clamp stays (it is Vulkan-correct). That run's report kept only the last 8,192 unbound
+  ranges (it was full), so now every unbound range is kept, and the loss names the target's memory (allocation, its
+  address and offset) and the nearest bound range below the fault. Next run queued (`chain25` -> `c25_smash.out`).
+  `-G4-smash-noalias` (2,019 unbound, not full) still says the address was never ours.
 - **MK8D (`-G4-mk8d-occl`, 58.0 FPS):** MK8D **does use samples-passed (occlusion) reports**, from the race start
   (60.7 s). In async replay their results land up to two presents later than in sync mode; if the game reads them
   without waiting (culling on last frame's result), objects are culled: the black stretches (lap shots 0.62 / 0.81 /
@@ -962,6 +968,18 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   Now the parts stop at **6 GB of the process's private memory** (`NXGFX_PARTS_PRIVATE_MB`), and a part made on the
   replay's thread is logged with its key (`NXGFX_PIPE_LOG=1`) to see why the ones made ahead did not cover a level.
   Rerun queued (`chain24` -> `c24_wonder.out`, 120 s).
+- **Frame generation off by default, one global setting** (owner, DECISIONS.md 1 and 8; config crate, outside
+  graphics): `lsfg` default 0, `settings_version` 4 moves an ini's old default `lsfg=1` to 0 once (a 1 written after
+  stays); config test `file_round_trip_with_migration_and_aliases`. **Whole-frame skip** (`framegen.rs`, new
+  `shaders/fg_stats.comp`, `fg_interp.comp`): after the luma pyramids, one workgroup counts the coarsest level's
+  changed and greatly changed pixels: nothing changed is a duplicate, more than half changed by over 0.2 of luma a
+  scene cut, and the two frames after a cut only warm up; in all three the in-between frames show the previous frame
+  as it is (Eglantine's duplicate skip and warm-up, reimplemented; the cut test is new). GPU test
+  `frame_generation_skips_duplicates_and_scene_cuts` (duplicate, cut, warm-up x2, interpolate). **Nothing presented
+  while minimised** (`present.rs record_present`: IsIconic on Windows, the front end's state on Linux via
+  `set_minimised`; the game goes on); the window test now ends with 30 frames as if minimised (none presented, 30
+  skipped, pacing still 59.5 FPS). (A first version of that test freed its program object before the
+  submission that drew with it: a test bug, not the engine's.)
 - **Capture / replay, first try:** MK8D's capture (`build/G4/mk8d.cap`, at present 6500: 83 regions, 1.6 GB of guest
   memory, 1,657 pools, 5,805 textures, 132 samplers, 2.4 s; 281 MB on disk) replays until its first pool, which is
   in the game's module data (0x70013465f0): the capture left the modules out. Now it takes everything below the
@@ -2154,6 +2172,25 @@ lane K's; G4 please review).**
   robustBufferAccess on (G4's default), buffer and texel-buffer descriptors are now written at the robust sizes, as
   VK_EXT_descriptor_buffer requires; the plain sizes were used before.
 
+
+**Engine bundle (lane Q, 2026-11-20; Linux as Eglantine, owner).** `scripts/package_engine.py --platform linux|windows
+--target <release dir> [--gnu <dir>] --xlate <dmsh_xlate> --spirv-val <spirv-val> [--out dist]` writes
+`nxrs-engine-<platform>-x64.tar.gz|zip` + `.sha256`: `nxrs-engine/` = nxrs-build(.exe), engine.json (contract, engine,
+version, platform; on Linux `requires`: the system packages), the engine libraries (Linux `libnxfront.a` /
+`libnxrt.a`; Windows `nxfront.lib` / `nxrt.lib` + `gnu/`), `tools/dmsh_xlate(.exe)`, `tools/spirv-val(.exe)`,
+`LICENSES/`. The launcher's package-release.py makes the same `nxrs-engine/` folder. **shaders (lane G4, a lookup only):**
+`Tools::find` now also takes `spirv-val` from `tools/` beside nxrs-build (as it already did `dmsh_xlate`), so a bundle
+needs no Vulkan SDK. ci.yml `linux` job: release build, `dmsh_xlate` built from nxnative e4b0d9b (`NXNATIVE_XLATE`;
+checked out with `core.autocrlf true`, which gives the Windows tool's `--source-sha` e11dc43d4ddc5b58: an LF checkout
+gives fe842711268600f0, a different shader-cache identity for byte-identical SPIR-V), packaged, unpacked elsewhere and
+checked (`contract`, `doctor`, `dmsh_xlate --source-sha`), uploaded as the artifact `nxrs-engine-linux-x64`. x86-64 only.
+Verified in WSL (Ubuntu 24.04): engine release build 2 m 52 s, dmsh_xlate built the CI way in 23 s (e11dc43d4ddc5b58),
+bundle packaged (sha256 7f0399c9…), unpacked: `nxrs-contract 2`, doctor every check ok but the display (none in WSL),
+and the launcher's `stage_nxrs(..., 'linux')` + `check_nxrs` on those real files (6 files, executable bits kept).
+**Not verified:** a game build with the unpacked bundle (Beach Bounce) — WSL's own disk went read-only, then the
+distribution stopped starting ("I/O error", `Wsl/Service/CreateInstance/E_FAIL`) before it began; the owner's WSL needs
+a look (lane Q did not try to repair it).
+
 ## MKW (lane K2, M7, 2026-11-20)
 
 Lane K2 takes over from lane K. Engine `target\K2`; game relinked by `build\K2\relink.sh mkw` (target\K2's
@@ -2308,6 +2345,17 @@ pass fault and the mesh faults are gone as far as it shows; not yet run with ind
   only. The glyph path itself is not identified yet.
 - 8 "GPU address ... is in no memory pool" lines at 9 s (1 MB reads at 0x13ba32000.. / 0x2a9204fd0, skipped binds).
 - FPS: 13-19 in menus, 8 in the race (prep / pool sync, G4).
+
+**For G4 (texture code, lane K2's change, contained): GPU-written textures go back to their storage.**
+`image.rs` `tex_writeback` / `tex_writeback_land`, `queue.rs` `Sub::tex_wb`, `exec.rs` `target_image`, `mem.rs`
+`cpu_written`. A texture written as a render target or copy destination (`target_image`) is listed for its
+submission; at the end of that submission small ones (single level and layer, uncompressed 2D, at most 512 KB, image
+the storage's size, scale 1, at most 64 a submission) are copied to a host buffer, and at completion written into
+their guest storage through the swizzle (`write_storage`), the storage's write watch reset, `gpu_owned` cleared and the
+page hashes dropped. A later CPU write to part of the texture then uploads the whole texture from storage that holds
+both (mkw-recomp's `gpu_written_locked` / `wb_at_fence`). Dropped (old behaviour kept) when a later GPU write to the
+texture came (`gpu_seq`), the CPU wrote the storage meanwhile (write-watch peek), a page is held on the device (lazy),
+or the image table is busy (`try_lock` on the completion thread: never waits). `NXGFX_TEX_WB=0` off. Not run yet.
 
 **Left (lane K2; bar per plan 5B 2afe332: a race start with the right picture, no GPU fault, at the FPS target):**
 the 128x128x5 pass fault (slot scrub to verify) and whether direct mesh draws are clean; then all mesh draws on
