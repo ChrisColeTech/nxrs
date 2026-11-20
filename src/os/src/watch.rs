@@ -97,6 +97,7 @@ fn hex(s: &str) -> Option<u64> {
 /// The control pipe's debugging commands on the os side (Turbo vk_ctl.c / nxnative DM_CTL): symbols, memory to a
 /// file, the environment, the guest clock's speed, focus and touch gestures for scripted runs.
 pub fn register_debug_commands() {
+    crate::cheats::register_commands();
     nxconfig::ctl::register("wpage", "<page hex>: log each write to a guest page and the function that made it (up to 600)", |a| match a.first().and_then(|s| hex(s)) {
         Some(p) => crate::wwatch::arm(p, p + 0x1000),
         None => "wpage <page hex>

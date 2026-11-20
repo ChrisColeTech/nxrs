@@ -6,6 +6,13 @@
 //!   site <set> <module> <offset> <original> <replacement> [...]   (`@page:x<n>` = adrp x<n>, <patch page>)
 //!   span <set> <module> <offset> <word> [...]
 //!   spin <module> <head> <back-edge> [...]
+//!   area <set> <module> <word> [...]                 (a stub's code, appended to the module's patch area)
+//!   areloc <module> <index> <op> <target> <addend>   (word <index> of that area: op adrp / b / bl to
+//!                                                     target state / area / module, plus addend)
+//! A site's replacement word may be `@<op>:<target>:<addend>[:<word>]` (relocated like an area word, e.g.
+//! `@b:area:0x96c`; an adrp's register comes from the word).
+//! A module with an area gets a code module of its own, `<module>_stubs`, after main's patch page: the frame-step
+//! state page (zeros, the host writes it) and then the area's code (frame-step and stub patches).
 //! The player's mods arrive here as sets and sites too (src/cli `mods.rs`: one set per mod).
 
 use crate::loader::{ModLayout, Module};
@@ -27,6 +34,79 @@ pub enum Repl {
     Word(u32),
     /// `@page:x<n>`
     Page(u32),
+    /// `@<op>:<target>:<addend>`: the word relocated (its other bits kept)
+    Reloc(u32, Reloc),
+}
+
+/// Where a relocated word points: the state page, the module's patch area, or the module itself, plus addend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Reloc {
+    pub op: RelocOp,
+    pub target: Target,
+    pub addend: i64,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RelocOp {
+    Adrp,
+    B,
+    Bl,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    State,
+    Area,
+    Module,
+}
+
+impl Reloc {
+    pub fn parse(op: &str, target: &str, addend: &str) -> Option<Reloc> {
+        let op = match op {
+            "adrp" => RelocOp::Adrp,
+            "b" => RelocOp::B,
+            "bl" => RelocOp::Bl,
+            _ => return None,
+        };
+        let target = match target {
+            "state" => Target::State,
+            "area" => Target::Area,
+            "module" => Target::Module,
+            _ => return None,
+        };
+        let neg = addend.starts_with('-');
+        let v = hex(addend.trim_start_matches('-')).ok()? as i64;
+        Some(Reloc { op, target, addend: if neg { -v } else { v } })
+    }
+
+    /// `w` (the recorded word) at `pc` pointing at the target.
+    pub fn apply(&self, w: u32, pc: u64, state: u64, area: u64, module: u64) -> Result<u32, PatchError> {
+        let to = match self.target {
+            Target::State => state,
+            Target::Area => area,
+            Target::Module => module,
+        }
+        .wrapping_add(self.addend as u64);
+        match self.op {
+            RelocOp::Adrp => adrp(pc, to, w & 0x1F),
+            RelocOp::B | RelocOp::Bl => {
+                let d = to.wrapping_sub(pc) as i64;
+                if d % 4 != 0 || !(-(1 << 27)..(1 << 27)).contains(&d) {
+                    return perr(format!("{pc:#x}: a branch to {to:#x} out of reach"));
+                }
+                let op = if self.op == RelocOp::Bl { 0x9400_0000 } else { 0x1400_0000 };
+                Ok(op | ((d >> 2) as u32 & 0x03FF_FFFF))
+            }
+        }
+    }
+}
+
+/// A module's patch area: its set, its words, their relocations ({word index: reloc}).
+#[derive(Debug, Clone, Default)]
+pub struct Area {
+    pub set: usize,
+    pub words: Vec<u32>,
+    pub relocs: BTreeMap<usize, Reloc>,
 }
 
 #[derive(Debug, Clone)]
@@ -43,6 +123,11 @@ pub struct Table {
     pub page: u64,
     pub spins: BTreeMap<String, BTreeMap<u64, u64>>,
     pub spans: BTreeMap<String, BTreeMap<u64, (usize, Vec<u32>)>>,
+    pub areas: BTreeMap<String, Area>,
+    /// The frame-step state page (the first page of the first stubs module); 0 without areas.
+    pub state: u64,
+    /// {module: (its stubs module's base, the address of its code)}
+    pub area_at: BTreeMap<String, (u64, u64)>,
 }
 
 pub fn adrp(pc: u64, target: u64, rd: u32) -> Result<u32, PatchError> {
@@ -98,6 +183,19 @@ impl Table {
                     for wd in &f[5..] {
                         repl.push(match wd.strip_prefix("@page:x") {
                             Some(r) => Repl::Page(r.parse().map_err(|_| PatchError(wh.clone()))?),
+                            None if wd.starts_with('@') => {
+                                let p: Vec<&str> = wd[1..].split(':').collect();
+                                // @op:target:addend[:recorded word] (an adrp keeps the word's register)
+                                let r = (p.len() == 3 || p.len() == 4)
+                                    .then(|| Reloc::parse(p[0], p[1], p[2]))
+                                    .flatten()
+                                    .ok_or_else(|| PatchError(format!("{wh}: bad relocation {wd}")))?;
+                                let w = match p.get(3) {
+                                    Some(x) => hex(x).map_err(bad)? as u32,
+                                    None => 0,
+                                };
+                                Repl::Reloc(w, r)
+                            }
                             None => Repl::Word(hex(wd).map_err(bad)? as u32),
                         });
                     }
@@ -134,6 +232,25 @@ impl Table {
                     }
                     m.insert(off, (k, words));
                 }
+                ("area", n) if n >= 4 => {
+                    let Some(&k) = index.get(f[1]) else { return perr(format!("{wh}: unknown set {}", f[1])) };
+                    if !bases.contains_key(f[2]) {
+                        return perr(format!("{wh}: module {} not in the layout", f[2]));
+                    }
+                    let a = t.areas.entry(f[2].into()).or_insert_with(|| Area { set: k, ..Default::default() });
+                    for x in &f[3..] {
+                        a.words.push(hex(x).map_err(bad)? as u32);
+                    }
+                }
+                ("areloc", 6) => {
+                    let Some(a) = t.areas.get_mut(f[1]) else { return perr(format!("{wh}: no area of {} before it", f[1])) };
+                    let i: usize = f[2].parse().map_err(|_| PatchError(wh.clone()))?;
+                    let r = Reloc::parse(f[3], f[4], f[5]).ok_or_else(|| PatchError(format!("{wh}: bad relocation")))?;
+                    if i >= a.words.len() {
+                        return perr(format!("{wh}: word {i} past the area's {} words", a.words.len()));
+                    }
+                    a.relocs.insert(i, r);
+                }
                 ("spin", n) if n >= 4 => {
                     if !bases.contains_key(f[1]) {
                         return perr(format!("{wh}: module {} not in the layout", f[1]));
@@ -159,7 +276,49 @@ impl Table {
             }
         }
         t.page = page;
+        // the stubs modules: after the patch page, each a state page then its code (64 KB aligned, as modules are)
+        let mut at = page + PAGE;
+        for (name, a) in &t.areas {
+            let base = (at + 0xFFFF) & !0xFFFF;
+            if t.state == 0 {
+                t.state = base;
+            }
+            t.area_at.insert(name.clone(), (base, base + PAGE));
+            at = base + PAGE + 4 * a.words.len() as u64;
+        }
+        if let (Some(nxt), false) = (nxt, t.areas.is_empty()) {
+            if at > nxt {
+                return perr(format!("no room for the patch areas after main ({at:#x} past the next module at {nxt:#x})"));
+            }
+        }
         Ok(t)
+    }
+
+    /// The stubs module of `name`'s area: (its name, base, size, code address, the relocated words).
+    pub fn stubs_module(&self, name: &str, module_base: u64) -> Result<Option<(String, u64, u64, u64, Vec<u32>)>, PatchError> {
+        let (Some(a), Some(&(base, code))) = (self.areas.get(name), self.area_at.get(name)) else { return Ok(None) };
+        let mut words = a.words.clone();
+        for (&i, r) in &a.relocs {
+            words[i] = r.apply(words[i], code + 4 * i as u64, self.state, code, module_base)?;
+        }
+        Ok(Some((format!("{name}_stubs"), base, PAGE + 4 * words.len() as u64, code, words)))
+    }
+
+    /// Addresses of `name` that its area's code or its sites branch to (B targets, the return points after B
+    /// sites): function starts of the module, as the dispatcher enters only those.
+    pub fn branch_ins(&self, name: &str, base: u64) -> Vec<u64> {
+        let mut out = vec![];
+        if let Some(a) = self.areas.get(name) {
+            out.extend(
+                a.relocs.values().filter(|r| r.op == RelocOp::B && r.target == Target::Module).map(|r| base.wrapping_add(r.addend as u64)),
+            );
+        }
+        for (off, s) in self.sites.get(name).into_iter().flatten() {
+            if matches!(s.repl.last(), Some(Repl::Reloc(_, r)) if r.op == RelocOp::B) {
+                out.push(base + off + 4 * s.repl.len() as u64);
+            }
+        }
+        out
     }
 
     /// {absolute back-edge: absolute head}.
@@ -188,6 +347,7 @@ impl Table {
                 .map(|r| match r {
                     Repl::Word(w) => Ok(*w),
                     Repl::Page(rd) => adrp(a, self.page, *rd),
+                    Repl::Reloc(w, r) => r.apply(*w, a, self.state, self.area_at.get(name).map_or(0, |x| x.1), base),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             out.insert(a, (s.set, ws));
@@ -291,6 +451,31 @@ mod tests {
         assert_eq!(t.page, 0x70_0010_0000);
         assert_eq!(t.spins_for("main", 0x70_0000_0000).len(), 2);
         assert!(t.header_text("M").contains("X(0, zstd, \"MKW_ZSTD\", 1)"));
+    }
+
+    /// A frame-step stub: its area after main's patch page, the area's words relocated, the site's branch into it.
+    #[test]
+    fn stub_area() {
+        let t = Table::parse(
+            "set fstep NXRS_PATCH_FSTEP 1\n\
+             area fstep main 90ff8010 b9400211 17ffffff 14000000\n\
+             areloc main 0 adrp state 0\nareloc main 3 b module 0x104\n\
+             site fstep main 100 681242b9 @b:area:0x4\n",
+            "t",
+            &mods(),
+        )
+        .unwrap();
+        let main = 0x70_0000_0000u64;
+        let (name, base, size, code, words) = t.stubs_module("main", main).unwrap().unwrap();
+        assert_eq!((name.as_str(), base, size, code), ("main_stubs", 0x70_0011_0000, PAGE + 16, 0x70_0011_1000));
+        assert_eq!(t.state, base);
+        assert_eq!(words[0], adrp(code, base, 16).unwrap(), "adrp x16, state page");
+        assert_eq!((words[1], words[2]), (0xb9400211, 0x17ffffff), "unrelocated words stay");
+        assert_eq!(branch_target(words[3], code + 12), Some(main + 0x104), "back into main");
+        let site = t.for_module("main", main).unwrap()[&(main + 0x100)].1[0];
+        assert_eq!(branch_target(site, main + 0x100), Some(code + 4), "the site branches to the area");
+        assert_eq!(t.branch_ins("main", main), vec![main + 0x104, main + 0x104]);
+        assert!(Table::parse("set s E 1\narea s main 0\nareloc main 1 b area 0\n", "t", &mods()).is_err(), "word past the area");
     }
 
     #[test]

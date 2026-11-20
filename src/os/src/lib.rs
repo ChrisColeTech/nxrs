@@ -5,8 +5,10 @@
 
 pub mod log;
 pub mod boot;
+pub mod cheats;
 pub mod clock;
 pub mod fpslock;
+pub mod fstep;
 pub mod gamefix;
 pub mod guest;
 pub mod hle;

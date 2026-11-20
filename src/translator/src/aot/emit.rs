@@ -248,6 +248,9 @@ impl<'m> Emitter<'m> {
                 if self.replacements(a).iter().any(|r| r.kind == Kind::Bl) {
                     calls.insert(i);
                 }
+                if self.replacements(a).last().is_some_and(|r| r.kind == Kind::B) {
+                    exits.insert(i);
+                }
             } else {
                 effects.push(flags::effect(if ins.kind == Kind::Bcond { &ins.cond } else { &ins.code })?);
             }
@@ -473,6 +476,9 @@ impl<'m> Emitter<'m> {
                         repl.push(op(i, &r.code)?);
                     } else if r.kind == Kind::Bl && j == words.len() - 1 {
                         repl.push(call(r.target, a, &mut refs, &mut external_calls));
+                    } else if r.kind == Kind::B && j == words.len() - 1 {
+                        // a stub site: on, it branches to the patch area (which comes back by a branch of its own)
+                        repl.push(jump(r.target, i, &mut refs));
                     } else {
                         return Err(PatchError(format!("{a:#x}: replacement word {w:08x} is a {}", kind_name(r.kind))).into());
                     }
@@ -675,7 +681,41 @@ pub fn table_text(name: &str, addrs: &[u64]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::is_context_restore;
+    use super::*;
+
+    /// A frame-step stub end to end: main's site branches to the stubs module when its set is on, the stubs
+    /// module's code comes back to the instruction after the site, which discovery made a function start.
+    #[test]
+    fn stub_site_branches_to_the_area_and_back() {
+        use crate::aot::discover::discover;
+        use crate::aot::patches::Table;
+        use crate::loader::{ModLayout, Module};
+        let base = 0x70_0000_0000u64;
+        // main: add w8,w8,#1 (the site at +4 replaced); mov w0,#1; ret, then padding
+        let main_words = vec![0x1100_0508u32, 0x1100_0508, 0x5280_0020, 0xD65F_03C0];
+        let lay = vec![ModLayout { name: "main".into(), base, size: 0x10_0000 }];
+        let t = Table::parse(
+            "set fstep NXRS_PATCH_FSTEP 1\narea fstep main 90000010 11000908 14000000\nareloc main 0 adrp state 0\nareloc main 2 b module 0x8\nsite fstep main 4 11000508 @b:area:0\n",
+            "t",
+            &lay,
+        )
+        .unwrap();
+        let mut main = Module::code("main", base, base, main_words, vec![]);
+        main.extra_seeds = t.branch_ins("main", base);
+        let (sname, sbase, _, code, words) = t.stubs_module("main", base).unwrap().unwrap();
+        let stubs = Module::code(&sname, sbase, code, words, vec![code]);
+        let starts = |m: &Module| -> Vec<u64> { discover(m).0.iter().map(|&s| m.lo + 4 * s as u64).collect() };
+        let (ms, ss) = (starts(&main), starts(&stubs));
+        assert!(ms.contains(&(base + 8)), "the return point is a start: {ms:x?}");
+        let mut e = Emitter::new(&main, &ms, t.for_module("main", base).unwrap(), Default::default(), Default::default(), &EmitOptions::default());
+        let (c, _) = e.function(base, base + 8).unwrap();
+        let c = c.join("\n");
+        assert!(c.contains("rt_patch_on[0]") && c.contains(&format!("c->pc = {}", hx(code))), "the site's branch:\n{c}");
+        let mut e = Emitter::new(&stubs, &ss, Default::default(), Default::default(), Default::default(), &EmitOptions::default());
+        let (c, _) = e.function(code, code + 12).unwrap();
+        let c = c.join("\n");
+        assert!(c.contains(&format!("c->pc = {}", hx(base + 8))), "back to main:\n{c}");
+    }
 
     #[test]
     fn context_restore_ret_is_recognised_and_epilogues_are_not() {

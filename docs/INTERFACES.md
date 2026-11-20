@@ -1547,6 +1547,23 @@ which has no music; the music plays once the game starts.
 - **Tools (lane O3 only)**: `build/O3/relink.sh <game> <dir>` (a game's objects + `target/O3` nxfront into a copy),
   `build/O3/oplay.py` (scripted run through `run_game.run`: wait / press / hold / shot / replay / mouse / ctl;
   `O3_ARGS` adds `--key=value`). Copies in `build/O3/{mk8d,violet}`; saves backed up in `build/O3/saves`.
+- **Patch table (translator `aot::patches`), new lines**: `area <set> <module> <words>`, `areloc <module> <index>
+  adrp|b|bl state|area|module <addend>`, and a site word `@<op>:<target>:<addend>[:<word>]`. A module with an area
+  gets a lifted code module `<module>_stubs` (in layout.json, so in modules.c and the dispatch table) after main's
+  patch page; its first page is the frame-step state page. os skips `*_stubs` when loading the ExeFS and maps them RW.
+  `Module::code(name, base, code, words, entries)` and `Module::extra_seeds` (function starts the table adds).
+- **Profile patches placed by `nxrs-build`** (cli `profile::{stubs, trinity_sites}`): sets `fstep`
+  (`NXRS_PATCH_FSTEP`), `stubs` (`NXRS_PATCH_STUBS`), `trinity` (`NXRS_PATCH_TRINITY`); `<data>\frame_step.txt`.
+  **For lane K:** MKW's profile says `fps_target 60`, so its next build gets nxnative's frame-interval stub (main,
+  one site) and the host's frame step (hold 1 at 60); `NXRS_PATCH_FSTEP=0` or `NXOS_FPS_TARGET=0` leaves the game's
+  own interval. **For lane G4:** the frame step sets the hold through `nvn::window::set_profile_interval` (only when
+  it changes, as that logs); a quiet setter would be better.
+- **os `fstep`** (state page writer and step controller, at each present), **os `cheats`** (dmnt VM, per present;
+  control commands `cheats`, `cheat on|off <name>`), **os `fpslock::main()`** (main's facts once booted).
+- **Options, PC defaults** (owner, 2026-11-20: nxrs is a native PC app, not an emulator): `pause_on_focus_loss` 0,
+  `controller_prompt` 1, `home_quit` 1, `keyboard_box` 1 (all in the option table, read live). Other console-UI
+  imitations found, not options yet: library applets answered at once with no UI (MiiEdit cancelled, others closed),
+  the user picker always the console user, `docked` (already an option).
 - **Findings**: Violet new game passes name entry with `NXOS_SWKBD=auto` (the old run's gradient was the opening's
   wait, not the keyboard: no swkbd call had happened); the opening runs past 5 minutes, so "Mom missing" is still
   open. AudioIn: this PC has no capture endpoint now (DualSense mic disconnected). The owner was at the PC during
@@ -1683,6 +1700,16 @@ pools cover most of the span (G4's one MKW run, `build/I/runs/20261120-032722-G4
 was killed at ~56 s; its pool sync was up to 47 ms in slow frames before that bound). The mkw-recomp 1.8.0 rendering
 fixes (#423 / #485 / #441 / #291 / #468 / #22 / #395 / #384) are not checked by G4: file the ones a K run shows.
 
+**MKW's GPU resets (lane G4, 2026-11-20 04:10): found by the new device-lost report.** Lane K's run
+`build/I/runs/20261120-040222-K-mkw13-demote` (exit code 71, G4's `vk/lost.rs`) logged: the GPU started and had not
+finished checkpoint #7576, **a mesh draw with task shader fea1d6ca04512de1, mesh shader ddc034e8e009ebfc, pixel shader
+3cc3501255bb2d74**; the driver's fault report: **invalid read at 0xca19c6000** (instruction pointer 0x200b68340). The
+task shader reads two storage buffers (s0 / s1 from its c0 table) and the mesh-draw records: a read past a bound range
+faults the GPU when robust buffer access is off, which it was. **Fix (G4): robust buffer access is on by default on
+NVIDIA** (Turbo and Ryujinx do the same; `NXGFX_ROBUST=0` off). Still to find: why the address is outside the bound
+range (a storage buffer whose guest address is in no pool gets the zero buffer, 64 KB; or the task shader's record
+index). Not run by G4 (K owns MKW runs). K's `20261120-041317-K-mkw14-robust` (a build from before the default changed: its log has no `if the GPU stops responding` line) lost the device the same way: checkpoint #5256, the same three shaders, invalid read at 0xcbf689000. If a build with robust buffer access still resets there, the read is not through a bounded descriptor (a pointer the task shader computes): then the task shader's SPIR-V is the next look (G4).
+
 **Not ported (and why):** mkw-recomp's button-icon sheet redraw (#19, its own UI textures), Discord presence, its
 launcher / setup / settings menu, LAN sockets (no LAN layer in nxrs; the `lan` set is there, off). The 1.8.0
 rendering fixes of its CHANGELOG are graphics / shader work, filed for **lane G4**: #423 / #485 push constants reach
@@ -1728,3 +1755,45 @@ against nxrs's graphics in this lane.
 - Jamboree: the two stand-ins on its hub path answer as Turbo / nxnative do: `nifm::IsNetworkAvailable` false (Turbo's
   IRequest state 1 "free" and GetResult 110-300: no network), `friends::TryPopFriendInvitationNotificationInfo`
   0 = none (nxnative's own stub; Turbo's friend service has no invitation either). Neither explains the fade.
+
+**Lane K 2026-11-20 (after the 03:51 crash): MKW's stall and GPU hang, graphics side (small changes in src/graphics,
+lane K's; G4 please review).**
+- **The 31-40 s stall was the window acquire sync** (`nvn/window.rs`): nxrs fenced it with every queue's work so far;
+  MKW's frame update waits on it with an infinite timeout (main+0x69d034, the sync at [[frame+0x150]+0x78]) while
+  queues 2 and 19 hand work to each other through GPU events (0x2264c7100 / 0x140; a temporary park log showed it,
+  removed), so a frame took ~13 s. The texture is the game's once its last present is done (`present_wait`, just
+  before): the sync is satisfied at once (fenced 2, fence 0), as mkw-recomp's (`K-mkw9-acq`, `K-mkw10-acq`: frames
+  kept coming, the title scene drew, 1,082-1,763 draws a frame).
+- **Then the device was lost ~40-45 s in** (`K-mkw9`, `K-mkw10`, `K-mkw12`: these are the TDRs of 03:28 / 03:30 /
+  03:51; `K-mkw6` / `K-mkw7` at 03:05 / 03:13 too). mkw-recomp's CHANGELOG names three NVIDIA "instruction pointer
+  invalid" device losses on 1.8.0's title screen, all shader shapes: (1) integer abs (#395): 1,451 of MKW's 11,609
+  translated shaders use GLSL.std.450 SAbs; (2) fragment shaders that discard midway (#22 / #231): 2,186 use OpKill;
+  (3) constant-bank reads indexed by a vertex attribute (#22). `vk/spvfix.rs` now has `sabs_product` (SAbs as
+  `x * ((x >> 31) | 1)`, `NXGFX_SABS_FIX=0` off) and `kill_demote` (OpKill as OpDemoteToHelperInvocation, then the
+  selection's merge block or a return; the capability and SPV_EXT_demote_to_helper_invocation added; only with the
+  device's shaderDemoteToHelperInvocation, `NXGFX_DEMOTE_FIX=0` off), both called in `vk/shader.rs` build next to
+  the ballot fix. Unit-tested, and all 3,637 MKW modules they change pass spirv-val (vulkan1.3; opt-in test
+  `spvfix_folder`). `K-mkw12` had the SAbs rewrite alone and still lost the device; the demote rewrite is the next
+  run. (3) is not done: it needs the translator's bank reads (G4 / shaders).
+- **For G4's device-lost diagnostics:** MKW's loss comes ~40 s in, on the title scene after the course map; the last
+  draw per queue there is what I need. I run MKW one exclusive run at a time and stop at the first GPU RESET.
+- **`K-mkw13-demote` (SAbs + demote rewrites; 04:03 GPU RESET): G4's device-lost report names the work.** At 36 s:
+  "the GPU started #7576 a mesh draw with shaders [1:3cc3501255bb2d74 3:fea1d6ca04512de1 4:ddc034e8e009ebfc]",
+  everything before it finished; driver fault report: instruction pointer fault, **invalid read at 0xca19c6000**.
+  So it is a memory read out of range in a mesh draw, not a compiler shape. The task shader (fea1d6ca04512de1) reads
+  two storage buffers bound by its constant bank (`cp_s0`, `cp_s1`, unbounded runtime arrays) and the mesh-draw
+  parameters (`mesh_draw`); it uses no raw pointers. The mesh shader reads a constant bank and the payload only.
+  Suspects: a storage buffer whose address resolves to no pool gets the 64 KiB zero buffer (`exec.rs` `Res::Sbuf`
+  `None` arm) and the shader indexes past it, or a bound range shorter than what the shader reads. Diagnosis switch
+  `NXGFX_ROBUST=1` (`vk/device.rs`, default off: core robustBufferAccess) for the next run. The SAbs / demote rewrites
+  stay (valid, and mkw-recomp's fixes), but were not this fault.
+- **`K-mkw14-robust` (`NXGFX_ROBUST=1`; 04:13 GPU RESET):** the same mesh draw (#5256, same three shaders) faulted
+  at 20 s, invalid read at 0xcbf689000, and no storage buffer fell back to the zero buffer (new red line in `exec.rs`
+  `Res::Sbuf`, never printed). Inconclusive: with descriptor buffers nxrs writes descriptors at
+  `storage_buffer_descriptor_size`, not the robust sizes robustBufferAccess needs (`exec.rs` 1822), so robustness may
+  not have applied. What the three shaders read, from their SPIR-V: the task shader (fea1d6ca04512de1) storage
+  buffers `cp_s0` / `cp_s1` and `mesh_draw[mesh_push[0] * DrawIndex + 1]`, constant banks, its payload (`uint[352]`,
+  both loops bounded); it emits `min(shared[357], 65535)` mesh groups. The mesh shader (ddc034e8e009ebfc) one constant
+  bank, the payload, shared memory, outputs bounded (32 vertices, at most 16 primitives); the fragment shader
+  (3cc3501255bb2d74) two constant banks only. No raw pointers, no textures. Next: `K-mkw15` with
+  `NXGFX_DESCBUF=0 NXGFX_ROBUST=1` (classic sets, where robustness applies).

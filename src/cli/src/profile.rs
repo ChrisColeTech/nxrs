@@ -132,6 +132,281 @@ pub fn match_sites(prof: &Option<Match>, exefs: &BTreeMap<String, Vec<u8>>, buil
 }
 
 /// The patch table text with the matched sites added.
+/// What a build's frame-step and stub patches give the game: the table lines and the facts the host's frame step
+/// reads (`frame_step.txt` in the data folder).
+#[derive(Debug, Default)]
+pub struct Stubs {
+    pub lines: Vec<String>,
+    pub said: Vec<String>,
+    /// a frame-step set placed (the host then writes its state page and paces the game by it)
+    pub frame_step: bool,
+    pub step_max: u32,
+    pub render_scale: u32,
+    pub capabilities: Vec<String>,
+}
+
+impl Stubs {
+    /// `frame_step.txt`: one `key value` a line.
+    pub fn facts(&self) -> String {
+        format!(
+            "# Written by nxrs: the frame step of this build's patches (the host's state page writer reads it).\nframe_step {}\nstep_max {}\nrender_scale {}\ncapabilities {}\n",
+            self.frame_step as u8,
+            self.step_max,
+            self.render_scale,
+            self.capabilities.join(",")
+        )
+    }
+}
+
+/// nxnative's FRAME_STEP / STUBS (`[[stub]]` by build) and MATCH_FRAME_STEP / MATCH_STUBS (`[[match]]` kind
+/// frame_step / stubs, placed by function fingerprint on builds without an entry of their own) as patch-table lines:
+/// each module's stubs go to its patch area (`area` / `areloc`), the puts to sites that branch there (set `fstep`,
+/// `NXRS_PATCH_FSTEP=0` off; set `stubs`, `NXRS_PATCH_STUBS=0` off). Bodies not evaluated at export (Python that reads
+/// the module) and rules whose functions or asserted sites are not found stay out, said in red.
+pub fn stubs(prof: &Option<Match>, exefs: &BTreeMap<String, Vec<u8>>, builds: &[(String, String)]) -> Stubs {
+    use translator::aot::nso_match::Image;
+    let mut st = Stubs::default();
+    let own: Vec<&profiles::patches::PatchFile> = prof.as_ref().map(|m| m.profile.patch_files().collect()).unwrap_or_default();
+    let shared = profiles::shared_patches();
+    let files: Vec<&profiles::patches::PatchFile> = own.iter().copied().chain(shared.iter().copied()).collect();
+    let mut nsos: BTreeMap<String, Option<translator::loader::nso::Nso>> = BTreeMap::new();
+    // {module: area words so far}
+    let mut area_len: BTreeMap<String, usize> = BTreeMap::new();
+    let (mut fstep_set, mut stubs_set) = (false, false);
+    for (module, bid) in builds {
+        let nso = nsos.entry(module.clone()).or_insert_with(|| exefs.get(module).and_then(|r| translator::loader::nso::Nso::parse(r).ok()));
+        let Some(nso) = nso.as_ref() else { continue };
+        let end = nso.text.0 + nso.text.1;
+        let mut bodies: Vec<(String, &str, &profiles::patches::StubBody, BTreeMap<String, u64>)> = vec![];
+        for f in &files {
+            for s in f.stub.iter().filter(|s| profiles::patches::build_matches(&s.build, bid) && module == "main") {
+                bodies.push((format!("{} {}", s.kind, &s.build[..8.min(s.build.len())]), s.kind.as_str(), &s.body, BTreeMap::new()));
+            }
+        }
+        let has_own_fstep = bodies.iter().any(|b| b.1 == "frame_step");
+        let mut img: Option<Image> = None;
+        for f in &files {
+            for r in f.matches.iter().filter(|r| (r.kind == "frame_step" || r.kind == "stubs") && r.module == *module) {
+                let Some(body) = &r.stub else { continue };
+                if r.kind == "frame_step" && has_own_fstep {
+                    continue;
+                }
+                if img.is_none() {
+                    match Image::new(&nso.image, end) {
+                        Ok(i) => img = Some(i),
+                        Err(e) => {
+                            st.said.push(format!("[RED] {module}: {e}"));
+                            break;
+                        }
+                    }
+                }
+                let i = img.as_mut().unwrap();
+                let mut at = BTreeMap::new();
+                let found = i.locate(r.size.unwrap_or(0) as usize, &r.fingerprints).map(|s| at.insert("base".to_string(), s as u64));
+                if found.is_err() {
+                    continue; // not this build's function: quietly, as the cuts
+                }
+                let mut miss = None;
+                for o in &r.others {
+                    match i.locate(o.size as usize, &o.fingerprints) {
+                        Ok(s) => {
+                            at.insert(format!("other:{}", o.label), s as u64);
+                        }
+                        Err(e) => miss = Some(format!("{}: {e}", o.label)),
+                    }
+                }
+                if let Some(m) = miss {
+                    st.said.push(format!("[RED] {} {:?} on {module}: not applied ({m})", r.kind, r.name));
+                    continue;
+                }
+                bodies.push((format!("{} {:?}", r.kind, r.name), if r.kind == "stubs" { "stub" } else { "frame_step" }, body, at));
+            }
+        }
+        for (what, kind, b, at) in bodies {
+            if !b.evaluated {
+                st.said.push(format!("[RED] {what} on {module}: not applied (its body reads the module: {})", b.needs.as_deref().unwrap_or("?")));
+                continue;
+            }
+            let place = |base: &str| -> Option<u64> {
+                if base == "module" {
+                    Some(0)
+                } else {
+                    at.get(base).copied()
+                }
+            };
+            let word_at = |off: u64| -> Option<u32> {
+                let o = off as usize;
+                (o >= nso.text.0 && o + 4 <= end).then(|| u32::from_le_bytes(nso.image[o..o + 4].try_into().unwrap()))
+            };
+            // the asserted sites: the module still has the words the stub was written against
+            let bad = b.sites.iter().find_map(|s| {
+                let off = place(&s.base)?.checked_add_signed(s.offset)?;
+                let want = profiles::patches::words_of(&s.original)?;
+                (0..want.len()).any(|k| word_at(off + 4 * k as u64) != Some(want[k])).then(|| format!("{}+{:#x}", s.base, s.offset)).or(None)
+            });
+            if let Some(b) = bad {
+                st.said.push(format!("[RED] {what} on {module}: not applied (the site {b} differs from the recorded words)"));
+                continue;
+            }
+            if b.sites.iter().any(|s| place(&s.base).is_none()) {
+                st.said.push(format!("[RED] {what} on {module}: not applied (a site's function is not located)"));
+                continue;
+            }
+            let start = *area_len.get(module).unwrap_or(&0);
+            let reloc = |r: &profiles::patches::Reloc, word: Option<u32>| -> Option<String> {
+                let (target, addend) = match r.target.as_str() {
+                    "state" => ("state", r.addend),
+                    "area" => ("area", r.addend + 4 * start as i64),
+                    "module" => ("module", r.addend),
+                    other => ("module", place(other)? as i64 + r.addend),
+                };
+                if !matches!(r.op.as_str(), "adrp" | "b" | "bl") {
+                    return None;
+                }
+                let add = format!("{}{:#x}", if addend < 0 { "-" } else { "" }, addend.unsigned_abs());
+                Some(match word {
+                    Some(w) => format!("@{}:{target}:{add}:{w:08x}", r.op),
+                    None => format!("{} {target} {add}", r.op),
+                })
+            };
+            let set = if kind == "frame_step" { "fstep" } else { "stubs" };
+            let mut lines = vec![];
+            let mut ok = true;
+            for chunk in b.code.chunks(16) {
+                lines.push(format!("area {set} {module} {}", chunk.iter().map(|w| format!("{w:08x}")).collect::<Vec<_>>().join(" ")));
+            }
+            for r in &b.relocs {
+                match reloc(r, None) {
+                    Some(t) => lines.push(format!("areloc {module} {} {t}", start + r.index)),
+                    None => ok = false,
+                }
+            }
+            for p in &b.puts {
+                let Some(off) = place(&p.base).and_then(|o| o.checked_add_signed(p.offset)) else {
+                    ok = false;
+                    break;
+                };
+                for (k, w) in p.words.iter().enumerate() {
+                    let a = off + 4 * k as u64;
+                    let Some(orig) = word_at(a) else {
+                        ok = false;
+                        break;
+                    };
+                    let repl = match p.relocs.iter().find(|r| r.index == k) {
+                        Some(r) => match reloc(r, Some(*w)) {
+                            Some(t) => t,
+                            None => {
+                                ok = false;
+                                break;
+                            }
+                        },
+                        None => format!("{w:08x}"),
+                    };
+                    lines.push(format!("site {set} {module} {a:#x} {orig:08x} {repl}  # {}", p.reason.lines().next().unwrap_or("").replace('#', "")));
+                }
+            }
+            if !ok {
+                st.said.push(format!("[RED] {what} on {module}: not applied (a relocation or put this table cannot place)"));
+                continue;
+            }
+            st.lines.extend(lines);
+            area_len.insert(module.clone(), start + b.code.len());
+            if kind == "frame_step" {
+                fstep_set = true;
+                st.frame_step = true;
+                st.step_max = st.step_max.max(b.step_max.unwrap_or(0));
+                st.render_scale = st.render_scale.max(b.render_scale.unwrap_or(0));
+                st.capabilities.extend(b.capabilities.clone().unwrap_or_default());
+            } else {
+                stubs_set = true;
+            }
+            st.said.push(format!("{what} on {module} ({} words, {} sites)", b.code.len(), b.puts.iter().map(|p| p.words.len()).sum::<usize>()));
+        }
+    }
+    let mut head = vec![];
+    if fstep_set {
+        head.push("set fstep NXRS_PATCH_FSTEP 1".to_string());
+    }
+    if stubs_set {
+        head.push("set stubs NXRS_PATCH_STUBS 1".to_string());
+    }
+    st.lines.splice(0..0, head);
+    st
+}
+
+/// The completer of Game Freak's Trinity per-frame rendezvous (Pokémon Scarlet / Violet, Legends Z-A): it sets the
+/// release flag with a plain `strb`, then reads the state word with `ldar` and returns without a wake when it is 2. A
+/// load-acquire does not order an earlier plain store (x86 also moves a store after a later load), so the flag can
+/// stay unseen while the main thread resets the state, reads the flag as 0 and parks for good. The site gets a
+/// `dmb ish` (a SEQ_CST fence) after the store (set `trinity`, `NXRS_PATCH_TRINITY=0` off). The shape is nxnative's
+/// (`patch_nso.py` trinity_completer_sites): two matches in one module place none. Returns (lines, said).
+pub fn trinity_sites(exefs: &BTreeMap<String, Vec<u8>>, builds: &[(String, String)]) -> (Vec<String>, Vec<String>) {
+    let (mut lines, mut said) = (vec![], vec![]);
+    for (module, _) in builds {
+        let Some(nso) = exefs.get(module).and_then(|r| translator::loader::nso::Nso::parse(r).ok()) else { continue };
+        let found = trinity_in(&nso.image, nso.text.0, nso.text.0 + nso.text.1);
+        match found.as_slice() {
+            [] => {}
+            [f] => {
+                let strb = u32::from_le_bytes(nso.image[f + 20..f + 24].try_into().unwrap());
+                lines.push(format!("site trinity {module} {:#x} {strb:08x} {strb:08x} d5033bbf  # Trinity rendezvous completer: a fence after the release flag's store", f + 20));
+                said.push(format!("Trinity rendezvous fence on {module} at {f:#x}"));
+            }
+            many => said.push(format!(
+                "[RED] {module}: {} functions have the shape of Trinity's rendezvous completer, so none gets its fence: {}",
+                many.len(),
+                many.iter().map(|o| format!("{o:#x}")).collect::<Vec<_>>().join(", ")
+            )),
+        }
+    }
+    if !lines.is_empty() {
+        lines.insert(0, "set trinity NXRS_PATCH_TRINITY 1".into());
+    }
+    (lines, said)
+}
+
+/// Offsets in [s, e) of functions shaped as Trinity's rendezvous completer.
+fn trinity_in(img: &[u8], s: usize, e: usize) -> Vec<usize> {
+    let w = |o: usize| u32::from_le_bytes(img[o..o + 4].try_into().unwrap());
+    let mut out = vec![];
+    let mut o = s;
+    while o + 12 <= e.min(img.len()) {
+        // ldar w8,[x9]; cmp w8,#2
+        if w(o) == 0x88DF_FD28 && w(o + 4) == 0x7100_091F && o >= s + 40 {
+            let f = o - 40;
+            let v: Vec<u32> = (0..13).map(|i| w(f + 4 * i)).collect();
+            if v[..3] == [0xA9BE_7BFD, 0xA901_4FF4, 0x9100_03FD]
+                && v[3] & 0xFFC0_03FF == 0xF940_0008
+                && v[4] == 0x5280_0029
+                && v[5] & 0xFFC0_03FF == 0x3900_0109
+                && v[6] & 0xFFC0_03FF == 0x3940_0109
+                && (v[6] >> 10 & 0xFFF) == (v[5] >> 10 & 0xFFF) + 1
+                && v[7] & 0xFF00_001F == 0x3400_0009
+                && v[8] & 0xFFC0_03FF == 0xF940_0114
+                && v[9] & 0xFFC0_03FF == 0x9100_0289
+                && v[12] & 0xFF00_001F == 0x5400_0001
+            {
+                out.push(f);
+            }
+        }
+        o += 4;
+    }
+    out
+}
+
+/// The patch table text with more lines (sets and all) added.
+pub fn with_lines(text: Option<String>, lines: &[String]) -> Option<String> {
+    if lines.is_empty() {
+        return text;
+    }
+    let mut s = text.unwrap_or_else(|| String::from("# Written by nxrs from the game's profile: the patches applied at build time.\n"));
+    for l in lines {
+        s.push_str(l);
+        s.push('\n');
+    }
+    Some(s)
+}
+
 pub fn with_match_sites(text: Option<String>, sites: &[String]) -> Option<String> {
     if sites.is_empty() {
         return text;
@@ -256,5 +531,67 @@ mod match_tests_oot {
             eprintln!("{l}");
         }
         eprintln!("{} sites", sites.len());
+    }
+}
+
+#[cfg(test)]
+mod stub_tests {
+    /// The frame-step rules of Ocarina of Time (frame ratio + dynamic resolution) and Mario Kart World (frame
+    /// interval) on the owner's builds, when the dumps are here: placed by fingerprint, and the table the translator
+    /// reads takes them (sites match the module, the stubs module lands after main's patch page, relocations reach).
+    #[test]
+    fn frame_step_on_owner_builds() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build/games");
+        for (game, title) in [("oot", 0x0400_4860_24DE_C000u64), ("mkw", 0x0400_C3F0_0006_E000)] {
+            let Ok(main) = std::fs::read(root.join(game).join(format!("{game}_data/exefs/main"))) else {
+                eprintln!("no {game} build here: skipped");
+                continue;
+            };
+            let exefs: std::collections::BTreeMap<String, Vec<u8>> = [("main".to_string(), main)].into();
+            let builds = super::module_builds(&exefs);
+            let prof = super::find(Some(title), &builds);
+            let st = super::stubs(&prof, &exefs, &builds);
+            for l in &st.said {
+                eprintln!("{game}: {l}");
+            }
+            assert!(st.frame_step, "{game}: no frame step placed");
+            let text = super::with_lines(None, &st.lines).unwrap();
+            let nso = translator::loader::nso::Nso::parse(&exefs["main"]).unwrap();
+            let lay = vec![translator::loader::ModLayout { name: "main".into(), base: 0x80_0000_0000, size: nso.size as u64 }];
+            let t = translator::aot::patches::Table::parse(&text, game, &lay).unwrap();
+            let m = translator::loader::Module::new("main", nso, 0x80_0000_0000);
+            t.check(&m, "main").unwrap();
+            let (name, _, _, code, words) = t.stubs_module("main", m.base).unwrap().unwrap();
+            assert_eq!(name, "main_stubs");
+            let sites = t.for_module("main", m.base).unwrap();
+            for (a, (_, ws)) in &sites {
+                if let Some(to) = translator::aot::patches::branch_target(ws[0], *a) {
+                    assert!((code..code + 4 * words.len() as u64).contains(&to), "{game}: site {a:#x} branches to {to:#x}, outside the area");
+                }
+            }
+            eprintln!("{game}: {} area words, {} sites, step_max {}", words.len(), sites.len(), st.step_max);
+        }
+    }
+}
+
+#[cfg(test)]
+mod trinity_tests {
+    /// Violet's main (when the dump is here) has exactly one rendezvous completer, and the table takes its fence.
+    #[test]
+    fn violet_rendezvous_fence() {
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build/games/violet/violet_data/exefs/main");
+        let Ok(main) = std::fs::read(&p) else {
+            eprintln!("no Violet build here: skipped");
+            return;
+        };
+        let exefs: std::collections::BTreeMap<String, Vec<u8>> = [("main".to_string(), main)].into();
+        let builds = super::module_builds(&exefs);
+        let (lines, said) = super::trinity_sites(&exefs, &builds);
+        eprintln!("{said:?}");
+        assert_eq!(lines.len(), 2, "{said:?}");
+        let nso = translator::loader::nso::Nso::parse(&exefs["main"]).unwrap();
+        let lay = vec![translator::loader::ModLayout { name: "main".into(), base: 0x80_0000_0000, size: nso.size as u64 }];
+        let t = translator::aot::patches::Table::parse(&lines.join("\n"), "violet", &lay).unwrap();
+        t.check(&translator::loader::Module::new("main", nso, 0x80_0000_0000), "main").unwrap();
     }
 }

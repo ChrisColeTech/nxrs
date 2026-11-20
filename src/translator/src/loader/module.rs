@@ -12,6 +12,8 @@ pub struct Module {
     pub lo: u64,
     pub hi: u64,
     pub words: Vec<u32>,
+    /// Function starts beside the module's own (the patch table's branch-ins, a stubs module's entries).
+    pub extra_seeds: Vec<u64>,
 }
 
 fn read_encoded(img: &[u8], off: usize, enc: u8, pc_base: usize) -> Result<(i64, usize), String> {
@@ -41,7 +43,38 @@ impl Module {
         let words = (0..nso.text.1 / 4)
             .map(|i| u32::from_le_bytes(image[t0 + 4 * i..t0 + 4 * i + 4].try_into().unwrap()))
             .collect();
-        Module { name: name.to_string(), nso, base, image, lo, hi, words }
+        Module { name: name.to_string(), nso, base, image, lo, hi, words, extra_seeds: vec![] }
+    }
+
+    /// A module of code alone at `code` (a stubs module: `base` is its state page, zeros): no symbols, relocations
+    /// or unwind tables; `entries` are its function starts.
+    pub fn code(name: &str, base: u64, code: u64, words: Vec<u32>, entries: Vec<u64>) -> Module {
+        let off = (code - base) as usize;
+        let mut image = vec![0u8; off];
+        image.extend(words.iter().flat_map(|w| w.to_le_bytes()));
+        let n = image.len();
+        let nso = Nso {
+            build_id: String::new(),
+            bss_size: 0,
+            text: (off, 4 * words.len()),
+            rodata: (n, 0),
+            data: (n, 0),
+            size: n,
+            image: image.clone(),
+            dynamic: 0,
+            bss_start: n,
+            bss_end: n,
+            eh_start: 0,
+            eh_end: 0,
+            module_obj: 0,
+            dyn_: Default::default(),
+            strtab: 0,
+            needed: vec![],
+            syms: vec![],
+            relocs: vec![],
+        };
+        let hi = code + 4 * words.len() as u64;
+        Module { name: name.to_string(), nso, base, image, lo: code, hi, words, extra_seeds: entries }
     }
 
     pub fn in_text(&self, a: u64) -> bool {
@@ -118,6 +151,7 @@ impl Module {
                 }
             }
         }
+        starts.extend(self.extra_seeds.iter().copied());
         starts.into_iter().filter(|&a| self.in_text(a)).collect()
     }
 }

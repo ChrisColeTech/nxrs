@@ -363,6 +363,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     let prof = crate::profile::find(game.exefs.title_id, &builds);
     out.say(&crate::profile::line(&prof, game.exefs.title_id, &builds));
     let patch_text = crate::profile::patch_table(&builds, out)?;
+    let mut stub_facts: Option<String> = None;
     let patch_text = if std::env::var("NXRS_NO_PROFILE_PATCHES").is_ok_and(|v| !v.is_empty() && v != "0") {
         patch_text
     } else {
@@ -370,7 +371,17 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         for l in &said {
             out.say(&format!("patch matched: {l}"));
         }
-        crate::profile::with_match_sites(patch_text, &sites)
+        let text = crate::profile::with_match_sites(patch_text, &sites);
+        let st = crate::profile::stubs(&prof, &game.exefs.files, &builds);
+        for l in &st.said {
+            out.say(&format!("patch stub: {l}"));
+        }
+        stub_facts = Some(st.facts());
+        let (fence, said) = crate::profile::trinity_sites(&game.exefs.files, &builds);
+        for l in &said {
+            out.say(&format!("patch: {l}"));
+        }
+        crate::profile::with_lines(crate::profile::with_lines(text, &st.lines), &fence)
     };
     let title = a
         .name
@@ -481,6 +492,14 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             out.say(&m.replace("install it with nxrs dlc install", "install it with nxrs-build dlc install"));
         }
     })?;
+    // the frame step's facts for the host (its state page writer); none: no frame-step patches
+    let fs_txt = data.join("frame_step.txt");
+    match stub_facts.as_deref().filter(|f| f.contains("frame_step 1")) {
+        Some(f) => std::fs::write(&fs_txt, f).with_context(|| format!("{}", fs_txt.display()))?,
+        None => {
+            let _ = std::fs::remove_file(&fs_txt);
+        }
+    }
     let nro_tsv = data.join("nro.tsv");
     if nros.nros.is_empty() && nros.refused.is_empty() {
         let _ = std::fs::remove_file(&nro_tsv);

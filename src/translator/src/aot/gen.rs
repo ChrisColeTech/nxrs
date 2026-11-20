@@ -5,7 +5,7 @@ use crate::aot::discover::{discover, estimate_sizes, partition, DiscoverStats};
 use crate::aot::emit::{table_text, EmitOptions, Emitter, GENERATED_MARKER};
 use crate::aot::patches::Table;
 use anyhow::{anyhow, Context, Result};
-use crate::loader::layout::{layout_h, layout_json, layout_names};
+use crate::loader::layout::{layout_h, layout_json, layout_names, ModLayout};
 use crate::loader::{Module, Nso};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
@@ -115,12 +115,28 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
     let mods = layout_names(&names, &|n: &str| nsos.get(n).map(|x| x.size)).map_err(|e| anyhow!(e))?;
     std::fs::create_dir_all(&opts.out)?;
     // gen.py writes these two with Path.write_text, so they carry the platform's line ends.
-    write_if_changed(&opts.out.join("layout.json"), text_mode(&layout_json(&mods)).as_bytes())?;
     write_if_changed(&opts.out.join("layout.h"), text_mode(&layout_h(&mods)).as_bytes())?;
     let table = match &opts.patches {
         Some(p) => Table::load(p, &mods)?,
         None => Table::empty(&mods)?,
     };
+    // each module's patch area as a code module of its own after main (frame-step and stub patches)
+    let mut stubs: Vec<(String, Module)> = vec![];
+    for ml in &mods {
+        if let Some((name, base, size, code, words)) = table.stubs_module(&ml.name, ml.base)? {
+            // its entries: where the module's sites branch in
+            let entries: Vec<u64> = table
+                .for_module(&ml.name, ml.base)?
+                .iter()
+                .filter_map(|(a, (_, ws))| ws.last().and_then(|&w| crate::aot::patches::branch_target(w, *a)))
+                .filter(|t| (code..base + size).contains(t))
+                .collect();
+            stubs.push((ml.name.clone(), Module::code(&name, base, code, words, entries)));
+        }
+    }
+    let mut all_mods = mods.clone();
+    all_mods.extend(stubs.iter().map(|(_, m)| ModLayout { name: m.name.clone(), base: m.base, size: m.image.len() as u64 }));
+    write_if_changed(&opts.out.join("layout.json"), text_mode(&layout_json(&all_mods)).as_bytes())?;
     write_if_changed(&opts.out.join("patches.h"), table.header_text(GENERATED_MARKER).as_bytes())?;
     let want: Vec<String> =
         if opts.modules.is_empty() { mods.iter().map(|m| m.name.clone()).collect() } else { opts.modules.clone() };
@@ -136,13 +152,28 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
     let mut dstats: Vec<DiscoverStats> = vec![];
     let mut nchunks: Vec<usize> = vec![];
     let mut tasks: Vec<(i64, Task)> = vec![];
-    for ml in &mods {
-        if !want.contains(&ml.name) {
+    let mut stub_mods: BTreeMap<String, Module> = stubs.into_iter().collect();
+    let order: Vec<(ModLayout, bool)> = mods
+        .iter()
+        .flat_map(|ml| {
+            let s = stub_mods.get(&ml.name).map(|m| (ModLayout { name: m.name.clone(), base: m.base, size: m.image.len() as u64 }, true));
+            std::iter::once((ml.clone(), false)).chain(s)
+        })
+        .collect();
+    for (ml, is_stubs) in &order {
+        let parent = if *is_stubs { ml.name.trim_end_matches("_stubs").to_string() } else { ml.name.clone() };
+        if !want.contains(&parent) {
             continue;
         }
         let t = Instant::now();
-        let nso = nsos.remove(&ml.name).unwrap();
-        let m = Module::new(&ml.name, nso, ml.base);
+        let m = if *is_stubs {
+            stub_mods.remove(&parent).unwrap()
+        } else {
+            let nso = nsos.remove(&ml.name).unwrap();
+            let mut m = Module::new(&ml.name, nso, ml.base);
+            m.extra_seeds = table.branch_ins(&ml.name, ml.base);
+            m
+        };
         table.check(&m, &ml.name)?;
         let (starts, ds) = discover(&m);
         let est = estimate_sizes(&m, &starts);

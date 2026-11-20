@@ -96,6 +96,11 @@ pub fn set_main(m: Main) {
     let _ = MAIN.set(m);
 }
 
+/// main's facts once booted.
+pub fn main() -> Option<&'static Main> {
+    MAIN.get()
+}
+
 fn rd32(a: u64) -> Option<u32> {
     nxrt::mem::readable(a, 4).then(|| unsafe { (*(a as *const AtomicU32)).load(Ordering::Relaxed) })
 }

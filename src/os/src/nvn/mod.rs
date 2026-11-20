@@ -42,6 +42,8 @@ pub fn note_present(window: u64, index: u32) {
     }
     frame_row(n + 1);
     crate::fpslock::tick();
+    crate::cheats::present();
+    crate::fstep::present();
 }
 
 /// metrics=1: one `frames-*.csv` row a present: its number, the guest clock (s), the time since the last present
