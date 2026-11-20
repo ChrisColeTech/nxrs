@@ -53,6 +53,8 @@ pub struct Image {
     pub page_hash: Vec<u64>,
     /// uploads again because the CPU wrote its pages (its page hashes are kept from the second on)
     pub rewrites: u32,
+    /// page_hash was taken this submission before the upload's storage read (image_begin_submit)
+    pub hashed_early: bool,
     /// the resolution scale of this image (a render target's; 1 for everything else): `extent` is the texture's size
     /// times it
     pub scale: f32,
@@ -648,6 +650,7 @@ impl Gpu {
                     sparse: None,
                     page_hash: Vec::new(),
                     rewrites: 0,
+                    hashed_early: false,
                     alias_of: None,
                     gpu_seq: 0,
                     scale: 1.0,
@@ -690,6 +693,7 @@ impl Gpu {
             sparse: None,
             page_hash: Vec::new(),
             rewrites: 0,
+            hashed_early: false,
             scale,
             alias_of: None,
             gpu_seq: 0,
@@ -861,6 +865,7 @@ impl Gpu {
             sparse: None,
             page_hash: Vec::new(),
             rewrites: 0,
+            hashed_early: false,
             scale: o.scale,
             alias_of: Some(owner),
             gpu_seq: 0,
@@ -1320,6 +1325,7 @@ impl Gpu {
                 sparse: None,
                 page_hash: Vec::new(),
                 rewrites: 0,
+                hashed_early: false,
                 scale: im.scale,
                 alias_of: None,
                 gpu_seq: 0,
@@ -1431,6 +1437,7 @@ impl Gpu {
                 sparse: None,
                 page_hash: Vec::new(),
                 rewrites: 0,
+                hashed_early: false,
                 scale: im.scale,
                 alias_of: None,
                 gpu_seq: 0,
@@ -1919,6 +1926,19 @@ impl Gpu {
         // the textures' storage read and laid out linearly on several threads first (a streaming burst: Pokemon
         // Legends: Z-A uploads ~1,400 textures in a few seconds, 0.5 ms each on one thread: frames of 200-370 ms)
         let t_scan = t_all.elapsed().as_secs_f64();
+        // page hashes of what is about to be read for the upload, taken before it is read: hashed after the upload
+        // read the storage, a CPU write between the two (the game's font thread adding glyphs to MKW's 1024x8192 glyph
+        // sheet) went into the hashes but not into the image, and its write-watch hit at the next submission found
+        // the page "unchanged": the glyph was never uploaded (lane K3, the dropped menu letters)
+        for &s in &serials {
+            if let Some(im) = imgs.by_serial.get_mut(&s) {
+                if im.needs_upload && !im.gpu_owned && !im.tex.mem.is_null() && im.sparse.is_none() && im.rewrites > 0 {
+                    let lo = im.tex.mem as u64;
+                    im.page_hash = page_hashes(lo, lo + im.tex.l.size);
+                    im.hashed_early = true;
+                }
+            }
+        }
         let mut pre = decode_many(&imgs, &serials);
         let t_dec = t_all.elapsed().as_secs_f64();
         let mut t_init = t_dec;
@@ -1989,12 +2009,13 @@ impl Gpu {
         }
         if im.needs_upload && !im.gpu_owned && !im.tex.mem.is_null() {
             let t0 = std::time::Instant::now();
-            self.upload_from_storage(im, sub);
-            // page hashes only for a texture whose pages the CPU writes again (most are uploaded once)
-            if im.sparse.is_none() && im.rewrites > 0 {
+            // page hashes only for a texture whose pages the CPU writes again (most are uploaded once), taken before
+            // the storage is read (image_begin_submit took them before its decode-ahead read)
+            if im.sparse.is_none() && im.rewrites > 0 && !std::mem::take(&mut im.hashed_early) {
                 let lo = im.tex.mem as u64;
                 im.page_hash = page_hashes(lo, lo + im.tex.l.size);
             }
+            self.upload_from_storage(im, sub);
             let ns = t0.elapsed().as_nanos() as u64;
             super::perf::add(super::perf::C::TexUploadNs, ns);
             upload_stats::note(serial, &im.tex, ns);

@@ -1423,6 +1423,22 @@ fn topology(p: i32) -> vk::PrimitiveTopology {
 static ZERO: std::sync::OnceLock<super::Buf> = std::sync::OnceLock::new();
 /// (diagnosis, lane K2; with `NXGFX_ADDR_REPORT`) a buffer named "staging" or "scratch" that is not this submission's
 /// own, about to be read by the GPU: the stale staged range MKW's early faults read (a red line with what binds it)
+/// NXGFX_SBUF_TO_END=0: read-only storage buffers bound with the size the game gave (as before lane K3).
+fn sbuf_to_end() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_SBUF_TO_END").as_deref() != Ok("0"))
+}
+
+/// The device range [buffer + o, + n) handed to the GPU, for the loss report (diagnostics, lane K3).
+fn use_note(sub: &Sub, b: vk::Buffer, o: u64, n: u64, what: &'static str) {
+    if super::lost::level() < 2 {
+        return;
+    }
+    if let Some(a) = sub.addr_of(b).or_else(|| super::mem::buffer_address(b)) {
+        super::lost::note_use(a + o, n, what);
+    }
+}
+
 fn stale_check(sub: &Sub, b: vk::Buffer, what: &str) {
     if let Some(n) = super::lost::buf_name(vk::Handle::as_raw(b)) {
         if (n == "staging" || n == "scratch") && !sub.owns(b) {
@@ -1928,6 +1944,16 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                         crate::vklog!("a storage buffer bound with size 0 ({a:#x}): bound to the end of its memory pool, {n} bytes (later ones are not logged)");
                     }
                 }
+                // A buffer the shader only reads runs to the end of its pool: an NVN shader's global loads are not held
+                // to the size in c0 (MKW's text vertex shader reads one 64-byte glyph record per instance from a binding
+                // of 0x100 bytes: past the fourth glyph it read zeros and the letters were dropped; mkw-recomp
+                // vk_exec_bind.c binds read-only buffers to the end of their backing). NXGFX_SBUF_TO_END=0 off.
+                if !*written && a != 0 && n != 0 && sbuf_to_end() && !crate::nvn::vpool::is_sparse(a) {
+                    let r = super::mem::room(a).min(g.d.props.limits.max_storage_buffer_range as u64);
+                    if r > n {
+                        n = r;
+                    }
+                }
                 if *written && st < 5 && a != 0 {
                     append::bound(a);
                 }
@@ -2149,6 +2175,7 @@ fn write_db_set(g: &Gpu, sub: &mut Sub, bufs: &[(u32, vk::DescriptorType, vk::De
             crate::log::red_once("descriptor buffers: a buffer bound to a shader has no device address: zeros bound");
         }
         let (a, range) = if base != 0 { (base + info.offset, info.range) } else { (zero, 65536) };
+        super::lost::note_use(a, range, if *ty == vk::DescriptorType::UNIFORM_BUFFER { "a uniform buffer descriptor" } else { "a storage buffer descriptor" });
         let ai = vk::DescriptorAddressInfoEXT::default().address(a).range(range);
         let (gi, size) = if *ty == vk::DescriptorType::UNIFORM_BUFFER {
             (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_uniform_buffer: &ai }), super::device::desc_size(p, vk::DescriptorType::UNIFORM_BUFFER))
@@ -2166,6 +2193,7 @@ fn write_db_set(g: &Gpu, sub: &mut Sub, bufs: &[(u32, vk::DescriptorType, vk::De
         unsafe { super::tables::put_descriptor(&g.d, ptr, off + l.db_stage_off[*b as usize], &gi, size) };
     }
     for (b, ty, ai) in taddrs {
+        super::lost::note_use(ai.address, ai.range, "a texel buffer descriptor");
         let (gi, size) = if *ty == vk::DescriptorType::UNIFORM_TEXEL_BUFFER {
             (vk::DescriptorGetInfoEXT::default().ty(*ty).data(vk::DescriptorDataEXT { p_uniform_texel_buffer: ai }), super::device::desc_size(p, vk::DescriptorType::UNIFORM_TEXEL_BUFFER))
         } else {
@@ -2208,6 +2236,7 @@ fn bind_sets(g: &Gpu, sub: &mut Sub, qs: &QState, mods: &[Arc<Module>], bp: vk::
             ];
             unsafe { g.d.db.cmd_bind_descriptor_buffers(sub.main, &infos) };
             sub.db_bound = Some(sub.db_cur);
+            super::lost::note_set(b'B', 0, sub.serial, sub.db_cur, 0);
         }
         for m in mods {
             let st = m.stage as usize;
@@ -2228,6 +2257,7 @@ fn bind_sets(g: &Gpu, sub: &mut Sub, qs: &QState, mods: &[Arc<Module>], bp: vk::
                 }
             };
             if let SetRef::Buf(off) = set {
+                super::lost::note_set(if hit.is_some() { b'H' } else { b'W' }, st as u8, sub.serial, sub.db_cur, off);
                 unsafe { g.d.db.cmd_set_descriptor_buffer_offsets(sub.main, bp, g.layout.pipeline, m.stage, &[1], &[off]) };
             }
             pool |= m.uses_pool;
@@ -2695,6 +2725,7 @@ fn vertex_input(g: &Gpu, sub: &mut Sub, qs: &QState, vs: &Module) {
         for (s, b, o) in bufs {
             if last.2[s as usize] != (b, o) {
                 stale_check(sub, b, "a vertex buffer");
+                use_note(sub, b, o, 1 << 24, "a vertex buffer (16 MB from its start assumed)");
                 g.dev().cmd_bind_vertex_buffers(sub.main, s, &[b], &[o]);
                 last.2[s as usize] = (b, o);
             }
@@ -2740,6 +2771,7 @@ fn draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw) {
     if d.ind != 0 {
         if let Some((b, o)) = rec {
             stale_check(sub, b, "an indirect draw record");
+            use_note(sub, b, o, 16, "an indirect draw record");
             unsafe { dev.cmd_draw_indirect(sub.main, b, o, 1, 16) };
         }
         return;
@@ -2816,6 +2848,7 @@ fn draw_idx(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw_idx) {
     let Some((ib, io, _)) = super::mem::resolve(g, sub, d.ibuf, n.max(1).min(1 << 20)) else { return };
     unsafe {
         stale_check(sub, ib, "an index buffer");
+        use_note(sub, ib, io, n.max(1).min(1 << 20), "an index buffer");
         dev.cmd_bind_index_buffer(sub.main, ib, io, ity);
         if d.ind != 0 {
             if let Some((b, o)) = rec {

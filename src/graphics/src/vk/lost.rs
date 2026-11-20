@@ -118,6 +118,16 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
                 }
             }
         }
+        // the commands just before the last started one (a pass begins at its first draw, after that draw's checkpoint)
+        if top != 0 {
+            for s in top.saturating_sub(3)..top {
+                crate::log::red(&format!("  before it: {}", text(s)));
+            }
+            if addr_report_wanted() {
+                crate::log::red("  stage sets around it:");
+                sets_report(top.saturating_sub(3), top + 1);
+            }
+        }
         if lo != 0 {
             for s in lo + 1..=hi.min(lo + 64) {
                 crate::log::red(&format!("  in flight: {}", text(s)));
@@ -155,6 +165,13 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
                 for a in ai.iter().take(c.address_info_count as usize) {
                     let t = TY.get(a.address_type.as_raw() as usize).copied().unwrap_or("?");
                     crate::log::red(&format!("  fault address: {t} at {:#x} (within {:#x})", a.reported_address, a.address_precision));
+                    if a.address_type == vk::DeviceFaultAddressTypeEXT::READ_INVALID || a.address_type == vk::DeviceFaultAddressTypeEXT::WRITE_INVALID {
+                        let us = uses_of(a.reported_address);
+                        crate::log::red(&format!("    {} recorded device range(s) of the replay hold it{}", us.len(), if us.is_empty() { "" } else { " (newest last):" }));
+                        for x in us {
+                            crate::log::red(&format!("      {x}"));
+                        }
+                    }
                     if let Some(o) = addr_owner(a.reported_address) {
                         crate::log::red(&format!("    {o}"));
                     } else if addr_report_wanted() {
@@ -290,16 +307,90 @@ fn name_of(handle: u64) -> String {
     NAMES.lock().unwrap().as_ref().and_then(|m| m.get(&handle)).map(|n| format!(" \"{n}\"")).unwrap_or_default()
 }
 
-/// What address `a` was in: the live binding holding it, else the last binding there that was unbound.
+/// What address `a` was in: the live binding holding it, else the last binding there that was unbound; then every other
+/// unbound binding that covered it (the newest owner of a recycled range is not always the one a stale reader means,
+/// lane K3).
 fn addr_owner(a: u64) -> Option<String> {
     let g = BINDS.lock().unwrap();
     let s = g.as_ref()?;
-    if let Some((&base, x)) = s.live.range(..=a).next_back().filter(|(&base, x)| a < base + x.size) {
-        return Some(format!("inside {:?} {:#x}{} (bound at {:.2} s: {:#x} +{:#x}), still bound", x.ty, x.handle, name_of(x.handle), x.at, base, x.size));
-    }
-    s.gone
+    let mut past: Vec<(f64, String)> = s
+        .gone
         .range(..=a)
-        .rev()
-        .find(|(base, (x, _))| a < **base + x.size)
-        .map(|(base, (x, t))| format!("inside {:?} {:#x}{} (bound at {:.2} s: {:#x} +{:#x}), UNBOUND at {:.2} s", x.ty, x.handle, name_of(x.handle), x.at, base, x.size, t))
+        .filter(|(base, (x, _))| a < **base + x.size)
+        .map(|(base, (x, t))| (*t, format!("{:?} {:#x}{} (bound at {:.2} s: {:#x} +{:#x}), UNBOUND at {:.2} s", x.ty, x.handle, name_of(x.handle), x.at, base, x.size, t)))
+        .collect();
+    past.sort_by(|x, y| x.0.total_cmp(&y.0));
+    let earlier = |skip_last: bool| {
+        let n = past.len() - skip_last as usize;
+        past[n.saturating_sub(8)..n].iter().map(|(_, d)| format!("
+      earlier: {d}")).collect::<String>()
+    };
+    if let Some((&base, x)) = s.live.range(..=a).next_back().filter(|(&base, x)| a < base + x.size) {
+        return Some(format!("inside {:?} {:#x}{} (bound at {:.2} s: {:#x} +{:#x}), still bound{}", x.ty, x.handle, name_of(x.handle), x.at, base, x.size, earlier(false)));
+    }
+    let last = past.last()?.1.clone();
+    Some(format!("inside {last}{}", earlier(true)))
+}
+
+/// Device ranges the replay handed the GPU (descriptor buffer / vertex / index / indirect addresses) with the checkpoint
+/// they came after, at `NXGFX_CHECKPOINTS=all` with the address report: a faulting address is matched against them
+/// (lane K3: MKW's 128x128x5 pass read a recycled range, and no reader was found by reading).
+const UN: usize = 1 << 20;
+static USES: Mutex<Vec<(u64, u64, u64, &'static str)>> = Mutex::new(Vec::new());
+static USE_I: AtomicU64 = AtomicU64::new(0);
+pub fn note_use(addr: u64, n: u64, what: &'static str) {
+    if addr == 0 || level() < 2 || !addr_report_wanted() {
+        return;
+    }
+    let i = USE_I.fetch_add(1, Ordering::Relaxed) as usize % UN;
+    let mut u = USES.lock().unwrap();
+    if u.is_empty() {
+        u.resize(UN, (0, 0, 0, ""));
+    }
+    u[i] = (SEQ.load(Ordering::Relaxed), addr, n, what);
+}
+/// Stage-set events of the replay (descriptor buffers), at `NXGFX_CHECKPOINTS=all` with the address report: a set
+/// written (W) or reused from the set cache (H) at (submission, chunk, offset) for a stage, a chunk bound (B).
+const SN: usize = 1 << 18;
+static SETS: Mutex<Vec<(u64, u8, u8, u64, u32, u64)>> = Mutex::new(Vec::new());
+static SET_I: AtomicU64 = AtomicU64::new(0);
+pub fn note_set(kind: u8, stage: u8, serial: u64, chunk: usize, off: u64) {
+    if level() < 2 || !addr_report_wanted() {
+        return;
+    }
+    let i = SET_I.fetch_add(1, Ordering::Relaxed) as usize % SN;
+    let mut u = SETS.lock().unwrap();
+    if u.is_empty() {
+        u.resize(SN, (0, 0, 0, 0, 0, 0));
+    }
+    u[i] = (SEQ.load(Ordering::Relaxed), kind, stage, serial, chunk as u32, off);
+}
+fn sets_report(lo: u64, hi: u64) {
+    let u = SETS.lock().unwrap();
+    let mut ev: Vec<(u64, u8, u8, u64, u32, u64)> = u.iter().filter(|e| e.1 != 0 && e.0 >= lo && e.0 <= hi).copied().collect();
+    ev.sort_by_key(|e| e.0);
+    for e in ev.iter().rev().take(16).rev() {
+        let what = match e.1 {
+            b'W' => "set written",
+            b'H' => "set reused",
+            _ => "chunk bound",
+        };
+        let mut line = format!("    after #{}: {what}: stage {} submission {} chunk {} offset {:#x}", e.0, e.2, e.3, e.4, e.5);
+        if e.1 == b'H' {
+            let w = u.iter().filter(|x| x.1 == b'W' && x.3 == e.3 && x.4 == e.4 && x.5 == e.5 && x.0 <= e.0).map(|x| x.0).max();
+            line += &match w {
+                Some(s) => format!(" (written after #{s})"),
+                None => " (NO write of it kept)".to_string(),
+            };
+        }
+        crate::log::red(&line);
+    }
+}
+
+fn uses_of(a: u64) -> Vec<String> {
+    let u = USES.lock().unwrap();
+    let mut hits: Vec<(u64, u64, u64, &'static str)> = u.iter().filter(|e| e.2 != 0 && a >= e.1 && a < e.1 + e.2).copied().collect();
+    hits.sort_by_key(|e| e.0);
+    let n = hits.len();
+    hits[n.saturating_sub(8)..].iter().map(|e| format!("{} {:#x} +{:#x} after {}", e.3, e.1, e.2, text(e.0))).collect()
 }
