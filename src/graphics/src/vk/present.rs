@@ -226,14 +226,14 @@ pub fn record_present(g: &Gpu, sub: &mut Sub, t: &tex_t, origin_ll: bool, crop: 
                     );
                 }
             }
-            Some((im.image, im.extent, im.scale))
+            Some((im.image, im.extent, im.scale, im.format))
         } else {
             None
         }
     }) else {
         return;
     };
-    let (src, sext, sscale) = (src.0, src.1, src.2);
+    let (src, sext, sscale, sfmt) = (src.0, src.1, src.2, src.3);
     let srgb = crate::tex::format::tex_format(t.d.format).map(|f| f.srgb).unwrap_or(false);
     // source region (crop); NVN's lower-left origin: row 0 is the bottom of the picture
     let (cx, cy, cw, ch) = match crop {
@@ -249,19 +249,20 @@ pub fn record_present(g: &Gpu, sub: &mut Sub, t: &tex_t, origin_ll: bool, crop: 
     // frame generation: the generated frames first, then the game's frame (from the history, upright)
     if let Some(out) = super::framegen::process(g, sub, src, cx, sy0, cx + cw, sy1) {
         for gi in out.gens {
-            if !present_image(g, sub, gi, srgb, [0, 0, out.w as i32, out.h as i32]) {
+            if !present_image(g, sub, gi, vk::Format::UNDEFINED, srgb, [0, 0, out.w as i32, out.h as i32]) {
                 return;
             }
         }
-        present_image(g, sub, out.real, srgb, [0, 0, out.w as i32, out.h as i32]);
+        present_image(g, sub, out.real, vk::Format::UNDEFINED, srgb, [0, 0, out.w as i32, out.h as i32]);
         return;
     }
-    present_image(g, sub, src, srgb, [cx, sy0, cx + cw, sy1]);
+    present_image(g, sub, src, sfmt, srgb, [cx, sy0, cx + cw, sy1]);
 }
 
 /// Acquires a swap chain image and records the blit of `src`'s region [x0, y0, x1, y1] (y0 > y1: turned over) into it,
 /// letterboxed; the present goes to `sub.present`. False when no image could be acquired.
-fn present_image(g: &Gpu, sub: &mut Sub, src: vk::Image, srgb: bool, r: [i32; 4]) -> bool {
+/// `fmt`: the source's format (UNDEFINED: not known, no sharp upscale).
+fn present_image(g: &Gpu, sub: &mut Sub, src: vk::Image, fmt: vk::Format, srgb: bool, r: [i32; 4]) -> bool {
     let mut p = g.present.lock().unwrap();
     let done = g.q.completed();
     let fg = super::framegen::wanted();
@@ -317,6 +318,12 @@ fn present_image(g: &Gpu, sub: &mut Sub, src: vk::Image, srgb: bool, r: [i32; 4]
     let scale = (ext.width as f64 / sw).min(ext.height as f64 / sh);
     let (dw, dh) = ((sw * scale) as i32, (sh * scale) as i32);
     let (dx, dy) = ((ext.width as i32 - dw) / 2, (ext.height as i32 - dh) / 2);
+    // a window larger than the picture: upscaled sharp into an image of the letterboxed size, copied 1:1
+    let up = if fmt != vk::Format::UNDEFINED { super::upscale::record(g, sub, src, fmt, r, dw.max(1) as u32, dh.max(1) as u32) } else { None };
+    let (src, [x0, y0, x1, y1]) = match up {
+        Some(t) => (t, [0, 0, dw, dh]),
+        None => (src, [x0, y0, x1, y1]),
+    };
     let blit = vk::ImageBlit {
         src_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
         src_offsets: [vk::Offset3D { x: x0, y: y0, z: 0 }, vk::Offset3D { x: x1, y: y1, z: 1 }],

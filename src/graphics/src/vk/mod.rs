@@ -31,6 +31,7 @@ pub mod present;
 pub mod queue;
 pub mod scale;
 pub mod spvfix;
+pub mod upscale;
 pub mod shader;
 pub mod shot;
 pub mod sparse;

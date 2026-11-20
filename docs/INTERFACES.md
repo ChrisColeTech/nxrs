@@ -702,6 +702,63 @@ shared by every program** (no per-program layouts, so pipelines key only on shad
 - **Fixed by lane W2 in graphics (small):** texture slot pairs (`tex_slots`, Anime Girls drew every texture as id 0)
   and no 3 s wait for a refused shader (Jamboree's 70 s stop); see the lane W2 section.
 
+**Lane G4 (2026-11-20, uncommitted).** Engine `target/G4`; game links `build/G4/<game>t` (`build/G4/link.sh <game>`: the
+game's objects, read only, a data folder of its own with the shaders through a junction to the game's, saves backed
+up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features gpu-tests --test gpu -- --test-threads=1`
+(17 now, all validation clean).
+- **shaders `link.rs` (new, used by graphics at module load and pipeline creation; built modules on disk unchanged):**
+  `trim_cull` (Turbo `vkspv_trim_cull`: gl_PerVertex's unused CullDistance member dropped when clip + cull pass
+  `maxCombinedClipAndCullDistances`; a red line names a shader whose cull distances are used), `io_locations` /
+  `missing` / `add_outputs` (a pixel shader reading a varying its vertex / geometry / tessellation shader never
+  writes: the earlier stage gets that output, holding (0, 0, 0, 1)), `int_outputs` / `output_kinds` (integer colour
+  targets), `dual_source`, `alpha_test` (`ALPHA_PUSH_OFFSET` 16: function u32, reference f32), `ballot_per_lane`.
+  **For lane S:** these could be applied at translation instead; graphics would then find nothing to do.
+- **Lane C's pipeline test:** the errors left were not clip / cull ones on this layer version but
+  `VUID-RuntimeSpirv-OpEntryPoint-08743` (pixel inputs no vertex output declares: 42 of Z-A's first 300 pairs). With
+  `pipe.rs link_io` (vertex variant per pair, `NXGFX_LINK_IO=0` off) and the trim: 0 validation errors on MK8D, DKB,
+  Z-A (300 pairs), Smash, Jamboree, Violet (600 pairs), prewarm included.
+- **Variants:** `shader.rs Library::variant` (cached per module and tag; the key's last bytes differ, so pipeline parts
+  and caches key on the variant): `with_outputs`, `with_int_outputs`, `fragment_variant(dual, alpha)`. Draw time
+  (`exec.rs draw_setup_ex`): dual-source when target 0 blends with SRC1 factors (else those factors count as zero),
+  alpha test when NVN's alpha function is not ALWAYS (`NXGFX_ALPHA_TEST=0`, control `alpha_test 0|1`). Pipeline time
+  (`pipe.rs link_io`): integer outputs from the key's colour formats, missing varyings.
+- **Storage use without the IMAGE flag:** on by default (`NXGFX_IMAGE_NOFLAG=0`, ini `image_noflag`, control
+  `image_noflag 0|1`); `image.rs want_image`, `upgrade_storage` (at the next submission's start, or at once when a draw
+  binds the image).
+- **Present:** `vk/upscale.rs` sharp upscale (`NXGFX_UPSCALE=standard`, `NXGFX_SHARPNESS`); frame generation's frames
+  are still blitted linearly.
+- **Linear render targets** read back at pass end (`NXGFX_RT_READBACK=0`). **NVN:** RegisterFastClear* return 1,
+  SetConservativeRasterEnable / SetShaderScratchMemory are procs now. **Pass dump** lines show target 0's blend
+  equation, logic op, alpha to coverage and alpha function; `NXGFX_DUMP_TEX` reads back compressed textures too (as
+  blocks).
+- **Write watch per allocation** (`mem.rs begin_submit`): watched pools of one allocation share one GetWriteWatch a
+  submission even with gaps between them (DKB: ~1,300 mirrors, 9 submissions a frame). **Not measured:** DKB built from
+  the current tree aborts in DT_INIT at 0.9 s (`nn::diag` Result 0xe801 from sdk+0x159154, before graphics:
+  `build/I/runs/20261120-025832-G4-dkb-pools`); **for lane O3**, probably the os work in the tree.
+- **First-run profile prewarm** (`pipe.rs prewarm_profile`, `NXGFX_PROFILE_PREWARM=0`): the shader parts of the
+  profile's pairs made ahead when the key file is nearly empty (Wonder's first entry). Not yet run on a first run.
+- **MK8D shadowed ground (M5): narrowed, not fixed.** Pass dump of `20261120-024043-G4-mk8d-lap1` at 150 s: pass 28
+  (shader `6aa6c36ed6065b7d`) writes an RGBA8 shadow mask at 0x15cf60600 (R = a constant from c3, G / B = the
+  shadow terms from the depth, the 2048x2048 RG32F VSM and the 1024x1024x2 D16 cascades); passes 29 / 30 multiply its
+  R by the karts' blob shadows (colour mask R only, ZERO / ONE_MINUS_SRC_ALPHA); pass 31 (the forward / G-buffer pass)
+  samples it through texture ser352412 whose **texture swizzle and view swizzle are both (G, B, A, R)**. Composed (as
+  Turbo does) that is (B, A, R, G); a view replacing the texture's would give (G, B, A, R). Tried
+  (`NXGFX_SWZ_OVERRIDE=1`, run `-mk8d-lap2-swz`): the stretch past the grandstand is still flat cyan with black shadow
+  (`0019-shot_lap.png`); in `-lap1` the same stretch came out black (`0022`, `0027`), the rest of the lap right
+  (`0016`). The VSM is still all zero (G3 rev 9). Next: decompile pass 31's pixel shaders (`044c744ceb0df7c2` and the
+  others sampling id7160) to see which mask channels they read, and find who should fill the VSM.
+- **Jamboree's white layer: not a blend state.** Pass 108's quad (`20261120-022711-G4-jamboree-blend2`): blend
+  SRC_ALPHA / ONE_MINUS_SRC_ALPHA, logic op COPY, no alpha to coverage, alpha function ALWAYS, colour mask all; its
+  colour = texture x c3[0] + c3[1] with c3 = (1, 1, 1, 1) / 0, and its 8x8 BC4 texture (swizzle 1, 1, 1, R) is block
+  `ff 00 00…` (every texel 1.0) on the GPU and in guest memory (`build/G4/jdump/tex-003663-ser3027-*.bin`). So the
+  game draws an opaque white fade on purpose: its fade state never advances. Back to lanes W / X (game state); not a
+  graphics state bug found.
+- **Smash device lost: not reproduced alone.** `20261120-025107-G4-smash-lost` (`NXRS_EXCLUSIVE=1`, 360 s of matches):
+  no device lost, 52.5 FPS (window 150-350 s). W2's losses came with other lanes' games on the GPU.
+- **Not done:** recording one submission on several threads (needs a recorder over every vkCmd call, Turbo
+  `vk_defer.c`), ray tracing (PORT_PLAN 5A.4 row), VRAM eviction, capture / replay, DKB's purple world, Wonder's
+  stutter measured.
+
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
 
@@ -1463,3 +1520,35 @@ which has no music; the music plays once the game starts.
 - Z-A floor / FPCR: **not a physics bug.** The player was blocked by an NPC (the boy in the yellow hoodie and his Helioptile stand at the hall arch: moving diagonally shows "A Talk" / "Interact Helioptile", `x2-plza10-move`); diagonal movement works and the camera follows it. FPCR handling matches Turbo by design: MSR FPCR keeps FZ/DN/AHP/RMode (`c->fpcr = v & 0x7c00000`), MXCSR mirrors FZ as FTZ+DAZ, directed rounding (RMode != 0) takes the slow paths of `runtime/simd.h` (Turbo instead sets MXCSR RC; same results); Z-A writes FPCR in 9 places; FRSQRTE/FRECPE are emulated (`rsqrte_s` 1161 / `recpe_s` 677 uses). Open: the camera stays put when she walks into the arch area behind the benches (`x2-plza11-gates`): the picture shows the platform with the player out of view. The ticket gates are past that arch (objective marker to the right of the bench pillar). Save: `build\X\saves\plza-0118\`.
 - MKW scene-ready flag: stage dispatch `main+0x76f60` skips stages 7/9 while `[obj+0x901]` bit 3 is set; bit 3 comes from `[x0+0x79]` in `main+0x4cd130` (called from `main+0x4cc580`), which clears `+0x79` only while `[x0+0x2dc] & 0x3f == 0`. `+0x2dc` has ~120 writers in main (many different classes use the offset), so the writer for this object needs a dynamic watch: a crumbs dump of `[x0+0x2dc]` / `[x0+0x79]` at `main+0x4cd204` per frame, then a write watch on that address. Expected answer: a resource-load or async-task count (fs async read, a thread signal, or a GPU fence the game polls) that never drains here.
 - Tools left in `build\X\` (lane X2 only): `xplay.py`, `icmd.sh`, `inst\inst.py` / `crumbs.py` (crumbs now guard their helper definitions when two functions of one chunk are instrumented), `relink.sh`, `ilink.sh`, inputs.
+
+## Lane O3 (os / runtime / front, 5A.1-5A.3, 2026-11-20)
+
+- **runtime `process::start_main(space, npdm, entry, setup)`**: the main thread for a host that loads the modules
+  itself (os): the kernel and start-up first, then `setup(&MainThread { priority, core, stack_size })` (os sets its
+  counter rate and virtual cores there, before any guest thread exists), then the thread at `Entry::Address` /
+  `Entry::Host`. `process::start` uses it. os no longer calls `create_main` itself.
+- **runtime `Kernel::thread_count()`** (live guest threads), `rt::trace_spec(env, log)`, `profile::on()`.
+- **SVCs (os `svc.rs`)**: an SVC nobody serves answers **NotImplemented 0xF601** (was success) with its gap line;
+  0x2E / 0x2F NotFound; 0x30 / 0x31 / 0x37 resource limits, 0x6F GetSystemInfo as Turbo; 0x02 / 0x03 / 0x80
+  recorded per page run (`mem::Memory::{set_permission, set_attribute}`) and reported by QueryMemory.
+- **Metrics producers**: runtime `kernel::svc` adds `wait_{sleep,sync,mutex,condvar,address}` and `_us`; os adds
+  `audio_underruns`, `audio_slowed_frames`, `ipc_requests`, `gap_answers` through `nxos::metric!("name", n)` (a
+  per-site cached `nxconfig::metrics` counter: use it for new counters); os pushes one `frames-*.csv` row per
+  present (`#present,guest_s,frame_ms,submits,nvn_calls,threads`). **Lane G4:** graphics may push its own per-frame
+  rows with `nxconfig::metrics::frame` (they share the file; start them with a `#` header line).
+- **New services**: `audren:u` (host mixer for SDK 1.x, `services/audren_ipc.rs`, with Turbo 8a265ab / a22b102),
+  `appletOE` / `appletAE` (library applets over IPC: MiiEdit cancelled, PlayerSelect the console user, others
+  closed with zero output; the proxy's other interfaces answer with gap lines; `services/applet.rs`).
+- **Profile `present_interval`**: os's `profile::Profile::present_interval` (engine.tsv `display` or 1..3, or the data
+  folder's `profile.tsv`) goes to `nxgfx::nvn::window::set_profile_interval` (`os::nvn::apply_present_interval`).
+- **front**: `input: mouse raw motion ... -> right stick ...` lines (the first 24) when `mouse_right_stick=1`.
+- **Test data**: `src/os/testdata/media/` (ffmpeg-made Opus / VP9 / AV1 / H.264 clips and ffmpeg's per-frame NV12
+  FNV hashes); os tests that need kernel objects call `crate::mem::tests::test_kernel()`.
+- **Tools (lane O3 only)**: `build/O3/relink.sh <game> <dir>` (a game's objects + `target/O3` nxfront into a copy),
+  `build/O3/oplay.py` (scripted run through `run_game.run`: wait / press / hold / shot / replay / mouse / ctl;
+  `O3_ARGS` adds `--key=value`). Copies in `build/O3/{mk8d,violet}`; saves backed up in `build/O3/saves`.
+- **Findings**: Violet new game passes name entry with `NXOS_SWKBD=auto` (the old run's gradient was the opening's
+  wait, not the keyboard: no swkbd call had happened); the opening runs past 5 minutes, so "Mom missing" is still
+  open. AudioIn: this PC has no capture endpoint now (DualSense mic disconnected). The owner was at the PC during
+  the mouse run (raw motion logged at 4 s, the window closed at 41 s): mouse runs move the real cursor, do them
+  only when the owner agrees.

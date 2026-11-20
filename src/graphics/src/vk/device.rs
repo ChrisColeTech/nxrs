@@ -55,6 +55,8 @@ pub struct Caps {
     pub storage_align: u64,
     pub occlusion_precise: bool,
     pub depth_bounds: bool,
+    /// dual-source blending (a pixel shader's output 1 as target 0's second source)
+    pub dual_src: bool,
     /// VK_EXT_mesh_shader's task and mesh stages (NVN2's DrawMeshTasks*)
     pub mesh: bool,
     /// VK_EXT_transform_feedback (NVN's transform feedback)
@@ -298,11 +300,15 @@ impl Device {
             eds3_sample_mask: caps_eds3.extended_dynamic_state3_sample_mask != 0,
             logic_op_dyn: f_eds2.extended_dynamic_state2_logic_op != 0 && base.logic_op != 0,
             patch_dyn: f_eds2.extended_dynamic_state2_patch_control_points != 0 && base.tessellation_shader != 0,
-            timestamp_period: props.limits.timestamp_period,
+            timestamp_period: {
+                super::shader::CLIP_CULL_LIMIT.store(props.limits.max_combined_clip_and_cull_distances, std::sync::atomic::Ordering::Relaxed);
+                props.limits.timestamp_period
+            },
             uniform_align: props.limits.min_uniform_buffer_offset_alignment,
             storage_align: props.limits.min_storage_buffer_offset_alignment,
             occlusion_precise: base.occlusion_query_precise != 0,
             depth_bounds: base.depth_bounds != 0,
+            dual_src: base.dual_src_blend != 0,
             mesh: has(ash::ext::mesh_shader::NAME) && f_ms.mesh_shader != 0 && f_ms.task_shader != 0 && env_on("NXGFX_MESH").unwrap_or(true),
             xfb: has(ash::ext::transform_feedback::NAME) && f_xfb.transform_feedback != 0,
             push_desc: has(ash::khr::push_descriptor::NAME),

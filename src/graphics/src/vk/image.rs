@@ -65,6 +65,69 @@ unsafe impl Send for Image {}
 
 const HPAGE: u64 = 4096;
 
+/// Image use without NVN's IMAGE flag (Turbo caa07ad). A game may register or bind a texture made without
+/// `NVN_TEXTURE_FLAGS_IMAGE` as an image (Ocarina of Time's movie network writes its pictures by image store into
+/// RGBA8 1920x1080 and RGBA8_SRGB 2560x1440 textures made with flags 0); the console takes that. Here such an image had
+/// no storage use and the writes were lost. With `NXGFX_IMAGE_NOFLAG=1` (or the ini / `--image_noflag=1`; off by
+/// default, as in Turbo) the storage of such a texture is remembered and every image over it gets storage use, an sRGB
+/// one through its UNORM twin (Vulkan has no sRGB storage images; `EXTENDED_USAGE`). An image made before the texture
+/// was used so is made again with its content (`upgrade_storage`).
+static IMG_MEM: std::sync::Mutex<Option<std::collections::HashSet<u64>>> = std::sync::Mutex::new(None);
+/// storage marked since the last submission (images over it are made again at its start)
+static IMG_PENDING: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+/// Read at each use (a texture registered or bound as an image without the flag; rare), so it can change live.
+pub fn image_noflag_on() -> bool {
+    match std::env::var("NXGFX_IMAGE_NOFLAG") {
+        Ok(v) => v != "0",
+        Err(_) => nxconfig::tristate("image_noflag").unwrap_or(true),
+    }
+}
+
+fn img_wanted(t: &tex_t) -> bool {
+    !t.mem.is_null() && IMG_MEM.lock().unwrap().as_ref().is_some_and(|m| m.contains(&(t.mem as u64)))
+}
+
+/// The UNORM twin of an sRGB format (what a storage view of an sRGB image is made in).
+pub fn unorm_twin(f: vk::Format) -> Option<vk::Format> {
+    Some(match f {
+        vk::Format::R8G8B8A8_SRGB => vk::Format::R8G8B8A8_UNORM,
+        vk::Format::B8G8R8A8_SRGB => vk::Format::B8G8R8A8_UNORM,
+        vk::Format::A8B8G8R8_SRGB_PACK32 => vk::Format::A8B8G8R8_UNORM_PACK32,
+        vk::Format::R8_SRGB => vk::Format::R8_UNORM,
+        vk::Format::R8G8_SRGB => vk::Format::R8G8_UNORM,
+        _ => return None,
+    })
+}
+
+/// A texture used as an image without the IMAGE flag: its storage is marked (when `image_noflag` is on); true when it
+/// is new to the set, so images over it are made again with storage use (at the next submission's start).
+pub fn want_image(t: &tex_t) -> bool {
+    if !image_noflag_on() || t.mem.is_null() || t.d.flags as u32 & tex_flags::IMAGE != 0 || t.d.target == target::BUFFER || layout::fmt_bpb(t.d.format).1 > 1 {
+        return false;
+    }
+    let Some(tf) = format::tex_format(t.d.format) else { return false };
+    if tf.astc.is_some() || matches!(tf.kind, Kind::Depth | Kind::DepthStencil | Kind::Stencil) {
+        return false;
+    }
+    let fresh = IMG_MEM.lock().unwrap().get_or_insert_with(Default::default).insert(t.mem as u64);
+    if fresh {
+        IMG_PENDING.lock().unwrap().push(t.mem as u64);
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::vklog!(
+                "texture ser{} {}x{} format {:#x} flags {:#x} is used as an image without the IMAGE flag: its image gets storage use",
+                t.serial,
+                t.d.width,
+                t.d.height,
+                t.d.format,
+                t.d.flags
+            );
+        }
+    }
+    fresh
+}
+
 fn hash_bytes(b: &[u8]) -> u64 {
     // four independent lanes of 8 bytes (one lane's multiply chain ran at ~2 GB/s: Violet hashed ~70 MB of
     // re-written texture pages a frame, 17-37 ms)
@@ -299,7 +362,11 @@ fn components(t: &tex_t, v: Option<&view_t>, tf: &TexFormat) -> vk::ComponentMap
     let mut c = [s & 7, s >> 3 & 7, s >> 6 & 7, s >> 9 & 7];
     if let Some(v) = v {
         if v.bits & VW_SWIZZLE != 0 {
-            let base = c;
+            // a view's swizzle applied over the texture's (Turbo's `compose`). NXGFX_SWZ_OVERRIDE=1: the view's replaces
+            // it (tried for Mario Kart 8 Deluxe's shadow mask, sampled through a texture and a view both swizzled
+            // (G, B, A, R): the cyan stayed, run G4-mk8d-lap2-swz)
+            static OVERRIDE: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            let base = if *OVERRIDE.get_or_init(|| std::env::var("NXGFX_SWZ_OVERRIDE").as_deref() == Ok("1")) { [2, 3, 4, 5] } else { c };
             for i in 0..4 {
                 let w = v.swz[i] as u16;
                 c[i] = if (2..=5).contains(&w) { base[(w - 2) as usize] } else { w };
@@ -418,10 +485,21 @@ impl Gpu {
             usage |= vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT;
         }
         let samples = samples_of(t.d.samples);
-        if feat.contains(vk::FormatFeatureFlags::STORAGE_IMAGE) && (t.d.flags as u32 & tex_flags::IMAGE != 0) && samples == vk::SampleCountFlags::TYPE_1 {
-            usage |= vk::ImageUsageFlags::STORAGE;
-        }
         let mut flags = vk::ImageCreateFlags::empty();
+        if samples == vk::SampleCountFlags::TYPE_1 {
+            if feat.contains(vk::FormatFeatureFlags::STORAGE_IMAGE) && (t.d.flags as u32 & tex_flags::IMAGE != 0) {
+                usage |= vk::ImageUsageFlags::STORAGE;
+            } else if t.d.flags as u32 & tex_flags::IMAGE == 0 && tf.astc.is_none() && img_wanted(t) {
+                // used as an image without the flag (`want_image`): storage use, through the UNORM twin when the
+                // format itself has none
+                if feat.contains(vk::FormatFeatureFlags::STORAGE_IMAGE) {
+                    usage |= vk::ImageUsageFlags::STORAGE;
+                } else if unorm_twin(tf.vk).is_some_and(|u| self.d.format_features(u).contains(vk::FormatFeatureFlags::STORAGE_IMAGE)) {
+                    usage |= vk::ImageUsageFlags::STORAGE;
+                    flags |= vk::ImageCreateFlags::EXTENDED_USAGE;
+                }
+            }
+        }
         if ty == vk::ImageType::TYPE_3D && usage.contains(vk::ImageUsageFlags::COLOR_ATTACHMENT) {
             flags |= vk::ImageCreateFlags::TYPE_2D_ARRAY_COMPATIBLE;
         }
@@ -756,6 +834,11 @@ impl Gpu {
         if base_level + nlevels > im.levels {
             nlevels = im.levels.saturating_sub(base_level).max(1);
         }
+        if storage && !self.d.format_features(fmt).contains(vk::FormatFeatureFlags::STORAGE_IMAGE) {
+            if let Some(u) = unorm_twin(fmt).filter(|&u| self.d.format_features(u).contains(vk::FormatFeatureFlags::STORAGE_IMAGE)) {
+                fmt = u;
+            }
+        }
         let comps = if attach || storage { vk::ComponentMapping::default() } else { components(&t, v, &im.tf) };
         let want = if attach {
             vk::ImageUsageFlags::COLOR_ATTACHMENT | vk::ImageUsageFlags::DEPTH_STENCIL_ATTACHMENT
@@ -813,12 +896,15 @@ impl Gpu {
             self.tables.note_buf_tex(id, *t);
             return;
         }
+        if as_image {
+            want_image(t);
+        }
         let mut imgs = self.images.lock().unwrap();
         if !self.ensure_image(&mut imgs, t) {
             return;
         }
         let im = imgs.by_serial.get_mut(&t.serial).unwrap();
-        let storage = im.usage.contains(vk::ImageUsageFlags::STORAGE) && (as_image || t.d.flags as u32 & tex_flags::IMAGE != 0);
+        let storage = im.usage.contains(vk::ImageUsageFlags::STORAGE) && (as_image || t.d.flags as u32 & tex_flags::IMAGE != 0 || img_wanted(t));
         if as_image {
             im.gpu_owned = true;
         }
@@ -1042,6 +1128,120 @@ impl Gpu {
         done.len()
     }
 
+    /// The images over `addrs` (storage of textures used as images without the IMAGE flag) that lack storage use made
+    /// again with it, their content copied (`sub.pre`, before the submission's work), the old ones released and the
+    /// texture pool's descriptors of every texture over them rewritten. Returns how many were made again.
+    pub fn upgrade_storage(&self, imgs: &mut Images, addrs: &[u64], sub: &mut Sub) -> usize {
+        let owners: Vec<u64> = imgs
+            .by_serial
+            .iter()
+            .filter(|(_, im)| addrs.contains(&(im.tex.mem as u64)) && im.alias_of.is_none() && im.sparse.is_none() && im.alloc.is_some() && !im.usage.contains(vk::ImageUsageFlags::STORAGE))
+            .map(|(k, _)| *k)
+            .collect();
+        let mut done = std::collections::HashSet::new();
+        let mut gone = Vec::new();
+        for serial in owners {
+            let tex = imgs.by_serial[&serial].tex;
+            let Some(new) = self.create_image(&tex) else { continue };
+            let im = imgs.by_serial.get_mut(&serial).unwrap();
+            if !new.usage.contains(vk::ImageUsageFlags::STORAGE) || new.extent != im.extent || new.format != im.format || new.sparse.is_some() {
+                self.destroy_released(new);
+                continue;
+            }
+            let asp = aspect(&im.tf);
+            let range = vk::ImageSubresourceRange { aspect_mask: asp, base_mip_level: 0, level_count: im.levels, base_array_layer: 0, layer_count: im.layers };
+            let b = [vk::ImageMemoryBarrier2::default()
+                .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
+                .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+                .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
+                .old_layout(vk::ImageLayout::UNDEFINED)
+                .new_layout(vk::ImageLayout::GENERAL)
+                .image(new.image)
+                .subresource_range(range)];
+            unsafe { self.dev().cmd_pipeline_barrier2(sub.pre, &vk::DependencyInfo::default().image_memory_barriers(&b)) };
+            if !im.needs_init {
+                let regions: Vec<vk::ImageCopy> = (0..im.levels)
+                    .map(|lv| {
+                        let sl = vk::ImageSubresourceLayers { aspect_mask: asp, mip_level: lv, base_array_layer: 0, layer_count: if im.ty == vk::ImageType::TYPE_3D { 1 } else { im.layers } };
+                        vk::ImageCopy {
+                            src_subresource: sl,
+                            src_offset: vk::Offset3D::default(),
+                            dst_subresource: sl,
+                            dst_offset: vk::Offset3D::default(),
+                            extent: vk::Extent3D { width: (im.extent.width >> lv).max(1), height: (im.extent.height >> lv).max(1), depth: (im.extent.depth >> lv).max(1) },
+                        }
+                    })
+                    .collect();
+                unsafe { self.dev().cmd_copy_image(sub.pre, im.image, vk::ImageLayout::GENERAL, new.image, vk::ImageLayout::GENERAL, &regions) };
+            }
+            let mut new = new;
+            let old = Image {
+                tex: im.tex,
+                image: std::mem::replace(&mut im.image, new.image),
+                alloc: std::mem::replace(&mut im.alloc, new.alloc.take()),
+                format: im.format,
+                tf: im.tf,
+                ty: im.ty,
+                extent: im.extent,
+                levels: im.levels,
+                layers: im.layers,
+                samples: im.samples,
+                usage: std::mem::replace(&mut im.usage, new.usage),
+                views: std::mem::take(&mut im.views),
+                gpu_owned: true,
+                needs_init: false,
+                needs_upload: false,
+                bc7: im.bc7,
+                decoded: None,
+                sparse: None,
+                page_hash: Vec::new(),
+                rewrites: 0,
+                scale: im.scale,
+                alias_of: None,
+            };
+            gone.push(old);
+            done.insert(serial);
+        }
+        if done.is_empty() {
+            return 0;
+        }
+        super::queue::full_barrier(self, sub.pre);
+        // aliases view the new images
+        let followers: Vec<u64> = imgs.by_serial.iter().filter(|(_, a)| a.alias_of.is_some_and(|o| done.contains(&o))).map(|(k, _)| *k).collect();
+        for f in followers {
+            let (o, usage) = {
+                let oi = &imgs.by_serial[&imgs.by_serial[&f].alias_of.unwrap()];
+                (oi.image, oi.usage)
+            };
+            let a = imgs.by_serial.get_mut(&f).unwrap();
+            let views: Vec<vk::ImageView> = a.views.drain().map(|(_, v)| v).collect();
+            self.q.defer_after_use(Box::new(move |g: &Gpu| unsafe {
+                for v in views {
+                    g.dev().destroy_image_view(v, None);
+                }
+            }));
+            a.image = o;
+            a.usage = usage;
+            done.insert(f);
+        }
+        for (id, serial, v) in self.tables.ids_of(&done) {
+            if let Some(im) = imgs.by_serial.get_mut(&serial) {
+                if let Some(view) = self.image_view(im, v.as_ref(), false) {
+                    let sview = self.storage_view(im, v.as_ref());
+                    self.tables.write_image(&self.d, id, view, sview);
+                }
+            }
+        }
+        sub.memo_views.clear();
+        let n = done.len();
+        crate::vklog!("{n} image(s) made again with storage use (textures used as images without the IMAGE flag)");
+        for im in gone {
+            self.destroy_released(im);
+        }
+        n
+    }
+
     fn destroy_released(&self, im: Image) {
         {
             self.q.defer_after_use(
@@ -1167,6 +1367,10 @@ impl Gpu {
             self.tables.write_texel_views(&self.d, id, uv, sv);
         }
         let mut imgs = self.images.lock().unwrap();
+        let pending = std::mem::take(&mut *IMG_PENDING.lock().unwrap());
+        if !pending.is_empty() {
+            self.upgrade_storage(&mut imgs, &pending, sub);
+        }
         let t_all = std::time::Instant::now();
         if !dirty.is_empty() && !imgs.by_addr.is_empty() {
             let max = imgs.max_size;

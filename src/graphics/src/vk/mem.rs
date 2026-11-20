@@ -52,6 +52,9 @@ pub struct Pool {
     pub pending: Vec<(u64, u64)>,
     /// the device address of `base` in its buffer (0: none yet; raw global memory's pool table, `gmem`)
     pub da: u64,
+    /// the allocation (VirtualQuery's allocation base) its first page is in, when it lies in one: watched pools of one
+    /// allocation share one GetWriteWatch call a submission
+    pub alloc_base: u64,
 }
 
 /// Moves whenever a pool comes, goes or gets its GPU buffer (the raw global memory table is written again).
@@ -108,8 +111,20 @@ mod watch {
         }
         Some(out)
     }
+    /// The allocation base of [lo, hi) when the whole range lies in one allocation (0 otherwise).
+    pub fn alloc_of(lo: u64, hi: u64) -> u64 {
+        let a = allocations_with_base(lo, hi);
+        if a.len() == 1 {
+            a[0].2
+        } else {
+            0
+        }
+    }
     /// [lo, hi) split where its allocations (VirtualQuery's allocation base) change.
     fn allocations(lo: u64, hi: u64) -> Vec<(u64, u64)> {
+        allocations_with_base(lo, hi).into_iter().map(|(a, b, _)| (a, b)).collect()
+    }
+    fn allocations_with_base(lo: u64, hi: u64) -> Vec<(u64, u64, u64)> {
         use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
         let mut out: Vec<(u64, u64, u64)> = Vec::new();
         let mut at = lo;
@@ -131,7 +146,7 @@ mod watch {
             }
             at = e;
         }
-        out.into_iter().map(|(a, b, _)| (a, b)).collect()
+        out
     }
     fn take_one(lo: u64, hi: u64, reset: bool) -> Option<Vec<u64>> {
         // one buffer of the thread's, reused (a buffer sized to the pool, zeroed at every call, was most of the cost
@@ -294,6 +309,7 @@ pub fn pool_add(p: &pool_t) {
         page_lo: lo,
         pending: Vec::new(),
         da: 0,
+        alloc_base: if watched { watch::alloc_of(lo, hi) } else { 0 },
     };
     if std::env::var("NXGFX_POOL_LOG").is_ok() {
         crate::vklog!("pool {base:#x} size {:#x} flags {:#x}: {placement:?}{}", p.size, p.flags, if watched { " (write watch)" } else { "" });
@@ -619,26 +635,28 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
     // most of them neighbours: one GetWriteWatch each was 3.5 ms a frame of `pools`; Mario Kart World 21 ms)
     let mut taken: HashMap<u64, Vec<u64>> = HashMap::new();
     {
-        let watched: Vec<(u64, u64, u64)> = m
+        let watched: Vec<(u64, u64, u64, u64)> = m
             .by_base
             .values()
             .filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host))
             .map(|p| {
                 let (lo, hi) = page_range(p.base, p.size);
-                (p.base, lo, hi)
+                (p.base, lo, hi, p.alloc_base)
             })
             .collect();
+        // a run: pools whose pages touch, or pools of one allocation with gaps between them (one call over the run
+        // instead of one per pool: Donkey Kong Bananza has ~1,300 mirrors, 9 submissions a frame)
         let mut i = 0;
         while i < watched.len() {
-            let (mut j, lo, mut hi) = (i + 1, watched[i].1, watched[i].2);
-            while j < watched.len() && watched[j].1 <= hi {
+            let (mut j, lo, mut hi, ab) = (i + 1, watched[i].1, watched[i].2, watched[i].3);
+            while j < watched.len() && (watched[j].1 <= hi || (ab != 0 && watched[j].3 == ab)) {
                 hi = hi.max(watched[j].2);
                 j += 1;
             }
             if j - i > 1 {
                 if let Some(pages) = watch::take(lo, hi, true) {
                     // each pool its own pages (a page two pools share goes to both)
-                    for &(base, plo, phi) in &watched[i..j] {
+                    for &(base, plo, phi, _) in &watched[i..j] {
                         let a = pages.partition_point(|&p| p < plo);
                         let b = pages.partition_point(|&p| p < phi);
                         taken.insert(base, pages[a..b].to_vec());

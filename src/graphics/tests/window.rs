@@ -67,8 +67,8 @@ fn main() {
     let mut n = Nvn::new();
     let e0 = validation_errors();
     nxgfx::set_window(hwnd, hinst);
-    // the game's swap chain: two 1280x720 RGBA8 textures
-    let mut texs: Vec<Box<NVNtexture>> = (0..2).map(|_| n.texture(1280, 720, 37, tex_flags::DISPLAY, false)).collect();
+    // the game's swap chain: two 640x360 RGBA8 textures (smaller than the 960x540 window: the sharp upscale runs)
+    let mut texs: Vec<Box<NVNtexture>> = (0..2).map(|_| n.texture(640, 360, 37, tex_flags::DISPLAY, false)).collect();
     let tp: Vec<*mut NVNtexture> = texs.iter_mut().map(|t| &mut **t as *mut NVNtexture).collect();
     let mut wb = NVNwindowBuilder::boxed();
     let mut win = NVNwindow::boxed();
@@ -95,7 +95,7 @@ fn main() {
         let t = &*texs[idx as usize];
         let a = f as f32 * 0.05;
         n.begin();
-        n.set_target(t, None, 1280, 720);
+        n.set_target(t, None, 640, 360);
         let bg = [0.1, 0.1 + 0.4 * (f as f32 / FRAMES as f32), 0.3, 1.0];
         unsafe { nvnCommandBufferClearColor(n.c(), 0, bg.as_ptr(), 0xf) };
         unsafe { nvnCommandBufferBindProgram(n.c(), &*prog, 0x1f) };

@@ -102,7 +102,7 @@ pub struct Pipes {
     /// linked pipelines an optimized one has replaced (a recorded command buffer may still use them)
     retired: Mutex<Vec<vk::Pipeline>>,
     /// keys whose whole pipeline the background builder is to make
-    optimize: Mutex<Option<std::sync::mpsc::Sender<(GfxKey, Vec<Arc<Module>>)>>>,
+    optimize: Mutex<Option<std::sync::mpsc::Sender<(GfxKey, GfxKey, Vec<Arc<Module>>)>>>,
     pub linked: AtomicU64,
     pub optimized: AtomicU64,
     /// shader parts made ahead (`prebuild`)
@@ -375,7 +375,10 @@ fn pipe_log(what: &str, mods: &[&Module], end: bool) {
 }
 
 pub fn driver_exclusive(g: &Gpu) -> bool {
-    nxconfig::tristate("driver_exclusive").unwrap_or(g.d.props.vendor_id == 0x8086)
+    driver_exclusive_d(&g.d)
+}
+pub fn driver_exclusive_d(d: &super::device::Device) -> bool {
+    nxconfig::tristate("driver_exclusive").unwrap_or(d.props.vendor_id == 0x8086)
 }
 
 fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, String> {
@@ -620,7 +623,8 @@ fn note_targets(k: &GfxKey) {
 /// only linked at its first draw: a new place in a game no longer waits for its shaders to compile there). The
 /// fragment part for the depth formats and sample counts pipelines were made for lately.
 pub fn prebuild(g: &'static Gpu, keys: Vec<ShaderKey>) {
-    if !g.d.caps.gpl || keys.is_empty() {
+    // shader_thread=0: nothing made on threads of its own (every pipeline at its first draw)
+    if !g.d.caps.gpl || keys.is_empty() || !nxconfig::flag("shader_thread") {
         return;
     }
     static TX: Mutex<Option<std::sync::mpsc::Sender<Vec<ShaderKey>>>> = Mutex::new(None);
@@ -663,6 +667,7 @@ pub fn prebuild(g: &'static Gpu, keys: Vec<ShaderKey>) {
                     if mods.is_empty() {
                         continue;
                     }
+                    link_io(g, &mut k, &mut mods);
                     let targets = TARGETS.lock().unwrap().clone();
                     for (samples, depth) in if targets.is_empty() { vec![(1, 0)] } else { targets } {
                         k.samples = samples;
@@ -680,22 +685,19 @@ pub fn prebuild(g: &'static Gpu, keys: Vec<ShaderKey>) {
 }
 
 /// The background builders of the whole pipelines that replace linked ones (below normal priority).
-fn queue_optimize(g: &'static Gpu, k: GfxKey, mods: Vec<Arc<Module>>) {
+/// `at`: the key the pipeline is found by; `k`: the one it is built from (its linked variant, `link_io`).
+fn queue_optimize(g: &'static Gpu, at: GfxKey, k: GfxKey, mods: Vec<Arc<Module>>) {
     let mut tx = g.pipes.optimize.lock().unwrap();
     if tx.is_none() {
-        let (s, r) = std::sync::mpsc::channel::<(GfxKey, Vec<Arc<Module>>)>();
+        let (s, r) = std::sync::mpsc::channel::<(GfxKey, GfxKey, Vec<Arc<Module>>)>();
         let r = Arc::new(Mutex::new(r));
         for i in 0..2 {
             let r = r.clone();
             let _ = std::thread::Builder::new().name(format!("vk pipeline optimizer {i}")).spawn(move || {
-                #[cfg(windows)]
-                unsafe {
-                    use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
-                    SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
-                }
+                low_priority();
                 loop {
                     let job = r.lock().unwrap().recv();
-                    let Ok((k, mods)) = job else { return };
+                    let Ok((at, k, mods)) = job else { return };
                     if g.pipes.stop.load(Ordering::Relaxed) {
                         return;
                     }
@@ -703,7 +705,7 @@ fn queue_optimize(g: &'static Gpu, k: GfxKey, mods: Vec<Arc<Module>>) {
                         continue;
                     }
                     if let Ok(p) = build_gfx(g, &k, &mods) {
-                        let old = g.pipes.map.lock().unwrap().insert(Key::Gfx(k), p);
+                        let old = g.pipes.map.lock().unwrap().insert(Key::Gfx(at), p);
                         if let Some(o) = old {
                             g.pipes.retired.lock().unwrap().push(o);
                         }
@@ -714,7 +716,7 @@ fn queue_optimize(g: &'static Gpu, k: GfxKey, mods: Vec<Arc<Module>>) {
         }
         *tx = Some(s);
     }
-    let _ = tx.as_ref().unwrap().send((k, mods));
+    let _ = tx.as_ref().unwrap().send((at, k, mods));
 }
 
 fn build_compute(g: &Gpu, m: &Module) -> Result<vk::Pipeline, String> {
@@ -726,6 +728,57 @@ fn build_compute(g: &Gpu, m: &Module) -> Result<vk::Pipeline, String> {
     pipe_log("compute", &[m], true);
     super::pcache::note_created(1);
     Ok(p[0])
+}
+
+/// 1 an unsigned integer colour format, 2 a signed one, 0 otherwise.
+fn int_class(f: vk::Format) -> u8 {
+    let n = format!("{f:?}");
+    if n.contains("UINT") {
+        1
+    } else if n.contains("SINT") {
+        2
+    } else {
+        0
+    }
+}
+
+/// A program's stage before the pixel shader with outputs for the varyings the pixel shader reads and it never writes
+/// (undefined on the console, an interface error on Vulkan): the variant module in `mods` and its key in `k`.
+/// `NXGFX_LINK_IO=0` off.
+fn link_io(g: &Gpu, k: &mut GfxKey, mods: &mut [Arc<Module>]) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("NXGFX_LINK_IO").as_deref() != Ok("0")) || mods.iter().any(|m| m.mesh != 0) {
+        return;
+    }
+    let Some(ps) = mods.iter().position(|m| m.stage == 1) else { return };
+    // integer colour targets: the pixel shader's float outputs there retyped (Turbo's integer output variant)
+    let outs = shaders::link::output_kinds(&mods[ps].words);
+    let mut kinds = [0u8; 8];
+    for (l, kind) in kinds.iter_mut().enumerate().take(k.ncolor as usize) {
+        let want = int_class(vk::Format::from_raw(k.colors[l]));
+        if want != 0 && outs[l] == Some(0) {
+            *kind = want;
+        }
+    }
+    if kinds.iter().any(|&x| x != 0) {
+        if let Some(v) = g.shaders.with_int_outputs(g.dev(), &mods[ps], &kinds) {
+            k.shaders[1] = v.key;
+            mods[ps] = v;
+        }
+    }
+    let Some(prev) = [2u32, 4, 0].iter().find_map(|&s| mods.iter().position(|m| m.stage == s)) else { return };
+    let inputs = shaders::link::io_locations(&mods[ps].words, false);
+    if inputs.is_empty() {
+        return;
+    }
+    let add = shaders::link::missing(&shaders::link::io_locations(&mods[prev].words, true), &inputs);
+    if add.is_empty() {
+        return;
+    }
+    if let Some(v) = g.shaders.with_outputs(g.dev(), &mods[prev], &add) {
+        k.shaders[mods[prev].stage as usize] = v.key;
+        mods[prev] = v;
+    }
 }
 
 fn modules_of(g: &Gpu, k: &GfxKey) -> Option<Vec<Arc<Module>>> {
@@ -745,6 +798,13 @@ impl Gpu {
         if let Some(p) = self.pipes.map.lock().unwrap().get(&key) {
             return Some(*p);
         }
+        let at = *k;
+        let (k, mods) = {
+            let (mut k2, mut m2) = (*k, mods.to_vec());
+            link_io(self, &mut k2, &mut m2);
+            (k2, m2)
+        };
+        let (k, mods) = (&k, &mods[..]);
         // it crashed the driver's compiler in an earlier session: not compiled again, its draws are skipped
         if crashed(self, k) {
             crate::log::red_once("a pipeline that crashed the driver's compiler in an earlier session is not compiled again: its draws are skipped (pipeline-crashed.bin)");
@@ -784,8 +844,9 @@ impl Gpu {
                 self.pipes.note_key(key);
                 if linked.is_some() {
                     self.pipes.linked.fetch_add(1, Ordering::Relaxed);
-                    if let Some(g) = Gpu::try_get() {
-                        queue_optimize(g, *k, mods.to_vec());
+                    // shader_thread=0: the linked pipeline stays (no optimizer thread)
+                    if let Some(g) = Gpu::try_get().filter(|_| nxconfig::flag("shader_thread")) {
+                        queue_optimize(g, at, *k, mods.to_vec());
                     }
                 }
                 Some(p)
@@ -846,6 +907,71 @@ pub fn private_bytes() -> u64 {
     0
 }
 
+/// A first run (the pipeline key file holds fewer than `NXGFX_PROFILE_PREWARM_MIN` keys, 64): the shader parts of the
+/// programs the profile's tables name (`<shaders>/profile/`, written by the build: nxnative's prewarm seed
+/// `pso_manifest.tsv` in first-use order, then the vertex / pixel pairs of `shader_pairs.tsv`) are made ahead on the
+/// shader-part threads (`prebuild`, within its memory budget), so a level's first entry links its pipelines from
+/// parts instead of compiling them at the first draw. `NXGFX_PROFILE_PREWARM=0` off. Returns the programs queued.
+pub fn prewarm_profile(g: &'static Gpu, keys_known: usize) -> usize {
+    if std::env::var("NXGFX_PROFILE_PREWARM").as_deref() == Ok("0") || !g.d.caps.gpl || !nxconfig::flag("shader_thread") {
+        return 0;
+    }
+    let min = std::env::var("NXGFX_PROFILE_PREWARM_MIN").ok().and_then(|v| v.parse().ok()).unwrap_or(64usize);
+    if keys_known >= min {
+        return 0;
+    }
+    let Some(dir) = g.shaders.dir().map(|d| d.join("profile")) else { return 0 };
+    let key = |h: &str| -> Option<ShaderKey> {
+        let h = h.split('_').next()?;
+        if h.len() != 16 {
+            return None;
+        }
+        let mut k = [0u8; 8];
+        for i in 0..8 {
+            k[i] = u8::from_str_radix(&h[2 * i..2 * i + 2], 16).ok()?;
+        }
+        Some(k)
+    };
+    let pairs: Vec<(ShaderKey, ShaderKey)> = std::fs::read_to_string(dir.join("shader_pairs.tsv"))
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| !l.starts_with('#'))
+        .filter_map(|l| {
+            let mut f = l.split(char::from(9u8));
+            Some((key(f.next()?)?, key(f.next()?)?))
+        })
+        .collect();
+    // the seed's shaders in first-use order: their pairs first
+    let mut order: Vec<ShaderKey> = Vec::new();
+    for l in std::fs::read_to_string(dir.join("pso_manifest.tsv")).unwrap_or_default().lines() {
+        let f: Vec<&str> = l.split(char::from(9u8)).collect();
+        if let ["S", k, ..] = f[..] {
+            if let Some(k) = key(k) {
+                order.push(k);
+            }
+        }
+    }
+    let mut queued = std::collections::HashSet::new();
+    let mut programs: Vec<Vec<ShaderKey>> = Vec::new();
+    let pos: std::collections::HashMap<ShaderKey, usize> = order.iter().enumerate().map(|(i, k)| (*k, i)).collect();
+    let mut sorted = pairs;
+    sorted.sort_by_key(|(v, p)| pos.get(v).copied().unwrap_or(usize::MAX).min(pos.get(p).copied().unwrap_or(usize::MAX)));
+    for (v, p) in sorted {
+        if queued.insert((v, p)) {
+            programs.push(vec![v, p]);
+        }
+    }
+    let n = programs.len();
+    if n == 0 {
+        return 0;
+    }
+    crate::vklog!("profile prewarm: a first run ({keys_known} pipeline keys known): the shader parts of {n} programs from {} made ahead ({} seeded shaders first)", dir.display(), order.len());
+    for p in programs {
+        prebuild(g, p);
+    }
+    n
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct PrewarmReport {
     pub keys: usize,
@@ -900,7 +1026,11 @@ pub fn prewarm(g: &'static Gpu, threads: usize) -> PrewarmReport {
             }
             let p = match k {
                 Key::Gfx(gk) if crashed(g, &gk) => None,
-                Key::Gfx(gk) => modules_of(g, &gk).and_then(|m| build_gfx(g, &gk, &m).ok()),
+                Key::Gfx(gk) => modules_of(g, &gk).and_then(|mut m| {
+                    let mut k2 = gk;
+                    link_io(g, &mut k2, &mut m);
+                    build_gfx(g, &k2, &m).ok()
+                }),
                 Key::Compute(s) => g.shaders.get(g.dev(), &s).and_then(|m| build_compute(g, &m).ok()),
             };
             match p {

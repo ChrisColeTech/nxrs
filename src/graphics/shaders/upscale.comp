@@ -1,0 +1,35 @@
+#version 450
+// The presented picture upscaled sharp to the window (Turbo's present.frag mode 2): each of the four source texels
+// around a point is sharpened against its four neighbours by how much contrast they leave room for (strong where the
+// picture is flat, gentle at edges, so no halos), then the four are blended bilinearly. Used only when the window is
+// larger than the picture; the result is copied 1:1 into the swap chain image.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D src;
+layout(set = 0, binding = 1, rgba16f) uniform writeonly image2D dst;
+// rect: the source region in texels (x0, y0, x1, y1; y0 > y1 turns it over); size: the destination's (w, h);
+// sharp.x: sharpness 0..1
+layout(push_constant) uniform PC { vec4 rect; vec4 size; vec4 sharp; } pc;
+
+vec3 texel(ivec2 q, ivec2 lo, ivec2 hi) { return texelFetch(src, clamp(q, lo, hi), 0).rgb; }
+vec3 sharpened(ivec2 q, ivec2 lo, ivec2 hi, float peak) {
+    vec3 c = texel(q, lo, hi), n = texel(q + ivec2(0, -1), lo, hi), s = texel(q + ivec2(0, 1), lo, hi);
+    vec3 w = texel(q + ivec2(-1, 0), lo, hi), e = texel(q + ivec2(1, 0), lo, hi);
+    vec3 mn = min(c, min(min(n, s), min(w, e))), mx = max(c, max(max(n, s), max(w, e)));
+    vec3 amp = sqrt(clamp(min(mn, 1.0 - mx) / max(mx, vec3(1e-5)), 0.0, 1.0));
+    vec3 k = amp * peak;
+    return clamp((c + (n + s + w + e) * k) / (1.0 + 4.0 * k), 0.0, 1.0);
+}
+
+void main() {
+    ivec2 o = ivec2(gl_GlobalInvocationID.xy);
+    if (o.x >= int(pc.size.x) || o.y >= int(pc.size.y)) return;
+    vec2 t = (vec2(o) + 0.5) / pc.size.xy;
+    vec2 p = vec2(mix(pc.rect.x, pc.rect.z, t.x), mix(pc.rect.y, pc.rect.w, t.y)) - 0.5;
+    ivec2 lo = ivec2(min(pc.rect.xy, pc.rect.zw)), hi = ivec2(max(pc.rect.xy, pc.rect.zw)) - 1;
+    ivec2 i = ivec2(floor(p));
+    vec2 f = p - floor(p);
+    float peak = -1.0 / mix(8.0, 5.0, clamp(pc.sharp.x, 0.0, 1.0));
+    vec3 a = sharpened(i, lo, hi, peak), b = sharpened(i + ivec2(1, 0), lo, hi, peak);
+    vec3 c = sharpened(i + ivec2(0, 1), lo, hi, peak), d = sharpened(i + ivec2(1, 1), lo, hi, peak);
+    imageStore(dst, o, vec4(mix(mix(a, b, f.x), mix(c, d, f.x), f.y), 1.0));
+}

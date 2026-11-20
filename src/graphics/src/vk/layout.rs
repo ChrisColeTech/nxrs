@@ -149,6 +149,15 @@ impl Layout {
             }
         }
         crate::vklog!(
+            "graphics options: driver_exclusive {} ({}), shader_thread {}, low_priority_shader_compiler {}, fps_target {} (frame skip {})",
+            nxconfig::string("driver_exclusive"),
+            if super::pipe::driver_exclusive_d(d) { "pipeline creation and drawing never at once" } else { "off" },
+            nxconfig::flag("shader_thread") as u8,
+            nxconfig::flag("low_priority_shader_compiler") as u8,
+            nxconfig::string("fps_target"),
+            nxconfig::frame_skip()
+        );
+        crate::vklog!(
             "shared pipeline layout: 6 stage sets of {STAGE_BINDINGS} bindings, pool set of {tex_cap} textures / {samp_cap} samplers{}",
             if d.caps.descbuf { format!("; descriptor buffers: a stage set {db_stage_size} bytes, the pool set {} KB", db_pool_size >> 10) } else { String::new() }
         );

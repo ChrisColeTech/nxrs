@@ -39,7 +39,11 @@ pub fn prewarm(threads: usize) -> vk::pipe::PrewarmReport {
         return Default::default();
     }
     match vk::Gpu::get() {
-        Ok(g) => vk::pipe::prewarm(g, threads),
+        Ok(g) => {
+            let r = vk::pipe::prewarm(g, threads);
+            vk::pipe::prewarm_profile(g, r.keys);
+            r
+        }
         Err(_) => Default::default(),
     }
 }
@@ -68,6 +72,19 @@ pub fn register_controls() {
         let on = a.first().is_none_or(|v| *v != "0");
         vk::exec::A2C.store(on, std::sync::atomic::Ordering::Relaxed);
         format!("a2c {}", on as u8)
+    });
+    if std::env::var("NXGFX_ALPHA_TEST").as_deref() == Ok("0") {
+        vk::exec::A_TEST.store(false, std::sync::atomic::Ordering::Relaxed);
+    }
+    nxconfig::ctl::register("alpha_test", "0|1: NVN's alpha test off / applied in the pixel shader (live)", |a| {
+        let on = a.first().is_none_or(|v| *v != "0");
+        vk::exec::A_TEST.store(on, std::sync::atomic::Ordering::Relaxed);
+        format!("alpha_test {}", on as u8)
+    });
+    nxconfig::ctl::register("image_noflag", "0|1: storage use for textures used as images without the IMAGE flag (new textures)", |a| {
+        let on = a.first().is_none_or(|v| *v != "0");
+        std::env::set_var("NXGFX_IMAGE_NOFLAG", if on { "1" } else { "0" });
+        format!("image_noflag {}", on as u8)
     });
     nxconfig::ctl::register("pcache", ": write the pipeline cache now", |_| match vk::Gpu::try_get() {
         Some(g) => format!("{}", vk::pcache::save_now(g)),

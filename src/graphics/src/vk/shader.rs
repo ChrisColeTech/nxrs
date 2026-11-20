@@ -16,6 +16,9 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+/// The device's maxCombinedClipAndCullDistances (0 until the device is made): modules declaring more are trimmed.
+pub static CLIP_CULL_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum InKind {
     Float,
@@ -391,6 +394,10 @@ impl Library {
     pub fn set_dir(&self, p: PathBuf) {
         *self.dir.lock().unwrap() = Some(p);
     }
+    /// The game's `<data>/shaders`, when set.
+    pub fn dir(&self) -> Option<PathBuf> {
+        self.dir.lock().unwrap().clone()
+    }
     /// A module in memory under `key`, with lane C's reflection json (None: written for the shared layout).
     pub fn insert(&self, key: ShaderKey, spirv: Vec<u32>, json: Option<String>) {
         self.mem.lock().unwrap().insert(key, (spirv, json));
@@ -501,11 +508,121 @@ impl Library {
         built
     }
 
+    /// Module `m` (the stage before the pixel shader) with outputs added for the varyings `add` its pixel shader reads
+    /// and it never writes (`shaders::link::add_outputs`: (0, 0, 0, 1)); made once per (module, varyings).
+    pub fn with_outputs(&self, dev: &ash::Device, m: &Arc<Module>, add: &[shaders::link::Varying]) -> Option<Arc<Module>> {
+        let tag: Vec<u32> = add.iter().flat_map(|v| [v.location, v.component, v.kind as u32, v.components]).collect();
+        let made = self.variant(dev, m, 1, &tag, || shaders::link::add_outputs(&m.words, add));
+        if made.is_none() {
+            crate::log::red_once(&format!("shader {}: the varyings its pixel shader reads could not be added", key_hex(&m.key)));
+        }
+        made
+    }
+
+    /// Pixel shader `m` with its outputs at the locations of integer targets retyped (`kinds`: 1 unsigned, 2 signed;
+    /// `shaders::link::int_outputs`, Turbo's integer output variant); made once per (module, kinds).
+    pub fn with_int_outputs(&self, dev: &ash::Device, m: &Arc<Module>, kinds: &[u8; 8]) -> Option<Arc<Module>> {
+        let tag: Vec<u32> = kinds.iter().map(|&k| k as u32).collect();
+        let made = self.variant(dev, m, 2, &tag, || shaders::link::int_outputs(&m.words, kinds));
+        if made.is_none() {
+            crate::log::red_once(&format!("shader {}: no integer-output variant (its float stores could not be retyped): the values written to integer targets stay undefined", key_hex(&m.key)));
+        }
+        made
+    }
+
+    /// Pixel shader `m` for a draw's blend and alpha state: `dual`, its output 1 as target 0's second source
+    /// (`shaders::link::dual_source`); `alpha`, NVN's alpha test before each return (`shaders::link::alpha_test`, the
+    /// function and reference in push constants). None when it cannot be made (said in red once per shader).
+    pub fn fragment_variant(&self, dev: &ash::Device, m: &Arc<Module>, dual: bool, alpha: bool) -> Option<Arc<Module>> {
+        let made = self.variant(dev, m, 3, &[dual as u32, alpha as u32], || {
+            let w = if dual { shaders::link::dual_source(&m.words)? } else { m.words.clone() };
+            if alpha {
+                shaders::link::alpha_test(&w)
+            } else {
+                Some(w)
+            }
+        });
+        if made.is_none() {
+            let what = match (dual, alpha) {
+                (true, true) => "dual-source + alpha test",
+                (true, false) => "dual-source (it does not write exactly outputs 0 and 1: the second source counts as zero)",
+                _ => "alpha test (its colour 0 is not a float vec4, or its push block cannot take the test: drawn without it)",
+            };
+            crate::log::red_once(&format!("pixel shader {}: no {what} variant", key_hex(&m.key)));
+        }
+        made
+    }
+
+    /// A variant of module `m` made from the words `make` gives (what: 1 added outputs, 2 integer outputs; `tag` tells
+    /// variants of one kind apart), cached; its key differs from the shader's (pipeline parts and caches key on it).
+    fn variant(&self, dev: &ash::Device, m: &Arc<Module>, what: u8, tag: &[u32], make: impl FnOnce() -> Option<Vec<u32>>) -> Option<Arc<Module>> {
+        type K = (u64, u8, Vec<u32>);
+        static MADE: Mutex<Option<HashMap<K, Option<Arc<Module>>>>> = Mutex::new(None);
+        let k: K = (m.id, what, tag.to_vec());
+        if let Some(v) = MADE.lock().unwrap().get_or_insert_with(HashMap::new).get(&k) {
+            return v.clone();
+        }
+        let made = make().and_then(|w| {
+            let ci = vk::ShaderModuleCreateInfo::default().code(&w);
+            let module = unsafe { dev.create_shader_module(&ci, None) }.ok()?;
+            let mut key = m.key;
+            let h = tag.iter().fold(0x811c_9dc5u32 ^ what as u32, |a, &x| (a ^ x).wrapping_mul(0x0100_0193));
+            key[5] ^= 0x96 ^ what;
+            key[6] ^= (h >> 8) as u8;
+            key[7] ^= h as u8;
+            Some(Arc::new(Module {
+                key,
+                stage: m.stage,
+                module,
+                entry: m.entry.clone(),
+                res: m.res.clone(),
+                uses_pool: m.uses_pool,
+                inputs: m.inputs.clone(),
+                c1: m.c1.clone(),
+                id: self.next_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                omap: m.omap,
+                mesh: m.mesh,
+                xfb: m.xfb.clone(),
+                words: w,
+                per_primitive: m.per_primitive.clone(),
+            }))
+        });
+        MADE.lock().unwrap().get_or_insert_with(HashMap::new).insert(k, made.clone());
+        made
+    }
+
     fn build(&self, dev: &ash::Device, key: &ShaderKey, words: &[u32], json: Option<&str>) -> Result<Arc<Module>, String> {
         let r = reflect(words)?;
         let (w, res, pool, c1) = remap(words, &r, json)?;
         // a vertex shader's outputs written once at the end (`spvfix`; NXGFX_LATE_OUTPUTS=0: as translated)
         let w = if r.stage == 0 && r.mesh == 0 && std::env::var("NXGFX_LATE_OUTPUTS").as_deref() != Ok("0") { super::spvfix::late_outputs(&w).unwrap_or(w) } else { w };
+        // NVN's warp-aggregated atomic add made per lane (the RTX 50 ballot hang, Turbo #12; NXGFX_BALLOT_FIX=0 off)
+        let w = if std::env::var("NXGFX_BALLOT_FIX").as_deref() != Ok("0") {
+            match shaders::link::ballot_per_lane(&w) {
+                Some((nw, n)) => {
+                    crate::vklog!("shader {}: {n} subgroup ballot(s) for a counter made per lane (RTX 50 hang)", key_hex(key));
+                    nw
+                }
+                None => w,
+            }
+        } else {
+            w
+        };
+        // gl_PerVertex's unused cull member dropped when clip + cull pass the device's limit (shaders::link)
+        let limit = CLIP_CULL_LIMIT.load(std::sync::atomic::Ordering::Relaxed);
+        let w = if r.stage != 1 && r.stage != 5 && limit != 0 {
+            match shaders::link::trim_cull(&w, limit) {
+                Some(t) => t,
+                None => {
+                    if shaders::link::needs_trim(&w, limit) {
+                        crate::log::red_once(&format!("shader {}: more clip and cull distances than the device takes, and the cull ones are used", key_hex(key)));
+                    }
+                    w
+                }
+            }
+        } else {
+            w
+        };
         let jr = json.and_then(|j| serde_json::from_str::<JRefl>(j).ok());
         let omap = jr.as_ref().and_then(|j| j.frag_out_map).filter(|&m| m >= 0 && r.stage == 1).map(|m| m as u32);
         let xfb = jr.as_ref().and_then(|j| j.transform_feedback.as_ref()).and_then(super::xfb::Layout::from_json);

@@ -10,6 +10,7 @@
 //! | [`xlate`] | the translator (`dmsh_xlate`, NativeAOT) driven in parallel, and `spirv-val` |
 //! | [`mesh`] | NVN2 task and mesh shaders made Vulkan task and mesh stages around the translated kernel |
 //! | [`fixes`] | the SPIR-V edits Vulkan needs (capabilities the translator leaves out, out-of-range size-query components) |
+//! | [`link`] | edits made when a module meets the device and its partner stage: clip / cull distances trimmed to the device, varyings a pixel shader reads and its vertex shader never writes |
 //! | [`reflect`] | the SPIR-V's descriptor bindings, as the graphics module creates its layouts |
 //! | [`prebuild`] | the whole build step: scan, translate, validate, write the output and its manifest |
 //!
@@ -18,6 +19,7 @@
 pub mod fixes;
 pub mod formats;
 pub mod job;
+pub mod link;
 pub mod mesh;
 pub mod rt;
 pub mod nvn;

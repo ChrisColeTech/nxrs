@@ -76,6 +76,8 @@ pub struct QState {
     /// conditional render: draws and clears go when true
     render_on: bool,
     alpha_ref: f32,
+    /// the bound pixel shader takes output 1 as target 0's second source (dual-source variant)
+    dual: bool,
     depth_bounds: (bool, f32, f32),
     sample_mask: u32,
     point_size: f32,
@@ -301,6 +303,7 @@ impl QState {
             push: Box::new([[0; 0x800]; 2]),
             render_on: true,
             alpha_ref: 0.0,
+            dual: false,
             depth_bounds: (false, 0.0, 1.0),
             sample_mask: u32::MAX,
             point_size: 1.0,
@@ -498,10 +501,12 @@ pub mod passdump {
                 (im.image, im.tex, im.format, im.extent)
             };
             let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(tex.d.format);
-            if bw != 1 || bh != 1 || bpb == 0 {
+            // compressed images as their blocks (an ASTC texture's image is decoded: left out)
+            let decoded = crate::tex::format::tex_format(tex.d.format).is_some_and(|tf| tf.astc.is_some());
+            if bpb == 0 || decoded && (bw != 1 || bh != 1) {
                 continue;
             }
-            let n = ext.width as u64 * ext.height as u64 * bpb as u64;
+            let n = ext.width.div_ceil(bw) as u64 * ext.height.div_ceil(bh) as u64 * bpb as u64;
             let Ok(buf) = g.buffer(n, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "texture dump") else { continue };
             let r = vk::BufferImageCopy {
                 buffer_offset: 0,
@@ -763,6 +768,74 @@ fn end_query(g: &Gpu, sub: &mut Sub, qs: &mut QState) {
     }
 }
 
+/// Linear render targets the CPU can read (NVN_TEXTURE_FLAGS_LINEAR / LINEAR_RENDER_TARGET in a pool the CPU can
+/// access; Turbo `rt_readback`, on by default): on the console the pool is the CPU's memory too, so what the GPU draws
+/// there the CPU reads (Mario Kart World draws its decoded animations into an 8x1218 RGBA16F linear target that its CPU
+/// animation decoder reads). At the end of a pass each such target's level / layer is copied into its storage, which
+/// reaches guest memory at the submission's fence (the write-back). `NXGFX_RT_READBACK=0` off.
+fn linear_rt_readback(g: &Gpu, sub: &mut Sub, qs: &QState) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("NXGFX_RT_READBACK").as_deref() != Ok("0")) {
+        return;
+    }
+    use crate::nvn::types::{mem_flags, tex_flags};
+    for i in 0..qs.rt_n {
+        let Some(t) = qs.rt[i].tex else { continue };
+        let lin = t.d.flags as u32 & (tex_flags::LINEAR | tex_flags::LINEAR_RENDER_TARGET) != 0;
+        if !lin || t.mem.is_null() || t.pool.is_null() || t.d.target == target::T3D || t.d.stride == 0 {
+            continue;
+        }
+        if unsafe { (*t.pool).flags } & mem_flags::CPU_NO_ACCESS != 0 {
+            continue;
+        }
+        let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(t.d.format);
+        if bw != 1 || bh != 1 || bpb == 0 || img_scale(g, t.serial) != 1.0 {
+            continue;
+        }
+        let v = qs.rt[i].view;
+        let level = v.filter(|v| v.bits & crate::nvn::obj::VW_LEVELS != 0).map(|v| v.base_level as u32).unwrap_or(0);
+        let layer = v.filter(|v| v.bits & crate::nvn::obj::VW_LAYERS != 0).map(|v| v.min_layer as u32).unwrap_or(0);
+        if level != 0 {
+            continue; // a linear texture has one level
+        }
+        let (w, h) = (t.d.width.max(1), t.d.height.max(1));
+        let row = t.d.stride as u64;
+        let bytes = row * (h as u64 - 1) + w as u64 * bpb as u64;
+        let addr = t.mem as u64 + layer as u64 * t.l.layer_size;
+        let image = {
+            let imgs = g.images.lock().unwrap();
+            let Some(im) = imgs.by_serial.get(&t.serial) else { continue };
+            if im.tf.astc.is_some() || im.tf.expand3 != 0 || im.bc7 {
+                continue;
+            }
+            im.image
+        };
+        let Some((b, o, _)) = super::mem::resolve(g, sub, addr, bytes) else { continue };
+        if row % bpb as u64 != 0 {
+            continue;
+        }
+        let r = vk::BufferImageCopy {
+            buffer_offset: o,
+            buffer_row_length: (row / bpb as u64) as u32,
+            buffer_image_height: h,
+            image_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: layer, layer_count: 1 },
+            image_offset: vk::Offset3D::default(),
+            image_extent: vk::Extent3D { width: w, height: h, depth: 1 },
+        };
+        unsafe { g.dev().cmd_copy_image_to_buffer(sub.main, image, vk::ImageLayout::GENERAL, b, &[r]) };
+        super::mem::note_gpu_write(g, sub, addr, bytes);
+        static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+        if N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::vklog!(
+                "linear render target ser{} {w}x{h} format {:#x} stride {row} at {addr:#x}: read back into its memory for the CPU (the console's shared memory)",
+                t.serial,
+                t.d.format
+            );
+        }
+        barrier(g, sub);
+    }
+}
+
 fn end_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) {
     end_query(g, sub, qs);
     if qs.in_pass {
@@ -770,6 +843,7 @@ fn end_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) {
         qs.in_pass = false;
         barrier(g, sub);
         passdump::pass_end(g, sub, qs);
+        linear_rt_readback(g, sub, qs);
         // compressed targets drawn through a block alias: the texels become the blocks
         // (through a buffer: an image copy cannot name a level smaller than one block, a buffer copy can)
         for (src, dst, level, layer, e, texels, bpb) in qs.copyback.drain(..) {
@@ -1029,6 +1103,18 @@ fn blend_factor(f: u32) -> vk::BlendFactor {
         _ => B::ONE,
     }
 }
+/// SRC1 factors with no second source: SRC1_COLOR / SRC1_ALPHA as ZERO, their ONE_MINUS forms as ONE.
+fn zero_src1(f: u32) -> u32 {
+    match f {
+        16 | 18 => 1,
+        17 | 19 => 2,
+        _ => f,
+    }
+}
+
+/// The alpha test applied in the pixel shader (`NXGFX_ALPHA_TEST=0` off).
+pub static A_TEST: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
 fn blend_op(e: u32) -> vk::BlendOp {
     match e {
         2 => vk::BlendOp::SUBTRACT,
@@ -1212,6 +1298,14 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
     let want = target_of(ty);
     if let Some((serial, view)) = g.tables.tex_at(id) {
         let mut imgs = g.images.lock().unwrap();
+        // bound as an image without the IMAGE flag (`image_noflag`): its image gets storage use now
+        if storage {
+            if let Some(t) = imgs.by_serial.get(&serial).filter(|im| !im.usage.contains(vk::ImageUsageFlags::STORAGE)).map(|im| im.tex) {
+                if super::image::want_image(&t) || super::image::image_noflag_on() {
+                    g.upgrade_storage(&mut imgs, &[t.mem as u64], sub);
+                }
+            }
+        }
         if let Some(im) = imgs.by_serial.get_mut(&serial) {
             let mut v = view.unwrap_or_default();
             let base_target = if v.bits & VW_TARGET != 0 { v.target as i32 } else { im.tex.d.target };
@@ -1746,8 +1840,9 @@ fn pool_bases(qs: &QState) -> (i32, i32) {
 
 fn push_constants(g: &Gpu, sub: &Sub, qs: &QState, flipped: bool) {
     let (tb, sb) = pool_bases(qs);
-    let pc: [u32; 4] = [tb as u32, sb as u32, flipped as u32, qs.mesh_stride];
-    let bytes = unsafe { core::slice::from_raw_parts(pc.as_ptr() as *const u8, 16) };
+    // 16: the alpha test's function and reference (shaders::link::ALPHA_PUSH_OFFSET)
+    let pc: [u32; 6] = [tb as u32, sb as u32, flipped as u32, qs.mesh_stride, qs.color.alpha_func(), qs.alpha_ref.to_bits()];
+    let bytes = unsafe { core::slice::from_raw_parts(pc.as_ptr() as *const u8, 24) };
     unsafe { g.dev().cmd_push_constants(sub.main, g.layout.pipeline, g.layout.push_stages, 0, bytes) };
 }
 
@@ -1801,7 +1896,10 @@ fn frame_skip() -> u32 {
     static V: AtomicU32 = AtomicU32::new(0);
     let g = nxconfig::generation();
     if GEN.swap(g, Ordering::Relaxed) != g {
-        V.store(nxconfig::frame_skip(), Ordering::Relaxed);
+        let n = nxconfig::frame_skip();
+        if V.swap(n, Ordering::Relaxed) != n || g == 1 {
+            crate::vklog!("fps_target: frame skip {n} (every {} frame drawn, the game keeps its own rate)", n + 1);
+        }
     }
     V.load(Ordering::Relaxed)
 }
@@ -1909,6 +2007,37 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
             }
         }
     }
+    // the pixel shader for the blend and alpha state: target 0 blending with a second source (dual-source variant) and
+    // NVN's alpha test (in the shader, as Turbo / nxnative do)
+    let mut dual = false;
+    if let Some(i) = mods.iter().position(|m| m.stage == 1) {
+        let n = qs.pass_formats.1;
+        let b0 = qs.blend[0];
+        let src1 = |f: u32| (16..=19).contains(&f);
+        let wants_dual = n > 0
+            && qs.chmask & 0xf != 0
+            && qs.color.blend_en() & 1 != 0
+            && [blend_field::SRC_RGB, blend_field::DST_RGB, blend_field::SRC_A, blend_field::DST_A].iter().any(|&f| src1(b0.get(f)));
+        let af = qs.color.alpha_func();
+        let alpha = af != cmp::ALWAYS && af != 0 && A_TEST.load(std::sync::atomic::Ordering::Relaxed);
+        let try_dual = wants_dual && g.d.caps.dual_src;
+        if try_dual || alpha {
+            match g.shaders.fragment_variant(g.dev(), &mods[i], try_dual, alpha) {
+                Some(v) => {
+                    mods[i] = v;
+                    dual = try_dual;
+                }
+                // without the dual-source part, the alpha test alone
+                None if try_dual && alpha => {
+                    if let Some(v) = g.shaders.fragment_variant(g.dev(), &mods[i], false, true) {
+                        mods[i] = v;
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    qs.dual = dual;
     let mut key = super::pipe::GfxKey::default();
     for m in &mods {
         key.shaders[m.stage as usize] = m.key;
@@ -1980,7 +2109,7 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
         }
         if passdump::active() {
             crate::vklog!(
-                "pass dump {}: depth test {} write {} func {} stencil test {}, cull {:#x}, color mask {:#x} output map {:#x}, blend enables {:#x}",
+                "pass dump {}: depth test {} write {} func {} stencil test {}, cull {:#x}, color mask {:#x} output map {:#x}, blend enables {:#x}, target 0 blend rgb {}*src {} {}*dst, alpha {}*src {} {}*dst, logic op {:#x}, alpha to coverage {}, alpha test {}",
                 passdump::pass_no(),
                 ds.get(ds_field::DT),
                 ds.get(ds_field::DW),
@@ -1989,7 +2118,16 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
                 poly.cull(),
                 qs.chmask,
                 qs.prog[1].as_ref().and_then(|m| m.omap).unwrap_or(u32::MAX),
-                qs.color.blend_en()
+                qs.color.blend_en(),
+                qs.blend[0].get(blend_field::SRC_RGB),
+                qs.blend[0].get(blend_field::EQ_RGB),
+                qs.blend[0].get(blend_field::DST_RGB),
+                qs.blend[0].get(blend_field::SRC_A),
+                qs.blend[0].get(blend_field::EQ_A),
+                qs.blend[0].get(blend_field::DST_A),
+                qs.color.logic_op(),
+                qs.ms.a2c,
+                qs.color.alpha_func()
             );
         }
         dev.cmd_set_depth_test_enable(cb, ds.get(ds_field::DT) != 0);
@@ -2051,12 +2189,14 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
             let eq: Vec<vk::ColorBlendEquationEXT> = (0..n)
                 .map(|i| {
                     let b = qs.blend[i];
+                    // a second source the shader does not give counts as zero (Turbo / nvn_mtl.m blend_zero_src1)
+                    let bf = |f: u32| if i == 0 && qs.dual { blend_factor(f) } else { blend_factor(zero_src1(f)) };
                     vk::ColorBlendEquationEXT {
-                        src_color_blend_factor: blend_factor(b.get(blend_field::SRC_RGB)),
-                        dst_color_blend_factor: blend_factor(b.get(blend_field::DST_RGB)),
+                        src_color_blend_factor: bf(b.get(blend_field::SRC_RGB)),
+                        dst_color_blend_factor: bf(b.get(blend_field::DST_RGB)),
                         color_blend_op: blend_op(b.get(blend_field::EQ_RGB)),
-                        src_alpha_blend_factor: blend_factor(b.get(blend_field::SRC_A)),
-                        dst_alpha_blend_factor: blend_factor(b.get(blend_field::DST_A)),
+                        src_alpha_blend_factor: bf(b.get(blend_field::SRC_A)),
+                        dst_alpha_blend_factor: bf(b.get(blend_field::DST_A)),
                         alpha_blend_op: blend_op(b.get(blend_field::EQ_A)),
                     }
                 })
@@ -2070,9 +2210,7 @@ fn draw_setup_ex(g: &Gpu, sub: &mut Sub, qs: &mut QState, prim_ty: i32, base_ins
             e3.cmd_set_color_write_mask(cb, 0, &wm);
         }
     }
-    if qs.color.alpha_func() != cmp::ALWAYS && qs.color.alpha_func() != 0 {
-        crate::log::red_once("alpha test is not implemented yet (it belongs in the translated fragment shader)");
-    }
+
     if !mesh {
         super::perf::timed(super::perf::C::VtxNs, || vertex_input(g, sub, qs, &vs));
     }

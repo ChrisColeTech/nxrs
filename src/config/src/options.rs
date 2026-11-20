@@ -200,7 +200,10 @@ pub fn normalise(key: &str, v: &str) -> Option<String> {
         }
         "renderer" => {
             if v != "vulkan" && !v.is_empty() {
-                // OpenGL and Eden are Turbo's other renderers; this engine has the NVN layer on Vulkan only
+                // OpenGL and Eden are Turbo's other renderers; this engine has the NVN layer on Vulkan only (the
+                // owner decides whether OpenGL comes back): said once, not silently
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| eprintln!("[config] renderer={v}: this engine has no {v} renderer; Vulkan is used"));
                 "vulkan".into()
             } else {
                 "vulkan".into()

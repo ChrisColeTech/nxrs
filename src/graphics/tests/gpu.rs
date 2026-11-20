@@ -507,3 +507,310 @@ fn resolution_scale_renders_at_twice_the_size() {
     check("triangle at resolution x2", &got, &want, 0);
     assert_eq!(validation_errors(), e0, "validation errors");
 }
+
+/// A texture made without NVN's IMAGE flag, registered as an image and written by image stores (Turbo caa07ad,
+/// `NXGFX_IMAGE_NOFLAG=1`): its image gets storage use (an sRGB one through its UNORM twin) and the writes land. The
+/// texture is registered as a sampled texture first, so its image is made without storage use and made again.
+#[test]
+fn image_stores_to_a_texture_without_the_image_flag() {
+    let _g = setup();
+    let e0 = validation_errors();
+    std::env::set_var("NXGFX_IMAGE_NOFLAG", "1");
+    for (name, fmt) in [("RGBA8", f::RGBA8), ("RGBA8_SRGB", 56)] {
+        let mut n = Nvn::new();
+        let tex = n.texture(W, H, fmt, 0, false);
+        n.register_texture(9, &tex);
+        // the image exists without storage use before the image registration
+        n.begin();
+        let r = NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: W as i32, height: H as i32, depth: 1 };
+        unsafe { nvnCommandBufferClearTexture(n.c(), &*tex, core::ptr::null(), &r, [0.0f32; 4].as_ptr(), 0xf) };
+        n.submit_wait();
+        unsafe { nxgfx::nvn::pool::nvnTexturePoolRegisterImage(&*n.tex_pool, 10, &*tex, core::ptr::null()) };
+        let cs = spv("image_store_comp");
+        let cj = json(
+            "cs",
+            r#"{"set": 5, "binding": 1, "type": "storage_image", "count": 1, "name": "img", "resource": {"kind": "image", "handle": 72, "cbuf_slot": -1, "type": 3, "format": "Unknown"}}"#,
+        );
+        let prog = n.program(&[(&cs, &cj)]);
+        let h = unsafe { nxgfx::nvn::device::nvnDeviceGetImageHandle(&*n.dev, 10) };
+        n.begin();
+        unsafe {
+            nvnCommandBufferBindProgram(n.c(), &*prog, 0x20);
+            nvnCommandBufferBindImage(n.c(), stage::COMPUTE as i32, 0, h);
+            nvnCommandBufferDispatchCompute(n.c(), W as i32 / 8, H as i32 / 8, 1);
+            nvnCommandBufferBarrier(n.c(), barrier::ORDER_PRIMITIVES as i32);
+        }
+        n.submit_wait();
+        let got = n.read_rgba8(&tex, W, H);
+        let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|i| Some([(i % W) as u8, (i / W) as u8, 128, 255])).collect();
+        check(&format!("image stores into {name} without the IMAGE flag"), &got, &want, 1);
+    }
+    std::env::remove_var("NXGFX_IMAGE_NOFLAG");
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// A pixel shader whose float output writes an R32UI target (the translator's outputs are float register containers):
+/// drawn through its integer-output variant (Turbo's `vkspv_int_outputs`), the target gets the bits it wrote.
+#[test]
+fn float_output_bits_reach_an_integer_target() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let rt = n.texture(W, H, 11, 0, false); // R32UI
+    let vs = spv("tri_vert");
+    let fs = spv("int_out_frag");
+    let prog = n.program(&[(&vs, &json("vs", "")), (&fs, &json("ps", ""))]);
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    bind_program(&mut n, &prog);
+    draw_tri(&mut n, [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]], [0.0; 4]);
+    n.submit_wait();
+    let got = n.read_rgba8(&rt, W, H);
+    let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|_| Some(0x1234_5678u32.to_le_bytes())).collect();
+    check("float output bits into R32UI", &got, &want, 0);
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// NVN's alpha test, applied in the pixel shader (Turbo `vkspv_alpha_test`): with GREATER 0.5 the half drawn at
+/// alpha 0.3 is discarded and the half at alpha 0.7 is drawn.
+#[test]
+fn alpha_test_discards_in_the_shader() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let rt = n.texture(W, H, f::RGBA8, 0, false);
+    let prog = tri_program(&mut n);
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    clear(&mut n, [0.0, 0.0, 1.0, 1.0]);
+    bind_program(&mut n, &prog);
+    let mut cs = NVNcolorState::boxed();
+    unsafe {
+        nvnColorStateSetDefaults(&mut *cs);
+        nvnColorStateSetAlphaTest(&mut *cs, 5); // GREATER
+        nvnCommandBufferBindColorState(n.c(), &*cs);
+        nxgfx::nvn::cmd2::nvnCommandBufferSetAlphaRef(n.c(), 0.5);
+    }
+    for (x0, x1, a) in [(-1.0f32, 0.0f32, 0.3f32), (0.0, 1.0, 0.7)] {
+        let c = [1.0, 0.0, 0.0, a];
+        draw_tri(&mut n, [[x0, -1.0, 0.0], [x1, -1.0, 0.0], [x1, 1.0, 0.0]], c);
+        draw_tri(&mut n, [[x0, -1.0, 0.0], [x1, 1.0, 0.0], [x0, 1.0, 0.0]], c);
+    }
+    n.submit_wait();
+    let got = n.read_rgba8(&rt, W, H);
+    let want: Vec<Option<[u8; 4]>> = (0..W * H)
+        .map(|i| {
+            let x = i % W;
+            if x == 32 {
+                None
+            } else if x < 32 {
+                Some([0, 0, 255, 255])
+            } else {
+                Some([255, 0, 0, 179])
+            }
+        })
+        .collect();
+    check("alpha test GREATER 0.5", &got, &want, 1);
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// Dual-source blending: the pixel shader's output 1 is target 0's second source (Turbo `vkspv_dual_source`):
+/// colour = src x ONE + dst x SRC1_COLOR over a white target.
+#[test]
+fn dual_source_blending_reads_output_1() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let rt = n.texture(W, H, f::RGBA8, 0, false);
+    let vs = spv("tri_vert");
+    let fs = spv("dual_frag");
+    let prog = n.program(&[(&vs, &json("vs", "")), (&fs, &json("ps", ""))]);
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    clear(&mut n, [1.0, 1.0, 1.0, 1.0]);
+    bind_program(&mut n, &prog);
+    let mut cs = NVNcolorState::boxed();
+    let mut bs = NVNblendState::boxed();
+    unsafe {
+        nvnColorStateSetDefaults(&mut *cs);
+        nvnColorStateSetBlendEnable(&mut *cs, 0, 1);
+        nvnCommandBufferBindColorState(n.c(), &*cs);
+        nvnBlendStateSetDefaults(&mut *bs);
+        nvnBlendStateSetBlendFunc(&mut *bs, blend_func::ONE as i32, 16 /* SRC1_COLOR */, blend_func::ONE as i32, blend_func::ZERO as i32);
+        nvnCommandBufferBindBlendState(n.c(), &*bs);
+    }
+    draw_tri(&mut n, [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]], [0.25, 0.0, 0.0, 1.0]);
+    n.submit_wait();
+    let got = n.read_rgba8(&rt, W, H);
+    let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|_| Some([128, 128, 255, 255])).collect();
+    check("dual-source blending", &got, &want, 1);
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// A buffer texture (texel buffer view over its pool memory) read by texelFetch in a compute shader.
+#[test]
+fn buffer_texture_read_by_texel_fetch() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let src: Vec<u32> = (0..256u32).map(|i| i * 7 + 3).collect();
+    let (soff, _) = n.data.alloc(1024, 256);
+    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, n.data.mem.ptr.add(soff), 1024) };
+    let mut b = NVNtextureBuilder::boxed();
+    let mut tex = NVNtexture::boxed();
+    unsafe {
+        nvnTextureBuilderSetDevice(&mut *b, n.d());
+        nvnTextureBuilderSetDefaults(&mut *b);
+        nvnTextureBuilderSetTarget(&mut *b, nxgfx::nvn::types::target::BUFFER);
+        nvnTextureBuilderSetFormat(&mut *b, 11); // R32UI
+        nvnTextureBuilderSetSize1D(&mut *b, 256);
+        nvnTextureBuilderSetStorage(&mut *b, n.data.p(), soff as isize);
+        assert_eq!(nvnTextureInitialize(&mut *tex, &*b), 1);
+    }
+    n.register_texture(6, &tex);
+    let mut out = Pool::new(n.d(), 1 << 16, CPU_POOL);
+    let (ooff, oaddr) = out.alloc(1024, 256);
+    let cs = spv("tbuf_comp");
+    let cj = json(
+        "cs",
+        r#"{"set": 5, "binding": 1, "type": "uniform_texel_buffer", "count": 1, "name": "tb", "resource": {"kind": "texture", "handle": 8, "cbuf_slot": -1, "type": 2}},
+           {"set": 5, "binding": 2, "type": "storage_buffer", "count": 1, "name": "o", "resource": {"kind": "sbuf", "slot": 0, "cb_slot": 0, "cb_offset": 196, "flags": 1}}"#,
+    );
+    let prog = n.program(&[(&cs, &cj)]);
+    let h = unsafe { nxgfx::nvn::device::nvnDeviceGetTextureHandle(&*n.dev, 6, 0) };
+    n.begin();
+    unsafe {
+        nvnCommandBufferBindProgram(n.c(), &*prog, 0x20);
+        nvnCommandBufferBindTexture(n.c(), stage::COMPUTE as i32, 0, h);
+        nvnCommandBufferBindStorageBuffer(n.c(), stage::COMPUTE as i32, 0, oaddr, 1024);
+        nvnCommandBufferDispatchCompute(n.c(), 4, 1, 1);
+        nvnCommandBufferBarrier(n.c(), barrier::ORDER_PRIMITIVES as i32);
+    }
+    n.submit_wait();
+    let o = &out.mem.slice()[ooff..ooff + 1024];
+    let bad = (0..256).filter(|&i| u32::from_le_bytes(o[4 * i..4 * i + 4].try_into().unwrap()) != src[i] * 2 + 1).count();
+    eprintln!("buffer texture: 256 texels fetched, {bad} wrong");
+    assert_eq!(bad, 0, "texelFetch through the buffer texture");
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// An append counter as indirect-draw arguments (Donkey Kong Bananza's terrain, `exec.rs` mod append): a draw's
+/// vertex shader adds 6 to word 0 of a 64-byte record it binds as a written storage buffer; DrawElementsIndirect then
+/// draws with that record (its instance count still 0): it gets one instance and draws the 6 indices of a full quad.
+#[test]
+fn append_counter_as_indirect_draw_arguments() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let rt = n.texture(W, H, f::RGBA8, 0, false);
+    let vs = spv("append_vert");
+    let vj = json("vs", r#"{"set": 0, "binding": 1, "type": "storage_buffer", "count": 1, "name": "rec", "resource": {"kind": "sbuf", "slot": 0, "cb_slot": 0, "cb_offset": 68, "flags": 1}}"#);
+    let fs = spv("tri_frag");
+    let counting = n.program(&[(&vs, &vj), (&fs, &json("ps", ""))]);
+    let tri = tri_program(&mut n);
+    let rec = n.data.put(&[0u32; 16], 256);
+    let quad: Vec<f32> = [[-1.0f32, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]].iter().flat_map(|p| [p[0], p[1], 0.0, 0.0, 1.0, 0.0, 1.0]).collect();
+    let qb = n.data.put(&quad, 256);
+    let ib = n.data.put(&[0u16, 1, 2, 0, 2, 3], 256);
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    clear(&mut n, [0.0, 0.0, 1.0, 1.0]);
+    bind_program(&mut n, &counting);
+    unsafe { nvnCommandBufferBindStorageBuffer(n.c(), stage::VERTEX as i32, 0, rec, 64) };
+    // a degenerate triangle: only its vertex shader's count matters
+    draw_tri(&mut n, [[0.0, 0.0, 0.0]; 3], [0.0; 4]);
+    unsafe { nvnCommandBufferBarrier(n.c(), (barrier::ORDER_PRIMITIVES | barrier::ORDER_INDIRECT_DATA) as i32) };
+    bind_program(&mut n, &tri);
+    n.vertex_layout(&[(f::RGB32F, 0), (f::RGBA32F, 12)], 28);
+    unsafe {
+        nvnCommandBufferBindVertexBuffer(n.c(), 0, qb, quad.len() * 4);
+        nvnCommandBufferDrawElementsIndirect(n.c(), prim::TRIANGLES, index_type::U16, ib, rec);
+    }
+    n.submit_wait();
+    let got = n.read_rgba8(&rt, W, H);
+    let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|_| Some([0, 255, 0, 255])).collect();
+    check("indirect draw from an append counter", &got, &want, 0);
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// A linear render target in a CPU-visible pool (Turbo's `rt_readback`): what a pass draws there is in its storage
+/// for the CPU at the fence, without a texel read or a copy by the game.
+#[test]
+fn linear_render_target_reaches_guest_memory() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let stride = W as usize * 4 + 256;
+    let mut b = NVNtextureBuilder::boxed();
+    let mut rt = NVNtexture::boxed();
+    let off;
+    unsafe {
+        nvnTextureBuilderSetDevice(&mut *b, n.d());
+        nvnTextureBuilderSetDefaults(&mut *b);
+        nvnTextureBuilderSetSize2D(&mut *b, W as i32, H as i32);
+        nvnTextureBuilderSetFormat(&mut *b, f::RGBA8);
+        nvnTextureBuilderSetFlags(&mut *b, nxgfx::nvn::types::tex_flags::LINEAR_RENDER_TARGET as i32);
+        nvnTextureBuilderSetStride(&mut *b, stride as isize);
+        let size = nvnTextureBuilderGetStorageSize(&*b).max(stride * H as usize);
+        let (o, _) = n.data.alloc(size, 4096);
+        off = o;
+        n.data.mem.slice()[o..o + size].fill(0x11);
+        nvnTextureBuilderSetStorage(&mut *b, n.data.p(), o as isize);
+        assert_eq!(nvnTextureInitialize(&mut *rt, &*b), 1);
+    }
+    let prog = tri_program(&mut n);
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    clear(&mut n, [0.0, 0.0, 1.0, 1.0]);
+    bind_program(&mut n, &prog);
+    draw_tri(&mut n, [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]], [1.0, 0.5, 0.0, 1.0]);
+    n.submit_wait();
+    let m = &n.data.mem.slice()[off..off + stride * H as usize];
+    let mut bad = 0;
+    for y in 0..H as usize {
+        for x in 0..W as usize {
+            let t = &m[y * stride + 4 * x..y * stride + 4 * x + 4];
+            if t[0] != 255 || !(127..=128).contains(&t[1]) || t[2] != 0 || t[3] != 255 {
+                bad += 1;
+            }
+        }
+    }
+    eprintln!("linear render target in guest memory: {} texels, {bad} wrong (first {:?})", W * H, &m[..8]);
+    assert_eq!(bad, 0, "the drawn texels in the storage");
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// NVN's warp-aggregated atomic counter after an early return (hangs RTX 50 cards, Turbo #12): the module is loaded
+/// with each ballot made per lane (`shaders::link::ballot_per_lane`) and the count is still right.
+#[test]
+fn ballot_counter_made_per_lane_counts_right() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let mut out = Pool::new(n.d(), 1 << 16, CPU_POOL);
+    let (coff, caddr) = out.alloc(256, 256);
+    out.mem.slice()[coff..coff + 4].copy_from_slice(&0u32.to_le_bytes());
+    let data: Vec<u32> = (0..256u32).map(|i| (i % 3 != 0) as u32).collect();
+    let want = data.iter().filter(|&&d| d != 0).count() as u32;
+    let daddr = n.data.put(&data, 256);
+    let cs = spv("ballot_comp");
+    let cj = json(
+        "cs",
+        r#"{"set": 5, "binding": 1, "type": "storage_buffer", "count": 1, "name": "count", "resource": {"kind": "sbuf", "slot": 0, "cb_slot": 0, "cb_offset": 196, "flags": 1}},
+           {"set": 5, "binding": 2, "type": "storage_buffer", "count": 1, "name": "data", "resource": {"kind": "sbuf", "slot": 1, "cb_slot": 0, "cb_offset": 200, "flags": 0}}"#,
+    );
+    let prog = n.program(&[(&cs, &cj)]);
+    n.begin();
+    unsafe {
+        nvnCommandBufferBindProgram(n.c(), &*prog, 0x20);
+        nvnCommandBufferBindStorageBuffer(n.c(), stage::COMPUTE as i32, 0, caddr, 256);
+        nvnCommandBufferBindStorageBuffer(n.c(), stage::COMPUTE as i32, 1, daddr, 1024);
+        nvnCommandBufferDispatchCompute(n.c(), 4, 1, 1);
+        nvnCommandBufferBarrier(n.c(), barrier::ORDER_PRIMITIVES as i32);
+    }
+    n.submit_wait();
+    let got = u32::from_le_bytes(out.mem.slice()[coff..coff + 4].try_into().unwrap());
+    eprintln!("ballot counter: {got} counted, {want} wanted");
+    assert_eq!(got, want);
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
