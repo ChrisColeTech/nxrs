@@ -12,8 +12,12 @@
 //!   anything else turns that cheat off with the reason ("unsupported opcode").
 //! * Memory: the memory-type nybble picks 0 main, 1 heap, 2 alias, 3 aslr, 4 absolute, 5-F main. A failed access
 //!   (an unmapped page, a pointer not set yet) is ignored as on a Switch: a load leaves the register, a condition
-//!   compares 0, a store writes nothing; the first failure of a cheat logs one line. Writes into main's code reach the
-//!   bytes but not the code the game runs (it was translated at build time), said once.
+//!   compares 0, a store writes nothing; the first failure of a cheat logs one line.
+//! * Code cheats (risk R2): the game runs code translated at build time, so the build compiles a cheat's stores into
+//!   main's code in as a patch set of its own (cli `cheats.rs`, `profiles::cheatfile`); the game hands its switch
+//!   table to the runtime (`nxrt::patchset`) and the cheat's toggle flips its set. A code cheat the build did not
+//!   compile in is said in red (rebuild with the file in place); its writes reach the bytes only.
+//! * `<build>.meta.tsv`, `<build>.values` and the panel (F6, Home + Minus): below.
 
 use std::sync::Mutex;
 
@@ -47,53 +51,25 @@ pub struct Cheat {
     /// Never-decrease: (region 0 main / 1 heap, offset) of a typed value the host keeps at its highest.
     pub nd: Option<(u32, u64)>,
     pub nd_max: Option<u64>,
+    /// The switch of its compiled-in patch set (`profiles::cheatfile::env_name`): the build made one when the cheat
+    /// writes main's code; `code` once the game's code has that set (the toggle flips it).
+    pub env: String,
+    pub code: bool,
+    /// Every write is compiled in (stores into main's code only): the VM has nothing left to do for it.
+    pub code_only: bool,
 }
 
 /// A cheat file's entries (labels, entries without code, left out).
 pub fn parse(text: &str) -> Vec<Cheat> {
-    let mut out: Vec<Cheat> = vec![];
-    let mut cur: Option<Cheat> = None;
-    for raw in text.lines() {
-        let mut line = raw.trim();
-        while !line.is_empty() {
-            if line.starts_with('[') || line.starts_with('{') {
-                let close = if line.starts_with('[') { ']' } else { '}' };
-                let Some(end) = line.find(close) else { break };
-                if let Some(c) = cur.take() {
-                    if !c.words.is_empty() {
-                        out.push(c);
-                    }
-                }
-                cur = Some(Cheat { name: line[1..end].trim().to_string(), master: close == '}', ..Default::default() });
-                line = line[end + 1..].trim_start();
-                continue;
-            }
-            // code words: 8 hex digits each, separated by spaces; a header glued to the last word starts a new entry
-            let tok_end = line.find(|c: char| c.is_whitespace() || c == '[' || c == '{').unwrap_or(line.len());
-            let tok = &line[..tok_end];
-            if tok.len() == 8 && tok.chars().all(|c| c.is_ascii_hexdigit()) {
-                if let Some(c) = cur.as_mut() {
-                    c.words.push(u32::from_str_radix(tok, 16).unwrap());
-                }
-            } else {
-                break; // prose (a credits line): ignored
-            }
-            line = line[tok_end..].trim_start();
-        }
-    }
-    if let Some(c) = cur.take() {
-        if !c.words.is_empty() {
-            out.push(c);
-        }
-    }
-    let mut out: Vec<Cheat> = out;
-    for c in out.iter_mut() {
-        if let Err(e) = validate(&c.words) {
-            c.broken = Some(e);
-        }
-        c.enabled = c.master;
-    }
-    out
+    let es = profiles::cheatfile::entries(text);
+    let envs = profiles::cheatfile::env_names(&es);
+    es.into_iter()
+        .zip(envs)
+        .map(|(e, env)| {
+            let broken = validate(&e.words).err();
+            Cheat { name: e.name, enabled: e.master, master: e.master, words: e.words, broken, env, ..Default::default() }
+        })
+        .collect()
 }
 
 fn width_ok(t: u32) -> bool {
@@ -641,6 +617,9 @@ impl Vm {
                 nd_step(c, mem);
                 continue;
             }
+            if c.code_only {
+                continue;
+            }
             if (c.once || c.restore_once) && !c.master {
                 c.enabled = false;
                 c.restore_once = false;
@@ -771,6 +750,7 @@ fn load() -> Option<State> {
             c.enabled = true;
         }
     }
+    bind_code(&mut cheats, (m.text_end, nxrt::patchset::has));
     let n_on = cheats.iter().filter(|c| c.enabled && !c.master).count();
     let broken: Vec<String> = cheats.iter().filter_map(|c| c.broken.as_ref().map(|b| format!("{} ({b})", c.name))).collect();
     crate::log!(
@@ -880,6 +860,215 @@ pub fn register_commands() {
 // in <build>.values), "set" cheats that run one pass and turn themselves off, and never-decrease, a host action that
 // keeps a typed value at the highest seen. Columns are read by their header names; rows go to the entries of the same
 // name in file order; "unresolved" rows (cheats the compiler left out) are listed.
+
+// ---- the cheat panel: a small window over the game (the prompts' window, `ui.rs`) listing the cheats with their state
+// and values; opened from the front end (F6, or Home + Minus on a controller). It acts through the same functions as
+// the control commands (`toggle`, `value_set`, `save_enabled`).
+
+/// What one step of the panel asks for.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PanelAct {
+    None,
+    /// Turn row r's cheat on / off.
+    Toggle(usize),
+    /// Change row r's value by a step (-1 / +1).
+    Step(usize, i32),
+    Close,
+}
+
+/// The panel's navigation over its rows: D-pad up / down or the arrows move (wrapping), A or Return toggles, left /
+/// right steps a value, B or Escape closes. Pads count on the press (a button held as it opened, or held on, counts
+/// once).
+pub struct CheatPanel {
+    pub cursor: usize,
+    /// A, B, up, down, left, right as last seen.
+    held: [bool; 6],
+}
+
+impl CheatPanel {
+    pub fn open(held: [bool; 6]) -> CheatPanel {
+        CheatPanel { cursor: 0, held }
+    }
+    /// One step over `n` rows: the pads (A, B, up, down, left, right), Return / Escape, the vertical and horizontal
+    /// arrows typed since the last step.
+    pub fn step(&mut self, n: usize, pads: [bool; 6], confirm: bool, cancel: bool, vert: i32, horiz: i32) -> PanelAct {
+        let e: Vec<bool> = (0..6).map(|i| pads[i] && !self.held[i]).collect();
+        self.held = pads;
+        if e[1] || cancel {
+            return PanelAct::Close;
+        }
+        if n == 0 {
+            return PanelAct::None;
+        }
+        self.cursor = self.cursor.min(n - 1);
+        if e[2] || vert < 0 {
+            self.cursor = (self.cursor + n - 1) % n;
+        }
+        if e[3] || vert > 0 {
+            self.cursor = (self.cursor + 1) % n;
+        }
+        if e[0] || confirm {
+            return PanelAct::Toggle(self.cursor);
+        }
+        if e[4] || horiz < 0 {
+            return PanelAct::Step(self.cursor, -1);
+        }
+        if e[5] || horiz > 0 {
+            return PanelAct::Step(self.cursor, 1);
+        }
+        PanelAct::None
+    }
+}
+
+/// The rows the panel lists: every cheat but the restore halves of pairs (their on half is the switch).
+pub fn panel_rows(cheats: &[Cheat]) -> Vec<usize> {
+    (0..cheats.len()).filter(|&i| !cheats[i].pair_off).collect()
+}
+
+/// The panel's text: up to 10 rows around the cursor (the selected one marked), then the keys.
+pub fn panel_text(cheats: &[Cheat], rows: &[usize], cursor: usize) -> String {
+    if rows.is_empty() {
+        return "No cheats for this build.\nB / Esc: close".into();
+    }
+    let first = cursor.saturating_sub(4).min(rows.len().saturating_sub(10));
+    let mut s = String::new();
+    for (k, &i) in rows.iter().enumerate().skip(first).take(10) {
+        let c = &cheats[i];
+        let state = if c.master {
+            "always"
+        } else if c.broken.is_some() {
+            "cannot run"
+        } else if c.enabled {
+            "ON"
+        } else {
+            "off"
+        };
+        let value = value_get(c).map(|v| format!("   < {v} >")).unwrap_or_default();
+        let mark = if k == cursor { "\u{25b6} " } else { "   " };
+        s.push_str(&format!("{mark}{}{}  [{state}]{value}\n", if c.section.is_empty() { String::new() } else { format!("{}: ", c.section) }, c.name));
+    }
+    s.push_str(&format!("{} of {}   A / Return: on-off   Left / Right: value   B / Esc: close", cursor + 1, rows.len()));
+    s
+}
+
+/// A value one step up or down in its type (1 for integers and floats), within its bounds.
+pub fn value_step(c: &mut Cheat, d: i32) -> Result<(), String> {
+    let v: f64 = value_get(c).ok_or("takes no value")?.parse().map_err(|_| "no value".to_string())?;
+    let n = v + d as f64;
+    let text = if c.ty.starts_with('f') { format!("{n}") } else { format!("{}", n as i128) };
+    value_set(c, &text)
+}
+
+static PANEL_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Opens the cheat panel over the game (on a thread of its own; nothing if it is open already). While it is open
+/// the game reads no pads and is out of focus, as under the console's menus.
+pub fn panel_open() {
+    if PANEL_OPEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    if std::thread::Builder::new().name("nxos cheat panel".into()).spawn(panel_run).is_err() {
+        PANEL_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+fn panel_pads() -> [bool; 6] {
+    let n = crate::ui::pads_nav();
+    let (l, r) = crate::ui::pads_lr();
+    [n[0], n[1], n[2], n[3], l, r]
+}
+
+fn panel_run() {
+    crate::log!("cheats: panel open");
+    crate::services::oe::applet_enter("cheat panel");
+    crate::input::set_prompt(true);
+    let mut p = CheatPanel::open(panel_pads());
+    let mut shown = String::new();
+    let _ = crate::ui::keys();
+    let _ = crate::ui::nav_keys();
+    let _ = crate::ui::hnav_keys();
+    loop {
+        let (confirm, cancel) = crate::ui::keys();
+        let (vert, _) = crate::ui::nav_keys();
+        let horiz = crate::ui::hnav_keys();
+        let text = {
+            let mut g = STATE.lock().unwrap();
+            let st = g.get_or_insert_with(load);
+            let rows = st.as_ref().map(|s| panel_rows(&s.cheats)).unwrap_or_default();
+            match p.step(rows.len(), panel_pads(), confirm, cancel, vert, horiz) {
+                PanelAct::Close => break,
+                PanelAct::Toggle(r) => {
+                    if let Some(st) = st.as_mut() {
+                        let i = rows[r];
+                        if !st.cheats[i].master {
+                            let (name, on) = (st.cheats[i].name.clone(), !st.cheats[i].enabled);
+                            match toggle(&mut st.cheats, &name, on) {
+                                Ok(r) => crate::log!("cheats (panel): {}", r.trim()),
+                                Err(e) => crate::log!("cheats (panel): {}", e.trim()),
+                            }
+                            save_enabled(st);
+                        }
+                    }
+                }
+                PanelAct::Step(r, d) => {
+                    if let Some(st) = st.as_mut() {
+                        let i = rows[r];
+                        if value_step(&mut st.cheats[i], d).is_ok() {
+                            save_enabled(st);
+                        }
+                    }
+                }
+                PanelAct::None => {}
+            }
+            match st.as_ref() {
+                Some(s) => panel_text(&s.cheats, &rows, p.cursor),
+                None => panel_text(&[], &[], 0),
+            }
+        };
+        if text != shown {
+            crate::ui::show("Cheats", &text);
+            shown = text;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    crate::ui::hide();
+    // the press that closed it never reaches the game
+    while panel_pads()[0] || panel_pads()[1] {
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    crate::input::set_prompt(false);
+    crate::services::oe::applet_leave();
+    crate::log!("cheats: panel closed");
+    PANEL_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// Marks the cheats the game's code has a patch set for (`has`: the runtime's table) and sets each set to the
+/// cheat's state; `code_only` when every write of the cheat is a store into main's code (below `text_end`).
+pub fn bind_code(cheats: &mut [Cheat], (text_end, has): (u64, fn(&str) -> bool)) {
+    let mut n = 0;
+    for c in cheats.iter_mut() {
+        if c.env.is_empty() || !has(&c.env) {
+            continue;
+        }
+        c.code = true;
+        c.code_only = profiles::cheatfile::main_writes(&c.words).is_some_and(|w| w.iter().all(|(o, b)| o + b.len() as u64 <= text_end));
+        sync_code(c);
+        n += 1;
+    }
+    if n > 0 {
+        crate::log!("cheats: {n} code cheats compiled into this build, switched by their toggles");
+    }
+    for c in cheats.iter().filter(|c| !c.code && profiles::cheatfile::main_writes(&c.words).is_some_and(|w| w.iter().any(|(o, _)| *o < text_end))) {
+        crate::log!("[RED] cheats: {:?} writes main's code but is not compiled into this build (rebuild with the cheat file in place): its code writes have no effect", c.name);
+    }
+}
+
+/// The compiled-in set of a code cheat follows its state (a master: always on).
+fn sync_code(c: &Cheat) {
+    if c.code {
+        nxrt::patchset::set(&c.env, c.enabled || c.master);
+    }
+}
 
 /// A meta type's width in bytes ("u8" .. "u64", "s16", "f32", "f64"); 0 unknown.
 fn type_width(t: &str) -> u32 {
@@ -1037,6 +1226,7 @@ pub fn toggle(cheats: &mut [Cheat], name: &str, on: bool) -> Result<String, Stri
         cheats[j].enabled = false;
         cheats[j].restore_once = was && !on;
     }
+    sync_code(&cheats[i]);
     Ok(format!("{}: {}{}\n", cheats[i].name, if on { "on" } else { "off" }, if was && !on && cheats[i].pair.is_some() { " (its restore runs once)" } else { "" }))
 }
 
@@ -1318,5 +1508,71 @@ Lost one	unresolved									no anchor
         assert_eq!(rd(&mut m, 0x20), 80);
         assert_eq!(onoff_split("God mode (off)"), Some(("God mode".to_string(), true)));
         assert_eq!(onoff_split("Wagon"), None);
+    }
+
+    /// A code cheat compiled into the build: its set in the game's switch table (handed to the runtime) follows its
+    /// toggle; the VM leaves a cheat whose every write is compiled in alone; a master's set is on; a code cheat the
+    /// build did not compile in is not bound.
+    #[test]
+    fn code_cheat_toggle_flips_its_set() {
+        let txt = "[No damage]
+04000000 00001000 D503201F
+{Always}
+04000000 00001010 D503201F
+[Not built]
+04000000 00001020 D503201F
+[Data]
+04000000 00009000 00000001
+";
+        let mut c = parse(txt);
+        let envs: Vec<std::ffi::CString> = c[..2].iter().map(|x| std::ffi::CString::new(x.env.clone()).unwrap()).collect();
+        let names: Vec<*const std::ffi::c_char> = envs.iter().map(|e| e.as_ptr()).collect();
+        static mut ON: [u8; 2] = [0, 0];
+        unsafe { nxrt::patchset::nxrt_patch_table(std::ptr::addr_of_mut!(ON) as *mut u8, names.as_ptr(), 2) };
+        bind_code(&mut c, (0x8000, nxrt::patchset::has));
+        assert!(c[0].code && c[0].code_only && c[1].code && !c[2].code && !c[3].code);
+        assert_eq!(unsafe { ON }, [0, 1], "off by default, the master on");
+        toggle(&mut c, "No damage", true).unwrap();
+        assert_eq!(nxrt::patchset::get(&c[0].env), Some(true));
+        let mut m = fake();
+        m.base = 0x1000_0000;
+        for a in 0..0x10 {
+            m.mem.insert(0x1000_1000 + a, 0xAA);
+        }
+        Vm::default().pass(&mut c, &mut m, 0);
+        assert_eq!(m.read(0x1000_1000, 4), Some(0xAAAA_AAAA), "the VM leaves a compiled-in cheat to its set");
+        toggle(&mut c, "No damage", false).unwrap();
+        assert_eq!(nxrt::patchset::get(&c[0].env), Some(false));
+    }
+
+    /// The panel: rows leave out a pair's restore half; arrows / D-pad move and wrap, A / Return toggle (the toggle
+    /// acts as the command does), left / right step a value within its bounds, a held button counts once, B / Escape
+    /// close; the text marks the selected row and shows states and values.
+    #[test]
+    fn cheat_panel() {
+        let txt = "[Coins]\n04000000 00000010 00000005\n[HP - on]\n04000000 00000018 000003E7\n[HP - off]\n04000000 00000018 00000064\n{Always}\n04000000 00000020 00000001\n";
+        let mut c = parse(txt);
+        meta_load(&mut c, "name\ttype\task\tvalue_words\nCoins\tu32\t0..6\t2\n");
+        link_pairs(&mut c);
+        let rows = panel_rows(&c);
+        assert_eq!(rows, vec![0, 1, 3], "the restore half is not a row");
+        let mut p = CheatPanel::open([true, false, false, false, false, false]);
+        assert_eq!(p.step(3, [true, false, false, false, false, false], false, false, 0, 0), PanelAct::None, "A held as it opened");
+        assert_eq!(p.step(3, [false; 6], false, false, -1, 0), PanelAct::None);
+        assert_eq!(p.cursor, 2, "wraps up");
+        p.step(3, [false, false, false, true, false, false], false, false, 0, 0);
+        assert_eq!(p.cursor, 0);
+        assert_eq!(p.step(3, [false; 6], false, false, 0, 1), PanelAct::Step(0, 1));
+        assert!(value_step(&mut c[0], 1).is_ok());
+        assert_eq!(value_get(&c[0]).as_deref(), Some("6"));
+        assert!(value_step(&mut c[0], 1).is_err(), "bounded");
+        p.step(3, [false; 6], false, false, 1, 0);
+        assert_eq!(p.step(3, [false; 6], true, false, 0, 0), PanelAct::Toggle(1));
+        let name = c[rows[1]].name.clone();
+        toggle(&mut c, &name, true).unwrap();
+        let t = panel_text(&c, &rows, p.cursor);
+        assert!(t.contains("\u{25b6} HP - on  [ON]") && t.contains("Coins  [off]   < 6 >") && t.contains("Always  [always]"), "{t}");
+        assert_eq!(p.step(3, [false, true, false, false, false, false], false, false, 0, 0), PanelAct::Close);
+        assert_eq!(CheatPanel::open([false; 6]).step(0, [false; 6], false, true, 0, 0), PanelAct::Close, "Escape");
     }
 }

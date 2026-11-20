@@ -19,6 +19,7 @@ use super::{Buf, Gpu};
 use crate::nvn::obj::pool_t;
 use crate::nvn::types::mem_flags;
 use ash::vk;
+use gpu_allocator::vulkan::{AllocationCreateDesc, AllocationScheme};
 use gpu_allocator::MemoryLocation;
 use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -57,6 +58,137 @@ pub struct Pool {
     pub alloc_base: u64,
     /// the frame its CPU writes were last seen (cold pools are asked once a frame: `begin_submit`)
     pub dirty_frame: u64,
+    /// A pool larger than the device's largest buffer (maintenance4 `maxBufferSize`; AMD: 2 GiB) has several buffers,
+    /// windows side by side over it (Turbo `vk_mem.c` pool windows): window k holds pool bytes [k * win, (k + 1) *
+    /// win), window 0 is `buf`, the others are here. `win` 0: one buffer for all of it.
+    pub win: u64,
+    pub wins: Vec<Buf>,
+    /// the device address of each extra window's start (raw global memory's table lists every window)
+    pub wins_da: Vec<u64>,
+    /// a sparse-residency buffer backed in granules on first use (`Granules`), None: backed whole
+    pub gran: Option<Granules>,
+    /// CPU-written ranges past the frame's upload budget (`upload_budget`): uploaded when a use resolves them, or by
+    /// the next submissions within their budget
+    pub deferred: Vec<(u64, u64)>,
+}
+
+/// The per-frame upload budget (Turbo `vk_mem.c` g_budget, NXRT_VK_UPLOAD_MB, 64 MB): CPU writes uploaded at the
+/// start of a submission count against it; past it, a range waits in its pool (`Pool::deferred`) and goes when a draw,
+/// dispatch or copy of this submission resolves an address in it (Turbo: `vkm_use` syncs what a use needs whatever the
+/// budget), when raw global memory's table is bound (every pool at once), or at the next submissions within theirs.
+/// Turbo's budget bounds its background page sync; here every CPU write was uploaded before each submission, so a
+/// frame that rewrote hundreds of MB the GPU did not read (a load's staging areas) staged all of it at once.
+/// `NXGFX_UPLOAD_MB` (default 64; 0: no budget).
+pub fn upload_budget() -> u64 {
+    match BUDGET_OVERRIDE.load(Ordering::Relaxed) {
+        0 => {
+            static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+            *V.get_or_init(|| std::env::var("NXGFX_UPLOAD_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(64) << 20)
+        }
+        o => o,
+    }
+}
+/// Tests: another budget (bytes; 0: the configured one).
+pub static BUDGET_OVERRIDE: AtomicU64 = AtomicU64::new(0);
+/// (frame, bytes uploaded in it so far)
+static BUDGET_USED: std::sync::Mutex<(u64, u64)> = std::sync::Mutex::new((0, 0));
+/// Bytes left for later by the budget, and taken by a use since.
+pub static DEFERRED_BYTES: AtomicU64 = AtomicU64::new(0);
+pub static DEFERRED_USED: AtomicU64 = AtomicU64::new(0);
+
+/// Takes `n` bytes of this frame's budget: false (nothing taken) when they do not fit.
+fn budget_take(n: u64) -> bool {
+    let b = upload_budget();
+    if b == 0 {
+        return true;
+    }
+    let f = super::present::frames();
+    let mut u = BUDGET_USED.lock().unwrap();
+    if u.0 != f {
+        *u = (f, 0);
+    }
+    // a frame's first range always goes (a range larger than the budget is not starved)
+    if u.1 > 0 && u.1 + n > b {
+        return false;
+    }
+    u.1 += n;
+    true
+}
+
+/// A pool buffer backed in granules on first use (Turbo `vk_dev.c:271` / `vk_mem.c` pool_bind): device memory for a
+/// granule is allocated and bound (before the submission that first uses it, `sparse::bind_buffer`) when a range in it
+/// is first resolved, and filled then with the guest memory's committed bytes there. A large pool the game uses a
+/// little of holds only that much device memory (Mario Kart World's pools of gigabytes). Raw global memory's table
+/// names whole pools: a pool it lists is bound whole. Pools of `GRAN_MIN` and up, Mirror / Vram, one window;
+/// `NXGFX_POOL_SPARSE=0` backs every pool whole.
+pub struct Granules {
+    pub size: u64,
+    pub mem: Vec<Option<gpu_allocator::vulkan::Allocation>>,
+    pub req: vk::MemoryRequirements,
+    pub bound: u64,
+}
+
+/// The granule (Turbo's GRAN: 2 MiB, a whole number of the device's sparse blocks).
+pub const GRAN: u64 = 2 << 20;
+/// Pools smaller than this are backed whole (a bind per first use of a 16 KB pool cost more than its memory).
+pub const GRAN_MIN: u64 = 8 << 20;
+/// Bytes of pool memory bound in granules so far.
+pub static GRAN_BOUND: AtomicU64 = AtomicU64::new(0);
+
+fn gran_on(g: &Gpu) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    g.d.caps.sparse_buffer && *ON.get_or_init(|| std::env::var("NXGFX_POOL_SPARSE").as_deref() != Ok("0"))
+}
+
+/// The granules [first, end) a range [off, off + n) of a pool touches.
+pub fn granules_of(gran: u64, off: u64, n: u64) -> (usize, usize) {
+    ((off / gran) as usize, (off + n.max(1)).div_ceil(gran) as usize)
+}
+
+/// The largest buffer the device makes (maintenance4 `maxBufferSize`), or less when a test or
+/// `NXGFX_MAX_BUFFER_MB` asks for it (to try pool windows on a device whose largest buffer is larger than any pool).
+pub static MAX_BUFFER_OVERRIDE: AtomicU64 = AtomicU64::new(0);
+
+pub fn max_buffer(g: &Gpu) -> u64 {
+    static DEV: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    let dev = *DEV.get_or_init(|| {
+        let mut m4 = vk::PhysicalDeviceMaintenance4Properties::default();
+        let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut m4);
+        unsafe { g.d.instance.get_physical_device_properties2(g.d.pdev, &mut p2) };
+        let max = if m4.max_buffer_size > 0 { m4.max_buffer_size } else { u64::MAX };
+        let env = std::env::var("NXGFX_MAX_BUFFER_MB").ok().and_then(|v| v.parse::<u64>().ok()).map(|v| v << 20).unwrap_or(u64::MAX);
+        max.min(env)
+    });
+    match MAX_BUFFER_OVERRIDE.load(Ordering::Relaxed) {
+        0 => dev,
+        o => o.min(dev),
+    }
+}
+
+/// The window size for a pool of `size` bytes when the device's largest buffer is `max`: 0 (one buffer) when it
+/// fits, else `max` rounded down to whole pages.
+pub fn window_size(size: u64, max: u64) -> u64 {
+    if size <= max {
+        0
+    } else {
+        (max & !(PAGE - 1)).max(PAGE)
+    }
+}
+
+/// [off, off + n) of a pool split at its windows: (window index, offset in the window, bytes).
+pub fn split_windows(win: u64, off: u64, n: u64) -> Vec<(usize, u64, u64)> {
+    if win == 0 {
+        return vec![(0, off, n)];
+    }
+    let mut out = vec![];
+    let (mut at, end) = (off, off + n);
+    while at < end {
+        let k = at / win;
+        let e = ((k + 1) * win).min(end);
+        out.push((k as usize, at - k * win, e - at));
+        at = e;
+    }
+    out
 }
 
 /// Moves whenever a pool comes, goes or gets its GPU buffer (the raw global memory table is written again).
@@ -379,6 +511,11 @@ pub fn pool_add(p: &pool_t) {
         da: 0,
         alloc_base: if watched { watch::alloc_of(lo, hi) } else { 0 },
         dirty_frame: super::present::frames(),
+        win: 0,
+        wins: Vec::new(),
+        wins_da: Vec::new(),
+        gran: None,
+        deferred: Vec::new(),
     };
     if std::env::var("NXGFX_POOL_LOG").is_ok() {
         crate::vklog!("pool {base:#x} size {:#x} flags {:#x}: {placement:?}{}", p.size, p.flags, if watched { " (write watch)" } else { "" });
@@ -400,10 +537,23 @@ fn release(g: &Gpu, p: Pool) {
     if p.buf.is_some() {
         super::lazy::touch(p.base, p.size);
     }
-    if let Some(b) = &p.buf {
-        if let Some(m) = ADDRS.write().unwrap().as_mut() {
+    if let Some(m) = ADDRS.write().unwrap().as_mut() {
+        for b in p.buf.iter().chain(p.wins.iter()) {
             m.remove(&vk::Handle::as_raw(b.buf));
         }
+    }
+    for b in p.wins {
+        g.q.defer_after_use(Box::new(move |g: &Gpu| g.free_buffer(b)));
+    }
+    if let Some(gr) = p.gran {
+        let mems: Vec<_> = gr.mem.into_iter().flatten().collect();
+        GRAN_BOUND.fetch_sub(mems.len() as u64 * gr.size, Ordering::Relaxed);
+        g.q.defer_after_use(Box::new(move |g: &Gpu| {
+            let mut a = g.alloc.lock().unwrap();
+            for m in mems {
+                let _ = a.free(m);
+            }
+        }));
     }
     if let Some(b) = p.buf {
         super::lost::note_gone(|| format!("pool buffer {:#x} of pool {:#x} (+{:#x}), device address {:#x}", vk::Handle::as_raw(b.buf), p.base, p.size, p.da));
@@ -449,7 +599,13 @@ pub fn room(a: u64) -> u64 {
     match find(&m, a, 1) {
         Some(b) => {
             let p = &m.by_base[&b];
-            p.base + p.size - a
+            // to the end of the window holding `a` (a pool over the device's largest buffer has several)
+            if p.win == 0 {
+                p.base + p.size - a
+            } else {
+                let k = (a - p.base) / p.win;
+                (p.base + ((k + 1) * p.win).min(p.size)) - a
+            }
         }
         None => 0,
     }
@@ -525,10 +681,12 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     }
     let ranges = p.take_cpu_writes(gen, Some(pages));
     p.dirty_frame = frame;
-    if let Some(buf) = p.buf.as_ref() {
+    if p.buf.is_some() {
         for &(ra, rn) in &ranges {
-            let src = unsafe { core::slice::from_raw_parts(ra as *const u8, rn as usize) };
-            sub.upload(g, src, buf.buf, p.buf_off + (ra - p.base));
+            for (buf, boff, pa, pn) in p.pieces(ra, rn) {
+                let src = unsafe { core::slice::from_raw_parts(pa as *const u8, pn as usize) };
+                sub.upload(g, src, buf, boff);
+            }
             UPLOAD_BYTES.fetch_add(rn, Ordering::Relaxed);
         }
     }
@@ -542,9 +700,63 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
 pub fn cpu_invalidate(_a: u64, _n: u64) {}
 
 impl Pool {
+    /// The buffer of window `k` and the buffer offset of the window's start.
+    fn window(&self, k: usize) -> Option<(vk::Buffer, u64)> {
+        if k == 0 {
+            self.buf.as_ref().map(|b| (b.buf, self.buf_off))
+        } else {
+            self.wins.get(k - 1).map(|b| (b.buf, 0))
+        }
+    }
+
+    /// [a, a + n) of guest memory in this pool as pieces of its buffers: (buffer, buffer offset, address, bytes).
+    pub fn pieces(&self, a: u64, n: u64) -> Vec<(vk::Buffer, u64, u64, u64)> {
+        split_windows(self.win, a - self.base, n)
+            .into_iter()
+            .filter_map(|(k, o, m)| {
+                let (b, b0) = self.window(k)?;
+                Some((b, b0 + o, self.base + k as u64 * self.win + o, m))
+            })
+            .collect()
+    }
+
+    /// The one buffer holding all of [a, a + n): (buffer, its offset of `a`, the window's first address, the window's
+    /// bytes). None when the range spans two windows.
+    pub fn one(&self, a: u64, n: u64) -> Option<(vk::Buffer, u64, u64, u64)> {
+        let ps = split_windows(self.win, a - self.base, n.max(1));
+        if ps.len() != 1 {
+            return None;
+        }
+        let (k, o, _) = ps[0];
+        let (b, b0) = self.window(k)?;
+        let wlen = if self.win == 0 { self.size } else { self.win.min(self.size - k as u64 * self.win) };
+        Some((b, b0 + o, self.base + k as u64 * self.win, wlen))
+    }
+
+    /// The ranges raw global memory's table lists for this pool: (first address, end, device address of the first).
+    pub fn da_ranges(&self) -> Vec<(u64, u64, u64)> {
+        if self.da == 0 {
+            return vec![];
+        }
+        if self.win == 0 {
+            return vec![(self.base, self.base + self.size, self.da)];
+        }
+        let mut v = vec![(self.base, self.base + self.win.min(self.size), self.da)];
+        for (i, &d) in self.wins_da.iter().enumerate() {
+            let lo = self.base + (i as u64 + 1) * self.win;
+            v.push((lo, (lo + self.win).min(self.base + self.size), d));
+        }
+        v
+    }
+
     fn ensure_buffer(&mut self, g: &Gpu, sub: &mut super::queue::Sub) -> Result<(), String> {
         if self.buf.is_some() {
             return Ok(());
+        }
+        let win = window_size(self.size, max_buffer(g));
+        if win != 0 && self.placement == Placement::Host {
+            // an imported range is one buffer: a pool larger than the device's largest buffer is mirrored instead
+            self.placement = Placement::Mirror;
         }
         match self.placement {
             Placement::CpuOnly => return Err(format!("pool {:#x} has no GPU access", self.base)),
@@ -564,19 +776,51 @@ impl Pool {
             },
             _ => {}
         }
-        let b = g.buffer(self.size, buf_usage(g), MemoryLocation::GpuOnly, "pool")?;
+        if win == 0 && self.size >= GRAN_MIN && matches!(self.placement, Placement::Mirror | Placement::Vram) && gran_on(g) {
+            return self.make_sparse(g);
+        }
+        let b = g.buffer(if win == 0 { self.size } else { win }, buf_usage(g), MemoryLocation::GpuOnly, "pool")?;
+        self.win = win;
+        if win != 0 {
+            let n = self.size.div_ceil(win);
+            for k in 1..n {
+                let len = win.min(self.size - k * win);
+                match g.buffer(len, buf_usage(g), MemoryLocation::GpuOnly, "pool window") {
+                    Ok(w) => self.wins.push(w),
+                    Err(e) => {
+                        for w in self.wins.drain(..) {
+                            g.free_buffer(w);
+                        }
+                        g.free_buffer(b);
+                        self.win = 0;
+                        return Err(format!("pool {:#x}: window {k} of {n}: {e}", self.base));
+                    }
+                }
+            }
+            crate::vklog!("memory pool {:#x}+{:#x}: {n} buffers of up to {} MB side by side (the device's largest buffer is {} MB)", self.base, self.size, win >> 20, max_buffer(g) >> 20);
+        }
         // The storage now: a Vram pool's initial content, a mirror's current one. Only the committed parts of the
         // guest's memory hold anything (a large pool the game has not written yet is zero and is not read here: reading
         // it would commit it, and staging it would double it in host memory; Mario Kart World's pools)
         super::lazy::touch(self.base, self.size);
         unsafe { g.dev().cmd_fill_buffer(sub.pre, b.buf, 0, vk::WHOLE_SIZE, 0) };
+        for w in &self.wins {
+            unsafe { g.dev().cmd_fill_buffer(sub.pre, w.buf, 0, vk::WHOLE_SIZE, 0) };
+        }
         super::queue::full_barrier(g, sub.pre);
+        self.buf = Some(b);
+        self.buf_off = 0;
         let mut staged = 0u64;
         for (a, n) in committed(self.base, self.size) {
-            let src = unsafe { core::slice::from_raw_parts(a as *const u8, n as usize) };
-            // in pieces of at most 64 MB (staging chunks)
-            for (k, part) in src.chunks(64 << 20).enumerate() {
-                sub.upload(g, part, b.buf, a - self.base + (k as u64) * (64 << 20));
+            // in pieces of at most 64 MB (staging chunks), split at the windows
+            let mut at = a;
+            while at < a + n {
+                let m = (a + n - at).min(64 << 20);
+                for (buf, boff, pa, pn) in self.pieces(at, m) {
+                    let src = unsafe { core::slice::from_raw_parts(pa as *const u8, pn as usize) };
+                    sub.upload(g, src, buf, boff);
+                }
+                at += m;
             }
             staged += n;
         }
@@ -592,9 +836,156 @@ impl Pool {
                 self.snapshot = Some(guest_bytes(self.base, self.size).into_owned());
             }
         }
-        self.buf = Some(b);
         self.note_address(g);
         Ok(())
+    }
+
+    /// A sparse-residency buffer with no memory yet; granules come at first use (`bind`).
+    fn make_sparse(&mut self, g: &Gpu) -> Result<(), String> {
+        let dev = g.dev();
+        let size = self.size.div_ceil(GRAN) * GRAN;
+        let bda = vk::BufferCreateInfo::default()
+            .size(size)
+            .usage(buf_usage(g))
+            .flags(vk::BufferCreateFlags::SPARSE_BINDING | vk::BufferCreateFlags::SPARSE_RESIDENCY)
+            .sharing_mode(vk::SharingMode::EXCLUSIVE);
+        let buf = unsafe { dev.create_buffer(&bda, None) }.map_err(|e| format!("pool {:#x}: sparse buffer: {e}", self.base))?;
+        let req = unsafe { dev.get_buffer_memory_requirements(buf) };
+        let gran = GRAN.div_ceil(req.alignment.max(1)) * req.alignment.max(1);
+        let n = size.div_ceil(gran) as usize;
+        let addr = if g.d.caps.bda { unsafe { dev.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buf)) } } else { 0 };
+        self.buf = Some(Buf { buf, alloc: None, mem: vk::DeviceMemory::null(), size, ptr: core::ptr::null_mut(), addr });
+        self.buf_off = 0;
+        self.gran = Some(Granules { size: gran, mem: (0..n).map(|_| None).collect(), req, bound: 0 });
+        static N: AtomicU64 = AtomicU64::new(0);
+        if N.fetch_add(1, Ordering::Relaxed) < 32 {
+            crate::vklog!("memory pool {:#x}+{:#x}: device-local, backed in {} KB granules on first use", self.base, self.size, gran >> 10);
+        }
+        if self.placement == Placement::Mirror {
+            let (lo, hi) = page_range(self.base, self.size);
+            if self.watched {
+                let _ = watch::take(lo, hi, true);
+            } else {
+                self.snapshot = Some(guest_bytes(self.base, self.size).into_owned());
+            }
+        }
+        self.note_address(g);
+        Ok(())
+    }
+
+    /// The granules of [a, a + n) that are not bound yet get memory, a bind before this submission, and the guest
+    /// memory's committed bytes there (zeros elsewhere), recorded into `sub`.
+    pub fn bind(&mut self, g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Result<(), String> {
+        let Some(gr) = self.gran.as_mut() else { return Ok(()) };
+        let (g0, g1) = granules_of(gr.size, a - self.base, n);
+        let g1 = g1.min(gr.mem.len());
+        if (g0..g1).all(|i| gr.mem[i].is_some()) {
+            return Ok(());
+        }
+        let buf = self.buf.as_ref().unwrap().buf;
+        let mut fresh = vec![];
+        for i in g0..g1 {
+            if gr.mem[i].is_some() {
+                continue;
+            }
+            let req = vk::MemoryRequirements { size: gr.size, alignment: gr.req.alignment, memory_type_bits: gr.req.memory_type_bits };
+            let al = g
+                .alloc
+                .lock()
+                .unwrap()
+                .allocate(&AllocationCreateDesc { name: "pool granule", requirements: req, location: MemoryLocation::GpuOnly, linear: true, allocation_scheme: AllocationScheme::GpuAllocatorManaged })
+                .map_err(|e| format!("no device memory to back pool {:#x} at {:#x}: {e}", self.base, i as u64 * gr.size))?;
+            super::sparse::bind_buffer(
+                buf,
+                vk::SparseMemoryBind { resource_offset: i as u64 * gr.size, size: gr.size, memory: unsafe { al.memory() }, memory_offset: al.offset(), flags: vk::SparseMemoryBindFlags::empty() },
+            );
+            gr.mem[i] = Some(al);
+            gr.bound += gr.size;
+            GRAN_BOUND.fetch_add(gr.size, Ordering::Relaxed);
+            fresh.push(i);
+        }
+        let gsz = gr.size;
+        // the new granules' content: zeros, then what the guest memory holds there (its committed parts)
+        for &i in &fresh {
+            unsafe { g.dev().cmd_fill_buffer(sub.pre, buf, i as u64 * gsz, gsz, 0) };
+        }
+        super::queue::full_barrier(g, sub.pre);
+        if self.placement == Placement::Mirror || self.placement == Placement::Vram {
+            for &i in &fresh {
+                let lo = self.base + i as u64 * gsz;
+                let hi = (lo + gsz).min(self.base + self.size);
+                if hi <= lo {
+                    continue;
+                }
+                super::lazy::touch(lo, hi - lo);
+                for (ca, cn) in committed(lo, hi - lo) {
+                    let src = unsafe { core::slice::from_raw_parts(ca as *const u8, cn as usize) };
+                    sub.upload(g, src, buf, ca - self.base);
+                    UPLOAD_BYTES.fetch_add(cn, Ordering::Relaxed);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Uploads this pool's deferred CPU writes overlapping [a, a + n) (all of them with `n` = u64::MAX), from guest
+    /// memory as it is now.
+    pub fn upload_deferred(&mut self, g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
+        let end = a.saturating_add(n);
+        let mut keep = vec![];
+        for (da, dn) in std::mem::take(&mut self.deferred) {
+            if da + dn <= a || da >= end {
+                keep.push((da, dn));
+                continue;
+            }
+            self.upload_now(g, sub, da, dn);
+            DEFERRED_USED.fetch_add(dn, Ordering::Relaxed);
+        }
+        self.deferred = keep;
+    }
+
+    fn upload_now(&self, g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
+        for (buf, boff, pa, pn) in self.pieces(a, n) {
+            // granules not bound yet take the guest bytes when they are bound
+            for (qa, qn) in self.bound_parts(pa, pn) {
+                let src = unsafe { core::slice::from_raw_parts(qa as *const u8, qn as usize) };
+                sub.upload(g, src, buf, boff + (qa - pa));
+            }
+        }
+        UPLOAD_BYTES.fetch_add(n, Ordering::Relaxed);
+    }
+
+    /// [a, a + n) as the runs that lie in bound granules (all of it for a pool backed whole).
+    fn bound_parts(&self, a: u64, n: u64) -> Vec<(u64, u64)> {
+        let Some(gr) = self.gran.as_ref() else { return vec![(a, n)] };
+        let mut out: Vec<(u64, u64)> = vec![];
+        let (g0, g1) = granules_of(gr.size, a - self.base, n);
+        for i in g0..g1.min(gr.mem.len()) {
+            if gr.mem[i].is_none() {
+                continue;
+            }
+            let lo = (self.base + i as u64 * gr.size).max(a);
+            let hi = (self.base + (i as u64 + 1) * gr.size).min(a + n);
+            match out.last_mut() {
+                Some(l) if l.0 + l.1 == lo => l.1 += hi - lo,
+                _ => out.push((lo, hi - lo)),
+            }
+        }
+        out
+    }
+
+    /// The bound span around [a, a + n) after `bind` (a resolve's cache entry stays inside memory that exists).
+    fn bound_span(&self, a: u64, n: u64) -> (u64, u64) {
+        let Some(gr) = self.gran.as_ref() else { return (self.base, self.size) };
+        let (mut g0, mut g1) = granules_of(gr.size, a - self.base, n);
+        while g0 > 0 && gr.mem[g0 - 1].is_some() {
+            g0 -= 1;
+        }
+        while g1 < gr.mem.len() && gr.mem[g1].is_some() {
+            g1 += 1;
+        }
+        let lo = self.base + g0 as u64 * gr.size;
+        (lo, (self.base + g1 as u64 * gr.size).min(self.base + self.size) - lo)
     }
 
     /// The buffer's device address (raw global memory) once it has one.
@@ -605,6 +996,12 @@ impl Pool {
                 let start = unsafe { g.dev().get_buffer_device_address(&ai) };
                 self.da = start + self.buf_off;
                 ADDRS.write().unwrap().get_or_insert_with(HashMap::new).insert(vk::Handle::as_raw(b.buf), start);
+            }
+            self.wins_da.clear();
+            for w in &self.wins {
+                let start = unsafe { g.dev().get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(w.buf)) };
+                self.wins_da.push(start);
+                ADDRS.write().unwrap().get_or_insert_with(HashMap::new).insert(vk::Handle::as_raw(w.buf), start);
             }
         }
         POOL_GEN.fetch_add(1, Ordering::Relaxed);
@@ -734,15 +1131,15 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
     // vkm_use fast path)
     thread_local! {
         // (generation, pool base, pool size, the next pool's base, buffer, buffer offset of base)
-        static LAST: std::cell::Cell<[(u64, u64, u64, u64, vk::Buffer, u64); 16]> = const { std::cell::Cell::new([(0, 0, 0, 0, vk::Buffer::null(), 0); 16]) };
+        static LAST: std::cell::Cell<[(u64, u64, u64, u64, vk::Buffer, u64, u64); 16]> = const { std::cell::Cell::new([(0, 0, 0, 0, vk::Buffer::null(), 0, 0); 16]) };
     }
     let gen = POOL_GEN.load(Ordering::Acquire);
     let n1 = n.max(1);
     // `find` takes the pool with the highest base at or below the address (pools laid over each other): a hit only
     // below the next pool's base
     let hit = LAST.with(|l| l.get().iter().find(|e| e.0 == gen && a >= e.1 && a + n1 <= e.1 + e.2 && a < e.3 && e.4 != vk::Buffer::null()).copied());
-    if let Some((_, base, _, _, buf, off)) = hit {
-        return Some((buf, off + (a - base), base));
+    if let Some((_, lo, _, _, buf, off, pool)) = hit {
+        return Some((buf, off + (a - lo), pool));
     }
     let mut m = g.mem.lock().unwrap();
     let Some(b) = find(&m, a, n1) else {
@@ -757,18 +1154,41 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
         crate::log::red_once(&e);
         return None;
     }
-    let (buf, off) = (p.buf.as_ref().unwrap().buf, p.buf_off);
+    if let Err(e) = p.bind(g, sub, a, n1) {
+        crate::log::red_once(&e);
+        return None;
+    }
+    // the window holding the range (one buffer for most pools)
+    let Some((buf, boff, wlo, wlen)) = p.one(a, n1) else {
+        crate::log::red_once(&format!(
+            "a range {a:#x}+{n:#x} spans two of memory pool {:#x}'s buffers (the device's largest buffer is {} MB): it is not bound (this is logged once)",
+            p.base,
+            max_buffer(g) >> 20
+        ));
+        return None;
+    };
+    // a pool backed in granules: the cache entry covers the bound granules around the range only
+    let (wlo, wlen) = if p.gran.is_some() { p.bound_span(a, n1) } else { (wlo, wlen) };
+    let off = boff - (a - wlo);
+    // CPU writes the frame's upload budget left for later: the ones in this range go now (this use needs them)
+    if !p.deferred.is_empty() {
+        p.upload_deferred(g, sub, a, n1);
+    }
     // the generation after the buffer exists (its creation moved it)
     let gen = POOL_GEN.load(Ordering::Acquire);
 
-    let (pb, ps) = (p.base, p.size);
-    let next = m.by_base.range(pb + 1..).next().map(|(k, _)| *k).unwrap_or(u64::MAX);
-    LAST.with(|l| {
-        let mut v = l.get();
-        v.rotate_right(1);
-        v[0] = (gen, pb, ps, next, buf, off);
-        l.set(v);
-    });
+    let (pb, ps) = (wlo, wlen);
+    let cache = p.deferred.is_empty();
+    let next = m.by_base.range(b + 1..).next().map(|(k, _)| *k).unwrap_or(u64::MAX);
+    // a pool with deferred writes is not cached: each use looks at them
+    if cache {
+        LAST.with(|l| {
+            let mut v = l.get();
+            v.rotate_right(1);
+            v[0] = (gen, pb, ps, next, buf, off, b);
+            l.set(v);
+        });
+    }
     Some((buf, off + (a - pb), b))
 }
 
@@ -973,6 +1393,12 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
         }
         let pre = taken.remove(&p.base);
         let mut ranges = p.take_cpu_writes(gen, pre);
+        // what the budget left for later comes first (the guest bytes as they are now)
+        if !p.deferred.is_empty() {
+            ranges.extend(std::mem::take(&mut p.deferred));
+            ranges.sort_unstable();
+            ranges.dedup();
+        }
         // pieces under a write-back still in flight wait (in `pending`) until it has landed
         if wb_guard() {
             let inflight = INFLIGHT.lock().unwrap();
@@ -999,13 +1425,20 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
             }
             p.dirty_frame = f;
         }
-        if let Some(b) = p.buf.as_ref() {
-            if p.placement == Placement::Mirror || p.placement == Placement::Vram {
-                for &(a, n) in &ranges {
-                    let src = unsafe { core::slice::from_raw_parts(a as *const u8, n as usize) };
-                    sub.upload(g, src, b.buf, p.buf_off + (a - p.base));
-                    UPLOAD_BYTES.fetch_add(n, Ordering::Relaxed);
+        if p.buf.is_some() && (p.placement == Placement::Mirror || p.placement == Placement::Vram) {
+            let mut deferred_now = false;
+            for &(a, n) in &ranges {
+                if !budget_take(n) {
+                    p.deferred.push((a, n));
+                    DEFERRED_BYTES.fetch_add(n, Ordering::Relaxed);
+                    deferred_now = true;
+                    continue;
                 }
+                p.upload_now(g, sub, a, n);
+            }
+            if deferred_now {
+                // resolves of this pool cached before must look at the deferred ranges
+                POOL_GEN.fetch_add(1, Ordering::Relaxed);
             }
         }
         all.extend(ranges);
@@ -1034,10 +1467,18 @@ pub fn note_gpu_write(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     let p = &m.by_base[&b];
     if p.placement == Placement::Mirror && p.buf.is_some() {
         super::perf::inc(super::perf::C::Writebacks);
-        let (buf, off) = (p.buf.as_ref().unwrap().buf, p.buf_off + (a - p.base));
-        // ranges that follow each other (or one inside another) in the same pool are one copy
+        // one write-back per window the range lies in
+        for (buf, off, a, n) in p.pieces(a, n) {
+            note_writeback(sub, b, a, n, buf, off);
+        }
+    }
+}
+
+fn note_writeback(sub: &mut super::queue::Sub, b: u64, a: u64, n: u64, buf: vk::Buffer, off: u64) {
+    {
+        // ranges that follow each other (or one inside another) in the same pool's buffer are one copy
         for w in sub.writebacks.iter_mut().rev() {
-            if w.0 != b {
+            if w.0 != b || w.3 != buf {
                 continue;
             }
             if a >= w.1 && a + n <= w.1 + w.2 {
@@ -1087,8 +1528,11 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8)]) 
         }
         super::lazy::T_TAKE.fetch_add(tl.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if !lazy.is_empty() {
-            let (buf, off0) = (p.buf.as_ref().map(|b| b.buf).unwrap_or_default(), p.buf_off);
-            let base = p.base;
+            let windows: Vec<(u64, u64, vk::Buffer, u64)> = if p.win == 0 {
+                vec![(p.base, p.size, p.buf.as_ref().map(|b| b.buf).unwrap_or_default(), p.buf_off)]
+            } else {
+                (0..=p.wins.len()).filter_map(|k| p.window(k).map(|(b, o)| (p.base + k as u64 * p.win, p.win, b, o))).collect()
+            };
             let mut at = a;
             for &pg in lazy.iter().chain(std::iter::once(&(a + n))) {
                 let end = pg.min(a + n);
@@ -1098,7 +1542,10 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8)]) 
                 at = (pg + PAGE).min(a + n).max(at);
             }
             let tm = std::time::Instant::now();
-            super::lazy::make_lazy(&lazy, buf, base, off0);
+            for &(wlo, wn, buf, off0) in &windows {
+                let pages: Vec<u64> = lazy.iter().copied().filter(|&pg| pg >= wlo && pg < wlo + wn).collect();
+                super::lazy::make_lazy(&pages, buf, wlo, off0);
+            }
             super::lazy::T_MAKE.fetch_add(tm.elapsed().as_nanos() as u64, Ordering::Relaxed);
             continue;
         }
@@ -1236,19 +1683,21 @@ mod inflight_tests {
 /// For a capture (`capture.rs`): every pool's pages held on the device come back to guest memory first, then what the
 /// GPU holds of the device-local pools (their guest memory is not their content): (base, bytes) of each.
 pub fn gpu_contents(g: &Gpu) -> Vec<(u64, Vec<u8>)> {
-    let pools: Vec<(u64, u64, Placement, Option<(vk::Buffer, u64)>)> = {
+    let pools: Vec<(u64, u64, Placement, Option<Vec<(vk::Buffer, u64, u64, u64)>>)> = {
         let m = g.mem.lock().unwrap();
-        m.by_base.values().map(|p| (p.base, p.size, p.placement, p.buf.as_ref().map(|b| (b.buf, p.buf_off)))).collect()
+        m.by_base.values().map(|p| (p.base, p.size, p.placement, p.buf.as_ref().map(|_| p.pieces(p.base, p.size)))).collect()
     };
     for &(base, size, _, _) in &pools {
         super::lazy::touch(base, size);
     }
     let mut out = Vec::new();
     for (base, size, placement, buf) in pools {
-        let (Placement::Vram, Some((buf, off))) = (placement, buf) else { continue };
+        let (Placement::Vram, Some(pieces)) = (placement, buf) else { continue };
         let Ok(rb) = g.buffer(size, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "capture readback") else { continue };
         let f = super::queue::oneoff(g, |g, sub, _| unsafe {
-            g.dev().cmd_copy_buffer(sub.main, buf, rb.buf, &[vk::BufferCopy { src_offset: off, dst_offset: 0, size }]);
+            for &(buf, off, a, n) in &pieces {
+                g.dev().cmd_copy_buffer(sub.main, buf, rb.buf, &[vk::BufferCopy { src_offset: off, dst_offset: a - base, size: n }]);
+            }
         });
         super::queue::wait_fence(f, u64::MAX);
         let bytes = unsafe { core::slice::from_raw_parts(rb.ptr as *const u8, size as usize) }.to_vec();
@@ -1256,4 +1705,23 @@ pub fn gpu_contents(g: &Gpu) -> Vec<(u64, Vec<u8>)> {
         out.push((base, bytes));
     }
     out
+}
+
+#[cfg(test)]
+mod window_tests {
+    #[test]
+    fn ranges_split_at_the_windows() {
+        assert_eq!(super::window_size(100 << 20, 1 << 30), 0, "fits: one buffer");
+        assert_eq!(super::window_size(3 << 30, (2 << 30) + 123), 2 << 30, "AMD's 2 GiB, in whole pages");
+        assert_eq!(super::split_windows(0, 5, 10), vec![(0, 5, 10)]);
+        assert_eq!(super::split_windows(100, 90, 30), vec![(0, 90, 10), (1, 0, 20)]);
+        assert_eq!(super::split_windows(100, 250, 10), vec![(2, 50, 10)]);
+    }
+}
+
+/// The device memory bound to pool `base` in granules (None: not a pool backed in granules). Tests and diagnostics.
+pub fn pool_bound(base: u64) -> Option<u64> {
+    let g = Gpu::try_get()?;
+    let m = g.mem.lock().unwrap();
+    m.by_base.get(&base).and_then(|p| p.gran.as_ref().map(|gr| gr.bound))
 }

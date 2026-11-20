@@ -19,6 +19,7 @@
 //! Exit codes: 0 done, 1 failed (the reason on stderr, or the UPDATE / DLC error lines), 2 bad arguments.
 
 mod cc;
+mod cheats;
 mod fpsfind;
 mod mods;
 mod out;

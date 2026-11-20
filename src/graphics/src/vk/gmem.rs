@@ -51,25 +51,25 @@ fn build(g: &Gpu) -> Table {
         let m = g.mem.lock().unwrap();
         let mut last_end = 0u64;
         for p in m.by_base.values() {
-            if p.da == 0 {
-                continue;
+            // one entry per buffer: a pool over the device's largest buffer lists each of its windows
+            for (wlo, whi, da) in p.da_ranges() {
+                // pools the game laid over each other: the first one has the overlap
+                let (lo, hi) = (wlo.max(last_end), whi);
+                if lo >= hi {
+                    continue;
+                }
+                if ranges.len() == ENTRIES {
+                    left += 1;
+                    continue;
+                }
+                let i = ranges.len();
+                let e = &mut bytes[i * ENTRY..(i + 1) * ENTRY];
+                e[0..8].copy_from_slice(&lo.to_le_bytes());
+                e[8..16].copy_from_slice(&hi.to_le_bytes());
+                e[16..24].copy_from_slice(&da.wrapping_sub(wlo).to_le_bytes());
+                ranges.push((lo, hi));
+                last_end = hi;
             }
-            // pools the game laid over each other: the first one has the overlap
-            let (lo, hi) = (p.base.max(last_end), p.base + p.size);
-            if lo >= hi {
-                continue;
-            }
-            if ranges.len() == ENTRIES {
-                left += 1;
-                continue;
-            }
-            let i = ranges.len();
-            let e = &mut bytes[i * ENTRY..(i + 1) * ENTRY];
-            e[0..8].copy_from_slice(&lo.to_le_bytes());
-            e[8..16].copy_from_slice(&hi.to_le_bytes());
-            e[16..24].copy_from_slice(&p.da.wrapping_sub(p.base).to_le_bytes());
-            ranges.push((lo, hi));
-            last_end = hi;
         }
     }
     for i in ranges.len()..ENTRIES {
@@ -107,6 +107,20 @@ pub fn binding(g: &Gpu, sub: &mut Sub, word: u32) -> Option<vk::DescriptorBuffer
         return None;
     }
     if sub.gmem.is_none() {
+        // a shader may reach any byte of a listed pool: pools backed in granules are bound whole first
+        {
+            let mut m = g.mem.lock().unwrap();
+            for p in m.by_base.values_mut().filter(|p| p.gran.is_some() && p.da != 0) {
+                let (base, size) = (p.base, p.size);
+                if let Err(e) = p.bind(g, sub, base, size) {
+                    crate::log::red_once(&e);
+                }
+            }
+            // and every CPU write the upload budget left for later goes now
+            for p in m.by_base.values_mut().filter(|p| !p.deferred.is_empty()) {
+                p.upload_deferred(g, sub, 0, u64::MAX);
+            }
+        }
         let (bytes, ranges) = {
             let mut t = TABLE.lock().unwrap();
             if t.as_ref().is_none_or(|t| t.gen != super::mem::POOL_GEN.load(Ordering::Relaxed)) {

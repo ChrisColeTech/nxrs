@@ -42,11 +42,12 @@ const KEYS: [(&str, &str); 7] = [
     ("+  -", "Enter  Backspace"),
     ("Controller", "Xbox / PlayStation / Switch"),
 ];
-const FKEYS: [(&str, &str); 8] = [
+const FKEYS: [(&str, &str); 9] = [
     ("F1", "This page"),
     ("F3", "Screenshot"),
     ("F4", "FPS limit on/off"),
     ("F5", "Diagnostic dump"),
+    ("F6", "Cheats (controller: Home + Minus)"),
     ("F7", "Record video"),
     ("F8", "Full resolution capture"),
     ("F11", "Fullscreen"),

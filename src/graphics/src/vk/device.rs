@@ -77,6 +77,8 @@ pub struct Caps {
     pub push_desc: bool,
     /// sparse 2D images with aliased residency on the graphics queue (sparse textures)
     pub sparse: bool,
+    /// sparse residency buffers on the graphics queue (memory pools backed in granules on first use, `mem.rs`)
+    pub sparse_buffer: bool,
     /// VK_EXT_graphics_pipeline_library with fast linking: a new pipeline is linked from parts compiled once each
     pub gpl: bool,
     /// buffer device addresses (raw global memory: the memory pool table's deltas)
@@ -377,6 +379,7 @@ impl Device {
                 && base.sparse_residency_image2_d != 0
                 && base.sparse_residency_aliased != 0
                 && qfams[qfam as usize].queue_flags.contains(vk::QueueFlags::SPARSE_BINDING),
+            sparse_buffer: base.sparse_binding != 0 && base.sparse_residency_buffer != 0 && qfams[qfam as usize].queue_flags.contains(vk::QueueFlags::SPARSE_BINDING),
             ..Default::default()
         };
         if has(ash::ext::external_memory_host::NAME) {
@@ -414,6 +417,7 @@ impl Device {
             fragment_stores_and_atomics: base.fragment_stores_and_atomics,
             sparse_binding: base.sparse_binding,
             sparse_residency_image2_d: base.sparse_residency_image2_d,
+            sparse_residency_buffer: base.sparse_residency_buffer,
             sparse_residency_aliased: base.sparse_residency_aliased,
             shader_image_gather_extended: base.shader_image_gather_extended,
             shader_storage_image_extended_formats: base.shader_storage_image_extended_formats,

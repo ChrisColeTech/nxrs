@@ -289,7 +289,12 @@ pub fn modules_c(mods: &[(String, String, String)], entry: &str) -> String {
     }
     // the code library's one export: dllexport on Windows, default visibility in the Linux shared object
     let export = if cfg!(windows) { "__declspec(dllexport)" } else { "__attribute__((visibility(\"default\")))" };
-    s.push_str(&format!("\n{export} int nxrs_game_main(int argc, char **argv) {{\n    nxrs_patch_sets();\n    nxrs_mod_markers();\n    RtModule mods[] = {{\n"));
+    // the sets' switch names by index: with the switch table they go to the runtime, so the host can flip a set while
+    // the game runs (a code cheat's toggle)
+    s.push_str("\nstatic const char *const nxrs_patch_envs[] = {\n#define NXRS_ENV(i, name, env, def) [i] = env,\n    RT_PATCH_SETS(NXRS_ENV)\n#undef NXRS_ENV\n    0};\n");
+    s.push_str(&format!(
+        "\n{export} int nxrs_game_main(int argc, char **argv) {{\n    nxrs_patch_sets();\n    nxrs_mod_markers();\n    nxrt_patch_table(rt_patch_on, nxrs_patch_envs, RT_PATCH_COUNT);\n    RtModule mods[] = {{\n"
+    ));
     for (n, b, z) in mods {
         s.push_str(&format!("        {{\"{n}\", {b}ull, {z}ull, {n}_fn_addrs, {n}_fn_ptrs, 0}},\n"));
     }
@@ -529,6 +534,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     let (exe, dll, data) = if cfg!(target_os = "linux") { (with(""), with("_code.so"), with("_data")) } else { (with(".exe"), with("_code.dll"), with("_data")) };
     // the player's mods: their code patches join the profile's table, their data bytes and RomFS go to the run
     let patch_text = crate::mods::prepare(&outdir, &game.exefs.files, &data, patch_text, out)?;
+    // the code cheats of main's build: a patch set each, switched by the cheat's toggle at run time
+    let patch_text = crate::cheats::prepare(&game.exefs.files, &data, patch_text, out)?;
     if !a.no_build {
         check_writable(&[&exe, &dll])?;
     }

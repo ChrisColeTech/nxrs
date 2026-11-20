@@ -4,7 +4,7 @@
 //! and keep the choice; the title shows the game, then the state (FPS limit, recording, frame generation).
 //!
 //! Keys: F1 help and controls, F3 screenshot (captures/), F4 FPS limit 60 / unlimited, F5 diagnostic dump, F7 record
-//! video, F8 full-resolution capture, F11 fullscreen, Esc quit. A held key's auto-repeat never repeats these. Keys are
+//! video, F6 the cheat panel, F8 full-resolution capture, F11 fullscreen, Esc quit. A held key's auto-repeat never repeats these. Keys are
 //! read by position (winit's physical key codes) and handed to the keyboard map as Windows virtual-key codes.
 
 use crate::keys;
@@ -121,6 +121,20 @@ pub fn poll_input() {
     let (b, a) = keys::state(held, m);
     nxos::input::set_keyboard(b | crate::script_now(), a);
     home_quit();
+    cheat_combo();
+}
+
+/// The cheat panel from a controller: Home + Minus pressed together (F6 on the keyboard).
+fn cheat_combo() {
+    static WAS: AtomicBool = AtomicBool::new(false);
+    let minus = nxos::input::devices().iter().any(|d| d.2 >> 11 & 1 != 0);
+    let now = minus && nxos::input::home_held();
+    if now && !WAS.swap(true, Ordering::AcqRel) {
+        crate::flog!("Home + Minus: the cheat panel");
+        nxos::cheats::panel_open();
+    } else if !now {
+        WAS.store(false, Ordering::Release);
+    }
 }
 
 /// Home held 2 s on a controller: "Quit the game?" over it (nxnative home_quit.h); A / Return quits, B / Escape /
@@ -227,6 +241,7 @@ const VK_F1: u32 = 0x70;
 const VK_F3: u32 = 0x72;
 const VK_F4: u32 = 0x73;
 const VK_F5: u32 = 0x74;
+const VK_F6: u32 = 0x75;
 const VK_F7: u32 = 0x76;
 const VK_F8: u32 = 0x77;
 const VK_F11: u32 = 0x7A;
@@ -242,7 +257,7 @@ fn key(vk: u32, down: bool, repeat: bool, alt: bool) {
         }
         return;
     }
-    let hot = [VK_ESCAPE, VK_F1, VK_F3, VK_F4, VK_F5, VK_F7, VK_F8, VK_F11].contains(&vk);
+    let hot = [VK_ESCAPE, VK_F1, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F11].contains(&vk);
     if hot && down {
         if repeat {
             return;
@@ -265,6 +280,7 @@ fn key(vk: u32, down: bool, repeat: bool, alt: bool) {
             }
             VK_F4 => fps_limit_toggle(),
             VK_F5 => diag_dump(),
+            VK_F6 => nxos::cheats::panel_open(),
             VK_F7 => crate::rec::toggle(),
             VK_F8 => crate::capture::full_res(),
             _ => {}

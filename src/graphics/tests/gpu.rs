@@ -1398,3 +1398,123 @@ fn diagnostic_dump_lists_the_render_targets() {
     assert!(d.lines().any(|l| l.contains("64x64x1") && l.contains("R8G8B8A8")), "the target is listed: {d}");
     assert_eq!(validation_errors(), e0, "validation errors");
 }
+
+/// A memory pool larger than the device's largest buffer (here made 1 MiB: `mem::MAX_BUFFER_OVERRIDE`, as AMD's 2 GiB
+/// against a 3.4 GiB pool) gets several buffers side by side: copies inside each window, between windows, the CPU's
+/// writes uploaded into the right window and the GPU's written back from it.
+#[test]
+fn pool_larger_than_the_largest_buffer_has_windows() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    nxgfx::vk::mem::MAX_BUFFER_OVERRIDE.store(1 << 20, std::sync::atomic::Ordering::Relaxed);
+    let size = (3 << 20) + (512 << 10);
+    let big = Pool::new(n.d(), size, CPU_POOL);
+    let base = big.mem.addr();
+    let pat = |seed: usize| -> Vec<u8> { (0..4096).map(|i| ((i * 31 + seed * 7) ^ (i >> 5)) as u8).collect() };
+    // window 0 at +0x100, window 2 at +2.5 MiB, written before the pool's first GPU use
+    big.mem.slice()[0x100..0x100 + 4096].copy_from_slice(&pat(1));
+    big.mem.slice()[(5 << 19)..(5 << 19) + 4096].copy_from_slice(&pat(2));
+    n.begin();
+    unsafe {
+        nvnCommandBufferCopyBufferToBuffer(n.c(), base + 0x100, base + (3 << 19), 4096, 0); // window 0 -> window 1
+        nvnCommandBufferCopyBufferToBuffer(n.c(), base + (5 << 19), base + 0x2000, 4096, 0); // window 2 -> window 0
+    }
+    n.submit_wait();
+    let s = big.mem.slice();
+    assert!(s[(3 << 19)..(3 << 19) + 4096] == pat(1)[..], "window 0 -> window 1");
+    assert!(s[0x2000..0x2000 + 4096] == pat(2)[..], "window 2 -> window 0");
+    // the CPU writes window 3 after the pool is on the GPU; a copy carries it into window 1
+    big.mem.slice()[(3 << 20) + 0x40..(3 << 20) + 0x40 + 4096].copy_from_slice(&pat(3));
+    n.begin();
+    unsafe { nvnCommandBufferCopyBufferToBuffer(n.c(), base + (3 << 20) + 0x40, base + (1 << 20) + 0x800, 4096, 0) };
+    n.submit_wait();
+    assert!(big.mem.slice()[(1 << 20) + 0x800..(1 << 20) + 0x800 + 4096] == pat(3)[..], "a CPU write in window 3 reaches window 1");
+    nxgfx::vk::mem::MAX_BUFFER_OVERRIDE.store(0, std::sync::atomic::Ordering::Relaxed);
+    drop(big);
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// A memory pool of 8 MiB and up is a sparse-residency buffer backed in 2 MiB granules on first use: copies inside
+/// two granules bind those two only (with the guest bytes there), the rest of the pool holds no device memory.
+#[test]
+fn large_pools_are_backed_in_granules_on_first_use() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let g = nxgfx::vk::Gpu::get().unwrap();
+    if !g.d.caps.sparse_buffer {
+        eprintln!("no sparse residency buffers on this device: skipped");
+        return;
+    }
+    let size = 64 << 20;
+    let big = Pool::new(n.d(), size, CPU_POOL);
+    let base = big.mem.addr();
+    let pat: Vec<u8> = (0..65536).map(|i| (i * 13 ^ (i >> 7)) as u8).collect();
+    big.mem.slice()[(10 << 20) + 0x40..(10 << 20) + 0x40 + 65536].copy_from_slice(&pat);
+    n.begin();
+    unsafe { nvnCommandBufferCopyBufferToBuffer(n.c(), base + (10 << 20) + 0x40, base + (40 << 20) + 0x100, 65536, 0) };
+    n.submit_wait();
+    assert!(big.mem.slice()[(40 << 20) + 0x100..(40 << 20) + 0x100 + 65536] == pat[..], "copied through two granules");
+    let bound = nxgfx::vk::mem::pool_bound(base).expect("a pool backed in granules");
+    eprintln!("64 MiB pool: {} MiB bound", bound >> 20);
+    assert!(bound <= 4 << 20 && bound >= 2 << 20, "two granules bound, not the pool: {bound}");
+    // a CPU write into a bound granule after its first use reaches the GPU; one into an unbound granule comes with it
+    big.mem.slice()[(10 << 20) + 0x40..(10 << 20) + 0x40 + 4].copy_from_slice(&[1, 2, 3, 4]);
+    big.mem.slice()[(60 << 20)..(60 << 20) + 4].copy_from_slice(&[9, 8, 7, 6]);
+    n.begin();
+    unsafe {
+        nvnCommandBufferCopyBufferToBuffer(n.c(), base + (10 << 20) + 0x40, base + (40 << 20), 4, 0);
+        nvnCommandBufferCopyBufferToBuffer(n.c(), base + (60 << 20), base + (40 << 20) + 8, 4, 0);
+    }
+    n.submit_wait();
+    assert_eq!(&big.mem.slice()[(40 << 20)..(40 << 20) + 12], &[1, 2, 3, 4, 0, 0, 0, 0, 9, 8, 7, 6]);
+    drop(big);
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// The per-frame upload budget: CPU writes past it wait in their pool; the one a copy of this submission reads goes
+/// at once (its use needs it), the others with the next submissions, every byte in the end.
+#[test]
+fn upload_budget_defers_cpu_writes_no_use_needs_yet() {
+    use std::sync::atomic::Ordering::Relaxed;
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let big = Pool::new(n.d(), 4 << 20, CPU_POOL);
+    let base = big.mem.addr();
+    // the pool on the GPU first
+    n.begin();
+    unsafe { nvnCommandBufferCopyBufferToBuffer(n.c(), base, base + 0x1000, 16, 0) };
+    n.submit_wait();
+    nxgfx::vk::mem::BUDGET_OVERRIDE.store(64 << 10, Relaxed);
+    let (d0, u0) = (nxgfx::vk::mem::DEFERRED_BYTES.load(Relaxed), nxgfx::vk::mem::DEFERRED_USED.load(Relaxed));
+    // four 256 KiB regions written by the CPU: over a 64 KiB budget
+    for k in 0..4usize {
+        let o = (k + 1) << 19;
+        for (i, x) in big.mem.slice()[o..o + (256 << 10)].iter_mut().enumerate() {
+            *x = (i * 3 + k * 50) as u8;
+        }
+    }
+    // this submission reads region 3 only
+    n.begin();
+    unsafe { nvnCommandBufferCopyBufferToBuffer(n.c(), base + (4 << 19), base + 0x10000, 4096, 0) };
+    n.submit_wait();
+    let want = |k: usize, i: usize| (i * 3 + k * 50) as u8;
+    assert!((0..4096).all(|i| big.mem.slice()[0x10000 + i] == want(3, i)), "the region a copy reads is uploaded for it");
+    let deferred = nxgfx::vk::mem::DEFERRED_BYTES.load(Relaxed) - d0;
+    let used = nxgfx::vk::mem::DEFERRED_USED.load(Relaxed) - u0;
+    eprintln!("budget 64 KiB: {} KiB left for later, {} KiB of it taken by a use", deferred >> 10, used >> 10);
+    assert!(deferred >= 512 << 10, "writes past the budget waited: {deferred}");
+    assert!(used >= 4096, "the used one went at once");
+    // later submissions carry the rest within their budgets: each region reads back right
+    nxgfx::vk::mem::BUDGET_OVERRIDE.store(0, Relaxed);
+    for k in 0..3usize {
+        n.begin();
+        unsafe { nvnCommandBufferCopyBufferToBuffer(n.c(), base + (((k + 1) << 19) as u64) + 0x100, base + 0x20000 + (k as u64) * 0x1000, 256, 0) };
+        n.submit_wait();
+        assert!((0..256).all(|i| big.mem.slice()[0x20000 + k * 0x1000 + i] == want(k, 0x100 + i)), "region {k}");
+    }
+    drop(big);
+    assert_eq!(validation_errors(), e0, "validation errors");
+}

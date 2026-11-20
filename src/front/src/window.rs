@@ -163,6 +163,20 @@ pub fn poll_input() {
     let (b, a) = keys::state(held, m);
     nxos::input::set_keyboard(b | crate::script_now(), a);
     home_quit();
+    cheat_combo();
+}
+
+/// The cheat panel from a controller: Home + Minus pressed together (F6 on the keyboard).
+fn cheat_combo() {
+    static WAS: AtomicBool = AtomicBool::new(false);
+    let minus = nxos::input::devices().iter().any(|d| d.2 >> 11 & 1 != 0);
+    let now = minus && nxos::input::home_held();
+    if now && !WAS.swap(true, Ordering::AcqRel) {
+        crate::flog!("Home + Minus: the cheat panel");
+        nxos::cheats::panel_open();
+    } else if !now {
+        WAS.store(false, Ordering::Release);
+    }
 }
 
 /// Home held 2 s on a controller: "Quit the game?" over it (nxnative home_quit.h); A / Return quits, B / Escape /
@@ -343,7 +357,7 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
                     return DefWindowProcW(h, m, w, l); // Alt+F4
                 }
             }
-            let hot = [VK_ESCAPE, VK_F1, VK_F3, VK_F4, VK_F5, VK_F7, VK_F8, VK_F11].iter().any(|&k| k as u32 == vk);
+            let hot = [VK_ESCAPE, VK_F1, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F11].iter().any(|&k| k as u32 == vk);
             if hot {
                 if repeat {
                     return 0;
@@ -367,6 +381,7 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
                     }
                     VK_F4 => fps_limit_toggle(h),
                     VK_F5 => diag_dump(),
+                    VK_F6 => nxos::cheats::panel_open(),
                     VK_F7 => crate::rec::toggle(),
                     VK_F8 => crate::capture::full_res(),
                     _ => {}

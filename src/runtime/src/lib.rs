@@ -17,6 +17,7 @@ pub mod kernel;
 pub mod linux;
 pub mod loader;
 pub mod mem;
+pub mod patchset;
 pub mod process;
 pub mod profile;
 pub mod rt;

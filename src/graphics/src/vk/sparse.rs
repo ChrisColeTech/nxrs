@@ -108,6 +108,14 @@ unsafe impl Send for State {}
 
 static ST: Mutex<Option<State>> = Mutex::new(None);
 
+/// Granules of sparse memory-pool buffers (`mem.rs`) bound before the next submission, with the sparse textures'.
+static BUF_BINDS: Mutex<Vec<(vk::Buffer, vk::SparseMemoryBind)>> = Mutex::new(Vec::new());
+
+/// A granule of a sparse pool buffer, bound by the next `flush` (before the submission being recorded runs).
+pub fn bind_buffer(buf: vk::Buffer, b: vk::SparseMemoryBind) {
+    BUF_BINDS.lock().unwrap().push((buf, b));
+}
+
 fn on() -> bool {
     std::env::var("NXGFX_SPARSE").as_deref() != Ok("0")
 }
@@ -571,6 +579,10 @@ pub fn fills(g: &Gpu, cb: vk::CommandBuffer) {
 
 pub fn flush(g: &Gpu, last: u64, timeline_main: vk::Semaphore, fence_next: u64) -> Option<(vk::Semaphore, u64)> {
     let mut lk = ST.lock().unwrap();
+    let bufs = std::mem::take(&mut *BUF_BINDS.lock().unwrap());
+    if lk.is_none() && !bufs.is_empty() {
+        *lk = Some(Default::default());
+    }
     let st = lk.as_mut()?;
     let dev = g.dev();
     if st.timeline == vk::Semaphore::null() {
@@ -611,8 +623,17 @@ pub fn flush(g: &Gpu, last: u64, timeline_main: vk::Semaphore, fence_next: u64) 
             }),
         );
     }
-    let any = st.imgs.iter().any(|s| !s.dl.is_empty() || s.tail_pending);
+    let any = st.imgs.iter().any(|s| !s.dl.is_empty() || s.tail_pending) || !bufs.is_empty();
     if any {
+        // pool buffers' granules, by buffer
+        let mut by_buf: Vec<(vk::Buffer, Vec<vk::SparseMemoryBind>)> = Vec::new();
+        for (b, m) in &bufs {
+            match by_buf.iter_mut().find(|x| x.0 == *b) {
+                Some(x) => x.1.push(*m),
+                None => by_buf.push((*b, vec![*m])),
+            }
+        }
+        let bb: Vec<vk::SparseBufferMemoryBindInfo> = by_buf.iter().map(|(b, v)| vk::SparseBufferMemoryBindInfo::default().buffer(*b).binds(v)).collect();
         let mut binds: Vec<Vec<vk::SparseImageMemoryBind>> = Vec::new();
         let mut opaque: Vec<Vec<vk::SparseMemoryBind>> = Vec::new();
         let mut imgs_b: Vec<vk::Image> = Vec::new();
@@ -695,7 +716,7 @@ pub fn flush(g: &Gpu, last: u64, timeline_main: vk::Semaphore, fence_next: u64) 
         let sigs = [st.timeline];
         let svals = [sig];
         let mut tl = vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&wvals).signal_semaphore_values(&svals);
-        let bi = vk::BindSparseInfo::default().wait_semaphores(&waits).signal_semaphores(&sigs).image_binds(&ib).image_opaque_binds(&ob).push_next(&mut tl);
+        let bi = vk::BindSparseInfo::default().wait_semaphores(&waits).signal_semaphores(&sigs).buffer_binds(&bb).image_binds(&ib).image_opaque_binds(&ob).push_next(&mut tl);
         let t0 = std::time::Instant::now();
         if let Err(e) = unsafe { dev.queue_bind_sparse(g.d.queue, &[bi], vk::Fence::null()) } {
             super::lost::check(g, e, "vkQueueBindSparse");
@@ -707,10 +728,11 @@ pub fn flush(g: &Gpu, last: u64, timeline_main: vk::Semaphore, fence_next: u64) 
         st.n_binds += blocks as u64;
         if st.n_calls <= 4 || st.n_calls.is_power_of_two() {
             crate::vklog!(
-                "sparse bind {}: {blocks} blocks in {} images as {} binds ({} blocks so far, {} tiles live = {} MB), {:.1} ms in the call",
+                "sparse bind {}: {blocks} blocks in {} images as {} binds, {} pool granules ({} blocks so far, {} tiles live = {} MB), {:.1} ms in the call",
                 st.n_calls,
                 ib.len(),
                 binds.iter().map(|v| v.len()).sum::<usize>(),
+                bufs.len(),
                 st.n_binds,
                 st.n_slots,
                 (st.n_slots * st.blocks.first().map(|b| b.slot_size).unwrap_or(65536)) >> 20,

@@ -288,6 +288,8 @@ static CANCEL: AtomicBool = AtomicBool::new(false);
 /// Arrow keys since the last `nav_keys` (up -1, down +1) and the last digit typed (0 none).
 static ARROW: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static DIGIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+/// Left / right arrow keys since the last `hnav_keys` (left -1, right +1).
+static HARROW: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
 static THREAD: AtomicBool = AtomicBool::new(false);
 
 fn w(s: &str) -> Vec<u16> {
@@ -321,6 +323,17 @@ pub fn nav_keys() -> (i32, Option<usize>) {
     let a = ARROW.swap(0, Ordering::SeqCst).signum();
     let d = DIGIT.swap(0, Ordering::SeqCst);
     (a, (d > 0).then_some(d))
+}
+
+/// Left / right arrows (-1, +1, 0 none) typed in the window since the last call.
+pub fn hnav_keys() -> i32 {
+    HARROW.swap(0, Ordering::SeqCst).signum()
+}
+
+/// D-pad left and right held on any controller (positional).
+pub fn pads_lr() -> (bool, bool) {
+    let d = crate::input::devices();
+    (d.iter().any(|x| x.2 >> 12 & 1 != 0), d.iter().any(|x| x.2 >> 14 & 1 != 0))
 }
 
 /// The prompt on Linux: the desktop's question dialog (zenity / kdialog, `desk.rs`) with the title and the line;
@@ -380,7 +393,7 @@ mod window {
     use windows_sys::Win32::Foundation::*;
     use windows_sys::Win32::Graphics::Gdi::*;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
-    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_UP};
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_LEFT, VK_RIGHT, VK_UP};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     static HWND_: AtomicIsize = AtomicIsize::new(0);
@@ -407,11 +420,23 @@ mod window {
                 ARROW.fetch_add(if wp == VK_UP as usize { -1 } else { 1 }, Ordering::SeqCst);
                 0
             }
+            WM_KEYDOWN if wp == VK_LEFT as usize || wp == VK_RIGHT as usize => {
+                HARROW.fetch_add(if wp == VK_LEFT as usize { -1 } else { 1 }, Ordering::SeqCst);
+                0
+            }
             WM_CLOSE => {
                 CANCEL.store(true, Ordering::SeqCst);
                 0
             }
             WM_APP => {
+                // as tall as the text's lines need (the prompts: two lines; the cheat panel: its rows)
+                let lines = SHOWN.lock().unwrap().as_ref().map_or(0, |s| s.text.iter().filter(|&&c| c == b'\n' as u16).count() as i32 + 1);
+                let mut wr: RECT = std::mem::zeroed();
+                GetWindowRect(h, &mut wr);
+                let want = (80 + 24 * lines + 24).max(170);
+                if lines > 0 && wr.bottom - wr.top != want {
+                    SetWindowPos(h, std::ptr::null_mut(), 0, 0, wr.right - wr.left, want, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                }
                 let shown = SHOWN.lock().unwrap().is_some();
                 ShowWindow(h, if shown { SW_SHOWNOACTIVATE } else { SW_HIDE });
                 InvalidateRect(h, std::ptr::null(), 0);
