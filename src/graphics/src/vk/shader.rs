@@ -34,7 +34,9 @@ pub enum Res {
     /// a texture whose handle word(s) are c[cbuf_slot] (-1 = c2) at word `handle & 0x3fff` (sampler word at
     /// `handle >> 14 & 0x3fff` for a separate sampler handle); `ty` is the sampler type (dimension | array 0x100)
     Tex { handle: u32, cbuf_slot: i32, ty: u32 },
-    Img { handle: u32, cbuf_slot: i32, ty: u32 },
+    /// `fmt`: the format the shader declares for the image (an NVN format code; 0: none, the texture's own): a raw
+    /// surface load (SULD.B, `r32ui`) reads the 32-bit words of an RGBA8 image, so its view is that format
+    Img { handle: u32, cbuf_slot: i32, ty: u32, fmt: u16 },
     /// NVN's texture pool / sampler pool / image pool indexed by ID (the pool set)
     Pool,
     /// a task / mesh shader's draw records (`mesh_draw`: {count, first} per draw; lane S)
@@ -267,7 +269,7 @@ pub fn remap(words: &[u32], refl: &Refl, json: Option<&str>) -> Result<(Vec<u32>
                     Res::Sbuf { cb_slot: 0, cb_off: base + 0x10 * (b - 32), written: true }
                 }
                 64..=127 => Res::Tex { handle: (0x20 + 8 * (b - 64)) / 4, cbuf_slot: -1, ty: 3 },
-                128..=143 => Res::Img { handle: (0x120 + 8 * (b - 128)) / 4, cbuf_slot: -1, ty: 3 },
+                128..=143 => Res::Img { handle: (0x120 + 8 * (b - 128)) / 4, cbuf_slot: -1, ty: 3, fmt: 0 },
                 _ => return Err(format!("binding {b} has no meaning without a reflection")),
             };
             res.push((b, r));
@@ -338,11 +340,12 @@ pub fn remap(words: &[u32], refl: &Refl, json: Option<&str>) -> Result<(Vec<u32>
             }
             ("image", "storage_image") => {
                 nimg += 1;
-                (st, L::IMG_BASE + nimg - 1, Some(Res::Img { handle: iv(r, "handle") as u32, cbuf_slot: iv(r, "cbuf_slot") as i32, ty: iv(r, "type") as u32 }))
+                let fmt = r.get("format").and_then(|f| f.as_str()).map(image_format_code).unwrap_or(0);
+                (st, L::IMG_BASE + nimg - 1, Some(Res::Img { handle: iv(r, "handle") as u32, cbuf_slot: iv(r, "cbuf_slot") as i32, ty: iv(r, "type") as u32, fmt }))
             }
             ("image", "storage_texel_buffer") => {
                 nib += 1;
-                (st, L::IBUF_BASE + nib - 1, Some(Res::Img { handle: iv(r, "handle") as u32, cbuf_slot: iv(r, "cbuf_slot") as i32, ty: 2 }))
+                (st, L::IBUF_BASE + nib - 1, Some(Res::Img { handle: iv(r, "handle") as u32, cbuf_slot: iv(r, "cbuf_slot") as i32, ty: 2, fmt: 0 }))
             }
             (k, t) => return Err(format!("binding kind {k} as {t} is not bound yet")),
         };
@@ -528,5 +531,32 @@ impl Library {
 impl Default for Library {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// The NVN format code of a storage image format the translator declares (its `format` names, SPIR-V's image
+/// formats); 0 for `Unknown` and the formats a view need not change (normalized and float ones read through the
+/// texture's own format).
+fn image_format_code(f: &str) -> u16 {
+    match f {
+        "R32Uint" => 11,
+        "R32Sint" => 12,
+        "Rg32Uint" => 23,
+        "Rg32Sint" => 24,
+        "Rgba32Uint" => 47,
+        "Rgba32Sint" => 48,
+        "R16Uint" => 8,
+        "R16Sint" => 9,
+        "Rg16Uint" => 20,
+        "Rg16Sint" => 21,
+        "Rgba16Uint" => 44,
+        "Rgba16Sint" => 45,
+        "R8Uint" => 3,
+        "R8Sint" => 4,
+        "Rg8Uint" => 15,
+        "Rg8Sint" => 16,
+        "Rgba8Uint" => 39,
+        "Rgba8Sint" => 40,
+        _ => 0,
     }
 }

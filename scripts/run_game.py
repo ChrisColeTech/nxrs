@@ -179,6 +179,11 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
             while True:
                 while running():
                     time.sleep(2)
+                    if not os.path.exists(LOCK):
+                        # another lane's stale-claim sweep can read the claim just before a hand-over rewrites it
+                        # (the old pid is gone) and remove it after: write it again while the game runs
+                        with open(LOCK, 'w') as fl:
+                            fl.write(mine)
                     m = priv_mb(pid)
                     peak = max(peak, m)
                     fc = free_commit_mb()

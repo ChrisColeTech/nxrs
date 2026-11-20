@@ -208,7 +208,11 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   off), `NXGFX_APPEND_RESET=0`, `NXGFX_A2C=0`, `NXGFX_SLOW_MS` (50), `NXGFX_FRAME_CSV=<path>`,
   `NXGFX_PCACHE_QUIET_MS` (2000), `NXGFX_HEADLESS=1` (no host window), `NXGFX_PREWARM_THREADS` (4).
   Added by lane G3 (rev 7): `NXGFX_DESCBUF=0` (classic descriptor sets instead of descriptor buffers), `NXGFX_GPL=0`
-  (whole pipelines only, no linking from parts), `NXGFX_PROFILE=1` (the fine timers inside `sets`).
+  (whole pipelines only, no linking from parts), `NXGFX_PROFILE=1` (the fine timers inside `sets`), `NXGFX_ASYNC=0`
+  (replay on the game's thread; on by default now), `NXGFX_ALIAS=0` (no image shared between texture objects over the
+  same storage), `NXGFX_IMG_FORMAT=0` (storage views in the texture's format, not the shader's declared one),
+  `NXGFX_PIPE_LOG=1` (each pipeline compile logged as it starts and ends), `NXGFX_PIPE_NOOPT=1` (whole pipelines with
+  DISABLE_OPTIMIZATION).
 - Options graphics reads from nxconfig (lane I's table), live: `fps_limit`, `forced_vsync`, `shadows`,
   `game_dynamic_resolution`. Control commands it registers (`nxgfx::register_controls`, called by os's bind):
   `shot [path]`, `a2c 0|1`, `pcache`, `gfx`.
@@ -477,6 +481,44 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   back twice (the base and the result) and compared byte by byte; fine at MK8D's 34 small write-backs a frame. Pages
   held on the device by lazy write-back no longer reach it (`lazy::outside`, above): bringing them back there made the
   completion thread wait for all later GPU work (`v6`: 48 ms of write-back a frame in Violet).
+- **Lane W2's picture bugs (rev 7):**
+  - **Beach Bounce's black final copy: fixed.** The game draws its scene into one texture object (ser36) and samples
+    it through another over the same storage (ser37, other flags): two images, the second one never drawn (pass dump
+    `build/G/runs/b1`: pass 44 samples ser37 while passes 0-43 draw ser36). A texture object over the storage of a live
+    image of the same shape (size, levels, layers, samples, bytes per texel) now views that image (`image.rs`
+    `alias_image`, `Image::alias_of`; the owner's memory passes to an alias when the owner is finalized; resolution
+    scale follows the owner; `NXGFX_ALIAS=0` off). `b2`: the hospital scene presents.
+  - **Shadow Generations' false colours: fixed.** Its last pass is a compute shader that loads the RGBA8 window target
+    as `r32ui` (a raw surface load, SULD.B) and stores it formatted; graphics bound an RGBA8 storage view to the
+    `r32ui` binding. A storage image's declared integer format (json `format`) now picks the view format when it is
+    the same texel size (`Res::Img::fmt`, `exec.rs tex_view`; `NXGFX_IMG_FORMAT=0` off). `s8`: the title screen is
+    right (`s6`, before: yellow / grey / navy).
+  - **MK8D's race picture: not fixed, cause narrowed.** Same build, different runs: `build/I/runs/…-225612-G3-mk8d-race`
+    clean; `…-232203` / `…-232536` (lsfg 0) with the road flat cyan and banded light; `…-232813` / `…-233028`
+    (`NXGFX_ASYNC=0`) cyan patches only where kart and item shadows fall; `…-233249` / `…-233504` (`NXGFX_GPL=0`) one
+    clean, one cyan. It is not run-to-run: the cyan / banded shots are all at one place of the lap (the turn past the
+    dark wall), the clean ones earlier; the picture there is wrong whatever async, GPL or descriptor buffers. A pass dump
+    at a clean spot (`build/G/runs/k1`, 82 passes) shows what to look at next, at the bad spot: passes 37 / 38 (point
+    lights, additive) bind **the same image ser157177 as colour targets 0 and 1** and some draws write both (output map
+    0xff): two Vulkan attachments over one image written in one subpass is undefined (the game may mean two views, or a
+    second texture over the same storage); and 0x15cf60600 holds four render targets in one frame (A2B10G10R10 normals,
+    two RGBA8, a 960x540 one): the transient pool the game reuses within the frame, which the aliasing above now keeps
+    as one image where the shapes match. Not fixed in this pass.
+  - **Donkey Kong Bananza's compiler crash: isolated, not fixed.** With `NXGFX_PIPE_LOG=1` (new: every pipeline the
+    driver compiles, as it starts and ends) the last one started in `build/G/runs/d3` is vertex `d87ccbede95b9f2c` +
+    pixel `6655320127e098d6`. It crashes outside the game in a second: `NXGFX_GPL=0 NXGFX_TEST_SHADERS=<dkb>_data/
+    shaders NXGFX_TEST_PAIR="d87ccbede95b9f2c 6655320127e098d6" cargo test -p graphics --features gpu-tests --test
+    shaders_lane_c one_program_pair -- --ignored` (new ignored test). Both modules pass `spirv-val` (all 22,854 of DKB's
+    do), the validation layer says nothing, `DISABLE_OPTIMIZATION` does not help, and each module builds with other
+    partners (pixel `6655…` with vertex `0885…` / `1899…`, vertex `d87c…` with another pixel shader): only the pair
+    crashes, so it is the driver's cross-stage step on this interface (10 vec4 varyings, location 5 flat, a
+    gl_PerVertex with `float[70]` after ClipDistance[2]: the same in the partners that build). Next: cut the pair down
+    (outputs the pixel shader does not read, the `float[70]` member) in the offline test until it builds; then lane S
+    emits that form.
+  - **Review of W2's two graphics changes: both right.** `tex_slots` (a texture handle's separate sampler bank,
+    Ryujinx's packing `texture slot | (sampler slot + 1) << 16`) and `ShaderCache::refused` (a draw waits for the live
+    translator only for a shader not yet loaded; one that failed to build is not waited for: `None` in `modules` is
+    stored only after a build error). Its doc comment had displaced `get_ex`'s: put back.
 
 **Shaders (agreed with shaders, lane C):** graphics reads lane C's output as written above: `<data>/shaders/spv/
 <key>.spv` + `.json` (`status` "ok"), the shader key as defined there (`nxgfx::nvn::prog::shader_key` computes it at

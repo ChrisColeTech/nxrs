@@ -384,6 +384,11 @@ fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
 }
 
 /// Blocks thread i (holding the lock) until woken or timed out (ns < 0: forever, 0: immediate timeout).
+fn sync0_poll_ns() -> i64 {
+    static V: OnceLock<i64> = OnceLock::new();
+    *V.get_or_init(|| std::env::var("NXRT_SYNC0_POLL_MS").ok().and_then(|v| v.trim().parse::<i64>().ok()).unwrap_or(0) * 1_000_000)
+}
+
 fn block<'a>(mut g: MutexGuard<'a, State>, i: usize, kind: Wait, ns: i64) -> (MutexGuard<'a, State>, u64) {
     g.wseq += 1;
     let s = g.wseq;
@@ -954,9 +959,16 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
                     g.t(i).cancel = false;
                     r = R_CANCELLED;
                 } else {
+                    // a wait on no kernel object (an SDK MultiWait of user-mode objects only: it is woken by
+                    // CancelSynchronization) with NXRT_SYNC0_POLL_MS: woken as cancelled after that long at most,
+                    // so the SDK checks its objects again (a diagnosis of lost wake-ups)
+                    let poll = if n == 0 && ns < 0 { sync0_poll_ns() } else { 0 };
                     g.t(i).wobjs = objs.clone();
                     g.t(i).widx = None;
-                    (g, r) = block(g, i, Wait::Sync, ns);
+                    (g, r) = block(g, i, Wait::Sync, if poll > 0 { poll } else { ns });
+                    if poll > 0 && r == R_TIMEOUT {
+                        r = R_CANCELLED;
+                    }
                     idx = g.t(i).widx;
                     g.t(i).wobjs.clear();
                 }

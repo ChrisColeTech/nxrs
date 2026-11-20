@@ -57,10 +57,9 @@ ps.SCENARIOS.update({
     'sonic_gens2': dict(seconds=900, window=(150, 880), steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('a', 45, 'program 1')]
                         + [('replay', 8, 'skip %d' % i, 'hold_a.txt') for i in range(8)]
                         + [('replay', 30, 'run', 'run_jump.txt')] + [('shot', 30, 'play +%d s' % (30 * m)) for m in range(1, 22)]),
-    # Shadow Generations: the story intro tried with +, B, a 5 s held A, then play (run_jump.txt)
+    # Shadow Generations: title, New Game, the story intro skipped (tap A, then hold it: skip_hold.txt), then play (run_jump.txt)
     'shadow_skip': dict(seconds=900, window=(200, 880), steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('right', 3, 'shadow'),
-                        ('a', 25, 'shadow start')] + [x for i in range(4) for x in (('plus', 4, 'plus %d' % i), ('b', 4, 'b %d' % i),
-                        ('replay', 7, 'hold a %d' % i, 'hold_a5.txt'))]
+                        ('a', 25, 'shadow start'), ('a', 20, 'new game')] + [('replay', 10, 'skip %d' % i, 'skip_hold.txt') for i in range(8)]
                         + [('replay', 30, 'run', 'run_jump.txt')] + [('shot', 30, 'play +%d s' % (30 * m)) for m in range(1, 20)]),
     # boot only, for a trace (NXOS_TRACE): shots at 60 / 150 / 190 s
     'boot': dict(seconds=200, window=(10, 190), steps=[('shot', 60, 'boot 60 s'), ('shot', 90, 'boot 150 s'), ('shot', 40, 'boot 190 s')]),

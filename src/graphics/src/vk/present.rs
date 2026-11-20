@@ -209,6 +209,23 @@ pub fn record_present(g: &Gpu, sub: &mut Sub, t: &tex_t, origin_ll: bool, crop: 
         if g.ensure_image(&mut imgs, t) {
             g.prepare_image(&mut imgs, t.serial, sub);
             let im = &imgs.by_serial[&t.serial];
+            {
+                static SEEN: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+                let mut seen = SEEN.lock().unwrap();
+                if seen.len() < 16 && !seen.contains(&t.serial) {
+                    seen.push(t.serial);
+                    crate::vklog!(
+                        "present: texture ser{} {}x{} format {:#x} ({:?}) at {:#x}{}",
+                        t.serial,
+                        t.d.width,
+                        t.d.height,
+                        t.d.format,
+                        im.format,
+                        t.mem as u64,
+                        im.alias_of.map(|o| format!(", the image of ser{o}")).unwrap_or_default()
+                    );
+                }
+            }
             Some((im.image, im.extent, im.scale))
         } else {
             None

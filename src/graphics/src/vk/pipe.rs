@@ -267,6 +267,18 @@ fn depth_has_depth(f: vk::Format) -> bool {
 /// `driver_exclusive` (auto = on for Intel, whose driver crashes compiling and drawing at once): pipeline creation and
 /// queue submissions take turns.
 pub static EXCLUSIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// `NXGFX_PIPE_LOG=1`: every pipeline the driver compiles is logged as it starts and ends (the one a compiler crash
+/// stopped in is the last started and not ended).
+fn pipe_log(what: &str, mods: &[&Module], end: bool) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("NXGFX_PIPE_LOG").as_deref() == Ok("1")) {
+        return;
+    }
+    let keys: Vec<String> = mods.iter().map(|m| m.key.iter().map(|b| format!("{b:02x}")).collect()).collect();
+    let th = std::thread::current();
+    crate::vklog!("pipeline {what} {} on {}: {}", if end { "made" } else { "compiling" }, th.name().unwrap_or("?"), keys.join(" "));
+}
+
 pub fn driver_exclusive(g: &Gpu) -> bool {
     nxconfig::tristate("driver_exclusive").unwrap_or(g.d.props.vendor_id == 0x8086)
 }
@@ -298,8 +310,10 @@ fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, 
         .color_attachment_formats(&colors)
         .depth_attachment_format(if depth_has_depth(df) { df } else { vk::Format::UNDEFINED })
         .stencil_attachment_format(if depth_has_stencil(df) { df } else { vk::Format::UNDEFINED });
+    static NOOPT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let noopt = if *NOOPT.get_or_init(|| std::env::var("NXGFX_PIPE_NOOPT").as_deref() == Ok("1")) { vk::PipelineCreateFlags::DISABLE_OPTIMIZATION } else { vk::PipelineCreateFlags::empty() };
     let mut ci = vk::GraphicsPipelineCreateInfo::default()
-        .flags(db_flag(g))
+        .flags(db_flag(g) | noopt)
         .stages(&stages)
         .viewport_state(&vp)
         .rasterization_state(&rs)
@@ -315,7 +329,10 @@ fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, 
     if tess {
         ci = ci.tessellation_state(&ts);
     }
+    let ml: Vec<&Module> = mods.iter().map(|m| &**m).collect();
+    pipe_log("graphics", &ml, false);
     let p = unsafe { g.dev().create_graphics_pipelines(g.pipes.cache, &[ci], None) }.map_err(|(_, e)| format!("vkCreateGraphicsPipelines: {e}"))?;
+    pipe_log("graphics", &ml, true);
     super::pcache::note_created(1);
     Ok(p[0])
 }
@@ -588,7 +605,9 @@ fn build_compute(g: &Gpu, m: &Module) -> Result<vk::Pipeline, String> {
     let _x = driver_exclusive(g).then(|| EXCLUSIVE.lock().unwrap());
     let st = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(m.module).name(&m.entry);
     let ci = vk::ComputePipelineCreateInfo::default().flags(db_flag(g)).stage(st).layout(g.layout.pipeline);
+    pipe_log("compute", &[m], false);
     let p = unsafe { g.dev().create_compute_pipelines(g.pipes.cache, &[ci], None) }.map_err(|(_, e)| format!("vkCreateComputePipelines: {e}"))?;
+    pipe_log("compute", &[m], true);
     super::pcache::note_created(1);
     Ok(p[0])
 }

@@ -117,3 +117,31 @@ fn lane_c_shaders_build_pipelines_in_the_shared_layout() {
     drop(n);
     let _ = std::fs::remove_dir_all(&cache);
 }
+
+/// One program pair of a game's shader build into a pipeline (`NXGFX_TEST_SHADERS` = the game's `_data/shaders`,
+/// `NXGFX_TEST_PAIR` = `<vertex key> <pixel key>`): a driver compiler crash reproduced outside the game.
+#[test]
+#[ignore]
+fn one_program_pair_builds() {
+    let _l = common::setup();
+    let (Ok(d), Ok(pair)) = (std::env::var("NXGFX_TEST_SHADERS"), std::env::var("NXGFX_TEST_PAIR")) else {
+        eprintln!("one program pair: NXGFX_TEST_SHADERS / NXGFX_TEST_PAIR not set, skipped");
+        return;
+    };
+    let _n = common::Nvn::new();
+    let g = nxgfx::vk::Gpu::get().unwrap();
+    g.shaders.set_dir(PathBuf::from(d));
+    let ks: Vec<ShaderKey> = pair.split_whitespace().filter_map(key).collect();
+    assert_eq!(ks.len(), 2, "two keys");
+    let vm = g.shaders.get(g.dev(), &ks[0]).expect("vertex module");
+    let pm = g.shaders.get(g.dev(), &ks[1]).expect("pixel module");
+    let mut k = GfxKey { ncolor: 4, depth: ash::vk::Format::D24_UNORM_S8_UINT.as_raw(), samples: 1, ..Default::default() };
+    k.shaders[0] = ks[0];
+    k.shaders[1] = ks[1];
+    for c in 0..4 {
+        k.colors[c] = ash::vk::Format::R8G8B8A8_UNORM.as_raw();
+    }
+    eprintln!("building the pipeline");
+    assert!(g.gfx_pipeline(&k, &[vm, pm]).is_some(), "pipeline built");
+    eprintln!("built");
+}

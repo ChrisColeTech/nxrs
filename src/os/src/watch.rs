@@ -17,6 +17,25 @@ pub fn run() {
     let after_submit = env_secs("NXOS_EXIT_AFTER_SUBMIT");
     let mut last = Instant::now();
     nxconfig::ctl::register("threads", ": every guest thread, what it waits for and its guest frames", |_| nxrt::kernel::dump_threads());
+    nxconfig::ctl::register("peek", "<address hex> [bytes hex, at most 0x1000]: guest memory as hex words (readable pages only)", |a| {
+        let h = |s: &str| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok();
+        let (Some(at), n) = (a.first().and_then(|s| h(s)), a.get(1).and_then(|s| h(s)).unwrap_or(0x40).min(0x1000)) else {
+            return "peek <address hex> [bytes hex]".into();
+        };
+        let info = crate::mem::get().query(at);
+        if info.perm & 1 == 0 || at + n > info.addr + info.size {
+            return format!("{at:#x}: not readable (state {:#x}, perm {:#x})", info.state, info.perm);
+        }
+        crate::guest::bytes(at, n)
+            .chunks(16)
+            .enumerate()
+            .map(|(i, c)| {
+                let w: Vec<String> = c.chunks(4).map(|x| format!("{:08x}", u32::from_le_bytes([x[0], *x.get(1).unwrap_or(&0), *x.get(2).unwrap_or(&0), *x.get(3).unwrap_or(&0)]))).collect();
+                format!("{:#x}: {}
+", at + 16 * i as u64, w.join(" "))
+            })
+            .collect()
+    });
     let (mut seen, mut since, mut dumped) = (0u64, Instant::now(), false);
     loop {
         let p = crate::nvn::presents();

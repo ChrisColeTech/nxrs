@@ -1,10 +1,11 @@
 //! The sound card: every audio stream of the game (each audio renderer's output, each AudioOut) is a queue of
 //! 48 kHz stereo blocks that one output device plays, mixed. The device is the system's default output through
 //! WASAPI (cpal), in its own format and rate (resampled linearly from 48 kHz). A block goes back to its producer
-//! (released, with its tag) once a nominal 48 kHz clock has gone past its end (as Turbo's audout: the guest's
-//! buffers come back in real time, not when the slowed-down playback reaches them; the samples were copied at
-//! append), and the producer's release hook runs on a host thread. A producer paced by its releases so keeps
-//! real time, and its queue fills the playback's reserve instead of draining it.
+//! (released, with its tag) once a 48 kHz wall clock has gone past its end (as Turbo's audout clock: the guest's
+//! buffers come back in real time, smoothly every 2 ms, not when the device's callback or the slowed-down playback
+//! reaches them; the samples were copied at append), and the producer's release hook runs on a host thread. A
+//! producer paced by its releases (two 5 ms buffers in flight, Beach Bounce) so keeps real time, and its queue
+//! fills the playback's reserve instead of draining it at every device period.
 //!
 //! Smooth slowdown (`audio_slowdown`, Turbo's option, on by default): when a stream runs short because the PC
 //! cannot produce its sound in real time, it plays slower, eased toward the fill of its queue, instead of breaking
@@ -42,7 +43,8 @@ struct St {
     released: VecDeque<u64>,
     pending: VecDeque<(u64, u64)>, // blocks not released yet: (tag, end on the appended timeline)
     appended: u64,                 // frames appended so far
-    paced: u64,                    // the nominal clock: frames due by now (never past `appended`)
+    paced: u64,                    // the release clock: frames due by now (never past `appended`)
+    clock0: Option<(Instant, u64)>, // the release clock's start (time, `paced` then); None while it waits for frames
     high: f64,     // the queue's high-water mark, decaying (the slowdown's reserve)
     primed: bool,
     waiting: u32,
@@ -108,6 +110,7 @@ impl Stream {
             st.released.push_back(tag);
         }
         st.paced = st.appended;
+        st.clock0 = None;
         st.queued = 0;
         drop(st);
         self.cv.notify_all();
@@ -167,10 +170,7 @@ impl Stream {
         if !st.started {
             return false;
         }
-        // the nominal clock runs from the first sample on, so the audible playback trails it by the priming (up
-        // to 50 ms): the reserve that keeps a release-paced producer ahead
-        let paced_now = st.queued > 0 && !st.primed;
-        let mut finished = paced_now && pace(st);
+        let mut finished = false;
         if !st.primed {
             st.waiting += 1;
             if st.queued > 0 && (st.queued as u32 >= PRIME || st.waiting >= PRIME) {
@@ -183,9 +183,6 @@ impl Stream {
             } else {
                 return finished;
             }
-        }
-        if !paced_now {
-            finished |= pace(st);
         }
         if st.queued == 0 && st.blocks.is_empty() {
             if !st.dry {
@@ -255,10 +252,21 @@ fn take(st: &mut St) -> bool {
     false
 }
 
-/// The nominal clock's frame: blocks whose end it reached go back to the producer. True if one did.
-fn pace(st: &mut St) -> bool {
-    if st.paced < st.appended {
-        st.paced += 1;
+/// The release clock at `now`: 48 kHz of wall time since it started (it starts with the first frame appended and
+/// stops, waiting, when it catches up with the appended frames); blocks whose end it reached go back to the
+/// producer. True if one did.
+fn pace(st: &mut St, now: Instant) -> bool {
+    if !st.started || st.paced >= st.appended {
+        st.clock0 = None;
+    } else {
+        let (t0, base) = *st.clock0.get_or_insert((now, st.paced));
+        let due = base + (now.duration_since(t0).as_secs_f64() * RATE as f64) as u64;
+        if due >= st.appended {
+            st.paced = st.appended;
+            st.clock0 = None;
+        } else {
+            st.paced = due;
+        }
     }
     let mut any = false;
     while st.pending.front().is_some_and(|&(_, end)| end <= st.paced) {
@@ -457,6 +465,27 @@ fn start() {
         })
         .expect("audio release thread");
     std::thread::Builder::new().name("nxos audio device".into()).spawn(device_thread).expect("audio device thread");
+    std::thread::Builder::new()
+        .name("nxos audio clock".into())
+        .spawn(|| loop {
+            std::thread::sleep(Duration::from_millis(2));
+            tick(Instant::now());
+        })
+        .expect("audio clock thread");
+}
+
+/// The release clock of every stream (every 2 ms): blocks it is past go back to their producers.
+fn tick(now: Instant) {
+    let s = sink();
+    let streams: Vec<Arc<Stream>> = s.streams.lock().unwrap().clone();
+    for strm in &streams {
+        if pace(&mut strm.st.lock().unwrap(), now) {
+            strm.cv.notify_all();
+            if let Some(tx) = s.notify.lock().unwrap().as_ref() {
+                let _ = tx.send(strm.clone());
+            }
+        }
+    }
 }
 
 fn device_thread() {
@@ -559,9 +588,12 @@ mod tests {
     fn st() -> Stream {
         Stream { name: "t".into(), st: Mutex::new(St { rate: 1.0, env: 1.0, ..Default::default() }), cv: Condvar::new(), hook: Mutex::new(None) }
     }
+    fn ms(t0: Instant, n: u64) -> Instant {
+        t0 + Duration::from_micros(n * 1000)
+    }
 
     #[test]
-    fn plays_every_sample_and_releases() {
+    fn plays_every_sample() {
         let s = st();
         s.start();
         let ramp: Vec<f32> = (0..2 * 3000).map(|i| (i / 2) as f32 / 4000.0).collect();
@@ -573,7 +605,6 @@ mod tests {
             s.pull(&mut st, &mut o, false);
             got.push(o[0]);
         }
-        assert_eq!(st.released.front(), Some(&7));
         assert_eq!(st.underruns, 1, "one gap after the block");
         // the samples come out in order, none skipped
         assert!(got[..3000].windows(2).all(|w| w[1] > w[0]));
@@ -592,36 +623,43 @@ mod tests {
             s.pull(&mut st, &mut o, true);
             n += 1;
         }
-        assert!(n >= 2400, "every sample played ({n} pulls)");
-        assert_eq!(st.released.len(), 1);
+        assert!(n >= 2399, "every sample played ({n} pulls)");
     }
 
     #[test]
-    fn releases_in_real_time_while_playback_slows() {
-        // a shallow queue (two 10 ms blocks) slows the playback down; the blocks still go back at 48 kHz
-        let s = st();
-        s.start();
-        s.append(1, vec![0.25; 2 * 480]);
-        s.append(2, vec![0.25; 2 * 480]);
-        let mut st = s.st.lock().unwrap();
-        for _ in 0..PRIME as usize + 960 {
-            let mut o = [0f32; 2];
-            s.pull(&mut st, &mut o, true);
-        }
-        assert_eq!(st.released.iter().copied().collect::<Vec<_>>(), vec![1, 2]);
-        assert!(st.queued > 0, "the slowed playback still holds samples");
-    }
-
-    #[test]
-    fn a_release_before_priming_is_announced() {
-        // Beach Bounce: two 256-frame buffers, then nothing until one comes back; the stream never reaches 50 ms
+    fn releases_on_the_wall_clock() {
+        // two 256-frame (5.33 ms) buffers: the first back at 5.33 ms, the second at 10.67 ms, whatever the playback
         let s = st();
         s.start();
         s.append(1, vec![0.1; 2 * 256]);
         s.append(2, vec![0.1; 2 * 256]);
         let mut st = s.st.lock().unwrap();
-        let fired = (0..300).any(|_| s.pull(&mut st, &mut [0f32; 2], true));
-        assert!(fired, "the first release is announced to the producer");
-        assert_eq!(st.released.front(), Some(&1));
+        let t0 = Instant::now();
+        assert!(!pace(&mut st, t0));
+        assert!(!pace(&mut st, ms(t0, 5)));
+        assert!(pace(&mut st, ms(t0, 6)));
+        assert_eq!(st.released.iter().copied().collect::<Vec<_>>(), vec![1]);
+        assert!(pace(&mut st, ms(t0, 11)));
+        assert_eq!(st.released.len(), 2);
+        assert_eq!(st.queued, 512, "nothing played yet: the samples stay queued for the device");
+    }
+
+    #[test]
+    fn the_clock_waits_for_a_late_producer() {
+        // the producer appends late: the clock does not run ahead over the gap (no burst of releases after it)
+        let s = st();
+        s.start();
+        s.append(1, vec![0.1; 2 * 480]);
+        let mut st = s.st.lock().unwrap();
+        let t0 = Instant::now();
+        pace(&mut st, t0);
+        assert!(pace(&mut st, ms(t0, 11)));
+        assert!(st.clock0.is_none(), "caught up: the clock waits");
+        drop(st);
+        s.append(2, vec![0.1; 2 * 480]);
+        let mut st = s.st.lock().unwrap();
+        assert!(!pace(&mut st, ms(t0, 100)), "starts again from the new frames");
+        assert!(!pace(&mut st, ms(t0, 105)));
+        assert!(pace(&mut st, ms(t0, 111)));
     }
 }

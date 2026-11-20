@@ -1118,6 +1118,7 @@ fn target_of(ty: u32) -> i32 {
 }
 
 /// The view of a registered texture ID with the type the shader declares; a stand-in when there is none.
+/// `ty`: the shader's texture type, and in bits 16.. the format a storage image is declared with (Res::Img::fmt).
 fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::ImageView {
     if let Some(&v) = sub.memo_views.get(&(id, ty, storage)) {
         return v;
@@ -1128,6 +1129,7 @@ fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::Imag
 }
 
 fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::ImageView {
+    let (ty, ifmt) = (ty & 0xffff, (ty >> 16) as u16);
     let want = target_of(ty);
     if let Some((serial, view)) = g.tables.tex_at(id) {
         let mut imgs = g.images.lock().unwrap();
@@ -1158,6 +1160,15 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
                 if base_target != want {
                     v.bits |= VW_TARGET;
                     v.target = want as u8;
+                }
+                // the shader's declared format, when the texel is the same size (a bit cast of a mutable-format image)
+                static FMT_OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+                if storage && ifmt != 0 && !*FMT_OFF.get_or_init(|| std::env::var("NXGFX_IMG_FORMAT").as_deref() == Ok("0")) {
+                    let cur = if v.bits & VW_FORMAT != 0 { v.format as i32 } else { im.tex.d.format };
+                    if cur != ifmt as i32 && crate::tex::layout::fmt_bpb(cur) == crate::tex::layout::fmt_bpb(ifmt as i32) && crate::tex::layout::fmt_bpb(cur).1 == 1 {
+                        v.bits |= VW_FORMAT;
+                        v.format = ifmt;
+                    }
                 }
                 let view = if storage { g.storage_view(im, Some(&v)) } else { g.image_view(im, Some(&v), false) };
                 if let Some(view) = view {
@@ -1290,7 +1301,7 @@ fn binding_scales(g: &Gpu, qs: &QState, st: usize, m: &Module, c0: &[u8], c2: &[
     for (b, r) in &m.res {
         let (handle, cbuf_slot, ty, idx) = match r {
             Res::Tex { handle, cbuf_slot, ty } if (L::TEX_BASE..L::TEX_BASE + L::TEX_N).contains(b) => (*handle, *cbuf_slot, *ty, (b - L::TEX_BASE) as usize),
-            Res::Img { handle, cbuf_slot, ty } if (L::IMG_BASE..L::IMG_BASE + L::IMG_N).contains(b) => (*handle, *cbuf_slot, *ty, ntex + (b - L::IMG_BASE) as usize),
+            Res::Img { handle, cbuf_slot, ty, .. } if (L::IMG_BASE..L::IMG_BASE + L::IMG_N).contains(b) => (*handle, *cbuf_slot, *ty, ntex + (b - L::IMG_BASE) as usize),
             _ => continue,
         };
         if ty == 2 || 1 + idx >= v.len() {
@@ -1392,9 +1403,10 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                     }
                     k @ 3..=18 => {
                         let (a, n) = qs.ubo[st][(k - 3) as usize];
-                        if dumping && a != 0 && n >= 64 && super::mem::room(a) >= 64 {
+                        let nf = (n.min(64) / 4) as usize;
+                        if dumping && a != 0 && nf > 0 && super::mem::room(a) >= 4 * nf as u64 {
                             // SAFETY: guest memory inside a registered pool (identity mapped)
-                            let f = unsafe { core::slice::from_raw_parts(a as *const f32, 16) };
+                            let f = unsafe { core::slice::from_raw_parts(a as *const f32, nf) };
                             said.push(format!("c{k}@{a:#x}+{n:#x}={:?}", f.iter().map(|v| (v * 1000.0).round() / 1000.0).collect::<Vec<_>>()));
                         } else if dumping {
                             said.push(format!("c{k}@{a:#x}+{n:#x}"));
@@ -1454,8 +1466,9 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                 };
                 bufs.push((b, vk::DescriptorType::STORAGE_BUFFER, info));
             }
-            Res::Tex { handle, cbuf_slot, ty } | Res::Img { handle, cbuf_slot, ty } => {
+            Res::Tex { handle, cbuf_slot, ty } | Res::Img { handle, cbuf_slot, ty, .. } => {
                 let is_img = matches!(r, Res::Img { .. });
+                let ifmt = if let Res::Img { fmt, .. } = r { *fmt } else { 0 };
                 let word = bank_word(qs, st, m, &c0, &c2, tex_slots(*cbuf_slot).0, handle & 0x3fff);
                 let kind = handle >> 28;
                 let tid = (word & 0xfffff) as i32 + tb;
@@ -1490,7 +1503,7 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                         0
                     }
                 } + sb;
-                let view = super::perf::timed_fine(super::perf::C::TexViewNs, || tex_view(g, sub, tid, *ty, is_img));
+                let view = super::perf::timed_fine(super::perf::C::TexViewNs, || tex_view(g, sub, tid, *ty | (ifmt as u32) << 16, is_img));
                 if dumping {
                     let what = g
                         .tables
@@ -1498,7 +1511,7 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                         .and_then(|(serial, v)| {
                             g.images.lock().unwrap().by_serial.get(&serial).map(|im| {
                                 let d = &im.tex.d;
-                                format!("ser{serial} fmt{:#x} {}x{}x{} t{} v{:?}", d.format, d.width, d.height, d.depth, d.target, v.map(|v| (v.bits, v.target, v.base_level, v.min_layer)))
+                                format!("ser{serial} fmt{:#x} {}x{}x{} t{} v{:?}", d.format, d.width, d.height, d.depth, d.target, v.map(|v| (v.bits, v.target, v.base_level, v.min_layer, v.format, v.swz, im.tex.swizzle(), im.format)))
                             })
                         })
                         .unwrap_or_else(|| "none".into());

@@ -56,6 +56,10 @@ pub struct Image {
     /// the resolution scale of this image (a render target's; 1 for everything else): `extent` is the texture's size
     /// times it
     pub scale: f32,
+    /// another texture object's image over the same storage (its serial): this one views that image and owns
+    /// neither the image nor its memory (Beach Bounce draws its scene into one texture object and samples it through
+    /// another over the same storage)
+    pub alias_of: Option<u64>,
 }
 unsafe impl Send for Image {}
 
@@ -440,6 +444,7 @@ impl Gpu {
                     sparse: None,
                     page_hash: Vec::new(),
                     rewrites: 0,
+                    alias_of: None,
                     scale: 1.0,
                 });
             }
@@ -481,6 +486,7 @@ impl Gpu {
             page_hash: Vec::new(),
             rewrites: 0,
             scale,
+            alias_of: None,
         })
     }
 
@@ -530,6 +536,11 @@ impl Gpu {
             if let Some(v) = imgs.by_addr.get_mut(&(t.mem as u64)) {
                 v.retain(|s| *s != old);
             }
+            for a in imgs.by_serial.values_mut() {
+                if a.alias_of == Some(old) {
+                    a.alias_of = Some(t.serial);
+                }
+            }
             if im.tex.swz != t.swz || im.tex.bits != t.bits {
                 let views: Vec<vk::ImageView> = im.views.drain().map(|(_, v)| v).collect();
                 self.q.defer_after_use(Box::new(move |g: &Gpu| unsafe {
@@ -542,6 +553,7 @@ impl Gpu {
             super::perf::inc(super::perf::C::ImagesReused);
             Some(im)
         });
+        let reused = reused.or_else(|| self.alias_image(imgs, t));
         let Some(im) = reused.or_else(|| self.create_image(t)) else { return false };
         if !t.mem.is_null() {
             // textures of sparse virtual pools are checked through their pages, not by address (a 5.8 GB terrain
@@ -553,6 +565,72 @@ impl Gpu {
         }
         imgs.by_serial.insert(t.serial, im);
         true
+    }
+
+    /// A new texture object over the storage of a live image of the same shape (size, levels, layers, samples, bytes
+    /// per texel; formats the image can be viewed as): an image that views that one. On the GPU both objects name the
+    /// same memory, so what is drawn through one is read through the other; separate images left the second one with
+    /// the storage's stale bytes (Beach Bounce's final copy to the window read zeros: lane W2).
+    fn alias_image(&self, imgs: &Images, t: &tex_t) -> Option<Image> {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if *OFF.get_or_init(|| std::env::var("NXGFX_ALIAS").as_deref() == Ok("0")) || t.mem.is_null() || crate::nvn::vpool::is_sparse(t.mem as u64) {
+            return None;
+        }
+        let tf = format::tex_format(t.d.format)?;
+        if tf.astc.is_some() || layout::fmt_bpb(t.d.format).1 > 1 {
+            return None;
+        }
+        let (ty, extent, layers) = shape(t);
+        let levels = t.d.levels.max(1);
+        let samples = samples_of(t.d.samples);
+        let bpb = layout::fmt_bpb(t.d.format).0;
+        let depthy = |k: Kind| matches!(k, Kind::Depth | Kind::DepthStencil | Kind::Stencil);
+        let (os, o) = imgs.by_addr.get(&(t.mem as u64))?.iter().rev().find_map(|s| {
+            let o = imgs.by_serial.get(s)?;
+            let (_, oext, _) = shape(&o.tex);
+            let same_shape = o.ty == ty && oext == extent && o.levels == levels && o.layers == layers && o.samples == samples && o.sparse.is_none() && !o.bc7;
+            let same_fmt = o.format == tf.vk
+                || !depthy(o.tf.kind) && !depthy(tf.kind) && o.tf.astc.is_none() && layout::fmt_bpb(o.tex.d.format) == (bpb, 1, 1) && o.alias_of.is_none() && o.alloc.is_some();
+            let storage_ok = t.d.flags as u32 & tex_flags::IMAGE == 0 || o.usage.contains(vk::ImageUsageFlags::STORAGE);
+            (same_shape && same_fmt && storage_ok && !o.needs_init).then_some((*s, o))
+        })?;
+        let owner = o.alias_of.unwrap_or(os);
+        static SAID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+            crate::vklog!(
+                "texture ser{} ({}x{} format {:#x}) shares the image of ser{owner} over the same storage {:#x}",
+                t.serial,
+                t.d.width,
+                t.d.height,
+                t.d.format,
+                t.mem as u64
+            );
+        }
+        Some(Image {
+            tex: *t,
+            image: o.image,
+            alloc: None,
+            format: tf.vk,
+            tf,
+            ty: o.ty,
+            extent: o.extent,
+            levels: o.levels,
+            layers: o.layers,
+            samples: o.samples,
+            usage: o.usage,
+            views: HashMap::new(),
+            gpu_owned: o.gpu_owned,
+            needs_init: false,
+            // the owner's content not uploaded yet: the same storage, uploaded through whichever is used first
+            needs_upload: o.needs_upload && !o.gpu_owned,
+            bc7: false,
+            decoded: None,
+            sparse: None,
+            page_hash: Vec::new(),
+            rewrites: 0,
+            scale: o.scale,
+            alias_of: Some(owner),
+        })
     }
 
     /// A view of an image (created once per view key).
@@ -729,9 +807,30 @@ impl Gpu {
     /// nvnTextureFinalize: the image goes once the GPU no longer uses it.
     pub fn tex_release(&self, serial: u64) {
         let mut imgs = self.images.lock().unwrap();
-        let Some(im) = imgs.by_serial.remove(&serial) else { return };
+        let Some(mut im) = imgs.by_serial.remove(&serial) else { return };
         if let Some(v) = imgs.by_addr.get_mut(&(im.tex.mem as u64)) {
             v.retain(|s| *s != serial);
+        }
+        // an image shared with other texture objects: an alias only drops its views; an owner hands the image and its
+        // memory to the first of its aliases
+        let aliases: Vec<u64> = imgs.by_serial.iter().filter(|(_, a)| a.alias_of == Some(serial)).map(|(k, _)| *k).collect();
+        if im.alias_of.is_some() || !aliases.is_empty() {
+            if let Some((&heir, rest)) = aliases.split_first() {
+                let a = imgs.by_serial.get_mut(&heir).unwrap();
+                a.alias_of = None;
+                a.alloc = im.alloc.take();
+                for r in rest {
+                    imgs.by_serial.get_mut(r).unwrap().alias_of = Some(heir);
+                }
+            }
+            let views: Vec<vk::ImageView> = im.views.drain().map(|(_, v)| v).collect();
+            drop(imgs);
+            self.q.defer_after_use(Box::new(move |g: &Gpu| unsafe {
+                for v in views {
+                    g.dev().destroy_image_view(v, None);
+                }
+            }));
+            return;
         }
         // kept a few frames for a texture initialized again the same way (ensure_image)
         let key = tex_identity(&im.tex);
@@ -786,7 +885,7 @@ impl Gpu {
         }
         imgs.parked.retain(|_, v| !v.is_empty());
         imgs.parked_n -= gone.len();
-        let serials: Vec<u64> = imgs.by_serial.iter().filter(|(_, im)| im.scale != s && super::scale::candidate(&im.tex) && im.sparse.is_none()).map(|(k, _)| *k).collect();
+        let serials: Vec<u64> = imgs.by_serial.iter().filter(|(_, im)| im.scale != s && super::scale::candidate(&im.tex) && im.sparse.is_none() && im.alias_of.is_none()).map(|(k, _)| *k).collect();
         let mut done = std::collections::HashSet::new();
         for serial in serials {
             let im = imgs.by_serial.get_mut(&serial).unwrap();
@@ -877,6 +976,7 @@ impl Gpu {
                 page_hash: Vec::new(),
                 rewrites: 0,
                 scale: im.scale,
+                alias_of: None,
             };
             im.extent = ext;
             im.scale = s;
@@ -884,6 +984,23 @@ impl Gpu {
             done.insert(serial);
         }
         super::queue::full_barrier(self, sub.pre);
+        // aliases of the images made again view the new ones
+        let followers: Vec<u64> = imgs.by_serial.iter().filter(|(_, a)| a.alias_of.is_some_and(|o| done.contains(&o))).map(|(k, _)| *k).collect();
+        for f in followers {
+            let o = imgs.by_serial[&imgs.by_serial[&f].alias_of.unwrap()].image;
+            let (ext, sc) = { let oi = &imgs.by_serial[&imgs.by_serial[&f].alias_of.unwrap()]; (oi.extent, oi.scale) };
+            let a = imgs.by_serial.get_mut(&f).unwrap();
+            let views: Vec<vk::ImageView> = a.views.drain().map(|(_, v)| v).collect();
+            self.q.defer_after_use(Box::new(move |g: &Gpu| unsafe {
+                for v in views {
+                    g.dev().destroy_image_view(v, None);
+                }
+            }));
+            a.image = o;
+            a.extent = ext;
+            a.scale = sc;
+            done.insert(f);
+        }
         // the texture pool's descriptors of the images made again
         for (id, serial, v) in self.tables.ids_of(&done) {
             if let Some(im) = imgs.by_serial.get_mut(&serial) {
@@ -918,9 +1035,22 @@ impl Gpu {
 
     /// The GPU writes a texture: its storage no longer holds its content.
     pub fn tex_gpu_written(&self, imgs: &mut Images, serial: u64) {
-        if let Some(im) = imgs.by_serial.get_mut(&serial) {
-            im.gpu_owned = true;
-            im.needs_upload = false;
+        let Some(im) = imgs.by_serial.get_mut(&serial) else { return };
+        im.gpu_owned = true;
+        im.needs_upload = false;
+        // the texture objects sharing its image
+        let (image, at) = (im.image, im.tex.mem as u64);
+        let Some(group) = imgs.by_addr.get(&at) else { return };
+        if group.len() < 2 {
+            return;
+        }
+        for s in group.clone() {
+            if let Some(o) = imgs.by_serial.get_mut(&s) {
+                if o.image == image {
+                    o.gpu_owned = true;
+                    o.needs_upload = false;
+                }
+            }
         }
     }
 
