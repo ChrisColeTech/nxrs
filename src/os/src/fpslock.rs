@@ -86,6 +86,7 @@ pub struct Main {
     pub size: u64,
     pub text_end: u64,
     pub ro_off: u64,
+    pub data_off: u64,
     pub build: String,
 }
 
@@ -166,6 +167,144 @@ pub fn want(kind: Kind, scale: u32, cur: u32, target: u32) -> Option<u32> {
         FpsF64 => return None,
     };
     (w != cur).then_some(w)
+}
+
+/// A target frame rate the game steps by, found by the code that reads and sets it (nxnative `fps_target.py`'s
+/// design, any build): an int32 field of an object a global points to, read by `ldr sT, [xB, #F]; scvtf sC, sT;
+/// fdiv sD, sM, sC` with sM = 60.0 (`movz wK, #0x4270, lsl #16; fmov sM, wK`), and set by `str wK, [xB, #F]` with an
+/// immediate 30 or 60; xB loaded from the global (`ldr xB, [xA]`, xA from adrp + add, or adrp + ldr of its GOT slot).
+/// At least `MIN_READERS` readers and a store of 30; exactly one such field, or none is written. `img`: main as loaded
+/// (its GOT slots relocated), `base` its address. Returns (the global's offset, the field's offset, what was found).
+pub const MIN_READERS: usize = 8;
+
+fn tf_writes(u: u32) -> Option<u32> {
+    if u & 0x0A00_0000 == 0x0800_0000 {
+        if (u >> 22) & 1 == 0 || (u >> 26) & 1 != 0 {
+            return None;
+        }
+        return Some(u & 31);
+    }
+    if u & 0x1C00_0000 == 0x1400_0000 {
+        return None;
+    }
+    if u & 0x1F00_0000 == 0x1E00_0000 && (u >> 29) & 1 == 0 && !matches!(u & 0xFFFF_FC00, 0x1E26_0000 | 0x9E66_0000) {
+        return None;
+    }
+    Some(u & 31)
+}
+
+fn tf_movz(w: u32) -> Option<(u32, u32)> {
+    (w & 0xFF80_0000 == 0x5280_0000).then(|| (w & 31, ((w >> 5) & 0xFFFF) << (16 * ((w >> 21) & 1))))
+}
+
+pub fn target_field_find(img: &[u8], base: u64, text_end: usize, data_off: usize) -> Result<Option<(u64, u32, String)>, String> {
+    let word = |a: usize| -> u32 { u32::from_le_bytes(img[a..a + 4].try_into().unwrap()) };
+    let is_adrp = |w: u32| w & 0x9F00_0000 == 0x9000_0000;
+    let adrp_page = |w: u32, pc: usize| -> i64 {
+        let mut imm = (((((w >> 5) & 0x7FFFF) << 2) | ((w >> 29) & 3)) as i64) << 12;
+        if imm & (1 << 32) != 0 {
+            imm -= 1 << 33;
+        }
+        (pc as i64 & !0xFFF) + imm
+    };
+    // the page adrp xA made a few words before word offset i, xA written by nothing in between
+    let page_of = |i: usize, a: u32| -> Option<i64> {
+        let mut k = i as i64 - 4;
+        while k > (i as i64 - 24).max(0) {
+            let u = word(k as usize);
+            if is_adrp(u) && u & 31 == a {
+                return Some(adrp_page(u, k as usize));
+            }
+            if tf_writes(u) == Some(a) {
+                return None;
+            }
+            k -= 4;
+        }
+        None
+    };
+    // the global whose value xB holds at word offset i
+    let global_of = |i: usize, b: u32| -> Option<u64> {
+        let mut k = i as i64 - 4;
+        while k > (i as i64 - 40).max(0) {
+            let u = word(k as usize);
+            if u & 31 == b && u & 0xFFC0_0000 == 0xF940_0000 {
+                if (u >> 10) & 0xFFF != 0 {
+                    return None;
+                }
+                let a = (u >> 5) & 31;
+                let mut k2 = k - 4;
+                while k2 > (k - 32).max(0) {
+                    let v = word(k2 as usize);
+                    if v & 31 == a {
+                        if v & 0xFFC0_0000 == 0x9100_0000 && (v >> 5) & 31 == a {
+                            return page_of(k2 as usize, a).map(|p| (p + ((v >> 10) & 0xFFF) as i64) as u64);
+                        }
+                        if v & 0xFFC0_0000 == 0xF940_0000 && (v >> 5) & 31 == a {
+                            // the GOT slot, relocated in memory: it holds the global's address
+                            let slot = (page_of(k2 as usize, a)? + ((v >> 10) & 0xFFF) as i64 * 8) as usize;
+                            let p = u64::from_le_bytes(img.get(slot..slot + 8)?.try_into().ok()?);
+                            return p.checked_sub(base);
+                        }
+                        return None;
+                    }
+                    k2 -= 4;
+                }
+                return None;
+            }
+            if tf_writes(u) == Some(b) {
+                return None;
+            }
+            k -= 4;
+        }
+        None
+    };
+    let text_end = text_end.min(img.len());
+    let mut readers: std::collections::BTreeMap<(u64, u32), usize> = Default::default();
+    let mut stores: std::collections::BTreeMap<(u64, u32), Vec<(usize, u32)>> = Default::default();
+    let mut i = 0;
+    while i + 4 <= text_end {
+        let u = word(i);
+        if u & 0xFFC0_0000 == 0xBD40_0000 {
+            // ldr sT, [xB, #F]; scvtf sC, sT; fdiv sD, sM, sC; sM = 60.0
+            let (t, b, f) = (u & 31, (u >> 5) & 31, ((u >> 10) & 0xFFF) * 4);
+            let reads = (i + 4..(i + 24).min(text_end)).step_by(4).find(|&k| word(k) & 0xFFFF_FFE0 == 0x5E21_D800 | t << 5).and_then(|conv| {
+                let c = word(conv) & 31;
+                let div = (conv + 4..(conv + 20).min(text_end)).step_by(4).find(|&k| word(k) & 0xFFE0_FC00 == 0x1E20_1800 && (word(k) >> 16) & 31 == c)?;
+                let m = (word(div) >> 5) & 31;
+                let fm = (div.saturating_sub(44)..div).step_by(4).rev().find(|&k| word(k) & 0xFFFF_FC1F == 0x1E27_0000 | m)?;
+                let wk = (word(fm) >> 5) & 31;
+                (fm.saturating_sub(28)..fm).step_by(4).rev().any(|k| tf_movz(word(k)) == Some((wk, 0x4270_0000))).then_some(())
+            });
+            if reads.is_some() {
+                if let Some(g) = global_of(i, b).filter(|&g| g >= data_off as u64) {
+                    *readers.entry((g, f)).or_default() += 1;
+                }
+            }
+        } else if u & 0xFFC0_0000 == 0xB900_0000 {
+            // str wK, [xB, #F] with wK an immediate 30 or 60
+            let (k_, b, f) = (u & 31, (u >> 5) & 31, ((u >> 10) & 0xFFF) * 4);
+            let val = (i.saturating_sub(28)..i).step_by(4).rev().find_map(|k| tf_movz(word(k)).filter(|z| z.0 == k_)).map(|z| z.1);
+            if let Some(v @ (30 | 60)) = val {
+                if let Some(g) = global_of(i, b).filter(|&g| g >= data_off as u64) {
+                    stores.entry((g, f)).or_default().push((i, v));
+                }
+            }
+        }
+        i += 4;
+    }
+    let found: Vec<(u64, u32)> = readers
+        .iter()
+        .filter(|(k, n)| **n >= MIN_READERS && stores.get(k).is_some_and(|s| s.iter().any(|x| x.1 == 30)))
+        .map(|(k, _)| *k)
+        .collect();
+    match found.as_slice() {
+        [] => Ok(None),
+        [(g, f)] => {
+            let st: Vec<String> = stores[&(*g, *f)].iter().map(|(a, v)| format!("{v} at main+{a:#x}")).collect();
+            Ok(Some((*g, *f, format!("target frame rate at [main+{g:#x}]+{f:#x}: {} readers of 60 / target, set to {}", readers[&(*g, *f)], st.join(", ")))))
+        }
+        many => Err(format!("target frame rate: {} qualify", many.iter().map(|(g, f)| format!("[main+{g:#x}]+{f:#x}")).collect::<Vec<_>>().join(", "))),
+    }
 }
 
 /// Frostbite's SimulationTimeSettings, found by name.
@@ -295,6 +434,8 @@ struct State {
     rows: Vec<Lock>,
     nier: Option<&'static Nier>,
     fb: Option<Frostbite>,
+    /// the generic target frame rate: (the global's offset, the field's offset)
+    tf: Option<(u64, u32)>,
     target: u32,
     logs: Vec<u32>,
 }
@@ -332,7 +473,18 @@ fn find() -> Option<State> {
     if let Some(f) = &fb {
         crate::log!("fps lock: Frostbite SimulationTimeSettings (ForceSimRate +{:#x}, MaxSimFps +{:#x}), type info main+{:#x}, {} instance caches", f.off_rate, f.off_max, f.ti, f.cache.len());
     }
-    if rows.is_empty() && nier.is_none() && fb.is_none() {
+    let tf = match target_field_find(&image, m.base, m.text_end as usize, m.data_off as usize) {
+        Ok(Some((g, f, why))) => {
+            crate::log!("fps lock: {why}");
+            Some((g, f))
+        }
+        Ok(None) => None,
+        Err(e) => {
+            crate::log!("[RED] fps lock: {e}; none is written");
+            None
+        }
+    };
+    if rows.is_empty() && nier.is_none() && fb.is_none() && tf.is_none() {
         return None;
     }
     let target = target();
@@ -343,7 +495,7 @@ fn find() -> Option<State> {
         return None;
     }
     let n = rows.len();
-    Some(State { rows, nier, fb, target, logs: vec![0; n] })
+    Some(State { rows, nier, fb, tf, target, logs: vec![0; n] })
 }
 
 /// Each present: the engine limiters of this main set to the target.
@@ -373,6 +525,17 @@ pub fn tick() {
         if let Some(cur) = rd32(base + n.minimum) {
             if cur != 0x3f80_0000 {
                 wr32(base + n.minimum, 0x3f80_0000);
+            }
+        }
+    }
+    if let Some((g, f)) = st.tf {
+        // the game sets 30 or 60 itself; the target replaces either
+        if let Some(obj) = rd64(base + g).filter(|&o| o != 0) {
+            if let Some(cur) = rd32(obj + f as u64) {
+                if cur != target && (cur == 30 || cur == 60) {
+                    wr32(obj + f as u64, target);
+                    crate::log_once!("target field", "fps lock: the game's target frame rate {cur} -> {target}");
+                }
             }
         }
     }
@@ -433,6 +596,40 @@ pub fn tick() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The generic target frame rate: 8 readers of 60 / [[global]+0x10] and a store of 30 there make the field; 7
+    /// readers do not.
+    #[test]
+    fn target_field_by_its_readers() {
+        let adrp = |pc: u32, target: u32, rd: u32| -> u32 {
+            let imm = ((target >> 12) as i32 - (pc >> 12) as i32) as u32 & 0x1F_FFFF;
+            0x9000_0000 | (imm & 3) << 29 | (imm >> 2) << 5 | rd
+        };
+        let build = |readers: usize| -> Vec<u8> {
+            let mut w: Vec<u32> = vec![0xD503_201F]; // nop: the scans look back, not at word 0
+            let global = [0x9100_2108u32, 0xF940_0109]; // add x8,x8,#8; ldr x9,[x8]
+            for _ in 0..readers {
+                let pc = 4 * w.len() as u32;
+                w.push(adrp(pc, 0x10000, 8));
+                w.extend(global);
+                // movz w10,#0x4270,lsl 16; fmov s1,w10; ldr s0,[x9,#0x10]; scvtf s2,s0; fdiv s3,s1,s2
+                w.extend([0x52A8_4E0A, 0x1E27_0141, 0xBD40_1120, 0x5E21_D802, 0x1E22_1823]);
+            }
+            let pc = 4 * w.len() as u32;
+            w.push(adrp(pc, 0x10000, 8));
+            w.extend(global);
+            w.extend([0x5280_03CB, 0xB900_112B]); // movz w11,#30; str w11,[x9,#0x10]
+            let mut img: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
+            img.resize(0x10010, 0);
+            img
+        };
+        let img = build(8);
+        let text_end = 4 * (8 * 8 + 6);
+        let (g, f, why) = target_field_find(&img, 0x80_0000_0000, text_end, 0x10000).unwrap().unwrap();
+        assert_eq!((g, f), (0x10008, 0x10), "{why}");
+        assert!(why.contains("8 readers") && why.contains("30 at"), "{why}");
+        assert_eq!(target_field_find(&build(7), 0x80_0000_0000, 4 * (7 * 8 + 6), 0x10000).unwrap(), None);
+    }
 
     /// nxnative's per-kind rules: what each field becomes at 60 and 30, and what is left alone.
     #[test]

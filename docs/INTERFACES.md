@@ -770,12 +770,18 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
     0xcbf689000). The task shader reads storage buffers through descriptors: **robust buffer access is now on by
     default on NVIDIA** (Turbo, Ryujinx; `NXGFX_ROBUST=0` off). Details in the MKW (lane K) section.
   - **DKB** (`-G4-dkb-pools2`, 03:44 reset): lost right after a new pipeline (pipeline lookups 446 ms) at 116 s, the
-    frame rate falling 60 → 20 → 1 FPS before it; no checkpoints then. DKB_HANG3
+    frame rate falling 60 → 20 → 1 FPS before it; no checkpoints then. **With the loop bound and robust buffer access** (`-G4-dkb-hang4`, `NXGFX_CHECKPOINTS=all`): no device loss in 167 s, through the opening (55-60 FPS) into play (5-12 FPS) past the 116 s where `-pools2` was lost; the GPU at 11 ms a frame, the replay's CPU 45 ms (pool sync 32.5, sets 18): DKB's frame rate is the pool sync (item 10), not the GPU.
   - **Every shader loop is bounded** (`shaders::link::loop_guard`, applied at module load: a counter per function,
     the back-edge goes to the loop's merge after 65,536; `NXGFX_LOOP_GUARD=<n>`, 0 off). 47 of DKB's first 300
     modules have loops. Lane C's test clean on MK8D / DKB / Z-A / Smash with it; GPU test `loops_are_bounded`.
-  - Not done: indirect counts clamped before the draw (an indirect draw sits inside a pass, where no compute can run;
-    the checkpoint names the draw and its indirect address), flight recorder / Aftermath.
+  - **Indirect counts held to the device's limits** (`exec.rs clamped_indirect`, `shaders/clamp_counts.comp`, a one-
+    invocation kernel on a staged copy, `NXGFX_CLAMP_INDIRECT=0` off): indirect dispatches (compute limits) and indirect
+    mesh draws (task limits, MKW's resets were mesh draws); direct mesh draws are held too. GPU test
+    `indirect_dispatch_through_the_count_clamp`. Indirect plain draws are not (they sit inside a pass, where no kernel
+    can run; the checkpoint names them and their address). Flight recorder / Aftermath: not done.
+- **Pool sync, cold pools** (`mem.rs begin_submit`, `NXGFX_POOL_COLD=0` off): a watched pool with no CPU write for 60
+  frames is asked once a frame instead of at every submission (DKB: 1,259 mirrors, 9 submissions a frame, 32 ms of
+  pool sync a frame); a write to a cold pool reaches the GPU at the next frame's first submission.
 - **Recording on a thread of its own** (`vk/defer.rs`, `NXGFX_DEFER=1`, off): barriers, passes, copies, blits, clears
   and queries are queued with copies now (they waited for the recorder before), and the main buffers have a command
   pool of their own (the replay thread records the upload buffer meanwhile; one pool's buffers may not be recorded
@@ -1595,7 +1601,9 @@ which has no music; the music plays once the game starts.
   **For lane K:** MKW's profile says `fps_target 60`, so its next build gets nxnative's frame-interval stub (main,
   one site) and the host's frame step (hold 1 at 60); `NXRS_PATCH_FSTEP=0` or `NXOS_FPS_TARGET=0` leaves the game's
   own interval. **Lane O3 builds a separate MKW copy** (`build\O3\mkw-fs`, from `build\games\mkw\mkw_data` as a
-  folder input, engine `target\O3`) only to prove the frame-step stubs module translates, compiles and links; K's
+  folder input, engine `target\O3`) only to prove the frame-step stubs module translates, compiles and links (done
+  04:35: `main_stubs` 1 function at 0x7005601000, main's site in set 10 `fstep` dispatches there, `frame_step.txt`
+  step_max 2, `build\O3\mkw-fs.build.log`, linked); K's
   `build\games\mkw` and its saves are not touched, and O3 does not run it while K owns MKW. **For lane G4:** the
   frame step sets the hold through `nvn::window::set_profile_interval` (only when
   it changes, as that logs); a quiet setter would be better.
@@ -1627,6 +1635,12 @@ which has no music; the music plays once the game starts.
   01008DD013200000, 0100A00019DE0000): left. Their Python assembles code from addresses it reads out of the module
   (values that land in immediates, not only relocations), so each needs its generator ported; none of those games
   is here to check one against.
+- **Violet new save, stick replay (2026-11-20 04:37, `build/I/runs/20261120-043726-O3-violet-new5`)**: control-pipe stick
+  presses (`ctl press LDown~1.5` ...) get the player up from the desk and walking the bedroom (shots 0005-0010);
+  first save commit at 317 s; no Mom in the bedroom, and the replay did not reach the stairs, so "Mom missing" is
+  still open (next: walk to the room's exit). Original save restored and diffed; the new save is in
+  `build/O3/saves/violet-newgame-run5`. Three earlier attempts (04:03, 04:13, 04:24) were blocked by GPU-reset
+  cooldowns from lane K's MKW runs (mkw13 / mkw14 / mkw15, started seconds before each).
 - **Findings**: Violet new game passes name entry with `NXOS_SWKBD=auto` (the old run's gradient was the opening's
   wait, not the keyboard: no swkbd call had happened); the opening runs past 5 minutes, so "Mom missing" is still
   open. AudioIn: this PC has no capture endpoint now (DualSense mic disconnected). The owner was at the PC during
@@ -1874,3 +1888,19 @@ lane K's; G4 please review).**
   changes, all small: `nvn/window.rs` (acquire sync satisfied at once: the stall fix), `vk/spvfix.rs` + `vk/shader.rs`
   (`sabs_product`, `kill_demote`, their switches `NXGFX_SABS_FIX` / `NXGFX_DEMOTE_FIX`), `vk/device.rs`
   (`NXGFX_ROBUST`, diagnosis, off), `vk/exec.rs` (a red line when a storage buffer falls back to the zero buffer).
+- **MKW mesh path against mkw-recomp (lane K, 04:40, no run needed):**
+  - mkw-recomp draws task/mesh natively (`VK_EXT_mesh_shader`) on NVIDIA by default since 01/11/2026 ("40 s of race
+    without a hang"); compute passes only on AMD / RADV (`vk_mesh_cs.c`). It records **only direct**
+    `nvnCommandBufferDrawMeshTasks(first, count)` -> `vkCmdDrawMeshTasksEXT(count, 1, 1)`, **ignores `first`** (logged
+    when non-zero, "drawn from group 0"), and **skips every indirect, 3D and multi mesh draw** (`nvn2.c`
+    `mesh_skipped`). nxrs draws all of them and passes `first` through its own `mesh_draw` record (task shader:
+    `shared[0] = mesh_draw[mesh_push[0] * DrawIndex + 1] + workgroup`), a lane S design mkw-recomp does not have.
+  - Checked and consistent in nxrs: NVN2 stage 6 / 7 -> host 3 / 4 for binds (`cmd.rs` `st_host`); task / mesh take
+    the tessellation stages' descriptor sets with TASK_EXT / MESH_EXT visibility (`layout.rs`); push constants reach
+    both stages (stride at byte 12, the task shader reads it there); `support_buffer` and every bank / storage buffer
+    are remapped into the module's own stage set (`shader.rs` `remap`); the storage tables in c0 (task 0x670, mesh
+    0x770) match the reflections (task `cp_s0` / `cp_s1` at words 412 / 416 = 0x670 / 0x680, mesh 476 / 480 =
+    0x770 / 0x780); payload and output indices bounded; group counts within NVIDIA's limits.
+  - So the two differences left against the reference: the shader translation itself (Ryujinx via dmsh_xlate against
+    mkw-recomp's sm86 translator) and the `first` / indirect handling. Next test: mkw-recomp's rule (draw direct mesh
+    draws from group 0, skip indirect / 3D / multi), behind a switch, to see whether the device loss goes.

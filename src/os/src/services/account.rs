@@ -1,6 +1,7 @@
 //! nn::account: local profiles only. One registered user (more slots for additional local users, as nxnative
 //! keeps them: a `user<n>.registered` marker in the save folder), sessions per open, the launch user preselected;
-//! online accounts are unavailable. `NXOS_NICK` names user 1 (default "Player").
+//! online accounts are unavailable. The PC's player is the option `pc_user` (1..8, default 1), named `pc_user_name`
+//! (`NXOS_NICK` overrides): opened at launch, answered by the user picker, always registered.
 
 use crate::guest::{r64, w64, w8, Args};
 use crate::hle::{Registry, RES_FAIL, RES_OK};
@@ -20,9 +21,14 @@ pub fn user_of(uid: u64) -> Option<u64> {
     (v1 == UID1 && (UID0..UID0 + USERS).contains(&v0) && registered() & (1 << (v0 - UID0)) != 0).then(|| v0 - UID0)
 }
 
-/// A bit per registered user: user 1 always, others when their marker exists in the save folder.
+/// The PC's player's slot (option `pc_user`, read live).
+pub fn pc_user() -> u64 {
+    (nxconfig::int("pc_user").clamp(1, USERS as i64) - 1) as u64
+}
+
+/// A bit per registered user: the PC's player always, others when their marker exists in the save folder.
 pub fn registered() -> u64 {
-    let mut m = 1;
+    let mut m = 1 << pc_user();
     for i in 1..USERS {
         if crate::services::fs::save_dir().join(format!("user{}.registered", i + 1)).exists() {
             m |= 1 << i;
@@ -32,8 +38,11 @@ pub fn registered() -> u64 {
 }
 
 fn nickname(i: u64) -> String {
-    if i == 0 {
-        std::env::var("NXOS_NICK").unwrap_or_else(|_| "Player".into())
+    if i == pc_user() {
+        std::env::var("NXOS_NICK").unwrap_or_else(|_| match nxconfig::string("pc_user_name") {
+            n if n.trim().is_empty() => "Player".into(),
+            n => n.trim().chars().take(32).collect(),
+        })
     } else {
         format!("Player {}", i + 1)
     }
@@ -44,7 +53,7 @@ struct Sessions {
     token: u64,
     last: u64,
 }
-static S: Mutex<Sessions> = Mutex::new(Sessions { open: Vec::new(), token: 0x5553_4552_0000_0000, last: 0 });
+static S: Mutex<Sessions> = Mutex::new(Sessions { open: Vec::new(), token: 0x5553_4552_0000_0000, last: u64::MAX });
 
 fn put_uid(a: u64, user: u64) {
     w64(a, UID0 + user);
@@ -112,8 +121,8 @@ accfn!(pop_open, |a| {
     0
 });
 accfn!(push_open, |a| { 0 });
-accfn!(try_open_pre, |a| { (open_user(a.x(0), 0) == RES_OK) as u64 });
-accfn!(open_pre, |a| { open_user(a.x(0), 0) });
+accfn!(try_open_pre, |a| { (open_user(a.x(0), pc_user()) == RES_OK) as u64 });
+accfn!(open_pre, |a| { open_user(a.x(0), pc_user()) });
 accfn!(open, |a| {
     match user_of(a.x(1)) {
         Some(u) => open_user(a.x(0), u),
@@ -126,7 +135,10 @@ accfn!(close, |a| {
     0
 });
 accfn!(last_opened, |a| {
-    let u = S.lock().unwrap().last;
+    let u = match S.lock().unwrap().last {
+        u64::MAX => pc_user(), // none opened yet: the PC's player
+        u => u,
+    };
     put_uid(a.x(0), u);
     RES_OK
 });
@@ -148,8 +160,8 @@ accfn!(nickname_fn, |a| {
 });
 accfn!(select, |a| {
     // the user selector: the one registered user is chosen (nxnative's native dialog belongs to the front end)
-    crate::log_once!("acc select", "account: user selector answered with user 1");
-    put_uid(a.x(0), 0);
+    crate::log_once!("acc select", "account: user selector answered with the PC's player (pc_user {})", pc_user() + 1);
+    put_uid(a.x(0), pc_user());
     RES_OK
 });
 accfn!(fail, |a| { RES_FAIL });
@@ -247,6 +259,20 @@ pub fn register(r: &mut Registry) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The PC's player is an option: its slot is registered and named, the picker and the launch answer with it.
+    #[test]
+    fn pc_user_option() {
+        assert!(nxconfig::apply_arg("--pc_user=3") && nxconfig::apply_arg("--pc_user_name=Chris"));
+        assert_eq!(pc_user(), 2);
+        assert_ne!(registered() & 0b100, 0);
+        if std::env::var("NXOS_NICK").is_err() {
+            assert_eq!(nickname(2), "Chris");
+        }
+        let out = crate::services::applet::applet_output(0x10);
+        assert_eq!(u64::from_le_bytes(out[8..16].try_into().unwrap()), UID0 + 2);
+        assert!(nxconfig::apply_arg("--pc_user=1") && nxconfig::apply_arg("--pc_user_name=Player"));
+    }
 
     #[test]
     fn handles_and_uids() {

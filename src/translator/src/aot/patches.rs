@@ -11,7 +11,7 @@
 //!                                                     target state / area / module, plus addend)
 //! A site's replacement word may be `@<op>:<target>:<addend>[:<word>]` (relocated like an area word, e.g.
 //! `@b:area:0x96c`; an adrp's register comes from the word).
-//! A module with an area gets a code module of its own, `<module>_stubs`, after main's patch page: the frame-step
+//! A module with an area gets a code module of its own, `<module>_stubs`, after the last module: the frame-step
 //! state page (zeros, the host writes it) and then the area's code (frame-step and stub patches).
 //! The player's mods arrive here as sets and sites too (src/cli `mods.rs`: one set per mod).
 
@@ -276,20 +276,16 @@ impl Table {
             }
         }
         t.page = page;
-        // the stubs modules: after the patch page, each a state page then its code (64 KB aligned, as modules are)
-        let mut at = page + PAGE;
+        // the stubs modules: after every module (the layout packs them, NROs included) and the patch page, each a
+        // state page then its code, 2 MiB aligned as modules are
+        let mut at = mods.iter().map(|m| m.base + m.size).max().unwrap_or(0).max(page + PAGE);
         for (name, a) in &t.areas {
-            let base = (at + 0xFFFF) & !0xFFFF;
+            let base = (at + 0x1F_FFFF) & !0x1F_FFFF;
             if t.state == 0 {
                 t.state = base;
             }
             t.area_at.insert(name.clone(), (base, base + PAGE));
             at = base + PAGE + 4 * a.words.len() as u64;
-        }
-        if let (Some(nxt), false) = (nxt, t.areas.is_empty()) {
-            if at > nxt {
-                return perr(format!("no room for the patch areas after main ({at:#x} past the next module at {nxt:#x})"));
-            }
         }
         Ok(t)
     }
@@ -467,7 +463,7 @@ mod tests {
         .unwrap();
         let main = 0x70_0000_0000u64;
         let (name, base, size, code, words) = t.stubs_module("main", main).unwrap().unwrap();
-        assert_eq!((name.as_str(), base, size, code), ("main_stubs", 0x70_0011_0000, PAGE + 16, 0x70_0011_1000));
+        assert_eq!((name.as_str(), base, size, code), ("main_stubs", 0x70_0020_0000, PAGE + 16, 0x70_0020_1000));
         assert_eq!(t.state, base);
         assert_eq!(words[0], adrp(code, base, 16).unwrap(), "adrp x16, state page");
         assert_eq!((words[1], words[2]), (0xb9400211, 0x17ffffff), "unrelocated words stay");

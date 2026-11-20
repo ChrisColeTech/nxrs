@@ -6,7 +6,7 @@
 //! * MiiEdit (0x12): MiiEditAppletOutput { u32 result = 1 (cancelled); s32 index = -1 } in 0x100 bytes. Zeros read as
 //!   "a Mii was made at index 0" of an empty database (Mario Kart 8 Deluxe then took a null Mii and crashed in
 //!   nn::mii::CreateId::IsValid);
-//! * PlayerSelect (0x10): UiReturnArg { u64 result 0; Uid } with the console's first user;
+//! * PlayerSelect (0x10): UiReturnArg { u64 result 0; Uid } with the PC's player (option `pc_user`);
 //! * any other applet: its output size of zeros (0x10, or 0x1010 for the web applets' WebCommonReturnValue).
 //!
 //! IStorage / IStorageAccessor carry the data both ways. The proxy's other interfaces are served by the takeovers by
@@ -34,7 +34,7 @@ pub fn applet_output(id: u32) -> Vec<u8> {
         }
         PLAYER_SELECT => {
             let mut r = vec![0u8; 0x18];
-            r[8..16].copy_from_slice(&crate::services::account::UID0.to_le_bytes());
+            r[8..16].copy_from_slice(&(crate::services::account::UID0 + crate::services::account::pc_user()).to_le_bytes());
             r[16..24].copy_from_slice(&crate::services::account::UID1.to_le_bytes());
             r
         }

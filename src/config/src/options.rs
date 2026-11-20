@@ -40,6 +40,9 @@ pub const SECTIONS: &[Section] = &[
             o!("button_map", "", "Optional changes on top of button_layout, physical:guest pairs, e.g. south:a east:b.\n;   Physical: south east west north (or cross circle square triangle), l r zl zr lstick rstick plus minus up down\n;   left right. Guest: a b x y l r zl zr lstick rstick plus minus up down left right none"),
             o!("controller_prompt", "1", "1 = when a game wants more players than are connected, it waits with a prompt until they join
 ;   (A or Return: done, B or Esc: cancel); 0 = it gets the players there are at once"),
+            o!("pc_user", "1", "The local profile (1..8) the game runs as: picked at launch and by any in-game user picker (a PC app has
+;   its player, not a console user list). Others exist when a game made them (their save folder markers)"),
+            o!("pc_user_name", "Player", "The name the game shows for that profile (NXOS_NICK overrides)"),
             o!("home_quit", "1", "1 = holding a controller's Home (logo) button 2 s asks whether to quit; 0 = off"),
             o!("pause_on_focus_loss", "0", "0 = the game runs on when its window is behind others (a PC app); 1 = the game is told it lost
 ;   the focus (many pause, as on a console) when the window is in the background or a prompt is open over it"),
