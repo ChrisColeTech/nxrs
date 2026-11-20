@@ -1,11 +1,15 @@
 """run_game.py <exe> <log> <hard timeout s> [args...]: the machine's game rules for one run.
 
-Takes
-GAME_LOCK atomically, checks no other game exe runs and free commit > 40 GB, starts the exe, watches it BY PID
-(kill if private bytes > 20 GB or free commit < 25 GB, or past the hard timeout), deletes the lock once it exited.
-Environment: NXRS_LANE names the lane in the lock. scripts/play_scenario.py runs games through `run()` here.
+Several games may run at once (one per lane). Each run writes its lane's claim file GAME_LOCK.<lane> (lane, exe, time,
+pid), checks free commit > 40 GB, starts the exe, watches it BY PID (kill if private bytes > 20 GB or free commit
+< 25 GB, or past the hard timeout) and deletes its claim once it exited. The claim is what gamectl.py checks before it
+sends a key or command, so a lane only ever drives its own game.
+NXRS_EXCLUSIVE=1: the run needs the machine to itself (FPS measurements): it starts only when no other game runs, and
+other lanes refuse to start while it runs. The old single GAME_LOCK, if another tool holds it, counts as exclusive.
+Environment: NXRS_LANE names the lane. scripts/play_scenario.py runs games through `run()` here.
 """
 import datetime
+import glob
 import json
 import os
 import subprocess
@@ -13,7 +17,43 @@ import sys
 import threading
 import time
 
-LOCK = r'D:\Projects\Switch2RECOMP-main\build\evidence\GAME_LOCK'
+EVIDENCE = r'D:\Projects\Switch2RECOMP-main\build\evidence'
+LEGACY_LOCK = os.path.join(EVIDENCE, 'GAME_LOCK')
+
+
+def claim_path(lane=None):
+    return os.path.join(EVIDENCE, 'GAME_LOCK.' + (lane or os.environ.get('NXRS_LANE', 'agent')))
+
+
+def read_claim(path):
+    """dict(lane, exe, time, pid, exclusive) of a claim file, or None."""
+    try:
+        f = [x.strip() for x in open(path).read().split('|')]
+    except OSError:
+        return None
+    return dict(lane=f[0], exe=f[1] if len(f) > 1 else '', time=f[2] if len(f) > 2 else '',
+                pid=int(f[3]) if len(f) > 3 and f[3].isdigit() else 0, exclusive=len(f) > 4 and f[4] == 'exclusive')
+
+
+def other_claims():
+    """Live claims of other lanes (claims whose process is gone are stale and removed), plus the legacy lock."""
+    out = []
+    mine = claim_path()
+    for p in glob.glob(os.path.join(EVIDENCE, 'GAME_LOCK.*')):
+        if os.path.normcase(p) == os.path.normcase(mine):
+            continue
+        c = read_claim(p)
+        if c and c['pid'] and not alive(c['pid']):
+            try:
+                os.remove(p)
+            except OSError:
+                pass
+            continue
+        if c:
+            out.append(c)
+    if os.path.exists(LEGACY_LOCK):
+        out.append(dict(lane='legacy GAME_LOCK', exe=open(LEGACY_LOCK).read().strip(), time='', pid=0, exclusive=True))
+    return out
 PRIVATE_LIMIT_MB = 20000
 COMMIT_MIN_START_MB = 40000
 COMMIT_MIN_RUN_MB = 25000
@@ -87,9 +127,14 @@ def alive(pid):
 def run(exe, logp, hard, args=(), env=None, during=None, say=print):
     """One guarded run. `during(pid)` (optional) runs on a thread while the game runs (a scenario's steps).
     Returns dict(why, exit, peak_mb, seconds) or raises SystemExit with the reason it could not start."""
-    g = other_games()
-    if g:
-        raise SystemExit('another game runs: %s' % g)
+    exclusive = os.environ.get('NXRS_EXCLUSIVE') == '1'
+    others = other_claims()
+    if any(c['exclusive'] for c in others):
+        raise SystemExit('locked: an exclusive run holds the machine: %s' % [c for c in others if c['exclusive']])
+    if exclusive:
+        g = other_games()
+        if others or g:
+            raise SystemExit('exclusive run refused: other games run: %s %s' % (others, g))
     # builds may overlap a run (owner, 2026-11-19): NXRS_WAIT_FOR_BUILDS=1 restores the wait if crashes under load return
     if os.environ.get('NXRS_WAIT_FOR_BUILDS') == '1':
         for i in range(61):
@@ -104,14 +149,19 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
     fc = free_commit_mb()
     if fc < COMMIT_MIN_START_MB:
         raise SystemExit('free commit %d MB < 40 GB' % fc)
-    try:
-        fd = os.open(LOCK, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
-    except FileExistsError:
-        raise SystemExit('locked: ' + open(LOCK).read().strip())
-    mine = '%s | %s | %s\n' % (os.environ.get('NXRS_LANE', 'agent'), os.path.basename(exe), datetime.datetime.now().isoformat(timespec='seconds'))
-    os.write(fd, mine.encode())
-    os.close(fd)
-    say('lock taken; free commit %d MB' % fc)
+    lane = os.environ.get('NXRS_LANE', 'agent')
+    LOCK = claim_path(lane)
+    old = read_claim(LOCK)
+    if old and old['pid'] and alive(old['pid']):
+        raise SystemExit('this lane already runs a game: %s' % old)
+    mode = ' | exclusive' if exclusive else ''
+
+    def claim_text(name, pid):
+        return '%s | %s | %s | %d%s\n' % (lane, name, datetime.datetime.now().isoformat(timespec='seconds'), pid, mode)
+    mine = claim_text(os.path.basename(exe), 0)
+    with open(LOCK, 'w') as fl:
+        fl.write(mine)
+    say('claim taken (%s%s); free commit %d MB' % (lane, ', exclusive' if exclusive else '', fc))
     peak = 0
     why = 'exited'
     rc = None
@@ -120,6 +170,9 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
         with open(logp, 'wb') as lf:
             p = subprocess.Popen([exe] + list(args), stdout=lf, stderr=subprocess.STDOUT, cwd=os.path.dirname(exe), env=env)
             CURRENT['pid'] = p.pid
+            mine = claim_text(os.path.basename(exe), p.pid)
+            with open(LOCK, 'w') as fl:
+                fl.write(mine)
             if during:
                 threading.Thread(target=during, args=(p.pid,), daemon=True).start()
             pid, running, seen = p.pid, (lambda: p.poll() is None), 0
@@ -149,7 +202,7 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
                 seen = os.path.getsize(logp)
                 pid = nxt[1]
                 CURRENT['pid'] = pid
-                mine_new = '%s | %s | %s\n' % (os.environ.get('NXRS_LANE', 'agent'), os.path.basename(nxt[0]), datetime.datetime.now().isoformat(timespec='seconds'))
+                mine_new = claim_text(os.path.basename(nxt[0]), pid)
                 with open(LOCK, 'w') as fl:
                     fl.write(mine_new)
                 mine = mine_new
@@ -157,7 +210,7 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
                 running = (lambda q=pid: alive(q))
     finally:
         for _ in range(20):
-            if not other_games():
+            if not CURRENT['pid'] or not alive(CURRENT['pid']):
                 break
             time.sleep(1)
         if os.path.exists(LOCK) and open(LOCK).read() == mine:

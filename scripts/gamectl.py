@@ -36,18 +36,24 @@ def image_of(pid):
 
 
 def check_owned(pid):
-    """Keys and pipe commands go only to the game this lane started and holds GAME_LOCK for: the lock's lane is
-    NXRS_LANE and its executable is the image of `pid` (a PID from `find` or another lane's game is refused)."""
+    """Keys and pipe commands go only to the game this lane started: its claim file GAME_LOCK.<NXRS_LANE> (written by
+    run_game.py) must name `pid`, or (before the pid is written) an executable matching the image of `pid`. A PID
+    from `find` or another lane's game is refused."""
     lane = os.environ.get('NXRS_LANE', '')
+    if not lane:
+        raise OSError('refused: NXRS_LANE is not set')
     try:
-        f = [x.strip() for x in open(LOCK).read().split('|')]
+        f = [x.strip() for x in open(LOCK + '.' + lane).read().split('|')]
     except OSError:
-        raise OSError('refused: no GAME_LOCK (the game is not running under run_game.py)')
-    if not lane or f[0] != lane:
-        raise OSError('refused: GAME_LOCK is %r, not this lane (NXRS_LANE=%r)' % (f[0], lane))
+        raise OSError('refused: lane %r has no game claim (the game is not running under run_game.py)' % lane)
+    claimed = int(f[3]) if len(f) > 3 and f[3].isdigit() else 0
+    if claimed:
+        if claimed != pid:
+            raise OSError('refused: pid %d is not lane %r\'s game (pid %d)' % (pid, lane, claimed))
+        return
     img = image_of(pid)
     if img is None or len(f) < 2 or img.lower() != f[1].lower():
-        raise OSError('refused: pid %d is %r, the locked game is %r' % (pid, img, f[1] if len(f) > 1 else None))
+        raise OSError('refused: pid %d is %r, lane %r\'s game is %r' % (pid, img, lane, f[1] if len(f) > 1 else None))
 
 
 def pipe(pid, line, timeout=30.0):
