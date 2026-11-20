@@ -1069,6 +1069,16 @@ fn c2_bytes(qs: &QState, st: usize) -> Vec<u8> {
 
 /// The words of constant bank `slot` of a stage as the shader reads them: c0 / c2 as the host builds them, c1 the
 /// shader's constants, c3 + r the game's uniform buffer (read from guest memory).
+/// A texture's `cbuf_slot` as (the texture word's bank, the sampler word's bank): Ryujinx packs a separate sampler
+/// in another bank as `texture slot | (sampler slot + 1) << 16` (Unity's NVN shaders: 0x30002, both words in c2).
+fn tex_slots(s: i32) -> (i32, i32) {
+    if s < 0 {
+        return (s, s);
+    }
+    let (t, hi) = (s & 0xffff, (s as u32) >> 16);
+    (t, if hi != 0 { hi as i32 - 1 } else { t })
+}
+
 fn bank_word(qs: &QState, st: usize, m: &Module, c0: &[u8], c2: &[u8], slot: i32, word: u32) -> u32 {
     let at = 4 * word as usize;
     let rd = |b: &[u8]| -> u32 { b.get(at..at + 4).map(|x| u32::from_le_bytes(x.try_into().unwrap())).unwrap_or(0) };
@@ -1286,7 +1296,7 @@ fn binding_scales(g: &Gpu, qs: &QState, st: usize, m: &Module, c0: &[u8], c2: &[
         if ty == 2 || 1 + idx >= v.len() {
             continue;
         }
-        let word = bank_word(qs, st, m, c0, c2, cbuf_slot, handle & 0x3fff);
+        let word = bank_word(qs, st, m, c0, c2, tex_slots(cbuf_slot).0, handle & 0x3fff);
         let tid = (word & 0xfffff) as i32 + tb;
         if let Some((serial, _)) = g.tables.tex_at(tid) {
             if let Some(im) = imgs.by_serial.get(&serial) {
@@ -1320,7 +1330,10 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
     // the texture part of the last set of this stage, when nothing it depends on changed
     let cacheable = !dumping
         && m.res.iter().all(|(_, r)| match r {
-            Res::Tex { cbuf_slot, ty, .. } | Res::Img { cbuf_slot, ty, .. } => (*cbuf_slot == 2 || *cbuf_slot == -1) && *ty != 2,
+            Res::Tex { cbuf_slot, ty, .. } | Res::Img { cbuf_slot, ty, .. } => {
+                let (t, s) = tex_slots(*cbuf_slot);
+                (t == 2 || t == -1) && (s == 2 || s == -1) && *ty != 2
+            }
             _ => true,
         });
     let mkey = (m as *const Module as usize, m.key);
@@ -1443,7 +1456,7 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
             }
             Res::Tex { handle, cbuf_slot, ty } | Res::Img { handle, cbuf_slot, ty } => {
                 let is_img = matches!(r, Res::Img { .. });
-                let word = bank_word(qs, st, m, &c0, &c2, *cbuf_slot, handle & 0x3fff);
+                let word = bank_word(qs, st, m, &c0, &c2, tex_slots(*cbuf_slot).0, handle & 0x3fff);
                 let kind = handle >> 28;
                 let tid = (word & 0xfffff) as i32 + tb;
                 if *ty == 2 {
@@ -1470,7 +1483,7 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                 }
                 let sid = match kind {
                     0 => (word >> 20) as i32,
-                    1 => (bank_word(qs, st, m, &c0, &c2, *cbuf_slot, handle >> 14 & 0x3fff) >> 20) as i32,
+                    1 => (bank_word(qs, st, m, &c0, &c2, tex_slots(*cbuf_slot).1, handle >> 14 & 0x3fff) >> 20) as i32,
                     2 => (handle >> 14 & 0x3fff) as i32,
                     _ => {
                         crate::log::red_once("constant sampler handles are not bound yet");

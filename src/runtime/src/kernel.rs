@@ -132,6 +132,10 @@ pub trait Scheduler: Sync {
     }
     /// A pass of a marked spin-wait loop (`rt_spin_gate`, before it yields the host core): a checkpoint.
     fn spin_pass(&self) {}
+    /// The calling guest thread enters / leaves a host function (`nxrt_host_invoke`): while it is in one, another
+    /// thread taking its core runs no guest code beside guest code of that core.
+    fn host_enter(&self) {}
+    fn host_leave(&self) {}
 }
 
 struct NoScheduler;

@@ -1,0 +1,3 @@
+# Hold A for 3 s (cutscenes that skip on a held A), then release
+0 1 0 0 0 0
+3000 0 0 0 0 0

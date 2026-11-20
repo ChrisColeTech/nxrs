@@ -19,9 +19,12 @@ unsafe fn nv_init(c: *mut Cpu) {
 }
 unsafe fn nv_fin(_c: *mut Cpu) {
     NV_POOL.store(0, Ordering::Relaxed);
+    NV_INITED.store(false, Ordering::Release);
 }
+/// nv::InitCheck: whether nv::InitializeGraphics ran (nxnative `g_nv_pool.inited`). Not the pool: Switch 2 games pass
+/// none (Donkey Kong Bananza: pool 0 at 0x0, then InitCheck from main+0xe19d04 when gameplay starts).
 unsafe fn nv_init_check(c: *mut Cpu) {
-    if NV_POOL.load(Ordering::Relaxed) == 0 {
+    if !NV_INITED.load(Ordering::Acquire) {
         nxrt::rt::guest_fatal(c, "nv::InitCheck: graphics not initialised");
     }
 }

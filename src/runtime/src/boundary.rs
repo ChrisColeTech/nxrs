@@ -97,7 +97,10 @@ pub unsafe extern "C" fn nxrt_host_invoke(c: *mut Cpu) -> u32 {
         };
         crate::hostfn::count_call(pc);
         PENDING.set(0);
+        let sc = crate::kernel::sched();
+        sc.host_enter();
         f(c);
+        sc.host_leave();
         match PENDING.replace(0) {
             0 => ST_RETURN,
             1 => ST_REDISPATCH, // c->pc still holds the jump's target

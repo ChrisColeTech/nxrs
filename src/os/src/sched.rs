@@ -40,6 +40,11 @@ struct Th {
     displaced: bool,
     handle: u32,
     alive: bool,
+    /// Host functions it is inside (`host_enter` depth): a holder there runs no guest code, so taking its core
+    /// lets no two threads run guest code on one core.
+    host: std::sync::Arc<AtomicU64>,
+    /// Mirror of `displaced` for `host_leave` (no lock on the hot path).
+    disp: std::sync::Arc<AtomicBool>,
 }
 
 struct State {
@@ -60,7 +65,13 @@ static STARTED: AtomicBool = AtomicBool::new(false);
 
 thread_local! {
     static ME: Cell<Option<usize>> = const { Cell::new(None) };
+    static ME_HOST: std::cell::RefCell<Option<(std::sync::Arc<AtomicU64>, std::sync::Arc<AtomicBool>)>> = const { std::cell::RefCell::new(None) };
 }
+
+/// A holder running guest code keeps its core this long against any waiter (Horizon would pause it; here it would run
+/// on beside the taker): past it the waiter takes the core anyway (a holder spinning with no checkpoint).
+const STEAL_GUEST: Duration = Duration::from_millis(200);
+pub static STEALS_GUEST: AtomicU64 = AtomicU64::new(0);
 
 /// `NXOS_STEAL_ANY_MS=<ms>` (debugging): how long a waiter waits before it takes a core from an equal or better holder
 /// (default 20; 0 = never, as Horizon, where an equal priority holder keeps its core until it blocks or yields).
@@ -73,13 +84,26 @@ fn steal_any() -> Option<Duration> {
     })
 }
 
+/// `NXOS_STEAL_WORSE_MS=<ms>` (debugging): how long a waiter waits before it takes a core from a worse holder (default
+/// 2; 0 = never: with `NXOS_CORES=1` and `NXOS_STEAL_ANY_MS=0` no two guest threads ever run at once).
+fn steal_worse() -> Option<Duration> {
+    static V: OnceLock<Option<Duration>> = OnceLock::new();
+    *V.get_or_init(|| match std::env::var("NXOS_STEAL_WORSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
+        Some(0) => None,
+        Some(ms) => Some(Duration::from_millis(ms)),
+        None => Some(STEAL_WORSE),
+    })
+}
+
 fn off() -> bool {
     *OFF.get_or_init(|| std::env::var("NXOS_FREE_CORES").is_ok_and(|v| v == "1"))
 }
 
 /// Configures the core count from the process core mask and installs the scheduler (before any thread starts).
 pub fn init(core_mask: u64) {
-    let n = (core_mask.count_ones() as usize).clamp(1, MAX_CORES);
+    // `NXOS_CORES=<n>` (debugging): fewer virtual cores than the process mask gives (1 = every guest thread in turn)
+    let want = std::env::var("NXOS_CORES").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n >= 1);
+    let n = want.unwrap_or(core_mask.count_ones() as usize).clamp(1, MAX_CORES);
     ST.lock().unwrap().ncores = n;
     STARTED.store(true, Ordering::Relaxed);
     nxrt::kernel::set_scheduler(&Cores);
@@ -93,7 +117,7 @@ fn new_thread(st: &mut State, prio: i32, ideal: i32, mask: u64, handle: u32) -> 
     let all = (1u64 << st.ncores) - 1;
     let ideal = if ideal < 0 || ideal as usize >= st.ncores { 0 } else { ideal as usize };
     let mask = if mask & all == 0 { 1 << ideal } else { mask & all };
-    st.threads.push(Th { prio, ideal, mask, core: None, waiting: false, wseq: 0, displaced: false, handle, alive: true });
+    st.threads.push(Th { prio, ideal, mask, core: None, waiting: false, wseq: 0, displaced: false, handle, alive: true, host: Default::default(), disp: Default::default() });
     st.threads.len() - 1
 }
 
@@ -132,6 +156,7 @@ fn try_take(st: &mut State, i: usize) -> bool {
             t.core = Some(c);
             t.waiting = false;
             t.displaced = false;
+            t.disp.store(false, Ordering::SeqCst);
             return true;
         }
     }
@@ -157,15 +182,40 @@ fn acquire(i: usize) {
             return;
         }
         let waited = t0.elapsed();
-        if waited >= STEAL_WORSE {
+        if steal_worse().is_some_and(|d| waited >= d) || steal_any().is_some_and(|d| waited >= d) {
             // a core the waiter may use, held by a thread worse than it (or any holder after STEAL_ANY)
             let me = st.threads[i].clone();
             let pick = (0..st.ncores).filter(|&c| me.mask >> c & 1 != 0).find(|&c| {
-                st.owner[c].is_some_and(|o| st.threads[o].prio > me.prio || steal_any().is_some_and(|d| waited >= d)) && best_waiter(&st, c) == Some(i)
+                st.owner[c].is_some_and(|o| {
+                    let t = &st.threads[o];
+                    let in_host = t.host.load(Ordering::Relaxed) > 0 || waited >= STEAL_GUEST;
+                    in_host && ((t.prio > me.prio && steal_worse().is_some_and(|d| waited >= d)) || steal_any().is_some_and(|d| waited >= d))
+                }) && best_waiter(&st, c) == Some(i)
+            });
+            // the holder may be leaving its host function right now: it reads `disp` after it drops `host` (SeqCst on
+            // both sides), so either it sees the flag and waits for a core, or this sees it back in guest code and
+            // leaves it the core (before STEAL_GUEST)
+            let pick = pick.filter(|&c| {
+                let o = st.owner[c].unwrap();
+                st.threads[o].disp.store(true, Ordering::SeqCst);
+                let ok = st.threads[o].host.load(Ordering::SeqCst) > 0 || waited >= STEAL_GUEST;
+                if !ok {
+                    st.threads[o].disp.store(st.threads[o].displaced, Ordering::SeqCst);
+                }
+                ok
             });
             if let Some(c) = pick {
                 if let Some(o) = st.owner[c] {
                     st.threads[o].displaced = true;
+                    st.threads[o].disp.store(true, Ordering::SeqCst);
+                    if st.threads[o].host.load(Ordering::Relaxed) == 0 && STEALS_GUEST.fetch_add(1, Ordering::Relaxed) < 16 {
+                        crate::log!(
+                            "scheduler: thread {:#x} took core {c} from thread {:#x}, which ran guest code with no checkpoint for {:.0} ms",
+                            me.handle,
+                            st.threads[o].handle,
+                            waited.as_secs_f64() * 1e3
+                        );
+                    }
                     if st.threads[o].prio <= me.prio && STEALS_ANY.fetch_add(1, Ordering::Relaxed) < 16 {
                         crate::log!(
                             "scheduler: thread {:#x} (priority {}) took core {c} from thread {:#x} (priority {}) after {:.1} ms: the holder runs on until its next checkpoint",
@@ -182,6 +232,7 @@ fn acquire(i: usize) {
                 t.core = Some(c);
                 t.waiting = false;
                 t.displaced = false;
+                t.disp.store(false, Ordering::SeqCst);
                 STEALS.fetch_add(1, Ordering::Relaxed);
                 return;
             }
@@ -195,6 +246,7 @@ fn release(i: usize) {
     let t = &mut st.threads[i];
     let core = t.core.take();
     let displaced = std::mem::replace(&mut t.displaced, false);
+    t.disp.store(false, Ordering::SeqCst);
     if let Some(c) = core {
         if !displaced && st.owner[c] == Some(i) {
             st.owner[c] = None;
@@ -290,6 +342,11 @@ fn start(handle: u32) {
         }
     };
     ME.set(Some(i));
+    let h = {
+        let st = ST.lock().unwrap();
+        (st.threads[i].host.clone(), st.threads[i].disp.clone())
+    };
+    ME_HOST.with(|m| *m.borrow_mut() = Some(h));
     if !off() {
         acquire(i);
     }
@@ -338,6 +395,24 @@ impl nxrt::kernel::Scheduler for Cores {
     fn spin_pass(&self) {
         checkpoint(true);
     }
+    fn host_enter(&self) {
+        ME_HOST.with(|m| {
+            if let Some((h, _)) = m.borrow().as_ref() {
+                h.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+    }
+    /// Back to guest code: a thread whose core was taken while it was in the host function waits for a core
+    /// first (Horizon: it was preempted), so two threads never run guest code on one core.
+    fn host_leave(&self) {
+        let back = ME_HOST.with(|m| match m.borrow().as_ref() {
+            Some((h, d)) => h.fetch_sub(1, Ordering::SeqCst) == 1 && d.load(Ordering::SeqCst),
+            None => false,
+        });
+        if back && !off() {
+            checkpoint(false);
+        }
+    }
 }
 
 /// SetThreadPriority / SetThreadCoreMask applied by the kernel: the scheduler's copy follows the kernel's.
@@ -376,11 +451,12 @@ pub fn stats() -> String {
     let held: Vec<String> = st.owner[..st.ncores].iter().map(|o| o.map_or("-".into(), |i| format!("{:#x}", st.threads[i].handle))).collect();
     let waiting = st.threads.iter().filter(|t| t.waiting).count();
     format!(
-        "cores [{}], {waiting} waiting, {} handoffs, {} steals ({} from an equal or better holder)",
+        "cores [{}], {waiting} waiting, {} handoffs, {} steals ({} from an equal or better holder, {} from a holder in guest code)",
         held.join(" "),
         HANDOFFS.load(Ordering::Relaxed),
         STEALS.load(Ordering::Relaxed),
-        STEALS_ANY.load(Ordering::Relaxed)
+        STEALS_ANY.load(Ordering::Relaxed),
+        STEALS_GUEST.load(Ordering::Relaxed)
     )
 }
 

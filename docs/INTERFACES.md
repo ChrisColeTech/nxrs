@@ -422,11 +422,25 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   (48 ms of write-back a frame). Such pages now stay on the device (its buffer has the newest bytes, this write-back's
   among them). The pools line shows `lazy write-back: N pages on the device, … brought back …` when it is on. Decision:
   see `v7` / `v8` below.
-- **MKW null command buffer (item 6).** Graphics now answers NVN2's device integers as Turbo does (`DEVINFO2`, 0xAA
-  items, and the constants of the driver compiled into the game's sdk: `nvn::device::set_sdk_image`, called by os with
-  the sdk module's image; MKW's sdk gives API 231.39, GPU code 201.20). The queue memory sizes, texture storage sizes and
-  alignments and command memory already matched Turbo. MKW still faults the same way 3.7 s after its first present
-  (`w12`: `main+0xa66e0 +0x2df5 (read of 0xa0)`): the sizes graphics reports are not the cause.
+- **MKW null command buffer (item 6; lane X2's root cause: the render-buffer pool fills).** Graphics now answers NVN2's
+  device integers as Turbo does (`DEVINFO2`, 0xAA items, and the constants of the driver compiled into the game's sdk:
+  `nvn::device::set_sdk_image`, called by os with the sdk module's image; MKW's sdk gives API 231.39, GPU code 201.20);
+  MKW still faults the same way (`w12`). The storage sizes lane X2 measured are the reference rule's: Turbo's
+  `nvn_tex.c`, nxnative's and mkw-recomp's `runtime/gfx/nvn/tex/nvn_tex.c` (MIT) all pick the block height from
+  height x 1.5 / 8 GOBs and align to 512 bytes, as `tex/layout.rs` does (2560x1440 RGBA8 = 0xf00000: 1440 rows in
+  128-row blocks = 1536; the 3072x3072 one is the shadow map, 3 layers of D16 = 0x3600000); the only NVN goldens anyone
+  has are the X1 SDK's (mkw-recomp `probes/nvn_tex_probe.c`), which this layout passes. 2560x1440 is the console's own
+  docked scene size (mkw-recomp: "the 3D scene still renders at the console's docked 2560x1440"; MKW 1.8.0 takes it
+  from its display object, not from what the host reports). **The same pool exhaustion is mkw-recomp's issue #255 /
+  #210 / #305 on MKW 1.8.0** (ours is 1.8.0: its allocator init is `main+0xeb1870`, mkw-recomp's `rb_alloc_init` for
+  1.8.0), and mkw-recomp fixes it in the game, not in sizes: `recomp/patches-mkw-180.txt` (lines 188-195) gives the
+  render-buffer allocator's pool table two slots (`main+0xeb199c` `mov w1, #8 -> #16`, `main+0xeb19b0` `mov w9, #1 ->
+  #2`) and routes `bl main+0xeb1870` at `main+0xd65720` and `bl main+0xb72c0` at `main+0xb6f90` to host functions, and `runtime/core/boot/patches.c`
+  (`host_shadow_pool`, `host_shadow_rb`, `shadow_second_pool`, `second_pool_bytes`) fills the second slot, when the
+  first shadow map is made, with a pool from memory of the runtime's own under a `pead::ExpHeap` of the game's class
+  (1.8.0 `expheap_create` `main+0xbeb4e0`, `rb_create` `main+0xb72c0`, `rb_pool_init` `main+0xeb1e60`): 128 MiB for
+  1.8.0's photo mode at 1440 lines plus one more 3072 shadow map. **For lanes X / O (the game-patch layer): port that
+  patch (MIT); graphics has nothing to change there.**
 - **5A.4 rows:** raw global memory (`vk/gmem.rs`: the 8,192-entry memory pool table with 2 MiB hints and the write log
   under constant slot 255, pools copied back after a shader wrote them through a loaded pointer, at most 64 MB each);
   resolution scale and the host's dynamic resolution (`vk/scale.rs`, the module's notes; GPU test
@@ -435,9 +449,13 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   here (CPU writes to a texture's storage reload it for all games, Turbo's two titles included); ray tracing not done
   (PORT_PLAN 5A.4).
 - **Texture pool set: 262,144 IDs** by default (`NXGFX_TEX_CAP`; MKW registers up to ~131,400).
-- **For the lane that edits `vk/queue.rs` / `vk/mem.rs` write-backs (the `base` copy and `land_changed`, not lane
-  G3's):** `v6` measured 48 ms of write-back a frame in Violet with lazy write-back on; part of it was lazy pages (fixed
-  above). `land_changed` calls `watch::take` / `watch::reset` per changed page.
+- **Review of lane X2's write-back landing (`vk/queue.rs` "write-back base", `vk/mem.rs land_changed`): correct.**
+  The base is copied in `pre` after the submission's uploads, so it is the device as the GPU work found it; only bytes
+  the work changed land, the rest keeps what the CPU wrote meanwhile (Turbo's `wr_land`), pages the GPU left alone are
+  not touched, and the write watch / snapshot are kept consistent around the landing. Costs: every write-back is read
+  back twice (the base and the result) and compared byte by byte; fine at MK8D's 34 small write-backs a frame. Pages
+  held on the device by lazy write-back no longer reach it (`lazy::outside`, above): bringing them back there made the
+  completion thread wait for all later GPU work (`v6`: 48 ms of write-back a frame in Violet).
 
 **Shaders (agreed with shaders, lane C):** graphics reads lane C's output as written above: `<data>/shaders/spv/
 <key>.spv` + `.json` (`status` "ok"), the shader key as defined there (`nxgfx::nvn::prog::shader_key` computes it at
