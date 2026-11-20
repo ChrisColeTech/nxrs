@@ -31,6 +31,10 @@ shaders = { path = "../shaders" }
 # decoder for the GPU decoder.
 ctt-astcenc = { version = "0.6", optional = true }
 
+[dev-dependencies]
+# the ampere_orin fixture (gzip), as nxnative ships it
+flate2 = "1"
+
 # The windowed present test runs its own event loop on the main thread.
 [[test]]
 name = "window"

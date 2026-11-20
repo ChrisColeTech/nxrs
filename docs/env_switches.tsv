@@ -48,6 +48,7 @@ NXGFX_LIVE	switch	`0` turns the live shader translator off (a draw whose shader 
 NXGFX_LIVE_JOBS	switch	as many translators as the build uses (NXGFX_LIVE_JOBS, 4)	src/graphics/src/vk/live.rs
 NXGFX_LOG_SHADER	diagnostic	NXGFX_LOG_SHADER=<key> (diagnosis, lane K): every texture / image this shader is bound to, with its image	src/graphics/src/vk/exec.rs
 NXGFX_LOOP_GUARD	switch	`NXGFX_LOOP_GUARD`: the back-edges a shader invocation's function may take (0: loops left unbounded).	src/graphics/src/vk/shader.rs
+NXGFX_MAX_BUFFER_MB	switch	`NXGFX_MAX_BUFFER_MB` asks for it (to try pool windows on a device whose largest buffer is larger than any pool).	src/graphics/src/vk/mem.rs
 NXGFX_MESH	switch	`0` leaves VK_EXT_mesh_shader off (task / mesh draws are not replayed)	src/graphics/src/vk/device.rs
 NXGFX_MESH_INDEX_FIX	switch	primitive indices held below the vertex count (NXGFX_MESH_INDEX_FIX=0 off; MKW's mesh-draw device losses)	src/graphics/src/vk/shader.rs
 NXGFX_MESH_REF	switch	NXGFX_MESH_REF=1 (diagnosis, lane K): mkw-recomp's rule for MKW's mesh draws: only direct 1D draws, from group 0	src/graphics/src/vk/exec.rs
@@ -61,6 +62,7 @@ NXGFX_PIPE_NOOPT	diagnostic	`1` makes pipelines with optimization disabled (driv
 NXGFX_POOL	switch	- **Host** (`NXGFX_POOL=host`): the guest pages imported into Vulkan (VK_EXT_external_memory_host): zero-copy,	src/graphics/src/vk/mem.rs, src/graphics/tests/gpu.rs
 NXGFX_POOL_COLD	switch	from then on). NXGFX_POOL_COLD=0: every pool at every submission.	src/graphics/src/vk/mem.rs
 NXGFX_POOL_LOG	diagnostic	set: a line per memory pool with its placement	src/graphics/src/vk/mem.rs
+NXGFX_POOL_SPARSE	switch	`NXGFX_POOL_SPARSE=0` backs every pool whole.	src/graphics/src/vk/mem.rs
 NXGFX_PRESENT	switch	the swap chain present mode: `fifo`, `mailbox` or `immediate`	src/graphics/src/vk/present.rs
 NXGFX_PREWARM_BUDGET_MB	switch	private-memory budget (`NXGFX_PREWARM_BUDGET_MB`, default 2048) or a count cap. A VkPipelineCache is kept on disk.	src/graphics/src/vk/pipe.rs, src/graphics/tests/shaders_lane_c.rs
 NXGFX_PREWARM_MAX	switch	pipelines built ahead at most (default 50,000)	src/graphics/src/vk/pipe.rs, src/graphics/tests/shaders_lane_c.rs
@@ -110,6 +112,7 @@ NXGFX_TEST_SDK	test	NXGFX_TEST_SDK=<a Switch 2 game's exefs/sdk>	src/graphics/te
 NXGFX_TEST_SHADERS	test	memory budget. Uses `NXGFX_TEST_SHADERS` (default: the workspace's `build/shaders/mk8d`); skipped when absent.	src/graphics/tests/shaders_lane_c.rs
 NXGFX_TEX_CAP	switch	textures in the shared descriptor table at most (default 262144, within the device limit)	src/graphics/src/vk/layout.rs
 NXGFX_TEX_WB	switch	are the storage's bytes: true for every format let through here). `NXGFX_TEX_WB=1` on (off by default: `K2-mkw16`'s race washed out with it).	src/graphics/src/vk/exec.rs
+NXGFX_UPLOAD_MB	switch	`NXGFX_UPLOAD_MB` (default 64; 0: no budget).	src/graphics/src/vk/mem.rs
 NXGFX_UPSCALE	switch	`NXGFX_UPSCALE=standard` (or the ini's `upscale=standard`) keeps the linear blit; `NXGFX_SHARPNESS` 0..1 (0.5).	src/graphics/src/vk/upscale.rs
 NXGFX_VALIDATION	diagnostic	`1` turns the Vulkan validation layer on (the GPU tests set it)	src/graphics/src/vk/device.rs, src/graphics/tests/common/mod.rs
 NXGFX_VIN_SKIP	switch	NXGFX_VIN_SKIP=0: vertex input set up at every draw.	src/graphics/src/vk/exec.rs
@@ -122,7 +125,7 @@ NXGFX_ZERO_SHARED	switch	task / mesh shared memory starts zeroed (NXGFX_ZERO_SHA
 NXOS_AUDIO_DEVICE	switch	sound" can be read from a log; `NXOS_AUDIO_DEVICE=<part of a name>` plays on that output device instead of the	src/os/src/media/sink.rs
 NXOS_AUDIO_DUMP	diagnostic	default (a name no device has: the default, said in red); `NXOS_AUDIO_DUMP=<file.wav>` writes the mix as it goes	src/os/src/media/sink.rs
 NXOS_AUDIO_MUTE	switch	Muting (`set_muted`, the player's `mute_on_focus_loss`; `NXOS_AUDIO_MUTE=1` for a whole run): the device gets	src/os/src/media/sink.rs
-NXOS_CHEATS	switch	<build>.txt` (`NXOS_CHEATS=<folder>` names another folder), the build being the first 16 hex digits of main's	src/os/src/cheats.rs
+NXOS_CHEATS	switch	<build>.txt` (`NXOS_CHEATS=<folder>` names another folder), the build being the first 16 hex digits of main's	src/cli/src/cheats.rs, src/os/src/cheats.rs
 NXOS_CHEATS_ON	switch	commands `cheats`, `cheat on|off <name>`, `cheats reload`; `NXOS_CHEATS_ON=<name>,...` at launch.	src/os/src/cheats.rs
 NXOS_CORES	switch	2; 0 = never: with `NXOS_CORES=1` and `NXOS_STEAL_ANY_MS=0` no two guest threads ever run at once).	src/os/src/sched.rs
 NXOS_CTRL_PROMPT	switch	NXOS_CTRL_PROMPT=0, scripted runs) answers at once	src/os/src/services/hid.rs
@@ -151,6 +154,8 @@ NXOS_STEAL_ANY_MS	switch	`NXOS_STEAL_ANY_MS=<ms>` (debugging): how long a waiter
 NXOS_STEAL_WORSE_MS	switch	`NXOS_STEAL_WORSE_MS=<ms>` (debugging): how long a waiter waits before it takes a core from a worse holder (default	src/os/src/sched.rs
 NXOS_SWKBD	switch	the `keyboard_text` setting ("Player"). With no window to show it over (`NXOS_SWKBD=auto`, a headless run) the	src/os/src/services/swkbd.rs
 NXOS_TRACE	diagnostic	`NXOS_TRACE=svc,ipc,hle,nvn,fs` (or `all`).	src/os/src/lib.rs
+NXRS_CHEAT_0000ABCD	test	a patch-set name the runtime's patchset unit test declares (not read at run time)	src/runtime/src/patchset.rs
+NXRS_CHEAT_FFFFFFFF	test	a patch-set name the runtime's patchset unit test declares (not read at run time)	src/runtime/src/patchset.rs
 NXRS_CLANG	switch	Where clang is looked for, in order: `NXRS_CLANG`; `--cc` when it names a clang; the bundled one beside nxrs	src/cli/src/cc.rs
 NXRS_CLOSE_QUIT	switch	NXRS_CLOSE_QUIT=0 (scripted runs): a single close is logged and ignored; a second one within 10 s	src/front/src/window.rs, src/front/src/window_linux.rs
 NXRS_CONTROLLER_BACKGROUND	switch	NXRS_CONTROLLER_BACKGROUND=1: the keyboard counts out of focus too (keys posted by a test script)	src/front/src/window.rs, src/front/src/window_linux.rs, src/os/src/input/mod.rs
@@ -185,6 +190,7 @@ NXRS_MKW_SEED	switch	`NXRS_MKW_SEED` (a number: fixed random seeds), `NXRS_MKW_R
 NXRS_MKW_SHADOW_SIZE	switch	Settings (environment, all optional): `NXRS_MKW_SHADOW_SIZE` (the shadow map's size, 0 = the console's),	src/os/src/gamefix/mkw.rs
 NXRS_MKW_ZSTD_CHECK	diagnostic	`NXRS_MKW_ZSTD_CHECK=1` decodes each one-shot call both ways, keeps the guest's result and logs every difference.	src/os/src/gamefix/mkw_zstd.rs
 NXRS_MODS	switch	(`NXRS_MODS=<folder>` names another). They are the player's files: nxrs never ships or downloads one.	src/cli/src/mods.rs
+NXRS_MOD_A	test	a patch-set name the runtime's patchset unit test declares (not read at run time)	src/runtime/src/patchset.rs
 NXRS_MOD_T_A	test	a name the mods unit test declares (not read at run time)	src/os/src/mods.rs
 NXRS_MOTION_GAIN	switch	`NXRS_KEYS=<steps>` (scripted presses), `NXRS_MOTION_GAIN`. Turbo's `SWR_` names are read too.	src/os/src/input/mod.rs
 NXRS_NAME	switch	the game name the front end uses for its files and window (default the executable's name)	src/front/src/lib.rs

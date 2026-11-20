@@ -12,6 +12,7 @@
 //! - [`translator_patches`]: the translator's patch-table text for the entries nxrs applies at build time.
 
 pub mod cheatfile;
+pub mod docs;
 pub mod mods;
 pub mod patches;
 

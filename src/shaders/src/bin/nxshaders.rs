@@ -4,6 +4,8 @@
 //!                        [--limit N] [--scan-only] [--optimize]
 //!     nxshaders stage <game> --data <dir> [--dlc <pkg>...]   a data folder as the build stages it (exefs, RomFS marker, DLC)
 //!     nxshaders prebuild-data <data> [--jobs 4]              the build's call: <data>/shaders from <data>
+//!     nxshaders tex-census <export dir> [--keys N]           texture instructions whose LOD clamp / residency the
+//!                                                 translator drops (nxnative tex_census.py)
 //!     nxshaders coverage <out dir> <used>...     how many of the keys a game used (Turbo's <game>_nvn folders:
 //!                                                 vk/pipelines.tsv and cache/dumps) the build found and translated
 
@@ -49,6 +51,13 @@ enum Cmd {
     },
     /// Keys a game used at run time (Turbo's `<game>_nvn` folders) against a build's manifest.
     Coverage { out: PathBuf, used: Vec<PathBuf> },
+    /// The texture instructions whose LOD clamp or residency predicate the translator drops, over an `export` folder.
+    TexCensus {
+        dir: PathBuf,
+        /// shader keys listed per finding
+        #[arg(long, default_value_t = 10)]
+        keys: usize,
+    },
     /// Stage a data folder as the build does (exefs/, the RomFS marker), with add-on content installed from packages.
     Stage {
         game: PathBuf,
@@ -212,6 +221,13 @@ fn main() {
                 }
             }
         }
+        Cmd::TexCensus { dir, keys } => match shaders::census::census_dir(&dir, keys) {
+            Ok(r) => print!("{r}"),
+            Err(e) => {
+                eprintln!("nxshaders: {e}");
+                std::process::exit(1)
+            }
+        },
         Cmd::Coverage { out, used } => {
             let manifest = std::fs::read_to_string(out.join("manifest.tsv")).unwrap_or_else(|e| {
                 eprintln!("{}: {e}", out.display());
