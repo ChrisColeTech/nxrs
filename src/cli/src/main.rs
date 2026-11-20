@@ -82,7 +82,7 @@ struct V1 {
     no_shaders: bool,
     #[arg(long, hide = true)]
     keep_c: bool,
-    /// (Turbo diagnostics: everything interpreted) nxrs has no interpreter; every function is translated
+    /// (diagnostics) translate no function: the runtime interprets the whole game
     #[arg(long, hide = true)]
     interp_only: bool,
     /// ignored: the runtime is linked into the game's code DLL
@@ -198,9 +198,6 @@ fn run_v1(args: Vec<String>) -> i32 {
         return update_info(&o, pkgs, a.input.as_deref(), a.keys.as_deref());
     }
     let Some(input) = a.input.clone() else { return usage_error("the game folder, .nup or .nsp package is required") };
-    if a.interp_only {
-        return fail(&anyhow!("--interp-only: nxrs has no interpreter; every function is translated"));
-    }
     let host = if cfg!(target_os = "linux") { "linux" } else { "windows" };
     if a.target.as_deref().is_some_and(|t| (t == "linux" || t == "windows") && t != host) {
         return fail(&anyhow!("--target {}: nxrs-build builds {host} x86-64 programs here; build on {} for that", a.target.as_deref().unwrap_or(""), a.target.as_deref().unwrap_or("")));
@@ -229,6 +226,7 @@ fn run_v1(args: Vec<String>) -> i32 {
         native: a.native,
         v1: true,
         ignored: (!ignored.is_empty()).then(|| format!("nxrs-build: ignored (Turbo options with no meaning here): {}", ignored.join(" "))),
+        interp_only: a.interp_only,
     };
     build(&o, &b)
 }
@@ -329,6 +327,9 @@ enum Cmd {
         /// also print @progress and @result lines
         #[arg(long)]
         machine: bool,
+        /// (diagnostics) translate no function: the runtime interprets the whole game
+        #[arg(long, hide = true)]
+        interp_only: bool,
     },
     /// Say what each update package is; with --game, check it belongs to that game (exit 1 on any error).
     UpdateInfo {
@@ -415,7 +416,7 @@ fn run_v2(args: Vec<String>) -> i32 {
             out::line(CONTRACT);
             0
         }
-        Cmd::Build { input, out, outdir, jobs, pkg, cc, no_build, no_shaders, chunk, native, quiet, machine } => {
+        Cmd::Build { input, out, outdir, jobs, pkg, cc, no_build, no_shaders, chunk, native, quiet, machine, interp_only } => {
             if let Some(n) = pkg.program {
                 std::env::set_var("NXRS_PROGRAM_INDEX", n.to_string());
             }
@@ -434,6 +435,7 @@ fn run_v2(args: Vec<String>) -> i32 {
                 native,
                 v1: false,
                 ignored: None,
+                interp_only,
             };
             build(&o, &b)
         }

@@ -4,6 +4,7 @@
 pub mod discover;
 pub mod emit;
 pub mod gen;
+pub mod hints;
 pub mod nso_match;
 pub mod patches;
 pub mod runtime_headers;

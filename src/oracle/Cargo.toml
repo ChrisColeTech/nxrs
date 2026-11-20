@@ -15,6 +15,8 @@ path = "src/main.rs"
 
 [dependencies]
 translator = { path = "../translator" }
+# --interp: the runtime's interpreter (nxrt::interp) on the same words and states
+runtime = { path = "../runtime" }
 dynarmic-sys = { package = "dynarmic-sys-mythrax", version = "=0.3.7" }
 libloading = "0.8"
 windows-sys = { version = "0.61", features = ["Win32_System_Memory"] }

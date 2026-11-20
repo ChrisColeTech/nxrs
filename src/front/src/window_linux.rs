@@ -144,7 +144,8 @@ fn home_quit() {
         HqPhase::Prompt => {
             crate::flog!("Home held: the quit prompt");
             nxos::input::set_prompt(true);
-            nxos::ui::show("Quit the game?", "A / Return: quit.   B / Esc / Home: keep playing.");
+            let (title, hint) = nxos::ui_text::texts(nxos::ui_text::Prompt::HomeQuit, 0, 0);
+            nxos::ui::show(&title, &hint);
         }
         HqPhase::Quit => {
             nxos::ui::hide();

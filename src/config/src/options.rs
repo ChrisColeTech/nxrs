@@ -46,9 +46,13 @@ pub const SECTIONS: &[Section] = &[
             o!("pc_user", "1", "The local profile (1..8) the game runs as: picked at launch and by any in-game user picker (a PC app has
 ;   its player, not a console user list). Others exist when a game made them (their save folder markers)"),
             o!("pc_user_name", "Player", "The name the game shows for that profile (NXOS_NICK overrides)"),
+            o!("ask_user", "0", "1 = when the game asks who is playing and more than one local profile exists, a picker opens over it
+;   (Up / Down to choose, A / Return: select, B / Esc: cancel); 0 = the game gets pc_user without asking"),
             o!("home_quit", "1", "1 = holding a controller's Home (logo) button 2 s asks whether to quit; 0 = off"),
             o!("pause_on_focus_loss", "0", "0 = the game runs on when its window is behind others (a PC app); 1 = the game is told it lost
 ;   the focus (many pause, as on a console) when the window is in the background or a prompt is open over it"),
+            o!("mute_on_focus_loss", "0", "1 = the game's sound is muted while its window is behind others or minimised (it comes back with the
+;   focus); 0 = it plays on (a PC app). Applies live"),
         ],
     },
     Section {

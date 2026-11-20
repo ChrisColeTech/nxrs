@@ -1,6 +1,7 @@
-//! Host prompts over the game (nxnative's controller-support prompt `ctrl_prompt.h` and Home-quit `home_quit.h`,
-//! reimplemented): the pure state machines, tested without a window, and one small topmost window that shows a title
-//! and a line of text and reports Return / Escape (the keyboard's answer; pads answer through the state machines).
+//! Host prompts over the game (nxnative's controller-support prompt `ctrl_prompt.h`, Home-quit `home_quit.h` and
+//! user selector `user_select_mac.h`, reimplemented): the pure state machines, tested without a window, and one small
+//! topmost window that shows a title and a line of text and reports Return / Escape, Up / Down and digits (the
+//! keyboard's answer; pads answer through the state machines). Texts in the game's language (`ui_text`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Mutex;
@@ -71,8 +72,119 @@ impl CtrlPrompt {
         self.phase
     }
     pub fn text(&self) -> (String, String) {
-        (format!("{} players wanted", self.min), format!("Press a button on each controller to join.   Players: {} of {}   (A / Return: done, B / Esc: cancel)", self.joined, self.min))
+        crate::ui_text::texts(crate::ui_text::Prompt::Controllers, self.min, self.joined)
     }
+}
+
+// ---- the profile picker (`ask_user`)
+
+/// The game asks who is playing and more than one local profile exists: Up / Down (D-pad, arrow keys) move, a digit
+/// picks that line, A or Return selects, B or Escape cancels. The press that opened or answered it is held back.
+#[derive(Clone, Debug)]
+pub struct UserPicker {
+    pub phase: CpPhase,
+    /// (profile slot, name)
+    pub choices: Vec<(u64, String)>,
+    pub cursor: usize,
+    /// The answer once settled: the slot, or None (cancelled).
+    pub chosen: Option<u64>,
+    held: [bool; 4],
+}
+
+impl UserPicker {
+    /// Opens on `current` (a slot of `choices`, else the first) with A, B, Up, Down as held now.
+    pub fn open(choices: Vec<(u64, String)>, current: u64, held: [bool; 4]) -> UserPicker {
+        let cursor = choices.iter().position(|c| c.0 == current).unwrap_or(0);
+        UserPicker { phase: CpPhase::Open, choices, cursor, chosen: None, held }
+    }
+
+    /// One step: A, B, Up, Down held on any controller; Return / Escape, an arrow (-1 up, 1 down) and a digit
+    /// (1-based line) from the keyboard since the last step.
+    pub fn step(&mut self, pads: [bool; 4], confirm: bool, cancel: bool, arrow: i32, digit: Option<usize>) -> CpPhase {
+        let edge: Vec<bool> = (0..4).map(|i| pads[i] && !self.held[i]).collect();
+        self.held = pads;
+        match self.phase {
+            CpPhase::Idle => {}
+            CpPhase::Open => {
+                let n = self.choices.len().max(1);
+                if edge[2] || arrow < 0 {
+                    self.cursor = (self.cursor + n - 1) % n;
+                }
+                if edge[3] || arrow > 0 {
+                    self.cursor = (self.cursor + 1) % n;
+                }
+                let pick = digit.filter(|&d| d >= 1 && d <= self.choices.len()).map(|d| d - 1);
+                if let Some(k) = pick {
+                    self.cursor = k;
+                }
+                if edge[1] || cancel {
+                    self.phase = CpPhase::Settle;
+                    self.chosen = None;
+                } else if (edge[0] || confirm || pick.is_some()) && !self.choices.is_empty() {
+                    self.phase = CpPhase::Settle;
+                    self.chosen = Some(self.choices[self.cursor].0);
+                }
+            }
+            CpPhase::Settle => {
+                if !pads[0] && !pads[1] {
+                    self.phase = CpPhase::Idle;
+                }
+            }
+        }
+        self.phase
+    }
+
+    /// The title, and the choices (the selected one in brackets) with the hint.
+    pub fn text(&self) -> (String, String) {
+        let (title, hint) = crate::ui_text::texts(crate::ui_text::Prompt::UserPicker, 0, 0);
+        let line: Vec<String> = self
+            .choices
+            .iter()
+            .enumerate()
+            .map(|(i, (_, name))| if i == self.cursor { format!("[ {} {name} ]", i + 1) } else { format!("{} {name}", i + 1) })
+            .collect();
+        (title, format!("{}\n{hint}", line.join("     ")))
+    }
+}
+
+/// The profile picker over the game until it is answered (blocking the calling guest thread, as the console's
+/// selector applet does): the chosen slot, or None (cancelled). The game is out of focus meanwhile.
+pub fn pick_user(choices: Vec<(u64, String)>, current: u64) -> Option<u64> {
+    let held = pads_nav();
+    let mut q = UserPicker::open(choices, current, held);
+    crate::log!("account: profile picker open ({} profiles; ask_user)", q.choices.len());
+    crate::services::oe::applet_enter("profile picker");
+    crate::input::set_prompt(true);
+    let mut shown = String::new();
+    loop {
+        let (confirm, cancel) = keys();
+        let (arrow, digit) = nav_keys();
+        let phase = q.step(pads_nav(), confirm, cancel, arrow, digit);
+        if phase == CpPhase::Open {
+            let (t, x) = q.text();
+            if x != shown {
+                show(&t, &x);
+                shown = x;
+            }
+        } else {
+            hide();
+        }
+        if phase == CpPhase::Idle {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(16));
+    }
+    crate::input::set_prompt(false);
+    crate::services::oe::applet_leave();
+    crate::log!("account: profile picker: {}", q.chosen.map_or("cancelled".into(), |s| format!("profile {}", s + 1)));
+    q.chosen
+}
+
+/// A, B, D-pad up, D-pad down held on any controller (positional, before the button layout).
+pub fn pads_nav() -> [bool; 4] {
+    let d = crate::input::devices();
+    let any = |bit: u32| d.iter().any(|x| x.2 >> bit & 1 != 0);
+    [any(0), any(1), any(13), any(15)]
 }
 
 // ---- Home held: quit?
@@ -173,6 +285,9 @@ struct Shown {
 static SHOWN: Mutex<Option<Shown>> = Mutex::new(None);
 static CONFIRM: AtomicBool = AtomicBool::new(false);
 static CANCEL: AtomicBool = AtomicBool::new(false);
+/// Arrow keys since the last `nav_keys` (up -1, down +1) and the last digit typed (0 none).
+static ARROW: std::sync::atomic::AtomicI32 = std::sync::atomic::AtomicI32::new(0);
+static DIGIT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 static THREAD: AtomicBool = AtomicBool::new(false);
 
 fn w(s: &str) -> Vec<u16> {
@@ -199,6 +314,13 @@ pub fn hide() {
 /// Return / Escape pressed in the window since the last call.
 pub fn keys() -> (bool, bool) {
     (CONFIRM.swap(false, Ordering::SeqCst), CANCEL.swap(false, Ordering::SeqCst))
+}
+
+/// Arrow keys (-1 up, +1 down, 0 none) and a digit (1-9) typed in the window since the last call.
+pub fn nav_keys() -> (i32, Option<usize>) {
+    let a = ARROW.swap(0, Ordering::SeqCst).signum();
+    let d = DIGIT.swap(0, Ordering::SeqCst);
+    (a, (d > 0).then_some(d))
 }
 
 /// The prompt on Linux: the desktop's question dialog (zenity / kdialog, `desk.rs`) with the title and the line;
@@ -258,6 +380,7 @@ mod window {
     use windows_sys::Win32::Foundation::*;
     use windows_sys::Win32::Graphics::Gdi::*;
     use windows_sys::Win32::System::LibraryLoader::GetModuleHandleW;
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse::{VK_DOWN, VK_UP};
     use windows_sys::Win32::UI::WindowsAndMessaging::*;
 
     static HWND_: AtomicIsize = AtomicIsize::new(0);
@@ -275,8 +398,13 @@ mod window {
                 match wp as u16 {
                     0x0d => CONFIRM.store(true, Ordering::SeqCst),
                     0x1b => CANCEL.store(true, Ordering::SeqCst),
+                    c @ 0x31..=0x39 => DIGIT.store((c - 0x30) as usize, Ordering::SeqCst),
                     _ => {}
                 }
+                0
+            }
+            WM_KEYDOWN if wp == VK_UP as usize || wp == VK_DOWN as usize => {
+                ARROW.fetch_add(if wp == VK_UP as usize { -1 } else { 1 }, Ordering::SeqCst);
                 0
             }
             WM_CLOSE => {
@@ -378,6 +506,33 @@ mod tests {
         let mut q = CtrlPrompt::open(2, 0, 0, false, false);
         assert_eq!(q.step(0, 0, false, false, false, true), CpPhase::Settle, "Escape");
         assert!(!q.ok);
+    }
+
+    /// The profile picker: the press that opened it is no answer, D-pad / arrows move (wrapping), A selects, B
+    /// cancels, a digit picks its line.
+    #[test]
+    fn user_picker() {
+        let users = vec![(0, "Player".to_string()), (2, "Player 3".to_string()), (5, "Player 6".to_string())];
+        let mut q = UserPicker::open(users.clone(), 2, [true, false, false, false]);
+        assert_eq!(q.cursor, 1, "opens on the current profile");
+        assert_eq!(q.step([true, false, false, false], false, false, 0, None), CpPhase::Open, "A held as it opened");
+        q.step([false, false, false, true], false, false, 0, None);
+        assert_eq!(q.cursor, 2);
+        q.step([false, false, false, true], false, false, 0, None);
+        assert_eq!(q.cursor, 2, "held: one step");
+        q.step([false, false, false, false], false, false, 1, None);
+        assert_eq!(q.cursor, 0, "wraps");
+        assert!(q.text().1.contains("[ 1 Player ]"));
+        assert_eq!(q.step([true, false, false, false], false, false, 0, None), CpPhase::Settle);
+        assert_eq!(q.chosen, Some(0));
+        assert_eq!(q.step([true, false, false, false], false, false, 0, None), CpPhase::Settle, "held until A is up");
+        assert_eq!(q.step([false; 4], false, false, 0, None), CpPhase::Idle);
+        let mut q = UserPicker::open(users.clone(), 0, [false; 4]);
+        q.step([false; 4], false, true, 0, None);
+        assert_eq!(q.chosen, None, "Escape cancels");
+        let mut q = UserPicker::open(users, 0, [false; 4]);
+        q.step([false; 4], false, false, 0, Some(3));
+        assert_eq!(q.chosen, Some(5), "the digit 3 picks the third line");
     }
 
     /// nxnative t_home_quit's cases: a short press does nothing, 2 s opens it, B closes, A quits.

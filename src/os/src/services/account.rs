@@ -1,7 +1,9 @@
 //! nn::account: local profiles only. One registered user (more slots for additional local users, as nxnative
 //! keeps them: a `user<n>.registered` marker in the save folder), sessions per open, the launch user preselected;
 //! online accounts are unavailable. The PC's player is the option `pc_user` (1..8, default 1), named `pc_user_name`
-//! (`NXOS_NICK` overrides): opened at launch, answered by the user picker, always registered.
+//! (`NXOS_NICK` overrides): opened at launch, answered by the user picker, always registered. With `ask_user=1` and
+//! more than one registered profile, the game's user selector opens the host's profile picker instead (nxnative
+//! `hle_account.c` select_user; `ui::pick_user`); cancelling it answers the selector's "cancelled".
 
 use crate::guest::{r64, w64, w8, Args};
 use crate::hle::{Registry, RES_FAIL, RES_OK};
@@ -158,11 +160,29 @@ accfn!(nickname_fn, |a| {
         None => RES_FAIL,
     }
 });
+/// nn::account's ResultCancelledByUser (module 124, 1): the player closed the selector.
+const RES_CANCELLED: u64 = 124 | (1 << 9);
+
+/// The profile the user selector answers: `pc_user`, or with `ask_user=1` and more than one registered profile the
+/// one the player picks (None: cancelled).
+pub fn choose_user() -> Option<u64> {
+    let users = registered();
+    if !nxconfig::flag("ask_user") || users.count_ones() < 2 {
+        crate::log_once!("acc select", "account: user selector answered with the PC's player (pc_user {})", pc_user() + 1);
+        return Some(pc_user());
+    }
+    let choices: Vec<(u64, String)> = (0..USERS).filter(|i| users >> i & 1 != 0).map(|i| (i, nickname(i))).collect();
+    crate::ui::pick_user(choices, pc_user())
+}
+
 accfn!(select, |a| {
-    // the user selector: the one registered user is chosen (nxnative's native dialog belongs to the front end)
-    crate::log_once!("acc select", "account: user selector answered with the PC's player (pc_user {})", pc_user() + 1);
-    put_uid(a.x(0), pc_user());
-    RES_OK
+    match choose_user() {
+        Some(u) => {
+            put_uid(a.x(0), u);
+            RES_OK
+        }
+        None => RES_CANCELLED,
+    }
 });
 accfn!(fail, |a| { RES_FAIL });
 accfn!(fail_zero_n, |a| {

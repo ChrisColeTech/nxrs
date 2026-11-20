@@ -27,6 +27,11 @@ pub struct GenOptions {
     pub big_fn: i64,
     pub patches: Option<PathBuf>,
     pub emit: EmitOptions,
+    /// Execution hints by module (`discovered.tsv`): extra function starts, each kept only when the module still has
+    /// its words there.
+    pub hints: BTreeMap<String, Vec<crate::aot::hints::Hint>>,
+    /// Emit no functions at all (`--interp-only`, a diagnostic): the runtime interprets everything.
+    pub interp_only: bool,
 }
 
 impl Default for GenOptions {
@@ -41,6 +46,8 @@ impl Default for GenOptions {
             big_fn: 300_000,
             patches: None,
             emit: EmitOptions::default(),
+            hints: BTreeMap::new(),
+            interp_only: false,
         }
     }
 }
@@ -61,6 +68,9 @@ pub struct ModuleReport {
 pub struct GenReport {
     pub modules: Vec<ModuleReport>,
     pub seconds: f64,
+    /// Execution hints made function starts, and those left out (another version's, or outside the code).
+    pub hints_used: usize,
+    pub hints_dropped: usize,
 }
 
 /// Writes the file unless it already holds exactly `data` (an unchanged chunk keeps its mtime, so a build skips
@@ -153,6 +163,7 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
     let mut nchunks: Vec<usize> = vec![];
     let mut tasks: Vec<(i64, Task)> = vec![];
     let mut stub_mods: BTreeMap<String, Module> = stubs.into_iter().collect();
+    let (mut hints_used, mut hints_dropped) = (0, 0);
     let order: Vec<(ModLayout, bool)> = mods
         .iter()
         .flat_map(|ml| {
@@ -172,13 +183,25 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
             let nso = nsos.remove(&ml.name).unwrap();
             let mut m = Module::new(&ml.name, nso, ml.base);
             m.extra_seeds = table.branch_ins(&ml.name, ml.base);
+            if let Some(h) = opts.hints.get(&ml.name) {
+                let (kept, dropped) = crate::aot::hints::usable(h, m.base, m.lo, m.hi, &|a| m.word(a));
+                hints_used += kept.len();
+                hints_dropped += dropped;
+                m.extra_seeds.extend(kept);
+            }
             m
         };
         table.check(&m, &ml.name)?;
         let (starts, ds) = discover(&m);
         let est = estimate_sizes(&m, &starts);
         let abs: Vec<u64> = starts.iter().map(|&s| m.lo + 4 * s as u64).collect();
-        let n = if opts.limit == 0 { abs.len() } else { opts.limit.min(abs.len()) };
+        let n = if opts.interp_only {
+            0
+        } else if opts.limit == 0 {
+            abs.len()
+        } else {
+            opts.limit.min(abs.len())
+        };
         let ends: Vec<u64> = abs[1..].iter().copied().chain([m.hi]).collect();
         let chunks = partition(&est[..n], opts.chunk_fns, opts.chunk_bytes, opts.big_fn);
         let moddir = opts.out.join(&ml.name);
@@ -232,7 +255,10 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
                     let t = Instant::now();
                     let e = emitters.entry(task.module).or_insert_with(|| {
                         let (p, s, sp) = per_module[task.module].clone();
-                        Emitter::new(&modules[task.module], &starts_abs[task.module], p, s, sp, &opts.emit)
+                        // --limit: only the emitted functions are called directly; the rest go through rt_dispatch
+                        // (the runtime interprets them), so a partial build links and runs
+                        let starts = if opts.limit == 0 { &starts_abs[task.module] } else { &emitted[task.module] };
+                        Emitter::new(&modules[task.module], starts, p, s, sp, &opts.emit)
                     });
                     e.stats.clear();
                     e.unsupported.clear();
@@ -273,7 +299,7 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
 
     let mut results = results.into_inner().unwrap();
     results.sort_by_key(|r| (r.module, r.number));
-    let mut report = GenReport::default();
+    let mut report = GenReport { hints_used, hints_dropped, ..GenReport::default() };
     for (idx, m) in modules.iter().enumerate() {
         let rs: Vec<&ChunkResult> = results.iter().filter(|r| r.module == idx).collect();
         let mut stats: BTreeMap<&'static str, u64> = BTreeMap::new();

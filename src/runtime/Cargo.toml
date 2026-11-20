@@ -18,6 +18,8 @@ path = "src/bin/nxrt_dev.rs"
 [dependencies]
 nxconfig = { package = "config", path = "../config" }
 lz4_flex = { version = "0.11", default-features = false, features = ["safe-decode", "std"] }
+# the interpreter shares the lifter's bit helpers (src/translator/src/xlate/util.rs), which derive their error type
+thiserror = "2"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [

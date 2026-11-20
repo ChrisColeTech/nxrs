@@ -32,6 +32,11 @@ pub struct Collected {
     pub registered: usize,
 }
 
+/// SHA-256 of an NRO image (the name a captured NRO is kept under, `<sha256>.nro`).
+pub fn sha256(d: &[u8]) -> [u8; 32] {
+    Sha256::digest(d).into()
+}
+
 /// The hashes an NRR registers (version 1, the Switch 2's, has a header 0x180 bytes longer).
 pub fn nrr_hashes(d: &[u8]) -> Vec<[u8; 32]> {
     if d.len() < 0x350 || &d[..4] != b"NRR0" {

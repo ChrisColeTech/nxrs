@@ -5,7 +5,7 @@
 //! function), so 4 bytes suffice while all lifted code lies within 4 GiB, which one PE image guarantees. The gaps
 //! between code ranges are never written, so the OS never backs them. The table is built once and made read-only;
 //! any number of threads read it without locks. Host functions (the bridge, `hostfn.rs`) live outside the modules
-//! and are found by the slow path, as are setjmp-owner resumes (`sjlj.rs`).
+//! and are found by the slow path, as are setjmp-owner resumes (`sjlj.rs`) and code the build missed (`interp`).
 
 use crate::asm::NXRT_DISPATCH;
 use crate::cpu::{Cpu, GuestFn};
@@ -101,7 +101,13 @@ impl Table {
             }
         }
         if hi <= lo {
-            return Err("dispatch: no functions in any module".into());
+            if modules.is_empty() || modules.iter().any(|m| !m.addrs.is_empty()) {
+                return Err("dispatch: no functions in any module".into());
+            }
+            // a build without lifted code (`nxrs-build --interp-only`): every dispatch goes to the interpreter
+            crate::interp::set_only(true);
+            crate::rt::log("dispatch: no lifted functions in any module (an --interp-only build): every guest instruction is interpreted");
+            return Ok(Table { modules, lo: 0, hi: 0, slots: 0, functions: 0, slot: core::ptr::null(), anchor: 0, by_host: vec![] });
         }
         if hi - lo > TABLE_SPAN_LIMIT {
             return Err(format!("dispatch: modules span {:#x} guest bytes, over the flat table's limit", hi - lo));
@@ -172,7 +178,8 @@ pub fn install(t: Table) -> Result<&'static Table, String> {
     unsafe {
         let d = &mut *core::ptr::addr_of_mut!(NXRT_DISPATCH);
         d.lo = t.lo;
-        d.slots = t.slots;
+        // NXRS_INTERP_ONLY: the fast path never hits, every dispatch is resolved (and interpreted)
+        d.slots = if crate::interp::only() { 0 } else { t.slots };
         d.slot = t.slot;
         d.anchor = t.anchor;
     }
@@ -209,13 +216,19 @@ pub unsafe extern "C" fn nxrt_dispatch_resolve(c: *mut Cpu) -> GuestFn {
             (*c).pc = a;
             return crate::asm::nxrt_host_entry as GuestFn;
         }
-        if let Some(f) = table().and_then(|t| t.lookup(pc)) {
-            return f; // only a racing reader before install
+        if !crate::interp::only() {
+            if let Some(f) = table().and_then(|t| t.lookup(pc)) {
+                return f; // only a racing reader before install
+            }
         }
         if let Some(s) = crate::sjlj::jump_target(c) {
             (*c).sj = s as *mut _;
             (*c).sync_mxcsr();
             return crate::asm::nxrt_jump_pending as GuestFn;
+        }
+        // code the build did not translate: the interpreter (recorded for the next build)
+        if let Some(f) = crate::interp::take(pc) {
+            return f;
         }
         let why = if table().is_none() {
             "before the dispatch table was installed"
@@ -290,6 +303,6 @@ mod tests {
             module("b", 0x7000_0000_8000, &[0x7000_0000_8000], &[f2]),
         ])
         .is_err());
-        assert!(Table::build(vec![module("m", 0x7000_0000_0000, &[], &[])]).is_err());
+        assert!(Table::build(vec![]).is_err());
     }
 }

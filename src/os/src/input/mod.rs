@@ -674,6 +674,8 @@ struct Inputs {
     devs: Vec<Dev>,
     slots: Slots,
     map: layout::PadMap,
+    /// Nintendo pads: by their printed labels whatever `button_layout` says (`layout::for_nintendo`).
+    map_nin: layout::PadMap,
     map_desc: String,
     map_gen: u64,
     last_scan: f64,
@@ -854,6 +856,7 @@ impl Inputs {
             ilog!("{err}; {bad} setting(s) ignored");
         }
         self.map = m;
+        self.map_nin = layout::for_nintendo(&nxconfig::string("button_map"));
         let d = layout::describe(&m);
         if d != self.map_desc {
             ilog!("button layout {d}");
@@ -874,7 +877,9 @@ impl Inputs {
         for d in &self.devs {
             let Some(p) = d.slot else { continue };
             mask |= 1 << p;
-            let (b, a) = if act { (layout::apply(&self.map, d.buttons), d.axes) } else { (0, [0; 4]) };
+            // a Nintendo pad by its printed labels, any other by button_layout
+            let map = if matches!(d.kind, Kind::Nin(_) | Kind::S2(..)) { &self.map_nin } else { &self.map };
+            let (b, a) = if act { (layout::apply(map, d.buttons), d.axes) } else { (0, [0; 4]) };
             let m = &mut merged[p];
             m.0 |= b & 0xffff;
             for k in 0..4 {
@@ -1005,6 +1010,7 @@ pub fn start() {
         devs: vec![],
         slots: Slots::default(),
         map: Default::default(),
+        map_nin: Default::default(),
         map_desc: String::new(),
         map_gen: 0,
         last_scan: -10.0,
@@ -1064,6 +1070,7 @@ pub fn probe_tick() {
         devs: vec![],
         slots: Slots::default(),
         map: Default::default(),
+        map_nin: Default::default(),
         map_desc: String::new(),
         map_gen: 0,
         last_scan: -10.0,

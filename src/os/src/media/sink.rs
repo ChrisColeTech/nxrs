@@ -15,6 +15,9 @@
 //!
 //! No output device at all (none installed, or every open fails): the streams are consumed in real time by a
 //! clock, so the game keeps its pace, and the log says so in red.
+//!
+//! Muting (`set_muted`, the player's `mute_on_focus_loss`): the device gets silence, faded over 10 ms; the streams
+//! play on at their pace (the game is not slowed or told), and a recording (the tap) keeps the sound.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -363,9 +366,24 @@ pub fn set_tap(f: Option<Tap>) {
     *TAP.lock().unwrap() = f;
 }
 
+static MUTED: AtomicBool = AtomicBool::new(false);
+
+/// Silences the device (true) or lets the sound through again; the streams play on either way.
+pub fn set_muted(on: bool) {
+    if MUTED.swap(on, Ordering::Relaxed) != on {
+        crate::log!("audio: {}", if on { "muted (the window lost the focus: mute_on_focus_loss)" } else { "unmuted" });
+    }
+}
+
+pub fn muted() -> bool {
+    MUTED.load(Ordering::Relaxed)
+}
+
 /// Fills `out` (stereo, 48 kHz) from every stream; blocks that finished are announced to their producers.
 struct Mixer {
     gain: f32,
+    /// The mute fade: 1 sound, 0 silence.
+    level: f32,
 }
 
 impl Mixer {
@@ -408,6 +426,20 @@ impl Mixer {
         if let Some(t) = *TAP.lock().unwrap() {
             t(out, RATE, 2);
         }
+        mute_fade(&mut self.level, MUTED.load(Ordering::Relaxed), out);
+    }
+}
+
+/// The mute fade on stereo frames: `level` moves toward 0 (muted) or 1 by 1/480 a frame (10 ms).
+fn mute_fade(level: &mut f32, muted: bool, out: &mut [f32]) {
+    let want = if muted { 0.0 } else { 1.0 };
+    if *level == want && !muted {
+        return;
+    }
+    for f in out.chunks_exact_mut(2) {
+        *level = if want > *level { (*level + 1.0 / 480.0).min(1.0) } else { (*level - 1.0 / 480.0).max(0.0) };
+        f[0] *= *level;
+        f[1] *= *level;
     }
 }
 
@@ -424,7 +456,7 @@ struct Resampler {
 
 impl Resampler {
     fn new(dev_rate: u32) -> Resampler {
-        Resampler { mixer: Mixer { gain: 1.0 }, buf: vec![0.0; CHUNK * 2], pos: CHUNK, a: [0.0; 2], b: [0.0; 2], phase: 1.0, step: RATE as f64 / dev_rate as f64 }
+        Resampler { mixer: Mixer { gain: 1.0, level: 1.0 }, buf: vec![0.0; CHUNK * 2], pos: CHUNK, a: [0.0; 2], b: [0.0; 2], phase: 1.0, step: RATE as f64 / dev_rate as f64 }
     }
     fn next48(&mut self) -> [f32; 2] {
         if self.pos >= CHUNK {
@@ -592,6 +624,21 @@ mod tests {
     }
     fn ms(t0: Instant, n: u64) -> Instant {
         t0 + Duration::from_micros(n * 1000)
+    }
+
+    #[test]
+    fn mute_fades_to_silence_and_back() {
+        let mut level = 1.0;
+        let mut out = vec![0.5f32; 2 * 960];
+        mute_fade(&mut level, true, &mut out);
+        assert!(out[0] > 0.49 && out[0] < 0.5, "fades, no click");
+        assert!(out[2 * 480..].iter().all(|&x| x == 0.0), "silent after 10 ms");
+        let mut out = vec![0.5f32; 2 * 960];
+        mute_fade(&mut level, false, &mut out);
+        assert_eq!(out[2 * 959], 0.5, "back to full");
+        let mut out = vec![0.5f32; 4];
+        mute_fade(&mut level, false, &mut out);
+        assert_eq!(out, vec![0.5; 4], "untouched when not muted");
     }
 
     #[test]

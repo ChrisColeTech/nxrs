@@ -12,6 +12,11 @@
 //! the game's (on Horizon they become the module's memory). `UnloadModule` calls DT_FINI and binds every import that
 //! pointed into the module again. A module not built (no row) fails with ro's failure, as on the console for one the
 //! NRRs do not register; an online SDK (a `refused` row) fails so the game plays offline.
+//!
+//! **Capture.** A module not built may be one the game decodes at run time (Mario Tennis Fever's boot stub decodes its
+//! game NRO from main's data), which no file holds: its image is written to `<data>\nro\<sha256>.nro` (nxnative
+//! `hle_ro.c` `DM_NRO_CAPTURE`), and the next build translates it with the others. `NXRS_NRO_CAPTURE=<dir>` is the
+//! build's capture boot: the image goes to `<dir>` and the run ends there.
 //! RegisterModuleInfo checks the NRR's form only (the build collected the modules by its hashes).
 //! GetJitEnvironmentInfo reads the environment's own layout (the SDK's GetImpl(handle) is the handle: code memory
 //! address and size at +8 / +0x10, data memory at +0x18 / +0x20).
@@ -254,6 +259,32 @@ fn module_of(s: &State, rm: u64) -> Option<usize> {
     s.nros.iter().position(|n| n.base == base && n.loaded)
 }
 
+/// Keeps the image of an NRO the build did not translate: `<dir>\<sha256>.nro` (dir = `NXRS_NRO_CAPTURE`, else
+/// `<data>\nro`). Under `NXRS_NRO_CAPTURE` (the build's capture boot) the run ends once it is written.
+fn capture(img: u64, n: u64) -> Option<std::path::PathBuf> {
+    let boot = std::env::var_os("NXRS_NRO_CAPTURE").filter(|v| !v.is_empty());
+    let dir = boot.clone().map(std::path::PathBuf::from).or_else(|| crate::boot::try_process().map(|p| p.data_dir.join("nro")))?;
+    let path = capture_to(&dir, crate::guest::bytes(img, n)).map_err(|e| crate::log!("[RED] ro::LoadModule: cannot keep the image in {}: {e}", dir.display())).ok()?;
+    if boot.is_some() {
+        crate::log!("ro::LoadModule: captured {} ({n} bytes) for the build; the capture boot ends here", path.display());
+        nxrt::process::exit(0);
+    }
+    Some(path)
+}
+
+/// Writes `image` to `<dir>\<sha256>.nro` (through a `.partial` file) unless it is there already.
+pub fn capture_to(dir: &Path, image: &[u8]) -> std::io::Result<std::path::PathBuf> {
+    let hex: String = translator::package::nro::sha256(image).iter().map(|b| format!("{b:02x}")).collect();
+    let path = dir.join(format!("{hex}.nro"));
+    if !path.exists() {
+        std::fs::create_dir_all(dir)?;
+        let tmp = dir.join(format!("{hex}.nro.partial"));
+        std::fs::write(&tmp, image)?;
+        std::fs::rename(&tmp, &path)?;
+    }
+    Ok(path)
+}
+
 /// LoadModule(Module*, const void *image, void *buffer, size_t size, int flag[, bool])
 unsafe fn ro_load(c: *mut Cpu) {
     let (rm, img, buf, bufsize, flag) = ((*c).x[0], (*c).x[1], (*c).x[2], (*c).x[3], (*c).x[4]);
@@ -271,7 +302,11 @@ unsafe fn ro_load(c: *mut Cpu) {
                 return RO_FAIL;
             }
             let Some(i) = s.nros.iter().position(|m| m.build_id == bid) else {
-                crate::log!("[RED] ro::LoadModule: no NRO with build id {hex}… ({n} bytes) was built (not in nro.tsv): the load fails");
+                let kept = capture(img, n);
+                crate::log!(
+                    "[RED] ro::LoadModule: no NRO with build id {hex}… ({n} bytes) was built (not in nro.tsv): the load fails{}",
+                    kept.map(|p| format!("; its image is kept in {} and the next build translates it", p.display())).unwrap_or_default()
+                );
                 return RO_FAIL;
             };
             if s.nros[i].loaded {
@@ -440,5 +475,21 @@ pub fn register(r: &mut Registry) {
         ("_ZN2nn3jit21GetJitEnvironmentInfoENS0_9JitHandleE", "the environment's memory, from its own layout", jit_info),
     ] {
         r.force(n, w, f);
+    }
+}
+
+#[cfg(test)]
+mod capture_tests {
+    #[test]
+    fn captured_image_is_kept_by_its_sha256() {
+        let dir = std::env::temp_dir().join(format!("nxos-nro-capture-{}", std::process::id()));
+        let img = b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0NRO0 an image".to_vec();
+        let p = super::capture_to(&dir, &img).unwrap();
+        let hex: String = translator::package::nro::sha256(&img).iter().map(|b| format!("{b:02x}")).collect();
+        assert_eq!(p, dir.join(format!("{hex}.nro")));
+        assert_eq!(std::fs::read(&p).unwrap(), img);
+        assert_eq!(super::capture_to(&dir, &img).unwrap(), p, "a second capture keeps the first");
+        assert!(!dir.join(format!("{hex}.nro.partial")).exists());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

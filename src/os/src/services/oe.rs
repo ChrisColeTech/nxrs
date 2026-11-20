@@ -133,11 +133,12 @@ fn focus_sync(applets: i32, why: &str) {
 }
 
 /// The front end: its window's focus (1 in front, 2 behind another window, 3 minimised), at every poll; what the game
-/// sees follows `pause_on_focus_loss` (read live).
+/// sees follows `pause_on_focus_loss`, the sound `mute_on_focus_loss` (both read live).
 pub fn set_focus(state: i32) {
     if !(1..=3).contains(&state) {
         return;
     }
+    crate::media::sink::set_muted(state != 1 && nxconfig::flag("mute_on_focus_loss"));
     static PAUSE: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     let pause = pause_on_focus_loss();
     let setting_changed = PAUSE.swap(pause, Ordering::Relaxed) != pause;

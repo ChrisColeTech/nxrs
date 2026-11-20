@@ -43,6 +43,8 @@ pub struct BuildArgs {
     pub v1: bool,
     /// v1: the Turbo options that were passed and mean nothing here, said after the banner
     pub ignored: Option<String>,
+    /// `--interp-only` (diagnostics): translate no function; the runtime interprets the whole game
+    pub interp_only: bool,
 }
 
 /// What the build produced.
@@ -143,9 +145,15 @@ fn module_lines(exefs: &BTreeMap<String, Vec<u8>>) -> Result<Vec<ModLine>> {
 
 /// Registered NROs no loose RomFS file holds: from the build's cache (`<build>\nro\<SHA-256>.nro`), else inside the
 /// RomFS's archives (data.arc's index), else found by a scan of the RomFS's large files (once; then cached).
-fn nros_beyond_files(romfs: &package::romfs::RomFs, missing: &[[u8; 32]], cache: &Path, out: &Out) -> std::result::Result<Vec<(String, Vec<u8>)>, package::PackageError> {
+fn nros_beyond_files(romfs: &package::romfs::RomFs, missing: &[[u8; 32]], cache: &Path, captured: &Path, out: &Out) -> std::result::Result<Vec<(String, Vec<u8>)>, package::PackageError> {
     let hex = |h: &[u8; 32]| h.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    let mut got: Vec<(String, Vec<u8>)> = missing.iter().filter_map(|h| std::fs::read(cache.join(format!("{}.nro", hex(h)))).ok().map(|d| (format!("cache {}", hex(h)), d))).collect();
+    // the cache of earlier builds, and the images runs of the game captured (os ro: an NRO it decoded at run time)
+    let mut got: Vec<(String, Vec<u8>)> = missing
+        .iter()
+        .filter_map(|h| {
+            [cache, captured].iter().find_map(|d| std::fs::read(d.join(format!("{}.nro", hex(h)))).ok()).map(|d| (format!("cache {}", hex(h)), d))
+        })
+        .collect();
     if got.len() == missing.len() {
         return Ok(got);
     }
@@ -200,6 +208,49 @@ fn archive_nros(romfs: &package::romfs::RomFs, want: &[[u8; 32]]) -> Vec<(String
         }
     }
     out
+}
+
+static CAPTURE_BOOTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// How long the capture boot waits for the game to load the NROs it decodes (nxnative NRO_CAPTURE_SECS: Mario Tennis
+/// Fever decodes its 24.7 MB NRO in under a second).
+const CAPTURE_SECS: u64 = 120;
+
+/// Boots the built game with `NXRS_NRO_CAPTURE` (os ro: the image of a LoadModule with no built copy is written to
+/// `dir\<sha256>.nro` and the run ends) until an NRO of `missing` is there, the game exits or the time is up.
+/// Returns how many of `missing` were captured.
+fn capture_boot(exe: &Path, dir: &Path, missing: &[[u8; 32]], out: &Out) -> Result<usize> {
+    let hex = |h: &[u8; 32]| h.iter().map(|b| format!("{b:02x}")).collect::<String>();
+    let have = || missing.iter().filter(|h| dir.join(format!("{}.nro", hex(h))).is_file()).count();
+    std::fs::create_dir_all(dir)?;
+    out.say(&format!(
+        "NRO modules: {} registered NRO(s) in no file; booting the game once to capture what it decodes at run time (up to {CAPTURE_SECS} s)",
+        missing.len()
+    ));
+    let mut child = std::process::Command::new(exe)
+        .env("NXRS_NRO_CAPTURE", std::path::absolute(dir)?)
+        .env("NXRS_NO_ACTIVATE", "1")
+        .env("NXRS_KEEP_FOCUS", "1")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("starting {}", exe.display()))?;
+    let t0 = Instant::now();
+    while have() == 0 && t0.elapsed().as_secs() < CAPTURE_SECS {
+        if child.try_wait()?.is_some() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    }
+    if child.try_wait()?.is_none() {
+        let _ = child.kill(); // this child only, by its handle
+        let _ = child.wait();
+    }
+    let n = have();
+    if n == 0 {
+        out.say("NRO modules: the capture boot loaded none of them; the game runs without them (their loads fail)");
+    }
+    Ok(n)
 }
 
 /// The modules layout.json lists, as (name, base, size) strings.
@@ -413,7 +464,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     std::fs::create_dir_all(&obj)?;
 
     // NRO modules the game loads at run time: translated with the ExeFS at bases after it (package::nro)
-    let nros = package::nro::collect_with(&game.romfs, &|missing| nros_beyond_files(&game.romfs, missing, &build_dir.join("nro"), out)).map_err(|e| anyhow!("Cannot read the game's NRO modules: {e}"))?;
+    let nros = package::nro::collect_with(&game.romfs, &|missing| nros_beyond_files(&game.romfs, missing, &build_dir.join("nro"), &data.join("nro"), out)).map_err(|e| anyhow!("Cannot read the game's NRO modules: {e}"))?;
     let mut code = game.exefs.files.clone();
     for n in &nros.nros {
         code.insert(n.name.clone(), n.bytes.clone());
@@ -447,7 +498,19 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         opts.chunk_bytes = n as i64 * translator::aot::discover::EST_INT;
         opts.chunk_fns = usize::MAX;
     }
-    let key = gen_key(&code, patch_text.as_deref().unwrap_or(""), &format!("{:?}{:?}", (opts.chunk_fns, opts.chunk_bytes, opts.big_fn), (opts.emit.reg_locals, opts.emit.callee_saved)))?;
+    // execution hints: the code earlier runs reached that this build had not translated (the runtime's interpreter
+    // wrote them to <data>\discovered.tsv); each becomes a function start when its module still has its words
+    let hints_text = std::fs::read_to_string(data.join(translator::aot::hints::FILE)).unwrap_or_default();
+    opts.hints = translator::aot::hints::parse(&hints_text);
+    opts.interp_only = a.interp_only;
+    let mut key_opts = format!("{:?}{:?}", (opts.chunk_fns, opts.chunk_bytes, opts.big_fn), (opts.emit.reg_locals, opts.emit.callee_saved));
+    if !opts.hints.is_empty() {
+        key_opts.push_str(&format!("|hints:{:?}", opts.hints));
+    }
+    if a.interp_only {
+        key_opts.push_str("|interp-only");
+    }
+    let key = gen_key(&code, patch_text.as_deref().unwrap_or(""), &key_opts)?;
     let stamp = gen.join("nxrs.gen.key");
     let reuse = std::fs::read_to_string(&stamp).ok().as_deref() == Some(key.as_str()) && gen.join("layout.json").is_file();
     if reuse {
@@ -480,6 +543,16 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         let bytes: usize = report.modules.iter().map(|m| m.c_bytes).sum();
         let files: usize = report.modules.iter().map(|m| m.chunks + 1).sum();
         out.say(&format!("C code: {files} files, {:.1} MB, {fns} functions", bytes as f64 / 1e6));
+        if report.hints_used > 0 || report.hints_dropped > 0 {
+            out.say(&format!(
+                "Execution hints: {} function(s) earlier runs had to interpret are translated now{}",
+                report.hints_used,
+                if report.hints_dropped > 0 { format!("; {} left out (another version of the program)", report.hints_dropped) } else { String::new() }
+            ));
+        }
+        if a.interp_only {
+            out.say("--interp-only: no function translated; the game runs entirely in the interpreter (diagnostics)");
+        }
         std::fs::write(&stamp, &key)?;
     }
     timings.push(("translate", t.elapsed().as_secs_f64()));
@@ -587,6 +660,15 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     cc::link_exe(&clang, &obj, &exe)?;
     timings.push(("link", t.elapsed().as_secs_f64()));
     timings.push(("total", t_all.elapsed().as_secs_f64()));
+    // NROs the game's NRRs register and no file holds: the game decodes them at run time. Boot it once to capture
+    // them (nxnative's capture boot), then build again with them
+    if !nros.missing.is_empty() && std::env::var_os("NXRS_NO_CAPTURE_BOOT").is_none() && !CAPTURE_BOOTED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        let got = capture_boot(&exe, &build_dir.join("nro"), &nros.missing, out)?;
+        if got > 0 {
+            out.say(&format!("NRO modules: {got} captured; building again with them"));
+            return build(a, out);
+        }
+    }
     Ok(Built { exe, data, timings })
 }
 

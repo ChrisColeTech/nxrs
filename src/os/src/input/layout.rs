@@ -7,6 +7,11 @@
 //! - `button_map=south:a ...`: per-button changes on top (physical:guest pairs, separated by spaces, commas or
 //!   semicolons, any case).
 //!
+//! A Nintendo pad (Pro Controller, Joy-Con, the Nintendo Online pads, Joy-Con 2, Pro Controller 2) is read by its
+//! printed labels whatever `button_layout` says: its right button is printed A, so its positions are its labels
+//! (`for_nintendo`: the switch table with the same `button_map`; nxnative `pad_apple.h`). Xbox, PlayStation and other
+//! pads follow `button_layout`.
+//!
 //! The keyboard is not remapped.
 
 pub const SWITCH: u8 = 0;
@@ -108,6 +113,11 @@ pub fn build(layout: &str, map: &str) -> (PadMap, u32, String) {
     (m, bad, err)
 }
 
+/// The table for a Nintendo pad: its printed labels (the switch layout), with `button_map`'s changes.
+pub fn for_nintendo(map: &str) -> PadMap {
+    build("switch", map).0
+}
+
 pub fn apply(m: &PadMap, pos: u64) -> u64 {
     let mut out = pos & !0xffff;
     for i in 0..16 {
@@ -155,6 +165,18 @@ mod tests {
         assert_eq!(apply(&x, 1 << 3), 1 << 2, "left is X on xbox");
         assert_eq!(describe(&s), "switch (A=right B=bottom X=top Y=left)");
         assert_eq!(describe(&x), "xbox (A=bottom B=right X=left Y=top)");
+    }
+
+    /// A Nintendo pad reads A where A is printed under either layout; button_map still applies to it.
+    #[test]
+    fn nintendo_pads_by_label() {
+        let n = for_nintendo("");
+        assert_eq!(apply(&n, 1), 1, "right (printed A) is A");
+        assert_eq!(apply(&n, 1 << 1), 1 << 1, "bottom (printed B) is B");
+        let (x, _, _) = build("xbox", "");
+        assert_ne!(apply(&x, 1), apply(&n, 1), "an Xbox pad under xbox differs");
+        let n = for_nintendo("east:b south:a");
+        assert_eq!(apply(&n, 1), 1 << 1, "the player's own swap applies");
     }
 
     #[test]

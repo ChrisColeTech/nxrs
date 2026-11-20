@@ -15,6 +15,10 @@
 //! TPIDR_EL0 and the data and code windows. FPSR's cumulative flags are counted apart (the portable C does not track
 //! them all). Each class runs in a child process, so a lifted word that faults is reported with its word, not lost.
 //! Output: one line per class and `<out>/mismatches.tsv`; exit 1 when a class mismatches or crashes.
+//!
+//! `--interp`: the runtime's interpreter (`nxrt::interp`, code the build missed) instead of the lifted C, on the same
+//! words and states: every word the lifter lowers must run the same in the interpreter as in dynarmic (the next PC of a
+//! branch from the interpreter's flow: a jump or call target, x30 for RET).
 
 mod classes;
 mod dynarmic;
@@ -119,6 +123,8 @@ struct Opts {
     mutate: bool,
     fpcr: u64,
     words: Vec<u32>,
+    /// Run the interpreter, not the lifted C.
+    interp: bool,
 }
 
 fn parse() -> (Opts, Option<String>) {
@@ -137,6 +143,7 @@ fn parse() -> (Opts, Option<String>) {
         mutate: a.iter().any(|x| x == "--mutate"),
         fpcr: val("--fpcr").and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok()).unwrap_or(0),
         words: val("--words").map(|v| v.split(',').filter_map(|w| u32::from_str_radix(w.trim().trim_start_matches("0x"), 16).ok()).collect()).unwrap_or_default(),
+        interp: a.iter().any(|x| x == "--interp"),
     };
     (o, val("--child"))
 }
@@ -400,21 +407,27 @@ fn run_class(o: &Opts, class: &Class) -> String {
     if words.is_empty() {
         return format!("RESULT\t{}\t0\t{refused}\t0\t0\t0\t0\tno word lowered and run", class.name);
     }
-    let include = dir.join("inc");
-    translator::aot::runtime_headers::write(&include).expect("headers");
-    let c = dir.join("t.c");
-    std::fs::write(&c, emit(&words, o.mutate)).unwrap();
-    let dll = dir.join("t.dll");
-    if let Err(e) = compile(&find_cc(o), &c, &dll, &include.join("include")) {
-        std::fs::write(dir.join("compile.log"), &e).unwrap();
-        return format!("RESULT\t{}\t{}\t0\t0\t0\t0\t0\tcompile failed (compile.log)", class.name, words.len());
-    }
-    // SAFETY: our own DLL; the table is an array of oracle_count functions
-    let lib = unsafe { libloading::Library::new(&dll) }.expect("load dll");
-    let fns: &[extern "C" fn(*mut Cpu)] = unsafe {
-        let n = **lib.get::<*const i32>(b"oracle_count\0").unwrap();
-        let p = *lib.get::<*const extern "C" fn(*mut Cpu)>(b"oracle_fns\0").unwrap();
-        std::slice::from_raw_parts(p, n as usize)
+    // the lifted C in a DLL, or (--interp) the runtime's interpreter
+    let mut _lib = None;
+    let fns: &[extern "C" fn(*mut Cpu)] = if o.interp {
+        &[]
+    } else {
+        let include = dir.join("inc");
+        translator::aot::runtime_headers::write(&include).expect("headers");
+        let c = dir.join("t.c");
+        std::fs::write(&c, emit(&words, o.mutate)).unwrap();
+        let dll = dir.join("t.dll");
+        if let Err(e) = compile(&find_cc(o), &c, &dll, &include.join("include")) {
+            std::fs::write(dir.join("compile.log"), &e).unwrap();
+            return format!("RESULT\t{}\t{}\t0\t0\t0\t0\t0\tcompile failed (compile.log)", class.name, words.len());
+        }
+        // SAFETY: our own DLL; the table is an array of oracle_count functions
+        let lib = _lib.insert(unsafe { libloading::Library::new(&dll) }.expect("load dll"));
+        unsafe {
+            let n = **lib.get::<*const i32>(b"oracle_count\0").unwrap();
+            let p = *lib.get::<*const extern "C" fn(*mut Cpu)>(b"oracle_fns\0").unwrap();
+            std::slice::from_raw_parts(p, n as usize)
+        }
     };
     let mem_class = class.mem != Mem::None;
     let mut dmem = vec![0u8; DATA_SIZE as usize];
@@ -436,7 +449,11 @@ fn run_class(o: &Opts, class: &Class) -> String {
             }
             let mut l = before;
             let old = mxcsr_enter(o.fpcr);
-            fns[i](&mut l);
+            if o.interp {
+                interp_step(&mut l, *w);
+            } else {
+                fns[i](&mut l);
+            }
             mxcsr_leave(old);
             cases += 1;
             let (mut diffs, fpsr) = compare(&before, &l, &d);
@@ -473,6 +490,22 @@ fn run_class(o: &Opts, class: &Class) -> String {
         fpsr_diffs,
         if faults > 0 { format!("{faults} states raised an exception in dynarmic") } else { String::new() }
     )
+}
+
+/// One word through the runtime's interpreter at PC; the next PC from its flow (a refused word leaves PC at the word,
+/// which no dynarmic run does, so it counts as a mismatch).
+fn interp_step(c: &mut Cpu, w: u32) {
+    use nxrt::interp::exec::{step, Flow};
+    // SAFETY: the oracle's Cpu is the runtime's (cpu.h) layout, size checked above
+    let rc = unsafe { &mut *(c as *mut Cpu as *mut nxrt::cpu::Cpu) };
+    // SAFETY: the data and code windows are mapped at the addresses the states use
+    let next = match unsafe { step(rc, w, PC) } {
+        Flow::Next => PC + 4,
+        Flow::Jump(t) | Flow::Call(t) => t,
+        Flow::Ret => rc.x[30],
+        Flow::Svc(_) | Flow::Brk(_) | Flow::Udf(_) => PC,
+    };
+    c.pc = next;
 }
 
 /// The host MXCSR of a thread running guest code under `fpcr` (runtime `Cpu::sync_mxcsr`: FTZ|DAZ = FPCR.FZ, RC

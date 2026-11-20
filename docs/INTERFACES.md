@@ -986,6 +986,28 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   kernel region (0x7F_0000_0000); `nxgfx-replay` reserves regions and commits pages as they come, says which regions
   it could not place, and `NXGFX_REPLAY_TRACE=1` lists the records. New capture queued (`chain23` -> `mk8d2.cap`).
 
+**Lane G4, round 6 (2026-11-20 09:50-, uncommitted).**
+- **Wonder's level-entry frame: fixed on a first run.** `-G4-wonder-first4` (120 s, keys and cache set aside):
+  38,587 shader parts made ahead (stopping at 6 GB of private memory, not reached: 5.9 GB at 114 s), **no frame over
+  a second; the level entry is 198 ms with 55 pipelines in 78 ms** (it was 2.0-2.5 s with 58-61 pipelines). 135
+  parts were still made at their draw (logged with `NXGFX_PIPE_LOG=1`), cheap.
+- **MK8D occlusion results** (`queue.rs aq_wait_room`, `OCCL_FRAME`, `NXGFX_OCCL_SYNC=0` off; unit test
+  `occlusion_results_keep_the_replay_caught_up`): while a game has used samples-passed reports in the last 120
+  presents, each present waits until every earlier op has been replayed, so the results come back as without async
+  replay. Not `NXGFX_ASYNC_PRESENTS`. `-G4-mk8d-occlsync` (57.7 FPS): **1 black lap shot of 14 (0.69, 0016, past the
+  grandstand) against 3-5 before**: better, not all.
+- **Uploads held back over in-flight write-backs** (`mem.rs INFLIGHT`, `split_inflight`, `NXGFX_WB_GUARD=0` off; unit
+  test `dirty_ranges_split_around_inflight_writebacks`): a CPU-dirty page over a range a submission in flight
+  writes on the GPU (and lands back at completion) was uploaded with the guest's older bytes, overwriting the GPU's
+  result before it came back; async replay widened that window. Those pieces now wait in the pool's pending list
+  until the write-back has landed. GPU tests pass. MK8D lap queued to see the grandstand stretch (`chain28` ->
+  `c28_mk8d.out`).
+- **Capture / replay works end to end.** `build/G4/mk8d2.cap` (MK8D at present 6500, with module memory) replays:
+  2 submissions, 2 presents, `frame-0/1.png` in `build/G4/replay2`. The regions are reserved before the device is
+  made (the driver's own mappings sat where the guest's were). The HUD is right; the 3D scene is white, as expected
+  from what a capture leaves out (the GPU-only state of earlier frames: exposure and other history targets).
+- **K2's e2496aa reviewed** (MKW (lane K2) section). Smash rerun with it queued (`chain27` -> `c25_smash.out`).
+
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
 
@@ -2261,6 +2283,16 @@ cut), and the title sky was not seen again.
 **FPS: 8-20 in menus and the flyover** (`K2-mkw6` pacing 10-20). The replay's `prep / pools` is 50-60 ms a frame
 (the per-submission write-watch pool sync over ~3,500 mirror pools, 3.3 GB): the largest single cost, for G4.
 
+**G4's review of K2's e2496aa (10:00):** `mem.rs release` bringing a pool's lazily held pages back before its buffer
+goes: right, and the likely explanation of "never bound" faults (G4's Smash runs now carry it). It runs on the game's
+thread inside nvnMemoryPoolFinalize, so a finalize may now wait for a page readback: fine, and only when pages are
+held. GPU texture write-back (`tex_writeback` / `tex_writeback_land`): right in shape (copied at the submission's
+end after the pass, landed at completion only if the texture is still the one written and its storage untouched).
+Two notes: the copy is the image's bytes, so it is only right where the upload is a straight copy (true for every
+format it lets through: depth, ASTC, BC7 and expanded 3-component formats are excluded); and landing drops silently
+when the image table is busy, so a busy frame keeps the old behaviour (fine, said here so it is not mistaken for a
+miss). The 262,144-entry checkpoint ring is ~8 MB even at the default level (each slot a String): fine.
+
 **G4's review of K2's changes (07:30):** `lazy.rs` (no self-wait on the page a thread brings back; `protect` returns
 whether it worked, a page that cannot be made accessible is dropped): right. `mem.rs` write watch resuming after the
 last returned page when the buffer fills (with `reset` the returned pages are not returned again): right, and the
@@ -2479,3 +2511,62 @@ exit criterion (M5 on Linux: MK8D at 60) needs a Linux PC with a GPU.
 **Left:** run on a Linux PC with a GPU (MK8D at 60, then the library), sound and controllers there; a Linux release
 package (the launcher's Linux CI builds Turbo games; shipping `nxrs-build` + `libnxfront.a` + `libnxrt.a` + the Linux
 `dmsh_xlate` with it is the launcher's part); MMCSS has no counterpart (not ported).
+
+## Lane J (interpreter, execution hints, NRO capture, pads, prompts; 2026-11-20)
+
+**Interpreter** (`src/runtime/src/interp`, `nxrt::interp`). Code the build did not translate runs instruction by
+instruction on the same `Cpu`, guest memory, SVC entry (`svc::nxrt_svc_impl`) and host-call boundary as lifted code.
+- *When:* `dispatch::nxrt_dispatch_resolve` finds no lifted function, host function or live setjmp owner at an aligned
+  address inside a module (`interp::take`); misaligned and out-of-module addresses stay fatal. `NXRS_INTERP_ONLY=1`
+  interprets every dispatch of a normal build; a build without functions (`nxrs-build --interp-only`, hidden, v1 and
+  v2) does so by itself (`Table::build` accepts modules with no functions then, and says so in the log).
+- *One meaning with the translator:* `exec.rs` follows `xlate/lifter.rs`'s decode (its bit helpers are that crate's
+  `xlate/util.rs`, included by `#[path]` as `interp::xutil`), `simd.rs` follows `xlate/simd.rs`; their semantics are
+  the C's (`runtime/simd.h`, `simd_fp.h`, on the exact path; `fp.rs`, `lanes.rs`; the estimate / CRC / AES tables are
+  read from simd.h). An encoding the lifter refuses ends the run (`FATAL: interp: <word> at <pc> ...`). **Anyone
+  changing `xlate/lifter.rs`, `xlate/simd.rs` or `runtime/simd*.h`: change the interpreter with it and run
+  `nx-oracle --interp`** (lane J's build: `build\J\oracle-build.bat`, target `target\Jo`; 0 mismatches expected, also with
+  `--fpcr 1000000`, `2000000`, `400000`, `800000`, `c00000`).
+- *Control flow:* BL / BLR call through `asm::nxrt_call_guest` (a barrier), RET returns to whoever entered the
+  interpreter (the lifted code's host-stack model; a context restore's RET is a jump, as `aot::emit` lowers it), a jump
+  to a lifted start, a host function or out of the modules leaves through `rt_dispatch` (asm `nxrt_interp_entry` status
+  1, no Rust frame left behind). Each entry runs under `rt_sj_owner` (asm `nxrt_interp_owner`); `sjlj::jump_target`
+  asks `interp::owns` for such slots: never for a call (`interp::is_call`: the BL / BLR before x30 names the target,
+  or x30 is `RET_HOST`), else the frame's own call return sites (setjmp) or an address in the same function
+  (`interp::funcs`, the module's `.eh_frame_hdr` through MOD0) as its active call (landing pads). Register branches in
+  interpreted code ask the same search, so a longjmp / unwinder resume from interpreted code reaches the frame below.
+- *Stats:* `interp::stats()` = (entries, instructions); the first 32 entries are logged (`NXRT_TRACE=interp`: all).
+
+**Execution hints** (`discovered.tsv`). `interp::set_data_dir` (os `boot`, runtime `process::run`) names
+`<data>\discovered.tsv`; every interpreted entry is appended once: `module \t 0xoffset \t w0 w1 w2 w3` (the first four
+words as a version stamp). `nxrs-build` reads it (`translator::aot::hints`, `GenOptions::hints`): an entry becomes a
+function start when its module still has those words there, else it is left out ("another version of the program");
+the generation key includes the hints. **Launcher (lane Q):** a run that wrote entries can say "N new functions
+found; rebuild for full speed" (count the non-`#` lines; the build itself is incremental).
+
+**NRO capture.** os `services::ro`: a LoadModule with no built copy keeps the image as `<data>\nro\<sha256>.nro`
+(`ro::capture_to`); `NXRS_NRO_CAPTURE=<dir>` writes there and ends the run (exit 0). `nxrs-build`: captured images
+join its NRO cache (`<name>_build\nro`), and a build whose NRRs register NROs no file holds boots the built game once
+with `NXRS_NRO_CAPTURE` (up to 120 s, `NXRS_NO_ACTIVATE=1 NXRS_KEEP_FOCUS=1`; `NXRS_NO_CAPTURE_BOOT=1` skips) and
+builds again with what it caught.
+
+**Translator `--limit`** (nxrs-translate, a diagnostic): with a limit, only the emitted functions are called directly
+and the rest through `rt_dispatch`, so a partial build links and its missing functions are interpreted (the e2e mixed
+runs use it).
+
+**Player options (all global; owner 2026-11-20: no per-game player settings).**
+- Nintendo pads (`Kind::Nin`, `Kind::S2`) read by their printed labels whatever `button_layout` says
+  (`input::layout::for_nintendo`: the switch table plus `button_map`); the default layout stays `switch`.
+- `mute_on_focus_loss` (Controls, default 0, live): `oe::set_focus` -> `media::sink::set_muted` (device output faded
+  out over 10 ms while the window is behind others or minimised; streams, recording and the game go on).
+- `ask_user` (Controls, default 0): with more than one registered profile, `ShowUserSelector` and the PlayerSelect
+  applet open `ui::pick_user` (`account::choose_user`; cancelled = ResultCancelledByUser 0x27c / UiReturnArg result 2).
+- Prompt texts in the game's language: `ui_text::texts(Prompt, min, joined)` by the `language` option (14 tables),
+  for the controller prompt, Home quit (front `window.rs` / `window_linux.rs`) and the picker; a front end may override
+  lines with `NXRS_CTRL_PROMPT_TEXT`, `NXRS_HOME_QUIT_TEXT`, `NXRS_USER_PROMPT_TEXT` (title, hint; one per line).
+  **Launcher (lane Q):** checkboxes for `mute_on_focus_loss` and `ask_user` beside `pause_on_focus_loss`.
+
+**Tests.** `cargo test -p runtime --lib interp` (incl. `hand_off_between_lifted_and_interpreted_code`, a child process:
+lifted -> interpreted -> lifted calls, an SVC, a host function, a lifted tail call, discovered.tsv written once and
+read back); `nxrt-dev e2e` with `NXRS_INTERP_ONLY=1`; `cargo test -p translator --lib hints`; os `input::layout`,
+`media::sink::tests::mute_fades_to_silence_and_back`, `ui::tests::user_picker`, `ui_text`, `ro::capture_tests`.

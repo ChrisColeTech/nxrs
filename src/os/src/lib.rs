@@ -30,6 +30,7 @@ pub mod watch;
 
 /// `NXOS_TRACE=svc,ipc,hle,nvn,fs` (or `all`).
 pub mod ui;
+pub mod ui_text;
 pub mod wwatch;
 pub mod trace {
     use std::sync::OnceLock;

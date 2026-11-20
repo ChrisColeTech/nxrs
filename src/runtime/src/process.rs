@@ -391,6 +391,8 @@ pub struct MainThread {
 
 fn run(exefs: &Path, modules: Vec<Module>) -> Result<(), String> {
     let p = load(exefs, modules)?;
+    // the interpreter's execution hints (discovered.tsv) beside the ExeFS folder
+    crate::interp::set_data_dir(exefs.parent().unwrap_or(exefs));
     start(&p, Entry::Main)?;
     Ok(())
 }

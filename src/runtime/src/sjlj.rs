@@ -26,7 +26,8 @@ static LOGGED: AtomicBool = AtomicBool::new(false);
 /// `c` is the calling thread's guest state with a live chain.
 pub unsafe fn jump_target(c: *const Cpu) -> Option<*mut SjSlot> {
     let pc = (*c).pc;
-    let inside = |s: &SjSlot| !s.is_barrier() && pc > s.lo && pc < s.hi;
+    // an interpreter frame owns exact resume points, not a range (`interp::owns`)
+    let inside = |s: &SjSlot| !s.is_barrier() && if crate::interp::is_slot(s) { crate::interp::owns(s, &*c) } else { pc > s.lo && pc < s.hi };
     let mut s = (*c).sj as *mut SjSlot;
     while !s.is_null() {
         if (*s).is_barrier() {

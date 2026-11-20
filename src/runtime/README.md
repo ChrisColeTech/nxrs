@@ -41,6 +41,7 @@ alignment or offset that differs from the Rust mirrors.
 | `dispatch.rs` | The flat guest-PC → function table (one `u32` per guest instruction, sealed read-only), the slow path, host-PC → guest-function mapping |
 | `hostfn.rs` | The bridge: host functions at synthetic guest addresses (`0x7F_1000_0000 + 16*i`), overrides by symbol name, UNIMPL stubs for imports nobody provides |
 | `sjlj.rs` | Which owner or barrier a non-local guest jump goes to |
+| `interp/` | The interpreter for code the build missed (the lifter's decode and C semantics), its hand-off to lifted code, `discovered.tsv` (execution hints); see docs/INTERFACES.md "Lane J" |
 | `fiber.rs` | nn::os fibers (`InitializeFiber`, `SwitchToFiber`, `GetCurrentFiber`, `FinalizeFiber`) bound by name to host fibers, each with its own `Cpu` |
 | `mem.rs` | Guest address space: module window from `0x70_0000_0000`, kernel region `0x7F_0000_0000`, a write-watched stack+heap block and alias region found from 4 GiB up, all below 2^39; heap (lazily committed on demand: `set_lazy_heap`, `NXRT_LAZY_HEAP=1`), physical memory in the alias region counted against the pool (a map past it fails with ResultLimitReached when the map limit is on: Z-A, Ocarina, `SWR_MAP_LIMIT`), stacks, TLS regions, QueryMemory, GetInfo ids, `written_pages` (GetWriteWatch) |
 | `loader.rs` | NSO (lz4) and NRO images, MOD0/.dynamic, mapping at the translator's bases, RELATIVE/ABS64/GLOB_DAT/JUMP_SLOT/RELR relocation, imports bound across modules by name with host overrides first, `main.npdm` main-thread parameters |

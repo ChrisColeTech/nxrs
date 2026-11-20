@@ -366,6 +366,7 @@ fn main() -> Result<()> {
                 big_fn,
                 patches,
                 emit: EmitOptions { reg_locals, callee_saved: !no_callee_saved_trust },
+                ..GenOptions::default()
             };
             let report = generate(&game.exefs.files, &opts, &|line| eprintln!("{line}"))?;
             let headers = translator::aot::runtime_headers::write(&out)?;
