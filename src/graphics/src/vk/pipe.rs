@@ -267,6 +267,87 @@ fn depth_has_depth(f: vk::Format) -> bool {
 /// `driver_exclusive` (auto = on for Intel, whose driver crashes compiling and drawing at once): pipeline creation and
 /// queue submissions take turns.
 pub static EXCLUSIVE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+/// Pipelines the driver's compiler died on: a pipeline whose compile (whole or linked from parts) was under way when
+/// the process ended (`<data>/pipeline-compiling.bin`, written before each compile and removed after) is recorded in
+/// `<data>/pipeline-crashed.bin` at the next start and not compiled again: its draws are skipped (a red line says so).
+/// Donkey Kong Bananza: the NVIDIA compiler (nvgpucomp64) faults on one vertex + pixel pair, whole or linked from
+/// parts; each stage compiles with other partners. One session ends there, the next ones go on without that program.
+static INFLIGHT: Mutex<Vec<GfxKey>> = Mutex::new(Vec::new());
+static CRASHED: Mutex<Option<std::collections::HashSet<GfxKey>>> = Mutex::new(None);
+
+fn crash_files(g: &Gpu) -> Option<(PathBuf, PathBuf)> {
+    let d = g.pipes.dir.lock().unwrap().clone()?;
+    Some((d.join("pipeline-compiling.bin"), d.join("pipeline-crashed.bin")))
+}
+
+fn read_keys(b: &[u8]) -> Vec<Key> {
+    let mut v = Vec::new();
+    let mut i = 0;
+    while i < b.len() {
+        match Key::from_bytes(&b[i..]) {
+            Some((k, n)) => {
+                v.push(k);
+                i += n;
+            }
+            None => break,
+        }
+    }
+    v
+}
+
+/// Whether `k` crashed the compiler in an earlier session (the crash list is read once, the in-flight file of the
+/// last session folded into it then).
+fn crashed(g: &Gpu, k: &GfxKey) -> bool {
+    let mut c = CRASHED.lock().unwrap();
+    if c.is_none() {
+        let mut set = std::collections::HashSet::new();
+        if let Some((inflight, list)) = crash_files(g) {
+            let old: Vec<Key> = read_keys(&std::fs::read(&list).unwrap_or_default());
+            let new: Vec<Key> = read_keys(&std::fs::read(&inflight).unwrap_or_default());
+            if !new.is_empty() {
+                let mut all = std::fs::read(&list).unwrap_or_default();
+                for k in &new {
+                    all.extend_from_slice(&k.to_bytes());
+                }
+                let _ = std::fs::write(&list, all);
+                crate::log::red(&format!(
+                    "{} pipeline(s) were compiling when the last session ended (a compiler crash): from now on linked from their parts only ({})",
+                    new.len(),
+                    list.display()
+                ));
+            }
+            let _ = std::fs::remove_file(&inflight);
+            for k in old.into_iter().chain(new) {
+                if let Key::Gfx(gk) = k {
+                    set.insert(gk);
+                }
+            }
+            if !set.is_empty() {
+                crate::vklog!("pipelines compiled from parts only (an earlier compiler crash): {}", set.len());
+            }
+        }
+        *c = Some(set);
+    }
+    c.as_ref().unwrap().contains(k)
+}
+
+/// A whole-pipeline compile starts (`on`) or ends: the in-flight file names the ones under way.
+fn note_inflight(g: &Gpu, k: &GfxKey, on: bool) {
+    let Some((inflight, _)) = crash_files(g) else { return };
+    let mut v = INFLIGHT.lock().unwrap();
+    if on {
+        v.push(*k);
+    } else if let Some(i) = v.iter().position(|x| x == k) {
+        v.swap_remove(i);
+    }
+    if v.is_empty() {
+        let _ = std::fs::remove_file(&inflight);
+    } else {
+        let b: Vec<u8> = v.iter().flat_map(|k| Key::Gfx(*k).to_bytes()).collect();
+        let _ = std::fs::write(&inflight, b);
+    }
+}
+
 /// `NXGFX_PIPE_LOG=1`: every pipeline the driver compiles is logged as it starts and ends (the one a compiler crash
 /// stopped in is the last started and not ended).
 fn pipe_log(what: &str, mods: &[&Module], end: bool) {
@@ -331,7 +412,10 @@ fn build_gfx(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Result<vk::Pipeline, 
     }
     let ml: Vec<&Module> = mods.iter().map(|m| &**m).collect();
     pipe_log("graphics", &ml, false);
-    let p = unsafe { g.dev().create_graphics_pipelines(g.pipes.cache, &[ci], None) }.map_err(|(_, e)| format!("vkCreateGraphicsPipelines: {e}"))?;
+    note_inflight(g, k, true);
+    let p = unsafe { g.dev().create_graphics_pipelines(g.pipes.cache, &[ci], None) };
+    note_inflight(g, k, false);
+    let p = p.map_err(|(_, e)| format!("vkCreateGraphicsPipelines: {e}"))?;
     pipe_log("graphics", &ml, true);
     super::pcache::note_created(1);
     Ok(p[0])
@@ -586,6 +670,9 @@ fn queue_optimize(g: &'static Gpu, k: GfxKey, mods: Vec<Arc<Module>>) {
                     if g.pipes.stop.load(Ordering::Relaxed) {
                         return;
                     }
+                    if crashed(g, &k) {
+                        continue;
+                    }
                     if let Ok(p) = build_gfx(g, &k, &mods) {
                         let old = g.pipes.map.lock().unwrap().insert(Key::Gfx(k), p);
                         if let Some(o) = old {
@@ -629,9 +716,21 @@ impl Gpu {
         if let Some(p) = self.pipes.map.lock().unwrap().get(&key) {
             return Some(*p);
         }
+        // it crashed the driver's compiler in an earlier session: not compiled again, its draws are skipped
+        if crashed(self, k) {
+            crate::log::red_once("a pipeline that crashed the driver's compiler in an earlier session is not compiled again: its draws are skipped (pipeline-crashed.bin)");
+            return None;
+        }
         let t0 = std::time::Instant::now();
         note_targets(k);
-        let linked = if self.d.caps.gpl { link_gfx(self, k, mods) } else { None };
+        let linked = if self.d.caps.gpl {
+            note_inflight(self, k, true);
+            let l = link_gfx(self, k, mods);
+            note_inflight(self, k, false);
+            l
+        } else {
+            None
+        };
         let r = match linked {
             Some(p) => Ok(p),
             None => build_gfx(self, k, mods),
@@ -771,6 +870,7 @@ pub fn prewarm(g: &'static Gpu, threads: usize) -> PrewarmReport {
                 continue;
             }
             let p = match k {
+                Key::Gfx(gk) if crashed(g, &gk) => None,
                 Key::Gfx(gk) => modules_of(g, &gk).and_then(|m| build_gfx(g, &gk, &m).ok()),
                 Key::Compute(s) => g.shaders.get(g.dev(), &s).and_then(|m| build_compute(g, &m).ok()),
             };

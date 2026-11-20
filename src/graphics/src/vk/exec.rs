@@ -481,10 +481,18 @@ pub mod passdump {
         for i in 0..qs.rt_n {
             let Some(t) = qs.rt[i].tex else { continue };
             let Some(tf) = crate::tex::format::tex_format(t.d.format) else { continue };
-            desc.push(format!("{i}:{:?} {}x{} ser{} @{:p}", tf.vk, t.d.width, t.d.height, t.serial, t.mem));
+            let vw = qs.rt[i].view.map(|v| format!(" v{:#x} L{}+{} lv{}", v.bits, v.min_layer, v.nlayers, v.base_level)).unwrap_or_default();
+            desc.push(format!("{i}:{:?} {}x{}x{} ser{} @{:p}{vw}", tf.vk, t.d.width, t.d.height, t.d.depth, t.serial, t.mem));
             let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(t.d.format);
             if bw != 1 || bh != 1 || bpb == 0 || !matches!(tf.kind, Kind::Float | Kind::Uint | Kind::Sint) {
                 continue;
+            }
+            // NXGFX_DUMP_PNG=0: the log lines only (dumps every few seconds over a long run)
+            // NXGFX_DUMP_PNG=<w>x<h>: pictures of targets of that size only
+            match std::env::var("NXGFX_DUMP_PNG").as_deref() {
+                Ok("0") => continue,
+                Ok(sz) if sz.contains('x') && sz != format!("{}x{}", t.d.width, t.d.height) => continue,
+                _ => {}
             }
             let v = qs.rt[i].view;
             let level = v.filter(|v| v.bits & VW_LEVELS != 0).map(|v| v.base_level as u32).unwrap_or(0);

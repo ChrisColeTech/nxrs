@@ -56,6 +56,11 @@ SCENARIOS = {
         ('shot', 9, 'boot'), ('lr', 4, 'title'), ('right', 1.5, 'Select a Mii: off Create a Mii'), ('a', 3, 'first Mii'), ('a', 3, 'menu1'),
         ('a', 3, 'menu2'), ('a', 5, 'menu3'), ('a', 4, 'char'), ('a', 2, 'k1'), ('a', 2, 'k2'), ('a', 4, 'k3'), ('a', 4, 'cup'), ('a', 30, 'gp-ok'),
         ('replay', 20, 'driving', 'mkw_drive.txt'), ('shot', 18, 'driving +20s')]),
+    # the mk8d steps, then a minute more of the race with a picture every 5 s (lane G3: the picture over a whole lap)
+    'mk8d-lap': dict(seconds=230, window=(100, 190), steps=[
+        ('shot', 9, 'boot'), ('lr', 4, 'title'), ('right', 1.5, 'Select a Mii: off Create a Mii'), ('a', 3, 'first Mii'), ('a', 3, 'menu1'),
+        ('a', 3, 'menu2'), ('a', 5, 'menu3'), ('a', 4, 'char'), ('a', 2, 'k1'), ('a', 2, 'k2'), ('a', 4, 'k3'), ('a', 4, 'cup'), ('a', 30, 'gp-ok'),
+        ('replay', 20, 'driving', 'mk8d_gp.txt')] + [('shot', 5, 'lap')] * 14),
 }
 PM = []
 # 'fullres' (graphics: the game's picture at its resolution, at the next present) or 'shot' (the front end: the

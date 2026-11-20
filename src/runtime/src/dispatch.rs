@@ -205,6 +205,10 @@ pub unsafe extern "C" fn nxrt_dispatch_resolve(c: *mut Cpu) -> GuestFn {
         if crate::hostfn::lookup(pc).is_some() {
             return crate::asm::nxrt_host_entry as GuestFn;
         }
+        if let Some(a) = crate::hostfn::aliased(pc) {
+            (*c).pc = a;
+            return crate::asm::nxrt_host_entry as GuestFn;
+        }
         if let Some(f) = table().and_then(|t| t.lookup(pc)) {
             return f; // only a racing reader before install
         }

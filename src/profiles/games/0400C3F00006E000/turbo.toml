@@ -1,0 +1,49 @@
+# The owner's patches for Mario Kart World, from mkw-recomp (recomp/patches-mkw-180.txt, set "shadow"); kept by hand,
+# never written by the exporter. nxrs applies them when it builds the game (apply = "build"): the translator lifts the
+# replacement and the original both, and the runtime picks one by the set's switch (NXRS_PATCH_MKW_RBPOOL=0 keeps the
+# game's). The two calls go to os `gamefix.rs` (the patch page after main), which fills the second slot.
+source = "mkw-recomp recomp/patches-mkw-180.txt (the owner's)"
+
+[[cut]]
+build = "d00e4f399e411d0613aa8d26b1c02fef"
+module = "main"
+offset = 0xd65720
+original = "54300594"
+replacement = "1c2eaa94"
+reason = """MKW 1.8.0: bl main+0xeb1870 (agl::utl::DynamicTextureAllocator's init) -> bl patch page + 0xf90 (os gamefix shadow_pool: remembers the allocator, runs the init)"""
+apply = "build"
+set = "mkw_rbpool"
+env = "NXRS_PATCH_MKW_RBPOOL"
+
+[[cut]]
+build = "d00e4f399e411d0613aa8d26b1c02fef"
+module = "main"
+offset = 0xb6f90
+original = "cc000094"
+replacement = "0ce8dc94"
+reason = """MKW 1.8.0: bl main+0xb72c0 (the shadow map's RenderBuffer creation) -> bl patch page + 0xfc0 (os gamefix shadow_rb: at the first map, the allocator's second pool)"""
+apply = "build"
+set = "mkw_rbpool"
+env = "NXRS_PATCH_MKW_RBPOOL"
+
+[[cut]]
+build = "d00e4f399e411d0613aa8d26b1c02fef"
+module = "main"
+offset = 0xeb199c
+original = "01018052"
+replacement = "01028052"
+reason = """MKW 1.8.0: mov w1, #8 -> #16: the render-buffer allocator's pool table gets two slots' bytes (mkw-recomp #255 / #210 / #305)"""
+apply = "build"
+set = "mkw_rbpool"
+env = "NXRS_PATCH_MKW_RBPOOL"
+
+[[cut]]
+build = "d00e4f399e411d0613aa8d26b1c02fef"
+module = "main"
+offset = 0xeb19b0
+original = "29008052"
+replacement = "49008052"
+reason = """MKW 1.8.0: mov w9, #1 -> #2: the pool table's slot count"""
+apply = "build"
+set = "mkw_rbpool"
+env = "NXRS_PATCH_MKW_RBPOOL"

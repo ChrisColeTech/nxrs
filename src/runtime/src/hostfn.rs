@@ -74,6 +74,24 @@ pub fn register(name: &str, f: HostFn) -> u64 {
     })
 }
 
+/// Guest addresses outside the host-function window that run a host function (a game patch's `bl` into the patch
+/// page after `main`, `aot/patches.rs`): `rt_dispatch`'s slow path finds the host function here.
+static ALIASES: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+
+/// Makes guest address `at` call host function `f` (registered under `name`).
+pub fn alias(at: u64, name: &str, f: HostFn) {
+    let a = register(name, f);
+    let mut v = ALIASES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    v.retain(|e| e.0 != at);
+    v.push((at, a));
+}
+
+/// The host-function address standing in for guest address `pc`, if `alias` made one.
+pub fn aliased(pc: u64) -> Option<u64> {
+    let v = ALIASES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    v.iter().find(|e| e.0 == pc).map(|e| e.1)
+}
+
 /// `HOST_OVERRIDE`: every import of `name` (GOT, GLOB_DAT, ABS64 in every module) binds to `f`, also when a module
 /// defines the symbol. A later override of the same name replaces an earlier one.
 pub fn add_override(name: &str, f: HostFn) {

@@ -1257,3 +1257,19 @@ start of the game into its opening (`x2-dkb-hoststeal2`), with sound (20,291 of 
 address: Switch 2 games pass no pool (DKB: 0 bytes at 0x0) and DKB calls InitCheck from main+0xe19d04 when its
 opening movie starts; it was a fatal. The "nearly silent title" was the new-save mode selection (Normal / Assist),
 which has no music; the music plays once the game starts.
+
+**Lane X2 (2026-11-20 00:10): MKW 1.8.0 render-buffer pool patch ported, not yet sufficient.**
+- Profile `src/profiles/games/0400C3F00006E000/turbo.toml` (set `mkw_rbpool`, `NXRS_PATCH_MKW_RBPOOL`, build
+  d00e4f399e411d06): mkw-recomp's four sites (pool table 2 slots; `bl` at main+0xd65720 / main+0xb6f90 to the patch
+  page + 0xf90 / 0xfc0). nxrs applies them at build ("patch applied" x4 in `build\games\mkw.buildX2.log`).
+- Runtime `hostfn::alias` / `aliased` + `dispatch.rs`: a guest address outside the host window (the patch page)
+  runs a host function. Os `gamefix.rs` (new): `shadow_pool` keeps the allocator and runs its init; `shadow_rb` makes
+  the second pool at the first shadow map (ExpHeap::create main+0xbeb4e0 over memory reserved at 0x60_0000_0000 in
+  the guest's 39-bit space, operator new main+0x3e3550, pool init main+0xeb1e60 as mkw-recomp: (pool, 0, 1, 7, count,
+  size, flags, heap)), 0xb600000 bytes, stored in slot 1.
+- Result (`build\I\runs\20261120-0006*-X-x2-mkw21-pools`): the second pool is made at 14 s and the allocator walks it
+  (crumbs `x2-mkw19-crumbs`: pool 0's free list, then pool 1's, then the out-of-memory path), but its regions hold no
+  free bytes (region +0x30 / +0x38 = 0, pool 0's region 0 has 0x7819800), so the same null block comes. Same with the
+  pool at a 41-bit host address. Open: why the regions of a pool made by `main+0xeb1e60` this way start empty here
+  (compare the pool's +0x10 field: 8 for the game's pool, 0x939 for ours; it is `[mem+0x10c]` of the GPU memory block
+  `main+0x5d6420` returns).

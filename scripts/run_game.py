@@ -43,7 +43,9 @@ def other_claims():
         if os.path.normcase(p) == os.path.normcase(mine):
             continue
         c = read_claim(p)
-        if c and c['pid'] and not alive(c['pid']):
+        # stale: its game exited, or it never got a pid (its runner died while waiting) within 30 minutes
+        stale_pending = c and not c['pid'] and time.time() - os.path.getmtime(p) > 1800
+        if c and ((c['pid'] and not alive(c['pid'])) or stale_pending):
             try:
                 os.remove(p)
             except OSError:
@@ -131,10 +133,6 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
     others = other_claims()
     if any(c['exclusive'] for c in others):
         raise SystemExit('locked: an exclusive run holds the machine: %s' % [c for c in others if c['exclusive']])
-    if exclusive:
-        g = other_games()
-        if others or g:
-            raise SystemExit('exclusive run refused: other games run: %s %s' % (others, g))
     # builds may overlap a run (owner, 2026-11-19): NXRS_WAIT_FOR_BUILDS=1 restores the wait if crashes under load return
     if os.environ.get('NXRS_WAIT_FOR_BUILDS') == '1':
         for i in range(61):
@@ -161,6 +159,26 @@ def run(exe, logp, hard, args=(), env=None, during=None, say=print):
     mine = claim_text(os.path.basename(exe), 0)
     with open(LOCK, 'w') as fl:
         fl.write(mine)
+    # Two lanes can pass the checks above in the same instant; settle it now that the claims are written.
+    # A normal run yields to any exclusive claim. Two exclusive claims: the lane name that sorts first keeps it.
+    # An exclusive run, once its claim stands, blocks new starts and waits (up to 20 min) for running games to end.
+    time.sleep(1.0)
+    others = other_claims()
+    ex = [c for c in others if c['exclusive']]
+    if ex and (not exclusive or any(c['lane'] < lane for c in ex)):
+        os.remove(LOCK)
+        raise SystemExit('locked: an exclusive run holds the machine: %s' % ex)
+    if exclusive:
+        for i in range(121):
+            busy = [c for c in other_claims() if not c['exclusive']] + other_games()
+            if not busy:
+                break
+            if i == 120:
+                os.remove(LOCK)
+                raise SystemExit('exclusive run gave up: games still running after 20 minutes: %s' % busy)
+            if i == 0:
+                say('exclusive claim stands; waiting for running games to end: %s' % busy)
+            time.sleep(10)
     say('claim taken (%s%s); free commit %d MB' % (lane, ', exclusive' if exclusive else '', fc))
     peak = 0
     why = 'exited'
