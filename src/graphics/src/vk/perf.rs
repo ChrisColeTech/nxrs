@@ -459,7 +459,8 @@ fn private_mb() -> u64 {
     let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut c as *mut _ as *mut _, c.cb) };
     if ok != 0 { c.PrivateUsage as u64 >> 20 } else { 0 }
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 fn private_mb() -> u64 {
-    0
+    let (rss, swap) = nxrt::linux::process_memory();
+    (rss + swap) >> 20
 }

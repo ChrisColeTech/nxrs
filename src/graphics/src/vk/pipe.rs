@@ -632,27 +632,29 @@ pub fn prebuild(g: &'static Gpu, keys: Vec<ShaderKey>) {
     if tx.is_none() {
         let (s, r) = std::sync::mpsc::channel::<Vec<ShaderKey>>();
         let r = Arc::new(Mutex::new(r));
-        for i in 0..2 {
+        // a quarter of the CPU's threads, 2 to 4 (below normal priority)
+        let n = std::thread::available_parallelism().map(|n| n.get() / 4).unwrap_or(2).clamp(2, 4);
+        for i in 0..n {
             let r = r.clone();
             let _ = std::thread::Builder::new().name(format!("vk shader parts {i}")).spawn(move || {
                 low_priority();
-                // the driver's memory bounds it, as the prewarm's (NXGFX_PREWARM_BUDGET_MB of private memory growth)
-                let budget = std::env::var("NXGFX_PREWARM_BUDGET_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2048) << 20;
-                static BASE: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-                let base = *BASE.get_or_init(private_bytes);
+                // the driver's memory bounds it: the private memory the parts' own jobs grew it by (the game's loading
+                // around them no longer counts), at most parts_budget()
+                let budget = parts_budget();
                 loop {
                     let job = r.lock().unwrap().recv();
                     let Ok(keys) = job else { return };
                     if g.pipes.stop.load(Ordering::Relaxed) {
                         return;
                     }
-                    if private_bytes().saturating_sub(base) > budget {
+                    if PARTS_GROWTH.load(Ordering::Relaxed) > budget {
                         static SAID: AtomicBool = AtomicBool::new(false);
                         if !SAID.swap(true, Ordering::Relaxed) {
-                            crate::vklog!("shader parts are no longer made ahead: private memory grew {} MB (NXGFX_PREWARM_BUDGET_MB)", budget >> 20);
+                            crate::vklog!("shader parts are no longer made ahead: they grew private memory by {} MB (NXGFX_PREWARM_BUDGET_MB)", budget >> 20);
                         }
                         continue;
                     }
+                    let _grew = Grew::start();
                     let _x = driver_exclusive(g).then(|| EXCLUSIVE.lock().unwrap());
                     let mut k = GfxKey::default();
                     let mut mods = Vec::new();
@@ -682,6 +684,37 @@ pub fn prebuild(g: &'static Gpu, keys: Vec<ShaderKey>) {
         *tx = Some(s);
     }
     let _ = tx.as_ref().unwrap().send(keys);
+}
+
+/// Private memory the shader-part jobs grew the process by (each job's own growth, summed).
+static PARTS_GROWTH: AtomicU64 = AtomicU64::new(0);
+
+static PARTS_JOBS: AtomicU64 = AtomicU64::new(0);
+
+/// Adds a job's growth to PARTS_GROWTH when it ends (shared among the jobs that ran beside it: each one's window sees
+/// the others' growth too).
+struct Grew(u64, u64);
+impl Grew {
+    fn start() -> Grew {
+        let n = PARTS_JOBS.fetch_add(1, Ordering::Relaxed) + 1;
+        Grew(private_bytes(), n)
+    }
+}
+impl Drop for Grew {
+    fn drop(&mut self) {
+        let n = PARTS_JOBS.fetch_sub(1, Ordering::Relaxed).max(self.1).max(1);
+        PARTS_GROWTH.fetch_add(private_bytes().saturating_sub(self.0) / n, Ordering::Relaxed);
+    }
+}
+
+/// The shader parts' memory budget: NXGFX_PREWARM_BUDGET_MB, else a twelfth of the machine's memory within 2-6 GB (the
+/// 2 GB that was the default stopped Super Mario Bros. Wonder's first run at a quarter of its programs, and the first
+/// level then compiled 61 pipelines in one 2.5 s frame).
+fn parts_budget() -> u64 {
+    if let Some(mb) = std::env::var("NXGFX_PREWARM_BUDGET_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
+        return mb << 20;
+    }
+    (super::total_phys() / 12).clamp(2 << 30, 6 << 30)
 }
 
 /// The background builders of the whole pipelines that replace linked ones (below normal priority).
@@ -890,6 +923,11 @@ fn low_priority() {
         use windows_sys::Win32::System::Threading::{GetCurrentThread, SetThreadPriority, THREAD_PRIORITY_BELOW_NORMAL};
         unsafe { SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL) };
     }
+    // Linux: a nice value of its own for the calling thread (Linux threads carry their own niceness)
+    #[cfg(target_os = "linux")]
+    if nxconfig::flag("low_priority_shader_compiler") {
+        unsafe { libc::setpriority(libc::PRIO_PROCESS, libc::gettid() as libc::id_t, 5) };
+    }
 }
 
 /// The process's private bytes (committed memory the driver's compiler shows up in).
@@ -904,6 +942,12 @@ pub fn private_bytes() -> u64 {
             return c.PrivateUsage as u64;
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        let (rss, swap) = nxrt::linux::process_memory();
+        return rss + swap;
+    }
+    #[allow(unreachable_code)]
     0
 }
 

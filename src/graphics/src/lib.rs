@@ -55,7 +55,9 @@ pub fn save_caches() {
     }
 }
 
-pub use vk::present::{close_window, set_window};
+pub use vk::present::{close_window, set_window, set_window_raw};
+#[cfg(target_os = "linux")]
+pub use vk::present::{set_window_unix, WsKind};
 
 /// The graphics layer's control commands (served by the front end's control pipe, `nxconfig::ctl`): `shot [path]`
 /// (a screenshot of the next present), `a2c 0|1` (alpha to coverage live), `pcache` (save the pipeline cache now),

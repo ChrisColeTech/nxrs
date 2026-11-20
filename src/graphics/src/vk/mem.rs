@@ -191,12 +191,23 @@ mod watch {
         }
     }
 }
-#[cfg(not(windows))]
+// ---------- Linux write watch (the runtime's userfaultfd watch, PAGEMAP_SCAN: one scan over any range) ----------
+#[cfg(target_os = "linux")]
 mod watch {
-    pub fn take(_lo: u64, _hi: u64, _reset: bool) -> Option<Vec<u64>> {
-        None
+    pub fn take(lo: u64, hi: u64, reset: bool) -> Option<Vec<u64>> {
+        // only memory a watched reservation holds answers (other memory has no write-protect marker: every page of
+        // it would read as written)
+        if nxrt::linux::allocation_of(lo, hi) == 0 || !nxrt::linux::watched(lo) {
+            return None;
+        }
+        nxrt::linux::written_pages(lo, hi - lo, reset)
     }
-    pub fn reset(_lo: u64, _hi: u64) {}
+    pub fn alloc_of(lo: u64, hi: u64) -> u64 {
+        nxrt::linux::allocation_of(lo, hi)
+    }
+    pub fn reset(lo: u64, hi: u64) {
+        let _ = take(lo, hi, true);
+    }
 }
 
 /// [a, a + n) of guest memory as it reads, the parts not committed as zeros (reading them would fault).
@@ -227,7 +238,27 @@ pub fn guest_bytes(a: u64, n: u64) -> std::borrow::Cow<'static, [u8]> {
     }
     std::borrow::Cow::Owned(v)
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
+pub fn guest_bytes(a: u64, n: u64) -> std::borrow::Cow<'static, [u8]> {
+    // process_vm_readv on this process: a read that fails on inaccessible pages (lazily written-back ones, decommitted
+    // ones) instead of faulting, as ReadProcessMemory does on Windows
+    let mut v = vec![0u8; n as usize];
+    if n == 0 || nxrt::linux::read_nofault(a, &mut v) {
+        return std::borrow::Cow::Owned(v);
+    }
+    let mut at = a;
+    while at < a + n {
+        let e = ((at & !(PAGE - 1)) + PAGE).min(a + n);
+        let o = (at - a) as usize;
+        let dst = &mut v[o..o + (e - at) as usize];
+        if !nxrt::linux::read_nofault(at, dst) {
+            dst.fill(0);
+        }
+        at = e;
+    }
+    std::borrow::Cow::Owned(v)
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn guest_bytes(a: u64, n: u64) -> std::borrow::Cow<'static, [u8]> {
     let c = committed(a, n);
     if c.len() == 1 && c[0] == (a, n) {
@@ -273,7 +304,15 @@ pub fn committed(a: u64, n: u64) -> Vec<(u64, u64)> {
     }
     out
 }
-#[cfg(not(windows))]
+/// The committed parts of [a, a + n) (the runtime's page states); memory outside its reservations is taken whole.
+#[cfg(target_os = "linux")]
+pub fn committed(a: u64, n: u64) -> Vec<(u64, u64)> {
+    if nxrt::linux::query(a).is_none() && nxrt::linux::allocation_of(a, a + n) == 0 {
+        return vec![(a, n)];
+    }
+    nxrt::linux::committed_runs(a, n)
+}
+#[cfg(not(any(windows, target_os = "linux")))]
 pub fn committed(a: u64, n: u64) -> Vec<(u64, u64)> {
     vec![(a, n)]
 }
@@ -327,6 +366,7 @@ pub fn pool_add(p: &pool_t) {
     if let Some(o) = old {
         release(g, o);
     }
+    g.tables.requeue_buf_texs(base, base + p.size);
 }
 
 fn release(g: &Gpu, p: Pool) {
@@ -348,6 +388,7 @@ pub fn pool_del(base: u64) {
     POOL_GEN.fetch_add(1, Ordering::Relaxed);
     if let Some(p) = p {
         g.images.lock().unwrap().drop_pool(base, p.size);
+        g.tables.requeue_buf_texs(base, base + p.size);
         release(g, p);
     }
 }

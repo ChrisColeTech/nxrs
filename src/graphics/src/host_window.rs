@@ -3,11 +3,14 @@
 //! the exit path). The front end replaces this with its own window and calls `set_window` itself; there is never more
 //! than one window (docs/INTERFACES.md, graphics).
 
-use raw_window_handle::{HasWindowHandle, RawWindowHandle};
+use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use std::sync::atomic::{AtomicBool, Ordering};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
+#[cfg(target_os = "linux")]
+use winit::platform::x11::EventLoopBuilderExtX11;
+#[cfg(windows)]
 use winit::platform::windows::EventLoopBuilderExtWindows;
 use winit::window::{Window, WindowId};
 
@@ -68,11 +71,10 @@ impl ApplicationHandler for App {
                 return;
             }
         };
-        if let Ok(h) = w.window_handle() {
-            if let RawWindowHandle::Win32(h) = h.as_raw() {
-                let hinst = h.hinstance.map(|v| v.get()).unwrap_or(0);
-                crate::vk::present::set_window(h.hwnd.get(), hinst);
-                crate::vklog!("host window {}x{} opened", self.size.0, self.size.1);
+        if let (Ok(d), Ok(h)) = (w.display_handle(), w.window_handle()) {
+            match crate::vk::present::set_window_raw(d.as_raw(), h.as_raw()) {
+                Ok(()) => crate::vklog!("host window {}x{} opened", self.size.0, self.size.1),
+                Err(e) => crate::log::red(&format!("host window: {e}")),
             }
         }
         self.window = Some(w);

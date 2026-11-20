@@ -1387,6 +1387,23 @@ impl Gpu {
         Some(vk::DescriptorAddressInfoEXT::default().address(base + off).range(n).format(tf.vk))
     }
 
+    /// Texel buffer descriptors (uniform, storage) over 64 KB of zeros: a buffer texture whose memory is gone.
+    fn texel_dummy(&self) -> Option<(vk::DescriptorAddressInfoEXT<'static>, vk::DescriptorAddressInfoEXT<'static>)> {
+        static B: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        let a = (*B.get_or_init(|| {
+            let usage = vk::BufferUsageFlags::UNIFORM_TEXEL_BUFFER | vk::BufferUsageFlags::STORAGE_TEXEL_BUFFER | vk::BufferUsageFlags::TRANSFER_DST;
+            let b = self.buffer(65536, usage, gpu_allocator::MemoryLocation::CpuToGpu, "texel dummy").ok()?;
+            if !b.ptr.is_null() {
+                unsafe { core::ptr::write_bytes(b.ptr, 0, 65536) };
+            }
+            let a = b.addr;
+            core::mem::forget(b);
+            (a != 0).then_some(a)
+        }))?;
+        let ai = vk::DescriptorAddressInfoEXT::default().address(a).range(65536).format(vk::Format::R32_UINT);
+        Some((ai, ai))
+    }
+
     fn texel_view_persistent(&self, sub: &mut Sub, t: &tex_t, storage: bool) -> Option<vk::BufferView> {
         let v = self.texel_view(sub, t, storage)?;
         // the pool set holds it past this submission: it is taken out of the submission's list and kept
@@ -1399,9 +1416,17 @@ impl Gpu {
         for id in self.tables.take_buf_pending() {
             let Some(t) = self.tables.buf_tex_at(id) else { continue };
             if self.d.caps.descbuf {
-                if let Some(u) = self.texel_addr(sub, &t, false) {
-                    let s = self.texel_addr(sub, &t, true);
-                    self.tables.write_texel_addrs(&self.d, &self.layout, id, u, s);
+                match self.texel_addr(sub, &t, false) {
+                    Some(u) => {
+                        let s = self.texel_addr(sub, &t, true);
+                        self.tables.write_texel_addrs(&self.d, &self.layout, id, u, s);
+                    }
+                    // no memory pool holds it (now): a buffer of zeros instead of the address of a freed buffer
+                    None => {
+                        if let Some((u, s)) = self.texel_dummy() {
+                            self.tables.write_texel_addrs(&self.d, &self.layout, id, u, Some(s));
+                        }
+                    }
                 }
                 continue;
             }

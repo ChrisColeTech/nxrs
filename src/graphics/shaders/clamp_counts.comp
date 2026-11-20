@@ -1,6 +1,7 @@
 #version 460
 // Indirect counts held to the device's limits before an indirect draw or dispatch reads them (a count from garbage makes
-// the GPU fault or work for ever): n records of stride words, their first three words clamped. One invocation.
+// the GPU fault or work for ever): n records of stride words, their first three words clamped; maxv.w (when not 0) also
+// holds word 0 x word 1 (a draw's vertices x instances) to it by lowering word 1. One invocation.
 #extension GL_EXT_buffer_reference : require
 #extension GL_EXT_buffer_reference_uvec2 : require
 layout(local_size_x = 1) in;
@@ -12,6 +13,13 @@ void main() {
         for (uint c = 0u; c < 3u; c++) {
             uint k = i * p.stride + c;
             w.v[k] = min(w.v[k], p.maxv[c]);
+        }
+        if (p.maxv.w != 0u) {
+            uint a = w.v[i * p.stride], b = w.v[i * p.stride + 1u], hi, lo;
+            umulExtended(a, b, hi, lo);
+            if (hi != 0u || lo > p.maxv.w) {
+                w.v[i * p.stride + 1u] = p.maxv.w / max(a, 1u);
+            }
         }
     }
 }

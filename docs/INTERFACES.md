@@ -777,7 +777,7 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   - **Indirect counts held to the device's limits** (`exec.rs clamped_indirect`, `shaders/clamp_counts.comp`, a one-
     invocation kernel on a staged copy, `NXGFX_CLAMP_INDIRECT=0` off): indirect dispatches (compute limits) and indirect
     mesh draws (task limits, MKW's resets were mesh draws); direct mesh draws are held too. GPU test
-    `indirect_dispatch_through_the_count_clamp`. Indirect plain draws are not (they sit inside a pass, where no kernel
+    `indirect_dispatch_through_the_count_clamp`. (Round 3: indirect plain draws are held too, before the pass.) Before that, indirect plain draws were not (they sit inside a pass, where no kernel
     can run; the checkpoint names them and their address). Flight recorder / Aftermath: not done.
 - **Pool sync, cold pools** (`mem.rs begin_submit`, `NXGFX_POOL_COLD=0` off): a watched pool with no CPU write for 60
   frames is asked once a frame instead of at every submission (DKB: 1,259 mirrors, 9 submissions a frame, 32 ms of
@@ -806,6 +806,53 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   cold-pool scanning, exclusive -> `c4_dkb.out`); each starts once, waiting while the machine is held. Note: the 03:51
   crash came during G4's earlier MK8D run with `NXGFX_ASYNC_PRESENTS=1` (`-G4-mk8d-aq1`: device lost at 130 s, no
   checkpoints then).
+
+**Lane G4, round 3 (2026-11-20 05:00-, after a57eecd; uncommitted).** `NXGFX_ASYNC_PRESENTS` stays at its default
+(chain3's `=1` MK8D step was stopped before it ran; chain3 / chain4 replaced by `build/G4/chain5..9.sh`).
+- **Asynchronous replay: two missing waits fixed** (`vk/queue.rs`; GPU tests fail without each fix, pass with it):
+  - *A command buffer's FenceSync read last frame's fence.* A sync fenced inside a command buffer (and reused every
+    frame) kept its old, signalled fence until the replay thread reached the record, so `nvnSyncWait` passed while
+    this frame's work was still queued and the game rewrote memory that work reads. Now `submit` fences every such sync
+    to the submission when it is queued (the replay still sets the exact value). Test
+    `reused_command_buffer_sync_covers_the_new_submission`. Log line once: `command-buffer fence syncs: fenced when submitted`.
+  - *A queue waiting on a parked queue's sync ran ahead.* `nvnQueueWaitSync` on an async fence returned at once even
+    when that fence's submit had found its queue parked at an event wait (its fence a receipt): the waiting queue's
+    work ran before the parked work. The wait now goes to the replay thread, which resolves it in queue order. And a
+    wait queued on a queue that is itself parked with work is no longer dropped: `Parked.later` keeps it at its stream
+    offset. Test `queue_waits_for_another_queues_parked_work`. Log line once: `a queue waits on another queue's parked work`.
+- **Indirect plain draws held** (`exec.rs clamped_draw_record`, `draw_limits`): DrawArrays/ElementsIndirect records
+  (and MultiDraw…IndirectCount's, up to 4,096) are copied and clamped before the pass (the pass ends there; the draw's
+  set-up begins it again): 16M vertices / indices, 256K instances, 256M of the two together (`clamp_counts.comp`
+  lowers instances; `NXGFX_DRAW_LIMIT` = that product in millions; `NXGFX_CLAMP_INDIRECT=0` off). GPU test
+  `indirect_draw_with_garbage_counts_is_held` (3 x 4 billion instances: drawn in < 1 s, green).
+- **Smash device loss (`-G4-smash-hang2`, 135.9 s into a match, exit 71, a driver reset at 05:14):** the fault report
+  says *invalid write at 0x400000000*, no checkpoint reached (default level: dispatches / indirect draws only), during
+  a run of new pipelines. Fixed one way stale device addresses can be written through: **buffer textures' pool-set
+  descriptors name their pool buffer's device address**; when that pool was finalized (or a new one took its address)
+  they kept the freed address. `mem::pool_add` / `pool_del` now queue the buffer textures over the range again
+  (`Tables::requeue_buf_texs`), written at the next submission from the new pool, or over a 64 KB zero buffer when
+  none holds them (`image.rs texel_dummy`). Not yet shown to be Smash's cause: `chain7` reruns the match with
+  `NXGFX_CHECKPOINTS=all` -> `build/G4/c7_smash.out`.
+- **DKB, cold pools measured** (`-G4-dkb-cold`, exclusive): pool sync 10-12 ms a frame (was 32.5), play at 15-25 FPS
+  (was 5-12), no device loss in 170 s. What is left is descriptor sets: **27 ms a frame for 15,400 sets** (7,060 draws,
+  4,280 write-backs, 9 submissions); `chain9` profiles it (`NXGFX_PROFILE=1` -> `c9_dkb.out`).
+- **Wonder's first-run level-entry frame:** the cause was the shader-part budget: `vk shader parts` stopped at 22 s
+  ("private memory grew 2048 MB") with 3,955 of 14,603 programs made, because the budget counted the game's own
+  loading too. Now each job's own growth is counted (shared among jobs running beside it) against
+  `NXGFX_PREWARM_BUDGET_MB` or a twelfth of the machine's memory within 2-6 GB, and the part threads are a quarter of
+  the CPU's threads (2-4, below normal priority). `chain8` reruns the first run (keys and cache set aside) ->
+  `c8_wonder.out`.
+- **Ray tracing, NVN2 argument layouts: not obtainable from the owner's games.** In MKW's and DKB's `main` the
+  ray-tracing names (`nvnCommandBufferDispatchRays` …) appear only in the game's proc loader (name -> GetProcAddress
+  -> a global pointer: MKW `main+0xdd4f84`, pointer via GOT `0x36e0208`; DKB `main+0x5de2ec`, GOT `0x245a680`); no code
+  in either game loads that pointer again (no call site), and the implementation is the system's NVN driver, not in
+  `main` or `sdk` (sdk exports only `nvnBootstrapLoader`, no `nvnCommandBuffer*`). So there is no caller to read the
+  arguments from and no callee to disassemble; a game that traces rays is needed.
+- **MK8D kart blob:** pass 31's pixel shader `044c744ceb0df7c2` reads the screen-space shadow mask (`fp_t_tcb_26`,
+  sampled at the projected position) as `.x` only. With its texture and view swizzles both (G, B, A, R), `.x` is B
+  composed (Turbo's rule) or G with the view replacing; neither is R, where passes 29 / 30 put the karts' blobs. The
+  blob reaches the picture through another shader; not traced further this round.
+- **Capture / replay: not started** (no nxnative capture source in reach; lower than the hangs and the races).
 
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
@@ -1942,3 +1989,18 @@ lane K's; G4 please review).**
   switches on `NXGFX_MESH_REF`); (2) the cube-map compute write: log the storage images bound to 881a4d611e825d6c (handle,
   registered texture, view size) when it is dispatched; mkw-recomp's #468 (a released texture a later image was written
   over) is the reference to diff against; (3) the 20 GB memory growth (`K-mkw16`, watchdog at 383 s).
+- **`K-mkw18-skip` (`NXGFX_MESH_REF=skip`: indirect / 3D mesh draws skipped, `first` kept; `NXGFX_CHECKPOINTS=all`;
+  `NXGFX_LOG_SHADER=881a4d611e825d6c`):** no device loss in 68 s (the mesh faults came at 18-45 s with everything
+  drawn); stopped by the memory watchdog (20.9 GB at 68 s). New switch modes: `NXGFX_MESH_REF=skip` / `first0` / `1`.
+  The cube pass 881a4d611e825d6c binds valid images: a 128x128 cube (t8, ser37540) and a 128x128x12 cube array (t9),
+  one storage view per level 0..6, every view made. It is a mip chain: each dispatch runs 2x2x6 groups of 256 for
+  every level down to 2x2, so most stores fall outside the smaller levels. Hardware ignores such stores; Vulkan
+  leaves them undefined without `robustImageAccess`, which nxrs did not enable (mkw-recomp enables every feature the
+  driver offers). **Fix (`vk/device.rs`, small, lane K):** `robustImageAccess` on with G4's buffer robustness (same
+  `NXGFX_ROBUST` switch, default on for NVIDIA). Verifying in `K-mkw19`.
+- **Memory (for G4, numbers from `K-mkw16` / `K-mkw18`):** private memory jumps by 6-8 GB within 10 s when the title
+  scene first loads, to 16-17 GB, then grows ~0.6 GB a minute to the 20 GB watchdog (mkw-recomp: 10.6 GB private in a
+  race on Windows). At 93 s: graphics allocator 10.6 GB in blocks (textures 36,958 = 6.6 GB, sparse tiles 1.7 GB,
+  scratch 0.5 GB, pools 0.3 GB), guest heap 3.1 GB, physical maps 1.0 GB. The pipeline prewarm alone added 2.4 GB for
+  334 pipelines (~7 MB each: NVIDIA keeps compiled pipelines in process memory), and pipelines made during play add
+  the same way. Not a released-texture build-up like mkw-recomp's #468: nxrs drops parked images after 8 frames.

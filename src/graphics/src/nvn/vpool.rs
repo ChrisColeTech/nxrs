@@ -65,12 +65,14 @@ fn unreserve(a: u64) {
     use windows_sys::Win32::System::Memory::{VirtualFree, MEM_RELEASE};
     unsafe { VirtualFree(a as *mut _, 0, MEM_RELEASE) };
 }
-#[cfg(not(windows))]
-fn reserve(_len: u64) -> u64 {
-    0
+#[cfg(target_os = "linux")]
+fn reserve(len: u64) -> u64 {
+    nxrt::mem::reserve_anywhere(len, false).unwrap_or(0)
 }
-#[cfg(not(windows))]
-fn unreserve(_a: u64) {}
+#[cfg(target_os = "linux")]
+fn unreserve(a: u64) {
+    nxrt::mem::release(a)
+}
 
 /// vmode: 0 undecided, 1 alias, 2 sparse.
 pub const UNDECIDED: i32 = 0;

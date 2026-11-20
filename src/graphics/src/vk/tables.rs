@@ -126,6 +126,13 @@ impl Tables {
         i.buf_tex.insert(id, t);
         i.buf_pending.push(id);
     }
+    /// The buffer textures over [lo, hi) are written again at the next submission: their memory pool went away or a
+    /// new one took its place (their descriptors name the old buffer's device address: a write through one faulted).
+    pub fn requeue_buf_texs(&self, lo: u64, hi: u64) {
+        let mut i = self.inner.lock().unwrap();
+        let ids: Vec<i32> = i.buf_tex.iter().filter(|(_, t)| (t.mem as u64) < hi && t.mem as u64 + (t.d.width as u64).max(1) > lo).map(|(k, _)| *k).collect();
+        i.buf_pending.extend(ids);
+    }
     pub fn buf_tex_at(&self, id: i32) -> Option<crate::nvn::obj::tex_t> {
         self.inner.lock().unwrap().buf_tex.get(&id).copied()
     }

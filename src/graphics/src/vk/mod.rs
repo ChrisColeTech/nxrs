@@ -210,15 +210,15 @@ fn host_cap() -> u64 {
 }
 
 #[cfg(windows)]
-fn total_phys() -> u64 {
+pub(crate) fn total_phys() -> u64 {
     use windows_sys::Win32::System::SystemInformation::{GlobalMemoryStatusEx, MEMORYSTATUSEX};
     let mut m: MEMORYSTATUSEX = unsafe { core::mem::zeroed() };
     m.dwLength = core::mem::size_of::<MEMORYSTATUSEX>() as u32;
     if unsafe { GlobalMemoryStatusEx(&mut m) } != 0 { m.ullTotalPhys } else { 0 }
 }
-#[cfg(not(windows))]
-fn total_phys() -> u64 {
-    0
+#[cfg(target_os = "linux")]
+pub(crate) fn total_phys() -> u64 {
+    nxrt::linux::total_memory()
 }
 
 /// Validation messages counted since the process started (errors, warnings).

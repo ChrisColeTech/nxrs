@@ -26,6 +26,17 @@ serde_json = "1"
 nxrt = { package = "runtime", path = "../runtime" }
 nxconfig = { package = "config", path = "../config" }
 shaders = { path = "../shaders" }
+# ARM's astc-encoder (vendored C++), for the GPU tests only: encodes the ASTC test images and is the CPU reference
+# decoder for the GPU decoder.
+ctt-astcenc = { version = "0.6", optional = true }
+
+# The windowed present test runs its own event loop on the main thread.
+[[test]]
+name = "window"
+harness = false
+required-features = ["gpu-tests"]
+
+[target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = [
     "Win32_Foundation",
     "Win32_System_Memory",
@@ -36,12 +47,6 @@ windows-sys = { version = "0.61", features = [
     "Win32_Media",
     "Win32_Security",
 ] }
-# ARM's astc-encoder (vendored C++), for the GPU tests only: encodes the ASTC test images and is the CPU reference
-# decoder for the GPU decoder.
-ctt-astcenc = { version = "0.6", optional = true }
 
-# The windowed present test runs its own event loop on the main thread.
-[[test]]
-name = "window"
-harness = false
-required-features = ["gpu-tests"]
+[target.'cfg(target_os = "linux")'.dependencies]
+libc = "0.2"

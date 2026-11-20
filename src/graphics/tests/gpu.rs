@@ -998,3 +998,149 @@ fn indirect_dispatch_through_the_count_clamp() {
     assert_eq!(bad, 0);
     assert_eq!(validation_errors(), e0, "validation errors");
 }
+
+/// A plain indirect draw whose record holds garbage counts (vertices x instances in the billions) is held to the draw
+/// limits before the pass reads it: the triangle is drawn, the GPU does not work for seconds.
+#[test]
+fn indirect_draw_with_garbage_counts_is_held() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let rt = n.texture(W, H, f::RGBA8, 0, false);
+    let tri = tri_program(&mut n);
+    let quad: Vec<f32> = [[-1.0f32, -1.0], [3.0, -1.0], [-1.0, 3.0]].iter().flat_map(|p| [p[0], p[1], 0.0, 0.0, 1.0, 0.0, 1.0]).collect();
+    let qb = n.data.put(&quad, 256);
+    let rec = n.data.put(&[3u32, 0xffff_fff0, 0, 0], 256);
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    clear(&mut n, [0.0, 0.0, 1.0, 1.0]);
+    bind_program(&mut n, &tri);
+    n.vertex_layout(&[(f::RGB32F, 0), (f::RGBA32F, 12)], 28);
+    unsafe {
+        nvnCommandBufferBindVertexBuffer(n.c(), 0, qb, quad.len() * 4);
+        nvnCommandBufferDrawArraysIndirect(n.c(), prim::TRIANGLES, rec);
+    }
+    let t0 = std::time::Instant::now();
+    n.submit_wait();
+    eprintln!("garbage indirect draw: {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
+    let got = n.read_rgba8(&rt, W, H);
+    let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|_| Some([0, 255, 0, 255])).collect();
+    check("indirect draw with garbage counts", &got, &want, 0);
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// A queue that waits on another queue's sync while that queue is parked at an event wait runs after the parked work
+/// (asynchronous replay: the sync's fence named the other queue's op before it had parked, and the wait passed at once:
+/// the waiting queue read memory the parked work had not written yet).
+#[test]
+fn queue_waits_for_another_queues_parked_work() {
+    use nxgfx::nvn::queue::*;
+    use nxgfx::nvn::sync::*;
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let d = n.d();
+    let mut qb = NVNqueueBuilder::boxed();
+    let mut qb_obj = NVNqueue::boxed();
+    let mut cmd_b = NVNcommandBuffer::boxed();
+    let mut ctl_b = vec![0u64; 512];
+    let mut cmd_pool_b = Pool::new(d, 1 << 16, CPU_POOL);
+    unsafe {
+        nvnQueueBuilderSetDevice(&mut *qb, d);
+        nvnQueueBuilderSetDefaults(&mut *qb);
+        assert_eq!(nvnQueueInitialize(&mut *qb_obj, &*qb), 1);
+        nvnCommandBufferInitialize(&mut *cmd_b, d);
+        nvnCommandBufferAddCommandMemory(&mut *cmd_b, cmd_pool_b.p(), 0, 1 << 16);
+        nvnCommandBufferAddControlMemory(&mut *cmd_b, ctl_b.as_mut_ptr() as *mut u8, ctl_b.len() * 8);
+    }
+    let (eoff, _) = n.data.alloc(16, 16);
+    n.data.mem.slice()[eoff..eoff + 4].fill(0);
+    let mut eb = NVNeventBuilder::boxed();
+    let mut ev = NVNevent::boxed();
+    unsafe {
+        nvnEventBuilderSetDefaults(&mut *eb);
+        nvnEventBuilderSetStorage(&mut *eb, n.data.p(), eoff as i64);
+        assert_eq!(nvnEventInitialize(&mut *ev, &*eb), 1);
+    }
+    let pattern: Vec<u8> = (0..256).map(|i| (i * 7 + 3) as u8).collect();
+    let src = n.data.put(&pattern, 256);
+    let (doff, dst) = n.data.alloc(256, 256);
+    let (d2off, dst2) = n.data.alloc(256, 256);
+    n.data.mem.slice()[doff..doff + 256].fill(0);
+    n.data.mem.slice()[d2off..d2off + 256].fill(0);
+    let mut sync_a = NVNsync::boxed();
+    let mut sync_b = NVNsync::boxed();
+    unsafe {
+        nvnSyncInitialize(&mut *sync_a, d);
+        nvnSyncInitialize(&mut *sync_b, d);
+        // A: parked at its event wait, then src -> dst
+        nvnCommandBufferBeginRecording(n.c());
+        nvnCommandBufferWaitEvent(n.c(), &*ev, event_wait::EQUAL as i32, 1);
+        nvnCommandBufferCopyBufferToBuffer(n.c(), src, dst, 256, 0);
+        let h = nvnCommandBufferEndRecording(n.c());
+        nvnQueueSubmitCommands(&mut *n.queue, 1, &h);
+        nvnQueueFenceSync(&mut *n.queue, &mut *sync_a, 0, 0);
+        // B: waits for A's sync, then dst -> dst2
+        nvnQueueWaitSync(&mut *qb_obj, &*sync_a);
+        nvnCommandBufferBeginRecording(&mut *cmd_b);
+        nvnCommandBufferCopyBufferToBuffer(&mut *cmd_b, dst, dst2, 256, 0);
+        let h = nvnCommandBufferEndRecording(&mut *cmd_b);
+        nvnQueueSubmitCommands(&mut *qb_obj, 1, &h);
+        nvnQueueFenceSync(&mut *qb_obj, &mut *sync_b, 0, 0);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(100));
+    assert_eq!(unsafe { nvnSyncWait(&*sync_b, 0) }, sync_wait::TIMEOUT_EXPIRED, "queue B ran before A's parked work");
+    unsafe {
+        nvnEventSignal(&mut *ev, event_signal::WRITE, 1);
+        let r = nvnSyncWait(&*sync_b, 5_000_000_000);
+        assert!(r != sync_wait::TIMEOUT_EXPIRED, "queue B never ran");
+    }
+    assert_eq!(&n.data.mem.slice()[d2off..d2off + 256], &pattern[..], "queue B copied before A wrote");
+    unsafe {
+        nvnCommandBufferFinalize(&mut *cmd_b);
+        nvnQueueFinalize(&mut *qb_obj);
+    }
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// A sync fenced inside a command buffer and reused every frame covers the new submission once it is submitted: it no
+/// longer reads as signalled (last frame's fence) while this frame's work still waits to run.
+#[test]
+fn reused_command_buffer_sync_covers_the_new_submission() {
+    use nxgfx::nvn::queue::*;
+    use nxgfx::nvn::sync::*;
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let d = n.d();
+    let (eoff, _) = n.data.alloc(16, 16);
+    n.data.mem.slice()[eoff..eoff + 4].fill(0);
+    let mut eb = NVNeventBuilder::boxed();
+    let mut ev = NVNevent::boxed();
+    let mut s = NVNsync::boxed();
+    unsafe {
+        nvnEventBuilderSetDefaults(&mut *eb);
+        nvnEventBuilderSetStorage(&mut *eb, n.data.p(), eoff as i64);
+        assert_eq!(nvnEventInitialize(&mut *ev, &*eb), 1);
+        nvnSyncInitialize(&mut *s, d);
+        // last frame: fenced and done
+        nvnCommandBufferBeginRecording(n.c());
+        nvnCommandBufferFenceSync(n.c(), &mut *s, 0, 0);
+        let h = nvnCommandBufferEndRecording(n.c());
+        nvnQueueSubmitCommands(&mut *n.queue, 1, &h);
+        assert!(nvnSyncWait(&*s, 5_000_000_000) != sync_wait::TIMEOUT_EXPIRED);
+        // this frame: held at an event wait before its fence
+        nvnCommandBufferBeginRecording(n.c());
+        nvnCommandBufferWaitEvent(n.c(), &*ev, event_wait::EQUAL as i32, 1);
+        nvnCommandBufferFenceSync(n.c(), &mut *s, 0, 0);
+        let h = nvnCommandBufferEndRecording(n.c());
+        nvnQueueSubmitCommands(&mut *n.queue, 1, &h);
+    }
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(unsafe { nvnSyncWait(&*s, 0) }, sync_wait::TIMEOUT_EXPIRED, "the sync read as signalled before its submission ran");
+    unsafe {
+        nvnEventSignal(&mut *ev, event_signal::WRITE, 1);
+        assert!(nvnSyncWait(&*s, 5_000_000_000) != sync_wait::TIMEOUT_EXPIRED, "the sync never signalled");
+    }
+    assert_eq!(validation_errors(), e0, "validation errors");
+}

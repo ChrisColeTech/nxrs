@@ -660,13 +660,19 @@ fn clamp_pipe(g: &Gpu) -> Option<(vk::PipelineLayout, vk::Pipeline)> {
 /// Indirect records `n` x `stride` bytes at (b, o) copied into staging with their first three words held to `maxv`
 /// (outside a pass: a copy and a dispatch). A count from garbage made the GPU fault or work for ever (GPU resets).
 /// `NXGFX_CLAMP_INDIRECT=0`: the records as they are. Returns where to read them from.
-fn clamped_indirect(g: &Gpu, sub: &mut Sub, b: vk::Buffer, o: u64, n: u32, stride: u32, maxv: [u32; 3]) -> (vk::Buffer, u64) {
+fn clamp_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var("NXGFX_CLAMP_INDIRECT").as_deref() != Ok("0")) || n == 0 || stride % 4 != 0 {
+    *ON.get_or_init(|| std::env::var("NXGFX_CLAMP_INDIRECT").as_deref() != Ok("0"))
+}
+
+/// `n` records of `stride` bytes, the last `last` bytes long; `maxv`: the first three words' limits, and (when not 0) the
+/// limit of word 0 x word 1.
+fn clamped_indirect(g: &Gpu, sub: &mut Sub, b: vk::Buffer, o: u64, n: u32, stride: u32, last: u32, maxv: [u32; 4]) -> (vk::Buffer, u64) {
+    if !clamp_on() || n == 0 || stride % 4 != 0 || last < 12 {
         return (b, o);
     }
     let Some((layout, pipe)) = clamp_pipe(g) else { return (b, o) };
-    let bytes = n as u64 * stride as u64;
+    let bytes = (n as u64 - 1) * stride as u64 + last as u64;
     let (sb, so) = sub.stage_bytes_fresh(g, &vec![0u8; bytes as usize]);
     let Some(addr) = sub.addr_of(sb).map(|a| a + so) else { return (b, o) };
     let dev = g.dev();
@@ -674,7 +680,7 @@ fn clamped_indirect(g: &Gpu, sub: &mut Sub, b: vk::Buffer, o: u64, n: u32, strid
         dev.cmd_copy_buffer(sub.main, b, sb, &[vk::BufferCopy { src_offset: o, dst_offset: so, size: bytes }]);
         super::queue::full_barrier(g, sub.main);
         dev.cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe);
-        let pc: [u32; 8] = [addr as u32, (addr >> 32) as u32, n, stride / 4, maxv[0], maxv[1], maxv[2], 0];
+        let pc: [u32; 8] = [addr as u32, (addr >> 32) as u32, n, stride / 4, maxv[0], maxv[1], maxv[2], maxv[3]];
         dev.cmd_push_constants(sub.main, layout, vk::ShaderStageFlags::COMPUTE, 0, core::slice::from_raw_parts(pc.as_ptr() as *const u8, 32));
         dev.cmd_dispatch(sub.main, 1, 1, 1);
         super::queue::full_barrier(g, sub.main);
@@ -685,8 +691,28 @@ fn clamped_indirect(g: &Gpu, sub: &mut Sub, b: vk::Buffer, o: u64, n: u32, strid
 }
 
 /// The device's compute workgroup count limits.
-fn compute_limits(g: &Gpu) -> [u32; 3] {
-    g.d.props.limits.max_compute_work_group_count
+fn compute_limits(g: &Gpu) -> [u32; 4] {
+    let l = g.d.props.limits.max_compute_work_group_count;
+    [l[0], l[1], l[2], 0]
+}
+
+/// An indirect draw's limits: 16M vertices or indices, 256K instances, 256M of the two together (a garbage record
+/// drew for seconds; NXGFX_DRAW_LIMIT = the product's limit in millions).
+fn draw_limits() -> [u32; 4] {
+    static P: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let prod = *P.get_or_init(|| std::env::var("NXGFX_DRAW_LIMIT").ok().and_then(|v| v.parse::<u32>().ok()).map(|m| m.saturating_mul(1 << 20)).unwrap_or(1 << 28));
+    [1 << 24, 1 << 18, u32::MAX, prod]
+}
+
+/// A plain indirect draw's record, held to `draw_limits` before the draw reads it. The copy and the dispatch may not be
+/// inside a render pass: the pass ends here (the draw's set-up begins it again).
+fn clamped_draw_record(g: &Gpu, sub: &mut Sub, qs: &mut QState, ind: u64, rec: u32) -> Option<(vk::Buffer, u64)> {
+    let (b, o, _) = super::mem::resolve(g, sub, ind, rec as u64)?;
+    if !clamp_on() {
+        return Some((b, o));
+    }
+    end_pass(g, sub, qs);
+    Some(clamped_indirect(g, sub, b, o, 1, rec, rec, draw_limits()))
 }
 
 fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mesh) {
@@ -702,13 +728,16 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
     // NXGFX_MESH_REF=1 (diagnosis, lane K): mkw-recomp's rule for MKW's mesh draws: only direct 1D draws, from group 0
     // (its `first` ignored); indirect, 3D and multi draws skipped
     static REF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    let refm = *REF.get_or_init(|| std::env::var("NXGFX_MESH_REF").is_ok_and(|v| v == "1"));
-    if refm && (indirect || m.three_d != 0) {
+    // 1 = both; skip = only the skipping; first0 = only `first` dropped
+    let mode = REF.get_or_init(|| std::env::var("NXGFX_MESH_REF").is_ok_and(|v| v == "1" || v == "skip"));
+    static FIRST0: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let first0 = *FIRST0.get_or_init(|| std::env::var("NXGFX_MESH_REF").is_ok_and(|v| v == "1" || v == "first0"));
+    if *mode && (indirect || m.three_d != 0) {
         crate::log::red_once("NXGFX_MESH_REF: indirect / 3D mesh draws skipped (mkw-recomp's rule)");
         super::perf::inc(super::perf::C::DrawsSkipped);
         return;
     }
-    let m = if refm { crate::nvn::cmd2::p_mesh { first: 0, ..m } } else { m };
+    let m = if first0 { crate::nvn::cmd2::p_mesh { first: 0, ..m } } else { m };
     // indirect: build {x, y, z} records first (a copy is not allowed inside a pass)
     let mut args: Option<(vk::Buffer, u64, u32)> = None;
     if indirect {
@@ -730,7 +759,8 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
         unsafe { dev.cmd_copy_buffer(sub.main, sb, ab, &regions) };
         barrier(g, sub);
         // the game's counts held to the device's limits (GPU resets in Mario Kart World's mesh draws)
-        let (ab, ao) = clamped_indirect(g, sub, ab, ao, n, 12, mesh_limits(g));
+        let l = mesh_limits(g);
+        let (ab, ao) = clamped_indirect(g, sub, ab, ao, n, 12, 12, [l[0], l[1], l[2], 0]);
         args = Some((ab, ao, n));
     }
     // the draw records the task / mesh shader reads its first workgroup from (lane S: `mesh_draw`, stride at push
@@ -799,13 +829,20 @@ fn multi_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mu
     }
     let indexed = m.itype >= 0;
     let base = p_draw { prim: m.prim, instances: 1, ..Default::default() };
-    if !draw_setup(g, sub, qs, base.prim, 0) {
-        return;
-    }
     let rec_n = if indexed { 20 } else { 16 };
     let stride = if m.stride > 0 { m.stride as u32 } else { rec_n };
     let span = stride as u64 * (m.max as u64 - 1) + rec_n as u64;
     let (Some((ib, io, _)), Some((cb, co, _))) = (super::mem::resolve(g, sub, m.ind, span), super::mem::resolve(g, sub, m.cnt, 4)) else { return };
+    // the records held to the draw limits first (outside the pass); the count is held to m.max by Vulkan
+    let (ib, io) = if clamp_on() && stride % 4 == 0 && m.max <= 4096 {
+        end_pass(g, sub, qs);
+        clamped_indirect(g, sub, ib, io, m.max as u32, stride, rec_n, draw_limits())
+    } else {
+        (ib, io)
+    };
+    if !draw_setup(g, sub, qs, base.prim, 0) {
+        return;
+    }
     let dev = g.dev();
     unsafe {
         if indexed {
@@ -1778,6 +1815,23 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                     }
                 } + sb;
                 let view = super::perf::timed_fine(super::perf::C::TexViewNs, || tex_view(g, sub, tid, *ty | (ifmt as u32) << 16, is_img));
+                // NXGFX_LOG_SHADER=<key> (diagnosis, lane K): every texture / image this shader is bound to, with its image
+                static LOGK: std::sync::OnceLock<String> = std::sync::OnceLock::new();
+                static LOGN: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                let logk = LOGK.get_or_init(|| std::env::var("NXGFX_LOG_SHADER").unwrap_or_default());
+                if !logk.is_empty() && m.key.iter().map(|b| format!("{b:02x}")).collect::<String>() == *logk && LOGN.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 60 {
+                    let what = g
+                        .tables
+                        .tex_at(tid)
+                        .and_then(|(serial, v)| {
+                            g.images.lock().unwrap().by_serial.get(&serial).map(|im| {
+                                let d = &im.tex.d;
+                                format!("ser{serial} fmt{:#x} {}x{}x{} levels {} t{} at {:#x} v{:?}", d.format, d.width, d.height, d.depth, d.levels, d.target, im.tex.mem as u64, v.map(|v| (v.base_level, v.min_layer, v.format)))
+                            })
+                        })
+                        .unwrap_or_else(|| "no registered image".into());
+                    crate::log::red(&format!("shader {logk}: {}{b} = handle word {word:#x} id {tid}: {what}; view {}", if is_img { "img" } else { "tex" }, if view == vk::ImageView::null() { "null" } else { "made" }));
+                }
                 if dumping {
                     let what = g
                         .tables
@@ -2430,12 +2484,13 @@ fn draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw) {
     checkpoint(g, sub, qs, d.ind == 0, || format!("a draw of {} vertices x{}{}", d.count, d.instances, if d.ind != 0 { format!(", indirect at {:#x}", d.ind) } else { String::new() }));
     let inst = if d.instances <= 0 { 1 } else { d.instances as u32 };
     append::draw(g, sub, qs, d.ind, false);
+    let rec = if d.ind != 0 { clamped_draw_record(g, sub, qs, d.ind, 16) } else { None };
     if !draw_setup(g, sub, qs, d.prim, d.base_instance as u32) {
         return;
     }
     let dev = g.dev();
     if d.ind != 0 {
-        if let Some((b, o, _)) = super::mem::resolve(g, sub, d.ind, 16) {
+        if let Some((b, o)) = rec {
             unsafe { dev.cmd_draw_indirect(sub.main, b, o, 1, 16) };
         }
         return;
@@ -2465,6 +2520,7 @@ fn draw_idx(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw_idx) {
         _ => 4,
     };
     append::draw(g, sub, qs, d.ind, true);
+    let rec = if d.ind != 0 { clamped_draw_record(g, sub, qs, d.ind, 20) } else { None };
     if !draw_setup(g, sub, qs, d.prim, d.base_instance as u32) {
         return;
     }
@@ -2512,7 +2568,7 @@ fn draw_idx(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw_idx) {
     unsafe {
         dev.cmd_bind_index_buffer(sub.main, ib, io, ity);
         if d.ind != 0 {
-            if let Some((b, o, _)) = super::mem::resolve(g, sub, d.ind, 20) {
+            if let Some((b, o)) = rec {
                 dev.cmd_draw_indexed_indirect(sub.main, b, o, 1, 20);
             }
         } else {
@@ -2530,7 +2586,7 @@ fn dispatch(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
     };
     let Some(pipe) = g.compute_pipeline(&cs) else { return };
     // an indirect dispatch's group counts held to the device's limits, before the dispatch's own bindings
-    let ind = if d.ind != 0 { super::mem::resolve(g, sub, d.ind, 12).map(|(b, o, _)| clamped_indirect(g, sub, b, o, 1, 12, compute_limits(g))) } else { None };
+    let ind = if d.ind != 0 { super::mem::resolve(g, sub, d.ind, 12).map(|(b, o, _)| clamped_indirect(g, sub, b, o, 1, 12, 12, compute_limits(g))) } else { None };
     super::perf::inc(super::perf::C::Dispatches);
     unsafe { g.dev().cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe) };
     bind_sets(g, sub, qs, std::slice::from_ref(&cs), vk::PipelineBindPoint::COMPUTE, [d.x as u32, d.y as u32, d.z as u32], 0);

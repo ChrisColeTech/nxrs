@@ -140,6 +140,9 @@ impl Device {
             ash::khr::win32_surface::NAME.as_ptr(),
             ash::khr::get_surface_capabilities2::NAME.as_ptr(),
         ];
+        // Linux: the window systems' surfaces (whichever the loader has; the list is filtered below)
+        #[cfg(target_os = "linux")]
+        exts.extend([ash::khr::xlib_surface::NAME.as_ptr(), ash::khr::xcb_surface::NAME.as_ptr(), ash::khr::wayland_surface::NAME.as_ptr()]);
         let inst_exts: Vec<String> = unsafe { entry.enumerate_instance_extension_properties(None) }
             .unwrap_or_default()
             .iter()
@@ -434,7 +437,11 @@ impl Device {
             .dynamic_rendering(true)
             .synchronization2(true)
             .maintenance4(f13.maintenance4 != 0)
-            .shader_demote_to_helper_invocation(f13.shader_demote_to_helper_invocation != 0);
+            .shader_demote_to_helper_invocation(f13.shader_demote_to_helper_invocation != 0)
+            // image stores past an image's size are discarded, as the console's surface stores ignore them: MKW 1.8.0's
+            // cube-map mip pass (881a4d611e825d6c) runs the same 2x2x6 groups for every level, down to 2x2, and lost the
+            // device with an invalid write (lane K); mkw-recomp enables every feature the driver offers
+            .robust_image_access(f13.robust_image_access != 0 && env_on("NXGFX_ROBUST").unwrap_or(props.vendor_id == 0x10de));
         let mut e_eds2 = vk::PhysicalDeviceExtendedDynamicState2FeaturesEXT::default()
             .extended_dynamic_state2(true)
             .extended_dynamic_state2_logic_op(caps.logic_op_dyn)

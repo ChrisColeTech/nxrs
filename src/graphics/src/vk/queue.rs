@@ -113,6 +113,8 @@ struct Parked {
     wait_receipt: Option<u64>,
     /// presents queued behind the parked work: (texture, crop), shown when it has run
     presents: Vec<(crate::nvn::obj::tex_t, Option<[i32; 4]>)>,
+    /// waits queued while parked: (stream offset, receipt): the work from that offset on runs once the receipt resolved
+    later: Vec<(usize, u64)>,
 }
 
 pub struct SubmitState {
@@ -751,12 +753,11 @@ enum Op {
 /// Queue `q` waits for receipt `r` (a sync of another queue's parked work) before anything else it was given.
 fn park_on_receipt(st: &mut SubmitState, q: u64, r: u64) {
     match st.parked.get_mut(&q) {
-        // already parked: the receipt joins the end of its work as a wait of its own is not representable inside a
-        // stream; the queue's parked work runs first, then (the next park) waits
-        Some(p) if p.wait_receipt.is_none() && p.stream.is_empty() => p.wait_receipt = Some(r),
-        Some(_) => {}
+        Some(p) if p.wait_receipt.is_none() && p.stream.is_empty() && p.later.is_empty() => p.wait_receipt = Some(r),
+        // already parked with work: the wait sits at the end of that work (the work queued after it runs once it passed)
+        Some(p) => p.later.push((p.stream.len(), r)),
         None => {
-            st.parked.insert(q, Parked { stream: Vec::new(), receipts: Vec::new(), wait_receipt: Some(r), presents: Vec::new() });
+            st.parked.insert(q, Parked { stream: Vec::new(), receipts: Vec::new(), wait_receipt: Some(r), presents: Vec::new(), later: Vec::new() });
         }
     }
 }
@@ -929,8 +930,14 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
             Op::Call(f) => f(g),
             Op::Retry => retry_parked(g),
             Op::WaitReceipt { q, r } => {
+                // an async fence: the receipt its op left when its queue was parked (else the timeline orders it)
+                let was_async = r & RECEIPT == 0;
+                let r = if was_async { a.fences.lock().unwrap().range((r & !ASYNC)..).next().map(|(_, v)| *v).unwrap_or(0) } else { r };
                 let mut st = g.q.sub.lock().unwrap();
-                if !g.q.receipts.lock().unwrap().contains_key(&r) {
+                if r & RECEIPT != 0 && !g.q.receipts.lock().unwrap().contains_key(&r) {
+                    if was_async {
+                        if !ASYNC_WAIT_LOGGED.swap(true, Ordering::Relaxed) { crate::vklog!("a queue waits on another queue's parked work (an async fence of a submit made while that queue waited on an event)"); }
+                    }
                     park_on_receipt(&mut st, q, r);
                 }
             }
@@ -1004,6 +1011,9 @@ pub fn after_queued(f: Box<dyn FnOnce(&'static Gpu) + Send>) {
     }
 }
 
+static ASYNC_WAIT_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static CB_FENCE_LOGGED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 /// The last op queued for each NVN queue (its fences name it).
 static LAST_SEQ: Mutex<Option<HashMap<u64, u64>>> = Mutex::new(None);
 
@@ -1012,8 +1022,29 @@ pub fn submit(qserial: u64, origin_ll: bool, handles: &[u64]) {
     let Some(g) = Gpu::try_get() else { return };
     if aq_on() {
         let mut stream = Vec::new();
-        unsafe { crate::nvn::cmd::for_each_record(handles, |_, r| stream.extend_from_slice(r)) };
+        let mut syncs = Vec::new();
+        unsafe {
+            crate::nvn::cmd::for_each_record(handles, |op, r| {
+                if op == crate::nvn::obj::op::FENCE_SYNC && r.len() >= 16 {
+                    syncs.push(core::ptr::read_unaligned(r.as_ptr().add(8) as *const u64));
+                }
+                stream.extend_from_slice(r)
+            })
+        };
         let seq = aq_push(g, Op::Submit { q: qserial, ll: origin_ll, stream });
+        // a sync fenced inside these command buffers covers this submission from now: one reused every frame still held
+        // last frame's (done) fence until the replay thread reached it, so a wait on it passed while this frame's work was
+        // still queued and the game rewrote memory that work reads (Turbo fences at submit; NXGFX_ASYNC=0 replays at once)
+        if !syncs.is_empty() && !CB_FENCE_LOGGED.swap(true, Ordering::Relaxed) {
+            crate::vklog!("command-buffer fence syncs: fenced when submitted (their replay sets the exact value)");
+        }
+        for s in syncs.into_iter().filter(|&s| s != 0) {
+            let so = s as *mut crate::nvn::obj::sync_t;
+            unsafe {
+                core::ptr::write_volatile(&mut (*so).fence, ASYNC | seq);
+                core::ptr::write_volatile(&mut (*so).fenced, 1);
+            }
+        }
         LAST_SEQ.lock().unwrap().get_or_insert_with(HashMap::new).insert(qserial, seq);
         return;
     }
@@ -1056,7 +1087,7 @@ fn run_stream(g: &'static Gpu, st: &mut SubmitState, qserial: u64, origin_ll: bo
     match rest {
         // parked again: its receipts wait for the rest
         Some(off) => {
-            st.parked.insert(qserial, Parked { stream: stream[off..].to_vec(), receipts, wait_receipt: None, presents: Vec::new() });
+            st.parked.insert(qserial, Parked { stream: stream[off..].to_vec(), receipts, wait_receipt: None, presents: Vec::new(), later: Vec::new() });
             // the retry thread (it also logs a queue parked for long)
             request_retry(g);
         }
@@ -1109,8 +1140,30 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
             return;
         }
         for q in ready {
-            let p = st.parked.remove(&q).unwrap();
+            let mut p = st.parked.remove(&q).unwrap();
             let ll = st.qstates.get(&q).map(|s| s.origin_ll).unwrap_or(true);
+            if let Some(&(off, r)) = p.later.first() {
+                // the work up to a queued wait runs; the rest parks behind that wait (its receipts and presents last)
+                let tail = p.stream.split_off(off.min(p.stream.len()));
+                let later: Vec<(usize, u64)> = p.later[1..].iter().map(|&(o, x)| (o - off, x)).collect();
+                if !p.stream.is_empty() {
+                    run_stream(g, st, q, ll, p.stream, Vec::new());
+                }
+                match st.parked.get_mut(&q) {
+                    Some(again) => {
+                        let base = again.stream.len();
+                        again.later.push((base, r));
+                        again.later.extend(later.into_iter().map(|(o, x)| (o + base, x)));
+                        again.stream.extend_from_slice(&tail);
+                        again.receipts.extend(p.receipts);
+                        again.presents.extend(p.presents);
+                    }
+                    None => {
+                        st.parked.insert(q, Parked { stream: tail, receipts: p.receipts, wait_receipt: Some(r), presents: p.presents, later });
+                    }
+                }
+                continue;
+            }
             if !p.stream.is_empty() || !p.receipts.is_empty() {
                 run_stream(g, st, q, ll, p.stream, p.receipts);
             }
@@ -1167,10 +1220,15 @@ pub fn queue_fence(qserial: u64) -> u64 {
 /// nvnQueueWaitSync: one physical queue runs submissions in order (each starts with a full barrier), so a fence
 /// already submitted orders itself; a receipt of a parked queue parks this one too.
 pub fn queue_wait_fence(_qserial: u64, fence: u64) {
+    let Some(g) = Gpu::try_get() else { return };
     if fence & RECEIPT == 0 {
+        // an async fence of a submit that found its queue parked at an event wait resolves to that queue's receipt: the
+        // waiting queue must not run ahead of the parked work (the replay thread resolves it in queue order)
+        if fence & ASYNC != 0 && AQ.get().is_some() && !on_replay_thread() && aq_physical(fence).is_none() {
+            aq_push(g, Op::WaitReceipt { q: _qserial, r: fence });
+        }
         return;
     }
-    let Some(g) = Gpu::try_get() else { return };
     if g.q.receipts.lock().unwrap().contains_key(&fence) {
         return;
     }

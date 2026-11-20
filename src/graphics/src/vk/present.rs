@@ -42,6 +42,88 @@ pub struct Presenter {
     vsync: bool,
     /// made with room for frame generation's extra images
     framegen: bool,
+    /// Linux: which window system `hwnd` (the window) and `hinstance` (the display) belong to
+    #[cfg(target_os = "linux")]
+    ws: WsKind,
+}
+
+/// The window systems a Linux window can come from (`hwnd` holds the window, `hinstance` the display connection).
+#[cfg(target_os = "linux")]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum WsKind {
+    #[default]
+    None,
+    Xlib,
+    Xcb,
+    Wayland,
+}
+
+/// The host window on Linux: an X11 (Xlib or XCB) window or a Wayland surface, with its display connection.
+#[cfg(target_os = "linux")]
+pub fn set_window_unix(kind: WsKind, display: usize, window: u64) {
+    let Ok(g) = Gpu::get() else { return };
+    let mut p = g.present.lock().unwrap();
+    p.hwnd = window as isize;
+    p.hinstance = display as isize;
+    p.ws = kind;
+    p.stale = true;
+}
+
+/// The host window from its raw handles (any platform raw-window-handle names: Win32, Xlib, XCB, Wayland).
+pub fn set_window_raw(display: raw_window_handle::RawDisplayHandle, window: raw_window_handle::RawWindowHandle) -> Result<(), String> {
+    #[allow(unused_imports)]
+    use raw_window_handle::{RawDisplayHandle as D, RawWindowHandle as W};
+    match (display, window) {
+        (_, W::Win32(h)) => {
+            set_window(h.hwnd.get(), h.hinstance.map(|v| v.get()).unwrap_or(0));
+            Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        (D::Xlib(d), W::Xlib(w)) => {
+            set_window_unix(WsKind::Xlib, d.display.map_or(0, |p| p.as_ptr() as usize), w.window as u64);
+            Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        (D::Xcb(d), W::Xcb(w)) => {
+            set_window_unix(WsKind::Xcb, d.connection.map_or(0, |p| p.as_ptr() as usize), w.window.get() as u64);
+            Ok(())
+        }
+        #[cfg(target_os = "linux")]
+        (D::Wayland(d), W::Wayland(w)) => {
+            set_window_unix(WsKind::Wayland, d.display.as_ptr() as usize, w.surface.as_ptr() as u64);
+            Ok(())
+        }
+        (d, w) => Err(format!("no Vulkan surface for this window ({d:?}, {w:?})")),
+    }
+}
+
+/// The Vulkan surface of the host window.
+#[cfg(windows)]
+fn create_surface(g: &Gpu, p: &Presenter) -> Result<vk::SurfaceKHR, String> {
+    let ci = vk::Win32SurfaceCreateInfoKHR::default().hwnd(p.hwnd).hinstance(p.hinstance);
+    unsafe { g.d.win32_i.create_win32_surface(&ci, None) }.map_err(|e| format!("surface: {e}"))
+}
+
+/// The Vulkan surface of the host window: VK_KHR_xlib_surface, VK_KHR_xcb_surface or VK_KHR_wayland_surface.
+#[cfg(target_os = "linux")]
+fn create_surface(g: &Gpu, p: &Presenter) -> Result<vk::SurfaceKHR, String> {
+    let (e, i) = (&g.d.entry, &g.d.instance);
+    let r = match p.ws {
+        WsKind::Xlib => {
+            let ci = vk::XlibSurfaceCreateInfoKHR::default().dpy(p.hinstance as *mut _).window(p.hwnd as vk::Window);
+            unsafe { ash::khr::xlib_surface::Instance::new(e, i).create_xlib_surface(&ci, None) }
+        }
+        WsKind::Xcb => {
+            let ci = vk::XcbSurfaceCreateInfoKHR::default().connection(p.hinstance as *mut _).window(p.hwnd as vk::xcb_window_t);
+            unsafe { ash::khr::xcb_surface::Instance::new(e, i).create_xcb_surface(&ci, None) }
+        }
+        WsKind::Wayland => {
+            let ci = vk::WaylandSurfaceCreateInfoKHR::default().display(p.hinstance as *mut _).surface(p.hwnd as *mut _);
+            unsafe { ash::khr::wayland_surface::Instance::new(e, i).create_wayland_surface(&ci, None) }
+        }
+        WsKind::None => return Err("no window".into()),
+    };
+    r.map_err(|e| format!("surface ({:?}): {e}", p.ws))
 }
 
 /// The host window every NVN window presents into (Win32 HWND and HINSTANCE). 0 = headless.
@@ -138,8 +220,7 @@ fn destroy_swapchain(g: &Gpu, p: &mut Presenter) {
 
 fn create_swapchain(g: &Gpu, p: &mut Presenter, srgb: bool) -> Result<(), String> {
     if p.surface == vk::SurfaceKHR::null() {
-        let ci = vk::Win32SurfaceCreateInfoKHR::default().hwnd(p.hwnd).hinstance(p.hinstance);
-        p.surface = unsafe { g.d.win32_i.create_win32_surface(&ci, None) }.map_err(|e| format!("surface: {e}"))?;
+        p.surface = create_surface(g, p)?;
         let ok = unsafe { g.d.surface_i.get_physical_device_surface_support(g.d.pdev, g.d.qfam, p.surface) }.unwrap_or(false);
         if !ok {
             return Err("the queue cannot present to this window".into());
@@ -467,6 +548,17 @@ pub fn precise_sleep(ns: u64) {
         }
         let _ = CloseHandle;
     }
+    // Linux: clock_nanosleep on the monotonic clock to an absolute deadline (hrtimer precision, no drift from EINTR)
+    #[cfg(target_os = "linux")]
+    unsafe {
+        let mut ts: libc::timespec = core::mem::zeroed();
+        libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts);
+        let t = ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64 + ns;
+        let dl = libc::timespec { tv_sec: (t / 1_000_000_000) as _, tv_nsec: (t % 1_000_000_000) as _ };
+        while libc::clock_nanosleep(libc::CLOCK_MONOTONIC, libc::TIMER_ABSTIME, &dl, core::ptr::null_mut()) == libc::EINTR {}
+        return;
+    }
+    #[allow(unreachable_code)]
     std::thread::sleep(std::time::Duration::from_nanos(ns));
 }
 

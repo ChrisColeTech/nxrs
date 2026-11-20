@@ -158,8 +158,15 @@ fn protect_n(p: u64, n: u64, access: bool) {
         }
     }
 }
-#[cfg(not(windows))]
-fn protect_n(_p: u64, _n: u64, _access: bool) {}
+#[cfg(target_os = "linux")]
+fn protect_n(p: u64, n: u64, access: bool) {
+    let prot = if access { nxrt::mem::Prot::ReadWrite } else { nxrt::mem::Prot::None };
+    if !nxrt::mem::protect(p, n * PAGE, prot) {
+        for k in 0..n {
+            nxrt::mem::protect(p + k * PAGE, PAGE, prot);
+        }
+    }
+}
 
 #[cfg(windows)]
 fn protect(p: u64, access: bool) {
@@ -167,8 +174,10 @@ fn protect(p: u64, access: bool) {
     let mut old = 0u32;
     unsafe { VirtualProtect(p as *const _, PAGE as usize, if access { PAGE_READWRITE } else { PAGE_NOACCESS }, &mut old) };
 }
-#[cfg(not(windows))]
-fn protect(_p: u64, _access: bool) {}
+#[cfg(target_os = "linux")]
+fn protect(p: u64, access: bool) {
+    nxrt::mem::protect(p, PAGE, if access { nxrt::mem::Prot::ReadWrite } else { nxrt::mem::Prot::None });
+}
 
 /// Whether any page of [a, a + n) is held on the device (the host is about to touch it: read it back first).
 /// The parts of [a, a + n) outside the pages held on the device, as (offset, length); None when none is held.
@@ -282,9 +291,12 @@ fn accessible(p: u64) -> bool {
     let n = unsafe { VirtualQuery(p as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
     n != 0 && mbi.State == MEM_COMMIT && mbi.Protect & PAGE_NOACCESS == 0
 }
-#[cfg(not(windows))]
-fn accessible(_p: u64) -> bool {
-    false
+#[cfg(target_os = "linux")]
+fn accessible(p: u64) -> bool {
+    match nxrt::linux::query(p) {
+        Some((committed, prot, _, _)) => committed && prot != 0,
+        None => nxrt::mem::readable(p, 1),
+    }
 }
 
 struct Reader {
@@ -344,8 +356,18 @@ fn install() {
         unsafe { AddVectoredExceptionHandler(1, Some(veh)) };
     }
 }
-#[cfg(not(windows))]
-fn install() {}
+#[cfg(target_os = "linux")]
+fn install() {
+    if !HANDLER.swap(true, Ordering::SeqCst) {
+        // newest hook first: the runtime's crash reporter must not see a lazy page's fault
+        nxrt::linux::add_fault_hook(lazy_fault);
+    }
+}
+
+#[cfg(target_os = "linux")]
+unsafe fn lazy_fault(f: &mut nxrt::linux::Fault) -> bool {
+    f.sig == libc::SIGSEGV && bring_back(f.addr)
+}
 
 #[cfg(windows)]
 unsafe extern "system" fn veh(ep: *mut windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS) -> i32 {
