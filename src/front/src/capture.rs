@@ -19,7 +19,9 @@ pub struct Frame {
 /// visible, else through PrintWindow (slow, but works covered or minimised).
 pub fn grab() -> Option<Frame> {
     let h = crate::window::hwnd();
-    if !h.is_null() && unsafe { GetForegroundWindow() == h && IsIconic(h) == 0 } {
+    // Never copy from the screen: anything over the window (another app, a notification) would be captured. Only the
+    // window's own content, through PrintWindow, whatever is in front of it. NXRS_SCREEN_GRAB=1 restores the screen copy.
+    if !h.is_null() && std::env::var("NXRS_SCREEN_GRAB").as_deref() == Ok("1") && unsafe { GetForegroundWindow() == h && IsIconic(h) == 0 } {
         if let Some(f) = grab_screen(h) {
             return Some(f);
         }
