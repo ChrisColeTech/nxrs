@@ -1283,6 +1283,247 @@ pub fn output_kinds(w: &[u32]) -> [Option<u8>; 8] {
     r
 }
 
+/// One handle table a shader indexes: the array variable (`var`), the constant buffer variable holding its handles
+/// (`cbuf`: the translator's block of one vec4 array) and the first handle's word in it.
+#[derive(Clone, Copy, Debug)]
+pub struct HandleTable {
+    pub var: u32,
+    pub cbuf: u32,
+    pub first_word: u32,
+}
+
+/// `handle_tables`: a texture array the translator declares for a handle table (NVN code that picks a texture handle
+/// out of a constant buffer by a computed index: Super Mario Party Jamboree's character and board shaders, 8,192
+/// combined image samplers read from c12 / c10) is replaced by the bindless pools: at each load of an element its
+/// handle word is read from the constant buffer the shader already declares (word `first_word + index`), the image
+/// (texture ID, bits 0-19) and the sampler (sampler ID, bits 20-31) come from the pool arrays at `pool_set` bindings
+/// `tex_binding` / `samp_binding`, joined with OpSampledImage. The array variables go. None when the module uses them
+/// other than through access chains loaded whole. The pool arrays are declared `tex_len` / `samp_len` long (the
+/// layout's); an ID past them reads element 0.
+pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_binding: u32, samp_binding: u32, tex_len: u32, samp_len: u32) -> Option<Vec<u32>> {
+    use std::collections::HashMap;
+    const OP_NAME: u32 = 5;
+    const OP_TYPE_IMAGE: u32 = 25;
+    const OP_TYPE_SAMPLER: u32 = 26;
+    const OP_TYPE_SAMPLED_IMAGE: u32 = 27;
+    const OP_SAMPLED_IMAGE: u32 = 86;
+    const OP_IADD: u32 = 128;
+    const OP_SHR_LOGICAL: u32 = 194;
+    const OP_BITWISE_AND: u32 = 199;
+    const OP_TYPE_BOOL: u32 = 20;
+    const OP_SELECT: u32 = 169;
+    const OP_ULESS_THAN: u32 = 176;
+    const SC_UNIFORM_CONSTANT: u32 = 0;
+    const SC_UNIFORM: u32 = 2;
+    const DEC_SET: u32 = 34;
+    const DEC_BINDING: u32 = 33;
+    type Types = HashMap<u32, (u32, Vec<u32>)>;
+    if tables.is_empty() {
+        return None;
+    }
+    let v = walk(w)?;
+    let mut bound = w[3];
+    let mut fresh = move || {
+        bound += 1;
+        bound - 1
+    };
+    // the module's types (id -> (opcode, operands after the id)), variables' pointer types, 32-bit constants
+    let mut types: Types = HashMap::new();
+    let mut var_ty: HashMap<u32, u32> = HashMap::new();
+    let mut consts: HashMap<(u32, u32), u32> = HashMap::new();
+    let mut first_fn = None;
+    for &(at, op, n) in &v {
+        match op {
+            OP_TYPE_BOOL | OP_TYPE_INT | OP_TYPE_FLOAT | OP_TYPE_VECTOR | OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY | OP_TYPE_STRUCT | OP_TYPE_POINTER | OP_TYPE_IMAGE | OP_TYPE_SAMPLER | OP_TYPE_SAMPLED_IMAGE => {
+                types.insert(w[at + 1], (op, w[at + 2..at + n].to_vec()));
+            }
+            OP_CONSTANT if n == 4 => {
+                consts.entry((w[at + 1], w[at + 3])).or_insert(w[at + 2]);
+            }
+            OP_VARIABLE => {
+                var_ty.insert(w[at + 2], w[at + 1]);
+            }
+            OP_FUNCTION if first_fn.is_none() => first_fn = Some(at),
+            _ => {}
+        }
+    }
+    let first_fn = first_fn?;
+    let mut decls: Vec<u32> = Vec::new();
+    // a type as the module has it (int, float, sampler and pointer types reused: some must be unique), else declared
+    fn get_ty(types: &mut Types, decls: &mut Vec<u32>, fresh: &mut dyn FnMut() -> u32, op: u32, ops: &[u32]) -> u32 {
+        if let Some((id, _)) = types.iter().filter(|(_, (o, x))| *o == op && x.as_slice() == ops).min_by_key(|(id, _)| **id) {
+            return *id;
+        }
+        let id = fresh();
+        let mut a = vec![id];
+        a.extend_from_slice(ops);
+        decls.extend(ins(op, &a));
+        types.insert(id, (op, ops.to_vec()));
+        id
+    }
+    fn get_const(consts: &mut HashMap<(u32, u32), u32>, decls: &mut Vec<u32>, fresh: &mut dyn FnMut() -> u32, ty: u32, val: u32) -> u32 {
+        if let Some(&id) = consts.get(&(ty, val)) {
+            return id;
+        }
+        let id = fresh();
+        decls.extend(ins(OP_CONSTANT, &[ty, id, val]));
+        consts.insert((ty, val), id);
+        id
+    }
+    let uint = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_INT, &[32, 0]);
+    let int = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_INT, &[32, 1]);
+    let float = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_FLOAT, &[32]);
+    let ptr_uf = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_POINTER, &[SC_UNIFORM, float]);
+    let sampler = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_SAMPLER, &[]);
+    let boolt = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_BOOL, &[]);
+    let c_u0 = get_const(&mut consts, &mut decls, &mut fresh, uint, 0);
+    let c_i0 = get_const(&mut consts, &mut decls, &mut fresh, int, 0);
+    let c_i2 = get_const(&mut consts, &mut decls, &mut fresh, int, 2);
+    let c_i3 = get_const(&mut consts, &mut decls, &mut fresh, int, 3);
+    let c_tmask = get_const(&mut consts, &mut decls, &mut fresh, uint, 0xfffff);
+    let c_20 = get_const(&mut consts, &mut decls, &mut fresh, uint, 20);
+    let c_tlen = get_const(&mut consts, &mut decls, &mut fresh, uint, tex_len.max(1));
+    let c_slen = get_const(&mut consts, &mut decls, &mut fresh, uint, samp_len.max(1));
+    // the sampler pool, once
+    let samp_arr = fresh();
+    decls.extend(ins(OP_TYPE_ARRAY, &[samp_arr, sampler, c_slen]));
+    let samp_parr = fresh();
+    decls.extend(ins(OP_TYPE_POINTER, &[samp_parr, SC_UNIFORM_CONSTANT, samp_arr]));
+    let samp_ptr = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_POINTER, &[SC_UNIFORM_CONSTANT, sampler]);
+    let samp_var = fresh();
+    decls.extend(ins(OP_VARIABLE, &[samp_parr, samp_var, SC_UNIFORM_CONSTANT]));
+    let mut annots: Vec<u32> = Vec::new();
+    annots.extend(ins(OP_DECORATE, &[samp_var, DEC_SET, pool_set]));
+    annots.extend(ins(OP_DECORATE, &[samp_var, DEC_BINDING, samp_binding]));
+    // per table: its sampled-image type, a pool image array of its image type (shared by tables of one image type),
+    // the constant buffer and the first handle word
+    struct T {
+        si: u32,
+        img: u32,
+        img_ptr: u32,
+        img_var: u32,
+        cbuf: u32,
+        base: u32,
+    }
+    let mut ts: HashMap<u32, T> = HashMap::new();
+    let mut img_vars: HashMap<u32, (u32, u32)> = HashMap::new();
+    for t in tables {
+        let pty = *var_ty.get(&t.var)?;
+        let (pop, pops) = types.get(&pty)?.clone();
+        if pop != OP_TYPE_POINTER || pops[0] != SC_UNIFORM_CONSTANT {
+            return None;
+        }
+        let (aop, aops) = types.get(&pops[1])?.clone();
+        if aop != OP_TYPE_ARRAY && aop != OP_TYPE_RUNTIME_ARRAY {
+            return None;
+        }
+        let si = aops[0];
+        let (sop, sops) = types.get(&si)?.clone();
+        if sop != OP_TYPE_SAMPLED_IMAGE {
+            return None;
+        }
+        let img = sops[0];
+        let cpty = *var_ty.get(&t.cbuf)?;
+        if types.get(&cpty).is_none_or(|(o, x)| *o != OP_TYPE_POINTER || x[0] != SC_UNIFORM) {
+            return None;
+        }
+        let (img_ptr, img_var) = match img_vars.get(&img) {
+            Some(&x) => x,
+            None => {
+                let arr = fresh();
+                decls.extend(ins(OP_TYPE_ARRAY, &[arr, img, c_tlen]));
+                let parr = fresh();
+                decls.extend(ins(OP_TYPE_POINTER, &[parr, SC_UNIFORM_CONSTANT, arr]));
+                let iptr = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_POINTER, &[SC_UNIFORM_CONSTANT, img]);
+                let var = fresh();
+                decls.extend(ins(OP_VARIABLE, &[parr, var, SC_UNIFORM_CONSTANT]));
+                annots.extend(ins(OP_DECORATE, &[var, DEC_SET, pool_set]));
+                annots.extend(ins(OP_DECORATE, &[var, DEC_BINDING, tex_binding]));
+                img_vars.insert(img, (iptr, var));
+                (iptr, var)
+            }
+        };
+        let base = get_const(&mut consts, &mut decls, &mut fresh, int, t.first_word);
+        ts.insert(t.var, T { si, img, img_ptr, img_var, cbuf: t.cbuf, base });
+    }
+    // the bodies: element pointers noted, their loads replaced
+    let mut chains: HashMap<u32, (u32, u32)> = HashMap::new(); // pointer id -> (table variable, index id)
+    let mut body: Vec<u32> = Vec::new();
+    for &(at, op, n) in v.iter().filter(|x| x.0 >= first_fn) {
+        let ops = &w[at + 1..at + n];
+        match op {
+            OP_ACCESS_CHAIN | OP_IN_BOUNDS_ACCESS_CHAIN if n == 5 && ts.contains_key(&ops[2]) => {
+                chains.insert(ops[1], (ops[2], ops[3]));
+                continue;
+            }
+            OP_LOAD if n >= 4 && chains.contains_key(&ops[2]) => {
+                let (var, idx) = chains[&ops[2]];
+                let t = &ts[&var];
+                let mut id = [0u32; 16];
+                for x in id.iter_mut() {
+                    *x = fresh();
+                }
+                let [word, q, c, p, f, h, tid0, sid0, ip, im, sp, sm, tok, sok, tid, sid] = id;
+                body.extend(ins(OP_IADD, &[int, word, idx, t.base]));
+                body.extend(ins(OP_SHR_LOGICAL, &[int, q, word, c_i2]));
+                body.extend(ins(OP_BITWISE_AND, &[int, c, word, c_i3]));
+                body.extend(ins(OP_ACCESS_CHAIN, &[ptr_uf, p, t.cbuf, c_i0, q, c]));
+                body.extend(ins(OP_LOAD, &[float, f, p]));
+                body.extend(ins(OP_BITCAST, &[uint, h, f]));
+                body.extend(ins(OP_BITWISE_AND, &[uint, tid0, h, c_tmask]));
+                body.extend(ins(OP_SHR_LOGICAL, &[uint, sid0, h, c_20]));
+                body.extend(ins(OP_ULESS_THAN, &[boolt, tok, tid0, c_tlen]));
+                body.extend(ins(OP_ULESS_THAN, &[boolt, sok, sid0, c_slen]));
+                body.extend(ins(OP_SELECT, &[uint, tid, tok, tid0, c_u0]));
+                body.extend(ins(OP_SELECT, &[uint, sid, sok, sid0, c_u0]));
+                body.extend(ins(OP_ACCESS_CHAIN, &[t.img_ptr, ip, t.img_var, tid]));
+                body.extend(ins(OP_LOAD, &[t.img, im, ip]));
+                body.extend(ins(OP_ACCESS_CHAIN, &[samp_ptr, sp, samp_var, sid]));
+                body.extend(ins(OP_LOAD, &[sampler, sm, sp]));
+                body.extend(ins(OP_SAMPLED_IMAGE, &[t.si, ops[1], im, sm]));
+                continue;
+            }
+            _ => {}
+        }
+        // any other use of a table or of an element pointer (the operands that can hold a pointer: literals such as an
+        // extended instruction's number or an image operand mask may equal an id): not this shape
+        let ptr_ops: &[u32] = match op {
+            OP_LOAD | OP_COPY_OBJECT | 60 => ops.get(2..3).unwrap_or(&[]),
+            OP_STORE | OP_COPY_MEMORY => ops.get(..2).unwrap_or(&[]),
+            OP_ACCESS_CHAIN | OP_IN_BOUNDS_ACCESS_CHAIN | 67 => ops.get(2..3).unwrap_or(&[]),
+            57 => ops.get(3..).unwrap_or(&[]),
+            169 => ops.get(3..).unwrap_or(&[]),
+            245 => ops.get(2..).unwrap_or(&[]),
+            _ => &[],
+        };
+        if ptr_ops.iter().any(|x| ts.contains_key(x) || chains.contains_key(x)) {
+            return None;
+        }
+        body.extend_from_slice(&w[at..at + n]);
+    }
+    // the head: the tables' names, decorations and variables dropped; the new annotations after the last decoration,
+    // the new types, constants and variables before the first function
+    let mut head: Vec<u32> = w[..5].to_vec();
+    let last_annot = v.iter().filter(|x| x.0 < first_fn && (x.1 == OP_DECORATE || x.1 == OP_MEMBER_DECORATE)).map(|x| x.0).max()?;
+    for &(at, op, n) in v.iter().filter(|x| x.0 < first_fn) {
+        let drop = match op {
+            OP_NAME | OP_DECORATE => ts.contains_key(&w[at + 1]),
+            OP_VARIABLE => ts.contains_key(&w[at + 2]),
+            _ => false,
+        };
+        if !drop {
+            head.extend_from_slice(&w[at..at + n]);
+        }
+        if at == last_annot {
+            head.extend_from_slice(&annots);
+        }
+    }
+    head.extend_from_slice(&decls);
+    head.extend_from_slice(&body);
+    head[3] = fresh();
+    Some(head)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1320,6 +1561,65 @@ mod tests {
         push(&mut w, 253, &[]);
         push(&mut w, 56, &[]);
         w
+    }
+
+    #[test]
+    fn handle_table_elements_come_from_the_pools() {
+        // a 2D combined-sampler array of 8 (%15) indexed by %40, a cbuf block of vec4[4096] (%22)
+        let mut w = vec![0x0723_0203, 0x0001_0300, 0, 60, 0];
+        let push = |w: &mut Vec<u32>, op: u32, ops: &[u32]| w.extend(ins(op, ops));
+        push(&mut w, 17, &[1]);
+        push(&mut w, 14, &[0, 1]);
+        push(&mut w, OP_ENTRY_POINT, &[4, 1, 0x6e69616d, 0]);
+        push(&mut w, 5, &[15, 0x0074]); // OpName %15 "t"
+        push(&mut w, OP_DECORATE, &[15, 34, 1]);
+        push(&mut w, OP_DECORATE, &[15, 33, 9]);
+        push(&mut w, OP_DECORATE, &[22, 34, 1]);
+        push(&mut w, OP_DECORATE, &[22, 33, 2]);
+        push(&mut w, 19, &[3]);
+        push(&mut w, 33, &[4, 3]);
+        push(&mut w, OP_TYPE_FLOAT, &[5, 32]);
+        push(&mut w, OP_TYPE_INT, &[6, 32, 0]);
+        push(&mut w, OP_TYPE_INT, &[7, 32, 1]);
+        push(&mut w, 25, &[10, 5, 1, 0, 0, 0, 1, 0]); // image 2D
+        push(&mut w, 27, &[11, 10]); // sampled image
+        push(&mut w, OP_CONSTANT, &[6, 12, 8]);
+        push(&mut w, OP_TYPE_ARRAY, &[13, 11, 12]);
+        push(&mut w, OP_TYPE_POINTER, &[14, 0, 13]);
+        push(&mut w, OP_VARIABLE, &[14, 15, 0]);
+        push(&mut w, OP_TYPE_POINTER, &[16, 0, 11]);
+        push(&mut w, OP_TYPE_VECTOR, &[17, 5, 4]);
+        push(&mut w, OP_CONSTANT, &[6, 18, 4096]);
+        push(&mut w, OP_TYPE_ARRAY, &[19, 17, 18]);
+        push(&mut w, OP_TYPE_STRUCT, &[20, 19]);
+        push(&mut w, OP_TYPE_POINTER, &[21, 2, 20]);
+        push(&mut w, OP_VARIABLE, &[21, 22, 2]);
+        push(&mut w, OP_CONSTANT, &[7, 40, 3]);
+        push(&mut w, OP_FUNCTION, &[3, 1, 0, 4]);
+        push(&mut w, 248, &[30]);
+        push(&mut w, OP_ACCESS_CHAIN, &[16, 41, 15, 40]);
+        push(&mut w, OP_LOAD, &[11, 42, 41]);
+        push(&mut w, 253, &[]);
+        push(&mut w, 56, &[]);
+        let t = [HandleTable { var: 15, cbuf: 22, first_word: 5 }];
+        let o = handle_tables(&w, &t, 6, 0, 1, 1024, 64).expect("rewritten");
+        let v = walk(&o).expect("well formed");
+        let has = |op: u32, f: &dyn Fn(&[u32]) -> bool| v.iter().any(|&(at, o2, n)| o2 == op && f(&o[at + 1..at + n]));
+        assert!(!has(OP_VARIABLE, &|x| x[1] == 15), "the table variable is gone");
+        assert!(!has(OP_ACCESS_CHAIN, &|x| x[2] == 15), "no element pointer into it");
+        assert!(has(86, &|x| x[0] == 11 && x[1] == 42), "the load's result is an OpSampledImage now");
+        assert!(has(OP_ACCESS_CHAIN, &|x| x[2] == 22 && x.len() == 6), "the handle read from the constant buffer");
+        assert!(has(OP_DECORATE, &|x| x[1] == 34 && x[2] == 6), "pool variables in set 6");
+        assert!(has(OP_CONSTANT, &|x| x[0] == 7 && x[2] == 5), "first handle word");
+        assert!(o[3] > w[3]);
+        // a table passed whole to something else: not rewritten
+        let mut w2 = w.clone();
+        let n = w2.len();
+        w2.truncate(n - 2);
+        w2.extend(ins(OP_COPY_OBJECT, &[14, 43, 15]));
+        w2.extend(ins(253, &[]));
+        w2.extend(ins(56, &[]));
+        assert!(handle_tables(&w2, &t, 6, 0, 1, 1024, 64).is_none());
     }
 
     #[test]
