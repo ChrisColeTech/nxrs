@@ -1016,6 +1016,28 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   effect without a known cause: `NXGFX_ASYNC=0` (`-G4-mk8d-sync2`) is still the only clean lap.
 - **K2's e2496aa reviewed** (MKW (lane K2) section).
 
+**Lane G4, round 7 (2026-11-20 10:20-, uncommitted).**
+- **MK8D async black, with the capture tool.** Captures of the grandstand stretch (present 7150) in async and sync mode
+  (`build/G4/mk8d_async*.cap`, `mk8d_sync*.cap`; `nxgfx-replay <cap> --summary` lists each present's records by op):
+  **the game sends the same kind of work in both** (one submission a frame; ~640-880 draw-class records either way,
+  the counts following the view, not the mode), so the black is not the game culling on stale results: it is what
+  the GPU makes of the same commands. And it comes and goes run to run: `-G4-mk8d-async-cap2` had no black shot at
+  all, `-async-cap` four. Pass-by-pass diffing (`NXGFX_REPLAY_DUMP=1` dumps the second frame's passes into the
+  replay's folder; `build/G4/passdiff.py A B` names the first pass that differs) is ready, but **the replays come out
+  white in the 3D scene**: a capture now also carries the GPU-only state it can read back (device-local pools,
+  lazily held pages brought back, and every GPU-drawn single-layer uncompressed 2D texture: 71-73 textures, ~130 MB,
+  restored in replay with WriteTexels), and that is still not enough (the missing state is likely array / cube /
+  depth / multi-level history targets, e.g. MK8D's exposure chain). Next: capture every GPU-owned image whole (all
+  levels and layers, depth included) so a replay reproduces the frame, then diff a black async frame against its
+  sync twin. Replay fixes this round: texture storage committed before its texels are written.
+- **Occlusion wait at submits: reverted to presents only.** Waiting at every submit as well did not help MK8D (4
+  black shots in `-async-cap`) and serialized Donkey Kong Bananza with the replay (`-G4-dkb-speed`: 13.0 FPS against
+  17.8 before; DKB uses samples-passed reports too). Rerun (`-G4-dkb-speed2`, presents only): **20.3 FPS** with the fine timers (17.8 before
+  these rounds, 13.0 with the submit wait).
+- **Recording on several threads, measured again** (`-G4-mk8d-defer3` / `-nodefer3`, MK8D 140 s exclusive): with
+  `NXGFX_DEFER=1` the replay's CPU time is 8.2-9.7 ms a frame against 5.8-6.4 off, both at 59.7 FPS. **It stays off**
+  (PORT_PLAN row).
+
 ## shaders (src/shaders)
 Every shader of a game found at build time and translated to SPIR-V before the game runs. See src/shaders/README.md.
 

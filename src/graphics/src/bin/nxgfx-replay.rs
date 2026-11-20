@@ -2,11 +2,13 @@
 //!
 //! `nxgfx-replay <capture> --shaders <game data>/shaders [--out <dir>]`: each present is written to
 //! `<dir>/frame-<n>.png` (default: the capture's folder). The game's translated shaders are read from `--shaders`.
+//! `nxgfx-replay <capture> --summary`: per present, its submissions and NVN record counts by op.
 use std::path::PathBuf;
 
 fn main() {
     let a: Vec<String> = std::env::args().collect();
     let mut cap = None;
+    let mut summary = false;
     let (mut shaders, mut out) = (None, None);
     let mut i = 1;
     while i < a.len() {
@@ -15,6 +17,7 @@ fn main() {
                 shaders = Some(PathBuf::from(&a[i + 1]));
                 i += 1;
             }
+            "--summary" => summary = true,
             "--out" if i + 1 < a.len() => {
                 out = Some(PathBuf::from(&a[i + 1]));
                 i += 1;
@@ -28,6 +31,16 @@ fn main() {
         std::process::exit(2);
     };
     nxgfx::log::set_sink(|l| eprintln!("{l}"));
+    if summary {
+        match nxgfx::vk::capture::summary(&cap) {
+            Ok(v) => v.iter().for_each(|l| println!("{l}")),
+            Err(e) => {
+                eprintln!("summary: {e}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     let out = out.unwrap_or_else(|| cap.parent().map(|p| p.to_path_buf()).unwrap_or_default());
     match nxgfx::vk::capture::replay(&cap, &out, shaders) {
         Ok(n) => println!("{n} frames written to {}", out.display()),

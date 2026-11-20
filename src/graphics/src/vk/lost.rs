@@ -268,16 +268,34 @@ pub fn binding_counts() -> (usize, usize) {
     BINDS.lock().unwrap().as_ref().map(|b| (b.live.len(), b.gone.len())).unwrap_or((0, 0))
 }
 
+/// The names `Gpu::buffer` gives its buffers, by handle, while the address report is on: the report names the kind
+/// of buffer a faulting address was in (staging, pool, write-back...), lane K2.
+static NAMES: Mutex<Option<std::collections::HashMap<u64, String>>> = Mutex::new(None);
+pub fn name_object(handle: u64, name: &str) {
+    if !addr_report_wanted() {
+        return;
+    }
+    let mut g = NAMES.lock().unwrap();
+    let m = g.get_or_insert_with(std::collections::HashMap::new);
+    if m.len() > 1 << 20 {
+        m.clear();
+    }
+    m.insert(handle, name.to_string());
+}
+fn name_of(handle: u64) -> String {
+    NAMES.lock().unwrap().as_ref().and_then(|m| m.get(&handle)).map(|n| format!(" \"{n}\"")).unwrap_or_default()
+}
+
 /// What address `a` was in: the live binding holding it, else the last binding there that was unbound.
 fn addr_owner(a: u64) -> Option<String> {
     let g = BINDS.lock().unwrap();
     let s = g.as_ref()?;
     if let Some((&base, x)) = s.live.range(..=a).next_back().filter(|(&base, x)| a < base + x.size) {
-        return Some(format!("inside {:?} {:#x} (bound at {:.2} s: {:#x} +{:#x}), still bound", x.ty, x.handle, x.at, base, x.size));
+        return Some(format!("inside {:?} {:#x}{} (bound at {:.2} s: {:#x} +{:#x}), still bound", x.ty, x.handle, name_of(x.handle), x.at, base, x.size));
     }
     s.gone
         .range(..=a)
         .rev()
         .find(|(base, (x, _))| a < **base + x.size)
-        .map(|(base, (x, t))| format!("inside {:?} {:#x} (bound at {:.2} s: {:#x} +{:#x}), UNBOUND at {:.2} s", x.ty, x.handle, x.at, base, x.size, t))
+        .map(|(base, (x, t))| format!("inside {:?} {:#x}{} (bound at {:.2} s: {:#x} +{:#x}), UNBOUND at {:.2} s", x.ty, x.handle, name_of(x.handle), x.at, base, x.size, t))
 }

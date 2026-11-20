@@ -37,6 +37,7 @@ pub mod rec {
     pub const PRESENT: u32 = 10; // {queue, origin lower-left, has_crop, crop[4]} + tex_t
     pub const DPOOL: u32 = 11; // {tex, pool object address, base}
     pub const END: u32 = 12;
+    pub const WTEX: u32 = 13; // {w, h, row, 0} + tex_t + level 0's texels (rows packed): a texture only the GPU held
 }
 
 const PAGE: u64 = 0x1000;
@@ -260,14 +261,50 @@ pub fn present(queue: u64, origin_ll: bool, t: &tex_t, crop: Option<[i32; 4]>) {
     for (&id, p) in &s.boot.samp {
         put(&mut l, rec::SAMPREG, &[&id.to_le_bytes(), &[0u8; 4], bytes_of(p)]);
     }
+    // what only the GPU held: device-local pools' contents (over their guest memory) and the textures it drew
+    let g = super::Gpu::get().ok();
+    let (mut pool_bytes, mut ntex, mut tex_bytes) = (0u64, 0u64, 0u64);
+    if let Some(g) = g {
+        for (base, bytes) in super::mem::gpu_contents(g) {
+            pool_bytes += bytes.len() as u64;
+            for (k, c) in bytes.chunks(16 << 20).enumerate() {
+                put(&mut l, rec::MEM, &[&(base + (k as u64) * (16 << 20)).to_le_bytes(), c]);
+            }
+        }
+        let texs: Vec<tex_t> = {
+            let imgs = g.images.lock().unwrap();
+            imgs.by_serial
+                .values()
+                .filter(|im| {
+                    let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(im.tex.d.format);
+                    let depthy = matches!(im.tf.kind, crate::tex::format::Kind::Depth | crate::tex::format::Kind::DepthStencil | crate::tex::format::Kind::Stencil);
+                    im.gpu_owned && im.ty == ash::vk::ImageType::TYPE_2D && im.layers == 1 && bpb > 0 && bw == 1 && bh == 1 && !depthy && im.tf.astc.is_none() && !im.bc7 && im.tf.expand3 == 0 && im.scale == 1.0 && im.samples == ash::vk::SampleCountFlags::TYPE_1
+                })
+                .map(|im| im.tex)
+                .collect()
+        };
+        for t in texs {
+            let (w, h) = (t.d.width.max(1) as u32, t.d.height.max(1) as u32);
+            let row = w as usize * crate::tex::layout::fmt_bpb(t.d.format).0 as usize;
+            let mut buf = vec![0u8; row * h as usize];
+            let r = crate::nvn::types::NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: w as i32, height: h as i32, depth: 1 };
+            g.read_texels(&t, None, &r, buf.as_mut_ptr(), row, buf.len());
+            let hd = [w, h, row as u32, 0];
+            put(&mut l, rec::WTEX, &[bytes_of(&hd), bytes_of(&t), &buf]);
+            ntex += 1;
+            tex_bytes += buf.len() as u64;
+        }
+    }
     crate::vklog!(
-        "capture: started at present {} into {path} ({} regions, {} MB of guest memory, {} pools, {} textures, {} samplers, {:.1} s)",
+        "capture: started at present {} into {path} ({} regions, {} MB written, {} pools, {} textures, {} samplers; GPU-held: {} MB of device-local pools, {ntex} textures {} MB; {:.1} s)",
         s.presents,
         regions.len(),
         l.bytes >> 20,
         s.boot.pools.len(),
         s.boot.tex.len(),
         s.boot.samp.len(),
+        pool_bytes >> 20,
+        tex_bytes >> 20,
         t0.elapsed().as_secs_f64()
     );
     s.live = Some(l);
@@ -463,6 +500,12 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
     }
     let g = super::Gpu::get()?;
     let _ = std::fs::create_dir_all(out);
+    // NXGFX_REPLAY_DUMP=1: the passes of the frame after the first present as PNGs into <out> (pass dump), to diff two
+    // captures of one moment pass by pass
+    if std::env::var("NXGFX_REPLAY_DUMP").as_deref() == Ok("1") {
+        std::env::set_var("NXGFX_DUMP_DIR", out);
+        super::exec::passdump::request_now();
+    }
     let (mut frames, mut subs) = (0u64, 0u64);
     let trace = std::env::var("NXGFX_REPLAY_TRACE").is_ok();
     let mut n_rec = 0u64;
@@ -507,6 +550,19 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
                 g.reg_samp(id, &s);
             }
             rec::TEXREL => g.tex_release(u64_at(&p, 0)),
+            rec::WTEX => {
+                let (w, h, row) = (u32::from_le_bytes(p[0..4].try_into().unwrap()), u32::from_le_bytes(p[4..8].try_into().unwrap()), u32::from_le_bytes(p[8..12].try_into().unwrap()));
+                let t: tex_t = read_t(&p, 16);
+                let data = &p[16 + core::mem::size_of::<tex_t>()..];
+                // its storage may never have been touched by the CPU (not in the capture's pages): committed for the
+                // write, which lands in storage as well as in the image
+                if !t.mem.is_null() && t.l.size > 0 {
+                    let lo = t.mem as u64 & !0xfff;
+                    commit(lo, (t.mem as u64 + t.l.size + 0xfff & !0xfff) - lo);
+                }
+                let r = crate::nvn::types::NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: w as i32, height: h as i32, depth: 1 };
+                g.write_texels(&t, None, &r, data.as_ptr(), row as usize, data.len());
+            }
             rec::SUBMIT => {
                 super::queue::submit_stream(u64_at(&p, 0), u64_at(&p, 8) != 0, p[16..].to_vec());
                 subs += 1;
@@ -516,6 +572,9 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
                 let hc: [i32; 5] = read_t(&p, 16);
                 let t: tex_t = read_t(&p, 40);
                 super::queue::finish();
+                // the frame count and pass dumps follow the presents, as in the game
+                let n = super::present::note_present();
+                super::exec::passdump::frame(n, crate::log::elapsed());
                 let crop = (hc[0] != 0).then_some([hc[1], hc[2], hc[3], hc[4]]);
                 if let Some((rgba, w, h)) = super::shot::capture(&t, crop, ll) {
                     let f = out.join(format!("frame-{frames}.png"));
@@ -530,6 +589,46 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
     super::queue::finish();
     crate::vklog!("replay: {frames} presents, {subs} submissions{}", if failed_regions > 0 { format!("; {failed_regions} regions could not be mapped at their address") } else { String::new() });
     Ok(frames)
+}
+
+/// What each present of a capture was made of: per present, its submissions and the count of each NVN record kind
+/// (`nxgfx-replay --summary`: two captures of the same moment, one in async and one in sync mode, side by side show
+/// whether the game itself sent other work).
+pub fn summary(path: &std::path::Path) -> Result<Vec<String>, String> {
+    let mut r = Reader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let mut out = Vec::new();
+    let mut ops: std::collections::BTreeMap<u32, u64> = Default::default();
+    let (mut subs, mut bytes, mut frame) = (0u64, 0u64, 0u64);
+    while let Some((ty, p)) = r.next() {
+        match ty {
+            rec::SUBMIT => {
+                subs += 1;
+                let st = &p[16..];
+                bytes += st.len() as u64;
+                let mut o = 0usize;
+                while o + 8 <= st.len() {
+                    let op = u32::from_le_bytes(st[o..o + 4].try_into().unwrap());
+                    let n = u32::from_le_bytes(st[o + 4..o + 8].try_into().unwrap()) as usize;
+                    if n < 8 || o + n > st.len() {
+                        break;
+                    }
+                    *ops.entry(op).or_insert(0) += 1;
+                    o += n;
+                }
+            }
+            rec::PRESENT => {
+                let list: Vec<String> = ops.iter().map(|(k, v)| format!("{k}:{v}")).collect();
+                out.push(format!("present {frame}: {subs} submissions, {bytes} bytes of records; records by op {}", list.join(" ")));
+                ops.clear();
+                subs = 0;
+                bytes = 0;
+                frame += 1;
+            }
+            rec::END => break,
+            _ => {}
+        }
+    }
+    Ok(out)
 }
 
 #[cfg(test)]

@@ -166,6 +166,7 @@ impl Gpu {
             .allocate(&AllocationCreateDesc { name, requirements: req, location: loc, linear: true, allocation_scheme: AllocationScheme::GpuAllocatorManaged })
             .map_err(|e| format!("allocation {name} ({size} bytes): {e}"))?;
         unsafe { self.dev().bind_buffer_memory(buf, a.memory(), a.offset()) }.map_err(|e| format!("bind {name}: {e}"))?;
+        lost::name_object(vk::Handle::as_raw(buf), name);
         let ptr = a.mapped_ptr().map(|p| p.as_ptr() as *mut u8).unwrap_or(core::ptr::null_mut());
         if !ptr.is_null() {
             HOST_LIVE.fetch_add(a.size(), std::sync::atomic::Ordering::Relaxed);

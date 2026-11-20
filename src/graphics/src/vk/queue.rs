@@ -842,9 +842,11 @@ pub fn aq_wait_room(present: bool) {
         return;
     }
     let Some(a) = AQ.get() else { return };
-    // a game whose frames read occlusion (samples-passed) results: before its present every earlier op has been
+    // a game whose frames read occlusion (samples-passed) results: before its presents every earlier op has been
     // replayed, so those results come back as soon as with replay on the game's thread (a game that culls on last
     // frame's results otherwise read them two presents late: Mario Kart 8 Deluxe's black stretches). NXGFX_OCCL_SYNC=0 off
+    // (presents only: waiting at every submit too serialized the game with the replay: Donkey Kong Bananza 17.8 -> 13
+    // FPS, and did not help Mario Kart 8 Deluxe)
     let occl = present && occl_sync();
     let full = || {
         let behind = a.tail.load(Ordering::Acquire) - a.done.load(Ordering::Acquire);

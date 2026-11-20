@@ -456,6 +456,29 @@ pub fn room(a: u64) -> u64 {
 }
 
 /// The OS write watch of [a, a + n) reset (the host wrote it, not the game).
+/// Every page of [a, a + n) is committed and writable by the host now (a texture write-back writes only then: a
+/// guest page read-only or not committed faulted in the host copy, lane K2).
+#[cfg(windows)]
+pub fn host_writable(a: u64, n: u64) -> bool {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_READWRITE};
+    let (mut at, end) = (a, a.saturating_add(n.max(1)));
+    while at < end {
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+        if unsafe { VirtualQuery(at as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 || mbi.State != MEM_COMMIT {
+            return false;
+        }
+        if mbi.Protect & 0xff != PAGE_READWRITE || mbi.Protect & PAGE_GUARD != 0 {
+            return false;
+        }
+        at = mbi.BaseAddress as u64 + mbi.RegionSize as u64;
+    }
+    true
+}
+#[cfg(not(windows))]
+pub fn host_writable(a: u64, n: u64) -> bool {
+    nxrt::mem::readable(a, n) && matches!(nxrt::linux::query(a), Some((true, prot, _, _)) if prot & 2 != 0)
+}
+
 /// Whether the CPU wrote any page of [a, a + n) since the write watch was last taken there (a peek: nothing reset).
 pub fn cpu_written(a: u64, n: u64) -> bool {
     let (lo, hi) = page_range(a, n);
@@ -1181,4 +1204,29 @@ mod inflight_tests {
         let (now, later) = super::split_inflight(0x1000, 0x1000, &[]);
         assert_eq!((now, later), (vec![(0x1000, 0x1000)], vec![]));
     }
+}
+
+/// For a capture (`capture.rs`): every pool's pages held on the device come back to guest memory first, then what the
+/// GPU holds of the device-local pools (their guest memory is not their content): (base, bytes) of each.
+pub fn gpu_contents(g: &Gpu) -> Vec<(u64, Vec<u8>)> {
+    let pools: Vec<(u64, u64, Placement, Option<(vk::Buffer, u64)>)> = {
+        let m = g.mem.lock().unwrap();
+        m.by_base.values().map(|p| (p.base, p.size, p.placement, p.buf.as_ref().map(|b| (b.buf, p.buf_off)))).collect()
+    };
+    for &(base, size, _, _) in &pools {
+        super::lazy::touch(base, size);
+    }
+    let mut out = Vec::new();
+    for (base, size, placement, buf) in pools {
+        let (Placement::Vram, Some((buf, off))) = (placement, buf) else { continue };
+        let Ok(rb) = g.buffer(size, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "capture readback") else { continue };
+        let f = super::queue::oneoff(g, |g, sub, _| unsafe {
+            g.dev().cmd_copy_buffer(sub.main, buf, rb.buf, &[vk::BufferCopy { src_offset: off, dst_offset: 0, size }]);
+        });
+        super::queue::wait_fence(f, u64::MAX);
+        let bytes = unsafe { core::slice::from_raw_parts(rb.ptr as *const u8, size as usize) }.to_vec();
+        g.free_buffer(rb);
+        out.push((base, bytes));
+    }
+    out
 }

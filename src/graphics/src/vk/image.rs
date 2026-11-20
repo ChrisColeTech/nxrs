@@ -78,6 +78,18 @@ static IMG_MEM: std::sync::Mutex<Option<std::collections::HashSet<u64>>> = std::
 /// storage marked since the last submission (images over it are made again at its start)
 static IMG_PENDING: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
 
+/// A texture write-back's bytes, completed, waiting for the next submission's start (`tex_writeback`).
+struct WbLanding {
+    t: tex_t,
+    serial: u64,
+    seq: u64,
+    image: vk::Image,
+    bpb: u32,
+    data: Vec<u8>,
+}
+unsafe impl Send for WbLanding {}
+static WB_LANDING: std::sync::Mutex<Vec<WbLanding>> = std::sync::Mutex::new(Vec::new());
+
 /// Read at each use (a texture registered or bound as an image without the flag; rare), so it can change live.
 pub fn image_noflag_on() -> bool {
     match std::env::var("NXGFX_IMAGE_NOFLAG") {
@@ -1421,7 +1433,8 @@ impl Gpu {
     /// out for good (MKW's CPU-updated RGBA16F tables, lane K2); mkw-recomp writes GPU-written textures back at the
     /// fence (`vk_tex_alias.c` `gpu_written_locked`, `wb_at_fence`). Only single-level, single-layer, uncompressed 2D
     /// textures of at most 512 KB whose image is the storage's size; a CPU write to the storage in the meantime keeps
-    /// the old behaviour for that texture (the write-back is dropped). `NXGFX_TEX_WB=0` off.
+    /// the old behaviour for that texture (the write-back is dropped). Byte-copy formats only (the image's texels
+    /// are the storage's bytes: true for every format let through here). `NXGFX_TEX_WB=0` off.
     pub fn tex_writeback(&self, sub: &mut Sub, serials: &[u64]) {
         let mut seen = std::collections::HashSet::new();
         let imgs = self.images.lock().unwrap();
@@ -1468,26 +1481,31 @@ impl Gpu {
             unsafe impl Send for Job {}
             let job = Job(b, t, serial, seq, image, bpb);
             sub.post.push(super::queue::Post::Callback(Box::new(move |g: &Gpu| {
+                // the bytes kept for the next submission's start, which lands them with the image table it holds
+                // anyway (the completion thread found the table busy nearly always: 8,000 of 8,004 dropped)
                 let Job(b, t, serial, seq, image, bpb) = job;
-                g.tex_writeback_land(&t, serial, seq, image, bpb, b.ptr as *const u8);
+                let n = t.d.width as usize * t.d.height as usize * bpb as usize;
+                let data = unsafe { core::slice::from_raw_parts(b.ptr as *const u8, n) }.to_vec();
                 g.free_buffer(b);
+                let mut q = WB_LANDING.lock().unwrap();
+                if q.len() < 256 {
+                    q.push(WbLanding { t, serial, seq, image, bpb, data });
+                }
             })));
         }
     }
 
     /// At completion: the copied texture into its storage, if it is still the texture the GPU wrote last and the CPU
     /// has not written its storage since (then its storage is the texture's content again: not GPU-owned).
-    fn tex_writeback_land(&self, t: &tex_t, serial: u64, seq: u64, image: vk::Image, bpb: u32, data: *const u8) {
-        // the completion thread never waits for the image table (a thread holding it may wait for this completion):
-        // busy, this write-back is dropped (the texture stays the GPU's, as without write-backs)
-        let Ok(mut imgs) = self.images.try_lock() else { return };
+    fn tex_writeback_land(&self, imgs: &mut Images, w: &WbLanding) {
+        let (t, serial, seq, image, bpb, data) = (&w.t, w.serial, w.seq, w.image, w.bpb, w.data.as_ptr());
         let Some(im) = imgs.by_serial.get_mut(&serial) else { return };
         if im.image != image || im.gpu_seq != seq || im.tex.mem != t.mem {
             return;
         }
         let (lo, hi) = (t.mem as u64 & !0xfff, (t.mem as u64 + t.l.size + 0xfff) & !0xfff);
         // CPU writes since (or pages held on the device): the old behaviour for this one
-        if super::mem::cpu_written(lo, hi - lo) || super::lazy::outside(t.mem as u64, t.l.size).is_some() {
+        if super::mem::cpu_written(lo, hi - lo) || super::lazy::outside(t.mem as u64, t.l.size).is_some() || !super::mem::host_writable(t.mem as u64, t.l.size) {
             return;
         }
         let (w, h) = (t.d.width as u32, t.d.height as u32);
@@ -1641,6 +1659,11 @@ impl Gpu {
             self.tables.write_texel_views(&self.d, id, uv, sv);
         }
         let mut imgs = self.images.lock().unwrap();
+        // texture write-backs completed since the last submission (`tex_writeback`)
+        let landing = std::mem::take(&mut *WB_LANDING.lock().unwrap());
+        for w in &landing {
+            self.tex_writeback_land(&mut imgs, w);
+        }
         let pending = std::mem::take(&mut *IMG_PENDING.lock().unwrap());
         if !pending.is_empty() {
             self.upgrade_storage(&mut imgs, &pending, sub);
