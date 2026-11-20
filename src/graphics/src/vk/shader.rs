@@ -504,6 +504,8 @@ impl Library {
     fn build(&self, dev: &ash::Device, key: &ShaderKey, words: &[u32], json: Option<&str>) -> Result<Arc<Module>, String> {
         let r = reflect(words)?;
         let (w, res, pool, c1) = remap(words, &r, json)?;
+        // a vertex shader's outputs written once at the end (`spvfix`; NXGFX_LATE_OUTPUTS=0: as translated)
+        let w = if r.stage == 0 && r.mesh == 0 && std::env::var("NXGFX_LATE_OUTPUTS").as_deref() != Ok("0") { super::spvfix::late_outputs(&w).unwrap_or(w) } else { w };
         let jr = json.and_then(|j| serde_json::from_str::<JRefl>(j).ok());
         let omap = jr.as_ref().and_then(|j| j.frag_out_map).filter(|&m| m >= 0 && r.stage == 1).map(|m| m as u32);
         let xfb = jr.as_ref().and_then(|j| j.transform_feedback.as_ref()).and_then(super::xfb::Layout::from_json);

@@ -316,6 +316,30 @@ fn components(t: &tex_t, v: Option<&view_t>, tf: &TexFormat) -> vk::ComponentMap
     vk::ComponentMapping { r: swz(c[0]), g: swz(c[1]), b: swz(c[2]), a: swz(c[3]) }
 }
 
+/// `NXGFX_WATCH_ADDR=<hex>`: images made / released over that address are logged (diagnostics).
+pub fn watch_log(what: &str, t: &tex_t, gpu: Option<bool>) {
+    static W: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+    let Some(a) = *W.get_or_init(|| std::env::var("NXGFX_WATCH_ADDR").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())) else { return };
+    let lo = t.mem as u64;
+    if t.mem.is_null() || a < lo || a >= lo + t.l.size.max(1) {
+        return;
+    }
+    crate::vklog!(
+        "watch {:#x}: {what} ser{} {}x{}x{} format {:#x} flags {:#x} target {} levels {} at {lo:#x} (+{:#x}){}",
+        a,
+        t.serial,
+        t.d.width,
+        t.d.height,
+        t.d.depth,
+        t.d.format,
+        t.d.flags,
+        t.d.target,
+        t.d.levels,
+        t.l.size,
+        gpu.map(|g| format!(", drawn by the GPU: {g}")).unwrap_or_default()
+    );
+}
+
 fn shape(t: &tex_t) -> (vk::ImageType, vk::Extent3D, u32) {
     let d = &t.d;
     let w = d.width.max(1);
@@ -501,6 +525,7 @@ impl Gpu {
         if imgs.by_serial.contains_key(&t.serial) {
             return true;
         }
+        watch_log("image", t, None);
         // the same texture initialized again over the same memory: its released image, with its content
         let key = tex_identity(t);
         let reused = imgs.parked.get_mut(&key).and_then(|v| v.pop()).map(|(mut im, _)| {
@@ -808,6 +833,7 @@ impl Gpu {
     pub fn tex_release(&self, serial: u64) {
         let mut imgs = self.images.lock().unwrap();
         let Some(mut im) = imgs.by_serial.remove(&serial) else { return };
+        watch_log("released", &im.tex, Some(im.gpu_owned));
         if let Some(v) = imgs.by_addr.get_mut(&(im.tex.mem as u64)) {
             v.retain(|s| *s != serial);
         }

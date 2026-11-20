@@ -471,11 +471,82 @@ pub mod passdump {
         std::env::var("NXGFX_DUMP_DIR").map(Into::into).unwrap_or_else(|_| "captures".into())
     }
 
+    /// `NXGFX_DUMP_TEX=<w>x<h>`: a sampled texture of that size, once per dump frame, is read back at the end of the
+    /// pass that sampled it: `tex-<frame>-ser<serial>-gpu.bin` (the image's level 0 as the GPU has it, tightly packed)
+    /// and `tex-<frame>-ser<serial>-mem.bin` (its storage in guest memory, as laid out by the game), with a log line.
+    static TEXQ: Mutex<Vec<u64>> = Mutex::new(Vec::new());
+    static TEXDONE: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+    pub fn want_tex(serial: u64, w: u32, h: u32) {
+        let Ok(sz) = std::env::var("NXGFX_DUMP_TEX") else { return };
+        if sz != format!("{w}x{h}") {
+            return;
+        }
+        let f = FRAME.load(Ordering::Relaxed);
+        let mut d = TEXDONE.lock().unwrap();
+        if d.contains(&(f, serial)) {
+            return;
+        }
+        d.push((f, serial));
+        TEXQ.lock().unwrap().push(serial);
+    }
+    fn dump_textures(g: &Gpu, sub: &mut Sub, f: u64) {
+        let q: Vec<u64> = std::mem::take(&mut *TEXQ.lock().unwrap());
+        for serial in q {
+            let (img, tex, fmt, ext) = {
+                let imgs = g.images.lock().unwrap();
+                let Some(im) = imgs.by_serial.get(&serial) else { continue };
+                (im.image, im.tex, im.format, im.extent)
+            };
+            let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(tex.d.format);
+            if bw != 1 || bh != 1 || bpb == 0 {
+                continue;
+            }
+            let n = ext.width as u64 * ext.height as u64 * bpb as u64;
+            let Ok(buf) = g.buffer(n, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "texture dump") else { continue };
+            let r = vk::BufferImageCopy {
+                buffer_offset: 0,
+                buffer_row_length: 0,
+                buffer_image_height: 0,
+                image_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+                image_offset: vk::Offset3D::default(),
+                image_extent: vk::Extent3D { width: ext.width, height: ext.height, depth: 1 },
+            };
+            super::super::queue::full_barrier(g, sub.main);
+            unsafe { g.dev().cmd_copy_image_to_buffer(sub.main, img, vk::ImageLayout::GENERAL, buf.buf, &[r]) };
+            super::super::queue::full_barrier(g, sub.main);
+            let ptr = buf.ptr as usize;
+            sub.transient.push(buf);
+            // the storage now, as the CPU sees it
+            let mem: Vec<u8> = if !tex.mem.is_null() && super::super::mem::room(tex.mem as u64) >= tex.l.size {
+                unsafe { core::slice::from_raw_parts(tex.mem as *const u8, tex.l.size as usize) }.to_vec()
+            } else {
+                Vec::new()
+            };
+            let d = dir();
+            crate::vklog!(
+                "texture dump {f}: ser{serial} {}x{} format {:#x} ({fmt:?}) at {:#x} ({} bytes of storage, layout {:?})",
+                tex.d.width,
+                tex.d.height,
+                tex.d.format,
+                tex.mem as u64,
+                tex.l.size,
+                tex.l
+            );
+            sub.post.push(Post::Callback(Box::new(move |_g: &Gpu| {
+                let src = unsafe { core::slice::from_raw_parts(ptr as *const u8, n as usize) };
+                let _ = std::fs::create_dir_all(&d);
+                let _ = std::fs::write(d.join(format!("tex-{f:06}-ser{serial}-gpu.bin")), src);
+                let _ = std::fs::write(d.join(format!("tex-{f:06}-ser{serial}-mem.bin")), &mem);
+            })));
+        }
+    }
+
     pub fn pass_end(g: &Gpu, sub: &mut Sub, qs: &QState) {
         let f = FRAME.load(Ordering::Relaxed);
         if f == 0 || super::super::present::frames() + 1 != f {
             return;
         }
+        dump_textures(g, sub, f);
         let p = PASS.fetch_add(1, Ordering::Relaxed);
         let mut desc = vec![];
         for i in 0..qs.rt_n {
@@ -1519,6 +1590,7 @@ fn stage_set(g: &Gpu, sub: &mut Sub, qs: &QState, m: &Module, dispatch: [u32; 3]
                         .and_then(|(serial, v)| {
                             g.images.lock().unwrap().by_serial.get(&serial).map(|im| {
                                 let d = &im.tex.d;
+                                passdump::want_tex(serial, d.width, d.height);
                                 format!("ser{serial} fmt{:#x} {}x{}x{} t{} v{:?}", d.format, d.width, d.height, d.depth, d.target, v.map(|v| (v.bits, v.target, v.base_level, v.min_layer, v.format, v.swz, im.tex.swizzle(), im.format)))
                             })
                         })

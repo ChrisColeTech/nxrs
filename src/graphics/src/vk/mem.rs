@@ -673,6 +673,17 @@ pub fn note_gpu_write(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     if n == 0 {
         return;
     }
+    {
+        static W: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
+        if let Some(w) = *W.get_or_init(|| std::env::var("NXGFX_WATCH_ADDR").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())) {
+            if a < w + 0x2000000 && w < a + n {
+                static N: AtomicU64 = AtomicU64::new(0);
+                if N.fetch_add(1, Ordering::Relaxed) < 40 {
+                    crate::vklog!("watch {w:#x}: the GPU writes {a:#x} (+{n:#x})");
+                }
+            }
+        }
+    }
     let m = g.mem.lock().unwrap();
     let Some(b) = find(&m, a, n) else { return };
     let p = &m.by_base[&b];

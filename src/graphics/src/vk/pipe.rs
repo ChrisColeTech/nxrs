@@ -311,7 +311,7 @@ fn crashed(g: &Gpu, k: &GfxKey) -> bool {
                 }
                 let _ = std::fs::write(&list, all);
                 crate::log::red(&format!(
-                    "{} pipeline(s) were compiling when the last session ended (a compiler crash): not compiled again, their draws skipped ({})",
+                    "{} pipeline(s) were compiling when the last session ended (a compiler crash): not compiled again (a library part: its programs are compiled whole; a whole pipeline: its draws are skipped) ({})",
                     new.len(),
                     list.display()
                 ));
@@ -329,6 +329,20 @@ fn crashed(g: &Gpu, k: &GfxKey) -> bool {
         *c = Some(set);
     }
     c.as_ref().unwrap().contains(k)
+}
+
+/// The crash-list key of a program's pipeline-library part: its pre-rasterization shaders (`frag` false) or its pixel
+/// shader, marked by an impossible colour count (never a real pipeline's key). DKB's vertex shader d87ccbede95b9f2c
+/// crashes the compiler as a pre-rasterization part, with any pixel shader (the shader parts made ahead at
+/// ProgramSetShaders died at 2.8 s in every session after the first, lane X2).
+fn part_mark(k: &GfxKey, frag: bool) -> GfxKey {
+    let mut m = GfxKey { ncolor: if frag { 254 } else { 255 }, ..Default::default() };
+    for (i, s) in k.shaders.iter().enumerate() {
+        if (i == 1) == frag {
+            m.shaders[i] = *s;
+        }
+    }
+    m
 }
 
 /// A whole-pipeline compile starts (`on`) or ends: the in-flight file names the ones under way.
@@ -554,7 +568,15 @@ fn shader_parts(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Option<[vk::Pipeli
         if tess {
             ci = ci.tessellation_state(&ts);
         }
-        gpl_part(g, key, vk::GraphicsPipelineLibraryFlagsEXT::PRE_RASTERIZATION_SHADERS, ci)?
+        // a part the compiler died on in an earlier session is not made again: the program is compiled whole
+        let mark = part_mark(k, false);
+        if crashed(g, &mark) {
+            return None;
+        }
+        note_inflight(g, &mark, true);
+        let p = gpl_part(g, key, vk::GraphicsPipelineLibraryFlagsEXT::PRE_RASTERIZATION_SHADERS, ci);
+        note_inflight(g, &mark, false);
+        p?
     };
     let frag = {
         let stages: Vec<vk::PipelineShaderStageCreateInfo> = mods
@@ -568,7 +590,14 @@ fn shader_parts(g: &Gpu, k: &GfxKey, mods: &[Arc<Module>]) -> Option<[vk::Pipeli
         let ds = vk::PipelineDepthStencilStateCreateInfo::default();
         let mut r = ri();
         let ci = vk::GraphicsPipelineCreateInfo::default().stages(&stages).multisample_state(&ms).depth_stencil_state(&ds).dynamic_state(&dy).layout(g.layout.pipeline).push_next(&mut r);
-        gpl_part(g, key, vk::GraphicsPipelineLibraryFlagsEXT::FRAGMENT_SHADER, ci)?
+        let mark = part_mark(k, true);
+        if crashed(g, &mark) {
+            return None;
+        }
+        note_inflight(g, &mark, true);
+        let p = gpl_part(g, key, vk::GraphicsPipelineLibraryFlagsEXT::FRAGMENT_SHADER, ci);
+        note_inflight(g, &mark, false);
+        p?
     };
     Some([pre, frag])
 }

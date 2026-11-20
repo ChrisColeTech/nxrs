@@ -582,9 +582,9 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   with the crash lists cleared: the pair compiles, no fault, nothing skipped. The crash list stays as a safety net.
   Lane S could emit this form itself (then graphics' pass finds nothing to do).
 - **Z-A:** `z10` (all of the above, `NXRS_EXCLUSIVE=1`): 58.5-60 FPS in most windows after the first 15 s (was
-  53.5-58 in `z8`); `z11` with `NXGFX_LATE_OUTPUTS=0` was running when the loop stopped (its log is in
-  `build/G/runs/z11`): what made the difference (the late outputs, or the newer os layer this link has) is not
-  settled.
+  53.5-58 in `z8`); `z11` with `NXGFX_LATE_OUTPUTS=0`: about the same (58-60, one 49-54 stretch), so the gain is not the
+  late outputs: it came with this link's newer os layer (other lanes' scheduler work) on top of lazy write-back.
+  Z-A is at its 59-60 in most windows now; the dips that remain are not attributed.
 - **Wonder's first-entry stutter: not worked on.** As in rev 7 (`x2`): the 0.3 / 2.5 / 0.26 s frames at the first
   entry into a level are shaders compiled at their first draw; a second session prewarms them from the key file.
   Next: make the shader parts ahead for a level's programs when they are registered (ProgramSetShaders already does
