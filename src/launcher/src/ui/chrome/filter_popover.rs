@@ -53,11 +53,8 @@ pub fn show(ctx: &egui::Context, app: &mut App, anchor: Rect) -> Vec<Action> {
                         .font(semibold(tokens::FONT_POPUP_TITLE)),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add_sized(vec2(30.0, 28.0), egui::Button::new("×"))
-                        .on_hover_text("Close (Esc)")
-                        .clicked()
-                    {
+                    use crate::ui::widgets::icon_button::{Glyph, add};
+                    if add(ui, Glyph::Close, "Close (Esc)", true) {
                         app.filters.open = false;
                     }
                 });
@@ -126,12 +123,21 @@ pub fn show(ctx: &egui::Context, app: &mut App, anchor: Rect) -> Vec<Action> {
             });
             label(ui, "Card size");
             let mut size = app.lib.cover_width;
-            ui.spacing_mut().slider_width = ui.available_width();
-            let slider = ui.add_enabled(
-                app.lib.view_mode == 0,
-                egui::Slider::new(&mut size, layout::COVER_WIDTH.0..=layout::COVER_WIDTH.2)
-                    .show_value(false),
-            );
+            // the rail in the border ink (the resting fill is the popover's own), the chosen part lit
+            let enabled = app.lib.view_mode == 0;
+            let slider = ui
+                .scope(|ui| {
+                    ui.spacing_mut().slider_width = ui.available_width();
+                    let rail = theme::of(ui.ctx()).border;
+                    ui.visuals_mut().widgets.inactive.bg_fill = rail;
+                    ui.visuals_mut().widgets.hovered.bg_fill = rail;
+                    let range = layout::COVER_WIDTH.0..=layout::COVER_WIDTH.2;
+                    let s = egui::Slider::new(&mut size, range)
+                        .show_value(false)
+                        .trailing_fill(true);
+                    ui.add_enabled(enabled, s)
+                })
+                .inner;
             app.lib.cover_width = size;
             slider.widget_info(|| {
                 egui::WidgetInfo::slider(app.lib.view_mode == 0, size as f64, "Gallery card size")

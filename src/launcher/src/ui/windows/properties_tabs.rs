@@ -31,7 +31,7 @@ pub fn general(ui: &mut Ui, app: &App, d: &mut PropertiesDraft) {
             ui.vertical(|ui| {
                 let filter = Browse::File(Some(l::GAME_FILTER));
                 field::path(ui, &mut d.source, "Source", "Choose source", filter, "");
-                if ui.button(w::CHOOSE_FOLDER).clicked()
+                if crate::ui::widgets::button::ghost(ui, w::CHOOSE_FOLDER, true).clicked()
                     && let Some(folder) = crate::flows::pick(
                         "Choose extracted game folder",
                         &d.source,
@@ -123,10 +123,7 @@ pub fn runtime(ui: &mut Ui, app: &App, d: &mut PropertiesDraft) {
     row(ui, "Graphics backend", "", |ui| readout(ui, w::VULKAN));
     let ini = d.game.ini_path();
     row(ui, "Settings file", w::RUNTIME_NOTE, |ui| {
-        if ui
-            .add_enabled(app.exists(&ini), egui::Button::new(w::OPEN_INI))
-            .clicked()
-        {
+        if crate::ui::widgets::button::ghost(ui, w::OPEN_INI, app.exists(&ini)).clicked() {
             app.open_path(&ini);
         }
     });

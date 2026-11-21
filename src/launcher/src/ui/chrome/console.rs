@@ -30,7 +30,8 @@ pub fn show(ui: &mut Ui, app: &mut App) -> Option<Action> {
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     // right to left: Close, then where it goes, then where else it can go
-                    use super::console_buttons::{Glyph, icon};
+                    use crate::ui::widgets::icon_button::{Glyph, add};
+                    let icon = |ui: &mut Ui, g, name| add(ui, g, name, false);
                     let c = &mut app.lib.console;
                     if c.floating {
                         if icon(ui, Glyph::PanelBottom, "Dock in the main window") {

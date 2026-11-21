@@ -1,16 +1,16 @@
-//! Buttons: the raised default and the one filled accent action of a surface (Qt's `AccentButton`).
+//! Buttons (the family's style guide, "Buttons and surfaces"): the ghost default and the one filled
+//! accent action of a surface. Icon-only buttons are `icon_button`.
 //! A disabled button says why in its tooltip when there is a reason.
 
 use crate::constants::popups as c;
 use crate::ui::theme::{self, Palette};
 use egui::{Button, Response, RichText, Stroke, Ui, vec2};
 
-/// The raised button.
+/// The ghost button, the family's default (Cancel, Close, the row and panel verbs): no frame at rest,
+/// the hover fill under the pointer. Outlines belong to the title bar alone.
 pub fn ghost(ui: &mut Ui, label: &str, enabled: bool) -> Response {
-    ui.add_enabled(
-        enabled,
-        Button::new(label).min_size(vec2(c::BUTTON_MIN, c::BUTTON)),
-    )
+    let button = Button::new(label).frame_when_inactive(false);
+    ui.add_enabled(enabled, button.min_size(vec2(c::BUTTON_MIN, c::BUTTON)))
 }
 
 /// The surface's one filled accent action.

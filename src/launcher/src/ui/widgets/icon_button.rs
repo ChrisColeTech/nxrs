@@ -1,11 +1,15 @@
-//! The build output's header buttons: icon buttons (the family's panel glyphs on a 24-unit grid,
-//! 2-unit strokes, rounded ends) with their names as tooltips and accessible names.
+//! The one icon-only button (the family's `IconButton`): a square with a glyph on a 24-unit grid, its
+//! name as tooltip and accessible name. Transparent at rest with a muted glyph, the hover fill and
+//! the text ink under the pointer. Borderless, except a title header's close (`edge`), which the
+//! family's style guide borders; every close in the app is this button with the same X.
 
+use crate::constants::popups::CLOSE_SIDE as SIZE;
 use crate::ui::theme;
-use egui::{Color32, CornerRadius, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, WidgetInfo, vec2};
+use egui::{
+    Color32, CornerRadius, Id, Pos2, Rect, Sense, Stroke, StrokeKind, Ui, WidgetInfo, vec2,
+};
 
-const SIZE: f32 = 26.0;
-const GLYPH: f32 = 15.0;
+const GLYPH: f32 = 14.0;
 
 #[derive(Clone, Copy)]
 pub enum Glyph {
@@ -55,16 +59,34 @@ fn draw(ui: &Ui, rect: Rect, glyph: Glyph, ink: Color32) {
     }
 }
 
-/// One icon button; true when pressed.
-pub fn icon(ui: &mut Ui, glyph: Glyph, name: &str) -> bool {
+/// The button in `rect`; true when pressed. `edge`: a title header's close.
+pub fn show(ui: &Ui, rect: Rect, id: &str, (glyph, name): (Glyph, &str), edge: bool) -> bool {
     let p = theme::of(ui.ctx());
-    let (rect, response) = ui.allocate_exact_size(vec2(SIZE, SIZE), Sense::click());
+    let response = ui.interact(rect, Id::unique(("icon-button", id)), Sense::click());
     response.widget_info(|| WidgetInfo::labeled(egui::Role::Button, true, name));
-    if response.hovered() {
-        ui.painter()
-            .rect_filled(rect, CornerRadius::same(4), p.hover);
-    }
-    let ink = if response.hovered() { p.text } else { p.muted };
-    draw(ui, rect, glyph, ink);
+    let hot = response.hovered();
+    let fill = if response.is_pointer_button_down_on() {
+        p.selected
+    } else if hot {
+        p.hover
+    } else {
+        Color32::TRANSPARENT
+    };
+    let border = if edge { p.border } else { Color32::TRANSPARENT };
+    let radius = CornerRadius::same(4);
+    ui.painter().rect(
+        rect,
+        radius,
+        fill,
+        Stroke::new(1.0, border),
+        StrokeKind::Inside,
+    );
+    draw(ui, rect, glyph, if hot { p.text } else { p.muted });
     response.on_hover_text(name).clicked()
+}
+
+/// The button laid out in the current row; true when pressed.
+pub fn add(ui: &mut Ui, glyph: Glyph, name: &str, edge: bool) -> bool {
+    let (rect, _) = ui.allocate_exact_size(vec2(SIZE, SIZE), Sense::hover());
+    show(ui, rect, name, (glyph, name), edge)
 }

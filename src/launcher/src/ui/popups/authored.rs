@@ -2,13 +2,9 @@
 //! connected primary tabs, the footer with its one primary action.
 
 use crate::constants::popups as c;
-use crate::ui::icons;
 use crate::ui::theme::{self, Palette};
 use crate::ui::widgets::button;
-use egui::{
-    Align, Align2, CornerRadius, Id, Layout, Rect, Role, Sense, Stroke, StrokeKind, Ui, WidgetInfo,
-    pos2, vec2,
-};
+use egui::{Align, Align2, Layout, Rect, Role, Sense, Stroke, Ui, WidgetInfo, pos2, vec2};
 
 /// The title and a trailing close button named `Close <title>`; true when it was pressed.
 pub fn header(ui: &mut Ui, width: f32, title: &str, close_id: &str) -> bool {
@@ -31,29 +27,14 @@ pub fn header(ui: &mut Ui, width: f32, title: &str, close_id: &str) -> bool {
         vec2(c::CLOSE_SIDE, c::CLOSE_SIDE),
     );
     let name = format!("{} {title}", c::CLOSE_NAME);
-    let hit = ui.interact(close, Id::unique(close_id), Sense::click());
-    hit.widget_info(|| WidgetInfo::labeled(Role::Button, true, &name));
-    let fill = if hit.is_pointer_button_down_on() {
-        p.selected
-    } else if hit.hovered() {
-        p.hover
-    } else {
-        p.surface
-    };
-    ui.painter().rect(
-        close,
-        CornerRadius::same(4),
-        fill,
-        Stroke::new(1.0, p.border),
-        StrokeKind::Inside,
-    );
-    icons::close_x(ui.painter(), close, p.text);
+    let glyph = (crate::ui::widgets::icon_button::Glyph::Close, name.as_str());
+    let pressed = crate::ui::widgets::icon_button::show(ui, close, close_id, glyph, true);
     ui.painter().hline(
         rect.x_range(),
         rect.bottom() - 0.5,
         Stroke::new(1.0, p.border),
     );
-    hit.on_hover_text(name).clicked()
+    pressed
 }
 
 /// The footer: a hairline, then Cancel and the primary action at the right (primary last).

@@ -42,11 +42,8 @@ pub fn show(ctx: &egui::Context, app: &App, anchor: Rect) -> (bool, Option<Actio
                     .font(semibold(tokens::FONT_POPUP_TITLE)),
                 );
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if ui
-                        .add_sized(vec2(30.0, 28.0), egui::Button::new("×"))
-                        .on_hover_text("Close (Esc)")
-                        .clicked()
-                    {
+                    use crate::ui::widgets::icon_button::{Glyph, add};
+                    if add(ui, Glyph::Close, "Close (Esc)", true) {
                         keep = false;
                     }
                 });

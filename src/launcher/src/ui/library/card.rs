@@ -1,68 +1,14 @@
 //! A gallery card (`GameCard`): the cover (artwork or the placeholder, the attention badge, the build's
-//! progress strip), the title footer, the primary button and Properties.
+//! progress strip) over the whole tile, the title on a fade at its foot, the primary button and
+//! Properties.
 
-use super::artwork_cache::{Art, ArtworkCache, crop_uv};
+use super::artwork_cache::ArtworkCache;
 use crate::constants::{layout, theme as tokens, words_library as w};
 use crate::flows::{Action, App};
 use crate::model::game::Game;
 use crate::model::path_text::native;
-use crate::ui::icons;
-use crate::ui::theme::{self, Palette, alpha, sans, semibold};
-use egui::{Align2, CornerRadius, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
-
-fn cover(ui: &Ui, p: &Palette, art: Option<Art>, rect: Rect) -> String {
-    let top = CornerRadius {
-        nw: 5,
-        ne: 5,
-        sw: 0,
-        se: 0,
-    };
-    if let Some(Art::Ready(tex)) = &art {
-        let shape = egui::epaint::RectShape::filled(rect, top, egui::Color32::WHITE)
-            .with_texture(tex.id(), crop_uv(tex.size_vec2(), rect.size()));
-        ui.painter().add(shape);
-        return String::new();
-    }
-    let error = if let Some(Art::Failed(e)) = &art {
-        e.clone()
-    } else {
-        String::new()
-    };
-    ui.painter()
-        .rect_filled(rect, top, theme::blend(p.raised, p.surface, 0.5));
-    icons::gamepad(ui.painter(), rect.center() - vec2(0.0, 7.0), p);
-    let text = if error.is_empty() {
-        w::NO_ARTWORK
-    } else {
-        w::BAD_ARTWORK
-    };
-    ui.painter().text(
-        pos2(rect.center().x, rect.bottom() - 13.0),
-        Align2::CENTER_BOTTOM,
-        text,
-        sans(tokens::FONT_SMALL),
-        p.muted,
-    );
-    error
-}
-
-fn badge(ui: &Ui, p: &Palette, cover: Rect, status: &str) {
-    let center = pos2(cover.right() - 31.0 + 11.5, cover.top() + 8.0 + 11.5);
-    ui.painter()
-        .circle_filled(center, 11.5, alpha(p.surface, 235));
-    let s = Stroke::new(1.8, p.accent);
-    if status.starts_with("Needs") {
-        ui.painter()
-            .line_segment([center + vec2(-5.0, 5.0), center + vec2(5.0, -5.0)], s);
-        ui.painter()
-            .line_segment([center + vec2(0.0, -6.0), center + vec2(6.0, 0.0)], s);
-    } else {
-        ui.painter()
-            .line_segment([center + vec2(0.0, -5.0), center + vec2(0.0, 1.0)], s);
-        ui.painter()
-            .circle_filled(center + vec2(0.0, 5.0), 1.0, p.accent);
-    }
-}
+use crate::ui::theme::{self, semibold};
+use egui::{CornerRadius, Id, Rect, Sense, Stroke, Ui, pos2, vec2};
 
 pub fn show(
     ui: &mut Ui,
@@ -98,14 +44,15 @@ pub fn show(
     let whole = ui.interact(Rect::from_min_max(rect.min, footer.max), id, Sense::click());
     let name = format!("{}, {}", game.title, state.status);
     whole.widget_info(|| egui::WidgetInfo::labeled(egui::Role::GenericContainer, true, &name));
-    let error = cover(ui, &p, art.get(&game.cover), cover_rect);
+    let tile = Rect::from_min_max(rect.min, footer.max);
+    let error = super::card_art::cover(ui, &p, art.get(&game.cover), (tile, cover_rect));
     if state.needs_attention {
-        badge(ui, &p, cover_rect, &state.status);
+        super::card_art::badge(ui, &p, cover_rect, &state.status);
     }
     if state.building && app.progress.total > 0 {
         let strip = Rect::from_min_max(
-            pos2(cover_rect.left(), cover_rect.bottom() - 3.0),
-            cover_rect.max,
+            pos2(tile.left() + 5.0, tile.bottom() - 3.0),
+            tile.max - vec2(5.0, 0.0),
         );
         ui.painter()
             .rect_filled(strip, CornerRadius::ZERO, p.border);
@@ -117,27 +64,28 @@ pub fn show(
         );
     }
     let selected = app.selected == game.id;
-    ui.painter().rect_filled(
-        footer,
-        CornerRadius {
-            nw: 0,
-            ne: 0,
-            sw: 5,
-            se: 5,
-        },
-        if selected { p.selected } else { p.raised },
+    // the title over a fade, not a bar: the artwork runs to the tile's foot
+    super::card_art::fade(
+        ui,
+        Rect::from_min_max(pos2(tile.left(), footer.top() - 28.0), tile.max),
     );
+    if selected {
+        let edge = Stroke::new(2.0, p.accent);
+        ui.painter()
+            .rect_stroke(tile, CornerRadius::same(5), edge, egui::StrokeKind::Inside);
+    }
+    let ink = egui::Color32::from_gray(245);
     let galley = ui.painter().layout(
         game.title.clone(),
         semibold(tokens::FONT_BODY),
-        p.text,
+        ink,
         footer.width() - 18.0,
     );
     let gh = galley.size().y.min(footer.height() - 4.0);
     ui.painter().with_clip_rect(footer).galley(
         pos2(footer.left() + 9.0, footer.center().y - gh / 2.0),
         galley,
-        p.text,
+        ink,
     );
     let art_tip = if !error.is_empty() {
         format!("{}{error}", w::ARTWORK_ERROR)

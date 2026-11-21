@@ -2,6 +2,7 @@
 pub mod button;
 pub mod field;
 pub mod form;
+pub mod icon_button;
 pub mod page;
 pub mod pick_list;
 pub mod rail;

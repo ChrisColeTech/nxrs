@@ -2,6 +2,7 @@
 pub mod artwork_cache;
 pub mod canvas;
 pub mod card;
+mod card_art;
 pub mod card_buttons;
 pub mod gallery;
 pub mod list;

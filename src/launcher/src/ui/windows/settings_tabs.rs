@@ -41,10 +41,7 @@ pub fn engine(ui: &mut Ui, app: &mut App, s: &mut SettingsDraft) {
     readout(ui, &app.doctor_text);
     ui.add_space(8.0);
     let can = !app.tools.nxrs_build.is_empty() && !app.doctor_running;
-    if ui
-        .add_enabled(can, egui::Button::new(w::CHECK_AGAIN))
-        .clicked()
-    {
+    if crate::ui::widgets::button::ghost(ui, w::CHECK_AGAIN, can).clicked() {
         app.run_doctor();
     }
 }
