@@ -23,7 +23,8 @@ pub enum Icon {
     Play,
 }
 
-fn icon(ui: &Ui, center: Pos2, kind: Icon, ink: Color32) {
+/// A section's icon, centred on `center` (the rail's entries, the page's group tiles).
+pub fn paint(ui: &Ui, center: Pos2, kind: Icon, ink: Color32) {
     let p = ui.painter();
     let h = ICON / 2.0;
     let s = Stroke::new(1.4, ink);
@@ -80,7 +81,7 @@ fn entry(ui: &Ui, p: &Palette, rect: Rect, (label, kind): (&str, Icon), on: bool
     };
     let y = rect.center().y;
     let x = rect.left() + PAD;
-    icon(ui, pos2(x + ICON / 2.0, y), kind, ink);
+    paint(ui, pos2(x + ICON / 2.0, y), kind, ink);
     let font = theme::sans(crate::constants::theme::FONT_BODY);
     let at = pos2(x + ICON + GAP, y);
     ui.painter()

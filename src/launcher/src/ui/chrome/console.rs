@@ -22,16 +22,10 @@ pub fn show(ui: &mut Ui, app: &mut App) -> Option<Action> {
             ui.horizontal(|ui| {
                 ui.label(egui::RichText::new(&app.console.title).font(semibold(13.0)));
                 ui.add_space(12.0);
-                if ui
-                    .add(egui::Button::new(m::OPEN_LOG).frame(false))
-                    .clicked()
-                {
+                if crate::ui::widgets::button::ghost(ui, m::OPEN_LOG, true).clicked() {
                     action = Some(Action::OpenBuildLog);
                 }
-                if ui
-                    .add(egui::Button::new(m::CLEAR_VIEW).frame(false))
-                    .clicked()
-                {
+                if crate::ui::widgets::button::ghost(ui, m::CLEAR_VIEW, true).clicked() {
                     action = Some(Action::ClearConsole);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {

@@ -36,10 +36,7 @@ pub fn show(ui: &mut Ui, app: &mut App, s: &mut SettingsDraft) -> Reply {
         .id_salt(("settings-page", s.tab))
         .auto_shrink([false, false])
         .show(&mut pane, |ui| {
-            ui.add_space(6.0);
-            let heading = w::SETTINGS_TABS.get(s.tab).copied().unwrap_or_default();
-            ui.label(egui::RichText::new(heading).font(theme::semibold(15.0)));
-            ui.add_space(10.0);
+            ui.add_space(2.0);
             match s.tab {
                 0 => settings_tabs::engine(ui, app, s),
                 1 => settings_tabs::builds(ui, s),
