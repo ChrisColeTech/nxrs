@@ -1,4 +1,5 @@
-//! Settings: Engine, Build defaults, Controller, Appearance, Play; Cancel and Apply. The appearance
+//! Settings: Engine, Build defaults, Controller, Appearance, Play down the rail (the family's work
+//! window, as giga-cut's Settings); Cancel and Apply. The appearance
 //! previews live; Cancel, Escape and the X restore it.
 
 use super::{Reply, settings_tabs};
@@ -7,22 +8,38 @@ use crate::flows::App;
 use crate::flows::settings::SettingsDraft;
 use crate::ui::popups::authored;
 use crate::ui::theme;
-use egui::Ui;
+use crate::ui::widgets::rail::{self, Icon};
+use egui::{Rect, Sense, Ui, UiBuilder, pos2, vec2};
+
+/// The sections down the rail, in the order of `words_settings::SETTINGS_TABS`.
+const ICONS: [Icon; 5] = [
+    Icon::Engine,
+    Icon::Build,
+    Icon::Controller,
+    Icon::Appearance,
+    Icon::Play,
+];
 
 pub fn show(ui: &mut Ui, app: &mut App, s: &mut SettingsDraft) -> Reply {
     let p = theme::of(ui.ctx());
-    if let Some(t) = authored::tabs(ui, &p, "settings-tabs", &w::SETTINGS_TABS, s.tab) {
+    // the family's work window: the rail down the left, the section's form scrolling beside it
+    let size = vec2(ui.available_width(), authored::body_height(ui));
+    let (area, _) = ui.allocate_exact_size(size, Sense::hover());
+    let rail_rect = Rect::from_min_size(area.min, vec2(rail::WIDTH, area.height()));
+    let entries: Vec<(&str, Icon)> = w::SETTINGS_TABS.iter().copied().zip(ICONS).collect();
+    if let Some(t) = rail::rail(ui, rail_rect, &entries, s.tab) {
         s.tab = t;
     }
-    ui.add_space(4.0);
-    let height = authored::body_height(ui);
+    let body = Rect::from_min_max(pos2(rail_rect.right() + 16.0, area.top()), area.max);
+    let mut pane = ui.new_child(UiBuilder::new().max_rect(body).id_salt("settings-body"));
     egui::ScrollArea::vertical()
         .id_salt(("settings-page", s.tab))
-        .max_height(height)
-        .min_scrolled_height(height)
         .auto_shrink([false, false])
-        .show(ui, |ui| {
-            ui.add_space(8.0);
+        .show(&mut pane, |ui| {
+            ui.add_space(6.0);
+            let heading = w::SETTINGS_TABS.get(s.tab).copied().unwrap_or_default();
+            ui.label(egui::RichText::new(heading).font(theme::semibold(15.0)));
+            ui.add_space(10.0);
             match s.tab {
                 0 => settings_tabs::engine(ui, app, s),
                 1 => settings_tabs::builds(ui, s),

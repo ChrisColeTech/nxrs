@@ -35,7 +35,7 @@ pub const SCRIM_ID: &str = "child-window-scrim";
 pub type Surface = (&'static str, f32, f32, f32, f32);
 pub const PROPERTIES: Surface = ("properties", 670.0, 400.0, 560.0, 340.0);
 pub const ADD_GAME: Surface = ("add-game", 670.0, 400.0, 560.0, 340.0);
-pub const SETTINGS: Surface = ("settings", 690.0, 440.0, 580.0, 360.0);
+pub const SETTINGS: Surface = ("settings", 840.0, 440.0, 730.0, 360.0);
 pub const DLC: Surface = ("dlc", 680.0, 400.0, 520.0, 300.0);
 pub const UPDATES: Surface = ("updates", 700.0, 430.0, 540.0, 320.0);
 /// A message or a question: its width; its body is measured from its text.

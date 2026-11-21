@@ -18,6 +18,15 @@ impl App {
             if settings && !self.doctor_running {
                 self.run_doctor();
             }
+            // and its engine field shows the engine found, when none was chosen
+            let found = crate::model::path_text::native(&self.tools.nxrs_build);
+            for s in &mut self.surfaces {
+                if let super::surface::Surface::Settings(d) = s
+                    && d.nxrs_build.trim().is_empty()
+                {
+                    d.nxrs_build = found.clone();
+                }
+            }
         }
         if let Some(d) = self.doctor_rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             (self.doctor_text, self.doctor_running, self.doctor_rx) = (d.summary(), false, None);

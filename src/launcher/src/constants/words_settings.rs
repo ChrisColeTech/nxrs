@@ -38,11 +38,11 @@ pub const LAYOUT_SWITCH: &str = "Switch — by position (A right, B bottom)";
 pub const LAYOUT_XBOX: &str = "Xbox — by label (A bottom, B right)";
 pub const LAYOUT_DEFAULT_SWITCH: &str = "Use default — Switch";
 pub const LAYOUT_DEFAULT_XBOX: &str = "Use default — Xbox";
-pub const SCREEN_TV: &str = "TV mode — sharper";
+pub const SCREEN_TV: &str = "Docked — sharper";
 pub const SCREEN_HANDHELD: &str = "Handheld — lighter";
-pub const SCREEN_DEFAULT_TV: &str = "Use default — TV mode";
+pub const SCREEN_DEFAULT_TV: &str = "Use default — Docked";
 pub const SCREEN_DEFAULT_HANDHELD: &str = "Use default — Handheld";
-pub const SCREEN_TIP: &str = "TV mode renders at the game's TV resolution (Switch 1920x1080, Switch 2 up to 2560x1440 and more): sharper. Handheld renders at its handheld resolution (1280x720 / 1920x1080): lighter on the GPU. The default is in Settings > Play.";
+pub const SCREEN_TIP: &str = "Docked renders at the game's docked resolution (Switch 1920x1080, Switch 2 up to 2560x1440 and more): sharper. Handheld renders at its handheld resolution (1280x720 / 1920x1080): lighter on the GPU. The default is in Settings > Play.";
 
 pub const ENGINE_ROW: &str = "Engine";
 pub const CHECKS_ROW: &str = "Checks";

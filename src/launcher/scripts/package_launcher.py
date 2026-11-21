@@ -133,12 +133,12 @@ def archive(stage, out, platform):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('--engine', required=True, help='nxrs-engine-<platform>-x64 archive, or an nxrs-engine folder')
-    ap.add_argument('--launcher', help='the built launcher (default: target/release/nxrs beside this script)')
+    ap.add_argument('--launcher', help='the built launcher (default: the repository target/release/nxrs)')
     ap.add_argument('--llvm-mingw', help='llvm-mingw (Windows, gnullvm engine; default: build/tools/llvm-mingw)')
     ap.add_argument('--out', default=str(LAUNCHER / 'dist'))
     args = ap.parse_args()
     platform = platform_name()
-    launcher = Path(args.launcher or LAUNCHER / 'target/release' / exe(NAME, platform))
+    launcher = Path(args.launcher or ROOT / 'target/release' / exe(NAME, platform))
     if not launcher.is_file():
         sys.exit(f'{launcher}: build it first (cargo build --release --jobs 4)')
     out = Path(args.out)

@@ -42,18 +42,24 @@ fn resolve(path: &str) -> String {
 
 impl Toolchain {
     /// `NXRS_BUILD`, else the one chosen in Settings, else the release's `nxrs-engine/` beside the
-    /// launcher; then its contract from `engine.json` beside it, else from `nxrs-build contract`.
+    /// launcher, else nxrs-build beside the launcher itself; then its contract from `engine.json` beside it, else from `nxrs-build contract`.
     pub fn find(chosen: &str, keys: &str) -> Toolchain {
         let mut t = Toolchain {
             keys: keys.to_string(),
             ..Toolchain::default()
         };
         let bundled = join(&app_dir(), e::BUNDLED_FOLDER);
-        t.nxrs_build = [env(e::ENV_NXRS_BUILD), chosen.to_string(), bundled]
-            .iter()
-            .map(|c| resolve(c))
-            .find(|p| !p.is_empty())
-            .unwrap_or_default();
+        // last, the launcher's own folder: a development build puts nxrs-build beside nxrs
+        t.nxrs_build = [
+            env(e::ENV_NXRS_BUILD),
+            chosen.to_string(),
+            bundled,
+            app_dir(),
+        ]
+        .iter()
+        .map(|c| resolve(c))
+        .find(|p| !p.is_empty())
+        .unwrap_or_default();
         if t.nxrs_build.is_empty() {
             return t;
         }

@@ -513,23 +513,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e0921b3876b3a1df8a1c9f912e7f94342458022c2e84288015893d83c4d62a79"
 
 [[package]]
-name = "cli"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "ash",
- "clap",
- "libc",
- "profiles",
- "serde_json",
- "sha2",
- "shaders",
- "translator",
- "unicode-normalization",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "colorchoice"
 version = "1.0.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1010,6 +993,7 @@ dependencies = [
  "ash",
  "config",
  "ctt-astcenc",
+ "flate2",
  "gpu-allocator",
  "libc",
  "raw-window-handle",
@@ -1359,6 +1343,23 @@ dependencies = [
  "proc-macro2",
  "quote",
  "syn 2.0.119",
+]
+
+[[package]]
+name = "nxrs-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "ash",
+ "clap",
+ "libc",
+ "profiles",
+ "serde_json",
+ "sha2",
+ "shaders",
+ "translator",
+ "unicode-normalization",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

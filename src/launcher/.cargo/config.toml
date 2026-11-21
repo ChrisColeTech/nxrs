@@ -1,0 +1,4 @@
+# The launcher is its own workspace (its own lock file) but builds into the repository's target folder, beside the
+# engine: target/release holds nxrs.exe (the launcher) and nxrs-build.exe (the engine CLI).
+[build]
+target-dir = "../../target"

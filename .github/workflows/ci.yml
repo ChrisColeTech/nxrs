@@ -148,7 +148,7 @@ jobs:
       - name: Engine release build
         run: |
           export NXGFX_GLSLANG=$HOME/glslang/glslangValidator
-          cargo build --release --locked --jobs 4 -p cli -p front -p runtime
+          cargo build --release --locked --jobs 4 -p nxrs-cli -p front -p runtime
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'
@@ -235,7 +235,7 @@ jobs:
       - name: Engine release build
         run: |
           export NXGFX_GLSLANG=$HOME/glslang/glslangValidator
-          cargo build --release --locked --jobs 4 -p cli -p front -p runtime
+          cargo build --release --locked --jobs 4 -p nxrs-cli -p front -p runtime
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.x'

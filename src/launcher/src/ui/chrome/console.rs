@@ -35,28 +35,28 @@ pub fn show(ui: &mut Ui, app: &mut App) -> Option<Action> {
                     action = Some(Action::ClearConsole);
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    // right to left: Close, then where it goes, then where else it can go
+                    use super::console_buttons::{Glyph, icon};
                     let c = &mut app.lib.console;
-                    if !c.floating
-                        && ui
-                            .add(egui::Button::new("×").frame(false))
-                            .on_hover_text("Close")
-                            .clicked()
-                    {
+                    if c.floating {
+                        if icon(ui, Glyph::PanelBottom, "Dock in the main window") {
+                            c.floating = false;
+                        }
+                        return;
+                    }
+                    if icon(ui, Glyph::Close, "Close build output") {
                         action = Some(Action::ToggleConsole);
                     }
-                    let float = if c.floating { "Dock" } else { "Pop out" };
-                    if ui.add(egui::Button::new(float).frame(false)).clicked() {
-                        c.floating = !c.floating;
+                    if icon(ui, Glyph::PopOut, "Pop out into a window") {
+                        c.floating = true;
                     }
-                    if !c.floating {
-                        let side = if c.right {
-                            "Dock at bottom"
-                        } else {
-                            "Dock at right"
-                        };
-                        if ui.add(egui::Button::new(side).frame(false)).clicked() {
-                            super::dock::switch_side(c);
-                        }
+                    let (glyph, name) = if c.right {
+                        (Glyph::PanelBottom, "Dock at the bottom")
+                    } else {
+                        (Glyph::PanelRight, "Dock at the right")
+                    };
+                    if icon(ui, glyph, name) {
+                        super::dock::switch_side(c);
                     }
                 });
             });

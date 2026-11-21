@@ -12,8 +12,8 @@ the launcher contract (v1 drop-in for Turbo's `switchrecomp.py`, v2 subcommands)
     nxrs-build translate <input> --out <dir>                      (development: C + data folder, for nxrt-dev e2e)
     nxrs-build <input> --outdir <dir> -o <name> ...                (contract v1: Turbo's options)
 
-Build and test: `cargo build --release -p cli -p runtime -p front` (`nxrs-build.exe` finds `nxfront.lib` and `nxrt.lib` beside
-itself), `cargo test -p cli`. Input: a folder, NSP, XCI, NUP or a homebrew NRO.
+Build and test: `cargo build --release -p nxrs-cli -p runtime -p front` (`nxrs-build.exe` finds `nxfront.lib` and `nxrt.lib` beside
+itself), `cargo test -p nxrs-cli`. Input: a folder, NSP, XCI, NUP or a homebrew NRO.
 
 ## The build step
 

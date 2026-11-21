@@ -6,7 +6,7 @@ use super::App;
 use super::surface::Surface;
 use crate::constants::{engine as e, words_settings as w};
 use crate::model::fill::fill;
-use crate::model::path_text::{absolute, from_native, native};
+use crate::model::path_text::{absolute, from_native, native, same_path};
 use crate::services::{build_facts, files, ini_file};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -30,7 +30,12 @@ impl App {
         let l = &self.lib;
         let draft = SettingsDraft {
             tab: tab.min(4),
-            nxrs_build: native(&l.nxrs_build),
+            // the engine in use: the one chosen, else the one found (the bundled one)
+            nxrs_build: native(if l.nxrs_build.is_empty() {
+                &self.tools.nxrs_build
+            } else {
+                &l.nxrs_build
+            }),
             output_root: l.output_root.clone(),
             jobs: l.jobs,
             button_layout: l.button_layout.clone(),
@@ -54,6 +59,9 @@ impl App {
     /// Apply: true when the window closes.
     pub fn apply_settings(&mut self, s: &SettingsDraft) -> bool {
         let chosen = from_native(s.nxrs_build.trim());
+        // the found engine left as shown is no choice: it stays found (a moved release finds its own)
+        let found = self.lib.nxrs_build.is_empty() && same_path(&chosen, &self.tools.nxrs_build);
+        let chosen = if found { String::new() } else { chosen };
         let engine_changed = s.output_root != self.lib.output_root
             || s.jobs != self.lib.jobs
             || chosen != self.lib.nxrs_build;

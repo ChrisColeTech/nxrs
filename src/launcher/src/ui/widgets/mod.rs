@@ -3,5 +3,6 @@ pub mod button;
 pub mod field;
 pub mod form;
 pub mod pick_list;
+pub mod rail;
 pub mod sash;
 pub mod select;

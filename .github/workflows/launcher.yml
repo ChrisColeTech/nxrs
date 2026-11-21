@@ -54,7 +54,7 @@ jobs:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-            src/launcher/target
+            target
           key: launcher-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('src/launcher/Cargo.lock') }}
           restore-keys: launcher-${{ runner.os }}-${{ env.RUST_VERSION }}-
       - name: Format
@@ -73,6 +73,6 @@ jobs:
         with:
           name: nxrs-launcher-${{ runner.os }}
           path: |
-            src/launcher/target/release/nxrs
-            src/launcher/target/release/nxrs.exe
+            target/release/nxrs
+            target/release/nxrs.exe
           if-no-files-found: error

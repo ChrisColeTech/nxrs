@@ -3,6 +3,7 @@
 pub mod caption;
 pub mod commands;
 pub mod console;
+pub mod console_buttons;
 pub mod dock;
 pub mod filter_popover;
 pub mod menu_draw;
