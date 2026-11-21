@@ -60,6 +60,8 @@ pub fn show(ui: &mut Ui, app: &mut App, win: &mut ListWindow) -> Reply {
     };
     let busy = app.probe_busy();
     let editable = !win.locked && !busy;
+    let tip = hint(game.updates.is_empty(), false);
+    crate::ui::widgets::page::group(ui, crate::ui::widgets::rail::Icon::Updates, "Updates", tip);
     version_row(ui, app, win, editable);
     ui.add_space(4.0);
     let rows = app.update_rows(&game);
@@ -81,7 +83,9 @@ pub fn show(ui: &mut Ui, app: &mut App, win: &mut ListWindow) -> Reply {
         ]
     };
     let pending = app.update_pending_text(&game);
-    let lines = [hint(game.updates.is_empty(), win.locked), pending.as_str()];
+    // the state stays in view; how the list works is in the heading's info mark
+    let locked = if win.locked { w::HINT_LOCKED } else { "" };
+    let lines = [locked, pending.as_str()];
     let buttons = Buttons {
         add: w::ADD,
         add_tip: w::ADD_TIP,

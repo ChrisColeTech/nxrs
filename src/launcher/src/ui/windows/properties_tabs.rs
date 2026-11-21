@@ -1,90 +1,98 @@
-//! Properties' General, Build, Runtime and Artwork pages (`editGame`).
+//! Properties' General, Build, Runtime and Artwork sections (`editGame`) in the family's page grammar:
+//! Groups of labelled rows, the explanations in the info marks' tooltips.
 
 use crate::constants::{words_library as l, words_settings as w};
 use crate::flows::App;
 use crate::flows::properties::PropertiesDraft;
-use crate::ui::theme;
 use crate::ui::widgets::field::{self, Browse};
-use crate::ui::widgets::{form, select};
+use crate::ui::widgets::page::{group, readout, row, rule};
+use crate::ui::widgets::rail::Icon;
+use crate::ui::widgets::select;
 use egui::Ui;
 
+const NAME_TIP: &str = "The name the library shows. The build keeps its executable name.";
+const SOURCE_TIP: &str = "The game package (NSP, XCI, NUP, an NRO) or an extracted folder (exefs/ + romfs/). Its data is read in place.";
+const FOLDER_TIP: &str =
+    "Where this game's build goes: the executable, the compiled code and the caches.";
+const EXE_TIP: &str = "The build's file name; it is set when the game is added.";
+const WORKERS_TIP: &str =
+    "Compiler processes for this game's builds; Use default follows Settings > Build defaults.";
+const LAYOUT_TIP: &str =
+    "This game's controller layout; Use default follows Settings > Controller.";
+const IMAGES: (&str, &[&str]) = ("Images", &["png", "jpg", "jpeg", "webp", "bmp"]);
+
 pub fn general(ui: &mut Ui, app: &App, d: &mut PropertiesDraft) {
-    let p = theme::of(ui.ctx());
-    form::row(ui, "Display name", |ui| {
+    group(ui, Icon::General, "Game", w::PATHS_NOTE);
+    row(ui, "Display name", NAME_TIP, |ui| {
         field::text(ui, &mut d.title, "", "Display name");
     });
     ui.add_enabled_ui(!d.locked, |ui| {
-        form::row(ui, "Source", |ui| {
-            field::path(
-                ui,
-                &mut d.source,
-                "Source",
-                "Choose source",
-                Browse::File(Some(l::GAME_FILTER)),
-                "",
-            );
-        });
-        form::row(ui, "", |ui| {
-            if ui.button(w::CHOOSE_FOLDER).clicked()
-                && let Some(folder) =
-                    crate::flows::pick("Choose extracted game folder", &d.source, Browse::Folder)
-            {
-                d.source = app.native(&folder);
-            }
+        row(ui, "Source", SOURCE_TIP, |ui| {
+            ui.vertical(|ui| {
+                let filter = Browse::File(Some(l::GAME_FILTER));
+                field::path(ui, &mut d.source, "Source", "Choose source", filter, "");
+                if ui.button(w::CHOOSE_FOLDER).clicked()
+                    && let Some(folder) = crate::flows::pick(
+                        "Choose extracted game folder",
+                        &d.source,
+                        Browse::Folder,
+                    )
+                {
+                    d.source = app.native(&folder);
+                }
+            });
         });
     });
-    form::value(ui, "Format", d.game.format());
+    rule(ui);
+    group(ui, Icon::General, "About", "");
+    row(ui, "Format", "", |ui| readout(ui, d.game.format()));
     let version = app.version_of(&d.game);
     if !version.is_empty() {
-        form::value(ui, "Version", &version);
+        row(ui, "Version", "", |ui| readout(ui, &version));
     }
-    form::value(ui, "Status", &d.status);
-    form::note(ui, &p, w::PATHS_NOTE);
+    row(ui, "Status", "", |ui| readout(ui, &d.status));
 }
 
 pub fn build(ui: &mut Ui, d: &mut PropertiesDraft) {
-    form::row(ui, "Build folder", |ui| {
+    group(ui, Icon::Build, "Build", FOLDER_TIP);
+    row(ui, "Build folder", FOLDER_TIP, |ui| {
+        let pick = "Choose build output folder";
         field::path(
             ui,
             &mut d.build_dir,
             "Build folder",
-            "Choose build output folder",
+            pick,
             Browse::Folder,
             "",
         );
     });
-    form::row(ui, "Executable name", |ui| {
+    row(ui, "Executable name", EXE_TIP, |ui| {
         if d.adding {
             field::text(ui, &mut d.output_name, "", "Executable name");
         } else {
             field::fixed(ui, &d.output_name, "Executable name");
         }
     });
-    form::row(ui, "Compiler workers", |ui| {
+    row(ui, "Compiler workers", WORKERS_TIP, |ui| {
         let shown = if d.workers == 0 {
             w::USE_DEFAULT.to_string()
         } else {
             d.workers.to_string()
         };
-        ui.add(
-            egui::DragValue::new(&mut d.workers)
-                .range(0..=64)
-                .speed(0.1)
-                .custom_formatter(move |_, _| shown.clone()),
-        );
+        let value = egui::DragValue::new(&mut d.workers)
+            .range(0..=64)
+            .speed(0.1);
+        ui.add(value.custom_formatter(move |_, _| shown.clone()));
     });
-    form::row(ui, "Engine", |ui| {
-        ui.label(if d.game.nxrs() {
-            w::ENGINE_NXRS
-        } else {
-            w::ENGINE_TURBO
-        });
-    });
+    let engine = if d.game.nxrs() {
+        w::ENGINE_NXRS
+    } else {
+        w::ENGINE_TURBO
+    };
+    row(ui, "Engine", "", |ui| readout(ui, engine));
 }
 
 pub fn runtime(ui: &mut Ui, app: &App, d: &mut PropertiesDraft) {
-    let p = theme::of(ui.ctx());
-    form::value(ui, "Graphics backend", w::VULKAN);
     let default = if app.lib.button_layout == "xbox" {
         w::LAYOUT_DEFAULT_XBOX
     } else {
@@ -95,9 +103,6 @@ pub fn runtime(ui: &mut Ui, app: &App, d: &mut PropertiesDraft) {
         (w::LAYOUT_SWITCH, "switch".into()),
         (w::LAYOUT_XBOX, "xbox".into()),
     ]);
-    form::row(ui, "Controller layout", |ui| {
-        select::select(ui, "Controller layout", &mut d.button_layout, &layouts);
-    });
     let screen_default = if app.lib.docked {
         w::SCREEN_DEFAULT_TV
     } else {
@@ -108,15 +113,16 @@ pub fn runtime(ui: &mut Ui, app: &App, d: &mut PropertiesDraft) {
         (w::SCREEN_TV, "tv".into()),
         (w::SCREEN_HANDHELD, "handheld".into()),
     ]);
-    form::row(ui, "Screen mode", |ui| {
-        ui.scope(|ui| select::select(ui, "Screen mode", &mut d.screen_mode, &modes))
-            .response
-            .on_hover_text(w::SCREEN_TIP);
+    group(ui, Icon::Runtime, "Runtime", w::RUNTIME_NOTE);
+    row(ui, "Screen mode", w::SCREEN_TIP, |ui| {
+        select::select(ui, "Screen mode", &mut d.screen_mode, &modes);
     });
-    form::note(ui, &p, w::RUNTIME_NOTE);
-    ui.add_space(6.0);
+    row(ui, "Controller layout", LAYOUT_TIP, |ui| {
+        select::select(ui, "Controller layout", &mut d.button_layout, &layouts);
+    });
+    row(ui, "Graphics backend", "", |ui| readout(ui, w::VULKAN));
     let ini = d.game.ini_path();
-    form::row(ui, "", |ui| {
+    row(ui, "Settings file", w::RUNTIME_NOTE, |ui| {
         if ui
             .add_enabled(app.exists(&ini), egui::Button::new(w::OPEN_INI))
             .clicked()
@@ -127,27 +133,19 @@ pub fn runtime(ui: &mut Ui, app: &App, d: &mut PropertiesDraft) {
 }
 
 pub fn artwork(ui: &mut Ui, d: &mut PropertiesDraft) {
-    let p = theme::of(ui.ctx());
-    let images: (&str, &[&str]) = ("Images", &["png", "jpg", "jpeg", "webp", "bmp"]);
-    form::row(ui, "Cover image", |ui| {
-        field::path(
-            ui,
-            &mut d.cover,
-            "Cover image",
-            "Choose cover",
-            Browse::File(Some(images)),
-            "",
-        );
+    group(ui, Icon::Artwork, "Artwork", w::ARTWORK_NOTE);
+    row(
+        ui,
+        "Cover image",
+        "The card's picture in the gallery.",
+        |ui| {
+            let browse = Browse::File(Some(IMAGES));
+            field::path(ui, &mut d.cover, "Cover image", "Choose cover", browse, "");
+        },
+    );
+    row(ui, "Background image", w::ARTWORK_NOTE, |ui| {
+        let browse = Browse::File(Some(IMAGES));
+        let pick = "Choose background artwork";
+        field::path(ui, &mut d.background, "Background image", pick, browse, "");
     });
-    form::row(ui, "Background image", |ui| {
-        field::path(
-            ui,
-            &mut d.background,
-            "Background image",
-            "Choose background artwork",
-            Browse::File(Some(images)),
-            "",
-        );
-    });
-    form::note(ui, &p, w::ARTWORK_NOTE);
 }

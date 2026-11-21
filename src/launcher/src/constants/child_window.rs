@@ -33,8 +33,8 @@ pub const SCRIM_ID: &str = "child-window-scrim";
 /// The launcher's surfaces: (key, content width, body height, least width, least body), from the Qt
 /// dialogs' sizes (Properties 670 x 400, Settings 690 x 440, DLC 680 x 400, Updates 700 x 430).
 pub type Surface = (&'static str, f32, f32, f32, f32);
-pub const PROPERTIES: Surface = ("properties", 670.0, 400.0, 560.0, 340.0);
-pub const ADD_GAME: Surface = ("add-game", 670.0, 400.0, 560.0, 340.0);
+pub const PROPERTIES: Surface = ("properties", 820.0, 440.0, 710.0, 360.0);
+pub const ADD_GAME: Surface = ("add-game", 820.0, 440.0, 710.0, 360.0);
 pub const SETTINGS: Surface = ("settings", 840.0, 440.0, 730.0, 360.0);
 pub const DLC: Surface = ("dlc", 680.0, 400.0, 520.0, 300.0);
 pub const UPDATES: Surface = ("updates", 700.0, 430.0, 540.0, 320.0);

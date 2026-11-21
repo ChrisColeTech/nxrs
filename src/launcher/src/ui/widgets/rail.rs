@@ -21,6 +21,16 @@ pub enum Icon {
     Controller,
     Appearance,
     Play,
+    /// a card with its title lines: what the game is
+    General,
+    /// a speed dial: how the game runs
+    Runtime,
+    /// a framed picture
+    Artwork,
+    /// a box: add-on content
+    Dlc,
+    /// an arrow into a tray: updates
+    Updates,
 }
 
 /// A section's icon, centred on `center` (the rail's entries, the page's group tiles).
@@ -57,6 +67,41 @@ pub fn paint(ui: &Ui, center: Pos2, kind: Icon, ink: Color32) {
             p.circle_filled(at(-0.3, -0.3), 1.5, ink);
             p.circle_filled(at(0.3, -0.35), 1.5, ink);
             p.circle_filled(at(0.4, 0.25), 1.5, ink);
+        }
+        Icon::General => {
+            let card = Rect::from_center_size(center, vec2(ICON, ICON * 0.8));
+            p.rect_stroke(card, CornerRadius::same(2), s, StrokeKind::Middle);
+            p.line_segment([at(-0.55, -0.25), at(0.55, -0.25)], s);
+            p.line_segment([at(-0.55, 0.2), at(0.2, 0.2)], s);
+        }
+        Icon::Runtime => {
+            p.circle_stroke(center, h * 0.9, s);
+            p.line_segment([center, at(0.45, -0.45)], s);
+            p.circle_filled(center, 1.6, ink);
+        }
+        Icon::Artwork => {
+            let frame = Rect::from_center_size(center, vec2(ICON, ICON * 0.8));
+            p.rect_stroke(frame, CornerRadius::same(2), s, StrokeKind::Middle);
+            p.line_segment([at(-0.8, 0.6), at(-0.2, -0.05)], s);
+            p.line_segment([at(-0.2, -0.05), at(0.25, 0.4)], s);
+            p.line_segment([at(0.1, 0.25), at(0.4, 0.0)], s);
+            p.line_segment([at(0.4, 0.0), at(0.8, 0.45)], s);
+            p.circle_filled(at(0.4, -0.4), 1.4, ink);
+        }
+        Icon::Dlc => {
+            let lid = Rect::from_min_max(at(-0.9, -0.75), at(0.9, -0.25));
+            let body = Rect::from_min_max(at(-0.75, -0.25), at(0.75, 0.85));
+            p.rect_stroke(lid, CornerRadius::same(1), s, StrokeKind::Middle);
+            p.rect_stroke(body, CornerRadius::same(1), s, StrokeKind::Middle);
+            p.line_segment([at(-0.25, 0.1), at(0.25, 0.1)], s);
+        }
+        Icon::Updates => {
+            p.line_segment([at(0.0, -0.9), at(0.0, 0.3)], s);
+            p.line_segment([at(-0.4, -0.1), at(0.0, 0.3)], s);
+            p.line_segment([at(0.4, -0.1), at(0.0, 0.3)], s);
+            p.line_segment([at(-0.85, 0.35), at(-0.85, 0.85)], s);
+            p.line_segment([at(-0.85, 0.85), at(0.85, 0.85)], s);
+            p.line_segment([at(0.85, 0.85), at(0.85, 0.35)], s);
         }
         Icon::Play => {
             let points = vec![at(-0.5, -0.8), at(0.8, 0.0), at(-0.5, 0.8)];

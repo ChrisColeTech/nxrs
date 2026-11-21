@@ -45,7 +45,10 @@ pub fn show(ui: &mut Ui, app: &mut App, win: &mut ListWindow) -> Reply {
             ),
         ]
     };
-    let lines = [hint(game.dlc.is_empty(), built, win.locked)];
+    // the state stays in view; how the list works is in the heading's info mark
+    let tip = hint(game.dlc.is_empty(), built, false);
+    crate::ui::widgets::page::group(ui, crate::ui::widgets::rail::Icon::Dlc, "DLC", tip);
+    let lines = [if win.locked { w::HINT_LOCKED } else { "" }];
     let buttons = Buttons {
         add: w::ADD,
         add_tip: w::ADD_TIP,

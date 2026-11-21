@@ -1,10 +1,14 @@
-//! Properties' DLC and Updates pages (`DlcPanel`, `UpdatePanel`): the lists, removal on Apply.
+//! Properties' DLC and Updates sections (`DlcPanel`, `UpdatePanel`): a Group heading over the list
+//! (how removal works is in its info mark), the list, and the list's state as a status line. Removal
+//! happens on Apply.
 
 use crate::constants::{words_dlc as d, words_updates as u};
 use crate::flows::App;
 use crate::flows::properties::PropertiesDraft;
 use crate::model::path_text::parent;
 use crate::ui::theme;
+use crate::ui::widgets::page::group;
+use crate::ui::widgets::rail::Icon;
 use crate::ui::widgets::{form, pick_list};
 use egui::Ui;
 
@@ -22,6 +26,7 @@ pub fn dlc(ui: &mut Ui, app: &App, draft: &mut PropertiesDraft) {
     let locked = draft.locked || app.dlc_busy();
     let rows = app.dlc_rows(&draft.game, &draft.dlc);
     let packages = draft.dlc.clone();
+    group(ui, Icon::Dlc, "DLC", d::PANEL_NOTE);
     let height = ui.available_height() - 52.0;
     let out = pick_list::show(
         ui,
@@ -51,14 +56,18 @@ pub fn dlc(ui: &mut Ui, app: &App, draft: &mut PropertiesDraft) {
     if out.delete || matches!(out.menu, Some((_, 0))) {
         draft.dlc_picks.rows.clear();
     }
-    let note = if draft.dlc.is_empty() {
+    // the list's state; how it works is in the heading's info mark
+    let state = if draft.dlc.is_empty() {
         d::PANEL_EMPTY
     } else if locked {
         d::HINT_LOCKED
     } else {
-        d::PANEL_NOTE
+        ""
     };
-    form::note(ui, &p, note);
+    if !state.is_empty() {
+        ui.add_space(6.0);
+        form::status(ui, &p, state, false);
+    }
 }
 
 pub fn updates(ui: &mut Ui, app: &App, draft: &mut PropertiesDraft) {
@@ -68,6 +77,7 @@ pub fn updates(ui: &mut Ui, app: &App, draft: &mut PropertiesDraft) {
     state.updates = draft.updates.clone();
     let rows = app.update_rows(&state);
     let paths: Vec<String> = draft.updates.iter().map(|u| u.path.clone()).collect();
+    group(ui, Icon::Updates, "Updates", u::PANEL_NOTE);
     let height = ui.available_height() - 66.0;
     let out = pick_list::show(
         ui,
@@ -103,12 +113,10 @@ pub fn updates(ui: &mut Ui, app: &App, draft: &mut PropertiesDraft) {
     } else if locked {
         u::HINT_LOCKED.to_string()
     } else {
-        let pending = app.update_pending_text(&state);
-        if pending.is_empty() {
-            u::PANEL_NOTE.to_string()
-        } else {
-            format!("{}\n{pending}", u::PANEL_NOTE)
-        }
+        app.update_pending_text(&state)
     };
-    form::note(ui, &p, &note);
+    if !note.is_empty() {
+        ui.add_space(6.0);
+        form::status(ui, &p, &note, false);
+    }
 }

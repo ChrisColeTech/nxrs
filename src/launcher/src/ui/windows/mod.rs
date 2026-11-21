@@ -6,6 +6,7 @@ mod message;
 mod properties;
 mod properties_lists;
 mod properties_tabs;
+mod rail_window;
 mod settings;
 mod settings_tabs;
 mod updates;

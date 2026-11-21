@@ -1,37 +1,8 @@
-//! A form's rows (Qt's `QFormLayout`): a label column and the control; notes in muted text.
+//! A window's state lines: selectable text, the status line (an error in red), the busy bar. Forms
+//! are `page`'s Groups and Rows.
 
-use crate::constants::popups as c;
 use crate::ui::theme::{self, Palette};
-use egui::{Align2, RichText, Sense, Ui, vec2};
-
-/// One labelled row; the control takes the rest of the width.
-pub fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
-    ui.horizontal(|ui| {
-        let (rect, _) = ui.allocate_exact_size(vec2(c::LABEL_COLUMN, c::FIELD), Sense::hover());
-        let ink = ui.visuals().text_color();
-        ui.painter().text(
-            rect.left_center(),
-            Align2::LEFT_CENTER,
-            label,
-            theme::sans(crate::constants::theme::FONT_BODY),
-            ink,
-        );
-        add(ui);
-    });
-    ui.add_space(c::GAP);
-}
-
-/// A text value in a row (Format, Version, Status).
-pub fn value(ui: &mut Ui, label: &str, text: &str) {
-    row(ui, label, |ui| {
-        ui.label(text);
-    });
-}
-
-/// Muted, wrapped text under the rows.
-pub fn note(ui: &mut Ui, p: &Palette, text: &str) {
-    ui.add(egui::Label::new(RichText::new(text).color(p.muted)).wrap());
-}
+use egui::{RichText, Sense, Ui, vec2};
 
 /// Selectable muted text (paths, health, the doctor's checks).
 pub fn selectable(ui: &mut Ui, p: &Palette, text: &str) {

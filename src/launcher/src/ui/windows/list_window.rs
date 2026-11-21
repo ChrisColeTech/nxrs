@@ -12,7 +12,7 @@ pub struct Buttons<'a> {
     pub remove_tip: &'a str,
     /// Build now (Updates only): (label, tip, enabled)
     pub build: Option<(&'a str, &'a str, bool)>,
-    /// texts under the list before the outcome (the hint, a pending note)
+    /// the list's state under it, before the outcome (locked, an update pending)
     pub lines: &'a [&'a str],
 }
 
@@ -64,7 +64,7 @@ pub fn show(
             form::status(ui, p, text, *error);
         }
         for line in b.lines.iter().rev().filter(|l| !l.is_empty()) {
-            form::note(ui, p, line);
+            form::status(ui, p, line, false);
         }
         ui.add_space(4.0);
         ui.with_layout(Layout::top_down(Align::Min), |ui| {

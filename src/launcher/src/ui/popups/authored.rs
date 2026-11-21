@@ -1,7 +1,7 @@
 //! The authored scaffold's parts: the title header with its close button (`Close <title>`), the
 //! connected primary tabs, the footer with its one primary action.
 
-use crate::constants::{popups as c, theme as tokens};
+use crate::constants::popups as c;
 use crate::ui::icons;
 use crate::ui::theme::{self, Palette};
 use crate::ui::widgets::button;
@@ -54,61 +54,6 @@ pub fn header(ui: &mut Ui, width: f32, title: &str, close_id: &str) -> bool {
         Stroke::new(1.0, p.border),
     );
     hit.on_hover_text(name).clicked()
-}
-
-/// Connected tabs (one segmented control, the selected one tinted); the chosen index when clicked.
-pub fn tabs(ui: &mut Ui, p: &Palette, id: &str, labels: &[&str], selected: usize) -> Option<usize> {
-    let row = ui.available_rect_before_wrap();
-    let width = (c::TAB_SEGMENT * labels.len() as f32)
-        .min(row.width() - c::TAB_SIDE * 2.0)
-        .max(0.0);
-    let (rect, _) = ui.allocate_exact_size(vec2(row.width(), c::TAB_HEIGHT), Sense::hover());
-    let bar = Rect::from_center_size(rect.center(), vec2(width, c::TAB_HEIGHT));
-    let radius = CornerRadius::same(c::RADIUS);
-    ui.painter().rect(
-        bar,
-        radius,
-        p.field,
-        Stroke::new(1.0, p.border),
-        StrokeKind::Inside,
-    );
-    let segment = bar.width() / labels.len().max(1) as f32;
-    let mut chosen = None;
-    for (at, label) in labels.iter().enumerate() {
-        let cell = Rect::from_min_size(
-            pos2(bar.left() + segment * at as f32, bar.top()),
-            vec2(segment, bar.height()),
-        );
-        let hit = ui.interact(cell.shrink(1.0), Id::unique((id, at)), Sense::click());
-        let on = selected == at;
-        hit.widget_info(|| WidgetInfo::selected(Role::RadioButton, true, on, *label));
-        if on || hit.hovered() {
-            ui.painter().rect_filled(
-                cell.shrink(1.0),
-                CornerRadius::same(c::RADIUS - 1),
-                if on { p.selected } else { p.hover },
-            );
-        }
-        let ink = if on { p.accent } else { p.text };
-        ui.painter().text(
-            cell.center(),
-            Align2::CENTER_CENTER,
-            *label,
-            theme::sans(tokens::FONT_BODY),
-            ink,
-        );
-        if at > 0 {
-            ui.painter().vline(
-                cell.left(),
-                bar.top() + 3.0..=bar.bottom() - 3.0,
-                Stroke::new(1.0, p.border),
-            );
-        }
-        if hit.clicked() {
-            chosen = Some(at);
-        }
-    }
-    chosen
 }
 
 /// The footer: a hairline, then Cancel and the primary action at the right (primary last).
