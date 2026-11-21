@@ -7,7 +7,7 @@ game's data is read in place from its own packages. Windows x86-64; Linux x86-64
 |---|---|
 | [`src/translator`](src/translator/README.md) | package input (folder, NSP, NUP, XCI, NCA; updates and DLC in place) and the ARM64 → C translator, with its development CLI `nxrs-translate` |
 | `src/runtime` | the host runtime |
-| [`src/cli`](src/cli/README.md) | `nxrs`: the build (clang, chunk cache, `<name>_code.dll` + loader), updates, DLC, the launcher contract ([docs/LAUNCHER_CONTRACT.md](docs/LAUNCHER_CONTRACT.md)) |
+| [`src/cli`](src/cli/README.md) | `nxrs-cli`, the `nxrs-build` executable: the build (clang, chunk cache, `<name>_code.dll` + loader), updates, DLC, the launcher contract ([docs/LAUNCHER_CONTRACT.md](docs/LAUNCHER_CONTRACT.md)) |
 | [`src/profiles`](src/profiles/README.md) | game profiles (nxnative's 207, as data) and their lookup by title and build id |
 | [`src/shaders`](src/shaders/README.md) | every shader of a game found at build time (ExeFS and RomFS, the containers of many engines, zstd / Yaz0 / ZBIC / Oodle) and translated to SPIR-V for Vulkan, validated, with a manifest by shader key; CLI `nxshaders` |
 | [`src/os`](src/os/README.md) | the OS services: the SDK's service clients replaced by name (file system over the packages in place, saves, accounts, applet / oe, time, settings, hid, audio renderer, vi, Mii, the offline stand-ins), the IPC framework and `sm`, the memory and IPC SVCs, virtual cores, the process boot, and the NVN bootstrap handing NVN to graphics (Vulkan) |
