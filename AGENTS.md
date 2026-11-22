@@ -6,6 +6,16 @@
 before changing behaviour or structure. The tree is often dirty: preserve unrelated work, and never reset, revert,
 stage or commit another person's changes.
 
+**Delegated work follows `docs/31-DELEGATION-PROTOCOL.md` (binding).** Read it before any wave, audit or send-back.
+The lead writes briefs/docs and runs acceptance; wave agents implement and compile within explicit file/resource
+leases. One active subagent, one compiler command, and one game/GPU workload at a time; no builds during GPU runs.
+The active game-outcome roadmap is `docs/33-REFERENCE-DELTA-ROADMAP.md`; `docs/32-REMAINING-WORK-PLAN.md` is
+retained as procedural history and the detailed execution ledger. Diagnostics, tests and audits are subtasks, not
+milestones: unresolved-title work ends only with a source correction and guarded game result.
+Agent briefs use absolute project/source/document/evidence paths and an explicit shell working directory. The lead
+returns defects to the implementing agent; a fresh agent audits high-impact work. Preserve fault-stop latches and
+blacklists; a cooldown alone does not authorize another GPU attempt. Commit only when the owner explicitly asks.
+
 ## Layout
 
 - The engine workspace (root `Cargo.toml`): `src/translator` package input and the ARM64 → C translator;
@@ -42,12 +52,9 @@ work builds into with `CARGO_TARGET_DIR`; `prune.ps1` never touches lanes unless
   `unwrap`/`expect`/`panic!`/`todo!` in production; `unsafe` only in `services/platform` with a `// SAFETY:`
   line; no `utils`/`helpers`/`misc`/`common` modules; words and sizes in `constants/`. The engine crates do not
   meet these yet; do not refactor engine code to meet them as a side task.
-- **Never read or write the owner's `%LOCALAPPDATA%\nxrs`.** Development and tests use `NXRS_DATA_DIR=<temp>` or
-  `--library <temp file>`. Never open or drive the owner's running launcher; run your own instance.
 - `library.json` keeps the Qt launcher's format exactly, backed up to `library.qt-backup.json` before the first
   write.
 - **Never kill by image name** (`taskkill /IM nxrs.exe`): kill by PID.
-- Don't run games except an acceptance build-and-play the owner asked for; close it by PID.
 - No fake features: every control works, or it is not shown. No per-file attribution headers (credits: README).
 - The interface follows the family grammar: child windows with the shared header and close; rail work windows;
   Groups and Rows with explanations in info-mark tooltips; ghost buttons by default, one filled primary per
@@ -63,9 +70,9 @@ work builds into with `CARGO_TARGET_DIR`; `prune.ps1` never touches lanes unless
 - The shell runs things: builds, clippy, tests, the CLI, audits.
 - Verify by running the real thing. Keep any default test run seconds-fast; heavy suites are opt-in
   (`NXRS_DOCTOR_EXE` for the real doctor).
-- Verify the interface visibly: your own instance on a temporary data folder, its windows captured with
-  `PrintWindow` (3x scaling here; never a screen copy), closed by PID afterwards.
-- Use `py` (with `PYTHONDONTWRITEBYTECODE=1`) for Python. Don't commit unless asked.
+- Verify the interface visibly: capture the launcher's windows with `PrintWindow` (3x scaling here; never a
+  screen copy) and close it by PID afterwards. `NXRS_DATA_DIR` or `--library` points it at another data folder.
+- Use `py` (with `PYTHONDONTWRITEBYTECODE=1`) for Python.
 
 ## Command-line tools available on this machine
 

@@ -62,8 +62,8 @@ bringing the engine to them is an owner decision, never a side task of other wor
   The launcher's own settings go under the `consolePanel` key the Qt launcher ignores.
 - On first start an older data folder (`RecompLauncher/RecompLauncher`, then `RecompLauncher/SwitchRecompLauncher`)
   is copied in once; the old folder is left as it was.
-- **Development and tests never touch the owner's data**: `NXRS_DATA_DIR=<temp>` or `--library <temp file>`, always.
-  The launcher checks that keys exist; it never reads them.
+- `NXRS_DATA_DIR` (the data folder) and `--library` (the library file) point the launcher elsewhere; the tests use
+  temporary ones. The launcher checks that keys exist; it never reads them.
 
 ## 4. Processes
 
@@ -117,9 +117,8 @@ the saved size survives hiding it, and a small window refits only the paint.
 - The default test run takes seconds: `cargo test` in `src/launcher`. A fake engine (`fake-engine`) stands in for
   `nxrs-build`; UI tests drive the real shell with `egui_kittest` by accessible names; CLI tests run the real binary.
   Heavy checks are opt-in (`NXRS_DOCTOR_EXE` runs the real doctor).
-- Verify the real thing: run your own instance on a temporary data folder and capture its windows with
-  `PrintWindow` (this machine is at 3x scaling; never a screen copy), then close it by PID. Never open or drive the
-  owner's running launcher.
+- Verify the real thing: run the launcher and capture its windows with `PrintWindow` (this machine is at 3x
+  scaling; never a screen copy), then close it by PID.
 - A release is checked by `src/launcher/scripts/smoke_release.py`: extracted away from the checkout, no
   `NXRS_BUILD`, a disposable profile, a build of a game folder through the launcher, and an import twice.
 
