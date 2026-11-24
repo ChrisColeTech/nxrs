@@ -37,8 +37,11 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       steal, presents fall to 0.2 FPS. Horizon would preempt it. Fix: a displaced-flag check on translated loop
       back-edges (generalising `rt_spin_gate`) so a displaced holder yields at once; needs a Cpu-struct field and a
       full retranslation of every title. STEAL_GUEST stays 5 s until then (200 ms broke DKB's loaders).
-- [ ] Failing titles one at a time, each ending with a fix and its run: dkb (pacing, audio underruns, texture
-      target), mkw / mkw180 (task/mesh fault, race stability; GAR-5), plza (cube mismatches, pacing), mk8d
+- [x] dkb (`build/play/20261124-124926-dkb`): completed 13/13, 59.4 FPS (5% low 53) over 100-150 s, 0 red lines
+      (the texture-target mismatch is gone), 0 audio underruns; fresh save: mode select, opening, lit mine tunnel,
+      walking moves the camera. All three recorded issues are resolved on this engine; scenario now ends with a
+      punch at the fresh-save "Y Punch" prompt (~141 s).
+- [ ] Failing titles one at a time, each ending with a fix and its run: mkw / mkw180 (task/mesh fault, race stability; GAR-5), plza (cube mismatches, pacing), mk8d
       (stutters, memory), shadow / sonic (resource diagnostics, blacklisted pipelines), smash (pacing)
 - [ ] Blocked titles: oot (native NDVE stays off; submission-4764 fault), violet (first-run progression, display reset)
 - [ ] Final pass: every scenario, one run each

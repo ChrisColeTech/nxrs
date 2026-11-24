@@ -18,7 +18,8 @@ seconds = 200
 window = [100, 150]
 steps = ["wait 75", "shot boot", "press A ; 6", "press A ; 25", "shot continue",
          "replay dkb_walk.txt ; 14", "shot walk", "replay dkb_punch.txt ; 6", "shot punch",
-         "replay dkb_walk.txt ; 14", "shot walk again", "wait 10", "shot end"]
+         "replay dkb_walk.txt ; 14", "shot walk again", "replay dkb_punch.txt ; 6", "shot punch tutorial",
+         "wait 6", "shot end"]
 
 [mkw]
 title = "Mario Kart World"
