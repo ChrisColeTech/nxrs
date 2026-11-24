@@ -60,6 +60,7 @@ class Report(unittest.TestCase):
         r = json.loads((self.f / 'report.json').read_text())
         self.assertEqual(r['exit_meaning'], 'GPU device lost (exit 71)')
         self.assertEqual(r['metrics']['fps_mean'], 45.0)
+        self.assertEqual((r["metrics"]["memory_mb_start"], r["metrics"]["memory_mb_end"]), (600, 700))
         self.assertEqual(r['metrics']['counters_of_note'], {'draws_skipped': 3})
         self.assertEqual((r['log']['red_kinds'], r['log']['red_lines']), (1, 2))
         self.assertEqual(r['log']['pacing_worst']['max_ms'], 120.0)

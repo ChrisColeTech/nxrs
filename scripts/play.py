@@ -263,7 +263,8 @@ def start(a, sc, name):
     folder = RUNS / ('%s-%s' % (stamp, a.label or name))
     folder.mkdir(parents=True)
     env = dict(os.environ, NXRS_METRICS=str(folder), NXRS_INPUT_REPLAY=str(folder / 'replay.txt'),
-               NXRS_CONTROLLER_BACKGROUND='1', NXRS_KEEP_FOCUS='1', NXRS_NO_ACTIVATE='1')
+               NXRS_CONTROLLER_BACKGROUND='1', NXRS_KEEP_FOCUS='1', NXRS_NO_ACTIVATE='1',
+               NXOS_SWKBD='auto')  # nobody types in a scripted run: the keyboard answers its default at once
     if a.diag in ('pipeline', 'render'):
         env.update(NXGFX_PIPE_LOG='1', NXGFX_WAIT_DIAG='1')
     if a.diag == 'render':

@@ -22,9 +22,21 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
 
 - [x] Commit the dirty tree as subsystem commits; independent review of the alignment candidate; review fixes
 - [x] Replace the harness with `scripts/play.py` (smoke run on Wonder's old build: completed, 58 FPS)
-- [ ] Build the candidate into `dist/nxrs` (`build.ps1 -Jobs 4 -SkipGnu -KeepCache`)
-- [ ] Rebuild Wonder with it; `play.py wonder`; read the sheet
-- [ ] Rebuild + run the other known-pass titles: arceus, arceus-base, agsob, beach-bounce, jamboree
+- [x] Build the candidate into `dist/nxrs` (`build.ps1 -Jobs 4 -SkipGnu -KeepCache`: ~4 min, contract 2)
+- [x] Rebuild Wonder with it; `play.py wonder`: completed 30/30, 60.1 FPS (5% low 59.4), no red lines, first
+      course renders and the run/jump replay moves the camera (`build/play/20261124-121843-wonder`)
+- [x] Rebuild + run the other known-pass titles (`build/play/20261124-12*`): agsob PASS (shooting, kills 5->8,
+      60 FPS); beach-bounce PASS (VN advances, 60 FPS); arceus / arceus-base / jamboree render correctly and exit
+      normally but stop inside their fresh-save openings (Arceus dialogue, Jamboree rules tutorial). Every title
+      starts from an empty save (none of them has one), and a fresh save asks for a name: the harness now sets
+      `NXOS_SWKBD=auto` (the first arceus run hung 15 s in a host text box nobody typed into). Jamboree's 12 GB is
+      its reservation from second 30, flat, not a leak.
+- [ ] Scenarios for fresh saves: extend arceus / arceus-base / jamboree through their openings to first gameplay
+- [ ] **Engine: no preemption inside long guest loops.** Fresh-save Arceus 99-114 s: low-priority thread 0x1004
+      (prio 46) holds virtual core 2 in a loader loop with no SVC; the better threads wait `STEAL_GUEST` (5 s) per
+      steal, presents fall to 0.2 FPS. Horizon would preempt it. Fix: a displaced-flag check on translated loop
+      back-edges (generalising `rt_spin_gate`) so a displaced holder yields at once; needs a Cpu-struct field and a
+      full retranslation of every title. STEAL_GUEST stays 5 s until then (200 ms broke DKB's loaders).
 - [ ] Failing titles one at a time, each ending with a fix and its run: dkb (pacing, audio underruns, texture
       target), mkw / mkw180 (task/mesh fault, race stability; GAR-5), plza (cube mismatches, pacing), mk8d
       (stutters, memory), shadow / sonic (resource diagnostics, blacklisted pipelines), smash (pacing)

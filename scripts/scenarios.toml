@@ -67,6 +67,7 @@ title = "Pokemon Legends Arceus (1G+1U)"
 about = "A through the opening to the field, walk"
 seconds = 240
 window = [105, 220]
+fps = 30
 steps = ["wait 30", "shot boot", "press A ; 3 * 20", "wait 15", "shot field",
          "replay arceus_gameplay.txt ; 15", "shot gameplay", "wait 30", "shot end"]
 
@@ -75,6 +76,7 @@ title = "Pokemon Legends Arceus base"
 about = "as arceus, on the base game"
 seconds = 240
 window = [105, 220]
+fps = 30
 steps = ["wait 30", "shot boot", "press A ; 3 * 20", "wait 15", "shot field",
          "replay arceus_gameplay.txt ; 15", "shot gameplay", "wait 30", "shot end"]
 

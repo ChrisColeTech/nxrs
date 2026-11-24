@@ -40,8 +40,8 @@ def metrics(folder, window):
     play = [r for r in rows if lo <= r['seconds'] <= hi] or rows
     fps = sorted(r['fps'] for r in play)
     out.update(window=[lo, hi], fps_mean=round(sum(fps) / len(fps), 1), fps_min=fps[0],
-               fps_p5=fps[len(fps) // 20], memory_mb_start=rows[0]['private_mb'],
-               memory_mb_end=rows[-1]['private_mb'], memory_mb_peak=max(r['private_mb'] for r in rows),
+               fps_p5=fps[len(fps) // 20], memory_mb_start=play[0]['private_mb'],
+               memory_mb_end=play[-1]['private_mb'], memory_mb_peak=max(r['private_mb'] for r in rows),
                frames=int(max(r['frames'] for r in rows)))
     totals = {}
     for r in rows:
@@ -167,7 +167,7 @@ def write(folder):
     if m.get('fps_mean') is not None:
         md.append('- FPS in %s s: mean %s, 5%% low %s, min %s (target %s); %s frames' % (
             m['window'], m['fps_mean'], m['fps_p5'], m['fps_min'], meta.get('fps'), m['frames']))
-        md.append('- memory: %d -> %d MB (peak %d)' % (m['memory_mb_start'], m['memory_mb_end'], m['memory_mb_peak']))
+        md.append('- memory over the window: %d -> %d MB (run peak %d)' % (m['memory_mb_start'], m['memory_mb_end'], m['memory_mb_peak']))
     else:
         md.append('- no metrics rows (the game never reached its first second of presenting?)')
     if lg.get('pacing_worst'):
