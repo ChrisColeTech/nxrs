@@ -20,11 +20,23 @@ pub const FILE: &str = "discovered.tsv";
 /// The entries of a discovered.tsv text by module (comments and malformed lines skipped, duplicates once).
 pub fn parse(text: &str) -> BTreeMap<String, Vec<Hint>> {
     let mut out: BTreeMap<String, Vec<Hint>> = BTreeMap::new();
-    for l in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+    for l in text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+    {
         let mut f = l.split('\t');
-        let (Some(module), Some(off)) = (f.next(), f.next()) else { continue };
-        let Ok(offset) = u64::from_str_radix(off.trim().trim_start_matches("0x"), 16) else { continue };
-        let words = f.next().unwrap_or("").split_whitespace().filter_map(|w| u32::from_str_radix(w, 16).ok()).collect();
+        let (Some(module), Some(off)) = (f.next(), f.next()) else {
+            continue;
+        };
+        let Ok(offset) = u64::from_str_radix(off.trim().trim_start_matches("0x"), 16) else {
+            continue;
+        };
+        let words = f
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .filter_map(|w| u32::from_str_radix(w, 16).ok())
+            .collect();
         let v = out.entry(module.trim().to_string()).or_default();
         if !v.iter().any(|h| h.offset == offset) {
             v.push(Hint { offset, words });
@@ -35,7 +47,13 @@ pub fn parse(text: &str) -> BTreeMap<String, Vec<Hint>> {
 
 /// The hints of one module that hold: aligned, inside its code, with the same words there (`word(a)` reads the
 /// module's code at guest address a). Returns (absolute starts kept, entries left out).
-pub fn usable(hints: &[Hint], base: u64, lo: u64, hi: u64, word: &dyn Fn(u64) -> u32) -> (Vec<u64>, usize) {
+pub fn usable(
+    hints: &[Hint],
+    base: u64,
+    lo: u64,
+    hi: u64,
+    word: &dyn Fn(u64) -> u32,
+) -> (Vec<u64>, usize) {
     let mut kept = vec![];
     let mut dropped = 0;
     for h in hints {
@@ -64,7 +82,13 @@ mod tests {
     fn parse_and_check_words() {
         let t = "# header\nmain\t0x10\taaaa0000 bbbb0000\nmain\t0x10\taaaa0000\nsdk\t0x4\t11111111\nbad line\n";
         let h = parse(t);
-        assert_eq!(h["main"], vec![Hint { offset: 0x10, words: vec![0xaaaa0000, 0xbbbb0000] }]);
+        assert_eq!(
+            h["main"],
+            vec![Hint {
+                offset: 0x10,
+                words: vec![0xaaaa0000, 0xbbbb0000]
+            }]
+        );
         assert_eq!(h["sdk"].len(), 1);
         let code = [0u32, 0, 0, 0, 0xaaaa0000, 0xbbbb0000, 0, 0];
         let base = 0x1000u64;
@@ -75,7 +99,10 @@ mod tests {
         let (kept, dropped) = usable(&h["sdk"], base, base, base + 32, &word);
         assert_eq!((kept.len(), dropped), (0, 1));
         // outside the code
-        let far = vec![Hint { offset: 0x100, words: vec![0] }];
+        let far = vec![Hint {
+            offset: 0x100,
+            words: vec![0],
+        }];
         assert_eq!(usable(&far, base, base, base + 32, &word).1, 1);
     }
 }

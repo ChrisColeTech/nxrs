@@ -35,7 +35,10 @@ pub fn ticket_key(data: &[u8]) -> Option<([u8; 16], Option<[u8; 16]>)> {
     }
     let rights: [u8; 16] = data[body + 0x160..body + 0x170].try_into().unwrap();
     let common = data[body + 0x141] == 0;
-    Some((rights, common.then(|| data[body + 0x40..body + 0x50].try_into().unwrap())))
+    Some((
+        rights,
+        common.then(|| data[body + 0x40..body + 0x50].try_into().unwrap()),
+    ))
 }
 
 /// One filesystem section of an NCA (offsets in the NCA).
@@ -85,7 +88,11 @@ pub struct Nca {
 
 impl std::fmt::Debug for Nca {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "Nca({}, type {}, title {:016x})", self.name, self.content_type, self.title_id)
+        write!(
+            f,
+            "Nca({}, type {}, title {:016x})",
+            self.name, self.content_type, self.title_id
+        )
     }
 }
 
@@ -118,7 +125,9 @@ impl Nca {
         }
         let header = decrypt_header(blob, member.offset, keys)?;
         if &header[0x200..0x204] != b"NCA3" {
-            return fmt(format!("{path}: the installed keys do not open {name} (or it is not an NCA3)"));
+            return fmt(format!(
+                "{path}: the installed keys do not open {name} (or it is not an NCA3)"
+            ));
         }
         let content_type = header[0x205];
         let title_id = u64le(&header, 0x210);
@@ -189,7 +198,10 @@ impl Nca {
                 2 => "system",
                 _ => return fmt(format!("{path}: {name} uses an unknown key area key")),
             };
-            (format!("key_area_key_{area}_{key_generation:02x}"), header[0x320..0x330].try_into().unwrap())
+            (
+                format!("key_area_key_{area}_{key_generation:02x}"),
+                header[0x320..0x330].try_into().unwrap(),
+            )
         };
         let kek = keys.get16(&kek_name)?;
         nca.key = Some(ecb_decrypt(&kek, &wrapped)[..].try_into().unwrap());
@@ -202,24 +214,39 @@ impl Nca {
     }
 
     pub fn section(&self, fs_type: u8, partition: u8) -> Option<usize> {
-        self.sections.iter().position(|s| s.fs_type == fs_type && s.partition == partition)
+        self.sections
+            .iter()
+            .position(|s| s.fs_type == fs_type && s.partition == partition)
     }
 
     /// The raw (still encrypted) bytes of a section range.
     pub fn raw(&self, s: &Section, offset: u64, size: u64) -> Result<Vec<u8>> {
         if offset.checked_add(size).map_or(true, |e| e > s.size) {
-            return fmt(format!("{}: read past the end of an NCA section", self.blob.path.display()));
+            return fmt(format!(
+                "{}: read past the end of an NCA section",
+                self.blob.path.display()
+            ));
         }
         self.blob.read_at(self.offset + s.offset + offset, size)
     }
 
     /// Read and decrypt a section range; `generation` overrides the counter's generation (AesCtrEx ranges).
-    pub fn read(&self, s: &Section, offset: u64, size: u64, generation: Option<u32>) -> Result<Vec<u8>> {
+    pub fn read(
+        &self,
+        s: &Section,
+        offset: u64,
+        size: u64,
+        generation: Option<u32>,
+    ) -> Result<Vec<u8>> {
         let mut data = self.raw(s, offset, size)?;
         if s.crypto != 1 {
-            let key = self
-                .key
-                .ok_or_else(|| PackageError::Format(format!("{}: {} has no content key", self.blob.path.display(), self.name)))?;
+            let key = self.key.ok_or_else(|| {
+                PackageError::Format(format!(
+                    "{}: {} has no content key",
+                    self.blob.path.display(),
+                    self.name
+                ))
+            })?;
             let mut upper = s.upper;
             if let Some(g) = generation {
                 upper[4..].copy_from_slice(&g.to_be_bytes());
@@ -232,7 +259,10 @@ impl Nca {
     /// nca.py `Section.ivfc_data`: (offset, size) of the RomFS image, the last IVFC level, in the section.
     pub fn ivfc_data(&self, s: &Section) -> Result<(u64, u64)> {
         if &s.fs[8..12] != b"IVFC" {
-            return fmt(format!("{}: the RomFS section has no IVFC header", self.blob.path.display()));
+            return fmt(format!(
+                "{}: the RomFS section has no IVFC header",
+                self.blob.path.display()
+            ));
         }
         let at = 0x18 + 5 * 0x18;
         Ok((u64le(&s.fs, at), u64le(&s.fs, at + 8)))
@@ -241,8 +271,20 @@ impl Nca {
     /// nca.py `Section.layer`: how the runtime reaches the section: file offset, size, NCA offset, crypto, counter
     /// and the content key still wrapped (`-` for plaintext).
     pub fn layer(&self, s: &Section) -> String {
-        let key = if s.crypto != 1 { self.wrapped.clone().unwrap_or_else(|| "None".into()) } else { "-".into() };
-        format!("{:x} {:x} {:x} {} {} {}", self.offset + s.offset, s.size, s.offset, s.crypto, hex(&s.upper), key)
+        let key = if s.crypto != 1 {
+            self.wrapped.clone().unwrap_or_else(|| "None".into())
+        } else {
+            "-".into()
+        };
+        format!(
+            "{:x} {:x} {:x} {} {} {}",
+            self.offset + s.offset,
+            s.size,
+            s.offset,
+            s.crypto,
+            hex(&s.upper),
+            key
+        )
     }
 
     pub fn key_status(&self) -> &str {
@@ -287,11 +329,16 @@ impl SectionStorage {
     /// Read and decrypt; `generation` overrides the counter's generation (AesCtrEx ranges of a patch).
     pub fn read_gen(&self, offset: u64, size: u64, generation: Option<u32>) -> Result<Vec<u8>> {
         if offset.checked_add(size).map_or(true, |e| e > self.size) {
-            return fmt(format!("{}: read past the end of an NCA section", self.blob.path.display()));
+            return fmt(format!(
+                "{}: read past the end of an NCA section",
+                self.blob.path.display()
+            ));
         }
         let mut data = self.blob.read_at(self.file_offset + offset, size)?;
         if self.crypto != 1 {
-            let key = self.key.ok_or_else(|| PackageError::Format(format!("{}: no content key", self.blob.path.display())))?;
+            let key = self.key.ok_or_else(|| {
+                PackageError::Format(format!("{}: no content key", self.blob.path.display()))
+            })?;
             let mut upper = self.upper;
             if let Some(g) = generation {
                 upper[4..].copy_from_slice(&g.to_be_bytes());
@@ -318,7 +365,10 @@ pub fn open_ncas(blob: &Arc<Blob>, keys: &Keys) -> Result<(Vec<Arc<Nca>>, usize)
     let members = container::members(blob)?;
     let bare = container::extension(&blob.path) == ".nca";
     let mut blobs = vec![];
-    for m in members.iter().filter(|m| m.name.to_ascii_lowercase().ends_with(".tik") && m.size <= 0x10000) {
+    for m in members
+        .iter()
+        .filter(|m| m.name.to_ascii_lowercase().ends_with(".tik") && m.size <= 0x10000)
+    {
         blobs.push(blob.read_at(m.offset, m.size)?);
     }
     if bare {
@@ -329,7 +379,11 @@ pub fn open_ncas(blob: &Arc<Blob>, keys: &Keys) -> Result<(Vec<Arc<Nca>>, usize)
             names.sort();
             for p in names {
                 let is_tik = p.extension().is_some_and(|e| e.eq_ignore_ascii_case("tik"));
-                if is_tik && std::fs::metadata(&p).map(|m| m.len() <= 0x10000).unwrap_or(false) {
+                if is_tik
+                    && std::fs::metadata(&p)
+                        .map(|m| m.len() <= 0x10000)
+                        .unwrap_or(false)
+                {
                     if let Ok(b) = std::fs::read(&p) {
                         blobs.push(b);
                     }
@@ -364,7 +418,11 @@ pub fn open_ncas(blob: &Arc<Blob>, keys: &Keys) -> Result<(Vec<Arc<Nca>>, usize)
                 if name.ends_with(".cnmt.nca") {
                     continue;
                 }
-                let header = if m.size >= HEADER_SIZE { decrypt_header(blob, m.offset, keys)? } else { vec![] };
+                let header = if m.size >= HEADER_SIZE {
+                    decrypt_header(blob, m.offset, keys)?
+                } else {
+                    vec![]
+                };
                 if header.get(0x200..0x204) != Some(b"NCA3") {
                     locked += 1;
                     continue;

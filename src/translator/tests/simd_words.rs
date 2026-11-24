@@ -8,11 +8,15 @@ use std::path::PathBuf;
 #[test]
 #[ignore]
 fn simd_words_match_python() {
-    let dir = std::env::var("SIMD_DUMP_DIR").map(PathBuf::from).unwrap_or_else(|_| {
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build/simd")
-    });
-    let mut files: Vec<_> = std::fs::read_dir(&dir).expect("dump dir").flatten().map(|e| e.path())
-        .filter(|p| p.extension().is_some_and(|e| e == "tsv")).collect();
+    let dir = std::env::var("SIMD_DUMP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build/simd"));
+    let mut files: Vec<_> = std::fs::read_dir(&dir)
+        .expect("dump dir")
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.extension().is_some_and(|e| e == "tsv"))
+        .collect();
     files.sort();
     assert!(!files.is_empty(), "no *.tsv in {}", dir.display());
     let mut total_bad = 0;
@@ -21,7 +25,12 @@ fn simd_words_match_python() {
         let (mut ok, mut bad, mut both_unsup) = (0, 0, 0);
         for line in text.lines() {
             let mut it = line.splitn(4, '\t');
-            let (kind, wh, pch, exp) = (it.next().unwrap(), it.next().unwrap(), it.next().unwrap(), it.next().unwrap());
+            let (kind, wh, pch, exp) = (
+                it.next().unwrap(),
+                it.next().unwrap(),
+                it.next().unwrap(),
+                it.next().unwrap(),
+            );
             let w = u32::from_str_radix(wh, 16).unwrap();
             let pc = u64::from_str_radix(pch, 16).unwrap();
             let r = match kind {
@@ -45,7 +54,13 @@ fn simd_words_match_python() {
                 }
             }
         }
-        println!("{}: {} matched ({} both-unsupported), {} mismatched", f.display(), ok, both_unsup, bad);
+        println!(
+            "{}: {} matched ({} both-unsupported), {} mismatched",
+            f.display(),
+            ok,
+            both_unsup,
+            bad
+        );
         total_bad += bad;
     }
     assert_eq!(total_bad, 0);

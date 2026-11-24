@@ -76,11 +76,22 @@ impl Reloc {
         };
         let neg = addend.starts_with('-');
         let v = hex(addend.trim_start_matches('-')).ok()? as i64;
-        Some(Reloc { op, target, addend: if neg { -v } else { v } })
+        Some(Reloc {
+            op,
+            target,
+            addend: if neg { -v } else { v },
+        })
     }
 
     /// `w` (the recorded word) at `pc` pointing at the target.
-    pub fn apply(&self, w: u32, pc: u64, state: u64, area: u64, module: u64) -> Result<u32, PatchError> {
+    pub fn apply(
+        &self,
+        w: u32,
+        pc: u64,
+        state: u64,
+        area: u64,
+        module: u64,
+    ) -> Result<u32, PatchError> {
         let to = match self.target {
             Target::State => state,
             Target::Area => area,
@@ -94,7 +105,11 @@ impl Reloc {
                 if d % 4 != 0 || !(-(1 << 27)..(1 << 27)).contains(&d) {
                     return perr(format!("{pc:#x}: a branch to {to:#x} out of reach"));
                 }
-                let op = if self.op == RelocOp::Bl { 0x9400_0000 } else { 0x1400_0000 };
+                let op = if self.op == RelocOp::Bl {
+                    0x9400_0000
+                } else {
+                    0x1400_0000
+                };
                 Ok(op | ((d >> 2) as u32 & 0x03FF_FFFF))
             }
         }
@@ -153,14 +168,18 @@ impl Table {
     }
 
     pub fn load(path: &Path, mods: &[ModLayout]) -> Result<Table, PatchError> {
-        let text = std::fs::read_to_string(path).map_err(|e| PatchError(format!("{}: {e}", path.display())))?;
+        let text = std::fs::read_to_string(path)
+            .map_err(|e| PatchError(format!("{}: {e}", path.display())))?;
         Self::parse(&text, &path.display().to_string(), mods)
     }
 
     pub fn parse(text: &str, path: &str, mods: &[ModLayout]) -> Result<Table, PatchError> {
         let mut t = Table::default();
         let mut index: BTreeMap<String, usize> = BTreeMap::new();
-        let bases: BTreeMap<&str, (u64, u64)> = mods.iter().map(|m| (m.name.as_str(), (m.base, m.size))).collect();
+        let bases: BTreeMap<&str, (u64, u64)> = mods
+            .iter()
+            .map(|m| (m.name.as_str(), (m.base, m.size)))
+            .collect();
         for (no, raw) in text.lines().enumerate() {
             let f: Vec<&str> = raw.split('#').next().unwrap().split_whitespace().collect();
             if f.is_empty() {
@@ -174,10 +193,16 @@ impl Table {
                         return perr(format!("{wh}: set {} defined twice", f[1]));
                     }
                     index.insert(f[1].into(), t.sets.len());
-                    t.sets.push((f[1].into(), f[2].into(), f[3].parse().map_err(|_| PatchError(wh.clone()))?));
+                    t.sets.push((
+                        f[1].into(),
+                        f[2].into(),
+                        f[3].parse().map_err(|_| PatchError(wh.clone()))?,
+                    ));
                 }
                 ("site", n) if n >= 6 => {
-                    let Some(&k) = index.get(f[1]) else { return perr(format!("{wh}: unknown set {}", f[1])) };
+                    let Some(&k) = index.get(f[1]) else {
+                        return perr(format!("{wh}: unknown set {}", f[1]));
+                    };
                     if !bases.contains_key(f[2]) {
                         return perr(format!("{wh}: module {} not in the layout", f[2]));
                     }
@@ -192,7 +217,9 @@ impl Table {
                                 let r = (p.len() == 3 || p.len() == 4)
                                     .then(|| Reloc::parse(p[0], p[1], p[2]))
                                     .flatten()
-                                    .ok_or_else(|| PatchError(format!("{wh}: bad relocation {wd}")))?;
+                                    .ok_or_else(|| {
+                                        PatchError(format!("{wh}: bad relocation {wd}"))
+                                    })?;
                                 let w = match p.get(3) {
                                     Some(x) => hex(x).map_err(bad)? as u32,
                                     None => 0,
@@ -207,50 +234,79 @@ impl Table {
                     }
                     for (o, (_, ws)) in t.spans.get(f[2]).into_iter().flatten() {
                         if *o <= off && off < o + 4 * ws.len() as u64 {
-                            return perr(format!("{wh}: {}+{off:#x} is both a site and in a span", f[2]));
+                            return perr(format!(
+                                "{wh}: {}+{off:#x} is both a site and in a span",
+                                f[2]
+                            ));
                         }
                     }
-                    t.sites.entry(f[2].into()).or_default().insert(off, Site { set: k, repl, orig });
+                    t.sites
+                        .entry(f[2].into())
+                        .or_default()
+                        .insert(off, Site { set: k, repl, orig });
                 }
                 ("span", n) if n >= 6 => {
-                    let Some(&k) = index.get(f[1]) else { return perr(format!("{wh}: unknown set {}", f[1])) };
+                    let Some(&k) = index.get(f[1]) else {
+                        return perr(format!("{wh}: unknown set {}", f[1]));
+                    };
                     if !bases.contains_key(f[2]) {
                         return perr(format!("{wh}: module {} not in the layout", f[2]));
                     }
                     let off = hex(f[3]).map_err(bad)?;
-                    let words = f[4..].iter().map(|x| hex(x).map(|v| v as u32)).collect::<Result<Vec<_>, _>>().map_err(bad)?;
+                    let words = f[4..]
+                        .iter()
+                        .map(|x| hex(x).map(|v| v as u32))
+                        .collect::<Result<Vec<_>, _>>()
+                        .map_err(bad)?;
                     let m = t.spans.entry(f[2].into()).or_default();
                     if m.contains_key(&off) {
                         return perr(format!("{wh}: {}+{off:#x} spanned twice", f[2]));
                     }
                     for (o, (_, ws)) in m.iter() {
                         if off < o + 4 * ws.len() as u64 && *o < off + 4 * words.len() as u64 {
-                            return perr(format!("{wh}: {}+{off:#x} overlaps the span at {o:#x}", f[2]));
+                            return perr(format!(
+                                "{wh}: {}+{off:#x} overlaps the span at {o:#x}",
+                                f[2]
+                            ));
                         }
                     }
                     for o in t.sites.get(f[2]).into_iter().flat_map(|m| m.keys()) {
                         if off <= *o && *o < off + 4 * words.len() as u64 {
-                            return perr(format!("{wh}: {}+{o:#x} is both a site and in a span", f[2]));
+                            return perr(format!(
+                                "{wh}: {}+{o:#x} is both a site and in a span",
+                                f[2]
+                            ));
                         }
                     }
                     m.insert(off, (k, words));
                 }
                 ("area", n) if n >= 4 => {
-                    let Some(&k) = index.get(f[1]) else { return perr(format!("{wh}: unknown set {}", f[1])) };
+                    let Some(&k) = index.get(f[1]) else {
+                        return perr(format!("{wh}: unknown set {}", f[1]));
+                    };
                     if !bases.contains_key(f[2]) {
                         return perr(format!("{wh}: module {} not in the layout", f[2]));
                     }
-                    let a = t.areas.entry(f[2].into()).or_insert_with(|| Area { set: k, ..Default::default() });
+                    let a = t.areas.entry(f[2].into()).or_insert_with(|| Area {
+                        set: k,
+                        ..Default::default()
+                    });
                     for x in &f[3..] {
                         a.words.push(hex(x).map_err(bad)? as u32);
                     }
                 }
                 ("areloc", 6) => {
-                    let Some(a) = t.areas.get_mut(f[1]) else { return perr(format!("{wh}: no area of {} before it", f[1])) };
+                    let Some(a) = t.areas.get_mut(f[1]) else {
+                        return perr(format!("{wh}: no area of {} before it", f[1]));
+                    };
                     let i: usize = f[2].parse().map_err(|_| PatchError(wh.clone()))?;
-                    let r = Reloc::parse(f[3], f[4], f[5]).ok_or_else(|| PatchError(format!("{wh}: bad relocation")))?;
+                    let r = Reloc::parse(f[3], f[4], f[5])
+                        .ok_or_else(|| PatchError(format!("{wh}: bad relocation")))?;
                     if i >= a.words.len() {
-                        return perr(format!("{wh}: word {i} past the area's {} words", a.words.len()));
+                        return perr(format!(
+                            "{wh}: word {i} past the area's {} words",
+                            a.words.len()
+                        ));
                     }
                     a.relocs.insert(i, r);
                 }
@@ -261,7 +317,10 @@ impl Table {
                     for o in &f[2..] {
                         let o = hex(o).map_err(bad)?;
                         if o % 4 != 0 {
-                            return perr(format!("{wh}: probe {}+{o:#x} is not an instruction (4-byte aligned)", f[1]));
+                            return perr(format!(
+                                "{wh}: probe {}+{o:#x} is not an instruction (4-byte aligned)",
+                                f[1]
+                            ));
                         }
                         t.probes.entry(f[1].into()).or_default().insert(o);
                     }
@@ -282,7 +341,9 @@ impl Table {
                 _ => return perr(format!("{wh}: cannot parse {raw:?}")),
             }
         }
-        let Some(&(base, size)) = bases.get("main") else { return perr("no main module in the layout".into()) };
+        let Some(&(base, size)) = bases.get("main") else {
+            return perr("no main module in the layout".into());
+        };
         let page = (base + size + PAGE - 1) & !(PAGE - 1);
         let nxt = mods.iter().map(|m| m.base).filter(|&b| b > base).min();
         if let Some(nxt) = nxt {
@@ -293,7 +354,12 @@ impl Table {
         t.page = page;
         // the stubs modules: after every module (the layout packs them, NROs included) and the patch page, each a
         // state page then its code, 2 MiB aligned as modules are
-        let mut at = mods.iter().map(|m| m.base + m.size).max().unwrap_or(0).max(page + PAGE);
+        let mut at = mods
+            .iter()
+            .map(|m| m.base + m.size)
+            .max()
+            .unwrap_or(0)
+            .max(page + PAGE);
         for (name, a) in &t.areas {
             let base = (at + 0x1F_FFFF) & !0x1F_FFFF;
             if t.state == 0 {
@@ -306,13 +372,25 @@ impl Table {
     }
 
     /// The stubs module of `name`'s area: (its name, base, size, code address, the relocated words).
-    pub fn stubs_module(&self, name: &str, module_base: u64) -> Result<Option<(String, u64, u64, u64, Vec<u32>)>, PatchError> {
-        let (Some(a), Some(&(base, code))) = (self.areas.get(name), self.area_at.get(name)) else { return Ok(None) };
+    pub fn stubs_module(
+        &self,
+        name: &str,
+        module_base: u64,
+    ) -> Result<Option<(String, u64, u64, u64, Vec<u32>)>, PatchError> {
+        let (Some(a), Some(&(base, code))) = (self.areas.get(name), self.area_at.get(name)) else {
+            return Ok(None);
+        };
         let mut words = a.words.clone();
         for (&i, r) in &a.relocs {
             words[i] = r.apply(words[i], code + 4 * i as u64, self.state, code, module_base)?;
         }
-        Ok(Some((format!("{name}_stubs"), base, PAGE + 4 * words.len() as u64, code, words)))
+        Ok(Some((
+            format!("{name}_stubs"),
+            base,
+            PAGE + 4 * words.len() as u64,
+            code,
+            words,
+        )))
     }
 
     /// Addresses of `name` that its area's code or its sites branch to (B targets, the return points after B
@@ -321,12 +399,22 @@ impl Table {
         let mut out = vec![];
         if let Some(a) = self.areas.get(name) {
             out.extend(
-                a.relocs.values().filter(|r| r.op == RelocOp::B && r.target == Target::Module).map(|r| base.wrapping_add(r.addend as u64)),
+                a.relocs
+                    .values()
+                    .filter(|r| r.op == RelocOp::B && r.target == Target::Module)
+                    .map(|r| base.wrapping_add(r.addend as u64)),
             );
         }
         for (off, s) in self.sites.get(name).into_iter().flatten() {
             if matches!(s.repl.last(), Some(Repl::Reloc(_, r)) if r.op == RelocOp::B) {
                 out.push(base + off + 4 * s.repl.len() as u64);
+            }
+            if let Some(Repl::Word(w)) = s.repl.last() {
+                if w >> 26 == 0b000101 {
+                    let pc = base + off + 4 * (s.repl.len() as u64 - 1);
+                    let delta = (((w & 0x03ff_ffff) as i32) << 6 >> 4) as i64;
+                    out.push(pc.wrapping_add(delta as u64));
+                }
             }
         }
         out
@@ -334,12 +422,22 @@ impl Table {
 
     /// The probe points of `name`, absolute.
     pub fn probes_for(&self, name: &str, base: u64) -> std::collections::BTreeSet<u64> {
-        self.probes.get(name).into_iter().flatten().map(|o| base + o).collect()
+        self.probes
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|o| base + o)
+            .collect()
     }
 
     /// {absolute back-edge: absolute head}.
     pub fn spins_for(&self, name: &str, base: u64) -> BTreeMap<u64, u64> {
-        self.spins.get(name).into_iter().flatten().map(|(b, h)| (base + b, base + h)).collect()
+        self.spins
+            .get(name)
+            .into_iter()
+            .flatten()
+            .map(|(b, h)| (base + b, base + h))
+            .collect()
     }
 
     /// {absolute span start: (set, absolute span end)}.
@@ -353,7 +451,11 @@ impl Table {
     }
 
     /// {absolute address: (set, [words])} with @page resolved.
-    pub fn for_module(&self, name: &str, base: u64) -> Result<BTreeMap<u64, (usize, Vec<u32>)>, PatchError> {
+    pub fn for_module(
+        &self,
+        name: &str,
+        base: u64,
+    ) -> Result<BTreeMap<u64, (usize, Vec<u32>)>, PatchError> {
         let mut out = BTreeMap::new();
         for (off, s) in self.sites.get(name).into_iter().flatten() {
             let a = base + off;
@@ -363,7 +465,13 @@ impl Table {
                 .map(|r| match r {
                     Repl::Word(w) => Ok(*w),
                     Repl::Page(rd) => adrp(a, self.page, *rd),
-                    Repl::Reloc(w, r) => r.apply(*w, a, self.state, self.area_at.get(name).map_or(0, |x| x.1), base),
+                    Repl::Reloc(w, r) => r.apply(
+                        *w,
+                        a,
+                        self.state,
+                        self.area_at.get(name).map_or(0, |x| x.1),
+                        base,
+                    ),
                 })
                 .collect::<Result<Vec<_>, _>>()?;
             out.insert(a, (s.set, ws));
@@ -380,7 +488,10 @@ impl Table {
             }
             let have = m.word(a);
             if have != s.orig {
-                return perr(format!("{name}+{off:#x}: module has {have:08x}, the patch expects {:08x}", s.orig));
+                return perr(format!(
+                    "{name}+{off:#x}: module has {have:08x}, the patch expects {:08x}",
+                    s.orig
+                ));
             }
         }
         for (off, (_, words)) in self.spans.get(name).into_iter().flatten() {
@@ -406,7 +517,9 @@ impl Table {
         for (b, head) in self.spins.get(name).into_iter().flatten() {
             let a = m.base + b;
             if !m.in_text(a) || branch_target(m.word(a), a) != Some(m.base + head) {
-                return perr(format!("{name}+{b:#x}: not a direct branch to the spin wait head {name}+{head:#x}"));
+                return perr(format!(
+                    "{name}+{b:#x}: not a direct branch to the spin wait head {name}+{head:#x}"
+                ));
             }
         }
         Ok(())
@@ -414,8 +527,12 @@ impl Table {
 
     /// patches.h for the runtime.
     pub fn header_text(&self, marker: &str) -> String {
-        let sets: Vec<String> =
-            self.sets.iter().enumerate().map(|(i, (n, e, d))| format!("X({i}, {n}, \"{e}\", {d})")).collect();
+        let sets: Vec<String> = self
+            .sets
+            .iter()
+            .enumerate()
+            .map(|(i, (n, e, d))| format!("X({i}, {n}, \"{e}\", {d})"))
+            .collect();
         [
             format!("// {marker}: code patch sets, generated by recomp/gen.py --patches. Do not edit or commit."),
             "#pragma once".into(),
@@ -438,7 +555,11 @@ impl Table {
 pub fn branch_target(w: u32, a: u64) -> Option<u64> {
     let s = |v: u32, n: u32| -> i64 {
         let v = v as i64;
-        if v & (1 << (n - 1)) != 0 { v - (1 << n) } else { v }
+        if v & (1 << (n - 1)) != 0 {
+            v - (1 << n)
+        } else {
+            v
+        }
     };
     if w >> 26 == 0x05 {
         return Some(a.wrapping_add((s(w & 0x3FF_FFFF, 26) << 2) as u64));
@@ -457,7 +578,11 @@ mod tests {
     use super::*;
 
     fn mods() -> Vec<ModLayout> {
-        vec![ModLayout { name: "main".into(), base: 0x70_0000_0000, size: 0x10_0000 }]
+        vec![ModLayout {
+            name: "main".into(),
+            base: 0x70_0000_0000,
+            size: 0x10_0000,
+        }]
     }
 
     #[test]
@@ -488,15 +613,42 @@ mod tests {
         .unwrap();
         let main = 0x70_0000_0000u64;
         let (name, base, size, code, words) = t.stubs_module("main", main).unwrap().unwrap();
-        assert_eq!((name.as_str(), base, size, code), ("main_stubs", 0x70_0020_0000, PAGE + 16, 0x70_0020_1000));
+        assert_eq!(
+            (name.as_str(), base, size, code),
+            ("main_stubs", 0x70_0020_0000, PAGE + 16, 0x70_0020_1000)
+        );
         assert_eq!(t.state, base);
-        assert_eq!(words[0], adrp(code, base, 16).unwrap(), "adrp x16, state page");
-        assert_eq!((words[1], words[2]), (0xb9400211, 0x17ffffff), "unrelocated words stay");
-        assert_eq!(branch_target(words[3], code + 12), Some(main + 0x104), "back into main");
+        assert_eq!(
+            words[0],
+            adrp(code, base, 16).unwrap(),
+            "adrp x16, state page"
+        );
+        assert_eq!(
+            (words[1], words[2]),
+            (0xb9400211, 0x17ffffff),
+            "unrelocated words stay"
+        );
+        assert_eq!(
+            branch_target(words[3], code + 12),
+            Some(main + 0x104),
+            "back into main"
+        );
         let site = t.for_module("main", main).unwrap()[&(main + 0x100)].1[0];
-        assert_eq!(branch_target(site, main + 0x100), Some(code + 4), "the site branches to the area");
+        assert_eq!(
+            branch_target(site, main + 0x100),
+            Some(code + 4),
+            "the site branches to the area"
+        );
         assert_eq!(t.branch_ins("main", main), vec![main + 0x104, main + 0x104]);
-        assert!(Table::parse("set s E 1\narea s main 0\nareloc main 1 b area 0\n", "t", &mods()).is_err(), "word past the area");
+        assert!(
+            Table::parse(
+                "set s E 1\narea s main 0\nareloc main 1 b area 0\n",
+                "t",
+                &mods()
+            )
+            .is_err(),
+            "word past the area"
+        );
     }
 
     #[test]

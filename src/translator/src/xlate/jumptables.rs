@@ -50,12 +50,20 @@ enum X {
 type R<T> = Result<T, X>;
 
 fn mask(sz: u32) -> u64 {
-    if sz == 32 { M32 } else { M64 }
+    if sz == 32 {
+        M32
+    } else {
+        M64
+    }
 }
 
 /// Python `sext` on an unbounded int (does not mask above bit n).
 fn psext(v: i128, n: u32) -> i128 {
-    if (v >> (n - 1)) & 1 != 0 { v - (1i128 << n) } else { v }
+    if (v >> (n - 1)) & 1 != 0 {
+        v - (1i128 << n)
+    } else {
+        v
+    }
 }
 
 // ---------------------------------------------------------------- expressions
@@ -113,7 +121,10 @@ impl Ex {
             Ex::C(_) | Ex::R(_) | Ex::U(_) | Ex::V(..) | Ex::Vw(..) | Ex::Oneof(..) => vec![],
             Ex::Lo(e) | Ex::Zx(e) | Ex::Sx(e) | Ex::Logic(_, e) => vec![e],
             Ex::Bin(_, _, a, b) => vec![a, b],
-            Ex::Shift(_, _, a, _) | Ex::Bfm(_, _, _, _, a) | Ex::Xt(_, _, _, a) | Ex::Ld(_, _, _, a, _) => vec![a],
+            Ex::Shift(_, _, a, _)
+            | Ex::Bfm(_, _, _, _, a)
+            | Ex::Xt(_, _, _, a)
+            | Ex::Ld(_, _, _, a, _) => vec![a],
             Ex::Bfi(_, _, _, a, b) => vec![a, b],
             Ex::Csel(_, x, y, _, s) => vec![x, y, s],
             Ex::Ccmp(_, a, b, _, _, _, p) => match p {
@@ -123,7 +134,11 @@ impl Ex {
         }
     }
     fn cval(&self) -> Option<u64> {
-        if let Ex::C(v) = self { Some(*v) } else { None }
+        if let Ex::C(v) = self {
+            Some(*v)
+        } else {
+            None
+        }
     }
     fn is_c(&self) -> bool {
         matches!(self, Ex::C(_))
@@ -152,7 +167,11 @@ fn lo(e: &E) -> E {
 }
 
 fn zx(e: &E) -> E {
-    if matches!(**e, Ex::C(_) | Ex::Oneof(..)) { e.clone() } else { mk(Ex::Zx(e.clone())) }
+    if matches!(**e, Ex::C(_) | Ex::Oneof(..)) {
+        e.clone()
+    } else {
+        mk(Ex::Zx(e.clone()))
+    }
 }
 
 fn sx(e: &E) -> E {
@@ -200,7 +219,11 @@ fn binop(op: Op, sz: u32, a: &E, b: &E) -> E {
     if op == Op::And {
         if let Some(bv) = b.cval() {
             if sz == 64 && bv <= M32 {
-                return if bv != M32 { zx(&binop(Op::And, 32, &lo(a), b)) } else { zx(&lo(a)) };
+                return if bv != M32 {
+                    zx(&binop(Op::And, 32, &lo(a), b))
+                } else {
+                    zx(&lo(a))
+                };
             }
             if bv == mask(sz) {
                 return a.clone();
@@ -229,7 +252,12 @@ fn bfm(sz: u32, signed: bool, immr: u32, imms: u32, x: &E) -> R<E> {
         return Ok(sx(&lo(x)));
     }
     if imms == sz - 1 {
-        return Ok(shift(if signed { Sh::Asr } else { Sh::Lsr }, sz, x, immr as i64));
+        return Ok(shift(
+            if signed { Sh::Asr } else { Sh::Lsr },
+            sz,
+            x,
+            immr as i64,
+        ));
     }
     if !signed && imms + 1 == immr {
         return Ok(shift(Sh::Lsl, sz, x, sz as i64 - immr as i64));
@@ -248,19 +276,29 @@ fn bfm(sz: u32, signed: bool, immr: u32, imms: u32, x: &E) -> R<E> {
 
 fn bfi(sz: u32, immr: u32, imms: u32, dst: &E, src: &E) -> R<E> {
     if let (Ex::C(d), Ex::C(s)) = (&**dst, &**src) {
-        return Ok(c(bfi_eval(sz, immr, imms, *d as u128, *s as u128)? as i128, sz));
+        return Ok(c(
+            bfi_eval(sz, immr, imms, *d as u128, *s as u128)? as i128,
+            sz,
+        ));
     }
     Ok(mk(Ex::Bfi(sz, immr, imms, dst.clone(), src.clone())))
 }
 
 fn bfi_eval(sz: u32, immr: u32, imms: u32, d: u128, v: u128) -> R<u64> {
-    let (wmask, tmask) = decode_bit_masks(if sz == 64 { 1 } else { 0 }, imms, immr, sz, false).map_err(|_| X::Raise)?;
+    let (wmask, tmask) = decode_bit_masks(if sz == 64 { 1 } else { 0 }, imms, immr, sz, false)
+        .map_err(|_| X::Raise)?;
     let (wmask, tmask, m) = (wmask as u128, tmask as u128, mask(sz) as u128);
     let r = if immr != 0 {
         if immr > sz {
             return Err(X::Raise); // negative shift count in Python
         }
-        ((v >> immr) | if sz - immr >= 128 { 0 } else { v << (sz - immr) }) & m
+        ((v >> immr)
+            | if sz - immr >= 128 {
+                0
+            } else {
+                v << (sz - immr)
+            })
+            & m
     } else {
         v
     };
@@ -282,7 +320,14 @@ fn extend(e: &E, option: u32, sz: u32) -> E {
     let v = lo(e);
     if let Ex::C(vv) = *v {
         let x = vv & ((1u64 << b) - 1);
-        return c(if signed { psext(x as i128, b) } else { x as i128 }, sz);
+        return c(
+            if signed {
+                psext(x as i128, b)
+            } else {
+                x as i128
+            },
+            sz,
+        );
     }
     mk(Ex::Xt(b, signed, sz, v))
 }
@@ -293,7 +338,11 @@ fn bfm_eval(sz: u32, signed: bool, immr: u32, imms: u32, v: u64) -> R<u64> {
     if imms >= immr {
         let w = imms - immr + 1;
         let f = (v >> immr) & ((1u128 << w) - 1);
-        let f = if signed { psext(f as i128, w) } else { f as i128 };
+        let f = if signed {
+            psext(f as i128, w)
+        } else {
+            f as i128
+        };
         return Ok((f & m) as u64);
     }
     let f = (v & ((1u128 << (imms + 1)) - 1)) as i128;
@@ -324,7 +373,14 @@ struct State {
 
 impl State {
     fn new() -> State {
-        State { regs: (0..32).map(|r| mk(Ex::R(r))).collect(), flags: None, epoch: 0, mem: vec![], conds: vec![], fresh: 0 }
+        State {
+            regs: (0..32).map(|r| mk(Ex::R(r))).collect(),
+            flags: None,
+            epoch: 0,
+            mem: vec![],
+            conds: vec![],
+            fresh: 0,
+        }
     }
     fn unknown(&mut self) -> E {
         self.fresh += 1;
@@ -335,7 +391,11 @@ impl State {
             return c64(0);
         }
         let e = &self.regs[r as usize];
-        if sz == 64 { e.clone() } else { lo(e) }
+        if sz == 64 {
+            e.clone()
+        } else {
+            lo(e)
+        }
     }
     fn set(&mut self, r: u32, sz: u32, e: E, sp: bool) {
         if r == 31 && !sp {
@@ -371,7 +431,9 @@ impl State {
         let (base, off) = split(addr);
         self.epoch += 1;
         self.mem.retain(|m| {
-            m.0 == base && ((m.1 as u128 + m.2 as u128) <= off as u128 || (off as u128 + size as u128) <= m.1 as u128)
+            m.0 == base
+                && ((m.1 as u128 + m.2 as u128) <= off as u128
+                    || (off as u128 + size as u128) <= m.1 as u128)
         });
         self.mem.push((base, off, size, value));
     }
@@ -387,7 +449,10 @@ impl State {
                 }
                 if signed {
                     if let Ex::C(vv) = **v {
-                        return c(psext((vv & ((1u64 << (8 * size)) - 1)) as i128, 8 * size), sz);
+                        return c(
+                            psext((vv & ((1u64 << (8 * size)) - 1)) as i128, 8 * size),
+                            sz,
+                        );
                     }
                     return mk(Ex::Xt(8 * size, true, sz, v.clone()));
                 }
@@ -459,7 +524,12 @@ fn ldst(st: &mut State, w: u32, pc: u64) {
         return;
     }
     if (w & 0x3A00_0000) == 0x2800_0000 {
-        let (mode, load, v, opc) = (bits(w, 23, 2), bits(w, 22, 1), bits(w, 26, 1), bits(w, 30, 2));
+        let (mode, load, v, opc) = (
+            bits(w, 23, 2),
+            bits(w, 22, 1),
+            bits(w, 26, 1),
+            bits(w, 30, 2),
+        );
         let scale = 2 + if v == 0 { bits(w, 31, 1) } else { opc };
         let base = st.get(rn, 64, true);
         let new = binop(Op::Add, 64, &base, &c64(sx_bits(w, 15, 7) << scale));
@@ -471,7 +541,10 @@ fn ldst(st: &mut State, w: u32, pc: u64) {
             st.kill(rt2, sz, false);
         } else if load == 0 && v == 0 && opc != 1 {
             let n = 1u64 << scale;
-            let (a, b) = (st.get(rt, 8 * n as u32, false), st.get(rt2, 8 * n as u32, false));
+            let (a, b) = (
+                st.get(rt, 8 * n as u32, false),
+                st.get(rt2, 8 * n as u32, false),
+            );
             st.store(&addr, n, a);
             st.store(&binop(Op::Add, 64, &addr, &c64(n as i128)), n, b);
         } else if load == 0 {
@@ -483,7 +556,9 @@ fn ldst(st: &mut State, w: u32, pc: u64) {
         return;
     }
     let m = w & 0x3B20_0C00;
-    if [0x3800_0000, 0x3800_0400, 0x3800_0C00, 0x3820_0800].contains(&m) || (w & 0x3B00_0000) == 0x3900_0000 {
+    if [0x3800_0000, 0x3800_0400, 0x3800_0C00, 0x3820_0800].contains(&m)
+        || (w & 0x3B00_0000) == 0x3900_0000
+    {
         let (size, v, opc) = (bits(w, 30, 2), bits(w, 26, 1), bits(w, 22, 2));
         if v != 0 {
             let scale = size | (bits(w, 23, 1) << 2);
@@ -507,7 +582,11 @@ fn ldst(st: &mut State, w: u32, pc: u64) {
             let val = st.get(rt, if size == 3 { 64 } else { 32 }, false);
             st.store(&addr, 1 << size, val);
         } else if opc == 1 {
-            let e = if size < 3 { zx(&st.load(1 << size, false, 32, &addr)) } else { st.load(8, false, 64, &addr) };
+            let e = if size < 3 {
+                zx(&st.load(1 << size, false, 32, &addr))
+            } else {
+                st.load(8, false, 64, &addr)
+            };
             st.set(rt, 64, e, false);
         } else if size == 3 {
             // prfm
@@ -556,12 +635,22 @@ fn dp_imm(st: &mut State, w: u32, pc: u64) -> R<()> {
     let sz = if sf != 0 { 64 } else { 32 };
     let op = bits(w, 23, 3);
     if op == 0 || op == 1 {
-        let imm = psext((((bits(w, 5, 19) as i128) << 2) | bits(w, 29, 2) as i128) as i128, 21);
-        let v = if sf != 0 { ((pc & !0xFFF) as i128) + (imm << 12) } else { pc as i128 + imm };
+        let imm = psext(
+            (((bits(w, 5, 19) as i128) << 2) | bits(w, 29, 2) as i128) as i128,
+            21,
+        );
+        let v = if sf != 0 {
+            ((pc & !0xFFF) as i128) + (imm << 12)
+        } else {
+            pc as i128 + imm
+        };
         st.set(rd, 64, c64(v), false);
     } else if op == 2 {
         let (opc, s) = (bits(w, 30, 1), bits(w, 29, 1));
-        let imm = c((bits(w, 10, 12) as i128) << if bits(w, 22, 1) != 0 { 12 } else { 0 }, sz);
+        let imm = c(
+            (bits(w, 10, 12) as i128) << if bits(w, 22, 1) != 0 { 12 } else { 0 },
+            sz,
+        );
         let a = st.get(rn, sz, true);
         let o = if opc != 0 { Op::Sub } else { Op::Add };
         let r = binop(o, sz, &a, &imm);
@@ -575,7 +664,8 @@ fn dp_imm(st: &mut State, w: u32, pc: u64) -> R<()> {
             st.kill_all();
             return Ok(());
         }
-        let (imm, _) = decode_bit_masks(n, bits(w, 10, 6), bits(w, 16, 6), sz, true).map_err(|_| X::Raise)?;
+        let (imm, _) =
+            decode_bit_masks(n, bits(w, 10, 6), bits(w, 16, 6), sz, true).map_err(|_| X::Raise)?;
         let o = [Op::And, Op::Orr, Op::Eor, Op::And][opc as usize];
         let r = binop(o, sz, &st.get(rn, sz, false), &c(imm as i128, sz));
         if opc == 3 {
@@ -602,12 +692,24 @@ fn dp_imm(st: &mut State, w: u32, pc: u64) -> R<()> {
     } else if op == 6 {
         let opc = bits(w, 29, 2);
         if opc == 1 {
-            let e = bfi(sz, bits(w, 16, 6), bits(w, 10, 6), &st.get(rd, sz, false), &st.get(rn, sz, false))?;
+            let e = bfi(
+                sz,
+                bits(w, 16, 6),
+                bits(w, 10, 6),
+                &st.get(rd, sz, false),
+                &st.get(rn, sz, false),
+            )?;
             st.set(rd, sz, e, false);
         } else if opc == 3 {
             st.kill(rd, sz, false);
         } else {
-            let e = bfm(sz, opc == 0, bits(w, 16, 6), bits(w, 10, 6), &st.get(rn, sz, false))?;
+            let e = bfm(
+                sz,
+                opc == 0,
+                bits(w, 16, 6),
+                bits(w, 10, 6),
+                &st.get(rn, sz, false),
+            )?;
             st.set(rd, sz, e, false);
         }
     } else if bits(w, 16, 5) == rn {
@@ -624,8 +726,16 @@ fn dp_reg(st: &mut State, w: u32) {
     let sz = if sf != 0 { 64 } else { 32 };
     if (w & 0x1F00_0000) == 0x0A00_0000 {
         let (opc, n) = (bits(w, 29, 2), bits(w, 21, 1));
-        let b = shift(SHIFT_NAMES[bits(w, 22, 2) as usize], sz, &st.get(rm, sz, false), bits(w, 10, 6) as i64);
-        let name = [[Op::And, Op::Orr, Op::Eor, Op::And], [Op::Bic, Op::Orn, Op::Eon, Op::Bic]][n as usize][opc as usize];
+        let b = shift(
+            SHIFT_NAMES[bits(w, 22, 2) as usize],
+            sz,
+            &st.get(rm, sz, false),
+            bits(w, 10, 6) as i64,
+        );
+        let name = [
+            [Op::And, Op::Orr, Op::Eor, Op::And],
+            [Op::Bic, Op::Orn, Op::Eon, Op::Bic],
+        ][n as usize][opc as usize];
         let r = binop(name, sz, &st.get(rn, sz, false), &b);
         if opc == 3 {
             st.flags = Some(mk(Ex::Logic(sz, r.clone())));
@@ -638,7 +748,12 @@ fn dp_reg(st: &mut State, w: u32) {
             return;
         }
         let a = st.get(rn, sz, false);
-        let b = shift(SHIFT_NAMES[typ as usize], sz, &st.get(rm, sz, false), bits(w, 10, 6) as i64);
+        let b = shift(
+            SHIFT_NAMES[typ as usize],
+            sz,
+            &st.get(rm, sz, false),
+            bits(w, 10, 6) as i64,
+        );
         let o = if opc != 0 { Op::Sub } else { Op::Add };
         if s != 0 {
             st.flags = Some(mk(Ex::Bin(o, sz, a.clone(), b.clone())));
@@ -647,22 +762,43 @@ fn dp_reg(st: &mut State, w: u32) {
     } else if (w & 0x1F20_0000) == 0x0B20_0000 {
         let (opc, s) = (bits(w, 30, 1), bits(w, 29, 1));
         let a = st.get(rn, sz, true);
-        let b = shift(Sh::Lsl, sz, &extend(&st.get(rm, 64, false), bits(w, 13, 3), sz), bits(w, 10, 3) as i64);
+        let b = shift(
+            Sh::Lsl,
+            sz,
+            &extend(&st.get(rm, 64, false), bits(w, 13, 3), sz),
+            bits(w, 10, 3) as i64,
+        );
         let o = if opc != 0 { Op::Sub } else { Op::Add };
         if s != 0 {
             st.flags = Some(mk(Ex::Bin(o, sz, a.clone(), b.clone())));
         }
         st.set(rd, sz, binop(o, sz, &a, &b), s == 0);
     } else if (w & 0x1FE0_0000) == 0x1A40_0000 && bits(w, 29, 1) != 0 {
-        let b = if bits(w, 11, 1) != 0 { c(rm as i128, sz) } else { st.get(rm, sz, false) };
+        let b = if bits(w, 11, 1) != 0 {
+            c(rm as i128, sz)
+        } else {
+            st.get(rm, sz, false)
+        };
         let prev = st.flags.take();
-        st.flags = Some(mk(Ex::Ccmp(sz, st.get(rn, sz, false), b, bits(w, 30, 1) == 0, bits(w, 12, 4), bits(w, 0, 4), prev)));
+        st.flags = Some(mk(Ex::Ccmp(
+            sz,
+            st.get(rn, sz, false),
+            b,
+            bits(w, 30, 1) == 0,
+            bits(w, 12, 4),
+            bits(w, 0, 4),
+            prev,
+        )));
     } else if (w & 0x1FE0_0000) == 0x1A00_0000 && (w & 0xFC00) != 0 {
         st.flags = None;
     } else if (w & 0x1FE0_0800) == 0x1A80_0000 && bits(w, 29, 1) == 0 {
         let (x, mut y) = (st.get(rn, sz, false), st.get(rm, sz, false));
         if bits(w, 10, 1) != 0 {
-            y = if bits(w, 30, 1) == 0 { binop(Op::Add, sz, &y, &c64(1)) } else { binop(Op::Sub, sz, &c64(0), &y) };
+            y = if bits(w, 30, 1) == 0 {
+                binop(Op::Add, sz, &y, &c64(1))
+            } else {
+                binop(Op::Sub, sz, &c64(0), &y)
+            };
         } else if bits(w, 30, 1) != 0 {
             y = binop(Op::Eor, sz, &y, &c64(mask(sz) as i128));
         }
@@ -670,7 +806,11 @@ fn dp_reg(st: &mut State, w: u32) {
             Some(f) => f.clone(),
             None => st.unknown(),
         };
-        let e = if x == y { x } else { mk(Ex::Csel(sz, x, y, bits(w, 12, 4), sel)) };
+        let e = if x == y {
+            x
+        } else {
+            mk(Ex::Csel(sz, x, y, bits(w, 12, 4), sel))
+        };
         st.set(rd, sz, e, false);
     } else {
         st.kill(rd, sz, false);
@@ -685,10 +825,18 @@ fn fp_simd(st: &mut State, w: u32) {
         st.flags = None;
     } else if (w & 0x5F20_0000) == 0x1E00_0000 || (w & 0x5F20_FC00) == 0x1E20_0000 {
         if [0, 1, 4, 5, 6].contains(&bits(w, 16, 3)) {
-            st.kill(bits(w, 0, 5), if bits(w, 31, 1) != 0 { 64 } else { 32 }, false);
+            st.kill(
+                bits(w, 0, 5),
+                if bits(w, 31, 1) != 0 { 64 } else { 32 },
+                false,
+            );
         }
     } else if (w & 0x9FE0_8400) == 0x0E00_0400 && [5, 7].contains(&bits(w, 11, 4)) {
-        st.kill(bits(w, 0, 5), if bits(w, 30, 1) != 0 { 64 } else { 32 }, false);
+        st.kill(
+            bits(w, 0, 5),
+            if bits(w, 30, 1) != 0 { 64 } else { 32 },
+            false,
+        );
     }
 }
 
@@ -728,11 +876,13 @@ fn edge(st: &mut State, w: u32, taken: bool) {
     } else if (w & 0x7E00_0000) == 0x3400_0000 {
         let sz = if bits(w, 31, 1) != 0 { 64 } else { 32 };
         let x = st.get(bits(w, 0, 5), sz, false);
-        st.conds.push(Cond::Zero(sz, x, taken != (bits(w, 24, 1) != 0)));
+        st.conds
+            .push(Cond::Zero(sz, x, taken != (bits(w, 24, 1) != 0)));
     } else if (w & 0x7E00_0000) == 0x3600_0000 {
         let bit = (bits(w, 31, 1) << 5) | bits(w, 19, 5);
         let x = st.get(bits(w, 0, 5), 64, false);
-        st.conds.push(Cond::Bit(x, bit, taken == (bits(w, 24, 1) != 0)));
+        st.conds
+            .push(Cond::Bit(x, bit, taken == (bits(w, 24, 1) != 0)));
     }
 }
 
@@ -853,7 +1003,12 @@ fn holds(cond: u32, f: Nzcv) -> bool {
 }
 
 fn imm_nzcv(imm: u32) -> Nzcv {
-    ((imm >> 3 & 1) as u64, imm >> 2 & 1 != 0, imm >> 1 & 1 != 0, (imm & 1) as u64)
+    (
+        (imm >> 3 & 1) as u64,
+        imm >> 2 & 1 != 0,
+        imm >> 1 & 1 != 0,
+        (imm & 1) as u64,
+    )
 }
 
 fn nzcv(kind: Option<Op>, sz: u32, x: u64, y: u64) -> Nzcv {
@@ -863,11 +1018,21 @@ fn nzcv(kind: Option<Op>, sz: u32, x: u64, y: u64) -> Nzcv {
         None => (((x >> top) & 1) as u64, x == 0, false, 0),
         Some(Op::Add) => {
             let r = (x + y) & m;
-            (((r >> top) & 1) as u64, r == 0, x + y > m, (((!(x ^ y)) & (x ^ r)) >> top & 1) as u64)
+            (
+                ((r >> top) & 1) as u64,
+                r == 0,
+                x + y > m,
+                (((!(x ^ y)) & (x ^ r)) >> top & 1) as u64,
+            )
         }
         _ => {
             let r = (x - y) & m;
-            (((r >> top) & 1) as u64, r == 0, x >= y, (((x ^ y) & (x ^ r)) >> top & 1) as u64)
+            (
+                ((r >> top) & 1) as u64,
+                r == 0,
+                x >= y,
+                (((x ^ y) & (x ^ r)) >> top & 1) as u64,
+            )
         }
     }
 }
@@ -930,8 +1095,16 @@ fn bounds(st: &State) -> Vec<(E, Vec<u64>)> {
         };
         if let Some(len) = len {
             if len > 0 && len <= MAX_COUNT as u128 {
-                let vals: Vec<u64> = if cc == Some(0) { vec![n as u64] } else { (0..len as u64).collect() };
-                let key = if matches!(*a, Ex::Zx(_) | Ex::Sx(_)) { lo(&a) } else { a };
+                let vals: Vec<u64> = if cc == Some(0) {
+                    vec![n as u64]
+                } else {
+                    (0..len as u64).collect()
+                };
+                let key = if matches!(*a, Ex::Zx(_) | Ex::Sx(_)) {
+                    lo(&a)
+                } else {
+                    a
+                };
                 out.push((key, vals));
             }
         }
@@ -997,34 +1170,53 @@ fn domain(e: &E) -> R<Option<Vec<u64>>> {
                 return Err(X::Raise);
             }
             let sh = sz - immr;
-            Ok(Some((0..1u128 << (imms + 1)).map(|v| ((v << sh) & mask(*sz) as u128) as u64).collect()))
+            Ok(Some(
+                (0..1u128 << (imms + 1))
+                    .map(|v| ((v << sh) & mask(*sz) as u128) as u64)
+                    .collect(),
+            ))
         }
         Ex::Bin(op @ (Op::Orr | Op::Add | Op::Eor), sz, a, b) => {
             let (da, db) = (dom_or_c(a)?, dom_or_c(b)?);
-            let (Some(da), Some(db)) = (da, db) else { return Ok(None) };
+            let (Some(da), Some(db)) = (da, db) else {
+                return Ok(None);
+            };
             if da.len() * db.len() > 256 {
                 return Ok(None);
             }
-            Ok(Some(sorted_set(da.iter().flat_map(|&x| db.iter().map(move |&y| bin_eval(*op, x, y, *sz))))))
+            Ok(Some(sorted_set(da.iter().flat_map(|&x| {
+                db.iter().map(move |&y| bin_eval(*op, x, y, *sz))
+            }))))
         }
-        Ex::Shift(Sh::Lsr, sz, _, n) if (*n as i64) > *sz as i64 - 10 => Ok(Some((0..1u64 << (sz - n)).collect())),
+        Ex::Shift(Sh::Lsr, sz, _, n) if (*n as i64) > *sz as i64 - 10 => {
+            Ok(Some((0..1u64 << (sz - n)).collect()))
+        }
         Ex::Xt(_, false, _, _) | Ex::Ld(1, false, _, _, _) => Ok(Some((0..256).collect())),
         Ex::Csel(_, x, y, _, _) => {
             let (da, db) = (dom_or_c(x)?, dom_or_c(y)?);
             match (da, db) {
-                (Some(a), Some(b)) if a.len() + b.len() <= 256 => Ok(Some(sorted_set(a.into_iter().chain(b)))),
+                (Some(a), Some(b)) if a.len() + b.len() <= 256 => {
+                    Ok(Some(sorted_set(a.into_iter().chain(b))))
+                }
                 _ => Ok(None),
             }
         }
         Ex::Zx(x) => domain(x),
         Ex::Lo(x) => Ok(domain(x)?.map(|d| sorted_set(d.into_iter().map(|v| v & M32)))),
-        Ex::Shift(Sh::Lsl, sz, a, n) => {
-            Ok(domain(a)?.map(|d| sorted_set(d.into_iter().map(|v| (((v as u128) << n) & mask(*sz) as u128) as u64))))
-        }
+        Ex::Shift(Sh::Lsl, sz, a, n) => Ok(domain(a)?.map(|d| {
+            sorted_set(
+                d.into_iter()
+                    .map(|v| (((v as u128) << n) & mask(*sz) as u128) as u64),
+            )
+        })),
         Ex::Oneof(_, s) => Ok(Some(s.to_vec())),
         Ex::Bfi(sz, immr, imms, dst, _) => {
             let dom = dom_or_c(dst)?;
-            let (width, at) = if imms >= immr { (imms - immr + 1, *immr) } else { (imms + 1, 0) };
+            let (width, at) = if imms >= immr {
+                (imms - immr + 1, *immr)
+            } else {
+                (imms + 1, 0)
+            };
             let Some(dom) = dom else { return Ok(None) };
             if width > 4 || (dom.len() << width) > 256 {
                 return Ok(None);
@@ -1095,7 +1287,14 @@ struct Cfg<'a> {
 }
 
 impl<'a> Cfg<'a> {
-    fn new(m: &Module, index: &[(i64, u64)], entry: u64, end: u64, tables: &Tables, pads: &'a Pads) -> Cfg<'a> {
+    fn new(
+        m: &Module,
+        index: &[(i64, u64)],
+        entry: u64,
+        end: u64,
+        tables: &Tables,
+        pads: &'a Pads,
+    ) -> Cfg<'a> {
         let i = index.partition_point(|x| x.0 < entry as i64);
         let j = index.partition_point(|x| x.0 < end as i64);
         let mut labels: Vec<(u64, Vec<u64>)> = vec![];
@@ -1131,21 +1330,34 @@ impl<'a> Cfg<'a> {
                 unknown.insert(*t);
             }
         }
-        let everywhere = tables.iter().filter(|(_, ts)| ts.is_none()).map(|(br, _)| *br).collect();
-        let mut preds: HashMap<u64, Vec<(u64, Option<bool>)>> = leaders.iter().map(|&b| (b, vec![])).collect();
+        let everywhere = tables
+            .iter()
+            .filter(|(_, ts)| ts.is_none())
+            .map(|(br, _)| *br)
+            .collect();
+        let mut preds: HashMap<u64, Vec<(u64, Option<bool>)>> =
+            leaders.iter().map(|&b| (b, vec![])).collect();
         for (&_b, &stop) in leaders.iter().zip(stops.iter()) {
             let last = stop - 4;
             let w = m.word(last);
             let t = branch_target(w, last);
-            let cond = ((w & 0xFF00_0010) == 0x5400_0000 && (w & 0xE) != 0xE) || (w & 0x7C00_0000) == 0x3400_0000;
+            let cond = ((w & 0xFF00_0010) == 0x5400_0000 && (w & 0xE) != 0xE)
+                || (w & 0x7C00_0000) == 0x3400_0000;
             if let Some(t) = t {
                 if entry as i128 <= t && t < end as i128 {
-                    let tk = if cond && t != stop as i128 { Some(true) } else { None };
+                    let tk = if cond && t != stop as i128 {
+                        Some(true)
+                    } else {
+                        None
+                    };
                     preds.get_mut(&(t as u64)).unwrap().push((last, tk));
                 }
             }
             if !no_fallthrough(w) && stop < end && t != Some(stop as i128) {
-                preds.get_mut(&stop).unwrap().push((last, if cond { Some(false) } else { None }));
+                preds
+                    .get_mut(&stop)
+                    .unwrap()
+                    .push((last, if cond { Some(false) } else { None }));
             }
         }
         for (br, ts) in tables {
@@ -1157,7 +1369,16 @@ impl<'a> Cfg<'a> {
                 }
             }
         }
-        Cfg { entry, end, pads, leaders, stops, unknown, everywhere, preds }
+        Cfg {
+            entry,
+            end,
+            pads,
+            leaders,
+            stops,
+            unknown,
+            everywhere,
+            preds,
+        }
     }
 
     fn block(&self, a: u64) -> u64 {
@@ -1168,7 +1389,12 @@ impl<'a> Cfg<'a> {
         if self.unknown.contains(&b) || self.pads.contains_key(&b) || self.preds[&b].is_empty() {
             return None;
         }
-        Some(self.preds[&b].iter().map(|&(src, taken)| (self.block(src), src, taken)).collect())
+        Some(
+            self.preds[&b]
+                .iter()
+                .map(|&(src, taken)| (self.block(src), src, taken))
+                .collect(),
+        )
     }
 }
 
@@ -1202,7 +1428,14 @@ fn sleb(img: &[u8], o: i128) -> R<(i128, i128)> {
     if n > 126 {
         return Err(X::Raise);
     }
-    Ok((if (v >> (n - 1)) & 1 != 0 { v - (1i128 << n) } else { v }, o2))
+    Ok((
+        if (v >> (n - 1)) & 1 != 0 {
+            v - (1i128 << n)
+        } else {
+            v
+        },
+        o2,
+    ))
 }
 
 fn le(img: &[u8], o: i128, n: usize, signed: bool) -> i128 {
@@ -1277,12 +1510,21 @@ fn landing_pads(m: &Module) -> R<BTreeMap<i128, Vec<(i128, i128)>>> {
             let (nxt, cid) = (o + 4 + length, le(img, o + 4, 4, false));
             if cid == 0 {
                 let mut p = o + 9;
-                let z = img.get(p as usize..).ok_or(X::Raise)?.iter().position(|&b| b == 0).ok_or(X::Raise)?;
+                let z = img
+                    .get(p as usize..)
+                    .ok_or(X::Raise)?
+                    .iter()
+                    .position(|&b| b == 0)
+                    .ok_or(X::Raise)?;
                 let aug: Vec<u8> = img[p as usize..p as usize + z].to_vec();
                 p += aug.len() as i128 + 1;
                 p = uleb(img, p)?.1;
                 p = sleb(img, p)?.1;
-                p = if byte(img, o + 8)? == 1 { p + 1 } else { uleb(img, p)?.1 };
+                p = if byte(img, o + 8)? == 1 {
+                    p + 1
+                } else {
+                    uleb(img, p)?.1
+                };
                 let (mut rr, mut ll) = (0u8, None);
                 if aug.first() == Some(&b'z') {
                     p = uleb(img, p)?.1;
@@ -1316,7 +1558,13 @@ fn landing_pads(m: &Module) -> R<BTreeMap<i128, Vec<(i128, i128)>>> {
     Ok(pads)
 }
 
-fn lsda_parse(img: &[u8], o: i128, func: i128, base: i128, pads: &mut BTreeMap<i128, Vec<(i128, i128)>>) -> R<()> {
+fn lsda_parse(
+    img: &[u8],
+    o: i128,
+    func: i128,
+    base: i128,
+    pads: &mut BTreeMap<i128, Vec<(i128, i128)>>,
+) -> R<()> {
     let lp_enc = byte(img, o)?;
     let (mut lpstart, mut o) = enc(img, o + 1, lp_enc)?;
     if lp_enc == 0xFF {
@@ -1337,7 +1585,9 @@ fn lsda_parse(img: &[u8], o: i128, func: i128, base: i128, pads: &mut BTreeMap<i
         let (lp, o1) = enc(img, o1, cs_enc & 0x0F)?;
         o = uleb(img, o1)?.1;
         if lp != 0 {
-            pads.entry(base + lpstart + lp).or_default().push((base + func + s, base + func + s + ln));
+            pads.entry(base + lpstart + lp)
+                .or_default()
+                .push((base + func + s, base + func + s + ln));
         }
     }
     Ok(())
@@ -1358,7 +1608,13 @@ type Env<'e> = &'e [(E, u64)];
 
 impl<'m> JumpTables<'m> {
     pub fn new(m: &'m Module) -> Self {
-        JumpTables { m, index: None, pads: None, func: None, budget: 0 }
+        JumpTables {
+            m,
+            index: None,
+            pads: None,
+            func: None,
+            budget: 0,
+        }
     }
 
     /// Python resolve(mod, br_pc, entry, end): sorted distinct targets in [entry, end), or None.
@@ -1380,7 +1636,10 @@ impl<'m> JumpTables<'m> {
             return Ok(None);
         }
         let f = self.function(entry, end)?;
-        Ok(f.get(&br_pc).cloned().flatten().map(|s| s.into_iter().collect()))
+        Ok(f.get(&br_pc)
+            .cloned()
+            .flatten()
+            .map(|s| s.into_iter().collect()))
     }
 
     fn computed(&self, br_pc: u64, entry: u64) -> R<bool> {
@@ -1394,7 +1653,14 @@ impl<'m> JumpTables<'m> {
             s -= 4;
         }
         let mut dummy = 0i64;
-        let (_, t) = run(m, &[(s, br_pc, None)], bits(w, 5, 5), None, None, &mut dummy)?;
+        let (_, t) = run(
+            m,
+            &[(s, br_pc, None)],
+            bits(w, 5, 5),
+            None,
+            None,
+            &mut dummy,
+        )?;
         Ok(match &*t {
             Ex::C(v) => m.in_text(*v),
             Ex::Bin(Op::Add | Op::Sub, ..) => refers(m, &t),
@@ -1437,7 +1703,10 @@ impl<'m> JumpTables<'m> {
             self.pads = Some(landing_pads(m));
         }
         let all = self.pads.as_ref().unwrap().as_ref().map_err(|e| *e)?;
-        let pads: Pads = all.range(entry as i128..end as i128).map(|(k, v)| (*k as u64, v.clone())).collect();
+        let pads: Pads = all
+            .range(entry as i128..end as i128)
+            .map(|(k, v)| (*k as u64, v.clone()))
+            .collect();
         self.index();
         self.budget = MAX_STEPS;
         let result = match self.resolve_all(entry, end, &brs, &pads) {
@@ -1449,9 +1718,16 @@ impl<'m> JumpTables<'m> {
         Ok(result)
     }
 
-    fn resolve_all(&mut self, entry: u64, end: u64, brs: &[u64], pads: &Pads) -> R<HashMap<u64, Option<BTreeSet<u64>>>> {
+    fn resolve_all(
+        &mut self,
+        entry: u64,
+        end: u64,
+        brs: &[u64],
+        pads: &Pads,
+    ) -> R<HashMap<u64, Option<BTreeSet<u64>>>> {
         let mut tables: Vec<(u64, BTreeSet<u64>)> = vec![];
-        let mut result: HashMap<u64, Option<BTreeSet<u64>>> = brs.iter().map(|&a| (a, None)).collect();
+        let mut result: HashMap<u64, Option<BTreeSet<u64>>> =
+            brs.iter().map(|&a| (a, None)).collect();
         let rounds = if brs.is_empty() { 0 } else { MAX_ROUNDS };
         for _ in 0..rounds {
             let mut grown = false;
@@ -1477,9 +1753,14 @@ impl<'m> JumpTables<'m> {
         }
         let mut dead: HashSet<u64> = HashSet::new();
         for _ in 0..rounds {
-            let full: Tables =
-                brs.iter().map(|&a| (a, tables.iter().find(|x| x.0 == a).map(|x| x.1.clone()))).collect();
-            let new: HashMap<u64, Option<BTreeSet<u64>>> = self.round(entry, end, brs, &full, pads)?.into_iter().collect();
+            let full: Tables = brs
+                .iter()
+                .map(|&a| (a, tables.iter().find(|x| x.0 == a).map(|x| x.1.clone())))
+                .collect();
+            let new: HashMap<u64, Option<BTreeSet<u64>>> = self
+                .round(entry, end, brs, &full, pads)?
+                .into_iter()
+                .collect();
             let fullm: HashMap<u64, Option<BTreeSet<u64>>> = full.iter().cloned().collect();
             let empty = BTreeSet::new();
             let bad: Vec<u64> = brs
@@ -1494,7 +1775,19 @@ impl<'m> JumpTables<'m> {
                 })
                 .collect();
             if bad.is_empty() {
-                result = brs.iter().map(|&a| (a, if fullm[&a].is_some() { new[&a].clone() } else { None })).collect();
+                result = brs
+                    .iter()
+                    .map(|&a| {
+                        (
+                            a,
+                            if fullm[&a].is_some() {
+                                new[&a].clone()
+                            } else {
+                                None
+                            },
+                        )
+                    })
+                    .collect();
                 break;
             }
             for a in bad {
@@ -1513,7 +1806,14 @@ impl<'m> JumpTables<'m> {
         Ok(result)
     }
 
-    fn round(&mut self, entry: u64, end: u64, brs: &[u64], tables: &Tables, pads: &Pads) -> R<Vec<(u64, Option<BTreeSet<u64>>)>> {
+    fn round(
+        &mut self,
+        entry: u64,
+        end: u64,
+        brs: &[u64],
+        tables: &Tables,
+        pads: &Pads,
+    ) -> R<Vec<(u64, Option<BTreeSet<u64>>)>> {
         let m = self.m;
         let index = self.index.take().unwrap();
         let cfg = Cfg::new(m, &index, entry, end, tables, pads);
@@ -1539,11 +1839,22 @@ impl<'m> JumpTables<'m> {
 
 fn spend(budget: &mut i64, n: i64) -> R<()> {
     *budget -= n;
-    if *budget < 0 { Err(X::Exhausted) } else { Ok(()) }
+    if *budget < 0 {
+        Err(X::Exhausted)
+    } else {
+        Ok(())
+    }
 }
 
 /// Symbolic state at the br that ends path and the br register value. `budget` None = do not spend.
-fn run(m: &Module, path: &[Seg], rn: u32, facts: Option<&Facts>, spend_on: Option<()>, budget: &mut i64) -> R<(State, E)> {
+fn run(
+    m: &Module,
+    path: &[Seg],
+    rn: u32,
+    facts: Option<&Facts>,
+    spend_on: Option<()>,
+    budget: &mut i64,
+) -> R<(State, E)> {
     if spend_on.is_some() {
         let n: u64 = path.iter().map(|&(s, l, _)| (l - s) >> 2).sum();
         spend(budget, n as i64 + 1)?;
@@ -1623,9 +1934,15 @@ fn eval(m: &Module, e: &E, env: Env) -> R<u64> {
         Ex::Shift(op, sz, a, n) => Ok(sh_eval(*op, eval(m, a, env)?, *n, *sz)),
         Ex::Xt(b, signed, sz, x) => {
             let v = eval(m, x, env)? & ((1u64 << b) - 1);
-            Ok(((if *signed { psext(v as i128, *b) } else { v as i128 }) & mask(*sz) as i128) as u64)
+            Ok(((if *signed {
+                psext(v as i128, *b)
+            } else {
+                v as i128
+            }) & mask(*sz) as i128) as u64)
         }
-        Ex::Bfm(sz, signed, immr, imms, x) => bfm_eval(*sz, *signed, *immr, *imms, eval(m, x, env)?),
+        Ex::Bfm(sz, signed, immr, imms, x) => {
+            bfm_eval(*sz, *signed, *immr, *imms, eval(m, x, env)?)
+        }
         Ex::Bfi(sz, immr, imms, d, s) => {
             let dv = eval(m, d, env)?;
             bfi_eval(*sz, *immr, *imms, dv as u128, eval(m, s, env)? as u128)
@@ -1664,14 +1981,26 @@ fn flags_of(m: &Module, f: &E, env: Env) -> R<Vec<Option<Nzcv>>> {
                     fixed = true;
                 }
             }
-            let mut out = if fixed { vec![Some(imm_nzcv(*imm))] } else { vec![] };
+            let mut out = if fixed {
+                vec![Some(imm_nzcv(*imm))]
+            } else {
+                vec![]
+            };
             if compare {
-                let g = mk(Ex::Bin(if *add { Op::Add } else { Op::Sub }, *sz, a.clone(), b.clone()));
+                let g = mk(Ex::Bin(
+                    if *add { Op::Add } else { Op::Sub },
+                    *sz,
+                    a.clone(),
+                    b.clone(),
+                ));
                 out.extend(flags_of(m, &g, env)?);
             }
             Ok(out)
         }
-        Ex::Logic(sz, r) => catch_unknown(eval(m, r, env).map(|x| vec![Some(nzcv(None, *sz, x, 0))]), vec![None]),
+        Ex::Logic(sz, r) => catch_unknown(
+            eval(m, r, env).map(|x| vec![Some(nzcv(None, *sz, x, 0))]),
+            vec![None],
+        ),
         Ex::Bin(op, sz, a, b) => {
             let r = (|| {
                 let x = eval(m, a, env)?;
@@ -1688,7 +2017,8 @@ fn violated(m: &Module, rec: &Cond, env: Env) -> R<bool> {
     let r = (|| match rec {
         Cond::Flags(f, cond, h) => {
             let opts = flags_of(m, f, env)?;
-            Ok(opts.iter().all(|o| o.is_some()) && opts.iter().all(|o| holds(*cond, o.unwrap()) != *h))
+            Ok(opts.iter().all(|o| o.is_some())
+                && opts.iter().all(|o| holds(*cond, o.unwrap()) != *h))
         }
         Cond::Zero(sz, x, h) => Ok(((eval(m, x, env)? & mask(*sz)) == 0) != *h),
         Cond::Bit(x, bit, h) => Ok(((eval(m, x, env)? >> bit) & 1 != 0) != *h),
@@ -1734,7 +2064,12 @@ fn solve(m: &Module, t: &E, st: &State, masks: bool, budget: &mut i64) -> R<Opti
     }
     let mut cands = bounds(st);
     if masks {
-        let limit = cands.iter().filter(|c| c.1.len() > 1).map(|c| c.1.len()).min().unwrap_or(MAX_COUNT);
+        let limit = cands
+            .iter()
+            .filter(|c| c.1.len() > 1)
+            .map(|c| c.1.len())
+            .min()
+            .unwrap_or(MAX_COUNT);
         let mut subs = vec![];
         indices(t, &mut subs);
         for e in subs {
@@ -1755,7 +2090,11 @@ fn solve(m: &Module, t: &E, st: &State, masks: bool, budget: &mut i64) -> R<Opti
     }
     let mut found: Option<Option<BTreeSet<u64>>> = None;
     for k in 1..=3 {
-        let list = if k == 1 { &uniq[..] } else { &uniq[..uniq.len().min(MAX_CANDS)] };
+        let list = if k == 1 {
+            &uniq[..]
+        } else {
+            &uniq[..uniq.len().min(MAX_CANDS)]
+        };
         let done = combinations(list.len(), k, |combo| {
             let mut size: u128 = 1;
             for &i in combo {
@@ -1824,7 +2163,13 @@ fn solve(m: &Module, t: &E, st: &State, masks: bool, budget: &mut i64) -> R<Opti
 }
 
 /// Targets of the table jump at br_pc over every path into its dispatch block, or None.
-fn explore(m: &Module, cfg: &Cfg, facts: Option<&HashMap<u64, Facts>>, br_pc: u64, budget: &mut i64) -> R<Option<BTreeSet<u64>>> {
+fn explore(
+    m: &Module,
+    cfg: &Cfg,
+    facts: Option<&HashMap<u64, Facts>>,
+    br_pc: u64,
+    budget: &mut i64,
+) -> R<Option<BTreeSet<u64>>> {
     let rn = bits(m.word(br_pc), 5, 5);
     let mut paths = MAX_PATHS;
 
@@ -1847,7 +2192,11 @@ fn explore(m: &Module, cfg: &Cfg, facts: Option<&HashMap<u64, Facts>>, br_pc: u6
         if let Some(r) = solve(m, &t, &st, false, budget)? {
             return Ok(Some(r));
         }
-        let preds = if depth < MAX_DEPTH { cfg.path_preds(path[0].0) } else { None };
+        let preds = if depth < MAX_DEPTH {
+            cfg.path_preds(path[0].0)
+        } else {
+            None
+        };
         if let Some(preds) = preds {
             let mut out = BTreeSet::new();
             let mut broke = false;
@@ -1869,7 +2218,16 @@ fn explore(m: &Module, cfg: &Cfg, facts: Option<&HashMap<u64, Facts>>, br_pc: u6
         solve(m, &t, &st, true, budget)
     }
 
-    let out = go(m, cfg, facts, rn, vec![(cfg.block(br_pc), br_pc, None)], 0, &mut paths, budget)?;
+    let out = go(
+        m,
+        cfg,
+        facts,
+        rn,
+        vec![(cfg.block(br_pc), br_pc, None)],
+        0,
+        &mut paths,
+        budget,
+    )?;
     match out {
         Some(o) if !o.is_empty() && !o.iter().any(|&a| a % 4 != 0 || !m.in_text(a)) => Ok(Some(o)),
         _ => Ok(None),
@@ -1925,7 +2283,10 @@ fn facts_fix(m: &Module, cfg: &Cfg, budget: &mut i64) -> R<Option<HashMap<u64, F
             while a < stop {
                 let w = m.word(a);
                 if is_call(w) {
-                    let cf: Facts = facts_of(&st).into_iter().filter(|(r, _)| (19..30).contains(r)).collect();
+                    let cf: Facts = facts_of(&st)
+                        .into_iter()
+                        .filter(|(r, _)| (19..30).contains(r))
+                        .collect();
                     match call_ix.get(&a) {
                         Some(&i) => {
                             if calls[i].1 != cf {
@@ -1999,9 +2360,15 @@ mod tests {
         assert_eq!(binop(Op::Sub, 32, &c64(1), &c64(2)), c64(M32 as i128));
         assert_eq!(c(-1, 32).cval(), Some(M32));
         // uxtw via ubfm #0, #31
-        assert_eq!(bfm(64, false, 0, 31, &r).unwrap(), mk(Ex::Zx(mk(Ex::Lo(r.clone())))));
+        assert_eq!(
+            bfm(64, false, 0, 31, &r).unwrap(),
+            mk(Ex::Zx(mk(Ex::Lo(r.clone()))))
+        );
         // lsl #2 as ubfm #62, #61
-        assert_eq!(bfm(64, false, 62, 61, &r).unwrap(), mk(Ex::Shift(Sh::Lsl, 64, r.clone(), 2)));
+        assert_eq!(
+            bfm(64, false, 62, 61, &r).unwrap(),
+            mk(Ex::Shift(Sh::Lsl, 64, r.clone(), 2))
+        );
     }
 
     #[test]
@@ -2035,6 +2402,16 @@ mod tests {
             Ok(false)
         })
         .unwrap();
-        assert_eq!(v, vec![vec![0, 1], vec![0, 2], vec![0, 3], vec![1, 2], vec![1, 3], vec![2, 3]]);
+        assert_eq!(
+            v,
+            vec![
+                vec![0, 1],
+                vec![0, 2],
+                vec![0, 3],
+                vec![1, 2],
+                vec![1, 3],
+                vec![2, 3]
+            ]
+        );
     }
 }

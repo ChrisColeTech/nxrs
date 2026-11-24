@@ -36,22 +36,47 @@ pub struct Insn {
 
 impl Insn {
     pub fn op(code: impl Into<String>) -> Insn {
-        Insn { kind: Kind::Op, code: code.into(), target: 0, target_reg: String::new(), cond: String::new() }
+        Insn {
+            kind: Kind::Op,
+            code: code.into(),
+            target: 0,
+            target_reg: String::new(),
+            cond: String::new(),
+        }
     }
     pub fn trap(code: impl Into<String>) -> Insn {
-        Insn { kind: Kind::Trap, ..Insn::op(code) }
+        Insn {
+            kind: Kind::Trap,
+            ..Insn::op(code)
+        }
     }
     fn branch(kind: Kind, target: u64) -> Insn {
-        Insn { kind, target, ..Insn::op("") }
+        Insn {
+            kind,
+            target,
+            ..Insn::op("")
+        }
     }
     fn bcond(target: u64, cond: String) -> Insn {
-        Insn { kind: Kind::Bcond, target, cond, ..Insn::op("") }
+        Insn {
+            kind: Kind::Bcond,
+            target,
+            cond,
+            ..Insn::op("")
+        }
     }
     fn reg_branch(kind: Kind, reg: String) -> Insn {
-        Insn { kind, target_reg: reg, ..Insn::op("") }
+        Insn {
+            kind,
+            target_reg: reg,
+            ..Insn::op("")
+        }
     }
     fn ret() -> Insn {
-        Insn { kind: Kind::Ret, ..Insn::op("") }
+        Insn {
+            kind: Kind::Ret,
+            ..Insn::op("")
+        }
     }
 }
 
@@ -137,10 +162,19 @@ impl Lifter {
                 let imm = (bits(w, 10, 12) as u64) << if sh != 0 { 12 } else { 0 };
                 let a = reg(sf, rn, true);
                 if s != 0 {
-                    let f = format!("{}{}", if opc != 0 { "subs" } else { "adds" }, if sf != 0 { "64" } else { "32" });
+                    let f = format!(
+                        "{}{}",
+                        if opc != 0 { "subs" } else { "adds" },
+                        if sf != 0 { "64" } else { "32" }
+                    );
                     return op_(set_reg(sf, rd, &format!("{f}(c, {a}, {})", hx(imm)), false));
                 }
-                op_(set_reg(sf, rd, &format!("{a} {} {}", if opc != 0 { "-" } else { "+" }, hx(imm)), true))
+                op_(set_reg(
+                    sf,
+                    rd,
+                    &format!("{a} {} {}", if opc != 0 { "-" } else { "+" }, hx(imm)),
+                    true,
+                ))
             }
             4 => {
                 let (opc, n) = (bits(w, 29, 2), bits(w, 22, 1));
@@ -154,7 +188,12 @@ impl Lifter {
                     0 => op_(set_reg(sf, rd, &format!("{a} & {}", hx(imm)), true)),
                     1 => op_(set_reg(sf, rd, &format!("{a} | {}", hx(imm)), true)),
                     2 => op_(set_reg(sf, rd, &format!("{a} ^ {}", hx(imm)), true)),
-                    _ => op_(set_reg(sf, rd, &format!("logic{size}(c, {a} & {})", hx(imm)), false)),
+                    _ => op_(set_reg(
+                        sf,
+                        rd,
+                        &format!("logic{size}(c, {a} & {})", hx(imm)),
+                        false,
+                    )),
                 }
             }
             5 => {
@@ -164,11 +203,21 @@ impl Lifter {
                 }
                 let imm = (bits(w, 5, 16) as u64) << (hw * 16);
                 match opc {
-                    0 => op_(set_reg(sf, rd, &hx(!imm & ones(if sf != 0 { 64 } else { 32 })), false)),
+                    0 => op_(set_reg(
+                        sf,
+                        rd,
+                        &hx(!imm & ones(if sf != 0 { 64 } else { 32 })),
+                        false,
+                    )),
                     2 => op_(set_reg(sf, rd, &hx(imm), false)),
                     3 => {
                         let mask = !(0xFFFFu64 << (hw * 16));
-                        op_(set_reg(sf, rd, &format!("({} & {}) | {}", x(rd), hx(mask), hx(imm)), false))
+                        op_(set_reg(
+                            sf,
+                            rd,
+                            &format!("({} & {}) | {}", x(rd), hx(mask), hx(imm)),
+                            false,
+                        ))
                     }
                     _ => unsup("movw opc"),
                 }
@@ -182,25 +231,46 @@ impl Lifter {
                 }
                 let (wmask, tmask) = decode_bit_masks(n, imms, immr, size, false)?;
                 let src = reg(sf, rn, false);
-                let rot = if immr != 0 { format!("ROR{size}({src}, {immr})") } else { src.clone() };
+                let rot = if immr != 0 {
+                    format!("ROR{size}({src}, {immr})")
+                } else {
+                    src.clone()
+                };
                 match opc {
-                    2 => op_(set_reg(sf, rd, &format!("{rot} & {}", hx(wmask & tmask)), false)),
+                    2 => op_(set_reg(
+                        sf,
+                        rd,
+                        &format!("{rot} & {}", hx(wmask & tmask)),
+                        false,
+                    )),
                     0 => {
                         let top = format!("(uint{size}_t)(-(int{size}_t)(({src} >> {imms}) & 1))");
                         op_(set_reg(
                             sf,
                             rd,
-                            &format!("({top} & {}) | ({rot} & {})", hx(!tmask & ones(size)), hx(wmask & tmask)),
+                            &format!(
+                                "({top} & {}) | ({rot} & {})",
+                                hx(!tmask & ones(size)),
+                                hx(wmask & tmask)
+                            ),
                             false,
                         ))
                     }
                     1 => {
                         let dst = reg(sf, rd, false);
-                        let bot = format!("(({dst} & {}) | ({rot} & {}))", hx(!wmask & ones(size)), hx(wmask));
+                        let bot = format!(
+                            "(({dst} & {}) | ({rot} & {}))",
+                            hx(!wmask & ones(size)),
+                            hx(wmask)
+                        );
                         op_(set_reg(
                             sf,
                             rd,
-                            &format!("({dst} & {}) | ({bot} & {})", hx(!tmask & ones(size)), hx(tmask)),
+                            &format!(
+                                "({dst} & {}) | ({bot} & {})",
+                                hx(!tmask & ones(size)),
+                                hx(tmask)
+                            ),
                             false,
                         ))
                     }
@@ -216,7 +286,12 @@ impl Lifter {
                 op_(set_reg(
                     sf,
                     rd,
-                    &format!("({} >> {lsb}) | ((uint{size}_t){} << {})", reg(sf, rm, false), reg(sf, rn, false), size - lsb),
+                    &format!(
+                        "({} >> {lsb}) | ((uint{size}_t){} << {})",
+                        reg(sf, rm, false),
+                        reg(sf, rn, false),
+                        size - lsb
+                    ),
                     false,
                 ))
             }
@@ -229,7 +304,14 @@ impl Lifter {
     fn branch_sys(&self, w: u32, pc: u64) -> LResult<Insn> {
         if bits(w, 26, 5) == 0b00101 {
             let t = pc_rel(pc, sext(bits(w, 0, 26) as u64, 26) * 4);
-            return Ok(Insn::branch(if bits(w, 31, 1) != 0 { Kind::Bl } else { Kind::B }, t));
+            return Ok(Insn::branch(
+                if bits(w, 31, 1) != 0 {
+                    Kind::Bl
+                } else {
+                    Kind::B
+                },
+                t,
+            ));
         }
         if bits(w, 25, 7) == 0b0101010 && bits(w, 4, 1) == 0 {
             let t = pc_rel(pc, sext(bits(w, 5, 19) as u64, 19) * 4);
@@ -237,18 +319,35 @@ impl Lifter {
             if cond >= 14 {
                 return Ok(Insn::branch(Kind::B, t));
             }
-            return Ok(Insn::bcond(t, format!("COND_{}(c)", COND_NAMES[cond as usize].to_uppercase())));
+            return Ok(Insn::bcond(
+                t,
+                format!("COND_{}(c)", COND_NAMES[cond as usize].to_uppercase()),
+            ));
         }
         if bits(w, 25, 6) == 0b011010 {
             let (sf, nz, rt) = (bits(w, 31, 1), bits(w, 24, 1), bits(w, 0, 5));
             let t = pc_rel(pc, sext(bits(w, 5, 19) as u64, 19) * 4);
-            return Ok(Insn::bcond(t, format!("{} {} 0", reg(sf, rt, false), if nz != 0 { "!=" } else { "==" })));
+            return Ok(Insn::bcond(
+                t,
+                format!(
+                    "{} {} 0",
+                    reg(sf, rt, false),
+                    if nz != 0 { "!=" } else { "==" }
+                ),
+            ));
         }
         if bits(w, 25, 6) == 0b011011 {
             let b = (bits(w, 31, 1) << 5) | bits(w, 19, 5);
             let (nz, rt) = (bits(w, 24, 1), bits(w, 0, 5));
             let t = pc_rel(pc, sext(bits(w, 5, 14) as u64, 14) * 4);
-            return Ok(Insn::bcond(t, format!("(({} >> {b}) & 1) {} 0", x(rt), if nz != 0 { "!=" } else { "==" })));
+            return Ok(Insn::bcond(
+                t,
+                format!(
+                    "(({} >> {b}) & 1) {} 0",
+                    x(rt),
+                    if nz != 0 { "!=" } else { "==" }
+                ),
+            ));
         }
         if bits(w, 25, 7) == 0b1101011 {
             let (opc, rn) = (bits(w, 21, 4), bits(w, 5, 5));
@@ -288,8 +387,14 @@ impl Lifter {
 
     fn system(&self, w: u32) -> LResult<Insn> {
         let l = bits(w, 21, 1);
-        let (op0, op1, crn, crm, op2, rt) =
-            (bits(w, 19, 2), bits(w, 16, 3), bits(w, 12, 4), bits(w, 8, 4), bits(w, 5, 3), bits(w, 0, 5));
+        let (op0, op1, crn, crm, op2, rt) = (
+            bits(w, 19, 2),
+            bits(w, 16, 3),
+            bits(w, 12, 4),
+            bits(w, 8, 4),
+            bits(w, 5, 3),
+            bits(w, 0, 5),
+        );
         if op0 == 0 && l == 0 {
             if crn == 2 && op1 == 3 && rt == 31 {
                 return Ok(Insn::op("/* hint */"));
@@ -304,7 +409,10 @@ impl Lifter {
         }
         if op0 == 1 {
             if l == 0 && op1 == 3 && crn == 7 && crm == 4 && op2 == 1 {
-                return Ok(Insn::op(format!("memset((void*)(uintptr_t)({} & ~63ull), 0, 64);", x(rt))));
+                return Ok(Insn::op(format!(
+                    "memset((void*)(uintptr_t)({} & ~63ull), 0, 64);",
+                    x(rt)
+                )));
             }
             return Ok(Insn::op("/* cache maintenance */"));
         }
@@ -351,7 +459,12 @@ impl Lifter {
             return Ok(Insn::op(match opc {
                 0 => set_reg(0, rt, &format!("LD32({})", hx(addr)), false),
                 1 => set_reg(1, rt, &format!("LD64({})", hx(addr)), false),
-                2 => set_reg(1, rt, &format!("(int64_t)(int32_t)LD32({})", hx(addr)), false),
+                2 => set_reg(
+                    1,
+                    rt,
+                    &format!("(int64_t)(int32_t)LD32({})", hx(addr)),
+                    false,
+                ),
                 _ => "/* prfm */".into(),
             }));
         }
@@ -373,8 +486,16 @@ impl Lifter {
             return Insn::op("/* stg */");
         }
         let off = sext(bits(w, 12, 9) as u64, 9) << 4;
-        let dst = if rn == 31 { "c->sp".to_string() } else { format!("c->x[{rn}]") };
-        Insn::op(format!("{dst} = {} + {}; /* stg */", xs(rn), hx(off as u64)))
+        let dst = if rn == 31 {
+            "c->sp".to_string()
+        } else {
+            format!("c->x[{rn}]")
+        };
+        Insn::op(format!(
+            "{dst} = {} + {}; /* stg */",
+            xs(rn),
+            hx(off as u64)
+        ))
     }
 
     fn ldst_excl(&self, w: u32) -> LResult<Insn> {
@@ -401,7 +522,12 @@ impl Lifter {
         }
         if o2 == 0 {
             if l != 0 {
-                return Ok(Insn::op(set_reg(1, rt, &format!("ldx{nbits}(c, {addr})"), false)));
+                return Ok(Insn::op(set_reg(
+                    1,
+                    rt,
+                    &format!("ldx{nbits}(c, {addr})"),
+                    false,
+                )));
             }
             return Ok(Insn::op(format!(
                 "{{ uint32_t st = stx{nbits}(c, {addr}, {}); {} }}",
@@ -410,7 +536,12 @@ impl Lifter {
             )));
         }
         if l != 0 {
-            return Ok(Insn::op(set_reg(1, rt, &format!("lda{nbits}({addr})"), false)));
+            return Ok(Insn::op(set_reg(
+                1,
+                rt,
+                &format!("lda{nbits}({addr})"),
+                false,
+            )));
         }
         Ok(Insn::op(format!("stl{nbits}({addr}, {});", x(rt))))
     }
@@ -433,9 +564,16 @@ impl Lifter {
         let st = if sz != 0 {
             format!("stxp128(c, {addr}, {}, {})", x(rt), x(rt2))
         } else {
-            format!("stx64(c, {addr}, (uint64_t){} | ((uint64_t){} << 32))", wr(rt), wr(rt2))
+            format!(
+                "stx64(c, {addr}, (uint64_t){} | ((uint64_t){} << 32))",
+                wr(rt),
+                wr(rt2)
+            )
         };
-        Insn::op(format!("{{ uint32_t st = {st}; {} }}", set_reg(0, rs, "st", false)))
+        Insn::op(format!(
+            "{{ uint32_t st = {st}; {} }}",
+            set_reg(0, rs, "st", false)
+        ))
     }
 
     fn cas(&self, size: u32, rs: u32, rt: u32, addr: &str) -> Insn {
@@ -486,11 +624,21 @@ impl Lifter {
         let t = format!("uint{nbits}_t");
         let p = format!("({t} *)(uintptr_t)({})", xs(rn));
         let v = format!("({t}){}", x(rs));
-        let order = ["__ATOMIC_RELAXED", "__ATOMIC_RELEASE", "__ATOMIC_ACQUIRE", "__ATOMIC_ACQ_REL"][(a << 1 | r) as usize];
+        let order = [
+            "__ATOMIC_RELAXED",
+            "__ATOMIC_RELEASE",
+            "__ATOMIC_ACQUIRE",
+            "__ATOMIC_ACQ_REL",
+        ][(a << 1 | r) as usize];
         let sf = (size == 3) as u32;
         let expr = if o3 != 0 {
             if opc == 4 && rs == 31 && a != 0 && r == 0 {
-                return Ok(Insn::op(set_reg(sf, rt, &format!("__atomic_load_n({p}, __ATOMIC_ACQUIRE)"), false)));
+                return Ok(Insn::op(set_reg(
+                    sf,
+                    rt,
+                    &format!("__atomic_load_n({p}, __ATOMIC_ACQUIRE)"),
+                    false,
+                )));
             }
             if opc != 0 {
                 return unsup("ldapr");
@@ -513,7 +661,12 @@ impl Lifter {
 
     fn ldst_pair(&self, w: u32) -> LResult<Insn> {
         let (opc, mode, l) = (bits(w, 30, 2), bits(w, 23, 2), bits(w, 22, 1));
-        let (imm7, rt2, rn, rt) = (sext(bits(w, 15, 7) as u64, 7), bits(w, 10, 5), bits(w, 5, 5), bits(w, 0, 5));
+        let (imm7, rt2, rn, rt) = (
+            sext(bits(w, 15, 7) as u64, 7),
+            bits(w, 10, 5),
+            bits(w, 5, 5),
+            bits(w, 0, 5),
+        );
         if opc == 3 {
             return unsup("pair opc 3");
         }
@@ -549,7 +702,11 @@ impl Lifter {
             lines.push(format!("ST32(ea, {}); ST32(ea + 4, {});", wr(rt), wr(rt2)));
         }
         if wb {
-            let dst = if rn == 31 { "c->sp".to_string() } else { format!("c->x[{rn}]") };
+            let dst = if rn == 31 {
+                "c->sp".to_string()
+            } else {
+                format!("c->x[{rn}]")
+            };
             if !post {
                 lines.push(format!("{dst} = ea;"));
             } else if off >= 0 {
@@ -585,10 +742,17 @@ impl Lifter {
                 if !matches!(option, 2 | 3 | 6 | 7) {
                     return unsup("ldst reg option");
                 }
-                ea = format!("{base} + {}", extend_expr(rm, option, if s != 0 { size } else { 0 }));
+                ea = format!(
+                    "{base} + {}",
+                    extend_expr(rm, option, if s != 0 { size } else { 0 })
+                );
             } else {
                 let imm9 = sext(bits(w, 12, 9) as u64, 9);
-                let sign_imm = if imm9 >= 0 { format!("+ {imm9}") } else { format!("- {}", -imm9) };
+                let sign_imm = if imm9 >= 0 {
+                    format!("+ {imm9}")
+                } else {
+                    format!("- {}", -imm9)
+                };
                 match kind {
                     0 | 2 => ea = format!("{base} {sign_imm}"),
                     1 => {
@@ -606,7 +770,10 @@ impl Lifter {
         let mut parts;
         let load;
         if opc == 0 {
-            parts = vec![format!("ST{nbits}(ea, {});", if size == 3 { x(rt) } else { wr(rt) })];
+            parts = vec![format!(
+                "ST{nbits}(ea, {});",
+                if size == 3 { x(rt) } else { wr(rt) }
+            )];
             load = None;
         } else if opc == 1 {
             parts = vec![format!("uint64_t v = LD{nbits}(ea);")];
@@ -616,12 +783,18 @@ impl Lifter {
         } else if size == 2 && opc == 3 {
             return unsup("ldst size2 opc3");
         } else {
-            parts = vec![format!("uint64_t v = (uint64_t)(int64_t)(int{nbits}_t)LD{nbits}(ea);")];
+            parts = vec![format!(
+                "uint64_t v = (uint64_t)(int64_t)(int{nbits}_t)LD{nbits}(ea);"
+            )];
             load = Some(set_reg(if opc == 2 { 1 } else { 0 }, rt, "v", false));
         }
         parts.insert(0, format!("uint64_t ea = {ea};"));
         if let Some(wb) = wb {
-            let dst = if rn == 31 { "c->sp".to_string() } else { format!("c->x[{rn}]") };
+            let dst = if rn == 31 {
+                "c->sp".to_string()
+            } else {
+                format!("c->x[{rn}]")
+            };
             parts.push(format!("{dst} = {wb};"));
         }
         if let Some(l) = load {
@@ -640,7 +813,12 @@ impl Lifter {
         let op_ = |s: String| Ok(Insn::op(s));
         if bits(w, 28, 1) == 0 {
             if bits(w, 24, 4) == 0b1010 {
-                let (opc, sh, n, amt) = (bits(w, 29, 2), bits(w, 22, 2), bits(w, 21, 1), bits(w, 10, 6));
+                let (opc, sh, n, amt) = (
+                    bits(w, 29, 2),
+                    bits(w, 22, 2),
+                    bits(w, 21, 1),
+                    bits(w, 10, 6),
+                );
                 if sf == 0 && amt >= 32 {
                     return unsup("logical shift amount");
                 }
@@ -655,7 +833,12 @@ impl Lifter {
                     _ => format!("{a} & {b}"),
                 };
                 if opc == 3 {
-                    return op_(set_reg(sf, rd, &format!("logic{size}(c, (uint{size}_t)({expr}))"), false));
+                    return op_(set_reg(
+                        sf,
+                        rd,
+                        &format!("logic{size}(c, (uint{size}_t)({expr}))"),
+                        false,
+                    ));
                 }
                 return op_(set_reg(sf, rd, &expr, false));
             }
@@ -677,50 +860,116 @@ impl Lifter {
                     let (option, amt) = (bits(w, 13, 3), bits(w, 10, 3));
                     a = reg(sf, rn, true);
                     let e = extend_expr(rm, option, amt);
-                    b = if sf == 0 { format!("(uint32_t)({e})") } else { e };
+                    b = if sf == 0 {
+                        format!("(uint32_t)({e})")
+                    } else {
+                        e
+                    };
                     sp_ok = s == 0;
                 }
                 if s != 0 {
                     let f = format!("{}{size}", if op != 0 { "subs" } else { "adds" });
-                    return op_(set_reg(sf, rd, &format!("{f}(c, {a}, (uint{size}_t)({b}))"), false));
+                    return op_(set_reg(
+                        sf,
+                        rd,
+                        &format!("{f}(c, {a}, (uint{size}_t)({b}))"),
+                        false,
+                    ));
                 }
-                return op_(set_reg(sf, rd, &format!("{a} {} {b}", if op != 0 { "-" } else { "+" }), sp_ok));
+                return op_(set_reg(
+                    sf,
+                    rd,
+                    &format!("{a} {} {b}", if op != 0 { "-" } else { "+" }),
+                    sp_ok,
+                ));
             }
             return unsup(format!("dp_reg {w:08x}"));
         }
         let op2 = bits(w, 21, 4);
         if bits(w, 24, 4) == 0b1011 {
-            let (op54, op31, o0, ra) = (bits(w, 29, 2), bits(w, 21, 3), bits(w, 15, 1), bits(w, 10, 5));
+            let (op54, op31, o0, ra) = (
+                bits(w, 29, 2),
+                bits(w, 21, 3),
+                bits(w, 15, 1),
+                bits(w, 10, 5),
+            );
             if op54 != 0 {
                 return unsup("dp3 op54");
             }
             let sgn = if o0 != 0 { "-" } else { "+" };
             return match op31 {
-                0 => op_(set_reg(sf, rd, &format!("{} {sgn} {} * {}", r(ra), r(rn), r(rm)), false)),
+                0 => op_(set_reg(
+                    sf,
+                    rd,
+                    &format!("{} {sgn} {} * {}", r(ra), r(rn), r(rm)),
+                    false,
+                )),
                 1 => op_(set_reg(
                     1,
                     rd,
-                    &format!("{} {sgn} (uint64_t)((int64_t)(int32_t){} * (int64_t)(int32_t){})", x(ra), wr(rn), wr(rm)),
+                    &format!(
+                        "{} {sgn} (uint64_t)((int64_t)(int32_t){} * (int64_t)(int32_t){})",
+                        x(ra),
+                        wr(rn),
+                        wr(rm)
+                    ),
                     false,
                 )),
-                5 => op_(set_reg(1, rd, &format!("{} {sgn} (uint64_t){} * (uint64_t){}", x(ra), wr(rn), wr(rm)), false)),
+                5 => op_(set_reg(
+                    1,
+                    rd,
+                    &format!(
+                        "{} {sgn} (uint64_t){} * (uint64_t){}",
+                        x(ra),
+                        wr(rn),
+                        wr(rm)
+                    ),
+                    false,
+                )),
                 2 => op_(set_reg(
                     1,
                     rd,
-                    &format!("(uint64_t)(((__int128)(int64_t){} * (__int128)(int64_t){}) >> 64)", x(rn), x(rm)),
+                    &format!(
+                        "(uint64_t)(((__int128)(int64_t){} * (__int128)(int64_t){}) >> 64)",
+                        x(rn),
+                        x(rm)
+                    ),
                     false,
                 )),
-                6 => op_(set_reg(1, rd, &format!("(uint64_t)(((unsigned __int128){} * {}) >> 64)", x(rn), x(rm)), false)),
+                6 => op_(set_reg(
+                    1,
+                    rd,
+                    &format!(
+                        "(uint64_t)(((unsigned __int128){} * {}) >> 64)",
+                        x(rn),
+                        x(rm)
+                    ),
+                    false,
+                )),
                 _ => unsup("dp3"),
             };
         }
         if op2 == 0 {
             let (op, s) = (bits(w, 30, 1), bits(w, 29, 1));
-            let f = format!("{}{}{size}", if op != 0 { "sbc" } else { "adc" }, if s != 0 { "s" } else { "" });
-            return op_(set_reg(sf, rd, &format!("{f}(c, {}, {})", r(rn), r(rm)), false));
+            let f = format!(
+                "{}{}{size}",
+                if op != 0 { "sbc" } else { "adc" },
+                if s != 0 { "s" } else { "" }
+            );
+            return op_(set_reg(
+                sf,
+                rd,
+                &format!("{f}(c, {}, {})", r(rn), r(rm)),
+                false,
+            ));
         }
         if op2 == 2 {
-            let (op, imm_form, cond, nzcv) = (bits(w, 30, 1), bits(w, 11, 1), bits(w, 12, 4), bits(w, 0, 4));
+            let (op, imm_form, cond, nzcv) = (
+                bits(w, 30, 1),
+                bits(w, 11, 1),
+                bits(w, 12, 4),
+                bits(w, 0, 4),
+            );
             let b = if imm_form != 0 { hx(rm as u64) } else { r(rm) };
             let f = format!("{}{size}", if op != 0 { "subs" } else { "adds" });
             return op_(format!(
@@ -740,7 +989,12 @@ impl Lifter {
                 (1, 1) => format!("-{b}"),
                 _ => return unsup("csel variant"),
             };
-            return op_(set_reg(sf, rd, &format!("({}) ? {} : (uint{size}_t)({alt})", cond_expr(cond), r(rn)), false));
+            return op_(set_reg(
+                sf,
+                rd,
+                &format!("({}) ? {} : (uint{size}_t)({alt})", cond_expr(cond), r(rn)),
+                false,
+            ));
         }
         if op2 == 6 {
             let opcode = bits(w, 10, 6);
@@ -776,7 +1030,11 @@ impl Lifter {
                 return op_(set_reg(
                     1,
                     rd,
-                    &format!("((uint64_t)rt_pacga({}, {}) << 32)", reg(1, rn, false), reg(1, rm, true)),
+                    &format!(
+                        "((uint64_t)rt_pacga({}, {}) << 32)",
+                        reg(1, rn, false),
+                        reg(1, rm, true)
+                    ),
                     false,
                 ));
             }
@@ -807,21 +1065,36 @@ mod tests {
     #[test]
     fn integer() {
         // add x0, x1, #0x10
-        assert_eq!(op(0x91004020, 0x1000), "c->x[0] = (uint64_t)(c->x[1] + 0x10ull);");
+        assert_eq!(
+            op(0x91004020, 0x1000),
+            "c->x[0] = (uint64_t)(c->x[1] + 0x10ull);"
+        );
         // cmp w0, #3 (subs wzr, w0, #3)
-        assert_eq!(op(0x7100_0c1f, 0x1000), "(void)(subs32(c, (uint32_t)c->x[0], 0x3ull));");
+        assert_eq!(
+            op(0x7100_0c1f, 0x1000),
+            "(void)(subs32(c, (uint32_t)c->x[0], 0x3ull));"
+        );
         // mov x29, sp (add x29, sp, #0)
-        assert_eq!(op(0x910003fd, 0x1000), "c->x[29] = (uint64_t)(c->sp + 0x0ull);");
+        assert_eq!(
+            op(0x910003fd, 0x1000),
+            "c->x[29] = (uint64_t)(c->sp + 0x0ull);"
+        );
         // movz w0, #1
         assert_eq!(op(0x52800020, 0x1000), "c->x[0] = (uint32_t)(0x1ull);");
         // adrp x0, #0x1000 at pc 0x7000001234
-        assert_eq!(op(0xb0000000, 0x7000001234), "c->x[0] = (uint64_t)(0x7000002000ull);");
+        assert_eq!(
+            op(0xb0000000, 0x7000001234),
+            "c->x[0] = (uint64_t)(0x7000002000ull);"
+        );
     }
 
     #[test]
     fn load_store() {
         // ldr x0, [x1, #8]
-        assert_eq!(op(0xf9400420, 0), "{ uint64_t ea = c->x[1] + 0x8ull; uint64_t v = LD64(ea); c->x[0] = (uint64_t)(v); }");
+        assert_eq!(
+            op(0xf9400420, 0),
+            "{ uint64_t ea = c->x[1] + 0x8ull; uint64_t v = LD64(ea); c->x[0] = (uint64_t)(v); }"
+        );
         // stp x29, x30, [sp, #-16]!
         assert_eq!(
             op(0xa9bf7bfd, 0),
@@ -842,7 +1115,10 @@ mod tests {
         assert_eq!((i.kind, i.target), (Kind::Bl, 0x1008));
         // b.ne -4
         let i = l.lift(0x54ffffe1, 0x1000).unwrap();
-        assert_eq!((i.kind, i.target, i.cond.as_str()), (Kind::Bcond, 0xffc, "COND_NE(c)"));
+        assert_eq!(
+            (i.kind, i.target, i.cond.as_str()),
+            (Kind::Bcond, 0xffc, "COND_NE(c)")
+        );
         // ret
         assert_eq!(l.lift(0xd65f03c0, 0).unwrap().kind, Kind::Ret);
         // br x16
@@ -856,7 +1132,10 @@ mod tests {
     #[test]
     fn atomics() {
         // ldaxr w8, [x0]
-        assert_eq!(op(0x885ffc08, 0), "c->x[8] = (uint64_t)(ldx32(c, c->x[0]));");
+        assert_eq!(
+            op(0x885ffc08, 0),
+            "c->x[8] = (uint64_t)(ldx32(c, c->x[0]));"
+        );
         // casal x1, x2, [x0]
         assert_eq!(
             op(0xc8e1fc02, 0),
@@ -865,7 +1144,10 @@ mod tests {
         // ldadd w1, w0, [x2]  (LSE, relaxed)
         assert_eq!(op(0xb8210040, 0), "c->x[0] = (uint32_t)(__atomic_fetch_add((uint32_t *)(uintptr_t)(c->x[2]), (uint32_t)c->x[1], __ATOMIC_RELAXED));");
         // dmb ish
-        assert_eq!(op(0xd5033bbf, 0), "__atomic_thread_fence(__ATOMIC_SEQ_CST);");
+        assert_eq!(
+            op(0xd5033bbf, 0),
+            "__atomic_thread_fence(__ATOMIC_SEQ_CST);"
+        );
         // svc #0x1
         assert_eq!(op(0xd4000021, 0x10), "rt_svc(c, 1, 0x10ull);");
     }

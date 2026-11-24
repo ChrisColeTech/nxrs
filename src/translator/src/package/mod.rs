@@ -140,10 +140,17 @@ fn detect(input: &Path) -> Result<Detected> {
     match &blob.read_at(0, 4)?[..] {
         b"PFS0" => Ok(Detected::Nsp),
         m if m == nup::MAGIC => Ok(Detected::Nup),
-        _ if blob.size >= 0x80 && blob.read_at(0x10, 4).is_ok_and(|m| m == b"NRO0") => Ok(Detected::Nro),
+        _ if blob.size >= 0x80 && blob.read_at(0x10, 4).is_ok_and(|m| m == b"NRO0") => {
+            Ok(Detected::Nro)
+        }
         // a card image (XCI), with or without the 0x1000-byte key area in front: its secure partition's NCAs are read
         // in place like an NSP's (container::members)
-        _ if [0x100u64, 0x1100].iter().any(|&at| blob.size >= at + 4 && blob.read_at(at, 4).is_ok_and(|m| m == b"HEAD")) => Ok(Detected::Nsp),
+        _ if [0x100u64, 0x1100]
+            .iter()
+            .any(|&at| blob.size >= at + 4 && blob.read_at(at, 4).is_ok_and(|m| m == b"HEAD")) =>
+        {
+            Ok(Detected::Nsp)
+        }
         _ => Err(PackageError::Unrecognised(input.to_path_buf())),
     }
 }
@@ -181,8 +188,14 @@ pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
             let exefs = folder::exefs(&path)?;
             // the RomFS is optional (a game without data, homebrew): Turbo builds such a folder with an empty one
             let (romfs, marker) = match folder::find_romfs(&path) {
-                Some(d) => (RomFs::from_folder(&d)?, (marker::DIR, format!("{}\n", d.display()))),
-                None => (RomFs::empty(format!("{} (no romfs/)", path.display())), (marker::NONE, String::new())),
+                Some(d) => (
+                    RomFs::from_folder(&d)?,
+                    (marker::DIR, format!("{}\n", d.display())),
+                ),
+                None => (
+                    RomFs::empty(format!("{} (no romfs/)", path.display())),
+                    (marker::NONE, String::new()),
+                ),
             };
             Ok(Game {
                 kind: SourceKind::Folder,
@@ -199,7 +212,10 @@ pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
         Detected::Nro => {
             // homebrew: the NRO is `main`; its asset section (after the image) may hold an icon, a control.nacp and
             // a RomFS, which is read in place (a byte range of the file, as an NSP's plaintext RomFS)
-            let d = std::fs::read(&path).map_err(|source| PackageError::Io { path: path.clone(), source })?;
+            let d = std::fs::read(&path).map_err(|source| PackageError::Io {
+                path: path.clone(),
+                source,
+            })?;
             let size = u32::from_le_bytes(d[0x18..0x1c].try_into().unwrap()) as usize;
             if size < 0x80 || size > d.len() {
                 return fmt(format!("{}: the NRO is cut short", path.display()));
@@ -210,7 +226,10 @@ pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
                     return None;
                 }
                 let at = 8 + which * 0x10;
-                let (o, n) = (u64::from_le_bytes(a[at..at + 8].try_into().unwrap()), u64::from_le_bytes(a[at + 8..at + 16].try_into().unwrap()));
+                let (o, n) = (
+                    u64::from_le_bytes(a[at..at + 8].try_into().unwrap()),
+                    u64::from_le_bytes(a[at + 8..at + 16].try_into().unwrap()),
+                );
                 (n > 0 && o + n <= a.len() as u64).then_some((size as u64 + o, n))
             };
             let mut control = BTreeMap::new();
@@ -222,17 +241,35 @@ pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
             let (romfs, marker) = match asset(2) {
                 Some((o, n)) => {
                     let blob = Arc::new(io::Blob::open(&path)?);
-                    let image = storage::FileRange { blob, offset: o, size: n };
-                    (RomFs::from_image(Arc::new(image), format!("NRO {}", path.display()))?, (marker::NSP, format!("SWRNSP1\n{}\n{o:x}\n{n:x}\n", path.display())))
+                    let image = storage::FileRange {
+                        blob,
+                        offset: o,
+                        size: n,
+                    };
+                    (
+                        RomFs::from_image(Arc::new(image), format!("NRO {}", path.display()))?,
+                        (
+                            marker::NSP,
+                            format!("SWRNSP1\n{}\n{o:x}\n{n:x}\n", path.display()),
+                        ),
+                    )
                 }
-                None => (RomFs::empty(format!("NRO {}", path.display())), (marker::NONE, String::new())),
+                None => (
+                    RomFs::empty(format!("NRO {}", path.display())),
+                    (marker::NONE, String::new()),
+                ),
             };
             let mut files = BTreeMap::new();
             files.insert("main".to_string(), d[..size].to_vec());
             Ok(Game {
                 kind: SourceKind::Nro,
                 path,
-                exefs: ExeFs { kind: SourceKind::Nro, title_id: None, version: None, files },
+                exefs: ExeFs {
+                    kind: SourceKind::Nro,
+                    title_id: None,
+                    version: None,
+                    files,
+                },
                 romfs: Arc::new(romfs),
                 display_version: None,
                 control,
@@ -269,7 +306,12 @@ pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
             };
             Ok(Game {
                 kind: SourceKind::Nsp,
-                exefs: ExeFs { kind: SourceKind::Nsp, title_id: Some(pkg.title_id), version: Some(pkg.version), files: pkg.exefs()? },
+                exefs: ExeFs {
+                    kind: SourceKind::Nsp,
+                    title_id: Some(pkg.title_id),
+                    version: Some(pkg.version),
+                    files: pkg.exefs()?,
+                },
                 romfs: Arc::new(romfs),
                 display_version: pkg.display_version.clone(),
                 control: pkg.control.clone(),
@@ -286,11 +328,18 @@ pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
 /// colon, not `.` / `..`, no trailing dot or space (Windows drops them), and not a reserved device name (CON, PRN,
 /// AUX, NUL, COM1-9, LPT1-9, with or without an extension).
 pub fn safe_exefs_name(name: &str) -> bool {
-    if name.is_empty() || name.contains(['/', '\\', ':']) || name == "." || name == ".." || name != name.trim_end_matches([' ', '.']) {
+    if name.is_empty()
+        || name.contains(['/', '\\', ':'])
+        || name == "."
+        || name == ".."
+        || name != name.trim_end_matches([' ', '.'])
+    {
         return false;
     }
     let base = name.split('.').next().unwrap_or("").to_ascii_uppercase();
-    let numbered = |p: &str| base.len() == 4 && base.starts_with(p) && matches!(base.as_bytes()[3], b'1'..=b'9');
+    let numbered = |p: &str| {
+        base.len() == 4 && base.starts_with(p) && matches!(base.as_bytes()[3], b'1'..=b'9')
+    };
     !(matches!(base.as_str(), "CON" | "PRN" | "AUX" | "NUL") || numbered("COM") || numbered("LPT"))
 }
 
@@ -301,17 +350,24 @@ impl Game {
     pub fn write_data(&self, datadir: &Path, say: &dyn Fn(&str)) -> Result<()> {
         let io_err = |p: &Path| {
             let p = p.to_path_buf();
-            move |source| PackageError::Io { path: p.clone(), source }
+            move |source| PackageError::Io {
+                path: p.clone(),
+                source,
+            }
         };
         let ex = datadir.join("exefs");
         std::fs::create_dir_all(&ex).map_err(io_err(&ex))?;
         for (name, data) in &self.exefs.files {
             if !safe_exefs_name(name) {
-                return fmt(format!("unsafe ExeFS name in {}: {name:?}", self.path.display()));
+                return fmt(format!(
+                    "unsafe ExeFS name in {}: {name:?}",
+                    self.path.display()
+                ));
             }
             let dst = ex.join(name);
             // ZBIC segments unpacked: the runtime's loader reads LZ4 only
-            let data = crate::loader::nso::for_runtime(data).or_else(|e| fmt(format!("{}: exefs/{name}: {e}", self.path.display())))?;
+            let data = crate::loader::nso::for_runtime(data)
+                .or_else(|e| fmt(format!("{}: exefs/{name}: {e}", self.path.display())))?;
             if std::fs::read(&dst).ok().as_deref() != Some(&data[..]) {
                 std::fs::write(&dst, &data[..]).map_err(io_err(&dst))?;
             }
@@ -335,9 +391,19 @@ impl Game {
             let m = datadir.join(self.marker.0);
             std::fs::write(&m, &self.marker.1).map_err(io_err(&m))?;
         }
-        let icons: Vec<&String> = self.control.keys().filter(|n| n.starts_with("icon_")).collect();
-        let icon = self.control.get("icon_AmericanEnglish.dat").or_else(|| icons.first().map(|n| &self.control[*n]));
-        for (name, blob) in [("control.nacp", self.control.get("control.nacp")), ("icon_AmericanEnglish.dat", icon)] {
+        let icons: Vec<&String> = self
+            .control
+            .keys()
+            .filter(|n| n.starts_with("icon_"))
+            .collect();
+        let icon = self
+            .control
+            .get("icon_AmericanEnglish.dat")
+            .or_else(|| icons.first().map(|n| &self.control[*n]));
+        for (name, blob) in [
+            ("control.nacp", self.control.get("control.nacp")),
+            ("icon_AmericanEnglish.dat", icon),
+        ] {
             if let Some(b) = blob {
                 let p = datadir.join(name);
                 std::fs::write(&p, b).map_err(io_err(&p))?;
@@ -347,8 +413,15 @@ impl Game {
         let html = datadir.join("html-document");
         let _ = std::fs::remove_dir_all(&html);
         let mut docs = 0;
-        for (name, b) in self.control.iter().filter(|(k, _)| k.starts_with("html-document/")) {
-            if name.split('/').any(|c| c == ".." || c.is_empty()) || name.contains(':') || name.contains('\\') {
+        for (name, b) in self
+            .control
+            .iter()
+            .filter(|(k, _)| k.starts_with("html-document/"))
+        {
+            if name.split('/').any(|c| c == ".." || c.is_empty())
+                || name.contains(':')
+                || name.contains('\\')
+            {
                 continue;
             }
             let p = datadir.join(name);
@@ -359,14 +432,23 @@ impl Game {
             docs += 1;
         }
         if docs > 0 {
-            say(&format!("Manual: {docs} offline HTML files staged in html-document/"));
+            say(&format!(
+                "Manual: {docs} offline HTML files staged in html-document/"
+            ));
         }
         let v = self.exefs.version.unwrap_or(0);
         let display = self.display_version.clone().unwrap_or_default();
         match &self.applied {
-            Applied::Separate(u) => say(&format!("Package: game with its update {display} (v{v}), applied in place from {}", u.display())),
-            Applied::Embedded => say(&format!("Package: game with its update {display} (v{v}), applied in place")),
-            Applied::LeftOut => say(&format!("Package: the game without the update this package holds: {display} (v{v})")),
+            Applied::Separate(u) => say(&format!(
+                "Package: game with its update {display} (v{v}), applied in place from {}",
+                u.display()
+            )),
+            Applied::Embedded => say(&format!(
+                "Package: game with its update {display} (v{v}), applied in place"
+            )),
+            Applied::LeftOut => say(&format!(
+                "Package: the game without the update this package holds: {display} (v{v})"
+            )),
             Applied::None => {}
         }
         if self.marker.0 == marker::NONE {
@@ -387,7 +469,10 @@ impl Game {
 
 /// Read the ExeFS of a folder / NSP / NUP (the game with the update its own package holds).
 pub fn open_exefs(input: &Path, keys: Option<&Path>) -> Result<ExeFs> {
-    let opts = OpenOptions { keys: keys.map(Path::to_path_buf), update: UpdateChoice::Embedded };
+    let opts = OpenOptions {
+        keys: keys.map(Path::to_path_buf),
+        update: UpdateChoice::Embedded,
+    };
     Ok(open_game(input, &opts)?.exefs)
 }
 
@@ -414,17 +499,33 @@ mod tests {
         let mut nso = vec![0u8; 0x100];
         nso[..4].copy_from_slice(b"NSO0");
         nso[0x40..0x48].copy_from_slice(&[0xde, 0xad, 0xbe, 0xef, 0, 1, 0, 0]);
-        assert_eq!(nso_build_id(&nso).unwrap(), vec![0xde, 0xad, 0xbe, 0xef, 0, 1]);
+        assert_eq!(
+            nso_build_id(&nso).unwrap(),
+            vec![0xde, 0xad, 0xbe, 0xef, 0, 1]
+        );
         assert!(nso_build_id(b"NSO0").is_none());
     }
 
     /// switchrecomp.py:440: names Windows cannot hold as files are refused, ordinary module names pass.
     #[test]
     fn reserved_windows_names_refused() {
-        for ok in ["main", "rtld", "sdk", "subsdk0", "main.npdm", "COM10", "console", "nul0", "LPT0"] {
+        for ok in [
+            "main",
+            "rtld",
+            "sdk",
+            "subsdk0",
+            "main.npdm",
+            "COM10",
+            "console",
+            "nul0",
+            "LPT0",
+        ] {
             assert!(safe_exefs_name(ok), "{ok}");
         }
-        for bad in ["", ".", "..", "a/b", "a\\b", "c:x", "CON", "con", "Nul.txt", "aux.npdm", "PRN", "COM1", "lpt9", "main.", "main "] {
+        for bad in [
+            "", ".", "..", "a/b", "a\\b", "c:x", "CON", "con", "Nul.txt", "aux.npdm", "PRN",
+            "COM1", "lpt9", "main.", "main ",
+        ] {
             assert!(!safe_exefs_name(bad), "{bad:?}");
         }
     }

@@ -20,7 +20,11 @@ use translator::aot::{generate, GenOptions};
 use translator::package::{self, dlc, OpenOptions, RomFs, UpdateChoice};
 
 #[derive(Parser)]
-#[command(name = "nxrs", version, about = "RecompLauncher engine: package input and ARM64 -> C translation")]
+#[command(
+    name = "nxrs",
+    version,
+    about = "RecompLauncher engine: package input and ARM64 -> C translation"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -46,7 +50,10 @@ impl Pkg {
             (None, true) => UpdateChoice::None,
             _ => UpdateChoice::Embedded,
         };
-        OpenOptions { keys: self.keys.clone(), update }
+        OpenOptions {
+            keys: self.keys.clone(),
+            update,
+        }
     }
 }
 
@@ -206,20 +213,33 @@ fn hex(b: &[u8]) -> String {
 }
 
 fn open(input: &Path, pkg: &Pkg) -> Result<package::Game> {
-    let game = package::open_game(input, &pkg.options()).with_context(|| format!("opening {}", input.display()))?;
+    let game = package::open_game(input, &pkg.options())
+        .with_context(|| format!("opening {}", input.display()))?;
     let fs = &game.exefs;
-    let tid = fs.title_id.map_or("unknown".into(), |t| format!("{t:016X}"));
+    let tid = fs
+        .title_id
+        .map_or("unknown".into(), |t| format!("{t:016X}"));
     let ver = fs.version.map_or("unknown".into(), |v| v.to_string());
-    println!("Analyzing {} ({:?}, title {tid}, version {ver}, update {:?})", input.display(), fs.kind, game.applied);
+    println!(
+        "Analyzing {} ({:?}, title {tid}, version {ver}, update {:?})",
+        input.display(),
+        fs.kind,
+        game.applied
+    );
     for (name, data) in &fs.files {
-        let bid = package::nso_build_id(data).map(|b| format!("  build id {}", hex(&b))).unwrap_or_default();
+        let bid = package::nso_build_id(data)
+            .map(|b| format!("  build id {}", hex(&b)))
+            .unwrap_or_default();
         println!("  exefs/{name:<10} {:>10} bytes{bid}", data.len());
     }
     Ok(game)
 }
 
 fn romfs_of(src: &RomfsSource) -> Result<RomFs> {
-    let is_data = ["romfs.nsp", "romfs.nup", "romfs.dir"].iter().any(|m| src.input.join(m).is_file()) || src.dlc.is_some();
+    let is_data = ["romfs.nsp", "romfs.nup", "romfs.dir"]
+        .iter()
+        .any(|m| src.input.join(m).is_file())
+        || src.dlc.is_some();
     if is_data {
         if let Some(id) = &src.dlc {
             let id = u64::from_str_radix(id, 16).context("--dlc takes a 16-digit title id")?;
@@ -246,7 +266,11 @@ fn main() -> Result<()> {
                 println!("{line}");
             }
             let g = open(&input, &pkg)?;
-            println!("  romfs: {} files ({})", g.romfs.walk().len(), g.romfs.source);
+            println!(
+                "  romfs: {} files ({})",
+                g.romfs.walk().len(),
+                g.romfs.source
+            );
         }
         Cmd::Extract { input, out, pkg } => {
             let g = open(&input, &pkg)?;
@@ -256,7 +280,11 @@ fn main() -> Result<()> {
             }
             println!("wrote {} files to {}", g.exefs.files.len(), out.display());
         }
-        Cmd::UpdateInfo { packages, game, keys } => {
+        Cmd::UpdateInfo {
+            packages,
+            game,
+            keys,
+        } => {
             let mut failed = false;
             for p in &packages {
                 match package::update_info(p, keys.as_deref(), game.as_deref()) {
@@ -272,7 +300,11 @@ fn main() -> Result<()> {
             }
         }
         Cmd::Romfs { cmd } => match cmd {
-            RomfsCmd::Ls { src, path, recursive } => {
+            RomfsCmd::Ls {
+                src,
+                path,
+                recursive,
+            } => {
                 let r = romfs_of(&src)?;
                 if recursive {
                     for (p, size) in r.walk() {
@@ -280,11 +312,26 @@ fn main() -> Result<()> {
                     }
                 } else {
                     for e in r.list(&path)? {
-                        println!("{:>12}  {}{}", if e.is_dir { "<dir>".into() } else { e.size.to_string() }, e.name, if e.is_dir { "/" } else { "" });
+                        println!(
+                            "{:>12}  {}{}",
+                            if e.is_dir {
+                                "<dir>".into()
+                            } else {
+                                e.size.to_string()
+                            },
+                            e.name,
+                            if e.is_dir { "/" } else { "" }
+                        );
                     }
                 }
             }
-            RomfsCmd::Cat { src, path, offset, len, out } => {
+            RomfsCmd::Cat {
+                src,
+                path,
+                offset,
+                len,
+                out,
+            } => {
                 let r = romfs_of(&src)?;
                 let data = r.read(&path, offset, len.unwrap_or(u64::MAX))?;
                 match out {
@@ -294,9 +341,16 @@ fn main() -> Result<()> {
             }
             RomfsCmd::Sha256 { src, paths, all } => {
                 let r = romfs_of(&src)?;
-                let paths: Vec<String> = if all { r.walk().into_iter().map(|x| x.0).collect() } else { paths };
+                let paths: Vec<String> = if all {
+                    r.walk().into_iter().map(|x| x.0).collect()
+                } else {
+                    paths
+                };
                 for p in paths {
-                    let size = r.find(&p).map(|n| n.size()).ok_or_else(|| anyhow::anyhow!("{p}: no such file"))?;
+                    let size = r
+                        .find(&p)
+                        .map(|n| n.size())
+                        .ok_or_else(|| anyhow::anyhow!("{p}: no such file"))?;
                     let mut h = Sha256::new();
                     let mut at = 0;
                     while at < size {
@@ -311,10 +365,17 @@ fn main() -> Result<()> {
         Cmd::Dlc { cmd } => {
             let result = (|| -> std::result::Result<Vec<String>, package::PackageError> {
                 Ok(match cmd {
-                    DlcCmd::Install { datadir, packages, keys, dlc_stub } => {
-                        dlc::install(&packages, &datadir, &say, keys.as_deref(), dlc_stub)?.1
-                    }
-                    DlcCmd::Sync { datadir, packages, keys } => dlc::sync(&packages, &datadir, &say, keys.as_deref())?.1,
+                    DlcCmd::Install {
+                        datadir,
+                        packages,
+                        keys,
+                        dlc_stub,
+                    } => dlc::install(&packages, &datadir, &say, keys.as_deref(), dlc_stub)?.1,
+                    DlcCmd::Sync {
+                        datadir,
+                        packages,
+                        keys,
+                    } => dlc::sync(&packages, &datadir, &say, keys.as_deref())?.1,
                     DlcCmd::Remove { datadir, what } => {
                         let mut errors = vec![];
                         for w in &what {
@@ -359,13 +420,20 @@ fn main() -> Result<()> {
             let opts = GenOptions {
                 out: out.clone(),
                 jobs,
-                modules: modules.split(',').filter(|s| !s.is_empty()).map(String::from).collect(),
+                modules: modules
+                    .split(',')
+                    .filter(|s| !s.is_empty())
+                    .map(String::from)
+                    .collect(),
                 limit,
                 chunk_fns,
                 chunk_bytes,
                 big_fn,
                 patches,
-                emit: EmitOptions { reg_locals, callee_saved: !no_callee_saved_trust },
+                emit: EmitOptions {
+                    reg_locals,
+                    callee_saved: !no_callee_saved_trust,
+                },
                 ..GenOptions::default()
             };
             let report = generate(&game.exefs.files, &opts, &|line| eprintln!("{line}"))?;

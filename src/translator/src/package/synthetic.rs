@@ -21,7 +21,9 @@ fn area_kek() -> [u8; 16] {
     std::array::from_fn(|i| 0x60 + i as u8)
 }
 fn shared() -> Vec<u8> {
-    (0..0x9000usize).map(|i| ((i * 7 + i / 251) & 0xff) as u8).collect()
+    (0..0x9000usize)
+        .map(|i| ((i * 7 + i / 251) & 0xff) as u8)
+        .collect()
 }
 
 /// (generation, secure value) as the FS header stores them; upper = secure BE || generation BE.
@@ -32,7 +34,13 @@ fn upper(counter: (u32, u32), generation: Option<u32>) -> [u8; 8] {
     u
 }
 
-fn fs_header(pfs_kind: bool, crypto: u8, counter: (u32, u32), data_at: u64, data_size: u64) -> Vec<u8> {
+fn fs_header(
+    pfs_kind: bool,
+    crypto: u8,
+    counter: (u32, u32),
+    data_at: u64,
+    data_size: u64,
+) -> Vec<u8> {
     let mut fs = vec![0u8; 0x200];
     fs[0] = 2;
     if pfs_kind {
@@ -62,7 +70,13 @@ fn plain_ctr(key: [u8; 16], counter: (u32, u32)) -> Option<Seal> {
     }))
 }
 
-fn build_nca(content_type: u8, title_id: u64, sections: Vec<(Vec<u8>, Vec<u8>, Option<Seal>)>, key: [u8; 16], rights: Option<[u8; 16]>) -> Vec<u8> {
+fn build_nca(
+    content_type: u8,
+    title_id: u64,
+    sections: Vec<(Vec<u8>, Vec<u8>, Option<Seal>)>,
+    key: [u8; 16],
+    rights: Option<[u8; 16]>,
+) -> Vec<u8> {
     let mut header = vec![0u8; 0xc00];
     header[0x200..0x204].copy_from_slice(b"NCA3");
     header[0x205] = content_type;
@@ -78,8 +92,10 @@ fn build_nca(content_type: u8, title_id: u64, sections: Vec<(Vec<u8>, Vec<u8>, O
     for (i, (fs, plain, seal)) in sections.into_iter().enumerate() {
         let mut plain = plain;
         plain.resize(plain.len().div_ceil(0x200) * 0x200, 0);
-        header[0x240 + i * 0x10..0x244 + i * 0x10].copy_from_slice(&((at / 0x200) as u32).to_le_bytes());
-        header[0x244 + i * 0x10..0x248 + i * 0x10].copy_from_slice(&(((at + plain.len() as u64) / 0x200) as u32).to_le_bytes());
+        header[0x240 + i * 0x10..0x244 + i * 0x10]
+            .copy_from_slice(&((at / 0x200) as u32).to_le_bytes());
+        header[0x244 + i * 0x10..0x248 + i * 0x10]
+            .copy_from_slice(&(((at + plain.len() as u64) / 0x200) as u32).to_le_bytes());
         header[0x400 + i * 0x200..0x600 + i * 0x200].copy_from_slice(&fs);
         body.extend(match seal {
             Some(s) => s(at, &plain),
@@ -107,11 +123,30 @@ fn id(byte: &str) -> [u8; 16] {
     [b; 16]
 }
 
-fn meta_nca(title_id: u64, version: u32, kind: u8, records: &[(&str, u8)], key: [u8; 16]) -> Vec<u8> {
+fn meta_nca(
+    title_id: u64,
+    version: u32,
+    kind: u8,
+    records: &[(&str, u8)],
+    key: [u8; 16],
+) -> Vec<u8> {
     let ids: Vec<([u8; 16], u8)> = records.iter().map(|(i, t)| (id(i), *t)).collect();
     let refs: Vec<(&[u8; 16], u8)> = ids.iter().map(|(i, t)| (i, *t)).collect();
-    let image = pfs(&[("meta.cnmt", &crate::package::cnmt::build(title_id, version, kind, &refs))]);
-    build_nca(1, title_id, vec![(fs_header(true, 3, (0, 0), 0, image.len() as u64), image, plain_ctr(key, (0, 0)))], key, None)
+    let image = pfs(&[(
+        "meta.cnmt",
+        &crate::package::cnmt::build(title_id, version, kind, &refs),
+    )]);
+    build_nca(
+        1,
+        title_id,
+        vec![(
+            fs_header(true, 3, (0, 0), 0, image.len() as u64),
+            image,
+            plain_ctr(key, (0, 0)),
+        )],
+        key,
+        None,
+    )
 }
 
 fn control_nca(title_id: u64, display: &str, key: [u8; 16]) -> Vec<u8> {
@@ -121,7 +156,17 @@ fn control_nca(title_id: u64, display: &str, key: [u8; 16]) -> Vec<u8> {
     let image = romfs_image(&[("control.nacp", &nacp), ("icon_AmericanEnglish.dat", &icon)]);
     let mut sec = vec![0u8; 0x200];
     sec.extend(&image);
-    build_nca(2, title_id, vec![(fs_header(false, 3, (0, 5), 0x200, image.len() as u64), sec, plain_ctr(key, (0, 5)))], key, None)
+    build_nca(
+        2,
+        title_id,
+        vec![(
+            fs_header(false, 3, (0, 5), 0x200, image.len() as u64),
+            sec,
+            plain_ctr(key, (0, 5)),
+        )],
+        key,
+        None,
+    )
 }
 
 fn nso(tag: &[u8]) -> Vec<u8> {
@@ -157,8 +202,16 @@ impl Fixture {
             update_key: std::array::from_fn(|i| 0x80 + i as u8),
             control_key: std::array::from_fn(|i| 0xa0 + i as u8),
             rights,
-            base_image: romfs_image(&[("keep.bin", &shared()), ("file.bin", b"test"), ("gone.bin", b"removed by the update")]),
-            new_image: romfs_image(&[("keep.bin", &shared()), ("file.bin", b"patched!"), ("new.bin", &new_bin)]),
+            base_image: romfs_image(&[
+                ("keep.bin", &shared()),
+                ("file.bin", b"test"),
+                ("gone.bin", b"removed by the update"),
+            ]),
+            new_image: romfs_image(&[
+                ("keep.bin", &shared()),
+                ("file.bin", b"patched!"),
+                ("new.bin", &new_bin),
+            ]),
         }
     }
 
@@ -171,17 +224,34 @@ impl Fixture {
             0,
             GAME,
             vec![
-                (fs_header(true, 3, (0, 1), 0, exefs.len() as u64), exefs, plain_ctr(self.base_key, (0, 1))),
-                (fs_header(false, 3, (0, 2), 0x400, self.base_image.len() as u64), sec, plain_ctr(self.base_key, (0, 2))),
+                (
+                    fs_header(true, 3, (0, 1), 0, exefs.len() as u64),
+                    exefs,
+                    plain_ctr(self.base_key, (0, 1)),
+                ),
+                (
+                    fs_header(false, 3, (0, 2), 0x400, self.base_image.len() as u64),
+                    sec,
+                    plain_ctr(self.base_key, (0, 2)),
+                ),
             ],
             self.base_key,
             Some(self.rights),
         );
         vec![
             (format!("{}.nca", "aa".repeat(16)), program),
-            (format!("{}.nca", "ab".repeat(16)), control_nca(GAME, "1.0.0", self.control_key)),
-            (format!("{}.cnmt.nca", "ac".repeat(16)), meta_nca(GAME, 0, 0x80, &[("aa", 1), ("ab", 3)], self.control_key)),
-            (format!("{}.tik", crate::package::io::hex(&self.rights)), ticket(self.rights, self.base_key, personalized)),
+            (
+                format!("{}.nca", "ab".repeat(16)),
+                control_nca(GAME, "1.0.0", self.control_key),
+            ),
+            (
+                format!("{}.cnmt.nca", "ac".repeat(16)),
+                meta_nca(GAME, 0, 0x80, &[("aa", 1), ("ab", 3)], self.control_key),
+            ),
+            (
+                format!("{}.tik", crate::package::io::hex(&self.rights)),
+                ticket(self.rights, self.base_key, personalized),
+            ),
         ]
     }
 
@@ -198,12 +268,21 @@ impl Fixture {
         physical.extend(tail);
         physical.resize(physical.len().div_ceil(16) * 16, 0);
         let hl = head.len() as u64;
-        let relocations = [(0u64, 0u64, 1u32), (hl, base_at, 0), (hl + sh.len() as u64, hl, 1)];
+        let relocations = [
+            (0u64, 0u64, 1u32),
+            (hl, base_at, 0),
+            (hl + sh.len() as u64, hl, 1),
+        ];
         let virtual_size = 0x800 + self.new_image.len() as u64;
         let indirect_at = physical.len() as u64;
         let table_size = 0x8000u64;
         let ex_at = indirect_at + table_size;
-        let generations = [(0u64, 5u32), (0x813, 7), (hl + 5, 9), (indirect_at, counter.0)];
+        let generations = [
+            (0u64, 5u32),
+            (0x813, 7),
+            (hl + 5, 9),
+            (indirect_at, counter.0),
+        ];
         let table = |entries: Vec<Vec<u8>>, total: u64| {
             let mut h = vec![0u8; 0x4000];
             h[4..8].copy_from_slice(&1u32.to_le_bytes());
@@ -220,11 +299,31 @@ impl Fixture {
         };
         let mut section = physical.clone();
         section.extend(table(
-            relocations.iter().map(|(v, p, s)| [v.to_le_bytes().to_vec(), p.to_le_bytes().to_vec(), s.to_le_bytes().to_vec()].concat()).collect(),
+            relocations
+                .iter()
+                .map(|(v, p, s)| {
+                    [
+                        v.to_le_bytes().to_vec(),
+                        p.to_le_bytes().to_vec(),
+                        s.to_le_bytes().to_vec(),
+                    ]
+                    .concat()
+                })
+                .collect(),
             virtual_size,
         ));
         section.extend(table(
-            generations.iter().map(|(a, g)| [a.to_le_bytes().to_vec(), 0u32.to_le_bytes().to_vec(), g.to_le_bytes().to_vec()].concat()).collect(),
+            generations
+                .iter()
+                .map(|(a, g)| {
+                    [
+                        a.to_le_bytes().to_vec(),
+                        0u32.to_le_bytes().to_vec(),
+                        g.to_le_bytes().to_vec(),
+                    ]
+                    .concat()
+                })
+                .collect(),
             indirect_at,
         ));
         let key = self.update_key;
@@ -251,14 +350,33 @@ impl Fixture {
         let program = build_nca(
             0,
             title,
-            vec![(fs_header(true, 3, (3, 1), 0, exefs.len() as u64), exefs, plain_ctr(key, (3, 1))), (fs, section, Some(seal))],
+            vec![
+                (
+                    fs_header(true, 3, (3, 1), 0, exefs.len() as u64),
+                    exefs,
+                    plain_ctr(key, (3, 1)),
+                ),
+                (fs, section, Some(seal)),
+            ],
             key,
             None,
         );
         vec![
             (format!("{}.nca", "ba".repeat(16)), program),
-            (format!("{}.nca", "bb".repeat(16)), control_nca(title, "1.2.3", self.control_key)),
-            (format!("{}.cnmt.nca", "bc".repeat(16)), meta_nca(title + 0x800, 262144, 0x81, &[("ba", 1), ("bb", 3)], self.control_key)),
+            (
+                format!("{}.nca", "bb".repeat(16)),
+                control_nca(title, "1.2.3", self.control_key),
+            ),
+            (
+                format!("{}.cnmt.nca", "bc".repeat(16)),
+                meta_nca(
+                    title + 0x800,
+                    262144,
+                    0x81,
+                    &[("ba", 1), ("bb", 3)],
+                    self.control_key,
+                ),
+            ),
         ]
     }
 
@@ -270,12 +388,19 @@ impl Fixture {
         let data = build_nca(
             4,
             GAME + 0x1001,
-            vec![(fs_header(false, 3, (0, 9), 0x200, image.len() as u64), sec, plain_ctr(self.control_key, (0, 9)))],
+            vec![(
+                fs_header(false, 3, (0, 9), 0x200, image.len() as u64),
+                sec,
+                plain_ctr(self.control_key, (0, 9)),
+            )],
             self.control_key,
             None,
         );
         vec![
-            (format!("{}.cnmt.nca", "cc".repeat(16)), meta_nca(GAME + 0x1001, 65536, 0x82, &[("cd", 2)], self.control_key)),
+            (
+                format!("{}.cnmt.nca", "cc".repeat(16)),
+                meta_nca(GAME + 0x1001, 65536, 0x82, &[("cd", 2)], self.control_key),
+            ),
             (format!("{}.nca", "cd".repeat(16)), data),
         ]
     }
@@ -308,16 +433,25 @@ fn setup(tag: &str) -> (Tmp, PathBuf) {
 
 fn write_pfs(path: &Path, parts: &[Files]) {
     let all: Vec<(String, Vec<u8>)> = parts.iter().flatten().cloned().collect();
-    let refs: Vec<(&str, &[u8])> = all.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+    let refs: Vec<(&str, &[u8])> = all
+        .iter()
+        .map(|(n, d)| (n.as_str(), d.as_slice()))
+        .collect();
     std::fs::write(path, pfs(&refs)).unwrap();
 }
 
 fn opts(keys: &Path, update: UpdateChoice) -> OpenOptions {
-    OpenOptions { keys: Some(keys.to_path_buf()), update }
+    OpenOptions {
+        keys: Some(keys.to_path_buf()),
+        update,
+    }
 }
 
 fn files(r: &crate::package::RomFs) -> Vec<(String, Vec<u8>)> {
-    r.walk().into_iter().map(|(p, _)| (p.clone(), r.read_file(&p).unwrap())).collect()
+    r.walk()
+        .into_iter()
+        .map(|(p, _)| (p.clone(), r.read_file(&p).unwrap()))
+        .collect()
 }
 
 fn expect_new(r: &crate::package::RomFs) {
@@ -328,7 +462,10 @@ fn expect_new(r: &crate::package::RomFs) {
     assert_eq!(f[1].1, shared());
     assert_eq!(f[2].1.len(), 256 * 9);
     // a read across the base/patch boundary of keep.bin and one from inside it
-    assert_eq!(r.read("keep.bin", 0x1234, 0x10).unwrap(), &shared()[0x1234..0x1244]);
+    assert_eq!(
+        r.read("keep.bin", 0x1234, 0x10).unwrap(),
+        &shared()[0x1234..0x1244]
+    );
 }
 
 #[test]
@@ -348,16 +485,30 @@ fn combined_package_applies_its_update_per_read() {
     let data = _t.0.join("data");
     g.write_data(&data, &|_| {}).unwrap();
     let text = std::fs::read_to_string(data.join("romfs.nsp")).unwrap();
-    assert!(text.starts_with("SWRNSP2\n") && text.contains("\nbase ") && text.contains("\npatch ") && !text.contains("\nupdate "));
-    assert!(text.contains(&format!("titlekek_02:{}", crate::package::io::hex(&ecb_encrypt(&titlekek(), &fx.base_key)))));
+    assert!(
+        text.starts_with("SWRNSP2\n")
+            && text.contains("\nbase ")
+            && text.contains("\npatch ")
+            && !text.contains("\nupdate ")
+    );
+    assert!(text.contains(&format!(
+        "titlekek_02:{}",
+        crate::package::io::hex(&ecb_encrypt(&titlekek(), &fx.base_key))
+    )));
     expect_new(&marker::open_data_dir(&data, Some(&keys)).unwrap());
-    assert_eq!(std::fs::read(data.join("exefs/main")).unwrap(), nso(b"update"));
+    assert_eq!(
+        std::fs::read(data.join("exefs/main")).unwrap(),
+        nso(b"update")
+    );
     assert!(std::fs::read(data.join("control.nacp")).unwrap().len() == 0x4000);
     // --no-update: the game as released
     let b = open_game(&pkg, &opts(&keys, UpdateChoice::None)).unwrap();
     assert_eq!(b.applied, Applied::LeftOut);
     assert_eq!(b.exefs.files["main"], nso(b"base"));
-    assert_eq!((b.exefs.version, b.display_version.as_deref()), (Some(0), Some("1.0.0")));
+    assert_eq!(
+        (b.exefs.version, b.display_version.as_deref()),
+        (Some(0), Some("1.0.0"))
+    );
     let names: Vec<String> = b.romfs.walk().into_iter().map(|x| x.0).collect();
     assert_eq!(names, ["file.bin", "gone.bin", "keep.bin"]);
     assert_eq!(b.romfs.read_file("file.bin").unwrap(), b"test");
@@ -368,8 +519,14 @@ fn combined_package_applies_its_update_per_read() {
 fn game_from_xci() {
     let (_t, keys) = setup("xcigame");
     let fx = Fixture::new();
-    let all: Vec<(String, Vec<u8>)> = [fx.base(false), fx.update(GAME)].into_iter().flatten().collect();
-    let refs: Vec<(&str, &[u8])> = all.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+    let all: Vec<(String, Vec<u8>)> = [fx.base(false), fx.update(GAME)]
+        .into_iter()
+        .flatten()
+        .collect();
+    let refs: Vec<(&str, &[u8])> = all
+        .iter()
+        .map(|(n, d)| (n.as_str(), d.as_slice()))
+        .collect();
     for key_area in [false, true] {
         let pkg = _t.0.join(format!("game{}.xci", key_area as u8));
         std::fs::write(&pkg, build_xci(&refs, key_area)).unwrap();
@@ -403,14 +560,20 @@ fn separate_update_nsp_xci_and_bare_nca() {
     std::fs::write(&bare, &u[0].1).unwrap();
     for (pkg, version) in [(&upd, 262144), (&xci, 262144), (&bare, 0)] {
         let g = open_game(&game, &opts(&keys, UpdateChoice::Package(pkg.clone()))).unwrap();
-        assert_eq!(g.applied, Applied::Separate(crate::package::io::abspath(pkg)));
+        assert_eq!(
+            g.applied,
+            Applied::Separate(crate::package::io::abspath(pkg))
+        );
         assert_eq!(g.exefs.files["main"], nso(b"update"));
         assert_eq!(g.exefs.version, Some(version));
         expect_new(&g.romfs);
         let data = _t.0.join("data");
         g.write_data(&data, &|_| {}).unwrap();
         let text = std::fs::read_to_string(data.join("romfs.nsp")).unwrap();
-        assert!(text.contains(&format!("\nupdate {}\n", crate::package::io::abspath(pkg).display())));
+        assert!(text.contains(&format!(
+            "\nupdate {}\n",
+            crate::package::io::abspath(pkg).display()
+        )));
         expect_new(&marker::open_data_dir(&data, Some(&keys)).unwrap());
     }
     // a bare NCA has no metadata: version 0, the control data stays the game's
@@ -418,14 +581,28 @@ fn separate_update_nsp_xci_and_bare_nca() {
     assert_eq!(g.display_version.as_deref(), Some("1.0.0"));
     // update-info: alone, and over the game
     let info = update_info(&upd, Some(&keys), None).unwrap();
-    assert_eq!(info.line(), format!("UPDATE\t{}\t{GAME:016x}\t262144\t1.2.3", crate::package::io::abspath(&upd).display()));
+    assert_eq!(
+        info.line(),
+        format!(
+            "UPDATE\t{}\t{GAME:016x}\t262144\t1.2.3",
+            crate::package::io::abspath(&upd).display()
+        )
+    );
     assert_eq!(update_info(&upd, Some(&keys), Some(&game)).unwrap(), info);
     // the marker names the update package; when it is gone the runtime says so
     let data = _t.0.join("data2");
-    open_game(&game, &opts(&keys, UpdateChoice::Package(upd.clone()))).unwrap().write_data(&data, &|_| {}).unwrap();
+    open_game(&game, &opts(&keys, UpdateChoice::Package(upd.clone())))
+        .unwrap()
+        .write_data(&data, &|_| {})
+        .unwrap();
     std::fs::rename(&upd, _t.0.join("moved.nsp")).unwrap();
-    let e = marker::open_data_dir(&data, Some(&keys)).unwrap_err().to_string();
-    assert!(e.contains("is missing") && e.contains("Install Updates"), "{e}");
+    let e = marker::open_data_dir(&data, Some(&keys))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.contains("is missing") && e.contains("Install Updates"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -439,29 +616,65 @@ fn refusals_with_turbos_reasons() {
     let other = _t.0.join("other.nsp");
     write_pfs(&other, &[fx.update(GAME + 0x10000)]);
     let o = crate::package::io::abspath(&other).display().to_string();
-    let e = open_game(&game, &opts(&keys, UpdateChoice::Package(other.clone()))).err().unwrap().to_string();
-    assert_eq!(e, format!("{o}: this update is for {:016x}, not for this game ({GAME:016x})", GAME + 0x10000));
+    let e = open_game(&game, &opts(&keys, UpdateChoice::Package(other.clone())))
+        .err()
+        .unwrap()
+        .to_string();
+    assert_eq!(
+        e,
+        format!(
+            "{o}: this update is for {:016x}, not for this game ({GAME:016x})",
+            GAME + 0x10000
+        )
+    );
     // a package without an update
-    let e = update_info(&game, Some(&keys), None).unwrap_err().to_string();
+    let e = update_info(&game, Some(&keys), None)
+        .unwrap_err()
+        .to_string();
     assert_eq!(e, format!("{g}: the package holds no game update"));
     // an update on its own as the game
     let upd = _t.0.join("update.nsp");
     write_pfs(&upd, &[fx.update(GAME)]);
-    let e = open_game(&upd, &opts(&keys, UpdateChoice::Embedded)).err().unwrap().to_string();
-    assert!(e.ends_with("this is an update without its game; use a package that holds both"), "{e}");
+    let e = open_game(&upd, &opts(&keys, UpdateChoice::Embedded))
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        e.ends_with("this is an update without its game; use a package that holds both"),
+        "{e}"
+    );
     // a console-bound ticket
     let bound = _t.0.join("bound.nsp");
     write_pfs(&bound, &[fx.base(true)]);
-    let e = open_game(&bound, &opts(&keys, UpdateChoice::Embedded)).err().unwrap().to_string();
-    assert!(e.contains("is bound to one console (a personalized ticket); dump the game with a common ticket"), "{e}");
+    let e = open_game(&bound, &opts(&keys, UpdateChoice::Embedded))
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        e.contains(
+            "is bound to one console (a personalized ticket); dump the game with a common ticket"
+        ),
+        "{e}"
+    );
     // a compressed package
     let nsz = _t.0.join("update.nsz");
     write_pfs(&nsz, &[vec![("x.ncz".into(), vec![0u8; 16])]]);
-    let e = open_game(&game, &opts(&keys, UpdateChoice::Package(nsz.clone()))).err().unwrap().to_string();
-    assert!(e.contains("this is a compressed package (NSZ / XCZ). Its data cannot be read in place"), "{e}");
+    let e = open_game(&game, &opts(&keys, UpdateChoice::Package(nsz.clone())))
+        .err()
+        .unwrap()
+        .to_string();
+    assert!(
+        e.contains("this is a compressed package (NSZ / XCZ). Its data cannot be read in place"),
+        "{e}"
+    );
     // a missing update package
-    let e = update_info(&_t.0.join("nope.nsp"), Some(&keys), Some(&game)).unwrap_err().to_string();
-    assert!(e.ends_with("nope.nsp: the update package is missing"), "{e}");
+    let e = update_info(&_t.0.join("nope.nsp"), Some(&keys), Some(&game))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        e.ends_with("nope.nsp: the update package is missing"),
+        "{e}"
+    );
 }
 
 #[test]
@@ -483,24 +696,44 @@ fn dlc_install_reads_in_place_and_refuses() {
     let (done, errors) = dlc::install(&[pkg.clone()], &datadir, &say, Some(&keys), false).unwrap();
     assert_eq!((done, errors.len()), (vec![GAME + 0x1001], 0));
     let p = crate::package::io::abspath(&pkg).display().to_string();
-    assert!(said.borrow().iter().any(|m| m == &format!("DLC: installed {:016x} v65536 (read in place from the package) from {p}", GAME + 0x1001)));
-    assert_eq!(dlc::read_manifest(&datadir), [(GAME + 0x1001, 65536, "data".to_string(), p.clone())]);
+    assert!(said.borrow().iter().any(|m| m
+        == &format!(
+            "DLC: installed {:016x} v65536 (read in place from the package) from {p}",
+            GAME + 0x1001
+        )));
+    assert_eq!(
+        dlc::read_manifest(&datadir),
+        [(GAME + 0x1001, 65536, "data".to_string(), p.clone())]
+    );
     let r = dlc::title_romfs(&datadir, GAME + 0x1001, Some(&keys)).unwrap();
     assert_eq!(r.read_file("version.txt").unwrap(), b"10002");
     assert_eq!(r.read_file("contents.dat").unwrap(), [7u8; 4096]);
     // again: nothing to do
     said.borrow_mut().clear();
     dlc::install(&[pkg.clone()], &datadir, &say, Some(&keys), false).unwrap();
-    assert_eq!(said.borrow()[0], format!("DLC: {:016x} v65536 is already installed", GAME + 0x1001));
+    assert_eq!(
+        said.borrow()[0],
+        format!("DLC: {:016x} v65536 is already installed", GAME + 0x1001)
+    );
     // a package without add-on content
     let game_only = _t.0.join("game.nsp");
     write_pfs(&game_only, &[fx.base(false)]);
-    let (_, errors) = dlc::install(&[game_only.clone()], &datadir, &|_| {}, Some(&keys), false).unwrap();
-    assert_eq!(errors, [format!("{}: the package has no add-on content (it holds the game)", crate::package::io::abspath(&game_only).display())]);
+    let (_, errors) =
+        dlc::install(&[game_only.clone()], &datadir, &|_| {}, Some(&keys), false).unwrap();
+    assert_eq!(
+        errors,
+        [format!(
+            "{}: the package has no add-on content (it holds the game)",
+            crate::package::io::abspath(&game_only).display()
+        )]
+    );
     // sync to nothing removes it all
     said.borrow_mut().clear();
     dlc::sync(&[], &datadir, &say, Some(&keys)).unwrap();
-    assert_eq!(said.borrow()[0], format!("DLC: removed {:016x}", GAME + 0x1001));
+    assert_eq!(
+        said.borrow()[0],
+        format!("DLC: removed {:016x}", GAME + 0x1001)
+    );
     assert!(dlc::read_manifest(&datadir).is_empty() && !datadir.join("dlc").exists());
 }
 
@@ -513,8 +746,28 @@ fn dlc_from_nsz_solid_and_block() {
     let image = romfs_image(&[("contents.dat", &[5u8; 3000]), ("version.txt", b"20003")]);
     let mut sec = vec![0u8; 0x3800];
     sec.extend(&image);
-    let plain_nca = build_nca(4, GAME + 0x1002, vec![(fs_header(false, 3, (0, 9), 0x3800, image.len() as u64), sec.clone(), None)], fx.control_key, None);
-    let encrypted = build_nca(4, GAME + 0x1002, vec![(fs_header(false, 3, (0, 9), 0x3800, image.len() as u64), sec, plain_ctr(fx.control_key, (0, 9)))], fx.control_key, None);
+    let plain_nca = build_nca(
+        4,
+        GAME + 0x1002,
+        vec![(
+            fs_header(false, 3, (0, 9), 0x3800, image.len() as u64),
+            sec.clone(),
+            None,
+        )],
+        fx.control_key,
+        None,
+    );
+    let encrypted = build_nca(
+        4,
+        GAME + 0x1002,
+        vec![(
+            fs_header(false, 3, (0, 9), 0x3800, image.len() as u64),
+            sec,
+            plain_ctr(fx.control_key, (0, 9)),
+        )],
+        fx.control_key,
+        None,
+    );
     let datadir = _t.0.join("Game_data");
     std::fs::create_dir_all(datadir.join("exefs")).unwrap();
     let mut npdm = vec![0u8; 0x100];
@@ -532,7 +785,10 @@ fn dlc_from_nsz_solid_and_block() {
         if block {
             let size = 1u64 << 14;
             let chunks: Vec<&[u8]> = rest.chunks(size as usize).collect();
-            let packed: Vec<Vec<u8>> = chunks.iter().map(|c| zstd::bulk::compress(c, 3).unwrap()).collect();
+            let packed: Vec<Vec<u8>> = chunks
+                .iter()
+                .map(|c| zstd::bulk::compress(c, 3).unwrap())
+                .collect();
             ncz.extend(b"NCZBLOCK");
             ncz.extend([2u8, 1, 0, 14]);
             ncz.extend((chunks.len() as u32).to_le_bytes());
@@ -547,14 +803,31 @@ fn dlc_from_nsz_solid_and_block() {
             ncz.extend(zstd::encode_all(rest, 3).unwrap());
         }
         let pkg = _t.0.join(format!("dlc{}.nsz", block as u8));
-        write_pfs(&pkg, &[vec![
-            (format!("{}.cnmt.nca", "ce".repeat(16)), meta_nca(GAME + 0x1002, 3, 0x82, &[("cf", 2)], fx.control_key)),
-            (format!("{}.ncz", "cf".repeat(16)), ncz),
-        ]]);
+        write_pfs(
+            &pkg,
+            &[vec![
+                (
+                    format!("{}.cnmt.nca", "ce".repeat(16)),
+                    meta_nca(GAME + 0x1002, 3, 0x82, &[("cf", 2)], fx.control_key),
+                ),
+                (format!("{}.ncz", "cf".repeat(16)), ncz),
+            ]],
+        );
         let said = std::cell::RefCell::new(vec![]);
-        let (done, errors) = dlc::install(&[pkg.clone()], &datadir, &|m| said.borrow_mut().push(m.to_string()), Some(&keys), false).unwrap();
+        let (done, errors) = dlc::install(
+            &[pkg.clone()],
+            &datadir,
+            &|m| said.borrow_mut().push(m.to_string()),
+            Some(&keys),
+            false,
+        )
+        .unwrap();
         assert_eq!((done.len(), errors.len()), (1, 0), "{:?}", said.borrow());
-        assert!(said.borrow().last().unwrap().contains("(RomFS image, "), "{:?}", said.borrow());
+        assert!(
+            said.borrow().last().unwrap().contains("(RomFS image, "),
+            "{:?}",
+            said.borrow()
+        );
         let r = dlc::title_romfs(&datadir, GAME + 0x1002, None).unwrap();
         assert_eq!(r.read_file("version.txt").unwrap(), b"20003");
         assert_eq!(r.read_file("contents.dat").unwrap(), [5u8; 3000]);
@@ -579,10 +852,14 @@ fn dlc_from_bare_nca_and_xci() {
     let bare = _t.0.join("addon.nca");
     std::fs::write(&bare, &addon[1].1).unwrap();
     let xci = _t.0.join("addon.xci");
-    let refs: Vec<(&str, &[u8])> = addon.iter().map(|(n, d)| (n.as_str(), d.as_slice())).collect();
+    let refs: Vec<(&str, &[u8])> = addon
+        .iter()
+        .map(|(n, d)| (n.as_str(), d.as_slice()))
+        .collect();
     std::fs::write(&xci, build_xci(&refs, false)).unwrap();
     for (pkg, version) in [(&bare, 0), (&xci, 65536)] {
-        let (done, errors) = dlc::install(&[pkg.clone()], &datadir, &|_| {}, Some(&keys), false).unwrap();
+        let (done, errors) =
+            dlc::install(&[pkg.clone()], &datadir, &|_| {}, Some(&keys), false).unwrap();
         assert_eq!((done, errors.len()), (vec![GAME + 0x1001], 0));
         assert_eq!(dlc::read_manifest(&datadir)[0].1, version);
         let r = dlc::title_romfs(&datadir, GAME + 0x1001, Some(&keys)).unwrap();

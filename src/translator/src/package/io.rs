@@ -28,23 +28,44 @@ fn pread(file: &File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
 
 impl Blob {
     pub fn open(path: &Path) -> Result<Blob> {
-        let io = |source| PackageError::Io { path: path.to_path_buf(), source };
+        let io = |source| PackageError::Io {
+            path: path.to_path_buf(),
+            source,
+        };
         let file = File::open(path).map_err(io)?;
         let size = file.metadata().map_err(io)?.len();
-        Ok(Blob { path: path.to_path_buf(), size, file })
+        Ok(Blob {
+            path: path.to_path_buf(),
+            size,
+            file,
+        })
     }
 
     /// Fill `buf` from `offset`; a short file is an error ("data at ... is cut short", as nsp.py `_read`).
     pub fn read_into(&self, offset: u64, buf: &mut [u8]) -> Result<()> {
-        if offset.checked_add(buf.len() as u64).map_or(true, |end| end > self.size) {
-            return crate::package::error::fmt(format!("{}: data at {offset:#x} is cut short", self.path.display()));
+        if offset
+            .checked_add(buf.len() as u64)
+            .map_or(true, |end| end > self.size)
+        {
+            return crate::package::error::fmt(format!(
+                "{}: data at {offset:#x} is cut short",
+                self.path.display()
+            ));
         }
         let mut done = 0;
         while done < buf.len() {
-            let n = pread(&self.file, &mut buf[done..], offset + done as u64)
-                .map_err(|source| PackageError::Io { path: self.path.clone(), source })?;
+            let n =
+                pread(&self.file, &mut buf[done..], offset + done as u64).map_err(|source| {
+                    PackageError::Io {
+                        path: self.path.clone(),
+                        source,
+                    }
+                })?;
             if n == 0 {
-                return crate::package::error::fmt(format!("{}: data at {offset:#x} is cut short", self.path.display()));
+                return crate::package::error::fmt(format!(
+                    "{}: data at {offset:#x} is cut short",
+                    self.path.display()
+                ));
             }
             done += n;
         }
@@ -60,7 +81,10 @@ impl Blob {
     /// A reader positioned at `offset`, limited to `size` bytes (for streaming decoders).
     pub fn reader(&self, offset: u64, size: u64) -> Result<std::io::Take<File>> {
         use std::io::{Read, Seek, SeekFrom};
-        let io = |source| PackageError::Io { path: self.path.clone(), source };
+        let io = |source| PackageError::Io {
+            path: self.path.clone(),
+            source,
+        };
         let mut file = File::open(&self.path).map_err(io)?;
         file.seek(SeekFrom::Start(offset)).map_err(io)?;
         Ok(file.take(size))

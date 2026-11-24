@@ -45,7 +45,12 @@ pub fn parse(data: &[u8]) -> Result<Cnmt> {
             id_offset: data[at + 0x37],
         });
     }
-    Ok(Cnmt { title_id: u64le(data, 0), version: u32le(data, 8), kind: data[0xc], records })
+    Ok(Cnmt {
+        title_id: u64le(data, 0),
+        version: u32le(data, 8),
+        kind: data[0xc],
+        records,
+    })
 }
 
 pub fn kind_name(kind: u8) -> &'static str {
@@ -104,13 +109,19 @@ mod tests {
     fn parses_header_and_records() {
         let d = build(0x01001F5010DFA800, 262144, PATCH, &[(&[0xab; 16], 3)]);
         let c = parse(&d).unwrap();
-        assert_eq!((c.title_id, c.version, c.kind), (0x01001F5010DFA800, 262144, PATCH));
+        assert_eq!(
+            (c.title_id, c.version, c.kind),
+            (0x01001F5010DFA800, 262144, PATCH)
+        );
         assert_eq!(c.records[0].nca_id, "ab".repeat(16));
         assert_eq!((c.records[0].kind, c.records[0].size), (3, 0x10));
         assert_eq!(base_of(c.title_id), 0x01001F5010DFA000);
         assert!(is_addon_of(0x0100152000023001, 0x0100152000022000));
         assert!(!is_addon_of(0x0100152000022800, 0x0100152000022000));
         assert!(parse(&d[..0x10]).is_err());
-        assert!(parse(&d[..0x30]).unwrap_err().to_string().contains("record is out of range"));
+        assert!(parse(&d[..0x30])
+            .unwrap_err()
+            .to_string()
+            .contains("record is out of range"));
     }
 }

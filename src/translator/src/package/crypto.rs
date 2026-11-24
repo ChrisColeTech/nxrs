@@ -105,7 +105,10 @@ mod tests {
         let key = [0u8; 32];
         let mut data = [0u8; 32];
         xts(&key, &mut data, 0, 32, true);
-        assert_eq!(hex(&data), "917cf69ebd68b2ec9b9fe9a3eadda692cd43d2f59598ed858c02c2652fbf922e");
+        assert_eq!(
+            hex(&data),
+            "917cf69ebd68b2ec9b9fe9a3eadda692cd43d2f59598ed858c02c2652fbf922e"
+        );
         xts(&key, &mut data, 0, 32, false);
         assert_eq!(data, [0u8; 32]);
     }

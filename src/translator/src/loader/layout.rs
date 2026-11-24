@@ -46,12 +46,19 @@ pub fn layout(size_of: &dyn Fn(&str) -> Option<usize>) -> Result<Vec<ModLayout>,
 }
 
 /// The same over `names` in their order (`order_with`).
-pub fn layout_names(names: &[String], size_of: &dyn Fn(&str) -> Option<usize>) -> Result<Vec<ModLayout>, String> {
+pub fn layout_names(
+    names: &[String],
+    size_of: &dyn Fn(&str) -> Option<usize>,
+) -> Result<Vec<ModLayout>, String> {
     let mut out = vec![];
     let mut base = FIRST_BASE;
     for name in names.iter().cloned() {
         let Some(size) = size_of(&name) else { continue };
-        out.push(ModLayout { name: name.clone(), base, size: size as u64 });
+        out.push(ModLayout {
+            name: name.clone(),
+            base,
+            size: size as u64,
+        });
         base = align_up(base + size as u64, ALIGN);
     }
     if base > ADDRESS_LIMIT {
@@ -90,7 +97,10 @@ pub fn layout_h(mods: &[ModLayout]) -> String {
     }
     lines.push(String::new());
     lines.push(format!("#define MOD_COUNT {}", mods.len()));
-    let list: Vec<String> = mods.iter().map(|m| format!("X({}, {})", m.name, m.name.to_uppercase())).collect();
+    let list: Vec<String> = mods
+        .iter()
+        .map(|m| format!("X({}, {})", m.name, m.name.to_uppercase()))
+        .collect();
     lines.push(format!("#define MOD_LIST(X) {}", list.join(" ")));
     lines.push(String::new());
     lines.join("\n")

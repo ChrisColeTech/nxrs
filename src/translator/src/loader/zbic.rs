@@ -41,7 +41,12 @@ fn bad(why: &str) -> String {
 }
 
 /// A BIC table header at `buf[pos..end]` → (normalized counts, table log, bytes used).
-fn read_bic_ncount(buf: &[u8], pos: usize, end: usize, max_symbol: usize) -> R<(Vec<i64>, u32, usize)> {
+fn read_bic_ncount(
+    buf: &[u8],
+    pos: usize,
+    end: usize,
+    max_symbol: usize,
+) -> R<(Vec<i64>, u32, usize)> {
     if end <= pos || end > buf.len() {
         return Err(bad("empty table header"));
     }
@@ -200,7 +205,11 @@ const LITERAL_SIZES: [(usize, u32); 4] = [(3, 10), (3, 10), (4, 14), (5, 18)];
 fn literals(buf: &[u8], p: usize, end: usize, out: &mut Vec<u8>) -> R<usize> {
     let b0 = *buf.get(p).ok_or_else(|| bad("literals are truncated"))?;
     let (kind, mut fmt) = (b0 & 3, ((b0 >> 2) & 3) as usize);
-    let at = |i: usize| -> R<usize> { buf.get(i).map(|&x| x as usize).ok_or_else(|| bad("literals are truncated")) };
+    let at = |i: usize| -> R<usize> {
+        buf.get(i)
+            .map(|&x| x as usize)
+            .ok_or_else(|| bad("literals are truncated"))
+    };
     if kind < 2 {
         let (head, size) = match fmt {
             0 | 2 => (1, (b0 >> 3) as usize),
@@ -270,7 +279,13 @@ fn block(buf: &[u8], mut p: usize, end: usize) -> R<Vec<u8>> {
         return Err(bad("sequences are truncated"));
     }
     let b = buf[p];
-    let n = if b < 128 { 1 } else if b < 255 { 2 } else { 3 };
+    let n = if b < 128 {
+        1
+    } else if b < 255 {
+        2
+    } else {
+        3
+    };
     if p + n > end {
         return Err(bad("sequences are truncated"));
     }
@@ -310,11 +325,21 @@ pub fn to_zstd(data: &[u8]) -> R<Vec<u8>> {
     let mut out = vec![];
     let mut p = 0;
     while p < data.len() {
-        let magic = data.get(p..p + 4).ok_or_else(|| bad("frame header is truncated"))?;
+        let magic = data
+            .get(p..p + 4)
+            .ok_or_else(|| bad("frame header is truncated"))?;
         let m = u32::from_le_bytes(magic.try_into().unwrap());
         if m & 0xFFFF_FFF0 == 0x184D_2A50 {
-            let n = 8 + u32::from_le_bytes(data.get(p + 4..p + 8).ok_or_else(|| bad("skippable frame is truncated"))?.try_into().unwrap()) as usize;
-            out.extend_from_slice(data.get(p..p + n).ok_or_else(|| bad("skippable frame is truncated"))?);
+            let n = 8 + u32::from_le_bytes(
+                data.get(p + 4..p + 8)
+                    .ok_or_else(|| bad("skippable frame is truncated"))?
+                    .try_into()
+                    .unwrap(),
+            ) as usize;
+            out.extend_from_slice(
+                data.get(p..p + n)
+                    .ok_or_else(|| bad("skippable frame is truncated"))?,
+            );
             p += n;
             continue;
         }
@@ -323,10 +348,18 @@ pub fn to_zstd(data: &[u8]) -> R<Vec<u8>> {
         }
         out.extend_from_slice(&ZSTD_MAGIC);
         p += 4;
-        let fhd = *data.get(p).ok_or_else(|| bad("frame header is truncated"))?;
+        let fhd = *data
+            .get(p)
+            .ok_or_else(|| bad("frame header is truncated"))?;
         let single = (fhd >> 5) & 1;
-        let head = 1 + if single != 0 { 0 } else { 1 } + [0usize, 1, 2, 4][(fhd & 3) as usize] + [single as usize, 2, 4, 8][(fhd >> 6) as usize];
-        out.extend_from_slice(data.get(p..p + head).ok_or_else(|| bad("frame header is truncated"))?);
+        let head = 1
+            + if single != 0 { 0 } else { 1 }
+            + [0usize, 1, 2, 4][(fhd & 3) as usize]
+            + [single as usize, 2, 4, 8][(fhd >> 6) as usize];
+        out.extend_from_slice(
+            data.get(p..p + head)
+                .ok_or_else(|| bad("frame header is truncated"))?,
+        );
         p += head;
         loop {
             if p + 3 > data.len() {
@@ -356,7 +389,10 @@ pub fn to_zstd(data: &[u8]) -> R<Vec<u8>> {
             }
         }
         if fhd & 4 != 0 {
-            out.extend_from_slice(data.get(p..p + 4).ok_or_else(|| bad("checksum is truncated"))?);
+            out.extend_from_slice(
+                data.get(p..p + 4)
+                    .ok_or_else(|| bad("checksum is truncated"))?,
+            );
             p += 4;
         }
     }
@@ -366,12 +402,18 @@ pub fn to_zstd(data: &[u8]) -> R<Vec<u8>> {
 /// ZBIC data → exactly `size` bytes.
 pub fn decompress(data: &[u8], size: usize) -> R<Vec<u8>> {
     let frames = to_zstd(data)?;
-    let mut dec = zstd::stream::read::Decoder::with_buffer(&frames[..]).map_err(|e| bad(&e.to_string()))?;
+    let mut dec =
+        zstd::stream::read::Decoder::with_buffer(&frames[..]).map_err(|e| bad(&e.to_string()))?;
     dec.window_log_max(31).map_err(|e| bad(&e.to_string()))?;
     let mut out = vec![];
-    dec.take(size as u64 + 1).read_to_end(&mut out).map_err(|e| bad(&e.to_string()))?;
+    dec.take(size as u64 + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| bad(&e.to_string()))?;
     if out.len() != size {
-        return Err(bad(&format!("{} bytes decoded, {size} expected", out.len())));
+        return Err(bad(&format!(
+            "{} bytes decoded, {size} expected",
+            out.len()
+        )));
     }
     Ok(out)
 }
@@ -382,12 +424,20 @@ mod tests {
 
     /// The text the sample was compressed from (generated, no game data).
     fn sample(n: usize) -> Vec<u8> {
-        let words: [&[u8]; 20] = [b"link", b"zelda", b"ocarina", b"temple", b"rupee", b"sword", b"shield", b"deku", b"hyrule", b"navi", b"ganon", b"epona", b"castle", b"forest", b"water", b"fire", b"shadow", b"spirit", b"time", b"song"];
+        let words: [&[u8]; 20] = [
+            b"link", b"zelda", b"ocarina", b"temple", b"rupee", b"sword", b"shield", b"deku",
+            b"hyrule", b"navi", b"ganon", b"epona", b"castle", b"forest", b"water", b"fire",
+            b"shadow", b"spirit", b"time", b"song",
+        ];
         let mut x: u64 = 12345;
         let mut out = vec![];
         while out.len() < n {
             x = (x * 1103515245 + 12345) & 0x7FFF_FFFF;
-            let w = words[if x & 3 != 0 { (x >> 8) as usize % words.len() } else { (x >> 8) as usize % 4 }];
+            let w = words[if x & 3 != 0 {
+                (x >> 8) as usize % words.len()
+            } else {
+                (x >> 8) as usize % 4
+            }];
             out.extend_from_slice(w);
             if x & 16 != 0 {
                 out.push(b' ');

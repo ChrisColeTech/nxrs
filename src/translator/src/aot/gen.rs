@@ -4,9 +4,9 @@
 use crate::aot::discover::{discover, estimate_sizes, partition, DiscoverStats};
 use crate::aot::emit::{table_text, EmitOptions, Emitter, GENERATED_MARKER};
 use crate::aot::patches::Table;
-use anyhow::{anyhow, Context, Result};
 use crate::loader::layout::{layout_h, layout_json, layout_names, ModLayout};
 use crate::loader::{Module, Nso};
+use anyhow::{anyhow, Context, Result};
 use serde_json::json;
 use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
@@ -81,7 +81,11 @@ pub fn write_if_changed(path: &Path, data: &[u8]) -> std::io::Result<bool> {
             return Ok(false);
         }
     }
-    let tmp = path.with_file_name(format!(".{}.{}.tmp", path.file_name().unwrap().to_string_lossy(), std::process::id()));
+    let tmp = path.with_file_name(format!(
+        ".{}.{}.tmp",
+        path.file_name().unwrap().to_string_lossy(),
+        std::process::id()
+    ));
     std::fs::write(&tmp, data)?;
     std::fs::rename(&tmp, path).inspect_err(|_| {
         let _ = std::fs::remove_file(&tmp);
@@ -91,7 +95,11 @@ pub fn write_if_changed(path: &Path, data: &[u8]) -> std::io::Result<bool> {
 
 /// Python text-mode newline translation (CRLF on Windows).
 fn text_mode(s: &str) -> String {
-    if cfg!(windows) { s.replace('\n', "\r\n") } else { s.to_string() }
+    if cfg!(windows) {
+        s.replace('\n', "\r\n")
+    } else {
+        s.to_string()
+    }
 }
 
 struct Task {
@@ -113,19 +121,30 @@ struct ChunkResult {
 }
 
 /// Generates C for the ExeFS modules given as name -> NSO bytes.
-pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: &(dyn Fn(&str) + Sync)) -> Result<GenReport> {
+pub fn generate(
+    exefs: &BTreeMap<String, Vec<u8>>,
+    opts: &GenOptions,
+    progress: &(dyn Fn(&str) + Sync),
+) -> Result<GenReport> {
     let t0 = Instant::now();
     let mut nsos: HashMap<String, Nso> = HashMap::new();
     let names = crate::loader::layout::order_with(exefs.keys());
     for name in &names {
         if let Some(raw) = exefs.get(name) {
-            nsos.insert(name.clone(), Nso::parse(raw).with_context(|| format!("loading {name}"))?);
+            nsos.insert(
+                name.clone(),
+                Nso::parse(raw).with_context(|| format!("loading {name}"))?,
+            );
         }
     }
-    let mods = layout_names(&names, &|n: &str| nsos.get(n).map(|x| x.size)).map_err(|e| anyhow!(e))?;
+    let mods =
+        layout_names(&names, &|n: &str| nsos.get(n).map(|x| x.size)).map_err(|e| anyhow!(e))?;
     std::fs::create_dir_all(&opts.out)?;
     // gen.py writes these two with Path.write_text, so they carry the platform's line ends.
-    write_if_changed(&opts.out.join("layout.h"), text_mode(&layout_h(&mods)).as_bytes())?;
+    write_if_changed(
+        &opts.out.join("layout.h"),
+        text_mode(&layout_h(&mods)).as_bytes(),
+    )?;
     let table = match &opts.patches {
         Some(p) => Table::load(p, &mods)?,
         None => Table::empty(&mods)?,
@@ -138,18 +157,37 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
             let entries: Vec<u64> = table
                 .for_module(&ml.name, ml.base)?
                 .iter()
-                .filter_map(|(a, (_, ws))| ws.last().and_then(|&w| crate::aot::patches::branch_target(w, *a)))
+                .filter_map(|(a, (_, ws))| {
+                    ws.last()
+                        .and_then(|&w| crate::aot::patches::branch_target(w, *a))
+                })
                 .filter(|t| (code..base + size).contains(t))
                 .collect();
-            stubs.push((ml.name.clone(), Module::code(&name, base, code, words, entries)));
+            stubs.push((
+                ml.name.clone(),
+                Module::code(&name, base, code, words, entries),
+            ));
         }
     }
     let mut all_mods = mods.clone();
-    all_mods.extend(stubs.iter().map(|(_, m)| ModLayout { name: m.name.clone(), base: m.base, size: m.image.len() as u64 }));
-    write_if_changed(&opts.out.join("layout.json"), text_mode(&layout_json(&all_mods)).as_bytes())?;
-    write_if_changed(&opts.out.join("patches.h"), table.header_text(GENERATED_MARKER).as_bytes())?;
-    let want: Vec<String> =
-        if opts.modules.is_empty() { mods.iter().map(|m| m.name.clone()).collect() } else { opts.modules.clone() };
+    all_mods.extend(stubs.iter().map(|(_, m)| ModLayout {
+        name: m.name.clone(),
+        base: m.base,
+        size: m.image.len() as u64,
+    }));
+    write_if_changed(
+        &opts.out.join("layout.json"),
+        text_mode(&layout_json(&all_mods)).as_bytes(),
+    )?;
+    write_if_changed(
+        &opts.out.join("patches.h"),
+        table.header_text(GENERATED_MARKER).as_bytes(),
+    )?;
+    let want: Vec<String> = if opts.modules.is_empty() {
+        mods.iter().map(|m| m.name.clone()).collect()
+    } else {
+        opts.modules.clone()
+    };
     for w in &want {
         if !mods.iter().any(|m| &m.name == w) {
             return Err(anyhow!("not in the ExeFS: {w}"));
@@ -167,12 +205,25 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
     let order: Vec<(ModLayout, bool)> = mods
         .iter()
         .flat_map(|ml| {
-            let s = stub_mods.get(&ml.name).map(|m| (ModLayout { name: m.name.clone(), base: m.base, size: m.image.len() as u64 }, true));
+            let s = stub_mods.get(&ml.name).map(|m| {
+                (
+                    ModLayout {
+                        name: m.name.clone(),
+                        base: m.base,
+                        size: m.image.len() as u64,
+                    },
+                    true,
+                )
+            });
             std::iter::once((ml.clone(), false)).chain(s)
         })
         .collect();
     for (ml, is_stubs) in &order {
-        let parent = if *is_stubs { ml.name.trim_end_matches("_stubs").to_string() } else { ml.name.clone() };
+        let parent = if *is_stubs {
+            ml.name.trim_end_matches("_stubs").to_string()
+        } else {
+            ml.name.clone()
+        };
         if !want.contains(&parent) {
             continue;
         }
@@ -184,7 +235,8 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
             let mut m = Module::new(&ml.name, nso, ml.base);
             m.extra_seeds = table.branch_ins(&ml.name, ml.base);
             if let Some(h) = opts.hints.get(&ml.name) {
-                let (kept, dropped) = crate::aot::hints::usable(h, m.base, m.lo, m.hi, &|a| m.word(a));
+                let (kept, dropped) =
+                    crate::aot::hints::usable(h, m.base, m.lo, m.hi, &|a| m.word(a));
                 hints_used += kept.len();
                 hints_dropped += dropped;
                 m.extra_seeds.extend(kept);
@@ -211,7 +263,12 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
             let fns = (i0..i1).map(|i| (abs[i], ends[i])).collect();
             tasks.push((
                 est[i0..i1].iter().sum(),
-                Task { module: idx, number, path: moddir.join(format!("{}_{number:04}.c", ml.name)), fns },
+                Task {
+                    module: idx,
+                    number,
+                    path: moddir.join(format!("{}_{number:04}.c", ml.name)),
+                    fns,
+                },
             ));
         }
         progress(&format!(
@@ -238,11 +295,24 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
     let results: Mutex<Vec<ChunkResult>> = Mutex::new(vec![]);
     let errors: Mutex<Vec<String>> = Mutex::new(vec![]);
     let t_emit = Instant::now();
-    let per_module: Vec<(BTreeMap<u64, (usize, Vec<u32>)>, BTreeMap<u64, u64>, BTreeMap<u64, (usize, u64)>)> = modules
+    let per_module: Vec<(
+        BTreeMap<u64, (usize, Vec<u32>)>,
+        BTreeMap<u64, u64>,
+        BTreeMap<u64, (usize, u64)>,
+    )> = modules
         .iter()
-        .map(|m| Ok((table.for_module(&m.name, m.base)?, table.spins_for(&m.name, m.base), table.spans_for(&m.name, m.base))))
+        .map(|m| {
+            Ok((
+                table.for_module(&m.name, m.base)?,
+                table.spins_for(&m.name, m.base),
+                table.spans_for(&m.name, m.base),
+            ))
+        })
         .collect::<Result<_>>()?;
-    let probes: Vec<std::collections::BTreeSet<u64>> = modules.iter().map(|m| table.probes_for(&m.name, m.base)).collect();
+    let probes: Vec<std::collections::BTreeSet<u64>> = modules
+        .iter()
+        .map(|m| table.probes_for(&m.name, m.base))
+        .collect();
     std::thread::scope(|scope| {
         for _ in 0..opts.jobs.max(1) {
             scope.spawn(|| {
@@ -258,8 +328,13 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
                         let (p, s, sp) = per_module[task.module].clone();
                         // --limit: only the emitted functions are called directly; the rest go through rt_dispatch
                         // (the runtime interprets them), so a partial build links and runs
-                        let starts = if opts.limit == 0 { &starts_abs[task.module] } else { &emitted[task.module] };
-                        Emitter::new(&modules[task.module], starts, p, s, sp, &opts.emit).with_probes(probes[task.module].clone())
+                        let starts = if opts.limit == 0 {
+                            &starts_abs[task.module]
+                        } else {
+                            &emitted[task.module]
+                        };
+                        Emitter::new(&modules[task.module], starts, p, s, sp, &opts.emit)
+                            .with_probes(probes[task.module].clone())
                     });
                     e.stats.clear();
                     e.unsupported.clear();
@@ -267,17 +342,28 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
                     let text = match e.chunk_text(name, task.number, &task.fns) {
                         Ok(t) => t,
                         Err(err) => {
-                            errors.lock().unwrap().push(format!("{name} chunk {}: {err}", task.number));
+                            errors
+                                .lock()
+                                .unwrap()
+                                .push(format!("{name} chunk {}: {err}", task.number));
                             break;
                         }
                     };
                     if let Err(err) = write_if_changed(&task.path, text.as_bytes()) {
-                        errors.lock().unwrap().push(format!("{}: {err}", task.path.display()));
+                        errors
+                            .lock()
+                            .unwrap()
+                            .push(format!("{}: {err}", task.path.display()));
                     }
                     results.lock().unwrap().push(ChunkResult {
                         module: task.module,
                         number: task.number,
-                        file: task.path.file_name().unwrap().to_string_lossy().into_owned(),
+                        file: task
+                            .path
+                            .file_name()
+                            .unwrap()
+                            .to_string_lossy()
+                            .into_owned(),
                         functions: task.fns.len(),
                         bytes: text.len(),
                         seconds: t.elapsed().as_secs_f64(),
@@ -300,7 +386,11 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
 
     let mut results = results.into_inner().unwrap();
     results.sort_by_key(|r| (r.module, r.number));
-    let mut report = GenReport { hints_used, hints_dropped, ..GenReport::default() };
+    let mut report = GenReport {
+        hints_used,
+        hints_dropped,
+        ..GenReport::default()
+    };
     for (idx, m) in modules.iter().enumerate() {
         let rs: Vec<&ChunkResult> = results.iter().filter(|r| r.module == idx).collect();
         let mut stats: BTreeMap<&'static str, u64> = BTreeMap::new();
@@ -314,7 +404,10 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
             }
         }
         let moddir = opts.out.join(&m.name);
-        write_if_changed(&moddir.join(format!("{}_table.c", m.name)), table_text(&m.name, &emitted[idx]).as_bytes())?;
+        write_if_changed(
+            &moddir.join(format!("{}_table.c", m.name)),
+            table_text(&m.name, &emitted[idx]).as_bytes(),
+        )?;
         remove_stale(&moddir, &m.name, nchunks[idx])?;
         let c_bytes: usize = rs.iter().map(|r| r.bytes).sum();
         let d = &dstats[idx];
@@ -342,7 +435,10 @@ pub fn generate(exefs: &BTreeMap<String, Vec<u8>>, opts: &GenOptions, progress: 
             "unsupported_census": census.iter().take(50).map(|(k, v)| (k.to_string(), json!(v))).collect::<serde_json::Map<_, _>>(),
             "timings": {"emit_wall_s": (emit_s * 100.0).round() / 100.0},
         });
-        write_if_changed(&moddir.join("manifest.json"), (serde_json::to_string_pretty(&manifest)? + "\n").as_bytes())?;
+        write_if_changed(
+            &moddir.join("manifest.json"),
+            (serde_json::to_string_pretty(&manifest)? + "\n").as_bytes(),
+        )?;
         progress(&format!(
             "{}: {} functions, {} chunks, {:.0} MB of C, {} jump tables, {} all-label fallbacks, {} br via dispatch, {} traps ({} unsupported)",
             m.name,
@@ -377,7 +473,9 @@ fn remove_stale(moddir: &Path, name: &str, nchunks: usize) -> Result<usize> {
     for e in std::fs::read_dir(moddir)? {
         let p = e?.path();
         let f = p.file_name().unwrap().to_string_lossy().into_owned();
-        let stale = pat.captures(&f).is_some_and(|c| c[1].parse::<usize>().unwrap() >= nchunks)
+        let stale = pat
+            .captures(&f)
+            .is_some_and(|c| c[1].parse::<usize>().unwrap() >= nchunks)
             || (f.starts_with('.') && f.ends_with(".tmp"));
         if stale {
             std::fs::remove_file(&p)?;

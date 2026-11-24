@@ -74,7 +74,9 @@ pub struct Nso {
 }
 
 fn rd32(b: &[u8], o: usize) -> Result<u32, NsoError> {
-    b.get(o..o + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap())).ok_or(NsoError::Bounds(o))
+    b.get(o..o + 4)
+        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+        .ok_or(NsoError::Bounds(o))
 }
 
 /// One compressed segment: a ZBIC frame (Switch 2) or an LZ4 block.
@@ -97,11 +99,22 @@ pub fn for_runtime(d: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, String> {
     }
     let r = |o: usize| u32::from_le_bytes(d[o..o + 4].try_into().unwrap());
     let flags = r(0xC);
-    let segs: Vec<(usize, usize, usize)> =
-        (0..3).map(|i| (r(0x10 + i * 0x10) as usize, r(0x18 + i * 0x10) as usize, r(0x60 + i * 4) as usize)).collect();
+    let segs: Vec<(usize, usize, usize)> = (0..3)
+        .map(|i| {
+            (
+                r(0x10 + i * 0x10) as usize,
+                r(0x18 + i * 0x10) as usize,
+                r(0x60 + i * 4) as usize,
+            )
+        })
+        .collect();
     let packed = |i: usize| flags >> i & 1 != 0;
     let zbic = flags & super::zbic::NSO_FLAG_ZBIC != 0
-        || (0..3).any(|i| packed(i) && d.get(segs[i].0..segs[i].0 + segs[i].2).is_some_and(super::zbic::is_zbic));
+        || (0..3).any(|i| {
+            packed(i)
+                && d.get(segs[i].0..segs[i].0 + segs[i].2)
+                    .is_some_and(super::zbic::is_zbic)
+        });
     if !zbic {
         return Ok(Cow::Borrowed(d));
     }
@@ -109,8 +122,14 @@ pub fn for_runtime(d: &[u8]) -> Result<std::borrow::Cow<'_, [u8]>, String> {
     let mut body = vec![];
     let mut at = 0x100usize;
     for (i, &(foff, size, stored)) in segs.iter().enumerate() {
-        let raw = d.get(foff..foff + if packed(i) { stored } else { size }).ok_or(format!("segment {i} is truncated"))?;
-        let seg = if packed(i) { unpack_segment(raw, size).map_err(|e| format!("segment {i}: {e}"))? } else { raw.to_vec() };
+        let raw = d
+            .get(foff..foff + if packed(i) { stored } else { size })
+            .ok_or(format!("segment {i} is truncated"))?;
+        let seg = if packed(i) {
+            unpack_segment(raw, size).map_err(|e| format!("segment {i}: {e}"))?
+        } else {
+            raw.to_vec()
+        };
         if seg.len() < size {
             return Err(format!("segment {i} is truncated"));
         }
@@ -132,8 +151,16 @@ fn nro_segments(raw: &[u8]) -> Option<([(usize, usize); 3], u32, usize)> {
     }
     let r = |o: usize| rd32(raw, o).ok().map(|v| v as usize);
     let size = r(0x18)?;
-    let segs = [(r(0x20)?, r(0x24)?), (r(0x28)?, r(0x2C)?), (r(0x30)?, r(0x34)?)];
-    (size <= raw.len() && segs.iter().all(|&(o, n)| o + n <= size)).then_some((segs, r(0x38)? as u32, size))
+    let segs = [
+        (r(0x20)?, r(0x24)?),
+        (r(0x28)?, r(0x2C)?),
+        (r(0x30)?, r(0x34)?),
+    ];
+    (size <= raw.len() && segs.iter().all(|&(o, n)| o + n <= size)).then_some((
+        segs,
+        r(0x38)? as u32,
+        size,
+    ))
 }
 
 impl Nso {
@@ -167,10 +194,17 @@ impl Nso {
 
     /// The image from its three segments (memory offset, bytes) and the bss size; the build id at +0x40 (NSO and NRO
     /// alike).
-    fn from_segments(raw: &[u8], segs: &[(usize, Vec<u8>); 3], bss_size: u32) -> Result<Nso, NsoError> {
+    fn from_segments(
+        raw: &[u8],
+        segs: &[(usize, Vec<u8>); 3],
+        bss_size: u32,
+    ) -> Result<Nso, NsoError> {
         let bid = raw.get(0x40..0x60).ok_or(NsoError::Bounds(0x40))?;
         let end = bid.iter().rposition(|&b| b != 0).map_or(0, |p| p + 1);
-        let build_id = bid[..end].iter().map(|b| format!("{b:02x}")).collect::<String>();
+        let build_id = bid[..end]
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect::<String>();
         let text = (segs[0].0, segs[0].1.len());
         let rodata = (segs[1].0, segs[1].1.len());
         let data = (segs[2].0, segs[2].1.len());
@@ -218,7 +252,11 @@ impl Nso {
             return Err(NsoError::Mod0);
         }
         let rel = |s: &Self, i: usize| -> usize {
-            let d = i32::from_le_bytes(s.image[mod0 + 4 + i * 4..mod0 + 8 + i * 4].try_into().unwrap());
+            let d = i32::from_le_bytes(
+                s.image[mod0 + 4 + i * 4..mod0 + 8 + i * 4]
+                    .try_into()
+                    .unwrap(),
+            );
             (mod0 as i64 + d as i64) as usize
         };
         self.dynamic = rel(self, 0);
@@ -244,7 +282,10 @@ impl Nso {
         self.dyn_ = dyn_;
         let strtab = *self.dyn_.get(&DT_STRTAB).unwrap_or(&0);
         self.strtab = strtab;
-        self.needed = needed.iter().map(|&v| self.cstr((strtab + v) as usize)).collect();
+        self.needed = needed
+            .iter()
+            .map(|&v| self.cstr((strtab + v) as usize))
+            .collect();
         let nsyms = self.symbol_count();
         if nsyms > 0 {
             if let Some(&st) = self.dyn_.get(&DT_SYMTAB) {
@@ -256,7 +297,13 @@ impl Nso {
                     let value = self.u64(o + 8);
                     let size = self.u64(o + 16);
                     let name = self.cstr((strtab + name as u64) as usize);
-                    self.syms.push(Sym { name, info, shndx, value, size });
+                    self.syms.push(Sym {
+                        name,
+                        info,
+                        shndx,
+                        value,
+                        size,
+                    });
                 }
             }
         }
@@ -268,7 +315,12 @@ impl Nso {
                     let r_off = self.u64(o);
                     let r_info = self.u64(o + 8);
                     let r_add = self.u64(o + 16) as i64;
-                    self.relocs.push(Reloc { off: r_off, typ: r_info as u32, sym: (r_info >> 32) as u32, addend: r_add });
+                    self.relocs.push(Reloc {
+                        off: r_off,
+                        typ: r_info as u32,
+                        sym: (r_info >> 32) as u32,
+                        addend: r_add,
+                    });
                 }
             }
         }
@@ -280,7 +332,12 @@ impl Nso {
                 let e = self.u64(relr as usize + i * 8);
                 if e & 1 == 0 {
                     let v = self.u64(e as usize);
-                    self.relocs.push(Reloc { off: e, typ: R_AARCH64_RELATIVE, sym: 0, addend: v as i64 });
+                    self.relocs.push(Reloc {
+                        off: e,
+                        typ: R_AARCH64_RELATIVE,
+                        sym: 0,
+                        addend: v as i64,
+                    });
                     where_ = e + 8;
                     continue;
                 }
@@ -288,7 +345,12 @@ impl Nso {
                     if (e >> (k + 1)) & 1 != 0 {
                         let a = where_ + k * 8;
                         let v = self.u64(a as usize);
-                        self.relocs.push(Reloc { off: a, typ: R_AARCH64_RELATIVE, sym: 0, addend: v as i64 });
+                        self.relocs.push(Reloc {
+                            off: a,
+                            typ: R_AARCH64_RELATIVE,
+                            sym: 0,
+                            addend: v as i64,
+                        });
                     }
                 }
                 where_ += 63 * 8;
@@ -302,11 +364,20 @@ impl Nso {
         if let Some(&h) = self.dyn_.get(&DT_HASH) {
             return self.u32(h as usize + 4) as usize;
         }
-        let Some(&h) = self.dyn_.get(&DT_GNU_HASH) else { return 0 };
+        let Some(&h) = self.dyn_.get(&DT_GNU_HASH) else {
+            return 0;
+        };
         let h = h as usize;
-        let (nbuckets, symoffset, bloom_size) = (self.u32(h) as usize, self.u32(h + 4), self.u32(h + 8) as usize);
+        let (nbuckets, symoffset, bloom_size) = (
+            self.u32(h) as usize,
+            self.u32(h + 4),
+            self.u32(h + 8) as usize,
+        );
         let buckets = h + 16 + bloom_size * 8;
-        let mut last = (0..nbuckets).map(|i| self.u32(buckets + 4 * i)).max().unwrap_or(0);
+        let mut last = (0..nbuckets)
+            .map(|i| self.u32(buckets + 4 * i))
+            .max()
+            .unwrap_or(0);
         if last < symoffset {
             return symoffset as usize;
         }
@@ -321,7 +392,10 @@ impl Nso {
         if off >= self.image.len() {
             return String::new();
         }
-        let end = self.image[off..].iter().position(|&b| b == 0).map_or(self.image.len(), |p| off + p);
+        let end = self.image[off..]
+            .iter()
+            .position(|&b| b == 0)
+            .map_or(self.image.len(), |p| off + p);
         String::from_utf8_lossy(&self.image[off..end]).into_owned()
     }
 }

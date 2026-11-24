@@ -15,14 +15,23 @@ fn repo() -> PathBuf {
 #[test]
 #[ignore]
 fn jumptables_match_python() {
-    let dir = std::env::var("JT_DUMP_DIR").map(PathBuf::from).unwrap_or_else(|_| repo().join("build/jt"));
-    let exefs = std::env::var("JT_EXEFS").map(PathBuf::from).unwrap_or_else(|_| repo().join("build/ref/exefs"));
+    let dir = std::env::var("JT_DUMP_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo().join("build/jt"));
+    let exefs = std::env::var("JT_EXEFS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| repo().join("build/ref/exefs"));
     let mut names: Vec<String> = match std::env::var("JT_MODULES") {
         Ok(s) => s.split(',').map(str::to_string).collect(),
         Err(_) => std::fs::read_dir(&dir)
             .expect("dump dir")
             .flatten()
-            .filter_map(|e| e.file_name().to_str().and_then(|n| n.strip_suffix(".txt")).map(str::to_string))
+            .filter_map(|e| {
+                e.file_name()
+                    .to_str()
+                    .and_then(|n| n.strip_suffix(".txt"))
+                    .map(str::to_string)
+            })
             .collect(),
     };
     names.sort();
@@ -31,10 +40,16 @@ fn jumptables_match_python() {
     for name in names {
         let text = std::fs::read_to_string(dir.join(format!("{name}.txt"))).unwrap();
         let mut lines = text.lines();
-        let base = u64::from_str_radix(lines.next().unwrap().strip_prefix("# base 0x").unwrap(), 16).unwrap();
+        let base =
+            u64::from_str_radix(lines.next().unwrap().strip_prefix("# base 0x").unwrap(), 16)
+                .unwrap();
         let module = name.split('.').next().unwrap(); // <module>[.variant].txt
         let raw = std::fs::read(exefs.join(module)).unwrap();
-        let m = translator::loader::Module::new(module, translator::loader::Nso::parse(&raw).unwrap(), base);
+        let m = translator::loader::Module::new(
+            module,
+            translator::loader::Nso::parse(&raw).unwrap(),
+            base,
+        );
         let mut jt = JumpTables::new(&m);
         let t0 = std::time::Instant::now();
         let (mut ok, mut bad, mut resolved) = (0, 0, 0);
@@ -46,7 +61,11 @@ fn jumptables_match_python() {
             let c = jt.is_computed(br, entry);
             let rs = match &r {
                 None => "None".to_string(),
-                Some(v) => v.iter().map(|t| format!("{t:x}")).collect::<Vec<_>>().join(","),
+                Some(v) => v
+                    .iter()
+                    .map(|t| format!("{t:x}"))
+                    .collect::<Vec<_>>()
+                    .join(","),
             };
             let got = format!("{} {}", c as u8, rs);
             let want = format!("{} {}", f[3], f[4]);
@@ -63,7 +82,10 @@ fn jumptables_match_python() {
                 }
             }
         }
-        println!("{name}: {ok} match, {bad} mismatch, {resolved} resolved ({:.1}s)", t0.elapsed().as_secs_f64());
+        println!(
+            "{name}: {ok} match, {bad} mismatch, {resolved} resolved ({:.1}s)",
+            t0.elapsed().as_secs_f64()
+        );
         total_bad += bad;
     }
     assert_eq!(total_bad, 0);

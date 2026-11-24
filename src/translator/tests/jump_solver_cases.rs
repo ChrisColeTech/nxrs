@@ -90,7 +90,9 @@ struct Case {
 }
 impl Case {
     fn new() -> Case {
-        Case { words: vec![0; 0x6000 / 4] }
+        Case {
+            words: vec![0; 0x6000 / 4],
+        }
     }
     fn table(&mut self, targets: &[u32]) {
         let at = (TABLE / 4) as usize;
@@ -129,7 +131,14 @@ fn compare_and_b_hi() {
     let tg = [36, 40, 44, 48, 52];
     c.table(&tg);
     let mut w = Case::base(4);
-    w.extend([ldr_w(18), cmp_w(18, 4), bcond(HI, 16, 56), ldrsw(18, 4, 18), addr(18, 18, 4), br(18)]);
+    w.extend([
+        ldr_w(18),
+        cmp_w(18, 4),
+        bcond(HI, 16, 56),
+        ldrsw(18, 4, 18),
+        addr(18, 18, 4),
+        br(18),
+    ]);
     assert_eq!(c.site(&pad(w, 6)), t(&tg));
 }
 
@@ -160,7 +169,16 @@ fn a_nearer_compare_with_its_own_guard_bounds() {
     let tg = [40, 44, 48, 52, 56];
     c.table(&tg);
     let mut w = Case::base(4);
-    w.extend([ldr_w(18), cmp_w(18, 4), bcond(HI, 16, 60), cmp_w(18, 1), bcond(HI, 24, 60), ldrsw(18, 4, 18), addr(18, 18, 4), br(18)]);
+    w.extend([
+        ldr_w(18),
+        cmp_w(18, 4),
+        bcond(HI, 16, 60),
+        cmp_w(18, 1),
+        bcond(HI, 24, 60),
+        ldrsw(18, 4, 18),
+        addr(18, 18, 4),
+        br(18),
+    ]);
     let n = 16 - w.len();
     assert_eq!(c.site(&pad(w, n)), t(&tg[..2]));
 }
@@ -171,7 +189,15 @@ fn b_ls_into_the_dispatch() {
     let tg = [36, 40, 44, 48, 52];
     c.table(&tg);
     let mut w = Case::base(4);
-    w.extend([ldr_w(18), cmp_w(18, 4), bcond(LS, 16, 24), b(20, 64), ldrsw(18, 4, 18), addr(18, 18, 4), br(18)]);
+    w.extend([
+        ldr_w(18),
+        cmp_w(18, 4),
+        bcond(LS, 16, 24),
+        b(20, 64),
+        ldrsw(18, 4, 18),
+        addr(18, 18, 4),
+        br(18),
+    ]);
     assert_eq!(c.site(&pad(w, 6)), t(&tg));
 }
 
@@ -182,7 +208,15 @@ fn copy_after_the_check() {
     let tg: Vec<u32> = (0..5).map(|i| 64 + 4 * i).collect();
     c.table(&tg);
     let mut w = Case::base(4);
-    w.extend([ldr_w(21), cmp_w(21, 4), bcond(HI, 16, 60), mov_w(18, 21), ldrsw(18, 4, 18), addr(18, 18, 4), br(18)]);
+    w.extend([
+        ldr_w(21),
+        cmp_w(21, 4),
+        bcond(HI, 16, 60),
+        mov_w(18, 21),
+        ldrsw(18, 4, 18),
+        addr(18, 18, 4),
+        br(18),
+    ]);
     assert_eq!(c.site(&pad(w, 12)), t(&tg));
 }
 
@@ -194,13 +228,30 @@ fn masked_copy_and_offset_checks() {
     let tg: Vec<u32> = (0..15).map(|i| 48 + 4 * i).collect();
     c.table(&tg);
     let mut w = Case::base(4);
-    w.extend([ldr_w(18), and_w(16, 18, 6), cmp_w(16, 14), bcond(HI, 20, 44), and_x(18, 18, 6), ldrsw(18, 4, 18), addr(18, 18, 4), br(18)]);
+    w.extend([
+        ldr_w(18),
+        and_w(16, 18, 6),
+        cmp_w(16, 14),
+        bcond(HI, 20, 44),
+        and_x(18, 18, 6),
+        ldrsw(18, 4, 18),
+        addr(18, 18, 4),
+        br(18),
+    ]);
     assert_eq!(c.site(&pad(w, 20)), t(&tg));
     let mut c = Case::new();
     let tg: Vec<u32> = (0..50).map(|i| 44 + 4 * i).collect();
     c.table(&tg);
     let mut w = Case::base(4);
-    w.extend([ldr_w(18), sub_w(0, 18, 0xd1), cmp_w(0, 0x31), bcond(HI, 20, 40), ldrsw(18, 4, 0), addr(18, 18, 4), br(18)]);
+    w.extend([
+        ldr_w(18),
+        sub_w(0, 18, 0xd1),
+        cmp_w(0, 0x31),
+        bcond(HI, 20, 40),
+        ldrsw(18, 4, 0),
+        addr(18, 18, 4),
+        br(18),
+    ]);
     assert_eq!(c.site(&pad(w, 55)), t(&tg));
 }
 
@@ -213,12 +264,23 @@ fn compare_widths() {
     c.table(&tg);
     let mut run = |load: u32, check: u32| {
         let mut w = Case::base(4);
-        w.extend([load, check, bcond(HI, 16, 56), ldrsw(18, 4, 22), addr(18, 18, 4), br(18)]);
+        w.extend([
+            load,
+            check,
+            bcond(HI, 16, 56),
+            ldrsw(18, 4, 22),
+            addr(18, 18, 4),
+            br(18),
+        ]);
         c.site(&pad(w, 10))
     };
     assert_eq!(run(ldr_x(22), cmp_x(22, 4)), t(&tg));
     assert_eq!(run(ldr_w(22), cmp_w(22, 4)), t(&tg));
-    assert_eq!(run(ldr_x(22), cmp_w(22, 4)), None, "ldr x22: the upper half is unknown");
+    assert_eq!(
+        run(ldr_x(22), cmp_w(22, 4)),
+        None,
+        "ldr x22: the upper half is unknown"
+    );
 }
 
 /// ASTRAL CHAIN main+0x6db104: lsr x17,x11,#32; cmp w17,#5; b.hi: the shift leaves the upper half zero
@@ -230,12 +292,24 @@ fn shifted_down_then_a_32_bit_compare() {
     c.table(&tg);
     let mut run = |shift: u32| {
         let mut w = Case::base(4);
-        w.extend([ldr_x(11), shift, cmp_w(22, 4), bcond(HI, 20, 60), ldrsw(18, 4, 22), addr(18, 18, 4), br(18)]);
+        w.extend([
+            ldr_x(11),
+            shift,
+            cmp_w(22, 4),
+            bcond(HI, 20, 60),
+            ldrsw(18, 4, 22),
+            addr(18, 18, 4),
+            br(18),
+        ]);
         c.site(&pad(w, 10))
     };
     assert_eq!(run(lsr_x(22, 11, 32)), t(&tg));
     assert_eq!(run(ubfx_x(22, 11, 8, 32)), t(&tg));
-    assert_eq!(run(lsr_x(22, 11, 31)), None, "33 bits: the compare leaves the top one unknown");
+    assert_eq!(
+        run(lsr_x(22, 11, 31)),
+        None,
+        "33 bits: the compare leaves the top one unknown"
+    );
 }
 
 /// Mario Tennis Aces main+0x35837c: cmp w8,#4; b.hi; and x18,x8,#0xffffffff
@@ -245,7 +319,15 @@ fn zero_extended_after_the_check() {
     let tg: Vec<u32> = (0..5).map(|i| 40 + 4 * i).collect();
     c.table(&tg);
     let mut w = Case::base(16);
-    w.extend([ldr_x(8), cmp_w(8, 4), bcond(HI, 16, 60), zext(18, 8), ldrsw(18, 16, 18), addr(18, 18, 16), br(18)]);
+    w.extend([
+        ldr_x(8),
+        cmp_w(8, 4),
+        bcond(HI, 16, 60),
+        zext(18, 8),
+        ldrsw(18, 16, 18),
+        addr(18, 18, 16),
+        br(18),
+    ]);
     assert_eq!(c.site(&pad(w, 8)), t(&tg));
 }
 
@@ -257,7 +339,16 @@ fn complemented_index() {
     let tg: Vec<u32> = (0..7).map(|i| 44 + 4 * i).collect();
     c.table(&tg);
     let mut w = Case::base(16);
-    w.extend([ldr_w(17), tst_w(17, 3), bcond(EQ, 16, 72), mvn_w(17, 17), and_x(18, 17, 3), ldrsw(18, 16, 18), addr(18, 18, 16), br(18)]);
+    w.extend([
+        ldr_w(17),
+        tst_w(17, 3),
+        bcond(EQ, 16, 72),
+        mvn_w(17, 17),
+        and_x(18, 17, 3),
+        ldrsw(18, 16, 18),
+        addr(18, 18, 16),
+        br(18),
+    ]);
     assert_eq!(c.site(&pad(w.clone(), 10)), t(&tg));
 }
 
@@ -269,7 +360,15 @@ fn mask_whose_highest_value_leaves() {
     let tg: Vec<u32> = (0..7).map(|i| 40 + 4 * i).collect();
     c.table(&tg);
     let mut w = Case::base(16);
-    w.extend([ldr_w(17), and_w(18, 17, 3), cmp_w(18, 7), bcond(EQ, 20, 68), ldrsw(18, 16, 18), addr(18, 18, 16), br(18)]);
+    w.extend([
+        ldr_w(17),
+        and_w(18, 17, 3),
+        cmp_w(18, 7),
+        bcond(EQ, 20, 68),
+        ldrsw(18, 16, 18),
+        addr(18, 18, 16),
+        br(18),
+    ]);
     assert_eq!(c.site(&pad(w, 10)), t(&tg));
 }
 
@@ -281,7 +380,15 @@ fn bit_test_before_the_mask() {
     let tg: Vec<u32> = (0..8).map(|i| 44 + 4 * i).collect();
     c.table(&tg);
     let mut w = Case::base(13);
-    w.extend([ldr_w(17), tbnz(17, 3, 12, 40), and_x(18, 17, 4), ldrsw(18, 13, 18), addr(18, 18, 13), br(18), RET]);
+    w.extend([
+        ldr_w(17),
+        tbnz(17, 3, 12, 40),
+        and_x(18, 17, 4),
+        ldrsw(18, 13, 18),
+        addr(18, 18, 13),
+        br(18),
+        RET,
+    ]);
     assert_eq!(c.site(&pad(w, 10)), t(&tg));
     let _ = movz(0, 0);
 }

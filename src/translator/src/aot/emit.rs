@@ -54,7 +54,10 @@ pub struct EmitOptions {
 
 impl Default for EmitOptions {
     fn default() -> Self {
-        EmitOptions { reg_locals: regs::LOCALS, callee_saved: true }
+        EmitOptions {
+            reg_locals: regs::LOCALS,
+            callee_saved: true,
+        }
     }
 }
 
@@ -97,7 +100,11 @@ impl<'m> Emitter<'m> {
             spanned,
             probes: BTreeSet::new(),
             reg_locals: opts.reg_locals,
-            kept: if opts.callee_saved { regs::callee_saved() } else { BTreeSet::new() },
+            kept: if opts.callee_saved {
+                regs::callee_saved()
+            } else {
+                BTreeSet::new()
+            },
             sj_owners: {
                 let mut o = crate::aot::discover::setjmp_owners(m, sorted_starts);
                 o.extend(crate::aot::discover::landing_pad_owners(m, sorted_starts));
@@ -128,10 +135,20 @@ impl<'m> Emitter<'m> {
     }
 
     fn replacements(&self, a: u64) -> Vec<Insn> {
-        self.patched[&a].1.iter().map(|&w| self.lifter.lift_or_trap(w, a)).collect()
+        self.patched[&a]
+            .1
+            .iter()
+            .enumerate()
+            .map(|(i, &w)| self.lifter.lift_or_trap(w, a + 4 * i as u64))
+            .collect()
     }
 
-    fn scan(&mut self, insns: &[Insn], entry: u64, end: u64) -> (BTreeSet<u64>, BTreeMap<u64, Table>) {
+    fn scan(
+        &mut self,
+        insns: &[Insn],
+        entry: u64,
+        end: u64,
+    ) -> (BTreeSet<u64>, BTreeMap<u64, Table>) {
         let mut labels = BTreeSet::new();
         let mut tables = BTreeMap::new();
         for (i, ins) in insns.iter().enumerate() {
@@ -171,9 +188,18 @@ impl<'m> Emitter<'m> {
         (labels, tables)
     }
 
-    fn flow(insns: &[Insn], entry: u64, end: u64, tables: &BTreeMap<u64, Table>) -> Vec<Vec<usize>> {
+    fn flow(
+        insns: &[Insn],
+        entry: u64,
+        end: u64,
+        tables: &BTreeMap<u64, Table>,
+    ) -> Vec<Vec<usize>> {
         let idx = |t: u64| -> Vec<usize> {
-            if entry <= t && t < end { vec![((t - entry) / 4) as usize] } else { vec![] }
+            if entry <= t && t < end {
+                vec![((t - entry) / 4) as usize]
+            } else {
+                vec![]
+            }
         };
         let mut succ: Vec<Vec<usize>> = insns
             .iter()
@@ -201,8 +227,16 @@ impl<'m> Emitter<'m> {
         let mut alts = vec![];
         let orig = [ins.clone()];
         let repl = self.replacements(a);
-        for words in [&orig[..], &repl[..]] {
+        for (original, words) in [(true, &orig[..]), (false, &repl[..])] {
             let mut fx = vec![];
+            if original && ins.kind == Kind::Bcond {
+                fx.push(flags::effect(&ins.cond)?);
+            }
+            if !original {
+                for w in words.iter().filter(|w| w.kind == Kind::Bcond) {
+                    fx.push(flags::effect(&w.cond)?);
+                }
+            }
             for w in words.iter().filter(|w| w.kind == Kind::Op) {
                 let e = flags::effect(&w.code)?;
                 if e.0 || e.1.is_some() {
@@ -210,7 +244,10 @@ impl<'m> Emitter<'m> {
                 }
             }
             if fx.len() > 1 {
-                return Err(PatchError(format!("{a:#x}: several flag-using words in one alternative")).into());
+                return Err(PatchError(format!(
+                    "{a:#x}: several flag-using words in one alternative"
+                ))
+                .into());
             }
             alts.push(fx.pop().unwrap_or((false, None)));
         }
@@ -258,11 +295,19 @@ impl<'m> Emitter<'m> {
                 if self.replacements(a).iter().any(|r| r.kind == Kind::Bl) {
                     calls.insert(i);
                 }
-                if self.replacements(a).last().is_some_and(|r| r.kind == Kind::B) {
+                if self
+                    .replacements(a)
+                    .last()
+                    .is_some_and(|r| r.kind == Kind::B)
+                {
                     exits.insert(i);
                 }
             } else {
-                effects.push(flags::effect(if ins.kind == Kind::Bcond { &ins.cond } else { &ins.code })?);
+                effects.push(flags::effect(if ins.kind == Kind::Bcond {
+                    &ins.cond
+                } else {
+                    &ins.code
+                })?);
             }
         }
         effects.push((false, None));
@@ -275,12 +320,29 @@ impl<'m> Emitter<'m> {
         // A context restore (libunwind's jumpto) ends in `ret` to a computed x30: lowered as a jump through
         // dispatch, not a C return.
         for i in 0..insns.len() {
-            if insns[i].kind == Kind::Ret && is_context_restore(&self.m.words, ((entry - self.m.lo) / 4) as usize, i) {
-                insns[i] = Insn { kind: Kind::Br, target_reg: "c->x[30]".into(), ..Insn::op("") };
+            if insns[i].kind == Kind::Ret
+                && is_context_restore(&self.m.words, ((entry - self.m.lo) / 4) as usize, i)
+            {
+                insns[i] = Insn {
+                    kind: Kind::Br,
+                    target_reg: "c->x[30]".into(),
+                    ..Insn::op("")
+                };
                 self.stat("ret_dispatch", 1);
             }
         }
         let (mut labels, tables) = self.scan(&insns, entry, end);
+        for (i, _) in insns.iter().enumerate() {
+            let a = entry + 4 * i as u64;
+            let Some(_) = self.patched.get(&a) else {
+                continue;
+            };
+            for r in self.replacements(a) {
+                if matches!(r.kind, Kind::B | Kind::Bcond) && entry <= r.target && r.target < end {
+                    labels.insert(r.target);
+                }
+            }
+        }
         let mut refs = BTreeSet::new();
         let sj_owner = self.sj_owners.contains(&entry);
         let all_labels = tables.values().any(|t| *t == Table::All) || sj_owner;
@@ -294,9 +356,16 @@ impl<'m> Emitter<'m> {
             labels = (entry..end).step_by(4).collect();
         }
         let local = !all_labels;
-        let (spill, reload, reload_call) =
-            if local { (regs::SPILL, regs::RELOAD, regs::RELOAD_CALL) } else { ("", "", "") };
-        let succ = if local { Some(Self::flow(&insns, entry, end, &tables)) } else { None };
+        let (spill, reload, reload_call) = if local {
+            (regs::SPILL, regs::RELOAD, regs::RELOAD_CALL)
+        } else {
+            ("", "", "")
+        };
+        let succ = if local {
+            Some(Self::flow(&insns, entry, end, &tables))
+        } else {
+            None
+        };
         let fp = match &succ {
             Some(s) => Some(self.flag_plan(&insns, entry, end, s)?),
             None => None,
@@ -304,12 +373,27 @@ impl<'m> Emitter<'m> {
         let fp = fp.filter(|p| p.used);
         if let Some(p) = &fp {
             self.stat("local_flag_functions", 1);
-            self.stat("flag_reads_direct", p.reader.iter().filter(|k| matches!(k, Some(k) if k != "nz")).count() as u64);
-            self.stat("flag_reads_packed", p.reader.iter().filter(|k| matches!(k, Some(k) if k == "nz")).count() as u64);
+            self.stat(
+                "flag_reads_direct",
+                p.reader
+                    .iter()
+                    .filter(|k| matches!(k, Some(k) if k != "nz"))
+                    .count() as u64,
+            );
+            self.stat(
+                "flag_reads_packed",
+                p.reader
+                    .iter()
+                    .filter(|k| matches!(k, Some(k) if k == "nz"))
+                    .count() as u64,
+            );
             self.stat("flag_entry_functions", p.entry as u64);
             self.stat("flag_entry_reads", p.entry_read as u64);
             self.stat("flag_reads_after_call", p.after_call as u64);
-            self.stat("flag_publishing_exits", p.exit.iter().filter(|k| k.is_some()).count() as u64);
+            self.stat(
+                "flag_publishing_exits",
+                p.exit.iter().filter(|k| k.is_some()).count() as u64,
+            );
         }
         let fx = |i: usize, code: &str| -> R<String> {
             match &fp {
@@ -331,14 +415,21 @@ impl<'m> Emitter<'m> {
                 return format!("{}{spill}{MUSTTAIL} {}(c);", publish(i), fname(t));
             }
             external_branches += 1;
-            format!("{}{spill}c->pc = {}; {MUSTTAIL} rt_dispatch(c);", publish(i), hx(t))
+            format!(
+                "{}{spill}c->pc = {}; {MUSTTAIL} rt_dispatch(c);",
+                publish(i),
+                hx(t)
+            )
         };
 
         let redispatch;
         let mut out: Vec<String>;
         if all_labels {
             let fb = format!("fb_{entry:x}");
-            let cases: Vec<String> = (entry..end).step_by(4).map(|t| format!("case {}: goto L_{t:x};", hx(t))).collect();
+            let cases: Vec<String> = (entry..end)
+                .step_by(4)
+                .map(|t| format!("case {}: goto L_{t:x};", hx(t)))
+                .collect();
             redispatch = format!("{MUSTTAIL} {fb}(c);");
             let enter = if sj_owner {
                 format!("rt_sj_owner(c, {fb}, {}, {});", hx(entry), hx(end))
@@ -353,12 +444,18 @@ impl<'m> Emitter<'m> {
                 format!("    {enter}"),
                 "}".into(),
                 format!("static void {fb}(Cpu *c) {{"),
-                format!("    switch (c->pc) {{ {} default: break; }}", cases.join(" ")),
+                format!(
+                    "    switch (c->pc) {{ {} default: break; }}",
+                    cases.join(" ")
+                ),
                 format!("    {MUSTTAIL} rt_dispatch(c);"),
             ];
         } else {
             redispatch = format!("{MUSTTAIL} rt_dispatch(c);");
-            out = vec![format!("void {}(Cpu *c) {{", fname(entry)), format!("    FN_ENTER({});", hx(entry))];
+            out = vec![
+                format!("void {}(Cpu *c) {{", fname(entry)),
+                format!("    FN_ENTER({});", hx(entry)),
+            ];
             if let Some(p) = &fp {
                 out.push(format!("    {}", p.decl()));
             }
@@ -367,28 +464,44 @@ impl<'m> Emitter<'m> {
         let call = |t: u64, a: u64, refs: &mut BTreeSet<u64>, external_calls: &mut u64| -> String {
             if starts.contains(&t) {
                 refs.insert(t);
-                return format!("c->x[30] = {}; {spill}{}(c);{reload_call}", hx(a + 4), fname(t));
+                return format!(
+                    "c->x[30] = {}; {spill}{}(c);{reload_call}",
+                    hx(a + 4),
+                    fname(t)
+                );
             }
             *external_calls += 1;
-            format!("c->x[30] = {}; {spill}c->pc = {}; rt_dispatch(c);{reload_call}", hx(a + 4), hx(t))
+            format!(
+                "c->x[30] = {}; {spill}c->pc = {}; rt_dispatch(c);{reload_call}",
+                hx(a + 4),
+                hx(t)
+            )
         };
         let op = |i: usize, code: &str| -> R<String> {
             let code = fx(i, code)?;
-            Ok(if regs::ESCAPE.is_match(&code) { format!("{spill}{code}{reload}") } else { code })
+            Ok(if regs::ESCAPE.is_match(&code) {
+                format!("{spill}{code}{reload}")
+            } else {
+                code
+            })
         };
 
         let mut body: Vec<(Option<usize>, String)> = vec![];
 
         // Spans the switch skips whole: check that nothing enters them except through their head by fall-through.
         let nins = insns.len();
-        let spanned: Vec<(u64, (usize, u64))> = self.spanned.iter().map(|(a, b)| (*a, *b)).collect();
+        let spanned: Vec<(u64, (usize, u64))> =
+            self.spanned.iter().map(|(a, b)| (*a, *b)).collect();
         let mut nspans = 0;
         for &(s, (_sk, se)) in &spanned {
             if se <= entry || s >= end {
                 continue;
             }
             if !(entry <= s && se <= end) {
-                return Err(PatchError(format!("{s:#x}: span ends at {se:#x}, outside this function")).into());
+                return Err(PatchError(format!(
+                    "{s:#x}: span ends at {se:#x}, outside this function"
+                ))
+                .into());
             }
             let (si, se_i) = (((s - entry) / 4) as usize, ((se - entry) / 4) as usize);
             let mut targets: BTreeMap<usize, Vec<usize>> = BTreeMap::new();
@@ -397,19 +510,34 @@ impl<'m> Emitter<'m> {
                     Kind::B | Kind::Bcond => vec![ins.target],
                     Kind::Br => match tables.get(&(entry + 4 * i as u64)) {
                         Some(Table::All) => {
-                            return Err(PatchError(format!("{s:#x}: an unresolved computed branch with the span")).into())
+                            return Err(PatchError(format!(
+                                "{s:#x}: an unresolved computed branch with the span"
+                            ))
+                            .into())
                         }
-                        Some(Table::Targets(jt)) => jt.iter().copied().filter(|&t| entry <= t && t < end).collect(),
+                        Some(Table::Targets(jt)) => jt
+                            .iter()
+                            .copied()
+                            .filter(|&t| entry <= t && t < end)
+                            .collect(),
                         None => vec![],
                     },
                     _ => vec![],
                 };
-                targets.insert(i, tg.into_iter().filter(|&t| entry <= t && t < end).map(|t| ((t - entry) / 4) as usize).collect());
+                targets.insert(
+                    i,
+                    tg.into_iter()
+                        .filter(|&t| entry <= t && t < end)
+                        .map(|t| ((t - entry) / 4) as usize)
+                        .collect(),
+                );
             }
             for (i, _) in insns.iter().enumerate() {
                 let a = entry + 4 * i as u64;
                 if self.patched.contains_key(&a) && s <= a && a < se {
-                    return Err(PatchError(format!("{a:#x}: a site inside the span at {s:#x}")).into());
+                    return Err(
+                        PatchError(format!("{a:#x}: a site inside the span at {s:#x}")).into(),
+                    );
                 }
                 for &t in &targets[&i] {
                     let ta = entry + 4 * t as u64;
@@ -417,7 +545,10 @@ impl<'m> Emitter<'m> {
                         continue;
                     }
                     if ta == s {
-                        return Err(PatchError(format!("{a:#x}: outside branch to the span head at {s:#x}")).into());
+                        return Err(PatchError(format!(
+                            "{a:#x}: outside branch to the span head at {s:#x}"
+                        ))
+                        .into());
                     }
                     let (mut ok, mut todo, mut back) = (true, vec![i], BTreeSet::new());
                     while let Some(j) = todo.pop() {
@@ -431,7 +562,8 @@ impl<'m> Emitter<'m> {
                             ok = false;
                             break;
                         }
-                        let mut preds: Vec<usize> = (0..nins).filter(|p| targets[p].contains(&j)).collect();
+                        let mut preds: Vec<usize> =
+                            (0..nins).filter(|p| targets[p].contains(&j)).collect();
                         let pj = j - 1;
                         if !matches!(insns[pj].kind, Kind::B | Kind::Br | Kind::Ret | Kind::Trap) {
                             preds.push(pj);
@@ -443,7 +575,10 @@ impl<'m> Emitter<'m> {
                         todo.extend(preds);
                     }
                     if !ok {
-                        return Err(PatchError(format!("{a:#x}: outside branch into the span at {s:#x}")).into());
+                        return Err(PatchError(format!(
+                            "{a:#x}: outside branch into the span at {s:#x}"
+                        ))
+                        .into());
                     }
                 }
             }
@@ -453,7 +588,10 @@ impl<'m> Emitter<'m> {
         // Calls up to each instruction: a loop with none needs a compiler barrier on its back edge.
         let mut calls = vec![0usize];
         for ins in &insns {
-            calls.push(calls.last().unwrap() + matches!(ins.kind, Kind::Bl | Kind::Blr | Kind::Trap) as usize);
+            calls.push(
+                calls.last().unwrap()
+                    + matches!(ins.kind, Kind::Bl | Kind::Blr | Kind::Trap) as usize,
+            );
         }
 
         let mut open_span: Option<u64> = None;
@@ -480,11 +618,27 @@ impl<'m> Emitter<'m> {
             }
             k = Some(ins.kind);
             if let Some((set, words)) = self.patched.get(&a) {
-                if !matches!(ins.kind, Kind::Op | Kind::Bl) {
-                    return Err(PatchError(format!("{a:#x}: patched instruction is a {}", kind_name(ins.kind))).into());
+                let rs = self.replacements(a);
+                let branch_original = matches!(ins.kind, Kind::B | Kind::Bcond);
+                if branch_original
+                    && !(words.len() == 1
+                        && rs.len() == 1
+                        && matches!(rs[0].kind, Kind::B | Kind::Bcond))
+                {
+                    return Err(PatchError(format!(
+                        "{a:#x}: a patched {} is supported only for a one-word branch replacement",
+                        kind_name(ins.kind)
+                    ))
+                    .into());
+                }
+                if !matches!(ins.kind, Kind::Op | Kind::B | Kind::Bcond | Kind::Bl) {
+                    return Err(PatchError(format!(
+                        "{a:#x}: patched instruction is a {}",
+                        kind_name(ins.kind)
+                    ))
+                    .into());
                 }
                 let mut repl = vec![];
-                let rs = self.replacements(a);
                 for (j, (w, r)) in words.iter().zip(&rs).enumerate() {
                     if r.kind == Kind::Op {
                         repl.push(op(i, &r.code)?);
@@ -493,18 +647,40 @@ impl<'m> Emitter<'m> {
                     } else if r.kind == Kind::B && j == words.len() - 1 {
                         // a stub site: on, it branches to the patch area (which comes back by a branch of its own)
                         repl.push(jump(r.target, i, &mut refs));
+                    } else if r.kind == Kind::Bcond && j == words.len() - 1 {
+                        repl.push(format!(
+                            "if ({}) {{ {} }}",
+                            fx(i, &r.cond)?,
+                            jump(r.target, i, &mut refs)
+                        ));
                     } else {
-                        return Err(PatchError(format!("{a:#x}: replacement word {w:08x} is a {}", kind_name(r.kind))).into());
+                        return Err(PatchError(format!(
+                            "{a:#x}: replacement word {w:08x} is a {}",
+                            kind_name(r.kind)
+                        ))
+                        .into());
                     }
                 }
-                let orig = if ins.kind == Kind::Op {
-                    op(i, &ins.code)?
-                } else {
-                    call(ins.target, a, &mut refs, &mut external_calls)
+                let orig = match ins.kind {
+                    Kind::Op => op(i, &ins.code)?,
+                    Kind::B => jump(ins.target, i, &mut refs),
+                    Kind::Bcond => format!(
+                        "if ({}) {{ {} }}",
+                        fx(i, &ins.cond)?,
+                        jump(ins.target, i, &mut refs)
+                    ),
+                    Kind::Bl => call(ins.target, a, &mut refs, &mut external_calls),
+                    _ => unreachable!(),
                 };
                 uses_patches = true;
                 patched_sites += 1;
-                body.push((Some(i), format!("    if (rt_patch_on[{set}]) {{ {} }} else {{ {orig} }}", repl.join(" "))));
+                body.push((
+                    Some(i),
+                    format!(
+                        "    if (rt_patch_on[{set}]) {{ {} }} else {{ {orig} }}",
+                        repl.join(" ")
+                    ),
+                ));
                 continue;
             }
             match ins.kind {
@@ -530,21 +706,55 @@ impl<'m> Emitter<'m> {
                     };
                     body.push((Some(i), line));
                 }
-                Kind::Bl => body.push((Some(i), format!("    {}", call(ins.target, a, &mut refs, &mut external_calls)))),
+                Kind::Bl => body.push((
+                    Some(i),
+                    format!(
+                        "    {}",
+                        call(ins.target, a, &mut refs, &mut external_calls)
+                    ),
+                )),
                 Kind::Blr => body.push((
                     Some(i),
-                    format!("    c->pc = {}; c->x[30] = {}; {spill}rt_dispatch(c);{reload_call}", ins.target_reg, hx(a + 4)),
+                    format!(
+                        "    c->pc = {}; c->x[30] = {}; {spill}rt_dispatch(c);{reload_call}",
+                        ins.target_reg,
+                        hx(a + 4)
+                    ),
                 )),
                 Kind::Br => match tables.get(&a) {
-                    Some(Table::All) => body.push((Some(i), format!("    c->pc = {}; {redispatch}", ins.target_reg))),
+                    Some(Table::All) => body.push((
+                        Some(i),
+                        format!("    c->pc = {}; {redispatch}", ins.target_reg),
+                    )),
                     Some(Table::Targets(jt)) => {
-                        let cases: Vec<String> = jt.iter().map(|t| format!("case {}: goto L_{t:x};", hx(*t))).collect();
-                        body.push((Some(i), format!("    switch ({}) {{ {} default: break; }}", ins.target_reg, cases.join(" "))));
-                        body.push((Some(i), format!("    {}{spill}c->pc = {}; {redispatch}", publish(i), ins.target_reg)));
+                        let cases: Vec<String> = jt
+                            .iter()
+                            .map(|t| format!("case {}: goto L_{t:x};", hx(*t)))
+                            .collect();
+                        body.push((
+                            Some(i),
+                            format!(
+                                "    switch ({}) {{ {} default: break; }}",
+                                ins.target_reg,
+                                cases.join(" ")
+                            ),
+                        ));
+                        body.push((
+                            Some(i),
+                            format!(
+                                "    {}{spill}c->pc = {}; {redispatch}",
+                                publish(i),
+                                ins.target_reg
+                            ),
+                        ));
                     }
                     None => body.push((
                         Some(i),
-                        format!("    {}{spill}c->pc = {}; {MUSTTAIL} rt_dispatch(c);", publish(i), ins.target_reg),
+                        format!(
+                            "    {}{spill}c->pc = {}; {MUSTTAIL} rt_dispatch(c);",
+                            publish(i),
+                            ins.target_reg
+                        ),
                     )),
                 },
                 Kind::Ret => body.push((Some(i), format!("    {spill}return;"))),
@@ -579,7 +789,13 @@ impl<'m> Emitter<'m> {
                 })
                 .map(|(i, _)| i)
                 .collect();
-            let rp = regs::plan(&texts, succ.as_ref().unwrap(), &clean, self.reg_locals, &self.kept);
+            let rp = regs::plan(
+                &texts,
+                succ.as_ref().unwrap(),
+                &clean,
+                self.reg_locals,
+                &self.kept,
+            );
             if !rp.regs.is_empty() {
                 out.push(format!("    {}", rp.decl()));
             }
@@ -618,7 +834,10 @@ impl<'m> Emitter<'m> {
             body.push(lines.join("\n"));
             refs.extend(r);
         }
-        let mut protos: String = refs.iter().map(|r| format!("void {}(Cpu *c);\n", fname(*r))).collect();
+        let mut protos: String = refs
+            .iter()
+            .map(|r| format!("void {}(Cpu *c);\n", fname(*r)))
+            .collect();
         if self.uses_patches {
             protos.push_str("extern uint8_t rt_patch_on[];\n");
         }
@@ -689,8 +908,17 @@ pub fn table_text(name: &str, addrs: &[u64]) -> String {
     s.push_str(&format!("\nconst uint64_t {name}_fn_addrs[] = {{\n"));
     s.push_str(&addrs.iter().map(|a| hx(*a)).collect::<Vec<_>>().join(",\n"));
     s.push_str(&format!("\n}};\nconst GuestFn {name}_fn_ptrs[] = {{\n"));
-    s.push_str(&addrs.iter().map(|a| fname(*a)).collect::<Vec<_>>().join(",\n"));
-    s.push_str(&format!("\n}};\nconst uint64_t {name}_fn_count = {};\n", addrs.len()));
+    s.push_str(
+        &addrs
+            .iter()
+            .map(|a| fname(*a))
+            .collect::<Vec<_>>()
+            .join(",\n"),
+    );
+    s.push_str(&format!(
+        "\n}};\nconst uint64_t {name}_fn_count = {};\n",
+        addrs.len()
+    ));
     s
 }
 
@@ -710,22 +938,53 @@ mod tests {
         use crate::loader::{ModLayout, Module};
         let base = 0x70_0000_0000u64;
         let words = vec![0x1100_0508u32, 0x1100_0508, 0x5280_0020, 0xD65F_03C0];
-        let lay = vec![ModLayout { name: "main".into(), base, size: 0x10_0000 }];
+        let lay = vec![ModLayout {
+            name: "main".into(),
+            base,
+            size: 0x10_0000,
+        }];
         let t = Table::parse("probe main 4 8\n", "t", &lay).unwrap();
         let main = Module::code("main", base, base, words, vec![]);
         t.check(&main, "main").unwrap();
-        assert_eq!(t.probes_for("main", base).into_iter().collect::<Vec<_>>(), vec![base + 4, base + 8]);
-        let starts: Vec<u64> = discover(&main).0.iter().map(|&s| main.lo + 4 * s as u64).collect();
-        let mut e = Emitter::new(&main, &starts, Default::default(), Default::default(), Default::default(), &EmitOptions::default())
-            .with_probes(t.probes_for("main", base));
+        assert_eq!(
+            t.probes_for("main", base).into_iter().collect::<Vec<_>>(),
+            vec![base + 4, base + 8]
+        );
+        let starts: Vec<u64> = discover(&main)
+            .0
+            .iter()
+            .map(|&s| main.lo + 4 * s as u64)
+            .collect();
+        let mut e = Emitter::new(
+            &main,
+            &starts,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            &EmitOptions::default(),
+        )
+        .with_probes(t.probes_for("main", base));
         let (c, _) = e.function(base, base + 16).unwrap();
         let c = c.join("\n");
-        let probe4 = c.find(&format!("c->pc = {}; rt_probe(c);", hx(base + 4))).expect(&c);
-        let probe8 = c.find(&format!("c->pc = {}; rt_probe(c);", hx(base + 8))).expect(&c);
-        assert!(probe4 < probe8 && c.matches("rt_probe(c)").count() == 2, "{c}");
+        let probe4 = c
+            .find(&format!("c->pc = {}; rt_probe(c);", hx(base + 4)))
+            .expect(&c);
+        let probe8 = c
+            .find(&format!("c->pc = {}; rt_probe(c);", hx(base + 8)))
+            .expect(&c);
+        assert!(
+            probe4 < probe8 && c.matches("rt_probe(c)").count() == 2,
+            "{c}"
+        );
         assert_eq!(e.stats.get("probes"), Some(&2));
-        assert!(Table::parse("probe main 6\n", "t", &lay).is_err(), "unaligned");
-        assert!(Table::parse("probe nope 4\n", "t", &lay).is_err(), "unknown module");
+        assert!(
+            Table::parse("probe main 6\n", "t", &lay).is_err(),
+            "unaligned"
+        );
+        assert!(
+            Table::parse("probe nope 4\n", "t", &lay).is_err(),
+            "unknown module"
+        );
         let far = Table::parse("probe main 0x8000\n", "t", &lay).unwrap();
         assert!(far.check(&main, "main").is_err(), "outside .text");
     }
@@ -738,7 +997,11 @@ mod tests {
         let base = 0x70_0000_0000u64;
         // main: add w8,w8,#1 (the site at +4 replaced); mov w0,#1; ret, then padding
         let main_words = vec![0x1100_0508u32, 0x1100_0508, 0x5280_0020, 0xD65F_03C0];
-        let lay = vec![ModLayout { name: "main".into(), base, size: 0x10_0000 }];
+        let lay = vec![ModLayout {
+            name: "main".into(),
+            base,
+            size: 0x10_0000,
+        }];
         let t = Table::parse(
             "set fstep NXRS_PATCH_FSTEP 1\narea fstep main 90000010 11000908 14000000\nareloc main 0 adrp state 0\nareloc main 2 b module 0x8\nsite fstep main 4 11000508 @b:area:0\n",
             "t",
@@ -749,23 +1012,173 @@ mod tests {
         main.extra_seeds = t.branch_ins("main", base);
         let (sname, sbase, _, code, words) = t.stubs_module("main", base).unwrap().unwrap();
         let stubs = Module::code(&sname, sbase, code, words, vec![code]);
-        let starts = |m: &Module| -> Vec<u64> { discover(m).0.iter().map(|&s| m.lo + 4 * s as u64).collect() };
+        let starts = |m: &Module| -> Vec<u64> {
+            discover(m).0.iter().map(|&s| m.lo + 4 * s as u64).collect()
+        };
         let (ms, ss) = (starts(&main), starts(&stubs));
-        assert!(ms.contains(&(base + 8)), "the return point is a start: {ms:x?}");
-        let mut e = Emitter::new(&main, &ms, t.for_module("main", base).unwrap(), Default::default(), Default::default(), &EmitOptions::default());
+        assert!(
+            ms.contains(&(base + 8)),
+            "the return point is a start: {ms:x?}"
+        );
+        let mut e = Emitter::new(
+            &main,
+            &ms,
+            t.for_module("main", base).unwrap(),
+            Default::default(),
+            Default::default(),
+            &EmitOptions::default(),
+        );
         let (c, _) = e.function(base, base + 8).unwrap();
         let c = c.join("\n");
-        assert!(c.contains("rt_patch_on[0]") && c.contains(&format!("c->pc = {}", hx(code))), "the site's branch:\n{c}");
-        let mut e = Emitter::new(&stubs, &ss, Default::default(), Default::default(), Default::default(), &EmitOptions::default());
+        assert!(
+            c.contains("rt_patch_on[0]") && c.contains(&format!("c->pc = {}", hx(code))),
+            "the site's branch:\n{c}"
+        );
+        let mut e = Emitter::new(
+            &stubs,
+            &ss,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            &EmitOptions::default(),
+        );
         let (c, _) = e.function(code, code + 12).unwrap();
         let c = c.join("\n");
-        assert!(c.contains(&format!("c->pc = {}", hx(base + 8))), "back to main:\n{c}");
+        assert!(
+            c.contains(&format!("c->pc = {}", hx(base + 8))),
+            "back to main:\n{c}"
+        );
+    }
+
+    #[test]
+    fn tbz_patch_preserves_conditional_off_path_and_unconditional_on_path() {
+        use crate::aot::patches::Table;
+        use crate::loader::{ModLayout, Module};
+        let base = 0x70_0000_0000u64;
+        let target = base + 0x83c;
+        let mut words = vec![0xd503_201fu32; 0x840 / 4];
+        words[0] = 0x3600_41e8; // OoT: tbz w8, #0, +0x83c
+        words[0x100 / 4] = 0x5400_1f81; // Arceus: b.ne target changed by the replacement
+        words[0x83c / 4] = 0xd65f_03c0;
+        let lay = vec![ModLayout {
+            name: "main".into(),
+            base,
+            size: 0x10_0000,
+        }];
+        let t = Table::parse(
+            "set fullres NXRS_PATCH_OOT_FULLRES 1\nsite fullres main 0 360041e8 1400020f\nsite fullres main 0x100 54001f81 54001ea1\n",
+            "t",
+            &lay,
+        )
+        .unwrap();
+        let main = Module::code("main", base, base, words, vec![]);
+        t.check(&main, "main").unwrap();
+        let starts = vec![base, target];
+        let mut e = Emitter::new(
+            &main,
+            &starts,
+            t.for_module("main", base).unwrap(),
+            Default::default(),
+            Default::default(),
+            &EmitOptions::default(),
+        );
+        let (c, _) = e.function(base, base + 0x840).unwrap();
+        let c = c.join("\n");
+        assert!(
+            c.contains("if (rt_patch_on[0]) { goto"),
+            "on path must branch: {c}"
+        );
+        assert!(
+            c.contains("else { if ("),
+            "off path must retain TBZ's condition: {c}"
+        );
+        assert!(
+            c.contains(&format!("L_{target:x}:;")),
+            "branch target must have a label: {c}"
+        );
+        assert!(
+            c.contains(&format!("L_{:x}:;", base + 0x4d4)),
+            "replacement Bcond target must have a label: {c}"
+        );
+    }
+
+    #[test]
+    fn unconditional_branch_patch_preserves_both_targets() {
+        use crate::aot::patches::Table;
+        use crate::loader::{ModLayout, Module};
+        let base = 0x70_0000_0000u64;
+        let site = base + 0x500;
+        let original_target = base + 0xf8;
+        let replacement_target = base + 0xa7c;
+        let mut words = vec![0xd503_201fu32; 0xb00 / 4];
+        words[0x500 / 4] = 0x17ff_fefe; // Arceus 1.1.1 main+0x16e3828
+        words[0xf8 / 4] = 0xd65f_03c0;
+        words[0xa7c / 4] = 0xd65f_03c0;
+        let lay = vec![ModLayout {
+            name: "main".into(),
+            base,
+            size: 0x10_0000,
+        }];
+        let t = Table::parse(
+            "set cuts NXRS_PATCH_ARCEUS 1\nsite cuts main 0x500 17fffefe 1400015f\n",
+            "t",
+            &lay,
+        )
+        .unwrap();
+        let main = Module::code("main", base, base, words, vec![]);
+        t.check(&main, "main").unwrap();
+        assert!(t.branch_ins("main", base).contains(&replacement_target));
+        let starts = vec![base, original_target, replacement_target];
+        let mut e = Emitter::new(
+            &main,
+            &starts,
+            t.for_module("main", base).unwrap(),
+            Default::default(),
+            Default::default(),
+            &EmitOptions::default(),
+        );
+        let (c, _) = e.function(base, base + 0xb00).unwrap();
+        let c = c.join("\n");
+        assert!(
+            c.contains(&format!(
+                "if (rt_patch_on[0]) {{ goto L_{replacement_target:x};"
+            )),
+            "on target: {c}"
+        );
+        assert!(
+            c.contains(&format!("else {{ goto L_{original_target:x};")),
+            "off target: {c}"
+        );
+        assert!(
+            c.contains(&format!("L_{replacement_target:x}:;")),
+            "replacement label: {c}"
+        );
+        let bad = Table::parse(
+            "set cuts X 1\nsite cuts main 0x500 17fffefe d503201f\n",
+            "t",
+            &lay,
+        )
+        .unwrap();
+        let mut e = Emitter::new(
+            &main,
+            &starts,
+            bad.for_module("main", base).unwrap(),
+            Default::default(),
+            Default::default(),
+            &EmitOptions::default(),
+        );
+        assert!(
+            e.function(site, site + 4).is_err(),
+            "arbitrary branch replacement must remain rejected"
+        );
     }
 
     #[test]
     fn context_restore_ret_is_recognised_and_epilogues_are_not() {
         // libunwind jumpto: ldp x2,x3,[x0,#16]; ldr x30,[x0,#0x100]; ldr x16,[x0,#0xf8]; ldp x0,x1,[x0]; mov sp,x16; ret
-        let jumpto = [0xA9410C02, 0xF940801E, 0xF9407C10, 0xA9400400, 0x9100021F, 0xD65F03C0];
+        let jumpto = [
+            0xA9410C02, 0xF940801E, 0xF9407C10, 0xA9400400, 0x9100021F, 0xD65F03C0,
+        ];
         assert!(is_context_restore(&jumpto, 0, 5));
         // an epilogue: ldp x29,x30,[sp,#16]; add sp,sp,#0x20; ret
         let epilogue = [0xA9417BFD, 0x910083FF, 0xD65F03C0];

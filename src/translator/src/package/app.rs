@@ -102,7 +102,9 @@ pub(crate) fn pfs_files(nca: &Nca, s: &Section) -> BTreeMap<String, Vec<u8>> {
     if size > 16 << 20 || at > s.size || size > s.size - at {
         return files;
     }
-    let Ok(image) = nca.read(s, at, size, None) else { return files };
+    let Ok(image) = nca.read(s, at, size, None) else {
+        return files;
+    };
     if image.len() < 0x10 {
         return files;
     }
@@ -114,13 +116,25 @@ pub(crate) fn pfs_files(nca: &Nca, s: &Section) -> BTreeMap<String, Vec<u8>> {
     let strings = &image[data_at - strings_size..data_at];
     for i in 0..count {
         let e = 0x10 + i * 0x18;
-        let (rel, len, name_at) = (u64le(&image, e) as usize, u64le(&image, e + 8) as usize, u32le(&image, e + 16) as usize);
-        let end = strings.get(name_at..).and_then(|x| x.iter().position(|&b| b == 0)).map(|p| name_at + p);
-        let Some(end) = end else { return BTreeMap::new() };
+        let (rel, len, name_at) = (
+            u64le(&image, e) as usize,
+            u64le(&image, e + 8) as usize,
+            u32le(&image, e + 16) as usize,
+        );
+        let end = strings
+            .get(name_at..)
+            .and_then(|x| x.iter().position(|&b| b == 0))
+            .map(|p| name_at + p);
+        let Some(end) = end else {
+            return BTreeMap::new();
+        };
         if (data_at + rel + len) as u64 > size {
             return BTreeMap::new();
         }
-        files.insert(String::from_utf8_lossy(&strings[name_at..end]).into_owned(), image[data_at + rel..data_at + rel + len].to_vec());
+        files.insert(
+            String::from_utf8_lossy(&strings[name_at..end]).into_owned(),
+            image[data_at + rel..data_at + rel + len].to_vec(),
+        );
     }
     files
 }
@@ -130,7 +144,11 @@ fn metadata(ncas: &[Arc<Nca>], title_id: u64, updated: bool) -> (u32, Vec<u64>, 
     let mut version = 0;
     let mut addons = vec![];
     let mut control: BTreeMap<u8, String> = BTreeMap::new();
-    let want = if updated { cnmt::PATCH } else { cnmt::APPLICATION };
+    let want = if updated {
+        cnmt::PATCH
+    } else {
+        cnmt::APPLICATION
+    };
     for nca in ncas {
         if nca.content_type != 1 || nca.sections.is_empty() {
             continue;
@@ -162,12 +180,24 @@ fn metadata(ncas: &[Arc<Nca>], title_id: u64, updated: bool) -> (u32, Vec<u64>, 
 /// The game's offline HTML documents (its Manual NCA's `html-document/` tree, which nn::web's offline pages open),
 /// keyed `html-document/<path>`; at most 64 MB. Empty when the package has none.
 pub(crate) fn manual_files(ncas: &[Arc<Nca>], title_id: u64) -> BTreeMap<String, Vec<u8>> {
-    fn walk(n: &crate::package::romfs::Node, dir: &str, image: &[u8], out: &mut BTreeMap<String, Vec<u8>>) {
+    fn walk(
+        n: &crate::package::romfs::Node,
+        dir: &str,
+        image: &[u8],
+        out: &mut BTreeMap<String, Vec<u8>>,
+    ) {
         for k in n.children() {
-            let path = if dir.is_empty() { k.name.clone() } else { format!("{dir}/{}", k.name) };
+            let path = if dir.is_empty() {
+                k.name.clone()
+            } else {
+                format!("{dir}/{}", k.name)
+            };
             match &k.kind {
                 NodeKind::Dir(_) => walk(k, &path, image, out),
-                NodeKind::File { size, loc: crate::package::romfs::FileLoc::Image(o) } => {
+                NodeKind::File {
+                    size,
+                    loc: crate::package::romfs::FileLoc::Image(o),
+                } => {
                     if let Some(b) = image.get(*o as usize..(*o + *size) as usize) {
                         out.insert(path, b.to_vec());
                     }
@@ -180,44 +210,9 @@ pub(crate) fn manual_files(ncas: &[Arc<Nca>], title_id: u64) -> BTreeMap<String,
         if nca.content_type != 3 || cnmt::base_of(nca.title_id) != cnmt::base_of(title_id) {
             continue;
         }
-        let Some(si) = nca.section(3, 0) else { continue };
-        let s = &nca.sections[si];
-        if s.patch || s.sparse {
+        let Some(si) = nca.section(3, 0) else {
             continue;
-        }
-        let files = (|| -> Result<BTreeMap<String, Vec<u8>>> {
-            let view = section_data(nca, si, &nca.blob.path.display().to_string())?;
-            let (at, mut size) = nca.ivfc_data(s)?;
-            if s.compressed {
-                size = view.size().saturating_sub(at);
-            }
-            if size > 64 << 20 || at > view.size() || size > view.size() - at {
-                return fmt("skip");
-            }
-            let image = view.read(at, size)?;
-            let read = |o: u64, n: u64| image.get(o as usize..(o + n) as usize).map(|x| x.to_vec()).ok_or_else(|| PackageError::Format("cut".into()));
-            let root = image_tree(&nca.blob.path.display().to_string(), size, &read)?;
-            let mut out = BTreeMap::new();
-            walk(&root, "", &image, &mut out);
-            Ok(out)
-        })();
-        let Ok(files) = files else { continue };
-        let html: BTreeMap<String, Vec<u8>> = files.into_iter().filter(|(k, _)| k.starts_with("html-document/")).collect();
-        if !html.is_empty() {
-            return html;
-        }
-    }
-    BTreeMap::new()
-}
-
-/// The Control NCA's files (control.nacp, icons): the one `wanted` names, else the first of the title.
-fn control_files(ncas: &[Arc<Nca>], title_id: u64, wanted: Option<&str>) -> (BTreeMap<String, Vec<u8>>, Option<String>) {
-    let mut found: Option<BTreeMap<String, Vec<u8>>> = None;
-    for nca in ncas {
-        if nca.content_type != 2 || cnmt::base_of(nca.title_id) != cnmt::base_of(title_id) {
-            continue;
-        }
-        let Some(si) = nca.section(3, 0) else { continue };
+        };
         let s = &nca.sections[si];
         if s.patch || s.sparse {
             continue;
@@ -233,13 +228,74 @@ fn control_files(ncas: &[Arc<Nca>], title_id: u64, wanted: Option<&str>) -> (BTr
             }
             let image = view.read(at, size)?;
             let read = |o: u64, n: u64| {
-                image.get(o as usize..(o + n) as usize).map(|x| x.to_vec()).ok_or_else(|| PackageError::Format("cut".into()))
+                image
+                    .get(o as usize..(o + n) as usize)
+                    .map(|x| x.to_vec())
+                    .ok_or_else(|| PackageError::Format("cut".into()))
+            };
+            let root = image_tree(&nca.blob.path.display().to_string(), size, &read)?;
+            let mut out = BTreeMap::new();
+            walk(&root, "", &image, &mut out);
+            Ok(out)
+        })();
+        let Ok(files) = files else { continue };
+        let html: BTreeMap<String, Vec<u8>> = files
+            .into_iter()
+            .filter(|(k, _)| k.starts_with("html-document/"))
+            .collect();
+        if !html.is_empty() {
+            return html;
+        }
+    }
+    BTreeMap::new()
+}
+
+/// The Control NCA's files (control.nacp, icons): the one `wanted` names, else the first of the title.
+fn control_files(
+    ncas: &[Arc<Nca>],
+    title_id: u64,
+    wanted: Option<&str>,
+) -> (BTreeMap<String, Vec<u8>>, Option<String>) {
+    let mut found: Option<BTreeMap<String, Vec<u8>>> = None;
+    for nca in ncas {
+        if nca.content_type != 2 || cnmt::base_of(nca.title_id) != cnmt::base_of(title_id) {
+            continue;
+        }
+        let Some(si) = nca.section(3, 0) else {
+            continue;
+        };
+        let s = &nca.sections[si];
+        if s.patch || s.sparse {
+            continue;
+        }
+        let files = (|| -> Result<BTreeMap<String, Vec<u8>>> {
+            let view = section_data(nca, si, &nca.blob.path.display().to_string())?;
+            let (at, mut size) = nca.ivfc_data(s)?;
+            if s.compressed {
+                size = view.size().saturating_sub(at);
+            }
+            if size > 64 << 20 || at > view.size() || size > view.size() - at {
+                return fmt("skip");
+            }
+            let image = view.read(at, size)?;
+            let read = |o: u64, n: u64| {
+                image
+                    .get(o as usize..(o + n) as usize)
+                    .map(|x| x.to_vec())
+                    .ok_or_else(|| PackageError::Format("cut".into()))
             };
             let root = image_tree(&nca.blob.path.display().to_string(), size, &read)?;
             let mut files = BTreeMap::new();
             for k in root.children() {
-                if let NodeKind::File { size, loc: crate::package::romfs::FileLoc::Image(o) } = &k.kind {
-                    files.insert(k.name.clone(), image[*o as usize..(*o + *size) as usize].to_vec());
+                if let NodeKind::File {
+                    size,
+                    loc: crate::package::romfs::FileLoc::Image(o),
+                } = &k.kind
+                {
+                    files.insert(
+                        k.name.clone(),
+                        image[*o as usize..(*o + *size) as usize].to_vec(),
+                    );
                 }
             }
             Ok(files)
@@ -248,11 +304,15 @@ fn control_files(ncas: &[Arc<Nca>], title_id: u64, wanted: Option<&str>) -> (BTr
         if files.get("control.nacp").map_or(0, |v| v.len()) < 0x3070 {
             continue;
         }
-        if found.is_none() || nca.name.to_ascii_lowercase() == wanted.unwrap_or("").to_ascii_lowercase() {
+        if found.is_none()
+            || nca.name.to_ascii_lowercase() == wanted.unwrap_or("").to_ascii_lowercase()
+        {
             found = Some(files);
         }
     }
-    let Some(found) = found else { return (BTreeMap::new(), None) };
+    let Some(found) = found else {
+        return (BTreeMap::new(), None);
+    };
     let nacp = &found["control.nacp"][0x3060..0x3070];
     let end = nacp.iter().position(|&b| b == 0).unwrap_or(nacp.len());
     let display = String::from_utf8_lossy(&nacp[..end]).into_owned();
@@ -263,7 +323,9 @@ fn control_files(ncas: &[Arc<Nca>], title_id: u64, wanted: Option<&str>) -> (BTr
 /// index; a base and its update share one), ascending.
 pub fn program_indices_of(title_ids: impl IntoIterator<Item = u64>) -> Vec<u64> {
     let ids: std::collections::BTreeSet<u64> = title_ids.into_iter().collect();
-    let Some(&min) = ids.iter().next() else { return vec![] };
+    let Some(&min) = ids.iter().next() else {
+        return vec![];
+    };
     ids.iter().map(|t| t - min).collect()
 }
 
@@ -271,7 +333,11 @@ pub fn program_indices_of(title_ids: impl IntoIterator<Item = u64>) -> Vec<u64> 
 pub fn program_indices(path: &Path, keys: &Keys) -> Result<Vec<u64>> {
     let blob = Arc::new(Blob::open(&abspath(path))?);
     let (ncas, _) = open_ncas(&blob, keys)?;
-    Ok(program_indices_of(ncas.iter().filter(|n| n.content_type == 0).map(|n| n.title_id)))
+    Ok(program_indices_of(
+        ncas.iter()
+            .filter(|n| n.content_type == 0)
+            .map(|n| n.title_id),
+    ))
 }
 
 impl Package {
@@ -281,28 +347,46 @@ impl Package {
         let p = path.display().to_string();
         let blob = Arc::new(Blob::open(&path)?);
         let (ncas, _) = open_ncas(&blob, keys)?;
-        let programs: Vec<Arc<Nca>> = ncas.iter().filter(|n| n.content_type == 0).cloned().collect();
+        let programs: Vec<Arc<Nca>> = ncas
+            .iter()
+            .filter(|n| n.content_type == 0)
+            .cloned()
+            .collect();
         if programs.is_empty() {
-            return fmt(format!("{p}: no decryptable Program NCA; check the installed keys"));
+            return fmt(format!(
+                "{p}: no decryptable Program NCA; check the installed keys"
+            ));
         }
         // a multi-program application (programs at title id + index, started by oe::ExecuteProgram): program 0
         // unless `NXRS_PROGRAM_INDEX` (the cli's `--program`) names another
-        let index = std::env::var("NXRS_PROGRAM_INDEX").ok().and_then(|v| v.trim().parse::<u64>().ok()).unwrap_or(0);
+        let index = std::env::var("NXRS_PROGRAM_INDEX")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .unwrap_or(0);
         let title_id = programs.iter().map(|n| n.title_id).min().unwrap() + index;
         if !programs.iter().any(|n| n.title_id == title_id) {
-            return fmt(format!("{p}: no program {index} (title {title_id:016x}) in the package"));
+            return fmt(format!(
+                "{p}: no program {index} (title {title_id:016x}) in the package"
+            ));
         }
-        let mut programs: Vec<Arc<Nca>> = programs.into_iter().filter(|n| n.title_id == title_id).collect();
+        let mut programs: Vec<Arc<Nca>> = programs
+            .into_iter()
+            .filter(|n| n.title_id == title_id)
+            .collect();
         let patches: Vec<Arc<Nca>> = programs.iter().filter(|n| is_patch(n)).cloned().collect();
         let bases: Vec<Arc<Nca>> = programs.iter().filter(|n| !is_patch(n)).cloned().collect();
         if patches.len() > 1 || bases.len() > 1 {
-            return fmt(format!("{p}: the package holds several versions of the game; keep one game and one update"));
+            return fmt(format!(
+                "{p}: the package holds several versions of the game; keep one game and one update"
+            ));
         }
         let base = bases.first().cloned();
         let embedded_update = patches.first().cloned();
         let mut update_path = None;
         let mut update_ncas = ncas.clone();
-        let alone = || format!("{p}: this package is an update on its own; the game's package is needed as the source");
+        let alone = || {
+            format!("{p}: this package is an update on its own; the game's package is needed as the source")
+        };
         let update = match choice {
             UpdateChoice::Package(u) => {
                 if base.is_none() {
@@ -311,8 +395,16 @@ impl Package {
                 let up = abspath(u);
                 let ublob = Arc::new(Blob::open(&up)?);
                 let (uncas, _) = open_ncas(&ublob, keys)?;
-                let theirs: Vec<Arc<Nca>> = uncas.iter().filter(|n| n.content_type == 0 && is_patch(n)).cloned().collect();
-                let mine: Vec<Arc<Nca>> = theirs.iter().filter(|n| n.title_id == title_id).cloned().collect();
+                let theirs: Vec<Arc<Nca>> = uncas
+                    .iter()
+                    .filter(|n| n.content_type == 0 && is_patch(n))
+                    .cloned()
+                    .collect();
+                let mine: Vec<Arc<Nca>> = theirs
+                    .iter()
+                    .filter(|n| n.title_id == title_id)
+                    .cloned()
+                    .collect();
                 if mine.is_empty() {
                     if let Some(t) = theirs.first() {
                         return fmt(format!(
@@ -321,10 +413,16 @@ impl Package {
                             t.title_id
                         ));
                     }
-                    return fmt(format!("{}: the package holds no game update", up.display()));
+                    return fmt(format!(
+                        "{}: the package holds no game update",
+                        up.display()
+                    ));
                 }
                 if mine.len() > 1 {
-                    return fmt(format!("{}: the package holds several updates; keep one", up.display()));
+                    return fmt(format!(
+                        "{}: the package holds several updates; keep one",
+                        up.display()
+                    ));
                 }
                 update_path = Some(up);
                 update_ncas = uncas;
@@ -341,11 +439,15 @@ impl Package {
             }
         };
         let program = update.clone().or_else(|| base.clone()).unwrap();
-        let encrypted = programs.iter().any(|n| n.sections.iter().any(|s| s.crypto != 1));
+        let encrypted = programs
+            .iter()
+            .any(|n| n.sections.iter().any(|s| s.crypto != 1));
         for n in &programs {
             for s in &n.sections {
                 if s.sparse {
-                    return fmt(format!("{p}: sparse storage in the Program NCA is not supported"));
+                    return fmt(format!(
+                        "{p}: sparse storage in the Program NCA is not supported"
+                    ));
                 }
                 if ![1, 3, 4].contains(&s.crypto) {
                     return fmt(format!(
@@ -358,7 +460,9 @@ impl Package {
         let mut exefs_section = None;
         let mut exefs_nodes = vec![];
         for nca in [&base, &update].into_iter().flatten() {
-            let Some(si) = nca.section(2, 1) else { return fmt(format!("{p}: the Program NCA has no ExeFS")) };
+            let Some(si) = nca.section(2, 1) else {
+                return fmt(format!("{p}: the Program NCA has no ExeFS"));
+            };
             let code = &nca.sections[si];
             let (at, size) = (u64le(&code.fs, 0x40), u64le(&code.fs, 0x48));
             if at > code.size || size > code.size - at {
@@ -366,14 +470,20 @@ impl Package {
             }
             let st = section_data(nca, si, &p)?;
             // a compressed data level is its decompressed size
-            let size = if compressed::table_of(&code.fs).is_some() { st.size().saturating_sub(at) } else { size };
+            let size = if compressed::table_of(&code.fs).is_some() {
+                st.size().saturating_sub(at)
+            } else {
+                size
+            };
             if at > st.size() || size > st.size() - at {
                 return fmt(format!("{p}: ExeFS range is out of bounds"));
             }
             exefs_nodes = Self::exefs_of(&p, nca, &*st, at, size)?;
             exefs_section = Some(st);
         }
-        let Some(di) = program.section(3, 0) else { return fmt(format!("{p}: the Program NCA has no RomFS")) };
+        let Some(di) = program.section(3, 0) else {
+            return fmt(format!("{p}: the Program NCA has no RomFS"));
+        };
         let data = &program.sections[di];
         let base_section = base.as_ref().and_then(|b| b.section(3, 0).map(|i| (b, i)));
         // A patch with a compression table of its own relocates onto the base's stored (compressed) bytes and is
@@ -387,7 +497,8 @@ impl Package {
         };
         let base_compressed = match base_section {
             Some((b, i)) if data.patch && !patch_compressed => {
-                compressed::over(Arc::new(SectionStorage::new(b, i)), &b.sections[i].fs, &p)?.map(|c| c.1)
+                compressed::over(Arc::new(SectionStorage::new(b, i)), &b.sections[i].fs, &p)?
+                    .map(|c| c.1)
             }
             _ => None,
         };
@@ -413,10 +524,15 @@ impl Package {
         if romfs_at > storage.size() || romfs_size > storage.size() - romfs_at {
             return fmt(format!("{p}: RomFS range is out of bounds"));
         }
-        let meta_ncas = if update.is_some() { &update_ncas } else { &ncas };
+        let meta_ncas = if update.is_some() {
+            &update_ncas
+        } else {
+            &ncas
+        };
         let (version, _, wanted) = metadata(meta_ncas, title_id, update.is_some());
         let (_, addons, base_wanted) = metadata(&ncas, title_id, false);
-        let (mut control, mut display_version) = control_files(meta_ncas, title_id, wanted.as_deref());
+        let (mut control, mut display_version) =
+            control_files(meta_ncas, title_id, wanted.as_deref());
         if control.is_empty() && update_path.is_some() {
             (control, display_version) = control_files(&ncas, title_id, base_wanted.as_deref());
         }
@@ -457,7 +573,14 @@ impl Package {
         let (count, strings_size) = (u32le(&head, 4) as u64, u32le(&head, 8) as u64);
         let table_size = 0x10 + count * 0x18 + strings_size;
         if &head[..4] != b"PFS0" || count > 1000 || table_size > size {
-            let kek = nca.wrapped.as_deref().unwrap_or("").split(':').next().unwrap_or("").to_string();
+            let kek = nca
+                .wrapped
+                .as_deref()
+                .unwrap_or("")
+                .split(':')
+                .next()
+                .unwrap_or("")
+                .to_string();
             return fmt(format!(
                 "{p}: the ExeFS did not decrypt; the installed keys probably lack this game's generation ({kek})"
             ));
@@ -467,8 +590,15 @@ impl Package {
         let mut nodes = vec![];
         for i in 0..count as usize {
             let e = 0x10 + i * 0x18;
-            let (rel, len, name_at) = (u64le(&table, e), u64le(&table, e + 8), u32le(&table, e + 16) as usize);
-            let end = strings.get(name_at..).and_then(|x| x.iter().position(|&b| b == 0)).map(|q| name_at + q);
+            let (rel, len, name_at) = (
+                u64le(&table, e),
+                u64le(&table, e + 8),
+                u32le(&table, e + 16) as usize,
+            );
+            let end = strings
+                .get(name_at..)
+                .and_then(|x| x.iter().position(|&b| b == 0))
+                .map(|q| name_at + q);
             let room = size - table_size;
             let Some(end) = end.filter(|_| rel <= room && len <= room - rel) else {
                 return fmt(format!("{p}: ExeFS entry is out of range"));
@@ -484,12 +614,19 @@ impl Package {
 
     /// The ExeFS files (name -> bytes): the update's when one is applied.
     pub fn exefs(&self) -> Result<BTreeMap<String, Vec<u8>>> {
-        self.exefs_nodes.iter().map(|n| Ok((n.name.clone(), self.exefs_section.read(n.offset, n.size)?))).collect()
+        self.exefs_nodes
+            .iter()
+            .map(|n| Ok((n.name.clone(), self.exefs_section.read(n.offset, n.size)?)))
+            .collect()
     }
 
     /// The RomFS image (IVFC level 6 of the possibly patched section) as a storage.
     pub fn romfs_image(&self) -> Arc<dyn Storage> {
-        Arc::new(Slice { inner: self.storage.clone(), offset: self.romfs_at, size: self.romfs_size })
+        Arc::new(Slice {
+            inner: self.storage.clone(),
+            offset: self.romfs_at,
+            size: self.romfs_size,
+        })
     }
 
     pub fn romfs(&self) -> Result<RomFs> {
@@ -502,7 +639,11 @@ impl Package {
         let p = self.path.display();
         match &*self.storage {
             RomStorage::Plain(s) if !self.encrypted && self.top_compressed.is_none() => {
-                format!("SWRNSP1\n{p}\n{:x}\n{:x}\n", s.file_offset + self.romfs_at, self.romfs_size)
+                format!(
+                    "SWRNSP1\n{p}\n{:x}\n{:x}\n",
+                    s.file_offset + self.romfs_at,
+                    self.romfs_size
+                )
             }
             storage => {
                 let mut lines = vec![
@@ -528,12 +669,23 @@ impl Package {
                             lines.push(format!("update {}", u.display()));
                         }
                         let fs = &self.program.sections[self.program.section(3, 0).unwrap()].fs;
-                        let (a, b, c, d) = (u64le(fs, 0x100), u64le(fs, 0x108), u64le(fs, 0x120), u64le(fs, 0x128));
-                        lines.push(format!("patch {} {a:x} {b:x} {c:x} {d:x}", self.program.layer(&self.program.sections[self.program.section(3, 0).unwrap()])));
+                        let (a, b, c, d) = (
+                            u64le(fs, 0x100),
+                            u64le(fs, 0x108),
+                            u64le(fs, 0x120),
+                            u64le(fs, 0x128),
+                        );
+                        lines.push(format!(
+                            "patch {} {a:x} {b:x} {c:x} {d:x}",
+                            self.program
+                                .layer(&self.program.sections[self.program.section(3, 0).unwrap()])
+                        ));
                     }
-                    (_, false) => {
-                        lines.push(format!("base {}", self.program.layer(&self.program.sections[self.program.section(3, 0).unwrap()])))
-                    }
+                    (_, false) => lines.push(format!(
+                        "base {}",
+                        self.program
+                            .layer(&self.program.sections[self.program.section(3, 0).unwrap()])
+                    )),
                 }
                 if let Some((h, a, n)) = self.top_compressed {
                     lines.push(format!("compressed {h:x} {a:x} {n:x}"));
@@ -556,7 +708,13 @@ pub struct UpdateInfo {
 impl UpdateInfo {
     /// The launcher's line: `UPDATE<tab>path<tab>title id<tab>version<tab>display version`.
     pub fn line(&self) -> String {
-        format!("UPDATE\t{}\t{:016x}\t{}\t{}", self.path.display(), self.title_id, self.version, self.display)
+        format!(
+            "UPDATE\t{}\t{:016x}\t{}\t{}",
+            self.path.display(),
+            self.title_id,
+            self.version,
+            self.display
+        )
     }
 }
 
@@ -564,7 +722,9 @@ impl UpdateInfo {
 fn is_nsp(p: &Path) -> bool {
     let Ok(b) = Blob::open(p) else { return false };
     b.read_at(0, 4).is_ok_and(|m| m == b"PFS0")
-        || [0x100u64, 0x1100].iter().any(|&at| b.size >= at + 4 && b.read_at(at, 4).is_ok_and(|m| m == b"HEAD"))
+        || [0x100u64, 0x1100]
+            .iter()
+            .any(|&at| b.size >= at + 4 && b.read_at(at, 4).is_ok_and(|m| m == b"HEAD"))
 }
 
 /// An NCA section as a storage: decrypted, and decompressed when the FS header has a compression table.
@@ -573,10 +733,12 @@ fn section_data(nca: &Arc<Nca>, index: usize, what: &str) -> Result<Arc<dyn Stor
     if nca.sections[index].patch {
         return Ok(plain);
     }
-    Ok(match compressed::over(plain.clone(), &nca.sections[index].fs, what)? {
-        Some((c, _)) => Arc::new(c),
-        None => plain,
-    })
+    Ok(
+        match compressed::over(plain.clone(), &nca.sections[index].fs, what)? {
+            Some((c, _)) => Arc::new(c),
+            None => plain,
+        },
+    )
 }
 
 /// nca.py `update_info`: what an update package is. With `game` (the game's own package) the update is opened over
@@ -612,12 +774,20 @@ pub fn update_info(path: &Path, keys: Option<&Path>, game: Option<&Path>) -> Res
     let blob = Arc::new(Blob::open(&path)?);
     let (ncas, _) = open_ncas(&blob, &keys)?;
     let Some(patch) = ncas.iter().find(|n| n.content_type == 0 && n.is_patch()) else {
-        return fmt(format!("{}: the package holds no game update", path.display()));
+        return fmt(format!(
+            "{}: the package holds no game update",
+            path.display()
+        ));
     };
     let title_id = patch.title_id;
     let (version, _, wanted) = metadata(&ncas, title_id, true);
     let (_, display) = control_files(&ncas, title_id, wanted.as_deref());
-    Ok(UpdateInfo { path, title_id, version, display: display.unwrap_or_default() })
+    Ok(UpdateInfo {
+        path,
+        title_id,
+        version,
+        display: display.unwrap_or_default(),
+    })
 }
 
 #[cfg(test)]
@@ -625,8 +795,22 @@ mod tests {
     /// Sonic X Shadow Generations: programs 0 and 1 (title id + 1); a base and its update count once.
     #[test]
     fn program_indices_from_title_ids() {
-        assert_eq!(super::program_indices_of([0x0100_A1B0_0000_0000, 0x0100_A1B0_0000_0001, 0x0100_A1B0_0000_0000]), vec![0, 1]);
-        assert_eq!(super::program_indices_of([0x0100_4990_0F54_6002, 0x0100_4990_0F54_6000, 0x0100_4990_0F54_6001]), vec![0, 1, 2]);
+        assert_eq!(
+            super::program_indices_of([
+                0x0100_A1B0_0000_0000,
+                0x0100_A1B0_0000_0001,
+                0x0100_A1B0_0000_0000
+            ]),
+            vec![0, 1]
+        );
+        assert_eq!(
+            super::program_indices_of([
+                0x0100_4990_0F54_6002,
+                0x0100_4990_0F54_6000,
+                0x0100_4990_0F54_6001
+            ]),
+            vec![0, 1, 2]
+        );
         assert_eq!(super::program_indices_of([0x0100_9650_1733_8000]), vec![0]);
         assert!(super::program_indices_of([]).is_empty());
     }

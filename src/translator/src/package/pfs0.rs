@@ -15,7 +15,11 @@ pub struct Entry {
 }
 
 /// Parse a PFS0 of `size` bytes; `read(offset, len)` returns bytes relative to the PFS0 start.
-pub fn parse(read: &dyn Fn(u64, u64) -> Result<Vec<u8>>, size: u64, what: &str) -> Result<Vec<Entry>> {
+pub fn parse(
+    read: &dyn Fn(u64, u64) -> Result<Vec<u8>>,
+    size: u64,
+    what: &str,
+) -> Result<Vec<Entry>> {
     if size < HEAD {
         return fmt(format!("{what}: PFS0 is too small"));
     }
@@ -59,15 +63,25 @@ pub fn parse_table(table: &[u8], size: u64, what: &str) -> Result<Vec<Entry>> {
             None => return fmt(format!("{what}: unterminated PFS0 name")),
         };
         let name = std::str::from_utf8(&strings[name_at..end])
-            .map_err(|_| crate::package::error::PackageError::Format(format!("{what}: non-UTF-8 PFS0 name")))?
+            .map_err(|_| {
+                crate::package::error::PackageError::Format(format!("{what}: non-UTF-8 PFS0 name"))
+            })?
             .to_string();
         let room = size - table_size;
-        if name.is_empty() || name.contains('/') || name.contains('\\') || rel > room || len > room - rel
+        if name.is_empty()
+            || name.contains('/')
+            || name.contains('\\')
+            || rel > room
+            || len > room - rel
             || out.iter().any(|e| e.name == name)
         {
             return fmt(format!("{what}: unsafe PFS0 entry {name:?}"));
         }
-        out.push(Entry { name, offset: table_size + rel, size: len });
+        out.push(Entry {
+            name,
+            offset: table_size + rel,
+            size: len,
+        });
     }
     Ok(out)
 }
@@ -111,8 +125,14 @@ mod tests {
         let e = parse(&read, size, "test").unwrap();
         assert_eq!(e.len(), 3);
         assert_eq!(e[0].name, "main");
-        assert_eq!(&img[e[0].offset as usize..(e[0].offset + e[0].size) as usize], b"NSO0hello");
-        assert_eq!(&img[e[1].offset as usize..(e[1].offset + e[1].size) as usize], b"META");
+        assert_eq!(
+            &img[e[0].offset as usize..(e[0].offset + e[0].size) as usize],
+            b"NSO0hello"
+        );
+        assert_eq!(
+            &img[e[1].offset as usize..(e[1].offset + e[1].size) as usize],
+            b"META"
+        );
         assert_eq!(e[2].size, 0);
     }
 

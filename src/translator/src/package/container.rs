@@ -16,7 +16,9 @@ pub struct Member {
 }
 
 pub fn extension(path: &std::path::Path) -> String {
-    path.extension().map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase())).unwrap_or_default()
+    path.extension()
+        .map(|e| format!(".{}", e.to_string_lossy().to_ascii_lowercase()))
+        .unwrap_or_default()
 }
 
 fn hfs(blob: &Blob, offset: u64, limit: u64) -> Result<Vec<Member>> {
@@ -32,9 +34,18 @@ fn hfs(blob: &Blob, offset: u64, limit: u64) -> Result<Vec<Member>> {
     let mut out = vec![];
     for i in 0..count as usize {
         let at = 0x10 + i * 0x40;
-        let (rel, len, name_at) = (u64le(&table, at), u64le(&table, at + 8), u32le(&table, at + 16) as usize);
-        let end = strings.get(name_at..).and_then(|s| s.iter().position(|&b| b == 0)).map(|p| name_at + p);
-        let Some(end) = end else { return fmt(format!("{path}: HFS0 entry is out of range")) };
+        let (rel, len, name_at) = (
+            u64le(&table, at),
+            u64le(&table, at + 8),
+            u32le(&table, at + 16) as usize,
+        );
+        let end = strings
+            .get(name_at..)
+            .and_then(|s| s.iter().position(|&b| b == 0))
+            .map(|p| name_at + p);
+        let Some(end) = end else {
+            return fmt(format!("{path}: HFS0 entry is out of range"));
+        };
         if rel > limit - table_size || len > limit - table_size - rel {
             return fmt(format!("{path}: HFS0 entry is out of range"));
         }
@@ -55,15 +66,31 @@ pub fn members(blob: &Blob) -> Result<Vec<Member>> {
         return fmt(format!("{path}: not a package ({})", EXTENSIONS.join(" ")));
     }
     if ext == ".nca" {
-        let name = blob.path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-        return Ok(vec![Member { name, offset: 0, size: blob.size }]);
+        let name = blob
+            .path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        return Ok(vec![Member {
+            name,
+            offset: 0,
+            size: blob.size,
+        }]);
     }
-    let head = if blob.size >= 0x10 { blob.read_at(0, blob.size.min(0x1200))? } else { vec![] };
+    let head = if blob.size >= 0x10 {
+        blob.read_at(0, blob.size.min(0x1200))?
+    } else {
+        vec![]
+    };
     if head.get(..4) == Some(b"PFS0") {
         let read = |o: u64, n: u64| blob.read_at(o, n);
         return Ok(pfs0::parse(&read, blob.size, &path.to_string())?
             .into_iter()
-            .map(|e| Member { name: e.name, offset: e.offset, size: e.size })
+            .map(|e| Member {
+                name: e.name,
+                offset: e.offset,
+                size: e.size,
+            })
             .collect());
     }
     for card in [0usize, 0x1000] {
@@ -78,7 +105,9 @@ pub fn members(blob: &Blob) -> Result<Vec<Member>> {
             return fmt(format!("{path}: the card image has no secure partition"));
         }
     }
-    fmt(format!("{path}: neither a PFS0 package (NSP, NSZ) nor a card image (XCI, XCZ)"))
+    fmt(format!(
+        "{path}: neither a PFS0 package (NSP, NSZ) nor a card image (XCI, XCZ)"
+    ))
 }
 
 #[cfg(test)]
@@ -137,12 +166,18 @@ mod tests {
             std::fs::write(&p, build_xci(&[("a.nca", b"hello"), ("b.tik", b"tik")], ka)).unwrap();
             let blob = Blob::open(&p).unwrap();
             let m = members(&blob).unwrap();
-            assert_eq!(m.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(), ["a.nca", "b.tik"]);
+            assert_eq!(
+                m.iter().map(|m| m.name.as_str()).collect::<Vec<_>>(),
+                ["a.nca", "b.tik"]
+            );
             assert_eq!(blob.read_at(m[0].offset, m[0].size).unwrap(), b"hello");
         }
         let p = dir.join("x.bin");
         std::fs::write(&p, b"0000000000000000").unwrap();
-        assert!(members(&Blob::open(&p).unwrap()).unwrap_err().to_string().contains("not a package (.nsp .nsz .xci .xcz .nca)"));
+        assert!(members(&Blob::open(&p).unwrap())
+            .unwrap_err()
+            .to_string()
+            .contains("not a package (.nsp .nsz .xci .xcz .nca)"));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

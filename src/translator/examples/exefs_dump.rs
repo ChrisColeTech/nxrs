@@ -31,13 +31,24 @@ fn main() {
         }
     };
     println!("kind:     {:?}", exefs.kind);
-    println!("title id: {}", exefs.title_id.map_or("unknown".into(), |t| format!("{t:016X}")));
-    println!("version:  {}", exefs.version.map_or("unknown".into(), |v| v.to_string()));
+    println!(
+        "title id: {}",
+        exefs
+            .title_id
+            .map_or("unknown".into(), |t| format!("{t:016X}"))
+    );
+    println!(
+        "version:  {}",
+        exefs.version.map_or("unknown".into(), |v| v.to_string())
+    );
     for (name, bytes) in &exefs.files {
         println!("  {name:<12} {:>12}", bytes.len());
     }
     match exefs.main_build_id() {
-        Some(id) => println!("main build id: {}", id.iter().map(|b| format!("{b:02X}")).collect::<String>()),
+        Some(id) => println!(
+            "main build id: {}",
+            id.iter().map(|b| format!("{b:02X}")).collect::<String>()
+        ),
         None => println!("main build id: (no NSO main)"),
     }
     println!("read in {:.2?}", started.elapsed());

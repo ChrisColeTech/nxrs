@@ -8,11 +8,11 @@
 //! codec-1 entries are decoded once and kept in a 256 MiB least-recently-used cache (as runtime/nup.c).
 use crate::package::error::{fmt, Result};
 use crate::package::io::{u32le, u64le, Blob};
+use crate::package::romfs::{FileLoc, Node as RNode, NodeKind, RomFs};
 use crate::package::{ExeFs, SourceKind};
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::sync::{Arc, Mutex};
-use crate::package::romfs::{FileLoc, Node as RNode, NodeKind, RomFs};
 
 pub const MAGIC: &[u8; 4] = b"NUP\x01";
 const TOC_MAGIC: &[u8; 4] = b"TOC\x01";
@@ -96,7 +96,11 @@ impl Toc {
         let nt = u32le(&table, 4) as u64;
         let (nd, nf) = (u64le(&table, 8), u64le(&table, 0x10));
         let (pool_at, pool_size) = (u64le(&table, 0x18), u64le(&table, 0x20));
-        if nt == 0 || nt > 4096 || nd == 0 || nd > 0xffff_ffff || nf > 0xffff_ffff
+        if nt == 0
+            || nt > 4096
+            || nd == 0
+            || nd > 0xffff_ffff
+            || nf > 0xffff_ffff
             || pool_at.saturating_add(pool_size) != table.len() as u64
         {
             return fmt(format!("{what}: table of contents is out of range"));
@@ -118,11 +122,25 @@ impl Toc {
                 }
             })
             .collect();
-        let title = match titles.iter().rposition(|t| (t.exefs_dir as u64) < nd && (t.romfs_dir as u64) < nd) {
+        let title = match titles
+            .iter()
+            .rposition(|t| (t.exefs_dir as u64) < nd && (t.romfs_dir as u64) < nd)
+        {
             Some(i) => i,
             None => return fmt(format!("{what}: no title has both ExeFS and RomFS")),
         };
-        Ok(Toc { table, nd, nf, dirs_at, files_at, children_at, pool_at: pool_at as usize, package_size, titles, title })
+        Ok(Toc {
+            table,
+            nd,
+            nf,
+            dirs_at,
+            files_at,
+            children_at,
+            pool_at: pool_at as usize,
+            package_size,
+            titles,
+            title,
+        })
     }
 
     fn name(&self, offset: u32, length: u32) -> Result<String> {
@@ -135,7 +153,8 @@ impl Toc {
         if raw.contains(&b'/') || raw.contains(&0) || raw == b"." || raw == b".." {
             return fmt("NUP: bad name in the table of contents");
         }
-        String::from_utf8(raw.to_vec()).map_err(|_| crate::package::error::PackageError::Format("NUP: non-UTF-8 name".into()))
+        String::from_utf8(raw.to_vec())
+            .map_err(|_| crate::package::error::PackageError::Format("NUP: non-UTF-8 name".into()))
     }
 
     /// The children of directory `dir`, sorted by name.
@@ -144,7 +163,10 @@ impl Toc {
             return fmt("NUP: bad directory index");
         }
         let at = self.dirs_at + dir as usize * DIR;
-        let (first, count) = (u32le(&self.table, at + 8) as usize, u32le(&self.table, at + 12) as usize);
+        let (first, count) = (
+            u32le(&self.table, at + 8) as usize,
+            u32le(&self.table, at + 12) as usize,
+        );
         let child_count = (self.pool_at - self.children_at) / 4;
         if first > child_count || count > child_count - first {
             return fmt("NUP: child list is out of range");
@@ -160,18 +182,33 @@ impl Toc {
                 let row = self.files_at + item as usize * FILE;
                 let t = &self.table;
                 let name = self.name(u32le(t, row), u32le(t, row + 4))?;
-                let (size, offset, stored, codec) = (u64le(t, row + 8), u64le(t, row + 16), u64le(t, row + 24), t[row + 64]);
+                let (size, offset, stored, codec) = (
+                    u64le(t, row + 8),
+                    u64le(t, row + 16),
+                    u64le(t, row + 24),
+                    t[row + 64],
+                );
                 if codec > 1 || (codec == 0 && stored != size) {
                     return fmt(format!("NUP: invalid codec or stored size for {name}"));
                 }
                 if offset > self.package_size || stored > self.package_size - offset {
                     return fmt(format!("NUP: {name} extends past the package"));
                 }
-                out.push(Node::File(FileNode { index: item, name, size, offset, stored, codec }));
+                out.push(Node::File(FileNode {
+                    index: item,
+                    name,
+                    size,
+                    offset,
+                    stored,
+                    codec,
+                }));
             } else {
                 let row = self.dirs_at + source as usize * DIR;
                 let name = self.name(u32le(&self.table, row), u32le(&self.table, row + 4))?;
-                out.push(Node::Dir { name, index: source as u32 });
+                out.push(Node::Dir {
+                    name,
+                    index: source as u32,
+                });
             }
         }
         out.sort_by(|a, b| node_name(a).as_bytes().cmp(node_name(b).as_bytes()));
@@ -195,20 +232,33 @@ pub fn read_file(blob: &Blob, f: &FileNode) -> Result<Vec<u8>> {
         return blob.read_at(f.offset, f.size);
     }
     let src = blob.reader(f.offset, f.stored)?;
-    let err = |e: std::io::Error| crate::package::error::PackageError::Format(format!("NUP: {}: zstd: {e}", f.name));
+    let err = |e: std::io::Error| {
+        crate::package::error::PackageError::Format(format!("NUP: {}: zstd: {e}", f.name))
+    };
     let mut dec = zstd::stream::read::Decoder::new(src).map_err(err)?;
     dec.window_log_max(31).map_err(err)?;
     let mut out = Vec::with_capacity(f.size as usize);
     dec.take(f.size + 1).read_to_end(&mut out).map_err(err)?;
     if out.len() as u64 != f.size {
-        return fmt(format!("NUP: {} decompresses to {} of {} bytes", f.name, out.len(), f.size));
+        return fmt(format!(
+            "NUP: {} decompresses to {} of {} bytes",
+            f.name,
+            out.len(),
+            f.size
+        ));
     }
     Ok(out)
 }
 
 impl Toc {
     /// nup.py `_tree`: the whole tree under `dir` (each file at most once, no cycles, depth <= 64).
-    pub fn tree(&self, dir: u32, seen_dirs: &mut std::collections::HashSet<u32>, seen_files: &mut std::collections::HashSet<u64>, depth: u32) -> Result<Vec<RNode>> {
+    pub fn tree(
+        &self,
+        dir: u32,
+        seen_dirs: &mut std::collections::HashSet<u32>,
+        seen_files: &mut std::collections::HashSet<u64>,
+        depth: u32,
+    ) -> Result<Vec<RNode>> {
         if dir as u64 >= self.nd || !seen_dirs.insert(dir) || depth > 64 {
             return fmt("NUP: bad directory tree");
         }
@@ -219,11 +269,18 @@ impl Toc {
                     if !seen_files.insert(f.index) {
                         return fmt("NUP: file appears more than once in a tree");
                     }
-                    kids.push(RNode { name: f.name.clone(), kind: NodeKind::File { size: f.size, loc: FileLoc::Nup(f) } });
+                    kids.push(RNode {
+                        name: f.name.clone(),
+                        kind: NodeKind::File {
+                            size: f.size,
+                            loc: FileLoc::Nup(f),
+                        },
+                    });
                 }
-                Node::Dir { name, index } => {
-                    kids.push(RNode { name, kind: NodeKind::Dir(self.tree(index, seen_dirs, seen_files, depth + 1)?) })
-                }
+                Node::Dir { name, index } => kids.push(RNode {
+                    name,
+                    kind: NodeKind::Dir(self.tree(index, seen_dirs, seen_files, depth + 1)?),
+                }),
             }
         }
         Ok(kids)
@@ -241,7 +298,10 @@ pub struct NupReader {
 
 impl NupReader {
     pub fn new(blob: Blob) -> NupReader {
-        NupReader { blob, cache: Mutex::new(vec![]) }
+        NupReader {
+            blob,
+            cache: Mutex::new(vec![]),
+        }
     }
 
     /// `len` bytes of `f` from `offset` (the caller clamps to the file size).
@@ -279,9 +339,21 @@ impl NupReader {
 pub fn romfs(blob: Blob) -> Result<RomFs> {
     let toc = Toc::open(&blob)?;
     let t = &toc.titles[toc.title];
-    let kids = toc.tree(t.romfs_dir, &mut Default::default(), &mut Default::default(), 0)?;
+    let kids = toc.tree(
+        t.romfs_dir,
+        &mut Default::default(),
+        &mut Default::default(),
+        0,
+    )?;
     let source = format!("NUP {}", blob.path.display());
-    Ok(RomFs::from_nup(Arc::new(NupReader::new(blob)), RNode { name: String::new(), kind: NodeKind::Dir(kids) }, source))
+    Ok(RomFs::from_nup(
+        Arc::new(NupReader::new(blob)),
+        RNode {
+            name: String::new(),
+            kind: NodeKind::Dir(kids),
+        },
+        source,
+    ))
 }
 
 pub fn exefs(blob: &Blob) -> Result<ExeFs> {
@@ -293,7 +365,12 @@ pub fn exefs(blob: &Blob) -> Result<ExeFs> {
             files.insert(f.name.clone(), read_file(blob, &f)?);
         }
     }
-    Ok(ExeFs { kind: SourceKind::Nup, title_id: Some(title.title_id), version: Some(title.version), files })
+    Ok(ExeFs {
+        kind: SourceKind::Nup,
+        title_id: Some(title.title_id),
+        version: Some(title.version),
+        files,
+    })
 }
 
 pub fn list(blob: &Blob) -> Result<Vec<String>> {
@@ -312,10 +389,16 @@ pub fn list(blob: &Blob) -> Result<Vec<String>> {
     let t = &toc.titles[toc.title];
     for node in toc.children(t.exefs_dir)? {
         if let Node::File(f) = node {
-            out.push(format!("  exefs/{:<16} {:>12} stored {:>12} codec {}", f.name, f.size, f.stored, f.codec));
+            out.push(format!(
+                "  exefs/{:<16} {:>12} stored {:>12} codec {}",
+                f.name, f.size, f.stored, f.codec
+            ));
         }
     }
-    out.push(format!("  romfs/ {} top-level entries", toc.children(t.romfs_dir)?.len()));
+    out.push(format!(
+        "  romfs/ {} top-level entries",
+        toc.children(t.romfs_dir)?.len()
+    ));
     Ok(out)
 }
 
@@ -360,7 +443,14 @@ mod tests {
             toc.extend_from_slice(&[0u8; 8]);
         }
         for (name_off, name_len, size, offset, stored, codec) in [
-            (10u32, 4u32, main.len() as u64, main_at, main.len() as u64, 0u8),
+            (
+                10u32,
+                4u32,
+                main.len() as u64,
+                main_at,
+                main.len() as u64,
+                0u8,
+            ),
             (14, 3, sdk.len() as u64, sdk_at, sdk_z.len() as u64, 1),
         ] {
             let mut row = Vec::new();
@@ -394,12 +484,21 @@ mod tests {
         let e = exefs(&blob).unwrap();
         assert_eq!(e.title_id, Some(0x0100_0000_0000_1000));
         assert_eq!(e.version, Some(65536));
-        assert_eq!(e.files.keys().cloned().collect::<Vec<_>>(), vec!["main", "sdk"]);
+        assert_eq!(
+            e.files.keys().cloned().collect::<Vec<_>>(),
+            vec!["main", "sdk"]
+        );
         assert_eq!(e.files["main"], main);
         assert_eq!(e.files["sdk"], sdk);
         drop(blob);
         let r = romfs(Blob::open(&path).unwrap()).unwrap();
-        assert_eq!(r.walk(), [("main".to_string(), main.len() as u64), ("sdk".into(), sdk.len() as u64)]);
+        assert_eq!(
+            r.walk(),
+            [
+                ("main".to_string(), main.len() as u64),
+                ("sdk".into(), sdk.len() as u64)
+            ]
+        );
         assert_eq!(r.read("sdk", 100, 50).unwrap(), sdk[100..150]);
         assert_eq!(r.read("sdk", 4990, 50).unwrap(), sdk[4990..]); // cached, clamped
         assert_eq!(r.read("main", 4, 3).unwrap(), main[4..7]);

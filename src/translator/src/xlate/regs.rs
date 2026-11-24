@@ -7,9 +7,11 @@ use std::sync::LazyLock;
 
 static REG: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"c->x\[(\d+)\]|c->sp\b").unwrap());
 // Python: c->(?:x\[(\d+)\]|(sp))\s*=(?!=)  -- the lookahead is checked by hand.
-static WRITE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"c->(?:x\[(\d+)\]|(sp))\s*=").unwrap());
+static WRITE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"c->(?:x\[(\d+)\]|(sp))\s*=").unwrap());
 /// Lifted instructions that hand the Cpu to the runtime.
-pub static ESCAPE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\brt_(?:svc|brk|udf)\(c\b").unwrap());
+pub static ESCAPE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\brt_(?:svc|brk|udf)\(c\b").unwrap());
 
 pub const SP: u32 = 31;
 pub const SPILL: &str = "\x00S";
@@ -22,11 +24,19 @@ pub fn callee_saved() -> BTreeSet<u32> {
 }
 
 pub fn name(r: u32) -> String {
-    if r == SP { "sp_".into() } else { format!("x{r}") }
+    if r == SP {
+        "sp_".into()
+    } else {
+        format!("x{r}")
+    }
 }
 
 pub fn cpu(r: u32) -> String {
-    if r == SP { "c->sp".into() } else { format!("c->x[{r}]") }
+    if r == SP {
+        "c->sp".into()
+    } else {
+        format!("c->x[{r}]")
+    }
 }
 
 fn reg_of(m: &Captures) -> u32 {
@@ -51,7 +61,11 @@ pub fn written(text: &str) -> BTreeSet<u32> {
         if b.get(end) == Some(&b'=') {
             continue;
         }
-        out.insert(if m.get(2).is_some() { SP } else { m[1].parse().unwrap() });
+        out.insert(if m.get(2).is_some() {
+            SP
+        } else {
+            m[1].parse().unwrap()
+        });
     }
     out
 }
@@ -67,17 +81,33 @@ pub struct Plan {
 
 impl Plan {
     fn new(regs: Vec<u32>, spill: Vec<BTreeSet<u32>>, kept: &BTreeSet<u32>) -> Plan {
-        let reload = regs.iter().map(|&r| format!(" {} = {};", name(r), cpu(r))).collect();
-        let reload_call =
-            regs.iter().filter(|r| !kept.contains(r)).map(|&r| format!(" {} = {};", name(r), cpu(r))).collect();
-        Plan { local: regs.iter().copied().collect(), regs, spill, reload, reload_call }
+        let reload = regs
+            .iter()
+            .map(|&r| format!(" {} = {};", name(r), cpu(r)))
+            .collect();
+        let reload_call = regs
+            .iter()
+            .filter(|r| !kept.contains(r))
+            .map(|&r| format!(" {} = {};", name(r), cpu(r)))
+            .collect();
+        Plan {
+            local: regs.iter().copied().collect(),
+            regs,
+            spill,
+            reload,
+            reload_call,
+        }
     }
 
     pub fn decl(&self) -> String {
         if self.regs.is_empty() {
             return String::new();
         }
-        let parts: Vec<String> = self.regs.iter().map(|&r| format!("{} = {}", name(r), cpu(r))).collect();
+        let parts: Vec<String> = self
+            .regs
+            .iter()
+            .map(|&r| format!("{} = {}", name(r), cpu(r)))
+            .collect();
         format!("uint64_t {};", parts.join(", "))
     }
 
@@ -85,14 +115,23 @@ impl Plan {
         let text = REG
             .replace_all(text, |m: &Captures| {
                 let r = reg_of(m);
-                if self.local.contains(&r) { name(r) } else { m[0].to_string() }
+                if self.local.contains(&r) {
+                    name(r)
+                } else {
+                    m[0].to_string()
+                }
             })
             .into_owned();
         if !text.contains('\x00') {
             return text;
         }
-        let spill: String = self.spill[i].iter().map(|&r| format!("{} = {}; ", cpu(r), name(r))).collect();
-        text.replace(SPILL, &spill).replace(RELOAD, &self.reload).replace(RELOAD_CALL, &self.reload_call)
+        let spill: String = self.spill[i]
+            .iter()
+            .map(|&r| format!("{} = {}; ", cpu(r), name(r)))
+            .collect();
+        text.replace(SPILL, &spill)
+            .replace(RELOAD, &self.reload)
+            .replace(RELOAD_CALL, &self.reload_call)
     }
 }
 
@@ -124,7 +163,11 @@ pub fn plan(
         seen[0] = true;
     }
     while let Some(i) = work.pop() {
-        let out: BTreeSet<u32> = if clean.contains(&i) { BTreeSet::new() } else { &dirty[i] | &writes[i] };
+        let out: BTreeSet<u32> = if clean.contains(&i) {
+            BTreeSet::new()
+        } else {
+            &dirty[i] | &writes[i]
+        };
         for &s in &succ[i] {
             if !seen[s] || !out.is_subset(&dirty[s]) {
                 seen[s] = true;
@@ -139,8 +182,15 @@ pub fn plan(
             dirty[i] = every.clone();
         }
     }
-    let spill =
-        (0..n).map(|i| if texts[i].contains(SPILL) { &dirty[i] | &writes[i] } else { BTreeSet::new() }).collect();
+    let spill = (0..n)
+        .map(|i| {
+            if texts[i].contains(SPILL) {
+                &dirty[i] | &writes[i]
+            } else {
+                BTreeSet::new()
+            }
+        })
+        .collect();
     Plan::new(regs.into_iter().collect(), spill, kept)
 }
 
@@ -150,7 +200,10 @@ mod tests {
 
     #[test]
     fn written_skips_compare() {
-        assert_eq!(written("c->x[3] = 1; if (c->sp == 0) c->sp = 2;"), [3, SP].into());
+        assert_eq!(
+            written("c->x[3] = 1; if (c->sp == 0) c->sp = 2;"),
+            [3, SP].into()
+        );
     }
 
     #[test]
@@ -159,7 +212,13 @@ mod tests {
             "c->x[0] = (uint64_t)(c->x[1] + 0x1ull);".to_string(),
             format!("{SPILL}return;"),
         ];
-        let p = plan(&texts, &[vec![1], vec![]], &BTreeSet::new(), 6, &callee_saved());
+        let p = plan(
+            &texts,
+            &[vec![1], vec![]],
+            &BTreeSet::new(),
+            6,
+            &callee_saved(),
+        );
         assert_eq!(p.decl(), "uint64_t x0 = c->x[0], x1 = c->x[1];");
         assert_eq!(p.resolve(0, &texts[0]), "x0 = (uint64_t)(x1 + 0x1ull);");
         assert_eq!(p.resolve(1, &texts[1]), "c->x[0] = x0; return;");

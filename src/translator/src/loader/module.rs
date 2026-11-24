@@ -18,7 +18,10 @@ pub struct Module {
 
 fn read_encoded(img: &[u8], off: usize, enc: u8, pc_base: usize) -> Result<(i64, usize), String> {
     let (fmt, app) = (enc & 0x0F, enc & 0x70);
-    let g = |n: usize| -> Result<&[u8], String> { img.get(off..off + n).ok_or("eh_frame_hdr out of bounds".into()) };
+    let g = |n: usize| -> Result<&[u8], String> {
+        img.get(off..off + n)
+            .ok_or("eh_frame_hdr out of bounds".into())
+    };
     let (mut v, size) = match fmt {
         0x0B => (i32::from_le_bytes(g(4)?.try_into().unwrap()) as i64, 4),
         0x03 => (u32::from_le_bytes(g(4)?.try_into().unwrap()) as i64, 4),
@@ -43,7 +46,16 @@ impl Module {
         let words = (0..nso.text.1 / 4)
             .map(|i| u32::from_le_bytes(image[t0 + 4 * i..t0 + 4 * i + 4].try_into().unwrap()))
             .collect();
-        Module { name: name.to_string(), nso, base, image, lo, hi, words, extra_seeds: vec![] }
+        Module {
+            name: name.to_string(),
+            nso,
+            base,
+            image,
+            lo,
+            hi,
+            words,
+            extra_seeds: vec![],
+        }
     }
 
     /// A module of code alone at `code` (a stubs module: `base` is its state page, zeros): no symbols, relocations
@@ -74,7 +86,16 @@ impl Module {
             relocs: vec![],
         };
         let hi = code + 4 * words.len() as u64;
-        Module { name: name.to_string(), nso, base, image, lo: code, hi, words, extra_seeds: entries }
+        Module {
+            name: name.to_string(),
+            nso,
+            base,
+            image,
+            lo: code,
+            hi,
+            words,
+            extra_seeds: entries,
+        }
     }
 
     pub fn in_text(&self, a: u64) -> bool {
@@ -93,7 +114,11 @@ impl Module {
     /// the end of the image are missing (a shorter value).
     pub fn read(&self, a: u64, n: usize, signed: bool) -> i128 {
         let o = a.wrapping_sub(self.base) as usize;
-        let s = if o >= self.image.len() { &[][..] } else { &self.image[o..(o + n).min(self.image.len())] };
+        let s = if o >= self.image.len() {
+            &[][..]
+        } else {
+            &self.image[o..(o + n).min(self.image.len())]
+        };
         let mut v: u128 = 0;
         for (i, b) in s.iter().enumerate() {
             v |= (*b as u128) << (8 * i);
@@ -114,15 +139,23 @@ impl Module {
         }
         let (ptr_enc, cnt_enc, tbl_enc) = (img[hdr + 1], img[hdr + 2], img[hdr + 3]);
         let mut off = hdr + 4;
-        let Ok((_, sz)) = read_encoded(img, off, ptr_enc, hdr) else { return vec![] };
+        let Ok((_, sz)) = read_encoded(img, off, ptr_enc, hdr) else {
+            return vec![];
+        };
         off += sz;
-        let Ok((count, sz)) = read_encoded(img, off, cnt_enc, hdr) else { return vec![] };
+        let Ok((count, sz)) = read_encoded(img, off, cnt_enc, hdr) else {
+            return vec![];
+        };
         off += sz;
         let mut starts = vec![];
         for _ in 0..count.max(0) {
-            let Ok((loc, sz)) = read_encoded(img, off, tbl_enc, hdr) else { break };
+            let Ok((loc, sz)) = read_encoded(img, off, tbl_enc, hdr) else {
+                break;
+            };
             off += sz;
-            let Ok((_, sz)) = read_encoded(img, off, tbl_enc, hdr) else { break };
+            let Ok((_, sz)) = read_encoded(img, off, tbl_enc, hdr) else {
+                break;
+            };
             off += sz;
             starts.push((self.base as i64 + loc) as u64);
         }
@@ -145,7 +178,12 @@ impl Module {
         for r in &self.nso.relocs {
             if r.typ == R_AARCH64_RELATIVE {
                 starts.insert(self.base.wrapping_add(r.addend as u64));
-            } else if let Some(s) = self.nso.syms.get(r.sym as usize).filter(|s| r.sym != 0 && s.shndx != 0) {
+            } else if let Some(s) = self
+                .nso
+                .syms
+                .get(r.sym as usize)
+                .filter(|s| r.sym != 0 && s.shndx != 0)
+            {
                 if matches!(s.info & 0xF, 0 | 2) {
                     starts.insert(self.base.wrapping_add(s.value));
                 }

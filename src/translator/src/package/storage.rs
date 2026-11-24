@@ -23,7 +23,10 @@ impl Storage for FileRange {
     }
     fn read(&self, offset: u64, size: u64) -> Result<Vec<u8>> {
         if offset.checked_add(size).map_or(true, |e| e > self.size) {
-            return crate::package::error::fmt(format!("{}: read past the end of the RomFS", self.blob.path.display()));
+            return crate::package::error::fmt(format!(
+                "{}: read past the end of the RomFS",
+                self.blob.path.display()
+            ));
         }
         self.blob.read_at(self.offset + offset, size)
     }

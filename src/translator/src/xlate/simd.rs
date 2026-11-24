@@ -4,12 +4,18 @@
 //! helpers in runtime/simd.h with constant fields. Covers ARMv8.0-A + Crypto + CRC32; unallocated or
 //! later-architecture encodings return `Unsupported`. Output must stay byte-identical to the Python.
 
-use crate::xlate::util::{bits, extend_expr, hx, sext, set_reg, unsup, w as wr, x as xr, xs, LResult, COND_NAMES};
+use crate::xlate::util::{
+    bits, extend_expr, hx, set_reg, sext, unsup, w as wr, x as xr, xs, LResult, COND_NAMES,
+};
 
 // ---------------------------------------------------------------- module helpers
 
 fn lop(name: &str, u: u32) -> String {
-    if u != 0 { format!("LOP_{name} | LOP_U") } else { format!("LOP_{name}") }
+    if u != 0 {
+        format!("LOP_{name} | LOP_U")
+    } else {
+        format!("LOP_{name}")
+    }
 }
 
 fn vu(sz: u32) -> &'static str {
@@ -29,7 +35,11 @@ fn vr(t: &str, n: u32) -> String {
 }
 
 fn vq(t: &str, q: u32, n: u32) -> String {
-    if q != 0 { format!("VREG({t}, {n})") } else { format!("VQ({t}, 0, {n})") }
+    if q != 0 {
+        format!("VREG({t}, {n})")
+    } else {
+        format!("VQ({t}, 0, {n})")
+    }
 }
 
 fn vwr(t: &str, q: u32, d: u32, e: &str) -> String {
@@ -37,13 +47,30 @@ fn vwr(t: &str, q: u32, d: u32, e: &str) -> String {
 }
 
 fn cond(c: u32) -> String {
-    if c < 14 { format!("COND_{}(c)", COND_NAMES[c as usize].to_uppercase()) } else { "1".into() }
+    if c < 14 {
+        format!("COND_{}(c)", COND_NAMES[c as usize].to_uppercase())
+    } else {
+        "1".into()
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn gen(
-    op: &str, sz: u32, ne: u32, d: u32, szd: u32, offd: u32, keep: u32, n: u32, szn: u32, offn: u32, m: i64, szm: u32,
-    offm: u32, bidx: i64, bimm: u64,
+    op: &str,
+    sz: u32,
+    ne: u32,
+    d: u32,
+    szd: u32,
+    offd: u32,
+    keep: u32,
+    n: u32,
+    szn: u32,
+    offn: u32,
+    m: i64,
+    szm: u32,
+    offm: u32,
+    bidx: i64,
+    bimm: u64,
 ) -> String {
     format!(
         "sl_gen(c, {op}, {sz}, {ne}, {d}, {szd}, {offd}, {keep}, {n}, {szn}, {offn}, {m}, {szm}, {offm}, {bidx}, {});",
@@ -77,7 +104,11 @@ fn shuf(a: &str, b: &str, idx: &[u32]) -> String {
 fn u128s(v: u128) -> String {
     let lo = v as u64;
     let hi = (v >> 64) as u64;
-    if hi != 0 { format!("((u128){} << 64 | {})", hx(hi), hx(lo)) } else { hx(lo) }
+    if hi != 0 {
+        format!("((u128){} << 64 | {})", hx(hi), hx(lo))
+    } else {
+        hx(lo)
+    }
 }
 
 #[allow(non_snake_case)]
@@ -93,9 +124,23 @@ struct Ft {
 
 fn ft(t: u32) -> Ft {
     if t == 0 {
-        Ft { F: "s", VT: "vf32", VU: "vu32", SF: "VSF32", SU: "VS32", SET: "FP_SETS" }
+        Ft {
+            F: "s",
+            VT: "vf32",
+            VU: "vu32",
+            SF: "VSF32",
+            SU: "VS32",
+            SET: "FP_SETS",
+        }
     } else {
-        Ft { F: "d", VT: "vf64", VU: "vu64", SF: "VSF64", SU: "VS64", SET: "FP_SETD" }
+        Ft {
+            F: "d",
+            VT: "vf64",
+            VU: "vu64",
+            SF: "VSF64",
+            SU: "VS64",
+            SET: "FP_SETD",
+        }
     }
 }
 
@@ -161,7 +206,11 @@ fn simd_expand_imm(op: u32, cmode: u32, imm8: u32) -> u64 {
         4 => (0..64).step_by(16).map(|s| i << s).sum(),
         5 => (0..64).step_by(16).map(|s| (i << 8) << s).sum(),
         6 => {
-            let v = if cmode & 1 == 0 { (i << 8) | 0xFF } else { (i << 16) | 0xFFFF };
+            let v = if cmode & 1 == 0 {
+                (i << 8) | 0xFF
+            } else {
+                (i << 16) | 0xFFFF
+            };
             (v << 32) | v
         }
         _ => {
@@ -186,23 +235,47 @@ fn simd_expand_imm(op: u32, cmode: u32, imm8: u32) -> u64 {
 }
 
 fn pm(u: u32) -> &'static str {
-    if u != 0 { "-" } else { "+" }
+    if u != 0 {
+        "-"
+    } else {
+        "+"
+    }
 }
 
 // ---------------------------------------------------------------- top level
 
 fn fp16_misc2(w: u32) -> LResult<String> {
-    let (q, u, opc, n, d) = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 12, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 12, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc != 0b01111 {
         return unsup("fp16 misc");
     }
     let x = vq("vu16", q, n);
-    Ok(vwr("vu16", q, d, &if u != 0 { format!("{x} ^ (uint16_t)0x8000") } else { format!("{x} & (uint16_t)0x7fff") }))
+    Ok(vwr(
+        "vu16",
+        q,
+        d,
+        &if u != 0 {
+            format!("{x} ^ (uint16_t)0x8000")
+        } else {
+            format!("{x} & (uint16_t)0x7fff")
+        },
+    ))
 }
 
 /// SimdC.dp: AdvSIMD / FP / crypto data processing.
 pub fn dp(w: u32, _pc: u64) -> LResult<String> {
-    let (op0, op1, op2, op3) = (bits(w, 28, 4), bits(w, 23, 2), bits(w, 19, 4), bits(w, 10, 9));
+    let (op0, op1, op2, op3) = (
+        bits(w, 28, 4),
+        bits(w, 23, 2),
+        bits(w, 19, 4),
+        bits(w, 10, 9),
+    );
     let o1b = op1 & 2 != 0;
     if op0 == 0b0100 && !o1b && (op2 & 7) == 5 && (op3 & 0b110000011) == 0b10 {
         return crypto_aes(w);
@@ -277,7 +350,9 @@ pub fn dp(w: u32, _pc: u64) -> LResult<String> {
         return unsup(format!("simd vector {w:08x}"));
     }
     if (op0 & 0b0101) == 0b0001 {
-        if bits(w, 29, 1) != 0 || (bits(w, 31, 1) != 0 && (o1b || (op2 & 4 != 0 && op3 & 0b111111 != 0))) {
+        if bits(w, 29, 1) != 0
+            || (bits(w, 31, 1) != 0 && (o1b || (op2 & 4 != 0 && op3 & 0b111111 != 0)))
+        {
             return unsup("fp M/S");
         }
         if o1b {
@@ -318,7 +393,12 @@ fn crypto_aes(w: u32) -> LResult<String> {
     if !(4..=7).contains(&opc) {
         return unsup("aes opcode");
     }
-    Ok(format!("sv_aes(c, {}, {}, {});", opc - 4, bits(w, 0, 5), bits(w, 5, 5)))
+    Ok(format!(
+        "sv_aes(c, {}, {}, {});",
+        opc - 4,
+        bits(w, 0, 5),
+        bits(w, 5, 5)
+    ))
 }
 
 fn crypto_sha3(w: u32) -> LResult<String> {
@@ -329,7 +409,10 @@ fn crypto_sha3(w: u32) -> LResult<String> {
     match opc {
         0..=2 => Ok(format!("sv_sha1hash(c, {opc}, {d}, {n}, {m});")),
         3 => Ok(format!("sv_sha_misc(c, 0, {d}, {n}, {m});")),
-        4 | 5 => Ok(format!("sv_sha256hash(c, {}, {d}, {n}, {m});", (opc == 4) as u32)),
+        4 | 5 => Ok(format!(
+            "sv_sha256hash(c, {}, {d}, {n}, {m});",
+            (opc == 4) as u32
+        )),
         6 => Ok(format!("sv_sha_misc(c, 3, {d}, {n}, {m});")),
         _ => unsup("sha3 opcode"),
     }
@@ -370,11 +453,19 @@ fn scalar_copy(w: u32) -> LResult<String> {
         return unsup("scalar dup size");
     }
     let (d, n) = (bits(w, 0, 5), bits(w, 5, 5));
-    Ok(format!("c->v[{d}] = (({} *)&c->v[{n}])[{idx}];", PTR[sz as usize]))
+    Ok(format!(
+        "c->v[{d}] = (({} *)&c->v[{n}])[{idx}];",
+        PTR[sz as usize]
+    ))
 }
 
 fn copy(w: u32) -> LResult<String> {
-    let (q, op, imm5, imm4) = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 16, 5), bits(w, 11, 4));
+    let (q, op, imm5, imm4) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 16, 5),
+        bits(w, 11, 4),
+    );
     let (d, n) = (bits(w, 0, 5), bits(w, 5, 5));
     let (sz, idx) = imm5_dec(imm5)?;
     if sz > 3 {
@@ -386,7 +477,9 @@ fn copy(w: u32) -> LResult<String> {
             return unsup("ins elem Q");
         }
         let idx2 = imm4 >> sz;
-        return Ok(format!("(({p} *)&c->v[{d}])[{idx}] = (({p} *)&c->v[{n}])[{idx2}];"));
+        return Ok(format!(
+            "(({p} *)&c->v[{d}])[{idx}] = (({p} *)&c->v[{n}])[{idx2}];"
+        ));
     }
     let t = vu(sz);
     match imm4 {
@@ -395,7 +488,12 @@ fn copy(w: u32) -> LResult<String> {
                 return unsup("dup 1d");
             }
             let nl = 16 >> sz;
-            Ok(vwr(t, q, d, &shuf(&vr(t, n), &vr(t, n), &vec![idx; nl as usize])))
+            Ok(vwr(
+                t,
+                q,
+                d,
+                &shuf(&vr(t, n), &vr(t, n), &vec![idx; nl as usize]),
+            ))
         }
         1 => {
             if sz == 3 && q == 0 {
@@ -407,14 +505,23 @@ fn copy(w: u32) -> LResult<String> {
             if q == 0 {
                 return unsup("ins Q");
             }
-            Ok(format!("(({p} *)&c->v[{d}])[{idx}] = ({}){};", ut(sz), xr(n)))
+            Ok(format!(
+                "(({p} *)&c->v[{d}])[{idx}] = ({}){};",
+                ut(sz),
+                xr(n)
+            ))
         }
         5 => {
             if sz >= 2 + q {
                 return unsup("smov size");
             }
             let st = ["int8_t", "int16_t", "int32_t"][sz as usize];
-            Ok(set_reg(q, d, &format!("(uint64_t)(int64_t)({st})(({p} *)&c->v[{n}])[{idx}]"), false))
+            Ok(set_reg(
+                q,
+                d,
+                &format!("(uint64_t)(int64_t)({st})(({p} *)&c->v[{n}])[{idx}]"),
+                false,
+            ))
         }
         7 => {
             if (q != 0 && sz != 3) || (q == 0 && sz == 3) {
@@ -427,7 +534,14 @@ fn copy(w: u32) -> LResult<String> {
 }
 
 fn permute(w: u32) -> LResult<String> {
-    let (q, sz, m, opc, n, d) = (bits(w, 30, 1), bits(w, 22, 2), bits(w, 16, 5), bits(w, 12, 3), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, sz, m, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 22, 2),
+        bits(w, 16, 5),
+        bits(w, 12, 3),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc == 0 || opc == 4 || (sz == 3 && q == 0) {
         return unsup("permute");
     }
@@ -444,7 +558,11 @@ fn permute(w: u32) -> LResult<String> {
             idx.push(if i & 1 == 0 { p + part } else { nl + p + part });
         } else {
             let base = part * ne / 2;
-            idx.push(if i & 1 == 0 { base + i / 2 } else { nl + base + i / 2 });
+            idx.push(if i & 1 == 0 {
+                base + i / 2
+            } else {
+                nl + base + i / 2
+            });
         }
     }
     idx.extend(std::iter::repeat_n(0, (nl - ne) as usize));
@@ -453,14 +571,28 @@ fn permute(w: u32) -> LResult<String> {
 }
 
 fn ext(w: u32) -> LResult<String> {
-    let (q, m, imm4, n, d) = (bits(w, 30, 1), bits(w, 16, 5), bits(w, 11, 4), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, m, imm4, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 16, 5),
+        bits(w, 11, 4),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if bits(w, 22, 2) != 0 || (q == 0 && imm4 >= 8) {
         return unsup("ext");
     }
     let idx: Vec<u32> = if q != 0 {
         (0..16).map(|i| imm4 + i).collect()
     } else {
-        let mut v: Vec<u32> = (0..8).map(|i| if imm4 + i < 8 { imm4 + i } else { 16 + imm4 + i - 8 }).collect();
+        let mut v: Vec<u32> = (0..8)
+            .map(|i| {
+                if imm4 + i < 8 {
+                    imm4 + i
+                } else {
+                    16 + imm4 + i - 8
+                }
+            })
+            .collect();
         v.extend([0; 8]);
         v
     };
@@ -468,7 +600,14 @@ fn ext(w: u32) -> LResult<String> {
 }
 
 fn tbl(w: u32) -> LResult<String> {
-    let (q, m, ln, op, n, d) = (bits(w, 30, 1), bits(w, 16, 5), bits(w, 13, 2), bits(w, 12, 1), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, m, ln, op, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 16, 5),
+        bits(w, 13, 2),
+        bits(w, 12, 1),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if bits(w, 22, 2) != 0 {
         return unsup("tbl op2");
     }
@@ -478,8 +617,15 @@ fn tbl(w: u32) -> LResult<String> {
 // ---------------------------------------------------------------- three same
 
 fn three_same(w: u32, scalar: bool) -> LResult<String> {
-    let (q, u, sz, m, opc, n, d) =
-        (bits(w, 30, 1), bits(w, 29, 1), bits(w, 22, 2), bits(w, 16, 5), bits(w, 11, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, sz, m, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 22, 2),
+        bits(w, 16, 5),
+        bits(w, 11, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc >= 0b11000 {
         return three_same_fp(w, scalar);
     }
@@ -499,7 +645,14 @@ fn three_same(w: u32, scalar: bool) -> LResult<String> {
     }
     match opc {
         0 => return Ok(same3(&lop("HADD", u), sz, ne, d, n, m)),
-        1 => return Ok(vwr(t, q, d, &format!("({t})__builtin_elementwise_add_sat({x}, {y})"))),
+        1 => {
+            return Ok(vwr(
+                t,
+                q,
+                d,
+                &format!("({t})__builtin_elementwise_add_sat({x}, {y})"),
+            ))
+        }
         2 => return Ok(same3(&lop("RHADD", u), sz, ne, d, n, m)),
         3 => {
             let (a64, b64, o64) = (vr("vu64", n), vr("vu64", m), vr("vu64", d));
@@ -516,17 +669,50 @@ fn three_same(w: u32, scalar: bool) -> LResult<String> {
             return Ok(vwr("vu64", q, d, &e));
         }
         4 => return Ok(same3(&lop("HSUB", u), sz, ne, d, n, m)),
-        5 => return Ok(vwr(t, q, d, &format!("({t})__builtin_elementwise_sub_sat({x}, {y})"))),
+        5 => {
+            return Ok(vwr(
+                t,
+                q,
+                d,
+                &format!("({t})__builtin_elementwise_sub_sat({x}, {y})"),
+            ))
+        }
         6 => return Ok(vwr(t, q, d, &format!("({t})({x} > {y})"))),
         7 => return Ok(vwr(t, q, d, &format!("({t})({x} >= {y})"))),
         8..=11 => {
-            return Ok(same3(&lop(["SHL", "QSHL", "RSHL", "QRSHL"][(opc - 8) as usize], u), sz, ne, d, n, m));
+            return Ok(same3(
+                &lop(["SHL", "QSHL", "RSHL", "QRSHL"][(opc - 8) as usize], u),
+                sz,
+                ne,
+                d,
+                n,
+                m,
+            ));
         }
-        12 => return Ok(vwr(t, q, d, &format!("({t})__builtin_elementwise_max({x}, {y})"))),
-        13 => return Ok(vwr(t, q, d, &format!("({t})__builtin_elementwise_min({x}, {y})"))),
+        12 => {
+            return Ok(vwr(
+                t,
+                q,
+                d,
+                &format!("({t})__builtin_elementwise_max({x}, {y})"),
+            ))
+        }
+        13 => {
+            return Ok(vwr(
+                t,
+                q,
+                d,
+                &format!("({t})__builtin_elementwise_min({x}, {y})"),
+            ))
+        }
         14 | 15 => {
             let e = format!("({t})__builtin_elementwise_max({x}, {y}) - ({t})__builtin_elementwise_min({x}, {y})");
-            return Ok(vwr(t, q, d, &if opc == 15 { format!("{o} + ({e})") } else { e }));
+            return Ok(vwr(
+                t,
+                q,
+                d,
+                &if opc == 15 { format!("{o} + ({e})") } else { e },
+            ));
         }
         16 => return Ok(vwr(t, q, d, &format!("{a} {} {b}", pm(u)))),
         17 => {
@@ -534,7 +720,11 @@ fn three_same(w: u32, scalar: bool) -> LResult<String> {
                 t,
                 q,
                 d,
-                &if u != 0 { format!("({t})({a} == {b})") } else { format!("({t})(({a} & {b}) != 0)") },
+                &if u != 0 {
+                    format!("({t})({a} == {b})")
+                } else {
+                    format!("({t})(({a} & {b}) != 0)")
+                },
             ));
         }
         _ => {}
@@ -558,18 +748,37 @@ fn three_same(w: u32, scalar: bool) -> LResult<String> {
                 return unsup("addp U");
             }
             let (ev, od) = pair_idx(q, sz);
-            let (aa, bb) = if u != 0 || opc == 23 { (&a, &b) } else { (&sa, &sb) };
+            let (aa, bb) = if u != 0 || opc == 23 {
+                (&a, &b)
+            } else {
+                (&sa, &sb)
+            };
             let (l, r) = (shuf(aa, bb, &ev), shuf(aa, bb, &od));
             if opc == 23 {
                 return Ok(vwr(t, q, d, &format!("({t})({l} + {r})")));
             }
-            Ok(vwr(t, q, d, &format!("({t})__builtin_elementwise_{}({l}, {r})", if opc == 20 { "max" } else { "min" })))
+            Ok(vwr(
+                t,
+                q,
+                d,
+                &format!(
+                    "({t})__builtin_elementwise_{}({l}, {r})",
+                    if opc == 20 { "max" } else { "min" }
+                ),
+            ))
         }
         22 => {
             if sz != 1 && sz != 2 {
                 return unsup("sqdmulh size");
             }
-            Ok(same3(&lop(if u != 0 { "SQRDMULH" } else { "SQDMULH" }, 0), sz, ne, d, n, m))
+            Ok(same3(
+                &lop(if u != 0 { "SQRDMULH" } else { "SQDMULH" }, 0),
+                sz,
+                ne,
+                d,
+                n,
+                m,
+            ))
         }
         _ => unsup("3same opcode"),
     }
@@ -598,13 +807,27 @@ fn three_same_scalar(u: u32, sz: u32, opc: u32, d: u32, n: u32, m: u32) -> LResu
         return Ok(same3(&op, sz, 1, d, n, m));
     }
     if opc == 9 || opc == 11 {
-        return Ok(same3(&lop(if opc == 9 { "QSHL" } else { "QRSHL" }, u), sz, 1, d, n, m));
+        return Ok(same3(
+            &lop(if opc == 9 { "QSHL" } else { "QRSHL" }, u),
+            sz,
+            1,
+            d,
+            n,
+            m,
+        ));
     }
     if opc == 22 {
         if sz != 1 && sz != 2 {
             return unsup("sqdmulh size");
         }
-        return Ok(same3(&lop(if u != 0 { "SQRDMULH" } else { "SQDMULH" }, 0), sz, 1, d, n, m));
+        return Ok(same3(
+            &lop(if u != 0 { "SQRDMULH" } else { "SQDMULH" }, 0),
+            sz,
+            1,
+            d,
+            n,
+            m,
+        ));
     }
     if sz != 3 {
         return unsup("scalar 3same size");
@@ -615,7 +838,14 @@ fn three_same_scalar(u: u32, sz: u32, opc: u32, d: u32, n: u32, m: u32) -> LResu
     match opc {
         6 => Ok(format!("c->v[{d}] = ({x} > {y}) ? ~0ull : 0;")),
         7 => Ok(format!("c->v[{d}] = ({x} >= {y}) ? ~0ull : 0;")),
-        8 | 10 => Ok(same3(&lop(if opc == 8 { "SHL" } else { "RSHL" }, u), 3, 1, d, n, m)),
+        8 | 10 => Ok(same3(
+            &lop(if opc == 8 { "SHL" } else { "RSHL" }, u),
+            3,
+            1,
+            d,
+            n,
+            m,
+        )),
         16 => Ok(format!("c->v[{d}] = (uint64_t)({a} {} {b});", pm(u))),
         17 => Ok(if u != 0 {
             format!("c->v[{d}] = ({a} == {b}) ? ~0ull : 0;")
@@ -650,26 +880,48 @@ fn three_same_fp(w: u32, scalar: bool) -> LResult<String> {
                 ut(2 + sz)
             ));
         }
-        return Ok(vwr(vuu, q, d, &format!("vcmp_{fl}(c, {cop}, {}, {})", vq(vt, q, n), vq(vt, q, m))));
+        return Ok(vwr(
+            vuu,
+            q,
+            d,
+            &format!("vcmp_{fl}(c, {cop}, {}, {})", vq(vt, q, n), vq(vt, q, m)),
+        ));
     }
     if scalar {
-        if !matches!(key, (0, 0, 0b11011) | (0, 0, 0b11111) | (0, 1, 0b11111) | (1, 1, 0b11010)) {
+        if !matches!(
+            key,
+            (0, 0, 0b11011) | (0, 0, 0b11111) | (0, 1, 0b11111) | (1, 1, 0b11010)
+        ) {
             return unsup("scalar fp 3same");
         }
         let fop = fop3(key).unwrap();
-        let x =
-            if fop == "FOP_RECPS" || fop == "FOP_RSQRTS" { format!("neg_{fl}({sf}({n}))") } else { format!("{sf}({n})") };
+        let x = if fop == "FOP_RECPS" || fop == "FOP_RSQRTS" {
+            format!("neg_{fl}({sf}({n}))")
+        } else {
+            format!("{sf}({n})")
+        };
         return Ok(format!("{set}({d}, op_{fl}(c, {fop}, {x}, {sf}({m}), 0));"));
     }
     let (mut a, b) = (vq(vt, q, n), vq(vt, q, m));
     let fu = fl.to_uppercase();
     if let Some(p) = fpairv(key) {
         let (ev, od) = pair_idx(q, 2 + sz);
-        return Ok(format!("SV_FOP_{fu}({p}, {q}, {d}, {}, {}, ({vt}){{}});", shuf(&a, &b, &ev), shuf(&a, &b, &od)));
+        return Ok(format!(
+            "SV_FOP_{fu}({p}, {q}, {d}, {}, {}, ({vt}){{}});",
+            shuf(&a, &b, &ev),
+            shuf(&a, &b, &od)
+        ));
     }
     if u == 0 && opc == 0b11001 {
-        let mm = if a_ != 0 { format!("vneg_{fl}({a})") } else { a.clone() };
-        return Ok(format!("SV_FOP_{fu}(FOP_MADD, {q}, {d}, {}, {mm}, {b});", vq(vt, q, d)));
+        let mm = if a_ != 0 {
+            format!("vneg_{fl}({a})")
+        } else {
+            a.clone()
+        };
+        return Ok(format!(
+            "SV_FOP_{fu}(FOP_MADD, {q}, {d}, {}, {mm}, {b});",
+            vq(vt, q, d)
+        ));
     }
     let Some(fop) = fop3(key) else {
         return unsup("fp 3same opcode");
@@ -677,14 +929,23 @@ fn three_same_fp(w: u32, scalar: bool) -> LResult<String> {
     if fop == "FOP_RECPS" || fop == "FOP_RSQRTS" {
         a = format!("vneg_{fl}({a})");
     }
-    Ok(format!("SV_FOP_{fu}({fop}, {q}, {d}, {a}, {b}, ({vt}){{}});"))
+    Ok(format!(
+        "SV_FOP_{fu}({fop}, {q}, {d}, {a}, {b}, ({vt}){{}});"
+    ))
 }
 
 // ---------------------------------------------------------------- three different
 
 fn three_diff(w: u32, scalar: bool) -> LResult<String> {
-    let (q, u, sz, m, opc, n, d) =
-        (bits(w, 30, 1), bits(w, 29, 1), bits(w, 22, 2), bits(w, 16, 5), bits(w, 12, 4), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, sz, m, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 22, 2),
+        bits(w, 16, 5),
+        bits(w, 12, 4),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     let mi = m as i64;
     if scalar {
         if u != 0 || ![9, 11, 13].contains(&opc) || (sz != 1 && sz != 2) {
@@ -695,7 +956,23 @@ fn three_diff(w: u32, scalar: bool) -> LResult<String> {
             11 => "SQDMLSL",
             _ => "SQDMULL",
         };
-        return Ok(gen(&lop(op, 0), sz, 1, d, sz + 1, 0, 0, n, sz, 0, mi, sz, 0, -1, 0));
+        return Ok(gen(
+            &lop(op, 0),
+            sz,
+            1,
+            d,
+            sz + 1,
+            0,
+            0,
+            n,
+            sz,
+            0,
+            mi,
+            sz,
+            0,
+            -1,
+            0,
+        ));
     }
     if opc == 14 {
         if u != 0 {
@@ -715,11 +992,43 @@ fn three_diff(w: u32, scalar: bool) -> LResult<String> {
     let off = q * ne;
     if opc == 4 || opc == 6 {
         let op = ["ADDHN", "RADDHN", "SUBHN", "RSUBHN"][((opc == 6) as u32 * 2 + u) as usize];
-        return Ok(gen(&lop(op, 0), sz, ne, d, sz, off, q, n, sz + 1, 0, mi, sz + 1, 0, -1, 0));
+        return Ok(gen(
+            &lop(op, 0),
+            sz,
+            ne,
+            d,
+            sz,
+            off,
+            q,
+            n,
+            sz + 1,
+            0,
+            mi,
+            sz + 1,
+            0,
+            -1,
+            0,
+        ));
     }
     if opc == 1 || opc == 3 {
         let op = if opc == 1 { "ADDW" } else { "SUBW" };
-        return Ok(gen(&lop(op, u), sz, ne, d, sz + 1, 0, 0, n, sz + 1, 0, mi, sz, off, -1, 0));
+        return Ok(gen(
+            &lop(op, u),
+            sz,
+            ne,
+            d,
+            sz + 1,
+            0,
+            0,
+            n,
+            sz + 1,
+            0,
+            mi,
+            sz,
+            off,
+            -1,
+            0,
+        ));
     }
     let op = match opc {
         0 => "ADDL",
@@ -737,14 +1046,41 @@ fn three_diff(w: u32, scalar: bool) -> LResult<String> {
     if op.starts_with("SQD") && (u != 0 || (sz != 1 && sz != 2)) {
         return unsup("sqdmull");
     }
-    let uu = if op.starts_with("SQD") || op.starts_with("PM") { 0 } else { u };
-    Ok(gen(&lop(op, uu), sz, ne, d, sz + 1, 0, 0, n, sz, off, mi, sz, off, -1, 0))
+    let uu = if op.starts_with("SQD") || op.starts_with("PM") {
+        0
+    } else {
+        u
+    };
+    Ok(gen(
+        &lop(op, uu),
+        sz,
+        ne,
+        d,
+        sz + 1,
+        0,
+        0,
+        n,
+        sz,
+        off,
+        mi,
+        sz,
+        off,
+        -1,
+        0,
+    ))
 }
 
 // ---------------------------------------------------------------- two-register misc
 
 fn misc2(w: u32, scalar: bool) -> LResult<String> {
-    let (q, u, sz, opc, n, d) = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 22, 2), bits(w, 12, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, sz, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 22, 2),
+        bits(w, 12, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc >= 0b11000 || opc == 0b10110 || opc == 0b10111 || (0b01100..=0b01111).contains(&opc) {
         return misc2_fp(w, scalar);
     }
@@ -782,16 +1118,31 @@ fn misc2(w: u32, scalar: bool) -> LResult<String> {
         if sz == 3 {
             return unsup("addlp size");
         }
-        return Ok(format!("sl_addlp(c, {u}, {}, {q}, {sz}, {d}, {n});", (opc == 6) as u32));
+        return Ok(format!(
+            "sl_addlp(c, {u}, {}, {q}, {sz}, {d}, {n});",
+            (opc == 6) as u32
+        ));
     }
     if opc == 3 {
-        return Ok(same2(&lop(if u != 0 { "USQADD" } else { "SUQADD" }, 0), sz, ne, d, n));
+        return Ok(same2(
+            &lop(if u != 0 { "USQADD" } else { "SUQADD" }, 0),
+            sz,
+            ne,
+            d,
+            n,
+        ));
     }
     if opc == 4 {
         if sz == 3 {
             return unsup("clz size");
         }
-        return Ok(same2(&lop(if u != 0 { "CLZ" } else { "CLS" }, 0), sz, ne, d, n));
+        return Ok(same2(
+            &lop(if u != 0 { "CLZ" } else { "CLS" }, 0),
+            sz,
+            ne,
+            d,
+            n,
+        ));
     }
     if opc == 5 {
         if u == 0 {
@@ -809,14 +1160,30 @@ fn misc2(w: u32, scalar: bool) -> LResult<String> {
         return unsup("not/rbit size");
     }
     if opc == 7 {
-        return Ok(same2(&lop(if u != 0 { "SQNEG" } else { "SQABS" }, 0), sz, ne, d, n));
+        return Ok(same2(
+            &lop(if u != 0 { "SQNEG" } else { "SQABS" }, 0),
+            sz,
+            ne,
+            d,
+            n,
+        ));
     }
     let (a, sa) = (vr(t, n), vr(s, n));
     if opc == 8 {
-        return Ok(vwr(t, q, d, &format!("({t})({sa} {} 0)", if u != 0 { ">=" } else { ">" })));
+        return Ok(vwr(
+            t,
+            q,
+            d,
+            &format!("({t})({sa} {} 0)", if u != 0 { ">=" } else { ">" }),
+        ));
     }
     if opc == 9 {
-        return Ok(vwr(t, q, d, &format!("({t})({sa} {} 0)", if u != 0 { "<=" } else { "==" })));
+        return Ok(vwr(
+            t,
+            q,
+            d,
+            &format!("({t})({sa} {} 0)", if u != 0 { "<=" } else { "==" }),
+        ));
     }
     if opc == 10 && u == 0 {
         return Ok(vwr(t, q, d, &format!("({t})({sa} < 0)")));
@@ -826,7 +1193,12 @@ fn misc2(w: u32, scalar: bool) -> LResult<String> {
             return Ok(vwr(t, q, d, &format!("-{a}")));
         }
         let sh = (8 << sz) - 1;
-        return Ok(vwr(t, q, d, &format!("(({t}){sa} ^ ({t})({sa} >> {sh})) - ({t})({sa} >> {sh})")));
+        return Ok(vwr(
+            t,
+            q,
+            d,
+            &format!("(({t}){sa} ^ ({t})({sa} >> {sh})) - ({t})({sa} >> {sh})"),
+        ));
     }
     if opc == 0b10010 || opc == 0b10100 {
         if sz == 3 {
@@ -839,24 +1211,68 @@ fn misc2(w: u32, scalar: bool) -> LResult<String> {
             _ => "UQXTN",
         };
         let ne = 8 >> sz;
-        return Ok(gen(&lop(op, 0), sz, ne, d, sz, q * ne, q, n, sz + 1, 0, -1, 0, 0, -1, 0));
+        return Ok(gen(
+            &lop(op, 0),
+            sz,
+            ne,
+            d,
+            sz,
+            q * ne,
+            q,
+            n,
+            sz + 1,
+            0,
+            -1,
+            0,
+            0,
+            -1,
+            0,
+        ));
     }
     if opc == 0b10011 && u != 0 {
         if sz == 3 {
             return unsup("shll size");
         }
         let ne = 8 >> sz;
-        return Ok(gen(&lop("SHLL", 0), sz, ne, d, sz + 1, 0, 0, n, sz, q * ne, -1, 0, 0, -1, 0));
+        return Ok(gen(
+            &lop("SHLL", 0),
+            sz,
+            ne,
+            d,
+            sz + 1,
+            0,
+            0,
+            n,
+            sz,
+            q * ne,
+            -1,
+            0,
+            0,
+            -1,
+            0,
+        ));
     }
     unsup("misc2 opcode")
 }
 
 fn misc2_scalar(u: u32, sz: u32, opc: u32, d: u32, n: u32) -> LResult<String> {
     if opc == 3 {
-        return Ok(same2(&lop(if u != 0 { "USQADD" } else { "SUQADD" }, 0), sz, 1, d, n));
+        return Ok(same2(
+            &lop(if u != 0 { "USQADD" } else { "SUQADD" }, 0),
+            sz,
+            1,
+            d,
+            n,
+        ));
     }
     if opc == 7 {
-        return Ok(same2(&lop(if u != 0 { "SQNEG" } else { "SQABS" }, 0), sz, 1, d, n));
+        return Ok(same2(
+            &lop(if u != 0 { "SQNEG" } else { "SQABS" }, 0),
+            sz,
+            1,
+            d,
+            n,
+        ));
     }
     if opc == 0b10010 || opc == 0b10100 {
         if sz == 3 || (opc == 0b10010 && u == 0) {
@@ -867,15 +1283,37 @@ fn misc2_scalar(u: u32, sz: u32, opc: u32, d: u32, n: u32) -> LResult<String> {
             (_, 0) => "SQXTN",
             _ => "UQXTN",
         };
-        return Ok(gen(&lop(op, 0), sz, 1, d, sz, 0, 0, n, sz + 1, 0, -1, 0, 0, -1, 0));
+        return Ok(gen(
+            &lop(op, 0),
+            sz,
+            1,
+            d,
+            sz,
+            0,
+            0,
+            n,
+            sz + 1,
+            0,
+            -1,
+            0,
+            0,
+            -1,
+            0,
+        ));
     }
     if sz != 3 {
         return unsup("scalar misc size");
     }
     let (a, sa) = (format!("VS64({n})"), format!("(int64_t)VS64({n})"));
     match opc {
-        8 => Ok(format!("c->v[{d}] = ({sa} {} 0) ? ~0ull : 0;", if u != 0 { ">=" } else { ">" })),
-        9 => Ok(format!("c->v[{d}] = ({sa} {} 0) ? ~0ull : 0;", if u != 0 { "<=" } else { "==" })),
+        8 => Ok(format!(
+            "c->v[{d}] = ({sa} {} 0) ? ~0ull : 0;",
+            if u != 0 { ">=" } else { ">" }
+        )),
+        9 => Ok(format!(
+            "c->v[{d}] = ({sa} {} 0) ? ~0ull : 0;",
+            if u != 0 { "<=" } else { "==" }
+        )),
         10 if u == 0 => Ok(format!("c->v[{d}] = ({sa} < 0) ? ~0ull : 0;")),
         11 => Ok(if u != 0 {
             format!("c->v[{d}] = (uint64_t)-{a};")
@@ -888,8 +1326,15 @@ fn misc2_scalar(u: u32, sz: u32, opc: u32, d: u32, n: u32) -> LResult<String> {
 
 /// FP two-register misc, vector and scalar.
 fn misc2_fp(w: u32, scalar: bool) -> LResult<String> {
-    let (q, u, a_, sz, opc, n, d) =
-        (bits(w, 30, 1), bits(w, 29, 1), bits(w, 23, 1), bits(w, 22, 1), bits(w, 12, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, a_, sz, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 23, 1),
+        bits(w, 22, 1),
+        bits(w, 12, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     let f = ft(sz);
     let (fl, vt, vuu, sf, su, set) = (f.F, f.VT, f.VU, f.SF, f.SU, f.SET);
     if opc == 0b10110 || opc == 0b10111 {
@@ -925,9 +1370,22 @@ fn misc2_fp(w: u32, scalar: bool) -> LResult<String> {
             if scalar {
                 return unsup("scalar fabs");
             }
-            let mask = if sz == 0 { "0x80000000u" } else { "0x8000000000000000ull" };
+            let mask = if sz == 0 {
+                "0x80000000u"
+            } else {
+                "0x8000000000000000ull"
+            };
             let r = vr(vuu, n);
-            return Ok(vwr(vuu, q, d, &if u != 0 { format!("{r} ^ {mask}") } else { format!("{r} & ~{mask}") }));
+            return Ok(vwr(
+                vuu,
+                q,
+                d,
+                &if u != 0 {
+                    format!("{r} ^ {mask}")
+                } else {
+                    format!("{r} & ~{mask}")
+                },
+            ));
         }
         let (op, swap) = match (opc, u) {
             (0b01100, 0) => (2, 0),
@@ -942,7 +1400,10 @@ fn misc2_fp(w: u32, scalar: bool) -> LResult<String> {
             if swap != 0 {
                 std::mem::swap(&mut a, &mut b);
             }
-            return Ok(format!("c->v[{d}] = ({})vcmp_{fl}(c, {op}, {a}, {b})[0];", ut(2 + sz)));
+            return Ok(format!(
+                "c->v[{d}] = ({})vcmp_{fl}(c, {op}, {a}, {b})[0];",
+                ut(2 + sz)
+            ));
         }
         let (mut a, mut b) = (x.clone(), format!("({vt}){{}}"));
         if swap != 0 {
@@ -958,7 +1419,10 @@ fn misc2_fp(w: u32, scalar: bool) -> LResult<String> {
             if scalar {
                 return unsup("scalar fsqrt");
             }
-            return Ok(format!("SV_FOP_{}(FOP_SQRT, {q}, {d}, {x}, {x}, ({vt}){{}});", fl.to_uppercase()));
+            return Ok(format!(
+                "SV_FOP_{}(FOP_SQRT, {q}, {d}, {x}, {x}, ({vt}){{}});",
+                fl.to_uppercase()
+            ));
         }
         if !scalar {
             return unsup("vector frecpx");
@@ -990,22 +1454,45 @@ fn misc2_fp(w: u32, scalar: bool) -> LResult<String> {
             _ => 4,
         };
         if scalar {
-            return Ok(format!("c->v[{d}] = ({})toint_{fl}(c, {sf}({n}), {rm}, 0, {}, {u});", ut(2 + sz), 32 << sz));
+            return Ok(format!(
+                "c->v[{d}] = ({})toint_{fl}(c, {sf}({n}), {rm}, 0, {}, {u});",
+                ut(2 + sz),
+                32 << sz
+            ));
         }
-        return Ok(vwr(vuu, q, d, &format!("vtoint_{fl}(c, {x}, {rm}, 0, {u})")));
+        return Ok(vwr(
+            vuu,
+            q,
+            d,
+            &format!("vtoint_{fl}(c, {x}, {rm}, 0, {u})"),
+        ));
     }
     if opc == 0b11100 {
         if scalar || sz != 0 {
             return unsup("urecpe");
         }
-        return Ok(same2(&lop(if u != 0 { "URSQRTE" } else { "URECPE" }, 0), 2, lanes(q, 2), d, n));
+        return Ok(same2(
+            &lop(if u != 0 { "URSQRTE" } else { "URECPE" }, 0),
+            2,
+            lanes(q, 2),
+            d,
+            n,
+        ));
     }
     if opc == 0b11101 {
         if a_ == 0 {
             if scalar {
-                return Ok(format!("{set}({d}, fromint_{fl}(c, {su}({n}), {}, {u}, 0));", 32 << sz));
+                return Ok(format!(
+                    "{set}({d}, fromint_{fl}(c, {su}({n}), {}, {u}, 0));",
+                    32 << sz
+                ));
             }
-            return Ok(vwr(vt, q, d, &format!("vfromint_{fl}(c, {}, 0, {u})", vr(vuu, n))));
+            return Ok(vwr(
+                vt,
+                q,
+                d,
+                &format!("vfromint_{fl}(c, {}, 0, {u})", vr(vuu, n)),
+            ));
         }
         let nm = if u != 0 { "rsqrte" } else { "recpe" };
         if scalar {
@@ -1019,7 +1506,14 @@ fn misc2_fp(w: u32, scalar: bool) -> LResult<String> {
 // ---------------------------------------------------------------- across lanes / pairwise
 
 fn across(w: u32) -> LResult<String> {
-    let (q, u, sz, opc, n, d) = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 22, 2), bits(w, 12, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, sz, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 22, 2),
+        bits(w, 12, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc == 0b01100 || opc == 0b01111 {
         if u == 0 {
             return unsup("fp16 across");
@@ -1051,7 +1545,13 @@ fn across(w: u32) -> LResult<String> {
 }
 
 fn scalar_pairwise(w: u32) -> LResult<String> {
-    let (u, sz, opc, n, d) = (bits(w, 29, 1), bits(w, 22, 2), bits(w, 12, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (u, sz, opc, n, d) = (
+        bits(w, 29, 1),
+        bits(w, 22, 2),
+        bits(w, 12, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if u == 0 {
         if opc == 0b11011 && sz == 3 {
             return Ok(format!("c->v[{d}] = (uint64_t)(VS64({n}) + VHI64({n}));"));
@@ -1068,13 +1568,22 @@ fn scalar_pairwise(w: u32) -> LResult<String> {
     };
     let f = ft(sz & 1);
     let r = vr(f.VT, n);
-    Ok(format!("{}({d}, pair_{}(c, {fop}, {r}[0], {r}[1]));", f.SET, f.F))
+    Ok(format!(
+        "{}({d}, pair_{}(c, {fop}, {r}[0], {r}[1]));",
+        f.SET, f.F
+    ))
 }
 
 // ---------------------------------------------------------------- modified immediate
 
 fn modimm(w: u32) -> LResult<String> {
-    let (q, op, cmode, o2, d) = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 12, 4), bits(w, 11, 1), bits(w, 0, 5));
+    let (q, op, cmode, o2, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 12, 4),
+        bits(w, 11, 1),
+        bits(w, 0, 5),
+    );
     let imm8 = (bits(w, 16, 3) << 5) | bits(w, 5, 5);
     if o2 != 0 {
         return unsup("fmov half imm");
@@ -1094,15 +1603,26 @@ fn modimm(w: u32) -> LResult<String> {
     if op != 0 && !(c4 == 14 || c4 == 15) {
         imm = !imm;
     }
-    let v: u128 = if q != 0 { imm as u128 | ((imm as u128) << 64) } else { imm as u128 };
+    let v: u128 = if q != 0 {
+        imm as u128 | ((imm as u128) << 64)
+    } else {
+        imm as u128
+    };
     Ok(format!("c->v[{d}] = {};", u128s(v)))
 }
 
 // ---------------------------------------------------------------- shift by immediate
 
 fn shift_imm(w: u32, scalar: bool) -> LResult<String> {
-    let (mut q, u, immh, immb, opc, n, d) =
-        (bits(w, 30, 1), bits(w, 29, 1), bits(w, 19, 4), bits(w, 16, 3), bits(w, 11, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (mut q, u, immh, immb, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 19, 4),
+        bits(w, 16, 3),
+        bits(w, 11, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if immh == 0 {
         return unsup("shift immh");
     }
@@ -1126,14 +1646,32 @@ fn shift_imm(w: u32, scalar: bool) -> LResult<String> {
         let fb = rsh;
         if opc == 0b11100 {
             if scalar {
-                return Ok(format!("{}({d}, fromint_{}(c, {}({n}), {es}, {u}, {fb}));", f.SET, f.F, f.SU));
+                return Ok(format!(
+                    "{}({d}, fromint_{}(c, {}({n}), {es}, {u}, {fb}));",
+                    f.SET, f.F, f.SU
+                ));
             }
-            return Ok(vwr(f.VT, q, d, &format!("vfromint_{}(c, {}, {fb}, {u})", f.F, vr(f.VU, n))));
+            return Ok(vwr(
+                f.VT,
+                q,
+                d,
+                &format!("vfromint_{}(c, {}, {fb}, {u})", f.F, vr(f.VU, n)),
+            ));
         }
         if scalar {
-            return Ok(format!("c->v[{d}] = ({})toint_{}(c, {}({n}), 3, {fb}, {es}, {u});", ut(sz), f.F, f.SF));
+            return Ok(format!(
+                "c->v[{d}] = ({})toint_{}(c, {}({n}), 3, {fb}, {es}, {u});",
+                ut(sz),
+                f.F,
+                f.SF
+            ));
         }
-        return Ok(vwr(f.VU, q, d, &format!("vtoint_{}(c, {}, 3, {fb}, {u})", f.F, vq(f.VT, q, n))));
+        return Ok(vwr(
+            f.VU,
+            q,
+            d,
+            &format!("vtoint_{}(c, {}, 3, {fb}, {u})", f.F, vq(f.VT, q, n)),
+        ));
     }
     if narrow {
         if sz == 3 {
@@ -1154,14 +1692,46 @@ fn shift_imm(w: u32, scalar: bool) -> LResult<String> {
             return unsup("scalar shrn");
         }
         let part = if scalar { 0 } else { q };
-        return Ok(gen(&lop(name, ou), sz, ne, d, sz, part * ne, part, n, sz + 1, 0, -1, 0, 0, -1, rsh as u64));
+        return Ok(gen(
+            &lop(name, ou),
+            sz,
+            ne,
+            d,
+            sz,
+            part * ne,
+            part,
+            n,
+            sz + 1,
+            0,
+            -1,
+            0,
+            0,
+            -1,
+            rsh as u64,
+        ));
     }
     if opc == 0b10100 {
         if scalar || sz == 3 {
             return unsup("sshll");
         }
         let ne = 8 >> sz;
-        return Ok(gen(&lop("SHLLI", u), sz, ne, d, sz + 1, 0, 0, n, sz, q * ne, -1, 0, 0, -1, lsh as u64));
+        return Ok(gen(
+            &lop("SHLLI", u),
+            sz,
+            ne,
+            d,
+            sz + 1,
+            0,
+            0,
+            n,
+            sz,
+            q * ne,
+            -1,
+            0,
+            0,
+            -1,
+            lsh as u64,
+        ));
     }
     if sz == 3 && q == 0 {
         return unsup("shift 1d");
@@ -1171,12 +1741,20 @@ fn shift_imm(w: u32, scalar: bool) -> LResult<String> {
     }
     let (t, s) = (vu(sz), vs(sz));
     let fin = |e: String| -> String {
-        if !scalar { vwr(t, q, d, &e) } else { format!("c->v[{d}] = (uint64_t)(({e})[0]);") }
+        if !scalar {
+            vwr(t, q, d, &e)
+        } else {
+            format!("c->v[{d}] = (uint64_t)(({e})[0]);")
+        }
     };
     match opc {
         0 | 2 => {
             let mut e = if u != 0 {
-                if rsh >= es { format!("({t}){{}}") } else { format!("({} >> {rsh})", vr(t, n)) }
+                if rsh >= es {
+                    format!("({t}){{}}")
+                } else {
+                    format!("({} >> {rsh})", vr(t, n))
+                }
             } else {
                 format!("({t})({} >> {})", vr(s, n), rsh.min(es - 1))
             };
@@ -1185,7 +1763,16 @@ fn shift_imm(w: u32, scalar: bool) -> LResult<String> {
             }
             Ok(fin(e))
         }
-        4 | 6 => Ok(same(&lop(if opc == 4 { "RSHRI" } else { "RSRAI" }, u), sz, ne, d, n, -1, rsh as u64, -1)),
+        4 | 6 => Ok(same(
+            &lop(if opc == 4 { "RSHRI" } else { "RSRAI" }, u),
+            sz,
+            ne,
+            d,
+            n,
+            -1,
+            rsh as u64,
+            -1,
+        )),
         8 => {
             if u == 0 {
                 return unsup("sri U");
@@ -1248,18 +1835,36 @@ fn indexed(w: u32, scalar: bool) -> LResult<String> {
         if scalar {
             let el = format!("{}[{idx}]", vr(vt, m));
             if opc == 9 {
-                return Ok(format!("{set}({d}, op_{fl}(c, {mul}, {sf}({n}), {el}, 0));"));
+                return Ok(format!(
+                    "{set}({d}, op_{fl}(c, {mul}, {sf}({n}), {el}, 0));"
+                ));
             }
-            let x = if opc == 1 { format!("{sf}({n})") } else { format!("neg_{fl}({sf}({n}))") };
-            return Ok(format!("{set}({d}, op_{fl}(c, FOP_MADD, {sf}({d}), {x}, {el}));"));
+            let x = if opc == 1 {
+                format!("{sf}({n})")
+            } else {
+                format!("neg_{fl}({sf}({n}))")
+            };
+            return Ok(format!(
+                "{set}({d}, op_{fl}(c, FOP_MADD, {sf}({d}), {x}, {el}));"
+            ));
         }
         let el = format!("vsplat_{fl}({}, {idx}, {q})", vr(vt, m));
         let fu = fl.to_uppercase();
         if opc == 9 {
-            return Ok(format!("SV_FOP_{fu}({mul}, {q}, {d}, {}, {el}, ({vt}){{}});", vq(vt, q, n)));
+            return Ok(format!(
+                "SV_FOP_{fu}({mul}, {q}, {d}, {}, {el}, ({vt}){{}});",
+                vq(vt, q, n)
+            ));
         }
-        let x = if opc == 1 { vq(vt, q, n) } else { format!("vneg_{fl}({})", vq(vt, q, n)) };
-        return Ok(format!("SV_FOP_{fu}(FOP_MADD, {q}, {d}, {}, {x}, {el});", vq(vt, q, d)));
+        let x = if opc == 1 {
+            vq(vt, q, n)
+        } else {
+            format!("vneg_{fl}({})", vq(vt, q, n))
+        };
+        return Ok(format!(
+            "SV_FOP_{fu}(FOP_MADD, {q}, {d}, {}, {x}, {el});",
+            vq(vt, q, d)
+        ));
     }
     let (idx, m) = match sz {
         1 => ((h << 2) | (l << 1) | mb, rm),
@@ -1278,9 +1883,41 @@ fn indexed(w: u32, scalar: bool) -> LResult<String> {
             _ => return unsup("scalar indexed"),
         };
         if op == "SQDMULH" || op == "SQRDMULH" {
-            return Ok(gen(&lop(op, 0), sz, 1, d, sz, 0, 0, n, sz, 0, mi, sz, 0, ii, 0));
+            return Ok(gen(
+                &lop(op, 0),
+                sz,
+                1,
+                d,
+                sz,
+                0,
+                0,
+                n,
+                sz,
+                0,
+                mi,
+                sz,
+                0,
+                ii,
+                0,
+            ));
         }
-        return Ok(gen(&lop(op, 0), sz, 1, d, sz + 1, 0, 0, n, sz, 0, mi, sz, 0, ii, 0));
+        return Ok(gen(
+            &lop(op, 0),
+            sz,
+            1,
+            d,
+            sz + 1,
+            0,
+            0,
+            n,
+            sz,
+            0,
+            mi,
+            sz,
+            0,
+            ii,
+            0,
+        ));
     }
     let ne = lanes(q, sz);
     let el = shuf(&vr(t, m), &vr(t, m), &vec![idx; (16 >> sz) as usize]);
@@ -1288,10 +1925,29 @@ fn indexed(w: u32, scalar: bool) -> LResult<String> {
         return Ok(vwr(t, q, d, &format!("{} * {el}", vr(t, n))));
     }
     if (u, opc) == (1, 0) || (u, opc) == (1, 4) {
-        return Ok(vwr(t, q, d, &format!("{} {} {} * {el}", vr(t, d), if opc == 0 { "+" } else { "-" }, vr(t, n))));
+        return Ok(vwr(
+            t,
+            q,
+            d,
+            &format!(
+                "{} {} {} * {el}",
+                vr(t, d),
+                if opc == 0 { "+" } else { "-" },
+                vr(t, n)
+            ),
+        ));
     }
     if (u, opc) == (0, 12) || (u, opc) == (0, 13) {
-        return Ok(same(&lop(if opc == 12 { "SQDMULH" } else { "SQRDMULH" }, 0), sz, ne, d, n, mi, 0, ii));
+        return Ok(same(
+            &lop(if opc == 12 { "SQDMULH" } else { "SQRDMULH" }, 0),
+            sz,
+            ne,
+            d,
+            n,
+            mi,
+            0,
+            ii,
+        ));
     }
     let lng = match opc {
         2 => "MLAL",
@@ -1307,7 +1963,23 @@ fn indexed(w: u32, scalar: bool) -> LResult<String> {
         return unsup("indexed opcode");
     }
     let ne = 8 >> sz;
-    Ok(gen(&lop(lng, if sq { 0 } else { u }), sz, ne, d, sz + 1, 0, 0, n, sz, q * ne, mi, sz, 0, ii, 0))
+    Ok(gen(
+        &lop(lng, if sq { 0 } else { u }),
+        sz,
+        ne,
+        d,
+        sz + 1,
+        0,
+        0,
+        n,
+        sz,
+        q * ne,
+        mi,
+        sz,
+        0,
+        ii,
+        0,
+    ))
 }
 
 // ---------------------------------------------------------------- scalar FP
@@ -1325,18 +1997,34 @@ fn fp_dp3(w: u32) -> LResult<String> {
     let (o1, o0) = (bits(w, 21, 1), bits(w, 15, 1));
     let (d, n, m, a) = (bits(w, 0, 5), bits(w, 5, 5), bits(w, 16, 5), bits(w, 10, 5));
     let (na, nn) = (o1, o1 ^ o0);
-    Ok(format!("fp_fma_{}(c, {na}, {nn}, {d}, {n}, {m}, {a});", ft(t).F))
+    Ok(format!(
+        "fp_fma_{}(c, {na}, {nn}, {d}, {n}, {m}, {a});",
+        ft(t).F
+    ))
 }
 
 fn fp_dp2(w: u32) -> LResult<String> {
     let t = ftype(w)?;
     let (opc, d, n, m) = (bits(w, 12, 4), bits(w, 0, 5), bits(w, 5, 5), bits(w, 16, 5));
-    const OPS: [&str; 9] =
-        ["FOP_MUL", "FOP_DIV", "FOP_ADD", "FOP_SUB", "FOP_MAX", "FOP_MIN", "FOP_MAXNM", "FOP_MINNM", "FOP_NMUL"];
+    const OPS: [&str; 9] = [
+        "FOP_MUL",
+        "FOP_DIV",
+        "FOP_ADD",
+        "FOP_SUB",
+        "FOP_MAX",
+        "FOP_MIN",
+        "FOP_MAXNM",
+        "FOP_MINNM",
+        "FOP_NMUL",
+    ];
     if opc > 8 {
         return unsup("fp dp2");
     }
-    Ok(format!("fp_op_{}(c, {}, {d}, {n}, {m});", ft(t).F, OPS[opc as usize]))
+    Ok(format!(
+        "fp_op_{}(c, {}, {d}, {n}, {m});",
+        ft(t).F,
+        OPS[opc as usize]
+    ))
 }
 
 fn fp_dp1(w: u32) -> LResult<String> {
@@ -1353,7 +2041,11 @@ fn fp_dp1(w: u32) -> LResult<String> {
         return unsup("fp type");
     }
     let f = ft(t);
-    let sign = if t == 0 { "0x80000000u" } else { "0x8000000000000000ull" };
+    let sign = if t == 0 {
+        "0x80000000u"
+    } else {
+        "0x8000000000000000ull"
+    };
     let (fl, sf, su, set) = (f.F, f.SF, f.SU, f.SET);
     match opc {
         0 => return Ok(format!("c->v[{d}] = {su}({n});")),
@@ -1370,7 +2062,10 @@ fn fp_dp1(w: u32) -> LResult<String> {
                 return unsup("fcvt same");
             }
             if to == 3 {
-                return Ok(format!("c->v[{d}] = {}(c, {sf}({n}));", if t == 0 { "simd_s2h" } else { "simd_dd2h" }));
+                return Ok(format!(
+                    "c->v[{d}] = {}(c, {sf}({n}));",
+                    if t == 0 { "simd_s2h" } else { "simd_dd2h" }
+                ));
             }
             return Ok(if to != 0 {
                 format!("FP_SETD({d}, simd_s2d(c, VSF32({n})));")
@@ -1400,7 +2095,11 @@ fn fp_cmp(w: u32) -> LResult<String> {
     }
     let f = ft(t);
     let (n, m, zero) = (bits(w, 5, 5), bits(w, 16, 5), bits(w, 3, 1));
-    let b = if zero != 0 { "0".to_string() } else { format!("{}({m})", f.SF) };
+    let b = if zero != 0 {
+        "0".to_string()
+    } else {
+        format!("{}({m})", f.SF)
+    };
     Ok(format!("c->nzcv = cmp_{}(c, {}({n}), {b});", f.F, f.SF))
 }
 
@@ -1421,7 +2120,10 @@ fn fp_csel(w: u32) -> LResult<String> {
     let t = ftype(w)?;
     let su = ft(t).SU;
     let (d, n, m, cnd) = (bits(w, 0, 5), bits(w, 5, 5), bits(w, 16, 5), bits(w, 12, 4));
-    Ok(format!("c->v[{d}] = {} ? {su}({n}) : {su}({m});", cond(cnd)))
+    Ok(format!(
+        "c->v[{d}] = {} ? {su}({n}) : {su}({m});",
+        cond(cnd)
+    ))
 }
 
 fn fp_imm(w: u32) -> LResult<String> {
@@ -1430,12 +2132,22 @@ fn fp_imm(w: u32) -> LResult<String> {
         return unsup("fmov imm5");
     }
     let (imm8, d) = (bits(w, 13, 8), bits(w, 0, 5));
-    Ok(format!("c->v[{d}] = {};", hx(vfp_expand_imm(imm8, 32 << t))))
+    Ok(format!(
+        "c->v[{d}] = {};",
+        hx(vfp_expand_imm(imm8, 32 << t))
+    ))
 }
 
 fn fp_fixed(w: u32) -> LResult<String> {
-    let (sf, t, rmode, opc, scale, n, d) =
-        (bits(w, 31, 1), bits(w, 22, 2), bits(w, 19, 2), bits(w, 16, 3), bits(w, 10, 6), bits(w, 5, 5), bits(w, 0, 5));
+    let (sf, t, rmode, opc, scale, n, d) = (
+        bits(w, 31, 1),
+        bits(w, 22, 2),
+        bits(w, 19, 2),
+        bits(w, 16, 3),
+        bits(w, 10, 6),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if t > 1 {
         return unsup("fixed type");
     }
@@ -1446,27 +2158,60 @@ fn fp_fixed(w: u32) -> LResult<String> {
     let (fb, ib) = (64 - scale, if sf != 0 { 64 } else { 32 });
     if rmode == 0 && (opc == 2 || opc == 3) {
         let src = if sf != 0 { xr(n) } else { wr(n) };
-        return Ok(format!("{}({d}, fromint_{}(c, {src}, {ib}, {}, {fb}));", f.SET, f.F, opc & 1));
+        return Ok(format!(
+            "{}({d}, fromint_{}(c, {src}, {ib}, {}, {fb}));",
+            f.SET,
+            f.F,
+            opc & 1
+        ));
     }
     if rmode == 3 && (opc == 0 || opc == 1) {
-        return Ok(set_reg(sf, d, &format!("toint_{}(c, {}({n}), 3, {fb}, {ib}, {opc})", f.F, f.SF), false));
+        return Ok(set_reg(
+            sf,
+            d,
+            &format!("toint_{}(c, {}({n}), 3, {fb}, {ib}, {opc})", f.F, f.SF),
+            false,
+        ));
     }
     unsup("fixed opcode")
 }
 
 fn fp_int(w: u32) -> LResult<String> {
-    let (sf, t, rmode, opc, n, d) = (bits(w, 31, 1), bits(w, 22, 2), bits(w, 19, 2), bits(w, 16, 3), bits(w, 5, 5), bits(w, 0, 5));
+    let (sf, t, rmode, opc, n, d) = (
+        bits(w, 31, 1),
+        bits(w, 22, 2),
+        bits(w, 19, 2),
+        bits(w, 16, 3),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc == 6 || opc == 7 {
         if t == 2 && sf != 0 && rmode == 1 {
-            return Ok(if opc == 6 { set_reg(1, d, &format!("VHI64({n})"), false) } else { format!("VHI64({d}) = {};", xr(n)) });
+            return Ok(if opc == 6 {
+                set_reg(1, d, &format!("VHI64({n})"), false)
+            } else {
+                format!("VHI64({d}) = {};", xr(n))
+            });
         }
         if rmode != 0 || t != sf || t > 1 {
             return unsup("fmov general");
         }
         if opc == 6 {
-            return Ok(set_reg(sf, d, &if sf != 0 { format!("VS64({n})") } else { format!("VS32({n})") }, false));
+            return Ok(set_reg(
+                sf,
+                d,
+                &if sf != 0 {
+                    format!("VS64({n})")
+                } else {
+                    format!("VS32({n})")
+                },
+                false,
+            ));
         }
-        return Ok(format!("c->v[{d}] = {};", if sf != 0 { xr(n) } else { wr(n) }));
+        return Ok(format!(
+            "c->v[{d}] = {};",
+            if sf != 0 { xr(n) } else { wr(n) }
+        ));
     }
     if t > 1 {
         return unsup("fp int type");
@@ -1478,7 +2223,12 @@ fn fp_int(w: u32) -> LResult<String> {
             return unsup("cvtf rmode");
         }
         let src = if sf != 0 { xr(n) } else { wr(n) };
-        return Ok(format!("{}({d}, fromint_{}(c, {src}, {ib}, {}, 0));", f.SET, f.F, opc & 1));
+        return Ok(format!(
+            "{}({d}, fromint_{}(c, {src}, {ib}, {}, 0));",
+            f.SET,
+            f.F,
+            opc & 1
+        ));
     }
     let rm = if opc == 4 || opc == 5 {
         if rmode != 0 {
@@ -1488,7 +2238,17 @@ fn fp_int(w: u32) -> LResult<String> {
     } else {
         rmode
     };
-    Ok(set_reg(sf, d, &format!("toint_{}(c, {}({n}), {rm}, 0, {ib}, {})", f.F, f.SF, opc & 1), false))
+    Ok(set_reg(
+        sf,
+        d,
+        &format!(
+            "toint_{}(c, {}({n}), {rm}, 0, {ib}, {})",
+            f.F,
+            f.SF,
+            opc & 1
+        ),
+        false,
+    ))
 }
 
 // ---------------------------------------------------------------- loads / stores
@@ -1502,7 +2262,11 @@ pub fn ldst(w: u32, pc: u64) -> LResult<String> {
             return unsup("ldr literal opc");
         }
         let addr = pc.wrapping_add((sext(bits(w, 5, 19) as u64, 19) * 4) as u64);
-        return Ok(format!("c->v[{rt}] = {}({});", ["LD32", "LD64", "LD128"][opc as usize], hx(addr)));
+        return Ok(format!(
+            "c->v[{rt}] = {}({});",
+            ["LD32", "LD64", "LD128"][opc as usize],
+            hx(addr)
+        ));
     }
     if bits(w, 31, 1) == 0 && (bits(w, 24, 6) == 0b001100 || bits(w, 24, 6) == 0b001101) {
         return ldst_struct(w);
@@ -1517,12 +2281,21 @@ pub fn ldst(w: u32, pc: u64) -> LResult<String> {
 }
 
 fn sreg(rn: u32) -> String {
-    if rn == 31 { "c->sp".into() } else { format!("c->x[{rn}]") }
+    if rn == 31 {
+        "c->sp".into()
+    } else {
+        format!("c->x[{rn}]")
+    }
 }
 
 fn ldst_pair(w: u32) -> LResult<String> {
     let (opc, mode, l) = (bits(w, 30, 2), bits(w, 23, 2), bits(w, 22, 1));
-    let (imm7, rt2, rn, rt) = (sext(bits(w, 15, 7) as u64, 7), bits(w, 10, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (imm7, rt2, rn, rt) = (
+        sext(bits(w, 15, 7) as u64, 7),
+        bits(w, 10, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc == 3 {
         return unsup("pair opc 3");
     }
@@ -1530,7 +2303,13 @@ fn ldst_pair(w: u32) -> LResult<String> {
     let off = imm7 * (1i64 << scale);
     let base = xs(rn);
     let (post, wb) = (mode == 1, mode == 1 || mode == 3);
-    let ea = if post { base.clone() } else if off >= 0 { format!("{base} + {off}") } else { format!("{base} - {}", -off) };
+    let ea = if post {
+        base.clone()
+    } else if off >= 0 {
+        format!("{base} + {off}")
+    } else {
+        format!("{base} - {}", -off)
+    };
     let (ld, st) = match scale {
         2 => ("LD32", "ST32"),
         3 => ("LD64", "ST64"),
@@ -1589,10 +2368,17 @@ fn ldst_reg(w: u32) -> LResult<String> {
                 if ![2, 3, 6, 7].contains(&option) {
                     return unsup("ldst simd reg option");
                 }
-                ea = format!("{base} + {}", extend_expr(rm, option, if s != 0 { scale } else { 0 }));
+                ea = format!(
+                    "{base} + {}",
+                    extend_expr(rm, option, if s != 0 { scale } else { 0 })
+                );
             } else {
                 let imm9 = sext(bits(w, 12, 9) as u64, 9);
-                let si = if imm9 >= 0 { format!("+ {imm9}") } else { format!("- {}", -imm9) };
+                let si = if imm9 >= 0 {
+                    format!("+ {imm9}")
+                } else {
+                    format!("- {}", -imm9)
+                };
                 match kind {
                     0 => ea = format!("{base} {si}"),
                     1 => {
@@ -1611,7 +2397,10 @@ fn ldst_reg(w: u32) -> LResult<String> {
     }
     let mut parts = vec![format!("uint64_t ea = {ea};")];
     if l != 0 {
-        parts.push(format!("c->v[{rt}] = {}(ea);", ["LD8", "LD16", "LD32", "LD64", "LD128"][scale as usize]));
+        parts.push(format!(
+            "c->v[{rt}] = {}(ea);",
+            ["LD8", "LD16", "LD32", "LD64", "LD128"][scale as usize]
+        ));
     } else {
         let src = match scale {
             0 => format!("VS8({rt})"),
@@ -1620,7 +2409,10 @@ fn ldst_reg(w: u32) -> LResult<String> {
             3 => format!("VS64({rt})"),
             _ => format!("c->v[{rt}]"),
         };
-        parts.push(format!("{}(ea, {src});", ["ST8", "ST16", "ST32", "ST64", "ST128"][scale as usize]));
+        parts.push(format!(
+            "{}(ea, {src});",
+            ["ST8", "ST16", "ST32", "ST64", "ST128"][scale as usize]
+        ));
     }
     if let Some(wb) = wb {
         parts.push(format!("{} = {wb};", sreg(rn)));
@@ -1629,8 +2421,15 @@ fn ldst_reg(w: u32) -> LResult<String> {
 }
 
 fn ldst_struct(w: u32) -> LResult<String> {
-    let (q, l, post, rm, rn, rt, sz) =
-        (bits(w, 30, 1), bits(w, 22, 1), bits(w, 23, 1), bits(w, 16, 5), bits(w, 5, 5), bits(w, 0, 5), bits(w, 10, 2));
+    let (q, l, post, rm, rn, rt, sz) = (
+        bits(w, 30, 1),
+        bits(w, 22, 1),
+        bits(w, 23, 1),
+        bits(w, 16, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+        bits(w, 10, 2),
+    );
     if post == 0 && rm != 0 {
         return unsup("ldst struct rm");
     }
@@ -1662,7 +2461,11 @@ fn ldst_struct(w: u32) -> LResult<String> {
                 .map(|i| {
                     let r = (rt + i) % 32;
                     if l != 0 {
-                        format!("c->v[{r}] = {}(ea + {});", if q != 0 { "LD128" } else { "LD64" }, i * step)
+                        format!(
+                            "c->v[{r}] = {}(ea + {});",
+                            if q != 0 { "LD128" } else { "LD64" },
+                            i * step
+                        )
                     } else if q != 0 {
                         format!("ST128(ea + {}, c->v[{r}]);", i * step)
                     } else {
@@ -1672,7 +2475,10 @@ fn ldst_struct(w: u32) -> LResult<String> {
                 .collect();
             acc = items.join(" ");
         } else {
-            acc = format!("sl_{}(c, {q}, {sz}, {selem}, {rpt}, {rt}, ea);", if l != 0 { "ldm" } else { "stm" });
+            acc = format!(
+                "sl_{}(c, {q}, {sz}, {selem}, {rpt}, {rt}, ea);",
+                if l != 0 { "ldm" } else { "stm" }
+            );
         }
     } else {
         let (opc, s, r) = (bits(w, 13, 3), bits(w, 12, 1), bits(w, 21, 1));
@@ -1708,13 +2514,20 @@ fn ldst_struct(w: u32) -> LResult<String> {
                 }
             }
             total = selem << scale;
-            acc = format!("sl_{}(c, {scale}, {selem}, {idx}, {rt}, ea);", if l != 0 { "lds" } else { "sts" });
+            acc = format!(
+                "sl_{}(c, {scale}, {selem}, {idx}, {rt}, ea);",
+                if l != 0 { "lds" } else { "sts" }
+            );
         }
     }
     let mut parts = vec![format!("uint64_t ea = {base};"), acc];
     if post != 0 {
         let dst = sreg(rn);
-        parts.push(if rm == 31 { format!("{dst} = ea + {total};") } else { format!("{dst} = ea + {};", xr(rm)) });
+        parts.push(if rm == 31 {
+            format!("{dst} = ea + {total};")
+        } else {
+            format!("{dst} = ea + {};", xr(rm))
+        });
     }
     Ok(format!("{{ {} }}", parts.join(" ")))
 }
@@ -1723,12 +2536,29 @@ fn ldst_struct(w: u32) -> LResult<String> {
 
 /// SimdC.crc: CRC32{B,H,W,X} / CRC32C*.
 pub fn crc(w: u32) -> LResult<String> {
-    let (sf, rm, c, sz, rn, rd) = (bits(w, 31, 1), bits(w, 16, 5), bits(w, 12, 1), bits(w, 10, 2), bits(w, 5, 5), bits(w, 0, 5));
+    let (sf, rm, c, sz, rn, rd) = (
+        bits(w, 31, 1),
+        bits(w, 16, 5),
+        bits(w, 12, 1),
+        bits(w, 10, 2),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if (sz == 3) != (sf != 0) {
         return unsup("crc size");
     }
     let val = if sz == 3 { xr(rm) } else { wr(rm) };
-    Ok(set_reg(0, rd, &format!("{}({}, {val}, {})", if c != 0 { "CRC32C" } else { "CRC32" }, wr(rn), 1 << sz), false))
+    Ok(set_reg(
+        0,
+        rd,
+        &format!(
+            "{}({}, {val}, {})",
+            if c != 0 { "CRC32C" } else { "CRC32" },
+            wr(rn),
+            1 << sz
+        ),
+        false,
+    ))
 }
 
 #[cfg(test)]
@@ -1743,12 +2573,18 @@ mod tests {
 
     #[test]
     fn simd_vector_add() {
-        assert_eq!(dp(0x4eb186d6, 0).unwrap(), "VW(vu32, 1, 22, VREG(vu32, 22) + VREG(vu32, 17));");
+        assert_eq!(
+            dp(0x4eb186d6, 0).unwrap(),
+            "VW(vu32, 1, 22, VREG(vu32, 22) + VREG(vu32, 17));"
+        );
     }
 
     #[test]
     fn simd_ldr_q_imm() {
-        assert_eq!(ldst(0x3dc02660, 0).unwrap(), "{ uint64_t ea = c->x[19] + 0x90ull; c->v[0] = LD128(ea); }");
+        assert_eq!(
+            ldst(0x3dc02660, 0).unwrap(),
+            "{ uint64_t ea = c->x[19] + 0x90ull; c->v[0] = LD128(ea); }"
+        );
     }
 
     #[test]
@@ -1761,12 +2597,18 @@ mod tests {
 
     #[test]
     fn simd_fcvtzs() {
-        assert_eq!(dp(0x1e38024d, 0).unwrap(), "c->x[13] = (uint32_t)(toint_s(c, VSF32(18), 3, 0, 32, 0));");
+        assert_eq!(
+            dp(0x1e38024d, 0).unwrap(),
+            "c->x[13] = (uint32_t)(toint_s(c, VSF32(18), 3, 0, 32, 0));"
+        );
     }
 
     #[test]
     fn simd_modimm_movi() {
-        assert_eq!(dp(0x4f04e400, 0).unwrap(), "c->v[0] = ((u128)0x8080808080808080ull << 64 | 0x8080808080808080ull);");
+        assert_eq!(
+            dp(0x4f04e400, 0).unwrap(),
+            "c->v[0] = ((u128)0x8080808080808080ull << 64 | 0x8080808080808080ull);"
+        );
     }
 
     #[test]
@@ -1776,7 +2618,10 @@ mod tests {
 
     #[test]
     fn simd_crc32() {
-        assert_eq!(crc(0x1acb4108).unwrap(), "c->x[8] = (uint32_t)(CRC32((uint32_t)c->x[8], (uint32_t)c->x[11], 1));");
+        assert_eq!(
+            crc(0x1acb4108).unwrap(),
+            "c->x[8] = (uint32_t)(CRC32((uint32_t)c->x[8], (uint32_t)c->x[11], 1));"
+        );
     }
 
     #[test]

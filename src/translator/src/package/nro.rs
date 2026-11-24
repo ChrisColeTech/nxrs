@@ -43,9 +43,17 @@ pub fn nrr_hashes(d: &[u8]) -> Vec<[u8; 32]> {
         return vec![];
     }
     let hdr = if d[5] == 1 { 0x4c0 } else { 0x340 };
-    let Some(f) = d.get(hdr..hdr + 8) else { return vec![] };
-    let (off, cnt) = (u32::from_le_bytes(f[..4].try_into().unwrap()) as usize, u32::from_le_bytes(f[4..].try_into().unwrap()) as usize);
-    (0..cnt).filter_map(|i| d.get(off + 32 * i..off + 32 * i + 32)).map(|h| h.try_into().unwrap()).collect()
+    let Some(f) = d.get(hdr..hdr + 8) else {
+        return vec![];
+    };
+    let (off, cnt) = (
+        u32::from_le_bytes(f[..4].try_into().unwrap()) as usize,
+        u32::from_le_bytes(f[4..].try_into().unwrap()) as usize,
+    );
+    (0..cnt)
+        .filter_map(|i| d.get(off + 32 * i..off + 32 * i + 32))
+        .map(|h| h.try_into().unwrap())
+        .collect()
 }
 
 /// Does the NRO define `name` in its dynamic symbol table? (a plain search of its .dynstr; enough to recognise an
@@ -82,7 +90,10 @@ struct FileReader<'a> {
 
 impl std::io::Read for FileReader<'_> {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let d = self.romfs.read(self.path, self.at, buf.len().min(1 << 20) as u64).map_err(std::io::Error::other)?;
+        let d = self
+            .romfs
+            .read(self.path, self.at, buf.len().min(1 << 20) as u64)
+            .map_err(std::io::Error::other)?;
         buf[..d.len()].copy_from_slice(&d);
         self.at += d.len() as u64;
         Ok(d.len())
@@ -93,13 +104,21 @@ impl std::io::Read for FileReader<'_> {
 /// index this reader does not parse in every version): every NRO header stored as is (`NRO0` at +0x10) and every
 /// zstd frame whose first bytes inflate to one; the ones whose SHA-256 is in `want` are returned as (label, bytes).
 /// `say` reports progress. nxnative's nro_collect.py scans the same way when an archive has no index it reads.
-pub fn scan(romfs: &RomFs, want: &[[u8; 32]], say: &dyn Fn(&str)) -> crate::package::error::Result<Vec<(String, Vec<u8>)>> {
+pub fn scan(
+    romfs: &RomFs,
+    want: &[[u8; 32]],
+    say: &dyn Fn(&str),
+) -> crate::package::error::Result<Vec<(String, Vec<u8>)>> {
     use std::io::Read;
     const WIN: u64 = 64 << 20;
     const ZMAGIC: [u8; 4] = [0x28, 0xb5, 0x2f, 0xfd];
     let mut out: Vec<(String, Vec<u8>)> = vec![];
     let mut seen: std::collections::HashSet<[u8; 32]> = std::collections::HashSet::new();
-    let files: Vec<(String, u64)> = romfs.walk().into_iter().filter(|(_, n)| *n >= (1 << 20)).collect();
+    let files: Vec<(String, u64)> = romfs
+        .walk()
+        .into_iter()
+        .filter(|(_, n)| *n >= (1 << 20))
+        .collect();
     let total: u64 = files.iter().map(|f| f.1).sum();
     let mut done = 0u64;
     let t0 = std::time::Instant::now();
@@ -117,19 +136,27 @@ pub fn scan(romfs: &RomFs, want: &[[u8; 32]], say: &dyn Fn(&str)) -> crate::pack
                     continue;
                 }
                 let start = if z { i } else { i - 0x10 };
-                let head = if z { zstd_head(&w[start..(start + 0x40000).min(w.len())], 0x40) } else { w.get(start..start + 0x40).map(|h| h.to_vec()) };
+                let head = if z {
+                    zstd_head(&w[start..(start + 0x40000).min(w.len())], 0x40)
+                } else {
+                    w.get(start..start + 0x40).map(|h| h.to_vec())
+                };
                 if let Some(h) = head.filter(|h| h.len() >= 0x40 && &h[0x10..0x14] == b"NRO0") {
                     let len = u32::from_le_bytes(h[0x18..0x1c].try_into().unwrap()) as u64;
                     if (0x100..=MAX_NRO).contains(&len) {
                         let abs = at + start as u64;
                         let mut d = vec![];
                         let ok = if z {
-                            zstd::stream::read::Decoder::new(FileReader { romfs, path: p, at: abs })
-                                .and_then(|mut dec| {
-                                    dec.window_log_max(31)?;
-                                    (&mut dec).take(len).read_to_end(&mut d)
-                                })
-                                .is_ok()
+                            zstd::stream::read::Decoder::new(FileReader {
+                                romfs,
+                                path: p,
+                                at: abs,
+                            })
+                            .and_then(|mut dec| {
+                                dec.window_log_max(31)?;
+                                (&mut dec).take(len).read_to_end(&mut d)
+                            })
+                            .is_ok()
                         } else {
                             d = romfs.read(p, abs, len)?;
                             true
@@ -139,7 +166,11 @@ pub fn scan(romfs: &RomFs, want: &[[u8; 32]], say: &dyn Fn(&str)) -> crate::pack
                             if want.contains(&hash) && seen.insert(hash) {
                                 out.push((format!("{p}@{abs:#x}"), d));
                                 if seen.len() == want.len() {
-                                    say(&format!("NRO scan: all {} found in {:.0} s", want.len(), t0.elapsed().as_secs_f64()));
+                                    say(&format!(
+                                        "NRO scan: all {} found in {:.0} s",
+                                        want.len(),
+                                        t0.elapsed().as_secs_f64()
+                                    ));
                                     return Ok(out);
                                 }
                             }
@@ -153,7 +184,14 @@ pub fn scan(romfs: &RomFs, want: &[[u8; 32]], say: &dyn Fn(&str)) -> crate::pack
             if (done - n) >> 30 == done >> 30 {
                 continue;
             }
-            say(&format!("NRO scan: {:.1} of {:.1} GB, {} of {} found ({:.0} s)", done as f64 / 1e9, total as f64 / 1e9, seen.len(), want.len(), t0.elapsed().as_secs_f64()));
+            say(&format!(
+                "NRO scan: {:.1} of {:.1} GB, {} of {} found ({:.0} s)",
+                done as f64 / 1e9,
+                total as f64 / 1e9,
+                seen.len(),
+                want.len(),
+                t0.elapsed().as_secs_f64()
+            ));
         }
     }
     Ok(out)
@@ -166,7 +204,10 @@ pub fn collect(romfs: &RomFs) -> crate::package::error::Result<Collected> {
 
 /// The same, with `extra` asked for the registered hashes no loose file holds: NROs inside the game's archives
 /// (Super Smash Bros. Ultimate's data.arc), as (label, bytes).
-pub fn collect_with(romfs: &RomFs, extra: &dyn Fn(&[[u8; 32]]) -> crate::package::error::Result<Vec<(String, Vec<u8>)>>) -> crate::package::error::Result<Collected> {
+pub fn collect_with(
+    romfs: &RomFs,
+    extra: &dyn Fn(&[[u8; 32]]) -> crate::package::error::Result<Vec<(String, Vec<u8>)>>,
+) -> crate::package::error::Result<Collected> {
     let mut out = Collected::default();
     let mut wanted: BTreeMap<[u8; 32], ()> = BTreeMap::new();
     let files = romfs.walk();
@@ -193,13 +234,21 @@ pub fn collect_with(romfs: &RomFs, extra: &dyn Fn(&[[u8; 32]]) -> crate::package
         }
         let d = romfs.read_file(p)?;
         let n = u32::from_le_bytes(d[0x18..0x1c].try_into().unwrap()) as usize;
-        let d = if n <= d.len() { d[..n].to_vec() } else { continue };
+        let d = if n <= d.len() {
+            d[..n].to_vec()
+        } else {
+            continue;
+        };
         let h: [u8; 32] = Sha256::digest(&d).into();
         if wanted.contains_key(&h) {
             found.entry(h).or_insert((p.clone(), d));
         }
     }
-    let missing: Vec<[u8; 32]> = wanted.keys().filter(|h| !found.contains_key(*h)).copied().collect();
+    let missing: Vec<[u8; 32]> = wanted
+        .keys()
+        .filter(|h| !found.contains_key(*h))
+        .copied()
+        .collect();
     if !missing.is_empty() {
         for (p, d) in extra(&missing)? {
             let h: [u8; 32] = Sha256::digest(&d).into();
@@ -211,12 +260,20 @@ pub fn collect_with(romfs: &RomFs, extra: &dyn Fn(&[[u8; 32]]) -> crate::package
     for h in wanted.keys() {
         match found.remove(h) {
             Some((path, bytes)) if exports(&bytes, "EOS_Platform_Create") => {
-                let b = bytes[0x40..0x60].iter().map(|b| format!("{b:02x}")).collect();
+                let b = bytes[0x40..0x60]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect();
                 out.refused.push((path, *h, b))
             }
             Some((path, bytes)) => {
                 let name = format!("nro_{:03}", out.nros.len());
-                out.nros.push(Nro { name, path, sha256: *h, bytes });
+                out.nros.push(Nro {
+                    name,
+                    path,
+                    sha256: *h,
+                    bytes,
+                });
             }
             None => out.missing.push(*h),
         }
@@ -229,11 +286,22 @@ pub fn collect_with(romfs: &RomFs, extra: &dyn Fn(&[[u8; 32]]) -> crate::package
 /// online SDK. The runtime finds a module by its build id (the NRO header's +0x40) and checks its size.
 pub fn tsv(c: &Collected, layout: &[(String, u64, u64)]) -> String {
     let hex = |h: &[u8; 32]| h.iter().map(|b| format!("{b:02x}")).collect::<String>();
-    let bid = |d: &[u8]| d.get(0x40..0x60).map_or(String::new(), |b| b.iter().map(|b| format!("{b:02x}")).collect());
+    let bid = |d: &[u8]| {
+        d.get(0x40..0x60).map_or(String::new(), |b| {
+            b.iter().map(|b| format!("{b:02x}")).collect()
+        })
+    };
     let mut s = String::from("# NRO modules the game loads at run time (nxrs-build): name, base, size, NRO bytes, SHA-256, build id, RomFS path\n");
     for n in &c.nros {
         if let Some((_, base, size)) = layout.iter().find(|m| m.0 == n.name) {
-            s.push_str(&format!("{}\t{base:#x}\t{size:#x}\t{:#x}\t{}\t{}\t{}\n", n.name, n.bytes.len(), hex(&n.sha256), bid(&n.bytes), n.path));
+            s.push_str(&format!(
+                "{}\t{base:#x}\t{size:#x}\t{:#x}\t{}\t{}\t{}\n",
+                n.name,
+                n.bytes.len(),
+                hex(&n.sha256),
+                bid(&n.bytes),
+                n.path
+            ));
         }
     }
     for (p, h, b) in &c.refused {
@@ -269,7 +337,12 @@ mod tests {
 
     #[test]
     fn registered_nros_are_collected_and_online_sdks_refused() {
-        let (a, b, eos, stray) = (nro(1, b""), nro(2, b""), nro(3, b"\0EOS_Platform_Create\0"), nro(4, b""));
+        let (a, b, eos, stray) = (
+            nro(1, b""),
+            nro(2, b""),
+            nro(3, b"\0EOS_Platform_Create\0"),
+            nro(4, b""),
+        );
         let h = |d: &[u8]| -> [u8; 32] { Sha256::digest(d).into() };
         let gone = [9u8; 32];
         let r = nrr(&[h(&a), h(&b), h(&eos), gone]);

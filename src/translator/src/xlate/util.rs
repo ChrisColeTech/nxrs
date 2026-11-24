@@ -12,8 +12,9 @@ pub fn unsup<T>(msg: impl Into<String>) -> LResult<T> {
     Err(Unsupported(msg.into()))
 }
 
-pub const COND_NAMES: [&str; 16] =
-    ["eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al", "nv"];
+pub const COND_NAMES: [&str; 16] = [
+    "eq", "ne", "cs", "cc", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al", "nv",
+];
 
 #[inline]
 pub fn bits(w: u32, lo: u32, n: u32) -> u32 {
@@ -60,7 +61,13 @@ pub fn replicate(v: u64, esize: u32, size: u32) -> u64 {
 }
 
 /// AArch64 DecodeBitMasks: (wmask, tmask).
-pub fn decode_bit_masks(n: u32, imms: u32, immr: u32, size: u32, immediate: bool) -> LResult<(u64, u64)> {
+pub fn decode_bit_masks(
+    n: u32,
+    imms: u32,
+    immr: u32,
+    size: u32,
+    immediate: bool,
+) -> LResult<(u64, u64)> {
     let x = (n << 6) | (!imms & 0x3F);
     if x == 0 {
         return unsup("reserved bitmask");
@@ -100,19 +107,35 @@ pub fn hx_i(v: i128) -> String {
 }
 
 pub fn x(r: u32) -> String {
-    if r == 31 { "0ull".into() } else { format!("c->x[{r}]") }
+    if r == 31 {
+        "0ull".into()
+    } else {
+        format!("c->x[{r}]")
+    }
 }
 
 pub fn xs(r: u32) -> String {
-    if r == 31 { "c->sp".into() } else { format!("c->x[{r}]") }
+    if r == 31 {
+        "c->sp".into()
+    } else {
+        format!("c->x[{r}]")
+    }
 }
 
 pub fn w(r: u32) -> String {
-    if r == 31 { "0u".into() } else { format!("(uint32_t)c->x[{r}]") }
+    if r == 31 {
+        "0u".into()
+    } else {
+        format!("(uint32_t)c->x[{r}]")
+    }
 }
 
 pub fn ws(r: u32) -> String {
-    if r == 31 { "(uint32_t)c->sp".into() } else { format!("(uint32_t)c->x[{r}]") }
+    if r == 31 {
+        "(uint32_t)c->sp".into()
+    } else {
+        format!("(uint32_t)c->x[{r}]")
+    }
 }
 
 /// Python `R(sf, r, sp=False)`.
@@ -130,7 +153,11 @@ pub fn set_reg(sf: u32, r: u32, expr: &str, sp: bool) -> String {
     if r == 31 && !sp {
         return format!("(void)({expr});");
     }
-    let dst = if r == 31 { "c->sp".to_string() } else { format!("c->x[{r}]") };
+    let dst = if r == 31 {
+        "c->sp".to_string()
+    } else {
+        format!("c->x[{r}]")
+    };
     if sf != 0 {
         format!("{dst} = (uint64_t)({expr});")
     } else {
@@ -150,7 +177,11 @@ pub fn extend_expr(r: u32, option: u32, shift: u32) -> String {
         6 => format!("(uint64_t)(int64_t)(int32_t){base}"),
         _ => base,
     };
-    if shift != 0 { format!("({e} << {shift})") } else { e }
+    if shift != 0 {
+        format!("({e} << {shift})")
+    } else {
+        e
+    }
 }
 
 /// Python `cond_expr(cond)` / simd_c `cond(c)`.

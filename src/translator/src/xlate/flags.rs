@@ -5,11 +5,15 @@ use regex::{Captures, Regex};
 use std::collections::BTreeSet;
 use std::sync::LazyLock;
 
-static KIND_DEF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(subs|adds|logic)(32|64)\(c, ").unwrap());
-static CARRY_DEF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(adcs|sbcs)(32|64)\(c, ").unwrap());
-static CARRY_USE: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\b(adc|sbc)(32|64)\(c, ").unwrap());
+static KIND_DEF: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(subs|adds|logic)(32|64)\(c, ").unwrap());
+static CARRY_DEF: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(adcs|sbcs)(32|64)\(c, ").unwrap());
+static CARRY_USE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\b(adc|sbc)(32|64)\(c, ").unwrap());
 static COND: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"COND_([A-Z]{2})\(c\)").unwrap());
-static VOID_DEF: LazyLock<Regex> = LazyLock::new(|| Regex::new(r"\(void\)(subs|adds)(32|64)\(c, ").unwrap());
+static VOID_DEF: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"\(void\)(subs|adds)(32|64)\(c, ").unwrap());
 const NZ_DEF: &str = "c->nzcv = ";
 const NZ_USE: &str = "(c->nzcv)";
 
@@ -27,13 +31,18 @@ pub struct FlagError(pub String);
 
 /// (reads flags, kind of the flags written: "nz", "sub64", ... or None) of one instruction's C.
 pub fn effect(code: &str) -> Result<(bool, Option<String>), FlagError> {
-    let reads = COND.is_match(code) || CARRY_USE.is_match(code) || CARRY_DEF.is_match(code) || code.contains(NZ_USE);
+    let reads = COND.is_match(code)
+        || CARRY_USE.is_match(code)
+        || CARRY_DEF.is_match(code)
+        || code.contains(NZ_USE);
     if code.contains(NZ_DEF) || CARRY_DEF.is_match(code) {
         return Ok((reads, Some("nz".into())));
     }
     let defs: Vec<Captures> = KIND_DEF.captures_iter(code).collect();
     if defs.len() > 1 {
-        return Err(FlagError(format!("several flag definitions in one instruction: {code}")));
+        return Err(FlagError(format!(
+            "several flag definitions in one instruction: {code}"
+        )));
     }
     if let Some(d) = defs.first() {
         return Ok((reads, Some(format!("{}{}", kind_name(&d[1]), &d[2]))));
@@ -55,11 +64,20 @@ pub struct Plan {
 
 impl Plan {
     fn new(n: usize) -> Plan {
-        Plan { reader: vec![None; n], pack: vec![false; n], exit: vec![None; n], ..Default::default() }
+        Plan {
+            reader: vec![None; n],
+            pack: vec![false; n],
+            exit: vec![None; n],
+            ..Default::default()
+        }
     }
 
     pub fn decl(&self) -> &'static str {
-        if self.entry { "Flags F = {.nz = c->nzcv};" } else { "Flags F = {0};" }
+        if self.entry {
+            "Flags F = {.nz = c->nzcv};"
+        } else {
+            "Flags F = {0};"
+        }
     }
 
     pub fn publish(&self, i: usize) -> String {
@@ -73,12 +91,18 @@ impl Plan {
         let mut code = code.to_string();
         let (_, dk) = effect(&code)?;
         if let Some(rk) = &self.reader[i] {
-            code = COND.replace_all(&code, |m: &Captures| format!("fc_{rk}(&F, CC_{})", &m[1])).into_owned();
+            code = COND
+                .replace_all(&code, |m: &Captures| format!("fc_{rk}(&F, CC_{})", &m[1]))
+                .into_owned();
             code = CARRY_DEF
-                .replace_all(&code, |m: &Captures| format!("{}{}f(&F, fc_{rk}(&F, CC_CS), ", &m[1], &m[2]))
+                .replace_all(&code, |m: &Captures| {
+                    format!("{}{}f(&F, fc_{rk}(&F, CC_CS), ", &m[1], &m[2])
+                })
                 .into_owned();
             code = CARRY_USE
-                .replace_all(&code, |m: &Captures| format!("{}{}f(fc_{rk}(&F, CC_CS), ", &m[1], &m[2]))
+                .replace_all(&code, |m: &Captures| {
+                    format!("{}{}f(fc_{rk}(&F, CC_CS), ", &m[1], &m[2])
+                })
                 .into_owned();
             code = code.replace(NZ_USE, &format!("(fnz_{rk}(&F))"));
         }
@@ -86,12 +110,16 @@ impl Plan {
             Some("nz") => {
                 code = code.replace(NZ_DEF, "F.nz = ");
                 code = VOID_DEF
-                    .replace_all(&code, |m: &Captures| format!("F.nz = nz_{}{}(", kind_name(&m[1]), &m[2]))
+                    .replace_all(&code, |m: &Captures| {
+                        format!("F.nz = nz_{}{}(", kind_name(&m[1]), &m[2])
+                    })
                     .into_owned();
             }
             Some(dk) => {
                 code = KIND_DEF
-                    .replace_all(&code, |m: &Captures| format!("f{}{}(&F, ", kind_name(&m[1]), &m[2]))
+                    .replace_all(&code, |m: &Captures| {
+                        format!("f{}{}(&F, ", kind_name(&m[1]), &m[2])
+                    })
                     .into_owned();
                 if self.pack[i] {
                     code.push_str(&format!(" F.nz = fnz_{dk}(&F);"));
@@ -99,8 +127,14 @@ impl Plan {
             }
             None => {}
         }
-        if code.contains("c->nzcv") || COND.is_match(&code) || KIND_DEF.is_match(&code) || CARRY_USE.is_match(&code) {
-            return Err(FlagError(format!("flag access left after the rewrite: {code}")));
+        if code.contains("c->nzcv")
+            || COND.is_match(&code)
+            || KIND_DEF.is_match(&code)
+            || CARRY_USE.is_match(&code)
+        {
+            return Err(FlagError(format!(
+                "flag access left after the rewrite: {code}"
+            )));
         }
         Ok(code)
     }
@@ -194,9 +228,15 @@ mod tests {
 
     #[test]
     fn effects() {
-        assert_eq!(effect("(void)(subs64(c, c->x[1], 0x3ull));").unwrap(), (false, Some("sub64".into())));
+        assert_eq!(
+            effect("(void)(subs64(c, c->x[1], 0x3ull));").unwrap(),
+            (false, Some("sub64".into()))
+        );
         assert_eq!(effect("if (COND_EQ(c)) x").unwrap(), (true, None));
-        assert_eq!(effect("c->nzcv = 0x0ull;").unwrap(), (false, Some("nz".into())));
+        assert_eq!(
+            effect("c->nzcv = 0x0ull;").unwrap(),
+            (false, Some("nz".into()))
+        );
     }
 
     #[test]
@@ -206,6 +246,9 @@ mod tests {
         let p = plan(&eff, &succ, &BTreeSet::new(), &BTreeSet::new());
         assert!(p.used && !p.entry);
         assert_eq!(p.rewrite(1, "COND_LT(c)").unwrap(), "fc_sub64(&F, CC_LT)");
-        assert_eq!(p.rewrite(0, "(void)(subs64(c, a, b));").unwrap(), "(void)(fsub64(&F, a, b));");
+        assert_eq!(
+            p.rewrite(0, "(void)(subs64(c, a, b));").unwrap(),
+            "(void)(fsub64(&F, a, b));"
+        );
     }
 }

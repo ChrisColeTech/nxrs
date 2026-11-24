@@ -85,7 +85,11 @@ pub fn writes_gpr(w: u32, r: u32) -> bool {
             // exclusives: loads write Rt (and Rt2), stores their status register Rs
             let load = (w >> 22) & 1 == 1;
             let rs = (w >> 16) & 31;
-            return if load { rd == r || ((w >> 21) & 1 == 1 && rt2 == r) } else { (w >> 23) & 1 == 0 && rs == r };
+            return if load {
+                rd == r || ((w >> 21) & 1 == 1 && rt2 == r)
+            } else {
+                (w >> 23) & 1 == 0 && rs == r
+            };
         }
         return false;
     }
@@ -125,7 +129,11 @@ pub fn writes_gpr(w: u32, r: u32) -> bool {
 
 /// Function ranges (module offsets) from the unwind table, sorted; empty for a module without one.
 pub fn fde_ranges(img: &[u8]) -> Result<Vec<(usize, usize)>, MatchError> {
-    let rd32 = |o: usize| img.get(o..o + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap())).ok_or(MatchError(format!("read past the image at {o:#x}")));
+    let rd32 = |o: usize| {
+        img.get(o..o + 4)
+            .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+            .ok_or(MatchError(format!("read past the image at {o:#x}")))
+    };
     let m0 = rd32(4)? as usize;
     if img.get(m0..m0 + 4) != Some(b"MOD0") {
         return merr("no MOD0".into());
@@ -134,7 +142,10 @@ pub fn fde_ranges(img: &[u8]) -> Result<Vec<(usize, usize)>, MatchError> {
     let ehe = (m0 as i64 + rd32(m0 + 20)? as i32 as i64) as usize;
     let read = |o: usize, enc: u8| -> Result<(i64, usize), MatchError> {
         let (fmt, app) = (enc & 0xf, enc & 0x70);
-        let g = |n: usize| img.get(o..o + n).ok_or(MatchError(format!("pointer past the image at {o:#x}")));
+        let g = |n: usize| {
+            img.get(o..o + n)
+                .ok_or(MatchError(format!("pointer past the image at {o:#x}")))
+        };
         let (mut v, sz) = match fmt {
             0x1 => {
                 let (mut v, mut sh, mut p) = (0i64, 0, o);
@@ -162,7 +173,10 @@ pub fn fde_ranges(img: &[u8]) -> Result<Vec<(usize, usize)>, MatchError> {
         }
         Ok((v, sz))
     };
-    if ehe < ehs + 12 || img.get(ehs) != Some(&1) || matches!(img.get(ehs + 3), Some(0xff) | Some(0) | None) {
+    if ehe < ehs + 12
+        || img.get(ehs) != Some(&1)
+        || matches!(img.get(ehs + 3), Some(0xff) | Some(0) | None)
+    {
         return Ok(vec![]);
     }
     let (penc, cenc, tenc) = (img[ehs + 1], img[ehs + 2], img[ehs + 3]);
@@ -186,7 +200,11 @@ pub fn fde_ranges(img: &[u8]) -> Result<Vec<(usize, usize)>, MatchError> {
                 let mut p = cie + 8;
                 let ver = *img.get(p).ok_or(MatchError("CIE past the image".into()))?;
                 p += 1;
-                let end = img[p..].iter().position(|&b| b == 0).ok_or(MatchError("CIE augmentation".into()))? + p;
+                let end = img[p..]
+                    .iter()
+                    .position(|&b| b == 0)
+                    .ok_or(MatchError("CIE augmentation".into()))?
+                    + p;
                 let aug = img[p..end].to_vec();
                 p = end + 1;
                 let uleb = |p: &mut usize| {
@@ -263,7 +281,9 @@ enum Callee {
 impl<'a> Image<'a> {
     pub fn new(image: &'a [u8], text_end: usize) -> Result<Image<'a>, MatchError> {
         let mut functions = BTreeMap::new();
-        for (s, e) in fde_ranges(image).map_err(|e| MatchError(format!("cannot read function boundaries: {e}")))? {
+        for (s, e) in fde_ranges(image)
+            .map_err(|e| MatchError(format!("cannot read function boundaries: {e}")))?
+        {
             if !(s < e && e <= text_end.min(image.len())) || s % 4 != 0 || e % 4 != 0 {
                 continue;
             }
@@ -274,7 +294,14 @@ impl<'a> Image<'a> {
             }
             functions.insert(s, e);
         }
-        Ok(Image { image, text_end, functions, bodies: HashMap::new(), prints: HashMap::new(), imports: None })
+        Ok(Image {
+            image,
+            text_end,
+            functions,
+            bodies: HashMap::new(),
+            prints: HashMap::new(),
+            imports: None,
+        })
     }
 
     fn word(&self, o: usize) -> u32 {
@@ -316,7 +343,9 @@ impl<'a> Image<'a> {
             let rd = w & 31;
             for j in i + 1..(i + 9).min(words.len()) {
                 let u = words[j];
-                if (u & 0xffc0_0000 == 0x9100_0000 || u & 0x3b00_0000 == 0x3900_0000) && (u >> 5) & 31 == rd {
+                if (u & 0xffc0_0000 == 0x9100_0000 || u & 0x3b00_0000 == 0x3900_0000)
+                    && (u >> 5) & 31 == rd
+                {
                     norm[j] &= !0x3f_fc00;
                     break;
                 }
@@ -327,7 +356,8 @@ impl<'a> Image<'a> {
         }
         let bytes: Vec<u8> = norm.iter().flat_map(|w| w.to_le_bytes()).collect();
         let digest = hex(&Sha256::digest(&bytes));
-        self.bodies.insert(start, (digest.clone(), branches.clone()));
+        self.bodies
+            .insert(start, (digest.clone(), branches.clone()));
         (digest, branches)
     }
 
@@ -337,8 +367,14 @@ impl<'a> Image<'a> {
             let img = self.image;
             let mut out = HashMap::new();
             let r = (|| -> Option<()> {
-                let r32 = |o: usize| img.get(o..o + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap()));
-                let r64 = |o: usize| img.get(o..o + 8).map(|s| u64::from_le_bytes(s.try_into().unwrap()));
+                let r32 = |o: usize| {
+                    img.get(o..o + 4)
+                        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+                };
+                let r64 = |o: usize| {
+                    img.get(o..o + 8)
+                        .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
+                };
                 let m = r32(4)? as usize;
                 let dyn_ = (m as i64 + r32(m + 4)? as i32 as i64) as usize;
                 let mut tags: HashMap<i64, u64> = HashMap::new();
@@ -354,7 +390,12 @@ impl<'a> Image<'a> {
                 if tags.get(&20) != Some(&7) {
                     return Some(());
                 }
-                let (jmprel, sz, symtab, strtab) = (*tags.get(&23)? as usize, *tags.get(&2)? as usize, *tags.get(&6)? as usize, *tags.get(&5)? as usize);
+                let (jmprel, sz, symtab, strtab) = (
+                    *tags.get(&23)? as usize,
+                    *tags.get(&2)? as usize,
+                    *tags.get(&6)? as usize,
+                    *tags.get(&5)? as usize,
+                );
                 let mut p = jmprel;
                 while p < jmprel + sz {
                     let (slot, info) = (r64(p)?, r64(p + 8)?);
@@ -378,9 +419,19 @@ impl<'a> Image<'a> {
         if target + 16 > self.text_end.min(self.image.len()) {
             return None;
         }
-        let (a, b, c, d) = (self.word(target), self.word(target + 4), self.word(target + 8), self.word(target + 12));
-        if a & 0x9f00_001f == 0x9000_0010 && b & 0xffc0_03ff == 0xf940_0211 && c & 0xffc0_03ff == 0x9100_0210 && d == 0xd61f_0220 {
-            let page = (target as i64 & !0xfff) + (signed((((a >> 29) & 3) | ((a >> 5) & 0x7ffff) << 2) as i64, 21) << 12);
+        let (a, b, c, d) = (
+            self.word(target),
+            self.word(target + 4),
+            self.word(target + 8),
+            self.word(target + 12),
+        );
+        if a & 0x9f00_001f == 0x9000_0010
+            && b & 0xffc0_03ff == 0xf940_0211
+            && c & 0xffc0_03ff == 0x9100_0210
+            && d == 0xd61f_0220
+        {
+            let page = (target as i64 & !0xfff)
+                + (signed((((a >> 29) & 3) | ((a >> 5) & 0x7ffff) << 2) as i64, 21) << 12);
             let lo = ((b >> 10) & 0xfff) as i64 * 8;
             if ((c >> 10) & 0xfff) as i64 == lo {
                 return self.import_slots().get(&((page + lo) as u64)).cloned();
@@ -395,17 +446,26 @@ impl<'a> Image<'a> {
                 return Ok(Callee::Import(n));
             }
             let (a, b) = (self.word(target), self.word(target + 4));
-            if a & 0xffe0_001f == 0xd400_0001 && b == 0xd65f_03c0 && !self.functions.contains_key(&target) {
+            if a & 0xffe0_001f == 0xd400_0001
+                && b == 0xd65f_03c0
+                && !self.functions.contains_key(&target)
+            {
                 return Ok(Callee::Svc((a >> 5) & 0xffff));
             }
         }
-        let Some(&end) = self.functions.get(&target) else { return merr(format!("callee has no verified boundary or import at {target:#x}")) };
+        let Some(&end) = self.functions.get(&target) else {
+            return merr(format!(
+                "callee has no verified boundary or import at {target:#x}"
+            ));
+        };
         Ok(Callee::Function(end - target, self.body(target).0))
     }
 
     pub fn fingerprint(&mut self, start: usize) -> Result<String, MatchError> {
         if let Some(p) = self.prints.get(&start) {
-            return p.clone().ok_or(MatchError(format!("function at {start:#x} has no fingerprint")));
+            return p.clone().ok_or(MatchError(format!(
+                "function at {start:#x} has no fingerprint"
+            )));
         }
         let (body, branches) = self.body(start);
         let mut refs = vec![];
@@ -438,7 +498,12 @@ impl<'a> Image<'a> {
 
     /// The start of the one function of `size` with one of `prints`.
     pub fn locate(&mut self, size: usize, prints: &[String]) -> Result<usize, MatchError> {
-        let starts: Vec<usize> = self.functions.iter().filter(|(&s, &e)| e - s == size).map(|(&s, _)| s).collect();
+        let starts: Vec<usize> = self
+            .functions
+            .iter()
+            .filter(|(&s, &e)| e - s == size)
+            .map(|(&s, _)| s)
+            .collect();
         let mut found = vec![];
         for s in starts {
             if let Ok(p) = self.fingerprint(s) {
@@ -448,13 +513,20 @@ impl<'a> Image<'a> {
             }
         }
         if found.len() != 1 {
-            return merr(format!("{} matching functions (need exactly one)", found.len()));
+            return merr(format!(
+                "{} matching functions (need exactly one)",
+                found.len()
+            ));
         }
         Ok(found[0])
     }
 
     /// One function's cuts placed: (module offset, original, replacement, reason), the original bytes checked.
-    pub fn cuts_at(&self, start: usize, cuts: &[(u64, String, String, String)]) -> Result<Vec<(u64, Vec<u8>, Vec<u8>, String)>, MatchError> {
+    pub fn cuts_at(
+        &self,
+        start: usize,
+        cuts: &[(u64, String, String, String)],
+    ) -> Result<Vec<(u64, Vec<u8>, Vec<u8>, String)>, MatchError> {
         let mut out = vec![];
         for (delta, old, new, reason) in cuts {
             let (o, n) = (unhex(old)?, unhex(new)?);
@@ -476,7 +548,12 @@ fn unhex(s: &str) -> Result<Vec<u8>, MatchError> {
     if s.len() % 2 != 0 {
         return merr(format!("odd hex {s}"));
     }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| MatchError(format!("bad hex {s}")))).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| {
+            u8::from_str_radix(&s[i..i + 2], 16).map_err(|_| MatchError(format!("bad hex {s}")))
+        })
+        .collect()
 }
 
 fn json_str(s: &str) -> String {
@@ -520,14 +597,19 @@ mod tests {
     /// function (rule size 0xa70 at main+0x16e33ec), matched in the owner's dump when it is on this PC.
     #[test]
     fn arceus_capture_demo_function_matches_nxnative() {
-        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../build/games/arceus/arceus_data/exefs/main");
+        let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../build/games/arceus/arceus_data/exefs/main");
         let Ok(raw) = std::fs::read(&p) else {
             eprintln!("no Arceus build here: skipped");
             return;
         };
         let nso = crate::loader::nso::Nso::parse(&raw).unwrap();
         let mut img = Image::new(&nso.image, nso.text.0 + nso.text.1).unwrap();
-        assert!(img.functions.len() > 10_000, "{} functions", img.functions.len());
+        assert!(
+            img.functions.len() > 10_000,
+            "{} functions",
+            img.functions.len()
+        );
         let want = ["123f93c4fa74d68f6100dab6ec8310a5047b2b3535b72361b6e658e3e48d792e".to_string()];
         let start = img.locate(0xa70, &want).unwrap();
         assert_eq!(start, 0x16e341c - 0x30);

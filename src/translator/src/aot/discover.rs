@@ -12,7 +12,11 @@ pub const EST_BR_LABELS: i64 = 10;
 
 fn sext(v: u32, n: u32) -> i64 {
     let v = v as i64;
-    if v & (1 << (n - 1)) != 0 { v - (1 << n) } else { v }
+    if v & (1 << (n - 1)) != 0 {
+        v - (1 << n)
+    } else {
+        v
+    }
 }
 
 fn imm21(w: u32) -> i64 {
@@ -38,7 +42,11 @@ pub struct DiscoverStats {
 pub fn discover(m: &Module) -> (Vec<i64>, DiscoverStats) {
     let w = &m.words;
     let n = w.len() as i64;
-    let mut seeds: Vec<i64> = m.seeds().iter().map(|&a| ((a - m.lo) >> 2) as i64).collect();
+    let mut seeds: Vec<i64> = m
+        .seeds()
+        .iter()
+        .map(|&a| ((a - m.lo) >> 2) as i64)
+        .collect();
     // The module's first instruction is its entry (the runtime starts it): a function start even when no unwind
     // entry or symbol names it.
     if n > 0 && !seeds.contains(&0) {
@@ -67,11 +75,16 @@ pub fn discover(m: &Module) -> (Vec<i64>, DiscoverStats) {
             br_tgt.push(i + sext((x >> 5) & 0x3FFF, 14));
         }
     }
-    let (br_src, br_tgt): (Vec<i64>, Vec<i64>) =
-        br_src.into_iter().zip(br_tgt).filter(|&(_, t)| t >= 0 && t < n).unzip();
+    let (br_src, br_tgt): (Vec<i64>, Vec<i64>) = br_src
+        .into_iter()
+        .zip(br_tgt)
+        .filter(|&(_, t)| t >= 0 && t < n)
+        .unzip();
 
     let pc0 = m.lo as i64;
-    let br: Vec<i64> = (0..n).filter(|&i| (w[i as usize] & 0xFFFF_FC1F) == 0xD61F_0000).collect();
+    let br: Vec<i64> = (0..n)
+        .filter(|&i| (w[i as usize] & 0xFFFF_FC1F) == 0xD61F_0000)
+        .collect();
     let mut mat = vec![];
     for i in 0..n {
         let x = w[i as usize];
@@ -85,7 +98,8 @@ pub fn discover(m: &Module) -> (Vec<i64>, DiscoverStats) {
         let rd = x & 31;
         for k in 1..5 {
             let y = w[(i + k).min(n - 1) as usize];
-            near |= ((y & 0xFF20_0000) == 0x8B00_0000 || (y & 0xFFE0_0000) == 0x8B20_0000) && ((y >> 5) & 31) == rd;
+            near |= ((y & 0xFF20_0000) == 0x8B00_0000 || (y & 0xFFE0_0000) == 0x8B20_0000)
+                && ((y >> 5) & 31) == rd;
         }
         if !near {
             mat.push(pc0 + i * 4 + imm21(x));
@@ -125,7 +139,11 @@ pub fn discover(m: &Module) -> (Vec<i64>, DiscoverStats) {
         }
     }
     let (lo, hi) = (m.lo as i64, m.hi as i64);
-    let mat: Vec<i64> = mat.into_iter().filter(|&a| a >= lo && a < hi && a % 4 == 0).map(|a| (a - pc0) >> 2).collect();
+    let mat: Vec<i64> = mat
+        .into_iter()
+        .filter(|&a| a >= lo && a < hi && a % 4 == 0)
+        .map(|a| (a - pc0) >> 2)
+        .collect();
     let bl_tgt: Vec<i64> = bl_tgt.into_iter().filter(|&t| t >= 0 && t < n).collect();
 
     let mut starts: BTreeSet<i64> = seeds.iter().copied().collect();
@@ -189,7 +207,10 @@ pub fn setjmp_owners(m: &Module, starts: &[u64]) -> BTreeSet<u64> {
         {
             let page = (pc(i) & !0xFFF) + (imm21(w[i]) << 12);
             let got = page + ((((w[i + 1] >> 10) & 0xFFF) as i64) << 3);
-            if names.get(&(got as u64)).is_some_and(|s| SETJMP_NAMES.contains(s)) {
+            if names
+                .get(&(got as u64))
+                .is_some_and(|s| SETJMP_NAMES.contains(s))
+            {
                 targets.insert(pc(i));
             }
         }
@@ -221,7 +242,10 @@ pub fn setjmp_owners(m: &Module, starts: &[u64]) -> BTreeSet<u64> {
 /// table): an unwinder resumes there, in the middle of the function, so it is built resumable like a setjmp caller.
 pub fn landing_pad_owners(m: &Module, starts: &[u64]) -> BTreeSet<u64> {
     let mut out = BTreeSet::new();
-    for pad in crate::xlate::jumptables::landing_pad_addresses(m).into_iter().filter(|&p| m.in_text(p)) {
+    for pad in crate::xlate::jumptables::landing_pad_addresses(m)
+        .into_iter()
+        .filter(|&p| m.in_text(p))
+    {
         let k = starts.partition_point(|&s| s <= pad);
         if k > 0 {
             out.insert(starts[k - 1]);
@@ -249,7 +273,11 @@ pub fn estimate_sizes(m: &Module, starts: &[i64]) -> Vec<i64> {
     (0..starts.len())
         .map(|k| {
             let s = starts[k] as usize;
-            let e = if k + 1 < starts.len() { starts[k + 1] as usize } else { w.len() };
+            let e = if k + 1 < starts.len() {
+                starts[k + 1] as usize
+            } else {
+                w.len()
+            };
             let mut size = csum[e] - csum[s] + EST_FN;
             if bsum[e] - bsum[s] > 0 {
                 size += (e - s) as i64 * EST_BR_LABELS;
@@ -302,7 +330,13 @@ mod tests {
 
     #[test]
     fn partition_splits_big_and_full() {
-        assert_eq!(partition(&[10, 10, 500, 10], 2, 100, 300), vec![(0, 2), (2, 3), (3, 4)]);
-        assert_eq!(partition(&[60, 60, 60], 10, 100, 300), vec![(0, 1), (1, 2), (2, 3)]);
+        assert_eq!(
+            partition(&[10, 10, 500, 10], 2, 100, 300),
+            vec![(0, 2), (2, 3), (3, 4)]
+        );
+        assert_eq!(
+            partition(&[60, 60, 60], 10, 100, 300),
+            vec![(0, 1), (1, 2), (2, 3)]
+        );
     }
 }

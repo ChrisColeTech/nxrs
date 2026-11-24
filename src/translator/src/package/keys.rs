@@ -22,23 +22,34 @@ fn unhex(s: &str) -> Option<Vec<u8>> {
     if s.is_empty() || s.len() % 2 != 0 {
         return None;
     }
-    (0..s.len()).step_by(2).map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok()).collect()
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(s.get(i..i + 2)?, 16).ok())
+        .collect()
 }
 
 impl Keys {
     pub fn parse(text: &str) -> Keys {
         let mut values = HashMap::new();
         for line in text.lines() {
-            let Some((name, value)) = line.split_once('=') else { continue };
+            let Some((name, value)) = line.split_once('=') else {
+                continue;
+            };
             if let Some(v) = unhex(value) {
                 values.insert(name.trim().to_ascii_lowercase(), v);
             }
         }
-        Keys { path: PathBuf::new(), values }
+        Keys {
+            path: PathBuf::new(),
+            values,
+        }
     }
 
     pub fn load(path: &Path) -> Result<Keys> {
-        let bytes = std::fs::read(path).map_err(|source| PackageError::Io { path: path.to_path_buf(), source })?;
+        let bytes = std::fs::read(path).map_err(|source| PackageError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
         let mut keys = Keys::parse(&String::from_utf8_lossy(&bytes));
         keys.path = crate::package::io::abspath(path);
         Ok(keys)
@@ -75,9 +86,19 @@ impl Keys {
             }
         }
         let to16 = |v: Vec<u8>| -> [u8; 16] { v[..].try_into().unwrap() };
-        let kek = to16(ecb_decrypt(&self.get16("master_key_00")?, &self.get16("aes_kek_generation_source")?));
-        let kek = to16(ecb_decrypt(&ecb_decrypt(&kek, &self.get16("header_kek_source")?).try_into().unwrap(), &self.get16("aes_key_generation_source")?));
-        Ok(ecb_decrypt(&kek, &self.get("header_key_source", 32)?)[..].try_into().unwrap())
+        let kek = to16(ecb_decrypt(
+            &self.get16("master_key_00")?,
+            &self.get16("aes_kek_generation_source")?,
+        ));
+        let kek = to16(ecb_decrypt(
+            &ecb_decrypt(&kek, &self.get16("header_kek_source")?)
+                .try_into()
+                .unwrap(),
+            &self.get16("aes_key_generation_source")?,
+        ));
+        Ok(ecb_decrypt(&kek, &self.get("header_key_source", 32)?)[..]
+            .try_into()
+            .unwrap())
     }
 }
 
@@ -105,7 +126,10 @@ pub fn default_keys_path() -> Option<PathBuf> {
     {
         // Linux: the launcher's data folder under XDG_DATA_HOME (~/.local/share), then the common ~/.switch
         let home = std::env::var_os("HOME").map(PathBuf::from);
-        let data = std::env::var_os("XDG_DATA_HOME").filter(|v| !v.is_empty()).map(PathBuf::from).or_else(|| home.as_ref().map(|h| h.join(".local/share")));
+        let data = std::env::var_os("XDG_DATA_HOME")
+            .filter(|v| !v.is_empty())
+            .map(PathBuf::from)
+            .or_else(|| home.as_ref().map(|h| h.join(".local/share")));
         let mut c = data.map(|d| keys_candidates(&d)).unwrap_or_default();
         if let Some(h) = home {
             c.push(h.join(".switch").join("prod.keys"));
@@ -113,12 +137,21 @@ pub fn default_keys_path() -> Option<PathBuf> {
         return c.into_iter().find(|p| p.is_file());
     }
     #[allow(unreachable_code)]
-    keys_candidates(&PathBuf::from(std::env::var_os("LOCALAPPDATA")?)).into_iter().find(|p| p.is_file())
+    keys_candidates(&PathBuf::from(std::env::var_os("LOCALAPPDATA")?))
+        .into_iter()
+        .find(|p| p.is_file())
 }
 
 /// Where the launcher keeps prod.keys under %LOCALAPPDATA%, the current layout first.
 pub fn keys_candidates(local: &Path) -> Vec<PathBuf> {
-    vec![local.join("nxrs").join("keys").join("prod.keys"), local.join("RecompLauncher").join("RecompLauncher").join("keys").join("prod.keys")]
+    vec![
+        local.join("nxrs").join("keys").join("prod.keys"),
+        local
+            .join("RecompLauncher")
+            .join("RecompLauncher")
+            .join("keys")
+            .join("prod.keys"),
+    ]
 }
 
 #[cfg(test)]
@@ -128,13 +161,25 @@ mod tests {
     #[test]
     fn keys_found_in_the_launchers_data_folder() {
         let c = keys_candidates(Path::new("L"));
-        assert_eq!(c[0], Path::new("L").join("nxrs").join("keys").join("prod.keys"), "launcher d538b31's folder first");
-        assert_eq!(c[1], Path::new("L").join("RecompLauncher").join("RecompLauncher").join("keys").join("prod.keys"));
+        assert_eq!(
+            c[0],
+            Path::new("L").join("nxrs").join("keys").join("prod.keys"),
+            "launcher d538b31's folder first"
+        );
+        assert_eq!(
+            c[1],
+            Path::new("L")
+                .join("RecompLauncher")
+                .join("RecompLauncher")
+                .join("keys")
+                .join("prod.keys")
+        );
     }
 
     #[test]
     fn parses_keys_text() {
-        let text = "header_key = 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\r\n\
+        let text =
+            "header_key = 000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f\r\n\
                     ; comment line\n\
                     TitleKek_00=00112233445566778899AABBCCDDEEFF\n\
                     bad = zz\n\

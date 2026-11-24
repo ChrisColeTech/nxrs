@@ -4,7 +4,10 @@ use std::path::PathBuf;
 #[derive(Debug, thiserror::Error)]
 pub enum PackageError {
     #[error("{path}: {source}")]
-    Io { path: PathBuf, source: std::io::Error },
+    Io {
+        path: PathBuf,
+        source: std::io::Error,
+    },
     #[error("{0}")]
     Format(String),
     #[error("keys: {0}")]

@@ -73,16 +73,32 @@ pub fn data_level(fs: &[u8]) -> Option<(u64, u64)> {
 
 /// The section `inner` (whose FS header is `fs`) with its data level decompressed, when it has a compression layer:
 /// (the view, (data level offset, table offset, table size)).
-pub fn over(inner: Arc<dyn Storage>, fs: &[u8], what: &str) -> Result<Option<(Compressed, (u64, u64, u64))>> {
-    let Some(table) = table_of(fs) else { return Ok(None) };
-    let Some((head, _)) = data_level(fs) else { return fmt(format!("{what}: a compressed section without a data level")) };
-    Ok(Some((Compressed::new(inner, head, table, what)?, (head, table.0, table.1))))
+pub fn over(
+    inner: Arc<dyn Storage>,
+    fs: &[u8],
+    what: &str,
+) -> Result<Option<(Compressed, (u64, u64, u64))>> {
+    let Some(table) = table_of(fs) else {
+        return Ok(None);
+    };
+    let Some((head, _)) = data_level(fs) else {
+        return fmt(format!("{what}: a compressed section without a data level"));
+    };
+    Ok(Some((
+        Compressed::new(inner, head, table, what)?,
+        (head, table.0, table.1),
+    )))
 }
 
 impl Compressed {
     /// The section `inner` with its data level (at `head`) decompressed through the table at `table` (relative to
     /// `head`).
-    pub fn new(inner: Arc<dyn Storage>, head: u64, table: (u64, u64), what: &str) -> Result<Compressed> {
+    pub fn new(
+        inner: Arc<dyn Storage>,
+        head: u64,
+        table: (u64, u64),
+        what: &str,
+    ) -> Result<Compressed> {
         let (at, size) = table;
         let room = inner.size().saturating_sub(head);
         if size > MAX_TABLE || size < NODE as u64 || at > room || size > room - at {
@@ -92,44 +108,81 @@ impl Compressed {
         let sets = u32le(&t, 4) as usize;
         let total = u64le(&t, 8);
         if sets == 0 || NODE * (1 + sets) > t.len() {
-            return fmt(format!("{what}: the compression table is damaged (wrong keys?)"));
+            return fmt(format!(
+                "{what}: the compression table is damaged (wrong keys?)"
+            ));
         }
         let mut entries = vec![];
         for set in 0..sets {
             let base = NODE * (1 + set);
             let n = u32le(&t, base + 4) as usize;
             if n > (NODE - 0x10) / ENTRY {
-                return fmt(format!("{what}: a compression table entry set is too large"));
+                return fmt(format!(
+                    "{what}: a compression table entry set is too large"
+                ));
             }
             for i in 0..n {
                 let e = base + 0x10 + i * ENTRY;
-                entries.push(Entry { virt: u64le(&t, e), phys: u64le(&t, e + 8), kind: t[e + 16], phys_size: u32le(&t, e + 20) });
+                entries.push(Entry {
+                    virt: u64le(&t, e),
+                    phys: u64le(&t, e + 8),
+                    kind: t[e + 16],
+                    phys_size: u32le(&t, e + 20),
+                });
             }
         }
-        if entries.is_empty() || entries[0].virt != 0 || entries.windows(2).any(|w| w[0].virt >= w[1].virt) || entries.last().unwrap().virt >= total {
-            return fmt(format!("{what}: the compression table is damaged (wrong keys?)"));
+        if entries.is_empty()
+            || entries[0].virt != 0
+            || entries.windows(2).any(|w| w[0].virt >= w[1].virt)
+            || entries.last().unwrap().virt >= total
+        {
+            return fmt(format!(
+                "{what}: the compression table is damaged (wrong keys?)"
+            ));
         }
         for (i, e) in entries.iter().enumerate() {
             let len = entries.get(i + 1).map_or(total, |n| n.virt) - e.virt;
             let stored = if e.kind == 0 { len } else { e.phys_size as u64 };
-            if ![0, 1, 3].contains(&e.kind) || (e.kind != 1 && (e.phys > at || stored > at - e.phys)) || (e.kind == 3 && len > 64 << 20) {
+            if ![0, 1, 3].contains(&e.kind)
+                || (e.kind != 1 && (e.phys > at || stored > at - e.phys))
+                || (e.kind == 3 && len > 64 << 20)
+            {
                 return fmt(format!("{what}: compression table entry {i} is damaged (type {}, {len:#x} bytes at {:#x})", e.kind, e.virt));
             }
         }
-        Ok(Compressed { inner, head, entries, data_size: total, cache: Mutex::new(vec![]), what: what.to_string() })
+        Ok(Compressed {
+            inner,
+            head,
+            entries,
+            data_size: total,
+            cache: Mutex::new(vec![]),
+            what: what.to_string(),
+        })
     }
 
     fn block(&self, i: usize) -> Result<Arc<Vec<u8>>> {
-        if let Some((_, b)) = self.cache.lock().unwrap_or_else(|p| p.into_inner()).iter().find(|(j, _)| *j == i) {
+        if let Some((_, b)) = self
+            .cache
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .iter()
+            .find(|(j, _)| *j == i)
+        {
             return Ok(b.clone());
         }
         let e = self.entries[i];
         let len = (self.entries.get(i + 1).map_or(self.data_size, |n| n.virt) - e.virt) as usize;
         let raw = self.inner.read(self.head + e.phys, e.phys_size as u64)?;
-        let out = lz4_flex::block::decompress(&raw, len)
-            .map_err(|err| PackageError::Format(format!("{}: LZ4 block at {:#x}: {err}", self.what, e.virt)))?;
+        let out = lz4_flex::block::decompress(&raw, len).map_err(|err| {
+            PackageError::Format(format!("{}: LZ4 block at {:#x}: {err}", self.what, e.virt))
+        })?;
         if out.len() != len {
-            return fmt(format!("{}: LZ4 block at {:#x} decoded to {:#x} bytes, {len:#x} expected", self.what, e.virt, out.len()));
+            return fmt(format!(
+                "{}: LZ4 block at {:#x} decoded to {:#x} bytes, {len:#x} expected",
+                self.what,
+                e.virt,
+                out.len()
+            ));
         }
         let b = Arc::new(out);
         let mut c = self.cache.lock().unwrap_or_else(|p| p.into_inner());
@@ -144,7 +197,10 @@ impl Compressed {
     fn read_data(&self, offset: u64, size: u64, out: &mut Vec<u8>) -> Result<()> {
         let end = offset + size;
         let mut pos = offset;
-        let mut i = self.entries.partition_point(|e| e.virt <= pos).saturating_sub(1);
+        let mut i = self
+            .entries
+            .partition_point(|e| e.virt <= pos)
+            .saturating_sub(1);
         while pos < end {
             let e = self.entries[i];
             let e_end = self.entries.get(i + 1).map_or(self.data_size, |n| n.virt);
@@ -168,7 +224,10 @@ impl Storage for Compressed {
     }
     fn read(&self, offset: u64, size: u64) -> Result<Vec<u8>> {
         if offset.checked_add(size).map_or(true, |e| e > self.size()) {
-            return fmt(format!("{}: read past the end of a compressed section", self.what));
+            return fmt(format!(
+                "{}: read past the end of a compressed section",
+                self.what
+            ));
         }
         let mut out = Vec::with_capacity(size as usize);
         let mut pos = offset;
@@ -199,7 +258,12 @@ mod tests {
                 1 => vec![],
                 _ => lz4_flex::block::compress(bytes),
             };
-            entries.push((want.len() as u64, data.len() as u64, *kind, stored.len() as u32));
+            entries.push((
+                want.len() as u64,
+                data.len() as u64,
+                *kind,
+                stored.len() as u32,
+            ));
             data.extend_from_slice(&stored);
             if *kind == 1 {
                 want.resize(want.len() + bytes.len(), 0);
@@ -232,17 +296,35 @@ mod tests {
 
     #[test]
     fn reads_hash_levels_and_plain_zero_and_lz4_runs() {
-        let text: Vec<u8> = (0..70_000u32).map(|i| (i % 251) as u8 ^ (i / 1000) as u8).collect();
-        let (section, table, want) = build(0x300, &[(0, b"plain head".to_vec()), (3, text), (1, vec![0; 5000]), (3, b"tail".repeat(100))]);
+        let text: Vec<u8> = (0..70_000u32)
+            .map(|i| (i % 251) as u8 ^ (i / 1000) as u8)
+            .collect();
+        let (section, table, want) = build(
+            0x300,
+            &[
+                (0, b"plain head".to_vec()),
+                (3, text),
+                (1, vec![0; 5000]),
+                (3, b"tail".repeat(100)),
+            ],
+        );
         let c = Compressed::new(Arc::new(section), 0x300, table, "test").unwrap();
         assert_eq!(c.size(), want.len() as u64);
         assert_eq!(c.read(0, want.len() as u64).unwrap(), want);
-        for (at, n) in [(0x2f0u64, 0x20u64), (0x305, 20), (0x309, 70_010), (70_300, 3000), (want.len() as u64 - 7, 7)] {
-            assert_eq!(c.read(at, n).unwrap(), &want[at as usize..(at + n) as usize]);
+        for (at, n) in [
+            (0x2f0u64, 0x20u64),
+            (0x305, 20),
+            (0x309, 70_010),
+            (70_300, 3000),
+            (want.len() as u64 - 7, 7),
+        ] {
+            assert_eq!(
+                c.read(at, n).unwrap(),
+                &want[at as usize..(at + n) as usize]
+            );
         }
         assert!(c.read(want.len() as u64 - 1, 2).is_err());
     }
-
 
     /// The owner's Super Mario Party Jamboree card image (compressed RomFS). The IVFC hashes cover the stored
     /// (compressed) data level; every NRO read through the LZ4 blocks hashes into the game's NRR list.
@@ -257,8 +339,12 @@ mod tests {
         if !p.exists() {
             return eprintln!("skip: {}", p.display());
         }
-        let keys = crate::package::keys::Keys::load(&crate::package::keys::keys_path(None).unwrap()).unwrap();
-        let pkg = crate::package::app::Package::open(p, &keys, &crate::package::UpdateChoice::Embedded).unwrap();
+        let keys =
+            crate::package::keys::Keys::load(&crate::package::keys::keys_path(None).unwrap())
+                .unwrap();
+        let pkg =
+            crate::package::app::Package::open(p, &keys, &crate::package::UpdateChoice::Embedded)
+                .unwrap();
         let si = pkg.program.section(3, 0).unwrap();
         let fs = &pkg.program.sections[si].fs;
         let stored = crate::package::nca::SectionStorage::new(&pkg.program, si);
@@ -267,19 +353,39 @@ mod tests {
         let (data_at, data_size) = data_level(fs).unwrap();
         let blocks = data_size.div_ceil(0x4000);
         for b in (0..blocks).step_by(997) {
-            let mut d = stored.read(data_at + b * 0x4000, 0x4000.min(data_size - b * 0x4000)).unwrap();
+            let mut d = stored
+                .read(data_at + b * 0x4000, 0x4000.min(data_size - b * 0x4000))
+                .unwrap();
             d.resize(0x4000, 0);
-            assert_eq!(Sha256::digest(&d)[..], stored.read(hash_at + b * 32, 32).unwrap()[..], "block {b}");
+            assert_eq!(
+                Sha256::digest(&d)[..],
+                stored.read(hash_at + b * 32, 32).unwrap()[..],
+                "block {b}"
+            );
         }
         let romfs = pkg.romfs().unwrap();
         let nrr = romfs.read_file(".nrr/bq_Release.nrr").unwrap();
         let (at, n) = (u32le(&nrr, 0x340) as usize, u32le(&nrr, 0x344) as usize);
-        let listed: std::collections::HashSet<&[u8]> = (0..n).map(|i| &nrr[at + 32 * i..at + 32 * i + 32]).collect();
-        let nros: Vec<String> = romfs.walk().into_iter().map(|x| x.0).filter(|p| p.ends_with(".nro")).collect();
+        let listed: std::collections::HashSet<&[u8]> = (0..n)
+            .map(|i| &nrr[at + 32 * i..at + 32 * i + 32])
+            .collect();
+        let nros: Vec<String> = romfs
+            .walk()
+            .into_iter()
+            .map(|x| x.0)
+            .filter(|p| p.ends_with(".nro"))
+            .collect();
         for f in &nros {
-            assert!(listed.contains(&Sha256::digest(romfs.read_file(f).unwrap())[..]), "{f}");
+            assert!(
+                listed.contains(&Sha256::digest(romfs.read_file(f).unwrap())[..]),
+                "{f}"
+            );
         }
-        eprintln!("{} stored blocks checked, {} NROs match the NRR", blocks.div_ceil(997), nros.len());
+        eprintln!(
+            "{} stored blocks checked, {} NROs match the NRR",
+            blocks.div_ceil(997),
+            nros.len()
+        );
     }
 
     /// Jamboree's 1.1.0 update over the card image: the patch has its own compression table and relocates onto the
@@ -289,23 +395,44 @@ mod tests {
     #[ignore]
     fn real_update_over_compressed_base() {
         use sha2::{Digest, Sha256};
-        let j = std::path::Path::new(r"P:\Games\Nintendo\DUMPS\Super Mario Party Jamboree [0100965017338800]");
+        let j = std::path::Path::new(
+            r"P:\Games\Nintendo\DUMPS\Super Mario Party Jamboree [0100965017338800]",
+        );
         let game = j.join("Super Mario Party Jamboree [0100965017338000][USA][v0][Base].xci");
-        let update = j.join(r"Updates\Super Mario Party Jamboree [0100965017338800][USA][v65536][Update].nsp");
+        let update = j.join(
+            r"Updates\Super Mario Party Jamboree [0100965017338800][USA][v65536][Update].nsp",
+        );
         if !game.exists() || !update.exists() {
             return eprintln!("skip: {}", j.display());
         }
-        let keys = crate::package::keys::Keys::load(&crate::package::keys::keys_path(None).unwrap()).unwrap();
-        let pkg = crate::package::app::Package::open(&game, &keys, &crate::package::UpdateChoice::Package(update)).unwrap();
+        let keys =
+            crate::package::keys::Keys::load(&crate::package::keys::keys_path(None).unwrap())
+                .unwrap();
+        let pkg = crate::package::app::Package::open(
+            &game,
+            &keys,
+            &crate::package::UpdateChoice::Package(update),
+        )
+        .unwrap();
         assert_eq!(pkg.version, 65536);
         let romfs = pkg.romfs().unwrap();
         let nrr = romfs.read_file(".nrr/bq_Release.nrr").unwrap();
         let (at, n) = (u32le(&nrr, 0x340) as usize, u32le(&nrr, 0x344) as usize);
-        let listed: std::collections::HashSet<&[u8]> = (0..n).map(|i| &nrr[at + 32 * i..at + 32 * i + 32]).collect();
-        let nros: Vec<String> = romfs.walk().into_iter().map(|x| x.0).filter(|p| p.ends_with(".nro")).collect();
+        let listed: std::collections::HashSet<&[u8]> = (0..n)
+            .map(|i| &nrr[at + 32 * i..at + 32 * i + 32])
+            .collect();
+        let nros: Vec<String> = romfs
+            .walk()
+            .into_iter()
+            .map(|x| x.0)
+            .filter(|p| p.ends_with(".nro"))
+            .collect();
         assert!(!nros.is_empty());
         for f in &nros {
-            assert!(listed.contains(&Sha256::digest(romfs.read_file(f).unwrap())[..]), "{f}");
+            assert!(
+                listed.contains(&Sha256::digest(romfs.read_file(f).unwrap())[..]),
+                "{f}"
+            );
         }
     }
 }

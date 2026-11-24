@@ -7,8 +7,19 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 fn corpus(h: &str) -> Vec<(String, Vec<u8>)> {
-    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/data/fuzz").join(h);
-    let mut v: Vec<_> = std::fs::read_dir(&d).unwrap().flatten().map(|e| (e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).unwrap())).collect();
+    let d = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/data/fuzz")
+        .join(h);
+    let mut v: Vec<_> = std::fs::read_dir(&d)
+        .unwrap()
+        .flatten()
+        .map(|e| {
+            (
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).unwrap(),
+            )
+        })
+        .collect();
     v.sort();
     assert!(!v.is_empty(), "{h}: no corpus");
     v
@@ -17,8 +28,13 @@ fn corpus(h: &str) -> Vec<(String, Vec<u8>)> {
 #[test]
 fn nso_corpus_is_read_or_refused_cleanly() {
     for (name, data) in corpus("nso") {
-        match std::panic::catch_unwind(|| translator::loader::Nso::parse(&data).map(|n| (n.size, n.image.len()))) {
-            Ok(Ok((size, len))) => assert_eq!(size, len, "{name}: the image has the length its segments lay out"),
+        match std::panic::catch_unwind(|| {
+            translator::loader::Nso::parse(&data).map(|n| (n.size, n.image.len()))
+        }) {
+            Ok(Ok((size, len))) => assert_eq!(
+                size, len,
+                "{name}: the image has the length its segments lay out"
+            ),
             Ok(Err(e)) => eprintln!("{name}: refused ({e:?})"),
             Err(_) => panic!("{name}: the NSO reader panicked"),
         }

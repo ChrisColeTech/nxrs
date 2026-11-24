@@ -44,33 +44,49 @@ pub const DIR: &str = "romfs.dir";
 pub const NONE: &str = "";
 
 fn hexnum(s: &str, what: &str) -> Result<u64> {
-    u64::from_str_radix(s, 16).map_err(|_| PackageError::Format(format!("{what}: bad number {s:?} in the marker")))
+    u64::from_str_radix(s, 16)
+        .map_err(|_| PackageError::Format(format!("{what}: bad number {s:?} in the marker")))
 }
 
 fn unhex16(s: &str) -> Option<[u8; 16]> {
     if s.len() != 32 {
         return None;
     }
-    let v: Option<Vec<u8>> = (0..16).map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok()).collect();
+    let v: Option<Vec<u8>> = (0..16)
+        .map(|i| u8::from_str_radix(&s[2 * i..2 * i + 2], 16).ok())
+        .collect();
     v.map(|v| v.try_into().unwrap())
 }
 
 /// A `base` / `patch` row: file offset, size, NCA offset, crypto, counter, key.
-fn section_row(fields: &[&str], blob: &Arc<Blob>, keys: Option<&Keys>, what: &str) -> Result<SectionStorage> {
+fn section_row(
+    fields: &[&str],
+    blob: &Arc<Blob>,
+    keys: Option<&Keys>,
+    what: &str,
+) -> Result<SectionStorage> {
     if fields.len() < 6 {
         return fmt(format!("{what}: a section row of the marker is cut short"));
     }
-    let crypto: u8 = fields[3].parse().map_err(|_| PackageError::Format(format!("{what}: bad crypto in the marker")))?;
-    let counter = u64::from_str_radix(fields[4], 16).map_err(|_| PackageError::Format(format!("{what}: bad counter")))?;
+    let crypto: u8 = fields[3]
+        .parse()
+        .map_err(|_| PackageError::Format(format!("{what}: bad crypto in the marker")))?;
+    let counter = u64::from_str_radix(fields[4], 16)
+        .map_err(|_| PackageError::Format(format!("{what}: bad counter")))?;
     let key = if fields[5] == "-" {
         None
     } else {
         let (name, wrapped) = fields[5]
             .split_once(':')
             .ok_or_else(|| PackageError::Format(format!("{what}: bad key in the marker")))?;
-        let wrapped = unhex16(wrapped).ok_or_else(|| PackageError::Format(format!("{what}: bad key in the marker")))?;
+        let wrapped = unhex16(wrapped)
+            .ok_or_else(|| PackageError::Format(format!("{what}: bad key in the marker")))?;
         let keys = keys.ok_or_else(|| PackageError::Format(format!("{what}: no keys")))?;
-        Some(ecb_decrypt(&keys.get16(name)?, &wrapped)[..].try_into().unwrap())
+        Some(
+            ecb_decrypt(&keys.get16(name)?, &wrapped)[..]
+                .try_into()
+                .unwrap(),
+        )
     };
     Ok(SectionStorage {
         blob: blob.clone(),
@@ -86,13 +102,23 @@ fn section_row(fields: &[&str], blob: &Arc<Blob>, keys: Option<&Keys>, what: &st
 
 /// Open the RomFS a `romfs.nsp` marker (version 1 or 2) describes.
 pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
-    let text = std::fs::read_to_string(marker).map_err(|source| PackageError::Io { path: marker.to_path_buf(), source })?;
+    let text = std::fs::read_to_string(marker).map_err(|source| PackageError::Io {
+        path: marker.to_path_buf(),
+        source,
+    })?;
     let lines: Vec<&str> = text.lines().collect();
     let what = marker.display().to_string();
-    let package = PathBuf::from(*lines.get(1).ok_or_else(|| PackageError::Format(format!("{what}: empty marker")))?);
+    let package = PathBuf::from(
+        *lines
+            .get(1)
+            .ok_or_else(|| PackageError::Format(format!("{what}: empty marker")))?,
+    );
     let open = |p: &Path| -> Result<Arc<Blob>> {
         Blob::open(p).map(Arc::new).map_err(|_| {
-            PackageError::Format(format!("{}: the package is missing (moved or its drive is offline)", p.display()))
+            PackageError::Format(format!(
+                "{}: the package is missing (moved or its drive is offline)",
+                p.display()
+            ))
         })
     };
     match lines[0] {
@@ -101,7 +127,11 @@ pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
                 return fmt(format!("{what}: marker is cut short"));
             }
             let blob = open(&package)?;
-            let image = FileRange { blob, offset: hexnum(lines[2], &what)?, size: hexnum(lines[3], &what)? };
+            let image = FileRange {
+                blob,
+                offset: hexnum(lines[2], &what)?,
+                size: hexnum(lines[3], &what)?,
+            };
             RomFs::from_image(Arc::new(image), format!("NSP {}", package.display()))
         }
         "SWRNSP2" => {
@@ -125,8 +155,14 @@ pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
                 } else if let Some(r) = l.strip_prefix("compressed ") {
                     let f: Vec<&str> = r.split_whitespace().collect();
                     match f[..] {
-                        ["base", h, a, n] => base_comp = Some((hexnum(h, &what)?, hexnum(a, &what)?, hexnum(n, &what)?)),
-                        [h, a, n] => top_comp = Some((hexnum(h, &what)?, hexnum(a, &what)?, hexnum(n, &what)?)),
+                        ["base", h, a, n] => {
+                            base_comp =
+                                Some((hexnum(h, &what)?, hexnum(a, &what)?, hexnum(n, &what)?))
+                        }
+                        [h, a, n] => {
+                            top_comp =
+                                Some((hexnum(h, &what)?, hexnum(a, &what)?, hexnum(n, &what)?))
+                        }
                         _ => return fmt(format!("{what}: bad compressed row")),
                     }
                 } else if let Some(r) = l.strip_prefix("base ") {
@@ -135,26 +171,41 @@ pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
                     patch_row = Some(r.split_whitespace().collect::<Vec<_>>());
                 }
             }
-            let Some((at, size)) = romfs else { return fmt(format!("{what}: the marker has no romfs row")) };
+            let Some((at, size)) = romfs else {
+                return fmt(format!("{what}: the marker has no romfs row"));
+            };
             let keys_loader = || -> Result<Keys> {
                 let p = keys
                     .map(Path::to_path_buf)
-                    .or_else(|| std::env::var_os("SWR_PROD_KEYS").filter(|v| !v.is_empty()).map(PathBuf::from))
+                    .or_else(|| {
+                        std::env::var_os("SWR_PROD_KEYS")
+                            .filter(|v| !v.is_empty())
+                            .map(PathBuf::from)
+                    })
                     .or(keys_file.clone());
                 match p {
                     Some(p) if p.is_file() => Keys::load(&p),
                     _ => fmt("Nintendo keys are not installed. In the launcher use Keys > Install keys, or set SWR_PROD_KEYS."),
                 }
             };
-            let needs_key = [&base_row, &patch_row].iter().any(|r| r.as_ref().is_some_and(|r| r.get(5).is_some_and(|k| *k != "-")));
-            let loaded = if needs_key { Some(keys_loader()?) } else { None };
+            let needs_key = [&base_row, &patch_row].iter().any(|r| {
+                r.as_ref()
+                    .is_some_and(|r| r.get(5).is_some_and(|k| *k != "-"))
+            });
+            let loaded = if needs_key {
+                Some(keys_loader()?)
+            } else {
+                None
+            };
             let keys_once = loaded.as_ref();
             let game = open(&package)?;
             let base = match &base_row {
                 Some(r) => {
                     let s = Arc::new(section_row(r, &game, keys_once, &what)?) as Arc<dyn Storage>;
                     match (base_comp, &patch_row) {
-                        (Some((h, a, n)), Some(_)) => Some(Arc::new(Compressed::new(s, h, (a, n), &what)?) as Arc<dyn Storage>),
+                        (Some((h, a, n)), Some(_)) => {
+                            Some(Arc::new(Compressed::new(s, h, (a, n), &what)?) as Arc<dyn Storage>)
+                        }
                         _ => Some(s),
                     }
                 }
@@ -176,10 +227,17 @@ pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
                         None => game.clone(),
                     };
                     let patch = section_row(r, &pblob, keys_once, &what)?;
-                    let t = (hexnum(r[6], &what)?, hexnum(r[7], &what)?, hexnum(r[8], &what)?, hexnum(r[9], &what)?);
+                    let t = (
+                        hexnum(r[6], &what)?,
+                        hexnum(r[7], &what)?,
+                        hexnum(r[8], &what)?,
+                        hexnum(r[9], &what)?,
+                    );
                     Arc::new(Patched::from_tables(patch, base, t)?)
                 }
-                None => base.ok_or_else(|| PackageError::Format(format!("{what}: the marker has no base row")))?,
+                None => base.ok_or_else(|| {
+                    PackageError::Format(format!("{what}: the marker has no base row"))
+                })?,
             };
             let storage: Arc<dyn Storage> = match top_comp {
                 Some((h, a, n)) => Arc::new(Compressed::new(storage, h, (a, n), &what)?),
@@ -192,7 +250,14 @@ pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
                 Some(u) => format!("NSP {} with the update {}", package.display(), u.display()),
                 None => format!("NSP {}", package.display()),
             };
-            RomFs::from_image(Arc::new(Slice { inner: storage, offset: at, size }), source)
+            RomFs::from_image(
+                Arc::new(Slice {
+                    inner: storage,
+                    offset: at,
+                    size,
+                }),
+                source,
+            )
         }
         other => fmt(format!("{what}: unknown marker {other:?}")),
     }

@@ -33,7 +33,12 @@ pub struct Patched {
 }
 
 /// The entries of a bucketed BKTR table: (first u64, second field) per entry, plus the header's total size.
-fn buckets(table: &[u8], entry_size: usize, path: &str, ex: bool) -> Result<(Vec<(u64, u64, u32)>, u64)> {
+fn buckets(
+    table: &[u8],
+    entry_size: usize,
+    path: &str,
+    ex: bool,
+) -> Result<(Vec<(u64, u64, u32)>, u64)> {
     if table.len() < 0x4000 {
         return fmt(format!("{path}: a BKTR table is cut short"));
     }
@@ -53,7 +58,11 @@ fn buckets(table: &[u8], entry_size: usize, path: &str, ex: bool) -> Result<(Vec
             let e = at + 0x10 + i * entry_size;
             if ex {
                 // '<QII': offset, pad, generation
-                entries.push((u64le(table, e), u32le(table, e + 8) as u64, u32le(table, e + 12)));
+                entries.push((
+                    u64le(table, e),
+                    u32le(table, e + 8) as u64,
+                    u32le(table, e + 12),
+                ));
             } else {
                 // '<QQI': virtual, physical, source
                 entries.push((u64le(table, e), u64le(table, e + 8), u32le(table, e + 16)));
@@ -95,7 +104,11 @@ impl Patched {
     }
 
     /// The same from the table locations alone (the runtime marker's `patch` row).
-    pub fn from_tables(patch: SectionStorage, base: Option<Arc<dyn Storage>>, tables: (u64, u64, u64, u64)) -> Result<Patched> {
+    pub fn from_tables(
+        patch: SectionStorage,
+        base: Option<Arc<dyn Storage>>,
+        tables: (u64, u64, u64, u64),
+    ) -> Result<Patched> {
         let path = patch.blob.path.display().to_string();
         let (indirect_at, indirect_size, ex_at, ex_size) = tables;
         let psize = patch.size();
@@ -104,7 +117,8 @@ impl Patched {
                 return fmt(format!("{path}: a BKTR table is out of range"));
             }
         }
-        let (relocations, size) = buckets(&patch.read(indirect_at, indirect_size)?, 0x14, &path, false)?;
+        let (relocations, size) =
+            buckets(&patch.read(indirect_at, indirect_size)?, 0x14, &path, false)?;
         let relocations: Vec<(u64, u64, u32)> = relocations;
         let (gens, _) = buckets(&patch.read(ex_at, ex_size)?, 0x10, &path, true)?;
         let generations: Vec<(u64, u32)> = gens.into_iter().map(|(at, _, g)| (at, g)).collect();
@@ -119,7 +133,9 @@ impl Patched {
             let limit = if source != 0 { psize } else { base_size };
             if source > 1 || end < virt || phys > limit || end - virt > limit - phys {
                 if source == 0 && base.is_none() {
-                    return fmt(format!("{path}: this is an update without its game; use a package that holds both"));
+                    return fmt(format!(
+                        "{path}: this is an update without its game; use a package that holds both"
+                    ));
                 }
                 return fmt(format!(
                     "{path}: the update does not fit the game in this package (BKTR range out of bounds)"
@@ -145,9 +161,15 @@ impl Patched {
             let end = self.generations.get(index + 1).map_or(psize, |g| g.0);
             let part = size.min(end.saturating_sub(offset));
             if part == 0 {
-                return fmt(format!("{}: a BKTR patch range is out of bounds", self.patch.blob.path.display()));
+                return fmt(format!(
+                    "{}: a BKTR patch range is out of bounds",
+                    self.patch.blob.path.display()
+                ));
             }
-            out.extend(self.patch.read_gen(offset, part, Some(self.generations[index].1))?);
+            out.extend(
+                self.patch
+                    .read_gen(offset, part, Some(self.generations[index].1))?,
+            );
             offset += part;
             size -= part;
             index += 1;
@@ -164,7 +186,10 @@ impl Storage for Patched {
     /// The indirect layer: a read of the virtual section, composed from the base and the patch.
     fn read(&self, mut offset: u64, mut size: u64) -> Result<Vec<u8>> {
         if offset.checked_add(size).map_or(true, |e| e > self.size) {
-            return fmt(format!("{}: read past the end of the patched RomFS", self.patch.blob.path.display()));
+            return fmt(format!(
+                "{}: read past the end of the patched RomFS",
+                self.patch.blob.path.display()
+            ));
         }
         let mut out = Vec::with_capacity(size as usize);
         let mut index = find(&self.relocations, |r| r.0, offset);
@@ -176,7 +201,12 @@ impl Storage for Patched {
             if source != 0 {
                 out.extend(self.read_patch(at, part)?);
             } else {
-                out.extend(self.base.as_ref().expect("checked at open").read(at, part)?);
+                out.extend(
+                    self.base
+                        .as_ref()
+                        .expect("checked at open")
+                        .read(at, part)?,
+                );
             }
             offset += part;
             size -= part;
@@ -216,7 +246,13 @@ mod tests {
         assert_eq!(total, 0x300);
         assert_eq!(e, vec![(0, 0x10, 0), (0x100, 0x20, 1)]);
         t[0x4010..0x4018].copy_from_slice(&0x200u64.to_le_bytes());
-        assert!(buckets(&t, 0x14, "t", false).unwrap_err().to_string().contains("not sorted"));
-        assert!(buckets(&t[..0x100], 0x14, "t", false).unwrap_err().to_string().contains("cut short"));
+        assert!(buckets(&t, 0x14, "t", false)
+            .unwrap_err()
+            .to_string()
+            .contains("not sorted"));
+        assert!(buckets(&t[..0x100], 0x14, "t", false)
+            .unwrap_err()
+            .to_string()
+            .contains("cut short"));
     }
 }
