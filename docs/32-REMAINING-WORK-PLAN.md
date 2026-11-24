@@ -5,7 +5,20 @@
 [`31-DELEGATION-PROTOCOL.md`](31-DELEGATION-PROTOCOL.md). This file retains prior assignments, evidence and
 resource decisions, but it no longer defines product milestones. Source root: `D:\Projects\RecompLauncherEngine`.
 
-## Latest execution update — 2026-11-23, thermal monitoring
+## Current — 2026-11-24, gameplay harness reset (branch `gameplay-harness`)
+
+The owner removed the incident scaffolding: HWiNFO/thermal monitoring, the build supervisor and provenance, GPU
+stop latches and journals, machine leases, job/lifecycle layers, save transactions, the Wonder wrappers and the old
+`run_game.py` / `play_scenario.py` / `gamectl.py` / `library_play.py` / triage scripts. Every hold, lease and
+authorization gate below is retired; `build/GPU-STOP.json` files are inert evidence nothing reads. Gameplay runs
+use `scripts/play.py` (see `AGENTS.md`); builds use `scripts/build/build.ps1` (4 workers).
+
+Engine state carried forward (commits on `main` up to `a4499ee`): the GPU-alignment candidate plus the review
+fixes (recoverable mesh/raw-table conditions skip instead of status 72); graphics 171 / shaders 75 CPU tests pass.
+`dist/nxrs` is still the 2026-11-23 release; the candidate is not packaged and no game is rebuilt with it.
+Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validation, the OoT/MKW/Violet faults.
+
+## Execution update — 2026-11-23, thermal monitoring (history)
 
 **Reference-alignment implementation update:** session `ses_df6763ff3ffey6Q3EHUCcHhGwN` wrote source corrections
 and CPU regression sources; reviewer `ses_df650e263ffe4Dd0lemSXGP0HS` rechecked GAR-1/2/3/4/6 and GAR-R1 closures.

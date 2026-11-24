@@ -17,38 +17,20 @@ Back up and restore saves. Audits are for genuinely dangerous changes, after a f
 The game-outcome roadmap is `docs/33-REFERENCE-DELTA-ROADMAP.md`; `docs/32-REMAINING-WORK-PLAN.md` is the ledger.
 Commit only when the owner explicitly asks.
 
-**Current owner hold (2026-11-23): no games or GPU workloads until the repeated reboot/overheating incident is
-investigated and the demonstrated runaway/resource/watchdog defects are corrected.** During this hold use existing
-evidence, read-only system telemetry and CPU-only failure-injection tests. Do not launch Vulkan tests, shader
-pipeline compilation probes, game replays or release stress builds. This newer instruction overrides the ordinary
-per-title continuation rule above. Production saves remain untouched. Status: `docs/waves/THERMAL-INCIDENT.md`.
+**Gameplay harness (2026-11-24):** `scripts/play.py` runs one built title through a scenario from
+`scripts/scenarios.toml` and writes `build/play/<run>/report.md` plus `sheet-N.png` contact sheets of the
+screenshots. Read the sheets yourself; the harness does not judge pictures. It does gameplay troubleshooting only:
+no thermal/HWiNFO feeds, supervisors, stop latches, leases or pre-run gates (the owner removed that incident
+scaffolding; the thermal/incident wave docs under `docs/waves/` are history). Runs use a copy of the title's save
+(`NXOS_SAVE`) unless `--real-save`. Live native NDVE stays off in the engine itself.
 
-**Completed narrow owner authorization (2026-11-23):** the monitored, single-worker production release rebuild
-finished and `dist/nxrs` was independently verified (contract 2, artifact hashes, cleanup). CPU/GPU observed peaks
-were 68/61 C. See `docs/waves/THERMAL-BUILD.md` for corrected supervision failures and final acceptance.
-This completed exception does not authorize further builds, games, GPU tests, launcher GUI startup, clearing
-GPU-stop journals or production-save operations. Existing external game binaries have not been rebuilt with
-the new engine libraries. Live HWiNFO monitoring and the game/GPU hold remain in place.
-
-**Wonder authorization stopped at preflight (2026-11-23):** the subsequently authorized one-title rebuild/run
-did not launch any workload. HWiNFO logged CPU package 91 C at 10:58:02; lead read-only follow-up at 11:05 showed
-advancing 93–95 C samples and a separate 12-worker Leonida build from another OpenCode session. Shared GPU stops,
-Wonder binaries, library metadata and production saves remain unchanged. No automatic retry or new workload is
-authorized by the consumed attempt. Resolve the active thermal/competing-workload condition first; do not stop
-another session's processes without owner authorization. See `docs/waves/THERMAL-WONDER.md` and the incident record.
-
-**Post-reboot source planning:** owner subsequently reported a hypervisor-error crash, disabling an unspecified
-Windows feature and restarting. Do not infer a repaired GPU/thermal cause or current sensor/process state from
-preboot evidence. The resumed source-only review is complete in `docs/waves/GPU-REFERENCE-PLAN.md`; it authorizes
-no implementation execution, build, test or GPU run. Existing workload holds remain active.
-
-**New implementation authorization:** the owner now requests applying the reference-plan patches and running
-tests after the build. Source corrections, independent review, a thermally supervised single-worker build and
-the relevant CPU-only tests are authorized. Compilation/test execution requires fresh advancing HWiNFO data
-and no competing build/game workload; no stale-data fallback or threshold relaxation. The 12:49 check found the
-CSV stopped at 11:55:37 and another session's four-worker Leonida build still present. HWiNFO was reopened for
-the owner to resume logging. Source work may proceed while these execution blockers remain. Live NDVE stays
-quarantined; this instruction does not authorize GPU crash reproductions, gameplay or clearing fault histories.
+```powershell
+py scripts/play.py --list                 # scenarios and their library titles
+py scripts/play.py wonder                 # run, then read report.md and sheet-*.png
+py scripts/play.py dkb --diag pipeline    # with compile/wait logging; --env/--option/--seconds/--exe too
+py scripts/play.py report build/play/<run>   # regenerate a report
+py -m unittest scripts.test_play          # the harness's own checks (under a second)
+```
 
 ## Layout
 

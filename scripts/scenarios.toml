@@ -1,0 +1,146 @@
+# play.py scenarios: one per library title. Goal (owner's bar): past the intro videos into first gameplay, a
+# short stretch of play with screenshots, then quit. `title` is the launcher library's title; `window` is the
+# stretch of seconds the report's FPS numbers cover; `fps` the target. Step grammar: see play.py.
+# Old long-run variants (11-25 min memory trends) were dropped on purpose; add one only for a specific bug.
+
+[wonder]
+title = "Super Mario Bros Wonders"
+about = "A through the opening to the first course, run and jump"
+seconds = 240
+window = [115, 230]
+steps = ["wait 25", "shot boot", "press A ; 4 * 20", "wait 3", "shot course",
+         "replay wonder_gameplay.txt ; 20", "shot gameplay", "wait 40", "shot gameplay later", "wait 30", "shot end"]
+
+[dkb]
+title = "Donkey Kong Bananza"
+about = "Continue, walk and punch"
+seconds = 200
+window = [100, 150]
+steps = ["wait 75", "shot boot", "press A ; 6", "press A ; 25", "shot continue",
+         "replay dkb_walk.txt ; 14", "shot walk", "replay dkb_punch.txt ; 6", "shot punch",
+         "replay dkb_walk.txt ; 14", "shot walk again", "wait 10", "shot end"]
+
+[mkw]
+title = "Mario Kart World"
+about = "menus to a race, drive"
+seconds = 230
+window = [150, 185]
+steps = ["wait 44", "shot boot", "press L+R ; 5", "shot title", "press A ; 6 * 8", "shot menus done",
+         "replay mkw_drive.txt ; 42", "shot race", "replay mkw_drive.txt ; 42", "shot race later"]
+
+[mkw180]
+title = "Mario Kart World v1.8.0"
+about = "as mkw, on the 1.8.0 build"
+seconds = 230
+window = [150, 185]
+steps = ["wait 44", "shot boot", "press L+R ; 5", "shot title", "press A ; 6 * 8", "shot menus done",
+         "replay mkw_drive.txt ; 42", "shot race", "replay mkw_drive.txt ; 42", "shot race later"]
+
+[plza]
+title = "Pokemon Legends Z-A"
+about = "title to the station, walk"
+seconds = 150
+window = [45, 84]
+steps = ["wait 12", "shot boot", "press A ; 30", "wait 8", "shot station",
+         "replay plza_walk.txt ; 10", "shot walk", "wait 5", "replay plza_walk.txt ; 10", "shot walk again", "wait 5", "shot end"]
+
+[oot]
+title = "The Legend of Zelda Ocarina of Time"
+about = "title and file menus"
+seconds = 140
+window = [45, 100]
+fps = 59
+steps = ["wait 40", "shot boot", "wait 25", "shot title", "press A ; 15", "shot menu", "press A ; 15",
+         "shot menu 2", "wait 10", "shot end"]
+
+[mk8d]
+title = "Mario Kart 8 Deluxe"
+about = "Mii, menus, a Grand Prix, drive"
+seconds = 240
+window = [100, 140]
+steps = ["wait 9", "shot boot", "press L+R ; 4", "press Right ; 1.5", "press A ; 3 * 3", "press A ; 5",
+         "press A ; 4", "press A ; 2 * 2", "press A ; 4 * 2", "press A ; 30", "shot grand prix",
+         "replay mkw_drive.txt ; 20", "shot driving", "wait 18", "shot driving later"]
+
+[arceus]
+title = "Pokemon Legends Arceus (1G+1U)"
+about = "A through the opening to the field, walk"
+seconds = 240
+window = [105, 220]
+steps = ["wait 30", "shot boot", "press A ; 3 * 20", "wait 15", "shot field",
+         "replay arceus_gameplay.txt ; 15", "shot gameplay", "wait 30", "shot end"]
+
+[arceus-base]
+title = "Pokemon Legends Arceus base"
+about = "as arceus, on the base game"
+seconds = 240
+window = [105, 220]
+steps = ["wait 30", "shot boot", "press A ; 3 * 20", "wait 15", "shot field",
+         "replay arceus_gameplay.txt ; 15", "shot gameplay", "wait 30", "shot end"]
+
+[violet]
+title = "Pokemon Violet"
+about = "into the house, walk, interact"
+seconds = 240
+window = [60, 210]
+steps = ["wait 20", "shot boot", "press A ; 4 * 3", "wait 8", "shot house",
+         "replay violet_gameplay.txt ; 27", "shot gameplay", "press A ; 8", "shot interact", "wait 30", "shot end"]
+
+[agsob]
+title = "Anime Girls Sun of a Beach"
+about = "start to the beach, walk, turn, fire, jump"
+seconds = 260
+window = [120, 250]
+steps = ["wait 40", "shot boot", "press A ; 6 * 6", "replay shooter.txt ; 30", "shot play",
+         "wait 30", "shot play later", "wait 30", "shot play end"]
+
+[beach-bounce]
+title = "Beach Bounce Remastered"
+about = "visual novel: A every 4 s"
+seconds = 260
+window = [60, 250]
+steps = ["wait 30", "shot boot", "press A ; 4 * 14", "shot min 1", "press A ; 4 * 14", "shot min 2",
+         "press A ; 4 * 14", "shot min 3"]
+
+[shadow]
+title = "SONIC X SHADOW GENERATIONS"
+about = "Shadow Generations, New Game, intro skipped, run"
+seconds = 400
+window = [250, 390]
+fps = 30
+steps = ["wait 40", "shot title", "press A ; 8", "press Right ; 3", "press A ; 25", "press Down ; 3",
+         "press A ; 20", "press A ; 20", "shot new game", "replay skip_hold.txt ; 18 * 5",
+         "replay run_jump.txt ; 30", "shot run", "wait 30", "shot run later", "wait 30", "shot end"]
+
+[sonic]
+title = "SONIC X SHADOW GENERATIONS"
+about = "Sonic Generations (successor process), intro skipped, spin dash"
+seconds = 400
+window = [250, 390]
+fps = 30
+steps = ["wait 40", "shot title", "press A ; 8", "press A ; 45", "shot program 1",
+         "replay hold_a.txt ; 8 * 8", "replay spindash.txt ; 30", "shot run", "wait 30", "shot run later",
+         "wait 30", "shot end"]
+
+[jamboree]
+title = "Super Mario Party Jamboree"
+about = "unskippable opening, L+R at the title, to the plaza, move"
+seconds = 520
+window = [300, 510]
+steps = ["wait 260", "shot title", "replay hold_lr.txt ; 5", "press A ; 6 * 20", "wait 15", "shot post menu",
+         "replay run_jump.txt ; 30", "shot movement", "wait 30", "shot end"]
+
+[smash]
+title = "Super Smash Bros Ultimate"
+about = "menus to a match vs a CPU, fight"
+seconds = 300
+window = [130, 290]
+steps = ["wait 40", "shot boot", "press A ; 8 * 7", "wait 3", "shot character select",
+         "replay smash_fight.txt ; 30", "shot fight", "wait 30", "shot fight later", "wait 30", "shot fight end"]
+
+[smoke]
+title = "Super Mario Bros Wonders"
+about = "any title (use --exe): boot, two pictures"
+seconds = 60
+window = [20, 50]
+steps = ["wait 20", "shot boot", "wait 25", "shot later"]

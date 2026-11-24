@@ -33,9 +33,7 @@ and the gap list in the log), F7 record video, F8 full-resolution capture, F11 /
     cargo test -p config -p front                         # well under a second
     cargo build -p front -p os                            # nxfront.lib and nxos-dev.exe
     target\I\debug\nxos-dev build --gen <gen> --obj <obj> --out <game>.exe --front
-    py scripts\run_game.py <game>.exe <log> <seconds> <data dir> --fullscreen=0 --seconds=60
-    py scripts\play_scenario.py smoke --exe <game>.exe --data <data dir>
-    py scripts\gamectl.py <pid> status | press A | shot | key F3 | title
+    py scripts\play.py smoke --exe <game>.exe             # boot, two screenshots, report.md + sheet-1.png
 
 ## Verified (MK8D, 2026-11-19, real Vulkan)
 

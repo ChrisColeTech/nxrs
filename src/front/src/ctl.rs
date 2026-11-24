@@ -1,5 +1,5 @@
 //! The control pipe: `\\.\pipe\nxrs_ctl_<process id>` (and Turbo's name `\\.\pipe\swr_ctl_<process id>`), one
-//! command line per connection, the reply text back (Turbo's vk_ctl.c protocol; scripts/play_scenario.py is the
+//! command line per connection, the reply text back (Turbo's vk_ctl.c protocol; scripts/play.py is the
 //! client). Commands come from the engine-wide registry (`nxconfig::ctl`): the input layer's `press`, `P2`..`P8` and
 //! `pads`, graphics' own, and the front end's below.
 

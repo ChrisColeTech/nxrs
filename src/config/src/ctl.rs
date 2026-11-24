@@ -1,5 +1,5 @@
 //! The control-command registry. The front end serves it on a named pipe (`\.\pipe\nxrs_ctl_<process id>`, one
-//! command line per connection, the reply text back; scripts/play_scenario.py is the client), and any part registers
+//! command line per connection, the reply text back; scripts/play.py is the client), and any part registers
 //! the commands it answers: graphics its screenshot and pass dumps, the input layer its presses, and so on.
 
 use std::collections::BTreeMap;
