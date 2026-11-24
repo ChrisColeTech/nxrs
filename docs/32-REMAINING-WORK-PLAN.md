@@ -48,7 +48,7 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       points at memory no live allocation holds: a stale/recycled buffer. Same run with `NXGFX_MESH_BINDINGS=1`
       (CPU-only bookkeeping, slower mesh draws) did **not** fault: title, menus, Mario driving at 90 s
       (`20261124-125448-mkw-bindings`). Timing-dependent -> lifetime race: something released or recycled on the
-      CPU timeline before the GPU's last use. Reproduced plain (`20261124-130006-mkw-repro`-style run: exit 71 at
+      CPU timeline before the GPU's last use. Reproduced plain (`20261124-125955-mkw-repro`: exit 71 at
       15.0 s, same draw shape, invalid read `0x37fb1f000`; the address moves run to run). `NXGFX_CHECKPOINTS=all`
       (address report) also hides it (90 s, no fault). "0 recorded device ranges" only means the address report
       was off (`note_use` needs level 2), not that nothing held the address.
