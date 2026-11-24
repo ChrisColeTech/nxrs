@@ -16,7 +16,10 @@ use std::path::{Path, PathBuf};
 use translator::package::UpdateChoice;
 
 #[derive(Parser)]
-#[command(name = "nxshaders", about = "Find every shader of a Switch game and translate it to SPIR-V")]
+#[command(
+    name = "nxshaders",
+    about = "Find every shader of a Switch game and translate it to SPIR-V"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -123,7 +126,19 @@ fn used_keys(dir: &Path) -> (BTreeSet<String>, BTreeSet<String>) {
 fn main() {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Prebuild { game, out, jobs, scan_jobs, keys, update, no_update, limit, scan_only, optimize, batch } => {
+        Cmd::Prebuild {
+            game,
+            out,
+            jobs,
+            scan_jobs,
+            keys,
+            update,
+            no_update,
+            limit,
+            scan_only,
+            optimize,
+            batch,
+        } => {
             let opts = Options {
                 keys,
                 update: if no_update {
@@ -137,7 +152,10 @@ fn main() {
                 scan_jobs,
                 scan_only,
                 limit,
-                job: shaders::job::JobOptions { debug: !optimize, reduced: true },
+                job: shaders::job::JobOptions {
+                    debug: !optimize,
+                    reduced: true,
+                },
                 batch,
                 facts_dir: None,
             };
@@ -156,8 +174,22 @@ fn main() {
                 }
             }
         }
-        Cmd::Export { game, out, sample, arch, exefs, keys } => {
-            let g = translator::package::open_game(&game, &translator::package::OpenOptions { keys, update: UpdateChoice::Embedded }).unwrap_or_else(|e| {
+        Cmd::Export {
+            game,
+            out,
+            sample,
+            arch,
+            exefs,
+            keys,
+        } => {
+            let g = translator::package::open_game(
+                &game,
+                &translator::package::OpenOptions {
+                    keys,
+                    update: UpdateChoice::Embedded,
+                },
+            )
+            .unwrap_or_else(|e| {
                 eprintln!("{}: {e}", game.display());
                 std::process::exit(1)
             });
@@ -169,29 +201,50 @@ fn main() {
             }
             let say = |s: &str| eprintln!("{s}");
             let rep = shaders::scan::scan(&g.exefs.files, &g.romfs, 8, &say);
-            let mut all: Vec<&shaders::scan::Shader> = rep.shaders.values().filter(|s| match arch.as_deref() {
-                Some("sm86") => shaders::nvn::nvn2_ctl(&s.ctl),
-                Some("maxwell") => !shaders::nvn::nvn2_ctl(&s.ctl),
-                _ => true,
-            }).collect();
+            let mut all: Vec<&shaders::scan::Shader> = rep
+                .shaders
+                .values()
+                .filter(|s| match arch.as_deref() {
+                    Some("sm86") => shaders::nvn::nvn2_ctl(&s.ctl),
+                    Some("maxwell") => !shaders::nvn::nvn2_ctl(&s.ctl),
+                    _ => true,
+                })
+                .collect();
             if let Some(n) = sample {
                 let step = (all.len() / n.max(1)).max(1);
                 all = all.into_iter().step_by(step).take(n).collect();
             }
-            let mut idx = String::from("key	stage	source
-");
+            let mut idx = String::from(
+                "key	stage	source
+",
+            );
             for s in &all {
                 std::fs::write(out.join(format!("{}.ctl", s.key)), &s.ctl).unwrap();
                 std::fs::write(out.join(format!("{}.code", s.key)), &s.code).unwrap();
-                idx += &format!("{}	{}	{}
-", s.key, s.stage, s.source);
+                idx += &format!(
+                    "{}	{}	{}
+",
+                    s.key, s.stage, s.source
+                );
             }
             std::fs::write(out.join("index.tsv"), idx).unwrap();
             println!("exported {} of {} shaders", all.len(), rep.shaders.len());
         }
-        Cmd::Stage { game, data, dlc, keys } => {
+        Cmd::Stage {
+            game,
+            data,
+            dlc,
+            keys,
+        } => {
             let say = |s: &str| println!("{s}");
-            let g = translator::package::open_game(&game, &translator::package::OpenOptions { keys: keys.clone(), update: UpdateChoice::Embedded }).unwrap_or_else(|e| {
+            let g = translator::package::open_game(
+                &game,
+                &translator::package::OpenOptions {
+                    keys: keys.clone(),
+                    update: UpdateChoice::Embedded,
+                },
+            )
+            .unwrap_or_else(|e| {
                 eprintln!("{}: {e}", game.display());
                 std::process::exit(1)
             });
@@ -212,7 +265,11 @@ fn main() {
         }
         Cmd::PrebuildData { data, jobs, keys } => {
             let say = |s: &str| println!("{s}");
-            let opts = Options { keys, jobs, ..Options::default() };
+            let opts = Options {
+                keys,
+                jobs,
+                ..Options::default()
+            };
             match shaders::prebuild_data(&data, &opts, &say) {
                 Ok(r) => println!("RESULT found={} translated={} reused={} failed={} valid={} invalid={} total_s={:.1}", r.found, r.translated, r.reused, r.failed, r.valid, r.invalid, r.total_seconds),
                 Err(e) => {
@@ -234,7 +291,10 @@ fn main() {
                 std::process::exit(1)
             });
             let mut status: BTreeMap<String, String> = BTreeMap::new();
-            for l in manifest.lines().filter(|l| !l.starts_with('#') && !l.starts_with("key\t")) {
+            for l in manifest
+                .lines()
+                .filter(|l| !l.starts_with('#') && !l.starts_with("key\t"))
+            {
                 let c: Vec<&str> = l.split('\t').collect();
                 if c.len() > 4 {
                     status.insert(c[0].to_string(), c[4].to_string());
@@ -250,8 +310,15 @@ fn main() {
             let all: BTreeSet<String> = all_p.union(&all_d).cloned().collect();
             for (name, set) in [("pipelines", &all_p), ("dumps", &all_d), ("all", &all)] {
                 let found = set.iter().filter(|k| status.contains_key(*k)).count();
-                let ok = set.iter().filter(|k| status.get(*k).map(String::as_str) == Some("ok")).count();
-                println!("COVERAGE {name}: used {} found {found} ok {ok} missing {}", set.len(), set.len() - found);
+                let ok = set
+                    .iter()
+                    .filter(|k| status.get(*k).map(String::as_str) == Some("ok"))
+                    .count();
+                println!(
+                    "COVERAGE {name}: used {} found {found} ok {ok} missing {}",
+                    set.len(),
+                    set.len() - found
+                );
             }
             let missing: Vec<&String> = all.iter().filter(|k| !status.contains_key(*k)).collect();
             for k in missing.iter().take(40) {

@@ -13,7 +13,10 @@ pub fn stage(ctl: &[u8], code: &[u8]) -> Option<Stage> {
         return nvn2_stage(ctl, code);
     }
     let head = code.get(..4);
-    let headerless_cs = head != Some(&CS_MAGIC[..]) && head != Some(&GFX_MAGIC[..]) && ctl.len() >= 0x754 && (0..3).all(|i| u32_at(ctl, 0x748 + 4 * i) != Some(0));
+    let headerless_cs = head != Some(&CS_MAGIC[..])
+        && head != Some(&GFX_MAGIC[..])
+        && ctl.len() >= 0x754
+        && (0..3).all(|i| u32_at(ctl, 0x748 + 4 * i) != Some(0));
     if head == Some(&CS_MAGIC[..]) || headerless_cs {
         Some(Stage::Cs)
     } else if head == Some(&GFX_MAGIC[..]) && code.len() >= 0x34 {
@@ -45,11 +48,20 @@ fn sections(d: &[u8], h: usize, size: usize) -> Option<Vec<(&[u8], &[u8])>> {
     let mut secs = vec![];
     for i in 0..n {
         let s = h + first + stride * i;
-        let (ssz, soff, typ) = (u32_at(d, s)? as usize, u32_at(d, s + 4)? as usize, u32_at(d, s + 8)?);
+        let (ssz, soff, typ) = (
+            u32_at(d, s)? as usize,
+            u32_at(d, s + 4)? as usize,
+            u32_at(d, s + 8)?,
+        );
         if typ != 0 {
             continue;
         }
-        let (co, ko, kn, cn) = (u32_at(d, s + 0x30)? as usize, u32_at(d, s + 0x34)? as usize, u32_at(d, s + 0x38)? as usize, u32_at(d, s + 0x3c)? as usize);
+        let (co, ko, kn, cn) = (
+            u32_at(d, s + 0x30)? as usize,
+            u32_at(d, s + 0x34)? as usize,
+            u32_at(d, s + 0x38)? as usize,
+            u32_at(d, s + 0x3c)? as usize,
+        );
         if soff + ssz > size || co + cn > ssz || ko + kn > ssz {
             return None;
         }
@@ -70,11 +82,18 @@ fn program(d: &[u8], h: usize, size: usize, label: &str) -> Vec<Found> {
     if secs.len() < 2 || uniq.len() < sts.len() {
         return vec![];
     }
-    if secs.iter().zip(&sts).any(|((c, k), st)| st.is_none_or(|st| check(st, c, k).is_some())) {
+    if secs
+        .iter()
+        .zip(&sts)
+        .any(|((c, k), st)| st.is_none_or(|st| check(st, c, k).is_some()))
+    {
         return vec![];
     }
     let tag = format!("{label}#GLSLC@{h:#x}#var");
-    secs.iter().zip(&sts).map(|((c, k), st)| Found::new(tag.clone(), st.unwrap(), c, k).grouped(tag.clone())).collect()
+    secs.iter()
+        .zip(&sts)
+        .map(|((c, k), st)| Found::new(tag.clone(), st.unwrap(), c, k).grouped(tag.clone()))
+        .collect()
 }
 
 /// Every GLSLC output in `d` that passes the checks.
@@ -108,7 +127,9 @@ pub fn shaders_skip(d: &[u8], label: &str, skip: &[(usize, usize)]) -> Vec<Found
         if !(size > 0x760 && size <= d.len() - h) {
             continue;
         }
-        let Some(c) = memchr::memmem::find(&d[h..h + size], &CTL_MAGIC).map(|c| c + h) else { continue };
+        let Some(c) = memchr::memmem::find(&d[h..h + size], &CTL_MAGIC).map(|c| c + h) else {
+            continue;
+        };
         if memchr::memmem::find(&d[c + 4..h + size], &CTL_MAGIC).is_some() {
             out.extend(program(d, h, size, label));
             continue;
@@ -123,7 +144,14 @@ pub fn shaders_skip(d: &[u8], label: &str, skip: &[(usize, usize)]) -> Vec<Found
             }
         }
         // no usable section header: the code area right after the control section's +0x20 length
-        let (nctl, ncode) = if c + 0x708 <= h + size { (u32_at(d, c + 0x20).unwrap() as usize, u32_at(d, c + 0x704).unwrap() as usize) } else { (0, 0) };
+        let (nctl, ncode) = if c + 0x708 <= h + size {
+            (
+                u32_at(d, c + 0x20).unwrap() as usize,
+                u32_at(d, c + 0x704).unwrap() as usize,
+            )
+        } else {
+            (0, 0)
+        };
         if !(nctl >= 0x760 && nctl & 3 == 0 && c + nctl + ncode <= h + size) {
             continue;
         }

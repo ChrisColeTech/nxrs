@@ -44,15 +44,24 @@ fn sph_outputs(sph: &[u8]) -> Vec<(Option<u32>, u32)> {
     if b(0x35) >> 3 & 1 != 0 {
         out.push((Some(u32::MAX), 0)); // the point size
     }
-    out.extend((0..4).filter(|c| b(0x35) >> (4 + c) & 1 != 0).map(|c| (None, c)));
+    out.extend(
+        (0..4)
+            .filter(|c| b(0x35) >> (4 + c) & 1 != 0)
+            .map(|c| (None, c)),
+    );
     for n in 0..32u32 {
-        out.extend((0..4).filter(|c| b(0x36 + n as usize / 2) >> (4 * (n % 2) + c) & 1 != 0).map(|c| (Some(n), c)));
+        out.extend(
+            (0..4)
+                .filter(|c| b(0x36 + n as usize / 2) >> (4 * (n % 2) + c) & 1 != 0)
+                .map(|c| (Some(n), c)),
+        );
     }
     out
 }
 
 fn sph_system(sph: &[u8]) -> Vec<u32> {
-    let bits = *sph.get(0x34).unwrap_or(&0) as u32 | ((*sph.get(0x35).unwrap_or(&0) as u32) & 0xf) << 8;
+    let bits =
+        *sph.get(0x34).unwrap_or(&0) as u32 | ((*sph.get(0x35).unwrap_or(&0) as u32) & 0xf) << 8;
     (0..12).filter(|b| bits >> b & 1 != 0).collect()
 }
 
@@ -63,19 +72,46 @@ fn mesh_stage(ctl: &[u8], area: &[u8]) -> (Value, Vec<u32>, u32, u32) {
     const INPUT: u32 = 0x10;
     const BLOCK: u32 = 32;
     let blocks_of = |n: u32| (n.max(1) + BLOCK - 1) / BLOCK;
-    let kind = if ctl.get(0x56) == Some(&6) { "ts" } else { "ms" };
+    let kind = if ctl.get(0x56) == Some(&6) {
+        "ts"
+    } else {
+        "ms"
+    };
     let threads = u16_at(ctl, 0x58).unwrap_or(0) as u32;
     let payload = u16_at(ctl, 0x5a).unwrap_or(0) as u32;
     let out = INPUT + ((payload + 15) & !15);
     if kind == "ts" {
         let info = json!({"kind": kind, "threads": threads, "payload": payload, "memory": [WORKGROUP, INPUT, out, out + payload]});
-        return (info, vec![WORKGROUP, INPUT, out, out + payload], out + ((payload + 3) & !3), threads);
+        return (
+            info,
+            vec![WORKGROUP, INPUT, out, out + payload],
+            out + ((payload + 3) & !3),
+            threads,
+        );
     }
-    let (max_v, max_p) = (u16_at(ctl, 0x60).unwrap_or(0) as u32, u16_at(ctl, 0x62).unwrap_or(0) as u32);
-    let at = if ctl.get(0x68).is_some_and(|b| b & 0x80 != 0) { u32_at(ctl, 0x64).unwrap_or(0) as usize } else { 0 };
-    let psph = if at != 0 { area.get(at..(at + 0x80).min(area.len())).unwrap_or(&[]) } else { &[] };
+    let (max_v, max_p) = (
+        u16_at(ctl, 0x60).unwrap_or(0) as u32,
+        u16_at(ctl, 0x62).unwrap_or(0) as u32,
+    );
+    let at = if ctl.get(0x68).is_some_and(|b| b & 0x80 != 0) {
+        u32_at(ctl, 0x64).unwrap_or(0) as usize
+    } else {
+        0
+    };
+    let psph = if at != 0 {
+        area.get(at..(at + 0x80).min(area.len())).unwrap_or(&[])
+    } else {
+        &[]
+    };
     let vertex = sph_outputs(area.get(..0x80.min(area.len())).unwrap_or(&[]));
-    let primitive: Vec<_> = if at != 0 { sph_outputs(psph).into_iter().filter(|c| c.0.is_some_and(|n| n != u32::MAX)).collect() } else { vec![] };
+    let primitive: Vec<_> = if at != 0 {
+        sph_outputs(psph)
+            .into_iter()
+            .filter(|c| c.0.is_some_and(|n| n != u32::MAX))
+            .collect()
+    } else {
+        vec![]
+    };
     let psys = if at != 0 { sph_system(psph) } else { vec![] };
     let verts = match ctl.get(0x5f) {
         Some(&0) | None => 3,
@@ -95,12 +131,27 @@ fn mesh_stage(ctl: &[u8], area: &[u8]) -> (Value, Vec<u32>, u32, u32) {
 
 /// An attribute area's components as `[attribute, component]`: -2 the point size, -1 the position, n generic n.
 fn comp_list(c: &[(Option<u32>, u32)]) -> Value {
-    json!(c.iter().map(|&(a, k)| json!([match a { None => -1i64, Some(u32::MAX) => -2, Some(n) => n as i64 }, k])).collect::<Vec<_>>())
+    json!(c
+        .iter()
+        .map(|&(a, k)| json!([
+            match a {
+                None => -1i64,
+                Some(u32::MAX) => -2,
+                Some(n) => n as i64,
+            },
+            k
+        ]))
+        .collect::<Vec<_>>())
 }
 
 /// Whether Ampere instructions use shared memory of their own (LDS, STS, ATOMS), which would lie over the stage memory.
 fn own_shared(code: &[u8]) -> bool {
-    (0..code.len().saturating_sub(15)).step_by(16).any(|o| matches!(u16_at(code, o).unwrap() & 0xfff, 0x984 | 0x388 | 0x988 | 0x38c | 0x98c | 0xf8c))
+    (0..code.len().saturating_sub(15)).step_by(16).any(|o| {
+        matches!(
+            u16_at(code, o).unwrap() & 0xfff,
+            0x984 | 0x388 | 0x988 | 0x38c | 0x98c | 0xf8c
+        )
+    })
 }
 
 /// A vertex shader in two parts (VertexA + VertexB, Catherine: Full Body's GLSLC) merged into one program, as
@@ -114,18 +165,38 @@ pub fn vertex_ab(key: &str, code: &[u8], ctl: &[u8]) -> R<Option<(Vec<u8>, Vec<u
     if w0 & 0x1f != 1 || (w0 >> 10) & 0xf != 0 {
         return Ok(None);
     }
-    let v: Vec<usize> = (0..6).map(|i| u32_at(ctl, 0x748 + 4 * i).unwrap_or(0) as usize).collect();
+    let v: Vec<usize> = (0..6)
+        .map(|i| u32_at(ctl, 0x748 + 4 * i).unwrap_or(0) as usize)
+        .collect();
     let (a_sph, a_len, b_sph, b_len) = (v[0], v[1], v[3], v[4]);
     if a_sph == 0 && a_len == 0 && b_sph == 0 && b_len == 0 {
         return Ok(None);
     }
-    let bw0 = if 0x80 <= b_sph && b_sph + 0x50 <= code.len() { u32_at(code, b_sph).unwrap() } else { 0 };
+    let bw0 = if 0x80 <= b_sph && b_sph + 0x50 <= code.len() {
+        u32_at(code, b_sph).unwrap()
+    } else {
+        0
+    };
     let c1o = u32_at(ctl, 0x700).unwrap_or(0) as usize;
-    if a_sph != 0x30 || b_sph != c1o + 0x30 || bw0 & 0x1f != 1 || (bw0 >> 10) & 0xf != 1 || a_len < 0x50 || b_len < 0x50 || (a_len - 0x50) % 32 != 0 || (b_len - 0x50) % 32 != 0 || b_sph + b_len > code.len() || a_sph + a_len > code.len() {
+    if a_sph != 0x30
+        || b_sph != c1o + 0x30
+        || bw0 & 0x1f != 1
+        || (bw0 >> 10) & 0xf != 1
+        || a_len < 0x50
+        || b_len < 0x50
+        || (a_len - 0x50) % 32 != 0
+        || (b_len - 0x50) % 32 != 0
+        || b_sph + b_len > code.len()
+        || a_sph + a_len > code.len()
+    {
         return Err(format!("{key}: vertex shader of shader type 0 without a VertexB part in the expected place (control +0x748 {a_sph:#x} {a_len:#x} {b_sph:#x} {b_len:#x})"));
     }
-    let sa: Vec<u32> = (0..20).map(|i| u32_at(code, a_sph + 4 * i).unwrap()).collect();
-    let sb: Vec<u32> = (0..20).map(|i| u32_at(code, b_sph + 4 * i).unwrap()).collect();
+    let sa: Vec<u32> = (0..20)
+        .map(|i| u32_at(code, a_sph + 4 * i).unwrap())
+        .collect();
+    let sb: Vec<u32> = (0..20)
+        .map(|i| u32_at(code, b_sph + 4 * i).unwrap())
+        .collect();
     let mut sph = vec![sb[0] | (sa[0] & !(0xf << 10))];
     for i in 1..4 {
         sph.push((sa[i] & 0xffffff).max(sb[i] & 0xffffff) | (sb[i] & !0xffffff));
@@ -143,7 +214,8 @@ pub fn vertex_ab(key: &str, code: &[u8], ctl: &[u8]) -> R<Option<(Vec<u8>, Vec<u
         }
         let ins = u64::from_le_bytes(a[o..o + 8].try_into().unwrap());
         if ins >> 52 == 0xe30 && ins & 0x1f == 0xf {
-            let bra = 0xe24u64 << 52 | (((alen - (o + 8)) as u64) & 0xffffff) << 20 | (ins & 0xfffff);
+            let bra =
+                0xe24u64 << 52 | (((alen - (o + 8)) as u64) & 0xffffff) << 20 | (ins & 0xfffff);
             a[o..o + 8].copy_from_slice(&bra.to_le_bytes());
         }
     }
@@ -158,7 +230,9 @@ pub fn vertex_ab(key: &str, code: &[u8], ctl: &[u8]) -> R<Option<(Vec<u8>, Vec<u
 
 /// Transform feedback streams of an NVN control section: [{stride, outputs: [[attribute, components]]}] or None.
 fn tf_layout(ctl: &[u8]) -> Option<Value> {
-    let strides: Vec<u32> = (0..4).map(|b| u16_at(ctl, 0x6dc + 2 * b).unwrap_or(0) as u32).collect();
+    let strides: Vec<u32> = (0..4)
+        .map(|b| u16_at(ctl, 0x6dc + 2 * b).unwrap_or(0) as u32)
+        .collect();
     if strides.iter().all(|&s| s == 0) {
         return None;
     }
@@ -171,7 +245,11 @@ fn tf_layout(ctl: &[u8]) -> Option<Value> {
         let count = *ctl.get(0x6e8 + b)? as usize;
         let locs = ctl.get(0xdc + 0x80 * b..0xdc + 0x80 * b + count)?;
         let sizes = ctl.get(0x4dc + 0x80 * b..0x4dc + 0x80 * b + count)?;
-        if !(1..=128).contains(&count) || locs.iter().any(|&x| !(0x20..0x40).contains(&x)) || sizes.iter().any(|&n| !(1..=4).contains(&n)) || strides[b] != 4 * sizes.iter().map(|&n| n as u32).sum::<u32>() {
+        if !(1..=128).contains(&count)
+            || locs.iter().any(|&x| !(0x20..0x40).contains(&x))
+            || sizes.iter().any(|&n| !(1..=4).contains(&n))
+            || strides[b] != 4 * sizes.iter().map(|&n| n as u32).sum::<u32>()
+        {
             return None;
         }
         out.push(json!({"stride": strides[b], "outputs": locs.iter().zip(sizes).map(|(&o, &n)| json!([o - 0x20, n])).collect::<Vec<_>>()}));
@@ -179,8 +257,16 @@ fn tf_layout(ctl: &[u8]) -> Option<Value> {
     Some(Value::Array(out))
 }
 
-const TESS_MODES: [(u32, &str); 3] = [(0x0004, "triangles"), (0x0007, "quads"), (0x8E7A, "isolines")];
-const TESS_SPACING: [(u32, &str); 3] = [(0x0202, "equal"), (0x8E7B, "fractional_odd"), (0x8E7C, "fractional_even")];
+const TESS_MODES: [(u32, &str); 3] = [
+    (0x0004, "triangles"),
+    (0x0007, "quads"),
+    (0x8E7A, "isolines"),
+];
+const TESS_SPACING: [(u32, &str); 3] = [
+    (0x0202, "equal"),
+    (0x8E7B, "fractional_odd"),
+    (0x8E7C, "fractional_even"),
+];
 const TESS_ORDER: [(u32, &str); 2] = [(0x0900, "cw"), (0x0901, "ccw")];
 
 /// A domain shader's own tessellation mode from its NVN control section.
@@ -189,7 +275,9 @@ fn tess_mode(ctl: &[u8]) -> Option<Value> {
         return None;
     }
     let find = |t: &[(u32, &'static str)], v: u32| t.iter().find(|x| x.0 == v).map(|x| x.1);
-    Some(json!({"mode": find(&TESS_MODES, u32_at(ctl, 0x738)?)?, "spacing": find(&TESS_SPACING, u32_at(ctl, 0x73c)?)?, "winding": find(&TESS_ORDER, u32_at(ctl, 0x744)?)?}))
+    Some(
+        json!({"mode": find(&TESS_MODES, u32_at(ctl, 0x738)?)?, "spacing": find(&TESS_SPACING, u32_at(ctl, 0x73c)?)?, "winding": find(&TESS_ORDER, u32_at(ctl, 0x744)?)?}),
+    )
 }
 
 /// Translation options: `debug` keeps the translator's DebugMode (no AST optimizer, as nxnative ships it);
@@ -202,7 +290,10 @@ pub struct JobOptions {
 
 impl Default for JobOptions {
     fn default() -> Self {
-        JobOptions { debug: true, reduced: true }
+        JobOptions {
+            debug: true,
+            reduced: true,
+        }
     }
 }
 
@@ -210,7 +301,9 @@ impl Default for JobOptions {
 /// games has it: SPH type 1 or 2 (bits 0..4), version 4 (bits 5..9), shader type 1..5 (bits 10..13), byte 2 0x0c or
 /// 0x0d; and bytes 13..16 zero, where every instruction has its scheduling controls (stall count, barriers, yield).
 pub fn is_ampere_sph(code: &[u8]) -> bool {
-    let Some(w) = u32_at(code, 0) else { return false };
+    let Some(w) = u32_at(code, 0) else {
+        return false;
+    };
     let ty = (w >> 10) & 0xf;
     matches!(w & 0x1f, 1 | 2)
         && (w >> 5) & 0x1f == 4
@@ -228,7 +321,9 @@ mod sph_tests {
         sph[..4].copy_from_slice(&0x020c0481u32.to_le_bytes());
         assert!(super::is_ampere_sph(&sph));
         // S2R R2 (MKW compute 0028b5da242b07b2) and an FADD with predicate P0
-        let s2r = [0x19u8, 0x79, 2, 0, 0, 0, 0, 0, 0, 0x25, 0, 0, 0, 0x28, 0x0e, 0];
+        let s2r = [
+            0x19u8, 0x79, 2, 0, 0, 0, 0, 0, 0, 0x25, 0, 0, 0, 0x28, 0x0e, 0,
+        ];
         assert!(!super::is_ampere_sph(&[&s2r[..], &[0u8; 0x80]].concat()));
         let mut fadd = vec![0u8; 0x90];
         fadd[..4].copy_from_slice(&0x020c0421u32.to_le_bytes());
@@ -247,27 +342,54 @@ pub fn job_for(key: &str, stage: Stage, ctl: &[u8], area: &[u8], opts: JobOption
         return Err(format!("{key}: ray-tracing programs are not translated (they need the RT program description nxnative builds)"));
     }
     if nvn2_ctl(ctl) {
-        let (a, e) = (u32_at(ctl, 0x40).unwrap_or(0) as usize, u32_at(ctl, 0x44).unwrap_or(0) as usize);
-        c1 = if a <= e && e <= area.len() { area[a..e].to_vec() } else { vec![] };
+        let (a, e) = (
+            u32_at(ctl, 0x40).unwrap_or(0) as usize,
+            u32_at(ctl, 0x44).unwrap_or(0) as usize,
+        );
+        c1 = if a <= e && e <= area.len() {
+            area[a..e].to_vec()
+        } else {
+            vec![]
+        };
         let il = (u32_at(ctl, 0x38).unwrap_or(0) as usize).min(area.len());
         let mut cut = area[..il].to_vec();
         j.insert("arch".into(), json!("sm86"));
         if stage == Stage::Cs {
-            let local: Vec<u32> = (0..3).map(|i| u32_at(ctl, 0x58 + 4 * i).unwrap_or(0)).collect();
+            let local: Vec<u32> = (0..3)
+                .map(|i| u32_at(ctl, 0x58 + 4 * i).unwrap_or(0))
+                .collect();
             if local.iter().any(|&x| x == 0) {
                 return Err(format!("{key}: zero compute workgroup dimension"));
             }
             j.insert("local".into(), json!(local));
-            j.insert("shared".into(), json!((u32_at(ctl, 0x64).unwrap_or(0) + 15) / 16 * 16));
+            j.insert(
+                "shared".into(),
+                json!((u32_at(ctl, 0x64).unwrap_or(0) + 15) / 16 * 16),
+            );
             let b = |o: usize| *ctl.get(o).unwrap_or(&0) as u32;
-            j.insert("nvn2_cs".into(), json!([b(0xb1), b(0xb2), b(0xb3), u16_at(ctl, 0xba).unwrap_or(0), b(0xa9) * 4, b(0xb4), b(0xb5), b(0xaa) * 4]));
+            j.insert(
+                "nvn2_cs".into(),
+                json!([
+                    b(0xb1),
+                    b(0xb2),
+                    b(0xb3),
+                    u16_at(ctl, 0xba).unwrap_or(0),
+                    b(0xa9) * 4,
+                    b(0xb4),
+                    b(0xb5),
+                    b(0xaa) * 4
+                ]),
+            );
             // A compute program whose code area starts with a 0x80-byte SPH (Mario Kart World's DrivePassShaderDefault
             // 078997bf631992c5: word 0 0x020c0481, SPH type 1, then S2R / I2F / ... EXIT / BRA-to-self from +0x80):
             // the instructions start after it. Ampere's opcode 0x481 does not exist, so such a word is never an
             // instruction.
             if cut.len() > 0x80 && is_ampere_sph(&cut) {
                 cut = cut[0x80..].to_vec();
-                extra.insert("cs_sph".into(), json!("a 0x80-byte SPH before the compute instructions, taken off"));
+                extra.insert(
+                    "cs_sph".into(),
+                    json!("a 0x80-byte SPH before the compute instructions, taken off"),
+                );
             }
         }
         let idx = match stage {
@@ -297,12 +419,23 @@ pub fn job_for(key: &str, stage: Stage, ctl: &[u8], area: &[u8], opts: JobOption
             st = Stage::Cs;
         }
         code = cut;
-        if stage == Stage::Ps && ctl.get(0x5b).is_some_and(|&b| b != 0) && code.len() >= 0x50 && u32_at(&code, 19 * 4).unwrap() & 2 == 0 {
+        if stage == Stage::Ps
+            && ctl.get(0x5b).is_some_and(|&b| b != 0)
+            && code.len() >= 0x50
+            && u32_at(&code, 19 * 4).unwrap() & 2 == 0
+        {
             j.insert("early_fragment_tests".into(), json!(true));
         }
     } else {
-        let (c1o, c1t) = (u32_at(ctl, 0x700).unwrap_or(0) as usize, u32_at(ctl, 0x704).unwrap_or(0) as usize);
-        let mut c1v = if c1o <= c1t && c1t <= area.len() { area[c1o..c1t].to_vec() } else { vec![] };
+        let (c1o, c1t) = (
+            u32_at(ctl, 0x700).unwrap_or(0) as usize,
+            u32_at(ctl, 0x704).unwrap_or(0) as usize,
+        );
+        let mut c1v = if c1o <= c1t && c1t <= area.len() {
+            area[c1o..c1t].to_vec()
+        } else {
+            vec![]
+        };
         let mut k = area.to_vec();
         if stage == Stage::Vs {
             if let Some((c, c1b)) = vertex_ab(key, area, ctl)? {
@@ -323,12 +456,17 @@ pub fn job_for(key: &str, stage: Stage, ctl: &[u8], area: &[u8], opts: JobOption
                 }
                 k = k[0x100..].to_vec();
             }
-            let local: Vec<u32> = (0..3).map(|i| u32_at(ctl, 0x748 + 4 * i).unwrap_or(0)).collect();
+            let local: Vec<u32> = (0..3)
+                .map(|i| u32_at(ctl, 0x748 + 4 * i).unwrap_or(0))
+                .collect();
             if local.iter().any(|&x| x == 0) {
                 return Err(format!("{key}: compute control +0x748 thread group is 0"));
             }
             j.insert("local".into(), json!(local));
-            j.insert("shared".into(), json!((u32_at(ctl, 0x754).unwrap_or(0) + 15) / 16 * 16));
+            j.insert(
+                "shared".into(),
+                json!((u32_at(ctl, 0x754).unwrap_or(0) + 15) / 16 * 16),
+            );
         }
         if matches!(stage, Stage::Vs | Stage::Gs) {
             if let Some(tf) = tf_layout(ctl) {
@@ -340,7 +478,11 @@ pub fn job_for(key: &str, stage: Stage, ctl: &[u8], area: &[u8], opts: JobOption
                 extra.insert("tess_mode".into(), t);
             }
         }
-        if stage == Stage::Ps && ctl.get(0x718).is_some_and(|&b| b != 0) && k.len() >= 0x50 && u32_at(&k, 19 * 4).unwrap() & 2 == 0 {
+        if stage == Stage::Ps
+            && ctl.get(0x718).is_some_and(|&b| b != 0)
+            && k.len() >= 0x50
+            && u32_at(&k, 19 * 4).unwrap() & 2 == 0
+        {
             j.insert("early_fragment_tests".into(), json!(true));
         }
         c1 = c1v;
@@ -348,7 +490,10 @@ pub fn job_for(key: &str, stage: Stage, ctl: &[u8], area: &[u8], opts: JobOption
     }
     j.insert("key".into(), json!(key));
     j.insert("stage".into(), json!(st.name()));
-    j.insert("c1".into(), json!(c1.iter().map(|b| format!("{b:02x}")).collect::<String>()));
+    j.insert(
+        "c1".into(),
+        json!(c1.iter().map(|b| format!("{b:02x}")).collect::<String>()),
+    );
     j.insert("tex".into(), json!({}));
     j.insert("img".into(), json!({}));
     j.insert("attr".into(), json!({}));
@@ -363,7 +508,14 @@ pub fn job_for(key: &str, stage: Stage, ctl: &[u8], area: &[u8], opts: JobOption
     if let Some(l) = j.get("local") {
         extra.insert("local".into(), l.clone());
     }
-    Ok(Job { key: key.into(), stage, xlate_stage: st, code, json: j, extra })
+    Ok(Job {
+        key: key.into(),
+        stage,
+        xlate_stage: st,
+        code,
+        json: j,
+        extra,
+    })
 }
 
 #[cfg(test)]

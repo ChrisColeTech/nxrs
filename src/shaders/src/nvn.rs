@@ -35,9 +35,26 @@ pub enum Stage {
 }
 
 impl Stage {
-    pub const ALL: [Stage; 9] = [Stage::Vs, Stage::Hs, Stage::Ds, Stage::Gs, Stage::Ps, Stage::Cs, Stage::Ts, Stage::Ms, Stage::Rt];
+    pub const ALL: [Stage; 9] = [
+        Stage::Vs,
+        Stage::Hs,
+        Stage::Ds,
+        Stage::Gs,
+        Stage::Ps,
+        Stage::Cs,
+        Stage::Ts,
+        Stage::Ms,
+        Stage::Rt,
+    ];
     /// BNSH's stage pointer order (a program's six pointers from +0x08).
-    pub const BNSH: [Stage; 6] = [Stage::Vs, Stage::Hs, Stage::Ds, Stage::Gs, Stage::Ps, Stage::Cs];
+    pub const BNSH: [Stage; 6] = [
+        Stage::Vs,
+        Stage::Hs,
+        Stage::Ds,
+        Stage::Gs,
+        Stage::Ps,
+        Stage::Cs,
+    ];
     pub fn name(self) -> &'static str {
         match self {
             Stage::Vs => "vs",
@@ -74,16 +91,19 @@ impl fmt::Display for Stage {
 }
 
 pub fn u16_at(d: &[u8], o: usize) -> Option<u16> {
-    d.get(o..o.checked_add(2)?).map(|s| u16::from_le_bytes([s[0], s[1]]))
+    d.get(o..o.checked_add(2)?)
+        .map(|s| u16::from_le_bytes([s[0], s[1]]))
 }
 pub fn u32_at(d: &[u8], o: usize) -> Option<u32> {
-    d.get(o..o.checked_add(4)?).map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+    d.get(o..o.checked_add(4)?)
+        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
 }
 pub fn i32_at(d: &[u8], o: usize) -> Option<i32> {
     u32_at(d, o).map(|v| v as i32)
 }
 pub fn u64_at(d: &[u8], o: usize) -> Option<u64> {
-    d.get(o..o.checked_add(8)?).map(|s| u64::from_le_bytes(s.try_into().unwrap()))
+    d.get(o..o.checked_add(8)?)
+        .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
 }
 
 fn outside(what: &str, n: usize, at: usize, len: usize) -> String {
@@ -101,7 +121,10 @@ pub fn need16(d: &[u8], at: usize, what: &str) -> R<u16> {
 }
 /// `d[at..at + n]`, refused naming the place when the range is not inside `d`.
 pub fn span<'a>(d: &'a [u8], at: u64, n: u64, what: &str) -> R<&'a [u8]> {
-    let end = at.checked_add(n).filter(|&e| e <= d.len() as u64).ok_or_else(|| outside(what, n as usize, at as usize, d.len()))?;
+    let end = at
+        .checked_add(n)
+        .filter(|&e| e <= d.len() as u64)
+        .ok_or_else(|| outside(what, n as usize, at as usize, d.len()))?;
     Ok(&d[at as usize..end as usize])
 }
 
@@ -203,7 +226,11 @@ pub fn same_shader(a: (&[u8], &[u8]), b: (&[u8], &[u8])) -> bool {
         return key_ctl(ca) == key_ctl(cb);
     }
     let own = u32_at(ca, 0x20).map(|v| v as usize).unwrap_or(ca.len());
-    let n = if own >= 0x760 && own <= ca.len().min(cb.len()) { own } else { ca.len().max(cb.len()) };
+    let n = if own >= 0x760 && own <= ca.len().min(cb.len()) {
+        own
+    } else {
+        ca.len().max(cb.len())
+    };
     ca.get(..n) == cb.get(..n)
 }
 
@@ -243,19 +270,34 @@ pub fn check(st: Stage, ctl: &[u8], code: &[u8]) -> Option<&'static str> {
         if !nvn2_ctl(ctl) || ctl.len() < 0x68 || ctl[0x56] != 8 {
             return Some("bad NVN2 ray-tracing control section");
         }
-        let (nmeta, pmeta, ncode) = (u32_at(ctl, 0x5c).unwrap() as usize, u32_at(ctl, 0x60).unwrap() as usize, u32_at(ctl, 0x64).unwrap() as usize);
+        let (nmeta, pmeta, ncode) = (
+            u32_at(ctl, 0x5c).unwrap() as usize,
+            u32_at(ctl, 0x60).unwrap() as usize,
+            u32_at(ctl, 0x64).unwrap() as usize,
+        );
         if ncode != code.len() {
             return Some("RT control +0x64 does not match the code area length");
         }
-        if nmeta == 0 || pmeta < 0x68 || pmeta % 8 != 0 || pmeta > ctl.len() || nmeta > ctl.len() - pmeta {
+        if nmeta == 0
+            || pmeta < 0x68
+            || pmeta % 8 != 0
+            || pmeta > ctl.len()
+            || nmeta > ctl.len() - pmeta
+        {
             return Some("RT metadata range lies outside the control section");
         }
     }
     if nvn2_ctl(ctl) {
-        return if u32_at(ctl, 0x44) == Some(code.len() as u32) { None } else { Some("control +0x44 does not match the code area length") };
+        return if u32_at(ctl, 0x44) == Some(code.len() as u32) {
+            None
+        } else {
+            Some("control +0x44 does not match the code area length")
+        };
     }
     let head = code.get(..4);
-    let cs_bad = st == Stage::Cs && (head == Some(&CS_MAGIC[..]) || head == Some(&GFX_MAGIC[..])) && head != Some(&CS_MAGIC[..]);
+    let cs_bad = st == Stage::Cs
+        && (head == Some(&CS_MAGIC[..]) || head == Some(&GFX_MAGIC[..]))
+        && head != Some(&CS_MAGIC[..]);
     if cs_bad || (st != Stage::Cs && head != Some(&GFX_MAGIC[..])) {
         return Some("code area header magic does not match the stage");
     }
@@ -279,7 +321,13 @@ pub struct Found {
 
 impl Found {
     pub fn new(label: String, stage: Stage, ctl: &[u8], code: &[u8]) -> Found {
-        Found { label, stage, ctl: ctl.to_vec(), code: code.to_vec(), group: None }
+        Found {
+            label,
+            stage,
+            ctl: ctl.to_vec(),
+            code: code.to_vec(),
+            group: None,
+        }
     }
     pub fn grouped(mut self, g: impl Into<String>) -> Found {
         self.group = Some(g.into());
@@ -354,7 +402,13 @@ mod tests {
         let mut h = Sha256::new();
         h.update(&ctl[..0x880]);
         h.update(&code);
-        assert_eq!(skey(&ctl, &code), h.finalize()[..8].iter().map(|b| format!("{b:02x}")).collect::<String>());
+        assert_eq!(
+            skey(&ctl, &code),
+            h.finalize()[..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        );
         // NVN2: the first 0x48 bytes, +0x30 zeroed; bytes past 0x48 do not count
         let (mut c2, k2) = nvn2(Stage::Vs, 1);
         let a = skey(&c2, &k2);

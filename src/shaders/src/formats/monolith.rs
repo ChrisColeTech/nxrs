@@ -27,7 +27,10 @@ pub fn arh_entries(d: &[u8], label: &str) -> R<Vec<(String, u64, u64)>> {
         let mut out = vec![];
         let mut off = 0u64;
         for i in 0..count {
-            let (key, size) = (u64_at(d, 16 + i * 16).unwrap(), u32_at(d, 24 + i * 16).unwrap() as u64);
+            let (key, size) = (
+                u64_at(d, 16 + i * 16).unwrap(),
+                u32_at(d, 24 + i * 16).unwrap() as u64,
+            );
             if size != 0 {
                 out.push((format!("/#{key:016x}"), off, size));
             }
@@ -39,25 +42,52 @@ pub fn arh_entries(d: &[u8], label: &str) -> R<Vec<(String, u64, u64)>> {
         return Ok(vec![]);
     }
     let w: Vec<u32> = (0..9).map(|k| u32_at(d, 4 + 4 * k).unwrap()).collect();
-    let (count, so, sn, no, nn, fo, fnn, key) = (w[1] as usize, w[2] as usize, w[3] as usize, w[4] as usize, w[5] as usize, w[6] as usize, w[7] as usize, w[8]);
+    let (count, so, sn, no, nn, fo, fnn, key) = (
+        w[1] as usize,
+        w[2] as usize,
+        w[3] as usize,
+        w[4] as usize,
+        w[5] as usize,
+        w[6] as usize,
+        w[7] as usize,
+        w[8],
+    );
     let oob = |o: usize, n: usize| o > d.len() || n > d.len() - o;
     if nn != count * 8 || oob(so, sn) || oob(no, nn) || oob(fo, fnn * 24) {
         return Err(format!("{label}: ARH1: index table out of bounds"));
     }
     let key = (key ^ 0xf3f3_5353).to_le_bytes();
     // whole u32 words are encrypted; a final partial word stays plain
-    let dec = |o: usize, n: usize| -> Vec<u8> { d[o..o + n].iter().enumerate().map(|(i, &v)| if i < n & !3 { v ^ key[i & 3] } else { v }).collect() };
+    let dec = |o: usize, n: usize| -> Vec<u8> {
+        d[o..o + n]
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| if i < n & !3 { v ^ key[i & 3] } else { v })
+            .collect()
+    };
     let strings = dec(so, sn);
     let nb = dec(no, nn);
-    let nodes: Vec<(i32, i32)> = nb.chunks_exact(8).map(|c| (i32::from_le_bytes(c[..4].try_into().unwrap()), i32::from_le_bytes(c[4..].try_into().unwrap()))).collect();
+    let nodes: Vec<(i32, i32)> = nb
+        .chunks_exact(8)
+        .map(|c| {
+            (
+                i32::from_le_bytes(c[..4].try_into().unwrap()),
+                i32::from_le_bytes(c[4..].try_into().unwrap()),
+            )
+        })
+        .collect();
     let mut names: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     for (i, &(nxt, prev)) in nodes.iter().enumerate() {
         if nxt >= 0 || prev < 0 {
             continue;
         }
         let off = (-(nxt as i64)) as usize;
-        let end = strings.get(off..).and_then(|s| memchr::memchr(0, s)).map(|e| e + off);
-        let Some(end) = end.filter(|&e| e + 5 <= strings.len() && strings[off..e].is_ascii()) else {
+        let end = strings
+            .get(off..)
+            .and_then(|s| memchr::memchr(0, s))
+            .map(|e| e + off);
+        let Some(end) = end.filter(|&e| e + 5 <= strings.len() && strings[off..e].is_ascii())
+        else {
             return Err(format!("{label}: ARH1: invalid path suffix"));
         };
         let fid = u32_at(&strings, end + 1).unwrap();
@@ -86,10 +116,22 @@ pub fn arh_entries(d: &[u8], label: &str) -> R<Vec<(String, u64, u64)>> {
     let mut out = vec![];
     for i in 0..fnn {
         let o = fo + i * 24;
-        let (off, size, flags, fid) = (u64_at(d, o).unwrap(), u32_at(d, o + 8).unwrap() as u64, u32_at(d, o + 16).unwrap(), u32_at(d, o + 20).unwrap());
+        let (off, size, flags, fid) = (
+            u64_at(d, o).unwrap(),
+            u32_at(d, o + 8).unwrap() as u64,
+            u32_at(d, o + 16).unwrap(),
+            u32_at(d, o + 20).unwrap(),
+        );
         // HasXbc1Header (bit 1): the stored size leaves out the 48-byte wrapper
         if size != 0 {
-            out.push((names.get(&fid).cloned().unwrap_or_else(|| format!("#{fid}")), off, size + if flags & 2 != 0 { 48 } else { 0 }));
+            out.push((
+                names
+                    .get(&fid)
+                    .cloned()
+                    .unwrap_or_else(|| format!("#{fid}")),
+                off,
+                size + if flags & 2 != 0 { 48 } else { 0 },
+            ));
         }
     }
     Ok(out)
@@ -101,7 +143,11 @@ fn xbc(d: &[u8], off: usize, label: &str) -> R<Option<(Vec<u8>, usize)>> {
     if off + 48 > d.len() || &d[off..off + 4] != b"xbc1" {
         return Ok(None);
     }
-    let (kind, raw, size) = (u32_at(d, off + 4).unwrap(), u32_at(d, off + 8).unwrap() as usize, u32_at(d, off + 12).unwrap() as usize);
+    let (kind, raw, size) = (
+        u32_at(d, off + 4).unwrap(),
+        u32_at(d, off + 8).unwrap() as usize,
+        u32_at(d, off + 12).unwrap() as usize,
+    );
     if !matches!(kind, 0 | 1 | 3) || size == 0 || off + 48 + size > d.len() {
         return Ok(None);
     }
@@ -111,13 +157,17 @@ fn xbc(d: &[u8], off: usize, label: &str) -> R<Option<(Vec<u8>, usize)>> {
         3 => {
             let mut v = vec![];
             let mut r = zstd::stream::read::Decoder::new(p).map_err(|e| format!("{label}: {e}"))?;
-            std::io::Read::read_to_end(&mut r, &mut v).map_err(|e| format!("{label}: XBC1 @{off:#x}: {e}"))?;
+            std::io::Read::read_to_end(&mut r, &mut v)
+                .map_err(|e| format!("{label}: XBC1 @{off:#x}: {e}"))?;
             v
         }
         _ => p.to_vec(),
     };
     if data.len() != raw {
-        return Err(format!("{label}: XBC1 @{off:#x}: expected {raw} bytes, decoded {}", data.len()));
+        return Err(format!(
+            "{label}: XBC1 @{off:#x}: expected {raw} bytes, decoded {}",
+            data.len()
+        ));
     }
     Ok(Some((data, off + 48 + size)))
 }
@@ -127,16 +177,23 @@ fn cmp_zlib(d: &[u8], off: usize, label: &str) -> R<Option<(Vec<u8>, usize)>> {
     if off + 16 > d.len() || &d[off..off + 8] != b"cmp\0zlib" {
         return Ok(None);
     }
-    let (size, raw) = (u32_at(d, off + 8).unwrap() as usize, u32_at(d, off + 12).unwrap() as usize);
+    let (size, raw) = (
+        u32_at(d, off + 8).unwrap() as usize,
+        u32_at(d, off + 12).unwrap() as usize,
+    );
     if size == 0 || size > d.len() - off - 16 {
         return Ok(None);
     }
     let p = &d[off + 16..off + 16 + size];
     let mut z = flate2::Decompress::new(true);
     let mut out = Vec::with_capacity(raw);
-    let st = z.decompress_vec(p, &mut out, flate2::FlushDecompress::Finish).map_err(|e| format!("{label}: cmp zlib @{off:#x}: damaged payload ({e})"))?;
+    let st = z
+        .decompress_vec(p, &mut out, flate2::FlushDecompress::Finish)
+        .map_err(|e| format!("{label}: cmp zlib @{off:#x}: damaged payload ({e})"))?;
     if st != flate2::Status::StreamEnd || z.total_in() as usize != size || out.len() != raw {
-        return Err(format!("{label}: cmp zlib @{off:#x}: payload does not match stored/raw sizes"));
+        return Err(format!(
+            "{label}: cmp zlib @{off:#x}: payload does not match stored/raw sizes"
+        ));
     }
     Ok(Some((out, off + 16 + size)))
 }
@@ -152,8 +209,13 @@ pub fn hcps(d: &[u8], base: usize, label: &str) -> R<Vec<Found>> {
         Ok(&d[off..off + n])
     };
     sp(base, 72)?;
-    let (table, count) = (u32_at(d, base + 8).unwrap() as usize, u32_at(d, base + 12).unwrap() as usize);
-    let w: Vec<usize> = (0..6).map(|k| u32_at(d, base + 24 + 4 * k).unwrap() as usize).collect();
+    let (table, count) = (
+        u32_at(d, base + 8).unwrap() as usize,
+        u32_at(d, base + 12).unwrap() as usize,
+    );
+    let w: Vec<usize> = (0..6)
+        .map(|k| u32_at(d, base + 24 + 4 * k).unwrap() as usize)
+        .collect();
     sp(base + table, count * 8)?;
     let slcts = sp(base + w[0], w[1])?;
     let codes = sp(base + w[2], w[3])?;
@@ -167,24 +229,43 @@ pub fn hcps(d: &[u8], base: usize, label: &str) -> R<Vec<Found>> {
         if s + 72 > slcts.len() || &slcts[s..s + 4] != b"SLCT" {
             return Err(format!("{at}: invalid SLCT {i}"));
         }
-        let (num, ptr) = (u32_at(slcts, s + 16).unwrap() as usize, u32_at(slcts, s + 20).unwrap() as usize);
-        let (mut c, cn, mut k, kn) = (u32_at(slcts, s + 40).unwrap() as usize, u32_at(slcts, s + 44).unwrap() as usize, u32_at(slcts, s + 48).unwrap() as usize, u32_at(slcts, s + 52).unwrap() as usize);
+        let (num, ptr) = (
+            u32_at(slcts, s + 16).unwrap() as usize,
+            u32_at(slcts, s + 20).unwrap() as usize,
+        );
+        let (mut c, cn, mut k, kn) = (
+            u32_at(slcts, s + 40).unwrap() as usize,
+            u32_at(slcts, s + 44).unwrap() as usize,
+            u32_at(slcts, s + 48).unwrap() as usize,
+            u32_at(slcts, s + 52).unwrap() as usize,
+        );
         let (ce, ke) = (c + cn, k + kn);
         if s + ptr + num * 8 > slcts.len() || ce > ctls.len() || ke > codes.len() {
             return Err(format!("{at} SLCT {i}: variant range out of bounds"));
         }
         for j in 0..num {
-            let (po, pn) = (u32_at(slcts, s + ptr + j * 8).unwrap() as usize, u32_at(slcts, s + ptr + j * 8 + 4).unwrap() as usize);
+            let (po, pn) = (
+                u32_at(slcts, s + ptr + j * 8).unwrap() as usize,
+                u32_at(slcts, s + ptr + j * 8 + 4).unwrap() as usize,
+            );
             let p = s + po;
             if pn < 32 || p + pn > slcts.len() {
                 return Err(format!("{at}: invalid NVSD"));
             }
-            let (vo, vn) = (u32_at(slcts, p + 24).unwrap() as usize, u32_at(slcts, p + 28).unwrap() as usize);
+            let (vo, vn) = (
+                u32_at(slcts, p + 24).unwrap() as usize,
+                u32_at(slcts, p + 28).unwrap() as usize,
+            );
             if vn == 0 || vo + vn * 20 > pn {
                 return Err(format!("{at}: invalid NVSD stage records"));
             }
             let r = p + vo + (vn - 1) * 20;
-            let (vs, ps, vc, pc) = (u32_at(slcts, r + 4).unwrap() as usize, u32_at(slcts, r + 8).unwrap() as usize, u32_at(slcts, r + 12).unwrap() as usize, u32_at(slcts, r + 16).unwrap() as usize);
+            let (vs, ps, vc, pc) = (
+                u32_at(slcts, r + 4).unwrap() as usize,
+                u32_at(slcts, r + 8).unwrap() as usize,
+                u32_at(slcts, r + 12).unwrap() as usize,
+                u32_at(slcts, r + 16).unwrap() as usize,
+            );
             let (pend, kend) = (c + vc + pc, k + vs + ps);
             if pend > ce || kend > ke {
                 return Err(format!("{at}: program exceeds SLCT range"));
@@ -201,13 +282,21 @@ pub fn hcps(d: &[u8], base: usize, label: &str) -> R<Vec<Found>> {
                 }
                 let nc = u32_at(ctls, c + if n2 { 0x30 } else { 0x20 }).unwrap() as usize;
                 let nk = u32_at(ctls, c + if n2 { 0x44 } else { 0x704 }).unwrap() as usize;
-                if nc < if n2 { NVN2_KEY_CTL } else { 0x760 } || c + nc > pend || nk == 0 || k + nk > kend {
+                if nc < if n2 { NVN2_KEY_CTL } else { 0x760 }
+                    || c + nc > pend
+                    || nk == 0
+                    || k + nk > kend
+                {
                     return Err(format!("{at}: shader exceeds program range"));
                 }
                 let (ctl, code) = (&ctls[c..c + nc], &codes[k..k + nk]);
                 c += (nc + 7) & !7;
                 k += nk;
-                let st = if n2 { nvn2_stage(ctl, code) } else { glslc::stage(ctl, code) };
+                let st = if n2 {
+                    nvn2_stage(ctl, code)
+                } else {
+                    glslc::stage(ctl, code)
+                };
                 let why = match st {
                     Some(st) => check(st, ctl, code),
                     None => Some("unknown stage"),
@@ -234,7 +323,12 @@ pub fn slct(d: &[u8], base: usize, label: &str) -> R<Vec<Found>> {
     if base + 72 > d.len() {
         return Ok(vec![]);
     }
-    let (c, cn, k, kn) = (u32_at(d, base + 40).unwrap() as usize, u32_at(d, base + 44).unwrap() as usize, u32_at(d, base + 48).unwrap() as usize, u32_at(d, base + 52).unwrap() as usize);
+    let (c, cn, k, kn) = (
+        u32_at(d, base + 40).unwrap() as usize,
+        u32_at(d, base + 44).unwrap() as usize,
+        u32_at(d, base + 48).unwrap() as usize,
+        u32_at(d, base + 52).unwrap() as usize,
+    );
     let size = (c + cn).max(k + kn);
     if c.min(k) < 72 || size > d.len() - base {
         return Ok(vec![]);
@@ -243,7 +337,10 @@ pub fn slct(d: &[u8], base: usize, label: &str) -> R<Vec<Found>> {
     h[..4].copy_from_slice(b"HCPS");
     h[8..12].copy_from_slice(&72u32.to_le_bytes());
     h[12..16].copy_from_slice(&1u32.to_le_bytes());
-    for (q, v) in [80u32, size as u32, 80, size as u32, 80, size as u32].iter().enumerate() {
+    for (q, v) in [80u32, size as u32, 80, size as u32, 80, size as u32]
+        .iter()
+        .enumerate()
+    {
         h[24 + 4 * q..28 + 4 * q].copy_from_slice(&v.to_le_bytes());
     }
     h.extend(&d[base..base + size]);
@@ -261,15 +358,22 @@ pub fn slcts(d: &[u8], label: &str) -> R<Vec<Found>> {
 
 /// Whether `d` starts as a Monolith container this reader takes whole.
 pub fn is_monolith(d: &[u8]) -> bool {
-    matches!(d.get(..4), Some(b"HCPS") | Some(b"xbc1") | Some(b"DRSM")) || d.starts_with(b"cmp\0zlib")
+    matches!(d.get(..4), Some(b"HCPS") | Some(b"xbc1") | Some(b"DRSM"))
+        || d.starts_with(b"cmp\0zlib")
 }
 
 /// Decoded entries and their XBC1 / cmp-zlib streams, read without relying on extensions.
 pub fn shaders(d: &[u8], label: &str, out: &mut Vec<Found>, depth: usize) -> R<()> {
     if depth > crate::formats::NEST {
-        return Err(format!("{label}: streams nested more than {} deep", crate::formats::NEST));
+        return Err(format!(
+            "{label}: streams nested more than {} deep",
+            crate::formats::NEST
+        ));
     }
-    let mut markers: Vec<(usize, bool, usize)> = memchr::memmem::find_iter(d, b"xbc1").map(|o| (o, true, 4)).chain(memchr::memmem::find_iter(d, b"cmp\0zlib").map(|o| (o, false, 8))).collect();
+    let mut markers: Vec<(usize, bool, usize)> = memchr::memmem::find_iter(d, b"xbc1")
+        .map(|o| (o, true, 4))
+        .chain(memchr::memmem::find_iter(d, b"cmp\0zlib").map(|o| (o, false, 8)))
+        .collect();
     markers.sort();
     let mut pos = 0;
     let mut compressed = vec![];
@@ -277,13 +381,25 @@ pub fn shaders(d: &[u8], label: &str, out: &mut Vec<Found>, depth: usize) -> R<(
         if off < pos {
             continue;
         }
-        let r = if is_xbc { xbc(d, off, label)? } else { cmp_zlib(d, off, label)? };
+        let r = if is_xbc {
+            xbc(d, off, label)?
+        } else {
+            cmp_zlib(d, off, label)?
+        };
         match r {
             None => pos = off + size,
             Some((data, end)) => {
                 pos = end;
                 compressed.push((off, end));
-                shaders(&data, &format!("{label}#{}@{off:#x}", if is_xbc { "XBC1" } else { "cmp-zlib" }), out, depth + 1)?;
+                shaders(
+                    &data,
+                    &format!(
+                        "{label}#{}@{off:#x}",
+                        if is_xbc { "XBC1" } else { "cmp-zlib" }
+                    ),
+                    out,
+                    depth + 1,
+                )?;
             }
         }
     }
@@ -332,7 +448,10 @@ mod tests {
         s[nvsd_at + 24..nvsd_at + 28].copy_from_slice(&32u32.to_le_bytes());
         s[nvsd_at + 28..nvsd_at + 32].copy_from_slice(&1u32.to_le_bytes());
         let r = nvsd_at + 32;
-        for (q, v) in [0usize, k1.len(), k2.len(), c1.len(), c2.len()].iter().enumerate() {
+        for (q, v) in [0usize, k1.len(), k2.len(), c1.len(), c2.len()]
+            .iter()
+            .enumerate()
+        {
             s[r + 4 * q..r + 4 + 4 * q].copy_from_slice(&(*v as u32).to_le_bytes());
         }
         s[c_at..k_at].copy_from_slice(&ctls);
@@ -346,7 +465,10 @@ mod tests {
         let mut main = vec![0u8; 16];
         main.extend(&s);
         let f = slcts(&main, "exefs/main").unwrap();
-        assert_eq!(f.iter().map(|x| x.stage).collect::<Vec<_>>(), vec![Stage::Vs, Stage::Ps]);
+        assert_eq!(
+            f.iter().map(|x| x.stage).collect::<Vec<_>>(),
+            vec![Stage::Vs, Stage::Ps]
+        );
         // an xbc1 (zlib) around a GLSLC-free HCPS-free blob holding nothing; then around a GLSLC output
         let g = crate::formats::glslc::tests::make_output(&nvn1_ps(3).0, &nvn1_ps(3).1);
         let mut z = flate2::write::ZlibEncoder::new(vec![], flate2::Compression::default());
@@ -376,6 +498,12 @@ mod tests {
             d.extend(n.to_le_bytes());
         }
         let e = arh_entries(&d, "t").unwrap();
-        assert_eq!(e, vec![("/#0000000000000001".into(), 0, 0x18), ("/#0000000000000002".into(), 0x20, 0x20)]);
+        assert_eq!(
+            e,
+            vec![
+                ("/#0000000000000001".into(), 0, 0x18),
+                ("/#0000000000000002".into(), 0x20, 0x20)
+            ]
+        );
     }
 }

@@ -63,13 +63,20 @@ pub fn storage_format_caps(spv: &[u8]) -> Option<(Vec<u8>, Vec<&'static str>)> {
         }
         i += n;
     }
-    let unknown = |img: &u32| result_type.get(img).is_some_and(|t| unknown_images.contains(t));
+    let unknown = |img: &u32| {
+        result_type
+            .get(img)
+            .is_some_and(|t| unknown_images.contains(t))
+    };
     let mut add = vec![];
     if !caps.contains(&CAP_READ_WITHOUT_FORMAT) && reads.iter().any(unknown) {
         add.push((CAP_READ_WITHOUT_FORMAT, "storage_image_read_without_format"));
     }
     if !caps.contains(&CAP_WRITE_WITHOUT_FORMAT) && writes.iter().any(unknown) {
-        add.push((CAP_WRITE_WITHOUT_FORMAT, "storage_image_write_without_format"));
+        add.push((
+            CAP_WRITE_WITHOUT_FORMAT,
+            "storage_image_write_without_format",
+        ));
     }
     let at = last_cap?;
     if add.is_empty() {
@@ -172,7 +179,7 @@ const IMG_OFFSET: u32 = 0x10;
 /// The words each image operand bit carries after the mask, in bit order (SPIR-V 3.14 Image Operands).
 fn image_operand_words(bit: u32) -> usize {
     match bit {
-        0x4 => 2,                                                   // Grad
+        0x4 => 2, // Grad
         0x1 | 0x2 | 0x8 | 0x10 | 0x20 | 0x40 | 0x80 | 0x100 | 0x200 | 0x10000 => 1,
         _ => 0,
     }
@@ -258,7 +265,10 @@ pub fn dynamic_offsets(spv: &[u8]) -> Option<(Vec<u8>, Vec<&'static str>)> {
         if consts.contains(&off) {
             // a constant offset: ConstOffset (bit 0x8, ordered before Offset)
             let mut out = vec![0u32, rt, res, img, coord, (mask & !IMG_OFFSET) | 0x8];
-            let mut sorted: Vec<(u32, Vec<u32>)> = ops.iter().map(|(b, v)| (if *b == IMG_OFFSET { 0x8 } else { *b }, v.clone())).collect();
+            let mut sorted: Vec<(u32, Vec<u32>)> = ops
+                .iter()
+                .map(|(b, v)| (if *b == IMG_OFFSET { 0x8 } else { *b }, v.clone()))
+                .collect();
             sorted.sort_by_key(|o| o.0);
             for (_, v) in sorted {
                 out.extend(v);
@@ -268,7 +278,9 @@ pub fn dynamic_offsets(spv: &[u8]) -> Option<(Vec<u8>, Vec<&'static str>)> {
             names.push("const_offset");
             continue;
         }
-        let (Some(&ct), Some(&ot)) = (types.get(&coord), types.get(&off)) else { return None };
+        let (Some(&ct), Some(&ot)) = (types.get(&coord), types.get(&off)) else {
+            return None;
+        };
         let mut pre: Vec<u32> = vec![];
         let add_to = if ct == ot {
             off
@@ -362,7 +374,10 @@ mod tests {
         let (out, names) = storage_format_caps(&b).unwrap();
         assert_eq!(names, vec!["storage_image_write_without_format"]);
         let ow = crate::reflect::words(&out).unwrap();
-        assert_eq!(&ow[7..9], &[(2 << 16) | OP_CAPABILITY, CAP_WRITE_WITHOUT_FORMAT]);
+        assert_eq!(
+            &ow[7..9],
+            &[(2 << 16) | OP_CAPABILITY, CAP_WRITE_WITHOUT_FORMAT]
+        );
         assert!(storage_format_caps(&out).is_none());
     }
 
@@ -376,13 +391,26 @@ mod tests {
         w.extend([(5 << 16) | OP_FUNCTION, 1, 2, 0, 3]);
         w.extend([(5 << 16) | OP_COMPOSITE_CONSTRUCT, 21, 30, 40, 41]); // coordinate
         w.extend([(5 << 16) | OP_COMPOSITE_CONSTRUCT, 21, 31, 42, 43]); // offset (computed)
-        w.extend([(8 << 16) | OP_IMAGE_FETCH, 50, 51, 52, 30, 0x2 | 0x10, 22, 31]);
+        w.extend([
+            (8 << 16) | OP_IMAGE_FETCH,
+            50,
+            51,
+            52,
+            30,
+            0x2 | 0x10,
+            22,
+            31,
+        ]);
         let (out, names) = dynamic_offsets(&to_bytes(&w)).unwrap();
         assert_eq!(names, vec!["dynamic_offset_added"]);
         let o = crate::reflect::words(&out).unwrap();
         assert_eq!(o[3], 101);
-        assert!(o.windows(5).any(|x| x == [(5 << 16) | OP_IADD, 21, 100, 30, 31]));
-        assert!(o.windows(7).any(|x| x == [(7 << 16) | OP_IMAGE_FETCH, 50, 51, 52, 100, 0x2, 22]));
+        assert!(o
+            .windows(5)
+            .any(|x| x == [(5 << 16) | OP_IADD, 21, 100, 30, 31]));
+        assert!(o
+            .windows(7)
+            .any(|x| x == [(7 << 16) | OP_IMAGE_FETCH, 50, 51, 52, 100, 0x2, 22]));
     }
 
     #[test]
@@ -399,9 +427,16 @@ mod tests {
         assert_eq!(names, vec!["size_query_components"]);
         let o = crate::reflect::words(&out).unwrap();
         assert_eq!(o[3], 61);
-        let at = o.iter().position(|&x| x == (5 << 16) | OP_FUNCTION).unwrap();
+        let at = o
+            .iter()
+            .position(|&x| x == (5 << 16) | OP_FUNCTION)
+            .unwrap();
         assert_eq!(&o[at - 4..at], &[(4 << 16) | OP_CONSTANT, 20, 60, 1]);
-        assert!(o.windows(4).any(|x| x == [(4 << 16) | OP_COPY_OBJECT, 20, 34, 60]));
-        assert!(o.windows(5).any(|x| x == [(5 << 16) | OP_COMPOSITE_EXTRACT, 20, 33, 30, 1]));
+        assert!(o
+            .windows(4)
+            .any(|x| x == [(4 << 16) | OP_COPY_OBJECT, 20, 34, 60]));
+        assert!(o
+            .windows(5)
+            .any(|x| x == [(5 << 16) | OP_COMPOSITE_EXTRACT, 20, 33, 30, 1]));
     }
 }

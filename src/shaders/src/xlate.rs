@@ -42,8 +42,16 @@ fn command(exe: &Path) -> Command {
 }
 
 /// The tools' file names: `dmsh_xlate.exe` / `spirv-val.exe` on Windows, without the extension elsewhere.
-const XLATE: &str = if cfg!(windows) { "dmsh_xlate.exe" } else { "dmsh_xlate" };
-const SPIRV_VAL: &str = if cfg!(windows) { "spirv-val.exe" } else { "spirv-val" };
+const XLATE: &str = if cfg!(windows) {
+    "dmsh_xlate.exe"
+} else {
+    "dmsh_xlate"
+};
+const SPIRV_VAL: &str = if cfg!(windows) {
+    "spirv-val.exe"
+} else {
+    "spirv-val"
+};
 
 /// Where the tools are: `dmsh_xlate.exe` (built from nxnative's source into build/tools/dmsh_xlate) and the Vulkan
 /// SDK's `spirv-val.exe`.
@@ -57,7 +65,9 @@ impl Tools {
     /// `NXSHADERS_XLATE` / `NXSHADERS_SPIRV_VAL`, else beside this executable (`tools/`), else the repository's
     /// build/tools and the Vulkan SDK (`VULKAN_SDK`, else C:\VulkanSDK\1.3.268.0).
     pub fn find() -> Result<Tools, String> {
-        let exe_dir = std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf));
+        let exe_dir = std::env::current_exe()
+            .ok()
+            .and_then(|p| p.parent().map(Path::to_path_buf));
         let mut xl: Vec<PathBuf> = vec![];
         if let Ok(p) = std::env::var("NXSHADERS_XLATE") {
             xl.push(p.into());
@@ -66,13 +76,26 @@ impl Tools {
             xl.push(d.join("tools").join(XLATE));
             xl.push(d.join(XLATE));
             for up in d.ancestors().take(5) {
-                xl.push(up.join("build").join("tools").join("dmsh_xlate").join(XLATE));
+                xl.push(
+                    up.join("build")
+                        .join("tools")
+                        .join("dmsh_xlate")
+                        .join(XLATE),
+                );
             }
         }
-        xl.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build/tools/dmsh_xlate").join(XLATE));
+        xl.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../build/tools/dmsh_xlate")
+                .join(XLATE),
+        );
         // Linux: the linux-x64 build of the tool (build_dmsh_xlate.sh) under build/tools/dmsh_xlate-linux
         #[cfg(not(windows))]
-        xl.push(PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../build/tools/dmsh_xlate-linux").join(XLATE));
+        xl.push(
+            PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../../build/tools/dmsh_xlate-linux")
+                .join(XLATE),
+        );
         let xlate = xl
             .into_iter()
             .find(|p| p.is_file())
@@ -93,7 +116,11 @@ impl Tools {
             sv.push(PathBuf::from(r"C:\VulkanSDK\1.3.268.0\Bin\spirv-val.exe"));
         } else {
             // the distribution's SPIRV-Tools (spirv-tools on Debian / Ubuntu / Fedora / Arch)
-            if let Some(p) = std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(SPIRV_VAL)).find(|p| p.is_file())) {
+            if let Some(p) = std::env::var_os("PATH").and_then(|p| {
+                std::env::split_paths(&p)
+                    .map(|d| d.join(SPIRV_VAL))
+                    .find(|p| p.is_file())
+            }) {
                 sv.push(p);
             }
         }
@@ -101,21 +128,35 @@ impl Tools {
             .into_iter()
             .find(|p| p.is_file())
             .ok_or(if cfg!(windows) { "spirv-val.exe not found (set NXSHADERS_SPIRV_VAL or VULKAN_SDK)" } else { "spirv-val not found (install spirv-tools, or set NXSHADERS_SPIRV_VAL or VULKAN_SDK)" })?;
-        Ok(Tools { xlate: dunce(xlate), spirv_val })
+        Ok(Tools {
+            xlate: dunce(xlate),
+            spirv_val,
+        })
     }
 
     /// The translator's identity: its source hash (embedded at build) and the executable's own hash.
     pub fn identity(&self) -> Result<String, String> {
-        let out = command(&self.xlate).arg("--source-sha").output().map_err(|e| format!("{}: {e}", self.xlate.display()))?;
+        let out = command(&self.xlate)
+            .arg("--source-sha")
+            .output()
+            .map_err(|e| format!("{}: {e}", self.xlate.display()))?;
         let src = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let bin = std::fs::read(&self.xlate).map_err(|e| e.to_string())?;
         let h = Sha256::digest(&bin);
-        Ok(format!("dmsh_xlate {src} bin {}", h[..8].iter().map(|b| format!("{b:02x}")).collect::<String>()))
+        Ok(format!(
+            "dmsh_xlate {src} bin {}",
+            h[..8]
+                .iter()
+                .map(|b| format!("{b:02x}"))
+                .collect::<String>()
+        ))
     }
 }
 
 fn dunce(p: PathBuf) -> PathBuf {
-    std::fs::canonicalize(&p).map(|c| PathBuf::from(c.to_string_lossy().trim_start_matches(r"\\?\"))).unwrap_or(p)
+    std::fs::canonicalize(&p)
+        .map(|c| PathBuf::from(c.to_string_lossy().trim_start_matches(r"\\?\")))
+        .unwrap_or(p)
 }
 
 /// One translation: the job (its code file already written) and where the output goes.
@@ -128,7 +169,15 @@ pub struct Work {
 pub type Outcome = Result<(), String>;
 
 /// Translate `work` in batches over `jobs` processes into `out`. `progress(done, total)` is called as batches end.
-pub fn translate(tools: &Tools, work: Vec<Work>, out: &Path, jobs: usize, batch: usize, timeout: Duration, progress: &(dyn Fn(usize, usize) + Sync)) -> HashMap<String, Outcome> {
+pub fn translate(
+    tools: &Tools,
+    work: Vec<Work>,
+    out: &Path,
+    jobs: usize,
+    batch: usize,
+    timeout: Duration,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> HashMap<String, Outcome> {
     let total = work.len();
     let queue: Mutex<Vec<Vec<Work>>> = Mutex::new({
         let mut q = vec![];
@@ -145,7 +194,9 @@ pub fn translate(tools: &Tools, work: Vec<Work>, out: &Path, jobs: usize, batch:
     std::thread::scope(|s| {
         for _ in 0..jobs.max(1) {
             s.spawn(|| loop {
-                let Some(b) = queue.lock().unwrap().pop() else { break };
+                let Some(b) = queue.lock().unwrap().pop() else {
+                    break;
+                };
                 let n = seq.fetch_add(1, Ordering::Relaxed);
                 let res = run_batch(tools, &b, out, n, timeout);
                 match res {
@@ -156,7 +207,9 @@ pub fn translate(tools: &Tools, work: Vec<Work>, out: &Path, jobs: usize, batch:
                             let o = match errs.get(&w.key) {
                                 Some(e) => Err(e.clone()),
                                 None if ok => Ok(()),
-                                None => Err("the translator wrote no SPIR-V and gave no reason".into()),
+                                None => {
+                                    Err("the translator wrote no SPIR-V and gave no reason".into())
+                                }
                             };
                             r.insert(w.key.clone(), o);
                         }
@@ -166,7 +219,10 @@ pub fn translate(tools: &Tools, work: Vec<Work>, out: &Path, jobs: usize, batch:
                     }
                     BatchEnd::Died(why) => {
                         if b.len() == 1 {
-                            results.lock().unwrap().insert(b[0].key.clone(), Err(format!("the translator {why}")));
+                            results
+                                .lock()
+                                .unwrap()
+                                .insert(b[0].key.clone(), Err(format!("the translator {why}")));
                             let d = done.fetch_add(1, Ordering::Relaxed) + 1;
                             progress(d, total);
                         } else {
@@ -201,7 +257,11 @@ fn run_batch(tools: &Tools, b: &[Work], out: &Path, n: usize, timeout: Duration)
         .arg(&jp)
         .arg(out)
         .stdout(Stdio::null())
-        .stderr(std::fs::File::create(&errf).map(Stdio::from).unwrap_or(Stdio::null()))
+        .stderr(
+            std::fs::File::create(&errf)
+                .map(Stdio::from)
+                .unwrap_or(Stdio::null()),
+        )
         .spawn();
     let mut child = match child {
         Ok(c) => c,
@@ -238,14 +298,22 @@ fn run_batch(tools: &Tools, b: &[Work], out: &Path, n: usize, timeout: Duration)
         Some(s) if s.success() || s.code() == Some(1) => BatchEnd::Finished(errs),
         Some(s) => {
             let tail: String = stderr.lines().rev().take(3).collect::<Vec<_>>().join(" | ");
-            BatchEnd::Died(format!("exited with {s} ({})", tail.chars().take(200).collect::<String>()))
+            BatchEnd::Died(format!(
+                "exited with {s} ({})",
+                tail.chars().take(200).collect::<String>()
+            ))
         }
     }
 }
 
 /// `spirv-val --target-env vulkan1.3` over each file, `jobs` at a time → path → the validator's first message (None
 /// when valid).
-pub fn validate(tools: &Tools, files: &[PathBuf], jobs: usize, progress: &(dyn Fn(usize, usize) + Sync)) -> HashMap<PathBuf, Option<String>> {
+pub fn validate(
+    tools: &Tools,
+    files: &[PathBuf],
+    jobs: usize,
+    progress: &(dyn Fn(usize, usize) + Sync),
+) -> HashMap<PathBuf, Option<String>> {
     let next = AtomicUsize::new(0);
     let res: Mutex<HashMap<PathBuf, Option<String>>> = Mutex::new(HashMap::new());
     let done = AtomicUsize::new(0);
@@ -254,12 +322,24 @@ pub fn validate(tools: &Tools, files: &[PathBuf], jobs: usize, progress: &(dyn F
             s.spawn(|| loop {
                 let i = next.fetch_add(1, Ordering::Relaxed);
                 let Some(f) = files.get(i) else { break };
-                let r = command(&tools.spirv_val).args(["--target-env", "vulkan1.3"]).arg(f).output();
+                let r = command(&tools.spirv_val)
+                    .args(["--target-env", "vulkan1.3"])
+                    .arg(f)
+                    .output();
                 let v = match r {
                     Ok(o) if o.status.success() => None,
                     Ok(o) => {
-                        let msg = String::from_utf8_lossy(&o.stderr).to_string() + &String::from_utf8_lossy(&o.stdout);
-                        Some(msg.lines().find(|l| l.contains("error")).unwrap_or(msg.lines().next().unwrap_or("invalid")).trim().chars().take(300).collect())
+                        let msg = String::from_utf8_lossy(&o.stderr).to_string()
+                            + &String::from_utf8_lossy(&o.stdout);
+                        Some(
+                            msg.lines()
+                                .find(|l| l.contains("error"))
+                                .unwrap_or(msg.lines().next().unwrap_or("invalid"))
+                                .trim()
+                                .chars()
+                                .take(300)
+                                .collect(),
+                        )
                     }
                     Err(e) => Some(format!("spirv-val did not run: {e}")),
                 };

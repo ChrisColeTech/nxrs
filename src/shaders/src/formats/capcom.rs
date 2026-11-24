@@ -24,7 +24,10 @@ pub struct KpkaEntry {
 /// length, u32 count, a u64 per block (offset in bits 0-41, stored length from 42; a block of the block length is
 /// stored, any other one zstd frame). `read(offset, length)` reads the PAK. → (entries, block length and blocks).
 #[allow(clippy::type_complexity)]
-pub fn kpka_entries(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, label: &str) -> R<(Vec<KpkaEntry>, Option<(u64, Vec<(u64, u64)>)>)> {
+pub fn kpka_entries(
+    read: &dyn Fn(u64, u64) -> R<Vec<u8>>,
+    label: &str,
+) -> R<(Vec<KpkaEntry>, Option<(u64, Vec<(u64, u64)>)>)> {
     let h = read(0, 16)?;
     if h.get(..4) != Some(&KPKA[..]) {
         return Err(format!("{label}: not a KPKA PAK"));
@@ -36,13 +39,28 @@ pub fn kpka_entries(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, label: &str) -> R<(Ve
     let t = read(16, 0x30 * n)?;
     let ents = t
         .chunks_exact(0x30)
-        .map(|e| KpkaEntry { hash: u64_at(e, 0).unwrap(), off: u64_at(e, 8).unwrap(), stored: u64_at(e, 16).unwrap(), len: u64_at(e, 24).unwrap(), attr: u64_at(e, 32).unwrap() })
+        .map(|e| KpkaEntry {
+            hash: u64_at(e, 0).unwrap(),
+            off: u64_at(e, 8).unwrap(),
+            stored: u64_at(e, 16).unwrap(),
+            len: u64_at(e, 24).unwrap(),
+            attr: u64_at(e, 32).unwrap(),
+        })
         .collect();
     let blocks = if feat & KPKA_BLOCKS != 0 {
         let bh = read(16 + 0x30 * n, 8)?;
-        let (bl, nb) = (u32_at(&bh, 0).unwrap() as u64, u32_at(&bh, 4).unwrap() as u64);
+        let (bl, nb) = (
+            u32_at(&bh, 0).unwrap() as u64,
+            u32_at(&bh, 4).unwrap() as u64,
+        );
         let b = read(24 + 0x30 * n, 8 * nb)?;
-        Some((bl, b.chunks_exact(8).map(|x| u64::from_le_bytes(x.try_into().unwrap())).map(|x| (x & ((1 << 42) - 1), x >> 42)).collect()))
+        Some((
+            bl,
+            b.chunks_exact(8)
+                .map(|x| u64::from_le_bytes(x.try_into().unwrap()))
+                .map(|x| (x & ((1 << 42) - 1), x >> 42))
+                .collect(),
+        ))
     } else {
         None
     };
@@ -50,22 +68,39 @@ pub fn kpka_entries(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, label: &str) -> R<(Ve
 }
 
 /// An entry's data, or only its first `head` bytes (as far as a cheap partial decode gives them).
-pub fn kpka_data(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, e: &KpkaEntry, blocks: Option<&(u64, Vec<(u64, u64)>)>, head: Option<usize>, label: &str) -> R<Vec<u8>> {
+pub fn kpka_data(
+    read: &dyn Fn(u64, u64) -> R<Vec<u8>>,
+    e: &KpkaEntry,
+    blocks: Option<&(u64, Vec<(u64, u64)>)>,
+    head: Option<usize>,
+    label: &str,
+) -> R<Vec<u8>> {
     let want = head.map(|h| (h as u64).min(e.len)).unwrap_or(e.len);
     if want > archive::DECODE_LIMIT {
         return Err(format!("{label}: {want:#x} bytes"));
     }
     if e.attr & KPKA_IN_BLOCKS != 0 {
-        let (bl, bs) = blocks.ok_or_else(|| format!("{label}: its data is in blocks, but its PAK has no block table"))?;
+        let (bl, bs) = blocks.ok_or_else(|| {
+            format!("{label}: its data is in blocks, but its PAK has no block table")
+        })?;
         if e.attr & 0xf != 0 {
-            return Err(format!("{label}: compression {} inside blocks is not known", e.attr & 0xf));
+            return Err(format!(
+                "{label}: compression {} inside blocks is not known",
+                e.attr & 0xf
+            ));
         }
         let mut out = vec![];
         let mut i = e.off as usize;
         while (out.len() as u64) < want {
-            let &(off, n) = bs.get(i).ok_or_else(|| format!("{label}: block {i} is past the block table"))?;
+            let &(off, n) = bs
+                .get(i)
+                .ok_or_else(|| format!("{label}: block {i} is past the block table"))?;
             let raw = read(off, n)?;
-            out.extend(if n == *bl { raw } else { archive::unzstd(&raw, &Default::default(), label)? });
+            out.extend(if n == *bl {
+                raw
+            } else {
+                archive::unzstd(&raw, &Default::default(), label)?
+            });
             i += 1;
         }
         out.truncate(want as usize);
@@ -77,12 +112,14 @@ pub fn kpka_data(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, e: &KpkaEntry, blocks: O
         1 => {
             let mut z = flate2::Decompress::new(false);
             let mut out = vec![0u8; want as usize];
-            z.decompress(&raw, &mut out, flate2::FlushDecompress::Finish).map_err(|x| format!("{label}: deflate: {x}"))?;
+            z.decompress(&raw, &mut out, flate2::FlushDecompress::Finish)
+                .map_err(|x| format!("{label}: deflate: {x}"))?;
             out.truncate(z.total_out() as usize);
             Ok(out)
         }
         2 => match head {
-            Some(h) => archive::zstd_peek(&raw, h).ok_or_else(|| format!("{label}: zstd frame does not decode")),
+            Some(h) => archive::zstd_peek(&raw, h)
+                .ok_or_else(|| format!("{label}: zstd frame does not decode")),
             None => archive::unzstd(&raw, &Default::default(), label),
         },
         c => Err(format!("{label}: compression {c} is not known")),
@@ -91,8 +128,19 @@ pub fn kpka_data(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, e: &KpkaEntry, blocks: O
 
 /// (first entry, entry length, the stage record's lengths at, its control section at): Monster Hunter Rise / Ghost
 /// Trick, PRAGMATA, Resident Evil 4.
-const SDF_LAYOUTS: [(usize, usize, usize, usize); 3] = [(0x10, 0x108, 0, 8), (0x18, 0x110, 8, 0x58), (0x18, 0x110, 8, 0x60)];
-const SDF_STAGES: [Stage; 6] = [Stage::Vs, Stage::Hs, Stage::Ds, Stage::Gs, Stage::Ps, Stage::Cs];
+const SDF_LAYOUTS: [(usize, usize, usize, usize); 3] = [
+    (0x10, 0x108, 0, 8),
+    (0x18, 0x110, 8, 0x58),
+    (0x18, 0x110, 8, 0x60),
+];
+const SDF_STAGES: [Stage; 6] = [
+    Stage::Vs,
+    Stage::Hs,
+    Stage::Ds,
+    Stage::Gs,
+    Stage::Ps,
+    Stage::Cs,
+];
 
 /// RE Engine shader definitions ('SDF\0'): u16 version 1, u16 entry count, entries in one of SDF_LAYOUTS (the one
 /// whose every stage offset leads to a control section), each with six u64 stage offsets at +0x10 (vertex, hull,
@@ -109,12 +157,24 @@ pub fn sdf(d: &[u8], label: &str) -> R<Vec<Found>> {
         if base + size * n > d.len() {
             return false;
         }
-        let offs: Vec<usize> = (0..n).flat_map(|i| (0..6).map(move |k| u64_at(d, base + size * i + 0x10 + 8 * k).unwrap() as usize)).filter(|&o| o != 0).collect();
-        !offs.is_empty() && offs.iter().all(|&o| d.get(o + at..o + at + 4) == Some(&CTL_MAGIC[..]))
+        let offs: Vec<usize> = (0..n)
+            .flat_map(|i| {
+                (0..6).map(move |k| u64_at(d, base + size * i + 0x10 + 8 * k).unwrap() as usize)
+            })
+            .filter(|&o| o != 0)
+            .collect();
+        !offs.is_empty()
+            && offs
+                .iter()
+                .all(|&o| d.get(o + at..o + at + 4) == Some(&CTL_MAGIC[..]))
     };
     let lays: Vec<_> = SDF_LAYOUTS.iter().filter(|l| fits(l)).collect();
     if lays.len() != 1 {
-        return Err(format!("{label}: the SDF entries fit {} of the {} known layouts", lays.len(), SDF_LAYOUTS.len()));
+        return Err(format!(
+            "{label}: the SDF entries fit {} of the {} known layouts",
+            lays.len(),
+            SDF_LAYOUTS.len()
+        ));
     }
     let &(base, size, lens, at) = lays[0];
     let mut out = vec![];
@@ -125,7 +185,10 @@ pub fn sdf(d: &[u8], label: &str) -> R<Vec<Found>> {
                 continue;
             }
             let w = format!("{label} SDF entry {i} {}", slot.name());
-            let (nc, nk) = (need32(d, o + lens, &w)? as u64, need32(d, o + lens + 4, &w)? as u64);
+            let (nc, nk) = (
+                need32(d, o + lens, &w)? as u64,
+                need32(d, o + lens + 4, &w)? as u64,
+            );
             let b = span(d, (o + at) as u64, nc + nk, &w)?;
             let (ctl, code) = b.split_at(nc as usize);
             let mut st = slot;
@@ -143,7 +206,10 @@ pub fn sdf(d: &[u8], label: &str) -> R<Vec<Found>> {
             if let Some(why) = why {
                 return Err(format!("{w}: {why}"));
             }
-            out.push(Found::new(format!("{label}#SDF#var{i}#{}", st.name()), st, ctl, code).grouped(format!("{label}#SDF#var{i}")));
+            out.push(
+                Found::new(format!("{label}#SDF#var{i}#{}", st.name()), st, ctl, code)
+                    .grouped(format!("{label}#SDF#var{i}")),
+            );
         }
     }
     Ok(out)
@@ -156,12 +222,18 @@ pub fn ocio(d: &[u8], label: &str) -> R<Vec<Found>> {
     for c in memchr::memmem::find_iter(d, &CTL_MAGIC) {
         for hl in [0x58usize, 0x60] {
             let Some(h) = c.checked_sub(hl) else { continue };
-            let (nc, nk) = (u32_at(d, h + 8).unwrap() as usize, u32_at(d, h + 12).unwrap() as usize);
-            let (Some(ctl), Some(code)) = (d.get(c..c + nc), d.get(c + nc..c + nc + nk)) else { continue };
+            let (nc, nk) = (
+                u32_at(d, h + 8).unwrap() as usize,
+                u32_at(d, h + 12).unwrap() as usize,
+            );
+            let (Some(ctl), Some(code)) = (d.get(c..c + nc), d.get(c + nc..c + nc + nk)) else {
+                continue;
+            };
             if nc == 0 || !nvn2_ctl(ctl) || u32_at(ctl, 0x44) != Some(nk as u32) {
                 continue;
             }
-            let st = nvn2_stage(ctl, code).ok_or_else(|| format!("{label} OCIO record @{h:#x}: no stage"))?;
+            let st = nvn2_stage(ctl, code)
+                .ok_or_else(|| format!("{label} OCIO record @{h:#x}: no stage"))?;
             if let Some(why) = check(st, ctl, code) {
                 return Err(format!("{label} OCIO record @{h:#x}: {why}"));
             }
@@ -173,7 +245,12 @@ pub fn ocio(d: &[u8], label: &str) -> R<Vec<Found>> {
 }
 
 /// A PAK entry's bytes (scan.rs reads entries in groups): its shaders when it is an SDF or OCIO file.
-pub fn kpka_member(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, e: &KpkaEntry, blocks: Option<&(u64, Vec<(u64, u64)>)>, label: &str) -> R<Vec<Found>> {
+pub fn kpka_member(
+    read: &dyn Fn(u64, u64) -> R<Vec<u8>>,
+    e: &KpkaEntry,
+    blocks: Option<&(u64, Vec<(u64, u64)>)>,
+    label: &str,
+) -> R<Vec<Found>> {
     if e.len < 0x10 {
         return Ok(vec![]);
     }
@@ -193,7 +270,9 @@ pub const MTARC: &[u8; 4] = b"ARC\0";
 pub fn mtarc_members(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
     let (ver, n) = (need16(d, 4, label)?, need16(d, 6, label)? as usize);
     if ver != 7 {
-        return Err(format!("{label}: ARC version {ver}: only version 7 is known"));
+        return Err(format!(
+            "{label}: ARC version {ver}: only version 7 is known"
+        ));
     }
     let rank = |width: usize| -> i32 {
         let step = width + 16;
@@ -203,7 +282,11 @@ pub fn mtarc_members(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
         }
         let mut data = false;
         for o in (8..end).step_by(step) {
-            let (st, sz, off) = (u32_at(d, o + width + 4).unwrap() as usize, u32_at(d, o + width + 8).unwrap() & 0x1fff_ffff, u32_at(d, o + width + 12).unwrap() as usize);
+            let (st, sz, off) = (
+                u32_at(d, o + width + 4).unwrap() as usize,
+                u32_at(d, o + width + 8).unwrap() & 0x1fff_ffff,
+                u32_at(d, o + width + 12).unwrap() as usize,
+            );
             if st == 0 && sz == 0 && off == 0 {
                 continue;
             }
@@ -220,21 +303,39 @@ pub fn mtarc_members(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
     } else {
         let short = rank(64);
         if wide < 0 && short < 0 {
-            return Err(format!("{label}: ARC v7 has no complete directory with in-bounds members"));
+            return Err(format!(
+                "{label}: ARC v7 has no complete directory with in-bounds members"
+            ));
         }
-        if wide >= short { 128 } else { 64 }
+        if wide >= short {
+            128
+        } else {
+            64
+        }
     };
     let mut out = vec![];
     for i in 0..n {
         let o = 8 + i * (width + 16);
         let p = &d[o..o + width];
-        let path = String::from_utf8_lossy(&p[..memchr::memchr(0, p).unwrap_or(width)]).replace('\\', "/");
-        let (st, sz, off) = (u32_at(d, o + width + 4).unwrap() as usize, (u32_at(d, o + width + 8).unwrap() & 0x1fff_ffff) as usize, u32_at(d, o + width + 12).unwrap() as usize);
+        let path =
+            String::from_utf8_lossy(&p[..memchr::memchr(0, p).unwrap_or(width)]).replace('\\', "/");
+        let (st, sz, off) = (
+            u32_at(d, o + width + 4).unwrap() as usize,
+            (u32_at(d, o + width + 8).unwrap() & 0x1fff_ffff) as usize,
+            u32_at(d, o + width + 12).unwrap() as usize,
+        );
         let w = format!("{label}#{path}");
         let raw = span(d, off as u64, st as u64, &w)?;
-        let data = if st != sz { archive::unzlib(raw, &w)? } else { raw.to_vec() };
+        let data = if st != sz {
+            archive::unzlib(raw, &w)?
+        } else {
+            raw.to_vec()
+        };
         if data.len() != sz {
-            return Err(format!("{w}: {:#x} bytes, the entry says {sz:#x}", data.len()));
+            return Err(format!(
+                "{w}: {:#x} bytes, the entry says {sz:#x}",
+                data.len()
+            ));
         }
         out.push((path, data));
     }
@@ -245,7 +346,8 @@ pub fn mtarc_members(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
 /// area and its control section (code first in The Great Ace Attorney Chronicles, control first in Ultra Street
 /// Fighter II); every one starts where the previous one ended.
 pub fn mtspk(d: &[u8], label: &str) -> R<Vec<Found>> {
-    let mut c = memchr::memmem::find(d, &CTL_MAGIC).ok_or_else(|| format!("{label} SPK: no shader control section"))?;
+    let mut c = memchr::memmem::find(d, &CTL_MAGIC)
+        .ok_or_else(|| format!("{label} SPK: no shader control section"))?;
     let nk = need32(d, c + 0x704, label)? as usize;
     let control_first = c < nk || d.get(c - nk..c - nk + 4) != Some(&GFX_MAGIC[..]);
     let mut out = vec![];
@@ -254,27 +356,55 @@ pub fn mtspk(d: &[u8], label: &str) -> R<Vec<Found>> {
         if c + 0x708 > d.len() || d[c..c + 4] != CTL_MAGIC {
             return Err(format!("{label} SPK: no complete control header at {c:#x}"));
         }
-        let (nc, nk) = (u32_at(d, c + 0x20).unwrap() as usize, u32_at(d, c + 0x704).unwrap() as usize);
-        let g = if control_first { Some(c + nc) } else { c.checked_sub(nk) };
-        let Some(g) = g.filter(|&g| nc >= 0x708 && c + nc <= d.len() && g + nk <= d.len() && d.get(g..g + 4) == Some(&GFX_MAGIC[..])) else {
-            return Err(format!("{label} SPK: no matching graphics code area for control at {c:#x}"));
+        let (nc, nk) = (
+            u32_at(d, c + 0x20).unwrap() as usize,
+            u32_at(d, c + 0x704).unwrap() as usize,
+        );
+        let g = if control_first {
+            Some(c + nc)
+        } else {
+            c.checked_sub(nk)
+        };
+        let Some(g) = g.filter(|&g| {
+            nc >= 0x708
+                && c + nc <= d.len()
+                && g + nk <= d.len()
+                && d.get(g..g + 4) == Some(&GFX_MAGIC[..])
+        }) else {
+            return Err(format!(
+                "{label} SPK: no matching graphics code area for control at {c:#x}"
+            ));
         };
         let start = if control_first { c } else { g };
         if end.is_some_and(|e| e != start) {
             return Err(format!("{label} SPK: noncontiguous shader at {start:#x}"));
         }
         let (ctl, code) = (&d[c..c + nc], &d[g..g + nk]);
-        let st = sph_stage(code).ok_or_else(|| format!("{label} SPK @{start:#x}: no stage in the SPH"))?;
+        let st = sph_stage(code)
+            .ok_or_else(|| format!("{label} SPK @{start:#x}: no stage in the SPH"))?;
         if let Some(why) = check(st, ctl, code) {
             return Err(format!("{label} SPK @{start:#x}: {why}"));
         }
-        out.push(Found::new(format!("{label}#MTSPK@{start:#x}"), st, ctl, code));
+        out.push(Found::new(
+            format!("{label}#MTSPK@{start:#x}"),
+            st,
+            ctl,
+            code,
+        ));
         let e = if control_first { g + nk } else { c + nc };
         if e == d.len() {
             return Ok(out);
         }
         end = Some(e);
-        c = if control_first { e } else { memchr::memmem::find(&d[e..], &CTL_MAGIC).map(|x| x + e).ok_or_else(|| format!("{label} SPK: the last shader ends at {e:#x}, before the end"))? };
+        c = if control_first {
+            e
+        } else {
+            memchr::memmem::find(&d[e..], &CTL_MAGIC)
+                .map(|x| x + e)
+                .ok_or_else(|| {
+                    format!("{label} SPK: the last shader ends at {e:#x}, before the end")
+                })?
+        };
     }
 }
 
@@ -329,7 +459,13 @@ mod tests {
         let (ents, blocks) = kpka_entries(&read, "/re_chunk_000.pak").unwrap();
         assert!(blocks.is_none());
         let f = kpka_member(&read, &ents[0], None, "/re_chunk_000.pak#1234").unwrap();
-        assert_eq!(f.iter().map(|f| (f.stage, f.key())).collect::<Vec<_>>(), vec![(Stage::Vs, skey(&vs.0, &vs.1)), (Stage::Ps, skey(&ps.0, &ps.1))]);
+        assert_eq!(
+            f.iter().map(|f| (f.stage, f.key())).collect::<Vec<_>>(),
+            vec![
+                (Stage::Vs, skey(&vs.0, &vs.1)),
+                (Stage::Ps, skey(&ps.0, &ps.1))
+            ]
+        );
         assert_eq!(f[0].group, f[1].group);
     }
 
@@ -358,6 +494,9 @@ mod tests {
         }
         d.extend_from_slice(&z);
         let f = mtarc(&d, "/root.arc").unwrap();
-        assert_eq!(f.iter().map(|f| f.key()).collect::<Vec<_>>(), vec![skey(&vs.0, &vs.1), skey(&ps.0, &ps.1)]);
+        assert_eq!(
+            f.iter().map(|f| f.key()).collect::<Vec<_>>(),
+            vec![skey(&vs.0, &vs.1), skey(&ps.0, &ps.1)]
+        );
     }
 }

@@ -35,22 +35,33 @@ fn lz4_chained(d: &[u8], size: usize, chunk: usize, label: &str) -> R<Vec<u8>> {
         pos += 4;
         let want = chunk.min(size - out.len());
         if stored == 0 || stored > d.len() - pos {
-            return Err(format!("{label}: LZ4 block at {:#x} runs past the member", pos - 4));
+            return Err(format!(
+                "{label}: LZ4 block at {:#x} runs past the member",
+                pos - 4
+            ));
         }
         if stored == want {
             out.extend_from_slice(&d[pos..pos + stored]);
         } else {
             let dict = &out[out.len().saturating_sub(chunk)..];
-            let b = lz4_flex::block::decompress_with_dict(&d[pos..pos + stored], want, dict).map_err(|e| format!("{label}: LZ4 block at {:#x}: {e}", pos - 4))?;
+            let b = lz4_flex::block::decompress_with_dict(&d[pos..pos + stored], want, dict)
+                .map_err(|e| format!("{label}: LZ4 block at {:#x}: {e}", pos - 4))?;
             if b.len() != want {
-                return Err(format!("{label}: LZ4 block makes {} of {want} bytes", b.len()));
+                return Err(format!(
+                    "{label}: LZ4 block makes {} of {want} bytes",
+                    b.len()
+                ));
             }
             out.extend(b);
         }
         pos += stored;
     }
     if pos != d.len() || out.len() != size {
-        return Err(format!("{label}: the LZ4 blocks make {} of {size} bytes from {pos} of {}", out.len(), d.len()));
+        return Err(format!(
+            "{label}: the LZ4 blocks make {} of {size} bytes from {pos} of {}",
+            out.len(),
+            d.len()
+        ));
     }
     Ok(out)
 }
@@ -69,19 +80,35 @@ pub fn pkz_entries(read: Read, label: &str) -> R<Vec<PkzEntry>> {
     }
     let ver = u32_at(&h, 4).unwrap();
     if ver != 0x10000 && ver != 0x20000 {
-        return Err(format!("{label}: PKZ version {ver:#x}: only 0x10000 and 0x20000 are known"));
+        return Err(format!(
+            "{label}: PKZ version {ver:#x}: only 0x10000 and 0x20000 are known"
+        ));
     }
-    let (n, eo, nl) = (u32_at(&h, 16).unwrap() as u64, u32_at(&h, 20).unwrap() as u64, u32_at(&h, 24).unwrap() as u64);
+    let (n, eo, nl) = (
+        u32_at(&h, 16).unwrap() as u64,
+        u32_at(&h, 20).unwrap() as u64,
+        u32_at(&h, 24).unwrap() as u64,
+    );
     let t = read(eo, 0x20 * n + nl)?;
     let nm = |o: u32| -> String {
         let a = 0x20 * n as usize + o as usize;
-        let e = t.get(a..).and_then(|s| memchr::memchr(0, s)).map(|e| a + e).unwrap_or(t.len());
+        let e = t
+            .get(a..)
+            .and_then(|s| memchr::memchr(0, s))
+            .map(|e| a + e)
+            .unwrap_or(t.len());
         String::from_utf8_lossy(t.get(a..e).unwrap_or(&[])).into_owned()
     };
     Ok((0..n as usize)
         .map(|i| {
             let o = 0x20 * i;
-            (nm(u32_at(&t, o).unwrap_or(0)), nm(u32_at(&t, o + 4).unwrap_or(0)), u64_at(&t, o + 16).unwrap_or(0), u64_at(&t, o + 24).unwrap_or(0), u64_at(&t, o + 8).unwrap_or(0))
+            (
+                nm(u32_at(&t, o).unwrap_or(0)),
+                nm(u32_at(&t, o + 4).unwrap_or(0)),
+                u64_at(&t, o + 16).unwrap_or(0),
+                u64_at(&t, o + 24).unwrap_or(0),
+                u64_at(&t, o + 8).unwrap_or(0),
+            )
         })
         .collect())
 }
@@ -95,7 +122,11 @@ pub fn pkz_read(read: Read, e: &PkzEntry, label: &str) -> R<Vec<u8>> {
         x => return Err(format!("{label}: compression {x:?} is not known")),
     };
     if d.len() as u64 != e.4 {
-        return Err(format!("{label}: {} bytes decoded, the entry says {}", d.len(), e.4));
+        return Err(format!(
+            "{label}: {} bytes decoded, the entry says {}",
+            d.len(),
+            e.4
+        ));
     }
     Ok(d)
 }
@@ -126,8 +157,15 @@ fn rpf_decrypt(key: &[u8; 32], data: &[u8]) -> Vec<u8> {
 }
 
 fn rpf_is_root(d: &[u8]) -> bool {
-    let be = |o: usize| d.get(o..o + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()));
-    d.len() >= 16 && be(0) == Some(0) && be(4) == Some(0) && be(8) == Some(0x8000_0001) && be(12).is_some_and(|c| c > 0)
+    let be = |o: usize| {
+        d.get(o..o + 4)
+            .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+    };
+    d.len() >= 16
+        && be(0) == Some(0)
+        && be(4) == Some(0)
+        && be(8) == Some(0x8000_0001)
+        && be(12).is_some_and(|c| c > 0)
 }
 
 /// (entry count, name table offset, encrypted), or None when `h` (the first 16 bytes) is no RPF6.
@@ -140,7 +178,13 @@ pub fn rpf_header(h: &[u8]) -> Option<(u32, u64, bool)> {
 }
 
 /// The key setup's first instructions: cmp w1, #0; mov w8, #-3; csel w8, w8, w1, eq; cmn w8, #3; str w8, [x0]
-const RPF_SETUP: [u32; 5] = [0x7100_003f, 0x1280_0048, 0x1a81_0108, 0x3100_0d1f, 0xb900_0008];
+const RPF_SETUP: [u32; 5] = [
+    0x7100_003f,
+    0x1280_0048,
+    0x1a81_0108,
+    0x3100_0d1f,
+    0xb900_0008,
+];
 
 /// Candidate keys the key setup in main's code builds: after its b.ne it stores 64 bytes of 16-byte constants (adrp,
 /// ldr q) at x0+8; those are eight big-endian u32 key words zero-extended to 64 bits.
@@ -150,7 +194,11 @@ fn rpf_setup_keys(img: &[u8], text: (usize, usize)) -> Vec<[u8; 32]> {
     let end = (ts + tl).min(img.len());
     let mut out = vec![];
     let mut from = ts;
-    while let Some(at) = img.get(from..end).and_then(|s| memchr::memmem::find(s, &setup)).map(|p| p + from) {
+    while let Some(at) = img
+        .get(from..end)
+        .and_then(|s| memchr::memmem::find(s, &setup))
+        .map(|p| p + from)
+    {
         from = at + 4;
         let mut page: std::collections::HashMap<u32, i64> = Default::default();
         let mut ctx: std::collections::HashMap<u32, i64> = [(0u32, 0i64)].into_iter().collect();
@@ -162,7 +210,11 @@ fn rpf_setup_keys(img: &[u8], text: (usize, usize)) -> Vec<[u8; 32]> {
             let (rd, rn) = (w & 31, (w >> 5) & 31);
             if w & 0x9f00_0000 == 0x9000_0000 {
                 let imm = ((w >> 29) & 3) as i64 | ((((w >> 5) & 0x7ffff) as i64) << 2);
-                let imm = if imm & (1 << 20) != 0 { imm - (1 << 21) } else { imm };
+                let imm = if imm & (1 << 20) != 0 {
+                    imm - (1 << 21)
+                } else {
+                    imm
+                };
                 page.insert(rd, ((a as i64) & !0xfff) + (imm << 12));
                 ctx.remove(&rd);
             } else if w & 0xffe0_ffe0 == 0xaa00_03e0 && ctx.contains_key(&((w >> 16) & 31)) {
@@ -174,28 +226,41 @@ fn rpf_setup_keys(img: &[u8], text: (usize, usize)) -> Vec<[u8; 32]> {
             } else if w & 0xffc0_0000 == 0x3dc0_0000 && page.contains_key(&rn) {
                 let o = (page[&rn] + ((w >> 10) & 0xfff) as i64 * 16) as usize;
                 q.insert(rd, img.get(o..o + 16).unwrap_or(&[]).to_vec());
-            } else if w & 0xffe0_0c00 == 0x3c80_0c00 && ctx.contains_key(&rn) && q.contains_key(&rd) {
+            } else if w & 0xffe0_0c00 == 0x3c80_0c00 && ctx.contains_key(&rn) && q.contains_key(&rd)
+            {
                 let imm = ((w >> 12) & 0x1ff) as i64;
                 let v = ctx[&rn] + if imm & 0x100 != 0 { imm - 0x200 } else { imm };
                 ctx.insert(rn, v);
                 mem.insert(v, q[&rd].clone());
-            } else if w & 0xffc0_0000 == 0x3d80_0000 && ctx.contains_key(&rn) && q.contains_key(&rd) {
+            } else if w & 0xffc0_0000 == 0x3d80_0000 && ctx.contains_key(&rn) && q.contains_key(&rd)
+            {
                 mem.insert(ctx[&rn] + ((w >> 10) & 0xfff) as i64 * 16, q[&rd].clone());
-            } else if w & 0xffc0_0000 == 0xad00_0000 && ctx.contains_key(&rn) && q.contains_key(&rd) && q.contains_key(&((w >> 10) & 31)) {
+            } else if w & 0xffc0_0000 == 0xad00_0000
+                && ctx.contains_key(&rn)
+                && q.contains_key(&rd)
+                && q.contains_key(&((w >> 10) & 31))
+            {
                 let imm = ((w >> 15) & 0x7f) as i64;
                 let o = ctx[&rn] + if imm & 0x40 != 0 { imm - 0x80 } else { imm } * 16;
                 mem.insert(o, q[&rd].clone());
                 mem.insert(o + 16, q[&((w >> 10) & 31)].clone());
-            } else if matches!(w & 0xfc00_0000, 0x1400_0000 | 0x9400_0000) || w & 0xff00_0010 == 0x5400_0000 {
+            } else if matches!(w & 0xfc00_0000, 0x1400_0000 | 0x9400_0000)
+                || w & 0xff00_0010 == 0x5400_0000
+            {
                 break;
             }
             a += 4;
         }
         if (0..4).all(|k| mem.get(&(8 + 16 * k)).is_some_and(|v| v.len() == 16)) {
-            let words: Vec<u64> = (0..4).flat_map(|k| {
-                let v = &mem[&(8 + 16 * k)];
-                [u64::from_le_bytes(v[..8].try_into().unwrap()), u64::from_le_bytes(v[8..].try_into().unwrap())]
-            }).collect();
+            let words: Vec<u64> = (0..4)
+                .flat_map(|k| {
+                    let v = &mem[&(8 + 16 * k)];
+                    [
+                        u64::from_le_bytes(v[..8].try_into().unwrap()),
+                        u64::from_le_bytes(v[8..].try_into().unwrap()),
+                    ]
+                })
+                .collect();
             if words.iter().all(|v| v >> 32 == 0) {
                 let mut k = [0u8; 32];
                 for (i, v) in words.iter().enumerate() {
@@ -223,7 +288,10 @@ pub fn rpf_find_key(img: &[u8], segs: &[(usize, usize)], first: &[u8]) -> Option
         while a + 32 < end {
             let w: [u8; 32] = img[a..a + 32].try_into().unwrap();
             let mut seen = [false; 256];
-            let distinct = w.iter().filter(|&&b| !std::mem::replace(&mut seen[b as usize], true)).count();
+            let distinct = w
+                .iter()
+                .filter(|&&b| !std::mem::replace(&mut seen[b as usize], true))
+                .count();
             if distinct >= 24 && rpf_is_root(&rpf_decrypt(&w, first)) {
                 return Some(w);
             }
@@ -245,7 +313,8 @@ pub struct RpfFile {
 }
 
 pub fn rpf_files(read: Read, size: u64, key: Option<&[u8; 32]>, label: &str) -> R<Vec<RpfFile>> {
-    let (n, names_at, enc) = rpf_header(&read(0, 16)?).ok_or_else(|| format!("{label}: no RPF6 archive"))?;
+    let (n, names_at, enc) =
+        rpf_header(&read(0, 16)?).ok_or_else(|| format!("{label}: no RPF6 archive"))?;
     if names_at > size {
         return Err(format!("{label}: the name table lies past the end"));
     }
@@ -257,10 +326,22 @@ pub fn rpf_files(read: Read, size: u64, key: Option<&[u8; 32]>, label: &str) -> 
         nt = rpf_decrypt(k, &nt);
     }
     if !rpf_is_root(&t) {
-        return Err(format!("{label}: the first entry is no root directory (wrong key?)"));
+        return Err(format!(
+            "{label}: the first entry is no root directory (wrong key?)"
+        ));
     }
     let be = |d: &[u8], o: usize| u32::from_be_bytes(d[o..o + 4].try_into().unwrap());
-    let raw: Vec<[u32; 5]> = (0..n as usize).map(|i| [be(&t, 20 * i), be(&t, 20 * i + 4), be(&t, 20 * i + 8), be(&t, 20 * i + 12), be(&t, 20 * i + 16)]).collect();
+    let raw: Vec<[u32; 5]> = (0..n as usize)
+        .map(|i| {
+            [
+                be(&t, 20 * i),
+                be(&t, 20 * i + 4),
+                be(&t, 20 * i + 8),
+                be(&t, 20 * i + 12),
+                be(&t, 20 * i + 16),
+            ]
+        })
+        .collect();
     let mut names: std::collections::HashMap<u32, String> = Default::default();
     let mut s = 0;
     for (i, &b) in nt.iter().enumerate() {
@@ -275,25 +356,54 @@ pub fn rpf_files(read: Read, size: u64, key: Option<&[u8; 32]>, label: &str) -> 
         }
     }
     let mut files = vec![];
-    fn walk(raw: &[[u32; 5]], names: &std::collections::HashMap<u32, String>, i: usize, prefix: &str, files: &mut Vec<RpfFile>, depth: usize, label: &str) -> R<()> {
+    fn walk(
+        raw: &[[u32; 5]],
+        names: &std::collections::HashMap<u32, String>,
+        i: usize,
+        prefix: &str,
+        files: &mut Vec<RpfFile>,
+        depth: usize,
+        label: &str,
+    ) -> R<()> {
         if depth > 64 {
             return Err(format!("{label}: directories nested too deep"));
         }
         let [h, a, b, c, _] = raw[i];
-        let name = names.get(&h).cloned().unwrap_or_else(|| format!("#{h:08x}"));
+        let name = names
+            .get(&h)
+            .cloned()
+            .unwrap_or_else(|| format!("#{h:08x}"));
         if b & 0x8000_0000 != 0 {
             let (first, count) = ((b & 0x7fff_ffff) as usize, c as usize);
             if first + count > raw.len() {
                 return Err(format!("{label}: directory entry {i} runs past the table"));
             }
-            let p = if i != 0 { format!("{prefix}{name}/") } else { String::new() };
+            let p = if i != 0 {
+                format!("{prefix}{name}/")
+            } else {
+                String::new()
+            };
             for j in first..first + count {
                 walk(raw, names, j, &p, files, depth + 1, label)?;
             }
         } else if c & 0x8000_0000 != 0 {
-            files.push(RpfFile { name: format!("{prefix}{name}"), off: (b & 0x7fff_ff00) as u64 * 8, stored: (a & 0x7fff_ffff) as u64, size: None, comp: c & 0x4000_0000 != 0, rflags: Some(c) });
+            files.push(RpfFile {
+                name: format!("{prefix}{name}"),
+                off: (b & 0x7fff_ff00) as u64 * 8,
+                stored: (a & 0x7fff_ffff) as u64,
+                size: None,
+                comp: c & 0x4000_0000 != 0,
+                rflags: Some(c),
+            });
         } else {
-            files.push(RpfFile { name: format!("{prefix}{name}"), off: (b & 0x7fff_ffff) as u64 * 8, stored: (a & 0x7fff_ffff) as u64, size: Some((c & 0x3fff_ffff) as u64), comp: c & 0x4000_0000 != 0, rflags: None });
+            files.push(RpfFile {
+                name: format!("{prefix}{name}"),
+                off: (b & 0x7fff_ffff) as u64 * 8,
+                stored: (a & 0x7fff_ffff) as u64,
+                size: Some((c & 0x3fff_ffff) as u64),
+                comp: c & 0x4000_0000 != 0,
+                rflags: None,
+            });
         }
         Ok(())
     }
@@ -305,7 +415,11 @@ fn rpf_unpack(d: &[u8]) -> Option<Vec<u8>> {
     if d.starts_with(&archive::ZSTD_MAGIC) {
         return unzstd(d, "").ok();
     }
-    if d.len() >= 2 && d[0] & 0xf == 8 && d[0] >> 4 <= 7 && ((d[0] as u32) << 8 | d[1] as u32) % 31 == 0 {
+    if d.len() >= 2
+        && d[0] & 0xf == 8
+        && d[0] >> 4 <= 7
+        && ((d[0] as u32) << 8 | d[1] as u32) % 31 == 0
+    {
         let mut out = vec![];
         std::io::Read::read_to_end(&mut flate2::read::ZlibDecoder::new(d), &mut out).ok()?;
         return Some(out);
@@ -319,10 +433,15 @@ pub fn rpf_read(read: Read, e: &RpfFile, key: Option<&[u8; 32]>, label: &str) ->
         let h = d.get(..4).unwrap_or(&[]);
         let rsc85 = h == b"RSC\x85";
         if h != b"RSC\x05" && !rsc85 {
-            return Err(format!("{label}: a resource entry, but no RSC5 / RSC85 header at {:#x}", e.off));
+            return Err(format!(
+                "{label}: a resource entry, but no RSC5 / RSC85 header at {:#x}",
+                e.off
+            ));
         }
         if u32_at(&d, 8) != Some(rf) {
-            return Err(format!("{label}: the resource header's flags differ from the entry's"));
+            return Err(format!(
+                "{label}: the resource header's flags differ from the entry's"
+            ));
         }
         d = d[if rsc85 { 16 } else { 12 }..].to_vec();
     }
@@ -347,7 +466,10 @@ pub fn rpf_read(read: Read, e: &RpfFile, key: Option<&[u8; 32]>, label: &str) ->
     };
     if let Some(s) = e.size {
         if u.len() as u64 != s {
-            return Err(format!("{label}: {} bytes decoded, the entry says {s}", u.len()));
+            return Err(format!(
+                "{label}: {} bytes decoded, the entry says {s}",
+                u.len()
+            ));
         }
     }
     Ok(u)
@@ -358,24 +480,40 @@ pub fn rpf_read(read: Read, e: &RpfFile, key: Option<&[u8; 32]>, label: &str) ->
 /// Its members (stored or one zlib stream each), from the index beside the data. → (name hash, data)
 pub fn d11_members(idx: &[u8], d: &[u8], label: &str) -> R<Vec<(u32, Vec<u8>)>> {
     if idx.len() < 12 {
-        return Err(format!("{label}: the pack index is cut short ({} bytes)", idx.len()));
+        return Err(format!(
+            "{label}: the pack index is cut short ({} bytes)",
+            idx.len()
+        ));
     }
     let (ver, n) = (u32_at(idx, 0).unwrap(), u32_at(idx, 8).unwrap() as usize);
     if ver != 3 {
-        return Err(format!("{label}: pack index version {ver}: only 3 is known"));
+        return Err(format!(
+            "{label}: pack index version {ver}: only 3 is known"
+        ));
     }
     if 12 + 16 * n > idx.len() {
-        return Err(format!("{label}: the pack index lists {n} members but holds {}", (idx.len() - 12) / 16));
+        return Err(format!(
+            "{label}: the pack index lists {n} members but holds {}",
+            (idx.len() - 12) / 16
+        ));
     }
     let mut out = vec![];
     for k in 0..n {
         let o = 12 + 16 * k;
-        let (size, stored, off, h) = (u32_at(idx, o).unwrap() as usize, u32_at(idx, o + 4).unwrap() as u64, u32_at(idx, o + 8).unwrap() as u64, u32_at(idx, o + 12).unwrap());
+        let (size, stored, off, h) = (
+            u32_at(idx, o).unwrap() as usize,
+            u32_at(idx, o + 4).unwrap() as u64,
+            u32_at(idx, o + 8).unwrap() as u64,
+            u32_at(idx, o + 12).unwrap(),
+        );
         let m = span(d, off, stored, &format!("{label}: member {k}"))?;
         let m = if stored as usize != size {
             let x = inflate(m, &format!("{label}: member {k} ({h:08x})"))?;
             if x.len() != size {
-                return Err(format!("{label}: member {k} ({h:08x}) inflates to {} bytes, the index says {size}", x.len()));
+                return Err(format!(
+                    "{label}: member {k} ({h:08x}) inflates to {} bytes, the index says {size}",
+                    x.len()
+                ));
             }
             x
         } else {
@@ -394,30 +532,66 @@ pub const UBIART_IPK: [u8; 4] = [0x50, 0xec, 0x12, 0xba];
 pub fn ipk_fxb(read: Read, label: &str) -> R<Vec<(String, Vec<u8>)>> {
     let h = read(0, 0x38)?;
     if h.len() < 0x38 {
-        return Err(format!("{label}: {} bytes, shorter than a UbiArt IPK header (0x38)", h.len()));
+        return Err(format!(
+            "{label}: {} bytes, shorter than a UbiArt IPK header (0x38)",
+            h.len()
+        ));
     }
-    let be = |d: &[u8], o: usize| d.get(o..o + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()));
-    let (ver, base, n) = (be(&h, 4).unwrap(), be(&h, 12).unwrap() as u64, be(&h, 16).unwrap() as usize);
+    let be = |d: &[u8], o: usize| {
+        d.get(o..o + 4)
+            .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+    };
+    let (ver, base, n) = (
+        be(&h, 4).unwrap(),
+        be(&h, 12).unwrap() as u64,
+        be(&h, 16).unwrap() as usize,
+    );
     if ver != 7 {
-        return Err(format!("{label}: UbiArt IPK version {ver} (only version 7 is read)"));
+        return Err(format!(
+            "{label}: UbiArt IPK version {ver} (only version 7 is read)"
+        ));
     }
     if base < 0x38 {
-        return Err(format!("{label}: the IPK header puts its data at {base:#x}, outside the file"));
+        return Err(format!(
+            "{label}: the IPK header puts its data at {base:#x}, outside the file"
+        ));
     }
     let t = read(0x38, base - 0x38)?;
     let mut p = 0usize;
     let mut out = vec![];
     for i in 0..n {
-        let cut = || format!("{label}: entry {i} of {n} runs past the IPK table: not the layout of a version 7 archive");
-        let (noff, size, csize) = (be(&t, p).ok_or_else(cut)? as usize, be(&t, p + 4).ok_or_else(cut)? as u64, be(&t, p + 8).ok_or_else(cut)? as u64);
+        let cut = || {
+            format!("{label}: entry {i} of {n} runs past the IPK table: not the layout of a version 7 archive")
+        };
+        let (noff, size, csize) = (
+            be(&t, p).ok_or_else(cut)? as usize,
+            be(&t, p + 4).ok_or_else(cut)? as u64,
+            be(&t, p + 8).ok_or_else(cut)? as u64,
+        );
         p += 20;
-        let off = if noff != 0 { t.get(p..p + 8).map(|b| u64::from_be_bytes(b.try_into().unwrap())).ok_or_else(cut)? } else { 0 };
+        let off = if noff != 0 {
+            t.get(p..p + 8)
+                .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
+                .ok_or_else(cut)?
+        } else {
+            0
+        };
         p += 8 * noff;
         let pl = be(&t, p).ok_or_else(cut)? as usize;
-        let dir: String = t.get(p + 4..p + 4 + pl).ok_or_else(cut)?.iter().map(|&c| c as char).collect();
+        let dir: String = t
+            .get(p + 4..p + 4 + pl)
+            .ok_or_else(cut)?
+            .iter()
+            .map(|&c| c as char)
+            .collect();
         p += 4 + pl;
         let nl = be(&t, p).ok_or_else(cut)? as usize;
-        let name: String = dir + &t.get(p + 4..p + 4 + nl).ok_or_else(cut)?.iter().map(|&c| c as char).collect::<String>();
+        let name: String = dir
+            + &t.get(p + 4..p + 4 + nl)
+                .ok_or_else(cut)?
+                .iter()
+                .map(|&c| c as char)
+                .collect::<String>();
         p += 4 + nl + 8;
         if !name.ends_with(".fxb") || format!("/{name}").contains("/shaders_dev/") {
             continue;
@@ -425,13 +599,19 @@ pub fn ipk_fxb(read: Read, label: &str) -> R<Vec<(String, Vec<u8>)>> {
         let want = if csize != 0 { csize } else { size };
         let mut b = read(base + off, want)?;
         if b.len() as u64 != want {
-            return Err(format!("{label}/{name}: the entry at {:#x} runs past the end of the archive", base + off));
+            return Err(format!(
+                "{label}/{name}: the entry at {:#x} runs past the end of the archive",
+                base + off
+            ));
         }
         if csize != 0 {
             b = inflate(&b, &format!("{label}/{name}"))?;
         }
         if b.len() as u64 != size {
-            return Err(format!("{label}/{name}: {} bytes decoded, the entry says {size}", b.len()));
+            return Err(format!(
+                "{label}/{name}: {} bytes decoded, the entry says {size}",
+                b.len()
+            ));
         }
         out.push((name, b));
     }
@@ -461,7 +641,14 @@ fn crc_tables(poly: u32) -> [[u32; 256]; 8] {
 
 fn crc64(t: &[[u32; 256]; 8], c: u64, v: u64) -> u64 {
     let x = c ^ v;
-    (t[7][(x & 0xff) as usize] ^ t[6][(x >> 8 & 0xff) as usize] ^ t[5][(x >> 16 & 0xff) as usize] ^ t[4][(x >> 24 & 0xff) as usize] ^ t[3][(x >> 32 & 0xff) as usize] ^ t[2][(x >> 40 & 0xff) as usize] ^ t[1][(x >> 48 & 0xff) as usize] ^ t[0][(x >> 56) as usize]) as u64
+    (t[7][(x & 0xff) as usize]
+        ^ t[6][(x >> 8 & 0xff) as usize]
+        ^ t[5][(x >> 16 & 0xff) as usize]
+        ^ t[4][(x >> 24 & 0xff) as usize]
+        ^ t[3][(x >> 32 & 0xff) as usize]
+        ^ t[2][(x >> 40 & 0xff) as usize]
+        ^ t[1][(x >> 48 & 0xff) as usize]
+        ^ t[0][(x >> 56) as usize]) as u64
 }
 
 struct Crc {
@@ -471,32 +658,60 @@ struct Crc {
 
 fn crcs() -> &'static Crc {
     static C: std::sync::OnceLock<Crc> = std::sync::OnceLock::new();
-    C.get_or_init(|| Crc { c32: crc_tables(0xedb8_8320), c32c: crc_tables(0x82f6_3b78) })
+    C.get_or_init(|| Crc {
+        c32: crc_tables(0xedb8_8320),
+        c32c: crc_tables(0x82f6_3b78),
+    })
 }
 
 fn cra_stem(path: &str) -> u64 {
     let e = path.rsplit('/').next().unwrap_or("");
-    let n = [e.find('.'), e.find('_'), Some(4)].into_iter().flatten().min().unwrap_or(4).min(e.len());
+    let n = [e.find('.'), e.find('_'), Some(4)]
+        .into_iter()
+        .flatten()
+        .min()
+        .unwrap_or(4)
+        .min(e.len());
     e.bytes().take(n).fold(0u64, |a, b| a << 8 | b as u64)
 }
 
 fn cra_key(path: &str) -> u64 {
     let t = &crcs().c32;
     let k = crc64(t, cra_stem(path), u64::from_le_bytes(*b"UseUrSk1"));
-    let a = crc64(t, crc64(t, 0xffff_ffff, u64::from_le_bytes(*b"Nintendo")), u64::from_le_bytes(*b"/CAMELOT"));
+    let a = crc64(
+        t,
+        crc64(t, 0xffff_ffff, u64::from_le_bytes(*b"Nintendo")),
+        u64::from_le_bytes(*b"/CAMELOT"),
+    );
     (a ^ crc64(t, k, u64::from_le_bytes(*b"lls4G00d")) ^ 0x0205_2636) & 0xffff_ffff
 }
 
-const VARIANT_MASK: [u64; 8] = [0x1111_1111, 0x2222_2223, 0x3333_3333, 0x4444_4445, 0x5555_5555, 0x6666_6667, 0x7777_7777, 0x8888_8889];
+const VARIANT_MASK: [u64; 8] = [
+    0x1111_1111,
+    0x2222_2223,
+    0x3333_3333,
+    0x4444_4445,
+    0x5555_5555,
+    0x6666_6667,
+    0x7777_7777,
+    0x8888_8889,
+];
 
 /// A file's 16-byte blocks unscrambled, and the sum its checksum comes from.
 fn cra_unscramble(path: &str, raw: &[u8]) -> (Vec<u8>, u64) {
     let w = cra_key(path);
     let v = (w & 7) as usize;
-    let t = if v & 4 != 0 { &crcs().c32c } else { &crcs().c32 };
+    let t = if v & 4 != 0 {
+        &crcs().c32c
+    } else {
+        &crcs().c32
+    };
     let mul = ((w & 0xffff_fffe) ^ VARIANT_MASK[v]) << 32 | 1;
     let n = raw.len() / 16;
-    let q: Vec<u64> = raw[..n * 16].chunks_exact(8).map(|c| u64::from_le_bytes(c.try_into().unwrap())).collect();
+    let q: Vec<u64> = raw[..n * 16]
+        .chunks_exact(8)
+        .map(|c| u64::from_le_bytes(c.try_into().unwrap()))
+        .collect();
     let mut out = vec![0u64; 2 * n];
     let (src, oth) = if v & 2 != 0 { (1, 0) } else { (0, 1) };
     let (a, b) = if v & 1 != 0 { (1, 0) } else { (0, 1) };
@@ -530,7 +745,10 @@ fn nro_words(nro: &[u8]) -> R<Vec<u32>> {
         return Err("not an NRO".into());
     }
     let end = (u32_at(nro, 0x24).unwrap_or(0) & !3) as usize;
-    Ok(nro[..end.min(nro.len())].chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect())
+    Ok(nro[..end.min(nro.len())]
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect())
 }
 
 /// A CRA file: (index, path, size, offset, checksum, 2021 layout).
@@ -546,12 +764,20 @@ fn cra_index_now(nro: &[u8]) -> R<Vec<CraEntry>> {
     let (mut table, mut count, mut sums, mut names) = (None, 0usize, None, None);
     for i in 3..w.len().saturating_sub(3) {
         let c = w[i];
-        if table.is_none() && c & 0xffe0_fc00 == 0x78e0_d800 && w[i - 1] & 0xffff_ffe0 == 0x5280_0240 && w[i + 1] & 0xffe0_8000 == 0x1b00_0000 && w[i + 2] & 0xffe0_0000 == 0x5280_0000 {
+        if table.is_none()
+            && c & 0xffe0_fc00 == 0x78e0_d800
+            && w[i - 1] & 0xffff_ffe0 == 0x5280_0240
+            && w[i + 1] & 0xffe0_8000 == 0x1b00_0000
+            && w[i + 2] & 0xffe0_0000 == 0x5280_0000
+        {
             if let Some(a) = adrp_add(&w, i - 3, c >> 5 & 31) {
                 table = Some(a);
                 count = ((w[i + 2] >> 5 & 0xffff) / 2) as usize;
             }
-        } else if sums.is_none() && c & 0xffff_ffe0 == 0xd28e_6aa0 && w[i + 1] & 0xffff_ffe0 == 0xf2aa_aca0 {
+        } else if sums.is_none()
+            && c & 0xffff_ffe0 == 0xd28e_6aa0
+            && w[i + 1] & 0xffff_ffe0 == 0xf2aa_aca0
+        {
             for k in i - 3..i {
                 for reg in 0..31 {
                     if let Some(a) = adrp_add(&w, k, reg) {
@@ -561,18 +787,33 @@ fn cra_index_now(nro: &[u8]) -> R<Vec<CraEntry>> {
             }
         }
     }
-    let (Some(table), Some(sums)) = (table, sums) else { return Err("this NRO has no CRA file table (or another layout of it)".into()) };
+    let (Some(table), Some(sums)) = (table, sums) else {
+        return Err("this NRO has no CRA file table (or another layout of it)".into());
+    };
     for i in 0..w.len().saturating_sub(5) {
-        if w[i] & 0xffff_fc00 == 0x39c0_0c00 && w[i + 1] & 0xff00_0000 == 0x3700_0000 && w[i + 2] & 0xffff_fc00 == 0x9240_1c00 {
+        if w[i] & 0xffff_fc00 == 0x39c0_0c00
+            && w[i + 1] & 0xff00_0000 == 0x3700_0000
+            && w[i + 2] & 0xffff_fc00 == 0x9240_1c00
+        {
             for reg in 0..31 {
-                if adrp_add(&w, i + 3, reg).is_some() && w.get(i + 5).is_some_and(|x| x & 0xffe0_fc00 == 0xf860_7800) {
+                if adrp_add(&w, i + 3, reg).is_some()
+                    && w.get(i + 5).is_some_and(|x| x & 0xffe0_fc00 == 0xf860_7800)
+                {
                     names = adrp_add(&w, i + 3, reg);
                 }
             }
         }
     }
     let d = nro;
-    let rec = |i: usize| -> Option<usize> { Some((table as i64 + i16::from_le_bytes(d.get(table + 2 * i..table + 2 * i + 2)?.try_into().ok()?) as i64 + i as i64 * 18 + count as i64 * 2) as usize) };
+    let rec = |i: usize| -> Option<usize> {
+        Some(
+            (table as i64
+                + i16::from_le_bytes(d.get(table + 2 * i..table + 2 * i + 2)?.try_into().ok()?)
+                    as i64
+                + i as i64 * 18
+                + count as i64 * 2) as usize,
+        )
+    };
     let name = |i: usize| -> Option<String> {
         let r = rec(i)?;
         let mut need = *d.get(r + 2)? as usize;
@@ -625,9 +866,17 @@ fn cra_index_now(nro: &[u8]) -> R<Vec<CraEntry>> {
         if size == 0 {
             continue;
         }
-        let off = (u64_at(d, r + 8).ok_or("CRA: a record outside the NRO")? & 0xff_ffff_ffff) ^ 0xff_00ff_00ff;
+        let off = (u64_at(d, r + 8).ok_or("CRA: a record outside the NRO")? & 0xff_ffff_ffff)
+            ^ 0xff_00ff_00ff;
         let sum = u32_at(d, sums + i * 4).ok_or("CRA: the checksums run past the NRO")?;
-        out.push((i, name(i).ok_or_else(|| format!("CRA: file {i}'s name runs past the NRO"))?, size as u64, off, sum, false));
+        out.push((
+            i,
+            name(i).ok_or_else(|| format!("CRA: file {i}'s name runs past the NRO"))?,
+            size as u64,
+            off,
+            sum,
+            false,
+        ));
     }
     Ok(out)
 }
@@ -640,7 +889,10 @@ fn cra_index_2021(nro: &[u8]) -> R<Vec<CraEntry>> {
     let w = nro_words(nro)?;
     let mut table = None;
     'f: for i in 8..w.len().saturating_sub(1) {
-        if w[i] & 0xffff_ffe0 != 0x5280_0000 | 0x2eca << 5 || w[i + 1] & 0xffff_ffe0 != 0x72a0_0000 | 0xce46 << 5 || (w[i] ^ w[i + 1]) & 31 != 0 {
+        if w[i] & 0xffff_ffe0 != 0x5280_0000 | 0x2eca << 5
+            || w[i + 1] & 0xffff_ffe0 != 0x72a0_0000 | 0xce46 << 5
+            || (w[i] ^ w[i + 1]) & 31 != 0
+        {
             continue;
         }
         for k in i - 8..i {
@@ -655,12 +907,22 @@ fn cra_index_2021(nro: &[u8]) -> R<Vec<CraEntry>> {
     }
     let table = table.ok_or("this NRO has no CRA file table (or another layout of it)")?;
     let d = nro;
-    let first = i32::from_le_bytes(d.get(table..table + 4).ok_or("CRA 2021: table outside the NRO")?.try_into().unwrap());
+    let first = i32::from_le_bytes(
+        d.get(table..table + 4)
+            .ok_or("CRA 2021: table outside the NRO")?
+            .try_into()
+            .unwrap(),
+    );
     if first >= 0 || first % 4 != 0 {
         return Err("the 2021 file table does not start with its records' distance".into());
     }
     let count = (-first / 4) as usize;
-    let rec = |i: usize| -> Option<usize> { (table as i64 - i32::from_le_bytes(d.get(table + i * 4..table + i * 4 + 4)?.try_into().ok()?) as i64).try_into().ok() };
+    let rec = |i: usize| -> Option<usize> {
+        (table as i64
+            - i32::from_le_bytes(d.get(table + i * 4..table + i * 4 + 4)?.try_into().ok()?) as i64)
+            .try_into()
+            .ok()
+    };
     let chars = |i: usize, r: usize| -> Option<Vec<u8>> {
         let (mut o, k) = (r + 0x11, (i & 15) as u8 + 1);
         let mut out = vec![];
@@ -698,8 +960,17 @@ fn cra_index_2021(nro: &[u8]) -> R<Vec<CraEntry>> {
         if raw == 0 || size == 0 {
             continue;
         }
-        let off = (u64_at(d, r + 0xc).ok_or("CRA 2021: a record outside the NRO")? & 0xff_ffff_ffff) ^ 0x46_f636_762a;
-        out.push((i, name(i).ok_or_else(|| format!("CRA 2021: file {i}'s name cannot be read"))?, size as u64, off, u32_at(d, r + 8).unwrap(), true));
+        let off = (u64_at(d, r + 0xc).ok_or("CRA 2021: a record outside the NRO")?
+            & 0xff_ffff_ffff)
+            ^ 0x46_f636_762a;
+        out.push((
+            i,
+            name(i).ok_or_else(|| format!("CRA 2021: file {i}'s name cannot be read"))?,
+            size as u64,
+            off,
+            u32_at(d, r + 8).unwrap(),
+            true,
+        ));
     }
     Ok(out)
 }
@@ -728,7 +999,11 @@ fn cra_keys_2021(path: &str) -> R<[u8; 16]> {
 
 fn cra_plain_2021(path: &str, raw: &[u8]) -> R<Vec<u8>> {
     let ks = cra_keys_2021(path)?;
-    Ok(raw.iter().enumerate().map(|(i, &b)| rev8(b ^ ks[i % 16])).collect())
+    Ok(raw
+        .iter()
+        .enumerate()
+        .map(|(i, &b)| rev8(b ^ ks[i % 16]))
+        .collect())
 }
 
 /// A CRA file's first 16 bytes, unscrambled (its magic).
@@ -764,7 +1039,10 @@ pub fn narc_members<'a>(d: &'a [u8], at: &str) -> R<Vec<&'a [u8]>> {
     if d.len() < 16 || &d[..4] != b"NARC" {
         return Err(format!("{at}: NARC header cut short"));
     }
-    let (mut o, n) = (u16_at(d, 0xc).unwrap() as usize, u16_at(d, 0xe).unwrap() as usize);
+    let (mut o, n) = (
+        u16_at(d, 0xc).unwrap() as usize,
+        u16_at(d, 0xe).unwrap() as usize,
+    );
     if o < 16 {
         return Err(format!("{at}: NARC sections overlap the header"));
     }
@@ -780,7 +1058,10 @@ pub fn narc_members<'a>(d: &'a [u8], at: &str) -> R<Vec<&'a [u8]>> {
         secs.insert(d[o..o + 4].try_into().unwrap(), (o, s));
         o += s;
     }
-    let (Some(&(fat, size)), Some(&(image, image_size))) = (secs.get(b"BTAF"), secs.get(b"GMIF")) else { return Err(format!("{at}: no BTAF or GMIF")) };
+    let (Some(&(fat, size)), Some(&(image, image_size))) = (secs.get(b"BTAF"), secs.get(b"GMIF"))
+    else {
+        return Err(format!("{at}: no BTAF or GMIF"));
+    };
     if size < 12 {
         return Err(format!("{at}: NARC BTAF header cut short"));
     }
@@ -791,7 +1072,10 @@ pub fn narc_members<'a>(d: &'a [u8], at: &str) -> R<Vec<&'a [u8]>> {
     let data = image + 8;
     (0..count)
         .map(|i| {
-            let (a, b) = (u32_at(d, fat + 12 + 8 * i).unwrap() as usize, u32_at(d, fat + 16 + 8 * i).unwrap() as usize);
+            let (a, b) = (
+                u32_at(d, fat + 12 + 8 * i).unwrap() as usize,
+                u32_at(d, fat + 16 + 8 * i).unwrap() as usize,
+            );
             if !(a <= b && b <= image_size - 8) {
                 return Err(format!("{at}: member {i} past the GMIF end"));
             }
@@ -819,7 +1103,10 @@ fn cra_lz(d: &[u8], mut at: usize) -> R<Vec<u8>> {
                 at += 1;
                 continue;
             }
-            let (lo, hi) = (*d.get(at).ok_or_else(cut)? as usize, *d.get(at + 1).ok_or_else(cut)? as usize);
+            let (lo, hi) = (
+                *d.get(at).ok_or_else(cut)? as usize,
+                *d.get(at + 1).ok_or_else(cut)? as usize,
+            );
             let dist = lo >> 4 | hi << 4;
             if dist == 0 {
                 return Ok(out);
@@ -828,13 +1115,19 @@ fn cra_lz(d: &[u8], mut at: usize) -> R<Vec<u8>> {
             if ln > 1 {
                 at += 2;
             } else if ln == 1 {
-                ln = *d.get(at + 2).ok_or_else(cut)? as usize + 0x11 + ((*d.get(at + 3).ok_or_else(cut)? as usize) << 8) + 0xff;
+                ln = *d.get(at + 2).ok_or_else(cut)? as usize
+                    + 0x11
+                    + ((*d.get(at + 3).ok_or_else(cut)? as usize) << 8)
+                    + 0xff;
                 at += 4;
             } else {
                 ln = *d.get(at + 2).ok_or_else(cut)? as usize + 0x10;
                 at += 3;
             }
-            let s = out.len().checked_sub(dist).ok_or("an LZ distance before the start")?;
+            let s = out
+                .len()
+                .checked_sub(dist)
+                .ok_or("an LZ distance before the start")?;
             for k in 0..ln {
                 out.push(out[s + k]);
             }
@@ -855,13 +1148,17 @@ pub fn cra_undo(d: &[u8], depth: usize) -> R<Vec<u8>> {
         let mut out = vec![];
         for i in 0..n {
             let s = u32_at(d, 12 + 4 * i).ok_or("MMMM table cut short")? as usize;
-            out.extend(cra_undo(d.get(at..at + s).ok_or("MMMM chunk past the end")?, depth + 1)?);
+            out.extend(cra_undo(
+                d.get(at..at + s).ok_or("MMMM chunk past the end")?,
+                depth + 1,
+            )?);
             at += (s + 15) & !15;
         }
         return Ok(out);
     }
     if k == 0x94 && d.len() >= 8 {
-        return lz4_flex::block::decompress(&d[8..], u32_at(d, 4).unwrap() as usize).map_err(|e| format!("LZ4: {e}"));
+        return lz4_flex::block::decompress(&d[8..], u32_at(d, 4).unwrap() as usize)
+            .map_err(|e| format!("LZ4: {e}"));
     }
     if k == 0x5a && d.starts_with(b"Z\0\0\0") {
         return unzstd(&d[8..], "");
@@ -900,13 +1197,20 @@ pub type CascEntry = (String, String, u64, u64, u64, String);
 
 /// The current build's files from a folder's manifests: `build_key` the build_key.txt text, `manifests` every .psv's
 /// (name, text).
-pub fn casc_files(build_key: &str, manifests: &[(String, String)], label: &str) -> R<Vec<CascEntry>> {
+pub fn casc_files(
+    build_key: &str,
+    manifests: &[(String, String)],
+    label: &str,
+) -> R<Vec<CascEntry>> {
     let want = build_key.trim();
     for (n, text) in manifests {
-        if !(text.starts_with('#') || text.starts_with("FileId")) || !text[..text.len().min(4096)].contains("FileId!") {
+        if !(text.starts_with('#') || text.starts_with("FileId"))
+            || !text[..text.len().min(4096)].contains("FileId!")
+        {
             continue;
         }
-        let (mut key, mut cols, mut rows): (Option<String>, Option<Vec<String>>, Vec<Vec<String>>) = (None, None, vec![]);
+        let (mut key, mut cols, mut rows): (Option<String>, Option<Vec<String>>, Vec<Vec<String>>) =
+            (None, None, vec![]);
         for line in text.lines() {
             if line.is_empty() {
                 continue;
@@ -924,18 +1228,35 @@ pub fn casc_files(build_key: &str, manifests: &[(String, String)], label: &str) 
             match &cols {
                 None => {
                     if !f[0].contains('!') {
-                        return Err(format!("{label}/{n}: no header line before the first file line"));
+                        return Err(format!(
+                            "{label}/{n}: no header line before the first file line"
+                        ));
                     }
-                    let c: Vec<String> = f.iter().map(|c| c.split('!').next().unwrap().to_string()).collect();
-                    let missing: Vec<&str> = ["FileId", "Chunk", "Archive", "CSize", "EKey", "ESize", "Encoding"].into_iter().filter(|x| !c.iter().any(|y| y == x)).collect();
+                    let c: Vec<String> = f
+                        .iter()
+                        .map(|c| c.split('!').next().unwrap().to_string())
+                        .collect();
+                    let missing: Vec<&str> = [
+                        "FileId", "Chunk", "Archive", "CSize", "EKey", "ESize", "Encoding",
+                    ]
+                    .into_iter()
+                    .filter(|x| !c.iter().any(|y| y == x))
+                    .collect();
                     if !missing.is_empty() {
-                        return Err(format!("{label}/{n}: manifest without the columns {}", missing.join(", ")));
+                        return Err(format!(
+                            "{label}/{n}: manifest without the columns {}",
+                            missing.join(", ")
+                        ));
                     }
                     cols = Some(c);
                 }
                 Some(c) => {
                     if f.len() != c.len() {
-                        return Err(format!("{label}/{n}: {} fields where the header names {}", f.len(), c.len()));
+                        return Err(format!(
+                            "{label}/{n}: {} fields where the header names {}",
+                            f.len(),
+                            c.len()
+                        ));
                     }
                     rows.push(f);
                 }
@@ -948,19 +1269,38 @@ pub fn casc_files(build_key: &str, manifests: &[(String, String)], label: &str) 
         let ix = |name: &str| cols.iter().position(|c| c == name).unwrap();
         let mut out = vec![];
         for r in rows {
-            let e: Vec<u8> = (0..r[ix("EKey")].len() / 2).filter_map(|i| u8::from_str_radix(&r[ix("EKey")][2 * i..2 * i + 2], 16).ok()).collect();
-            let chunk: u8 = r[ix("Chunk")].parse().map_err(|_| format!("{label}/{n}: bad Chunk"))?;
-            let arch: u8 = r[ix("Archive")].parse().map_err(|_| format!("{label}/{n}: bad Archive"))?;
+            let e: Vec<u8> = (0..r[ix("EKey")].len() / 2)
+                .filter_map(|i| u8::from_str_radix(&r[ix("EKey")][2 * i..2 * i + 2], 16).ok())
+                .collect();
+            let chunk: u8 = r[ix("Chunk")]
+                .parse()
+                .map_err(|_| format!("{label}/{n}: bad Chunk"))?;
+            let arch: u8 = r[ix("Archive")]
+                .parse()
+                .map_err(|_| format!("{label}/{n}: bad Archive"))?;
             if e.len() != 16 || (e[9], e[10]) != (chunk, arch) {
                 return Err(format!("{label}/{n}: {}: encoded key {} does not end in chunk {chunk}, archive {arch} and an offset", r[ix("FileId")], r[ix("EKey")]));
             }
             let off = e[11..].iter().fold(0u64, |a, &b| a << 8 | b as u64);
-            let num = |c: &str| r[ix(c)].parse::<u64>().map_err(|_| format!("{label}/{n}: bad {c}"));
-            out.push((r[ix("FileId")].clone(), format!("{chunk:02}-{arch:08}.data"), off, num("ESize")?, num("CSize")?, r[ix("Encoding")].clone()));
+            let num = |c: &str| {
+                r[ix(c)]
+                    .parse::<u64>()
+                    .map_err(|_| format!("{label}/{n}: bad {c}"))
+            };
+            out.push((
+                r[ix("FileId")].clone(),
+                format!("{chunk:02}-{arch:08}.data"),
+                off,
+                num("ESize")?,
+                num("CSize")?,
+                r[ix("Encoding")].clone(),
+            ));
         }
         return Ok(out);
     }
-    Err(format!("{label}: no manifest has the config key {want} that build_key.txt names"))
+    Err(format!(
+        "{label}: no manifest has the config key {want} that build_key.txt names"
+    ))
 }
 
 fn blte_chunk(c: &[u8], label: &str) -> R<Vec<u8>> {
@@ -996,16 +1336,29 @@ pub fn casc_decode(d: &[u8], enc: &str, size: u64, label: &str) -> R<Vec<u8>> {
             let mut out = vec![];
             for i in 0..n {
                 let o = 12 + 24 * i;
-                let (stored, sz) = (u32::from_be_bytes(d[o..o + 4].try_into().unwrap()) as usize, u32::from_be_bytes(d[o + 4..o + 8].try_into().unwrap()) as usize);
-                let x = blte_chunk(d.get(at..at + stored).ok_or_else(|| format!("{label}: BLTE chunk {i} past the end"))?, label)?;
+                let (stored, sz) = (
+                    u32::from_be_bytes(d[o..o + 4].try_into().unwrap()) as usize,
+                    u32::from_be_bytes(d[o + 4..o + 8].try_into().unwrap()) as usize,
+                );
+                let x = blte_chunk(
+                    d.get(at..at + stored)
+                        .ok_or_else(|| format!("{label}: BLTE chunk {i} past the end"))?,
+                    label,
+                )?;
                 if x.len() != sz {
-                    return Err(format!("{label}: BLTE chunk {i}: {} bytes where the table says {sz}", x.len()));
+                    return Err(format!(
+                        "{label}: BLTE chunk {i}: {} bytes where the table says {sz}",
+                        x.len()
+                    ));
                 }
                 out.extend(x);
                 at += stored;
             }
             if at != d.len() {
-                return Err(format!("{label}: BLTE chunks end at {at}, the container at {}", d.len()));
+                return Err(format!(
+                    "{label}: BLTE chunks end at {at}, the container at {}",
+                    d.len()
+                ));
             }
             out
         }
@@ -1013,7 +1366,10 @@ pub fn casc_decode(d: &[u8], enc: &str, size: u64, label: &str) -> R<Vec<u8>> {
         return Err(format!("{label}: encoding {enc:?}"));
     };
     if x.len() as u64 != size {
-        return Err(format!("{label}: {} bytes where the manifest says {size}", x.len()));
+        return Err(format!(
+            "{label}: {} bytes where the manifest says {size}",
+            x.len()
+        ));
     }
     Ok(x)
 }
@@ -1046,13 +1402,23 @@ pub fn d3_streams(d: &[u8], start: usize, end: usize, base: u64) -> Vec<(usize, 
         if p < last {
             continue;
         }
-        let (n, stored) = (u32_at(d, p).unwrap() as usize, u16_at(d, p + 4).unwrap() as usize);
+        let (n, stored) = (
+            u32_at(d, p).unwrap() as usize,
+            u16_at(d, p + 4).unwrap() as usize,
+        );
         if n == 0 || stored < 3 || p + 6 + stored > d.len() {
             continue;
         }
         let mut z = flate2::Decompress::new(true);
         let mut x = Vec::with_capacity(n + 1);
-        let ok = matches!(z.decompress_vec(&d[p + 6..p + 6 + stored], &mut x, flate2::FlushDecompress::Finish), Ok(flate2::Status::StreamEnd));
+        let ok = matches!(
+            z.decompress_vec(
+                &d[p + 6..p + 6 + stored],
+                &mut x,
+                flate2::FlushDecompress::Finish
+            ),
+            Ok(flate2::Status::StreamEnd)
+        );
         if !ok || z.total_in() as usize != stored || x.len() != n {
             continue;
         }
@@ -1063,7 +1429,13 @@ pub fn d3_streams(d: &[u8], start: usize, end: usize, base: u64) -> Vec<(usize, 
 }
 
 /// A byte range of a Diablo III package: control sections each directly followed by their code area in its streams.
-pub fn d3_shaders(d: &[u8], start: u64, end: u64, label: &str, problems: &mut Vec<String>) -> Vec<Found> {
+pub fn d3_shaders(
+    d: &[u8],
+    start: u64,
+    end: u64,
+    label: &str,
+    problems: &mut Vec<String>,
+) -> Vec<Found> {
     let mut out = vec![];
     let mut lost = vec![];
     for (p, _, x) in d3_streams(d, 0, (end - start) as usize, start) {
@@ -1072,14 +1444,26 @@ pub fn d3_shaders(d: &[u8], start: u64, end: u64, label: &str, problems: &mut Ve
             if c + 0x708 > x.len() {
                 continue;
             }
-            let (n, k) = (u32_at(&x, c + 0x20).unwrap() as usize, u32_at(&x, c + 0x704).unwrap() as usize);
+            let (n, k) = (
+                u32_at(&x, c + 0x20).unwrap() as usize,
+                u32_at(&x, c + 0x704).unwrap() as usize,
+            );
             if !(0x760..=0x880).contains(&n) {
                 continue;
             }
-            let (ctl, code) = (&x[c..(c + n).min(x.len())], x.get(c + n..c + n + k).unwrap_or(&[]));
-            let st = if code.len() == k && ctl.len() == n { crate::formats::glslc::stage(ctl, code) } else { None };
+            let (ctl, code) = (
+                &x[c..(c + n).min(x.len())],
+                x.get(c + n..c + n + k).unwrap_or(&[]),
+            );
+            let st = if code.len() == k && ctl.len() == n {
+                crate::formats::glslc::stage(ctl, code)
+            } else {
+                None
+            };
             match st {
-                Some(st) if check(st, ctl, code).is_none() => out.push(Found::new(format!("{lb}#D3@{c:#x}"), st, ctl, code)),
+                Some(st) if check(st, ctl, code).is_none() => {
+                    out.push(Found::new(format!("{lb}#D3@{c:#x}"), st, ctl, code))
+                }
                 _ => lost.push(format!("{lb}+{c:#x}")),
             }
         }
@@ -1100,15 +1484,29 @@ pub const PDAT_SPAN: u64 = 1 << 20;
 pub fn pdat_shaders(d: &[u8], start: u64, end: u64, label: &str) -> R<Vec<Found>> {
     let n = (end - start) as usize;
     let mut out = vec![];
-    let ctl_tag = [CTL_MAGIC[0], CTL_MAGIC[1], CTL_MAGIC[2], CTL_MAGIC[3], 0xc9, 0, 0, 0];
+    let ctl_tag = [
+        CTL_MAGIC[0],
+        CTL_MAGIC[1],
+        CTL_MAGIC[2],
+        CTL_MAGIC[3],
+        0xc9,
+        0,
+        0,
+        0,
+    ];
     let program = |x: &[u8], at: u64, lb: &str, out: &mut Vec<Found>| -> R<()> {
         for c in memchr::memmem::find_iter(x, &ctl_tag) {
             if c & 7 != 0 || c + NVN2_KEY_CTL > x.len() {
                 continue;
             }
-            let (nctl, ncode) = (u32_at(x, c + 0x30).unwrap() as usize, u32_at(x, c + 0x44).unwrap() as usize);
+            let (nctl, ncode) = (
+                u32_at(x, c + 0x30).unwrap() as usize,
+                u32_at(x, c + 0x44).unwrap() as usize,
+            );
             if nctl < NVN2_KEY_CTL || c + nctl + ncode > x.len() {
-                return Err(format!("{lb}: the control section at {c:#x} runs past its record"));
+                return Err(format!(
+                    "{lb}: the control section at {c:#x} runs past its record"
+                ));
             }
             let (ctl, code) = (&x[c..c + nctl], &x[c + nctl..c + nctl + ncode]);
             let st = nvn2_stage(ctl, code);
@@ -1119,7 +1517,10 @@ pub fn pdat_shaders(d: &[u8], start: u64, end: u64, label: &str) -> R<Vec<Found>
             if let Some(w) = why {
                 return Err(format!("{lb}: the shader at {c:#x} is not one: {w}"));
             }
-            out.push(Found::new(format!("{lb}@{at:#x}#var0"), st.unwrap(), ctl, code).grouped(format!("{lb}@{at:#x}#var0")));
+            out.push(
+                Found::new(format!("{lb}@{at:#x}#var0"), st.unwrap(), ctl, code)
+                    .grouped(format!("{lb}@{at:#x}#var0")),
+            );
         }
         Ok(())
     };
@@ -1132,7 +1533,10 @@ pub fn pdat_shaders(d: &[u8], start: u64, end: u64, label: &str) -> R<Vec<Found>
         }
         let lim = (p + PDAT_SPAN as usize).min(d.len());
         let Some((x, used)) = archive::zstd_frame(&d[p..lim]) else {
-            return Err(format!("{label}: the PMAP frame at {:#x} is longer than {PDAT_SPAN:#x} bytes", start + p as u64));
+            return Err(format!(
+                "{label}: the PMAP frame at {:#x} is longer than {PDAT_SPAN:#x} bytes",
+                start + p as u64
+            ));
         };
         frames.push((p, p + used));
         program(&x, start + p as u64, &lb, &mut out)?;
@@ -1142,7 +1546,12 @@ pub fn pdat_shaders(d: &[u8], start: u64, end: u64, label: &str) -> R<Vec<Found>
             continue;
         }
         let k = (u32_at(d, c + 0x30).unwrap_or(0) + u32_at(d, c + 0x44).unwrap_or(0)) as usize;
-        program(d.get(c..c + k).unwrap_or(&d[c..]), start + c as u64, &lb, &mut out)?;
+        program(
+            d.get(c..c + k).unwrap_or(&d[c..]),
+            start + c as u64,
+            &lb,
+            &mut out,
+        )?;
     }
     Ok(out)
 }
@@ -1167,11 +1576,17 @@ pub struct ZipEntry {
 pub fn zip_entries(read: Read, file_size: u64, label: &str) -> R<Vec<ZipEntry>> {
     let tail_n = file_size.min(0x10000 + 22);
     let tail = read(file_size - tail_n, tail_n)?;
-    let eocd = (0..tail.len().saturating_sub(21)).rev().find(|&i| tail[i..].starts_with(b"PK\x05\x06")).ok_or_else(|| format!("{label}: no end of central directory"))?;
+    let eocd = (0..tail.len().saturating_sub(21))
+        .rev()
+        .find(|&i| tail[i..].starts_with(b"PK\x05\x06"))
+        .ok_or_else(|| format!("{label}: no end of central directory"))?;
     let mut count = u16_at(&tail, eocd + 10).unwrap() as u64;
     let mut cd_size = u32_at(&tail, eocd + 12).unwrap() as u64;
     let mut cd_off = u32_at(&tail, eocd + 16).unwrap() as u64;
-    if (count == 0xffff || cd_off == 0xffff_ffff || cd_size == 0xffff_ffff) && eocd >= 20 && tail[eocd - 20..].starts_with(b"PK\x06\x07") {
+    if (count == 0xffff || cd_off == 0xffff_ffff || cd_size == 0xffff_ffff)
+        && eocd >= 20
+        && tail[eocd - 20..].starts_with(b"PK\x06\x07")
+    {
         let z64 = u64_at(&tail, eocd - 12).unwrap();
         let r = read(z64, 56)?;
         if !r.starts_with(b"PK\x06\x06") {
@@ -1184,25 +1599,45 @@ pub fn zip_entries(read: Read, file_size: u64, label: &str) -> R<Vec<ZipEntry>> 
     // a prefix before the archive (Star Fox's VZIP index): the directory sits where its size says, before the EOCD
     let eocd_abs = file_size - tail_n + eocd as u64;
     let shift = eocd_abs.saturating_sub(cd_size).saturating_sub(cd_off);
-    let shift = if read(cd_off, 4).ok().as_deref() == Some(b"PK\x01\x02") { 0 } else { shift };
+    let shift = if read(cd_off, 4).ok().as_deref() == Some(b"PK\x01\x02") {
+        0
+    } else {
+        shift
+    };
     let cd = read(cd_off + shift, cd_size)?;
     let mut out = vec![];
     let mut p = 0usize;
     for _ in 0..count {
         if cd.get(p..p + 4) != Some(b"PK\x01\x02") {
-            return Err(format!("{label}: central directory entry at {p:#x} damaged"));
+            return Err(format!(
+                "{label}: central directory entry at {p:#x} damaged"
+            ));
         }
         let method = u16_at(&cd, p + 10).unwrap();
         let crc = u32_at(&cd, p + 16).unwrap();
-        let (mut stored, mut size) = (u32_at(&cd, p + 20).unwrap() as u64, u32_at(&cd, p + 24).unwrap() as u64);
-        let (nl, xl, cl) = (u16_at(&cd, p + 28).unwrap() as usize, u16_at(&cd, p + 30).unwrap() as usize, u16_at(&cd, p + 32).unwrap() as usize);
+        let (mut stored, mut size) = (
+            u32_at(&cd, p + 20).unwrap() as u64,
+            u32_at(&cd, p + 24).unwrap() as u64,
+        );
+        let (nl, xl, cl) = (
+            u16_at(&cd, p + 28).unwrap() as usize,
+            u16_at(&cd, p + 30).unwrap() as usize,
+            u16_at(&cd, p + 32).unwrap() as usize,
+        );
         let mut header = u32_at(&cd, p + 42).unwrap() as u64;
-        let name = String::from_utf8_lossy(cd.get(p + 46..p + 46 + nl).ok_or_else(|| format!("{label}: central directory cut short"))?).into_owned();
+        let name = String::from_utf8_lossy(
+            cd.get(p + 46..p + 46 + nl)
+                .ok_or_else(|| format!("{label}: central directory cut short"))?,
+        )
+        .into_owned();
         // zip64 extra field
         let mut x = p + 46 + nl;
         let xe = x + xl;
         while x + 4 <= xe.min(cd.len()) {
-            let (id, len) = (u16_at(&cd, x).unwrap(), u16_at(&cd, x + 2).unwrap() as usize);
+            let (id, len) = (
+                u16_at(&cd, x).unwrap(),
+                u16_at(&cd, x + 2).unwrap() as usize,
+            );
             if id == 1 {
                 let mut q = x + 4;
                 if size == 0xffff_ffff {
@@ -1221,7 +1656,14 @@ pub fn zip_entries(read: Read, file_size: u64, label: &str) -> R<Vec<ZipEntry>> 
         }
         p = xe + cl;
         if !name.ends_with('/') {
-            out.push(ZipEntry { name, header: header + shift, method, stored, size, crc });
+            out.push(ZipEntry {
+                name,
+                header: header + shift,
+                method,
+                stored,
+                size,
+                crc,
+            });
         }
     }
     Ok(out)
@@ -1234,7 +1676,10 @@ pub fn zip_read(read: Read, e: &ZipEntry, label: &str) -> R<Vec<u8>> {
     if !h.starts_with(ZIP) {
         return Err(format!("{label}: no local header at {:#x}", e.header));
     }
-    let (nl, xl) = (u16_at(&h, 26).unwrap() as u64, u16_at(&h, 28).unwrap() as u64);
+    let (nl, xl) = (
+        u16_at(&h, 26).unwrap() as u64,
+        u16_at(&h, 28).unwrap() as u64,
+    );
     let d = read(e.header + 30 + nl + xl, e.stored)?;
     let out = match e.method {
         0 if e.stored != e.size => lz4_chained(&d, e.size as usize, 0x10000, label)?,
@@ -1243,7 +1688,11 @@ pub fn zip_read(read: Read, e: &ZipEntry, label: &str) -> R<Vec<u8>> {
         m => return Err(format!("{label}: zip compression method {m} is not read")),
     };
     if out.len() as u64 != e.size {
-        return Err(format!("{label}: {} bytes decoded, the directory says {}", out.len(), e.size));
+        return Err(format!(
+            "{label}: {} bytes decoded, the directory says {}",
+            out.len(),
+            e.size
+        ));
     }
     let mut c = flate2::Crc::new();
     c.update(&out);
@@ -1267,11 +1716,15 @@ fn lspk_decode(data: &[u8], size: usize, method: u32, what: &str) -> R<Vec<u8>> 
     let out = match method {
         0 => data.to_vec(),
         1 => inflate(data, what)?,
-        2 => lz4_flex::block::decompress(data, size).map_err(|e| format!("{what}: damaged LZ4 block: {e}"))?,
+        2 => lz4_flex::block::decompress(data, size)
+            .map_err(|e| format!("{what}: damaged LZ4 block: {e}"))?,
         m => return Err(format!("{what}: unsupported compression {m}")),
     };
     if out.len() != size {
-        return Err(format!("{what}: decoded size {} differs from {size}", out.len()));
+        return Err(format!(
+            "{what}: decoded size {} differs from {size}",
+            out.len()
+        ));
     }
     Ok(out)
 }
@@ -1292,12 +1745,20 @@ pub fn lspk_package(read: Read, size: u64, label: &str) -> R<Option<(usize, Vec<
     }
     let header = size - hsize;
     let h = read(header, 16)?;
-    let (version, offset, stored, parts, flags) = (u32_at(&h, 0).unwrap(), u32_at(&h, 4).unwrap() as u64, u32_at(&h, 8).unwrap() as u64, u16_at(&h, 12).unwrap() as usize, h[14]);
+    let (version, offset, stored, parts, flags) = (
+        u32_at(&h, 0).unwrap(),
+        u32_at(&h, 4).unwrap() as u64,
+        u32_at(&h, 8).unwrap() as u64,
+        u16_at(&h, 12).unwrap() as usize,
+        h[14],
+    );
     if version != 13 {
         return Err(format!("{label}: unsupported LSPK version {version}"));
     }
     if parts == 0 || flags & 4 != 0 {
-        return Err(format!("{label}: invalid part count or unsupported solid LSPK"));
+        return Err(format!(
+            "{label}: invalid part count or unsupported solid LSPK"
+        ));
     }
     if offset > header || stored > header - offset || stored < 4 || stored > 256 << 20 {
         return Err(format!("{label}: invalid LSPK file table"));
@@ -1307,7 +1768,12 @@ pub fn lspk_package(read: Read, size: u64, label: &str) -> R<Option<(usize, Vec<
     if count > (256 << 20) / 280 {
         return Err(format!("{label}: LSPK file count {count} is too large"));
     }
-    let table = lspk_decode(&t[4..], count * 280, 2, &format!("{label}: LSPK file table"))?;
+    let table = lspk_decode(
+        &t[4..],
+        count * 280,
+        2,
+        &format!("{label}: LSPK file table"),
+    )?;
     let mut out = vec![];
     for i in 0..count {
         let row = &table[i * 280..(i + 1) * 280];
@@ -1322,9 +1788,18 @@ pub fn lspk_package(read: Read, size: u64, label: &str) -> R<Option<(usize, Vec<
             return Err(format!("{label}/{name}: invalid LSPK part {part}"));
         }
         if part == 0 && (at > offset || n > offset - at) {
-            return Err(format!("{label}/{name}: range {at:#x}+{n:#x} exceeds {offset:#x} bytes"));
+            return Err(format!(
+                "{label}/{name}: range {at:#x}+{n:#x} exceeds {offset:#x} bytes"
+            ));
         }
-        out.push((name, part, at, n, if comp & 15 != 0 { raw } else { n }, comp & 15));
+        out.push((
+            name,
+            part,
+            at,
+            n,
+            if comp & 15 != 0 { raw } else { n },
+            comp & 15,
+        ));
     }
     Ok(Some((parts, out)))
 }
@@ -1345,7 +1820,10 @@ pub fn lspk_part(path: &str, i: usize) -> String {
     if i == 0 {
         return path.to_string();
     }
-    match path.rfind('.').filter(|&d| d > path.rfind('/').map_or(0, |s| s + 1)) {
+    match path
+        .rfind('.')
+        .filter(|&d| d > path.rfind('/').map_or(0, |s| s + 1))
+    {
         Some(d) => format!("{}_{i}{}", &path[..d], &path[d..]),
         None => format!("{path}_{i}"),
     }
@@ -1358,7 +1836,11 @@ pub const KIT: &[u8; 4] = b"kit!";
 /// A KIT member: (record, part, offset, length there, decoded size, chained LZ4, SHA-1).
 pub type KitEntry = (usize, u16, u64, u64, u64, bool, [u8; 20]);
 
-pub fn kit_entries(d: &[u8], part_size: &dyn Fn(u16) -> Option<u64>, label: &str) -> R<Vec<KitEntry>> {
+pub fn kit_entries(
+    d: &[u8],
+    part_size: &dyn Fn(u16) -> Option<u64>,
+    label: &str,
+) -> R<Vec<KitEntry>> {
     if d.len() < 0x25 || &d[..4] != KIT {
         return Err(format!("{label}: incomplete KIT header"));
     }
@@ -1370,12 +1852,22 @@ pub fn kit_entries(d: &[u8], part_size: &dyn Fn(u16) -> Option<u64>, label: &str
     let mut out = vec![];
     for i in 0..count {
         let o = base + 56 * i;
-        let (flags, part, off, high, stored, size) = (u32_at(d, o).unwrap(), u16_at(d, o + 4).unwrap(), u32_at(d, o + 6).unwrap() as u64, u16_at(d, o + 10).unwrap(), u64_at(d, o + 12).unwrap(), u64_at(d, o + 20).unwrap());
+        let (flags, part, off, high, stored, size) = (
+            u32_at(d, o).unwrap(),
+            u16_at(d, o + 4).unwrap(),
+            u32_at(d, o + 6).unwrap() as u64,
+            u16_at(d, o + 10).unwrap(),
+            u64_at(d, o + 12).unwrap(),
+            u64_at(d, o + 20).unwrap(),
+        );
         let sha: [u8; 20] = d[o + 28..o + 48].try_into().unwrap();
         if high != 0 {
-            return Err(format!("{label}: KIT entry {i} has an unsupported high offset word"));
+            return Err(format!(
+                "{label}: KIT entry {i} has an unsupported high offset word"
+            ));
         }
-        let psize = part_size(part).ok_or_else(|| format!("{label}: KIT entry {i} has no part {part}"))?;
+        let psize =
+            part_size(part).ok_or_else(|| format!("{label}: KIT entry {i} has no part {part}"))?;
         let n = if flags & 8 != 0 { stored } else { size };
         if off > psize || n > psize - off {
             return Err(format!("{label}: KIT entry {i} is outside part {part}"));
@@ -1390,7 +1882,11 @@ pub fn kit_read(read: Read, e: &KitEntry, label: &str) -> R<Vec<u8>> {
     if d.len() as u64 != e.3 {
         return Err(format!("{label}: truncated KIT member"));
     }
-    let d = if e.5 { lz4_chained(&d, e.4 as usize, 0x10000, label)? } else { d };
+    let d = if e.5 {
+        lz4_chained(&d, e.4 as usize, 0x10000, label)?
+    } else {
+        d
+    };
     use sha1::Digest;
     if sha1::Sha1::digest(&d)[..] != e.6[..] {
         return Err(format!("{label}: KIT SHA1 mismatch"));
@@ -1415,7 +1911,8 @@ pub fn vbf_entries(read: Read, label: &str) -> R<Vec<VbfEntry>> {
     let head = read(0, hlen)?;
     let count = count as usize;
     let strings = 16 + count * 64;
-    let slen = u32_at(&head, strings).ok_or_else(|| format!("{label}: truncated VBF header"))? as usize;
+    let slen =
+        u32_at(&head, strings).ok_or_else(|| format!("{label}: truncated VBF header"))? as usize;
     let blocks = strings + slen;
     if slen < 4 || blocks > hlen as usize {
         return Err(format!("{label}: invalid VBF string table"));
@@ -1423,7 +1920,12 @@ pub fn vbf_entries(read: Read, label: &str) -> R<Vec<VbfEntry>> {
     let mut out = vec![];
     for i in 0..count {
         let o = 16 + count * 32 + i * 32;
-        let (bi, size, offset, name) = (u32_at(&head, o).unwrap() as usize, u64_at(&head, o + 8).unwrap(), u64_at(&head, o + 16).unwrap(), u64_at(&head, o + 24).unwrap() as usize);
+        let (bi, size, offset, name) = (
+            u32_at(&head, o).unwrap() as usize,
+            u64_at(&head, o + 8).unwrap(),
+            u64_at(&head, o + 16).unwrap(),
+            u64_at(&head, o + 24).unwrap() as usize,
+        );
         if offset == u64::MAX {
             continue;
         }
@@ -1431,13 +1933,22 @@ pub fn vbf_entries(read: Read, label: &str) -> R<Vec<VbfEntry>> {
         if !(strings + 4 <= start && start < blocks) {
             return Err(format!("{label}: invalid VBF name offset"));
         }
-        let end = memchr::memchr(0, &head[start..blocks]).map(|e| start + e).ok_or_else(|| format!("{label}: unterminated VBF name"))?;
+        let end = memchr::memchr(0, &head[start..blocks])
+            .map(|e| start + e)
+            .ok_or_else(|| format!("{label}: unterminated VBF name"))?;
         let n = size.div_ceil(65536) as usize;
         if blocks + (bi + n) * 2 > hlen as usize || offset < hlen {
             return Err(format!("{label}: invalid VBF block range"));
         }
-        let lengths = (0..n).map(|k| u16_at(&head, blocks + (bi + k) * 2).unwrap()).collect();
-        out.push((String::from_utf8_lossy(&head[start..end]).into_owned(), size, offset, lengths));
+        let lengths = (0..n)
+            .map(|k| u16_at(&head, blocks + (bi + k) * 2).unwrap())
+            .collect();
+        out.push((
+            String::from_utf8_lossy(&head[start..end]).into_owned(),
+            size,
+            offset,
+            lengths,
+        ));
     }
     Ok(out)
 }
@@ -1459,7 +1970,9 @@ pub fn vbf_read(read: Read, e: &VbfEntry, label: &str) -> R<Vec<u8>> {
             let mut o = Vec::with_capacity(n + 1);
             match z.decompress_vec(&data, &mut o, flate2::FlushDecompress::Finish) {
                 Ok(flate2::Status::StreamEnd) if o.len() == n => o,
-                _ => lz4_flex::block::decompress(&data, n).map_err(|_| format!("{label}: {name}: invalid VBF compressed block (neither zlib nor LZ4)"))?,
+                _ => lz4_flex::block::decompress(&data, n).map_err(|_| {
+                    format!("{label}: {name}: invalid VBF compressed block (neither zlib nor LZ4)")
+                })?,
             }
         } else {
             data
@@ -1475,7 +1988,11 @@ pub fn vbf_read(read: Read, e: &VbfEntry, label: &str) -> R<Vec<u8>> {
 
 /// Whether a VBF member may hold shader programs (compiled effects and loose GPU programs).
 pub fn vbf_wanted(name: &str) -> bool {
-    name.contains(".fx") || name.contains("/shaders/") || name.ends_with(".vs.bin") || name.ends_with(".ps.bin") || name.ends_with(".fs.bin")
+    name.contains(".fx")
+        || name.contains("/shaders/")
+        || name.ends_with(".vs.bin")
+        || name.ends_with(".ps.bin")
+        || name.ends_with(".fs.bin")
 }
 
 #[cfg(test)]
@@ -1517,7 +2034,8 @@ mod tests {
         z.extend((cd_size as u32).to_le_bytes());
         z.extend((cd_off as u32).to_le_bytes());
         z.extend(0u16.to_le_bytes());
-        let read = |o: u64, n: u64| Ok(z[o as usize..(o + n).min(z.len() as u64) as usize].to_vec());
+        let read =
+            |o: u64, n: u64| Ok(z[o as usize..(o + n).min(z.len() as u64) as usize].to_vec());
         let e = zip_entries(&read, z.len() as u64, "t").unwrap();
         assert_eq!(e.len(), 1);
         assert_eq!(zip_read(&read, &e[0], "t").unwrap(), data);
@@ -1545,7 +2063,12 @@ mod tests {
     fn casc_manifest_and_d3_streams() {
         let text = "## config-key = abc\nFileId!STRING:0|KeyLayout!DEC:4|Chunk!DEC:8|Archive!DEC:8|CKey!HEX:16|CSize!DEC:4|EKey!HEX:16|ESize!DEC:4|Encoding!STRING:0|Path!STRING:0|Flags!STRING:0\n\
 f1|0|1|2|00|5|00000000000000000001020000001000|5|n|x|\n";
-        let e = casc_files("abc\n", &[("build_manifest.psv".into(), text.into())], "data").unwrap();
+        let e = casc_files(
+            "abc\n",
+            &[("build_manifest.psv".into(), text.into())],
+            "data",
+        )
+        .unwrap();
         assert_eq!(e[0].1, "01-00000002.data");
         assert_eq!(e[0].2, 0x1000);
         // a D3 stream record

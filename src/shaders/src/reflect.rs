@@ -73,13 +73,19 @@ pub fn words(spv: &[u8]) -> Option<Vec<u32>> {
     if spv.len() % 4 != 0 || spv.len() < 20 {
         return None;
     }
-    let w: Vec<u32> = spv.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+    let w: Vec<u32> = spv
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
     (w[0] == 0x0723_0203).then_some(w)
 }
 
 pub fn reflect(spv: &[u8]) -> Result<Module, String> {
     let w = words(spv).ok_or("not a SPIR-V module")?;
-    let mut m = Module { version: ((w[1] >> 16) & 0xff, (w[1] >> 8) & 0xff), ..Default::default() };
+    let mut m = Module {
+        version: ((w[1] >> 16) & 0xff, (w[1] >> 8) & 0xff),
+        ..Default::default()
+    };
     let mut set: HashMap<u32, u32> = HashMap::new();
     let mut binding: HashMap<u32, u32> = HashMap::new();
     let mut block: HashMap<u32, u32> = HashMap::new();
@@ -102,7 +108,9 @@ pub fn reflect(spv: &[u8]) -> Result<Module, String> {
                 m.execution_model = Some(model_name(ins[1]));
                 entry = Some(ins[2]);
             }
-            OP_EXECUTION_MODE if n >= 6 && ins[2] == 17 && Some(ins[1]) == entry => m.local_size = Some([ins[3], ins[4], ins[5]]),
+            OP_EXECUTION_MODE if n >= 6 && ins[2] == 17 && Some(ins[1]) == entry => {
+                m.local_size = Some([ins[3], ins[4], ins[5]])
+            }
             OP_NAME if n >= 3 => {
                 let b: Vec<u8> = ins[2..].iter().flat_map(|x| x.to_le_bytes()).collect();
                 let z = b.iter().position(|&c| c == 0).unwrap_or(b.len());
@@ -120,7 +128,14 @@ pub fn reflect(spv: &[u8]) -> Result<Module, String> {
                 }
                 _ => {}
             },
-            OP_TYPE_IMAGE | OP_TYPE_SAMPLER | OP_TYPE_SAMPLED_IMAGE | OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY | OP_TYPE_STRUCT | OP_TYPE_POINTER | OP_TYPE_ACCELERATION_STRUCTURE => {
+            OP_TYPE_IMAGE
+            | OP_TYPE_SAMPLER
+            | OP_TYPE_SAMPLED_IMAGE
+            | OP_TYPE_ARRAY
+            | OP_TYPE_RUNTIME_ARRAY
+            | OP_TYPE_STRUCT
+            | OP_TYPE_POINTER
+            | OP_TYPE_ACCELERATION_STRUCTURE => {
                 types.insert(ins[1], ins.to_vec());
             }
             OP_CONSTANT if n >= 4 => {
@@ -135,8 +150,14 @@ pub fn reflect(spv: &[u8]) -> Result<Module, String> {
         if sc == SC_PUSH_CONSTANT {
             m.push_constants = true;
         }
-        let (Some(&s), Some(&b)) = (set.get(&id), binding.get(&id)) else { continue };
-        let mut t = types.get(&ptr).filter(|t| t[0] & 0xffff == OP_TYPE_POINTER).map(|t| t[3]).ok_or_else(|| format!("variable {id}: not a pointer"))?;
+        let (Some(&s), Some(&b)) = (set.get(&id), binding.get(&id)) else {
+            continue;
+        };
+        let mut t = types
+            .get(&ptr)
+            .filter(|t| t[0] & 0xffff == OP_TYPE_POINTER)
+            .map(|t| t[3])
+            .ok_or_else(|| format!("variable {id}: not a pointer"))?;
         let mut count = 1u32;
         loop {
             match types.get(&t) {
@@ -154,7 +175,9 @@ pub fn reflect(spv: &[u8]) -> Result<Module, String> {
         let ins = types.get(&t);
         let kind = match (sc, ins.map(|x| x[0] & 0xffff)) {
             (SC_STORAGE_BUFFER, _) => "storage_buffer",
-            (SC_UNIFORM, Some(OP_TYPE_STRUCT)) if block.get(&t) == Some(&DEC_BUFFER_BLOCK) => "storage_buffer",
+            (SC_UNIFORM, Some(OP_TYPE_STRUCT)) if block.get(&t) == Some(&DEC_BUFFER_BLOCK) => {
+                "storage_buffer"
+            }
             (SC_UNIFORM, _) => "uniform_buffer",
             (SC_UNIFORM_CONSTANT, Some(OP_TYPE_SAMPLER)) => "sampler",
             (SC_UNIFORM_CONSTANT, Some(OP_TYPE_ACCELERATION_STRUCTURE)) => "acceleration_structure",
@@ -178,7 +201,13 @@ pub fn reflect(spv: &[u8]) -> Result<Module, String> {
             }
             _ => "unknown",
         };
-        m.bindings.push(Binding { set: s, binding: b, kind, count, name: names.get(&id).cloned().unwrap_or_default() });
+        m.bindings.push(Binding {
+            set: s,
+            binding: b,
+            kind,
+            count,
+            name: names.get(&id).cloned().unwrap_or_default(),
+        });
     }
     m.bindings.sort();
     Ok(m)
@@ -231,7 +260,18 @@ mod tests {
         let b: Vec<u8> = w.iter().flat_map(|x| x.to_le_bytes()).collect();
         let m = reflect(&b).unwrap();
         assert_eq!(m.execution_model, Some("fragment"));
-        let got: Vec<(u32, u32, &str, u32)> = m.bindings.iter().map(|b| (b.set, b.binding, b.kind, b.count)).collect();
-        assert_eq!(got, vec![(0, 0, "uniform_buffer", 1), (5, 1, "combined_image_sampler", 4), (5, 2, "storage_buffer", 0)]);
+        let got: Vec<(u32, u32, &str, u32)> = m
+            .bindings
+            .iter()
+            .map(|b| (b.set, b.binding, b.kind, b.count))
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (0, 0, "uniform_buffer", 1),
+                (5, 1, "combined_image_sampler", 4),
+                (5, 2, "storage_buffer", 0)
+            ]
+        );
     }
 }

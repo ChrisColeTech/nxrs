@@ -11,7 +11,11 @@ pub const PDRK: &[u8; 8] = b"PDRK0000";
 /// The IDRK entries of an RDB file of `size` bytes (`read(offset, length)`): 'IDRK0000', u64 entry length, u64
 /// stored length, u64 length, ..., +0x2c flags; the stored data ends the entry. Entries follow each other, some
 /// after padding. → (start of the stored data, its end, flags).
-pub fn idrk_entries(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, size: u64, label: &str) -> R<Vec<(u64, u64, u32)>> {
+pub fn idrk_entries(
+    read: &dyn Fn(u64, u64) -> R<Vec<u8>>,
+    size: u64,
+    label: &str,
+) -> R<Vec<(u64, u64, u32)>> {
     let mut out = vec![];
     let mut o = 0u64;
     while o + 0x30 <= size {
@@ -34,7 +38,9 @@ pub fn idrk_entries(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, size: u64, label: &st
         }
         let (esz, csz) = (u64_at(&h, 8).unwrap(), u64_at(&h, 16).unwrap());
         if esz < 0x30 || csz > esz || o + esz > size {
-            return Err(format!("{label}: IDRK entry at {o:#x} of {esz:#x} bytes does not fit"));
+            return Err(format!(
+                "{label}: IDRK entry at {o:#x} of {esz:#x} bytes does not fit"
+            ));
         }
         out.push((o + esz - csz, o + esz, u32_at(&h, 0x2c).unwrap()));
         o += esz;
@@ -53,12 +59,18 @@ pub fn idrk_data(d: &[u8], flags: u32, head: Option<usize>, label: &str) -> R<Ve
     let mut out = vec![];
     let mut a = 0;
     while a + 4 <= d.len() {
-        let cs = if new { u16_at(d, a).unwrap() as usize } else { u32_at(d, a).unwrap() as usize };
+        let cs = if new {
+            u16_at(d, a).unwrap() as usize
+        } else {
+            u32_at(d, a).unwrap() as usize
+        };
         a += if new { 10 } else { 4 };
         if cs == 0 {
             break;
         }
-        let c = d.get(a..a + cs).ok_or_else(|| format!("{label}: chunk at {a:#x} runs past the entry"))?;
+        let c = d
+            .get(a..a + cs)
+            .ok_or_else(|| format!("{label}: chunk at {a:#x} runs past the entry"))?;
         let r = if lz4b {
             lz4_flex::block::decompress(c, 0x4000).map_err(|e| format!("{label}: LZ4: {e}"))?
         } else {
@@ -75,7 +87,12 @@ pub fn idrk_data(d: &[u8], flags: u32, head: Option<usize>, label: &str) -> R<Ve
 }
 
 /// An RDB file's GLSLC outputs: entries whose data starts '_S2G' (G2S containers) or '_DOK' (system resources).
-pub fn rdb(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, size: u64, label: &str, out: &mut super::Scanned) {
+pub fn rdb(
+    read: &dyn Fn(u64, u64) -> R<Vec<u8>>,
+    size: u64,
+    label: &str,
+    out: &mut super::Scanned,
+) {
     let ents = match idrk_entries(read, size, label) {
         Ok(e) => e,
         Err(e) => {
@@ -103,8 +120,17 @@ pub fn rdb(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, size: u64, label: &str, out: &
 /// each chunk's stored length, then the chunks at 0x80 alignment, each {u32 length, zlib stream}, or stored when its
 /// stored length is its inflated length. None when `d` is not in that form.
 pub fn kt_gz(d: &[u8]) -> Option<Vec<u8>> {
-    let (cs, n, tot) = (u32_at(d, 0)? as usize, u32_at(d, 4)? as usize, u32_at(d, 8)? as usize);
-    if cs < 0x10000 || !cs.is_power_of_two() || n == 0 || n != tot.div_ceil(cs) || 12 + 4 * n > d.len() {
+    let (cs, n, tot) = (
+        u32_at(d, 0)? as usize,
+        u32_at(d, 4)? as usize,
+        u32_at(d, 8)? as usize,
+    );
+    if cs < 0x10000
+        || !cs.is_power_of_two()
+        || n == 0
+        || n != tot.div_ceil(cs)
+        || 12 + 4 * n > d.len()
+    {
         return None;
     }
     let mut o = (12 + 4 * n + 0x7f) & !0x7f;
@@ -140,7 +166,9 @@ pub fn gust_gz(d: &[u8]) -> Option<Vec<u8>> {
         }
         let mut z = flate2::Decompress::new(true);
         let mut buf = vec![0u8; 0x40000];
-        let st = z.decompress(c, &mut buf, flate2::FlushDecompress::Finish).ok()?;
+        let st = z
+            .decompress(c, &mut buf, flate2::FlushDecompress::Finish)
+            .ok()?;
         if st != flate2::Status::StreamEnd || z.total_in() as usize != n {
             return None;
         }
@@ -163,12 +191,25 @@ pub fn linkdata_index(path: &str) -> Option<String> {
     } else {
         return None;
     };
-    Some(if dir.is_empty() { idx } else { format!("{dir}/{idx}") })
+    Some(if dir.is_empty() {
+        idx
+    } else {
+        format!("{dir}/{idx}")
+    })
 }
 
 /// A LINKDATA index: 32-byte entries {u64 offset, u64 inflated length, u64 stored length, u64 compressed}.
 pub fn linkdata_entries(idx: &[u8]) -> Vec<(u64, u64, u64, u64)> {
-    idx.chunks_exact(32).map(|e| (u64_at(e, 0).unwrap(), u64_at(e, 8).unwrap(), u64_at(e, 16).unwrap(), u64_at(e, 24).unwrap())).collect()
+    idx.chunks_exact(32)
+        .map(|e| {
+            (
+                u64_at(e, 0).unwrap(),
+                u64_at(e, 8).unwrap(),
+                u64_at(e, 16).unwrap(),
+                u64_at(e, 24).unwrap(),
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
@@ -218,12 +259,15 @@ mod tests {
         for x in [0x10000u32, 2, data.len() as u32] {
             d.extend_from_slice(&x.to_le_bytes());
         }
-        let chunks: Vec<Vec<u8>> = data.chunks(0x10000).map(|c| {
-            let z = zlib(c);
-            let mut v = (z.len() as u32).to_le_bytes().to_vec();
-            v.extend(z);
-            v
-        }).collect();
+        let chunks: Vec<Vec<u8>> = data
+            .chunks(0x10000)
+            .map(|c| {
+                let z = zlib(c);
+                let mut v = (z.len() as u32).to_le_bytes().to_vec();
+                v.extend(z);
+                v
+            })
+            .collect();
         for c in &chunks {
             d.extend_from_slice(&(c.len() as u32).to_le_bytes());
         }
@@ -241,6 +285,9 @@ mod tests {
         }
         g.extend_from_slice(&0u32.to_le_bytes());
         assert_eq!(gust_gz(&g).unwrap(), data);
-        assert_eq!(linkdata_index("nx/DATA1.bin").as_deref(), Some("nx/DATA0.bin"));
+        assert_eq!(
+            linkdata_index("nx/DATA1.bin").as_deref(),
+            Some("nx/DATA0.bin")
+        );
     }
 }

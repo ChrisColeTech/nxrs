@@ -19,8 +19,12 @@ use std::collections::{HashMap, HashSet};
 /// A module image's relative relocations (RELA type 0x403, and DT_RELR): slot → target, module offsets.
 pub fn rel_targets(img: &[u8]) -> HashMap<usize, usize> {
     let mut out = HashMap::new();
-    let Some(m) = u32_at(img, 4).map(|x| x as usize) else { return out };
-    let Some(dynoff) = i32_at(img, m + 4).and_then(|x| m.checked_add_signed(x as isize)) else { return out };
+    let Some(m) = u32_at(img, 4).map(|x| x as usize) else {
+        return out;
+    };
+    let Some(dynoff) = i32_at(img, m + 4).and_then(|x| m.checked_add_signed(x as isize)) else {
+        return out;
+    };
     let mut tags: HashMap<i64, u64> = HashMap::new();
     let mut o = dynoff;
     while let (Some(tag), Some(v)) = (u64_at(img, o), u64_at(img, o + 8)) {
@@ -34,7 +38,11 @@ pub fn rel_targets(img: &[u8]) -> HashMap<usize, usize> {
         let mut i = 0;
         while i + 24 <= sz as usize {
             let a = rela as usize + i;
-            let (Some(off), Some(info), Some(add)) = (u64_at(img, a), u64_at(img, a + 8), u64_at(img, a + 16)) else { break };
+            let (Some(off), Some(info), Some(add)) =
+                (u64_at(img, a), u64_at(img, a + 8), u64_at(img, a + 16))
+            else {
+                break;
+            };
             if info & 0xffff_ffff == 0x403 {
                 out.insert(off as usize, add as usize);
             }
@@ -45,7 +53,9 @@ pub fn rel_targets(img: &[u8]) -> HashMap<usize, usize> {
         let mut next = 0usize;
         let mut i = 0;
         while i + 8 <= sz as usize {
-            let Some(e) = u64_at(img, relr as usize + i) else { break };
+            let Some(e) = u64_at(img, relr as usize + i) else {
+                break;
+            };
             i += 8;
             if e & 1 == 0 {
                 if let Some(t) = u64_at(img, e as usize) {
@@ -107,22 +117,42 @@ pub fn shad_record(d: &[u8], at: usize, end: usize) -> Option<(&[u8], &[u8])> {
         return None;
     }
     let w: Vec<u32> = (0..5).map(|i| u32_at(d, at + 4 * i).unwrap()).collect();
-    if w[0] != 5 || w[4] != 4 || w[2] != w[3].wrapping_add(0xc) || at + 0x14 + w[3] as usize + w[1] as usize != end {
+    if w[0] != 5
+        || w[4] != 4
+        || w[2] != w[3].wrapping_add(0xc)
+        || at + 0x14 + w[3] as usize + w[1] as usize != end
+    {
         return None;
     }
-    Some((&d[at + 0x14 + w[3] as usize..end], &d[at + 0x14..at + 0x14 + w[3] as usize]))
+    Some((
+        &d[at + 0x14 + w[3] as usize..end],
+        &d[at + 0x14..at + 0x14 + w[3] as usize],
+    ))
 }
 
 /// The loose control sections of `d` (a main module's image) with their code areas; `known` the control sections
 /// other readers already took from it (compared at their own +0x20 length). Control sections with no code area
 /// found go to `problems`.
-pub fn raw_shaders(d: &[u8], label: &str, known: &HashSet<Vec<u8>>, problems: &mut Vec<String>) -> Vec<Found> {
+pub fn raw_shaders(
+    d: &[u8],
+    label: &str,
+    known: &HashSet<Vec<u8>>,
+    problems: &mut Vec<String>,
+) -> Vec<Found> {
     let w32 = |o: usize| u32_at(d, o).unwrap_or(0) as usize;
-    let headed = |k: usize| d.get(k..k + 4).is_some_and(|h| h == GFX_MAGIC || h == CS_MAGIC);
+    let headed = |k: usize| {
+        d.get(k..k + 4)
+            .is_some_and(|h| h == GFX_MAGIC || h == CS_MAGIC)
+    };
     let adjacent = |c: usize| -> Option<usize> {
         let (nctl, n) = (w32(c + 0x20), w32(c + 0x704));
         let k = c.checked_sub(n)?;
-        (n >= 0x80 && nctl >= 0x760 && c + nctl <= d.len() && headed(k) && memchr::memmem::find(&d[k..c], &CTL_MAGIC).is_none()).then_some(k)
+        (n >= 0x80
+            && nctl >= 0x760
+            && c + nctl <= d.len()
+            && headed(k)
+            && memchr::memmem::find(&d[k..c], &CTL_MAGIC).is_none())
+        .then_some(k)
     };
     let mut skip: Vec<(usize, usize)> = vec![];
     for m in memchr::memmem::find_iter(d, &glslc::MAGIC) {
@@ -135,7 +165,11 @@ pub fn raw_shaders(d: &[u8], label: &str, known: &HashSet<Vec<u8>>, problems: &m
         skip.push((m, m + w32(m + 0x1c)));
     }
     let ctls: Vec<usize> = memchr::memmem::find_iter(d, &CTL_MAGIC)
-        .filter(|&c| c + 0x708 <= d.len() && !skip.iter().any(|&(a, b)| a <= c && c < b) && (c & 3 == 0 || adjacent(c).is_some()))
+        .filter(|&c| {
+            c + 0x708 <= d.len()
+                && !skip.iter().any(|&(a, b)| a <= c && c < b)
+                && (c & 3 == 0 || adjacent(c).is_some())
+        })
         .filter(|&c| !known.contains(d.get(c..c + w32(c + 0x20)).unwrap_or(&[])))
         .collect();
     if ctls.is_empty() {
@@ -145,13 +179,22 @@ pub fn raw_shaders(d: &[u8], label: &str, known: &HashSet<Vec<u8>>, problems: &m
     let cset: HashSet<usize> = ctls.iter().copied().collect();
     let mut code_of: HashMap<usize, usize> = HashMap::new();
     for (&s, &c) in &rel {
-        if cset.contains(&c) && !code_of.contains_key(&c) && s >= 8 && w32(s + 8) == w32(c + 0x704) {
+        if cset.contains(&c) && !code_of.contains_key(&c) && s >= 8 && w32(s + 8) == w32(c + 0x704)
+        {
             if let Some(&k) = rel.get(&(s - 8)) {
                 code_of.insert(c, k);
             }
         }
     }
-    let built = if ctls.iter().any(|c| !code_of.contains_key(c)) { adrp_targets(d, ctls[0].saturating_sub(0x100000), ctls[ctls.len() - 1] + 0x100000) } else { HashMap::new() };
+    let built = if ctls.iter().any(|c| !code_of.contains_key(c)) {
+        adrp_targets(
+            d,
+            ctls[0].saturating_sub(0x100000),
+            ctls[ctls.len() - 1] + 0x100000,
+        )
+    } else {
+        HashMap::new()
+    };
     let targets: HashSet<usize> = rel.values().copied().collect();
     let mut out = vec![];
     for &c in &ctls {
@@ -161,27 +204,39 @@ pub fn raw_shaders(d: &[u8], label: &str, known: &HashSet<Vec<u8>>, problems: &m
         }
         if !code_of.contains_key(&c) {
             if let Some(r) = c.checked_sub(n + 0x14) {
-                if (targets.contains(&r) || built.contains_key(&r)) && shad_record(d, r, r + 0x14 + n + w32(r + 4)).is_some() {
+                if (targets.contains(&r) || built.contains_key(&r))
+                    && shad_record(d, r, r + 0x14 + n + w32(r + 4)).is_some()
+                {
                     code_of.insert(c, c - n);
                 }
             }
         }
         let ctl = &d[c..c + nctl];
         let near = |k: usize| -> usize {
-            let (Some(a), Some(b)) = (built.get(&k), built.get(&c)) else { return usize::MAX };
-            a.iter().flat_map(|x| b.iter().map(move |y| x.abs_diff(*y))).min().unwrap_or(usize::MAX)
+            let (Some(a), Some(b)) = (built.get(&k), built.get(&c)) else {
+                return usize::MAX;
+            };
+            a.iter()
+                .flat_map(|x| b.iter().map(move |y| x.abs_diff(*y)))
+                .min()
+                .unwrap_or(usize::MAX)
         };
         let cands: Vec<usize> = match code_of.get(&c) {
             Some(&k) => vec![k],
             None => {
-                let mut v: Vec<usize> = [(c + nctl + 15) & !15, c.wrapping_sub(n)].into_iter().filter(|&k| k < d.len() && near(k) < 0x400).collect();
+                let mut v: Vec<usize> = [(c + nctl + 15) & !15, c.wrapping_sub(n)]
+                    .into_iter()
+                    .filter(|&k| k < d.len() && near(k) < 0x400)
+                    .collect();
                 v.sort_by_key(|&k| near(k));
                 v
             }
         };
         let mut done = false;
         for k in cands {
-            let Some(code) = d.get(k..k + n) else { continue };
+            let Some(code) = d.get(k..k + n) else {
+                continue;
+            };
             if memchr::memmem::find(code, &CTL_MAGIC).is_some() {
                 continue;
             }
@@ -194,7 +249,9 @@ pub fn raw_shaders(d: &[u8], label: &str, known: &HashSet<Vec<u8>>, problems: &m
         if !done && !code_of.contains_key(&c) {
             if let Some(k) = adjacent(c) {
                 let code = &d[k..c];
-                if let Some(st) = glslc::stage(ctl, code).filter(|&st| check(st, ctl, code).is_none()) {
+                if let Some(st) =
+                    glslc::stage(ctl, code).filter(|&st| check(st, ctl, code).is_none())
+                {
                     out.push(Found::new(format!("{label}#PHYRE@{k:#x}"), st, ctl, code));
                     done = true;
                 }
@@ -256,8 +313,14 @@ mod tests {
         let f = raw_shaders(&d, "main", &HashSet::new(), &mut p);
         assert!(p.is_empty(), "{p:?}");
         let got: Vec<(String, String)> = f.iter().map(|f| (f.label.clone(), f.key())).collect();
-        assert!(got.contains(&(format!("main#PHYRE@{:#x}", 0x100), skey(&c1, &k1))), "{got:?}");
-        assert!(got.contains(&(format!("main#RAW@{at2:#x}"), skey(&c2, &k2))), "{got:?}");
+        assert!(
+            got.contains(&(format!("main#PHYRE@{:#x}", 0x100), skey(&c1, &k1))),
+            "{got:?}"
+        );
+        assert!(
+            got.contains(&(format!("main#RAW@{at2:#x}"), skey(&c2, &k2))),
+            "{got:?}"
+        );
         let _ = at1;
     }
 }

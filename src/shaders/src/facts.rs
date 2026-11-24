@@ -26,7 +26,9 @@ pub fn parse(text: &str) -> Facts {
         if l.trim().is_empty() || l.starts_with('#') {
             continue;
         }
-        let Some((k, v)) = l.split_once('\t') else { continue };
+        let Some((k, v)) = l.split_once('\t') else {
+            continue;
+        };
         if let Ok(Value::Object(m)) = serde_json::from_str::<Value>(v) {
             out.insert(k.trim().to_string(), m);
         }
@@ -47,7 +49,11 @@ pub fn merge(mut generated: Facts, manual: Facts) -> Facts {
 
 /// The tables in `dir` (the shader folder's `profile\`); empty when there are none.
 pub fn load(dir: &Path) -> Facts {
-    let read = |n: &str| std::fs::read_to_string(dir.join(n)).map(|t| parse(&t)).unwrap_or_default();
+    let read = |n: &str| {
+        std::fs::read_to_string(dir.join(n))
+            .map(|t| parse(&t))
+            .unwrap_or_default()
+    };
     merge(read("shader_facts.tsv"), read("shader_facts_manual.tsv"))
 }
 
@@ -81,21 +87,45 @@ mod tests {
         let man = parse("1871a290791d9148\t{\"tex\":{\"8\":\"Cube\"}}\r\nffff000011112222\t{\"attr\":{\"3\":\"sint\"}}\n");
         let f = merge(gen, man);
         assert_eq!(f.len(), 3);
-        assert_eq!(f["1871a290791d9148"]["tex"], json!({"8": "Cube"}), "manual wins");
-        assert_eq!(f["1871a290791d9148"]["fout"], json!({"0": "uint"}), "the generated facts it does not name stay");
+        assert_eq!(
+            f["1871a290791d9148"]["tex"],
+            json!({"8": "Cube"}),
+            "manual wins"
+        );
+        assert_eq!(
+            f["1871a290791d9148"]["fout"],
+            json!({"0": "uint"}),
+            "the generated facts it does not name stay"
+        );
         // a pixel job: its texture and output facts, no thread group
-        let mut ps: Map<String, Value> = serde_json::from_value(json!({"key": "1871a290791d9148", "tex": {}, "img": {}, "attr": {}, "fout": {}})).unwrap();
+        let mut ps: Map<String, Value> = serde_json::from_value(
+            json!({"key": "1871a290791d9148", "tex": {}, "img": {}, "attr": {}, "fout": {}}),
+        )
+        .unwrap();
         assert_eq!(apply(&mut ps, &f["1871a290791d9148"]), 2);
         assert_eq!(ps["tex"], json!({"8": "Cube"}));
         let mut ps2 = ps.clone();
-        assert_eq!(apply(&mut ps2, &f["08145fb333797be6"]), 0, "local / shared only for compute");
-        let mut cs: Map<String, Value> = serde_json::from_value(json!({"local": [64, 1, 1], "shared": 16, "tex": {}})).unwrap();
+        assert_eq!(
+            apply(&mut ps2, &f["08145fb333797be6"]),
+            0,
+            "local / shared only for compute"
+        );
+        let mut cs: Map<String, Value> =
+            serde_json::from_value(json!({"local": [64, 1, 1], "shared": 16, "tex": {}})).unwrap();
         assert_eq!(apply(&mut cs, &f["08145fb333797be6"]), 2);
         assert_eq!(cs["local"], json!([32, 1, 1]));
         let dir = std::env::temp_dir().join(format!("nxshaders-facts-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("shader_facts.tsv"), "aa\t{\"img\":{\"1\":\"R32ui\"}}\n").unwrap();
-        std::fs::write(dir.join("shader_facts_manual.tsv"), "aa\t{\"tex\":{\"2\":\"3D\"}}\n").unwrap();
+        std::fs::write(
+            dir.join("shader_facts.tsv"),
+            "aa\t{\"img\":{\"1\":\"R32ui\"}}\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.join("shader_facts_manual.tsv"),
+            "aa\t{\"tex\":{\"2\":\"3D\"}}\n",
+        )
+        .unwrap();
         let l = load(&dir);
         assert_eq!(l["aa"].len(), 2);
         let _ = std::fs::remove_dir_all(&dir);

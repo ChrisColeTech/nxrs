@@ -43,7 +43,17 @@ struct Rd<'a> {
 
 impl<'a> Rd<'a> {
     fn raw(&mut self, n: usize) -> R<&'a [u8]> {
-        let s = self.b.get(self.o..self.o.checked_add(n).unwrap_or(usize::MAX)).ok_or_else(|| format!("{}: {n:#x} bytes at {:#x} do not fit in its {:#x}", self.what, self.o, self.b.len()))?;
+        let s = self
+            .b
+            .get(self.o..self.o.checked_add(n).unwrap_or(usize::MAX))
+            .ok_or_else(|| {
+                format!(
+                    "{}: {n:#x} bytes at {:#x} do not fit in its {:#x}",
+                    self.what,
+                    self.o,
+                    self.b.len()
+                )
+            })?;
         self.o += n;
         Ok(s)
     }
@@ -70,7 +80,10 @@ impl<'a> Rd<'a> {
         let n = self.i32()?;
         if n < 0 {
             let b = self.raw(2 * n.unsigned_abs() as usize)?;
-            let w: Vec<u16> = b.chunks(2).map(|c| u16::from_le_bytes([c[0], c[1]])).collect();
+            let w: Vec<u16> = b
+                .chunks(2)
+                .map(|c| u16::from_le_bytes([c[0], c[1]]))
+                .collect();
             return Ok(String::from_utf16_lossy(&w[..w.len().saturating_sub(1)]));
         }
         let b = self.raw(n as usize)?;
@@ -116,9 +129,16 @@ pub fn pak_footer(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, size: u64) -> R<PakFoot
         _ => return Err(format!("pak version {ver} (footer magic {back:#x} from the end); versions 4, 8 and 11 are read")),
     };
     if ioff.checked_add(isz).is_none_or(|e| e > size) {
-        return Err(format!("the index ({isz:#x} bytes at {ioff:#x}) runs past the end of the pak"));
+        return Err(format!(
+            "the index ({isz:#x} bytes at {ioff:#x}) runs past the end of the pak"
+        ));
     }
-    Ok(PakFooter { encrypted: enc, index: (ioff, isz), methods, version: ver })
+    Ok(PakFooter {
+        encrypted: enc,
+        index: (ioff, isz),
+        methods,
+        version: ver,
+    })
 }
 
 /// AES-256 ECB decryption in place (whole 16-byte blocks; a short tail is left as it is).
@@ -131,7 +151,13 @@ pub fn aes_decrypt(key: &[u8; 32], data: &mut [u8]) {
 }
 
 /// `n` bytes at `off`, decrypted with `key` when `enc` (read in whole 16-byte blocks).
-fn read_at(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, off: u64, n: u64, enc: bool, key: Option<&[u8; 32]>) -> R<Vec<u8>> {
+fn read_at(
+    read: &dyn Fn(u64, u64) -> R<Vec<u8>>,
+    off: u64,
+    n: u64,
+    enc: bool,
+    key: Option<&[u8; 32]>,
+) -> R<Vec<u8>> {
     if !enc {
         return read(off, n);
     }
@@ -153,7 +179,10 @@ pub fn opens(key: &[u8; 32], first: &[u8; 16]) -> bool {
     }
     let s = &d[4..(4 + n as usize).min(16)];
     let n = n as usize;
-    s[..(n - 1).min(s.len())].iter().all(|&c| (0x20..0x7f).contains(&c)) && (s.len() < n || s[n - 1] == 0)
+    s[..(n - 1).min(s.len())]
+        .iter()
+        .all(|&c| (0x20..0x7f).contains(&c))
+        && (s.len() < n || s[n - 1] == 0)
 }
 
 /// 32-byte keys main's code stores from two 16-byte literals (`stp qA, qB, [x0]` after `ldr qA` / `ldr qB`, each
@@ -173,17 +202,25 @@ pub fn code_keys(img: &[u8], lo: usize) -> Vec<[u8; 32]> {
             let y = w(j);
             if y & 0x9F00_0000 == 0x9000_0000 {
                 let imm = (((y >> 29) & 3) | ((y >> 5) & 0x7FFFF) << 2) as i64;
-                let imm = if imm & (1 << 20) != 0 { imm - (1 << 21) } else { imm };
+                let imm = if imm & (1 << 20) != 0 {
+                    imm - (1 << 21)
+                } else {
+                    imm
+                };
                 page.insert(y & 31, ((j as i64 * 4) & !0xFFF) + (imm << 12));
             } else if y & 0xFFC0_0000 == 0x3DC0_0000 && page.contains_key(&((y >> 5) & 31)) {
-                half.insert(y & 31, page[&((y >> 5) & 31)] + ((y >> 10) & 0xFFF) as i64 * 16);
+                half.insert(
+                    y & 31,
+                    page[&((y >> 5) & 31)] + ((y >> 10) & 0xFFF) as i64 * 16,
+                );
             } else {
                 page.remove(&(y & 31));
                 half.remove(&(y & 31));
             }
         }
         if let (Some(&a), Some(&b)) = (half.get(&(x & 31)), half.get(&((x >> 10) & 31))) {
-            if a >= 0 && b >= 0 && (a as usize) + 16 <= img.len() && (b as usize) + 16 <= img.len() {
+            if a >= 0 && b >= 0 && (a as usize) + 16 <= img.len() && (b as usize) + 16 <= img.len()
+            {
                 let mut k = [0u8; 32];
                 k[..16].copy_from_slice(&img[a as usize..a as usize + 16]);
                 k[16..].copy_from_slice(&img[b as usize..b as usize + 16]);
@@ -208,7 +245,10 @@ pub fn find_key(img: &[u8], lo: usize, first: &[u8; 16], known: &[[u8; 32]]) -> 
     while a + 32 <= img.len() {
         let k: [u8; 32] = img[a..a + 32].try_into().unwrap();
         let mut seen = [false; 256];
-        let distinct = k.iter().filter(|&&b| !std::mem::replace(&mut seen[b as usize], true)).count();
+        let distinct = k
+            .iter()
+            .filter(|&&b| !std::mem::replace(&mut seen[b as usize], true))
+            .count();
         if distinct >= 20 && opens(&k, first) {
             return Some(k);
         }
@@ -218,22 +258,41 @@ pub fn find_key(img: &[u8], lo: usize, first: &[u8; 16], known: &[[u8; 32]]) -> 
 }
 
 /// The files of a pak; `read(offset, length)` reads the pak, `key` decrypts an encrypted index and entries.
-pub fn pak_files(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, size: u64, key: Option<&[u8; 32]>) -> R<Vec<PakEntry>> {
-    let PakFooter { encrypted: enc, index: (ioff, isz), methods, version: ver } = pak_footer(read, size)?;
+pub fn pak_files(
+    read: &dyn Fn(u64, u64) -> R<Vec<u8>>,
+    size: u64,
+    key: Option<&[u8; 32]>,
+) -> R<Vec<PakEntry>> {
+    let PakFooter {
+        encrypted: enc,
+        index: (ioff, isz),
+        methods,
+        version: ver,
+    } = pak_footer(read, size)?;
     if enc && key.is_none() {
         return Err("the index is AES-encrypted and no key in main opens it".into());
     }
     let idx = read_at(read, ioff, isz, enc, key)?;
-    let mut r = Rd { b: &idx, o: 0, what: "the pak index" };
+    let mut r = Rd {
+        b: &idx,
+        o: 0,
+        what: "the pak index",
+    };
     r.fstr()?;
     let count = r.count(1 << 24)?;
     let method_name = |m: u32| -> String {
         if m == 0 {
             String::new()
         } else if ver < 8 {
-            LEGACY_METHODS.get(m as usize - 1).map(|s| s.to_string()).unwrap_or_else(|| format!("flags {m}"))
+            LEGACY_METHODS
+                .get(m as usize - 1)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|| format!("flags {m}"))
         } else {
-            methods.get(m as usize - 1).cloned().unwrap_or_else(|| format!("method {m}"))
+            methods
+                .get(m as usize - 1)
+                .cloned()
+                .unwrap_or_else(|| format!("method {m}"))
         }
     };
     let mut out = vec![];
@@ -255,7 +314,16 @@ pub fn pak_files(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, size: u64, key: Option<&
             if blocks.is_empty() {
                 blocks.push((53, sz));
             }
-            out.push(PakEntry { name, off, raw, size: sz, method: method_name(meth), encrypted: e != 0, block_size: bsz as u64, blocks });
+            out.push(PakEntry {
+                name,
+                off,
+                raw,
+                size: sz,
+                method: method_name(meth),
+                encrypted: e != 0,
+                block_size: bsz as u64,
+                blocks,
+            });
         }
         return Ok(out);
     }
@@ -279,27 +347,53 @@ pub fn pak_files(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, size: u64, key: Option<&
         return Err("the directory index runs past the end of the pak".into());
     }
     let dir = read_at(read, doff, dsz, enc, key)?;
-    let mut d = Rd { b: &dir, o: 0, what: "the pak directory index" };
+    let mut d = Rd {
+        b: &dir,
+        o: 0,
+        what: "the pak directory index",
+    };
     let nd = d.count(1 << 24)?;
     for _ in 0..nd {
         let dn = d.fstr()?;
         let nf = d.count(1 << 24)?;
         for _ in 0..nf {
-            let fname = format!("{dn}{}", d.fstr()?).trim_start_matches('/').to_string();
+            let fname = format!("{dn}{}", d.fstr()?)
+                .trim_start_matches('/')
+                .to_string();
             let at = d.i32()?;
             if at < 0 {
                 continue;
             }
-            let mut e = Rd { b: encoded, o: at as usize, what: "an encoded pak entry" };
+            let mut e = Rd {
+                b: encoded,
+                o: at as usize,
+                what: "an encoded pak entry",
+            };
             let v = e.u32()?;
             let mut bsz = ((v & 0x3f) as u64) << 11;
             if v & 0x3f == 0x3f {
                 bsz = e.u32()? as u64;
             }
             let (nblk, encr, meth) = ((v >> 6) & 0xffff, (v >> 22) & 1, (v >> 23) & 0x3f);
-            let off = if (v >> 31) & 1 != 0 { e.u32()? as u64 } else { e.u64()? };
-            let raw = if (v >> 30) & 1 != 0 { e.u32()? as u64 } else { e.u64()? };
-            let sz = if meth != 0 { if (v >> 29) & 1 != 0 { e.u32()? as u64 } else { e.u64()? } } else { raw };
+            let off = if (v >> 31) & 1 != 0 {
+                e.u32()? as u64
+            } else {
+                e.u64()?
+            };
+            let raw = if (v >> 30) & 1 != 0 {
+                e.u32()? as u64
+            } else {
+                e.u64()?
+            };
+            let sz = if meth != 0 {
+                if (v >> 29) & 1 != 0 {
+                    e.u32()? as u64
+                } else {
+                    e.u64()?
+                }
+            } else {
+                raw
+            };
             let mut cur = 53 + if meth != 0 { 4 + 16 * nblk as u64 } else { 0 };
             if nblk == 1 && bsz == 0 {
                 bsz = raw;
@@ -314,14 +408,28 @@ pub fn pak_files(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, size: u64, key: Option<&
                     cur += if encr != 0 { (s + 15) & !15 } else { s };
                 }
             }
-            out.push(PakEntry { name: fname, off, raw, size: sz, method: method_name(meth), encrypted: encr != 0, block_size: bsz, blocks });
+            out.push(PakEntry {
+                name: fname,
+                off,
+                raw,
+                size: sz,
+                method: method_name(meth),
+                encrypted: encr != 0,
+                block_size: bsz,
+                blocks,
+            });
         }
     }
     Ok(out)
 }
 
 /// A pak file's bytes, its blocks decoded (stored, Zlib, LZ4, Oodle).
-pub fn pak_read(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, e: &PakEntry, label: &str, key: Option<&[u8; 32]>) -> R<Vec<u8>> {
+pub fn pak_read(
+    read: &dyn Fn(u64, u64) -> R<Vec<u8>>,
+    e: &PakEntry,
+    label: &str,
+    key: Option<&[u8; 32]>,
+) -> R<Vec<u8>> {
     if e.encrypted && key.is_none() {
         return Err(format!("{label}: encrypted in the pak and no key"));
     }
@@ -329,7 +437,10 @@ pub fn pak_read(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, e: &PakEntry, label: &str
         return read_at(read, e.off + 53, e.size, e.encrypted, key);
     }
     if e.raw > archive::DECODE_LIMIT || e.block_size == 0 {
-        return Err(format!("{label}: {:#x} raw bytes in blocks of {:#x}", e.raw, e.block_size));
+        return Err(format!(
+            "{label}: {:#x} raw bytes in blocks of {:#x}",
+            e.raw, e.block_size
+        ));
     }
     let mut out = Vec::with_capacity(e.raw as usize);
     let mut left = e.raw;
@@ -356,7 +467,14 @@ pub fn pak_read(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, e: &PakEntry, label: &str
 /// code archive (shaders inline), its cooked packages too.
 pub fn shader_files(files: Vec<PakEntry>) -> Vec<PakEntry> {
     let archives = files.iter().any(|e| e.name.ends_with(".ushaderbytecode"));
-    files.into_iter().filter(|e| e.name.ends_with(".ushaderbytecode") || e.name.contains("GlobalShaderCache") || (!archives && e.name.ends_with(".uexp"))).collect()
+    files
+        .into_iter()
+        .filter(|e| {
+            e.name.ends_with(".ushaderbytecode")
+                || e.name.contains("GlobalShaderCache")
+                || (!archives && e.name.ends_with(".uexp"))
+        })
+        .collect()
 }
 
 fn ue_tag(t: &[u8]) -> Option<Stage> {
@@ -405,12 +523,25 @@ pub fn nvn2_record(s: &[u8]) -> Option<(&[u8], &[u8])> {
 /// A decoded record → (stage, control, code); `freq` the archive's frequency when it has one.
 fn record<'a>(s: &'a [u8], freq: Option<u8>, wh: &str) -> R<(Stage, &'a [u8], &'a [u8])> {
     if let Some((tag, ctl, code)) = lslg(s) {
-        let st = ue_tag(tag).ok_or_else(|| format!("{wh}: stage tag {}", String::from_utf8_lossy(tag)))?;
+        let st = ue_tag(tag)
+            .ok_or_else(|| format!("{wh}: stage tag {}", String::from_utf8_lossy(tag)))?;
         // EShaderFrequency before Unreal Engine 5: 0 vertex, 1 hull, 2 domain, 3 pixel, 4 geometry, 5 compute
         if let Some(f) = freq {
-            let want = [Stage::Vs, Stage::Hs, Stage::Ds, Stage::Ps, Stage::Gs, Stage::Cs].get(f as usize).copied();
+            let want = [
+                Stage::Vs,
+                Stage::Hs,
+                Stage::Ds,
+                Stage::Ps,
+                Stage::Gs,
+                Stage::Cs,
+            ]
+            .get(f as usize)
+            .copied();
             if want != Some(st) {
-                return Err(format!("{wh}: tag {} but frequency {f}", String::from_utf8_lossy(tag)));
+                return Err(format!(
+                    "{wh}: tag {} but frequency {f}",
+                    String::from_utf8_lossy(tag)
+                ));
             }
         }
         if let Some(why) = check(st, ctl, code) {
@@ -418,11 +549,21 @@ fn record<'a>(s: &'a [u8], freq: Option<u8>, wh: &str) -> R<(Stage, &'a [u8], &'
         }
         return Ok((st, ctl, code));
     }
-    let (ctl, code) = nvn2_record(s).ok_or_else(|| format!("{wh}: neither an LSLG record nor an NVN2 one"))?;
+    let (ctl, code) =
+        nvn2_record(s).ok_or_else(|| format!("{wh}: neither an LSLG record nor an NVN2 one"))?;
     let st = nvn2_stage(ctl, code).ok_or_else(|| format!("{wh}: no stage"))?;
     // Unreal Engine 5's numbering: 1 mesh, 2 amplification (task)
     if let Some(f) = freq {
-        let want = [Stage::Vs, Stage::Ms, Stage::Ts, Stage::Ps, Stage::Gs, Stage::Cs].get(f as usize).copied();
+        let want = [
+            Stage::Vs,
+            Stage::Ms,
+            Stage::Ts,
+            Stage::Ps,
+            Stage::Gs,
+            Stage::Cs,
+        ]
+        .get(f as usize)
+        .copied();
         if want != Some(st) {
             return Err(format!("{wh}: a {} shader with frequency {f}", st.name()));
         }
@@ -439,31 +580,58 @@ fn record<'a>(s: &'a [u8], freq: Option<u8>, wh: &str) -> R<(Stage, &'a [u8], &'
 /// Oodle stream.
 pub fn shader_archive(d: &[u8], label: &str) -> R<Vec<Found>> {
     let wh = format!("{label}: shader code archive");
-    let mut r = Rd { b: d, o: 0, what: &wh };
+    let mut r = Rd {
+        b: d,
+        o: 0,
+        what: &wh,
+    };
     if r.u32()? != 2 {
         return Err(format!("{wh}: not version 2"));
     }
     // shader map hashes, shader hashes, shader map entries
     for elem in [20usize, 20, 16] {
         let n = r.u32()? as usize;
-        r.raw(elem.checked_mul(n).ok_or_else(|| format!("{wh}: count {n}"))?)?;
+        r.raw(
+            elem.checked_mul(n)
+                .ok_or_else(|| format!("{wh}: count {n}"))?,
+        )?;
     }
     let n = r.u32()? as usize;
-    let ents = r.raw(17usize.checked_mul(n).ok_or_else(|| format!("{wh}: count {n}"))?)?;
+    let ents = r.raw(
+        17usize
+            .checked_mul(n)
+            .ok_or_else(|| format!("{wh}: count {n}"))?,
+    )?;
     let np = r.u32()? as usize;
-    r.raw(16usize.checked_mul(np).ok_or_else(|| format!("{wh}: count {np}"))?)?;
+    r.raw(
+        16usize
+            .checked_mul(np)
+            .ok_or_else(|| format!("{wh}: count {np}"))?,
+    )?;
     let ni = r.u32()? as usize;
-    r.raw(4usize.checked_mul(ni).ok_or_else(|| format!("{wh}: count {ni}"))?)?;
+    r.raw(
+        4usize
+            .checked_mul(ni)
+            .ok_or_else(|| format!("{wh}: count {ni}"))?,
+    )?;
     let code = r.o as u64;
     let mut out = vec![];
     for i in 0..n {
         let e = &ents[17 * i..17 * i + 17];
-        let (off, size, raw, fr) = (u64_at(e, 0).unwrap(), u32_at(e, 8).unwrap() as usize, u32_at(e, 12).unwrap() as usize, e[16]);
+        let (off, size, raw, fr) = (
+            u64_at(e, 0).unwrap(),
+            u32_at(e, 8).unwrap() as usize,
+            u32_at(e, 12).unwrap() as usize,
+            e[16],
+        );
         let w = format!("{label}#UE{i}");
         let c = span(d, code.saturating_add(off), size as u64, &w)?;
         let s = if size == raw {
             c.to_vec()
-        } else if raw <= 255 * size && lz4_flex::block::decompress(c, raw).is_ok_and(|x| x.len() == raw && (lslg(&x).is_some() || nvn2_record(&x).is_some())) {
+        } else if raw <= 255 * size
+            && lz4_flex::block::decompress(c, raw)
+                .is_ok_and(|x| x.len() == raw && (lslg(&x).is_some() || nvn2_record(&x).is_some()))
+        {
             lz4_flex::block::decompress(c, raw).unwrap()
         } else {
             archive::oodle(c, raw, &w)?
@@ -487,7 +655,13 @@ pub fn inline(d: &[u8], label: &str) -> (Vec<Found>, Vec<String>) {
             Err(e) => problems.push(e),
         }
     };
-    let len_before = |i: usize| if i >= 4 { u32_at(d, i - 4).unwrap() as usize } else { 0 };
+    let len_before = |i: usize| {
+        if i >= 4 {
+            u32_at(d, i - 4).unwrap() as usize
+        } else {
+            0
+        }
+    };
     // zlib streams
     let mut i = 0;
     while let Some(p) = memchr::memchr(0x78, &d[i..]) {
@@ -503,7 +677,10 @@ pub fn inline(d: &[u8], label: &str) -> (Vec<Found>, Vec<String>) {
         }
         let mut z = flate2::Decompress::new(true);
         let mut head = vec![0u8; 4];
-        if z.decompress(&d[at..at + n], &mut head, flate2::FlushDecompress::None).is_err() || head != b"LSLG" {
+        if z.decompress(&d[at..at + n], &mut head, flate2::FlushDecompress::None)
+            .is_err()
+            || head != b"LSLG"
+        {
             continue;
         }
         if let Ok(s) = archive::unzlib(&d[at..at + n], label) {
@@ -521,7 +698,11 @@ pub fn inline(d: &[u8], label: &str) -> (Vec<Found>, Vec<String>) {
         // an LZ4 block whose first literals start here: its token at j (and literal length bytes up to `at`)
         for j in (at.saturating_sub(5).max(4)..at).rev() {
             let (t, ext) = (d[j] >> 4, &d[j + 1..at]);
-            if (t < 15 && !ext.is_empty()) || (t == 15 && !(ext.last().is_some_and(|&x| x < 0xff) && ext[..ext.len() - 1].iter().all(|&x| x == 0xff))) {
+            if (t < 15 && !ext.is_empty())
+                || (t == 15
+                    && !(ext.last().is_some_and(|&x| x < 0xff)
+                        && ext[..ext.len() - 1].iter().all(|&x| x == 0xff)))
+            {
                 continue;
             }
             let n = u32_at(d, j - 4).unwrap() as usize;
@@ -550,14 +731,18 @@ pub fn inline(d: &[u8], label: &str) -> (Vec<Found>, Vec<String>) {
         if !(1..=1 << 20).contains(&count) {
             continue;
         }
-        let Some(hashes) = (i - 8).checked_sub(20 * count) else { continue };
+        let Some(hashes) = (i - 8).checked_sub(20 * count) else {
+            continue;
+        };
         if hashes < 4 || u32_at(d, hashes - 4).unwrap() as usize != count {
             continue;
         }
         let mut rows = vec![];
         let mut p = i - 4;
         for _ in 0..count {
-            let Some(n) = u32_at(d, p).map(|x| x as usize) else { break };
+            let Some(n) = u32_at(d, p).map(|x| x as usize) else {
+                break;
+            };
             let q = p + 4 + n;
             if n == 0 || q + 5 > d.len() {
                 break;
@@ -590,7 +775,10 @@ pub fn inline(d: &[u8], label: &str) -> (Vec<Found>, Vec<String>) {
                 // stored LSLG records were taken by the scan above
                 Some(s) if s.starts_with(b"LSLG") && row.1 == row.2 => {}
                 Some(s) => take(&s, row.0, &mut out, &mut problems),
-                None => problems.push(format!("{label}#UE{:x}: the Oodle stream does not decode", row.0)),
+                None => problems.push(format!(
+                    "{label}#UE{:x}: the Oodle stream does not decode",
+                    row.0
+                )),
             }
         }
     }
@@ -602,21 +790,28 @@ pub const UE3_TAG: [u8; 4] = [0xc1, 0x83, 0x2a, 0x9e];
 
 /// An Unreal Engine 3 global shader cache ('BMSG') or package.
 pub fn is_ue3(head: &[u8]) -> bool {
-    head.get(..4) == Some(b"BMSG") || (head.get(..4) == Some(&UE3_TAG[..]) && u16_at(head, 4).is_some_and(|v| v > 0 && v < 0x8000))
+    head.get(..4) == Some(b"BMSG")
+        || (head.get(..4) == Some(&UE3_TAG[..])
+            && u16_at(head, 4).is_some_and(|v| v > 0 && v < 0x8000))
 }
 
 /// An Unreal Engine 3 package with its compressed chunks decoded: the summary up to the first chunk tag, then chunks
 /// {tag, u32 block size, u32 stored and raw size, per block u32 stored and raw size} and their blocks (stored when the
 /// sizes are equal, zlib, else Oodle). A package without chunks is returned as it is.
 pub fn ue3_body(d: &[u8], label: &str) -> R<Vec<u8>> {
-    let Some(first) = memchr::memmem::find(&d[4.min(d.len())..], &UE3_TAG).map(|x| x + 4) else { return Ok(d.to_vec()) };
+    let Some(first) = memchr::memmem::find(&d[4.min(d.len())..], &UE3_TAG).map(|x| x + 4) else {
+        return Ok(d.to_vec());
+    };
     let mut out = d[..first].to_vec();
     let mut i = first;
     while i < d.len() {
         if d.get(i..i + 4) != Some(&UE3_TAG[..]) || i + 16 > d.len() {
             return Err(format!("{label}: no compressed chunk at {i:#x} (the chunks do not run to the end of the package)"));
         }
-        let (bs, us) = (u32_at(d, i + 4).unwrap() as usize, u32_at(d, i + 12).unwrap() as usize);
+        let (bs, us) = (
+            u32_at(d, i + 4).unwrap() as usize,
+            u32_at(d, i + 12).unwrap() as usize,
+        );
         if bs == 0 {
             return Err(format!("{label}: chunk at {i:#x} has block size 0"));
         }
@@ -624,12 +819,21 @@ pub fn ue3_body(d: &[u8], label: &str) -> R<Vec<u8>> {
         let mut o = i + 16 + 8 * nb;
         for k in 0..nb {
             let w = format!("{label} chunk at {i:#x} block {k}");
-            let (c, u) = (need32(d, i + 16 + 8 * k, &w)? as usize, need32(d, i + 20 + 8 * k, &w)? as usize);
+            let (c, u) = (
+                need32(d, i + 16 + 8 * k, &w)? as usize,
+                need32(d, i + 20 + 8 * k, &w)? as usize,
+            );
             let blk = span(d, o as u64, c as u64, &w)?;
             if out.len() + u > archive::DECODE_LIMIT as usize {
                 return Err(format!("{w}: the package decodes past the limit"));
             }
-            out.extend(if c == u { blk.to_vec() } else if blk[0] == 0x78 { archive::unzlib(blk, &w)? } else { archive::oodle(blk, u, &w)? });
+            out.extend(if c == u {
+                blk.to_vec()
+            } else if blk[0] == 0x78 {
+                archive::unzlib(blk, &w)?
+            } else {
+                archive::oodle(blk, u, &w)?
+            });
             o += c;
         }
         i = o;
@@ -648,21 +852,37 @@ pub fn ue3_shaders(d: &[u8], label: &str) -> R<Vec<Found>> {
             continue;
         }
         let n = u32_at(d, c + 0x704).unwrap() as usize;
-        let Some(a) = c.checked_sub(n).filter(|&a| a >= 12) else { continue };
+        let Some(a) = c.checked_sub(n).filter(|&a| a >= 12) else {
+            continue;
+        };
         let head = &d[a..a + 4];
         if head != GFX_MAGIC && head != CS_MAGIC {
             continue;
         }
-        let nctl = [4usize, 8].iter().filter_map(|&k| a.checked_sub(k + 4)).find_map(|p| {
-            let (ln, lc) = (u32_at(d, p)? as usize, u32_at(d, p + 4)? as usize);
-            (ln == n && (0x760..=0x1000).contains(&lc)).then_some(lc)
-        });
-        let Some(nctl) = nctl.filter(|&x| c + x <= d.len()) else { continue };
+        let nctl = [4usize, 8]
+            .iter()
+            .filter_map(|&k| a.checked_sub(k + 4))
+            .find_map(|p| {
+                let (ln, lc) = (u32_at(d, p)? as usize, u32_at(d, p + 4)? as usize);
+                (ln == n && (0x760..=0x1000).contains(&lc)).then_some(lc)
+            });
+        let Some(nctl) = nctl.filter(|&x| c + x <= d.len()) else {
+            continue;
+        };
         let (ctl, code) = (&d[c..c + nctl], &d[a..c]);
-        let st = if head == CS_MAGIC { Some(Stage::Cs) } else { sph_stage(code) };
-        let st = st.ok_or_else(|| format!("{label}: shader record at {c:#x}: no stage in the code area header"))?;
+        let st = if head == CS_MAGIC {
+            Some(Stage::Cs)
+        } else {
+            sph_stage(code)
+        };
+        let st = st.ok_or_else(|| {
+            format!("{label}: shader record at {c:#x}: no stage in the code area header")
+        })?;
         if let Some(why) = check(st, ctl, code) {
-            return Err(format!("{label}: shader record at {c:#x} ({}): {why}", st.name()));
+            return Err(format!(
+                "{label}: shader record at {c:#x} ({}): {why}",
+                st.name()
+            ));
         }
         out.push(Found::new(format!("{label}#UE3@{c:x}"), st, ctl, code));
     }
@@ -701,40 +921,91 @@ impl Toc {
         let wh = format!("{label}: TOC header");
         let w = |o: usize| need32(b, o, &wh).map(|x| x as usize);
         let version = b[16];
-        let (hsz, n, nblk, bsz, nmeth, mlen, block_size, _dsz, nparts) = (w(20)?, w(24)?, w(28)?, w(32)?, w(36)?, w(40)?, w(44)? as u64, w(48)?, w(52)?);
+        let (hsz, n, nblk, bsz, nmeth, mlen, block_size, _dsz, nparts) = (
+            w(20)?,
+            w(24)?,
+            w(28)?,
+            w(32)?,
+            w(36)?,
+            w(40)?,
+            w(44)? as u64,
+            w(48)?,
+            w(52)?,
+        );
         if bsz != 12 || block_size == 0 {
-            return Err(format!("{label}: compression block entries of {bsz} bytes, blocks of {block_size}"));
+            return Err(format!(
+                "{label}: compression block entries of {bsz} bytes, blocks of {block_size}"
+            ));
         }
         let flags = *b.get(80).ok_or_else(|| format!("{wh}: cut short"))?;
         let nseeds = if version >= 4 { w(84)? } else { 0 };
-        let part_size = if version >= 3 && nparts > 1 { need64(b, 88, &wh)? } else { u64::MAX };
+        let part_size = if version >= 3 && nparts > 1 {
+            need64(b, 88, &wh)?
+        } else {
+            u64::MAX
+        };
         let nover = if version >= 5 { w(96)? } else { 0 };
         let total = hsz + 22 * n + 4 * (nseeds + nover) + 12 * nblk + mlen * nmeth;
         if total > b.len() || n > b.len() || nblk > b.len() {
             return Err(format!("{label}: the TOC's tables run past its end"));
         }
         let mut o = hsz;
-        let ids = (0..n).map(|i| b[o + 12 * i..o + 12 * i + 12].try_into().unwrap()).collect();
+        let ids = (0..n)
+            .map(|i| b[o + 12 * i..o + 12 * i + 12].try_into().unwrap())
+            .collect();
         o += 12 * n;
         let be5 = |s: &[u8]| s.iter().fold(0u64, |a, &x| a << 8 | x as u64);
         let le = |s: &[u8]| s.iter().rev().fold(0u64, |a, &x| a << 8 | x as u64);
-        let ranges = (0..n).map(|i| (be5(&b[o + 10 * i..o + 10 * i + 5]), be5(&b[o + 10 * i + 5..o + 10 * i + 10]))).collect();
+        let ranges = (0..n)
+            .map(|i| {
+                (
+                    be5(&b[o + 10 * i..o + 10 * i + 5]),
+                    be5(&b[o + 10 * i + 5..o + 10 * i + 10]),
+                )
+            })
+            .collect();
         o += 10 * n + 4 * (nseeds + nover);
         let blocks = (0..nblk)
             .map(|i| {
                 let e = &b[o + 12 * i..o + 12 * i + 12];
-                (le(&e[..5]), le(&e[5..8]) as u32, le(&e[8..11]) as u32, e[11])
+                (
+                    le(&e[..5]),
+                    le(&e[5..8]) as u32,
+                    le(&e[8..11]) as u32,
+                    e[11],
+                )
             })
             .collect();
         o += 12 * nblk;
-        let methods = (0..nmeth).map(|i| String::from_utf8_lossy(&b[o + mlen * i..o + mlen * (i + 1)]).trim_end_matches('\0').to_string()).collect();
-        Ok(Toc { version, encrypted: flags & 2 != 0, block_size, part_size, ids, ranges, blocks, methods })
+        let methods = (0..nmeth)
+            .map(|i| {
+                String::from_utf8_lossy(&b[o + mlen * i..o + mlen * (i + 1)])
+                    .trim_end_matches('\0')
+                    .to_string()
+            })
+            .collect();
+        Ok(Toc {
+            version,
+            encrypted: flags & 2 != 0,
+            block_size,
+            part_size,
+            ids,
+            ranges,
+            blocks,
+            methods,
+        })
     }
 
     /// The chunks of the cooked packages (their export bundles): type 1 from version 4 (Unreal Engine 5), 2 before.
     pub fn export_bundles(&self) -> Vec<usize> {
-        let t = if self.version >= 4 { IO_EXPORT_BUNDLE } else { IO_EXPORT_BUNDLE_427 };
-        (0..self.ids.len()).filter(|&i| self.ids[i][11] == t).collect()
+        let t = if self.version >= 4 {
+            IO_EXPORT_BUNDLE
+        } else {
+            IO_EXPORT_BUNDLE_427
+        };
+        (0..self.ids.len())
+            .filter(|&i| self.ids[i][11] == t)
+            .collect()
     }
 
     /// The shader library chunks (Unreal Engine 5).
@@ -742,41 +1013,76 @@ impl Toc {
         if self.version < 4 {
             return vec![];
         }
-        (0..self.ids.len()).filter(|&i| self.ids[i][11] == IO_SHADER_LIBRARY).collect()
+        (0..self.ids.len())
+            .filter(|&i| self.ids[i][11] == IO_SHADER_LIBRARY)
+            .collect()
     }
 
     /// Chunk `i`'s bytes; `read(partition, offset, length)` reads the .ucas files.
-    pub fn read(&self, i: usize, read: &dyn Fn(u64, u64, u64) -> R<Vec<u8>>, key: Option<&[u8; 32]>, label: &str) -> R<Vec<u8>> {
+    pub fn read(
+        &self,
+        i: usize,
+        read: &dyn Fn(u64, u64, u64) -> R<Vec<u8>>,
+        key: Option<&[u8; 32]>,
+        label: &str,
+    ) -> R<Vec<u8>> {
         if self.encrypted && key.is_none() {
-            return Err(format!("{label}: the container is encrypted and no key opens it"));
+            return Err(format!(
+                "{label}: the container is encrypted and no key opens it"
+            ));
         }
         let (off, ln) = self.ranges[i];
         if ln > archive::DECODE_LIMIT {
             return Err(format!("{label}: chunk of {ln:#x} bytes"));
         }
         let first = off / self.block_size;
-        let last = if ln > 0 { (off + ln - 1) / self.block_size + 1 } else { first };
+        let last = if ln > 0 {
+            (off + ln - 1) / self.block_size + 1
+        } else {
+            first
+        };
         let mut out = vec![];
         for k in first..last {
-            let &(at, size, raw, m) = self.blocks.get(k as usize).ok_or_else(|| format!("{label}: block {k} is not in the TOC"))?;
+            let &(at, size, raw, m) = self
+                .blocks
+                .get(k as usize)
+                .ok_or_else(|| format!("{label}: block {k} is not in the TOC"))?;
             let (part, po) = (at / self.part_size, at % self.part_size);
-            let mut d = read(part, po, if self.encrypted { (size as u64 + 15) & !15 } else { size as u64 })?;
+            let mut d = read(
+                part,
+                po,
+                if self.encrypted {
+                    (size as u64 + 15) & !15
+                } else {
+                    size as u64
+                },
+            )?;
             if self.encrypted {
                 aes_decrypt(key.unwrap(), &mut d);
                 d.truncate(size as usize);
             }
             let wh = format!("{label} block {k}");
-            let meth = if m == 0 { "" } else { self.methods.get(m as usize - 1).map(|s| s.as_str()).unwrap_or("?") };
+            let meth = if m == 0 {
+                ""
+            } else {
+                self.methods
+                    .get(m as usize - 1)
+                    .map(|s| s.as_str())
+                    .unwrap_or("?")
+            };
             out.extend(match meth {
                 "" => d[..(raw as usize).min(d.len())].to_vec(),
                 "Oodle" => archive::oodle(&d, raw as usize, &wh)?,
                 "Zlib" => archive::unzlib(&d, &wh)?,
-                "LZ4" => lz4_flex::block::decompress(&d, raw as usize).map_err(|e| format!("{wh}: LZ4: {e}"))?,
+                "LZ4" => lz4_flex::block::decompress(&d, raw as usize)
+                    .map_err(|e| format!("{wh}: LZ4: {e}"))?,
                 m => return Err(format!("{wh}: compression method {m} is not read")),
             });
         }
         let s = (off - first * self.block_size) as usize;
-        out.get(s..s + ln as usize).map(|x| x.to_vec()).ok_or_else(|| format!("{label}: chunk {i} is shorter than its range"))
+        out.get(s..s + ln as usize)
+            .map(|x| x.to_vec())
+            .ok_or_else(|| format!("{label}: chunk {i} is shorter than its range"))
     }
 }
 
@@ -785,8 +1091,16 @@ impl Toc {
 /// offset in the group's decoded bytes from 34), groups {first index, count, raw size, stored size}, shader indices;
 /// each a u32 count and its elements. A group is one chunk holding its shaders end to end, Oodle-compressed as a
 /// whole when stored < raw. `chunk(id)` reads a group's chunk.
-pub fn io_library(lib: &[u8], chunk: &dyn Fn(&[u8; 12]) -> R<Vec<u8>>, label: &str) -> R<Vec<Found>> {
-    let mut r = Rd { b: lib, o: 0, what: label };
+pub fn io_library(
+    lib: &[u8],
+    chunk: &dyn Fn(&[u8; 12]) -> R<Vec<u8>>,
+    label: &str,
+) -> R<Vec<Found>> {
+    let mut r = Rd {
+        b: lib,
+        o: 0,
+        what: label,
+    };
     if r.u32()? != 1 {
         return Err(format!("{label}: shader library is not version 1"));
     }
@@ -795,13 +1109,17 @@ pub fn io_library(lib: &[u8], chunk: &dyn Fn(&[u8; 12]) -> R<Vec<u8>>, label: &s
     let nsh = r.u32()? as usize;
     r.raw(20usize.checked_mul(nsh).ok_or("count")?)?;
     let ng = r.u32()? as usize;
-    let gids: Vec<[u8; 12]> = (0..ng).map(|_| r.raw(12).map(|s| s.try_into().unwrap())).collect::<R<_>>()?;
+    let gids: Vec<[u8; 12]> = (0..ng)
+        .map(|_| r.raw(12).map(|s| s.try_into().unwrap()))
+        .collect::<R<_>>()?;
     let nmap = r.u32()? as usize;
     r.raw(8usize.checked_mul(nmap).ok_or("count")?)?;
     let n = r.u32()? as usize;
     let ents: Vec<u64> = (0..n).map(|_| r.u64()).collect::<R<_>>()?;
     let ngr = r.u32()? as usize;
-    let groups: Vec<[u32; 4]> = (0..ngr).map(|_| Ok([r.u32()?, r.u32()?, r.u32()?, r.u32()?])).collect::<R<_>>()?;
+    let groups: Vec<[u32; 4]> = (0..ngr)
+        .map(|_| Ok([r.u32()?, r.u32()?, r.u32()?, r.u32()?]))
+        .collect::<R<_>>()?;
     let ni = r.u32()? as usize;
     let idx: Vec<u32> = (0..ni).map(|_| r.u32()).collect::<R<_>>()?;
     if n != nsh || gids.len() != groups.len() {
@@ -812,17 +1130,27 @@ pub fn io_library(lib: &[u8], chunk: &dyn Fn(&[u8; 12]) -> R<Vec<u8>>, label: &s
         let wh = format!("{label}: shader group {g}");
         let mut d = chunk(gid).map_err(|e| format!("{wh}: {e}"))?;
         if d.len() != stored as usize {
-            return Err(format!("{wh} is {} bytes, its entry says {stored}", d.len()));
+            return Err(format!(
+                "{wh} is {} bytes, its entry says {stored}",
+                d.len()
+            ));
         }
         if stored < raw {
             d = archive::oodle(&d, raw as usize, &wh)?;
         }
-        let sel = idx.get(first as usize..(first + cnt) as usize).ok_or_else(|| format!("{wh}: indices out of range"))?;
-        let mut mine: Vec<(u64, usize)> = sel.iter().filter_map(|&s| ents.get(s as usize).map(|e| (e >> 34, s as usize))).collect();
+        let sel = idx
+            .get(first as usize..(first + cnt) as usize)
+            .ok_or_else(|| format!("{wh}: indices out of range"))?;
+        let mut mine: Vec<(u64, usize)> = sel
+            .iter()
+            .filter_map(|&s| ents.get(s as usize).map(|e| (e >> 34, s as usize)))
+            .collect();
         mine.sort();
         for (j, &(at, s)) in mine.iter().enumerate() {
             let nxt = mine.get(j + 1).map(|x| x.0).unwrap_or(raw as u64);
-            let c = d.get(at as usize..nxt as usize).ok_or_else(|| format!("{wh}: shader {s} out of range"))?;
+            let c = d
+                .get(at as usize..nxt as usize)
+                .ok_or_else(|| format!("{wh}: shader {s} out of range"))?;
             let w = format!("{label}#UE{s}");
             let (st, ctl, cd) = record(c, Some((ents[s] & 0xf) as u8), &w)?;
             out.push(Found::new(w, st, ctl, cd));
@@ -878,7 +1206,10 @@ mod tests {
         for x in [2u32, 0, 0, 0, 2] {
             a.extend_from_slice(&x.to_le_bytes());
         }
-        for (off, size, raw, f) in [(0u64, rv.len(), rv.len(), 0u8), (rv.len() as u64, rpc.len(), rp.len(), 3)] {
+        for (off, size, raw, f) in [
+            (0u64, rv.len(), rv.len(), 0u8),
+            (rv.len() as u64, rpc.len(), rp.len(), 3),
+        ] {
             a.extend_from_slice(&off.to_le_bytes());
             a.extend_from_slice(&(size as u32).to_le_bytes());
             a.extend_from_slice(&(raw as u32).to_le_bytes());
@@ -888,7 +1219,13 @@ mod tests {
         a.extend_from_slice(&rv);
         a.extend_from_slice(&rpc);
         let f = shader_archive(&a, "/x.ushaderbytecode").unwrap();
-        assert_eq!(f.iter().map(|f| (f.stage, f.key())).collect::<Vec<_>>(), vec![(Stage::Vs, skey(&vs.0, &vs.1)), (Stage::Ps, skey(&ps.0, &ps.1))]);
+        assert_eq!(
+            f.iter().map(|f| (f.stage, f.key())).collect::<Vec<_>>(),
+            vec![
+                (Stage::Vs, skey(&vs.0, &vs.1)),
+                (Stage::Ps, skey(&ps.0, &ps.1))
+            ]
+        );
         // the archive in a version 4 pak, stored
         let mut pak = vec![0u8; 53];
         pak.extend_from_slice(&a);
@@ -896,7 +1233,10 @@ mod tests {
         let mut idx = vec![];
         fstr(&mut idx, "../../../");
         idx.extend_from_slice(&1i32.to_le_bytes());
-        fstr(&mut idx, "Game/Content/ShaderArchive-Global-SF_GLSL_SWITCH.ushaderbytecode");
+        fstr(
+            &mut idx,
+            "Game/Content/ShaderArchive-Global-SF_GLSL_SWITCH.ushaderbytecode",
+        );
         for x in [0u64, a.len() as u64, a.len() as u64] {
             idx.extend_from_slice(&x.to_le_bytes());
         }
@@ -939,7 +1279,8 @@ mod tests {
         let mut first = [0u8; 16];
         first[..4].copy_from_slice(&10i32.to_le_bytes());
         first[4..13].copy_from_slice(b"../../../");
-        aes::Aes256::new(GenericArray::from_slice(&key)).encrypt_block(GenericArray::from_mut_slice(&mut first));
+        aes::Aes256::new(GenericArray::from_slice(&key))
+            .encrypt_block(GenericArray::from_mut_slice(&mut first));
         let mut img = vec![0u8; 0x200];
         img[0x140..0x160].copy_from_slice(&key);
         assert_eq!(find_key(&img, 0x100, &first, &[]), Some(key));
@@ -991,7 +1332,10 @@ mod tests {
         be5(&mut t, lib.len() as u64);
         be5(&mut t, bs as u64);
         be5(&mut t, group.len() as u64);
-        for (at, n) in [(0u64, lib.len() as u64), (lib.len() as u64, group.len() as u64)] {
+        for (at, n) in [
+            (0u64, lib.len() as u64),
+            (lib.len() as u64, group.len() as u64),
+        ] {
             t.extend_from_slice(&at.to_le_bytes()[..5]);
             t.extend_from_slice(&n.to_le_bytes()[..3]);
             t.extend_from_slice(&n.to_le_bytes()[..3]);
@@ -1007,7 +1351,13 @@ mod tests {
             toc.read(1, &read, None, "/x.utoc")
         };
         let f = io_library(&l, &chunk, "/x.utoc#lib").unwrap();
-        assert_eq!(f.iter().map(|f| (f.stage, f.key())).collect::<Vec<_>>(), vec![(Stage::Vs, skey(&vs.0, &vs.1)), (Stage::Ps, skey(&ps.0, &ps.1))]);
+        assert_eq!(
+            f.iter().map(|f| (f.stage, f.key())).collect::<Vec<_>>(),
+            vec![
+                (Stage::Vs, skey(&vs.0, &vs.1)),
+                (Stage::Ps, skey(&ps.0, &ps.1))
+            ]
+        );
     }
 
     #[test]
@@ -1030,14 +1380,30 @@ mod tests {
         d.extend_from_slice(&0x360u16.to_le_bytes());
         d.resize(0x40, 0);
         d.extend_from_slice(&UE3_TAG);
-        for x in [half as u32, (z.len() + rec.len() - half) as u32, rec.len() as u32, z.len() as u32, half as u32, (rec.len() - half) as u32, (rec.len() - half) as u32] {
+        for x in [
+            half as u32,
+            (z.len() + rec.len() - half) as u32,
+            rec.len() as u32,
+            z.len() as u32,
+            half as u32,
+            (rec.len() - half) as u32,
+            (rec.len() - half) as u32,
+        ] {
             d.extend_from_slice(&x.to_le_bytes());
         }
         d.extend_from_slice(&z);
         d.extend_from_slice(&rec[half..]);
         let mut sc = crate::formats::Scanned::default();
-        crate::formats::scan_file(&Default::default(), &d, "/CookedSwitch/CombinedShaderCache.xxx", &mut sc);
+        crate::formats::scan_file(
+            &Default::default(),
+            &d,
+            "/CookedSwitch/CombinedShaderCache.xxx",
+            &mut sc,
+        );
         assert!(sc.problems.is_empty(), "{:?}", sc.problems);
-        assert_eq!(sc.found.iter().map(|f| f.key()).collect::<Vec<_>>(), vec![skey(&ps.0, &ps.1), skey(&cs.0, &cs.1)]);
+        assert_eq!(
+            sc.found.iter().map(|f| f.key()).collect::<Vec<_>>(),
+            vec![skey(&ps.0, &ps.1), skey(&cs.0, &cs.1)]
+        );
     }
 }

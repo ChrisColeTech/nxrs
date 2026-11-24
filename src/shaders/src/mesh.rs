@@ -5,14 +5,15 @@
 //! shader, the primitive count and index bytes). This pass keeps that kernel as an ordinary function and adds the
 //! stage's own entry point around it:
 //!
-//! 1. the stage memory is cleared (every invocation a share of it), the workgroup's number is stored (and, for a mesh
-//!    shader launched by a task, the task's payload is copied in, its word 0 being the mesh workgroup's number among
+//! 1. the stage memory and fixed 4 KiB task payload are cleared (every invocation a share of them), the workgroup's
+//!    number is stored (and, for a mesh shader launched by a task, the shader-declared live payload is copied in, its
+//!    word 0 being the mesh workgroup's number among
 //!    the task's launches, as the hardware leaves it). A task shader's, or a mesh shader's with no task, is the draw's
 //!    first workgroup + its own: the first is word 1 of the draw's NVN record `{count, first}` (`DrawMeshTasks*`), read
 //!    from the storage buffer `mesh_draw` at word `DrawIndex * stride + 1`, the stride (in words) being push constant
 //!    word 3 (byte 12); graphics binds the game's indirect records there, or a staged record for a direct draw;
 //! 2. the kernel runs;
-//! 3. a task shader copies its payload out and launches `min(word 1 of its outputs, 65535)` mesh workgroups; a mesh
+//! 3. a task shader copies its payload out and launches at most the NVN2 task record capacity of 32 mesh workgroups; a mesh
 //!    shader declares its vertices (all `max_v`) and the primitive count the kernel wrote (byte 3 of the primitive
 //!    word, at most `max_p`), and copies the attribute blocks out: vertex v's component k at
 //!    `out + (v / 32) * 32 * nv + 32 * k + v % 32` (words), primitives' after all vertex blocks, their system values
@@ -27,7 +28,7 @@
 use serde_json::Value;
 
 /// Part of a task / mesh output's identity (prebuild.rs): a change here translates those shaders again.
-pub const VERSION: &str = "mesh 3";
+pub const VERSION: &str = "mesh 6";
 
 const OP_EXTENSION: u32 = 10;
 const OP_MEMORY_MODEL: u32 = 14;
@@ -124,8 +125,31 @@ const MODEL_TASK: u32 = 5364;
 const MODEL_MESH: u32 = 5365;
 
 const BLOCK: u32 = 32;
-/// Mesh workgroups a task workgroup launches at most (Vulkan's guaranteed maxMeshWorkGroupCount[0]).
-const MAX_LAUNCH: u32 = 65535;
+/// NVN2's task payload allocation. Shader controls describe the live prefix, not a smaller payload allocation.
+const TASK_PAYLOAD_WORDS: u32 = 1024;
+
+fn payload_words(bytes: u32) -> Result<u32, String> {
+    if bytes > TASK_PAYLOAD_WORDS * 4 {
+        return Err(format!("mesh: declared payload prefix {bytes} exceeds the 4 KiB task interface"));
+    }
+    Ok(bytes.div_ceil(4))
+}
+
+#[cfg(test)]
+mod payload_contract_tests {
+    use super::payload_words;
+    #[test]
+    fn declared_prefix_is_not_silently_clamped_or_wrapped() {
+        assert_eq!(payload_words(0).unwrap(), 0);
+        assert_eq!(payload_words(4093).unwrap(), 1024);
+        assert_eq!(payload_words(4096).unwrap(), 1024);
+        assert!(payload_words(4097).is_err());
+        assert!(payload_words(u32::MAX).is_err());
+    }
+}
+/// NVN2 mesh records emitted by one task workgroup. Keeping the wider Vulkan limit allowed a damaged or stale count
+/// to fan out thousands of groups that read beyond the task payload before descriptor robustness could intervene.
+const MAX_LAUNCH: u32 = 32;
 /// The storage buffer with the draw's NVN records (`{count, first}`), as its OpName says; the reflection's
 /// `{"kind": "mesh_draw"}`.
 pub const DRAW_BUFFER: &str = "mesh_draw";
@@ -157,7 +181,12 @@ impl Info {
         if self.task {
             return vec![];
         }
-        let mut v: Vec<u32> = self.primitive.iter().filter(|p| p.0 >= 0 && !self.vertex.iter().any(|x| x.0 == p.0)).map(|p| p.0 as u32).collect();
+        let mut v: Vec<u32> = self
+            .primitive
+            .iter()
+            .filter(|p| p.0 >= 0 && !self.vertex.iter().any(|x| x.0 == p.0))
+            .map(|p| p.0 as u32)
+            .collect();
         v.sort();
         v.dedup();
         v
@@ -171,10 +200,26 @@ impl Info {
     pub fn from_json(v: &Value) -> Result<Info, String> {
         let u = |k: &str| v.get(k).and_then(Value::as_u64).unwrap_or(0) as u32;
         let comps = |k: &str| -> Vec<(i64, u32)> {
-            v.get(k).and_then(Value::as_array).map(|a| a.iter().filter_map(|c| Some((c.get(0)?.as_i64()?, c.get(1)?.as_u64()? as u32))).collect()).unwrap_or_default()
+            v.get(k)
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|c| Some((c.get(0)?.as_i64()?, c.get(1)?.as_u64()? as u32)))
+                        .collect()
+                })
+                .unwrap_or_default()
         };
-        let kind = v.get("kind").and_then(Value::as_str).ok_or("mesh info without a kind")?;
-        let memory: Vec<u32> = v.get("memory").and_then(Value::as_array).ok_or("mesh info without its memory layout")?.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect();
+        let kind = v
+            .get("kind")
+            .and_then(Value::as_str)
+            .ok_or("mesh info without a kind")?;
+        let memory: Vec<u32> = v
+            .get("memory")
+            .and_then(Value::as_array)
+            .ok_or("mesh info without its memory layout")?
+            .iter()
+            .filter_map(|x| x.as_u64().map(|x| x as u32))
+            .collect();
         if memory.len() < 4 {
             return Err("mesh info: memory layout too short".into());
         }
@@ -183,12 +228,23 @@ impl Info {
             threads: u("threads").max(1),
             payload: u("payload"),
             has_task: v.get("task").and_then(Value::as_bool).unwrap_or(false),
-            verts: match u("verts") { 0 => 3, n => n },
+            verts: match u("verts") {
+                0 => 3,
+                n => n,
+            },
             max_v: u("max_v"),
             max_p: u("max_p"),
             vertex: comps("vertex"),
             primitive: comps("primitive"),
-            primitive_system: v.get("primitive_system").and_then(Value::as_array).map(|a| a.iter().filter_map(|x| x.as_u64().map(|x| x as u32)).collect()).unwrap_or_default(),
+            primitive_system: v
+                .get("primitive_system")
+                .and_then(Value::as_array)
+                .map(|a| {
+                    a.iter()
+                        .filter_map(|x| x.as_u64().map(|x| x as u32))
+                        .collect()
+                })
+                .unwrap_or_default(),
             memory,
         })
     }
@@ -200,7 +256,9 @@ fn str_words(s: &str) -> Vec<u32> {
     while b.len() % 4 != 0 {
         b.push(0);
     }
-    b.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect()
+    b.chunks(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect()
 }
 
 fn inst(op: u32, ops: &[u32]) -> Vec<u32> {
@@ -230,7 +288,10 @@ impl M {
             ins.push(w[i..i + n].to_vec());
             i += n;
         }
-        Some(M { head: w[..5].try_into().unwrap(), ins })
+        Some(M {
+            head: w[..5].try_into().unwrap(),
+            ins,
+        })
     }
     fn words(&self) -> Vec<u32> {
         let mut v = self.head.to_vec();
@@ -248,11 +309,18 @@ impl M {
         i[0] & 0xffff
     }
     fn first_function(&self) -> usize {
-        self.ins.iter().position(|i| M::op(i) == OP_FUNCTION).unwrap_or(self.ins.len())
+        self.ins
+            .iter()
+            .position(|i| M::op(i) == OP_FUNCTION)
+            .unwrap_or(self.ins.len())
     }
     /// A type with these operands (after its result id), made at the end of the global section when missing.
     fn ty(&mut self, op: u32, ops: &[u32]) -> u32 {
-        if let Some(i) = self.ins.iter().find(|i| M::op(i) == op && i.len() == ops.len() + 2 && &i[2..] == ops) {
+        if let Some(i) = self
+            .ins
+            .iter()
+            .find(|i| M::op(i) == op && i.len() == ops.len() + 2 && &i[2..] == ops)
+        {
             return i[1];
         }
         let id = self.id();
@@ -263,7 +331,11 @@ impl M {
         id
     }
     fn constant(&mut self, ty: u32, val: u32) -> u32 {
-        if let Some(i) = self.ins.iter().find(|i| M::op(i) == OP_CONSTANT && i.len() == 4 && i[1] == ty && i[3] == val) {
+        if let Some(i) = self
+            .ins
+            .iter()
+            .find(|i| M::op(i) == OP_CONSTANT && i.len() == 4 && i[1] == ty && i[3] == val)
+        {
             return i[2];
         }
         let id = self.id();
@@ -286,7 +358,12 @@ impl M {
             .iter()
             .rposition(|i| matches!(M::op(i), 71 | 72 | 73 | 74 | 75 | 332 | 5632 | 5633))
             .map(|p| p + 1)
-            .unwrap_or_else(|| self.ins.iter().position(|i| matches!(M::op(i), 19..=39 | 43..=52 | 59)).unwrap_or(0));
+            .unwrap_or_else(|| {
+                self.ins
+                    .iter()
+                    .position(|i| matches!(M::op(i), 19..=39 | 43..=52 | 59))
+                    .unwrap_or(0)
+            });
         self.ins.insert(at, inst(op, d));
     }
     /// A type made anew at the end of the global section (structs and arrays that carry decorations of their own).
@@ -299,13 +376,26 @@ impl M {
         id
     }
     fn name(&mut self, id: u32, n: &str) {
-        let at = self.ins.iter().rposition(|i| matches!(M::op(i), 2 | 3 | 4 | 5 | 6 | 7 | 10 | 11 | 14 | 15 | 16 | 17 | 331)).map(|p| p + 1).unwrap_or(0);
+        let at = self
+            .ins
+            .iter()
+            .rposition(|i| {
+                matches!(
+                    M::op(i),
+                    2 | 3 | 4 | 5 | 6 | 7 | 10 | 11 | 14 | 15 | 16 | 17 | 331
+                )
+            })
+            .map(|p| p + 1)
+            .unwrap_or(0);
         let mut v = vec![id];
         v.extend(str_words(n));
         self.ins.insert(at, inst(OP_NAME, &v));
     }
     fn builtin_var(&self, b: u32) -> Option<u32> {
-        self.ins.iter().find(|i| M::op(i) == OP_DECORATE && i.len() >= 4 && i[2] == DEC_BUILTIN && i[3] == b).map(|i| i[1])
+        self.ins
+            .iter()
+            .find(|i| M::op(i) == OP_DECORATE && i.len() >= 4 && i[2] == DEC_BUILTIN && i[3] == b)
+            .map(|i| i[1])
     }
     fn def(&self, id: u32) -> Option<&Vec<u32>> {
         self.ins.iter().find(|i| {
@@ -345,8 +435,23 @@ impl F<'_> {
         id
     }
     /// for (n = start; n < end; n += step) body(n)
-    fn for_range(&mut self, var: u32, uint: u32, boolt: u32, start: u32, end: u32, step: u32, body: &mut dyn FnMut(&mut F, u32)) {
-        let (head, cond, bl, cont, merge) = (self.m.id(), self.m.id(), self.m.id(), self.m.id(), self.m.id());
+    fn for_range(
+        &mut self,
+        var: u32,
+        uint: u32,
+        boolt: u32,
+        start: u32,
+        end: u32,
+        step: u32,
+        body: &mut dyn FnMut(&mut F, u32),
+    ) {
+        let (head, cond, bl, cont, merge) = (
+            self.m.id(),
+            self.m.id(),
+            self.m.id(),
+            self.m.id(),
+            self.m.id(),
+        );
         self.raw(OP_STORE, &[var, start]);
         self.raw(OP_BRANCH, &[head]);
         self.label(head);
@@ -379,22 +484,49 @@ impl F<'_> {
 
 /// The translated compute kernel → the task or mesh stage. Errors say why it cannot be.
 pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
+    let pay_words = payload_words(i.payload)?;
     let w = crate::reflect::words(spv).ok_or("not SPIR-V")?;
     let mut m = M::parse(&w).ok_or("SPIR-V that does not parse")?;
     let kind = if i.task { "task" } else { "mesh" };
     buffer_blocks_to_storage(&mut m);
     // the kernel and its stage memory
-    let ep = m.ins.iter().position(|x| M::op(x) == OP_ENTRY_POINT).ok_or("no entry point")?;
+    let ep = m
+        .ins
+        .iter()
+        .position(|x| M::op(x) == OP_ENTRY_POINT)
+        .ok_or("no entry point")?;
     let old = m.ins[ep][2];
-    let wvars: Vec<(u32, u32)> = m.ins.iter().filter(|x| M::op(x) == OP_VARIABLE && x.len() >= 4 && x[3] == SC_WORKGROUP).map(|x| (x[2], x[1])).collect();
+    let wvars: Vec<(u32, u32)> = m
+        .ins
+        .iter()
+        .filter(|x| M::op(x) == OP_VARIABLE && x.len() >= 4 && x[3] == SC_WORKGROUP)
+        .map(|x| (x[2], x[1]))
+        .collect();
     if wvars.len() != 1 {
-        return Err(format!("{kind}: {} workgroup variables (the stage memory must be the only one)", wvars.len()));
+        return Err(format!(
+            "{kind}: {} workgroup variables (the stage memory must be the only one)",
+            wvars.len()
+        ));
     }
     let (mem, memptr) = wvars[0];
-    let arr = m.def(memptr).and_then(|p| p.get(3).copied()).ok_or("stage memory pointer type")?;
-    let (elem, len_id) = m.def(arr).filter(|a| M::op(a) == OP_TYPE_ARRAY).map(|a| (a[2], a[3])).ok_or("stage memory is not an array")?;
-    let words = m.def(len_id).filter(|c| M::op(c) == OP_CONSTANT).map(|c| c[3]).ok_or("stage memory length")?;
-    if !m.def(elem).is_some_and(|t| M::op(t) == OP_TYPE_INT && t[2] == 32) {
+    let arr = m
+        .def(memptr)
+        .and_then(|p| p.get(3).copied())
+        .ok_or("stage memory pointer type")?;
+    let (elem, len_id) = m
+        .def(arr)
+        .filter(|a| M::op(a) == OP_TYPE_ARRAY)
+        .map(|a| (a[2], a[3]))
+        .ok_or("stage memory is not an array")?;
+    let words = m
+        .def(len_id)
+        .filter(|c| M::op(c) == OP_CONSTANT)
+        .map(|c| c[3])
+        .ok_or("stage memory length")?;
+    if !m
+        .def(elem)
+        .is_some_and(|t| M::op(t) == OP_TYPE_INT && t[2] == 32)
+    {
         return Err(format!("{kind}: stage memory of other than 32-bit words"));
     }
     let lay = &i.memory;
@@ -421,7 +553,12 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
         None => match m.builtin_var(BI_SUBGROUP_LOCAL_ID) {
             Some(v) => {
                 for x in m.ins.iter_mut() {
-                    if M::op(x) == OP_DECORATE && x.len() >= 4 && x[1] == v && x[2] == DEC_BUILTIN && x[3] == BI_SUBGROUP_LOCAL_ID {
+                    if M::op(x) == OP_DECORATE
+                        && x.len() >= 4
+                        && x[1] == v
+                        && x[2] == DEC_BUILTIN
+                        && x[3] == BI_SUBGROUP_LOCAL_ID
+                    {
                         x[3] = BI_LOCAL_INVOCATION_INDEX;
                     }
                 }
@@ -449,7 +586,17 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
             .ins
             .iter()
             .filter(|x| M::op(x) == OP_DECORATE && x.len() >= 4 && x[2] == DEC_SET && x[3] == set)
-            .filter_map(|x| m.ins.iter().find(|y| M::op(y) == OP_DECORATE && y.len() >= 4 && y[1] == x[1] && y[2] == DEC_BINDING).map(|y| y[3]))
+            .filter_map(|x| {
+                m.ins
+                    .iter()
+                    .find(|y| {
+                        M::op(y) == OP_DECORATE
+                            && y.len() >= 4
+                            && y[1] == x[1]
+                            && y[2] == DEC_BINDING
+                    })
+                    .map(|y| y[3])
+            })
             .max()
             .map_or(1, |b| b + 1);
         let ra = m.fresh_type(OP_TYPE_RUNTIME_ARRAY, &[uint]);
@@ -471,9 +618,18 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
         m.name(push, "mesh_push");
         let di = m.global_var(in_u, SC_INPUT);
         m.decorate(&[di, DEC_BUILTIN, BI_DRAW_INDEX]);
-        if !m.ins.iter().any(|x| M::op(x) == OP_CAPABILITY && x[1] == CAP_DRAW_PARAMETERS) {
-            let at = m.ins.iter().rposition(|x| M::op(x) == OP_CAPABILITY).ok_or("no capability")?;
-            m.ins.insert(at + 1, inst(OP_CAPABILITY, &[CAP_DRAW_PARAMETERS]));
+        if !m
+            .ins
+            .iter()
+            .any(|x| M::op(x) == OP_CAPABILITY && x[1] == CAP_DRAW_PARAMETERS)
+        {
+            let at = m
+                .ins
+                .iter()
+                .rposition(|x| M::op(x) == OP_CAPABILITY)
+                .ok_or("no capability")?;
+            m.ins
+                .insert(at + 1, inst(OP_CAPABILITY, &[CAP_DRAW_PARAMETERS]));
         }
         let sb_u = m.ty(OP_TYPE_POINTER, &[SC_STORAGE_BUFFER, uint]);
         let pc_u = m.ty(OP_TYPE_POINTER, &[SC_PUSH_CONSTANT, uint]);
@@ -481,10 +637,8 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
     } else {
         None
     };
-    let pay_words = (i.payload + 3) / 4;
-    let pay_words = pay_words.max(1);
     let payload = if i.task || i.has_task {
-        let n = c(&mut m, pay_words);
+        let n = c(&mut m, TASK_PAYLOAD_WORDS);
         let pt = m.ty(OP_TYPE_ARRAY, &[uint, n]);
         let pp = m.ty(OP_TYPE_POINTER, &[SC_TASK_PAYLOAD, pt]);
         Some(m.global_var(pp, SC_TASK_PAYLOAD))
@@ -504,7 +658,10 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
     let mut pouts: Vec<Out> = vec![]; // per-primitive generic attributes (PerPrimitiveEXT)
     let mut sys_outs: Vec<(u32, u32, u32)> = vec![]; // (variable, element pointer, component in the primitive block)
     let mut idx_var = (0, 0, 0); // (variable, element pointer, index type)
-    let (nv, npc) = (i.vertex.len() as u32, i.primitive_system.len() as u32 + i.primitive.len() as u32);
+    let (nv, npc) = (
+        i.vertex.len() as u32,
+        i.primitive_system.len() as u32 + i.primitive.len() as u32,
+    );
     if !i.task {
         if i.max_v == 0 || i.max_p == 0 {
             return Err("mesh: no vertices or primitives".into());
@@ -535,7 +692,12 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
                 let of = m.ty(OP_TYPE_POINTER, &[SC_OUTPUT, flt]);
                 let v = m.global_var(fap, SC_OUTPUT);
                 m.decorate(&[v, DEC_BUILTIN, BI_POINT_SIZE]);
-                vouts.push(Out { var: v, elem_ptr: of, comps: *cs, scalar: true });
+                vouts.push(Out {
+                    var: v,
+                    elem_ptr: of,
+                    comps: *cs,
+                    scalar: true,
+                });
                 continue;
             }
             let v = m.global_var(va4p, SC_OUTPUT);
@@ -545,7 +707,12 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
             } else {
                 m.decorate(&[v, DEC_LOCATION, *a as u32]);
             }
-            vouts.push(Out { var: v, elem_ptr: o4, comps: *cs, scalar: false });
+            vouts.push(Out {
+                var: v,
+                elem_ptr: o4,
+                comps: *cs,
+                scalar: false,
+            });
         }
         let pa4 = m.ty(OP_TYPE_ARRAY, &[vec4, nmax_p]);
         let pa4p = m.ty(OP_TYPE_POINTER, &[SC_OUTPUT, pa4]);
@@ -568,7 +735,12 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
             let v = m.global_var(pa4p, SC_OUTPUT);
             m.decorate(&[v, DEC_LOCATION, a as u32]);
             m.decorate(&[v, DEC_PER_PRIMITIVE]);
-            pouts.push(Out { var: v, elem_ptr: o4, comps: cs, scalar: false });
+            pouts.push(Out {
+                var: v,
+                elem_ptr: o4,
+                comps: cs,
+                scalar: false,
+            });
         }
         // per-primitive system values: OMAP bit 8 the primitive ID, 9 the layer, 10 the viewport
         let ua = m.ty(OP_TYPE_ARRAY, &[uint, nmax_p]);
@@ -606,9 +778,19 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
 
     // SPIR-V 1.4, the capability and the extension
     m.head[1] = m.head[1].max(0x0001_0400);
-    let last_cap = m.ins.iter().rposition(|x| M::op(x) == OP_CAPABILITY).ok_or("no capability")?;
-    m.ins.insert(last_cap + 1, inst(OP_CAPABILITY, &[CAP_MESH_SHADING]));
-    let after_caps = m.ins.iter().rposition(|x| M::op(x) == OP_CAPABILITY).unwrap() + 1;
+    let last_cap = m
+        .ins
+        .iter()
+        .rposition(|x| M::op(x) == OP_CAPABILITY)
+        .ok_or("no capability")?;
+    m.ins
+        .insert(last_cap + 1, inst(OP_CAPABILITY, &[CAP_MESH_SHADING]));
+    let after_caps = m
+        .ins
+        .iter()
+        .rposition(|x| M::op(x) == OP_CAPABILITY)
+        .unwrap()
+        + 1;
     let mut ext = vec![];
     ext.extend(str_words("SPV_EXT_mesh_shader"));
     m.ins.insert(after_caps, inst(OP_EXTENSION, &ext));
@@ -631,7 +813,10 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
     let (cmaxv, cmaxp) = (c(&mut m, i.max_v.max(1)), c(&mut m, i.max_p.max(1)));
     let cvstride = c(&mut m, BLOCK * nv.max(1));
     let cpstride = c(&mut m, BLOCK * npc.max(1));
-    let cpbase = c(&mut m, out + (i.max_v.max(1) + BLOCK - 1) / BLOCK * BLOCK * nv);
+    let cpbase = c(
+        &mut m,
+        out + (i.max_v.max(1) + BLOCK - 1) / BLOCK * BLOCK * nv,
+    );
     let cprimw = c(&mut m, prim / 4);
     let c24 = c(&mut m, 24);
     let cidx0 = c(&mut m, prim + 4);
@@ -644,7 +829,11 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
         kconst.push(c(&mut m, k * BLOCK));
     }
 
-    let mut f = F { m: &mut m, code: vec![], vars: vec![] };
+    let mut f = F {
+        m: &mut m,
+        code: vec![],
+        vars: vec![],
+    };
     let ivar = f.local(fnp);
     let lv = f.e(OP_LOAD, uint, &[lid]);
     let w3 = f.e(OP_LOAD, uvec3, &[wid]);
@@ -660,7 +849,16 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
         f.e(OP_LOAD, uint, &[p])
     };
     // 1. the stage memory starts at zero
-    f.for_range(ivar, uint, boolt, lv, nwords, threads, &mut |f, n| store_mem(f, n, zero));
+    f.for_range(ivar, uint, boolt, lv, nwords, threads, &mut |f, n| {
+        store_mem(f, n, zero)
+    });
+    if let (true, Some(pv)) = (i.task, payload) {
+        let ctask = c(f.m, TASK_PAYLOAD_WORDS);
+        f.for_range(ivar, uint, boolt, lv, ctask, threads, &mut |f, n| {
+            let pp = f.e(OP_ACCESS_CHAIN, pay_e, &[pv, n]);
+            f.raw(OP_STORE, &[pp, zero]);
+        });
+    }
     barrier(&mut f);
     if let (false, Some(pv)) = (i.task, payload) {
         f.for_range(ivar, uint, boolt, lv, cpay, threads, &mut |f, n| {
@@ -676,7 +874,8 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
         });
     } else {
         // the draw's first workgroup + this one: record DrawIndex * stride, word 1
-        let (buf, push, di, sb_u, pc_u) = draw.ok_or("a stage that reads the draw's first workgroup without its buffer")?;
+        let (buf, push, di, sb_u, pc_u) =
+            draw.ok_or("a stage that reads the draw's first workgroup without its buffer")?;
         f.if_then(is0, &mut |f| {
             let sp = f.e(OP_ACCESS_CHAIN, pc_u, &[push, zero]);
             let stride = f.e(OP_LOAD, uint, &[sp]);
@@ -746,7 +945,13 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
         f.for_range(ivar, uint, boolt, lv, cmaxv, threads, &mut |f, n| {
             for o in &vouts {
                 let val = if o.scalar {
-                    let x = word(f, cout, cvstride, n, o.comps.iter().flatten().next().copied().unwrap_or(0));
+                    let x = word(
+                        f,
+                        cout,
+                        cvstride,
+                        n,
+                        o.comps.iter().flatten().next().copied().unwrap_or(0),
+                    );
                     f.e(OP_BITCAST, flt, &[x])
                 } else {
                     vec4_of(f, cout, cvstride, n, &o.comps)
@@ -770,7 +975,11 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
                 let b = f.e(OP_SHIFT_RIGHT_LOGICAL, uint, &[wv, sh]);
                 idx.push(f.e(OP_BITWISE_AND, uint, &[b, c255]));
             }
-            let val = if idx.len() == 1 { idx[0] } else { f.e(OP_COMPOSITE_CONSTRUCT, it, &idx) };
+            let val = if idx.len() == 1 {
+                idx[0]
+            } else {
+                f.e(OP_COMPOSITE_CONSTRUCT, it, &idx)
+            };
             let p = f.e(OP_ACCESS_CHAIN, ie, &[iv, n]);
             f.raw(OP_STORE, &[p, val]);
             for &(sv, se, k) in &sys_outs {
@@ -788,14 +997,21 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
     }
     let (code, vars) = (std::mem::take(&mut f.code), std::mem::take(&mut f.vars));
     let first_label = m.id();
-    let mut func = vec![inst(OP_FUNCTION, &[voidt, entry, 0, fnt]), inst(OP_LABEL, &[first_label])];
+    let mut func = vec![
+        inst(OP_FUNCTION, &[voidt, entry, 0, fnt]),
+        inst(OP_LABEL, &[first_label]),
+    ];
     func.extend(vars);
     func.extend(code);
     func.push(inst(OP_FUNCTION_END, &[]));
     m.ins.extend(func);
 
     // the entry point: the new function, every global variable in its interface; its modes
-    let ep = m.ins.iter().position(|x| M::op(x) == OP_ENTRY_POINT).unwrap();
+    let ep = m
+        .ins
+        .iter()
+        .position(|x| M::op(x) == OP_ENTRY_POINT)
+        .unwrap();
     let name_len = {
         let e = &m.ins[ep];
         let mut n = 0;
@@ -811,7 +1027,8 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
     let ff = m.first_function();
     let mut iface: Vec<u32> = vec![];
     for x in &m.ins[..ff] {
-        if M::op(x) == OP_VARIABLE && x.len() >= 4 && x[3] != SC_FUNCTION && !iface.contains(&x[2]) {
+        if M::op(x) == OP_VARIABLE && x.len() >= 4 && x[3] != SC_FUNCTION && !iface.contains(&x[2])
+        {
             iface.push(x[2]);
         }
     }
@@ -825,15 +1042,26 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
         }
     }
     if !i.task {
-        let at = m.ins.iter().rposition(|x| M::op(x) == OP_EXECUTION_MODE).map(|p| p + 1).unwrap_or(ep + 1);
+        let at = m
+            .ins
+            .iter()
+            .rposition(|x| M::op(x) == OP_EXECUTION_MODE)
+            .map(|p| p + 1)
+            .unwrap_or(ep + 1);
         let topo = match i.verts {
             1 => EM_OUTPUT_POINTS,
             2 => EM_OUTPUT_LINES,
             _ => EM_OUTPUT_TRIANGLES,
         };
         m.ins.insert(at, inst(OP_EXECUTION_MODE, &[entry, topo]));
-        m.ins.insert(at, inst(OP_EXECUTION_MODE, &[entry, EM_OUTPUT_PRIMITIVES, i.max_p]));
-        m.ins.insert(at, inst(OP_EXECUTION_MODE, &[entry, EM_OUTPUT_VERTICES, i.max_v]));
+        m.ins.insert(
+            at,
+            inst(OP_EXECUTION_MODE, &[entry, EM_OUTPUT_PRIMITIVES, i.max_p]),
+        );
+        m.ins.insert(
+            at,
+            inst(OP_EXECUTION_MODE, &[entry, EM_OUTPUT_VERTICES, i.max_v]),
+        );
     }
     let _ = (OP_MEMORY_MODEL, OP_CONSTANT_NULL);
     Ok(m.words().iter().flat_map(|x| x.to_le_bytes()).collect())
@@ -844,14 +1072,28 @@ pub fn to_stage(spv: &[u8], i: &Info, set: u32) -> Result<Vec<u8>, String> {
 fn buffer_blocks_to_storage(m: &mut M) {
     const DEC_BUFFER_BLOCK: u32 = 3;
     const SC_UNIFORM: u32 = 2;
-    let bb: Vec<u32> = m.ins.iter().filter(|x| M::op(x) == OP_DECORATE && x.len() >= 3 && x[2] == DEC_BUFFER_BLOCK).map(|x| x[1]).collect();
+    let bb: Vec<u32> = m
+        .ins
+        .iter()
+        .filter(|x| M::op(x) == OP_DECORATE && x.len() >= 3 && x[2] == DEC_BUFFER_BLOCK)
+        .map(|x| x[1])
+        .collect();
     if bb.is_empty() {
         return;
     }
     // a struct reached through arrays (a variable may be an array of blocks)
     let mut wraps: Vec<u32> = bb.clone();
     loop {
-        let more: Vec<u32> = m.ins.iter().filter(|x| matches!(M::op(x), OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY) && wraps.contains(&x[2]) && !wraps.contains(&x[1])).map(|x| x[1]).collect();
+        let more: Vec<u32> = m
+            .ins
+            .iter()
+            .filter(|x| {
+                matches!(M::op(x), OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY)
+                    && wraps.contains(&x[2])
+                    && !wraps.contains(&x[1])
+            })
+            .map(|x| x[1])
+            .collect();
         if more.is_empty() {
             break;
         }
@@ -883,7 +1125,11 @@ fn buffer_blocks_to_storage(m: &mut M) {
         for k in 0..m.ins.len() {
             let x = &m.ins[k];
             let op = M::op(x);
-            if matches!(op, 65 | 66 | 67 | 70 | 83) && x.len() >= 4 && derived.contains(&x[3]) && !derived.contains(&x[2]) {
+            if matches!(op, 65 | 66 | 67 | 70 | 83)
+                && x.len() >= 4
+                && derived.contains(&x[3])
+                && !derived.contains(&x[2])
+            {
                 derived.insert(x[2]);
                 changed = true;
             }
@@ -892,9 +1138,23 @@ fn buffer_blocks_to_storage(m: &mut M) {
             break;
         }
     }
-    let pointee: std::collections::HashMap<u32, (u32, u32)> = m.ins.iter().filter(|x| M::op(x) == OP_TYPE_POINTER).map(|x| (x[1], (x[2], x[3]))).collect();
+    let pointee: std::collections::HashMap<u32, (u32, u32)> = m
+        .ins
+        .iter()
+        .filter(|x| M::op(x) == OP_TYPE_POINTER)
+        .map(|x| (x[1], (x[2], x[3])))
+        .collect();
     let is_ptr_op = |x: &Vec<u32>| matches!(M::op(x), 65 | 66 | 67 | 70 | 83) && x.len() >= 4;
-    let olds: Vec<u32> = m.ins.iter().filter(|x| is_ptr_op(x) && derived.contains(&x[2]) && pointee.get(&x[1]).is_some_and(|p| p.0 == SC_UNIFORM)).map(|x| x[1]).collect();
+    let olds: Vec<u32> = m
+        .ins
+        .iter()
+        .filter(|x| {
+            is_ptr_op(x)
+                && derived.contains(&x[2])
+                && pointee.get(&x[1]).is_some_and(|p| p.0 == SC_UNIFORM)
+        })
+        .map(|x| x[1])
+        .collect();
     let mut retype: std::collections::HashMap<u32, u32> = std::collections::HashMap::new();
     for t in olds {
         if !retype.contains_key(&t) {
@@ -909,7 +1169,10 @@ fn buffer_blocks_to_storage(m: &mut M) {
             }
         }
     }
-    m.ins.retain(|x| !(M::op(x) == OP_EXTENSION && x[1..] == str_words("SPV_KHR_storage_buffer_storage_class")[..]));
+    m.ins.retain(|x| {
+        !(M::op(x) == OP_EXTENSION
+            && x[1..] == str_words("SPV_KHR_storage_buffer_storage_class")[..])
+    });
 }
 
 /// SPIR-V 1.4 for a module: its entry points list every global variable (1.4's rule), its version word raised.
@@ -920,9 +1183,16 @@ fn to_1_4(m: &mut M) {
     m.head[1] = 0x0001_0400;
     buffer_blocks_to_storage(m);
     let ff = m.first_function();
-    let globals: Vec<u32> = m.ins[..ff].iter().filter(|x| M::op(x) == OP_VARIABLE && x.len() >= 4 && x[3] != SC_FUNCTION).map(|x| x[2]).collect();
+    let globals: Vec<u32> = m.ins[..ff]
+        .iter()
+        .filter(|x| M::op(x) == OP_VARIABLE && x.len() >= 4 && x[3] != SC_FUNCTION)
+        .map(|x| x[2])
+        .collect();
     for e in m.ins.iter_mut().filter(|x| M::op(x) == OP_ENTRY_POINT) {
-        let name_end = 3 + e[3..].iter().position(|w| w.to_le_bytes().contains(&0)).map_or(e.len() - 3, |p| p + 1);
+        let name_end = 3 + e[3..]
+            .iter()
+            .position(|w| w.to_le_bytes().contains(&0))
+            .map_or(e.len() - 3, |p| p + 1);
         let mut v: Vec<u32> = e[1..name_end].to_vec();
         for g in &globals {
             v.push(*g);
@@ -939,31 +1209,68 @@ fn to_1_4(m: &mut M) {
 pub fn fragment_per_primitive(spv: &[u8], locations: &[u32]) -> Result<Vec<u8>, String> {
     let w = crate::reflect::words(spv).ok_or("not SPIR-V")?;
     let mut m = M::parse(&w).ok_or("SPIR-V that does not parse")?;
-    if !m.ins.iter().any(|x| M::op(x) == OP_ENTRY_POINT && x[1] == 4) {
+    if !m
+        .ins
+        .iter()
+        .any(|x| M::op(x) == OP_ENTRY_POINT && x[1] == 4)
+    {
         return Err("not a pixel shader".into());
     }
-    let inputs: Vec<u32> = m.ins.iter().filter(|x| M::op(x) == OP_VARIABLE && x.len() >= 4 && x[3] == SC_INPUT).map(|x| x[2]).collect();
+    let inputs: Vec<u32> = m
+        .ins
+        .iter()
+        .filter(|x| M::op(x) == OP_VARIABLE && x.len() >= 4 && x[3] == SC_INPUT)
+        .map(|x| x[2])
+        .collect();
     let targets: Vec<u32> = m
         .ins
         .iter()
-        .filter(|x| M::op(x) == OP_DECORATE && x.len() >= 4 && x[2] == DEC_LOCATION && locations.contains(&x[3]) && inputs.contains(&x[1]))
+        .filter(|x| {
+            M::op(x) == OP_DECORATE
+                && x.len() >= 4
+                && x[2] == DEC_LOCATION
+                && locations.contains(&x[3])
+                && inputs.contains(&x[1])
+        })
         .map(|x| x[1])
         .collect();
     if targets.is_empty() {
         return Ok(spv.to_vec());
     }
     // interpolation does not apply to a per-primitive value
-    m.ins.retain(|x| !(M::op(x) == OP_DECORATE && x.len() >= 3 && targets.contains(&x[1]) && matches!(x[2], DEC_NO_PERSPECTIVE | DEC_CENTROID | DEC_SAMPLE)));
+    m.ins.retain(|x| {
+        !(M::op(x) == OP_DECORATE
+            && x.len() >= 3
+            && targets.contains(&x[1])
+            && matches!(x[2], DEC_NO_PERSPECTIVE | DEC_CENTROID | DEC_SAMPLE))
+    });
     for t in &targets {
-        if !m.ins.iter().any(|x| M::op(x) == OP_DECORATE && x.len() >= 3 && x[1] == *t && x[2] == DEC_PER_PRIMITIVE) {
+        if !m.ins.iter().any(|x| {
+            M::op(x) == OP_DECORATE && x.len() >= 3 && x[1] == *t && x[2] == DEC_PER_PRIMITIVE
+        }) {
             m.decorate(&[*t, DEC_PER_PRIMITIVE]);
         }
     }
-    if !m.ins.iter().any(|x| M::op(x) == OP_CAPABILITY && x[1] == CAP_MESH_SHADING) {
-        let at = m.ins.iter().rposition(|x| M::op(x) == OP_CAPABILITY).ok_or("no capability")?;
-        m.ins.insert(at + 1, inst(OP_CAPABILITY, &[CAP_MESH_SHADING]));
-        let at = m.ins.iter().rposition(|x| M::op(x) == OP_CAPABILITY).unwrap() + 1;
-        m.ins.insert(at, inst(OP_EXTENSION, &str_words("SPV_EXT_mesh_shader")));
+    if !m
+        .ins
+        .iter()
+        .any(|x| M::op(x) == OP_CAPABILITY && x[1] == CAP_MESH_SHADING)
+    {
+        let at = m
+            .ins
+            .iter()
+            .rposition(|x| M::op(x) == OP_CAPABILITY)
+            .ok_or("no capability")?;
+        m.ins
+            .insert(at + 1, inst(OP_CAPABILITY, &[CAP_MESH_SHADING]));
+        let at = m
+            .ins
+            .iter()
+            .rposition(|x| M::op(x) == OP_CAPABILITY)
+            .unwrap()
+            + 1;
+        m.ins
+            .insert(at, inst(OP_EXTENSION, &str_words("SPV_EXT_mesh_shader")));
     }
     to_1_4(&mut m);
     Ok(m.words().iter().flat_map(|x| x.to_le_bytes()).collect())
@@ -971,7 +1278,12 @@ pub fn fragment_per_primitive(spv: &[u8], locations: &[u32]) -> Result<Vec<u8>, 
 
 /// A small uint constant inside a function's emission (made in the module's global section).
 fn kconst_small(f: &mut F, v: u32) -> u32 {
-    let uint = f.m.ins.iter().find(|i| M::op(i) == OP_TYPE_INT && i.len() == 4 && i[2] == 32 && i[3] == 0).map(|i| i[1]).unwrap();
+    let uint =
+        f.m.ins
+            .iter()
+            .find(|i| M::op(i) == OP_TYPE_INT && i.len() == 4 && i[2] == 32 && i[3] == 0)
+            .map(|i| i[1])
+            .unwrap();
     f.m.constant(uint, v)
 }
 
@@ -984,6 +1296,16 @@ mod tests {
         assert_eq!(str_words("abc"), vec![u32::from_le_bytes(*b"abc\0")]);
         assert_eq!(str_words("abcd").len(), 2);
     }
+
+    #[test]
+    fn task_payload_and_launch_limit_match_nvn2_capacity() {
+        assert_eq!(TASK_PAYLOAD_WORDS, 1024);
+        assert_eq!(MAX_LAUNCH, 32);
+        assert_eq!(
+            VERSION, "mesh 6",
+            "the shader-library identity must change with payload semantics"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -992,22 +1314,40 @@ mod build_tests {
     /// its paired pixel shaders made per-primitive and checked with spirv-val (`NXSHADERS_SPIRV_VAL`).
     #[test]
     fn fragment_per_primitive_on_a_build() {
-        let (Ok(dir), Ok(val)) = (std::env::var("NXSHADERS_TEST_BUILD"), std::env::var("NXSHADERS_SPIRV_VAL")) else { return };
+        let (Ok(dir), Ok(val)) = (
+            std::env::var("NXSHADERS_TEST_BUILD"),
+            std::env::var("NXSHADERS_SPIRV_VAL"),
+        ) else {
+            return;
+        };
         let dir = std::path::Path::new(&dir);
         let pairs = std::fs::read_to_string(dir.join("pairs.tsv")).unwrap();
         let mut checked = 0;
         for l in pairs.lines().filter(|l| !l.starts_with('#')) {
             let f: Vec<&str> = l.split('\t').collect();
-            let Ok(j) = std::fs::read(dir.join("spv").join(format!("{}.json", f[0]))) else { continue };
+            let Ok(j) = std::fs::read(dir.join("spv").join(format!("{}.json", f[0]))) else {
+                continue;
+            };
             let j: serde_json::Value = serde_json::from_slice(&j).unwrap();
-            let Some(locs) = j.get("per_primitive_locations").and_then(|v| v.as_array()) else { continue };
+            let Some(locs) = j.get("per_primitive_locations").and_then(|v| v.as_array()) else {
+                continue;
+            };
             let locs: Vec<u32> = locs.iter().map(|x| x.as_u64().unwrap() as u32).collect();
             let ps = std::fs::read(dir.join("spv").join(format!("{}.spv", f[1]))).unwrap();
             let out = super::fragment_per_primitive(&ps, &locs).unwrap();
             let tmp = std::env::temp_dir().join(format!("nxs_pp_{}.spv", f[1]));
             std::fs::write(&tmp, &out).unwrap();
-            let o = std::process::Command::new(&val).args(["--target-env", "vulkan1.3"]).arg(&tmp).output().unwrap();
-            assert!(o.status.success(), "{}: {}", f[1], String::from_utf8_lossy(&o.stderr));
+            let o = std::process::Command::new(&val)
+                .args(["--target-env", "vulkan1.3"])
+                .arg(&tmp)
+                .output()
+                .unwrap();
+            assert!(
+                o.status.success(),
+                "{}: {}",
+                f[1],
+                String::from_utf8_lossy(&o.stderr)
+            );
             let _ = std::fs::remove_file(&tmp);
             checked += 1;
         }
@@ -1015,7 +1355,13 @@ mod build_tests {
         // shader with locations 0 and 1 made per-primitive
         if checked == 0 {
             let man = std::fs::read_to_string(dir.join("manifest.tsv")).unwrap();
-            for (n, l) in man.lines().filter(|l| l.split('\t').nth(1) == Some("ps") && l.split('\t').nth(4) == Some("ok")).enumerate() {
+            for (n, l) in man
+                .lines()
+                .filter(|l| {
+                    l.split('\t').nth(1) == Some("ps") && l.split('\t').nth(4) == Some("ok")
+                })
+                .enumerate()
+            {
                 if n % 50 != 0 {
                     continue;
                 }
@@ -1024,8 +1370,16 @@ mod build_tests {
                 let out = super::fragment_per_primitive(&ps, &[0, 1]).unwrap();
                 let tmp = std::env::temp_dir().join(format!("nxs_pp_{k}.spv"));
                 std::fs::write(&tmp, &out).unwrap();
-                let o = std::process::Command::new(&val).args(["--target-env", "vulkan1.3"]).arg(&tmp).output().unwrap();
-                assert!(o.status.success(), "{k}: {}", String::from_utf8_lossy(&o.stderr));
+                let o = std::process::Command::new(&val)
+                    .args(["--target-env", "vulkan1.3"])
+                    .arg(&tmp)
+                    .output()
+                    .unwrap();
+                assert!(
+                    o.status.success(),
+                    "{k}: {}",
+                    String::from_utf8_lossy(&o.stderr)
+                );
                 let _ = std::fs::remove_file(&tmp);
                 checked += 1;
             }

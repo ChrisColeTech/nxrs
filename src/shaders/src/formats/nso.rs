@@ -13,16 +13,26 @@ pub fn image(nso: &[u8], label: &str) -> R<Vec<u8>> {
     let mut segs = vec![];
     let mut size = 0usize;
     for i in 0..3 {
-        let (off, mem, len) = (u32_at(nso, 0x10 + 0x10 * i).unwrap() as u64, u32_at(nso, 0x14 + 0x10 * i).unwrap() as usize, u32_at(nso, 0x18 + 0x10 * i).unwrap() as usize);
+        let (off, mem, len) = (
+            u32_at(nso, 0x10 + 0x10 * i).unwrap() as u64,
+            u32_at(nso, 0x14 + 0x10 * i).unwrap() as usize,
+            u32_at(nso, 0x18 + 0x10 * i).unwrap() as usize,
+        );
         let stored = u32_at(nso, 0x60 + 4 * i).unwrap() as u64;
         let compressed = flags >> i & 1 != 0;
-        let raw = span(nso, off, if compressed { stored } else { len as u64 }, &format!("{label} segment {i}"))?;
+        let raw = span(
+            nso,
+            off,
+            if compressed { stored } else { len as u64 },
+            &format!("{label} segment {i}"),
+        )?;
         let data = if !compressed {
             raw.to_vec()
         } else if raw.starts_with(&zbic::MAGIC) {
             zbic::decompress(raw, len).map_err(|e| format!("{label} segment {i}: {e}"))?
         } else {
-            lz4_flex::block::decompress(raw, len).map_err(|e| format!("{label} segment {i}: LZ4: {e}"))?
+            lz4_flex::block::decompress(raw, len)
+                .map_err(|e| format!("{label} segment {i}: LZ4: {e}"))?
         };
         size = size.max(mem + len);
         segs.push((mem, data));
@@ -49,7 +59,11 @@ mod tests {
         let mut n = vec![0u8; 0x100];
         n[..4].copy_from_slice(b"NSO0");
         n[0xc..0x10].copy_from_slice(&2u32.to_le_bytes());
-        let segs = [(0x100usize, 0usize, text.len(), text.len()), (0x400, 0x1000, ro.len(), lz.len()), (0x400 + lz.len(), 0x2000, 0, 0)];
+        let segs = [
+            (0x100usize, 0usize, text.len(), text.len()),
+            (0x400, 0x1000, ro.len(), lz.len()),
+            (0x400 + lz.len(), 0x2000, 0, 0),
+        ];
         for (i, (off, mem, len, stored)) in segs.iter().enumerate() {
             n[0x10 + 0x10 * i..0x14 + 0x10 * i].copy_from_slice(&(*off as u32).to_le_bytes());
             n[0x14 + 0x10 * i..0x18 + 0x10 * i].copy_from_slice(&(*mem as u32).to_le_bytes());

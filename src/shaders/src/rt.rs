@@ -123,7 +123,10 @@ impl Rd<'_> {
     fn count(&mut self, min: usize) -> R<usize> {
         self.align(8)?;
         let c = self.u64()? as usize;
-        need(c <= (self.end - self.pos) / min.max(1), "inner count exceeds remaining input")?;
+        need(
+            c <= (self.end - self.pos) / min.max(1),
+            "inner count exceeds remaining input",
+        )?;
         Ok(c)
     }
     fn vector(&mut self, stride: usize) -> R<Vec<u8>> {
@@ -132,7 +135,10 @@ impl Rd<'_> {
     }
     fn name(&mut self) -> R<String> {
         let raw = self.vector(1)?;
-        need(!raw.is_empty() && !raw.contains(&0), "empty or embedded-NUL symbol name")?;
+        need(
+            !raw.is_empty() && !raw.contains(&0),
+            "empty or embedded-NUL symbol name",
+        )?;
         String::from_utf8(raw).map_err(|_| "invalid UTF-8 symbol name".to_string())
     }
 }
@@ -173,8 +179,13 @@ fn entry(r: &mut Rd) -> R<Entry> {
     r.align(4)?;
     r.u32()?;
     let n = r.count(80)?;
-    let regions = (0..n).map(|_| serialized_region(r)).collect::<R<Vec<_>>>()?;
-    need(fields[0] as usize == regions.len(), "entry region count disagrees with inner records")?;
+    let regions = (0..n)
+        .map(|_| serialized_region(r))
+        .collect::<R<Vec<_>>>()?;
+    need(
+        fields[0] as usize == regions.len(),
+        "entry region count disagrees with inner records",
+    )?;
     r.align(4)?;
     r.u32()?;
     r.vector(12)?;
@@ -182,7 +193,11 @@ fn entry(r: &mut Rd) -> R<Entry> {
     r.take(6)?;
     r.align(4)?;
     r.u32()?;
-    Ok(Entry { name, fields, regions })
+    Ok(Entry {
+        name,
+        fields,
+        regions,
+    })
 }
 
 fn resource(r: &mut Rd) -> R<Resource> {
@@ -191,21 +206,46 @@ fn resource(r: &mut Rd) -> R<Resource> {
     let kind = r.u32()?;
     r.align(8)?;
     let (size, alignment, offset) = (r.u64()?, r.u64()?, r.u64()?);
-    need(alignment > 0 && alignment & (alignment - 1) == 0, "resource alignment is not a power of two")?;
+    need(
+        alignment > 0 && alignment & (alignment - 1) == 0,
+        "resource alignment is not a power of two",
+    )?;
     need(offset % alignment == 0, "misaligned resource offset")?;
-    need(offset.checked_add(size).is_some(), "resource extent overflows u64")?;
+    need(
+        offset.checked_add(size).is_some(),
+        "resource extent overflows u64",
+    )?;
     let data = r.vector(1)?;
     r.align(4)?;
     let f0 = r.u32()?;
     r.align(8)?;
     let (f1, f2) = (r.u64()?, r.u32()?);
-    Ok(Resource { name, kind, size, alignment, offset, data, fields: (f0, f1, f2) })
+    Ok(Resource {
+        name,
+        kind,
+        size,
+        alignment,
+        offset,
+        data,
+        fields: (f0, f1, f2),
+    })
 }
 
 #[allow(clippy::type_complexity)]
-fn inner(m: &[u8], start: usize, size: usize) -> R<([u8; 16], Vec<Entry>, Vec<Resource>, u32, (u32, u32, u32))> {
-    need(start <= m.len() && size <= m.len() - start, "inner module outside input")?;
-    let mut r = Rd { d: m, pos: start, end: start + size };
+fn inner(
+    m: &[u8],
+    start: usize,
+    size: usize,
+) -> R<([u8; 16], Vec<Entry>, Vec<Resource>, u32, (u32, u32, u32))> {
+    need(
+        start <= m.len() && size <= m.len() - start,
+        "inner module outside input",
+    )?;
+    let mut r = Rd {
+        d: m,
+        pos: start,
+        end: start + size,
+    };
     let fingerprint: [u8; 16] = r.take(16)?.try_into().unwrap();
     r.vector(1)?;
     r.align(8)?;
@@ -214,7 +254,10 @@ fn inner(m: &[u8], start: usize, size: usize) -> R<([u8; 16], Vec<Entry>, Vec<Re
     r.take(3)?;
     r.align(4)?;
     r.u32()?;
-    need(r.count(1)? == 0, "unsupported nonempty module parameter list")?;
+    need(
+        r.count(1)? == 0,
+        "unsupported nonempty module parameter list",
+    )?;
     r.align(4)?;
     r.u32()?;
     r.name()?;
@@ -263,12 +306,21 @@ fn inner(m: &[u8], start: usize, size: usize) -> R<([u8; 16], Vec<Entry>, Vec<Re
     let m278 = r.u32()?;
     r.vector(1)?;
     need(r.pos == r.end, "unconsumed inner metadata variant")?;
-    Ok((fingerprint, entries, resources, module160, (m250, m254, m278)))
+    Ok((
+        fingerprint,
+        entries,
+        resources,
+        module160,
+        (m250, m254, m278),
+    ))
 }
 
 /// Validate and read one module's metadata (control +0x60, +0x5c bytes) with its code area.
 pub fn parse_module(metadata: &[u8], code: &[u8]) -> R<Module> {
-    need(!code.is_empty() && code.len() % 16 == 0, "code is empty or not 16-byte aligned")?;
+    need(
+        !code.is_empty() && code.len() % 16 == 0,
+        "code is empty or not 16-byte aligned",
+    )?;
     need(metadata.len() >= 56, "outer header outside input")?;
     let mut h = [0u32; 14];
     for (i, x) in h.iter_mut().enumerate() {
@@ -280,50 +332,135 @@ pub fn parse_module(metadata: &[u8], code: &[u8]) -> R<Module> {
     let words = |off: u32, count: u32, label: &str| -> R<Vec<u32>> {
         let (off, count) = (off as usize, count as usize);
         need(off % 4 == 0, &format!("misaligned {label}"))?;
-        need(off <= metadata.len() && count <= (metadata.len() - off) / 4, &format!("{label} count exceeds input"))?;
-        Ok((0..count).map(|i| u32::from_le_bytes(metadata[off + 4 * i..off + 4 * i + 4].try_into().unwrap())).collect())
+        need(
+            off <= metadata.len() && count <= (metadata.len() - off) / 4,
+            &format!("{label} count exceeds input"),
+        )?;
+        Ok((0..count)
+            .map(|i| u32::from_le_bytes(metadata[off + 4 * i..off + 4 * i + 4].try_into().unwrap()))
+            .collect())
     };
-    let (starts, sizes, names, selectors) = (words(h[5], h[4], "region starts")?, words(h[6], h[4], "region sizes")?, words(h[7], h[4], "region names")?, words(h[8], h[4], "region selectors")?);
+    let (starts, sizes, names, selectors) = (
+        words(h[5], h[4], "region starts")?,
+        words(h[6], h[4], "region sizes")?,
+        words(h[7], h[4], "region names")?,
+        words(h[8], h[4], "region selectors")?,
+    );
     let entry_counts = words(h[12], h[11], "entry region counts")?;
-    need(entry_counts.iter().all(|&c| c != 0) && entry_counts.iter().sum::<u32>() == h[4], "entry regions do not cover region table")?;
+    need(
+        entry_counts.iter().all(|&c| c != 0) && entry_counts.iter().sum::<u32>() == h[4],
+        "entry regions do not cover region table",
+    )?;
     let mut regions = vec![];
     for i in 0..h[4] as usize {
         let (offset, size) = (starts[i] as usize, sizes[i] as usize);
-        need(offset % 16 == 0 && size % 16 == 0 && size > 0, "unaligned or empty region")?;
-        need(offset <= code.len() && size <= code.len() - offset, "region code outside input")?;
+        need(
+            offset % 16 == 0 && size % 16 == 0 && size > 0,
+            "unaligned or empty region",
+        )?;
+        need(
+            offset <= code.len() && size <= code.len() - offset,
+            "region code outside input",
+        )?;
         let no = names[i] as usize;
         need(no < metadata.len(), "region name outside metadata")?;
         let end = memchr::memchr(0, &metadata[no..]).map(|e| e + no);
-        let end = end.filter(|&e| e > no).ok_or("empty or unterminated region name")?;
-        let name = String::from_utf8(metadata[no..end].to_vec()).map_err(|_| "invalid UTF-8 region name")?;
-        regions.push(Region { offset, size, name, selector: selectors[i] as i32 as i64 });
+        let end = end
+            .filter(|&e| e > no)
+            .ok_or("empty or unterminated region name")?;
+        let name = String::from_utf8(metadata[no..end].to_vec())
+            .map_err(|_| "invalid UTF-8 region name")?;
+        regions.push(Region {
+            offset,
+            size,
+            name,
+            selector: selectors[i] as i32 as i64,
+        });
     }
-    let (fingerprint, entries, resources, module160, module_fields) = inner(metadata, h[3] as usize, h[2] as usize)?;
-    need(entries.len() == h[11] as usize, "inner/outer entry count mismatch")?;
-    need(entries.iter().map(|e| e.regions.len() as u32).eq(entry_counts.iter().copied()), "inner/outer region count mismatch")?;
-    need(entries.iter().flat_map(|e| e.regions.iter()).eq(regions.iter().map(|r| &r.name)), "inner/outer region names disagree")?;
+    let (fingerprint, entries, resources, module160, module_fields) =
+        inner(metadata, h[3] as usize, h[2] as usize)?;
+    need(
+        entries.len() == h[11] as usize,
+        "inner/outer entry count mismatch",
+    )?;
+    need(
+        entries
+            .iter()
+            .map(|e| e.regions.len() as u32)
+            .eq(entry_counts.iter().copied()),
+        "inner/outer region count mismatch",
+    )?;
+    need(
+        entries
+            .iter()
+            .flat_map(|e| e.regions.iter())
+            .eq(regions.iter().map(|r| &r.name)),
+        "inner/outer region names disagree",
+    )?;
     let (ro, rn) = (h[10] as usize, h[9] as usize);
-    need(ro <= metadata.len() && rn * 40 <= metadata.len() - ro, "relocation table outside input")?;
+    need(
+        ro <= metadata.len() && rn * 40 <= metadata.len() - ro,
+        "relocation table outside input",
+    )?;
     need(ro % 8 == 0, "misaligned relocation table")?;
     let mut relocations = vec![];
     for i in 0..rn {
         let o = ro + 40 * i;
-        let q = |k: usize| u64::from_le_bytes(metadata[o + 8 * k..o + 8 * k + 8].try_into().unwrap());
-        let w = |k: usize| u32::from_le_bytes(metadata[o + 24 + 4 * k..o + 28 + 4 * k].try_into().unwrap());
-        let r = Relocation { patch_offset: q(0), addend: q(1), template: q(2), kind: w(0) as i32, region_base: w(1), target: w(2), tail: w(3) };
-        let sources: Vec<&Region> = regions.iter().filter(|g| g.offset as u64 == r.region_base as u64).collect();
+        let q =
+            |k: usize| u64::from_le_bytes(metadata[o + 8 * k..o + 8 * k + 8].try_into().unwrap());
+        let w = |k: usize| {
+            u32::from_le_bytes(metadata[o + 24 + 4 * k..o + 28 + 4 * k].try_into().unwrap())
+        };
+        let r = Relocation {
+            patch_offset: q(0),
+            addend: q(1),
+            template: q(2),
+            kind: w(0) as i32,
+            region_base: w(1),
+            target: w(2),
+            tail: w(3),
+        };
+        let sources: Vec<&Region> = regions
+            .iter()
+            .filter(|g| g.offset as u64 == r.region_base as u64)
+            .collect();
         need(!sources.is_empty(), "relocation base has no region")?;
-        need(r.patch_offset % 16 == 0 && sources.iter().any(|g| r.patch_offset + 16 <= g.size as u64), "relocation instruction outside region")?;
+        need(
+            r.patch_offset % 16 == 0
+                && sources.iter().any(|g| r.patch_offset + 16 <= g.size as u64),
+            "relocation instruction outside region",
+        )?;
         let at = r.region_base as u64 + r.patch_offset;
-        need(at + 16 <= code.len() as u64, "relocation instruction outside input")?;
+        need(
+            at + 16 <= code.len() as u64,
+            "relocation instruction outside input",
+        )?;
         if r.kind < 0 {
-            need((r.target as usize) < regions.len(), "logical relocation target outside module")?;
+            need(
+                (r.target as usize) < regions.len(),
+                "logical relocation target outside module",
+            )?;
         } else {
-            need((r.target as usize) < code.len(), "code relocation target outside module")?;
+            need(
+                (r.target as usize) < code.len(),
+                "code relocation target outside module",
+            )?;
         }
         relocations.push(r);
     }
-    Ok(Module { header: h, fingerprint, regions, entry_region_counts: entry_counts, entries, resources, relocations, module160, module_fields, metadata: metadata.to_vec(), code: code.to_vec() })
+    Ok(Module {
+        header: h,
+        fingerprint,
+        regions,
+        entry_region_counts: entry_counts,
+        entries,
+        resources,
+        relocations,
+        module160,
+        module_fields,
+        metadata: metadata.to_vec(),
+        code: code.to_vec(),
+    })
 }
 
 /// One region given its logical ID: (ID, entry index, region index).
@@ -336,38 +473,89 @@ pub struct Linked {
 
 /// The module's regions given `ids` (contiguous within an entry), its relocations checked: → (regions, moves
 /// (instruction offset, template, target ID)).
-pub fn link_plan(m: &Module, ids: &[u32], fingerprint: &[u8; 16]) -> R<(Vec<Linked>, Vec<(u64, u64, u32)>)> {
-    need(ids.len() == m.regions.len(), "logical ID count differs from region count")?;
-    need(ids.iter().all(|&i| 0 < i && i < 0x8000), "logical ID outside positive signed16 domain")?;
+pub fn link_plan(
+    m: &Module,
+    ids: &[u32],
+    fingerprint: &[u8; 16],
+) -> R<(Vec<Linked>, Vec<(u64, u64, u32)>)> {
+    need(
+        ids.len() == m.regions.len(),
+        "logical ID count differs from region count",
+    )?;
+    need(
+        ids.iter().all(|&i| 0 < i && i < 0x8000),
+        "logical ID outside positive signed16 domain",
+    )?;
     need(&m.fingerprint == fingerprint, "link fingerprint mismatch")?;
     need(m.header[13] <= 1, "unsupported outer metadata flag")?;
-    need(m.module_fields == (0, 3, 7), "unsupported executable module fields")?;
-    need(m.regions.iter().all(|r| r.selector == -1), "unsupported internal region selector")?;
-    need(m.entries.iter().all(|e| matches!(e.kind(), 0 | 7 | 8)), "unsupported executable entry kind")?;
-    need(m.resources.iter().all(|r| r.kind == 3), "unsupported executable resource kind")?;
-    need(m.resources.iter().all(|r| r.data.len() as u64 <= r.size), "resource initializer exceeds extent")?;
+    need(
+        m.module_fields == (0, 3, 7),
+        "unsupported executable module fields",
+    )?;
+    need(
+        m.regions.iter().all(|r| r.selector == -1),
+        "unsupported internal region selector",
+    )?;
+    need(
+        m.entries.iter().all(|e| matches!(e.kind(), 0 | 7 | 8)),
+        "unsupported executable entry kind",
+    )?;
+    need(
+        m.resources.iter().all(|r| r.kind == 3),
+        "unsupported executable resource kind",
+    )?;
+    need(
+        m.resources.iter().all(|r| r.data.len() as u64 <= r.size),
+        "resource initializer exceeds extent",
+    )?;
     let mut sorted: Vec<&Region> = m.regions.iter().collect();
     sorted.sort_by_key(|r| r.offset);
-    need(sorted.windows(2).all(|w| w[0].offset + w[0].size <= w[1].offset), "unsupported overlapping executable regions")?;
+    need(
+        sorted
+            .windows(2)
+            .all(|w| w[0].offset + w[0].size <= w[1].offset),
+        "unsupported overlapping executable regions",
+    )?;
     let mut linked = vec![];
     let mut cur = 0usize;
     for (ei, &c) in m.entry_region_counts.iter().enumerate() {
         let part = &ids[cur..cur + c as usize];
-        need(part.iter().enumerate().all(|(k, &x)| x == part[0] + k as u32), "continuation IDs are not contiguous")?;
+        need(
+            part.iter()
+                .enumerate()
+                .all(|(k, &x)| x == part[0] + k as u32),
+            "continuation IDs are not contiguous",
+        )?;
         for ri in cur..cur + c as usize {
-            linked.push(Linked { id: ids[ri], entry: ei, region: ri });
+            linked.push(Linked {
+                id: ids[ri],
+                entry: ei,
+                region: ri,
+            });
         }
         cur += c as usize;
     }
     let mut moves = vec![];
     let mut sites = std::collections::HashSet::new();
     for r in &m.relocations {
-        need(r.kind == LOGICAL_ID_MOV, &format!("unsupported executable relocation kind {}", r.kind))?;
-        need(r.addend == 0 && r.tail == 0, "unsupported logical MOV addend or trailing field")?;
-        need(r.template < 1 << 32 && matches!(r.template & 0xfff, 0x802 | 0x882), "unsupported logical MOV template")?;
+        need(
+            r.kind == LOGICAL_ID_MOV,
+            &format!("unsupported executable relocation kind {}", r.kind),
+        )?;
+        need(
+            r.addend == 0 && r.tail == 0,
+            "unsupported logical MOV addend or trailing field",
+        )?;
+        need(
+            r.template < 1 << 32 && matches!(r.template & 0xfff, 0x802 | 0x882),
+            "unsupported logical MOV template",
+        )?;
         let at = r.region_base as u64 + r.patch_offset;
         let src = u64::from_le_bytes(m.code[at as usize..at as usize + 8].try_into().unwrap());
-        need(src == r.template, "logical MOV template disagrees with original instruction")?;
+        need(
+            src == r.template,
+            "logical MOV template disagrees with original instruction",
+        )?;
         need(sites.insert(at), "duplicate relocation instruction")?;
         moves.push((at, r.template, ids[r.target as usize]));
     }
@@ -376,17 +564,48 @@ pub fn link_plan(m: &Module, ids: &[u32], fingerprint: &[u8; 16]) -> R<(Vec<Link
 
 /// One stage-8 module's metadata from its control section, checked against its code.
 pub fn module_of(control: &[u8], code: &[u8]) -> R<Module> {
-    let u = |o: usize| control.get(o..o + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).unwrap_or(0);
+    let u = |o: usize| {
+        control
+            .get(o..o + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .unwrap_or(0)
+    };
     need(control.len() >= 0x68, "truncated RT control header")?;
-    need(u(0) == 0x9876_1234 && u(4) == 0xc9, "unsupported RT control schema")?;
+    need(
+        u(0) == 0x9876_1234 && u(4) == 0xc9,
+        "unsupported RT control schema",
+    )?;
     need(control[0x56] == 8, "RT control is not stage 8")?;
     let (size, offset, code_size) = (u(0x5c) as usize, u(0x60) as usize, u(0x64) as usize);
-    need(size > 0 && offset >= 0x68 && offset % 8 == 0 && offset <= control.len() && size <= control.len() - offset, "RT metadata extent outside control")?;
-    need(code_size == code.len() && u(0x44) as usize == code.len(), "RT control code size disagrees with code bytes")?;
+    need(
+        size > 0
+            && offset >= 0x68
+            && offset % 8 == 0
+            && offset <= control.len()
+            && size <= control.len() - offset,
+        "RT metadata extent outside control",
+    )?;
+    need(
+        code_size == code.len() && u(0x44) as usize == code.len(),
+        "RT control code size disagrees with code bytes",
+    )?;
     let m = parse_module(&control[offset..offset + size], code)?;
-    need(m.module160 == 0 && m.entries.iter().all(|e| e.native_stack_bytes() == 0), "unsupported native RT stack requirement")?;
-    need(m.entries.iter().all(|e| e.kind() == 0 || e.regions.len() == 1), "unsupported non-raygen continuation regions")?;
-    need(m.entries.iter().all(|e| e.continuation_frame_bytes() <= 0x10000), "RT continuation frame exceeds 64 KiB")?;
+    need(
+        m.module160 == 0 && m.entries.iter().all(|e| e.native_stack_bytes() == 0),
+        "unsupported native RT stack requirement",
+    )?;
+    need(
+        m.entries
+            .iter()
+            .all(|e| e.kind() == 0 || e.regions.len() == 1),
+        "unsupported non-raygen continuation regions",
+    )?;
+    need(
+        m.entries
+            .iter()
+            .all(|e| e.continuation_frame_bytes() <= 0x10000),
+        "RT continuation frame exceeds 64 KiB",
+    )?;
     Ok(m)
 }
 
@@ -399,16 +618,23 @@ pub struct Library {
 }
 
 fn sha(d: &[u8]) -> String {
-    Sha256::digest(d).iter().map(|b| format!("{b:02x}")).collect()
+    Sha256::digest(d)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Link every RT module (key, control, code) into one library; identical repeated keys collapse.
 pub fn make_library(records: &[(String, Vec<u8>, Vec<u8>)]) -> R<Library> {
     let mut uniq: std::collections::BTreeMap<u64, (&[u8], &[u8])> = Default::default();
     for (k, c, d) in records {
-        let key = u64::from_str_radix(k, 16).map_err(|_| "RT key must be sixteen hex digits".to_string())?;
+        let key = u64::from_str_radix(k, 16)
+            .map_err(|_| "RT key must be sixteen hex digits".to_string())?;
         if let Some(prev) = uniq.get(&key) {
-            need(prev.0 == &c[..] && prev.1 == &d[..], &format!("conflicting RT records for key {key:016x}"))?;
+            need(
+                prev.0 == &c[..] && prev.1 == &d[..],
+                &format!("conflicting RT records for key {key:016x}"),
+            )?;
         }
         uniq.insert(key, (c, d));
     }
@@ -421,16 +647,31 @@ pub fn make_library(records: &[(String, Vec<u8>, Vec<u8>)]) -> R<Library> {
     let (mut raygen_frame, mut callback_frame) = (-1i64, 0i64);
     for (key, (control, code)) in &uniq {
         let m = module_of(control, code)?;
-        need(next_id as usize + m.regions.len() <= 0x8000, "RT library exceeds positive signed16 logical IDs")?;
+        need(
+            next_id as usize + m.regions.len() <= 0x8000,
+            "RT library exceeds positive signed16 logical IDs",
+        )?;
         let fp = *fingerprint.get_or_insert(m.fingerprint);
         let ids: Vec<u32> = (next_id..next_id + m.regions.len() as u32).collect();
         let (linked, mv) = link_plan(&m, &ids, &fp)?;
         let mut cur: Vec<Resource> = m.resources.clone();
         cur.sort_by(|a, b| (a.offset, &a.name).cmp(&(b.offset, &b.name)));
         let names: std::collections::BTreeSet<&str> = cur.iter().map(|r| r.name.as_str()).collect();
-        need(names == RESOURCES.iter().map(|x| x.0).collect(), "unsupported or missing RT resource symbols")?;
-        need(cur.iter().all(|r| r.kind == 3 && RESOURCES.iter().any(|(n, s)| *n == r.name && *s == r.size)), "unsupported named RT resource extent or kind")?;
-        need(cur.windows(2).all(|w| w[0].offset + w[0].size <= w[1].offset), "RT resource extents overlap")?;
+        need(
+            names == RESOURCES.iter().map(|x| x.0).collect(),
+            "unsupported or missing RT resource symbols",
+        )?;
+        need(
+            cur.iter().all(|r| {
+                r.kind == 3 && RESOURCES.iter().any(|(n, s)| *n == r.name && *s == r.size)
+            }),
+            "unsupported named RT resource extent or kind",
+        )?;
+        need(
+            cur.windows(2)
+                .all(|w| w[0].offset + w[0].size <= w[1].offset),
+            "RT resource extents overlap",
+        )?;
         let l = layout.get_or_insert_with(|| cur.clone());
         need(*l == cur, "RT modules disagree on named resource layout")?;
         let address = image.len().div_ceil(CODE_ALIGNMENT) * CODE_ALIGNMENT;
@@ -456,7 +697,10 @@ pub fn make_library(records: &[(String, Vec<u8>, Vec<u8>)]) -> R<Library> {
             }
         }
         modules.push(json!({"key": format!("{key:016x}"), "address": address, "length": code.len(), "control_sha256": sha(control), "metadata_sha256": sha(&m.metadata), "code_sha256": sha(code), "entries": ents}));
-        moves.extend(mv.into_iter().map(|(at, t, id)| (address as u64 + at, t, id)));
+        moves.extend(
+            mv.into_iter()
+                .map(|(at, t, id)| (address as u64 + at, t, id)),
+        );
         next_id += m.regions.len() as u32;
     }
     need(raygen_frame >= 0, "RT library has no ray-generation entry")?;
@@ -484,7 +728,12 @@ pub fn make_library(records: &[(String, Vec<u8>, Vec<u8>)]) -> R<Library> {
         "modules": modules,
         "rt": rt.clone(),
     });
-    Ok(Library { code: image, rt, manifest, local_memory_bytes: arena })
+    Ok(Library {
+        code: image,
+        rt,
+        manifest,
+        local_memory_bytes: arena,
+    })
 }
 
 #[cfg(test)]
@@ -624,8 +873,28 @@ pub(crate) mod tests {
         let mut o = W { d: vec![0u8; 56] };
         o.d.extend(&inner);
         let names = ["start", "resume"];
-        let mut h = [0u32, 0, inner.len() as u32, 56, 2, 0, 0, 0, 0, 1, 0, 1, 0, 0];
-        for (idx, vals) in [(5, vec![0u32, 32]), (6, vec![32, 32]), (7, vec![0, 0]), (8, vec![u32::MAX, u32::MAX])] {
+        let mut h = [
+            0u32,
+            0,
+            inner.len() as u32,
+            56,
+            2,
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            1,
+            0,
+            0,
+        ];
+        for (idx, vals) in [
+            (5, vec![0u32, 32]),
+            (6, vec![32, 32]),
+            (7, vec![0, 0]),
+            (8, vec![u32::MAX, u32::MAX]),
+        ] {
             o.align(4);
             h[idx] = o.d.len() as u32;
             for v in vals {
@@ -682,7 +951,11 @@ pub(crate) mod tests {
         assert_eq!(m.entries[0].continuation_frame_bytes(), 96);
         assert_eq!(m.resources[1].name, "descriptorBaseArray");
         assert_eq!(crate::nvn::check(crate::nvn::Stage::Rt, &ctl, &code), None);
-        let lib = make_library(&[("00000000000000aa".into(), ctl.clone(), code.clone()), ("00000000000000bb".into(), ctl, code)]).unwrap();
+        let lib = make_library(&[
+            ("00000000000000aa".into(), ctl.clone(), code.clone()),
+            ("00000000000000bb".into(), ctl, code),
+        ])
+        .unwrap();
         // two modules at 256-byte boundaries, IDs 1..4, the MOVs naming region "resume" of each
         assert_eq!(lib.code.len(), 256 + 64);
         assert_eq!(lib.rt["entries"].as_array().unwrap().len(), 4);

@@ -12,7 +12,10 @@ pub const ONEPACK: &[u8; 8] = b"ONEPACK\0";
 /// 1 zlib, 2 LZ4 (one block), 3 Oodle Kraken. Calls `each(index, bytes)` per entry.
 pub fn gfpak_members(d: &[u8], label: &str, each: &mut dyn FnMut(usize, Vec<u8>)) -> R<()> {
     if d.get(8..12) != Some(&[0, 0x10, 0, 0]) {
-        return Err(format!("{label}: GFPAK version {:02x?}, not 0x1000", d.get(8..12)));
+        return Err(format!(
+            "{label}: GFPAK version {:02x?}, not 0x1000",
+            d.get(8..12)
+        ));
     }
     let n = need32(d, 0x10, label)? as usize;
     let files = need64(d, 0x18, label)? as usize;
@@ -24,15 +27,21 @@ pub fn gfpak_members(d: &[u8], label: &str, each: &mut dyn FnMut(usize, Vec<u8>)
         let off = need64(d, e + 0x10, label)?;
         let raw = span(d, off, csz, &format!("{label}#{i}"))?;
         let w = format!("{label}#{i}");
-        let data = match ct {
-            0 => raw.to_vec(),
-            1 => archive::unzlib(raw, &w)?,
-            2 => lz4_flex::block::decompress(raw, usz).map_err(|e| format!("{w}: LZ4: {e}"))?,
-            3 => archive::oodle(raw, usz, &w)?,
-            _ => return Err(format!("{label}: entry {i} has compression {ct}, which this reader does not decode")),
-        };
+        let data =
+            match ct {
+                0 => raw.to_vec(),
+                1 => archive::unzlib(raw, &w)?,
+                2 => lz4_flex::block::decompress(raw, usz).map_err(|e| format!("{w}: LZ4: {e}"))?,
+                3 => archive::oodle(raw, usz, &w)?,
+                _ => return Err(format!(
+                    "{label}: entry {i} has compression {ct}, which this reader does not decode"
+                )),
+            };
         if data.len() != usz {
-            return Err(format!("{w}: {:#x} bytes, the entry says {usz:#x}", data.len()));
+            return Err(format!(
+                "{w}: {:#x} bytes, the entry says {usz:#x}",
+                data.len()
+            ));
         }
         each(i, data);
     }
@@ -49,7 +58,10 @@ pub struct Fb<'a>(pub &'a [u8]);
 
 impl<'a> Fb<'a> {
     fn bad(&self, what: &str, at: usize) -> String {
-        format!("FlatBuffers {what} at {at:#x} lies outside the {:#x} bytes there are", self.0.len())
+        format!(
+            "FlatBuffers {what} at {at:#x} lies outside the {:#x} bytes there are",
+            self.0.len()
+        )
     }
     pub fn root(&self, at: usize) -> R<usize> {
         Ok(rel(at, need32(self.0, at, "FlatBuffers root")?))
@@ -71,7 +83,9 @@ impl<'a> Fb<'a> {
     }
     /// (start, count) of the vector in field `i`.
     pub fn vec(&self, t: usize, i: usize) -> R<(usize, usize)> {
-        let Some(p) = self.field(t, i)? else { return Ok((0, 0)) };
+        let Some(p) = self.field(t, i)? else {
+            return Ok((0, 0));
+        };
         let p = rel(p, need32(self.0, p, "FlatBuffers vector")?);
         let n = need32(self.0, p, "FlatBuffers vector")? as usize;
         Ok((p + 4, n))
@@ -79,10 +93,19 @@ impl<'a> Fb<'a> {
     /// The tables / strings a vector of offsets points at.
     pub fn refs(&self, t: usize, i: usize) -> R<Vec<usize>> {
         let (st, n) = self.vec(t, i)?;
-        (0..n).map(|k| Ok(rel(st + 4 * k, need32(self.0, st + 4 * k, "FlatBuffers offset")?))).collect()
+        (0..n)
+            .map(|k| {
+                Ok(rel(
+                    st + 4 * k,
+                    need32(self.0, st + 4 * k, "FlatBuffers offset")?,
+                ))
+            })
+            .collect()
     }
     pub fn u64s(&self, st: usize, n: usize) -> R<Vec<u64>> {
-        (0..n).map(|k| need64(self.0, st + 8 * k, "FlatBuffers u64")).collect()
+        (0..n)
+            .map(|k| need64(self.0, st + 8 * k, "FlatBuffers u64"))
+            .collect()
     }
 }
 
@@ -102,7 +125,11 @@ pub fn trpfs_packs(head: &[u8], tail: &[u8]) -> R<Vec<u64>> {
 
 /// The files of one Trinity pack (its FlatBuffer from its first byte): {0 file hashes [u64], 1 files [{1 compression
 /// i8 (3 Oodle), 2 level, 3 length u64, 4 data [u8]}]}. Calls `each(hash, bytes)` per file.
-pub fn trinity_pack(pack: &[u8], label: &str, each: &mut dyn FnMut(u64, Vec<u8>) -> R<()>) -> R<()> {
+pub fn trinity_pack(
+    pack: &[u8],
+    label: &str,
+    each: &mut dyn FnMut(u64, Vec<u8>) -> R<()>,
+) -> R<()> {
     let fb = Fb(pack);
     let root = fb.root(0)?;
     let (hs, nh) = fb.vec(root, 0)?;
@@ -125,7 +152,9 @@ pub fn trinity_pack(pack: &[u8], label: &str, each: &mut dyn FnMut(u64, Vec<u8>)
         } else if sz as u64 == n {
             raw.to_vec()
         } else {
-            return Err(format!("{w}: compression {comp} ({sz} -> {n} bytes), which is not known"));
+            return Err(format!(
+                "{w}: compression {comp} ({sz} -> {n} bytes), which is not known"
+            ));
         };
         each(hash, data)?;
     }
@@ -174,7 +203,8 @@ pub(crate) mod tests {
             self.b.extend_from_slice(&(v.len() as u32).to_le_bytes());
             for (k, &t) in v.iter().enumerate() {
                 let at = p + 4 + 4 * k;
-                self.b.extend_from_slice(&((t as i64 - at as i64) as u32).to_le_bytes());
+                self.b
+                    .extend_from_slice(&((t as i64 - at as i64) as u32).to_le_bytes());
             }
             p
         }
@@ -237,7 +267,11 @@ pub(crate) mod tests {
         let mut tabs = vec![];
         for (_, data) in files {
             let v = w.bytes(data);
-            tabs.push(w.table(&[(1, Field::Raw(vec![0])), (3, Field::Raw((data.len() as u64).to_le_bytes().to_vec())), (4, Field::Ref(v))]));
+            tabs.push(w.table(&[
+                (1, Field::Raw(vec![0])),
+                (3, Field::Raw((data.len() as u64).to_le_bytes().to_vec())),
+                (4, Field::Ref(v)),
+            ]));
         }
         let hs = w.u64s(&files.iter().map(|f| f.0).collect::<Vec<_>>());
         let fv = w.offs(&tabs);
@@ -254,7 +288,13 @@ pub(crate) mod tests {
             Ok(())
         })
         .unwrap();
-        assert_eq!(got, vec![(0x1111, b"first file".to_vec()), (0x2222, b"BNSH second".to_vec())]);
+        assert_eq!(
+            got,
+            vec![
+                (0x1111, b"first file".to_vec()),
+                (0x2222, b"BNSH second".to_vec())
+            ]
+        );
     }
 
     #[test]

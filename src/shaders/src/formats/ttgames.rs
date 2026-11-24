@@ -17,7 +17,9 @@ pub type TtEntry = (String, u64, u64, u64);
 
 fn range(off: u64, n: u64, end: u64, what: &str) -> R<()> {
     if off > end || n > end - off {
-        return Err(format!("{what}: range {off:#x}+{n:#x} exceeds {end:#x} bytes"));
+        return Err(format!(
+            "{what}: range {off:#x}+{n:#x} exceeds {end:#x} bytes"
+        ));
     }
     Ok(())
 }
@@ -41,7 +43,10 @@ pub fn entries(read: Read, size: u64, label: &str) -> R<Option<Vec<TtEntry>>> {
         return Ok(None);
     }
     let h = read(0, 8)?;
-    let (mut offset, length) = (u32::from_le_bytes(h[..4].try_into().unwrap()) as u64, u32::from_le_bytes(h[4..8].try_into().unwrap()) as u64);
+    let (mut offset, length) = (
+        u32::from_le_bytes(h[..4].try_into().unwrap()) as u64,
+        u32::from_le_bytes(h[4..8].try_into().unwrap()) as u64,
+    );
     if offset & 0x8000_0000 != 0 {
         offset = ((offset ^ 0xffff_ffff) + 1) << 8;
     }
@@ -59,30 +64,64 @@ pub fn entries(read: Read, size: u64, label: &str) -> R<Option<Vec<TtEntry>>> {
     if !(32..=MAX_TABLE).contains(&length) {
         return Err(format!("{label}: CC4 index: invalid length {length}"));
     }
-    let (hlen, kind, version, count, names, strings) = (be32(&head, 0) as u64, be32(&head, 12) as i32, be32(&head, 16), be32(&head, 20) as usize, be32(&head, 24) as usize, be32(&head, 28) as usize);
+    let (hlen, kind, version, count, names, strings) = (
+        be32(&head, 0) as u64,
+        be32(&head, 12) as i32,
+        be32(&head, 16),
+        be32(&head, 20) as usize,
+        be32(&head, 24) as usize,
+        be32(&head, 28) as usize,
+    );
     if version != 2 || kind != -13 {
-        return Err(format!("{label}: unsupported CC4 version {version}, layout {kind}"));
+        return Err(format!(
+            "{label}: unsupported CC4 version {version}, layout {kind}"
+        ));
     }
     if hlen + 4 != length {
-        return Err(format!("{label}: CC4 index length disagrees with its header"));
+        return Err(format!(
+            "{label}: CC4 index length disagrees with its header"
+        ));
     }
     let names_at = 32 + strings + 4;
     let files_at = names_at + 12 * names + 8;
     let hashes_at = files_at + 16 * count;
     let len = length as usize;
-    range(32, strings as u64, length, &format!("{label}: CC4 name strings"))?;
-    range(names_at as u64, (12 * names + 8) as u64, length, &format!("{label}: CC4 name records"))?;
-    range(files_at as u64, (24 * count) as u64, length, &format!("{label}: CC4 files and hashes"))?;
+    range(
+        32,
+        strings as u64,
+        length,
+        &format!("{label}: CC4 name strings"),
+    )?;
+    range(
+        names_at as u64,
+        (12 * names + 8) as u64,
+        length,
+        &format!("{label}: CC4 name records"),
+    )?;
+    range(
+        files_at as u64,
+        (24 * count) as u64,
+        length,
+        &format!("{label}: CC4 files and hashes"),
+    )?;
     let data = read(offset, length)?;
     if data.len() != len {
         return Err(format!("{label}: truncated CC4 index"));
     }
-    if (be32(&data, files_at - 8) as i32, be32(&data, files_at - 4) as usize) != (kind, count) {
+    if (
+        be32(&data, files_at - 8) as i32,
+        be32(&data, files_at - 4) as usize,
+    ) != (kind, count)
+    {
         return Err(format!("{label}: CC4 file counts disagree"));
     }
     let mut hashes = std::collections::HashMap::new();
     for i in 0..count {
-        let k = u64::from_be_bytes(data[hashes_at + 8 * i..hashes_at + 8 * i + 8].try_into().unwrap());
+        let k = u64::from_be_bytes(
+            data[hashes_at + 8 * i..hashes_at + 8 * i + 8]
+                .try_into()
+                .unwrap(),
+        );
         if hashes.insert(k, i).is_some() {
             return Err(format!("{label}: duplicate CC4 file hash"));
         }
@@ -100,8 +139,13 @@ pub fn entries(read: Read, size: u64, label: &str) -> R<Option<Vec<TtEntry>>> {
         let no = no as usize;
         range(no as u64, 1, strings as u64, &format!("{label}: CC4 name"))?;
         let s = &data[32 + no..32 + strings];
-        let end = s.iter().position(|&b| b == 0).ok_or_else(|| format!("{label}: unterminated CC4 name"))?;
-        let parent_path = folders.get(&parent).ok_or_else(|| format!("{label}: CC4 name {i} has an unknown parent {parent}"))?;
+        let end = s
+            .iter()
+            .position(|&b| b == 0)
+            .ok_or_else(|| format!("{label}: unterminated CC4 name"))?;
+        let parent_path = folders
+            .get(&parent)
+            .ok_or_else(|| format!("{label}: CC4 name {i} has an unknown parent {parent}"))?;
         let full = format!("{parent_path}{}", String::from_utf8_lossy(&s[..end]));
         if full.len() > 4096 {
             return Err(format!("{label}: CC4 path exceeds 4096 characters"));
@@ -113,17 +157,26 @@ pub fn entries(read: Read, size: u64, label: &str) -> R<Option<Vec<TtEntry>>> {
         if !full.to_lowercase().ends_with(".nnx_shaders") {
             continue;
         }
-        let &fi = hashes.get(&name_hash(&full)).ok_or_else(|| format!("{label}/{full}: no matching CC4 file hash"))?;
+        let &fi = hashes
+            .get(&name_hash(&full))
+            .ok_or_else(|| format!("{label}/{full}: no matching CC4 file hash"))?;
         let f = files_at + 16 * fi;
         let encoded = u64::from_be_bytes(data[f..f + 8].try_into().unwrap());
-        let (stored, raw) = (be32(&data, f + 8) as u64, (be32(&data, f + 12) & 0x7fff_ffff) as u64);
+        let (stored, raw) = (
+            be32(&data, f + 8) as u64,
+            (be32(&data, f + 12) & 0x7fff_ffff) as u64,
+        );
         let at = encoded & 0x00ff_ffff_ffff_ffff; // the top byte carries the packing flags
         range(at, stored, offset, &format!("{label}/{full}"))?;
         if !(1..=MAX_MEMBER).contains(&raw) {
-            return Err(format!("{label}/{full}: invalid shader member length {raw}"));
+            return Err(format!(
+                "{label}/{full}: invalid shader member length {raw}"
+            ));
         }
         if !(1..=MAX_MEMBER * 2).contains(&stored) {
-            return Err(format!("{label}/{full}: invalid stored shader length {stored}"));
+            return Err(format!(
+                "{label}/{full}: invalid stored shader length {stored}"
+            ));
         }
         out.push((full, at, stored, raw));
     }
@@ -141,9 +194,13 @@ fn inflate_dflt(data: &[u8], size: usize, name: &str) -> R<Vec<u8>> {
     let mut out = Vec::with_capacity(size);
     let mut dec = flate2::Decompress::new(false);
     out.reserve(size + 1);
-    let st = dec.decompress_vec(&d, &mut out, flate2::FlushDecompress::Finish).map_err(|_| format!("{name}: invalid DFLT stream"))?;
+    let st = dec
+        .decompress_vec(&d, &mut out, flate2::FlushDecompress::Finish)
+        .map_err(|_| format!("{name}: invalid DFLT stream"))?;
     if st != flate2::Status::StreamEnd || dec.total_in() as usize != d.len() || out.len() != size {
-        return Err(format!("{name}: DFLT stream disagrees with its chunk length"));
+        return Err(format!(
+            "{name}: DFLT stream disagrees with its chunk length"
+        ));
     }
     Ok(out)
 }
@@ -157,7 +214,11 @@ pub fn read_member(read: Read, e: &TtEntry, label: &str) -> R<Vec<u8>> {
             return Err(format!("{name}: unsupported TT Games compression {tag:?}"));
         }
         let d = read(offset, stored)?;
-        return if d.len() == size { Ok(d) } else { Err(format!("{name}: truncated stored member")) };
+        return if d.len() == size {
+            Ok(d)
+        } else {
+            Err(format!("{name}: truncated stored member"))
+        };
     }
     let all = read(offset, stored)?;
     if all.len() as u64 != stored {
@@ -166,9 +227,19 @@ pub fn read_member(read: Read, e: &TtEntry, label: &str) -> R<Vec<u8>> {
     let codec = String::from_utf8_lossy(&tag).to_string();
     let (mut at, mut out) = (0usize, Vec::with_capacity(size));
     while at < all.len() {
-        let h = all.get(at..at + 12).ok_or_else(|| format!("{name}: truncated {codec} header"))?;
-        let (packed, raw) = (u32::from_le_bytes(h[4..8].try_into().unwrap()) as usize, u32::from_le_bytes(h[8..12].try_into().unwrap()) as usize);
-        if h[..4] != tag[..] || packed == 0 || raw == 0 || packed > (all.len() - at - 12).min(MAX_MEMBER as usize) || raw > size - out.len() {
+        let h = all
+            .get(at..at + 12)
+            .ok_or_else(|| format!("{name}: truncated {codec} header"))?;
+        let (packed, raw) = (
+            u32::from_le_bytes(h[4..8].try_into().unwrap()) as usize,
+            u32::from_le_bytes(h[8..12].try_into().unwrap()) as usize,
+        );
+        if h[..4] != tag[..]
+            || packed == 0
+            || raw == 0
+            || packed > (all.len() - at - 12).min(MAX_MEMBER as usize)
+            || raw > size - out.len()
+        {
             return Err(format!("{name}: invalid {codec} chunk header"));
         }
         let d = &all[at + 12..at + 12 + packed];
@@ -186,7 +257,9 @@ pub fn read_member(read: Read, e: &TtEntry, label: &str) -> R<Vec<u8>> {
         at += 12 + packed;
     }
     if out.len() != size {
-        return Err(format!("{name}: {codec} decoded length disagrees with the index"));
+        return Err(format!(
+            "{name}: {codec} decoded length disagrees with the index"
+        ));
     }
     Ok(out)
 }
@@ -198,7 +271,10 @@ fn adjacent(d: &[u8], c: usize, start: usize, end: usize) -> Option<(Stage, Vec<
     if c < start || c + 0x760 > end {
         return None;
     }
-    let (cn, kn) = (u32_at(d, c + 0x20)? as usize, u32_at(d, c + 0x704)? as usize);
+    let (cn, kn) = (
+        u32_at(d, c + 0x20)? as usize,
+        u32_at(d, c + 0x704)? as usize,
+    );
     if cn < 0x760 || c + cn > end || kn < 8 {
         return None;
     }
@@ -217,7 +293,9 @@ fn adjacent(d: &[u8], c: usize, start: usize, end: usize) -> Option<(Stage, Vec<
         if memchr::memmem::find(code, &CTL_MAGIC).is_some() {
             continue;
         }
-        let Some(st) = glslc::stage(ctl, code) else { continue };
+        let Some(st) = glslc::stage(ctl, code) else {
+            continue;
+        };
         if st == Stage::Cs && code[..4] != CS_MAGIC && code.iter().all(|&b| b == 0) {
             continue;
         }
@@ -226,7 +304,11 @@ fn adjacent(d: &[u8], c: usize, start: usize, end: usize) -> Option<(Stage, Vec<
         }
     }
     if cands.len() > 1 {
-        let headed: Vec<_> = cands.iter().filter(|v| v.2[..4] == GFX_MAGIC || v.2[..4] == CS_MAGIC).cloned().collect();
+        let headed: Vec<_> = cands
+            .iter()
+            .filter(|v| v.2[..4] == GFX_MAGIC || v.2[..4] == CS_MAGIC)
+            .cloned()
+            .collect();
         if headed.len() == 1 {
             return headed.into_iter().next();
         }
@@ -234,9 +316,19 @@ fn adjacent(d: &[u8], c: usize, start: usize, end: usize) -> Option<(Stage, Vec<
             let code = &v.2;
             let s = if code[..4] == CS_MAGIC { 0x100 } else { 0 };
             let c1 = u32_at(ctl, 0x700).unwrap_or(0) as usize;
-            let e = if s < c1 && c1 <= code.len() { c1 } else { code.len() };
+            let e = if s < c1 && c1 <= code.len() {
+                c1
+            } else {
+                code.len()
+            };
             let q = |i: usize| u64_at(code, i).unwrap_or(0);
-            v.0 == Stage::Cs && (s..e.saturating_sub(7)).step_by(32).all(|i| q(i) >> 63 == 0) && (s..e.saturating_sub(7)).step_by(8).any(|i| (i - s) % 32 != 0 && q(i) >> 52 == 0xe30)
+            v.0 == Stage::Cs
+                && (s..e.saturating_sub(7))
+                    .step_by(32)
+                    .all(|i| q(i) >> 63 == 0)
+                && (s..e.saturating_sub(7))
+                    .step_by(8)
+                    .any(|i| (i - s) % 32 != 0 && q(i) >> 52 == 0xe30)
         };
         cands.retain(exits);
     }
@@ -273,7 +365,10 @@ pub fn programs(data: &[u8], label: &str, problems: &mut Vec<String>) -> Vec<Fou
             problems.push(format!("{label}: truncated control section @{c:#x}"));
             continue;
         }
-        let (cn, kn) = (u32_at(data, c + 0x20).unwrap_or(0) as usize, u32_at(data, c + 0x704).unwrap_or(0) as usize);
+        let (cn, kn) = (
+            u32_at(data, c + 0x20).unwrap_or(0) as usize,
+            u32_at(data, c + 0x704).unwrap_or(0) as usize,
+        );
         let end = start.min(controls.get(i + 1).copied().unwrap_or(data.len()));
         let mut cand = adjacent(data, c, previous_stop, end);
         if cand.is_none() && cn >= 0x760 && c + cn <= data.len() && kn >= 0x80 {
@@ -281,12 +376,16 @@ pub fn programs(data: &[u8], label: &str, problems: &mut Vec<String>) -> Vec<Fou
             let mut v = vec![];
             let from = c + cn;
             if from < end {
-                for k in (from..end.saturating_sub(3)).filter(|&k| (data[k] == b'x' || data[k] == b'y') && data[k + 1..k + 4] == [0x56, 0x34, 0x12]) {
+                for k in (from..end.saturating_sub(3)).filter(|&k| {
+                    (data[k] == b'x' || data[k] == b'y') && data[k + 1..k + 4] == [0x56, 0x34, 0x12]
+                }) {
                     if k + kn > end {
                         continue;
                     }
                     let code = &data[k..k + kn];
-                    if let Some(st) = glslc::stage(ctl, code).filter(|&st| check(st, ctl, code).is_none()) {
+                    if let Some(st) =
+                        glslc::stage(ctl, code).filter(|&st| check(st, ctl, code).is_none())
+                    {
                         v.push((st, ctl.to_vec(), code.to_vec()));
                     }
                 }
@@ -296,8 +395,12 @@ pub fn programs(data: &[u8], label: &str, problems: &mut Vec<String>) -> Vec<Fou
             }
         }
         match cand {
-            Some((st, ctl, code)) => found.push(Found::new(format!("{label}#RAW@{c:#x}"), st, &ctl, &code)),
-            None => problems.push(format!("{label} control section @{c:#x}: no unique code area in its program")),
+            Some((st, ctl, code)) => {
+                found.push(Found::new(format!("{label}#RAW@{c:#x}"), st, &ctl, &code))
+            }
+            None => problems.push(format!(
+                "{label} control section @{c:#x}: no unique code area in its program"
+            )),
         }
     }
     found
@@ -324,7 +427,8 @@ mod tests {
             name_recs.push((no, 1, (i + 1) as u16));
             let at = body.len() as u64;
             if *deflate {
-                let mut e = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+                let mut e =
+                    flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
                 std::io::Write::write_all(&mut e, data).unwrap();
                 let mut c = e.finish().unwrap();
                 // the DLC's writer stores a dynamic block's type as 0
@@ -338,7 +442,12 @@ mod tests {
             } else {
                 body.extend_from_slice(data);
             }
-            files.push((name_hash(&format!("SHADERS/{n}")), at, (body.len() as u64 - at) as u32, data.len() as u32));
+            files.push((
+                name_hash(&format!("SHADERS/{n}")),
+                at,
+                (body.len() as u64 - at) as u32,
+                data.len() as u32,
+            ));
         }
         // the last name record must not be a folder with file id 0 unless it is the last: fine
         files.sort_by_key(|f| f.0);
@@ -390,21 +499,38 @@ mod tests {
             program.push(0);
         }
         program.extend_from_slice(&code);
-        let d = dat(&[("A.NNX_SHADERS", program.clone(), false), ("B.nnx_shaders", program.clone(), true), ("C.TEX", vec![1, 2, 3], false)]);
-        let read = |o: u64, n: u64| -> R<Vec<u8>> { Ok(d.get(o as usize..(o + n) as usize).map(|s| s.to_vec()).unwrap_or_else(|| d[o as usize..].to_vec())) };
-        let es = entries(&read, d.len() as u64, "t.dat").unwrap().expect("a CC4 DAT");
-        assert_eq!(es.iter().map(|e| e.0.as_str()).collect::<Vec<_>>(), ["SHADERS/A.NNX_SHADERS", "SHADERS/B.nnx_shaders"]);
+        let d = dat(&[
+            ("A.NNX_SHADERS", program.clone(), false),
+            ("B.nnx_shaders", program.clone(), true),
+            ("C.TEX", vec![1, 2, 3], false),
+        ]);
+        let read = |o: u64, n: u64| -> R<Vec<u8>> {
+            Ok(d.get(o as usize..(o + n) as usize)
+                .map(|s| s.to_vec())
+                .unwrap_or_else(|| d[o as usize..].to_vec()))
+        };
+        let es = entries(&read, d.len() as u64, "t.dat")
+            .unwrap()
+            .expect("a CC4 DAT");
+        assert_eq!(
+            es.iter().map(|e| e.0.as_str()).collect::<Vec<_>>(),
+            ["SHADERS/A.NNX_SHADERS", "SHADERS/B.nnx_shaders"]
+        );
         for e in &es {
             let m = read_member(&read, e, &e.0).unwrap();
             assert_eq!(m, program, "{} decodes", e.0);
             let mut probs = vec![];
             let f = programs(&m, &e.0, &mut probs);
             assert_eq!(f.len(), 1, "{probs:?}");
-            assert_eq!((f[0].stage, f[0].ctl.as_slice(), f[0].code.as_slice()), (Stage::Ps, &ctl[..], &code[..]));
+            assert_eq!(
+                (f[0].stage, f[0].ctl.as_slice(), f[0].code.as_slice()),
+                (Stage::Ps, &ctl[..], &code[..])
+            );
         }
         // another DAT format is not taken
         let other = vec![0u8; 64];
-        let r2 = |o: u64, n: u64| -> R<Vec<u8>> { Ok(other[o as usize..(o + n) as usize].to_vec()) };
+        let r2 =
+            |o: u64, n: u64| -> R<Vec<u8>> { Ok(other[o as usize..(o + n) as usize].to_vec()) };
         assert!(entries(&r2, 64, "x.dat").unwrap().is_none());
         assert_eq!(name_hash("a/b"), name_hash("\\A\\B"));
     }

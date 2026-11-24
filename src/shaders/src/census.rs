@@ -37,7 +37,12 @@ fn ops() -> Vec<Op> {
         ("TLD", format!("11011100{}", x(56)), None, true),
         ("TLD.B", format!("11011101{}", x(56)), None, true),
         ("TLD4", format!("110010{}", x(58)), Some(58), true),
-        ("TLD4.B", format!("1101111011{}0{}", x(13), x(40)), Some(40), true),
+        (
+            "TLD4.B",
+            format!("1101111011{}0{}", x(13), x(40)),
+            Some(40),
+            true,
+        ),
         ("TXD", format!("110111100{}", x(55)), Some(50), true),
         ("TXD.B", format!("1101111001{}", x(54)), Some(50), true),
         ("TEXS", format!("1101100{}", x(57)), None, false),
@@ -73,7 +78,11 @@ pub fn census(stage: Stage, ctl: &[u8], code: &[u8]) -> Option<Vec<Found>> {
         0x80
     };
     let c1 = u32_at(ctl, 0x700).unwrap_or(0) as usize;
-    let end = if c1 > 0 && c1 <= code.len() { c1 } else { code.len() };
+    let end = if c1 > 0 && c1 <= code.len() {
+        c1
+    } else {
+        code.len()
+    };
     let ops = ops();
     let mut out = vec![];
     let mut i = start;
@@ -97,14 +106,22 @@ pub fn census(stage: Stage, ctl: &[u8], code: &[u8]) -> Option<Vec<Found>> {
 /// The census of an `nxshaders export` folder (`index.tsv` + `<key>.ctl` / `<key>.code`), as a report.
 pub fn census_dir(dir: &std::path::Path, list: usize) -> Result<String, String> {
     use std::collections::BTreeMap;
-    let idx = std::fs::read_to_string(dir.join("index.tsv")).map_err(|e| format!("{}: {e}", dir.join("index.tsv").display()))?;
+    let idx = std::fs::read_to_string(dir.join("index.tsv"))
+        .map_err(|e| format!("{}: {e}", dir.join("index.tsv").display()))?;
     let (mut shaders, mut nvn2, mut with_tex) = (0usize, 0usize, 0usize);
     let mut ops: BTreeMap<&str, (usize, usize, usize)> = BTreeMap::new();
     let (mut lc_keys, mut rp_keys) = (vec![], vec![]);
     for l in idx.lines() {
         let f: Vec<&str> = l.split('\t').collect();
-        let (Some(key), Some(st)) = (f.first(), f.get(1).and_then(|s| Stage::parse(s))) else { continue };
-        let (Ok(ctl), Ok(code)) = (std::fs::read(dir.join(format!("{key}.ctl"))), std::fs::read(dir.join(format!("{key}.code")))) else { continue };
+        let (Some(key), Some(st)) = (f.first(), f.get(1).and_then(|s| Stage::parse(s))) else {
+            continue;
+        };
+        let (Ok(ctl), Ok(code)) = (
+            std::fs::read(dir.join(format!("{key}.ctl"))),
+            std::fs::read(dir.join(format!("{key}.code"))),
+        ) else {
+            continue;
+        };
         let Some(found) = census(st, &ctl, &code) else {
             nvn2 += 1;
             continue;
@@ -117,7 +134,10 @@ pub fn census_dir(dir: &std::path::Path, list: usize) -> Result<String, String> 
             e.1 += c as usize;
             e.2 += r as usize;
         }
-        let (c, r) = (found.iter().filter(|x| x.1).count(), found.iter().filter(|x| x.2).count());
+        let (c, r) = (
+            found.iter().filter(|x| x.1).count(),
+            found.iter().filter(|x| x.2).count(),
+        );
         if c > 0 {
             lc_keys.push(format!("{key} ({st:?}, {c} instructions)"));
         }
@@ -129,7 +149,11 @@ pub fn census_dir(dir: &std::path::Path, list: usize) -> Result<String, String> 
     for (n, (k, c, r)) in &ops {
         s += &format!("{n:8} {k:9} {c:9} {r:9}\n");
     }
-    s += &format!("shaders with a LOD clamp: {}; with a residency predicate: {}\n", lc_keys.len(), rp_keys.len());
+    s += &format!(
+        "shaders with a LOD clamp: {}; with a residency predicate: {}\n",
+        lc_keys.len(),
+        rp_keys.len()
+    );
     for k in lc_keys.iter().take(list) {
         s += &format!("  LOD clamp: {k}\n");
     }
@@ -149,7 +173,9 @@ mod tests {
     fn texture_instructions_with_lod_clamp_and_residency() {
         let (mut ctl, _) = crate::nvn::synth::nvn1_ps(1);
         ctl[0x700..0x704].copy_from_slice(&0u32.to_le_bytes());
-        let tex = |lc: bool, pred: u64| -> u64 { (0b11000u64 << 59) | ((lc as u64) << 58) | (pred << 51) };
+        let tex = |lc: bool, pred: u64| -> u64 {
+            (0b11000u64 << 59) | ((lc as u64) << 58) | (pred << 51)
+        };
         let tld4s = 0b1101111100u64 << 54;
         let words = [
             tex(true, 7), // a scheduling word slot: skipped whatever it holds
@@ -166,7 +192,14 @@ mod tests {
             code.extend_from_slice(&w.to_le_bytes());
         }
         let f = census(Stage::Ps, &ctl, &code).unwrap();
-        assert_eq!(f, vec![("TEX", true, true, 8), ("TLD4S", false, false, 16), ("TEX", false, false, 24)]);
+        assert_eq!(
+            f,
+            vec![
+                ("TEX", true, true, 8),
+                ("TLD4S", false, false, 16),
+                ("TEX", false, false, 24)
+            ]
+        );
         // NVN2 is skipped
         let (c2, k2) = crate::nvn::synth::nvn2(Stage::Ps, 1);
         assert!(census(Stage::Ps, &c2, &k2).is_none());

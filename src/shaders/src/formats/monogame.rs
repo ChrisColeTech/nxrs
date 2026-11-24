@@ -8,11 +8,14 @@ use crate::nvn::*;
 pub const MGFX: &[u8; 4] = b"MGFX";
 
 const EXTRA: [u8; 51] = [
-    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15, 16, 16, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13, 14, 14, 15, 15, 16, 16, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17, 17,
 ];
 const BASE: [u32; 51] = [
-    0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536, 2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072,
-    196608, 262144, 393216, 524288, 655360, 786432, 917504, 1048576, 1179648, 1310720, 1441792, 1572864, 1703936, 1835008, 1966080, 2097152,
+    0, 1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 48, 64, 96, 128, 192, 256, 384, 512, 768, 1024, 1536,
+    2048, 3072, 4096, 6144, 8192, 12288, 16384, 24576, 32768, 49152, 65536, 98304, 131072, 196608,
+    262144, 393216, 524288, 655360, 786432, 917504, 1048576, 1179648, 1310720, 1441792, 1572864,
+    1703936, 1835008, 1966080, 2097152,
 ];
 const MAIN_SYMS: usize = 256 + 50 * 8;
 const LEN_SYMS: usize = 249 + 1;
@@ -139,7 +142,11 @@ impl Lzx {
     fn ensure(&mut self, d: &[u8], n: u32) {
         while self.bl < n {
             // a 16-bit overread past the block's end reads zeros, as the C decoder allows
-            let w = if self.ip + 1 < d.len() { d[self.ip] as u64 | (d[self.ip + 1] as u64) << 8 } else { 0 };
+            let w = if self.ip + 1 < d.len() {
+                d[self.ip] as u64 | (d[self.ip + 1] as u64) << 8
+            } else {
+                0
+            };
             self.bb = (self.bb << 16) | w;
             self.bl += 16;
             self.ip += 2;
@@ -158,14 +165,22 @@ impl Lzx {
         self.remove(n);
         v
     }
-    fn huffsym(&mut self, d: &[u8], which: u8, nbits: u32, maxsyms: usize) -> Result<usize, String> {
+    fn huffsym(
+        &mut self,
+        d: &[u8],
+        which: u8,
+        nbits: u32,
+        maxsyms: usize,
+    ) -> Result<usize, String> {
         self.ensure(d, 16);
         let (tbl, lens): (&[u16], &[u8]) = match which {
             0 => (&self.main_tbl, &self.main_len),
             1 => (&self.length_tbl, &self.length_len),
             _ => (&self.al_tbl, &self.al_len),
         };
-        let mut i = *tbl.get((self.bb >> (self.bl - nbits)) as usize).ok_or("LZX: no table")? as usize;
+        let mut i = *tbl
+            .get((self.bb >> (self.bl - nbits)) as usize)
+            .ok_or("LZX: no table")? as usize;
         if i >= maxsyms {
             let mut k = 0;
             loop {
@@ -210,7 +225,13 @@ impl Lzx {
         let mut x = first;
         while x < last {
             let z = self.pre_sym(d, &pre, &pre_len)?;
-            fn lens(s: &mut Lzx, main: bool) -> &mut Vec<u8> { if main { &mut s.main_len } else { &mut s.length_len } }
+            fn lens(s: &mut Lzx, main: bool) -> &mut Vec<u8> {
+                if main {
+                    &mut s.main_len
+                } else {
+                    &mut s.length_len
+                }
+            }
             match z {
                 17 => {
                     let y = self.read(d, 4) + 4;
@@ -305,7 +326,8 @@ impl Lzx {
                             self.ip -= 2;
                         }
                         for k in 0..3 {
-                            self.r[k] = u32_at(d, self.ip).ok_or("LZX: uncompressed block header cut short")?;
+                            self.r[k] = u32_at(d, self.ip)
+                                .ok_or("LZX: uncompressed block header cut short")?;
                             self.ip += 4;
                         }
                     }
@@ -324,7 +346,9 @@ impl Lzx {
             }
             let mut posn = self.posn;
             if self.block_type == 3 {
-                let src = d.get(self.ip..self.ip + run).ok_or("LZX: the uncompressed block runs past the block")?;
+                let src = d
+                    .get(self.ip..self.ip + run)
+                    .ok_or("LZX: the uncompressed block runs past the block")?;
                 self.window[posn..posn + run].copy_from_slice(src);
                 self.ip += run;
                 posn += run;
@@ -399,7 +423,11 @@ impl Lzx {
             }
             self.posn = posn;
         }
-        let (start, end) = if self.posn != 0 { (self.posn as i64 - outlen as i64, self.posn) } else { (ws as i64 - outlen as i64, ws) };
+        let (start, end) = if self.posn != 0 {
+            (self.posn as i64 - outlen as i64, self.posn)
+        } else {
+            (ws as i64 - outlen as i64, ws)
+        };
         if start < 0 {
             return Err("LZX: frame larger than the window".into());
         }
@@ -421,7 +449,11 @@ impl Lzx {
                     }
                     let abs = i32::from_le_bytes(out[pos..pos + 4].try_into().unwrap()) as i64;
                     if -curpos <= abs && abs < filesize {
-                        let rel = if abs >= 0 { abs - curpos } else { abs + filesize };
+                        let rel = if abs >= 0 {
+                            abs - curpos
+                        } else {
+                            abs + filesize
+                        };
                         out[pos..pos + 4].copy_from_slice(&(rel as u32).to_le_bytes());
                     }
                     pos += 4;
@@ -452,19 +484,31 @@ pub fn xnb_decompress(d: &[u8], first_block: bool, label: &str) -> R<Vec<u8>> {
             let hi = body[p];
             p += 1;
             let (dst, src) = if hi == 0xff {
-                let b = body.get(p..p + 4).ok_or_else(|| format!("{label}: XNB LZX frame header cut short"))?;
+                let b = body
+                    .get(p..p + 4)
+                    .ok_or_else(|| format!("{label}: XNB LZX frame header cut short"))?;
                 p += 4;
-                (((b[0] as usize) << 8) | b[1] as usize, ((b[2] as usize) << 8) | b[3] as usize)
+                (
+                    ((b[0] as usize) << 8) | b[1] as usize,
+                    ((b[2] as usize) << 8) | b[3] as usize,
+                )
             } else {
-                let b = *body.get(p).ok_or_else(|| format!("{label}: XNB LZX frame header cut short"))?;
+                let b = *body
+                    .get(p)
+                    .ok_or_else(|| format!("{label}: XNB LZX frame header cut short"))?;
                 p += 1;
                 (0x8000, ((hi as usize) << 8) | b as usize)
             };
             if src == 0 || dst == 0 {
                 break;
             }
-            let blk = body.get(p..p + src).ok_or_else(|| format!("{label}: XNB LZX frame runs past the file"))?;
-            out.extend(st.decompress(blk, dst).map_err(|e| format!("{label}: {e}"))?);
+            let blk = body
+                .get(p..p + src)
+                .ok_or_else(|| format!("{label}: XNB LZX frame runs past the file"))?;
+            out.extend(
+                st.decompress(blk, dst)
+                    .map_err(|e| format!("{label}: {e}"))?,
+            );
             p += src;
             if first_block {
                 break;
@@ -473,7 +517,8 @@ pub fn xnb_decompress(d: &[u8], first_block: bool, label: &str) -> R<Vec<u8>> {
         return Ok(out);
     }
     if d[5] & 0x40 != 0 {
-        return lz4_flex::block::decompress(body, dec).map_err(|e| format!("{label}: XNB LZ4 block: {e}"));
+        return lz4_flex::block::decompress(body, dec)
+            .map_err(|e| format!("{label}: XNB LZ4 block: {e}"));
     }
     Ok(d[14..].to_vec())
 }
@@ -521,7 +566,10 @@ pub fn effect(d: &[u8], p: usize, label: &str) -> Option<R<Vec<Found>>> {
     if d.get(p + 4) != Some(&8) && !v5 {
         return None;
     }
-    let mut r = Rd { d, p: p + if v5 { 6 } else { 10 } };
+    let mut r = Rd {
+        d,
+        p: p + if v5 { 6 } else { 10 },
+    };
     let head = (|| -> Option<bool> {
         for _ in 0..r.u8()? {
             if !v5 {
@@ -531,7 +579,11 @@ pub fn effect(d: &[u8], p: usize, label: &str) -> Option<R<Vec<Found>>> {
             let n = r.u8()? as usize;
             r.raw(3 * n)?;
         }
-        Some(if v5 { d.get(r.p + 6..r.p + 10) == Some(&glslc::MAGIC[..]) } else { d.get(r.p + 10..r.p + 14) == Some(&CTL_MAGIC[..]) })
+        Some(if v5 {
+            d.get(r.p + 6..r.p + 10) == Some(&glslc::MAGIC[..])
+        } else {
+            d.get(r.p + 10..r.p + 14) == Some(&CTL_MAGIC[..])
+        })
     })();
     if head != Some(true) {
         return None;
@@ -547,38 +599,67 @@ pub fn effect(d: &[u8], p: usize, label: &str) -> Option<R<Vec<Found>>> {
             let n = r.u32().ok_or_else(cut)? as usize;
             if r.p + n > d.len() {
                 if xnb {
-                    return Err(format!("{at}: shader {i} claims {n:#x} bytes past the end of the file"));
+                    return Err(format!(
+                        "{at}: shader {i} claims {n:#x} bytes past the end of the file"
+                    ));
                 }
                 return Ok(None);
             }
             let bc = r.raw(n).unwrap();
             let (st, ctl, code): (Option<Stage>, Vec<u8>, Vec<u8>) = if v5 {
                 let g = glslc::shaders(bc, &format!("{at} shader {i}"));
-                if vs > 1 || g.len() != 1 || bc.get(..4) != Some(&glslc::MAGIC[..]) || u32_at(bc, 0x44) != Some(n as u32) {
-                    return Err(format!("{at} shader {i}: {n:#x} bytes, not one GLSLC output of one stage"));
+                if vs > 1
+                    || g.len() != 1
+                    || bc.get(..4) != Some(&glslc::MAGIC[..])
+                    || u32_at(bc, 0x44) != Some(n as u32)
+                {
+                    return Err(format!(
+                        "{at} shader {i}: {n:#x} bytes, not one GLSLC output of one stage"
+                    ));
                 }
                 (Some(g[0].stage), g[0].ctl.clone(), g[0].code.clone())
             } else {
                 let nctl = u32_at(bc, 0).unwrap_or(u32::MAX) as usize;
-                let ncode = if 8 + nctl <= n { u32_at(bc, 4 + nctl).map(|x| x as usize) } else { None };
+                let ncode = if 8 + nctl <= n {
+                    u32_at(bc, 4 + nctl).map(|x| x as usize)
+                } else {
+                    None
+                };
                 if vs > 1 || ncode.map(|k| 8 + nctl + k) != Some(n) {
-                    return Err(format!("{at} shader {i}: {n:#x} bytes, not a control section and a code area"));
+                    return Err(format!(
+                        "{at} shader {i}: {n:#x} bytes, not a control section and a code area"
+                    ));
                 }
                 let code = bc[8 + nctl..].to_vec();
-                let st = if code.get(..4) == Some(&GFX_MAGIC[..]) { sph_stage(&code) } else { None };
+                let st = if code.get(..4) == Some(&GFX_MAGIC[..]) {
+                    sph_stage(&code)
+                } else {
+                    None
+                };
                 (st, bc[4..4 + nctl].to_vec(), code)
             };
             let want = if vs == 1 { Stage::Vs } else { Stage::Ps };
-            let why = if st == Some(want) { check(want, &ctl, &code).map(|s| s.to_string()) } else { Some(format!("the SPH stage is {st:?}, the effect says {want:?}")) };
+            let why = if st == Some(want) {
+                check(want, &ctl, &code).map(|s| s.to_string())
+            } else {
+                Some(format!("the SPH stage is {st:?}, the effect says {want:?}"))
+            };
             if let Some(w) = why {
                 return Err(format!("{at} shader {i}: {w}"));
             }
-            out.push(Found::new(format!("{label}#MGFX@{p:#x}#{i}"), want, &ctl, &code));
+            out.push(Found::new(
+                format!("{label}#MGFX@{p:#x}#{i}"),
+                want,
+                &ctl,
+                &code,
+            ));
             for _ in 0..r.u8().ok_or_else(cut)? {
                 r.raw(3).ok_or_else(cut)?;
                 if r.u8().ok_or_else(cut)? != 0 {
                     if v5 {
-                        return Err(format!("{at} shader {i}: a sampler state (none in the version 5 effects seen)"));
+                        return Err(format!(
+                            "{at} shader {i}: a sampler state (none in the version 5 effects seen)"
+                        ));
                     }
                     r.raw(20).ok_or_else(cut)?;
                 }
@@ -610,7 +691,10 @@ pub fn effect(d: &[u8], p: usize, label: &str) -> Option<R<Vec<Found>>> {
                 if r.u8().ok_or_else(cut)? != 0 {
                     return Err(format!("{at}: annotations (MonoGame writes none)"));
                 }
-                let (rows, cols) = (r.u8().ok_or_else(cut)? as usize, r.u8().ok_or_else(cut)? as usize);
+                let (rows, cols) = (
+                    r.u8().ok_or_else(cut)? as usize,
+                    r.u8().ok_or_else(cut)? as usize,
+                );
                 let a = params(r, at, depth + 1)?;
                 let b = params(r, at, depth + 1)?;
                 if a + b != 0 {
@@ -637,9 +721,15 @@ pub fn effect(d: &[u8], p: usize, label: &str) -> Option<R<Vec<Found>>> {
                 if r.u8().ok_or_else(cut)? != 0 {
                     return Err(format!("{at}: annotations (MonoGame writes none)"));
                 }
-                let (v, f) = (r.u8().ok_or_else(cut)? as usize, r.u8().ok_or_else(cut)? as usize);
+                let (v, f) = (
+                    r.u8().ok_or_else(cut)? as usize,
+                    r.u8().ok_or_else(cut)? as usize,
+                );
                 if (v != 255 && v >= out.len()) || (f != 255 && f >= out.len()) {
-                    return Err(format!("{at}: a pass names shader {v} / {f} of {}", out.len()));
+                    return Err(format!(
+                        "{at}: a pass names shader {v} / {f} of {}",
+                        out.len()
+                    ));
                 }
                 for n in [18usize, 25, 12] {
                     if r.u8().ok_or_else(cut)? != 0 {
@@ -649,7 +739,11 @@ pub fn effect(d: &[u8], p: usize, label: &str) -> Option<R<Vec<Found>>> {
             }
         }
         if xnb && d[r.p..].iter().any(|&b| b != 0) {
-            return Err(format!("{at}: the effect ends at {:#x}, the file at {:#x}", r.p, d.len()));
+            return Err(format!(
+                "{at}: the effect ends at {:#x}, the file at {:#x}",
+                r.p,
+                d.len()
+            ));
         }
         Ok(Some(out))
     })();
@@ -668,8 +762,13 @@ pub fn shaders(d: &[u8], label: &str) -> R<Vec<Found>> {
             out.extend(r?);
         }
     }
-    if label.ends_with(".xnb") && memchr::memmem::find(&d[..d.len().min(0x200)], b"EffectReader").is_some() && out.is_empty() {
-        return Err(format!("{label}: an XNB effect without an MGFX version 5 or 8 effect of NVN shaders"));
+    if label.ends_with(".xnb")
+        && memchr::memmem::find(&d[..d.len().min(0x200)], b"EffectReader").is_some()
+        && out.is_empty()
+    {
+        return Err(format!(
+            "{label}: an XNB effect without an MGFX version 5 or 8 effect of NVN shaders"
+        ));
     }
     Ok(out)
 }
@@ -714,9 +813,14 @@ mod tests {
     fn mgfx_v8() {
         let e = effect8(nvn1_vs(1), nvn1_ps(2));
         let f = shaders(&e, "/Content/Effects/x.xnb").unwrap();
-        assert_eq!(f.iter().map(|x| x.stage).collect::<Vec<_>>(), vec![Stage::Vs, Stage::Ps]);
+        assert_eq!(
+            f.iter().map(|x| x.stage).collect::<Vec<_>>(),
+            vec![Stage::Vs, Stage::Ps]
+        );
         // garbage after 'MGFX' in other data is no effect
-        assert!(shaders(b"xxMGFX\x08\0\0\0\0\0\x00\x09", "/main").unwrap().is_empty());
+        assert!(shaders(b"xxMGFX\x08\0\0\0\0\0\x00\x09", "/main")
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

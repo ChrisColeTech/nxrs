@@ -1,7 +1,10 @@
 //! A whole game's shaders: every code module of its ExeFS and every file of its RomFS (the update applied), read in
 //! place through the translator's package API, in parallel, one copy kept per key.
 
-use crate::formats::{self, archive, capcom, engines, fromsoft, gamefreak, koei, monolith, nlg, packs, retro, smash, studios, unreal, Ctx, Scanned};
+use crate::formats::{
+    self, archive, capcom, engines, fromsoft, gamefreak, koei, monolith, nlg, packs, retro, smash,
+    studios, unreal, Ctx, Scanned,
+};
 use crate::nvn::*;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -72,9 +75,21 @@ enum Item {
     /// Entries of a LINKDATA archive (offset, length, stored length, compressed).
     Linkdata(usize, String, Vec<(usize, (u64, u64, u64, u64))>),
     /// Entries of an RE Engine PAK, with its block table.
-    Kpka(usize, String, Vec<capcom::KpkaEntry>, Arc<Option<(u64, Vec<(u64, u64)>)>>),
+    Kpka(
+        usize,
+        String,
+        Vec<capcom::KpkaEntry>,
+        Arc<Option<(u64, Vec<(u64, u64)>)>>,
+    ),
     /// Chunks of an IoStore container (the .utoc's path): its shader libraries (true) or its cooked packages.
-    Io(usize, String, Arc<unreal::Toc>, Vec<usize>, bool, Option<[u8; 32]>),
+    Io(
+        usize,
+        String,
+        Arc<unreal::Toc>,
+        Vec<usize>,
+        bool,
+        Option<[u8; 32]>,
+    ),
     /// A Next Level Games index (.dict), read with the files beside it.
     Nlg(usize, String),
     /// Entries of a Monolith .ard (path, offset, stored size), from its .arh.
@@ -143,12 +158,20 @@ impl Item {
 }
 
 fn reader_tag(label: &str) -> String {
-    let t = label.rsplit('#').find(|p| p.chars().next().is_some_and(|c| c.is_ascii_uppercase())).unwrap_or("?");
+    let t = label
+        .rsplit('#')
+        .find(|p| p.chars().next().is_some_and(|c| c.is_ascii_uppercase()))
+        .unwrap_or("?");
     t.split(['@', ':']).next().unwrap_or("?").to_string()
 }
 
 /// Every shader of a game: its code modules (`exefs`: name → NSO bytes) and its RomFS.
-pub fn scan(exefs: &BTreeMap<String, Vec<u8>>, romfs: &RomFs, jobs: usize, say: &(dyn Fn(&str) + Sync)) -> ScanReport {
+pub fn scan(
+    exefs: &BTreeMap<String, Vec<u8>>,
+    romfs: &RomFs,
+    jobs: usize,
+    say: &(dyn Fn(&str) + Sync),
+) -> ScanReport {
     scan_with_addons(exefs, romfs, &[], jobs, say)
 }
 
@@ -159,14 +182,27 @@ fn rank(label: &str) -> (bool, &str) {
 }
 
 /// The same, with the RomFS of installed add-on content (labels `/aoc/<title id>/...`).
-pub fn scan_with_addons(exefs: &BTreeMap<String, Vec<u8>>, romfs: &RomFs, addons: &[(u64, &RomFs)], jobs: usize, say: &(dyn Fn(&str) + Sync)) -> ScanReport {
+pub fn scan_with_addons(
+    exefs: &BTreeMap<String, Vec<u8>>,
+    romfs: &RomFs,
+    addons: &[(u64, &RomFs)],
+    jobs: usize,
+    say: &(dyn Fn(&str) + Sync),
+) -> ScanReport {
     let mut roms: Vec<(String, &RomFs)> = vec![(String::new(), romfs)];
     roms.extend(addons.iter().map(|(t, r)| (format!("aoc/{t:016x}/"), *r)));
     let t0 = Instant::now();
     let mut rep = ScanReport::default();
     let mut ctx = Ctx::default();
-    if romfs.find("Pack/ZsDic.pack.zs").is_some_and(|n| n.is_file()) {
-        match romfs.read_file("Pack/ZsDic.pack.zs").map_err(|e| e.to_string()).and_then(|d| archive::ZstdDicts::from_pack(&d, "/Pack/ZsDic.pack.zs")) {
+    if romfs
+        .find("Pack/ZsDic.pack.zs")
+        .is_some_and(|n| n.is_file())
+    {
+        match romfs
+            .read_file("Pack/ZsDic.pack.zs")
+            .map_err(|e| e.to_string())
+            .and_then(|d| archive::ZstdDicts::from_pack(&d, "/Pack/ZsDic.pack.zs"))
+        {
             Ok(d) => ctx.dicts = d,
             Err(e) => rep.problems.push(format!("/Pack/ZsDic.pack.zs: {e}")),
         }
@@ -201,7 +237,14 @@ pub fn scan_with_addons(exefs: &BTreeMap<String, Vec<u8>>, romfs: &RomFs, addons
     let main_segments = || -> Option<(&[u8], Vec<(usize, usize)>)> {
         let (img, _) = main()?;
         let nso = exefs.get("main")?;
-        let segs = (0..3).map(|i| Some((u32_at(nso, 0x14 + 0x10 * i)? as usize, u32_at(nso, 0x18 + 0x10 * i)? as usize))).collect::<Option<Vec<_>>>()?;
+        let segs = (0..3)
+            .map(|i| {
+                Some((
+                    u32_at(nso, 0x14 + 0x10 * i)? as usize,
+                    u32_at(nso, 0x18 + 0x10 * i)? as usize,
+                ))
+            })
+            .collect::<Option<Vec<_>>>()?;
         Some((img.as_slice(), segs))
     };
     let rpf_key: std::cell::OnceCell<Option<[u8; 32]>> = std::cell::OnceCell::new();
@@ -210,7 +253,16 @@ pub fn scan_with_addons(exefs: &BTreeMap<String, Vec<u8>>, romfs: &RomFs, addons
     let nros: Vec<(String, Vec<u8>)> = std::env::var_os("NXSHADERS_NRO_DIR")
         .and_then(|d| std::fs::read_dir(d).ok())
         .map(|rd| {
-            let mut v: Vec<(String, Vec<u8>)> = rd.flatten().filter(|e| e.path().extension().is_some_and(|x| x == "nro")).filter_map(|e| Some((e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).ok()?))).collect();
+            let mut v: Vec<(String, Vec<u8>)> = rd
+                .flatten()
+                .filter(|e| e.path().extension().is_some_and(|x| x == "nro"))
+                .filter_map(|e| {
+                    Some((
+                        e.file_name().to_string_lossy().into_owned(),
+                        std::fs::read(e.path()).ok()?,
+                    ))
+                })
+                .collect();
             v.sort();
             v
         })
@@ -232,275 +284,364 @@ pub fn scan_with_addons(exefs: &BTreeMap<String, Vec<u8>>, romfs: &RomFs, addons
         rep.problems.extend(folder_problems);
         let have: std::collections::HashSet<&str> = files.iter().map(|(p, _)| p.as_str()).collect();
         for (path, size) in files.iter().cloned() {
-        if taken_here.contains(&path) {
-            continue;
-        }
-        // read through its Next Level Games index
-        if let Some((stem, _)) = nlg::SIBLINGS.iter().find_map(|e| path.strip_suffix(e).map(|s| (s, e))) {
-            if have.contains(format!("{stem}.dict").as_str()) {
+            if taken_here.contains(&path) {
                 continue;
             }
-        }
-        let head = romfs.read(&path, 0, 16).unwrap_or_default();
-        let plan = (|| -> Result<Option<Item>, String> {
-            let read = |o: u64, n: u64| romfs.read(&path, o, n).map_err(|e| e.to_string());
-            let label = format!("/{pre}{path}");
-            if head.starts_with(&nlg::DICT) {
-                return Ok(Some(Item::Nlg(ri, path.clone())));
-            }
-            if path.ends_with(".arh") && monolith::is_arh(&head) {
-                let ard = format!("{}.ard", &path[..path.len() - 4]);
-                if !have.contains(ard.as_str()) {
-                    return Err("ARH index has no ARD data file".into());
-                }
-                let ents = monolith::arh_entries(&romfs.read_file(&path).map_err(|e| e.to_string())?, &label)?;
-                let ard_size = files.iter().find(|(p, _)| *p == ard).map(|x| x.1).unwrap_or(0);
-                if ents.iter().any(|e| e.1 > ard_size || e.2 > ard_size - e.1) {
-                    return Err("ARD entry out of bounds".into());
-                }
-                group(ents, |e| e.2, |c| Item::Arh(ri, ard.clone(), c), &mut items);
-                return Ok(None);
-            }
-            if path.ends_with(".kit") && head.starts_with(packs::KIT) {
-                let idx = romfs.read_file(&path).map_err(|e| e.to_string())?;
-                let part = |n: u16| files.iter().find(|(p, _)| *p == format!("{path}.{n}")).map(|x| x.1);
-                let ents = packs::kit_entries(&idx, &part, &label)?;
-                group(ents, |e| e.3, |c| Item::Kit(ri, path.clone(), c), &mut items);
-                return Ok(None);
-            }
-            if let Some(stem) = path.strip_suffix(".pkdswitch").filter(|s| have.contains(format!("{s}.pkiswitch").as_str())) {
-                let _ = stem;
-                return Ok(Some(Item::D11(ri, path.clone(), size)));
-            }
-            if head.starts_with(&packs::UBIART_IPK) {
-                return Ok(Some(Item::Ipk(ri, path.clone(), size)));
-            }
-            if head.starts_with(packs::PKZL) && path.ends_with(".pkz") {
-                let ents = packs::pkz_entries(&read, &label)?;
-                group(ents, |e| e.3, |c| Item::Pkz(ri, path.clone(), c), &mut items);
-                return Ok(None);
-            }
-            if head.starts_with(packs::RPF6) {
-                let (_, _, enc) = packs::rpf_header(&head).ok_or("RPF6 header cut short")?;
-                let key = if enc {
-                    let first = read(16, 16)?;
-                    let k = rpf_key.get_or_init(|| main_segments().and_then(|(img, segs)| packs::rpf_find_key(img, &segs, &first)));
-                    Some((*k).ok_or("an encrypted RPF6 archive, and no 32-byte window of main decrypts its first entry to the root directory")?)
-                } else {
-                    None
-                };
-                let ents = packs::rpf_files(&read, size, key.as_ref(), &label)?;
-                group(ents, |e| e.stored, |c| Item::Rpf(ri, path.clone(), key, c), &mut items);
-                return Ok(None);
-            }
-            if head.starts_with(packs::CRA) {
-                let idx = nros.iter().find_map(|(_, n)| packs::cra_index(n).ok()).ok_or_else(|| format!("a CRA archive, and no NRO in NXSHADERS_NRO_DIR ({}) holds its file table", std::env::var("NXSHADERS_NRO_DIR").unwrap_or_default()))?;
-                group(idx, |e| e.2, |c| Item::Cra(ri, path.clone(), c), &mut items);
-                return Ok(None);
-            }
-            if path.to_lowercase().ends_with(".cpk") && packs::is_d3cpk(&head) {
-                let step = (size / 64).max(1 << 24);
-                let mut a = 0;
-                while a < size {
-                    items.push(Item::Range(ri, path.clone(), a, (a + step).min(size), false));
-                    a += step;
-                }
-                return Ok(None);
-            }
-            if head.starts_with(packs::PDAT) {
-                let step = (size / 64).max(1 << 24);
-                let mut a = 0;
-                while a < size {
-                    items.push(Item::Range(ri, path.clone(), a, (a + step).min(size), true));
-                    a += step;
-                }
-                return Ok(None);
-            }
-            if head.starts_with(packs::ZIP) || head.starts_with(packs::VZIP) {
-                match packs::zip_entries(&read, size, &label) {
-                    Ok(ents) => {
-                        group(ents, |e| e.size, |c| Item::Zip(ri, path.clone(), c), &mut items);
-                        return Ok(None);
-                    }
-                    Err(e) => return Err(format!("the zip cannot be read ({e})")),
+            // read through its Next Level Games index
+            if let Some((stem, _)) = nlg::SIBLINGS
+                .iter()
+                .find_map(|e| path.strip_suffix(e).map(|s| (s, e)))
+            {
+                if have.contains(format!("{stem}.dict").as_str()) {
+                    continue;
                 }
             }
-            if head.starts_with(b"SRYK") {
-                let ents: Vec<packs::VbfEntry> = packs::vbf_entries(&read, &label)?.into_iter().filter(|e| packs::vbf_wanted(&e.0)).collect();
-                group(ents, |e| e.1, |c| Item::Vbf(ri, path.clone(), c), &mut items);
-                return Ok(None);
-            }
-            if head.starts_with(retro::RFRM) && size > 1 << 28 {
-                return Ok(Some(Item::Rfrm(ri, path.clone(), size)));
-            }
-            if head.starts_with(gamefreak::ONEPACK) && size >= 16 {
-                trinity.push((ri, path.clone(), size));
-                return Ok(None);
-            }
-            if head.starts_with(b"CPK ") {
+            let head = romfs.read(&path, 0, 16).unwrap_or_default();
+            let plan = (|| -> Result<Option<Item>, String> {
                 let read = |o: u64, n: u64| romfs.read(&path, o, n).map_err(|e| e.to_string());
-                let ents = archive::cpk_files(&read, size)?;
-                let mut cur = vec![];
-                let mut n = 0;
-                for e in ents {
-                    n += e.2;
-                    cur.push(e);
-                    if n >= PACK_GROUP {
-                        items.push(Item::Cpk(ri, path.clone(), std::mem::take(&mut cur)));
-                        n = 0;
+                let label = format!("/{pre}{path}");
+                if head.starts_with(&nlg::DICT) {
+                    return Ok(Some(Item::Nlg(ri, path.clone())));
+                }
+                if path.ends_with(".arh") && monolith::is_arh(&head) {
+                    let ard = format!("{}.ard", &path[..path.len() - 4]);
+                    if !have.contains(ard.as_str()) {
+                        return Err("ARH index has no ARD data file".into());
                     }
-                }
-                if !cur.is_empty() {
-                    items.push(Item::Cpk(ri, path.clone(), cur));
-                }
-                return Ok(None);
-            }
-            if head.starts_with(b"PAK") && head.len() >= 12 {
-                let hs = i32_at(&head, 4).unwrap_or(0).max(0) as u64;
-                if hs > 12 && hs <= 1 << 28 {
-                    let h = romfs.read(&path, 0, hs).map_err(|e| e.to_string())?;
-                    if let Some(members) = engines::heaps_pak_files(&h) {
-                        for (nm, off, n) in members {
-                            if nm.ends_with(&format!("/{}", engines::HEAPS_CACHE)) {
-                                items.push(Item::Heaps(ri, path.clone(), nm, off, n));
-                            }
-                        }
-                        return Ok(None);
+                    let ents = monolith::arh_entries(
+                        &romfs.read_file(&path).map_err(|e| e.to_string())?,
+                        &label,
+                    )?;
+                    let ard_size = files
+                        .iter()
+                        .find(|(p, _)| *p == ard)
+                        .map(|x| x.1)
+                        .unwrap_or(0);
+                    if ents.iter().any(|e| e.1 > ard_size || e.2 > ard_size - e.1) {
+                        return Err("ARD entry out of bounds".into());
                     }
+                    group(ents, |e| e.2, |c| Item::Arh(ri, ard.clone(), c), &mut items);
+                    return Ok(None);
                 }
-            }
-            if let Some(idx) = path.strip_suffix(".bdt").map(|p| format!("{p}.bhd5")).filter(|i| romfs.find(i).is_some_and(|n| n.is_file())) {
-                let ents = fromsoft::bhd5_entries(&romfs.read_file(&idx).map_err(|e| e.to_string())?, &idx)?;
-                let mut cur = vec![];
-                let mut n = 0;
-                for e in ents {
-                    n += e.2;
-                    cur.push(e);
-                    if n >= PACK_GROUP {
-                        items.push(Item::Bdt(ri, path.clone(), std::mem::take(&mut cur)));
-                        n = 0;
+                if path.ends_with(".kit") && head.starts_with(packs::KIT) {
+                    let idx = romfs.read_file(&path).map_err(|e| e.to_string())?;
+                    let part = |n: u16| {
+                        files
+                            .iter()
+                            .find(|(p, _)| *p == format!("{path}.{n}"))
+                            .map(|x| x.1)
+                    };
+                    let ents = packs::kit_entries(&idx, &part, &label)?;
+                    group(
+                        ents,
+                        |e| e.3,
+                        |c| Item::Kit(ri, path.clone(), c),
+                        &mut items,
+                    );
+                    return Ok(None);
+                }
+                if let Some(stem) = path
+                    .strip_suffix(".pkdswitch")
+                    .filter(|s| have.contains(format!("{s}.pkiswitch").as_str()))
+                {
+                    let _ = stem;
+                    return Ok(Some(Item::D11(ri, path.clone(), size)));
+                }
+                if head.starts_with(&packs::UBIART_IPK) {
+                    return Ok(Some(Item::Ipk(ri, path.clone(), size)));
+                }
+                if head.starts_with(packs::PKZL) && path.ends_with(".pkz") {
+                    let ents = packs::pkz_entries(&read, &label)?;
+                    group(
+                        ents,
+                        |e| e.3,
+                        |c| Item::Pkz(ri, path.clone(), c),
+                        &mut items,
+                    );
+                    return Ok(None);
+                }
+                if head.starts_with(packs::RPF6) {
+                    let (_, _, enc) = packs::rpf_header(&head).ok_or("RPF6 header cut short")?;
+                    let key = if enc {
+                        let first = read(16, 16)?;
+                        let k = rpf_key.get_or_init(|| {
+                            main_segments()
+                                .and_then(|(img, segs)| packs::rpf_find_key(img, &segs, &first))
+                        });
+                        Some((*k).ok_or("an encrypted RPF6 archive, and no 32-byte window of main decrypts its first entry to the root directory")?)
+                    } else {
+                        None
+                    };
+                    let ents = packs::rpf_files(&read, size, key.as_ref(), &label)?;
+                    group(
+                        ents,
+                        |e| e.stored,
+                        |c| Item::Rpf(ri, path.clone(), key, c),
+                        &mut items,
+                    );
+                    return Ok(None);
+                }
+                if head.starts_with(packs::CRA) {
+                    let idx = nros.iter().find_map(|(_, n)| packs::cra_index(n).ok()).ok_or_else(|| format!("a CRA archive, and no NRO in NXSHADERS_NRO_DIR ({}) holds its file table", std::env::var("NXSHADERS_NRO_DIR").unwrap_or_default()))?;
+                    group(idx, |e| e.2, |c| Item::Cra(ri, path.clone(), c), &mut items);
+                    return Ok(None);
+                }
+                if path.to_lowercase().ends_with(".cpk") && packs::is_d3cpk(&head) {
+                    let step = (size / 64).max(1 << 24);
+                    let mut a = 0;
+                    while a < size {
+                        items.push(Item::Range(
+                            ri,
+                            path.clone(),
+                            a,
+                            (a + step).min(size),
+                            false,
+                        ));
+                        a += step;
                     }
+                    return Ok(None);
                 }
-                if !cur.is_empty() {
-                    items.push(Item::Bdt(ri, path.clone(), cur));
-                }
-                return Ok(None);
-            }
-            if head.starts_with(&smash::MAGIC) {
-                let read = |o: u64, n: u64| romfs.read(&path, o, n).map_err(|e| e.to_string());
-                let ents = smash::files(&read, &path)?;
-                let mut cur = vec![];
-                let mut n = 0;
-                for e in ents {
-                    n += e.2;
-                    cur.push(e);
-                    if n >= PACK_GROUP {
-                        items.push(Item::Smash(ri, path.clone(), std::mem::take(&mut cur)));
-                        n = 0;
+                if head.starts_with(packs::PDAT) {
+                    let step = (size / 64).max(1 << 24);
+                    let mut a = 0;
+                    while a < size {
+                        items.push(Item::Range(ri, path.clone(), a, (a + step).min(size), true));
+                        a += step;
                     }
+                    return Ok(None);
                 }
-                if !cur.is_empty() {
-                    items.push(Item::Smash(ri, path.clone(), cur));
-                }
-                return Ok(None);
-            }
-            if head.starts_with(koei::IDRK) || head.starts_with(koei::PDRK) {
-                return Ok(Some(Item::Rdb(ri, path.clone(), size)));
-            }
-            if let Some(idx) = koei::linkdata_index(&path).filter(|i| romfs.find(i).is_some_and(|n| n.is_file())) {
-                let ents = koei::linkdata_entries(&romfs.read_file(&idx).map_err(|e| e.to_string())?);
-                let mut cur = vec![];
-                let mut n = 0;
-                for (i, e) in ents.into_iter().enumerate() {
-                    n += e.2;
-                    cur.push((i, e));
-                    if n >= PACK_GROUP {
-                        items.push(Item::Linkdata(ri, path.clone(), std::mem::take(&mut cur)));
-                        n = 0;
-                    }
-                }
-                if !cur.is_empty() {
-                    items.push(Item::Linkdata(ri, path.clone(), cur));
-                }
-                return Ok(None);
-            }
-            if head.starts_with(capcom::KPKA) {
-                let read = |o: u64, n: u64| romfs.read(&path, o, n).map_err(|e| e.to_string());
-                let (ents, blocks) = capcom::kpka_entries(&read, &path)?;
-                let blocks = Arc::new(blocks);
-                let mut cur = vec![];
-                let mut n = 0;
-                for e in ents {
-                    n += e.stored;
-                    cur.push(e);
-                    if n >= PACK_GROUP {
-                        items.push(Item::Kpka(ri, path.clone(), std::mem::take(&mut cur), blocks.clone()));
-                        n = 0;
-                    }
-                }
-                if !cur.is_empty() {
-                    items.push(Item::Kpka(ri, path.clone(), cur, blocks));
-                }
-                return Ok(None);
-            }
-            if head.starts_with(unreal::TOC_MAGIC) {
-                tocs.push((ri, path.clone()));
-                return Ok(None);
-            }
-            if size >= 0x2d {
-                let tail = romfs.read(&path, size - size.min(0xe1), size.min(0xe1)).unwrap_or_default();
-                if [0x2cusize, 0xc8, 0xcc].iter().any(|&b| tail.len() >= b && u32_at(&tail, tail.len() - b) == Some(unreal::PAK_MAGIC)) {
-                    let read = |o: u64, n: u64| romfs.read(&path, o, n).map_err(|e| e.to_string());
-                    let mut key = None;
-                    if let Ok(f) = unreal::pak_footer(&read, size) {
-                        if f.encrypted {
-                            let first: [u8; 16] = read(f.index.0, 16)?.try_into().map_err(|_| "index cut short")?;
-                            key = main().and_then(|(img, lo)| unreal::find_key(img, *lo, &first, &ue_keys));
-                            if let Some(k) = key {
-                                if !ue_keys.contains(&k) {
-                                    ue_keys.push(k);
-                                }
-                                pak_keys.insert((ri, path.clone()), k);
-                            }
-                        }
-                    }
-                    let ents = match unreal::pak_files(&read, size, key.as_ref()) {
-                        Ok(e) => {
-                            ue_archives |= e.iter().any(|x| x.name.ends_with(".ushaderbytecode"));
-                            unreal::shader_files(e)
-                        }
-                        Err(e) => {
-                            // a pak is not read whole: its shaders are left out
-                            pak_problems.push(format!("/{}{path}: Unreal pak: {e}; not scanned", roms[ri].0));
+                if head.starts_with(packs::ZIP) || head.starts_with(packs::VZIP) {
+                    match packs::zip_entries(&read, size, &label) {
+                        Ok(ents) => {
+                            group(
+                                ents,
+                                |e| e.size,
+                                |c| Item::Zip(ri, path.clone(), c),
+                                &mut items,
+                            );
                             return Ok(None);
                         }
-                    };
+                        Err(e) => return Err(format!("the zip cannot be read ({e})")),
+                    }
+                }
+                if head.starts_with(b"SRYK") {
+                    let ents: Vec<packs::VbfEntry> = packs::vbf_entries(&read, &label)?
+                        .into_iter()
+                        .filter(|e| packs::vbf_wanted(&e.0))
+                        .collect();
+                    group(
+                        ents,
+                        |e| e.1,
+                        |c| Item::Vbf(ri, path.clone(), c),
+                        &mut items,
+                    );
+                    return Ok(None);
+                }
+                if head.starts_with(retro::RFRM) && size > 1 << 28 {
+                    return Ok(Some(Item::Rfrm(ri, path.clone(), size)));
+                }
+                if head.starts_with(gamefreak::ONEPACK) && size >= 16 {
+                    trinity.push((ri, path.clone(), size));
+                    return Ok(None);
+                }
+                if head.starts_with(b"CPK ") {
+                    let read = |o: u64, n: u64| romfs.read(&path, o, n).map_err(|e| e.to_string());
+                    let ents = archive::cpk_files(&read, size)?;
                     let mut cur = vec![];
                     let mut n = 0;
                     for e in ents {
-                        n += e.size;
+                        n += e.2;
                         cur.push(e);
                         if n >= PACK_GROUP {
-                            items.push(Item::Pak(ri, path.clone(), std::mem::take(&mut cur), key));
+                            items.push(Item::Cpk(ri, path.clone(), std::mem::take(&mut cur)));
                             n = 0;
                         }
                     }
                     if !cur.is_empty() {
-                        items.push(Item::Pak(ri, path.clone(), cur, key));
+                        items.push(Item::Cpk(ri, path.clone(), cur));
                     }
                     return Ok(None);
                 }
+                if head.starts_with(b"PAK") && head.len() >= 12 {
+                    let hs = i32_at(&head, 4).unwrap_or(0).max(0) as u64;
+                    if hs > 12 && hs <= 1 << 28 {
+                        let h = romfs.read(&path, 0, hs).map_err(|e| e.to_string())?;
+                        if let Some(members) = engines::heaps_pak_files(&h) {
+                            for (nm, off, n) in members {
+                                if nm.ends_with(&format!("/{}", engines::HEAPS_CACHE)) {
+                                    items.push(Item::Heaps(ri, path.clone(), nm, off, n));
+                                }
+                            }
+                            return Ok(None);
+                        }
+                    }
+                }
+                if let Some(idx) = path
+                    .strip_suffix(".bdt")
+                    .map(|p| format!("{p}.bhd5"))
+                    .filter(|i| romfs.find(i).is_some_and(|n| n.is_file()))
+                {
+                    let ents = fromsoft::bhd5_entries(
+                        &romfs.read_file(&idx).map_err(|e| e.to_string())?,
+                        &idx,
+                    )?;
+                    let mut cur = vec![];
+                    let mut n = 0;
+                    for e in ents {
+                        n += e.2;
+                        cur.push(e);
+                        if n >= PACK_GROUP {
+                            items.push(Item::Bdt(ri, path.clone(), std::mem::take(&mut cur)));
+                            n = 0;
+                        }
+                    }
+                    if !cur.is_empty() {
+                        items.push(Item::Bdt(ri, path.clone(), cur));
+                    }
+                    return Ok(None);
+                }
+                if head.starts_with(&smash::MAGIC) {
+                    let read = |o: u64, n: u64| romfs.read(&path, o, n).map_err(|e| e.to_string());
+                    let ents = smash::files(&read, &path)?;
+                    let mut cur = vec![];
+                    let mut n = 0;
+                    for e in ents {
+                        n += e.2;
+                        cur.push(e);
+                        if n >= PACK_GROUP {
+                            items.push(Item::Smash(ri, path.clone(), std::mem::take(&mut cur)));
+                            n = 0;
+                        }
+                    }
+                    if !cur.is_empty() {
+                        items.push(Item::Smash(ri, path.clone(), cur));
+                    }
+                    return Ok(None);
+                }
+                if head.starts_with(koei::IDRK) || head.starts_with(koei::PDRK) {
+                    return Ok(Some(Item::Rdb(ri, path.clone(), size)));
+                }
+                if let Some(idx) = koei::linkdata_index(&path)
+                    .filter(|i| romfs.find(i).is_some_and(|n| n.is_file()))
+                {
+                    let ents =
+                        koei::linkdata_entries(&romfs.read_file(&idx).map_err(|e| e.to_string())?);
+                    let mut cur = vec![];
+                    let mut n = 0;
+                    for (i, e) in ents.into_iter().enumerate() {
+                        n += e.2;
+                        cur.push((i, e));
+                        if n >= PACK_GROUP {
+                            items.push(Item::Linkdata(ri, path.clone(), std::mem::take(&mut cur)));
+                            n = 0;
+                        }
+                    }
+                    if !cur.is_empty() {
+                        items.push(Item::Linkdata(ri, path.clone(), cur));
+                    }
+                    return Ok(None);
+                }
+                if head.starts_with(capcom::KPKA) {
+                    let read = |o: u64, n: u64| romfs.read(&path, o, n).map_err(|e| e.to_string());
+                    let (ents, blocks) = capcom::kpka_entries(&read, &path)?;
+                    let blocks = Arc::new(blocks);
+                    let mut cur = vec![];
+                    let mut n = 0;
+                    for e in ents {
+                        n += e.stored;
+                        cur.push(e);
+                        if n >= PACK_GROUP {
+                            items.push(Item::Kpka(
+                                ri,
+                                path.clone(),
+                                std::mem::take(&mut cur),
+                                blocks.clone(),
+                            ));
+                            n = 0;
+                        }
+                    }
+                    if !cur.is_empty() {
+                        items.push(Item::Kpka(ri, path.clone(), cur, blocks));
+                    }
+                    return Ok(None);
+                }
+                if head.starts_with(unreal::TOC_MAGIC) {
+                    tocs.push((ri, path.clone()));
+                    return Ok(None);
+                }
+                if size >= 0x2d {
+                    let tail = romfs
+                        .read(&path, size - size.min(0xe1), size.min(0xe1))
+                        .unwrap_or_default();
+                    if [0x2cusize, 0xc8, 0xcc].iter().any(|&b| {
+                        tail.len() >= b && u32_at(&tail, tail.len() - b) == Some(unreal::PAK_MAGIC)
+                    }) {
+                        let read =
+                            |o: u64, n: u64| romfs.read(&path, o, n).map_err(|e| e.to_string());
+                        let mut key = None;
+                        if let Ok(f) = unreal::pak_footer(&read, size) {
+                            if f.encrypted {
+                                let first: [u8; 16] = read(f.index.0, 16)?
+                                    .try_into()
+                                    .map_err(|_| "index cut short")?;
+                                key = main().and_then(|(img, lo)| {
+                                    unreal::find_key(img, *lo, &first, &ue_keys)
+                                });
+                                if let Some(k) = key {
+                                    if !ue_keys.contains(&k) {
+                                        ue_keys.push(k);
+                                    }
+                                    pak_keys.insert((ri, path.clone()), k);
+                                }
+                            }
+                        }
+                        let ents = match unreal::pak_files(&read, size, key.as_ref()) {
+                            Ok(e) => {
+                                ue_archives |=
+                                    e.iter().any(|x| x.name.ends_with(".ushaderbytecode"));
+                                unreal::shader_files(e)
+                            }
+                            Err(e) => {
+                                // a pak is not read whole: its shaders are left out
+                                pak_problems.push(format!(
+                                    "/{}{path}: Unreal pak: {e}; not scanned",
+                                    roms[ri].0
+                                ));
+                                return Ok(None);
+                            }
+                        };
+                        let mut cur = vec![];
+                        let mut n = 0;
+                        for e in ents {
+                            n += e.size;
+                            cur.push(e);
+                            if n >= PACK_GROUP {
+                                items.push(Item::Pak(
+                                    ri,
+                                    path.clone(),
+                                    std::mem::take(&mut cur),
+                                    key,
+                                ));
+                                n = 0;
+                            }
+                        }
+                        if !cur.is_empty() {
+                            items.push(Item::Pak(ri, path.clone(), cur, key));
+                        }
+                        return Ok(None);
+                    }
+                }
+                Ok(Some(Item::File(ri, path.clone(), size)))
+            })();
+            match plan {
+                Ok(Some(it)) => items.push(it),
+                Ok(None) => {}
+                Err(e) => {
+                    rep.problems
+                        .push(format!("/{}{path}: {e}; scanned as one file", roms[ri].0));
+                    items.push(Item::File(ri, path.clone(), size));
+                }
             }
-            Ok(Some(Item::File(ri, path.clone(), size)))
-        })();
-        match plan {
-            Ok(Some(it)) => items.push(it),
-            Ok(None) => {}
-            Err(e) => {
-                rep.problems.push(format!("/{}{path}: {e}; scanned as one file", roms[ri].0));
-                items.push(Item::File(ri, path.clone(), size));
-            }
-        }
         }
     }
     // IoStore containers: shader libraries, and the cooked packages where no pak has shader code archives and the
@@ -509,7 +650,11 @@ pub fn scan_with_addons(exefs: &BTreeMap<String, Vec<u8>>, romfs: &RomFs, addons
     for (ri, path) in tocs {
         let romfs = roms[ri].1;
         let label = format!("/{}{path}", roms[ri].0);
-        let toc = match romfs.read_file(&path).map_err(|e| e.to_string()).and_then(|b| unreal::Toc::parse(&b, &label)) {
+        let toc = match romfs
+            .read_file(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|b| unreal::Toc::parse(&b, &label))
+        {
             Ok(t) => Arc::new(t),
             Err(e) => {
                 pak_problems.push(format!("{e}; not scanned"));
@@ -517,18 +662,36 @@ pub fn scan_with_addons(exefs: &BTreeMap<String, Vec<u8>>, romfs: &RomFs, addons
             }
         };
         let base = path.strip_suffix(".utoc").unwrap_or(&path).to_string();
-        let key = if toc.encrypted { pak_keys.get(&(ri, format!("{base}.pak"))).or(ue_keys.first()).copied() } else { None };
+        let key = if toc.encrypted {
+            pak_keys
+                .get(&(ri, format!("{base}.pak")))
+                .or(ue_keys.first())
+                .copied()
+        } else {
+            None
+        };
         if toc.encrypted && key.is_none() {
             pak_problems.push(format!("{label}: the container is encrypted and no key of the game opens a pak; not scanned"));
             continue;
         }
         let libs = toc.shader_libraries();
-        let bundles = if libs.is_empty() && !ue_archives { toc.export_bundles() } else { vec![] };
+        let bundles = if libs.is_empty() && !ue_archives {
+            toc.export_bundles()
+        } else {
+            vec![]
+        };
         if libs.is_empty() && bundles.is_empty() {
             continue;
         }
         for k in 0..64u64 {
-            taken.insert((ri, if k == 0 { format!("{base}.ucas") } else { format!("{base}_s{k}.ucas") }));
+            taken.insert((
+                ri,
+                if k == 0 {
+                    format!("{base}.ucas")
+                } else {
+                    format!("{base}_s{k}.ucas")
+                },
+            ));
         }
         if !libs.is_empty() {
             items.push(Item::Io(ri, path.clone(), toc.clone(), libs, true, key));
@@ -539,7 +702,14 @@ pub fn scan_with_addons(exefs: &BTreeMap<String, Vec<u8>>, romfs: &RomFs, addons
             n += toc.ranges[i].1;
             cur.push(i);
             if n >= PACK_GROUP {
-                items.push(Item::Io(ri, path.clone(), toc.clone(), std::mem::take(&mut cur), false, key));
+                items.push(Item::Io(
+                    ri,
+                    path.clone(),
+                    toc.clone(),
+                    std::mem::take(&mut cur),
+                    false,
+                    key,
+                ));
                 n = 0;
             }
         }
@@ -551,12 +721,16 @@ pub fn scan_with_addons(exefs: &BTreeMap<String, Vec<u8>>, romfs: &RomFs, addons
     rep.problems.extend(pak_problems);
     for (ri, path, size) in trinity {
         if let Err(e) = trinity_items(ri, &path, size, roms[ri].1, &mut items) {
-            rep.problems.push(format!("/{}{path}: {e}; not scanned", roms[ri].0));
+            rep.problems
+                .push(format!("/{}{path}: {e}; not scanned", roms[ri].0));
         }
     }
     items.sort_by_key(|i| std::cmp::Reverse(i.weight()));
     let total = items.len();
-    say(&format!("shaders: scanning {} files ({} work items, {} jobs)", rep.files, total, jobs));
+    say(&format!(
+        "shaders: scanning {} files ({} work items, {} jobs)",
+        rep.files, total, jobs
+    ));
 
     let shaders: Mutex<HashMap<String, Shader>> = Mutex::new(HashMap::new());
     let pairs: Mutex<BTreeSet<Pair>> = Mutex::new(BTreeSet::new());
@@ -651,7 +825,12 @@ pub fn scan_with_addons(exefs: &BTreeMap<String, Vec<u8>>, romfs: &RomFs, addons
 }
 
 /// Entries in work items of about PACK_GROUP bytes.
-fn group<T>(ents: Vec<T>, w: impl Fn(&T) -> u64, mk: impl Fn(Vec<T>) -> Item, items: &mut Vec<Item>) {
+fn group<T>(
+    ents: Vec<T>,
+    w: impl Fn(&T) -> u64,
+    mk: impl Fn(Vec<T>) -> Item,
+    items: &mut Vec<Item>,
+) {
     let mut cur = vec![];
     let mut n = 0;
     for e in ents {
@@ -670,7 +849,12 @@ fn group<T>(ents: Vec<T>, w: impl Fn(&T) -> u64, mk: impl Fn(Vec<T>) -> Item, it
 /// Formats that span files or folders: Blizzard's CASC folders, Frostbite's tables, Larian's LSPK parts and the KIT
 /// and ARH data files read through their indexes. → (paths they take, which a loose scan leaves alone; their work
 /// items; problems)
-fn folder_formats(ri: usize, pre: &str, romfs: &RomFs, files: &[(String, u64)]) -> (std::collections::HashSet<String>, Vec<Item>, Vec<String>) {
+fn folder_formats(
+    ri: usize,
+    pre: &str,
+    romfs: &RomFs,
+    files: &[(String, u64)],
+) -> (std::collections::HashSet<String>, Vec<Item>, Vec<String>) {
     let mut taken = std::collections::HashSet::new();
     let mut items = vec![];
     let mut problems = vec![];
@@ -685,16 +869,33 @@ fn folder_formats(ri: usize, pre: &str, romfs: &RomFs, files: &[(String, u64)]) 
         let names: Vec<String> = fs.iter().map(|(p, _)| base_of(p)).collect();
         let casc = names.iter().any(|n| n == "build_key.txt")
             && names.iter().any(|n| n.ends_with(".psv"))
-            && names.iter().any(|n| n.ends_with(".data") && n.len() == 16 && n.as_bytes()[2] == 0x2d);
+            && names
+                .iter()
+                .any(|n| n.ends_with(".data") && n.len() == 16 && n.as_bytes()[2] == 0x2d);
         if !casc {
             continue;
         }
-        let at = |n: &str| if d.is_empty() { n.to_string() } else { format!("{d}/{n}") };
+        let at = |n: &str| {
+            if d.is_empty() {
+                n.to_string()
+            } else {
+                format!("{d}/{n}")
+            }
+        };
         let r = (|| -> R<()> {
-            let key = String::from_utf8_lossy(&romfs.read_file(&at("build_key.txt")).map_err(|e| e.to_string())?).into_owned();
+            let key = String::from_utf8_lossy(
+                &romfs
+                    .read_file(&at("build_key.txt"))
+                    .map_err(|e| e.to_string())?,
+            )
+            .into_owned();
             let mut psv = vec![];
             for n in names.iter().filter(|n| n.ends_with(".psv")) {
-                psv.push((n.clone(), String::from_utf8_lossy(&romfs.read_file(&at(n)).map_err(|e| e.to_string())?).into_owned()));
+                psv.push((
+                    n.clone(),
+                    String::from_utf8_lossy(&romfs.read_file(&at(n)).map_err(|e| e.to_string())?)
+                        .into_owned(),
+                ));
             }
             psv.sort();
             let es = packs::casc_files(&key, &psv, &format!("/{pre}{d}"))?;
@@ -703,11 +904,18 @@ fn folder_formats(ri: usize, pre: &str, romfs: &RomFs, files: &[(String, u64)]) 
                 by.entry(e.1.clone()).or_default().push(e);
             }
             if let Some(lost) = by.keys().find(|a| !names.contains(a)) {
-                return Err(format!("/{pre}{d}: the manifest names archive {lost}, which the RomFS lacks"));
+                return Err(format!(
+                    "/{pre}{d}: the manifest names archive {lost}, which the RomFS lacks"
+                ));
             }
             for (a, mut es) in by {
                 es.sort_by_key(|e| e.2);
-                group(es, |e| e.3, |c| Item::Casc(ri, at(&a), d.clone(), c), &mut items);
+                group(
+                    es,
+                    |e| e.3,
+                    |c| Item::Casc(ri, at(&a), d.clone(), c),
+                    &mut items,
+                );
             }
             for n in names.iter().filter(|n| n.ends_with(".data")) {
                 taken.insert(at(n));
@@ -719,7 +927,10 @@ fn folder_formats(ri: usize, pre: &str, romfs: &RomFs, files: &[(String, u64)]) 
         }
     }
     // Frostbite: <root>Data/layout.toc with the toc magic
-    for (p, _) in files.iter().filter(|(p, _)| p == "Data/layout.toc" || p.ends_with("/Data/layout.toc")) {
+    for (p, _) in files
+        .iter()
+        .filter(|(p, _)| p == "Data/layout.toc" || p.ends_with("/Data/layout.toc"))
+    {
         let root = &p[..p.len() - "Data/layout.toc".len()];
         let r = (|| -> R<()> {
             let layout = romfs.read_file(p).map_err(|e| e.to_string())?;
@@ -728,21 +939,37 @@ fn folder_formats(ri: usize, pre: &str, romfs: &RomFs, files: &[(String, u64)]) 
             }
             let chunks = formats::frostbite::install_chunks(&layout)?;
             let mut tocs = vec![];
-            for (q, _) in files.iter().filter(|(q, _)| q.starts_with(&format!("{root}Data/NX/")) || q.starts_with(&format!("{root}Patch/NX/"))) {
+            for (q, _) in files.iter().filter(|(q, _)| {
+                q.starts_with(&format!("{root}Data/NX/"))
+                    || q.starts_with(&format!("{root}Patch/NX/"))
+            }) {
                 if q.ends_with(".toc") {
                     tocs.push((q.clone(), romfs.read_file(q).map_err(|e| e.to_string())?));
                 }
             }
-            let read = |path: &str, o: u64, n: u64| romfs.read(&format!("{root}{path}"), o, n).map_err(|e| e.to_string());
-            let res = formats::frostbite::resources(&chunks, &tocs, &read, formats::frostbite::name_hash("CompiledBytecode"))?;
+            let read = |path: &str, o: u64, n: u64| {
+                romfs
+                    .read(&format!("{root}{path}"), o, n)
+                    .map_err(|e| e.to_string())
+            };
+            let res = formats::frostbite::resources(
+                &chunks,
+                &tocs,
+                &read,
+                formats::frostbite::name_hash("CompiledBytecode"),
+            )?;
             let mut by: BTreeMap<String, Vec<(u64, u64, u64, String)>> = BTreeMap::new();
             for ((cas, off, stored), (size, name)) in res {
-                by.entry(format!("{root}{cas}")).or_default().push((off, stored, size, name));
+                by.entry(format!("{root}{cas}"))
+                    .or_default()
+                    .push((off, stored, size, name));
             }
             for (cas, es) in by {
                 group(es, |e| e.1, |c| Item::Fb(ri, cas.clone(), c), &mut items);
             }
-            for (q, _) in files.iter().filter(|(q, _)| q.starts_with(root) && (q.ends_with(".toc") || q.ends_with(".cas"))) {
+            for (q, _) in files.iter().filter(|(q, _)| {
+                q.starts_with(root) && (q.ends_with(".toc") || q.ends_with(".cas"))
+            }) {
                 taken.insert(q.clone());
             }
             Ok(())
@@ -752,7 +979,10 @@ fn folder_formats(ri: usize, pre: &str, romfs: &RomFs, files: &[(String, u64)]) 
         }
     }
     // TT Games' CC4 DATs (Skywalker Saga): only their indexed .nnx_shaders members are read
-    for (p, size) in files.iter().filter(|(p, _)| p.to_lowercase().ends_with(".dat")) {
+    for (p, size) in files
+        .iter()
+        .filter(|(p, _)| p.to_lowercase().ends_with(".dat"))
+    {
         if taken.contains(p) {
             continue;
         }
@@ -770,7 +1000,10 @@ fn folder_formats(ri: usize, pre: &str, romfs: &RomFs, files: &[(String, u64)]) 
         }
     }
     // Larian LSPK packages (footer-indexed, in numbered parts): only their BSHD members are read
-    for (p, size) in files.iter().filter(|(p, _)| p.to_lowercase().ends_with(".pak")) {
+    for (p, size) in files
+        .iter()
+        .filter(|(p, _)| p.to_lowercase().ends_with(".pak"))
+    {
         if taken.contains(p) {
             continue;
         }
@@ -782,7 +1015,10 @@ fn folder_formats(ri: usize, pre: &str, romfs: &RomFs, files: &[(String, u64)]) 
                     taken.insert(packs::lspk_part(p, i));
                 }
                 taken.insert(p.clone());
-                let ents: Vec<packs::LspkEntry> = ents.into_iter().filter(|e| e.0.to_lowercase().ends_with(".bshd")).collect();
+                let ents: Vec<packs::LspkEntry> = ents
+                    .into_iter()
+                    .filter(|e| e.0.to_lowercase().ends_with(".bshd"))
+                    .collect();
                 group(ents, |e| e.3, |c| Item::Lspk(ri, p.clone(), c), &mut items);
             }
             Err(e) => {
@@ -799,7 +1035,11 @@ fn folder_formats(ri: usize, pre: &str, romfs: &RomFs, files: &[(String, u64)]) 
             }
         }
         if p.ends_with(".kit") && romfs.read(p, 0, 4).is_ok_and(|h| h.starts_with(packs::KIT)) {
-            for (q, _) in files.iter().filter(|(q, _)| q.strip_prefix(p.as_str()).is_some_and(|r| r.len() > 1 && r.starts_with('.') && r[1..].bytes().all(|b| b.is_ascii_digit()))) {
+            for (q, _) in files.iter().filter(|(q, _)| {
+                q.strip_prefix(p.as_str()).is_some_and(|r| {
+                    r.len() > 1 && r.starts_with('.') && r[1..].bytes().all(|b| b.is_ascii_digit())
+                })
+            }) {
                 taken.insert(q.clone());
             }
         }
@@ -809,10 +1049,18 @@ fn folder_formats(ri: usize, pre: &str, romfs: &RomFs, files: &[(String, u64)]) 
 
 /// A Trinity file system's packs, in work items of about PACK_GROUP bytes. A pack runs to the next one (the last to
 /// the root table).
-fn trinity_items(ri: usize, path: &str, size: u64, romfs: &RomFs, items: &mut Vec<Item>) -> Result<(), String> {
+fn trinity_items(
+    ri: usize,
+    path: &str,
+    size: u64,
+    romfs: &RomFs,
+    items: &mut Vec<Item>,
+) -> Result<(), String> {
     let head = romfs.read(path, 0, 16).map_err(|e| e.to_string())?;
     let root = u64_at(&head, 8).unwrap_or(size).min(size);
-    let tail = romfs.read(path, root, size - root).map_err(|e| e.to_string())?;
+    let tail = romfs
+        .read(path, root, size - root)
+        .map_err(|e| e.to_string())?;
     let offs = gamefreak::trpfs_packs(&head, &tail)?;
     let mut cur = vec![];
     let mut n = 0;
@@ -834,14 +1082,23 @@ fn trinity_items(ri: usize, path: &str, size: u64, romfs: &RomFs, items: &mut Ve
     Ok(())
 }
 
-fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned, bytes: &AtomicU64, oodle: &AtomicUsize) {
+fn run_item(
+    ctx: &Ctx,
+    roms: &[(String, &RomFs)],
+    item: &Item,
+    out: &mut Scanned,
+    bytes: &AtomicU64,
+    oodle: &AtomicUsize,
+) {
     match item {
         Item::Code(label, image) => formats::scan_code(ctx, image, label, out),
         Item::File(ri, path, size) => {
             let (pre, romfs) = (&roms[*ri].0, roms[*ri].1);
             let label = format!("/{pre}{path}");
             if *size > MAX_WHOLE {
-                out.problems.push(format!("{label}: {size} bytes, too large to read whole (not scanned)"));
+                out.problems.push(format!(
+                    "{label}: {size} bytes, too large to read whole (not scanned)"
+                ));
                 return;
             }
             match romfs.read_file(path) {
@@ -878,7 +1135,10 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
             let (pre, romfs) = (&roms[*ri].0, roms[*ri].1);
             for (nm, off, csz, usz) in ents {
                 let label = format!("/{pre}{path}/{nm}");
-                let d = romfs.read(path, *off, *csz).map_err(|e| e.to_string()).and_then(|raw| archive::cpk_entry(raw, *usz, &label));
+                let d = romfs
+                    .read(path, *off, *csz)
+                    .map_err(|e| e.to_string())
+                    .and_then(|raw| archive::cpk_entry(raw, *usz, &label));
                 match d {
                     Ok(d) => {
                         bytes.fetch_add(*csz, Ordering::Relaxed);
@@ -892,10 +1152,13 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
             let (pre, romfs) = (&roms[*ri].0, roms[*ri].1);
             for &(h, off, n) in ents {
                 let label = format!("/{pre}{path}#{h:08x}");
-                match romfs.read(path, off, n).map_err(|e| e.to_string()).and_then(|d| {
-                    bytes.fetch_add(n, Ordering::Relaxed);
-                    fromsoft::bnd(&d, &label)
-                }) {
+                match romfs
+                    .read(path, off, n)
+                    .map_err(|e| e.to_string())
+                    .and_then(|d| {
+                        bytes.fetch_add(n, Ordering::Relaxed);
+                        fromsoft::bnd(&d, &label)
+                    }) {
                     Ok(f) => out.found.extend(f),
                     Err(e) => out.problems.push(e),
                 }
@@ -915,7 +1178,9 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
                         let label = smash::label_of(&format!("/{pre}{path}"), &d, e.0);
                         let n = out.found.len();
                         formats::scan_blob(ctx, &d, &label, out, 0);
-                        if out.found.len() == n && memchr::memmem::find(&d, &formats::glslc::MAGIC).is_some() {
+                        if out.found.len() == n
+                            && memchr::memmem::find(&d, &formats::glslc::MAGIC).is_some()
+                        {
                             out.found.extend(formats::glslc::shaders(&d, &label));
                         }
                     }
@@ -961,12 +1226,26 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
             let (pre, romfs) = (&roms[*ri].0, roms[*ri].1);
             let base = path.strip_suffix(".utoc").unwrap_or(path);
             let read = |part: u64, o: u64, n: u64| {
-                let f = if part == 0 { format!("{base}.ucas") } else { format!("{base}_s{part}.ucas") };
+                let f = if part == 0 {
+                    format!("{base}.ucas")
+                } else {
+                    format!("{base}_s{part}.ucas")
+                };
                 romfs.read(&f, o, n).map_err(|e| e.to_string())
             };
-            let index: HashMap<[u8; 12], usize> = if *libs { toc.ids.iter().enumerate().map(|(i, id)| (*id, i)).collect() } else { HashMap::new() };
+            let index: HashMap<[u8; 12], usize> = if *libs {
+                toc.ids.iter().enumerate().map(|(i, id)| (*id, i)).collect()
+            } else {
+                HashMap::new()
+            };
             for &i in chunks {
-                let label = format!("/{pre}{path}#{}", toc.ids[i].iter().map(|b| format!("{b:02x}")).collect::<String>());
+                let label = format!(
+                    "/{pre}{path}#{}",
+                    toc.ids[i]
+                        .iter()
+                        .map(|b| format!("{b:02x}"))
+                        .collect::<String>()
+                );
                 let d = match toc.read(i, &read, key.as_ref(), &label) {
                     Ok(d) => d,
                     Err(e) => {
@@ -1025,7 +1304,11 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
                 bytes.fetch_add(b.len() as u64, Ordering::Relaxed);
                 Some(b)
             };
-            match romfs.read_file(path).map_err(|e| e.to_string()).and_then(|idx| nlg::nlg(ctx, &idx, &sib, &label, out)) {
+            match romfs
+                .read_file(path)
+                .map_err(|e| e.to_string())
+                .and_then(|idx| nlg::nlg(ctx, &idx, &sib, &label, out))
+            {
                 Ok(()) => {}
                 Err(e) => out.problems.push(format!("{e}; its shaders are left out")),
             }
@@ -1064,9 +1347,15 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
         Item::D11(ri, path, _) => {
             let (pre, romfs) = (&roms[*ri].0, roms[*ri].1);
             let label = format!("/{pre}{path}");
-            let idx = format!("{}.pkiswitch", path.strip_suffix(".pkdswitch").unwrap_or(path));
+            let idx = format!(
+                "{}.pkiswitch",
+                path.strip_suffix(".pkdswitch").unwrap_or(path)
+            );
             let r = (|| -> R<()> {
-                let (i, d) = (romfs.read_file(&idx).map_err(|e| e.to_string())?, romfs.read_file(path).map_err(|e| e.to_string())?);
+                let (i, d) = (
+                    romfs.read_file(&idx).map_err(|e| e.to_string())?,
+                    romfs.read_file(path).map_err(|e| e.to_string())?,
+                );
                 bytes.fetch_add((i.len() + d.len()) as u64, Ordering::Relaxed);
                 for (h, m) in packs::d11_members(&i, &d, &label)? {
                     let lb = format!("{label}#{h:08x}");
@@ -1138,7 +1427,9 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
             for e in ents {
                 let label = format!("/{pre}{path}/{}", e.1);
                 // sound and movies (FSTM, EBML) are left out by their first block
-                if packs::cra_head(&read, e).is_ok_and(|h| h.starts_with(b"FSTM") || h.starts_with(&[0x1a, 0x45, 0xdf, 0xa3])) {
+                if packs::cra_head(&read, e).is_ok_and(|h| {
+                    h.starts_with(b"FSTM") || h.starts_with(&[0x1a, 0x45, 0xdf, 0xa3])
+                }) {
                     continue;
                 }
                 match packs::cra_read(&read, e) {
@@ -1157,12 +1448,18 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
             let (pre, romfs) = (&roms[*ri].0, roms[*ri].1);
             for e in ents {
                 let label = format!("/{pre}{dir}/{}", e.0);
-                match romfs.read(archive, e.2, e.3).map_err(|x| x.to_string()).and_then(|d| {
-                    if d.len() as u64 != e.3 {
-                        return Err(format!("{} bytes at {:#x} run past the archive's end", e.3, e.2));
-                    }
-                    packs::casc_decode(&d, &e.5, e.4, &label)
-                }) {
+                match romfs
+                    .read(archive, e.2, e.3)
+                    .map_err(|x| x.to_string())
+                    .and_then(|d| {
+                        if d.len() as u64 != e.3 {
+                            return Err(format!(
+                                "{} bytes at {:#x} run past the archive's end",
+                                e.3, e.2
+                            ));
+                        }
+                        packs::casc_decode(&d, &e.5, e.4, &label)
+                    }) {
                     Ok(d) => {
                         bytes.fetch_add(e.3, Ordering::Relaxed);
                         formats::scan_blob(ctx, &d, &label, out, 0);
@@ -1174,7 +1471,11 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
         Item::Range(ri, path, a, b, pdat) => {
             let (pre, romfs) = (&roms[*ri].0, roms[*ri].1);
             let label = format!("/{pre}{path}");
-            let span = if *pdat { packs::PDAT_SPAN } else { packs::D3_SPAN };
+            let span = if *pdat {
+                packs::PDAT_SPAN
+            } else {
+                packs::D3_SPAN
+            };
             match romfs.read(path, *a, b - a + span) {
                 Ok(d) => {
                     bytes.fetch_add(b - a, Ordering::Relaxed);
@@ -1201,7 +1502,10 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
                         bytes.fetch_add(e.stored, Ordering::Relaxed);
                         let n = out.found.len();
                         formats::scan_blob(ctx, &d, &label, out, 0);
-                        if out.found.len() == n && d.get(..4) != Some(b"MSHD") && memchr::memmem::find(&d, &formats::glslc::MAGIC).is_some() {
+                        if out.found.len() == n
+                            && d.get(..4) != Some(b"MSHD")
+                            && memchr::memmem::find(&d, &formats::glslc::MAGIC).is_some()
+                        {
                             out.found.extend(formats::glslc::shaders(&d, &label));
                         }
                     }
@@ -1257,22 +1561,31 @@ fn run_item(ctx: &Ctx, roms: &[(String, &RomFs)], item: &Item, out: &mut Scanned
             let (pre, romfs) = (&roms[*ri].0, roms[*ri].1);
             for (off, stored, size, name) in ents {
                 let label = format!("/{pre}{cas}#{name}");
-                let r = romfs.read(cas, *off, *stored).map_err(|e| e.to_string()).and_then(|d| {
-                    bytes.fetch_add(*stored, Ordering::Relaxed);
-                    let item = formats::frostbite::read_item(&d, *size, &label)?;
-                    oodle.fetch_add(1, Ordering::Relaxed);
-                    formats::frostbite::nvn_shader(&item).map_err(|e| format!("{label}: {e}"))
-                });
+                let r = romfs
+                    .read(cas, *off, *stored)
+                    .map_err(|e| e.to_string())
+                    .and_then(|d| {
+                        bytes.fetch_add(*stored, Ordering::Relaxed);
+                        let item = formats::frostbite::read_item(&d, *size, &label)?;
+                        oodle.fetch_add(1, Ordering::Relaxed);
+                        formats::frostbite::nvn_shader(&item).map_err(|e| format!("{label}: {e}"))
+                    });
                 match r {
                     Ok(Some((code, ctl))) => {
                         let st = formats::glslc::stage(&ctl, &code);
                         match st.map(|st| (st, check(st, &ctl, &code))) {
                             Some((st, None)) => out.found.push(Found::new(label, st, &ctl, &code)),
-                            Some((_, Some(w))) => out.problems.push(format!("{label}: {w}; left out")),
-                            None => out.problems.push(format!("{label}: no stage in the code area header; left out")),
+                            Some((_, Some(w))) => {
+                                out.problems.push(format!("{label}: {w}; left out"))
+                            }
+                            None => out.problems.push(format!(
+                                "{label}: no stage in the code area header; left out"
+                            )),
                         }
                     }
-                    Ok(None) => out.problems.push(format!("{label}: a CompiledBytecode resource without a VNVN record; left out")),
+                    Ok(None) => out.problems.push(format!(
+                        "{label}: a CompiledBytecode resource without a VNVN record; left out"
+                    )),
                     Err(e) => out.problems.push(e),
                 }
             }

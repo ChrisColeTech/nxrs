@@ -24,19 +24,52 @@ struct Dict {
 }
 
 fn dict(d: &[u8], label: &str) -> R<Dict> {
-    let (nchunk, nrec) = if d.len() >= 0x10 { (d[0xc] as usize, d[0xd] as usize) } else { (0, 0) };
+    let (nchunk, nrec) = if d.len() >= 0x10 {
+        (d[0xc] as usize, d[0xd] as usize)
+    } else {
+        (0, 0)
+    };
     let co = 0x10 + 0x18 * nrec;
-    let bad = d.len() < co + 0x10 * nchunk || nrec > nchunk || (0..nrec).any(|i| d[0x18 + 0x18 * i..0x28 + 0x18 * i].iter().any(|&c| c as usize >= nchunk));
+    let bad = d.len() < co + 0x10 * nchunk
+        || nrec > nchunk
+        || (0..nrec).any(|i| {
+            d[0x18 + 0x18 * i..0x28 + 0x18 * i]
+                .iter()
+                .any(|&c| c as usize >= nchunk)
+        });
     if bad {
         return Err(format!("{label}: the index ({:#x} bytes, header {:02x?}) is not in the layout of Luigi's Mansion 3's archives", d.len(), d.get(4..0x10).unwrap_or(&[])));
     }
-    let recs = (0..nrec).map(|i| (u16_at(d, 0x14 + 0x18 * i).unwrap(), d[0x18 + 0x18 * i..0x28 + 0x18 * i].try_into().unwrap())).collect();
-    let chunks = (0..nchunk).map(|i| {
-        let o = co + 0x10 * i;
-        (u32_at(d, o).unwrap(), u32_at(d, o + 4).unwrap(), u32_at(d, o + 8).unwrap(), d[o + 0xe])
-    }).collect();
-    let names = d[co + 0x10 * nchunk..].split(|&b| b == 0).take(d[0xe] as usize).map(|n| n.iter().map(|&c| c as char).collect()).collect();
-    Ok(Dict { comp: d[6] != 0, recs, chunks, names })
+    let recs = (0..nrec)
+        .map(|i| {
+            (
+                u16_at(d, 0x14 + 0x18 * i).unwrap(),
+                d[0x18 + 0x18 * i..0x28 + 0x18 * i].try_into().unwrap(),
+            )
+        })
+        .collect();
+    let chunks = (0..nchunk)
+        .map(|i| {
+            let o = co + 0x10 * i;
+            (
+                u32_at(d, o).unwrap(),
+                u32_at(d, o + 4).unwrap(),
+                u32_at(d, o + 8).unwrap(),
+                d[o + 0xe],
+            )
+        })
+        .collect();
+    let names = d[co + 0x10 * nchunk..]
+        .split(|&b| b == 0)
+        .take(d[0xe] as usize)
+        .map(|n| n.iter().map(|&c| c as char).collect())
+        .collect();
+    Ok(Dict {
+        comp: d[6] != 0,
+        recs,
+        chunks,
+        names,
+    })
 }
 
 /// The plain entries of a variant's table in the game's order (lists inline, depth first).
@@ -46,7 +79,13 @@ fn walk(tab: &[u8], start: u32, count: u32, out: &mut Vec<usize>, depth: usize) 
     }
     for i in start..start.saturating_add(count) {
         let i = i as usize;
-        let (Some(w0), Some(w1), Some(w2)) = (u32_at(tab, 12 * i), u32_at(tab, 12 * i + 4), u32_at(tab, 12 * i + 8)) else { return };
+        let (Some(w0), Some(w1), Some(w2)) = (
+            u32_at(tab, 12 * i),
+            u32_at(tab, 12 * i + 4),
+            u32_at(tab, 12 * i + 8),
+        ) else {
+            return;
+        };
         if w0 >> 31 != 0 {
             walk(tab, w2, w1, out, depth + 1);
         } else {
@@ -60,10 +99,23 @@ fn walk(tab: &[u8], start: u32, count: u32, out: &mut Vec<usize>, depth: usize) 
 /// below its length) or from the update's body (counted from the old length); old[cut..end] is kept aside first, as
 /// the game copies it before the packing overwrites it.
 #[allow(clippy::too_many_arguments)]
-fn patch_section(tab: &mut [u8], order: &[usize], s: u32, old: &[u8], body: &[u8], cut: usize, end: usize, size: usize) -> Vec<u8> {
+fn patch_section(
+    tab: &mut [u8],
+    order: &[usize],
+    s: u32,
+    old: &[u8],
+    body: &[u8],
+    cut: usize,
+    end: usize,
+    size: usize,
+) -> Vec<u8> {
     let mut buf = vec![0u8; old.len().max(size)];
     buf[..old.len()].copy_from_slice(old);
-    let keep: Vec<u8> = if end != 0 { old.get(cut..end.min(old.len())).unwrap_or(&[]).to_vec() } else { vec![] };
+    let keep: Vec<u8> = if end != 0 {
+        old.get(cut..end.min(old.len())).unwrap_or(&[]).to_vec()
+    } else {
+        vec![]
+    };
     let mut cur = 0usize;
     let put = |buf: &mut Vec<u8>, at: usize, src: &[u8]| {
         if buf.len() < at + src.len() {
@@ -72,11 +124,19 @@ fn patch_section(tab: &mut [u8], order: &[usize], s: u32, old: &[u8], body: &[u8
         buf[at..at + src.len()].copy_from_slice(src);
     };
     for &i in order {
-        let (w0, n, src) = (u32_at(tab, 12 * i).unwrap(), u32_at(tab, 12 * i + 4).unwrap() as usize, u32_at(tab, 12 * i + 8).unwrap() as usize);
+        let (w0, n, src) = (
+            u32_at(tab, 12 * i).unwrap(),
+            u32_at(tab, 12 * i + 4).unwrap() as usize,
+            u32_at(tab, 12 * i + 8).unwrap() as usize,
+        );
         if (w0 >> 27) & 0xf != s {
             continue;
         }
-        let al = if w0 & 0x7c0_0000 != 0 { 1usize << ((w0 >> 22) & 0x1f) } else { 1 };
+        let al = if w0 & 0x7c0_0000 != 0 {
+            1usize << ((w0 >> 22) & 0x1f)
+        } else {
+            1
+        };
         cur = (cur + al - 1) & !(al - 1);
         let piece: Vec<u8> = if src >= old.len() {
             let a = src - old.len();
@@ -85,7 +145,9 @@ fn patch_section(tab: &mut [u8], order: &[usize], s: u32, old: &[u8], body: &[u8
             let a = src - cut;
             keep.get(a..(a + n).min(keep.len())).unwrap_or(&[]).to_vec()
         } else {
-            buf.get(src..(src + n).min(buf.len())).unwrap_or(&[]).to_vec()
+            buf.get(src..(src + n).min(buf.len()))
+                .unwrap_or(&[])
+                .to_vec()
         };
         put(&mut buf, cur, &piece);
         tab[12 * i + 8..12 * i + 12].copy_from_slice(&(cur as u32).to_le_bytes());
@@ -98,12 +160,23 @@ fn patch_section(tab: &mut [u8], order: &[usize], s: u32, old: &[u8], body: &[u8
 
 /// A Next Level Games archive's shaders: `index` is the `.dict`, `sibling(ext)` reads `<stem><ext>` when the RomFS has
 /// it. BNSH containers in a revision-4 archive's data go through `scan_blob` as everywhere else.
-pub fn nlg(ctx: &Ctx, index: &[u8], sibling: &dyn Fn(&str) -> Option<Vec<u8>>, label: &str, out: &mut Scanned) -> R<()> {
+pub fn nlg(
+    ctx: &Ctx,
+    index: &[u8],
+    sibling: &dyn Fn(&str) -> Option<Vec<u8>>,
+    label: &str,
+    out: &mut Scanned,
+) -> R<()> {
     if index.get(4..6) == Some(&DICT4[..]) {
         return nlg4(ctx, index, sibling, label, out);
     }
     let dc = dict(index, label)?;
-    let files: std::collections::HashMap<u8, Vec<u8>> = dc.names.iter().enumerate().filter_map(|(i, n)| sibling(n).map(|b| (i as u8, b))).collect();
+    let files: std::collections::HashMap<u8, Vec<u8>> = dc
+        .names
+        .iter()
+        .enumerate()
+        .filter_map(|(i, n)| sibling(n).map(|b| (i as u8, b)))
+        .collect();
     let patch = sibling(".patch");
     let mut cache: std::collections::HashMap<usize, Vec<u8>> = std::collections::HashMap::new();
     let mut chunk = |ci: usize| -> R<Vec<u8>> {
@@ -111,11 +184,25 @@ pub fn nlg(ctx: &Ctx, index: &[u8], sibling: &dyn Fn(&str) -> Option<Vec<u8>>, l
             return Ok(c.clone());
         }
         let (off, n, stored, f) = dc.chunks[ci];
-        let file = files.get(&f).ok_or_else(|| format!("{label}: chunk {ci} is in a file the game does not ship"))?;
-        let raw = span(file, off as u64, if dc.comp { stored } else { n } as u64, &format!("{label}: chunk {ci}"))?;
-        let c = if dc.comp { archive::unzlib(raw, label)? } else { raw.to_vec() };
+        let file = files
+            .get(&f)
+            .ok_or_else(|| format!("{label}: chunk {ci} is in a file the game does not ship"))?;
+        let raw = span(
+            file,
+            off as u64,
+            if dc.comp { stored } else { n } as u64,
+            &format!("{label}: chunk {ci}"),
+        )?;
+        let c = if dc.comp {
+            archive::unzlib(raw, label)?
+        } else {
+            raw.to_vec()
+        };
         if c.len() != n as usize {
-            return Err(format!("{label}: chunk {ci} inflates to {:#x} bytes, the index says {n:#x}", c.len()));
+            return Err(format!(
+                "{label}: chunk {ci} inflates to {:#x} bytes, the index says {n:#x}",
+                c.len()
+            ));
         }
         cache.insert(ci, c.clone());
         Ok(c)
@@ -123,38 +210,82 @@ pub fn nlg(ctx: &Ctx, index: &[u8], sibling: &dyn Fn(&str) -> Option<Vec<u8>>, l
     let (mut mask, mut body, mut bsec) = (0u64, vec![], vec![0u32; 16]);
     if let Some(p) = &patch {
         mask = u64_at(p, 0).ok_or_else(|| format!("{label}: patch cut short"))?;
-        let (boff, bstored, bn) = (need32(p, 8, "patch")? as u64, need32(p, 12, "patch")? as u64, need32(p, 16, "patch")? as usize);
-        body = archive::unzlib(span(p, boff, bstored, &format!("{label}: patch body"))?, label)?;
+        let (boff, bstored, bn) = (
+            need32(p, 8, "patch")? as u64,
+            need32(p, 12, "patch")? as u64,
+            need32(p, 16, "patch")? as usize,
+        );
+        body = archive::unzlib(
+            span(p, boff, bstored, &format!("{label}: patch body"))?,
+            label,
+        )?;
         if body.len() != bn {
-            return Err(format!("{label}: the patch body inflates to {:#x} bytes, its header says {bn:#x}", body.len()));
+            return Err(format!(
+                "{label}: the patch body inflates to {:#x} bytes, its header says {bn:#x}",
+                body.len()
+            ));
         }
         bsec = (0..16).map(|k| u32_at(&body, 4 * k).unwrap_or(0)).collect();
     }
     for (v, (top, secs)) in dc.recs.iter().enumerate() {
-        let used: Vec<usize> = std::iter::once(v).chain(secs.iter().filter(|&&c| c != 0).map(|&c| c as usize)).collect();
+        let used: Vec<usize> = std::iter::once(v)
+            .chain(secs.iter().filter(|&&c| c != 0).map(|&c| c as usize))
+            .collect();
         if used.iter().any(|&ci| !files.contains_key(&dc.chunks[ci].3)) {
             continue; // a variant of a file the game does not ship
         }
         let _ = top;
-        let mut sections: std::collections::HashMap<u32, Vec<u8>> = std::collections::HashMap::new();
+        let mut sections: std::collections::HashMap<u32, Vec<u8>> =
+            std::collections::HashMap::new();
         let live: Vec<u32>;
         if v < 64 && mask >> v & 1 != 0 {
             let p = patch.as_ref().unwrap();
             let at = 0x18 + 0xd0 * (mask & ((1u64 << v) - 1)).count_ones() as usize;
-            let r: Vec<u32> = (0..52).map(|k| u32_at(p, at + 4 * k).unwrap_or(0)).collect();
-            let mut tab = archive::unzlib(span(p, r[0] as u64, r[1] as u64, &format!("{label}: variant {v} patch table"))?, label)?;
+            let r: Vec<u32> = (0..52)
+                .map(|k| u32_at(p, at + 4 * k).unwrap_or(0))
+                .collect();
+            let mut tab = archive::unzlib(
+                span(
+                    p,
+                    r[0] as u64,
+                    r[1] as u64,
+                    &format!("{label}: variant {v} patch table"),
+                )?,
+                label,
+            )?;
             if tab.len() != 12 * r[2] as usize {
-                return Err(format!("{label}: variant {v} patch table has {} bytes for {} entries", tab.len(), r[2]));
+                return Err(format!(
+                    "{label}: variant {v} patch table has {} bytes for {} entries",
+                    tab.len(),
+                    r[2]
+                ));
             }
             let mut order = vec![];
             walk(&tab, 0, r[3] & 0xffff, &mut order, 0);
             live = (0..16).filter(|&s| r[4 + s as usize] != 0).collect();
             for &s in &live {
-                let old = if secs[s as usize] != 0 { chunk(secs[s as usize] as usize)? } else { vec![] };
+                let old = if secs[s as usize] != 0 {
+                    chunk(secs[s as usize] as usize)?
+                } else {
+                    vec![]
+                };
                 let b0 = bsec[s as usize] as usize;
-                let b1 = if s < 15 { bsec[s as usize + 1] as usize } else { body.len() };
+                let b1 = if s < 15 {
+                    bsec[s as usize + 1] as usize
+                } else {
+                    body.len()
+                };
                 let piece = body.get(b0..b1.max(b0).min(body.len())).unwrap_or(&[]);
-                let sec = patch_section(&mut tab, &order, s, &old, piece, r[36 + s as usize] as usize, r[20 + s as usize] as usize, r[4 + s as usize] as usize);
+                let sec = patch_section(
+                    &mut tab,
+                    &order,
+                    s,
+                    &old,
+                    piece,
+                    r[36 + s as usize] as usize,
+                    r[20 + s as usize] as usize,
+                    r[4 + s as usize] as usize,
+                );
                 sections.insert(s, sec);
             }
         } else {
@@ -163,7 +294,10 @@ pub fn nlg(ctx: &Ctx, index: &[u8], sibling: &dyn Fn(&str) -> Option<Vec<u8>>, l
                 sections.insert(s, chunk(secs[s as usize] as usize)?);
             }
         }
-        for &c in live.iter().filter(|&&s| sections[&s].get(..4) == Some(&CTL_MAGIC[..])) {
+        for &c in live
+            .iter()
+            .filter(|&&s| sections[&s].get(..4) == Some(&CTL_MAGIC[..]))
+        {
             let ctls = &sections[&c];
             let n = u32_at(ctls, 0x20).unwrap_or(0) as usize;
             if n < 0x24 {
@@ -177,13 +311,20 @@ pub fn nlg(ctx: &Ctx, index: &[u8], sibling: &dyn Fn(&str) -> Option<Vec<u8>>, l
                 let code = &sections[&k];
                 let (mut found, mut p, mut i) = (vec![], 0usize, 0usize);
                 let mut ok = true;
-                while ctls.get(i * n..i * n + 4) == Some(&CTL_MAGIC[..]) && (i + 1) * n <= ctls.len() {
+                while ctls.get(i * n..i * n + 4) == Some(&CTL_MAGIC[..])
+                    && (i + 1) * n <= ctls.len()
+                {
                     let ctl = &ctls[i * n..(i + 1) * n];
                     let ln = u32_at(ctl, 0x704).unwrap_or(0) as usize;
                     let cd = code.get(p..p + ln).unwrap_or(&[]);
                     let st = glslc::stage(ctl, cd);
                     match st {
-                        Some(st) if check(st, ctl, cd).is_none() => found.push(Found::new(format!("{label}#NLG{v}:{c}@{:#x}", i * n), st, ctl, cd)),
+                        Some(st) if check(st, ctl, cd).is_none() => found.push(Found::new(
+                            format!("{label}#NLG{v}:{c}@{:#x}", i * n),
+                            st,
+                            ctl,
+                            cd,
+                        )),
                         _ => {
                             ok = false;
                             break;
@@ -227,9 +368,12 @@ fn unzs_frames(d: &[u8], label: &str) -> R<Vec<u8>> {
     let mut p = 0;
     while p < d.len() {
         if d[p..].starts_with(&archive::ZSTD_MAGIC) {
-            let n = zstd_frame_len(d, p).ok_or_else(|| format!("{label}: a zstd frame at {p:#x} runs past the end"))?;
-            let mut r = zstd::stream::read::Decoder::new(&d[p..p + n]).map_err(|e| format!("{label}: {e}"))?;
-            std::io::Read::read_to_end(&mut r, &mut out).map_err(|e| format!("{label}: zstd frame at {p:#x}: {e}"))?;
+            let n = zstd_frame_len(d, p)
+                .ok_or_else(|| format!("{label}: a zstd frame at {p:#x} runs past the end"))?;
+            let mut r = zstd::stream::read::Decoder::new(&d[p..p + n])
+                .map_err(|e| format!("{label}: {e}"))?;
+            std::io::Read::read_to_end(&mut r, &mut out)
+                .map_err(|e| format!("{label}: zstd frame at {p:#x}: {e}"))?;
             p += n;
         } else if d[p] == 0 {
             p += 1;
@@ -246,12 +390,20 @@ fn programs4(idx: &[u8]) -> Vec<(u32, u32, u32, u32)> {
     let group = |p: usize| -> Option<[(u32, u32, u32); 4]> {
         let mut e = [(0, 0, 0); 4];
         for (k, x) in e.iter_mut().enumerate() {
-            *x = (u32_at(idx, p + 12 * k)?, u32_at(idx, p + 12 * k + 4)?, u32_at(idx, p + 12 * k + 8)?);
+            *x = (
+                u32_at(idx, p + 12 * k)?,
+                u32_at(idx, p + 12 * k + 4)?,
+                u32_at(idx, p + 12 * k + 8)?,
+            );
         }
         Some(e)
     };
     let fits = |e: &[(u32, u32, u32); 4], kind: Option<u32>| {
-        e.iter().zip(GROUP4).all(|(x, g)| (x.0 & 0xff, x.0 >> 24) == g) && e.iter().all(|x| (x.0 >> 8 & 0xffff) == kind.unwrap_or(e[0].0 >> 8 & 0xffff))
+        e.iter()
+            .zip(GROUP4)
+            .all(|(x, g)| (x.0 & 0xff, x.0 >> 24) == g)
+            && e.iter()
+                .all(|x| (x.0 >> 8 & 0xffff) == kind.unwrap_or(e[0].0 >> 8 & 0xffff))
     };
     let mut p = 0;
     let start = loop {
@@ -278,18 +430,41 @@ fn programs4(idx: &[u8]) -> Vec<(u32, u32, u32, u32)> {
 /// Where a section starts in `buf`: the first start for which every offset lands on one of `magics`.
 fn place(buf: &[u8], offs: &[u32], magics: &[[u8; 4]]) -> Option<usize> {
     let first = *offs.iter().min()? as usize;
-    let mut qs: Vec<usize> = magics.iter().flat_map(|m| memchr::memmem::find_iter(buf, m).filter(|q| q % 4 == 0)).collect();
+    let mut qs: Vec<usize> = magics
+        .iter()
+        .flat_map(|m| memchr::memmem::find_iter(buf, m).filter(|q| q % 4 == 0))
+        .collect();
     qs.sort();
-    qs.into_iter().filter(|&q| q >= first).map(|q| q - first).find(|&s| offs.iter().all(|&o| buf.get(s + o as usize..s + o as usize + 4).is_some_and(|x| magics.iter().any(|m| x == m))))
+    qs.into_iter()
+        .filter(|&q| q >= first)
+        .map(|q| q - first)
+        .find(|&s| {
+            offs.iter().all(|&o| {
+                buf.get(s + o as usize..s + o as usize + 4)
+                    .is_some_and(|x| magics.iter().any(|m| x == m))
+            })
+        })
 }
 
-fn nlg4(ctx: &Ctx, index: &[u8], sibling: &dyn Fn(&str) -> Option<Vec<u8>>, label: &str, out: &mut Scanned) -> R<()> {
+fn nlg4(
+    ctx: &Ctx,
+    index: &[u8],
+    sibling: &dyn Fn(&str) -> Option<Vec<u8>>,
+    label: &str,
+    out: &mut Scanned,
+) -> R<()> {
     let progs0 = programs4(&unzs_frames(index.get(0x40..).unwrap_or(&[]), label)?);
-    let data = unzs_frames(&sibling(".data").ok_or_else(|| format!("{label}: no .data beside the index"))?, label)?;
+    let data = unzs_frames(
+        &sibling(".data").ok_or_else(|| format!("{label}: no .data beside the index"))?,
+        label,
+    )?;
     let patch = sibling(".patch");
     if let Some(p) = &patch {
         if p.get(4..6) != Some(&PATCH4[..]) {
-            return Err(format!("{label}: the patch header {:02x?} is not a revision-4 patch", p.get(4..8).unwrap_or(&[])));
+            return Err(format!(
+                "{label}: the patch header {:02x?} is not a revision-4 patch",
+                p.get(4..8).unwrap_or(&[])
+            ));
         }
     }
     let body = match &patch {
@@ -307,8 +482,16 @@ fn nlg4(ctx: &Ctx, index: &[u8], sibling: &dyn Fn(&str) -> Option<Vec<u8>>, labe
     }
     let ctl_m = [CTL_MAGIC];
     let code_m = [GFX_MAGIC, CS_MAGIC];
-    let cs0 = place(&data, &progs0.iter().map(|p| p.3).collect::<Vec<_>>(), &ctl_m);
-    let ks0 = place(&data, &progs0.iter().map(|p| p.1).collect::<Vec<_>>(), &code_m);
+    let cs0 = place(
+        &data,
+        &progs0.iter().map(|p| p.3).collect::<Vec<_>>(),
+        &ctl_m,
+    );
+    let ks0 = place(
+        &data,
+        &progs0.iter().map(|p| p.1).collect::<Vec<_>>(),
+        &code_m,
+    );
     let (Some(cs0), Some(ks0)) = (cs0, ks0) else {
         return Err(format!("{label}: no start of the control / code section fits all {} programs of the shader table", progs0.len()));
     };
@@ -318,34 +501,75 @@ fn nlg4(ctx: &Ctx, index: &[u8], sibling: &dyn Fn(&str) -> Option<Vec<u8>>, labe
     if let Some(p) = &patch {
         let want = need32(p, 8, "patch header")? as usize;
         if body.len() != want {
-            return Err(format!("{label}: the patch body inflates to {:#x} bytes, its header says {want:#x}", body.len()));
+            return Err(format!(
+                "{label}: the patch body inflates to {:#x} bytes, its header says {want:#x}",
+                body.len()
+            ));
         }
         progs = programs4(&body);
         if progs.is_empty() {
             return Err(format!("{label}: the patch body has no shader table"));
         }
-        let nc: Vec<u32> = progs.iter().filter(|p| p.3 >= ctl_old).map(|p| p.3 - ctl_old).collect();
-        let nk: Vec<u32> = progs.iter().filter(|p| p.1 >= code_old).map(|p| p.1 - code_old).collect();
-        let a = if nc.is_empty() { Some(0) } else { place(&body, &nc, &ctl_m) };
-        let b = if nk.is_empty() { Some(0) } else { place(&body, &nk, &code_m) };
+        let nc: Vec<u32> = progs
+            .iter()
+            .filter(|p| p.3 >= ctl_old)
+            .map(|p| p.3 - ctl_old)
+            .collect();
+        let nk: Vec<u32> = progs
+            .iter()
+            .filter(|p| p.1 >= code_old)
+            .map(|p| p.1 - code_old)
+            .collect();
+        let a = if nc.is_empty() {
+            Some(0)
+        } else {
+            place(&body, &nc, &ctl_m)
+        };
+        let b = if nk.is_empty() {
+            Some(0)
+        } else {
+            place(&body, &nk, &code_m)
+        };
         let (Some(a), Some(b)) = (a, b) else {
-            return Err(format!("{label}: no start of the patch body's new control / code data fits its programs"));
+            return Err(format!(
+                "{label}: no start of the patch body's new control / code data fits its programs"
+            ));
         };
         (cs1, ks1) = (a, b);
     }
-    let at = |buf: &[u8], s: usize, o: u32, n: u32| buf.get(s + o as usize..s + o as usize + n as usize).unwrap_or(&[]).to_vec();
+    let at = |buf: &[u8], s: usize, o: u32, n: u32| {
+        buf.get(s + o as usize..s + o as usize + n as usize)
+            .unwrap_or(&[])
+            .to_vec()
+    };
     for (i, &(kn, ko, cn, co)) in progs.iter().enumerate() {
-        let ctl = if co < ctl_old { at(&data, cs0, co, cn) } else { at(&body, cs1, co - ctl_old, cn) };
-        let code = if ko < code_old { at(&data, ks0, ko, kn) } else { at(&body, ks1, ko - code_old, kn) };
+        let ctl = if co < ctl_old {
+            at(&data, cs0, co, cn)
+        } else {
+            at(&body, cs1, co - ctl_old, cn)
+        };
+        let code = if ko < code_old {
+            at(&data, ks0, ko, kn)
+        } else {
+            at(&body, ks1, ko - code_old, kn)
+        };
         let st = glslc::stage(&ctl, &code);
         let why = match st {
             None => Some("no stage"),
             Some(st) => check(st, &ctl, &code),
         };
         if let Some(w) = why {
-            return Err(format!("{label}: program {i} of the shader table{}: {w}", if patch.is_some() { " (patched)" } else { "" }));
+            return Err(format!(
+                "{label}: program {i} of the shader table{}: {w}",
+                if patch.is_some() { " (patched)" } else { "" }
+            ));
         }
-        out.found.push(Found::new(format!("{label}#NLG4{}:{i}", if patch.is_some() { "p" } else { "" }), st.unwrap(), &ctl, &code));
+        out.found.push(Found::new(
+            format!("{label}#NLG4{}:{i}", if patch.is_some() { "p" } else { "" }),
+            st.unwrap(),
+            &ctl,
+            &code,
+        ));
     }
     Ok(())
 }
@@ -375,7 +599,11 @@ mod tests {
         rec[8 + 7] = 1;
         rec[8 + 8] = 2;
         d.extend(rec);
-        for (off, n) in [(0usize, 12usize), (12, codes.len()), (12 + codes.len(), ctls.len())] {
+        for (off, n) in [
+            (0usize, 12usize),
+            (12, codes.len()),
+            (12 + codes.len(), ctls.len()),
+        ] {
             let mut c = vec![0u8; 0x10];
             c[..4].copy_from_slice(&(off as u32).to_le_bytes());
             c[4..8].copy_from_slice(&(n as u32).to_le_bytes());

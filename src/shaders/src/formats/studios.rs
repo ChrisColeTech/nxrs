@@ -13,13 +13,24 @@ pub const CIVBSF: &[u8; 8] = b"CIVBSF\0\0";
 pub const SHAD: &[u8; 8] = b"SHADSHAD";
 pub const SCNE: &[u8; 4] = b"SCNE";
 
-const STAGES: [Stage; 6] = [Stage::Vs, Stage::Hs, Stage::Ds, Stage::Gs, Stage::Ps, Stage::Cs];
+const STAGES: [Stage; 6] = [
+    Stage::Vs,
+    Stage::Hs,
+    Stage::Ds,
+    Stage::Gs,
+    Stage::Ps,
+    Stage::Cs,
+];
 
 fn inflate_exact(s: &[u8], expected: usize) -> Option<Vec<u8>> {
     let mut z = flate2::Decompress::new(true);
     let mut out = Vec::with_capacity(expected + 1);
     match z.decompress_vec(s, &mut out, flate2::FlushDecompress::Finish) {
-        Ok(flate2::Status::StreamEnd) if z.total_in() as usize == s.len() && out.len() == expected => Some(out),
+        Ok(flate2::Status::StreamEnd)
+            if z.total_in() as usize == s.len() && out.len() == expected =>
+        {
+            Some(out)
+        }
         _ => None,
     }
 }
@@ -33,14 +44,18 @@ pub fn sumo_members(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
     if d[17] != 2 || !(1..=2).contains(&n) || head != 44 + 4 * n || head > d.len() {
         return Err(format!("{label}: unsupported MuxFDMR layout"));
     }
-    let sizes: Vec<usize> = (0..n).map(|i| u32_at(d, 40 + 4 * i).unwrap() as usize).collect();
+    let sizes: Vec<usize> = (0..n)
+        .map(|i| u32_at(d, 40 + 4 * i).unwrap() as usize)
+        .collect();
     if head + sizes.iter().sum::<usize>() != d.len() {
         return Err(format!("{label}: MuxFDMR streams do not fit the file"));
     }
     let mut out = vec![];
     for (i, &size) in sizes.iter().enumerate() {
         let expected = u32_at(d, 24 + 8 * i).unwrap() as usize;
-        let raw = inflate_exact(&d[head..head + size], expected).ok_or_else(|| format!("{label}: MuxFDMR stream {i} length does not match its header"))?;
+        let raw = inflate_exact(&d[head..head + size], expected).ok_or_else(|| {
+            format!("{label}: MuxFDMR stream {i} length does not match its header")
+        })?;
         out.push((format!("#MUX{i}"), raw));
         head += size;
     }
@@ -48,13 +63,32 @@ pub fn sumo_members(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
 }
 
 #[allow(clippy::too_many_arguments)]
-fn sumo_program(d: &[u8], base: usize, size: usize, co: usize, ko: usize, cn: usize, kn: usize, label: String, stage: Option<Stage>) -> R<Found> {
+fn sumo_program(
+    d: &[u8],
+    base: usize,
+    size: usize,
+    co: usize,
+    ko: usize,
+    cn: usize,
+    kn: usize,
+    label: String,
+    stage: Option<Stage>,
+) -> R<Found> {
     let disjoint = co + cn <= ko || ko + kn <= co;
-    if size < 0x34 || base + size > d.len() || cn < 0x760 || kn < 0x40 || co.min(ko) < 0x34 || (co + cn).max(ko + kn) > size || !disjoint {
+    if size < 0x34
+        || base + size > d.len()
+        || cn < 0x760
+        || kn < 0x40
+        || co.min(ko) < 0x34
+        || (co + cn).max(ko + kn) > size
+        || !disjoint
+    {
         return Err(format!("{label}: shader ranges do not fit the container"));
     }
     let (ctl, code) = (&d[base + co..base + co + cn], &d[base + ko..base + ko + kn]);
-    let st = glslc::stage(ctl, code).filter(|st| stage.is_none_or(|s| s == *st)).ok_or_else(|| format!("{label}: invalid shader stage"))?;
+    let st = glslc::stage(ctl, code)
+        .filter(|st| stage.is_none_or(|s| s == *st))
+        .ok_or_else(|| format!("{label}: invalid shader stage"))?;
     if let Some(w) = check(st, ctl, code) {
         return Err(format!("{label}: {w}"));
     }
@@ -66,23 +100,49 @@ fn sumo_program(d: &[u8], base: usize, size: usize, co: usize, ko: usize, cn: us
 pub fn sumo(d: &[u8], label: &str) -> R<Vec<Found>> {
     let mut out = vec![];
     for m in memchr::memmem::find_iter(d, SUMO_NX) {
-        let Some(r) = m.checked_sub(0x30) else { continue };
-        let Some(base) = u64_at(d, r + 0x28).and_then(|o| (r as u64).checked_sub(o)).map(|b| b as usize) else { continue };
+        let Some(r) = m.checked_sub(0x30) else {
+            continue;
+        };
+        let Some(base) = u64_at(d, r + 0x28)
+            .and_then(|o| (r as u64).checked_sub(o))
+            .map(|b| b as usize)
+        else {
+            continue;
+        };
         if r < base + 0x38 {
             continue;
         }
-        let Some(size) = u64_at(d, base + 8).map(|s| s as usize) else { continue };
+        let Some(size) = u64_at(d, base + 8).map(|s| s as usize) else {
+            continue;
+        };
         if r + 0x40 > base.saturating_add(size) || base.saturating_add(size) > d.len() {
             continue;
         }
         if u32_at(d, base + 4) != Some(1) {
             return Err(format!("{label}: unsupported Ninty_NX container version"));
         }
-        let (co, ko, cn, kn) = (u64_at(d, r).unwrap() as usize, u64_at(d, r + 8).unwrap() as usize, u32_at(d, r + 16).unwrap() as usize, u32_at(d, r + 20).unwrap() as usize);
-        out.push(sumo_program(d, base, size, co, ko, cn, kn, format!("{label}#SUMO@{r:#x}"), None)?);
+        let (co, ko, cn, kn) = (
+            u64_at(d, r).unwrap() as usize,
+            u64_at(d, r + 8).unwrap() as usize,
+            u32_at(d, r + 16).unwrap() as usize,
+            u32_at(d, r + 20).unwrap() as usize,
+        );
+        out.push(sumo_program(
+            d,
+            base,
+            size,
+            co,
+            ko,
+            cn,
+            kn,
+            format!("{label}#SUMO@{r:#x}"),
+            None,
+        )?);
     }
     for h in memchr::memmem::find_iter(d, NVNSH) {
-        let Some(size) = u32_at(d, h + 8).map(|s| s as usize) else { continue };
+        let Some(size) = u32_at(d, h + 8).map(|s| s as usize) else {
+            continue;
+        };
         if h + 0x34 > d.len() || !(0x34..=d.len() - h).contains(&size) {
             continue;
         }
@@ -90,9 +150,26 @@ pub fn sumo(d: &[u8], label: &str) -> R<Vec<Found>> {
             return Err(format!("{label}: unsupported NVNsh version"));
         }
         let stage = u32_at(d, h + 28).unwrap() as usize;
-        let st = *STAGES.get(stage).ok_or_else(|| format!("{label}: invalid NVNsh stage {stage}"))?;
-        let (co, ko, kn, cn) = (u32_at(d, h + 32).unwrap() as usize, u32_at(d, h + 36).unwrap() as usize, u32_at(d, h + 40).unwrap() as usize, u32_at(d, h + 44).unwrap() as usize);
-        out.push(sumo_program(d, h, size, co, ko, cn, kn, format!("{label}#NVNSH@{h:#x}"), Some(st))?);
+        let st = *STAGES
+            .get(stage)
+            .ok_or_else(|| format!("{label}: invalid NVNsh stage {stage}"))?;
+        let (co, ko, kn, cn) = (
+            u32_at(d, h + 32).unwrap() as usize,
+            u32_at(d, h + 36).unwrap() as usize,
+            u32_at(d, h + 40).unwrap() as usize,
+            u32_at(d, h + 44).unwrap() as usize,
+        );
+        out.push(sumo_program(
+            d,
+            h,
+            size,
+            co,
+            ko,
+            cn,
+            kn,
+            format!("{label}#NVNSH@{h:#x}"),
+            Some(st),
+        )?);
     }
     Ok(out)
 }
@@ -109,7 +186,11 @@ pub fn civbsf(d: &[u8], label: &str) -> R<Vec<Found>> {
         v => return Err(format!("{at}: unknown revision {v:#x}")),
     };
     if u32_at(d, 0xc).unwrap() as usize != d.len() {
-        return Err(format!("{at}: file size {:#x} does not match {:#x} bytes", u32_at(d, 0xc).unwrap(), d.len()));
+        return Err(format!(
+            "{at}: file size {:#x} does not match {:#x} bytes",
+            u32_at(d, 0xc).unwrap(),
+            d.len()
+        ));
     }
     let (table, count) = (u64_at(d, 0x20).unwrap(), u32_at(d, 0x68).unwrap() as u64);
     if table < 0x90 {
@@ -125,11 +206,22 @@ pub fn civbsf(d: &[u8], label: &str) -> R<Vec<Found>> {
             span(d, desc, 0x40, &format!("{src} platform descriptors"))?;
             for platform in 0..4u64 {
                 let o = (desc + platform * 16) as usize;
-                let (offset, length, kind) = (u64_at(d, o).unwrap(), u32_at(d, o + 8).unwrap() as u64, u32_at(d, o + 12).unwrap() as u64);
+                let (offset, length, kind) = (
+                    u64_at(d, o).unwrap(),
+                    u32_at(d, o + 8).unwrap() as u64,
+                    u32_at(d, o + 12).unwrap() as u64,
+                );
                 if kind != platform {
-                    return Err(format!("{src}: platform descriptor {platform} has kind {kind}"));
+                    return Err(format!(
+                        "{src}: platform descriptor {platform} has kind {kind}"
+                    ));
                 }
-                let payload = span(d, offset, length, &format!("{src} platform {platform} data"))?;
+                let payload = span(
+                    d,
+                    offset,
+                    length,
+                    &format!("{src} platform {platform} data"),
+                )?;
                 if platform != 3 {
                     continue;
                 }
@@ -139,32 +231,56 @@ pub fn civbsf(d: &[u8], label: &str) -> R<Vec<Found>> {
                 }
                 let (nout, nrefl) = (u64_at(payload, 8).unwrap(), u64_at(payload, 16).unwrap());
                 if 0x28 + nout + nrefl != length {
-                    return Err(format!("{src}: NVBC output and reflection lengths do not match the data size"));
+                    return Err(format!(
+                        "{src}: NVBC output and reflection lengths do not match the data size"
+                    ));
                 }
                 let output = &payload[0x28..0x28 + nout as usize];
-                if output.get(..4) != Some(&glslc::MAGIC[..]) || glslc::layout(output, 0).0 as u64 != nout {
+                if output.get(..4) != Some(&glslc::MAGIC[..])
+                    || glslc::layout(output, 0).0 as u64 != nout
+                {
                     return Err(format!("{src}: invalid NVBC GLSLC output length or tag"));
                 }
-                out.extend(glslc::shaders(output, &format!("{label}#CIVBSF@{entry:#x}")));
+                out.extend(glslc::shaders(
+                    output,
+                    &format!("{label}#CIVBSF@{entry:#x}"),
+                ));
             }
             continue;
         }
-        let (offset, length) = (need64(d, desc as usize, &src)?, need64(d, desc as usize + 8, &src)?);
+        let (offset, length) = (
+            need64(d, desc as usize, &src)?,
+            need64(d, desc as usize + 8, &src)?,
+        );
         let payload = span(d, offset, length, &format!("{src} data"))?;
         span(payload, 0, 16, &src)?;
-        let (tag, ncode, nctl) = (u32_at(payload, 0).unwrap(), u32_at(payload, 4).unwrap() as u64, u32_at(payload, 8).unwrap() as u64);
+        let (tag, ncode, nctl) = (
+            u32_at(payload, 0).unwrap(),
+            u32_at(payload, 4).unwrap() as u64,
+            u32_at(payload, 8).unwrap() as u64,
+        );
         if tag != 0xff00_ff00 {
             return Err(format!("{src}: unknown data tag {tag:#x}"));
         }
         if 16 + ncode + nctl != length {
-            return Err(format!("{src}: code and control lengths do not match the data size"));
+            return Err(format!(
+                "{src}: code and control lengths do not match the data size"
+            ));
         }
-        let (code, ctl) = (&payload[16..16 + ncode as usize], &payload[16 + ncode as usize..]);
+        let (code, ctl) = (
+            &payload[16..16 + ncode as usize],
+            &payload[16 + ncode as usize..],
+        );
         let st = glslc::stage(ctl, code).ok_or_else(|| format!("{src}: unknown shader stage"))?;
         if let Some(w) = check(st, ctl, code) {
             return Err(format!("{src}: {w}"));
         }
-        out.push(Found::new(format!("{label}#CIVBSF@{entry:#x}"), st, ctl, code));
+        out.push(Found::new(
+            format!("{label}#CIVBSF@{entry:#x}"),
+            st,
+            ctl,
+            code,
+        ));
     }
     Ok(out)
 }
@@ -173,23 +289,38 @@ pub fn civbsf(d: &[u8], label: &str) -> R<Vec<Found>> {
 /// start, length}; SHAD and SHMD hold chunks, PRM[ a table of offsets to BTCD chunks, a BTCD's data the record
 /// `raw::shad_record` reads.
 pub fn shad(d: &[u8], label: &str) -> R<Vec<Found>> {
-    fn walk(d: &[u8], label: &str, mut at: usize, end: usize, depth: usize, out: &mut Vec<Found>) -> R<()> {
+    fn walk(
+        d: &[u8],
+        label: &str,
+        mut at: usize,
+        end: usize,
+        depth: usize,
+        out: &mut Vec<Found>,
+    ) -> R<()> {
         if depth > 32 {
             return Err(format!("{label}: SHAD chunks nested too deep"));
         }
         while at < end {
             if at + 28 > end {
-                return Err(format!("{label}: chunk header at {at:#x} runs past {end:#x}"));
+                return Err(format!(
+                    "{label}: chunk header at {at:#x} runs past {end:#x}"
+                ));
             }
             let tag = &d[at..at + 4];
             let cnt = u32_at(d, at + 8).unwrap() as usize;
-            let (hl, ds, size) = (u32_at(d, at + 16).unwrap() as usize, u32_at(d, at + 20).unwrap() as usize, u32_at(d, at + 24).unwrap() as usize);
+            let (hl, ds, size) = (
+                u32_at(d, at + 16).unwrap() as usize,
+                u32_at(d, at + 20).unwrap() as usize,
+                u32_at(d, at + 24).unwrap() as usize,
+            );
             if !(28 <= hl && hl <= ds && ds <= size) || at + size > end {
                 return Err(format!("{label}: chunk {:?} at {at:#x} (header {hl:#x}, data {ds:#x}, length {size:#x}) does not fit {end:#x}", String::from_utf8_lossy(tag)));
             }
             match tag {
                 b"BTCD" => {
-                    let (ctl, code) = raw::shad_record(d, at + hl, at + size).ok_or_else(|| format!("{label}: BTCD at {at:#x} does not hold a record of its length"))?;
+                    let (ctl, code) = raw::shad_record(d, at + hl, at + size).ok_or_else(|| {
+                        format!("{label}: BTCD at {at:#x} does not hold a record of its length")
+                    })?;
                     let wh = format!("{label}#SHAD@{at:#x}");
                     let st = glslc::stage(ctl, code);
                     let why = match st {
@@ -233,14 +364,20 @@ pub fn phyre(d: &[u8], label: &str) -> Vec<Found> {
         if c + 0x708 > d.len() {
             continue;
         }
-        let (cn, kn) = (u32_at(d, c + 0x20).unwrap() as usize, u32_at(d, c + 0x704).unwrap() as usize);
+        let (cn, kn) = (
+            u32_at(d, c + 0x20).unwrap() as usize,
+            u32_at(d, c + 0x704).unwrap() as usize,
+        );
         let Some(k) = c.checked_sub(kn) else { continue };
         if kn < 0x80 || cn < 0x760 || c + cn > d.len() {
             continue;
         }
         let (ctl, code) = (&d[c..c + cn], &d[k..c]);
         let st = glslc::stage(ctl, code);
-        if st == Some(Stage::Cs) && code.get(..4) != Some(&CS_MAGIC[..]) && (!d.starts_with(b"RYHP") || memchr::memmem::find(code, &CTL_MAGIC).is_some()) {
+        if st == Some(Stage::Cs)
+            && code.get(..4) != Some(&CS_MAGIC[..])
+            && (!d.starts_with(b"RYHP") || memchr::memmem::find(code, &CTL_MAGIC).is_some())
+        {
             continue;
         }
         if let Some(st) = st.filter(|&st| check(st, ctl, code).is_none()) {
@@ -270,12 +407,20 @@ pub fn viper(d: &[u8], label: &str) -> Option<R<Vec<Found>>> {
         return None;
     }
     let Some(st) = nvn2_stage(ctl, code) else {
-        return Some(Err(format!("{label}: a shader binary of no known stage (control +0x56 {:?})", ctl.get(0x56))));
+        return Some(Err(format!(
+            "{label}: a shader binary of no known stage (control +0x56 {:?})",
+            ctl.get(0x56)
+        )));
     };
     if let Some(w) = check(st, ctl, code) {
         return Some(Err(format!("{label} ({}): {w}", st.name())));
     }
-    Some(Ok(vec![Found::new(format!("{label}#VIPER"), st, ctl, code)]))
+    Some(Ok(vec![Found::new(
+        format!("{label}#VIPER"),
+        st,
+        ctl,
+        code,
+    )]))
 }
 
 /// A VIPR resource container: the NDSR networks it wraps.
@@ -283,7 +428,10 @@ pub fn vipr(d: &[u8], label: &str) -> Vec<Found> {
     let mut out = vec![];
     for p in memchr::memmem::find_iter(d, b"NDSR") {
         if p + 0x20 <= d.len() && d[p + 4..p + 6] == [0, 1] {
-            out.extend(crate::formats::nvnfmt::ndsr(&d[p..], &format!("{label}#NDSR@{p:#x}")));
+            out.extend(crate::formats::nvnfmt::ndsr(
+                &d[p..],
+                &format!("{label}#NDSR@{p:#x}"),
+            ));
         }
     }
     out
@@ -297,9 +445,16 @@ pub fn bshd(data: &[u8], label: &str) -> R<Vec<Found>> {
     }
     let word = u32::from_be_bytes(data[..4].try_into().unwrap());
     let n = (word & 0x7fff_ffff) as usize;
-    let d = if word >> 31 != 0 { inflate_exact(&data[4..], n).ok_or_else(|| format!("{label}: damaged BSHD zlib stream"))? } else { data[4..].to_vec() };
+    let d = if word >> 31 != 0 {
+        inflate_exact(&data[4..], n).ok_or_else(|| format!("{label}: damaged BSHD zlib stream"))?
+    } else {
+        data[4..].to_vec()
+    };
     if d.len() != n {
-        return Err(format!("{label}: BSHD of {} bytes, its length says {n}", d.len()));
+        return Err(format!(
+            "{label}: BSHD of {} bytes, its length says {n}",
+            d.len()
+        ));
     }
     if d.len() < 6 || d[..5] != [0xff, 0xff, 0xff, 0xff, 1] {
         return Err(format!("{label}: unsupported BSHD header"));
@@ -311,7 +466,11 @@ pub fn bshd(data: &[u8], label: &str) -> R<Vec<Found>> {
     }
     let mut out = vec![];
     for i in 0..count {
-        let (stage, offset, size) = (d[6 + 9 * i], u32_at(&d, 7 + 9 * i).unwrap() as usize, u32_at(&d, 11 + 9 * i).unwrap() as usize);
+        let (stage, offset, size) = (
+            d[6 + 9 * i],
+            u32_at(&d, 7 + 9 * i).unwrap() as usize,
+            u32_at(&d, 11 + 9 * i).unwrap() as usize,
+        );
         if offset < start || size == 0 || offset + size > d.len() {
             return Err(format!("{label}: invalid BSHD stage {i} range"));
         }
@@ -327,10 +486,15 @@ pub fn bshd(data: &[u8], label: &str) -> R<Vec<Found>> {
         };
         let st = glslc::shaders(program, label);
         if st.len() != 1 || Some(st[0].stage) != expected {
-            return Err(format!("{label}: BSHD stage {stage} disagrees with its GLSLC program"));
+            return Err(format!(
+                "{label}: BSHD stage {stage} disagrees with its GLSLC program"
+            ));
         }
         let f = &st[0];
-        out.push(Found::new(format!("{label}#BSHD#var"), f.stage, &f.ctl, &f.code).grouped(format!("{label}#BSHD#var")));
+        out.push(
+            Found::new(format!("{label}#BSHD#var"), f.stage, &f.ctl, &f.code)
+                .grouped(format!("{label}#BSHD#var")),
+        );
     }
     Ok(out)
 }
@@ -338,7 +502,10 @@ pub fn bshd(data: &[u8], label: &str) -> R<Vec<Found>> {
 /// A NintendoWare Bezel Engine archive ('SCNE'): +0x20 the entry count, +0x28 the entry pointer array (or, Bezel
 /// Engine 2.9, the 'ASST' entries themselves back to back); each entry's data (one zstd frame or stored) and path.
 pub fn bea_members(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
-    let (n, arr) = (need64(d, 0x20, label)? as usize, need64(d, 0x28, label)? as usize);
+    let (n, arr) = (
+        need64(d, 0x20, label)? as usize,
+        need64(d, 0x28, label)? as usize,
+    );
     let inline = d.get(arr..arr + 4) == Some(b"ASST");
     let mut o = arr;
     let mut out = vec![];
@@ -349,9 +516,19 @@ pub fn bea_members(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
         if d.get(o..o + 4) != Some(b"ASST") {
             return Err(format!("{label}: entry {i} @{o:#x} is not an ASST entry"));
         }
-        let size = if inline { need32(d, o + 4, label)? as usize } else { 0x30 };
-        let (csz, usz) = (need32(d, o + 0x14, label)? as u64, need32(d, o + 0x18, label)? as usize);
-        let (off, nm) = (need64(d, o + size - 0x10, label)?, need64(d, o + size - 8, label)? as usize);
+        let size = if inline {
+            need32(d, o + 4, label)? as usize
+        } else {
+            0x30
+        };
+        let (csz, usz) = (
+            need32(d, o + 0x14, label)? as u64,
+            need32(d, o + 0x18, label)? as usize,
+        );
+        let (off, nm) = (
+            need64(d, o + size - 0x10, label)?,
+            need64(d, o + size - 8, label)? as usize,
+        );
         if inline {
             o += size.max(4);
         }
@@ -360,14 +537,19 @@ pub fn bea_members(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
         let raw = span(d, off, csz, &format!("{label}/{path}"))?;
         let data = if raw.starts_with(&archive::ZSTD_MAGIC) {
             let mut v = Vec::with_capacity(usz);
-            let mut r = zstd::stream::read::Decoder::new(raw).map_err(|e| format!("{label}/{path}: {e}"))?;
-            std::io::Read::read_to_end(&mut r, &mut v).map_err(|e| format!("{label}/{path}: {e}"))?;
+            let mut r = zstd::stream::read::Decoder::new(raw)
+                .map_err(|e| format!("{label}/{path}: {e}"))?;
+            std::io::Read::read_to_end(&mut r, &mut v)
+                .map_err(|e| format!("{label}/{path}: {e}"))?;
             v
         } else {
             raw.to_vec()
         };
         if data.len() != usz {
-            return Err(format!("{label}/{path}: {:#x} bytes, the entry says {usz:#x}", data.len()));
+            return Err(format!(
+                "{label}/{path}: {:#x} bytes, the entry says {usz:#x}",
+                data.len()
+            ));
         }
         out.push((path, data));
     }
@@ -407,7 +589,10 @@ mod tests {
         v.extend([0u8; 12]);
         v.extend(&k2);
         v.extend(&c2);
-        assert_eq!(viper(&v, "/data.zip/a.shb").unwrap().unwrap()[0].stage, Stage::Cs);
+        assert_eq!(
+            viper(&v, "/data.zip/a.shb").unwrap().unwrap()[0].stage,
+            Stage::Cs
+        );
         // Phyre: code immediately before control
         let mut p = b"RYHP".to_vec();
         p.extend([0u8; 3]);
@@ -420,7 +605,13 @@ mod tests {
     fn shad_tree_and_bshd() {
         let (c, k) = nvn1_vs(3);
         let mut rec = vec![];
-        for w in [5u32, c.len() as u32, k.len() as u32 + 0xc, k.len() as u32, 4] {
+        for w in [
+            5u32,
+            c.len() as u32,
+            k.len() as u32 + 0xc,
+            k.len() as u32,
+            4,
+        ] {
             rec.extend(w.to_le_bytes());
         }
         rec.extend(&k);

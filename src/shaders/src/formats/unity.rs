@@ -13,13 +13,22 @@ use super::glslc;
 use crate::nvn::*;
 
 pub const UNITYFS: &[u8; 8] = b"UnityFS\0";
-const NV_STAGES: [Stage; 6] = [Stage::Vs, Stage::Ps, Stage::Gs, Stage::Hs, Stage::Ds, Stage::Cs];
+const NV_STAGES: [Stage; 6] = [
+    Stage::Vs,
+    Stage::Ps,
+    Stage::Gs,
+    Stage::Hs,
+    Stage::Ds,
+    Stage::Cs,
+];
 
 fn be32(d: &[u8], o: usize) -> Option<u32> {
-    d.get(o..o + 4).map(|b| u32::from_be_bytes(b.try_into().unwrap()))
+    d.get(o..o + 4)
+        .map(|b| u32::from_be_bytes(b.try_into().unwrap()))
 }
 fn be64(d: &[u8], o: usize) -> Option<u64> {
-    d.get(o..o + 8).map(|b| u64::from_be_bytes(b.try_into().unwrap()))
+    d.get(o..o + 8)
+        .map(|b| u64::from_be_bytes(b.try_into().unwrap()))
 }
 
 /// A serialized file: big-endian header, format 17..22 (from 22 the sizes are 64-bit at +0x14).
@@ -31,12 +40,26 @@ pub fn is_serialized(d: &[u8]) -> bool {
     if !(17..=22).contains(&ver) || d[16] > 1 {
         return false;
     }
-    let (msz, fsz, doff) = if ver >= 22 { (be32(d, 20).unwrap() as u64, be64(d, 24).unwrap(), be64(d, 32).unwrap()) } else { (be32(d, 0).unwrap() as u64, be32(d, 4).unwrap() as u64, be32(d, 12).unwrap() as u64) };
+    let (msz, fsz, doff) = if ver >= 22 {
+        (
+            be32(d, 20).unwrap() as u64,
+            be64(d, 24).unwrap(),
+            be64(d, 32).unwrap(),
+        )
+    } else {
+        (
+            be32(d, 0).unwrap() as u64,
+            be32(d, 4).unwrap() as u64,
+            be32(d, 12).unwrap() as u64,
+        )
+    };
     fsz == d.len() as u64 && 0 < msz && msz < fsz && doff <= fsz
 }
 
 fn cstr(d: &[u8], p: usize, wh: &str) -> R<(String, usize)> {
-    let s = d.get(p..).ok_or_else(|| format!("{wh}: string at {p:#x} past the end"))?;
+    let s = d
+        .get(p..)
+        .ok_or_else(|| format!("{wh}: string at {p:#x} past the end"))?;
     let n = memchr::memchr(0, s).ok_or_else(|| format!("{wh}: unterminated string at {p:#x}"))?;
     Ok((String::from_utf8_lossy(&s[..n]).into_owned(), p + n + 1))
 }
@@ -46,11 +69,17 @@ fn decomp(raw: &[u8], n: usize, kind: u32, wh: &str) -> R<Vec<u8>> {
         0 => Ok(raw.to_vec()),
         2 | 3 => {
             if n > 255 * raw.len().max(1) || n as u64 > super::archive::DECODE_LIMIT {
-                return Err(format!("{wh}: an LZ4 block of {:#x} bytes cannot hold {n:#x}", raw.len()));
+                return Err(format!(
+                    "{wh}: an LZ4 block of {:#x} bytes cannot hold {n:#x}",
+                    raw.len()
+                ));
             }
             let d = lz4_flex::block::decompress(raw, n).map_err(|e| format!("{wh}: LZ4: {e}"))?;
             if d.len() != n {
-                return Err(format!("{wh}: LZ4 block gives {:#x} bytes, not {n:#x}", d.len()));
+                return Err(format!(
+                    "{wh}: LZ4 block gives {:#x} bytes, not {n:#x}",
+                    d.len()
+                ));
             }
             Ok(d)
         }
@@ -59,11 +88,23 @@ fn decomp(raw: &[u8], n: usize, kind: u32, wh: &str) -> R<Vec<u8>> {
             if n as u64 > super::archive::DECODE_LIMIT {
                 return Err(format!("{wh}: an LZMA block of {n:#x} bytes"));
             }
-            let opts = lzma_rs::decompress::Options { unpacked_size: lzma_rs::decompress::UnpackedSize::UseProvided(Some(n as u64)), memlimit: None, allow_incomplete: false };
+            let opts = lzma_rs::decompress::Options {
+                unpacked_size: lzma_rs::decompress::UnpackedSize::UseProvided(Some(n as u64)),
+                memlimit: None,
+                allow_incomplete: false,
+            };
             let mut out = Vec::with_capacity(n);
-            lzma_rs::lzma_decompress_with_options(&mut std::io::BufReader::new(raw), &mut out, &opts).map_err(|e| format!("{wh}: LZMA: {e:?}"))?;
+            lzma_rs::lzma_decompress_with_options(
+                &mut std::io::BufReader::new(raw),
+                &mut out,
+                &opts,
+            )
+            .map_err(|e| format!("{wh}: LZMA: {e:?}"))?;
             if out.len() != n {
-                return Err(format!("{wh}: LZMA block gives {:#x} bytes, not {n:#x}", out.len()));
+                return Err(format!(
+                    "{wh}: LZMA block gives {:#x} bytes, not {n:#x}",
+                    out.len()
+                ));
             }
             Ok(out)
         }
@@ -81,13 +122,22 @@ pub fn bundle_files(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
     let (_, p) = cstr(d, 12, &wh)?;
     let (_, mut p) = cstr(d, p, &wh)?;
     let h = span(d, p as u64, 20, &format!("{wh} header"))?;
-    let (csz, usz, flags) = (be32(h, 8).unwrap() as usize, be32(h, 12).unwrap() as usize, be32(h, 16).unwrap());
+    let (csz, usz, flags) = (
+        be32(h, 8).unwrap() as usize,
+        be32(h, 12).unwrap() as usize,
+        be32(h, 16).unwrap(),
+    );
     p += 20;
     if fmt >= 7 {
         p = (p + 15) & !15;
     }
     let info_raw = if flags & 0x80 != 0 {
-        span(d, (d.len() as u64).saturating_sub(csz as u64), csz as u64, &format!("{wh} block info"))?
+        span(
+            d,
+            (d.len() as u64).saturating_sub(csz as u64),
+            csz as u64,
+            &format!("{wh} block info"),
+        )?
     } else {
         let s = span(d, p as u64, csz as u64, &format!("{wh} block info"))?;
         p += csz;
@@ -100,7 +150,11 @@ pub fn bundle_files(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
     let mut blocks = vec![];
     for _ in 0..nb {
         let b = info.get(q..q + 10).ok_or_else(bad)?;
-        blocks.push((be32(b, 0).unwrap() as usize, be32(b, 4).unwrap() as usize, u16::from_be_bytes([b[8], b[9]]) as u32));
+        blocks.push((
+            be32(b, 0).unwrap() as usize,
+            be32(b, 4).unwrap() as usize,
+            u16::from_be_bytes([b[8], b[9]]) as u32,
+        ));
         q += 10;
     }
     let nn = be32(&info, q).ok_or_else(bad)? as usize;
@@ -128,7 +182,12 @@ pub fn bundle_files(d: &[u8], label: &str) -> R<Vec<(String, Vec<u8>)>> {
     }
     nodes
         .into_iter()
-        .map(|(off, sz, name)| Ok((name.clone(), span(&out, off, sz, &format!("{wh} file {name}"))?.to_vec())))
+        .map(|(off, sz, name)| {
+            Ok((
+                name.clone(),
+                span(&out, off, sz, &format!("{wh} file {name}"))?.to_vec(),
+            ))
+        })
         .collect()
 }
 
@@ -233,13 +292,24 @@ fn blob_at(x: &[u8], p: usize) -> Option<(Vec<(bool, Vec<Vec<u8>>)>, usize)> {
                 if !(1..=256).contains(&n) {
                     return None;
                 }
-                arr.push((0..n).map(|j| u32_at(x, q + 4 + 4 * j)).collect::<Option<_>>()?);
+                arr.push(
+                    (0..n)
+                        .map(|j| u32_at(x, q + 4 + 4 * j))
+                        .collect::<Option<_>>()?,
+                );
                 q += 4 + 4 * n;
             }
         }
         let [o, c, u] = arrs;
-        let per: Vec<[Vec<u32>; 3]> = o.into_iter().zip(c).zip(u).map(|((o, c), u)| [o, c, u]).collect();
-        per.iter().all(|a| a[0].len() == a[1].len() && a[1].len() == a[2].len()).then_some((per, q))
+        let per: Vec<[Vec<u32>; 3]> = o
+            .into_iter()
+            .zip(c)
+            .zip(u)
+            .map(|((o, c), u)| [o, c, u])
+            .collect();
+        per.iter()
+            .all(|a| a[0].len() == a[1].len() && a[1].len() == a[2].len())
+            .then_some((per, q))
     };
     let flat = |mut q: usize| -> Option<(Vec<[Vec<u32>; 3]>, usize)> {
         let mut arrs: [Vec<u32>; 3] = Default::default();
@@ -247,10 +317,17 @@ fn blob_at(x: &[u8], p: usize) -> Option<(Vec<(bool, Vec<Vec<u8>>)>, usize)> {
             if k > 0 && u32_at(x, q)? as usize != np {
                 return None;
             }
-            *arr = (0..np).map(|j| u32_at(x, q + 4 + 4 * j)).collect::<Option<_>>()?;
+            *arr = (0..np)
+                .map(|j| u32_at(x, q + 4 + 4 * j))
+                .collect::<Option<_>>()?;
             q += 4 + 4 * np;
         }
-        Some(((0..np).map(|i| [vec![arrs[0][i]], vec![arrs[1][i]], vec![arrs[2][i]]]).collect(), q))
+        Some((
+            (0..np)
+                .map(|i| [vec![arrs[0][i]], vec![arrs[1][i]], vec![arrs[2][i]]])
+                .collect(),
+            q,
+        ))
     };
     let (per, q2, is_nested) = match nested(q) {
         Some((per, q2)) => (per, q2, true),
@@ -286,7 +363,9 @@ pub fn serialized(x: &[u8], label: &str) -> Vec<Found> {
     let mut out = vec![];
     let mut add = |where_: String, progs: Vec<(Stage, &[u8], &[u8])>| {
         for (st, ctl, cd) in progs {
-            out.push(Found::new(format!("{where_}#{}", st.name()), st, ctl, cd).grouped(where_.clone()));
+            out.push(
+                Found::new(format!("{where_}#{}", st.name()), st, ctl, cd).grouped(where_.clone()),
+            );
         }
     };
     // Shader objects' compressed blobs
@@ -301,9 +380,18 @@ pub fn serialized(x: &[u8], label: &str) -> Vec<Found> {
             let n = u32_at(s0, 0).unwrap_or(0) as usize;
             let w = if *nested { 12 } else { 8 };
             for k in 0..n.min((s0.len().saturating_sub(4)) / w) {
-                let (off, ln) = (u32_at(s0, 4 + w * k).unwrap() as usize, u32_at(s0, 8 + w * k).unwrap() as usize);
-                let seg = if *nested { u32_at(s0, 12 + w * k).unwrap() as usize } else { 0 };
-                let Some(sp) = segs.get(seg).and_then(|s| s.get(off..off + ln)) else { continue };
+                let (off, ln) = (
+                    u32_at(s0, 4 + w * k).unwrap() as usize,
+                    u32_at(s0, 8 + w * k).unwrap() as usize,
+                );
+                let seg = if *nested {
+                    u32_at(s0, 12 + w * k).unwrap() as usize
+                } else {
+                    0
+                };
+                let Some(sp) = segs.get(seg).and_then(|s| s.get(off..off + ln)) else {
+                    continue;
+                };
                 // Unity 2022 also keeps parameter entries in the blob: no program code, left out
                 if let Some(progs) = subprogram_code(sp).and_then(program) {
                     add(format!("{label}#UNITY@{p:#x}.{pi}.{k}"), progs);
@@ -316,9 +404,13 @@ pub fn serialized(x: &[u8], label: &str) -> Vec<Found> {
     // block's control section follows it, or before a 0x10 header
     for c in memchr::memmem::find_iter(x, &CTL_MAGIC) {
         for back in [0x64usize, 0x14] {
-            let Some(at) = c.checked_sub(back) else { continue };
+            let Some(at) = c.checked_sub(back) else {
+                continue;
+            };
             let Some(n) = u32_at(x, at) else { continue };
-            let Some(code) = x.get(at + 4..at + 4 + n as usize) else { continue };
+            let Some(code) = x.get(at + 4..at + 4 + n as usize) else {
+                continue;
+            };
             if let Some(progs) = program(code) {
                 add(format!("{label}#UNITY@{at:#x}"), progs);
                 break;
@@ -394,7 +486,10 @@ mod tests {
         let code = program_code(&[(0, &vs), (1, &ps)]);
         // a subprogram (version 201806140: keywords and local keywords, both empty)
         let mut sp = vec![];
-        u32s(&mut sp, &[201806140, 0, 0, 0, 0, 0, 0, 0, code.len() as u32]);
+        u32s(
+            &mut sp,
+            &[201806140, 0, 0, 0, 0, 0, 0, 0, code.len() as u32],
+        );
         sp.extend_from_slice(&code);
         let mut seg = vec![];
         u32s(&mut seg, &[1, 16, sp.len() as u32, 0]);
@@ -402,13 +497,34 @@ mod tests {
         let comp = lz4_flex::block::compress(&seg);
         // platforms, offsets, compressedLengths, decompressedLengths (nested), the blob
         let mut x = vec![0u8; 0x20];
-        u32s(&mut x, &[1, 25, 1, 1, 0, 1, 1, comp.len() as u32, 1, 1, seg.len() as u32, comp.len() as u32]);
+        u32s(
+            &mut x,
+            &[
+                1,
+                25,
+                1,
+                1,
+                0,
+                1,
+                1,
+                comp.len() as u32,
+                1,
+                1,
+                seg.len() as u32,
+                comp.len() as u32,
+            ],
+        );
         x.extend_from_slice(&comp);
         while x.len() % 4 != 0 {
             x.push(0);
         }
         let f = serialized(&x, "/Data/sharedassets0.assets");
-        assert_eq!(f.len(), 2, "{:?}", f.iter().map(|f| &f.label).collect::<Vec<_>>());
+        assert_eq!(
+            f.len(),
+            2,
+            "{:?}",
+            f.iter().map(|f| &f.label).collect::<Vec<_>>()
+        );
         assert_eq!((f[0].stage, f[1].stage), (Stage::Vs, Stage::Ps));
         assert_eq!(f[1].key(), skey(&ps.0, &ps.1));
         assert_eq!(f[0].group, f[1].group);

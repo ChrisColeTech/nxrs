@@ -2,9 +2,10 @@
 //! pipeline creation; built modules on disk stay as translated).
 //!
 //! - `trim_cull`: the translator's gl_PerVertex declares ClipDistance[8] and CullDistance[1] (Maxwell has 8 clip
-//!   distances), more than a device with maxCombinedClipAndCullDistances 8 takes. The cull member goes when nothing
-//!   reaches it: it is the block's last member, no access chain names it, the block is never loaded, stored or built
-//!   whole (Turbo's `vkspv_trim_cull`).
+//!   distances), more than a device with maxCombinedClipAndCullDistances 8 takes. The cull member goes from every
+//!   over-limit block when nothing reaches it: it is the block's last member, no access chain names it, the block is
+//!   never loaded, stored or built whole (Turbo's `vkspv_trim_cull`). Geometry modules have separate input and output
+//!   blocks, which must be trimmed together.
 //! - `io_locations` / `add_outputs`: a pixel shader may read a varying its vertex shader never writes (undefined on the
 //!   console; Vulkan requires the previous stage to declare it). The vertex shader of such a pair gets an output at
 //!   each missing location, of the type the pixel shader reads, holding (0, 0, 0, 1) as the translator's own unwritten
@@ -67,50 +68,45 @@ fn walk(w: &[u32]) -> Option<Vec<(usize, u32, usize)>> {
     Some(v)
 }
 
-/// `words` without gl_PerVertex's cull member when the clip and cull arrays together pass `limit` and nothing reaches
-/// it. `None`: nothing to do (or it cannot be done: the cull distances are used; the caller logs it with `needs_trim`).
+/// `words` without each over-limit gl_PerVertex block's cull member when that makes its clip and cull arrays pass
+/// `limit` and nothing reaches any removed member. `None`: nothing to do (or it cannot be done; the caller checks
+/// `needs_trim`). Geometry input and output blocks are handled atomically so their interfaces remain compatible.
 pub fn trim_cull(w: &[u32], limit: u32) -> Option<Vec<u32>> {
     let v = walk(w)?;
     let bound = w[3] as usize;
-    let (mut st, mut clip_m, mut cull_m) = (0u32, u32::MAX, u32::MAX);
+    let mut members: std::collections::HashMap<u32, (u32, u32)> = Default::default();
     for &(i, op, n) in &v {
-        if op == OP_MEMBER_DECORATE && n >= 5 && w[i + 3] == DEC_BUILTIN && (w[i + 4] == BI_CLIP || w[i + 4] == BI_CULL) {
-            if st != 0 && st != w[i + 1] {
-                return None; // more than one block declares them: left alone
-            }
-            st = w[i + 1];
+        if op == OP_MEMBER_DECORATE
+            && n >= 5
+            && w[i + 3] == DEC_BUILTIN
+            && (w[i + 4] == BI_CLIP || w[i + 4] == BI_CULL)
+        {
+            let m = members.entry(w[i + 1]).or_insert((u32::MAX, u32::MAX));
             if w[i + 4] == BI_CLIP {
-                clip_m = w[i + 2];
+                m.0 = w[i + 2];
             } else {
-                cull_m = w[i + 2];
+                m.1 = w[i + 2];
             }
         }
     }
-    if st == 0 || clip_m == u32::MAX || cull_m == u32::MAX || st as usize >= bound {
+    if members.is_empty() {
         return None;
     }
     let mut def = vec![0usize; bound];
     let mut cval = vec![0u32; bound];
     let mut isc = vec![false; bound];
-    let mut si = 0usize;
     for &(i, op, n) in &v {
         if (OP_TYPE_INT..=OP_TYPE_POINTER).contains(&op) && n >= 2 && (w[i + 1] as usize) < bound {
             def[w[i + 1] as usize] = i;
-        }
-        if op == OP_TYPE_STRUCT && w[i + 1] == st {
-            si = i;
         }
         if op == OP_CONSTANT && n >= 4 && (w[i + 2] as usize) < bound {
             cval[w[i + 2] as usize] = w[i + 3];
             isc[w[i + 2] as usize] = true;
         }
     }
-    if si == 0 {
-        return None;
-    }
-    let nmem = (w[si] >> 16) - 2;
-    let len_of = |m: u32| -> u32 {
-        if m >= nmem {
+    let len_of = |si: usize, m: u32| -> u32 {
+        let nmem = (w[si] >> 16) - 2;
+        if si == 0 || m >= nmem {
             return 0;
         }
         let t = w[si + 2 + m as usize] as usize;
@@ -122,56 +118,106 @@ pub fn trim_cull(w: &[u32], limit: u32) -> Option<Vec<u32>> {
         }
         0
     };
-    let (lc, lu) = (len_of(clip_m), len_of(cull_m));
-    if lc == 0 || lu == 0 || lc + lu <= limit {
+    let mut trim: std::collections::HashMap<u32, u32> = Default::default();
+    for (&st, &(clip_m, cull_m)) in &members {
+        if st as usize >= bound || clip_m == u32::MAX || cull_m == u32::MAX {
+            continue;
+        }
+        let si = def[st as usize];
+        if si == 0 || w[si] & 0xffff != OP_TYPE_STRUCT {
+            return None;
+        }
+        let nmem = (w[si] >> 16) - 2;
+        let (lc, lu) = (len_of(si, clip_m), len_of(si, cull_m));
+        if lc == 0 || lu == 0 {
+            return None;
+        }
+        if lc + lu > limit {
+            if cull_m != nmem - 1 || lc > limit {
+                return None;
+            }
+            trim.insert(st, cull_m);
+        }
+    }
+    if trim.is_empty() {
         return None;
     }
-    let mut ok = cull_m == nmem - 1 && lc <= limit;
-    // what refers to the block: arrays of it (2), pointers to those, the variables of those
-    let mut blk = vec![0u8; bound];
-    let mut bptr = vec![0u8; bound];
-    let mut bvar = vec![0u8; bound];
-    blk[st as usize] = 1;
+    // Track the affected struct through arrays, pointers and variables. `depth` is the number of array indices before
+    // the struct member index in an access chain (one for a geometry input block).
+    let mut block = vec![0u32; bound];
+    let mut depth = vec![0u32; bound];
+    let mut ptr_block = vec![0u32; bound];
+    let mut ptr_depth = vec![0u32; bound];
+    let mut var_block = vec![0u32; bound];
+    let mut var_depth = vec![0u32; bound];
+    for &st in trim.keys() {
+        block[st as usize] = st;
+    }
     for &(i, op, n) in &v {
         let at = |k: usize| w[i + k] as usize;
-        if (op == OP_TYPE_ARRAY || op == OP_TYPE_RUNTIME_ARRAY) && n >= 3 && at(2) < bound && blk[at(2)] != 0 && at(1) < bound {
-            blk[at(1)] = 2;
+        if (op == OP_TYPE_ARRAY || op == OP_TYPE_RUNTIME_ARRAY)
+            && n >= 3
+            && at(2) < bound
+            && block[at(2)] != 0
+            && at(1) < bound
+        {
+            block[at(1)] = block[at(2)];
+            depth[at(1)] = depth[at(2)] + 1;
         }
-        if op == OP_TYPE_POINTER && n >= 4 && at(3) < bound && blk[at(3)] != 0 && at(1) < bound {
-            bptr[at(1)] = blk[at(3)];
+        if op == OP_TYPE_POINTER && n >= 4 && at(3) < bound && block[at(3)] != 0 && at(1) < bound {
+            ptr_block[at(1)] = block[at(3)];
+            ptr_depth[at(1)] = depth[at(3)];
         }
-        if op == OP_VARIABLE && n >= 4 && at(1) < bound && bptr[at(1)] != 0 && at(2) < bound {
-            bvar[at(2)] = bptr[at(1)];
+        if op == OP_VARIABLE && n >= 4 && at(1) < bound && ptr_block[at(1)] != 0 && at(2) < bound {
+            var_block[at(2)] = ptr_block[at(1)];
+            var_depth[at(2)] = ptr_depth[at(1)];
         }
     }
+    let mut ok = true;
     for &(i, op, n) in &v {
         if !ok {
             break;
         }
         let at = |k: usize| w[i + k] as usize;
-        if (op == OP_ACCESS_CHAIN || op == OP_IN_BOUNDS_ACCESS_CHAIN) && n >= 5 && at(3) < bound && bvar[at(3)] != 0 {
-            let k = if bvar[at(3)] == 2 { 5 } else { 4 }; // the member index follows the vertex index of an arrayed block
-            if k < n && (at(k) >= bound || !isc[at(k)] || cval[at(k)] == cull_m) {
+        if (op == OP_ACCESS_CHAIN || op == OP_IN_BOUNDS_ACCESS_CHAIN)
+            && n >= 5
+            && at(3) < bound
+            && var_block[at(3)] != 0
+        {
+            let k = 4 + var_depth[at(3)] as usize;
+            let cull_m = trim[&var_block[at(3)]];
+            if k >= n || at(k) >= bound || !isc[at(k)] || cval[at(k)] == cull_m {
                 ok = false;
             }
         }
-        if matches!(op, OP_LOAD | OP_COMPOSITE_CONSTRUCT | OP_COPY_OBJECT) && n >= 3 && at(1) < bound && blk[at(1)] != 0 {
+        if matches!(op, OP_LOAD | OP_COMPOSITE_CONSTRUCT | OP_COPY_OBJECT)
+            && n >= 3
+            && at(1) < bound
+            && block[at(1)] != 0
+        {
             ok = false;
         }
-        if matches!(op, OP_STORE | OP_COPY_MEMORY) && n >= 3 && ((at(1) < bound && bvar[at(1)] != 0) || (at(2) < bound && bvar[at(2)] != 0)) {
+        if matches!(op, OP_STORE | OP_COPY_MEMORY)
+            && n >= 3
+            && ((at(1) < bound && var_block[at(1)] != 0)
+                || (at(2) < bound && var_block[at(2)] != 0))
+        {
             ok = false;
         }
     }
     if !ok {
         return None;
     }
-    // the struct loses its last word; the member's name and decorations go
+    // Each affected struct loses its last word; all decorations (including PassthroughNV) and its name go.
     let mut o = w[..5].to_vec();
     for &(i, op, n) in &v {
-        if (op == OP_MEMBER_DECORATE || op == OP_MEMBER_NAME) && n >= 3 && w[i + 1] == st && w[i + 2] == cull_m {
+        if (op == OP_MEMBER_DECORATE || op == OP_MEMBER_NAME)
+            && n >= 3
+            && trim.get(&w[i + 1]) == Some(&w[i + 2])
+        {
             continue;
         }
-        if i == si {
+        if op == OP_TYPE_STRUCT && trim.contains_key(&w[i + 1]) {
             o.push((((n - 1) as u32) << 16) | op);
             o.extend_from_slice(&w[i + 1..i + n - 1]);
             continue;
@@ -184,7 +230,6 @@ pub fn trim_cull(w: &[u32], limit: u32) -> Option<Vec<u32>> {
 /// Whether gl_PerVertex's clip and cull arrays together pass `limit` (what `trim_cull` could not fix is logged).
 pub fn needs_trim(w: &[u32], limit: u32) -> bool {
     let Some(v) = walk(w) else { return false };
-    let mut lens = 0u32;
     let mut arr: std::collections::HashMap<u32, u32> = Default::default();
     let mut consts: std::collections::HashMap<u32, u32> = Default::default();
     let mut members: Vec<(u32, u32)> = vec![];
@@ -200,18 +245,24 @@ pub fn needs_trim(w: &[u32], limit: u32) -> bool {
             OP_TYPE_STRUCT => {
                 structs.insert(w[i + 1], w[i + 2..i + n].to_vec());
             }
-            OP_MEMBER_DECORATE if n >= 5 && w[i + 3] == DEC_BUILTIN && (w[i + 4] == BI_CLIP || w[i + 4] == BI_CULL) => {
+            OP_MEMBER_DECORATE
+                if n >= 5
+                    && w[i + 3] == DEC_BUILTIN
+                    && (w[i + 4] == BI_CLIP || w[i + 4] == BI_CULL) =>
+            {
                 members.push((w[i + 1], w[i + 2]));
             }
             _ => {}
         }
     }
+    let mut lens: std::collections::HashMap<u32, u32> = Default::default();
     for (s, m) in members {
         if let Some(t) = structs.get(&s).and_then(|ms| ms.get(m as usize)) {
-            lens += arr.get(t).and_then(|c| consts.get(c)).copied().unwrap_or(0);
+            *lens.entry(s).or_default() +=
+                arr.get(t).and_then(|c| consts.get(c)).copied().unwrap_or(0);
         }
     }
-    lens > limit
+    lens.values().any(|&n| n > limit)
 }
 
 /// A user varying: its location, first component, scalar kind (0 float, 1 signed, 2 unsigned) and component count.
@@ -267,7 +318,9 @@ pub fn io_locations(w: &[u32], output: bool) -> Vec<Varying> {
         if builtin.contains(&id) || index1.contains(&id) {
             continue;
         }
-        let (Some(&l), Some(&(_, t))) = (loc.get(&id), ptrs.get(&pty)) else { continue };
+        let (Some(&l), Some(&(_, t))) = (loc.get(&id), ptrs.get(&pty)) else {
+            continue;
+        };
         let (mut t, mut nc) = (t, 1u32);
         if let Some(&(op, i)) = types.get(&t) {
             if op == OP_TYPE_VECTOR {
@@ -286,7 +339,12 @@ pub fn io_locations(w: &[u32], output: bool) -> Vec<Varying> {
             }
             _ => continue,
         };
-        out.push(Varying { location: l, component: comp.get(&id).copied().unwrap_or(0), kind, components: nc });
+        out.push(Varying {
+            location: l,
+            component: comp.get(&id).copied().unwrap_or(0),
+            kind,
+            components: nc,
+        });
     }
     out
 }
@@ -294,7 +352,11 @@ pub fn io_locations(w: &[u32], output: bool) -> Vec<Varying> {
 /// The varyings `inputs` (a pixel shader's) reads that `outputs` (its vertex shader's) does not declare at their
 /// location (a location declared with other components counts as declared).
 pub fn missing(outputs: &[Varying], inputs: &[Varying]) -> Vec<Varying> {
-    let mut m: Vec<Varying> = inputs.iter().filter(|i| !outputs.iter().any(|o| o.location == i.location)).copied().collect();
+    let mut m: Vec<Varying> = inputs
+        .iter()
+        .filter(|i| !outputs.iter().any(|o| o.location == i.location))
+        .copied()
+        .collect();
     m.sort_by_key(|v| (v.location, v.component));
     m.dedup_by_key(|v| v.location);
     m
@@ -316,11 +378,17 @@ pub fn add_outputs(w: &[u32], add: &[Varying]) -> Option<Vec<u32>> {
     };
     // existing types and constants to reuse (SPIR-V does not allow a scalar or vector type twice)
     let find = |op: u32, ops: &[u32]| -> Option<u32> {
-        v.iter().find(|&&(i, o, n)| o == op && n == ops.len() + 2 && &w[i + 2..i + n] == ops).map(|&(i, _, _)| w[i + 1])
+        v.iter()
+            .find(|&&(i, o, n)| o == op && n == ops.len() + 2 && &w[i + 2..i + n] == ops)
+            .map(|&(i, _, _)| w[i + 1])
     };
     let mut new_types: Vec<Vec<u32>> = vec![];
     let mut made: Vec<(u32, Vec<u32>, u32)> = vec![];
-    let mut ty = |op: u32, ops: &[u32], new_types: &mut Vec<Vec<u32>>, fresh: &mut dyn FnMut() -> u32| -> u32 {
+    let mut ty = |op: u32,
+                  ops: &[u32],
+                  new_types: &mut Vec<Vec<u32>>,
+                  fresh: &mut dyn FnMut() -> u32|
+     -> u32 {
         if let Some(id) = find(op, ops) {
             return id;
         }
@@ -336,7 +404,9 @@ pub fn add_outputs(w: &[u32], add: &[Varying]) -> Option<Vec<u32>> {
     };
     let mut consts: Vec<(u32, u32, u32)> = vec![];
     let find_const = |ty: u32, val: u32| -> Option<u32> {
-        v.iter().find(|&&(i, o, n)| o == OP_CONSTANT && n == 4 && w[i + 1] == ty && w[i + 3] == val).map(|&(i, _, _)| w[i + 2])
+        v.iter()
+            .find(|&&(i, o, n)| o == OP_CONSTANT && n == 4 && w[i + 1] == ty && w[i + 3] == val)
+            .map(|&(i, _, _)| w[i + 2])
     };
     let mut globals: Vec<Vec<u32>> = vec![];
     let mut decos: Vec<Vec<u32>> = vec![];
@@ -348,8 +418,17 @@ pub fn add_outputs(w: &[u32], add: &[Varying]) -> Option<Vec<u32>> {
             _ => ty(OP_TYPE_INT, &[32, 0], &mut new_types, &mut fresh),
         };
         let nc = a.components.clamp(1, 4);
-        let vty = if nc > 1 { ty(OP_TYPE_VECTOR, &[scalar, nc], &mut new_types, &mut fresh) } else { scalar };
-        let ptr = ty(OP_TYPE_POINTER, &[SC_OUTPUT, vty], &mut new_types, &mut fresh);
+        let vty = if nc > 1 {
+            ty(OP_TYPE_VECTOR, &[scalar, nc], &mut new_types, &mut fresh)
+        } else {
+            scalar
+        };
+        let ptr = ty(
+            OP_TYPE_POINTER,
+            &[SC_OUTPUT, vty],
+            &mut new_types,
+            &mut fresh,
+        );
         // (0, 0, 0, 1) from the variable's first component on
         let mut comps = vec![];
         for c in 0..nc {
@@ -359,7 +438,12 @@ pub fn add_outputs(w: &[u32], add: &[Varying]) -> Option<Vec<u32>> {
                 (_, true) => 1,
                 _ => 0,
             };
-            let id = match find_const(scalar, bits).or_else(|| consts.iter().find(|x| x.0 == scalar && x.1 == bits).map(|x| x.2)) {
+            let id = match find_const(scalar, bits).or_else(|| {
+                consts
+                    .iter()
+                    .find(|x| x.0 == scalar && x.1 == bits)
+                    .map(|x| x.2)
+            }) {
                 Some(id) => id,
                 None => {
                     let id = fresh();
@@ -387,8 +471,21 @@ pub fn add_outputs(w: &[u32], add: &[Varying]) -> Option<Vec<u32>> {
         }
         iface.push(var);
     }
-    let first_fn = v.iter().find(|x| x.1 == OP_FUNCTION).map(|x| x.0).unwrap_or(w.len());
-    let last_deco = v.iter().filter(|x| matches!(x.1, OP_DECORATE | OP_MEMBER_DECORATE | 73 | 74 | 75 | 332 | 5632 | 5633)).map(|x| x.0 + x.2).max();
+    let first_fn = v
+        .iter()
+        .find(|x| x.1 == OP_FUNCTION)
+        .map(|x| x.0)
+        .unwrap_or(w.len());
+    let last_deco = v
+        .iter()
+        .filter(|x| {
+            matches!(
+                x.1,
+                OP_DECORATE | OP_MEMBER_DECORATE | 73 | 74 | 75 | 332 | 5632 | 5633
+            )
+        })
+        .map(|x| x.0 + x.2)
+        .max();
     let mut o = w[..5].to_vec();
     o[3] = bound;
     let mut placed_decos = false;
@@ -439,7 +536,12 @@ pub fn int_outputs(w: &[u32], kinds: &[u8; 8]) -> Option<Vec<u32>> {
         if (19..=OP_TYPE_POINTER).contains(&op) && n >= 2 && (w[i + 1] as usize) < bound0 {
             def[w[i + 1] as usize] = i;
         }
-        if matches!(op, OP_VARIABLE | OP_ACCESS_CHAIN | OP_IN_BOUNDS_ACCESS_CHAIN) && n >= 4 && (w[i + 2] as usize) < bound0 {
+        if matches!(
+            op,
+            OP_VARIABLE | OP_ACCESS_CHAIN | OP_IN_BOUNDS_ACCESS_CHAIN
+        ) && n >= 4
+            && (w[i + 2] as usize) < bound0
+        {
             def[w[i + 2] as usize] = i;
         }
         if op == OP_TYPE_INT && n == 4 && w[i + 2] == 32 && w[i + 3] < 2 {
@@ -484,12 +586,21 @@ pub fn int_outputs(w: &[u32], kinds: &[u8; 8]) -> Option<Vec<u32>> {
             if op == OP_VARIABLE && n >= 4 && w[i + 3] == SC_OUTPUT {
                 out.insert(w[i + 2]);
             }
-            if op == OP_DECORATE && n >= 3 && (w[i + 2] == DEC_BUILTIN || (w[i + 2] == DEC_INDEX && n >= 4 && w[i + 3] == 1)) {
+            if op == OP_DECORATE
+                && n >= 3
+                && (w[i + 2] == DEC_BUILTIN || (w[i + 2] == DEC_INDEX && n >= 4 && w[i + 3] == 1))
+            {
                 bi.insert(w[i + 1]);
             }
         }
         for &(i, op, n) in &v {
-            if op == OP_DECORATE && n >= 4 && w[i + 2] == DEC_LOCATION && out.contains(&w[i + 1]) && !bi.contains(&w[i + 1]) && w[i + 3] < 8 {
+            if op == OP_DECORATE
+                && n >= 4
+                && w[i + 2] == DEC_LOCATION
+                && out.contains(&w[i + 1])
+                && !bi.contains(&w[i + 1])
+                && w[i + 3] < 8
+            {
                 let l = w[i + 3] as usize;
                 at[l] = if at[l] == -1 { w[i + 1] as i64 } else { -2 };
             }
@@ -516,7 +627,12 @@ pub fn int_outputs(w: &[u32], kinds: &[u8; 8]) -> Option<Vec<u32>> {
         let vti = if vt < bound0 { def[vt] } else { 0 };
         nc_of[l] = if vti != 0 && w[vti] & 0xffff == OP_TYPE_FLOAT && w[vti + 2] == 32 {
             1
-        } else if vti != 0 && w[vti] & 0xffff == OP_TYPE_VECTOR && f32t != 0 && w[vti + 2] == f32t && (2..=4).contains(&w[vti + 3]) {
+        } else if vti != 0
+            && w[vti] & 0xffff == OP_TYPE_VECTOR
+            && f32t != 0
+            && w[vti + 2] == f32t
+            && (2..=4).contains(&w[vti + 3])
+        {
             w[vti + 3]
         } else {
             return None;
@@ -528,7 +644,10 @@ pub fn int_outputs(w: &[u32], kinds: &[u8; 8]) -> Option<Vec<u32>> {
     if !any {
         return None;
     }
-    let first_var = (0..8).filter(|&l| var_of[l] != 0).map(|l| def[var_of[l] as usize]).min()?;
+    let first_var = (0..8)
+        .filter(|&l| var_of[l] != 0)
+        .map(|l| def[var_of[l] as usize])
+        .min()?;
     let mut hoist: Vec<usize> = vec![];
     for k in 0..2 {
         if iscal[k] != 0 && def[iscal[k] as usize] > first_var {
@@ -602,11 +721,18 @@ pub fn int_outputs(w: &[u32], kinds: &[u8; 8]) -> Option<Vec<u32>> {
                 if n != 4 {
                     return None; // an initializer would need retyping too
                 }
-                x[1] = if nc_of[l] > 1 { ivp[k_of[l]][nc_of[l] as usize] } else { isp[k_of[l]] };
+                x[1] = if nc_of[l] > 1 {
+                    ivp[k_of[l]][nc_of[l] as usize]
+                } else {
+                    isp[k_of[l]]
+                };
                 repl.insert(x[2], k_of[l]);
             }
             o.extend(x);
-        } else if (op == OP_ACCESS_CHAIN || op == OP_IN_BOUNDS_ACCESS_CHAIN) && n >= 5 && repl.contains_key(&x[3]) {
+        } else if (op == OP_ACCESS_CHAIN || op == OP_IN_BOUNDS_ACCESS_CHAIN)
+            && n >= 5
+            && repl.contains_key(&x[3])
+        {
             if n != 5 {
                 return None;
             }
@@ -617,7 +743,11 @@ pub fn int_outputs(w: &[u32], kinds: &[u8; 8]) -> Option<Vec<u32>> {
         } else if op == OP_LOAD && n >= 4 && repl.contains_key(&x[3]) {
             let k = repl[&x[3]];
             let ti = def.get(x[1] as usize).copied().unwrap_or(0);
-            let nc = if ti != 0 && w[ti] & 0xffff == OP_TYPE_VECTOR { w[ti + 3] as usize } else { 1 };
+            let nc = if ti != 0 && w[ti] & 0xffff == OP_TYPE_VECTOR {
+                w[ti + 3] as usize
+            } else {
+                1
+            };
             let (old_type, old_id) = (x[1], x[2]);
             x[1] = if nc > 1 { ivec[k][nc] } else { iscal[k] };
             x[2] = bound;
@@ -661,12 +791,21 @@ fn outputs_at(w: &[u32], v: &[(usize, u32, usize)]) -> [i64; 8] {
         if op == OP_VARIABLE && n >= 4 && w[i + 3] == SC_OUTPUT {
             out.insert(w[i + 2]);
         }
-        if op == OP_DECORATE && n >= 3 && (w[i + 2] == DEC_BUILTIN || (w[i + 2] == DEC_INDEX && n >= 4 && w[i + 3] == 1)) {
+        if op == OP_DECORATE
+            && n >= 3
+            && (w[i + 2] == DEC_BUILTIN || (w[i + 2] == DEC_INDEX && n >= 4 && w[i + 3] == 1))
+        {
             bi.insert(w[i + 1]);
         }
     }
     for &(i, op, n) in v {
-        if op == OP_DECORATE && n >= 4 && w[i + 2] == DEC_LOCATION && out.contains(&w[i + 1]) && !bi.contains(&w[i + 1]) && w[i + 3] < 8 {
+        if op == OP_DECORATE
+            && n >= 4
+            && w[i + 2] == DEC_LOCATION
+            && out.contains(&w[i + 1])
+            && !bi.contains(&w[i + 1])
+            && w[i + 3] < 8
+        {
             let l = w[i + 3] as usize;
             at[l] = if at[l] == -1 { w[i + 1] as i64 } else { -2 };
         }
@@ -769,9 +908,21 @@ pub fn alpha_test(w: &[u32]) -> Option<Vec<u32>> {
     let vi = def[at[0] as usize];
     let pt = if vi != 0 { w[vi + 1] as usize } else { 0 };
     let pti = if pt < bound0 { def[pt] } else { 0 };
-    let vt = if pti != 0 && w[pti] & 0xffff == OP_TYPE_POINTER { w[pti + 3] as usize } else { 0 };
+    let vt = if pti != 0 && w[pti] & 0xffff == OP_TYPE_POINTER {
+        w[pti + 3] as usize
+    } else {
+        0
+    };
     let vti = if vt < bound0 { def[vt] } else { 0 };
-    if entry == 0 || f32t == 0 || first_type == 0 || first_fn == 0 || vti == 0 || w[vti] & 0xffff != OP_TYPE_VECTOR || w[vti + 2] != f32t || w[vti + 3] != 4 {
+    if entry == 0
+        || f32t == 0
+        || first_type == 0
+        || first_fn == 0
+        || vti == 0
+        || w[vti] & 0xffff != OP_TYPE_VECTOR
+        || w[vti + 2] != f32t
+        || w[vti + 3] != 4
+    {
         return None;
     }
     for &(i, op, n) in &v {
@@ -815,13 +966,21 @@ pub fn alpha_test(w: &[u32]) -> Option<Vec<u32>> {
                 return None;
             }
             // the struct must be used by this block only, and its members must end before the new ones
-            let uses = v.iter().filter(|&&(i, op, n)| op == OP_TYPE_POINTER && n == 4 && w[i + 3] == st).count();
+            let uses = v
+                .iter()
+                .filter(|&&(i, op, n)| op == OP_TYPE_POINTER && n == 4 && w[i + 3] == st)
+                .count();
             if uses != 1 {
                 return None;
             }
             let nm = (w[sti] >> 16) - 2;
             for &(i, op, n) in &v {
-                if op == OP_MEMBER_DECORATE && n >= 5 && w[i + 1] == st && w[i + 3] == DEC_OFFSET && w[i + 4] >= ALPHA_PUSH_OFFSET {
+                if op == OP_MEMBER_DECORATE
+                    && n >= 5
+                    && w[i + 1] == st
+                    && w[i + 3] == DEC_OFFSET
+                    && w[i + 4] >= ALPHA_PUSH_OFFSET
+                {
                     return None;
                 }
             }
@@ -835,14 +994,26 @@ pub fn alpha_test(w: &[u32]) -> Option<Vec<u32>> {
             ty.extend(ins(OP_TYPE_POINTER, &[pst, SC_PUSH, st]));
             ty.extend(ins(OP_VARIABLE, &[pst, pv, SC_PUSH]));
             dec.extend(ins(OP_DECORATE, &[st, DEC_BLOCK]));
-            dec.extend(ins(OP_MEMBER_DECORATE, &[st, 0, DEC_OFFSET, ALPHA_PUSH_OFFSET]));
-            dec.extend(ins(OP_MEMBER_DECORATE, &[st, 1, DEC_OFFSET, ALPHA_PUSH_OFFSET + 4]));
+            dec.extend(ins(
+                OP_MEMBER_DECORATE,
+                &[st, 0, DEC_OFFSET, ALPHA_PUSH_OFFSET],
+            ));
+            dec.extend(ins(
+                OP_MEMBER_DECORATE,
+                &[st, 1, DEC_OFFSET, ALPHA_PUSH_OFFSET + 4],
+            ));
             (pv, 0, 1, None)
         }
     };
     if let Some((_, st)) = old_struct {
-        dec.extend(ins(OP_MEMBER_DECORATE, &[st, m_func, DEC_OFFSET, ALPHA_PUSH_OFFSET]));
-        dec.extend(ins(OP_MEMBER_DECORATE, &[st, m_ref, DEC_OFFSET, ALPHA_PUSH_OFFSET + 4]));
+        dec.extend(ins(
+            OP_MEMBER_DECORATE,
+            &[st, m_func, DEC_OFFSET, ALPHA_PUSH_OFFSET],
+        ));
+        dec.extend(ins(
+            OP_MEMBER_DECORATE,
+            &[st, m_ref, DEC_OFFSET, ALPHA_PUSH_OFFSET + 4],
+        ));
     }
     let pu = id();
     let pfl = id();
@@ -862,7 +1033,11 @@ pub fn alpha_test(w: &[u32]) -> Option<Vec<u32>> {
     } else {
         (c[0], c[1])
     };
-    let kill = if w[1] >= 0x0001_0600 { OP_TERMINATE_INVOCATION } else { OP_KILL };
+    let kill = if w[1] >= 0x0001_0600 {
+        OP_TERMINATE_INVOCATION
+    } else {
+        OP_KILL
+    };
     let mut o = w[..5].to_vec();
     let mut in_fn = 0u32;
     for &(i, op, n) in &v {
@@ -876,8 +1051,23 @@ pub fn alpha_test(w: &[u32]) -> Option<Vec<u32>> {
             in_fn = w[i + 2];
         }
         if op == OP_RETURN && in_fn == entry {
-            let (pf, f, pr, r, pa, a, m, lt, eq, gt) = (id(), id(), id(), id(), id(), id(), id(), id(), id(), id());
-            let (b0, h0, p0, b1, h1, p1, b2, h2, p2, q, pass, ok_l, kill_l) = (id(), id(), id(), id(), id(), id(), id(), id(), id(), id(), id(), id(), id());
+            let (pf, f, pr, r, pa, a, m, lt, eq, gt) =
+                (id(), id(), id(), id(), id(), id(), id(), id(), id(), id());
+            let (b0, h0, p0, b1, h1, p1, b2, h2, p2, q, pass, ok_l, kill_l) = (
+                id(),
+                id(),
+                id(),
+                id(),
+                id(),
+                id(),
+                id(),
+                id(),
+                id(),
+                id(),
+                id(),
+                id(),
+                id(),
+            );
             o.extend(ins(OP_ACCESS_CHAIN, &[pu, pf, var, cm_func]));
             o.extend(ins(OP_LOAD, &[u32t, f, pf]));
             o.extend(ins(OP_ACCESS_CHAIN, &[pfl, pr, var, cm_ref]));
@@ -983,13 +1173,21 @@ pub fn ballot_per_lane(w: &[u32]) -> Option<(Vec<u32>, u32)> {
         if op == OP_FUNCTION && first_fn == 0 {
             first_fn = i;
         }
-        if op == B_BALLOT && n == 5 && lt(w[i + 4]) && is_true[w[i + 4] as usize] && ballots.len() < 32 {
+        if op == B_BALLOT
+            && n == 5
+            && lt(w[i + 4])
+            && is_true[w[i + 4] as usize]
+            && ballots.len() < 32
+        {
             ballots.push((w[i + 2], i));
         }
     }
     let lane_ok = lane_var != 0 && (lane_var as usize) < bound0 && def[lane_var as usize] != 0 && {
         let pt = w[def[lane_var as usize] + 1] as usize;
-        pt < bound0 && def[pt] != 0 && w[def[pt]] & 0xffff == OP_TYPE_POINTER && w[def[pt] + 3] == tu
+        pt < bound0
+            && def[pt] != 0
+            && w[def[pt]] & 0xffff == OP_TYPE_POINTER
+            && w[def[pt] + 3] == tu
     };
     if ballots.is_empty() || tu == 0 || !lane_ok || first_fn == 0 {
         return None;
@@ -1017,10 +1215,22 @@ pub fn ballot_per_lane(w: &[u32]) -> Option<(Vec<u32>, u32)> {
             if op == OP_STORE && n >= 3 && ok_id(w[i + 1]) && ok_id(w[i + 2]) {
                 let (dd, cc) = (d[w[i + 2] as usize], c[w[i + 2] as usize]);
                 flow(&mut d, &mut c, w[i + 1], dd, cc);
-            } else if matches!(op, OP_LOAD | OP_ACCESS_CHAIN | OP_IN_BOUNDS_ACCESS_CHAIN | B_COMPOSITE_EXTRACT | OP_COPY_OBJECT | OP_BITCAST) && n >= 4 && ok_id(w[i + 2]) && ok_id(w[i + 3]) {
+            } else if matches!(
+                op,
+                OP_LOAD
+                    | OP_ACCESS_CHAIN
+                    | OP_IN_BOUNDS_ACCESS_CHAIN
+                    | B_COMPOSITE_EXTRACT
+                    | OP_COPY_OBJECT
+                    | OP_BITCAST
+            ) && n >= 4
+                && ok_id(w[i + 2])
+                && ok_id(w[i + 3])
+            {
                 let (dd, cc) = (d[w[i + 3] as usize], c[w[i + 3] as usize]);
                 flow(&mut d, &mut c, w[i + 2], dd, cc);
-            } else if op == B_AND && n == 5 && ok_id(w[i + 2]) && ok_id(w[i + 3]) && ok_id(w[i + 4]) {
+            } else if op == B_AND && n == 5 && ok_id(w[i + 2]) && ok_id(w[i + 3]) && ok_id(w[i + 4])
+            {
                 let (a, b) = (w[i + 3] as usize, w[i + 4] as usize);
                 let (dd, cc) = (d[a] | d[b], c[a] | c[b]);
                 flow(&mut d, &mut c, w[i + 2], dd, cc);
@@ -1028,9 +1238,14 @@ pub fn ballot_per_lane(w: &[u32]) -> Option<(Vec<u32>, u32)> {
                 let s = w[i + 3] as usize;
                 let cc = d[s] | c[s];
                 flow(&mut d, &mut c, w[i + 2], 0, cc);
-            } else if op == B_EXT_INST && n == 6 && (w[i + 4] == FIND_UMSB || w[i + 4] == FIND_SMSB) && ok_id(w[i + 5]) {
+            } else if op == B_EXT_INST
+                && n == 6
+                && (w[i + 4] == FIND_UMSB || w[i + 4] == FIND_SMSB)
+                && ok_id(w[i + 5])
+            {
                 msb |= d[w[i + 5] as usize];
-            } else if op == B_ATOMIC_IADD && n == 7 && ok_id(w[i + 6]) && c[w[i + 6] as usize] != 0 {
+            } else if op == B_ATOMIC_IADD && n == 7 && ok_id(w[i + 6]) && c[w[i + 6] as usize] != 0
+            {
                 let cv = c[w[i + 6] as usize];
                 atom |= cv;
                 // its result read anywhere (beyond a store into a variable nothing else names) keeps those ballots
@@ -1056,7 +1271,10 @@ pub fn ballot_per_lane(w: &[u32]) -> Option<(Vec<u32>, u32)> {
                         if atom_used & cv != 0 {
                             break;
                         }
-                        if jo == B_NAME || (jo == OP_VARIABLE && w[j + 2] == stored) || (jo == OP_STORE && w[j + 1] == stored) {
+                        if jo == B_NAME
+                            || (jo == OP_VARIABLE && w[j + 2] == stored)
+                            || (jo == OP_STORE && w[j + 1] == stored)
+                        {
                             continue;
                         }
                         if (1..jc).any(|a| w[j + a] == stored) {
@@ -1074,7 +1292,12 @@ pub fn ballot_per_lane(w: &[u32]) -> Option<(Vec<u32>, u32)> {
     for (k, &(_, at)) in ballots.iter().enumerate() {
         if ok >> k & 1 != 0 {
             let vt = w[at + 1] as usize;
-            if !(vt < bound0 && def[vt] != 0 && w[def[vt]] & 0xffff == OP_TYPE_VECTOR && w[def[vt] + 2] == tu && w[def[vt] + 3] == 4) {
+            if !(vt < bound0
+                && def[vt] != 0
+                && w[def[vt]] & 0xffff == OP_TYPE_VECTOR
+                && w[def[vt] + 2] == tu
+                && w[def[vt] + 3] == 4)
+            {
                 ok &= !(1 << k);
             }
         }
@@ -1098,12 +1321,19 @@ pub fn ballot_per_lane(w: &[u32]) -> Option<(Vec<u32>, u32)> {
                 o.extend(ins(OP_CONSTANT, &[tu, c1, 1]));
             }
         }
-        if let Some(_k) = ballots.iter().enumerate().find(|(k, b)| b.1 == i && ok >> k & 1 != 0) {
+        if let Some(_k) = ballots
+            .iter()
+            .enumerate()
+            .find(|(k, b)| b.1 == i && ok >> k & 1 != 0)
+        {
             let (lid, bit) = (bound, bound + 1);
             bound += 2;
             o.extend(ins(OP_LOAD, &[tu, lid, lane_var]));
             o.extend(ins(B_SHL, &[tu, bit, c1, lid]));
-            o.extend(ins(OP_COMPOSITE_CONSTRUCT, &[w[i + 1], w[i + 2], bit, c0, c0, c0]));
+            o.extend(ins(
+                OP_COMPOSITE_CONSTRUCT,
+                &[w[i + 1], w[i + 2], bit, c0, c0, c0],
+            ));
             nrw += 1;
             continue;
         }
@@ -1155,7 +1385,13 @@ pub fn loop_guard(w: &[u32], cap: u32) -> Option<(Vec<u32>, u32)> {
             OP_LABEL => {
                 seen_labels.insert(w[i + 1]);
             }
-            OP_BRANCH if n == 2 && merge_of.contains_key(&w[i + 1]) && seen_labels.contains(&w[i + 1]) => edges.push((i, w[i + 1])),
+            OP_BRANCH
+                if n == 2
+                    && merge_of.contains_key(&w[i + 1])
+                    && seen_labels.contains(&w[i + 1]) =>
+            {
+                edges.push((i, w[i + 1]))
+            }
             OP_BRANCH_COND if n >= 4 => {
                 let (t, f) = (w[i + 2], w[i + 3]);
                 for h in [t, f] {
@@ -1181,7 +1417,11 @@ pub fn loop_guard(w: &[u32], cap: u32) -> Option<(Vec<u32>, u32)> {
         bound += 1;
         x
     };
-    let find = |op: u32, ops: &[u32]| -> Option<u32> { v.iter().find(|&&(i, o, n)| o == op && n == ops.len() + 2 && &w[i + 2..i + n] == ops).map(|&(i, _, _)| w[i + 1]) };
+    let find = |op: u32, ops: &[u32]| -> Option<u32> {
+        v.iter()
+            .find(|&&(i, o, n)| o == op && n == ops.len() + 2 && &w[i + 2..i + n] == ops)
+            .map(|&(i, _, _)| w[i + 1])
+    };
     let mut globals: Vec<u32> = vec![];
     let u32t = match find(OP_TYPE_INT, &[32, 0]) {
         Some(t) => t,
@@ -1300,7 +1540,15 @@ pub struct HandleTable {
 /// `tex_binding` / `samp_binding`, joined with OpSampledImage. The array variables go. None when the module uses them
 /// other than through access chains loaded whole. The pool arrays are declared `tex_len` / `samp_len` long (the
 /// layout's); an ID past them reads element 0.
-pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_binding: u32, samp_binding: u32, tex_len: u32, samp_len: u32) -> Option<Vec<u32>> {
+pub fn handle_tables(
+    w: &[u32],
+    tables: &[HandleTable],
+    pool_set: u32,
+    tex_binding: u32,
+    samp_binding: u32,
+    tex_len: u32,
+    samp_len: u32,
+) -> Option<Vec<u32>> {
     use std::collections::HashMap;
     const OP_NAME: u32 = 5;
     const OP_TYPE_IMAGE: u32 = 25;
@@ -1334,7 +1582,17 @@ pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_bindi
     let mut first_fn = None;
     for &(at, op, n) in &v {
         match op {
-            OP_TYPE_BOOL | OP_TYPE_INT | OP_TYPE_FLOAT | OP_TYPE_VECTOR | OP_TYPE_ARRAY | OP_TYPE_RUNTIME_ARRAY | OP_TYPE_STRUCT | OP_TYPE_POINTER | OP_TYPE_IMAGE | OP_TYPE_SAMPLER | OP_TYPE_SAMPLED_IMAGE => {
+            OP_TYPE_BOOL
+            | OP_TYPE_INT
+            | OP_TYPE_FLOAT
+            | OP_TYPE_VECTOR
+            | OP_TYPE_ARRAY
+            | OP_TYPE_RUNTIME_ARRAY
+            | OP_TYPE_STRUCT
+            | OP_TYPE_POINTER
+            | OP_TYPE_IMAGE
+            | OP_TYPE_SAMPLER
+            | OP_TYPE_SAMPLED_IMAGE => {
                 types.insert(w[at + 1], (op, w[at + 2..at + n].to_vec()));
             }
             OP_CONSTANT if n == 4 => {
@@ -1350,8 +1608,18 @@ pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_bindi
     let first_fn = first_fn?;
     let mut decls: Vec<u32> = Vec::new();
     // a type as the module has it (int, float, sampler and pointer types reused: some must be unique), else declared
-    fn get_ty(types: &mut Types, decls: &mut Vec<u32>, fresh: &mut dyn FnMut() -> u32, op: u32, ops: &[u32]) -> u32 {
-        if let Some((id, _)) = types.iter().filter(|(_, (o, x))| *o == op && x.as_slice() == ops).min_by_key(|(id, _)| **id) {
+    fn get_ty(
+        types: &mut Types,
+        decls: &mut Vec<u32>,
+        fresh: &mut dyn FnMut() -> u32,
+        op: u32,
+        ops: &[u32],
+    ) -> u32 {
+        if let Some((id, _)) = types
+            .iter()
+            .filter(|(_, (o, x))| *o == op && x.as_slice() == ops)
+            .min_by_key(|(id, _)| **id)
+        {
             return *id;
         }
         let id = fresh();
@@ -1361,7 +1629,13 @@ pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_bindi
         types.insert(id, (op, ops.to_vec()));
         id
     }
-    fn get_const(consts: &mut HashMap<(u32, u32), u32>, decls: &mut Vec<u32>, fresh: &mut dyn FnMut() -> u32, ty: u32, val: u32) -> u32 {
+    fn get_const(
+        consts: &mut HashMap<(u32, u32), u32>,
+        decls: &mut Vec<u32>,
+        fresh: &mut dyn FnMut() -> u32,
+        ty: u32,
+        val: u32,
+    ) -> u32 {
         if let Some(&id) = consts.get(&(ty, val)) {
             return id;
         }
@@ -1373,7 +1647,13 @@ pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_bindi
     let uint = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_INT, &[32, 0]);
     let int = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_INT, &[32, 1]);
     let float = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_FLOAT, &[32]);
-    let ptr_uf = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_POINTER, &[SC_UNIFORM, float]);
+    let ptr_uf = get_ty(
+        &mut types,
+        &mut decls,
+        &mut fresh,
+        OP_TYPE_POINTER,
+        &[SC_UNIFORM, float],
+    );
     let sampler = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_SAMPLER, &[]);
     let boolt = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_BOOL, &[]);
     let c_u0 = get_const(&mut consts, &mut decls, &mut fresh, uint, 0);
@@ -1388,10 +1668,22 @@ pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_bindi
     let samp_arr = fresh();
     decls.extend(ins(OP_TYPE_ARRAY, &[samp_arr, sampler, c_slen]));
     let samp_parr = fresh();
-    decls.extend(ins(OP_TYPE_POINTER, &[samp_parr, SC_UNIFORM_CONSTANT, samp_arr]));
-    let samp_ptr = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_POINTER, &[SC_UNIFORM_CONSTANT, sampler]);
+    decls.extend(ins(
+        OP_TYPE_POINTER,
+        &[samp_parr, SC_UNIFORM_CONSTANT, samp_arr],
+    ));
+    let samp_ptr = get_ty(
+        &mut types,
+        &mut decls,
+        &mut fresh,
+        OP_TYPE_POINTER,
+        &[SC_UNIFORM_CONSTANT, sampler],
+    );
     let samp_var = fresh();
-    decls.extend(ins(OP_VARIABLE, &[samp_parr, samp_var, SC_UNIFORM_CONSTANT]));
+    decls.extend(ins(
+        OP_VARIABLE,
+        &[samp_parr, samp_var, SC_UNIFORM_CONSTANT],
+    ));
     let mut annots: Vec<u32> = Vec::new();
     annots.extend(ins(OP_DECORATE, &[samp_var, DEC_SET, pool_set]));
     annots.extend(ins(OP_DECORATE, &[samp_var, DEC_BINDING, samp_binding]));
@@ -1424,7 +1716,10 @@ pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_bindi
         }
         let img = sops[0];
         let cpty = *var_ty.get(&t.cbuf)?;
-        if types.get(&cpty).is_none_or(|(o, x)| *o != OP_TYPE_POINTER || x[0] != SC_UNIFORM) {
+        if types
+            .get(&cpty)
+            .is_none_or(|(o, x)| *o != OP_TYPE_POINTER || x[0] != SC_UNIFORM)
+        {
             return None;
         }
         let (img_ptr, img_var) = match img_vars.get(&img) {
@@ -1434,7 +1729,13 @@ pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_bindi
                 decls.extend(ins(OP_TYPE_ARRAY, &[arr, img, c_tlen]));
                 let parr = fresh();
                 decls.extend(ins(OP_TYPE_POINTER, &[parr, SC_UNIFORM_CONSTANT, arr]));
-                let iptr = get_ty(&mut types, &mut decls, &mut fresh, OP_TYPE_POINTER, &[SC_UNIFORM_CONSTANT, img]);
+                let iptr = get_ty(
+                    &mut types,
+                    &mut decls,
+                    &mut fresh,
+                    OP_TYPE_POINTER,
+                    &[SC_UNIFORM_CONSTANT, img],
+                );
                 let var = fresh();
                 decls.extend(ins(OP_VARIABLE, &[parr, var, SC_UNIFORM_CONSTANT]));
                 annots.extend(ins(OP_DECORATE, &[var, DEC_SET, pool_set]));
@@ -1444,7 +1745,17 @@ pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_bindi
             }
         };
         let base = get_const(&mut consts, &mut decls, &mut fresh, int, t.first_word);
-        ts.insert(t.var, T { si, img, img_ptr, img_var, cbuf: t.cbuf, base });
+        ts.insert(
+            t.var,
+            T {
+                si,
+                img,
+                img_ptr,
+                img_var,
+                cbuf: t.cbuf,
+                base,
+            },
+        );
     }
     // the bodies: element pointers noted, their loads replaced
     let mut chains: HashMap<u32, (u32, u32)> = HashMap::new(); // pointer id -> (table variable, index id)
@@ -1496,7 +1807,10 @@ pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_bindi
             245 => ops.get(2..).unwrap_or(&[]),
             _ => &[],
         };
-        if ptr_ops.iter().any(|x| ts.contains_key(x) || chains.contains_key(x)) {
+        if ptr_ops
+            .iter()
+            .any(|x| ts.contains_key(x) || chains.contains_key(x))
+        {
             return None;
         }
         body.extend_from_slice(&w[at..at + n]);
@@ -1504,7 +1818,11 @@ pub fn handle_tables(w: &[u32], tables: &[HandleTable], pool_set: u32, tex_bindi
     // the head: the tables' names, decorations and variables dropped; the new annotations after the last decoration,
     // the new types, constants and variables before the first function
     let mut head: Vec<u32> = w[..5].to_vec();
-    let last_annot = v.iter().filter(|x| x.0 < first_fn && (x.1 == OP_DECORATE || x.1 == OP_MEMBER_DECORATE)).map(|x| x.0).max()?;
+    let last_annot = v
+        .iter()
+        .filter(|x| x.0 < first_fn && (x.1 == OP_DECORATE || x.1 == OP_MEMBER_DECORATE))
+        .map(|x| x.0)
+        .max()?;
     for &(at, op, n) in v.iter().filter(|x| x.0 < first_fn) {
         let drop = match op {
             OP_NAME | OP_DECORATE => ts.contains_key(&w[at + 1]),
@@ -1563,6 +1881,27 @@ mod tests {
         w
     }
 
+    /// Add a second gl_PerVertex block, as a geometry shader has distinct input and output blocks.
+    fn module_with_two_blocks() -> Vec<u32> {
+        let mut w = module();
+        let v = walk(&w).unwrap();
+        let first_type = v.iter().find(|x| x.1 == 19).unwrap().0;
+        let first_fn = v.iter().find(|x| x.1 == OP_FUNCTION).unwrap().0;
+        let mut annotations = Vec::new();
+        annotations.extend(ins(OP_MEMBER_NAME, &[32, 2, 0x6c7563]));
+        annotations.extend(ins(OP_MEMBER_DECORATE, &[32, 0, DEC_BUILTIN, 0]));
+        annotations.extend(ins(OP_MEMBER_DECORATE, &[32, 1, DEC_BUILTIN, BI_CLIP]));
+        annotations.extend(ins(OP_MEMBER_DECORATE, &[32, 2, DEC_BUILTIN, BI_CULL]));
+        w.splice(first_type..first_type, annotations);
+        let added = w.len() - module().len();
+        let mut declarations = Vec::new();
+        declarations.extend(ins(OP_TYPE_STRUCT, &[32, 6, 12, 13]));
+        declarations.extend(ins(OP_TYPE_POINTER, &[33, SC_INPUT, 32]));
+        declarations.extend(ins(OP_VARIABLE, &[33, 34, SC_INPUT]));
+        w.splice(first_fn + added..first_fn + added, declarations);
+        w
+    }
+
     #[test]
     fn handle_table_elements_come_from_the_pools() {
         // a 2D combined-sampler array of 8 (%15) indexed by %40, a cbuf block of vec4[4096] (%22)
@@ -1601,16 +1940,41 @@ mod tests {
         push(&mut w, OP_LOAD, &[11, 42, 41]);
         push(&mut w, 253, &[]);
         push(&mut w, 56, &[]);
-        let t = [HandleTable { var: 15, cbuf: 22, first_word: 5 }];
+        let t = [HandleTable {
+            var: 15,
+            cbuf: 22,
+            first_word: 5,
+        }];
         let o = handle_tables(&w, &t, 6, 0, 1, 1024, 64).expect("rewritten");
         let v = walk(&o).expect("well formed");
-        let has = |op: u32, f: &dyn Fn(&[u32]) -> bool| v.iter().any(|&(at, o2, n)| o2 == op && f(&o[at + 1..at + n]));
-        assert!(!has(OP_VARIABLE, &|x| x[1] == 15), "the table variable is gone");
-        assert!(!has(OP_ACCESS_CHAIN, &|x| x[2] == 15), "no element pointer into it");
-        assert!(has(86, &|x| x[0] == 11 && x[1] == 42), "the load's result is an OpSampledImage now");
-        assert!(has(OP_ACCESS_CHAIN, &|x| x[2] == 22 && x.len() == 6), "the handle read from the constant buffer");
-        assert!(has(OP_DECORATE, &|x| x[1] == 34 && x[2] == 6), "pool variables in set 6");
-        assert!(has(OP_CONSTANT, &|x| x[0] == 7 && x[2] == 5), "first handle word");
+        let has = |op: u32, f: &dyn Fn(&[u32]) -> bool| {
+            v.iter()
+                .any(|&(at, o2, n)| o2 == op && f(&o[at + 1..at + n]))
+        };
+        assert!(
+            !has(OP_VARIABLE, &|x| x[1] == 15),
+            "the table variable is gone"
+        );
+        assert!(
+            !has(OP_ACCESS_CHAIN, &|x| x[2] == 15),
+            "no element pointer into it"
+        );
+        assert!(
+            has(86, &|x| x[0] == 11 && x[1] == 42),
+            "the load's result is an OpSampledImage now"
+        );
+        assert!(
+            has(OP_ACCESS_CHAIN, &|x| x[2] == 22 && x.len() == 6),
+            "the handle read from the constant buffer"
+        );
+        assert!(
+            has(OP_DECORATE, &|x| x[1] == 34 && x[2] == 6),
+            "pool variables in set 6"
+        );
+        assert!(
+            has(OP_CONSTANT, &|x| x[0] == 7 && x[2] == 5),
+            "first handle word"
+        );
         assert!(o[3] > w[3]);
         // a table passed whole to something else: not rewritten
         let mut w2 = w.clone();
@@ -1628,8 +1992,66 @@ mod tests {
         assert!(needs_trim(&w, 8));
         let t = trim_cull(&w, 8).expect("trimmed");
         assert!(!needs_trim(&t, 8));
-        assert_eq!(t.len(), w.len() - 1 - 5, "struct one word shorter, the cull member decoration gone");
+        assert_eq!(
+            t.len(),
+            w.len() - 1 - 5,
+            "struct one word shorter, the cull member decoration gone"
+        );
         assert!(trim_cull(&w, 9).is_none(), "within the limit: unchanged");
+    }
+
+    #[test]
+    fn cull_member_trimmed_from_both_geometry_blocks() {
+        let w = module_with_two_blocks();
+        assert!(needs_trim(&w, 8));
+        let t = trim_cull(&w, 8).expect("both blocks trimmed");
+        assert!(!needs_trim(&t, 8));
+        let blocks = walk(&t)
+            .unwrap()
+            .into_iter()
+            .filter(|&(i, op, _)| op == OP_TYPE_STRUCT && (t[i + 1] == 10 || t[i + 1] == 32))
+            .collect::<Vec<_>>();
+        assert_eq!(blocks.len(), 2);
+        assert!(
+            blocks.iter().all(|&(_, _, n)| n == 4),
+            "both structs lost their trailing cull member"
+        );
+        assert!(!walk(&t).unwrap().iter().any(|&(i, op, n)| {
+            (op == OP_MEMBER_DECORATE || op == OP_MEMBER_NAME)
+                && n >= 3
+                && (t[i + 1] == 10 || t[i + 1] == 32)
+                && t[i + 2] == 2
+        }));
+    }
+
+    #[test]
+    #[ignore]
+    fn trim_cull_file_passes_spirv_val() {
+        let path = std::env::var("NXSHADERS_TEST_CULL_SPV").expect("NXSHADERS_TEST_CULL_SPV");
+        let validator = std::env::var("NXSHADERS_SPIRV_VAL").unwrap_or_else(|_| "spirv-val".into());
+        let bytes = std::fs::read(path).unwrap();
+        assert_eq!(bytes.len() % 4, 0);
+        let words: Vec<u32> = bytes
+            .chunks_exact(4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .collect();
+        let trimmed = trim_cull(&words, 8).expect("over-limit unused cull declarations trimmed");
+        assert!(!needs_trim(&trimmed, 8));
+        let output =
+            std::env::temp_dir().join(format!("nxshaders-trim-cull-{}.spv", std::process::id()));
+        let bytes: Vec<u8> = trimmed.iter().flat_map(|w| w.to_le_bytes()).collect();
+        std::fs::write(&output, bytes).unwrap();
+        let result = std::process::Command::new(validator)
+            .args(["--target-env", "vulkan1.3"])
+            .arg(&output)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_file(output);
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
     }
 
     #[test]
@@ -1658,21 +2080,50 @@ mod tests {
         assert_eq!(output_kinds(&o)[0], Some(1), "signed");
         let o = int_outputs(&w, &[1, 0, 0, 0, 0, 0, 0, 0]).expect("variant");
         assert_eq!(output_kinds(&o)[0], Some(2), "unsigned");
-        assert!(int_outputs(&w, &[0, 2, 0, 0, 0, 0, 0, 0]).is_none(), "no output at location 1");
+        assert!(
+            int_outputs(&w, &[0, 2, 0, 0, 0, 0, 0, 0]).is_none(),
+            "no output at location 1"
+        );
     }
 
     #[test]
     fn missing_outputs_are_added() {
         let w = module();
         let outs = io_locations(&w, true);
-        assert_eq!(outs, vec![Varying { location: 0, component: 0, kind: 0, components: 4 }]);
-        let want = [Varying { location: 0, component: 0, kind: 0, components: 4 }, Varying { location: 3, component: 0, kind: 2, components: 2 }];
+        assert_eq!(
+            outs,
+            vec![Varying {
+                location: 0,
+                component: 0,
+                kind: 0,
+                components: 4
+            }]
+        );
+        let want = [
+            Varying {
+                location: 0,
+                component: 0,
+                kind: 0,
+                components: 4,
+            },
+            Varying {
+                location: 3,
+                component: 0,
+                kind: 2,
+                components: 2,
+            },
+        ];
         let m = missing(&outs, &want);
         assert_eq!(m.len(), 1);
         let a = add_outputs(&w, &m).expect("added");
         let o2 = io_locations(&a, true);
         assert_eq!(o2.len(), 2);
-        assert!(o2.contains(&Varying { location: 3, component: 0, kind: 2, components: 2 }));
+        assert!(o2.contains(&Varying {
+            location: 3,
+            component: 0,
+            kind: 2,
+            components: 2
+        }));
         assert!(missing(&o2, &want).is_empty());
     }
 }

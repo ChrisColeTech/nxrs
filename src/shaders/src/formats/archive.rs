@@ -14,13 +14,23 @@ pub const DECODE_LIMIT: u64 = 1 << 32;
 /// Yaz0: group header bits, 1 = a literal byte, 0 = a back-reference {length nibble, 12-bit distance + 1}; length 0
 /// reads one more byte + 0x12, else + 2.
 pub fn yaz0(s: &[u8], label: &str) -> R<Vec<u8>> {
-    let n = u32::from_be_bytes(s.get(4..8).ok_or_else(|| format!("{label}: a Yaz0 header cut short"))?.try_into().unwrap()) as usize;
+    let n = u32::from_be_bytes(
+        s.get(4..8)
+            .ok_or_else(|| format!("{label}: a Yaz0 header cut short"))?
+            .try_into()
+            .unwrap(),
+    ) as usize;
     if n as u64 > DECODE_LIMIT {
         return Err(format!("{label}: a Yaz0 stream of {n:#x} bytes"));
     }
     let mut out: Vec<u8> = Vec::with_capacity(n);
     let mut si = 16usize;
-    let cut = |len: usize| format!("{label}: the Yaz0 stream ends at {:#x} with {len:#x} of its {n:#x} bytes decoded", s.len());
+    let cut = |len: usize| {
+        format!(
+            "{label}: the Yaz0 stream ends at {:#x} with {len:#x} of its {n:#x} bytes decoded",
+            s.len()
+        )
+    };
     while out.len() < n {
         let mut h = *s.get(si).ok_or_else(|| cut(out.len()))?;
         si += 1;
@@ -29,7 +39,10 @@ pub fn yaz0(s: &[u8], label: &str) -> R<Vec<u8>> {
                 out.push(*s.get(si).ok_or_else(|| cut(out.len()))?);
                 si += 1;
             } else {
-                let (b1, b2) = (*s.get(si).ok_or_else(|| cut(out.len()))?, *s.get(si + 1).ok_or_else(|| cut(out.len()))?);
+                let (b1, b2) = (
+                    *s.get(si).ok_or_else(|| cut(out.len()))?,
+                    *s.get(si + 1).ok_or_else(|| cut(out.len()))?,
+                );
                 si += 2;
                 let dist = (((b1 & 15) as usize) << 8 | b2 as usize) + 1;
                 let ln = if b1 >> 4 != 0 {
@@ -39,7 +52,9 @@ pub fn yaz0(s: &[u8], label: &str) -> R<Vec<u8>> {
                     si += 1;
                     x
                 };
-                let st = out.len().checked_sub(dist).ok_or_else(|| format!("{label}: a back-reference at {si:#x} reaches before the start"))?;
+                let st = out.len().checked_sub(dist).ok_or_else(|| {
+                    format!("{label}: a back-reference at {si:#x} reaches before the start")
+                })?;
                 for i in 0..ln {
                     out.push(out[st + i]);
                 }
@@ -66,7 +81,11 @@ pub fn sarc_members<'a>(d: &'a [u8], label: &str) -> R<Vec<(String, &'a [u8])>> 
     let mut out = Vec::with_capacity(n);
     for i in 0..n {
         let e = hl + 12 + 16 * i;
-        let (attr, s, en) = (u32_at(d, e + 4).unwrap(), u32_at(d, e + 8).unwrap() as usize, u32_at(d, e + 12).unwrap() as usize);
+        let (attr, s, en) = (
+            u32_at(d, e + 4).unwrap(),
+            u32_at(d, e + 8).unwrap() as usize,
+            u32_at(d, e + 12).unwrap() as usize,
+        );
         if !(s <= en && en <= d.len() - doff) {
             return Err(format!("{label}: SARC member {i} at {s:#x}..{en:#x} of the data lies outside its {:#x} bytes", d.len() - doff));
         }
@@ -97,7 +116,8 @@ impl ZstdDicts {
         for (_, m) in sarc_members(&sarc, label)? {
             if m.len() >= 8 && m[..4] == ZSDIC_MAGIC {
                 let id = u32_at(m, 4).unwrap();
-                d.prepared.insert(id, zstd::dict::DecoderDictionary::copy(m));
+                d.prepared
+                    .insert(id, zstd::dict::DecoderDictionary::copy(m));
                 d.raw.insert(id, m.to_vec());
             }
         }
@@ -128,9 +148,14 @@ pub fn zstd_dict_id(d: &[u8]) -> u32 {
 
 fn read_limited(mut r: impl Read, label: &str) -> R<Vec<u8>> {
     let mut out = vec![];
-    (&mut r).take(DECODE_LIMIT + 1).read_to_end(&mut out).map_err(|e| format!("{label}: zstd: {e}"))?;
+    (&mut r)
+        .take(DECODE_LIMIT + 1)
+        .read_to_end(&mut out)
+        .map_err(|e| format!("{label}: zstd: {e}"))?;
     if out.len() as u64 > DECODE_LIMIT {
-        return Err(format!("{label}: a zstd stream past {DECODE_LIMIT:#x} bytes"));
+        return Err(format!(
+            "{label}: a zstd stream past {DECODE_LIMIT:#x} bytes"
+        ));
     }
     Ok(out)
 }
@@ -139,20 +164,28 @@ fn read_limited(mut r: impl Read, label: &str) -> R<Vec<u8>> {
 pub fn unzstd(d: &[u8], dicts: &ZstdDicts, label: &str) -> R<Vec<u8>> {
     let did = zstd_dict_id(d);
     if did == 0 {
-        let mut dec = zstd::stream::read::Decoder::with_buffer(d).map_err(|e| format!("{label}: zstd: {e}"))?;
-        dec.window_log_max(31).map_err(|e| format!("{label}: zstd: {e}"))?;
+        let mut dec = zstd::stream::read::Decoder::with_buffer(d)
+            .map_err(|e| format!("{label}: zstd: {e}"))?;
+        dec.window_log_max(31)
+            .map_err(|e| format!("{label}: zstd: {e}"))?;
         return read_limited(dec, label);
     }
-    let dict = dicts.prepared.get(&did).ok_or_else(|| format!("{label}: a frame needs zstd dictionary {did}, which the game does not ship"))?;
-    let mut dec = zstd::stream::read::Decoder::with_prepared_dictionary(d, dict).map_err(|e| format!("{label}: zstd: {e}"))?;
-    dec.window_log_max(31).map_err(|e| format!("{label}: zstd: {e}"))?;
+    let dict = dicts.prepared.get(&did).ok_or_else(|| {
+        format!("{label}: a frame needs zstd dictionary {did}, which the game does not ship")
+    })?;
+    let mut dec = zstd::stream::read::Decoder::with_prepared_dictionary(d, dict)
+        .map_err(|e| format!("{label}: zstd: {e}"))?;
+    dec.window_log_max(31)
+        .map_err(|e| format!("{label}: zstd: {e}"))?;
     read_limited(dec, label)
 }
 
 /// One zstd frame at the start of `d`, decoded, and its compressed length.
 pub fn zstd_frame(d: &[u8]) -> Option<(Vec<u8>, usize)> {
     let n = zstd::zstd_safe::find_frame_compressed_size(d).ok()?;
-    let mut dec = zstd::stream::read::Decoder::with_buffer(&d[..n]).ok()?.single_frame();
+    let mut dec = zstd::stream::read::Decoder::with_buffer(&d[..n])
+        .ok()?
+        .single_frame();
     dec.window_log_max(31).ok()?;
     let mut out = vec![];
     dec.take(DECODE_LIMIT).read_to_end(&mut out).ok()?;
@@ -161,7 +194,9 @@ pub fn zstd_frame(d: &[u8]) -> Option<(Vec<u8>, usize)> {
 
 /// The first `n` decoded bytes of the zstd frame at the start of `d` (a peek: a damaged frame gives None).
 pub fn zstd_peek(d: &[u8], n: usize) -> Option<Vec<u8>> {
-    let mut dec = zstd::stream::read::Decoder::with_buffer(d).ok()?.single_frame();
+    let mut dec = zstd::stream::read::Decoder::with_buffer(d)
+        .ok()?
+        .single_frame();
     dec.window_log_max(31).ok()?;
     let mut out = vec![0u8; n];
     let mut got = 0;
@@ -188,7 +223,11 @@ pub fn unzlib(d: &[u8], label: &str) -> R<Vec<u8>> {
 /// The uncompressed size a zstd or LZ4 frame header records.
 fn frame_size(f: &[u8]) -> Option<u64> {
     if f.get(..4) == Some(&LZ4_FRAME_MAGIC[..]) {
-        return if f.len() > 14 && f[4] & 8 != 0 { u64_at(f, 6) } else { None };
+        return if f.len() > 14 && f[4] & 8 != 0 {
+            u64_at(f, 6)
+        } else {
+            None
+        };
     }
     let fhd = *f.get(4)?;
     let single = ((fhd >> 5) & 1) as usize;
@@ -206,7 +245,12 @@ fn frame_size(f: &[u8]) -> Option<u64> {
 
 /// A size-prefixed frame (HAL's .cmp containers): a u32 size, then a zstd or LZ4 frame. Bytes whose frame records
 /// another size are not such a container and come back as they are; so does a frame that does not open (reported).
-pub fn size_prefixed<'a>(d: &'a [u8], dicts: &ZstdDicts, label: &str, problems: &mut Vec<String>) -> std::borrow::Cow<'a, [u8]> {
+pub fn size_prefixed<'a>(
+    d: &'a [u8],
+    dicts: &ZstdDicts,
+    label: &str,
+    problems: &mut Vec<String>,
+) -> std::borrow::Cow<'a, [u8]> {
     let n = u32_at(d, 0).unwrap_or(0) as u64;
     let f = &d[4.min(d.len())..];
     match frame_size(f) {
@@ -215,7 +259,11 @@ pub fn size_prefixed<'a>(d: &'a [u8], dicts: &ZstdDicts, label: &str, problems: 
     }
     let dec = if f.get(..4) == Some(&LZ4_FRAME_MAGIC[..]) {
         let mut out = vec![];
-        lz4_flex::frame::FrameDecoder::new(f).take(DECODE_LIMIT).read_to_end(&mut out).map(|_| out).map_err(|e| e.to_string())
+        lz4_flex::frame::FrameDecoder::new(f)
+            .take(DECODE_LIMIT)
+            .read_to_end(&mut out)
+            .map(|_| out)
+            .map_err(|e| e.to_string())
     } else {
         unzstd(f, dicts, label)
     };
@@ -226,7 +274,9 @@ pub fn size_prefixed<'a>(d: &'a [u8], dicts: &ZstdDicts, label: &str, problems: 
             d.into()
         }
         Err(e) => {
-            problems.push(format!("{label}: a size-prefixed frame that did not open ({e}): the file is read as it is"));
+            problems.push(format!(
+                "{label}: a size-prefixed frame that did not open ({e}): the file is read as it is"
+            ));
             d.into()
         }
     }
@@ -239,7 +289,8 @@ pub fn oodle(comp: &[u8], n: usize, label: &str) -> R<Vec<u8>> {
         return Err(format!("{label}: an Oodle stream of {n:#x} bytes"));
     }
     let mut out = vec![0u8; n];
-    lztans::decode(comp, &mut out).map_err(|e| format!("{label}: Oodle: the stream does not decode ({e})"))?;
+    lztans::decode(comp, &mut out)
+        .map_err(|e| format!("{label}: Oodle: the stream does not decode ({e})"))?;
     Ok(out)
 }
 
@@ -249,7 +300,10 @@ pub fn crilayla(c: &[u8]) -> R<Vec<u8>> {
     if c.get(..8) != Some(b"CRILAYLA") {
         return Err("not CRILAYLA".into());
     }
-    let (usz, csz) = (u32_at(c, 8).unwrap_or(0) as usize, u32_at(c, 12).unwrap_or(0) as usize);
+    let (usz, csz) = (
+        u32_at(c, 8).unwrap_or(0) as usize,
+        u32_at(c, 12).unwrap_or(0) as usize,
+    );
     if 0x10 + csz + 0x100 > c.len() {
         return Err("CRILAYLA: the stream is cut short".into());
     }
@@ -343,9 +397,25 @@ pub fn utf(d: &[u8]) -> R<(String, Vec<HashMap<String, UtfVal>>)> {
     if d.get(..4) != Some(b"@UTF") {
         return Err("no @UTF table".into());
     }
-    let be16 = |o: usize| -> R<usize> { d.get(o..o + 2).map(|s| u16::from_be_bytes([s[0], s[1]]) as usize).ok_or_else(|| "@UTF cut short".to_string()) };
-    let be32 = |o: usize| -> R<usize> { d.get(o..o + 4).map(|s| u32::from_be_bytes(s.try_into().unwrap()) as usize).ok_or_else(|| "@UTF cut short".to_string()) };
-    let (ro, so, dof, tn, nc, rw, nr) = (be16(10)?, be32(12)?, be32(16)?, be32(20)?, be16(24)?, be16(26)?, be32(28)?);
+    let be16 = |o: usize| -> R<usize> {
+        d.get(o..o + 2)
+            .map(|s| u16::from_be_bytes([s[0], s[1]]) as usize)
+            .ok_or_else(|| "@UTF cut short".to_string())
+    };
+    let be32 = |o: usize| -> R<usize> {
+        d.get(o..o + 4)
+            .map(|s| u32::from_be_bytes(s.try_into().unwrap()) as usize)
+            .ok_or_else(|| "@UTF cut short".to_string())
+    };
+    let (ro, so, dof, tn, nc, rw, nr) = (
+        be16(10)?,
+        be32(12)?,
+        be32(16)?,
+        be32(20)?,
+        be16(24)?,
+        be16(26)?,
+        be32(28)?,
+    );
     let b = 8;
     let sz = |off: usize| -> R<String> {
         let s = d.get(b + so + off..).ok_or("@UTF string out of range")?;
@@ -353,21 +423,59 @@ pub fn utf(d: &[u8]) -> R<(String, Vec<HashMap<String, UtfVal>>)> {
         Ok(String::from_utf8_lossy(&s[..z]).into_owned())
     };
     let val = |t: u8, p: usize| -> R<(UtfVal, usize)> {
-        let g = |n: usize| d.get(p..p + n).ok_or_else(|| "@UTF value out of range".to_string());
+        let g = |n: usize| {
+            d.get(p..p + n)
+                .ok_or_else(|| "@UTF value out of range".to_string())
+        };
         Ok(match t {
             0 => (UtfVal::Int(g(1)?[0] as i128), 1),
             1 => (UtfVal::Int(g(1)?[0] as i8 as i128), 1),
-            2 => (UtfVal::Int(u16::from_be_bytes(g(2)?.try_into().unwrap()) as i128), 2),
-            3 => (UtfVal::Int(i16::from_be_bytes(g(2)?.try_into().unwrap()) as i128), 2),
-            4 => (UtfVal::Int(u32::from_be_bytes(g(4)?.try_into().unwrap()) as i128), 4),
-            5 => (UtfVal::Int(i32::from_be_bytes(g(4)?.try_into().unwrap()) as i128), 4),
-            6 => (UtfVal::Int(u64::from_be_bytes(g(8)?.try_into().unwrap()) as i128), 8),
-            7 => (UtfVal::Int(i64::from_be_bytes(g(8)?.try_into().unwrap()) as i128), 8),
-            8 => (UtfVal::Float(f32::from_be_bytes(g(4)?.try_into().unwrap())), 4),
-            0xa => (UtfVal::Str(sz(u32::from_be_bytes(g(4)?.try_into().unwrap()) as usize)?), 4),
+            2 => (
+                UtfVal::Int(u16::from_be_bytes(g(2)?.try_into().unwrap()) as i128),
+                2,
+            ),
+            3 => (
+                UtfVal::Int(i16::from_be_bytes(g(2)?.try_into().unwrap()) as i128),
+                2,
+            ),
+            4 => (
+                UtfVal::Int(u32::from_be_bytes(g(4)?.try_into().unwrap()) as i128),
+                4,
+            ),
+            5 => (
+                UtfVal::Int(i32::from_be_bytes(g(4)?.try_into().unwrap()) as i128),
+                4,
+            ),
+            6 => (
+                UtfVal::Int(u64::from_be_bytes(g(8)?.try_into().unwrap()) as i128),
+                8,
+            ),
+            7 => (
+                UtfVal::Int(i64::from_be_bytes(g(8)?.try_into().unwrap()) as i128),
+                8,
+            ),
+            8 => (
+                UtfVal::Float(f32::from_be_bytes(g(4)?.try_into().unwrap())),
+                4,
+            ),
+            0xa => (
+                UtfVal::Str(sz(u32::from_be_bytes(g(4)?.try_into().unwrap()) as usize)?),
+                4,
+            ),
             0xb => {
-                let (a, n) = (u32::from_be_bytes(g(4)?.try_into().unwrap()) as usize, u32::from_be_bytes(d.get(p + 4..p + 8).ok_or("@UTF")?.try_into().unwrap()) as usize);
-                (UtfVal::Data(d.get(b + dof + a..b + dof + a + n).ok_or("@UTF data out of range")?.to_vec()), 8)
+                let (a, n) = (
+                    u32::from_be_bytes(g(4)?.try_into().unwrap()) as usize,
+                    u32::from_be_bytes(d.get(p + 4..p + 8).ok_or("@UTF")?.try_into().unwrap())
+                        as usize,
+                );
+                (
+                    UtfVal::Data(
+                        d.get(b + dof + a..b + dof + a + n)
+                            .ok_or("@UTF data out of range")?
+                            .to_vec(),
+                    ),
+                    8,
+                )
             }
             _ => return Err(format!("@UTF column type {t:#x}")),
         })
@@ -415,20 +523,29 @@ pub fn utf(d: &[u8]) -> R<(String, Vec<HashMap<String, UtfVal>>)> {
 }
 
 /// A CPK's files: (path, offset, stored length, length), by its TOC.
-pub fn cpk_files(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, file_size: u64) -> R<Vec<(String, u64, u64, u64)>> {
+pub fn cpk_files(
+    read: &dyn Fn(u64, u64) -> R<Vec<u8>>,
+    file_size: u64,
+) -> R<Vec<(String, u64, u64, u64)>> {
     let h = read(0, 0x800.min(file_size))?;
     if h.get(..4) != Some(b"CPK ") {
         return Err("not a CPK".into());
     }
     let n = need32(&h, 8, "CPK header")? as usize;
-    let h = if 0x10 + n > h.len() { read(0, (0x10 + n) as u64)? } else { h };
+    let h = if 0x10 + n > h.len() {
+        read(0, (0x10 + n) as u64)?
+    } else {
+        h
+    };
     let (_, hd) = utf(&utf_at(&h, 0x10, n))?;
     let hd = hd.into_iter().next().ok_or("CPK header has no row")?;
     let int = |r: &HashMap<String, UtfVal>, k: &str| match r.get(k) {
         Some(UtfVal::Int(v)) => Some(*v as u64),
         _ => None,
     };
-    let toc = int(&hd, "TocOffset").filter(|&t| t != 0).ok_or("no TOC (ITOC only is not read)")?;
+    let toc = int(&hd, "TocOffset")
+        .filter(|&t| t != 0)
+        .ok_or("no TOC (ITOC only is not read)")?;
     let ctt = int(&hd, "ContentOffset");
     let t = read(toc, 0x10)?;
     if t.get(..4) != Some(b"TOC ") {
@@ -449,7 +566,11 @@ pub fn cpk_files(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, file_size: u64) -> R<Vec
             _ => String::new(),
         };
         let dir = s("DirName");
-        let nm = if dir.is_empty() { s("FileName") } else { format!("{dir}/{}", s("FileName")) };
+        let nm = if dir.is_empty() {
+            s("FileName")
+        } else {
+            format!("{dir}/{}", s("FileName"))
+        };
         let off = int(&r, "FileOffset").ok_or("TOC row without FileOffset")?;
         let csz = int(&r, "FileSize").ok_or("TOC row without FileSize")?;
         let usz = int(&r, "ExtractSize").unwrap_or(csz);
@@ -460,7 +581,11 @@ pub fn cpk_files(read: &dyn Fn(u64, u64) -> R<Vec<u8>>, file_size: u64) -> R<Vec
 
 /// A CPK entry's bytes: CRILAYLA-decoded when compressed.
 pub fn cpk_entry(raw: Vec<u8>, usz: u64, label: &str) -> R<Vec<u8>> {
-    let d = if raw.len() as u64 != usz || raw.get(..8) == Some(b"CRILAYLA") { crilayla(&raw).map_err(|e| format!("{label}: {e}"))? } else { raw };
+    let d = if raw.len() as u64 != usz || raw.get(..8) == Some(b"CRILAYLA") {
+        crilayla(&raw).map_err(|e| format!("{label}: {e}"))?
+    } else {
+        raw
+    };
     if d.len() as u64 != usz {
         return Err(format!("{label}: {} bytes, the TOC says {usz}", d.len()));
     }
@@ -523,7 +648,10 @@ pub(crate) mod tests {
 
     #[test]
     fn yaz0_literals_and_backrefs() {
-        assert_eq!(yaz0(&make_yaz0(b"hello world!"), "t").unwrap(), b"hello world!");
+        assert_eq!(
+            yaz0(&make_yaz0(b"hello world!"), "t").unwrap(),
+            b"hello world!"
+        );
         // "ab" then a back-reference of 6 bytes at distance 2: "abababab"
         let mut d = b"Yaz0".to_vec();
         d.extend_from_slice(&8u32.to_be_bytes());
@@ -537,15 +665,26 @@ pub(crate) mod tests {
     fn sarc_names() {
         let s = make_sarc(&[("a/b.bin", b"xyz"), ("c", b"12345")]);
         let m = sarc_members(&s, "t").unwrap();
-        assert_eq!(m, vec![("a/b.bin".to_string(), &b"xyz"[..]), ("c".to_string(), &b"12345"[..])]);
+        assert_eq!(
+            m,
+            vec![
+                ("a/b.bin".to_string(), &b"xyz"[..]),
+                ("c".to_string(), &b"12345"[..])
+            ]
+        );
     }
 
     #[test]
     fn zstd_with_and_without_dictionary() {
         let plain = zstd::bulk::compress(b"shader shader shader", 3).unwrap();
-        assert_eq!(unzstd(&plain, &ZstdDicts::default(), "t").unwrap(), b"shader shader shader");
+        assert_eq!(
+            unzstd(&plain, &ZstdDicts::default(), "t").unwrap(),
+            b"shader shader shader"
+        );
         // a dictionary-compressed frame names its dictionary; without it the frame is refused
-        let samples: Vec<Vec<u8>> = (0..64).map(|i| format!("control section {i} code area {}", i * 7).into_bytes()).collect();
+        let samples: Vec<Vec<u8>> = (0..64)
+            .map(|i| format!("control section {i} code area {}", i * 7).into_bytes())
+            .collect();
         let dict = zstd::dict::from_samples(&samples, 4096).unwrap();
         let mut c = zstd::bulk::Compressor::with_dictionary(3, &dict).unwrap();
         let framed = c.compress(b"control section 5 code area 35").unwrap();
@@ -554,11 +693,17 @@ pub(crate) mod tests {
         assert!(unzstd(&framed, &ZstdDicts::default(), "t").is_err());
         let mut zsdic = ZSDIC_MAGIC.to_vec();
         zsdic.extend_from_slice(&dict[4..]);
-        assert_eq!(&zsdic, &dict, "a zstd dictionary starts with the .zsdic magic");
+        assert_eq!(
+            &zsdic, &dict,
+            "a zstd dictionary starts with the .zsdic magic"
+        );
         let pack = zstd::bulk::compress(&make_sarc(&[("x.zsdic", &dict)]), 3).unwrap();
         let dicts = ZstdDicts::from_pack(&pack, "ZsDic").unwrap();
         assert_eq!(dicts.len(), 1);
-        assert_eq!(unzstd(&framed, &dicts, "t").unwrap(), b"control section 5 code area 35");
+        assert_eq!(
+            unzstd(&framed, &dicts, "t").unwrap(),
+            b"control section 5 code area 35"
+        );
     }
 
     #[test]
@@ -567,10 +712,16 @@ pub(crate) mod tests {
         let mut d = (body.len() as u32).to_le_bytes().to_vec();
         d.extend(zstd::bulk::compress(&body, 3).unwrap());
         let mut p = vec![];
-        assert_eq!(&*size_prefixed(&d, &ZstdDicts::default(), "t", &mut p), &body[..]);
+        assert_eq!(
+            &*size_prefixed(&d, &ZstdDicts::default(), "t", &mut p),
+            &body[..]
+        );
         // a prefix that is not the frame's size: the bytes as they are
         d[0] ^= 1;
-        assert_eq!(&*size_prefixed(&d, &ZstdDicts::default(), "t", &mut p), &d[..]);
+        assert_eq!(
+            &*size_prefixed(&d, &ZstdDicts::default(), "t", &mut p),
+            &d[..]
+        );
     }
 
     #[test]
@@ -587,7 +738,10 @@ pub(crate) mod tests {
         while bitsv.len() % 8 != 0 {
             bitsv.push(0);
         }
-        let bytes: Vec<u8> = bitsv.chunks(8).map(|c| c.iter().fold(0, |a, &x| a << 1 | x)).collect();
+        let bytes: Vec<u8> = bitsv
+            .chunks(8)
+            .map(|c| c.iter().fold(0, |a, &x| a << 1 | x))
+            .collect();
         // bits are read from the last byte backwards
         let comp: Vec<u8> = bytes.iter().rev().cloned().collect();
         let mut c = b"CRILAYLA".to_vec();

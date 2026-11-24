@@ -39,7 +39,17 @@ pub struct Options {
 
 impl Default for Options {
     fn default() -> Self {
-        Options { keys: None, update: UpdateChoice::Embedded, jobs: 4, scan_jobs: 8, scan_only: false, limit: None, job: JobOptions::default(), batch: 64, facts_dir: None }
+        Options {
+            keys: None,
+            update: UpdateChoice::Embedded,
+            jobs: 4,
+            scan_jobs: 8,
+            scan_only: false,
+            limit: None,
+            job: JobOptions::default(),
+            batch: 64,
+            facts_dir: None,
+        }
     }
 }
 
@@ -76,7 +86,10 @@ fn sha_hex(parts: &[&[u8]]) -> String {
         h.update(p);
         h.update([0u8]);
     }
-    h.finalize()[..12].iter().map(|b| format!("{b:02x}")).collect()
+    h.finalize()[..12]
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 fn write_atomic(p: &Path, data: &[u8]) -> std::io::Result<()> {
@@ -85,13 +98,48 @@ fn write_atomic(p: &Path, data: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, p)
 }
 
+fn job_identity(chain: &str, json: &Map<String, Value>, code: &[u8], mesh_version: &str) -> String {
+    let mut json = json.clone();
+    json.remove("code");
+    sha_hex(&[chain.as_bytes(), crate::fixes::VERSION.as_bytes(), mesh_version.as_bytes(),
+        REFLECTION.as_bytes(), serde_json::to_string(&json).unwrap().as_bytes(), code])
+}
+
+/// The actual prebuild hit decision, before the Rust mesh wrapper is invoked.
+fn cached_status(previous: &Value, job_sha: &str, spv_len: usize) -> Option<String> {
+    if previous.get("job_sha").and_then(Value::as_str) != Some(job_sha)
+        || previous.get("layout").and_then(Value::as_str) != Some(LAYOUT) { return None; }
+    let status = previous.get("status").and_then(Value::as_str).unwrap_or("?");
+    (status != "ok" || spv_len > 0).then(|| status.to_string())
+}
+
+fn mesh_stage_output(bytes: &[u8], info: &Value, set: u32) -> Result<(Vec<u8>, crate::mesh::Info), String> {
+    crate::mesh::Info::from_json(info)
+        .and_then(|i| crate::mesh::to_stage(bytes, &i, set).map(|s| (s, i)))
+}
+
+fn publish_outcome(outcome: &Result<(), String>, validation: Option<String>,
+    load: impl FnOnce() -> Vec<u8>) -> (&'static str, Option<String>, Vec<u8>) {
+    match outcome {
+        Err(e) => ("failed", Some(e.clone()), Vec::new()),
+        Ok(()) => match validation {
+            None => ("ok", None, load()),
+            Some(e) => ("invalid", Some(e), load()),
+        },
+    }
+}
+
 /// The texture or image slot a c2 handle names (combined textures 0.., separate textures 128 + r, images 0..7);
 /// -1 when the handle is not in c2's tables.
 fn c2_slot(handle: i64, cbuf_slot: i64, image: bool) -> i64 {
     if cbuf_slot >= 0 && (cbuf_slot & 0xffff) != 2 {
         return -1;
     }
-    let (w0, w1, ty) = (handle & 0x3fff, (handle >> 14) & 0x3fff, (handle as u32 >> 28) as i64);
+    let (w0, w1, ty) = (
+        handle & 0x3fff,
+        (handle >> 14) & 0x3fff,
+        (handle as u32 >> 28) as i64,
+    );
     let words: &[i64] = if ty == 0 || ty == 2 { &[w0] } else { &[w0, w1] };
     for &w in words {
         let b = w * 4;
@@ -113,17 +161,39 @@ fn c2_slot(handle: i64, cbuf_slot: i64, image: bool) -> i64 {
 
 /// The reflection the graphics module reads: every descriptor binding with its Vulkan type and what the game binds
 /// there, plus the facts that are not in the SPIR-V.
-fn reflection(job: &job::Job, chain: &str, job_sha: &str, spv: &[u8], res: &Value, status: &str, why: Option<&str>) -> Value {
+fn reflection(
+    job: &job::Job,
+    chain: &str,
+    job_sha: &str,
+    spv: &[u8],
+    res: &Value,
+    status: &str,
+    why: Option<&str>,
+) -> Value {
     let m = reflect::reflect(spv);
     let mut by_binding: HashMap<i64, (String, Value)> = HashMap::new();
-    for (list, kind) in [("cbufs", "cbuf"), ("sbufs", "sbuf"), ("textures", "texture"), ("images", "image")] {
-        for e in res.get(list).and_then(Value::as_array).into_iter().flatten() {
+    for (list, kind) in [
+        ("cbufs", "cbuf"),
+        ("sbufs", "sbuf"),
+        ("textures", "texture"),
+        ("images", "image"),
+    ] {
+        for e in res
+            .get(list)
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
             if let Some(b) = e.get("binding").and_then(Value::as_i64) {
                 let mut e = e.clone();
                 if kind == "texture" || kind == "image" {
                     let h = e.get("handle").and_then(Value::as_i64).unwrap_or(-1);
                     let cs = e.get("cbuf_slot").and_then(Value::as_i64).unwrap_or(-1);
-                    e["slot"] = json!(if h >= 0 { c2_slot(h, cs, kind == "image") } else { -1 });
+                    e["slot"] = json!(if h >= 0 {
+                        c2_slot(h, cs, kind == "image")
+                    } else {
+                        -1
+                    });
                 }
                 by_binding.insert(b, (kind.to_string(), e));
             }
@@ -137,21 +207,38 @@ fn reflection(job: &job::Job, chain: &str, job_sha: &str, spv: &[u8], res: &Valu
             let mut o = json!({"set": b.set, "binding": b.binding, "type": b.kind, "count": b.count, "name": b.name});
             if b.set == 0 && b.binding == 0 && b.name == "support_buffer" {
                 o["resource"] = json!({"kind": "support"});
-            } else if job.stage == Stage::Rt && b.set == 0 && matches!(b.name.as_str(), "rt_scene" | "rt_dispatch" | "rt_errors" | "rt_instance_sbt") {
+            } else if job.stage == Stage::Rt
+                && b.set == 0
+                && matches!(
+                    b.name.as_str(),
+                    "rt_scene" | "rt_dispatch" | "rt_errors" | "rt_instance_sbt"
+                )
+            {
                 // the RT library's own resources (the translator's reserved set 0 bindings 1..4): the scene's
                 // acceleration structure, the dispatch parameters, the error words, the instance SBT records
                 o["resource"] = json!({"kind": b.name});
-            } else if b.name == crate::mesh::DRAW_BUFFER && b.kind == "storage_buffer" && job.extra.contains_key("mesh_draw") {
+            } else if b.name == crate::mesh::DRAW_BUFFER
+                && b.kind == "storage_buffer"
+                && job.extra.contains_key("mesh_draw")
+            {
                 // the draw's NVN records {count, first} (mesh.rs): word DrawIndex * stride + 1 is its first workgroup
                 o["resource"] = json!({"kind": "mesh_draw"});
-            } else if let Some((kind, e)) = by_binding.get(&(b.binding as i64)).filter(|_| b.set as u64 == set) {
+            } else if let Some((kind, e)) = by_binding
+                .get(&(b.binding as i64))
+                .filter(|_| b.set as u64 == set)
+            {
                 let mut r = e.clone();
                 r["kind"] = json!(kind);
                 if let Some(r) = r.as_object_mut() {
                     r.remove("binding");
                 }
                 o["resource"] = r;
-            } else if let Some(slot) = b.name.rsplit_once("_c").and_then(|(_, n)| n.parse::<u32>().ok()).filter(|_| b.kind == "uniform_buffer") {
+            } else if let Some(slot) = b
+                .name
+                .rsplit_once("_c")
+                .and_then(|(_, n)| n.parse::<u32>().ok())
+                .filter(|_| b.kind == "uniform_buffer")
+            {
                 // a constant bank the translator reads for itself (c0: NVN's driver segment with the storage buffer
                 // table), named <stage>_c<bank>
                 o["resource"] = json!({"kind": "cbuf", "slot": slot, "implicit": true});
@@ -161,11 +248,19 @@ fn reflection(job: &job::Job, chain: &str, job_sha: &str, spv: &[u8], res: &Valu
             let rt_own = job.stage == Stage::Rt && b.set == 0 && b.name.starts_with("rt_");
             // the RT library's banks are its own: c0 the core parameters (`coreParams`), c3 the descriptor arena
             // (`descriptorBaseArray`), as the link layout places them
-            if job.stage == Stage::Rt && b.kind == "uniform_buffer" && (b.name.ends_with("_c0") || b.name.ends_with("_c3")) {
-                o["resource"] = json!({"kind": if b.name.ends_with("_c0") { "rt_bank0" } else { "rt_bank3" }});
+            if job.stage == Stage::Rt
+                && b.kind == "uniform_buffer"
+                && (b.name.ends_with("_c0") || b.name.ends_with("_c3"))
+            {
+                o["resource"] =
+                    json!({"kind": if b.name.ends_with("_c0") { "rt_bank0" } else { "rt_bank3" }});
             }
-            if !(b.set == 0 && b.binding == 0) && !rt_own && (b.set as u64 != set || b.binding == 0) {
-                layout_problems.push(format!("binding {} in set {}, not the stage's set {set}", b.binding, b.set));
+            if !(b.set == 0 && b.binding == 0) && !rt_own && (b.set as u64 != set || b.binding == 0)
+            {
+                layout_problems.push(format!(
+                    "binding {} in set {}, not the stage's set {set}",
+                    b.binding, b.set
+                ));
             }
             bindings.push(o);
         }
@@ -175,7 +270,14 @@ fn reflection(job: &job::Job, chain: &str, job_sha: &str, spv: &[u8], res: &Valu
     r.insert("key".into(), json!(job.key));
     r.insert("stage".into(), json!(job.stage.name()));
     r.insert("translated_as".into(), json!(job.xlate_stage.name()));
-    r.insert("arch".into(), json!(if job.json.get("arch").is_some() { "sm86" } else { "maxwell" }));
+    r.insert(
+        "arch".into(),
+        json!(if job.json.get("arch").is_some() {
+            "sm86"
+        } else {
+            "maxwell"
+        }),
+    );
     r.insert("status".into(), json!(status));
     if let Some(w) = why {
         r.insert("why".into(), json!(w));
@@ -185,7 +287,10 @@ fn reflection(job: &job::Job, chain: &str, job_sha: &str, spv: &[u8], res: &Valu
     r.insert("set".into(), json!(set));
     if let Ok(m) = &m {
         r.insert("execution_model".into(), json!(m.execution_model));
-        r.insert("spirv_version".into(), json!(format!("{}.{}", m.version.0, m.version.1)));
+        r.insert(
+            "spirv_version".into(),
+            json!(format!("{}.{}", m.version.0, m.version.1)),
+        );
         r.insert("capabilities".into(), json!(m.capabilities));
         if let Some(ls) = m.local_size {
             r.insert("local_size".into(), json!(ls));
@@ -195,11 +300,20 @@ fn reflection(job: &job::Job, chain: &str, job_sha: &str, spv: &[u8], res: &Valu
     if !layout_problems.is_empty() {
         r.insert("layout_problems".into(), json!(layout_problems));
     }
-    r.insert("c1".into(), job.json.get("c1").cloned().unwrap_or(json!("")));
+    r.insert(
+        "c1".into(),
+        job.json.get("c1").cloned().unwrap_or(json!("")),
+    );
     for (k, v) in &job.extra {
         r.insert(k.clone(), v.clone());
     }
-    for k in ["uses_frag_coord", "frag_out_map", "geometry_stride", "fetch1d", "notes"] {
+    for k in [
+        "uses_frag_coord",
+        "frag_out_map",
+        "geometry_stride",
+        "fetch1d",
+        "notes",
+    ] {
         if let Some(v) = res.get(k) {
             r.insert(k.into(), v.clone());
         }
@@ -208,15 +322,33 @@ fn reflection(job: &job::Job, chain: &str, job_sha: &str, spv: &[u8], res: &Valu
 }
 
 /// Build the shaders of `input` (a folder, NSP or NUP; the update applied as `opts.update` says) into `out_dir`.
-pub fn prebuild(input: &Path, out_dir: &Path, opts: &Options, say: &(dyn Fn(&str) + Sync)) -> Result<Report, String> {
+pub fn prebuild(
+    input: &Path,
+    out_dir: &Path,
+    opts: &Options,
+    say: &(dyn Fn(&str) + Sync),
+) -> Result<Report, String> {
     let t0 = Instant::now();
-    let game = package::open_game(input, &OpenOptions { keys: opts.keys.clone(), update: opts.update.clone() }).map_err(|e| e.to_string())?;
+    let game = package::open_game(
+        input,
+        &OpenOptions {
+            keys: opts.keys.clone(),
+            update: opts.update.clone(),
+        },
+    )
+    .map_err(|e| e.to_string())?;
     let rep = scan::scan(&game.exefs.files, &game.romfs, opts.scan_jobs, say);
     build_from_scan(rep, out_dir, opts, say, t0)
 }
 
 /// The same for a game already open (`Game::exefs.files`, `Game::romfs`).
-pub fn prebuild_game(exefs: &BTreeMap<String, Vec<u8>>, romfs: &package::RomFs, out_dir: &Path, opts: &Options, say: &(dyn Fn(&str) + Sync)) -> Result<Report, String> {
+pub fn prebuild_game(
+    exefs: &BTreeMap<String, Vec<u8>>,
+    romfs: &package::RomFs,
+    out_dir: &Path,
+    opts: &Options,
+    say: &(dyn Fn(&str) + Sync),
+) -> Result<Report, String> {
     let t0 = Instant::now();
     let rep = scan::scan(exefs, romfs, opts.scan_jobs, say);
     build_from_scan(rep, out_dir, opts, say, t0)
@@ -224,14 +356,24 @@ pub fn prebuild_game(exefs: &BTreeMap<String, Vec<u8>>, romfs: &package::RomFs, 
 
 /// The same for a built game's data folder, as the build stages it (`Game::write_data`): reads `<data>/exefs/*`, the
 /// RomFS its marker names (`open_data_dir`) and the add-on content installed there (`dlc`), writes `<data>/shaders/`.
-pub fn prebuild_data(data: &Path, opts: &Options, say: &(dyn Fn(&str) + Sync)) -> Result<Report, String> {
+pub fn prebuild_data(
+    data: &Path,
+    opts: &Options,
+    say: &(dyn Fn(&str) + Sync),
+) -> Result<Report, String> {
     let t0 = Instant::now();
     let romfs = package::open_data_dir(data, opts.keys.as_deref()).map_err(|e| e.to_string())?;
     let mut exefs = BTreeMap::new();
     let dir = data.join("exefs");
-    for e in std::fs::read_dir(&dir).map_err(|e| format!("{}: {e}", dir.display()))?.flatten() {
+    for e in std::fs::read_dir(&dir)
+        .map_err(|e| format!("{}: {e}", dir.display()))?
+        .flatten()
+    {
         if e.path().is_file() {
-            exefs.insert(e.file_name().to_string_lossy().into_owned(), std::fs::read(e.path()).map_err(|x| format!("{}: {x}", e.path().display()))?);
+            exefs.insert(
+                e.file_name().to_string_lossy().into_owned(),
+                std::fs::read(e.path()).map_err(|x| format!("{}: {x}", e.path().display()))?,
+            );
         }
     }
     // installed add-on content (translator::package::dlc), each title's RomFS read in place
@@ -269,7 +411,17 @@ pub fn translate_one(ctl: &[u8], code: &[u8], out_dir: &Path) -> Result<String, 
     }
     let key = crate::nvn::skey(ctl, code);
     let mut shaders = BTreeMap::new();
-    shaders.insert(key.clone(), scan::Shader { key: key.clone(), stage, ctl: ctl.to_vec(), code: code.to_vec(), source: "live (set by the game at run time)".into(), copies: 1 });
+    shaders.insert(
+        key.clone(),
+        scan::Shader {
+            key: key.clone(),
+            stage,
+            ctl: ctl.to_vec(),
+            code: code.to_vec(),
+            source: "live (set by the game at run time)".into(),
+            copies: 1,
+        },
+    );
     let rep = ScanReport {
         shaders,
         pairs: Default::default(),
@@ -283,12 +435,19 @@ pub fn translate_one(ctl: &[u8], code: &[u8], out_dir: &Path) -> Result<String, 
         oodle_streams: 0,
     };
     // the profile's facts are in the shader folder (`<shaders>/profile`), beside the live translations' folder
-    let opts = Options { jobs: 1, facts_dir: out_dir.parent().map(|p| p.join("profile")), ..Default::default() };
+    let opts = Options {
+        jobs: 1,
+        facts_dir: out_dir.parent().map(|p| p.join("profile")),
+        ..Default::default()
+    };
     let r = build_from_scan(rep, &out_dir.join(&key), &opts, &|_| {}, Instant::now())?;
     if r.valid == 1 {
         Ok(key)
     } else {
-        Err(format!("translated {}, failed {}, invalid {}", r.translated, r.failed, r.invalid))
+        Err(format!(
+            "translated {}, failed {}, invalid {}",
+            r.translated, r.failed, r.invalid
+        ))
     }
 }
 
@@ -318,7 +477,13 @@ pub fn regressions(old: &str, new: &str) -> Vec<(String, String, String, String)
 pub static REGRESSIONS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Translate and write what a scan found (used by [`prebuild`]).
-pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(dyn Fn(&str) + Sync), t0: Instant) -> Result<Report, String> {
+pub fn build_from_scan(
+    scan: ScanReport,
+    out_dir: &Path,
+    opts: &Options,
+    say: &(dyn Fn(&str) + Sync),
+    t0: Instant,
+) -> Result<Report, String> {
     let mut report = Report {
         found: scan.shaders.len(),
         scan_problems: scan.problems.len(),
@@ -330,20 +495,43 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
         ..Default::default()
     };
     for s in scan.shaders.values() {
-        *report.by_stage.entry(s.stage.name().to_string()).or_default() += 1;
+        *report
+            .by_stage
+            .entry(s.stage.name().to_string())
+            .or_default() += 1;
     }
-    say(&format!("shaders: {} found in {:.1} s ({} files, {:.0} MB read, {} problems)", report.found, scan.seconds, scan.files, scan.bytes_read as f64 / 1e6, scan.problems.len()));
+    say(&format!(
+        "shaders: {} found in {:.1} s ({} files, {:.0} MB read, {} problems)",
+        report.found,
+        scan.seconds,
+        scan.files,
+        scan.bytes_read as f64 / 1e6,
+        scan.problems.len()
+    ));
     let io = |p: &Path, e: std::io::Error| format!("{}: {e}", p.display());
     let spv_dir = out_dir.join("spv");
-    let facts = crate::facts::load(&opts.facts_dir.clone().unwrap_or_else(|| out_dir.join("profile")));
+    let facts = crate::facts::load(
+        &opts
+            .facts_dir
+            .clone()
+            .unwrap_or_else(|| out_dir.join("profile")),
+    );
     if !facts.is_empty() {
-        say(&format!("shaders: {} keys have translation facts from the profile", facts.len()));
+        say(&format!(
+            "shaders: {} keys have translation facts from the profile",
+            facts.len()
+        ));
     }
     std::fs::create_dir_all(&spv_dir).map_err(|e| io(&spv_dir, e))?;
     let write_lists = |manifest_rows: &[String], report: &Report| -> Result<(), String> {
         let mut pairs = String::from("# vertex (or mesh) key\tpixel key\tkind (var: the same program variation; prog: an agl program's variation)\n");
         for p in &scan.pairs {
-            pairs += &format!("{}\t{}\t{}\n", p.first, p.pixel, if p.prog { "prog" } else { "var" });
+            pairs += &format!(
+                "{}\t{}\t{}\n",
+                p.first,
+                p.pixel,
+                if p.prog { "prog" } else { "var" }
+            );
         }
         write_atomic(&out_dir.join("pairs.tsv"), pairs.as_bytes()).map_err(|e| io(out_dir, e))?;
         let mut probs = String::new();
@@ -351,7 +539,8 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
             probs += p;
             probs += "\n";
         }
-        write_atomic(&out_dir.join("problems.txt"), probs.as_bytes()).map_err(|e| io(out_dir, e))?;
+        write_atomic(&out_dir.join("problems.txt"), probs.as_bytes())
+            .map_err(|e| io(out_dir, e))?;
         let mut m = format!("# {LAYOUT}\n# chain {}\n# found {} translated {} reused {} failed {} skipped {} valid {} invalid {}\n", report.chain, report.found, report.translated, report.reused, report.failed, report.skipped, report.valid, report.invalid);
         m += "key\tstage\ttranslated_as\tarch\tstatus\tspv_bytes\tsource\n";
         for r in manifest_rows {
@@ -367,13 +556,30 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
                     t += &format!("{k}\t{st}\t{a}\t{b}\n");
                 }
                 REGRESSIONS.store(reg.len(), std::sync::atomic::Ordering::Relaxed);
-                write_atomic(&out_dir.join("regressions.tsv"), t.as_bytes()).map_err(|e| io(out_dir, e))?;
+                write_atomic(&out_dir.join("regressions.tsv"), t.as_bytes())
+                    .map_err(|e| io(out_dir, e))?;
             }
         }
         write_atomic(&out_dir.join("manifest.tsv"), m.as_bytes()).map_err(|e| io(out_dir, e))
     };
     if opts.scan_only {
-        let rows: Vec<String> = scan.shaders.values().map(|s| format!("{}\t{}\t-\t{}\tfound\t0\t{}\n", s.key, s.stage, if crate::nvn::nvn2_ctl(&s.ctl) { "sm86" } else { "maxwell" }, s.source)).collect();
+        let rows: Vec<String> = scan
+            .shaders
+            .values()
+            .map(|s| {
+                format!(
+                    "{}\t{}\t-\t{}\tfound\t0\t{}\n",
+                    s.key,
+                    s.stage,
+                    if crate::nvn::nvn2_ctl(&s.ctl) {
+                        "sm86"
+                    } else {
+                        "maxwell"
+                    },
+                    s.source
+                )
+            })
+            .collect();
         report.total_seconds = t0.elapsed().as_secs_f64();
         write_lists(&rows, &report)?;
         return Ok(report);
@@ -400,8 +606,18 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
     let mut rows: BTreeMap<String, String> = BTreeMap::new();
     let mut work = vec![];
     let row = |s: &scan::Shader, j: Option<&job::Job>, status: &str, bytes: usize| {
-        let arch = if crate::nvn::nvn2_ctl(&s.ctl) { "sm86" } else { "maxwell" };
-        format!("{}\t{}\t{}\t{arch}\t{status}\t{bytes}\t{}\n", s.key, s.stage, j.map(|j| j.xlate_stage.name()).unwrap_or("-"), s.source)
+        let arch = if crate::nvn::nvn2_ctl(&s.ctl) {
+            "sm86"
+        } else {
+            "maxwell"
+        };
+        format!(
+            "{}\t{}\t{}\t{arch}\t{status}\t{bytes}\t{}\n",
+            s.key,
+            s.stage,
+            j.map(|j| j.xlate_stage.name()).unwrap_or("-"),
+            s.source
+        )
     };
     // ray-tracing modules: all of them linked into one library (rt.rs), translated as one compute kernel
     let mut rt_records: Vec<(String, Vec<u8>, Vec<u8>)> = vec![];
@@ -418,11 +634,43 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
                 extra.insert("local".into(), json!(crate::rt::LOCAL));
                 rt_catalog = Some(lib.manifest.clone());
                 let mut jj = Map::new();
-                for (k, v) in [("key", json!(crate::rt::KEY)), ("stage", json!("cs")), ("arch", json!("sm86")), ("local", json!(crate::rt::LOCAL)), ("tex", json!({})), ("img", json!({})), ("attr", json!({})), ("fout", json!({})), ("c1", json!("")), ("debug", json!(opts.job.debug)), ("reduced", json!(opts.job.reduced)), ("target", json!("vulkan")), ("set", json!(job::stage_set(Stage::Rt))), ("rt", lib.rt.clone())] {
+                for (k, v) in [
+                    ("key", json!(crate::rt::KEY)),
+                    ("stage", json!("cs")),
+                    ("arch", json!("sm86")),
+                    ("local", json!(crate::rt::LOCAL)),
+                    ("tex", json!({})),
+                    ("img", json!({})),
+                    ("attr", json!({})),
+                    ("fout", json!({})),
+                    ("c1", json!("")),
+                    ("debug", json!(opts.job.debug)),
+                    ("reduced", json!(opts.job.reduced)),
+                    ("target", json!("vulkan")),
+                    ("set", json!(job::stage_set(Stage::Rt))),
+                    ("rt", lib.rt.clone()),
+                ] {
                     jj.insert(k.into(), v);
                 }
-                let j = job::Job { key: crate::rt::KEY.into(), stage: Stage::Rt, xlate_stage: Stage::Cs, code: lib.code.clone(), json: jj, extra };
-                rt_shader = Some(scan::Shader { key: crate::rt::KEY.into(), stage: Stage::Rt, ctl: vec![], code: lib.code, source: format!("the game's {} ray-tracing modules, linked", rt_records.len()), copies: rt_records.len() });
+                let j = job::Job {
+                    key: crate::rt::KEY.into(),
+                    stage: Stage::Rt,
+                    xlate_stage: Stage::Cs,
+                    code: lib.code.clone(),
+                    json: jj,
+                    extra,
+                };
+                rt_shader = Some(scan::Shader {
+                    key: crate::rt::KEY.into(),
+                    stage: Stage::Rt,
+                    ctl: vec![],
+                    code: lib.code,
+                    source: format!(
+                        "the game's {} ray-tracing modules, linked",
+                        rt_records.len()
+                    ),
+                    copies: rt_records.len(),
+                });
                 rt_job = Some(j);
             }
             Err(e) => rt_failed = Some(e),
@@ -445,14 +693,22 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
             if let Some(w) = why {
                 o["why"] = json!(w);
             }
-            write_atomic(&spv_dir.join(format!("{}.json", s.key)), serde_json::to_string_pretty(&o).unwrap().as_bytes()).map_err(|e| io(&spv_dir, e))?;
+            write_atomic(
+                &spv_dir.join(format!("{}.json", s.key)),
+                serde_json::to_string_pretty(&o).unwrap().as_bytes(),
+            )
+            .map_err(|e| io(&spv_dir, e))?;
             rows.insert(s.key.clone(), row(s, None, st, 0));
             continue;
         }
         let mut j = match job::job_for(&s.key, s.stage, &s.ctl, &s.code, opts.job) {
             Ok(j) => j,
             Err(e) => {
-                let st = if s.stage == Stage::Rt { "skipped" } else { "failed" };
+                let st = if s.stage == Stage::Rt {
+                    "skipped"
+                } else {
+                    "failed"
+                };
                 if s.stage == Stage::Rt {
                     report.skipped += 1;
                 } else {
@@ -472,15 +728,20 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
                 }
             }
         }
-        let mut jj = j.json.clone();
-        jj.remove("code");
-        let mesh_v = if j.extra.contains_key("mesh_stage") { crate::mesh::VERSION } else { "" };
-        let job_sha = sha_hex(&[chain.as_bytes(), crate::fixes::VERSION.as_bytes(), mesh_v.as_bytes(), REFLECTION.as_bytes(), serde_json::to_string(&jj).unwrap().as_bytes(), &j.code]);
-        let prev: Option<Value> = std::fs::read(spv_dir.join(format!("{}.json", s.key))).ok().and_then(|b| serde_json::from_slice(&b).ok());
-        if let Some(p) = prev.filter(|p| p.get("job_sha").and_then(Value::as_str) == Some(&job_sha) && p.get("layout").and_then(Value::as_str) == Some(LAYOUT)) {
-            let st = p.get("status").and_then(Value::as_str).unwrap_or("?").to_string();
-            let spv_len = std::fs::metadata(spv_dir.join(format!("{}.spv", s.key))).map(|m| m.len() as usize).unwrap_or(0);
-            if st == "ok" && spv_len > 0 || st != "ok" {
+        let mesh_v = if j.extra.contains_key("mesh_stage") {
+            crate::mesh::VERSION
+        } else {
+            ""
+        };
+        let job_sha = job_identity(&chain, &j.json, &j.code, mesh_v);
+        let prev: Option<Value> = std::fs::read(spv_dir.join(format!("{}.json", s.key)))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok());
+        if let Some(p) = prev {
+            let spv_len = std::fs::metadata(spv_dir.join(format!("{}.spv", s.key)))
+                .map(|m| m.len() as usize)
+                .unwrap_or(0);
+            if let Some(st) = cached_status(&p, &job_sha, spv_len) {
                 report.reused += 1;
                 match st.as_str() {
                     "ok" => report.valid += 1,
@@ -495,18 +756,39 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
         std::fs::write(&cp, &j.code).map_err(|e| io(&cp, e))?;
         let mut js = j.json.clone();
         js.insert("code".into(), json!(cp.to_string_lossy()));
-        work.push(Work { key: s.key.clone(), json: Value::Object(js) });
+        work.push(Work {
+            key: s.key.clone(),
+            json: Value::Object(js),
+        });
         jobs.insert(s.key.clone(), (j, job_sha));
     }
     if let (Some(j), Some(sh)) = (rt_job, rt_shader.as_ref()) {
         let mut jj = j.json.clone();
         jj.remove("code");
-        let job_sha = sha_hex(&[chain.as_bytes(), crate::rt::VERSION.as_bytes(), REFLECTION.as_bytes(), serde_json::to_string(&jj).unwrap().as_bytes(), &j.code]);
-        let prev: Option<Value> = std::fs::read(spv_dir.join(format!("{}.json", j.key))).ok().and_then(|b| serde_json::from_slice(&b).ok());
-        let spv_len = std::fs::metadata(spv_dir.join(format!("{}.spv", j.key))).map(|m| m.len() as usize).unwrap_or(0);
-        match prev.filter(|p| p.get("job_sha").and_then(Value::as_str) == Some(&job_sha) && p.get("layout").and_then(Value::as_str) == Some(LAYOUT) && (spv_len > 0 || p.get("status").and_then(Value::as_str) != Some("ok"))) {
+        let job_sha = sha_hex(&[
+            chain.as_bytes(),
+            crate::rt::VERSION.as_bytes(),
+            REFLECTION.as_bytes(),
+            serde_json::to_string(&jj).unwrap().as_bytes(),
+            &j.code,
+        ]);
+        let prev: Option<Value> = std::fs::read(spv_dir.join(format!("{}.json", j.key)))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok());
+        let spv_len = std::fs::metadata(spv_dir.join(format!("{}.spv", j.key)))
+            .map(|m| m.len() as usize)
+            .unwrap_or(0);
+        match prev.filter(|p| {
+            p.get("job_sha").and_then(Value::as_str) == Some(&job_sha)
+                && p.get("layout").and_then(Value::as_str) == Some(LAYOUT)
+                && (spv_len > 0 || p.get("status").and_then(Value::as_str) != Some("ok"))
+        }) {
             Some(p) => {
-                let st = p.get("status").and_then(Value::as_str).unwrap_or("?").to_string();
+                let st = p
+                    .get("status")
+                    .and_then(Value::as_str)
+                    .unwrap_or("?")
+                    .to_string();
                 report.reused += 1;
                 match st.as_str() {
                     "ok" => report.valid += 1,
@@ -520,12 +802,16 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
                 std::fs::write(&cp, &j.code).map_err(|e| io(&cp, e))?;
                 let mut js = j.json.clone();
                 js.insert("code".into(), json!(cp.to_string_lossy()));
-                work.push(Work { key: j.key.clone(), json: Value::Object(js) });
+                work.push(Work {
+                    key: j.key.clone(),
+                    json: Value::Object(js),
+                });
                 jobs.insert(j.key.clone(), (j, job_sha));
             }
         }
     }
-    let mut src_of: HashMap<&str, &scan::Shader> = keys.iter().map(|s| (s.key.as_str(), *s)).collect();
+    let mut src_of: HashMap<&str, &scan::Shader> =
+        keys.iter().map(|s| (s.key.as_str(), *s)).collect();
     if let Some(sh) = rt_shader.as_ref() {
         src_of.insert(sh.key.as_str(), sh);
     }
@@ -533,16 +819,30 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
     // translate
     let t1 = Instant::now();
     let n = work.len();
-    say(&format!("shaders: translating {n} ({} reused) with {} processes", report.reused, opts.jobs));
+    say(&format!(
+        "shaders: translating {n} ({} reused) with {} processes",
+        report.reused, opts.jobs
+    ));
     let last = std::sync::Mutex::new(Instant::now());
-    let mut outcomes = xlate::translate(&tools, work, &xl_dir, opts.jobs, opts.batch, Duration::from_secs(120), &|d, t| {
-        let mut l = last.lock().unwrap();
-        if l.elapsed().as_secs_f64() >= 3.0 || d == t {
-            *l = Instant::now();
-            let el = t1.elapsed().as_secs_f64();
-            say(&format!("shaders: translated {d} of {t} ({:.0} a second)", d as f64 / el.max(0.001)));
-        }
-    });
+    let mut outcomes = xlate::translate(
+        &tools,
+        work,
+        &xl_dir,
+        opts.jobs,
+        opts.batch,
+        Duration::from_secs(120),
+        &|d, t| {
+            let mut l = last.lock().unwrap();
+            if l.elapsed().as_secs_f64() >= 3.0 || d == t {
+                *l = Instant::now();
+                let el = t1.elapsed().as_secs_f64();
+                say(&format!(
+                    "shaders: translated {d} of {t} ({:.0} a second)",
+                    d as f64 / el.max(0.001)
+                ));
+            }
+        },
+    );
     report.translate_seconds = t1.elapsed().as_secs_f64();
 
     // the SPIR-V edits Vulkan needs (fixes.rs)
@@ -552,17 +852,26 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
     for (k, o) in &outcomes {
         if o.is_ok() {
             let p = xl_dir.join(format!("{k}.spv"));
-            let Ok(mut b) = std::fs::read(&p) else { continue };
+            let Ok(mut b) = std::fs::read(&p) else {
+                continue;
+            };
             let mut names = vec![];
-            for f in [crate::fixes::storage_format_caps, crate::fixes::size_query_components, crate::fixes::dynamic_offsets] {
+            for f in [
+                crate::fixes::storage_format_caps,
+                crate::fixes::size_query_components,
+                crate::fixes::dynamic_offsets,
+            ] {
                 if let Some((fixed, n)) = f(&b) {
                     b = fixed;
                     names.extend(n);
                 }
             }
             // a task or mesh shader: its Vulkan stage around the kernel (mesh.rs)
-            if let Some((info, set)) = jobs.get(k).and_then(|(j, _)| Some((j.extra.get("mesh_stage")?, job::stage_set(j.stage)))) {
-                match crate::mesh::Info::from_json(info).and_then(|i| crate::mesh::to_stage(&b, &i, set).map(|s| (s, i))) {
+            if let Some((info, set)) = jobs
+                .get(k)
+                .and_then(|(j, _)| Some((j.extra.get("mesh_stage")?, job::stage_set(j.stage))))
+            {
+                match mesh_stage_output(&b, info, set) {
                     Ok((staged, i)) => {
                         b = staged;
                         names.push("mesh_stage");
@@ -600,9 +909,18 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
 
     // validate what was written
     let t2 = Instant::now();
-    let spvs: Vec<PathBuf> = outcomes.iter().filter(|(_, o)| o.is_ok()).map(|(k, _)| xl_dir.join(format!("{k}.spv"))).collect();
-    say(&format!("shaders: validating {} with spirv-val", spvs.len()));
-    let val = xlate::validate(&tools, &spvs, opts.jobs * 2, &|d, t| say(&format!("shaders: validated {d} of {t}")));
+    let spvs: Vec<PathBuf> = outcomes
+        .iter()
+        .filter(|(_, o)| o.is_ok())
+        .map(|(k, _)| xl_dir.join(format!("{k}.spv")))
+        .collect();
+    say(&format!(
+        "shaders: validating {} with spirv-val",
+        spvs.len()
+    ));
+    let val = xlate::validate(&tools, &spvs, opts.jobs * 2, &|d, t| {
+        say(&format!("shaders: validated {d} of {t}"))
+    });
     report.validate_seconds = t2.elapsed().as_secs_f64();
 
     // publish: <key>.spv, then <key>.json (a reader takes a shader once its json is there)
@@ -610,26 +928,18 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
         let (j, job_sha) = &jobs[key];
         let s = src_of[key.as_str()];
         report.translated += outcome.is_ok() as usize;
-        let res: Value = std::fs::read(xl_dir.join(format!("{key}.res.json"))).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or(json!({}));
-        let (status, why, spv) = match outcome {
-            Err(e) => {
-                report.failed += 1;
-                ("failed", Some(e.clone()), vec![])
-            }
-            Ok(()) => {
-                let spv = std::fs::read(xl_dir.join(format!("{key}.spv"))).unwrap_or_default();
-                match val.get(&xl_dir.join(format!("{key}.spv"))).cloned().flatten() {
-                    None => {
-                        report.valid += 1;
-                        ("ok", None, spv)
-                    }
-                    Some(e) => {
-                        report.invalid += 1;
-                        ("invalid", Some(e), spv)
-                    }
-                }
-            }
-        };
+        let res: Value = std::fs::read(xl_dir.join(format!("{key}.res.json")))
+            .ok()
+            .and_then(|b| serde_json::from_slice(&b).ok())
+            .unwrap_or(json!({}));
+        let (status, why, spv) = publish_outcome(outcome,
+            val.get(&xl_dir.join(format!("{key}.spv"))).cloned().flatten(),
+            || std::fs::read(xl_dir.join(format!("{key}.spv"))).unwrap_or_default());
+        match status {
+            "ok" => report.valid += 1,
+            "invalid" => report.invalid += 1,
+            _ => report.failed += 1,
+        }
         let mut r = reflection(j, &chain, job_sha, &spv, &res, status, why.as_deref());
         if j.stage == Stage::Rt {
             // what the translator laid out (bindings of the scene, parameters, errors, instance SBT; local memory; each
@@ -651,14 +961,16 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
             write_atomic(&sp, &spv).map_err(|e| io(&sp, e))?;
         }
         let jp = spv_dir.join(format!("{key}.json"));
-        write_atomic(&jp, serde_json::to_string_pretty(&r).unwrap().as_bytes()).map_err(|e| io(&jp, e))?;
+        write_atomic(&jp, serde_json::to_string_pretty(&r).unwrap().as_bytes())
+            .map_err(|e| io(&jp, e))?;
         rows.insert(key.clone(), row(s, Some(j), status, spv.len()));
     }
     let _ = std::fs::remove_dir_all(&work_dir);
     report.total_seconds = t0.elapsed().as_secs_f64();
     let rows: Vec<String> = rows.into_values().collect();
     write_lists(&rows, &report)?;
-    write_atomic(&out_dir.join("LAYOUT"), format!("{LAYOUT}\n").as_bytes()).map_err(|e| io(out_dir, e))?;
+    write_atomic(&out_dir.join("LAYOUT"), format!("{LAYOUT}\n").as_bytes())
+        .map_err(|e| io(out_dir, e))?;
     say(&format!(
         "shaders: {} found, {} translated ({} reused), {} failed, {} skipped, {} valid, {} invalid; {:.0} s",
         report.found, report.translated, report.reused, report.failed, report.skipped, report.valid, report.invalid, report.total_seconds
@@ -668,12 +980,69 @@ pub fn build_from_scan(scan: ScanReport, out_dir: &Path, opts: &Options, say: &(
 
 #[cfg(test)]
 mod regression_tests {
+    use super::*;
+
+    fn task_compute_fixture() -> Vec<u8> {
+        let mut words = vec![0x07230203u32, 0x00010000, 0, 10, 0];
+        for (op, operands) in [
+            (17, vec![1]), (14, vec![0, 1]),
+            (15, vec![5, 1, u32::from_le_bytes(*b"main"), 0]),
+            (16, vec![1, 17, 32, 1, 1]), (19, vec![2]), (21, vec![3, 32, 0]),
+            (43, vec![3, 4, 4096]), (28, vec![5, 3, 4]), (32, vec![6, 4, 5]),
+            (59, vec![6, 7, 4]), (33, vec![8, 2]), (54, vec![2, 1, 0, 8]),
+            (248, vec![9]), (253, vec![]), (56, vec![]),
+        ] {
+            words.push(((operands.len() as u32 + 1) << 16) | op);
+            words.extend(operands);
+        }
+        words.iter().flat_map(|w| w.to_le_bytes()).collect()
+    }
+
+    #[test]
+    fn mesh5_success_cannot_bypass_new_payload_admission_or_publish_stale_output() {
+        let bytes = task_compute_fixture();
+        for payload in [4096, 4097] {
+            let info = json!({"kind":"ts", "threads":32, "payload":payload,
+                "memory":[0, 16, 16, 0]});
+            let job_json = json!({"mesh_stage":info}).as_object().unwrap().clone();
+            // Same translator binary, same job/input bytes: only Rust wrapper identity changes.
+            let old_sha = job_identity("same-tool-binary", &job_json, &bytes, "mesh 5");
+            let old = json!({"job_sha":old_sha, "layout":LAYOUT, "status":"ok"});
+            assert_eq!(cached_status(&old, &old_sha, 128).as_deref(), Some("ok"));
+            let new_sha = job_identity("same-tool-binary", &job_json, &bytes, crate::mesh::VERSION);
+            assert!(cached_status(&old, &new_sha, 128).is_none());
+            let stage = mesh_stage_output(&bytes, &info, 3);
+            if payload == 4096 {
+                let (output, _) = stage.unwrap();
+                assert!(!output.is_empty());
+                let (status, why, published) = publish_outcome(&Ok(()), None, || output);
+                assert_eq!(status, "ok"); assert!(why.is_none()); assert!(!published.is_empty());
+            } else {
+                let error = stage.err().expect("oversized live prefix must fail on a cache miss");
+                assert!(error.contains("4097"));
+                let outcome = Err(format!("mesh stage: {error}"));
+                let (status, why, published) = publish_outcome(&outcome, None,
+                    || panic!("failed admission must not load/re-publish old successful SPIR-V"));
+                assert_eq!(status, "failed"); assert!(why.unwrap().contains("4097"));
+                assert!(published.is_empty()); // production publication removes this stale .spv
+            }
+        }
+    }
+
     #[test]
     fn a_shader_valid_before_and_failed_now_is_a_regression() {
         let h = "# nxshaders 1\nkey\tstage\ttranslated_as\tarch\tstatus\tspv_bytes\tsource\n";
         let old = format!("{h}aa\tps\tps\tmaxwell\tok\t10\tx\nbb\tvs\tvs\tmaxwell\tok\t10\tx\ncc\tcs\tcs\tmaxwell\tfailed\t0\tx\ndd\tps\tps\tmaxwell\tok\t1\tx\n");
         let new = format!("{h}aa\tps\tps\tmaxwell\tok\t10\tx\nbb\tvs\tvs\tmaxwell\tinvalid\t10\tx\ncc\tcs\tcs\tmaxwell\tfailed\t0\tx\nee\tps\tps\tmaxwell\tfailed\t0\tx\n");
         let r = super::regressions(&old, &new);
-        assert_eq!(r, vec![("bb".to_string(), "vs".to_string(), "ok".to_string(), "invalid".to_string())]);
+        assert_eq!(
+            r,
+            vec![(
+                "bb".to_string(),
+                "vs".to_string(),
+                "ok".to_string(),
+                "invalid".to_string()
+            )]
+        );
     }
 }
