@@ -1,0 +1,39 @@
+#version 460
+// Independent PTX-fragment oracle for the current Vulkan translator's helper:
+// one warp, A 16x16, B 16x8, C/D 16x8, packed fp16 row-major in buffers.
+// GenerateHmma16816F16 does 16 FP32 FMAs followed by ONE PackHalf2x16.
+// This intentionally does not adopt the native model's half-way rounding.
+layout(local_size_x=32) in;
+layout(set=0,binding=0,std430) readonly buffer A { uint a[]; };
+layout(set=0,binding=1,std430) writeonly buffer D { uint d[]; };
+layout(set=0,binding=2,std430) readonly buffer B { uint b[]; };
+layout(set=0,binding=4,std430) readonly buffer C { uint c[]; };
+shared uint scratch[256];
+float bh(uint i) { return unpackHalf2x16(b[i/2])[i&1]; }
+void main() {
+    if(gl_WorkGroupID.x!=0) return;
+    uint lane=gl_LocalInvocationID.x,g=lane/4,t=lane%4;
+    scratch[g*8+t]=a[g*8+t];
+    scratch[(g+8)*8+t]=a[(g+8)*8+t];
+    scratch[g*8+t+4]=a[g*8+t+4];
+    scratch[(g+8)*8+t+4]=a[(g+8)*8+t+4];
+    scratch[128+g*8+t]=packHalf2x16(vec2(bh(2*t*8+g),bh((2*t+1)*8+g)));
+    scratch[128+g*8+t+4]=packHalf2x16(vec2(bh((2*t+8)*8+g),bh((2*t+9)*8+g)));
+    scratch[192+g*4+t]=c[g*4+t];
+    scratch[192+(g+8)*4+t]=c[(g+8)*4+t];
+    barrier();
+    for(uint q=0;q<2;++q) {
+        uint row=g+8*q;
+        precise vec2 acc=unpackHalf2x16(scratch[192+row*4+t]);
+        for(uint j=0;j<2;++j) {
+            uint col=2*t+j;
+            for(uint kw=0;kw<8;++kw) {
+                vec2 av=unpackHalf2x16(scratch[row*8+kw]);
+                vec2 bv=unpackHalf2x16(scratch[128+col*8+kw]);
+                acc[j]=fma(av.x,bv.x,acc[j]);
+                acc[j]=fma(av.y,bv.y,acc[j]);
+            }
+        }
+        d[row*4+t]=packHalf2x16(acc);
+    }
+}

@@ -28,17 +28,26 @@ fn glslang() -> PathBuf {
 /// A shader that names variants in a comment line `// variants: NAME=DEFINE ...` is also compiled once per variant
 /// with `-DDEFINE`, into `<file>_<NAME>.spv` (the BC7 encoder's mode-6-only build).
 fn variants(p: &Path) -> Vec<(String, String)> {
-    let Ok(text) = std::fs::read_to_string(p) else { return vec![] };
+    let Ok(text) = std::fs::read_to_string(p) else {
+        return vec![];
+    };
     text.lines()
         .take(40)
         .filter_map(|l| l.trim().strip_prefix("// variants:"))
-        .flat_map(|v| v.split_whitespace().filter_map(|kv| kv.split_once('=')).map(|(a, b)| (a.to_string(), b.to_string())).collect::<Vec<_>>())
+        .flat_map(|v| {
+            v.split_whitespace()
+                .filter_map(|kv| kv.split_once('='))
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect::<Vec<_>>()
+        })
         .collect()
 }
 
 fn compile_dir(src: &Path, out: &Path, tool: &Path) {
     println!("cargo:rerun-if-changed={}", src.display());
-    let Ok(rd) = std::fs::read_dir(src) else { return };
+    let Ok(rd) = std::fs::read_dir(src) else {
+        return;
+    };
     std::fs::create_dir_all(out).unwrap();
     let mut entries: Vec<_> = rd.flatten().map(|e| e.path()).collect();
     entries.sort();
@@ -64,7 +73,12 @@ fn compile_dir(src: &Path, out: &Path, tool: &Path) {
                 .arg(out.join(file))
                 .arg(&p)
                 .output()
-                .unwrap_or_else(|e| panic!("cannot run {} ({e}): install the Vulkan SDK or set NXGFX_GLSLANG", tool.display()));
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "cannot run {} ({e}): install the Vulkan SDK or set NXGFX_GLSLANG",
+                        tool.display()
+                    )
+                });
             if !st.status.success() {
                 panic!(
                     "glslang failed on {}:\n{}{}",

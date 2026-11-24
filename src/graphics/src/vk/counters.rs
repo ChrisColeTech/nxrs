@@ -44,7 +44,14 @@ struct Clock {
     idle: u64,
     prev_end: u64,
 }
-static CLOCK: Mutex<Clock> = Mutex::new(Clock { have: false, off: 0, last: 0, key: 0, idle: 0, prev_end: 0 });
+static CLOCK: Mutex<Clock> = Mutex::new(Clock {
+    have: false,
+    off: 0,
+    last: 0,
+    key: 0,
+    idle: 0,
+    prev_end: 0,
+});
 
 /// Which idle time reports leave out (Turbo 283c6b6 `rep_gaps`): the time the GPU sat idle between the submissions of
 /// one frame (2, the default: present to present), or only inside one submission (1, nxnative's rule:
@@ -52,7 +59,12 @@ static CLOCK: Mutex<Clock> = Mutex::new(Clock { have: false, off: 0, last: 0, ke
 /// submissions as GPU time with the second (Donkey Kong Bananza, 8 submissions a frame, sat at its smallest size).
 pub fn rep_gaps() -> u32 {
     static V: OnceLock<u32> = OnceLock::new();
-    *V.get_or_init(|| std::env::var("NXGFX_REP_GAPS").ok().and_then(|v| v.parse().ok()).unwrap_or(2))
+    *V.get_or_init(|| {
+        std::env::var("NXGFX_REP_GAPS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(2)
+    })
 }
 
 /// The key of the part a submission's idle time is counted in: its frame (`rep_gaps` 2) or itself.
@@ -73,7 +85,11 @@ pub fn part(key: u64, t0: u64, t1: u64) {
         c.idle += t0 - c.prev_end;
     }
     let cand = guest_ns() as i64 - t1 as i64;
-    c.off = if !c.have || cand < c.off + 2000 { cand } else { c.off + 2000 };
+    c.off = if !c.have || cand < c.off + 2000 {
+        cand
+    } else {
+        c.off + 2000
+    };
     c.have = true;
     c.key = key;
     c.prev_end = t1;
@@ -203,9 +219,13 @@ mod tests {
         let b = super::report_time(Some(t2), t2 - 2_000_000, t2);
         let idle = super::CLOCK.lock().unwrap().idle;
         assert!(idle >= 5_000_000 && idle < 6_000_000, "idle {idle}");
-        let d = crate::nvn::device::timestamp_to_ns(b) as i64 - crate::nvn::device::timestamp_to_ns(a) as i64;
+        let d = crate::nvn::device::timestamp_to_ns(b) as i64
+            - crate::nvn::device::timestamp_to_ns(a) as i64;
         let want = (t2 - t1) as i64 - idle as i64;
-        assert!((d - want).abs() < 200_000, "the frame's GPU time without its idle gap: {d} ns, want {want}");
+        assert!(
+            (d - want).abs() < 200_000,
+            "the frame's GPU time without its idle gap: {d} ns, want {want}"
+        );
         super::part(super::part_key(8, 101), now() - 1_000, now());
         assert_eq!(super::CLOCK.lock().unwrap().idle, 0, "a new frame");
     }

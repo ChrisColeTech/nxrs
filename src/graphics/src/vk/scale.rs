@@ -46,8 +46,19 @@ pub fn active() -> bool {
 
 /// What the options ask for now: the ini's scale times the dynamic resolution's factor, in steps of 1/20.
 fn wanted() -> f32 {
-    let ini = { let v = nxconfig::f32("resolution"); if v > 0.0 { v.clamp(0.25, 4.0) } else { 1.0 } };
-    let s = if nxconfig::flag("dynamic_resolution") { ini * f(&DRS) } else { ini };
+    let ini = {
+        let v = nxconfig::f32("resolution");
+        if v > 0.0 {
+            v.clamp(0.25, 4.0)
+        } else {
+            1.0
+        }
+    };
+    let s = if nxconfig::flag("dynamic_resolution") {
+        ini * f(&DRS)
+    } else {
+        ini
+    };
     ((s * 20.0).round() / 20.0).clamp(0.25, 4.0)
 }
 
@@ -56,8 +67,20 @@ pub fn candidate(t: &tex_t) -> bool {
     let d = &t.d;
     let fl = d.flags as u32;
     fl & tex_flags::COMPRESSIBLE != 0
-        && fl & (tex_flags::IMAGE | tex_flags::LINEAR | tex_flags::LINEAR_RENDER_TARGET | tex_flags::SPARSE) == 0
-        && matches!(d.target, target::T2D | target::T2D_ARRAY | target::T2D_MS | target::T2D_MS_ARRAY | target::RECTANGLE)
+        && fl
+            & (tex_flags::IMAGE
+                | tex_flags::LINEAR
+                | tex_flags::LINEAR_RENDER_TARGET
+                | tex_flags::SPARSE)
+            == 0
+        && matches!(
+            d.target,
+            target::T2D
+                | target::T2D_ARRAY
+                | target::T2D_MS
+                | target::T2D_MS_ARRAY
+                | target::RECTANGLE
+        )
         && d.width > 1
         && d.height > 1
         && crate::tex::layout::fmt_bpb(d.format).1 == 1
@@ -86,7 +109,9 @@ pub fn for_new(t: &tex_t) -> f32 {
 /// The blit filter between two images of a format: linear for filterable float colour, nearest otherwise.
 pub fn filter(g: &Gpu, fmt: vk::Format, kind: crate::tex::format::Kind) -> vk::Filter {
     use crate::tex::format::Kind;
-    let lin = g.d.format_features(fmt).contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR);
+    let lin =
+        g.d.format_features(fmt)
+            .contains(vk::FormatFeatureFlags::SAMPLED_IMAGE_FILTER_LINEAR);
     if lin && matches!(kind, Kind::Float) {
         vk::Filter::LINEAR
     } else {
@@ -131,26 +156,82 @@ pub fn bounce(g: &Gpu, fmt: vk::Format, e: vk::Extent3D, layers: u32) -> Option<
 }
 
 /// Barriers from `UNDEFINED` / transfer to `GENERAL` for a bounce image and between the steps of a bounce.
-pub fn general(g: &Gpu, cb: vk::CommandBuffer, img: vk::Image, aspect: vk::ImageAspectFlags, layers: u32, from_undefined: bool) {
+pub fn general(
+    g: &Gpu,
+    cb: vk::CommandBuffer,
+    img: vk::Image,
+    aspect: vk::ImageAspectFlags,
+    layers: u32,
+    from_undefined: bool,
+) {
     let b = [vk::ImageMemoryBarrier2::default()
         .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
         .src_access_mask(vk::AccessFlags2::MEMORY_WRITE)
         .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
         .dst_access_mask(vk::AccessFlags2::MEMORY_READ | vk::AccessFlags2::MEMORY_WRITE)
-        .old_layout(if from_undefined { vk::ImageLayout::UNDEFINED } else { vk::ImageLayout::GENERAL })
+        .old_layout(if from_undefined {
+            vk::ImageLayout::UNDEFINED
+        } else {
+            vk::ImageLayout::GENERAL
+        })
         .new_layout(vk::ImageLayout::GENERAL)
         .image(img)
-        .subresource_range(vk::ImageSubresourceRange { aspect_mask: aspect, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: layers.max(1) })];
-    unsafe { g.dev().cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().image_memory_barriers(&b)) };
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: aspect,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: layers.max(1),
+        })];
+    unsafe {
+        g.dev()
+            .cmd_pipeline_barrier2(cb, &vk::DependencyInfo::default().image_memory_barriers(&b))
+    };
 }
 
 /// A blit of a region given in the game's texels between images of scales `ss` and `ds`.
 #[allow(clippy::too_many_arguments)]
-pub fn blit(g: &Gpu, cb: vk::CommandBuffer, src: vk::Image, ss: f32, sl: vk::ImageSubresourceLayers, so: vk::Offset3D, dst: vk::Image, ds: f32, dl: vk::ImageSubresourceLayers, d_o: vk::Offset3D, e: vk::Extent3D, filter: vk::Filter) {
-    let at = |o: vk::Offset3D, s: f32| vk::Offset3D { x: coord(o.x, s), y: coord(o.y, s), z: o.z };
-    let end = |o: vk::Offset3D, s: f32| vk::Offset3D { x: coord(o.x + e.width as i32, s), y: coord(o.y + e.height as i32, s), z: o.z + e.depth as i32 };
-    let r = vk::ImageBlit { src_subresource: sl, src_offsets: [at(so, ss), end(so, ss)], dst_subresource: dl, dst_offsets: [at(d_o, ds), end(d_o, ds)] };
-    unsafe { g.dev().cmd_blit_image(cb, src, vk::ImageLayout::GENERAL, dst, vk::ImageLayout::GENERAL, &[r], filter) };
+pub fn blit(
+    g: &Gpu,
+    cb: vk::CommandBuffer,
+    src: vk::Image,
+    ss: f32,
+    sl: vk::ImageSubresourceLayers,
+    so: vk::Offset3D,
+    dst: vk::Image,
+    ds: f32,
+    dl: vk::ImageSubresourceLayers,
+    d_o: vk::Offset3D,
+    e: vk::Extent3D,
+    filter: vk::Filter,
+) {
+    let at = |o: vk::Offset3D, s: f32| vk::Offset3D {
+        x: coord(o.x, s),
+        y: coord(o.y, s),
+        z: o.z,
+    };
+    let end = |o: vk::Offset3D, s: f32| vk::Offset3D {
+        x: coord(o.x + e.width as i32, s),
+        y: coord(o.y + e.height as i32, s),
+        z: o.z + e.depth as i32,
+    };
+    let r = vk::ImageBlit {
+        src_subresource: sl,
+        src_offsets: [at(so, ss), end(so, ss)],
+        dst_subresource: dl,
+        dst_offsets: [at(d_o, ds), end(d_o, ds)],
+    };
+    unsafe {
+        g.dev().cmd_blit_image(
+            cb,
+            src,
+            vk::ImageLayout::GENERAL,
+            dst,
+            vk::ImageLayout::GENERAL,
+            &[r],
+            filter,
+        )
+    };
 }
 
 // ---------- the host's dynamic resolution ----------
@@ -162,7 +243,11 @@ struct DrsState {
     up: u32,
     last_down: Option<std::time::Instant>,
 }
-static DRS_ST: Mutex<DrsState> = Mutex::new(DrsState { hold: 0, up: 0, last_down: None });
+static DRS_ST: Mutex<DrsState> = Mutex::new(DrsState {
+    hold: 0,
+    up: 0,
+    last_down: None,
+});
 
 /// A submission's GPU time (the completion thread).
 pub fn note_gpu(ns: u64) {
@@ -191,7 +276,8 @@ pub fn frame() {
     DRS_T0.store(now, Ordering::Relaxed);
     let busy = DRS_GPU_NS.swap(0, Ordering::Relaxed) as f64 / dt as f64;
     static PIPES: AtomicU64 = AtomicU64::new(0);
-    let pipes = super::perf::get(super::perf::C::PipesGfx) + super::perf::get(super::perf::C::PipesCompute);
+    let pipes =
+        super::perf::get(super::perf::C::PipesGfx) + super::perf::get(super::perf::C::PipesCompute);
     let new_pipes = pipes != PIPES.swap(pipes, Ordering::Relaxed);
     let mut st = DRS_ST.lock().unwrap();
     if new_pipes {
@@ -202,21 +288,37 @@ pub fn frame() {
         st.hold -= 1;
         return;
     }
-    let min = { let v = nxconfig::f32("dynamic_resolution_min"); if v > 0.0 { v.clamp(0.25, 1.0) } else { 0.6 } };
+    let min = {
+        let v = nxconfig::f32("dynamic_resolution_min");
+        if v > 0.0 {
+            v.clamp(0.25, 1.0)
+        } else {
+            0.6
+        }
+    };
     let cur = f(&DRS);
     if busy > 0.90 && cur > min + 0.01 {
         DRS.store((cur - 0.1).max(min).to_bits(), Ordering::Relaxed);
         st.hold = 2;
         st.up = 0;
         st.last_down = Some(std::time::Instant::now());
-        crate::vklog!("dynamic resolution: the GPU was busy {:.0}% of the last second: x{:.2}", busy * 100.0, f(&DRS));
-    } else if busy < 0.65 && cur < 0.99 && st.last_down.is_none_or(|t| t.elapsed().as_secs() >= 20) {
+        crate::vklog!(
+            "dynamic resolution: the GPU was busy {:.0}% of the last second: x{:.2}",
+            busy * 100.0,
+            f(&DRS)
+        );
+    } else if busy < 0.65 && cur < 0.99 && st.last_down.is_none_or(|t| t.elapsed().as_secs() >= 20)
+    {
         st.up += 1;
         if st.up >= 4 {
             DRS.store((cur + 0.1).min(1.0).to_bits(), Ordering::Relaxed);
             st.hold = 3;
             st.up = 0;
-            crate::vklog!("dynamic resolution: headroom ({:.0}% busy): x{:.2}", busy * 100.0, f(&DRS));
+            crate::vklog!(
+                "dynamic resolution: headroom ({:.0}% busy): x{:.2}",
+                busy * 100.0,
+                f(&DRS)
+            );
         }
     } else {
         st.up = 0;

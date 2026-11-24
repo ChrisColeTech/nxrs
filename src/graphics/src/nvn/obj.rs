@@ -13,7 +13,10 @@ use core::mem::size_of;
 
 macro_rules! fits {
     ($t:ty, $n:expr) => {
-        const _: () = assert!(size_of::<$t>() <= $n, concat!(stringify!($t), " exceeds the size the game reserves"));
+        const _: () = assert!(
+            size_of::<$t>() <= $n,
+            concat!(stringify!($t), " exceeds the size the game reserves")
+        );
     };
 }
 
@@ -132,7 +135,9 @@ pub struct buf_t {
     pub size: u64,
 }
 fits!(buf_t, 0x30);
-const _: () = assert!(core::mem::offset_of!(buf_t, off) == 0x18 && core::mem::offset_of!(buf_t, size) == 0x20);
+const _: () = assert!(
+    core::mem::offset_of!(buf_t, off) == 0x18 && core::mem::offset_of!(buf_t, size) == 0x20
+);
 
 #[repr(C)]
 pub struct tex_builder_t {
@@ -178,7 +183,11 @@ unsafe impl Sync for tex_t {}
 
 impl tex_t {
     pub fn swizzle(&self) -> u16 {
-        if self.bits & 1 != 0 { self.swz } else { 2 | 3 << 3 | 4 << 6 | 5 << 9 }
+        if self.bits & 1 != 0 {
+            self.swz
+        } else {
+            2 | 3 << 3 | 4 << 6 | 5 << 9
+        }
     }
     pub fn valid(&self) -> bool {
         self.magic == MAGIC_TEX
@@ -326,7 +335,9 @@ pub struct win_builder2_t {
 pub const WIN_BUILDER2_OFF: usize = 0x40;
 const _: () = assert!(WIN_BUILDER2_OFF + size_of::<win_builder2_t>() <= 0x80);
 /// The NVN2 driver's HDR defaults (Rec.709 primaries, D65 white, 0.03 to 1000 nits; content 200 / 60).
-pub const HDR_DISPLAY_DEFAULT: [f32; 10] = [0.64, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.329, 0.03, 1000.0];
+pub const HDR_DISPLAY_DEFAULT: [f32; 10] = [
+    0.64, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.329, 0.03, 1000.0,
+];
 pub const HDR_CONTENT_DEFAULT: [f32; 2] = [200.0, 60.0];
 
 /// Command buffer: records go into the command memory the game gives (AddCommandMemory), the list that strings a
@@ -388,7 +399,19 @@ pub struct chmask_st(pub u32);
 #[derive(Clone, Copy, Default, Debug)]
 pub struct blend_st(pub u64);
 impl blend_st {
-    const F: [(u32, u32); 11] = [(0, 3), (3, 7), (10, 7), (17, 7), (24, 7), (31, 3), (34, 3), (37, 6), (43, 1), (44, 2), (46, 1)];
+    const F: [(u32, u32); 11] = [
+        (0, 3),
+        (3, 7),
+        (10, 7),
+        (17, 7),
+        (24, 7),
+        (31, 3),
+        (34, 3),
+        (37, 6),
+        (43, 1),
+        (44, 2),
+        (46, 1),
+    ];
     pub fn get(self, i: usize) -> u32 {
         let (o, w) = Self::F[i];
         (self.0 >> o & ((1u64 << w) - 1)) as u32
@@ -457,7 +480,20 @@ impl poly_st {
 #[derive(Clone, Copy, Default, Debug)]
 pub struct ds_st(pub u64);
 impl ds_st {
-    const F: [(u32, u32); 12] = [(0, 1), (1, 1), (2, 4), (6, 1), (7, 4), (11, 4), (15, 4), (19, 4), (23, 4), (27, 4), (31, 4), (35, 4)];
+    const F: [(u32, u32); 12] = [
+        (0, 1),
+        (1, 1),
+        (2, 4),
+        (6, 1),
+        (7, 4),
+        (11, 4),
+        (15, 4),
+        (19, 4),
+        (23, 4),
+        (27, 4),
+        (31, 4),
+        (35, 4),
+    ];
     pub fn get(self, i: usize) -> u32 {
         let (o, w) = Self::F[i];
         (self.0 >> o & ((1u64 << w) - 1)) as u32
@@ -645,6 +681,7 @@ pub mod op {
     pub const DOWNSAMPLE: u32 = 68;
     pub const RESOLVE_DEPTH: u32 = 69;
     pub const PROVOKING: u32 = 70;
+    pub const CONS_RASTER: u32 = 71;
     pub const COUNT: u32 = 80;
 }
 

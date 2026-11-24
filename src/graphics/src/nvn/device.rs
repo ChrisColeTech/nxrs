@@ -16,10 +16,12 @@ pub static DEPTH_ZERO: AtomicBool = AtomicBool::new(false);
 
 /// Device properties measured on Tegra X1 (items 0 .. 0x68).
 pub const DEVINFO: [i32; 0x69] = [
-    55, 15, 14, 65536, 256, 8, 16, 4, 16, 32, 16, 4, 4, 4, 16, 32, 32, 256, 256, 4, 8, 512, 256, 2, 256, 4096, 131072, 16, 1536, 1024, 64,
-    1536, 65535, 65535, 65535, 8, 1048576, 4096, 16, 4096, 1, 1, 1, 262144, 15, 2048, 1, 1, 14, 5, 1, 8, 8, 4, 32, 128, 32, 128, 65536,
-    1, 4, 16384, 134217728, 2048, 16384, 16384, 1, 1, 1, 1, 5, 1, 1, 1, 1, 1, 1, 16, 1024, 32, 4096, 65536, 65536, 256, 16384, 262144,
-    4096, 1, 4, 2, 0, 4096, 16384, 4096, 128, 32, 65535, 1, 32, 256, 16, 65535, 65535, 256, 16383,
+    55, 15, 14, 65536, 256, 8, 16, 4, 16, 32, 16, 4, 4, 4, 16, 32, 32, 256, 256, 4, 8, 512, 256, 2,
+    256, 4096, 131072, 16, 1536, 1024, 64, 1536, 65535, 65535, 65535, 8, 1048576, 4096, 16, 4096,
+    1, 1, 1, 262144, 15, 2048, 1, 1, 14, 5, 1, 8, 8, 4, 32, 128, 32, 128, 65536, 1, 4, 16384,
+    134217728, 2048, 16384, 16384, 1, 1, 1, 1, 5, 1, 1, 1, 1, 1, 1, 16, 1024, 32, 4096, 65536,
+    65536, 256, 16384, 262144, 4096, 1, 4, 2, 0, 4096, 16384, 4096, 128, 32, 65535, 1, 32, 256, 16,
+    65535, 65535, 256, 16383,
 ];
 
 /// An NVN2 item the driver reads from the GPU's own description at run time (not knowable from the binary).
@@ -30,14 +32,18 @@ const RT: i32 = -1;
 /// padding, 32 separate sampler bindings, and items up to 0xA9. `RT` items keep the X1 value below 0x60 and answer 0
 /// (with a red line) above it.
 pub const DEVINFO2: [i32; 0xAA] = [
-    231, 39, 14, 65536, 256, 8, 32, 4, 16, 32, 16, 4, 4, 4, 32, 32, // 0x00 (0x06: 32, the 1.8.0 driver as mkw-recomp reads it; not a constant case of its switch)
+    231, 39, 14, 65536, 256, 8, 32, 4, 16, 32, 16, 4, 4, 4, 32,
+    32, // 0x00 (0x06: 32, the 1.8.0 driver as mkw-recomp reads it; not a constant case of its switch)
     32, 256, 256, 4, 8, 512, 256, RT, RT, 4096, 16384, 16, 1024, 1024, 64, 1024, // 0x10
-    2147483647, 65535, 65535, 8, 1048576, 4096, 16, 4096, 1, 1, 1, RT, 16, RT, 201, 201, // 0x20
+    2147483647, 65535, 65535, 8, 1048576, 4096, 16, 4096, 1, 1, 1, RT, 16, RT, 201,
+    201, // 0x20
     20, 0, 1, 8, 8, 4, 32, RT, RT, 128, RT, 1, 4, RT, RT, RT, // 0x30
     RT, RT, 1, 1, 1, 1, 5, 1, 1, 1, 1, 1, 1, 16, 2048, 32, // 0x40
-    4096, 65536, 65536, 256, 16384, 262144, 4096, 1, 4, 2, 0, 4096, 16384, 4096, 128, 32, // 0x50
+    4096, 65536, 65536, 256, 16384, 262144, 4096, 1, 4, 2, 0, 4096, 16384, 4096, 128,
+    32, // 0x50
     65535, 1, RT, 256, 16, 65535, 65535, 256, 1, 16, 16, 16, 1, 1, 1, 256, // 0x60
-    0, 16, 8, 16, 32, 31, 536870912, 16777216, 16777216, 1073741824, 32, 1, 64, RT, 1, 2147483647, // 0x70
+    0, 16, 8, 16, 32, 31, 536870912, 16777216, 16777216, 1073741824, 32, 1, 64, RT, 1,
+    2147483647, // 0x70
     32, 32, 4194303, 512, 256, 32, 16383, RT, 8, 0, 0, 4, 256, 16, 0, 1, // 0x80
     31, 0, 64, 1, 58368, 24576, 0, 256, 262144, RT, RT, 0, 201, 14, 201, 20, // 0x90
     163840, 8, 4, 256, 256, 4, 65536, 201, 5, 1, // 0xA0
@@ -67,20 +73,26 @@ fn nvn2_items(img: &[u8]) -> Option<Vec<Option<i32>>> {
     let w = |i: usize| u32::from_le_bytes(img[i * 4..i * 4 + 4].try_into().unwrap());
     let imm21 = |x: u32| -> i64 {
         let v = ((x >> 3) & 0x1FFFFC) as i64 | ((x >> 29) & 3) as i64;
-        if v & 0x100000 != 0 { v - 0x200000 } else { v }
+        if v & 0x100000 != 0 {
+            v - 0x200000
+        } else {
+            v
+        }
     };
     for p in 8..n.saturating_sub(9) {
         if w(p) != 0x52801CE0 {
             continue;
         }
-        let (mut tb, mut adr, mut lim, mut ldrb, mut br) = (None::<usize>, None::<usize>, None::<usize>, false, false);
+        let (mut tb, mut adr, mut lim, mut ldrb, mut br) =
+            (None::<usize>, None::<usize>, None::<usize>, false, false);
         for q in p - 8..=p + 8 {
             let x = w(q);
             if x & 0xFFC0001F == 0x7100001F {
                 lim = Some(((x >> 10) & 0xFFF) as usize);
             } else if x & 0x9F000000 == 0x90000000 && w(q + 1) & 0xFFC00000 == 0x91000000 {
                 let page = (q * 4) as i64 & !0xFFF;
-                tb = usize::try_from(page + imm21(x) * 4096 + ((w(q + 1) >> 10) & 0xFFF) as i64).ok();
+                tb = usize::try_from(page + imm21(x) * 4096 + ((w(q + 1) >> 10) & 0xFFF) as i64)
+                    .ok();
             } else if x & 0x9F000000 == 0x10000000 {
                 adr = usize::try_from((q * 4) as i64 + imm21(x)).ok();
             } else if x & 0xFFE0FC00 == 0x38606800 {
@@ -89,7 +101,9 @@ fn nvn2_items(img: &[u8]) -> Option<Vec<Option<i32>>> {
                 br = true;
             }
         }
-        let (Some(tb), Some(adr), Some(lim)) = (tb, adr, lim) else { continue };
+        let (Some(tb), Some(adr), Some(lim)) = (tb, adr, lim) else {
+            continue;
+        };
         if lim <= 1 || !ldrb || !br || tb + lim >= img.len() {
             continue;
         }
@@ -99,8 +113,12 @@ fn nvn2_items(img: &[u8]) -> Option<Vec<Option<i32>>> {
                 if c + 8 > img.len() {
                     return None;
                 }
-                let (c0, c1) = (u32::from_le_bytes(img[c..c + 4].try_into().unwrap()), u32::from_le_bytes(img[c + 4..c + 8].try_into().unwrap()));
-                (c0 & 0xFFE0001F == 0x52800000 && c1 & 0xFC000000 == 0x14000000).then_some(((c0 >> 5) & 0xFFFF) as i32)
+                let (c0, c1) = (
+                    u32::from_le_bytes(img[c..c + 4].try_into().unwrap()),
+                    u32::from_le_bytes(img[c + 4..c + 8].try_into().unwrap()),
+                );
+                (c0 & 0xFFE0001F == 0x52800000 && c1 & 0xFC000000 == 0x14000000)
+                    .then_some(((c0 >> 5) & 0xFFFF) as i32)
             })
             .collect();
         return Some(items);
@@ -114,10 +132,18 @@ fn nvn2_item(w: usize) -> Option<i32> {
 
 /// NVN counter timestamps: 614.4 MHz ticks on the Switch, nanoseconds on the Switch 2.
 pub fn timestamp_from_ns(ns: u64) -> u64 {
-    if SWITCH2.load(Ordering::Relaxed) { ns } else { (ns as u128 * 384 / 625) as u64 }
+    if SWITCH2.load(Ordering::Relaxed) {
+        ns
+    } else {
+        (ns as u128 * 384 / 625) as u64
+    }
 }
 pub fn timestamp_to_ns(t: u64) -> u64 {
-    if SWITCH2.load(Ordering::Relaxed) { t } else { (t as u128 * 625 / 384) as u64 }
+    if SWITCH2.load(Ordering::Relaxed) {
+        t
+    } else {
+        (t as u128 * 625 / 384) as u64
+    }
 }
 
 pub fn now_ns() -> u64 {

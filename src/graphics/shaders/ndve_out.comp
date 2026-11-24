@@ -1,0 +1,57 @@
+#version 460
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 64) in;
+layout(set=0,binding=0,std430) readonly buffer Input { uint a[]; };
+layout(set=0,binding=1,std430) buffer Output { uint o[]; };
+layout(set=0,binding=2,std430) readonly buffer Weights { uint w[]; };
+layout(set=0,binding=3,std430) readonly buffer Bias { uint b[]; };
+layout(set=0,binding=4,std430) readonly buffer Skip { uint unused[]; };
+layout(set=0,binding=5) uniform sampler2D picture;
+layout(set=0,binding=7,rgb10_a2) uniform writeonly image2D destination;
+layout(push_constant) uniform Args {
+    uint width, height, ki, no;
+    uint kind, count, rounding, reserved;
+} p;
+
+float ah(uint i) { return unpackHalf2x16(a[i >> 1])[i & 1]; }
+float wh(uint i) { return unpackHalf2x16(w[i >> 1])[i & 1]; }
+float bh(uint i) { return unpackHalf2x16(b[i >> 1])[i & 1]; }
+float rh(float x) { return unpackHalf2x16(packHalf2x16(vec2(x, 0.0))).x; }
+
+float convolution(uint x, uint y, uint n) {
+    precise float acc = 0.0;
+    [[dont_unroll]] for (uint t = 0; t < 9; ++t) {
+        uint iy = y + t / 3, ix = x + t % 3;
+        [[dont_unroll]] for (uint k = 0; k < 16; ++k) {
+            acc = fma(ah((iy * (p.width + 2) + ix) * 16 + k),
+                      wh((t * 16 + k) * 16 + n), acc);
+        }
+        acc = rh(acc);
+    }
+    return acc;
+}
+
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (id >= p.count) return;
+    if (p.kind == 4) {
+        uint x = id % (2 * p.width), y = id / (2 * p.width);
+        uint sub = 2 * (y & 1) + (x & 1);
+        uvec4 ns = uvec4(2 * sub, 2 * sub + 1, 8 + 2 * sub, 9 + 2 * sub);
+        vec4 pic = texelFetch(picture, ivec2(x, y), 0);
+        precise vec4 v;
+        for (uint c = 0; c < 4; ++c)
+            v[c] = (pic[c] + convolution(x / 2, y / 2, ns[c])) + bh(ns[c]);
+        imageStore(destination, ivec2(x, y), v);
+    } else {
+        vec2 value;
+        for (uint c = 0; c < 2; ++c) {
+            vec3 rgb = texelFetch(picture, ivec2((2 * id + c) % p.width,
+                                                (2 * id + c) / p.width), 0).rgb;
+            precise float t = rgb.y * 0.715200006961822509765625;
+            value[c] = fma(rgb.z, 0.072200000286102294921875,
+                           fma(rgb.x, 0.2125999927520751953125, t));
+        }
+        o[id] = packHalf2x16(value);
+    }
+}

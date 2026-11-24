@@ -52,7 +52,12 @@ type Exec = unsafe fn(usize, vk::CommandBuffer, &[u64; 8]);
 
 enum Cmd {
     /// a command whose arguments are all scalars or handles: the real function, its decoder, the arguments
-    Words { real: usize, exec: Exec, cb: vk::CommandBuffer, a: [u64; 8] },
+    Words {
+        real: usize,
+        exec: Exec,
+        cb: vk::CommandBuffer,
+        a: [u64; 8],
+    },
     /// a command with copied arrays
     Owned(Box<dyn FnOnce() + Send>),
 }
@@ -68,8 +73,14 @@ struct Ring {
 fn ring() -> &'static Ring {
     static R: OnceLock<Ring> = OnceLock::new();
     R.get_or_init(|| {
-        let _ = std::thread::Builder::new().name("vk recorder".into()).spawn(recorder);
-        Ring { q: Mutex::new((VecDeque::new(), 0)), work: Condvar::new(), idle: Condvar::new() }
+        let _ = std::thread::Builder::new()
+            .name("vk recorder".into())
+            .spawn(recorder);
+        Ring {
+            q: Mutex::new((VecDeque::new(), 0)),
+            work: Condvar::new(),
+            idle: Condvar::new(),
+        }
     })
 }
 
@@ -210,11 +221,24 @@ w_handle!(vk::Buffer, vk::Pipeline, vk::PipelineLayout);
 macro_rules! w_enum {
     ($($t:ty),*) => {$(impl W for $t { fn w(self) -> u64 { self.as_raw() as u32 as u64 } fn f(w: u64) -> Self { <$t>::from_raw(w as u32 as i32) } })*};
 }
-w_enum!(vk::PipelineBindPoint, vk::IndexType, vk::FrontFace, vk::PrimitiveTopology, vk::CompareOp, vk::StencilOp, vk::LogicOp, vk::PolygonMode);
+w_enum!(
+    vk::PipelineBindPoint,
+    vk::IndexType,
+    vk::FrontFace,
+    vk::PrimitiveTopology,
+    vk::CompareOp,
+    vk::StencilOp,
+    vk::LogicOp,
+    vk::PolygonMode
+);
 macro_rules! w_flags {
     ($($t:ty),*) => {$(impl W for $t { fn w(self) -> u64 { self.as_raw() as u64 } fn f(w: u64) -> Self { <$t>::from_raw(w as _) } })*};
 }
-w_flags!(vk::CullModeFlags, vk::StencilFaceFlags, vk::SampleCountFlags);
+w_flags!(
+    vk::CullModeFlags,
+    vk::StencilFaceFlags,
+    vk::SampleCountFlags
+);
 
 // ---------- the shims ----------
 
@@ -383,15 +407,28 @@ unsafe extern "system" fn a_blend_constants(cb: vk::CommandBuffer, c: *const [f3
     let c = *c;
     push(Cmd::Owned(Box::new(move || f(cb, &c))));
 }
-unsafe extern "system" fn a_sample_mask(cb: vk::CommandBuffer, s: vk::SampleCountFlags, m: *const vk::SampleMask) {
-    let f = real!("vkCmdSetSampleMaskEXT", vk::SampleCountFlags, *const vk::SampleMask);
+unsafe extern "system" fn a_sample_mask(
+    cb: vk::CommandBuffer,
+    s: vk::SampleCountFlags,
+    m: *const vk::SampleMask,
+) {
+    let f = real!(
+        "vkCmdSetSampleMaskEXT",
+        vk::SampleCountFlags,
+        *const vk::SampleMask
+    );
     if !deferring(cb) {
         return f(cb, s, m);
     }
     let m = copy(m, s.as_raw().div_ceil(32).max(1));
     push(Cmd::Owned(Box::new(move || f(cb, s, m.as_ptr()))));
 }
-unsafe extern "system" fn a_blend_enable(cb: vk::CommandBuffer, first: u32, n: u32, e: *const vk::Bool32) {
+unsafe extern "system" fn a_blend_enable(
+    cb: vk::CommandBuffer,
+    first: u32,
+    n: u32,
+    e: *const vk::Bool32,
+) {
     let f = real!("vkCmdSetColorBlendEnableEXT", u32, u32, *const vk::Bool32);
     if !deferring(cb) {
         return f(cb, first, n, e);
@@ -399,57 +436,157 @@ unsafe extern "system" fn a_blend_enable(cb: vk::CommandBuffer, first: u32, n: u
     let e = copy(e, n);
     push(Cmd::Owned(Box::new(move || f(cb, first, n, e.as_ptr()))));
 }
-unsafe extern "system" fn a_blend_eq(cb: vk::CommandBuffer, first: u32, n: u32, e: *const vk::ColorBlendEquationEXT) {
-    let f = real!("vkCmdSetColorBlendEquationEXT", u32, u32, *const vk::ColorBlendEquationEXT);
+unsafe extern "system" fn a_blend_eq(
+    cb: vk::CommandBuffer,
+    first: u32,
+    n: u32,
+    e: *const vk::ColorBlendEquationEXT,
+) {
+    let f = real!(
+        "vkCmdSetColorBlendEquationEXT",
+        u32,
+        u32,
+        *const vk::ColorBlendEquationEXT
+    );
     if !deferring(cb) {
         return f(cb, first, n, e);
     }
     let e = copy(e, n);
     push(Cmd::Owned(Box::new(move || f(cb, first, n, e.as_ptr()))));
 }
-unsafe extern "system" fn a_write_mask(cb: vk::CommandBuffer, first: u32, n: u32, e: *const vk::ColorComponentFlags) {
-    let f = real!("vkCmdSetColorWriteMaskEXT", u32, u32, *const vk::ColorComponentFlags);
+unsafe extern "system" fn a_write_mask(
+    cb: vk::CommandBuffer,
+    first: u32,
+    n: u32,
+    e: *const vk::ColorComponentFlags,
+) {
+    let f = real!(
+        "vkCmdSetColorWriteMaskEXT",
+        u32,
+        u32,
+        *const vk::ColorComponentFlags
+    );
     if !deferring(cb) {
         return f(cb, first, n, e);
     }
     let e = copy(e, n);
     push(Cmd::Owned(Box::new(move || f(cb, first, n, e.as_ptr()))));
 }
-unsafe extern "system" fn a_vertex_buffers(cb: vk::CommandBuffer, first: u32, n: u32, b: *const vk::Buffer, o: *const vk::DeviceSize) {
-    let f = real!("vkCmdBindVertexBuffers", u32, u32, *const vk::Buffer, *const vk::DeviceSize);
+unsafe extern "system" fn a_vertex_buffers(
+    cb: vk::CommandBuffer,
+    first: u32,
+    n: u32,
+    b: *const vk::Buffer,
+    o: *const vk::DeviceSize,
+) {
+    let f = real!(
+        "vkCmdBindVertexBuffers",
+        u32,
+        u32,
+        *const vk::Buffer,
+        *const vk::DeviceSize
+    );
     if !deferring(cb) {
         return f(cb, first, n, b, o);
     }
     let (b, o) = (copy(b, n), copy(o, n));
-    push(Cmd::Owned(Box::new(move || f(cb, first, n, b.as_ptr(), o.as_ptr()))));
+    push(Cmd::Owned(Box::new(move || {
+        f(cb, first, n, b.as_ptr(), o.as_ptr())
+    })));
 }
-unsafe extern "system" fn a_push_constants(cb: vk::CommandBuffer, l: vk::PipelineLayout, st: vk::ShaderStageFlags, off: u32, n: u32, v: *const core::ffi::c_void) {
-    let f = real!("vkCmdPushConstants", vk::PipelineLayout, vk::ShaderStageFlags, u32, u32, *const core::ffi::c_void);
+unsafe extern "system" fn a_push_constants(
+    cb: vk::CommandBuffer,
+    l: vk::PipelineLayout,
+    st: vk::ShaderStageFlags,
+    off: u32,
+    n: u32,
+    v: *const core::ffi::c_void,
+) {
+    let f = real!(
+        "vkCmdPushConstants",
+        vk::PipelineLayout,
+        vk::ShaderStageFlags,
+        u32,
+        u32,
+        *const core::ffi::c_void
+    );
     if !deferring(cb) {
         return f(cb, l, st, off, n, v);
     }
     let v = copy(v as *const u8, n);
-    push(Cmd::Owned(Box::new(move || f(cb, l, st, off, n, v.as_ptr() as *const _))));
+    push(Cmd::Owned(Box::new(move || {
+        f(cb, l, st, off, n, v.as_ptr() as *const _)
+    })));
 }
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn a_bind_sets(cb: vk::CommandBuffer, bp: vk::PipelineBindPoint, l: vk::PipelineLayout, first: u32, n: u32, s: *const vk::DescriptorSet, nd: u32, d: *const u32) {
-    let f = real!("vkCmdBindDescriptorSets", vk::PipelineBindPoint, vk::PipelineLayout, u32, u32, *const vk::DescriptorSet, u32, *const u32);
+unsafe extern "system" fn a_bind_sets(
+    cb: vk::CommandBuffer,
+    bp: vk::PipelineBindPoint,
+    l: vk::PipelineLayout,
+    first: u32,
+    n: u32,
+    s: *const vk::DescriptorSet,
+    nd: u32,
+    d: *const u32,
+) {
+    let f = real!(
+        "vkCmdBindDescriptorSets",
+        vk::PipelineBindPoint,
+        vk::PipelineLayout,
+        u32,
+        u32,
+        *const vk::DescriptorSet,
+        u32,
+        *const u32
+    );
     if !deferring(cb) {
         return f(cb, bp, l, first, n, s, nd, d);
     }
     let (s, d) = (copy(s, n), copy(d, nd));
-    push(Cmd::Owned(Box::new(move || f(cb, bp, l, first, n, s.as_ptr(), nd, d.as_ptr()))));
+    push(Cmd::Owned(Box::new(move || {
+        f(cb, bp, l, first, n, s.as_ptr(), nd, d.as_ptr())
+    })));
 }
-unsafe extern "system" fn a_db_offsets(cb: vk::CommandBuffer, bp: vk::PipelineBindPoint, l: vk::PipelineLayout, first: u32, n: u32, i: *const u32, o: *const vk::DeviceSize) {
-    let f = real!("vkCmdSetDescriptorBufferOffsetsEXT", vk::PipelineBindPoint, vk::PipelineLayout, u32, u32, *const u32, *const vk::DeviceSize);
+unsafe extern "system" fn a_db_offsets(
+    cb: vk::CommandBuffer,
+    bp: vk::PipelineBindPoint,
+    l: vk::PipelineLayout,
+    first: u32,
+    n: u32,
+    i: *const u32,
+    o: *const vk::DeviceSize,
+) {
+    let f = real!(
+        "vkCmdSetDescriptorBufferOffsetsEXT",
+        vk::PipelineBindPoint,
+        vk::PipelineLayout,
+        u32,
+        u32,
+        *const u32,
+        *const vk::DeviceSize
+    );
     if !deferring(cb) {
         return f(cb, bp, l, first, n, i, o);
     }
     let (i, o) = (copy(i, n), copy(o, n));
-    push(Cmd::Owned(Box::new(move || f(cb, bp, l, first, n, i.as_ptr(), o.as_ptr()))));
+    push(Cmd::Owned(Box::new(move || {
+        f(cb, bp, l, first, n, i.as_ptr(), o.as_ptr())
+    })));
 }
-unsafe extern "system" fn a_vertex_input(cb: vk::CommandBuffer, nb: u32, b: *const vk::VertexInputBindingDescription2EXT<'static>, na: u32, a: *const vk::VertexInputAttributeDescription2EXT<'static>) {
-    let f = real!("vkCmdSetVertexInputEXT", u32, *const vk::VertexInputBindingDescription2EXT<'static>, u32, *const vk::VertexInputAttributeDescription2EXT<'static>);
+unsafe extern "system" fn a_vertex_input(
+    cb: vk::CommandBuffer,
+    nb: u32,
+    b: *const vk::VertexInputBindingDescription2EXT<'static>,
+    na: u32,
+    a: *const vk::VertexInputAttributeDescription2EXT<'static>,
+) {
+    let f = real!(
+        "vkCmdSetVertexInputEXT",
+        u32,
+        *const vk::VertexInputBindingDescription2EXT<'static>,
+        u32,
+        *const vk::VertexInputAttributeDescription2EXT<'static>
+    );
     if !deferring(cb) {
         return f(cb, nb, b, na, a);
     }
@@ -460,7 +597,6 @@ unsafe extern "system" fn a_vertex_input(cb: vk::CommandBuffer, nb: u32, b: *con
         f(cb, nb, b.0.as_ptr(), na, a.0.as_ptr())
     })));
 }
-
 
 macro_rules! regions {
     ($shim:ident, $vk:literal, $rt:ty, ($($a:ident : $t:ty),*)) => {
@@ -483,8 +619,26 @@ regions!(a_copy_b2i, "vkCmdCopyBufferToImage", vk::BufferImageCopy, (s: vk::Buff
 regions!(a_copy_i2b, "vkCmdCopyImageToBuffer", vk::BufferImageCopy, (s: vk::Image, sl: vk::ImageLayout, d: vk::Buffer));
 
 #[allow(clippy::too_many_arguments)]
-unsafe extern "system" fn a_blit(cb: vk::CommandBuffer, s: vk::Image, sl: vk::ImageLayout, d: vk::Image, dl: vk::ImageLayout, n: u32, r: *const vk::ImageBlit, flt: vk::Filter) {
-    let f = real!("vkCmdBlitImage", vk::Image, vk::ImageLayout, vk::Image, vk::ImageLayout, u32, *const vk::ImageBlit, vk::Filter);
+unsafe extern "system" fn a_blit(
+    cb: vk::CommandBuffer,
+    s: vk::Image,
+    sl: vk::ImageLayout,
+    d: vk::Image,
+    dl: vk::ImageLayout,
+    n: u32,
+    r: *const vk::ImageBlit,
+    flt: vk::Filter,
+) {
+    let f = real!(
+        "vkCmdBlitImage",
+        vk::Image,
+        vk::ImageLayout,
+        vk::Image,
+        vk::ImageLayout,
+        u32,
+        *const vk::ImageBlit,
+        vk::Filter
+    );
     if !deferring(cb) {
         return f(cb, s, sl, d, dl, n, r, flt);
     }
@@ -494,8 +648,22 @@ unsafe extern "system" fn a_blit(cb: vk::CommandBuffer, s: vk::Image, sl: vk::Im
         f(cb, s, sl, d, dl, n, r.0.as_ptr(), flt)
     })));
 }
-unsafe extern "system" fn a_clear_color(cb: vk::CommandBuffer, i: vk::Image, l: vk::ImageLayout, c: *const vk::ClearColorValue, n: u32, r: *const vk::ImageSubresourceRange) {
-    let f = real!("vkCmdClearColorImage", vk::Image, vk::ImageLayout, *const vk::ClearColorValue, u32, *const vk::ImageSubresourceRange);
+unsafe extern "system" fn a_clear_color(
+    cb: vk::CommandBuffer,
+    i: vk::Image,
+    l: vk::ImageLayout,
+    c: *const vk::ClearColorValue,
+    n: u32,
+    r: *const vk::ImageSubresourceRange,
+) {
+    let f = real!(
+        "vkCmdClearColorImage",
+        vk::Image,
+        vk::ImageLayout,
+        *const vk::ClearColorValue,
+        u32,
+        *const vk::ImageSubresourceRange
+    );
     if !deferring(cb) {
         return f(cb, i, l, c, n, r);
     }
@@ -505,8 +673,22 @@ unsafe extern "system" fn a_clear_color(cb: vk::CommandBuffer, i: vk::Image, l: 
         f(cb, i, l, &c, n, r.0.as_ptr())
     })));
 }
-unsafe extern "system" fn a_clear_ds(cb: vk::CommandBuffer, i: vk::Image, l: vk::ImageLayout, c: *const vk::ClearDepthStencilValue, n: u32, r: *const vk::ImageSubresourceRange) {
-    let f = real!("vkCmdClearDepthStencilImage", vk::Image, vk::ImageLayout, *const vk::ClearDepthStencilValue, u32, *const vk::ImageSubresourceRange);
+unsafe extern "system" fn a_clear_ds(
+    cb: vk::CommandBuffer,
+    i: vk::Image,
+    l: vk::ImageLayout,
+    c: *const vk::ClearDepthStencilValue,
+    n: u32,
+    r: *const vk::ImageSubresourceRange,
+) {
+    let f = real!(
+        "vkCmdClearDepthStencilImage",
+        vk::Image,
+        vk::ImageLayout,
+        *const vk::ClearDepthStencilValue,
+        u32,
+        *const vk::ImageSubresourceRange
+    );
     if !deferring(cb) {
         return f(cb, i, l, c, n, r);
     }
@@ -516,8 +698,20 @@ unsafe extern "system" fn a_clear_ds(cb: vk::CommandBuffer, i: vk::Image, l: vk:
         f(cb, i, l, &c, n, r.0.as_ptr())
     })));
 }
-unsafe extern "system" fn a_clear_att(cb: vk::CommandBuffer, n: u32, a: *const vk::ClearAttachment, nr: u32, r: *const vk::ClearRect) {
-    let f = real!("vkCmdClearAttachments", u32, *const vk::ClearAttachment, u32, *const vk::ClearRect);
+unsafe extern "system" fn a_clear_att(
+    cb: vk::CommandBuffer,
+    n: u32,
+    a: *const vk::ClearAttachment,
+    nr: u32,
+    r: *const vk::ClearRect,
+) {
+    let f = real!(
+        "vkCmdClearAttachments",
+        u32,
+        *const vk::ClearAttachment,
+        u32,
+        *const vk::ClearRect
+    );
     if !deferring(cb) {
         return f(cb, n, a, nr, r);
     }
@@ -539,21 +733,32 @@ unsafe extern "system" fn a_barrier2(cb: vk::CommandBuffer, d: *const vk::Depend
     }
     let di = *d;
     let m = SendVec(copy(di.p_memory_barriers, di.memory_barrier_count));
-    let b = SendVec(copy(di.p_buffer_memory_barriers, di.buffer_memory_barrier_count));
-    let i = SendVec(copy(di.p_image_memory_barriers, di.image_memory_barrier_count));
+    let b = SendVec(copy(
+        di.p_buffer_memory_barriers,
+        di.buffer_memory_barrier_count,
+    ));
+    let i = SendVec(copy(
+        di.p_image_memory_barriers,
+        di.image_memory_barrier_count,
+    ));
     let flags = di.dependency_flags;
     push(Cmd::Owned(Box::new(move || {
         let (m, b, i) = (m, b, i);
         let mut d = vk::DependencyInfo::default();
         d.dependency_flags = flags;
         (d.memory_barrier_count, d.p_memory_barriers) = (m.0.len() as u32, m.0.as_ptr());
-        (d.buffer_memory_barrier_count, d.p_buffer_memory_barriers) = (b.0.len() as u32, b.0.as_ptr());
-        (d.image_memory_barrier_count, d.p_image_memory_barriers) = (i.0.len() as u32, i.0.as_ptr());
+        (d.buffer_memory_barrier_count, d.p_buffer_memory_barriers) =
+            (b.0.len() as u32, b.0.as_ptr());
+        (d.image_memory_barrier_count, d.p_image_memory_barriers) =
+            (i.0.len() as u32, i.0.as_ptr());
         f(cb, &d)
     })));
 }
 /// A pass: its attachments copied (a chained pass info is drained instead).
-unsafe extern "system" fn a_begin_rendering(cb: vk::CommandBuffer, ri: *const vk::RenderingInfo<'static>) {
+unsafe extern "system" fn a_begin_rendering(
+    cb: vk::CommandBuffer,
+    ri: *const vk::RenderingInfo<'static>,
+) {
     let f = real!("vkCmdBeginRendering", *const vk::RenderingInfo<'static>);
     if !deferring(cb) {
         return f(cb, ri);
@@ -564,43 +769,89 @@ unsafe extern "system" fn a_begin_rendering(cb: vk::CommandBuffer, ri: *const vk
     }
     let r = *ri;
     let colors = SendVec(copy(r.p_color_attachments, r.color_attachment_count));
-    let depth = SendVec(if r.p_depth_attachment.is_null() { vec![] } else { vec![*r.p_depth_attachment] });
-    let stencil = SendVec(if r.p_stencil_attachment.is_null() { vec![] } else { vec![*r.p_stencil_attachment] });
+    let depth = SendVec(if r.p_depth_attachment.is_null() {
+        vec![]
+    } else {
+        vec![*r.p_depth_attachment]
+    });
+    let stencil = SendVec(if r.p_stencil_attachment.is_null() {
+        vec![]
+    } else {
+        vec![*r.p_stencil_attachment]
+    });
     let (flags, area, layers, mask) = (r.flags, r.render_area, r.layer_count, r.view_mask);
     push(Cmd::Owned(Box::new(move || {
         let (colors, depth, stencil) = (colors, depth, stencil);
-        let mut ri = vk::RenderingInfo::default().flags(flags).render_area(area).layer_count(layers).view_mask(mask);
-        (ri.color_attachment_count, ri.p_color_attachments) = (colors.0.len() as u32, colors.0.as_ptr());
+        let mut ri = vk::RenderingInfo::default()
+            .flags(flags)
+            .render_area(area)
+            .layer_count(layers)
+            .view_mask(mask);
+        (ri.color_attachment_count, ri.p_color_attachments) =
+            (colors.0.len() as u32, colors.0.as_ptr());
         ri.p_depth_attachment = depth.0.first().map_or(core::ptr::null(), |d| d as *const _);
-        ri.p_stencil_attachment = stencil.0.first().map_or(core::ptr::null(), |s| s as *const _);
+        ri.p_stencil_attachment = stencil
+            .0
+            .first()
+            .map_or(core::ptr::null(), |s| s as *const _);
         f(cb, &ri)
     })));
 }
 
 fn array_table() -> Vec<(&'static str, usize)> {
     vec![
-    ("vkCmdCopyBuffer", a_copy_buf as *const () as usize),
-    ("vkCmdCopyImage", a_copy_img as *const () as usize),
-    ("vkCmdCopyBufferToImage", a_copy_b2i as *const () as usize),
-    ("vkCmdCopyImageToBuffer", a_copy_i2b as *const () as usize),
-    ("vkCmdBlitImage", a_blit as *const () as usize),
-    ("vkCmdClearColorImage", a_clear_color as *const () as usize),
-    ("vkCmdClearDepthStencilImage", a_clear_ds as *const () as usize),
-    ("vkCmdClearAttachments", a_clear_att as *const () as usize),
-    ("vkCmdPipelineBarrier2", a_barrier2 as *const () as usize),
-    ("vkCmdBeginRendering", a_begin_rendering as *const () as usize),
-    ("vkCmdSetViewportWithCount", a_viewports as *const () as usize),
-    ("vkCmdSetScissorWithCount", a_scissors as *const () as usize),
-    ("vkCmdSetBlendConstants", a_blend_constants as *const () as usize),
-    ("vkCmdSetSampleMaskEXT", a_sample_mask as *const () as usize),
-    ("vkCmdSetColorBlendEnableEXT", a_blend_enable as *const () as usize),
-    ("vkCmdSetColorBlendEquationEXT", a_blend_eq as *const () as usize),
-    ("vkCmdSetColorWriteMaskEXT", a_write_mask as *const () as usize),
-    ("vkCmdBindVertexBuffers", a_vertex_buffers as *const () as usize),
-    ("vkCmdPushConstants", a_push_constants as *const () as usize),
-    ("vkCmdBindDescriptorSets", a_bind_sets as *const () as usize),
-    ("vkCmdSetDescriptorBufferOffsetsEXT", a_db_offsets as *const () as usize),
-    ("vkCmdSetVertexInputEXT", a_vertex_input as *const () as usize),
+        ("vkCmdCopyBuffer", a_copy_buf as *const () as usize),
+        ("vkCmdCopyImage", a_copy_img as *const () as usize),
+        ("vkCmdCopyBufferToImage", a_copy_b2i as *const () as usize),
+        ("vkCmdCopyImageToBuffer", a_copy_i2b as *const () as usize),
+        ("vkCmdBlitImage", a_blit as *const () as usize),
+        ("vkCmdClearColorImage", a_clear_color as *const () as usize),
+        (
+            "vkCmdClearDepthStencilImage",
+            a_clear_ds as *const () as usize,
+        ),
+        ("vkCmdClearAttachments", a_clear_att as *const () as usize),
+        ("vkCmdPipelineBarrier2", a_barrier2 as *const () as usize),
+        (
+            "vkCmdBeginRendering",
+            a_begin_rendering as *const () as usize,
+        ),
+        (
+            "vkCmdSetViewportWithCount",
+            a_viewports as *const () as usize,
+        ),
+        ("vkCmdSetScissorWithCount", a_scissors as *const () as usize),
+        (
+            "vkCmdSetBlendConstants",
+            a_blend_constants as *const () as usize,
+        ),
+        ("vkCmdSetSampleMaskEXT", a_sample_mask as *const () as usize),
+        (
+            "vkCmdSetColorBlendEnableEXT",
+            a_blend_enable as *const () as usize,
+        ),
+        (
+            "vkCmdSetColorBlendEquationEXT",
+            a_blend_eq as *const () as usize,
+        ),
+        (
+            "vkCmdSetColorWriteMaskEXT",
+            a_write_mask as *const () as usize,
+        ),
+        (
+            "vkCmdBindVertexBuffers",
+            a_vertex_buffers as *const () as usize,
+        ),
+        ("vkCmdPushConstants", a_push_constants as *const () as usize),
+        ("vkCmdBindDescriptorSets", a_bind_sets as *const () as usize),
+        (
+            "vkCmdSetDescriptorBufferOffsetsEXT",
+            a_db_offsets as *const () as usize,
+        ),
+        (
+            "vkCmdSetVertexInputEXT",
+            a_vertex_input as *const () as usize,
+        ),
     ]
 }
 
@@ -621,7 +872,9 @@ fn real_of(name: &str) -> usize {
         return p;
     }
     let c = std::ffi::CString::new(name).unwrap();
-    let p = unsafe { (t.gdpa)(t.device, c.as_ptr()) }.map(|f| f as usize).unwrap_or(0);
+    let p = unsafe { (t.gdpa)(t.device, c.as_ptr()) }
+        .map(|f| f as usize)
+        .unwrap_or(0);
     if p == 0 {
         MISSES.fetch_add(1, Ordering::Relaxed);
     }
@@ -629,17 +882,27 @@ fn real_of(name: &str) -> usize {
     p
 }
 
-unsafe extern "system" fn shadow_gdpa(device: vk::Device, name: *const core::ffi::c_char) -> vk::PFN_vkVoidFunction {
+unsafe extern "system" fn shadow_gdpa(
+    device: vk::Device,
+    name: *const core::ffi::c_char,
+) -> vk::PFN_vkVoidFunction {
     let t = T.get().unwrap();
     let real = (t.gdpa)(device, name);
-    let Ok(n) = std::ffi::CStr::from_ptr(name).to_str() else { return real };
+    let Ok(n) = std::ffi::CStr::from_ptr(name).to_str() else {
+        return real;
+    };
     if real.is_none() {
         return None;
     }
     for table in [scalar_table(), drained_table(), array_table()] {
         if let Some(&(_, shim)) = table.iter().find(|(k, _)| *k == n) {
-            t.real.lock().unwrap().insert(n.to_string(), real.unwrap() as usize);
-            return Some(core::mem::transmute::<usize, unsafe extern "system" fn()>(shim));
+            t.real
+                .lock()
+                .unwrap()
+                .insert(n.to_string(), real.unwrap() as usize);
+            return Some(core::mem::transmute::<usize, unsafe extern "system" fn()>(
+                shim,
+            ));
         }
     }
     if n.starts_with("vkCmd") {
@@ -657,11 +920,20 @@ unsafe extern "system" fn shadow_gdpa(device: vk::Device, name: *const core::ffi
 
 /// An instance whose device-level lookups hand out the shims (the real device and loaders are made through it).
 pub fn shadow_instance(instance: &ash::Instance, device: vk::Device) -> ash::Instance {
-    let _ = T.set(Tables { gdpa: instance.fp_v1_0().get_device_proc_addr, device, real: Mutex::new(Default::default()) });
+    let _ = T.set(Tables {
+        gdpa: instance.fp_v1_0().get_device_proc_addr,
+        device,
+        real: Mutex::new(Default::default()),
+    });
     let mut f0 = instance.fp_v1_0().clone();
     f0.get_device_proc_addr = shadow_gdpa;
     ACTIVE.store(true, Ordering::Relaxed);
     let _ = ring();
     crate::vklog!("deferred recording: the replay's commands are recorded on a thread of their own (NXGFX_DEFER=1)");
-    ash::Instance::from_parts_1_3(instance.handle(), f0, instance.fp_v1_1().clone(), instance.fp_v1_3().clone())
+    ash::Instance::from_parts_1_3(
+        instance.handle(),
+        f0,
+        instance.fp_v1_1().clone(),
+        instance.fp_v1_3().clone(),
+    )
 }

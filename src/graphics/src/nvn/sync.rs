@@ -54,25 +54,38 @@ nvn_fns! {
         1
     }
     fn nvnSyncWait(s: *const NVNsync, timeout: u64) -> u32 {
+        let diag = vk::queue::wait_diag::Wait::new(s as usize, timeout);
         // a fence recorded in a command buffer still queued for the replay thread is set once that replays (Turbo's
         // aq_wait_fenced: until the sync is fenced or the queue has run dry, within the timeout; a poll does not wait)
         if (*(s as *const sync_t)).fenced == 0 && timeout > 0 && vk::queue::aq_busy() {
+            diag.set("publication wait: blocking hook entry", None);
             let fenced = &(*(s as *const sync_t)).fenced as *const u32 as usize;
-            super::blocking(|| vk::queue::aq_wait_until(timeout, || unsafe { core::ptr::read_volatile(fenced as *const u32) } != 0));
+            super::blocking(|| {
+                diag.set("await command-buffer fence publication", None);
+                vk::queue::aq_wait_until(timeout, || unsafe { core::ptr::read_volatile(fenced as *const u32) } != 0);
+                diag.set("publication wait returned: blocking hook re-entry", None);
+            });
         }
         let o = &*(s as *const sync_t);
+        diag.set("check fence completion", Some(o.fence));
         if o.fenced == 0 || vk::queue::fence_done(o.fence) {
             return sync_wait::ALREADY_SIGNALED;
         }
         let t0 = std::time::Instant::now();
         let fence = o.fence;
-        let ok = super::blocking(|| vk::queue::wait_fence(fence, timeout));
+        diag.set("fence wait: blocking hook entry", Some(fence));
+        let ok = super::blocking(|| {
+            diag.set("wait fence", Some(fence));
+            let ok = vk::queue::wait_fence(fence, timeout);
+            diag.set(if ok { "fence satisfied: blocking hook re-entry" } else { "fence expired: blocking hook re-entry" }, Some(fence));
+            ok
+        });
         vk::perf::add(vk::perf::C::WaitSyncNs, t0.elapsed().as_nanos() as u64);
         if ok {
             sync_wait::CONDITION_SATISFIED
         } else {
             if timeout >= 1_000_000_000 {
-                crate::log::red(&format!("nvnSyncWait: a {:.1} s wait on fence {} expired after {:.1} s", timeout as f64 / 1e9, o.fence, t0.elapsed().as_secs_f64()));
+                crate::vklog!("nvnSyncWait: a {:.1} s timed wait on fence {} returned TIMEOUT_EXPIRED after {:.1} s", timeout as f64 / 1e9, o.fence, t0.elapsed().as_secs_f64());
             }
             sync_wait::TIMEOUT_EXPIRED
         }

@@ -37,6 +37,8 @@ pub enum Placement {
 }
 
 pub struct Pool {
+    /// Registration identity, distinct even when guest base and Vulkan handles are reused.
+    pub identity: u64,
     pub base: u64,
     pub size: u64,
     pub flags: u32,
@@ -83,7 +85,13 @@ pub fn upload_budget() -> u64 {
     match BUDGET_OVERRIDE.load(Ordering::Relaxed) {
         0 => {
             static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-            *V.get_or_init(|| std::env::var("NXGFX_UPLOAD_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(64) << 20)
+            *V.get_or_init(|| {
+                std::env::var("NXGFX_UPLOAD_MB")
+                    .ok()
+                    .and_then(|v| v.parse::<u64>().ok())
+                    .unwrap_or(64)
+                    << 20
+            })
         }
         o => o,
     }
@@ -137,12 +145,16 @@ pub static GRAN_BOUND: AtomicU64 = AtomicU64::new(0);
 
 fn gran_on(g: &Gpu) -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    g.d.caps.sparse_buffer && *ON.get_or_init(|| std::env::var("NXGFX_POOL_SPARSE").as_deref() != Ok("0"))
+    g.d.caps.sparse_buffer
+        && *ON.get_or_init(|| std::env::var("NXGFX_POOL_SPARSE").as_deref() != Ok("0"))
 }
 
 /// The granules [first, end) a range [off, off + n) of a pool touches.
 pub fn granules_of(gran: u64, off: u64, n: u64) -> (usize, usize) {
-    ((off / gran) as usize, (off + n.max(1)).div_ceil(gran) as usize)
+    (
+        (off / gran) as usize,
+        (off + n.max(1)).div_ceil(gran) as usize,
+    )
 }
 
 /// The largest buffer the device makes (maintenance4 `maxBufferSize`), or less when a test or
@@ -154,9 +166,20 @@ pub fn max_buffer(g: &Gpu) -> u64 {
     let dev = *DEV.get_or_init(|| {
         let mut m4 = vk::PhysicalDeviceMaintenance4Properties::default();
         let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut m4);
-        unsafe { g.d.instance.get_physical_device_properties2(g.d.pdev, &mut p2) };
-        let max = if m4.max_buffer_size > 0 { m4.max_buffer_size } else { u64::MAX };
-        let env = std::env::var("NXGFX_MAX_BUFFER_MB").ok().and_then(|v| v.parse::<u64>().ok()).map(|v| v << 20).unwrap_or(u64::MAX);
+        unsafe {
+            g.d.instance
+                .get_physical_device_properties2(g.d.pdev, &mut p2)
+        };
+        let max = if m4.max_buffer_size > 0 {
+            m4.max_buffer_size
+        } else {
+            u64::MAX
+        };
+        let env = std::env::var("NXGFX_MAX_BUFFER_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .map(|v| v << 20)
+            .unwrap_or(u64::MAX);
         max.min(env)
     });
     match MAX_BUFFER_OVERRIDE.load(Ordering::Relaxed) {
@@ -198,7 +221,9 @@ pub static POOL_GEN: AtomicU64 = AtomicU64::new(1);
 fn buf_usage(g: &Gpu) -> vk::BufferUsageFlags {
     if g.d.caps.rt {
         // pool memory is also ray-tracing geometry and instance input (vk/rt.rs)
-        BUF_USAGE | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+        BUF_USAGE
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
+            | vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
     } else if g.d.caps.bda {
         BUF_USAGE | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS
     } else {
@@ -261,7 +286,10 @@ mod watch {
     }
     /// [lo, hi) split where its allocations (VirtualQuery's allocation base) change.
     fn allocations(lo: u64, hi: u64) -> Vec<(u64, u64)> {
-        allocations_with_base(lo, hi).into_iter().map(|(a, b, _)| (a, b)).collect()
+        allocations_with_base(lo, hi)
+            .into_iter()
+            .map(|(a, b, _)| (a, b))
+            .collect()
     }
     fn allocations_with_base(lo: u64, hi: u64) -> Vec<(u64, u64, u64)> {
         use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION};
@@ -269,7 +297,14 @@ mod watch {
         let mut at = lo;
         while at < hi {
             let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
-            if unsafe { VirtualQuery(at as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+            if unsafe {
+                VirtualQuery(
+                    at as *const _,
+                    &mut mbi,
+                    core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                )
+            } == 0
+            {
                 out.push((at, hi, 0));
                 break;
             }
@@ -374,7 +409,16 @@ pub fn guest_bytes(a: u64, n: u64) -> std::borrow::Cow<'static, [u8]> {
     let mut v = vec![0u8; n as usize];
     let rd = |at: u64, dst: &mut [u8]| -> bool {
         let mut got = 0usize;
-        unsafe { ReadProcessMemory(GetCurrentProcess(), at as *const _, dst.as_mut_ptr() as *mut _, dst.len(), &mut got) != 0 && got == dst.len() }
+        unsafe {
+            ReadProcessMemory(
+                GetCurrentProcess(),
+                at as *const _,
+                dst.as_mut_ptr() as *mut _,
+                dst.len(),
+                &mut got,
+            ) != 0
+                && got == dst.len()
+        }
     };
     if n == 0 || rd(a, &mut v) {
         return std::borrow::Cow::Owned(v);
@@ -416,13 +460,16 @@ pub fn guest_bytes(a: u64, n: u64) -> std::borrow::Cow<'static, [u8]> {
     let c = committed(a, n);
     if c.len() == 1 && c[0] == (a, n) {
         // SAFETY: committed guest memory
-        return std::borrow::Cow::Borrowed(unsafe { core::slice::from_raw_parts(a as *const u8, n as usize) });
+        return std::borrow::Cow::Borrowed(unsafe {
+            core::slice::from_raw_parts(a as *const u8, n as usize)
+        });
     }
     let mut v = vec![0u8; n as usize];
     for (ca, cn) in c {
         let o = (ca - a) as usize;
         // SAFETY: committed guest memory
-        v[o..o + cn as usize].copy_from_slice(unsafe { core::slice::from_raw_parts(ca as *const u8, cn as usize) });
+        v[o..o + cn as usize]
+            .copy_from_slice(unsafe { core::slice::from_raw_parts(ca as *const u8, cn as usize) });
     }
     std::borrow::Cow::Owned(v)
 }
@@ -436,7 +483,13 @@ pub fn committed(a: u64, n: u64) -> Vec<(u64, u64)> {
     let mut at = a;
     while at < end {
         let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
-        let r = unsafe { VirtualQuery(at as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+        let r = unsafe {
+            VirtualQuery(
+                at as *const _,
+                &mut mbi,
+                core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        };
         if r == 0 {
             // not queryable: take the rest as it is
             out.push((at, end - at));
@@ -495,8 +548,10 @@ pub fn pool_add(p: &pool_t) {
     let base = p.mem as u64;
     let placement = placement_for(p.flags);
     let (lo, hi) = page_range(base, p.size);
-    let watched = matches!(placement, Placement::Mirror | Placement::Host) && watch::take(lo, hi, false).is_some();
+    let watched = matches!(placement, Placement::Mirror | Placement::Host)
+        && watch::take(lo, hi, false).is_some();
     let pool = Pool {
+        identity: POOL_GEN.fetch_add(1, Ordering::AcqRel) + 1,
         base,
         size: p.size,
         flags: p.flags,
@@ -518,10 +573,19 @@ pub fn pool_add(p: &pool_t) {
         deferred: Vec::new(),
     };
     if std::env::var("NXGFX_POOL_LOG").is_ok() {
-        crate::vklog!("pool {base:#x} size {:#x} flags {:#x}: {placement:?}{}", p.size, p.flags, if watched { " (write watch)" } else { "" });
+        crate::vklog!(
+            "pool {base:#x} size {:#x} flags {:#x}: {placement:?}{}",
+            p.size,
+            p.flags,
+            if watched { " (write watch)" } else { "" }
+        );
     }
-    let old = g.mem.lock().unwrap().by_base.insert(base, pool);
-    POOL_GEN.fetch_add(1, Ordering::Relaxed);
+    let old = {
+        let mut m = g.mem.lock().unwrap();
+        let old = m.by_base.insert(base, pool);
+        POOL_GEN.fetch_add(1, Ordering::Release);
+        old
+    };
     if let Some(o) = old {
         release(g, o);
     }
@@ -556,7 +620,15 @@ fn release(g: &Gpu, p: Pool) {
         }));
     }
     if let Some(b) = p.buf {
-        super::lost::note_gone(|| format!("pool buffer {:#x} of pool {:#x} (+{:#x}), device address {:#x}", vk::Handle::as_raw(b.buf), p.base, p.size, p.da));
+        super::lost::note_gone(|| {
+            format!(
+                "pool buffer {:#x} of pool {:#x} (+{:#x}), device address {:#x}",
+                vk::Handle::as_raw(b.buf),
+                p.base,
+                p.size,
+                p.da
+            )
+        });
         g.q.defer_after_use(Box::new(move |g: &Gpu| g.free_buffer(b)));
     }
 }
@@ -565,8 +637,12 @@ fn release(g: &Gpu, p: Pool) {
 pub fn pool_del(base: u64) {
     super::capture::pool_del(base);
     let Some(g) = Gpu::try_get() else { return };
-    let p = g.mem.lock().unwrap().by_base.remove(&base);
-    POOL_GEN.fetch_add(1, Ordering::Relaxed);
+    let p = {
+        let mut m = g.mem.lock().unwrap();
+        let p = m.by_base.remove(&base);
+        POOL_GEN.fetch_add(1, Ordering::Release);
+        p
+    };
     if let Some(p) = p {
         g.images.lock().unwrap().drop_pool(base, p.size);
         g.tables.requeue_buf_texs(base, base + p.size);
@@ -594,7 +670,11 @@ pub fn addr_known(a: u64, n: u64) -> bool {
 /// The bytes from `a` to the end of its memory pool (0 when `a` is in none).
 pub fn room(a: u64) -> u64 {
     let Some(g) = Gpu::try_get() else { return 0 };
-    let a = if crate::nvn::vpool::is_sparse(a) { crate::nvn::vpool::translate(a, 1).unwrap_or(0) } else { a };
+    let a = if crate::nvn::vpool::is_sparse(a) {
+        crate::nvn::vpool::translate(a, 1).unwrap_or(0)
+    } else {
+        a
+    };
     let m = g.mem.lock().unwrap();
     match find(&m, a, 1) {
         Some(b) => {
@@ -616,11 +696,21 @@ pub fn room(a: u64) -> u64 {
 /// guest page read-only or not committed faulted in the host copy, lane K2).
 #[cfg(windows)]
 pub fn host_writable(a: u64, n: u64) -> bool {
-    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_READWRITE};
+    use windows_sys::Win32::System::Memory::{
+        VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_READWRITE,
+    };
     let (mut at, end) = (a, a.saturating_add(n.max(1)));
     while at < end {
         let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
-        if unsafe { VirtualQuery(at as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 || mbi.State != MEM_COMMIT {
+        if unsafe {
+            VirtualQuery(
+                at as *const _,
+                &mut mbi,
+                core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        } == 0
+            || mbi.State != MEM_COMMIT
+        {
             return false;
         }
         if mbi.Protect & 0xff != PAGE_READWRITE || mbi.Protect & PAGE_GUARD != 0 {
@@ -632,7 +722,8 @@ pub fn host_writable(a: u64, n: u64) -> bool {
 }
 #[cfg(not(windows))]
 pub fn host_writable(a: u64, n: u64) -> bool {
-    nxrt::mem::readable(a, n) && matches!(nxrt::linux::query(a), Some((true, prot, _, _)) if prot & 2 != 0)
+    nxrt::mem::readable(a, n)
+        && matches!(nxrt::linux::query(a), Some((true, prot, _, _)) if prot & 2 != 0)
 }
 
 /// Whether the CPU wrote any page of [a, a + n) since the write watch was last taken there (a peek: nothing reset).
@@ -675,7 +766,9 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
         return;
     }
     let (lo, hi) = page_range(a, n);
-    let Some(pages) = watch::take(lo, hi, true) else { return };
+    let Some(pages) = watch::take(lo, hi, true) else {
+        return;
+    };
     if pages.is_empty() {
         return;
     }
@@ -729,7 +822,11 @@ impl Pool {
         }
         let (k, o, _) = ps[0];
         let (b, b0) = self.window(k)?;
-        let wlen = if self.win == 0 { self.size } else { self.win.min(self.size - k as u64 * self.win) };
+        let wlen = if self.win == 0 {
+            self.size
+        } else {
+            self.win.min(self.size - k as u64 * self.win)
+        };
         Some((b, b0 + o, self.base + k as u64 * self.win, wlen))
     }
 
@@ -768,7 +865,10 @@ impl Pool {
                     return Ok(());
                 }
                 Err(e) => {
-                    crate::log::red_once(&format!("pool {:#x}: host import failed ({e}); mirrored instead", self.base));
+                    crate::log::red_once(&format!(
+                        "pool {:#x}: host import failed ({e}); mirrored instead",
+                        self.base
+                    ));
                     self.placement = Placement::Mirror;
                     let (lo, hi) = page_range(self.base, self.size);
                     self.watched = watch::take(lo, hi, false).is_some();
@@ -776,10 +876,19 @@ impl Pool {
             },
             _ => {}
         }
-        if win == 0 && self.size >= GRAN_MIN && matches!(self.placement, Placement::Mirror | Placement::Vram) && gran_on(g) {
+        if win == 0
+            && self.size >= GRAN_MIN
+            && matches!(self.placement, Placement::Mirror | Placement::Vram)
+            && gran_on(g)
+        {
             return self.make_sparse(g);
         }
-        let b = g.buffer(if win == 0 { self.size } else { win }, buf_usage(g), MemoryLocation::GpuOnly, "pool")?;
+        let b = g.buffer(
+            if win == 0 { self.size } else { win },
+            buf_usage(g),
+            MemoryLocation::GpuOnly,
+            "pool",
+        )?;
         self.win = win;
         if win != 0 {
             let n = self.size.div_ceil(win);
@@ -803,9 +912,15 @@ impl Pool {
         // guest's memory hold anything (a large pool the game has not written yet is zero and is not read here: reading
         // it would commit it, and staging it would double it in host memory; Mario Kart World's pools)
         super::lazy::touch(self.base, self.size);
-        unsafe { g.dev().cmd_fill_buffer(sub.pre, b.buf, 0, vk::WHOLE_SIZE, 0) };
+        unsafe {
+            g.dev()
+                .cmd_fill_buffer(sub.pre, b.buf, 0, vk::WHOLE_SIZE, 0)
+        };
         for w in &self.wins {
-            unsafe { g.dev().cmd_fill_buffer(sub.pre, w.buf, 0, vk::WHOLE_SIZE, 0) };
+            unsafe {
+                g.dev()
+                    .cmd_fill_buffer(sub.pre, w.buf, 0, vk::WHOLE_SIZE, 0)
+            };
         }
         super::queue::full_barrier(g, sub.pre);
         self.buf = Some(b);
@@ -826,7 +941,13 @@ impl Pool {
         }
         UPLOAD_BYTES.fetch_add(staged, Ordering::Relaxed);
         if self.size >= 256 << 20 {
-            crate::vklog!("pool {:#x}: {} MB on the GPU, {} MB of it committed and uploaded ({:?})", self.base, self.size >> 20, staged >> 20, self.placement);
+            crate::vklog!(
+                "pool {:#x}: {} MB on the GPU, {} MB of it committed and uploaded ({:?})",
+                self.base,
+                self.size >> 20,
+                staged >> 20,
+                self.placement
+            );
         }
         if self.placement == Placement::Mirror {
             let (lo, hi) = page_range(self.base, self.size);
@@ -849,17 +970,41 @@ impl Pool {
             .usage(buf_usage(g))
             .flags(vk::BufferCreateFlags::SPARSE_BINDING | vk::BufferCreateFlags::SPARSE_RESIDENCY)
             .sharing_mode(vk::SharingMode::EXCLUSIVE);
-        let buf = unsafe { dev.create_buffer(&bda, None) }.map_err(|e| format!("pool {:#x}: sparse buffer: {e}", self.base))?;
+        let buf = unsafe { dev.create_buffer(&bda, None) }
+            .map_err(|e| format!("pool {:#x}: sparse buffer: {e}", self.base))?;
         let req = unsafe { dev.get_buffer_memory_requirements(buf) };
         let gran = GRAN.div_ceil(req.alignment.max(1)) * req.alignment.max(1);
         let n = size.div_ceil(gran) as usize;
-        let addr = if g.d.caps.bda { unsafe { dev.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buf)) } } else { 0 };
-        self.buf = Some(Buf { buf, alloc: None, mem: vk::DeviceMemory::null(), size, ptr: core::ptr::null_mut(), addr });
+        let addr = if g.d.caps.bda {
+            unsafe {
+                dev.get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buf))
+            }
+        } else {
+            0
+        };
+        self.buf = Some(Buf {
+            buf,
+            alloc: None,
+            mem: vk::DeviceMemory::null(),
+            size,
+            ptr: core::ptr::null_mut(),
+            addr,
+        });
         self.buf_off = 0;
-        self.gran = Some(Granules { size: gran, mem: (0..n).map(|_| None).collect(), req, bound: 0 });
+        self.gran = Some(Granules {
+            size: gran,
+            mem: (0..n).map(|_| None).collect(),
+            req,
+            bound: 0,
+        });
         static N: AtomicU64 = AtomicU64::new(0);
         if N.fetch_add(1, Ordering::Relaxed) < 32 {
-            crate::vklog!("memory pool {:#x}+{:#x}: device-local, backed in {} KB granules on first use", self.base, self.size, gran >> 10);
+            crate::vklog!(
+                "memory pool {:#x}+{:#x}: device-local, backed in {} KB granules on first use",
+                self.base,
+                self.size,
+                gran >> 10
+            );
         }
         if self.placement == Placement::Mirror {
             let (lo, hi) = page_range(self.base, self.size);
@@ -875,8 +1020,16 @@ impl Pool {
 
     /// The granules of [a, a + n) that are not bound yet get memory, a bind before this submission, and the guest
     /// memory's committed bytes there (zeros elsewhere), recorded into `sub`.
-    pub fn bind(&mut self, g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Result<(), String> {
-        let Some(gr) = self.gran.as_mut() else { return Ok(()) };
+    pub fn bind(
+        &mut self,
+        g: &Gpu,
+        sub: &mut super::queue::Sub,
+        a: u64,
+        n: u64,
+    ) -> Result<(), String> {
+        let Some(gr) = self.gran.as_mut() else {
+            return Ok(());
+        };
         let (g0, g1) = granules_of(gr.size, a - self.base, n);
         let g1 = g1.min(gr.mem.len());
         if (g0..g1).all(|i| gr.mem[i].is_some()) {
@@ -888,16 +1041,38 @@ impl Pool {
             if gr.mem[i].is_some() {
                 continue;
             }
-            let req = vk::MemoryRequirements { size: gr.size, alignment: gr.req.alignment, memory_type_bits: gr.req.memory_type_bits };
+            let req = vk::MemoryRequirements {
+                size: gr.size,
+                alignment: gr.req.alignment,
+                memory_type_bits: gr.req.memory_type_bits,
+            };
             let al = g
                 .alloc
                 .lock()
                 .unwrap()
-                .allocate(&AllocationCreateDesc { name: "pool granule", requirements: req, location: MemoryLocation::GpuOnly, linear: true, allocation_scheme: AllocationScheme::GpuAllocatorManaged })
-                .map_err(|e| format!("no device memory to back pool {:#x} at {:#x}: {e}", self.base, i as u64 * gr.size))?;
+                .allocate(&AllocationCreateDesc {
+                    name: "pool granule",
+                    requirements: req,
+                    location: MemoryLocation::GpuOnly,
+                    linear: true,
+                    allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+                })
+                .map_err(|e| {
+                    format!(
+                        "no device memory to back pool {:#x} at {:#x}: {e}",
+                        self.base,
+                        i as u64 * gr.size
+                    )
+                })?;
             super::sparse::bind_buffer(
                 buf,
-                vk::SparseMemoryBind { resource_offset: i as u64 * gr.size, size: gr.size, memory: unsafe { al.memory() }, memory_offset: al.offset(), flags: vk::SparseMemoryBindFlags::empty() },
+                vk::SparseMemoryBind {
+                    resource_offset: i as u64 * gr.size,
+                    size: gr.size,
+                    memory: unsafe { al.memory() },
+                    memory_offset: al.offset(),
+                    flags: vk::SparseMemoryBindFlags::empty(),
+                },
             );
             gr.mem[i] = Some(al);
             gr.bound += gr.size;
@@ -907,7 +1082,10 @@ impl Pool {
         let gsz = gr.size;
         // the new granules' content: zeros, then what the guest memory holds there (its committed parts)
         for &i in &fresh {
-            unsafe { g.dev().cmd_fill_buffer(sub.pre, buf, i as u64 * gsz, gsz, 0) };
+            unsafe {
+                g.dev()
+                    .cmd_fill_buffer(sub.pre, buf, i as u64 * gsz, gsz, 0)
+            };
         }
         super::queue::full_barrier(g, sub.pre);
         if self.placement == Placement::Mirror || self.placement == Placement::Vram {
@@ -957,7 +1135,9 @@ impl Pool {
 
     /// [a, a + n) as the runs that lie in bound granules (all of it for a pool backed whole).
     fn bound_parts(&self, a: u64, n: u64) -> Vec<(u64, u64)> {
-        let Some(gr) = self.gran.as_ref() else { return vec![(a, n)] };
+        let Some(gr) = self.gran.as_ref() else {
+            return vec![(a, n)];
+        };
         let mut out: Vec<(u64, u64)> = vec![];
         let (g0, g1) = granules_of(gr.size, a - self.base, n);
         for i in g0..g1.min(gr.mem.len()) {
@@ -976,7 +1156,9 @@ impl Pool {
 
     /// The bound span around [a, a + n) after `bind` (a resolve's cache entry stays inside memory that exists).
     fn bound_span(&self, a: u64, n: u64) -> (u64, u64) {
-        let Some(gr) = self.gran.as_ref() else { return (self.base, self.size) };
+        let Some(gr) = self.gran.as_ref() else {
+            return (self.base, self.size);
+        };
         let (mut g0, mut g1) = granules_of(gr.size, a - self.base, n);
         while g0 > 0 && gr.mem[g0 - 1].is_some() {
             g0 -= 1;
@@ -985,7 +1167,10 @@ impl Pool {
             g1 += 1;
         }
         let lo = self.base + g0 as u64 * gr.size;
-        (lo, (self.base + g1 as u64 * gr.size).min(self.base + self.size) - lo)
+        (
+            lo,
+            (self.base + g1 as u64 * gr.size).min(self.base + self.size) - lo,
+        )
     }
 
     /// The buffer's device address (raw global memory) once it has one.
@@ -995,13 +1180,25 @@ impl Pool {
                 let ai = vk::BufferDeviceAddressInfo::default().buffer(b.buf);
                 let start = unsafe { g.dev().get_buffer_device_address(&ai) };
                 self.da = start + self.buf_off;
-                ADDRS.write().unwrap().get_or_insert_with(HashMap::new).insert(vk::Handle::as_raw(b.buf), start);
+                ADDRS
+                    .write()
+                    .unwrap()
+                    .get_or_insert_with(HashMap::new)
+                    .insert(vk::Handle::as_raw(b.buf), start);
             }
             self.wins_da.clear();
             for w in &self.wins {
-                let start = unsafe { g.dev().get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(w.buf)) };
+                let start = unsafe {
+                    g.dev().get_buffer_device_address(
+                        &vk::BufferDeviceAddressInfo::default().buffer(w.buf),
+                    )
+                };
                 self.wins_da.push(start);
-                ADDRS.write().unwrap().get_or_insert_with(HashMap::new).insert(vk::Handle::as_raw(w.buf), start);
+                ADDRS
+                    .write()
+                    .unwrap()
+                    .get_or_insert_with(HashMap::new)
+                    .insert(vk::Handle::as_raw(w.buf), start);
             }
         }
         POOL_GEN.fetch_add(1, Ordering::Relaxed);
@@ -1073,31 +1270,71 @@ fn import(g: &Gpu, base: u64, size: u64) -> Result<(Buf, u64), String> {
     }
     let al = g.d.caps.import_align.max(PAGE);
     let lo = base & !(al - 1);
-    let hi = (base + size + al - 1) & !(al - 1);
+    let hi = base.checked_add(size).and_then(|end| end.checked_add(al - 1))
+        .ok_or("import range overflow")? & !(al - 1);
+    if size == 0 { return Err("empty import range".into()); }
     let ht = vk::ExternalMemoryHandleTypeFlags::HOST_ALLOCATION_EXT;
     let mut hp = vk::MemoryHostPointerPropertiesEXT::default();
-    let r = unsafe { (g.d.emh.fp().get_memory_host_pointer_properties_ext)(g.dev().handle(), ht, lo as *const core::ffi::c_void, &mut hp) };
+    let r = unsafe {
+        (g.d.emh.fp().get_memory_host_pointer_properties_ext)(
+            g.dev().handle(),
+            ht,
+            lo as *const core::ffi::c_void,
+            &mut hp,
+        )
+    };
     if r != vk::Result::SUCCESS {
         return Err(format!("host pointer properties: {r}"));
     }
     let mut ext = vk::ExternalMemoryBufferCreateInfo::default().handle_types(ht);
-    let ci = vk::BufferCreateInfo::default().size(hi - lo).usage(buf_usage(g)).push_next(&mut ext);
-    let buf = unsafe { g.dev().create_buffer(&ci, None) }.map_err(|e| format!("{e}"))?;
-    let req = unsafe { g.dev().get_buffer_memory_requirements(buf) };
-    let ty = g.d.mem_type(req.memory_type_bits & hp.memory_type_bits, vk::MemoryPropertyFlags::HOST_VISIBLE).ok_or("no memory type")?;
-    let mut imp = vk::ImportMemoryHostPointerInfoEXT::default().handle_type(ht).host_pointer(lo as *mut core::ffi::c_void);
-    let mut fl = vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
-    let mut ai = vk::MemoryAllocateInfo::default().allocation_size(hi - lo).memory_type_index(ty).push_next(&mut imp);
+    let ci = vk::BufferCreateInfo::default()
+        .size(hi - lo)
+        .usage(buf_usage(g))
+        .push_next(&mut ext);
+    let (buf, mem) = super::queue::submission_safety::create_bound_buffer(
+    || unsafe { g.dev().create_buffer(&ci, None) }.map_err(|e| format!("{e}")), |buf| {
+    let req = unsafe { g.dev().get_buffer_memory_requirements(*buf) };
+    let ty =
+        g.d.mem_type(
+            req.memory_type_bits & hp.memory_type_bits,
+            vk::MemoryPropertyFlags::HOST_VISIBLE,
+        )
+        .ok_or("no memory type")?;
+    let mut imp = vk::ImportMemoryHostPointerInfoEXT::default()
+        .handle_type(ht)
+        .host_pointer(lo as *mut core::ffi::c_void);
+    let mut fl =
+        vk::MemoryAllocateFlagsInfo::default().flags(vk::MemoryAllocateFlags::DEVICE_ADDRESS);
+    let mut ai = vk::MemoryAllocateInfo::default()
+        .allocation_size(hi - lo)
+        .memory_type_index(ty)
+        .push_next(&mut imp);
     if g.d.caps.bda {
         ai = ai.push_next(&mut fl);
     }
-    let mem = unsafe { g.dev().allocate_memory(&ai, None) }.map_err(|e| {
-        unsafe { g.dev().destroy_buffer(buf, None) };
-        format!("import: {e}")
-    })?;
-    unsafe { g.dev().bind_buffer_memory(buf, mem, 0) }.map_err(|e| format!("{e}"))?;
-    let addr = if g.d.caps.bda { unsafe { g.dev().get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buf)) } } else { 0 };
-    Ok((Buf { buf, alloc: None, mem, size: hi - lo, ptr: lo as *mut u8, addr }, base - lo))
+    unsafe { g.dev().allocate_memory(&ai, None) }.map_err(|e| format!("import: {e}"))
+    }, |buf, mem| unsafe { g.dev().bind_buffer_memory(*buf, *mem, 0) }.map_err(|e| format!("{e}")),
+        |buf| unsafe { g.dev().destroy_buffer(buf, None) },
+        |mem| unsafe { g.dev().free_memory(mem, None) })?;
+    let addr = if g.d.caps.bda {
+        unsafe {
+            g.dev()
+                .get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buf))
+        }
+    } else {
+        0
+    };
+    Ok((
+        Buf {
+            buf,
+            alloc: None,
+            mem,
+            size: hi - lo,
+            ptr: lo as *mut u8,
+            addr,
+        },
+        base - lo,
+    ))
 }
 
 /// Pool buffers' device addresses by handle (entered when a pool gets its buffer, removed when it goes).
@@ -1105,15 +1342,46 @@ static ADDRS: std::sync::RwLock<Option<HashMap<u64, u64>>> = std::sync::RwLock::
 
 /// The device address of a pool's buffer (descriptor buffers).
 pub fn buffer_address(buf: vk::Buffer) -> Option<u64> {
-    ADDRS.read().unwrap().as_ref().and_then(|m| m.get(&vk::Handle::as_raw(buf)).copied())
+    ADDRS
+        .read()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&vk::Handle::as_raw(buf)).copied())
+}
+
+/// Read-only preflight: no allocation, upload, sparse bind or cache publication.
+/// Pool release is deferred through the open recording by `release`/`defer_after_use`.
+pub(crate) fn prepared_span(g: &Gpu, a: u64, n: u64) -> Option<(vk::Buffer, u64)> {
+    let end = a.checked_add(n)?;
+    if a == 0 || n == 0 || crate::nvn::vpool::is_sparse(a) { return None; }
+    let m = g.mem.lock().unwrap();
+    let (&base, p) = m.by_base.range(..=a).next_back()?;
+    if end > p.base.checked_add(p.size)? || p.gran.is_some() || !p.deferred.is_empty() {
+        return None;
+    }
+    if m.by_base.range((std::ops::Bound::Excluded(base), std::ops::Bound::Unbounded))
+        .next().is_some_and(|(&next, _)| end > next) { return None; }
+    let (buffer, offset, _, _) = p.one(a, n)?;
+    let owner = p.buf.iter().chain(p.wins.iter()).find(|b| b.buf == buffer)?;
+    (offset.checked_add(n)? <= owner.size).then_some((buffer, offset))
 }
 
 /// A GPU address range as (buffer, offset, pool base); creates the pool's buffer at its first use.
-pub fn resolve(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(vk::Buffer, u64, u64)> {
+pub fn resolve(
+    g: &Gpu,
+    sub: &mut super::queue::Sub,
+    a: u64,
+    n: u64,
+) -> Option<(vk::Buffer, u64, u64)> {
     super::perf::timed_fine(super::perf::C::ResolveNs, || resolve_in(g, sub, a, n))
 }
 
-fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(vk::Buffer, u64, u64)> {
+fn resolve_in(
+    g: &Gpu,
+    sub: &mut super::queue::Sub,
+    a: u64,
+    n: u64,
+) -> Option<(vk::Buffer, u64, u64)> {
     // a sparse virtual pool's range: the physical memory its page table maps there (contiguous pages only)
     let a = if crate::nvn::vpool::is_sparse(a) {
         match crate::nvn::vpool::translate(a, n) {
@@ -1137,7 +1405,18 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
     let n1 = n.max(1);
     // `find` takes the pool with the highest base at or below the address (pools laid over each other): a hit only
     // below the next pool's base
-    let hit = LAST.with(|l| l.get().iter().find(|e| e.0 == gen && a >= e.1 && a + n1 <= e.1 + e.2 && a < e.3 && e.4 != vk::Buffer::null()).copied());
+    let hit = LAST.with(|l| {
+        l.get()
+            .iter()
+            .find(|e| {
+                e.0 == gen
+                    && a >= e.1
+                    && a + n1 <= e.1 + e.2
+                    && a < e.3
+                    && e.4 != vk::Buffer::null()
+            })
+            .copied()
+    });
     if let Some((_, lo, _, _, buf, off, pool)) = hit {
         return Some((buf, off + (a - lo), pool));
     }
@@ -1145,7 +1424,9 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
     let Some(b) = find(&m, a, n1) else {
         static N: AtomicU64 = AtomicU64::new(0);
         if N.fetch_add(1, Ordering::Relaxed) < 8 {
-            crate::log::red(&format!("GPU address {a:#x} (+{n:#x}) is in no memory pool"));
+            crate::log::red(&format!(
+                "GPU address {a:#x} (+{n:#x}) is in no memory pool"
+            ));
         }
         return None;
     };
@@ -1168,7 +1449,11 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
         return None;
     };
     // a pool backed in granules: the cache entry covers the bound granules around the range only
-    let (wlo, wlen) = if p.gran.is_some() { p.bound_span(a, n1) } else { (wlo, wlen) };
+    let (wlo, wlen) = if p.gran.is_some() {
+        p.bound_span(a, n1)
+    } else {
+        (wlo, wlen)
+    };
     let off = boff - (a - wlo);
     // CPU writes the frame's upload budget left for later: the ones in this range go now (this use needs them)
     if !p.deferred.is_empty() {
@@ -1179,7 +1464,12 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
 
     let (pb, ps) = (wlo, wlen);
     let cache = p.deferred.is_empty();
-    let next = m.by_base.range(b + 1..).next().map(|(k, _)| *k).unwrap_or(u64::MAX);
+    let next = m
+        .by_base
+        .range(b + 1..)
+        .next()
+        .map(|(k, _)| *k)
+        .unwrap_or(u64::MAX);
     // a pool with deferred writes is not cached: each use looks at them
     if cache {
         LAST.with(|l| {
@@ -1197,7 +1487,10 @@ fn resolve_in(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) -> Option<(v
 /// it is in flight: the guest bytes there are older than the GPU's, and uploading them overwrote the GPU's result
 /// before it came back (asynchronous replay made the window wide: Mario Kart 8 Deluxe's GPU-computed values read as
 /// stale, the black stretches). Those pieces upload once it has landed (NXGFX_WB_GUARD=0: uploaded at once, as before).
-static INFLIGHT: std::sync::Mutex<Inflight> = std::sync::Mutex::new(Inflight { by_start: std::collections::BTreeMap::new(), max_len: 0 });
+static INFLIGHT: std::sync::Mutex<Inflight> = std::sync::Mutex::new(Inflight {
+    by_start: std::collections::BTreeMap::new(),
+    max_len: 0,
+});
 
 /// The in-flight write-back ranges by start: ((start, end) -> how many submissions), and the longest one's length.
 struct Inflight {
@@ -1272,7 +1565,10 @@ fn split_inflight(a: u64, n: u64, inflight: &[(u64, u64)]) -> (Vec<(u64, u64)>, 
         }
         now = next;
     }
-    (now.into_iter().map(|(s, e)| (s, e - s)).collect(), later.into_iter().map(|(s, e)| (s, e - s)).collect())
+    (
+        now.into_iter().map(|(s, e)| (s, e - s)).collect(),
+        later.into_iter().map(|(s, e)| (s, e - s)).collect(),
+    )
 }
 
 /// Uploads held back for an in-flight write-back (submissions that had some).
@@ -1303,6 +1599,151 @@ impl Drop for WatchTimer {
     }
 }
 
+/// (pool base, page start, page end, allocation base), ordered by pool base.
+type WatchedPool = (u64, u64, u64, u64);
+
+fn watch_batch_end(watched: &[WatchedPool], i: usize) -> (usize, u64) {
+    let (mut j, lo, mut hi, ab) = (i + 1, watched[i].1, watched[i].2, watched[i].3);
+    let mut covered = hi - lo;
+    while j < watched.len() {
+        let (_, next_lo, next_hi, next_ab) = watched[j];
+        let end = hi.max(next_hi);
+        let next_covered = covered + next_hi.saturating_sub(hi.max(next_lo));
+        // Limit total holes, not each individual hole. Otherwise thousands of small
+        // pools can join one huge mostly-empty scan while each gap passes the test.
+        let holes = (end - lo).saturating_sub(next_covered);
+        if next_lo > hi && (ab == 0 || next_ab != ab || holes > (next_covered / 2).max(4 << 20)) {
+            break;
+        }
+        covered = next_covered;
+        hi = end;
+        j += 1;
+    }
+    (j, hi)
+}
+
+/// Resetting a scan clears pages belonging to *every* overlapping pool, including
+/// cold pools between the requested ones and aliases sharing a boundary page.
+/// Distribute the union only after all scans, so a later empty scan cannot replace
+/// a dirty result from an earlier overlapping range.
+fn distribute_watched_pages(
+    pools: &[WatchedPool],
+    pages: &mut Vec<u64>,
+    taken: &mut HashMap<u64, Vec<u64>>,
+) {
+    pages.sort_unstable();
+    pages.dedup();
+    for &(base, lo, hi, _) in pools {
+        let a = pages.partition_point(|&p| p < lo);
+        let b = pages.partition_point(|&p| p < hi);
+        if a != b {
+            taken
+                .entry(base)
+                .or_default()
+                .extend_from_slice(&pages[a..b]);
+        }
+    }
+}
+
+#[cfg(test)]
+mod watch_batch_tests {
+    use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn real_write_watch_reset_consumes_a_cold_pools_notification() {
+        use windows_sys::Win32::System::Memory::{
+            VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+        };
+        const MEM_WRITE_WATCH: u32 = 0x20_0000;
+        struct Allocation(*mut core::ffi::c_void);
+        impl Drop for Allocation {
+            fn drop(&mut self) {
+                unsafe {
+                    VirtualFree(self.0, 0, MEM_RELEASE);
+                }
+            }
+        }
+        // No Vulkan/device work: exercise Windows' actual reset semantics.
+        let a = Allocation(unsafe {
+            VirtualAlloc(
+                core::ptr::null(),
+                (4 * PAGE) as usize,
+                MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH,
+                PAGE_READWRITE,
+            )
+        });
+        assert!(!a.0.is_null());
+        let lo = a.0 as u64;
+        unsafe {
+            (a.0 as *mut u8).add(PAGE as usize).write_volatile(7);
+        }
+        let mut pages = watch::take(lo, lo + 4 * PAGE, true).unwrap();
+        assert!(pages.contains(&(lo + PAGE)));
+        assert!(
+            watch::take(lo + PAGE, lo + 2 * PAGE, true)
+                .unwrap()
+                .is_empty(),
+            "a later scan cannot recover the notification reset by its warm neighbours"
+        );
+        let mut taken = HashMap::new();
+        distribute_watched_pages(
+            &[(lo + PAGE, lo + PAGE, lo + 2 * PAGE, lo)],
+            &mut pages,
+            &mut taken,
+        );
+        assert_eq!(taken[&(lo + PAGE)], [lo + PAGE]);
+    }
+
+    #[test]
+    fn batched_reset_keeps_cold_gap_and_overlapping_pool_writes() {
+        let pools = [
+            (0x1000, 0x1000, 0x2000, 1),
+            (0x2000, 0x2000, 0x4000, 1),
+            (0x2800, 0x2000, 0x3000, 1),
+            (0x4000, 0x4000, 0x5000, 1),
+        ];
+        // Only first/last are warm. One batch spans the cold pools and resets
+        // their flags, so those pages must wake BOTH owners in this submission.
+        let warm = [pools[0], pools[3]];
+        assert_eq!(watch_batch_end(&warm, 0), (2, 0x5000));
+        let mut taken = HashMap::from([(0x1000, vec![]), (0x4000, vec![])]);
+        distribute_watched_pages(&pools, &mut vec![0x4000, 0x2000, 0x2000], &mut taken);
+        assert_eq!(taken[&0x2000], [0x2000]);
+        assert_eq!(taken[&0x2800], [0x2000]);
+        assert_eq!(taken[&0x4000], [0x4000]);
+        assert!(taken[&0x1000].is_empty());
+    }
+
+    #[test]
+    fn individual_gap_allowances_cannot_accumulate_into_a_giant_scan() {
+        let pools: Vec<_> = (0..100)
+            .map(|i| {
+                let base = i * (4 << 20);
+                (base, base, base + PAGE, 1)
+            })
+            .collect();
+        // Old loop joined all 100 because each <4 MiB gap qualified separately.
+        assert_eq!(watch_batch_end(&pools, 0), (2, (4 << 20) + PAGE));
+        let contiguous = [(0, 0, PAGE, 1), (PAGE, PAGE, 2 * PAGE, 1)];
+        assert_eq!(watch_batch_end(&contiguous, 0), (2, 2 * PAGE));
+    }
+
+    #[test]
+    fn distant_allocations_are_not_joined_and_nested_spans_do_not_count_twice() {
+        let pools = [
+            (0, 0, 8 << 20, 1),
+            (PAGE, PAGE, 8 << 20, 1),
+            (14 << 20, 14 << 20, (14 << 20) + PAGE, 1),
+        ];
+        assert_eq!(watch_batch_end(&pools, 0), (2, 8 << 20));
+        assert_eq!(
+            watch_batch_end(&[(0, 0, PAGE, 1), (2 * PAGE, 2 * PAGE, 3 * PAGE, 2)], 0),
+            (1, PAGE)
+        );
+    }
+}
+
 /// Start of a submission: every CPU write since the last one goes up to the mirrors (recorded into the
 /// submission's upload command buffer). Returns the written ranges (textures over them may need a new upload).
 pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
@@ -1313,6 +1754,7 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
     // the write watch asked once per run of watched pools whose pages touch (Pokemon Legends Z-A has ~400 mirrors,
     // most of them neighbours: one GetWriteWatch each was 3.5 ms a frame of `pools`; Mario Kart World 21 ms)
     let mut taken: HashMap<u64, Vec<u64>> = HashMap::new();
+    let mut retry_watch = std::collections::HashSet::new();
     let cold_skipped: std::collections::HashSet<u64>;
     // a later submission of this frame (its first one asked every pool already)
     let mid_frame;
@@ -1328,27 +1770,48 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
         mid_frame = !new_frame;
         m.scan_frame = frame;
         let skip = |p: &Pool| cold_on && !new_frame && frame.saturating_sub(p.dirty_frame) > 60;
-        cold_skipped = m.by_base.values().filter(|p| p.watched && skip(p)).map(|p| p.base).collect();
-        let watched: Vec<(u64, u64, u64, u64)> = m
+        cold_skipped = m
             .by_base
             .values()
-            .filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host) && !skip(p))
+            .filter(|p| p.watched && skip(p))
+            .map(|p| p.base)
+            .collect();
+        let all_watched: Vec<WatchedPool> = m
+            .by_base
+            .values()
+            .filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host))
             .map(|p| {
                 let (lo, hi) = page_range(p.base, p.size);
                 (p.base, lo, hi, p.alloc_base)
             })
             .collect();
+        let watched: Vec<_> = all_watched
+            .iter()
+            .copied()
+            .filter(|p| !cold_skipped.contains(&p.0))
+            .collect();
         WATCH_POOLS.fetch_add(watched.len() as u64, Ordering::Relaxed);
         if super::perf::fine() {
-            for p in m.by_base.values().filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host) && !skip(p)) {
+            for p in m.by_base.values().filter(|p| {
+                p.watched && matches!(p.placement, Placement::Mirror | Placement::Host) && !skip(p)
+            }) {
                 let warm = frame.saturating_sub(p.dirty_frame) <= 1;
-                (if warm { &WATCH_WARM_B } else { &WATCH_LUKE_B }).fetch_add(p.size, Ordering::Relaxed);
+                (if warm { &WATCH_WARM_B } else { &WATCH_LUKE_B })
+                    .fetch_add(p.size, Ordering::Relaxed);
             }
         }
         let subs = WATCH_SUBS.fetch_add(1, Ordering::Relaxed) + 1;
         if subs % 600 == 0 && super::perf::fine() {
-            let (c, ns, np) = (WATCH_CALLS.swap(0, Ordering::Relaxed), WATCH_NS.swap(0, Ordering::Relaxed), WATCH_POOLS.swap(0, Ordering::Relaxed));
-            let (wb, lb, lh) = (WATCH_WARM_B.swap(0, Ordering::Relaxed), WATCH_LUKE_B.swap(0, Ordering::Relaxed), WATCH_LUKE_HITS.swap(0, Ordering::Relaxed));
+            let (c, ns, np) = (
+                WATCH_CALLS.swap(0, Ordering::Relaxed),
+                WATCH_NS.swap(0, Ordering::Relaxed),
+                WATCH_POOLS.swap(0, Ordering::Relaxed),
+            );
+            let (wb, lb, lh) = (
+                WATCH_WARM_B.swap(0, Ordering::Relaxed),
+                WATCH_LUKE_B.swap(0, Ordering::Relaxed),
+                WATCH_LUKE_HITS.swap(0, Ordering::Relaxed),
+            );
             crate::vklog!(
                 "pool sync, last 600 submissions: {:.0} watched pools, {:.0} write-watch calls, {:.2} ms in them a submission; scanned a submission {:.0} MB in pools written this / last frame, {:.0} MB in pools written 2-60 frames ago ({lh} later-submission writes found in those)",
                 np as f64 / 600.0,
@@ -1361,37 +1824,45 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
         // a run: pools whose pages touch, or pools of one allocation with gaps between them (one call over the run
         // instead of one per pool: Donkey Kong Bananza has ~1,300 mirrors, 9 submissions a frame)
         let mut i = 0;
+        let mut dirty_pages = Vec::new();
         while i < watched.len() {
-            let (mut j, lo, mut hi, ab) = (i + 1, watched[i].1, watched[i].2, watched[i].3);
-            // a gap inside one allocation joins the run only while the pools cover most of the span (GetWriteWatch
-            // walks every page of its range: Mario Kart World's pools sit far apart in one large reservation)
-            let mut covered = hi - lo;
-            while j < watched.len() && (watched[j].1 <= hi || (ab != 0 && watched[j].3 == ab && watched[j].1 - hi <= (covered / 2).max(4 << 20))) {
-                covered += watched[j].2.saturating_sub(hi.max(watched[j].1));
-                hi = hi.max(watched[j].2);
-                j += 1;
-            }
-            if j - i > 1 {
-                if let Some(pages) = watch::take(lo, hi, true) {
-                    // each pool its own pages (a page two pools share goes to both)
-                    for &(base, plo, phi, _) in &watched[i..j] {
-                        let a = pages.partition_point(|&p| p < plo);
-                        let b = pages.partition_point(|&p| p < phi);
-                        taken.insert(base, pages[a..b].to_vec());
-                    }
+            let (j, hi) = watch_batch_end(&watched, i);
+            if let Some(pages) = watch::take(watched[i].1, hi, true) {
+                dirty_pages.extend(pages);
+                for &(base, _, _, _) in &watched[i..j] {
+                    taken.entry(base).or_default();
                 }
+            } else {
+                retry_watch.extend(watched[i..j].iter().map(|p| p.0));
             }
             i = j;
+        }
+        distribute_watched_pages(&all_watched, &mut dirty_pages, &mut taken);
+        let recovered = cold_skipped
+            .iter()
+            .filter(|base| taken.get(base).is_some_and(|p| !p.is_empty()))
+            .count();
+        if recovered != 0 {
+            nxconfig::metrics::add(
+                nxconfig::metrics::counter("pool_cold_writes_recovered"),
+                recovered as u64,
+            );
         }
     }
     for p in m.by_base.values_mut() {
         if !matches!(p.placement, Placement::Mirror | Placement::Host) && p.pending.is_empty() {
             continue;
         }
-        if p.pending.is_empty() && cold_skipped.contains(&p.base) {
+        if p.pending.is_empty() && cold_skipped.contains(&p.base) && !taken.contains_key(&p.base) {
             continue;
         }
-        let pre = taken.remove(&p.base);
+        let mut pre = taken.remove(&p.base);
+        if retry_watch.contains(&p.base) {
+            // Pages recovered from another scan are only partial coverage here.
+            // Retain them while allowing the existing individual-scan fallback.
+            p.pending
+                .extend(pre.take().into_iter().flatten().map(|page| (page, PAGE)));
+        }
         let mut ranges = p.take_cpu_writes(gen, pre);
         // what the budget left for later comes first (the guest bytes as they are now)
         if !p.deferred.is_empty() {
@@ -1448,12 +1919,21 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
 
 /// The GPU writes [a, a + n) in this submission: a mirrored range is copied back into guest memory at its fence.
 pub fn note_gpu_write(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
+    note_gpu_write_version(g, sub, a, n, None);
+}
+
+pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64,
+    identity: Option<u64>) {
     if n == 0 {
         return;
     }
     {
         static W: std::sync::OnceLock<Option<u64>> = std::sync::OnceLock::new();
-        if let Some(w) = *W.get_or_init(|| std::env::var("NXGFX_WATCH_ADDR").ok().and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())) {
+        if let Some(w) = *W.get_or_init(|| {
+            std::env::var("NXGFX_WATCH_ADDR")
+                .ok()
+                .and_then(|v| u64::from_str_radix(v.trim_start_matches("0x"), 16).ok())
+        }) {
             if a < w + 0x2000000 && w < a + n {
                 static N: AtomicU64 = AtomicU64::new(0);
                 if N.fetch_add(1, Ordering::Relaxed) < 40 {
@@ -1465,20 +1945,21 @@ pub fn note_gpu_write(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     let m = g.mem.lock().unwrap();
     let Some(b) = find(&m, a, n) else { return };
     let p = &m.by_base[&b];
+    if !writeback_identity_matches(identity, p.identity) { return; }
     if p.placement == Placement::Mirror && p.buf.is_some() {
         super::perf::inc(super::perf::C::Writebacks);
         // one write-back per window the range lies in
         for (buf, off, a, n) in p.pieces(a, n) {
-            note_writeback(sub, b, a, n, buf, off);
+            note_writeback(sub, b, a, n, buf, off, p.identity);
         }
     }
 }
 
-fn note_writeback(sub: &mut super::queue::Sub, b: u64, a: u64, n: u64, buf: vk::Buffer, off: u64) {
+fn note_writeback(sub: &mut super::queue::Sub, b: u64, a: u64, n: u64, buf: vk::Buffer, off: u64, identity: u64) {
     {
         // ranges that follow each other (or one inside another) in the same pool's buffer are one copy
         for w in sub.writebacks.iter_mut().rev() {
-            if w.0 != b || w.3 != buf {
+            if w.0 != b || w.3 != buf || w.5 != identity {
                 continue;
             }
             if a >= w.1 && a + n <= w.1 + w.2 {
@@ -1495,13 +1976,13 @@ fn note_writeback(sub: &mut super::queue::Sub, b: u64, a: u64, n: u64, buf: vk::
                 return;
             }
         }
-        sub.writebacks.push((b, a, n, buf, off));
+        sub.writebacks.push((b, a, n, buf, off, identity));
     }
 }
 
 /// Completion of a submission: its write-backs land in guest memory. CPU writes the game made meanwhile to the same
 /// pages stay marked for the next upload; the write-back's own stores are not taken for CPU writes.
-pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8)]) {
+pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)]) {
     if wbs.is_empty() {
         return;
     }
@@ -1510,11 +1991,18 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8)]) 
     let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
     super::lazy::T_LOCK.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    for &(pool, a, n, src, pre) in wbs {
-        let Some(p) = m.by_base.get_mut(&pool) else { continue };
+    for &(pool, a, n, src, pre, identity) in wbs {
+        let Some(p) = m.by_base.get_mut(&pool) else {
+            continue;
+        };
+        if !writeback_identity_matches(Some(identity), p.identity) { continue; }
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let tl = std::time::Instant::now();
-        let mut lazy = if p.watched { super::lazy::take_lazy(a, n) } else { vec![] };
+        let mut lazy = if p.watched {
+            super::lazy::take_lazy(a, n)
+        } else {
+            vec![]
+        };
         // a page the CPU wrote since its pool was last asked (a cold pool is asked once a frame) is not held on the
         // device: its buffer copy lacks those bytes, and bringing it back would put the buffer's page over them (lane
         // K2: the bytes of a page the GPU and the CPU both write, as MKW's glyph pages may be; mkw-recomp #250)
@@ -1529,21 +2017,45 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8)]) 
         super::lazy::T_TAKE.fetch_add(tl.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if !lazy.is_empty() {
             let windows: Vec<(u64, u64, vk::Buffer, u64)> = if p.win == 0 {
-                vec![(p.base, p.size, p.buf.as_ref().map(|b| b.buf).unwrap_or_default(), p.buf_off)]
+                vec![(
+                    p.base,
+                    p.size,
+                    p.buf.as_ref().map(|b| b.buf).unwrap_or_default(),
+                    p.buf_off,
+                )]
             } else {
-                (0..=p.wins.len()).filter_map(|k| p.window(k).map(|(b, o)| (p.base + k as u64 * p.win, p.win, b, o))).collect()
+                (0..=p.wins.len())
+                    .filter_map(|k| {
+                        p.window(k)
+                            .map(|(b, o)| (p.base + k as u64 * p.win, p.win, b, o))
+                    })
+                    .collect()
             };
             let mut at = a;
             for &pg in lazy.iter().chain(std::iter::once(&(a + n))) {
                 let end = pg.min(a + n);
                 if end > at {
-                    land(p, at, end - at, unsafe { src.add((at - a) as usize) }, if pre.is_null() { pre } else { unsafe { pre.add((at - a) as usize) } });
+                    land(
+                        p,
+                        at,
+                        end - at,
+                        unsafe { src.add((at - a) as usize) },
+                        if pre.is_null() {
+                            pre
+                        } else {
+                            unsafe { pre.add((at - a) as usize) }
+                        },
+                    );
                 }
                 at = (pg + PAGE).min(a + n).max(at);
             }
             let tm = std::time::Instant::now();
             for &(wlo, wn, buf, off0) in &windows {
-                let pages: Vec<u64> = lazy.iter().copied().filter(|&pg| pg >= wlo && pg < wlo + wn).collect();
+                let pages: Vec<u64> = lazy
+                    .iter()
+                    .copied()
+                    .filter(|&pg| pg >= wlo && pg < wlo + wn)
+                    .collect();
                 super::lazy::make_lazy(&pages, buf, wlo, off0);
             }
             super::lazy::T_MAKE.fetch_add(tm.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -1563,7 +2075,13 @@ fn land(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
     // (Pokemon Violet: 48 ms of write-back a frame, 12 FPS)
     if let Some(runs) = super::lazy::outside(a, n) {
         for (o, m) in runs {
-            let at = |q: *const u8| if q.is_null() { q } else { unsafe { q.add(o as usize) } };
+            let at = |q: *const u8| {
+                if q.is_null() {
+                    q
+                } else {
+                    unsafe { q.add(o as usize) }
+                }
+            };
             land(p, a + o, m, at(src), at(base));
         }
         return;
@@ -1586,7 +2104,8 @@ fn land(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
             watch::reset(lo, hi);
         } else if let Some(s) = p.snapshot.as_mut() {
             let o = (a - p.base) as usize;
-            s[o..o + n as usize].copy_from_slice(unsafe { core::slice::from_raw_parts(src, n as usize) });
+            s[o..o + n as usize]
+                .copy_from_slice(unsafe { core::slice::from_raw_parts(src, n as usize) });
         }
         WRITEBACK_BYTES.fetch_add(n, Ordering::Relaxed);
     }
@@ -1596,8 +2115,30 @@ fn land(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
 /// the device before its work) land in guest memory; the rest of the range keeps what the CPU has, including what it
 /// wrote while the GPU worked (Turbo's `wr_land`: a storage buffer is written in part). Pages the GPU left alone are
 /// not touched. Counts the guest bytes the CPU had changed meanwhile that a whole-range landing would have reverted.
+pub(crate) fn writeback_identity_matches(expected: Option<u64>, actual: u64) -> bool {
+    expected.is_none_or(|expected| expected == actual)
+}
+
+/// The production byte merge. Only producer-changed bytes replace CPU bytes;
+/// callers must supply the correct producer baseline, not a later snapshot.
+pub(crate) fn merge_changed_bytes(guest: &mut [u8], after: &[u8], before: &[u8]) -> u64 {
+    assert_eq!(guest.len(), after.len());
+    assert_eq!(after.len(), before.len());
+    let mut kept = 0;
+    for ((guest, &new), &old) in guest.iter_mut().zip(after).zip(before) {
+        if new != old { *guest = new; }
+        else if *guest != old { kept += 1; }
+    }
+    kept
+}
+
 fn land_changed(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
-    let (s, b) = unsafe { (core::slice::from_raw_parts(src, n as usize), core::slice::from_raw_parts(base, n as usize)) };
+    let (s, b) = unsafe {
+        (
+            core::slice::from_raw_parts(src, n as usize),
+            core::slice::from_raw_parts(base, n as usize),
+        )
+    };
     let mut at = 0u64;
     let mut kept = 0u64;
     while at < n {
@@ -1614,14 +2155,7 @@ fn land_changed(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
                 }
             }
             let g = unsafe { core::slice::from_raw_parts_mut((a + at) as *mut u8, hi - lo) };
-            for i in 0..hi - lo {
-                let (nv, ov) = (s[lo + i], b[lo + i]);
-                if nv != ov {
-                    g[i] = nv;
-                } else if g[i] != ov {
-                    kept += 1;
-                }
-            }
+            kept += merge_changed_bytes(g, &s[lo..hi], &b[lo..hi]);
             if p.watched {
                 watch::reset(plo, phi);
             } else if let Some(snap) = p.snapshot.as_mut() {
@@ -1648,7 +2182,11 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         bytes[i] += p.size;
     }
     // mirrors without a write watch: compared with a snapshot of all of them at every submission
-    let (sn, sb) = m.by_base.values().filter(|p| p.snapshot.is_some()).fold((0usize, 0u64), |(n, b), p| (n + 1, b + p.size));
+    let (sn, sb) = m
+        .by_base
+        .values()
+        .filter(|p| p.snapshot.is_some())
+        .fold((0usize, 0u64), |(n, b), p| (n + 1, b + p.size));
     let f = frames.max(1) as f64;
     let up = UPLOAD_BYTES.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
     let wb = WRITEBACK_BYTES.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
@@ -1672,7 +2210,8 @@ mod inflight_tests {
     /// A CPU-dirty range over in-flight write-backs: the parts outside upload now, the parts over them later.
     #[test]
     fn dirty_ranges_split_around_inflight_writebacks() {
-        let (now, later) = super::split_inflight(0x1000, 0x3000, &[(0x1800, 0x800), (0x3800, 0x1000)]);
+        let (now, later) =
+            super::split_inflight(0x1000, 0x3000, &[(0x1800, 0x800), (0x3800, 0x1000)]);
         assert_eq!(now, vec![(0x1000, 0x800), (0x2000, 0x1800)]);
         assert_eq!(later, vec![(0x1800, 0x800), (0x3800, 0x800)]);
         let (now, later) = super::split_inflight(0x1000, 0x1000, &[]);
@@ -1683,24 +2222,58 @@ mod inflight_tests {
 /// For a capture (`capture.rs`): every pool's pages held on the device come back to guest memory first, then what the
 /// GPU holds of the device-local pools (their guest memory is not their content): (base, bytes) of each.
 pub fn gpu_contents(g: &Gpu) -> Vec<(u64, Vec<u8>)> {
-    let pools: Vec<(u64, u64, Placement, Option<Vec<(vk::Buffer, u64, u64, u64)>>)> = {
+    let pools: Vec<(
+        u64,
+        u64,
+        Placement,
+        Option<Vec<(vk::Buffer, u64, u64, u64)>>,
+    )> = {
         let m = g.mem.lock().unwrap();
-        m.by_base.values().map(|p| (p.base, p.size, p.placement, p.buf.as_ref().map(|_| p.pieces(p.base, p.size)))).collect()
+        m.by_base
+            .values()
+            .map(|p| {
+                (
+                    p.base,
+                    p.size,
+                    p.placement,
+                    p.buf.as_ref().map(|_| p.pieces(p.base, p.size)),
+                )
+            })
+            .collect()
     };
     for &(base, size, _, _) in &pools {
         super::lazy::touch(base, size);
     }
     let mut out = Vec::new();
     for (base, size, placement, buf) in pools {
-        let (Placement::Vram, Some(pieces)) = (placement, buf) else { continue };
-        let Ok(rb) = g.buffer(size, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "capture readback") else { continue };
+        let (Placement::Vram, Some(pieces)) = (placement, buf) else {
+            continue;
+        };
+        let Ok(rb) = g.buffer(
+            size,
+            vk::BufferUsageFlags::TRANSFER_DST,
+            MemoryLocation::GpuToCpu,
+            "capture readback",
+        ) else {
+            continue;
+        };
         let f = super::queue::oneoff(g, |g, sub, _| unsafe {
             for &(buf, off, a, n) in &pieces {
-                g.dev().cmd_copy_buffer(sub.main, buf, rb.buf, &[vk::BufferCopy { src_offset: off, dst_offset: a - base, size: n }]);
+                g.dev().cmd_copy_buffer(
+                    sub.main,
+                    buf,
+                    rb.buf,
+                    &[vk::BufferCopy {
+                        src_offset: off,
+                        dst_offset: a - base,
+                        size: n,
+                    }],
+                );
             }
         });
         super::queue::wait_fence(f, u64::MAX);
-        let bytes = unsafe { core::slice::from_raw_parts(rb.ptr as *const u8, size as usize) }.to_vec();
+        let bytes =
+            unsafe { core::slice::from_raw_parts(rb.ptr as *const u8, size as usize) }.to_vec();
         g.free_buffer(rb);
         out.push((base, bytes));
     }
@@ -1711,10 +2284,21 @@ pub fn gpu_contents(g: &Gpu) -> Vec<(u64, Vec<u8>)> {
 mod window_tests {
     #[test]
     fn ranges_split_at_the_windows() {
-        assert_eq!(super::window_size(100 << 20, 1 << 30), 0, "fits: one buffer");
-        assert_eq!(super::window_size(3 << 30, (2 << 30) + 123), 2 << 30, "AMD's 2 GiB, in whole pages");
+        assert_eq!(
+            super::window_size(100 << 20, 1 << 30),
+            0,
+            "fits: one buffer"
+        );
+        assert_eq!(
+            super::window_size(3 << 30, (2 << 30) + 123),
+            2 << 30,
+            "AMD's 2 GiB, in whole pages"
+        );
         assert_eq!(super::split_windows(0, 5, 10), vec![(0, 5, 10)]);
-        assert_eq!(super::split_windows(100, 90, 30), vec![(0, 90, 10), (1, 0, 20)]);
+        assert_eq!(
+            super::split_windows(100, 90, 30),
+            vec![(0, 90, 10), (1, 0, 20)]
+        );
         assert_eq!(super::split_windows(100, 250, 10), vec![(2, 50, 10)]);
     }
 }
@@ -1723,5 +2307,7 @@ mod window_tests {
 pub fn pool_bound(base: u64) -> Option<u64> {
     let g = Gpu::try_get()?;
     let m = g.mem.lock().unwrap();
-    m.by_base.get(&base).and_then(|p| p.gran.as_ref().map(|gr| gr.bound))
+    m.by_base
+        .get(&base)
+        .and_then(|p| p.gran.as_ref().map(|gr| gr.bound))
 }

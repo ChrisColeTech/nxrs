@@ -22,12 +22,16 @@ unsafe extern "system" fn debug_cb(
     let msg = if data.is_null() || (*data).p_message.is_null() {
         String::from("?")
     } else {
-        CStr::from_ptr((*data).p_message).to_string_lossy().into_owned()
+        CStr::from_ptr((*data).p_message)
+            .to_string_lossy()
+            .into_owned()
     };
     if sev.contains(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR) {
         VALIDATION_ERRORS.fetch_add(1, Ordering::Relaxed);
         crate::log::red(&format!("[vk] validation error: {msg}"));
-    } else if sev.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING) && !ty.contains(vk::DebugUtilsMessageTypeFlagsEXT::GENERAL) {
+    } else if sev.contains(vk::DebugUtilsMessageSeverityFlagsEXT::WARNING)
+        && !ty.contains(vk::DebugUtilsMessageTypeFlagsEXT::GENERAL)
+    {
         VALIDATION_WARNINGS.fetch_add(1, Ordering::Relaxed);
         // performance notes (GENERAL layouts are the design here) are counted, not logged
         if !ty.contains(vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE) {
@@ -52,6 +56,7 @@ pub struct Caps {
     pub eds3_a2c: bool,
     pub eds3_logic_en: bool,
     pub eds3_sample_mask: bool,
+    pub eds3_cons_raster: bool,
     pub logic_op_dyn: bool,
     pub patch_dyn: bool,
     pub timestamp_period: f32,
@@ -85,6 +90,10 @@ pub struct Caps {
     pub bda: bool,
     /// VK_EXT_descriptor_buffer: the replay's descriptor sets are written into buffers (`descbuf`)
     pub descbuf: bool,
+    /// VK_EXT_robustness2 robustBufferAccess2 is enabled for this device
+    pub robust_buffer_access2: bool,
+    /// VK_EXT_robustness2 robustImageAccess2 is enabled for this device
+    pub robust_image_access2: bool,
 }
 
 pub struct Device {
@@ -121,24 +130,68 @@ fn env_on(name: &str) -> Option<bool> {
     std::env::var(name).ok().map(|v| v != "0" && !v.is_empty())
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Robustness {
+    buffer_access: bool,
+    image_access: bool,
+    buffer_access2: bool,
+    image_access2: bool,
+}
+
+/// Selects the robustness features without depending on Vulkan structs or process-global environment state.
+fn robustness_policy(
+    vendor_id: u32,
+    robust: Option<bool>,
+    robust2: Option<bool>,
+    has_robustness2: bool,
+    buffer_access: bool,
+    image_access: bool,
+    buffer_access2: bool,
+    image_access2: bool,
+) -> Robustness {
+    let base_on = robust.unwrap_or(vendor_id == 0x10de);
+    let buffer_access = base_on && buffer_access;
+    let image_access = base_on && image_access;
+    // Preserve the existing requirement that v1 buffer robustness is active before enabling robustness2.
+    let r2_on = has_robustness2 && buffer_access && robust2.unwrap_or(true);
+    Robustness {
+        buffer_access,
+        image_access,
+        buffer_access2: r2_on && buffer_access2,
+        image_access2: r2_on && image_access2,
+    }
+}
+
 impl Device {
     pub fn new() -> Result<Device, String> {
         let entry = unsafe { ash::Entry::load() }.map_err(|e| format!("Vulkan loader: {e}"))?;
         let app = CString::new("RecompLauncherEngine").unwrap();
-        let app_info = vk::ApplicationInfo::default().application_name(&app).engine_name(&app).api_version(vk::API_VERSION_1_3);
+        let app_info = vk::ApplicationInfo::default()
+            .application_name(&app)
+            .engine_name(&app)
+            .api_version(vk::API_VERSION_1_3);
         let layers_avail: Vec<String> = unsafe { entry.enumerate_instance_layer_properties() }
             .unwrap_or_default()
             .iter()
-            .map(|l| unsafe { CStr::from_ptr(l.layer_name.as_ptr()) }.to_string_lossy().into_owned())
+            .map(|l| {
+                unsafe { CStr::from_ptr(l.layer_name.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         let want_validation = env_on("NXGFX_VALIDATION").unwrap_or(false);
         let val_name = CString::new("VK_LAYER_KHRONOS_validation").unwrap();
         let mut layers = vec![];
         if want_validation {
-            if layers_avail.iter().any(|l| l == "VK_LAYER_KHRONOS_validation") {
+            if layers_avail
+                .iter()
+                .any(|l| l == "VK_LAYER_KHRONOS_validation")
+            {
                 layers.push(val_name.as_ptr());
             } else {
-                crate::log::red("NXGFX_VALIDATION is set but VK_LAYER_KHRONOS_validation is not installed");
+                crate::log::red(
+                    "NXGFX_VALIDATION is set but VK_LAYER_KHRONOS_validation is not installed",
+                );
             }
         }
         let mut exts = vec![
@@ -148,11 +201,19 @@ impl Device {
         ];
         // Linux: the window systems' surfaces (whichever the loader has; the list is filtered below)
         #[cfg(target_os = "linux")]
-        exts.extend([ash::khr::xlib_surface::NAME.as_ptr(), ash::khr::xcb_surface::NAME.as_ptr(), ash::khr::wayland_surface::NAME.as_ptr()]);
+        exts.extend([
+            ash::khr::xlib_surface::NAME.as_ptr(),
+            ash::khr::xcb_surface::NAME.as_ptr(),
+            ash::khr::wayland_surface::NAME.as_ptr(),
+        ]);
         let inst_exts: Vec<String> = unsafe { entry.enumerate_instance_extension_properties(None) }
             .unwrap_or_default()
             .iter()
-            .map(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) }.to_string_lossy().into_owned())
+            .map(|e| {
+                unsafe { CStr::from_ptr(e.extension_name.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         let has_debug = inst_exts.iter().any(|e| e == "VK_EXT_debug_utils");
         if has_debug {
@@ -163,23 +224,40 @@ impl Device {
             inst_exts.contains(&s)
         });
         let mut dbg_info = vk::DebugUtilsMessengerCreateInfoEXT::default()
-            .message_severity(vk::DebugUtilsMessageSeverityFlagsEXT::ERROR | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING)
+            .message_severity(
+                vk::DebugUtilsMessageSeverityFlagsEXT::ERROR
+                    | vk::DebugUtilsMessageSeverityFlagsEXT::WARNING,
+            )
             .message_type(
-                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
+                vk::DebugUtilsMessageTypeFlagsEXT::GENERAL
+                    | vk::DebugUtilsMessageTypeFlagsEXT::VALIDATION
+                    | vk::DebugUtilsMessageTypeFlagsEXT::PERFORMANCE,
             )
             .pfn_user_callback(Some(debug_cb));
-        let mut ci = vk::InstanceCreateInfo::default().application_info(&app_info).enabled_layer_names(&layers).enabled_extension_names(&exts);
+        let mut ci = vk::InstanceCreateInfo::default()
+            .application_info(&app_info)
+            .enabled_layer_names(&layers)
+            .enabled_extension_names(&exts);
         let addr_report = has_debug && super::lost::addr_report_wanted();
         if addr_report {
-            dbg_info = dbg_info.message_type(dbg_info.message_type | vk::DebugUtilsMessageTypeFlagsEXT::DEVICE_ADDRESS_BINDING).message_severity(dbg_info.message_severity | vk::DebugUtilsMessageSeverityFlagsEXT::INFO);
+            dbg_info = dbg_info
+                .message_type(
+                    dbg_info.message_type
+                        | vk::DebugUtilsMessageTypeFlagsEXT::DEVICE_ADDRESS_BINDING,
+                )
+                .message_severity(
+                    dbg_info.message_severity | vk::DebugUtilsMessageSeverityFlagsEXT::INFO,
+                );
         }
         if has_debug && (!layers.is_empty() || addr_report) {
             ci = ci.push_next(&mut dbg_info);
         }
-        let instance = unsafe { entry.create_instance(&ci, None) }.map_err(|e| format!("vkCreateInstance: {e}"))?;
+        let instance = unsafe { entry.create_instance(&ci, None) }
+            .map_err(|e| format!("vkCreateInstance: {e}"))?;
         let debug = if has_debug && (!layers.is_empty() || addr_report) {
             let du = debug_utils::Instance::new(&entry, &instance);
-            let m = unsafe { du.create_debug_utils_messenger(&dbg_info, None) }.map_err(|e| format!("debug messenger: {e}"))?;
+            let m = unsafe { du.create_debug_utils_messenger(&dbg_info, None) }
+                .map_err(|e| format!("debug messenger: {e}"))?;
             Some((du, m))
         } else {
             None
@@ -194,7 +272,9 @@ impl Device {
             if pr.api_version < vk::API_VERSION_1_3 {
                 continue;
             }
-            let name = unsafe { CStr::from_ptr(pr.device_name.as_ptr()) }.to_string_lossy().into_owned();
+            let name = unsafe { CStr::from_ptr(pr.device_name.as_ptr()) }
+                .to_string_lossy()
+                .into_owned();
             let mp = unsafe { instance.get_physical_device_memory_properties(p) };
             let local: u64 = mp.memory_heaps[..mp.memory_heap_count as usize]
                 .iter()
@@ -217,17 +297,26 @@ impl Device {
         let pdev = best.ok_or("no Vulkan 1.3 device")?.0;
         let props = unsafe { instance.get_physical_device_properties(pdev) };
         let mem_props = unsafe { instance.get_physical_device_memory_properties(pdev) };
-        let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }.to_string_lossy().into_owned();
+        let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
+            .to_string_lossy()
+            .into_owned();
         let qfams = unsafe { instance.get_physical_device_queue_family_properties(pdev) };
         let qfam = qfams
             .iter()
-            .position(|q| q.queue_flags.contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE))
+            .position(|q| {
+                q.queue_flags
+                    .contains(vk::QueueFlags::GRAPHICS | vk::QueueFlags::COMPUTE)
+            })
             .ok_or("no graphics queue")? as u32;
 
         let dev_exts: Vec<String> = unsafe { instance.enumerate_device_extension_properties(pdev) }
             .unwrap_or_default()
             .iter()
-            .map(|e| unsafe { CStr::from_ptr(e.extension_name.as_ptr()) }.to_string_lossy().into_owned())
+            .map(|e| {
+                unsafe { CStr::from_ptr(e.extension_name.as_ptr()) }
+                    .to_string_lossy()
+                    .into_owned()
+            })
             .collect();
         let has = |n: &CStr| dev_exts.iter().any(|e| e.as_str() == n.to_str().unwrap());
         let required: [&CStr; 5] = [
@@ -242,8 +331,9 @@ impl Device {
                 return Err(format!("device {name} lacks {}", r.to_string_lossy()));
             }
         }
-        let mut dexts: Vec<*const core::ffi::c_char> = required.iter().map(|n| n.as_ptr()).collect();
-        let optional: [&CStr; 19] = [
+        let mut dexts: Vec<*const core::ffi::c_char> =
+            required.iter().map(|n| n.as_ptr()).collect();
+        let optional: [&CStr; 22] = [
             ash::ext::robustness2::NAME,
             ash::ext::device_address_binding_report::NAME,
             ash::nv::device_diagnostic_checkpoints::NAME,
@@ -263,6 +353,9 @@ impl Device {
             ash::ext::fragment_shader_interlock::NAME,
             ash::ext::mesh_shader::NAME,
             ash::ext::transform_feedback::NAME,
+            ash::nv::geometry_shader_passthrough::NAME,
+            ash::nv::viewport_array2::NAME,
+            ash::ext::conservative_rasterization::NAME,
         ];
         for o in optional {
             if has(o) {
@@ -314,39 +407,92 @@ impl Device {
             .push_next(&mut f_r2);
         unsafe { instance.get_physical_device_features2(pdev, &mut f2) };
         let base = f2.features;
-        let abr = addr_report && has(ash::ext::device_address_binding_report::NAME) && f_abr.report_address_binding != 0;
-        let need = |ok: u32, what: &str| -> Result<(), String> { if ok != 0 { Ok(()) } else { Err(format!("device {name} lacks {what}")) } };
+        let abr = addr_report
+            && has(ash::ext::device_address_binding_report::NAME)
+            && f_abr.report_address_binding != 0;
+        let need = |ok: u32, what: &str| -> Result<(), String> {
+            if ok != 0 {
+                Ok(())
+            } else {
+                Err(format!("device {name} lacks {what}"))
+            }
+        };
         need(f13.dynamic_rendering, "dynamicRendering")?;
         need(f13.synchronization2, "synchronization2")?;
-        super::spvfix::DEMOTE.store(f13.shader_demote_to_helper_invocation != 0, std::sync::atomic::Ordering::Relaxed);
-        super::spvfix::ZERO_WG.store(f13.shader_zero_initialize_workgroup_memory != 0, std::sync::atomic::Ordering::Relaxed);
+        super::spvfix::DEMOTE.store(
+            f13.shader_demote_to_helper_invocation != 0,
+            std::sync::atomic::Ordering::Relaxed,
+        );
+        super::spvfix::ZERO_WG.store(
+            f13.shader_zero_initialize_workgroup_memory != 0,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         need(f12.timeline_semaphore, "timelineSemaphore")?;
-        need(f12.descriptor_binding_partially_bound, "descriptorBindingPartiallyBound")?;
-        need(f12.descriptor_binding_sampled_image_update_after_bind, "descriptorBindingSampledImageUpdateAfterBind")?;
-        need(f12.descriptor_binding_storage_image_update_after_bind, "descriptorBindingStorageImageUpdateAfterBind")?;
+        need(
+            f12.descriptor_binding_partially_bound,
+            "descriptorBindingPartiallyBound",
+        )?;
+        need(
+            f12.descriptor_binding_sampled_image_update_after_bind,
+            "descriptorBindingSampledImageUpdateAfterBind",
+        )?;
+        need(
+            f12.descriptor_binding_storage_image_update_after_bind,
+            "descriptorBindingStorageImageUpdateAfterBind",
+        )?;
         need(f12.runtime_descriptor_array, "runtimeDescriptorArray")?;
         need(f_vin.vertex_input_dynamic_state, "vertexInputDynamicState")?;
         need(f_dcc.depth_clip_control, "depthClipControl")?;
-        need(f_eds3.extended_dynamic_state3_color_blend_enable, "extendedDynamicState3ColorBlendEnable")?;
-        need(f_eds3.extended_dynamic_state3_color_blend_equation, "extendedDynamicState3ColorBlendEquation")?;
-        need(f_eds3.extended_dynamic_state3_color_write_mask, "extendedDynamicState3ColorWriteMask")?;
+        need(
+            f_eds3.extended_dynamic_state3_color_blend_enable,
+            "extendedDynamicState3ColorBlendEnable",
+        )?;
+        need(
+            f_eds3.extended_dynamic_state3_color_blend_equation,
+            "extendedDynamicState3ColorBlendEquation",
+        )?;
+        need(
+            f_eds3.extended_dynamic_state3_color_write_mask,
+            "extendedDynamicState3ColorWriteMask",
+        )?;
 
         let caps_eds3 = f_eds3;
+        let robustness = robustness_policy(
+            props.vendor_id,
+            env_on("NXGFX_ROBUST"),
+            env_on("NXGFX_ROBUST2"),
+            has(ash::ext::robustness2::NAME),
+            base.robust_buffer_access != 0,
+            f13.robust_image_access != 0,
+            f_r2.robust_buffer_access2 != 0,
+            f_r2.robust_image_access2 != 0,
+        );
         let mut caps = Caps {
-            divisor: has(ash::ext::vertex_attribute_divisor::NAME) && f_div.vertex_attribute_instance_rate_divisor != 0,
+            divisor: has(ash::ext::vertex_attribute_divisor::NAME)
+                && f_div.vertex_attribute_instance_rate_divisor != 0,
             index_u8: has(ash::ext::index_type_uint8::NAME) && f_u8.index_type_uint8 != 0,
-            custom_border: has(ash::ext::custom_border_color::NAME) && f_cb.custom_border_colors != 0,
+            custom_border: has(ash::ext::custom_border_color::NAME)
+                && f_cb.custom_border_colors != 0,
             eds3_samples: caps_eds3.extended_dynamic_state3_rasterization_samples != 0,
             eds3_clip_neg: caps_eds3.extended_dynamic_state3_depth_clip_negative_one_to_one != 0,
-            eds3_clamp: caps_eds3.extended_dynamic_state3_depth_clamp_enable != 0 && base.depth_clamp != 0,
-            eds3_poly: caps_eds3.extended_dynamic_state3_polygon_mode != 0 && base.fill_mode_non_solid != 0,
+            eds3_clamp: caps_eds3.extended_dynamic_state3_depth_clamp_enable != 0
+                && base.depth_clamp != 0,
+            eds3_poly: caps_eds3.extended_dynamic_state3_polygon_mode != 0
+                && base.fill_mode_non_solid != 0,
             eds3_a2c: caps_eds3.extended_dynamic_state3_alpha_to_coverage_enable != 0,
-            eds3_logic_en: caps_eds3.extended_dynamic_state3_logic_op_enable != 0 && base.logic_op != 0,
+            eds3_logic_en: caps_eds3.extended_dynamic_state3_logic_op_enable != 0
+                && base.logic_op != 0,
             eds3_sample_mask: caps_eds3.extended_dynamic_state3_sample_mask != 0,
+            eds3_cons_raster: has(ash::ext::conservative_rasterization::NAME)
+                && caps_eds3.extended_dynamic_state3_conservative_rasterization_mode != 0,
             logic_op_dyn: f_eds2.extended_dynamic_state2_logic_op != 0 && base.logic_op != 0,
-            patch_dyn: f_eds2.extended_dynamic_state2_patch_control_points != 0 && base.tessellation_shader != 0,
+            patch_dyn: f_eds2.extended_dynamic_state2_patch_control_points != 0
+                && base.tessellation_shader != 0,
             timestamp_period: {
-                super::shader::CLIP_CULL_LIMIT.store(props.limits.max_combined_clip_and_cull_distances, std::sync::atomic::Ordering::Relaxed);
+                super::shader::CLIP_CULL_LIMIT.store(
+                    props.limits.max_combined_clip_and_cull_distances,
+                    std::sync::atomic::Ordering::Relaxed,
+                );
                 props.limits.timestamp_period
             },
             uniform_align: props.limits.min_uniform_buffer_offset_alignment,
@@ -361,25 +507,44 @@ impl Device {
                 && f_rq.ray_query != 0
                 && f12.buffer_device_address != 0
                 && env_on("NXGFX_RT").unwrap_or(true),
-            checkpoints: has(ash::nv::device_diagnostic_checkpoints::NAME) && super::lost::level() > 0,
+            checkpoints: has(ash::nv::device_diagnostic_checkpoints::NAME)
+                && super::lost::level() > 0,
             device_fault: has(ash::ext::device_fault::NAME) && f_fault.device_fault != 0,
             mem_budget: has(ash::ext::memory_budget::NAME),
-            mesh: has(ash::ext::mesh_shader::NAME) && f_ms.mesh_shader != 0 && f_ms.task_shader != 0 && env_on("NXGFX_MESH").unwrap_or(true),
+            mesh: has(ash::ext::mesh_shader::NAME)
+                && f_ms.mesh_shader != 0
+                && f_ms.task_shader != 0
+                && env_on("NXGFX_MESH").unwrap_or(true),
             xfb: has(ash::ext::transform_feedback::NAME) && f_xfb.transform_feedback != 0,
             push_desc: has(ash::khr::push_descriptor::NAME),
             bda: f12.buffer_device_address != 0,
-            descbuf: has(ash::ext::descriptor_buffer::NAME) && f_db.descriptor_buffer != 0 && f12.buffer_device_address != 0 && env_on("NXGFX_DESCBUF").unwrap_or(true),
-            gpl: has(ash::ext::graphics_pipeline_library::NAME) && has(ash::khr::pipeline_library::NAME) && f_gpl.graphics_pipeline_library != 0 && {
-                let mut gp = vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT::default();
-                let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut gp);
-                unsafe { instance.get_physical_device_properties2(pdev, &mut p2) };
-                gp.graphics_pipeline_library_fast_linking != 0
-            } && env_on("NXGFX_GPL").unwrap_or(true),
+            descbuf: has(ash::ext::descriptor_buffer::NAME)
+                && f_db.descriptor_buffer != 0
+                && f12.buffer_device_address != 0
+                && env_on("NXGFX_DESCBUF").unwrap_or(true),
+            robust_buffer_access2: robustness.buffer_access2,
+            robust_image_access2: robustness.image_access2,
+            gpl: has(ash::ext::graphics_pipeline_library::NAME)
+                && has(ash::khr::pipeline_library::NAME)
+                && f_gpl.graphics_pipeline_library != 0
+                && {
+                    let mut gp = vk::PhysicalDeviceGraphicsPipelineLibraryPropertiesEXT::default();
+                    let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut gp);
+                    unsafe { instance.get_physical_device_properties2(pdev, &mut p2) };
+                    gp.graphics_pipeline_library_fast_linking != 0
+                }
+                && env_on("NXGFX_GPL").unwrap_or(true),
             sparse: base.sparse_binding != 0
                 && base.sparse_residency_image2_d != 0
                 && base.sparse_residency_aliased != 0
-                && qfams[qfam as usize].queue_flags.contains(vk::QueueFlags::SPARSE_BINDING),
-            sparse_buffer: base.sparse_binding != 0 && base.sparse_residency_buffer != 0 && qfams[qfam as usize].queue_flags.contains(vk::QueueFlags::SPARSE_BINDING),
+                && qfams[qfam as usize]
+                    .queue_flags
+                    .contains(vk::QueueFlags::SPARSE_BINDING),
+            sparse_buffer: base.sparse_binding != 0
+                && base.sparse_residency_buffer != 0
+                && qfams[qfam as usize]
+                    .queue_flags
+                    .contains(vk::QueueFlags::SPARSE_BINDING),
             ..Default::default()
         };
         if has(ash::ext::external_memory_host::NAME) {
@@ -392,12 +557,19 @@ impl Device {
 
         // Enable: exactly the queried support for the parts we use.
         // with robustBufferAccess on, buffer descriptors in descriptor buffers are written at the robust sizes (`desc_size`)
-        ROBUST_BUFFERS.store(env_on("NXGFX_ROBUST").unwrap_or(props.vendor_id == 0x10de) && base.robust_buffer_access != 0, std::sync::atomic::Ordering::Relaxed);
+        ROBUST_BUFFERS.store(
+            robustness.buffer_access,
+            std::sync::atomic::Ordering::Relaxed,
+        );
         let en_base = vk::PhysicalDeviceFeatures {
             // reads past a bound buffer's range return in-range data or zero instead of faulting the GPU: on by default on
             // NVIDIA (Turbo, Ryujinx). Mario Kart World's GPU resets were a task shader's read of 0xca19c6000 (a device
             // fault report of lane K's run 20261120-040222-K-mkw13-demote). NXGFX_ROBUST=0 off, =1 on other GPUs too
-            robust_buffer_access: if env_on("NXGFX_ROBUST").unwrap_or(props.vendor_id == 0x10de) { base.robust_buffer_access } else { 0 },
+            robust_buffer_access: if robustness.buffer_access {
+                vk::TRUE
+            } else {
+                vk::FALSE
+            },
             independent_blend: base.independent_blend,
             geometry_shader: base.geometry_shader,
             tessellation_shader: base.tessellation_shader,
@@ -422,7 +594,8 @@ impl Device {
             shader_image_gather_extended: base.shader_image_gather_extended,
             shader_storage_image_extended_formats: base.shader_storage_image_extended_formats,
             shader_storage_image_read_without_format: base.shader_storage_image_read_without_format,
-            shader_storage_image_write_without_format: base.shader_storage_image_write_without_format,
+            shader_storage_image_write_without_format: base
+                .shader_storage_image_write_without_format,
             shader_clip_distance: base.shader_clip_distance,
             shader_cull_distance: base.shader_cull_distance,
             shader_float64: base.shader_float64,
@@ -432,19 +605,30 @@ impl Device {
             sample_rate_shading: base.sample_rate_shading,
             ..Default::default()
         };
-        let mut e11 = vk::PhysicalDeviceVulkan11Features::default().shader_draw_parameters(f11.shader_draw_parameters != 0);
+        let mut e11 = vk::PhysicalDeviceVulkan11Features::default()
+            .shader_draw_parameters(f11.shader_draw_parameters != 0);
         let mut e12 = vk::PhysicalDeviceVulkan12Features::default()
             .timeline_semaphore(true)
             .descriptor_indexing(true)
             .descriptor_binding_partially_bound(true)
             .descriptor_binding_sampled_image_update_after_bind(true)
             .descriptor_binding_storage_image_update_after_bind(true)
-            .descriptor_binding_uniform_texel_buffer_update_after_bind(f12.descriptor_binding_uniform_texel_buffer_update_after_bind != 0)
-            .descriptor_binding_storage_texel_buffer_update_after_bind(f12.descriptor_binding_storage_texel_buffer_update_after_bind != 0)
-            .descriptor_binding_update_unused_while_pending(f12.descriptor_binding_update_unused_while_pending != 0)
+            .descriptor_binding_uniform_texel_buffer_update_after_bind(
+                f12.descriptor_binding_uniform_texel_buffer_update_after_bind != 0,
+            )
+            .descriptor_binding_storage_texel_buffer_update_after_bind(
+                f12.descriptor_binding_storage_texel_buffer_update_after_bind != 0,
+            )
+            .descriptor_binding_update_unused_while_pending(
+                f12.descriptor_binding_update_unused_while_pending != 0,
+            )
             .runtime_descriptor_array(true)
-            .shader_sampled_image_array_non_uniform_indexing(f12.shader_sampled_image_array_non_uniform_indexing != 0)
-            .shader_storage_image_array_non_uniform_indexing(f12.shader_storage_image_array_non_uniform_indexing != 0)
+            .shader_sampled_image_array_non_uniform_indexing(
+                f12.shader_sampled_image_array_non_uniform_indexing != 0,
+            )
+            .shader_storage_image_array_non_uniform_indexing(
+                f12.shader_storage_image_array_non_uniform_indexing != 0,
+            )
             .scalar_block_layout(f12.scalar_block_layout != 0)
             .shader_float16(f12.shader_float16 != 0)
             .shader_int8(f12.shader_int8 != 0)
@@ -460,11 +644,13 @@ impl Device {
             .synchronization2(true)
             .maintenance4(f13.maintenance4 != 0)
             .shader_demote_to_helper_invocation(f13.shader_demote_to_helper_invocation != 0)
-            .shader_zero_initialize_workgroup_memory(f13.shader_zero_initialize_workgroup_memory != 0)
+            .shader_zero_initialize_workgroup_memory(
+                f13.shader_zero_initialize_workgroup_memory != 0,
+            )
             // image stores past an image's size are discarded, as the console's surface stores ignore them: MKW 1.8.0's
             // cube-map mip pass (881a4d611e825d6c) runs the same 2x2x6 groups for every level, down to 2x2, and lost the
             // device with an invalid write (lane K); mkw-recomp enables every feature the driver offers
-            .robust_image_access(f13.robust_image_access != 0 && env_on("NXGFX_ROBUST").unwrap_or(props.vendor_id == 0x10de));
+            .robust_image_access(robustness.image_access);
         let mut e_eds2 = vk::PhysicalDeviceExtendedDynamicState2FeaturesEXT::default()
             .extended_dynamic_state2(true)
             .extended_dynamic_state2_logic_op(caps.logic_op_dyn)
@@ -480,15 +666,24 @@ impl Device {
             .extended_dynamic_state3_polygon_mode(caps.eds3_poly)
             .extended_dynamic_state3_alpha_to_coverage_enable(caps.eds3_a2c)
             .extended_dynamic_state3_logic_op_enable(caps.eds3_logic_en);
-        let mut e_vin = vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT::default().vertex_input_dynamic_state(true);
-        let mut e_dcc = vk::PhysicalDeviceDepthClipControlFeaturesEXT::default().depth_clip_control(true);
+        e_eds3.extended_dynamic_state3_conservative_rasterization_mode =
+            caps.eds3_cons_raster as vk::Bool32;
+        let mut e_vin = vk::PhysicalDeviceVertexInputDynamicStateFeaturesEXT::default()
+            .vertex_input_dynamic_state(true);
+        let mut e_dcc =
+            vk::PhysicalDeviceDepthClipControlFeaturesEXT::default().depth_clip_control(true);
         let mut e_div = vk::PhysicalDeviceVertexAttributeDivisorFeaturesEXT::default()
             .vertex_attribute_instance_rate_divisor(caps.divisor)
-            .vertex_attribute_instance_rate_zero_divisor(caps.divisor && f_div.vertex_attribute_instance_rate_zero_divisor != 0);
-        let mut e_u8 = vk::PhysicalDeviceIndexTypeUint8FeaturesEXT::default().index_type_uint8(caps.index_u8);
+            .vertex_attribute_instance_rate_zero_divisor(
+                caps.divisor && f_div.vertex_attribute_instance_rate_zero_divisor != 0,
+            );
+        let mut e_u8 =
+            vk::PhysicalDeviceIndexTypeUint8FeaturesEXT::default().index_type_uint8(caps.index_u8);
         let mut e_cb = vk::PhysicalDeviceCustomBorderColorFeaturesEXT::default()
             .custom_border_colors(caps.custom_border)
-            .custom_border_color_without_format(caps.custom_border && f_cb.custom_border_color_without_format != 0);
+            .custom_border_color_without_format(
+                caps.custom_border && f_cb.custom_border_color_without_format != 0,
+            );
         // the translator's fragment shaders order their framebuffer reads with pixel interlock
         let mut e_il = vk::PhysicalDeviceFragmentShaderInterlockFeaturesEXT::default()
             .fragment_shader_pixel_interlock(f_il.fragment_shader_pixel_interlock != 0)
@@ -500,9 +695,13 @@ impl Device {
             dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::transform_feedback::NAME);
         }
         // task and mesh shaders alone (multiview, shading rate and queries would need features not enabled here)
-        let mut e_ms = vk::PhysicalDeviceMeshShaderFeaturesEXT::default().mesh_shader(caps.mesh).task_shader(caps.mesh);
-        let mut e_gpl = vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT::default().graphics_pipeline_library(caps.gpl);
-        let mut e_db = vk::PhysicalDeviceDescriptorBufferFeaturesEXT::default().descriptor_buffer(caps.descbuf);
+        let mut e_ms = vk::PhysicalDeviceMeshShaderFeaturesEXT::default()
+            .mesh_shader(caps.mesh)
+            .task_shader(caps.mesh);
+        let mut e_gpl = vk::PhysicalDeviceGraphicsPipelineLibraryFeaturesEXT::default()
+            .graphics_pipeline_library(caps.gpl);
+        let mut e_db = vk::PhysicalDeviceDescriptorBufferFeaturesEXT::default()
+            .descriptor_buffer(caps.descbuf);
         if !caps.descbuf {
             dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::descriptor_buffer::NAME);
         }
@@ -517,32 +716,47 @@ impl Device {
         }
         let mut e_fault = vk::PhysicalDeviceFaultFeaturesEXT::default().device_fault(true);
         if !caps.checkpoints {
-            dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::nv::device_diagnostic_checkpoints::NAME);
+            dexts.retain(
+                |&n| unsafe { CStr::from_ptr(n) } != ash::nv::device_diagnostic_checkpoints::NAME,
+            );
         }
         if !caps.device_fault {
             dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::device_fault::NAME);
         }
-        let mut e_abr = vk::PhysicalDeviceAddressBindingReportFeaturesEXT::default().report_address_binding(true);
+        let mut e_abr = vk::PhysicalDeviceAddressBindingReportFeaturesEXT::default()
+            .report_address_binding(true);
         // VK_EXT_robustness2 (with robust access on, NVIDIA by default; NXGFX_ROBUST2=0 off): every buffer access held to
         // its descriptor's range (reads past it give zero, writes are dropped), images likewise. robustBufferAccess (v1)
         // only holds an access to the memory bound to the buffer: MKW's task shaders index a game-sized ring of 48-byte
         // records in a storage buffer with counts from the game's constants, and their device losses were reads ~5.3 MB
         // past a binding into a freed range (lane K3)
-        let r2_on = has(ash::ext::robustness2::NAME) && en_base.robust_buffer_access != 0 && env_on("NXGFX_ROBUST2").unwrap_or(true);
-        let r2_buf = r2_on && f_r2.robust_buffer_access2 != 0;
-        let r2_img = r2_on && f_r2.robust_image_access2 != 0;
-        let mut e_r2 = vk::PhysicalDeviceRobustness2FeaturesEXT::default().robust_buffer_access2(r2_buf).robust_image_access2(r2_img);
-        if !(r2_buf || r2_img) {
+        let mut e_r2 = vk::PhysicalDeviceRobustness2FeaturesEXT::default()
+            .robust_buffer_access2(caps.robust_buffer_access2)
+            .robust_image_access2(caps.robust_image_access2);
+        if !(caps.robust_buffer_access2 || caps.robust_image_access2) {
             dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::robustness2::NAME);
         }
-        crate::vklog!("robustness: buffer access {} (v2 {r2_buf}), image access v2 {r2_img}", en_base.robust_buffer_access != 0);
+        crate::vklog!(
+            "robustness: buffer access {} (v2 {}), image access {} (v2 {})",
+            robustness.buffer_access,
+            caps.robust_buffer_access2,
+            robustness.image_access,
+            caps.robust_image_access2
+        );
         if !abr {
-            dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != ash::ext::device_address_binding_report::NAME);
+            dexts.retain(
+                |&n| unsafe { CStr::from_ptr(n) } != ash::ext::device_address_binding_report::NAME,
+            );
         }
-        let mut e_as = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default().acceleration_structure(true);
+        let mut e_as = vk::PhysicalDeviceAccelerationStructureFeaturesKHR::default()
+            .acceleration_structure(true);
         let mut e_rq = vk::PhysicalDeviceRayQueryFeaturesKHR::default().ray_query(true);
         if !caps.rt {
-            for x in [ash::khr::acceleration_structure::NAME, ash::khr::ray_query::NAME, ash::khr::deferred_host_operations::NAME] {
+            for x in [
+                ash::khr::acceleration_structure::NAME,
+                ash::khr::ray_query::NAME,
+                ash::khr::deferred_host_operations::NAME,
+            ] {
                 dexts.retain(|&n| unsafe { CStr::from_ptr(n) } != x);
             }
         }
@@ -550,7 +764,9 @@ impl Device {
             .transform_feedback(caps.xfb)
             .geometry_streams(caps.xfb && f_xfb.geometry_streams != 0);
         let prio = [1.0f32];
-        let qci = [vk::DeviceQueueCreateInfo::default().queue_family_index(qfam).queue_priorities(&prio)];
+        let qci = [vk::DeviceQueueCreateInfo::default()
+            .queue_family_index(qfam)
+            .queue_priorities(&prio)];
         let mut dci = vk::DeviceCreateInfo::default()
             .queue_create_infos(&qci)
             .enabled_extension_names(&dexts)
@@ -592,17 +808,19 @@ impl Device {
         if caps.device_fault {
             dci = dci.push_next(&mut e_fault);
         }
-        if r2_buf || r2_img {
+        if caps.robust_buffer_access2 || caps.robust_image_access2 {
             dci = dci.push_next(&mut e_r2);
         }
         if abr {
             dci = dci.push_next(&mut e_abr);
             crate::vklog!("device address binding report on (the memory a faulting address belonged to is named on a device loss)");
         }
-        let dev = unsafe { instance.create_device(pdev, &dci, None) }.map_err(|e| format!("vkCreateDevice: {e}"))?;
+        let dev = unsafe { instance.create_device(pdev, &dci, None) }
+            .map_err(|e| format!("vkCreateDevice: {e}"))?;
         let queue = unsafe { dev.get_device_queue(qfam, 0) };
         // deferred recording: the device and its loaders through the shims (vk/defer.rs)
-        let shadow = super::defer::wanted().then(|| super::defer::shadow_instance(&instance, dev.handle()));
+        let shadow =
+            super::defer::wanted().then(|| super::defer::shadow_instance(&instance, dev.handle()));
         let dev = match &shadow {
             Some(s) => unsafe { ash::Device::load(s.fp_v1_0(), dev.handle()) },
             None => dev,
@@ -654,26 +872,161 @@ impl Device {
     }
 
     pub fn format_features(&self, f: vk::Format) -> vk::FormatFeatureFlags {
-        unsafe { self.instance.get_physical_device_format_properties(self.pdev, f) }.optimal_tiling_features
+        unsafe {
+            self.instance
+                .get_physical_device_format_properties(self.pdev, f)
+        }
+        .optimal_tiling_features
     }
 
     pub fn mem_type(&self, bits: u32, want: vk::MemoryPropertyFlags) -> Option<u32> {
-        (0..self.mem_props.memory_type_count).find(|&i| bits & (1 << i) != 0 && self.mem_props.memory_types[i as usize].property_flags.contains(want))
+        (0..self.mem_props.memory_type_count).find(|&i| {
+            bits & (1 << i) != 0
+                && self.mem_props.memory_types[i as usize]
+                    .property_flags
+                    .contains(want)
+        })
     }
 }
 
 /// robustBufferAccess is enabled: descriptor-buffer writes of buffer and texel-buffer descriptors take the robust sizes
 /// (VK_EXT_descriptor_buffer requires them then; the plain ones may be shorter and truncate the descriptor).
-pub static ROBUST_BUFFERS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+pub static ROBUST_BUFFERS: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 /// The size a buffer or texel-buffer descriptor of type `ty` takes in a descriptor buffer (robust when robustness is on).
-pub fn desc_size(p: &vk::PhysicalDeviceDescriptorBufferPropertiesEXT, ty: vk::DescriptorType) -> usize {
+pub fn desc_size(
+    p: &vk::PhysicalDeviceDescriptorBufferPropertiesEXT,
+    ty: vk::DescriptorType,
+) -> usize {
     let r = ROBUST_BUFFERS.load(std::sync::atomic::Ordering::Relaxed);
     match ty {
-        vk::DescriptorType::UNIFORM_BUFFER => if r { p.robust_uniform_buffer_descriptor_size } else { p.uniform_buffer_descriptor_size },
-        vk::DescriptorType::STORAGE_BUFFER => if r { p.robust_storage_buffer_descriptor_size } else { p.storage_buffer_descriptor_size },
-        vk::DescriptorType::UNIFORM_TEXEL_BUFFER => if r { p.robust_uniform_texel_buffer_descriptor_size } else { p.uniform_texel_buffer_descriptor_size },
-        vk::DescriptorType::STORAGE_TEXEL_BUFFER => if r { p.robust_storage_texel_buffer_descriptor_size } else { p.storage_texel_buffer_descriptor_size },
+        vk::DescriptorType::UNIFORM_BUFFER => {
+            if r {
+                p.robust_uniform_buffer_descriptor_size
+            } else {
+                p.uniform_buffer_descriptor_size
+            }
+        }
+        vk::DescriptorType::STORAGE_BUFFER => {
+            if r {
+                p.robust_storage_buffer_descriptor_size
+            } else {
+                p.storage_buffer_descriptor_size
+            }
+        }
+        vk::DescriptorType::UNIFORM_TEXEL_BUFFER => {
+            if r {
+                p.robust_uniform_texel_buffer_descriptor_size
+            } else {
+                p.uniform_texel_buffer_descriptor_size
+            }
+        }
+        vk::DescriptorType::STORAGE_TEXEL_BUFFER => {
+            if r {
+                p.robust_storage_texel_buffer_descriptor_size
+            } else {
+                p.storage_texel_buffer_descriptor_size
+            }
+        }
         _ => 0,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{robustness_policy, Robustness};
+
+    const NVIDIA: u32 = 0x10de;
+    const OTHER: u32 = 0x1002;
+
+    fn policy(
+        vendor: u32,
+        robust: Option<bool>,
+        robust2: Option<bool>,
+        extension: bool,
+        features: [bool; 4],
+    ) -> Robustness {
+        robustness_policy(
+            vendor,
+            robust,
+            robust2,
+            extension,
+            features[0],
+            features[1],
+            features[2],
+            features[3],
+        )
+    }
+
+    #[test]
+    fn robustness_defaults_follow_vendor_and_support() {
+        assert_eq!(
+            policy(NVIDIA, None, None, true, [true; 4]),
+            Robustness {
+                buffer_access: true,
+                image_access: true,
+                buffer_access2: true,
+                image_access2: true
+            }
+        );
+        assert_eq!(
+            policy(OTHER, None, None, true, [true; 4]),
+            Robustness::default()
+        );
+        assert_eq!(
+            policy(NVIDIA, None, None, true, [true, false, false, true]),
+            Robustness {
+                buffer_access: true,
+                image_access: false,
+                buffer_access2: false,
+                image_access2: true
+            }
+        );
+    }
+
+    #[test]
+    fn robustness_environment_overrides_defaults() {
+        assert_eq!(
+            policy(NVIDIA, Some(false), None, true, [true; 4]),
+            Robustness::default()
+        );
+        assert_eq!(
+            policy(OTHER, Some(true), None, true, [true; 4]),
+            Robustness {
+                buffer_access: true,
+                image_access: true,
+                buffer_access2: true,
+                image_access2: true
+            }
+        );
+        assert_eq!(
+            policy(NVIDIA, None, Some(false), true, [true; 4]),
+            Robustness {
+                buffer_access: true,
+                image_access: true,
+                buffer_access2: false,
+                image_access2: false
+            }
+        );
+    }
+
+    #[test]
+    fn robustness2_requires_extension_base_and_individual_features() {
+        for (extension, base, features, expected) in [
+            (false, true, [true, true], [false, false]),
+            (true, false, [true, true], [false, false]),
+            (true, true, [true, false], [true, false]),
+            (true, true, [false, true], [false, true]),
+        ] {
+            let got = policy(
+                NVIDIA,
+                None,
+                None,
+                extension,
+                [base, true, features[0], features[1]],
+            );
+            assert_eq!([got.buffer_access2, got.image_access2], expected);
+        }
     }
 }

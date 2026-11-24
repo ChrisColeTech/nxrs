@@ -34,11 +34,18 @@ unsafe fn nvn2_ctl(c: *const u8) -> bool {
 /// As `nvn2_ctl`.
 pub unsafe fn ctl_lens(c: *const u8) -> (usize, usize) {
     if nvn2_ctl(c) {
-        return (NVN2_KEY_CTL, core::ptr::read_unaligned(c.add(0x44) as *const u32) as usize);
+        return (
+            NVN2_KEY_CTL,
+            core::ptr::read_unaligned(c.add(0x44) as *const u32) as usize,
+        );
     }
     let ncode = core::ptr::read_unaligned(c.add(0x704) as *const u32) as usize;
     let own = core::ptr::read_unaligned(c.add(0x20) as *const u32) as usize;
-    let nctl = if (0x760..0x880).contains(&own) { own } else { 0x880 };
+    let nctl = if (0x760..0x880).contains(&own) {
+        own
+    } else {
+        0x880
+    };
     (nctl, ncode)
 }
 
@@ -85,11 +92,10 @@ struct ProgKeys {
 }
 static KEYS: Mutex<Option<HashMap<u64, ProgKeys>>> = Mutex::new(None);
 
-/// The keys of a program's stages, by its serial (a game may copy an NVNprogram after SetShaders and draw with the copy).
+/// The stage keys retained for a program. Unlike `prog_keys`, this preserves empty stage slots for capture/replay.
 /// # Safety
 /// `p` is a program the game initialized.
-pub unsafe fn prog_keys(p: &prog_t) -> Vec<ShaderKey> {
-    let mut out = Vec::new();
+pub unsafe fn prog_stage_keys(p: &prog_t) -> [Option<ShaderKey>; 6] {
     let mut g = KEYS.lock().unwrap();
     let map = g.get_or_insert_with(HashMap::new);
     let rec = map.entry(p.serial).or_default();
@@ -101,16 +107,36 @@ pub unsafe fn prog_keys(p: &prog_t) -> Vec<ShaderKey> {
             }
             rec.key[i] = shader_key(&sd, false);
             if let Some(k) = rec.key[i] {
-                if sd.data != 0 && crate::vk::mem::addr_known(sd.data, ctl_lens(sd.control).1 as u64) {
+                if sd.data != 0
+                    && crate::vk::mem::addr_known(sd.data, ctl_lens(sd.control).1 as u64)
+                {
                     live_if_missing(&k, &sd);
                 }
             }
         }
-        if let Some(k) = rec.key[i] {
-            out.push(k);
-        }
     }
-    out
+    rec.key
+}
+
+/// Restores the process-side key state which is not part of the guest `NVNprogram` object.
+pub fn restore_prog_keys(serial: u64, keys: [Option<ShaderKey>; 6]) {
+    KEYS.lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(
+            serial,
+            ProgKeys {
+                key: keys,
+                ctl: Default::default(),
+            },
+        );
+}
+
+/// The keys of a program's stages, by its serial (a game may copy an NVNprogram after SetShaders and draw with the copy).
+/// # Safety
+/// `p` is a program the game initialized.
+pub unsafe fn prog_keys(p: &prog_t) -> Vec<ShaderKey> {
+    prog_stage_keys(p).into_iter().flatten().collect()
 }
 
 /// A stage the shader library lacks goes to the live translator (its control and code copied: the game may free the
@@ -118,7 +144,9 @@ pub unsafe fn prog_keys(p: &prog_t) -> Vec<ShaderKey> {
 /// # Safety
 /// `sd`'s control section and code area are readable.
 unsafe fn live_if_missing(k: &ShaderKey, sd: &NVNshaderData) {
-    let Some(g) = crate::vk::Gpu::try_get() else { return };
+    let Some(g) = crate::vk::Gpu::try_get() else {
+        return;
+    };
     if g.shaders.has(k) || sd.control.is_null() || sd.data == 0 {
         return;
     }
@@ -126,6 +154,27 @@ unsafe fn live_if_missing(k: &ShaderKey, sd: &NVNshaderData) {
     let ctl = core::slice::from_raw_parts(sd.control, nctl).to_vec();
     let code = core::slice::from_raw_parts(sd.data as *const u8, ncode).to_vec();
     crate::vk::live::request(*k, ctl, code);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn restored_program_keys_do_not_rehash_guest_shader_pointers() {
+        let serial = 0xffff_ffff_0000_0000 | std::process::id() as u64;
+        let key = [0xf1, 0xaa, 0x1f, 0xe9, 0xef, 0x30, 0x01, 0x07];
+        let mut keys = [None; 6];
+        keys[1] = Some(key);
+        restore_prog_keys(serial, keys);
+        let p = prog_t {
+            magic: MAGIC_PROG,
+            nstage: 2,
+            sd: unsafe { core::mem::zeroed() },
+            serial,
+        };
+        assert_eq!(unsafe { prog_keys(&p) }, vec![key]);
+    }
 }
 
 nvn_fns! {

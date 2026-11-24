@@ -59,9 +59,21 @@ pub fn late_outputs(words: &[u32]) -> Option<Vec<u32>> {
     }
     let entry = v.iter().find(|x| x.1 == OP_ENTRY_POINT).map(|x| x.2[1])?;
     let mut located = std::collections::HashSet::new();
+    let mut components = HashMap::new();
+    let mut types = HashMap::new();
+    let mut initializers = HashMap::new();
     for x in &v {
         if x.1 == OP_DECORATE && x.2.len() >= 2 && x.2[1] == DEC_LOCATION {
             located.insert(x.2[0]);
+        }
+        if x.1 == OP_DECORATE && x.2.len() == 3 && x.2[1] == 31 {
+            components.insert(x.2[0], x.2[2]);
+        }
+        if matches!(x.1, 21..=23) {
+            types.insert(x.2[0], (x.1, &x.2[1..]));
+        }
+        if x.1 == OP_VARIABLE && x.2.len() == 4 && x.2[2] == SC_OUTPUT {
+            initializers.insert(x.2[1], x.2[3]);
         }
     }
     let mut ptr: HashMap<u32, (u32, u32)> = HashMap::new(); // pointer type -> (storage class, pointee)
@@ -72,7 +84,8 @@ pub fn late_outputs(words: &[u32]) -> Option<Vec<u32>> {
     }
     let mut outs: Vec<(u32, u32)> = Vec::new(); // (variable, its pointee type)
     for x in &v {
-        if x.1 == OP_VARIABLE && x.2.len() >= 3 && x.2[2] == SC_OUTPUT && located.contains(&x.2[1]) {
+        if x.1 == OP_VARIABLE && x.2.len() >= 3 && x.2[2] == SC_OUTPUT && located.contains(&x.2[1])
+        {
             outs.push((x.2[1], ptr.get(&x.2[0])?.1));
         }
     }
@@ -85,10 +98,12 @@ pub fn late_outputs(words: &[u32]) -> Option<Vec<u32>> {
         bound += 1;
         bound - 1
     };
-    // declarations: a private pointer type per pointee, a null constant per pointee, a shadow per output
+    // Preserve explicit initializers. Otherwise use the translator's unwritten user-attribute
+    // defaults (0, 0, 0, 1), including Component decorations. A full-vector export must not turn
+    // an unwritten W into zero: fullscreen lighting shaders divide by that varying's W.
     let mut decl: Vec<u32> = Vec::new();
     let mut priv_ptr: HashMap<u32, u32> = HashMap::new();
-    let mut nulls: HashMap<u32, u32> = HashMap::new();
+    let mut defaults: HashMap<(u32, u32), u32> = HashMap::new();
     let mut shadow: HashMap<u32, u32> = HashMap::new();
     for &(var, t) in &outs {
         let pp = *priv_ptr.entry(t).or_insert_with(|| {
@@ -96,13 +111,52 @@ pub fn late_outputs(words: &[u32]) -> Option<Vec<u32>> {
             decl.extend(ins(OP_TYPE_POINTER, &[id, SC_PRIVATE, t]));
             id
         });
-        let nul = *nulls.entry(t).or_insert_with(|| {
-            let id = new_id();
-            decl.extend(ins(OP_CONSTANT_NULL, &[t, id]));
-            id
-        });
+        let component = components.get(&var).copied().unwrap_or(0);
+        let init = if let Some(&init) = initializers.get(&var) {
+            init
+        } else if let Some(&init) = defaults.get(&(t, component)) {
+            init
+        } else {
+            let (scalar, count) = match types.get(&t) {
+                Some((23, a)) => (a[0], a[1]),
+                _ => (t, 1),
+            };
+            let init = match types.get(&scalar) {
+                Some((op @ (21 | 22), a)) if a[0] == 32 && count <= 4 => {
+                    let mut values = Vec::new();
+                    for c in 0..count {
+                        let value = if component + c != 3 {
+                            0
+                        } else if *op == 22 {
+                            1.0f32.to_bits()
+                        } else {
+                            1
+                        };
+                        let id = new_id();
+                        decl.extend(ins(43, &[scalar, id, value]));
+                        values.push(id);
+                    }
+                    if count == 1 {
+                        values[0]
+                    } else {
+                        let id = new_id();
+                        let mut args = vec![t, id];
+                        args.extend(values);
+                        decl.extend(ins(44, &args));
+                        id
+                    }
+                }
+                _ => {
+                    let id = new_id();
+                    decl.extend(ins(OP_CONSTANT_NULL, &[t, id]));
+                    id
+                }
+            };
+            defaults.insert((t, component), init);
+            init
+        };
         let s = new_id();
-        decl.extend(ins(OP_VARIABLE, &[pp, s, SC_PRIVATE, nul]));
+        decl.extend(ins(OP_VARIABLE, &[pp, s, SC_PRIVATE, init]));
         shadow.insert(var, s);
     }
     // access chains into an output: a private pointer of the component type (declared with the rest)
@@ -174,7 +228,12 @@ pub fn late_outputs(words: &[u32]) -> Option<Vec<u32>> {
                     OP_SELECTION_MERGE | OP_LOOP_MERGE | OP_SWITCH | OP_LINE => &[],
                     _ => a,
                 };
-                if declared && op != OP_NAME && op != OP_DECORATE && op != OP_VARIABLE && ids.iter().any(|&w| is_out(w)) {
+                if declared
+                    && op != OP_NAME
+                    && op != OP_DECORATE
+                    && op != OP_VARIABLE
+                    && ids.iter().any(|&w| is_out(w))
+                {
                     return None;
                 }
                 if op == OP_EXT_INST && a.len() > 4 && a[4..].iter().any(|&w| is_out(w)) {
@@ -186,6 +245,86 @@ pub fn late_outputs(words: &[u32]) -> Option<Vec<u32>> {
     }
     out[3] = bound;
     Some(out)
+}
+
+#[cfg(test)]
+mod late_output_tests {
+    use super::*;
+
+    fn fixture(component: u32, count: u32, initializer: bool) -> Vec<u32> {
+        let mut w = vec![0x0723_0203, 0x0001_0300, 0, 20, 0];
+        w.extend(ins(OP_ENTRY_POINT, &[0, 10, 0x6e69616d, 0, 5]));
+        w.extend(ins(OP_DECORATE, &[5, DEC_LOCATION, 0]));
+        w.extend(ins(OP_DECORATE, &[5, 31, component]));
+        w.extend(ins(22, &[1, 32]));
+        w.extend(ins(23, &[2, 1, count]));
+        w.extend(ins(OP_TYPE_POINTER, &[3, SC_OUTPUT, 2]));
+        w.extend(ins(OP_CONSTANT_NULL, &[2, 4]));
+        w.extend(ins(
+            OP_VARIABLE,
+            if initializer {
+                &[3, 5, SC_OUTPUT, 4]
+            } else {
+                &[3, 5, SC_OUTPUT]
+            },
+        ));
+        w.extend(ins(OP_FUNCTION, &[6, 10, 0, 7]));
+        w.extend(ins(OP_RETURN, &[]));
+        w
+    }
+
+    fn shadow_value(w: &[u32]) -> Vec<u32> {
+        let mut constants: HashMap<u32, Vec<u32>> = HashMap::new();
+        let mut at = 5;
+        while at < w.len() {
+            let n = (w[at] >> 16) as usize;
+            let a = &w[at + 1..at + n];
+            match w[at] & 65535 {
+                43 => {
+                    constants.insert(a[1], vec![a[2]]);
+                }
+                44 => {
+                    constants.insert(a[1], a[2..].iter().map(|id| constants[id][0]).collect());
+                }
+                OP_VARIABLE if a[2] == SC_PRIVATE => return constants[&a[3]].clone(),
+                _ => {}
+            }
+            at += n;
+        }
+        panic!("no private output");
+    }
+
+    #[test]
+    fn late_output_defaults_keep_w_one_and_respect_component() {
+        assert_eq!(
+            shadow_value(&late_outputs(&fixture(0, 4, false)).unwrap()),
+            [0, 0, 0, 1.0f32.to_bits()]
+        );
+        assert_eq!(
+            shadow_value(&late_outputs(&fixture(2, 2, false)).unwrap()),
+            [0, 1.0f32.to_bits()]
+        );
+        assert_eq!(
+            shadow_value(&late_outputs(&fixture(0, 2, false)).unwrap()),
+            [0, 0]
+        );
+    }
+
+    #[test]
+    fn late_outputs_keep_explicit_initializer() {
+        let w = late_outputs(&fixture(0, 4, true)).unwrap();
+        let mut at = 5;
+        let mut found = false;
+        while at < w.len() {
+            let n = (w[at] >> 16) as usize;
+            if w[at] & 65535 == OP_VARIABLE && w[at + 3] == SC_PRIVATE {
+                assert_eq!(w[at + 4], 4, "explicit zero must override the default W");
+                found = true;
+            }
+            at += n;
+        }
+        assert!(found);
+    }
 }
 
 /// `sabs_product`: every 32-bit GLSL.std.450 SAbs written as `x * ((x >> 31) | 1)` (mkw-recomp's translator, #395 /
@@ -225,7 +364,11 @@ pub fn sabs_product(words: &[u32]) -> Option<Vec<u32>> {
     for &(i, op, n) in &v {
         match op {
             OP_EXT_INST_IMPORT if n >= 3 => {
-                let name: Vec<u8> = words[i + 2..i + n].iter().flat_map(|w| w.to_le_bytes()).take_while(|&b| b != 0).collect();
+                let name: Vec<u8> = words[i + 2..i + n]
+                    .iter()
+                    .flat_map(|w| w.to_le_bytes())
+                    .take_while(|&b| b != 0)
+                    .collect();
                 if name == b"GLSL.std.450" {
                     glsl.push(words[i + 1]);
                 }
@@ -239,7 +382,12 @@ pub fn sabs_product(words: &[u32]) -> Option<Vec<u32>> {
                 }
             }
             OP_FUNCTION if first_fn == 0 => first_fn = i,
-            OP_EXT_INST if n == 6 && glsl.contains(&words[i + 3]) && words[i + 4] == GLSL_SABS && ints.contains_key(&words[i + 1]) => {
+            OP_EXT_INST
+                if n == 6
+                    && glsl.contains(&words[i + 3])
+                    && words[i + 4] == GLSL_SABS
+                    && ints.contains_key(&words[i + 1]) =>
+            {
                 sites += 1;
             }
             _ => {}
@@ -258,11 +406,14 @@ pub fn sabs_product(words: &[u32]) -> Option<Vec<u32>> {
     let mut decl = vec![];
     let mut scalar: HashMap<u32, (u32, u32)> = HashMap::new();
     for &(i, op, n) in &v {
-        if op != OP_EXT_INST || n != 6 || !glsl.contains(&words[i + 3]) || words[i + 4] != GLSL_SABS {
+        if op != OP_EXT_INST || n != 6 || !glsl.contains(&words[i + 3]) || words[i + 4] != GLSL_SABS
+        {
             continue;
         }
         let t = words[i + 1];
-        let Some(&(count, s)) = ints.get(&t) else { continue };
+        let Some(&(count, s)) = ints.get(&t) else {
+            continue;
+        };
         if consts.contains_key(&t) {
             continue;
         }
@@ -293,7 +444,8 @@ pub fn sabs_product(words: &[u32]) -> Option<Vec<u32>> {
         if i == first_fn {
             out.extend_from_slice(&decl);
         }
-        if op == OP_EXT_INST && n == 6 && glsl.contains(&words[i + 3]) && words[i + 4] == GLSL_SABS {
+        if op == OP_EXT_INST && n == 6 && glsl.contains(&words[i + 3]) && words[i + 4] == GLSL_SABS
+        {
             if let Some(&(c31, c1)) = consts.get(&words[i + 1]) {
                 let (t, r, x) = (words[i + 1], words[i + 2], words[i + 5]);
                 let (sh, or) = (fresh(), fresh());
@@ -318,7 +470,16 @@ mod sabs_tests {
     #[test]
     fn sabs_becomes_a_product() {
         let mut w = vec![0x0723_0203, 0x0001_0000, 0, 100, 0];
-        w.extend(ins(11, &[1, u32::from_le_bytes(*b"GLSL"), u32::from_le_bytes(*b".std"), u32::from_le_bytes(*b".450"), 0]));
+        w.extend(ins(
+            11,
+            &[
+                1,
+                u32::from_le_bytes(*b"GLSL"),
+                u32::from_le_bytes(*b".std"),
+                u32::from_le_bytes(*b".450"),
+                0,
+            ],
+        ));
         w.extend(ins(21, &[2, 32, 1])); // int
         w.extend(ins(23, &[3, 2, 2])); // ivec2
         w.extend(ins(OP_FUNCTION, &[2, 10, 0, 11]));
@@ -336,7 +497,10 @@ mod sabs_tests {
             v
         };
         // import, int, ivec2, 31, 1, ivec2(31), ivec2(1), function, 2 x (shift, or, mul), the other ext inst
-        assert_eq!(ops, [11, 21, 23, 43, 43, 44, 44, 54, 195, 197, 132, 195, 197, 132, 12]);
+        assert_eq!(
+            ops,
+            [11, 21, 23, 43, 43, 44, 44, 54, 195, 197, 132, 195, 197, 132, 12]
+        );
         assert_eq!(out[3], 100 + 4 + 4);
         assert!(sabs_product(&out).is_none(), "nothing left to rewrite");
         for x in [0i32, 1, -1, 7, -7, i32::MAX, i32::MIN, -2_000_000_000] {
@@ -432,7 +596,9 @@ pub fn kill_demote(words: &[u32]) -> Option<Vec<u32>> {
         if op == OP_KILL {
             out.extend(ins(OP_DEMOTE, &[]));
             match merge_of.get(&block) {
-                Some(&m) if !phi_at.get(&m).copied().unwrap_or(true) => out.extend(ins(OP_BRANCH, &[m])),
+                Some(&m) if !phi_at.get(&m).copied().unwrap_or(true) => {
+                    out.extend(ins(OP_BRANCH, &[m]))
+                }
                 _ if voids.contains(&fn_type) => out.extend(ins(OP_RETURN, &[])),
                 _ => {
                     let u = bound;
@@ -447,11 +613,14 @@ pub fn kill_demote(words: &[u32]) -> Option<Vec<u32>> {
         if k == last_cap && !has_cap {
             out.extend(ins(OP_CAPABILITY, &[CAP_DEMOTE]));
             let name = b"SPV_EXT_demote_to_helper_invocation\0";
-            let mut ws: Vec<u32> = name.chunks(4).map(|c| {
-                let mut b = [0u8; 4];
-                b[..c.len()].copy_from_slice(c);
-                u32::from_le_bytes(b)
-            }).collect();
+            let mut ws: Vec<u32> = name
+                .chunks(4)
+                .map(|c| {
+                    let mut b = [0u8; 4];
+                    b[..c.len()].copy_from_slice(c);
+                    u32::from_le_bytes(b)
+                })
+                .collect();
             out.extend(ins(OP_EXTENSION, &ws));
         }
     }
@@ -489,7 +658,10 @@ mod kill_tests {
         w.extend(ins(OP_RETURN, &[]));
         w.extend(ins(56, &[]));
         let out = kill_demote(&w).unwrap();
-        assert_eq!(ops(&out), [17, 17, 10, 19, 54, 248, 247, 250, 248, 5380, 249, 248, 253, 56]);
+        assert_eq!(
+            ops(&out),
+            [17, 17, 10, 19, 54, 248, 247, 250, 248, 5380, 249, 248, 253, 56]
+        );
         assert!(kill_demote(&out).is_none());
         // the branch goes to the merge block 14
         let at = out.iter().position(|&x| x & 0xffff == 5380).unwrap();
@@ -518,7 +690,12 @@ mod kill_tests {
 #[test]
 #[ignore]
 fn spvfix_folder() {
-    let (Ok(i), Ok(o)) = (std::env::var("NXGFX_SPVFIX_IN"), std::env::var("NXGFX_SPVFIX_OUT")) else { return };
+    let (Ok(i), Ok(o)) = (
+        std::env::var("NXGFX_SPVFIX_IN"),
+        std::env::var("NXGFX_SPVFIX_OUT"),
+    ) else {
+        return;
+    };
     std::fs::create_dir_all(&o).unwrap();
     let mut n = 0;
     for e in std::fs::read_dir(&i).unwrap().flatten() {
@@ -526,7 +703,10 @@ fn spvfix_folder() {
         if b.len() % 4 != 0 {
             continue;
         }
-        let w: Vec<u32> = b.chunks(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        let w: Vec<u32> = b
+            .chunks(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         let k = kill_demote(&w);
         let s = sabs_product(k.as_deref().unwrap_or(&w));
         let m = mesh_indices(s.as_deref().or(k.as_deref()).unwrap_or(&w));
@@ -539,7 +719,11 @@ fn spvfix_folder() {
             }
             f
         };
-        let z = if is_mesh { zero_workgroup(m.as_deref().or(s.as_deref()).or(k.as_deref()).unwrap_or(&w)) } else { None };
+        let z = if is_mesh {
+            zero_workgroup(m.as_deref().or(s.as_deref()).or(k.as_deref()).unwrap_or(&w))
+        } else {
+            None
+        };
         if k.is_none() && s.is_none() && m.is_none() && z.is_none() {
             continue;
         }
@@ -590,8 +774,16 @@ pub fn mesh_indices(words: &[u32]) -> Option<Vec<u32>> {
     let mut first_fn = 0;
     for &(i, op, n) in &v {
         match op {
-            OP_EXECUTION_MODE if n >= 4 && words[i + 2] == MODE_OUTPUT_VERTICES => verts = words[i + 3],
-            OP_DECORATE if n >= 4 && words[i + 2] == DEC_BUILTIN && INDEX_BUILTINS.contains(&words[i + 3]) => index_vars.push(words[i + 1]),
+            OP_EXECUTION_MODE if n >= 4 && words[i + 2] == MODE_OUTPUT_VERTICES => {
+                verts = words[i + 3]
+            }
+            OP_DECORATE
+                if n >= 4
+                    && words[i + 2] == DEC_BUILTIN
+                    && INDEX_BUILTINS.contains(&words[i + 3]) =>
+            {
+                index_vars.push(words[i + 1])
+            }
             OP_TYPE_INT if n == 4 && words[i + 2] == 32 && words[i + 3] == 0 => {
                 uints.insert(words[i + 1], ());
             }
@@ -611,7 +803,10 @@ pub fn mesh_indices(words: &[u32]) -> Option<Vec<u32>> {
     // access chains into the index arrays: result id -> pointee type
     let mut chains: HashMap<u32, u32> = HashMap::new();
     for &(i, op, n) in &v {
-        if (op == OP_ACCESS_CHAIN || op == OP_IN_BOUNDS_ACCESS_CHAIN) && n >= 4 && index_vars.contains(&words[i + 3]) {
+        if (op == OP_ACCESS_CHAIN || op == OP_IN_BOUNDS_ACCESS_CHAIN)
+            && n >= 4
+            && index_vars.contains(&words[i + 3])
+        {
             chains.insert(words[i + 2], *ptrs.get(&words[i + 1])?);
         }
     }
@@ -631,8 +826,16 @@ pub fn mesh_indices(words: &[u32]) -> Option<Vec<u32>> {
         if index_vars.contains(&words[i + 1]) {
             return None; // the whole array stored at once: not rewritten
         }
-        let Some(&t) = chains.get(&words[i + 1]) else { continue };
-        let s = if uints.contains_key(&t) { t } else { vecs.get(&t).filter(|(c, _)| uints.contains_key(c)).map(|(c, _)| *c)? };
+        let Some(&t) = chains.get(&words[i + 1]) else {
+            continue;
+        };
+        let s = if uints.contains_key(&t) {
+            t
+        } else {
+            vecs.get(&t)
+                .filter(|(c, _)| uints.contains_key(c))
+                .map(|(c, _)| *c)?
+        };
         if !consts.contains_key(&t) {
             let sc = *scalar.entry(s).or_insert_with(|| {
                 let c = fresh();
@@ -761,7 +964,10 @@ pub fn zero_workgroup(words: &[u32]) -> Option<Vec<u32>> {
                 let z = bound;
                 bound += 1;
                 out.extend(ins(OP_CONSTANT_NULL, &[t, z]));
-                out.extend(ins(OP_VARIABLE, &[words[i + 1], words[i + 2], SC_WORKGROUP, z]));
+                out.extend(ins(
+                    OP_VARIABLE,
+                    &[words[i + 1], words[i + 2], SC_WORKGROUP, z],
+                ));
                 continue;
             }
         }
@@ -785,9 +991,19 @@ mod zero_wg_tests {
         w.extend(ins(OP_VARIABLE, &[4, 11, 3]));
         w.extend(ins(OP_FUNCTION, &[2, 12, 0, 13]));
         let out = zero_workgroup(&w).unwrap();
-        assert!(out.windows(4).any(|x| x == [(3 << 16) | 46, 2, 50, (5 << 16) | 59]), "null constant before the variable");
-        assert!(out.windows(4).any(|x| x == [3, 10, 4, 50]), "the variable initialized with it");
-        assert!(out.windows(3).any(|x| x == [4, 11, 3]), "the output variable untouched");
+        assert!(
+            out.windows(4)
+                .any(|x| x == [(3 << 16) | 46, 2, 50, (5 << 16) | 59]),
+            "null constant before the variable"
+        );
+        assert!(
+            out.windows(4).any(|x| x == [3, 10, 4, 50]),
+            "the variable initialized with it"
+        );
+        assert!(
+            out.windows(3).any(|x| x == [4, 11, 3]),
+            "the output variable untouched"
+        );
         assert_eq!(out[3], 51);
     }
 }

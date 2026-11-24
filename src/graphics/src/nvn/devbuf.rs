@@ -23,7 +23,11 @@ unsafe fn dmb_mem(o: &dmb_t) -> *mut u8 {
         return core::ptr::null_mut();
     }
     let base = super::pool::pool_cpu_map(&*o.pool);
-    if base.is_null() { base } else { base.add(o.off as usize) }
+    if base.is_null() {
+        base
+    } else {
+        base.add(o.off as usize)
+    }
 }
 
 /// The NVN shader stage of a record's source stage code (-1 = unknown).
@@ -116,8 +120,16 @@ pub fn format_message(fmt: &[u8], args: &[u32]) -> String {
         for _ in 0..vec {
             let s = match conv {
                 b'd' | b'i' => {
-                    let v = if words == 2 { next(2) as i64 } else { next(1) as u32 as i32 as i64 };
-                    if plus && v >= 0 { format!("+{v}") } else { v.to_string() }
+                    let v = if words == 2 {
+                        next(2) as i64
+                    } else {
+                        next(1) as u32 as i32 as i64
+                    };
+                    if plus && v >= 0 {
+                        format!("+{v}")
+                    } else {
+                        v.to_string()
+                    }
                 }
                 b'u' => next(words).to_string(),
                 b'x' => format!("{:x}", next(words)),
@@ -133,7 +145,11 @@ pub fn format_message(fmt: &[u8], args: &[u32]) -> String {
                         b'g' | b'G' | b'a' | b'A' => format!("{v}"),
                         _ => format!("{v:.p$}"),
                     };
-                    if plus && v >= 0.0 { format!("+{s}") } else { s }
+                    if plus && v >= 0.0 {
+                        format!("+{s}")
+                    } else {
+                        s
+                    }
                 }
                 _ => {
                     // an unknown conversion is copied as written
@@ -148,7 +164,11 @@ pub fn format_message(fmt: &[u8], args: &[u32]) -> String {
             out.push_str(&s);
             out.extend(std::iter::repeat_n(' ', pad));
         } else if zero && vec == 1 && !matches!(conv, b'c') {
-            let (sign, digits) = if s.starts_with(['-', '+']) { s.split_at(1) } else { ("", s.as_str()) };
+            let (sign, digits) = if s.starts_with(['-', '+']) {
+                s.split_at(1)
+            } else {
+                ("", s.as_str())
+            };
             out.push_str(sign);
             out.extend(std::iter::repeat_n('0', pad));
             out.push_str(digits);
@@ -259,8 +279,24 @@ mod tests {
 
     #[test]
     fn printf_records() {
-        assert_eq!(format_message(b"x=%d u=%u h=%04x %%", &[(-5i32) as u32, 7, 0xab]), "x=-5 u=7 h=00ab %");
-        assert_eq!(format_message(b"%.2f|%v3f|%lld", &[1.5f32.to_bits(), 1f32.to_bits(), 2f32.to_bits(), 3f32.to_bits(), 5, 1]), "1.50|1.000000, 2.000000, 3.000000|4294967301");
+        assert_eq!(
+            format_message(b"x=%d u=%u h=%04x %%", &[(-5i32) as u32, 7, 0xab]),
+            "x=-5 u=7 h=00ab %"
+        );
+        assert_eq!(
+            format_message(
+                b"%.2f|%v3f|%lld",
+                &[
+                    1.5f32.to_bits(),
+                    1f32.to_bits(),
+                    2f32.to_bits(),
+                    3f32.to_bits(),
+                    5,
+                    1
+                ]
+            ),
+            "1.50|1.000000, 2.000000, 3.000000|4294967301"
+        );
     }
 
     #[test]
@@ -286,7 +322,9 @@ mod tests {
         rec.extend_from_slice(&0x24u32.to_le_bytes());
         rec.extend_from_slice(&4u16.to_le_bytes());
         rec.extend_from_slice(&(-2i16).to_le_bytes());
-        for k in 0..4u32 { rec.extend_from_slice(&(10 + k).to_le_bytes()); }
+        for k in 0..4u32 {
+            rec.extend_from_slice(&(10 + k).to_le_bytes());
+        }
         rec.extend_from_slice(b"v %d\0\0\0\0");
         rec.extend_from_slice(&42u32.to_le_bytes());
         assert_eq!(rec.len(), 0x24);
@@ -296,10 +334,26 @@ mod tests {
         let mut text = [0u8; 16];
         unsafe {
             nvnDeviceMessageBufferBeginMessages(mp);
-            assert_eq!(nvnDeviceMessageBufferGetNextMessage(mp, info.as_mut_ptr(), text.as_mut_ptr(), text.len()), 1);
+            assert_eq!(
+                nvnDeviceMessageBufferGetNextMessage(
+                    mp,
+                    info.as_mut_ptr(),
+                    text.as_mut_ptr(),
+                    text.len()
+                ),
+                1
+            );
             assert_eq!(info, [-2, 1, 10, 11, 12, 13]);
             assert_eq!(&text[..5], b"v 42\0");
-            assert_eq!(nvnDeviceMessageBufferGetNextMessage(mp, info.as_mut_ptr(), text.as_mut_ptr(), text.len()), 0);
+            assert_eq!(
+                nvnDeviceMessageBufferGetNextMessage(
+                    mp,
+                    info.as_mut_ptr(),
+                    text.as_mut_ptr(),
+                    text.len()
+                ),
+                0
+            );
             nvnDeviceMessageBufferEndMessages(mp);
         }
     }

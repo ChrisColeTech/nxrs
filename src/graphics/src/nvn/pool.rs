@@ -24,8 +24,16 @@ struct DpoolBases {
     next: i32,
     end: i32,
 }
-static TEX_BASES: Mutex<DpoolBases> = Mutex::new(DpoolBases { t: Vec::new(), next: 0, end: 0 });
-static SAMP_BASES: Mutex<DpoolBases> = Mutex::new(DpoolBases { t: Vec::new(), next: 0, end: 0 });
+static TEX_BASES: Mutex<DpoolBases> = Mutex::new(DpoolBases {
+    t: Vec::new(),
+    next: 0,
+    end: 0,
+});
+static SAMP_BASES: Mutex<DpoolBases> = Mutex::new(DpoolBases {
+    t: Vec::new(),
+    next: 0,
+    end: 0,
+});
 
 fn dpool_add(m: &Mutex<DpoolBases>, pool: usize, n: i32, kind: &str) -> i32 {
     let mut g = m.lock().unwrap();
@@ -33,14 +41,19 @@ fn dpool_add(m: &Mutex<DpoolBases>, pool: usize, n: i32, kind: &str) -> i32 {
         Some(e) => e.1,
         None => {
             if g.t.len() == NDPOOL {
-                crate::log::red_once(&format!("{kind} pools exceed {NDPOOL}: later ones share the first pool's numbering"));
+                crate::log::red_once(&format!(
+                    "{kind} pools exceed {NDPOOL}: later ones share the first pool's numbering"
+                ));
                 return 0;
             }
             let b = g.next;
             g.t.push((pool, b));
             g.next += (n + 255) & !255;
             if g.t.len() > 1 {
-                crate::nvnlog!("pool #{} ({kind}, {n} entries): numbered from {b} in the host table", g.t.len());
+                crate::nvnlog!(
+                    "pool #{} ({kind}, {n} entries): numbered from {b} in the host table",
+                    g.t.len()
+                );
             }
             b
         }
@@ -51,11 +64,21 @@ fn dpool_add(m: &Mutex<DpoolBases>, pool: usize, n: i32, kind: &str) -> i32 {
     base
 }
 fn dpool_base(m: &Mutex<DpoolBases>, pool: usize) -> i32 {
-    m.lock().unwrap().t.iter().find(|e| e.0 == pool).map(|e| e.1).unwrap_or(0)
+    m.lock()
+        .unwrap()
+        .t
+        .iter()
+        .find(|e| e.0 == pool)
+        .map(|e| e.1)
+        .unwrap_or(0)
 }
 /// The texture (tex = true) or sampler descriptor pools initialized so far: (pool object address, host table base).
 pub fn dpool_list(tex: bool) -> Vec<(usize, i32)> {
-    (if tex { &TEX_BASES } else { &SAMP_BASES }).lock().unwrap().t.clone()
+    (if tex { &TEX_BASES } else { &SAMP_BASES })
+        .lock()
+        .unwrap()
+        .t
+        .clone()
 }
 /// A descriptor pool numbered from `base` as a capture recorded it (vk::capture's replay).
 pub fn dpool_restore(tex: bool, pool: usize, base: i32, n: i32) {
@@ -70,7 +93,11 @@ pub fn dpool_restore(tex: bool, pool: usize, base: i32, n: i32) {
 
 /// The host table base of a texture (tex = true) or sampler descriptor pool: the replay's bound pools.
 pub fn dpool_base_of(pool: *const dpool_t, tex: bool) -> i32 {
-    if tex { dpool_base(&TEX_BASES, pool as usize) } else { dpool_base(&SAMP_BASES, pool as usize) }
+    if tex {
+        dpool_base(&TEX_BASES, pool as usize)
+    } else {
+        dpool_base(&SAMP_BASES, pool as usize)
+    }
 }
 
 nvn_fns! {

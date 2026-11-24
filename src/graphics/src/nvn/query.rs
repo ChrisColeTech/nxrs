@@ -16,7 +16,11 @@ unsafe fn ms<'a>(s: *const NVNmultisampleState) -> &'a mut ms_st {
     &mut *(s as *mut ms_st)
 }
 fn set_bit(v: &mut u8, bit: u8, on: bool) {
-    if on { *v |= bit } else { *v &= !bit }
+    if on {
+        *v |= bit
+    } else {
+        *v &= !bit
+    }
 }
 
 /// A sample location coordinate as the hardware keeps it: clamped to [0, 1], 4-bit fixed point (1/16 pixel).
@@ -67,7 +71,13 @@ unsafe fn put_swz(w: u16, r: *mut i32, g: *mut i32, b: *mut i32, a: *mut i32) {
 }
 unsafe fn sparse(d: &crate::tex::layout::TexDesc, o: *mut NVNtextureSparseTileLayout) {
     let (n, tw, th, td) = crate::tex::layout::sparse_tiles(d);
-    *o = NVNtextureSparseTileLayout { num_tiled_levels: n, tile_width: tw as i32, tile_height: th as i32, tile_depth: td as i32, reserved: [0; 16] };
+    *o = NVNtextureSparseTileLayout {
+        num_tiled_levels: n,
+        tile_width: tw as i32,
+        tile_height: th as i32,
+        tile_depth: td as i32,
+        reserved: [0; 16],
+    };
 }
 
 fn switch2() -> bool {
@@ -106,7 +116,8 @@ pub struct AsGeometry {
     pub _pad: u32,
     pub w: [u64; 7],
 }
-const _: () = assert!(core::mem::size_of::<AsBuild>() == 0x40 && core::mem::size_of::<AsGeometry>() == 0x40);
+const _: () =
+    assert!(core::mem::size_of::<AsBuild>() == 0x40 && core::mem::size_of::<AsGeometry>() == 0x40);
 pub const AS_ALLOW_UPDATE: u32 = 1;
 
 /// Storage, build scratch and update scratch bytes of an acceleration structure. The host keeps its own acceleration
@@ -137,7 +148,11 @@ pub unsafe fn as_sizes(b: &AsBuild) -> Option<(u64, u64, u64)> {
     let a = |n: u64| (n + 255) & !255;
     let storage = a(1024 + prims * 192);
     let scratch = a(512 + prims * 128);
-    let update = if b.flags & AS_ALLOW_UPDATE != 0 { a(512 + prims * 64) } else { 0 };
+    let update = if b.flags & AS_ALLOW_UPDATE != 0 {
+        a(512 + prims * 64)
+    } else {
+        0
+    };
     Some((storage, scratch, update))
 }
 
@@ -415,19 +430,46 @@ mod tests {
             nvnBlendStateSetAdvancedPremultipliedSrc(p, 0x100); // only the low 8 bits count: false
             nvnBlendStateSetAdvancedOverlap(p, 2);
             nvnBlendStateSetAdvancedNormalizedDst(p, 0);
-            assert_eq!((nvnBlendStateGetAdvancedMode(p), nvnBlendStateGetAdvancedPremultipliedSrc(p), nvnBlendStateGetAdvancedOverlap(p), nvnBlendStateGetAdvancedNormalizedDst(p)), (8, 0, 2, 0));
+            assert_eq!(
+                (
+                    nvnBlendStateGetAdvancedMode(p),
+                    nvnBlendStateGetAdvancedPremultipliedSrc(p),
+                    nvnBlendStateGetAdvancedOverlap(p),
+                    nvnBlendStateGetAdvancedNormalizedDst(p)
+                ),
+                (8, 0, 2, 0)
+            );
         }
         let mut d = NVNdepthStencilState::boxed();
         let p = &mut *d as *mut NVNdepthStencilState;
         unsafe {
             nvnDepthStencilStateSetDefaults(p);
             nvnDepthStencilStateSetStencilFunc(p, face::BACK as i32, cmp::EQUAL as i32);
-            nvnDepthStencilStateSetStencilOp(p, face::FRONT as i32, stencil_op::ZERO as i32, stencil_op::INCR as i32, stencil_op::REPLACE as i32);
-            assert_eq!(nvnDepthStencilStateGetStencilFunc(p, face::BACK as i32), cmp::EQUAL as i32);
-            assert_eq!(nvnDepthStencilStateGetStencilFunc(p, face::FRONT as i32), cmp::ALWAYS as i32);
+            nvnDepthStencilStateSetStencilOp(
+                p,
+                face::FRONT as i32,
+                stencil_op::ZERO as i32,
+                stencil_op::INCR as i32,
+                stencil_op::REPLACE as i32,
+            );
+            assert_eq!(
+                nvnDepthStencilStateGetStencilFunc(p, face::BACK as i32),
+                cmp::EQUAL as i32
+            );
+            assert_eq!(
+                nvnDepthStencilStateGetStencilFunc(p, face::FRONT as i32),
+                cmp::ALWAYS as i32
+            );
             let (mut a, mut z, mut s) = (0, 0, 0);
             nvnDepthStencilStateGetStencilOp(p, face::FRONT as i32, &mut a, &mut z, &mut s);
-            assert_eq!((a, z, s), (stencil_op::ZERO as i32, stencil_op::INCR as i32, stencil_op::REPLACE as i32));
+            assert_eq!(
+                (a, z, s),
+                (
+                    stencil_op::ZERO as i32,
+                    stencil_op::INCR as i32,
+                    stencil_op::REPLACE as i32
+                )
+            );
             nvnDepthStencilStateGetStencilOp(p, face::BACK as i32, &mut a, &mut z, &mut s);
             assert_eq!(a, stencil_op::KEEP as i32);
         }
@@ -456,8 +498,21 @@ mod tests {
             nvnMultisampleStateGetSampleLocationsGrid(p, &mut w, &mut h);
             assert_eq!((w, h), (2, 1));
             assert_eq!(nvnMultisampleStateGetRasterSamples(p), 8);
-            assert_eq!((nvnMultisampleStateGetCoverageToColorEnable(p), nvnMultisampleStateGetCoverageToColorOutput(p)), (1, 5));
-            assert_eq!((nvnMultisampleStateGetCoverageTruncationEnable(p), nvnMultisampleStateGetSampleLocationsGridEnable(p), nvnMultisampleStateGetSampleLocationsEnable(p)), (1, 1, 0));
+            assert_eq!(
+                (
+                    nvnMultisampleStateGetCoverageToColorEnable(p),
+                    nvnMultisampleStateGetCoverageToColorOutput(p)
+                ),
+                (1, 5)
+            );
+            assert_eq!(
+                (
+                    nvnMultisampleStateGetCoverageTruncationEnable(p),
+                    nvnMultisampleStateGetSampleLocationsGridEnable(p),
+                    nvnMultisampleStateGetSampleLocationsEnable(p)
+                ),
+                (1, 1, 0)
+            );
             assert_eq!(nvnMultisampleStateGetCoverageModulationMode(p), 3);
             assert_eq!(nvnMultisampleStateGetAlphaToCoverageDither(p), 1);
             // the bound bytes stay within the state object
@@ -467,12 +522,22 @@ mod tests {
 
     #[test]
     fn raw_storage_classes_and_view_getters() {
-        let mut d = crate::tex::layout::TexDesc { format: fmt::RGBA8, ..Default::default() };
+        let mut d = crate::tex::layout::TexDesc {
+            format: fmt::RGBA8,
+            ..Default::default()
+        };
         assert_eq!(raw_storage_class(&d), 2);
         d.flags = tex_flags::LINEAR as i32;
         assert_eq!(raw_storage_class(&d), 1);
         d.flags = 0;
-        for (f, c) in [(fmt::STENCIL8, 3), (fmt::DEPTH16, 3), (fmt::DEPTH24_STENCIL8, 4), (fmt::DEPTH32F, 2), (fmt::DEPTH32F_STENCIL8, 5), (fmt::NONE, 0)] {
+        for (f, c) in [
+            (fmt::STENCIL8, 3),
+            (fmt::DEPTH16, 3),
+            (fmt::DEPTH24_STENCIL8, 4),
+            (fmt::DEPTH32F, 2),
+            (fmt::DEPTH32F_STENCIL8, 5),
+            (fmt::NONE, 0),
+        ] {
             d.format = f;
             assert_eq!(raw_storage_class(&d), c, "format {f}");
         }
@@ -481,11 +546,17 @@ mod tests {
         let (mut r, mut g, mut b, mut a) = (0, 0, 0, 0);
         unsafe {
             crate::nvn::tex::nvnTextureViewSetDefaults(p);
-            assert_eq!(nvnTextureViewGetSwizzle(p, &mut r, &mut g, &mut b, &mut a), 0);
+            assert_eq!(
+                nvnTextureViewGetSwizzle(p, &mut r, &mut g, &mut b, &mut a),
+                0
+            );
             assert_eq!((r, g, b, a), (2, 3, 4, 5));
             crate::nvn::tex::nvnTextureViewSetSwizzle(p, 5, 4, 3, 2);
             crate::nvn::tex::nvnTextureViewSetDepthStencilMode(p, 1);
-            assert_eq!(nvnTextureViewGetSwizzle(p, &mut r, &mut g, &mut b, &mut a), 1);
+            assert_eq!(
+                nvnTextureViewGetSwizzle(p, &mut r, &mut g, &mut b, &mut a),
+                1
+            );
             assert_eq!((r, g, b, a), (5, 4, 3, 2));
             let mut m = 0;
             assert_eq!(nvnTextureViewGetDepthStencilMode(p, &mut m), 1);
@@ -511,9 +582,18 @@ mod tests {
             assert_eq!((n, nvnQueueBuilderGetQueuePriority(p)), (0x2000, 1000));
         }
         unsafe {
-            assert_eq!(nvnDeviceGetUniformBufferHandle(core::ptr::null(), 0x1_2340, 17), 0x1234 | 2 << 45);
-            assert_eq!(nvnDeviceGetCommandHandleMemorySize(core::ptr::null(), 0x1000), 0);
-            assert_eq!(nvnDeviceGetCommandHandleMemorySize(core::ptr::null(), (0x400u64 << 38) | 2), 0x400);
+            assert_eq!(
+                nvnDeviceGetUniformBufferHandle(core::ptr::null(), 0x1_2340, 17),
+                0x1234 | 2 << 45
+            );
+            assert_eq!(
+                nvnDeviceGetCommandHandleMemorySize(core::ptr::null(), 0x1000),
+                0
+            );
+            assert_eq!(
+                nvnDeviceGetCommandHandleMemorySize(core::ptr::null(), (0x400u64 << 38) | 2),
+                0x400
+            );
         }
     }
 
@@ -526,21 +606,43 @@ mod tests {
         stack[1] = 1000.0f32.to_bits() as u64;
         let mut c = nxrt::cpu::Cpu::new_boxed();
         c.x[0] = w.0.as_mut_ptr() as u64;
-        for (i, v) in [0.64f32, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.329].into_iter().enumerate() {
+        for (i, v) in [0.64f32, 0.33, 0.30, 0.60, 0.15, 0.06, 0.3127, 0.329]
+            .into_iter()
+            .enumerate()
+        {
             c.v[i] = v.to_bits() as u128;
         }
         c.sp = stack.as_mut_ptr() as u64;
         unsafe { crate::nvn::find("nvnWindowSetHdrDisplayMetadata").unwrap()(&mut *c) };
         let mut o = [0f32; 10];
         let p: Vec<*mut f32> = o.iter_mut().map(|x| x as *mut f32).collect();
-        unsafe { nvnWindowGetHdrDisplayMetadata(&*w, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9]) };
+        unsafe {
+            nvnWindowGetHdrDisplayMetadata(
+                &*w, p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9],
+            )
+        };
         assert_eq!(o, HDR_DISPLAY_DEFAULT);
     }
 
     #[test]
     fn acceleration_structure_sizes() {
-        let tri = AsGeometry { kind: 1, _pad: 0, w: [0x1000, 300, 12, 0, 0, 0, 0] };
-        let b = AsBuild { flags: AS_ALLOW_UPDATE, operation: 0, geometries: &tri, count: 1, _pad: 0, source: 0, destination: 0, destination_size: 0, scratch: 0, scratch_size: 0 };
+        let tri = AsGeometry {
+            kind: 1,
+            _pad: 0,
+            w: [0x1000, 300, 12, 0, 0, 0, 0],
+        };
+        let b = AsBuild {
+            flags: AS_ALLOW_UPDATE,
+            operation: 0,
+            geometries: &tri,
+            count: 1,
+            _pad: 0,
+            source: 0,
+            destination: 0,
+            destination_size: 0,
+            scratch: 0,
+            scratch_size: 0,
+        };
         let (s, c, u) = unsafe { as_sizes(&b) }.unwrap();
         assert!(s >= 100 * 192 && s % 256 == 0 && c >= 100 * 128 && u > 0);
         let bad = AsBuild { flags: 16, ..b };

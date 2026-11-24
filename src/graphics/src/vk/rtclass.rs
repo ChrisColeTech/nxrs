@@ -29,7 +29,13 @@ pub struct Rt {
 
 impl Default for Rt {
     fn default() -> Rt {
-        Rt { frame: 0, cpu: 0, win: [0.0; WIN], n: 0, comp_ms: 0.0 }
+        Rt {
+            frame: 0,
+            cpu: 0,
+            win: [0.0; WIN],
+            n: 0,
+            comp_ms: 0.0,
+        }
     }
 }
 
@@ -56,7 +62,8 @@ impl Rt {
         if frame == self.frame {
             return 0.0;
         }
-        self.win[self.n] = cpu_ns.saturating_sub(self.cpu) as f64 / 1e6 / (frame - self.frame) as f64;
+        self.win[self.n] =
+            cpu_ns.saturating_sub(self.cpu) as f64 / 1e6 / (frame - self.frame) as f64;
         self.n += 1;
         self.frame = frame;
         self.cpu = cpu_ns;
@@ -90,7 +97,10 @@ fn thread_cpu_ns() -> u64 {
     {
         use windows_sys::Win32::Foundation::FILETIME;
         use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
-        let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let z = FILETIME {
+            dwLowDateTime: 0,
+            dwHighDateTime: 0,
+        };
         let (mut c, mut e, mut k, mut u) = (z, z, z, z);
         if unsafe { GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u) } == 0 {
             return 0;
@@ -100,7 +110,10 @@ fn thread_cpu_ns() -> u64 {
     }
     #[cfg(target_os = "linux")]
     {
-        let mut ts = libc::timespec { tv_sec: 0, tv_nsec: 0 };
+        let mut ts = libc::timespec {
+            tv_sec: 0,
+            tv_nsec: 0,
+        };
         unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
         ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
     }
@@ -127,8 +140,19 @@ pub fn join(name: &'static str) {
             return;
         }
         let joined = on() && enter_class();
-        crate::vklog!("{name}: {}", if joined { "joined the multimedia class scheduler's Games task" } else { "stays in its normal class" });
-        *t = Some(Thr { name, r: Rt::default(), joined });
+        crate::vklog!(
+            "{name}: {}",
+            if joined {
+                "joined the multimedia class scheduler's Games task"
+            } else {
+                "stays in its normal class"
+            }
+        );
+        *t = Some(Thr {
+            name,
+            r: Rt::default(),
+            joined,
+        });
     });
 }
 
@@ -160,7 +184,11 @@ pub fn tick() {
             t.r.comp_ms = c;
             static N: AtomicU64 = AtomicU64::new(0);
             if N.fetch_add(1, Ordering::Relaxed) < 40 {
-                crate::vklog!("{} needs {c:.2} ms of CPU a frame of {period:.2} ms{}", t.name, if t.joined { " (Games class)" } else { "" });
+                crate::vklog!(
+                    "{} needs {c:.2} ms of CPU a frame of {period:.2} ms{}",
+                    t.name,
+                    if t.joined { " (Games class)" } else { "" }
+                );
             }
         }
     });
@@ -189,22 +217,43 @@ mod tests {
     fn frame_thread_computation_follows_the_window() {
         let (mut r, mut f, mut cpu) = (Rt::default(), 10u64, 0u64);
         r.sample(f, cpu, 33.3);
-        assert_eq!(feed(&mut r, &mut f, &mut cpu, WIN - 1, 10.0, 33.3), 0.0, "nothing before a whole window");
+        assert_eq!(
+            feed(&mut r, &mut f, &mut cpu, WIN - 1, 10.0, 33.3),
+            0.0,
+            "nothing before a whole window"
+        );
         let c = feed(&mut r, &mut f, &mut cpu, 1, 14.0, 33.3);
-        assert!(c > 15.3 && c < 15.5, "10 ms frames with one of 14 declare 1.1 x the peak: {c}");
-        assert_eq!(feed(&mut r, &mut f, &mut cpu, WIN, 11.0, 33.3), 0.0, "13.75 ms is within 15%: no new declaration");
+        assert!(
+            c > 15.3 && c < 15.5,
+            "10 ms frames with one of 14 declare 1.1 x the peak: {c}"
+        );
+        assert_eq!(
+            feed(&mut r, &mut f, &mut cpu, WIN, 11.0, 33.3),
+            0.0,
+            "13.75 ms is within 15%: no new declaration"
+        );
         let c = feed(&mut r, &mut f, &mut cpu, WIN, 6.0, 33.3);
-        assert!(c > 7.4 && c < 7.6, "6 ms frames declare 1.25 x the p90: {c}");
+        assert!(
+            c > 7.4 && c < 7.6,
+            "6 ms frames declare 1.25 x the p90: {c}"
+        );
         let (mut r, mut f, mut cpu) = (Rt::default(), 1u64, 0u64);
         r.sample(f, cpu, 33.3);
         let c = feed(&mut r, &mut f, &mut cpu, WIN, 40.0, 33.3);
         assert!(c > 29.9 && c < 30.0, "at most 0.9 x the period: {c}");
-        assert_eq!(feed(&mut r, &mut f, &mut cpu, WIN, 0.1, 33.3), 1.0, "at least 1 ms");
+        assert_eq!(
+            feed(&mut r, &mut f, &mut cpu, WIN, 0.1, 33.3),
+            1.0,
+            "at least 1 ms"
+        );
         let (mut r, mut cpu) = (Rt::default(), 0u64);
         r.sample(100, cpu, 33.3);
         cpu += 50_000_000;
         r.sample(200, cpu, 33.3);
-        assert!(r.n == 1 && r.win[0] > 0.49 && r.win[0] < 0.51, "100 frames over 50 ms: one sample of 0.5 ms");
+        assert!(
+            r.n == 1 && r.win[0] > 0.49 && r.win[0] < 0.51,
+            "100 frames over 50 ms: one sample of 0.5 ms"
+        );
         r.sample(200, cpu + 1_000_000, 33.3);
         assert_eq!(r.n, 1, "a second sample in the same frame adds nothing");
     }

@@ -10,17 +10,17 @@
 
 pub mod cmd;
 pub mod cmd2;
-pub mod native;
+pub mod devbuf;
 pub mod device;
+pub mod dlss;
 pub mod entry;
+pub mod native;
 pub mod nops;
 pub mod obj;
 pub mod pool;
 pub mod prog;
 pub mod prog2;
 pub mod query;
-pub mod dlss;
-pub mod devbuf;
 pub mod queue;
 pub mod state;
 pub mod sync;
@@ -81,7 +81,9 @@ pub unsafe fn cstr(p: *const u8) -> String {
     if p.is_null() {
         return String::new();
     }
-    std::ffi::CStr::from_ptr(p as *const std::ffi::c_char).to_string_lossy().into_owned()
+    std::ffi::CStr::from_ptr(p as *const std::ffi::c_char)
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// How the record layer calls back into the game (command memory callbacks): lane A installs a caller that runs the
@@ -101,6 +103,7 @@ pub(crate) fn call_guest(addr: u64, args: &[u64]) -> u64 {
         a[i] = *v;
     }
     // SAFETY: without a guest caller, callbacks are host functions of this signature (documented above).
-    let f: extern "C" fn(u64, u64, u64, u64) -> u64 = unsafe { core::mem::transmute(addr as usize) };
+    let f: extern "C" fn(u64, u64, u64, u64) -> u64 =
+        unsafe { core::mem::transmute(addr as usize) };
     f(a[0], a[1], a[2], a[3])
 }

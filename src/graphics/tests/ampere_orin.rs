@@ -23,9 +23,15 @@ use std::path::{Path, PathBuf};
 /// nxnative's KNOWN list: ops that still differ from the Orin beyond the platform, or that the translator refuses.
 const KNOWN: &[(&str, &str)] = &[
     ("i2f_s32_rz", "I2FP.F32.S32.RZ rounds to nearest"),
-    ("fmax_nan", "FMNMX.NAN: a NaN operand gives the other operand"),
+    (
+        "fmax_nan",
+        "FMNMX.NAN: a NaN operand gives the other operand",
+    ),
     ("fmin_nan", "as fmax_nan"),
-    ("hmma_16816_f32", "HMMA.16816.F32: the f32 accumulator does not add as the tensor core does"),
+    (
+        "hmma_16816_f32",
+        "HMMA.16816.F32: the f32 accumulator does not add as the tensor core does",
+    ),
     ("fdiv_rn", "FCHK is not implemented"),
     ("f2i_s64", "F2I.S64 is not implemented"),
     ("dadd", "DADD is not implemented"),
@@ -39,59 +45,49 @@ const KNOWN: &[(&str, &str)] = &[
     ("imma_16832_s8", "IMMA is not implemented"),
     ("i2i_s8_sat", "I2I .SAT is not implemented"),
     ("i2i_u16_sat", "as i2i_s8_sat"),
-    ("iadd_sat", "PLOP3 with .SIGN register sources is not implemented"),
+    (
+        "iadd_sat",
+        "PLOP3 with .SIGN register sources is not implemented",
+    ),
     ("isub_sat", "as iadd_sat"),
-    ("prmt", "PRMT modes other than the index form are not implemented"),
+    (
+        "prmt",
+        "PRMT modes other than the index form are not implemented",
+    ),
     ("mufu_tanh", "MUFU.TANH is not implemented"),
     ("mufu_tanh_f16x2", "as mufu_tanh"),
     ("frcp_rn", "not testable: CALL.ABS into the CUDA driver"),
     ("fsqrt_rn", "as frcp_rn"),
 ];
-/// Ops that differ here and not on nxnative's chain (2026-11-20 baseline, 124 of 193 ops matching): this engine's
-/// `dmsh_xlate` build predates nxnative's later Ampere work (HFMA2.MMA / IMAD.WIDE-class opcode 0x435, DP2A/DP4A,
-/// directed rounding of FADD / FMUL / FFMA, ...). Rebuilding the translator from nxnative's current source should take
-/// most of these out; the test then reports them as matching.
+/// Ops that still differ here and not on nxnative's chain (2026-11-21 pinned-source result, 153 of 193 ops matching).
 const HERE: &[(&str, &str)] = &[
-    ("dp2a_hi", "this engine's translator build refuses Ampere opcode 226"),
-    ("dp2a_lo", "this engine's translator build refuses Ampere opcode 226"),
-    ("dp4a_s32", "this engine's translator build refuses Ampere opcode 226"),
-    ("dp4a_su", "this engine's translator build refuses Ampere opcode 226"),
-    ("dp4a_u32", "this engine's translator build refuses Ampere opcode 226"),
-    ("f2f_tf32", "this engine's translator build refuses Ampere opcode 435"),
-    ("f2fp_pack_bf16x2", "differs from the Orin: 1003 words"),
-    ("f2fp_pack_f16x2_relu", "differs from the Orin: 664 words"),
     ("f2i_s32_rmi", "differs from the Orin: 4 words"),
     ("f2i_s32_rpi", "differs from the Orin: 7 words"),
-    ("fadd_rm", "directed rounding not applied (rounds to nearest)"),
-    ("fadd_rp", "directed rounding not applied (rounds to nearest)"),
-    ("fadd_rz", "directed rounding not applied (rounds to nearest)"),
-    ("ffma_rm", "directed rounding not applied (rounds to nearest)"),
-    ("ffma_rp", "directed rounding not applied (rounds to nearest)"),
-    ("ffma_rz", "directed rounding not applied (rounds to nearest)"),
-    ("fmul_rm", "directed rounding not applied (rounds to nearest)"),
-    ("fmul_rp", "directed rounding not applied (rounds to nearest)"),
-    ("fmul_rz", "directed rounding not applied (rounds to nearest)"),
+    ("ffma_rz", "differs from the Orin: 1 word"),
+    ("fmul_rm", "differs from the Orin: 1 word"),
     ("fsel_cmp", "differs from the Orin: 2 words"),
     ("fsetp", "differs from the Orin: 116 words"),
     ("fsetp_ftz", "differs from the Orin: 45 words"),
-    ("hfma2", "this engine's translator build refuses Ampere opcode 235"),
-    ("hfma2_ftz", "this engine's translator build refuses Ampere opcode 235"),
-    ("hfma2_relu", "this engine's translator build refuses Ampere opcode 235"),
-    ("hfma2_sat", "this engine's translator build refuses Ampere opcode 235"),
-    ("i2f_s64", "differs from the Orin: 10 words"),
-    ("iadd64", "this engine's translator build refuses Ampere opcode 435"),
-    ("idiv_u32", "this engine's translator build refuses Ampere opcode 435"),
-    ("idiv_u32_by_7", "this engine's translator build refuses Ampere opcode 435"),
-    ("imul24", "this engine's translator build refuses Ampere opcode 435"),
-    ("imul64", "this engine's translator build refuses Ampere opcode 435"),
-    ("irem_s32", "this engine's translator build refuses Ampere opcode 435"),
-    ("isad", "this engine's translator build refuses Ampere opcode 214"),
-    ("isub64", "this engine's translator build refuses Ampere opcode 435"),
 ];
 /// Ops that run the device's own approximation: compared and reported, never failed.
 const APPROX: &[&str] = &[
-    "mufu_ex2", "mufu_ex2_ftz", "mufu_lg2", "mufu_lg2_ftz", "mufu_rcp", "mufu_rcp_ftz", "mufu_rsqrt", "mufu_rsqrt_ftz", "mufu_sqrt", "mufu_sqrt_ftz", "mufu_sin", "mufu_cos",
-    "mufu_ex2_f16x2", "fdiv_full", "fdiv_approx", "hmma_16816_f16", "hmma_1688_f16",
+    "mufu_ex2",
+    "mufu_ex2_ftz",
+    "mufu_lg2",
+    "mufu_lg2_ftz",
+    "mufu_rcp",
+    "mufu_rcp_ftz",
+    "mufu_rsqrt",
+    "mufu_rsqrt_ftz",
+    "mufu_sqrt",
+    "mufu_sqrt_ftz",
+    "mufu_sin",
+    "mufu_cos",
+    "mufu_ex2_f16x2",
+    "fdiv_full",
+    "fdiv_approx",
+    "hmma_16816_f16",
+    "hmma_1688_f16",
 ];
 
 struct Op {
@@ -108,19 +104,30 @@ fn data() -> PathBuf {
 }
 
 fn load() -> Vec<Op> {
-    let doc: serde_json::Value = serde_json::from_slice(&std::fs::read(data().join("manifest.json")).unwrap()).unwrap();
-    let mut gz = flate2::read::GzDecoder::new(std::fs::File::open(data().join("ampere_orin.u32.gz")).unwrap());
+    let doc: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(data().join("manifest.json")).unwrap()).unwrap();
+    let mut gz = flate2::read::GzDecoder::new(
+        std::fs::File::open(data().join("ampere_orin.u32.gz")).unwrap(),
+    );
     let mut blob = vec![];
     gz.read_to_end(&mut blob).unwrap();
     let mut out = vec![];
     for o in doc["ops"].as_array().unwrap() {
-        let r = |k: &str| (o[k][0].as_u64().unwrap() as usize, o[k][1].as_u64().unwrap() as usize);
+        let r = |k: &str| {
+            (
+                o[k][0].as_u64().unwrap() as usize,
+                o[k][1].as_u64().unwrap() as usize,
+            )
+        };
         let (p0, pn) = r("prog");
         let (r0, rn) = r("rows");
         let ins = o["ins"].as_str().unwrap().len();
         let outs: Vec<char> = o["outs"].as_str().unwrap().chars().collect();
         let w = ins + outs.len();
-        let words: Vec<u32> = blob[r0..r0 + rn].chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
+        let words: Vec<u32> = blob[r0..r0 + rn]
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+            .collect();
         let rows: Vec<&[u32]> = words.chunks(w).collect();
         out.push(Op {
             name: o["name"].as_str().unwrap().to_string(),
@@ -135,7 +142,11 @@ fn load() -> Vec<Op> {
 }
 
 fn sdk_tool(name: &str) -> Option<PathBuf> {
-    let exe = if cfg!(windows) { format!("{name}.exe") } else { name.to_string() };
+    let exe = if cfg!(windows) {
+        format!("{name}.exe")
+    } else {
+        name.to_string()
+    };
     let mut c = vec![];
     if let Ok(s) = std::env::var("VULKAN_SDK") {
         c.push(Path::new(&s).join("Bin").join(&exe));
@@ -165,7 +176,11 @@ fn harness(glsl: &str, w: usize) -> Result<String, String> {
     // the io buffer after the #version / extension lines
     let ins = head.find("layout(").unwrap_or(0);
     let decl = "layout(set = 7, binding = 0, std430) buffer DmIo { uint dm_io[]; };\n";
-    Ok(format!("{}{decl}{}void main()\n{{\n    {seed}\n{body}\n    {dump}\n}}\n", &head[..ins], &head[ins..]))
+    Ok(format!(
+        "{}{decl}{}void main()\n{{\n    {seed}\n{body}\n    {dump}\n}}\n",
+        &head[..ins],
+        &head[ins..]
+    ))
 }
 
 /// The shared array spirv-cross writes: `shared uint NAME[N];` -> (NAME, N).
@@ -188,8 +203,14 @@ fn cause(k: char, got: u32, want: u32, ins: &[u32], kinds_in: bool) -> Option<&'
     }
     let lanes: Vec<(u32, u32, u32, u32, u32)> = match k {
         'f' => vec![(got, want, 0x7f80_0000, 0x007f_ffff, 32)],
-        'h' => vec![(got & 0xffff, want & 0xffff, 0x7c00, 0x03ff, 16), (got >> 16, want >> 16, 0x7c00, 0x03ff, 16)],
-        'b' => vec![(got & 0xffff, want & 0xffff, 0x7f80, 0x007f, 16), (got >> 16, want >> 16, 0x7f80, 0x007f, 16)],
+        'h' => vec![
+            (got & 0xffff, want & 0xffff, 0x7c00, 0x03ff, 16),
+            (got >> 16, want >> 16, 0x7c00, 0x03ff, 16),
+        ],
+        'b' => vec![
+            (got & 0xffff, want & 0xffff, 0x7f80, 0x007f, 16),
+            (got >> 16, want >> 16, 0x7f80, 0x007f, 16),
+        ],
         _ => return Some("other"),
     };
     let nan = |v: u32, e: u32, m: u32| v & e == e && v & m != 0;
@@ -211,7 +232,19 @@ fn cause(k: char, got: u32, want: u32, ins: &[u32], kinds_in: bool) -> Option<&'
         if k == 'f' && kinds_in && ins.iter().any(|&x| den(x, 0x7f80_0000, 0x007f_ffff)) {
             continue; // denorm-in
         }
-        let small = |v: u32| den(v, e, m) || v & !sign == 0 || v & !sign == 1 << (bits - (if bits == 32 { 9 } else if e == 0x7c00 { 6 } else { 9 }));
+        let small = |v: u32| {
+            den(v, e, m)
+                || v & !sign == 0
+                || v & !sign
+                    == 1 << (bits
+                        - (if bits == 32 {
+                            9
+                        } else if e == 0x7c00 {
+                            6
+                        } else {
+                            9
+                        }))
+        };
         if den(g, e, m) || den(w, e, m) || (small(g) && small(w)) {
             continue; // denorm-out
         }
@@ -221,16 +254,26 @@ fn cause(k: char, got: u32, want: u32, ins: &[u32], kinds_in: bool) -> Option<&'
 }
 
 #[test]
+#[ignore = "requires a Vulkan GPU and the external shader toolchain"]
 fn ampere_ops_match_the_orin() {
     let _l = common::setup();
-    let (Ok(tools), Some(cross), Some(glslang)) = (shaders::xlate::Tools::find(), sdk_tool("spirv-cross"), sdk_tool("glslangValidator")) else {
+    let (Ok(tools), Some(cross), Some(glslang)) = (
+        shaders::xlate::Tools::find(),
+        sdk_tool("spirv-cross"),
+        sdk_tool("glslangValidator"),
+    ) else {
         eprintln!("ampere_orin: the translator or the Vulkan SDK tools are missing: skipped");
         return;
     };
     let e0 = common::validation_errors();
     let ops = load();
-    let only: Vec<String> = std::env::var("AMPERE_ORIN_ONLY").map(|v| v.split(',').map(String::from).collect()).unwrap_or_default();
-    let ops: Vec<Op> = ops.into_iter().filter(|o| only.is_empty() || only.contains(&o.name)).collect();
+    let only: Vec<String> = std::env::var("AMPERE_ORIN_ONLY")
+        .map(|v| v.split(',').map(String::from).collect())
+        .unwrap_or_default();
+    let ops: Vec<Op> = ops
+        .into_iter()
+        .filter(|o| only.is_empty() || only.contains(&o.name))
+        .collect();
     let work = std::env::temp_dir().join(format!("nxgfx-ampere-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&work);
     std::fs::create_dir_all(&work).unwrap();
@@ -242,9 +285,20 @@ fn ampere_ops_match_the_orin() {
         let w = o.ins + o.outs.len();
         let j = serde_json::json!({"key": o.name, "stage": "cs", "arch": "sm86", "code": code.to_string_lossy(), "tex": {}, "img": {}, "attr": {}, "fout": {},
             "local": [32, 1, 1], "debug": true, "reduced": true, "shared": 32 * w * 4, "nvn2_cs": [0, 0, 3, 0x40, 0], "c1": "", "target": "vulkan", "set": 5});
-        jobs.push(shaders::xlate::Work { key: o.name.clone(), json: j });
+        jobs.push(shaders::xlate::Work {
+            key: o.name.clone(),
+            json: j,
+        });
     }
-    let outcome = shaders::xlate::translate(&tools, jobs, &work, 4, 32, std::time::Duration::from_secs(120), &|_, _| {});
+    let outcome = shaders::xlate::translate(
+        &tools,
+        jobs,
+        &work,
+        4,
+        32,
+        std::time::Duration::from_secs(120),
+        &|_, _| {},
+    );
     let g = {
         let mut n = common::Nvn::new();
         let _ = n.d();
@@ -261,7 +315,9 @@ fn ampere_ops_match_the_orin() {
     let mut counts: BTreeMap<String, usize> = BTreeMap::new();
     for (name, (stage, why)) in &results {
         *counts.entry(stage.clone()).or_default() += 1;
-        let listed = known.contains_key(name.as_str()) || APPROX.contains(&name.as_str()) || HERE.iter().any(|h| h.0 == name);
+        let listed = known.contains_key(name.as_str())
+            || APPROX.contains(&name.as_str())
+            || HERE.iter().any(|h| h.0 == name);
         if stage == "ok" && HERE.iter().any(|h| h.0 == name) {
             eprintln!("  {name}: matches now: take it out of HERE");
         }
@@ -272,23 +328,51 @@ fn ampere_ops_match_the_orin() {
     eprintln!("ampere_orin: {} ops: {counts:?}", results.len());
     for (name, (stage, why)) in &results {
         if stage != "ok" {
-            eprintln!("  {name}: {stage}{}{}", if why.is_empty() { "" } else { ": " }, why);
+            eprintln!(
+                "  {name}: {stage}{}{}",
+                if why.is_empty() { "" } else { ": " },
+                why
+            );
         }
     }
     let _ = std::fs::remove_dir_all(&work);
-    assert!(bad.is_empty(), "ops outside KNOWN / APPROX that do not match the Orin:\n{}", bad.join("\n"));
+    assert!(
+        bad.is_empty(),
+        "ops outside KNOWN / APPROX that do not match the Orin:\n{}",
+        bad.join("\n")
+    );
     assert_eq!(common::validation_errors(), e0, "validation errors");
 }
 
 /// ("ok" | the stage that failed | "differs", the reason)
-fn run_op(g: &'static nxgfx::vk::Gpu, o: &Op, work: &Path, outcome: &std::collections::HashMap<String, Result<(), String>>, cross: &Path, glslang: &Path) -> (String, String) {
+fn run_op(
+    g: &'static nxgfx::vk::Gpu,
+    o: &Op,
+    work: &Path,
+    outcome: &std::collections::HashMap<String, Result<(), String>>,
+    cross: &Path,
+    glslang: &Path,
+) -> (String, String) {
     if let Some(Err(e)) = outcome.get(&o.name) {
-        return ("translator".into(), e.lines().next().unwrap_or("").chars().take(160).collect());
+        return (
+            "translator".into(),
+            e.lines().next().unwrap_or("").chars().take(160).collect(),
+        );
     }
     let spv = work.join(format!("{}.spv", o.name));
-    let r = std::process::Command::new(cross).arg(&spv).args(["--version", "460", "--vulkan-semantics"]).output().unwrap();
+    let r = std::process::Command::new(cross)
+        .arg(&spv)
+        .args(["--version", "460", "--vulkan-semantics"])
+        .output()
+        .unwrap();
     if !r.status.success() {
-        return ("spirv-cross".into(), String::from_utf8_lossy(&r.stderr).chars().take(160).collect());
+        return (
+            "spirv-cross".into(),
+            String::from_utf8_lossy(&r.stderr)
+                .chars()
+                .take(160)
+                .collect(),
+        );
     }
     let w = o.ins + o.outs.len();
     let src = match harness(&String::from_utf8_lossy(&r.stdout), w) {
@@ -298,20 +382,45 @@ fn run_op(g: &'static nxgfx::vk::Gpu, o: &Op, work: &Path, outcome: &std::collec
     let gl = work.join(format!("{}.comp", o.name));
     let out = work.join(format!("{}.h.spv", o.name));
     std::fs::write(&gl, &src).unwrap();
-    let r = std::process::Command::new(glslang).args(["-V", "--target-env", "vulkan1.3", "-o"]).arg(&out).arg(&gl).output().unwrap();
+    let r = std::process::Command::new(glslang)
+        .args(["-V", "--target-env", "vulkan1.3", "-o"])
+        .arg(&out)
+        .arg(&gl)
+        .output()
+        .unwrap();
     if !r.status.success() {
-        return ("glslang".into(), String::from_utf8_lossy(&r.stdout).lines().find(|l| l.contains("ERROR")).unwrap_or("").to_string());
+        return (
+            "glslang".into(),
+            String::from_utf8_lossy(&r.stdout)
+                .lines()
+                .find(|l| l.contains("ERROR"))
+                .unwrap_or("")
+                .to_string(),
+        );
     }
     // the bindings the module declares: every one gets a zeroed 64 KiB buffer, the io buffer is set 7 binding 0
-    let refl = std::process::Command::new(cross).arg(&out).arg("--reflect").output().unwrap();
+    let refl = std::process::Command::new(cross)
+        .arg(&out)
+        .arg("--reflect")
+        .output()
+        .unwrap();
     let refl: serde_json::Value = serde_json::from_slice(&refl.stdout).unwrap_or_default();
     let mut binds: Vec<(u32, u32, vk::DescriptorType)> = vec![];
-    for (k, ty) in [("ubos", vk::DescriptorType::UNIFORM_BUFFER), ("ssbos", vk::DescriptorType::STORAGE_BUFFER)] {
+    for (k, ty) in [
+        ("ubos", vk::DescriptorType::UNIFORM_BUFFER),
+        ("ssbos", vk::DescriptorType::STORAGE_BUFFER),
+    ] {
         for b in refl[k].as_array().cloned().unwrap_or_default() {
-            binds.push((b["set"].as_u64().unwrap_or(0) as u32, b["binding"].as_u64().unwrap_or(0) as u32, ty));
+            binds.push((
+                b["set"].as_u64().unwrap_or(0) as u32,
+                b["binding"].as_u64().unwrap_or(0) as u32,
+                ty,
+            ));
         }
     }
-    if refl["textures"].as_array().is_some_and(|a| !a.is_empty()) || refl["images"].as_array().is_some_and(|a| !a.is_empty()) {
+    if refl["textures"].as_array().is_some_and(|a| !a.is_empty())
+        || refl["images"].as_array().is_some_and(|a| !a.is_empty())
+    {
         return ("harness".into(), "the module samples textures".into());
     }
     let groups = o.rows_in.len().div_ceil(32);
@@ -343,7 +452,13 @@ fn run_op(g: &'static nxgfx::vk::Gpu, o: &Op, work: &Path, outcome: &std::collec
     ("ok".into(), String::new())
 }
 
-fn dispatch(g: &'static nxgfx::vk::Gpu, spv: &[u8], binds: &[(u32, u32, vk::DescriptorType)], io: &mut [u32], groups: u32) -> Result<(), String> {
+fn dispatch(
+    g: &'static nxgfx::vk::Gpu,
+    spv: &[u8],
+    binds: &[(u32, u32, vk::DescriptorType)],
+    io: &mut [u32],
+    groups: u32,
+) -> Result<(), String> {
     use gpu_allocator::MemoryLocation;
     let dev = g.dev();
     let nsets = binds.iter().map(|b| b.0 + 1).max().unwrap_or(0).max(8);
@@ -352,40 +467,146 @@ fn dispatch(g: &'static nxgfx::vk::Gpu, spv: &[u8], binds: &[(u32, u32, vk::Desc
         let bs: Vec<_> = binds
             .iter()
             .filter(|b| b.0 == s)
-            .map(|b| vk::DescriptorSetLayoutBinding::default().binding(b.1).descriptor_type(b.2).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE))
+            .map(|b| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(b.1)
+                    .descriptor_type(b.2)
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            })
             .collect();
-        layouts.push(unsafe { dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&bs), None) }.map_err(|e| e.to_string())?);
+        layouts.push(
+            unsafe {
+                dev.create_descriptor_set_layout(
+                    &vk::DescriptorSetLayoutCreateInfo::default().bindings(&bs),
+                    None,
+                )
+            }
+            .map_err(|e| e.to_string())?,
+        );
     }
-    let pl = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts), None) }.map_err(|e| e.to_string())?;
-    let words: Vec<u32> = spv.chunks_exact(4).map(|c| u32::from_le_bytes(c.try_into().unwrap())).collect();
-    let m = unsafe { dev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None) }.map_err(|e| e.to_string())?;
-    let st = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(m).name(c"main");
-    let pipe = unsafe { dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(st).layout(pl)], None) }.map_err(|(_, e)| e.to_string())?[0];
+    let pl = unsafe {
+        dev.create_pipeline_layout(
+            &vk::PipelineLayoutCreateInfo::default().set_layouts(&layouts),
+            None,
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    let words: Vec<u32> = spv
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes(c.try_into().unwrap()))
+        .collect();
+    let m = unsafe {
+        dev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
+    }
+    .map_err(|e| e.to_string())?;
+    let st = vk::PipelineShaderStageCreateInfo::default()
+        .stage(vk::ShaderStageFlags::COMPUTE)
+        .module(m)
+        .name(c"main");
+    let pipe = unsafe {
+        dev.create_compute_pipelines(
+            vk::PipelineCache::null(),
+            &[vk::ComputePipelineCreateInfo::default()
+                .stage(st)
+                .layout(pl)],
+            None,
+        )
+    }
+    .map_err(|(_, e)| e.to_string())?[0];
     unsafe { dev.destroy_shader_module(m, None) };
     let nbytes = (io.len() * 4) as u64;
-    let iob = g.buffer(nbytes, vk::BufferUsageFlags::STORAGE_BUFFER, MemoryLocation::CpuToGpu, "ampere io").map_err(|e| e.to_string())?;
+    let iob = g
+        .buffer(
+            nbytes,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            MemoryLocation::CpuToGpu,
+            "ampere io",
+        )
+        .map_err(|e| e.to_string())?;
     unsafe { core::ptr::copy_nonoverlapping(io.as_ptr() as *const u8, iob.ptr, nbytes as usize) };
-    let zero = g.buffer(65536, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER, MemoryLocation::CpuToGpu, "ampere zero").map_err(|e| e.to_string())?;
+    let zero = g
+        .buffer(
+            65536,
+            vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER,
+            MemoryLocation::CpuToGpu,
+            "ampere zero",
+        )
+        .map_err(|e| e.to_string())?;
     unsafe { core::ptr::write_bytes(zero.ptr, 0, 65536) };
-    let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::UNIFORM_BUFFER, descriptor_count: 64 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 64 }];
-    let pool = unsafe { dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(nsets).pool_sizes(&sizes), None) }.map_err(|e| e.to_string())?;
-    let sets = unsafe { dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&layouts)) }.map_err(|e| e.to_string())?;
+    let sizes = [
+        vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::UNIFORM_BUFFER,
+            descriptor_count: 64,
+        },
+        vk::DescriptorPoolSize {
+            ty: vk::DescriptorType::STORAGE_BUFFER,
+            descriptor_count: 64,
+        },
+    ];
+    let pool = unsafe {
+        dev.create_descriptor_pool(
+            &vk::DescriptorPoolCreateInfo::default()
+                .max_sets(nsets)
+                .pool_sizes(&sizes),
+            None,
+        )
+    }
+    .map_err(|e| e.to_string())?;
+    let sets = unsafe {
+        dev.allocate_descriptor_sets(
+            &vk::DescriptorSetAllocateInfo::default()
+                .descriptor_pool(pool)
+                .set_layouts(&layouts),
+        )
+    }
+    .map_err(|e| e.to_string())?;
     let mut writes = vec![];
     let infos: Vec<[vk::DescriptorBufferInfo; 1]> = binds
         .iter()
-        .map(|b| [vk::DescriptorBufferInfo { buffer: if (b.0, b.1) == (7, 0) { iob.buf } else { zero.buf }, offset: 0, range: vk::WHOLE_SIZE }])
+        .map(|b| {
+            [vk::DescriptorBufferInfo {
+                buffer: if (b.0, b.1) == (7, 0) {
+                    iob.buf
+                } else {
+                    zero.buf
+                },
+                offset: 0,
+                range: vk::WHOLE_SIZE,
+            }]
+        })
         .collect();
     for (b, info) in binds.iter().zip(&infos) {
-        writes.push(vk::WriteDescriptorSet::default().dst_set(sets[b.0 as usize]).dst_binding(b.1).descriptor_type(b.2).buffer_info(info));
+        writes.push(
+            vk::WriteDescriptorSet::default()
+                .dst_set(sets[b.0 as usize])
+                .dst_binding(b.1)
+                .descriptor_type(b.2)
+                .buffer_info(info),
+        );
     }
     unsafe { dev.update_descriptor_sets(&writes, &[]) };
     let f = nxgfx::vk::queue::oneoff(g, |g, sub, _| unsafe {
-        g.dev().cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe);
-        g.dev().cmd_bind_descriptor_sets(sub.main, vk::PipelineBindPoint::COMPUTE, pl, 0, &sets, &[]);
+        g.dev()
+            .cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe);
+        g.dev().cmd_bind_descriptor_sets(
+            sub.main,
+            vk::PipelineBindPoint::COMPUTE,
+            pl,
+            0,
+            &sets,
+            &[],
+        );
         g.dev().cmd_dispatch(sub.main, groups, 1, 1);
     });
     nxgfx::vk::queue::wait_fence(f, u64::MAX);
-    unsafe { core::ptr::copy_nonoverlapping(iob.ptr as *const u8, io.as_mut_ptr() as *mut u8, nbytes as usize) };
+    unsafe {
+        core::ptr::copy_nonoverlapping(
+            iob.ptr as *const u8,
+            io.as_mut_ptr() as *mut u8,
+            nbytes as usize,
+        )
+    };
     unsafe {
         dev.destroy_pipeline(pipe, None);
         dev.destroy_pipeline_layout(pl, None);

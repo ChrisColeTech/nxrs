@@ -27,7 +27,11 @@ unsafe fn csb<'a>(b: *const NVNsamplerBuilder) -> &'a samp_par {
 
 fn view_offset(d: &TexDesc, layer_size: u64, w: Option<&view_t>) -> isize {
     let Some(w) = w else { return 0 };
-    let mut off = if w.bits & VW_LEVELS != 0 { layout::level_offset(d, w.base_level as u32) } else { 0 };
+    let mut off = if w.bits & VW_LEVELS != 0 {
+        layout::level_offset(d, w.base_level as u32)
+    } else {
+        0
+    };
     if w.bits & VW_LAYERS != 0 {
         off += w.min_layer as u64 * layer_size;
     }
@@ -184,19 +188,42 @@ nvn_fns! {
         let img = if img != 0 { img as usize } else { i0.max(row) };
         vk::Gpu::with(|g| g.write_texels(&o, (v as *const view_t).as_ref().copied(), &*r, data, row, img));
     }
+    /// # Safety
+    /// `t` and `r`, and `v` when non-null, must be readable initialized objects describing a valid
+    /// texture copy. `data` must satisfy `Gpu::read_texels`' destination contract for tightly packed
+    /// block rows/images: the full `row * rows * max(depth, 1)` extent must fit one live writable
+    /// allocation, without arithmetic overflow. No alignment beyond bytes is needed for `data`.
+    /// The caller must keep the storage live and free of conflicting accesses through the blocking
+    /// call; it must not overlap the runtime's staging source or live shared Rust references.
     fn nvnTextureReadTexels(t: *const NVNtexture, v: *const NVNtextureView, r: *const NVNcopyRegion, data: *mut u8) {
         let o = *ctx(t);
         let (row, img) = region_pitch(o.d.format, &*r);
         let (vw, rg, dp) = ((v as *const view_t).as_ref().copied(), *r, data as usize);
-        super::blocking(|| vk::Gpu::with(|g| g.read_texels(&o, vw, &rg, dp as *mut u8, row, img)));
+        // SAFETY: this unsafe NVN entry's caller provides the writable packed extent and lifetime.
+        // region_pitch uses the same format block geometry as read_texels; o/vw/rg are local copies.
+        // blocking and Gpu::with invoke the closure synchronously, so dp is not retained.
+        // NVN's ABI is void. The backend reports a failed readback and leaves data unchanged.
+        let _copied = super::blocking(|| vk::Gpu::with(|g| unsafe { g.read_texels(&o, vw, &rg, dp as *mut u8, row, img) }));
     }
+    /// # Safety
+    /// The object, destination validity, lifetime and nonoverlap requirements of ReadTexels apply.
+    /// Explicit pitches must be nonnegative byte counts. Zero row uses the packed block-row size;
+    /// zero img uses max(packed image size, effective row), as below. With those effective pitches,
+    /// the caller must provide every row span required by `Gpu::read_texels`, including padding and
+    /// all depth slices: `(depth - 1) * img + (rows - 1) * row + row_bytes` for nonempty rows.
+    /// All offsets/lengths must fit usize/isize and the destination allocation; these are caller
+    /// obligations, not checks made by the guest bridge. Overlapping destination rows copy in order.
     fn nvnTextureReadTexelsStrided(t: *const NVNtexture, v: *const NVNtextureView, r: *const NVNcopyRegion, data: *mut u8, row: isize, img: isize) {
         let o = *ctx(t);
         let (r0, i0) = region_pitch(o.d.format, &*r);
         let row = if row != 0 { row as usize } else { r0 };
         let img = if img != 0 { img as usize } else { i0.max(row) };
         let (vw, rg, dp) = ((v as *const view_t).as_ref().copied(), *r, data as usize);
-        super::blocking(|| vk::Gpu::with(|g| g.read_texels(&o, vw, &rg, dp as *mut u8, row, img)));
+        // SAFETY: this unsafe NVN entry's caller supplies a writable extent for these effective
+        // pitches (not just the packed size), with no conflicting aliases/accesses through return.
+        // o/vw/rg are local copies, and both wrappers run synchronously without retaining dp.
+        // Preserve the void ABI; read_texels itself logs failure instead of fabricating output.
+        let _copied = super::blocking(|| vk::Gpu::with(|g| unsafe { g.read_texels(&o, vw, &rg, dp as *mut u8, row, img) }));
     }
     fn nvnTextureFlushTexels(t: *const NVNtexture, v: *const NVNtextureView, r: *const NVNcopyRegion) { let _ = (t, v, r); }
     fn nvnTextureInvalidateTexels(t: *const NVNtexture, v: *const NVNtextureView, r: *const NVNcopyRegion) { let _ = (t, v, r); }

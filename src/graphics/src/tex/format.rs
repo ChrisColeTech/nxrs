@@ -27,16 +27,44 @@ pub struct TexFormat {
 }
 
 const fn t(vk: vk::Format, kind: Kind) -> TexFormat {
-    TexFormat { vk, kind, alpha_one: false, expand3: 0, astc: None, srgb: false }
+    TexFormat {
+        vk,
+        kind,
+        alpha_one: false,
+        expand3: 0,
+        astc: None,
+        srgb: false,
+    }
 }
 const fn x(vk: vk::Format, kind: Kind) -> TexFormat {
-    TexFormat { vk, kind, alpha_one: true, expand3: 0, astc: None, srgb: false }
+    TexFormat {
+        vk,
+        kind,
+        alpha_one: true,
+        expand3: 0,
+        astc: None,
+        srgb: false,
+    }
 }
 const fn e3(vk: vk::Format, kind: Kind, comp: u32) -> TexFormat {
-    TexFormat { vk, kind, alpha_one: true, expand3: comp, astc: None, srgb: false }
+    TexFormat {
+        vk,
+        kind,
+        alpha_one: true,
+        expand3: comp,
+        astc: None,
+        srgb: false,
+    }
 }
 const fn s(vk: vk::Format) -> TexFormat {
-    TexFormat { vk, kind: Kind::Float, alpha_one: false, expand3: 0, astc: None, srgb: true }
+    TexFormat {
+        vk,
+        kind: Kind::Float,
+        alpha_one: false,
+        expand3: 0,
+        astc: None,
+        srgb: true,
+    }
 }
 
 /// The texture format of an NVN format; None for an unknown value.
@@ -44,12 +72,30 @@ pub fn tex_format(f: i32) -> Option<TexFormat> {
     use vk::Format as F;
     use Kind::*;
     if (0x79..=0x94).contains(&f) {
-        const ASTC: [[u32; 2]; 14] =
-            [[4, 4], [5, 4], [5, 5], [6, 5], [6, 6], [8, 5], [8, 6], [8, 8], [10, 5], [10, 6], [10, 8], [10, 10], [12, 10], [12, 12]];
+        const ASTC: [[u32; 2]; 14] = [
+            [4, 4],
+            [5, 4],
+            [5, 5],
+            [6, 5],
+            [6, 6],
+            [8, 5],
+            [8, 6],
+            [8, 8],
+            [10, 5],
+            [10, 6],
+            [10, 8],
+            [10, 10],
+            [12, 10],
+            [12, 12],
+        ];
         let k = ((f - 0x79) % 14) as usize;
         let srgb = f >= 0x87;
         return Some(TexFormat {
-            vk: if srgb { F::R8G8B8A8_SRGB } else { F::R8G8B8A8_UNORM },
+            vk: if srgb {
+                F::R8G8B8A8_SRGB
+            } else {
+                F::R8G8B8A8_UNORM
+            },
             kind: Float,
             alpha_one: false,
             expand3: 0,
@@ -112,7 +158,10 @@ pub fn tex_format(f: i32) -> Option<TexFormat> {
         52 => t(F::D32_SFLOAT, Depth),
         53 => t(F::D24_UNORM_S8_UINT, DepthStencil),
         54 => t(F::D32_SFLOAT_S8_UINT, DepthStencil),
-        55 => TexFormat { alpha_one: true, ..s(F::R8G8B8A8_SRGB) },
+        55 => TexFormat {
+            alpha_one: true,
+            ..s(F::R8G8B8A8_SRGB)
+        },
         56 => s(F::R8G8B8A8_SRGB),
         57 => t(F::A4B4G4R4_UNORM_PACK16, Float),
         58 => x(F::A1R5G5B5_UNORM_PACK16, Float),
@@ -126,7 +175,10 @@ pub fn tex_format(f: i32) -> Option<TexFormat> {
         66 => t(F::BC1_RGBA_UNORM_BLOCK, Float),
         67 => t(F::BC2_UNORM_BLOCK, Float),
         68 => t(F::BC3_UNORM_BLOCK, Float),
-        69 => TexFormat { alpha_one: true, ..s(F::BC1_RGB_SRGB_BLOCK) },
+        69 => TexFormat {
+            alpha_one: true,
+            ..s(F::BC1_RGB_SRGB_BLOCK)
+        },
         70 => s(F::BC1_RGBA_SRGB_BLOCK),
         71 => s(F::BC2_SRGB_BLOCK),
         72 => s(F::BC3_SRGB_BLOCK),
@@ -184,7 +236,10 @@ pub fn tex_format(f: i32) -> Option<TexFormat> {
         152 => t(F::R5G5B5A1_UNORM_PACK16, Float),
         153 => x(F::B8G8R8A8_UNORM, Float),
         154 => t(F::B8G8R8A8_UNORM, Float),
-        155 => TexFormat { alpha_one: true, ..s(F::B8G8R8A8_SRGB) },
+        155 => TexFormat {
+            alpha_one: true,
+            ..s(F::B8G8R8A8_SRGB)
+        },
         156 => s(F::B8G8R8A8_SRGB),
         _ => return None,
     })

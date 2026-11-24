@@ -79,7 +79,10 @@ pub struct NVNshaderData {
 }
 impl Default for NVNshaderData {
     fn default() -> Self {
-        NVNshaderData { data: 0, control: core::ptr::null() }
+        NVNshaderData {
+            data: 0,
+            control: core::ptr::null(),
+        }
     }
 }
 

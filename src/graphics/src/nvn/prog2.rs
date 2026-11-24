@@ -34,9 +34,17 @@ pub unsafe fn device_compute_size(ctl: *const u8) -> i32 {
 /// # Safety
 /// The stages' control sections are readable.
 pub unsafe fn note_program(serial: u64, sd: &[NVNshaderData]) {
-    let n = sd.iter().map(|s| device_compute_size(s.control)).max().unwrap_or(0);
+    let n = sd
+        .iter()
+        .map(|s| device_compute_size(s.control))
+        .max()
+        .unwrap_or(0);
     if n != 0 {
-        DEVICE_COMPUTE.lock().unwrap().get_or_insert_with(HashMap::new).insert(serial, n);
+        DEVICE_COMPUTE
+            .lock()
+            .unwrap()
+            .get_or_insert_with(HashMap::new)
+            .insert(serial, n);
     }
 }
 
@@ -163,8 +171,20 @@ mod tests {
             nvnProgramBuilderSetMaxTraceRecursionDepth(p, 7);
             nvnProgramBuilderSetDefaults(p);
             assert_eq!(nvnProgramBuilderGetDevice(p) as usize, 0x1000);
-            assert_eq!((nvnProgramBuilderGetMaxTraceRecursionDepth(p), nvnProgramBuilderGetMaxCallableRecursionDepth(p)), (2, 2));
-            assert_eq!((nvnProgramBuilderGetShaderCount(p), nvnProgramBuilderGetRayTracingModuleCount(p)), (0, 0));
+            assert_eq!(
+                (
+                    nvnProgramBuilderGetMaxTraceRecursionDepth(p),
+                    nvnProgramBuilderGetMaxCallableRecursionDepth(p)
+                ),
+                (2, 2)
+            );
+            assert_eq!(
+                (
+                    nvnProgramBuilderGetShaderCount(p),
+                    nvnProgramBuilderGetRayTracingModuleCount(p)
+                ),
+                (0, 0)
+            );
         }
         let mut ctl = vec![0u8; 0xd8];
         ctl[0..4].copy_from_slice(&0x9876_1234u32.to_le_bytes());
@@ -172,7 +192,10 @@ mod tests {
         ctl[0x56] = stage::COMPUTE as u8;
         ctl[0xa8] = 1;
         ctl[0xba..0xbc].copy_from_slice(&0x40u16.to_le_bytes());
-        assert_eq!(unsafe { device_compute_size(ctl.as_ptr()) }, (0x40 + 0x22f) & 0x1ff00);
+        assert_eq!(
+            unsafe { device_compute_size(ctl.as_ptr()) },
+            (0x40 + 0x22f) & 0x1ff00
+        );
         ctl[0xa8] = 0;
         assert_eq!(unsafe { device_compute_size(ctl.as_ptr()) }, 0);
     }

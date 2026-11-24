@@ -35,7 +35,12 @@ pub fn set_dir(d: PathBuf) {
 
 pub fn wait_ms() -> u64 {
     static V: OnceLock<u64> = OnceLock::new();
-    *V.get_or_init(|| std::env::var("NXGFX_SHADER_WAIT_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(3000))
+    *V.get_or_init(|| {
+        std::env::var("NXGFX_SHADER_WAIT_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(3000)
+    })
 }
 
 /// A shader set by the game whose key the library lacks: queued for translation (once per key).
@@ -44,7 +49,13 @@ pub fn request(key: ShaderKey, ctl: Vec<u8>, code: Vec<u8>) {
         return;
     }
     let mut g = ST.lock().unwrap();
-    let st = g.get_or_insert_with(|| St { queued: HashSet::new(), q: VecDeque::new(), missed_at: HashMap::new(), failed: HashSet::new(), started: false });
+    let st = g.get_or_insert_with(|| St {
+        queued: HashSet::new(),
+        q: VecDeque::new(),
+        missed_at: HashMap::new(),
+        failed: HashSet::new(),
+        started: false,
+    });
     if !st.queued.insert(key) {
         return;
     }
@@ -53,9 +64,16 @@ pub fn request(key: ShaderKey, ctl: Vec<u8>, code: Vec<u8>) {
     if !st.started {
         st.started = true;
         // as many translators as the build uses (NXGFX_LIVE_JOBS, 4)
-        let n = std::env::var("NXGFX_LIVE_JOBS").ok().and_then(|v| v.parse().ok()).unwrap_or(4usize).max(1);
+        let n = std::env::var("NXGFX_LIVE_JOBS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4usize)
+            .max(1);
         for i in 0..n {
-            std::thread::Builder::new().name(format!("live shader translator {i}")).spawn(worker).ok();
+            std::thread::Builder::new()
+                .name(format!("live shader translator {i}"))
+                .spawn(worker)
+                .ok();
         }
     }
     CV.notify_one();
@@ -92,11 +110,20 @@ fn worker() {
         let hex = key_hex(&key);
         match shaders::prebuild::translate_one(&ctl, &code, &d) {
             Ok(k) => {
-                let since = ST.lock().unwrap().as_ref().and_then(|s| s.missed_at.get(&key).copied()).map(|t| t.elapsed().as_secs_f64()).unwrap_or(0.0);
+                let since = ST
+                    .lock()
+                    .unwrap()
+                    .as_ref()
+                    .and_then(|s| s.missed_at.get(&key).copied())
+                    .map(|t| t.elapsed().as_secs_f64())
+                    .unwrap_or(0.0);
                 if k != hex {
                     crate::log::red(&format!("live shader translator: key {k} for the game's {hex} (the two key functions differ)"));
                 }
-                crate::vklog!("live shader {hex} translated in {:.2} s ({since:.1} s after it was missed)", t0.elapsed().as_secs_f64());
+                crate::vklog!(
+                    "live shader {hex} translated in {:.2} s ({since:.1} s after it was missed)",
+                    t0.elapsed().as_secs_f64()
+                );
             }
             Err(e) => {
                 if let Some(s) = ST.lock().unwrap().as_mut() {
@@ -110,7 +137,10 @@ fn worker() {
 
 /// Whether the live translator gave up on `key` (a draw stops waiting for it).
 pub fn failed(key: &ShaderKey) -> bool {
-    ST.lock().unwrap().as_ref().is_some_and(|s| s.failed.contains(key))
+    ST.lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|s| s.failed.contains(key))
 }
 
 /// Where a live translation of `key` is (`<live>/<key>/spv`), when it exists.
@@ -126,7 +156,12 @@ static WAITED: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
 /// `NXGFX_SHADER_WAIT_FRAME_MS` (default 1500; 0: no cap).
 pub fn frame_cap_ms() -> u64 {
     static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("NXGFX_SHADER_WAIT_FRAME_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(1500))
+    *V.get_or_init(|| {
+        std::env::var("NXGFX_SHADER_WAIT_FRAME_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(1500)
+    })
 }
 
 /// (frame, ms waited in it so far)
@@ -166,7 +201,12 @@ pub fn wait_for(keys: &[ShaderKey], mut look: impl FnMut() -> bool) -> bool {
             h = (h ^ *b as u64).wrapping_mul(1099511628211);
         }
     }
-    if WAITED.lock().unwrap().get_or_insert_with(HashSet::new).contains(&h) {
+    if WAITED
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashSet::new)
+        .contains(&h)
+    {
         return false; // waited for once: a shader that never comes is skipped from then on
     }
     // the frame's waits so far: none left, the draw is skipped and the set waited for in a later frame
@@ -176,7 +216,11 @@ pub fn wait_for(keys: &[ShaderKey], mut look: impl FnMut() -> bool) -> bool {
         prioritize(keys);
         return false;
     }
-    WAITED.lock().unwrap().get_or_insert_with(HashSet::new).insert(h);
+    WAITED
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashSet::new)
+        .insert(h);
     prioritize(keys);
     let t0 = Instant::now();
     let mut came = false;
@@ -214,11 +258,19 @@ mod tests {
     #[test]
     fn a_frames_shader_waits_are_capped() {
         let f = 1_000_000_007;
-        assert_eq!(super::budget(f, 3000, 1500), 1500, "one wait at most the frame's cap");
+        assert_eq!(
+            super::budget(f, 3000, 1500),
+            1500,
+            "one wait at most the frame's cap"
+        );
         super::spent(f, 1200);
         assert_eq!(super::budget(f, 3000, 1500), 300, "what is left of it");
         super::spent(f, 400);
-        assert_eq!(super::budget(f, 3000, 1500), 0, "none left: skipped this frame");
+        assert_eq!(
+            super::budget(f, 3000, 1500),
+            0,
+            "none left: skipped this frame"
+        );
         assert_eq!(super::budget(f + 1, 3000, 1500), 1500, "the next frame");
         assert_eq!(super::budget(f, 3000, 0), 3000, "no cap");
     }

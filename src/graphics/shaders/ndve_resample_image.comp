@@ -1,0 +1,67 @@
+#version 460
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 64) in;
+layout(set=0,binding=0,std430) readonly buffer Luma { uint luma[]; };
+layout(set=0,binding=1,std430) writeonly buffer Output { uint unused_output[]; };
+layout(set=0,binding=2,std430) readonly buffer Weights { uint weights[]; };
+layout(set=0,binding=3,std430) readonly buffer DitherBuffer { uint unused_dither[]; };
+layout(set=0,binding=4,std430) readonly buffer PictureBuffer { uint unused_picture[]; };
+layout(set=0,binding=5) uniform sampler2D picture;
+layout(set=0,binding=6) uniform sampler2D dither_image;
+layout(set=0,binding=7,rgba8) uniform writeonly image2D destination;
+layout(push_constant) uniform Args {
+    uint width, height, dither_w, dither_h;
+    uint kind, count, rounding, flip;
+} p;
+shared float X[256];
+shared float H[512];
+shared float Y[256];
+float wh(uint i) { return unpackHalf2x16(weights[i / 2])[i & 1]; }
+float lh(uint i) { return unpackHalf2x16(luma[i / 2])[i & 1]; }
+float rh(float x) { return unpackHalf2x16(packHalf2x16(vec2(x, 0))).x; }
+void main() {
+    uint lane = gl_LocalInvocationID.x, ow = p.width * 4 / 3, oh = p.height * 4 / 3;
+    uint bx = gl_WorkGroupID.x % (ow / 8), by = gl_WorkGroupID.x / (ow / 8);
+    for (uint i = lane; i < 256; i += 64) {
+        int x = clamp(int(6 * bx) - 5 + int(i % 16), 0, int(p.width) - 1);
+        int y = clamp(int(6 * by) - 5 + int(i / 16), 0, int(p.height) - 1);
+        X[i] = lh(uint(y) * p.width + uint(x));
+    }
+    barrier();
+    [[dont_unroll]] for (uint block = 0; block < 6; ++block) {
+        for (uint i = lane; i < 512; i += 64) {
+            uint g = i / 256, m = (i % 256) / 16, n = i % 16;
+            precise float value = 0.0;
+            [[dont_unroll]] for (uint k = 0; k < 16; ++k)
+                value = fma(wh(block * 1024 + 256 * g + 128 * (k / 8) + 8 * m + k % 8),
+                            X[k * 16 + n], value);
+            H[i] = rh(value);
+        }
+        barrier();
+        for (uint i = lane; i < 256; i += 64) {
+            uint m = i / 16, n = i % 16;
+            precise float value = 0.0;
+            [[dont_unroll]] for (uint g = 0; g < 2; ++g) {
+                [[dont_unroll]] for (uint k = 0; k < 16; ++k)
+                    value = fma(H[g * 256 + m * 16 + k],
+                                wh(block * 1024 + 512 + 256 * g + 128 * (n / 8) + 8 * k + n % 8), value);
+                value = rh(value);
+            }
+            Y[i] = block < 5 ? max(value, 0.0) : value;
+        }
+        barrier();
+        for (uint i = lane; i < 256; i += 64) X[i] = Y[i];
+        barrier();
+    }
+    uint x = 8 * bx + lane % 8, y = 8 * by + lane / 8;
+    float delta = X[(lane / 8) * 16 + lane % 8];
+    precise vec2 uv = (vec2(x, y) + 0.5) * vec2(1.0 / float(ow), 1.0 / float(oh));
+    vec3 sample_value = textureLod(picture, uv, 0.0).rgb;
+    vec3 dv = texelFetch(dither_image, ivec2(x % p.dither_w, y % p.dither_h), 0).rgb;
+    vec3 off = fma(dv, vec3(2.0), vec3(-1.0));
+    precise vec3 value = vec3(-0.0) + (sample_value + delta);
+    vec3 quantized = roundEven(fma(value, vec3(255.0), off));
+    uint yo = p.flip != 0 ? oh - 1 - y : y;
+    imageStore(destination, ivec2(x, yo),
+               vec4(quantized * 0.0039215688593685626983642578125, 1.0));
+}

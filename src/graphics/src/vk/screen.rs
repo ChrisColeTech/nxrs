@@ -11,7 +11,11 @@ pub fn pick(cur: u32, rates: &[u32], fps: u32) -> Option<u32> {
     if fps == 0 || cur <= 1 || cur % fps == 0 {
         return None;
     }
-    rates.iter().copied().filter(|&r| r > 1 && r % fps == 0).max()
+    rates
+        .iter()
+        .copied()
+        .filter(|&r| r > 1 && r % fps == 0)
+        .max()
 }
 
 fn on() -> bool {
@@ -45,10 +49,20 @@ mod imp {
     }
 
     fn set_rate(dev: &[u16; 32], hz: u32) -> bool {
-        let Some(mut m) = mode(dev, ENUM_CURRENT_SETTINGS) else { return false };
+        let Some(mut m) = mode(dev, ENUM_CURRENT_SETTINGS) else {
+            return false;
+        };
         m.dmDisplayFrequency = hz;
         m.dmFields = DM_DISPLAYFREQUENCY;
-        unsafe { ChangeDisplaySettingsExW(dev.as_ptr(), &m, core::ptr::null_mut(), CDS_FULLSCREEN, core::ptr::null()) == DISP_CHANGE_SUCCESSFUL }
+        unsafe {
+            ChangeDisplaySettingsExW(
+                dev.as_ptr(),
+                &m,
+                core::ptr::null_mut(),
+                CDS_FULLSCREEN,
+                core::ptr::null(),
+            ) == DISP_CHANGE_SUCCESSFUL
+        }
     }
 
     fn name(dev: &[u16; 32]) -> String {
@@ -61,12 +75,20 @@ mod imp {
         let mon = unsafe { MonitorFromWindow(h, MONITOR_DEFAULTTONEAREST) };
         let mut mi: MONITORINFOEXW = unsafe { core::mem::zeroed() };
         mi.monitorInfo.cbSize = core::mem::size_of::<MONITORINFOEXW>() as u32;
-        let mut wr = RECT { left: 0, top: 0, right: 0, bottom: 0 };
-        if unsafe { GetMonitorInfoW(mon, &mut mi as *mut MONITORINFOEXW as *mut MONITORINFO) } == 0 || unsafe { GetWindowRect(h, &mut wr) } == 0 {
+        let mut wr = RECT {
+            left: 0,
+            top: 0,
+            right: 0,
+            bottom: 0,
+        };
+        if unsafe { GetMonitorInfoW(mon, &mut mi as *mut MONITORINFOEXW as *mut MONITORINFO) } == 0
+            || unsafe { GetWindowRect(h, &mut wr) } == 0
+        {
             return;
         }
         let r = mi.monitorInfo.rcMonitor;
-        let covers = wr.left <= r.left && wr.top <= r.top && wr.right >= r.right && wr.bottom >= r.bottom;
+        let covers =
+            wr.left <= r.left && wr.top <= r.top && wr.right >= r.right && wr.bottom >= r.bottom;
         let dev = mi.szDevice;
         let mut sw = SWITCHED.lock().unwrap();
         if let Some((d, old)) = *sw {
@@ -80,11 +102,16 @@ mod imp {
         if !covers || !super::on() {
             return;
         }
-        let Some(cur) = mode(&dev, ENUM_CURRENT_SETTINGS) else { return };
+        let Some(cur) = mode(&dev, ENUM_CURRENT_SETTINGS) else {
+            return;
+        };
         let mut rates = vec![];
         let mut i = 0;
         while let Some(m) = mode(&dev, i) {
-            if m.dmPelsWidth == cur.dmPelsWidth && m.dmPelsHeight == cur.dmPelsHeight && m.dmBitsPerPel == cur.dmBitsPerPel {
+            if m.dmPelsWidth == cur.dmPelsWidth
+                && m.dmPelsHeight == cur.dmPelsHeight
+                && m.dmBitsPerPel == cur.dmBitsPerPel
+            {
                 rates.push(m.dmDisplayFrequency);
             }
             i += 1;
@@ -132,13 +159,21 @@ mod tests {
     #[test]
     fn the_screen_takes_the_highest_rate_that_is_a_multiple() {
         let modes = [60, 100, 120, 144, 165];
-        assert_eq!(super::pick(144, &modes, 60), Some(120), "144 Hz -> 120 for 60 fps");
+        assert_eq!(
+            super::pick(144, &modes, 60),
+            Some(120),
+            "144 Hz -> 120 for 60 fps"
+        );
         assert_eq!(super::pick(165, &modes, 60), Some(120));
         assert_eq!(super::pick(120, &modes, 60), None, "already a multiple");
         assert_eq!(super::pick(60, &modes, 60), None);
         assert_eq!(super::pick(144, &[144, 75], 60), None, "no such mode: kept");
         assert_eq!(super::pick(165, &modes, 144), Some(144), "144 fps: 144 Hz");
-        assert_eq!(super::pick(165, &[165, 60], 144), None, "no mode for 144 fps: kept");
+        assert_eq!(
+            super::pick(165, &[165, 60], 144),
+            None,
+            "no mode for 144 fps: kept"
+        );
         assert_eq!(super::pick(144, &[144, 240], 120), Some(240));
     }
 }

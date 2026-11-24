@@ -25,7 +25,11 @@ impl Layout {
     /// From the json's `transform_feedback` array (None: nothing captured, or a form not met yet).
     pub fn from_json(v: &serde_json::Value) -> Option<Layout> {
         let a = v.as_array()?;
-        let mut l = Layout { nbuf: 0, stride: [0; 4], outs: vec![] };
+        let mut l = Layout {
+            nbuf: 0,
+            stride: [0; 4],
+            outs: vec![],
+        };
         for (b, e) in a.iter().enumerate().take(4) {
             let Some(o) = e.as_object() else { continue };
             let stride = o.get("stride")?.as_u64()? as u32;
@@ -84,7 +88,8 @@ pub fn variant(w: &[u32], l: &Layout) -> Option<Vec<u32>> {
     }
     let mut bound = w[3];
     let (mut f32t, mut vec, mut ptr) = (0u32, [0u32; 5], [0u32; 5]);
-    let (mut entry, mut entry_at, mut last_cap, mut last_dec, mut first_fn) = (0u32, 0usize, 0usize, 0usize, 0usize);
+    let (mut entry, mut entry_at, mut last_cap, mut last_dec, mut first_fn) =
+        (0u32, 0usize, 0usize, 0usize, 0usize);
     let mut loc_of: HashMap<u32, u32> = HashMap::new();
     let mut outs: Vec<(u32, u32)> = vec![]; // (variable, pointer type)
     let mut ptr_to: HashMap<u32, u32> = HashMap::new();
@@ -107,7 +112,9 @@ pub fn variant(w: &[u32], l: &Layout) -> Option<Vec<u32>> {
                 }
             }
             OP_TYPE_FLOAT if w[i + 2] == 32 => f32t = w[i + 1],
-            OP_TYPE_VECTOR if f32t != 0 && w[i + 2] == f32t && w[i + 3] <= 4 => vec[w[i + 3] as usize] = w[i + 1],
+            OP_TYPE_VECTOR if f32t != 0 && w[i + 2] == f32t && w[i + 3] <= 4 => {
+                vec[w[i + 3] as usize] = w[i + 1]
+            }
             OP_TYPE_POINTER => {
                 ptr_to.insert(w[i + 1], w[i + 3]);
                 if w[i + 2] == SC_OUTPUT {
@@ -133,7 +140,9 @@ pub fn variant(w: &[u32], l: &Layout) -> Option<Vec<u32>> {
     let mut used_loc = 0u32;
     let mut src = vec![0u32; l.outs.len()];
     for &(id, ty) in &outs {
-        let Some(&loc) = loc_of.get(&id) else { continue };
+        let Some(&loc) = loc_of.get(&id) else {
+            continue;
+        };
         if loc < 32 {
             used_loc |= 1 << loc;
         }
@@ -181,7 +190,11 @@ pub fn variant(w: &[u32], l: &Layout) -> Option<Vec<u32>> {
         }
         nv[k] = var;
         put(&mut decs, OP_DECORATE, &[var, DEC_XFB_BUFFER, o.0]);
-        put(&mut decs, OP_DECORATE, &[var, DEC_XFB_STRIDE, l.stride[o.0 as usize]]);
+        put(
+            &mut decs,
+            OP_DECORATE,
+            &[var, DEC_XFB_STRIDE, l.stride[o.0 as usize]],
+        );
         put(&mut decs, OP_DECORATE, &[var, DEC_OFFSET, o.3]);
     }
     let mut o = w[..5].to_vec();
@@ -282,7 +295,10 @@ mod tests {
 
     #[test]
     fn layout_from_the_reflection() {
-        let v: serde_json::Value = serde_json::from_str(r#"[{"stride": 12, "outputs": [[0, 3]]}, {"stride": 4, "outputs": [[1, 1]]}, [], []]"#).unwrap();
+        let v: serde_json::Value = serde_json::from_str(
+            r#"[{"stride": 12, "outputs": [[0, 3]]}, {"stride": 4, "outputs": [[1, 1]]}, [], []]"#,
+        )
+        .unwrap();
         let l = Layout::from_json(&v).unwrap();
         assert_eq!(l.nbuf, 2);
         assert_eq!(l.outs, vec![(0, 0, 3, 0), (1, 1, 1, 0)]);

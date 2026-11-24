@@ -129,23 +129,48 @@ pub struct p_bufs_deferred {
     pub src: u64,
 }
 
-unsafe fn push_const(c: *mut NVNcommandBuffer, compute: bool, w: u64, off: u64, n: u64, data: *const u8, deferred: bool) {
+unsafe fn push_const(
+    c: *mut NVNcommandBuffer,
+    compute: bool,
+    w: u64,
+    off: u64,
+    n: u64,
+    data: *const u8,
+    deferred: bool,
+) {
     let at = w as usize * PUSH_BLOCK + off as usize;
     if at + n as usize > PUSH_GROUP || data.is_null() {
-        crate::log::red_once(&format!("push constants past their group: block {w} offset {off:#x} size {n:#x}"));
+        crate::log::red_once(&format!(
+            "push constants past their group: block {w} offset {off:#x} size {n:#x}"
+        ));
         return;
     }
     let size = core::mem::size_of::<p_push_const>();
     let extra = if deferred { 0 } else { n as usize };
     let p = rec(c, op::PUSH_CONST, size + extra);
     let h = p as *mut p_push_const;
-    *h = p_push_const { compute: compute as u16, offset: at as u16, size: n as u32, deferred: deferred as u32, pad: 0, src: data as u64 };
+    *h = p_push_const {
+        compute: compute as u16,
+        offset: at as u16,
+        size: n as u32,
+        deferred: deferred as u32,
+        pad: 0,
+        src: data as u64,
+    };
     if !deferred {
         core::ptr::copy_nonoverlapping(data, p.add(size), n as usize);
     }
 }
 
-unsafe fn tex_pair(c: *mut NVNcommandBuffer, op: u32, kind: u8, s: *const NVNtexture, sv: *const NVNtextureView, d: *const NVNtexture, dv: *const NVNtextureView) {
+unsafe fn tex_pair(
+    c: *mut NVNcommandBuffer,
+    op: u32,
+    kind: u8,
+    s: *const NVNtexture,
+    sv: *const NVNtextureView,
+    d: *const NVNtexture,
+    dv: *const NVNtextureView,
+) {
     let r = rec_t::<p_tex2>(c, op);
     (*r).src = *(s as *const tex_t);
     (*r).dst = *(d as *const tex_t);
@@ -270,33 +295,33 @@ nvn_fns! {
 pub mod hints {
     use super::super::entry::nvn_fns;
     use super::super::types::*;
-nvn_fns! {
-    fn nvnCommandBufferInsertDebugMarkerCompute(c: *mut NVNcommandBuffer, s: *const u8) { let _ = (c, s); }
-    fn nvnCommandBufferInsertDebugMarkerGraphics(c: *mut NVNcommandBuffer, s: *const u8) { let _ = (c, s); }
-    fn nvnCommandBufferPushDebugGroupCompute(c: *mut NVNcommandBuffer, s: *const u8) { let _ = (c, s); }
-    fn nvnCommandBufferPushDebugGroupGraphics(c: *mut NVNcommandBuffer, s: *const u8) { let _ = (c, s); }
-    fn nvnCommandBufferPopDebugGroupCompute(c: *mut NVNcommandBuffer) { let _ = c; }
-    fn nvnCommandBufferPopDebugGroupGraphics(c: *mut NVNcommandBuffer) { let _ = c; }
-    fn nvnCommandBufferInsertCheckpointStatic(c: *mut NVNcommandBuffer, id: u32, s: *const u8) { let _ = (c, id, s); }
-    fn nvnCommandBufferInsertCheckpointDynamic(c: *mut NVNcommandBuffer, id: u32, s: *const u8) { let _ = (c, id, s); }
-    fn nvnCommandBufferSetComputeOverlapMode(c: *mut NVNcommandBuffer, m: i32) { let _ = (c, m); }
-    fn nvnCommandBufferSetComputeWorkloadPriority(c: *mut NVNcommandBuffer, p: i32) { let _ = (c, p); }
-    fn nvnCommandBufferSetGraphicsWorkloadPriority(c: *mut NVNcommandBuffer, p: i32) { let _ = (c, p); }
-    fn nvnCommandBufferSetResourceOccupancy(c: *mut NVNcommandBuffer, a: i32, b: i32) { let _ = (c, a, b); }
-    fn nvnCommandBufferOverrideSubtileSize(c: *mut NVNcommandBuffer, w: i32, h: i32) { let _ = (c, w, h); }
-    fn nvnCommandBufferSetZCullZF32CompressionEnable(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
-    fn nvnCommandBufferSetRecordingMode(c: *mut NVNcommandBuffer, m: i32) { let _ = (c, m); }
-    fn nvnCommandBufferSetRepresentativeFragmentTest(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
-    fn nvnCommandBufferSetSubpixelPrecisionBias(c: *mut NVNcommandBuffer, x: i32, y: i32) { let _ = (c, x, y); }
-    fn nvnCommandBufferSetColorReductionEnable(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
-    fn nvnCommandBufferSetColorReductionThresholds(c: *mut NVNcommandBuffer, f: i32, t: *const u8) { let _ = (c, f, t); }
-    fn nvnCommandBufferSetFloatBlendClamp(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
-    fn nvnCommandBufferSetGeometryProcessingMode(c: *mut NVNcommandBuffer, m: i32) { let _ = (c, m); }
-    fn nvnCommandBufferBindShadingRateImage(c: *mut NVNcommandBuffer, v: *const u8, t: *const u8) { let _ = (c, v, t); }
-    fn nvnCommandBufferShadingRateImagePalette(c: *mut NVNcommandBuffer, first: i32, n: i32, e: *const u8) { let _ = (c, first, n, e); }
-    fn nvnCommandBufferSetShadingRatePaletteMode(c: *mut NVNcommandBuffer, m: i32) { let _ = (c, m); }
-    fn nvnCommandBufferBindCoverageModulationTable(c: *mut NVNcommandBuffer, n: i32, e: *const f32) { let _ = (c, n, e); }
-    fn nvnCommandBufferSetCommandMemoryCallbackEnabled(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
-    fn nvnCommandBufferSetControlMemoryCallbackEnabled(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
-}
+    nvn_fns! {
+        fn nvnCommandBufferInsertDebugMarkerCompute(c: *mut NVNcommandBuffer, s: *const u8) { let _ = (c, s); }
+        fn nvnCommandBufferInsertDebugMarkerGraphics(c: *mut NVNcommandBuffer, s: *const u8) { let _ = (c, s); }
+        fn nvnCommandBufferPushDebugGroupCompute(c: *mut NVNcommandBuffer, s: *const u8) { let _ = (c, s); }
+        fn nvnCommandBufferPushDebugGroupGraphics(c: *mut NVNcommandBuffer, s: *const u8) { let _ = (c, s); }
+        fn nvnCommandBufferPopDebugGroupCompute(c: *mut NVNcommandBuffer) { let _ = c; }
+        fn nvnCommandBufferPopDebugGroupGraphics(c: *mut NVNcommandBuffer) { let _ = c; }
+        fn nvnCommandBufferInsertCheckpointStatic(c: *mut NVNcommandBuffer, id: u32, s: *const u8) { let _ = (c, id, s); }
+        fn nvnCommandBufferInsertCheckpointDynamic(c: *mut NVNcommandBuffer, id: u32, s: *const u8) { let _ = (c, id, s); }
+        fn nvnCommandBufferSetComputeOverlapMode(c: *mut NVNcommandBuffer, m: i32) { let _ = (c, m); }
+        fn nvnCommandBufferSetComputeWorkloadPriority(c: *mut NVNcommandBuffer, p: i32) { let _ = (c, p); }
+        fn nvnCommandBufferSetGraphicsWorkloadPriority(c: *mut NVNcommandBuffer, p: i32) { let _ = (c, p); }
+        fn nvnCommandBufferSetResourceOccupancy(c: *mut NVNcommandBuffer, a: i32, b: i32) { let _ = (c, a, b); }
+        fn nvnCommandBufferOverrideSubtileSize(c: *mut NVNcommandBuffer, w: i32, h: i32) { let _ = (c, w, h); }
+        fn nvnCommandBufferSetZCullZF32CompressionEnable(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
+        fn nvnCommandBufferSetRecordingMode(c: *mut NVNcommandBuffer, m: i32) { let _ = (c, m); }
+        fn nvnCommandBufferSetRepresentativeFragmentTest(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
+        fn nvnCommandBufferSetSubpixelPrecisionBias(c: *mut NVNcommandBuffer, x: i32, y: i32) { let _ = (c, x, y); }
+        fn nvnCommandBufferSetColorReductionEnable(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
+        fn nvnCommandBufferSetColorReductionThresholds(c: *mut NVNcommandBuffer, f: i32, t: *const u8) { let _ = (c, f, t); }
+        fn nvnCommandBufferSetFloatBlendClamp(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
+        fn nvnCommandBufferSetGeometryProcessingMode(c: *mut NVNcommandBuffer, m: i32) { let _ = (c, m); }
+        fn nvnCommandBufferBindShadingRateImage(c: *mut NVNcommandBuffer, v: *const u8, t: *const u8) { let _ = (c, v, t); }
+        fn nvnCommandBufferShadingRateImagePalette(c: *mut NVNcommandBuffer, first: i32, n: i32, e: *const u8) { let _ = (c, first, n, e); }
+        fn nvnCommandBufferSetShadingRatePaletteMode(c: *mut NVNcommandBuffer, m: i32) { let _ = (c, m); }
+        fn nvnCommandBufferBindCoverageModulationTable(c: *mut NVNcommandBuffer, n: i32, e: *const f32) { let _ = (c, n, e); }
+        fn nvnCommandBufferSetCommandMemoryCallbackEnabled(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
+        fn nvnCommandBufferSetControlMemoryCallbackEnabled(c: *mut NVNcommandBuffer, e: u32) { let _ = (c, e); }
+    }
 }

@@ -53,7 +53,9 @@ impl Arg for f32 {
             c.arg_s(*vi)
         } else {
             let slot = (*xi).saturating_sub(8) + (*vi - 8);
-            f32::from_bits(core::ptr::read_unaligned((c.sp + 8 * slot as u64) as *const u32))
+            f32::from_bits(core::ptr::read_unaligned(
+                (c.sp + 8 * slot as u64) as *const u32,
+            ))
         };
         *vi += 1;
         v
@@ -61,12 +63,16 @@ impl Arg for f32 {
 }
 impl Arg for super::types::NVNseparateTextureHandle {
     unsafe fn take(c: &Cpu, xi: &mut usize, vi: &mut usize) -> Self {
-        Self { value: u64::take(c, xi, vi) }
+        Self {
+            value: u64::take(c, xi, vi),
+        }
     }
 }
 impl Arg for super::types::NVNseparateSamplerHandle {
     unsafe fn take(c: &Cpu, xi: &mut usize, vi: &mut usize) -> Self {
-        Self { value: u64::take(c, xi, vi) }
+        Self {
+            value: u64::take(c, xi, vi),
+        }
     }
 }
 
@@ -173,7 +179,11 @@ pub fn procs() -> &'static [Entry] {
         super::devbuf::entries(&mut v);
         v.sort_by_key(|e| e.name);
         for w in v.windows(2) {
-            assert!(w[0].name != w[1].name, "NVN entry point {} defined twice", w[0].name);
+            assert!(
+                w[0].name != w[1].name,
+                "NVN entry point {} defined twice",
+                w[0].name
+            );
         }
         v
     })
@@ -181,7 +191,9 @@ pub fn procs() -> &'static [Entry] {
 
 pub fn find(name: &str) -> Option<HostFn> {
     let p = procs();
-    p.binary_search_by_key(&name, |e| e.name).ok().map(|i| p[i].f)
+    p.binary_search_by_key(&name, |e| e.name)
+        .ok()
+        .map(|i| p[i].f)
 }
 
 type Resolver = fn(&str) -> u64;
@@ -198,7 +210,9 @@ pub fn resolve(name: &str) -> u64 {
         Some(f) => {
             let a = f(name);
             if a == 0 {
-                crate::log::red_once(&format!("NVN address lookup of a name with no implementation: {name}"));
+                crate::log::red_once(&format!(
+                    "NVN address lookup of a name with no implementation: {name}"
+                ));
             }
             a
         }

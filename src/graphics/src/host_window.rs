@@ -8,10 +8,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use winit::application::ApplicationHandler;
 use winit::event::WindowEvent;
 use winit::event_loop::{ActiveEventLoop, EventLoop};
-#[cfg(target_os = "linux")]
-use winit::platform::x11::EventLoopBuilderExtX11;
 #[cfg(windows)]
 use winit::platform::windows::EventLoopBuilderExtWindows;
+#[cfg(target_os = "linux")]
+use winit::platform::x11::EventLoopBuilderExtX11;
 use winit::window::{Window, WindowId};
 
 static OPEN: AtomicBool = AtomicBool::new(false);
@@ -26,11 +26,49 @@ pub fn set_key_handler(f: KeyHandler) {
 /// The Windows virtual-key code of a winit key (letters and digits as their ASCII capitals, as Win32 does).
 fn vk_of(k: winit::keyboard::KeyCode) -> u32 {
     use winit::keyboard::KeyCode as K;
-    let letters = [K::KeyA, K::KeyB, K::KeyC, K::KeyD, K::KeyE, K::KeyF, K::KeyG, K::KeyH, K::KeyI, K::KeyJ, K::KeyK, K::KeyL, K::KeyM, K::KeyN, K::KeyO, K::KeyP, K::KeyQ, K::KeyR, K::KeyS, K::KeyT, K::KeyU, K::KeyV, K::KeyW, K::KeyX, K::KeyY, K::KeyZ];
+    let letters = [
+        K::KeyA,
+        K::KeyB,
+        K::KeyC,
+        K::KeyD,
+        K::KeyE,
+        K::KeyF,
+        K::KeyG,
+        K::KeyH,
+        K::KeyI,
+        K::KeyJ,
+        K::KeyK,
+        K::KeyL,
+        K::KeyM,
+        K::KeyN,
+        K::KeyO,
+        K::KeyP,
+        K::KeyQ,
+        K::KeyR,
+        K::KeyS,
+        K::KeyT,
+        K::KeyU,
+        K::KeyV,
+        K::KeyW,
+        K::KeyX,
+        K::KeyY,
+        K::KeyZ,
+    ];
     if let Some(i) = letters.iter().position(|&l| l == k) {
         return b'A' as u32 + i as u32;
     }
-    let digits = [K::Digit0, K::Digit1, K::Digit2, K::Digit3, K::Digit4, K::Digit5, K::Digit6, K::Digit7, K::Digit8, K::Digit9];
+    let digits = [
+        K::Digit0,
+        K::Digit1,
+        K::Digit2,
+        K::Digit3,
+        K::Digit4,
+        K::Digit5,
+        K::Digit6,
+        K::Digit7,
+        K::Digit8,
+        K::Digit9,
+    ];
     if let Some(i) = digits.iter().position(|&d| d == k) {
         return b'0' as u32 + i as u32;
     }
@@ -62,7 +100,9 @@ impl ApplicationHandler for App {
         if self.window.is_some() {
             return;
         }
-        let attrs = Window::default_attributes().with_title(&self.title).with_inner_size(winit::dpi::PhysicalSize::new(self.size.0, self.size.1));
+        let attrs = Window::default_attributes()
+            .with_title(&self.title)
+            .with_inner_size(winit::dpi::PhysicalSize::new(self.size.0, self.size.1));
         let w = match el.create_window(attrs) {
             Ok(w) => w,
             Err(e) => {
@@ -121,7 +161,11 @@ pub fn open(title: &str, w: u32, h: u32) {
                     return;
                 }
             };
-            let mut app = App { title, size: (w, h), window: None };
+            let mut app = App {
+                title,
+                size: (w, h),
+                window: None,
+            };
             if let Err(e) = el.run_app(&mut app) {
                 crate::log::red(&format!("host window: {e}"));
             }

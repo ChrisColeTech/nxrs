@@ -13,7 +13,10 @@ fn deferred_recording_draws_the_same() {
     let _g = setup();
     let e0 = validation_errors();
     let mut n = Nvn::new();
-    assert!(nxgfx::vk::defer::active(), "the shims are in the device's tables");
+    assert!(
+        nxgfx::vk::defer::active(),
+        "the shims are in the device's tables"
+    );
     let rt = n.texture(64, 64, 37, 0, false);
     let vs = spv("tri_vert");
     let fs = spv("tri_frag");
@@ -46,6 +49,9 @@ fn deferred_recording_draws_the_same() {
     let blue = got.chunks(4).filter(|p| p == &[0, 0, 255, 255]).count();
     eprintln!("deferred recording: {queued} commands queued, {red} red / {blue} blue pixels");
     assert!(queued > 400, "the draws went through the recorder");
-    assert!(red > 200 && blue > 1000 && red + blue == 64 * 64, "the triangles over the clear");
+    assert!(
+        red > 200 && blue > 1000 && red + blue == 64 * 64,
+        "the triangles over the clear"
+    );
     assert_eq!(validation_errors(), e0, "validation errors");
 }

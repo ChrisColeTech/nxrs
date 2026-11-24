@@ -27,7 +27,10 @@ pub fn header_ok(data: &[u8], props: &vk::PhysicalDeviceProperties) -> bool {
         return false;
     }
     let u = |o: usize| u32::from_le_bytes(data[o..o + 4].try_into().unwrap());
-    u(4) == vk::PipelineCacheHeaderVersion::ONE.as_raw() as u32 && u(8) == props.vendor_id && u(12) == props.device_id && data[16..32] == props.pipeline_cache_uuid
+    u(4) == vk::PipelineCacheHeaderVersion::ONE.as_raw() as u32
+        && u(8) == props.vendor_id
+        && u(12) == props.device_id
+        && data[16..32] == props.pipeline_cache_uuid
 }
 
 /// The file in `dir` merged into the live cache, and the saver started for it.
@@ -46,7 +49,10 @@ pub fn attach(g: &'static Gpu, dir: &Path) {
                 unsafe { g.dev().destroy_pipeline_cache(c, None) };
             }
         } else {
-            crate::vklog!("pipeline cache file {} is from another device or driver: started empty", path.display());
+            crate::vklog!(
+                "pipeline cache file {} is from another device or driver: started empty",
+                path.display()
+            );
         }
     }
     let quiet = quiet_ms();
@@ -60,7 +66,9 @@ pub fn attach(g: &'static Gpu, dir: &Path) {
                 if c == SAVED_AT.load(Ordering::Relaxed) {
                     continue;
                 }
-                if crate::nvn::device::now_ns().saturating_sub(LAST_NS.load(Ordering::Relaxed)) < quiet * 1_000_000 {
+                if crate::nvn::device::now_ns().saturating_sub(LAST_NS.load(Ordering::Relaxed))
+                    < quiet * 1_000_000
+                {
                     continue;
                 }
                 save_now(g);
@@ -70,7 +78,10 @@ pub fn attach(g: &'static Gpu, dir: &Path) {
 }
 
 fn quiet_ms() -> u64 {
-    std::env::var("NXGFX_PCACHE_QUIET_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(2000)
+    std::env::var("NXGFX_PCACHE_QUIET_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(2000)
 }
 
 /// `n` new pipelines went into the cache.
@@ -81,11 +92,15 @@ pub fn note_created(n: u64) {
 
 /// Writes the cache now (temporary file, then an atomic replace). True on success.
 pub fn save_now(g: &Gpu) -> bool {
-    let Some(path) = PATH.lock().unwrap().clone() else { return false };
+    let Some(path) = PATH.lock().unwrap().clone() else {
+        return false;
+    };
     let t0 = std::time::Instant::now();
     let _l = LOCK.lock().unwrap();
     let c = CREATED.load(Ordering::Relaxed);
-    let Ok(data) = (unsafe { g.dev().get_pipeline_cache_data(g.pipes.cache) }) else { return false };
+    let Ok(data) = (unsafe { g.dev().get_pipeline_cache_data(g.pipes.cache) }) else {
+        return false;
+    };
     let tmp = path.with_extension("bin.tmp");
     let ok = (|| -> std::io::Result<()> {
         use std::io::Write;
@@ -104,7 +119,10 @@ pub fn save_now(g: &Gpu) -> bool {
         SAVES.fetch_add(1, Ordering::Relaxed);
         BYTES.store(data.len() as u64, Ordering::Relaxed);
     } else {
-        crate::log::red_once(&format!("pipeline cache {} could not be written", path.display()));
+        crate::log::red_once(&format!(
+            "pipeline cache {} could not be written",
+            path.display()
+        ));
     }
     SAVE_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     ok
@@ -112,14 +130,23 @@ pub fn save_now(g: &Gpu) -> bool {
 
 /// (pipelines created, saves, bytes of the last save, save time ns).
 pub fn stats() -> (u64, u64, u64, u64) {
-    (CREATED.load(Ordering::Relaxed), SAVES.load(Ordering::Relaxed), BYTES.load(Ordering::Relaxed), SAVE_NS.load(Ordering::Relaxed))
+    (
+        CREATED.load(Ordering::Relaxed),
+        SAVES.load(Ordering::Relaxed),
+        BYTES.load(Ordering::Relaxed),
+        SAVE_NS.load(Ordering::Relaxed),
+    )
 }
 
 #[cfg(test)]
 mod tests {
     #[test]
     fn header_check() {
-        let mut p = ash::vk::PhysicalDeviceProperties { vendor_id: 0x10de, device_id: 0x2b85, ..Default::default() };
+        let mut p = ash::vk::PhysicalDeviceProperties {
+            vendor_id: 0x10de,
+            device_id: 0x2b85,
+            ..Default::default()
+        };
         p.pipeline_cache_uuid = [7; 16];
         let mut d = vec![0u8; 64];
         d[0..4].copy_from_slice(&32u32.to_le_bytes());

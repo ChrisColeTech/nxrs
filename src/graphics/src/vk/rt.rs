@@ -30,7 +30,12 @@ static ACCELS: Mutex<Option<HashMap<u64, Accel>>> = Mutex::new(None);
 
 /// The host structure built at guest address `a`: (handle, device address).
 pub fn lookup(a: u64) -> Option<(vk::AccelerationStructureKHR, u64)> {
-    ACCELS.lock().unwrap().as_ref()?.get(&a).map(|x| (x.handle, x.addr))
+    ACCELS
+        .lock()
+        .unwrap()
+        .as_ref()?
+        .get(&a)
+        .map(|x| (x.handle, x.addr))
 }
 
 fn dev_addr(g: &Gpu, sub: &mut Sub, a: u64, n: u64) -> Option<u64> {
@@ -56,7 +61,9 @@ pub fn build(g: &Gpu, sub: &mut Sub, b: &AsBuild) -> Result<(), String> {
     if b.count != 0 && b.geometries.is_null() {
         return Err("no geometries".into());
     }
-    let geos: Vec<AsGeometry> = (0..b.count as usize).map(|i| unsafe { *b.geometries.add(i) }).collect();
+    let geos: Vec<AsGeometry> = (0..b.count as usize)
+        .map(|i| unsafe { *b.geometries.add(i) })
+        .collect();
     let top = geos.iter().any(|g| g.kind == 3);
     if top && geos.len() != 1 {
         return Err("a top level has one instance geometry".into());
@@ -67,27 +74,45 @@ pub fn build(g: &Gpu, sub: &mut Sub, b: &AsBuild) -> Result<(), String> {
     for ge in &geos {
         match ge.kind {
             1 => {
-                let (va, vcount, vfmt, stride) = (ge.w[0], (ge.w[1] & 0xffff_ffff) as u32, (ge.w[1] >> 32) as u32, ge.w[2]);
-                let (ia, icount, ity) = (ge.w[3], (ge.w[4] & 0xffff_ffff) as u32, (ge.w[4] >> 32) as u32);
+                let (va, vcount, vfmt, stride) = (
+                    ge.w[0],
+                    (ge.w[1] & 0xffff_ffff) as u32,
+                    (ge.w[1] >> 32) as u32,
+                    ge.w[2],
+                );
+                let (ia, icount, ity) = (
+                    ge.w[3],
+                    (ge.w[4] & 0xffff_ffff) as u32,
+                    (ge.w[4] >> 32) as u32,
+                );
                 let fmt = vertex_format(vfmt).ok_or(format!("vertex format {vfmt}"))?;
-                let vdev = dev_addr(g, sub, va, vcount as u64 * stride).ok_or("vertices in no memory pool")?;
+                let vdev = dev_addr(g, sub, va, vcount as u64 * stride)
+                    .ok_or("vertices in no memory pool")?;
                 let (it, idev) = if icount != 0 {
                     let (t, sz) = match ity {
                         1 => (vk::IndexType::UINT16, 2),
                         2 => (vk::IndexType::UINT32, 4),
                         _ => return Err(format!("index type {ity}")),
                     };
-                    (t, dev_addr(g, sub, ia, icount as u64 * sz).ok_or("indices in no memory pool")?)
+                    (
+                        t,
+                        dev_addr(g, sub, ia, icount as u64 * sz)
+                            .ok_or("indices in no memory pool")?,
+                    )
                 } else {
                     (vk::IndexType::NONE_KHR, 0)
                 };
                 let tri = vk::AccelerationStructureGeometryTrianglesDataKHR::default()
                     .vertex_format(fmt)
-                    .vertex_data(vk::DeviceOrHostAddressConstKHR { device_address: vdev })
+                    .vertex_data(vk::DeviceOrHostAddressConstKHR {
+                        device_address: vdev,
+                    })
                     .vertex_stride(stride)
                     .max_vertex(vcount.saturating_sub(1))
                     .index_type(it)
-                    .index_data(vk::DeviceOrHostAddressConstKHR { device_address: idev });
+                    .index_data(vk::DeviceOrHostAddressConstKHR {
+                        device_address: idev,
+                    });
                 vk_geos.push(
                     vk::AccelerationStructureGeometryKHR::default()
                         .geometry_type(vk::GeometryTypeKHR::TRIANGLES)
@@ -97,10 +122,23 @@ pub fn build(g: &Gpu, sub: &mut Sub, b: &AsBuild) -> Result<(), String> {
                 prims.push(if icount != 0 { icount / 3 } else { vcount / 3 });
             }
             2 => {
-                let (ba, count, stride) = (ge.w[0], (ge.w[1] & 0xffff_ffff) as u32, (ge.w[1] >> 32).max(24));
-                let bdev = dev_addr(g, sub, ba, count as u64 * stride).ok_or("boxes in no memory pool")?;
-                let aabb = vk::AccelerationStructureGeometryAabbsDataKHR::default().data(vk::DeviceOrHostAddressConstKHR { device_address: bdev }).stride(stride);
-                vk_geos.push(vk::AccelerationStructureGeometryKHR::default().geometry_type(vk::GeometryTypeKHR::AABBS).geometry(vk::AccelerationStructureGeometryDataKHR { aabbs: aabb }));
+                let (ba, count, stride) = (
+                    ge.w[0],
+                    (ge.w[1] & 0xffff_ffff) as u32,
+                    (ge.w[1] >> 32).max(24),
+                );
+                let bdev =
+                    dev_addr(g, sub, ba, count as u64 * stride).ok_or("boxes in no memory pool")?;
+                let aabb = vk::AccelerationStructureGeometryAabbsDataKHR::default()
+                    .data(vk::DeviceOrHostAddressConstKHR {
+                        device_address: bdev,
+                    })
+                    .stride(stride);
+                vk_geos.push(
+                    vk::AccelerationStructureGeometryKHR::default()
+                        .geometry_type(vk::GeometryTypeKHR::AABBS)
+                        .geometry(vk::AccelerationStructureGeometryDataKHR { aabbs: aabb }),
+                );
                 prims.push(count);
             }
             3 => {
@@ -109,42 +147,119 @@ pub fn build(g: &Gpu, sub: &mut Sub, b: &AsBuild) -> Result<(), String> {
                 let (ia, count) = (ge.w[0], (ge.w[1] & 0xffff_ffff) as u32);
                 let n = count as u64 * 64;
                 let src = super::mem::guest_bytes(ia, n);
-                let ib = g.buffer(n.max(64), vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, MemoryLocation::CpuToGpu, "rt instances")?;
+                let ib = g.buffer(
+                    n.max(64),
+                    vk::BufferUsageFlags::ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_KHR
+                        | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+                    MemoryLocation::CpuToGpu,
+                    "rt instances",
+                )?;
                 let mut recs = src.to_vec();
                 for k in 0..count as usize {
                     let r = &mut recs[k * 64 + 56..k * 64 + 64];
                     let guest = u64::from_le_bytes(r.try_into().unwrap());
-                    let host = lookup(guest).map(|x| x.1).ok_or(format!("instance {k} names {guest:#x}, built nowhere"))?;
+                    let host = lookup(guest)
+                        .map(|x| x.1)
+                        .ok_or(format!("instance {k} names {guest:#x}, built nowhere"))?;
                     r.copy_from_slice(&host.to_le_bytes());
                 }
                 unsafe { core::ptr::copy_nonoverlapping(recs.as_ptr(), ib.ptr, recs.len()) };
-                let inst = vk::AccelerationStructureGeometryInstancesDataKHR::default().data(vk::DeviceOrHostAddressConstKHR { device_address: ib.addr });
-                vk_geos.push(vk::AccelerationStructureGeometryKHR::default().geometry_type(vk::GeometryTypeKHR::INSTANCES).geometry(vk::AccelerationStructureGeometryDataKHR { instances: inst }));
+                let inst = vk::AccelerationStructureGeometryInstancesDataKHR::default().data(
+                    vk::DeviceOrHostAddressConstKHR {
+                        device_address: ib.addr,
+                    },
+                );
+                vk_geos.push(
+                    vk::AccelerationStructureGeometryKHR::default()
+                        .geometry_type(vk::GeometryTypeKHR::INSTANCES)
+                        .geometry(vk::AccelerationStructureGeometryDataKHR { instances: inst }),
+                );
                 prims.push(count);
                 keep.push(ib);
             }
             k => return Err(format!("geometry kind {k}")),
         }
     }
-    let ty = if top { vk::AccelerationStructureTypeKHR::TOP_LEVEL } else { vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL };
+    let ty = if top {
+        vk::AccelerationStructureTypeKHR::TOP_LEVEL
+    } else {
+        vk::AccelerationStructureTypeKHR::BOTTOM_LEVEL
+    };
     let flags = vk::BuildAccelerationStructureFlagsKHR::PREFER_FAST_TRACE
-        | if b.flags & crate::nvn::query::AS_ALLOW_UPDATE != 0 { vk::BuildAccelerationStructureFlagsKHR::ALLOW_UPDATE } else { vk::BuildAccelerationStructureFlagsKHR::empty() };
-    let mut info = vk::AccelerationStructureBuildGeometryInfoKHR::default().ty(ty).flags(flags).mode(vk::BuildAccelerationStructureModeKHR::BUILD).geometries(&vk_geos);
+        | if b.flags & crate::nvn::query::AS_ALLOW_UPDATE != 0 {
+            vk::BuildAccelerationStructureFlagsKHR::ALLOW_UPDATE
+        } else {
+            vk::BuildAccelerationStructureFlagsKHR::empty()
+        };
+    let mut info = vk::AccelerationStructureBuildGeometryInfoKHR::default()
+        .ty(ty)
+        .flags(flags)
+        .mode(vk::BuildAccelerationStructureModeKHR::BUILD)
+        .geometries(&vk_geos);
     let mut sizes = vk::AccelerationStructureBuildSizesInfoKHR::default();
-    unsafe { g.d.accel.get_acceleration_structure_build_sizes(vk::AccelerationStructureBuildTypeKHR::DEVICE, &info, &prims, &mut sizes) };
-    let buf = g.buffer(sizes.acceleration_structure_size, vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, MemoryLocation::GpuOnly, "rt structure")?;
-    let ci = vk::AccelerationStructureCreateInfoKHR::default().buffer(buf.buf).size(sizes.acceleration_structure_size).ty(ty);
-    let handle = unsafe { g.d.accel.create_acceleration_structure(&ci, None) }.map_err(|e| format!("vkCreateAccelerationStructureKHR: {e}"))?;
-    let scratch = g.buffer(sizes.build_scratch_size + 256, vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS, MemoryLocation::GpuOnly, "rt scratch")?;
-    info = info.dst_acceleration_structure(handle).scratch_data(vk::DeviceOrHostAddressKHR { device_address: (scratch.addr + 255) & !255 });
-    let ranges: Vec<vk::AccelerationStructureBuildRangeInfoKHR> = prims.iter().map(|&p| vk::AccelerationStructureBuildRangeInfoKHR::default().primitive_count(p)).collect();
+    unsafe {
+        g.d.accel.get_acceleration_structure_build_sizes(
+            vk::AccelerationStructureBuildTypeKHR::DEVICE,
+            &info,
+            &prims,
+            &mut sizes,
+        )
+    };
+    let buf = g.buffer(
+        sizes.acceleration_structure_size,
+        vk::BufferUsageFlags::ACCELERATION_STRUCTURE_STORAGE_KHR
+            | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        MemoryLocation::GpuOnly,
+        "rt structure",
+    )?;
+    let ci = vk::AccelerationStructureCreateInfoKHR::default()
+        .buffer(buf.buf)
+        .size(sizes.acceleration_structure_size)
+        .ty(ty);
+    let handle = unsafe { g.d.accel.create_acceleration_structure(&ci, None) }
+        .map_err(|e| format!("vkCreateAccelerationStructureKHR: {e}"))?;
+    let scratch = g.buffer(
+        sizes.build_scratch_size + 256,
+        vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::SHADER_DEVICE_ADDRESS,
+        MemoryLocation::GpuOnly,
+        "rt scratch",
+    )?;
+    info = info
+        .dst_acceleration_structure(handle)
+        .scratch_data(vk::DeviceOrHostAddressKHR {
+            device_address: (scratch.addr + 255) & !255,
+        });
+    let ranges: Vec<vk::AccelerationStructureBuildRangeInfoKHR> = prims
+        .iter()
+        .map(|&p| vk::AccelerationStructureBuildRangeInfoKHR::default().primitive_count(p))
+        .collect();
     super::queue::full_barrier(g, sub.main);
-    unsafe { g.d.accel.cmd_build_acceleration_structures(sub.main, &[info], &[&ranges]) };
+    unsafe {
+        g.d.accel
+            .cmd_build_acceleration_structures(sub.main, &[info], &[&ranges])
+    };
     super::queue::full_barrier(g, sub.main);
-    let addr = unsafe { g.d.accel.get_acceleration_structure_device_address(&vk::AccelerationStructureDeviceAddressInfoKHR::default().acceleration_structure(handle)) };
+    let addr = unsafe {
+        g.d.accel.get_acceleration_structure_device_address(
+            &vk::AccelerationStructureDeviceAddressInfoKHR::default()
+                .acceleration_structure(handle),
+        )
+    };
     sub.transient.push(scratch);
     sub.transient.extend(keep);
-    let old = ACCELS.lock().unwrap().get_or_insert_with(HashMap::new).insert(b.destination, Accel { handle, buf, addr, top });
+    let old = ACCELS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(
+            b.destination,
+            Accel {
+                handle,
+                buf,
+                addr,
+                top,
+            },
+        );
     if let Some(o) = old {
         g.q.defer_after_use(Box::new(move |g: &Gpu| unsafe {
             g.d.accel.destroy_acceleration_structure(o.handle, None);

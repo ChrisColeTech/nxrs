@@ -64,14 +64,28 @@ fn hash64(p: &[u8], seed: u64) -> u64 {
     }
     let mut t = [0u8; 16];
     t[..ch.remainder().len()].copy_from_slice(ch.remainder());
-    let (a, b) = (u64::from_le_bytes(t[..8].try_into().unwrap()), u64::from_le_bytes(t[8..].try_into().unwrap()));
-    mix(h ^ a ^ 0x8ebc_6af0_9c88_c6e3, b ^ 0x5899_65cc_7537_4cc3 ^ p.len() as u64)
+    let (a, b) = (
+        u64::from_le_bytes(t[..8].try_into().unwrap()),
+        u64::from_le_bytes(t[8..].try_into().unwrap()),
+    );
+    mix(
+        h ^ a ^ 0x8ebc_6af0_9c88_c6e3,
+        b ^ 0x5899_65cc_7537_4cc3 ^ p.len() as u64,
+    )
 }
 
 /// The key of one level's ASTC blocks.
 pub fn key(blocks: &[u8], w: u32, h: u32, slices: u32, bw: u32, bh: u32, srgb: bool) -> Key {
-    let shape = w as u64 | (h as u64) << 20 | (slices as u64) << 40 | (bw as u64) << 52 | (bh as u64) << 56 | (srgb as u64) << 60;
-    Key(hash64(blocks, ENCODER ^ shape), hash64(blocks, !ENCODER ^ shape.wrapping_mul(0x2545_F491_4F6C_DD1D)))
+    let shape = w as u64
+        | (h as u64) << 20
+        | (slices as u64) << 40
+        | (bw as u64) << 52
+        | (bh as u64) << 56
+        | (srgb as u64) << 60;
+    Key(
+        hash64(blocks, ENCODER ^ shape),
+        hash64(blocks, !ENCODER ^ shape.wrapping_mul(0x2545_F491_4F6C_DD1D)),
+    )
 }
 
 fn enabled() -> bool {
@@ -81,8 +95,18 @@ fn enabled() -> bool {
 
 fn open(dir: &Path) -> std::io::Result<Pack> {
     std::fs::create_dir_all(dir)?;
-    let data = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join(PACK))?;
-    let mut idx = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(dir.join(INDEX))?;
+    let data = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(PACK))?;
+    let mut idx = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join(INDEX))?;
     let dn = data.metadata()?.len();
     let mut raw = Vec::new();
     idx.read_to_end(&mut raw)?;
@@ -100,9 +124,24 @@ fn open(dir: &Path) -> std::io::Result<Pack> {
     }
     // a torn last record is cut off
     idx.set_len((n * 32) as u64)?;
-    let max = std::env::var("NXGFX_ASTC_CACHE_MB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(8192) << 20;
-    crate::vklog!("ASTC -> BC7 cache {}: {} levels, {} MB", dir.display(), map.len(), end >> 20);
-    Ok(Pack { dir: dir.to_path_buf(), data, map, end, max })
+    let max = std::env::var("NXGFX_ASTC_CACHE_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(8192)
+        << 20;
+    crate::vklog!(
+        "ASTC -> BC7 cache {}: {} levels, {} MB",
+        dir.display(),
+        map.len(),
+        end >> 20
+    );
+    Ok(Pack {
+        dir: dir.to_path_buf(),
+        data,
+        map,
+        end,
+        max,
+    })
 }
 
 /// Where the pack lives (the game's cache folder). Before this, nothing is cached.
@@ -116,7 +155,10 @@ pub fn set_dir(dir: &Path) {
     }
     match open(dir) {
         Ok(x) => *p = Some(x),
-        Err(e) => crate::vklog!("ASTC -> BC7 cache {}: cannot open ({e}), encoding as it comes", dir.display()),
+        Err(e) => crate::vklog!(
+            "ASTC -> BC7 cache {}: cannot open ({e}), encoding as it comes",
+            dir.display()
+        ),
     }
 }
 
@@ -130,7 +172,12 @@ pub fn close() {
 pub fn get(k: Key, size: usize) -> Option<Vec<u8>> {
     let mut g = PACK_.lock().unwrap();
     let p = g.as_mut()?;
-    let Some(e) = p.map.get(&k.0).copied().filter(|e| e.hi == k.1 && e.size as usize == size) else {
+    let Some(e) = p
+        .map
+        .get(&k.0)
+        .copied()
+        .filter(|e| e.hi == k.1 && e.size as usize == size)
+    else {
         MISSES.fetch_add(1, Ordering::Relaxed);
         return None;
     };
@@ -163,10 +210,22 @@ fn write_one(k: Key, data: &[u8]) {
     rec[..8].copy_from_slice(&k.0.to_le_bytes());
     rec[8..16].copy_from_slice(&k.1.to_le_bytes());
     rec[16..24].copy_from_slice(&off.to_le_bytes());
-    rec[24..32].copy_from_slice(&((data.len() as u64) | (ENCODER & 0xffff_ffff) << 32).to_le_bytes());
-    let ok = OpenOptions::new().append(true).open(p.dir.join(INDEX)).and_then(|mut f| f.write_all(&rec)).is_ok();
+    rec[24..32]
+        .copy_from_slice(&((data.len() as u64) | (ENCODER & 0xffff_ffff) << 32).to_le_bytes());
+    let ok = OpenOptions::new()
+        .append(true)
+        .open(p.dir.join(INDEX))
+        .and_then(|mut f| f.write_all(&rec))
+        .is_ok();
     if ok {
-        p.map.insert(k.0, Ent { hi: k.1, off, size: data.len() as u32 });
+        p.map.insert(
+            k.0,
+            Ent {
+                hi: k.1,
+                off,
+                size: data.len() as u32,
+            },
+        );
         p.end = off + data.len() as u64;
         PUTS.fetch_add(1, Ordering::Relaxed);
     }
@@ -211,7 +270,11 @@ pub fn flush() {
 
 /// (hits, misses, levels written)
 pub fn stats() -> (u64, u64, u64) {
-    (HITS.load(Ordering::Relaxed), MISSES.load(Ordering::Relaxed), PUTS.load(Ordering::Relaxed))
+    (
+        HITS.load(Ordering::Relaxed),
+        MISSES.load(Ordering::Relaxed),
+        PUTS.load(Ordering::Relaxed),
+    )
 }
 
 #[cfg(test)]
@@ -225,7 +288,11 @@ mod tests {
         set_dir(&dir);
         let blocks: Vec<u8> = (0..4096u32).map(|i| (i * 7) as u8).collect();
         let k = key(&blocks, 256, 256, 1, 4, 4, false);
-        assert_ne!(k, key(&blocks, 256, 256, 1, 4, 4, true), "sRGB is part of the key");
+        assert_ne!(
+            k,
+            key(&blocks, 256, 256, 1, 4, 4, true),
+            "sRGB is part of the key"
+        );
         assert!(get(k, 65536).is_none());
         let bc7: Vec<u8> = (0..65536u32).map(|i| (i ^ (i >> 8)) as u8).collect();
         put(k, bc7.clone());
@@ -234,7 +301,11 @@ mod tests {
         assert!(get(k, 1024).is_none(), "a different size misses");
         close();
         set_dir(&dir);
-        assert_eq!(get(k, 65536).as_deref(), Some(&bc7[..]), "read back after a reopen");
+        assert_eq!(
+            get(k, 65536).as_deref(),
+            Some(&bc7[..]),
+            "read back after a reopen"
+        );
         close();
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -12,6 +12,9 @@ use ash::vk;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 
+#[path = "lost_bindings.rs"]
+pub(crate) mod bindings;
+
 /// checkpoints kept (with `all` the GPU ran more than 4,096 draws behind the replay in MKW races: the faulting one was
 /// gone, lane K2)
 const N: usize = 1 << 18;
@@ -26,6 +29,15 @@ static RING: Mutex<Vec<Ck>> = Mutex::new(Vec::new());
 static SEQ: AtomicU64 = AtomicU64::new(0);
 static LOST: AtomicBool = AtomicBool::new(false);
 
+thread_local! {
+    // The issue site samples its own recording thread, not a later checkpoint on another worker.
+    static LAST_RECORDED: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+pub(crate) fn last_recorded_checkpoint() -> u64 {
+    LAST_RECORDED.with(|last| last.get())
+}
+
 /// 0 off, 1 dispatches and indirect draws, 2 every draw too.
 pub fn level() -> u8 {
     static L: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
@@ -37,9 +49,15 @@ pub fn level() -> u8 {
 }
 
 /// A checkpoint before a command (`direct_draw`: a plain draw, checkpointed only at level 2); `what` describes it.
-pub fn checkpoint(g: &Gpu, cb: vk::CommandBuffer, direct_draw: bool, what: impl FnOnce() -> String) {
+/// Returns its explicit token (0 when unavailable), so setup's intervening checkpoints cannot steal association.
+pub fn checkpoint(
+    g: &Gpu,
+    cb: vk::CommandBuffer,
+    direct_draw: bool,
+    what: impl FnOnce() -> String,
+) -> u64 {
     if !g.d.caps.checkpoints || level() < if direct_draw { 2 } else { 1 } {
-        return;
+        return 0;
     }
     let s = SEQ.fetch_add(1, Ordering::Relaxed) + 1;
     {
@@ -47,9 +65,17 @@ pub fn checkpoint(g: &Gpu, cb: vk::CommandBuffer, direct_draw: bool, what: impl 
         if r.is_empty() {
             r.resize(N, Ck::default());
         }
-        r[s as usize % N] = Ck { seq: s, what: what() };
+        r[s as usize % N] = Ck {
+            seq: s,
+            what: what(),
+        };
     }
-    unsafe { g.d.ck.cmd_set_checkpoint(cb, s as usize as *const core::ffi::c_void) };
+    unsafe {
+        g.d.ck
+            .cmd_set_checkpoint(cb, s as usize as *const core::ffi::c_void)
+    };
+    LAST_RECORDED.with(|last| last.set(s));
+    s
 }
 
 fn text(s: u64) -> String {
@@ -80,7 +106,10 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
             std::thread::sleep(std::time::Duration::from_secs(60));
         }
     }
-    crate::log::red(&format!("the GPU stopped responding (device lost, first seen at {at}); what it was doing:"));
+    crate::log::red(&format!(
+        "the GPU stopped responding (device lost, first seen at {at}); what it was doing:"
+    ));
+    let mut binding_markers = Vec::new();
     if g.d.caps.checkpoints {
         let n = unsafe { g.d.ck.get_queue_checkpoint_data_len(g.d.queue) };
         let mut cd = vec![vk::CheckpointDataNV::default(); n.min(64)];
@@ -90,6 +119,10 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
         let (mut lo, mut hi) = (0u64, 0u64);
         for c in &cd {
             let s = c.p_checkpoint_marker as usize as u64;
+            // Preserve every explicit marker, including bottom > top from pre/main submission order.
+            if s != 0 && !binding_markers.contains(&s) {
+                binding_markers.push(s);
+            }
             let at = if c.stage == vk::PipelineStageFlags::TOP_OF_PIPE {
                 "started"
             } else if c.stage == vk::PipelineStageFlags::BOTTOM_OF_PIPE {
@@ -97,7 +130,11 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
             } else {
                 "reached"
             };
-            crate::log::red(&format!("  the GPU {at} {} (stage {:#x})", text(s), c.stage.as_raw()));
+            crate::log::red(&format!(
+                "  the GPU {at} {} (stage {:#x})",
+                text(s),
+                c.stage.as_raw()
+            ));
             if c.stage == vk::PipelineStageFlags::BOTTOM_OF_PIPE {
                 lo = lo.max(s);
             } else {
@@ -112,7 +149,10 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
         if top != 0 {
             let r = RING.lock().unwrap();
             for s in (top.saturating_sub(N as u64 - 1)..=top).rev() {
-                if let Some(c) = r.get(s as usize % N).filter(|c| c.seq == s && c.what.starts_with("a pass")) {
+                if let Some(c) = r
+                    .get(s as usize % N)
+                    .filter(|c| c.seq == s && c.what.starts_with("a pass"))
+                {
                     crate::log::red(&format!("  in the pass #{s} {}", c.what));
                     break;
                 }
@@ -139,7 +179,10 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
     {
         let r = GONE.lock().unwrap();
         if !r.is_empty() {
-            crate::log::red(&format!("  the last {} images and buffers handed to be destroyed (newest last):", r.len()));
+            crate::log::red(&format!(
+                "  the last {} images and buffers handed to be destroyed (newest last):",
+                r.len()
+            ));
             for (t, w) in r.iter() {
                 crate::log::red(&format!("    {t:.2} s: {w}"));
             }
@@ -152,22 +195,59 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
             c.address_info_count = c.address_info_count.min(8);
             c.vendor_info_count = c.vendor_info_count.min(8);
             c.vendor_binary_size = 0;
-            let mut ai = vec![vk::DeviceFaultAddressInfoEXT::default(); c.address_info_count as usize];
-            let mut vi = vec![vk::DeviceFaultVendorInfoEXT::default(); c.vendor_info_count as usize];
+            let mut ai =
+                vec![vk::DeviceFaultAddressInfoEXT::default(); c.address_info_count as usize];
+            let mut vi =
+                vec![vk::DeviceFaultVendorInfoEXT::default(); c.vendor_info_count as usize];
             let mut fi = vk::DeviceFaultInfoEXT::default();
-            fi.p_address_infos = if ai.is_empty() { core::ptr::null_mut() } else { ai.as_mut_ptr() };
-            fi.p_vendor_infos = if vi.is_empty() { core::ptr::null_mut() } else { vi.as_mut_ptr() };
+            fi.p_address_infos = if ai.is_empty() {
+                core::ptr::null_mut()
+            } else {
+                ai.as_mut_ptr()
+            };
+            fi.p_vendor_infos = if vi.is_empty() {
+                core::ptr::null_mut()
+            } else {
+                vi.as_mut_ptr()
+            };
             let r = unsafe { f(g.dev().handle(), &mut c, &mut fi) };
             if r == vk::Result::SUCCESS || r == vk::Result::INCOMPLETE {
-                let d = fi.description_as_c_str().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                crate::log::red(&format!("  the driver's fault report: {}", if d.is_empty() { "(no description)" } else { &d }));
-                const TY: [&str; 7] = ["none", "invalid read", "invalid write", "invalid execute", "unknown instruction pointer", "invalid instruction pointer", "instruction pointer of the fault"];
+                let d = fi
+                    .description_as_c_str()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
+                crate::log::red(&format!(
+                    "  the driver's fault report: {}",
+                    if d.is_empty() { "(no description)" } else { &d }
+                ));
+                const TY: [&str; 7] = [
+                    "none",
+                    "invalid read",
+                    "invalid write",
+                    "invalid execute",
+                    "unknown instruction pointer",
+                    "invalid instruction pointer",
+                    "instruction pointer of the fault",
+                ];
                 for a in ai.iter().take(c.address_info_count as usize) {
-                    let t = TY.get(a.address_type.as_raw() as usize).copied().unwrap_or("?");
-                    crate::log::red(&format!("  fault address: {t} at {:#x} (within {:#x})", a.reported_address, a.address_precision));
-                    if a.address_type == vk::DeviceFaultAddressTypeEXT::READ_INVALID || a.address_type == vk::DeviceFaultAddressTypeEXT::WRITE_INVALID {
+                    let t = TY
+                        .get(a.address_type.as_raw() as usize)
+                        .copied()
+                        .unwrap_or("?");
+                    crate::log::red(&format!(
+                        "  fault address: {t} at {:#x} (within {:#x})",
+                        a.reported_address, a.address_precision
+                    ));
+                    if a.address_type == vk::DeviceFaultAddressTypeEXT::READ_INVALID
+                        || a.address_type == vk::DeviceFaultAddressTypeEXT::WRITE_INVALID
+                    {
+                        bindings::report(&binding_markers, a.reported_address);
                         let us = uses_of(a.reported_address);
-                        crate::log::red(&format!("    {} recorded device range(s) of the replay hold it{}", us.len(), if us.is_empty() { "" } else { " (newest last):" }));
+                        crate::log::red(&format!(
+                            "    {} recorded device range(s) of the replay hold it{}",
+                            us.len(),
+                            if us.is_empty() { "" } else { " (newest last):" }
+                        ));
                         for x in us {
                             crate::log::red(&format!("      {x}"));
                         }
@@ -183,8 +263,14 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
                     }
                 }
                 for v in vi.iter().take(c.vendor_info_count as usize) {
-                    let d = v.description_as_c_str().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
-                    crate::log::red(&format!("  vendor fault: {d} (code {:#x}, data {:#x})", v.vendor_fault_code, v.vendor_fault_data));
+                    let d = v
+                        .description_as_c_str()
+                        .map(|s| s.to_string_lossy().into_owned())
+                        .unwrap_or_default();
+                    crate::log::red(&format!(
+                        "  vendor fault: {d} (code {:#x}, data {:#x})",
+                        v.vendor_fault_code, v.vendor_fault_data
+                    ));
                 }
             }
         } else {
@@ -199,7 +285,8 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
 }
 
 /// The last resources handed to be destroyed (an "invalid write" fault names freed memory: is it one of these?).
-static GONE: std::sync::Mutex<std::collections::VecDeque<(f64, String)>> = std::sync::Mutex::new(std::collections::VecDeque::new());
+static GONE: std::sync::Mutex<std::collections::VecDeque<(f64, String)>> =
+    std::sync::Mutex::new(std::collections::VecDeque::new());
 
 /// Notes a resource handed to be destroyed once the GPU is past it (kept: the last 48).
 pub fn note_gone(what: impl FnOnce() -> String) {
@@ -226,6 +313,7 @@ pub fn addr_report_wanted() -> bool {
 
 #[derive(Clone, Copy)]
 struct Bind {
+    id: u64,
     size: u64,
     ty: vk::ObjectType,
     handle: u64,
@@ -233,6 +321,7 @@ struct Bind {
 }
 #[derive(Default)]
 struct Binds {
+    next_id: u64,
     live: std::collections::BTreeMap<u64, Bind>,
     /// the last binding unbound at each base address (every one since the start: a fault can name memory freed long ago)
     gone: std::collections::BTreeMap<u64, (Bind, f64)>,
@@ -256,33 +345,77 @@ pub unsafe fn on_binding(data: *const vk::DebugUtilsMessengerCallbackDataEXT<'_>
         p = (*p).p_next;
     }
     let Some(b) = b else { return };
-    let (ty, handle) = if d.object_count > 0 && !d.p_objects.is_null() { ((*d.p_objects).object_type, (*d.p_objects).object_handle) } else { (vk::ObjectType::UNKNOWN, 0) };
+    let (ty, handle) = if d.object_count > 0 && !d.p_objects.is_null() {
+        ((*d.p_objects).object_type, (*d.p_objects).object_handle)
+    } else {
+        (vk::ObjectType::UNKNOWN, 0)
+    };
     let at = crate::log::elapsed();
     let mut g = BINDS.lock().unwrap();
     let s = g.get_or_insert_with(Binds::default);
     if b.binding_type == vk::DeviceAddressBindingTypeEXT::BIND {
-        s.live.insert(b.base_address, Bind { size: b.size, ty, handle, at });
+        s.next_id += 1;
+        s.live.insert(
+            b.base_address,
+            Bind {
+                id: s.next_id,
+                size: b.size,
+                ty,
+                handle,
+                at,
+            },
+        );
     } else if let Some(x) = s.live.remove(&b.base_address) {
         s.gone.insert(b.base_address, (x, at));
     }
 }
 
+/// Observed driver binding generation for this buffer/address, not an allocation inferred from recycled VA.
+/// None means unobserved (including disabled/unsupported address reports), not proof of a freed resource.
+pub(crate) fn binding_id(handle: u64, address: u64) -> Option<u64> {
+    let g = BINDS.lock().unwrap();
+    g.as_ref()?
+        .live
+        .range(..=address)
+        .rev()
+        .find_map(|(&base, b)| {
+            (b.ty == vk::ObjectType::BUFFER && b.handle == handle && address - base < b.size)
+                .then_some(b.id)
+        })
+}
+
 /// Where the report saw object `handle` bound (address, size), for the loss report's pass line.
 pub fn bound_at(handle: u64) -> Option<(u64, u64)> {
     let g = BINDS.lock().unwrap();
-    g.as_ref()?.live.iter().find(|(_, b)| b.handle == handle).map(|(a, b)| (*a, b.size))
+    g.as_ref()?
+        .live
+        .iter()
+        .find(|(_, b)| b.handle == handle)
+        .map(|(a, b)| (*a, b.size))
 }
 
 /// The live binding nearest below `a` (where its end is, against the faulting address).
 fn nearest_below(a: u64) -> Option<String> {
     let g = BINDS.lock().unwrap();
     let (&base, x) = g.as_ref()?.live.range(..=a).next_back()?;
-    Some(format!("{:?} {:#x} at {base:#x} +{:#x} (ends {:#x}, {:#x} before the fault)", x.ty, x.handle, x.size, base + x.size, a.saturating_sub(base + x.size)))
+    Some(format!(
+        "{:?} {:#x} at {base:#x} +{:#x} (ends {:#x}, {:#x} before the fault)",
+        x.ty,
+        x.handle,
+        x.size,
+        base + x.size,
+        a.saturating_sub(base + x.size)
+    ))
 }
 
 /// Bindings the report has seen: (live, unbound kept).
 pub fn binding_counts() -> (usize, usize) {
-    BINDS.lock().unwrap().as_ref().map(|b| (b.live.len(), b.gone.len())).unwrap_or((0, 0))
+    BINDS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|b| (b.live.len(), b.gone.len()))
+        .unwrap_or((0, 0))
 }
 
 /// The names `Gpu::buffer` gives its buffers, by handle, while the address report is on: the report names the kind
@@ -301,10 +434,20 @@ pub fn name_object(handle: u64, name: &str) {
 }
 /// The name a buffer was made with (address report on), if known.
 pub fn buf_name(handle: u64) -> Option<String> {
-    NAMES.lock().unwrap().as_ref().and_then(|m| m.get(&handle).cloned())
+    NAMES
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&handle).cloned())
 }
 fn name_of(handle: u64) -> String {
-    NAMES.lock().unwrap().as_ref().and_then(|m| m.get(&handle)).map(|n| format!(" \"{n}\"")).unwrap_or_default()
+    NAMES
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&handle))
+        .map(|n| format!(" \"{n}\""))
+        .unwrap_or_default()
 }
 
 /// What address `a` was in: the live binding holding it, else the last binding there that was unbound; then every other
@@ -317,16 +460,51 @@ fn addr_owner(a: u64) -> Option<String> {
         .gone
         .range(..=a)
         .filter(|(base, (x, _))| a < **base + x.size)
-        .map(|(base, (x, t))| (*t, format!("{:?} {:#x}{} (bound at {:.2} s: {:#x} +{:#x}), UNBOUND at {:.2} s", x.ty, x.handle, name_of(x.handle), x.at, base, x.size, t)))
+        .map(|(base, (x, t))| {
+            (
+                *t,
+                format!(
+                    "{:?} {:#x}{} (bound at {:.2} s: {:#x} +{:#x}), UNBOUND at {:.2} s",
+                    x.ty,
+                    x.handle,
+                    name_of(x.handle),
+                    x.at,
+                    base,
+                    x.size,
+                    t
+                ),
+            )
+        })
         .collect();
     past.sort_by(|x, y| x.0.total_cmp(&y.0));
     let earlier = |skip_last: bool| {
         let n = past.len() - skip_last as usize;
-        past[n.saturating_sub(8)..n].iter().map(|(_, d)| format!("
-      earlier: {d}")).collect::<String>()
+        past[n.saturating_sub(8)..n]
+            .iter()
+            .map(|(_, d)| {
+                format!(
+                    "
+      earlier: {d}"
+                )
+            })
+            .collect::<String>()
     };
-    if let Some((&base, x)) = s.live.range(..=a).next_back().filter(|(&base, x)| a < base + x.size) {
-        return Some(format!("inside {:?} {:#x}{} (bound at {:.2} s: {:#x} +{:#x}), still bound{}", x.ty, x.handle, name_of(x.handle), x.at, base, x.size, earlier(false)));
+    if let Some((&base, x)) = s
+        .live
+        .range(..=a)
+        .next_back()
+        .filter(|(&base, x)| a < base + x.size)
+    {
+        return Some(format!(
+            "inside {:?} {:#x}{} (bound at {:.2} s: {:#x} +{:#x}), still bound{}",
+            x.ty,
+            x.handle,
+            name_of(x.handle),
+            x.at,
+            base,
+            x.size,
+            earlier(false)
+        ));
     }
     let last = past.last()?.1.clone();
     Some(format!("inside {last}{}", earlier(true)))
@@ -363,11 +541,22 @@ pub fn note_set(kind: u8, stage: u8, serial: u64, chunk: usize, off: u64) {
     if u.is_empty() {
         u.resize(SN, (0, 0, 0, 0, 0, 0));
     }
-    u[i] = (SEQ.load(Ordering::Relaxed), kind, stage, serial, chunk as u32, off);
+    u[i] = (
+        SEQ.load(Ordering::Relaxed),
+        kind,
+        stage,
+        serial,
+        chunk as u32,
+        off,
+    );
 }
 fn sets_report(lo: u64, hi: u64) {
     let u = SETS.lock().unwrap();
-    let mut ev: Vec<(u64, u8, u8, u64, u32, u64)> = u.iter().filter(|e| e.1 != 0 && e.0 >= lo && e.0 <= hi).copied().collect();
+    let mut ev: Vec<(u64, u8, u8, u64, u32, u64)> = u
+        .iter()
+        .filter(|e| e.1 != 0 && e.0 >= lo && e.0 <= hi)
+        .copied()
+        .collect();
     ev.sort_by_key(|e| e.0);
     for e in ev.iter().rev().take(16).rev() {
         let what = match e.1 {
@@ -375,9 +564,16 @@ fn sets_report(lo: u64, hi: u64) {
             b'H' => "set reused",
             _ => "chunk bound",
         };
-        let mut line = format!("    after #{}: {what}: stage {} submission {} chunk {} offset {:#x}", e.0, e.2, e.3, e.4, e.5);
+        let mut line = format!(
+            "    after #{}: {what}: stage {} submission {} chunk {} offset {:#x}",
+            e.0, e.2, e.3, e.4, e.5
+        );
         if e.1 == b'H' {
-            let w = u.iter().filter(|x| x.1 == b'W' && x.3 == e.3 && x.4 == e.4 && x.5 == e.5 && x.0 <= e.0).map(|x| x.0).max();
+            let w = u
+                .iter()
+                .filter(|x| x.1 == b'W' && x.3 == e.3 && x.4 == e.4 && x.5 == e.5 && x.0 <= e.0)
+                .map(|x| x.0)
+                .max();
             line += &match w {
                 Some(s) => format!(" (written after #{s})"),
                 None => " (NO write of it kept)".to_string(),
@@ -389,8 +585,15 @@ fn sets_report(lo: u64, hi: u64) {
 
 fn uses_of(a: u64) -> Vec<String> {
     let u = USES.lock().unwrap();
-    let mut hits: Vec<(u64, u64, u64, &'static str)> = u.iter().filter(|e| e.2 != 0 && a >= e.1 && a < e.1 + e.2).copied().collect();
+    let mut hits: Vec<(u64, u64, u64, &'static str)> = u
+        .iter()
+        .filter(|e| e.2 != 0 && a >= e.1 && a < e.1 + e.2)
+        .copied()
+        .collect();
     hits.sort_by_key(|e| e.0);
     let n = hits.len();
-    hits[n.saturating_sub(8)..].iter().map(|e| format!("{} {:#x} +{:#x} after {}", e.3, e.1, e.2, text(e.0))).collect()
+    hits[n.saturating_sub(8)..]
+        .iter()
+        .map(|e| format!("{} {:#x} +{:#x} after {}", e.3, e.1, e.2, text(e.0)))
+        .collect()
 }

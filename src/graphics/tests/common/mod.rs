@@ -2,7 +2,6 @@
 //! the OS write watch, as the runtime's guest memory has), programs made from the test shaders, and image checks.
 #![allow(dead_code, clippy::missing_safety_doc)]
 
-
 use nxgfx::nvn::types::*;
 use nxgfx::nvn::{cmd::*, device::*, pool::*, prog::*, queue::*, state::*, sync::*, tex::*};
 use std::sync::{Mutex, MutexGuard, Once};
@@ -35,14 +34,26 @@ impl GuestMem {
         let size = (size + 0xffff) & !0xffff;
         let a = nxrt::mem::reserve_anywhere(size as u64, true).expect("reserve");
         assert!(nxrt::mem::commit(a, size as u64), "commit");
-        GuestMem { ptr: a as *mut u8, size }
+        GuestMem {
+            ptr: a as *mut u8,
+            size,
+        }
     }
     #[cfg(windows)]
     pub fn new(size: usize) -> GuestMem {
-        use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
+        use windows_sys::Win32::System::Memory::{
+            VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
+        };
         const MEM_WRITE_WATCH: u32 = 0x200000;
         let size = (size + 0xffff) & !0xffff;
-        let p = unsafe { VirtualAlloc(core::ptr::null(), size, MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH, PAGE_READWRITE) } as *mut u8;
+        let p = unsafe {
+            VirtualAlloc(
+                core::ptr::null(),
+                size,
+                MEM_RESERVE | MEM_COMMIT | MEM_WRITE_WATCH,
+                PAGE_READWRITE,
+            )
+        } as *mut u8;
         assert!(!p.is_null(), "VirtualAlloc");
         GuestMem { ptr: p, size }
     }
@@ -94,7 +105,9 @@ impl Pool {
     pub fn put<T: Copy>(&mut self, data: &[T], align: usize) -> u64 {
         let n = core::mem::size_of_val(data);
         let (off, a) = self.alloc(n, align);
-        unsafe { core::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, self.mem.ptr.add(off), n) };
+        unsafe {
+            core::ptr::copy_nonoverlapping(data.as_ptr() as *const u8, self.mem.ptr.add(off), n)
+        };
         a
     }
     pub fn p(&mut self) -> *mut NVNmemoryPool {
@@ -161,17 +174,41 @@ impl Nvn {
         }
         let data = Pool::new(d, 16 << 20, CPU_POOL);
         let gpu = Pool::new(d, 32 << 20, GPU_POOL);
-        let code = Pool::new(d, 4 << 20, mem_flags::CPU_UNCACHED | mem_flags::GPU_CACHED | mem_flags::SHADER_CODE);
+        let code = Pool::new(
+            d,
+            4 << 20,
+            mem_flags::CPU_UNCACHED | mem_flags::GPU_CACHED | mem_flags::SHADER_CODE,
+        );
         let mut desc = Pool::new(d, 1 << 20, CPU_POOL);
         let mut tex_pool = NVNtexturePool::boxed();
         let mut samp_pool = NVNsamplerPool::boxed();
         unsafe {
-            assert_eq!(nvnTexturePoolInitialize(&mut *tex_pool, desc.p(), 0, 256), 1);
-            assert_eq!(nvnSamplerPoolInitialize(&mut *samp_pool, desc.p(), 256 * 32, 64), 1);
+            assert_eq!(
+                nvnTexturePoolInitialize(&mut *tex_pool, desc.p(), 0, 256),
+                1
+            );
+            assert_eq!(
+                nvnSamplerPoolInitialize(&mut *samp_pool, desc.p(), 256 * 32, 64),
+                1
+            );
         }
         let mut sync = NVNsync::boxed();
         unsafe { nvnSyncInitialize(&mut *sync, d) };
-        Nvn { dev, queue, qmem, cmd, cmd_pool, ctl, data, gpu, code, tex_pool, samp_pool, desc, sync }
+        Nvn {
+            dev,
+            queue,
+            qmem,
+            cmd,
+            cmd_pool,
+            ctl,
+            data,
+            gpu,
+            code,
+            tex_pool,
+            samp_pool,
+            desc,
+            sync,
+        }
     }
 
     pub fn d(&mut self) -> *mut NVNdevice {
@@ -196,14 +233,24 @@ impl Nvn {
             nvnQueueFenceSync(&mut *self.queue, &mut *self.sync, 0, 0);
             nvnQueueFlush(&mut *self.queue);
             let r = nvnSyncWait(&*self.sync, 10_000_000_000);
-            assert!(r == sync_wait::ALREADY_SIGNALED || r == sync_wait::CONDITION_SATISFIED, "sync wait {r}");
+            assert!(
+                r == sync_wait::ALREADY_SIGNALED || r == sync_wait::CONDITION_SATISFIED,
+                "sync wait {r}"
+            );
         }
         // the next recording starts at the start of the command memory again, as a game's ring does
         unsafe { nvnCommandBufferAddCommandMemory(self.c(), self.cmd_pool.p(), 0, 1 << 20) };
     }
 
     /// A texture in `pool` (GPU-only pool when None).
-    pub fn texture(&mut self, w: u32, h: u32, format: i32, flags: u32, cpu_pool: bool) -> Box<NVNtexture> {
+    pub fn texture(
+        &mut self,
+        w: u32,
+        h: u32,
+        format: i32,
+        flags: u32,
+        cpu_pool: bool,
+    ) -> Box<NVNtexture> {
         let d = self.d();
         let mut b = NVNtextureBuilder::boxed();
         let mut t = NVNtexture::boxed();
@@ -215,7 +262,11 @@ impl Nvn {
             nvnTextureBuilderSetFlags(&mut *b, flags as i32);
             let size = nvnTextureBuilderGetStorageSize(&*b);
             let align = nvnTextureBuilderGetStorageAlignment(&*b);
-            let pool = if cpu_pool { &mut self.data } else { &mut self.gpu };
+            let pool = if cpu_pool {
+                &mut self.data
+            } else {
+                &mut self.gpu
+            };
             let (off, _) = pool.alloc(size, align);
             nvnTextureBuilderSetStorage(&mut *b, pool.p(), off as isize);
             assert_eq!(nvnTextureInitialize(&mut *t, &*b), 1);
@@ -226,14 +277,24 @@ impl Nvn {
     /// Reads a 2D RGBA8 texture back (nvnTextureReadTexels).
     pub fn read_rgba8(&mut self, t: &NVNtexture, w: u32, h: u32) -> Vec<u8> {
         let mut v = vec![0u8; (w * h * 4) as usize];
-        let r = NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: w as i32, height: h as i32, depth: 1 };
+        let r = NVNcopyRegion {
+            xoffset: 0,
+            yoffset: 0,
+            zoffset: 0,
+            width: w as i32,
+            height: h as i32,
+            depth: 1,
+        };
         unsafe { nvnTextureReadTexels(t, core::ptr::null(), &r, v.as_mut_ptr()) };
         v
     }
 
     /// The host ID of this device's texture pool entry 0 (texture IDs are per pool; the replay adds the pool's base).
     pub fn tex_base(&self) -> i32 {
-        nxgfx::nvn::pool::dpool_base_of(&*self.tex_pool as *const NVNtexturePool as *const nxgfx::nvn::obj::dpool_t, true)
+        nxgfx::nvn::pool::dpool_base_of(
+            &*self.tex_pool as *const NVNtexturePool as *const nxgfx::nvn::obj::dpool_t,
+            true,
+        )
     }
     pub fn register_texture(&mut self, id: i32, t: &NVNtexture) {
         unsafe { nvnTexturePoolRegisterTexture(&*self.tex_pool, id, t, core::ptr::null()) };
@@ -246,7 +307,12 @@ impl Nvn {
             nvnSamplerBuilderSetDefaults(&mut *b);
             let f = if nearest { 0 } else { 1 };
             nvnSamplerBuilderSetMinMagFilter(&mut *b, f, f);
-            nvnSamplerBuilderSetWrapMode(&mut *b, wrap::CLAMP_TO_EDGE as i32, wrap::CLAMP_TO_EDGE as i32, wrap::CLAMP_TO_EDGE as i32);
+            nvnSamplerBuilderSetWrapMode(
+                &mut *b,
+                wrap::CLAMP_TO_EDGE as i32,
+                wrap::CLAMP_TO_EDGE as i32,
+                wrap::CLAMP_TO_EDGE as i32,
+            );
             nvnSamplerInitialize(&mut *s, &*b);
             nvnSamplerPoolRegisterSampler(&*self.samp_pool, id, &*s);
         }
@@ -266,16 +332,25 @@ impl Nvn {
             ctl[0x20..0x24].copy_from_slice(&0x880u32.to_le_bytes());
             ctl[0x704..0x708].copy_from_slice(&(code.len() as u32).to_le_bytes());
             let ctl: &'static [u8] = Box::leak(ctl.into_boxed_slice());
-            let sd = NVNshaderData { data: addr, control: ctl.as_ptr() };
+            let sd = NVNshaderData {
+                data: addr,
+                control: ctl.as_ptr(),
+            };
             let key = unsafe { shader_key(&sd, true) }.expect("shader key");
-            let words: Vec<u32> = spv.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            let words: Vec<u32> = spv
+                .chunks_exact(4)
+                .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                .collect();
             g.shaders.insert(key, words, Some(json.to_string()));
             sds.push(sd);
         }
         let mut p = NVNprogram::boxed();
         unsafe {
             nvnProgramInitialize(&mut *p, self.d());
-            assert_eq!(nvnProgramSetShaders(&mut *p, sds.len() as i32, sds.as_ptr()), 1);
+            assert_eq!(
+                nvnProgramSetShaders(&mut *p, sds.len() as i32, sds.as_ptr()),
+                1
+            );
         }
         p
     }
@@ -285,7 +360,16 @@ impl Nvn {
         let c = self.c();
         let cts = [color as *const NVNtexture];
         unsafe {
-            nvnCommandBufferSetRenderTargets(c, 1, cts.as_ptr(), core::ptr::null(), depth.map(|d| d as *const NVNtexture).unwrap_or(core::ptr::null()), core::ptr::null());
+            nvnCommandBufferSetRenderTargets(
+                c,
+                1,
+                cts.as_ptr(),
+                core::ptr::null(),
+                depth
+                    .map(|d| d as *const NVNtexture)
+                    .unwrap_or(core::ptr::null()),
+                core::ptr::null(),
+            );
             nvnCommandBufferSetViewport(c, 0, 0, w as i32, h as i32);
             nvnCommandBufferSetScissor(c, 0, 0, w as i32, h as i32);
             let mut cs = NVNcolorState::boxed();
@@ -327,7 +411,11 @@ impl Nvn {
         unsafe {
             nvnVertexStreamStateSetDefaults(&mut *s);
             nvnVertexStreamStateSetStride(&mut *s, stride as isize);
-            nvnCommandBufferBindVertexAttribState(c, flat.len() as i32, flat.as_ptr() as *const NVNvertexAttribState);
+            nvnCommandBufferBindVertexAttribState(
+                c,
+                flat.len() as i32,
+                flat.as_ptr() as *const NVNvertexAttribState,
+            );
             nvnCommandBufferBindVertexStreamState(c, 1, &*s);
         }
     }
@@ -350,7 +438,9 @@ impl Drop for Nvn {
 }
 
 pub fn spv(name: &str) -> Vec<u8> {
-    let p = std::path::Path::new(env!("OUT_DIR")).join("test_spv").join(format!("{name}.spv"));
+    let p = std::path::Path::new(env!("OUT_DIR"))
+        .join("test_spv")
+        .join(format!("{name}.spv"));
     std::fs::read(&p).unwrap_or_else(|e| panic!("{}: {e}", p.display()))
 }
 
@@ -367,7 +457,11 @@ pub fn tri_cover(v: [[f32; 2]; 3], w: u32, h: u32, flip: bool) -> Vec<Option<boo
         .iter()
         .map(|p| {
             let x = (p[0] as f64 + 1.0) / 2.0 * w as f64;
-            let y = if flip { (1.0 - p[1] as f64) / 2.0 * h as f64 } else { (p[1] as f64 + 1.0) / 2.0 * h as f64 };
+            let y = if flip {
+                (1.0 - p[1] as f64) / 2.0 * h as f64
+            } else {
+                (p[1] as f64 + 1.0) / 2.0 * h as f64
+            };
             (x, y)
         })
         .collect();
@@ -380,7 +474,11 @@ pub fn tri_cover(v: [[f32; 2]; 3], w: u32, h: u32, flip: bool) -> Vec<Option<boo
     for y in 0..h {
         for x in 0..w {
             let p = (x as f64 + 0.5, y as f64 + 0.5);
-            let e = [edge(win[0], win[1], p), edge(win[1], win[2], p), edge(win[2], win[0], p)];
+            let e = [
+                edge(win[0], win[1], p),
+                edge(win[1], win[2], p),
+                edge(win[2], win[0], p),
+            ];
             let s = if area > 0.0 { 1.0 } else { -1.0 };
             let d: Vec<f64> = e.iter().map(|x| x * s).collect();
             if d.iter().all(|&x| x > 1.0) {
@@ -410,5 +508,7 @@ pub fn diff(got: &[u8], want: &[Option<[u8; 4]>], tol: u8) -> Vec<(usize, [u8; 4
 }
 
 pub fn json(stage: &str, bindings: &str) -> String {
-    format!(r#"{{"layout": "nxshaders 1", "stage": "{stage}", "status": "ok", "bindings": [{bindings}], "c1": ""}}"#)
+    format!(
+        r#"{{"layout": "nxshaders 1", "stage": "{stage}", "status": "ok", "bindings": [{bindings}], "c1": ""}}"#
+    )
 }

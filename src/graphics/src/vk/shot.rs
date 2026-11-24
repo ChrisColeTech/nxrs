@@ -26,13 +26,35 @@ struct Cfg {
 fn cfg() -> &'static Cfg {
     static C: OnceLock<Cfg> = OnceLock::new();
     C.get_or_init(|| {
-        let at = std::env::var("NXGFX_SHOT").ok().map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect()).unwrap_or_default();
-        let every = std::env::var("NXGFX_SHOT_EVERY").ok().and_then(|v| v.parse().ok()).unwrap_or(0);
+        let at = std::env::var("NXGFX_SHOT")
+            .ok()
+            .map(|v| v.split(',').filter_map(|s| s.trim().parse().ok()).collect())
+            .unwrap_or_default();
+        let every = std::env::var("NXGFX_SHOT_EVERY")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0);
         let file = std::env::var("NXGFX_SHOT_FILE").ok().map(PathBuf::from);
-        let dir = std::env::var("NXGFX_SHOT_DIR").map(PathBuf::from).unwrap_or_else(|_| PathBuf::from("captures"));
-        let c = Cfg { at, every, file, dir };
+        let dir = std::env::var("NXGFX_SHOT_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| PathBuf::from("captures"));
+        let c = Cfg {
+            at,
+            every,
+            file,
+            dir,
+        };
         if !c.at.is_empty() || c.every > 0 || c.file.is_some() {
-            crate::vklog!("screenshots: {} presents named, every {}, control file {}, to {}", c.at.len(), c.every, c.file.as_ref().map(|p| p.display().to_string()).unwrap_or("-".into()), c.dir.display());
+            crate::vklog!(
+                "screenshots: {} presents named, every {}, control file {}, to {}",
+                c.at.len(),
+                c.every,
+                c.file
+                    .as_ref()
+                    .map(|p| p.display().to_string())
+                    .unwrap_or("-".into()),
+                c.dir.display()
+            );
         }
         c
     })
@@ -46,7 +68,14 @@ pub fn request(path: &str) {
     let mut r = REQ.lock().unwrap();
     if r.len() < 8 {
         r.push(path.to_string());
-        crate::vklog!("screenshot of the next present requested: {}", if path.is_empty() { "default name" } else { path });
+        crate::vklog!(
+            "screenshot of the next present requested: {}",
+            if path.is_empty() {
+                "default name"
+            } else {
+                path
+            }
+        );
     }
 }
 
@@ -94,7 +123,16 @@ pub fn on_present(t: &tex_t, frame: u64, crop: Option<[i32; 4]>, origin_ll: bool
             }
             let ok = png_write(&path, &px, w, h).is_ok();
             COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            crate::vklog!("screenshot: present {frame} ({w}x{h}) {} {} ({:.1} ms)", if ok { "written to" } else { "could not be written to" }, path.display(), t0.elapsed().as_secs_f64() * 1e3);
+            crate::vklog!(
+                "screenshot: present {frame} ({w}x{h}) {} {} ({:.1} ms)",
+                if ok {
+                    "written to"
+                } else {
+                    "could not be written to"
+                },
+                path.display(),
+                t0.elapsed().as_secs_f64() * 1e3
+            );
         }
         None => crate::vklog!("screenshot of present {frame}: nothing to read back"),
     }
@@ -103,24 +141,58 @@ pub fn on_present(t: &tex_t, frame: u64, crop: Option<[i32; 4]>, origin_ll: bool
 /// The presented texture as RGBA8 rows, top row first.
 pub fn capture(t: &tex_t, crop: Option<[i32; 4]>, flip: bool) -> Option<(Vec<u8>, u32, u32)> {
     let g = Gpu::try_get()?;
-    let tf = crate::tex::format::tex_format(t.d.format)?;
-    let (tw, th) = (t.d.width as i32, t.d.height as i32);
-    let mut r = NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: tw, height: th, depth: 1 };
+    capture_with(&t.d, crop, flip, |r, raw, row| {
+        // SAFETY: the presented texture supplies the source region. capture_with checked the full
+        // 1x1-block, one-image extent/pitch. Its exclusive destination slice stays live throughout
+        // this synchronous call and cannot overlap the separately allocated staging source.
+        unsafe { g.read_texels(t, None, r, raw.as_mut_ptr(), row, raw.len()) }
+    })
+}
+
+/// The production capture path with an injectable readback; failure never reaches conversion/PNG.
+fn capture_with(
+    d: &crate::tex::layout::TexDesc,
+    crop: Option<[i32; 4]>,
+    flip: bool,
+    read: impl FnOnce(&NVNcopyRegion, &mut [u8], usize) -> bool,
+) -> Option<(Vec<u8>, u32, u32)> {
+    let tf = crate::tex::format::tex_format(d.format)?;
+    let (tw, th) = (d.width as i32, d.height as i32);
+    let mut r = NVNcopyRegion {
+        xoffset: 0,
+        yoffset: 0,
+        zoffset: 0,
+        width: tw,
+        height: th,
+        depth: 1,
+    };
     if let Some([x, y, w, h]) = crop {
         if w > 0 && h > 0 && x >= 0 && y >= 0 && x + w <= tw && y + h <= th {
-            r = NVNcopyRegion { xoffset: x, yoffset: y, zoffset: 0, width: w, height: h, depth: 1 };
+            r = NVNcopyRegion {
+                xoffset: x,
+                yoffset: y,
+                zoffset: 0,
+                width: w,
+                height: h,
+                depth: 1,
+            };
         }
     }
-    let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(t.d.format);
+    let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(d.format);
     if bw != 1 || bh != 1 || bpb == 0 {
         return None;
     }
-    let n = (r.width * r.height) as usize;
-    let mut raw = vec![0u8; n * bpb as usize];
-    g.read_texels(t, None, &r, raw.as_mut_ptr(), r.width as usize * bpb as usize, raw.len());
+    let (n, bytes) = capture_len(r.width, r.height, bpb)?;
+    let mut raw = vec![0u8; bytes];
+    if !read(&r, &mut raw, r.width as usize * bpb as usize) {
+        return None;
+    }
     let mut out = vec![0u8; n * 4];
     if !to_rgba8(tf.vk, &raw, n, &mut out) {
-        crate::log::red_once(&format!("screenshot: the presented image's format {:?} is not converted", tf.vk));
+        crate::log::red_once(&format!(
+            "screenshot: the presented image's format {:?} is not converted",
+            tf.vk
+        ));
         return None;
     }
     let (w, h) = (r.width as usize, r.height as usize);
@@ -131,6 +203,17 @@ pub fn capture(t: &tex_t, crop: Option<[i32; 4]>, flip: bool) -> Option<(Vec<u8>
         }
     }
     Some((out, w as u32, h as u32))
+}
+
+/// Pixel count and destination byte length for a one-image, uncompressed screenshot readback.
+fn capture_len(width: i32, height: i32, bpb: u32) -> Option<(usize, usize)> {
+    if width <= 0 || height <= 0 || bpb == 0 {
+        return None;
+    }
+    let pixels = (width as usize).checked_mul(height as usize)?;
+    let bytes = pixels.checked_mul(bpb as usize)?;
+    // Both Vec allocations must fit Rust's allocation limit, including the RGBA8 conversion.
+    (bytes.max(pixels.checked_mul(4)?) <= isize::MAX as usize).then_some((pixels, bytes))
 }
 
 fn f2u8(v: f32) -> u8 {
@@ -173,7 +256,9 @@ pub fn to_rgba8(f: vk::Format, s: &[u8], n: usize, d: &mut [u8]) -> bool {
     let rd32 = |i: usize| u32::from_le_bytes(s[i..i + 4].try_into().unwrap());
     let rd16 = |i: usize| u16::from_le_bytes(s[i..i + 2].try_into().unwrap());
     match f {
-        vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => d[..n * 4].copy_from_slice(&s[..n * 4]),
+        vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB => {
+            d[..n * 4].copy_from_slice(&s[..n * 4])
+        }
         vk::Format::B8G8R8A8_UNORM | vk::Format::B8G8R8A8_SRGB => {
             for i in 0..n {
                 d[4 * i] = s[4 * i + 2];
@@ -220,7 +305,11 @@ pub fn to_rgba8(f: vk::Format, s: &[u8], n: usize, d: &mut [u8]) -> bool {
                 for k in 0..3 {
                     let e = c[k] >> mb[k];
                     let m = c[k] & ((1 << mb[k]) - 1);
-                    let f = if e != 0 { (1.0 + m as f32 / (1u32 << mb[k]) as f32) * 2f32.powi(e as i32 - 15) } else { m as f32 * 2f32.powi(-14 - mb[k] as i32) };
+                    let f = if e != 0 {
+                        (1.0 + m as f32 / (1u32 << mb[k]) as f32) * 2f32.powi(e as i32 - 15)
+                    } else {
+                        m as f32 * 2f32.powi(-14 - mb[k] as i32)
+                    };
                     d[4 * i + k] = f2u8(f);
                 }
                 d[4 * i + 3] = 255;
@@ -250,13 +339,23 @@ pub fn to_rgba8(f: vk::Format, s: &[u8], n: usize, d: &mut [u8]) -> bool {
         }
         vk::Format::R16G16_SFLOAT => {
             for i in 0..n {
-                d[4 * i..4 * i + 4].copy_from_slice(&[f2u8(half(rd16(4 * i))), f2u8(half(rd16(4 * i + 2))), 0, 255]);
+                d[4 * i..4 * i + 4].copy_from_slice(&[
+                    f2u8(half(rd16(4 * i))),
+                    f2u8(half(rd16(4 * i + 2))),
+                    0,
+                    255,
+                ]);
             }
         }
         vk::Format::R5G6B5_UNORM_PACK16 => {
             for i in 0..n {
                 let v = rd16(2 * i) as u32;
-                d[4 * i..4 * i + 4].copy_from_slice(&[((v >> 11) * 255 / 31) as u8, ((v >> 5 & 63) * 255 / 63) as u8, ((v & 31) * 255 / 31) as u8, 255]);
+                d[4 * i..4 * i + 4].copy_from_slice(&[
+                    ((v >> 11) * 255 / 31) as u8,
+                    ((v >> 5 & 63) * 255 / 63) as u8,
+                    ((v & 31) * 255 / 31) as u8,
+                    255,
+                ]);
             }
         }
         _ => return false,
@@ -271,7 +370,11 @@ fn crc32(mut c: u32, p: &[u8]) -> u32 {
         for (i, e) in t.iter_mut().enumerate() {
             let mut v = i as u32;
             for _ in 0..8 {
-                v = if v & 1 != 0 { 0xEDB8_8320 ^ (v >> 1) } else { v >> 1 };
+                v = if v & 1 != 0 {
+                    0xEDB8_8320 ^ (v >> 1)
+                } else {
+                    v >> 1
+                };
             }
             *e = v;
         }
@@ -337,10 +440,78 @@ pub fn png_bytes(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn failed_readback_is_not_a_successful_black_capture() {
+        let d = crate::tex::layout::TexDesc {
+            format: 37,
+            width: 2,
+            height: 2,
+            ..Default::default()
+        };
+        let mut called = false;
+        let captured = super::capture_with(&d, None, false, |r, raw, row| {
+            called = true;
+            assert_eq!(
+                (r.width, r.height, r.depth, row, raw.len()),
+                (2, 2, 1, 8, 16)
+            );
+            assert_eq!(raw, &[0; 16]);
+            false // allocation failure, no recorded copy, or failed wait
+        });
+        assert!(called);
+        assert!(
+            captured.is_none(),
+            "zero-initialized pixels must not turn failure into a PNG"
+        );
+    }
+
+    #[test]
+    fn successful_readback_preserves_capture_pixels_and_flip() {
+        let d = crate::tex::layout::TexDesc {
+            format: 37,
+            width: 1,
+            height: 2,
+            ..Default::default()
+        };
+        let captured = super::capture_with(&d, None, true, |r, raw, row| {
+            assert_eq!((r.width, r.height, row), (1, 2, 4));
+            raw.copy_from_slice(&[1, 2, 3, 4, 5, 6, 7, 8]);
+            true
+        })
+        .unwrap();
+        assert_eq!(captured, (vec![5, 6, 7, 8, 1, 2, 3, 4], 1, 2));
+    }
+
+    #[test]
+    fn capture_extent_rejects_invalid_or_unrepresentable_allocations() {
+        assert_eq!(super::capture_len(3, 2, 4), Some((6, 24)));
+        assert_eq!(super::capture_len(0, 2, 4), None);
+        assert_eq!(super::capture_len(-1, 2, 4), None);
+        assert_eq!(super::capture_len(2, -1, 4), None);
+        assert_eq!(super::capture_len(2, 2, 0), None);
+        assert_eq!(super::capture_len(i32::MAX, i32::MAX, 16), None);
+        // Even a one-byte source must leave room for the four-byte-per-pixel output Vec.
+        assert_eq!(super::capture_len(i32::MAX, i32::MAX, 1), None);
+    }
+
+    #[test]
+    #[cfg(target_pointer_width = "64")]
+    fn capture_extent_does_not_truncate_to_i32() {
+        // Old (width * height) as usize wrapped to 65,536 pixels in unchecked builds.
+        // Arithmetic only: this test allocates no image and does not initialize Vulkan.
+        assert_eq!(
+            super::capture_len(65_536, 65_537, 4),
+            Some((4_295_032_832, 17_180_131_328))
+        );
+    }
+
+    #[test]
     fn png_is_well_formed_and_half_floats_convert() {
         let px = [255u8, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 1, 2, 3, 4];
         let p = super::png_bytes(&px, 2, 2);
-        assert_eq!(&p[..8], &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']);
+        assert_eq!(
+            &p[..8],
+            &[0x89, b'P', b'N', b'G', b'\r', b'\n', 0x1a, b'\n']
+        );
         assert_eq!(&p[12..16], b"IHDR");
         assert_eq!(&p[p.len() - 8..p.len() - 4], b"IEND");
         assert_eq!(super::half(0x3c00), 1.0);
@@ -360,10 +531,18 @@ pub fn set_frame_sink(fps: u32, f: Option<FrameSink>) {
 }
 
 /// In a present's submission: a copy of the presented texture for the frame sink when one is due.
-pub fn record_sink(g: &Gpu, sub: &mut super::queue::Sub, t: &tex_t, crop: Option<[i32; 4]>, flip: bool) {
+pub fn record_sink(
+    g: &Gpu,
+    sub: &mut super::queue::Sub,
+    t: &tex_t,
+    crop: Option<[i32; 4]>,
+    flip: bool,
+) {
     let f = {
         let mut s = SINK.lock().unwrap();
-        let Some((fps, f, last)) = s.as_mut() else { return };
+        let Some((fps, f, last)) = s.as_mut() else {
+            return;
+        };
         let now = std::time::Instant::now();
         if last.is_some_and(|l| now.duration_since(l).as_secs_f64() < 1.0 / *fps as f64 - 0.001) {
             return;
@@ -371,14 +550,18 @@ pub fn record_sink(g: &Gpu, sub: &mut super::queue::Sub, t: &tex_t, crop: Option
         *last = Some(now);
         *f
     };
-    let Some(tf) = crate::tex::format::tex_format(t.d.format) else { return };
+    let Some(tf) = crate::tex::format::tex_format(t.d.format) else {
+        return;
+    };
     let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(t.d.format);
     if bw != 1 || bh != 1 || bpb == 0 {
         return;
     }
     let (tw, th) = (t.d.width as i32, t.d.height as i32);
     let [x, y, w, h] = match crop {
-        Some([x, y, w, h]) if w > 0 && h > 0 && x >= 0 && y >= 0 && x + w <= tw && y + h <= th => [x, y, w, h],
+        Some([x, y, w, h]) if w > 0 && h > 0 && x >= 0 && y >= 0 && x + w <= tw && y + h <= th => {
+            [x, y, w, h]
+        }
         _ => [0, 0, tw, th],
     };
     {
@@ -389,14 +572,30 @@ pub fn record_sink(g: &Gpu, sub: &mut super::queue::Sub, t: &tex_t, crop: Option
         g.prepare_image(&mut imgs, t.serial, sub);
     }
     let n = w as u64 * h as u64 * bpb as u64;
-    let Ok(buf) = g.buffer(n, vk::BufferUsageFlags::TRANSFER_DST, gpu_allocator::MemoryLocation::GpuToCpu, "frame sink") else { return };
+    let Ok(buf) = g.buffer(
+        n,
+        vk::BufferUsageFlags::TRANSFER_DST,
+        gpu_allocator::MemoryLocation::GpuToCpu,
+        "frame sink",
+    ) else {
+        return;
+    };
     let r = vk::BufferImageCopy {
         buffer_offset: 0,
         buffer_row_length: 0,
         buffer_image_height: 0,
-        image_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+        image_subresource: vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
         image_offset: vk::Offset3D { x, y, z: 0 },
-        image_extent: vk::Extent3D { width: w as u32, height: h as u32, depth: 1 },
+        image_extent: vk::Extent3D {
+            width: w as u32,
+            height: h as u32,
+            depth: 1,
+        },
     };
     super::queue::full_barrier(g, sub.main);
     {
@@ -407,23 +606,24 @@ pub fn record_sink(g: &Gpu, sub: &mut super::queue::Sub, t: &tex_t, crop: Option
     let ptr = buf.ptr as usize;
     let fmt = tf.vk;
     sub.transient.push(buf);
-    sub.post.push(super::queue::Post::Callback(Box::new(move |_g: &Gpu| {
-        let (w, h) = (w as usize, h as usize);
-        // SAFETY: the read-back buffer, freed after this callback
-        let src = unsafe { core::slice::from_raw_parts(ptr as *const u8, n as usize) };
-        let mut px = vec![0u8; w * h * 4];
-        if !to_rgba8(fmt, src, w * h, &mut px) {
-            return;
-        }
-        let mut out = vec![0u8; w * h * 4];
-        for row in 0..h {
-            let sr = if flip { h - 1 - row } else { row };
-            for c in 0..w {
-                let s = (sr * w + c) * 4;
-                let d = (row * w + c) * 4;
-                out[d..d + 4].copy_from_slice(&[px[s + 2], px[s + 1], px[s], 255]);
+    sub.post
+        .push(super::queue::Post::Callback(Box::new(move |_g: &Gpu| {
+            let (w, h) = (w as usize, h as usize);
+            // SAFETY: the read-back buffer, freed after this callback
+            let src = unsafe { core::slice::from_raw_parts(ptr as *const u8, n as usize) };
+            let mut px = vec![0u8; w * h * 4];
+            if !to_rgba8(fmt, src, w * h, &mut px) {
+                return;
             }
-        }
-        f(&out, w as u32, h as u32);
-    })));
+            let mut out = vec![0u8; w * h * 4];
+            for row in 0..h {
+                let sr = if flip { h - 1 - row } else { row };
+                for c in 0..w {
+                    let s = (sr * w + c) * 4;
+                    let d = (row * w + c) * 4;
+                    out[d..d + 4].copy_from_slice(&[px[s + 2], px[s + 1], px[s], 255]);
+                }
+            }
+            f(&out, w as u32, h as u32);
+        })));
 }

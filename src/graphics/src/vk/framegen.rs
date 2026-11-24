@@ -54,7 +54,12 @@ pub fn settings() -> Settings {
     if GEN.swap(g, Ordering::Relaxed) != g || s.is_none() {
         let (on, mult, target) = nxconfig::lsfg();
         let lsfg = nxconfig::string("frame_gen_type").eq_ignore_ascii_case("lsfg");
-        *s = Some(Settings { on: on && std::env::var("NXGFX_FRAMEGEN").as_deref() != Ok("0"), lsfg, multiplier: mult.clamp(2, 4), target });
+        *s = Some(Settings {
+            on: on && std::env::var("NXGFX_FRAMEGEN").as_deref() != Ok("0"),
+            lsfg,
+            multiplier: mult.clamp(2, 4),
+            target,
+        });
     }
     s.unwrap()
 }
@@ -76,7 +81,9 @@ impl Pacer {
     /// Generations for the frame presented now.
     fn plan(&mut self, s: &Settings) -> usize {
         let now = Instant::now();
-        let Some(last) = self.last.replace(now) else { return 0 };
+        let Some(last) = self.last.replace(now) else {
+            return 0;
+        };
         let iv = now.duration_since(last).as_secs_f64();
         if iv <= 0.0 {
             return 0;
@@ -88,7 +95,11 @@ impl Pacer {
             self.avg = if iv > 0.1 { 0.0 } else { self.avg };
             return 0;
         }
-        self.avg = if self.avg > 0.0 { self.avg + (iv - self.avg) * 0.2 } else { iv };
+        self.avg = if self.avg > 0.0 {
+            self.avg + (iv - self.avg) * 0.2
+        } else {
+            iv
+        };
         if self.hold_until.is_some_and(|t| now < t) {
             return 0;
         }
@@ -123,12 +134,21 @@ fn make_image(g: &Gpu, w: u32, h: u32, fmt: vk::Format, name: &str) -> Result<Im
     let ci = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
         .format(fmt)
-        .extent(vk::Extent3D { width: w, height: h, depth: 1 })
+        .extent(vk::Extent3D {
+            width: w,
+            height: h,
+            depth: 1,
+        })
         .mip_levels(1)
         .array_layers(1)
         .samples(vk::SampleCountFlags::TYPE_1)
         .tiling(vk::ImageTiling::OPTIMAL)
-        .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::STORAGE | vk::ImageUsageFlags::TRANSFER_SRC | vk::ImageUsageFlags::TRANSFER_DST)
+        .usage(
+            vk::ImageUsageFlags::SAMPLED
+                | vk::ImageUsageFlags::STORAGE
+                | vk::ImageUsageFlags::TRANSFER_SRC
+                | vk::ImageUsageFlags::TRANSFER_DST,
+        )
         .initial_layout(vk::ImageLayout::UNDEFINED);
     let image = unsafe { dev.create_image(&ci, None) }.map_err(|e| format!("{name}: {e}"))?;
     let req = unsafe { dev.get_image_memory_requirements(image) };
@@ -136,16 +156,35 @@ fn make_image(g: &Gpu, w: u32, h: u32, fmt: vk::Format, name: &str) -> Result<Im
         .alloc
         .lock()
         .unwrap()
-        .allocate(&AllocationCreateDesc { name, requirements: req, location: MemoryLocation::GpuOnly, linear: false, allocation_scheme: AllocationScheme::GpuAllocatorManaged })
+        .allocate(&AllocationCreateDesc {
+            name,
+            requirements: req,
+            location: MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })
         .map_err(|e| format!("{name}: {e}"))?;
-    unsafe { dev.bind_image_memory(image, a.memory(), a.offset()) }.map_err(|e| format!("{name}: {e}"))?;
+    unsafe { dev.bind_image_memory(image, a.memory(), a.offset()) }
+        .map_err(|e| format!("{name}: {e}"))?;
     let vci = vk::ImageViewCreateInfo::default()
         .image(image)
         .view_type(vk::ImageViewType::TYPE_2D)
         .format(fmt)
-        .subresource_range(vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 });
+        .subresource_range(vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        });
     let view = unsafe { dev.create_image_view(&vci, None) }.map_err(|e| format!("{name}: {e}"))?;
-    Ok(Img { image, view, alloc: Some(a), w, h })
+    Ok(Img {
+        image,
+        view,
+        alloc: Some(a),
+        w,
+        h,
+    })
 }
 
 fn free_image(g: &Gpu, i: Img) {
@@ -201,7 +240,9 @@ struct Fg {
 static FG: Mutex<Option<Fg>> = Mutex::new(None);
 
 fn words(b: &[u8]) -> Vec<u32> {
-    b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    b.chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect()
 }
 
 impl Fg {
@@ -212,16 +253,55 @@ impl Fg {
             4 => vk::DescriptorType::STORAGE_BUFFER,
             _ => vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
         };
-        let binds: Vec<_> = (0..5).map(|b| vk::DescriptorSetLayoutBinding::default().binding(b).descriptor_type(ty(b)).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE)).collect();
-        let set_layout = unsafe { dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&binds), None) }.map_err(|e| e.to_string())?;
-        let pcr = [vk::PushConstantRange::default().stage_flags(vk::ShaderStageFlags::COMPUTE).size(32)];
+        let binds: Vec<_> = (0..5)
+            .map(|b| {
+                vk::DescriptorSetLayoutBinding::default()
+                    .binding(b)
+                    .descriptor_type(ty(b))
+                    .descriptor_count(1)
+                    .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            })
+            .collect();
+        let set_layout = unsafe {
+            dev.create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&binds),
+                None,
+            )
+        }
+        .map_err(|e| e.to_string())?;
+        let pcr = [vk::PushConstantRange::default()
+            .stage_flags(vk::ShaderStageFlags::COMPUTE)
+            .size(32)];
         let sl = [set_layout];
-        let layout = unsafe { dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&sl).push_constant_ranges(&pcr), None) }.map_err(|e| e.to_string())?;
+        let layout = unsafe {
+            dev.create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default()
+                    .set_layouts(&sl)
+                    .push_constant_ranges(&pcr),
+                None,
+            )
+        }
+        .map_err(|e| e.to_string())?;
         let mk = |spv: &[u8]| -> Result<vk::Pipeline, String> {
             let w = words(spv);
-            let m = unsafe { dev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&w), None) }.map_err(|e| e.to_string())?;
-            let st = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(m).name(c"main");
-            let p = unsafe { dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(st).layout(layout)], None) }.map_err(|(_, e)| e.to_string())?[0];
+            let m = unsafe {
+                dev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&w), None)
+            }
+            .map_err(|e| e.to_string())?;
+            let st = vk::PipelineShaderStageCreateInfo::default()
+                .stage(vk::ShaderStageFlags::COMPUTE)
+                .module(m)
+                .name(c"main");
+            let p = unsafe {
+                dev.create_compute_pipelines(
+                    vk::PipelineCache::null(),
+                    &[vk::ComputePipelineCreateInfo::default()
+                        .stage(st)
+                        .layout(layout)],
+                    None,
+                )
+            }
+            .map_err(|(_, e)| e.to_string())?[0];
             unsafe { dev.destroy_shader_module(m, None) };
             Ok(p)
         };
@@ -234,9 +314,22 @@ impl Fg {
             .max_lod(0.0);
         let sampler = unsafe { dev.create_sampler(&sci, None) }.map_err(|e| e.to_string())?;
         Ok(Fg {
-            h: H { set_layout, layout, luma: mk(LUMA_SPV)?, flow: mk(FLOW_SPV)?, interp: mk(INTERP_SPV)?, stats: mk(STATS_SPV)?, sampler },
+            h: H {
+                set_layout,
+                layout,
+                luma: mk(LUMA_SPV)?,
+                flow: mk(FLOW_SPV)?,
+                interp: mk(INTERP_SPV)?,
+                stats: mk(STATS_SPV)?,
+                sampler,
+            },
             frames: None,
-            pacer: Pacer { last: None, avg: 0.0, credit: 0.0, hold_until: None },
+            pacer: Pacer {
+                last: None,
+                avg: 0.0,
+                credit: 0.0,
+                hold_until: None,
+            },
             t_line: Instant::now(),
             base: 0,
             out: 0,
@@ -245,17 +338,27 @@ impl Fg {
             lsfg_failed: false,
         })
     }
-
 }
 
-fn ensure_frames<'a>(g: &Gpu, frames: &'a mut Option<Frames>, w: u32, h: u32) -> Result<&'a mut Frames, String> {
+fn ensure_frames<'a>(
+    g: &Gpu,
+    frames: &'a mut Option<Frames>,
+    w: u32,
+    h: u32,
+) -> Result<&'a mut Frames, String> {
     {
         let this = frames;
         if this.as_ref().is_some_and(|f| f.w != w || f.h != h) {
             // the old images may be in use by submissions in flight
             super::queue::wait_fence(g.q.last_fence(), u64::MAX);
             let f = this.take().unwrap();
-            for i in f.hist.into_iter().chain(f.luma.into_iter().flatten()).chain(f.flow).chain(f.gen) {
+            for i in f
+                .hist
+                .into_iter()
+                .chain(f.luma.into_iter().flatten())
+                .chain(f.flow)
+                .chain(f.gen)
+            {
                 free_image(g, i);
             }
             g.free_buffer(f.state);
@@ -263,21 +366,50 @@ fn ensure_frames<'a>(g: &Gpu, frames: &'a mut Option<Frames>, w: u32, h: u32) ->
         if this.is_none() {
             let lvl = |k: usize| ((w >> (k + 1)).max(1), (h >> (k + 1)).max(1));
             let mk_luma = |s: usize| -> Result<[Img; LEVELS], String> {
-                let a = make_image(g, lvl(0).0, lvl(0).1, vk::Format::R16_SFLOAT, &format!("fg luma {s} 1/2"))?;
-                let b = make_image(g, lvl(1).0, lvl(1).1, vk::Format::R16_SFLOAT, &format!("fg luma {s} 1/4"))?;
-                let c = make_image(g, lvl(2).0, lvl(2).1, vk::Format::R16_SFLOAT, &format!("fg luma {s} 1/8"))?;
+                let a = make_image(
+                    g,
+                    lvl(0).0,
+                    lvl(0).1,
+                    vk::Format::R16_SFLOAT,
+                    &format!("fg luma {s} 1/2"),
+                )?;
+                let b = make_image(
+                    g,
+                    lvl(1).0,
+                    lvl(1).1,
+                    vk::Format::R16_SFLOAT,
+                    &format!("fg luma {s} 1/4"),
+                )?;
+                let c = make_image(
+                    g,
+                    lvl(2).0,
+                    lvl(2).1,
+                    vk::Format::R16_SFLOAT,
+                    &format!("fg luma {s} 1/8"),
+                )?;
                 Ok([a, b, c])
             };
-            let fl = |k: usize| make_image(g, lvl(k).0, lvl(k).1, vk::Format::R16G16_SFLOAT, "fg flow");
+            let fl =
+                |k: usize| make_image(g, lvl(k).0, lvl(k).1, vk::Format::R16G16_SFLOAT, "fg flow");
             let f = Frames {
                 w,
                 h,
-                hist: [make_image(g, w, h, HIST_FMT, "fg history 0")?, make_image(g, w, h, HIST_FMT, "fg history 1")?],
+                hist: [
+                    make_image(g, w, h, HIST_FMT, "fg history 0")?,
+                    make_image(g, w, h, HIST_FMT, "fg history 1")?,
+                ],
                 luma: [mk_luma(0)?, mk_luma(1)?],
                 flow: [fl(0)?, fl(1)?, fl(2)?],
-                gen: (0..MAX_GEN).map(|i| make_image(g, w, h, HIST_FMT, &format!("fg generated {i}"))).collect::<Result<_, _>>()?,
+                gen: (0..MAX_GEN)
+                    .map(|i| make_image(g, w, h, HIST_FMT, &format!("fg generated {i}")))
+                    .collect::<Result<_, _>>()?,
                 state: {
-                    let b = g.buffer(64, vk::BufferUsageFlags::STORAGE_BUFFER, MemoryLocation::GpuToCpu, "fg state")?;
+                    let b = g.buffer(
+                        64,
+                        vk::BufferUsageFlags::STORAGE_BUFFER,
+                        MemoryLocation::GpuToCpu,
+                        "fg state",
+                    )?;
                     if !b.ptr.is_null() {
                         unsafe { core::ptr::write_bytes(b.ptr, 0, 64) };
                     }
@@ -287,30 +419,96 @@ fn ensure_frames<'a>(g: &Gpu, frames: &'a mut Option<Frames>, w: u32, h: u32) ->
                 have_prev: false,
                 fresh: true,
             };
-            crate::vklog!("frame generation: built-in, {w}x{h} history, flow at {}x{} .. {}x{}", lvl(0).0, lvl(0).1, lvl(2).0, lvl(2).1);
+            crate::vklog!(
+                "frame generation: built-in, {w}x{h} history, flow at {}x{} .. {}x{}",
+                lvl(0).0,
+                lvl(0).1,
+                lvl(2).0,
+                lvl(2).1
+            );
             *this = Some(f);
         }
         Ok(this.as_mut().unwrap())
     }
 }
 
-fn set_for(g: &Gpu, sub: &mut Sub, fg: &H, inputs: [vk::ImageView; 3], out: vk::ImageView, state: vk::Buffer) -> vk::DescriptorSet {
+fn set_for(
+    g: &Gpu,
+    sub: &mut Sub,
+    fg: &H,
+    inputs: [vk::ImageView; 3],
+    out: vk::ImageView,
+    state: vk::Buffer,
+) -> vk::DescriptorSet {
     let set = sub.alloc_set(g, fg.set_layout);
-    let ii: Vec<[vk::DescriptorImageInfo; 1]> = inputs.iter().map(|&v| [vk::DescriptorImageInfo { sampler: fg.sampler, image_view: v, image_layout: vk::ImageLayout::GENERAL }]).collect();
-    let oi = [vk::DescriptorImageInfo { sampler: vk::Sampler::null(), image_view: out, image_layout: vk::ImageLayout::GENERAL }];
-    let mut w: Vec<vk::WriteDescriptorSet> = (0..3).map(|b| vk::WriteDescriptorSet::default().dst_set(set).dst_binding(b as u32).descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER).image_info(&ii[b])).collect();
-    w.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(3).descriptor_type(vk::DescriptorType::STORAGE_IMAGE).image_info(&oi));
-    let bi = [vk::DescriptorBufferInfo { buffer: state, offset: 0, range: 64 }];
-    w.push(vk::WriteDescriptorSet::default().dst_set(set).dst_binding(4).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&bi));
+    let ii: Vec<[vk::DescriptorImageInfo; 1]> = inputs
+        .iter()
+        .map(|&v| {
+            [vk::DescriptorImageInfo {
+                sampler: fg.sampler,
+                image_view: v,
+                image_layout: vk::ImageLayout::GENERAL,
+            }]
+        })
+        .collect();
+    let oi = [vk::DescriptorImageInfo {
+        sampler: vk::Sampler::null(),
+        image_view: out,
+        image_layout: vk::ImageLayout::GENERAL,
+    }];
+    let mut w: Vec<vk::WriteDescriptorSet> = (0..3)
+        .map(|b| {
+            vk::WriteDescriptorSet::default()
+                .dst_set(set)
+                .dst_binding(b as u32)
+                .descriptor_type(vk::DescriptorType::COMBINED_IMAGE_SAMPLER)
+                .image_info(&ii[b])
+        })
+        .collect();
+    w.push(
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(3)
+            .descriptor_type(vk::DescriptorType::STORAGE_IMAGE)
+            .image_info(&oi),
+    );
+    let bi = [vk::DescriptorBufferInfo {
+        buffer: state,
+        offset: 0,
+        range: 64,
+    }];
+    w.push(
+        vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(4)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&bi),
+    );
     unsafe { g.dev().update_descriptor_sets(&w, &[]) };
     set
 }
 
-fn dispatch(g: &Gpu, sub: &Sub, fg: &H, pipe: vk::Pipeline, set: vk::DescriptorSet, push: &[u8], w: u32, h: u32) {
+fn dispatch(
+    g: &Gpu,
+    sub: &Sub,
+    fg: &H,
+    pipe: vk::Pipeline,
+    set: vk::DescriptorSet,
+    push: &[u8],
+    w: u32,
+    h: u32,
+) {
     let dev = g.dev();
     unsafe {
         dev.cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe);
-        dev.cmd_bind_descriptor_sets(sub.main, vk::PipelineBindPoint::COMPUTE, fg.layout, 0, &[set], &[]);
+        dev.cmd_bind_descriptor_sets(
+            sub.main,
+            vk::PipelineBindPoint::COMPUTE,
+            fg.layout,
+            0,
+            &[set],
+            &[],
+        );
         dev.cmd_push_constants(sub.main, fg.layout, vk::ShaderStageFlags::COMPUTE, 0, push);
         dev.cmd_dispatch(sub.main, w.div_ceil(8), h.div_ceil(8), 1);
     }
@@ -319,7 +517,8 @@ fn dispatch(g: &Gpu, sub: &Sub, fg: &H, pipe: vk::Pipeline, set: vk::DescriptorS
 
 fn bytes<T: Copy>(v: &T) -> Vec<u8> {
     // SAFETY: plain push-constant structs
-    unsafe { core::slice::from_raw_parts(v as *const T as *const u8, core::mem::size_of::<T>()) }.to_vec()
+    unsafe { core::slice::from_raw_parts(v as *const T as *const u8, core::mem::size_of::<T>()) }
+        .to_vec()
 }
 
 #[repr(C)]
@@ -365,7 +564,15 @@ pub struct Output {
 /// Records, for a presented frame (`src` and the source region: `y0 > y1` turns it over), the copy into the history
 /// and the generated frames the pacer asks for. None: frame generation is off or failed (the caller presents as
 /// usual).
-pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32, y1: i32) -> Option<Output> {
+pub fn process(
+    g: &Gpu,
+    sub: &mut Sub,
+    src: vk::Image,
+    x0: i32,
+    y0: i32,
+    x1: i32,
+    y1: i32,
+) -> Option<Output> {
     let s = settings();
     if !s.on {
         return None;
@@ -399,7 +606,9 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
                     fg.lsfg = Some(l);
                 }
                 Some(Err(e)) => {
-                    crate::log::red(&format!("frame generation: LSFG cannot run ({e}); the built-in mode is used"));
+                    crate::log::red(&format!(
+                        "frame generation: LSFG cannot run ({e}); the built-in mode is used"
+                    ));
                     fg.lsfg_failed = true;
                 }
                 None => {}
@@ -418,7 +627,9 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
                     return Some(Output { gens, real, w, h });
                 }
                 Err(e) => {
-                    crate::log::red(&format!("frame generation: LSFG failed ({e}); the built-in mode is used"));
+                    crate::log::red(&format!(
+                        "frame generation: LSFG failed ({e}); the built-in mode is used"
+                    ));
                     fg.lsfg = None;
                     fg.lsfg_failed = true;
                 }
@@ -436,9 +647,21 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
     };
     let dev = g.dev();
     if frames.fresh {
-        let range = vk::ImageSubresourceRange { aspect_mask: vk::ImageAspectFlags::COLOR, base_mip_level: 0, level_count: 1, base_array_layer: 0, layer_count: 1 };
-        let all: Vec<vk::Image> =
-            frames.hist.iter().chain(frames.luma.iter().flatten()).chain(frames.flow.iter()).chain(frames.gen.iter()).map(|i| i.image).collect();
+        let range = vk::ImageSubresourceRange {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            base_mip_level: 0,
+            level_count: 1,
+            base_array_layer: 0,
+            layer_count: 1,
+        };
+        let all: Vec<vk::Image> = frames
+            .hist
+            .iter()
+            .chain(frames.luma.iter().flatten())
+            .chain(frames.flow.iter())
+            .chain(frames.gen.iter())
+            .map(|i| i.image)
+            .collect();
         let b: Vec<vk::ImageMemoryBarrier2> = all
             .iter()
             .map(|&im| {
@@ -452,25 +675,73 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
                     .subresource_range(range)
             })
             .collect();
-        unsafe { dev.cmd_pipeline_barrier2(sub.main, &vk::DependencyInfo::default().image_memory_barriers(&b)) };
+        unsafe {
+            dev.cmd_pipeline_barrier2(
+                sub.main,
+                &vk::DependencyInfo::default().image_memory_barriers(&b),
+            )
+        };
         frames.fresh = false;
     }
     // the history: this frame upright and cropped
     let cur = frames.cur ^ 1;
     let blit = vk::ImageBlit {
-        src_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
-        src_offsets: [vk::Offset3D { x: x0, y: y0, z: 0 }, vk::Offset3D { x: x1, y: y1, z: 1 }],
-        dst_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
-        dst_offsets: [vk::Offset3D::default(), vk::Offset3D { x: w as i32, y: h as i32, z: 1 }],
+        src_subresource: vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
+        src_offsets: [
+            vk::Offset3D { x: x0, y: y0, z: 0 },
+            vk::Offset3D { x: x1, y: y1, z: 1 },
+        ],
+        dst_subresource: vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
+        dst_offsets: [
+            vk::Offset3D::default(),
+            vk::Offset3D {
+                x: w as i32,
+                y: h as i32,
+                z: 1,
+            },
+        ],
     };
-    unsafe { dev.cmd_blit_image(sub.main, src, vk::ImageLayout::GENERAL, frames.hist[cur].image, vk::ImageLayout::GENERAL, &[blit], vk::Filter::NEAREST) };
+    unsafe {
+        dev.cmd_blit_image(
+            sub.main,
+            src,
+            vk::ImageLayout::GENERAL,
+            frames.hist[cur].image,
+            vk::ImageLayout::GENERAL,
+            &[blit],
+            vk::Filter::NEAREST,
+        )
+    };
     super::queue::full_barrier(g, sub.main);
     // its luma pyramid
     for k in 0..LEVELS {
-        let (src_view, sw, sh, rgb) = if k == 0 { (frames.hist[cur].view, w, h, 1) } else { (frames.luma[cur][k - 1].view, frames.luma[cur][k - 1].w, frames.luma[cur][k - 1].h, 0) };
+        let (src_view, sw, sh, rgb) = if k == 0 {
+            (frames.hist[cur].view, w, h, 1)
+        } else {
+            (
+                frames.luma[cur][k - 1].view,
+                frames.luma[cur][k - 1].w,
+                frames.luma[cur][k - 1].h,
+                0,
+            )
+        };
         let d = &frames.luma[cur][k];
         let set = set_for(g, sub, fg_ro, [src_view; 3], d.view, frames.state.buf);
-        let p = PLuma { size: [d.w as i32, d.h as i32], inv_src: [1.0 / sw as f32, 1.0 / sh as f32], from_rgb: rgb };
+        let p = PLuma {
+            size: [d.w as i32, d.h as i32],
+            inv_src: [1.0 / sw as f32, 1.0 / sh as f32],
+            from_rgb: rgb,
+        };
         dispatch(g, sub, fg_ro, fg_ro.luma, set, &bytes(&p), d.w, d.h);
     }
     let real = frames.hist[cur].image;
@@ -483,13 +754,38 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
         // in between instead of a warped guess: Eglantine's duplicate skip and warm-up; the cut test is new)
         let k = LEVELS - 1;
         let d = &frames.luma[cur][k];
-        let set = set_for(g, sub, fg_ro, [frames.luma[cur][k].view, frames.luma[prev][k].view, d.view], d.view, frames.state.buf);
-        let p = PStats { size: [d.w as i32, d.h as i32], same: 1.0 / 512.0, cut_d: 0.2, cut_f: 0.5 };
+        let set = set_for(
+            g,
+            sub,
+            fg_ro,
+            [frames.luma[cur][k].view, frames.luma[prev][k].view, d.view],
+            d.view,
+            frames.state.buf,
+        );
+        let p = PStats {
+            size: [d.w as i32, d.h as i32],
+            same: 1.0 / 512.0,
+            cut_d: 0.2,
+            cut_f: 0.5,
+        };
         let dev = g.dev();
         unsafe {
             dev.cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, fg_ro.stats);
-            dev.cmd_bind_descriptor_sets(sub.main, vk::PipelineBindPoint::COMPUTE, fg_ro.layout, 0, &[set], &[]);
-            dev.cmd_push_constants(sub.main, fg_ro.layout, vk::ShaderStageFlags::COMPUTE, 0, &bytes(&p));
+            dev.cmd_bind_descriptor_sets(
+                sub.main,
+                vk::PipelineBindPoint::COMPUTE,
+                fg_ro.layout,
+                0,
+                &[set],
+                &[],
+            );
+            dev.cmd_push_constants(
+                sub.main,
+                fg_ro.layout,
+                vk::ShaderStageFlags::COMPUTE,
+                0,
+                &bytes(&p),
+            );
             dev.cmd_dispatch(sub.main, 1, 1, 1);
         }
         super::queue::full_barrier(g, sub.main);
@@ -498,16 +794,47 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
         // the flow, coarse to fine
         for k in (0..LEVELS).rev() {
             let d = &frames.flow[k];
-            let coarse = if k + 1 < LEVELS { frames.flow[k + 1].view } else { frames.flow[k].view };
-            let set = set_for(g, sub, fg_ro, [frames.luma[cur][k].view, frames.luma[prev][k].view, coarse], d.view, frames.state.buf);
-            let p = PFlow { size: [d.w as i32, d.h as i32], radius: if k + 1 == LEVELS { 4 } else { 1 }, has_coarse: (k + 1 < LEVELS) as i32 };
+            let coarse = if k + 1 < LEVELS {
+                frames.flow[k + 1].view
+            } else {
+                frames.flow[k].view
+            };
+            let set = set_for(
+                g,
+                sub,
+                fg_ro,
+                [frames.luma[cur][k].view, frames.luma[prev][k].view, coarse],
+                d.view,
+                frames.state.buf,
+            );
+            let p = PFlow {
+                size: [d.w as i32, d.h as i32],
+                radius: if k + 1 == LEVELS { 4 } else { 1 },
+                has_coarse: (k + 1 < LEVELS) as i32,
+            };
             dispatch(g, sub, fg_ro, fg_ro.flow, set, &bytes(&p), d.w, d.h);
         }
         for i in 0..gens {
             let t = (i + 1) as f32 / (gens + 1) as f32;
             let o = &frames.gen[i];
-            let set = set_for(g, sub, fg_ro, [frames.hist[cur].view, frames.hist[prev].view, frames.flow[0].view], o.view, frames.state.buf);
-            let p = PInterp { size: [w as i32, h as i32], inv_size: [1.0 / w as f32, 1.0 / h as f32], t, flow_scale: 2.0 };
+            let set = set_for(
+                g,
+                sub,
+                fg_ro,
+                [
+                    frames.hist[cur].view,
+                    frames.hist[prev].view,
+                    frames.flow[0].view,
+                ],
+                o.view,
+                frames.state.buf,
+            );
+            let p = PInterp {
+                size: [w as i32, h as i32],
+                inv_size: [1.0 / w as f32, 1.0 / h as f32],
+                t,
+                flow_scale: 2.0,
+            };
             dispatch(g, sub, fg_ro, fg_ro.interp, set, &bytes(&p), w, h);
         }
     }
@@ -517,8 +844,22 @@ pub fn process(g: &Gpu, sub: &mut Sub, src: vk::Image, x0: i32, y0: i32, x1: i32
         capture(g, sub, real, HIST_FMT, w, h, "current");
         CAPTURE_TAKEN.store(true, std::sync::atomic::Ordering::Relaxed);
     }
-    let out = Output { gens: frames.gen[..gens].iter().map(|i| i.image).collect(), real, w, h };
-    note_stats(fg, &s, gens, if s.lsfg { "built-in (LSFG not available)" } else { "built-in" });
+    let out = Output {
+        gens: frames.gen[..gens].iter().map(|i| i.image).collect(),
+        real,
+        w,
+        h,
+    };
+    note_stats(
+        fg,
+        &s,
+        gens,
+        if s.lsfg {
+            "built-in (LSFG not available)"
+        } else {
+            "built-in"
+        },
+    );
     Some(out)
 }
 
@@ -559,44 +900,80 @@ static CAPTURE_TAKEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 /// `NXGFX_FG_SHOT=<s>`: once, after that many seconds, the first generated frame of a game frame and its two
 /// neighbours as PNG (`fg-generated.png`, `fg-previous.png`, `fg-current.png` in `NXGFX_SHOT_DIR`).
-fn capture(g: &Gpu, sub: &mut Sub, img: vk::Image, fmt: vk::Format, w: u32, h: u32, name: &'static str) {
+fn capture(
+    g: &Gpu,
+    sub: &mut Sub,
+    img: vk::Image,
+    fmt: vk::Format,
+    w: u32,
+    h: u32,
+    name: &'static str,
+) {
     use std::sync::atomic::Ordering;
-    let Ok(at) = std::env::var("NXGFX_FG_SHOT") else { return };
-    if CAPTURE_TAKEN.load(Ordering::Relaxed) || crate::log::elapsed() < at.parse::<f64>().unwrap_or(0.0) {
+    let Ok(at) = std::env::var("NXGFX_FG_SHOT") else {
+        return;
+    };
+    if CAPTURE_TAKEN.load(Ordering::Relaxed)
+        || crate::log::elapsed() < at.parse::<f64>().unwrap_or(0.0)
+    {
         return;
     }
     let n = w as u64 * h as u64 * 8;
-    let Ok(buf) = g.buffer(n, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "fg shot") else { return };
+    let Ok(buf) = g.buffer(
+        n,
+        vk::BufferUsageFlags::TRANSFER_DST,
+        MemoryLocation::GpuToCpu,
+        "fg shot",
+    ) else {
+        return;
+    };
     let r = vk::BufferImageCopy {
         buffer_offset: 0,
         buffer_row_length: 0,
         buffer_image_height: 0,
-        image_subresource: vk::ImageSubresourceLayers { aspect_mask: vk::ImageAspectFlags::COLOR, mip_level: 0, base_array_layer: 0, layer_count: 1 },
+        image_subresource: vk::ImageSubresourceLayers {
+            aspect_mask: vk::ImageAspectFlags::COLOR,
+            mip_level: 0,
+            base_array_layer: 0,
+            layer_count: 1,
+        },
         image_offset: vk::Offset3D::default(),
-        image_extent: vk::Extent3D { width: w, height: h, depth: 1 },
+        image_extent: vk::Extent3D {
+            width: w,
+            height: h,
+            depth: 1,
+        },
     };
-    unsafe { g.dev().cmd_copy_image_to_buffer(sub.main, img, vk::ImageLayout::GENERAL, buf.buf, &[r]) };
+    unsafe {
+        g.dev()
+            .cmd_copy_image_to_buffer(sub.main, img, vk::ImageLayout::GENERAL, buf.buf, &[r])
+    };
     super::queue::full_barrier(g, sub.main);
     let ptr = buf.ptr as usize;
     sub.transient.push(buf);
     let dir = std::env::var("NXGFX_SHOT_DIR").unwrap_or_else(|_| "captures".into());
-    sub.post.push(super::queue::Post::Callback(Box::new(move |_g: &Gpu| {
-        let np = (w * h) as usize;
-        // SAFETY: the read-back buffer, kept until after this callback
-        let src = unsafe { core::slice::from_raw_parts(ptr as *const u8, n as usize) };
-        let mut out = vec![0u8; np * 4];
-        if super::shot::to_rgba8(fmt, src, np, &mut out) {
-            let _ = std::fs::create_dir_all(&dir);
-            let p = std::path::Path::new(&dir).join(format!("fg-{name}.png"));
-            let _ = super::shot::png_write(&p, &out, w, h);
-            crate::vklog!("frame generation: {} written", p.display());
-        }
-    })));
+    sub.post
+        .push(super::queue::Post::Callback(Box::new(move |_g: &Gpu| {
+            let np = (w * h) as usize;
+            // SAFETY: the read-back buffer, kept until after this callback
+            let src = unsafe { core::slice::from_raw_parts(ptr as *const u8, n as usize) };
+            let mut out = vec![0u8; np * 4];
+            if super::shot::to_rgba8(fmt, src, np, &mut out) {
+                let _ = std::fs::create_dir_all(&dir);
+                let p = std::path::Path::new(&dir).join(format!("fg-{name}.png"));
+                let _ = super::shot::png_write(&p, &out, w, h);
+                crate::vklog!("frame generation: {} written", p.display());
+            }
+        })));
 }
 
 /// The game frame interval the pacer measured (s), for spacing the presents.
 pub fn interval() -> f64 {
-    FG.lock().unwrap().as_ref().map(|f| f.pacer.avg).unwrap_or(0.0)
+    FG.lock()
+        .unwrap()
+        .as_ref()
+        .map(|f| f.pacer.avg)
+        .unwrap_or(0.0)
 }
 
 // ---------- the LSFG mode's state (lane I's front/lsfg.rs) ----------
@@ -613,7 +990,8 @@ fn lsfg_state() -> String {
             let s = f();
             format!("Lossless.dll {s}; its passes are not run by graphics yet, the built-in mode generates the frames")
         }
-        None => "no Lossless.dll state from the front end; the built-in mode generates the frames".into(),
+        None => "no Lossless.dll state from the front end; the built-in mode generates the frames"
+            .into(),
     }
 }
 
@@ -664,8 +1042,18 @@ mod tests {
 
     #[test]
     fn pacer_fills_to_the_target_with_credit() {
-        let s = Settings { on: true, lsfg: false, multiplier: 4, target: 120.0 };
-        let mut p = Pacer { last: None, avg: 1.0 / 45.0, credit: 0.0, hold_until: None };
+        let s = Settings {
+            on: true,
+            lsfg: false,
+            multiplier: 4,
+            target: 120.0,
+        };
+        let mut p = Pacer {
+            last: None,
+            avg: 1.0 / 45.0,
+            credit: 0.0,
+            hold_until: None,
+        };
         // 45 FPS to 120: 2.67 images a frame, so 1 or 2 generations alternate, about 1.67 on average
         let mut total = 0;
         for _ in 0..30 {
@@ -674,7 +1062,12 @@ mod tests {
         }
         assert!((45..=55).contains(&total), "{total}");
         // at the target already: none
-        let mut p = Pacer { last: None, avg: 1.0 / 120.0, credit: 0.0, hold_until: None };
+        let mut p = Pacer {
+            last: None,
+            avg: 1.0 / 120.0,
+            credit: 0.0,
+            hold_until: None,
+        };
         p.last = Some(Instant::now() - Duration::from_secs_f64(1.0 / 120.0));
         assert_eq!(p.plan(&s), 0);
     }

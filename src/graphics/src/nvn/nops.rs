@@ -12,7 +12,6 @@ nvn_fns! {
     fn nvnDeviceRegisterFastClearColori(d: *mut NVNdevice, c: *const i32, f: i32) -> NVNboolean { let _ = (d, c, f); 1 }
     fn nvnDeviceRegisterFastClearColorui(d: *mut NVNdevice, c: *const u32, f: i32) -> NVNboolean { let _ = (d, c, f); 1 }
     fn nvnDeviceRegisterFastClearDepth(d: *mut NVNdevice, v: f32) -> NVNboolean { let _ = (d, v); 1 }
-    fn nvnCommandBufferSetConservativeRasterEnable(c: *mut NVNcommandBuffer, on: u32) { let _ = (c, on); super::nops::once("SetConservativeRasterEnable: conservative rasterization is not applied (logged once)"); }
     fn nvnCommandBufferSetShaderScratchMemory(c: *mut NVNcommandBuffer, p: *const NVNmemoryPool, off: isize, n: usize) { let _ = (c, p, off, n); }
     fn nvnMemoryPoolSetDebugLabel(p: *mut NVNmemoryPool, s: *const u8) { let _ = (p, s); }
     fn nvnTexturePoolSetDebugLabel(p: *mut NVNtexturePool, s: *const u8) { let _ = (p, s); }

@@ -39,7 +39,10 @@ static FS_WAIT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 /// first since the last present.
 pub fn frame_started(t_in: u64, t_out: u64) {
     use std::sync::atomic::Ordering;
-    if FS_START.compare_exchange(0, t_out.max(1), Ordering::AcqRel, Ordering::Relaxed).is_ok() {
+    if FS_START
+        .compare_exchange(0, t_out.max(1), Ordering::AcqRel, Ordering::Relaxed)
+        .is_ok()
+    {
         FS_WAIT.store(t_out.saturating_sub(t_in), Ordering::Release);
     }
 }
@@ -57,7 +60,11 @@ pub fn frame_start_take() -> (u64, u64) {
 pub const VSYNC_NS: u64 = 16_666_667;
 
 fn window_active(o: &win_t) -> i32 {
-    if o.nactive > 0 && o.nactive < o.ntex { o.nactive } else { o.ntex }
+    if o.nactive > 0 && o.nactive < o.ntex {
+        o.nactive
+    } else {
+        o.ntex
+    }
 }
 
 /// Sleeps until `deadline` (ns on `device::now_ns`'s clock): a high-resolution waitable timer, then a short spin.
@@ -80,12 +87,19 @@ pub fn sleep_until(deadline: u64) {
 /// nvnQueuePresentTexture.
 pub fn present(q: &queue_t, w: &mut win_t, idx: i32) {
     if idx < 0 || idx >= w.ntex || w.tex[idx as usize].is_null() {
-        crate::log::red(&format!("QueuePresentTexture: texture index {idx} of {}", w.ntex));
+        crate::log::red(&format!(
+            "QueuePresentTexture: texture index {idx} of {}",
+            w.ntex
+        ));
         return;
     }
     // SAFETY: the window's textures are the game's live texture objects.
     let t = unsafe { *(w.tex[idx as usize] as *const tex_t) };
-    let crop = if w.crop[2] > 0 && w.crop[3] > 0 { Some(w.crop) } else { None };
+    let crop = if w.crop[2] > 0 && w.crop[3] > 0 {
+        Some(w.crop)
+    } else {
+        None
+    };
     w.presents += 1;
     if vk::queue::aq_on() {
         super::blocking(|| vk::queue::aq_wait_room(true));
@@ -252,6 +266,10 @@ pub fn set_profile_interval(n: i32) {
 
 pub fn forced_interval() -> Option<i32> {
     let ini = nxconfig::int("present_interval");
-    let n = if ini > 0 { ini as i32 } else { PROFILE_INTERVAL.load(std::sync::atomic::Ordering::Relaxed) };
+    let n = if ini > 0 {
+        ini as i32
+    } else {
+        PROFILE_INTERVAL.load(std::sync::atomic::Ordering::Relaxed)
+    };
     (n > 0).then_some(n.min(4))
 }

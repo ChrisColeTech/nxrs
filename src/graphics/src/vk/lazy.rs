@@ -82,7 +82,11 @@ fn frame() -> u64 {
 
 /// Pages now held on the device only.
 pub fn pages() -> usize {
-    ST.lock().unwrap().as_ref().map(|s| s.lazy.len()).unwrap_or(0)
+    ST.lock()
+        .unwrap()
+        .as_ref()
+        .map(|s| s.lazy.len())
+        .unwrap_or(0)
 }
 
 /// A GPU write-back of the whole pages in [a, a + n) is due: the pages that go lazy instead (their write-back is
@@ -96,7 +100,11 @@ pub fn take_lazy(a: u64, n: u64) -> Vec<u64> {
     let hi = (a + n) & !(PAGE - 1);
     let mut out = vec![];
     let mut g = ST.lock().unwrap();
-    let st = g.get_or_insert_with(|| St { lazy: HashMap::new(), hist: HashMap::new(), returning: HashSet::new() });
+    let st = g.get_or_insert_with(|| St {
+        lazy: HashMap::new(),
+        hist: HashMap::new(),
+        returning: HashSet::new(),
+    });
     let mut p = lo;
     while p < hi {
         let h = st.hist.entry(p).or_default();
@@ -129,7 +137,17 @@ pub fn make_lazy(pages: &[u64], buf: vk::Buffer, base: u64, off0: u64) {
         if st.returning.contains(&p) {
             continue; // being read back for a CPU access right now: stays eager
         }
-        if st.lazy.insert(p, Lazy { buf, off: off0 + (p - base) }).is_none() {
+        if st
+            .lazy
+            .insert(
+                p,
+                Lazy {
+                    buf,
+                    off: off0 + (p - base),
+                },
+            )
+            .is_none()
+        {
             fresh.push(p);
         }
         SKIP_BYTES.fetch_add(PAGE, Ordering::Relaxed);
@@ -150,7 +168,11 @@ pub fn make_lazy(pages: &[u64], buf: vk::Buffer, base: u64, off0: u64) {
 fn protect_n(p: u64, n: u64, access: bool) {
     use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_NOACCESS, PAGE_READWRITE};
     let mut old = 0u32;
-    let prot = if access { PAGE_READWRITE } else { PAGE_NOACCESS };
+    let prot = if access {
+        PAGE_READWRITE
+    } else {
+        PAGE_NOACCESS
+    };
     // a run over two allocations is refused as a whole: page by page then
     if unsafe { VirtualProtect(p as *const _, (n * PAGE) as usize, prot, &mut old) } == 0 {
         for k in 0..n {
@@ -160,7 +182,11 @@ fn protect_n(p: u64, n: u64, access: bool) {
 }
 #[cfg(target_os = "linux")]
 fn protect_n(p: u64, n: u64, access: bool) {
-    let prot = if access { nxrt::mem::Prot::ReadWrite } else { nxrt::mem::Prot::None };
+    let prot = if access {
+        nxrt::mem::Prot::ReadWrite
+    } else {
+        nxrt::mem::Prot::None
+    };
     if !nxrt::mem::protect(p, n * PAGE, prot) {
         for k in 0..n {
             nxrt::mem::protect(p + k * PAGE, PAGE, prot);
@@ -172,11 +198,30 @@ fn protect_n(p: u64, n: u64, access: bool) {
 fn protect(p: u64, access: bool) -> bool {
     use windows_sys::Win32::System::Memory::{VirtualProtect, PAGE_NOACCESS, PAGE_READWRITE};
     let mut old = 0u32;
-    unsafe { VirtualProtect(p as *const _, PAGE as usize, if access { PAGE_READWRITE } else { PAGE_NOACCESS }, &mut old) != 0 }
+    unsafe {
+        VirtualProtect(
+            p as *const _,
+            PAGE as usize,
+            if access {
+                PAGE_READWRITE
+            } else {
+                PAGE_NOACCESS
+            },
+            &mut old,
+        ) != 0
+    }
 }
 #[cfg(target_os = "linux")]
 fn protect(p: u64, access: bool) -> bool {
-    nxrt::mem::protect(p, PAGE, if access { nxrt::mem::Prot::ReadWrite } else { nxrt::mem::Prot::None })
+    nxrt::mem::protect(
+        p,
+        PAGE,
+        if access {
+            nxrt::mem::Prot::ReadWrite
+        } else {
+            nxrt::mem::Prot::None
+        },
+    )
 }
 
 /// Whether any page of [a, a + n) is held on the device (the host is about to touch it: read it back first).
@@ -213,7 +258,13 @@ pub fn outside(a: u64, n: u64) -> Option<Vec<(u64, u64)>> {
 }
 
 pub fn touch(a: u64, n: u64) {
-    if n == 0 || ST.lock().unwrap().as_ref().is_none_or(|s| s.lazy.is_empty()) {
+    if n == 0
+        || ST
+            .lock()
+            .unwrap()
+            .as_ref()
+            .is_none_or(|s| s.lazy.is_empty())
+    {
         return;
     }
     let t0 = std::time::Instant::now();
@@ -226,9 +277,17 @@ pub fn touch(a: u64, n: u64) {
         let Some(st) = g.as_ref() else { return };
         let span = (hi - lo).div_ceil(PAGE) as usize;
         if span <= st.lazy.len() + st.returning.len() {
-            (0..span as u64).map(|i| lo + i * PAGE).filter(|p| st.lazy.contains_key(p) || st.returning.contains(p)).collect()
+            (0..span as u64)
+                .map(|i| lo + i * PAGE)
+                .filter(|p| st.lazy.contains_key(p) || st.returning.contains(p))
+                .collect()
         } else {
-            st.lazy.keys().chain(st.returning.iter()).copied().filter(|&p| p >= lo && p < hi).collect()
+            st.lazy
+                .keys()
+                .chain(st.returning.iter())
+                .copied()
+                .filter(|&p| p >= lo && p < hi)
+                .collect()
         }
     };
     pages.sort_unstable();
@@ -250,7 +309,9 @@ pub fn bring_back(p: u64) -> bool {
         static MINE: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
     }
     if MINE.with(|m| m.get()) == p {
-        crate::log::red(&format!("lazy write-back: page {p:#x} faulted again while this thread brought it back"));
+        crate::log::red(&format!(
+            "lazy write-back: page {p:#x} faulted again while this thread brought it back"
+        ));
         return false;
     }
     let l = loop {
@@ -304,9 +365,17 @@ pub fn bring_back(p: u64) -> bool {
 
 #[cfg(windows)]
 fn accessible(p: u64) -> bool {
-    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_NOACCESS};
+    use windows_sys::Win32::System::Memory::{
+        VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_NOACCESS,
+    };
     let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
-    let n = unsafe { VirtualQuery(p as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
+    let n = unsafe {
+        VirtualQuery(
+            p as *const _,
+            &mut mbi,
+            core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        )
+    };
     n != 0 && mbi.State == MEM_COMMIT && mbi.Protect & PAGE_NOACCESS == 0
 }
 #[cfg(target_os = "linux")]
@@ -332,25 +401,71 @@ fn read_page(g: &Gpu, buf: vk::Buffer, off: u64) -> Vec<u8> {
     // completion thread's bookkeeping (the completion thread may be the one asking)
     let sems = [g.q.timeline];
     let vals = [g.q.last_fence()];
-    unsafe { g.dev().wait_semaphores(&vk::SemaphoreWaitInfo::default().semaphores(&sems).values(&vals), u64::MAX) }.ok();
+    unsafe {
+        g.dev().wait_semaphores(
+            &vk::SemaphoreWaitInfo::default()
+                .semaphores(&sems)
+                .values(&vals),
+            u64::MAX,
+        )
+    }
+    .ok();
     let mut rg = READER.lock().unwrap();
     if rg.is_none() {
-        let pci = vk::CommandPoolCreateInfo::default().queue_family_index(g.d.qfam).flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let pci = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(g.d.qfam)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
         let pool = unsafe { g.dev().create_command_pool(&pci, None) }.expect("lazy reader pool");
-        let ai = vk::CommandBufferAllocateInfo::default().command_pool(pool).level(vk::CommandBufferLevel::PRIMARY).command_buffer_count(1);
+        let ai = vk::CommandBufferAllocateInfo::default()
+            .command_pool(pool)
+            .level(vk::CommandBufferLevel::PRIMARY)
+            .command_buffer_count(1);
         let cb = unsafe { g.dev().allocate_command_buffers(&ai) }.expect("lazy reader cb")[0];
-        let fence = unsafe { g.dev().create_fence(&vk::FenceCreateInfo::default(), None) }.expect("lazy reader fence");
-        let stage = g.buffer(PAGE, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, "lazy page").expect("lazy page buffer");
-        *rg = Some(Reader { _pool: pool, cb, fence, stage });
+        let fence = unsafe { g.dev().create_fence(&vk::FenceCreateInfo::default(), None) }
+            .expect("lazy reader fence");
+        let stage = g
+            .buffer(
+                PAGE,
+                vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuToCpu,
+                "lazy page",
+            )
+            .expect("lazy page buffer");
+        *rg = Some(Reader {
+            _pool: pool,
+            cb,
+            fence,
+            stage,
+        });
     }
     let r = rg.as_ref().unwrap();
     unsafe {
         let d = g.dev();
-        d.reset_command_buffer(r.cb, vk::CommandBufferResetFlags::empty()).ok();
-        d.begin_command_buffer(r.cb, &vk::CommandBufferBeginInfo::default().flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT)).ok();
+        d.reset_command_buffer(r.cb, vk::CommandBufferResetFlags::empty())
+            .ok();
+        d.begin_command_buffer(
+            r.cb,
+            &vk::CommandBufferBeginInfo::default()
+                .flags(vk::CommandBufferUsageFlags::ONE_TIME_SUBMIT),
+        )
+        .ok();
         super::queue::full_barrier(g, r.cb);
-        super::lost::checkpoint(g, r.cb, false, || format!("a lazy page read from buffer {:#x} at {off:#x}", vk::Handle::as_raw(buf)));
-        d.cmd_copy_buffer(r.cb, buf, r.stage.buf, &[vk::BufferCopy { src_offset: off, dst_offset: 0, size: PAGE }]);
+        super::lost::checkpoint(g, r.cb, false, || {
+            format!(
+                "a lazy page read from buffer {:#x} at {off:#x}",
+                vk::Handle::as_raw(buf)
+            )
+        });
+        d.cmd_copy_buffer(
+            r.cb,
+            buf,
+            r.stage.buf,
+            &[vk::BufferCopy {
+                src_offset: off,
+                dst_offset: 0,
+                size: PAGE,
+            }],
+        );
         let mb = [vk::MemoryBarrier2::default()
             .src_stage_mask(vk::PipelineStageFlags2::ALL_TRANSFER)
             .src_access_mask(vk::AccessFlags2::TRANSFER_WRITE)
@@ -389,7 +504,9 @@ unsafe fn lazy_fault(f: &mut nxrt::linux::Fault) -> bool {
 }
 
 #[cfg(windows)]
-unsafe extern "system" fn veh(ep: *mut windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS) -> i32 {
+unsafe extern "system" fn veh(
+    ep: *mut windows_sys::Win32::System::Diagnostics::Debug::EXCEPTION_POINTERS,
+) -> i32 {
     use windows_sys::Win32::Foundation::EXCEPTION_ACCESS_VIOLATION;
     const CONTINUE_EXECUTION: i32 = -1;
     const CONTINUE_SEARCH: i32 = 0;

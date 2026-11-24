@@ -26,7 +26,9 @@ pub fn set_shader_dir(p: std::path::PathBuf) {
 /// The profile's `shader_key_skip` (control bytes shader keys hash as zeros), set before any program is keyed.
 pub fn set_shader_key_skip(skip: Option<(u32, u32)>) {
     if let Some((o, l)) = skip {
-        crate::nvnlog!("shader keys hash control bytes {o:#x}+{l:#x} as zeros (profile shader_key_skip)");
+        crate::nvnlog!(
+            "shader keys hash control bytes {o:#x}+{l:#x} as zeros (profile shader_key_skip)"
+        );
     }
     shaders::nvn::set_key_skip(skip);
 }
@@ -34,10 +36,15 @@ pub fn set_shader_key_skip(skip: Option<(u32, u32)>) {
 /// F5's graphics part (Turbo's `gpu_gl_dump_rts`): the render targets that exist now, as text, and a pass dump of
 /// the next frame (each pass's colour targets as PNGs in `captures`, `vk::exec::passdump`).
 pub fn diag_dump() -> String {
-    let Some(g) = vk::Gpu::try_get() else { return String::new() };
+    let Some(g) = vk::Gpu::try_get() else {
+        return String::new();
+    };
     vk::exec::passdump::request_now();
     let rts = g.images.lock().unwrap().render_targets();
-    let mut s = format!("# render targets ({}; the next frame's passes are dumped as PNGs into captures)\n", rts.len());
+    let mut s = format!(
+        "# render targets ({}; the next frame's passes are dumped as PNGs into captures)\n",
+        rts.len()
+    );
     for l in rts {
         s += &l;
         s.push('\n');
@@ -89,36 +96,68 @@ pub fn register_controls() {
     if std::env::var("NXGFX_A2C").as_deref() == Ok("0") {
         vk::exec::A2C.store(false, std::sync::atomic::Ordering::Relaxed);
     }
-    nxconfig::ctl::register("shot", "[path]: a screenshot of the next present (PNG; default captures/shot-<n>.png)", |a| {
-        vk::shot::request(a.first().copied().unwrap_or(""));
-        "ok".into()
-    });
-    nxconfig::ctl::register("a2c", "0|1: alpha to coverage off / as the game sets it (live)", |a| {
-        let on = a.first().is_none_or(|v| *v != "0");
-        vk::exec::A2C.store(on, std::sync::atomic::Ordering::Relaxed);
-        format!("a2c {}", on as u8)
-    });
+    nxconfig::ctl::register(
+        "shot",
+        "[path]: a screenshot of the next present (PNG; default captures/shot-<n>.png)",
+        |a| {
+            vk::shot::request(a.first().copied().unwrap_or(""));
+            "ok".into()
+        },
+    );
+    nxconfig::ctl::register(
+        "a2c",
+        "0|1: alpha to coverage off / as the game sets it (live)",
+        |a| {
+            let on = a.first().is_none_or(|v| *v != "0");
+            vk::exec::A2C.store(on, std::sync::atomic::Ordering::Relaxed);
+            format!("a2c {}", on as u8)
+        },
+    );
     if std::env::var("NXGFX_ALPHA_TEST").as_deref() == Ok("0") {
         vk::exec::A_TEST.store(false, std::sync::atomic::Ordering::Relaxed);
     }
-    nxconfig::ctl::register("alpha_test", "0|1: NVN's alpha test off / applied in the pixel shader (live)", |a| {
-        let on = a.first().is_none_or(|v| *v != "0");
-        vk::exec::A_TEST.store(on, std::sync::atomic::Ordering::Relaxed);
-        format!("alpha_test {}", on as u8)
+    nxconfig::ctl::register(
+        "alpha_test",
+        "0|1: NVN's alpha test off / applied in the pixel shader (live)",
+        |a| {
+            let on = a.first().is_none_or(|v| *v != "0");
+            vk::exec::A_TEST.store(on, std::sync::atomic::Ordering::Relaxed);
+            format!("alpha_test {}", on as u8)
+        },
+    );
+    nxconfig::ctl::register(
+        "image_noflag",
+        "0|1: storage use for textures used as images without the IMAGE flag (new textures)",
+        |a| {
+            let on = a.first().is_none_or(|v| *v != "0");
+            std::env::set_var("NXGFX_IMAGE_NOFLAG", if on { "1" } else { "0" });
+            format!("image_noflag {}", on as u8)
+        },
+    );
+    nxconfig::ctl::register(
+        "pcache",
+        ": write the pipeline cache now",
+        |_| match vk::Gpu::try_get() {
+            Some(g) => format!("{}", vk::pcache::save_now(g)),
+            None => "no device".into(),
+        },
+    );
+    nxconfig::ctl::register(
+        "passdump",
+        ": the colour targets of the next frame's passes as PNGs (captures/)",
+        |_| {
+            vk::exec::passdump::request_now();
+            "ok".into()
+        },
+    );
+    nxconfig::ctl::register("gfx", ": the replay's counters", |_| {
+        vk::perf::snapshot()
+            .iter()
+            .map(|(n, v)| format!("{n} {v}"))
+            .collect::<Vec<_>>()
+            .join(
+                "
+",
+            )
     });
-    nxconfig::ctl::register("image_noflag", "0|1: storage use for textures used as images without the IMAGE flag (new textures)", |a| {
-        let on = a.first().is_none_or(|v| *v != "0");
-        std::env::set_var("NXGFX_IMAGE_NOFLAG", if on { "1" } else { "0" });
-        format!("image_noflag {}", on as u8)
-    });
-    nxconfig::ctl::register("pcache", ": write the pipeline cache now", |_| match vk::Gpu::try_get() {
-        Some(g) => format!("{}", vk::pcache::save_now(g)),
-        None => "no device".into(),
-    });
-    nxconfig::ctl::register("passdump", ": the colour targets of the next frame's passes as PNGs (captures/)", |_| {
-        vk::exec::passdump::request_now();
-        "ok".into()
-    });
-    nxconfig::ctl::register("gfx", ": the replay's counters", |_| vk::perf::snapshot().iter().map(|(n, v)| format!("{n} {v}")).collect::<Vec<_>>().join("
-"));
 }

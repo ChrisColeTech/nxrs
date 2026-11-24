@@ -68,6 +68,13 @@ pub enum C {
     TfCaptures,
     SetsReused,
     VinSkipped,
+    PoolSnapshots,
+    PoolSnapshotReused,
+    PoolSnapshotNs,
+    PoolSnapshotBytes,
+    PoolSnapshotDeviceReadBytes,
+    PoolPrepareScans,
+    PoolPrepareImages,
     N,
 }
 
@@ -120,6 +127,13 @@ const NAMES: [&str; C::N as usize] = [
     "tf_captures",
     "sets_reused",
     "vertex_input_skipped",
+    "pool_snapshots",
+    "pool_snapshot_reused",
+    "pool_snapshot_ns",
+    "pool_snapshot_bytes",
+    "pool_snapshot_device_read_bytes",
+    "pool_prepare_scans",
+    "pool_prepare_images",
 ];
 
 static COUNT: [AtomicU64; C::N as usize] = [const { AtomicU64::new(0) }; C::N as usize];
@@ -140,16 +154,32 @@ pub fn max(c: C, v: u64) {
 }
 /// Every counter by name (the metrics and the harness).
 pub fn snapshot() -> Vec<(&'static str, u64)> {
-    (0..C::N as usize).map(|i| (NAMES[i], COUNT[i].load(Ordering::Relaxed))).collect()
+    (0..C::N as usize)
+        .map(|i| (NAMES[i], COUNT[i].load(Ordering::Relaxed)))
+        .collect()
 }
 
 /// Graphics' columns of the per-frame metrics CSV (`frames-*.csv`, os `frame_row`): the header part.
-pub const FRAME_COLUMNS: &str = "draws,draws_skipped,passes,dispatches,gpu_ms,replay_ms,acquire_wait_ms,tex_upload_ms,pipelines_made";
+pub const FRAME_COLUMNS: &str = "draws,draws_skipped,passes,dispatches,gpu_ms,replay_ms,acquire_wait_ms,tex_upload_ms,pipelines_made,prep_ms,pool_sync_ms,descriptor_ms,pipeline_ms";
 
 /// Graphics' columns of one row: what the counters moved since the previous row (one row a present).
 pub fn frame_columns() -> String {
-    const CS: [C; 9] = [C::Draws, C::DrawsSkipped, C::Passes, C::Dispatches, C::GpuNs, C::ReplayNs, C::WaitAcquireNs, C::TexUploadNs, C::PipesGfx];
-    static LAST: std::sync::Mutex<[u64; 9]> = std::sync::Mutex::new([0; 9]);
+    const CS: [C; 13] = [
+        C::Draws,
+        C::DrawsSkipped,
+        C::Passes,
+        C::Dispatches,
+        C::GpuNs,
+        C::ReplayNs,
+        C::WaitAcquireNs,
+        C::TexUploadNs,
+        C::PipesGfx,
+        C::PrepNs,
+        C::PoolSyncNs,
+        C::SetNs,
+        C::PipeNs,
+    ];
+    static LAST: std::sync::Mutex<[u64; 13]> = std::sync::Mutex::new([0; 13]);
     let mut l = LAST.lock().unwrap();
     let mut out = String::new();
     for (i, c) in CS.iter().enumerate() {
@@ -162,7 +192,17 @@ pub fn frame_columns() -> String {
         if i > 0 {
             out.push(',');
         }
-        if matches!(c, C::GpuNs | C::ReplayNs | C::WaitAcquireNs | C::TexUploadNs) {
+        if matches!(
+            c,
+            C::GpuNs
+                | C::ReplayNs
+                | C::WaitAcquireNs
+                | C::TexUploadNs
+                | C::PrepNs
+                | C::PoolSyncNs
+                | C::SetNs
+                | C::PipeNs
+        ) {
             out += &format!("{:.3}", d as f64 / 1e6);
         } else {
             out += &d.to_string();
@@ -231,11 +271,31 @@ fn render_sizes_line(frame: u64, frames: u64) -> Option<String> {
     if v.is_empty() {
         return None;
     }
-    let (mw, mh) = v.iter().filter(|e| e.3 > 0).map(|e| (e.0, e.1)).max_by_key(|e| e.0 as u64 * e.1 as u64).unwrap_or((0, 0));
+    let (mw, mh) = v
+        .iter()
+        .filter(|e| e.3 > 0)
+        .map(|e| (e.0, e.1))
+        .max_by_key(|e| e.0 as u64 * e.1 as u64)
+        .unwrap_or((0, 0));
     v.sort_by(|a, b| b.2.cmp(&a.2));
     let f = frames.max(1) as f64;
-    let parts: Vec<String> = v.iter().take(8).map(|e| format!("{}x{} x{:.1} ({:.1} with depth)", e.0, e.1, e.2 as f64 / f, e.3 as f64 / f)).collect();
-    Some(format!("render sizes up to frame {frame}, passes per frame: {}; largest with depth {mw}x{mh}", parts.join(", ")))
+    let parts: Vec<String> = v
+        .iter()
+        .take(8)
+        .map(|e| {
+            format!(
+                "{}x{} x{:.1} ({:.1} with depth)",
+                e.0,
+                e.1,
+                e.2 as f64 / f,
+                e.3 as f64 / f
+            )
+        })
+        .collect();
+    Some(format!(
+        "render sizes up to frame {frame}, passes per frame: {}; largest with depth {mw}x{mh}",
+        parts.join(", ")
+    ))
 }
 
 // ---------- frame telemetry ----------
@@ -257,15 +317,24 @@ struct Ring {
 static RING: Mutex<Option<Ring>> = Mutex::new(None);
 
 fn csv_start() {
-    let Ok(p) = std::env::var("NXGFX_FRAME_CSV") else { return };
-    let f = match std::fs::OpenOptions::new().write(true).create_new(true).open(&p) {
+    let Ok(p) = std::env::var("NXGFX_FRAME_CSV") else {
+        return;
+    };
+    let f = match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&p)
+    {
         Ok(f) => f,
         Err(e) => {
             crate::log::red(&format!("cannot create frame telemetry {p}: {e}"));
             return;
         }
     };
-    *RING.lock().unwrap() = Some(Ring { rows: Default::default(), lost: 0 });
+    *RING.lock().unwrap() = Some(Ring {
+        rows: Default::default(),
+        lost: 0,
+    });
     crate::vklog!("frame telemetry: {p}; bounded ring, background writer");
     std::thread::Builder::new()
         .name("vk frame telemetry".into())
@@ -305,7 +374,7 @@ fn csv_start() {
 fn breakdown(cur: &[u64; C::N as usize], base: &[u64; C::N as usize], frames: f64) -> String {
     let d = |c: C| (cur[c as usize] - base[c as usize]) as f64 / 1e6 / frames;
     format!(
-        "prep {:.2} (pools {:.2}, texture hashes {:.2}), sets {:.2} (memory {:.2}, views {:.2}, banks {:.2}, keys {:.2}, writes {:.2}), pipeline lookups {:.2}, passes {:.2}, vertex input {:.2}, uploads {:.2} ms, {:.1} uploads skipped (same bytes), {:.1} images reused",
+        "prep {:.2} (pools {:.2}, texture hashes {:.2}), sets {:.2} (memory {:.2}, views {:.2}, banks {:.2}, keys {:.2}, writes {:.2}), pipeline lookups {:.2}, passes {:.2}, vertex input {:.2}, uploads {:.2} ms, {:.1} uploads skipped (same bytes), {:.1} images reused, pool snapshots {:.2} ms ({:.1} made, {:.1} reused), pool preparation {:.1} passes / {:.1} images",
         d(C::PrepNs),
         d(C::PoolSyncNs),
         d(C::HashNs),
@@ -320,13 +389,20 @@ fn breakdown(cur: &[u64; C::N as usize], base: &[u64; C::N as usize], frames: f6
         d(C::VtxNs),
         d(C::TexUploadNs),
         (cur[C::UploadsSame as usize] - base[C::UploadsSame as usize]) as f64 / frames,
-        (cur[C::ImagesReused as usize] - base[C::ImagesReused as usize]) as f64 / frames
+        (cur[C::ImagesReused as usize] - base[C::ImagesReused as usize]) as f64 / frames,
+        d(C::PoolSnapshotNs),
+        (cur[C::PoolSnapshots as usize] - base[C::PoolSnapshots as usize]) as f64 / frames,
+        (cur[C::PoolSnapshotReused as usize] - base[C::PoolSnapshotReused as usize]) as f64 / frames,
+        (cur[C::PoolPrepareScans as usize] - base[C::PoolPrepareScans as usize]) as f64 / frames,
+        (cur[C::PoolPrepareImages as usize] - base[C::PoolPrepareImages as usize]) as f64 / frames
     )
 }
 
 fn dropped_total() -> u64 {
     // the counters of work not done (texture formats .. unsupported primitives), not the plain counts after them
-    (C::TexNoFormat as usize..=C::DrawPrim as usize).map(|i| COUNT[i].load(Ordering::Relaxed)).sum()
+    (C::TexNoFormat as usize..=C::DrawPrim as usize)
+        .map(|i| COUNT[i].load(Ordering::Relaxed))
+        .sum()
 }
 
 struct FrameState {
@@ -338,11 +414,24 @@ struct FrameState {
     rsz_frame: u64,
     slow_lines: u64,
 }
-static FRAME: Mutex<FrameState> = Mutex::new(FrameState { started: false, t_last: 0, prev: [0; C::N as usize], prev_frame: 0, slow: [0; C::N as usize], rsz_frame: 0, slow_lines: 0 });
+static FRAME: Mutex<FrameState> = Mutex::new(FrameState {
+    started: false,
+    t_last: 0,
+    prev: [0; C::N as usize],
+    prev_frame: 0,
+    slow: [0; C::N as usize],
+    rsz_frame: 0,
+    slow_lines: 0,
+});
 
 fn slow_ms() -> u64 {
     static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
-    *V.get_or_init(|| std::env::var("NXGFX_SLOW_MS").ok().and_then(|v| v.parse().ok()).unwrap_or(50))
+    *V.get_or_init(|| {
+        std::env::var("NXGFX_SLOW_MS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(50)
+    })
 }
 
 /// Every present (frame number from 1).
@@ -463,11 +552,13 @@ mod tests {
         let _ = super::frame_columns();
         super::add(super::C::Draws, 7);
         super::add(super::C::GpuNs, 2_500_000);
+        super::add(super::C::PoolSyncNs, 3_500_000);
         let row = super::frame_columns();
         let f: Vec<&str> = row.split(',').collect();
         assert_eq!(f.len(), super::FRAME_COLUMNS.split(',').count());
         assert!(f[0].parse::<u64>().unwrap() >= 7, "draws {row}");
         assert!(f[4].parse::<f64>().unwrap() >= 2.5, "gpu_ms {row}");
+        assert!(f[10].parse::<f64>().unwrap() >= 3.5, "pool_sync_ms {row}");
     }
     #[test]
     fn render_sizes_are_listed_most_used_first() {
@@ -483,7 +574,9 @@ mod tests {
 /// Where memory is (every 600 frames): the process's private bytes, the allocator's blocks and allocations by name,
 /// images, parked images, staging kept by recycled submissions, and imported / mirrored pools.
 pub fn memory_line() -> String {
-    let Some(g) = super::Gpu::try_get() else { return String::new() };
+    let Some(g) = super::Gpu::try_get() else {
+        return String::new();
+    };
     let private = private_mb();
     let rep = g.alloc.lock().unwrap().generate_report();
     let mut by: std::collections::HashMap<String, (u64, u64)> = std::collections::HashMap::new();
@@ -494,7 +587,11 @@ pub fn memory_line() -> String {
     }
     let mut v: Vec<_> = by.into_iter().collect();
     v.sort_by(|a, b| b.1 .1.cmp(&a.1 .1));
-    let top: Vec<String> = v.iter().take(8).map(|(n, (c, b))| format!("{n} {c} = {} MB", b >> 20)).collect();
+    let top: Vec<String> = v
+        .iter()
+        .take(8)
+        .map(|(n, (c, b))| format!("{n} {c} = {} MB", b >> 20))
+        .collect();
     let (ni, parked) = g.image_counts();
     format!(
         "memory: private {private} MB; allocator {} MB in blocks, {} MB allocated ({}); this layer's system memory {} MB ({} refused over its cap); images {ni}, parked {parked}, {} registered without one yet; replay queue {} ops behind, {} submits replayed with the one before",
@@ -511,12 +608,18 @@ pub fn memory_line() -> String {
 
 #[cfg(windows)]
 fn private_mb() -> u64 {
-    use windows_sys::Win32::System::ProcessStatus::{GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX};
+    use windows_sys::Win32::System::ProcessStatus::{
+        GetProcessMemoryInfo, PROCESS_MEMORY_COUNTERS_EX,
+    };
     use windows_sys::Win32::System::Threading::GetCurrentProcess;
     let mut c: PROCESS_MEMORY_COUNTERS_EX = unsafe { core::mem::zeroed() };
     c.cb = core::mem::size_of::<PROCESS_MEMORY_COUNTERS_EX>() as u32;
     let ok = unsafe { GetProcessMemoryInfo(GetCurrentProcess(), &mut c as *mut _ as *mut _, c.cb) };
-    if ok != 0 { c.PrivateUsage as u64 >> 20 } else { 0 }
+    if ok != 0 {
+        c.PrivateUsage as u64 >> 20
+    } else {
+        0
+    }
 }
 #[cfg(target_os = "linux")]
 fn private_mb() -> u64 {

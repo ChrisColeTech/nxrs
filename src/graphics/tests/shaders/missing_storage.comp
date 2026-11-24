@@ -1,0 +1,19 @@
+#version 450
+layout(local_size_x = 1) in;
+layout(set = 5, binding = 1, std430) coherent buffer MissingA { uint a[]; };
+layout(set = 5, binding = 2, std430) coherent buffer MissingB { uint b[]; };
+layout(set = 5, binding = 3, std430) readonly buffer MissingRead { uint r[]; };
+layout(set = 5, binding = 4, std430) buffer Result { uint result_data[]; };
+layout(set = 5, binding = 5, std140) uniform MissingUniform { uvec4 u; };
+void main() {
+    result_data[0] = atomicAdd(a[0], 17u);
+    memoryBarrierBuffer();
+    result_data[1] = atomicAdd(b[0], 29u);
+    a[1] = 0x3f800000u;
+    b[2] = 0x7fc00000u;
+    memoryBarrierBuffer();
+    result_data[2] = r[1];
+    result_data[3] = u.z;
+    result_data[4] = r[0];
+    result_data[5] = 0x12345678u;
+}

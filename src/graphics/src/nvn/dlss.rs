@@ -46,14 +46,21 @@ pub fn optimal(b: &dlss_builder_t) -> [i32; 6] {
     [cd(b.w, f), cd(b.h, f), cd(b.w, 3), cd(b.h, 3), b.w, b.h]
 }
 
-unsafe fn set_tex(p: *mut NVNdlssParameters, k: usize, t: *const NVNtexture, v: *const NVNtextureView) {
+unsafe fn set_tex(
+    p: *mut NVNdlssParameters,
+    k: usize,
+    t: *const NVNtexture,
+    v: *const NVNtextureView,
+) {
     let o = pr(p);
     o.tex[k] = t as *const tex_t;
     if v.is_null() {
         o.has_view &= !(1 << k);
     } else {
         o.has_view |= 1 << k;
-        crate::log::red_once(&format!("DLSS parameter {k} given a texture view: the whole texture is used"));
+        crate::log::red_once(&format!(
+            "DLSS parameter {k} given a texture view: the whole texture is used"
+        ));
     }
 }
 

@@ -1,0 +1,78 @@
+#version 460
+#extension GL_EXT_control_flow_attributes : require
+layout(local_size_x = 64) in;
+layout(set=0,binding=0,std430) readonly buffer Luma { uint luma[]; };
+layout(set=0,binding=1,std430) writeonly buffer Output { uint outpic[]; };
+layout(set=0,binding=2,std430) readonly buffer Weights { uint weights[]; };
+layout(set=0,binding=3,std430) readonly buffer Dither { uint dither[]; };
+layout(set=0,binding=4,std430) readonly buffer Picture { uint picture[]; };
+layout(push_constant) uniform Args {
+    uint width, height, dither_w, dither_h;
+    uint kind, count, rounding, flip;
+} p;
+shared float X[256];
+shared float H[512];
+shared float Y[256];
+// Host rounding=16 matches the retained Vulkan HMMA helper: ordered FP32 FMAs,
+// then one half pack per matrix product. In stage two, round at each g boundary,
+// carrying the rounded H_0*W2_0 accumulator into H_1*W2_1 (not one 32-product sum).
+float wh(uint i) { return unpackHalf2x16(weights[i/2])[i&1]; }
+float lh(uint i) { return unpackHalf2x16(luma[i/2])[i&1]; }
+float rh(float x) { return unpackHalf2x16(packHalf2x16(vec2(x,0))).x; }
+vec3 rgb10(uint v) { return vec3(v&1023,(v>>10)&1023,(v>>20)&1023)/1023.0; }
+vec3 fetchpic(ivec2 q) {
+    q=clamp(q,ivec2(0),ivec2(p.width-1,p.height-1));
+    return rgb10(picture[uint(q.y)*p.width+uint(q.x)]);
+}
+void main() {
+    uint lane=gl_LocalInvocationID.x, ow=p.width*4/3, oh=p.height*4/3;
+    uint bx=gl_WorkGroupID.x%(ow/8), by=gl_WorkGroupID.x/(ow/8);
+    for(uint i=lane;i<256;i+=64) {
+        int x=clamp(int(6*bx)-5+int(i%16),0,int(p.width)-1);
+        int y=clamp(int(6*by)-5+int(i/16),0,int(p.height)-1);
+        X[i]=lh(uint(y)*p.width+uint(x));
+    }
+    barrier();
+    [[dont_unroll]] for(uint block=0;block<6;++block) {
+        for(uint i=lane;i<512;i+=64) {
+            uint g=i/256,m=(i%256)/16,n=i%16;
+            precise float a=0.0;
+            [[dont_unroll]] for(uint k=0;k<16;++k) {
+                a=fma(wh(block*1024+256*g+128*(k/8)+8*m+k%8),X[k*16+n],a);
+                if((k+1)%p.rounding==0) a=rh(a);
+            }
+            H[i]=a;
+        }
+        barrier();
+        for(uint i=lane;i<256;i+=64) {
+            uint m=i/16,n=i%16;
+            precise float a=0.0;
+            [[dont_unroll]] for(uint g=0;g<2;++g) {
+                [[dont_unroll]] for(uint k=0;k<16;++k) {
+                    a=fma(H[g*256+m*16+k],wh(block*1024+512+256*g+128*(n/8)+8*k+n%8),a);
+                    if((k+1)%p.rounding==0) a=rh(a);
+                }
+            }
+            Y[i]=block<5?max(a,0.0):a;
+        }
+        barrier();
+        for(uint i=lane;i<256;i+=64) X[i]=Y[i];
+        barrier();
+    }
+    uint x=8*bx+lane%8,y=8*by+lane/8;
+    float delta=X[(lane/8)*16+lane%8];
+    // Buffer transport oracle. Hardware image filtering precision is a separate
+    // certification gate; this bilinear implementation must not enable replay.
+    precise vec2 uv=(vec2(x,y)+0.5)*vec2(1.0/float(ow),1.0/float(oh));
+    precise vec2 q=uv*vec2(p.width,p.height)-0.5;
+    ivec2 base=ivec2(floor(q)); vec2 f=fract(q);
+    precise vec3 top=fetchpic(base)*(1.0-f.x)+fetchpic(base+ivec2(1,0))*f.x;
+    precise vec3 bottom=fetchpic(base+ivec2(0,1))*(1.0-f.x)+fetchpic(base+ivec2(1,1))*f.x;
+    precise vec3 samplepic=top*(1.0-f.y)+bottom*f.y;
+    vec3 dv=rgb10(dither[(y%p.dither_h)*p.dither_w+x%p.dither_w]);
+    vec3 off=fma(dv,vec3(2.0),vec3(-1.0));
+    precise vec3 v=vec3(-0.0)+(samplepic+delta);
+    vec3 k=roundEven(fma(v,vec3(255.0),off));
+    uint yo=p.flip!=0?oh-1-y:y;
+    outpic[yo*ow+x]=packUnorm4x8(vec4(k*0.0039215688593685626983642578125,1.0));
+}

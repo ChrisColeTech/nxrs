@@ -47,19 +47,35 @@ struct HostSegs {
     bytes: u64,
     total: u64,
 }
-static HOSTSEGS: Mutex<HostSegs> = Mutex::new(HostSegs { segs: Vec::new(), bytes: 0, total: 0 });
+static HOSTSEGS: Mutex<HostSegs> = Mutex::new(HostSegs {
+    segs: Vec::new(),
+    bytes: 0,
+    total: 0,
+});
 /// Busy segments with a guest range: 0 lets `hostseg_written` return without the lock.
 static HOSTSEG_HELD: AtomicU32 = AtomicU32::new(0);
 
 fn hostseg_size(o: &cmd_t, empty_pool: bool, want: usize) -> usize {
     if empty_pool {
-        return if want != 0 && want <= HOSTSEG_SMALL && o.recording == 0 { HOSTSEG_SMALL } else { HOSTSEG_SZ };
+        return if want != 0 && want <= HOSTSEG_SMALL && o.recording == 0 {
+            HOSTSEG_SMALL
+        } else {
+            HOSTSEG_SZ
+        };
     }
-    if want > HOSTSEG_SZ { (want + 0xfff) & !0xfff } else { HOSTSEG_SZ }
+    if want > HOSTSEG_SZ {
+        (want + 0xfff) & !0xfff
+    } else {
+        HOSTSEG_SZ
+    }
 }
 
 fn cmd_own(o: &cmd_t) -> usize {
-    if o.own_back != 0 { o.end as usize - o.own_back as usize } else { 0 }
+    if o.own_back != 0 {
+        o.end as usize - o.own_back as usize
+    } else {
+        0
+    }
 }
 
 /// A segment of `n` bytes for the recording `o` to continue in.
@@ -71,7 +87,10 @@ unsafe fn hostseg_take(o: &mut cmd_t, n: usize) -> *mut u8 {
     let mut g = HOSTSEGS.lock().unwrap_or_else(|e| e.into_inner());
     let (mut lo, mut hi) = (0usize, 0usize);
     let in_seg = if cur != 0 {
-        g.segs.iter().find(|s| cur >= s.mem && o.end as usize == s.mem + s.n).map(|s| (s.lo, s.hi))
+        g.segs
+            .iter()
+            .find(|s| cur >= s.mem && o.end as usize == s.mem + s.n)
+            .map(|s| (s.lo, s.hi))
     } else {
         None
     };
@@ -80,7 +99,13 @@ unsafe fn hostseg_take(o: &mut cmd_t, n: usize) -> *mut u8 {
         hi = b;
     } else if o.recording != 0 && cur != 0 {
         let own = cmd_own(o);
-        let own = if own != 0 && own <= cur { own } else if cur < o.end as usize { cur } else { 0 };
+        let own = if own != 0 && own <= cur {
+            own
+        } else if cur < o.end as usize {
+            cur
+        } else {
+            0
+        };
         if own != 0 {
             lo = own;
             hi = if cur > lo { cur } else { lo + 1 };
@@ -92,13 +117,27 @@ unsafe fn hostseg_take(o: &mut cmd_t, n: usize) -> *mut u8 {
     let rec = o.rec_id;
     let mut m = 0usize;
     if let Some(s) = g.segs.iter_mut().find(|s| !s.busy && s.n == n) {
-        *s = HostSeg { mem: s.mem, n, busy: true, lo, hi, rec_id: rec };
+        *s = HostSeg {
+            mem: s.mem,
+            n,
+            busy: true,
+            lo,
+            hi,
+            rec_id: rec,
+        };
         m = s.mem;
     }
     if m == 0 && g.bytes + n as u64 <= HOSTSEG_CAP {
         let v = vec![0u64; n / 8].into_boxed_slice();
         m = Box::leak(v).as_mut_ptr() as usize;
-        g.segs.push(HostSeg { mem: m, n, busy: true, lo, hi, rec_id: rec });
+        g.segs.push(HostSeg {
+            mem: m,
+            n,
+            busy: true,
+            lo,
+            hi,
+            rec_id: rec,
+        });
         g.bytes += n as u64;
     }
     if m != 0 && hi > lo {
@@ -138,10 +177,15 @@ fn ctlseg_take(n: usize) -> *mut u8 {
     static BYTES: AtomicU64 = AtomicU64::new(0);
     let b = BYTES.fetch_add(n as u64, Ordering::Relaxed) + n as u64;
     if b > 256 << 20 {
-        panic!("NVN control memory: the game gives none and host-lent control memory reached 256 MB");
+        panic!(
+            "NVN control memory: the game gives none and host-lent control memory reached 256 MB"
+        );
     }
     if b == n as u64 || b % (16 << 20) == 0 {
-        crate::nvnlog!("the game gave no control memory when asked, the host lends a block ({} KB so far)", b >> 10);
+        crate::nvnlog!(
+            "the game gave no control memory when asked, the host lends a block ({} KB so far)",
+            b >> 10
+        );
     }
     let v = vec![0u64; n / 8].into_boxed_slice();
     Box::leak(v).as_mut_ptr() as *mut u8
@@ -166,9 +210,17 @@ unsafe fn cmd_new_segment(o: &mut cmd_t, mem: *mut u8, n: usize) {
 }
 
 unsafe fn ctl_set(o: &mut cmd_t, m: *mut u8, n: usize) {
-    let a = if m.is_null() { core::ptr::null_mut() } else { align8(m) };
+    let a = if m.is_null() {
+        core::ptr::null_mut()
+    } else {
+        align8(m)
+    };
     let pad = a as usize - m as usize;
-    let mut n = if !a.is_null() && n > pad { (n - pad) & !7 } else { 0 };
+    let mut n = if !a.is_null() && n > pad {
+        (n - pad) & !7
+    } else {
+        0
+    };
     n = n.min(0xffff_fff8);
     if !o.ctl_list.is_null() && !o.ctl_mem.is_null() {
         if n < 8 {
@@ -191,7 +243,15 @@ unsafe fn ctl_put(o: &mut cmd_t, e: u64) {
             ctl_set(o, m, CTLSEG_SZ);
             break;
         }
-        super::call_guest(o.cb, &[o as *mut cmd_t as u64, cmdbuf_mem_event::OUT_OF_CONTROL_MEMORY as u64, need as u64, o.cb_data]);
+        super::call_guest(
+            o.cb,
+            &[
+                o as *mut cmd_t as u64,
+                cmdbuf_mem_event::OUT_OF_CONTROL_MEMORY as u64,
+                need as u64,
+                o.cb_data,
+            ],
+        );
         tries += 1;
     }
     let p = o.ctl_mem.add(o.ctl_used as usize);
@@ -226,7 +286,11 @@ unsafe fn ctl_flush(o: &mut cmd_t) {
 unsafe fn ctl_chunk_close(o: &mut cmd_t) {
     if !o.chunk.is_null() && o.cur > o.chunk {
         hostseg_written(o, o.chunk, (o.cur as usize - o.chunk as usize) as u64);
-        let e = ctl_e(CTL_CHUNK, o.chunk, (o.cur as usize - o.chunk as usize) as u64);
+        let e = ctl_e(
+            CTL_CHUNK,
+            o.chunk,
+            (o.cur as usize - o.chunk as usize) as u64,
+        );
         ctl_push(o, e);
     }
     o.chunk = core::ptr::null_mut();
@@ -251,7 +315,15 @@ unsafe fn cmd_alloc(o: &mut cmd_t, size: u32) -> *mut u8 {
             cmd_new_segment(o, m, sz);
             break;
         }
-        super::call_guest(o.cb, &[o as *mut cmd_t as u64, cmdbuf_mem_event::OUT_OF_COMMAND_MEMORY as u64, size as u64, o.cb_data]);
+        super::call_guest(
+            o.cb,
+            &[
+                o as *mut cmd_t as u64,
+                cmdbuf_mem_event::OUT_OF_COMMAND_MEMORY as u64,
+                size as u64,
+                o.cb_data,
+            ],
+        );
         tries += 1;
     }
     let p = o.cur;
@@ -337,7 +409,11 @@ pub(crate) unsafe fn rec_draw(c: *mut NVNcommandBuffer, d: p_draw) {
         put32(&mut q, d.instances as u32);
         return;
     }
-    let n = if d.ind != 0 || d.mdi_cnt != 0 { core::mem::size_of::<p_draw>() } else { P_DRAW_IND_OFF };
+    let n = if d.ind != 0 || d.mdi_cnt != 0 {
+        core::mem::size_of::<p_draw>()
+    } else {
+        P_DRAW_IND_OFF
+    };
     core::ptr::copy_nonoverlapping(&d as *const p_draw as *const u8, rec(c, op::DRAW, n), n);
 }
 unsafe fn rec_draw_idx(c: *mut NVNcommandBuffer, d: p_draw_idx) {
@@ -366,8 +442,16 @@ unsafe fn rec_draw_idx(c: *mut NVNcommandBuffer, d: p_draw_idx) {
             return;
         }
     }
-    let n = if d.ind != 0 || d.mdi_cnt != 0 { core::mem::size_of::<p_draw_idx>() } else { P_DRAW_IDX_IND_OFF };
-    core::ptr::copy_nonoverlapping(&d as *const p_draw_idx as *const u8, rec(c, op::DRAW_IDX, n), n);
+    let n = if d.ind != 0 || d.mdi_cnt != 0 {
+        core::mem::size_of::<p_draw_idx>()
+    } else {
+        P_DRAW_IDX_IND_OFF
+    };
+    core::ptr::copy_nonoverlapping(
+        &d as *const p_draw_idx as *const u8,
+        rec(c, op::DRAW_IDX, n),
+        n,
+    );
 }
 
 // ---------- compact record expansion ----------
@@ -405,7 +489,11 @@ pub unsafe fn rec_expand(r: *const u8, out: &mut Vec<u8>) {
     };
     match h.op & 0xff {
         opc::DRAW | opc::DRAW_INST | opc::DRAW_IND => {
-            let mut d = p_draw { prim: (a & 0xff) as i32, instances: 1, ..Default::default() };
+            let mut d = p_draw {
+                prim: (a & 0xff) as i32,
+                instances: 1,
+                ..Default::default()
+            };
             if h.op & 0xff == opc::DRAW_IND {
                 d.ind = g64(&mut q);
             } else {
@@ -420,7 +508,12 @@ pub unsafe fn rec_expand(r: *const u8, out: &mut Vec<u8>) {
             put_struct(out, at, &d);
         }
         opc::DRAW_IDX | opc::DRAW_IDX_INST | opc::DRAW_IDX_IND => {
-            let mut d = p_draw_idx { prim: (a & 0xff) as i32, itype: (a >> 8 & 0xff) as i32, instances: 1, ..Default::default() };
+            let mut d = p_draw_idx {
+                prim: (a & 0xff) as i32,
+                itype: (a >> 8 & 0xff) as i32,
+                instances: 1,
+                ..Default::default()
+            };
             if h.op & 0xff == opc::DRAW_IDX_IND {
                 d.ibuf = g64(&mut q);
                 d.ind = g64(&mut q);
@@ -437,7 +530,11 @@ pub unsafe fn rec_expand(r: *const u8, out: &mut Vec<u8>) {
             put_struct(out, at, &d);
         }
         opc::VIEWPORTS => {
-            let mut r = p_viewports { first: (a & 0xff) as i32, n: (a >> 8 & 0xff) as i32, v: [[0.0; 6]; 16] };
+            let mut r = p_viewports {
+                first: (a & 0xff) as i32,
+                n: (a >> 8 & 0xff) as i32,
+                v: [[0.0; 6]; 16],
+            };
             r.v[0][4] = f32::from_bits(a >> 16 & 3);
             for i in 0..r.n as usize {
                 for k in 0..4 {
@@ -448,7 +545,11 @@ pub unsafe fn rec_expand(r: *const u8, out: &mut Vec<u8>) {
             put_struct(out, at, &r);
         }
         opc::STENCIL => {
-            let mut s = p_stencil { face: (a & 3) as i32, which: (a >> 2 & 3) as i32, ..Default::default() };
+            let mut s = p_stencil {
+                face: (a & 3) as i32,
+                which: (a >> 2 & 3) as i32,
+                ..Default::default()
+            };
             let v = (a >> 4) as i32;
             match s.which {
                 0 => s.value_mask = v,
@@ -461,11 +562,19 @@ pub unsafe fn rec_expand(r: *const u8, out: &mut Vec<u8>) {
         opc::HANDLES => {
             let cnt = (a >> 17 & 0x3f) as usize;
             let at = xrec(out, a & 0x3f, 24 + 8 * cnt);
-            let mut r = p_bind_handles { stage: (a >> 6 & 7) as i32, first: (a >> 9 & 0xff) as i32, n: cnt as i32, defer: 0, src: 0, h: [0; 32] };
+            let mut r = p_bind_handles {
+                stage: (a >> 6 & 7) as i32,
+                first: (a >> 9 & 0xff) as i32,
+                n: cnt as i32,
+                defer: 0,
+                src: 0,
+                h: [0; 32],
+            };
             for i in 0..cnt {
                 r.h[i] = g32(&mut q) as u64;
             }
-            let bytes = core::slice::from_raw_parts(&r as *const p_bind_handles as *const u8, 24 + 8 * cnt);
+            let bytes =
+                core::slice::from_raw_parts(&r as *const p_bind_handles as *const u8, 24 + 8 * cnt);
             out[at..at + bytes.len()].copy_from_slice(bytes);
         }
         opc::BUFS => {
@@ -475,16 +584,38 @@ pub unsafe fn rec_expand(r: *const u8, out: &mut Vec<u8>) {
                 let size = g32(&mut q);
                 if o == op::BIND_UBO_SMALL {
                     let at = xrec(out, o, core::mem::size_of::<p_bind_ubo_small>());
-                    put_struct(out, at, &p_bind_ubo_small { stage: st as u16, index: (first + i) as u16, size, addr });
+                    put_struct(
+                        out,
+                        at,
+                        &p_bind_ubo_small {
+                            stage: st as u16,
+                            index: (first + i) as u16,
+                            size,
+                            addr,
+                        },
+                    );
                 } else {
                     let at = xrec(out, o, core::mem::size_of::<p_bind_buf>());
-                    put_struct(out, at, &p_bind_buf { stage: st as i32, index: (first + i) as i32, addr, size: size as u64 });
+                    put_struct(
+                        out,
+                        at,
+                        &p_bind_buf {
+                            stage: st as i32,
+                            index: (first + i) as i32,
+                            addr,
+                            size: size as u64,
+                        },
+                    );
                 }
             }
         }
         opc::VBUFS => {
             let cnt = (a >> 8 & 0xff) as usize;
-            let mut r = p_bind_vbuf { first: (a & 0xff) as i32, n: cnt as i32, r: [NVNbufferRange::default(); 16] };
+            let mut r = p_bind_vbuf {
+                first: (a & 0xff) as i32,
+                n: cnt as i32,
+                r: [NVNbufferRange::default(); 16],
+            };
             for i in 0..cnt.min(16) {
                 r.r[i].address = g64(&mut q);
                 r.r[i].size = g32(&mut q) as u64;
@@ -494,7 +625,11 @@ pub unsafe fn rec_expand(r: *const u8, out: &mut Vec<u8>) {
         }
         opc::VATTR => {
             let cnt = (a & 0xff) as usize;
-            let mut r = p_bind_vattr { first: 0, n: cnt as i32, st: [0; 32] };
+            let mut r = p_bind_vattr {
+                first: 0,
+                n: cnt as i32,
+                st: [0; 32],
+            };
             for i in 0..cnt.min(32) {
                 r.st[i] = g32(&mut q);
             }
@@ -503,24 +638,48 @@ pub unsafe fn rec_expand(r: *const u8, out: &mut Vec<u8>) {
         }
         opc::VSTREAM => {
             let cnt = (a & 0xff) as usize;
-            let mut r = p_bind_vstream { first: 0, n: cnt as i32, st: [vs_st::default(); 16] };
+            let mut r = p_bind_vstream {
+                first: 0,
+                n: cnt as i32,
+                st: [vs_st::default(); 16],
+            };
             for i in 0..cnt.min(16) {
                 r.st[i].stride = g32(&mut q);
                 r.st[i].divisor = g32(&mut q);
             }
-            let at = xrec(out, op::BIND_VSTREAM, core::mem::size_of::<p_bind_vstream>());
+            let at = xrec(
+                out,
+                op::BIND_VSTREAM,
+                core::mem::size_of::<p_bind_vstream>(),
+            );
             put_struct(out, at, &r);
         }
         opc::UBO => {
             let (st, first, cnt) = (a & 7, a >> 3 & 0xf, a >> 7 & 0x1f);
             for i in 0..cnt {
                 let v = g64(&mut q);
-                let at = xrec(out, op::BIND_UBO_SMALL, core::mem::size_of::<p_bind_ubo_small>());
-                put_struct(out, at, &p_bind_ubo_small { stage: st as u16, index: (first + i) as u16, size: (v >> 40) as u32, addr: (v & ((1u64 << 40) - 1)) << 8 });
+                let at = xrec(
+                    out,
+                    op::BIND_UBO_SMALL,
+                    core::mem::size_of::<p_bind_ubo_small>(),
+                );
+                put_struct(
+                    out,
+                    at,
+                    &p_bind_ubo_small {
+                        stage: st as u16,
+                        index: (first + i) as u16,
+                        size: (v >> 40) as u32,
+                        addr: (v & ((1u64 << 40) - 1)) << 8,
+                    },
+                );
             }
         }
         opc::STATE | opc::STATE8 => {
-            let mut r = p_bind_state { kind: (a & 7) as i32, bytes: [0; 0x18] };
+            let mut r = p_bind_state {
+                kind: (a & 7) as i32,
+                bytes: [0; 0x18],
+            };
             if h.op & 0xff == opc::STATE {
                 r.bytes[..4].copy_from_slice(&(a >> 3).to_le_bytes());
             } else {
@@ -534,13 +693,33 @@ pub unsafe fn rec_expand(r: *const u8, out: &mut Vec<u8>) {
             out[at..at + 4].copy_from_slice(&a.to_le_bytes());
         }
         opc::PRIM_RESTART => {
-            let at = xrec(out, op::PRIM_RESTART, core::mem::size_of::<p_prim_restart>());
-            put_struct(out, at, &p_prim_restart { on: a & 1, index: if a & 2 != 0 { u32::MAX } else { a >> 2 } });
+            let at = xrec(
+                out,
+                op::PRIM_RESTART,
+                core::mem::size_of::<p_prim_restart>(),
+            );
+            put_struct(
+                out,
+                at,
+                &p_prim_restart {
+                    on: a & 1,
+                    index: if a & 2 != 0 { u32::MAX } else { a >> 2 },
+                },
+            );
         }
         opc::SCISSOR => {
             let v: [u16; 4] = core::ptr::read_unaligned(q as *const [u16; 4]);
             let at = xrec(out, op::SCISSOR, core::mem::size_of::<p_scissor>());
-            put_struct(out, at, &p_scissor { x: v[0] as i32, y: v[1] as i32, w: v[2] as i32, h: v[3] as i32 });
+            put_struct(
+                out,
+                at,
+                &p_scissor {
+                    x: v[0] as i32,
+                    y: v[1] as i32,
+                    w: v[2] as i32,
+                    h: v[3] as i32,
+                },
+            );
         }
         _ => panic!("NVN command list: unknown compact record {:#x}", h.op),
     }
@@ -569,7 +748,9 @@ pub unsafe fn ctl_pieces(handle: u64, mut f: impl FnMut(u64)) {
             continue;
         }
         if ctl_kind(v) != CTL_CHUNK {
-            crate::log::red(&format!("NVN command list: control entry {v:#x} at {e:p} is no piece"));
+            crate::log::red(&format!(
+                "NVN command list: control entry {v:#x} at {e:p} is no piece"
+            ));
             return;
         }
         links = 0;
@@ -651,7 +832,11 @@ unsafe fn copy_view(dst: &mut view_t, has: &mut u8, v: *const NVNtextureView) {
 }
 /// A record followed by `k` texture snapshots.
 unsafe fn rec_snap<T>(c: *mut NVNcommandBuffer, op: u32, k: usize) -> *mut T {
-    rec(c, op, snap_off(core::mem::size_of::<T>()) + k * core::mem::size_of::<tex_t>()) as *mut T
+    rec(
+        c,
+        op,
+        snap_off(core::mem::size_of::<T>()) + k * core::mem::size_of::<tex_t>(),
+    ) as *mut T
 }
 fn slots_fit(st: i32, first: i32, n: i32, slots: i32) -> i32 {
     if st as u32 >= RESOURCE_STAGES as u32 || first < 0 || n < 0 || first >= slots {
@@ -665,7 +850,9 @@ fn slots_fit(st: i32, first: i32, n: i32, slots: i32) -> i32 {
 fn slots_bound(what: &str, st: i32, first: i32, n: i32, slots: i32) -> i32 {
     let k = slots_fit(st, first, n, slots);
     if k != n {
-        crate::log::red_once(&format!("{what} stage {st} first={first} n={n}: the host keeps {slots} slots a stage"));
+        crate::log::red_once(&format!(
+            "{what} stage {st} first={first} n={n}: the host keeps {slots} slots a stage"
+        ));
     }
     k
 }
@@ -677,8 +864,20 @@ pub(crate) fn st_host(st: i32) -> i32 {
         s => s,
     }
 }
-unsafe fn rec_ubo(c: *mut NVNcommandBuffer, st: i32, first: i32, n: i32, rg: *const NVNbufferRange) -> bool {
-    if !compact() || st as u32 >= RESOURCE_STAGES as u32 || first < 0 || n < 1 || first >= 16 || n > 16 - first {
+unsafe fn rec_ubo(
+    c: *mut NVNcommandBuffer,
+    st: i32,
+    first: i32,
+    n: i32,
+    rg: *const NVNbufferRange,
+) -> bool {
+    if !compact()
+        || st as u32 >= RESOURCE_STAGES as u32
+        || first < 0
+        || n < 1
+        || first >= 16
+        || n > 16 - first
+    {
         return false;
     }
     for i in 0..n as usize {
@@ -687,7 +886,12 @@ unsafe fn rec_ubo(c: *mut NVNcommandBuffer, st: i32, first: i32, n: i32, rg: *co
             return false;
         }
     }
-    let mut q = crec(c, opc::UBO, st as u32 | (first as u32) << 3 | (n as u32) << 7, 8 * n as usize);
+    let mut q = crec(
+        c,
+        opc::UBO,
+        st as u32 | (first as u32) << 3 | (n as u32) << 7,
+        8 * n as usize,
+    );
     for i in 0..n as usize {
         let r = *rg.add(i);
         put64(&mut q, r.address >> 8 | r.size << 40);
@@ -695,18 +899,46 @@ unsafe fn rec_ubo(c: *mut NVNcommandBuffer, st: i32, first: i32, n: i32, rg: *co
     true
 }
 unsafe fn record_uniform_buffer(c: *mut NVNcommandBuffer, st: i32, i: i32, a: u64, n: u64) {
-    let r = NVNbufferRange { address: a, size: n };
+    let r = NVNbufferRange {
+        address: a,
+        size: n,
+    };
     if rec_ubo(c, st, i, 1, &r) {
         return;
     }
     if n <= u32::MAX as u64 {
-        *rec_t::<p_bind_ubo_small>(c, op::BIND_UBO_SMALL) = p_bind_ubo_small { stage: st as u16, index: i as u16, size: n as u32, addr: a };
+        *rec_t::<p_bind_ubo_small>(c, op::BIND_UBO_SMALL) = p_bind_ubo_small {
+            stage: st as u16,
+            index: i as u16,
+            size: n as u32,
+            addr: a,
+        };
     } else {
-        *rec_t::<p_bind_buf>(c, op::BIND_UBO) = p_bind_buf { stage: st, index: i, addr: a, size: n };
+        *rec_t::<p_bind_buf>(c, op::BIND_UBO) = p_bind_buf {
+            stage: st,
+            index: i,
+            addr: a,
+            size: n,
+        };
     }
 }
-unsafe fn rec_bufs(c: *mut NVNcommandBuffer, o: u32, st: i32, first: i32, n: i32, rg: *const NVNbufferRange, slots: i32) -> bool {
-    if !compact() || !(1..=63).contains(&n) || st as u32 >= RESOURCE_STAGES as u32 || first < 0 || first > 0xff || first >= slots || n > slots - first {
+unsafe fn rec_bufs(
+    c: *mut NVNcommandBuffer,
+    o: u32,
+    st: i32,
+    first: i32,
+    n: i32,
+    rg: *const NVNbufferRange,
+    slots: i32,
+) -> bool {
+    if !compact()
+        || !(1..=63).contains(&n)
+        || st as u32 >= RESOURCE_STAGES as u32
+        || first < 0
+        || first > 0xff
+        || first >= slots
+        || n > slots - first
+    {
         return false;
     }
     for i in 0..n as usize {
@@ -714,7 +946,12 @@ unsafe fn rec_bufs(c: *mut NVNcommandBuffer, o: u32, st: i32, first: i32, n: i32
             return false;
         }
     }
-    let mut q = crec(c, opc::BUFS, o | (st as u32) << 6 | (first as u32) << 9 | (n as u32) << 17, 12 * n as usize);
+    let mut q = crec(
+        c,
+        opc::BUFS,
+        o | (st as u32) << 6 | (first as u32) << 9 | (n as u32) << 17,
+        12 * n as usize,
+    );
     for i in 0..n as usize {
         let r = *rg.add(i);
         put64(&mut q, r.address);
@@ -723,7 +960,14 @@ unsafe fn rec_bufs(c: *mut NVNcommandBuffer, o: u32, st: i32, first: i32, n: i32
     true
 }
 /// A Bind*Deferred: the handles at `src` as they are when the queue runs the record.
-pub(crate) unsafe fn bind_handles_deferred(c: *mut NVNcommandBuffer, o: u32, st: i32, first: i32, n: i32, src: u64) {
+pub(crate) unsafe fn bind_handles_deferred(
+    c: *mut NVNcommandBuffer,
+    o: u32,
+    st: i32,
+    first: i32,
+    n: i32,
+    src: u64,
+) {
     if !(0..=32).contains(&n) || src == 0 {
         crate::log::red(&format!("deferred bind handle count {n} at {src:#x}"));
         return;
@@ -736,20 +980,44 @@ pub(crate) unsafe fn bind_handles_deferred(c: *mut NVNcommandBuffer, o: u32, st:
     (*r).src = src;
 }
 
-unsafe fn bind_handles(c: *mut NVNcommandBuffer, o: u32, st: i32, first: i32, n: i32, h: *const u64) {
+unsafe fn bind_handles(
+    c: *mut NVNcommandBuffer,
+    o: u32,
+    st: i32,
+    first: i32,
+    n: i32,
+    h: *const u64,
+) {
     if !(0..=32).contains(&n) {
         crate::log::red(&format!("bind handle count {n}"));
         return;
     }
-    let slots = if o == op::BIND_SAMP { 128 } else if o == op::BIND_IMG { 32 } else { SEPTEX_SLOT0 + 128 };
-    let what = if o == op::BIND_SAMP { "BindSamplers" } else if o == op::BIND_IMG { "BindImages" } else { "BindTextures" };
+    let slots = if o == op::BIND_SAMP {
+        128
+    } else if o == op::BIND_IMG {
+        32
+    } else {
+        SEPTEX_SLOT0 + 128
+    };
+    let what = if o == op::BIND_SAMP {
+        "BindSamplers"
+    } else if o == op::BIND_IMG {
+        "BindImages"
+    } else {
+        "BindTextures"
+    };
     let n = slots_bound(what, st, first, n, slots);
     if n == 0 {
         return;
     }
     // The driver writes each handle into the c2 table as a 32-bit word: the GPU never sees the upper half.
     if compact() && (st as u32) < RESOURCE_STAGES as u32 && first >= 0 && first <= 0xff {
-        let mut q = crec(c, opc::HANDLES, o | (st as u32) << 6 | (first as u32) << 9 | (n as u32) << 17, 4 * n as usize);
+        let mut q = crec(
+            c,
+            opc::HANDLES,
+            o | (st as u32) << 6 | (first as u32) << 9 | (n as u32) << 17,
+            4 * n as usize,
+        );
         for i in 0..n as usize {
             put32(&mut q, *h.add(i) as u32);
         }
@@ -782,7 +1050,12 @@ unsafe fn bind_state(c: *mut NVNcommandBuffer, kind: i32, s: *const u8, n: usize
 }
 unsafe fn rec_stencil(c: *mut NVNcommandBuffer, f: i32, which: i32, v: i32) {
     if compact() && (f as u32) < 4 && (v as u32) < 1 << 20 {
-        crec(c, opc::STENCIL, f as u32 | (which as u32) << 2 | (v as u32) << 4, 0);
+        crec(
+            c,
+            opc::STENCIL,
+            f as u32 | (which as u32) << 2 | (v as u32) << 4,
+            0,
+        );
         return;
     }
     *rec_t::<p_stencil>(c, op::STENCIL) = p_stencil {
@@ -796,15 +1069,34 @@ unsafe fn rec_stencil(c: *mut NVNcommandBuffer, f: i32, which: i32, v: i32) {
 unsafe fn rec_copy(c: *mut NVNcommandBuffer, o: u32) -> *mut p_copy_b2t {
     let cc = cb(c);
     let st = cc.copy_row != 0 || cc.copy_image != 0;
-    let r = rec(c, o, COPY_STRIDES_OFF + if st { core::mem::size_of::<p_copy_strides>() } else { 0 });
+    let r = rec(
+        c,
+        o,
+        COPY_STRIDES_OFF
+            + if st {
+                core::mem::size_of::<p_copy_strides>()
+            } else {
+                0
+            },
+    );
     if st {
-        core::ptr::write_unaligned(r.add(COPY_STRIDES_OFF) as *mut p_copy_strides, p_copy_strides { row: cc.copy_row, image: cc.copy_image });
+        core::ptr::write_unaligned(
+            r.add(COPY_STRIDES_OFF) as *mut p_copy_strides,
+            p_copy_strides {
+                row: cc.copy_row,
+                image: cc.copy_image,
+            },
+        );
     }
     r as *mut p_copy_b2t
 }
 unsafe fn dev_origin(c: *mut NVNcommandBuffer) -> u32 {
     let d = cb(c).dev;
-    if d.is_null() { 0 } else { (*(d as *const dev_t)).origin }
+    if d.is_null() {
+        0
+    } else {
+        (*(d as *const dev_t)).origin
+    }
 }
 
 nvn_fns! {
@@ -1064,6 +1356,7 @@ nvn_fns! {
     fn nvnCommandBufferSetLineWidth(c: *mut NVNcommandBuffer, w: f32) { *rec_t::<p_line_width>(c, op::LINE_WIDTH) = p_line_width { w }; }
     fn nvnCommandBufferSetDepthClamp(c: *mut NVNcommandBuffer, on: u32) { *rec_t::<p_depth_clamp>(c, op::DEPTH_CLAMP) = p_depth_clamp { on: super::b(on) as i32 }; }
     fn nvnCommandBufferSetRasterizerDiscard(c: *mut NVNcommandBuffer, on: u32) { *rec_t::<p_rast_discard>(c, op::RAST_DISCARD) = p_rast_discard { on: super::b(on) as i32 }; }
+    fn nvnCommandBufferSetConservativeRasterEnable(c: *mut NVNcommandBuffer, on: u32) { *rec_t::<p_rast_discard>(c, op::CONS_RASTER) = p_rast_discard { on: super::b(on) as i32 }; }
     fn nvnCommandBufferSetPatchSize(c: *mut NVNcommandBuffer, n: i32) { *rec_t::<p_patch_size>(c, op::PATCH_SIZE) = p_patch_size { n }; }
 
     // ---------- program, state objects, vertex input ----------
@@ -1261,7 +1554,16 @@ mod tests {
             nvnCommandBufferDrawArrays(c, 4, 0, 3);
             nvnCommandBufferDrawElementsInstanced(c, 4, 1, 6, 0x10000, 2, 3, 4);
             nvnCommandBufferSetScissor(c, 1, 2, 30, 40);
-            let ranges = [NVNbufferRange { address: 0x1000, size: 64 }, NVNbufferRange { address: 0x2000, size: 128 }];
+            let ranges = [
+                NVNbufferRange {
+                    address: 0x1000,
+                    size: 64,
+                },
+                NVNbufferRange {
+                    address: 0x2000,
+                    size: 128,
+                },
+            ];
             nvnCommandBufferBindUniformBuffers(c, 0, 0, 2, ranges.as_ptr());
             nvnCommandBufferBindVertexBuffers(c, 0, 2, ranges.as_ptr());
             let h = [5u64 | 7 << 20, 0x1_0000_0009];
@@ -1338,7 +1640,9 @@ mod tests {
             nvnCommandBufferDrawArrays(&mut *c.c, 4, 2, 3);
             let outer = nvnCommandBufferEndRecording(&mut *c.c);
             let mut firsts = vec![];
-            for_each_record(&[outer], |_, r| firsts.push(rd::<p_draw>(r.as_ptr().add(8)).first));
+            for_each_record(&[outer], |_, r| {
+                firsts.push(rd::<p_draw>(r.as_ptr().add(8)).first)
+            });
             assert_eq!(firsts, vec![0, 1, 2]);
         }
     }

@@ -7,11 +7,36 @@ use common::*;
 use nxgfx::nvn::cmd::*;
 
 use nxgfx::nvn::state::*;
-use nxgfx::nvn::types::*;
 use nxgfx::nvn::tex::*;
+use nxgfx::nvn::types::*;
 
 const W: u32 = 64;
 const H: u32 = 64;
+
+#[test]
+fn late_outputs_preserve_unwritten_homogeneous_component() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let mut rt = n.texture(W, H, f::RGBA8, 0, false);
+    let prog = n.program(&[
+        (&spv("partial_varying_vert"), &json("vs", "")),
+        (&spv("partial_varying_frag"), &json("ps", "")),
+    ]);
+    n.begin();
+    n.set_target(&rt, None, W, H);
+    bind_program(&mut n, &prog);
+    unsafe { nvnCommandBufferDrawArrays(n.c(), prim::TRIANGLES, 0, 3) };
+    n.submit_wait();
+    check(
+        "partially written varying divided by W",
+        &n.read_rgba8(&rt, W, H),
+        &vec![Some([64, 128, 0, 255]); (W * H) as usize],
+        1,
+    );
+    unsafe { nvnTextureFinalize(&mut *rt) };
+    assert_eq!(validation_errors(), e0);
+}
 
 fn tri_program(n: &mut Nvn) -> Box<NVNprogram> {
     let vs = spv("tri_vert");
@@ -66,11 +91,503 @@ fn check(name: &str, got: &[u8], want: &[Option<[u8; 4]>], tol: u8) {
     let bad = diff(got, want, tol);
     let checked = want.iter().filter(|w| w.is_some()).count();
     eprintln!("{name}: {checked} pixels compared, {} differ", bad.len());
-    assert!(bad.is_empty(), "{name}: {} of {checked} pixels differ, first {:?}", bad.len(), &bad[..bad.len().min(5)]);
+    assert!(
+        bad.is_empty(),
+        "{name}: {} of {checked} pixels differ, first {:?}",
+        bad.len(),
+        &bad[..bad.len().min(5)]
+    );
 }
 
 fn rgba8(c: [f32; 4]) -> [u8; 4] {
     c.map(|x| (x * 255.0).round() as u8)
+}
+
+struct TextureEnv(Vec<(&'static str, Option<std::ffi::OsString>)>);
+impl TextureEnv {
+    fn new() -> Self {
+        Self(
+            [
+                ("NXGFX_LAZY_IMAGES", "1"),
+                ("NXGFX_IMAGE_NOFLAG", "1"),
+                ("NXGFX_TEX_WB", "0"),
+            ]
+            .into_iter()
+            .map(|(key, value)| {
+                let old = std::env::var_os(key);
+                std::env::set_var(key, value);
+                (key, old)
+            })
+            .collect(),
+        )
+    }
+}
+impl Drop for TextureEnv {
+    fn drop(&mut self) {
+        for (key, old) in &self.0 {
+            if let Some(old) = old {
+                std::env::set_var(key, old);
+            } else {
+                std::env::remove_var(key);
+            }
+        }
+    }
+}
+
+fn texture_snapshot(t: &NVNtexture) -> nxgfx::nvn::obj::tex_t {
+    unsafe { *(t as *const NVNtexture as *const nxgfx::nvn::obj::tex_t) }
+}
+
+fn lifecycle_quad_program(n: &mut Nvn, pool: bool) -> Box<NVNprogram> {
+    if !pool {
+        return quad_program(n);
+    }
+    n.program(&[(&spv("quad_vert"), &json("vs", "")), (&spv("pool_quad_frag"), &json("ps",
+        r#"{"set":6,"binding":0,"type":"sampled_image","count":0,"resource":{"kind":"texture","array":1048576}},
+           {"set":6,"binding":1,"type":"sampler","count":0,"resource":{"kind":"sampler","array":4096}}"#))])
+}
+
+fn lifecycle_quad_data(n: &mut Nvn) -> (u64, u64, u64) {
+    n.register_sampler(3, true);
+    let handle = unsafe { nxgfx::nvn::device::nvnDeviceGetTextureHandle(&*n.dev, 5, 3) };
+    let vb = n.data.put(
+        &[
+            -1.0f32, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 0.0, 1.0,
+        ],
+        256,
+    );
+    let ub = n.data.put(&[1.0f32; 4], 256);
+    (handle, vb, ub)
+}
+
+fn lifecycle_quad(n: &mut Nvn, prog: &NVNprogram, data: (u64, u64, u64)) {
+    bind_program(n, prog);
+    n.vertex_layout(&[(f::RG32F, 0), (f::RG32F, 8)], 16);
+    unsafe {
+        nvnCommandBufferBindVertexBuffer(n.c(), 0, data.1, 64);
+        nvnCommandBufferBindTexture(n.c(), stage::FRAGMENT as i32, 0, data.0);
+        nvnCommandBufferBindUniformBuffer(n.c(), stage::FRAGMENT as i32, 0, data.2, 16);
+        nvnCommandBufferDrawArrays(n.c(), prim::TRIANGLE_FAN, 0, 4);
+    }
+}
+
+/// A view selects channels of the texture's format, not of its builder-swizzled result.
+/// Exercise both stage descriptors and the bindless pool, including a cached view replaced at the same ID.
+#[test]
+fn texture_view_swizzle_replaces_builder_swizzle() {
+    let _g = setup();
+    let e0 = validation_errors();
+    for pool in [false, true] {
+        let mut n = Nvn::new();
+        let mut b = NVNtextureBuilder::boxed();
+        let mut tex = NVNtexture::boxed();
+        unsafe {
+            nvnTextureBuilderSetDefaults(&mut *b);
+            nvnTextureBuilderSetDevice(&mut *b, n.d());
+            nvnTextureBuilderSetSize2D(&mut *b, W as i32, H as i32);
+            nvnTextureBuilderSetFormat(&mut *b, f::RGBA8);
+            nvnTextureBuilderSetSwizzle(&mut *b, 3, 4, 5, 2);
+            let size = nvnTextureBuilderGetStorageSize(&*b);
+            let align = nvnTextureBuilderGetStorageAlignment(&*b);
+            let (off, _) = n.data.alloc(size, align);
+            nvnTextureBuilderSetStorage(&mut *b, n.data.p(), off as isize);
+            assert_eq!(nvnTextureInitialize(&mut *tex, &*b), 1);
+        }
+        let pixels = [32u8, 64, 128, 192].repeat((W * H) as usize);
+        let r = NVNcopyRegion {
+            xoffset: 0,
+            yoffset: 0,
+            zoffset: 0,
+            width: W as i32,
+            height: H as i32,
+            depth: 1,
+        };
+        unsafe { nvnTextureWriteTexels(&*tex, core::ptr::null(), &r, pixels.as_ptr()) };
+        let mut rt = n.texture(W, H, f::RGBA8, 0, false);
+        let prog = lifecycle_quad_program(&mut n, pool);
+        let data = lifecycle_quad_data(&mut n);
+        let cases = [
+            (None, [64, 128, 192, 32]),
+            (Some([3, 4, 5, 2]), [64, 128, 192, 32]),
+            (Some([2, 3, 4, 5]), [32, 64, 128, 192]),
+            (Some([5, 1, 0, 2]), [192, 255, 0, 32]),
+        ];
+        for (swizzle, want) in cases {
+            let mut view = NVNtextureView::boxed();
+            unsafe {
+                nvnTextureViewSetDefaults(&mut *view);
+                if let Some([r, g, b, a]) = swizzle {
+                    nvnTextureViewSetSwizzle(&mut *view, r, g, b, a);
+                }
+                nxgfx::nvn::pool::nvnTexturePoolRegisterTexture(&*n.tex_pool, 5, &*tex, &*view);
+            }
+            n.begin();
+            n.set_target(&rt, None, W, H);
+            lifecycle_quad(&mut n, &prog, data);
+            n.submit_wait();
+            check(
+                &format!("view swizzle {swizzle:?}, pool={pool}"),
+                &n.read_rgba8(&rt, W, H),
+                &vec![Some(want); (W * H) as usize],
+                0,
+            );
+        }
+        unsafe {
+            nvnTextureFinalize(&mut *tex);
+            nvnTextureFinalize(&mut *rt);
+        }
+    }
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+fn lifecycle_store_program(n: &mut Nvn, pool: bool) -> Box<NVNprogram> {
+    if pool {
+        return n.program(&[(&spv("pool_image_store_comp"), &json("cs",
+            r#"{"set":6,"binding":2,"type":"storage_image","count":0,"resource":{"kind":"image","array":1048576}}"#))]);
+    }
+    n.program(&[(&spv("image_store_comp"), &json("cs",
+        r#"{"set":5,"binding":1,"type":"storage_image","count":1,"resource":{"kind":"image","handle":72,"cbuf_slot":-1,"type":3,"format":"Unknown"}}"#))])
+}
+
+fn lifecycle_store(n: &mut Nvn, prog: &NVNprogram, x: i32, y: i32) {
+    // Deliberately bind the sampled registration as an image. RegisterImage before replay would upgrade at setup
+    // and never exercise the mid-replay copy or the missing ownership on an IMAGE-flagged sampled registration.
+    let h = unsafe { nxgfx::nvn::device::nvnDeviceGetImageHandle(&*n.dev, 5) };
+    unsafe {
+        nvnCommandBufferBindProgram(n.c(), prog, 0x20);
+        nvnCommandBufferBindImage(n.c(), stage::COMPUTE as i32, 0, h);
+        nvnCommandBufferDispatchCompute(n.c(), x, y, 1);
+    }
+}
+
+/// No source clear, transfer or warm-up submission: its first sampling must upload the lazy texture's storage.
+#[test]
+fn texture_lifecycle_first_submission_lazy_sample() {
+    let _g = setup();
+    let _env = TextureEnv::new();
+    let e0 = validation_errors();
+    for pool in [false, true] {
+        let mut n = Nvn::new();
+        let mut tex = n.texture(W, H, f::RGBA8, 0, true);
+        let mut rt = n.texture(W, H, f::RGBA8, 0, false);
+        let pixels: Vec<u8> = (0..W * H)
+            .flat_map(|i| [(i % W) as u8, (i / W) as u8, 173, 255])
+            .collect();
+        let r = NVNcopyRegion {
+            xoffset: 0,
+            yoffset: 0,
+            zoffset: 0,
+            width: W as i32,
+            height: H as i32,
+            depth: 1,
+        };
+        unsafe { nvnTextureWriteTexels(&*tex, core::ptr::null(), &r, pixels.as_ptr()) };
+        n.register_texture(5, &tex);
+        let g = nxgfx::vk::Gpu::get().unwrap();
+        let serial = texture_snapshot(&tex).serial;
+        assert!(
+            !g.images.lock().unwrap().by_serial.contains_key(&serial),
+            "must start lazy"
+        );
+        let prog = lifecycle_quad_program(&mut n, pool);
+        let data = lifecycle_quad_data(&mut n);
+        n.begin();
+        n.set_target(&rt, None, W, H);
+        lifecycle_quad(&mut n, &prog, data);
+        n.submit_wait();
+        let want: Vec<_> = pixels
+            .chunks_exact(4)
+            .map(|p| Some(p.try_into().unwrap()))
+            .collect();
+        check(
+            &format!("first lazy sample, pool={pool}"),
+            &n.read_rgba8(&rt, W, H),
+            &want,
+            0,
+        );
+        unsafe {
+            nvnTextureFinalize(&mut *tex);
+            nvnTextureFinalize(&mut *rt);
+        }
+    }
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// The first sample caches the old backing; a partial image store upgrades it after a raster write. The second
+/// sample must see both that write outside the stored 8x8 region and the new stores inside it, in ONE submission.
+#[test]
+fn texture_lifecycle_write_upgrade_cached_sample() {
+    let _g = setup();
+    let _env = TextureEnv::new();
+    let e0 = validation_errors();
+    for pool in [false, true] {
+        let mut n = Nvn::new();
+        // Keep this storage away from addresses used by other tests' no-flag registrations.
+        n.gpu.alloc((3 + pool as usize) << 20, 4096);
+        let mut tex = n.texture(W, H, f::RGBA8, 0, false);
+        let mut before = n.texture(W, H, f::RGBA8, 0, false);
+        let mut after = n.texture(W, H, f::RGBA8, 0, false);
+        n.register_texture(5, &tex);
+        let quad = lifecycle_quad_program(&mut n, pool);
+        let tri = tri_program(&mut n);
+        let store = lifecycle_store_program(&mut n, false);
+        let data = lifecycle_quad_data(&mut n);
+        let g = nxgfx::vk::Gpu::get().unwrap();
+        g.materialize(n.tex_base() + 5);
+        let serial = texture_snapshot(&tex).serial;
+        let old = {
+            let mut imgs = g.images.lock().unwrap();
+            // Make both destinations now: creation of a new target after the upgrade must not independently
+            // invalidate the sampled-stage caches and conceal a missing backing-generation dependency.
+            assert!(g.ensure_image(&mut imgs, &texture_snapshot(&before)));
+            assert!(g.ensure_image(&mut imgs, &texture_snapshot(&after)));
+            let im = &imgs.by_serial[&serial];
+            assert!(
+                !im.usage.contains(ash::vk::ImageUsageFlags::STORAGE),
+                "must exercise an upgrade"
+            );
+            im.image
+        };
+        let triangle = [[-0.9f32, -0.9], [0.9, -0.9], [-0.9, 0.9]];
+        n.begin();
+        n.set_target(&tex, None, W, H);
+        clear(&mut n, [0.0, 0.0, 1.0, 1.0]);
+        bind_program(&mut n, &tri);
+        draw_tri(
+            &mut n,
+            triangle.map(|p| [p[0], p[1], 0.0]),
+            [1.0, 0.0, 0.0, 1.0],
+        );
+        n.set_target(&before, None, W, H);
+        // Two identical bindings ensure the cache is populated even if first-use materialization changed its gen.
+        lifecycle_quad(&mut n, &quad, data);
+        lifecycle_quad(&mut n, &quad, data);
+        lifecycle_store(&mut n, &store, 1, 1);
+        n.set_target(&after, None, W, H);
+        lifecycle_quad(&mut n, &quad, data);
+        n.submit_wait();
+        assert_ne!(g.images.lock().unwrap().by_serial[&serial].image, old);
+        let want_before: Vec<_> = tri_cover(triangle, W, H, false)
+            .into_iter()
+            .map(|v| {
+                v.map(|inside| {
+                    if inside {
+                        [255, 0, 0, 255]
+                    } else {
+                        [0, 0, 255, 255]
+                    }
+                })
+            })
+            .collect();
+        check(
+            "pre-upgrade sample",
+            &n.read_rgba8(&before, W, H),
+            &want_before,
+            0,
+        );
+        let want_after: Vec<_> = want_before
+            .iter()
+            .enumerate()
+            .map(|(i, &v)| {
+                let (x, y) = (i as u32 % W, i as u32 / W);
+                if x < 8 && y < 8 {
+                    Some([x as u8, y as u8, 128, 255])
+                } else {
+                    v
+                }
+            })
+            .collect();
+        check(
+            "ordered upgrade and cached sample",
+            &n.read_rgba8(&after, W, H),
+            &want_after,
+            1,
+        );
+        unsafe {
+            nvnTextureFinalize(&mut *tex);
+            nvnTextureFinalize(&mut *before);
+            nvnTextureFinalize(&mut *after);
+        }
+    }
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// Both sides of the old 512 KiB readback cutoff. A small CPU write on a storage page must not make a subsequent
+/// submission replace GPU content with the stale CPU backing. Repeated dispatches also hit descriptor caches.
+#[test]
+fn texture_lifecycle_storage_survives_next_submit_readback_off() {
+    let _g = setup();
+    let _env = TextureEnv::new();
+    let e0 = validation_errors();
+    for (size, pool) in [(64u32, false), (512, false), (64, true), (512, true)] {
+        let mut n = Nvn::new();
+        let mut tex = n.texture(size, size, f::RGBA8, tex_flags::IMAGE, true);
+        n.register_texture(5, &tex);
+        let store = lifecycle_store_program(&mut n, pool);
+        n.begin();
+        lifecycle_store(&mut n, &store, size as i32 / 8, size as i32 / 8);
+        lifecycle_store(&mut n, &store, size as i32 / 8, size as i32 / 8);
+        n.submit_wait();
+        let t = texture_snapshot(&tex);
+        let g = nxgfx::vk::Gpu::get().unwrap();
+        {
+            let imgs = g.images.lock().unwrap();
+            let im = &imgs.by_serial[&t.serial];
+            assert!(
+                im.gpu_owned && im.gpu_seq >= 2,
+                "every dispatch owns its writes, including cache hits"
+            );
+        }
+        let want: Vec<_> = (0..size * size)
+            .map(|i| {
+                Some([
+                    (i % size).min(255) as u8,
+                    (i / size).min(255) as u8,
+                    128,
+                    255,
+                ])
+            })
+            .collect();
+        unsafe {
+            *t.mem = 17;
+        }
+        n.begin();
+        n.submit_wait();
+        assert!(g.images.lock().unwrap().by_serial[&t.serial].gpu_owned,
+            "one changed storage page must not reclaim the whole GPU image (size={size}, pool={pool})");
+        check(
+            &format!("storage survives next submit, readback off, size={size}, pool={pool}"),
+            &n.read_rgba8(&tex, size, size),
+            &want,
+            1,
+        );
+
+        // Conversely, a genuine whole-storage rewrite must replace the GPU content. Do not fix first-touch
+        // false positives by ignoring CPU writes to GPU-owned textures altogether.
+        unsafe {
+            core::ptr::write_bytes(t.mem, 85, t.l.size as usize);
+        }
+        n.begin();
+        n.submit_wait();
+        assert!(
+            !g.images.lock().unwrap().by_serial[&t.serial].gpu_owned,
+            "a full CPU rewrite must reclaim the texture (size={size}, pool={pool})"
+        );
+        check(
+            "full CPU rewrite after storage writes",
+            &n.read_rgba8(&tex, size, size),
+            &vec![Some([85; 4]); (size * size) as usize],
+            0,
+        );
+        // NVN requires the texture to be finalized before its memory pool. Otherwise the next case may reuse
+        // that guest address while an old, differently sized texture still tracks and uploads its storage.
+        unsafe {
+            nvnTextureFinalize(&mut *tex);
+        }
+    }
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// Pool draws across transient targets and submissions must not clone the whole descriptor table per draw.
+/// Includes Jamboree-sized registration metadata, repeated identical descriptor writes, and pixel verification.
+#[test]
+fn texture_lifecycle_pool_snapshot_work_is_bounded() {
+    use nxgfx::vk::perf::{get, C};
+    let _guard = setup();
+    let _env = TextureEnv::new();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let mut tex = n.texture(W, H, f::RGBA8, 0, true);
+    let pixels = vec![127u8; (W * H * 4) as usize];
+    let r = NVNcopyRegion {
+        xoffset: 0,
+        yoffset: 0,
+        zoffset: 0,
+        width: W as i32,
+        height: H as i32,
+        depth: 1,
+    };
+    unsafe {
+        nvnTextureWriteTexels(&*tex, core::ptr::null(), &r, pixels.as_ptr());
+    }
+    n.register_texture(5, &tex);
+    let prog = lifecycle_quad_program(&mut n, true);
+    let data = lifecycle_quad_data(&mut n);
+    let mut targets: Vec<_> = (0..4)
+        .map(|_| n.texture(W, H, f::RGBA8, 0, false))
+        .collect();
+    let g = nxgfx::vk::Gpu::get().unwrap();
+    g.materialize(n.tex_base() + 5);
+    let t = texture_snapshot(&tex);
+    let count = 138_000u32.min(g.layout.tex_cap.saturating_sub(4096));
+    for id in g.layout.tex_cap - count..g.layout.tex_cap {
+        g.reg_tex(id as i32, &t, None, false);
+    }
+    let counters = [
+        C::PoolSnapshots,
+        C::PoolSnapshotReused,
+        C::PoolSnapshotNs,
+        C::PoolSnapshotBytes,
+        C::PoolSnapshotDeviceReadBytes,
+        C::PoolPrepareScans,
+        C::PoolPrepareImages,
+    ];
+    let before = counters.map(get);
+    for _ in 0..3 {
+        // Re-registering identical descriptors must not invalidate immutable snapshots either.
+        n.register_texture(5, &tex);
+        n.register_sampler(3, true);
+        n.begin();
+        for rt in &targets {
+            n.set_target(rt, None, W, H);
+            for _ in 0..8 {
+                lifecycle_quad(&mut n, &prog, data);
+            }
+        }
+        n.submit_wait();
+    }
+    let delta: Vec<_> = counters
+        .iter()
+        .zip(before)
+        .map(|(&c, b)| get(c) - b)
+        .collect();
+    eprintln!("pool snapshot work: {count} extra registrations, 96 draws, 3 submissions: snapshots {}, reused {}, snapshot CPU {:.3} ms, copied {} bytes, device-read {} bytes, preparation passes {}, images visited {}",
+        delta[0], delta[1], delta[2] as f64 / 1e6, delta[3], delta[4], delta[5], delta[6]);
+    for rt in &targets {
+        check(
+            "bounded pool snapshot pixels",
+            &n.read_rgba8(rt, W, H),
+            &vec![Some([127; 4]); (W * H) as usize],
+            0,
+        );
+    }
+    unsafe {
+        nvnTextureFinalize(&mut *tex);
+        for rt in &mut targets {
+            nvnTextureFinalize(&mut **rt);
+        }
+    }
+    assert_eq!(
+        delta[0], 1,
+        "unchanged descriptors: one immutable snapshot across draws and submissions"
+    );
+    assert_eq!(
+        delta[1], 2,
+        "the latest immutable version is reused across submissions"
+    );
+    assert_eq!(
+        delta[4], 0,
+        "snapshots must never read the device-local descriptor mapping on the CPU"
+    );
+    assert_eq!(
+        delta[5], 3,
+        "one preparation scan per submission, not per transient target/draw"
+    );
+    assert!(
+        delta[6] <= 1,
+        "preparation visits pending images, not the whole image/registration table"
+    );
+    assert_eq!(validation_errors(), e0, "validation errors");
 }
 
 /// A triangle in NVN's default lower-left origin: NDC +y is the picture's top, which is the last row in memory (the
@@ -94,12 +611,34 @@ fn triangle() {
         let got = n.read_rgba8(&rt, W, H);
         let want: Vec<Option<[u8; 4]>> = tri_cover(tri, W, H, flip)
             .into_iter()
-            .map(|c| c.map(|inside| if inside { rgba8(color) } else { [0, 0, 255, 255] }))
+            .map(|c| {
+                c.map(|inside| {
+                    if inside {
+                        rgba8(color)
+                    } else {
+                        [0, 0, 255, 255]
+                    }
+                })
+            })
             .collect();
-        check(if flip { "triangle upper-left" } else { "triangle lower-left" }, &got, &want, 0);
+        check(
+            if flip {
+                "triangle upper-left"
+            } else {
+                "triangle lower-left"
+            },
+            &got,
+            &want,
+            0,
+        );
         // orientation: the apex (NDC y 0.9) is near the last row for lower-left, the first for upper-left
-        let row = |y: u32| got[(y * W * 4 + 32 * 4) as usize..(y * W * 4 + 32 * 4 + 4) as usize].to_vec();
-        let (top, bottom) = if flip { (row(6), row(57)) } else { (row(57), row(6)) };
+        let row =
+            |y: u32| got[(y * W * 4 + 32 * 4) as usize..(y * W * 4 + 32 * 4 + 4) as usize].to_vec();
+        let (top, bottom) = if flip {
+            (row(6), row(57))
+        } else {
+            (row(57), row(6))
+        };
         assert_eq!(top, vec![0, 255, 0, 255]);
         assert_eq!(bottom, vec![0, 0, 255, 255]);
     }
@@ -115,12 +654,22 @@ fn indexed_textured_quad() {
     let mut n = Nvn::new();
     let rt = n.texture(W, H, f::RGBA8, 0, false);
     let tex = n.texture(4, 4, f::RGBA8, 0, false);
-    let checker: Vec<u8> = (0..16).flat_map(|i| if (i % 4 + i / 4) % 2 == 0 { [255u8, 255, 255, 255] } else { [255, 0, 0, 255] }).collect();
+    let checker: Vec<u8> = (0..16)
+        .flat_map(|i| {
+            if (i % 4 + i / 4) % 2 == 0 {
+                [255u8, 255, 255, 255]
+            } else {
+                [255, 0, 0, 255]
+            }
+        })
+        .collect();
     let src = n.data.put(&checker, 256);
     n.register_texture(5, &tex);
     n.register_sampler(3, true);
     let prog = quad_program(&mut n);
-    let verts: [f32; 16] = [-1.0, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 0.0, 1.0];
+    let verts: [f32; 16] = [
+        -1.0, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 0.0, 1.0,
+    ];
     let vb = n.data.put(&verts, 256);
     let idx: [u16; 6] = [0, 1, 2, 0, 2, 3];
     let ib = n.data.put(&idx, 256);
@@ -129,7 +678,14 @@ fn indexed_textured_quad() {
     let handle = unsafe { nxgfx::nvn::device::nvnDeviceGetTextureHandle(&*n.dev, 5, 3) };
     n.begin();
     unsafe {
-        let r = NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: 4, height: 4, depth: 1 };
+        let r = NVNcopyRegion {
+            xoffset: 0,
+            yoffset: 0,
+            zoffset: 0,
+            width: 4,
+            height: 4,
+            depth: 1,
+        };
         nvnCommandBufferCopyBufferToTexture(n.c(), src, &*tex, core::ptr::null(), &r, 0);
     }
     n.set_target(&rt, None, W, H);
@@ -150,7 +706,11 @@ fn indexed_textured_quad() {
             let (x, y) = (i % W, i / W);
             let (tx, ty) = (x / 16, y / 16);
             let white = (tx + ty) % 2 == 0;
-            Some(if white { [255, 255, 0, 255] } else { [255, 0, 0, 255] })
+            Some(if white {
+                [255, 255, 0, 255]
+            } else {
+                [255, 0, 0, 255]
+            })
         })
         .collect();
     check("indexed textured quad", &got, &want, 0);
@@ -170,7 +730,9 @@ fn render_to_texture_then_sample() {
     n.register_sampler(2, true);
     let tri = tri_program(&mut n);
     let quad = quad_program(&mut n);
-    let verts: [f32; 16] = [-1.0, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 0.0, 1.0];
+    let verts: [f32; 16] = [
+        -1.0, -1.0, 0.0, 0.0, 1.0, -1.0, 1.0, 0.0, 1.0, 1.0, 1.0, 1.0, -1.0, 1.0, 0.0, 1.0,
+    ];
     let vb = n.data.put(&verts, 256);
     let ub = n.data.put(&[1.0f32, 1.0, 1.0, 1.0], 256);
     let handle = unsafe { nxgfx::nvn::device::nvnDeviceGetTextureHandle(&*n.dev, 7, 2) };
@@ -180,7 +742,12 @@ fn render_to_texture_then_sample() {
     clear(&mut n, [0.0, 0.0, 0.0, 1.0]);
     bind_program(&mut n, &tri);
     draw_tri(&mut n, t.map(|p| [p[0], p[1], 0.0]), [1.0, 0.5, 0.0, 1.0]);
-    unsafe { nvnCommandBufferBarrier(n.c(), (barrier::ORDER_FRAGMENTS | barrier::INVALIDATE_TEXTURE) as i32) };
+    unsafe {
+        nvnCommandBufferBarrier(
+            n.c(),
+            (barrier::ORDER_FRAGMENTS | barrier::INVALIDATE_TEXTURE) as i32,
+        )
+    };
     n.set_target(&b, None, W, H);
     clear(&mut n, [0.0, 0.0, 1.0, 1.0]);
     bind_program(&mut n, &quad);
@@ -193,15 +760,30 @@ fn render_to_texture_then_sample() {
     }
     n.submit_wait();
     let got_a = n.read_rgba8(&a, aw, ah);
-    let want_a: Vec<Option<[u8; 4]>> =
-        tri_cover(t, aw, ah, false).into_iter().map(|c| c.map(|i| if i { [255, 128, 0, 255] } else { [0, 0, 0, 255] })).collect();
+    let want_a: Vec<Option<[u8; 4]>> = tri_cover(t, aw, ah, false)
+        .into_iter()
+        .map(|c| {
+            c.map(|i| {
+                if i {
+                    [255, 128, 0, 255]
+                } else {
+                    [0, 0, 0, 255]
+                }
+            })
+        })
+        .collect();
     check("render target A", &got_a, &want_a, 1);
     let got_b = n.read_rgba8(&b, W, H);
     let want_b: Vec<Option<[u8; 4]>> = (0..W * H)
         .map(|i| {
             let (x, y) = (i % W, i / W);
             let k = ((y / 2) * aw + x / 2) as usize;
-            Some([got_a[4 * k], got_a[4 * k + 1], got_a[4 * k + 2], got_a[4 * k + 3]])
+            Some([
+                got_a[4 * k],
+                got_a[4 * k + 1],
+                got_a[4 * k + 2],
+                got_a[4 * k + 3],
+            ])
         })
         .collect();
     check("sampled into B", &got_b, &want_b, 0);
@@ -247,7 +829,13 @@ fn blending_and_depth() {
         nvnColorStateSetBlendEnable(&mut *cs, 0, 1);
         nvnCommandBufferBindColorState(n.c(), &*cs);
         nvnBlendStateSetDefaults(&mut *bs);
-        nvnBlendStateSetBlendFunc(&mut *bs, blend_func::SRC_ALPHA as i32, blend_func::ONE_MINUS_SRC_ALPHA as i32, blend_func::ONE as i32, blend_func::ZERO as i32);
+        nvnBlendStateSetBlendFunc(
+            &mut *bs,
+            blend_func::SRC_ALPHA as i32,
+            blend_func::ONE_MINUS_SRC_ALPHA as i32,
+            blend_func::ONE as i32,
+            blend_func::ZERO as i32,
+        );
         nvnCommandBufferBindBlendState(n.c(), &*bs);
         nvnDepthStencilStateSetDepthWriteEnable(&mut *ds, 0);
         nvnCommandBufferBindDepthStencilState(n.c(), &*ds);
@@ -261,9 +849,17 @@ fn blending_and_depth() {
             if x == 20 || x == 40 || y == 32 {
                 return None;
             }
-            let base: [f32; 4] = if x < 40 { [1.0, 0.0, 0.0, 1.0] } else { [0.0, 1.0, 0.0, 1.0] };
+            let base: [f32; 4] = if x < 40 {
+                [1.0, 0.0, 0.0, 1.0]
+            } else {
+                [0.0, 1.0, 0.0, 1.0]
+            };
             // alpha: src alpha x ONE + dst alpha x ZERO = 0.5
-            let c = if y < 32 { [base[0] * 0.5, base[1] * 0.5, 0.5, 0.5] } else { base };
+            let c = if y < 32 {
+                [base[0] * 0.5, base[1] * 0.5, 0.5, 0.5]
+            } else {
+                base
+            };
             Some(c.map(|v| (v * 255.0).round() as u8))
         })
         .collect();
@@ -322,6 +918,93 @@ fn compute_writes_buffer_visible_after_fence() {
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
+/// Unbound writable descriptors cannot corrupt other unbound bindings or the shared uniform/vertex zero buffer.
+/// The two writable slots match DKB's c0+0x400 and c0+0x3f0; run both descriptor backends in separate processes.
+#[test]
+fn missing_storage_writes_do_not_poison_zero_fallbacks() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let mut out = Pool::new(n.d(), 1 << 16, CPU_POOL);
+    let (off, dst) = out.alloc(256, 256);
+    let cs = spv("missing_storage_comp");
+    let cj = json(
+        "cs",
+        r#"
+        {"set":5,"binding":1,"type":"storage_buffer","count":1,"resource":{"kind":"sbuf","cb_slot":0,"cb_offset":256,"flags":1}},
+        {"set":5,"binding":2,"type":"storage_buffer","count":1,"resource":{"kind":"sbuf","cb_slot":0,"cb_offset":252,"flags":1}},
+        {"set":5,"binding":3,"type":"storage_buffer","count":1,"resource":{"kind":"sbuf","cb_slot":0,"cb_offset":196,"flags":0}},
+        {"set":5,"binding":4,"type":"storage_buffer","count":1,"resource":{"kind":"sbuf","cb_slot":0,"cb_offset":200,"flags":1}},
+        {"set":5,"binding":5,"type":"uniform_buffer","count":1,"resource":{"kind":"cbuf","slot":3}}
+    "#,
+    );
+    let prog = n.program(&[(&cs, &cj)]);
+    for _ in 0..2 {
+        n.begin();
+        unsafe {
+            nvnCommandBufferBindProgram(n.c(), &*prog, 0x20);
+            for slot in [0, 14, 15] {
+                nvnCommandBufferBindStorageBuffer(n.c(), stage::COMPUTE as i32, slot, 0, 0);
+            }
+            nvnCommandBufferBindStorageBuffer(n.c(), stage::COMPUTE as i32, 1, dst, 24);
+            nvnCommandBufferBindUniformBuffer(n.c(), stage::COMPUTE as i32, 0, 0, 0);
+            nvnCommandBufferDispatchCompute(n.c(), 1, 1, 1);
+        }
+        n.submit_wait();
+        let got: Vec<_> = out.mem.slice()[off..off + 24]
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+            .collect();
+        assert_eq!(
+            got,
+            [0, 0, 0, 0, 0, 0x12345678],
+            "missing storage descriptors must be isolated"
+        );
+    }
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
+/// Deliberately reads one word beyond a storage descriptor's range. This is ignored by default because a broken or
+/// falsely advertised robustness2 implementation could lose the device; run manually only on a disposable GPU setup.
+#[test]
+#[ignore = "deliberate GPU descriptor-range OOB; run manually on a disposable robustness2-capable device"]
+fn robustness2_zeroes_storage_buffer_descriptor_oob_reads() {
+    let _g = setup();
+    let e0 = validation_errors();
+    let mut n = Nvn::new();
+    let g = nxgfx::vk::Gpu::get().unwrap();
+    if !g.d.caps.robust_buffer_access2 {
+        eprintln!("robustness2 descriptor OOB: robustBufferAccess2 is unavailable, skipped");
+        return;
+    }
+    let src = n.data.put(&[1u32, 2, 3, 4, 0xdead_beef], 256);
+    let mut out = Pool::new(n.d(), 1 << 16, CPU_POOL);
+    let (off, dst) = out.alloc(16, 256);
+    out.mem.slice()[off..off + 4].copy_from_slice(&0xffff_ffffu32.to_le_bytes());
+    let cs = spv("descriptor_oob_comp");
+    let cj = json(
+        "cs",
+        r#"{"set": 5, "binding": 1, "type": "storage_buffer", "count": 1, "name": "src", "resource": {"kind": "sbuf", "slot": 0, "cb_slot": 0, "cb_offset": 196, "flags": 1}},
+           {"set": 5, "binding": 2, "type": "storage_buffer", "count": 1, "name": "dst", "resource": {"kind": "sbuf", "slot": 1, "cb_slot": 0, "cb_offset": 200, "flags": 1}}"#,
+    );
+    let prog = n.program(&[(&cs, &cj)]);
+    n.begin();
+    unsafe {
+        nvnCommandBufferBindProgram(n.c(), &*prog, 0x20);
+        nvnCommandBufferBindStorageBuffer(n.c(), stage::COMPUTE as i32, 0, src, 16);
+        nvnCommandBufferBindStorageBuffer(n.c(), stage::COMPUTE as i32, 1, dst, 16);
+        nvnCommandBufferDispatchCompute(n.c(), 1, 1, 1);
+        nvnCommandBufferBarrier(n.c(), barrier::ORDER_PRIMITIVES as i32);
+    }
+    n.submit_wait();
+    let got = u32::from_le_bytes(out.mem.slice()[off..off + 4].try_into().unwrap());
+    assert_eq!(
+        got, 0,
+        "robustBufferAccess2 must zero a read beyond the descriptor range"
+    );
+    assert_eq!(validation_errors(), e0, "validation errors");
+}
+
 /// GPU writes reach guest memory at the fence and CPU writes made after reach the GPU at the next submission:
 /// a texture copied to a CPU-visible buffer, then the CPU rewrites that buffer and the GPU copies it on.
 #[test]
@@ -336,14 +1019,27 @@ fn pool_write_back_round_trip() {
     n.set_target(&rt, None, 16, 16);
     clear(&mut n, [0.25, 0.5, 0.75, 1.0]);
     unsafe {
-        let r = NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: 16, height: 16, depth: 1 };
+        let r = NVNcopyRegion {
+            xoffset: 0,
+            yoffset: 0,
+            zoffset: 0,
+            width: 16,
+            height: 16,
+            depth: 1,
+        };
         nvnCommandBufferCopyTextureToBuffer(n.c(), &*rt, core::ptr::null(), &r, a, 0);
     }
     n.submit_wait();
     let got: Vec<u8> = n.data.mem.slice()[aoff..aoff + 1024].to_vec();
     // 0.25 / 0.5 / 0.75 in UNORM8 (a tie rounds either way)
-    let near = |p: &[u8]| p[0].abs_diff(64) <= 1 && p[1].abs_diff(128) <= 1 && p[2].abs_diff(191) <= 1 && p[3] == 255;
-    assert!(got.chunks(4).all(near), "texture copy in guest memory: {:?}", &got[..8]);
+    let near = |p: &[u8]| {
+        p[0].abs_diff(64) <= 1 && p[1].abs_diff(128) <= 1 && p[2].abs_diff(191) <= 1 && p[3] == 255
+    };
+    assert!(
+        got.chunks(4).all(near),
+        "texture copy in guest memory: {:?}",
+        &got[..8]
+    );
     // the CPU writes the buffer after the GPU did; the next submission copies it on
     for (i, x) in n.data.mem.slice()[aoff..aoff + 1024].iter_mut().enumerate() {
         *x = (i * 7) as u8;
@@ -353,7 +1049,10 @@ fn pool_write_back_round_trip() {
     n.submit_wait();
     let s = n.data.mem.slice();
     let ok = (0..1024).all(|i| s[boff + i] == (i * 7) as u8);
-    eprintln!("write-back round trip: GPU->CPU 1024 bytes, CPU->GPU->CPU 1024 bytes: {}", if ok { "equal" } else { "differ" });
+    eprintln!(
+        "write-back round trip: GPU->CPU 1024 bytes, CPU->GPU->CPU 1024 bytes: {}",
+        if ok { "equal" } else { "differ" }
+    );
     assert!(ok, "CPU writes after a GPU write reach the GPU");
     assert_eq!(validation_errors(), e0, "validation errors");
 }
@@ -381,7 +1080,11 @@ fn event_wait_parks_a_queue_until_another_queue_signals() {
         assert_eq!(nvnQueueInitialize(&mut *qb_obj, &*qb), 1);
         nvnCommandBufferInitialize(&mut *cmd_b, d);
         nvnCommandBufferAddCommandMemory(&mut *cmd_b, cmd_pool_b.p(), 0, 1 << 16);
-        nvnCommandBufferAddControlMemory(&mut *cmd_b, ctl_b.as_mut_ptr() as *mut u8, ctl_b.len() * 8);
+        nvnCommandBufferAddControlMemory(
+            &mut *cmd_b,
+            ctl_b.as_mut_ptr() as *mut u8,
+            ctl_b.len() * 8,
+        );
     }
     let (eoff, _) = n.data.alloc(16, 16);
     n.data.mem.slice()[eoff..eoff + 4].fill(0);
@@ -410,8 +1113,15 @@ fn event_wait_parks_a_queue_until_another_queue_signals() {
     }
     std::thread::sleep(std::time::Duration::from_millis(100));
     let early = unsafe { nvnSyncWait(&*sync_a, 0) };
-    assert_eq!(early, sync_wait::TIMEOUT_EXPIRED, "queue A ran before the event");
-    assert!(n.data.mem.slice()[doff..doff + 256].iter().all(|&b| b == 0), "the copy behind the wait ran early");
+    assert_eq!(
+        early,
+        sync_wait::TIMEOUT_EXPIRED,
+        "queue A ran before the event"
+    );
+    assert!(
+        n.data.mem.slice()[doff..doff + 256].iter().all(|&b| b == 0),
+        "the copy behind the wait ran early"
+    );
     unsafe {
         nvnCommandBufferBeginRecording(&mut *cmd_b);
         nvnCommandBufferSignalEvent(&mut *cmd_b, &*ev, event_signal::WRITE as i32, 0, 0, 1);
@@ -421,10 +1131,17 @@ fn event_wait_parks_a_queue_until_another_queue_signals() {
         let r = nvnSyncWait(&*sync_b, 5_000_000_000);
         assert!(r != sync_wait::TIMEOUT_EXPIRED);
         let r = nvnSyncWait(&*sync_a, 5_000_000_000);
-        assert!(r == sync_wait::CONDITION_SATISFIED || r == sync_wait::ALREADY_SIGNALED, "queue A ran on after the signal: {r}");
+        assert!(
+            r == sync_wait::CONDITION_SATISFIED || r == sync_wait::ALREADY_SIGNALED,
+            "queue A ran on after the signal: {r}"
+        );
         assert_eq!(nvnEventGetValue(&*ev), 1);
     }
-    assert_eq!(&n.data.mem.slice()[doff..doff + 256], &pattern[..], "the parked copy ran after the signal");
+    assert_eq!(
+        &n.data.mem.slice()[doff..doff + 256],
+        &pattern[..],
+        "the parked copy ran after the signal"
+    );
     eprintln!("queue parking: A held by its event wait until B signalled, then ran; its receipt fence resolved");
     unsafe {
         nvnCommandBufferFinalize(&mut *cmd_b);
@@ -451,28 +1168,69 @@ fn write_texels_reach_every_texture_over_the_storage() {
         nvnTextureBuilderSetDefaults(&mut *tb);
         nvnTextureBuilderSetSize2D(&mut *tb, w as i32, h as i32);
         nvnTextureBuilderSetFormat(&mut *tb, f::RGBA8);
-        nvnTextureBuilderSetStorage(&mut *tb, nvnTextureGetMemoryPool(&*a), nvnTextureGetMemoryOffset(&*a));
+        nvnTextureBuilderSetStorage(
+            &mut *tb,
+            nvnTextureGetMemoryPool(&*a),
+            nvnTextureGetMemoryOffset(&*a),
+        );
         assert_eq!(nvnTextureInitialize(&mut *t, &*tb), 1);
         t
     };
-    let frame = |k: u8| -> Vec<u8> { (0..w * h).flat_map(|i| [(i % 251) as u8, k, (i / w) as u8, 255]).collect() };
-    let whole = NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: w as i32, height: h as i32, depth: 1 };
+    let frame = |k: u8| -> Vec<u8> {
+        (0..w * h)
+            .flat_map(|i| [(i % 251) as u8, k, (i / w) as u8, 255])
+            .collect()
+    };
+    let whole = NVNcopyRegion {
+        xoffset: 0,
+        yoffset: 0,
+        zoffset: 0,
+        width: w as i32,
+        height: h as i32,
+        depth: 1,
+    };
     let f1 = frame(10);
     unsafe { nvnTextureWriteTexels(&*a, core::ptr::null(), &whole, f1.as_ptr()) };
-    assert!(n.read_rgba8(&b, w, h) == f1, "first frame through the other object");
+    assert!(
+        n.read_rgba8(&b, w, h) == f1,
+        "first frame through the other object"
+    );
     let f2 = frame(20);
-    unsafe { nvnTextureWriteTexelsStrided(&*a, core::ptr::null(), &whole, f2.as_ptr(), (w * 4) as isize, 0) };
-    assert!(n.read_rgba8(&b, w, h) == f2, "second frame: the existing image uploads again");
+    unsafe {
+        nvnTextureWriteTexelsStrided(
+            &*a,
+            core::ptr::null(),
+            &whole,
+            f2.as_ptr(),
+            (w * 4) as isize,
+            0,
+        )
+    };
+    assert!(
+        n.read_rgba8(&b, w, h) == f2,
+        "second frame: the existing image uploads again"
+    );
     // a 5x3 region at (7, 9), rows of 5 texels
     let part: Vec<u8> = (0..15).flat_map(|_| [1u8, 2, 3, 4]).collect();
-    let r = NVNcopyRegion { xoffset: 7, yoffset: 9, zoffset: 0, width: 5, height: 3, depth: 1 };
+    let r = NVNcopyRegion {
+        xoffset: 7,
+        yoffset: 9,
+        zoffset: 0,
+        width: 5,
+        height: 3,
+        depth: 1,
+    };
     unsafe { nvnTextureWriteTexels(&*a, core::ptr::null(), &r, part.as_ptr()) };
     let got = n.read_rgba8(&b, w, h);
     for y in 0..h {
         for x in 0..w {
             let i = ((y * w + x) * 4) as usize;
             let inside = (7..12).contains(&x) && (9..12).contains(&y);
-            let want = if inside { [1u8, 2, 3, 4] } else { [f2[i], f2[i + 1], f2[i + 2], f2[i + 3]] };
+            let want = if inside {
+                [1u8, 2, 3, 4]
+            } else {
+                [f2[i], f2[i + 1], f2[i + 2], f2[i + 3]]
+            };
             assert_eq!(&got[i..i + 4], &want, "texel {x},{y}");
         }
     }
@@ -487,7 +1245,13 @@ fn resolution_scale_renders_at_twice_the_size() {
     let e0 = validation_errors();
     nxconfig::set("resolution", "2");
     let mut n = Nvn::new();
-    let rt = n.texture(W, H, f::RGBA8, nxgfx::nvn::types::tex_flags::COMPRESSIBLE, false);
+    let rt = n.texture(
+        W,
+        H,
+        f::RGBA8,
+        nxgfx::nvn::types::tex_flags::COMPRESSIBLE,
+        false,
+    );
     let prog = tri_program(&mut n);
     let tri = [[-0.8f32, -0.6], [0.7, -0.5], [0.0, 0.9]];
     let color = [0.0, 1.0, 0.0, 1.0];
@@ -501,7 +1265,15 @@ fn resolution_scale_renders_at_twice_the_size() {
     let got = n.read_rgba8(&rt, W, H);
     let want: Vec<Option<[u8; 4]>> = tri_cover(tri, W, H, false)
         .into_iter()
-        .map(|c| c.map(|inside| if inside { rgba8(color) } else { [0, 0, 255, 255] }))
+        .map(|c| {
+            c.map(|inside| {
+                if inside {
+                    rgba8(color)
+                } else {
+                    [0, 0, 255, 255]
+                }
+            })
+        })
         .collect();
     nxconfig::set("resolution", "1");
     check("triangle at resolution x2", &got, &want, 0);
@@ -522,10 +1294,33 @@ fn image_stores_to_a_texture_without_the_image_flag() {
         n.register_texture(9, &tex);
         // the image exists without storage use before the image registration
         n.begin();
-        let r = NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: W as i32, height: H as i32, depth: 1 };
-        unsafe { nvnCommandBufferClearTexture(n.c(), &*tex, core::ptr::null(), &r, [0.0f32; 4].as_ptr(), 0xf) };
+        let r = NVNcopyRegion {
+            xoffset: 0,
+            yoffset: 0,
+            zoffset: 0,
+            width: W as i32,
+            height: H as i32,
+            depth: 1,
+        };
+        unsafe {
+            nvnCommandBufferClearTexture(
+                n.c(),
+                &*tex,
+                core::ptr::null(),
+                &r,
+                [0.0f32; 4].as_ptr(),
+                0xf,
+            )
+        };
         n.submit_wait();
-        unsafe { nxgfx::nvn::pool::nvnTexturePoolRegisterImage(&*n.tex_pool, 10, &*tex, core::ptr::null()) };
+        unsafe {
+            nxgfx::nvn::pool::nvnTexturePoolRegisterImage(
+                &*n.tex_pool,
+                10,
+                &*tex,
+                core::ptr::null(),
+            )
+        };
         let cs = spv("image_store_comp");
         let cj = json(
             "cs",
@@ -542,8 +1337,15 @@ fn image_stores_to_a_texture_without_the_image_flag() {
         }
         n.submit_wait();
         let got = n.read_rgba8(&tex, W, H);
-        let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|i| Some([(i % W) as u8, (i / W) as u8, 128, 255])).collect();
-        check(&format!("image stores into {name} without the IMAGE flag"), &got, &want, 1);
+        let want: Vec<Option<[u8; 4]>> = (0..W * H)
+            .map(|i| Some([(i % W) as u8, (i / W) as u8, 128, 255]))
+            .collect();
+        check(
+            &format!("image stores into {name} without the IMAGE flag"),
+            &got,
+            &want,
+            1,
+        );
     }
     std::env::remove_var("NXGFX_IMAGE_NOFLAG");
     assert_eq!(validation_errors(), e0, "validation errors");
@@ -563,10 +1365,16 @@ fn float_output_bits_reach_an_integer_target() {
     n.begin();
     n.set_target(&rt, None, W, H);
     bind_program(&mut n, &prog);
-    draw_tri(&mut n, [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]], [0.0; 4]);
+    draw_tri(
+        &mut n,
+        [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
+        [0.0; 4],
+    );
     n.submit_wait();
     let got = n.read_rgba8(&rt, W, H);
-    let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|_| Some(0x1234_5678u32.to_le_bytes())).collect();
+    let want: Vec<Option<[u8; 4]>> = (0..W * H)
+        .map(|_| Some(0x1234_5678u32.to_le_bytes()))
+        .collect();
     check("float output bits into R32UI", &got, &want, 0);
     assert_eq!(validation_errors(), e0, "validation errors");
 }
@@ -593,7 +1401,11 @@ fn alpha_test_discards_in_the_shader() {
     }
     for (x0, x1, a) in [(-1.0f32, 0.0f32, 0.3f32), (0.0, 1.0, 0.7)] {
         let c = [1.0, 0.0, 0.0, a];
-        draw_tri(&mut n, [[x0, -1.0, 0.0], [x1, -1.0, 0.0], [x1, 1.0, 0.0]], c);
+        draw_tri(
+            &mut n,
+            [[x0, -1.0, 0.0], [x1, -1.0, 0.0], [x1, 1.0, 0.0]],
+            c,
+        );
         draw_tri(&mut n, [[x0, -1.0, 0.0], [x1, 1.0, 0.0], [x0, 1.0, 0.0]], c);
     }
     n.submit_wait();
@@ -636,10 +1448,20 @@ fn dual_source_blending_reads_output_1() {
         nvnColorStateSetBlendEnable(&mut *cs, 0, 1);
         nvnCommandBufferBindColorState(n.c(), &*cs);
         nvnBlendStateSetDefaults(&mut *bs);
-        nvnBlendStateSetBlendFunc(&mut *bs, blend_func::ONE as i32, 16 /* SRC1_COLOR */, blend_func::ONE as i32, blend_func::ZERO as i32);
+        nvnBlendStateSetBlendFunc(
+            &mut *bs,
+            blend_func::ONE as i32,
+            16, /* SRC1_COLOR */
+            blend_func::ONE as i32,
+            blend_func::ZERO as i32,
+        );
         nvnCommandBufferBindBlendState(n.c(), &*bs);
     }
-    draw_tri(&mut n, [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]], [0.25, 0.0, 0.0, 1.0]);
+    draw_tri(
+        &mut n,
+        [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
+        [0.25, 0.0, 0.0, 1.0],
+    );
     n.submit_wait();
     let got = n.read_rgba8(&rt, W, H);
     let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|_| Some([128, 128, 255, 255])).collect();
@@ -655,7 +1477,9 @@ fn buffer_texture_read_by_texel_fetch() {
     let mut n = Nvn::new();
     let src: Vec<u32> = (0..256u32).map(|i| i * 7 + 3).collect();
     let (soff, _) = n.data.alloc(1024, 256);
-    unsafe { core::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, n.data.mem.ptr.add(soff), 1024) };
+    unsafe {
+        core::ptr::copy_nonoverlapping(src.as_ptr() as *const u8, n.data.mem.ptr.add(soff), 1024)
+    };
     let mut b = NVNtextureBuilder::boxed();
     let mut tex = NVNtexture::boxed();
     unsafe {
@@ -688,7 +1512,9 @@ fn buffer_texture_read_by_texel_fetch() {
     }
     n.submit_wait();
     let o = &out.mem.slice()[ooff..ooff + 1024];
-    let bad = (0..256).filter(|&i| u32::from_le_bytes(o[4 * i..4 * i + 4].try_into().unwrap()) != src[i] * 2 + 1).count();
+    let bad = (0..256)
+        .filter(|&i| u32::from_le_bytes(o[4 * i..4 * i + 4].try_into().unwrap()) != src[i] * 2 + 1)
+        .count();
     eprintln!("buffer texture: 256 texels fetched, {bad} wrong");
     assert_eq!(bad, 0, "texelFetch through the buffer texture");
     assert_eq!(validation_errors(), e0, "validation errors");
@@ -704,12 +1530,18 @@ fn append_counter_as_indirect_draw_arguments() {
     let mut n = Nvn::new();
     let rt = n.texture(W, H, f::RGBA8, 0, false);
     let vs = spv("append_vert");
-    let vj = json("vs", r#"{"set": 0, "binding": 1, "type": "storage_buffer", "count": 1, "name": "rec", "resource": {"kind": "sbuf", "slot": 0, "cb_slot": 0, "cb_offset": 68, "flags": 1}}"#);
+    let vj = json(
+        "vs",
+        r#"{"set": 0, "binding": 1, "type": "storage_buffer", "count": 1, "name": "rec", "resource": {"kind": "sbuf", "slot": 0, "cb_slot": 0, "cb_offset": 68, "flags": 1}}"#,
+    );
     let fs = spv("tri_frag");
     let counting = n.program(&[(&vs, &vj), (&fs, &json("ps", ""))]);
     let tri = tri_program(&mut n);
     let rec = n.data.put(&[0u32; 16], 256);
-    let quad: Vec<f32> = [[-1.0f32, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]].iter().flat_map(|p| [p[0], p[1], 0.0, 0.0, 1.0, 0.0, 1.0]).collect();
+    let quad: Vec<f32> = [[-1.0f32, -1.0], [1.0, -1.0], [1.0, 1.0], [-1.0, 1.0]]
+        .iter()
+        .flat_map(|p| [p[0], p[1], 0.0, 0.0, 1.0, 0.0, 1.0])
+        .collect();
     let qb = n.data.put(&quad, 256);
     let ib = n.data.put(&[0u16, 1, 2, 0, 2, 3], 256);
     n.begin();
@@ -719,7 +1551,12 @@ fn append_counter_as_indirect_draw_arguments() {
     unsafe { nvnCommandBufferBindStorageBuffer(n.c(), stage::VERTEX as i32, 0, rec, 64) };
     // a degenerate triangle: only its vertex shader's count matters
     draw_tri(&mut n, [[0.0, 0.0, 0.0]; 3], [0.0; 4]);
-    unsafe { nvnCommandBufferBarrier(n.c(), (barrier::ORDER_PRIMITIVES | barrier::ORDER_INDIRECT_DATA) as i32) };
+    unsafe {
+        nvnCommandBufferBarrier(
+            n.c(),
+            (barrier::ORDER_PRIMITIVES | barrier::ORDER_INDIRECT_DATA) as i32,
+        )
+    };
     bind_program(&mut n, &tri);
     n.vertex_layout(&[(f::RGB32F, 0), (f::RGBA32F, 12)], 28);
     unsafe {
@@ -749,7 +1586,10 @@ fn linear_render_target_reaches_guest_memory() {
         nvnTextureBuilderSetDefaults(&mut *b);
         nvnTextureBuilderSetSize2D(&mut *b, W as i32, H as i32);
         nvnTextureBuilderSetFormat(&mut *b, f::RGBA8);
-        nvnTextureBuilderSetFlags(&mut *b, nxgfx::nvn::types::tex_flags::LINEAR_RENDER_TARGET as i32);
+        nvnTextureBuilderSetFlags(
+            &mut *b,
+            nxgfx::nvn::types::tex_flags::LINEAR_RENDER_TARGET as i32,
+        );
         nvnTextureBuilderSetStride(&mut *b, stride as isize);
         let size = nvnTextureBuilderGetStorageSize(&*b).max(stride * H as usize);
         let (o, _) = n.data.alloc(size, 4096);
@@ -763,7 +1603,11 @@ fn linear_render_target_reaches_guest_memory() {
     n.set_target(&rt, None, W, H);
     clear(&mut n, [0.0, 0.0, 1.0, 1.0]);
     bind_program(&mut n, &prog);
-    draw_tri(&mut n, [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]], [1.0, 0.5, 0.0, 1.0]);
+    draw_tri(
+        &mut n,
+        [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
+        [1.0, 0.5, 0.0, 1.0],
+    );
     n.submit_wait();
     let m = &n.data.mem.slice()[off..off + stride * H as usize];
     let mut bad = 0;
@@ -775,8 +1619,17 @@ fn linear_render_target_reaches_guest_memory() {
             }
         }
     }
-    eprintln!("linear render target in guest memory: {} texels, {bad} wrong (first {:?})", W * H, &m[..8]);
+    eprintln!(
+        "linear render target in guest memory: {} texels, {bad} wrong (first {:?})",
+        W * H,
+        &m[..8]
+    );
     assert_eq!(bad, 0, "the drawn texels in the storage");
+    // The texture's memory pool is destroyed with n. Do not leave its live linear backing registered over an
+    // address that a later test can allocate for block-linear storage.
+    unsafe {
+        nvnTextureFinalize(&mut *rt);
+    }
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
@@ -832,7 +1685,32 @@ fn vram_budget_frees_parked_images() {
     let freed = g.vram_budget();
     std::env::remove_var("NXGFX_VRAM_EVICT_PCT");
     eprintln!("VRAM budget: {} KB of parked images freed", freed >> 10);
-    assert!(freed >= 256 * 256 * 4, "the finalized texture's parked image");
+    assert!(
+        freed >= 256 * 256 * 4,
+        "the finalized texture's parked image"
+    );
+}
+
+/// A finalized texture slot is a typed zero placeholder, not a live target mismatch. Registering a new texture in
+/// that slot restores normal live-resource target validation (Smash/Jamboree placeholders vs PLZA/SXSG mismatches).
+#[test]
+fn finalized_texture_slots_are_placeholder_only_until_reregistered() {
+    let _g = setup();
+    let mut n = Nvn::new();
+    let id = 17;
+    let mut old = n.texture(16, 16, f::RGBA8, 0, false);
+    n.register_texture(id, &old);
+    let g = nxgfx::vk::Gpu::get().unwrap();
+    g.materialize(id + n.tex_base());
+    unsafe { nxgfx::nvn::tex::nvnTextureFinalize(&mut *old) };
+    std::env::set_var("NXGFX_VRAM_EVICT_PCT", "0");
+    g.vram_budget();
+    std::env::remove_var("NXGFX_VRAM_EVICT_PCT");
+    assert!(g.tables.placeholder_at(id + n.tex_base()));
+
+    let live = n.texture(16, 16, f::RGBA8, 0, false);
+    n.register_texture(id, &live);
+    assert!(!g.tables.placeholder_at(id + n.tex_base()));
 }
 
 /// Ray tracing (`vk/rt.rs`): a bottom level from NVN2's build description of one triangle in guest memory, a top level
@@ -854,52 +1732,163 @@ fn ray_query_traces_a_triangle() {
     let (_, blas_at) = n.data.alloc(256, 256);
     let (_, tlas_at) = n.data.alloc(256, 256);
     let mut inst = [0u8; 64];
-    for (i, v) in [1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0].iter().enumerate() {
+    for (i, v) in [
+        1.0f32, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0,
+    ]
+    .iter()
+    .enumerate()
+    {
         inst[4 * i..4 * i + 4].copy_from_slice(&v.to_le_bytes());
     }
     inst[48..52].copy_from_slice(&(0xffu32 << 24).to_le_bytes());
     inst[56..64].copy_from_slice(&blas_at.to_le_bytes());
     let ia = n.data.put(&inst, 256);
-    let tri_geo = AsGeometry { kind: 1, _pad: 0, w: [va, 3 | 34 << 32, 12, 0, 0, 0, 0] };
-    let inst_geo = AsGeometry { kind: 3, _pad: 0, w: [ia, 1, 0, 0, 0, 0, 0] };
-    let mk = |geo: &AsGeometry, dst: u64| AsBuild { flags: 0, operation: 0, geometries: geo, count: 1, _pad: 0, source: 0, destination: dst, destination_size: 0, scratch: 0, scratch_size: 0 };
+    let tri_geo = AsGeometry {
+        kind: 1,
+        _pad: 0,
+        w: [va, 3 | 34 << 32, 12, 0, 0, 0, 0],
+    };
+    let inst_geo = AsGeometry {
+        kind: 3,
+        _pad: 0,
+        w: [ia, 1, 0, 0, 0, 0, 0],
+    };
+    let mk = |geo: &AsGeometry, dst: u64| AsBuild {
+        flags: 0,
+        operation: 0,
+        geometries: geo,
+        count: 1,
+        _pad: 0,
+        source: 0,
+        destination: dst,
+        destination_size: 0,
+        scratch: 0,
+        scratch_size: 0,
+    };
     let (bl, tl) = (mk(&tri_geo, blas_at), mk(&inst_geo, tlas_at));
-    let f = nxgfx::vk::queue::oneoff(g, |g, sub, _| nxgfx::vk::rt::build(g, sub, &bl).expect("bottom level"));
+    let f = nxgfx::vk::queue::oneoff(g, |g, sub, _| {
+        nxgfx::vk::rt::build(g, sub, &bl).expect("bottom level")
+    });
     nxgfx::vk::queue::wait_fence(f, u64::MAX);
-    let f = nxgfx::vk::queue::oneoff(g, |g, sub, _| nxgfx::vk::rt::build(g, sub, &tl).expect("top level"));
+    let f = nxgfx::vk::queue::oneoff(g, |g, sub, _| {
+        nxgfx::vk::rt::build(g, sub, &tl).expect("top level")
+    });
     nxgfx::vk::queue::wait_fence(f, u64::MAX);
     let (tlas, _) = nxgfx::vk::rt::lookup(tlas_at).expect("the top level by its guest address");
     // the tracing kernel, with its own layout
     use ash::vk;
     let dev = g.dev();
     let binds = [
-        vk::DescriptorSetLayoutBinding::default().binding(0).descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE),
-        vk::DescriptorSetLayoutBinding::default().binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).descriptor_count(1).stage_flags(vk::ShaderStageFlags::COMPUTE),
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(0)
+            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
+        vk::DescriptorSetLayoutBinding::default()
+            .binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .descriptor_count(1)
+            .stage_flags(vk::ShaderStageFlags::COMPUTE),
     ];
-    let out = g.buffer(32 * 32 * 4, vk::BufferUsageFlags::STORAGE_BUFFER, gpu_allocator::MemoryLocation::GpuToCpu, "rt test out").unwrap();
+    let out = g
+        .buffer(
+            32 * 32 * 4,
+            vk::BufferUsageFlags::STORAGE_BUFFER,
+            gpu_allocator::MemoryLocation::GpuToCpu,
+            "rt test out",
+        )
+        .unwrap();
     unsafe {
-        let dsl = dev.create_descriptor_set_layout(&vk::DescriptorSetLayoutCreateInfo::default().bindings(&binds), None).unwrap();
+        let dsl = dev
+            .create_descriptor_set_layout(
+                &vk::DescriptorSetLayoutCreateInfo::default().bindings(&binds),
+                None,
+            )
+            .unwrap();
         let sl = [dsl];
-        let pl = dev.create_pipeline_layout(&vk::PipelineLayoutCreateInfo::default().set_layouts(&sl), None).unwrap();
+        let pl = dev
+            .create_pipeline_layout(
+                &vk::PipelineLayoutCreateInfo::default().set_layouts(&sl),
+                None,
+            )
+            .unwrap();
         let code = spv("rq_comp");
-        let words: Vec<u32> = code.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
-        let m = dev.create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None).unwrap();
-        let st = vk::PipelineShaderStageCreateInfo::default().stage(vk::ShaderStageFlags::COMPUTE).module(m).name(c"main");
-        let pipe = dev.create_compute_pipelines(vk::PipelineCache::null(), &[vk::ComputePipelineCreateInfo::default().stage(st).layout(pl)], None).unwrap()[0];
-        let sizes = [vk::DescriptorPoolSize { ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR, descriptor_count: 1 }, vk::DescriptorPoolSize { ty: vk::DescriptorType::STORAGE_BUFFER, descriptor_count: 1 }];
-        let pool = dev.create_descriptor_pool(&vk::DescriptorPoolCreateInfo::default().max_sets(1).pool_sizes(&sizes), None).unwrap();
-        let set = dev.allocate_descriptor_sets(&vk::DescriptorSetAllocateInfo::default().descriptor_pool(pool).set_layouts(&sl)).unwrap()[0];
+        let words: Vec<u32> = code
+            .chunks_exact(4)
+            .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+            .collect();
+        let m = dev
+            .create_shader_module(&vk::ShaderModuleCreateInfo::default().code(&words), None)
+            .unwrap();
+        let st = vk::PipelineShaderStageCreateInfo::default()
+            .stage(vk::ShaderStageFlags::COMPUTE)
+            .module(m)
+            .name(c"main");
+        let pipe = dev
+            .create_compute_pipelines(
+                vk::PipelineCache::null(),
+                &[vk::ComputePipelineCreateInfo::default()
+                    .stage(st)
+                    .layout(pl)],
+                None,
+            )
+            .unwrap()[0];
+        let sizes = [
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::ACCELERATION_STRUCTURE_KHR,
+                descriptor_count: 1,
+            },
+            vk::DescriptorPoolSize {
+                ty: vk::DescriptorType::STORAGE_BUFFER,
+                descriptor_count: 1,
+            },
+        ];
+        let pool = dev
+            .create_descriptor_pool(
+                &vk::DescriptorPoolCreateInfo::default()
+                    .max_sets(1)
+                    .pool_sizes(&sizes),
+                None,
+            )
+            .unwrap();
+        let set = dev
+            .allocate_descriptor_sets(
+                &vk::DescriptorSetAllocateInfo::default()
+                    .descriptor_pool(pool)
+                    .set_layouts(&sl),
+            )
+            .unwrap()[0];
         let ases = [tlas];
-        let mut asw = vk::WriteDescriptorSetAccelerationStructureKHR::default().acceleration_structures(&ases);
-        let bi = [vk::DescriptorBufferInfo { buffer: out.buf, offset: 0, range: vk::WHOLE_SIZE }];
-        let mut w0 = vk::WriteDescriptorSet::default().dst_set(set).dst_binding(0).descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR).push_next(&mut asw);
+        let mut asw = vk::WriteDescriptorSetAccelerationStructureKHR::default()
+            .acceleration_structures(&ases);
+        let bi = [vk::DescriptorBufferInfo {
+            buffer: out.buf,
+            offset: 0,
+            range: vk::WHOLE_SIZE,
+        }];
+        let mut w0 = vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(0)
+            .descriptor_type(vk::DescriptorType::ACCELERATION_STRUCTURE_KHR)
+            .push_next(&mut asw);
         w0.descriptor_count = 1;
-        let w1 = vk::WriteDescriptorSet::default().dst_set(set).dst_binding(1).descriptor_type(vk::DescriptorType::STORAGE_BUFFER).buffer_info(&bi);
+        let w1 = vk::WriteDescriptorSet::default()
+            .dst_set(set)
+            .dst_binding(1)
+            .descriptor_type(vk::DescriptorType::STORAGE_BUFFER)
+            .buffer_info(&bi);
         dev.update_descriptor_sets(&[w0, w1], &[]);
         let f = nxgfx::vk::queue::oneoff(g, |g, sub, _| {
             let d = g.dev();
             d.cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe);
-            d.cmd_bind_descriptor_sets(sub.main, vk::PipelineBindPoint::COMPUTE, pl, 0, &[set], &[]);
+            d.cmd_bind_descriptor_sets(
+                sub.main,
+                vk::PipelineBindPoint::COMPUTE,
+                pl,
+                0,
+                &[set],
+                &[],
+            );
             d.cmd_dispatch(sub.main, 4, 4, 1);
             nxgfx::vk::queue::full_barrier(g, sub.main);
         });
@@ -911,7 +1900,11 @@ fn ray_query_traces_a_triangle() {
             for x in 0..32usize {
                 let (fx, fy) = ((x as f32 + 0.5) / 16.0 - 1.0, (y as f32 + 0.5) / 16.0 - 1.0);
                 // inside the triangle (-1,-1) (1,-1) (-1,1): x + y < 0; the diagonal itself left out
-                let want = if (fx + fy).abs() < 0.07 { None } else { Some(fx + fy < 0.0) };
+                let want = if (fx + fy).abs() < 0.07 {
+                    None
+                } else {
+                    Some(fx + fy < 0.0)
+                };
                 let got = hits[y * 32 + x] == 1;
                 n_hit += got as u32;
                 if want.is_some_and(|w| w != got) {
@@ -962,7 +1955,10 @@ fn loops_are_bounded() {
     if cap == 0 {
         assert_eq!(got, 1_000_000);
     } else {
-        assert!(got < cap + 2 && got + 2 >= cap, "the loop ended at the bound");
+        assert!(
+            got < cap + 2 && got + 2 >= cap,
+            "the loop ended at the bound"
+        );
     }
     assert_eq!(validation_errors(), e0, "validation errors");
 }
@@ -995,7 +1991,11 @@ fn indirect_dispatch_through_the_count_clamp() {
     }
     n.submit_wait();
     let s = &out.mem.slice()[soff..soff + 1024];
-    let bad = (0..256).filter(|&i| u32::from_le_bytes(s[4 * i..4 * i + 4].try_into().unwrap()) != i as u32 * 3 + 7).count();
+    let bad = (0..256)
+        .filter(|&i| {
+            u32::from_le_bytes(s[4 * i..4 * i + 4].try_into().unwrap()) != i as u32 * 3 + 7
+        })
+        .count();
     eprintln!("indirect dispatch: 256 words, {bad} wrong");
     assert_eq!(bad, 0);
     assert_eq!(validation_errors(), e0, "validation errors");
@@ -1010,7 +2010,10 @@ fn indirect_draw_with_garbage_counts_is_held() {
     let mut n = Nvn::new();
     let rt = n.texture(W, H, f::RGBA8, 0, false);
     let tri = tri_program(&mut n);
-    let quad: Vec<f32> = [[-1.0f32, -1.0], [3.0, -1.0], [-1.0, 3.0]].iter().flat_map(|p| [p[0], p[1], 0.0, 0.0, 1.0, 0.0, 1.0]).collect();
+    let quad: Vec<f32> = [[-1.0f32, -1.0], [3.0, -1.0], [-1.0, 3.0]]
+        .iter()
+        .flat_map(|p| [p[0], p[1], 0.0, 0.0, 1.0, 0.0, 1.0])
+        .collect();
     let qb = n.data.put(&quad, 256);
     let rec = n.data.put(&[3u32, 0xffff_fff0, 0, 0], 256);
     n.begin();
@@ -1024,7 +2027,10 @@ fn indirect_draw_with_garbage_counts_is_held() {
     }
     let t0 = std::time::Instant::now();
     n.submit_wait();
-    eprintln!("garbage indirect draw: {:.0} ms", t0.elapsed().as_secs_f64() * 1e3);
+    eprintln!(
+        "garbage indirect draw: {:.0} ms",
+        t0.elapsed().as_secs_f64() * 1e3
+    );
     let got = n.read_rgba8(&rt, W, H);
     let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|_| Some([0, 255, 0, 255])).collect();
     check("indirect draw with garbage counts", &got, &want, 0);
@@ -1053,7 +2059,11 @@ fn queue_waits_for_another_queues_parked_work() {
         assert_eq!(nvnQueueInitialize(&mut *qb_obj, &*qb), 1);
         nvnCommandBufferInitialize(&mut *cmd_b, d);
         nvnCommandBufferAddCommandMemory(&mut *cmd_b, cmd_pool_b.p(), 0, 1 << 16);
-        nvnCommandBufferAddControlMemory(&mut *cmd_b, ctl_b.as_mut_ptr() as *mut u8, ctl_b.len() * 8);
+        nvnCommandBufferAddControlMemory(
+            &mut *cmd_b,
+            ctl_b.as_mut_ptr() as *mut u8,
+            ctl_b.len() * 8,
+        );
     }
     let (eoff, _) = n.data.alloc(16, 16);
     n.data.mem.slice()[eoff..eoff + 4].fill(0);
@@ -1091,13 +2101,21 @@ fn queue_waits_for_another_queues_parked_work() {
         nvnQueueFenceSync(&mut *qb_obj, &mut *sync_b, 0, 0);
     }
     std::thread::sleep(std::time::Duration::from_millis(100));
-    assert_eq!(unsafe { nvnSyncWait(&*sync_b, 0) }, sync_wait::TIMEOUT_EXPIRED, "queue B ran before A's parked work");
+    assert_eq!(
+        unsafe { nvnSyncWait(&*sync_b, 0) },
+        sync_wait::TIMEOUT_EXPIRED,
+        "queue B ran before A's parked work"
+    );
     unsafe {
         nvnEventSignal(&mut *ev, event_signal::WRITE, 1);
         let r = nvnSyncWait(&*sync_b, 5_000_000_000);
         assert!(r != sync_wait::TIMEOUT_EXPIRED, "queue B never ran");
     }
-    assert_eq!(&n.data.mem.slice()[d2off..d2off + 256], &pattern[..], "queue B copied before A wrote");
+    assert_eq!(
+        &n.data.mem.slice()[d2off..d2off + 256],
+        &pattern[..],
+        "queue B copied before A wrote"
+    );
     unsafe {
         nvnCommandBufferFinalize(&mut *cmd_b);
         nvnQueueFinalize(&mut *qb_obj);
@@ -1139,10 +2157,17 @@ fn reused_command_buffer_sync_covers_the_new_submission() {
         nvnQueueSubmitCommands(&mut *n.queue, 1, &h);
     }
     std::thread::sleep(std::time::Duration::from_millis(50));
-    assert_eq!(unsafe { nvnSyncWait(&*s, 0) }, sync_wait::TIMEOUT_EXPIRED, "the sync read as signalled before its submission ran");
+    assert_eq!(
+        unsafe { nvnSyncWait(&*s, 0) },
+        sync_wait::TIMEOUT_EXPIRED,
+        "the sync read as signalled before its submission ran"
+    );
     unsafe {
         nvnEventSignal(&mut *ev, event_signal::WRITE, 1);
-        assert!(nvnSyncWait(&*s, 5_000_000_000) != sync_wait::TIMEOUT_EXPIRED, "the sync never signalled");
+        assert!(
+            nvnSyncWait(&*s, 5_000_000_000) != sync_wait::TIMEOUT_EXPIRED,
+            "the sync never signalled"
+        );
     }
     assert_eq!(validation_errors(), e0, "validation errors");
 }
@@ -1181,7 +2206,11 @@ fn conditional_clear_runs_once_after_a_timestamp_report() {
     let got = n.read_rgba8(&rt, W, H);
     let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|_| Some([255, 0, 0, 255])).collect();
     check("conditional clear once", &got, &want, 0);
-    assert_eq!(&n.data.mem.slice()[roff..roff + 8], &0u64.to_le_bytes(), "the timestamp's counter field");
+    assert_eq!(
+        &n.data.mem.slice()[roff..roff + 8],
+        &0u64.to_le_bytes(),
+        "the timestamp's counter field"
+    );
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
@@ -1219,7 +2248,11 @@ fn scissor_past_the_target_is_held_to_it() {
     clear(&mut n, [0.0, 0.0, 1.0, 1.0]);
     bind_program(&mut n, &prog);
     unsafe { nvnCommandBufferSetScissor(n.c(), -16, -16, 8192, 8192) };
-    draw_tri(&mut n, [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]], [0.0, 1.0, 0.0, 1.0]);
+    draw_tri(
+        &mut n,
+        [[-1.0, -1.0, 0.0], [3.0, -1.0, 0.0], [-1.0, 3.0, 0.0]],
+        [0.0, 1.0, 0.0, 1.0],
+    );
     n.submit_wait();
     let got = n.read_rgba8(&rt, W, H);
     let want: Vec<Option<[u8; 4]>> = (0..W * H).map(|_| Some([0, 255, 0, 255])).collect();
@@ -1266,10 +2299,22 @@ fn frame_generation_skips_duplicates_and_scene_cuts() {
     frame(&a);
     assert_eq!(frame(&a), Some(1), "the same frame again: a duplicate");
     assert_eq!(frame(&b), Some(2), "a different picture: a scene cut");
-    assert_eq!(frame(&b), Some(1), "after the cut, the same again: a duplicate");
-    assert_eq!(frame(&b2), Some(3), "warming up after the cut (a small change)");
+    assert_eq!(
+        frame(&b),
+        Some(1),
+        "after the cut, the same again: a duplicate"
+    );
+    assert_eq!(
+        frame(&b2),
+        Some(3),
+        "warming up after the cut (a small change)"
+    );
     assert_eq!(frame(&b), Some(3), "warming up, the second frame");
-    assert_eq!(frame(&b2), Some(0), "a small change once warm: interpolated");
+    assert_eq!(
+        frame(&b2),
+        Some(0),
+        "a small change once warm: interpolated"
+    );
     assert!(nxconfig::apply_arg("--lsfg=0"));
 }
 
@@ -1298,7 +2343,11 @@ fn a_taken_over_texture_object_still_finds_its_image() {
         nvnTextureBuilderSetDefaults(&mut *tb);
         nvnTextureBuilderSetSize2D(&mut *tb, w as i32, h as i32);
         nvnTextureBuilderSetFormat(&mut *tb, f::RGBA8);
-        nvnTextureBuilderSetStorage(&mut *tb, nvnTextureGetMemoryPool(&*a), nvnTextureGetMemoryOffset(&*a));
+        nvnTextureBuilderSetStorage(
+            &mut *tb,
+            nvnTextureGetMemoryPool(&*a),
+            nvnTextureGetMemoryOffset(&*a),
+        );
         assert_eq!(nvnTextureInitialize(&mut *t, &*tb), 1);
         t
     };
@@ -1306,9 +2355,19 @@ fn a_taken_over_texture_object_still_finds_its_image() {
     let mut imgs = g.images.lock().unwrap();
     let image_a = imgs.by_serial[&ta.serial].image;
     assert!(g.ensure_image(&mut imgs, &tb_));
-    assert!(!imgs.by_serial.contains_key(&ta.serial), "the newer object took the image over");
-    assert_eq!(imgs.by_serial[&tb_.serial].image, image_a, "with its content");
-    assert_eq!(imgs.live(ta.serial), tb_.serial, "the older object finds it through the newer one");
+    assert!(
+        !imgs.by_serial.contains_key(&ta.serial),
+        "the newer object took the image over"
+    );
+    assert_eq!(
+        imgs.by_serial[&tb_.serial].image, image_a,
+        "with its content"
+    );
+    assert_eq!(
+        imgs.live(ta.serial),
+        tb_.serial,
+        "the older object finds it through the newer one"
+    );
     assert_eq!(imgs.live(tb_.serial), tb_.serial);
     // the older object made again takes it back: no forwarding left for it
     assert!(g.ensure_image(&mut imgs, &ta));
@@ -1331,10 +2390,27 @@ fn block_linear_textures_deswizzle_on_the_gpu_as_on_the_cpu() {
         GOB_SWITCH2.store(s2, std::sync::atomic::Ordering::Relaxed);
         // (format, width, height, depth, levels, target): RGBA8 2D with mips, an RGBA8 array, R8 (rows of 1-byte
         // texels), BC1 and BC7 (8- and 16-byte blocks), RGBA16F 3D
-        for (fmt, w, h, depth, levels, target) in [(0x25, 300, 200, 1, 5, 1), (0x25, 64, 48, 6, 3, 4), (0x01, 516, 37, 1, 2, 1), (0x42, 256, 128, 1, 4, 1), (0x49, 96, 160, 1, 3, 1), (0x29, 40, 24, 20, 2, 2)] {
-            let d = TexDesc { target, format: fmt, width: w, height: h, depth, levels, ..Default::default() };
+        for (fmt, w, h, depth, levels, target) in [
+            (0x25, 300, 200, 1, 5, 1),
+            (0x25, 64, 48, 6, 3, 4),
+            (0x01, 516, 37, 1, 2, 1),
+            (0x42, 256, 128, 1, 4, 1),
+            (0x49, 96, 160, 1, 3, 1),
+            (0x29, 40, 24, 20, 2, 2),
+        ] {
+            let d = TexDesc {
+                target,
+                format: fmt,
+                width: w,
+                height: h,
+                depth,
+                levels,
+                ..Default::default()
+            };
             let l = tex_layout(&d);
-            let storage: Vec<u8> = (0..l.size as u32).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+            let storage: Vec<u8> = (0..l.size as u32)
+                .map(|i| (i.wrapping_mul(2654435761) >> 13) as u8)
+                .collect();
             for layer in 0..if target == 2 { 1 } else { l.layers } {
                 for lv in 0..levels {
                     let gm = geom(&d, lv, layer).unwrap();
@@ -1344,8 +2420,13 @@ fn block_linear_textures_deswizzle_on_the_gpu_as_on_the_cpu() {
                     let n = gm.row_bytes as usize * gm.rows as usize * gm.slices as usize;
                     let mut want = vec![0u8; n];
                     deswizzle(&d, lv, layer, &storage, &mut want, gm.row_bytes as usize).unwrap();
-                    let got = nxgfx::tex::deswizzle_gpu::deswizzle_on_gpu(g, &d, lv, layer, &storage).expect("GPU deswizzle");
-                    assert!(got == want, "format {fmt:#x} {w}x{h}x{depth} level {lv} layer {layer} switch2 {s2}");
+                    let got =
+                        nxgfx::tex::deswizzle_gpu::deswizzle_on_gpu(g, &d, lv, layer, &storage)
+                            .expect("GPU deswizzle");
+                    assert!(
+                        got == want,
+                        "format {fmt:#x} {w}x{h}x{depth} level {lv} layer {layer} switch2 {s2}"
+                    );
                     levels_checked += 1;
                 }
             }
@@ -1365,18 +2446,31 @@ fn texture_upload_goes_through_the_gpu_deswizzle() {
     let mut n = Nvn::new();
     let (w, h) = (512u32, 384u32);
     let tex = n.texture(w, h, f::RGBA8, 0, true);
-    let src: Vec<u8> = (0..w * h * 4).map(|i| (i.wrapping_mul(2246822519) >> 11) as u8).collect();
+    let src: Vec<u8> = (0..w * h * 4)
+        .map(|i| (i.wrapping_mul(2246822519) >> 11) as u8)
+        .collect();
     let before = nxgfx::vk::image::GPU_DESWIZZLED.load(std::sync::atomic::Ordering::Relaxed);
     unsafe {
-        let r = NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: w as i32, height: h as i32, depth: 1 };
+        let r = NVNcopyRegion {
+            xoffset: 0,
+            yoffset: 0,
+            zoffset: 0,
+            width: w as i32,
+            height: h as i32,
+            depth: 1,
+        };
         nvnTextureWriteTexels(&*tex, core::ptr::null(), &r, src.as_ptr());
     }
     n.begin();
     n.submit_wait();
     let got = n.read_rgba8(&tex, w, h);
     assert!(got == src, "texels read back as written");
-    let moved = nxgfx::vk::image::GPU_DESWIZZLED.load(std::sync::atomic::Ordering::Relaxed) - before;
-    assert!(moved >= (w * h * 4) as u64, "the upload took the GPU deswizzle ({moved} bytes)");
+    let moved =
+        nxgfx::vk::image::GPU_DESWIZZLED.load(std::sync::atomic::Ordering::Relaxed) - before;
+    assert!(
+        moved >= (w * h * 4) as u64,
+        "the upload took the GPU deswizzle ({moved} bytes)"
+    );
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
@@ -1395,7 +2489,11 @@ fn diagnostic_dump_lists_the_render_targets() {
     let d = nxgfx::diag_dump();
     eprintln!("{d}");
     assert!(d.starts_with("# render targets ("), "{d}");
-    assert!(d.lines().any(|l| l.contains("64x64x1") && l.contains("R8G8B8A8")), "the target is listed: {d}");
+    assert!(
+        d.lines()
+            .any(|l| l.contains("64x64x1") && l.contains("R8G8B8A8")),
+        "the target is listed: {d}"
+    );
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
@@ -1411,25 +2509,47 @@ fn pool_larger_than_the_largest_buffer_has_windows() {
     let size = (3 << 20) + (512 << 10);
     let big = Pool::new(n.d(), size, CPU_POOL);
     let base = big.mem.addr();
-    let pat = |seed: usize| -> Vec<u8> { (0..4096).map(|i| ((i * 31 + seed * 7) ^ (i >> 5)) as u8).collect() };
+    let pat = |seed: usize| -> Vec<u8> {
+        (0..4096)
+            .map(|i| ((i * 31 + seed * 7) ^ (i >> 5)) as u8)
+            .collect()
+    };
     // window 0 at +0x100, window 2 at +2.5 MiB, written before the pool's first GPU use
     big.mem.slice()[0x100..0x100 + 4096].copy_from_slice(&pat(1));
     big.mem.slice()[(5 << 19)..(5 << 19) + 4096].copy_from_slice(&pat(2));
     n.begin();
     unsafe {
         nvnCommandBufferCopyBufferToBuffer(n.c(), base + 0x100, base + (3 << 19), 4096, 0); // window 0 -> window 1
-        nvnCommandBufferCopyBufferToBuffer(n.c(), base + (5 << 19), base + 0x2000, 4096, 0); // window 2 -> window 0
+        nvnCommandBufferCopyBufferToBuffer(n.c(), base + (5 << 19), base + 0x2000, 4096, 0);
+        // window 2 -> window 0
     }
     n.submit_wait();
     let s = big.mem.slice();
-    assert!(s[(3 << 19)..(3 << 19) + 4096] == pat(1)[..], "window 0 -> window 1");
-    assert!(s[0x2000..0x2000 + 4096] == pat(2)[..], "window 2 -> window 0");
+    assert!(
+        s[(3 << 19)..(3 << 19) + 4096] == pat(1)[..],
+        "window 0 -> window 1"
+    );
+    assert!(
+        s[0x2000..0x2000 + 4096] == pat(2)[..],
+        "window 2 -> window 0"
+    );
     // the CPU writes window 3 after the pool is on the GPU; a copy carries it into window 1
     big.mem.slice()[(3 << 20) + 0x40..(3 << 20) + 0x40 + 4096].copy_from_slice(&pat(3));
     n.begin();
-    unsafe { nvnCommandBufferCopyBufferToBuffer(n.c(), base + (3 << 20) + 0x40, base + (1 << 20) + 0x800, 4096, 0) };
+    unsafe {
+        nvnCommandBufferCopyBufferToBuffer(
+            n.c(),
+            base + (3 << 20) + 0x40,
+            base + (1 << 20) + 0x800,
+            4096,
+            0,
+        )
+    };
     n.submit_wait();
-    assert!(big.mem.slice()[(1 << 20) + 0x800..(1 << 20) + 0x800 + 4096] == pat(3)[..], "a CPU write in window 3 reaches window 1");
+    assert!(
+        big.mem.slice()[(1 << 20) + 0x800..(1 << 20) + 0x800 + 4096] == pat(3)[..],
+        "a CPU write in window 3 reaches window 1"
+    );
     nxgfx::vk::mem::MAX_BUFFER_OVERRIDE.store(0, std::sync::atomic::Ordering::Relaxed);
     drop(big);
     assert_eq!(validation_errors(), e0, "validation errors");
@@ -1453,22 +2573,45 @@ fn large_pools_are_backed_in_granules_on_first_use() {
     let pat: Vec<u8> = (0..65536).map(|i| (i * 13 ^ (i >> 7)) as u8).collect();
     big.mem.slice()[(10 << 20) + 0x40..(10 << 20) + 0x40 + 65536].copy_from_slice(&pat);
     n.begin();
-    unsafe { nvnCommandBufferCopyBufferToBuffer(n.c(), base + (10 << 20) + 0x40, base + (40 << 20) + 0x100, 65536, 0) };
+    unsafe {
+        nvnCommandBufferCopyBufferToBuffer(
+            n.c(),
+            base + (10 << 20) + 0x40,
+            base + (40 << 20) + 0x100,
+            65536,
+            0,
+        )
+    };
     n.submit_wait();
-    assert!(big.mem.slice()[(40 << 20) + 0x100..(40 << 20) + 0x100 + 65536] == pat[..], "copied through two granules");
+    assert!(
+        big.mem.slice()[(40 << 20) + 0x100..(40 << 20) + 0x100 + 65536] == pat[..],
+        "copied through two granules"
+    );
     let bound = nxgfx::vk::mem::pool_bound(base).expect("a pool backed in granules");
     eprintln!("64 MiB pool: {} MiB bound", bound >> 20);
-    assert!(bound <= 4 << 20 && bound >= 2 << 20, "two granules bound, not the pool: {bound}");
+    assert!(
+        bound <= 4 << 20 && bound >= 2 << 20,
+        "two granules bound, not the pool: {bound}"
+    );
     // a CPU write into a bound granule after its first use reaches the GPU; one into an unbound granule comes with it
     big.mem.slice()[(10 << 20) + 0x40..(10 << 20) + 0x40 + 4].copy_from_slice(&[1, 2, 3, 4]);
     big.mem.slice()[(60 << 20)..(60 << 20) + 4].copy_from_slice(&[9, 8, 7, 6]);
     n.begin();
     unsafe {
-        nvnCommandBufferCopyBufferToBuffer(n.c(), base + (10 << 20) + 0x40, base + (40 << 20), 4, 0);
+        nvnCommandBufferCopyBufferToBuffer(
+            n.c(),
+            base + (10 << 20) + 0x40,
+            base + (40 << 20),
+            4,
+            0,
+        );
         nvnCommandBufferCopyBufferToBuffer(n.c(), base + (60 << 20), base + (40 << 20) + 8, 4, 0);
     }
     n.submit_wait();
-    assert_eq!(&big.mem.slice()[(40 << 20)..(40 << 20) + 12], &[1, 2, 3, 4, 0, 0, 0, 0, 9, 8, 7, 6]);
+    assert_eq!(
+        &big.mem.slice()[(40 << 20)..(40 << 20) + 12],
+        &[1, 2, 3, 4, 0, 0, 0, 0, 9, 8, 7, 6]
+    );
     drop(big);
     assert_eq!(validation_errors(), e0, "validation errors");
 }
@@ -1488,7 +2631,10 @@ fn upload_budget_defers_cpu_writes_no_use_needs_yet() {
     unsafe { nvnCommandBufferCopyBufferToBuffer(n.c(), base, base + 0x1000, 16, 0) };
     n.submit_wait();
     nxgfx::vk::mem::BUDGET_OVERRIDE.store(64 << 10, Relaxed);
-    let (d0, u0) = (nxgfx::vk::mem::DEFERRED_BYTES.load(Relaxed), nxgfx::vk::mem::DEFERRED_USED.load(Relaxed));
+    let (d0, u0) = (
+        nxgfx::vk::mem::DEFERRED_BYTES.load(Relaxed),
+        nxgfx::vk::mem::DEFERRED_USED.load(Relaxed),
+    );
     // four 256 KiB regions written by the CPU: over a 64 KiB budget
     for k in 0..4usize {
         let o = (k + 1) << 19;
@@ -1501,19 +2647,40 @@ fn upload_budget_defers_cpu_writes_no_use_needs_yet() {
     unsafe { nvnCommandBufferCopyBufferToBuffer(n.c(), base + (4 << 19), base + 0x10000, 4096, 0) };
     n.submit_wait();
     let want = |k: usize, i: usize| (i * 3 + k * 50) as u8;
-    assert!((0..4096).all(|i| big.mem.slice()[0x10000 + i] == want(3, i)), "the region a copy reads is uploaded for it");
+    assert!(
+        (0..4096).all(|i| big.mem.slice()[0x10000 + i] == want(3, i)),
+        "the region a copy reads is uploaded for it"
+    );
     let deferred = nxgfx::vk::mem::DEFERRED_BYTES.load(Relaxed) - d0;
     let used = nxgfx::vk::mem::DEFERRED_USED.load(Relaxed) - u0;
-    eprintln!("budget 64 KiB: {} KiB left for later, {} KiB of it taken by a use", deferred >> 10, used >> 10);
-    assert!(deferred >= 512 << 10, "writes past the budget waited: {deferred}");
+    eprintln!(
+        "budget 64 KiB: {} KiB left for later, {} KiB of it taken by a use",
+        deferred >> 10,
+        used >> 10
+    );
+    assert!(
+        deferred >= 512 << 10,
+        "writes past the budget waited: {deferred}"
+    );
     assert!(used >= 4096, "the used one went at once");
     // later submissions carry the rest within their budgets: each region reads back right
     nxgfx::vk::mem::BUDGET_OVERRIDE.store(0, Relaxed);
     for k in 0..3usize {
         n.begin();
-        unsafe { nvnCommandBufferCopyBufferToBuffer(n.c(), base + (((k + 1) << 19) as u64) + 0x100, base + 0x20000 + (k as u64) * 0x1000, 256, 0) };
+        unsafe {
+            nvnCommandBufferCopyBufferToBuffer(
+                n.c(),
+                base + (((k + 1) << 19) as u64) + 0x100,
+                base + 0x20000 + (k as u64) * 0x1000,
+                256,
+                0,
+            )
+        };
         n.submit_wait();
-        assert!((0..256).all(|i| big.mem.slice()[0x20000 + k * 0x1000 + i] == want(k, 0x100 + i)), "region {k}");
+        assert!(
+            (0..256).all(|i| big.mem.slice()[0x20000 + k * 0x1000 + i] == want(k, 0x100 + i)),
+            "region {k}"
+        );
     }
     drop(big);
     assert_eq!(validation_errors(), e0, "validation errors");

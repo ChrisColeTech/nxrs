@@ -10,7 +10,11 @@ unsafe fn qb<'a>(b: *mut NVNqueueBuilder) -> &'a mut queue_builder_t {
 }
 fn qb_size(o: &queue_builder_t, k: usize) -> u64 {
     const DEF: [u32; 4] = [65536, 262144, 16384, 0];
-    if o.set[k] != 0 { o.sz[k] as u64 } else { DEF[k] as u64 }
+    if o.set[k] != 0 {
+        o.sz[k] as u64
+    } else {
+        DEF[k] as u64
+    }
 }
 
 nvn_fns! {

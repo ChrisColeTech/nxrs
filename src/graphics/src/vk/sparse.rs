@@ -123,15 +123,22 @@ fn on() -> bool {
 fn budget(g: &Gpu) -> u64 {
     static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *V.get_or_init(|| {
-        let mib = std::env::var("NXGFX_SPARSE_MIB").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or_else(|| {
-            let mp = &g.d.mem_props;
-            let vram = (0..mp.memory_heap_count as usize)
-                .filter(|&h| mp.memory_heaps[h].flags.contains(vk::MemoryHeapFlags::DEVICE_LOCAL))
-                .map(|h| mp.memory_heaps[h].size)
-                .max()
-                .unwrap_or(0);
-            (vram >> 20) / 2
-        });
+        let mib = std::env::var("NXGFX_SPARSE_MIB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or_else(|| {
+                let mp = &g.d.mem_props;
+                let vram = (0..mp.memory_heap_count as usize)
+                    .filter(|&h| {
+                        mp.memory_heaps[h]
+                            .flags
+                            .contains(vk::MemoryHeapFlags::DEVICE_LOCAL)
+                    })
+                    .map(|h| mp.memory_heaps[h].size)
+                    .max()
+                    .unwrap_or(0);
+                (vram >> 20) / 2
+            });
         crate::vklog!("sparse textures: tile memory up to {mib} MB (NXGFX_SPARSE_MIB; 0 lifts it)");
         if mib == 0 {
             u64::MAX
@@ -157,13 +164,20 @@ pub fn wanted(g: &Gpu, t: &crate::nvn::obj::tex_t, ci: &vk::ImageCreateInfo) -> 
 /// block is 64 KiB).
 fn granularity_texels(f: vk::Format, gw: &mut u32, gh: &mut u32) {
     let raw = f.as_raw();
-    let (bw, bh, bpb): (u32, u32, u64) = if (vk::Format::BC1_RGB_UNORM_BLOCK.as_raw()..=vk::Format::BC7_SRGB_BLOCK.as_raw()).contains(&raw) {
-        let half = raw <= vk::Format::BC1_RGBA_SRGB_BLOCK.as_raw() || f == vk::Format::BC4_UNORM_BLOCK || f == vk::Format::BC4_SNORM_BLOCK;
+    let (bw, bh, bpb): (u32, u32, u64) = if (vk::Format::BC1_RGB_UNORM_BLOCK.as_raw()
+        ..=vk::Format::BC7_SRGB_BLOCK.as_raw())
+        .contains(&raw)
+    {
+        let half = raw <= vk::Format::BC1_RGBA_SRGB_BLOCK.as_raw()
+            || f == vk::Format::BC4_UNORM_BLOCK
+            || f == vk::Format::BC4_SNORM_BLOCK;
         (4, 4, if half { 8 } else { 16 })
     } else {
         return;
     };
-    if (*gw / bw) as u64 * (*gh / bh) as u64 * bpb == 65536 || *gw as u64 * *gh as u64 * bpb != 65536 {
+    if (*gw / bw) as u64 * (*gh / bh) as u64 * bpb == 65536
+        || *gw as u64 * *gh as u64 * bpb != 65536
+    {
         return;
     }
     *gw *= bw;
@@ -173,18 +187,41 @@ fn granularity_texels(f: vk::Format, gw: &mut u32, gh: &mut u32) {
 /// Creates the sparse image of a texture (None: it cannot be one, the caller makes an ordinary image).
 pub fn create(g: &Gpu, t: &crate::nvn::obj::tex_t, ci0: &vk::ImageCreateInfo) -> Option<vk::Image> {
     let mut ci = *ci0;
-    if !matches!(t.d.target, crate::nvn::types::target::CUBE | crate::nvn::types::target::CUBE_ARRAY) {
+    if !matches!(
+        t.d.target,
+        crate::nvn::types::target::CUBE | crate::nvn::types::target::CUBE_ARRAY
+    ) {
         ci.flags &= !vk::ImageCreateFlags::CUBE_COMPATIBLE;
     }
-    ci.flags |= vk::ImageCreateFlags::SPARSE_BINDING | vk::ImageCreateFlags::SPARSE_RESIDENCY | vk::ImageCreateFlags::SPARSE_ALIASED;
+    ci.flags |= vk::ImageCreateFlags::SPARSE_BINDING
+        | vk::ImageCreateFlags::SPARSE_RESIDENCY
+        | vk::ImageCreateFlags::SPARSE_ALIASED;
     let inst = &g.d.instance;
-    let fp = unsafe { inst.get_physical_device_sparse_image_format_properties(g.d.pdev, ci.format, ci.image_type, ci.samples, ci.usage, ci.tiling) };
+    let fp = unsafe {
+        inst.get_physical_device_sparse_image_format_properties(
+            g.d.pdev,
+            ci.format,
+            ci.image_type,
+            ci.samples,
+            ci.usage,
+            ci.tiling,
+        )
+    };
     let Some(fp0) = fp.first().copied() else {
-        crate::log::red_once(&format!("sparse textures: {:?} usage {:?} has no sparse blocks: a whole image", ci.format, ci.usage));
+        crate::log::red_once(&format!(
+            "sparse textures: {:?} usage {:?} has no sparse blocks: a whole image",
+            ci.format, ci.usage
+        ));
         return None;
     };
-    if fp0.flags.contains(vk::SparseImageFormatFlags::NONSTANDARD_BLOCK_SIZE) {
-        crate::log::red_once(&format!("sparse textures: {:?} has no standard sparse blocks: a whole image", ci.format));
+    if fp0
+        .flags
+        .contains(vk::SparseImageFormatFlags::NONSTANDARD_BLOCK_SIZE)
+    {
+        crate::log::red_once(&format!(
+            "sparse textures: {:?} has no standard sparse blocks: a whole image",
+            ci.format
+        ));
         return None;
     }
     let (ntl, ntw, nth, _) = crate::tex::layout::sparse_tiles(&t.d);
@@ -198,7 +235,10 @@ pub fn create(g: &Gpu, t: &crate::nvn::obj::tex_t, ci0: &vk::ImageCreateInfo) ->
     let image = match unsafe { dev.create_image(&ci, None) } {
         Ok(i) => i,
         Err(e) => {
-            crate::log::red_once(&format!("sparse textures: vkCreateImage {}x{} layers {}: {e}: a whole image", ci.extent.width, ci.extent.height, ci.array_layers));
+            crate::log::red_once(&format!(
+                "sparse textures: vkCreateImage {}x{} layers {}: {e}: a whole image",
+                ci.extent.width, ci.extent.height, ci.array_layers
+            ));
             return None;
         }
     };
@@ -294,18 +334,31 @@ pub fn create(g: &Gpu, t: &crate::nvn::obj::tex_t, ci0: &vk::ImageCreateInfo) ->
 }
 
 fn alloc_mem(g: &Gpu, size: u64, align: u64, type_bits: u32, name: &str) -> Option<Allocation> {
-    let req = vk::MemoryRequirements { size, alignment: align, memory_type_bits: type_bits };
+    let req = vk::MemoryRequirements {
+        size,
+        alignment: align,
+        memory_type_bits: type_bits,
+    };
     g.alloc
         .lock()
         .unwrap()
-        .allocate(&AllocationCreateDesc { name, requirements: req, location: MemoryLocation::GpuOnly, linear: false, allocation_scheme: AllocationScheme::GpuAllocatorManaged })
+        .allocate(&AllocationCreateDesc {
+            name,
+            requirements: req,
+            location: MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        })
         .ok()
 }
 
 fn tail_count(s: &Img) -> u32 {
     match s.tail_req {
         Some(r) if s.tail_end < s.nmips && r.image_mip_tail_size != 0 => {
-            if r.format_properties.flags.contains(vk::SparseImageFormatFlags::SINGLE_MIPTAIL) {
+            if r.format_properties
+                .flags
+                .contains(vk::SparseImageFormatFlags::SINGLE_MIPTAIL)
+            {
                 1
             } else {
                 s.layers
@@ -321,12 +374,20 @@ fn round_up(v: u64, a: u64) -> u64 {
 
 /// Memory for the levels outside NVN's tiles and the Vulkan mip tail.
 fn tail_alloc(g: &Gpu, s: &mut Img) {
-    s.tail_end = s.tail_req.map(|r| r.image_mip_tail_first_lod.min(s.nmips)).unwrap_or(s.nmips);
+    s.tail_end = s
+        .tail_req
+        .map(|r| r.image_mip_tail_first_lod.min(s.nmips))
+        .unwrap_or(s.nmips);
     for l in s.nlev..s.tail_end {
         let (lw, lh) = ((s.w >> l).max(1), (s.h >> l).max(1));
         s.tail_blocks += lw.div_ceil(s.gw) * lh.div_ceil(s.gh);
     }
-    let bytes = s.layers as u64 * s.tail_blocks as u64 * s.slot_size + tail_count(s) as u64 * round_up(s.tail_req.map(|r| r.image_mip_tail_size).unwrap_or(0), s.slot_size);
+    let bytes = s.layers as u64 * s.tail_blocks as u64 * s.slot_size
+        + tail_count(s) as u64
+            * round_up(
+                s.tail_req.map(|r| r.image_mip_tail_size).unwrap_or(0),
+                s.slot_size,
+            );
     if bytes == 0 {
         return;
     }
@@ -343,7 +404,9 @@ fn tail_alloc(g: &Gpu, s: &mut Img) {
 fn new_block(g: &Gpu, st: &mut State, type_bits: u32, slot_size: u64) -> Option<usize> {
     let dev = g.dev();
     let size = slot_size * BLOCK_SLOTS as u64;
-    let bi = vk::BufferCreateInfo::default().size(size).usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC);
+    let bi = vk::BufferCreateInfo::default()
+        .size(size)
+        .usage(vk::BufferUsageFlags::TRANSFER_DST | vk::BufferUsageFlags::TRANSFER_SRC);
     let buf = unsafe { dev.create_buffer(&bi, None) }.ok()?;
     let rb = unsafe { dev.get_buffer_memory_requirements(buf) };
     let both = rb.memory_type_bits & type_bits;
@@ -363,30 +426,52 @@ fn new_block(g: &Gpu, st: &mut State, type_bits: u32, slot_size: u64) -> Option<
     if buf != vk::Buffer::null() {
         unsafe { dev.bind_buffer_memory(buf, mem, base) }.ok()?;
     }
-    st.blocks.push(Block { buf, _alloc: Some(a), mem, base, slot_size, type_bits, used: 0, busy: vec![0; BLOCK_SLOTS], fresh: true });
+    st.blocks.push(Block {
+        buf,
+        _alloc: Some(a),
+        mem,
+        base,
+        slot_size,
+        type_bits,
+        used: 0,
+        busy: vec![0; BLOCK_SLOTS],
+        fresh: true,
+    });
     Some(st.blocks.len() - 1)
 }
 
 fn slot_get(g: &Gpu, st: &mut State, s: &Img, pa: u64, sub: u32) -> Option<SlotKey> {
-    let k = SlotKey { pa, sub, fmt: s.fmt.as_raw() };
+    let k = SlotKey {
+        pa,
+        sub,
+        fmt: s.fmt.as_raw(),
+    };
     if st.slots.contains_key(&k) {
         return Some(k);
     }
     if s.size > 4 << 20 && (st.n_slots + 1) * s.slot_size > budget(g) {
         st.n_over += 1;
         if st.n_over <= 4 || st.n_over.is_power_of_two() {
-            crate::vklog!("sparse textures: tile memory over NXGFX_SPARSE_MIB ({} tiles left non-resident)", st.n_over);
+            crate::vklog!(
+                "sparse textures: tile memory over NXGFX_SPARSE_MIB ({} tiles left non-resident)",
+                st.n_over
+            );
         }
         return None;
     }
-    let mut b = st.blocks.iter().position(|b| b.used < BLOCK_SLOTS && b.type_bits == s.type_bits && b.slot_size == s.slot_size);
+    let mut b = st.blocks.iter().position(|b| {
+        b.used < BLOCK_SLOTS && b.type_bits == s.type_bits && b.slot_size == s.slot_size
+    });
     if b.is_none() {
         b = new_block(g, st, s.type_bits, s.slot_size);
     }
     let Some(b) = b else {
         st.n_failed += 1;
         if st.n_failed <= 8 || st.n_failed.is_power_of_two() {
-            crate::log::red(&format!("sparse textures: no memory for a tile ({} failed, {} live)", st.n_failed, st.n_slots));
+            crate::log::red(&format!(
+                "sparse textures: no memory for a tile ({} failed, {} live)",
+                st.n_failed, st.n_slots
+            ));
         }
         return None;
     };
@@ -397,9 +482,19 @@ fn slot_get(g: &Gpu, st: &mut State, s: &Img, pa: u64, sub: u32) -> Option<SlotK
     blk.used += 1;
     if reused && blk.buf != vk::Buffer::null() {
         // a freed slot keeps its texels: zeroed again with the next fills
-        FILLS.lock().unwrap().push((blk.buf, idx as u64 * blk.slot_size, blk.slot_size));
+        FILLS
+            .lock()
+            .unwrap()
+            .push((blk.buf, idx as u64 * blk.slot_size, blk.slot_size));
     }
-    st.slots.insert(k, Slot { blk: b, idx, refs: 0 });
+    st.slots.insert(
+        k,
+        Slot {
+            blk: b,
+            idx,
+            refs: 0,
+        },
+    );
     st.n_slots += 1;
     Some(k)
 }
@@ -484,14 +579,19 @@ pub fn remap(lo: u64, size: u64) {
 }
 
 pub fn is_sparse(img: vk::Image) -> bool {
-    ST.lock().unwrap().as_ref().is_some_and(|st| st.imgs.iter().any(|s| s.image == img))
+    ST.lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|st| st.imgs.iter().any(|s| s.image == img))
 }
 
 /// The image goes (its slots are freed once the GPU is past it).
 pub fn destroy(img: vk::Image) {
     let mut lk = ST.lock().unwrap();
     let Some(st) = lk.as_mut() else { return };
-    let Some(i) = st.imgs.iter().position(|s| s.image == img) else { return };
+    let Some(i) = st.imgs.iter().position(|s| s.image == img) else {
+        return;
+    };
     let s = st.imgs.swap_remove(i);
     for k in s.bound.iter().flatten() {
         slot_unref(st, *k);
@@ -520,9 +620,21 @@ fn make_bind(s: &Img, i: u32, run: u32, st: &State) -> vk::SparseImageMemoryBind
         None => (vk::DeviceMemory::null(), 0),
     };
     vk::SparseImageMemoryBind {
-        subresource: vk::ImageSubresource { aspect_mask: s.aspect, mip_level: l as u32, array_layer: layer },
-        offset: vk::Offset3D { x: x as i32, y: y as i32, z: 0 },
-        extent: vk::Extent3D { width: (lw - x).min(w), height: (lh - y).min(s.gh), depth: 1 },
+        subresource: vk::ImageSubresource {
+            aspect_mask: s.aspect,
+            mip_level: l as u32,
+            array_layer: layer,
+        },
+        offset: vk::Offset3D {
+            x: x as i32,
+            y: y as i32,
+            z: 0,
+        },
+        extent: vk::Extent3D {
+            width: (lw - x).min(w),
+            height: (lh - y).min(s.gh),
+            depth: 1,
+        },
         memory: mem,
         memory_offset: off,
         flags: vk::SparseMemoryBindFlags::empty(),
@@ -538,10 +650,15 @@ fn run_len(s: &Img, st: &State, k: usize) -> u32 {
         l += 1;
     }
     let bx = (r - s.blk0[l]) % s.bx[l];
-    let first = s.bound[i as usize].and_then(|k| st.slots.get(&k)).map(|sl| (sl.blk, sl.idx));
+    let first = s.bound[i as usize]
+        .and_then(|k| st.slots.get(&k))
+        .map(|sl| (sl.blk, sl.idx));
     let mut run = 1u32;
-    while k + (run as usize) < s.dl.len() && s.dl[k + run as usize] == i + run && bx + run < s.bx[l] {
-        let nx = s.bound[(i + run) as usize].and_then(|k| st.slots.get(&k)).map(|sl| (sl.blk, sl.idx));
+    while k + (run as usize) < s.dl.len() && s.dl[k + run as usize] == i + run && bx + run < s.bx[l]
+    {
+        let nx = s.bound[(i + run) as usize]
+            .and_then(|k| st.slots.get(&k))
+            .map(|sl| (sl.blk, sl.idx));
         let ok = match (first, nx) {
             (Some((b, x)), Some((b2, x2))) => b == b2 && x2 == x + run as usize,
             (None, None) => true,
@@ -577,7 +694,12 @@ pub fn fills(g: &Gpu, cb: vk::CommandBuffer) {
     }
 }
 
-pub fn flush(g: &Gpu, last: u64, timeline_main: vk::Semaphore, fence_next: u64) -> Option<(vk::Semaphore, u64)> {
+pub fn flush(
+    g: &Gpu,
+    last: u64,
+    timeline_main: vk::Semaphore,
+    fence_next: u64,
+) -> Option<(vk::Semaphore, u64)> {
     let mut lk = ST.lock().unwrap();
     let bufs = std::mem::take(&mut *BUF_BINDS.lock().unwrap());
     if lk.is_none() && !bufs.is_empty() {
@@ -586,7 +708,8 @@ pub fn flush(g: &Gpu, last: u64, timeline_main: vk::Semaphore, fence_next: u64) 
     let st = lk.as_mut()?;
     let dev = g.dev();
     if st.timeline == vk::Semaphore::null() {
-        let mut ti = vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
+        let mut ti =
+            vk::SemaphoreTypeCreateInfo::default().semaphore_type(vk::SemaphoreType::TIMELINE);
         let ci = vk::SemaphoreCreateInfo::default().push_next(&mut ti);
         st.timeline = unsafe { dev.create_semaphore(&ci, None) }.ok()?;
     }
@@ -633,7 +756,14 @@ pub fn flush(g: &Gpu, last: u64, timeline_main: vk::Semaphore, fence_next: u64) 
                 None => by_buf.push((*b, vec![*m])),
             }
         }
-        let bb: Vec<vk::SparseBufferMemoryBindInfo> = by_buf.iter().map(|(b, v)| vk::SparseBufferMemoryBindInfo::default().buffer(*b).binds(v)).collect();
+        let bb: Vec<vk::SparseBufferMemoryBindInfo> = by_buf
+            .iter()
+            .map(|(b, v)| {
+                vk::SparseBufferMemoryBindInfo::default()
+                    .buffer(*b)
+                    .binds(v)
+            })
+            .collect();
         let mut binds: Vec<Vec<vk::SparseImageMemoryBind>> = Vec::new();
         let mut opaque: Vec<Vec<vk::SparseMemoryBind>> = Vec::new();
         let mut imgs_b: Vec<vk::Image> = Vec::new();
@@ -654,9 +784,21 @@ pub fn flush(g: &Gpu, last: u64, timeline_main: vk::Semaphore, fence_next: u64) 
                                 let mut x = 0;
                                 while x < lw {
                                     v.push(vk::SparseImageMemoryBind {
-                                        subresource: vk::ImageSubresource { aspect_mask: s.aspect, mip_level: l, array_layer: layer },
-                                        offset: vk::Offset3D { x: x as i32, y: y as i32, z: 0 },
-                                        extent: vk::Extent3D { width: (lw - x).min(s.gw), height: (lh - y).min(s.gh), depth: 1 },
+                                        subresource: vk::ImageSubresource {
+                                            aspect_mask: s.aspect,
+                                            mip_level: l,
+                                            array_layer: layer,
+                                        },
+                                        offset: vk::Offset3D {
+                                            x: x as i32,
+                                            y: y as i32,
+                                            z: 0,
+                                        },
+                                        extent: vk::Extent3D {
+                                            width: (lw - x).min(s.gw),
+                                            height: (lh - y).min(s.gh),
+                                            depth: 1,
+                                        },
                                         memory: mem,
                                         memory_offset: off,
                                         flags: vk::SparseMemoryBindFlags::empty(),
@@ -674,7 +816,8 @@ pub fn flush(g: &Gpu, last: u64, timeline_main: vk::Semaphore, fence_next: u64) 
                         let mut ob = Vec::new();
                         for t in 0..nt {
                             ob.push(vk::SparseMemoryBind {
-                                resource_offset: r.image_mip_tail_offset + t as u64 * r.image_mip_tail_stride,
+                                resource_offset: r.image_mip_tail_offset
+                                    + t as u64 * r.image_mip_tail_stride,
                                 size: r.image_mip_tail_size,
                                 memory: mem,
                                 memory_offset: off,
@@ -708,15 +851,35 @@ pub fn flush(g: &Gpu, last: u64, timeline_main: vk::Semaphore, fence_next: u64) 
             }
         }
         st.imgs = imgs;
-        let ib: Vec<vk::SparseImageMemoryBindInfo> = binds.iter().zip(&imgs_b).map(|(v, &im)| vk::SparseImageMemoryBindInfo::default().image(im).binds(v)).collect();
-        let ob: Vec<vk::SparseImageOpaqueMemoryBindInfo> = opaque.iter().zip(&imgs_o).map(|(v, &im)| vk::SparseImageOpaqueMemoryBindInfo::default().image(im).binds(v)).collect();
+        let ib: Vec<vk::SparseImageMemoryBindInfo> = binds
+            .iter()
+            .zip(&imgs_b)
+            .map(|(v, &im)| vk::SparseImageMemoryBindInfo::default().image(im).binds(v))
+            .collect();
+        let ob: Vec<vk::SparseImageOpaqueMemoryBindInfo> = opaque
+            .iter()
+            .zip(&imgs_o)
+            .map(|(v, &im)| {
+                vk::SparseImageOpaqueMemoryBindInfo::default()
+                    .image(im)
+                    .binds(v)
+            })
+            .collect();
         let sig = st.value + 1;
         let waits = [timeline_main];
         let wvals = [last];
         let sigs = [st.timeline];
         let svals = [sig];
-        let mut tl = vk::TimelineSemaphoreSubmitInfo::default().wait_semaphore_values(&wvals).signal_semaphore_values(&svals);
-        let bi = vk::BindSparseInfo::default().wait_semaphores(&waits).signal_semaphores(&sigs).buffer_binds(&bb).image_binds(&ib).image_opaque_binds(&ob).push_next(&mut tl);
+        let mut tl = vk::TimelineSemaphoreSubmitInfo::default()
+            .wait_semaphore_values(&wvals)
+            .signal_semaphore_values(&svals);
+        let bi = vk::BindSparseInfo::default()
+            .wait_semaphores(&waits)
+            .signal_semaphores(&sigs)
+            .buffer_binds(&bb)
+            .image_binds(&ib)
+            .image_opaque_binds(&ob)
+            .push_next(&mut tl);
         let t0 = std::time::Instant::now();
         if let Err(e) = unsafe { dev.queue_bind_sparse(g.d.queue, &[bi], vk::Fence::null()) } {
             super::lost::check(g, e, "vkQueueBindSparse");

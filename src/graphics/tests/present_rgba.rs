@@ -49,11 +49,18 @@ fn main() {
         el.pump_app_events(Some(Duration::from_millis(10)), &mut app);
     }
     let window = app.window.as_ref().expect("the window opened");
-    let raw = (window.display_handle().unwrap().as_raw(), window.window_handle().unwrap().as_raw());
+    let raw = (
+        window.display_handle().unwrap().as_raw(),
+        window.window_handle().unwrap().as_raw(),
+    );
     let mut n = Nvn::new(); // the device, as a game brings it up
     let e0 = validation_errors();
     nxgfx::set_window_raw(raw.0, raw.1).expect("a window Vulkan can present to");
-    assert_eq!(nxgfx::vk::present::present_rgba(0, 0, &[]), 0, "an empty picture is refused");
+    assert_eq!(
+        nxgfx::vk::present::present_rgba(0, 0, &[]),
+        0,
+        "an empty picture is refused"
+    );
     let p0 = nxgfx::vk::present::presented();
     let mut fences = 0;
     // 1280x720 (the docked layer of a raw vi client) then 320x240: the host image is made again
@@ -74,7 +81,10 @@ fn main() {
     let errs = validation_errors() - e0;
     eprintln!("present_rgba: {fences} submitted, {presented} presented, {errs} validation errors");
     assert_eq!(fences, 60, "every picture submitted");
-    assert!(presented >= 58, "the pictures reached the swap chain: {presented}");
+    assert!(
+        presented >= 58,
+        "the pictures reached the swap chain: {presented}"
+    );
     assert_eq!(errs, 0, "validation errors");
     eprintln!("present_rgba test: ok");
 }

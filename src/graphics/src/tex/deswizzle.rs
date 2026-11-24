@@ -15,7 +15,12 @@ pub static GOB_SWITCH2: AtomicBool = AtomicBool::new(false);
 
 fn gob_off(x: u32, y: u32) -> u32 {
     if GOB_SWITCH2.load(Ordering::Relaxed) {
-        (x % 64 / 32) * 256 + (y % 8 / 4) * 128 + (x % 32 / 16) * 64 + (y % 4 / 2) * 32 + (y % 2) * 16 + x % 16
+        (x % 64 / 32) * 256
+            + (y % 8 / 4) * 128
+            + (x % 32 / 16) * 64
+            + (y % 4 / 2) * 32
+            + (y % 2) * 16
+            + x % 16
     } else {
         (x % 64 / 32) * 256 + (y % 8 / 2) * 64 + (x % 32 / 16) * 32 + (y % 2) * 16 + x % 16
     }
@@ -37,7 +42,11 @@ pub fn bl_offset(x: u32, y: u32, z: u32, row_bytes: u32, rows: u32, th: u32, td:
 
 fn mip(s: u32, l: u32) -> u32 {
     let v = s >> l;
-    if v == 0 { 1 } else { v }
+    if v == 0 {
+        1
+    } else {
+        v
+    }
 }
 
 /// One level and layer as stored: bytes per block row, block rows, slices, its start in the storage, block shape and
@@ -68,7 +77,11 @@ pub fn geom(d: &TexDesc, level: u32, layer: u32) -> Option<LevelGeom> {
     let one_d = d.target == 0 || d.target == 3;
     let w = mip(d.width, level);
     let h = if one_d { 1 } else { mip(d.height, level) };
-    let slices = if d.target == 2 { mip(d.depth.max(1), level) } else { 1 };
+    let slices = if d.target == 2 {
+        mip(d.depth.max(1), level)
+    } else {
+        1
+    };
     let (th, td) = level_tiles(d, level);
     Some(LevelGeom {
         row_bytes: w.div_ceil(bw) * bpb,
@@ -81,7 +94,15 @@ pub fn geom(d: &TexDesc, level: u32, layer: u32) -> Option<LevelGeom> {
     })
 }
 
-fn mv(d: &TexDesc, level: u32, layer: u32, bl: &mut [u8], lin: &mut [u8], pitch: usize, to_linear: bool) -> Option<()> {
+fn mv(
+    d: &TexDesc,
+    level: u32,
+    layer: u32,
+    bl: &mut [u8],
+    lin: &mut [u8],
+    pitch: usize,
+    to_linear: bool,
+) -> Option<()> {
     let g = geom(d, level, layer)?;
     if pitch < g.row_bytes as usize {
         return None;
@@ -105,9 +126,12 @@ fn mv(d: &TexDesc, level: u32, layer: u32, bl: &mut [u8], lin: &mut [u8], pitch:
     let nfull = (g.row_bytes >> 4) as usize;
     let tail = (g.row_bytes & 15) as usize;
     for z in 0..g.slices {
-        let zb = (z >> g.td) as u64 * gobs_x * blocks_y * block + (z & (bd - 1)) as u64 * bh as u64 * 512;
+        let zb = (z >> g.td) as u64 * gobs_x * blocks_y * block
+            + (z & (bd - 1)) as u64 * bh as u64 * 512;
         for y in 0..g.rows {
-            let p = (y >> (3 + g.th)) as u64 * gobs_x * block + (((y & (8 * bh - 1)) >> 3) as u64) * 512 + koy[(y & 7) as usize];
+            let p = (y >> (3 + g.th)) as u64 * gobs_x * block
+                + (((y & (8 * bh - 1)) >> 3) as u64) * 512
+                + koy[(y & 7) as usize];
             let row = ((z * g.rows + y) as usize) * pitch;
             let yb = zb + p;
             for j in 0..=nfull {
@@ -133,14 +157,28 @@ fn mv(d: &TexDesc, level: u32, layer: u32, bl: &mut [u8], lin: &mut [u8], pitch:
 
 /// Decode one level and layer of the whole-texture storage into rows of `pitch` bytes (block rows for compressed
 /// formats; 3D: slice k after k x rows rows).
-pub fn deswizzle(d: &TexDesc, level: u32, layer: u32, storage: &[u8], dst: &mut [u8], pitch: usize) -> Option<()> {
+pub fn deswizzle(
+    d: &TexDesc,
+    level: u32,
+    layer: u32,
+    storage: &[u8],
+    dst: &mut [u8],
+    pitch: usize,
+) -> Option<()> {
     // SAFETY of the cast: `mv` only reads `bl` when to_linear is set.
     let bl = unsafe { core::slice::from_raw_parts_mut(storage.as_ptr() as *mut u8, storage.len()) };
     mv(d, level, layer, bl, dst, pitch, true)
 }
 
 /// The reverse, for round-trip tests and texel writes.
-pub fn swizzle(d: &TexDesc, level: u32, layer: u32, src: &[u8], pitch: usize, storage: &mut [u8]) -> Option<()> {
+pub fn swizzle(
+    d: &TexDesc,
+    level: u32,
+    layer: u32,
+    src: &[u8],
+    pitch: usize,
+    storage: &mut [u8],
+) -> Option<()> {
     let lin = unsafe { core::slice::from_raw_parts_mut(src.as_ptr() as *mut u8, src.len()) };
     mv(d, level, layer, storage, lin, pitch, false)
 }
@@ -165,15 +203,30 @@ mod tests {
 
     #[test]
     fn round_trip_levels_and_layers() {
-        for (fmt, w, h, levels, target, depth) in [(0x25, 70, 45, 4, 1, 1), (0x42, 128, 64, 3, 1, 1), (0x25, 33, 17, 2, 4, 3), (0x01, 9, 300, 5, 1, 1)] {
-            let d = TexDesc { target, format: fmt, width: w, height: h, depth, levels, ..Default::default() };
+        for (fmt, w, h, levels, target, depth) in [
+            (0x25, 70, 45, 4, 1, 1),
+            (0x42, 128, 64, 3, 1, 1),
+            (0x25, 33, 17, 2, 4, 3),
+            (0x01, 9, 300, 5, 1, 1),
+        ] {
+            let d = TexDesc {
+                target,
+                format: fmt,
+                width: w,
+                height: h,
+                depth,
+                levels,
+                ..Default::default()
+            };
             let l = tex_layout(&d);
             let mut storage = vec![0u8; l.size as usize];
             for layer in 0..l.layers {
                 for lv in 0..levels {
                     let g = geom(&d, lv, layer).unwrap();
                     let n = g.row_bytes as usize * g.rows as usize * g.slices as usize;
-                    let src: Vec<u8> = (0..n).map(|i| (i as u32 * 7 + lv * 31 + layer * 13) as u8).collect();
+                    let src: Vec<u8> = (0..n)
+                        .map(|i| (i as u32 * 7 + lv * 31 + layer * 13) as u8)
+                        .collect();
                     swizzle(&d, lv, layer, &src, g.row_bytes as usize, &mut storage).unwrap();
                     let mut back = vec![0u8; n];
                     deswizzle(&d, lv, layer, &storage, &mut back, g.row_bytes as usize).unwrap();

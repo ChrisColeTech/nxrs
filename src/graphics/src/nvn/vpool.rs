@@ -85,16 +85,30 @@ pub fn initialize(o: &mut pool_t) -> u64 {
     let len = (o.size.min(64 << 30) + 0xFFFF) & !0xFFFF;
     let a = reserve(len);
     if a == 0 {
-        crate::log::red(&format!("virtual pool {:p}: cannot reserve {len:#x} bytes of address space", o as *const _));
+        crate::log::red(&format!(
+            "virtual pool {:p}: cannot reserve {len:#x} bytes of address space",
+            o as *const _
+        ));
         return 0;
     }
     let leaves = o.size.div_ceil(LEAF as u64 * PG) as usize;
-    o.vmode = if o.size > APP_POOL.load(Ordering::Relaxed) { SPARSE } else { UNDECIDED };
+    o.vmode = if o.size > APP_POOL.load(Ordering::Relaxed) {
+        SPARSE
+    } else {
+        UNDECIDED
+    };
     if o.vmode == SPARSE {
         crate::nvnlog!("virtual pool {:p} ({:#x} bytes, flags {:#x}): sparse, own address range {a:#x}+{len:#x}, kept in a page table", o as *const _, o.size, o.flags);
     }
     let mut g = POOLS.write().unwrap();
-    g.push(VPool { pool: o as *const _ as usize, base: a, len, size: o.size, top: 0, pt: (0..leaves).map(|_| None).collect() });
+    g.push(VPool {
+        pool: o as *const _ as usize,
+        base: a,
+        len,
+        size: o.size,
+        top: 0,
+        pt: (0..leaves).map(|_| None).collect(),
+    });
     a
 }
 
@@ -148,10 +162,17 @@ pub fn map(o: &mut pool_t, rq: &[MapReq]) -> bool {
         // SAFETY: the game's physical pool object
         let ph = unsafe { &*r.phys };
         if ph.mem.is_null() {
-            crate::log::red(&format!("MapVirtual: physical pool {:p} has no storage", r.phys));
+            crate::log::red(&format!(
+                "MapVirtual: physical pool {:p} has no storage",
+                r.phys
+            ));
             return false;
         }
-        if r.voff < 0 || r.voff as u64 + r.size > o.size || r.poff < 0 || r.poff as u64 + r.size > ph.size {
+        if r.voff < 0
+            || r.voff as u64 + r.size > o.size
+            || r.poff < 0
+            || r.poff as u64 + r.size > ph.size
+        {
             crate::log::red(&format!("MapVirtual: request out of range (virtual {:#x}+{:#x} / pool {:#x}, physical {:#x} / pool {:#x})", r.voff, r.size, o.size, r.poff, ph.size));
             return false;
         }
@@ -163,7 +184,13 @@ pub fn map(o: &mut pool_t, rq: &[MapReq]) -> bool {
             return false;
         }
         if o.mem.is_null() {
-            crate::nvnlog!("MapVirtual: virtual pool {:p} ({:#x} bytes) is physical pool {:p} + {:#x}", o as *const _, o.size, r.phys, r.poff - r.voff);
+            crate::nvnlog!(
+                "MapVirtual: virtual pool {:p} ({:#x} bytes) is physical pool {:p} + {:#x}",
+                o as *const _,
+                o.size,
+                r.phys,
+                r.poff - r.voff
+            );
         }
         o.mem = base;
     }
@@ -187,18 +214,27 @@ fn set(v: &mut VPool, voff: u64, size: u64, phys: Option<u64>) {
             v.pt[li] = Some(Box::new([Pte::default(); LEAF]));
         }
         let leaf = v.pt[li].as_mut().unwrap();
-        leaf[((at / PG) as usize) % LEAF] = Pte { phys: phys.map(|p| p + o).unwrap_or(0), gen };
+        leaf[((at / PG) as usize) % LEAF] = Pte {
+            phys: phys.map(|p| p + o).unwrap_or(0),
+            gen,
+        };
         o += PG;
     }
 }
 
 fn map_sparse(v: &mut VPool, r: &MapReq) -> bool {
     if r.voff < 0 || r.voff as u64 + r.size > v.size {
-        crate::log::red(&format!("virtual pool {:#x}: request at {:#x}+{:#x} is beyond the pool's {:#x}", v.pool, r.voff, r.size, v.size));
+        crate::log::red(&format!(
+            "virtual pool {:#x}: request at {:#x}+{:#x} is beyond the pool's {:#x}",
+            v.pool, r.voff, r.size, v.size
+        ));
         return false;
     }
     if (r.voff as u64 | r.size | r.poff as u64) & (PG - 1) != 0 {
-        crate::log::red(&format!("virtual pool {:#x}: request {:#x}+{:#x} (physical offset {:#x}) is not 4 KB aligned", v.pool, r.voff, r.size, r.poff));
+        crate::log::red(&format!(
+            "virtual pool {:#x}: request {:#x}+{:#x} (physical offset {:#x}) is not 4 KB aligned",
+            v.pool, r.voff, r.size, r.poff
+        ));
         return false;
     }
     let phys = if r.phys.is_null() {
@@ -207,7 +243,10 @@ fn map_sparse(v: &mut VPool, r: &MapReq) -> bool {
         // SAFETY: the game's physical pool object
         let ph = unsafe { &*r.phys };
         if ph.mem.is_null() || r.poff < 0 || r.poff as u64 + r.size > ph.size {
-            crate::log::red(&format!("virtual pool {:#x}: physical pool {:p} ({:#x} bytes) cannot supply {:#x}+{:#x}", v.pool, r.phys, ph.size, r.poff, r.size));
+            crate::log::red(&format!(
+                "virtual pool {:#x}: physical pool {:p} ({:#x} bytes) cannot supply {:#x}+{:#x}",
+                v.pool, r.phys, ph.size, r.poff, r.size
+            ));
             return false;
         }
         Some(ph.mem as u64 + r.poff as u64)
@@ -215,7 +254,10 @@ fn map_sparse(v: &mut VPool, r: &MapReq) -> bool {
     set(v, r.voff as u64, r.size, phys);
     let end = r.voff as u64 + r.size;
     if phys.is_some() && end >> 27 > v.top >> 27 {
-        crate::nvnlog!("virtual pool {:#x}: mapped up to {end:#x} (page table)", v.pool);
+        crate::nvnlog!(
+            "virtual pool {:#x}: mapped up to {end:#x} (page table)",
+            v.pool
+        );
     }
     if phys.is_some() && end > v.top {
         v.top = end;
@@ -224,24 +266,38 @@ fn map_sparse(v: &mut VPool, r: &MapReq) -> bool {
 }
 
 fn pte(v: &VPool, off: u64) -> Pte {
-    v.pt.get((off / (LEAF as u64 * PG)) as usize).and_then(|l| l.as_ref()).map(|l| l[((off / PG) as usize) % LEAF]).unwrap_or_default()
+    v.pt.get((off / (LEAF as u64 * PG)) as usize)
+        .and_then(|l| l.as_ref())
+        .map(|l| l[((off / PG) as usize) % LEAF])
+        .unwrap_or_default()
 }
 
 fn with_pool<R>(a: u64, f: impl FnOnce(&VPool, u64) -> R) -> Option<R> {
     let g = POOLS.read().unwrap();
-    let v = g.iter().find(|v| a >= v.base && a < v.base + v.len.max(v.size))?;
+    let v = g
+        .iter()
+        .find(|v| a >= v.base && a < v.base + v.len.max(v.size))?;
     Some(f(v, a - v.base))
 }
 
 /// Whether the sparse virtual pool holding `a` is one the CPU cannot access (its textures only the GPU writes).
 pub fn gpu_only(a: u64) -> bool {
     // SAFETY: the game's pool object, live while its range is registered
-    with_pool(a, |v, _| unsafe { (*(v.pool as *const pool_t)).flags } & mem_flags::CPU_NO_ACCESS != 0).unwrap_or(false)
+    with_pool(
+        a,
+        |v, _| unsafe { (*(v.pool as *const pool_t)).flags } & mem_flags::CPU_NO_ACCESS != 0,
+    )
+    .unwrap_or(false)
 }
 
 /// The virtual address range [base, base + size) a sparse pool's offsets map into.
 pub fn range_of(pool: usize) -> Option<(u64, u64)> {
-    POOLS.read().unwrap().iter().find(|v| v.pool == pool).map(|v| (v.base, v.size))
+    POOLS
+        .read()
+        .unwrap()
+        .iter()
+        .find(|v| v.pool == pool)
+        .map(|v| (v.base, v.size))
 }
 
 /// Whether `a` is in a sparse virtual pool's range.
@@ -286,7 +342,9 @@ pub fn copy(a: u64, dst: &mut [u8]) -> Option<Vec<(u64, u64)>> {
             } else {
                 let src = p.phys + (o & (PG - 1));
                 // SAFETY: mapped physical pool memory (the game's own pages)
-                unsafe { core::ptr::copy_nonoverlapping(src as *const u8, dst.as_mut_ptr().add(i), n) };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(src as *const u8, dst.as_mut_ptr().add(i), n)
+                };
                 match runs.last_mut() {
                     Some(l) if l.0 + l.1 == src => l.1 += n as u64,
                     _ => runs.push((src, n as u64)),
@@ -325,7 +383,15 @@ pub fn is_virtual(p: &pool_t) -> bool {
 mod tests {
     use super::*;
     fn pool(size: u64, mem: *mut u8, flags: u32) -> pool_t {
-        pool_t { magic: 0, flags, mem, size, vp: core::ptr::null_mut(), vmode: 0, serial: 0 }
+        pool_t {
+            magic: 0,
+            flags,
+            mem,
+            size,
+            vp: core::ptr::null_mut(),
+            vmode: 0,
+            serial: 0,
+        }
     }
     #[test]
     fn alias_then_sparse_page_table() {
@@ -338,16 +404,39 @@ mod tests {
         let mut v = pool(0x8000, core::ptr::null_mut(), mem_flags::VIRTUAL);
         v.mem = initialize(&mut v) as *mut u8;
         assert!(!v.mem.is_null());
-        assert!(map(&mut v, &[MapReq { phys: &ph, poff: 0x4000, voff: 0, size: 0x8000, storage_class: 0, pad: 0 }]));
+        assert!(map(
+            &mut v,
+            &[MapReq {
+                phys: &ph,
+                poff: 0x4000,
+                voff: 0,
+                size: 0x8000,
+                storage_class: 0,
+                pad: 0
+            }]
+        ));
         assert_eq!(v.vmode, ALIAS);
         assert_eq!(v.mem as u64, phys_mem.as_ptr() as u64 + 0x4000);
         // partial mapping: sparse
         let mut s = pool(0x8000, core::ptr::null_mut(), mem_flags::VIRTUAL);
         s.mem = initialize(&mut s) as *mut u8;
         let base = s.mem as u64;
-        assert!(map(&mut s, &[MapReq { phys: &ph, poff: 0x3000, voff: 0x1000, size: 0x2000, storage_class: 0, pad: 0 }]));
+        assert!(map(
+            &mut s,
+            &[MapReq {
+                phys: &ph,
+                poff: 0x3000,
+                voff: 0x1000,
+                size: 0x2000,
+                storage_class: 0,
+                pad: 0
+            }]
+        ));
         assert_eq!(s.vmode, SPARSE);
-        assert_eq!(translate(base + 0x1010, 0x1ff0), Some(phys_mem.as_ptr() as u64 + 0x3010));
+        assert_eq!(
+            translate(base + 0x1010, 0x1ff0),
+            Some(phys_mem.as_ptr() as u64 + 0x3010)
+        );
         assert_eq!(translate(base, 0x10), None);
         let mut buf = vec![0xffu8; 0x3000];
         let runs = copy(base, &mut buf).unwrap();

@@ -61,14 +61,22 @@ fn main() {
         el.pump_app_events(Some(Duration::from_millis(10)), &mut app);
     }
     let window = app.window.as_ref().expect("the window opened");
-    let raw = (window.display_handle().unwrap().as_raw(), window.window_handle().unwrap().as_raw());
+    let raw = (
+        window.display_handle().unwrap().as_raw(),
+        window.window_handle().unwrap().as_raw(),
+    );
 
     let mut n = Nvn::new();
     let e0 = validation_errors();
     nxgfx::set_window_raw(raw.0, raw.1).expect("a window Vulkan can present to");
     // the game's swap chain: two 640x360 RGBA8 textures (smaller than the 960x540 window: the sharp upscale runs)
-    let mut texs: Vec<Box<NVNtexture>> = (0..2).map(|_| n.texture(640, 360, 37, tex_flags::DISPLAY, false)).collect();
-    let tp: Vec<*mut NVNtexture> = texs.iter_mut().map(|t| &mut **t as *mut NVNtexture).collect();
+    let mut texs: Vec<Box<NVNtexture>> = (0..2)
+        .map(|_| n.texture(640, 360, 37, tex_flags::DISPLAY, false))
+        .collect();
+    let tp: Vec<*mut NVNtexture> = texs
+        .iter_mut()
+        .map(|t| &mut **t as *mut NVNtexture)
+        .collect();
     let mut wb = NVNwindowBuilder::boxed();
     let mut win = NVNwindow::boxed();
     unsafe {
@@ -104,7 +112,11 @@ fn main() {
         unsafe { nvnCommandBufferBindProgram(n.c(), &*prog, 0x1f) };
         let v = |k: f32| [0.7 * (a + k).cos(), 0.7 * (a + k).sin(), 0.0];
         let mut data = Vec::new();
-        for (p, c) in [(v(0.0), [1.0f32, 0.2, 0.2, 1.0]), (v(2.094), [0.2, 1.0, 0.2, 1.0]), (v(4.189), [0.2, 0.2, 1.0, 1.0])] {
+        for (p, c) in [
+            (v(0.0), [1.0f32, 0.2, 0.2, 1.0]),
+            (v(2.094), [0.2, 1.0, 0.2, 1.0]),
+            (v(4.189), [0.2, 0.2, 1.0, 1.0]),
+        ] {
             data.extend_from_slice(&p);
             data.extend_from_slice(&c);
         }
@@ -139,17 +151,35 @@ fn main() {
         if let Some(i) = l.find("] [vk] pacing: ") {
             let rest = &l[i + 15..];
             let fps: f64 = rest.split(' ').next().unwrap().parse().expect("FPS");
-            assert!(rest.contains(" FPS | p95 ") && rest.contains(" p99 ") && rest.contains(" max ") && rest.contains(" ms | >16.67 "), "{l}");
-            assert!(rest.contains(" >33/50/100 ") && rest.trim_end().ends_with("intervals)"), "{l}");
-            assert!(l.starts_with('[') && l[1..i].trim().parse::<f64>().is_ok(), "{l}");
+            assert!(
+                rest.contains(" FPS | p95 ")
+                    && rest.contains(" p99 ")
+                    && rest.contains(" max ")
+                    && rest.contains(" ms | >16.67 "),
+                "{l}"
+            );
+            assert!(
+                rest.contains(" >33/50/100 ") && rest.trim_end().ends_with("intervals)"),
+                "{l}"
+            );
+            assert!(
+                l.starts_with('[') && l[1..i].trim().parse::<f64>().is_ok(),
+                "{l}"
+            );
             assert!(fps > 30.0 && fps < 70.0, "paced near 60: {l}");
             paced += 1;
         }
     }
     let errs = validation_errors() - e0;
     eprintln!("window: {FRAMES} frames in {secs:.2} s ({:.1} per s), {presented} presented, {paced} pacing lines, {errs} validation errors", FRAMES as f64 / secs);
-    assert!(presented >= (FRAMES - MIN) as u64 - 1 && presented <= (FRAMES - MIN) as u64 + 1, "presents reached the swap chain, none while minimised: {presented}");
-    assert!(skipped >= MIN as u64 - 1, "presents skipped while minimised: {skipped}");
+    assert!(
+        presented >= (FRAMES - MIN) as u64 - 1 && presented <= (FRAMES - MIN) as u64 + 1,
+        "presents reached the swap chain, none while minimised: {presented}"
+    );
+    assert!(
+        skipped >= MIN as u64 - 1,
+        "presents skipped while minimised: {skipped}"
+    );
     assert!(paced >= 3, "pacing lines: {paced}");
     assert_eq!(errs, 0, "validation errors");
     eprintln!("window test: ok");

@@ -15,13 +15,14 @@
 //! device-local pools the GPU wrote), so the first captured frame can differ where it reads earlier frames' results;
 //! the frames after it are made from the capture alone. Sparse textures' mappings are not recorded either.
 
-use crate::nvn::obj::{pool_t, samp_par, tex_t, view_t};
-use std::collections::HashMap;
+use crate::nvn::obj::{op, pool_t, prog_t, samp_par, tex_t, view_t, MAGIC_PROG};
+use crate::nvn::prog::ShaderKey;
+use std::collections::{HashMap, HashSet};
 use std::io::{Read, Write};
 use std::sync::Mutex;
 
 const MAGIC: u64 = 0x3150_4143_5847_584e; // "NXGXCAP1"
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
 
 /// Record types: {u32 type, u32 0, u64 size} + payload.
 pub mod rec {
@@ -39,6 +40,8 @@ pub mod rec {
     pub const END: u32 = 12;
     pub const WTEX: u32 = 13; // {w, h, row, 0} + tex_t + level 0's texels (rows packed): a texture only the GPU held
     pub const WIMG: u32 = 14; // ImgHead + tex_t + the image's raw texels (every aspect, level, layer, slice): an image only the GPU held
+    pub const SHADER: u32 = 15; // key, stage, original SPIR-V words, and optional lane-C reflection JSON
+    pub const PROGRAM: u32 = 16; // program serial, stage mask, then one shader key per set stage bit
 }
 
 const PAGE: u64 = 0x1000;
@@ -52,6 +55,7 @@ struct Boot {
     pools: Vec<u64>,
     tex: HashMap<i32, (tex_t, Option<view_t>, bool)>,
     samp: HashMap<i32, samp_par>,
+    shaders: HashMap<ShaderKey, CapturedShader>,
 }
 
 struct Live {
@@ -59,6 +63,92 @@ struct Live {
     hashes: HashMap<u64, u64>,
     frames_left: u64,
     bytes: u64,
+    shaders: HashSet<ShaderKey>,
+    programs: HashMap<u64, [Option<ShaderKey>; 6]>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+struct CapturedShader {
+    key: ShaderKey,
+    stage: u32,
+    words: Vec<u32>,
+    json: Option<String>,
+}
+
+impl CapturedShader {
+    fn encode(&self) -> Vec<u8> {
+        let json = self.json.as_deref().unwrap_or("").as_bytes();
+        let mut out = Vec::with_capacity(32 + self.words.len() * 4 + json.len());
+        out.extend_from_slice(&self.key);
+        out.extend_from_slice(&self.stage.to_le_bytes());
+        out.extend_from_slice(&(self.json.is_some() as u32).to_le_bytes());
+        out.extend_from_slice(&(self.words.len() as u64).to_le_bytes());
+        out.extend_from_slice(&(json.len() as u64).to_le_bytes());
+        for word in &self.words {
+            out.extend_from_slice(&word.to_le_bytes());
+        }
+        out.extend_from_slice(json);
+        out
+    }
+
+    fn decode(p: &[u8]) -> Result<Self, String> {
+        if p.len() < 32 {
+            return Err("short shader record".into());
+        }
+        let key = p[..8].try_into().unwrap();
+        let stage = u32::from_le_bytes(p[8..12].try_into().unwrap());
+        let flags = u32::from_le_bytes(p[12..16].try_into().unwrap());
+        if flags & !1 != 0 {
+            return Err("unknown shader record flags".into());
+        }
+        let word_count = u64_at(p, 16);
+        let json_len = u64_at(p, 24);
+        let word_bytes = word_count
+            .checked_mul(4)
+            .ok_or("shader word count overflow")?;
+        let total = 32u64
+            .checked_add(word_bytes)
+            .and_then(|n| n.checked_add(json_len))
+            .ok_or("shader record size overflow")?;
+        if total != p.len() as u64 {
+            return Err("bad shader record size".into());
+        }
+        let words_end = 32 + word_bytes as usize;
+        let words = p[32..words_end]
+            .chunks_exact(4)
+            .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+            .collect();
+        let json = if flags & 1 != 0 {
+            Some(
+                std::str::from_utf8(&p[words_end..])
+                    .map_err(|_| "shader reflection is not UTF-8")?
+                    .to_owned(),
+            )
+        } else {
+            if json_len != 0 {
+                return Err("shader record has reflection bytes without reflection flag".into());
+            }
+            None
+        };
+        Ok(Self {
+            key,
+            stage,
+            words,
+            json,
+        })
+    }
+}
+
+fn remember_shader(
+    shaders: &mut HashMap<ShaderKey, CapturedShader>,
+    shader: CapturedShader,
+) -> bool {
+    if shaders.contains_key(&shader.key) {
+        false
+    } else {
+        shaders.insert(shader.key, shader);
+        true
+    }
 }
 
 #[derive(Default)]
@@ -99,6 +189,73 @@ fn put(l: &mut Live, ty: u32, parts: &[&[u8]]) {
     l.bytes += 16 + n;
 }
 
+fn put_shader(l: &mut Live, shader: &CapturedShader) {
+    let payload = shader.encode();
+    put(l, rec::SHADER, &[&payload]);
+}
+
+fn encode_program(serial: u64, keys: &[Option<ShaderKey>; 6]) -> Vec<u8> {
+    let mask = keys
+        .iter()
+        .enumerate()
+        .fold(0u64, |m, (i, k)| m | ((k.is_some() as u64) << i));
+    let mut out = Vec::with_capacity(16 + mask.count_ones() as usize * 8);
+    out.extend_from_slice(&serial.to_le_bytes());
+    out.extend_from_slice(&mask.to_le_bytes());
+    for key in keys.iter().flatten() {
+        out.extend_from_slice(key);
+    }
+    out
+}
+
+fn decode_program(p: &[u8]) -> Result<(u64, [Option<ShaderKey>; 6]), String> {
+    if p.len() < 16 {
+        return Err("short program-key record".into());
+    }
+    let serial = u64_at(p, 0);
+    let mask = u64_at(p, 8);
+    if mask & !0x3f != 0 || p.len() != 16 + mask.count_ones() as usize * 8 {
+        return Err("bad program-key record".into());
+    }
+    let mut keys = [None; 6];
+    let mut at = 16;
+    for (stage, key) in keys.iter_mut().enumerate() {
+        if mask & (1 << stage) != 0 {
+            *key = Some(p[at..at + 8].try_into().unwrap());
+            at += 8;
+        }
+    }
+    Ok((serial, keys))
+}
+
+fn program_ptrs(stream: &[u8]) -> Vec<*const prog_t> {
+    let mut out = Vec::new();
+    let mut at = 0usize;
+    while at + 8 <= stream.len() {
+        let ty = u32::from_le_bytes(stream[at..at + 4].try_into().unwrap());
+        let n = u32::from_le_bytes(stream[at + 4..at + 8].try_into().unwrap()) as usize;
+        if n < 8 || at + n > stream.len() {
+            break;
+        }
+        if ty == op::BIND_PROGRAM && n >= 16 {
+            out.push(
+                u64::from_le_bytes(stream[at + 8..at + 16].try_into().unwrap()) as *const prog_t,
+            );
+        }
+        at += n;
+    }
+    out
+}
+
+fn put_program(l: &mut Live, serial: u64, keys: [Option<ShaderKey>; 6]) {
+    if l.programs.get(&serial) == Some(&keys) {
+        return;
+    }
+    let payload = encode_program(serial, &keys);
+    put(l, rec::PROGRAM, &[&payload]);
+    l.programs.insert(serial, keys);
+}
+
 // ---------- hooks (the back end calls them; each does nothing unless NXGFX_CAPTURE) ----------
 
 pub fn pool_add(p: *const pool_t) {
@@ -122,7 +279,9 @@ pub fn pool_del(base: u64) {
     }
     with(|s| {
         // the pool object whose storage starts at base
-        s.boot.pools.retain(|&a| unsafe { (*(a as *const pool_t)).mem as u64 } != base);
+        s.boot
+            .pools
+            .retain(|&a| unsafe { (*(a as *const pool_t)).mem as u64 } != base);
         if let Some(l) = s.live.as_mut() {
             put(l, rec::POOL_DEL, &[&base.to_le_bytes()]);
         }
@@ -154,7 +313,11 @@ pub fn samp_reg(id: i32, p: &samp_par) {
     with(|s| {
         s.boot.samp.insert(id, *p);
         if let Some(l) = s.live.as_mut() {
-            put(l, rec::SAMPREG, &[&id.to_le_bytes(), &[0u8; 4], bytes_of(p)]);
+            put(
+                l,
+                rec::SAMPREG,
+                &[&id.to_le_bytes(), &[0u8; 4], bytes_of(p)],
+            );
         }
     });
 }
@@ -174,15 +337,67 @@ pub fn tex_release(serial: u64) {
     });
 }
 
+/// A shader source that was successfully loaded into the library. The original words and reflection are retained so
+/// replay applies the same remapping and device-specific fixes when it builds the module.
+pub fn shader_module(key: ShaderKey, stage: u32, words: &[u32], json: Option<&str>) {
+    if !on() {
+        return;
+    }
+    with(|s| {
+        let shader = CapturedShader {
+            key,
+            stage,
+            words: words.to_vec(),
+            json: json.map(str::to_owned),
+        };
+        remember_shader(&mut s.boot.shaders, shader.clone());
+        let stored = s.boot.shaders[&key].clone();
+        if let Some(l) = s.live.as_mut() {
+            if l.shaders.insert(key) {
+                put_shader(l, &stored);
+            }
+        }
+    });
+}
+
 /// A submission (its records flattened), before it is queued.
 pub fn submit(queue: u64, origin_ll: bool, stream: &[u8]) {
     if !on() {
         return;
     }
+    if !ST
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|s| s.live.is_some())
+    {
+        return;
+    }
+    let programs: Vec<_> = program_ptrs(stream)
+        .into_iter()
+        .filter_map(|p| unsafe {
+            if p.is_null() || (*p).magic != MAGIC_PROG {
+                None
+            } else {
+                Some(((*p).serial, crate::nvn::prog::prog_stage_keys(&*p)))
+            }
+        })
+        .collect();
     with(|s| {
         if let Some(l) = s.live.as_mut() {
+            for &(serial, keys) in &programs {
+                put_program(l, serial, keys);
+            }
             mem_delta(l);
-            put(l, rec::SUBMIT, &[&queue.to_le_bytes(), &(origin_ll as u64).to_le_bytes(), stream]);
+            put(
+                l,
+                rec::SUBMIT,
+                &[
+                    &queue.to_le_bytes(),
+                    &(origin_ll as u64).to_le_bytes(),
+                    stream,
+                ],
+            );
         }
     });
 }
@@ -200,7 +415,11 @@ pub fn present(queue: u64, origin_ll: bool, t: &tex_t, crop: Option<[i32; 4]>) {
         let c = crop.unwrap_or([0; 4]);
         let h: [u64; 2] = [queue, origin_ll as u64];
         let hc: [i32; 5] = [crop.is_some() as i32, c[0], c[1], c[2], c[3]];
-        put(l, rec::PRESENT, &[bytes_of(&h), bytes_of(&hc), &[0u8; 4], bytes_of(t)]);
+        put(
+            l,
+            rec::PRESENT,
+            &[bytes_of(&h), bytes_of(&hc), &[0u8; 4], bytes_of(t)],
+        );
         l.frames_left -= 1;
         if l.frames_left == 0 {
             let mut l = s.live.take().unwrap();
@@ -208,16 +427,23 @@ pub fn present(queue: u64, origin_ll: bool, t: &tex_t, crop: Option<[i32; 4]>) {
             let bytes = l.bytes;
             let _ = l.out.finish().map(|mut w| w.flush());
             s.done = true;
-            crate::vklog!("capture: written ({} MB before compression)", bytes >> 20);
+            crate::vklog!("capture: written ({} MB before compression, {} shader records, {} submitted programs)", bytes >> 20, l.shaders.len(), l.programs.len());
         }
         return;
     }
-    let at = std::env::var("NXGFX_CAPTURE_AT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(600);
+    let at = std::env::var("NXGFX_CAPTURE_AT")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(600);
     if s.done || s.presents < at {
         return;
     }
     let path = std::env::var("NXGFX_CAPTURE").unwrap_or_default();
-    let frames = std::env::var("NXGFX_CAPTURE_FRAMES").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(2).max(1);
+    let frames = std::env::var("NXGFX_CAPTURE_FRAMES")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(2)
+        .max(1);
     // what was submitted before is on the GPU side already
     drop(g);
     super::queue::finish();
@@ -231,14 +457,37 @@ pub fn present(queue: u64, origin_ll: bool, t: &tex_t, crop: Option<[i32; 4]>) {
             return;
         }
     };
-    let Ok(out) = zstd::stream::write::Encoder::new(std::io::BufWriter::new(f), 3) else { return };
-    let mut l = Live { out, hashes: HashMap::new(), frames_left: frames, bytes: 0 };
+    let Ok(out) = zstd::stream::write::Encoder::new(std::io::BufWriter::new(f), 3) else {
+        return;
+    };
+    let mut l = Live {
+        out,
+        hashes: HashMap::new(),
+        frames_left: frames,
+        bytes: 0,
+        shaders: HashSet::new(),
+        programs: HashMap::new(),
+    };
     let t0 = std::time::Instant::now();
-    put(&mut l, rec::META, &[&MAGIC.to_le_bytes(), &VERSION.to_le_bytes(), &[0u8; 4], &s.presents.to_le_bytes(), &frames.to_le_bytes()]);
+    put(
+        &mut l,
+        rec::META,
+        &[
+            &MAGIC.to_le_bytes(),
+            &VERSION.to_le_bytes(),
+            &[0u8; 4],
+            &s.presents.to_le_bytes(),
+            &frames.to_le_bytes(),
+        ],
+    );
     // the guest's allocations, then their bytes
     let regions = guest_regions();
     for &(base, size) in &regions {
-        put(&mut l, rec::REGION, &[&base.to_le_bytes(), &size.to_le_bytes()]);
+        put(
+            &mut l,
+            rec::REGION,
+            &[&base.to_le_bytes(), &size.to_le_bytes()],
+        );
     }
     for &(lo, hi) in &committed(&regions) {
         let mut a = lo;
@@ -253,7 +502,15 @@ pub fn present(queue: u64, origin_ll: bool, t: &tex_t, crop: Option<[i32; 4]>) {
     mem_delta(&mut l); // the page hashes as written (nothing changed meanwhile: the game is in its present)
     for tex in [true, false] {
         for (pool, base) in crate::nvn::pool::dpool_list(tex) {
-            put(&mut l, rec::DPOOL, &[&(tex as u64).to_le_bytes(), &(pool as u64).to_le_bytes(), &(base as i64).to_le_bytes()]);
+            put(
+                &mut l,
+                rec::DPOOL,
+                &[
+                    &(tex as u64).to_le_bytes(),
+                    &(pool as u64).to_le_bytes(),
+                    &(base as i64).to_le_bytes(),
+                ],
+            );
         }
     }
     for &a in &s.boot.pools {
@@ -263,7 +520,15 @@ pub fn present(queue: u64, origin_ll: bool, t: &tex_t, crop: Option<[i32; 4]>) {
         put_texreg(&mut l, id, &t, v, img);
     }
     for (&id, p) in &s.boot.samp {
-        put(&mut l, rec::SAMPREG, &[&id.to_le_bytes(), &[0u8; 4], bytes_of(p)]);
+        put(
+            &mut l,
+            rec::SAMPREG,
+            &[&id.to_le_bytes(), &[0u8; 4], bytes_of(p)],
+        );
+    }
+    for shader in s.boot.shaders.values() {
+        put_shader(&mut l, shader);
+        l.shaders.insert(shader.key);
     }
     // what only the GPU held: device-local pools' contents (over their guest memory) and the textures it drew
     let g = super::Gpu::get().ok();
@@ -272,7 +537,11 @@ pub fn present(queue: u64, origin_ll: bool, t: &tex_t, crop: Option<[i32; 4]>) {
         for (base, bytes) in super::mem::gpu_contents(g) {
             pool_bytes += bytes.len() as u64;
             for (k, c) in bytes.chunks(16 << 20).enumerate() {
-                put(&mut l, rec::MEM, &[&(base + (k as u64) * (16 << 20)).to_le_bytes(), c]);
+                put(
+                    &mut l,
+                    rec::MEM,
+                    &[&(base + (k as u64) * (16 << 20)).to_le_bytes(), c],
+                );
             }
         }
         let (n, b, skipped) = put_gpu_images(&mut l, g);
@@ -283,8 +552,9 @@ pub fn present(queue: u64, origin_ll: bool, t: &tex_t, crop: Option<[i32; 4]>) {
         }
     }
     crate::vklog!(
-        "capture: started at present {} into {path} ({} regions, {} MB written, {} pools, {} textures, {} samplers; GPU-held: {} MB of device-local pools, {ntex} textures {} MB; {:.1} s)",
+        "capture: started at present {} into {path} ({} shader records retained; {} regions, {} MB written, {} pools, {} textures, {} samplers; GPU-held: {} MB of device-local pools, {ntex} textures {} MB; {:.1} s)",
         s.presents,
+        l.shaders.len(),
         regions.len(),
         l.bytes >> 20,
         s.boot.pools.len(),
@@ -321,12 +591,20 @@ type Aspects = [(ash::vk::ImageAspectFlags, u32); 2];
 fn raw_aspects(im: &super::image::Image) -> Option<Aspects> {
     use crate::tex::format::Kind;
     use ash::vk::{Format as F, ImageAspectFlags as A};
-    if im.samples != ash::vk::SampleCountFlags::TYPE_1 || im.tf.astc.is_some() || im.bc7 || im.tf.expand3 != 0 || im.sparse.is_some() {
+    if im.samples != ash::vk::SampleCountFlags::TYPE_1
+        || im.tf.astc.is_some()
+        || im.bc7
+        || im.tf.expand3 != 0
+        || im.sparse.is_some()
+    {
         return None;
     }
     let none = (A::empty(), 0);
     Some(match im.tf.kind {
-        Kind::Depth => [(A::DEPTH, if im.format == F::D16_UNORM { 2 } else { 4 }), none],
+        Kind::Depth => [
+            (A::DEPTH, if im.format == F::D16_UNORM { 2 } else { 4 }),
+            none,
+        ],
         Kind::DepthStencil => [(A::DEPTH, 4), (A::STENCIL, 1)],
         Kind::Stencil => [(A::STENCIL, 1), none],
         _ => {
@@ -345,14 +623,27 @@ fn raw_copies(h: &ImgHead, asp: &Aspects, three_d: bool) -> (Vec<ash::vk::Buffer
     let mut off = 0u64;
     for &(a, bpt) in asp.iter().filter(|x| x.1 > 0) {
         for lv in 0..h.levels {
-            let (w, hh, d) = ((h.w >> lv).max(1), (h.h >> lv).max(1), if three_d { (h.d >> lv).max(1) } else { 1 });
+            let (w, hh, d) = (
+                (h.w >> lv).max(1),
+                (h.h >> lv).max(1),
+                if three_d { (h.d >> lv).max(1) } else { 1 },
+            );
             out.push(ash::vk::BufferImageCopy {
                 buffer_offset: off,
                 buffer_row_length: 0,
                 buffer_image_height: 0,
-                image_subresource: ash::vk::ImageSubresourceLayers { aspect_mask: a, mip_level: lv, base_array_layer: 0, layer_count: h.layers },
+                image_subresource: ash::vk::ImageSubresourceLayers {
+                    aspect_mask: a,
+                    mip_level: lv,
+                    base_array_layer: 0,
+                    layer_count: h.layers,
+                },
                 image_offset: ash::vk::Offset3D::default(),
-                image_extent: ash::vk::Extent3D { width: w, height: hh, depth: d },
+                image_extent: ash::vk::Extent3D {
+                    width: w,
+                    height: hh,
+                    depth: d,
+                },
             });
             off += w as u64 * hh as u64 * d as u64 * h.layers as u64 * bpt as u64;
             off = (off + 15) & !15;
@@ -369,8 +660,21 @@ fn put_gpu_images(l: &mut Live, g: &super::Gpu) -> (u64, u64, u64) {
             .values()
             .filter(|im| im.gpu_owned && im.alloc.is_some() && im.alias_of.is_none())
             .map(|im| {
-                let h = ImgHead { w: im.extent.width, h: im.extent.height, d: im.extent.depth, levels: im.levels, layers: im.layers, format: im.format.as_raw(), bpt: [0; 2] };
-                (im.tex, h, raw_aspects(im), im.ty == ash::vk::ImageType::TYPE_3D)
+                let h = ImgHead {
+                    w: im.extent.width,
+                    h: im.extent.height,
+                    d: im.extent.depth,
+                    levels: im.levels,
+                    layers: im.layers,
+                    format: im.format.as_raw(),
+                    bpt: [0; 2],
+                };
+                (
+                    im.tex,
+                    h,
+                    raw_aspects(im),
+                    im.ty == ash::vk::ImageType::TYPE_3D,
+                )
             })
             .collect()
     };
@@ -382,16 +686,31 @@ fn put_gpu_images(l: &mut Live, g: &super::Gpu) -> (u64, u64, u64) {
         };
         h.bpt = [asp[0].1, asp[1].1];
         let (copies, total) = raw_copies(&h, &asp, three_d);
-        let Ok(rb) = g.buffer(total, ash::vk::BufferUsageFlags::TRANSFER_DST, gpu_allocator::MemoryLocation::GpuToCpu, "capture image") else {
+        let Ok(rb) = g.buffer(
+            total,
+            ash::vk::BufferUsageFlags::TRANSFER_DST,
+            gpu_allocator::MemoryLocation::GpuToCpu,
+            "capture image",
+        ) else {
             skipped += 1;
             continue;
         };
         let (serial, dst) = (t.serial, rb.buf);
         let mut ok = false;
         let f = super::queue::oneoff(g, |g, sub, imgs| {
-            let Some(im) = imgs.by_serial.get(&serial) else { return };
+            let Some(im) = imgs.by_serial.get(&serial) else {
+                return;
+            };
             super::queue::full_barrier(g, sub.main);
-            unsafe { g.dev().cmd_copy_image_to_buffer(sub.main, im.image, ash::vk::ImageLayout::GENERAL, dst, &copies) };
+            unsafe {
+                g.dev().cmd_copy_image_to_buffer(
+                    sub.main,
+                    im.image,
+                    ash::vk::ImageLayout::GENERAL,
+                    dst,
+                    &copies,
+                )
+            };
             ok = true;
         });
         super::queue::wait_fence(f, u64::MAX);
@@ -441,11 +760,23 @@ fn restore_image(g: &super::Gpu, p: &[u8]) -> bool {
             im.needs_upload = false;
         }
         g.prepare_image(imgs, t.serial, sub);
-        let Some(im) = imgs.by_serial.get_mut(&t.serial) else { return };
-        if im.alloc.is_none() || im.extent.width != h.w || im.extent.height != h.h || im.extent.depth != h.d || im.levels != h.levels || im.layers != h.layers || im.format.as_raw() != h.format {
+        let Some(im) = imgs.by_serial.get_mut(&t.serial) else {
+            return;
+        };
+        if im.alloc.is_none()
+            || im.extent.width != h.w
+            || im.extent.height != h.h
+            || im.extent.depth != h.d
+            || im.levels != h.levels
+            || im.layers != h.layers
+            || im.format.as_raw() != h.format
+        {
             return;
         }
-        let asp = [asp_of(h.bpt[0], false, im.tf.kind), asp_of(h.bpt[1], true, im.tf.kind)];
+        let asp = [
+            asp_of(h.bpt[0], false, im.tf.kind),
+            asp_of(h.bpt[1], true, im.tf.kind),
+        ];
         let (mut copies, total) = raw_copies(&h, &asp, im.ty == ash::vk::ImageType::TYPE_3D);
         if total as usize != data.len() {
             return;
@@ -455,7 +786,15 @@ fn restore_image(g: &super::Gpu, p: &[u8]) -> bool {
             c.buffer_offset += off;
         }
         super::queue::full_barrier(g, sub.pre);
-        unsafe { g.dev().cmd_copy_buffer_to_image(sub.pre, buf, im.image, ash::vk::ImageLayout::GENERAL, &copies) };
+        unsafe {
+            g.dev().cmd_copy_buffer_to_image(
+                sub.pre,
+                buf,
+                im.image,
+                ash::vk::ImageLayout::GENERAL,
+                &copies,
+            )
+        };
         super::queue::full_barrier(g, sub.pre);
         im.gpu_owned = true;
         im.needs_upload = false;
@@ -476,7 +815,14 @@ fn guest_regions() -> Vec<(u64, u64)> {
     let mut a = GUEST_LO;
     while a < GUEST_HI {
         let mut mi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
-        if unsafe { VirtualQuery(a as *const _, &mut mi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+        if unsafe {
+            VirtualQuery(
+                a as *const _,
+                &mut mi,
+                core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        } == 0
+        {
             break;
         }
         let (base, size) = (mi.BaseAddress as u64, mi.RegionSize as u64);
@@ -499,17 +845,29 @@ fn guest_regions() -> Vec<(u64, u64)> {
 /// The committed, readable ranges inside `regions`.
 #[cfg(windows)]
 fn committed(regions: &[(u64, u64)]) -> Vec<(u64, u64)> {
-    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS};
+    use windows_sys::Win32::System::Memory::{
+        VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS,
+    };
     let mut out = Vec::new();
     for &(lo, size) in regions {
         let mut a = lo;
         while a < lo + size {
             let mut mi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
-            if unsafe { VirtualQuery(a as *const _, &mut mi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+            if unsafe {
+                VirtualQuery(
+                    a as *const _,
+                    &mut mi,
+                    core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                )
+            } == 0
+            {
                 break;
             }
             let (base, n) = (mi.BaseAddress as u64, mi.RegionSize as u64);
-            if mi.State == MEM_COMMIT && mi.Protect & (PAGE_GUARD | PAGE_NOACCESS) == 0 && mi.Protect != 0 {
+            if mi.State == MEM_COMMIT
+                && mi.Protect & (PAGE_GUARD | PAGE_NOACCESS) == 0
+                && mi.Protect != 0
+            {
                 out.push((base, (base + n).min(lo + size)));
             }
             a = base + n.max(PAGE);
@@ -534,7 +892,10 @@ fn page_hash(p: &[u8]) -> u64 {
 /// The guest pages written since the last record (hashes on 8 threads), as MEM records of runs of changed pages.
 fn mem_delta(l: &mut Live) {
     let ranges = committed(&guest_regions());
-    let pages: Vec<u64> = ranges.iter().flat_map(|&(lo, hi)| (lo..hi).step_by(PAGE as usize)).collect();
+    let pages: Vec<u64> = ranges
+        .iter()
+        .flat_map(|&(lo, hi)| (lo..hi).step_by(PAGE as usize))
+        .collect();
     let nt = 8usize;
     let chunk = pages.len().div_ceil(nt).max(1);
     let hashes = &l.hashes;
@@ -546,14 +907,18 @@ fn mem_delta(l: &mut Live) {
                     ps.iter()
                         .filter_map(|&p| {
                             // SAFETY: a committed, readable page (VirtualQuery just now; the game is inside a call to us)
-                            let h = page_hash(unsafe { core::slice::from_raw_parts(p as *const u8, PAGE as usize) });
+                            let h = page_hash(unsafe {
+                                core::slice::from_raw_parts(p as *const u8, PAGE as usize)
+                            });
                             (hashes.get(&p) != Some(&h)).then_some((p, h))
                         })
                         .collect::<Vec<_>>()
                 })
             })
             .collect();
-        hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        hs.into_iter()
+            .flat_map(|h| h.join().unwrap_or_default())
+            .collect()
     });
     let mut i = 0;
     while i < changed.len() {
@@ -583,7 +948,9 @@ pub struct Reader {
 
 impl Reader {
     pub fn open(path: &std::path::Path) -> std::io::Result<Reader> {
-        Ok(Reader { r: zstd::stream::read::Decoder::new(std::fs::File::open(path)?)? })
+        Ok(Reader {
+            r: zstd::stream::read::Decoder::new(std::fs::File::open(path)?)?,
+        })
     }
     /// The next record: (type, payload); None at the end.
     pub fn next(&mut self) -> Option<(u32, Vec<u8>)> {
@@ -628,24 +995,62 @@ fn commit(_: u64, _: u64) -> bool {
 
 /// Replays capture `path` on this process's back end (`set_shader_dir` first); writes each present to
 /// `<out>/frame-<n>.png`. Returns the presents written.
-pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std::path::PathBuf>) -> Result<u64, String> {
+pub fn replay(
+    path: &std::path::Path,
+    out: &std::path::Path,
+    shaders: Option<std::path::PathBuf>,
+) -> Result<u64, String> {
     let mut r = Reader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let (ty, meta) = r.next().ok_or("an empty capture")?;
-    if ty != rec::META || u64_at(&meta, 0) != MAGIC {
+    if ty != rec::META || meta.len() < 12 || u64_at(&meta, 0) != MAGIC {
         return Err("not a capture of this format".into());
     }
-    // the guest's regions first, before the device exists (the driver maps memory of its own where they were)
+    let version = u32::from_le_bytes(meta[8..12].try_into().unwrap());
+    if version != VERSION {
+        return Err(format!(
+            "capture version {version} is not supported (expected {VERSION})"
+        ));
+    }
+    // Scan before the device exists: reserve every guest region before the driver can take its address, and collect
+    // every shader even when it was first loaded after an earlier submission was captured.
     let mut failed_regions = 0u64;
-    let mut pending: Option<(u32, Vec<u8>)> = None;
+    let mut captured_shaders = HashMap::new();
+    let mut captured_programs = HashMap::new();
     while let Some((ty, p)) = r.next() {
-        if ty != rec::REGION {
-            pending = Some((ty, p));
-            break;
-        }
-        let (b, n) = (u64_at(&p, 0), u64_at(&p, 8));
-        if !map_region(b, n) {
-            failed_regions += 1;
-            crate::log::red(&format!("replay: the capture's region {b:#x} +{n:#x} could not be reserved at its address (this process holds memory there)"));
+        match ty {
+            rec::REGION => {
+                if p.len() < 16 {
+                    return Err("short region record".into());
+                }
+                let (b, n) = (u64_at(&p, 0), u64_at(&p, 8));
+                if !map_region(b, n) {
+                    failed_regions += 1;
+                    crate::log::red(&format!("replay: the capture's region {b:#x} +{n:#x} could not be reserved at its address (this process holds memory there)"));
+                }
+            }
+            rec::SHADER => {
+                let shader = CapturedShader::decode(&p)?;
+                let reflected = super::shader::reflect(&shader.words).map_err(|e| {
+                    format!(
+                        "captured shader {}: {e}",
+                        crate::nvn::prog::key_hex(&shader.key)
+                    )
+                })?;
+                if reflected.stage != shader.stage {
+                    return Err(format!(
+                        "captured shader {} says stage {}, SPIR-V says {}",
+                        crate::nvn::prog::key_hex(&shader.key),
+                        shader.stage,
+                        reflected.stage
+                    ));
+                }
+                remember_shader(&mut captured_shaders, shader);
+            }
+            rec::PROGRAM => {
+                let (serial, keys) = decode_program(&p)?;
+                captured_programs.insert(serial, keys);
+            }
+            _ => {}
         }
     }
     if failed_regions > 0 {
@@ -655,6 +1060,32 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
         crate::set_shader_dir(s);
     }
     let g = super::Gpu::get()?;
+    for mut shader in captured_shaders.into_values() {
+        // Offline shader probes: only replace sources explicitly supplied by the investigator.
+        if let Ok(dir) = std::env::var("NXGFX_REPLAY_SHADER_DIR") {
+            let path = std::path::Path::new(&dir)
+                .join(format!("{}.spv", crate::nvn::prog::key_hex(&shader.key)));
+            if path.is_file() {
+                let bytes = std::fs::read(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+                if bytes.len() % 4 != 0 {
+                    return Err(format!("{}: unaligned SPIR-V", path.display()));
+                }
+                shader.words = bytes
+                    .chunks_exact(4)
+                    .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                    .collect();
+                crate::vklog!("replay shader probe: {}", path.display());
+            }
+        }
+        g.shaders.insert(shader.key, shader.words, shader.json);
+    }
+    for (serial, keys) in captured_programs {
+        crate::nvn::prog::restore_prog_keys(serial, keys);
+    }
+    // The scan above deliberately did not apply state: replay the stream from its beginning now that all captured
+    // shader sources are in the library.
+    let mut r = Reader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let _ = r.next();
     let _ = std::fs::create_dir_all(out);
     // NXGFX_REPLAY_DUMP=1: the passes of the frame after the first present as PNGs into <out> (pass dump), to diff two
     // captures of one moment pass by pass
@@ -666,24 +1097,40 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
     let trace = std::env::var("NXGFX_REPLAY_TRACE").is_ok();
     let mut n_rec = 0u64;
     let (mut n_img, mut bad_img) = (0u64, 0u64);
-    while let Some((ty, p)) = pending.take().or_else(|| r.next()) {
+    while let Some((ty, p)) = r.next() {
         n_rec += 1;
         if trace {
-            eprintln!("replay: record {n_rec} type {ty} ({} bytes){}", p.len(), if p.len() >= 8 { format!(" first word {:#x}", u64_at(&p, 0)) } else { String::new() });
+            eprintln!(
+                "replay: record {n_rec} type {ty} ({} bytes){}",
+                p.len(),
+                if p.len() >= 8 {
+                    format!(" first word {:#x}", u64_at(&p, 0))
+                } else {
+                    String::new()
+                }
+            );
         }
         match ty {
             rec::REGION => {}
             rec::MEM => {
                 let a = u64_at(&p, 0);
                 if !commit(a, (p.len() - 8) as u64) {
-                    crate::log::red_once(&format!("replay: guest memory at {a:#x} could not be committed"));
+                    crate::log::red_once(&format!(
+                        "replay: guest memory at {a:#x} could not be committed"
+                    ));
                     continue;
                 }
                 // SAFETY: committed just now, inside a region reserved above (a page the capture read)
-                unsafe { core::ptr::copy_nonoverlapping(p[8..].as_ptr(), a as *mut u8, p.len() - 8) };
+                unsafe {
+                    core::ptr::copy_nonoverlapping(p[8..].as_ptr(), a as *mut u8, p.len() - 8)
+                };
             }
             rec::DPOOL => {
-                let (tex, pool, base) = (u64_at(&p, 0) != 0, u64_at(&p, 8) as usize, u64_at(&p, 16) as i64 as i32);
+                let (tex, pool, base) = (
+                    u64_at(&p, 0) != 0,
+                    u64_at(&p, 8) as usize,
+                    u64_at(&p, 16) as i64 as i32,
+                );
                 let n = unsafe { (*(pool as *const crate::nvn::obj::dpool_t)).n };
                 crate::nvn::pool::dpool_restore(tex, pool, base, n);
                 if tex {
@@ -708,7 +1155,11 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
             }
             rec::TEXREL => g.tex_release(u64_at(&p, 0)),
             rec::WTEX => {
-                let (w, h, row) = (u32::from_le_bytes(p[0..4].try_into().unwrap()), u32::from_le_bytes(p[4..8].try_into().unwrap()), u32::from_le_bytes(p[8..12].try_into().unwrap()));
+                let (w, h, row) = (
+                    u32::from_le_bytes(p[0..4].try_into().unwrap()),
+                    u32::from_le_bytes(p[4..8].try_into().unwrap()),
+                    u32::from_le_bytes(p[8..12].try_into().unwrap()),
+                );
                 let t: tex_t = read_t(&p, 16);
                 let data = &p[16 + core::mem::size_of::<tex_t>()..];
                 // its storage may never have been touched by the CPU (not in the capture's pages): committed for the
@@ -717,7 +1168,14 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
                     let lo = t.mem as u64 & !0xfff;
                     commit(lo, (t.mem as u64 + t.l.size + 0xfff & !0xfff) - lo);
                 }
-                let r = crate::nvn::types::NVNcopyRegion { xoffset: 0, yoffset: 0, zoffset: 0, width: w as i32, height: h as i32, depth: 1 };
+                let r = crate::nvn::types::NVNcopyRegion {
+                    xoffset: 0,
+                    yoffset: 0,
+                    zoffset: 0,
+                    width: w as i32,
+                    height: h as i32,
+                    depth: 1,
+                };
                 g.write_texels(&t, None, &r, data.as_ptr(), row as usize, data.len());
             }
             rec::WIMG => {
@@ -726,6 +1184,8 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
                     bad_img += 1;
                 }
             }
+            rec::SHADER => {}
+            rec::PROGRAM => {}
             rec::SUBMIT => {
                 super::queue::submit_stream(u64_at(&p, 0), u64_at(&p, 8) != 0, p[16..].to_vec());
                 subs += 1;
@@ -741,7 +1201,8 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
                 let crop = (hc[0] != 0).then_some([hc[1], hc[2], hc[3], hc[4]]);
                 if let Some((rgba, w, h)) = super::shot::capture(&t, crop, ll) {
                     let f = out.join(format!("frame-{frames}.png"));
-                    super::shot::png_write(&f, &rgba, w, h).map_err(|e| format!("{}: {e}", f.display()))?;
+                    super::shot::png_write(&f, &rgba, w, h)
+                        .map_err(|e| format!("{}: {e}", f.display()))?;
                 }
                 frames += 1;
             }
@@ -751,7 +1212,14 @@ pub fn replay(path: &std::path::Path, out: &std::path::Path, shaders: Option<std
     }
     super::queue::finish();
     crate::vklog!("replay: {n_img} GPU-held images restored whole ({bad_img} not: no image of the captured shape)");
-    crate::vklog!("replay: {frames} presents, {subs} submissions{}", if failed_regions > 0 { format!("; {failed_regions} regions could not be mapped at their address") } else { String::new() });
+    crate::vklog!(
+        "replay: {frames} presents, {subs} submissions{}",
+        if failed_regions > 0 {
+            format!("; {failed_regions} regions could not be mapped at their address")
+        } else {
+            String::new()
+        }
+    );
     Ok(frames)
 }
 
@@ -762,11 +1230,23 @@ pub fn summary(path: &std::path::Path) -> Result<Vec<String>, String> {
     let mut r = Reader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut out = Vec::new();
     let mut ops: std::collections::BTreeMap<u32, u64> = Default::default();
-    let (mut subs, mut bytes, mut frame) = (0u64, 0u64, 0u64);
+    let (mut subs, mut total_subs, mut bytes, mut frame) = (0u64, 0u64, 0u64, 0u64);
+    let mut shaders = HashSet::new();
+    let mut program_keys = HashSet::new();
+    let mut programs = HashSet::new();
     while let Some((ty, p)) = r.next() {
         match ty {
+            rec::SHADER => {
+                shaders.insert(CapturedShader::decode(&p)?.key);
+            }
+            rec::PROGRAM => {
+                let (serial, keys) = decode_program(&p)?;
+                programs.insert(serial);
+                program_keys.extend(keys.into_iter().flatten());
+            }
             rec::SUBMIT => {
                 subs += 1;
+                total_subs += 1;
                 let st = &p[16..];
                 bytes += st.len() as u64;
                 let mut o = 0usize;
@@ -792,20 +1272,131 @@ pub fn summary(path: &std::path::Path) -> Result<Vec<String>, String> {
             _ => {}
         }
     }
+    let mut missing: Vec<_> = program_keys
+        .difference(&shaders)
+        .map(crate::nvn::prog::key_hex)
+        .collect();
+    missing.sort();
+    let shader_summary = if programs.is_empty() && total_subs > 0 {
+        format!(
+            "capture: {} shaders; no submitted-program key records (missing submission keys cannot be determined)",
+            shaders.len()
+        )
+    } else {
+        format!(
+            "capture: {} shaders, {} submitted programs, {} program shader keys; {} keys missing shader records{}",
+            shaders.len(),
+            programs.len(),
+            program_keys.len(),
+            missing.len(),
+            if missing.is_empty() { String::new() } else { format!(": {}", missing.join(" ")) }
+        )
+    };
+    out.insert(0, shader_summary);
     Ok(out)
+}
+
+fn shader_key(s: &str) -> Result<ShaderKey, String> {
+    if s.len() != 16 || !s.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return Err("shader key must be exactly 16 hexadecimal characters".into());
+    }
+    let mut key = [0; 8];
+    for (i, byte) in key.iter_mut().enumerate() {
+        *byte = u8::from_str_radix(&s[i * 2..i * 2 + 2], 16).map_err(|_| "invalid shader key")?;
+    }
+    Ok(key)
+}
+
+/// Extracts one captured shader source without creating a GPU or mapping captured memory. Output names are derived
+/// only from the validated key, so this diagnostic cannot use the key as a path.
+pub fn dump_shader(
+    path: &std::path::Path,
+    key: &str,
+    out: &std::path::Path,
+) -> Result<Vec<std::path::PathBuf>, String> {
+    let key = shader_key(key)?;
+    let mut r = Reader::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+    let (ty, meta) = r.next().ok_or("an empty capture")?;
+    if ty != rec::META || meta.len() < 12 || u64_at(&meta, 0) != MAGIC {
+        return Err("not a capture of this format".into());
+    }
+    let version = u32::from_le_bytes(meta[8..12].try_into().unwrap());
+    if version != VERSION {
+        return Err(format!(
+            "capture version {version} is not supported (expected {VERSION})"
+        ));
+    }
+    let mut found = None;
+    while let Some((ty, p)) = r.next() {
+        if ty == rec::SHADER {
+            let shader = CapturedShader::decode(&p)?;
+            if shader.key == key {
+                found = Some(shader);
+                break;
+            }
+        } else if ty == rec::END {
+            break;
+        }
+    }
+    let shader = found.ok_or_else(|| {
+        format!(
+            "shader {} is not in the capture",
+            crate::nvn::prog::key_hex(&key)
+        )
+    })?;
+    super::shader::reflect(&shader.words)
+        .map_err(|e| format!("captured shader {}: {e}", crate::nvn::prog::key_hex(&key)))?;
+    std::fs::create_dir_all(out).map_err(|e| format!("{}: {e}", out.display()))?;
+    let stem = crate::nvn::prog::key_hex(&key);
+    let spv = out.join(format!("{stem}.spv"));
+    let bytes: Vec<u8> = shader
+        .words
+        .iter()
+        .flat_map(|word| word.to_le_bytes())
+        .collect();
+    std::fs::write(&spv, bytes).map_err(|e| format!("{}: {e}", spv.display()))?;
+    let mut files = vec![spv];
+    if let Some(json) = shader.json {
+        let reflection = out.join(format!("{stem}.json"));
+        std::fs::write(&reflection, json).map_err(|e| format!("{}: {e}", reflection.display()))?;
+        files.push(reflection);
+    }
+    Ok(files)
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn shader_dump_key_is_strict_hex() {
+        assert_eq!(
+            super::shader_key("9914591108fbb25d").unwrap(),
+            [0x99, 0x14, 0x59, 0x11, 0x08, 0xfb, 0xb2, 0x5d]
+        );
+        assert!(super::shader_key("../9914591108fbb25d").is_err());
+        assert!(super::shader_key("9914591108fbb25").is_err());
+        assert!(super::shader_key("9914591108fbb25z").is_err());
+    }
+
     #[test]
     fn records_read_back_in_order() {
         let path = std::env::temp_dir().join(format!("nxgfx-cap-test-{}.cap", std::process::id()));
         {
             let f = std::fs::File::create(&path).unwrap();
             let out = zstd::stream::write::Encoder::new(std::io::BufWriter::new(f), 3).unwrap();
-            let mut l = super::Live { out, hashes: Default::default(), frames_left: 1, bytes: 0 };
+            let mut l = super::Live {
+                out,
+                hashes: Default::default(),
+                frames_left: 1,
+                bytes: 0,
+                shaders: Default::default(),
+                programs: Default::default(),
+            };
             super::put(&mut l, super::rec::META, &[&super::MAGIC.to_le_bytes()]);
-            super::put(&mut l, super::rec::SUBMIT, &[&7u64.to_le_bytes(), &1u64.to_le_bytes(), &[1, 2, 3]]);
+            super::put(
+                &mut l,
+                super::rec::SUBMIT,
+                &[&7u64.to_le_bytes(), &1u64.to_le_bytes(), &[1, 2, 3]],
+            );
             super::put(&mut l, super::rec::END, &[]);
             use std::io::Write;
             l.out.finish().unwrap().flush().unwrap();
@@ -813,7 +1404,10 @@ mod tests {
         let mut r = super::Reader::open(&path).unwrap();
         assert_eq!(r.next().map(|x| x.0), Some(super::rec::META));
         let (t, p) = r.next().unwrap();
-        assert_eq!((t, super::u64_at(&p, 0), &p[16..]), (super::rec::SUBMIT, 7, &[1u8, 2, 3][..]));
+        assert_eq!(
+            (t, super::u64_at(&p, 0), &p[16..]),
+            (super::rec::SUBMIT, 7, &[1u8, 2, 3][..])
+        );
         assert_eq!(r.next().map(|x| x.0), Some(super::rec::END));
         assert!(r.next().is_none());
         let _ = std::fs::remove_file(&path);
@@ -825,5 +1419,90 @@ mod tests {
         let h0 = super::page_hash(&a);
         a[4095] = 1;
         assert_ne!(h0, super::page_hash(&a));
+    }
+
+    #[test]
+    fn shader_record_round_trip() {
+        let shader = super::CapturedShader {
+            key: [1, 2, 3, 4, 5, 6, 7, 8],
+            stage: 1,
+            words: vec![0x0723_0203, 0x0001_0000, 17, 4],
+            json: Some(r#"{"status":"ok","bindings":[]}"#.into()),
+        };
+        assert_eq!(super::CapturedShader::decode(&shader.encode()), Ok(shader));
+
+        let no_json = super::CapturedShader {
+            key: [9; 8],
+            stage: 5,
+            words: vec![1, 2, 3],
+            json: None,
+        };
+        assert_eq!(
+            super::CapturedShader::decode(&no_json.encode()),
+            Ok(no_json)
+        );
+    }
+
+    #[test]
+    fn shader_records_are_deduplicated_by_key() {
+        let first = super::CapturedShader {
+            key: [3; 8],
+            stage: 0,
+            words: vec![1],
+            json: None,
+        };
+        let duplicate = super::CapturedShader {
+            key: [3; 8],
+            stage: 1,
+            words: vec![2],
+            json: Some("{}".into()),
+        };
+        let mut shaders = std::collections::HashMap::new();
+        assert!(super::remember_shader(&mut shaders, first.clone()));
+        assert!(!super::remember_shader(&mut shaders, duplicate));
+        assert_eq!(shaders.len(), 1);
+        assert_eq!(shaders.get(&first.key), Some(&first));
+    }
+
+    #[test]
+    fn submitted_program_keys_are_compared_with_shader_sources() {
+        let present = [1; 8];
+        let missing = [2; 8];
+        let mut keys = [None; 6];
+        keys[0] = Some(present);
+        keys[1] = Some(missing);
+        let (_, decoded) = super::decode_program(&super::encode_program(42, &keys)).unwrap();
+        let shaders = std::collections::HashSet::from([present]);
+        let required: std::collections::HashSet<_> = decoded.into_iter().flatten().collect();
+        assert_eq!(
+            required.difference(&shaders).copied().collect::<Vec<_>>(),
+            vec![missing]
+        );
+    }
+
+    #[test]
+    fn bind_program_record_uses_restored_side_table_keys() {
+        let serial = 0xffff_fffe_0000_0000 | std::process::id() as u64;
+        let key = [7; 8];
+        let mut keys = [None; 6];
+        keys[0] = Some(key);
+        crate::nvn::prog::restore_prog_keys(serial, keys);
+        let program = crate::nvn::obj::prog_t {
+            magic: crate::nvn::obj::MAGIC_PROG,
+            nstage: 1,
+            sd: unsafe { core::mem::zeroed() },
+            serial,
+        };
+        let mut record = Vec::new();
+        record.extend_from_slice(&crate::nvn::obj::op::BIND_PROGRAM.to_le_bytes());
+        record.extend_from_slice(&24u32.to_le_bytes());
+        record.extend_from_slice(&(core::ptr::addr_of!(program) as u64).to_le_bytes());
+        record.extend_from_slice(&[0; 8]);
+        let pointers = super::program_ptrs(&record);
+        assert_eq!(pointers.len(), 1);
+        assert_eq!(
+            unsafe { crate::nvn::prog::prog_stage_keys(&*pointers[0]) },
+            keys
+        );
     }
 }
