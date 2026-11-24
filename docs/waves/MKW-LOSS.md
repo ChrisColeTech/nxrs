@@ -121,3 +121,44 @@ of this build no longer reproduce the loss (6 of 6 clean), so a clean `play.py m
 
 ### Questions
 - None (the next step is engineering, above).
+
+## Lead review of round 1 (2026-11-24 15:20)
+
+Accepted as diagnosis + tooling, not a fix. Checkpoint commits `f5aa951` (ring, poison switches, 2 tests; lead
+re-ran graphics lib: 173 passed) and `d187c73` (play.py asks the game to `quit` before a PID kill). Diagnostics
+are off by default (`db_log` only fills under `NXGFX_DB_POISON`); the recycle path is unchanged when
+`NXGFX_RECYCLE_DELAY` is unset. Slip decision: the two false `pipeline-crashed.bin` entries (library parts
+`29d238afbe10399d`, `acce38c094307d9c`, bytes 237-395, appended in order by `load_crashed`) were removed; the three
+older entries stay (protocol: blacklists stay). Backup: `<MKW data>\pipeline-crashed.bin.20261124-bak`.
+Lead source checks: `SetKey` carries `serial` and `chunk` (set reuse cannot cross submissions); every
+descriptor-buffer bind and offset is recorded on `sub.main` only (`exec.rs` ~4248/4305/4318); classic
+descriptor-set binds are recorded on `sub.main` by `vk/upscale.rs:344`, `vk/framegen.rs:504,774`,
+`vk/newndve/kernels.rs:596` (and on `sub.pre` by ASTC/deswizzle), while `sub.db_bound` (reset only at recycle
+`queue.rs:~1071` and on a new pool snapshot `exec.rs:~4220`) keeps claiming the descriptor buffers are bound.
+
+## Brief round 2 (fresh agent)
+
+**Goal / done:** unchanged from the brief above (a correction for the cause, its test, engine + MKW rebuilt, two
+clean `play.py mkw` runs through the race, sheet looked at), plus: the deterministic reproducer below no longer
+fails with the correction in (poisoning finished submissions' sets must then be harmless, as `_ZERO` already is).
+
+**Baseline:** HEAD `d187c73`, clean tree. `dist/nxrs` = round 1's final tree (diagnostics in). Read this whole file.
+
+**Reproducer:** plain runs stopped faulting after 14:19 (warm caches); do not rely on them. Use
+`py scripts/play.py mkw --seconds 60 --env NXGFX_DB_POISON=1 --env NXGFX_DB_POISON_ONLY=32-33 --env
+NXGFX_RECYCLE_DELAY=8` (fails at ~12 s, exit 70; compute-only poisoning hangs, exit 72). A clean result there is
+the primary proof; plain clean runs are supporting evidence.
+
+**Leads, in order (each is a hypothesis; disprove or fix):**
+1. Mixed descriptor models in one command buffer: a classic `vkCmdBindDescriptorSets` / push descriptor on
+   `sub.main` (upscale, framegen, NDVE kernels; any other) after `vkCmdBindDescriptorBuffersEXT`, with `db_bound`
+   still set, so later descriptor-buffer work runs on an invalidated binding that NVIDIA may resolve to an earlier
+   command buffer's addresses. Check the VK_EXT_descriptor_buffer spec text on what each call invalidates, and
+   which of those paths MKW actually records (log counts). Candidate correction: clear `db_bound` after every
+   classic bind on a command buffer that also uses descriptor buffers (and re-set offsets), or keep those passes
+   off descriptor-buffer command buffers.
+2. Any descriptor-buffer-pipeline work recorded on a command buffer before its own bind (round 1's step 2).
+3. Bisect with the poison switches (per `Sub` / per chunk) only if 1-2 are disproved.
+
+**Rules, exclusions, commands:** as in the first brief. Deadline 2 hours from your start; park a blocker after
+~90 min and continue. Append your report as "## Report round 2" with the §5 headings.
