@@ -41,7 +41,21 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       (the texture-target mismatch is gone), 0 audio underruns; fresh save: mode select, opening, lit mine tunnel,
       walking moves the camera. All three recorded issues are resolved on this engine; scenario now ends with a
       punch at the fresh-save "Y Punch" prompt (~141 s).
-- [ ] **mkw device loss (top priority, in progress).** `build/play/20261124-125344-mkw`: exit 71 at 19.1 s, draw
+- [x] **mkw device loss: fixed (wave `docs/waves/MKW-LOSS.md`, two delegated rounds).** Cause: descriptor-buffer
+      stage sets wrote only their shader's own slots; chunks are reused by later recordings, so the other slots kept
+      an earlier recording's descriptors naming its (since freed) staging, and a stray GPU access through one (storage
+      slot 33 of a vertex shader's set during task/mesh draws) read freed memory. Correction: every set's 64 buffer
+      slots are written (unused uniform -> zero buffer, unused storage -> a write-only sink), then its own bindings
+      (`exec.rs` `write_db_set`; `NXGFX_DB_FILL=0` restores the old behaviour for diagnosis). Verified: the
+      deterministic poison reproducer runs clean (`20261124-162011-repro-final`, `-163340-repro-final2`; canary 0
+      stray writes vs 6-15 without), two plain runs 17/17 with no loss (`-162115-plain1`, `-162441-plain2`, sheet read:
+      road, kart, title, Single Player menu). graphics lib 176 passed (lead re-ran).
+- [ ] mkw follow-ups: (a) name the shader that reaches set 0's slot 33 during task/mesh draws (with the fill its
+      writes land in the sink: possibly lost rendering data; A/B in the wave report points at the task/mesh draw
+      reading set 0); (b) FPS in the window 7.1-7.4 vs round 1's 12.5 (pool sync 48 vs 20 ms/frame after ~60 s;
+      not shown to be caused by the fill); (c) the scenario reaches the attract loop, not a race: the title's
+      "Press L+R" appears at ~141 s, after the scripted L+R at 49 s.
+- [ ] _(history)_ mkw device loss investigation notes: `build/play/20261124-125344-mkw`: exit 71 at 19.1 s, draw
       #7708 direct 1D 6x1x1 mesh, task `fea1d6ca04512de1` / mesh `ddc034e8e009ebfc` (same pair as before; the payload
       fix did not cure it). Driver: invalid read `0xd468e7000`, "0 recorded device ranges of the replay hold it".
       Neither shader uses raw pointers (no capability 5347), robust access v2 is on, so a descriptor in this draw

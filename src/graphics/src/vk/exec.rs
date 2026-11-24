@@ -2428,14 +2428,29 @@ fn zero_buffer(g: &Gpu, sub: &mut Sub) -> vk::Buffer {
         .expect("zero buffer")
     });
     if fresh {
+        let sink = SINK.get_or_init(|| {
+            g.buffer(
+                65536,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::TRANSFER_DST,
+                MemoryLocation::GpuOnly,
+                "descriptor sink",
+            )
+            .expect("descriptor sink buffer")
+        });
         unsafe {
             g.dev()
-                .cmd_fill_buffer(sub.pre, b.buf, 0, vk::WHOLE_SIZE, 0)
+                .cmd_fill_buffer(sub.pre, b.buf, 0, vk::WHOLE_SIZE, 0);
+            g.dev()
+                .cmd_fill_buffer(sub.pre, sink.buf, 0, vk::WHOLE_SIZE, 0)
         };
         super::queue::full_barrier(g, sub.pre);
     }
     b.buf
 }
+
+/// What a stage set's storage slots that its shader does not bind name (descriptor buffers): a buffer of its own that
+/// nothing reads, so a stray access through such a slot reaches neither freed memory nor the zero buffer.
+static SINK: std::sync::OnceLock<super::Buf> = std::sync::OnceLock::new();
 
 /// A writable missing binding must never alias ZERO (also used for uniforms and vertex attributes), or another
 /// missing binding. DKB's unbound compute slots 14/15 contain atomics and stores. Use non-memoized staging so their
@@ -3855,15 +3870,19 @@ fn write_db_set(
         omitted: 0,
     });
     let zero = ZERO.get().map(|b| b.addr).unwrap_or(0);
-    // NXGFX_DB_FILL=1 (diagnosis): every uniform / storage slot of the set first names the zero buffer, so no slot keeps
-    // what an earlier recording wrote there
-    if db_fill_on() && zero != 0 {
+    // Every uniform / storage slot of the set is written: first the slots the shader does not bind (uniform: the zero
+    // buffer; storage: the sink), then its own below. Descriptor-buffer memory is reused by later recordings, so a slot
+    // left alone still held what an earlier recording wrote there: a storage descriptor naming that recording's staging,
+    // freed since, and a GPU access through it lost the device (MKW-LOSS: the canary runs saw MKW's GPU write through
+    // such a slot of a vertex shader's set that binds no storage buffer). NXGFX_DB_FILL=0 leaves them (diagnosis).
+    let sink = SINK.get().map(|b| b.addr).unwrap_or(0);
+    if db_fill_on() && zero != 0 && sink != 0 {
         static T: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
         let t = T.get_or_init(|| {
             let mut v = vec![0u8; l.db_stage_size as usize];
             for b in 0..64u32 {
                 let ty = super::layout::stage_binding_type(b);
-                let ai = vk::DescriptorAddressInfoEXT::default().address(zero).range(65536);
+                let ai = vk::DescriptorAddressInfoEXT::default().address(db_fill_target(ty, zero, sink)).range(65536);
                 let gi = if ty == vk::DescriptorType::UNIFORM_BUFFER {
                     vk::DescriptorGetInfoEXT::default().ty(ty).data(vk::DescriptorDataEXT { p_uniform_buffer: &ai })
                 } else {
@@ -3874,19 +3893,9 @@ fn write_db_set(
             }
             v
         });
-        // the buffer slots' span (each slot written whole, the image slots between them left alone)
-        let start = l.db_stage_off[..64].iter().copied().min().unwrap_or(0) as usize;
-        let end = (0..64usize)
-            .map(|b| l.db_stage_off[b] as usize + super::device::desc_size(p, super::layout::stage_binding_type(b as u32)))
-            .max()
-            .unwrap_or(start);
-        unsafe {
-            core::ptr::copy_nonoverlapping(
-                t.as_ptr().add(start),
-                (ptr + off as usize + start) as *mut u8,
-                end.max(start) - start,
-            )
-        };
+        // the buffer slots' span, each slot written whole
+        let (start, end) = db_fill_span(&l.db_stage_off, |b| super::device::desc_size(p, super::layout::stage_binding_type(b)));
+        unsafe { core::ptr::copy_nonoverlapping(t.as_ptr().add(start), (ptr + off as usize + start) as *mut u8, end - start) };
     }
     // the distinct buffers' addresses (a set names a few: a staging chunk, the zero buffer, some pools)
     let mut seen: [(vk::Buffer, u64); 8] = [(vk::Buffer::null(), 0); 8];
@@ -4045,6 +4054,10 @@ fn write_db_set(
     }
     if db_poison_on() {
         sub.db_log.push((sub.db_cur, off, m.stage));
+        if let Some(k) = db_canary(g) {
+            let slots = bufs.iter().filter(|x| (32..64).contains(&x.0)).fold(0u32, |a, x| a | 1 << (x.0 - 32));
+            k.note_write(sub.db[sub.db_cur].addr, off, sub.serial, m.key, m.stage, slots);
+        }
     }
     if let Some(tw) = tw {
         super::perf::add(super::perf::C::SetWriteNs, tw.elapsed().as_nanos() as u64);
@@ -4097,7 +4110,73 @@ pub(crate) const DB_POISON: u64 = 0x7f00_0000_0000;
 
 fn db_fill_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("NXGFX_DB_FILL").as_deref() == Ok("1"))
+    *ON.get_or_init(|| db_fill_wanted(std::env::var("NXGFX_DB_FILL").ok().as_deref()))
+}
+
+/// Every stage set's buffer slots are written unless `NXGFX_DB_FILL=0`.
+fn db_fill_wanted(v: Option<&str>) -> bool {
+    v != Some("0")
+}
+
+/// The address an unbound buffer slot of type `ty` names: uniform slots the zero buffer (read-only), storage slots
+/// the sink (never the zero buffer: a write through it would change what every unbound uniform reads).
+fn db_fill_target(ty: vk::DescriptorType, zero: u64, sink: u64) -> u64 {
+    if ty == vk::DescriptorType::UNIFORM_BUFFER {
+        zero
+    } else {
+        sink
+    }
+}
+
+/// The byte span of a stage set that holds its 64 buffer slots (`off[b]` the slot's offset, `size(b)` its descriptor
+/// size): what the fill copies.
+fn db_fill_span(off: &[u64], size: impl Fn(u32) -> usize) -> (usize, usize) {
+    let start = off[..64].iter().copied().min().unwrap_or(0) as usize;
+    let end = (0..64u32).map(|b| off[b as usize] as usize + size(b)).max().unwrap_or(start);
+    (start, end.max(start))
+}
+
+#[cfg(test)]
+mod db_fill_tests {
+    use super::*;
+
+    /// MKW-LOSS: unbound slots are written by default, so none keeps an earlier recording's descriptor.
+    #[test]
+    fn unbound_slots_are_written_by_default() {
+        assert!(db_fill_wanted(None), "on without the variable (before the fix it was off unless =1)");
+        assert!(db_fill_wanted(Some("1")));
+        assert!(!db_fill_wanted(Some("0")), "=0 turns it off (diagnosis)");
+    }
+
+    /// Storage slots name the sink, never the zero buffer; uniform slots the zero buffer.
+    #[test]
+    fn storage_slots_name_the_sink() {
+        let (zero, sink) = (0x1000, 0x2000);
+        for b in 0..64u32 {
+            let ty = super::super::layout::stage_binding_type(b);
+            let t = db_fill_target(ty, zero, sink);
+            if b < 32 {
+                assert_eq!(t, zero, "uniform slot {b}");
+            } else {
+                assert_eq!(t, sink, "storage slot {b}");
+            }
+        }
+    }
+
+    /// The copied span covers every buffer slot whole, in any binding order.
+    #[test]
+    fn the_span_covers_every_buffer_slot() {
+        let size = |b: u32| if b < 32 { 8 } else { 16 };
+        // NVIDIA's order (uniform slots first) and a reversed one
+        let fwd: Vec<u64> = (0..64u64).map(|b| if b < 32 { b * 8 } else { 256 + (b - 32) * 16 }).collect();
+        let rev: Vec<u64> = (0..64u64).map(|b| if b >= 32 { (63 - b) * 16 } else { 512 + (31 - b) * 8 }).collect();
+        for off in [fwd, rev] {
+            let (s, e) = db_fill_span(&off, size);
+            for b in 0..64u32 {
+                assert!(s <= off[b as usize] as usize && off[b as usize] as usize + size(b) <= e, "slot {b}");
+            }
+        }
+    }
 }
 
 /// Overwrites the stage sets `sub` wrote (chunks up to `db_cur`, the last up to `db_used`) with the poison set.
@@ -4164,11 +4243,27 @@ pub(crate) fn db_poison(g: &Gpu, sub: &mut Sub) {
     let mask = *MASK.get_or_init(|| {
         std::env::var("NXGFX_DB_POISON_STAGES").ok().and_then(|v| v.parse().ok()).unwrap_or(0x3f)
     });
+    let canary = db_canary(g);
     for &(chunk, off, stage) in &sub.db_log {
         if mask & (1 << stage) == 0 {
             continue;
         }
         let Some(c) = sub.db.get(chunk) else { continue };
+        if let Some(k) = canary {
+            for b in b0..b1 {
+                let ty = super::layout::stage_binding_type(b);
+                let Some(at) = k.claim((sub.serial, c.addr, off, stage, b)) else { continue };
+                let ai = vk::DescriptorAddressInfoEXT::default().address(at).range(CANARY_STRIDE);
+                let gi = if ty == vk::DescriptorType::UNIFORM_BUFFER {
+                    vk::DescriptorGetInfoEXT::default().ty(ty).data(vk::DescriptorDataEXT { p_uniform_buffer: &ai })
+                } else {
+                    vk::DescriptorGetInfoEXT::default().ty(ty).data(vk::DescriptorDataEXT { p_storage_buffer: &ai })
+                };
+                let size = super::device::desc_size(p, ty);
+                unsafe { super::tables::put_descriptor(&g.d, c.ptr, off + l.db_stage_off[b as usize], &gi, size) };
+            }
+            continue;
+        }
         {
             for b in b0..b1 {
                 let ty = super::layout::stage_binding_type(b);
@@ -4183,13 +4278,163 @@ pub(crate) fn db_poison(g: &Gpu, sub: &mut Sub) {
     sub.db_log.clear();
 }
 
+/// `NXGFX_DB_POISON_CANARY=1` (with `NXGFX_DB_POISON`; diagnosis, MKW-LOSS round 2): the poisoned slots name 64-byte
+/// regions of a host-visible canary buffer, one region per (chunk, set place, storage slot) of the first 160 set places of
+/// each chunk, instead of an unmapped address. Each completion scans the canary: a region the GPU wrote names whose stale
+/// set was used, the set the completed recording wrote at that place (shader, storage slots written) and the draws
+/// that bound it.
+pub(crate) struct DbCanary {
+    buf: super::Buf,
+    tags: std::sync::Mutex<Vec<(u64, u64, u64, u32, u32)>>,
+    chunks: std::sync::Mutex<Vec<u64>>,
+    /// (chunk address, offset) -> (recording, shader, stage, storage slots written) of the last set written there
+    writes: std::sync::Mutex<std::collections::HashMap<(u64, u64), (u64, [u8; 8], u32, u32)>>,
+    /// (chunk address, offset) -> the last draw or dispatch bound with the set there (bind point, its stages)
+    draws: std::sync::Mutex<std::collections::HashMap<(u64, u64), String>>,
+    /// every set bound in order: (recording, graphics, stage, offset, the draw's stages)
+    seq: std::sync::Mutex<Vec<(u64, bool, u32, u64, String)>>,
+}
+
+const CANARY_SETS: usize = 160;
+const CANARY_N: usize = 1 << 18;
+const CANARY_STRIDE: u64 = 64;
+
+fn db_canary(g: &Gpu) -> Option<&'static DbCanary> {
+    static C: std::sync::OnceLock<Option<DbCanary>> = std::sync::OnceLock::new();
+    C.get_or_init(|| {
+        if std::env::var("NXGFX_DB_POISON_CANARY").as_deref() != Ok("1") {
+            return None;
+        }
+        let size = CANARY_N as u64 * CANARY_STRIDE;
+        let buf = g
+            .buffer(
+                size,
+                vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER,
+                MemoryLocation::GpuToCpu,
+                "canary",
+            )
+            .ok()?;
+        if buf.ptr.is_null() || buf.addr == 0 {
+            return None;
+        }
+        unsafe { core::ptr::write_bytes(buf.ptr, 0, size as usize) };
+        crate::vklog!("MKW-LOSS canary: poisoned slots name {:#x} +{size:#x}", buf.addr);
+        Some(DbCanary {
+            buf,
+            tags: std::sync::Mutex::new(vec![(0, 0, 0, 0, 0); CANARY_N]),
+            chunks: std::sync::Mutex::new(Vec::new()),
+            writes: std::sync::Mutex::new(std::collections::HashMap::new()),
+            draws: std::sync::Mutex::new(std::collections::HashMap::new()),
+            seq: std::sync::Mutex::new(Vec::new()),
+        })
+    })
+    .as_ref()
+}
+
+impl DbCanary {
+    /// A zeroed region for `tag` (recording, chunk address, offset, stage, binding): its device address. One region per
+    /// place a set can start (chunk, offset / 1536: sets are 1600 bytes apart), so no later poisoning of another place
+    /// reuses it.
+    fn claim(&self, tag: (u64, u64, u64, u32, u32)) -> Option<u64> {
+        // one region per storage slot of the first CANARY_SETS set places of each chunk
+        let place = (tag.2 / 1536) as usize;
+        if place >= CANARY_SETS || tag.4 < 32 {
+            return None;
+        }
+        let i = {
+            let mut ch = self.chunks.lock().unwrap();
+            let ci = ch.iter().position(|&a| a == tag.1).unwrap_or_else(|| {
+                ch.push(tag.1);
+                ch.len() - 1
+            });
+            (ci * CANARY_SETS + place) * 32 + (tag.4 as usize - 32)
+        };
+        if i >= CANARY_N {
+            return None;
+        }
+        unsafe { core::ptr::write_bytes(self.buf.ptr.add(i * CANARY_STRIDE as usize), 0, CANARY_STRIDE as usize) };
+        self.tags.lock().unwrap()[i] = tag;
+        Some(self.buf.addr + i as u64 * CANARY_STRIDE)
+    }
+
+    /// A set written (canary mode): its place, recording, shader, stage and the storage slots written.
+    fn note_write(&self, chunk: u64, off: u64, serial: u64, shader: [u8; 8], stage: u32, slots: u32) {
+        if ((off / 1536) as usize) < CANARY_SETS {
+            self.writes.lock().unwrap().insert((chunk, off), (serial, shader, stage, slots));
+        }
+    }
+}
+
+
+/// The canary scan at the completion of timeline `value` (recording `sub`, before it is recycled).
+pub(crate) fn db_canary_scan(g: &Gpu, sub: &Sub, value: u64) {
+    let Some(k) = db_canary(g) else { return };
+    static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let tags = k.tags.lock().unwrap();
+    for i in 0..CANARY_N {
+        let p = unsafe { k.buf.ptr.add(i * CANARY_STRIDE as usize) } as *const [u64; 8];
+        let w = unsafe { core::ptr::read_volatile(p) };
+        if w.iter().all(|&x| x == 0) {
+            continue;
+        }
+        unsafe { core::ptr::write_bytes(p as *mut u8, 0, CANARY_STRIDE as usize) };
+        let (serial, caddr, off, stage, b) = tags[i];
+        let chunk = sub.db.iter().position(|c| c.addr == caddr);
+        let own = chunk.and_then(|ci| {
+            sub.db_log.iter().find(|&&(c, o, _)| c == ci && o.abs_diff(off) < g.layout.db_stage_size).map(|&(_, o, st)| (o, st))
+        });
+        let used = chunk.map(|ci| if ci < sub.db_cur { "a full chunk" } else if ci == sub.db_cur && off < sub.db_used { "below its use" } else { "beyond its use" });
+        // the last set written at that place (normally the completed recording's own)
+        let last = own.and_then(|(o, _)| k.writes.lock().unwrap().get(&(caddr, o)).copied());
+        let last = last.map(|(s, key, st, slots)| {
+            let hex: String = key.iter().map(|b| format!("{b:02x}")).collect();
+            let d = k.draws.lock().unwrap().get(&(caddr, own.map_or(off, |o| o.0))).cloned();
+            format!("recording {s} stage {st} shader {hex} storage slots written {slots:#010x}, bound for {d:?}")
+        });
+        if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 80 {
+            crate::vklog!(
+                "MKW-LOSS canary: timeline {value} (recording {}, chunks {:x?}, cur {} used {:#x}) wrote through binding {b} of the stage {stage} set recording {serial} wrote at {caddr:#x} +{off:#x}: its own chunk {chunk:?} ({used:?}), its own set there (offset, stage): {own:x?}, last written there: {last:?}; words {:x?}",
+                sub.serial,
+                sub.db.iter().map(|c| c.addr).collect::<Vec<_>>(),
+                sub.db_cur,
+                sub.db_used,
+                &w[..4]
+            );
+            // what this recording bound after the set there, until that set index was set again
+            if let Some((o, st)) = own {
+                let q = k.seq.lock().unwrap();
+                let mut after = false;
+                let mut n = 0;
+                let mut last = String::new();
+                for (s, gfx, est, eoff, desc) in q.iter() {
+                    if *s != sub.serial {
+                        continue;
+                    }
+                    if !after {
+                        after = *gfx && *est == st && *eoff == o;
+                        continue;
+                    }
+                    if *desc != last || n < 24 {
+                        crate::vklog!("MKW-LOSS canary:   then {desc}: stage {est} set at {eoff:#x}{}", if *gfx { "" } else { " (compute)" });
+                        last = desc.clone();
+                        n += 1;
+                    }
+                    if (*gfx && *est == st && *eoff != o) || n >= 24 {
+                        crate::vklog!("MKW-LOSS canary:   (stage {est} set again at {eoff:#x})");
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
 thread_local! {
     /// The (descriptor-buffer chunk, offset) each graphics stage's set was last bound at on this thread (the loss ring's
     /// mesh draw records).
     static LAST_SETS: std::cell::Cell<[(u64, u64); 5]> = const { std::cell::Cell::new([(u64::MAX, 0); 5]) };
     /// The stage-set descriptor buffer this thread last bound (its device address).
-    static BOUND_DB: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-}
+    static BOUND_DB: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };}
 
 fn bind_sets(
     g: &Gpu,
@@ -4282,6 +4527,20 @@ fn bind_sets(
                 }
             };
             if let SetRef::Buf(off) = set {
+                if let Some(k) = db_canary(g).filter(|_| ((off / 1536) as usize) < CANARY_SETS) {
+                    let d: Vec<String> = mods
+                        .iter()
+                        .map(|x| format!("{}:{}", x.stage, x.key.iter().map(|b| format!("{b:02x}")).collect::<String>()))
+                        .collect();
+                    let desc = format!("{bp:?} [{}]", d.join(" "));
+                    let mut q = k.seq.lock().unwrap();
+                    if q.len() > 400_000 {
+                        q.drain(..100_000);
+                    }
+                    q.push((sub.serial, bp == vk::PipelineBindPoint::GRAPHICS, m.stage, off, desc.clone()));
+                    drop(q);
+                    k.draws.lock().unwrap().insert((sub.db[sub.db_cur].addr, off), desc);
+                }
                 if st < 5 {
                     LAST_SETS.with(|l| {
                         let mut v = l.get();

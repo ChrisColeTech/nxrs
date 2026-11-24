@@ -162,3 +162,62 @@ the primary proof; plain clean runs are supporting evidence.
 
 **Rules, exclusions, commands:** as in the first brief. Deadline 2 hours from your start; park a blocker after
 ~90 min and continue. Append your report as "## Report round 2" with the §5 headings.
+
+## Report round 2 (agent, protocol §5)
+
+**Status: done by the brief's criteria.** Verified working now: the brief's reproducer no longer fails (60 s clean,
+was exit 70/72 at ~12 s), and two full `play.py mkw` runs complete 17/17 with no device loss. The correction is
+proven against the poison/canary evidence; which shader makes the stray access is narrowed, not named (Unproven).
+
+### Built
+- **Cause (found with a new canary diagnostic):** stage sets are written only at the slots their shader binds; descriptor-
+  buffer chunks are reused by later recordings, so every other slot still holds an earlier recording's descriptor (its
+  staging, freed since). MKW's GPU writes through such a slot: storage slot 33 of a vertex shader's set
+  (`1ee7ea5a03bdd780`, binds only its support buffer; written slots mask 0) that the recording had just written at that
+  very place, while mesh draws (task `6098504f5d12ea03` / mesh `1de24686294997d8`, both write their slot 33) follow it.
+  In plain runs that slot names freed staging: the device loss.
+- **Correction** (`exec.rs` `write_db_set`): every set's 64 buffer slots are written before its own bindings: uniform slots
+  name the zero buffer, storage slots a new `descriptor sink` buffer (`SINK`, made with the zero buffer; nothing reads
+  it, so stray writes reach neither freed memory nor the zero buffer). This was round 1's `NXGFX_DB_FILL` (zero buffer
+  everywhere) made the default; `NXGFX_DB_FILL=0` turns it off (diagnosis). Helpers `db_fill_wanted/target/span`.
+- **Diagnosis kept, off by default** (`NXGFX_DB_POISON_CANARY=1` with `NXGFX_DB_POISON`): poisoned storage slots name
+  per-(chunk, set place, slot) regions of a host-visible canary; each completion (`queue.rs` hook) scans it and logs the
+  region written, the set the recording wrote there (shader, slots written) and the draws bound with it.
+- Leads: (1) mixed descriptor models: disproved for MKW. Classic binds are only in present submissions (upscale), in
+  `pre` (ASTC/deswizzle); framegen/NDVE kernels inactive; the indirect-clamp pipeline is descriptor-buffer flagged and
+  `NXGFX_CLAMP_INDIRECT=0` still showed stray writes. (2) by reading, every draw/dispatch binds through `bind_sets`,
+  which binds the buffers before offsets.
+
+### Tests
+- `exec::db_fill_tests` (3): unbound slots are written by default (fails on the old default, which was off unless
+  `=1`); storage slots name the sink, uniform slots the zero buffer; the copied span covers every buffer slot in any
+  binding order. `cargo test --jobs 4 -p graphics --lib`: 176 passed, 0 failed.
+
+### Verified
+- Engine `build.ps1 -Jobs 4 -SkipGnu -KeepCache` into `dist/nxrs`; MKW via `nxrs.exe --select-title "Mario Kart World"
+  --build` (final tree, 16:33).
+- Reproducer (`--env NXGFX_DB_POISON=1 NXGFX_DB_POISON_ONLY=32-33 NXGFX_RECYCLE_DELAY=8`): `build/play/20261124-162011-
+  repro-final` and `-163340-repro-final2`, no fault (60 s / 45 s). Poison+canary with the fix: 0 stray writes in 60 s
+  (`-161635-repro-fixed-nodelay`); without the fill 6-15 per run (`-163058-set0-control`, `-160009-canary7`).
+- Plain: `build/play/20261124-162115-plain1` and `-162441-plain2`: completed, 17/17, normal exit, no red lines but
+  the known `pipeline-crashed.bin` skip. Sheets read: desert road boot/title, Mario in the kart at 99 s, the attract
+  scene with the kart ("Press L+R to start") at 141 s, Single Player menu at 183-184 s (round 1's sheet shows the same
+  attract loop at another phase).
+
+### Unproven
+- **Who makes the stray access.** A/B with the fill off (`-163006-set0-task` vs `-163058-set0-control`): pointing set 0
+  at the task shader's set during mesh draws gives 0 stray writes vs 6; setting set 0 again to the same offset does not
+  help. So the task/mesh draw reaches descriptors through set 0 on this driver (set 3's layout is TCS|TASK, set 0's
+  VERTEX). Next step: check the task/mesh modules' final decorations and NVIDIA's task-stage set mapping; until then the
+  fill keeps those accesses off freed memory, but the task shader may be reading the wrong set (rendering not checked).
+- FPS in the window is 7.1-7.4 vs round 1's 12.5; equal until ~60 s, then pool sync 48 vs 20 ms/frame; set time unchanged
+  (10-12 ms). Not shown to be caused by this change; a `NXGFX_DB_FILL=0` plain control was not run (loss risk).
+
+### Slips
+- 14 diagnostic runs (no device loss, no driver reset, no guest fault); four sentinel runs were confounded (extra sets
+  shifted offsets) and deleted with other superseded canary runs. One MKW rebuild ran after a failed engine compile
+  (same engine as before). `pipeline-crashed.bin` unchanged (237 bytes). This report was first appended with a shell
+  heredoc, not the editor tool (AGENTS.md); content unaffected.
+
+### Questions
+- None.

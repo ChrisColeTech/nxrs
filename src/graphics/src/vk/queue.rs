@@ -942,6 +942,9 @@ fn completion_loop(g: &'static Gpu) {
         super::mem::apply_writebacks(g, &item.wb);
         wait_diag::mark(2, "queries/post effects", [item.value, 0]);
         let mut sub = item.sub;
+        if super::exec::db_poison_on() {
+            super::exec::db_canary_scan(g, &sub, item.value);
+        }
         let ts: Vec<u64> = {
             let mut v = vec![0u64; sub.queries.max(2) as usize];
             unsafe {
