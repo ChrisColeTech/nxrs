@@ -38,9 +38,11 @@ const PS_RW: u8 = 4;
 
 static PSTATE: AtomicPtr<u8> = AtomicPtr::new(core::ptr::null_mut());
 /// Reservations made through `reserve` (base -> size): VirtualQuery's allocation base.
-static RESERVATIONS: Mutex<std::collections::BTreeMap<u64, u64>> = Mutex::new(std::collections::BTreeMap::new());
+static RESERVATIONS: Mutex<std::collections::BTreeMap<u64, u64>> =
+    Mutex::new(std::collections::BTreeMap::new());
 /// Page states of reservations above the map's 39 bits (host tables, tests): one byte a page, per reservation.
-static HIGH: Mutex<std::collections::BTreeMap<u64, Vec<u8>>> = Mutex::new(std::collections::BTreeMap::new());
+static HIGH: Mutex<std::collections::BTreeMap<u64, Vec<u8>>> =
+    Mutex::new(std::collections::BTreeMap::new());
 /// The userfaultfd (write watch) and /proc/self/pagemap: -1 while closed, -2 when write watch is unavailable.
 static WW_FD: AtomicI32 = AtomicI32::new(-1);
 static PM_FD: AtomicI32 = AtomicI32::new(-1);
@@ -55,12 +57,24 @@ fn pstate() -> *mut u8 {
     }
     // SAFETY: an anonymous mapping of our own; only the pages written cost memory
     let m = unsafe {
-        libc::mmap(core::ptr::null_mut(), (PS_LIMIT / PAGE) as usize, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE, -1, 0)
+        libc::mmap(
+            core::ptr::null_mut(),
+            (PS_LIMIT / PAGE) as usize,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+            -1,
+            0,
+        )
     };
     if m == libc::MAP_FAILED {
         crate::rt::fatal("memory: the page state map could not be reserved");
     }
-    match PSTATE.compare_exchange(core::ptr::null_mut(), m as *mut u8, Ordering::AcqRel, Ordering::Acquire) {
+    match PSTATE.compare_exchange(
+        core::ptr::null_mut(),
+        m as *mut u8,
+        Ordering::AcqRel,
+        Ordering::Acquire,
+    ) {
         Ok(_) => m as *mut u8,
         Err(other) => {
             // SAFETY: our own mapping, never published
@@ -77,7 +91,10 @@ fn ps_set(addr: u64, n: u64, v: u8) {
     if addr >= PS_LIMIT {
         let mut h = HIGH.lock().unwrap_or_else(|p| p.into_inner());
         if let Some((&base, st)) = h.range_mut(..=addr).next_back() {
-            let (i, e) = (((addr - base) / PAGE) as usize, ((addr + n - base).div_ceil(PAGE) as usize).min(st.len()));
+            let (i, e) = (
+                ((addr - base) / PAGE) as usize,
+                ((addr + n - base).div_ceil(PAGE) as usize).min(st.len()),
+            );
             if i < e {
                 st[i..e].fill(v);
             }
@@ -94,7 +111,10 @@ fn ps_get(addr: u64) -> u8 {
     if addr >= PS_LIMIT {
         let h = HIGH.lock().unwrap_or_else(|p| p.into_inner());
         return match h.range(..=addr).next_back() {
-            Some((&base, st)) => st.get(((addr - base) / PAGE) as usize).copied().unwrap_or(PS_FREE),
+            Some((&base, st)) => st
+                .get(((addr - base) / PAGE) as usize)
+                .copied()
+                .unwrap_or(PS_FREE),
             None => PS_FREE,
         };
     }
@@ -104,9 +124,14 @@ fn ps_get(addr: u64) -> u8 {
 
 /// A reservation's bookkeeping (its page states, when it lies above the map).
 fn track(addr: u64, n: u64) {
-    RESERVATIONS.lock().unwrap_or_else(|p| p.into_inner()).insert(addr, n);
+    RESERVATIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(addr, n);
     if addr >= PS_LIMIT {
-        HIGH.lock().unwrap_or_else(|p| p.into_inner()).insert(addr, vec![PS_RESERVED; n.div_ceil(PAGE) as usize]);
+        HIGH.lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .insert(addr, vec![PS_RESERVED; n.div_ceil(PAGE) as usize]);
     } else {
         ps_set(addr, n, PS_RESERVED);
     }
@@ -129,8 +154,15 @@ fn ww_open() -> Option<i32> {
     const UFFD_USER_MODE_ONLY: libc::c_long = 1;
     // SAFETY: plain syscalls on descriptors we own
     unsafe {
-        let fd = libc::syscall(libc::SYS_userfaultfd, (libc::O_CLOEXEC | libc::O_NONBLOCK) as libc::c_long | UFFD_USER_MODE_ONLY) as i32;
-        let mut api = UffdioApi { api: UFFD_API, features: UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED, ioctls: 0 };
+        let fd = libc::syscall(
+            libc::SYS_userfaultfd,
+            (libc::O_CLOEXEC | libc::O_NONBLOCK) as libc::c_long | UFFD_USER_MODE_ONLY,
+        ) as i32;
+        let mut api = UffdioApi {
+            api: UFFD_API,
+            features: UFFD_FEATURE_WP_ASYNC | UFFD_FEATURE_WP_UNPOPULATED,
+            ioctls: 0,
+        };
         if fd < 0 || libc::ioctl(fd, UFFDIO_API, &mut api) != 0 {
             let e = std::io::Error::last_os_error();
             crate::rt::log(&format!("memory: no asynchronous userfaultfd write protection ({e}): written guest memory is found by comparison instead"));
@@ -140,7 +172,10 @@ fn ww_open() -> Option<i32> {
             WW_FD.store(-2, Ordering::Release);
             return None;
         }
-        let pm = libc::open(c"/proc/self/pagemap".as_ptr(), libc::O_RDONLY | libc::O_CLOEXEC);
+        let pm = libc::open(
+            c"/proc/self/pagemap".as_ptr(),
+            libc::O_RDONLY | libc::O_CLOEXEC,
+        );
         if pm < 0 {
             libc::close(fd);
             WW_FD.store(-2, Ordering::Release);
@@ -211,10 +246,18 @@ fn watch_register(addr: u64, n: u64) {
     // watched per 4 KiB page, as on Windows.
     // SAFETY: our own reservation
     unsafe { libc::madvise(addr as *mut _, n as usize, libc::MADV_NOHUGEPAGE) };
-    let mut reg = UffdioRegister { start: addr, len: n, mode: UFFDIO_REGISTER_MODE_WP, ioctls: 0 };
+    let mut reg = UffdioRegister {
+        start: addr,
+        len: n,
+        mode: UFFDIO_REGISTER_MODE_WP,
+        ioctls: 0,
+    };
     // SAFETY: a registration of our own range
     if unsafe { libc::ioctl(fd, UFFDIO_REGISTER, &mut reg) } != 0 {
-        crate::rt::log(&format!("memory: write watch over {addr:#x}+{n:#x} failed ({})", std::io::Error::last_os_error()));
+        crate::rt::log(&format!(
+            "memory: write watch over {addr:#x}+{n:#x} failed ({})",
+            std::io::Error::last_os_error()
+        ));
     } else {
         WATCHED.lock().unwrap_or_else(|p| p.into_inner()).push(addr);
     }
@@ -225,7 +268,17 @@ pub fn reserve(addr: u64, n: u64, watch: bool) -> bool {
     pstate();
     // SAFETY: MAP_FIXED_NOREPLACE never takes over an existing mapping
     let p = unsafe {
-        libc::mmap(addr as *mut _, n as usize, libc::PROT_NONE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE | libc::MAP_FIXED_NOREPLACE, -1, 0)
+        libc::mmap(
+            addr as *mut _,
+            n as usize,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE
+                | libc::MAP_ANONYMOUS
+                | libc::MAP_NORESERVE
+                | libc::MAP_FIXED_NOREPLACE,
+            -1,
+            0,
+        )
     };
     if p == libc::MAP_FAILED {
         return false;
@@ -247,7 +300,16 @@ pub fn reserve(addr: u64, n: u64, watch: bool) -> bool {
 pub fn reserve_anywhere(n: u64, watch: bool) -> Option<u64> {
     pstate();
     // SAFETY: a fresh anonymous mapping
-    let p = unsafe { libc::mmap(core::ptr::null_mut(), n as usize, libc::PROT_NONE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE, -1, 0) };
+    let p = unsafe {
+        libc::mmap(
+            core::ptr::null_mut(),
+            n as usize,
+            libc::PROT_NONE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+            -1,
+            0,
+        )
+    };
     if p == libc::MAP_FAILED {
         return None;
     }
@@ -260,8 +322,14 @@ pub fn reserve_anywhere(n: u64, watch: bool) -> Option<u64> {
 }
 
 pub fn release(addr: u64) {
-    WATCHED.lock().unwrap_or_else(|p| p.into_inner()).retain(|&b| b != addr);
-    let n = RESERVATIONS.lock().unwrap_or_else(|p| p.into_inner()).remove(&addr);
+    WATCHED
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .retain(|&b| b != addr);
+    let n = RESERVATIONS
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .remove(&addr);
     if let Some(n) = n {
         // SAFETY: a whole reservation of ours
         unsafe { libc::munmap(addr as *mut _, n as usize) };
@@ -278,7 +346,13 @@ pub fn commit(addr: u64, n: u64) -> bool {
         return true;
     }
     // SAFETY: inside a reservation of ours
-    let ok = unsafe { libc::mprotect(addr as *mut _, n as usize, libc::PROT_READ | libc::PROT_WRITE) } == 0;
+    let ok = unsafe {
+        libc::mprotect(
+            addr as *mut _,
+            n as usize,
+            libc::PROT_READ | libc::PROT_WRITE,
+        )
+    } == 0;
     if ok {
         ps_set(addr, n, PS_RW);
     }
@@ -290,7 +364,10 @@ pub fn decommit(addr: u64, n: u64) -> bool {
         return true;
     }
     // SAFETY: inside a reservation of ours
-    let ok = unsafe { libc::madvise(addr as *mut _, n as usize, libc::MADV_DONTNEED) == 0 && libc::mprotect(addr as *mut _, n as usize, libc::PROT_NONE) == 0 };
+    let ok = unsafe {
+        libc::madvise(addr as *mut _, n as usize, libc::MADV_DONTNEED) == 0
+            && libc::mprotect(addr as *mut _, n as usize, libc::PROT_NONE) == 0
+    };
     if ok {
         ps_set(addr, n, PS_RESERVED);
     }
@@ -318,7 +395,16 @@ pub fn protect(addr: u64, n: u64, prot: u8) -> bool {
 /// Zeroed host memory (populated at first touch), for the runtime's own tables.
 pub fn host_alloc(n: u64) -> Option<*mut u8> {
     // SAFETY: a fresh anonymous mapping
-    let p = unsafe { libc::mmap(core::ptr::null_mut(), n as usize, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE, -1, 0) };
+    let p = unsafe {
+        libc::mmap(
+            core::ptr::null_mut(),
+            n as usize,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE,
+            -1,
+            0,
+        )
+    };
     (p != libc::MAP_FAILED).then_some(p as *mut u8)
 }
 
@@ -327,10 +413,18 @@ pub fn read_nofault(addr: u64, out: &mut [u8]) -> bool {
     if out.is_empty() {
         return true;
     }
-    let local = libc::iovec { iov_base: out.as_mut_ptr() as *mut _, iov_len: out.len() };
-    let remote = libc::iovec { iov_base: addr as *mut _, iov_len: out.len() };
+    let local = libc::iovec {
+        iov_base: out.as_mut_ptr() as *mut _,
+        iov_len: out.len(),
+    };
+    let remote = libc::iovec {
+        iov_base: addr as *mut _,
+        iov_len: out.len(),
+    };
     // SAFETY: process_vm_readv on our own process reads through the page tables and fails instead of faulting
-    unsafe { libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0) == out.len() as isize }
+    unsafe {
+        libc::process_vm_readv(libc::getpid(), &local, 1, &remote, 1, 0) == out.len() as isize
+    }
 }
 
 /// Every byte of [addr, addr+n) is mapped and readable.
@@ -374,7 +468,11 @@ pub fn committed_in(a: u64, n: u64) -> u64 {
 /// The committed runs of [a, a+n): (start, length) pairs.
 pub fn committed_runs(a: u64, n: u64) -> Vec<(u64, u64)> {
     let mut out: Vec<(u64, u64)> = Vec::new();
-    let end = if a >= PS_LIMIT { a + n } else { (a + n).min(PS_LIMIT) };
+    let end = if a >= PS_LIMIT {
+        a + n
+    } else {
+        (a + n).min(PS_LIMIT)
+    };
     let mut p = a & !(PAGE - 1);
     while p < end {
         let next = (p + PAGE).min(end);
@@ -429,7 +527,9 @@ pub fn limit_cpus(n: u32) -> bool {
         if let Ok(rd) = std::fs::read_dir("/proc/self/task") {
             for t in rd.flatten() {
                 if let Some(tid) = t.file_name().to_str().and_then(|s| s.parse::<i32>().ok()) {
-                    ok &= libc::sched_setaffinity(tid, core::mem::size_of::<libc::cpu_set_t>(), &set) == 0;
+                    ok &=
+                        libc::sched_setaffinity(tid, core::mem::size_of::<libc::cpu_set_t>(), &set)
+                            == 0;
                 }
             }
         }
@@ -440,7 +540,11 @@ pub fn limit_cpus(n: u32) -> bool {
 /// Whether `addr` lies in a reservation under the write watch.
 pub fn watched(addr: u64) -> bool {
     let base = allocation_of(addr, addr + 1);
-    base != 0 && WATCHED.lock().unwrap_or_else(|p| p.into_inner()).contains(&base)
+    base != 0
+        && WATCHED
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .contains(&base)
 }
 
 /// The base of the reservation holding all of [lo, hi), 0 when none does.
@@ -465,7 +569,11 @@ pub fn written_pages(addr: u64, n: u64, reset: bool) -> Option<Vec<u64>> {
         // Neither is a write, as on Windows.
         let mut arg = PmScanArg {
             size: core::mem::size_of::<PmScanArg>() as u64,
-            flags: if reset { PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC } else { 0 },
+            flags: if reset {
+                PM_SCAN_WP_MATCHING | PM_SCAN_CHECK_WPASYNC
+            } else {
+                0
+            },
             start: at,
             end,
             vec: r.as_mut_ptr() as u64,
@@ -565,7 +673,10 @@ impl Fault {
 #[cfg(target_arch = "x86_64")]
 unsafe fn access_kind(sig: i32, ucp: *const libc::ucontext_t) -> (bool, bool) {
     let err = (*ucp).uc_mcontext.gregs[libc::REG_ERR as usize] as u64;
-    (sig == libc::SIGSEGV && err & 2 != 0, sig == libc::SIGSEGV && err & 16 != 0)
+    (
+        sig == libc::SIGSEGV && err & 2 != 0,
+        sig == libc::SIGSEGV && err & 16 != 0,
+    )
 }
 
 /// AArch64: from the ESR record the kernel puts in the frame's `__reserved` area (`esr_context`).
@@ -659,9 +770,19 @@ pub fn add_fault_hook(h: FaultHook) {
 unsafe extern "C" fn handler(sig: i32, si: *mut libc::siginfo_t, uc: *mut libc::c_void) {
     let errno = *libc::__errno_location();
     let ucp = uc as *mut libc::ucontext_t;
-    let addr = if sig == libc::SIGSEGV || sig == libc::SIGBUS { (*si).si_addr() as u64 } else { 0 };
+    let addr = if sig == libc::SIGSEGV || sig == libc::SIGBUS {
+        (*si).si_addr() as u64
+    } else {
+        0
+    };
     let (write, exec) = access_kind(sig, ucp);
-    let mut f = Fault { sig, addr, write, exec, uc: ucp };
+    let mut f = Fault {
+        sig,
+        addr,
+        write,
+        exec,
+        uc: ucp,
+    };
     let n = NHOOKS.load(Ordering::Acquire).min(MAX_HOOKS);
     for i in (0..n).rev() {
         let h = HOOKS[i].load(Ordering::Acquire);
@@ -676,7 +797,10 @@ unsafe extern "C" fn handler(sig: i32, si: *mut libc::siginfo_t, uc: *mut libc::
     let flags = OLD_FLAGS[sig as usize & 31].load(Ordering::Acquire) as i32;
     if old > 1 {
         if flags & libc::SA_SIGINFO != 0 {
-            core::mem::transmute::<usize, unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void)>(old)(sig, si, uc);
+            core::mem::transmute::<
+                usize,
+                unsafe extern "C" fn(i32, *mut libc::siginfo_t, *mut libc::c_void),
+            >(old)(sig, si, uc);
         } else {
             core::mem::transmute::<usize, unsafe extern "C" fn(i32)>(old)(sig);
         }
@@ -692,7 +816,13 @@ fn install_handler() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         alt_stack();
-        for sig in [libc::SIGSEGV, libc::SIGBUS, libc::SIGILL, libc::SIGFPE, libc::SIGTRAP] {
+        for sig in [
+            libc::SIGSEGV,
+            libc::SIGBUS,
+            libc::SIGILL,
+            libc::SIGFPE,
+            libc::SIGTRAP,
+        ] {
             // SAFETY: a process-wide handler of ours; the old one is kept and chained to
             unsafe {
                 let mut sa: libc::sigaction = core::mem::zeroed();
@@ -703,7 +833,9 @@ fn install_handler() {
                 libc::sigaction(sig, &sa, &mut old);
                 OLD_TABLE[sig as usize & 31].store(old.sa_sigaction as u64, Ordering::Release);
                 OLD_FLAGS[sig as usize & 31].store(old.sa_flags as u64, Ordering::Release);
-                OLD.lock().unwrap_or_else(|p| p.into_inner()).push((sig, old));
+                OLD.lock()
+                    .unwrap_or_else(|p| p.into_inner())
+                    .push((sig, old));
             }
         }
     });
@@ -720,11 +852,22 @@ pub fn alt_stack() {
             return;
         }
         let size = 256 << 10;
-        let p = libc::mmap(core::ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0);
+        let p = libc::mmap(
+            core::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS,
+            -1,
+            0,
+        );
         if p == libc::MAP_FAILED {
             return;
         }
-        let ss = libc::stack_t { ss_sp: p, ss_flags: 0, ss_size: size };
+        let ss = libc::stack_t {
+            ss_sp: p,
+            ss_flags: 0,
+            ss_size: size,
+        };
         libc::sigaltstack(&ss, core::ptr::null_mut());
     }
 }
@@ -845,7 +988,12 @@ pub fn now_ns() -> u64 {
 /// The machine's physical memory in bytes.
 pub fn total_memory() -> u64 {
     // SAFETY: sysconf has no preconditions
-    let (pages, size) = unsafe { (libc::sysconf(libc::_SC_PHYS_PAGES), libc::sysconf(libc::_SC_PAGESIZE)) };
+    let (pages, size) = unsafe {
+        (
+            libc::sysconf(libc::_SC_PHYS_PAGES),
+            libc::sysconf(libc::_SC_PAGESIZE),
+        )
+    };
     (pages.max(0) as u64) * (size.max(0) as u64)
 }
 
@@ -853,7 +1001,14 @@ pub fn total_memory() -> u64 {
 /// enough: Linux has no commit charge per process).
 pub fn process_memory() -> (u64, u64) {
     let s = std::fs::read_to_string("/proc/self/status").unwrap_or_default();
-    let kb = |key: &str| s.lines().find(|l| l.starts_with(key)).and_then(|l| l.split_whitespace().nth(1)).and_then(|v| v.parse::<u64>().ok()).unwrap_or(0) << 10;
+    let kb = |key: &str| {
+        s.lines()
+            .find(|l| l.starts_with(key))
+            .and_then(|l| l.split_whitespace().nth(1))
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(0)
+            << 10
+    };
     (kb("VmRSS:"), kb("VmSwap:"))
 }
 
@@ -863,7 +1018,9 @@ pub fn process_memory() -> (u64, u64) {
 pub fn memory_cap(cap: u64) -> Result<String, String> {
     match cgroup_cap(cap) {
         Ok(p) => return Ok(format!("cgroup {p} memory.max")),
-        Err(e) => crate::rt::log(&format!("process memory cap: no cgroup of its own ({e}); a watchdog enforces it")),
+        Err(e) => crate::rt::log(&format!(
+            "process memory cap: no cgroup of its own ({e}); a watchdog enforces it"
+        )),
     }
     std::thread::Builder::new()
         .name("memory cap".into())
@@ -885,13 +1042,22 @@ pub fn memory_cap(cap: u64) -> Result<String, String> {
 
 fn cgroup_cap(cap: u64) -> Result<String, String> {
     let line = std::fs::read_to_string("/proc/self/cgroup").map_err(|e| e.to_string())?;
-    let rel = line.lines().find_map(|l| l.strip_prefix("0::")).ok_or("not cgroup v2")?.trim().to_string();
+    let rel = line
+        .lines()
+        .find_map(|l| l.strip_prefix("0::"))
+        .ok_or("not cgroup v2")?
+        .trim()
+        .to_string();
     let root = std::path::Path::new("/sys/fs/cgroup");
     let own = root.join(rel.trim_start_matches('/'));
     let parent = own.parent().ok_or("no parent cgroup")?;
-    let ctl = std::fs::read_to_string(parent.join("cgroup.subtree_control")).map_err(|e| e.to_string())?;
+    let ctl = std::fs::read_to_string(parent.join("cgroup.subtree_control"))
+        .map_err(|e| e.to_string())?;
     if !ctl.split_whitespace().any(|c| c == "memory") {
-        return Err(format!("{} does not delegate the memory controller", parent.display()));
+        return Err(format!(
+            "{} does not delegate the memory controller",
+            parent.display()
+        ));
     }
     let mine = parent.join(format!("nxrs-{}.scope", std::process::id()));
     std::fs::create_dir(&mine).map_err(|e| format!("{}: {e}", mine.display()))?;
@@ -899,9 +1065,11 @@ fn cgroup_cap(cap: u64) -> Result<String, String> {
         let _ = std::fs::remove_dir(&mine);
         e
     };
-    std::fs::write(mine.join("memory.max"), cap.to_string()).map_err(|e| fail(format!("memory.max: {e}")))?;
+    std::fs::write(mine.join("memory.max"), cap.to_string())
+        .map_err(|e| fail(format!("memory.max: {e}")))?;
     let _ = std::fs::write(mine.join("memory.swap.max"), "0");
-    std::fs::write(mine.join("cgroup.procs"), std::process::id().to_string()).map_err(|e| fail(format!("cgroup.procs: {e}")))?;
+    std::fs::write(mine.join("cgroup.procs"), std::process::id().to_string())
+        .map_err(|e| fail(format!("cgroup.procs: {e}")))?;
     Ok(mine.display().to_string())
 }
 
@@ -989,8 +1157,20 @@ mod tests {
         assert_eq!(find_esr(&[0u8; 64]), None);
         assert_eq!(esr_access(esr), (true, false));
         assert_eq!(esr_access(esr & !(1 << 6)), (false, false), "a read");
-        assert_eq!(esr_access(esr | (1 << 8)), (false, false), "cache maintenance is not a write");
-        assert_eq!(esr_access(0x20u64 << 26), (false, true), "instruction abort");
-        assert_eq!(esr_access(0x15u64 << 26), (false, false), "an SVC is no access");
+        assert_eq!(
+            esr_access(esr | (1 << 8)),
+            (false, false),
+            "cache maintenance is not a write"
+        );
+        assert_eq!(
+            esr_access(0x20u64 << 26),
+            (false, true),
+            "instruction abort"
+        );
+        assert_eq!(
+            esr_access(0x15u64 << 26),
+            (false, false),
+            "an SVC is no access"
+        );
     }
 }

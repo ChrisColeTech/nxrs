@@ -174,11 +174,22 @@ pub fn current_cpu() -> Option<*mut Cpu> {
 }
 
 pub fn get() -> &'static Kernel {
-    KERNEL.get().unwrap_or_else(|| crate::rt::fatal("kernel used before process start"))
+    KERNEL
+        .get()
+        .unwrap_or_else(|| crate::rt::fatal("kernel used before process start"))
 }
 
 pub fn init(space: &'static Space) -> &'static Kernel {
-    if KERNEL.set(Kernel { g: Mutex::new(State { next_id: 0x51, ..Default::default() }), space }).is_err() {
+    if KERNEL
+        .set(Kernel {
+            g: Mutex::new(State {
+                next_id: 0x51,
+                ..Default::default()
+            }),
+            space,
+        })
+        .is_err()
+    {
         crate::rt::fatal("kernel initialised twice");
     }
     crate::process::startup(space);
@@ -191,13 +202,20 @@ pub fn try_get() -> Option<&'static Kernel> {
 }
 
 fn ld32(a: u64) -> u32 {
-    unsafe { (*(a as *const core::sync::atomic::AtomicU32)).load(core::sync::atomic::Ordering::SeqCst) }
+    unsafe {
+        (*(a as *const core::sync::atomic::AtomicU32)).load(core::sync::atomic::Ordering::SeqCst)
+    }
 }
 fn ld64(a: u64) -> u64 {
-    unsafe { (*(a as *const core::sync::atomic::AtomicU64)).load(core::sync::atomic::Ordering::SeqCst) }
+    unsafe {
+        (*(a as *const core::sync::atomic::AtomicU64)).load(core::sync::atomic::Ordering::SeqCst)
+    }
 }
 fn st32(a: u64, v: u32) {
-    unsafe { (*(a as *const core::sync::atomic::AtomicU32)).store(v, core::sync::atomic::Ordering::SeqCst) }
+    unsafe {
+        (*(a as *const core::sync::atomic::AtomicU32))
+            .store(v, core::sync::atomic::Ordering::SeqCst)
+    }
 }
 fn cas32(a: u64, exp: &mut u32, v: u32) -> bool {
     use core::sync::atomic::{AtomicU32, Ordering::SeqCst};
@@ -247,7 +265,13 @@ impl State {
         let mut best: Option<usize> = None;
         for (i, t) in self.threads.iter().enumerate() {
             let Some(t) = t else { continue };
-            if t.wkind != kind || (if kind == Wait::CondVar { t.wkey } else { t.waddr }) != a {
+            if t.wkind != kind
+                || (if kind == Wait::CondVar {
+                    t.wkey
+                } else {
+                    t.waddr
+                }) != a
+            {
                 continue;
             }
             let better = match best {
@@ -279,7 +303,9 @@ impl State {
             return;
         };
         let more = self.threads.iter().enumerate().any(|(i, t)| {
-            i != w && t.as_ref().is_some_and(|t| t.wkind == Wait::Lock && t.waddr == addr)
+            i != w
+                && t.as_ref()
+                    .is_some_and(|t| t.wkind == Wait::Lock && t.waddr == addr)
         });
         let tag = self.t(w).wtag;
         st32(addr, tag | if more { WAITERS_BIT } else { 0 });
@@ -297,13 +323,21 @@ impl State {
         if o == H_CUR_THREAD {
             return false;
         }
-        let Obj::Thread(i) = self.h_get(o) else { return false };
-        let Some(t) = self.threads[i].as_ref() else { return false };
+        let Obj::Thread(i) = self.h_get(o) else {
+            return false;
+        };
+        let Some(t) = self.threads[i].as_ref() else {
+            return false;
+        };
         t.exited || (matches!(t.wkind, Wait::Lock | Wait::CondVar) && t.waddr == addr)
     }
 
     fn lock_waiters(&self, addr: u64, except: Option<usize>) -> bool {
-        self.threads.iter().enumerate().any(|(i, t)| Some(i) != except && t.as_ref().is_some_and(|t| t.wkind == Wait::Lock && t.waddr == addr))
+        self.threads.iter().enumerate().any(|(i, t)| {
+            Some(i) != except
+                && t.as_ref()
+                    .is_some_and(|t| t.wkind == Wait::Lock && t.waddr == addr)
+        })
     }
 
     /// The sweep for lock waiters stuck behind a stale owner or whose waiters bit was cleared (then the owner unlocks
@@ -315,15 +349,24 @@ impl State {
         for _ in 0..64 {
             let mut changed = false;
             for i in 0..self.threads.len() {
-                let Some(t) = self.threads[i].as_ref() else { continue };
+                let Some(t) = self.threads[i].as_ref() else {
+                    continue;
+                };
                 if t.wkind != Wait::Lock {
                     continue;
                 }
                 let a = t.waddr;
                 let mut v = ld32(a);
                 if self.owner_is_stale(v, a) {
-                    let Some(n) = self.pick(Wait::Lock, a) else { continue };
-                    let nv = self.t(n).wtag | if self.lock_waiters(a, Some(n)) { WAITERS_BIT } else { 0 };
+                    let Some(n) = self.pick(Wait::Lock, a) else {
+                        continue;
+                    };
+                    let nv = self.t(n).wtag
+                        | if self.lock_waiters(a, Some(n)) {
+                            WAITERS_BIT
+                        } else {
+                            0
+                        };
                     let found = v;
                     if cas32(a, &mut v, nv) {
                         self.wake(n, 0);
@@ -438,7 +481,9 @@ fn heal_note(addr: u64, what: &str, v: u32) {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
     if n <= 20 || n % 1024 == 0 {
-        crate::rt::log(&format!("kernel: mutex {addr:#x} repaired ({what}, value {v:#x}) [{n} times]"));
+        crate::rt::log(&format!(
+            "kernel: mutex {addr:#x} repaired ({what}, value {v:#x}) [{n} times]"
+        ));
     }
 }
 
@@ -469,7 +514,12 @@ fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
 }
 
 /// Blocks thread i (holding the lock) until woken or timed out (ns < 0: forever, 0: immediate timeout).
-fn block<'a>(mut g: MutexGuard<'a, State>, i: usize, kind: Wait, ns: i64) -> (MutexGuard<'a, State>, u64) {
+fn block<'a>(
+    mut g: MutexGuard<'a, State>,
+    i: usize,
+    kind: Wait,
+    ns: i64,
+) -> (MutexGuard<'a, State>, u64) {
     g.wseq += 1;
     let s = g.wseq;
     let t = g.t(i);
@@ -493,7 +543,10 @@ fn block<'a>(mut g: MutexGuard<'a, State>, i: usize, kind: Wait, ns: i64) -> (Mu
                     t.wkind = Wait::None;
                     return (g, R_TIMEOUT);
                 }
-                g = cv.wait_timeout(g, d - now).unwrap_or_else(PoisonError::into_inner).0;
+                g = cv
+                    .wait_timeout(g, d - now)
+                    .unwrap_or_else(PoisonError::into_inner)
+                    .0;
             }
         }
     }
@@ -502,14 +555,20 @@ fn block<'a>(mut g: MutexGuard<'a, State>, i: usize, kind: Wait, ns: i64) -> (Mu
 }
 
 fn cur(svc: u32) -> usize {
-    CUR.get().unwrap_or_else(|| crate::rt::fatal(&format!("kernel: svc {svc:#x} on a host thread (no guest thread)")))
+    CUR.get().unwrap_or_else(|| {
+        crate::rt::fatal(&format!(
+            "kernel: svc {svc:#x} on a host thread (no guest thread)"
+        ))
+    })
 }
 
 /// The calling host thread's guest thread handle, if it is one.
 /// Every guest thread's state for a stall report (os's `threads` control command): handle, priority, core, what it
 /// waits for, and its guest frames (x30, then the x29 chain) as of its last SVC.
 pub fn dump_threads() -> String {
-    let Some(k) = KERNEL.get() else { return "no kernel\n".into() };
+    let Some(k) = KERNEL.get() else {
+        return "no kernel\n".into();
+    };
     let g = lock(&k.g);
     let mut out = String::new();
     for t in g.threads.iter().flatten() {
@@ -519,7 +578,11 @@ pub fn dump_threads() -> String {
         let w = match t.wkind {
             Wait::None => "running or sleeping".to_string(),
             // the lock word holds the owner's handle (bit 30: waiters)
-            Wait::Lock if crate::mem::readable(t.waddr, 4) => format!("lock {:#x} (word {:#x})", t.waddr, unsafe { *(t.waddr as *const u32) }),
+            Wait::Lock if crate::mem::readable(t.waddr, 4) => {
+                format!("lock {:#x} (word {:#x})", t.waddr, unsafe {
+                    *(t.waddr as *const u32)
+                })
+            }
             Wait::Lock => format!("lock {:#x}", t.waddr),
             Wait::CondVar => format!("condvar key {:#x} (lock {:#x})", t.wkey, t.waddr),
             Wait::Address => format!("address {:#x}", t.waddr),
@@ -528,9 +591,15 @@ pub fn dump_threads() -> String {
         let until = match (t.wkind, t.wuntil) {
             (Wait::None, _) => String::new(),
             (_, None) => " (no time limit)".into(),
-            (_, Some(d)) => format!(" (time limit in {} ms)", d.saturating_duration_since(Instant::now()).as_millis()),
+            (_, Some(d)) => format!(
+                " (time limit in {} ms)",
+                d.saturating_duration_since(Instant::now()).as_millis()
+            ),
         };
-        out.push_str(&format!("thread {:#x} prio {} core {} entry {:#x}: {w}{until}", t.handle, t.prio, t.core, t.entry));
+        out.push_str(&format!(
+            "thread {:#x} prio {} core {} entry {:#x}: {w}{until}",
+            t.handle, t.prio, t.core, t.entry
+        ));
         if !t.cpu.is_null() {
             let c = unsafe { &*t.cpu };
             out.push_str(&format!("; pc {:#x}", c.pc));
@@ -542,7 +611,13 @@ pub fn dump_threads() -> String {
             // NXRS_DUMP_FRAMES=<ret>[,<ret>..]: the 16 words at the frame record of a frame returning there (its
             // saved registers: a stall's loop counters)
             let peek: Vec<u64> = std::env::var("NXRS_DUMP_FRAMES")
-                .map(|v| v.split(',').filter_map(|s| u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()).collect())
+                .map(|v| {
+                    v.split(',')
+                        .filter_map(|s| {
+                            u64::from_str_radix(s.trim().trim_start_matches("0x"), 16).ok()
+                        })
+                        .collect()
+                })
                 .unwrap_or_default();
             let mut words = String::new();
             for _ in 0..12 {
@@ -581,11 +656,18 @@ impl Kernel {
 
     pub fn create_event(&self) -> (u32, u32) {
         let mut g = lock(&self.g);
-        let e = g.events.iter().position(|e| e.is_none()).unwrap_or_else(|| {
-            g.events.push(None);
-            g.events.len() - 1
+        let e = g
+            .events
+            .iter()
+            .position(|e| e.is_none())
+            .unwrap_or_else(|| {
+                g.events.push(None);
+                g.events.len() - 1
+            });
+        g.events[e] = Some(Event {
+            signaled: false,
+            refs: 2,
         });
-        g.events[e] = Some(Event { signaled: false, refs: 2 });
         (g.h_new(Obj::EventW(e)), g.h_new(Obj::EventR(e)))
     }
 
@@ -637,10 +719,14 @@ impl Kernel {
         let mut g = lock(&self.g);
         let id = g.next_id;
         g.next_id += 1;
-        let slot = g.threads.iter().position(|t| t.is_none()).unwrap_or_else(|| {
-            g.threads.push(None);
-            g.threads.len() - 1
-        });
+        let slot = g
+            .threads
+            .iter()
+            .position(|t| t.is_none())
+            .unwrap_or_else(|| {
+                g.threads.push(None);
+                g.threads.len() - 1
+            });
         let core = if core >= 0 { core } else { 0 };
         let handle = g.h_new(Obj::Thread(slot));
         g.threads[slot] = Some(Thread {
@@ -678,7 +764,9 @@ impl Kernel {
             .stack_size(HOST_STACK)
             .spawn(move || thread_main(slot));
         if let Err(e) = r {
-            crate::rt::fatal(&format!("kernel: host thread for guest thread {handle:#x}: {e}"));
+            crate::rt::fatal(&format!(
+                "kernel: host thread for guest thread {handle:#x}: {e}"
+            ));
         }
         if crate::rt::trace("thread") {
             crate::rt::log(&format!("CreateThread {handle:#x} entry {} arg {arg:#x} sp {stack_top:#x} prio {prio} core {core}", crate::dispatch::guest_name(entry)));
@@ -719,7 +807,9 @@ impl Kernel {
     pub fn create_main(&self, entry: u64, stack_top: u64, prio: i32, core: i32) -> u32 {
         let h = self.create_thread(entry, 0, stack_top, prio, core);
         let mut g = lock(&self.g);
-        let Obj::Thread(i) = g.h_get(h) else { unreachable!() };
+        let Obj::Thread(i) = g.h_get(h) else {
+            unreachable!()
+        };
         let t = g.t(i);
         t.arg = 0;
         // Horizon's main thread gets x0 = 0 and x1 = its own handle; thread_main sets x1 for the main thread.
@@ -784,7 +874,9 @@ fn thread_body(slot: usize) {
                 crate::rt::log(&format!("kernel: guest thread {handle:#x}'s entry returned (Horizon requires ExitThread)"));
             }
             crate::boundary::GuestCall::Exit => {}
-            crate::boundary::GuestCall::Escaped => crate::rt::fatal("kernel: a guest jump left a thread's entry function"),
+            crate::boundary::GuestCall::Escaped => {
+                crate::rt::fatal("kernel: a guest jump left a thread's entry function")
+            }
         }
         crate::boundary::take_pending();
     }
@@ -815,9 +907,17 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
 }
 
 /// The metrics counters of a blocking SVC's kind: (waits, microseconds waited).
-fn wait_counters(imm: u32) -> (&'static std::sync::atomic::AtomicU64, &'static std::sync::atomic::AtomicU64) {
+fn wait_counters(
+    imm: u32,
+) -> (
+    &'static std::sync::atomic::AtomicU64,
+    &'static std::sync::atomic::AtomicU64,
+) {
     use nxconfig::metrics::counter;
-    type C2 = (&'static std::sync::atomic::AtomicU64, &'static std::sync::atomic::AtomicU64);
+    type C2 = (
+        &'static std::sync::atomic::AtomicU64,
+        &'static std::sync::atomic::AtomicU64,
+    );
     static C: OnceLock<[C2; 5]> = OnceLock::new();
     let c = C.get_or_init(|| {
         [
@@ -875,7 +975,9 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
         }
         0x0E => {
             let g = lock(&k.g);
-            let t = g.thread_of(c.x[2] as u32).map(|i| g.threads[i].as_ref().unwrap());
+            let t = g
+                .thread_of(c.x[2] as u32)
+                .map(|i| g.threads[i].as_ref().unwrap());
             c.x[0] = if t.is_some() { R_OK } else { R_BAD_HANDLE };
             c.x[1] = t.map_or(0, |t| t.core as u64);
             c.x[2] = t.map_or(0, |t| t.mask);
@@ -891,7 +993,13 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
                     } else if ideal == -2 {
                         t.core = 0;
                     }
-                    t.mask = if ideal == -2 { 1 } else if mask != 0 { mask } else { t.mask };
+                    t.mask = if ideal == -2 {
+                        1
+                    } else if mask != 0 {
+                        mask
+                    } else {
+                        t.mask
+                    };
                     let (h, core, mask) = (t.handle, t.core, t.mask);
                     drop(g);
                     sched().affinity_changed(h, core, mask);
@@ -905,7 +1013,9 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
                 c.x[0] = n as u64;
             } else {
                 let g = lock(&k.g);
-                c.x[0] = CUR.get().map_or(0, |i| g.threads[i].as_ref().unwrap().core as u64);
+                c.x[0] = CUR
+                    .get()
+                    .map_or(0, |i| g.threads[i].as_ref().unwrap().core as u64);
             }
         }
         0x25 => {
@@ -924,7 +1034,12 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
             if v == (c.x[0] as u32 | WAITERS_BIT) && g.owner_is_stale(v, addr) {
                 // already released (Turbo `svc_arbitrate_lock`): hand it to the caller, the waiters bit kept if anyone
                 // else is queued; the caller rereads the word
-                let nv = tag | if g.lock_waiters(addr, None) { WAITERS_BIT } else { 0 };
+                let nv = tag
+                    | if g.lock_waiters(addr, None) {
+                        WAITERS_BIT
+                    } else {
+                        0
+                    };
                 let found = v;
                 if cas32(addr, &mut v, nv) {
                     heal_note(addr, "on request", found);
@@ -966,12 +1081,17 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
             let mut g = lock(&k.g);
             let mut n = 0;
             while cnt <= 0 || n < cnt {
-                let Some(w) = g.pick(Wait::CondVar, key) else { break };
+                let Some(w) = g.pick(Wait::CondVar, key) else {
+                    break;
+                };
                 let (a, tag) = (g.t(w).waddr, g.t(w).wtag);
                 g.lock_acquire_for(w, a, tag);
                 n += 1;
             }
-            let left = g.threads.iter().any(|t| t.as_ref().is_some_and(|t| t.wkind == Wait::CondVar && t.wkey == key));
+            let left = g.threads.iter().any(|t| {
+                t.as_ref()
+                    .is_some_and(|t| t.wkind == Wait::CondVar && t.wkey == key)
+            });
             if !left {
                 st32(key, 0);
             }
@@ -990,7 +1110,10 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
                 _ => (v as i32) < val,
             };
             if ok && ty == 1 {
-                while !{ let nv = v.wrapping_sub(1); cas32(addr, &mut v, nv) } {
+                while !{
+                    let nv = v.wrapping_sub(1);
+                    cas32(addr, &mut v, nv)
+                } {
                     if (v as i32) >= val {
                         ok = false;
                         break;
@@ -1013,13 +1136,24 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
             // equal, modify by the waiter count and wake
             let (addr, ty, val, cnt) = (c.x[0], c.x[1] as u32, c.x[2] as i32, c.x[3] as i32);
             let mut g = lock(&k.g);
-            let nw = g.threads.iter().filter(|t| t.as_ref().is_some_and(|t| t.wkind == Wait::Address && t.waddr == addr)).count() as i32;
+            let nw = g
+                .threads
+                .iter()
+                .filter(|t| {
+                    t.as_ref()
+                        .is_some_and(|t| t.wkind == Wait::Address && t.waddr == addr)
+                })
+                .count() as i32;
             let mut r = R_OK;
             if ty != 0 {
                 let mut nv = val.wrapping_add(1);
                 if ty == 2 {
                     nv = if cnt <= 0 {
-                        if nw > 0 { val - 2 } else { val + 1 }
+                        if nw > 0 {
+                            val - 2
+                        } else {
+                            val + 1
+                        }
                     } else if nw == 0 {
                         val + 1
                     } else if nw <= cnt {
@@ -1036,7 +1170,9 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
             if r == R_OK {
                 let mut n = 0;
                 while cnt <= 0 || n < cnt {
-                    let Some(w) = g.pick(Wait::Address, addr) else { break };
+                    let Some(w) = g.pick(Wait::Address, addr) else {
+                        break;
+                    };
                     g.wake(w, 0);
                     n += 1;
                 }
@@ -1053,7 +1189,9 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
             // SignalEvent(write end) / ClearEvent(either end) / ResetSignal(read end, error if not signaled)
             let mut g = lock(&k.g);
             let e = match (imm, g.h_get(c.x[0] as u32)) {
-                (0x11, Obj::EventW(e)) | (0x17, Obj::EventR(e)) | (0x12, Obj::EventW(e) | Obj::EventR(e)) => Some(e),
+                (0x11, Obj::EventW(e))
+                | (0x17, Obj::EventR(e))
+                | (0x12, Obj::EventW(e) | Obj::EventR(e)) => Some(e),
                 _ => None,
             };
             c.x[0] = match e {
@@ -1079,7 +1217,9 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
                 c.x[1] = 0;
                 return true;
             }
-            let hs: Vec<u32> = (0..n).map(|k| unsafe { *((c.x[1] + 4 * k as u64) as *const u32) }).collect();
+            let hs: Vec<u32> = (0..n)
+                .map(|k| unsafe { *((c.x[1] + 4 * k as u64) as *const u32) })
+                .collect();
             let mut g = lock(&k.g);
             let mut objs = vec![];
             for &h in &hs {
@@ -1152,13 +1292,20 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
         // garbage collector pauses every thread around GetThreadContext3.
         0x32 => {
             let g = lock(&k.g);
-            c.x[0] = if g.thread_of(c.x[0] as u32).is_some() { R_OK } else { R_BAD_HANDLE };
+            c.x[0] = if g.thread_of(c.x[0] as u32).is_some() {
+                R_OK
+            } else {
+                R_BAD_HANDLE
+            };
         }
         // GetThreadContext3(x0 ThreadContext, w1 handle): the thread's registers as its `Cpu` holds them (x0-x28,
         // fp, lr, sp, pc, pstate, v0-v31, fpcr, fpsr, tpidr; 0x320 bytes)
         0x33 => {
             let g = lock(&k.g);
-            let cpu = g.thread_of(c.x[1] as u32).map(|i| g.threads[i].as_ref().unwrap().cpu).filter(|p| !p.is_null());
+            let cpu = g
+                .thread_of(c.x[1] as u32)
+                .map(|i| g.threads[i].as_ref().unwrap().cpu)
+                .filter(|p| !p.is_null());
             c.x[0] = match cpu {
                 Some(p) => {
                     let mut b = [0u8; 0x320];
@@ -1177,7 +1324,9 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
                     b[0x314..0x318].copy_from_slice(&(t.fpsr as u32).to_le_bytes());
                     b[0x318..0x320].copy_from_slice(&t.tpidr.to_le_bytes());
                     // SAFETY: the guest's output buffer
-                    unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), c.x[0] as *mut u8, b.len()) };
+                    unsafe {
+                        core::ptr::copy_nonoverlapping(b.as_ptr(), c.x[0] as *mut u8, b.len())
+                    };
                     R_OK
                 }
                 None => R_BAD_HANDLE,
@@ -1193,7 +1342,10 @@ mod tests {
     use super::*;
 
     fn state_with_threads(n: usize) -> State {
-        let mut s = State { next_id: 1, ..Default::default() };
+        let mut s = State {
+            next_id: 1,
+            ..Default::default()
+        };
         for p in 0..n {
             let h = s.h_new(Obj::Thread(p));
             s.threads.push(Some(Thread {
@@ -1215,7 +1367,7 @@ mod tests {
                 waddr: 0,
                 wkey: 0,
                 wtag: 0,
-            wuntil: None,
+                wuntil: None,
                 wres: 0,
                 wseq: 0,
                 wobjs: vec![],
@@ -1266,8 +1418,15 @@ mod tests {
                 s.t(0).host_running = false;
                 s.thread_maybe_free(0)
             };
-            let (first, second) = if close_first { (close(&mut s), host_end(&mut s)) } else { (host_end(&mut s), close(&mut s)) };
-            assert!(first.is_none(), "freed too early (close_first {close_first})");
+            let (first, second) = if close_first {
+                (close(&mut s), host_end(&mut s))
+            } else {
+                (host_end(&mut s), close(&mut s))
+            };
+            assert!(
+                first.is_none(),
+                "freed too early (close_first {close_first})"
+            );
             assert!(second.is_some() && s.threads[0].is_none());
             assert!(s.threads[1].is_some(), "the other thread is untouched");
         }
@@ -1293,7 +1452,11 @@ mod tests {
         wait_on(&mut s, 1, Wait::Lock, a, 44, 0x1002);
         wait_on(&mut s, 2, Wait::Lock, a, 30, 0x1003); // better priority, later
         s.lock_handoff(a);
-        assert_eq!(ld32(a), 0x1003 | WAITERS_BIT, "priority 30 first; 0x1002 still waits");
+        assert_eq!(
+            ld32(a),
+            0x1003 | WAITERS_BIT,
+            "priority 30 first; 0x1002 still waits"
+        );
         assert!(s.t(2).woke && s.t(2).wkind == Wait::None);
         s.lock_handoff(a);
         assert_eq!(ld32(a), 0x1002, "last waiter: no waiters bit");
@@ -1307,7 +1470,11 @@ mod tests {
     fn stuck_mutexes_are_healed_as_turbo() {
         let mut s = state_with_threads(5); // handles 0x1001..0x1005
         let words = Box::new([0u32; 3]);
-        let (a, b, c) = (&words[0] as *const u32 as u64, &words[1] as *const u32 as u64, &words[2] as *const u32 as u64);
+        let (a, b, c) = (
+            &words[0] as *const u32 as u64,
+            &words[1] as *const u32 as u64,
+            &words[2] as *const u32 as u64,
+        );
         // a: its owner 0x1001 exited; waiters 0x1002 (priority 44) and 0x1003 (priority 30)
         st32(a, 0x1001 | WAITERS_BIT);
         s.t(0).exited = true;
@@ -1319,23 +1486,44 @@ mod tests {
         // c: a live owner with no kernel waiter: not visited
         st32(c, 0x1004 | WAITERS_BIT);
         let notes = s.heal_locks();
-        assert_eq!(notes, vec![(a, "stale owner", 0x1001 | WAITERS_BIT), (b, "lost waiter flag", 0x1004)]);
-        assert_eq!(ld32(a), 0x1003 | WAITERS_BIT, "priority 30 takes it, 0x1002 still waits");
+        assert_eq!(
+            notes,
+            vec![
+                (a, "stale owner", 0x1001 | WAITERS_BIT),
+                (b, "lost waiter flag", 0x1004)
+            ]
+        );
+        assert_eq!(
+            ld32(a),
+            0x1003 | WAITERS_BIT,
+            "priority 30 takes it, 0x1002 still waits"
+        );
         assert!(s.t(2).woke && s.t(2).wkind == Wait::None && s.t(1).wkind == Wait::Lock);
-        assert_eq!(ld32(b), 0x1004 | WAITERS_BIT, "the lost bit set again; the live owner keeps the lock");
+        assert_eq!(
+            ld32(b),
+            0x1004 | WAITERS_BIT,
+            "the lost bit set again; the live owner keeps the lock"
+        );
         assert!(s.t(4).wkind == Wait::Lock);
         assert_eq!(ld32(c), 0x1004 | WAITERS_BIT);
         assert!(s.heal_locks().is_empty(), "nothing left to repair");
         // an owner waiting on the very lock it holds is stale; the pseudo-handle and non-threads are left alone
         assert!(s.owner_is_stale(0x1005 | WAITERS_BIT, b) && s.owner_is_stale(WAITERS_BIT, b));
-        assert!(!s.owner_is_stale(H_CUR_THREAD | WAITERS_BIT, b) && !s.owner_is_stale(0x5000, b) && !s.owner_is_stale(0x1003, a));
+        assert!(
+            !s.owner_is_stale(H_CUR_THREAD | WAITERS_BIT, b)
+                && !s.owner_is_stale(0x5000, b)
+                && !s.owner_is_stale(0x1003, a)
+        );
     }
 
     #[test]
     fn condvar_signal_retakes_the_lock() {
         let mut s = state_with_threads(3);
         let words = Box::new([0u32; 2]);
-        let (lock, key) = (&words[0] as *const u32 as u64, &words[1] as *const u32 as u64);
+        let (lock, key) = (
+            &words[0] as *const u32 as u64,
+            &words[1] as *const u32 as u64,
+        );
         st32(key, 1);
         for i in [1usize, 2] {
             wait_on(&mut s, i, Wait::CondVar, key, 44, 0x1001 + i as u32);
@@ -1346,7 +1534,11 @@ mod tests {
         assert_eq!(w, 1, "first come at equal priority");
         let (a, tag) = (s.t(w).waddr, s.t(w).wtag);
         s.lock_acquire_for(w, a, tag);
-        assert_eq!(s.t(1).wkind, Wait::Lock, "the lock is taken: it now waits for it");
+        assert_eq!(
+            s.t(1).wkind,
+            Wait::Lock,
+            "the lock is taken: it now waits for it"
+        );
         assert_eq!(ld32(lock), 0x1001 | WAITERS_BIT);
         s.lock_handoff(lock); // the signaller unlocks
         assert_eq!(ld32(lock), 0x1002);
@@ -1355,14 +1547,21 @@ mod tests {
         st32(lock, 0);
         let (a, tag) = (s.t(w).waddr, s.t(w).wtag);
         s.lock_acquire_for(w, a, tag);
-        assert_eq!(ld32(lock), 0x1003, "a free lock goes to the woken waiter at once");
+        assert_eq!(
+            ld32(lock),
+            0x1003,
+            "a free lock goes to the woken waiter at once"
+        );
         assert!(s.t(2).woke);
     }
 
     #[test]
     fn sync_waiters_and_events() {
         let mut s = state_with_threads(2);
-        s.events.push(Some(Event { signaled: false, refs: 2 }));
+        s.events.push(Some(Event {
+            signaled: false,
+            refs: 2,
+        }));
         s.t(1).wkind = Wait::Sync;
         s.t(1).wobjs = vec![SyncRef::Thread(0), SyncRef::Event(0)];
         assert!(!s.signaled(SyncRef::Event(0)));

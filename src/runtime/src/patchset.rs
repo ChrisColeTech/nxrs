@@ -20,14 +20,26 @@ static TABLE: Mutex<Option<Table>> = Mutex::new(None);
 /// # Safety
 /// `on` points to at least `count` bytes that live as long as the process; `envs` to `count` C strings or nulls.
 #[no_mangle]
-pub unsafe extern "C" fn nxrt_patch_table(on: *mut u8, envs: *const *const core::ffi::c_char, count: i32) {
+pub unsafe extern "C" fn nxrt_patch_table(
+    on: *mut u8,
+    envs: *const *const core::ffi::c_char,
+    count: i32,
+) {
     if on.is_null() || count <= 0 {
         return;
     }
     let names = (0..count as usize)
         .map(|i| {
-            let p = if envs.is_null() { core::ptr::null() } else { *envs.add(i) };
-            if p.is_null() { String::new() } else { std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned() }
+            let p = if envs.is_null() {
+                core::ptr::null()
+            } else {
+                *envs.add(i)
+            };
+            if p.is_null() {
+                String::new()
+            } else {
+                std::ffi::CStr::from_ptr(p).to_string_lossy().into_owned()
+            }
         })
         .collect();
     *TABLE.lock().unwrap() = Some(Table { on, envs: names });
@@ -35,14 +47,20 @@ pub unsafe extern "C" fn nxrt_patch_table(on: *mut u8, envs: *const *const core:
 
 /// Whether a set of that switch name exists in the game's code.
 pub fn has(env: &str) -> bool {
-    TABLE.lock().unwrap().as_ref().is_some_and(|t| t.envs.iter().any(|e| e == env))
+    TABLE
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|t| t.envs.iter().any(|e| e == env))
 }
 
 /// Turns the set of that switch name on or off; false when there is none.
 pub fn set(env: &str, on: bool) -> bool {
     let g = TABLE.lock().unwrap();
     let Some(t) = g.as_ref() else { return false };
-    let Some(i) = t.envs.iter().position(|e| e == env) else { return false };
+    let Some(i) = t.envs.iter().position(|e| e == env) else {
+        return false;
+    };
     // SAFETY: i < count (the table's length); a byte store the generated code reads at each site
     unsafe { core::ptr::write_volatile(t.on.add(i), on as u8) };
     true
@@ -62,8 +80,14 @@ mod tests {
     #[test]
     fn handed_over_table_flips() {
         static mut ON: [u8; 3] = [0, 1, 0];
-        let names = [c"NXRS_MOD_A".as_ptr(), core::ptr::null(), c"NXRS_CHEAT_0000ABCD".as_ptr()];
-        unsafe { super::nxrt_patch_table(core::ptr::addr_of_mut!(ON) as *mut u8, names.as_ptr(), 3) };
+        let names = [
+            c"NXRS_MOD_A".as_ptr(),
+            core::ptr::null(),
+            c"NXRS_CHEAT_0000ABCD".as_ptr(),
+        ];
+        unsafe {
+            super::nxrt_patch_table(core::ptr::addr_of_mut!(ON) as *mut u8, names.as_ptr(), 3)
+        };
         assert!(super::has("NXRS_CHEAT_0000ABCD") && !super::has("NXRS_CHEAT_FFFFFFFF"));
         assert!(super::set("NXRS_CHEAT_0000ABCD", true));
         assert_eq!(unsafe { ON[2] }, 1);

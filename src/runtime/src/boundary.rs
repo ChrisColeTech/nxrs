@@ -149,7 +149,7 @@ mod tests {
         "mov qword ptr [rcx + 264], rax",
         "call rt_dispatch",
         "mov rcx, qword ptr [rsp + 32]",
-        "mov qword ptr [rcx], 7",   // only if the host function returned: wrong
+        "mov qword ptr [rcx], 7", // only if the host function returned: wrong
         "add rsp, 40",
         "ret",
         ".seh_endproc",
@@ -178,7 +178,7 @@ mod tests {
         "mov qword ptr [rdi + 264], rax",
         "call rt_dispatch",
         "mov rdi, qword ptr [rsp + 8]",
-        "mov qword ptr [rdi], 7",   // only if the host function returned: wrong
+        "mov qword ptr [rdi], 7", // only if the host function returned: wrong
         "add rsp, 24",
         "ret",
         ".globl nxrt_test_longjmp",
@@ -210,7 +210,7 @@ mod tests {
         "str x9, [x0, #264]",
         "bl rt_dispatch",
         "ldr x0, [sp, #16]",
-        "mov x9, #7",   // only if the host function returned: wrong
+        "mov x9, #7", // only if the host function returned: wrong
         "str x9, [x0]",
         "ldp x29, x30, [sp], #32",
         "ret",
@@ -252,16 +252,35 @@ mod tests {
     #[test]
     fn longjmp_out_of_a_host_callback_keeps_rust_frames() {
         let leak = |v: Vec<u64>| -> &'static [u64] { Box::leak(v.into_boxed_slice()) };
-        let fns: &'static [GuestFn] = Box::leak(vec![nxrt_test_longjmp as GuestFn].into_boxed_slice());
-        let t = Table::build(vec![Module { name: "test".into(), base: 0x7A00_0000_0000, size: 0x1000, addrs: leak(vec![0x7A00_0000_0200]), fns }]).unwrap();
+        let fns: &'static [GuestFn] =
+            Box::leak(vec![nxrt_test_longjmp as GuestFn].into_boxed_slice());
+        let t = Table::build(vec![Module {
+            name: "test".into(),
+            base: 0x7A00_0000_0000,
+            size: 0x1000,
+            addrs: leak(vec![0x7A00_0000_0200]),
+            fns,
+        }])
+        .unwrap();
         crate::dispatch::install(t).unwrap();
         let host = crate::hostfn::register("test_host_calls_back", host_calls_back);
         let mut c = Cpu::new_boxed();
         c.x[1] = host;
         c.pc = 0x7A00_0000_0100;
-        unsafe { asm::rt_sj_owner(&mut *c, nxrt_test_owner_body, 0x7A00_0000_0100, 0x7A00_0000_0180) };
+        unsafe {
+            asm::rt_sj_owner(
+                &mut *c,
+                nxrt_test_owner_body,
+                0x7A00_0000_0100,
+                0x7A00_0000_0180,
+            )
+        };
         assert_eq!(c.x[0], 42, "the jump landed in the owner");
-        assert_eq!(DROPS.load(Ordering::SeqCst), 1, "the host function's frame unwound normally");
+        assert_eq!(
+            DROPS.load(Ordering::SeqCst),
+            1,
+            "the host function's frame unwound normally"
+        );
         assert_eq!(*RESULT.lock().unwrap(), Some(GuestCall::Escaped));
         assert!(c.sj.is_null(), "owner and barrier both unlinked");
     }
@@ -283,12 +302,19 @@ mod tests {
         }
         let exe = std::env::current_exe().unwrap();
         let out = std::process::Command::new(exe)
-            .args(["--exact", "boundary::tests::panic_in_host_function_exits_cleanly", "--nocapture"])
+            .args([
+                "--exact",
+                "boundary::tests::panic_in_host_function_exits_cleanly",
+                "--nocapture",
+            ])
             .env("NXRT_PANIC_CHILD", "1")
             .output()
             .unwrap();
         let err = String::from_utf8_lossy(&out.stderr);
         assert_eq!(out.status.code(), Some(70), "{err}");
-        assert!(err.contains("panic in a host function: deliberate test panic"), "{err}");
+        assert!(
+            err.contains("panic in a host function: deliberate test panic"),
+            "{err}"
+        );
     }
 }

@@ -74,12 +74,26 @@ fn xm_mark(c: &mut Cpu, a: u64) {
 fn xm_begin(c: &Cpu, a: u64) -> bool {
     match xm(a) {
         None => true,
-        Some(m) => m.compare_exchange(c.excl_seq, c.excl_seq.wrapping_add(1), Ordering::SeqCst, Ordering::Relaxed).is_ok(),
+        Some(m) => m
+            .compare_exchange(
+                c.excl_seq,
+                c.excl_seq.wrapping_add(1),
+                Ordering::SeqCst,
+                Ordering::Relaxed,
+            )
+            .is_ok(),
     }
 }
 fn xm_end(c: &Cpu, a: u64, stored: bool) {
     if let Some(m) = xm(a) {
-        m.store(if stored { c.excl_seq.wrapping_add(2) } else { c.excl_seq }, Ordering::Release);
+        m.store(
+            if stored {
+                c.excl_seq.wrapping_add(2)
+            } else {
+                c.excl_seq
+            },
+            Ordering::Release,
+        );
     }
 }
 
@@ -124,7 +138,10 @@ pub unsafe fn stx(c: &mut Cpu, sz: u32, a: u64, v: u64) -> u32 {
         return 1;
     }
     let e = c.excl_val;
-    let ok = with_atomic!(sz, a, |x| x.compare_exchange(e as _, v as _, Ordering::SeqCst, Ordering::SeqCst).is_ok()) != 0;
+    let ok = with_atomic!(sz, a, |x| x
+        .compare_exchange(e as _, v as _, Ordering::SeqCst, Ordering::SeqCst)
+        .is_ok())
+        != 0;
     xm_end(c, a, ok);
     !ok as u32
 }
@@ -221,7 +238,12 @@ pub unsafe fn stxp128(c: &mut Cpu, a: u64, lo: u64, hi: u64) -> u32 {
 
 /// CAS: returns the value found (the new Rs).
 pub unsafe fn cas(sz: u32, a: u64, expected: u64, new: u64) -> u64 {
-    with_atomic!(sz, a, |x| match x.compare_exchange(expected as _, new as _, Ordering::SeqCst, Ordering::SeqCst) {
+    with_atomic!(sz, a, |x| match x.compare_exchange(
+        expected as _,
+        new as _,
+        Ordering::SeqCst,
+        Ordering::SeqCst
+    ) {
         Ok(v) | Err(v) => v,
     })
 }
@@ -232,10 +254,34 @@ pub unsafe fn atomic_rmw(sz: u32, opc: u32, a: u64, v: u64, order: Ordering) -> 
     let sx = |x: u64| ((x << (64 - bits)) as i64) >> (64 - bits);
     let f = move |o: u64| -> u64 {
         match opc {
-            4 => if sx(o) > sx(v) { o } else { v },
-            5 => if sx(o) < sx(v) { o } else { v },
-            6 => if o > v { o } else { v },
-            _ => if o < v { o } else { v },
+            4 => {
+                if sx(o) > sx(v) {
+                    o
+                } else {
+                    v
+                }
+            }
+            5 => {
+                if sx(o) < sx(v) {
+                    o
+                } else {
+                    v
+                }
+            }
+            6 => {
+                if o > v {
+                    o
+                } else {
+                    v
+                }
+            }
+            _ => {
+                if o < v {
+                    o
+                } else {
+                    v
+                }
+            }
         }
     };
     match opc {
@@ -248,7 +294,12 @@ pub unsafe fn atomic_rmw(sz: u32, opc: u32, a: u64, v: u64, order: Ordering) -> 
         _ => with_atomic!(sz, a, |x| {
             let mut o = x.load(Ordering::Relaxed);
             loop {
-                match x.compare_exchange_weak(o, f(o as u64) as _, Ordering::SeqCst, Ordering::Relaxed) {
+                match x.compare_exchange_weak(
+                    o,
+                    f(o as u64) as _,
+                    Ordering::SeqCst,
+                    Ordering::Relaxed,
+                ) {
                     Ok(v) => break v,
                     Err(v) => o = v,
                 }

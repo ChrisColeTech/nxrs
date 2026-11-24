@@ -58,7 +58,9 @@ static STEPS: AtomicU64 = AtomicU64::new(0);
 /// Every dispatch interpreted: `NXRS_INTERP_ONLY=1`, or a build without lifted functions (`set_only`).
 pub fn only() -> bool {
     ONLY.load(Ordering::Relaxed)
-        || *ENV_ONLY.get_or_init(|| std::env::var("NXRS_INTERP_ONLY").is_ok_and(|v| !v.is_empty() && v != "0"))
+        || *ENV_ONLY.get_or_init(|| {
+            std::env::var("NXRS_INTERP_ONLY").is_ok_and(|v| !v.is_empty() && v != "0")
+        })
 }
 static ENV_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
 
@@ -68,7 +70,10 @@ pub fn set_only(on: bool) {
 
 /// (times the interpreter was entered, instructions it ran) since start.
 pub fn stats() -> (u64, u64) {
-    (ENTRIES.load(Ordering::Relaxed), STEPS.load(Ordering::Relaxed))
+    (
+        ENTRIES.load(Ordering::Relaxed),
+        STEPS.load(Ordering::Relaxed),
+    )
 }
 
 // ---------------------------------------------------------------- discovered.tsv
@@ -90,9 +95,19 @@ pub fn set_data_dir(dir: &std::path::Path) {
     let path = dir.join(DISCOVERED);
     let mut seen = HashSet::new();
     if let Ok(t) = std::fs::read_to_string(&path) {
-        seen.extend(parse_discovered(&t).into_iter().map(|e| (e.module, e.offset)));
+        seen.extend(
+            parse_discovered(&t)
+                .into_iter()
+                .map(|e| (e.module, e.offset)),
+        );
     }
-    *DISC.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Discovered { path: Some(path), seen, new: 0 });
+    *DISC
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(Discovered {
+        path: Some(path),
+        seen,
+        new: 0,
+    });
 }
 
 /// One line of discovered.tsv.
@@ -113,8 +128,17 @@ pub fn parse_discovered(text: &str) -> Vec<Entry> {
             let mut f = l.split('\t');
             let module = f.next()?.trim().to_string();
             let offset = u64::from_str_radix(f.next()?.trim().trim_start_matches("0x"), 16).ok()?;
-            let words = f.next().unwrap_or("").split_whitespace().filter_map(|w| u32::from_str_radix(w, 16).ok()).collect();
-            Some(Entry { module, offset, words })
+            let words = f
+                .next()
+                .unwrap_or("")
+                .split_whitespace()
+                .filter_map(|w| u32::from_str_radix(w, 16).ok())
+                .collect();
+            Some(Entry {
+                module,
+                offset,
+                words,
+            })
         })
         .collect()
 }
@@ -132,27 +156,49 @@ fn record(pc: u64) {
     if only() {
         return;
     }
-    let Some(m) = crate::dispatch::table().and_then(|t| t.module_at(pc)) else { return };
-    let mut g = DISC.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    let d = g.get_or_insert_with(|| Discovered { path: None, seen: HashSet::new(), new: 0 });
+    let Some(m) = crate::dispatch::table().and_then(|t| t.module_at(pc)) else {
+        return;
+    };
+    let mut g = DISC
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let d = g.get_or_insert_with(|| Discovered {
+        path: None,
+        seen: HashSet::new(),
+        new: 0,
+    });
     if !d.seen.insert((m.name.clone(), pc - m.base)) {
         return;
     }
     d.new += 1;
     let n = (((m.base + m.size).saturating_sub(pc)) / 4).min(4);
     // SAFETY: inside a mapped module
-    let words: Vec<u32> = (0..n).map(|i| unsafe { core::ptr::read_unaligned((pc + 4 * i) as *const u32) }).collect();
-    let e = Entry { module: m.name.clone(), offset: pc - m.base, words };
+    let words: Vec<u32> = (0..n)
+        .map(|i| unsafe { core::ptr::read_unaligned((pc + 4 * i) as *const u32) })
+        .collect();
+    let e = Entry {
+        module: m.name.clone(),
+        offset: pc - m.base,
+        words,
+    };
     if d.new <= 32 || crate::rt::trace("interp") {
         crate::rt::log(&format!(
             "interp: {} was not translated; interpreting it{}",
             crate::dispatch::guest_name(pc),
-            if d.path.is_some() { " (recorded in discovered.tsv: the next build translates it)" } else { "" }
+            if d.path.is_some() {
+                " (recorded in discovered.tsv: the next build translates it)"
+            } else {
+                ""
+            }
         ));
     }
     if let Some(p) = &d.path {
         let fresh = !p.exists();
-        if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(p) {
+        if let Ok(mut f) = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+        {
             let mut s = String::new();
             if fresh {
                 s.push_str(HEADER);
@@ -165,7 +211,10 @@ fn record(pc: u64) {
 
 /// How many entries this run added to discovered.tsv.
 pub fn discovered_this_run() -> usize {
-    DISC.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().map_or(0, |d| d.new)
+    DISC.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .map_or(0, |d| d.new)
 }
 
 // ---------------------------------------------------------------- dispatch
@@ -189,7 +238,9 @@ fn hand_off(pc: u64, jumped: bool) -> bool {
     if pc & 3 != 0 {
         return true;
     }
-    let Some(t) = crate::dispatch::table() else { return true };
+    let Some(t) = crate::dispatch::table() else {
+        return true;
+    };
     if !only() && t.lookup(pc).is_some() {
         return true;
     }
@@ -204,7 +255,9 @@ fn hand_off(pc: u64, jumped: bool) -> bool {
 #[no_mangle]
 pub unsafe extern "C" fn nxrt_interp_span_end(c: *mut Cpu) -> u64 {
     let pc = (*c).pc;
-    let Some(m) = crate::dispatch::table().and_then(|t| t.module_at(pc)) else { return pc + 4 };
+    let Some(m) = crate::dispatch::table().and_then(|t| t.module_at(pc)) else {
+        return pc + 4;
+    };
     let k = m.addrs.partition_point(|&a| a <= pc);
     if only() {
         return m.base + m.size;
@@ -241,7 +294,12 @@ pub unsafe fn is_call(c: &Cpu) -> bool {
     if r == crate::hostfn::RET_HOST {
         return true;
     }
-    if r & 3 != 0 || r < 4 || crate::dispatch::table().and_then(|t| t.module_at(r - 4)).is_none() {
+    if r & 3 != 0
+        || r < 4
+        || crate::dispatch::table()
+            .and_then(|t| t.module_at(r - 4))
+            .is_none()
+    {
         return false;
     }
     let w = core::ptr::read_unaligned((r - 4) as *const u32);
@@ -266,11 +324,16 @@ pub unsafe fn owns(s: &crate::asm::SjSlot, c: &Cpu) -> bool {
         return false;
     }
     let active = FRAMES.with(|f| {
-        f.borrow().iter().find(|fr| fr.slot == slot).map(|fr| (fr.sites.contains(&pc), fr.active))
+        f.borrow()
+            .iter()
+            .find(|fr| fr.slot == slot)
+            .map(|fr| (fr.sites.contains(&pc), fr.active))
     });
     match active {
         Some((true, _)) => true,
-        Some((false, call)) if call != 0 => funcs::function_of(call).is_some_and(|f| funcs::function_of(pc) == Some(f)),
+        Some((false, call)) if call != 0 => {
+            funcs::function_of(call).is_some_and(|f| funcs::function_of(pc) == Some(f))
+        }
         _ => false,
     }
 }
@@ -290,7 +353,11 @@ unsafe fn frame_enter(c: &Cpu) -> usize {
         let mut f = f.borrow_mut();
         f.retain(|fr| live.contains(&fr.slot) && !(first && fr.slot == slot));
         if !f.iter().any(|fr| fr.slot == slot) {
-            f.push(Frame { slot, sites: vec![], active: 0 });
+            f.push(Frame {
+                slot,
+                sites: vec![],
+                active: 0,
+            });
         }
     });
     slot
@@ -368,7 +435,11 @@ pub unsafe fn run(c: &mut Cpu) -> u32 {
                 c.pc = pc;
                 crate::rt::guest_fatal(
                     c,
-                    &format!("interp: {} at {} is not an instruction the translator handles ({msg})", hexw(word), crate::dispatch::guest_name(pc)),
+                    &format!(
+                        "interp: {} at {} is not an instruction the translator handles ({msg})",
+                        hexw(word),
+                        crate::dispatch::guest_name(pc)
+                    ),
                 )
             }
         }

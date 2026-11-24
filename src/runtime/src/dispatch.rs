@@ -41,14 +41,25 @@ impl Module {
     /// # Safety
     /// The pointers of `m` must stay valid for the process (they point into the linked game code).
     pub unsafe fn from_raw(m: &RtModule) -> Module {
-        let name = std::ffi::CStr::from_ptr(m.name).to_string_lossy().into_owned();
+        let name = std::ffi::CStr::from_ptr(m.name)
+            .to_string_lossy()
+            .into_owned();
         let n = m.count as usize;
         let (addrs, fns) = if n == 0 {
             (&[][..], &[][..])
         } else {
-            (std::slice::from_raw_parts(m.addrs, n), std::slice::from_raw_parts(m.fns, n))
+            (
+                std::slice::from_raw_parts(m.addrs, n),
+                std::slice::from_raw_parts(m.fns, n),
+            )
         };
-        Module { name, base: m.base, size: m.size, addrs, fns }
+        Module {
+            name,
+            base: m.base,
+            size: m.size,
+            addrs,
+            fns,
+        }
     }
 }
 
@@ -78,7 +89,10 @@ impl Table {
         modules.sort_by_key(|m| m.base);
         for w in modules.windows(2) {
             if w[0].base + w[0].size > w[1].base {
-                return Err(format!("dispatch: modules {} and {} overlap", w[0].name, w[1].name));
+                return Err(format!(
+                    "dispatch: modules {} and {} overlap",
+                    w[0].name, w[1].name
+                ));
             }
         }
         let (mut lo, mut hi) = (u64::MAX, 0u64);
@@ -86,10 +100,16 @@ impl Table {
         for m in &modules {
             for (k, (&a, &f)) in m.addrs.iter().zip(m.fns).enumerate() {
                 if a & 3 != 0 || a.wrapping_sub(m.base) >= m.size {
-                    return Err(format!("dispatch: {}_fn_addrs[{k}] = {a:#x} is misaligned or outside the module", m.name));
+                    return Err(format!(
+                        "dispatch: {}_fn_addrs[{k}] = {a:#x} is misaligned or outside the module",
+                        m.name
+                    ));
                 }
                 if k > 0 && a <= m.addrs[k - 1] {
-                    return Err(format!("dispatch: {}_fn_addrs is not strictly ascending at [{k}] = {a:#x}", m.name));
+                    return Err(format!(
+                        "dispatch: {}_fn_addrs is not strictly ascending at [{k}] = {a:#x}",
+                        m.name
+                    ));
                 }
                 let f = f as usize as u64;
                 host_lo = host_lo.min(f);
@@ -107,31 +127,58 @@ impl Table {
             // a build without lifted code (`nxrs-build --interp-only`): every dispatch goes to the interpreter
             crate::interp::set_only(true);
             crate::rt::log("dispatch: no lifted functions in any module (an --interp-only build): every guest instruction is interpreted");
-            return Ok(Table { modules, lo: 0, hi: 0, slots: 0, functions: 0, slot: core::ptr::null(), anchor: 0, by_host: vec![] });
+            return Ok(Table {
+                modules,
+                lo: 0,
+                hi: 0,
+                slots: 0,
+                functions: 0,
+                slot: core::ptr::null(),
+                anchor: 0,
+                by_host: vec![],
+            });
         }
         if hi - lo > TABLE_SPAN_LIMIT {
-            return Err(format!("dispatch: modules span {:#x} guest bytes, over the flat table's limit", hi - lo));
+            return Err(format!(
+                "dispatch: modules span {:#x} guest bytes, over the flat table's limit",
+                hi - lo
+            ));
         }
         let anchor = (host_lo & !15) - 16;
         if host_hi - anchor > u32::MAX as u64 {
-            return Err(format!("dispatch: lifted code spans {:#x} host bytes; slots hold 32-bit offsets", host_hi - anchor));
+            return Err(format!(
+                "dispatch: lifted code spans {:#x} host bytes; slots hold 32-bit offsets",
+                host_hi - anchor
+            ));
         }
         let slots = (hi - lo) >> 2;
         let bytes = (slots * 4 + 0xFFFF) & !0xFFFF;
-        let slot = crate::mem::host_alloc(bytes).ok_or("dispatch: cannot allocate the table")? as *mut u32;
+        let slot =
+            crate::mem::host_alloc(bytes).ok_or("dispatch: cannot allocate the table")? as *mut u32;
         let mut functions = 0;
         let mut by_host = vec![];
         for m in &modules {
             for (&a, &f) in m.addrs.iter().zip(m.fns) {
                 // SAFETY: a lies in [lo, hi), so the index is below slots.
-                unsafe { *slot.add(((a - lo) >> 2) as usize) = (f as usize as u64 - anchor) as u32 };
+                unsafe {
+                    *slot.add(((a - lo) >> 2) as usize) = (f as usize as u64 - anchor) as u32
+                };
                 by_host.push((f as usize as u64, a));
                 functions += 1;
             }
         }
         by_host.sort_unstable();
         crate::mem::host_protect_readonly(slot as u64, bytes);
-        Ok(Table { modules, lo, hi, slots, functions, slot, anchor, by_host })
+        Ok(Table {
+            modules,
+            lo,
+            hi,
+            slots,
+            functions,
+            slot,
+            anchor,
+            by_host,
+        })
     }
 
     pub fn lookup(&self, pc: u64) -> Option<GuestFn> {
@@ -141,14 +188,18 @@ impl Table {
             let off = unsafe { *self.slot.add(i as usize) };
             if off != 0 {
                 // SAFETY: the slot holds a lifted function's offset from anchor.
-                return Some(unsafe { core::mem::transmute::<usize, GuestFn>((self.anchor + off as u64) as usize) });
+                return Some(unsafe {
+                    core::mem::transmute::<usize, GuestFn>((self.anchor + off as u64) as usize)
+                });
             }
         }
         None
     }
 
     pub fn module_at(&self, pc: u64) -> Option<&Module> {
-        self.modules.iter().find(|m| pc.wrapping_sub(m.base) < m.size)
+        self.modules
+            .iter()
+            .find(|m| pc.wrapping_sub(m.base) < m.size)
     }
 
     /// The guest function whose lifted code starts at or before host address `rip` (the nearest lifted function
@@ -172,7 +223,9 @@ impl Table {
 
 /// Installs the table for `rt_dispatch`. Once, before any guest thread starts.
 pub fn install(t: Table) -> Result<&'static Table, String> {
-    TABLE.set(t).map_err(|_| "dispatch: installed twice".to_string())?;
+    TABLE
+        .set(t)
+        .map_err(|_| "dispatch: installed twice".to_string())?;
     let t = TABLE.get().unwrap();
     // SAFETY: written once, before any thread reads it (thread creation publishes it).
     unsafe {
@@ -239,7 +292,13 @@ pub unsafe extern "C" fn nxrt_dispatch_resolve(c: *mut Cpu) -> GuestFn {
         } else {
             "outside every module, no host function registered"
         };
-        crate::rt::guest_fatal(c, &format!("rt_dispatch: no function at guest pc {}: {why}", guest_name(pc)));
+        crate::rt::guest_fatal(
+            c,
+            &format!(
+                "rt_dispatch: no function at guest pc {}: {why}",
+                guest_name(pc)
+            ),
+        );
     })
 }
 
@@ -262,14 +321,25 @@ mod tests {
     }
 
     fn module(name: &str, base: u64, addrs: &[u64], fns: &[GuestFn]) -> Module {
-        Module { name: name.into(), base, size: 0x10000, addrs: leak(addrs), fns: leak(fns) }
+        Module {
+            name: name.into(),
+            base,
+            size: 0x10000,
+            addrs: leak(addrs),
+            fns: leak(fns),
+        }
     }
 
     #[test]
     fn lookup_and_names() {
         let t = Table::build(vec![
             module("sdk", 0x7000_0200_0000, &[0x7000_0200_0010], &[f3]),
-            module("main", 0x7000_0000_0000, &[0x7000_0000_0000, 0x7000_0000_0040], &[f1, f2]),
+            module(
+                "main",
+                0x7000_0000_0000,
+                &[0x7000_0000_0000, 0x7000_0000_0040],
+                &[f1, f2],
+            ),
         ])
         .unwrap();
         assert_eq!(t.functions, 3);
@@ -288,16 +358,39 @@ mod tests {
         assert!(t.lookup(0x6FFF_FFFF_FFFC).is_none(), "below");
         assert!(t.lookup(0x7000_0200_0014).is_none(), "above");
         assert_eq!(t.module_at(0x7000_0200_0020).unwrap().name, "sdk");
-        assert_eq!(t.guest_of_fn((f2 as GuestFn) as usize as u64), Some(0x7000_0000_0040));
-        let (g, d) = t.guest_of_host((f3 as GuestFn) as usize as u64 + 2).unwrap();
+        assert_eq!(
+            t.guest_of_fn((f2 as GuestFn) as usize as u64),
+            Some(0x7000_0000_0040)
+        );
+        let (g, d) = t
+            .guest_of_host((f3 as GuestFn) as usize as u64 + 2)
+            .unwrap();
         assert!(g == 0x7000_0200_0010 || d > 2); // nearest lifted function below
     }
 
     #[test]
     fn rejects_bad_tables() {
-        assert!(Table::build(vec![module("m", 0x7000_0000_0000, &[0x7000_0000_0040, 0x7000_0000_0000], &[f1, f2])]).is_err());
-        assert!(Table::build(vec![module("m", 0x7000_0000_0000, &[0x7000_0000_0002], &[f1])]).is_err());
-        assert!(Table::build(vec![module("m", 0x7000_0000_0000, &[0x7000_0010_0000], &[f1])]).is_err());
+        assert!(Table::build(vec![module(
+            "m",
+            0x7000_0000_0000,
+            &[0x7000_0000_0040, 0x7000_0000_0000],
+            &[f1, f2]
+        )])
+        .is_err());
+        assert!(Table::build(vec![module(
+            "m",
+            0x7000_0000_0000,
+            &[0x7000_0000_0002],
+            &[f1]
+        )])
+        .is_err());
+        assert!(Table::build(vec![module(
+            "m",
+            0x7000_0000_0000,
+            &[0x7000_0010_0000],
+            &[f1]
+        )])
+        .is_err());
         assert!(Table::build(vec![
             module("a", 0x7000_0000_0000, &[0x7000_0000_0000], &[f1]),
             module("b", 0x7000_0000_8000, &[0x7000_0000_8000], &[f2]),

@@ -337,7 +337,13 @@ macro_rules! fp_impl {
                     return nan2(c, a, b);
                 }
                 if op == FOP_MAX || op == FOP_MAXNM {
-                    return if a == b { fv(x & y) } else if a > b { a } else { b };
+                    return if a == b {
+                        fv(x & y)
+                    } else if a > b {
+                        a
+                    } else {
+                        b
+                    };
                 }
                 if a == b {
                     fv(x | y)
@@ -360,7 +366,11 @@ macro_rules! fp_impl {
                     return minmax(c, op, a, b);
                 }
                 let old = rm_enter(fpcr);
-                let mut r = if op == FOP_RSQRTS { rsqrts(a, b) } else { calc(op, a, b, d) };
+                let mut r = if op == FOP_RSQRTS {
+                    rsqrts(a, b)
+                } else {
+                    calc(op, a, b, d)
+                };
                 if bad(op, r) {
                     r = fix(c, op, a, b, d);
                 }
@@ -425,7 +435,11 @@ macro_rules! fp_impl {
             /// FRINT*: rm 0..4 as `rnd`, 5 X / 6 I = the FPCR mode.
             pub fn frint(c: &Cpu, x: T, rm: u32) -> T {
                 let x = fz(c, x);
-                let rm = if rm >= 5 { ((c.fpcr >> 22) & 3) as u32 } else { rm };
+                let rm = if rm >= 5 {
+                    ((c.fpcr >> 22) & 3) as u32
+                } else {
+                    rm
+                };
                 let r = rnd(x, rm);
                 if r.is_nan() {
                     return nan1(c, x);
@@ -448,9 +462,17 @@ macro_rules! fp_impl {
                         return 0;
                     }
                     if ib == 32 {
-                        return if r >= 4294967296.0 { 0xffff_ffff } else { r as u32 as u64 };
+                        return if r >= 4294967296.0 {
+                            0xffff_ffff
+                        } else {
+                            r as u32 as u64
+                        };
                     }
-                    return if r >= 18446744073709551616.0 { !0 } else { r as u64 };
+                    return if r >= 18446744073709551616.0 {
+                        !0
+                    } else {
+                        r as u64
+                    };
                 }
                 if ib == 32 {
                     return if r >= 2147483648.0 {
@@ -565,7 +587,11 @@ macro_rules! fp_impl {
                     }
                     frac = (frac << 1) & (((1 as U) << MB) - 1);
                 }
-                let scaled = if e & 1 != 0 { 128 | (frac >> (MB - 7)) as usize } else { 256 | (frac >> (MB - 8)) as usize };
+                let scaled = if e & 1 != 0 {
+                    128 | (frac >> (MB - 7)) as usize
+                } else {
+                    256 | (frac >> (MB - 8)) as usize
+                };
                 let re = ((3 * ((1i64 << (EB - 1)) - 1) - 1) - e) / 2;
                 let est = tab[scaled - 128] as U;
                 fv(((re as U) << MB) | (est << (MB - 8)))
@@ -596,7 +622,9 @@ pub fn s2d(c: &Cpu, x: f32) -> f64 {
         if c.fpcr & FPCR_DN != 0 {
             return fd::fv(0x7ff8_0000_0000_0000);
         }
-        return fd::fv(((u as u64 >> 31) << 63) | 0x7ff8_0000_0000_0000 | ((u as u64 & 0x3f_ffff) << 29));
+        return fd::fv(
+            ((u as u64 >> 31) << 63) | 0x7ff8_0000_0000_0000 | ((u as u64 & 0x3f_ffff) << 29),
+        );
     }
     bb(fs::fv(u)) as f64
 }
@@ -681,7 +709,11 @@ pub fn d2h(c: &Cpu, u: u64) -> u16 {
         return s;
     }
     let m = if e != 0 { f | (1u64 << 52) } else { f };
-    let (big_e, ue) = if e != 0 { (e - 1075, e - 1023) } else { (-1074, -1023) };
+    let (big_e, ue) = if e != 0 {
+        (e - 1075, e - 1023)
+    } else {
+        (-1074, -1023)
+    };
     let bits: i64 = if ue < -14 {
         rnd_shift(m, -24 - big_e, rm, neg) as i64
     } else {
@@ -723,7 +755,10 @@ pub fn h2dbits(c: &Cpu, h: u16) -> u64 {
         return s | 0x7ff8_0000_0000_0000 | (f << 42);
     }
     if e == 0 {
-        return ((if s != 0 { -1.0f64 } else { 1.0 }) * f as f64 * f64::from_bits(0x3e70_0000_0000_0000)).to_bits();
+        return ((if s != 0 { -1.0f64 } else { 1.0 })
+            * f as f64
+            * f64::from_bits(0x3e70_0000_0000_0000))
+        .to_bits();
     }
     s | (((e - 15 + 1023) as u64) << 52) | (f << 42)
 }
@@ -754,7 +789,10 @@ mod tests {
         assert_eq!(fs::op(&c, FOP_ADD, qnan, 1.0, 0.0).to_bits(), 0x7fc0_0000);
         c.fpcr = 0;
         // inf - inf: default NaN
-        assert_eq!(fd::op(&c, FOP_SUB, f64::INFINITY, f64::INFINITY, 0.0).to_bits(), 0x7ff8_0000_0000_0000);
+        assert_eq!(
+            fd::op(&c, FOP_SUB, f64::INFINITY, f64::INFINITY, 0.0).to_bits(),
+            0x7ff8_0000_0000_0000
+        );
         // round toward plus infinity
         c.fpcr = 1 << 22;
         let r = fs::op(&c, FOP_ADD, 1.0, f32::from_bits(1), 0.0);

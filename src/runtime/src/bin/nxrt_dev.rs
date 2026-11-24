@@ -44,7 +44,9 @@ fn llvm(tool: &str) -> PathBuf {
 }
 
 fn run(cmd: &mut Command) -> R<String> {
-    let out = cmd.output().map_err(|e| format!("{:?}: {e}", cmd.get_program()))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("{:?}: {e}", cmd.get_program()))?;
     if !out.status.success() {
         return Err(format!(
             "{:?} {:?} failed:\n{}{}",
@@ -100,9 +102,22 @@ const GUEST_C: &[&str] = &[
 
 fn guest_cc(src: &Path, obj: &Path, extra: &[&str]) -> Command {
     let mut c = Command::new(llvm("clang"));
-    c.args(GUEST_C).args(extra).arg(format!("-I{}", root().join("guest/sdk").display())).arg("-c").arg(src).arg("-o").arg(obj);
+    c.args(GUEST_C)
+        .args(extra)
+        .arg(format!("-I{}", root().join("guest/sdk").display()))
+        .arg("-c")
+        .arg(src)
+        .arg("-o")
+        .arg(obj);
     if src.extension().is_some_and(|e| e == "cpp") {
-        c.args(["-std=c++17", "-fexceptions", "-fcxx-exceptions", "-nostdinc++", "-fno-threadsafe-statics", "-fno-use-cxa-atexit"]);
+        c.args([
+            "-std=c++17",
+            "-fexceptions",
+            "-fcxx-exceptions",
+            "-nostdinc++",
+            "-fno-threadsafe-statics",
+            "-fno-use-cxa-atexit",
+        ]);
     }
     c
 }
@@ -110,7 +125,16 @@ fn guest_cc(src: &Path, obj: &Path, extra: &[&str]) -> Command {
 fn guest_ld(objs: &[PathBuf], libs: &[PathBuf], shared: bool, soname: &str, out: &Path) -> R<()> {
     let mut c = Command::new(llvm("ld.lld"));
     c.arg(if shared { "-shared" } else { "-pie" })
-        .args(["--eh-frame-hdr", "--hash-style=sysv", "-z", "notext", "--build-id=sha1", "-soname", soname, "-T"])
+        .args([
+            "--eh-frame-hdr",
+            "--hash-style=sysv",
+            "-z",
+            "notext",
+            "--build-id=sha1",
+            "-soname",
+            soname,
+            "-T",
+        ])
         .arg(root().join("guest/link.ld"))
         .args(objs)
         .args(libs)
@@ -129,7 +153,10 @@ pub fn elf_to_nso(elf: &[u8]) -> R<Vec<u8>> {
         return Err("not an ELF64".into());
     }
     let phoff = u64::from_le_bytes(rd(elf, 0x20)) as usize;
-    let (phentsize, phnum) = (u16::from_le_bytes(rd(elf, 0x36)) as usize, u16::from_le_bytes(rd(elf, 0x38)) as usize);
+    let (phentsize, phnum) = (
+        u16::from_le_bytes(rd(elf, 0x36)) as usize,
+        u16::from_le_bytes(rd(elf, 0x38)) as usize,
+    );
     let mut loads = vec![];
     for i in 0..phnum {
         let p = phoff + i * phentsize;
@@ -144,7 +171,10 @@ pub fn elf_to_nso(elf: &[u8]) -> R<Vec<u8>> {
     }
     loads.sort_by_key(|l| l.0);
     if loads.len() != 3 || loads[0].0 != 0 || loads.iter().any(|l| l.0 % 0x1000 != 0) {
-        return Err(format!("expected three page-aligned PT_LOADs from 0, got {:?}", loads.iter().map(|l| (l.0, l.1.len())).collect::<Vec<_>>()));
+        return Err(format!(
+            "expected three page-aligned PT_LOADs from 0, got {:?}",
+            loads.iter().map(|l| (l.0, l.1.len())).collect::<Vec<_>>()
+        ));
     }
     let bss = loads[2].2 - loads[2].1.len();
     let mut h = vec![0u8; 0x100];
@@ -213,7 +243,11 @@ fn build_guest(out: &Path, tests: &[String]) -> R<()> {
         }
         let extra = g.join("tests").join(format!("{t}_lse.c"));
         if extra.is_file() {
-            cmds.push(guest_cc(&extra, &o(&format!("t_{t}_lse")), &["-fPIE", "-march=armv8.1-a+lse"]));
+            cmds.push(guest_cc(
+                &extra,
+                &o(&format!("t_{t}_lse")),
+                &["-fPIE", "-march=armv8.1-a+lse"],
+            ));
             objs.push(o(&format!("t_{t}_lse")));
         }
         if objs.is_empty() {
@@ -223,7 +257,13 @@ fn build_guest(out: &Path, tests: &[String]) -> R<()> {
     }
     parallel(cmds, 4)?;
     let sdk = obj.join("sdk.so");
-    guest_ld(&[o("crt0_sdk"), o("svc"), o("libc"), o("thread"), o("cxxrt")], &[], true, "sdk", &sdk)?;
+    guest_ld(
+        &[o("crt0_sdk"), o("svc"), o("libc"), o("thread"), o("cxxrt")],
+        &[],
+        true,
+        "sdk",
+        &sdk,
+    )?;
     let host = obj.join("host.so");
     guest_ld(&[o("crt0_sdk"), o("hostlib")], &[], true, "host", &host)?;
     let sdk_nso = elf_to_nso(&std::fs::read(&sdk).map_err(|e| e.to_string())?)?;
@@ -236,7 +276,11 @@ fn build_guest(out: &Path, tests: &[String]) -> R<()> {
         std::fs::create_dir_all(&exefs).map_err(|e| e.to_string())?;
         // a dump folder holds romfs/ beside exefs/ (the translator checks); homebrew has none, so it stays empty
         std::fs::create_dir_all(out.join(&t).join("romfs")).map_err(|e| e.to_string())?;
-        std::fs::write(exefs.join("main"), elf_to_nso(&std::fs::read(&elf).map_err(|e| e.to_string())?)?).map_err(|e| e.to_string())?;
+        std::fs::write(
+            exefs.join("main"),
+            elf_to_nso(&std::fs::read(&elf).map_err(|e| e.to_string())?)?,
+        )
+        .map_err(|e| e.to_string())?;
         std::fs::write(exefs.join("sdk"), &sdk_nso).map_err(|e| e.to_string())?;
     }
     Ok(())
@@ -245,12 +289,20 @@ fn build_guest(out: &Path, tests: &[String]) -> R<()> {
 // ---------------------------------------------------------------- host build
 
 /// The host baseline the games use (nxrs-build `cc::MARCH`).
-const HOST_MARCH: &str = if cfg!(target_arch = "aarch64") { "-march=armv8.2-a+fp16+rcpc+dotprod+crc" } else { "-march=x86-64-v3" };
+const HOST_MARCH: &str = if cfg!(target_arch = "aarch64") {
+    "-march=armv8.2-a+fp16+rcpc+dotprod+crc"
+} else {
+    "-march=x86-64-v3"
+};
 
 /// Linux: the host triple, stated (a cross clang builds for it too, finding the target's C library as a cross
 /// toolchain: an AArch64 runtime tested under qemu-user on an x86-64 machine).
 #[cfg(not(windows))]
-const HOST_TARGET: &str = if cfg!(target_arch = "aarch64") { "--target=aarch64-linux-gnu" } else { "--target=x86_64-linux-gnu" };
+const HOST_TARGET: &str = if cfg!(target_arch = "aarch64") {
+    "--target=aarch64-linux-gnu"
+} else {
+    "--target=x86_64-linux-gnu"
+};
 
 const GEN_FLAGS: &[&str] = &[
     "-O1",
@@ -269,7 +321,8 @@ const GEN_FLAGS: &[&str] = &[
 /// modules.c: the module table from layout.json and the generated tables, the profiler and patch switches the
 /// generated code reads, and main() calling nxrt_main.
 fn modules_c(gen: &Path) -> R<String> {
-    let layout = std::fs::read_to_string(gen.join("layout.json")).map_err(|e| format!("layout.json: {e}"))?;
+    let layout = std::fs::read_to_string(gen.join("layout.json"))
+        .map_err(|e| format!("layout.json: {e}"))?;
     // [{"name": "main", "base": "0x...", "size": "0x..."}, ...] (tiny parser: the translator writes this shape)
     let mut mods = vec![];
     let field = |chunk: &str, k: &str| -> Option<String> {
@@ -280,7 +333,11 @@ fn modules_c(gen: &Path) -> R<String> {
         Some(rest[a..b].to_string())
     };
     for chunk in layout.split('{').skip(1) {
-        let (Some(n), Some(b), Some(s)) = (field(chunk, "name"), field(chunk, "base"), field(chunk, "size")) else {
+        let (Some(n), Some(b), Some(s)) = (
+            field(chunk, "name"),
+            field(chunk, "base"),
+            field(chunk, "size"),
+        ) else {
             return Err("layout.json: unexpected shape".into());
         };
         if gen.join(&n).join(format!("{n}_table.c")).is_file() {
@@ -299,19 +356,28 @@ fn modules_c(gen: &Path) -> R<String> {
     }
     s.push_str("\nint main(int argc, char **argv) {\n    RtModule mods[] = {\n");
     for (n, b, z) in &mods {
-        s.push_str(&format!("        {{\"{n}\", {b}ull, {z}ull, {n}_fn_addrs, {n}_fn_ptrs, 0}},\n"));
+        s.push_str(&format!(
+            "        {{\"{n}\", {b}ull, {z}ull, {n}_fn_addrs, {n}_fn_ptrs, 0}},\n"
+        ));
     }
     s.push_str("    };\n");
     for (i, (n, _, _)) in mods.iter().enumerate() {
         s.push_str(&format!("    mods[{i}].count = {n}_fn_count;\n"));
     }
-    s.push_str(&format!("    return nxrt_main(argc, argv, mods, {});\n}}\n", mods.len()));
+    s.push_str(&format!(
+        "    return nxrt_main(argc, argv, mods, {});\n}}\n",
+        mods.len()
+    ));
     Ok(s)
 }
 
 fn nxrt_lib() -> PathBuf {
     let exe = std::env::current_exe().unwrap();
-    exe.parent().unwrap().join(if cfg!(windows) { "nxrt.lib" } else { "libnxrt.a" })
+    exe.parent().unwrap().join(if cfg!(windows) {
+        "nxrt.lib"
+    } else {
+        "libnxrt.a"
+    })
 }
 
 fn link(gen: &Path, out: &Path) -> R<()> {
@@ -319,9 +385,19 @@ fn link(gen: &Path, out: &Path) -> R<()> {
     std::fs::create_dir_all(&obj).map_err(|e| e.to_string())?;
     std::fs::write(obj.join("modules.c"), modules_c(gen)?).map_err(|e| e.to_string())?;
     let mut srcs = vec![obj.join("modules.c")];
-    for e in std::fs::read_dir(gen).map_err(|e| e.to_string())?.filter_map(|e| e.ok()) {
-        if e.path().is_dir() && e.path().join(format!("{}_table.c", e.file_name().to_string_lossy())).is_file() {
-            for f in std::fs::read_dir(e.path()).map_err(|e| e.to_string())?.filter_map(|e| e.ok()) {
+    for e in std::fs::read_dir(gen)
+        .map_err(|e| e.to_string())?
+        .filter_map(|e| e.ok())
+    {
+        if e.path().is_dir()
+            && e.path()
+                .join(format!("{}_table.c", e.file_name().to_string_lossy()))
+                .is_file()
+        {
+            for f in std::fs::read_dir(e.path())
+                .map_err(|e| e.to_string())?
+                .filter_map(|e| e.ok())
+            {
                 if f.path().extension().is_some_and(|x| x == "c") {
                     srcs.push(f.path());
                 }
@@ -330,15 +406,26 @@ fn link(gen: &Path, out: &Path) -> R<()> {
     }
     // gen/include holds the headers the Rust translator writes; mkw-recomp's generator writes none, and the
     // translator's vendored copies (the same files) serve then.
-    let incs = [gen.join("include"), root().join("../translator/runtime"), root().join("include")];
+    let incs = [
+        gen.join("include"),
+        root().join("../translator/runtime"),
+        root().join("include"),
+    ];
     let mut cmds = vec![];
     let mut objs = vec![];
     for (i, src) in srcs.iter().enumerate() {
-        let o = obj.join(format!("{i:04}_{}.o", src.file_stem().unwrap().to_string_lossy()));
+        let o = obj.join(format!(
+            "{i:04}_{}.o",
+            src.file_stem().unwrap().to_string_lossy()
+        ));
         let mut c = Command::new(llvm("clang"));
         #[cfg(not(windows))]
         c.arg(HOST_TARGET);
-        c.args(GEN_FLAGS.iter().filter(|f| cfg!(windows) || !f.starts_with("-fms-runtime-lib")));
+        c.args(
+            GEN_FLAGS
+                .iter()
+                .filter(|f| cfg!(windows) || !f.starts_with("-fms-runtime-lib")),
+        );
         for inc in &incs {
             c.arg(format!("-I{}", inc.display()));
         }
@@ -354,16 +441,30 @@ fn link(gen: &Path, out: &Path) -> R<()> {
     let mut c = Command::new(llvm("clang"));
     c.arg("-fuse-ld=lld");
     if cfg!(windows) {
-        c.arg("-fms-runtime-lib=dll")
-            .args(&objs)
-            .arg(&lib)
-            .args(["-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp", "-ladvapi32", "-lbcrypt", "-lsynchronization"]);
+        c.arg("-fms-runtime-lib=dll").args(&objs).arg(&lib).args([
+            "-lkernel32",
+            "-lntdll",
+            "-luserenv",
+            "-lws2_32",
+            "-ldbghelp",
+            "-ladvapi32",
+            "-lbcrypt",
+            "-lsynchronization",
+        ]);
     } else {
         // the runtime's system libraries (--print native-static-libs); the test executable's main stack is the
         // process's own
         #[cfg(not(windows))]
         c.arg(HOST_TARGET);
-        c.args(&objs).arg(&lib).args(["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"]);
+        c.args(&objs).arg(&lib).args([
+            "-lgcc_s",
+            "-lutil",
+            "-lrt",
+            "-lpthread",
+            "-lm",
+            "-ldl",
+            "-lc",
+        ]);
     }
     c.arg("-o").arg(out);
     run(&mut c).map(|_| ())
@@ -373,14 +474,29 @@ fn link(gen: &Path, out: &Path) -> R<()> {
 
 fn translate(generator: &str, nxrs: &Path, exefs_parent: &Path, gen: &Path) -> R<()> {
     match generator {
-        "rust" => run(Command::new(nxrs).arg("translate").arg(exefs_parent).arg("--out").arg(gen).args(["--jobs", "4"])).map(|_| ()),
+        "rust" => run(Command::new(nxrs)
+            .arg("translate")
+            .arg(exefs_parent)
+            .arg("--out")
+            .arg(gen)
+            .args(["--jobs", "4"]))
+        .map(|_| ()),
         "mkw" => {
             let script = root().join("tools/mkw_gen.py");
             let py = std::env::var("NXRT_MKW_PYTHON")
                 .map(PathBuf::from)
                 .unwrap_or_else(|_| root().join("../../build/venv-mkw/Scripts/python.exe"));
-            run(Command::new(py).env("PYTHONDONTWRITEBYTECODE", "1").arg("-B").arg("-I").arg(&script).arg("--exefs").arg(exefs_parent.join("exefs")).arg("--out").arg(gen).args(["--jobs", "4"]))
-                .map(|_| ())
+            run(Command::new(py)
+                .env("PYTHONDONTWRITEBYTECODE", "1")
+                .arg("-B")
+                .arg("-I")
+                .arg(&script)
+                .arg("--exefs")
+                .arg(exefs_parent.join("exefs"))
+                .arg("--out")
+                .arg(gen)
+                .args(["--jobs", "4"]))
+            .map(|_| ())
         }
         g => Err(format!("unknown generator {g}")),
     }
@@ -399,14 +515,27 @@ fn e2e(work: &Path, generator: &str, nxrs: &Path, tests: &[String]) -> R<bool> {
             all = false;
             continue;
         }
-        let out = Command::new(&exe).arg(dir.join("exefs")).output().map_err(|e| e.to_string())?;
+        let out = Command::new(&exe)
+            .arg(dir.join("exefs"))
+            .output()
+            .map_err(|e| e.to_string())?;
         let got = String::from_utf8_lossy(&out.stdout).replace("\r\n", "\n");
-        let want = std::fs::read_to_string(root().join("guest/tests").join(format!("{t}.expected"))).unwrap().replace("\r\n", "\n");
+        let want =
+            std::fs::read_to_string(root().join("guest/tests").join(format!("{t}.expected")))
+                .unwrap()
+                .replace("\r\n", "\n");
         let ok = out.status.success() && got == want;
         all &= ok;
-        println!("[{t}] {} (generator {generator}, exit {:?})", if ok { "PASS" } else { "FAIL" }, out.status.code());
+        println!(
+            "[{t}] {} (generator {generator}, exit {:?})",
+            if ok { "PASS" } else { "FAIL" },
+            out.status.code()
+        );
         if !ok {
-            println!("--- expected\n{want}--- got\n{got}--- stderr\n{}", String::from_utf8_lossy(&out.stderr));
+            println!(
+                "--- expected\n{want}--- got\n{got}--- stderr\n{}",
+                String::from_utf8_lossy(&out.stderr)
+            );
         } else {
             for line in got.lines() {
                 println!("    {line}");
@@ -417,7 +546,9 @@ fn e2e(work: &Path, generator: &str, nxrs: &Path, tests: &[String]) -> R<bool> {
 }
 
 fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn main() {
@@ -448,10 +579,19 @@ fn main() {
             link(Path::new(&g), Path::new(&o)).map(|_| true)
         }
         Some("e2e") => {
-            let work = PathBuf::from(arg(&args, "--work").unwrap_or_else(|| root().join("../../build/runtime-e2e").display().to_string()));
+            let work =
+                PathBuf::from(arg(&args, "--work").unwrap_or_else(|| {
+                    root().join("../../build/runtime-e2e").display().to_string()
+                }));
             let generator = arg(&args, "--generator").unwrap_or("rust".into());
             let nxrs = PathBuf::from(arg(&args, "--nxrs").unwrap_or_else(|| {
-                std::env::current_exe().unwrap().parent().unwrap().join(format!("nxrs-build{}", std::env::consts::EXE_SUFFIX)).display().to_string()
+                std::env::current_exe()
+                    .unwrap()
+                    .parent()
+                    .unwrap()
+                    .join(format!("nxrs-build{}", std::env::consts::EXE_SUFFIX))
+                    .display()
+                    .to_string()
             }));
             let mut tests = positional(&["--work", "--generator", "--nxrs"]);
             if tests.is_empty() {

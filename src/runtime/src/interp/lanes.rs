@@ -152,7 +152,11 @@ pub fn lop(op: u32, sz: u32, a: u64, b: u64, d: u64) -> u64 {
     let es = 8u32 << sz;
     let op = op & 255;
     let (sa, sb) = (lsx(a, sz), lsx(b, sz));
-    let (xa, xb): (i128, i128) = if u { (a as i128, b as i128) } else { (sa as i128, sb as i128) };
+    let (xa, xb): (i128, i128) = if u {
+        (a as i128, b as i128)
+    } else {
+        (sa as i128, sb as i128)
+    };
     let sh = b as u8 as i8 as i32;
     let t = crate::interp::tables::get();
     let abd = |x: i128, y: i128| if x > y { x - y } else { y - x };
@@ -169,7 +173,11 @@ pub fn lop(op: u32, sz: u32, a: u64, b: u64, d: u64) -> u64 {
             if sh >= 0 {
                 let s = sh.min(64) as u32;
                 if sat {
-                    return if u { sat_uu((a as u128) << s, sz) } else { sat_s(shl128(sa as i128, s), sz) };
+                    return if u {
+                        sat_uu((a as u128) << s, sz)
+                    } else {
+                        sat_s(shl128(sa as i128, s), sz)
+                    };
                 }
                 return if sh as u32 >= es { 0 } else { a << sh };
             }
@@ -202,8 +210,16 @@ pub fn lop(op: u32, sz: u32, a: u64, b: u64, d: u64) -> u64 {
                 lshr_s(sa, b as i32, true) as u64
             }
         }
-        LOP_SRAI => d.wrapping_add(if u { lshr_u(a, b as i32, false) as u64 } else { lshr_s(sa, b as i32, false) as u64 }),
-        LOP_RSRAI => d.wrapping_add(if u { lshr_u(a, b as i32, true) as u64 } else { lshr_s(sa, b as i32, true) as u64 }),
+        LOP_SRAI => d.wrapping_add(if u {
+            lshr_u(a, b as i32, false) as u64
+        } else {
+            lshr_s(sa, b as i32, false) as u64
+        }),
+        LOP_RSRAI => d.wrapping_add(if u {
+            lshr_u(a, b as i32, true) as u64
+        } else {
+            lshr_s(sa, b as i32, true) as u64
+        }),
         LOP_SRI => {
             let m = if b as u32 >= es { 0 } else { lmask(sz) >> b };
             (d & !m) | if b as u32 >= es { 0 } else { a >> b }
@@ -213,7 +229,10 @@ pub fn lop(op: u32, sz: u32, a: u64, b: u64, d: u64) -> u64 {
             (d & !m) | ((a << b) & m)
         }
         LOP_SQDMULH => sat_s((sa as i128 * sb as i128 * 2) >> es, sz),
-        LOP_SQRDMULH => sat_s((sa as i128 * sb as i128 * 2 + (1i128 << (es - 1))) >> es, sz),
+        LOP_SQRDMULH => sat_s(
+            (sa as i128 * sb as i128 * 2 + (1i128 << (es - 1))) >> es,
+            sz,
+        ),
         LOP_PMUL | LOP_PMULL => pmul64(a, b).0,
         LOP_SQABS => sat_s(if sa < 0 { -(sa as i128) } else { sa as i128 }, sz),
         LOP_SQNEG => sat_s(-(sa as i128), sz),
@@ -227,7 +246,12 @@ pub fn lop(op: u32, sz: u32, a: u64, b: u64, d: u64) -> u64 {
         LOP_NEG => a.wrapping_neg(),
         LOP_CLS => {
             let x = ((sa ^ (sa >> 1)) as u64) & lmask(sz);
-            (if x != 0 { (x << (64 - es)).leading_zeros() as u64 } else { es as u64 }).wrapping_sub(1)
+            (if x != 0 {
+                (x << (64 - es)).leading_zeros() as u64
+            } else {
+                es as u64
+            })
+            .wrapping_sub(1)
         }
         LOP_CLZ => {
             if a != 0 {
@@ -265,12 +289,16 @@ pub fn lop(op: u32, sz: u32, a: u64, b: u64, d: u64) -> u64 {
         LOP_ADDW => a.wrapping_add(xb as u64),
         LOP_SUBW => a.wrapping_sub(xb as u64),
         LOP_SQDMULL => sat_s(sa as i128 * sb as i128 * 2, sz + 1),
-        LOP_SQDMLAL => {
-            sat_s(lsx(d, sz + 1) as i128 + lsx(sat_s(sa as i128 * sb as i128 * 2, sz + 1), sz + 1) as i128, sz + 1)
-        }
-        LOP_SQDMLSL => {
-            sat_s(lsx(d, sz + 1) as i128 - lsx(sat_s(sa as i128 * sb as i128 * 2, sz + 1), sz + 1) as i128, sz + 1)
-        }
+        LOP_SQDMLAL => sat_s(
+            lsx(d, sz + 1) as i128
+                + lsx(sat_s(sa as i128 * sb as i128 * 2, sz + 1), sz + 1) as i128,
+            sz + 1,
+        ),
+        LOP_SQDMLSL => sat_s(
+            lsx(d, sz + 1) as i128
+                - lsx(sat_s(sa as i128 * sb as i128 * 2, sz + 1), sz + 1) as i128,
+            sz + 1,
+        ),
         LOP_SHLL => a << es,
         LOP_XTN => a,
         LOP_SQXTN => sat_s(lsx(a, sz + 1) as i128, sz),
@@ -302,16 +330,39 @@ pub fn lop(op: u32, sz: u32, a: u64, b: u64, d: u64) -> u64 {
 /// of m when bidx >= 0, or the constant `bimm` when m < 0; the accumulator is d's old lane offd+i.
 #[allow(clippy::too_many_arguments)]
 pub fn gen(
-    c: &mut Cpu, op: u32, sz: u32, ne: u32, d: u32, szd: u32, offd: u32, keep: bool, n: u32, szn: u32, offn: u32, m: i32,
-    szm: u32, offm: u32, bidx: i32, bimm: u64,
+    c: &mut Cpu,
+    op: u32,
+    sz: u32,
+    ne: u32,
+    d: u32,
+    szd: u32,
+    offd: u32,
+    keep: bool,
+    n: u32,
+    szn: u32,
+    offn: u32,
+    m: i32,
+    szm: u32,
+    offm: u32,
+    bidx: i32,
+    bimm: u64,
 ) {
     let a = c.v[n as usize];
     let b = if m >= 0 { c.v[m as usize] } else { 0 };
     let o = c.v[d as usize];
     let mut r = if keep { o } else { 0 };
     for i in 0..ne {
-        let y = if m < 0 { bimm } else { lget(b, szm, if bidx >= 0 { bidx as u32 } else { offm + i }) };
-        lset(&mut r, szd, offd + i, lop(op, sz, lget(a, szn, offn + i), y, lget(o, szd, offd + i)));
+        let y = if m < 0 {
+            bimm
+        } else {
+            lget(b, szm, if bidx >= 0 { bidx as u32 } else { offm + i })
+        };
+        lset(
+            &mut r,
+            szd,
+            offd + i,
+            lop(op, sz, lget(a, szn, offn + i), y, lget(o, szd, offd + i)),
+        );
     }
     c.v[d as usize] = r;
 }
@@ -319,7 +370,9 @@ pub fn gen(
 /// Lane-wise op, every operand the same size (simd.rs `same`).
 #[allow(clippy::too_many_arguments)]
 pub fn same(c: &mut Cpu, op: u32, sz: u32, ne: u32, d: u32, n: u32, m: i32, bimm: u64, bidx: i32) {
-    gen(c, op, sz, ne, d, sz, 0, false, n, sz, 0, m, sz, 0, bidx, bimm)
+    gen(
+        c, op, sz, ne, d, sz, 0, false, n, sz, 0, m, sz, 0, bidx, bimm,
+    )
 }
 
 /// SADDLP / UADDLP / SADALP / UADALP.
@@ -328,8 +381,17 @@ pub fn addlp(c: &mut Cpu, u: bool, acc: bool, q: u32, sz: u32, d: u32, n: u32) {
     let mut r = 0u128;
     for i in 0..((4 << q) >> sz) {
         let (x, y) = (lget(a, sz, 2 * i), lget(a, sz, 2 * i + 1));
-        let s = if u { x.wrapping_add(y) } else { (lsx(x, sz) + lsx(y, sz)) as u64 };
-        lset(&mut r, sz + 1, i, s.wrapping_add(if acc { lget(o, sz + 1, i) } else { 0 }));
+        let s = if u {
+            x.wrapping_add(y)
+        } else {
+            (lsx(x, sz) + lsx(y, sz)) as u64
+        };
+        lset(
+            &mut r,
+            sz + 1,
+            i,
+            s.wrapping_add(if acc { lget(o, sz + 1, i) } else { 0 }),
+        );
     }
     c.v[d as usize] = r;
 }
@@ -338,7 +400,13 @@ pub fn addlp(c: &mut Cpu, u: bool, acc: bool, q: u32, sz: u32, d: u32, n: u32) {
 pub fn across(c: &mut Cpu, op: u32, u: bool, q: u32, sz: u32, d: u32, n: u32) {
     let a = c.v[n as usize];
     let ne = (8 << q) >> sz;
-    let get = |i| if u { lget(a, sz, i) as i64 } else { lsx(lget(a, sz, i), sz) };
+    let get = |i| {
+        if u {
+            lget(a, sz, i) as i64
+        } else {
+            lsx(lget(a, sz, i), sz)
+        }
+    };
     let mut acc = get(0);
     for i in 1..ne {
         let x = get(i);
@@ -346,7 +414,11 @@ pub fn across(c: &mut Cpu, op: u32, u: bool, q: u32, sz: u32, d: u32, n: u32) {
             0 | 1 => acc.wrapping_add(x),
             2 => {
                 if u {
-                    if x as u64 > acc as u64 { x } else { acc }
+                    if x as u64 > acc as u64 {
+                        x
+                    } else {
+                        acc
+                    }
                 } else if x > acc {
                     x
                 } else {
@@ -355,7 +427,11 @@ pub fn across(c: &mut Cpu, op: u32, u: bool, q: u32, sz: u32, d: u32, n: u32) {
             }
             _ => {
                 if u {
-                    if (x as u64) < acc as u64 { x } else { acc }
+                    if (x as u64) < acc as u64 {
+                        x
+                    } else {
+                        acc
+                    }
                 } else if x < acc {
                     x
                 } else {
@@ -369,7 +445,10 @@ pub fn across(c: &mut Cpu, op: u32, u: bool, q: u32, sz: u32, d: u32, n: u32) {
 
 /// PMULL / PMULL2 1Q.
 pub fn pmull64(c: &mut Cpu, part: u32, d: u32, n: u32, m: u32) {
-    let (lo, hi) = pmul64((c.v[n as usize] >> (64 * part)) as u64, (c.v[m as usize] >> (64 * part)) as u64);
+    let (lo, hi) = pmul64(
+        (c.v[n as usize] >> (64 * part)) as u64,
+        (c.v[m as usize] >> (64 * part)) as u64,
+    );
     c.v[d as usize] = ((hi as u128) << 64) | lo as u128;
 }
 
@@ -377,7 +456,8 @@ pub fn pmull64(c: &mut Cpu, part: u32, d: u32, n: u32, m: u32) {
 pub fn tbl(c: &mut Cpu, q: u32, len: u32, tbx: bool, d: u32, n: u32, m: u32) {
     let mut tab = [0u8; 64];
     for i in 0..=len {
-        tab[16 * i as usize..16 * i as usize + 16].copy_from_slice(&c.v[((n + i) & 31) as usize].to_le_bytes());
+        tab[16 * i as usize..16 * i as usize + 16]
+            .copy_from_slice(&c.v[((n + i) & 31) as usize].to_le_bytes());
     }
     let (idx, o) = (c.v[m as usize], c.v[d as usize]);
     let mut r = 0u128;
@@ -411,18 +491,26 @@ fn aes_xt(x: u8) -> u8 {
 }
 fn aes_mul(x: u8, k: u32) -> u8 {
     let (x2, x4, x8) = (aes_xt(x), aes_xt(aes_xt(x)), aes_xt(aes_xt(aes_xt(x))));
-    x8 ^ if k & 4 != 0 { x4 } else { 0 } ^ if k & 2 != 0 { x2 } else { 0 } ^ if k & 1 != 0 { x } else { 0 }
+    x8 ^ if k & 4 != 0 { x4 } else { 0 }
+        ^ if k & 2 != 0 { x2 } else { 0 }
+        ^ if k & 1 != 0 { x } else { 0 }
 }
 
 /// 0 AESE, 1 AESD, 2 AESMC, 3 AESIMC.
 pub fn aes(c: &mut Cpu, op: u32, d: u32, n: u32) {
     let t = crate::interp::tables::get();
-    let v = if op < 2 { c.v[d as usize] ^ c.v[n as usize] } else { c.v[n as usize] };
+    let v = if op < 2 {
+        c.v[d as usize] ^ c.v[n as usize]
+    } else {
+        c.v[n as usize]
+    };
     let s = v.to_le_bytes();
     let mut r = [0u8; 16];
     match op {
         0 => (0..16).for_each(|i| r[i] = t.aes_sbox[s[(i + 4 * (i & 3)) & 15] as usize]),
-        1 => (0..16).for_each(|i| r[i] = t.aes_isbox[s[(i.wrapping_sub(4 * (i & 3))) & 15] as usize]),
+        1 => {
+            (0..16).for_each(|i| r[i] = t.aes_isbox[s[(i.wrapping_sub(4 * (i & 3))) & 15] as usize])
+        }
         _ => {
             for col in 0..4 {
                 let a = &s[4 * col..4 * col + 4];
@@ -441,7 +529,12 @@ pub fn aes(c: &mut Cpu, op: u32, d: u32, n: u32) {
 }
 
 fn words(v: u128) -> [u32; 4] {
-    [v as u32, (v >> 32) as u32, (v >> 64) as u32, (v >> 96) as u32]
+    [
+        v as u32,
+        (v >> 32) as u32,
+        (v >> 64) as u32,
+        (v >> 96) as u32,
+    ]
 }
 fn from_words(w: [u32; 4]) -> u128 {
     w[0] as u128 | (w[1] as u128) << 32 | (w[2] as u128) << 64 | (w[3] as u128) << 96
@@ -458,7 +551,10 @@ pub fn sha1hash(c: &mut Cpu, op: u32, d: u32, n: u32, m: u32) {
             1 => x[1] ^ x[2] ^ x[3],
             _ => (x[1] & x[2]) | ((x[1] | x[2]) & x[3]),
         };
-        y = y.wrapping_add(x[0].rotate_left(5)).wrapping_add(t).wrapping_add(we);
+        y = y
+            .wrapping_add(x[0].rotate_left(5))
+            .wrapping_add(t)
+            .wrapping_add(we);
         x[1] = x[1].rotate_left(30);
         let top = x[3];
         x[3] = x[2];
@@ -472,8 +568,11 @@ pub fn sha1hash(c: &mut Cpu, op: u32, d: u32, n: u32, m: u32) {
 
 /// SHA256H (part1) / SHA256H2.
 pub fn sha256hash(c: &mut Cpu, part1: bool, d: u32, n: u32, m: u32) {
-    let (mut x, mut y) =
-        if part1 { (words(c.v[d as usize]), words(c.v[n as usize])) } else { (words(c.v[n as usize]), words(c.v[d as usize])) };
+    let (mut x, mut y) = if part1 {
+        (words(c.v[d as usize]), words(c.v[n as usize]))
+    } else {
+        (words(c.v[n as usize]), words(c.v[d as usize]))
+    };
     let w = words(c.v[m as usize]);
     for &we in &w {
         let chs = ((y[1] ^ y[2]) & y[0]) ^ y[2];
@@ -483,7 +582,9 @@ pub fn sha256hash(c: &mut Cpu, part1: bool, d: u32, n: u32, m: u32) {
             .wrapping_add(chs)
             .wrapping_add(we);
         x[3] = t1.wrapping_add(x[3]);
-        y[3] = t1.wrapping_add(x[0].rotate_right(2) ^ x[0].rotate_right(13) ^ x[0].rotate_right(22)).wrapping_add(maj);
+        y[3] = t1
+            .wrapping_add(x[0].rotate_right(2) ^ x[0].rotate_right(13) ^ x[0].rotate_right(22))
+            .wrapping_add(maj);
         let t = y[3];
         y[3] = y[2];
         y[2] = y[1];
@@ -499,7 +600,11 @@ pub fn sha256hash(c: &mut Cpu, part1: bool, d: u32, n: u32, m: u32) {
 
 /// 0 SHA1SU0, 1 SHA1SU1, 2 SHA256SU0, 3 SHA256SU1, 4 SHA1H.
 pub fn sha_misc(c: &mut Cpu, op: u32, d: u32, n: u32, m: u32) {
-    let (a, b, k) = (words(c.v[d as usize]), words(c.v[n as usize]), words(c.v[m as usize]));
+    let (a, b, k) = (
+        words(c.v[d as usize]),
+        words(c.v[n as usize]),
+        words(c.v[m as usize]),
+    );
     let mut r = [0u32; 4];
     match op {
         0 => {
@@ -513,13 +618,18 @@ pub fn sha_misc(c: &mut Cpu, op: u32, d: u32, n: u32, m: u32) {
         }
         2 => {
             let t = [a[1], a[2], a[3], b[0]];
-            (0..4).for_each(|i| r[i] = (t[i].rotate_right(7) ^ t[i].rotate_right(18) ^ (t[i] >> 3)).wrapping_add(a[i]));
+            (0..4).for_each(|i| {
+                r[i] =
+                    (t[i].rotate_right(7) ^ t[i].rotate_right(18) ^ (t[i] >> 3)).wrapping_add(a[i])
+            });
         }
         3 => {
             let t0 = [b[1], b[2], b[3], k[0]];
             for e in 0..4 {
                 let x = if e < 2 { k[e + 2] } else { r[e - 2] };
-                r[e] = (x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10)).wrapping_add(a[e]).wrapping_add(t0[e]);
+                r[e] = (x.rotate_right(17) ^ x.rotate_right(19) ^ (x >> 10))
+                    .wrapping_add(a[e])
+                    .wrapping_add(t0[e]);
             }
         }
         _ => {
@@ -571,7 +681,11 @@ pub unsafe fn lds(c: &mut Cpu, sz: u32, selem: u32, idx: u32, t: u32, ea: u64) {
 }
 pub unsafe fn sts(c: &Cpu, sz: u32, selem: u32, idx: u32, t: u32, ea: u64) {
     for s in 0..selem {
-        st(ea.wrapping_add((s << sz) as u64), sz, lget(c.v[((t + s) & 31) as usize], sz, idx));
+        st(
+            ea.wrapping_add((s << sz) as u64),
+            sz,
+            lget(c.v[((t + s) & 31) as usize], sz, idx),
+        );
     }
 }
 /// LDnR: replicate into every lane.

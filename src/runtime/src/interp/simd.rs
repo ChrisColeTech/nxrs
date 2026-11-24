@@ -68,9 +68,23 @@ fn mask(t: bool, sz: u32) -> u64 {
 /// One FP lane of type t (0 single, 1 double), as raw bits.
 fn fop(c: &Cpu, t: u32, op: u32, a: u64, b: u64, d: u64) -> u64 {
     if t == 0 {
-        fs::op(c, op, f32::from_bits(a as u32), f32::from_bits(b as u32), f32::from_bits(d as u32)).to_bits() as u64
+        fs::op(
+            c,
+            op,
+            f32::from_bits(a as u32),
+            f32::from_bits(b as u32),
+            f32::from_bits(d as u32),
+        )
+        .to_bits() as u64
     } else {
-        fd::op(c, op, f64::from_bits(a), f64::from_bits(b), f64::from_bits(d)).to_bits()
+        fd::op(
+            c,
+            op,
+            f64::from_bits(a),
+            f64::from_bits(b),
+            f64::from_bits(d),
+        )
+        .to_bits()
     }
 }
 fn fneg(t: u32, a: u64) -> u64 {
@@ -103,7 +117,11 @@ fn fromint_lane(c: &Cpu, t: u32, a: u64, ib: u32, uns: bool, fbits: u32) -> u64 
 }
 /// FP_SETS / FP_SETD: the whole register.
 fn fset(c: &mut Cpu, t: u32, d: u32, bits: u64) {
-    c.v[d as usize] = if t == 0 { bits as u32 as u128 } else { bits as u128 };
+    c.v[d as usize] = if t == 0 {
+        bits as u32 as u128
+    } else {
+        bits as u128
+    };
 }
 /// The scalar of type t in register n (VSF32 / VSF64 as bits).
 fn sget(c: &Cpu, t: u32, n: u32) -> u64 {
@@ -144,7 +162,11 @@ fn simd_expand_imm(op: u32, cmode: u32, imm8: u32) -> u64 {
         4 => (0..64).step_by(16).map(|s| i << s).sum(),
         5 => (0..64).step_by(16).map(|s| (i << 8) << s).sum(),
         6 => {
-            let v = if cmode & 1 == 0 { (i << 8) | 0xFF } else { (i << 16) | 0xFFFF };
+            let v = if cmode & 1 == 0 {
+                (i << 8) | 0xFF
+            } else {
+                (i << 16) | 0xFFFF
+            };
             (v << 32) | v
         }
         _ => {
@@ -210,7 +232,12 @@ fn fcmp3(key: (u32, u32, u32)) -> Option<u32> {
 
 /// AdvSIMD / FP / crypto data processing (simd.rs `dp`).
 pub fn dp(c: &mut Cpu, w: u32) -> R<()> {
-    let (op0, op1, op2, op3) = (bits(w, 28, 4), bits(w, 23, 2), bits(w, 19, 4), bits(w, 10, 9));
+    let (op0, op1, op2, op3) = (
+        bits(w, 28, 4),
+        bits(w, 23, 2),
+        bits(w, 19, 4),
+        bits(w, 10, 9),
+    );
     let o1b = op1 & 2 != 0;
     if op0 == 0b0100 && !o1b && (op2 & 7) == 5 && (op3 & 0b110000011) == 0b10 {
         return crypto_aes(c, w);
@@ -285,7 +312,9 @@ pub fn dp(c: &mut Cpu, w: u32) -> R<()> {
         return unsup(format!("simd vector {w:08x}"));
     }
     if (op0 & 0b0101) == 0b0001 {
-        if bits(w, 29, 1) != 0 || (bits(w, 31, 1) != 0 && (o1b || (op2 & 4 != 0 && op3 & 0b111111 != 0))) {
+        if bits(w, 29, 1) != 0
+            || (bits(w, 31, 1) != 0 && (o1b || (op2 & 4 != 0 && op3 & 0b111111 != 0)))
+        {
             return unsup("fp M/S");
         }
         if o1b {
@@ -317,7 +346,13 @@ pub fn dp(c: &mut Cpu, w: u32) -> R<()> {
 }
 
 fn fp16_misc2(c: &mut Cpu, w: u32) -> R<()> {
-    let (q, u, opc, n, d) = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 12, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 12, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc != 0b01111 {
         return unsup("fp16 misc");
     }
@@ -404,7 +439,12 @@ fn splat(sz: u32, x: u64) -> u128 {
 }
 
 fn copy(c: &mut Cpu, w: u32) -> R<()> {
-    let (q, op, imm5, imm4) = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 16, 5), bits(w, 11, 4));
+    let (q, op, imm5, imm4) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 16, 5),
+        bits(w, 11, 4),
+    );
     let (d, n) = (bits(w, 0, 5), bits(w, 5, 5));
     let (sz, idx) = imm5_dec(imm5)?;
     if sz > 3 {
@@ -468,14 +508,25 @@ fn shuf(a: u128, b: u128, sz: u32, idx: &[u32]) -> u128 {
     let nl = 16 >> sz;
     let mut r = 0u128;
     for (i, &k) in idx.iter().enumerate() {
-        let e = if k < nl { lget(a, sz, k) } else { lget(b, sz, k - nl) };
+        let e = if k < nl {
+            lget(a, sz, k)
+        } else {
+            lget(b, sz, k - nl)
+        };
         lset(&mut r, sz, i as u32, e);
     }
     r
 }
 
 fn permute(c: &mut Cpu, w: u32) -> R<()> {
-    let (q, sz, m, opc, n, d) = (bits(w, 30, 1), bits(w, 22, 2), bits(w, 16, 5), bits(w, 12, 3), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, sz, m, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 22, 2),
+        bits(w, 16, 5),
+        bits(w, 12, 3),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc == 0 || opc == 4 || (sz == 3 && q == 0) {
         return unsup("permute");
     }
@@ -492,7 +543,11 @@ fn permute(c: &mut Cpu, w: u32) -> R<()> {
             idx.push(if i & 1 == 0 { p + part } else { nl + p + part });
         } else {
             let base = part * ne / 2;
-            idx.push(if i & 1 == 0 { base + i / 2 } else { nl + base + i / 2 });
+            idx.push(if i & 1 == 0 {
+                base + i / 2
+            } else {
+                nl + base + i / 2
+            });
         }
     }
     let r = shuf(v(c, n), v(c, m), sz, &idx);
@@ -501,14 +556,28 @@ fn permute(c: &mut Cpu, w: u32) -> R<()> {
 }
 
 fn ext(c: &mut Cpu, w: u32) -> R<()> {
-    let (q, m, imm4, n, d) = (bits(w, 30, 1), bits(w, 16, 5), bits(w, 11, 4), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, m, imm4, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 16, 5),
+        bits(w, 11, 4),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if bits(w, 22, 2) != 0 || (q == 0 && imm4 >= 8) {
         return unsup("ext");
     }
     let idx: Vec<u32> = if q != 0 {
         (0..16).map(|i| imm4 + i).collect()
     } else {
-        (0..8).map(|i| if imm4 + i < 8 { imm4 + i } else { 16 + imm4 + i - 8 }).collect()
+        (0..8)
+            .map(|i| {
+                if imm4 + i < 8 {
+                    imm4 + i
+                } else {
+                    16 + imm4 + i - 8
+                }
+            })
+            .collect()
     };
     let r = shuf(v(c, n), v(c, m), 0, &idx);
     vw(c, q, d, r);
@@ -516,7 +585,14 @@ fn ext(c: &mut Cpu, w: u32) -> R<()> {
 }
 
 fn tbl(c: &mut Cpu, w: u32) -> R<()> {
-    let (q, m, len, op, n, d) = (bits(w, 30, 1), bits(w, 16, 5), bits(w, 13, 2), bits(w, 12, 1), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, m, len, op, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 16, 5),
+        bits(w, 13, 2),
+        bits(w, 12, 1),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if bits(w, 22, 2) != 0 {
         return unsup("tbl op2");
     }
@@ -535,8 +611,15 @@ fn lopu(op: u32, u: u32) -> u32 {
 }
 
 fn three_same(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
-    let (q, u, sz, m, opc, n, d) =
-        (bits(w, 30, 1), bits(w, 29, 1), bits(w, 22, 2), bits(w, 16, 5), bits(w, 11, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, sz, m, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 22, 2),
+        bits(w, 16, 5),
+        bits(w, 11, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc >= 0b11000 {
         return three_same_fp(c, w, scalar);
     }
@@ -561,10 +644,19 @@ fn three_same(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
         return unsup("3same size");
     }
     let lm = lmask(sz) as i128;
-    let (lo, hi) = if us { (0i128, lm) } else { (-(lm + 1) / 2, lm / 2) };
+    let (lo, hi) = if us {
+        (0i128, lm)
+    } else {
+        (-(lm + 1) / 2, lm / 2)
+    };
     match opc {
         0 => ln::same(c, lopu(LOP_HADD, u), sz, ne, d, n, m as i32, 0, -1),
-        1 => vw(c, q, d, map2(a, b, sz, ne, |x, y| (val(x) + val(y)).clamp(lo, hi) as u64)),
+        1 => vw(
+            c,
+            q,
+            d,
+            map2(a, b, sz, ne, |x, y| (val(x) + val(y)).clamp(lo, hi) as u64),
+        ),
         2 => ln::same(c, lopu(LOP_RHADD, u), sz, ne, d, n, m as i32, 0, -1),
         3 => {
             let (a64, b64, o64) = (a, b, o);
@@ -581,19 +673,81 @@ fn three_same(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             vw(c, q, d, e);
         }
         4 => ln::same(c, lopu(LOP_HSUB, u), sz, ne, d, n, m as i32, 0, -1),
-        5 => vw(c, q, d, map2(a, b, sz, ne, |x, y| (val(x) - val(y)).clamp(lo, hi) as u64)),
-        6 => vw(c, q, d, map2(a, b, sz, ne, |x, y| mask(val(x) > val(y), sz))),
-        7 => vw(c, q, d, map2(a, b, sz, ne, |x, y| mask(val(x) >= val(y), sz))),
-        8..=11 => ln::same(c, lopu([LOP_SHL, LOP_QSHL, LOP_RSHL, LOP_QRSHL][(opc - 8) as usize], u), sz, ne, d, n, m as i32, 0, -1),
-        12 => vw(c, q, d, map2(a, b, sz, ne, |x, y| val(x).max(val(y)) as u64)),
-        13 => vw(c, q, d, map2(a, b, sz, ne, |x, y| val(x).min(val(y)) as u64)),
+        5 => vw(
+            c,
+            q,
+            d,
+            map2(a, b, sz, ne, |x, y| (val(x) - val(y)).clamp(lo, hi) as u64),
+        ),
+        6 => vw(
+            c,
+            q,
+            d,
+            map2(a, b, sz, ne, |x, y| mask(val(x) > val(y), sz)),
+        ),
+        7 => vw(
+            c,
+            q,
+            d,
+            map2(a, b, sz, ne, |x, y| mask(val(x) >= val(y), sz)),
+        ),
+        8..=11 => ln::same(
+            c,
+            lopu(
+                [LOP_SHL, LOP_QSHL, LOP_RSHL, LOP_QRSHL][(opc - 8) as usize],
+                u,
+            ),
+            sz,
+            ne,
+            d,
+            n,
+            m as i32,
+            0,
+            -1,
+        ),
+        12 => vw(
+            c,
+            q,
+            d,
+            map2(a, b, sz, ne, |x, y| val(x).max(val(y)) as u64),
+        ),
+        13 => vw(
+            c,
+            q,
+            d,
+            map2(a, b, sz, ne, |x, y| val(x).min(val(y)) as u64),
+        ),
         14 | 15 => {
-            let r = map2(a, b, sz, ne, |x, y| (val(x).max(val(y)) as u64).wrapping_sub(val(x).min(val(y)) as u64));
-            let r = if opc == 15 { map2(o, r, sz, ne, |x, y| x.wrapping_add(y)) } else { r };
+            let r = map2(a, b, sz, ne, |x, y| {
+                (val(x).max(val(y)) as u64).wrapping_sub(val(x).min(val(y)) as u64)
+            });
+            let r = if opc == 15 {
+                map2(o, r, sz, ne, |x, y| x.wrapping_add(y))
+            } else {
+                r
+            };
             vw(c, q, d, r);
         }
-        16 => vw(c, q, d, map2(a, b, sz, ne, |x, y| if us { x.wrapping_sub(y) } else { x.wrapping_add(y) })),
-        17 => vw(c, q, d, map2(a, b, sz, ne, |x, y| mask(if us { x == y } else { x & y != 0 }, sz))),
+        16 => vw(
+            c,
+            q,
+            d,
+            map2(a, b, sz, ne, |x, y| {
+                if us {
+                    x.wrapping_sub(y)
+                } else {
+                    x.wrapping_add(y)
+                }
+            }),
+        ),
+        17 => vw(
+            c,
+            q,
+            d,
+            map2(a, b, sz, ne, |x, y| {
+                mask(if us { x == y } else { x & y != 0 }, sz)
+            }),
+        ),
         _ => {
             if sz == 3 && opc != 23 {
                 return unsup("3same size");
@@ -601,7 +755,18 @@ fn three_same(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             match opc {
                 18 => {
                     let p = map2(a, b, sz, ne, |x, y| x.wrapping_mul(y));
-                    vw(c, q, d, map2(o, p, sz, ne, |x, y| if us { x.wrapping_sub(y) } else { x.wrapping_add(y) }));
+                    vw(
+                        c,
+                        q,
+                        d,
+                        map2(o, p, sz, ne, |x, y| {
+                            if us {
+                                x.wrapping_sub(y)
+                            } else {
+                                x.wrapping_add(y)
+                            }
+                        }),
+                    );
                 }
                 19 => {
                     if us {
@@ -617,7 +782,10 @@ fn three_same(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
                     if opc == 23 && us {
                         return unsup("addp U");
                     }
-                    let src: Vec<u64> = (0..ne).map(|i| lget(a, sz, i)).chain((0..ne).map(|i| lget(b, sz, i))).collect();
+                    let src: Vec<u64> = (0..ne)
+                        .map(|i| lget(a, sz, i))
+                        .chain((0..ne).map(|i| lget(b, sz, i)))
+                        .collect();
                     let mut r = 0u128;
                     for k in 0..ne {
                         let (x, y) = (src[2 * k as usize], src[2 * k as usize + 1]);
@@ -634,7 +802,17 @@ fn three_same(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
                     if sz != 1 && sz != 2 {
                         return unsup("sqdmulh size");
                     }
-                    ln::same(c, if us { LOP_SQRDMULH } else { LOP_SQDMULH }, sz, ne, d, n, m as i32, 0, -1);
+                    ln::same(
+                        c,
+                        if us { LOP_SQRDMULH } else { LOP_SQDMULH },
+                        sz,
+                        ne,
+                        d,
+                        n,
+                        m as i32,
+                        0,
+                        -1,
+                    );
                 }
                 _ => return unsup("3same opcode"),
             }
@@ -647,7 +825,11 @@ fn three_same_scalar(c: &mut Cpu, u: u32, sz: u32, opc: u32, d: u32, n: u32, m: 
     let mi = m as i32;
     if opc == 1 || opc == 5 {
         let op = if opc == 1 {
-            if u != 0 { LOP_UQADD } else { LOP_SQADD }
+            if u != 0 {
+                LOP_UQADD
+            } else {
+                LOP_SQADD
+            }
         } else if u != 0 {
             LOP_UQSUB
         } else {
@@ -657,27 +839,65 @@ fn three_same_scalar(c: &mut Cpu, u: u32, sz: u32, opc: u32, d: u32, n: u32, m: 
         return Ok(());
     }
     if opc == 9 || opc == 11 {
-        ln::same(c, lopu(if opc == 9 { LOP_QSHL } else { LOP_QRSHL }, u), sz, 1, d, n, mi, 0, -1);
+        ln::same(
+            c,
+            lopu(if opc == 9 { LOP_QSHL } else { LOP_QRSHL }, u),
+            sz,
+            1,
+            d,
+            n,
+            mi,
+            0,
+            -1,
+        );
         return Ok(());
     }
     if opc == 22 {
         if sz != 1 && sz != 2 {
             return unsup("sqdmulh size");
         }
-        ln::same(c, if u != 0 { LOP_SQRDMULH } else { LOP_SQDMULH }, sz, 1, d, n, mi, 0, -1);
+        ln::same(
+            c,
+            if u != 0 { LOP_SQRDMULH } else { LOP_SQDMULH },
+            sz,
+            1,
+            d,
+            n,
+            mi,
+            0,
+            -1,
+        );
         return Ok(());
     }
     if sz != 3 {
         return unsup("scalar 3same size");
     }
     let (a, b) = (vs64(c, n), vs64(c, m));
-    let gt = if u != 0 { a > b } else { (a as i64) > (b as i64) };
-    let ge = if u != 0 { a >= b } else { (a as i64) >= (b as i64) };
+    let gt = if u != 0 {
+        a > b
+    } else {
+        (a as i64) > (b as i64)
+    };
+    let ge = if u != 0 {
+        a >= b
+    } else {
+        (a as i64) >= (b as i64)
+    };
     let r = match opc {
         6 => mask(gt, 3),
         7 => mask(ge, 3),
         8 | 10 => {
-            ln::same(c, lopu(if opc == 8 { LOP_SHL } else { LOP_RSHL }, u), 3, 1, d, n, mi, 0, -1);
+            ln::same(
+                c,
+                lopu(if opc == 8 { LOP_SHL } else { LOP_RSHL }, u),
+                3,
+                1,
+                d,
+                n,
+                mi,
+                0,
+                -1,
+            );
             return Ok(());
         }
         16 => {
@@ -695,8 +915,16 @@ fn three_same_scalar(c: &mut Cpu, u: u32, sz: u32, opc: u32, d: u32, n: u32, m: 
 }
 
 fn three_same_fp(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
-    let (q, u, a_, sz, m, opc, n, d) =
-        (bits(w, 30, 1), bits(w, 29, 1), bits(w, 23, 1), bits(w, 22, 1), bits(w, 16, 5), bits(w, 11, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, a_, sz, m, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 23, 1),
+        bits(w, 22, 1),
+        bits(w, 16, 5),
+        bits(w, 11, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if !scalar && sz != 0 && q == 0 {
         return unsup("fp 2d Q");
     }
@@ -710,16 +938,25 @@ fn three_same_fp(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             return Ok(());
         }
         let ne = lanes(1, fsz);
-        let r = map2(vq(c, q, n), vq(c, q, m), fsz, ne, |x, y| fcmp_lane(c, t, cop, x, y));
+        let r = map2(vq(c, q, n), vq(c, q, m), fsz, ne, |x, y| {
+            fcmp_lane(c, t, cop, x, y)
+        });
         vw(c, q, d, r);
         return Ok(());
     }
     if scalar {
-        if !matches!(key, (0, 0, 0b11011) | (0, 0, 0b11111) | (0, 1, 0b11111) | (1, 1, 0b11010)) {
+        if !matches!(
+            key,
+            (0, 0, 0b11011) | (0, 0, 0b11111) | (0, 1, 0b11111) | (1, 1, 0b11010)
+        ) {
             return unsup("scalar fp 3same");
         }
         let op = fop3(key).unwrap();
-        let x = if op == FOP_RECPS || op == FOP_RSQRTS { fneg(t, sget(c, t, n)) } else { sget(c, t, n) };
+        let x = if op == FOP_RECPS || op == FOP_RSQRTS {
+            fneg(t, sget(c, t, n))
+        } else {
+            sget(c, t, n)
+        };
         let r = fop(c, t, op, x, sget(c, t, m), 0);
         fset(c, t, d, r);
         return Ok(());
@@ -728,20 +965,44 @@ fn three_same_fp(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
     let (a, b) = (vq(c, q, n), vq(c, q, m));
     if let Some(p) = fpairv(key) {
         let nq = lanes(q, fsz);
-        let src: Vec<u64> = (0..nq).map(|i| lget(a, fsz, i)).chain((0..nq).map(|i| lget(b, fsz, i))).collect();
+        let src: Vec<u64> = (0..nq)
+            .map(|i| lget(a, fsz, i))
+            .chain((0..nq).map(|i| lget(b, fsz, i)))
+            .collect();
         let mut r = 0u128;
         for k in 0..nq {
-            lset(&mut r, fsz, k, fop(c, t, p, src[2 * k as usize], src[2 * k as usize + 1], 0));
+            lset(
+                &mut r,
+                fsz,
+                k,
+                fop(c, t, p, src[2 * k as usize], src[2 * k as usize + 1], 0),
+            );
         }
         vw(c, q, d, r);
         return Ok(());
     }
     if u == 0 && opc == 0b11001 {
         let acc = vq(c, q, d);
-        let mm = if a_ != 0 { map1(a, fsz, ne, |x| fneg(t, x)) } else { a };
+        let mm = if a_ != 0 {
+            map1(a, fsz, ne, |x| fneg(t, x))
+        } else {
+            a
+        };
         let mut r = 0u128;
         for i in 0..lanes(q, fsz) {
-            lset(&mut r, fsz, i, fop(c, t, FOP_MADD, lget(acc, fsz, i), lget(mm, fsz, i), lget(b, fsz, i)));
+            lset(
+                &mut r,
+                fsz,
+                i,
+                fop(
+                    c,
+                    t,
+                    FOP_MADD,
+                    lget(acc, fsz, i),
+                    lget(mm, fsz, i),
+                    lget(b, fsz, i),
+                ),
+            );
         }
         vw(c, q, d, r);
         return Ok(());
@@ -749,7 +1010,11 @@ fn three_same_fp(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
     let Some(op) = fop3(key) else {
         return unsup("fp 3same opcode");
     };
-    let a = if op == FOP_RECPS || op == FOP_RSQRTS { map1(a, fsz, ne, |x| fneg(t, x)) } else { a };
+    let a = if op == FOP_RECPS || op == FOP_RSQRTS {
+        map1(a, fsz, ne, |x| fneg(t, x))
+    } else {
+        a
+    };
     let r = map2(a, b, fsz, lanes(q, fsz), |x, y| fop(c, t, op, x, y, 0));
     vw(c, q, d, r);
     Ok(())
@@ -758,8 +1023,15 @@ fn three_same_fp(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
 // ---------------------------------------------------------------- three different
 
 fn three_diff(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
-    let (q, u, sz, m, opc, n, d) =
-        (bits(w, 30, 1), bits(w, 29, 1), bits(w, 22, 2), bits(w, 16, 5), bits(w, 12, 4), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, sz, m, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 22, 2),
+        bits(w, 16, 5),
+        bits(w, 12, 4),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     let mi = m as i32;
     if scalar {
         if u != 0 || ![9, 11, 13].contains(&opc) || (sz != 1 && sz != 2) {
@@ -770,7 +1042,24 @@ fn three_diff(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             11 => LOP_SQDMLSL,
             _ => LOP_SQDMULL,
         };
-        ln::gen(c, op, sz, 1, d, sz + 1, 0, false, n, sz, 0, mi, sz, 0, -1, 0);
+        ln::gen(
+            c,
+            op,
+            sz,
+            1,
+            d,
+            sz + 1,
+            0,
+            false,
+            n,
+            sz,
+            0,
+            mi,
+            sz,
+            0,
+            -1,
+            0,
+        );
         return Ok(());
     }
     if opc == 14 {
@@ -791,13 +1080,48 @@ fn three_diff(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
     let ne = 8 >> sz;
     let off = q * ne;
     if opc == 4 || opc == 6 {
-        let op = [LOP_ADDHN, LOP_RADDHN, LOP_SUBHN, LOP_RSUBHN][((opc == 6) as u32 * 2 + u) as usize];
-        ln::gen(c, op, sz, ne, d, sz, off, q != 0, n, sz + 1, 0, mi, sz + 1, 0, -1, 0);
+        let op =
+            [LOP_ADDHN, LOP_RADDHN, LOP_SUBHN, LOP_RSUBHN][((opc == 6) as u32 * 2 + u) as usize];
+        ln::gen(
+            c,
+            op,
+            sz,
+            ne,
+            d,
+            sz,
+            off,
+            q != 0,
+            n,
+            sz + 1,
+            0,
+            mi,
+            sz + 1,
+            0,
+            -1,
+            0,
+        );
         return Ok(());
     }
     if opc == 1 || opc == 3 {
         let op = if opc == 1 { LOP_ADDW } else { LOP_SUBW };
-        ln::gen(c, lopu(op, u), sz, ne, d, sz + 1, 0, false, n, sz + 1, 0, mi, sz, off, -1, 0);
+        ln::gen(
+            c,
+            lopu(op, u),
+            sz,
+            ne,
+            d,
+            sz + 1,
+            0,
+            false,
+            n,
+            sz + 1,
+            0,
+            mi,
+            sz,
+            off,
+            -1,
+            0,
+        );
         return Ok(());
     }
     let op = match opc {
@@ -818,14 +1142,38 @@ fn three_diff(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
         return unsup("sqdmull");
     }
     let uu = if sqd || op == LOP_PMULL { 0 } else { u };
-    ln::gen(c, lopu(op, uu), sz, ne, d, sz + 1, 0, false, n, sz, off, mi, sz, off, -1, 0);
+    ln::gen(
+        c,
+        lopu(op, uu),
+        sz,
+        ne,
+        d,
+        sz + 1,
+        0,
+        false,
+        n,
+        sz,
+        off,
+        mi,
+        sz,
+        off,
+        -1,
+        0,
+    );
     Ok(())
 }
 
 // ---------------------------------------------------------------- two-register misc
 
 fn misc2(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
-    let (q, u, sz, opc, n, d) = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 22, 2), bits(w, 12, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, sz, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 22, 2),
+        bits(w, 12, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc >= 0b11000 || opc == 0b10110 || opc == 0b10111 || (0b01100..=0b01111).contains(&opc) {
         return misc2_fp(c, w, scalar);
     }
@@ -869,14 +1217,34 @@ fn misc2(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
         return Ok(());
     }
     if opc == 3 {
-        ln::same(c, if u != 0 { LOP_USQADD } else { LOP_SUQADD }, sz, ne, d, n, -1, 0, -1);
+        ln::same(
+            c,
+            if u != 0 { LOP_USQADD } else { LOP_SUQADD },
+            sz,
+            ne,
+            d,
+            n,
+            -1,
+            0,
+            -1,
+        );
         return Ok(());
     }
     if opc == 4 {
         if sz == 3 {
             return unsup("clz size");
         }
-        ln::same(c, if u != 0 { LOP_CLZ } else { LOP_CLS }, sz, ne, d, n, -1, 0, -1);
+        ln::same(
+            c,
+            if u != 0 { LOP_CLZ } else { LOP_CLS },
+            sz,
+            ne,
+            d,
+            n,
+            -1,
+            0,
+            -1,
+        );
         return Ok(());
     }
     if opc == 5 {
@@ -899,7 +1267,17 @@ fn misc2(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
         return unsup("not/rbit size");
     }
     if opc == 7 {
-        ln::same(c, if u != 0 { LOP_SQNEG } else { LOP_SQABS }, sz, ne, d, n, -1, 0, -1);
+        ln::same(
+            c,
+            if u != 0 { LOP_SQNEG } else { LOP_SQABS },
+            sz,
+            ne,
+            d,
+            n,
+            -1,
+            0,
+            -1,
+        );
         return Ok(());
     }
     let a = v(c, n);
@@ -924,7 +1302,24 @@ fn misc2(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
                     _ => LOP_UQXTN,
                 };
                 let ne = 8 >> sz;
-                ln::gen(c, op, sz, ne, d, sz, q * ne, q != 0, n, sz + 1, 0, -1, 0, 0, -1, 0);
+                ln::gen(
+                    c,
+                    op,
+                    sz,
+                    ne,
+                    d,
+                    sz,
+                    q * ne,
+                    q != 0,
+                    n,
+                    sz + 1,
+                    0,
+                    -1,
+                    0,
+                    0,
+                    -1,
+                    0,
+                );
                 return Ok(());
             }
             if opc == 0b10011 && u != 0 {
@@ -932,7 +1327,24 @@ fn misc2(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
                     return unsup("shll size");
                 }
                 let ne = 8 >> sz;
-                ln::gen(c, LOP_SHLL, sz, ne, d, sz + 1, 0, false, n, sz, q * ne, -1, 0, 0, -1, 0);
+                ln::gen(
+                    c,
+                    LOP_SHLL,
+                    sz,
+                    ne,
+                    d,
+                    sz + 1,
+                    0,
+                    false,
+                    n,
+                    sz,
+                    q * ne,
+                    -1,
+                    0,
+                    0,
+                    -1,
+                    0,
+                );
                 return Ok(());
             }
             return unsup("misc2 opcode");
@@ -944,11 +1356,31 @@ fn misc2(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
 
 fn misc2_scalar(c: &mut Cpu, u: u32, sz: u32, opc: u32, d: u32, n: u32) -> R<()> {
     if opc == 3 {
-        ln::same(c, if u != 0 { LOP_USQADD } else { LOP_SUQADD }, sz, 1, d, n, -1, 0, -1);
+        ln::same(
+            c,
+            if u != 0 { LOP_USQADD } else { LOP_SUQADD },
+            sz,
+            1,
+            d,
+            n,
+            -1,
+            0,
+            -1,
+        );
         return Ok(());
     }
     if opc == 7 {
-        ln::same(c, if u != 0 { LOP_SQNEG } else { LOP_SQABS }, sz, 1, d, n, -1, 0, -1);
+        ln::same(
+            c,
+            if u != 0 { LOP_SQNEG } else { LOP_SQABS },
+            sz,
+            1,
+            d,
+            n,
+            -1,
+            0,
+            -1,
+        );
         return Ok(());
     }
     if opc == 0b10010 || opc == 0b10100 {
@@ -989,8 +1421,15 @@ fn misc2_scalar(c: &mut Cpu, u: u32, sz: u32, opc: u32, d: u32, n: u32) -> R<()>
 }
 
 fn misc2_fp(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
-    let (q, u, a_, sz, opc, n, d) =
-        (bits(w, 30, 1), bits(w, 29, 1), bits(w, 23, 1), bits(w, 22, 1), bits(w, 12, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, a_, sz, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 23, 1),
+        bits(w, 22, 1),
+        bits(w, 12, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     let t = sz;
     let fsz = 2 + sz;
     if opc == 0b10110 || opc == 0b10111 {
@@ -1032,8 +1471,18 @@ fn misc2_fp(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             if scalar {
                 return unsup("scalar fabs");
             }
-            let sign = if sz == 0 { 0x8000_0000u64 } else { 0x8000_0000_0000_0000 };
-            let r = map1(v(c, n), fsz, lanes(1, fsz), |e| if u != 0 { e ^ sign } else { e & !sign });
+            let sign = if sz == 0 {
+                0x8000_0000u64
+            } else {
+                0x8000_0000_0000_0000
+            };
+            let r = map1(v(c, n), fsz, lanes(1, fsz), |e| {
+                if u != 0 {
+                    e ^ sign
+                } else {
+                    e & !sign
+                }
+            });
             vw(c, q, d, r);
             return Ok(());
         }
@@ -1045,7 +1494,13 @@ fn misc2_fp(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             (0b01110, 0) => (2, true),
             _ => return unsup("fcm zero"),
         };
-        let lane = |c: &Cpu, e: u64| if swap { fcmp_lane(c, t, op, 0, e) } else { fcmp_lane(c, t, op, e, 0) };
+        let lane = |c: &Cpu, e: u64| {
+            if swap {
+                fcmp_lane(c, t, op, 0, e)
+            } else {
+                fcmp_lane(c, t, op, e, 0)
+            }
+        };
         if scalar {
             let r = lane(c, sget(c, t, n));
             set_v(c, d, r as u128);
@@ -1070,7 +1525,11 @@ fn misc2_fp(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
         if !scalar {
             return unsup("vector frecpx");
         }
-        let r = if t == 0 { fs::recpx(c, sfs(c, n)).to_bits() as u64 } else { fd::recpx(c, sfd(c, n)).to_bits() };
+        let r = if t == 0 {
+            fs::recpx(c, sfs(c, n)).to_bits() as u64
+        } else {
+            fd::recpx(c, sfd(c, n)).to_bits()
+        };
         fset(c, t, d, r);
         return Ok(());
     }
@@ -1120,7 +1579,17 @@ fn misc2_fp(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
         if scalar || sz != 0 {
             return unsup("urecpe");
         }
-        ln::same(c, if u != 0 { LOP_URSQRTE } else { LOP_URECPE }, 2, lanes(q, 2), d, n, -1, 0, -1);
+        ln::same(
+            c,
+            if u != 0 { LOP_URSQRTE } else { LOP_URECPE },
+            2,
+            lanes(q, 2),
+            d,
+            n,
+            -1,
+            0,
+            -1,
+        );
         return Ok(());
     }
     if opc == 0b11101 {
@@ -1161,11 +1630,21 @@ fn fcvtl(c: &mut Cpu, sz: u32, part: u32, d: u32, n: u32) {
     let mut r = 0u128;
     if sz == 0 {
         for i in 0..4 {
-            lset(&mut r, 2, i, fp::h2s(c, lget(a, 1, 4 * part + i) as u16).to_bits() as u64);
+            lset(
+                &mut r,
+                2,
+                i,
+                fp::h2s(c, lget(a, 1, 4 * part + i) as u16).to_bits() as u64,
+            );
         }
     } else {
         for i in 0..2 {
-            lset(&mut r, 3, i, fp::s2d(c, f32::from_bits(lget(a, 2, 2 * part + i) as u32)).to_bits());
+            lset(
+                &mut r,
+                3,
+                i,
+                fp::s2d(c, f32::from_bits(lget(a, 2, 2 * part + i) as u32)).to_bits(),
+            );
         }
     }
     set_v(c, d, r);
@@ -1176,12 +1655,21 @@ fn fcvtn(c: &mut Cpu, sz: u32, part: u32, odd: bool, d: u32, n: u32) {
     let mut r = if part != 0 { v(c, d) as u64 as u128 } else { 0 };
     if sz == 0 {
         for i in 0..4 {
-            lset(&mut r, 1, 4 * part + i, fp::s2h(c, f32::from_bits(lget(a, 2, i) as u32)) as u64);
+            lset(
+                &mut r,
+                1,
+                4 * part + i,
+                fp::s2h(c, f32::from_bits(lget(a, 2, i) as u32)) as u64,
+            );
         }
     } else {
         for i in 0..2 {
             let x = f64::from_bits(lget(a, 3, i));
-            let s = if odd { fp::d2s_odd(c, x) } else { fp::d2s(c, x) };
+            let s = if odd {
+                fp::d2s_odd(c, x)
+            } else {
+                fp::d2s(c, x)
+            };
             lset(&mut r, 2, 2 * part + i, s.to_bits() as u64);
         }
     }
@@ -1191,7 +1679,14 @@ fn fcvtn(c: &mut Cpu, sz: u32, part: u32, odd: bool, d: u32, n: u32) {
 // ---------------------------------------------------------------- across lanes / pairwise
 
 fn across(c: &mut Cpu, w: u32) -> R<()> {
-    let (q, u, sz, opc, n, d) = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 22, 2), bits(w, 12, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (q, u, sz, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 22, 2),
+        bits(w, 12, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc == 0b01100 || opc == 0b01111 {
         if u == 0 {
             return unsup("fp16 across");
@@ -1230,7 +1725,13 @@ fn across(c: &mut Cpu, w: u32) -> R<()> {
 }
 
 fn scalar_pairwise(c: &mut Cpu, w: u32) -> R<()> {
-    let (u, sz, opc, n, d) = (bits(w, 29, 1), bits(w, 22, 2), bits(w, 12, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (u, sz, opc, n, d) = (
+        bits(w, 29, 1),
+        bits(w, 22, 2),
+        bits(w, 12, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if u == 0 {
         if opc == 0b11011 && sz == 3 {
             let r = vs64(c, n).wrapping_add(vhi64(c, n));
@@ -1258,7 +1759,13 @@ fn scalar_pairwise(c: &mut Cpu, w: u32) -> R<()> {
 // ---------------------------------------------------------------- modified immediate
 
 fn modimm(c: &mut Cpu, w: u32) -> R<()> {
-    let (q, op, cmode, o2, d) = (bits(w, 30, 1), bits(w, 29, 1), bits(w, 12, 4), bits(w, 11, 1), bits(w, 0, 5));
+    let (q, op, cmode, o2, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 12, 4),
+        bits(w, 11, 1),
+        bits(w, 0, 5),
+    );
     let imm8 = (bits(w, 16, 3) << 5) | bits(w, 5, 5);
     if o2 != 0 {
         return unsup("fmov half imm");
@@ -1277,7 +1784,11 @@ fn modimm(c: &mut Cpu, w: u32) -> R<()> {
     if op != 0 && !(cmode == 14 || cmode == 15) {
         imm = !imm;
     }
-    let val: u128 = if q != 0 { imm as u128 | ((imm as u128) << 64) } else { imm as u128 };
+    let val: u128 = if q != 0 {
+        imm as u128 | ((imm as u128) << 64)
+    } else {
+        imm as u128
+    };
     set_v(c, d, val);
     Ok(())
 }
@@ -1285,8 +1796,15 @@ fn modimm(c: &mut Cpu, w: u32) -> R<()> {
 // ---------------------------------------------------------------- shift by immediate
 
 fn shift_imm(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
-    let (mut q, u, immh, immb, opc, n, d) =
-        (bits(w, 30, 1), bits(w, 29, 1), bits(w, 19, 4), bits(w, 16, 3), bits(w, 11, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (mut q, u, immh, immb, opc, n, d) = (
+        bits(w, 30, 1),
+        bits(w, 29, 1),
+        bits(w, 19, 4),
+        bits(w, 16, 3),
+        bits(w, 11, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if immh == 0 {
         return unsup("shift immh");
     }
@@ -1314,7 +1832,9 @@ fn shift_imm(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
                 fset(c, t, d, r);
                 return Ok(());
             }
-            let r = map1(v(c, n), sz, lanes(1, sz), |e| fromint_lane(c, t, e, es, u != 0, fb));
+            let r = map1(v(c, n), sz, lanes(1, sz), |e| {
+                fromint_lane(c, t, e, es, u != 0, fb)
+            });
             vw(c, q, d, r);
             return Ok(());
         }
@@ -1323,7 +1843,9 @@ fn shift_imm(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             set_v(c, d, r as u128);
             return Ok(());
         }
-        let r = map1(vq(c, q, n), sz, lanes(1, sz), |e| toint_lane(c, t, e, 3, fb, es, u != 0));
+        let r = map1(vq(c, q, n), sz, lanes(1, sz), |e| {
+            toint_lane(c, t, e, 3, fb, es, u != 0)
+        });
         vw(c, q, d, r);
         return Ok(());
     }
@@ -1346,7 +1868,24 @@ fn shift_imm(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             return unsup("scalar shrn");
         }
         let part = if scalar { 0 } else { q };
-        ln::gen(c, lopu(op, ou), sz, ne, d, sz, part * ne, part != 0, n, sz + 1, 0, -1, 0, 0, -1, rsh as u64);
+        ln::gen(
+            c,
+            lopu(op, ou),
+            sz,
+            ne,
+            d,
+            sz,
+            part * ne,
+            part != 0,
+            n,
+            sz + 1,
+            0,
+            -1,
+            0,
+            0,
+            -1,
+            rsh as u64,
+        );
         return Ok(());
     }
     if opc == 0b10100 {
@@ -1354,7 +1893,24 @@ fn shift_imm(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             return unsup("sshll");
         }
         let ne = 8 >> sz;
-        ln::gen(c, lopu(LOP_SHLLI, u), sz, ne, d, sz + 1, 0, false, n, sz, q * ne, -1, 0, 0, -1, lsh as u64);
+        ln::gen(
+            c,
+            lopu(LOP_SHLLI, u),
+            sz,
+            ne,
+            d,
+            sz + 1,
+            0,
+            false,
+            n,
+            sz,
+            q * ne,
+            -1,
+            0,
+            0,
+            -1,
+            lsh as u64,
+        );
         return Ok(());
     }
     if sz == 3 && q == 0 {
@@ -1389,7 +1945,17 @@ fn shift_imm(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             }
             fin(c, r);
         }
-        4 | 6 => ln::same(c, lopu(if opc == 4 { LOP_RSHRI } else { LOP_RSRAI }, u), sz, ne, d, n, -1, rsh as u64, -1),
+        4 | 6 => ln::same(
+            c,
+            lopu(if opc == 4 { LOP_RSHRI } else { LOP_RSRAI }, u),
+            sz,
+            ne,
+            d,
+            n,
+            -1,
+            rsh as u64,
+            -1,
+        ),
         8 => {
             if u == 0 {
                 return unsup("sri U");
@@ -1456,7 +2022,11 @@ fn indexed(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             let r = if opc == 9 {
                 fop(c, t, mul, sget(c, t, n), el, 0)
             } else {
-                let x = if opc == 1 { sget(c, t, n) } else { fneg(t, sget(c, t, n)) };
+                let x = if opc == 1 {
+                    sget(c, t, n)
+                } else {
+                    fneg(t, sget(c, t, n))
+                };
                 fop(c, t, FOP_MADD, sget(c, t, d), x, el)
             };
             fset(c, t, d, r);
@@ -1493,7 +2063,11 @@ fn indexed(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
             (0, 13) => LOP_SQRDMULH,
             _ => return unsup("scalar indexed"),
         };
-        let szd = if op == LOP_SQDMULH || op == LOP_SQRDMULH { sz } else { sz + 1 };
+        let szd = if op == LOP_SQDMULH || op == LOP_SQRDMULH {
+            sz
+        } else {
+            sz + 1
+        };
         ln::gen(c, op, sz, 1, d, szd, 0, false, n, sz, 0, mi, sz, 0, ii, 0);
         return Ok(());
     }
@@ -1506,12 +2080,28 @@ fn indexed(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
     }
     if (u, opc) == (1, 0) || (u, opc) == (1, 4) {
         let p = map1(v(c, n), sz, ne, |x| x.wrapping_mul(el));
-        let r = map2(v(c, d), p, sz, ne, |o, p| if opc == 0 { o.wrapping_add(p) } else { o.wrapping_sub(p) });
+        let r = map2(v(c, d), p, sz, ne, |o, p| {
+            if opc == 0 {
+                o.wrapping_add(p)
+            } else {
+                o.wrapping_sub(p)
+            }
+        });
         vw(c, q, d, r);
         return Ok(());
     }
     if (u, opc) == (0, 12) || (u, opc) == (0, 13) {
-        ln::same(c, if opc == 12 { LOP_SQDMULH } else { LOP_SQRDMULH }, sz, ne, d, n, mi, 0, ii);
+        ln::same(
+            c,
+            if opc == 12 { LOP_SQDMULH } else { LOP_SQRDMULH },
+            sz,
+            ne,
+            d,
+            n,
+            mi,
+            0,
+            ii,
+        );
         return Ok(());
     }
     let lng = match opc {
@@ -1528,7 +2118,24 @@ fn indexed(c: &mut Cpu, w: u32, scalar: bool) -> R<()> {
         return unsup("indexed opcode");
     }
     let ne = 8 >> sz;
-    ln::gen(c, lopu(lng, if sq { 0 } else { u }), sz, ne, d, sz + 1, 0, false, n, sz, q * ne, mi, sz, 0, ii, 0);
+    ln::gen(
+        c,
+        lopu(lng, if sq { 0 } else { u }),
+        sz,
+        ne,
+        d,
+        sz + 1,
+        0,
+        false,
+        n,
+        sz,
+        q * ne,
+        mi,
+        sz,
+        0,
+        ii,
+        0,
+    );
     Ok(())
 }
 
@@ -1563,7 +2170,9 @@ fn fp_dp3(c: &mut Cpu, w: u32) -> R<()> {
 fn fp_dp2(c: &mut Cpu, w: u32) -> R<()> {
     let t = ftype(w)?;
     let (opc, d, n, m) = (bits(w, 12, 4), bits(w, 0, 5), bits(w, 5, 5), bits(w, 16, 5));
-    const OPS: [u32; 9] = [FOP_MUL, FOP_DIV, FOP_ADD, FOP_SUB, FOP_MAX, FOP_MIN, FOP_MAXNM, FOP_MINNM, FOP_NMUL];
+    const OPS: [u32; 9] = [
+        FOP_MUL, FOP_DIV, FOP_ADD, FOP_SUB, FOP_MAX, FOP_MIN, FOP_MAXNM, FOP_MINNM, FOP_NMUL,
+    ];
     if opc > 8 {
         return unsup("fp dp2");
     }
@@ -1593,7 +2202,11 @@ fn fp_dp1(c: &mut Cpu, w: u32) -> R<()> {
     if t == 2 {
         return unsup("fp type");
     }
-    let sign = if t == 0 { 0x8000_0000u64 } else { 0x8000_0000_0000_0000 };
+    let sign = if t == 0 {
+        0x8000_0000u64
+    } else {
+        0x8000_0000_0000_0000
+    };
     match opc {
         0 => {
             let r = sget(c, t, n);
@@ -1622,7 +2235,11 @@ fn fp_dp1(c: &mut Cpu, w: u32) -> R<()> {
                 return unsup("fcvt same");
             }
             let r: u128 = if to == 3 {
-                (if t == 0 { fp::s2h(c, sfs(c, n)) } else { fp::dd2h(c, sfd(c, n)) }) as u128
+                (if t == 0 {
+                    fp::s2h(c, sfs(c, n))
+                } else {
+                    fp::dd2h(c, sfd(c, n))
+                }) as u128
             } else if to != 0 {
                 fp::s2d(c, sfs(c, n)).to_bits() as u128
             } else {
@@ -1641,7 +2258,11 @@ fn fp_dp1(c: &mut Cpu, w: u32) -> R<()> {
                 15 => 6,
                 _ => return unsup("fp dp1 opcode"),
             };
-            let r = if t == 0 { fs::frint(c, sfs(c, n), rm).to_bits() as u64 } else { fd::frint(c, sfd(c, n), rm).to_bits() };
+            let r = if t == 0 {
+                fs::frint(c, sfs(c, n), rm).to_bits() as u64
+            } else {
+                fd::frint(c, sfd(c, n), rm).to_bits()
+            };
             fset(c, t, d, r);
         }
     }
@@ -1670,14 +2291,22 @@ fn fp_cmp(c: &mut Cpu, w: u32) -> R<()> {
 fn fp_ccmp(c: &mut Cpu, w: u32) -> R<()> {
     let t = ftype(w)?;
     let (n, m, cnd, nzcv) = (bits(w, 5, 5), bits(w, 16, 5), bits(w, 12, 4), bits(w, 0, 4));
-    c.nzcv = if cond(c, cnd) { fcmp(c, t, sget(c, t, n), sget(c, t, m)) } else { (nzcv as u64) << 28 };
+    c.nzcv = if cond(c, cnd) {
+        fcmp(c, t, sget(c, t, n), sget(c, t, m))
+    } else {
+        (nzcv as u64) << 28
+    };
     Ok(())
 }
 
 fn fp_csel(c: &mut Cpu, w: u32) -> R<()> {
     let t = ftype(w)?;
     let (d, n, m, cnd) = (bits(w, 0, 5), bits(w, 5, 5), bits(w, 16, 5), bits(w, 12, 4));
-    let r = if cond(c, cnd) { sget(c, t, n) } else { sget(c, t, m) };
+    let r = if cond(c, cnd) {
+        sget(c, t, n)
+    } else {
+        sget(c, t, m)
+    };
     set_v(c, d, r as u128);
     Ok(())
 }
@@ -1693,8 +2322,15 @@ fn fp_imm(c: &mut Cpu, w: u32) -> R<()> {
 }
 
 fn fp_fixed(c: &mut Cpu, w: u32) -> R<()> {
-    let (sf, t, rmode, opc, scale, n, d) =
-        (bits(w, 31, 1), bits(w, 22, 2), bits(w, 19, 2), bits(w, 16, 3), bits(w, 10, 6), bits(w, 5, 5), bits(w, 0, 5));
+    let (sf, t, rmode, opc, scale, n, d) = (
+        bits(w, 31, 1),
+        bits(w, 22, 2),
+        bits(w, 19, 2),
+        bits(w, 16, 3),
+        bits(w, 10, 6),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if t > 1 {
         return unsup("fixed type");
     }
@@ -1717,7 +2353,14 @@ fn fp_fixed(c: &mut Cpu, w: u32) -> R<()> {
 }
 
 fn fp_int(c: &mut Cpu, w: u32) -> R<()> {
-    let (sf, t, rmode, opc, n, d) = (bits(w, 31, 1), bits(w, 22, 2), bits(w, 19, 2), bits(w, 16, 3), bits(w, 5, 5), bits(w, 0, 5));
+    let (sf, t, rmode, opc, n, d) = (
+        bits(w, 31, 1),
+        bits(w, 22, 2),
+        bits(w, 19, 2),
+        bits(w, 16, 3),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc == 6 || opc == 7 {
         if t == 2 && sf != 0 && rmode == 1 {
             if opc == 6 {
@@ -1804,7 +2447,12 @@ fn set_base(c: &mut Cpu, rn: u32, v: u64) {
 
 unsafe fn ldst_pair(c: &mut Cpu, w: u32) -> R<()> {
     let (opc, mode, l) = (bits(w, 30, 2), bits(w, 23, 2), bits(w, 22, 1));
-    let (imm7, rt2, rn, rt) = (sext(bits(w, 15, 7) as u64, 7), bits(w, 10, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (imm7, rt2, rn, rt) = (
+        sext(bits(w, 15, 7) as u64, 7),
+        bits(w, 10, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc == 3 {
         return unsup("pair opc 3");
     }
@@ -1812,19 +2460,35 @@ unsafe fn ldst_pair(c: &mut Cpu, w: u32) -> R<()> {
     let off = imm7 * (1i64 << scale);
     let base = xs(c, rn);
     let (post, wb) = (mode == 1, mode == 1 || mode == 3);
-    let ea = if post { base } else { base.wrapping_add(off as u64) };
+    let ea = if post {
+        base
+    } else {
+        base.wrapping_add(off as u64)
+    };
     let sz = 1u64 << scale;
     if l != 0 {
         let (a, b) = (ld_v(ea, scale), ld_v(ea.wrapping_add(sz), scale));
         set_v(c, rt, a);
         set_v(c, rt2, b);
     } else {
-        let m = if scale == 4 { !0u128 } else { (1u128 << (8 << scale)) - 1 };
+        let m = if scale == 4 {
+            !0u128
+        } else {
+            (1u128 << (8 << scale)) - 1
+        };
         st_v(ea, scale, v(c, rt) & m);
         st_v(ea.wrapping_add(sz), scale, v(c, rt2) & m);
     }
     if wb {
-        set_base(c, rn, if post { ea.wrapping_add(off as u64) } else { ea });
+        set_base(
+            c,
+            rn,
+            if post {
+                ea.wrapping_add(off as u64)
+            } else {
+                ea
+            },
+        );
     }
     Ok(())
 }
@@ -1855,7 +2519,12 @@ unsafe fn ldst_reg(c: &mut Cpu, w: u32) -> R<()> {
                 if ![2, 3, 6, 7].contains(&option) {
                     return unsup("ldst simd reg option");
                 }
-                ea = base.wrapping_add(crate::interp::exec::extend(c, rm, option, if s != 0 { scale } else { 0 }));
+                ea = base.wrapping_add(crate::interp::exec::extend(
+                    c,
+                    rm,
+                    option,
+                    if s != 0 { scale } else { 0 },
+                ));
             } else {
                 let imm9 = sext(bits(w, 12, 9) as u64, 9) as u64;
                 match kind {
@@ -1878,7 +2547,11 @@ unsafe fn ldst_reg(c: &mut Cpu, w: u32) -> R<()> {
         let r = ld_v(ea, scale);
         set_v(c, rt, r);
     } else {
-        let m = if scale == 4 { !0u128 } else { (1u128 << (8 << scale)) - 1 };
+        let m = if scale == 4 {
+            !0u128
+        } else {
+            (1u128 << (8 << scale)) - 1
+        };
         st_v(ea, scale, v(c, rt) & m);
     }
     if let Some(wbv) = wb {
@@ -1888,8 +2561,15 @@ unsafe fn ldst_reg(c: &mut Cpu, w: u32) -> R<()> {
 }
 
 unsafe fn ldst_struct(c: &mut Cpu, w: u32) -> R<()> {
-    let (q, l, post, rm, rn, rt, sz) =
-        (bits(w, 30, 1), bits(w, 22, 1), bits(w, 23, 1), bits(w, 16, 5), bits(w, 5, 5), bits(w, 0, 5), bits(w, 10, 2));
+    let (q, l, post, rm, rn, rt, sz) = (
+        bits(w, 30, 1),
+        bits(w, 22, 1),
+        bits(w, 23, 1),
+        bits(w, 16, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+        bits(w, 10, 2),
+    );
     if post == 0 && rm != 0 {
         return unsup("ldst struct rm");
     }
@@ -1975,7 +2655,11 @@ unsafe fn ldst_struct(c: &mut Cpu, w: u32) -> R<()> {
         }
     }
     if post != 0 {
-        let nv = if rm == 31 { ea.wrapping_add(total as u64) } else { ea.wrapping_add(xr(c, rm)) };
+        let nv = if rm == 31 {
+            ea.wrapping_add(total as u64)
+        } else {
+            ea.wrapping_add(xr(c, rm))
+        };
         set_base(c, rn, nv);
     }
     Ok(())

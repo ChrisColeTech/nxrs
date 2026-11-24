@@ -19,7 +19,10 @@ fn integer_and_flags() {
     // cmp w0, #0x15 ; b.eq +8
     unsafe { step(&mut c, 0x7100_541f, 0x1000) };
     assert_eq!(c.nzcv >> 28, 0b0110);
-    assert_eq!(unsafe { step(&mut c, 0x5400_0040, 0x1000) }, Flow::Jump(0x1008));
+    assert_eq!(
+        unsafe { step(&mut c, 0x5400_0040, 0x1000) },
+        Flow::Jump(0x1008)
+    );
     // subs x2, x1, x1 -> zero, carry
     unsafe { step(&mut c, 0xeb01_0022, 0) };
     assert_eq!((c.x[2], c.nzcv >> 28), (0, 0b0110));
@@ -65,12 +68,18 @@ fn loads_stores_and_branches() {
     unsafe { step(&mut c, 0x3840_1460, 0) };
     assert_eq!((c.x[0], c.x[3]), (0xAB, bytes.as_ptr() as u64 + 1));
     // bl +8 ; ret ; br x16 ; blr x1
-    assert_eq!(unsafe { step(&mut c, 0x9400_0002, 0x1000) }, Flow::Call(0x1008));
+    assert_eq!(
+        unsafe { step(&mut c, 0x9400_0002, 0x1000) },
+        Flow::Call(0x1008)
+    );
     assert_eq!(c.x[30], 0x1004);
     assert_eq!(unsafe { step(&mut c, 0xd65f_03c0, 0) }, Flow::Ret);
     c.x[16] = 0x4444;
     assert_eq!(unsafe { step(&mut c, 0xd61f_0200, 0) }, Flow::Jump(0x4444));
-    assert_eq!(unsafe { step(&mut c, 0xd63f_0020, 0x2000) }, Flow::Call(0x2929));
+    assert_eq!(
+        unsafe { step(&mut c, 0xd63f_0020, 0x2000) },
+        Flow::Call(0x2929)
+    );
     assert_eq!(c.x[30], 0x2004);
     // svc #1, brk #0
     assert_eq!(unsafe { step(&mut c, 0xd400_0021, 0) }, Flow::Svc(1));
@@ -138,7 +147,11 @@ fn fp_and_simd() {
 
 #[test]
 fn discovered_format_round_trips() {
-    let e = Entry { module: "main".into(), offset: 0x1234, words: vec![0xd10083ff, 0xa9017bfd] };
+    let e = Entry {
+        module: "main".into(),
+        offset: 0x1234,
+        words: vec![0xd10083ff, 0xa9017bfd],
+    };
     let line = format_entry(&e);
     assert_eq!(line, "main\t0x1234\td10083ff a9017bfd\n");
     let parsed = parse_discovered(&format!("{HEADER}{line}garbage\n"));
@@ -203,11 +216,20 @@ fn hand_off_between_lifted_and_interpreted_code() {
     }
     let exe = std::env::current_exe().unwrap();
     let out = std::process::Command::new(exe)
-        .args(["--exact", "interp::tests::hand_off_between_lifted_and_interpreted_code", "--nocapture", "--test-threads=1"])
+        .args([
+            "--exact",
+            "interp::tests::hand_off_between_lifted_and_interpreted_code",
+            "--nocapture",
+            "--test-threads=1",
+        ])
         .env("NXRT_INTERP_CHILD", "1")
         .output()
         .unwrap();
-    let text = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+    let text = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert_eq!(out.status.code(), Some(0), "{text}");
     assert!(text.contains("HANDOFF OK"), "{text}");
 }
@@ -217,9 +239,16 @@ fn child() {
     let code: &'static [u32] = Box::leak(program().into_boxed_slice());
     let base = code.as_ptr() as u64;
     let leak = |v: Vec<u64>| -> &'static [u64] { Box::leak(v.into_boxed_slice()) };
-    let fns: &'static [GuestFn] = Box::leak(vec![lifted_double as GuestFn, lifted_tail as GuestFn].into_boxed_slice());
-    let t = Table::build(vec![Module { name: "test".into(), base, size: code.len() as u64 * 4, addrs: leak(vec![base + 0x40, base + 0x100]), fns }])
-        .unwrap();
+    let fns: &'static [GuestFn] =
+        Box::leak(vec![lifted_double as GuestFn, lifted_tail as GuestFn].into_boxed_slice());
+    let t = Table::build(vec![Module {
+        name: "test".into(),
+        base,
+        size: code.len() as u64 * 4,
+        addrs: leak(vec![base + 0x40, base + 0x100]),
+        fns,
+    }])
+    .unwrap();
     crate::dispatch::install(t).unwrap();
     let dir = std::env::temp_dir().join(format!("nxrt-interp-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
@@ -239,14 +268,21 @@ fn child() {
     // both interpreted entries were recorded, with their words
     let tsv = std::fs::read_to_string(dir.join(DISCOVERED)).unwrap();
     let e = parse_discovered(&tsv);
-    assert_eq!(e.iter().map(|e| e.offset).collect::<Vec<_>>(), vec![0, 0x80], "{tsv}");
+    assert_eq!(
+        e.iter().map(|e| e.offset).collect::<Vec<_>>(),
+        vec![0, 0x80],
+        "{tsv}"
+    );
     assert_eq!(e[1].words[..2], [0x8b00_0000, 0xd65f_03c0]);
     // a second run records nothing new, also after a restart (the file is read back)
     set_data_dir(&dir);
     c.x[0] = 0;
     let _ = unsafe { crate::boundary::call_guest(&mut *c, base) };
     assert_eq!(c.x[0], 1129);
-    assert_eq!(parse_discovered(&std::fs::read_to_string(dir.join(DISCOVERED)).unwrap()).len(), 2);
+    assert_eq!(
+        parse_discovered(&std::fs::read_to_string(dir.join(DISCOVERED)).unwrap()).len(),
+        2
+    );
     let (entries, steps) = stats();
     assert!(entries >= 4 && steps > 10, "{entries} {steps}");
     let _ = std::fs::remove_dir_all(&dir);

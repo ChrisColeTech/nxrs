@@ -45,18 +45,26 @@ unsafe fn read(base: u64, size: u64) -> Vec<u64> {
     let b = |o: u64| core::ptr::read_unaligned((hdr + o) as *const u8);
     let (ptr_enc, cnt_enc, tbl_enc) = (b(1), b(2), b(3));
     let mut a = hdr + 4;
-    let Some((_, n)) = encoded(a, ptr_enc, hdr) else { return vec![] };
+    let Some((_, n)) = encoded(a, ptr_enc, hdr) else {
+        return vec![];
+    };
     a += n;
-    let Some((count, n)) = encoded(a, cnt_enc, hdr) else { return vec![] };
+    let Some((count, n)) = encoded(a, cnt_enc, hdr) else {
+        return vec![];
+    };
     a += n;
     let mut v = vec![];
     for _ in 0..count.clamp(0, 1 << 22) {
         if !inside(a, 16) {
             break;
         }
-        let Some((loc, n)) = encoded(a, tbl_enc, hdr) else { break };
+        let Some((loc, n)) = encoded(a, tbl_enc, hdr) else {
+            break;
+        };
         a += n;
-        let Some((_, n)) = encoded(a, tbl_enc, hdr) else { break };
+        let Some((_, n)) = encoded(a, tbl_enc, hdr) else {
+            break;
+        };
         a += n;
         v.push(loc as u64);
     }
@@ -68,10 +76,14 @@ unsafe fn read(base: u64, size: u64) -> Vec<u64> {
 pub fn function_of(pc: u64) -> Option<u64> {
     let m = crate::dispatch::table()?.module_at(pc)?;
     let starts = {
-        let mut g = CACHE.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut g = CACHE
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let map = g.get_or_insert_with(HashMap::new);
         // SAFETY: the module is mapped at its base for its size
-        map.entry(m.base).or_insert_with(|| Arc::new(unsafe { read(m.base, m.size) })).clone()
+        map.entry(m.base)
+            .or_insert_with(|| Arc::new(unsafe { read(m.base, m.size) }))
+            .clone()
     };
     let k = starts.partition_point(|&s| s <= pc);
     (k > 0).then(|| starts[k - 1])

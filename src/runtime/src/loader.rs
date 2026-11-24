@@ -21,6 +21,7 @@ const DT_STRTAB: u64 = 5;
 const DT_SYMTAB: u64 = 6;
 const DT_RELA: u64 = 7;
 const DT_RELASZ: u64 = 8;
+const DT_INIT: u64 = 12;
 const DT_PLTRELSZ: u64 = 2;
 const DT_JMPREL: u64 = 23;
 const DT_INIT_ARRAY: u64 = 25;
@@ -67,10 +68,14 @@ pub struct Reloc {
 }
 
 fn rd32(b: &[u8], o: u64) -> Result<u32, String> {
-    b.get(o as usize..o as usize + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap())).ok_or(format!("read past the end at {o:#x}"))
+    b.get(o as usize..o as usize + 4)
+        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+        .ok_or(format!("read past the end at {o:#x}"))
 }
 fn rd64(b: &[u8], o: u64) -> Result<u64, String> {
-    b.get(o as usize..o as usize + 8).map(|s| u64::from_le_bytes(s.try_into().unwrap())).ok_or(format!("read past the end at {o:#x}"))
+    b.get(o as usize..o as usize + 8)
+        .map(|s| u64::from_le_bytes(s.try_into().unwrap()))
+        .ok_or(format!("read past the end at {o:#x}"))
 }
 
 /// Parses an NSO or an NRO file into its memory image.
@@ -83,14 +88,20 @@ pub fn parse(raw: &[u8]) -> Result<Image, String> {
             let mem_off = rd32(raw, 0x14 + i * 0x10)? as u64;
             let size = rd32(raw, 0x18 + i * 0x10)? as usize;
             let csize = rd32(raw, 0x60 + i * 4)? as usize;
-            let src = raw.get(file_off..file_off + csize).ok_or(format!("NSO segment {i} truncated"))?;
+            let src = raw
+                .get(file_off..file_off + csize)
+                .ok_or(format!("NSO segment {i} truncated"))?;
             let data = if flags & (1 << i) != 0 {
-                lz4_flex::block::decompress(src, size).map_err(|e| format!("NSO segment {i}: {e}"))?
+                lz4_flex::block::decompress(src, size)
+                    .map_err(|e| format!("NSO segment {i}: {e}"))?
             } else {
                 src.to_vec()
             };
             if data.len() != size {
-                return Err(format!("NSO segment {i}: {} bytes, header says {size}", data.len()));
+                return Err(format!(
+                    "NSO segment {i}: {} bytes, header says {size}",
+                    data.len()
+                ));
             }
             segs.push((mem_off, data));
         }
@@ -112,7 +123,12 @@ pub fn parse(raw: &[u8]) -> Result<Image, String> {
         });
     }
     if raw.get(0x10..0x14) == Some(b"NRO0") {
-        let seg = |i: u64| -> Result<(u64, u64), String> { Ok((rd32(raw, 0x20 + i * 8)? as u64, rd32(raw, 0x24 + i * 8)? as u64)) };
+        let seg = |i: u64| -> Result<(u64, u64), String> {
+            Ok((
+                rd32(raw, 0x20 + i * 8)? as u64,
+                rd32(raw, 0x24 + i * 8)? as u64,
+            ))
+        };
         let (text, rodata, data) = (seg(0)?, seg(1)?, seg(2)?);
         let bss = rd32(raw, 0x38)? as u64;
         let file_end = data.0 + data.1;
@@ -125,7 +141,14 @@ pub fn parse(raw: &[u8]) -> Result<Image, String> {
         }
         let mut build_id = [0u8; 0x20];
         build_id.copy_from_slice(&raw[0x40..0x60]);
-        return Ok(Image { text, rodata, data, bss, bytes, build_id });
+        return Ok(Image {
+            text,
+            rodata,
+            data,
+            bss,
+            bytes,
+            build_id,
+        });
     }
     Err("neither an NSO nor an NRO".into())
 }
@@ -140,6 +163,7 @@ pub struct Dynamic {
     pub eh_frame_hdr: u64,
     pub syms: Vec<Sym>,
     pub relocs: Vec<Reloc>,
+    pub init: Option<u64>,
     pub init_array: (u64, u64),
 }
 
@@ -148,8 +172,17 @@ pub fn dynamic(img: &[u8]) -> Result<Dynamic, String> {
     if img.get(mod0 as usize..mod0 as usize + 4) != Some(b"MOD0") {
         return Err("no MOD0 header".into());
     }
-    let rel = |i: u64| -> Result<u64, String> { Ok((mod0 as i64 + rd32(img, mod0 + 4 + 4 * i)? as i32 as i64) as u64) };
-    let mut d = Dynamic { mod0, dynamic: rel(0)?, bss_start: rel(1)?, bss_end: rel(2)?, eh_frame_hdr: rel(3)?, ..Default::default() };
+    let rel = |i: u64| -> Result<u64, String> {
+        Ok((mod0 as i64 + rd32(img, mod0 + 4 + 4 * i)? as i32 as i64) as u64)
+    };
+    let mut d = Dynamic {
+        mod0,
+        dynamic: rel(0)?,
+        bss_start: rel(1)?,
+        bss_end: rel(2)?,
+        eh_frame_hdr: rel(3)?,
+        ..Default::default()
+    };
     let mut tags: HashMap<u64, u64> = HashMap::new();
     let mut o = d.dynamic;
     loop {
@@ -163,12 +196,17 @@ pub fn dynamic(img: &[u8]) -> Result<Dynamic, String> {
     let strtab = tags.get(&DT_STRTAB).copied().unwrap_or(0);
     let cstr = |off: u64| -> String {
         let s = &img[(off as usize).min(img.len())..];
-        String::from_utf8_lossy(&s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())]).into_owned()
+        String::from_utf8_lossy(&s[..s.iter().position(|&b| b == 0).unwrap_or(s.len())])
+            .into_owned()
     };
     let nsyms = if let Some(&h) = tags.get(&DT_HASH) {
         rd32(img, h + 4)? as u64
     } else if let Some(&h) = tags.get(&DT_GNU_HASH) {
-        let (nb, symoff, bloom) = (rd32(img, h)? as u64, rd32(img, h + 4)? as u64, rd32(img, h + 8)? as u64);
+        let (nb, symoff, bloom) = (
+            rd32(img, h)? as u64,
+            rd32(img, h + 4)? as u64,
+            rd32(img, h + 8)? as u64,
+        );
         let buckets = h + 16 + bloom * 8;
         let mut last = 0u64;
         for i in 0..nb {
@@ -202,7 +240,12 @@ pub fn dynamic(img: &[u8]) -> Result<Dynamic, String> {
             for i in 0..tags.get(&st).copied().unwrap_or(0) / 24 {
                 let e = b + 24 * i;
                 let info = rd64(img, e + 8)?;
-                d.relocs.push(Reloc { off: rd64(img, e)?, typ: info as u32, sym: (info >> 32) as u32, addend: rd64(img, e + 16)? as i64 });
+                d.relocs.push(Reloc {
+                    off: rd64(img, e)?,
+                    typ: info as u32,
+                    sym: (info >> 32) as u32,
+                    addend: rd64(img, e + 16)? as i64,
+                });
             }
         }
     }
@@ -211,19 +254,30 @@ pub fn dynamic(img: &[u8]) -> Result<Dynamic, String> {
         for i in 0..tags.get(&DT_RELRSZ).copied().unwrap_or(0) / 8 {
             let e = rd64(img, relr + 8 * i)?;
             if e & 1 == 0 {
-                d.relocs.push(Reloc { off: e, typ: R_AARCH64_RELATIVE, sym: 0, addend: rd64(img, e)? as i64 });
+                d.relocs.push(Reloc {
+                    off: e,
+                    typ: R_AARCH64_RELATIVE,
+                    sym: 0,
+                    addend: rd64(img, e)? as i64,
+                });
                 where_ = e + 8;
                 continue;
             }
             for k in 0..63u64 {
                 if (e >> (k + 1)) & 1 != 0 {
                     let a = where_ + 8 * k;
-                    d.relocs.push(Reloc { off: a, typ: R_AARCH64_RELATIVE, sym: 0, addend: rd64(img, a)? as i64 });
+                    d.relocs.push(Reloc {
+                        off: a,
+                        typ: R_AARCH64_RELATIVE,
+                        sym: 0,
+                        addend: rd64(img, a)? as i64,
+                    });
                 }
             }
             where_ += 63 * 8;
         }
     }
+    d.init = tags.get(&DT_INIT).copied();
     if let (Some(&a), Some(&n)) = (tags.get(&DT_INIT_ARRAY), tags.get(&DT_INIT_ARRAYSZ)) {
         d.init_array = (a, n);
     }
@@ -244,6 +298,72 @@ impl Loaded {
     pub fn entry(&self) -> u64 {
         self.base + self.image.text.0
     }
+
+    /// Returns DT_INIT and, when requested, the relocated DT_INIT_ARRAY entries.
+    pub fn initializers(&self, include_array: bool) -> Result<Vec<u64>, String> {
+        let mut out = Vec::new();
+        if let Some(init) = self
+            .dynamic
+            .init
+            .filter(|&init| init != 0 && init != u64::MAX)
+        {
+            if init >= self.size {
+                return Err(format!(
+                    "{}: DT_INIT at {init:#x} outside the image",
+                    self.name
+                ));
+            }
+            out.push(
+                self.base
+                    .checked_add(init)
+                    .ok_or_else(|| format!("{}: DT_INIT address overflow", self.name))?,
+            );
+        }
+
+        if !include_array {
+            return Ok(out);
+        }
+        let (array, size) = self.dynamic.init_array;
+        if size == 0 {
+            return Ok(out);
+        }
+        if size % 8 != 0 {
+            return Err(format!(
+                "{}: DT_INIT_ARRAY size {size:#x} is not a multiple of 8",
+                self.name
+            ));
+        }
+        let end = array
+            .checked_add(size)
+            .ok_or_else(|| format!("{}: DT_INIT_ARRAY range overflows", self.name))?;
+        if end > self.size {
+            return Err(format!(
+                "{}: DT_INIT_ARRAY {array:#x}..{end:#x} outside the image",
+                self.name
+            ));
+        }
+        let address = self
+            .base
+            .checked_add(array)
+            .ok_or_else(|| format!("{}: DT_INIT_ARRAY address overflow", self.name))?;
+        self.base
+            .checked_add(end)
+            .ok_or_else(|| format!("{}: DT_INIT_ARRAY address overflow", self.name))?;
+        if !mem::readable(address, size) {
+            return Err(format!(
+                "{}: DT_INIT_ARRAY at {address:#x} is not readable",
+                self.name
+            ));
+        }
+        for i in 0..size / 8 {
+            // SAFETY: the complete array was checked readable above; entries need not be aligned.
+            let init = unsafe { core::ptr::read_unaligned((address + i * 8) as *const u64) };
+            if init != 0 && init != u64::MAX {
+                out.push(init);
+            }
+        }
+        Ok(out)
+    }
 }
 
 /// What `bind` resolved, for the load report.
@@ -256,19 +376,32 @@ pub struct BindReport {
 
 /// Places the modules (name, base, file bytes), relocates them and binds their imports. `size` checks the image
 /// size the translator's layout assumed (0 to skip).
-pub fn load(space: &Space, mods: &[(String, u64, u64, Vec<u8>)]) -> Result<(Vec<Loaded>, BindReport), String> {
+pub fn load(
+    space: &Space,
+    mods: &[(String, u64, u64, Vec<u8>)],
+) -> Result<(Vec<Loaded>, BindReport), String> {
     let mut loaded = vec![];
     for (name, base, size, raw) in mods {
         let image = parse(raw).map_err(|e| format!("{name}: {e}"))?;
         let n = image.bytes.len() as u64;
         if *size != 0 && *size != n {
-            return Err(format!("{name}: the image is {n:#x} bytes; the translated code was laid out for {size:#x}"));
+            return Err(format!(
+                "{name}: the image is {n:#x} bytes; the translated code was laid out for {size:#x}"
+            ));
         }
         let dynamic = dynamic(&image.bytes).map_err(|e| format!("{name}: {e}"))?;
         space.map_module(*base, n)?;
         // SAFETY: just committed [base, base+n).
-        unsafe { core::ptr::copy_nonoverlapping(image.bytes.as_ptr(), *base as *mut u8, n as usize) };
-        loaded.push(Loaded { name: name.clone(), base: *base, size: n, image, dynamic });
+        unsafe {
+            core::ptr::copy_nonoverlapping(image.bytes.as_ptr(), *base as *mut u8, n as usize)
+        };
+        loaded.push(Loaded {
+            name: name.clone(),
+            base: *base,
+            size: n,
+            image,
+            dynamic,
+        });
     }
     let report = relocate(&loaded)?;
     for m in &loaded {
@@ -276,9 +409,24 @@ pub fn load(space: &Space, mods: &[(String, u64, u64, Vec<u8>)]) -> Result<(Vec<
         let ro_end = i.data.0;
         // Horizon's regions are whole pages: the code runs up to read-only data (the SDK's C++ unwinder walks the
         // regions from a PC to find its module; a gap after an unaligned .text ended the walk and aborted it)
-        space.protect_segment(m.base + i.text.0, i.rodata.0.max(i.text.0 + i.text.1) - i.text.0, ST_CODE, mem::PERM_RX)?;
-        space.protect_segment(m.base + i.rodata.0, ro_end - i.rodata.0, ST_CODE, mem::PERM_R)?;
-        space.protect_segment(m.base + i.data.0, m.size - i.data.0, ST_CODEDATA, mem::PERM_RW)?;
+        space.protect_segment(
+            m.base + i.text.0,
+            i.rodata.0.max(i.text.0 + i.text.1) - i.text.0,
+            ST_CODE,
+            mem::PERM_RX,
+        )?;
+        space.protect_segment(
+            m.base + i.rodata.0,
+            ro_end - i.rodata.0,
+            ST_CODE,
+            mem::PERM_R,
+        )?;
+        space.protect_segment(
+            m.base + i.data.0,
+            m.size - i.data.0,
+            ST_CODEDATA,
+            mem::PERM_RW,
+        )?;
     }
     Ok((loaded, report))
 }
@@ -289,7 +437,12 @@ fn resolve(mods: &[Loaded], name: &str) -> Option<u64> {
         return Some(a);
     }
     for m in mods {
-        if let Some(s) = m.dynamic.syms.iter().find(|s| s.defined() && s.name == name) {
+        if let Some(s) = m
+            .dynamic
+            .syms
+            .iter()
+            .find(|s| s.defined() && s.name == name)
+        {
             return Some(m.base.wrapping_add(s.value));
         }
     }
@@ -304,13 +457,20 @@ pub fn relocate(mods: &[Loaded]) -> Result<BindReport, String> {
         for r in &m.dynamic.relocs {
             let at = m.base + r.off;
             if r.off + 8 > m.size {
-                return Err(format!("{}: relocation at {:#x} outside the image", m.name, r.off));
+                return Err(format!(
+                    "{}: relocation at {:#x} outside the image",
+                    m.name, r.off
+                ));
             }
             let v = match r.typ {
                 R_AARCH64_NONE => continue,
                 R_AARCH64_RELATIVE => m.base.wrapping_add(r.addend as u64),
                 R_AARCH64_ABS64 | R_AARCH64_GLOB_DAT | R_AARCH64_JUMP_SLOT => {
-                    let s = m.dynamic.syms.get(r.sym as usize).ok_or(format!("{}: bad symbol index {}", m.name, r.sym))?;
+                    let s = m
+                        .dynamic
+                        .syms
+                        .get(r.sym as usize)
+                        .ok_or(format!("{}: bad symbol index {}", m.name, r.sym))?;
                     let target = if s.name.is_empty() {
                         Some(m.base.wrapping_add(s.value))
                     } else {
@@ -323,7 +483,11 @@ pub fn relocate(mods: &[Loaded]) -> Result<BindReport, String> {
                         })
                     };
                     match target {
-                        Some(t) => t.wrapping_add(if r.typ == R_AARCH64_JUMP_SLOT { 0 } else { r.addend as u64 }),
+                        Some(t) => t.wrapping_add(if r.typ == R_AARCH64_JUMP_SLOT {
+                            0
+                        } else {
+                            r.addend as u64
+                        }),
                         None if s.weak() => 0,
                         None => {
                             rep.unresolved.push(s.name.clone());
@@ -333,7 +497,12 @@ pub fn relocate(mods: &[Loaded]) -> Result<BindReport, String> {
                         }
                     }
                 }
-                t => return Err(format!("{}: unsupported relocation type {t} at {:#x}", m.name, r.off)),
+                t => {
+                    return Err(format!(
+                        "{}: unsupported relocation type {t} at {:#x}",
+                        m.name, r.off
+                    ))
+                }
             };
             // SAFETY: inside the mapped, writable image.
             unsafe { core::ptr::write_unaligned(at as *mut u64, v) };
@@ -350,7 +519,11 @@ pub fn relocate(mods: &[Loaded]) -> Result<BindReport, String> {
 /// `main.npdm`'s main-thread parameters: (priority, core, stack size). Defaults: 44, 0, 1 MiB.
 pub fn npdm_main_thread(npdm: Option<&[u8]>) -> (i32, i32, u64) {
     match npdm {
-        Some(b) if b.len() >= 0x20 && &b[..4] == b"META" => (b[0xE] as i32, b[0xF] as i32, rd32(b, 0x1C).unwrap_or(0x10_0000) as u64),
+        Some(b) if b.len() >= 0x20 && &b[..4] == b"META" => (
+            b[0xE] as i32,
+            b[0xF] as i32,
+            rd32(b, 0x1C).unwrap_or(0x10_0000) as u64,
+        ),
         _ => (44, 0, 0x10_0000),
     }
 }
@@ -364,8 +537,10 @@ pub(crate) mod tests {
     /// data (GOT: 4 words), bss 0x1000.
     pub fn tiny_image(defs: &[(&str, u64)], imports: &[(&str, u32)]) -> Vec<u8> {
         let mut img = vec![0u8; 0x3000];
-        let w32 = |img: &mut Vec<u8>, o: usize, v: u32| img[o..o + 4].copy_from_slice(&v.to_le_bytes());
-        let w64 = |img: &mut Vec<u8>, o: usize, v: u64| img[o..o + 8].copy_from_slice(&v.to_le_bytes());
+        let w32 =
+            |img: &mut Vec<u8>, o: usize, v: u32| img[o..o + 4].copy_from_slice(&v.to_le_bytes());
+        let w64 =
+            |img: &mut Vec<u8>, o: usize, v: u64| img[o..o + 8].copy_from_slice(&v.to_le_bytes());
         w32(&mut img, 0, 0x1400_0002);
         w32(&mut img, 4, 0x1000);
         // MOD0 at 0x1000: dynamic at +0x40, bss [0x2100, 0x3000), eh_frame_hdr 0, module object 0
@@ -399,7 +574,11 @@ pub(crate) mod tests {
         // relocations: a RELATIVE at GOT[0] -> 0x10, then one per import (type given) at GOT[1+i]
         let mut rels = vec![(0x2000u64, R_AARCH64_RELATIVE as u64, 0x10i64)];
         for (i, (_, t)) in imports.iter().enumerate() {
-            rels.push((0x2008 + 8 * i as u64, ((first_import + i) as u64) << 32 | *t as u64, if *t == R_AARCH64_ABS64 { 4 } else { 0 }));
+            rels.push((
+                0x2008 + 8 * i as u64,
+                ((first_import + i) as u64) << 32 | *t as u64,
+                if *t == R_AARCH64_ABS64 { 4 } else { 0 },
+            ));
         }
         for (i, (o, info, a)) in rels.iter().enumerate() {
             w64(&mut img, rela + 24 * i, *o);
@@ -426,7 +605,11 @@ pub(crate) mod tests {
     pub fn nso(img: &[u8]) -> Vec<u8> {
         let mut f = vec![0u8; 0x100];
         f[..4].copy_from_slice(b"NSO0");
-        let segs = [(0x100u32, 0u32, 0x1000u32), (0x1100, 0x1000, 0x1000), (0x2100, 0x2000, 0x100)];
+        let segs = [
+            (0x100u32, 0u32, 0x1000u32),
+            (0x1100, 0x1000, 0x1000),
+            (0x2100, 0x2000, 0x100),
+        ];
         for (i, (fo, mo, sz)) in segs.iter().enumerate() {
             f[0x10 + 0x10 * i..0x14 + 0x10 * i].copy_from_slice(&fo.to_le_bytes());
             f[0x14 + 0x10 * i..0x18 + 0x10 * i].copy_from_slice(&mo.to_le_bytes());
@@ -442,35 +625,169 @@ pub(crate) mod tests {
 
     #[test]
     fn parse_load_relocate_bind() {
-        let main = nso(&tiny_image(&[("shared_fn", 0x40)], &[("sdk_fn", R_AARCH64_JUMP_SLOT), ("loader_test_hosted", R_AARCH64_GLOB_DAT), ("nobody_has_this", R_AARCH64_JUMP_SLOT)]));
-        let sdk = nso(&tiny_image(&[("sdk_fn", 0x80), ("loader_test_hosted", 0x90)], &[("shared_fn", R_AARCH64_ABS64)]));
+        let main = nso(&tiny_image(
+            &[("shared_fn", 0x40)],
+            &[
+                ("sdk_fn", R_AARCH64_JUMP_SLOT),
+                ("loader_test_hosted", R_AARCH64_GLOB_DAT),
+                ("nobody_has_this", R_AARCH64_JUMP_SLOT),
+            ],
+        ));
+        let sdk = nso(&tiny_image(
+            &[("sdk_fn", 0x80), ("loader_test_hosted", 0x90)],
+            &[("shared_fn", R_AARCH64_ABS64)],
+        ));
         let img = parse(&main).unwrap();
         assert_eq!(img.text, (0, 0x1000));
         assert_eq!(img.bytes.len(), 0x3000);
         let d = dynamic(&img.bytes).unwrap();
-        assert_eq!((d.mod0, d.dynamic, d.bss_start, d.bss_end), (0x1000, 0x1040, 0x2100, 0x3000));
+        assert_eq!(
+            (d.mod0, d.dynamic, d.bss_start, d.bss_end),
+            (0x1000, 0x1040, 0x2100, 0x3000)
+        );
         assert!(d.syms.iter().any(|s| s.name == "shared_fn" && s.defined()));
 
         crate::hostfn::add_override("loader_test_hosted", host_nop);
         let base = 0x7B_0000_0000u64;
-        let space = Space::new(mem::Range { base, size: 0x40_0000 }, 0x7B_8000_0000, false).unwrap();
-        let mods = vec![("main".to_string(), base, 0x3000, main), ("sdk".to_string(), base + 0x20_0000, 0, sdk)];
+        let space = Space::new(
+            mem::Range {
+                base,
+                size: 0x40_0000,
+            },
+            0x7B_8000_0000,
+            false,
+        )
+        .unwrap();
+        let mods = vec![
+            ("main".to_string(), base, 0x3000, main),
+            ("sdk".to_string(), base + 0x20_0000, 0, sdk),
+        ];
         let (l, rep) = load(&space, &mods).unwrap();
         assert_eq!(l[1].entry(), base + 0x20_0000);
         let rd = |a: u64| unsafe { *(a as *const u64) };
         assert_eq!(rd(base + 0x2000), base + 0x10, "RELATIVE");
-        assert_eq!(rd(base + 0x2008), base + 0x20_0000 + 0x80, "JUMP_SLOT into sdk");
+        assert_eq!(
+            rd(base + 0x2008),
+            base + 0x20_0000 + 0x80,
+            "JUMP_SLOT into sdk"
+        );
         let hosted = rd(base + 0x2010);
-        assert_eq!(crate::hostfn::name_of(hosted).as_deref(), Some("loader_test_hosted"), "override beats the definition");
+        assert_eq!(
+            crate::hostfn::name_of(hosted).as_deref(),
+            Some("loader_test_hosted"),
+            "override beats the definition"
+        );
         let missing = rd(base + 0x2018);
-        assert_eq!(crate::hostfn::name_of(missing).as_deref(), Some("nobody_has_this"));
-        assert_eq!(rd(base + 0x20_0000 + 0x2008), base + 0x40 + 4, "ABS64 + addend into main");
+        assert_eq!(
+            crate::hostfn::name_of(missing).as_deref(),
+            Some("nobody_has_this")
+        );
+        assert_eq!(
+            rd(base + 0x20_0000 + 0x2008),
+            base + 0x40 + 4,
+            "ABS64 + addend into main"
+        );
         assert_eq!(rep.unresolved, vec!["nobody_has_this".to_string()]);
         assert_eq!(rep.host_bound, vec!["loader_test_hosted".to_string()]);
         assert_eq!(unsafe { *((base + 0x2F00) as *const u8) }, 0, "bss zeroed");
         assert_eq!(space.query(base + 0x10).state, ST_CODE);
         assert_eq!(space.query(base + 0x2010).state, ST_CODEDATA);
-        assert!(load(&space, &[("x".into(), base + 0x30_0000, 0x5000, nso(&tiny_image(&[], &[])))]).is_err(), "size mismatch");
+        assert!(
+            load(
+                &space,
+                &[(
+                    "x".into(),
+                    base + 0x30_0000,
+                    0x5000,
+                    nso(&tiny_image(&[], &[]))
+                )]
+            )
+            .is_err(),
+            "size mismatch"
+        );
+    }
+
+    #[test]
+    fn relocated_initializers_are_in_elf_order() {
+        let mut img = tiny_image(&[], &[]);
+        let w64 =
+            |img: &mut Vec<u8>, o: usize, v: u64| img[o..o + 8].copy_from_slice(&v.to_le_bytes());
+        // Replace DT_NULL with DT_INIT and append the array tags and a new terminator.
+        w64(&mut img, 0x1090, DT_INIT);
+        w64(&mut img, 0x1098, 0x40);
+        w64(&mut img, 0x10a0, DT_INIT_ARRAY);
+        w64(&mut img, 0x10a8, 0x2000);
+        w64(&mut img, 0x10b0, DT_INIT_ARRAYSZ);
+        w64(&mut img, 0x10b8, 24);
+        w64(&mut img, 0x10c0, DT_NULL);
+        w64(&mut img, 0x10c8, 0);
+        w64(&mut img, 0x2010, u64::MAX);
+
+        let base = 0x7B_1000_0000u64;
+        let next = base + 0x20_0000;
+        let space = Space::new(
+            mem::Range {
+                base,
+                size: 0x40_0000,
+            },
+            0x7C_8000_0000,
+            false,
+        )
+        .unwrap();
+        let (loaded, _) = load(
+            &space,
+            &[
+                ("main".into(), base, 0, nso(&img)),
+                ("sdk".into(), next, 0, nso(&img)),
+            ],
+        )
+        .unwrap();
+        let mut order = Vec::new();
+        for module in &loaded {
+            order.extend(module.initializers(true).unwrap());
+        }
+        assert_eq!(
+            order,
+            vec![base + 0x40, base + 0x10, next + 0x40, next + 0x10]
+        );
+        assert_eq!(loaded[0].initializers(false).unwrap(), vec![base + 0x40]);
+    }
+
+    #[test]
+    fn malformed_initializer_ranges_are_rejected() {
+        let img = tiny_image(&[], &[]);
+        let image = Image {
+            text: (0, 0x1000),
+            rodata: (0x1000, 0x1000),
+            data: (0x2000, 0x100),
+            bss: 0xf00,
+            bytes: img.clone(),
+            build_id: [0; 0x20],
+        };
+        let mut dynamic = dynamic(&img).unwrap();
+        let module = |dynamic| Loaded {
+            name: "bad".into(),
+            base: 0x1000,
+            size: 0x3000,
+            image: image.clone(),
+            dynamic,
+        };
+
+        dynamic.init_array = (0x2ff8, 16);
+        assert!(module(dynamic.clone())
+            .initializers(true)
+            .unwrap_err()
+            .contains("outside the image"));
+        dynamic.init_array = (0x2000, 7);
+        assert!(module(dynamic.clone())
+            .initializers(true)
+            .unwrap_err()
+            .contains("multiple of 8"));
+        dynamic.init_array = (u64::MAX - 3, 8);
+        assert!(module(dynamic)
+            .initializers(true)
+            .unwrap_err()
+            .contains("overflows"));
     }
 
     #[test]
@@ -478,13 +795,19 @@ pub(crate) mod tests {
         let img = tiny_image(&[], &[]);
         let mut nro = img[..0x2100].to_vec();
         nro[0x10..0x14].copy_from_slice(b"NRO0");
-        for (i, (o, n)) in [(0u32, 0x1000u32), (0x1000, 0x1000), (0x2000, 0x100)].iter().enumerate() {
+        for (i, (o, n)) in [(0u32, 0x1000u32), (0x1000, 0x1000), (0x2000, 0x100)]
+            .iter()
+            .enumerate()
+        {
             nro[0x20 + 8 * i..0x24 + 8 * i].copy_from_slice(&o.to_le_bytes());
             nro[0x24 + 8 * i..0x28 + 8 * i].copy_from_slice(&n.to_le_bytes());
         }
         nro[0x38..0x3C].copy_from_slice(&0xF00u32.to_le_bytes());
         let i = parse(&nro).unwrap();
-        assert_eq!((i.data, i.bss, i.bytes.len()), ((0x2000, 0x100), 0xF00, 0x3000));
+        assert_eq!(
+            (i.data, i.bss, i.bytes.len()),
+            ((0x2000, 0x100), 0xF00, 0x3000)
+        );
         assert_eq!(dynamic(&i.bytes).unwrap().mod0, 0x1000);
         assert_eq!(npdm_main_thread(None), (44, 0, 0x10_0000));
         let mut meta = vec![0u8; 0x80];

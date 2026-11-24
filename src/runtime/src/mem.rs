@@ -113,7 +113,14 @@ pub fn protect(addr: u64, n: u64, p: Prot) -> bool {
 /// Zeroed host memory (committed on first touch by the OS), for the runtime's own tables.
 #[cfg(windows)]
 pub fn host_alloc(n: u64) -> Option<*mut u8> {
-    let p = unsafe { VirtualAlloc(core::ptr::null(), n as usize, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) };
+    let p = unsafe {
+        VirtualAlloc(
+            core::ptr::null(),
+            n as usize,
+            MEM_RESERVE | MEM_COMMIT,
+            PAGE_READWRITE,
+        )
+    };
     (!p.is_null()).then_some(p as *mut u8)
 }
 
@@ -131,7 +138,9 @@ pub fn readable(addr: u64, n: u64) -> bool {
     let end = addr.saturating_add(n.max(1));
     while a < end {
         let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
-        if unsafe { VirtualQuery(a as _, &mut mbi, core::mem::size_of_val(&mbi)) } == 0 || mbi.State != MEM_COMMIT {
+        if unsafe { VirtualQuery(a as _, &mut mbi, core::mem::size_of_val(&mbi)) } == 0
+            || mbi.State != MEM_COMMIT
+        {
             return false;
         }
         if mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD) != 0 {
@@ -167,7 +176,6 @@ pub fn written_pages(addr: u64, n: u64, reset: bool) -> Option<Vec<u64>> {
     Some(pages)
 }
 
-
 // The same layer on Linux (`linux.rs`: mmap / mprotect, a userfaultfd write watch).
 #[cfg(target_os = "linux")]
 pub fn reserve(addr: u64, n: u64, watch: bool) -> bool {
@@ -191,11 +199,15 @@ pub fn decommit(addr: u64, n: u64) -> bool {
 }
 #[cfg(target_os = "linux")]
 pub fn protect(addr: u64, n: u64, p: Prot) -> bool {
-    crate::linux::protect(addr, n, match p {
-        Prot::None => 0,
-        Prot::Read => 1,
-        Prot::ReadWrite => 2,
-    })
+    crate::linux::protect(
+        addr,
+        n,
+        match p {
+            Prot::None => 0,
+            Prot::Read => 1,
+            Prot::ReadWrite => 2,
+        },
+    )
 }
 #[cfg(target_os = "linux")]
 pub fn host_alloc(n: u64) -> Option<*mut u8> {
@@ -299,7 +311,10 @@ static EARLY: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 
 /// The module window `Space::new` reserves for modules spanning `mods`.
 fn module_window(mods: Range) -> Range {
-    Range { base: mods.base & !0xFFFF, size: align_up(mods.end(), 0x10000) - (mods.base & !0xFFFF) }
+    Range {
+        base: mods.base & !0xFFFF,
+        size: align_up(mods.end(), 0x10000) - (mods.base & !0xFFFF),
+    }
 }
 
 /// Reserves the regions of the guest map that cannot move (the module window for `mods`, the kernel region, the
@@ -308,8 +323,14 @@ fn module_window(mods: Range) -> Range {
 /// region is taken" at 0.3 s, right after another game had exited). `Space::new` takes these reservations over.
 pub fn claim_fixed(mods: Range) {
     let w = module_window(mods);
-    let mut e = EARLY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    for (a, n) in [(w.base, w.size), (KERNEL_BASE, KERNEL_SIZE), (crate::hostfn::HOSTFN_BASE, crate::hostfn::HOSTFN_SIZE)] {
+    let mut e = EARLY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (a, n) in [
+        (w.base, w.size),
+        (KERNEL_BASE, KERNEL_SIZE),
+        (crate::hostfn::HOSTFN_BASE, crate::hostfn::HOSTFN_SIZE),
+    ] {
         if !e.contains(&(a, n)) && reserve(a, n, false) {
             e.push((a, n));
         }
@@ -318,7 +339,9 @@ pub fn claim_fixed(mods: Range) {
 
 /// Reserves [addr, addr+n) unwatched, or takes over `claim_fixed`'s reservation of exactly that range.
 fn reserve_fixed(addr: u64, n: u64) -> bool {
-    let mut e = EARLY.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut e = EARLY
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(i) = e.iter().position(|&r| r == (addr, n)) {
         e.remove(i);
         return true;
@@ -331,7 +354,14 @@ fn reserve_fixed(addr: u64, n: u64) -> bool {
 #[cfg(windows)]
 pub fn describe_taken(addr: u64) -> String {
     let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
-    if unsafe { VirtualQuery(addr as _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+    if unsafe {
+        VirtualQuery(
+            addr as _,
+            &mut mbi,
+            core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        )
+    } == 0
+    {
         return String::new();
     }
     let state = match mbi.State {
@@ -359,7 +389,11 @@ pub fn describe_taken(addr: u64) -> String {
         mbi.AllocationBase as u64,
         mbi.BaseAddress as u64,
         mbi.RegionSize,
-        if n > 0 { format!(", {}", String::from_utf16_lossy(&name[..n])) } else { String::new() }
+        if n > 0 {
+            format!(", {}", String::from_utf16_lossy(&name[..n]))
+        } else {
+            String::new()
+        }
     )
 }
 
@@ -368,9 +402,15 @@ pub fn describe_taken(addr: u64) -> String {
 pub fn describe_taken(addr: u64) -> String {
     let maps = std::fs::read_to_string("/proc/self/maps").unwrap_or_default();
     for l in maps.lines() {
-        let Some((r, _)) = l.split_once(' ') else { continue };
-        let Some((a, b)) = r.split_once('-') else { continue };
-        let (Ok(a), Ok(b)) = (u64::from_str_radix(a, 16), u64::from_str_radix(b, 16)) else { continue };
+        let Some((r, _)) = l.split_once(' ') else {
+            continue;
+        };
+        let Some((a, b)) = r.split_once('-') else {
+            continue;
+        };
+        let (Ok(a), Ok(b)) = (u64::from_str_radix(a, 16), u64::from_str_radix(b, 16)) else {
+            continue;
+        };
         if addr < b && addr + KERNEL_SIZE > a {
             return format!(" (held by: {l})");
         }
@@ -385,16 +425,31 @@ impl Space {
     pub fn new(mods: Range, kernel_base: u64, reserve_hostfn: bool) -> Result<Space, String> {
         let mods = module_window(mods);
         if mods.end() > kernel_base || kernel_base + KERNEL_SIZE > ADDRESS_LIMIT {
-            return Err(format!("memory: modules end at {:#x}, inside the kernel region", mods.end()));
+            return Err(format!(
+                "memory: modules end at {:#x}, inside the kernel region",
+                mods.end()
+            ));
         }
         if !reserve_fixed(mods.base, mods.size) {
-            return Err(format!("memory: the module window {:#x}+{:#x} is taken{}", mods.base, mods.size, describe_taken(mods.base)));
+            return Err(format!(
+                "memory: the module window {:#x}+{:#x} is taken{}",
+                mods.base,
+                mods.size,
+                describe_taken(mods.base)
+            ));
         }
         if !reserve_fixed(kernel_base, KERNEL_SIZE) {
-            return Err(format!("memory: the kernel region {kernel_base:#x}+{KERNEL_SIZE:#x} is taken{}", describe_taken(kernel_base)));
+            return Err(format!(
+                "memory: the kernel region {kernel_base:#x}+{KERNEL_SIZE:#x} is taken{}",
+                describe_taken(kernel_base)
+            ));
         }
-        if reserve_hostfn && !reserve_fixed(crate::hostfn::HOSTFN_BASE, crate::hostfn::HOSTFN_SIZE) {
-            return Err(format!("memory: the host-function window is taken{}", describe_taken(crate::hostfn::HOSTFN_BASE)));
+        if reserve_hostfn && !reserve_fixed(crate::hostfn::HOSTFN_BASE, crate::hostfn::HOSTFN_SIZE)
+        {
+            return Err(format!(
+                "memory: the host-function window is taken{}",
+                describe_taken(crate::hostfn::HOSTFN_BASE)
+            ));
         }
         let mut low = 0;
         let mut at = LOW_SEARCH_FROM;
@@ -420,11 +475,26 @@ impl Space {
         }
         Ok(Space {
             modules: mods,
-            aslr: Range { base: low, size: ADDRESS_LIMIT - low },
-            stack: Range { base: low + STACK_OFF, size: STACK_SIZE },
-            heap: Range { base: low + HEAP_OFF, size: HEAP_CAP },
-            alias: Range { base: alias, size: ALIAS_SIZE },
-            kernel: Range { base: kernel_base, size: KERNEL_SIZE },
+            aslr: Range {
+                base: low,
+                size: ADDRESS_LIMIT - low,
+            },
+            stack: Range {
+                base: low + STACK_OFF,
+                size: STACK_SIZE,
+            },
+            heap: Range {
+                base: low + HEAP_OFF,
+                size: HEAP_CAP,
+            },
+            alias: Range {
+                base: alias,
+                size: ALIAS_SIZE,
+            },
+            kernel: Range {
+                base: kernel_base,
+                size: KERNEL_SIZE,
+            },
             pool: DEFAULT_POOL,
             pool_override: AtomicU64::new(0),
             phys_bytes: AtomicU64::new(0),
@@ -444,25 +514,46 @@ impl Space {
     /// Commits a module's image read-write (the loader copies and relocates it, then `protect_module`).
     pub fn map_module(&self, base: u64, size: u64) -> Result<(), String> {
         if base < self.modules.base || base + size > self.modules.end() {
-            return Err(format!("memory: module {base:#x}+{size:#x} outside the module window"));
+            return Err(format!(
+                "memory: module {base:#x}+{size:#x} outside the module window"
+            ));
         }
         if !commit(base, size) {
-            return Err(format!("memory: commit of module {base:#x}+{size:#x} failed"));
+            return Err(format!(
+                "memory: commit of module {base:#x}+{size:#x} failed"
+            ));
         }
         Ok(())
     }
 
     /// Final permissions of a module segment, recorded for QueryMemory.
-    pub fn protect_segment(&self, base: u64, size: u64, state: u32, perm: u32) -> Result<(), String> {
+    pub fn protect_segment(
+        &self,
+        base: u64,
+        size: u64,
+        state: u32,
+        perm: u32,
+    ) -> Result<(), String> {
         if size == 0 {
             return Ok(());
         }
-        let p = if perm & 2 != 0 { Prot::ReadWrite } else { Prot::Read };
+        let p = if perm & 2 != 0 {
+            Prot::ReadWrite
+        } else {
+            Prot::Read
+        };
         if !protect(base, size, p) {
             return Err(format!("memory: protect {base:#x}+{size:#x} failed"));
         }
-        let mut st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        st.regions.push(Region { r: Range { base, size }, state, perm });
+        let mut st = self
+            .st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        st.regions.push(Region {
+            r: Range { base, size },
+            state,
+            perm,
+        });
         st.regions.sort_by_key(|r| r.r.base);
         Ok(())
     }
@@ -497,10 +588,18 @@ impl Space {
         if !self.lazy.load(Ordering::Relaxed) || n == 0 {
             return;
         }
-        let (lo, hi) = (a.max(self.heap.base), (a + n).min(self.heap.base + self.heap_end.load(Ordering::Acquire)));
+        let (lo, hi) = (
+            a.max(self.heap.base),
+            (a + n).min(self.heap.base + self.heap_end.load(Ordering::Acquire)),
+        );
         if lo < hi {
             let c0 = lo & !(LAZY_GRAIN - 1);
-            commit(c0, align_up(hi, LAZY_GRAIN).min(self.heap.base + self.heap_end.load(Ordering::Acquire)) - c0);
+            commit(
+                c0,
+                align_up(hi, LAZY_GRAIN)
+                    .min(self.heap.base + self.heap_end.load(Ordering::Acquire))
+                    - c0,
+            );
         }
     }
 
@@ -521,7 +620,10 @@ impl Space {
     /// svcSetHeapSize: the heap grows and shrinks at its base in 2 MiB steps; returns the heap's address. The heap
     /// and the mapped physical memory share the pool.
     pub fn set_heap_size(&self, size: u64) -> Result<u64, u32> {
-        let mut st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut st = self
+            .st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if size > HEAP_CAP || !size.is_multiple_of(0x20_0000) {
             return Err(R_INVALID_SIZE);
         }
@@ -543,7 +645,10 @@ impl Space {
 
     /// Committed bytes of the heap and of the alias region (physical memory maps), for the memory report.
     pub fn committed(&self) -> (u64, u64) {
-        (Self::committed_in(self.heap.base, self.heap.size), Self::committed_in(self.alias.base, self.alias.size))
+        (
+            Self::committed_in(self.heap.base, self.heap.size),
+            Self::committed_in(self.alias.base, self.alias.size),
+        )
     }
 
     /// Committed bytes of [a, a+n).
@@ -560,7 +665,14 @@ impl Space {
         while p < a + n {
             let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
             // SAFETY: a query of our own address space
-            if unsafe { VirtualQuery(p as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+            if unsafe {
+                VirtualQuery(
+                    p as *const _,
+                    &mut mbi,
+                    core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                )
+            } == 0
+            {
                 break;
             }
             let end = (mbi.BaseAddress as u64 + mbi.RegionSize as u64).min(a + n);
@@ -581,11 +693,15 @@ impl Space {
         if size == 0 || (a | size) & (PAGE - 1) != 0 || a < al.base || a + size > al.end() {
             return R_INVALID_ADDRESS;
         }
-        let _st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let _st = self
+            .st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mapped = Self::committed_in(a, size);
         if map {
             let need = size - mapped;
-            let used = self.heap_end.load(Ordering::Relaxed) + self.phys_bytes.load(Ordering::Relaxed);
+            let used =
+                self.heap_end.load(Ordering::Relaxed) + self.phys_bytes.load(Ordering::Relaxed);
             if need > 0 && used + need > self.pool() && self.map_limit.load(Ordering::Relaxed) {
                 static SAID: AtomicU64 = AtomicU64::new(0);
                 if SAID.fetch_add(1, Ordering::Relaxed) < 8 {
@@ -599,12 +715,17 @@ impl Space {
                 return R_LIMIT_REACHED;
             }
             if !commit(a, size) {
-                crate::rt::fatal(&format!("memory: MapPhysicalMemory commit of {a:#x}+{size:#x} failed"));
+                crate::rt::fatal(&format!(
+                    "memory: MapPhysicalMemory commit of {a:#x}+{size:#x} failed"
+                ));
             }
             self.phys_bytes.fetch_add(need, Ordering::Relaxed);
         } else {
             decommit(a, size);
-            self.phys_bytes.fetch_sub(mapped.min(self.phys_bytes.load(Ordering::Relaxed)), Ordering::Relaxed);
+            self.phys_bytes.fetch_sub(
+                mapped.min(self.phys_bytes.load(Ordering::Relaxed)),
+                Ordering::Relaxed,
+            );
         }
         R_OK
     }
@@ -615,13 +736,19 @@ impl Space {
     }
 
     pub fn heap_size(&self) -> u64 {
-        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).heap_size
+        self.st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .heap_size
     }
 
     /// A guest stack of `size` bytes in the stack region (the main thread's), committed. Returns its base.
     pub fn alloc_stack(&self, size: u64) -> Result<u64, String> {
         let size = align_up(size, PAGE);
-        let mut st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut st = self
+            .st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let a = st.stack_top;
         if a + size > self.stack.end() {
             return Err("memory: the stack region is full".into());
@@ -630,14 +757,21 @@ impl Space {
             return Err("memory: commit of a stack failed".into());
         }
         st.stack_top = a + size + PAGE; // an uncommitted guard page between stacks
-        st.regions.push(Region { r: Range { base: a, size }, state: ST_STACK, perm: PERM_RW });
+        st.regions.push(Region {
+            r: Range { base: a, size },
+            state: ST_STACK,
+            perm: PERM_RW,
+        });
         st.regions.sort_by_key(|r| r.r.base);
         Ok(a)
     }
 
     /// Zeroed, committed memory in the kernel region (host objects the guest reads).
     pub fn kernel_alloc(&self, size: u64, align: u64) -> u64 {
-        let mut st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut st = self
+            .st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let a = align_up(st.kernel_top, align.max(16));
         let end = a + size;
         if end > self.kernel.end() {
@@ -653,7 +787,13 @@ impl Space {
 
     /// A thread's 0x200-byte TLS region (TPIDRRO_EL0), zeroed; reused after `free_tls`.
     pub fn alloc_tls(&self) -> u64 {
-        if let Some(a) = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).free_tls.pop() {
+        if let Some(a) = self
+            .st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .free_tls
+            .pop()
+        {
             // SAFETY: a region this space handed out, committed.
             unsafe { core::ptr::write_bytes(a as *mut u8, 0, 0x200) };
             return a;
@@ -662,24 +802,60 @@ impl Space {
     }
 
     pub fn free_tls(&self, a: u64) {
-        self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner).free_tls.push(a);
+        self.st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .free_tls
+            .push(a);
     }
 
     /// svcQueryMemory: the region holding `a`, from the runtime's own table (heap, stacks, module segments), free
     /// space between them clipped to the neighbours.
     pub fn query(&self, a: u64) -> MemoryInfo {
-        let st = self.st.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let st = self
+            .st
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let mut regions = st.regions.clone();
         if st.heap_size > 0 {
-            regions.push(Region { r: Range { base: self.heap.base, size: st.heap_size }, state: ST_NORMAL, perm: PERM_RW });
+            regions.push(Region {
+                r: Range {
+                    base: self.heap.base,
+                    size: st.heap_size,
+                },
+                state: ST_NORMAL,
+                perm: PERM_RW,
+            });
         }
         regions.sort_by_key(|r| r.r.base);
         if let Some(r) = regions.iter().find(|r| r.r.contains(a)) {
-            return MemoryInfo { addr: r.r.base, size: r.r.size, state: r.state, perm: r.perm, ..Default::default() };
+            return MemoryInfo {
+                addr: r.r.base,
+                size: r.r.size,
+                state: r.state,
+                perm: r.perm,
+                ..Default::default()
+            };
         }
-        let lo = regions.iter().filter(|r| r.r.end() <= a).map(|r| r.r.end()).max().unwrap_or(0);
-        let hi = regions.iter().filter(|r| r.r.base > a).map(|r| r.r.base).min().unwrap_or(u64::MAX);
-        MemoryInfo { addr: lo, size: hi - lo, state: ST_FREE, perm: PERM_NONE, ..Default::default() }
+        let lo = regions
+            .iter()
+            .filter(|r| r.r.end() <= a)
+            .map(|r| r.r.end())
+            .max()
+            .unwrap_or(0);
+        let hi = regions
+            .iter()
+            .filter(|r| r.r.base > a)
+            .map(|r| r.r.base)
+            .min()
+            .unwrap_or(u64::MAX);
+        MemoryInfo {
+            addr: lo,
+            size: hi - lo,
+            state: ST_FREE,
+            perm: PERM_NONE,
+            ..Default::default()
+        }
     }
 
     /// svcGetInfo for the process memory ids.
@@ -704,7 +880,10 @@ impl Space {
     /// Pages the CPU wrote in [addr, addr+n) since the last call (the range must lie in the stack+heap block or the
     /// alias region).
     pub fn written_pages(&self, addr: u64, n: u64) -> Option<Vec<u64>> {
-        let low = Range { base: self.aslr.base, size: LOW_SIZE };
+        let low = Range {
+            base: self.aslr.base,
+            size: LOW_SIZE,
+        };
         let inside = |r: Range| addr >= r.base && addr + n <= r.end();
         if !inside(low) && !inside(self.alias) {
             return None;
@@ -732,7 +911,11 @@ mod tests {
         assert!(reserve_fixed(a, n), "the space takes its own claim over");
         assert!(!reserve_fixed(a, n), "once");
         #[cfg(windows)]
-        assert!(describe_taken(a).contains("reserved private allocation"), "{}", describe_taken(a));
+        assert!(
+            describe_taken(a).contains("reserved private allocation"),
+            "{}",
+            describe_taken(a)
+        );
     }
 
     #[test]
@@ -754,17 +937,28 @@ mod tests {
         let _ = unsafe { *((a + 9 * PAGE) as *const u8) }; // a read is no write
         let got = written_pages(a, n, true).unwrap();
         assert_eq!(got, [3u64, 7, 8, 40].map(|p| a + p * PAGE));
-        assert_eq!(written_pages(a, n, true).unwrap(), Vec::<u64>::new(), "reset");
+        assert_eq!(
+            written_pages(a, n, true).unwrap(),
+            Vec::<u64>::new(),
+            "reset"
+        );
         assert!(decommit(a, n));
         assert!(commit(a, PAGE));
-        assert_eq!(unsafe { *((a + 123) as *const u8) }, 0, "decommitted pages come back zeroed");
+        assert_eq!(
+            unsafe { *((a + 123) as *const u8) },
+            0,
+            "decommitted pages come back zeroed"
+        );
         release(a);
     }
 
     #[test]
     fn space_layout_heap_query_info() {
         // A module window and kernel region of the test's own, high in the 39-bit space.
-        let mods = Range { base: 0x7C_0000_0000, size: 0x30_0000 };
+        let mods = Range {
+            base: 0x7C_0000_0000,
+            size: 0x30_0000,
+        };
         let s = Space::new(mods, 0x7D_0000_0000, false).expect("reservation below 2^39");
         assert!(s.stack.end() <= s.heap.base && s.heap.end() <= s.aslr.base + LOW_SIZE);
         assert!(s.alias.base >= s.aslr.base + LOW_SIZE && s.alias.end() <= mods.base);
@@ -772,11 +966,16 @@ mod tests {
 
         s.map_module(mods.base, 0x3000).unwrap();
         unsafe { *((mods.base + 0x2000) as *mut u64) = 5 };
-        s.protect_segment(mods.base, 0x1000, ST_CODE, PERM_RX).unwrap();
-        s.protect_segment(mods.base + 0x1000, 0x2000, ST_CODEDATA, PERM_RW).unwrap();
+        s.protect_segment(mods.base, 0x1000, ST_CODE, PERM_RX)
+            .unwrap();
+        s.protect_segment(mods.base + 0x1000, 0x2000, ST_CODEDATA, PERM_RW)
+            .unwrap();
         assert!(readable(mods.base, 0x3000));
         let q = s.query(mods.base + 0x10);
-        assert_eq!((q.addr, q.size, q.state, q.perm), (mods.base, 0x1000, ST_CODE, PERM_RX));
+        assert_eq!(
+            (q.addr, q.size, q.state, q.perm),
+            (mods.base, 0x1000, ST_CODE, PERM_RX)
+        );
         let q = s.query(mods.base + 0x5000);
         assert_eq!((q.addr, q.state), (mods.base + 0x3000, ST_FREE));
 
@@ -802,6 +1001,10 @@ mod tests {
         unsafe { *(t1 as *mut u64) = 9 };
         s.free_tls(t1);
         assert_eq!(s.alloc_tls(), t1);
-        assert_eq!(unsafe { *(t1 as *const u64) }, 0, "a reused TLS region is zeroed");
+        assert_eq!(
+            unsafe { *(t1 as *const u64) },
+            0,
+            "a reused TLS region is zeroed"
+        );
     }
 }

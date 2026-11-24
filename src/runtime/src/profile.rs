@@ -11,7 +11,9 @@ use windows_sys::Win32::Foundation::{CloseHandle, DuplicateHandle, DUPLICATE_SAM
 #[cfg(windows)]
 use windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, CONTEXT};
 #[cfg(windows)]
-use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentThread, ResumeThread, SuspendThread};
+use windows_sys::Win32::System::Threading::{
+    GetCurrentProcess, GetCurrentThread, ResumeThread, SuspendThread,
+};
 
 /// CONTEXT_AMD64 | CONTEXT_CONTROL
 #[cfg(windows)]
@@ -42,9 +44,23 @@ pub fn on() -> bool {
 pub fn add_current(handle: u32) {
     let mut d: HANDLE = core::ptr::null_mut();
     // SAFETY: duplicating our own thread's pseudo-handle into a real one
-    let ok = unsafe { DuplicateHandle(GetCurrentProcess(), GetCurrentThread(), GetCurrentProcess(), &mut d, 0, 0, DUPLICATE_SAME_ACCESS) };
+    let ok = unsafe {
+        DuplicateHandle(
+            GetCurrentProcess(),
+            GetCurrentThread(),
+            GetCurrentProcess(),
+            &mut d,
+            0,
+            0,
+            DUPLICATE_SAME_ACCESS,
+        )
+    };
     if ok != 0 {
-        threads().lock().unwrap_or_else(|p| p.into_inner()).0.push((handle, d as usize));
+        threads()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .0
+            .push((handle, d as usize));
     }
 }
 
@@ -68,10 +84,13 @@ pub fn thread_cpu() -> Vec<(u32, f64)> {
     let t = threads().lock().unwrap_or_else(|p| p.into_inner());
     t.0.iter()
         .filter_map(|&(h, d)| {
-            let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) = unsafe { core::mem::zeroed() };
+            let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) =
+                unsafe { core::mem::zeroed() };
             // SAFETY: our duplicated thread handle and our own FILETIMEs
             let ok = unsafe { GetThreadTimes(d as HANDLE, &mut c, &mut e, &mut k, &mut u) } != 0;
-            let ft = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
+            let ft = |f: FILETIME| {
+                ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7
+            };
             ok.then(|| (h, ft(k) + ft(u)))
         })
         .collect()
@@ -98,7 +117,10 @@ pub fn start(on: bool) {
     if ON.set(on).is_err() || !on {
         return;
     }
-    let out = std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("profile.txt"))).unwrap_or_else(|| "profile.txt".into());
+    let out = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(|d| d.join("profile.txt")))
+        .unwrap_or_else(|| "profile.txt".into());
     crate::rt::log(&format!("profile: active ({} every 10 s)", out.display()));
     std::thread::Builder::new()
         .name("profiler".into())
@@ -149,7 +171,11 @@ pub fn start(on: bool) {
 /// The calling host thread runs guest thread `handle` (Linux: its pthread, sampled with SIGPROF).
 #[cfg(target_os = "linux")]
 pub fn add_current(handle: u32) {
-    threads().lock().unwrap_or_else(|p| p.into_inner()).0.push((handle, crate::linux::current_thread()));
+    threads()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .0
+        .push((handle, crate::linux::current_thread()));
 }
 
 #[cfg(target_os = "linux")]
@@ -164,5 +190,7 @@ pub fn remove(handle: u32) {
 #[cfg(target_os = "linux")]
 pub fn thread_cpu() -> Vec<(u32, f64)> {
     let t = threads().lock().unwrap_or_else(|p| p.into_inner());
-    t.0.iter().filter_map(|&(h, th)| crate::linux::thread_cpu_seconds(th).map(|s| (h, s))).collect()
+    t.0.iter()
+        .filter_map(|&(h, th)| crate::linux::thread_cpu_seconds(th).map(|s| (h, s)))
+        .collect()
 }

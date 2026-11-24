@@ -91,7 +91,12 @@ pub fn mkflags(n: bool, z: bool, cy: bool, v: bool) -> u64 {
 }
 pub fn cond(c: &Cpu, cc: u32) -> bool {
     let f = c.nzcv;
-    let (n, z, cy, v) = ((f >> 31) & 1 != 0, (f >> 30) & 1 != 0, (f >> 29) & 1 != 0, (f >> 28) & 1 != 0);
+    let (n, z, cy, v) = (
+        (f >> 31) & 1 != 0,
+        (f >> 30) & 1 != 0,
+        (f >> 29) & 1 != 0,
+        (f >> 28) & 1 != 0,
+    );
     match cc {
         0 => z,
         1 => !z,
@@ -125,11 +130,21 @@ pub fn addsub_flags(c: &mut Cpu, sf: u32, a: u64, b: u64, sub: bool) -> u64 {
     let top = n - 1;
     if sub {
         let r = a.wrapping_sub(b) & m;
-        c.nzcv = mkflags(r >> top & 1 != 0, r == 0, a >= b, ((a ^ b) & (a ^ r)) >> top & 1 != 0);
+        c.nzcv = mkflags(
+            r >> top & 1 != 0,
+            r == 0,
+            a >= b,
+            ((a ^ b) & (a ^ r)) >> top & 1 != 0,
+        );
         r
     } else {
         let r = a.wrapping_add(b) & m;
-        c.nzcv = mkflags(r >> top & 1 != 0, r == 0, r < a, ((a ^ r) & (b ^ r)) >> top & 1 != 0);
+        c.nzcv = mkflags(
+            r >> top & 1 != 0,
+            r == 0,
+            r < a,
+            ((a ^ r) & (b ^ r)) >> top & 1 != 0,
+        );
         r
     }
 }
@@ -230,7 +245,11 @@ fn dp_imm(c: &mut Cpu, w: u32, pc: u64) -> R<()> {
     match op {
         0 | 1 => {
             let imm = sext(((bits(w, 5, 19) as u64) << 2) | bits(w, 29, 2) as u64, 21);
-            let val = if bits(w, 31, 1) != 0 { (pc & !0xFFF).wrapping_add((imm << 12) as u64) } else { pc_rel(pc, imm) };
+            let val = if bits(w, 31, 1) != 0 {
+                (pc & !0xFFF).wrapping_add((imm << 12) as u64)
+            } else {
+                pc_rel(pc, imm)
+            };
             set_reg(c, 1, rd, val, false);
         }
         2 => {
@@ -241,7 +260,11 @@ fn dp_imm(c: &mut Cpu, w: u32, pc: u64) -> R<()> {
                 let r = addsub_flags(c, sf, a, imm, opc != 0);
                 set_reg(c, sf, rd, r, false);
             } else {
-                let r = if opc != 0 { a.wrapping_sub(imm) } else { a.wrapping_add(imm) };
+                let r = if opc != 0 {
+                    a.wrapping_sub(imm)
+                } else {
+                    a.wrapping_add(imm)
+                };
                 set_reg(c, sf, rd, r, true);
             }
         }
@@ -251,7 +274,8 @@ fn dp_imm(c: &mut Cpu, w: u32, pc: u64) -> R<()> {
                 return unsup("logical imm N=1 32-bit");
             }
             let size = size_bits(sf);
-            let (imm, _) = decode_bit_masks(n, bits(w, 10, 6), bits(w, 16, 6), size, true).map_err(|e| e.0)?;
+            let (imm, _) =
+                decode_bit_masks(n, bits(w, 10, 6), bits(w, 16, 6), size, true).map_err(|e| e.0)?;
             let a = reg(c, sf, rn, false);
             match opc {
                 0 => set_reg(c, sf, rd, a & imm, true),
@@ -332,7 +356,9 @@ fn dp_imm(c: &mut Cpu, w: u32, pc: u64) -> R<()> {
 /// (`aot::emit::is_context_restore`) lowers such a RET as a jump through x30, so the interpreter does as well.
 unsafe fn is_context_restore(pc: u64) -> bool {
     let (mut sp_set, mut lr_loaded) = (false, false);
-    let lo = crate::dispatch::table().and_then(|t| t.module_at(pc)).map_or(pc, |m| m.base);
+    let lo = crate::dispatch::table()
+        .and_then(|t| t.module_at(pc))
+        .map_or(pc, |m| m.base);
     let mut a = pc;
     for _ in 0..96 {
         if a < lo + 4 {
@@ -372,25 +398,48 @@ unsafe fn branch_sys(c: &mut Cpu, w: u32, pc: u64) -> R<Flow> {
     }
     if bits(w, 25, 7) == 0b0101010 && bits(w, 4, 1) == 0 {
         let t = pc_rel(pc, sext(bits(w, 5, 19) as u64, 19) * 4);
-        return Ok(if cond(c, bits(w, 0, 4)) { Flow::Jump(t) } else { Flow::Next });
+        return Ok(if cond(c, bits(w, 0, 4)) {
+            Flow::Jump(t)
+        } else {
+            Flow::Next
+        });
     }
     if bits(w, 25, 6) == 0b011010 {
         let (sf, nz, rt) = (bits(w, 31, 1), bits(w, 24, 1), bits(w, 0, 5));
         let t = pc_rel(pc, sext(bits(w, 5, 19) as u64, 19) * 4);
         let zero = reg(c, sf, rt, false) == 0;
-        return Ok(if zero != (nz != 0) { Flow::Jump(t) } else { Flow::Next });
+        return Ok(if zero != (nz != 0) {
+            Flow::Jump(t)
+        } else {
+            Flow::Next
+        });
     }
     if bits(w, 25, 6) == 0b011011 {
         let b = (bits(w, 31, 1) << 5) | bits(w, 19, 5);
         let (nz, rt) = (bits(w, 24, 1), bits(w, 0, 5));
         let t = pc_rel(pc, sext(bits(w, 5, 14) as u64, 14) * 4);
         let set = (x(c, rt) >> b) & 1 != 0;
-        return Ok(if set == (nz != 0) { Flow::Jump(t) } else { Flow::Next });
+        return Ok(if set == (nz != 0) {
+            Flow::Jump(t)
+        } else {
+            Flow::Next
+        });
     }
     if bits(w, 25, 7) == 0b1101011 {
         let (opc, rn) = (bits(w, 21, 4), bits(w, 5, 5));
-        let ret = || if is_context_restore(pc) { Flow::Jump(x(c, 30)) } else { Flow::Ret };
-        if opc == 2 && matches!(bits(w, 10, 6), 2 | 3) && rn == 31 && bits(w, 0, 5) == 31 && bits(w, 16, 5) == 31 {
+        let ret = || {
+            if is_context_restore(pc) {
+                Flow::Jump(x(c, 30))
+            } else {
+                Flow::Ret
+            }
+        };
+        if opc == 2
+            && matches!(bits(w, 10, 6), 2 | 3)
+            && rn == 31
+            && bits(w, 0, 5) == 31
+            && bits(w, 16, 5) == 31
+        {
             return Ok(ret());
         }
         if bits(w, 16, 5) != 31 || bits(w, 10, 6) != 0 || bits(w, 0, 5) != 0 {
@@ -426,7 +475,14 @@ unsafe fn branch_sys(c: &mut Cpu, w: u32, pc: u64) -> R<Flow> {
 
 unsafe fn system(c: &mut Cpu, w: u32) -> R<()> {
     let l = bits(w, 21, 1);
-    let (op0, op1, crn, crm, op2, rt) = (bits(w, 19, 2), bits(w, 16, 3), bits(w, 12, 4), bits(w, 8, 4), bits(w, 5, 3), bits(w, 0, 5));
+    let (op0, op1, crn, crm, op2, rt) = (
+        bits(w, 19, 2),
+        bits(w, 16, 3),
+        bits(w, 12, 4),
+        bits(w, 8, 4),
+        bits(w, 5, 3),
+        bits(w, 0, 5),
+    );
     if op0 == 0 && l == 0 {
         if crn == 2 && op1 == 3 && rt == 31 {
             return Ok(()); // hint
@@ -518,8 +574,15 @@ unsafe fn ldst(c: &mut Cpu, w: u32, pc: u64) -> R<()> {
 }
 
 unsafe fn ldst_excl(c: &mut Cpu, w: u32) -> R<()> {
-    let (size, o2, l, o1, rs, rn, rt) =
-        (bits(w, 30, 2), bits(w, 23, 1), bits(w, 22, 1), bits(w, 21, 1), bits(w, 16, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (size, o2, l, o1, rs, rn, rt) = (
+        bits(w, 30, 2),
+        bits(w, 23, 1),
+        bits(w, 22, 1),
+        bits(w, 21, 1),
+        bits(w, 16, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     let a = xs(c, rn);
     if o1 != 0 {
         if o2 != 0 {
@@ -594,9 +657,22 @@ unsafe fn excl_pair(c: &mut Cpu, sz: u32, l: u32, rs: u32, rt2: u32, rt: u32, a:
 }
 
 unsafe fn atomic(c: &mut Cpu, w: u32) -> R<()> {
-    let (size, a, r, rs, o3, opc, rn, rt) =
-        (bits(w, 30, 2), bits(w, 23, 1), bits(w, 22, 1), bits(w, 16, 5), bits(w, 15, 1), bits(w, 12, 3), bits(w, 5, 5), bits(w, 0, 5));
-    let order = [Ordering::Relaxed, Ordering::Release, Ordering::Acquire, Ordering::AcqRel][((a << 1) | r) as usize];
+    let (size, a, r, rs, o3, opc, rn, rt) = (
+        bits(w, 30, 2),
+        bits(w, 23, 1),
+        bits(w, 22, 1),
+        bits(w, 16, 5),
+        bits(w, 15, 1),
+        bits(w, 12, 3),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
+    let order = [
+        Ordering::Relaxed,
+        Ordering::Release,
+        Ordering::Acquire,
+        Ordering::AcqRel,
+    ][((a << 1) | r) as usize];
     let sf = (size == 3) as u32;
     let p = xs(c, rn);
     let v = x(c, rs) & ones(8 << size);
@@ -619,7 +695,12 @@ unsafe fn atomic(c: &mut Cpu, w: u32) -> R<()> {
 
 unsafe fn ldst_pair(c: &mut Cpu, w: u32) -> R<()> {
     let (opc, mode, l) = (bits(w, 30, 2), bits(w, 23, 2), bits(w, 22, 1));
-    let (imm7, rt2, rn, rt) = (sext(bits(w, 15, 7) as u64, 7), bits(w, 10, 5), bits(w, 5, 5), bits(w, 0, 5));
+    let (imm7, rt2, rn, rt) = (
+        sext(bits(w, 15, 7) as u64, 7),
+        bits(w, 10, 5),
+        bits(w, 5, 5),
+        bits(w, 0, 5),
+    );
     if opc == 3 {
         return unsup("pair opc 3");
     }
@@ -631,7 +712,11 @@ unsafe fn ldst_pair(c: &mut Cpu, w: u32) -> R<()> {
     let base = xs(c, rn);
     let post = mode == 1;
     let wb = mode == 1 || mode == 3;
-    let ea = if post { base } else { base.wrapping_add(off as u64) };
+    let ea = if post {
+        base
+    } else {
+        base.wrapping_add(off as u64)
+    };
     let (mut va, mut vb) = (0, 0);
     if l != 0 {
         match opc {
@@ -656,7 +741,15 @@ unsafe fn ldst_pair(c: &mut Cpu, w: u32) -> R<()> {
         st(ea.wrapping_add(4), 2, wv(c, rt2));
     }
     if wb {
-        set_base(c, rn, if post { ea.wrapping_add(off as u64) } else { ea });
+        set_base(
+            c,
+            rn,
+            if post {
+                ea.wrapping_add(off as u64)
+            } else {
+                ea
+            },
+        );
     }
     if l != 0 {
         set_reg(c, 1, rt, va, false);
@@ -736,7 +829,12 @@ unsafe fn dp_reg(c: &mut Cpu, w: u32) -> R<()> {
     let r = |c: &Cpu, n: u32| reg(c, sf, n, false);
     if bits(w, 28, 1) == 0 {
         if bits(w, 24, 4) == 0b1010 {
-            let (opc, sh, n, amt) = (bits(w, 29, 2), bits(w, 22, 2), bits(w, 21, 1), bits(w, 10, 6));
+            let (opc, sh, n, amt) = (
+                bits(w, 29, 2),
+                bits(w, 22, 2),
+                bits(w, 21, 1),
+                bits(w, 10, 6),
+            );
             if sf == 0 && amt >= 32 {
                 return unsup("logical shift amount");
             }
@@ -779,7 +877,11 @@ unsafe fn dp_reg(c: &mut Cpu, w: u32) -> R<()> {
                 let v = addsub_flags(c, sf, a, b, op != 0);
                 set_reg(c, sf, rd, v, false);
             } else {
-                let v = if op != 0 { a.wrapping_sub(b) } else { a.wrapping_add(b) };
+                let v = if op != 0 {
+                    a.wrapping_sub(b)
+                } else {
+                    a.wrapping_add(b)
+                };
                 set_reg(c, sf, rd, v, sp_ok);
             }
             return Ok(());
@@ -788,18 +890,32 @@ unsafe fn dp_reg(c: &mut Cpu, w: u32) -> R<()> {
     }
     let op2 = bits(w, 21, 4);
     if bits(w, 24, 4) == 0b1011 {
-        let (op54, op31, o0, ra) = (bits(w, 29, 2), bits(w, 21, 3), bits(w, 15, 1), bits(w, 10, 5));
+        let (op54, op31, o0, ra) = (
+            bits(w, 29, 2),
+            bits(w, 21, 3),
+            bits(w, 15, 1),
+            bits(w, 10, 5),
+        );
         if op54 != 0 {
             return unsup("dp3 op54");
         }
-        let addsub = |acc: u64, p: u64| if o0 != 0 { acc.wrapping_sub(p) } else { acc.wrapping_add(p) };
+        let addsub = |acc: u64, p: u64| {
+            if o0 != 0 {
+                acc.wrapping_sub(p)
+            } else {
+                acc.wrapping_add(p)
+            }
+        };
         let v = match op31 {
             0 => {
                 let p = r(c, rn).wrapping_mul(r(c, rm)) & m;
                 set_reg(c, sf, rd, addsub(r(c, ra), p), false);
                 return Ok(());
             }
-            1 => addsub(x(c, ra), ((w_(c, rn) as i32 as i64).wrapping_mul(w_(c, rm) as i32 as i64)) as u64),
+            1 => addsub(
+                x(c, ra),
+                ((w_(c, rn) as i32 as i64).wrapping_mul(w_(c, rm) as i32 as i64)) as u64,
+            ),
             5 => addsub(x(c, ra), wv(c, rn).wrapping_mul(wv(c, rm))),
             2 => ((x(c, rn) as i64 as i128 * x(c, rm) as i64 as i128) >> 64) as u64,
             6 => ((x(c, rn) as u128 * x(c, rm) as u128) >> 64) as u64,
@@ -817,13 +933,23 @@ unsafe fn dp_reg(c: &mut Cpu, w: u32) -> R<()> {
         if s != 0 {
             let top = size - 1;
             let cy = if cin != 0 { v <= a } else { v < a };
-            c.nzcv = mkflags(v >> top & 1 != 0, v == 0, cy, ((a ^ v) & (b ^ v)) >> top & 1 != 0);
+            c.nzcv = mkflags(
+                v >> top & 1 != 0,
+                v == 0,
+                cy,
+                ((a ^ v) & (b ^ v)) >> top & 1 != 0,
+            );
         }
         set_reg(c, sf, rd, v, false);
         return Ok(());
     }
     if op2 == 2 {
-        let (op, imm_form, cnd, nzcv) = (bits(w, 30, 1), bits(w, 11, 1), bits(w, 12, 4), bits(w, 0, 4));
+        let (op, imm_form, cnd, nzcv) = (
+            bits(w, 30, 1),
+            bits(w, 11, 1),
+            bits(w, 12, 4),
+            bits(w, 0, 4),
+        );
         let b = if imm_form != 0 { rm as u64 } else { r(c, rm) };
         if cond(c, cnd) {
             let a = r(c, rn);
@@ -876,7 +1002,8 @@ unsafe fn dp_reg(c: &mut Cpu, w: u32) -> R<()> {
                     if sf == 0 {
                         (a as u32).swap_bytes() as u64
                     } else {
-                        ((a as u32).swap_bytes() as u64) | (((a >> 32) as u32).swap_bytes() as u64) << 32
+                        ((a as u32).swap_bytes() as u64)
+                            | (((a >> 32) as u32).swap_bytes() as u64) << 32
                     }
                 }
                 3 if sf != 0 => a.swap_bytes(),

@@ -17,7 +17,10 @@ pub struct Tables {
 /// The values of `static const <type> <name>[<n>] = { ... };` in simd.h.
 fn table(name: &str, n: usize) -> Vec<u64> {
     let head = format!("{name}[{n}] = {{");
-    let at = SIMD_H.find(&head).unwrap_or_else(|| panic!("simd.h has no table {name}[{n}]")) + head.len();
+    let at = SIMD_H
+        .find(&head)
+        .unwrap_or_else(|| panic!("simd.h has no table {name}[{n}]"))
+        + head.len();
     let end = at + SIMD_H[at..].find("};").expect("table end");
     let v: Vec<u64> = SIMD_H[at..end]
         .split(',')

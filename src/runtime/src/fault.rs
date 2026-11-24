@@ -6,16 +6,18 @@
 use std::io::Write;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
-    EXCEPTION_ACCESS_VIOLATION, EXCEPTION_ILLEGAL_INSTRUCTION, EXCEPTION_INT_DIVIDE_BY_ZERO, EXCEPTION_PRIV_INSTRUCTION,
-    EXCEPTION_STACK_OVERFLOW, HMODULE,
+    EXCEPTION_ACCESS_VIOLATION, EXCEPTION_ILLEGAL_INSTRUCTION, EXCEPTION_INT_DIVIDE_BY_ZERO,
+    EXCEPTION_PRIV_INSTRUCTION, EXCEPTION_STACK_OVERFLOW, HMODULE,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Diagnostics::Debug::{
-    AddVectoredExceptionHandler, RtlLookupFunctionEntry, RtlVirtualUnwind, CONTEXT, EXCEPTION_POINTERS, UNW_FLAG_NHANDLER,
+    AddVectoredExceptionHandler, RtlLookupFunctionEntry, RtlVirtualUnwind, CONTEXT,
+    EXCEPTION_POINTERS, UNW_FLAG_NHANDLER,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::LibraryLoader::{
-    GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+    GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
 };
 
 #[cfg(windows)]
@@ -27,18 +29,27 @@ const EXCEPTION_CONTINUE_EXECUTION: i32 = -1;
 /// info, else the nearest lifted function below it.
 #[cfg(windows)]
 pub fn describe_host(rip: u64) -> String {
-    let Some(t) = crate::dispatch::table() else { return format!("{rip:#x}") };
+    let Some(t) = crate::dispatch::table() else {
+        return format!("{rip:#x}");
+    };
     let mut base = 0u64;
     let f = unsafe { RtlLookupFunctionEntry(rip, &mut base, core::ptr::null_mut()) };
     if !f.is_null() {
         let start = base + unsafe { (*f).BeginAddress } as u64;
         if let Some(g) = t.guest_of_fn(start) {
-            return format!("{rip:#x} = lifted {} +{:#x}", crate::dispatch::guest_name(g), rip - start);
+            return format!(
+                "{rip:#x} = lifted {} +{:#x}",
+                crate::dispatch::guest_name(g),
+                rip - start
+            );
         }
         return format!("{rip:#x} (host code)");
     }
     match t.guest_of_host(rip) {
-        Some((g, d)) if d < 0x10_0000 => format!("{rip:#x} = near lifted {} +{d:#x}", crate::dispatch::guest_name(g)),
+        Some((g, d)) if d < 0x10_0000 => format!(
+            "{rip:#x} = near lifted {} +{d:#x}",
+            crate::dispatch::guest_name(g)
+        ),
         _ => format!("{rip:#x}"),
     }
 }
@@ -46,9 +57,13 @@ pub fn describe_host(rip: u64) -> String {
 /// "name.dll+0x1234" for an address in a loaded module (the foreign-fault lines).
 #[cfg(windows)]
 fn module_name(a: u64) -> String {
-    let Some(m) = module_of(a) else { return format!("{a:#x}") };
+    let Some(m) = module_of(a) else {
+        return format!("{a:#x}");
+    };
     let mut buf = [0u16; 260];
-    let n = unsafe { windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW(m, buf.as_mut_ptr(), 260) } as usize;
+    let n = unsafe {
+        windows_sys::Win32::System::LibraryLoader::GetModuleFileNameW(m, buf.as_mut_ptr(), 260)
+    } as usize;
     let path = String::from_utf16_lossy(&buf[..n]);
     let name = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
     format!("{name}+{:#x}", a - m as u64)
@@ -57,7 +72,8 @@ fn module_name(a: u64) -> String {
 #[cfg(windows)]
 fn module_of(a: u64) -> Option<HMODULE> {
     let mut m: HMODULE = core::ptr::null_mut();
-    let flags = GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
+    let flags =
+        GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT;
     (unsafe { GetModuleHandleExW(flags, a as *const u16, &mut m) } != 0).then_some(m)
 }
 
@@ -102,10 +118,15 @@ unsafe fn report(ep: *mut EXCEPTION_POINTERS) -> i32 {
         // driver) is left to its handlers, but its first lines are logged with the caller chain, since the process may
         // then die with no report (0xc0000005)
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        if std::env::var("NXRT_FOREIGN_FAULTS").is_ok_and(|v| v == "1") && N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+        if std::env::var("NXRT_FOREIGN_FAULTS").is_ok_and(|v| v == "1")
+            && N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8
+        {
             let mut s = format!("fault in another module ({what}) at {}", module_name(rip));
             if er.NumberParameters >= 2 {
-                s.push_str(&format!(" (access {} of {:#x})", er.ExceptionInformation[0], er.ExceptionInformation[1]));
+                s.push_str(&format!(
+                    " (access {} of {:#x})",
+                    er.ExceptionInformation[0], er.ExceptionInformation[1]
+                ));
             }
             let mut c: CONTEXT = *ctx;
             for n in 0..16 {
@@ -120,13 +141,26 @@ unsafe fn report(ep: *mut EXCEPTION_POINTERS) -> i32 {
                 } else {
                     let mut hd = core::ptr::null_mut();
                     let mut est = 0u64;
-                    RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, f, &mut c, &mut hd, &mut est, core::ptr::null_mut());
+                    RtlVirtualUnwind(
+                        UNW_FLAG_NHANDLER,
+                        base,
+                        c.Rip,
+                        f,
+                        &mut c,
+                        &mut hd,
+                        &mut est,
+                        core::ptr::null_mut(),
+                    );
                 }
                 if c.Rip == 0 {
                     break;
                 }
-                s.push_str(&format!("
-  frame {n:2}: {} {}", module_name(c.Rip), describe_host(c.Rip)));
+                s.push_str(&format!(
+                    "
+  frame {n:2}: {} {}",
+                    module_name(c.Rip),
+                    describe_host(c.Rip)
+                ));
             }
             crate::rt::log(&s);
         }
@@ -135,7 +169,10 @@ unsafe fn report(ep: *mut EXCEPTION_POINTERS) -> i32 {
     let _ = std::io::stdout().flush();
     let mut s = format!("FATAL: host {what} at {}", describe_host(rip));
     if er.ExceptionCode == EXCEPTION_ACCESS_VIOLATION && er.NumberParameters >= 2 {
-        let kind = ["read", "write", "?", "?", "?", "?", "?", "?", "execute"].get(er.ExceptionInformation[0]).copied().unwrap_or("?");
+        let kind = ["read", "write", "?", "?", "?", "?", "?", "?", "execute"]
+            .get(er.ExceptionInformation[0])
+            .copied()
+            .unwrap_or("?");
         s.push_str(&format!(" ({kind} of {:#x})", er.ExceptionInformation[1]));
     }
     s.push('\n');
@@ -153,7 +190,16 @@ unsafe fn report(ep: *mut EXCEPTION_POINTERS) -> i32 {
             } else {
                 let mut hd = core::ptr::null_mut();
                 let mut est = 0u64;
-                RtlVirtualUnwind(UNW_FLAG_NHANDLER, base, c.Rip, f, &mut c, &mut hd, &mut est, core::ptr::null_mut());
+                RtlVirtualUnwind(
+                    UNW_FLAG_NHANDLER,
+                    base,
+                    c.Rip,
+                    f,
+                    &mut c,
+                    &mut hd,
+                    &mut est,
+                    core::ptr::null_mut(),
+                );
             }
             if c.Rip == 0 {
                 break;
@@ -186,10 +232,17 @@ pub fn minidump_flags(v: Option<&str>) -> Option<u32> {
 /// game's code DLL.
 #[cfg(windows)]
 unsafe fn write_minidump(ep: *mut EXCEPTION_POINTERS) {
-    let Some(flags) = minidump_flags(std::env::var("NXRT_MINIDUMP").ok().as_deref()) else { return };
-    let path = std::env::current_exe().map(|e| e.with_extension("dmp")).unwrap_or_else(|_| "crash.dmp".into());
+    let Some(flags) = minidump_flags(std::env::var("NXRT_MINIDUMP").ok().as_deref()) else {
+        return;
+    };
+    let path = std::env::current_exe()
+        .map(|e| e.with_extension("dmp"))
+        .unwrap_or_else(|_| "crash.dmp".into());
     if dump_to(&path, flags, ep) {
-        crate::rt::log(&format!("minidump written: {} (NXRT_MINIDUMP=0 turns it off, =full adds referenced memory)", path.display()));
+        crate::rt::log(&format!(
+            "minidump written: {} (NXRT_MINIDUMP=0 turns it off, =full adds referenced memory)",
+            path.display()
+        ));
     }
 }
 
@@ -197,12 +250,34 @@ unsafe fn write_minidump(ep: *mut EXCEPTION_POINTERS) {
 #[cfg(windows)]
 pub unsafe fn dump_to(path: &std::path::Path, flags: u32, ep: *mut EXCEPTION_POINTERS) -> bool {
     use std::os::windows::io::AsRawHandle;
-    use windows_sys::Win32::System::Diagnostics::Debug::{MiniDumpWriteDump, MINIDUMP_EXCEPTION_INFORMATION};
-    use windows_sys::Win32::System::Threading::{GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId};
-    let Ok(f) = std::fs::File::create(path) else { return false };
-    let info = MINIDUMP_EXCEPTION_INFORMATION { ThreadId: GetCurrentThreadId(), ExceptionPointers: ep, ClientPointers: 0 };
-    let pinfo = if ep.is_null() { core::ptr::null() } else { &info as *const _ };
-    let ok = MiniDumpWriteDump(GetCurrentProcess(), GetCurrentProcessId(), f.as_raw_handle() as _, flags as _, pinfo, core::ptr::null(), core::ptr::null());
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        MiniDumpWriteDump, MINIDUMP_EXCEPTION_INFORMATION,
+    };
+    use windows_sys::Win32::System::Threading::{
+        GetCurrentProcess, GetCurrentProcessId, GetCurrentThreadId,
+    };
+    let Ok(f) = std::fs::File::create(path) else {
+        return false;
+    };
+    let info = MINIDUMP_EXCEPTION_INFORMATION {
+        ThreadId: GetCurrentThreadId(),
+        ExceptionPointers: ep,
+        ClientPointers: 0,
+    };
+    let pinfo = if ep.is_null() {
+        core::ptr::null()
+    } else {
+        &info as *const _
+    };
+    let ok = MiniDumpWriteDump(
+        GetCurrentProcess(),
+        GetCurrentProcessId(),
+        f.as_raw_handle() as _,
+        flags as _,
+        pinfo,
+        core::ptr::null(),
+        core::ptr::null(),
+    );
     drop(f);
     if ok == 0 {
         let _ = std::fs::remove_file(path);
@@ -219,12 +294,17 @@ pub fn install() {
 /// hidden, and generated code keeps no frame pointers, so the dispatch table is the map).
 #[cfg(target_os = "linux")]
 pub fn describe_host(rip: u64) -> String {
-    let Some(t) = crate::dispatch::table() else { return format!("{rip:#x}") };
+    let Some(t) = crate::dispatch::table() else {
+        return format!("{rip:#x}");
+    };
     if let Some(g) = t.guest_of_fn(rip) {
         return format!("{rip:#x} = lifted {}", crate::dispatch::guest_name(g));
     }
     match t.guest_of_host(rip) {
-        Some((g, d)) if d < 0x10_0000 => format!("{rip:#x} = near lifted {} +{d:#x}", crate::dispatch::guest_name(g)),
+        Some((g, d)) if d < 0x10_0000 => format!(
+            "{rip:#x} = near lifted {} +{d:#x}",
+            crate::dispatch::guest_name(g)
+        ),
         _ => match crate::linux::module_of(rip) {
             Some((m, base)) => format!("{rip:#x} ({m}+{:#x})", rip - base),
             None => format!("{rip:#x}"),
@@ -238,7 +318,9 @@ pub fn describe_host(rip: u64) -> String {
 fn ours(rip: u64) -> bool {
     match crate::linux::module_of(rip) {
         None => true,
-        Some((_, base)) => Some(base) == crate::linux::module_of(install as *const () as u64).map(|m| m.1),
+        Some((_, base)) => {
+            Some(base) == crate::linux::module_of(install as *const () as u64).map(|m| m.1)
+        }
     }
 }
 
@@ -266,13 +348,25 @@ unsafe fn report(f: &mut crate::linux::Fault) -> bool {
         // `NXRT_FOREIGN_FAULTS=1` (debugging): a fault in another library (libc's memcpy under host code, a driver)
         // is left to the default action, but its first lines are logged with the caller chain
         static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-        if std::env::var("NXRT_FOREIGN_FAULTS").is_ok_and(|v| v == "1") && N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
-            let m = crate::linux::module_of(rip).map(|(m, b)| format!("{m}+{:#x}", rip - b)).unwrap_or_else(|| format!("{rip:#x}"));
+        if std::env::var("NXRT_FOREIGN_FAULTS").is_ok_and(|v| v == "1")
+            && N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8
+        {
+            let m = crate::linux::module_of(rip)
+                .map(|(m, b)| format!("{m}+{:#x}", rip - b))
+                .unwrap_or_else(|| format!("{rip:#x}"));
             let mut s = format!("fault in another module ({what}) at {m}");
             if f.sig == libc::SIGSEGV || f.sig == libc::SIGBUS {
-                s.push_str(&format!(" ({} of {:#x})", if f.write { "write" } else { "read" }, f.addr));
+                s.push_str(&format!(
+                    " ({} of {:#x})",
+                    if f.write { "write" } else { "read" },
+                    f.addr
+                ));
             }
-            for (n, a) in crate::linux::host_backtrace(24).into_iter().enumerate().skip(2) {
+            for (n, a) in crate::linux::host_backtrace(24)
+                .into_iter()
+                .enumerate()
+                .skip(2)
+            {
                 s.push_str(&format!("\n  frame {n:2}: {}", describe_host(a)));
             }
             crate::rt::log(&s);
@@ -282,13 +376,23 @@ unsafe fn report(f: &mut crate::linux::Fault) -> bool {
     let _ = std::io::stdout().flush();
     let mut s = format!("FATAL: host {what} at {}", describe_host(rip));
     if f.sig == libc::SIGSEGV || f.sig == libc::SIGBUS {
-        let kind = if f.exec { "execute" } else if f.write { "write" } else { "read" };
+        let kind = if f.exec {
+            "execute"
+        } else if f.write {
+            "write"
+        } else {
+            "read"
+        };
         s.push_str(&format!(" ({kind} of {:#x})", f.addr));
     }
     s.push('\n');
     // the frames below the signal frame: glibc's unwinder (.eh_frame) through the handler into the faulting code
     let frames = crate::linux::host_backtrace(40);
-    let at = frames.iter().position(|&a| a == rip || a == rip + 1).map(|i| i + 1).unwrap_or(0);
+    let at = frames
+        .iter()
+        .position(|&a| a == rip || a == rip + 1)
+        .map(|i| i + 1)
+        .unwrap_or(0);
     s.push_str(&format!("  host frame  0: {}\n", describe_host(rip)));
     for (n, a) in frames.into_iter().skip(at).take(24).enumerate() {
         s.push_str(&format!("  host frame {:2}: {}\n", n + 1, describe_host(a)));

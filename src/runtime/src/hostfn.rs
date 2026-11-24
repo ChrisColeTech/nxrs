@@ -45,7 +45,9 @@ struct Registry {
 static REG: Mutex<Option<Registry>> = Mutex::new(None);
 
 fn with<R>(f: impl FnOnce(&mut Registry) -> R) -> R {
-    let mut g = REG.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut g = REG
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let r = g.get_or_insert_with(|| Registry {
         names: vec![],
         by_key: HashMap::new(),
@@ -81,14 +83,18 @@ static ALIASES: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 /// Makes guest address `at` call host function `f` (registered under `name`).
 pub fn alias(at: u64, name: &str, f: HostFn) {
     let a = register(name, f);
-    let mut v = ALIASES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut v = ALIASES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     v.retain(|e| e.0 != at);
     v.push((at, a));
 }
 
 /// The host-function address standing in for guest address `pc`, if `alias` made one.
 pub fn aliased(pc: u64) -> Option<u64> {
-    let v = ALIASES.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let v = ALIASES
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     v.iter().find(|e| e.0 == pc).map(|e| e.1)
 }
 
@@ -119,11 +125,17 @@ pub fn unresolved(name: &str) -> u64 {
 
 unsafe fn unresolved_import(c: *mut Cpu) {
     let name = name_of((*c).pc).unwrap_or_default();
-    crate::rt::guest_fatal(c, &format!("UNIMPL: the guest called {name}, an import no module or host function provides"));
+    crate::rt::guest_fatal(
+        c,
+        &format!("UNIMPL: the guest called {name}, an import no module or host function provides"),
+    );
 }
 
 unsafe fn ret_host(c: *mut Cpu) {
-    crate::rt::guest_fatal(c, "guest code jumped to the host-return address (a host -> guest call's x30)");
+    crate::rt::guest_fatal(
+        c,
+        "guest code jumped to the host-return address (a host -> guest call's x30)",
+    );
 }
 
 fn index(pc: u64) -> Option<usize> {
@@ -135,7 +147,10 @@ fn index(pc: u64) -> Option<usize> {
 pub fn count_call(pc: u64) {
     if let Some(i) = index(pc) {
         if CALLS[i].fetch_add(1, Ordering::Relaxed) == 0 && crate::rt::trace("host") {
-            crate::rt::log(&format!("host: first call of {} at {pc:#x}", name_of(pc).unwrap_or_default()));
+            crate::rt::log(&format!(
+                "host: first call of {} at {pc:#x}",
+                name_of(pc).unwrap_or_default()
+            ));
         }
     }
 }

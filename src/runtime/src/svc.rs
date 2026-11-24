@@ -12,7 +12,8 @@ static SVCS: AtomicU64 = AtomicU64::new(0);
 /// guest registers and writes its results there. Returns false to let the runtime handle it after all.
 pub type SvcHandler = fn(&mut Cpu, u32) -> bool;
 
-static HANDLERS: [std::sync::atomic::AtomicUsize; 256] = [const { std::sync::atomic::AtomicUsize::new(0) }; 256];
+static HANDLERS: [std::sync::atomic::AtomicUsize; 256] =
+    [const { std::sync::atomic::AtomicUsize::new(0) }; 256];
 static FALLBACK: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
 
 /// Routes `SVC #imm` to `f` before the runtime's own handling (set before guest code runs; a later call replaces it).
@@ -86,7 +87,14 @@ unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
     let c = &mut *c;
     CALLER.set(pc);
     if crate::rt::trace("svc") && imm != 0x27 {
-        crate::rt::log(&format!("svc {imm:#04x} at {} x0 {:#x} x1 {:#x} x2 {:#x} x3 {:#x}", crate::dispatch::guest_name(pc), c.x[0], c.x[1], c.x[2], c.x[3]));
+        crate::rt::log(&format!(
+            "svc {imm:#04x} at {} x0 {:#x} x1 {:#x} x2 {:#x} x3 {:#x}",
+            crate::dispatch::guest_name(pc),
+            c.x[0],
+            c.x[1],
+            c.x[2],
+            c.x[3]
+        ));
     }
     if let Some(f) = handler_of(&HANDLERS[(imm & 0xFF) as usize]) {
         if f(c, imm) {
@@ -124,7 +132,13 @@ unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
                 c.x[0] = R_OK; // a notification only (e.g. a module load)
             } else {
                 c.pc = pc;
-                crate::rt::guest_fatal(c, &format!("guest svcBreak reason {reason:#x} buffer {p:#x}+{n:#x} at {}", crate::dispatch::guest_name(pc)));
+                crate::rt::guest_fatal(
+                    c,
+                    &format!(
+                        "guest svcBreak reason {reason:#x} buffer {p:#x}+{n:#x} at {}",
+                        crate::dispatch::guest_name(pc)
+                    ),
+                );
             }
         }
         0x27 => {
@@ -139,13 +153,16 @@ unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
             // GetInfo(-> x1; w1 id0, w2 handle, x3 id1)
             let (id0, id1) = (c.x[1] as u32, c.x[3]);
             let v = match id0 {
-                0 => Some(0xF),  // core mask
+                0 => Some(0xF),                   // core mask
                 1 => Some(0xFFFF_FFFF_FFFF_FFF0), // priority mask
-                8 => Some(0),    // debugger attached
-                11 if id1 < 4 => Some(crate::rt::rt_ticks().wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ id1.wrapping_mul(0xC2B2_AE3D_27D4_EB4F)), // random entropy
+                8 => Some(0),                     // debugger attached
+                11 if id1 < 4 => Some(
+                    crate::rt::rt_ticks().wrapping_mul(0x9E37_79B9_7F4A_7C15)
+                        ^ id1.wrapping_mul(0xC2B2_AE3D_27D4_EB4F),
+                ), // random entropy
                 18 => Some(0x0100_0000_0000_1000), // program id
-                20 => Some(0), // user exception context
-                23 => Some(1), // is application
+                20 => Some(0),                    // user exception context
+                23 => Some(1),                    // is application
                 _ => space.info(id0),
             };
             match v {
@@ -161,7 +178,14 @@ unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
         _ => {
             if !kernel::svc(c, imm) && !handler_of(&FALLBACK).is_some_and(|f| f(c, imm)) {
                 c.pc = pc;
-                crate::rt::guest_fatal(c, &format!("svc #{imm:#x} {} at {} is not implemented", name(imm), crate::dispatch::guest_name(pc)));
+                crate::rt::guest_fatal(
+                    c,
+                    &format!(
+                        "svc #{imm:#x} {} at {} is not implemented",
+                        name(imm),
+                        crate::dispatch::guest_name(pc)
+                    ),
+                );
             }
         }
     }

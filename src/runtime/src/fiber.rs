@@ -4,18 +4,21 @@
 //! guest fiber gets a host fiber (its own reserved host stack) and its own `Cpu`: a suspended fiber's guest registers
 //! and host frames stay untouched while others run. A switch carries the thread's state (TPIDR, TPIDRRO, FPCR/FPSR)
 //! over to the target's `Cpu` and clears the exclusive monitor. A fiber's function returns the fiber to switch to
-//! next (NULL: back to the thread's own context); switched to again, it runs its function again.
+//! next (NULL: back to the thread's own context). Returning completes the fiber; it must be initialized again
+//! before another switch to it. The SDK's inline queries read that lifecycle in FiberType, not our side table.
 
-use crate::cpu::Cpu;
 #[allow(unused_imports)]
 use crate::boundary;
+use crate::cpu::Cpu;
+#[cfg(target_os = "linux")]
+use host::{ConvertThreadToFiberEx, CreateFiberEx, DeleteFiber, SwitchToFiber};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 #[cfg(windows)]
-use windows_sys::Win32::System::Threading::{ConvertThreadToFiberEx, CreateFiberEx, DeleteFiber, SwitchToFiber};
-#[cfg(target_os = "linux")]
-use host::{ConvertThreadToFiberEx, CreateFiberEx, DeleteFiber, SwitchToFiber};
+use windows_sys::Win32::System::Threading::{
+    ConvertThreadToFiberEx, CreateFiberEx, DeleteFiber, SwitchToFiber,
+};
 
 const FIBER_FLAG_FLOAT_SWITCH: u32 = 1;
 const HOST_STACK: usize = 256 << 20;
@@ -29,6 +32,14 @@ pub const SYM_CURRENT: &str = "_ZN2nn2os15GetCurrentFiberEv";
 enum St {
     New,
     Started,
+    Completed,
+}
+
+/// Horizon FiberType's state byte: 0 uninitialized, 1 ready/suspended, 2 running, 4 completed. SDK InitializeFiber,
+/// SwitchToFiber and the fiber entry wrapper maintain it at +0x20; clients can read it inline (Bezel's IsCompleted).
+unsafe fn guest_state(addr: u64, state: u8) {
+    // SAFETY: the caller supplied this writable FiberType to InitializeFiber and has not finalized it yet.
+    core::ptr::write_volatile((addr + 0x20) as *mut u8, state);
 }
 
 struct Fiber {
@@ -62,47 +73,68 @@ pub fn on_fiber() -> bool {
 }
 
 fn find(addr: u64) -> Option<Arc<Mutex<Fiber>>> {
-    FIBERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_ref().and_then(|m| m.get(&addr).cloned())
+    FIBERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_ref()
+        .and_then(|m| m.get(&addr).cloned())
 }
 
 fn resumed() {
     if let Some(f) = LEAVING.with(|l| l.borrow_mut().take()) {
-        f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).running = false;
+        f.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .running = false;
     }
 }
 
 /// Runs a fiber's guest function (called by `nxrt_fiber_entry`, the fiber's first frame). When the function returns,
-/// the fiber switches to the fiber it names (NULL: the thread's own context), as nn::os does; a later switch back to
-/// it runs the function again from the start of its stack (Super Mario Party Jamboree's job fibers return when their
-/// job is done and are switched to again for the next one, without a new InitializeFiber).
+/// the fiber switches to the fiber it names (NULL: the thread's own context), as nn::os does. The SDK wrapper marks
+/// it completed before that switch. Restarting it here replays a finished callback and leaves IsCompleted false.
 #[no_mangle]
 unsafe extern "C" fn nxrt_fiber_run(p: *mut core::ffi::c_void) -> usize {
     crate::boundary::guard("a fiber entry", || {
         resumed();
         let f = Arc::from_raw(p as *const Mutex<Fiber>);
-        loop {
-            let (c, func, arg, addr, top) = {
-                let g = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-                (g.cpu, g.func, g.arg, g.addr, (g.stack + g.size) & !15)
-            };
-            (*c).x[0] = arg;
-            (*c).sp = top;
-            if crate::boundary::call_guest(c, func) != crate::boundary::GuestCall::Returned {
-                crate::rt::guest_fatal(c, &format!("fiber {addr:#x}: a guest jump or ExitThread left the fiber's function"));
-            }
-            let next = (*c).x[0];
-            if crate::rt::trace("fiber") {
-                crate::rt::log(&format!("fiber {addr:#x}: its function returned, next {next:#x}"));
-            }
-            let n = if next != 0 {
-                Some(find(next).unwrap_or_else(|| {
-                    crate::rt::guest_fatal(c, &format!("fiber {addr:#x} returned {next:#x}, which is not an initialized fiber"))
-                }))
-            } else {
-                None
-            };
-            switch_to(c, n);
+        let (c, func, arg, addr, top) = {
+            let g = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            (g.cpu, g.func, g.arg, g.addr, (g.stack + g.size) & !15)
+        };
+        (*c).x[0] = arg;
+        (*c).sp = top;
+        if crate::boundary::call_guest(c, func) != crate::boundary::GuestCall::Returned {
+            crate::rt::guest_fatal(
+                c,
+                &format!("fiber {addr:#x}: a guest jump or ExitThread left the fiber's function"),
+            );
         }
+        let next = (*c).x[0];
+        if crate::rt::trace("fiber") {
+            crate::rt::log(&format!(
+                "fiber {addr:#x}: its function returned, next {next:#x}"
+            ));
+        }
+        let n = if next != 0 {
+            Some(find(next).unwrap_or_else(|| {
+                crate::rt::guest_fatal(
+                    c,
+                    &format!(
+                        "fiber {addr:#x} returned {next:#x}, which is not an initialized fiber"
+                    ),
+                )
+            }))
+        } else {
+            None
+        };
+        f.lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .state = St::Completed;
+        guest_state(addr, 4);
+        switch_to(c, n);
+        crate::rt::guest_fatal(
+            c,
+            &format!("fiber {addr:#x}: a completed fiber was resumed"),
+        );
     })
 }
 
@@ -125,13 +157,23 @@ unsafe fn prepare(from: *const Cpu, to: Option<Arc<Mutex<Fiber>>>) -> usize {
         Some(f) => {
             let mut g = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             if g.running {
-                crate::rt::fatal(&format!("SwitchToFiber({:#x}): the fiber is running", g.addr));
+                crate::rt::fatal(&format!(
+                    "SwitchToFiber({:#x}): the fiber is running",
+                    g.addr
+                ));
+            }
+            if g.state == St::Completed {
+                crate::rt::fatal(&format!(
+                    "SwitchToFiber({:#x}): the fiber is completed; initialize it before reuse",
+                    g.addr
+                ));
             }
             g.running = true;
             if g.state == St::New {
                 (*g.cpu).sp = (g.stack + g.size) & !15;
                 g.state = St::Started;
             }
+            guest_state(g.addr, 2);
             (g.cpu, g.host)
         }
         None => (THREAD_CPU.get(), BASE.get()),
@@ -144,6 +186,12 @@ unsafe fn prepare(from: *const Cpu, to: Option<Arc<Mutex<Fiber>>>) -> usize {
     d.excl_addr = !0;
     d.thread = (*from).thread;
     let prev = CURRENT.with(|c| core::mem::replace(&mut *c.borrow_mut(), to));
+    if let Some(f) = &prev {
+        let g = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if g.state != St::Completed {
+            guest_state(g.addr, 1);
+        }
+    }
     LEAVING.with(|l| *l.borrow_mut() = prev);
     host
 }
@@ -154,7 +202,15 @@ unsafe fn switch_to(from: *const Cpu, to: Option<Arc<Mutex<Fiber>>>) {
     let host = prepare(from, to);
     SwitchToFiber(host as *const _);
     resumed();
-    let me = CURRENT.with(|c| c.borrow().as_ref().map(|f| f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).cpu)).unwrap_or(THREAD_CPU.get());
+    let me = CURRENT
+        .with(|c| {
+            c.borrow().as_ref().map(|f| {
+                f.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .cpu
+            })
+        })
+        .unwrap_or(THREAD_CPU.get());
     (*me).sync_mxcsr();
 }
 
@@ -165,40 +221,83 @@ unsafe fn initialize(c: *mut Cpu) {
     if crate::rt::trace("fiber") {
         crate::rt::log(&format!("fiber {addr:#x}: InitializeFiber function {:#x} argument {:#x} stack {:#x}+{:#x} flags {:#x}", c.x[1], c.x[2], c.x[3], c.x[4], c.x[5]));
     }
-    let mut map = FIBERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut map = FIBERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let map = map.get_or_insert_with(HashMap::new);
     if let Some(old) = map.get(&addr) {
-        let g = old.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let g = old
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         if g.running {
-            crate::rt::guest_fatal(c, &format!("InitializeFiber({addr:#x}): the fiber is running"));
+            crate::rt::guest_fatal(
+                c,
+                &format!("InitializeFiber({addr:#x}): the fiber is running"),
+            );
         }
     }
     let cpu = Box::into_raw(Cpu::new_boxed());
-    let f = Arc::new(Mutex::new(Fiber { addr, func: c.x[1], arg: c.x[2], stack: c.x[3], size: c.x[4], cpu, host: 0, state: St::New, running: false }));
+    let f = Arc::new(Mutex::new(Fiber {
+        addr,
+        func: c.x[1],
+        arg: c.x[2],
+        stack: c.x[3],
+        size: c.x[4],
+        cpu,
+        host: 0,
+        state: St::New,
+        running: false,
+    }));
     #[cfg(windows)]
-    let entry: unsafe extern "system" fn(*mut core::ffi::c_void) = core::mem::transmute(crate::asm::nxrt_fiber_entry as *const () as usize);
+    let entry: unsafe extern "system" fn(*mut core::ffi::c_void) =
+        core::mem::transmute(crate::asm::nxrt_fiber_entry as *const () as usize);
     #[cfg(target_os = "linux")]
     let entry: unsafe extern "C" fn(*mut core::ffi::c_void) = crate::asm::nxrt_fiber_entry;
-    let host = CreateFiberEx(64 << 10, HOST_STACK, FIBER_FLAG_FLOAT_SWITCH, Some(entry), Arc::into_raw(f.clone()) as *const _);
+    let host = CreateFiberEx(
+        64 << 10,
+        HOST_STACK,
+        FIBER_FLAG_FLOAT_SWITCH,
+        Some(entry),
+        Arc::into_raw(f.clone()) as *const _,
+    );
     if host.is_null() {
         crate::rt::fatal("fiber: cannot create a host fiber");
     }
-    f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).host = host as usize;
+    f.lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .host = host as usize;
     if let Some(old) = map.insert(addr, f) {
-        release(&old.lock().unwrap_or_else(std::sync::PoisonError::into_inner));
+        release(
+            &old.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        );
     }
+    guest_state(addr, 1);
 }
 
 /// FinalizeFiber(x0 FiberType*)
 unsafe fn finalize(c: *mut Cpu) {
     let addr = (*c).x[0];
-    let f = FIBERS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).as_mut().and_then(|m| m.remove(&addr));
-    let Some(f) = f else { crate::rt::guest_fatal(c, &format!("FinalizeFiber({addr:#x}): not an initialized fiber")) };
+    let f = FIBERS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .as_mut()
+        .and_then(|m| m.remove(&addr));
+    let Some(f) = f else {
+        crate::rt::guest_fatal(
+            c,
+            &format!("FinalizeFiber({addr:#x}): not an initialized fiber"),
+        )
+    };
     let g = f.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if g.running {
-        crate::rt::guest_fatal(c, &format!("FinalizeFiber({addr:#x}): the fiber is running"));
+        crate::rt::guest_fatal(
+            c,
+            &format!("FinalizeFiber({addr:#x}): the fiber is running"),
+        );
     }
     release(&g);
+    guest_state(addr, 0);
 }
 
 /// Deletes a fiber's host fiber (its host stack). A fiber finalized while suspended inside its function (as Horizon
@@ -209,7 +308,10 @@ unsafe fn finalize(c: *mut Cpu) {
 /// host fiber cost Super Smash Bros. Ultimate ~100 MB of committed stack a minute (11,471 fibers in 14 min).
 unsafe fn release(g: &Fiber) {
     if g.state == St::Started && crate::rt::trace("fiber") {
-        crate::rt::log(&format!("fiber {:#x}: finalized while suspended; its host stack is freed", g.addr));
+        crate::rt::log(&format!(
+            "fiber {:#x}: finalized while suspended; its host stack is freed",
+            g.addr
+        ));
     }
     DeleteFiber(g.host as *const _);
 }
@@ -218,14 +320,28 @@ unsafe fn release(g: &Fiber) {
 unsafe fn switch(c: *mut Cpu) {
     let addr = (*c).x[0];
     if crate::rt::trace("fiber") {
-        let cur = CURRENT.with(|f| f.borrow().as_ref().map_or(0, |f| f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).addr));
-        crate::rt::log(&format!("fiber: SwitchToFiber {cur:#x} -> {addr:#x} (lr {:#x})", (*c).x[30]));
+        let cur = CURRENT.with(|f| {
+            f.borrow().as_ref().map_or(0, |f| {
+                f.lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .addr
+            })
+        });
+        crate::rt::log(&format!(
+            "fiber: SwitchToFiber {cur:#x} -> {addr:#x} (lr {:#x})",
+            (*c).x[30]
+        ));
     }
     if !on_fiber() {
         THREAD_CPU.set(c);
     }
     let to = if addr != 0 {
-        Some(find(addr).unwrap_or_else(|| crate::rt::guest_fatal(c, &format!("SwitchToFiber({addr:#x}): not an initialized fiber"))))
+        Some(find(addr).unwrap_or_else(|| {
+            crate::rt::guest_fatal(
+                c,
+                &format!("SwitchToFiber({addr:#x}): not an initialized fiber"),
+            )
+        }))
     } else {
         None
     };
@@ -241,7 +357,13 @@ unsafe fn switch(c: *mut Cpu) {
 
 /// GetCurrentFiber() -> x0 (NULL on the thread's own context)
 unsafe fn current(c: *mut Cpu) {
-    (*c).x[0] = CURRENT.with(|f| f.borrow().as_ref().map_or(0, |f| f.lock().unwrap_or_else(std::sync::PoisonError::into_inner).addr));
+    (*c).x[0] = CURRENT.with(|f| {
+        f.borrow().as_ref().map_or(0, |f| {
+            f.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .addr
+        })
+    });
 }
 
 pub fn register() {
@@ -275,8 +397,15 @@ mod host {
         static CUR: Cell<*mut HostFiber> = const { Cell::new(core::ptr::null_mut()) };
     }
 
-    pub unsafe fn ConvertThreadToFiberEx(_p: *const core::ffi::c_void, _flags: u32) -> *mut core::ffi::c_void {
-        let f = Box::into_raw(Box::new(HostFiber { sp: 0, stack: 0, size: 0 }));
+    pub unsafe fn ConvertThreadToFiberEx(
+        _p: *const core::ffi::c_void,
+        _flags: u32,
+    ) -> *mut core::ffi::c_void {
+        let f = Box::into_raw(Box::new(HostFiber {
+            sp: 0,
+            stack: 0,
+            size: 0,
+        }));
         CUR.set(f);
         f as *mut _
     }
@@ -290,14 +419,25 @@ mod host {
     ) -> *mut core::ffi::c_void {
         const GUARD: usize = 0x1000;
         let size = reserve + GUARD;
-        let p = libc::mmap(core::ptr::null_mut(), size, libc::PROT_READ | libc::PROT_WRITE, libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE | libc::MAP_STACK, -1, 0);
+        let p = libc::mmap(
+            core::ptr::null_mut(),
+            size,
+            libc::PROT_READ | libc::PROT_WRITE,
+            libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_NORESERVE | libc::MAP_STACK,
+            -1,
+            0,
+        );
         if p == libc::MAP_FAILED {
             return core::ptr::null_mut();
         }
         libc::mprotect(p, GUARD, libc::PROT_NONE);
         let top = (p as usize + size) & !15;
         let sp = initial_frame(top, entry.map_or(0, |e| e as usize as u64), param as u64);
-        let f = Box::into_raw(Box::new(HostFiber { sp, stack: p as usize, size }));
+        let f = Box::into_raw(Box::new(HostFiber {
+            sp,
+            stack: p as usize,
+            size,
+        }));
         f as *mut _
     }
 
@@ -427,18 +567,35 @@ mod host {
                 let started = AtomicU32::new(0);
                 let base = ConvertThreadToFiberEx(core::ptr::null(), 1);
                 BASE_FIBER.store(base as usize, Ordering::SeqCst);
-                let f = CreateFiberEx(64 << 10, 1 << 20, 1, Some(nxrt_test_fiber_tramp), &started as *const _ as *const _);
+                let f = CreateFiberEx(
+                    64 << 10,
+                    1 << 20,
+                    1,
+                    Some(nxrt_test_fiber_tramp),
+                    &started as *const _ as *const _,
+                );
                 assert!(!f.is_null());
                 assert!(!host_fz());
                 let kept = core::hint::black_box(0x1234_5678_u64);
                 SwitchToFiber(f);
-                assert_eq!(started.load(Ordering::SeqCst), 1, "the fiber ran from its entry");
-                assert!(!host_fz(), "the fiber's FP control did not leak into the base context");
+                assert_eq!(
+                    started.load(Ordering::SeqCst),
+                    1,
+                    "the fiber ran from its entry"
+                );
+                assert!(
+                    !host_fz(),
+                    "the fiber's FP control did not leak into the base context"
+                );
                 assert_eq!(core::hint::black_box(kept), 0x1234_5678);
                 for i in 1..=3 {
                     SwitchToFiber(f);
                     assert_eq!(STEPS.load(Ordering::SeqCst), i);
-                    assert_eq!(FZ_KEPT.load(Ordering::SeqCst), 1, "the fiber's own FP control came back with it");
+                    assert_eq!(
+                        FZ_KEPT.load(Ordering::SeqCst),
+                        1,
+                        "the fiber's own FP control came back with it"
+                    );
                     assert!(!host_fz());
                 }
                 DeleteFiber(f);

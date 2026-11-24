@@ -50,8 +50,13 @@ pub static mut rt_excl_mon: *mut u32 = core::ptr::null_mut();
 
 /// Turns the global exclusive monitor on or off; call before any guest code runs.
 pub fn set_exclusive_monitor(on: bool) {
-    static TABLE: [core::sync::atomic::AtomicU32; 1 << 16] = [const { core::sync::atomic::AtomicU32::new(0) }; 1 << 16];
-    let p = if on { TABLE.as_ptr() as *mut u32 } else { core::ptr::null_mut() };
+    static TABLE: [core::sync::atomic::AtomicU32; 1 << 16] =
+        [const { core::sync::atomic::AtomicU32::new(0) }; 1 << 16];
+    let p = if on {
+        TABLE.as_ptr() as *mut u32
+    } else {
+        core::ptr::null_mut()
+    };
     // SAFETY: start-up, before guest threads run
     unsafe { core::ptr::addr_of_mut!(rt_excl_mon).write_volatile(p) }
 }
@@ -115,7 +120,12 @@ impl Cpu {
         unsafe {
             use core::arch::x86_64::{_mm_getcsr, _mm_setcsr};
             let cur = _mm_getcsr();
-            let want = (cur & !0xE040) | if self.fpcr & (1 << 24) != 0 { 0x8040 } else { 0 };
+            let want = (cur & !0xE040)
+                | if self.fpcr & (1 << 24) != 0 {
+                    0x8040
+                } else {
+                    0
+                };
             if cur != want {
                 _mm_setcsr(want);
             }
@@ -166,9 +176,19 @@ mod tests {
     #[test]
     fn header_offsets_agree() {
         let h = include_str!("../../translator/runtime/cpu.h");
-        for (field, off) in [("sp", 256), ("pc", 264), ("nzcv", 272), ("fpcr", 320), ("fpsr", 328), ("v", 512)] {
+        for (field, off) in [
+            ("sp", 256),
+            ("pc", 264),
+            ("nzcv", 272),
+            ("fpcr", 320),
+            ("fpsr", 328),
+            ("v", 512),
+        ] {
             let want = format!("_Static_assert(offsetof(Cpu, {field}) == {off}");
-            assert!(h.contains(&want), "cpu.h no longer asserts {field} at {off}");
+            assert!(
+                h.contains(&want),
+                "cpu.h no longer asserts {field} at {off}"
+            );
         }
         assert!(h.contains("void *sj;                // 344"));
     }

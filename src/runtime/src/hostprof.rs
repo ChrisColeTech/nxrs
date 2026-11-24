@@ -22,12 +22,19 @@ pub struct Spec {
 
 pub fn parse(v: &str) -> Spec {
     let mut it = v.splitn(3, ',');
-    let mut s = Spec { start: 0.0, seconds: 10.0, file: None };
+    let mut s = Spec {
+        start: 0.0,
+        seconds: 10.0,
+        file: None,
+    };
     if let Some(x) = it.next().and_then(|x| x.trim().parse().ok()) {
         s.start = x;
         if let Some(y) = it.next().and_then(|y| y.trim().parse().ok()) {
             s.seconds = y;
-            s.file = it.next().map(|f| f.trim_end_matches(['\r', '\n']).to_string()).filter(|f| !f.is_empty());
+            s.file = it
+                .next()
+                .map(|f| f.trim_end_matches(['\r', '\n']).to_string())
+                .filter(|f| !f.is_empty());
         }
     }
     s
@@ -58,30 +65,52 @@ pub struct Names<'a> {
 /// The sample lines and the tables (host_prof.py's three), `image` = this image's base.
 pub fn report(head: &str, samples: &[Sample], image: u64, names: &Names, top: usize) -> String {
     let mut s = format!("{head}\n");
-    let (mut own, mut outside, mut via, mut outfn): (HashMap<String, u64>, HashMap<String, u64>, HashMap<String, u64>, HashMap<String, u64>) = Default::default();
+    let (mut own, mut outside, mut via, mut outfn): (
+        HashMap<String, u64>,
+        HashMap<String, u64>,
+        HashMap<String, u64>,
+        HashMap<String, u64>,
+    ) = Default::default();
     let mut n_own = 0u64;
     for sm in samples {
         match (names.own)(sm.ip) {
             Some(name) => {
-                s.push_str(&format!("{:x} {:x} -\n", sm.ip - image, if sm.ret != 0 { sm.ret - image } else { 0 }));
+                s.push_str(&format!(
+                    "{:x} {:x} -\n",
+                    sm.ip - image,
+                    if sm.ret != 0 { sm.ret - image } else { 0 }
+                ));
                 *own.entry(name).or_default() += 1;
                 n_own += 1;
             }
             None => {
-                let (path, rel, fname) = (names.module)(sm.ip).unwrap_or_else(|| ("?".into(), sm.ip, "?".into()));
-                s.push_str(&format!("{:x} {:x} {path}\n", rel, if sm.ret != 0 { sm.ret - image } else { 0 }));
+                let (path, rel, fname) =
+                    (names.module)(sm.ip).unwrap_or_else(|| ("?".into(), sm.ip, "?".into()));
+                s.push_str(&format!(
+                    "{:x} {:x} {path}\n",
+                    rel,
+                    if sm.ret != 0 { sm.ret - image } else { 0 }
+                ));
                 let base = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
                 let f = format!("{base}!{fname}");
                 *outside.entry(base).or_default() += 1;
                 *outfn.entry(f.clone()).or_default() += 1;
-                let caller = if sm.ret != 0 { (names.own)(sm.ret).unwrap_or_else(|| "?".into()) } else { "(no caller found)".into() };
+                let caller = if sm.ret != 0 {
+                    (names.own)(sm.ret).unwrap_or_else(|| "?".into())
+                } else {
+                    "(no caller found)".into()
+                };
                 *via.entry(format!("{caller} -> {f}")).or_default() += 1;
             }
         }
     }
     let n = samples.len() as u64;
     let pct = |c: u64| 100.0 * c as f64 / n.max(1) as f64;
-    s.push_str(&format!("# {n} samples; in this image {n_own} ({:.1} %), in other modules {}\n", pct(n_own), n - n_own));
+    s.push_str(&format!(
+        "# {n} samples; in this image {n_own} ({:.1} %), in other modules {}\n",
+        pct(n_own),
+        n - n_own
+    ));
     let mut all = own.clone();
     for (m, c) in &outside {
         *all.entry(format!("[{m}]")).or_default() += c;
@@ -94,9 +123,24 @@ pub fn report(head: &str, samples: &[Sample], image: u64, names: &Names, top: us
             s.push_str(&format!("# {:6.2} %  {c:6}  {name}\n", pct(*c)));
         }
     };
-    table(&mut s, "by function (self time; other modules by name)", &all, top);
-    table(&mut s, "time in other modules, by the nearest export below the address", &outfn, top / 2);
-    table(&mut s, "time in other modules, by the function of this image that called", &via, top / 2);
+    table(
+        &mut s,
+        "by function (self time; other modules by name)",
+        &all,
+        top,
+    );
+    table(
+        &mut s,
+        "time in other modules, by the nearest export below the address",
+        &outfn,
+        top / 2,
+    );
+    table(
+        &mut s,
+        "time in other modules, by the function of this image that called",
+        &via,
+        top / 2,
+    );
     s
 }
 
@@ -104,21 +148,39 @@ pub fn report(head: &str, samples: &[Sample], image: u64, names: &Names, top: us
 pub fn start() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let Some(v) = std::env::var("SWR_HOST_PROF").ok().filter(|v| !v.is_empty()) else { return };
+        let Some(v) = std::env::var("SWR_HOST_PROF")
+            .ok()
+            .filter(|v| !v.is_empty())
+        else {
+            return;
+        };
         let spec = parse(&v);
         let name = thread_name(std::env::var("SWR_HOST_PROF_THREAD").ok().as_deref());
-        let path = spec.file.clone().map(std::path::PathBuf::from).unwrap_or_else(default_path);
-        let _ = std::thread::Builder::new().name("host profiler".into()).spawn(move || {
-            let t0 = std::time::Instant::now();
-            std::thread::sleep(std::time::Duration::from_secs_f64(spec.start.max(0.0)));
-            match run(&name, spec.seconds, t0) {
-                Ok(text) => match std::fs::write(&path, text.as_bytes()) {
-                    Ok(()) => crate::rt::log(&format!("host profile: written to {} ({})", path.display(), text.lines().next().unwrap_or(""))),
-                    Err(e) => crate::rt::log(&format!("host profile: cannot write {}: {e}", path.display())),
-                },
-                Err(e) => crate::rt::log(&format!("host profile: {e}")),
-            }
-        });
+        let path = spec
+            .file
+            .clone()
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(default_path);
+        let _ = std::thread::Builder::new()
+            .name("host profiler".into())
+            .spawn(move || {
+                let t0 = std::time::Instant::now();
+                std::thread::sleep(std::time::Duration::from_secs_f64(spec.start.max(0.0)));
+                match run(&name, spec.seconds, t0) {
+                    Ok(text) => match std::fs::write(&path, text.as_bytes()) {
+                        Ok(()) => crate::rt::log(&format!(
+                            "host profile: written to {} ({})",
+                            path.display(),
+                            text.lines().next().unwrap_or("")
+                        )),
+                        Err(e) => crate::rt::log(&format!(
+                            "host profile: cannot write {}: {e}",
+                            path.display()
+                        )),
+                    },
+                    Err(e) => crate::rt::log(&format!("host profile: {e}")),
+                }
+            });
     });
 }
 
@@ -134,13 +196,22 @@ pub use win::{own_name, run};
 mod win {
     use super::*;
     use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, HMODULE};
-    use windows_sys::Win32::System::Diagnostics::Debug::{GetThreadContext, CONTEXT, IMAGE_NT_HEADERS64};
-    use windows_sys::Win32::System::Diagnostics::ToolHelp::{CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32};
-    use windows_sys::Win32::System::LibraryLoader::{GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT};
+    use windows_sys::Win32::System::Diagnostics::Debug::{
+        GetThreadContext, CONTEXT, IMAGE_NT_HEADERS64,
+    };
+    use windows_sys::Win32::System::Diagnostics::ToolHelp::{
+        CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
+    };
+    use windows_sys::Win32::System::LibraryLoader::{
+        GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+        GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+    };
     use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
     use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
     use windows_sys::Win32::System::Threading::{
-        GetCurrentProcessId, GetThreadDescription, GetThreadTimes, OpenThread, ResumeThread, SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
+        GetCurrentProcessId, GetThreadDescription, GetThreadTimes, OpenThread, ResumeThread,
+        SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION,
+        THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
     };
 
     const CONTEXT_CONTROL: u32 = 0x0010_0001;
@@ -149,7 +220,14 @@ mod win {
     fn module_of(addr: u64) -> Option<(HMODULE, u64, u64, u64, u64)> {
         let mut m: HMODULE = core::ptr::null_mut();
         // SAFETY: a lookup by address; the module stays loaded (unchanged refcount: the engine's own or a system DLL)
-        let ok = unsafe { GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT, addr as *const u16, &mut m) };
+        let ok = unsafe {
+            GetModuleHandleExW(
+                GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS
+                    | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                addr as *const u16,
+                &mut m,
+            )
+        };
         if ok == 0 {
             return None;
         }
@@ -160,7 +238,13 @@ mod win {
             let nt = &*((base + d.e_lfanew as u64) as *const IMAGE_NT_HEADERS64);
             let size = nt.OptionalHeader.SizeOfImage as u64;
             let code = base + nt.OptionalHeader.BaseOfCode as u64;
-            Some((m, base, base + size, code, code + nt.OptionalHeader.SizeOfCode as u64))
+            Some((
+                m,
+                base,
+                base + size,
+                code,
+                code + nt.OptionalHeader.SizeOfCode as u64,
+            ))
         }
     }
 
@@ -177,7 +261,11 @@ mod win {
             }
             let e = (base + dir.VirtualAddress as u64) as *const u32;
             let (nfun, nname) = (*e.add(5), *e.add(6));
-            let (afun, aname, aord) = (base + *e.add(7) as u64, base + *e.add(8) as u64, base + *e.add(9) as u64);
+            let (afun, aname, aord) = (
+                base + *e.add(7) as u64,
+                base + *e.add(8) as u64,
+                base + *e.add(9) as u64,
+            );
             let rva = addr - base;
             let mut best: Option<(u32, u32)> = None;
             for i in 0..nname as usize {
@@ -193,7 +281,11 @@ mod win {
             match best {
                 Some((f, nm)) => {
                     let p = (base + nm as u64) as *const core::ffi::c_char;
-                    format!("{}+{:x}", core::ffi::CStr::from_ptr(p).to_string_lossy(), rva - f as u64)
+                    format!(
+                        "{}+{:x}",
+                        core::ffi::CStr::from_ptr(p).to_string_lossy(),
+                        rva - f as u64
+                    )
                 }
                 None => format!("+{rva:x}"),
             }
@@ -201,7 +293,13 @@ mod win {
     }
 
     fn own_range() -> (u64, u64, u64, u64) {
-        let (_, lo, hi, tlo, thi) = module_of(own_range as *const () as usize as u64).unwrap_or((core::ptr::null_mut(), 0, 0, 0, 0));
+        let (_, lo, hi, tlo, thi) = module_of(own_range as *const () as usize as u64).unwrap_or((
+            core::ptr::null_mut(),
+            0,
+            0,
+            0,
+            0,
+        ));
         (lo, hi, tlo, thi)
     }
 
@@ -211,7 +309,10 @@ mod win {
         if addr < lo || addr >= hi {
             return None;
         }
-        if let Some((g, _)) = crate::dispatch::table().and_then(|t| t.guest_of_host(addr)).filter(|&(_, d)| d < 0x10_0000) {
+        if let Some((g, _)) = crate::dispatch::table()
+            .and_then(|t| t.guest_of_host(addr))
+            .filter(|&(_, d)| d < 0x10_0000)
+        {
             return Some(crate::dispatch::guest_name(g));
         }
         Some(export_below(lo, addr))
@@ -222,7 +323,11 @@ mod win {
         let mut buf = [0u16; 520];
         // SAFETY: our buffer
         let n = unsafe { GetModuleFileNameW(m, buf.as_mut_ptr(), buf.len() as u32) } as usize;
-        Some((String::from_utf16_lossy(&buf[..n]), addr - base, export_below(base, addr)))
+        Some((
+            String::from_utf16_lossy(&buf[..n]),
+            addr - base,
+            export_below(base, addr),
+        ))
     }
 
     /// The first thread of this process whose name starts with `name`.
@@ -245,7 +350,9 @@ mod win {
                         let mut p: *mut u16 = core::ptr::null_mut();
                         if GetThreadDescription(h, &mut p) >= 0 && !p.is_null() {
                             let len = (0..).take_while(|&i| *p.add(i) != 0).count();
-                            if String::from_utf16_lossy(core::slice::from_raw_parts(p, len)).starts_with(name) {
+                            if String::from_utf16_lossy(core::slice::from_raw_parts(p, len))
+                                .starts_with(name)
+                            {
                                 found = Some(te.th32ThreadID);
                             }
                             windows_sys::Win32::Foundation::LocalFree(p as _);
@@ -261,10 +368,12 @@ mod win {
     }
 
     fn cpu_seconds(h: HANDLE) -> f64 {
-        let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) = unsafe { core::mem::zeroed() };
+        let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) =
+            unsafe { core::mem::zeroed() };
         // SAFETY: our thread handle and FILETIMEs
         unsafe { GetThreadTimes(h, &mut c, &mut e, &mut k, &mut u) };
-        let ft = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
+        let ft =
+            |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
         ft(k) + ft(u)
     }
 
@@ -280,7 +389,13 @@ mod win {
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
         // SAFETY: opening a thread of this process
-        let th = unsafe { OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION, 0, tid) };
+        let th = unsafe {
+            OpenThread(
+                THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
+                0,
+                tid,
+            )
+        };
         if th.is_null() {
             return Err(format!("cannot open the thread {name:?}"));
         }
@@ -307,7 +422,13 @@ mod win {
                         // the first stack word that points into this image's code
                         let sp = cx.Rsp as *const u64;
                         let mut mb: MEMORY_BASIC_INFORMATION = core::mem::zeroed();
-                        if VirtualQuery(sp as _, &mut mb, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0 && mb.State == MEM_COMMIT {
+                        if VirtualQuery(
+                            sp as _,
+                            &mut mb,
+                            core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                        ) != 0
+                            && mb.State == MEM_COMMIT
+                        {
                             let rend = mb.BaseAddress as u64 + mb.RegionSize as u64;
                             for k in 0..512u64 {
                                 if cx.Rsp + (k + 1) * 8 > rend {
@@ -330,7 +451,16 @@ mod win {
         // SAFETY: our handle
         unsafe { CloseHandle(th) };
         let head = format!("# host profile of thread {name:?}: {} samples in {seconds:.1} s, thread CPU {cpu:.2} s, image {lo:x}..{hi:x}", samples.len());
-        Ok(report(&head, &samples, lo, &Names { own: &own_name, module: &module_name }, 40))
+        Ok(report(
+            &head,
+            &samples,
+            lo,
+            &Names {
+                own: &own_name,
+                module: &module_name,
+            },
+            40,
+        ))
     }
 }
 
@@ -346,10 +476,38 @@ mod tests {
     /// Turbo's sscanf("%lf,%lf,%[^\n]") and SWR_HOST_PROF_THREAD.
     #[test]
     fn spec_as_turbo() {
-        assert_eq!(parse("100,25"), Spec { start: 100.0, seconds: 25.0, file: None });
-        assert_eq!(parse("5,2.5,C:\\x\\p.txt\n"), Spec { start: 5.0, seconds: 2.5, file: Some("C:\\x\\p.txt".into()) });
-        assert_eq!(parse("7"), Spec { start: 7.0, seconds: 10.0, file: None });
-        assert_eq!(parse("x"), Spec { start: 0.0, seconds: 10.0, file: None });
+        assert_eq!(
+            parse("100,25"),
+            Spec {
+                start: 100.0,
+                seconds: 25.0,
+                file: None
+            }
+        );
+        assert_eq!(
+            parse("5,2.5,C:\\x\\p.txt\n"),
+            Spec {
+                start: 5.0,
+                seconds: 2.5,
+                file: Some("C:\\x\\p.txt".into())
+            }
+        );
+        assert_eq!(
+            parse("7"),
+            Spec {
+                start: 7.0,
+                seconds: 10.0,
+                file: None
+            }
+        );
+        assert_eq!(
+            parse("x"),
+            Spec {
+                start: 0.0,
+                seconds: 10.0,
+                file: None
+            }
+        );
         assert_eq!(thread_name(None), "vk replay");
         assert_eq!(thread_name(Some("completion")), "nvn-completion");
         assert_eq!(thread_name(Some("c")), "nvn-completion");
@@ -359,13 +517,47 @@ mod tests {
     /// host_prof.py's three tables from Turbo-format samples.
     #[test]
     fn report_tables_as_host_prof_py() {
-        let own = |a: u64| (0x1000..0x2000).contains(&a).then(|| if a < 0x1800 { "vk_replay_cmd".to_string() } else { "vk_bind".to_string() });
-        let module = |a: u64| Some(("C:\\Windows\\System32\\nvoglv64.dll".to_string(), a - 0x9000, "vkQueueSubmit+10".to_string()));
-        let names = Names { own: &own, module: &module };
-        let s = [Sample { ip: 0x1100, ret: 0 }, Sample { ip: 0x1200, ret: 0 }, Sample { ip: 0x1900, ret: 0 }, Sample { ip: 0x9010, ret: 0x1110 }];
+        let own = |a: u64| {
+            (0x1000..0x2000).contains(&a).then(|| {
+                if a < 0x1800 {
+                    "vk_replay_cmd".to_string()
+                } else {
+                    "vk_bind".to_string()
+                }
+            })
+        };
+        let module = |a: u64| {
+            Some((
+                "C:\\Windows\\System32\\nvoglv64.dll".to_string(),
+                a - 0x9000,
+                "vkQueueSubmit+10".to_string(),
+            ))
+        };
+        let names = Names {
+            own: &own,
+            module: &module,
+        };
+        let s = [
+            Sample { ip: 0x1100, ret: 0 },
+            Sample { ip: 0x1200, ret: 0 },
+            Sample { ip: 0x1900, ret: 0 },
+            Sample {
+                ip: 0x9010,
+                ret: 0x1110,
+            },
+        ];
         let r = report("# head", &s, 0x1000, &names, 40);
         let l: Vec<&str> = r.lines().collect();
-        assert_eq!(&l[..5], ["# head", "100 0 -", "200 0 -", "900 0 -", "10 110 C:\\Windows\\System32\\nvoglv64.dll"]);
+        assert_eq!(
+            &l[..5],
+            [
+                "# head",
+                "100 0 -",
+                "200 0 -",
+                "900 0 -",
+                "10 110 C:\\Windows\\System32\\nvoglv64.dll"
+            ]
+        );
         assert!(r.contains("# 4 samples; in this image 3 (75.0 %), in other modules 1"));
         assert!(r.contains("#  50.00 %       2  vk_replay_cmd"));
         assert!(r.contains("#  25.00 %       1  [nvoglv64.dll]"));
@@ -393,9 +585,23 @@ mod tests {
         h.join().unwrap();
         let text = text.unwrap();
         let head = text.lines().next().unwrap();
-        assert!(head.starts_with("# host profile of thread \"hostprof test spinner\": "), "{head}");
-        let n: usize = head.split(": ").nth(1).unwrap().split(' ').next().unwrap().parse().unwrap();
+        assert!(
+            head.starts_with("# host profile of thread \"hostprof test spinner\": "),
+            "{head}"
+        );
+        let n: usize = head
+            .split(": ")
+            .nth(1)
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
         assert!(n > 50, "{head}");
-        assert!(text.lines().filter(|l| l.ends_with(" -")).count() > n / 2, "most samples in this image");
+        assert!(
+            text.lines().filter(|l| l.ends_with(" -")).count() > n / 2,
+            "most samples in this image"
+        );
     }
 }

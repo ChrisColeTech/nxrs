@@ -1,9 +1,19 @@
+states: initialized 1 1
 main: switching to fiber1 (current 0x0)
 fiber1: start (arg 11, on its stack: 1)
+states: fiber1 running 2 1
 fiber2: start (arg 22, on its stack: 1)
+states: fiber1 suspended 1 2
 fiber1: resumed, current is fiber1: 1, local 1
 fiber2: resumed after fiber1 finished
+states: fiber1 completed 4 2
 main: back on the thread (current 0x0, local 42)
+states: returned to thread 4 1
 fiber2: resumed from the thread, local 2
-main: back again; finalizing
+states: both completed 4 4
+states: reinitialized 1 4
+reused: arg 33 state 2
+main: callback calls 1, completed 4
+main: finalizing
+states: finalized 0 0
 main: done

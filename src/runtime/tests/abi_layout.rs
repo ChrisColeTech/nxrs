@@ -47,14 +47,21 @@ fn c_and_rust_layouts_agree() {
     let exe = dir.join("probe.exe");
     let out = Command::new(clang())
         .args(["-O0", "-march=x86-64-v3", "-w"])
-        .arg(format!("-I{}", root.join("../translator/runtime").display()))
+        .arg(format!(
+            "-I{}",
+            root.join("../translator/runtime").display()
+        ))
         .arg(format!("-I{}", root.join("include").display()))
         .arg(dir.join("probe.c"))
         .arg("-o")
         .arg(&exe)
         .output()
         .expect("clang (set NXRT_CLANG) is needed for the ABI layout check");
-    assert!(out.status.success(), "probe failed to compile:\n{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "probe failed to compile:\n{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let run = Command::new(&exe).output().unwrap();
     let c: BTreeMap<String, usize> = String::from_utf8(run.stdout)
         .unwrap()
@@ -103,5 +110,9 @@ fn c_and_rust_layouts_agree() {
             other => mismatches.push(format!("{k}: C {other:?}, Rust {v}")),
         }
     }
-    assert!(mismatches.is_empty(), "C and Rust disagree on the shared layouts:\n  {}", mismatches.join("\n  "));
+    assert!(
+        mismatches.is_empty(),
+        "C and Rust disagree on the shared layouts:\n  {}",
+        mismatches.join("\n  ")
+    );
 }

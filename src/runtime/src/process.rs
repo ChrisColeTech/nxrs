@@ -52,13 +52,20 @@ fn program() -> Program {
         let exefs = std::env::var_os("NXRT_EXEFS")
             .map(PathBuf::from)
             .or_else(|| std::env::var_os("NXRS_DATA").map(|d| Path::new(&d).join("exefs")));
-        let id = exefs.and_then(|e| std::fs::read(e.join("main.npdm")).ok()).and_then(|n| npdm_program_id(&n));
-        Program { program_id: id.unwrap_or(0) }
+        let id = exefs
+            .and_then(|e| std::fs::read(e.join("main.npdm")).ok())
+            .and_then(|n| npdm_program_id(&n));
+        Program {
+            program_id: id.unwrap_or(0),
+        }
     })
 }
 
 fn env_flag(name: &str) -> Option<bool> {
-    std::env::var(name).ok().filter(|v| !v.is_empty()).map(|v| v.trim().parse::<i64>().map_or(true, |n| n > 0))
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .map(|v| v.trim().parse::<i64>().map_or(true, |n| n > 0))
 }
 
 /// What start-up decides, once per process (from `kernel::init`, before any guest thread runs):
@@ -74,14 +81,26 @@ pub fn startup(space: &Space) {
         return;
     }
     let p = program();
-    let mut hz = if p.switch2() { crate::rt::TICK_HZ_SWITCH2 } else { crate::rt::TICK_HZ_SWITCH1 };
-    if let Some(v) = std::env::var("SWR_TICK_HZ").ok().and_then(|v| v.trim().parse::<f64>().ok()).filter(|v| *v >= 1e6) {
+    let mut hz = if p.switch2() {
+        crate::rt::TICK_HZ_SWITCH2
+    } else {
+        crate::rt::TICK_HZ_SWITCH1
+    };
+    if let Some(v) = std::env::var("SWR_TICK_HZ")
+        .ok()
+        .and_then(|v| v.trim().parse::<f64>().ok())
+        .filter(|v| *v >= 1e6)
+    {
         hz = v as u32;
     }
     crate::rt::set_tick_hz(hz);
-    let xmon = env_flag("SWR_XMON").unwrap_or_else(|| env_flag("SWR_NO_XMON").map_or(!p.switch2(), |no| !no));
+    let xmon = env_flag("SWR_XMON")
+        .unwrap_or_else(|| env_flag("SWR_NO_XMON").map_or(!p.switch2(), |no| !no));
     crate::cpu::set_exclusive_monitor(xmon);
-    let limit = env_flag("SWR_MAP_LIMIT").unwrap_or(matches!(p.program_id, 0x0100_F430_08C4_4000 | 0x0400_4860_24DE_C000));
+    let limit = env_flag("SWR_MAP_LIMIT").unwrap_or(matches!(
+        p.program_id,
+        0x0100_F430_08C4_4000 | 0x0400_4860_24DE_C000
+    ));
     space.set_map_limit(limit);
     if env_flag("NXRT_LAZY_HEAP") == Some(true) {
         space.set_lazy_heap(true);
@@ -150,8 +169,13 @@ pub fn memory_cap(pool: u64) {
     // SAFETY: a plain query into our struct
     unsafe { GlobalMemoryStatusEx(&mut ms) };
     // never below what the game is allowed to map (memory_gb) plus room for the driver and the engine
-    let mut cap = (ms.ullTotalPhys / 2).clamp(12 << 30, 32 << 30).max((pool + (8 << 30)).min(ms.ullTotalPhys));
-    if let Some(gb) = std::env::var("SWR_MEMORY_CAP_GB").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+    let mut cap = (ms.ullTotalPhys / 2)
+        .clamp(12 << 30, 32 << 30)
+        .max((pool + (8 << 30)).min(ms.ullTotalPhys));
+    if let Some(gb) = std::env::var("SWR_MEMORY_CAP_GB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
         cap = gb << 30;
     }
     let _ = MEMORY_CAP.set(cap);
@@ -172,7 +196,10 @@ pub fn memory_cap(pool: u64) {
                 &li as *const _ as *const core::ffi::c_void,
                 core::mem::size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             ) != 0
-            && AssignProcessToJobObject(job, windows_sys::Win32::System::Threading::GetCurrentProcess()) != 0
+            && AssignProcessToJobObject(
+                job,
+                windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            ) != 0
     };
     if ok {
         crate::rt::log(&format!(
@@ -193,8 +220,13 @@ pub fn memory_cap(pool: u64) {
         return;
     }
     let total = crate::linux::total_memory();
-    let mut cap = (total / 2).clamp(12 << 30, 32 << 30).max((pool + (8 << 30)).min(total));
-    if let Some(gb) = std::env::var("SWR_MEMORY_CAP_GB").ok().and_then(|v| v.trim().parse::<u64>().ok()) {
+    let mut cap = (total / 2)
+        .clamp(12 << 30, 32 << 30)
+        .max((pool + (8 << 30)).min(total));
+    if let Some(gb) = std::env::var("SWR_MEMORY_CAP_GB")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+    {
         cap = gb << 30;
     }
     let _ = MEMORY_CAP.set(cap);
@@ -293,21 +325,43 @@ pub unsafe fn claim_fixed_regions(mods: *const RtModule, count: i32) {
     let lo = ms.iter().map(|m| m.base).min().unwrap_or(0);
     let hi = ms.iter().map(|m| m.base + m.size).max().unwrap_or(0);
     if hi > lo {
-        crate::mem::claim_fixed(Range { base: lo, size: hi - lo });
+        crate::mem::claim_fixed(Range {
+            base: lo,
+            size: hi - lo,
+        });
     }
 }
 
 /// `int nxrt_main(int argc, char **argv, const RtModule *mods, int count)`
 #[no_mangle]
-pub unsafe extern "C" fn nxrt_main(argc: i32, argv: *const *const core::ffi::c_char, mods: *const RtModule, count: i32) -> i32 {
+pub unsafe extern "C" fn nxrt_main(
+    argc: i32,
+    argv: *const *const core::ffi::c_char,
+    mods: *const RtModule,
+    count: i32,
+) -> i32 {
     claim_fixed_regions(mods, count);
-    let args: Vec<String> = (0..argc as usize).map(|i| std::ffi::CStr::from_ptr(*argv.add(i)).to_string_lossy().into_owned()).collect();
+    let args: Vec<String> = (0..argc as usize)
+        .map(|i| {
+            std::ffi::CStr::from_ptr(*argv.add(i))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
     // the first argument that is not a --key=value setting names the ExeFS folder
-    let exefs = match args.iter().skip(1).find(|a| !(a.starts_with("--") && a.contains('='))) {
+    let exefs = match args
+        .iter()
+        .skip(1)
+        .find(|a| !(a.starts_with("--") && a.contains('=')))
+    {
         Some(a) => PathBuf::from(a),
-        None => std::env::var("NXRT_EXEFS").map(PathBuf::from).unwrap_or_else(|_| usage()),
+        None => std::env::var("NXRT_EXEFS")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| usage()),
     };
-    let modules: Vec<Module> = (0..count as usize).map(|i| Module::from_raw(&*mods.add(i))).collect();
+    let modules: Vec<Module> = (0..count as usize)
+        .map(|i| Module::from_raw(&*mods.add(i)))
+        .collect();
     match crate::boundary::guard("nxrt_main", || run(&exefs, modules)) {
         Ok(()) => loop {
             std::thread::park();
@@ -349,7 +403,14 @@ pub fn load(exefs: &Path, modules: Vec<Module>) -> Result<Process, String> {
     }
     let lo = modules.iter().map(|m| m.base).min().unwrap();
     let hi = modules.iter().map(|m| m.base + m.size).max().unwrap();
-    let space: &'static Space = Box::leak(Box::new(Space::new(Range { base: lo, size: hi - lo }, KERNEL_BASE, true)?));
+    let space: &'static Space = Box::leak(Box::new(Space::new(
+        Range {
+            base: lo,
+            size: hi - lo,
+        },
+        KERNEL_BASE,
+        true,
+    )?));
     register_builtins();
     let mut files = vec![];
     for m in &modules {
@@ -360,16 +421,31 @@ pub fn load(exefs: &Path, modules: Vec<Module>) -> Result<Process, String> {
     let (loaded, rep) = crate::loader::load(space, &files)?;
     let table = crate::dispatch::install(Table::build(modules)?)?;
     crate::fault::install();
-    let names: Vec<String> = loaded.iter().map(|m| format!("{} {:#x}+{:#x}", m.name, m.base, m.size)).collect();
+    let names: Vec<String> = loaded
+        .iter()
+        .map(|m| format!("{} {:#x}+{:#x}", m.name, m.base, m.size))
+        .collect();
     crate::rt::log(&format!(
         "loaded {}; {} lifted functions; {} relocations; host-bound imports: {}{}",
         names.join(", "),
         table.functions,
         rep.relocations,
-        if rep.host_bound.is_empty() { "none".into() } else { rep.host_bound.join(" ") },
-        if rep.unresolved.is_empty() { String::new() } else { format!("; UNRESOLVED (stubbed): {}", rep.unresolved.join(" ")) },
+        if rep.host_bound.is_empty() {
+            "none".into()
+        } else {
+            rep.host_bound.join(" ")
+        },
+        if rep.unresolved.is_empty() {
+            String::new()
+        } else {
+            format!("; UNRESOLVED (stubbed): {}", rep.unresolved.join(" "))
+        },
     ));
-    Ok(Process { space, modules: loaded, npdm })
+    Ok(Process {
+        space,
+        modules: loaded,
+        npdm,
+    })
 }
 
 /// Starts the kernel (and start-up's decisions) and the main thread at `entry`, with main.npdm's priority, core and
@@ -377,8 +453,14 @@ pub fn load(exefs: &Path, modules: Vec<Module>) -> Result<Process, String> {
 pub fn start(p: &Process, entry: Entry) -> Result<u32, String> {
     let first = |name: &str| p.modules.iter().find(|m| m.name == name).map(|m| m.entry());
     let entry = match entry {
-        Entry::Main => Entry::Address(first("main").or(p.modules.first().map(|m| m.entry())).unwrap()),
-        Entry::Module(n) => Entry::Address(first(&n).ok_or_else(|| format!("no module {n} to start in"))?),
+        Entry::Main => Entry::Address(
+            first("main")
+                .or(p.modules.first().map(|m| m.entry()))
+                .unwrap(),
+        ),
+        Entry::Module(n) => {
+            Entry::Address(first(&n).ok_or_else(|| format!("no module {n} to start in"))?)
+        }
         e => e,
     };
     start_main(p.space, p.npdm.as_deref(), entry, |_| {})
@@ -387,17 +469,35 @@ pub fn start(p: &Process, entry: Entry) -> Result<u32, String> {
 /// The main thread a host that loads the modules itself starts (the os layer): the kernel and start-up's decisions,
 /// then `setup(MainThread)` (the host's scheduler, counter rate: before any guest thread exists), then the main
 /// thread at `entry` (`Address` or `Host`) with main.npdm's priority, core and stack size. Returns its handle.
-pub fn start_main(space: &'static Space, npdm: Option<&[u8]>, entry: Entry, setup: impl FnOnce(&MainThread)) -> Result<u32, String> {
+pub fn start_main(
+    space: &'static Space,
+    npdm: Option<&[u8]>,
+    entry: Entry,
+    setup: impl FnOnce(&MainThread),
+) -> Result<u32, String> {
     let (prio, core, stack_size) = crate::loader::npdm_main_thread(npdm);
     let stack = space.alloc_stack(stack_size)?;
     let pc = match entry {
         Entry::Address(a) => a,
         Entry::Host(f) => crate::hostfn::register("the main thread's start", f),
-        Entry::Main | Entry::Module(_) => return Err("start_main: a module entry needs the loaded process (process::start)".into()),
+        Entry::Main | Entry::Module(_) => {
+            return Err(
+                "start_main: a module entry needs the loaded process (process::start)".into(),
+            )
+        }
     };
     let k = crate::kernel::init(space);
-    setup(&MainThread { priority: prio, core, stack_size });
-    Ok(k.create_main(pc, stack + crate::mem::align_up(stack_size, crate::mem::PAGE), prio, core))
+    setup(&MainThread {
+        priority: prio,
+        core,
+        stack_size,
+    });
+    Ok(k.create_main(
+        pc,
+        stack + crate::mem::align_up(stack_size, crate::mem::PAGE),
+        prio,
+        core,
+    ))
 }
 
 /// The main thread `start_main` is about to create, as main.npdm describes it.
@@ -425,9 +525,15 @@ mod option_tests {
     /// console's, 6 / 8 the extended layouts; the pool is what GetInfo and the memory cap use.
     #[test]
     fn memory_gb_sets_the_application_pool() {
-        let s1 = Program { program_id: 0x0100_1520_0002_2000 };
-        let totk = Program { program_id: 0x0100_F2C0_115B_6000 };
-        let s2 = Program { program_id: 0x0400_C3F0_0006_E000 };
+        let s1 = Program {
+            program_id: 0x0100_1520_0002_2000,
+        };
+        let totk = Program {
+            program_id: 0x0100_F2C0_115B_6000,
+        };
+        let s2 = Program {
+            program_id: 0x0400_C3F0_0006_E000,
+        };
         for (gb, want, want_totk, want_s2) in [
             ("0", 0xCD50_0000u64, 0x1_4D50_0000u64, 0x2_4000_0000u64),
             ("4", 0xCD50_0000, 0xCD50_0000, 0xCD50_0000),
@@ -435,7 +541,11 @@ mod option_tests {
             ("8", 0x1_CD50_0000, 0x1_CD50_0000, 0x1_CD50_0000),
         ] {
             assert!(nxconfig::apply_arg(&format!("--memory_gb={gb}")));
-            assert_eq!((app_pool(s1), app_pool(totk), app_pool(s2)), (want, want_totk, want_s2), "memory_gb={gb}");
+            assert_eq!(
+                (app_pool(s1), app_pool(totk), app_pool(s2)),
+                (want, want_totk, want_s2),
+                "memory_gb={gb}"
+            );
         }
         assert!(nxconfig::apply_arg("--memory_gb=0"));
     }
@@ -458,7 +568,10 @@ mod option_tests {
         assert_eq!(crate::rt::trace_spec(None, 1), "");
         assert_eq!(crate::rt::trace_spec(None, 2), "all");
         assert_eq!(crate::rt::trace_spec(Some(String::new()), 2), "all");
-        assert_eq!(crate::rt::trace_spec(Some("svc,host".into()), 2), "svc,host");
+        assert_eq!(
+            crate::rt::trace_spec(Some("svc,host".into()), 2),
+            "svc,host"
+        );
         assert!(nxconfig::apply_arg("--log=2"));
         assert_eq!(crate::rt::trace_spec(None, nxconfig::int("log")), "all");
     }
@@ -468,7 +581,7 @@ mod option_tests {
     fn profile_starts_the_profiler() {
         assert!(nxconfig::apply_arg("--profile=1"));
         crate::profile::start(nxconfig::flag("profile"));
-    crate::hostprof::start();
+        crate::hostprof::start();
         assert!(crate::profile::on());
     }
 }

@@ -103,15 +103,15 @@ core::arch::global_asm!(
     ".p2align 4",
     frame_asm!(prologue "rt_sj_owner"),
     "mov rax, qword ptr [rcx + 344]",
-    "mov qword ptr [rsp + 32], rax",     // up
-    "mov qword ptr [rsp + 40], r8",      // lo
-    "mov qword ptr [rsp + 48], r9",      // hi
-    "mov qword ptr [rsp + 56], rsp",     // rsp
-    "mov qword ptr [rsp + 64], rcx",     // c
-    "mov qword ptr [rsp + 72], rdx",     // body
+    "mov qword ptr [rsp + 32], rax", // up
+    "mov qword ptr [rsp + 40], r8",  // lo
+    "mov qword ptr [rsp + 48], r9",  // hi
+    "mov qword ptr [rsp + 56], rsp", // rsp
+    "mov qword ptr [rsp + 64], rcx", // c
+    "mov qword ptr [rsp + 72], rdx", // body
     "lea rax, [rip + 3f]",
-    "mov qword ptr [rsp + 80], rax",     // resume
-    "mov qword ptr [rsp + 88], 0",       // status
+    "mov qword ptr [rsp + 80], rax", // resume
+    "mov qword ptr [rsp + 88], 0",   // status
     "lea rax, [rsp + 32]",
     "mov qword ptr [rcx + 344], rax",
     "3:",
@@ -302,15 +302,15 @@ core::arch::global_asm!(
     ".p2align 4",
     frame_asm_sysv!(prologue "rt_sj_owner"),
     "mov rax, qword ptr [rdi + 344]",
-    "mov qword ptr [rsp + 32], rax",     // up
-    "mov qword ptr [rsp + 40], rdx",     // lo
-    "mov qword ptr [rsp + 48], rcx",     // hi
-    "mov qword ptr [rsp + 56], rsp",     // rsp
-    "mov qword ptr [rsp + 64], rdi",     // c
-    "mov qword ptr [rsp + 72], rsi",     // body
+    "mov qword ptr [rsp + 32], rax", // up
+    "mov qword ptr [rsp + 40], rdx", // lo
+    "mov qword ptr [rsp + 48], rcx", // hi
+    "mov qword ptr [rsp + 56], rsp", // rsp
+    "mov qword ptr [rsp + 64], rdi", // c
+    "mov qword ptr [rsp + 72], rsi", // body
     "lea rax, [rip + 3f]",
-    "mov qword ptr [rsp + 80], rax",     // resume
-    "mov qword ptr [rsp + 88], 0",       // status
+    "mov qword ptr [rsp + 80], rax", // resume
+    "mov qword ptr [rsp + 88], 0",   // status
     "lea rax, [rsp + 32]",
     "mov qword ptr [rdi + 344], rax",
     "3:",
@@ -536,14 +536,14 @@ core::arch::global_asm!(
     ".p2align 4",
     frame_asm_a64!(prologue "rt_sj_owner"),
     "ldr x9, [x0, #344]",
-    "str x9, [sp, #160]",        // up
-    "stp x2, x3, [sp, #168]",    // lo, hi
+    "str x9, [sp, #160]",     // up
+    "stp x2, x3, [sp, #168]", // lo, hi
     "mov x9, sp",
-    "str x9, [sp, #184]",        // rsp (the frame's sp)
-    "stp x0, x1, [sp, #192]",    // c, body
+    "str x9, [sp, #184]",     // rsp (the frame's sp)
+    "stp x0, x1, [sp, #192]", // c, body
     "adr x9, 3f",
-    "str x9, [sp, #208]",        // resume
-    "str xzr, [sp, #216]",       // status
+    "str x9, [sp, #208]",  // resume
+    "str xzr, [sp, #216]", // status
     "add x9, sp, #160",
     "str x9, [x0, #344]",
     "3:",
@@ -714,7 +714,6 @@ extern "C" {
     pub fn nxrt_ctx_switch(save: *mut usize, to: usize);
 }
 
-
 /// Status codes of the shims (`nxrt_svc_impl`, `nxrt_host_invoke`).
 pub const ST_RETURN: u32 = 0;
 pub const ST_REDISPATCH: u32 = 1;
@@ -752,7 +751,12 @@ pub struct DispatchHot {
 }
 
 #[no_mangle]
-pub static mut NXRT_DISPATCH: DispatchHot = DispatchHot { lo: 0, slots: 0, slot: core::ptr::null(), anchor: 0 };
+pub static mut NXRT_DISPATCH: DispatchHot = DispatchHot {
+    lo: 0,
+    slots: 0,
+    slot: core::ptr::null(),
+    anchor: 0,
+};
 
 /// SwitchToFiber, for `nxrt_fiber_entry` (set by `fiber.rs`).
 #[cfg(windows)]

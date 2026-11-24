@@ -36,13 +36,20 @@ static TRACE: OnceLock<String> = OnceLock::new();
 /// `NXRT_TRACE=svc,host,sjlj,thread,load` (or `all`).
 pub fn trace(what: &str) -> bool {
     // NXRT_TRACE, else the ini's log=2 ("everything", slow): every trace
-    let t = TRACE.get_or_init(|| trace_spec(std::env::var("NXRT_TRACE").ok(), nxconfig::int("log")));
+    let t =
+        TRACE.get_or_init(|| trace_spec(std::env::var("NXRT_TRACE").ok(), nxconfig::int("log")));
     !t.is_empty() && (t == "all" || t.split(',').any(|w| w == what))
 }
 
 /// The traces on: `NXRT_TRACE` when set, else everything for the ini's `log=2` (Turbo's g_verbose), else none.
 pub fn trace_spec(env: Option<String>, log: i64) -> String {
-    env.filter(|v| !v.is_empty()).unwrap_or_else(|| if log >= 2 { "all".into() } else { String::new() })
+    env.filter(|v| !v.is_empty()).unwrap_or_else(|| {
+        if log >= 2 {
+            "all".into()
+        } else {
+            String::new()
+        }
+    })
 }
 
 /// "[nxrt] msg" on stderr, in one write.
@@ -107,15 +114,41 @@ pub fn probe_prints(hit: u64, every: u64, limit: u64) -> bool {
 /// translator): the thread, x0..x3 (`NXRT_PROBE_ALL=1`: x0..x18) with the strings they point to, and the guest
 /// registers' frame chain; then the instruction runs on. `NXRT_PROBE_EVERY=N` prints every N-th hit (its `#` the
 /// true count), `NXRT_PROBE_LIMIT=N` at most N printed per probe (20 by default; 0 no limit).
+/// Does not modify the CPU state or retain its pointer; updates probe counters and may log diagnostics.
+///
+/// # Safety
+/// `c` must be non-null, properly aligned and point to a fully initialized `Cpu` that remains live and
+/// readable for the entire call. No alias may mutate that state during the call; shared read-only aliases
+/// are permitted. These requirements apply even when this hit is not printed.
+/// Any guest memory read for strings, frame chains or `NXRT_FATAL_PEEK` must remain valid and initialized
+/// for those reads, including alignment for `u64` loads, without concurrent writes or unmapping.
+/// Readable-page checks do not synchronize access or keep allocations alive.
+///
+/// Rust callers must explicitly uphold this contract, even for a valid CPU:
+/// ```compile_fail,E0133
+/// let mut cpu = nxrt::cpu::Cpu::new_boxed();
+/// nxrt::rt::rt_probe(&mut *cpu);
+/// ```
 #[no_mangle]
-pub extern "C" fn rt_probe(c: *mut Cpu) {
+pub unsafe extern "C" fn rt_probe(c: *mut Cpu) {
     use std::collections::HashMap;
     use std::sync::Mutex;
     static HITS: Mutex<Option<HashMap<u64, u64>>> = Mutex::new(None);
     static CFG: OnceLock<(u64, u64, bool)> = OnceLock::new();
-    let env = |k: &str, d: u64| std::env::var(k).ok().and_then(|v| v.trim().parse().ok()).unwrap_or(d);
-    let &(every, limit, all) = CFG.get_or_init(|| (env("NXRT_PROBE_EVERY", 1), env("NXRT_PROBE_LIMIT", 20), env("NXRT_PROBE_ALL", 0) != 0));
-    // SAFETY: the calling guest thread's own state (generated code passes `c`)
+    let env = |k: &str, d: u64| {
+        std::env::var(k)
+            .ok()
+            .and_then(|v| v.trim().parse().ok())
+            .unwrap_or(d)
+    };
+    let &(every, limit, all) = CFG.get_or_init(|| {
+        (
+            env("NXRT_PROBE_EVERY", 1),
+            env("NXRT_PROBE_LIMIT", 20),
+            env("NXRT_PROBE_ALL", 0) != 0,
+        )
+    });
+    // SAFETY: the caller guarantees a live, aligned, initialized CPU with no mutation during this call.
     let c = unsafe { &*c };
     let hit = {
         let mut g = HITS.lock().unwrap_or_else(|p| p.into_inner());
@@ -127,7 +160,10 @@ pub extern "C" fn rt_probe(c: *mut Cpu) {
         return;
     }
     let thread = crate::kernel::current_handle().map_or("host".to_string(), |h| format!("{h:#x}"));
-    let mut s = format!("probe {} #{hit} thread {thread}\n", crate::dispatch::guest_name(c.pc));
+    let mut s = format!(
+        "probe {} #{hit} thread {thread}\n",
+        crate::dispatch::guest_name(c.pc)
+    );
     for r in 0..if all { 19 } else { 4 } {
         s.push_str(&format!("  x{r:<2} {:#018x}", c.x[r]));
         if let Some(t) = guest_cstr(c.x[r]) {
@@ -143,10 +179,18 @@ pub extern "C" fn rt_probe(c: *mut Cpu) {
 pub fn guest_report(c: &Cpu) -> String {
     let mut s = String::new();
     for i in (0..31).step_by(4) {
-        let row: Vec<String> = (i..(i + 4).min(31)).map(|r| format!("x{r:<2} {:#018x}", c.x[r])).collect();
+        let row: Vec<String> = (i..(i + 4).min(31))
+            .map(|r| format!("x{r:<2} {:#018x}", c.x[r]))
+            .collect();
         s.push_str(&format!("  {}\n", row.join("  ")));
     }
-    s.push_str(&format!("  sp  {:#018x}  pc {}  tpidr {:#x}  tpidrro {:#x}\n", c.sp, crate::dispatch::guest_name(c.pc), c.tpidr, c.tpidrro));
+    s.push_str(&format!(
+        "  sp  {:#018x}  pc {}  tpidr {:#x}  tpidrro {:#x}\n",
+        c.sp,
+        crate::dispatch::guest_name(c.pc),
+        c.tpidr,
+        c.tpidrro
+    ));
     s.push_str(&format!("  lr  {}\n", crate::dispatch::guest_name(c.x[30])));
     let mut fp = c.x[29];
     for n in 0..32 {
@@ -155,7 +199,10 @@ pub fn guest_report(c: &Cpu) -> String {
         }
         // SAFETY: checked readable.
         let (next, lr) = unsafe { (*(fp as *const u64), *((fp + 8) as *const u64)) };
-        s.push_str(&format!("  guest frame {n:2}: {}\n", crate::dispatch::guest_name(lr)));
+        s.push_str(&format!(
+            "  guest frame {n:2}: {}\n",
+            crate::dispatch::guest_name(lr)
+        ));
         if next <= fp || next - fp > (64 << 20) {
             break;
         }
@@ -175,8 +222,15 @@ pub fn guest_report(c: &Cpu) -> String {
 fn peek(c: &Cpu, chain: &str) -> String {
     fn num(t: &str) -> Option<i64> {
         let t = t.trim();
-        let (neg, t) = t.strip_prefix('-').map(|r| (true, r)).unwrap_or((false, t.strip_prefix('+').unwrap_or(t)));
-        let v = if let Some(h) = t.strip_prefix("0x") { i64::from_str_radix(h, 16).ok()? } else { t.parse().ok()? };
+        let (neg, t) = t
+            .strip_prefix('-')
+            .map(|r| (true, r))
+            .unwrap_or((false, t.strip_prefix('+').unwrap_or(t)));
+        let v = if let Some(h) = t.strip_prefix("0x") {
+            i64::from_str_radix(h, 16).ok()?
+        } else {
+            t.parse().ok()?
+        };
         Some(if neg { -v } else { v })
     }
     let mut parts = chain.split('>');
@@ -189,7 +243,12 @@ fn peek(c: &Cpu, chain: &str) -> String {
         "sp" => c.sp,
         "lr" => c.x[30],
         "fp" => c.x[29],
-        r if r.starts_with('x') => r[1..].parse::<usize>().ok().filter(|&i| i < 31).map(|i| c.x[i]).unwrap_or(0),
+        r if r.starts_with('x') => r[1..]
+            .parse::<usize>()
+            .ok()
+            .filter(|&i| i < 31)
+            .map(|i| c.x[i])
+            .unwrap_or(0),
         h => num(h).unwrap_or(0) as u64,
     };
     let mut a = b.wrapping_add(off as u64);
@@ -212,8 +271,20 @@ fn peek(c: &Cpu, chain: &str) -> String {
         }
         // SAFETY: checked readable.
         let b = unsafe { core::slice::from_raw_parts(p as *const u8, 16) };
-        let hex: Vec<String> = b.chunks(8).map(|q| format!("{:016x}", u64::from_le_bytes(q.try_into().unwrap()))).collect();
-        let asc: String = b.iter().map(|&x| if (0x20..0x7f).contains(&x) { x as char } else { '.' }).collect();
+        let hex: Vec<String> = b
+            .chunks(8)
+            .map(|q| format!("{:016x}", u64::from_le_bytes(q.try_into().unwrap())))
+            .collect();
+        let asc: String = b
+            .iter()
+            .map(|&x| {
+                if (0x20..0x7f).contains(&x) {
+                    x as char
+                } else {
+                    '.'
+                }
+            })
+            .collect();
         s.push_str(&format!("    {p:#014x}: {}  {asc}\n", hex.join(" ")));
     }
     s
@@ -221,7 +292,9 @@ fn peek(c: &Cpu, chain: &str) -> String {
 
 #[cfg(windows)]
 fn qpc() -> (u64, u64) {
-    use windows_sys::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
+    use windows_sys::Win32::System::Performance::{
+        QueryPerformanceCounter, QueryPerformanceFrequency,
+    };
     static FREQ: OnceLock<u64> = OnceLock::new();
     let f = *FREQ.get_or_init(|| {
         let mut f = 0i64;
@@ -263,15 +336,17 @@ pub fn set_clock(f: fn() -> u64) {
 /// CNTPCT_EL0 / CNTVCT_EL0 and svcGetSystemTick: ticks at [`tick_hz`].
 #[no_mangle]
 pub extern "C" fn rt_ticks() -> u64 {
-    crate::boundary::guard("rt_ticks", || match CLOCK.load(std::sync::atomic::Ordering::Acquire) {
-        0 => {
-            let (n, f) = qpc();
-            (n as u128 * tick_hz() as u128 / f as u128) as u64
-        }
-        // SAFETY: only `set_clock` stores here, always a `fn() -> u64`.
-        p => {
-            let ns = unsafe { core::mem::transmute::<usize, fn() -> u64>(p) }();
-            (ns as u128 * tick_hz() as u128 / 1_000_000_000) as u64
+    crate::boundary::guard("rt_ticks", || {
+        match CLOCK.load(std::sync::atomic::Ordering::Acquire) {
+            0 => {
+                let (n, f) = qpc();
+                (n as u128 * tick_hz() as u128 / f as u128) as u64
+            }
+            // SAFETY: only `set_clock` stores here, always a `fn() -> u64`.
+            p => {
+                let ns = unsafe { core::mem::transmute::<usize, fn() -> u64>(p) }();
+                (ns as u128 * tick_hz() as u128 / 1_000_000_000) as u64
+            }
         }
     })
 }
@@ -291,7 +366,10 @@ pub extern "C" fn rt_spin_gate(_c: *mut Cpu, _head: u64) {
 pub unsafe extern "C" fn rt_brk(c: *mut Cpu, imm: u32, pc: u64) -> ! {
     crate::boundary::guard("rt_brk", || {
         (*c).pc = pc;
-        guest_fatal(c, &format!("guest BRK #{imm:#x} at {}", crate::dispatch::guest_name(pc)))
+        guest_fatal(
+            c,
+            &format!("guest BRK #{imm:#x} at {}", crate::dispatch::guest_name(pc)),
+        )
     })
 }
 
@@ -300,8 +378,18 @@ pub unsafe extern "C" fn rt_brk(c: *mut Cpu, imm: u32, pc: u64) -> ! {
 pub unsafe extern "C" fn rt_udf(c: *mut Cpu, pc: u64) -> ! {
     crate::boundary::guard("rt_udf", || {
         (*c).pc = pc;
-        let w = if crate::mem::readable(pc, 4) { format!("{:08x}", *(pc as *const u32)) } else { "????????".into() };
-        guest_fatal(c, &format!("undefined or unlifted instruction {w} at {}", crate::dispatch::guest_name(pc)))
+        let w = if crate::mem::readable(pc, 4) {
+            format!("{:08x}", *(pc as *const u32))
+        } else {
+            "????????".into()
+        };
+        guest_fatal(
+            c,
+            &format!(
+                "undefined or unlifted instruction {w} at {}",
+                crate::dispatch::guest_name(pc)
+            ),
+        )
     })
 }
 
@@ -315,19 +403,29 @@ mod tests {
     /// printable text the registers point to.
     #[test]
     fn probe_hits_and_strings() {
-        let printed = |every, limit| (1..=100u64).filter(|&h| super::probe_prints(h, every, limit)).collect::<Vec<_>>();
+        let printed = |every, limit| {
+            (1..=100u64)
+                .filter(|&h| super::probe_prints(h, every, limit))
+                .collect::<Vec<_>>()
+        };
         assert_eq!(printed(1, 20).len(), 20);
         assert_eq!(printed(10, 0), (1..=10).map(|k| 10 * k).collect::<Vec<_>>());
         assert_eq!(printed(10, 3), vec![10, 20, 30]);
         let s = b"rom:/Layout/title.bflyt\0";
-        assert_eq!(super::guest_cstr(s.as_ptr() as u64).as_deref(), Some("rom:/Layout/title.bflyt"));
+        assert_eq!(
+            super::guest_cstr(s.as_ptr() as u64).as_deref(),
+            Some("rom:/Layout/title.bflyt")
+        );
         let bin = [1u8, 2, 3, 0];
         assert_eq!(super::guest_cstr(bin.as_ptr() as u64), None);
         assert_eq!(super::guest_cstr(0x10), None);
         let mut c = crate::cpu::Cpu::new_boxed();
         c.pc = 0x1234;
         c.x[0] = s.as_ptr() as u64;
-        super::rt_probe(&mut *c); // logs, changes nothing
+        let probe: crate::cpu::GuestFn = super::rt_probe;
+        // SAFETY: the box owns a live, initialized CPU, exclusively borrowed for this call; its string
+        // points to the live immutable `s`, and the zero frame pointer ends the frame chain.
+        unsafe { probe(&mut *c) }; // logs, changes nothing
         assert_eq!((c.pc, c.x[0]), (0x1234, s.as_ptr() as u64));
     }
 
