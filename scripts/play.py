@@ -296,6 +296,14 @@ def start(a, sc, name):
         outcome, code = 'interrupted', None
     finally:
         run.done.set()
+        # Ask before killing: a process killed while pipelines compile has them recorded as compiler crashes
+        # (`pipeline-crashed.bin`) and their draws skipped from then on.
+        if exit_code(run.pid) is None:
+            run.ctl('quit', timeout=5)
+            for _ in range(20):
+                if exit_code(run.pid) is not None:
+                    break
+                time.sleep(.5)
         for pid in {run.pid, proc.pid}:
             if exit_code(pid) is None:
                 kill(pid)
