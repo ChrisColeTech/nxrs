@@ -41,7 +41,16 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       (the texture-target mismatch is gone), 0 audio underruns; fresh save: mode select, opening, lit mine tunnel,
       walking moves the camera. All three recorded issues are resolved on this engine; scenario now ends with a
       punch at the fresh-save "Y Punch" prompt (~141 s).
-- [ ] Failing titles one at a time, each ending with a fix and its run: mkw / mkw180 (task/mesh fault, race stability; GAR-5), plza (cube mismatches, pacing), mk8d
+- [ ] **mkw device loss (top priority, in progress).** `build/play/20261124-125344-mkw`: exit 71 at 19.1 s, draw
+      #7708 direct 1D 6x1x1 mesh, task `fea1d6ca04512de1` / mesh `ddc034e8e009ebfc` (same pair as before; the payload
+      fix did not cure it). Driver: invalid read `0xd468e7000`, "0 recorded device ranges of the replay hold it".
+      Neither shader uses raw pointers (no capability 5347), robust access v2 is on, so a descriptor in this draw
+      points at memory no live allocation holds: a stale/recycled buffer. Same run with `NXGFX_MESH_BINDINGS=1`
+      (CPU-only bookkeeping, slower mesh draws) did **not** fault: title, menus, Mario driving at 90 s
+      (`20261124-125448-mkw-bindings`). Timing-dependent -> lifetime race: something released or recycled on the
+      CPU timeline before the GPU's last use. Next: find which of the task shader's bindings (support buffer,
+      cp_c0/cp_c3 uniforms, cp_s0.. storage at cb offsets) can name recycled staging/pool memory, and what frees it.
+- [ ] Other failing titles one at a time, each ending with a fix and its run: mkw180 (task/mesh fault, race stability; GAR-5), plza (cube mismatches, pacing), mk8d
       (stutters, memory), shadow / sonic (resource diagnostics, blacklisted pipelines), smash (pacing)
 - [ ] Blocked titles: oot (native NDVE stays off; submission-4764 fault), violet (first-run progression, display reset)
 - [ ] Final pass: every scenario, one run each
