@@ -19,7 +19,34 @@ MENU_MK8D = [('shot', 9, 'boot'), ('lr', 4, 'title'), ('right', 1.5, 'mii'), ('a
              ('a', 4, 'cup'), ('a', 30, 'gp-ok')]
 ps.KEYS.update(r='R', l='L', zr='ZR', minus='Minus')
 ps.SCENARIOS.update({
-    'mk8d_gp': dict(seconds=900, window=(120, 760), steps=MENU_MK8D + [('replay', 30, 'race', 'mk8d_gp.txt')]
+    # Saved-game first-playable routes reconstructed from lane X2's successful fixed-step runs.
+    'wonder_gameplay': dict(seconds=300, window=(115, 260), save=True,
+        acceptance=dict(target_fps=60, gameplay_window=[115, 260], max_stutters=12, allowed_gaps=5.5,
+                         memory_slope_threshold=100, max_red_errors=0,
+                         required_screenshot_names=['shot-course', 'replay-gameplay',
+                                                                                'shot-gameplay end']),
+        steps=[('shot', 25, 'boot')] + [('a', 4, 'advance %02d' % (i + 1)) for i in range(20)]
+              + [('shot', 3, 'course'), ('replay', 60, 'gameplay', 'wonder_gameplay.txt'), ('shot', 30, 'gameplay end')]),
+    'arceus_gameplay': dict(seconds=240, window=(105, 220), save=True,
+        acceptance=dict(target_fps=30, gameplay_window=[105, 220], max_stutters=8, allowed_gaps=5.5,
+                         memory_slope_threshold=40, max_red_errors=0,
+                         required_screenshot_names=['shot-field', 'replay-gameplay',
+                                                                               'shot-gameplay end']),
+        steps=[('shot', 30, 'boot')] + [('a', 3, 'advance %02d' % (i + 1)) for i in range(20)]
+              + [('shot', 15, 'field'), ('replay', 15, 'gameplay', 'arceus_gameplay.txt'), ('shot', 30, 'gameplay end')]),
+    'violet_gameplay': dict(seconds=240, window=(60, 210), save=True,
+        acceptance=dict(target_fps=30, gameplay_window=[60, 210], max_stutters=8, allowed_gaps=5.5,
+                         memory_slope_threshold=40, max_red_errors=0,
+                         required_screenshot_names=['shot-house', 'replay-gameplay',
+                                                                               'shot-gameplay end']),
+        steps=[('shot', 20, 'boot')] + [('a', 4, 'advance %02d' % (i + 1)) for i in range(3)]
+              + [('shot', 8, 'house'), ('replay', 27, 'gameplay', 'violet_gameplay.txt'), ('a', 8, 'interact'),
+                 ('shot', 30, 'gameplay end')]),
+    'mk8d_gp': dict(seconds=900, window=(120, 760),
+        acceptance=ps.acceptance(60, (120, 760), ['replay-race', 'shot-race +11 min'], stutters=30,
+                                 memory_slope=60, require_non_silent_audio=True,
+                                 image_thresholds={'screenshots': {'replay-race': {'max_black_fraction': .8}}}),
+        steps=MENU_MK8D + [('replay', 30, 'race', 'mk8d_gp.txt')]
                     + [('shot', 60, 'race +%d min' % m) for m in range(1, 12)]),
     'mk8d_cups': dict(seconds=200, window=(60, 150), steps=MENU_MK8D[:-2] + [('shot', 4, 'cups')]
                       + [('right', 2, 'right %d' % i) for i in range(1, 13)] + [('down', 2, 'down')]),
@@ -32,46 +59,80 @@ ps.SCENARIOS.update({
     'probe': dict(seconds=420, window=(60, 400), steps=[('shot', 30, 'boot')] + [('shot', 60, 'min %d' % m) for m in range(1, 7)]),
     # Sonic X Shadow Generations: the title, then Shadow Generations (right on the game choice; Sonic Generations is
     # program 1, started by oe::ExecuteProgram), then A through its intro and a run to the right with jumps
-    'sonic_shadow': dict(seconds=900, window=(150, 880), steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('right', 3, 'shadow'),
+    'sonic_shadow': dict(seconds=900, window=(150, 880),
+        acceptance=ps.acceptance(30, (150, 880), ['replay-run', 'shot-play +10 min'], stutters=30,
+                                 memory_slope=60, require_non_silent_audio=True),
+        steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('right', 3, 'shadow'),
                          ('a', 20, 'shadow start')] + [('replay', 8, 'skip %d' % i, 'hold_a.txt') for i in range(6)]
                          + [('replay', 30, 'run', 'run_right.txt')] + [('shot', 60, 'play +%d min' % m) for m in range(1, 11)]),
     # Sonic Generations: the title, A on the game choice (program 1, a successor process the harness follows), A
     # through its intro, then a run to the right with jumps
-    'sonic_gens': dict(seconds=900, window=(150, 880), steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('a', 45, 'program 1')]
+    'sonic_gens': dict(seconds=900, window=(150, 880),
+        acceptance=ps.acceptance(30, (150, 880), ['replay-run', 'shot-play +10 min'], stutters=30,
+                                 memory_slope=60, require_non_silent_audio=True),
+        steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('a', 45, 'program 1')]
                        + [('replay', 8, 'skip %d' % i, 'hold_a.txt') for i in range(8)]
                        + [('replay', 30, 'run', 'run_right.txt')] + [('shot', 60, 'play +%d min' % m) for m in range(1, 11)]),
-    # Super Mario Party Jamboree: the opening movie (+ to skip), the title (L+R), then A through the first-time
-    # menus toward a party or a minigame
-    'jamboree': dict(seconds=900, window=(300, 880), steps=[('shot', 40, 'boot'), ('plus', 10, 'skip'), ('plus', 10, 'skip2')]
-                     + [x for i in range(45) for x in (('lr', 3, 'lr %d' % i), ('a', 6, 'a %d' % i))]
-                     + [('shot', 30, 'end')]),
+    # Super Mario Party Jamboree: the opening cannot be skipped; hold L+R at its late title, advance to the plaza,
+    # then move Mario. A short L+R pulse during the character montage never reaches the title gate.
+    'jamboree': dict(seconds=500, window=(270, 480), save=True,
+        acceptance=dict(target_fps=60, gameplay_window=[270, 480], max_stutters=30, allowed_gaps=5.5,
+                          memory_slope_threshold=60, max_red_errors=0,
+                          required_screenshot_names=['shot-title', 'shot-post menu', 'replay-movement', 'shot-end']),
+        steps=[('shot', 260, 'title'), ('replay', 5, 'hold lr', 'hold_lr.txt')]
+              + [('a', 6, 'advance %02d' % i) for i in range(20)]
+              + [('shot', 15, 'post menu'), ('replay', 30, 'movement', 'run_jump.txt'), ('shot', 30, 'end')]),
     # Super Smash Bros. Ultimate: A through the title, Smash, the rules and the stage select (Random) to the character
     # select, then smash_fight.txt: Mario vs a CPU, matches of 2:30 one after another, ~11 min
-    'smash_match': dict(seconds=900, window=(150, 840), steps=[('shot', 40, 'boot')] + [('a', 8, 'menu %d' % i) for i in range(7)]
+    'smash_match': dict(seconds=900, window=(150, 840),
+        acceptance=ps.acceptance(60, (150, 840), ['replay-fight', 'shot-fight +660 s'], stutters=40,
+                                 memory_slope=40, require_non_silent_audio=True),
+        steps=[('shot', 40, 'boot')] + [('a', 8, 'menu %d' % i) for i in range(7)]
                         + [('shot', 3, 'character select'), ('replay', 30, 'fight', 'smash_fight.txt')]
                         + [('shot', 30, 'fight +%d s' % (30 * m)) for m in range(1, 23)]),
     # Anime Girls: Sun of a Beach: A through the start to the beach, then shooter.txt (walk, turn, fire, jump), ~11 min
-    'agsob': dict(seconds=900, window=(120, 840), steps=[('shot', 40, 'boot')] + [('a', 6, 'start %d' % i) for i in range(6)]
+    'agsob': dict(seconds=900, window=(120, 840), save=True,
+        acceptance=ps.acceptance(60, (120, 840), ['replay-play', 'shot-play +12 min'],
+                                 memory_slope=40, max_audio_underruns=10, require_non_silent_audio=True,
+                                 image_thresholds={'screenshots': {'replay-play': {
+                                     'max_black_fraction': .8, 'min_coarse_unique_colours': 16}}}),
+        steps=[('shot', 40, 'boot')] + [('a', 6, 'start %d' % i) for i in range(6)]
                   + [('replay', 30, 'play', 'shooter.txt')] + [('shot', 60, 'play +%d min' % m) for m in range(1, 13)]),
     # Sonic Generations, spin dashing through Green Hill (spindash.txt: a rolling Sonic goes through badniks)
-    'sonic_gens2': dict(seconds=900, window=(150, 880), steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('a', 45, 'program 1')]
+    'sonic_gens2': dict(seconds=900, window=(150, 880), save=True,
+        acceptance=ps.acceptance(30, (150, 880), ['replay-run', 'shot-play +630 s'], stutters=30,
+                                 memory_slope=60, require_non_silent_audio=True),
+        steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('a', 45, 'program 1')]
                         + [('replay', 8, 'skip %d' % i, 'hold_a.txt') for i in range(8)]
                         + [('replay', 30, 'run', 'spindash.txt')] + [('shot', 30, 'play +%d s' % (30 * m)) for m in range(1, 22)]),
     # Shadow Generations: title, New Game, the story intro skipped (tap A, then hold it: skip_hold.txt), then play (run_jump.txt)
-    'shadow_skip': dict(seconds=900, window=(200, 880), steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('right', 3, 'shadow'),
+    'shadow_skip': dict(seconds=900, window=(200, 880), save=True,
+        acceptance=ps.acceptance(30, (200, 880), ['replay-run', 'shot-play +570 s'], stutters=30,
+                                 memory_slope=60, require_non_silent_audio=True),
+        steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('right', 3, 'shadow'),
                         ('a', 25, 'shadow start'), ('down', 3, 'new game row'), ('a', 20, 'new game'), ('a', 20, 'save slot 1')] + [('replay', 18, 'skip %d' % i, 'skip_hold.txt') for i in range(5)]
                         + [('replay', 30, 'run', 'run_jump.txt')] + [('shot', 30, 'play +%d s' % (30 * m)) for m in range(1, 20)]),
     # a visual novel (Beach Bounce Remastered): A every 4 s for ~11 min, a shot each minute
-    'vn': dict(seconds=900, window=(60, 720), steps=[('shot', 30, 'boot')] + [x for m in range(11) for x in
+    'vn': dict(seconds=900, window=(60, 720), save=True,
+        acceptance=ps.acceptance(60, (60, 720), ['shot-boot', 'shot-min 11'], memory_slope=40,
+                                 require_non_silent_audio=True,
+                                 image_thresholds={'screenshots': {'shot-min 11': {'max_black_fraction': .8}}}),
+        steps=[('shot', 30, 'boot')] + [x for m in range(11) for x in
                ([('a', 4, 'a %d.%d' % (m, i)) for i in range(14)] + [('shot', 4, 'min %d' % (m + 1))])]),
     # Shadow Generations: title, Shadow, Down + A (New Game), A (save slot 1), the short intro, then boost_run.txt in the
     # first stage (stick forward, ZR boost, B, A), a shot a minute
-    'shadow_watch': dict(seconds=1500, window=(300, 1440), steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('right', 3, 'shadow'),
+    'shadow_watch': dict(seconds=1500, window=(300, 1440), save=True,
+        acceptance=ps.acceptance(30, (300, 1440), ['replay-play', 'shot-play +21 min'], stutters=40,
+                                 memory_slope=60, require_non_silent_audio=True),
+        steps=[('shot', 40, 'title'), ('a', 8, 'choice'), ('right', 3, 'shadow'),
                          ('a', 25, 'shadow start'), ('down', 3, 'new game row'), ('a', 20, 'new game'),
                          ('a', 20, 'save slot 1'), ('replay', 30, 'play', 'boost_run.txt')]
                          + [('shot', 60, 'play +%d min' % m) for m in range(1, 22)]),
     # Smash: smash_match for 20 min (the memory trend)
-    'smash_long': dict(seconds=1500, window=(150, 1440), steps=[('shot', 40, 'boot')] + [('a', 8, 'menu %d' % i) for i in range(7)]
+    'smash_long': dict(seconds=1500, window=(150, 1440), save=True,
+        acceptance=ps.acceptance(60, (150, 1440), ['replay-fight', 'shot-fight +21 min'], stutters=60,
+                                 memory_slope=40, require_non_silent_audio=True),
+        steps=[('shot', 40, 'boot')] + [('a', 8, 'menu %d' % i) for i in range(7)]
                        + [('shot', 3, 'character select'), ('replay', 30, 'fight', 'smash_fight.txt')]
                        + [('shot', 60, 'fight +%d min' % m) for m in range(1, 22)]),
     # boot only, for a trace (NXOS_TRACE): shots at 60 / 150 / 190 s

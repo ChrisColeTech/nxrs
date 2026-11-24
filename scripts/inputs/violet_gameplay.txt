@@ -1,0 +1,7 @@
+# Violet house route reconstructed from the successful lane X2 route.
+0 0 -32767 0 0 0
+6000 0 0 -32767 0 0
+12000 0 -32767 0 0 0
+17000 0 32767 9000 0 0
+23500 0 0 32767 0 0
+26000 0 0 0 0 0

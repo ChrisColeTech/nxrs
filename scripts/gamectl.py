@@ -18,6 +18,7 @@ import os
 import subprocess
 import sys
 import time
+import harness_job
 from ctypes import wintypes
 
 user32 = ctypes.WinDLL('user32', use_last_error=True)
@@ -31,14 +32,23 @@ LOCK = r'D:\Projects\Switch2RECOMP-main\build\evidence\GAME_LOCK'
 
 
 def image_of(pid):
-    out = subprocess.run(['tasklist', '/FI', 'PID eq %d' % pid, '/FO', 'CSV', '/NH'], capture_output=True, text=True).stdout
+    out = harness_job.bounded_run(['tasklist', '/FI', 'PID eq %d' % pid, '/FO', 'CSV', '/NH'], timeout=2)
     return next((l.split('","')[0].strip('"') for l in out.splitlines() if l.startswith('"')), None)
 
 
 def check_owned(pid):
-    """Keys and pipe commands go only to the game this lane started: its claim file GAME_LOCK.<NXRS_LANE> (written by
-    run_game.py) must name `pid`, or (before the pid is written) an executable matching the image of `pid`. A PID
-    from `find` or another lane's game is refused."""
+    """Require live job membership, plus a matching lane claim for standalone callers.
+
+    Pending claims, executable-name matches and reused PIDs never establish ownership.
+    """
+    import run_game
+    job = run_game.CURRENT.get('job')
+    if job is not None:
+        if run_game.CURRENT.get('stop') is not None and run_game.CURRENT['stop'].is_set():
+            raise OSError('refused: run is stopping')
+        if not job.owns(pid):
+            raise OSError('refused: PID is not a member of the owned job')
+        return job.name
     lane = os.environ.get('NXRS_LANE', '')
     if not lane:
         raise OSError('refused: NXRS_LANE is not set')
@@ -50,34 +60,61 @@ def check_owned(pid):
     if claimed:
         if claimed != pid:
             raise OSError('refused: pid %d is not lane %r\'s game (pid %d)' % (pid, lane, claimed))
-        return
-    img = image_of(pid)
-    if img is None or len(f) < 2 or img.lower() != f[1].lower():
-        raise OSError('refused: pid %d is %r, lane %r\'s game is %r' % (pid, img, lane, f[1] if len(f) > 1 else None))
+        if len(f) > 5 and harness_job.owns_named(f[5], pid):
+            return f[5]
+    raise OSError('refused: claim lacks live job ownership (pending/image-only claims are not authority)')
 
 
 def pipe(pid, line, timeout=30.0):
-    check_owned(pid)
+    """Bound the entire exchange, including a server that connects but never replies.
+
+    A job-contained helper owns the blocking Windows pipe handle. Its independent
+    watchdog stops it on timeout/parent exit; no abandoned reader thread survives.
+    Never retry a command after connecting: an input may already have been delivered.
+    """
+    timeout = min(timeout, 2.0)
+    job_name = check_owned(pid)
+    try:
+        reply = harness_job.bounded_run(
+            [sys.executable, os.path.abspath(__file__), '--pipe-worker', str(pid), line, job_name],
+            timeout=timeout, text=False)
+    except subprocess.TimeoutExpired as e:
+        raise TimeoutError('control pipe %d: %r exceeded %.2f s (delivery unknown)' % (pid, line, timeout)) from e
+    return reply.decode('utf-8', 'replace')
+
+
+def _pipe_exchange(pid, line, job_name):
+    def verify():
+        if not harness_job.owns_named(job_name, pid):
+            raise OSError('refused: pipe target no longer belongs to the run job')
+    verify()
     name = r'\\.\pipe\nxrs_ctl_%d' % pid
-    t0 = time.time()
     while True:
         try:
-            with open(name, 'r+b', buffering=0) as f:
-                f.write((line + '\n').encode())
-                out = b''
-                while True:
-                    try:
-                        b = f.read(65536)
-                    except OSError:
-                        break  # the server disconnected after its reply
-                    if not b:
-                        break
-                    out += b
-                return out.decode(errors='replace')
+            f = open(name, 'r+b', buffering=0)
+            break
         except OSError:
-            if time.time() - t0 > timeout:
-                raise
+            verify()
             time.sleep(0.2)
+    with f:
+        verify()
+        f.write((line + '\n').encode('utf-8'))
+        out = bytearray()
+        while True:
+            try:
+                b = f.read(65536)
+            except OSError as e:
+                # CPython's CRT pipe read can report disconnect as EINVAL/EPIPE
+                # without a winerror, including after a complete valid reply.
+                if getattr(e, 'winerror', None) in (109, 232, 233) or e.errno in (22, 32):
+                    break  # server disconnected after its reply
+                raise
+            if not b:
+                break
+            out.extend(b)
+            if len(out) > 8 * 1024 * 1024:
+                raise OSError('control reply exceeded 8 MiB')
+        return bytes(out)
 
 
 def window(pid):
@@ -123,12 +160,19 @@ def key(pid, names, hold=0.05):
 
 def find(image):
     """PIDs by image name: for looking only. Never send keys or commands to a PID found this way."""
-    out = subprocess.run(['tasklist', '/FI', 'IMAGENAME eq %s' % image, '/FO', 'CSV', '/NH'], capture_output=True, text=True).stdout
+    out = harness_job.bounded_run(['tasklist', '/FI', 'IMAGENAME eq %s' % image, '/FO', 'CSV', '/NH'], timeout=2)
     return [int(l.split('","')[1]) for l in out.splitlines() if l.startswith('"')]
 
 
 def main():
     a = sys.argv[1:]
+    if len(a) == 4 and a[0] == '--pipe-worker':
+        try:
+            sys.stdout.buffer.write(_pipe_exchange(int(a[1]), a[2], a[3]))
+        except OSError as e:
+            sys.stderr.buffer.write(str(e).encode('utf-8'))
+            sys.exit(1)
+        return
     if len(a) >= 2 and a[0] == 'find':
         print(' '.join(map(str, find(a[1]))))
         return
