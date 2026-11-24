@@ -51,6 +51,7 @@ This page is generated from `src/config/src/options.rs` (`cargo test -p config s
 | `dynamic_resolution_min` | `0.6` | The lowest internal resolution dynamic_resolution goes to |
 | `game_dynamic_resolution` | `auto` | The game's own dynamic resolution and frame pacing, as on the console: auto = on (the game is told the GPU's real times), 1 = on, 0 = off (the game is told the GPU takes no time: always its largest size, for a fast graphics card) |
 | `shadows` | `1` | 0 = no shadow maps (more FPS) |
+| `image_noflag` | `1` | 1 = allow shader image writes to textures without the IMAGE flag (required by some games); 0 = diagnostic override |
 
 ## Performance
 

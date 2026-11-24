@@ -2,6 +2,249 @@
 
 Each module documents here the API other modules call. Keep entries short; update yours when it changes.
 
+## Current incident/build interfaces — 2026-11-23
+
+This update supersedes the historical status below. Current incident/authorization:
+[`waves/THERMAL-INCIDENT.md`](waves/THERMAL-INCIDENT.md); deployment evidence:
+[`waves/THERMAL-BUILD.md`](waves/THERMAL-BUILD.md).
+
+- `dist/nxrs` contains the newly compiled/verified engine and launcher, contract **2**. Resource/watchdog corrections
+  and live NDVE quarantine are compiled into the new libraries. Existing external game binaries are unchanged.
+- Fatal GPU completion/resource safety termination is **72**, distinct from device loss **71** and harness-owned
+  termination **124**. Native one-use descriptor pools are submission-owned and released only after exact completion.
+  Live NDVE `on`, `1` and `check` remain refused; earlier check-mode permission statements are historical.
+- `Monitor` uses a run-scoped HWiNFO source selected by per-run `NXRS_HWINFO_CSV` or ignored local
+  `build/harness-monitor.json`. Timestamp plus observed append progression is required. Missing/stale/invalid/hot
+  data or protective flags refuse/stop through the existing positive cleanup/save gate.
+- `scripts/build_supervisor.py` supervises the fixed CPU build under the machine lease and an independent watched
+  job, without game-frame progress checks or clearing GPU stops. `build.ps1 -Jobs 1` constrains Cargo work for the
+  approved build; validated staged publication protects the previous release. The build-only grant is now complete.
+
+**Game/GPU hold and pending fault journals remain active.** Runtime verification and game rebuilds remain owed;
+the successful CPU build (observed CPU/GPU peaks 68/61 C) is not GPU or thermal-root-cause certification.
+
+## Historical remaining work (2026-11-21, delegated CPU/offline cycle / HARNESS3)
+
+This section and "Latest campaign status" in `PORT_PLAN.md` supersede conflicting claims in all older rows below.
+Sources: `build/CAMPAIGN2/campaign-results.json` (rounds 2-5 / MKW candidate),
+`build/CAMPAIGN2/arceus-trace/outcome.json`, `build/CAMPAIGN2/mk8d-trace/outcome.json`,
+`build/CAMPAIGN2/jamboree-fiber/outcome.json`; latest: `build/CAMPAIGN2/fiber-verify/outcome.json`,
+`build/CAMPAIGN2/switch2-fiber/outcome.json`, `build/OOTWAIT/investigation.json`, `build/NDVE/validation.json`
+and its `cpu.log` / `gpu.log`.
+**No clean whole-library claim.** Parent-owned test results and short visual verification have bounded scope.
+
+**Latest delegated source changes:** `docs/31-DELEGATION-PROTOCOL.md` is binding through `AGENTS.md`;
+`docs/32-REMAINING-WORK-PLAN.md` assigns remaining work and leases. DG-01/DH-01/DS-01 passed lead CPU acceptance
+and independent review; DG's two initial audit findings were corrected by its original agent and rechecked.
+Latest graphics suite **107 passed / 3 ignored**; Python **64 run / 1 optional skip**. Offline SPIR-V validation
+passed. Clippy remains blocked/unassessed in pre-existing runtime `rt.rs:119` (DV-01). No new release/GPU run.
+
+- `vk/lost_bindings.rs` plus `exec.rs`/`lost.rs`: opt-in `NXGFX_MESH_BINDINGS=1` records mesh buffer descriptor
+  evidence on the descriptor-buffer backend. Immutable encoding evidence follows the actual cache entry; active
+  stages are selected independently. Issued draws retain exact checkpoint/setup spans; loss reporting preserves
+  explicit driver markers even across pre/main numeric reordering and reports capped omissions separately.
+  Limit: 16,384 draws / 16 MiB charged payload, 64 ranges/stage, 64 output draws; up to 14 cached/active snapshot
+  references per queue outside the history budget. Binding IDs are observed callback identities; missing IDs,
+  unsupported classic sets, evictions and address precision remain unknown. No causal MKW correction claimed.
+- `scripts/gpu_stop.py`: repository-fixed `build/GPU-STOP.json` is checked before generic-runner claims and launch.
+  `NXRS_GPU_STOP_PATH` is additive; malformed/unreadable/pending markers refuse. Exit 71/in-run/late resets append
+  durable fault provenance through an exclusive pending journal and atomic replace. Persistence errors surface
+  after owned-child cleanup. No automatic clear/resume. Shared latch is seeded from retained HARNESS3 evidence;
+  both remain active. OS-denied cleanup, successor exit-code visibility and total storage denial remain explicit limits.
+- NDVE host jobs now pass interval **16**, grounded in symbolic tracing of all 128 scalar output chains of retained
+  `dmsh_hmma16816_f16`. The independent packed-word CPU oracle preserves low/high FP32 FMA order and final half
+  conversion. Five new contract tests and sharpened historical witness pass. Eight-product behavior remains a
+  comparison; old GPU certification is historical. New device parity, actual guest layout/preflight and shadow
+  comparison are still owed. `on` remains refused; no guest dispatch is consumed. See `docs/waves/DS-01.md`.
+
+Detailed reports: `docs/waves/DG-01.md`, `DH-01.md`, `DS-01.md`, `Audit-01.md`; artifacts under
+`build/DELEGATION/`. These source changes supersede old eight-product-prototype statements below, but do not
+change the latest observed game outcomes or authorize GPU resumption.
+
+**Latest HARNESS3 follow-up supersedes the DKB/MKW/OoT measurements below:**
+`build/HARNESS3/outcome.json` records two bounded OoT runs, an invalidated early DKB attempt, completed DKB
+verification, and a **MKW baseline driver reset**. `build/HARNESS3/GPU-STOP.json` blocks further campaign GPU runs;
+the staged MKW candidate was not executed. The 13:57:10 reset occurred despite confirmed buffer/image robustness2.
+Checkpoint #94396 is a direct mesh draw (task `6098504f5d12ea03`, mesh `1de24686294997d8`); invalid read
+`0xd434b0000` is in the history of recycled/unbound staging/pool memory. This does not yet distinguish stale
+descriptors/resource lifetime from OOB arithmetic. Earlier survival is not stability certification.
+
+`vk/mem.rs` now redistributes dirty pages consumed by batched write-watch resets to every overlapping pool,
+including cold pools omitted from the requested list and shared-page aliases. Previously those notifications could
+be lost permanently. Batch density limits now apply to total holes, not each gap separately. Four CPU regressions
+include actual Windows GetWriteWatch reset semantics. DKB `build/HARNESS3/20261121-135303-dkb-fixed` exercised
+**262 recovered pool-write events**, 198 in 100-150 s. It still has black-world rendering: **20.845 FPS**, 166.8 s,
+exit 0, 30 window skipped draws; mean pool sync 10.199 ms, replay 30.612 ms, GPU 12.775 ms. Fine profiling and route
+differences preclude causal comparison with older FPS. The earlier `135022` attempt was invalidated by a CRT pipe
+disconnect handling regression, corrected before the completed run. Saves/source data verified unchanged.
+
+OoT `build/OOTWAIT/20261121-133352-diagnostic` and `20261121-134158-noopt` prove the observed stall has entered
+`vkCreateComputePipelines` for `d15370a382630d4e`; no logged return before bounded exit. The diagnostic no-opt flag
+now covers compute as well as graphics; it did not unblock this shader. Driver compilation duration/hang and NDVE
+equivalence/integration remain open, with replacement off.
+
+Harness contract additions:
+- `gamectl.pipe(timeout=...)` bounds connect, write and read via an isolated helper, killed/reaped on timeout;
+  command delivery after timeout is unknown and is not retried. CRT disconnect EINVAL/EPIPE is handled as EOF.
+- `diagnostics-*-requests.json` records each request's result, wall timestamp, duration and errors. Periodic
+  collection is cancelled before final artifact indexing; GPU-reset handling does not request another frame.
+- `provenance.json` fingerprints executable, code DLL, ini and pipeline files and records diagnostic settings.
+  Scenario metadata includes steps/input hashes; `save-restoration.json` verifies the restored hashes/existence.
+- `--diagnostics baseline|pipeline|render`: pipeline adds compile brackets and wait ledger; render also adds
+  `NXGFX_PROFILE=1` (measurable overhead). Explicit environment overrides take precedence.
+- `triage.json`, linked from `summary.json`, indexes compile timing/pending calls, frame costs, skipped draws,
+  wait/fault context, shader hashes/reflection and capture outcomes. `py scripts/run_triage.py RUN --window A,B`
+  works offline. Old missing frame columns remain unknown. Shader variants absent from disk are reported missing.
+- Frame CSV appends `prep_ms,pool_sync_ms,descriptor_ms,pipeline_ms`; preparation can be outside replay timing,
+  while other timers overlap. Pipeline logging adds thread IDs and logs failed driver returns distinctly.
+
+- **Arceus overexposure fixed:** `20261121-063541-CAMPAIGN2-arceus-varying-fixed`, native **30.0 FPS**, observed
+  100.01-125.87 s. Confirmed cause: late-output defaults changed unwritten W to 0, causing divide-by-zero / NaN
+  reconstruction and excess specular lighting. Unwritten W must default to **1, not 0**. Preserve explicit initializers;
+  otherwise use `(0,0,0,1)` with
+  Component respected. The 4,096-pixel GPU check passed; six startup missing-shader diagnostics remain.
+- **MK8D cyan shadow fixed:** `20261121-073844-MK8DTRACE-swizzle-fixed`, **59.52 FPS**, observed 100.02-122.46 s;
+  0 gameplay underruns / 4 lifetime. `src/graphics/src/vk/image.rs::components`: explicit view swizzle **replaces**
+  builder swizzle, then format alpha-one mapping applies. Same-capture probes and **65,536 GPU pixel comparisons**
+  (stage/bindless paths, both descriptor backends) passed with zero mismatches / validation errors. Six normalized
+  resource issues and 149 missing-shader entries remain. Round-5 "cyan still open" is historical, not current.
+- **Z-A round 5 station shading corrected:** `20261121-065540-CAMPAIGN2-r5-plza`, **59.807 FPS over 120-190 s**,
+  0 audio underruns; shaded station/player/NPCs and controllable movement verified after the W-default fix. Earlier
+  black/transition-only claims are superseded. Fourteen red issues and the very bright doorway remain.
+- **Shadow round 3 washout corrected:** `20261121-043909-CAMPAIGN2-r3-shadow`, **29.99 FPS**, observed
+  200.02-264.31 s; clear structures, readable boost HUD and movement after lifecycle + vertex fixes. This compares
+  bundles, not an isolated causal fix; 219 red lines / 5 normalized issues and incomplete window coverage remain.
+- **DKB still unresolved:** `20261121-110051-CAMPAIGN2-switch2-fiber-dkb`, **21.953 FPS over 100-150 s**, 165.8 s
+  total, black world early and late, no visible player / verified gameplay, no device loss. One retained blacklist,
+  **57 in-window skipped draws** (58 across frame rows), 13 gameplay underruns. Historical `042240` late tunnel
+  visibility remains unreproduced after round 5 (21.899 FPS) and this run; different progress limits causal attribution.
+- **Jamboree uninstrumented confirmation complete:** `20261121-103510-CAMPAIGN2-fiber-jamboree`, original objects,
+  no traces: unobscured plaza, normal dialogue advancement and Mario movement verified. **59.671 FPS over 140-170 s**
+  (dialogue / movement transition), 183.4 s total, 0 audio underruns; **36 red diagnostics remain**, no clean overall
+  or board/minigame pass. Completion **4 at FiberType+0x20** and no callback rerun unblock the game's FadeIn.
+  Supersedes pending confirmation after instrumented `jamboree-fiber/run-20261121-102100-verify` (~60 FPS).
+- **Smash uninstrumented gameplay, not clean:** `20261121-104037-CAMPAIGN2-fiber-smash`, **56.105 FPS**, 39 stutters,
+  +55.4 MB/min short-window memory trend, no fatal/device loss. Different stage/opponent is not a controlled speed
+  comparison; longer memory verification remains open.
+- **MKW bounded survival, rendering still broken:** `20261121-110733-CAMPAIGN2-switch2-fiber-mkw`, **200 s budget
+  without reset / device loss** (204.8 s total), **6.551 FPS over 150-190 s**, near-white haze / black silhouettes,
+  no usable controllable race. **12 retained blacklist entries, 3,144 in-window skipped draws** (20,423 across frame
+  rows); final shot incomplete. Robustness2 and mesh enabled, but matching the old fault workload is unproven.
+  Historical `045257` was 6.697 FPS / 2,948 skips; the parent's ignored robustness2 descriptor-OOB test passed.
+  Neither run establishes definitive robustness causality or full stability.
+- **OoT progresses past the old initialization stop, then stalls:** default `DT_INIT`-only
+  `20261121-104607-CAMPAIGN2-fiber-oot` reaches nnMain / first present at 4.343 s, then black-screen `nvnSyncWait`
+  with **144 presents / 871 submits**. No static-init fault; no gameplay, and required lifecycle duration fails.
+  `NXOS_INIT_ARRAY` remains diagnostic-only. The separate OOTWAIT run stops at 119 presents: async op 1189 has not
+  finished CPU recording (done 1188); physical submitted/completed work is caught up at 1185. Phase is **compute
+  pipeline acquisition/creation**, shader **d15370a382630d4e**, NDVE **up_64_32**, **2,857,956 bytes / 176,275 SPIR-V
+  instructions**. Driver compilation versus an internal lock / very long compile is not distinguished. AV1 decoded
+  12, delivered 4, holds 8, has no queued/busy decode or armed syncpoint: output waits correctly for client release.
+  **No codec deadlock or synchronization correctness fix established.**
+
+**NDVE prototype gate (not Done):** `vk/newndve.rs` and `build/NDVE/validation.json` describe synthetic kernels,
+not a certified guest replacement. **7 CPU tests**, **24,184 GPU packed words matching CPU**, and **128/128 fp16
+subnormal outputs preserved**, with no new Vulkan validation errors/warnings. The reference/native model rounds
+after each **8 products**, while the retained translated HMMA rounds after **16**: **128/128 witness outputs differ
+by 1 fp16 ULP**. Guest tensor layout / binding / residency preflight and actual frame comparison are unfinished.
+`NXGFX_NDVE=off` is default; `check` only reports the blocked prerequisite; `on` / `1` is refused and falls back off.
+**No translated dispatch is consumed or skipped; no frame comparison or OoT fix is claimed; zero game runs.**
+
+**Source-supported contracts / parent validation:**
+- Texture lifecycle (`src/graphics/src/vk/image.rs`, `exec.rs`): first-use lazy upload, ordered storage-image upgrade
+  preserving writes and invalidating cached views, GPU ownership across submissions without stale CPU overwrite.
+  Latest parent GPU suite: **42 active tests passed on each descriptor backend**, including lifecycle regressions
+  (supersedes the earlier 39). Lifecycle performance recovered in `20261121-093555-CAMPAIGN2-jamboree-pool-perf`:
+  **60.0 FPS over 140-180 s**, zero stutters / audio underruns; this earlier run establishes pacing, not fade removal.
+  `image_noflag` is registered in `src/config/src/options.rs`, default **1**; probe 1663 verified actual STORAGE
+  upgrade / real image binding. This and the earlier zero-buffer isolation / gmem fixes do not certify DKB rendering.
+- `vk/shader.rs`: match vertex-fetch numeric class and **bitcast** loads back to the translated register type.
+  Effective variants use a full **64-bit** identity over base key, kind, full recipe and resulting SPIR-V, replacing
+  the collision-prone 16-bit recipe; legacy aliases only preserve existing blacklist enforcement.
+- `vk/exec.rs::index_binding_span`: indirect residency lookahead is clamped/aligned to the valid backing tail.
+  `vk/pipe.rs::begin_clean_shutdown`: close the compile journal atomically against late workers so intentional exit
+  creates no false crash blacklist entries; existing crash lists are retained. Parent CPU workspace / Python tests pass.
+- `src/runtime/src/fiber.rs`: guest lifecycle byte at `FiberType+0x20` is **1** ready/suspended, **2** running,
+  **4** completed, **0** finalized. Publish completion after callback return and before switching to its successor;
+  a completed fiber cannot be switched to until reinitialized. The guest regression fails on the old runtime and
+  passes fixed (one callback invocation under completion polling); **45 runtime unit tests pass**. This supersedes
+  the old Jamboree investigation's claim that the executor was ruled out.
+- `scripts/observability.py`: target-relative drop estimates correctly handle native 30 FPS; missing evidence is
+  **unknown**, and exit/completion/observed-window lifecycle checks reject incomplete coverage. Old JSON preserves
+  historical 60 Hz estimates. Lifecycle duration is telemetry coverage, not gameplay-content proof; visual review,
+  startup versus gameplay audio, red diagnostics and blacklist/skipped-draw coverage remain part of the verdict.
+
+Other open items retain their earlier evidence: Anime banding, Wonder diagnostics, residual title diagnostics and
+longer memory verification. OoT now needs pipeline-blocker investigation and NDVE parity / guest integration, not
+another claim that whole init-array execution fixes startup. Jamboree's pending uninstrumented-confirmation status
+is superseded by the verified plaza run; it still has red diagnostics and no whole-title certification.
+
+## Earlier campaign snapshot (2026-11-21; superseded by CAMPAIGN2 above)
+
+The following is retained historical evidence, including former MKW-not-run, cyan-shadow-open, Jamboree-fade-open
+and Z-A verdicts; the authoritative section above takes precedence.
+Evidence run IDs below are relative to `D:\Projects\RecompLauncherEngine\build\I\runs\`; consult their
+`summary.json`, `run.log`, diagnostics and screenshots. Code and GPU testing are owned by the parent lane.
+
+- MKW: K3's direct-mesh out-of-range access; robustness2 selection is now explicit, retained in the device caps and
+  covered by policy tests, and task-buffer diagnostics report the final descriptor range. Run the ignored synthetic
+  descriptor-range test on disposable GPU state, then the game candidate; after that fix the pale-green haze and
+  65-79 ms/frame pool sync. The older K2 128x128x5-pass / ser28824 diagnosis is superseded.
+- DKB: **black world remains**, about 21.9 FPS (pacing mean; frame-derived 21.8 over 100-150 s), no crash / device
+  loss in `20261121-015501-dkb-sbuf-gmem-fixed` (165 s). The earlier purple/lavender world is superseded by
+  `20261121-014108-dkb-storage-default-fixed`: `image_noflag` was unregistered, effectively false; it is now registered
+  in `src/config/src/options.rs` with default `1`. Probe ID 1663 verifies a STORAGE upgrade and real upscale storage
+  image binding. This fixes the binding, not world rendering; rendering correctness and pool/replay cost remain open.
+- Smash: suspended-fiber host-stack growth is fixed but needs a long memory re-measure. The latest run completed a
+  240 s match at 60 FPS without device loss after the lazy-page lifetime fix; earlier losses remain historical.
+- Jamboree: the opaque white fade remains, but G4 proved it is a game-state problem, **not a blend-state bug**.
+- MK8D: `20261120-190233-verify-mk8d-current`, race 59.58 FPS (100-190 s window, run ended at 189 s), 0 gameplay
+  underruns / 6 lifetime. **Not clean overall:** 5 normalized red resource-binding issues, 50 lines (out-of-pool
+  addresses / zero-bound uniforms). Cyan kart shadows remain; older broad black-road / async failures are superseded.
+- Wonder: `20261120-191640-verify-wonder-current2`, gameplay 59.68 FPS, 6 stutters and 1 gameplay underrun;
+  115-260 s configured window observed only to 210 s. Loading-memory trend +179 MB/min needs a steady-state check;
+  two prior pipeline entries are blacklisted. Earlier prewarm success does not make this a clean overall pass.
+- Z-A: `20261120-193044-verify-plza-background-input` **does not verify gameplay**: images show a dark transition.
+  Its 59.62 FPS / screenshot metrics cannot certify controllable station play. Earlier station runs are historical;
+  Arceus and Violet retain their previously recorded gameplay evidence.
+- Beach Bounce: `20261120-174245-library-bbounce-current`, 900 s, exit 0, 59.60 FPS over 60-720 s; frequent captures
+  induced stutters (135 intervals >=50 ms). Real audio worked: lifetime 69 startup underruns, unchanged from the
+  first 61 s report through exit, no new later underruns. This is not a clean uncaptured pacing baseline.
+- Anime: `20261120-181310-diagnose-agsob-initfix`, 59.93 FPS gameplay (observed portion of 120-840 s, ended at
+  303 s), 0 gameplay underruns / 9 lifetime; **banding unresolved**.
+- Graphics parity: VRAM eviction is GPU-tested. Capture format 2 embeds shader SPIR-V/reflection and `PROGRAM`
+  serial -> stage-key mappings, including live shaders absent from the offline library. Deferred
+  recording is implemented but stays off because it is slower. Frame generation is implemented and globally off by
+  default. Ray-tracing NVN2 call layouts remain blocked on a game that invokes them.
+- Ocarina of Time: **whole `DT_INIT_ARRAY` execution did NOT fix it**. In
+  `20261120-192559-verify-oot-init-array`, constructor main+0xebe390 -> main+0x66ace0 crashes reading 0x8.
+  Global host init-array execution also crashed Anime (`20261120-180914-diagnose-agsob-current`). Current
+  `src/os/src/boot.rs` runs `DT_INIT` only by default; the SDK owns its arrays. `NXOS_INIT_ARRAY=1` is an explicit
+  initialization-order diagnostic, **not an OoT opt-in**. Earlier "fixed / awaiting OoT verification" claims are
+  superseded; OoT remains deferred with initialization unresolved.
+
+**Validated graphics contracts (2026-11-21):** `shaders::link::trim_cull` trims all affected gl_PerVertex blocks
+together, including separate geometry input/output blocks; the multi-block fix is validated. In
+`graphics/src/vk/exec.rs`, unresolved writable storage bindings receive fresh, submission-owned zero-initialized
+scratch per binding; read-only fallbacks still share immutable zero storage. In `vk/gmem.rs`, overlapping pools
+follow `mem::find`'s highest-base policy, including later pools without buffers and their hidden predecessor tails.
+The parent reports `missing_storage_writes_do_not_poison_zero_fallbacks` passed with both descriptor buffers and
+classic sets; gmem overlap policy has regression coverage. **These results do not establish a DKB world fix.**
+
+**Capture evidence / offline interface:** `build/I/agsob-lut-v2-programs.cap` has **193 shaders, 32 programs,
+64 referenced keys, none missing**, and replays (`build/I/agsob-lut-replay2`). `vk/capture.rs` records `PROGRAM`
+serials with stage masks and keys; `nxgfx-replay <capture> --dump-shader <16-hex-key> --out <dir>` extracts captured
+SPIR-V and reflection without GPU replay. Replay success does not resolve Anime's colour banding.
+
+**Harness interpretation:** summaries and image metrics are heuristic, not proof of gameplay or picture correctness.
+Keep startup/loading/gameplay windows and actual observed duration explicit; distinguish lifetime audio underruns
+from gameplay-window deltas, capture-induced stalls from baseline pacing, and loading-memory slopes from sustained
+leaks. Normalized red diagnostics (resource bindings, pipeline blacklists, validation, GPU and service failures) remain
+part of the verdict even with a zero exit, good FPS, no device loss or non-silent audio.
+
+Feasible non-graphics diagnostics now include the `gaps` control command (`os/src/watch.rs`): it returns the live
+summary of unimplemented services, commands, SVCs, imports and NVN calls encountered so far.
+
 ## translator (src/translator)
 Package API (`translator::package`): `open_game`, `open_data_dir`, `RomFs::{list, find, read}`, `update_info`, `dlc::*`. See src/translator/README.md.
 
@@ -141,6 +384,16 @@ no `-I` for it and no overlay in the headers key (a whole-engine build recompile
 `nxos-dev` likewise compiles against the translator's `cpu.h` only.
 
 ## graphics (src/graphics, lib `nxgfx`)
+
+**Historical graphics hand-off (2026-11-20; superseded by the 2026-11-21 authoritative section above):**
+asynchronous replay is on by default; resolution scaling and frame generation are implemented; frame generation is
+a global option off by default; VRAM eviction is GPU-tested; capture / replay reproduces MK8D offline; Wonder's
+first-run level-entry stall is fixed; Smash completed 240 s at 60 FPS without device loss after the lazy-page
+lifetime fix; and DKB's shader-compiler crash is fixed. Current blockers are MKW's direct-mesh robustness fault,
+haze and pool-sync cost; DKB's purple world and low FPS; MK8D's cyan kart-shadow blob; and Jamboree's game-state
+fade. Multi-thread command recording exists but stays off because it measured slower. Ray-tracing NVN2 call layouts
+remain blocked on a game that actually calls those entry points.
+The control channel also has `gaps`, backed by `nxos::log::gap_summary`, for the live non-graphics gap inventory.
 NVN on Vulkan: the record layer (nxnative's `hle_nvn.c`: objects in place in the game's memory, commands recorded into
 its command memory) and the replay on a discrete GPU. Module map in `src/lib.rs` and `src/vk/mod.rs`.
 
@@ -225,7 +478,8 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   `fps_target` frame skip (draws of skipped frames are not replayed, their presents not shown),
   `game_dynamic_resolution`, `driver_exclusive` (auto: Intel; pipeline creation and submissions take turns),
   `shader_thread` (0: no pipelines built ahead), `low_priority_shader_compiler` (builder threads below normal).
-  **Not yet:** `resolution` / `dynamic_resolution(_min)` (render-target scaling) and the frame generation hook.
+  **Superseded by lanes G3/G4:** `resolution` / `dynamic_resolution(_min)` and the frame-generation hook are implemented;
+  frame generation is a global option off by default.
 - **Answers to lane O:** NVN2 native images (`nvnNativeImage*`, `nvnTextureInitializeFromNativeImage`) are graphics'
   (`nxgfx::nvn::native`): os binds `takeovers()` by mangled name and gives `set_source(codec_video::native_image)`
   (done in `nvn::finish_registration`). A texture the GPU wrote and the CPU then writes is uploaded again from its
@@ -237,12 +491,15 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   `main+0x946a20`, which reads `+0x20`); that global is still 0. Its only writer is `main+0x268d10`
   (`main_0035.c:4233`), reached behind a static-guard pair (`main+0x3c41ca0` / `+0x3c41cb0`, `__cxa_guard_acquire` /
   `release`): a C++ static the game constructs on another path (a static constructor of `.init_array`, or a thread
-  that has not run yet). Graphics answered both bootstrap calls and every GetProcAddress (683 procs, none 0). Lanes O/T:
-  check that `main`'s `DT_INIT_ARRAY` entries run (not only `DT_INIT`) and which thread calls `main+0x268cc0`.
+  that has not run yet). Graphics answered both bootstrap calls and every GetProcAddress (683 procs, none 0).
+  **Superseded follow-up:** whole host `DT_INIT_ARRAY` execution was subsequently tried and crashed in
+  main+0xebe390 -> main+0x66ace0; it did not fix OoT. Default startup is `DT_INIT` only, with `NXOS_INIT_ARRAY`
+  diagnostic-only. The earlier null-global evidence remains useful for initialization-order investigation.
 - Diagnostics: `NXGFX_DUMP_AT_S=<s,...>` / control command `passdump`: every colour target of one frame's passes as
   PNG (`NXGFX_DUMP_DIR`), a log line per pass.
 
-**Lane G hand-off notes (2026-11-19, keep current):**
+**Lane G hand-off notes (2026-11-19, historical; all status claims are superseded by the authoritative section at the
+start of this file and by later G3/G4/G5 evidence; retained for investigation detail):**
 - Test builds of lane G: `build/G/compile_mk8dt.sh` (lane T's MK8D gen compiled with the current headers into
   `build/G/mk8dt/obj`), `build/G/link_mk8dt.sh` and `build/G/link_game.sh <name> <game build dir> <out>` (link with
   `target/G/release/nxfront.lib`); MKW at `build/G/mkwt` (lane O's objects, a copy of its data folder). Runs:
@@ -257,7 +514,7 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   `pass dump N: stage 1 …` lines of the pass writing A2B10G10R10 1920x1080 just before the UI). The HDR scene itself
   (before grading) still has a black sky: next suspect for the lighting item. MKW: 28 GB was 19 GB of whole images
   for sparse terrain arrays + a 76 s scan; sparse images fix both (MKW presents, 8.4-8.9 GB peak).
-- **For lanes X / O (MKW with lane G's engine, `build/G/runs/w6`):** with sparse images MKW presents (first present
+- **Superseded MKW hand-off for lanes X / O (`build/G/runs/w6`):** with sparse images MKW presents (first present
   30 s, peak 8.8 GB) and then stops in game code: `host access violation … lifted main+0x47ff40 +0x1cc (read of 0x30)`
   (a null object; w5 instead: `rt_dispatch: no function at guest pc 0x0`). No graphics red line precedes it. w7 (sync replay): `nvnCommandBufferWaitEvent` called with a null command buffer (x0 = 0, event 0x2264cbb88, from main+0xa0140): something earlier handed the game a null command buffer or it was never initialized; lane G checks its NVN2 command-buffer entry points next, lanes X / O please check which object the game expected there.
 - **(Superseded by rev 7: asynchronous submission is on by default, see lane G3.)** Asynchronous submission was off by default: with it MK8D stopped submitting ~120 s
@@ -504,7 +761,7 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
     second texture over the same storage); and 0x15cf60600 holds four render targets in one frame (A2B10G10R10 normals,
     two RGBA8, a 960x540 one): the transient pool the game reuses within the frame, which the aliasing above now keeps
     as one image where the shapes match. Not fixed in this pass.
-  - **Donkey Kong Bananza's compiler crash: isolated, not fixed.** With `NXGFX_PIPE_LOG=1` (new: every pipeline the
+  - **Superseded by lane G3 rev 9: Donkey Kong Bananza's compiler crash was then isolated, not fixed.** With `NXGFX_PIPE_LOG=1` (new: every pipeline the
     driver compiles, as it starts and ends) the last one started in `build/G/runs/d3` is vertex `d87ccbede95b9f2c` +
     pixel `6655320127e098d6`. It crashes outside the game in a second: `NXGFX_GPL=0 NXGFX_TEST_SHADERS=<dkb>_data/
     shaders NXGFX_TEST_PAIR="d87ccbede95b9f2c 6655320127e098d6" cargo test -p graphics --features gpu-tests --test
@@ -689,7 +946,7 @@ shared by every program** (no per-program layouts, so pipelines key only on shad
   `20261119-200906-W2-sonic-shadow\0012-a_intro_7.png`): the title and story scenes are recognisable but every colour
   is wrong (wrapping bands, as if a float or 10-bit target were read as UNORM8 or the other way). Program 1 (Sonic
   Generations, `sonic_p1.exe`) at 1920x1080 is right (`20261119-204133-W2-sonic-gens\0013-shot_play_1_min.png`).
-- **Super Mario Party Jamboree: the white screen after the title is most likely a blend state (lane G).** The opening
+- **Superseded by lane G4: Super Mario Party Jamboree's white screen was initially suspected to be a blend state.** The opening
   movie and title are posterized like MK8D; after L+R the hub (Party Plaza) is drawn right (pass 96) and the last
   pass (108: vertex `ce7eacf81c6e4ffc`, pixel `7f4356c21967c962`, one draw over 1920x1080 R8G8B8A8_SRGB with a depth
   attachment) covers it with plain white. That quad's colour bank c3 at guest 0x1d98ad300 reads (1, 1, 1, 1) **in
@@ -747,17 +1004,17 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   (`0019-shot_lap.png`); in `-lap1` the same stretch came out black (`0022`, `0027`), the rest of the lap right
   (`0016`). The VSM is still all zero (G3 rev 9). Next: decompile pass 31's pixel shaders (`044c744ceb0df7c2` and the
   others sampling id7160) to see which mask channels they read, and find who should fill the VSM.
-- **Jamboree's white layer: not a blend state.** Pass 108's quad (`20261120-022711-G4-jamboree-blend2`): blend
+- **Jamboree's white layer: not a blend state (current finding).** Pass 108's quad (`20261120-022711-G4-jamboree-blend2`): blend
   SRC_ALPHA / ONE_MINUS_SRC_ALPHA, logic op COPY, no alpha to coverage, alpha function ALWAYS, colour mask all; its
   colour = texture x c3[0] + c3[1] with c3 = (1, 1, 1, 1) / 0, and its 8x8 BC4 texture (swizzle 1, 1, 1, R) is block
   `ff 00 00…` (every texel 1.0) on the GPU and in guest memory (`build/G4/jdump/tex-003663-ser3027-*.bin`). So the
   game draws an opaque white fade on purpose: its fade state never advances. Back to lanes W / X (game state); not a
   graphics state bug found.
-- **Smash device lost: not reproduced alone.** `20261120-025107-G4-smash-lost` (`NXRS_EXCLUSIVE=1`, 360 s of matches):
+- **Historical G4 snapshot, superseded by round 6:** Smash device loss was not reproduced alone. `20261120-025107-G4-smash-lost` (`NXRS_EXCLUSIVE=1`, 360 s of matches):
   no device lost, 52.5 FPS (window 150-350 s). W2's losses came with other lanes' games on the GPU.
-- **Not done:** recording one submission on several threads (needs a recorder over every vkCmd call, Turbo
-  `vk_defer.c`), ray tracing (PORT_PLAN 5A.4 row), VRAM eviction, capture / replay, DKB's purple world, Wonder's
-  stutter measured.
+- **Superseded status list:** recording was subsequently implemented and measured slower, VRAM eviction was GPU-tested,
+  capture / replay reached end to end, and Wonder's first-run stutter was fixed. Still current here: ray-tracing NVN2
+  call layouts are blocked, and DKB's purple world remains open.
 
 **Lane G4, round 2 (2026-11-20, after the 03:51 crash; uncommitted).**
 - **GPU hangs (top priority).** `vk/lost.rs`: VK_NV_device_diagnostic_checkpoints before every dispatch and indirect
@@ -1316,7 +1573,7 @@ reference vector moved to `src/translator/tests/data/zbic_sample.zbic`). `Nso::p
 ## cli (src/cli, binary `nxrs-build`)
 **Renamed (lane L, 2026-11-19; owner's decision): the CLI binary is now `nxrs-build` (`target\<dir>\release\nxrs-build.exe`),
 not `nxrs`.** Every lane: switch your commands (`nxrs build …` → `nxrs-build build …`, `nxrs profile`, `nxrs doctor`,
-`nxrs translate` likewise; contract v1 calls are unchanged apart from the name). `cargo build -p cli` still builds it
+`nxrs translate` likewise; contract v1 calls are unchanged apart from the name). `cargo build -p nxrs-cli` builds it
 (the package is `cli`). An old `nxrs.exe` left in a target folder is stale: delete it. `nxrt-dev e2e` now looks for
 `nxrs-build.exe` beside itself (`--nxrs` still overrides); `scripts/run_game.py` waits for `nxrs-build.exe` as a
 compiler. The product is nxrs, the launcher `nxrs.exe`, the engine repo becomes nxrs-engine (the folder is renamed
@@ -1690,7 +1947,7 @@ files of the moment); every lane W game relinked from it. Runs go through `scrip
     `boost_run.txt`: stick forward, ZR boost, B, A): **18 min of the stage**, 30.0 FPS (the game's target; p95 37 ms),
     private memory flat (6.86 -> 7.07 GB), picture right, quit cleanly; Shadow reaches a robot fight (`B -> Y` prompt)
     and the script stops there. No output device on the PC: no sound evidence.
-  - **Jamboree white screen: handed to lane G (blend state of the last pass, lane G findings above).** Ruled out
+  - **Superseded hand-off: Jamboree's white screen was handed to lane G as a suspected blend state.** Ruled out
     first: the nifm network check (it finishes), a lost wake-up in the nn::async executor (forced 50 ms wake-ups
     changed nothing), failed file opens, and the game logic itself (the hub's BGM plays; the fade quad's colour is
     (1, 1, 1, 1) in guest memory, so the game does not wait with the screen faded: it draws a white layer that should
@@ -1709,8 +1966,8 @@ files of the moment); every lane W game relinked from it. Runs go through `scrip
       build before lane G3's e503854 played 14 min without it.
     - **Shadow Generations has no video end-of-stream problem** (the "loop" was the script walking back through
       menus; see above); its open items are only the sound check and the owner's hand test.
-    - **Jamboree fade: handed to lane G** (the white quad the game sets to (1, 1, 1, 1) should not cover the hub:
-      blend / write mask of pass 108; lane G findings).
+    - **Superseded by lane G4:** Jamboree's fade was handed to lane G as a blend / write-mask question; pass 108 was
+      later proved to use the requested state, while the game deliberately supplies an opaque-white fade.
     - **Sound re-check owed:** since ~23:30 the PC has no default output device (`[RED] audio: no output device` in
       every run log), so the sink's wall-clock release (Sonic's stretched sound, Beach Bounce's ~38 underruns a
       second) has no evidence with a real device yet. Before counting a run as sound evidence, check its log for
@@ -1835,7 +2092,8 @@ it).
   pointers at the moment of the second press; Turbo runs this game with every thread free, so compare its loader
   and file reads around the save load. Title music: the BGM stream is never opened (0.9 s of renderer sound in 60 s).
 - Super Mario Bros. Wonder: 12.7 min, no crash, picture right, sound, memory flat after minute 5; FPS median 59.8 /
-  p10 54.7 (another lane's build ran during minutes 2-5). Not marked Playable.
+  p10 54.7 (another lane's build ran during minutes 2-5). **Historical status: later marked Playable; first-run
+  level-entry prewarm was fixed in G4 round 6.**
 - Arceus: Jubilife Village right with `lsfg=0` (the garbled village was frame generation); 30.0 FPS, 620 s.
 - Violet: in-house gameplay 20 min, 30.0 FPS, sound, flat memory; the story step that opens the front door was not
   found (the game answers "You're not quite ready to go to school yet").
@@ -1902,7 +2160,7 @@ which has no music; the music plays once the game starts.
 
 **For lane G3, DKB after 4652dc2 (crashed-pipeline guard), lane X2 2026-11-20 01:30:** session 1 (`x2-dkb-g3fix1`) ran 59 s into the title / opening and died in the driver (exit 0xC0000005); the guard recorded that pipeline ("1 pipeline(s) were compiling when the last session ended"). Every later session (`x2-dkb-g3fix2` .. `5`, with `NXRT_FOREIGN_FAULTS=1`) dies at **2.8 s** in `nvgpucomp64.dll+0x3c1c150` (frame 0 `nvgpucomp64.dll+0x312335d`, read of 0) with the guard still at 1 pipeline: this compile is not caught by the guard (a different path from the one it wraps: pipeline-library parts made ahead at ProgramSetShaders, or a compute pipeline?), so DKB no longer reaches its title. Save backed up in `build\X\saves\dkb-0122\`.
 
-**Pokémon: where each one is stuck (for the owner to play past by hand; saves backed up):**
+**Pokémon historical progression notes (superseded by the 2026-11-20 5B gameplay bar; saves backed up):**
 - Arceus: Jubilife Village, objective "Head to the Wallflower" (the game's autosave at 2026-11-19 15:49; no menu / Save yet at this step). Save: `build\X\saves\arceus-0033\`. A hand play to the first night (Survey Corps quarters) and on into the Obsidian Fieldlands, then an in-game Save once the menu has it, gets M6's place.
 - Violet: the house at the start, in uniform; the menu has Options / Save only (no Rotom Phone), Mom is in no room we found, and the step down to the entrance answers "You're not quite ready to go to school yet." Save (in-game Save of 00:45): `build\X\saves\violet-stuck-house\`.
 - Z-A: Lumiose station platform after "Lumiose City! We made it!" (60 FPS there); the platform ends at a fence and walking right toward the station building leaves the camera fixed with the player out of view (`x2-plza4-gate`). Save: `build\X\saves\plza-0118\`.
@@ -2813,7 +3071,7 @@ unchanged (wrapped in `cfg(windows)`, nothing restructured). The windows / windo
 | dmsh_xlate.exe, spirv-val.exe (shader build tools) | `build/tools/dmsh_xlate-linux/dmsh_xlate` (NativeAOT linux-x64, `src/shaders/tools/build_dmsh_xlate.sh`: same source, same `--source-sha` e11dc43d4ddc5b58 as the Windows tool), `spirv-val` from PATH (spirv-tools) | shaders `xlate.rs` |
 | nxrt-dev (homebrew e2e) toolchain | PATH clang / ld.lld, `libnxrt.a` | runtime `bin/nxrt_dev.rs` |
 
-**Using it.** Build the engine with `cargo build --release -p cli -p front -p runtime` (needs clang, lld, pkg-config,
+**Using it.** Build the engine with `cargo build --release -p nxrs-cli -p front -p runtime` (needs clang, lld, pkg-config,
 libasound2-dev, libopus-dev, libvpx-dev, libdav1d-dev, libavcodec-dev, libavutil-dev, a glslangValidator); put
 `libnxfront.a` / `libnxrt.a` beside `nxrs-build` (the release folder has them) and run `nxrs-build <package> -o <name>
 --outdir <dir>`. `nxrs-build doctor` checks the Linux pieces (clang, ld.lld, the engine libraries, libvulkan, ALSA, the

@@ -6,15 +6,49 @@
 before changing behaviour or structure. The tree is often dirty: preserve unrelated work, and never reset, revert,
 stage or commit another person's changes.
 
-**Delegated work follows `docs/31-DELEGATION-PROTOCOL.md` (binding).** Read it before any wave, audit or send-back.
-The lead writes briefs/docs and runs acceptance; wave agents implement and compile within explicit file/resource
-leases. One active subagent, one compiler command, and one game/GPU workload at a time; no builds during GPU runs.
-The active game-outcome roadmap is `docs/33-REFERENCE-DELTA-ROADMAP.md`; `docs/32-REMAINING-WORK-PLAN.md` is
-retained as procedural history and the detailed execution ledger. Diagnostics, tests and audits are subtasks, not
-milestones: unresolved-title work ends only with a source correction and guarded game result.
-Agent briefs use absolute project/source/document/evidence paths and an explicit shell working directory. The lead
-returns defects to the implementing agent; a fresh agent audits high-impact work. Preserve fault-stop latches and
-blacklists; a cooldown alone does not authorize another GPU attempt. Commit only when the owner explicitly asks.
+**Delegated work follows `docs/31-DELEGATION-PROTOCOL.md` (binding).** Read it before a wave. An agent owns a bug
+end to end: it implements, builds, tests and verifies in the game; the lead may implement too. One compiler-heavy
+command and one game/GPU workload at a time; no builds while a game runs. Use the normal CLI builds, the real
+library and the configured build folders (owner-authorized); no per-run copies of games. Diagnostics, tests and
+audits are steps, never milestones: work ends with a source correction and its game result. A device loss stops
+that workload and becomes the top-priority bug: fix it and re-run that path with the fix, never unchanged.
+Blacklists stay unless a corrected pipeline is proven safe.
+Back up and restore saves. Audits are for genuinely dangerous changes, after a fix exists. Keep evidence compact.
+The game-outcome roadmap is `docs/33-REFERENCE-DELTA-ROADMAP.md`; `docs/32-REMAINING-WORK-PLAN.md` is the ledger.
+Commit only when the owner explicitly asks.
+
+**Current owner hold (2026-11-23): no games or GPU workloads until the repeated reboot/overheating incident is
+investigated and the demonstrated runaway/resource/watchdog defects are corrected.** During this hold use existing
+evidence, read-only system telemetry and CPU-only failure-injection tests. Do not launch Vulkan tests, shader
+pipeline compilation probes, game replays or release stress builds. This newer instruction overrides the ordinary
+per-title continuation rule above. Production saves remain untouched. Status: `docs/waves/THERMAL-INCIDENT.md`.
+
+**Completed narrow owner authorization (2026-11-23):** the monitored, single-worker production release rebuild
+finished and `dist/nxrs` was independently verified (contract 2, artifact hashes, cleanup). CPU/GPU observed peaks
+were 68/61 C. See `docs/waves/THERMAL-BUILD.md` for corrected supervision failures and final acceptance.
+This completed exception does not authorize further builds, games, GPU tests, launcher GUI startup, clearing
+GPU-stop journals or production-save operations. Existing external game binaries have not been rebuilt with
+the new engine libraries. Live HWiNFO monitoring and the game/GPU hold remain in place.
+
+**Wonder authorization stopped at preflight (2026-11-23):** the subsequently authorized one-title rebuild/run
+did not launch any workload. HWiNFO logged CPU package 91 C at 10:58:02; lead read-only follow-up at 11:05 showed
+advancing 93–95 C samples and a separate 12-worker Leonida build from another OpenCode session. Shared GPU stops,
+Wonder binaries, library metadata and production saves remain unchanged. No automatic retry or new workload is
+authorized by the consumed attempt. Resolve the active thermal/competing-workload condition first; do not stop
+another session's processes without owner authorization. See `docs/waves/THERMAL-WONDER.md` and the incident record.
+
+**Post-reboot source planning:** owner subsequently reported a hypervisor-error crash, disabling an unspecified
+Windows feature and restarting. Do not infer a repaired GPU/thermal cause or current sensor/process state from
+preboot evidence. The resumed source-only review is complete in `docs/waves/GPU-REFERENCE-PLAN.md`; it authorizes
+no implementation execution, build, test or GPU run. Existing workload holds remain active.
+
+**New implementation authorization:** the owner now requests applying the reference-plan patches and running
+tests after the build. Source corrections, independent review, a thermally supervised single-worker build and
+the relevant CPU-only tests are authorized. Compilation/test execution requires fresh advancing HWiNFO data
+and no competing build/game workload; no stale-data fallback or threshold relaxation. The 12:49 check found the
+CSV stopped at 11:55:37 and another session's four-worker Leonida build still present. HWiNFO was reopened for
+the owner to resume logging. Source work may proceed while these execution blockers remain. Live NDVE stays
+quarantined; this instruction does not authorize GPU crash reproductions, gameplay or clearing fault histories.
 
 ## Layout
 
@@ -36,15 +70,15 @@ cargo build --release --manifest-path src/launcher/Cargo.toml   # the launcher: 
 cargo test                                          # engine (seconds; GPU and game tests are opt-in)
 cd src/launcher; cargo test --jobs 4                # launcher (seconds: fake engine, kittest, CLI)
 cd src/launcher; cargo clippy --all-targets --jobs 4 -- -D warnings; cargo fmt   # max_width 100
-scripts/build/build.ps1 -Run       # release build into dist/nxrs, target/ left lean, starts dist/nxrs/nxrs.exe
-scripts/build/build.ps1 -KeepCache # keep the release cache: fast rebuilds, large target/
-scripts/build/prune.ps1            # just shrink target/ (-BudgetGB, -KeepDays, -Lanes, -WhatIf)
+scripts/build/build.ps1 -Run       # release build into dist/nxrs, then all of target/ removed; starts it
+scripts/build/build.ps1 -KeepCache # keep target/: fast incremental rebuilds
+scripts/build/prune.ps1            # shrink target/ without removing it (-BudgetGB, -KeepDays, -Lanes, -WhatIf)
 ```
 
-`dist/nxrs` is a release laid out as it ships (`nxrs.exe`, `nxrs-engine/`, `legal/`) and runs on its own.
-`target/` is large mostly because of `debug/` and the lane folders (`target/L2`, `target/K`, ...) that parallel
-work builds into with `CARGO_TARGET_DIR`; `prune.ps1` never touches lanes unless given `-Lanes`. Cargo uses
-`--jobs 4` on this machine (heavy parallel builds crash its compilers).
+`dist/nxrs` is a release laid out as it ships (`nxrs.exe`, `nxrs-engine/`, `legal/`) and runs on its own; the
+default build leaves only it. Don't keep stale lane folders (`target/L2`, `target/K`, ...): build in the normal
+`target/` and remove a lane when its work is done. Cargo uses `--jobs 4` on this machine (heavy parallel builds
+crash its compilers).
 
 ## Rules that bite (full text: docs/ARCHITECTURE-AND-STYLE-GUIDE.md)
 
