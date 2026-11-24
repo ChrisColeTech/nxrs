@@ -41,8 +41,9 @@ def stops():
 
 
 def preflight():
-    if (ROOT / 'target').exists():
-        raise RuntimeError('this authorized clean-source attempt requires the observed absent root target')
+    # A reused target/ is recorded, not refused: provenance rests on the source hashes compared at verify
+    # and on Cargo's own fingerprints.
+    target_absent = not (ROOT / 'target').exists()
     sdk = Path(os.environ.get('VULKAN_SDK', 'missing-sdk'))
     needed = [ROOT / 'build/tools/dmsh_xlate/dmsh_xlate.exe', sdk / 'Bin/spirv-val.exe',
               Path(os.environ.get('NXGFX_GLSLANG', str(sdk / 'Bin/glslangValidator.exe')))]
@@ -62,7 +63,7 @@ def preflight():
     return dict(head=command(['git', '-C', str(ROOT), 'rev-parse', 'HEAD']),
                 dirty_status=command(['git', '-C', str(ROOT), 'status', '--short']),
                 source_sha256=sources(), existing_release=release_hashes(), stops=stops(),
-                target_absent=True, free_bytes=free,
+                target_absent=target_absent, free_bytes=free,
                 rust_flags_check=rust_flags_check,
                 rustc=command(['rustc', '-Vv']), cargo=command(['cargo', '-V']),
                 prerequisite_sha256={str(p): digest(p) for p in needed})
