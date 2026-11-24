@@ -18,6 +18,19 @@ fixes (recoverable mesh/raw-table conditions skip instead of status 72); graphic
 `dist/nxrs` is still the 2026-11-23 release; the candidate is not packaged and no game is rebuilt with it.
 Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validation, the OoT/MKW/Violet faults.
 
+### To do (in order)
+
+- [x] Commit the dirty tree as subsystem commits; independent review of the alignment candidate; review fixes
+- [x] Replace the harness with `scripts/play.py` (smoke run on Wonder's old build: completed, 58 FPS)
+- [ ] Build the candidate into `dist/nxrs` (`build.ps1 -Jobs 4 -SkipGnu -KeepCache`)
+- [ ] Rebuild Wonder with it; `play.py wonder`; read the sheet
+- [ ] Rebuild + run the other known-pass titles: arceus, arceus-base, agsob, beach-bounce, jamboree
+- [ ] Failing titles one at a time, each ending with a fix and its run: dkb (pacing, audio underruns, texture
+      target), mkw / mkw180 (task/mesh fault, race stability; GAR-5), plza (cube mismatches, pacing), mk8d
+      (stutters, memory), shadow / sonic (resource diagnostics, blacklisted pipelines), smash (pacing)
+- [ ] Blocked titles: oot (native NDVE stays off; submission-4764 fault), violet (first-run progression, display reset)
+- [ ] Final pass: every scenario, one run each
+
 ## Execution update — 2026-11-23, thermal monitoring (history)
 
 **Reference-alignment implementation update:** session `ses_df6763ff3ffey6Q3EHUCcHhGwN` wrote source corrections
