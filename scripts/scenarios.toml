@@ -43,11 +43,24 @@ steps = ["wait 44", "shot boot", "press L+R ; 5", "shot title", "press A ; 6 * 8
 
 [plza]
 title = "Pokemon Legends Z-A"
-about = "title to the station, walk"
-seconds = 150
-window = [45, 84]
-steps = ["wait 12", "shot boot", "press A ; 30", "wait 8", "shot station",
-         "replay plza_walk.txt ; 10", "shot walk", "wait 5", "replay plza_walk.txt ; 10", "shot walk again", "wait 5", "shot end"]
+about = "fresh save: language/name, first look, Ready!, the arrival to free movement on the station platform, walk"
+seconds = 330
+window = [215, 300]
+# A through the opening to the appearance grid (A alone selects nothing there: the stick highlights a look), then Confirm Choices opens on
+# "Change hair color": Down twice to Ready!. A through "You're ready to go!" and the train to the platform, where
+# the player walks (the NPC bubbles are ambient, A does not clear them).
+steps = ["wait 12", "shot boot", "press A ; 1 * 45", "shot appearance", "press LRight~0.3 ; 1", "press A ; 2", "shot confirm choices",
+         "press Down ; 1 * 2", "press A ; 3", "shot ready", "press A ; 1 * 70", "shot station",
+         "press A ; 1 * 30", "shot platform", "replay plza_walk.txt ; 10", "shot walk", "wait 5",
+         "replay plza_walk.txt ; 10", "shot walk again", "press LUp~4 ; 5", "shot walk forward", "wait 5",
+         "shot end"]
+
+[plza-explore]
+title = "Pokemon Legends Z-A"
+about = "boot and wait: the control pipe is driven by hand (route finding)"
+seconds = 900
+window = [60, 120]
+steps = ["wait 12", "shot boot", "wait 880"]
 
 [oot]
 title = "The Legend of Zelda Ocarina of Time"

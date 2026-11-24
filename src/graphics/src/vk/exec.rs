@@ -2806,6 +2806,30 @@ fn generic_typed_placeholder(
         && samples == vk::SampleCountFlags::TYPE_1
 }
 
+/// Whether a texture of NVN target `base` gets a view of the target the shader declares (`want`). `cube_ok`: the
+/// image is square 2D layers of whole cubes, made cube compatible (image.rs).
+fn view_compatible(base: i32, want: i32, cube_ok: bool) -> bool {
+    match (base, want) {
+        (a, b) if a == b => true,
+        (target::T2D_ARRAY, target::CUBE | target::CUBE_ARRAY) if cube_ok => true,
+        (target::T2D | target::RECTANGLE, target::T2D) => true,
+        (
+            target::T2D | target::T2D_ARRAY | target::CUBE | target::CUBE_ARRAY | target::RECTANGLE,
+            target::T2D_ARRAY | target::T2D,
+        ) => true,
+        (target::CUBE_ARRAY, target::CUBE) | (target::CUBE, target::CUBE_ARRAY) => true,
+        // a multisampled sampler type over a single-sample texture: the view type is the same in Vulkan
+        (target::T2D | target::T2D_MS, target::T2D_MS | target::T2D) => true,
+        (target::T2D_ARRAY | target::T2D_MS_ARRAY, target::T2D_MS_ARRAY | target::T2D_ARRAY) => {
+            true
+        }
+        // a multisample-array fetch (Ampere TLD.MS over a 2D array) of a 2D texture: the TIC decides on the console,
+        // so the texture reads as one layer; in Vulkan a 2D image takes a one-layer 2D-array view (Mario Kart World)
+        (target::T2D | target::T2D_MS, target::T2D_MS_ARRAY) => true,
+        _ => false,
+    }
+}
+
 fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::ImageView {
     let (ty, ifmt) = (ty & 0xffff, (ty >> 16) as u16);
     let want = target_of(ty);
@@ -2816,6 +2840,7 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
     g.materialize(id);
     if let Some((serial, view)) = g.tables.tex_at(id) {
         let mut imgs = g.images.lock().unwrap();
+        let reg_serial = serial;
         let serial = imgs.live(serial);
         if probe {
             let declared = crate::tex::format::tex_format(ifmt as i32)
@@ -2869,27 +2894,20 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
                 && im.layers % 6 == 0
                 && first + 6 <= im.layers
                 && im.samples == vk::SampleCountFlags::TYPE_1;
-            let compatible = match (base_target, want) {
-                (a, b) if a == b => true,
-                (target::T2D_ARRAY, target::CUBE | target::CUBE_ARRAY) if cube_ok => true,
-                (target::T2D | target::RECTANGLE, target::T2D) => true,
-                (
-                    target::T2D
-                    | target::T2D_ARRAY
-                    | target::CUBE
-                    | target::CUBE_ARRAY
-                    | target::RECTANGLE,
-                    target::T2D_ARRAY | target::T2D,
-                ) => true,
-                (target::CUBE_ARRAY, target::CUBE) | (target::CUBE, target::CUBE_ARRAY) => true,
-                // a multisampled sampler type over a single-sample texture: the view type is the same in Vulkan
-                (target::T2D | target::T2D_MS, target::T2D_MS | target::T2D) => true,
-                (
-                    target::T2D_ARRAY | target::T2D_MS_ARRAY,
-                    target::T2D_MS_ARRAY | target::T2D_ARRAY,
-                ) => true,
-                _ => false,
-            };
+            let compatible = view_compatible(base_target, want, cube_ok);
+            // a 2D texture sampled as a cube: its one layer in every face (the descriptor decides on the console);
+            // NXGFX_CUBE_TWIN=0: the zero stand-in as before (A/B comparisons)
+            static TWIN_OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+            if !compatible
+                && !*TWIN_OFF.get_or_init(|| std::env::var("NXGFX_CUBE_TWIN").as_deref() == Ok("0"))
+                && !storage
+                && matches!(base_target, target::T2D | target::RECTANGLE)
+                && matches!(want, target::CUBE | target::CUBE_ARRAY)
+            {
+                if let Some(view) = g.cube_twin_view(im, view.as_ref(), want, sub) {
+                    return view;
+                }
+            }
             if compatible && (!storage || im.usage.contains(vk::ImageUsageFlags::STORAGE)) {
                 if base_target != want {
                     v.bits |= VW_TARGET;
@@ -2932,6 +2950,15 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
                 }
             } else if !compatible {
                 crate::log::red_once(&format!("texture ID {id}: target {base_target} bound where the shader samples target {want}"));
+                static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 40 {
+                crate::vklog!(
+                    "texture ID {id} target mismatch: registered ser{reg_serial} live ser{serial} NVN target {} {}x{}x{} levels {} fmt {:#x} flags {:#x} mem {:#x} size {:#x}; image {:?} {:?} layers {} levels {} usage {:?} alias {:?}; view {view:?}",
+                    im.tex.d.target, im.tex.d.width, im.tex.d.height, im.tex.d.depth, im.tex.d.levels,
+                    im.tex.d.format, im.tex.d.flags, im.tex.mem as u64, im.tex.l.size, im.ty, im.extent,
+                    im.layers, im.levels, im.usage, im.alias_of,
+                );
+                }
             } else {
                 crate::log::red_once(&format!("texture ID {id} ser{serial}: storage image requested but Vulkan image lacks STORAGE usage ({:?}, {:?}); a zero storage stand-in is bound", im.format, im.usage));
             }
@@ -8253,6 +8280,50 @@ mod downstream_tests {
             conservative_raster_mode(true),
             vk::ConservativeRasterizationModeEXT::OVERESTIMATE
         );
+    }
+
+    #[test]
+    fn a_2d_texture_takes_a_one_layer_view_for_a_multisample_array_fetch() {
+        // Mario Kart World: target 1 bound where the shader declares 2D multisample array (target 6, not a cube)
+        assert_eq!(target_of(3 | 0x100 | 0x400), target::T2D_MS_ARRAY);
+        assert!(view_compatible(target::T2D, target::T2D_MS_ARRAY, false));
+        assert!(view_compatible(target::T2D_MS, target::T2D_MS_ARRAY, false));
+        // unchanged: a 2D texture is no cube, a 3D texture no 2D array
+        assert!(!view_compatible(target::T2D, target::CUBE, false));
+        assert!(!view_compatible(target::T3D, target::T2D_MS_ARRAY, false));
+        assert!(!view_compatible(target::T2D_ARRAY, target::CUBE, false));
+        assert!(view_compatible(target::T2D_ARRAY, target::CUBE, true));
+    }
+
+    #[test]
+    fn a_square_one_layer_2d_colour_image_gets_a_cube_twin() {
+        use crate::tex::format::Kind;
+        let e = |w, h| vk::Extent3D {
+            width: w,
+            height: h,
+            depth: 1,
+        };
+        let one = vk::SampleCountFlags::TYPE_1;
+        let d2 = vk::ImageType::TYPE_2D;
+        // Pokemon Legends Z-A: ser25641, 32x32 BC7, six levels, target 1, sampled as target 8
+        assert!(super::super::image::cube_twin_fits(d2, e(32, 32), 1, one, Kind::Float));
+        assert!(!super::super::image::cube_twin_fits(d2, e(64, 32), 1, one, Kind::Float));
+        assert!(!super::super::image::cube_twin_fits(d2, e(32, 32), 6, one, Kind::Float));
+        assert!(!super::super::image::cube_twin_fits(d2, e(32, 32), 1, one, Kind::Depth));
+        assert!(!super::super::image::cube_twin_fits(
+            d2,
+            e(32, 32),
+            1,
+            vk::SampleCountFlags::TYPE_4,
+            Kind::Float
+        ));
+        assert!(!super::super::image::cube_twin_fits(
+            vk::ImageType::TYPE_3D,
+            e(32, 32),
+            1,
+            one,
+            Kind::Float
+        ));
     }
 
     #[test]

@@ -57,8 +57,13 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       earlier scan covers the op and no CPU event signal came since). Audited; audit HIGH fixed by the lead.
 - [ ] mkw: race FPS 14-16 of 60. Frame 61-71 ms: pool sync 34-41 ms (parked-queue resumes each scan), descriptor
       sets ~12 ms, replay ~21 ms.
-- [ ] mkw: `texture ID 58700: target 1 bound where the shader samples target 6` (~415 lines a race run; a 2D texture
-      where a cube is sampled; same class as plza's cube mismatches).
+- [x] Texture targets (wave `docs/waves/CUBE-TARGET.md`): MKW's ~414 `target 1 ... target 6` lines (6 = 2D MS
+      array, not a cube) -> 0 via a one-layer 2D-array view (the descriptor decides the fetch); Z-A's 34 `1 ... 8`
+      (cube) lines -> 0 via a six-face cube twin of its one-layer 32x32 fallback texture (`NXGFX_CUBE_TWIN=0` off).
+- [x] **plza PASS** (`build/play/20261124-182844-plza-final`): fresh save through appearance and confirm, train
+      arrival, platform with the Move HUD, walking into the station hall; 166/166, 59.6 FPS (5% low 57.9), 0 red lines.
+- [ ] mkw `texture ID 337: target 2 bound where the shader samples target 1` (3D noise read by a 2D instruction;
+      fetch semantics unconfirmed). Risk to check off NVIDIA: single-sample views bound where SPIR-V declares MS.
 - [ ] Startup check of per-stage descriptor limits (`maxPerStageDescriptor*`, `maxPerStageResources`) for the shared
       layout: every graphics stage now sees all five stage sets (~880 descriptors); fine on NVIDIA, unchecked elsewhere.
 - [ ] _(done, history)_ mkw follow-ups as first listed: (a) name the shader that reaches set 0's slot 33 during task/mesh draws (with the fill its

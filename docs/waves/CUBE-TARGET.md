@@ -43,4 +43,78 @@ that path: fix it, never re-run it unchanged.
 
 ## Report (agent, protocol §5)
 
-_(Built / Tests / Verified / Unproven / Slips / Questions — lead with what is verified working now.)_
+**Verified working now:** Z-A goes from a fresh save to controllable free movement (the station platform with the
+"Move / Control Camera" HUD, then walking into the station hall) at 59.6 FPS; its 2D-as-cube lines go from 34 to 0. MKW's
+race run goes from 414 `target 1 ... target 6` lines to 0 and races normally (15.6 FPS vs 14.0 before). One unrelated
+MKW line is left (3D sampled as 2D, below).
+
+**The brief's premise was wrong.** NVN target 6 is `TEXTURE_2D_MULTISAMPLE_ARRAY`, not a cube. The cube is 8
+(`nvn/types.rs`, the same numbering as mkw-recomp's `nvn_tex.c`). So MKW and Z-A had two separate causes.
+
+### Built
+- **MKW (target 1 where the shader declares 2D multisample array).** The Ampere decoder emits `TLD.MS` with a 2D-array
+  dimension (`InstEmitAmpereMem.cs` bit 78), so reflection declares `2D | Array | Multisample`. The game binds a plain
+  2D texture there; on the console the texture descriptor (TIC), not the instruction, decides the fetch. The view
+  check had no rule for 2D to 2D-MS-array, so a zero stand-in was bound. Fix: `view_compatible` (pulled out of
+  `tex_view_uncached`, `vk/exec.rs`) accepts `(T2D | T2D_MS) -> T2D_MS_ARRAY` and gives a one-layer `TYPE_2D_ARRAY`
+  view of the 2D image. This is the array form of the existing `(T2D, T2D_MS)` rule.
+- **Z-A (target 1 where the shader samples a cube, 8).** Every mismatch was one texture: a 32x32 BC7 texture with 6
+  levels and 1 layer (ser25641, later ser25635/ser29642). The game registers it into about 11 IDs whose shaders sample
+  cubes, with a registered view of target 1. It is not a 2D array, so CUBE_COMPATIBLE and "generic cube widening" do
+  not apply. Fix (`vk/image.rs` `cube_twin_view`): a cube-compatible six-layer twin image gets every level of the
+  texture's one layer copied into each face, in the submission's `pre` buffer. Following the same "descriptor decides"
+  semantics, a 2D descriptor has one layer and every face reads it. The copy runs again when the source's
+  `(rewrites, gpu_seq)` changes, or once per submission for a GPU-written source. The twin is freed when the texture
+  is released (`tex_release_now`). `NXGFX_CUBE_TWIN=0` turns it off for A/B runs. Other 2D-to-cube cases (not square,
+  layered, depth, storage) keep the logged stand-in.
+- Diagnostics: the mismatch line now also logs (at most 40 times) the registered and live serial, NVN descriptor,
+  Vulkan image and view.
+- `scripts/scenarios.toml [plza]`: on a fresh save, A through the opening. On the appearance grid A alone selects
+  nothing, so LRight first, then A. Confirm Choices opens on "Change hair color", so Down x2 to Ready!, then A through
+  the train arrival to the platform, and walk. The bubbles on the platform are ambient: 100 A presses do not clear
+  them, which explains the earlier "station dialogue stall". New `[plza-explore]` (boot and wait) for driving by hand.
+
+### Tests
+`cargo test --jobs 4 -p graphics --lib`: 181 passed, 0 failed. New tests:
+`a_2d_texture_takes_a_one_layer_view_for_a_multisample_array_fetch` (would fail before: there was no such rule) and
+`a_square_one_layer_2d_colour_image_gets_a_cube_twin` (shape gate). The twin copy itself has no CPU test.
+
+### Verified (sheets looked at)
+- MKW before: `build/play/20261124-175216-mkw-audit-fix` (414 lines of 1->6, 14.0 FPS). After:
+  `build/play/20261124-182126-mkw-cube` (0 lines of 1->6, 15.6 FPS, race driven, no device loss). The grid and race
+  shots match in image quality. I could not tie a visible element to the fixed fetch: the lines start in the opening
+  (~102 s), and the shots are not of matching moments.
+- Z-A after: `build/play/20261124-182844-plza-final`, a full scenario run. Its log has 0 mismatch lines and 2 twins
+  made. Window FPS 59.6, 5% low 57.9, against the earlier 57.7 FPS.
+- Z-A before (same build, `NXGFX_CUBE_TWIN=0`): `build/play/20261124-183244-plza-twin-off` (34 lines of 1->8, 59.7 FPS).
+  The scenes match frame for frame. The full-resolution `08-walk_again` shots are indistinguishable, so the fallback
+  cube is not visibly significant in these scenes.
+- Route finding: `build/play/20261124-181155-plza-explore`. Old scenario stuck at Appearance: `20261124-180105-plza-base`.
+
+### Unproven
+- MKW still has 1 kind of line: `texture ID 337: target 2 bound where the shader samples target 1`. This is a 64x64x64
+  3D noise texture (ser194, fmt 0x49, swizzle RRRR) sampled by a 2D instruction. What the hardware fetches for a 2D
+  instruction on a 3D TIC is not established. Next step: a 2D view of slice 0 (`VK_EXT_image_2d_view_of_3d`) only once
+  the semantics are confirmed against a reference.
+- The twin copy is recorded in `pre`, so a source the GPU writes in the same submission is read one submission late.
+  Z-A's source is a static BC7 texture.
+- Z-A reached free movement on the platform and in the station hall. I did not drive it to the Battle Zone.
+- I added no pacing work: Z-A is at 59.6 to 59.7 FPS.
+
+### Slips
+- I killed three of my own Z-A runs by PID on stuck scenarios: two at Appearance or Hair Color, and the exploration
+  session. Two superseded run folders were deleted.
+- `[plza]` picks a different look each run (the stick timing varies), so the before/after character shots differ.
+
+### Questions
+None.
+
+## Lead review (2026-11-24 18:45)
+
+Accepted. Lead re-ran graphics lib (181 passed) and harness tests; read `20261124-182844-plza-final/sheet-1.png`
+(appearance, confirm, train arrival, platform with the Move HUD, walking into the hall; 166/166 steps, 59.6 FPS).
+The brief's "target 6 = cube" was wrong (6 = 2D multisample array; cube = 8); the agent found two causes and fixed
+each at its source. Recorded risk: the MKW rule binds a single-sample 2D-array view where the SPIR-V declares a
+multisampled image (as the existing 2D -> 2D_MS rule already does); NVIDIA handles it, but strict Vulkan calls the
+sample-count mismatch undefined, so non-NVIDIA drivers need checking (or a translator-side fetch from a
+non-MS image when the TIC is single-sample). Open: MKW `texture ID 337` (3D noise sampled by a 2D instruction).

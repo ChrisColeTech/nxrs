@@ -1049,6 +1049,36 @@ impl Images {
     }
 }
 
+/// A six-face copy of a one-layer 2D image that shaders sample as a cube (`Gpu::cube_twin_view`).
+struct CubeTwin {
+    /// the source's Vulkan image when the twin was made (a new backing makes a new twin)
+    src: vk::Image,
+    image: vk::Image,
+    alloc: Option<Allocation>,
+    views: HashMap<(view_t, i32), vk::ImageView>,
+    /// the source's (rewrites, gpu_seq) at the last copy
+    version: Option<(u32, u64)>,
+    copied_sub: Option<u64>,
+}
+
+static CUBE_TWINS: Mutex<Option<HashMap<u64, CubeTwin>>> = Mutex::new(None);
+
+/// Whether an image is a square, single-sample, one-layer 2D colour image: the shape a cube twin copies.
+pub fn cube_twin_fits(
+    ty: vk::ImageType,
+    extent: vk::Extent3D,
+    layers: u32,
+    samples: vk::SampleCountFlags,
+    kind: Kind,
+) -> bool {
+    ty == vk::ImageType::TYPE_2D
+        && extent.width == extent.height
+        && extent.depth == 1
+        && layers == 1
+        && samples == vk::SampleCountFlags::TYPE_1
+        && !matches!(kind, Kind::Depth | Kind::DepthStencil | Kind::Stencil)
+}
+
 fn view_type(t: i32) -> vk::ImageViewType {
     match t {
         target::T1D => vk::ImageViewType::TYPE_1D,
@@ -1693,6 +1723,213 @@ impl Gpu {
         self.image_view_kind(im, v, attach, false)
     }
 
+    /// The cube view of a square one-layer 2D texture that a shader samples as a cube (`want`: CUBE or CUBE_ARRAY;
+    /// Pokemon Legends Z-A registers its 32x32 BC7 fallback, target 1, into slots its shaders sample as cubes). On
+    /// the console the texture descriptor, not the instruction, decides the fetch: a 2D descriptor has one layer,
+    /// which every face reads. A Vulkan image of one layer cannot take a cube view, so a cube-compatible twin holds
+    /// that layer in all six faces (every level), copied in the submission's upload buffer whenever the texture's
+    /// content may have changed (a CPU rewrite, a GPU write, or once per submission for a GPU-written texture).
+    pub fn cube_twin_view(
+        &self,
+        im: &Image,
+        v: Option<&view_t>,
+        want: i32,
+        sub: &mut Sub,
+    ) -> Option<vk::ImageView> {
+        if !cube_twin_fits(im.ty, im.extent, im.layers, im.samples, im.tf.kind)
+            || im.sparse.is_some()
+            || !matches!(want, target::CUBE | target::CUBE_ARRAY)
+        {
+            return None;
+        }
+        let serial = im.tex.serial;
+        let mut all = CUBE_TWINS.lock().unwrap();
+        let m = all.get_or_insert_with(HashMap::new);
+        if m.get(&serial).is_some_and(|t| t.src != im.image) {
+            if let Some(old) = m.remove(&serial) {
+                self.drop_cube_twin(old);
+            }
+        }
+        if !m.contains_key(&serial) {
+            let twin = self.make_cube_twin(im, sub)?;
+            crate::vklog!(
+                "texture ser{serial} ({}x{} {:?}, {} levels, target {}) sampled as a cube: a six-face twin of its one layer",
+                im.extent.width, im.extent.height, im.format, im.levels, im.tex.d.target
+            );
+            m.insert(serial, twin);
+        }
+        let t = m.get_mut(&serial).unwrap();
+        let version = (im.rewrites, im.gpu_seq);
+        if (t.version != Some(version) || im.gpu_owned) && t.copied_sub != Some(sub.serial) {
+            self.copy_cube_twin(im, t.image, sub.pre);
+            t.version = Some(version);
+            t.copied_sub = Some(sub.serial);
+        }
+        let key = (v.copied().unwrap_or_default(), want);
+        if let Some(&view) = t.views.get(&key) {
+            return Some(view);
+        }
+        let (mut base_level, mut nlevels) = (0, im.levels);
+        if let Some(v) = v.filter(|v| v.bits & VW_LEVELS != 0) {
+            base_level = (v.base_level as u32).min(im.levels - 1);
+            nlevels = (v.nlevels as u32).max(1).min(im.levels - base_level);
+        }
+        let ci = vk::ImageViewCreateInfo::default()
+            .image(t.image)
+            .view_type(view_type(want))
+            .format(im.format)
+            .components(components(&im.tex, v, &im.tf))
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: base_level,
+                level_count: nlevels,
+                base_array_layer: 0,
+                layer_count: 6,
+            });
+        let view = match unsafe { self.dev().create_image_view(&ci, None) } {
+            Ok(v) => v,
+            Err(e) => {
+                crate::log::red(&format!("vkCreateImageView (cube twin): {e}"));
+                return None;
+            }
+        };
+        t.views.insert(key, view);
+        Some(view)
+    }
+
+    fn make_cube_twin(&self, im: &Image, sub: &mut Sub) -> Option<CubeTwin> {
+        let ci = vk::ImageCreateInfo::default()
+            .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE)
+            .image_type(vk::ImageType::TYPE_2D)
+            .format(im.format)
+            .extent(im.extent)
+            .mip_levels(im.levels)
+            .array_layers(6)
+            .samples(vk::SampleCountFlags::TYPE_1)
+            .tiling(vk::ImageTiling::OPTIMAL)
+            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            .initial_layout(vk::ImageLayout::UNDEFINED);
+        let image = match unsafe { self.dev().create_image(&ci, None) } {
+            Ok(i) => i,
+            Err(e) => {
+                crate::log::red_once(&format!("vkCreateImage (cube twin) {:?}: {e}", im.format));
+                return None;
+            }
+        };
+        let req = unsafe { self.dev().get_image_memory_requirements(image) };
+        let a = self.alloc.lock().unwrap().allocate(&AllocationCreateDesc {
+            name: "cube twin",
+            requirements: req,
+            location: MemoryLocation::GpuOnly,
+            linear: false,
+            allocation_scheme: AllocationScheme::GpuAllocatorManaged,
+        });
+        let Ok(a) = a else {
+            unsafe { self.dev().destroy_image(image, None) };
+            return None;
+        };
+        if unsafe { self.dev().bind_image_memory(image, a.memory(), a.offset()) }.is_err() {
+            unsafe { self.dev().destroy_image(image, None) };
+            let _ = self.alloc.lock().unwrap().free(a);
+            return None;
+        }
+        // into GENERAL, the layout every texture image is kept in
+        let b = [vk::ImageMemoryBarrier2::default()
+            .src_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .dst_stage_mask(vk::PipelineStageFlags2::ALL_COMMANDS)
+            .dst_access_mask(vk::AccessFlags2::MEMORY_WRITE | vk::AccessFlags2::MEMORY_READ)
+            .old_layout(vk::ImageLayout::UNDEFINED)
+            .new_layout(vk::ImageLayout::GENERAL)
+            .image(image)
+            .subresource_range(vk::ImageSubresourceRange {
+                aspect_mask: vk::ImageAspectFlags::COLOR,
+                base_mip_level: 0,
+                level_count: vk::REMAINING_MIP_LEVELS,
+                base_array_layer: 0,
+                layer_count: vk::REMAINING_ARRAY_LAYERS,
+            })];
+        unsafe {
+            self.dev().cmd_pipeline_barrier2(
+                sub.pre,
+                &vk::DependencyInfo::default().image_memory_barriers(&b),
+            )
+        };
+        Some(CubeTwin {
+            src: im.image,
+            image,
+            alloc: Some(a),
+            views: HashMap::new(),
+            version: None,
+            copied_sub: None,
+        })
+    }
+
+    /// Every level of the source's one layer into each of the twin's six faces.
+    fn copy_cube_twin(&self, im: &Image, twin: vk::Image, cb: vk::CommandBuffer) {
+        let regions: Vec<vk::ImageCopy> = (0..im.levels)
+            .flat_map(|level| {
+                let extent = vk::Extent3D {
+                    width: (im.extent.width >> level).max(1),
+                    height: (im.extent.height >> level).max(1),
+                    depth: 1,
+                };
+                (0..6).map(move |face| vk::ImageCopy {
+                    src_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: level,
+                        base_array_layer: 0,
+                        layer_count: 1,
+                    },
+                    src_offset: vk::Offset3D::default(),
+                    dst_subresource: vk::ImageSubresourceLayers {
+                        aspect_mask: vk::ImageAspectFlags::COLOR,
+                        mip_level: level,
+                        base_array_layer: face,
+                        layer_count: 1,
+                    },
+                    dst_offset: vk::Offset3D::default(),
+                    extent,
+                })
+            })
+            .collect();
+        super::queue::full_barrier(self, cb);
+        unsafe {
+            self.dev().cmd_copy_image(
+                cb,
+                im.image,
+                vk::ImageLayout::GENERAL,
+                twin,
+                vk::ImageLayout::GENERAL,
+                &regions,
+            )
+        };
+        super::queue::full_barrier(self, cb);
+    }
+
+    fn drop_cube_twin(&self, t: CubeTwin) {
+        self.defer_image_free(Box::new(move |g: &Gpu| unsafe {
+            for v in t.views.values() {
+                g.dev().destroy_image_view(*v, None);
+            }
+            g.dev().destroy_image(t.image, None);
+            if let Some(a) = t.alloc {
+                let _ = g.alloc.lock().unwrap().free(a);
+            }
+        }));
+    }
+
+    /// The texture goes: its cube twin too.
+    fn forget_cube_twin(&self, serial: u64) {
+        let twin = CUBE_TWINS
+            .lock()
+            .unwrap()
+            .as_mut()
+            .and_then(|m| m.remove(&serial));
+        if let Some(t) = twin {
+            self.drop_cube_twin(t);
+        }
+    }
+
     /// The format a view of `im` through `v` has (the texture's, or the view's own when Vulkan allows it).
     pub fn view_format(&self, im: &Image, v: Option<&view_t>) -> vk::Format {
         let f = self.raw_view_format(im, v);
@@ -2008,6 +2245,7 @@ impl Gpu {
         self.tables.invalidate_images();
         super::capture::tex_release(serial);
         lazy::forget_serial(serial);
+        self.forget_cube_twin(serial);
         let mut imgs = self.images.lock().unwrap();
         let Some(mut im) = imgs.by_serial.remove(&serial) else {
             return;
