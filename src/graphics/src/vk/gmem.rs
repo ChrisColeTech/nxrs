@@ -37,6 +37,8 @@ struct Table {
     /// the listed ranges by entry index (entry 0 empty)
     ranges: std::sync::Arc<Vec<(u64, u64)>>,
     identities: std::sync::Arc<Vec<u64>>,
+    /// more pool windows than entries: this map is incomplete and is never bound
+    truncated: bool,
 }
 
 pub struct Version {
@@ -71,15 +73,11 @@ fn build(g: &Gpu) -> Table {
     let m = g.mem.lock().unwrap();
     let gen = super::mem::POOL_GEN.load(Ordering::Acquire);
     let windows = visible_ranges(m.by_base.values().map(|p| (p.base, p.da_ranges())));
-    let (mut table, left) = encode(gen, &windows);
+    let (mut table, _left) = encode(gen, &windows);
     table.identities = std::sync::Arc::new(table.ranges.iter().map(|&(lo, _)| {
         m.by_base.range(..=lo).next_back().map_or(0, |(_, p)| p.identity)
     }).collect());
     drop(m);
-    if left > 0 {
-        // A truncated address map is not a valid descriptor for this work.
-        super::queue::submission_safety::resource_safety_fatal();
-    }
     static SAID: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
     if !SAID.swap(true, Ordering::Relaxed) {
         crate::vklog!("raw global memory: a shader reads or writes through pointers it loaded from memory; the memory pool table has {} ranges (written again when pools change)", table.ranges.len() - 1);
@@ -146,6 +144,7 @@ fn encode(gen: u64, windows: &[(u64, u64, u64)]) -> (Table, usize) {
             bytes: std::sync::Arc::new(bytes),
             ranges: std::sync::Arc::new(ranges),
             identities: std::sync::Arc::new(Vec::new()),
+            truncated: left > 0,
         },
         left,
     )
@@ -177,7 +176,12 @@ pub(crate) fn bindings(g: &Gpu, sub: &mut Sub) -> Option<Bindings> {
                 .filter(|p| p.gran.is_some() && p.da != 0)
             {
                 let (base, size) = (p.base, p.size);
-                super::queue::submission_safety::resource_safety_result(p.bind(g, sub, base, size));
+                if p.bind(g, sub, base, size).is_err() {
+                    // No device memory to back the whole pool: a table naming its unbound granules is not
+                    // bound. The draw gets the empty table (as without buffer device addresses).
+                    crate::log::red_once("raw global memory: a granule pool could not be backed whole (device memory); shaders that read or write through loaded pointers get an empty table");
+                    return None;
+                }
             }
             // and every CPU write the upload budget left for later goes now
             for p in m.by_base.values_mut().filter(|p| !p.deferred.is_empty()) {
@@ -192,6 +196,10 @@ pub(crate) fn bindings(g: &Gpu, sub: &mut Sub) -> Option<Bindings> {
                 *t = Some(build(g));
             }
             let t = t.as_ref().unwrap();
+            if t.truncated {
+                crate::log::red_once("raw global memory: more pool windows than the table's 8,191 entries; shaders that read or write through loaded pointers get an empty table");
+                return None;
+            }
             (t.bytes.clone(), t.ranges.clone(), t.identities.clone(), t.gen)
         };
         // Never content-deduplicate a generation: address reuse may encode identical
@@ -1030,6 +1038,19 @@ mod tests {
         assert!(super::super::mem::writeback_identity_matches(Some(7), 7));
         assert_eq!(super::super::mem::merge_changed_bytes(&mut guest, &result, &baseline), 1);
         assert_eq!(guest, [1, 9]);
+    }
+
+    #[test]
+    fn overfull_table_is_marked_truncated_not_bound() {
+        let windows: Vec<(u64, u64, u64)> = (1..=ENTRIES as u64)
+            .map(|k| (k << 16, (k << 16) + 0x100, k << 32))
+            .collect();
+        let (full, left) = encode(1, &windows[..ENTRIES - 1]);
+        assert_eq!(left, 0);
+        assert!(!full.truncated);
+        let (over, left) = encode(2, &windows);
+        assert_eq!(left, 1);
+        assert!(over.truncated);
     }
 
     #[test]

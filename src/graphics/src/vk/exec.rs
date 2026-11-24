@@ -1300,7 +1300,11 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
     });
     // a mesh pipeline has no vertex input: the next draw sets it again
     qs.vin_last.borrow_mut().0 = 0;
-    if !g.d.caps.mesh { super::queue::submission_safety::resource_safety_fatal(); }
+    if !g.d.caps.mesh {
+        crate::log::red_once("task and mesh draws: the device has no VK_EXT_mesh_shader, they are not drawn");
+        super::perf::inc(super::perf::C::DrawsSkipped);
+        return;
+    }
     let limits = mesh_limits(g);
     let has_task = qs.prog[3].as_ref().is_some_and(|m| m.mesh == 1);
     let contract = (|| {
@@ -1312,7 +1316,13 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
         } else if mesh.payload != 0 { return Err("taskless mesh declares task payload"); }
         Ok::<_, &'static str>(())
     })();
-    super::queue::submission_safety::resource_safety_result(contract);
+    // A draw outside the device's mesh contract is not recorded: skipping it is GPU-safe, so the process
+    // continues (status 72 is reserved for states that cannot be recovered).
+    if let Err(why) = contract {
+        crate::log::red_once(&format!("mesh draw not drawn: {why}"));
+        super::perf::inc(super::perf::C::DrawsSkipped);
+        return;
+    }
     let indirect = m.ind != 0;
     // Indirect execution remains the held pre-alignment path. Its GPU-generated
     // counts/total validation are unresolved; CPU admission must not reject every
@@ -1449,7 +1459,16 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
                 mesh_contract::grid(groups, limits)?;
                 Ok::<_, &'static str>(groups)
             })();
-            let [x, y, z] = super::queue::submission_safety::resource_safety_result(groups);
+            // Guest grid values outside the device limits (or negative) are skipped, not clamped:
+            // a partial grid would draw a wrong result.
+            let [x, y, z] = match groups {
+                Ok(groups) => groups,
+                Err(why) => {
+                    crate::log::red_once(&format!("mesh draw not drawn: {why}"));
+                    super::perf::inc(super::perf::C::DrawsSkipped);
+                    [0, 0, 0]
+                }
+            };
             if x > 0 && y > 0 && z > 0 {
                 mesh_binding_evidence(sub, qs, draw_checkpoint);
                 unsafe { ms.cmd_draw_mesh_tasks(sub.main, x, y, z) };
