@@ -16,7 +16,9 @@ static C_DIRS: Mutex<Vec<(String, String)>> = Mutex::new(Vec::new());
 
 /// The mods folder of a build.
 pub fn mods_dir(outdir: &Path) -> PathBuf {
-    std::env::var_os("NXRS_MODS").map(PathBuf::from).unwrap_or_else(|| outdir.join("mods"))
+    std::env::var_os("NXRS_MODS")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| outdir.join("mods"))
 }
 
 struct Image {
@@ -27,7 +29,13 @@ struct Image {
 
 /// Reads the mods, adds their sets and sites to the profile's patch table (returned), and writes `<data>\mods.tsv`
 /// (or removes it when there are no mods).
-pub fn prepare(outdir: &Path, code: &BTreeMap<String, Vec<u8>>, data: &Path, profile_table: Option<String>, out: &Out) -> Result<Option<String>> {
+pub fn prepare(
+    outdir: &Path,
+    code: &BTreeMap<String, Vec<u8>>,
+    data: &Path,
+    profile_table: Option<String>,
+    out: &Out,
+) -> Result<Option<String>> {
     let dir = mods_dir(outdir);
     let found = mods::scan(&dir);
     let tsv = data.join("mods.tsv");
@@ -37,7 +45,11 @@ pub fn prepare(outdir: &Path, code: &BTreeMap<String, Vec<u8>>, data: &Path, pro
         return Ok(profile_table);
     }
     if found.len() > 200 {
-        bail!("{}: {} mods; at most 200 patch sets fit", dir.display(), found.len());
+        bail!(
+            "{}: {} mods; at most 200 patch sets fit",
+            dir.display(),
+            found.len()
+        );
     }
     let mut images: BTreeMap<String, Image> = BTreeMap::new();
     for (name, raw) in code {
@@ -45,13 +57,25 @@ pub fn prepare(outdir: &Path, code: &BTreeMap<String, Vec<u8>>, data: &Path, pro
             continue;
         }
         if let Ok(n) = translator::loader::Nso::parse(raw) {
-            images.insert(name.clone(), Image { image: n.image.clone(), text: n.text, build_id: mods::norm_build_id(&n.build_id) });
+            images.insert(
+                name.clone(),
+                Image {
+                    image: n.image.clone(),
+                    text: n.text,
+                    build_id: mods::norm_build_id(&n.build_id),
+                },
+            );
         }
     }
     // words the profile already patches: a mod's site there would be a second patch of one word
     let mut taken: BTreeSet<(String, u64)> = BTreeSet::new();
     for l in profile_table.as_deref().unwrap_or("").lines() {
-        let f: Vec<&str> = l.split('#').next().unwrap_or("").split_whitespace().collect();
+        let f: Vec<&str> = l
+            .split('#')
+            .next()
+            .unwrap_or("")
+            .split_whitespace()
+            .collect();
         if f.len() >= 6 && f[0] == "site" {
             if let Ok(o) = u64::from_str_radix(f[3].trim_start_matches("0x"), 16) {
                 taken.insert((f[2].to_string(), o));
@@ -59,14 +83,19 @@ pub fn prepare(outdir: &Path, code: &BTreeMap<String, Vec<u8>>, data: &Path, pro
         }
     }
     let mut table = String::new();
-    let mut lines = vec![String::from("# Written by nxrs-build: the mods of this build (src/os mods.rs reads it). Do not edit.")];
+    let mut lines = vec![String::from(
+        "# Written by nxrs-build: the mods of this build (src/os mods.rs reads it). Do not edit.",
+    )];
     for m in &found {
         report(m, out);
         let (set, env) = (m.set_name(), m.env());
         let mut sites = vec![];
         for pf in &m.patches {
             let Some((mname, img)) = images.iter().find(|(_, i)| i.build_id == pf.build_id) else {
-                out.say(&format!("  mod {}: {} is for build {}, which no module of this game has; left out", m.name, pf.source, pf.build_id));
+                out.say(&format!(
+                    "  mod {}: {} is for build {}, which no module of this game has; left out",
+                    m.name, pf.source, pf.build_id
+                ));
                 continue;
             };
             let edits: Vec<&Edit> = pf.edits.iter().collect();
@@ -83,12 +112,17 @@ pub fn prepare(outdir: &Path, code: &BTreeMap<String, Vec<u8>>, data: &Path, pro
                     if (t0..t1).contains(&a) {
                         words.insert(a & !3);
                     } else {
-                        lines.push(format!("bytes\t{env}\t{mname}\t{a:#x}\t{:02x}", patched[a as usize]));
+                        lines.push(format!(
+                            "bytes\t{env}\t{mname}\t{a:#x}\t{:02x}",
+                            patched[a as usize]
+                        ));
                     }
                 }
             }
             for w in words {
-                let rd = |v: &[u8]| u32::from_le_bytes(v[w as usize..w as usize + 4].try_into().unwrap());
+                let rd = |v: &[u8]| {
+                    u32::from_le_bytes(v[w as usize..w as usize + 4].try_into().unwrap())
+                };
                 let (o, r) = (rd(&img.image), rd(&patched));
                 if o == r {
                     continue;
@@ -97,7 +131,10 @@ pub fn prepare(outdir: &Path, code: &BTreeMap<String, Vec<u8>>, data: &Path, pro
                     out.say(&format!("  mod {}: {mname}+{w:#x} is patched already (the profile or another mod); this word is left out", m.name));
                     continue;
                 }
-                sites.push(format!("site {set} {mname} {w:#x} {o:08x} {r:08x}  # mod {}", m.name.replace('#', "")));
+                sites.push(format!(
+                    "site {set} {mname} {w:#x} {o:08x} {r:08x}  # mod {}",
+                    m.name.replace('#', "")
+                ));
             }
         }
         if !sites.is_empty() {
@@ -108,9 +145,21 @@ pub fn prepare(outdir: &Path, code: &BTreeMap<String, Vec<u8>>, data: &Path, pro
             }
             C_DIRS.lock().unwrap().push((env.clone(), m.folder.clone()));
         }
-        let romfs = m.romfs.as_ref().map_or("-".to_string(), |p| std::path::absolute(p).unwrap_or(p.clone()).display().to_string());
-        lines.insert(1, format!("mod\t{env}\t{}\t{}\t{romfs}", m.default_on as u8, m.folder));
-        out.say(&format!("  mod {}: {} instruction words switchable ({env})", m.name, sites.len()));
+        let romfs = m.romfs.as_ref().map_or("-".to_string(), |p| {
+            std::path::absolute(p)
+                .unwrap_or(p.clone())
+                .display()
+                .to_string()
+        });
+        lines.insert(
+            1,
+            format!("mod\t{env}\t{}\t{}\t{romfs}", m.default_on as u8, m.folder),
+        );
+        out.say(&format!(
+            "  mod {}: {} instruction words switchable ({env})",
+            m.name,
+            sites.len()
+        ));
     }
     std::fs::create_dir_all(data).with_context(|| format!("{}", data.display()))?;
     crate::write_if_changed(&tsv, (lines.join("\n") + "\n").as_bytes())?;
@@ -129,8 +178,16 @@ fn report(m: &Mod, out: &Out) {
         m.name,
         m.dir.display(),
         m.patches.len(),
-        if m.romfs.is_some() { ", RomFS files layered over the game's" } else { "" },
-        if m.default_on { "" } else { ", off by default (mod.json)" }
+        if m.romfs.is_some() {
+            ", RomFS files layered over the game's"
+        } else {
+            ""
+        },
+        if m.default_on {
+            ""
+        } else {
+            ", off by default (mod.json)"
+        }
     ));
     for p in &m.problems {
         out.say(&format!("  mod {}: {p}", m.name));
@@ -148,7 +205,16 @@ pub fn c_code() -> String {
     }
     s.push_str("    static const char *dirs[][2] = {\n");
     for (env, folder) in &dirs {
-        let esc: String = folder.chars().flat_map(|c| if c == '"' || c == '\\' { vec!['\\', c] } else { vec![c] }).collect();
+        let esc: String = folder
+            .chars()
+            .flat_map(|c| {
+                if c == '"' || c == '\\' {
+                    vec!['\\', c]
+                } else {
+                    vec![c]
+                }
+            })
+            .collect();
         s.push_str(&format!("        {{\"{env}\", \"{esc}\"}},\n"));
     }
     if !cfg!(windows) {

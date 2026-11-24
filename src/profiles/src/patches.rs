@@ -231,7 +231,11 @@ pub fn build_matches(key: &str, build_id: &str) -> bool {
 
 fn sext(v: u32, bits: u32) -> i64 {
     let v = v as i64;
-    if v & (1 << (bits - 1)) != 0 { v - (1 << bits) } else { v }
+    if v & (1 << (bits - 1)) != 0 {
+        v - (1 << bits)
+    } else {
+        v
+    }
 }
 
 /// The target of a pc-relative word at `pc`.
@@ -243,7 +247,11 @@ pub fn reloc_target(op: &str, w: u32, pc: u64) -> Option<u64> {
         "tbz" => pc + 4 * sext((w >> 5) & 0x3FFF, 14),
         "adrp" | "adr" => {
             let imm = sext(((w >> 5) & 0x7FFFF) << 2 | (w >> 29) & 3, 21);
-            if op == "adrp" { (pc & !0xFFF) + (imm << 12) } else { pc + imm }
+            if op == "adrp" {
+                (pc & !0xFFF) + (imm << 12)
+            } else {
+                pc + imm
+            }
         }
         _ => return None,
     } as u64)
@@ -267,8 +275,16 @@ pub fn reloc_encode(op: &str, w: u32, pc: u64, target: u64) -> Option<u32> {
             fits(d, 14).then(|| (w & !(0x3FFF << 5)) | ((d as u32 & 0x3FFF) << 5))
         }
         "adrp" | "adr" => {
-            let d = if op == "adrp" { ((t & !0xFFF) - (pc & !0xFFF)) >> 12 } else { t - pc };
-            fits(d, 21).then(|| (w & !(0x6000_0000 | 0x7FFFF << 5)) | ((d as u32 & 3) << 29) | (((d as u32 >> 2) & 0x7FFFF) << 5))
+            let d = if op == "adrp" {
+                ((t & !0xFFF) - (pc & !0xFFF)) >> 12
+            } else {
+                t - pc
+            };
+            fits(d, 21).then(|| {
+                (w & !(0x6000_0000 | 0x7FFFF << 5))
+                    | ((d as u32 & 3) << 29)
+                    | (((d as u32 >> 2) & 0x7FFFF) << 5)
+            })
         }
         _ => None,
     }
@@ -289,7 +305,9 @@ impl Layout<'_> {
             "area" => Some(self.area),
             "state" => Some(self.state),
             "base" => Some(self.base),
-            _ => name.strip_prefix("other:").and_then(|l| self.others.iter().find(|(k, _)| *k == l).map(|(_, v)| *v)),
+            _ => name
+                .strip_prefix("other:")
+                .and_then(|l| self.others.iter().find(|(k, _)| *k == l).map(|(_, v)| *v)),
         }
     }
 }
@@ -305,20 +323,31 @@ pub struct Placed {
 impl StubBody {
     pub fn place(&self, at: &Layout) -> Result<Placed, String> {
         if !self.evaluated {
-            return Err(format!("not recorded: needs {}", self.needs.as_deref().unwrap_or("the game")));
+            return Err(format!(
+                "not recorded: needs {}",
+                self.needs.as_deref().unwrap_or("the game")
+            ));
         }
-        let sym = |n: &str| at.symbol(n).ok_or_else(|| format!("no symbol {n} in the layout"));
+        let sym = |n: &str| {
+            at.symbol(n)
+                .ok_or_else(|| format!("no symbol {n} in the layout"))
+        };
         let apply = |words: &[u32], pc0: u64, relocs: &[Reloc]| -> Result<Vec<u32>, String> {
             let mut w = words.to_vec();
             for r in relocs {
                 let pc = pc0 + 4 * r.index as u64;
                 let t = (sym(&r.target)? as i64 + r.addend) as u64;
-                w[r.index] = reloc_encode(&r.op, w[r.index], pc, t).ok_or_else(|| format!("word {}: {} out of reach", r.index, r.op))?;
+                w[r.index] = reloc_encode(&r.op, w[r.index], pc, t)
+                    .ok_or_else(|| format!("word {}: {} out of reach", r.index, r.op))?;
             }
             Ok(w)
         };
         let code = apply(&self.code, at.area, &self.relocs)?;
-        let sites = self.sites.iter().map(|s| Ok((sym(&s.base)? as i64 + s.offset) as u64)).collect::<Result<_, String>>()?;
+        let sites = self
+            .sites
+            .iter()
+            .map(|s| Ok((sym(&s.base)? as i64 + s.offset) as u64))
+            .collect::<Result<_, String>>()?;
         let mut puts = vec![];
         for p in &self.puts {
             let off = (sym(&p.base)? as i64 + p.offset) as u64;
@@ -347,24 +376,65 @@ mod tests {
 
     #[test]
     fn encode_inverts_target() {
-        for (op, w) in [("b", 0x1400_0000u32), ("bl", 0x9400_0000), ("bcond", 0x5400_0000), ("cbz", 0x3400_0001), ("tbz", 0x3600_0002), ("adrp", 0x9000_0010), ("adr", 0x1000_0003)] {
-            for (pc, t) in [(0x1000u64, 0x2000u64), (0x80_0000, 0x7F_F000), (0x10_0004, 0x10_0000)] {
+        for (op, w) in [
+            ("b", 0x1400_0000u32),
+            ("bl", 0x9400_0000),
+            ("bcond", 0x5400_0000),
+            ("cbz", 0x3400_0001),
+            ("tbz", 0x3600_0002),
+            ("adrp", 0x9000_0010),
+            ("adr", 0x1000_0003),
+        ] {
+            for (pc, t) in [
+                (0x1000u64, 0x2000u64),
+                (0x80_0000, 0x7F_F000),
+                (0x10_0004, 0x10_0000),
+            ] {
                 let e = reloc_encode(op, w, pc, t).unwrap();
                 let back = reloc_target(op, e, pc).unwrap();
                 let want = if op == "adrp" { t & !0xFFF } else { t };
                 assert_eq!(back, want, "{op} {pc:#x} -> {t:#x}");
-                assert_eq!(e & !match op { "b" | "bl" => 0x3FF_FFFF, "bcond" | "cbz" => 0x7FFFF << 5, "tbz" => 0x3FFF << 5, _ => 0x6000_0000 | 0x7FFFF << 5 }, w & !match op { "b" | "bl" => 0x3FF_FFFF, "bcond" | "cbz" => 0x7FFFF << 5, "tbz" => 0x3FFF << 5, _ => 0x6000_0000 | 0x7FFFF << 5 });
+                assert_eq!(
+                    e & !match op {
+                        "b" | "bl" => 0x3FF_FFFF,
+                        "bcond" | "cbz" => 0x7FFFF << 5,
+                        "tbz" => 0x3FFF << 5,
+                        _ => 0x6000_0000 | 0x7FFFF << 5,
+                    },
+                    w & !match op {
+                        "b" | "bl" => 0x3FF_FFFF,
+                        "bcond" | "cbz" => 0x7FFFF << 5,
+                        "tbz" => 0x3FFF << 5,
+                        _ => 0x6000_0000 | 0x7FFFF << 5,
+                    }
+                );
             }
         }
-        assert_eq!(reloc_encode("tbz", 0x3600_0000, 0, 0x10_0000), None, "tbz reaches 32 KB");
+        assert_eq!(
+            reloc_encode("tbz", 0x3600_0000, 0, 0x10_0000),
+            None,
+            "tbz reaches 32 KB"
+        );
     }
 
     #[test]
     fn build_keys() {
-        assert!(build_matches("b1f12fd919eae86ab8a978317677e64b", "B1F12FD919EAE86AB8A978317677E64BCE443D1F00"));
-        assert!(build_matches("B1F12FD919EAE86AB8A978317677E64BCE443D1F", "b1f12fd919eae86ab8a978317677e64bce443d1f"));
-        assert!(!build_matches("b1f12fd919eae86ab8a978317677e64bce443d1f", "b1f12fd919eae86ab8a978317677e64bce443d1e"));
-        assert!(!build_matches("b1f12fd9", "b1f12fd919eae86ab8a978317677e64b"), "a key under 16 bytes names nothing");
+        assert!(build_matches(
+            "b1f12fd919eae86ab8a978317677e64b",
+            "B1F12FD919EAE86AB8A978317677E64BCE443D1F00"
+        ));
+        assert!(build_matches(
+            "B1F12FD919EAE86AB8A978317677E64BCE443D1F",
+            "b1f12fd919eae86ab8a978317677e64bce443d1f"
+        ));
+        assert!(!build_matches(
+            "b1f12fd919eae86ab8a978317677e64bce443d1f",
+            "b1f12fd919eae86ab8a978317677e64bce443d1e"
+        ));
+        assert!(
+            !build_matches("b1f12fd9", "b1f12fd919eae86ab8a978317677e64b"),
+            "a key under 16 bytes names nothing"
+        );
     }
 
     #[test]

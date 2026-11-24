@@ -22,7 +22,11 @@ pub fn line(m: &str) {
 
 impl Out {
     pub fn new(quiet: bool, machine: bool) -> Out {
-        Out { quiet, machine, lock: Mutex::new(()) }
+        Out {
+            quiet,
+            machine,
+            lock: Mutex::new(()),
+        }
     }
 
     pub fn say(&self, m: &str) {
@@ -48,7 +52,10 @@ impl Out {
     pub fn result(&self, ok: bool, detail: &str) {
         if self.machine {
             let _g = self.lock.lock().unwrap();
-            line(&format!("@result\t{}\t{detail}", if ok { "ok" } else { "error" }));
+            line(&format!(
+                "@result\t{}\t{detail}",
+                if ok { "ok" } else { "error" }
+            ));
         }
     }
 }

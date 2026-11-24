@@ -42,7 +42,12 @@ pub struct PatchFile {
 
 /// A build id in the one form patches are matched in: lowercase hex, trailing zero bytes stripped.
 pub fn norm_build_id(s: &str) -> String {
-    let mut h: String = s.trim().chars().filter(|c| c.is_ascii_hexdigit()).collect::<String>().to_ascii_lowercase();
+    let mut h: String = s
+        .trim()
+        .chars()
+        .filter(|c| c.is_ascii_hexdigit())
+        .collect::<String>()
+        .to_ascii_lowercase();
     if h.len() % 2 == 1 {
         h.push('0');
     }
@@ -69,30 +74,48 @@ pub fn parse_ips(data: &[u8], build_id: &str, source: &str) -> Result<PatchFile,
     let (olen, eof): (usize, &[u8]) = if wide { (4, b"EEOF") } else { (3, b"EOF") };
     let mut edits = vec![];
     loop {
-        if data.get(i..i + eof.len()) == Some(eof) && (i + eof.len() == data.len() || data.len() - (i + eof.len()) <= 3) {
+        if data.get(i..i + eof.len()) == Some(eof)
+            && (i + eof.len() == data.len() || data.len() - (i + eof.len()) <= 3)
+        {
             break;
         }
-        let rec = data.get(i..i + olen + 2).ok_or_else(|| format!("{source}: cut off at byte {i}"))?;
+        let rec = data
+            .get(i..i + olen + 2)
+            .ok_or_else(|| format!("{source}: cut off at byte {i}"))?;
         let off = be(&rec[..olen]);
         let n = be(&rec[olen..]) as usize;
         i += olen + 2;
         let bytes = if n == 0 {
-            let r = data.get(i..i + 3).ok_or_else(|| format!("{source}: RLE record cut off at byte {i}"))?;
+            let r = data
+                .get(i..i + 3)
+                .ok_or_else(|| format!("{source}: RLE record cut off at byte {i}"))?;
             i += 3;
             vec![r[2]; be(&r[..2]) as usize]
         } else {
-            let b = data.get(i..i + n).ok_or_else(|| format!("{source}: record cut off at byte {i}"))?.to_vec();
+            let b = data
+                .get(i..i + n)
+                .ok_or_else(|| format!("{source}: record cut off at byte {i}"))?
+                .to_vec();
             i += n;
             b
         };
         if off < NSO_HEADER {
-            return Err(format!("{source}: a record at {off:#x} writes the NSO header"));
+            return Err(format!(
+                "{source}: a record at {off:#x} writes the NSO header"
+            ));
         }
         if !bytes.is_empty() {
-            edits.push(Edit { offset: off - NSO_HEADER, bytes });
+            edits.push(Edit {
+                offset: off - NSO_HEADER,
+                bytes,
+            });
         }
     }
-    Ok(PatchFile { build_id: norm_build_id(build_id), edits, source: source.to_string() })
+    Ok(PatchFile {
+        build_id: norm_build_id(build_id),
+        edits,
+        source: source.to_string(),
+    })
 }
 
 fn unquote(s: &str) -> Result<Vec<u8>, String> {
@@ -113,7 +136,9 @@ fn unquote(s: &str) -> Result<Vec<u8>, String> {
             Some('"') => out.push(b'"'),
             Some('x') => {
                 let h: String = it.by_ref().take(2).collect();
-                out.push(u8::from_str_radix(&h, 16).map_err(|_| format!("bad \\x escape in \"{s}\""))?);
+                out.push(
+                    u8::from_str_radix(&h, 16).map_err(|_| format!("bad \\x escape in \"{s}\""))?,
+                );
             }
             o => return Err(format!("bad escape \\{} in \"{s}\"", o.unwrap_or(' '))),
         }
@@ -138,11 +163,17 @@ pub fn parse_pchtxt(text: &str, source: &str) -> Result<Vec<PatchFile>, String> 
             let mut f = rest.split_whitespace();
             let word = f.next().unwrap_or("");
             if let Some(bid) = word.strip_prefix("nsobid-") {
-                out.push(PatchFile { build_id: norm_build_id(bid), edits: vec![], source: source.to_string() });
+                out.push(PatchFile {
+                    build_id: norm_build_id(bid),
+                    edits: vec![],
+                    source: source.to_string(),
+                });
                 enabled = false;
             } else if word == "flag" {
                 if f.next() == Some("offset_shift") {
-                    let v = f.next().ok_or_else(|| at("offset_shift without a value".into()))?;
+                    let v = f
+                        .next()
+                        .ok_or_else(|| at("offset_shift without a value".into()))?;
                     shift = parse_int(v).ok_or_else(|| at(format!("bad offset_shift {v}")))?;
                 }
             } else if word == "enabled" {
@@ -157,23 +188,42 @@ pub fn parse_pchtxt(text: &str, source: &str) -> Result<Vec<PatchFile>, String> 
         if !enabled {
             continue;
         }
-        let (off_s, val) = line.split_once(char::is_whitespace).ok_or_else(|| at(format!("not a patch line: {line}")))?;
-        let off = i64::from_str_radix(off_s.trim_start_matches("0x"), 16).map_err(|_| at(format!("bad offset {off_s}")))? + shift;
+        let (off_s, val) = line
+            .split_once(char::is_whitespace)
+            .ok_or_else(|| at(format!("not a patch line: {line}")))?;
+        let off = i64::from_str_radix(off_s.trim_start_matches("0x"), 16)
+            .map_err(|_| at(format!("bad offset {off_s}")))?
+            + shift;
         let val = val.trim();
         let bytes = if let Some(q) = val.strip_prefix('"') {
-            unquote(q.strip_suffix('"').ok_or_else(|| at("unterminated string".into()))?).map_err(at)?
+            unquote(
+                q.strip_suffix('"')
+                    .ok_or_else(|| at("unterminated string".into()))?,
+            )
+            .map_err(at)?
         } else {
             let h: String = val.chars().filter(|c| !c.is_whitespace()).collect();
             if h.len() % 2 != 0 {
                 return Err(at(format!("odd number of hex digits: {val}")));
             }
-            (0..h.len()).step_by(2).map(|k| u8::from_str_radix(&h[k..k + 2], 16)).collect::<Result<Vec<u8>, _>>().map_err(|_| at(format!("bad hex: {val}")))?
+            (0..h.len())
+                .step_by(2)
+                .map(|k| u8::from_str_radix(&h[k..k + 2], 16))
+                .collect::<Result<Vec<u8>, _>>()
+                .map_err(|_| at(format!("bad hex: {val}")))?
         };
         if off < NSO_HEADER as i64 {
-            return Err(at(format!("offset {off:#x} is inside the NSO header (missing `@flag offset_shift 0x100`?)")));
+            return Err(at(format!(
+                "offset {off:#x} is inside the NSO header (missing `@flag offset_shift 0x100`?)"
+            )));
         }
-        let pf = out.last_mut().ok_or_else(|| at("a patch before any @nsobid".into()))?;
-        pf.edits.push(Edit { offset: off as u64 - NSO_HEADER, bytes });
+        let pf = out
+            .last_mut()
+            .ok_or_else(|| at("a patch before any @nsobid".into()))?;
+        pf.edits.push(Edit {
+            offset: off as u64 - NSO_HEADER,
+            bytes,
+        });
     }
     out.retain(|p| !p.edits.is_empty());
     Ok(out)
@@ -214,8 +264,15 @@ impl Mod {
 
 /// The folder name as an identifier: ASCII letters and digits, the rest `_`.
 pub fn ident(s: &str) -> String {
-    let v: String = s.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
-    if v.is_empty() { "_".into() } else { v }
+    let v: String = s
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c } else { '_' })
+        .collect();
+    if v.is_empty() {
+        "_".into()
+    } else {
+        v
+    }
 }
 
 fn json_field<'a>(v: &'a serde_json::Value, k: &str) -> Option<&'a serde_json::Value> {
@@ -223,7 +280,9 @@ fn json_field<'a>(v: &'a serde_json::Value, k: &str) -> Option<&'a serde_json::V
 }
 
 fn patch_files_in(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
-    let Ok(rd) = std::fs::read_dir(dir) else { return };
+    let Ok(rd) = std::fs::read_dir(dir) else {
+        return;
+    };
     let mut v: Vec<PathBuf> = rd.flatten().map(|e| e.path()).collect();
     v.sort();
     for p in v {
@@ -231,7 +290,10 @@ fn patch_files_in(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
             if depth > 0 {
                 patch_files_in(&p, out, depth - 1);
             }
-        } else if p.extension().is_some_and(|x| x.eq_ignore_ascii_case("ips") || x.eq_ignore_ascii_case("pchtxt")) {
+        } else if p
+            .extension()
+            .is_some_and(|x| x.eq_ignore_ascii_case("ips") || x.eq_ignore_ascii_case("pchtxt"))
+        {
             out.push(p);
         }
     }
@@ -239,8 +301,19 @@ fn patch_files_in(dir: &Path, out: &mut Vec<PathBuf>, depth: u32) {
 
 /// Reads one mod folder.
 pub fn read_mod(dir: &Path) -> Mod {
-    let folder = dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
-    let mut m = Mod { folder: folder.clone(), name: folder, dir: dir.to_path_buf(), default_on: true, patches: vec![], romfs: None, problems: vec![] };
+    let folder = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut m = Mod {
+        folder: folder.clone(),
+        name: folder,
+        dir: dir.to_path_buf(),
+        default_on: true,
+        patches: vec![],
+        romfs: None,
+        problems: vec![],
+    };
     if let Ok(t) = std::fs::read_to_string(dir.join("mod.json")) {
         match serde_json::from_str::<serde_json::Value>(&t) {
             Ok(v) => {
@@ -263,7 +336,10 @@ pub fn read_mod(dir: &Path) -> Mod {
         let r = match std::fs::read(&f) {
             Err(e) => Err(format!("{src}: {e}")),
             Ok(d) if f.extension().is_some_and(|x| x.eq_ignore_ascii_case("ips")) => {
-                let stem = f.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+                let stem = f
+                    .file_stem()
+                    .map(|s| s.to_string_lossy().into_owned())
+                    .unwrap_or_default();
                 parse_ips(&d, &stem, &src).map(|p| vec![p])
             }
             Ok(d) => parse_pchtxt(&String::from_utf8_lossy(&d), &src),
@@ -282,8 +358,14 @@ pub fn read_mod(dir: &Path) -> Mod {
 
 /// Every mod folder under `mods_dir`, by name.
 pub fn scan(mods_dir: &Path) -> Vec<Mod> {
-    let Ok(rd) = std::fs::read_dir(mods_dir) else { return vec![] };
-    let mut dirs: Vec<PathBuf> = rd.flatten().map(|e| e.path()).filter(|p| p.is_dir()).collect();
+    let Ok(rd) = std::fs::read_dir(mods_dir) else {
+        return vec![];
+    };
+    let mut dirs: Vec<PathBuf> = rd
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| p.is_dir())
+        .collect();
     dirs.sort();
     dirs.iter().map(|d| read_mod(d)).collect()
 }
@@ -314,13 +396,34 @@ mod tests {
         d.extend_from_slice(b"EOF");
         let p = parse_ips(&d, "ABCD0000", "t.ips").unwrap();
         assert_eq!(p.build_id, "abcd");
-        assert_eq!(p.edits, vec![Edit { offset: 4, bytes: vec![0x1f, 0x20, 0x03, 0xd5] }, Edit { offset: 0x100, bytes: vec![0xaa; 3] }]);
+        assert_eq!(
+            p.edits,
+            vec![
+                Edit {
+                    offset: 4,
+                    bytes: vec![0x1f, 0x20, 0x03, 0xd5]
+                },
+                Edit {
+                    offset: 0x100,
+                    bytes: vec![0xaa; 3]
+                }
+            ]
+        );
         let mut d = b"IPS32".to_vec();
         d.extend_from_slice(&[0x01, 0x00, 0x01, 0x00, 0x00, 0x01, 0x42]);
         d.extend_from_slice(b"EEOF");
         let p = parse_ips(&d, "ff", "t.ips").unwrap();
-        assert_eq!(p.edits, vec![Edit { offset: 0x0100_0000, bytes: vec![0x42] }]);
-        assert!(parse_ips(b"PATCH\x00\x00\x10\x00\x01\x00EOF", "ff", "h.ips").is_err(), "header write refused");
+        assert_eq!(
+            p.edits,
+            vec![Edit {
+                offset: 0x0100_0000,
+                bytes: vec![0x42]
+            }]
+        );
+        assert!(
+            parse_ips(b"PATCH\x00\x00\x10\x00\x01\x00EOF", "ff", "h.ips").is_err(),
+            "header write refused"
+        );
         assert!(parse_ips(b"NOPE", "ff", "x.ips").is_err());
     }
 
@@ -333,12 +436,24 @@ mod tests {
         assert_eq!(
             v[0].edits,
             vec![
-                Edit { offset: 0x1b296d8, bytes: vec![0xf4, 0x03, 0x1f, 0x2a] },
-                Edit { offset: 0x10, bytes: b"ok\0".to_vec() },
-                Edit { offset: 0x30, bytes: vec![0x20, 0x00, 0x80, 0x52] }
+                Edit {
+                    offset: 0x1b296d8,
+                    bytes: vec![0xf4, 0x03, 0x1f, 0x2a]
+                },
+                Edit {
+                    offset: 0x10,
+                    bytes: b"ok\0".to_vec()
+                },
+                Edit {
+                    offset: 0x30,
+                    bytes: vec![0x20, 0x00, 0x80, 0x52]
+                }
             ]
         );
-        assert!(parse_pchtxt("@nsobid-aa\n@enabled\n00000010 00\n", "n.pchtxt").is_err(), "no offset_shift: inside the header");
+        assert!(
+            parse_pchtxt("@nsobid-aa\n@enabled\n00000010 00\n", "n.pchtxt").is_err(),
+            "no offset_shift: inside the header"
+        );
     }
 
     #[test]
@@ -348,15 +463,40 @@ mod tests {
         std::fs::create_dir_all(m.join("exefs")).unwrap();
         std::fs::create_dir_all(m.join("romfs/a")).unwrap();
         std::fs::write(m.join("mod.json"), r#"{"name": "Sixty", "enabled": false}"#).unwrap();
-        std::fs::write(m.join("exefs/aabb.ips"), b"PATCH\x00\x01\x00\x00\x01\x07EOF").unwrap();
-        std::fs::write(m.join("x.pchtxt"), "@nsobid-ccdd\n@flag offset_shift 0x100\n@enabled\n10 0102\n").unwrap();
+        std::fs::write(
+            m.join("exefs/aabb.ips"),
+            b"PATCH\x00\x01\x00\x00\x01\x07EOF",
+        )
+        .unwrap();
+        std::fs::write(
+            m.join("x.pchtxt"),
+            "@nsobid-ccdd\n@flag offset_shift 0x100\n@enabled\n10 0102\n",
+        )
+        .unwrap();
         let v = scan(&d);
         assert_eq!(v.len(), 1);
         let m0 = &v[0];
-        assert_eq!((m0.name.as_str(), m0.default_on, m0.set_name(), m0.env()), ("Sixty", false, "mod_my_60_fps_".into(), "NXRS_MOD_MY_60_FPS_".into()));
+        assert_eq!(
+            (m0.name.as_str(), m0.default_on, m0.set_name(), m0.env()),
+            (
+                "Sixty",
+                false,
+                "mod_my_60_fps_".into(),
+                "NXRS_MOD_MY_60_FPS_".into()
+            )
+        );
         assert_eq!(m0.patches.len(), 2, "{:?}", m0.problems);
         assert!(m0.romfs.is_some());
-        assert_eq!(apply(&[0u8; 4], &[&Edit { offset: 1, bytes: vec![9, 9, 9, 9] }]), vec![0, 9, 9, 9]);
+        assert_eq!(
+            apply(
+                &[0u8; 4],
+                &[&Edit {
+                    offset: 1,
+                    bytes: vec![9, 9, 9, 9]
+                }]
+            ),
+            vec![0, 9, 9, 9]
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 }

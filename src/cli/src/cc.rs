@@ -33,11 +33,19 @@ pub const TARGET: &str = "x86_64-pc-windows-msvc";
 /// (`gnu\libnxfront.a`, `gnu\libnxrt.a`), linked against the UCRT that every Windows 10 has.
 pub const TARGET_GNU: &str = "x86_64-w64-windows-gnu";
 /// Linux: the system's C library, the engine built for the host (`libnxfront.a`, `libnxrt.a`); x86-64 or AArch64.
-pub const TARGET_LINUX: &str = if cfg!(target_arch = "aarch64") { "aarch64-unknown-linux-gnu" } else { "x86_64-unknown-linux-gnu" };
+pub const TARGET_LINUX: &str = if cfg!(target_arch = "aarch64") {
+    "aarch64-unknown-linux-gnu"
+} else {
+    "x86_64-unknown-linux-gnu"
+};
 
 /// The game code's processor baseline: x86-64-v3 (AVX2, FMA, BMI2); AArch64 Linux: ARMv8.2-A with FP16, RCpc,
 /// dot product and CRC32 (mkw-recomp's AArch64 baseline: Cortex-A76 / Neoverse N1 and later, Apple M1).
-pub const MARCH: &str = if cfg!(target_arch = "aarch64") { "-march=armv8.2-a+fp16+rcpc+dotprod+crc" } else { "-march=x86-64-v3" };
+pub const MARCH: &str = if cfg!(target_arch = "aarch64") {
+    "-march=armv8.2-a+fp16+rcpc+dotprod+crc"
+} else {
+    "-march=x86-64-v3"
+};
 
 /// The game-code flags: -O1 without the vectorizers, frame pointers or debug info (measured: fewer instructions than
 /// either compiler's defaults), for `MARCH`. `-fms-runtime-lib=dll` matches the CRT the Rust
@@ -64,7 +72,15 @@ const STUB_FLAGS: &[&str] = &["-std=gnu11", "-O2", "-fms-runtime-lib=dll", "-w"]
 /// System libraries the Rust runtime needs (`cargo rustc -p runtime -- --print native-static-libs`), plus what the
 /// loader uses. `NXRS_LINK_LIBS` (space-separated) adds more when a runtime crate starts needing them.
 const SYS_LIBS: &[&str] = &[
-    "-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp", "-ladvapi32", "-lbcrypt", "-lsynchronization", "-luser32",
+    "-lkernel32",
+    "-lntdll",
+    "-luserenv",
+    "-lws2_32",
+    "-ldbghelp",
+    "-ladvapi32",
+    "-lbcrypt",
+    "-lsynchronization",
+    "-luser32",
 ];
 
 #[derive(Debug, Clone)]
@@ -94,7 +110,11 @@ impl Clang {
     /// into a shared object: position-independent).
     pub fn gen_flags(&self) -> Vec<String> {
         let linux = cfg!(target_os = "linux");
-        let mut v: Vec<String> = GEN_FLAGS.iter().filter(|f| !((self.gnu || linux) && f.starts_with("-fms-runtime-lib"))).map(|s| s.to_string()).collect();
+        let mut v: Vec<String> = GEN_FLAGS
+            .iter()
+            .filter(|f| !((self.gnu || linux) && f.starts_with("-fms-runtime-lib")))
+            .map(|s| s.to_string())
+            .collect();
         if linux {
             v.push("-fPIC".into());
         }
@@ -111,9 +131,18 @@ pub fn have_visual_studio() -> bool {
     if std::env::var_os("VCToolsInstallDir").is_some() {
         return true;
     }
-    let vswhere = PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
+    let vswhere =
+        PathBuf::from(r"C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe");
     Command::new(vswhere)
-        .args(["-latest", "-products", "*", "-requires", "Microsoft.VisualStudio.Component.VC.Tools.x86.x64", "-property", "installationPath"])
+        .args([
+            "-latest",
+            "-products",
+            "*",
+            "-requires",
+            "Microsoft.VisualStudio.Component.VC.Tools.x86.x64",
+            "-property",
+            "installationPath",
+        ])
         .output()
         .is_ok_and(|o| o.status.success() && !String::from_utf8_lossy(&o.stdout).trim().is_empty())
 }
@@ -125,7 +154,10 @@ pub fn llvm_mingw_clang() -> Option<PathBuf> {
     if let Some(d) = std::env::var_os("NXRS_LLVM_MINGW") {
         v.push(Path::new(&d).join(r"bin\clang.exe"));
     }
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
         v.push(dir.join(r"llvm-mingw\bin\clang.exe"));
         v.push(dir.join(r"..\toolchain\llvm-mingw\bin\clang.exe"));
         for up in dir.ancestors().take(5) {
@@ -142,7 +174,11 @@ pub fn use_gnu() -> bool {
     if cfg!(target_os = "linux") {
         return false; // one toolchain on Linux: the system's clang and lld
     }
-    match std::env::var("NXRS_TOOLCHAIN").ok().as_deref().map(str::trim) {
+    match std::env::var("NXRS_TOOLCHAIN")
+        .ok()
+        .as_deref()
+        .map(str::trim)
+    {
         Some("gnu") | Some("mingw") | Some("gnullvm") => true,
         Some("msvc") => false,
         _ => llvm_mingw_clang().is_some() && !msvc_ready(),
@@ -153,8 +189,14 @@ pub fn use_gnu() -> bool {
 fn msvc_ready() -> bool {
     let lib = std::env::var_os("NXRS_ENGINE_LIB")
         .map(PathBuf::from)
-        .or_else(|| std::env::current_exe().ok().and_then(|e| e.parent().map(|d| d.join("nxfront.lib"))));
-    lib.is_some_and(|l| l.is_file()) && candidates(None).iter().any(|p| p.is_file()) && have_visual_studio()
+        .or_else(|| {
+            std::env::current_exe()
+                .ok()
+                .and_then(|e| e.parent().map(|d| d.join("nxfront.lib")))
+        });
+    lib.is_some_and(|l| l.is_file())
+        && candidates(None).iter().any(|p| p.is_file())
+        && have_visual_studio()
 }
 
 /// The folder of the gnullvm engine libraries: `NXRS_GNU_LIBS`, else `gnu\` beside nxrs.
@@ -166,17 +208,34 @@ pub fn gnu_lib_dir() -> Result<PathBuf> {
 }
 
 fn version_of(path: &Path) -> Result<(String, String)> {
-    let out = Command::new(path).arg("--version").output().with_context(|| format!("starting {}", path.display()))?;
+    let out = Command::new(path)
+        .arg("--version")
+        .output()
+        .with_context(|| format!("starting {}", path.display()))?;
     let text = String::from_utf8_lossy(&out.stdout).into_owned();
     let first = text.lines().next().unwrap_or("").to_string();
-    let Some(at) = first.find("clang version ") else { bail!("{} is not clang: {first:?}", path.display()) };
-    let version = first[at..].split_whitespace().take(3).collect::<Vec<_>>().join(" ");
-    let id = text.lines().filter(|l| !l.starts_with("InstalledDir:")).collect::<Vec<_>>().join("\n");
+    let Some(at) = first.find("clang version ") else {
+        bail!("{} is not clang: {first:?}", path.display())
+    };
+    let version = first[at..]
+        .split_whitespace()
+        .take(3)
+        .collect::<Vec<_>>()
+        .join(" ");
+    let id = text
+        .lines()
+        .filter(|l| !l.starts_with("InstalledDir:"))
+        .collect::<Vec<_>>()
+        .join("\n");
     Ok((version, id))
 }
 
 fn which(exe: &str) -> Option<PathBuf> {
-    std::env::var_os("PATH").and_then(|p| std::env::split_paths(&p).map(|d| d.join(exe)).find(|p| p.is_file()))
+    std::env::var_os("PATH").and_then(|p| {
+        std::env::split_paths(&p)
+            .map(|d| d.join(exe))
+            .find(|p| p.is_file())
+    })
 }
 
 /// Where clang is looked for, in order: `NXRS_CLANG`; `--cc` when it names a clang; the bundled one beside nxrs
@@ -191,12 +250,18 @@ pub fn candidates(cc_hint: Option<&str>) -> Vec<PathBuf> {
         v.push(PathBuf::from(p));
     }
     if let Some(cc) = cc_hint {
-        let name = Path::new(cc).file_name().map(|n| n.to_string_lossy().to_lowercase()).unwrap_or_default();
+        let name = Path::new(cc)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
         if name.contains("clang") {
             v.push(PathBuf::from(cc));
         }
     }
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
         v.push(dir.join(r"clang\bin\clang.exe"));
         v.push(dir.join(r"..\toolchain\clang\bin\clang.exe"));
     }
@@ -218,18 +283,26 @@ fn candidates_linux(cc_hint: Option<&str>) -> Vec<PathBuf> {
         v.push(PathBuf::from(p));
     }
     if let Some(cc) = cc_hint {
-        if Path::new(cc).file_name().is_some_and(|n| n.to_string_lossy().contains("clang")) {
+        if Path::new(cc)
+            .file_name()
+            .is_some_and(|n| n.to_string_lossy().contains("clang"))
+        {
             v.push(PathBuf::from(cc));
         }
     }
-    if let Some(dir) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    if let Some(dir) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
         v.push(dir.join("clang/bin/clang"));
         v.push(dir.join("../toolchain/clang/bin/clang"));
     }
     if let Some(d) = std::env::var_os("NXRT_LLVM") {
         v.push(Path::new(&d).join("clang"));
     }
-    for n in std::iter::once("clang".to_string()).chain((15..=21).rev().map(|k| format!("clang-{k}"))) {
+    for n in
+        std::iter::once("clang".to_string()).chain((15..=21).rev().map(|k| format!("clang-{k}")))
+    {
         if let Some(p) = which(&n) {
             v.push(p);
         }
@@ -239,21 +312,37 @@ fn candidates_linux(cc_hint: Option<&str>) -> Vec<PathBuf> {
 
 /// The linker clang drives on Linux (`-fuse-ld=lld`): ld.lld beside that clang or on PATH.
 pub fn find_lld(clang: &Clang) -> Option<PathBuf> {
-    let beside = clang.path.parent().map(|d| d.join("ld.lld")).filter(|p| p.is_file());
-    beside.or_else(|| which("ld.lld")).or_else(|| (15..=21).rev().find_map(|k| which(&format!("ld.lld-{k}"))))
+    let beside = clang
+        .path
+        .parent()
+        .map(|d| d.join("ld.lld"))
+        .filter(|p| p.is_file());
+    beside
+        .or_else(|| which("ld.lld"))
+        .or_else(|| (15..=21).rev().find_map(|k| which(&format!("ld.lld-{k}"))))
 }
 
 pub fn find_clang(cc_hint: Option<&str>) -> Result<Clang> {
     if use_gnu() {
         let path = llvm_mingw_clang().ok_or_else(|| anyhow!("NXRS_TOOLCHAIN=gnu, but llvm-mingw is not bundled (llvm-mingw\\bin beside nxrs, or NXRS_LLVM_MINGW)"))?;
         let (version, id) = version_of(&path)?;
-        return Ok(Clang { path, version, id: format!("{id}\ntarget {TARGET_GNU}"), gnu: true });
+        return Ok(Clang {
+            path,
+            version,
+            id: format!("{id}\ntarget {TARGET_GNU}"),
+            gnu: true,
+        });
     }
     let tried = candidates(cc_hint);
     for path in &tried {
         if path.is_file() {
             let (version, id) = version_of(path)?;
-            return Ok(Clang { path: path.clone(), version, id: format!("{id}\ntarget {TARGET}"), gnu: false });
+            return Ok(Clang {
+                path: path.clone(),
+                version,
+                id: format!("{id}\ntarget {TARGET}"),
+                gnu: false,
+            });
         }
     }
     bail!(
@@ -274,7 +363,11 @@ pub struct Engine {
 
 impl Engine {
     pub fn entry(&self) -> &'static str {
-        if self.front { "nxfront_main" } else { "nxrt_main" }
+        if self.front {
+            "nxfront_main"
+        } else {
+            "nxrt_main"
+        }
     }
 }
 
@@ -282,11 +375,21 @@ impl Engine {
 /// runtime (`find_runtime_lib`).
 pub fn find_engine(sdk_title: bool, gnu: bool) -> Result<Engine> {
     if !sdk_title {
-        return Ok(Engine { lib: find_runtime_lib(gnu)?, front: false });
+        return Ok(Engine {
+            lib: find_runtime_lib(gnu)?,
+            front: false,
+        });
     }
     if let Some(p) = std::env::var_os("NXRS_ENGINE_LIB") {
         let p = PathBuf::from(p);
-        return if p.is_file() { Ok(Engine { lib: p, front: true }) } else { Err(anyhow!("NXRS_ENGINE_LIB={} does not exist", p.display())) };
+        return if p.is_file() {
+            Ok(Engine {
+                lib: p,
+                front: true,
+            })
+        } else {
+            Err(anyhow!("NXRS_ENGINE_LIB={} does not exist", p.display()))
+        };
     }
     let here = std::env::current_exe()?.parent().unwrap().to_path_buf();
     let p = if cfg!(target_os = "linux") {
@@ -297,7 +400,10 @@ pub fn find_engine(sdk_title: bool, gnu: bool) -> Result<Engine> {
         here.join("nxfront.lib")
     };
     if p.is_file() {
-        Ok(Engine { lib: p, front: true })
+        Ok(Engine {
+            lib: p,
+            front: true,
+        })
     } else {
         bail!("the engine library {} is missing (cargo build --release -p front, or set NXRS_ENGINE_LIB)", p.display())
     }
@@ -306,15 +412,33 @@ pub fn find_engine(sdk_title: bool, gnu: bool) -> Result<Engine> {
 /// System libraries the whole engine needs on top of [`SYS_LIBS`]: COM, the window and its theme, the shell, audio
 /// (WinMM), HID controllers (SetupAPI, HID), video recording (Media Foundation).
 const ENGINE_LIBS: &[&str] = &[
-    "-lole32", "-loleaut32", "-lgdi32", "-lshell32", "-ldwmapi", "-luxtheme", "-limm32", "-lcomctl32", "-lwinmm",
-    "-lpropsys", "-llegacy_stdio_definitions", "-lsetupapi", "-lhid", "-lmfplat", "-lmfreadwrite", "-lmfuuid",
+    "-lole32",
+    "-loleaut32",
+    "-lgdi32",
+    "-lshell32",
+    "-ldwmapi",
+    "-luxtheme",
+    "-limm32",
+    "-lcomctl32",
+    "-lwinmm",
+    "-lpropsys",
+    "-llegacy_stdio_definitions",
+    "-lsetupapi",
+    "-lhid",
+    "-lmfplat",
+    "-lmfreadwrite",
+    "-lmfuuid",
 ];
 
 /// The runtime library the code DLL links: `NXRS_RUNTIME_LIB`, else `nxrt.lib` beside nxrs (`gnu\libnxrt.a`).
 pub fn find_runtime_lib(gnu: bool) -> Result<PathBuf> {
     if let Some(p) = std::env::var_os("NXRS_RUNTIME_LIB") {
         let p = PathBuf::from(p);
-        return if p.is_file() { Ok(p) } else { Err(anyhow!("NXRS_RUNTIME_LIB={} does not exist", p.display())) };
+        return if p.is_file() {
+            Ok(p)
+        } else {
+            Err(anyhow!("NXRS_RUNTIME_LIB={} does not exist", p.display()))
+        };
     }
     let exe = std::env::current_exe()?;
     let p = if cfg!(target_os = "linux") {
@@ -419,16 +543,25 @@ fn compile_one(clang: &Clang, unit: &Unit, key: &str) -> Result<(), String> {
             .map_err(|e| format!("starting {}: {e}", clang.path.display()))?;
         if out.status.success() {
             rename_retry(&tmp, &unit.obj).map_err(|e| format!("{}: {e}", unit.obj.display()))?;
-            std::fs::write(stamp_of(&unit.obj), key).map_err(|e| format!("{}: {e}", unit.obj.display()))?;
+            std::fs::write(stamp_of(&unit.obj), key)
+                .map_err(|e| format!("{}: {e}", unit.obj.display()))?;
             return Ok(());
         }
         let _ = std::fs::remove_file(&tmp);
         let err = String::from_utf8_lossy(&out.stderr).into_owned();
-        last = format!("{}: {}", unit.src.file_name().unwrap().to_string_lossy(), tail(&err, 3000));
+        last = format!(
+            "{}: {}",
+            unit.src.file_name().unwrap().to_string_lossy(),
+            tail(&err, 3000)
+        );
         if !crashed(out.status.code(), &err) {
             break;
         }
-        eprintln!("compile: {}: the compiler crashed (attempt {}), trying again", unit.src.display(), attempt + 1);
+        eprintln!(
+            "compile: {}: the compiler crashed (attempt {}), trying again",
+            unit.src.display(),
+            attempt + 1
+        );
     }
     Err(last)
 }
@@ -454,10 +587,19 @@ pub struct CompileReport {
 
 /// Compiles every unit whose object is missing or stale, `jobs` at a time, the largest first; `say` gets
 /// "compiled n/m (Ns)" every ten units and at the end.
-pub fn compile(clang: &Clang, units: &[Unit], root: &Path, jobs: usize, say: &(dyn Fn(&str) + Sync)) -> Result<CompileReport> {
+pub fn compile(
+    clang: &Clang,
+    units: &[Unit],
+    root: &Path,
+    jobs: usize,
+    say: &(dyn Fn(&str) + Sync),
+) -> Result<CompileReport> {
     let t0 = Instant::now();
-    let mut order: Vec<(u64, usize)> =
-        units.iter().enumerate().map(|(i, u)| (std::fs::metadata(&u.src).map(|m| m.len()).unwrap_or(0), i)).collect();
+    let mut order: Vec<(u64, usize)> = units
+        .iter()
+        .enumerate()
+        .map(|(i, u)| (std::fs::metadata(&u.src).map(|m| m.len()).unwrap_or(0), i))
+        .collect();
     order.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
     let next = AtomicUsize::new(0);
     let done = AtomicUsize::new(0);
@@ -474,7 +616,9 @@ pub fn compile(clang: &Clang, units: &[Unit], root: &Path, jobs: usize, say: &(d
                 let unit = &units[ui];
                 let r = (|| -> Result<(), String> {
                     let key = object_key(unit, root).map_err(|e| e.to_string())?;
-                    let fresh = unit.obj.is_file() && std::fs::read_to_string(stamp_of(&unit.obj)).ok().as_deref() == Some(key.as_str());
+                    let fresh = unit.obj.is_file()
+                        && std::fs::read_to_string(stamp_of(&unit.obj)).ok().as_deref()
+                            == Some(key.as_str());
                     if fresh {
                         return Ok(());
                     }
@@ -488,7 +632,11 @@ pub fn compile(clang: &Clang, units: &[Unit], root: &Path, jobs: usize, say: &(d
                 }
                 let n = done.fetch_add(1, Ordering::Relaxed) + 1;
                 if n % 10 == 0 || n == units.len() {
-                    say(&format!("  compiled {n}/{} ({:.0}s)", units.len(), t0.elapsed().as_secs_f64()));
+                    say(&format!(
+                        "  compiled {n}/{} ({:.0}s)",
+                        units.len(),
+                        t0.elapsed().as_secs_f64()
+                    ));
                 }
             });
         }
@@ -496,7 +644,11 @@ pub fn compile(clang: &Clang, units: &[Unit], root: &Path, jobs: usize, say: &(d
     if let Some(e) = error.into_inner().unwrap() {
         bail!("Compilation failed:\n{e}");
     }
-    Ok(CompileReport { units: units.len(), compiled: compiled.into_inner(), seconds: t0.elapsed().as_secs_f64() })
+    Ok(CompileReport {
+        units: units.len(),
+        compiled: compiled.into_inner(),
+        seconds: t0.elapsed().as_secs_f64(),
+    })
 }
 
 /// Deletes objects (and their keys) in `dir` that no unit produces any more (chunks an earlier version had).
@@ -517,7 +669,9 @@ pub fn remove_stale_objects(dir: &Path, units: &[Unit]) -> usize {
 
 /// Response-file text: one quoted path a line, forward slashes (lld-link and the clang driver read both).
 pub fn response_file(objs: &[PathBuf]) -> String {
-    objs.iter().map(|o| format!("\"{}\"\n", o.display().to_string().replace('\\', "/"))).collect()
+    objs.iter()
+        .map(|o| format!("\"{}\"\n", o.display().to_string().replace('\\', "/")))
+        .collect()
 }
 
 fn run_link(clang: &Clang, args: &[String], cwd: &Path) -> Result<()> {
@@ -528,20 +682,34 @@ fn run_link(clang: &Clang, args: &[String], cwd: &Path) -> Result<()> {
         .output()
         .with_context(|| format!("starting {}", clang.path.display()))?;
     if !out.status.success() {
-        bail!("Linking failed:\n{}{}", tail(&String::from_utf8_lossy(&out.stdout), 2000), tail(&String::from_utf8_lossy(&out.stderr), 4000));
+        bail!(
+            "Linking failed:\n{}{}",
+            tail(&String::from_utf8_lossy(&out.stdout), 2000),
+            tail(&String::from_utf8_lossy(&out.stderr), 4000)
+        );
     }
     Ok(())
 }
 
 /// What the gnullvm engine adds (`--print native-static-libs`): the windows crate's import library (shipped in
 /// `gnu\`) and LLVM's unwinder, linked statically so the game needs no llvm-mingw DLL.
-const GNU_LIBS: &[&str] = &["-lwindows.0.52.0", "-Wl,-Bstatic", "-lunwind", "-Wl,-Bdynamic"];
+const GNU_LIBS: &[&str] = &[
+    "-lwindows.0.52.0",
+    "-Wl,-Bstatic",
+    "-lunwind",
+    "-Wl,-Bdynamic",
+];
 
 fn extra_libs(front: bool, gnu: bool) -> Vec<String> {
     let mut v: Vec<String> = SYS_LIBS.iter().map(|s| s.to_string()).collect();
     if front {
         // the MinGW CRT has the stdio functions MSVC keeps in legacy_stdio_definitions
-        v.extend(ENGINE_LIBS.iter().filter(|l| !(gnu && l.contains("legacy_stdio"))).map(|s| s.to_string()));
+        v.extend(
+            ENGINE_LIBS
+                .iter()
+                .filter(|l| !(gnu && l.contains("legacy_stdio")))
+                .map(|s| s.to_string()),
+        );
     }
     if gnu {
         if let Ok(d) = gnu_lib_dir() {
@@ -560,14 +728,38 @@ fn extra_libs(front: bool, gnu: bool) -> Vec<String> {
 /// Linux: what the engine's static libraries need of the system (`cargo rustc --crate-type staticlib --
 /// --print native-static-libs`): the runtime's, and for the whole engine ALSA (cpal's sound), the codec libraries
 /// (opus, libvpx, dav1d) and FFmpeg's libavcodec / libavutil (H.264 and AAC).
-const LINUX_SYS_LIBS: &[&str] = &["-lgcc_s", "-lutil", "-lrt", "-lpthread", "-lm", "-ldl", "-lc"];
-const LINUX_ENGINE_LIBS: &[&str] = &["-lopus", "-lvpx", "-ldav1d", "-lavcodec", "-lavutil", "-lasound"];
+const LINUX_SYS_LIBS: &[&str] = &[
+    "-lgcc_s",
+    "-lutil",
+    "-lrt",
+    "-lpthread",
+    "-lm",
+    "-ldl",
+    "-lc",
+];
+const LINUX_ENGINE_LIBS: &[&str] = &[
+    "-lopus",
+    "-lvpx",
+    "-ldav1d",
+    "-lavcodec",
+    "-lavutil",
+    "-lasound",
+];
 
 /// `<name>_code.so` on Linux: every object and the engine library, `-Bsymbolic`, nothing left undefined.
-fn link_so(clang: &Clang, objs: &[PathBuf], engine: &Engine, obj_dir: &Path, so: &Path) -> Result<()> {
+fn link_so(
+    clang: &Clang,
+    objs: &[PathBuf],
+    engine: &Engine,
+    obj_dir: &Path,
+    so: &Path,
+) -> Result<()> {
     let rsp = obj_dir.join("link.rsp");
     std::fs::write(&rsp, response_file(objs))?;
-    let part = so.with_file_name(format!("{}.part", so.file_name().unwrap().to_string_lossy()));
+    let part = so.with_file_name(format!(
+        "{}.part",
+        so.file_name().unwrap().to_string_lossy()
+    ));
     let mut args: Vec<String> = vec![
         "-shared".into(),
         "-fuse-ld=lld".into(),
@@ -588,17 +780,27 @@ fn link_so(clang: &Clang, objs: &[PathBuf], engine: &Engine, obj_dir: &Path, so:
         args.extend(more.split_whitespace().map(String::from));
     }
     run_link(clang, &args, obj_dir)?;
-    rename_retry(&part, so).with_context(|| format!("{} is in use. Close the game and try again.", so.display()))?;
+    rename_retry(&part, so)
+        .with_context(|| format!("{} is in use. Close the game and try again.", so.display()))?;
     Ok(())
 }
 
-pub fn link_dll(clang: &Clang, objs: &[PathBuf], engine: &Engine, obj_dir: &Path, dll: &Path) -> Result<()> {
+pub fn link_dll(
+    clang: &Clang,
+    objs: &[PathBuf],
+    engine: &Engine,
+    obj_dir: &Path,
+    dll: &Path,
+) -> Result<()> {
     if cfg!(target_os = "linux") {
         return link_so(clang, objs, engine, obj_dir, dll);
     }
     let rsp = obj_dir.join("link.rsp");
     std::fs::write(&rsp, response_file(objs))?;
-    let part = dll.with_file_name(format!("{}.part", dll.file_name().unwrap().to_string_lossy()));
+    let part = dll.with_file_name(format!(
+        "{}.part",
+        dll.file_name().unwrap().to_string_lossy()
+    ));
     let mut args: Vec<String> = vec!["-shared".into(), "-fuse-ld=lld".into()];
     if !clang.gnu {
         args.push("-fms-runtime-lib=dll".into());
@@ -609,7 +811,11 @@ pub fn link_dll(clang: &Clang, objs: &[PathBuf], engine: &Engine, obj_dir: &Path
         format!("@{}", rsp.display()),
         engine.lib.display().to_string(),
         // the import library and export file stay with the objects, not beside the game
-        if clang.gnu { format!("-Wl,--out-implib,{}", obj_dir.join("code.dll.a").display()) } else { format!("-Wl,/implib:{}", obj_dir.join("code.lib").display()) },
+        if clang.gnu {
+            format!("-Wl,--out-implib,{}", obj_dir.join("code.dll.a").display())
+        } else {
+            format!("-Wl,/implib:{}", obj_dir.join("code.lib").display())
+        },
     ]);
     if clang.gnu {
         // compiler-rt's builtins, statically: no llvm-mingw DLL beside the game
@@ -617,7 +823,8 @@ pub fn link_dll(clang: &Clang, objs: &[PathBuf], engine: &Engine, obj_dir: &Path
     }
     args.extend(extra_libs(engine.front, clang.gnu));
     run_link(clang, &args, obj_dir)?;
-    rename_retry(&part, dll).with_context(|| format!("{} is in use. Close the game and try again.", dll.display()))?;
+    rename_retry(&part, dll)
+        .with_context(|| format!("{} is in use. Close the game and try again.", dll.display()))?;
     Ok(())
 }
 
@@ -733,12 +940,28 @@ pub fn link_exe(clang: &Clang, obj_dir: &Path, exe: &Path) -> Result<()> {
     if cfg!(target_os = "linux") {
         let src = obj_dir.join("nxrs_loader.c");
         crate::write_if_changed(&src, STUB_C_LINUX.as_bytes())?;
-        let unit = Unit { src, obj: obj_dir.join("nxrs_loader.o"), flags: vec!["-std=gnu11".into(), "-O2".into(), "-w".into()], headers: headers_key(clang, &[])? };
+        let unit = Unit {
+            src,
+            obj: obj_dir.join("nxrs_loader.o"),
+            flags: vec!["-std=gnu11".into(), "-O2".into(), "-w".into()],
+            headers: headers_key(clang, &[])?,
+        };
         compile(clang, std::slice::from_ref(&unit), obj_dir, 1, &|_| {})?;
-        let part = exe.with_file_name(format!("{}.part", exe.file_name().unwrap().to_string_lossy()));
-        let args: Vec<String> = vec!["-fuse-ld=lld".into(), "-o".into(), part.display().to_string(), unit.obj.display().to_string(), "-ldl".into()];
+        let part = exe.with_file_name(format!(
+            "{}.part",
+            exe.file_name().unwrap().to_string_lossy()
+        ));
+        let args: Vec<String> = vec![
+            "-fuse-ld=lld".into(),
+            "-o".into(),
+            part.display().to_string(),
+            unit.obj.display().to_string(),
+            "-ldl".into(),
+        ];
         run_link(clang, &args, obj_dir)?;
-        rename_retry(&part, exe).with_context(|| format!("{} is in use. Close the game and try again.", exe.display()))?;
+        rename_retry(&part, exe).with_context(|| {
+            format!("{} is in use. Close the game and try again.", exe.display())
+        })?;
         return Ok(());
     }
     let src = obj_dir.join("nxrs_loader.c");
@@ -746,15 +969,34 @@ pub fn link_exe(clang: &Clang, obj_dir: &Path, exe: &Path) -> Result<()> {
     let unit = Unit {
         src,
         obj: obj_dir.join("nxrs_loader.o"),
-        flags: STUB_FLAGS.iter().filter(|f| !(clang.gnu && f.starts_with("-fms-runtime-lib"))).map(|s| s.to_string()).collect(),
+        flags: STUB_FLAGS
+            .iter()
+            .filter(|f| !(clang.gnu && f.starts_with("-fms-runtime-lib")))
+            .map(|s| s.to_string())
+            .collect(),
         headers: headers_key(clang, &[])?,
     };
     compile(clang, std::slice::from_ref(&unit), obj_dir, 1, &|_| {})?;
-    let part = exe.with_file_name(format!("{}.part", exe.file_name().unwrap().to_string_lossy()));
-    let mut args: Vec<String> = vec!["-fuse-ld=lld".into(), "-o".into(), part.display().to_string(), unit.obj.display().to_string(), "-lkernel32".into(), "-luser32".into()];
+    let part = exe.with_file_name(format!(
+        "{}.part",
+        exe.file_name().unwrap().to_string_lossy()
+    ));
+    let mut args: Vec<String> = vec![
+        "-fuse-ld=lld".into(),
+        "-o".into(),
+        part.display().to_string(),
+        unit.obj.display().to_string(),
+        "-lkernel32".into(),
+        "-luser32".into(),
+    ];
     if clang.gnu {
         // a windowed program (mainCRTStartup calls main), the engine's start-up on a 16 MB main stack
-        args.extend(["-mwindows".into(), "-static-libgcc".into(), "--rtlib=compiler-rt".into(), "-Wl,--stack,0x1000000".into()]);
+        args.extend([
+            "-mwindows".into(),
+            "-static-libgcc".into(),
+            "--rtlib=compiler-rt".into(),
+            "-Wl,--stack,0x1000000".into(),
+        ]);
     } else {
         args.extend([
             "-fms-runtime-lib=dll".into(),
@@ -766,7 +1008,8 @@ pub fn link_exe(clang: &Clang, obj_dir: &Path, exe: &Path) -> Result<()> {
         ]);
     }
     run_link(clang, &args, obj_dir)?;
-    rename_retry(&part, exe).with_context(|| format!("{} is in use. Close the game and try again.", exe.display()))?;
+    rename_retry(&part, exe)
+        .with_context(|| format!("{} is in use. Close the game and try again.", exe.display()))?;
     Ok(())
 }
 
@@ -775,7 +1018,12 @@ mod tests {
     use super::*;
 
     fn fake_clang() -> Clang {
-        Clang { path: "clang".into(), version: "clang version 0".into(), id: "clang version 0\ntarget x".into(), gnu: false }
+        Clang {
+            path: "clang".into(),
+            version: "clang version 0".into(),
+            id: "clang version 0\ntarget x".into(),
+            gnu: false,
+        }
     }
 
     #[test]
@@ -792,17 +1040,32 @@ mod tests {
         let unit = |sub: &str, flag: &str| Unit {
             src: d.join(sub).join("x.c"),
             obj: d.join(sub).join("x.o"),
-            flags: vec![format!("-I{}", d.join(sub).join("include").display()), flag.into()],
+            flags: vec![
+                format!("-I{}", d.join(sub).join("include").display()),
+                flag.into(),
+            ],
             headers: headers_key(&c, &[d.join(sub).join("cpu.h")]).unwrap(),
         };
         let ka = object_key(&unit("a", "-O1"), &d.join("a")).unwrap();
         let kb = object_key(&unit("b", "-O1"), &d.join("b")).unwrap();
         assert_eq!(ka, kb, "the same C in another build folder keeps its key");
-        assert_ne!(ka, object_key(&unit("a", "-O2"), &d.join("a")).unwrap(), "flags are in the key");
+        assert_ne!(
+            ka,
+            object_key(&unit("a", "-O2"), &d.join("a")).unwrap(),
+            "flags are in the key"
+        );
         std::fs::write(d.join("a").join("cpu.h"), "// changed").unwrap();
-        assert_ne!(ka, object_key(&unit("a", "-O1"), &d.join("a")).unwrap(), "headers are in the key");
+        assert_ne!(
+            ka,
+            object_key(&unit("a", "-O1"), &d.join("a")).unwrap(),
+            "headers are in the key"
+        );
         std::fs::write(d.join("b").join("x.c"), "int y;").unwrap();
-        assert_ne!(kb, object_key(&unit("b", "-O1"), &d.join("b")).unwrap(), "the C is in the key");
+        assert_ne!(
+            kb,
+            object_key(&unit("b", "-O1"), &d.join("b")).unwrap(),
+            "the C is in the key"
+        );
         let _ = std::fs::remove_dir_all(&d);
     }
 
@@ -815,7 +1078,10 @@ mod tests {
 
     #[test]
     fn response_file_quotes_with_forward_slashes() {
-        assert_eq!(response_file(&[PathBuf::from(r"C:\a b\c.o")]), "\"C:/a b/c.o\"\n");
+        assert_eq!(
+            response_file(&[PathBuf::from(r"C:\a b\c.o")]),
+            "\"C:/a b/c.o\"\n"
+        );
     }
 
     /// The names a PE image exports (its export directory).
@@ -829,16 +1095,24 @@ mod tests {
         let off = |rva: usize| {
             (0..nsec).find_map(|i| {
                 let s = opt + optsz + 40 * i;
-                let (vs, va, rs, rp) = (u32_at(s + 8), u32_at(s + 12), u32_at(s + 16), u32_at(s + 20));
+                let (vs, va, rs, rp) = (
+                    u32_at(s + 8),
+                    u32_at(s + 12),
+                    u32_at(s + 16),
+                    u32_at(s + 20),
+                );
                 (va <= rva && rva < va + vs.max(rs)).then(|| rva - va + rp)
             })
         };
-        let Some(e) = (exp_rva != 0).then(|| off(exp_rva)).flatten() else { return vec![] };
+        let Some(e) = (exp_rva != 0).then(|| off(exp_rva)).flatten() else {
+            return vec![];
+        };
         let (n, names) = (u32_at(e + 24), off(u32_at(e + 32)).unwrap());
         (0..n)
             .map(|i| {
                 let o = off(u32_at(names + 4 * i)).unwrap();
-                String::from_utf8_lossy(&d[o..o + d[o..].iter().position(|&c| c == 0).unwrap()]).into_owned()
+                String::from_utf8_lossy(&d[o..o + d[o..].iter().position(|&c| c == 0).unwrap()])
+                    .into_owned()
             })
             .collect()
     }
@@ -849,7 +1123,9 @@ mod tests {
     #[test]
     fn loader_exports_the_gpu_hints() {
         assert!(STUB_C.contains("__declspec(dllexport) DWORD NvOptimusEnablement = 1;"));
-        assert!(STUB_C.contains("__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;"));
+        assert!(
+            STUB_C.contains("__declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;")
+        );
         let Ok(clang) = find_clang(None) else {
             eprintln!("no clang: the link is not checked");
             return;
@@ -861,6 +1137,12 @@ mod tests {
         link_exe(&clang, &d, &exe).unwrap();
         let names = pe_exports(&std::fs::read(&exe).unwrap());
         let _ = std::fs::remove_dir_all(&d);
-        assert!(names.iter().any(|n| n == "NvOptimusEnablement") && names.iter().any(|n| n == "AmdPowerXpressRequestHighPerformance"), "{names:?}");
+        assert!(
+            names.iter().any(|n| n == "NvOptimusEnablement")
+                && names
+                    .iter()
+                    .any(|n| n == "AmdPowerXpressRequestHighPerformance"),
+            "{names:?}"
+        );
     }
 }

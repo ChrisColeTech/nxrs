@@ -44,7 +44,10 @@ pub const CONTRACT: &str = "nxrs-contract 2";
 
 /// Turbo's switchrecomp.py options, as the launcher passes them.
 #[derive(Parser, Debug)]
-#[command(name = "nxrs-build", about = "Builds a Switch game into a native x86-64 program for this system, Windows or Linux (contract v1; `nxrs-build help` for the subcommands).")]
+#[command(
+    name = "nxrs-build",
+    about = "Builds a Switch game into a native x86-64 program for this system, Windows or Linux (contract v1; `nxrs-build help` for the subcommands)."
+)]
 struct V1 {
     /// game folder (exefs/ + romfs/), .nsp or .nup package
     input: Option<PathBuf>,
@@ -154,7 +157,11 @@ fn run_v1(args: Vec<String>) -> i32 {
         let gnu = cc::use_gnu();
         return match (cc::find_runtime_lib(gnu), cc::find_clang(a.cc.as_deref())) {
             (Ok(lib), Ok(c)) => {
-                o.say(&format!("The runtime ships prebuilt and is linked into each game: {} ({})", lib.display(), c.version));
+                o.say(&format!(
+                    "The runtime ships prebuilt and is linked into each game: {} ({})",
+                    lib.display(),
+                    c.version
+                ));
                 0
             }
             (Err(e), _) | (_, Err(e)) => fail(&e),
@@ -162,10 +169,16 @@ fn run_v1(args: Vec<String>) -> i32 {
     }
     if a.install_dlc.is_some() || a.sync_dlc.is_some() || a.remove_dlc.is_some() || a.list_dlc {
         let datadir = a.datadir.clone().or_else(|| match (&a.outdir, &a.out) {
-            (Some(d), Some(n)) => Some(std::path::absolute(d).unwrap_or(d.clone()).join(format!("{n}_data"))),
+            (Some(d), Some(n)) => Some(
+                std::path::absolute(d)
+                    .unwrap_or(d.clone())
+                    .join(format!("{n}_data")),
+            ),
             _ => None,
         });
-        let Some(datadir) = datadir else { return usage_error("the DLC options need --datadir (or --outdir with -o)") };
+        let Some(datadir) = datadir else {
+            return usage_error("the DLC options need --datadir (or --outdir with -o)");
+        };
         let say = |m: &str| o.say(m);
         let r = (|| -> Result<Vec<String>, package::PackageError> {
             let mut errors = vec![];
@@ -198,15 +211,33 @@ fn run_v1(args: Vec<String>) -> i32 {
     if let Some(pkgs) = &a.update_info {
         return update_info(&o, pkgs, a.input.as_deref(), a.keys.as_deref());
     }
-    let Some(input) = a.input.clone() else { return usage_error("the game folder, .nup or .nsp package is required") };
-    let host = if cfg!(target_os = "linux") { "linux" } else { "windows" };
-    if a.target.as_deref().is_some_and(|t| (t == "linux" || t == "windows") && t != host) {
-        return fail(&anyhow!("--target {}: nxrs-build builds {host} x86-64 programs here; build on {} for that", a.target.as_deref().unwrap_or(""), a.target.as_deref().unwrap_or("")));
+    let Some(input) = a.input.clone() else {
+        return usage_error("the game folder, .nup or .nsp package is required");
+    };
+    let host = if cfg!(target_os = "linux") {
+        "linux"
+    } else {
+        "windows"
+    };
+    if a.target
+        .as_deref()
+        .is_some_and(|t| (t == "linux" || t == "windows") && t != host)
+    {
+        return fail(&anyhow!(
+            "--target {}: nxrs-build builds {host} x86-64 programs here; build on {} for that",
+            a.target.as_deref().unwrap_or(""),
+            a.target.as_deref().unwrap_or("")
+        ));
     }
     let ignored: Vec<String> = [
-        a.target.as_ref().filter(|v| v.as_str() != host).map(|v| format!("--target {v}")),
+        a.target
+            .as_ref()
+            .filter(|v| v.as_str() != host)
+            .map(|v| format!("--target {v}")),
         a.backend.as_ref().map(|v| format!("--backend {v}")),
-        a.cc.as_ref().filter(|c| !c.to_lowercase().contains("clang")).map(|v| format!("--cc {v}")),
+        a.cc.as_ref()
+            .filter(|c| !c.to_lowercase().contains("clang"))
+            .map(|v| format!("--cc {v}")),
         a.opt.as_ref().map(|v| format!("-O {v}")),
         a.runtime.as_ref().map(|v| format!("--runtime {v}")),
     ]
@@ -226,7 +257,12 @@ fn run_v1(args: Vec<String>) -> i32 {
         chunk: a.chunk,
         native: a.native,
         v1: true,
-        ignored: (!ignored.is_empty()).then(|| format!("nxrs-build: ignored (Turbo options with no meaning here): {}", ignored.join(" "))),
+        ignored: (!ignored.is_empty()).then(|| {
+            format!(
+                "nxrs-build: ignored (Turbo options with no meaning here): {}",
+                ignored.join(" ")
+            )
+        }),
         interp_only: a.interp_only,
     };
     build(&o, &b)
@@ -243,13 +279,21 @@ pub fn other_programs(indices: &[u64], name: &str, chosen: bool) -> Vec<(u64, St
     if chosen {
         return vec![];
     }
-    indices.iter().filter(|&&i| i != 0).map(|&i| (i, format!("{name}_p{i}"))).collect()
+    indices
+        .iter()
+        .filter(|&&i| i != 0)
+        .map(|&i| (i, format!("{name}_p{i}")))
+        .collect()
 }
 
 fn build(o: &Out, b: &pipeline::BuildArgs) -> i32 {
     match pipeline::build(b, o) {
         Ok(built) => {
-            let t: Vec<String> = built.timings.iter().map(|(k, v)| format!("{k} {v:.1}s")).collect();
+            let t: Vec<String> = built
+                .timings
+                .iter()
+                .map(|(k, v)| format!("{k} {v:.1}s"))
+                .collect();
             o.say(&format!("  time: {}", t.join(", ")));
             if b.no_build {
                 o.say(&format!("Done (C and data only): {}", built.data.display()));
@@ -259,16 +303,31 @@ fn build(o: &Out, b: &pipeline::BuildArgs) -> i32 {
             // a multi-program application (the profile's `programs`, the package's Program NCAs): every program,
             // each `<name>_p<N>` in the same folder (nxnative builds them all into one app)
             let chosen = std::env::var("NXRS_PROGRAM_INDEX").is_ok_and(|v| !v.trim().is_empty());
-            let indices = package::program_indices(&b.input, b.keys.as_deref()).unwrap_or_else(|_| vec![0]);
-            let name = built.exe.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let indices =
+                package::program_indices(&b.input, b.keys.as_deref()).unwrap_or_else(|_| vec![0]);
+            let name = built
+                .exe
+                .file_stem()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
             for (i, pname) in other_programs(&indices, &name, chosen) {
-                o.say(&format!("Program {i} of {} (started by the game with oe::ExecuteProgram): {pname}", indices.len()));
+                o.say(&format!(
+                    "Program {i} of {} (started by the game with oe::ExecuteProgram): {pname}",
+                    indices.len()
+                ));
                 std::env::set_var("NXRS_PROGRAM_INDEX", i.to_string());
-                let pb = pipeline::BuildArgs { name: Some(pname), outdir: built.exe.parent().map(Path::to_path_buf), ..b.clone() };
+                let pb = pipeline::BuildArgs {
+                    name: Some(pname),
+                    outdir: built.exe.parent().map(Path::to_path_buf),
+                    ..b.clone()
+                };
                 let r = pipeline::build(&pb, o);
                 std::env::remove_var("NXRS_PROGRAM_INDEX");
                 if let Err(e) = r {
-                    o.result(false, &format!("program {i}: {e:#}").replace(['\r', '\n'], " "));
+                    o.result(
+                        false,
+                        &format!("program {i}: {e:#}").replace(['\r', '\n'], " "),
+                    );
                     return fail(&e);
                 }
             }
@@ -299,7 +358,10 @@ fn update_info(o: &Out, packages: &[PathBuf], game: Option<&Path>, keys: Option<
 // ------------------------------------------------------------------------------------------------ contract v2
 
 #[derive(Parser)]
-#[command(name = "nxrs-build", about = "nxrs engine: builds Switch games into native Windows programs")]
+#[command(
+    name = "nxrs-build",
+    about = "nxrs engine: builds Switch games into native Windows programs"
+)]
 struct V2 {
     #[command(subcommand)]
     cmd: Cmd,
@@ -427,7 +489,16 @@ enum DlcCmd {
     },
 }
 
-const SUBCOMMANDS: &[&str] = &["build", "update-info", "dlc", "profile", "doctor", "contract", "translate", "help"];
+const SUBCOMMANDS: &[&str] = &[
+    "build",
+    "update-info",
+    "dlc",
+    "profile",
+    "doctor",
+    "contract",
+    "translate",
+    "help",
+];
 
 fn run_v2(args: Vec<String>) -> i32 {
     let a = match V2::try_parse_from(&args) {
@@ -442,7 +513,21 @@ fn run_v2(args: Vec<String>) -> i32 {
             out::line(CONTRACT);
             0
         }
-        Cmd::Build { input, out, outdir, jobs, pkg, cc, no_build, no_shaders, chunk, native, quiet, machine, interp_only } => {
+        Cmd::Build {
+            input,
+            out,
+            outdir,
+            jobs,
+            pkg,
+            cc,
+            no_build,
+            no_shaders,
+            chunk,
+            native,
+            quiet,
+            machine,
+            interp_only,
+        } => {
             if let Some(n) = pkg.program {
                 std::env::set_var("NXRS_PROGRAM_INDEX", n.to_string());
             }
@@ -465,14 +550,26 @@ fn run_v2(args: Vec<String>) -> i32 {
             };
             build(&o, &b)
         }
-        Cmd::UpdateInfo { packages, game, keys } => update_info(&Out::default(), &packages, game.as_deref(), keys.as_deref()),
+        Cmd::UpdateInfo {
+            packages,
+            game,
+            keys,
+        } => update_info(&Out::default(), &packages, game.as_deref(), keys.as_deref()),
         Cmd::Dlc { cmd } => {
             let o = Out::default();
             let say = |m: &str| o.say(m);
             let r = (|| -> Result<Vec<String>, package::PackageError> {
                 Ok(match cmd {
-                    DlcCmd::Install { datadir, packages, keys } => dlc::install(&packages, &datadir, &say, keys.as_deref(), false)?.1,
-                    DlcCmd::Sync { datadir, packages, keys } => dlc::sync(&packages, &datadir, &say, keys.as_deref())?.1,
+                    DlcCmd::Install {
+                        datadir,
+                        packages,
+                        keys,
+                    } => dlc::install(&packages, &datadir, &say, keys.as_deref(), false)?.1,
+                    DlcCmd::Sync {
+                        datadir,
+                        packages,
+                        keys,
+                    } => dlc::sync(&packages, &datadir, &say, keys.as_deref())?.1,
                     DlcCmd::Remove { datadir, what } => {
                         let mut errors = vec![];
                         for w in &what {
@@ -498,23 +595,55 @@ fn run_v2(args: Vec<String>) -> i32 {
                 }
             }
         }
-        Cmd::Profile { title_id, main_build_id, package, keys } => {
-            match profile::command(title_id.as_deref(), main_build_id.as_deref(), package.as_deref(), keys.as_deref()) {
+        Cmd::Profile {
+            title_id,
+            main_build_id,
+            package,
+            keys,
+        } => {
+            match profile::command(
+                title_id.as_deref(),
+                main_build_id.as_deref(),
+                package.as_deref(),
+                keys.as_deref(),
+            ) {
                 Ok(()) => 0,
                 Err(e) => fail(&e),
             }
         }
         Cmd::Doctor => doctor(),
-        Cmd::Translate { input, out, data, pkg, jobs } => match translate(&input, &out, data, &pkg, jobs) {
+        Cmd::Translate {
+            input,
+            out,
+            data,
+            pkg,
+            jobs,
+        } => match translate(&input, &out, data, &pkg, jobs) {
             Ok(()) => 0,
             Err(e) => fail(&e),
         },
     }
 }
 
-fn translate(input: &Path, out: &Path, data: Option<PathBuf>, pkg: &PkgArgs, jobs: usize) -> Result<()> {
-    let game = package::open_game(input, &package::OpenOptions { keys: pkg.keys.clone(), update: update_choice(&pkg.update, pkg.no_update) })?;
-    let opts = translator::aot::GenOptions { out: out.to_path_buf(), jobs, ..Default::default() };
+fn translate(
+    input: &Path,
+    out: &Path,
+    data: Option<PathBuf>,
+    pkg: &PkgArgs,
+    jobs: usize,
+) -> Result<()> {
+    let game = package::open_game(
+        input,
+        &package::OpenOptions {
+            keys: pkg.keys.clone(),
+            update: update_choice(&pkg.update, pkg.no_update),
+        },
+    )?;
+    let opts = translator::aot::GenOptions {
+        out: out.to_path_buf(),
+        jobs,
+        ..Default::default()
+    };
     let report = translator::aot::generate(&game.exefs.files, &opts, &|l| eprintln!("{l}"))?;
     translator::aot::runtime_headers::write(out)?;
     let datadir = data.unwrap_or_else(|| out.join("data"));
@@ -537,8 +666,12 @@ fn doctor() -> i32 {
         bad += i32::from(!ok);
     };
     #[cfg(target_arch = "x86_64")]
-    check(std::arch::is_x86_feature_detected!("avx2") && std::arch::is_x86_feature_detected!("fma") && std::arch::is_x86_feature_detected!("bmi2"),
-        "CPU: AVX2, FMA, BMI2 (the game code is built for x86-64-v3)".into());
+    check(
+        std::arch::is_x86_feature_detected!("avx2")
+            && std::arch::is_x86_feature_detected!("fma")
+            && std::arch::is_x86_feature_detected!("bmi2"),
+        "CPU: AVX2, FMA, BMI2 (the game code is built for x86-64-v3)".into(),
+    );
     #[cfg(target_arch = "aarch64")]
     check(
         std::arch::is_aarch64_feature_detected!("fp16")
@@ -563,7 +696,15 @@ fn doctor() -> i32 {
         }
     ));
     match cc::find_clang(None) {
-        Ok(c) => check(true, format!("compiler: {} ({}, {})", c.path.display(), c.version, c.target())),
+        Ok(c) => check(
+            true,
+            format!(
+                "compiler: {} ({}, {})",
+                c.path.display(),
+                c.version,
+                c.target()
+            ),
+        ),
         Err(e) => check(false, format!("compiler: {e}")),
     }
     if cfg!(target_os = "linux") {
@@ -575,7 +716,10 @@ fn doctor() -> i32 {
             Err(_) => check(false, "linker: no clang to drive ld.lld".into()),
         }
     } else if !gnu {
-        check(cc::have_visual_studio(), "Visual Studio C++ build tools (the MSVC libraries)".into());
+        check(
+            cc::have_visual_studio(),
+            "Visual Studio C++ build tools (the MSVC libraries)".into(),
+        );
     }
     match cc::find_runtime_lib(gnu) {
         Ok(p) => check(true, format!("runtime library: {}", p.display())),
@@ -588,8 +732,13 @@ fn doctor() -> i32 {
     if cfg!(target_os = "linux") {
         linux_checks(&mut check);
     } else {
-        let sys = std::env::var_os("SystemRoot").map(PathBuf::from).unwrap_or_else(|| r"C:\Windows".into());
-        check(sys.join(r"System32\vulkan-1.dll").is_file(), "Vulkan loader (vulkan-1.dll)".into());
+        let sys = std::env::var_os("SystemRoot")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| r"C:\Windows".into());
+        check(
+            sys.join(r"System32\vulkan-1.dll").is_file(),
+            "Vulkan loader (vulkan-1.dll)".into(),
+        );
     }
     match vulkan_devices() {
         Ok(devs) if devs.is_empty() => check(false, "Vulkan: no device".into()),
@@ -604,7 +753,11 @@ fn doctor() -> i32 {
                         ash::vk::api_version_major(*api),
                         ash::vk::api_version_minor(*api),
                         ash::vk::api_version_patch(*api),
-                        if ok { "" } else { " (the engine needs Vulkan 1.3: update the graphics driver)" }
+                        if ok {
+                            ""
+                        } else {
+                            " (the engine needs Vulkan 1.3: update the graphics driver)"
+                        }
                     ),
                 );
             }
@@ -619,10 +772,17 @@ fn doctor() -> i32 {
                     "free disk for {what} ({}): {:.1} GB{}",
                     dir.display(),
                     free as f64 / 1e9,
-                    if free >= need { String::new() } else { format!(" (a build needs about {:.0} GB)", need as f64 / 1e9) }
+                    if free >= need {
+                        String::new()
+                    } else {
+                        format!(" (a build needs about {:.0} GB)", need as f64 / 1e9)
+                    }
                 ),
             ),
-            None => check(false, format!("free disk for {what}: {} cannot be read", dir.display())),
+            None => check(
+                false,
+                format!("free disk for {what}: {} cannot be read", dir.display()),
+            ),
         }
     }
     match translator::package::default_keys_path() {
@@ -635,17 +795,40 @@ fn doctor() -> i32 {
 /// What a game on Linux loads at run time: the Vulkan loader, the shared libraries the engine links (sound, codecs),
 /// a display, and the optional pieces (SDL2 for controllers, zenity / kdialog for dialogs, ffmpeg for F7).
 fn linux_checks(check: &mut dyn FnMut(bool, String)) {
-    let multiarch = if cfg!(target_arch = "aarch64") { "aarch64-linux-gnu" } else { "x86_64-linux-gnu" };
-    let dirs = [format!("/usr/lib/{multiarch}"), "/usr/lib64".into(), "/usr/lib".into(), format!("/lib/{multiarch}"), "/lib64".into()];
+    let multiarch = if cfg!(target_arch = "aarch64") {
+        "aarch64-linux-gnu"
+    } else {
+        "x86_64-linux-gnu"
+    };
+    let dirs = [
+        format!("/usr/lib/{multiarch}"),
+        "/usr/lib64".into(),
+        "/usr/lib".into(),
+        format!("/lib/{multiarch}"),
+        "/lib64".into(),
+    ];
     let has_lib = |prefix: &str| {
         dirs.iter().any(|d| {
-            std::fs::read_dir(d).into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with(prefix))
+            std::fs::read_dir(d)
+                .into_iter()
+                .flatten()
+                .flatten()
+                .any(|e| e.file_name().to_string_lossy().starts_with(prefix))
         })
     };
-    let on_path = |n: &str| std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(n).is_file()));
-    check(has_lib("libvulkan.so.1"), "Vulkan loader (libvulkan.so.1)".into());
+    let on_path = |n: &str| {
+        std::env::var_os("PATH")
+            .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(n).is_file()))
+    };
+    check(
+        has_lib("libvulkan.so.1"),
+        "Vulkan loader (libvulkan.so.1)".into(),
+    );
     for (lib, what) in [
-        ("libasound.so.2", "ALSA (sound; PulseAudio / PipeWire through its default device)"),
+        (
+            "libasound.so.2",
+            "ALSA (sound; PulseAudio / PipeWire through its default device)",
+        ),
         ("libopus.so.0", "libopus (Opus sound)"),
         ("libvpx.so", "libvpx (VP8 / VP9 movies)"),
         ("libdav1d.so", "dav1d (AV1 movies)"),
@@ -654,11 +837,44 @@ fn linux_checks(check: &mut dyn FnMut(bool, String)) {
     ] {
         check(has_lib(lib), format!("{what}: {lib}"));
     }
-    let display = std::env::var_os("WAYLAND_DISPLAY").map(|v| format!("Wayland {}", v.to_string_lossy())).or_else(|| std::env::var_os("DISPLAY").map(|v| format!("X11 {}", v.to_string_lossy())));
-    check(display.is_some(), format!("display: {}", display.unwrap_or_else(|| "none (DISPLAY / WAYLAND_DISPLAY unset): a game cannot open its window".into())));
-    out::line(&format!("     controllers: SDL2 {}", if has_lib("libSDL2-2.0.so.0") { "found (Xbox and other pads)" } else { "not found (install libsdl2: only native HID pads and the keyboard)" }));
-    out::line(&format!("     dialogs: {}", if on_path("zenity") { "zenity" } else if on_path("kdialog") { "kdialog" } else { "neither zenity nor kdialog (messages and the keyboard go to the log)" }));
-    out::line(&format!("     recording (F7): {}", if on_path("ffmpeg") { "ffmpeg found" } else { "ffmpeg not found (F7 needs it)" }));
+    let display = std::env::var_os("WAYLAND_DISPLAY")
+        .map(|v| format!("Wayland {}", v.to_string_lossy()))
+        .or_else(|| std::env::var_os("DISPLAY").map(|v| format!("X11 {}", v.to_string_lossy())));
+    check(
+        display.is_some(),
+        format!(
+            "display: {}",
+            display.unwrap_or_else(|| {
+                "none (DISPLAY / WAYLAND_DISPLAY unset): a game cannot open its window".into()
+            })
+        ),
+    );
+    out::line(&format!(
+        "     controllers: SDL2 {}",
+        if has_lib("libSDL2-2.0.so.0") {
+            "found (Xbox and other pads)"
+        } else {
+            "not found (install libsdl2: only native HID pads and the keyboard)"
+        }
+    ));
+    out::line(&format!(
+        "     dialogs: {}",
+        if on_path("zenity") {
+            "zenity"
+        } else if on_path("kdialog") {
+            "kdialog"
+        } else {
+            "neither zenity nor kdialog (messages and the keyboard go to the log)"
+        }
+    ));
+    out::line(&format!(
+        "     recording (F7): {}",
+        if on_path("ffmpeg") {
+            "ffmpeg found"
+        } else {
+            "ffmpeg not found (F7 needs it)"
+        }
+    ));
 }
 
 /// Every Vulkan device: (name, API version, driver version as its vendor writes it, discrete).
@@ -666,15 +882,22 @@ fn vulkan_devices() -> Result<Vec<(String, u32, String, bool)>> {
     use ash::vk;
     // SAFETY: the loader is loaded and released here; every handle made is destroyed before return
     unsafe {
-        let entry = ash::Entry::load().map_err(|e| anyhow!("the Vulkan loader does not load: {e}"))?;
+        let entry =
+            ash::Entry::load().map_err(|e| anyhow!("the Vulkan loader does not load: {e}"))?;
         let app = vk::ApplicationInfo::default().api_version(vk::API_VERSION_1_3);
         let inst = entry
-            .create_instance(&vk::InstanceCreateInfo::default().application_info(&app), None)
+            .create_instance(
+                &vk::InstanceCreateInfo::default().application_info(&app),
+                None,
+            )
             .map_err(|e| anyhow!("no Vulkan instance: {e}"))?;
         let mut out = vec![];
         for pd in inst.enumerate_physical_devices().unwrap_or_default() {
             let p = inst.get_physical_device_properties(pd);
-            let name = p.device_name_as_c_str().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let name = p
+                .device_name_as_c_str()
+                .map(|s| s.to_string_lossy().into_owned())
+                .unwrap_or_default();
             let d = p.driver_version;
             let driver = if p.vendor_id == 0x10DE {
                 // NVIDIA: 10 bits major, 8 minor, 8 sub-minor, 6 patch
@@ -682,9 +905,19 @@ fn vulkan_devices() -> Result<Vec<(String, u32, String, bool)>> {
             } else if p.vendor_id == 0x8086 && cfg!(windows) {
                 format!("{}.{}", d >> 14, d & 0x3FFF)
             } else {
-                format!("{}.{}.{}", vk::api_version_major(d), vk::api_version_minor(d), vk::api_version_patch(d))
+                format!(
+                    "{}.{}.{}",
+                    vk::api_version_major(d),
+                    vk::api_version_minor(d),
+                    vk::api_version_patch(d)
+                )
             };
-            out.push((name, p.api_version, driver, p.device_type == vk::PhysicalDeviceType::DISCRETE_GPU));
+            out.push((
+                name,
+                p.api_version,
+                driver,
+                p.device_type == vk::PhysicalDeviceType::DISCRETE_GPU,
+            ));
         }
         inst.destroy_instance(None);
         Ok(out)
@@ -696,7 +929,10 @@ fn vulkan_devices() -> Result<Vec<(String, u32, String, bool)>> {
 /// Z-A), its translated shaders a few hundred MB.
 fn disk_checks() -> Vec<(&'static str, PathBuf, u64)> {
     let mut v = vec![];
-    if let Some(d) = std::env::current_exe().ok().and_then(|e| e.parent().map(Path::to_path_buf)) {
+    if let Some(d) = std::env::current_exe()
+        .ok()
+        .and_then(|e| e.parent().map(Path::to_path_buf))
+    {
         v.push(("builds", d, 4_000_000_000));
     }
     v.push(("temporary files", std::env::temp_dir(), 1_000_000_000));
@@ -709,7 +945,8 @@ fn free_bytes(dir: &Path) -> Option<u64> {
     let p = std::ffi::CString::new(dir.as_os_str().as_encoded_bytes()).ok()?;
     let mut st: libc::statvfs = unsafe { core::mem::zeroed() };
     // SAFETY: a NUL-terminated path and our output variable
-    (unsafe { libc::statvfs(p.as_ptr(), &mut st) } == 0).then(|| st.f_bavail as u64 * st.f_frsize as u64)
+    (unsafe { libc::statvfs(p.as_ptr(), &mut st) } == 0)
+        .then(|| st.f_bavail as u64 * st.f_frsize as u64)
 }
 
 /// Free bytes for this user on the volume of `dir`.
@@ -720,7 +957,12 @@ fn free_bytes(dir: &Path) -> Option<u64> {
     let mut free = 0u64;
     // SAFETY: a NUL-terminated path and our output variable
     let ok = unsafe {
-        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(w.as_ptr(), &mut free, core::ptr::null_mut(), core::ptr::null_mut())
+        windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW(
+            w.as_ptr(),
+            &mut free,
+            core::ptr::null_mut(),
+            core::ptr::null_mut(),
+        )
     };
     (ok != 0).then_some(free)
 }
@@ -740,7 +982,10 @@ mod program_tests {
     /// one named program (`--program`) makes only that one.
     #[test]
     fn other_programs_are_built_beside_program_0() {
-        assert_eq!(super::other_programs(&[0, 1], "Sonic", false), vec![(1, "Sonic_p1".to_string())]);
+        assert_eq!(
+            super::other_programs(&[0, 1], "Sonic", false),
+            vec![(1, "Sonic_p1".to_string())]
+        );
         assert_eq!(super::other_programs(&[0, 1, 2], "3DAS", false).len(), 2);
         assert!(super::other_programs(&[0], "MK8D", false).is_empty());
         assert!(super::other_programs(&[0, 1], "Sonic", true).is_empty());

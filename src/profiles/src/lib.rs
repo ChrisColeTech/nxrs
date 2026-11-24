@@ -57,7 +57,11 @@ impl Platform {
 
     /// Switch 2 application ids start 04; Switch ids 01.
     pub fn of_title(title_id: u64) -> Platform {
-        if title_id >> 56 == 0x04 { Platform::Switch2 } else { Platform::Switch }
+        if title_id >> 56 == 0x04 {
+            Platform::Switch2
+        } else {
+            Platform::Switch
+        }
     }
 }
 
@@ -76,7 +80,10 @@ pub struct Build {
 
 impl Build {
     pub fn module(&self, name: &str) -> Option<&str> {
-        self.modules.iter().find(|(m, _)| m == name).map(|(_, b)| b.as_str())
+        self.modules
+            .iter()
+            .find(|(m, _)| m == name)
+            .map(|(_, b)| b.as_str())
     }
 }
 
@@ -173,7 +180,11 @@ pub struct Profile {
 
 fn int(s: &str) -> Result<u64, String> {
     let s = s.trim();
-    let r = if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) { u64::from_str_radix(h, 16) } else { s.parse() };
+    let r = if let Some(h) = s.strip_prefix("0x").or_else(|| s.strip_prefix("0X")) {
+        u64::from_str_radix(h, 16)
+    } else {
+        s.parse()
+    };
     r.map_err(|_| format!("not a number: {s:?}"))
 }
 
@@ -186,7 +197,11 @@ fn on_off(v: &str, key: &str) -> Result<bool, String> {
 }
 
 fn one_of(v: String, key: &str, allowed: &[&str]) -> Result<String, String> {
-    if allowed.contains(&v.as_str()) { Ok(v) } else { Err(format!("{key} must be {}: {v}", allowed.join(" or "))) }
+    if allowed.contains(&v.as_str()) {
+        Ok(v)
+    } else {
+        Err(format!("{key} must be {}: {v}", allowed.join(" or ")))
+    }
 }
 
 impl Profile {
@@ -210,7 +225,16 @@ impl Profile {
             package: None,
             modules: vec![],
             romfs_marker: String::new(),
-            memory: Memory { reserve: 0, alias: 0, stack: 0, app_pool: 0, used: 0, sys_resource: 0, stdalloc_cap: 0, map_limit: false },
+            memory: Memory {
+                reserve: 0,
+                alias: 0,
+                stack: 0,
+                app_pool: 0,
+                used: 0,
+                sys_resource: 0,
+                stdalloc_cap: 0,
+                map_limit: false,
+            },
             settings: Settings::default_values(),
             programs: vec![],
             program_of: None,
@@ -219,19 +243,28 @@ impl Profile {
             recomp: None,
             rows,
         };
-        let need = |k: &str| p.get(k).ok_or_else(|| format!("{id}: game.tsv has no key {k}"));
-        let title_id = u64::from_str_radix(&need("title_id")?, 16).map_err(|_| format!("{id}: title_id"))?;
-        let program_id = u64::from_str_radix(&need("program_id")?, 16).map_err(|_| format!("{id}: program_id"))?;
+        let need = |k: &str| {
+            p.get(k)
+                .ok_or_else(|| format!("{id}: game.tsv has no key {k}"))
+        };
+        let title_id =
+            u64::from_str_radix(&need("title_id")?, 16).map_err(|_| format!("{id}: title_id"))?;
+        let program_id = u64::from_str_radix(&need("program_id")?, 16)
+            .map_err(|_| format!("{id}: program_id"))?;
         let name = need("name")?;
         let romfs_marker = need("romfs_marker")?;
         let mut builds = vec![];
         for v in p.values("build") {
             if v.len() < 2 {
-                return Err(format!("{id}: a build row needs a version and a display version"));
+                return Err(format!(
+                    "{id}: a build row needs a version and a display version"
+                ));
             }
             let mut modules = vec![];
             for m in &v[2..] {
-                let (k, b) = m.split_once('=').ok_or_else(|| format!("{id}: build row module {m:?} is not name=build id"))?;
+                let (k, b) = m
+                    .split_once('=')
+                    .ok_or_else(|| format!("{id}: build row module {m:?} is not name=build id"))?;
                 if !b.chars().all(|c| c.is_ascii_hexdigit()) || b.len() < 32 {
                     return Err(format!("{id}: build id {b:?} of {k}"));
                 }
@@ -244,8 +277,13 @@ impl Profile {
                 modules,
             });
         }
-        let mem = |k: &str| -> Result<u64, String> { int(&need(k)?).map_err(|e| format!("{id}: {k}: {e}")) };
-        let mem_or = |k: &str, d: u64| -> Result<u64, String> { p.get(k).map_or(Ok(d), |v| int(&v).map_err(|e| format!("{id}: {k}: {e}"))) };
+        let mem = |k: &str| -> Result<u64, String> {
+            int(&need(k)?).map_err(|e| format!("{id}: {k}: {e}"))
+        };
+        let mem_or = |k: &str, d: u64| -> Result<u64, String> {
+            p.get(k)
+                .map_or(Ok(d), |v| int(&v).map_err(|e| format!("{id}: {k}: {e}")))
+        };
         let memory = Memory {
             reserve: mem("mem_reserve")?,
             alias: mem("mem_alias")?,
@@ -254,27 +292,54 @@ impl Profile {
             used: mem_or("mem_used", 0x400_0000)?,
             sys_resource: mem_or("sys_resource", 0x200_0000)?,
             stdalloc_cap: mem_or("stdalloc_cap", 0)?,
-            map_limit: on_off(&p.get_or("mem_map_limit", "off"), "mem_map_limit").map_err(|e| format!("{id}: {e}"))?,
+            map_limit: on_off(&p.get_or("mem_map_limit", "off"), "mem_map_limit")
+                .map_err(|e| format!("{id}: {e}"))?,
         };
         let settings = Settings::from(&p).map_err(|e| format!("{id}: {e}"))?;
         let mut programs = vec![];
         for pair in p.words("programs").unwrap_or_default() {
-            let (n, other) = pair.split_once('=').ok_or_else(|| format!("{id}: programs entry {pair:?}"))?;
-            programs.push((n.parse().map_err(|_| format!("{id}: programs index {n:?}"))?, other.to_string()));
+            let (n, other) = pair
+                .split_once('=')
+                .ok_or_else(|| format!("{id}: programs entry {pair:?}"))?;
+            programs.push((
+                n.parse()
+                    .map_err(|_| format!("{id}: programs index {n:?}"))?,
+                other.to_string(),
+            ));
         }
         let modules = p.words("modules").unwrap_or_else(|| vec!["main".into()]);
         let (package, program_of) = (p.get("package"), p.get("program_of"));
-        Ok(Profile { title_id, program_id, name, romfs_marker, builds, memory, settings, programs, modules, package, program_of, ..p })
+        Ok(Profile {
+            title_id,
+            program_id,
+            name,
+            romfs_marker,
+            builds,
+            memory,
+            settings,
+            programs,
+            modules,
+            package,
+            program_of,
+            ..p
+        })
     }
 
     /// Every row of a key (game.py `values`).
     pub fn values(&self, key: &str) -> Vec<&Vec<String>> {
-        self.rows.iter().filter(|(k, _)| k == key).map(|(_, v)| v).collect()
+        self.rows
+            .iter()
+            .filter(|(k, _)| k == key)
+            .map(|(_, v)| v)
+            .collect()
     }
 
     /// The first row of a key, its values joined by tabs (game.py `get`).
     pub fn get(&self, key: &str) -> Option<String> {
-        self.rows.iter().find(|(k, _)| k == key).map(|(_, v)| v.join("\t"))
+        self.rows
+            .iter()
+            .find(|(k, _)| k == key)
+            .map(|(_, v)| v.join("\t"))
     }
 
     pub fn get_or(&self, key: &str, default: &str) -> String {
@@ -282,7 +347,8 @@ impl Profile {
     }
 
     pub fn words(&self, key: &str) -> Option<Vec<String>> {
-        self.get(key).map(|v| v.split_whitespace().map(String::from).collect())
+        self.get(key)
+            .map(|v| v.split_whitespace().map(String::from).collect())
     }
 
     /// Switch 2 when the profile's title id is one (04…).
@@ -297,13 +363,21 @@ impl Profile {
 
     /// The registered build whose module `module` has this build id.
     pub fn build_with(&self, module: &str, build_id: &str) -> Option<&Build> {
-        self.builds.iter().find(|b| b.module(module).is_some_and(|k| patches::build_matches(k, build_id)))
+        self.builds.iter().find(|b| {
+            b.module(module)
+                .is_some_and(|k| patches::build_matches(k, build_id))
+        })
     }
 
     /// The modules a build loads: its build row's, in the profile's load order, else the profile's list.
     pub fn modules_of(&self, build: Option<&Build>) -> Vec<String> {
         match build {
-            Some(b) if b.module("main").is_some() => self.modules.iter().filter(|m| b.module(m).is_some()).cloned().collect(),
+            Some(b) if b.module("main").is_some() => self
+                .modules
+                .iter()
+                .filter(|m| b.module(m).is_some())
+                .cloned()
+                .collect(),
             _ => self.modules.clone(),
         }
     }
@@ -361,12 +435,24 @@ impl Settings {
         };
         let utp = g("ue_texture_pool", "0");
         let ufc = g("ue_fps_cvar", "t.MaxFPS");
-        if ufc.is_empty() || ufc.len() > 31 || !ufc.chars().next().unwrap().is_ascii_alphabetic() || !ufc.chars().all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.') {
-            return Err(format!("ue_fps_cvar must be a console variable name: {ufc}"));
+        if ufc.is_empty()
+            || ufc.len() > 31
+            || !ufc.chars().next().unwrap().is_ascii_alphabetic()
+            || !ufc
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        {
+            return Err(format!(
+                "ue_fps_cvar must be a console variable name: {ufc}"
+            ));
         }
         let api = p.get("device_api");
         if let Some(a) = &api {
-            let ok = a.split_once('.').is_some_and(|(x, y)| !x.is_empty() && !y.is_empty() && x.chars().chain(y.chars()).all(|c| c.is_ascii_digit()));
+            let ok = a.split_once('.').is_some_and(|(x, y)| {
+                !x.is_empty()
+                    && !y.is_empty()
+                    && x.chars().chain(y.chars()).all(|c| c.is_ascii_digit())
+            });
             if !ok {
                 return Err(format!("device_api must be major.minor: {a}"));
             }
@@ -376,7 +462,10 @@ impl Settings {
             Some(v) => {
                 let dims: Vec<(u32, u32)> = v
                     .split_whitespace()
-                    .map(|d| d.split_once('x').and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?))))
+                    .map(|d| {
+                        d.split_once('x')
+                            .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+                    })
                     .collect::<Option<_>>()
                     .ok_or_else(|| format!("render_base must be <w>x<h> <w>x<h>: {v}"))?;
                 if dims.len() != 2 {
@@ -388,7 +477,9 @@ impl Settings {
         let shader_key_skip = match p.get("shader_key_skip") {
             None => None,
             Some(v) => {
-                let (o, l) = v.split_once('+').ok_or_else(|| format!("shader_key_skip takes <offset>+<length>: {v}"))?;
+                let (o, l) = v
+                    .split_once('+')
+                    .ok_or_else(|| format!("shader_key_skip takes <offset>+<length>: {v}"))?;
                 let (o, l) = (int(o)? as u32, int(l)? as u32);
                 if o < 0x30 || l == 0 || o + l > 0x880 || (o < 0x760 && o + l > 0x700) {
                     return Err(format!("shader_key_skip out of bounds: {v}"));
@@ -400,23 +491,40 @@ impl Settings {
             fps_target,
             fps_max,
             fps_hold: b("fps_hold", "on")?,
-            present_interval: one_of(g("present_interval", "game"), "present_interval", &["game", "display"])?,
+            present_interval: one_of(
+                g("present_interval", "game"),
+                "present_interval",
+                &["game", "display"],
+            )?,
             op_mode: one_of(g("op_mode", "console"), "op_mode", &["console", "handheld"])?,
             perf_mode: one_of(g("perf_mode", "follow"), "perf_mode", &["follow", "boost"])?,
             core_preempt: b("core_preempt", "off")?,
             alloc_big_align: b("alloc_big_align", "off")?,
-            shared_font: p.get("shared_font").map(|v| one_of(v, "shared_font", &["bfttf", "ttf"])).transpose()?,
+            shared_font: p
+                .get("shared_font")
+                .map(|v| one_of(v, "shared_font", &["bfttf", "ttf"]))
+                .transpose()?,
             device_api: api,
             depth_mode: one_of(g("depth_mode", "gl"), "depth_mode", &["gl", "zero"])?,
-            pad_layout: one_of(g("pad_layout", "simple"), "pad_layout", &["simple", "full", "touch"])?,
+            pad_layout: one_of(
+                g("pad_layout", "simple"),
+                "pad_layout",
+                &["simple", "full", "touch"],
+            )?,
             game_args: g("game_args", ""),
             game_env: g("game_env", ""),
             launch_param: g("launch_param", ""),
             screen_aspect: b("screen_aspect", "off")?,
             render_base,
-            ue_texture_pool: utp.parse().map_err(|_| format!("ue_texture_pool must be megabytes: {utp}"))?,
+            ue_texture_pool: utp
+                .parse()
+                .map_err(|_| format!("ue_texture_pool must be megabytes: {utp}"))?,
             ue_fps_cvar: ufc,
-            draw_barriers: one_of(g("draw_barriers", "full"), "draw_barriers", &["full", "game"])?,
+            draw_barriers: one_of(
+                g("draw_barriers", "full"),
+                "draw_barriers",
+                &["full", "game"],
+            )?,
             tex_flush_upload: b("tex_flush_upload", "off")?,
             tex_dirty_upload: b("tex_dirty_upload", "off")?,
             tex_dyn_slots: b("tex_dyn_slots", "off")?,
@@ -457,7 +565,17 @@ pub fn player_settings() -> Vec<PlayerSetting> {
         .map(|l| {
             let c: Vec<&str> = l.split('\t').collect();
             let f = |i: usize| c.get(i).copied().unwrap_or("").to_string();
-            PlayerSetting { variable: f(0), kind: f(1), values: f(2), default: f(3), shown: f(4), section: f(5), label: f(6), note: f(7), meta: f(8) }
+            PlayerSetting {
+                variable: f(0),
+                kind: f(1),
+                values: f(2),
+                default: f(3),
+                shown: f(4),
+                section: f(5),
+                label: f(6),
+                note: f(7),
+                meta: f(8),
+            }
         })
         .collect()
 }
@@ -481,12 +599,30 @@ fn db() -> &'static Db {
         let mut errors = vec![];
         for r in data::GAMES {
             // engine.tsv's rows come first: a key takes its first row
-            let text = match r.engine_tsv { Some(e) => format!("{e}
-{}", r.game_tsv), None => r.game_tsv.to_string() };
+            let text = match r.engine_tsv {
+                Some(e) => format!(
+                    "{e}
+{}",
+                    r.game_tsv
+                ),
+                None => r.game_tsv.to_string(),
+            };
             let parsed = Profile::parse(r.id, &text).and_then(|mut p| {
-                p.patches = r.patches.map(PatchFile::parse).transpose().map_err(|e| format!("{}: patches.toml: {e}", r.id))?;
-                p.turbo = r.turbo.map(PatchFile::parse).transpose().map_err(|e| format!("{}: turbo.toml: {e}", r.id))?;
-                p.recomp = r.recomp.map(RecompTable::parse).transpose().map_err(|e| format!("{}: recomp.txt: {e}", r.id))?;
+                p.patches = r
+                    .patches
+                    .map(PatchFile::parse)
+                    .transpose()
+                    .map_err(|e| format!("{}: patches.toml: {e}", r.id))?;
+                p.turbo = r
+                    .turbo
+                    .map(PatchFile::parse)
+                    .transpose()
+                    .map_err(|e| format!("{}: turbo.toml: {e}", r.id))?;
+                p.recomp = r
+                    .recomp
+                    .map(RecompTable::parse)
+                    .transpose()
+                    .map_err(|e| format!("{}: recomp.txt: {e}", r.id))?;
                 Ok(p)
             });
             match parsed {
@@ -502,7 +638,12 @@ fn db() -> &'static Db {
         };
         let sdk = shared("sdk_patches.toml", data::SDK_PATCHES);
         let engine = shared("engine_patches.toml", data::ENGINE_PATCHES);
-        Db { profiles, errors, sdk, engine }
+        Db {
+            profiles,
+            errors,
+            sdk,
+            engine,
+        }
     })
 }
 
@@ -511,12 +652,21 @@ fn db() -> &'static Db {
 /// `shader_pairs.tsv` (vertex / pixel key pairs), `shader_facts.tsv` and `shader_facts_manual.tsv` (answers to the
 /// shader translator's queries). Empty when the profile has none.
 pub fn shader_tables(id: &str) -> Result<Vec<(String, String)>, String> {
-    let Some(raw) = data::GAMES.iter().find(|r| r.id.eq_ignore_ascii_case(id)).and_then(|r| r.shaders) else { return Ok(vec![]) };
+    let Some(raw) = data::GAMES
+        .iter()
+        .find(|r| r.id.eq_ignore_ascii_case(id))
+        .and_then(|r| r.shaders)
+    else {
+        return Ok(vec![]);
+    };
     let text = zstd::stream::decode_all(raw).map_err(|e| format!("{id}: shaders.tsv.zst: {e}"))?;
     let text = String::from_utf8(text).map_err(|_| format!("{id}: shaders.tsv.zst: not UTF-8"))?;
     let mut out: Vec<(String, String)> = vec![];
     for line in text.split_inclusive('\n') {
-        if let Some(name) = line.strip_prefix("## ").filter(|n| n.trim_end().ends_with(".tsv")) {
+        if let Some(name) = line
+            .strip_prefix("## ")
+            .filter(|n| n.trim_end().ends_with(".tsv"))
+        {
             out.push((name.trim_end().to_string(), String::new()));
         } else if let Some(last) = out.last_mut() {
             last.1.push_str(line);
@@ -532,7 +682,9 @@ pub fn shader_tables(id: &str) -> Result<Vec<(String, String)>, String> {
 /// are left out.
 pub fn prewarm_shaders(id: &str) -> Result<Vec<(String, String)>, String> {
     let tables = shader_tables(id)?;
-    let Some((_, m)) = tables.iter().find(|(n, _)| n == "pso_manifest.tsv") else { return Ok(vec![]) };
+    let Some((_, m)) = tables.iter().find(|(n, _)| n == "pso_manifest.tsv") else {
+        return Ok(vec![]);
+    };
     Ok(m.lines()
         .filter_map(|l| {
             let f: Vec<&str> = l.split('\t').collect();
@@ -566,16 +718,26 @@ pub fn get(id: &str) -> Option<&'static Profile> {
 
 /// The profile of a title: its title or program id, else (an update's 0x800, an add-on's id) the base game's.
 pub fn by_title(title_id: u64) -> Option<&'static Profile> {
-    let exact = all().iter().find(|p| p.title_id == title_id || p.program_id == title_id);
+    let exact = all()
+        .iter()
+        .find(|p| p.title_id == title_id || p.program_id == title_id);
     exact.or_else(|| {
         let base = title_id & !0xFFF;
-        all().iter().find(|p| p.title_id == base).or_else(|| all().iter().find(|p| p.title_id == base.wrapping_sub(0x1000) && title_id & 0xFFF != 0 && title_id & 0x1000 != 0))
+        all().iter().find(|p| p.title_id == base).or_else(|| {
+            all().iter().find(|p| {
+                p.title_id == base.wrapping_sub(0x1000)
+                    && title_id & 0xFFF != 0
+                    && title_id & 0x1000 != 0
+            })
+        })
     })
 }
 
 /// The profile and build row that register this main build id (a release of the same build under another id too).
 pub fn by_build(main_build_id: &str) -> Option<(&'static Profile, &'static Build)> {
-    all().iter().find_map(|p| p.build_with("main", main_build_id).map(|b| (p, b)))
+    all()
+        .iter()
+        .find_map(|p| p.build_with("main", main_build_id).map(|b| (p, b)))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -605,14 +767,26 @@ pub fn lookup(title_id: Option<u64>, main_build_id: Option<&str>) -> Option<Matc
         let by_tid = title_id.and_then(by_title);
         if let Some(p) = by_tid {
             if let Some(b) = p.build_with("main", bid) {
-                return Some(Match { profile: p, build: Some(b), how: How::Build });
+                return Some(Match {
+                    profile: p,
+                    build: Some(b),
+                    how: How::Build,
+                });
             }
         }
         if let Some((p, b)) = by_build(bid) {
-            return Some(Match { profile: p, build: Some(b), how: How::Build });
+            return Some(Match {
+                profile: p,
+                build: Some(b),
+                how: How::Build,
+            });
         }
     }
-    title_id.and_then(by_title).map(|p| Match { profile: p, build: None, how: How::Title })
+    title_id.and_then(by_title).map(|p| Match {
+        profile: p,
+        build: None,
+        how: How::Title,
+    })
 }
 
 /// A patch-table entry that names a module build.
@@ -627,13 +801,36 @@ pub enum Entry<'a> {
 /// Every entry keyed by this module build id, from every profile and the shared tables, with the file it is in.
 pub fn patches_for(build_id: &str) -> Vec<(&'static str, Entry<'static>)> {
     let mut out = vec![];
-    let files = all().iter().flat_map(|p| p.patch_files()).chain(shared_patches());
+    let files = all()
+        .iter()
+        .flat_map(|p| p.patch_files())
+        .chain(shared_patches());
     for f in files {
         let src = f.source.as_str();
-        out.extend(f.cut.iter().filter(|c| patches::build_matches(&c.build, build_id)).map(|c| (src, Entry::Cut(c))));
-        out.extend(f.obs.iter().filter(|c| patches::build_matches(&c.build, build_id)).map(|c| (src, Entry::Obs(c))));
-        out.extend(f.stub.iter().filter(|c| patches::build_matches(&c.build, build_id)).map(|c| (src, Entry::Stub(c))));
-        out.extend(f.capability.iter().filter(|c| patches::build_matches(&c.build, build_id)).map(|c| (src, Entry::Capability(c))));
+        out.extend(
+            f.cut
+                .iter()
+                .filter(|c| patches::build_matches(&c.build, build_id))
+                .map(|c| (src, Entry::Cut(c))),
+        );
+        out.extend(
+            f.obs
+                .iter()
+                .filter(|c| patches::build_matches(&c.build, build_id))
+                .map(|c| (src, Entry::Obs(c))),
+        );
+        out.extend(
+            f.stub
+                .iter()
+                .filter(|c| patches::build_matches(&c.build, build_id))
+                .map(|c| (src, Entry::Stub(c))),
+        );
+        out.extend(
+            f.capability
+                .iter()
+                .filter(|c| patches::build_matches(&c.build, build_id))
+                .map(|c| (src, Entry::Capability(c))),
+        );
     }
     out
 }
@@ -653,7 +850,12 @@ impl RecompTable {
         let mut key = None;
         let mut body = String::new();
         for line in text.lines() {
-            let f: Vec<&str> = line.split('#').next().unwrap_or("").split_whitespace().collect();
+            let f: Vec<&str> = line
+                .split('#')
+                .next()
+                .unwrap_or("")
+                .split_whitespace()
+                .collect();
             if f.first() == Some(&"build") {
                 if f.len() != 3 || key.is_some() {
                     return Err(format!("bad or second build line: {line:?}"));
@@ -668,12 +870,21 @@ impl RecompTable {
         if build.len() < 32 {
             return Err(format!("build id {build} is shorter than 32 digits"));
         }
-        Ok(RecompTable { module, build, text: body })
+        Ok(RecompTable {
+            module,
+            build,
+            text: body,
+        })
     }
 
     /// (sets, sites and spans, spin waits) as the translator counts them
     pub fn counts(&self) -> (usize, usize, usize) {
-        let n = |k: &str| self.text.lines().filter(|l| l.split_whitespace().next() == Some(k)).count();
+        let n = |k: &str| {
+            self.text
+                .lines()
+                .filter(|l| l.split_whitespace().next() == Some(k))
+                .count()
+        };
         (n("set"), n("site") + n("span"), n("spin"))
     }
 }
@@ -685,23 +896,43 @@ pub fn translator_patches(modules: &[(&str, &str)]) -> Result<(String, Vec<Strin
     let mut sets: BTreeMap<String, String> = BTreeMap::new();
     let mut sites = vec![];
     let mut said = vec![];
-    let files = all().iter().flat_map(|p| p.patch_files()).chain(shared_patches());
+    let files = all()
+        .iter()
+        .flat_map(|p| p.patch_files())
+        .chain(shared_patches());
     for f in files {
         for c in f.cut.iter().filter(|c| c.apply.as_deref() == Some("build")) {
             for (m, bid) in modules {
-                if c.module.as_deref().is_some_and(|cm| cm != *m) || !patches::build_matches(&c.build, bid) {
+                if c.module.as_deref().is_some_and(|cm| cm != *m)
+                    || !patches::build_matches(&c.build, bid)
+                {
                     continue;
                 }
-                let (Some(o), Some(r)) = (patches::words_of(&c.original), patches::words_of(&c.replacement)) else {
-                    return Err(format!("{}: the cut at {m}+{:#x} is not whole instructions", f.source, c.offset));
+                let (Some(o), Some(r)) = (
+                    patches::words_of(&c.original),
+                    patches::words_of(&c.replacement),
+                ) else {
+                    return Err(format!(
+                        "{}: the cut at {m}+{:#x} is not whole instructions",
+                        f.source, c.offset
+                    ));
                 };
                 if o.len() != r.len() || c.offset % 4 != 0 {
-                    return Err(format!("{}: the cut at {m}+{:#x} changes its length or is misaligned", f.source, c.offset));
+                    return Err(format!(
+                        "{}: the cut at {m}+{:#x} changes its length or is misaligned",
+                        f.source, c.offset
+                    ));
                 }
                 let set = c.set.clone().unwrap_or_else(|| "profile".into());
-                sets.entry(set.clone()).or_insert_with(|| c.env.clone().unwrap_or_else(|| "NXRS_PATCH_PROFILE".into()));
+                sets.entry(set.clone()).or_insert_with(|| {
+                    c.env.clone().unwrap_or_else(|| "NXRS_PATCH_PROFILE".into())
+                });
                 for (i, (ow, rw)) in o.iter().zip(&r).enumerate() {
-                    sites.push(format!("site {set} {m} {:#x} {ow:08x} {rw:08x}  # {}", c.offset + 4 * i as u64, c.reason.lines().next().unwrap_or("")));
+                    sites.push(format!(
+                        "site {set} {m} {:#x} {ow:08x} {rw:08x}  # {}",
+                        c.offset + 4 * i as u64,
+                        c.reason.lines().next().unwrap_or("")
+                    ));
                 }
                 said.push(c.reason.clone());
             }
@@ -710,16 +941,24 @@ pub fn translator_patches(modules: &[(&str, &str)]) -> Result<(String, Vec<Strin
     let mut tables = vec![];
     for p in all() {
         let Some(t) = &p.recomp else { continue };
-        if modules.iter().any(|(m, bid)| *m == t.module && patches::build_matches(&t.build, bid)) {
+        if modules
+            .iter()
+            .any(|(m, bid)| *m == t.module && patches::build_matches(&t.build, bid))
+        {
             let (k, n, spins) = t.counts();
-            said.push(format!("{}: {k} code patch sets, {n} sites, {spins} spin waits (recomp.txt)", p.name));
+            said.push(format!(
+                "{}: {k} code patch sets, {n} sites, {spins} spin waits (recomp.txt)",
+                p.name
+            ));
             tables.push(t.text.as_str());
         }
     }
     if sites.is_empty() && tables.is_empty() {
         return Ok((String::new(), said));
     }
-    let mut s = String::from("# Written by nxrs from the game's profile: the patches applied at build time.\n");
+    let mut s = String::from(
+        "# Written by nxrs from the game's profile: the patches applied at build time.\n",
+    );
     for (name, env) in &sets {
         s.push_str(&format!("set {name} {env} 1\n"));
     }

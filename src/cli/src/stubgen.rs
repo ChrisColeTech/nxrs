@@ -22,12 +22,25 @@ pub struct Ctx<'a> {
 }
 
 fn reloc(index: usize, op: &str, target: &str, addend: i64) -> Reloc {
-    Reloc { index, op: op.into(), target: target.into(), addend }
+    Reloc {
+        index,
+        op: op.into(),
+        target: target.into(),
+        addend,
+    }
 }
 
 impl<'a> Ctx<'a> {
     pub fn new(img: &'a [u8], base: u64, others: BTreeMap<String, u64>) -> Ctx<'a> {
-        Ctx { img, base, others, body: StubBody { evaluated: true, ..Default::default() } }
+        Ctx {
+            img,
+            base,
+            others,
+            body: StubBody {
+                evaluated: true,
+                ..Default::default()
+            },
+        }
     }
     pub fn here(&self) -> u64 {
         AREA + 4 * self.body.code.len() as u64
@@ -36,12 +49,21 @@ impl<'a> Ctx<'a> {
         self.body.code.push(w);
     }
     fn word(&self, off: u64) -> Result<u32, String> {
-        self.img.get(off as usize..off as usize + 4).map(|b| u32::from_le_bytes(b.try_into().unwrap())).ok_or(format!("{off:#x}: outside the module"))
+        self.img
+            .get(off as usize..off as usize + 4)
+            .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+            .ok_or(format!("{off:#x}: outside the module"))
     }
     /// adrp x<rd> of `to`'s page (a module offset, `STATE` or an area address)
     pub fn adrp(&mut self, rd: u32, to: u64) {
         let i = self.body.code.len();
-        let (t, a) = if to >= STATE { ("state", 0) } else if to >= AREA { ("area", ((to - AREA) & !0xFFF) as i64) } else { ("module", (to & !0xFFF) as i64) };
+        let (t, a) = if to >= STATE {
+            ("state", 0)
+        } else if to >= AREA {
+            ("area", ((to - AREA) & !0xFFF) as i64)
+        } else {
+            ("module", (to & !0xFFF) as i64)
+        };
         self.body.relocs.push(reloc(i, "adrp", t, a));
         self.emit(0x9000_0000 | rd);
     }
@@ -67,17 +89,32 @@ impl<'a> Ctx<'a> {
         self.emit(0x3500_0000 | ((d as u32 & 0x7FFFF) << 5) | t);
     }
     pub fn site(&mut self, off: u64, original: &str) -> Result<(), String> {
-        let want: Vec<u8> = (0..original.len() / 2).map(|i| u8::from_str_radix(&original[2 * i..2 * i + 2], 16).unwrap()).collect();
-        let have = self.img.get(off as usize..off as usize + want.len()).ok_or(format!("site {off:#x} outside the module"))?;
+        let want: Vec<u8> = (0..original.len() / 2)
+            .map(|i| u8::from_str_radix(&original[2 * i..2 * i + 2], 16).unwrap())
+            .collect();
+        let have = self
+            .img
+            .get(off as usize..off as usize + want.len())
+            .ok_or(format!("site {off:#x} outside the module"))?;
         if have != want.as_slice() {
             return Err(format!("site {off:#x} differs from {original}"));
         }
-        self.body.sites.push(Site { base: "module".into(), offset: off as i64, original: original.into() });
+        self.body.sites.push(Site {
+            base: "module".into(),
+            offset: off as i64,
+            original: original.into(),
+        });
         Ok(())
     }
     /// One word at `off`: a branch to the area address `start`.
     pub fn put_b(&mut self, off: u64, start: u64, reason: &str) {
-        self.body.puts.push(Put { base: "module".into(), offset: off as i64, words: vec![0x1400_0000], reason: reason.into(), relocs: vec![reloc(0, "b", "area", (start - AREA) as i64)] });
+        self.body.puts.push(Put {
+            base: "module".into(),
+            offset: off as i64,
+            words: vec![0x1400_0000],
+            reason: reason.into(),
+            relocs: vec![reloc(0, "b", "area", (start - AREA) as i64)],
+        });
     }
     /// The data address the adrp at `off` and the add / load / store at `lo_off` (default `off + 4`) make.
     pub fn address(&self, off: u64, lo_off: Option<u64>) -> Result<u64, String> {
@@ -92,7 +129,9 @@ impl<'a> Ctx<'a> {
         }
         let page = ((off & !0xFFF) as i64 + imm) as u64;
         if (b >> 5) & 31 != a & 31 {
-            return Err(format!("the low instruction at {lo_off:#x} does not use the adrp register"));
+            return Err(format!(
+                "the low instruction at {lo_off:#x} does not use the adrp register"
+            ));
         }
         if b & 0xFFC0_0000 == 0x9100_0000 {
             return Ok(page + ((b >> 10) & 0xFFF) as u64);
@@ -100,7 +139,12 @@ impl<'a> Ctx<'a> {
         if b & 0x3B00_0000 != 0x3900_0000 {
             return Err(format!("no add, load or store after the adrp at {off:#x}"));
         }
-        let scale = (1u64 << (b >> 30)) * if b & 0x0480_0000 == 0x0480_0000 && b >> 30 == 0 { 16 } else { 1 };
+        let scale = (1u64 << (b >> 30))
+            * if b & 0x0480_0000 == 0x0480_0000 && b >> 30 == 0 {
+                16
+            } else {
+                1
+            };
         Ok(page + ((b >> 10) & 0xFFF) as u64 * scale)
     }
 }
@@ -119,7 +163,15 @@ fn stp(op: u32, t: u32, t2: u32, n: u32, off: i64) -> u32 {
 
 /// nxnative's `stub(ctx, kids, nn_main, scene, block, device, rate)`: the frame step at the KIDS frame task, nnMain's
 /// device config, the scene update's event counters, the game's frame-rate block and the KTGL device's global.
-pub fn hwaoc(ctx: &mut Ctx, kids: u64, nn_main: u64, scene: u64, block: u64, device: u64, rate: Option<u64>) -> Result<(), String> {
+pub fn hwaoc(
+    ctx: &mut Ctx,
+    kids: u64,
+    nn_main: u64,
+    scene: u64,
+    block: u64,
+    device: u64,
+    rate: Option<u64>,
+) -> Result<(), String> {
     if block % 4 != 0 || (block & 0xFFF) + 0xC >= 0x1000 || device % 8 != 0 {
         return Err("frame-rate block or device not as reviewed".into());
     }
@@ -130,7 +182,13 @@ pub fn hwaoc(ctx: &mut Ctx, kids: u64, nn_main: u64, scene: u64, block: u64, dev
     ctx.site(s_device, "4900c0f2")?;
     let start = ctx.here();
     ctx.adrp(16, STATE);
-    for w in [0xb940_0210, 0x52a8_3e11, 0x6b11_021f, 0x5400_006d, 0xf2c0_0029] {
+    for w in [
+        0xb940_0210,
+        0x52a8_3e11,
+        0x6b11_021f,
+        0x5400_006d,
+        0xf2c0_0029,
+    ] {
         ctx.emit(w);
     }
     ctx.b(s_device + 4);
@@ -139,7 +197,16 @@ pub fn hwaoc(ctx: &mut Ctx, kids: u64, nn_main: u64, scene: u64, block: u64, dev
     ctx.put_b(s_device, start, "KTGL device config present interval: 1 above a 30 fps cap, else the game's 2 (state page target fps)");
     let start = ctx.here();
     ctx.adrp(16, STATE);
-    for w in [0xbd40_0210, 0x1e20_2208, 0x5400_01ad, 0x1e38_0208, 0xb900_3268, 0x5280_0791, 0x1ac8_0a31, 0xb900_2a11] {
+    for w in [
+        0xbd40_0210,
+        0x1e20_2208,
+        0x5400_01ad,
+        0x1e38_0208,
+        0xb900_3268,
+        0x5280_0791,
+        0x1ac8_0a31,
+        0xb900_2a11,
+    ] {
         ctx.emit(w);
     }
     ctx.adrp(16, block);
@@ -184,8 +251,25 @@ pub fn hwaoc(ctx: &mut Ctx, kids: u64, nn_main: u64, scene: u64, block: u64, dev
     ctx.emit(0xbd40_36f0);
     ctx.adrp(16, STATE);
     for w in [
-        0xb940_2a11, 0x3400_01f1, 0xf940_1a08, 0x8b31_4108, 0xf900_1a08, 0xb940_4ae8, 0x3400_0148, 0x1b08_7e31, 0x1e23_0231, 0x5280_0788, 0x1e23_0112, 0x1e32_1a31, 0xbd40_46e0, 0x1e31_0a10,
-        0x1e31_0800, 0x1400_0002, 0xbd40_46e0, 0x1e26_0208, 0xb900_1a68,
+        0xb940_2a11,
+        0x3400_01f1,
+        0xf940_1a08,
+        0x8b31_4108,
+        0xf900_1a08,
+        0xb940_4ae8,
+        0x3400_0148,
+        0x1b08_7e31,
+        0x1e23_0231,
+        0x5280_0788,
+        0x1e23_0112,
+        0x1e32_1a31,
+        0xbd40_46e0,
+        0x1e31_0a10,
+        0x1e31_0800,
+        0x1400_0002,
+        0xbd40_46e0,
+        0x1e26_0208,
+        0xb900_1a68,
     ] {
         ctx.emit(w);
     }
@@ -193,10 +277,20 @@ pub fn hwaoc(ctx: &mut Ctx, kids: u64, nn_main: u64, scene: u64, block: u64, dev
     ctx.put_b(s_steps, start, "KIDS frame task: the frame-rate object's steps × its fps × vsyncs per update / 60 (state page target fps; 0 = as the game sets them)");
     ctx.site(scene + 0x86c, "4a050011")?;
     ctx.site(scene + 0x890, "4a050051")?;
-    for (site, step, what) in [(scene + 0x86c, 0x1100_054a, "frame"), (scene + 0x890, 0x5100_054a, "frames left")] {
+    for (site, step, what) in [
+        (scene + 0x86c, 0x1100_054a, "frame"),
+        (scene + 0x890, 0x5100_054a, "frames left"),
+    ] {
         let start = ctx.here();
         ctx.adrp(16, STATE);
-        for w in [0xb940_2a11, 0x7100_063f, 0x5400_0061, 0xf940_1a11, 0x3700_0051, step] {
+        for w in [
+            0xb940_2a11,
+            0x7100_063f,
+            0x5400_0061,
+            0xf940_1a11,
+            0x3700_0051,
+            step,
+        ] {
             ctx.emit(w);
         }
         ctx.b(site + 4);
@@ -209,7 +303,11 @@ pub fn hwaoc(ctx: &mut Ctx, kids: u64, nn_main: u64, scene: u64, block: u64, dev
 /// global from the task's own load (+0xd70), the block from the writer's store of the fps (+0x3c).
 pub fn hwaoc_matched(ctx: &mut Ctx) -> Result<(), String> {
     let g = |k: &str| ctx.others.get(k).copied().ok_or(format!("{k} not found"));
-    let (nn, scene, writer) = (g("nnMain")?, g("scene update")?, g("frame-rate block writer")?);
+    let (nn, scene, writer) = (
+        g("nnMain")?,
+        g("scene update")?,
+        g("frame-rate block writer")?,
+    );
     let block = ctx.address(writer + 0x3c, None)?;
     let device = ctx.address(ctx.base + 0xd70, None)?;
     let kids = ctx.base;
@@ -223,15 +321,50 @@ const ORI_UNLOCK: u64 = 0xcbebe0;
 const ORI_MUTEX: u64 = 0x2df18;
 const ORI_WRAPPED: [(u64, &str, u32, &str); 10] = [
     (0x2d640, "ff4302d1", 0, "insert a layout"),
-    (0x34f80, "ffc301d1", 0, "register a layout and its members (main thread)"),
+    (
+        0x34f80,
+        "ffc301d1",
+        0,
+        "register a layout and its members (main thread)",
+    ),
     (0x353c0, "f60f1df8", 0, "look up a member (main thread)"),
-    (0x24550, "ff0302d1", 1, "apply a program's parameters (render thread, per draw)"),
-    (0x24de0, "ffc301d1", 0, "set a constant buffer (render thread)"),
-    (0x2d200, "ff0302d1", 0, "set several constant buffers (render thread)"),
-    (0x35510, "ff0301d1", 0, "write a buffer's values (render thread)"),
-    (0x25110, "fc6fbaa9", 0, "move a layout's bound slots (render thread)"),
+    (
+        0x24550,
+        "ff0302d1",
+        1,
+        "apply a program's parameters (render thread, per draw)",
+    ),
+    (
+        0x24de0,
+        "ffc301d1",
+        0,
+        "set a constant buffer (render thread)",
+    ),
+    (
+        0x2d200,
+        "ff0302d1",
+        0,
+        "set several constant buffers (render thread)",
+    ),
+    (
+        0x35510,
+        "ff0301d1",
+        0,
+        "write a buffer's values (render thread)",
+    ),
+    (
+        0x25110,
+        "fc6fbaa9",
+        0,
+        "move a layout's bound slots (render thread)",
+    ),
     (0x29330, "083858f9", 0, "reset the layouts' slots"),
-    (0x29120, "f40f1ef8", 1, "copy the table into a graphics-job device"),
+    (
+        0x29120,
+        "f40f1ef8",
+        1,
+        "copy the table into a graphics-job device",
+    ),
 ];
 
 pub fn ori_registry_lock(ctx: &mut Ctx) -> Result<(), String> {
@@ -250,11 +383,23 @@ pub fn ori_registry_lock(ctx: &mut Ctx) -> Result<(), String> {
         ctx.emit(stp(0xA980_0000, 29, 30, 31, -0x60));
         ctx.emit(0x9100_03fd);
         for i in 0..4 {
-            ctx.emit(stp(0xA900_0000, 2 * i, 2 * i + 1, 31, 0x10 + 0x10 * i as i64));
+            ctx.emit(stp(
+                0xA900_0000,
+                2 * i,
+                2 * i + 1,
+                31,
+                0x10 + 0x10 * i as i64,
+            ));
         }
         mutex_call(ctx, ORI_LOCK);
         for i in 0..4 {
-            ctx.emit(stp(0xA940_0000, 2 * i, 2 * i + 1, 31, 0x10 + 0x10 * i as i64));
+            ctx.emit(stp(
+                0xA940_0000,
+                2 * i,
+                2 * i + 1,
+                31,
+                0x10 + 0x10 * i as i64,
+            ));
         }
         ctx.bl(orig);
         ctx.emit(strx(0, 31, 2));
@@ -265,7 +410,13 @@ pub fn ori_registry_lock(ctx: &mut Ctx) -> Result<(), String> {
         if ctx.here() != orig {
             return Err("the wrapper is not 23 words".into());
         }
-        let w = u32::from_le_bytes((0..4).map(|i| u8::from_str_radix(&first[2 * i..2 * i + 2], 16).unwrap()).collect::<Vec<_>>().try_into().unwrap());
+        let w = u32::from_le_bytes(
+            (0..4)
+                .map(|i| u8::from_str_radix(&first[2 * i..2 * i + 2], 16).unwrap())
+                .collect::<Vec<_>>()
+                .try_into()
+                .unwrap(),
+        );
         ctx.emit(w);
         ctx.b(f + 4);
         ctx.put_b(f, start, &format!("Unity's constant-buffer table: {what} on the shared device under the registry mutex"));
@@ -291,16 +442,42 @@ pub fn xenoblade_camera_step(ctx: &mut Ctx) -> Result<(), String> {
     ctx.emit(0xbd40_b6a8);
     ctx.adrp(8, interval);
     ctx.emit(ldrx(8, 8, (interval & 0xFFF) / 8));
-    for w in [0xb940_0108, 0x7100_011f, 0x5280_0049, 0x1a88_0128, 0x5280_0789, 0x1ac8_0d28, 0x1e22_0101, 0x1e2e_1002, 0x1e21_1841] {
+    for w in [
+        0xb940_0108,
+        0x7100_011f,
+        0x5280_0049,
+        0x1a88_0128,
+        0x5280_0789,
+        0x1ac8_0d28,
+        0x1e22_0101,
+        0x1e2e_1002,
+        0x1e21_1841,
+    ] {
         ctx.emit(w);
     }
     ctx.adrp(8, elapsed);
     ctx.emit(ldrx(8, 8, (elapsed & 0xFFF) / 8));
-    for w in [0x1e20_4022, 0xb400_0048, 0xbd62_6d02, 0x1e21_2825, 0x1e25_2040, 0x1e22_cca5, 0x1e21_2040, 0x1e25_4c22, 0x1e27_d001, 0x1e21_0842, 0x1e22_0908] {
+    for w in [
+        0x1e20_4022,
+        0xb400_0048,
+        0xbd62_6d02,
+        0x1e21_2825,
+        0x1e25_2040,
+        0x1e22_cca5,
+        0x1e21_2040,
+        0x1e25_4c22,
+        0x1e27_d001,
+        0x1e21_0842,
+        0x1e22_0908,
+    ] {
         ctx.emit(w);
     }
     ctx.b(site + 4);
-    ctx.put_b(site, start, "camera angular integration: use the game's clamped elapsed frame time");
+    ctx.put_b(
+        site,
+        start,
+        "camera angular integration: use the game's clamped elapsed frame time",
+    );
     ctx.body.fps_ready = Some(true);
     Ok(())
 }
@@ -308,25 +485,40 @@ pub fn xenoblade_camera_step(ctx: &mut Ctx) -> Result<(), String> {
 // ---------------- 0100A00019DE0000: the render size times the host's render scale
 
 fn is_size(w: &[u32], i: usize) -> Option<u32> {
-    (w[i] & 0xffff_ffe0 == 0xd280_a000 && i + 1 < w.len() && w[i + 1] == 0xf2c0_5a00 | (w[i] & 31)).then_some(w[i] & 31)
+    (w[i] & 0xffff_ffe0 == 0xd280_a000 && i + 1 < w.len() && w[i + 1] == 0xf2c0_5a00 | (w[i] & 31))
+        .then_some(w[i] & 31)
 }
 
 /// The anchored find: the one function calling the import `calls` (through its PLT stub), with one 1280x720 size
 /// after that call and nowhere else in main; returns (the function, the size's offset in it, its register).
-pub fn render_size_find(nso: &translator::loader::nso::Nso, calls: &str) -> Result<(u64, u64, u32), String> {
+pub fn render_size_find(
+    nso: &translator::loader::nso::Nso,
+    calls: &str,
+) -> Result<(u64, u64, u32), String> {
     use translator::loader::nso::R_AARCH64_JUMP_SLOT;
     let img = &nso.image;
     let end = nso.text.0 + nso.text.1;
     let w = |a: usize| u32::from_le_bytes(img[a..a + 4].try_into().unwrap());
-    let sym = nso.syms.iter().position(|s| s.name == calls).ok_or(format!("{calls} not imported"))?;
-    let slot = nso.relocs.iter().find(|r| r.typ == R_AARCH64_JUMP_SLOT && r.sym as usize == sym).ok_or("no PLT slot")?.off;
+    let sym = nso
+        .syms
+        .iter()
+        .position(|s| s.name == calls)
+        .ok_or(format!("{calls} not imported"))?;
+    let slot = nso
+        .relocs
+        .iter()
+        .find(|r| r.typ == R_AARCH64_JUMP_SLOT && r.sym as usize == sym)
+        .ok_or("no PLT slot")?
+        .off;
     // the PLT stub: adrp x16, slot page; ldr x17, [x16, #lo]; add x16, x16, #lo; br x17
     let mut plt = None;
     let mut a = nso.text.0;
     while a + 16 <= end {
         let p = w(a);
         if p & 0x9F00_001F == 0x9000_0010 && w(a + 12) == 0xd61f_0220 {
-            let page = ((a as i64 & !0xFFF) + (((((((p >> 5) & 0x7FFFF) << 2) | ((p >> 29) & 3)) as i64) << 44) >> 32)) as u64;
+            let page = ((a as i64 & !0xFFF)
+                + (((((((p >> 5) & 0x7FFFF) << 2) | ((p >> 29) & 3)) as i64) << 44) >> 32))
+                as u64;
             let l = w(a + 4);
             if l & 0xFFC0_03FF == 0xF940_0211 && page + ((l >> 10) & 0xFFF) as u64 * 8 == slot {
                 plt = Some(a);
@@ -341,7 +533,9 @@ pub fn render_size_find(nso: &translator::loader::nso::Nso, calls: &str) -> Resu
     for (&s, &e) in &image.functions {
         for c in (s..e).step_by(4) {
             let u = w(c);
-            if u & 0xFC00_0000 == 0x9400_0000 && c as i64 + ((((u & 0x3FF_FFFF) << 6) as i32 >> 4) as i64) == plt {
+            if u & 0xFC00_0000 == 0x9400_0000
+                && c as i64 + ((((u & 0x3FF_FFFF) << 6) as i32 >> 4) as i64) == plt
+            {
                 callers.push((s, e, c));
             }
         }
@@ -352,28 +546,42 @@ pub fn render_size_find(nso: &translator::loader::nso::Nso, calls: &str) -> Resu
     }
     let (s, e, call) = callers[0];
     let words: Vec<u32> = (s..e).step_by(4).map(w).collect();
-    let sites: Vec<(usize, u32)> = (0..words.len()).filter_map(|i| is_size(&words, i).map(|rd| (4 * i, rd))).collect();
+    let sites: Vec<(usize, u32)> = (0..words.len())
+        .filter_map(|i| is_size(&words, i).map(|rd| (4 * i, rd)))
+        .collect();
     if sites.len() != 1 {
-        return Err(format!("{} 1280x720 sizes in the function at {s:#x} (need one)", sites.len()));
+        return Err(format!(
+            "{} 1280x720 sizes in the function at {s:#x} (need one)",
+            sites.len()
+        ));
     }
     let (off, rd) = sites[0];
     if callers.iter().filter(|c| c.0 == s).count() != 1 || call > s + off {
         return Err("the size does not follow the one CreateLayer call".into());
     }
     let text: Vec<u32> = (nso.text.0..end).step_by(4).map(w).collect();
-    let n = (0..text.len()).filter(|&i| is_size(&text, i).is_some()).count();
+    let n = (0..text.len())
+        .filter(|&i| is_size(&text, i).is_some())
+        .count();
     if n != 1 {
         return Err(format!("{n} 1280x720 sizes in main's text (need one)"));
     }
     let movk = (s + off + 4) as i64;
-    if (s..e).step_by(4).any(|c| translator::aot::patches::branch_target(w(c), c as u64) == Some(movk as u64)) {
+    if (s..e)
+        .step_by(4)
+        .any(|c| translator::aot::patches::branch_target(w(c), c as u64) == Some(movk as u64))
+    {
         return Err("a branch lands on the movk".into());
     }
     // the stub writes x16, x17 and v16-v18: the function must not use them
     for u in &words {
         let regs = [u & 31, (u >> 5) & 31, (u >> 10) & 31, (u >> 16) & 31];
-        if regs.iter().any(|&r| (16..=18).contains(&r)) && (u & 0x1F00_0000 == 0x1E00_0000 || regs[..2].iter().any(|&r| r == 16 || r == 17)) {
-            return Err(format!("the function at {s:#x} uses x16 / x17 / v16-v18, which the stub writes"));
+        if regs.iter().any(|&r| (16..=18).contains(&r))
+            && (u & 0x1F00_0000 == 0x1E00_0000 || regs[..2].iter().any(|&r| r == 16 || r == 17))
+        {
+            return Err(format!(
+                "the function at {s:#x} uses x16 / x17 / v16-v18, which the stub writes"
+            ));
         }
     }
     Ok((s as u64, off as u64, rd))
@@ -381,13 +589,33 @@ pub fn render_size_find(nso: &translator::loader::nso::Nso, calls: &str) -> Resu
 
 pub fn render_size(ctx: &mut Ctx, off: u64, rd: u32) -> Result<(), String> {
     let site = ctx.base + off;
-    let orig: String = (0xd280_a000u32 | rd).to_le_bytes().iter().chain((0xf2c0_5a00u32 | rd).to_le_bytes().iter()).map(|b| format!("{b:02x}")).collect();
+    let orig: String = (0xd280_a000u32 | rd)
+        .to_le_bytes()
+        .iter()
+        .chain((0xf2c0_5a00u32 | rd).to_le_bytes().iter())
+        .map(|b| format!("{b:02x}"))
+        .collect();
     ctx.site(site, &orig)?;
     let start = ctx.here();
     ctx.adrp(16, STATE);
     for w in [
-        0xbd40_1210, 0x1e2e_1011, 0x1e31_2200, 0x5400_01e0, 0x1e20_2208, 0x5400_01ad, 0x5280_2811, 0x1e22_0231, 0x1e30_0a31, 0x1e20_0231, 0x5280_1690, 0x1e22_0212, 0x1e30_0a52,
-        0x1e20_0250, 0x531e_7631, 0x531e_7610, 0xaa10_8220 | rd,
+        0xbd40_1210,
+        0x1e2e_1011,
+        0x1e31_2200,
+        0x5400_01e0,
+        0x1e20_2208,
+        0x5400_01ad,
+        0x5280_2811,
+        0x1e22_0231,
+        0x1e30_0a31,
+        0x1e20_0231,
+        0x5280_1690,
+        0x1e22_0212,
+        0x1e30_0a52,
+        0x1e20_0250,
+        0x531e_7631,
+        0x531e_7610,
+        0xaa10_8220 | rd,
     ] {
         ctx.emit(w);
     }
@@ -401,7 +629,13 @@ pub fn render_size(ctx: &mut Ctx, off: u64, rd: u32) -> Result<(), String> {
 }
 
 /// The generator of a stub body the exporter could not evaluate: by the rule's name or the build (None: none ported).
-pub fn generate(what: &str, nso: &translator::loader::nso::Nso, base: u64, others: &BTreeMap<String, u64>, calls: Option<&str>) -> Option<Result<StubBody, String>> {
+pub fn generate(
+    what: &str,
+    nso: &translator::loader::nso::Nso,
+    base: u64,
+    others: &BTreeMap<String, u64>,
+    calls: Option<&str>,
+) -> Option<Result<StubBody, String>> {
     let mut ctx = Ctx::new(&nso.image, base, others.clone());
     let r = if what.starts_with("60 fps frame step: the KIDS frame task") {
         hwaoc_matched(&mut ctx)
@@ -425,7 +659,9 @@ mod tests {
     use super::*;
 
     fn le(hex: &str) -> Vec<u8> {
-        (0..hex.len() / 2).map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap()).collect()
+        (0..hex.len() / 2)
+            .map(|i| u8::from_str_radix(&hex[2 * i..2 * i + 2], 16).unwrap())
+            .collect()
     }
     fn put(img: &mut [u8], at: u64, bytes: &[u8]) {
         img[at as usize..at as usize + bytes.len()].copy_from_slice(bytes);
@@ -438,8 +674,16 @@ mod tests {
     fn shape(b: &StubBody) -> (Vec<(usize, u32)>, Vec<(usize, String, String, i64)>) {
         let fixed: Vec<usize> = b.relocs.iter().map(|r| r.index).collect();
         (
-            b.code.iter().enumerate().filter(|(i, _)| !fixed.contains(i)).map(|(i, w)| (i, *w)).collect(),
-            b.relocs.iter().map(|r| (r.index, r.op.clone(), r.target.clone(), r.addend)).collect(),
+            b.code
+                .iter()
+                .enumerate()
+                .filter(|(i, _)| !fixed.contains(i))
+                .map(|(i, w)| (i, *w))
+                .collect(),
+            b.relocs
+                .iter()
+                .map(|r| (r.index, r.op.clone(), r.target.clone(), r.addend))
+                .collect(),
         )
     }
 
@@ -448,19 +692,44 @@ mod tests {
     #[test]
     fn hwaoc_matches_the_recorded_build_entry() {
         let prof = profiles::by_title(0x0100_2B00_111A_2000).expect("profile");
-        let rec = prof.patch_files().flat_map(|f| f.stub.iter()).find(|s| s.kind == "frame_step").expect("recorded").body.clone();
+        let rec = prof
+            .patch_files()
+            .flat_map(|f| f.stub.iter())
+            .find(|s| s.kind == "frame_step")
+            .expect("recorded")
+            .body
+            .clone();
         let mut img = vec![0u8; 0x2c0_0000];
         for s in &rec.sites {
             put(&mut img, s.offset as u64, &le(&s.original));
         }
         let mut ctx = Ctx::new(&img, 0, BTreeMap::new());
-        hwaoc(&mut ctx, 0x166d980, 0x8d94b0 - 0x1e60, 0x857510, 0x269e150, 0x2bac798, Some(0x1ef5f3c)).unwrap();
+        hwaoc(
+            &mut ctx,
+            0x166d980,
+            0x8d94b0 - 0x1e60,
+            0x857510,
+            0x269e150,
+            0x2bac798,
+            Some(0x1ef5f3c),
+        )
+        .unwrap();
         let b = ctx.body;
         assert_eq!(b.code.len(), rec.code.len());
         assert_eq!(shape(&b), shape(&rec));
-        let sites = |b: &StubBody| b.sites.iter().map(|s| (s.offset, s.original.clone())).collect::<std::collections::BTreeSet<_>>();
+        let sites = |b: &StubBody| {
+            b.sites
+                .iter()
+                .map(|s| (s.offset, s.original.clone()))
+                .collect::<std::collections::BTreeSet<_>>()
+        };
         assert_eq!(sites(&b), sites(&rec));
-        let puts = |b: &StubBody| b.puts.iter().map(|p| (p.offset, p.relocs[0].addend, p.reason.clone())).collect::<std::collections::BTreeSet<_>>();
+        let puts = |b: &StubBody| {
+            b.puts
+                .iter()
+                .map(|p| (p.offset, p.relocs[0].addend, p.reason.clone()))
+                .collect::<std::collections::BTreeSet<_>>()
+        };
         assert_eq!(puts(&b), puts(&rec));
     }
 
@@ -469,20 +738,52 @@ mod tests {
     #[test]
     fn ori_wraps_the_ten_functions() {
         let mut img = vec![0u8; 0xd0_0000];
-        put(&mut img, ORI_MUTEX, &adrp_word(ORI_MUTEX, 0x7e48000, 8).to_le_bytes());
-        put(&mut img, ORI_MUTEX + 4, &(0xF940_0108u32 | (0x960 / 8) << 10).to_le_bytes()); // ldr x8, [x8, #0x960]
+        put(
+            &mut img,
+            ORI_MUTEX,
+            &adrp_word(ORI_MUTEX, 0x7e48000, 8).to_le_bytes(),
+        );
+        put(
+            &mut img,
+            ORI_MUTEX + 4,
+            &(0xF940_0108u32 | (0x960 / 8) << 10).to_le_bytes(),
+        ); // ldr x8, [x8, #0x960]
         for (f, first, _, _) in ORI_WRAPPED {
             put(&mut img, f, &le(first));
         }
         let mut ctx = Ctx::new(&img, 0, BTreeMap::new());
         ori_registry_lock(&mut ctx).unwrap();
         let b = ctx.body;
-        assert_eq!((b.code.len(), b.puts.len(), b.sites.len()), (10 * 25, 10, 10));
-        assert_eq!(b.code[9], 0xF940_0000 | (0x960 / 8) << 10, "ldr x0, [x0, #slot lo]");
-        assert!(b.relocs.iter().any(|r| r.op == "adrp" && r.addend == 0x7e48000));
-        assert!(b.relocs.iter().any(|r| r.op == "bl" && r.addend == ORI_LOCK as i64) && b.relocs.iter().any(|r| r.op == "bl" && r.addend == ORI_UNLOCK as i64));
-        assert_eq!(b.code[23], u32::from_le_bytes(le("ff4302d1").try_into().unwrap()), "the original first instruction after the wrapper");
-        assert!(b.relocs.iter().any(|r| r.index == 24 && r.op == "b" && r.addend == 0x2d644));
+        assert_eq!(
+            (b.code.len(), b.puts.len(), b.sites.len()),
+            (10 * 25, 10, 10)
+        );
+        assert_eq!(
+            b.code[9],
+            0xF940_0000 | (0x960 / 8) << 10,
+            "ldr x0, [x0, #slot lo]"
+        );
+        assert!(b
+            .relocs
+            .iter()
+            .any(|r| r.op == "adrp" && r.addend == 0x7e48000));
+        assert!(
+            b.relocs
+                .iter()
+                .any(|r| r.op == "bl" && r.addend == ORI_LOCK as i64)
+                && b.relocs
+                    .iter()
+                    .any(|r| r.op == "bl" && r.addend == ORI_UNLOCK as i64)
+        );
+        assert_eq!(
+            b.code[23],
+            u32::from_le_bytes(le("ff4302d1").try_into().unwrap()),
+            "the original first instruction after the wrapper"
+        );
+        assert!(b
+            .relocs
+            .iter()
+            .any(|r| r.index == 24 && r.op == "b" && r.addend == 0x2d644));
     }
 
     /// Xenoblade's camera step: the interval's GOT slot from the setter's interleaved adrp / ldr, the frame object's
@@ -492,18 +793,51 @@ mod tests {
         let mut img = vec![0u8; 0x10_0000];
         let (base, setter, elapsed) = (0x1000u64, 0x3000u64, 0x4000u64);
         put(&mut img, base + 0x1ec, &le("a8b640bd"));
-        put(&mut img, setter, &adrp_word(setter, 0x8_0000, 8).to_le_bytes());
-        put(&mut img, setter + 8, &(0xF940_0108u32 | (0x18 / 8) << 10).to_le_bytes());
-        put(&mut img, elapsed, &adrp_word(elapsed, 0x9_0000, 9).to_le_bytes());
-        put(&mut img, elapsed + 4, &(0xF940_0129u32 | (0x20 / 8) << 10).to_le_bytes());
-        let others = BTreeMap::from([("interval setter".into(), setter), ("elapsed seconds".into(), elapsed), ("clamped task step".into(), 0x5000)]);
+        put(
+            &mut img,
+            setter,
+            &adrp_word(setter, 0x8_0000, 8).to_le_bytes(),
+        );
+        put(
+            &mut img,
+            setter + 8,
+            &(0xF940_0108u32 | (0x18 / 8) << 10).to_le_bytes(),
+        );
+        put(
+            &mut img,
+            elapsed,
+            &adrp_word(elapsed, 0x9_0000, 9).to_le_bytes(),
+        );
+        put(
+            &mut img,
+            elapsed + 4,
+            &(0xF940_0129u32 | (0x20 / 8) << 10).to_le_bytes(),
+        );
+        let others = BTreeMap::from([
+            ("interval setter".into(), setter),
+            ("elapsed seconds".into(), elapsed),
+            ("clamped task step".into(), 0x5000),
+        ]);
         let mut ctx = Ctx::new(&img, base, others);
         xenoblade_camera_step(&mut ctx).unwrap();
         let b = ctx.body;
         assert_eq!(b.code[2], 0xF940_0108 | (0x18 / 8) << 10);
-        assert!(b.relocs.iter().any(|r| r.op == "adrp" && r.addend == 0x8_0000) && b.relocs.iter().any(|r| r.op == "adrp" && r.addend == 0x9_0000));
-        assert_eq!((b.puts[0].offset, b.fps_ready), ((base + 0x1ec) as i64, Some(true)));
-        assert!(b.relocs.iter().any(|r| r.op == "b" && r.addend == (base + 0x1f0) as i64));
+        assert!(
+            b.relocs
+                .iter()
+                .any(|r| r.op == "adrp" && r.addend == 0x8_0000)
+                && b.relocs
+                    .iter()
+                    .any(|r| r.op == "adrp" && r.addend == 0x9_0000)
+        );
+        assert_eq!(
+            (b.puts[0].offset, b.fps_ready),
+            ((base + 0x1ec) as i64, Some(true))
+        );
+        assert!(b
+            .relocs
+            .iter()
+            .any(|r| r.op == "b" && r.addend == (base + 0x1f0) as i64));
     }
 
     /// The render size: the one 1280x720 pair, its register kept; the stub reads the state page's render scale.

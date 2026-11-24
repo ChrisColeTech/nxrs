@@ -32,11 +32,17 @@ pub fn entries(text: &str) -> Vec<Entry> {
                         out.push(c);
                     }
                 }
-                cur = Some(Entry { name: line[1..end].trim().to_string(), master: close == '}', words: vec![] });
+                cur = Some(Entry {
+                    name: line[1..end].trim().to_string(),
+                    master: close == '}',
+                    words: vec![],
+                });
                 line = line[end + 1..].trim_start();
                 continue;
             }
-            let tok_end = line.find(|c: char| c.is_whitespace() || c == '[' || c == '{').unwrap_or(line.len());
+            let tok_end = line
+                .find(|c: char| c.is_whitespace() || c == '[' || c == '{')
+                .unwrap_or(line.len());
             let tok = &line[..tok_end];
             if tok.len() == 8 && tok.chars().all(|c| c.is_ascii_hexdigit()) {
                 if let Some(c) = cur.as_mut() {
@@ -59,7 +65,9 @@ pub fn entries(text: &str) -> Vec<Entry> {
 /// The run-time switch of a cheat's patch set: `NXRS_CHEAT_<FNV-1a 32 of its name>` (the build and the run name it
 /// alike; a second entry of the same name gets `_2`, `_3`...).
 pub fn env_name(name: &str, nth: usize) -> String {
-    let h = name.bytes().fold(0x811c_9dc5u32, |h, b| (h ^ b as u32).wrapping_mul(0x0100_0193));
+    let h = name.bytes().fold(0x811c_9dc5u32, |h, b| {
+        (h ^ b as u32).wrapping_mul(0x0100_0193)
+    });
     if nth <= 1 {
         format!("NXRS_CHEAT_{h:08X}")
     } else {
@@ -95,7 +103,11 @@ pub fn main_writes(words: &[u32]) -> Option<Vec<(u64, Vec<u8>)>> {
             return None;
         }
         let rel = ((w & 0xFF) as u64) << 32 | words[i + 1] as u64;
-        let v = if t == 8 { (words[i + 2] as u64) << 32 | words[i + 3] as u64 } else { words[i + 2] as u64 };
+        let v = if t == 8 {
+            (words[i + 2] as u64) << 32 | words[i + 3] as u64
+        } else {
+            words[i + 2] as u64
+        };
         out.push((rel, v.to_le_bytes()[..t as usize].to_vec()));
         i += n;
     }
@@ -110,12 +122,35 @@ mod tests {
     fn entries_and_main_writes() {
         let t = "[Credits: someone]\n{Master}\n04000000 00000100 00000001\n[Moon jump]\n580F0000 01234567\n[Label only]\n[Two]\n04000000 00001000 D503201F 02000000 00001006 00001234\n[Wide]\n08000000 00002000 11111111 22222222\n";
         let e = entries(t);
-        assert_eq!(e.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(), ["Master", "Moon jump", "Two", "Wide"]);
+        assert_eq!(
+            e.iter().map(|x| x.name.as_str()).collect::<Vec<_>>(),
+            ["Master", "Moon jump", "Two", "Wide"]
+        );
         assert!(e[0].master);
-        assert_eq!(main_writes(&e[1].words), None, "a pointer cheat stays the VM's");
-        assert_eq!(main_writes(&e[2].words), Some(vec![(0x1000, vec![0x1f, 0x20, 0x03, 0xd5]), (0x1006, vec![0x34, 0x12])]));
-        assert_eq!(main_writes(&e[3].words), Some(vec![(0x2000, vec![0x22, 0x22, 0x22, 0x22, 0x11, 0x11, 0x11, 0x11])]));
-        assert_eq!(main_writes(&[0x0410_0000, 0, 1]), None, "the heap is not main");
+        assert_eq!(
+            main_writes(&e[1].words),
+            None,
+            "a pointer cheat stays the VM's"
+        );
+        assert_eq!(
+            main_writes(&e[2].words),
+            Some(vec![
+                (0x1000, vec![0x1f, 0x20, 0x03, 0xd5]),
+                (0x1006, vec![0x34, 0x12])
+            ])
+        );
+        assert_eq!(
+            main_writes(&e[3].words),
+            Some(vec![(
+                0x2000,
+                vec![0x22, 0x22, 0x22, 0x22, 0x11, 0x11, 0x11, 0x11]
+            )])
+        );
+        assert_eq!(
+            main_writes(&[0x0410_0000, 0, 1]),
+            None,
+            "the heap is not main"
+        );
         let n = env_names(&[e[2].clone(), e[2].clone()]);
         assert_eq!(n[0], env_name("Two", 1));
         assert!(n[1].ends_with("_2") && n[0].starts_with("NXRS_CHEAT_") && n[0].len() == 19);
