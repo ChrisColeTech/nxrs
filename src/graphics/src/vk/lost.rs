@@ -14,6 +14,8 @@ use std::sync::Mutex;
 
 #[path = "lost_bindings.rs"]
 pub(crate) mod bindings;
+#[path = "lost_ring.rs"]
+pub(crate) mod ring;
 
 /// checkpoints kept (with `all` the GPU ran more than 4,096 draws behind the replay in MKW races: the faulting one was
 /// gone, lane K2)
@@ -242,6 +244,9 @@ pub fn on_lost(g: &Gpu, at: &str) -> ! {
                         || a.address_type == vk::DeviceFaultAddressTypeEXT::WRITE_INVALID
                     {
                         bindings::report(&binding_markers, a.reported_address);
+                        for l in ring::report(&binding_markers, a.reported_address) {
+                            crate::log::red(&format!("    {l}"));
+                        }
                         let us = uses_of(a.reported_address);
                         crate::log::red(&format!(
                             "    {} recorded device range(s) of the replay hold it{}",

@@ -225,6 +225,7 @@ impl Gpu {
         } else {
             0
         };
+        lost::ring::note_mem(11, addr, size, vk::Handle::as_raw(buf), self.q.last_fence(), name);
         Ok(Buf {
             buf,
             alloc: Some(a),
@@ -236,6 +237,7 @@ impl Gpu {
     }
 
     pub fn free_buffer(&self, b: Buf) {
+        lost::ring::note_free(1, b.addr, b.size, vk::Handle::as_raw(b.buf), self.q.last_fence());
         unsafe { self.dev().destroy_buffer(b.buf, None) };
         if let Some(a) = b.alloc {
             if a.mapped_ptr().is_some() {

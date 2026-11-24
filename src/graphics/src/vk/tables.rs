@@ -36,6 +36,7 @@ impl Drop for PoolSnapshot {
     fn drop(&mut self) {
         unsafe {
             if let Some(db) = &self.db {
+                super::lost::ring::note_free(3, db.addr, db.size, vk::Handle::as_raw(db.buf), 0);
                 self.dev.unmap_memory(db.mem);
                 self.dev.destroy_buffer(db.buf, None);
                 self.dev.free_memory(db.mem, None);
@@ -98,6 +99,7 @@ pub fn desc_buffer(d: &Device, size: u64) -> Result<DescBuf, String> {
         d.dev
             .get_buffer_device_address(&vk::BufferDeviceAddressInfo::default().buffer(buf))
     };
+    super::lost::ring::note_mem(13, addr, allocation_size, vk::Handle::as_raw(buf), 0, "");
     Ok(DescBuf {
         buf,
         mem,

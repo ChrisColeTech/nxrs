@@ -606,6 +606,9 @@ fn release(g: &Gpu, p: Pool) {
             m.remove(&vk::Handle::as_raw(b.buf));
         }
     }
+    for b in p.buf.iter().chain(p.wins.iter()) {
+        super::lost::ring::note_free(2, b.addr, b.size, vk::Handle::as_raw(b.buf), g.q.last_fence());
+    }
     for b in p.wins {
         g.q.defer_after_use(Box::new(move |g: &Gpu| g.free_buffer(b)));
     }
@@ -982,6 +985,7 @@ impl Pool {
         } else {
             0
         };
+        super::lost::ring::note_mem(11, addr, size, vk::Handle::as_raw(buf), g.q.last_fence(), "granules");
         self.buf = Some(Buf {
             buf,
             alloc: None,

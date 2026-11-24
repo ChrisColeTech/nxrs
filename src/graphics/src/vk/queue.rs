@@ -75,6 +75,8 @@ pub struct Sub {
     pub db_cur: usize,
     pub db_used: u64,
     pub db_bound: Option<usize>,
+    /// `NXGFX_DB_POISON` (diagnosis): the stage sets written, (chunk, offset, stage)
+    pub db_log: Vec<(usize, u64, u32)>,
 }
 
 const DB_CHUNK: u64 = 4 << 20;
@@ -624,6 +626,7 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
             db_cur: 0,
             db_used: 0,
             db_bound: None,
+            db_log: Vec::new(),
         }
     };
     static SUB_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -850,6 +853,7 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         panic!("vkQueueSubmit2: {e}")
     });
     q.last.store(value, Ordering::Release);
+    super::lost::ring::note_submit(s.serial, value);
     super::newndve::trace::link(s.serial, value, true);
     {
         let mut l = q.after_current.lock().unwrap();
@@ -929,6 +933,7 @@ fn completion_loop(g: &'static Gpu) {
             },
         );
         let completion = submission_safety::resource_safety_result(completion);
+        super::lost::ring::COMPLETED.store(item.value, Ordering::Relaxed);
         // Failure above terminates with status 72, without entering any logger/cleanup.
         // Userspace still cannot preempt a driver call that never returns or prevent TDR.
         let mut signalled = false;
@@ -1037,6 +1042,30 @@ fn completion_loop(g: &'static Gpu) {
             .unwrap_or_else(|_| submission_safety::resource_safety_fatal());
         super::newndve::trace::retire(sub.serial, item.value);
         sub.dpool_i = 0;
+        // NXGFX_RECYCLE_DELAY=<n> (diagnosis): a completed submission's `Sub` waits until n later ones completed before
+        // it is poisoned (NXGFX_DB_POISON) and reused
+        static DELAY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        static HELD: Mutex<VecDeque<Sub>> = Mutex::new(VecDeque::new());
+        let delay = *DELAY.get_or_init(|| {
+            std::env::var("NXGFX_RECYCLE_DELAY").ok().and_then(|v| v.parse().ok()).unwrap_or(0)
+        });
+        let mut sub = if delay > 0 {
+            let mut h = HELD.lock().unwrap();
+            h.push_back(sub);
+            if h.len() <= delay {
+                None
+            } else {
+                h.pop_front()
+            }
+        } else {
+            Some(sub)
+        };
+        if let Some(sub) = sub.as_mut() {
+            if super::exec::db_poison_on() {
+                super::exec::db_poison(g, sub);
+            }
+        }
+        if let Some(mut sub) = sub {
         sub.db_cur = 0;
         sub.db_used = 0;
         sub.db_bound = None;
@@ -1049,6 +1078,7 @@ fn completion_loop(g: &'static Gpu) {
         sub.queries = 2;
         sub.occl_n = 0;
         q.recycled.lock().unwrap().push(sub);
+        }
         {
             let mut dl = q.deferred.lock().unwrap();
             let mut keep = Vec::new();

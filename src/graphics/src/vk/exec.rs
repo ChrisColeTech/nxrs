@@ -1514,6 +1514,11 @@ fn mesh_draw(g: &Gpu, sub: &mut Sub, qs: &mut QState, m: crate::nvn::cmd2::p_mes
 
 fn mesh_binding_evidence(sub: &Sub, qs: &QState, checkpoint: u64) {
     use super::lost::bindings;
+    if checkpoint != 0 {
+        let s = LAST_SETS.with(|l| l.get());
+        let bound = BOUND_DB.with(|b| b.get());
+        super::lost::ring::note_draw(checkpoint, sub.serial, bound, [s[1], s[3], s[4]]);
+    }
     if !bindings::enabled() || checkpoint == 0 {
         return;
     }
@@ -2383,6 +2388,7 @@ fn sbuf_to_end() -> bool {
 
 /// The device range [buffer + o, + n) handed to the GPU, for the loss report (diagnostics, lane K3).
 fn use_note(sub: &Sub, b: vk::Buffer, o: u64, n: u64, what: &'static str) {
+    super::lost::ring::note_use(sub.serial, vk::Handle::as_raw(b), o, n, what);
     if super::lost::level() < 2 {
         return;
     }
@@ -3849,9 +3855,45 @@ fn write_db_set(
         omitted: 0,
     });
     let zero = ZERO.get().map(|b| b.addr).unwrap_or(0);
+    // NXGFX_DB_FILL=1 (diagnosis): every uniform / storage slot of the set first names the zero buffer, so no slot keeps
+    // what an earlier recording wrote there
+    if db_fill_on() && zero != 0 {
+        static T: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+        let t = T.get_or_init(|| {
+            let mut v = vec![0u8; l.db_stage_size as usize];
+            for b in 0..64u32 {
+                let ty = super::layout::stage_binding_type(b);
+                let ai = vk::DescriptorAddressInfoEXT::default().address(zero).range(65536);
+                let gi = if ty == vk::DescriptorType::UNIFORM_BUFFER {
+                    vk::DescriptorGetInfoEXT::default().ty(ty).data(vk::DescriptorDataEXT { p_uniform_buffer: &ai })
+                } else {
+                    vk::DescriptorGetInfoEXT::default().ty(ty).data(vk::DescriptorDataEXT { p_storage_buffer: &ai })
+                };
+                let size = super::device::desc_size(p, ty);
+                unsafe { super::tables::put_descriptor(&g.d, v.as_mut_ptr() as usize, l.db_stage_off[b as usize], &gi, size) };
+            }
+            v
+        });
+        // the buffer slots' span (each slot written whole, the image slots between them left alone)
+        let start = l.db_stage_off[..64].iter().copied().min().unwrap_or(0) as usize;
+        let end = (0..64usize)
+            .map(|b| l.db_stage_off[b] as usize + super::device::desc_size(p, super::layout::stage_binding_type(b as u32)))
+            .max()
+            .unwrap_or(start);
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                t.as_ptr().add(start),
+                (ptr + off as usize + start) as *mut u8,
+                end.max(start) - start,
+            )
+        };
+    }
     // the distinct buffers' addresses (a set names a few: a staging chunk, the zero buffer, some pools)
     let mut seen: [(vk::Buffer, u64); 8] = [(vk::Buffer::null(), 0); 8];
     let mut ns = 0;
+    // the loss ring's record of this set (fixed size, no allocation)
+    let mut ring = [(0u32, 0i32, 0u64, 0u64, 0u64); super::lost::ring::MAXB];
+    let mut nr = 0;
     for (b, ty, info) in bufs {
         stale_check(sub, info.buffer, "a descriptor");
         let base = match seen[..ns].iter().find(|x| x.0 == info.buffer) {
@@ -3879,6 +3921,10 @@ fn write_db_set(
         } else {
             (zero, 65536)
         };
+        if nr < ring.len() {
+            ring[nr] = (*b, ty.as_raw(), a, range, vk::Handle::as_raw(info.buffer));
+            nr += 1;
+        }
         if let Some(e) = evidence.as_mut() {
             let buffer = if base != 0 {
                 info.buffer
@@ -3994,6 +4040,12 @@ fn write_db_set(
         };
     }
     super::perf::inc(super::perf::C::DescSets);
+    if m.mesh != 0 || m.stage == 1 {
+        super::lost::ring::note_set(sub.serial, sub.db_cur, sub.db[sub.db_cur].addr, off, m.stage, m.key, &ring[..nr]);
+    }
+    if db_poison_on() {
+        sub.db_log.push((sub.db_cur, off, m.stage));
+    }
     if let Some(tw) = tw {
         super::perf::add(super::perf::C::SetWriteNs, tw.elapsed().as_nanos() as u64);
     }
@@ -4032,6 +4084,113 @@ fn push_constants(g: &Gpu, sub: &Sub, qs: &QState, flipped: bool) {
     };
 }
 
+/// `NXGFX_DB_POISON=1` (diagnosis, MKW-LOSS): when a submission is recycled, the stage sets its descriptor buffer held
+/// are overwritten with uniform / storage descriptors naming an address nothing is mapped at (0x7f00_0000_0000 + 64 KB
+/// a binding). A later submission that reads a descriptor it did not write then faults at that address, at once,
+/// instead of reading the previous submission's (stale) descriptors.
+pub(crate) fn db_poison_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_DB_POISON").as_deref() == Ok("1"))
+}
+
+pub(crate) const DB_POISON: u64 = 0x7f00_0000_0000;
+
+fn db_fill_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_DB_FILL").as_deref() == Ok("1"))
+}
+
+/// Overwrites the stage sets `sub` wrote (chunks up to `db_cur`, the last up to `db_used`) with the poison set.
+pub(crate) fn db_poison(g: &Gpu, sub: &mut Sub) {
+    static T: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
+    let l = &g.layout;
+    let p = &g.d.db_props;
+    if std::env::var("NXGFX_DB_POISON_ZERO").as_deref() == Ok("1") && ZERO.get().is_none() {
+        return;
+    }
+    let t = T.get_or_init(|| {
+        let mut v = vec![0u8; l.db_stage_size as usize];
+        // NXGFX_DB_POISON_ZERO=1: the same writes naming the zero buffer instead (harmless: the cost alone)
+        let zero = (std::env::var("NXGFX_DB_POISON_ZERO").as_deref() == Ok("1"))
+            .then(|| ZERO.get().map(|z| z.addr))
+            .flatten();
+        // NXGFX_DB_POISON_FREED=1: a buffer's range freed right after its descriptors are made (a read faults there,
+        // and the loss report names the draw)
+        let freed = (std::env::var("NXGFX_DB_POISON_FREED").as_deref() == Ok("1"))
+            .then(|| {
+                g.buffer(
+                    // past the allocator's block size: memory of its own, unmapped when freed
+                    300 << 20,
+                    vk::BufferUsageFlags::STORAGE_BUFFER | vk::BufferUsageFlags::UNIFORM_BUFFER,
+                    MemoryLocation::GpuOnly,
+                    "poison",
+                )
+                .ok()
+            })
+            .flatten();
+        let zero = zero.or(freed.as_ref().map(|b| b.addr));
+        for b in 0..64u32 {
+            let ty = super::layout::stage_binding_type(b);
+            let ai = vk::DescriptorAddressInfoEXT::default()
+                .address(zero.unwrap_or(DB_POISON + b as u64 * 0x10000))
+                .range(0x10000);
+            let gi = if ty == vk::DescriptorType::UNIFORM_BUFFER {
+                vk::DescriptorGetInfoEXT::default().ty(ty).data(vk::DescriptorDataEXT { p_uniform_buffer: &ai })
+            } else {
+                vk::DescriptorGetInfoEXT::default().ty(ty).data(vk::DescriptorDataEXT { p_storage_buffer: &ai })
+            };
+            let size = super::device::desc_size(p, ty);
+            unsafe { super::tables::put_descriptor(&g.d, v.as_mut_ptr() as usize, l.db_stage_off[b as usize], &gi, size) };
+        }
+        if let Some(b) = freed {
+            crate::vklog!("MKW-LOSS poison: descriptors name freed buffer range {:#x} +{:#x}", b.addr, b.size);
+            g.free_buffer(b);
+        }
+        v
+    });
+    // NXGFX_DB_POISON=ubo / sbuf: only the uniform (0-31) / storage (32-63) bindings
+    static WHICH: std::sync::OnceLock<(u32, u32)> = std::sync::OnceLock::new();
+    let (b0, b1) = *WHICH.get_or_init(|| match std::env::var("NXGFX_DB_POISON_ONLY").as_deref() {
+        Ok("ubo") => (0, 32),
+        Ok("sbuf") => (32, 64),
+        Ok(r) if r.contains('-') => {
+            let mut it = r.split('-').map(|x| x.parse::<u32>().unwrap_or(0));
+            (it.next().unwrap_or(0), it.next().unwrap_or(64).min(64))
+        }
+        _ => (0, 64),
+    });
+    // NXGFX_DB_POISON_STAGES=<mask>: only the sets these stages wrote (bit n: stage n; default all)
+    static MASK: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    let mask = *MASK.get_or_init(|| {
+        std::env::var("NXGFX_DB_POISON_STAGES").ok().and_then(|v| v.parse().ok()).unwrap_or(0x3f)
+    });
+    for &(chunk, off, stage) in &sub.db_log {
+        if mask & (1 << stage) == 0 {
+            continue;
+        }
+        let Some(c) = sub.db.get(chunk) else { continue };
+        {
+            for b in b0..b1 {
+                let ty = super::layout::stage_binding_type(b);
+                let at = l.db_stage_off[b as usize] as usize;
+                let n = super::device::desc_size(p, ty);
+                unsafe {
+                    core::ptr::copy_nonoverlapping(t.as_ptr().add(at), (c.ptr + off as usize + at) as *mut u8, n)
+                };
+            }
+        }
+    }
+    sub.db_log.clear();
+}
+
+thread_local! {
+    /// The (descriptor-buffer chunk, offset) each graphics stage's set was last bound at on this thread (the loss ring's
+    /// mesh draw records).
+    static LAST_SETS: std::cell::Cell<[(u64, u64); 5]> = const { std::cell::Cell::new([(u64::MAX, 0); 5]) };
+    /// The stage-set descriptor buffer this thread last bound (its device address).
+    static BOUND_DB: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
 fn bind_sets(
     g: &Gpu,
     sub: &mut Sub,
@@ -4041,6 +4200,9 @@ fn bind_sets(
     dispatch: [u32; 3],
     base_instance: u32,
 ) {
+    if bp == vk::PipelineBindPoint::GRAPHICS {
+        LAST_SETS.with(|l| l.set([(u64::MAX, 0); 5]));
+    }
     if super::lost::bindings::enabled() {
         qs.sets
             .borrow_mut()
@@ -4085,6 +4247,7 @@ fn bind_sets(
             ];
             unsafe { g.d.db.cmd_bind_descriptor_buffers(sub.main, &infos) };
             sub.db_bound = Some(sub.db_cur);
+            BOUND_DB.with(|b| b.set(sub.db[sub.db_cur].addr));
             super::lost::note_set(b'B', 0, sub.serial, sub.db_cur, 0);
         }
         for m in mods {
@@ -4119,6 +4282,13 @@ fn bind_sets(
                 }
             };
             if let SetRef::Buf(off) = set {
+                if st < 5 {
+                    LAST_SETS.with(|l| {
+                        let mut v = l.get();
+                        v[st] = (sub.db_cur as u64, off);
+                        l.set(v);
+                    });
+                }
                 if super::lost::bindings::enabled() {
                     qs.sets
                         .borrow_mut()
