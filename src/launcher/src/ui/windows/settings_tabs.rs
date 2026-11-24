@@ -16,7 +16,6 @@ const ENGINE_TIP: &str = "The nxrs-build this launcher runs. Left as found, it i
 const CHECKS_TIP: &str = "What nxrs-build doctor checks on this machine: the CPU, the compiler, the engine libraries, Vulkan, free disk and the keys.";
 const WORKERS_TIP: &str = "How many compiler processes a build runs at once.";
 const BACKGROUND_TIP: &str = "The selected game's artwork, dimmed behind the gallery.";
-const PROFILES_TIP: &str = "When several profiles exist, the game asks who is playing.";
 
 pub fn engine(ui: &mut Ui, app: &mut App, s: &mut SettingsDraft) {
     let exe: (&str, &[&str]) = (
@@ -145,8 +144,5 @@ pub fn play(ui: &mut Ui, s: &mut SettingsDraft) {
             ui.checkbox(&mut s.pause, "Pause the game");
             ui.checkbox(&mut s.mute, "Mute the game");
         });
-    });
-    row(ui, "Profiles", PROFILES_TIP, |ui| {
-        ui.checkbox(&mut s.ask_user, "Ask who is playing");
     });
 }

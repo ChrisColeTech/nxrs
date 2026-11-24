@@ -52,6 +52,20 @@ pub fn run(app: &mut App, o: &Options) -> i32 {
     if let Err(code) = startup::apply(app, o) {
         return code;
     }
+    let source_changed = if let Some(source) = &o.source {
+        match app.set_source(source) {
+            Ok(path) => {
+                println!("Source: {path}");
+                true
+            }
+            Err(e) => {
+                eprintln!("Source error: {e}");
+                return 1;
+            }
+        }
+    } else {
+        false
+    };
     if o.nxrs_doctor {
         let d = crate::services::run::doctor(&app.tools);
         println!("{}", d.text());
@@ -77,6 +91,8 @@ pub fn run(app: &mut App, o: &Options) -> i32 {
         app.copy_saves(false, false);
     } else if o.build {
         app.start_build();
+    } else if source_changed {
+        return 0;
     }
     outcome(app)
 }

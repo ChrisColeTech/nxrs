@@ -16,6 +16,7 @@ pub struct Options {
     pub preview_theme: Option<String>,
     pub preview_accent: Option<String>,
     pub select_title: Option<String>,
+    pub source: Option<String>,
     pub check_image: Option<String>,
     pub show_appearance: bool,
     pub show_controller: bool,
@@ -51,6 +52,7 @@ impl Options {
                 || !self.install_update.is_empty()
                 || !self.remove_update.is_empty()
                 || self.update_choice.is_some()
+                || self.source.is_some()
                 || self.copy_saves
                 || self.nxrs_doctor)
     }
@@ -91,6 +93,7 @@ pub fn command() -> Command {
         .arg(value("preview-theme", "mode", "Preview dark or light mode without saving"))
         .arg(value("preview-accent", "color", "Preview an accent without saving"))
         .arg(value("select-title", "title", "Select a library game by display title"))
+        .arg(value("source", "package", "Set the --select-title game's source package or extracted folder, saved before --build"))
         .arg(value("check-image", "file", "Validate an artwork image"))
         .arg(flag("show-appearance", "Open appearance settings"))
         .arg(flag("show-controller", "Open controller settings"))
@@ -148,6 +151,7 @@ fn from_matches(m: &ArgMatches) -> Options {
         preview_theme: s("preview-theme"),
         preview_accent: s("preview-accent"),
         select_title: s("select-title"),
+        source: s("source"),
         check_image: s("check-image"),
         show_appearance: f("show-appearance"),
         show_controller: f("show-controller"),

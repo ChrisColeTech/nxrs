@@ -5,11 +5,31 @@ use super::properties::PropertiesDraft;
 use super::surface::Surface;
 use super::{App, DlcReason};
 use crate::model::game::Game;
-use crate::model::path_text::same_path;
+use crate::model::path_text::{absolute, same_path};
 use crate::model::play::{effective_button_layout, effective_docked};
-use crate::services::{build_facts, dlc_files, ini_file};
+use crate::services::{build_facts, dlc_files, ini_file, sources};
 
 impl App {
+    /// `--source`: the Properties source edit as a headless, composable product operation.
+    pub fn set_source(&mut self, source: &str) -> Result<String, String> {
+        sources::valid_source(source)?;
+        let id = self
+            .selected_id()
+            .ok_or_else(|| "No game is selected".to_string())?;
+        if self.busy(&id) {
+            return Err("The selected game is running or building".into());
+        }
+        let path = absolute(source);
+        let game = self
+            .lib
+            .find_mut(&id)
+            .ok_or_else(|| "No game is selected".to_string())?;
+        game.source = path.clone();
+        self.save();
+        self.refresh_facts();
+        Ok(path)
+    }
+
     pub fn show_properties(&mut self, tab: usize) {
         let Some(id) = self.selected_id() else { return };
         if self

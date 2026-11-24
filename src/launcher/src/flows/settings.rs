@@ -22,7 +22,6 @@ pub struct SettingsDraft {
     pub docked: bool,
     pub pause: bool,
     pub mute: bool,
-    pub ask_user: bool,
 }
 
 impl App {
@@ -45,7 +44,6 @@ impl App {
             docked: l.docked,
             pause: l.pause_on_focus_loss,
             mute: l.mute_on_focus_loss,
-            ask_user: l.ask_user,
         };
         self.surfaces.push(Surface::Settings(Box::new(draft)));
         self.run_doctor();
@@ -104,21 +102,9 @@ impl App {
             }
         }
         let l = &self.lib;
-        if (s.pause, s.mute, s.docked, s.ask_user)
-            != (
-                l.pause_on_focus_loss,
-                l.mute_on_focus_loss,
-                l.docked,
-                l.ask_user,
-            )
-        {
+        if (s.pause, s.mute, s.docked) != (l.pause_on_focus_loss, l.mute_on_focus_loss, l.docked) {
             let l = &mut self.lib;
-            (
-                l.pause_on_focus_loss,
-                l.mute_on_focus_loss,
-                l.docked,
-                l.ask_user,
-            ) = (s.pause, s.mute, s.docked, s.ask_user);
+            (l.pause_on_focus_loss, l.mute_on_focus_loss, l.docked) = (s.pause, s.mute, s.docked);
             let lib = self.lib.clone();
             let (failed, error) = ini_file::write_all(&lib.games, |g| {
                 build_facts::has_build(g)

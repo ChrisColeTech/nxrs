@@ -55,7 +55,6 @@ pub const BACKDROP: &str = "Show selected game artwork behind the gallery";
 pub const LIBRARY_FILE: &str = "Library file:\n";
 pub const PAUSE: &str = "Pause the game when its window is in the background";
 pub const MUTE: &str = "Mute the game when its window is in the background";
-pub const ASK_USER: &str = "Ask who is playing (when several profiles exist)";
 pub const PLAY_NOTE: &str = "The screen mode is the default for every game without its own (Properties > Runtime); the rest apply to every game. Off: a game keeps running, and its sound playing, while you use another window, as a PC game does. Built games get a change in their settings file right away, the others when they are built.";
 pub const BUSY_TITLE: &str = "Build in progress";
 pub const BUSY: &str =

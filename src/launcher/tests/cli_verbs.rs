@@ -64,6 +64,40 @@ fn build_dlc_updates_and_saves_verbs() {
 }
 
 #[test]
+fn source_can_be_changed_and_built_through_the_product_cli() {
+    let (_t, dir) = tmp();
+    let lib = fixture(&dir);
+    let data = format!("{dir}/data");
+    let source = format!("{dir}/replacement.nsp");
+    write(&source, b"PFS0....");
+    let o = nxrs(
+        &data,
+        &[
+            "--library",
+            &lib,
+            "--select-title",
+            "Kart",
+            "--source",
+            &source,
+            "--build",
+        ],
+    );
+    assert_eq!(o.status.code(), Some(0), "{}", text(&o));
+    assert!(text(&o).contains("Source:"));
+    let game = &library(&lib)["games"][0];
+    let normalized =
+        |value: &serde_json::Value| value.as_str().unwrap().replace('\\', "/").to_lowercase();
+    assert_eq!(
+        normalized(&game["source"]),
+        source.replace('\\', "/").to_lowercase()
+    );
+    assert_eq!(
+        normalized(&game["builtSource"]),
+        source.replace('\\', "/").to_lowercase()
+    );
+}
+
+#[test]
 fn engine_doctor_and_images() {
     let (_t, dir) = tmp();
     let lib = fixture(&dir);
