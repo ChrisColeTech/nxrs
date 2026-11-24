@@ -13,7 +13,8 @@ EXITS = {0: 'normal exit', 70: 'guest fault (exit 70)', 71: 'GPU device lost (ex
          0xC0000409: 'stack buffer overrun / fast fail', 0x40010004: 'killed (debugger/taskkill)', 1: 'killed or error'}
 PACING = re.compile(r'^\[\s*([\d.]+)\] \[vk\] pacing: ([\d.]+) FPS \| p95 ([\d.]+) p99 ([\d.]+) max ([\d.]+) ms')
 STAMP = re.compile(r'^\[\s*(?:front\s+)?([\d.]+)\]\s*')
-FAULT = re.compile(r'DEVICE_LOST|device lost|stall|exception|panicked|fault|abort', re.I)
+FAULT = re.compile(r'DEVICE_LOST|device lost|\bstall|\bexception\b|panicked|\bfault\b|\babort(ed|ing)?\b', re.I)
+NOT_FAULT = ('if the GPU stops responding', 'init takeover:')
 COUNTER = re.compile(r'skip|drop|lost|fail|unimpl|blacklist|stale|miss', re.I)
 SHEET_COLUMNS, SHEET_ROWS, CELL_W = 4, 3, 480
 
@@ -60,7 +61,7 @@ def log_facts(folder, failed):
             key = re.sub(r'0x[0-9a-fA-F]+|\b\d+\b', '#', STAMP.sub('', line))
             entry = red.setdefault(key, [0, line.strip()])
             entry[0] += 1
-        elif FAULT.search(line) and len(faults) < 40:
+        elif FAULT.search(line) and not any(s in line for s in NOT_FAULT) and len(faults) < 40:
             faults.append(line.strip()[:300])
         m = PACING.match(line)
         if m:
@@ -132,7 +133,8 @@ def sheets(folder, shots):
         items = [dict(path=str(p), label='%s  @%ss' % (p.stem, '?' if t is None else round(t)))
                  for p, t in shots[n:n + per]]
         spec = folder / 'sheet.json'
-        spec.write_text(json.dumps(dict(out=str(out), columns=SHEET_COLUMNS, cell_w=CELL_W, items=items)),
+        spec.write_text(json.dumps(dict(out=str(out), columns=min(SHEET_COLUMNS, len(items)), cell_w=CELL_W,
+                                        items=items)),
                         encoding='utf-8')
         subprocess.run(['powershell', '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', str(script),
                         str(spec)], capture_output=True, timeout=120)

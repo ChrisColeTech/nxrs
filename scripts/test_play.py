@@ -77,7 +77,7 @@ class Report(unittest.TestCase):
         self.assertEqual(r['sheets'], ['sheet-1.png'])
         self.assertEqual(r['screenshots'], ['01-shot.png', '02-shot.png'])
         head = (self.f / 'sheet-1.png').read_bytes()[:24]
-        self.assertEqual(struct.unpack('>II', head[16:24]), (4 * play_report.CELL_W, 270 + 26))
+        self.assertEqual(struct.unpack('>II', head[16:24]), (2 * play_report.CELL_W, 270 + 26))
 
 
 if __name__ == '__main__':
