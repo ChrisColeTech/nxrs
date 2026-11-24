@@ -130,7 +130,8 @@ class BuildTests(unittest.TestCase):
         self.assertEqual((self.root / 'idle.log').read_bytes(), b'')
 
     def invoke_main(self, fault=None):
-        def factory(folder):
+        def factory(folder, jobs=4):
+            self.assertEqual(jobs, 4)
             run = self.run_fixture(folder)
             execute = run.execute
             def idle(phase, command):

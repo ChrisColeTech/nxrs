@@ -92,23 +92,26 @@ def live_external_process(job, pid):
         hj.checked(hj.close(handle))
 
 
-def build_environment():
+def build_environment(jobs=4):
     env = dict(os.environ)
     # These are process-local; Cargo's jobserver also governs cc-rs native compilation.
-    env.update(PYTHONDONTWRITEBYTECODE='1', CARGO_BUILD_JOBS='1', CMAKE_BUILD_PARALLEL_LEVEL='1',
-               MAKEFLAGS='-j1', NUM_JOBS='1', RAYON_NUM_THREADS='1', OMP_NUM_THREADS='1',
+    # Codegen-unit and linker-thread settings stay fixed: they are part of Cargo's fingerprint.
+    workers = str(jobs)
+    env.update(PYTHONDONTWRITEBYTECODE='1', CARGO_BUILD_JOBS=workers, CMAKE_BUILD_PARALLEL_LEVEL=workers,
+               MAKEFLAGS='-j' + workers, NUM_JOBS=workers, RAYON_NUM_THREADS='1', OMP_NUM_THREADS='1',
                CARGO_PROFILE_RELEASE_CODEGEN_UNITS='1',
                CARGO_PROFILE_RELEASE_BUILD_OVERRIDE_CODEGEN_UNITS='1', CARGO_INCREMENTAL='0')
     if env.get('RUSTFLAGS') or env.get('CARGO_ENCODED_RUSTFLAGS'):
-        raise RuntimeError('review existing Rust flags before the single-worker build')
+        raise RuntimeError('review existing Rust flags before the supervised build')
     env['RUSTFLAGS'] = '-Clink-arg=/CGTHREADS:1'
     return env
 
 
 class BuildRun:
-    def __init__(self, folder, seconds=1800, monitor=None, overlap=external_workloads, poll_seconds=1):
-        self.folder, self.overlap = Path(folder), overlap
-        self.env = build_environment()
+    def __init__(self, folder, seconds=1800, monitor=None, overlap=external_workloads, poll_seconds=1,
+                 jobs=4):
+        self.folder, self.overlap, self.jobs = Path(folder), overlap, jobs
+        self.env = build_environment(jobs)
         self.monitor = monitor if monitor is not None else hm.Monitor(env=self.env)
         self.job = hj.Job(seconds)
         self.deadline = self.job.deadline
@@ -229,6 +232,8 @@ def rollback(folder):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--evidence', type=Path, required=True)
+    parser.add_argument('--jobs', type=int, choices=range(1, 5), default=4,
+                        help='Cargo workers (machine limit 4; lower only for a demonstrated cause)')
     args = parser.parse_args()
     folder = args.evidence.resolve()
     if not folder.parent.is_dir():
@@ -237,10 +242,10 @@ def main():
         folder.mkdir()  # refusal on any prior attempt; no automatic retry / stop reuse
         run, error, recovery = None, None, None
         try:
-            run = BuildRun(folder)
+            run = BuildRun(folder, jobs=args.jobs)
             write_json(folder / 'intent.json', dict(authorization='one monitored CPU production rebuild only',
                        command=['pwsh', '-NoProfile', '-File', str(ROOT / 'scripts/build/build.ps1'),
-                                '-Jobs', '1', '-SkipGnu', '-RetainPrevious',
+                                '-Jobs', str(args.jobs), '-SkipGnu', '-RetainPrevious',
                                 '-PublicationJournal', str(folder / 'publication.json')],
                        environment={k: v for k, v in run.env.items() if k in (
                            'CARGO_BUILD_JOBS', 'CMAKE_BUILD_PARALLEL_LEVEL', 'MAKEFLAGS', 'NUM_JOBS',
@@ -249,7 +254,7 @@ def main():
                        **run.status()))
             run.execute('preflight', [sys.executable, str(PROVENANCE), 'preflight', str(folder)])
             run.execute('production-build', ['pwsh', '-NoProfile', '-NonInteractive', '-File',
-                        str(ROOT / 'scripts/build/build.ps1'), '-Jobs', '1', '-SkipGnu',
+                        str(ROOT / 'scripts/build/build.ps1'), '-Jobs', str(args.jobs), '-SkipGnu',
                         '-RetainPrevious', '-PublicationJournal', str(folder / 'publication.json')])
             run.execute('verify', [sys.executable, str(PROVENANCE), 'verify', str(folder)])
         except BaseException as exc:

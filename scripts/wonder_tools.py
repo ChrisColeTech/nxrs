@@ -13,6 +13,7 @@ ROOT = Path(__file__).resolve().parents[1]
 LIBRARY = Path(r'C:\Users\Risky Biz\AppData\Local\nxrs\library.json')
 TITLE = '5afdfd1c-3c79-4576-ab73-761b7b1852b8'
 RELEASE = ROOT / 'dist/nxrs'
+WORKERS = 4  # the machine's normal worker count; native tools share the same bound
 
 
 def entry():
@@ -37,28 +38,34 @@ def engine_args(args, game):
     if args.count('--jobs') != 1:
         raise ValueError('expected one normal launcher worker argument')
     result = list(args)
-    result[result.index('--jobs')+1] = '1'
+    result[result.index('--jobs')+1] = str(WORKERS)
     return result
 
 
 class ToolSlot:
-    def __init__(self, name, deadline):
-        self.name, self.deadline, self.handle = name, deadline, None
+    """One of `slots` named mutexes (`name-0` ..): at most `slots` native tools run at once."""
+
+    def __init__(self, name, deadline, slots=1):
+        self.name, self.deadline, self.slots, self.handle = name, deadline, slots, None
 
     def __enter__(self):
-        self.handle = hj.checked(hj.create_mutex(None, False, self.name))
+        handles = [hj.checked(hj.create_mutex(None, False, '%s-%d' % (self.name, k)))
+                   for k in range(self.slots)]
         try:
             while time.monotonic() < self.deadline:
-                status = hj.wait(self.handle, 100)
-                if status == 0:
-                    return self
-                if status != 258:
-                    raise RuntimeError('tool slot abandoned/failed; refuse overlap')
+                for k, handle in enumerate(handles):
+                    status = hj.wait(handle, 100 if self.slots == 1 else 0)
+                    if status == 0:
+                        self.handle = handles.pop(k)
+                        return self
+                    if status != 258:
+                        raise RuntimeError('tool slot abandoned/failed; refuse overlap')
+                if self.slots > 1:
+                    time.sleep(.05)
             raise TimeoutError('tool slot deadline')
-        except BaseException:
-            hj.close(self.handle)
-            self.handle = None
-            raise
+        finally:
+            for handle in handles:
+                hj.close(handle)
 
     def __exit__(self, *exc):
         try:
@@ -85,7 +92,8 @@ def main():
                   'spirv': str(RELEASE / 'nxrs-engine/tools/spirv-val.exe')}[kind]
     if kind == 'clang' and '-fuse-ld=lld' in args and '-c' not in args:
         args = [*args, '-Wl,/threads:1']
-    with ToolSlot(os.environ['NXRS_WONDER_TOOL_SLOT'], deadline):
+    slot = os.environ['NXRS_WONDER_TOOL_SLOT']
+    with ToolSlot(slot + '-evidence', deadline):
         counts = folder / 'tool-counts.json'
         values = json.loads(counts.read_text()) if counts.exists() else {}
         values[kind] = values.get(kind, 0)+1
@@ -93,6 +101,7 @@ def main():
         if kind == 'clang' and '-c' not in args:
             with (folder / 'link-commands.jsonl').open('a', encoding='utf-8') as stream:
                 stream.write(json.dumps([executable, *args])+'\n')
+    with ToolSlot(slot, deadline, WORKERS):
         return subprocess.call([executable, *args], cwd=ROOT)
 
 

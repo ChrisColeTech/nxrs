@@ -133,7 +133,7 @@ class WonderTests(unittest.TestCase):
         game = dict(source='C:/my game/source.nup', buildDir='C:/my game/build', outputName='Wonder')
         args = ['build', game['source'], '--outdir', game['buildDir'], '-o', 'Wonder', '--jobs', '8', '--machine']
         result = wt.engine_args(args, game)
-        self.assertEqual(result[result.index('--jobs')+1], '1')
+        self.assertEqual(result[result.index('--jobs')+1], '4')
         self.assertEqual(args[args.index('--jobs')+1], '8')
         with self.assertRaises(ValueError):
             wt.engine_args(['build', 'C:/other/source.nup', *args[2:]], game)
@@ -158,6 +158,26 @@ class WonderTests(unittest.TestCase):
             self.assertFalse(thread.is_alive())
         self.assertEqual(max(peaks), 1)
         self.assertEqual(len(completed), 3)
+
+    def test_native_tool_slots_bound_concurrency_to_worker_count(self):
+        name = 'Local\\wonder-slots-'+str(os.getpid())
+        lock, active, peaks = threading.Lock(), [0], []
+        def use():
+            with wt.ToolSlot(name, time.monotonic()+5, 2):
+                with lock:
+                    active[0] += 1
+                    peaks.append(active[0])
+                time.sleep(.05)
+                with lock:
+                    active[0] -= 1
+        threads = [threading.Thread(target=use) for _ in range(6)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=5)
+            self.assertFalse(thread.is_alive())
+        self.assertEqual(len(peaks), 6)
+        self.assertLessEqual(max(peaks), 2)
 
     def test_shadow_route_never_constructs_production_save_transaction(self):
         game = dict(buildDir=str(self.root / 'game'), outputName='Wonder', id=wt.TITLE)
