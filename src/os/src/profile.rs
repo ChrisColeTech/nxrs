@@ -55,7 +55,11 @@ const BUILTIN: &[(u64, &str)] = &[(
 fn present_interval(v: &str) -> i32 {
     match v.trim() {
         "display" => 1,
-        n => n.parse::<i32>().ok().filter(|n| (1..=3).contains(n)).unwrap_or(0),
+        n => n
+            .parse::<i32>()
+            .ok()
+            .filter(|n| (1..=3).contains(n))
+            .unwrap_or(0),
     }
 }
 
@@ -74,10 +78,14 @@ impl Profile {
             if line.starts_with('#') || line.is_empty() {
                 continue;
             }
-            let Some((k, v)) = line.split_once('\t') else { continue };
+            let Some((k, v)) = line.split_once('\t') else {
+                continue;
+            };
             match k {
                 "name" => self.name = v.trim().to_string(),
-                "program_id" => self.program_id = u64::from_str_radix(v.trim(), 16).unwrap_or(self.program_id),
+                "program_id" => {
+                    self.program_id = u64::from_str_radix(v.trim(), 16).unwrap_or(self.program_id)
+                }
                 "app_pool" => self.pool = num(v).unwrap_or(self.pool),
                 "mem_used" => self.used_beside_heap = num(v).unwrap_or(self.used_beside_heap),
                 "sys_resource" => self.sys_resource = num(v).unwrap_or(self.sys_resource),
@@ -127,7 +135,10 @@ impl Profile {
         // the NPDM's SystemResourceSize (META +0x14): virtual address memory for a title no profile describes
         // (Anime Girls: Sun of a Beach, Beach Bounce Remastered, Sonic X Shadow Generations reserve address regions
         // in their static initialisers); a profile's value replaces it
-        if let Some(n) = npdm.filter(|n| n.get(..4) == Some(&b"META"[..])).and_then(|n| n.get(0x14..0x18)) {
+        if let Some(n) = npdm
+            .filter(|n| n.get(..4) == Some(&b"META"[..]))
+            .and_then(|n| n.get(0x14..0x18))
+        {
             p.sys_resource = u32::from_le_bytes(n.try_into().unwrap()) as u64;
         }
         if let Some(id) = npdm.and_then(npdm_program_id) {
@@ -155,7 +166,9 @@ impl Profile {
 /// The core mask of an NPDM's ThreadInfo kernel capability (ACI0, low bits 0b0111: lowest and highest core at bits
 /// 16-23 and 24-31).
 pub fn npdm_core_mask(npdm: &[u8]) -> Option<u64> {
-    let rd = |o: usize| -> Option<u32> { Some(u32::from_le_bytes(npdm.get(o..o + 4)?.try_into().ok()?)) };
+    let rd = |o: usize| -> Option<u32> {
+        Some(u32::from_le_bytes(npdm.get(o..o + 4)?.try_into().ok()?))
+    };
     let aci = rd(0x70)? as usize;
     if npdm.get(aci..aci + 4)? != b"ACI0" {
         return None;
@@ -182,7 +195,9 @@ pub fn npdm_program_id(npdm: &[u8]) -> Option<u64> {
     if npdm.get(aci..aci + 4)? != b"ACI0" {
         return None;
     }
-    Some(u64::from_le_bytes(npdm.get(aci + 0x10..aci + 0x18)?.try_into().ok()?))
+    Some(u64::from_le_bytes(
+        npdm.get(aci + 0x10..aci + 0x18)?.try_into().ok()?,
+    ))
 }
 
 static PROFILE: OnceLock<Profile> = OnceLock::new();
@@ -224,15 +239,32 @@ mod tests {
     /// ini leaves it to the profile (`present_interval=0`), and the ini's own value wins over it.
     #[test]
     fn present_interval_reaches_graphics() {
-        assert_eq!(Profile::load(None, Some("present_interval\tdisplay\n")).present_interval, 1);
-        assert_eq!(Profile::load(None, Some("present_interval\t2\n")).present_interval, 2);
-        assert_eq!(Profile::load(None, Some("present_interval\tgame\n")).present_interval, 0);
-        assert_eq!(Profile::load(None, None).present_interval, 0, "off by default");
+        assert_eq!(
+            Profile::load(None, Some("present_interval\tdisplay\n")).present_interval,
+            1
+        );
+        assert_eq!(
+            Profile::load(None, Some("present_interval\t2\n")).present_interval,
+            2
+        );
+        assert_eq!(
+            Profile::load(None, Some("present_interval\tgame\n")).present_interval,
+            0
+        );
+        assert_eq!(
+            Profile::load(None, None).present_interval,
+            0,
+            "off by default"
+        );
         let p = Profile::load(None, Some("present_interval\tdisplay\n"));
         crate::nvn::apply_present_interval(&p);
         assert_eq!(nxgfx::nvn::window::forced_interval(), Some(1));
         assert!(nxconfig::apply_arg("--present_interval=2"));
-        assert_eq!(nxgfx::nvn::window::forced_interval(), Some(2), "the ini wins");
+        assert_eq!(
+            nxgfx::nvn::window::forced_interval(),
+            Some(2),
+            "the ini wins"
+        );
         assert!(nxconfig::apply_arg("--present_interval=0"));
         crate::nvn::apply_present_interval(&Profile::default());
         assert_eq!(nxgfx::nvn::window::forced_interval(), None);

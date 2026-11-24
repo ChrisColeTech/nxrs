@@ -22,7 +22,9 @@ pub fn game(key: &str, default: &str) -> String {
     if let Ok(v) = std::env::var(format!("NXOS_{}", key.to_ascii_uppercase())) {
         return v;
     }
-    profiles::by_title(crate::profile::get().program_id).and_then(|p| p.get(key)).unwrap_or_else(|| default.to_string())
+    profiles::by_title(crate::profile::get().program_id)
+        .and_then(|p| p.get(key))
+        .unwrap_or_else(|| default.to_string())
 }
 
 /// A game fact that is `on` / `off` (or 1 / 0 in an override).
@@ -67,8 +69,10 @@ pub fn launch_param_bytes(spec: &str, lang8: u64) -> (Vec<u8>, Vec<String>) {
 }
 
 /// Turbo's `language` numbers (nn::settings::Language order) as language codes.
-pub const LANGUAGES: [&str; 15] =
-    ["ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB", "fr-CA", "es-419"];
+pub const LANGUAGES: [&str; 15] = [
+    "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB",
+    "fr-CA", "es-419",
+];
 
 /// The language code of a `language` setting (a number, or a code as such).
 pub fn language_code(v: &str) -> String {
@@ -115,10 +119,19 @@ mod tests {
     /// Profile facts: the running title's game.tsv value, else game.py's default; on / off flags.
     #[test]
     fn game_facts_from_the_profile() {
-        assert!(super::flag_value("on") && super::flag_value("1") && !super::flag_value("off") && !super::flag_value("0"));
+        assert!(
+            super::flag_value("on")
+                && super::flag_value("1")
+                && !super::flag_value("off")
+                && !super::flag_value("0")
+        );
         // Absolum (0100A83022A22000): stdalloc_cap 0xa0000000; the default title: game.py's defaults
         let absolum = profiles::by_title(0x0100_A830_22A2_2000).unwrap();
         assert_eq!(absolum.get("stdalloc_cap").as_deref(), Some("0xa0000000"));
-        assert_eq!(super::game("perf_mode", "follow"), "follow", "no profile for the default program");
+        assert_eq!(
+            super::game("perf_mode", "follow"),
+            "follow",
+            "no profile for the default program"
+        );
     }
 }

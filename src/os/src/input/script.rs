@@ -9,11 +9,14 @@
 //!   and R<x>/<y> (a stick part way, -1..1, y up); held 0.15 s by default.
 //! - The control pipe's `press <keys>[~hold]` and `P<n> <keys>[~hold]` (player n).
 
-use super::{ilog, Path, PLAYERS, SCRIPT, SCRIPT_P, SCRIPT_PLAYERS, REPLAYING};
+use super::{ilog, Path, PLAYERS, REPLAYING, SCRIPT, SCRIPT_P, SCRIPT_PLAYERS};
 use std::io::Write;
 use std::sync::atomic::Ordering;
 
-pub const KEY_NAMES: [&str; 16] = ["A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "Plus", "Minus", "Left", "Up", "Right", "Down"];
+pub const KEY_NAMES: [&str; 16] = [
+    "A", "B", "X", "Y", "LS", "RS", "L", "R", "ZL", "ZR", "Plus", "Minus", "Left", "Up", "Right",
+    "Down",
+];
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Step {
@@ -32,11 +35,17 @@ pub fn parse_keys(spec: &str) -> Result<(u64, [i32; 4]), String> {
             b |= 1 << i;
             continue;
         }
-        let dirs = [("Left", -32767, 0), ("Up", 0, 32767), ("Right", 32767, 0), ("Down", 0, -32767)];
+        let dirs = [
+            ("Left", -32767, 0),
+            ("Up", 0, 32767),
+            ("Right", 32767, 0),
+            ("Down", 0, -32767),
+        ];
         let mut found = false;
         for (stick, off) in [('L', 0usize), ('R', 2)] {
             for (d, x, y) in dirs {
-                if k.len() == d.len() + 1 && k.starts_with(stick) && k[1..].eq_ignore_ascii_case(d) {
+                if k.len() == d.len() + 1 && k.starts_with(stick) && k[1..].eq_ignore_ascii_case(d)
+                {
                     if x != 0 {
                         a[off] = x;
                     }
@@ -68,7 +77,10 @@ pub fn parse_keys(spec: &str) -> Result<(u64, [i32; 4]), String> {
 pub fn parse_steps(spec: &str) -> (Vec<Step>, Vec<String>) {
     let mut out = vec![];
     let mut errs = vec![];
-    for tok in spec.split([',', ' ', '\t', '\r', '\n']).filter(|t| !t.is_empty()) {
+    for tok in spec
+        .split([',', ' ', '\t', '\r', '\n'])
+        .filter(|t| !t.is_empty())
+    {
         let Some((t, rest)) = tok.split_once(':') else {
             errs.push(format!("step lacks 'seconds:': {tok}"));
             continue;
@@ -88,14 +100,22 @@ pub fn parse_steps(spec: &str) -> (Vec<Step>, Vec<String>) {
         let (count, every) = match rep {
             Some(x) => {
                 let (c, e) = x.split_once('/').unwrap_or((x, "1"));
-                (c.parse::<u32>().unwrap_or(1).max(1), e.parse::<f64>().unwrap_or(1.0))
+                (
+                    c.parse::<u32>().unwrap_or(1).max(1),
+                    e.parse::<f64>().unwrap_or(1.0),
+                )
             }
             None => (1, 0.0),
         };
         match parse_keys(keys) {
             Ok((btn, axes)) => {
                 for i in 0..count {
-                    out.push(Step { at: at + i as f64 * every, hold, btn, axes });
+                    out.push(Step {
+                        at: at + i as f64 * every,
+                        hold,
+                        btn,
+                        axes,
+                    });
                 }
             }
             Err(e) => errs.push(e),
@@ -114,7 +134,9 @@ fn press(path: &'static Path, btn: u64, axes: [i32; 4], hold: f64) {
 /// NXRS_KEYS on a thread of its own, and the control pipe's commands.
 pub fn start_keys() {
     register_commands();
-    let Some(spec) = super::env_str("NXRS_KEYS") else { return };
+    let Some(spec) = super::env_str("NXRS_KEYS") else {
+        return;
+    };
     let text = match spec.strip_prefix('@') {
         Some(f) => match std::fs::read_to_string(f) {
             Ok(t) => t,
@@ -142,7 +164,12 @@ pub fn start_keys() {
                 if s.at > el {
                     std::thread::sleep(std::time::Duration::from_secs_f64(s.at - el));
                 }
-                crate::log!("NXRS_KEYS: {:.2} press {:#x} (hold {:.2} s)", s.at, s.btn, s.hold);
+                crate::log!(
+                    "NXRS_KEYS: {:.2} press {:#x} (hold {:.2} s)",
+                    s.at,
+                    s.btn,
+                    s.hold
+                );
                 press(&SCRIPT, s.btn, s.axes, s.hold);
             }
         })
@@ -150,24 +177,10 @@ pub fn start_keys() {
 }
 
 fn register_commands() {
-    nxconfig::ctl::register("press", "<keys>[~seconds]: presses player 1's keys (A+B, LUp, L0.5/-1 ...), 0.15 s by default", |a| {
-        let spec = a.join("+");
-        let (keys, hold) = match spec.split_once('~') {
-            Some((k, h)) => (k.to_string(), h.parse().unwrap_or(0.15)),
-            None => (spec.clone(), 0.15),
-        };
-        match parse_keys(&keys) {
-            Ok((b, ax)) => {
-                crate::log!("ctl: press {b:#x} (hold {hold:.2} s)");
-                press(&SCRIPT, b, ax, hold);
-                format!("pressed {b:#x} for {hold:.2} s")
-            }
-            Err(e) => e,
-        }
-    });
-    for p in 1..PLAYERS {
-        let name: &'static str = Box::leak(format!("P{}", p + 1).into_boxed_str());
-        nxconfig::ctl::register(name, "<keys>[~seconds]: that player's scripted controller (connected from its first press)", move |a| {
+    nxconfig::ctl::register(
+        "press",
+        "<keys>[~seconds]: presses player 1's keys (A+B, LUp, L0.5/-1 ...), 0.15 s by default",
+        |a| {
             let spec = a.join("+");
             let (keys, hold) = match spec.split_once('~') {
                 Some((k, h)) => (k.to_string(), h.parse().unwrap_or(0.15)),
@@ -175,20 +188,45 @@ fn register_commands() {
             };
             match parse_keys(&keys) {
                 Ok((b, ax)) => {
-                    if SCRIPT_PLAYERS.fetch_or(1 << p, Ordering::AcqRel) >> p & 1 == 0 {
-                        crate::log!("ctl: player {}'s scripted controller connected", p + 1);
-                    }
-                    press(&SCRIPT_P[p], b, ax, hold);
-                    format!("player {} pressed {b:#x} for {hold:.2} s", p + 1)
+                    crate::log!("ctl: press {b:#x} (hold {hold:.2} s)");
+                    press(&SCRIPT, b, ax, hold);
+                    format!("pressed {b:#x} for {hold:.2} s")
                 }
                 Err(e) => e,
             }
-        });
+        },
+    );
+    for p in 1..PLAYERS {
+        let name: &'static str = Box::leak(format!("P{}", p + 1).into_boxed_str());
+        nxconfig::ctl::register(
+            name,
+            "<keys>[~seconds]: that player's scripted controller (connected from its first press)",
+            move |a| {
+                let spec = a.join("+");
+                let (keys, hold) = match spec.split_once('~') {
+                    Some((k, h)) => (k.to_string(), h.parse().unwrap_or(0.15)),
+                    None => (spec.clone(), 0.15),
+                };
+                match parse_keys(&keys) {
+                    Ok((b, ax)) => {
+                        if SCRIPT_PLAYERS.fetch_or(1 << p, Ordering::AcqRel) >> p & 1 == 0 {
+                            crate::log!("ctl: player {}'s scripted controller connected", p + 1);
+                        }
+                        press(&SCRIPT_P[p], b, ax, hold);
+                        format!("player {} pressed {b:#x} for {hold:.2} s", p + 1)
+                    }
+                    Err(e) => e,
+                }
+            },
+        );
     }
     nxconfig::ctl::register("pads", ": the controllers, their players and state", |_| {
         let mut s = String::new();
         for (n, p, b, a) in super::devices() {
-            s.push_str(&format!("{n}: player {} buttons {b:#06x} sticks {a:?}\n", p.map(|p| (p + 1).to_string()).unwrap_or("-".into())));
+            s.push_str(&format!(
+                "{n}: player {} buttons {b:#06x} sticks {a:?}\n",
+                p.map(|p| (p + 1).to_string()).unwrap_or("-".into())
+            ));
         }
         if s.is_empty() {
             s = "no controllers\n".into();
@@ -206,10 +244,18 @@ pub struct Recorder {
 
 impl Recorder {
     pub fn open(path: &str) -> Option<Recorder> {
-        match std::fs::OpenOptions::new().create(true).append(true).open(path) {
+        match std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+        {
             Ok(f) => {
                 ilog!("input: recording to {path}");
-                Some(Recorder { f: std::io::BufWriter::new(f), t0: None, last: None })
+                Some(Recorder {
+                    f: std::io::BufWriter::new(f),
+                    t0: None,
+                    last: None,
+                })
             }
             Err(e) => {
                 ilog!("[RED] input: cannot record to {path}: {e}");
@@ -223,7 +269,16 @@ impl Recorder {
         }
         let t0 = *self.t0.get_or_insert(now);
         self.last = Some((b, a));
-        let _ = writeln!(self.f, "{} {:x} {} {} {} {}", ((now - t0) * 1000.0) as u64, b & 0xffff, a[0], a[1], a[2], a[3]);
+        let _ = writeln!(
+            self.f,
+            "{} {:x} {} {} {} {}",
+            ((now - t0) * 1000.0) as u64,
+            b & 0xffff,
+            a[0],
+            a[1],
+            a[2],
+            a[3]
+        );
         let _ = self.f.flush();
     }
     pub fn flush(&mut self) {
@@ -252,7 +307,12 @@ pub fn parse_record(text: &str) -> Vec<(u64, u64, [i32; 4])> {
         if f.len() < 6 {
             continue;
         }
-        let (Ok(ms), Ok(b)) = (f[0].parse::<u64>(), u64::from_str_radix(f[1].trim_start_matches("0x"), 16)) else { continue };
+        let (Ok(ms), Ok(b)) = (
+            f[0].parse::<u64>(),
+            u64::from_str_radix(f[1].trim_start_matches("0x"), 16),
+        ) else {
+            continue;
+        };
         let a: [i32; 4] = std::array::from_fn(|i| f[2 + i].parse().unwrap_or(0));
         v.push((ms, b, a));
     }
@@ -262,7 +322,14 @@ pub fn parse_record(text: &str) -> Vec<(u64, u64, [i32; 4])> {
 impl Replay {
     pub fn new(path: String) -> Replay {
         ilog!("input: replaying {path} when it appears");
-        Replay { path, stamp: None, lines: vec![], start: 0.0, at: 0, next_check: 0.0 }
+        Replay {
+            path,
+            stamp: None,
+            lines: vec![],
+            start: 0.0,
+            at: 0,
+            next_check: 0.0,
+        }
     }
     pub fn tick(&mut self, now: f64) {
         if now >= self.next_check {
@@ -271,10 +338,15 @@ impl Replay {
                 let st = (m.modified().unwrap_or(std::time::UNIX_EPOCH), m.len());
                 if self.stamp != Some(st) {
                     self.stamp = Some(st);
-                    self.lines = parse_record(&std::fs::read_to_string(&self.path).unwrap_or_default());
+                    self.lines =
+                        parse_record(&std::fs::read_to_string(&self.path).unwrap_or_default());
                     self.start = now;
                     self.at = 0;
-                    ilog!("input: replay of {} ({} states) starts", self.path, self.lines.len());
+                    ilog!(
+                        "input: replay of {} ({} states) starts",
+                        self.path,
+                        self.lines.len()
+                    );
                     REPLAYING.store(!self.lines.is_empty(), Ordering::Release);
                 }
             }
@@ -287,7 +359,10 @@ impl Replay {
             self.at += 1;
         }
         if self.at + 1 >= self.lines.len() && ms > self.lines[self.at].0 + 100 {
-            ilog!("input: replay of {} finished; the real input is back", self.path);
+            ilog!(
+                "input: replay of {} finished; the real input is back",
+                self.path
+            );
             self.lines.clear();
             SCRIPT.set(0, [0; 4]);
             REPLAYING.store(false, Ordering::Release);

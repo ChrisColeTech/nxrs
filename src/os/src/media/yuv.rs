@@ -26,8 +26,23 @@ impl Picture {
     }
     /// From planar 4:2:0 rows (each plane with its own stride).
     #[allow(clippy::too_many_arguments)]
-    pub fn from_i420(w: usize, h: usize, y: &[u8], ys: usize, u: &[u8], us: usize, v: &[u8], vs: usize) -> Picture {
-        let mut p = Picture { w, h, y: vec![0; w * h], uv: vec![0; w.div_ceil(2) * 2 * h.div_ceil(2)], ..Default::default() };
+    pub fn from_i420(
+        w: usize,
+        h: usize,
+        y: &[u8],
+        ys: usize,
+        u: &[u8],
+        us: usize,
+        v: &[u8],
+        vs: usize,
+    ) -> Picture {
+        let mut p = Picture {
+            w,
+            h,
+            y: vec![0; w * h],
+            uv: vec![0; w.div_ceil(2) * 2 * h.div_ceil(2)],
+            ..Default::default()
+        };
         for r in 0..h {
             p.y[r * w..r * w + w].copy_from_slice(&y[r * ys..r * ys + w]);
         }
@@ -43,7 +58,13 @@ impl Picture {
     }
     /// From NV12 rows (luma and chroma with one stride).
     pub fn from_nv12(w: usize, h: usize, y: &[u8], uv: &[u8], stride: usize) -> Picture {
-        let mut p = Picture { w, h, y: vec![0; w * h], uv: vec![0; w.div_ceil(2) * 2 * h.div_ceil(2)], ..Default::default() };
+        let mut p = Picture {
+            w,
+            h,
+            y: vec![0; w * h],
+            uv: vec![0; w.div_ceil(2) * 2 * h.div_ceil(2)],
+            ..Default::default()
+        };
         for r in 0..h {
             p.y[r * w..r * w + w].copy_from_slice(&y[r * stride..r * stride + w]);
         }
@@ -81,8 +102,16 @@ impl Picture {
     pub fn rgba_into(&self, dst: &mut [u8], w: usize, h: usize) {
         let full = self.full_range;
         let b709 = self.bt709_for(h);
-        let (ky, kc) = if full { (1.0, 1.0) } else { (255.0 / 219.0, 255.0 / 224.0) };
-        let (rv, gu, gv, bu) = if b709 { (1.5748, 0.1873, 0.4681, 1.8556) } else { (1.402, 0.3441, 0.7141, 1.772) };
+        let (ky, kc) = if full {
+            (1.0, 1.0)
+        } else {
+            (255.0 / 219.0, 255.0 / 224.0)
+        };
+        let (rv, gu, gv, bu) = if b709 {
+            (1.5748, 0.1873, 0.4681, 1.8556)
+        } else {
+            (1.402, 0.3441, 0.7141, 1.772)
+        };
         let f = |x: f64| (x * 65536.0) as i32;
         let (yk, rvk, guk, gvk, buk) = (f(ky), f(rv * kc), f(gu * kc), f(gv * kc), f(bu * kc));
         let y0 = if full { 0 } else { 16 };
@@ -128,7 +157,11 @@ pub fn write_png(path: &std::path::Path, rgba: &[u8], w: usize, h: usize) -> std
         for &b in data {
             c ^= b as u32;
             for _ in 0..8 {
-                c = if c & 1 != 0 { 0xedb8_8320 ^ (c >> 1) } else { c >> 1 };
+                c = if c & 1 != 0 {
+                    0xedb8_8320 ^ (c >> 1)
+                } else {
+                    c >> 1
+                };
             }
         }
         !c

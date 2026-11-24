@@ -42,7 +42,9 @@ extern "C" {
 }
 
 pub fn version() -> String {
-    unsafe { CStr::from_ptr(dav1d_version()) }.to_string_lossy().into_owned()
+    unsafe { CStr::from_ptr(dav1d_version()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 #[repr(C, align(16))]
@@ -78,7 +80,14 @@ impl Av1 {
         if e != 0 {
             return Err(e);
         }
-        Ok(Av1 { c, fed: false, bad_units: 0, bad_frames: 0, last_error: 0, threads })
+        Ok(Av1 {
+            c,
+            fed: false,
+            bad_units: 0,
+            bad_frames: 0,
+            last_error: 0,
+            threads,
+        })
     }
 
     fn picture(p: &[u8]) -> Picture {
@@ -88,7 +97,13 @@ impl Av1 {
         let data: [*const u8; 3] = [rd(p, P_DATA), rd(p, P_DATA + 8), rd(p, P_DATA + 16)];
         let stride: [isize; 2] = [rd(p, P_STRIDE), rd(p, P_STRIDE + 8)];
         let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-        let mut pic = Picture { w, h, y: vec![0; w * h], uv: vec![128; cw * 2 * ch], ..Default::default() };
+        let mut pic = Picture {
+            w,
+            h,
+            y: vec![0; w * h],
+            uv: vec![128; cw * 2 * ch],
+            ..Default::default()
+        };
         let sample = |plane: *const u8, row: usize, stride: isize, x: usize| -> u8 {
             unsafe {
                 let r = plane.offset(row as isize * stride);

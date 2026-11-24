@@ -12,7 +12,8 @@ use std::path::{Path, PathBuf};
 
 /// Whether a host window may open now (not under the harness, not headless).
 fn may_show() -> bool {
-    std::env::var("NXRS_NO_ACTIVATE").map_or(true, |v| v.is_empty() || v == "0") && std::env::var("NXGFX_HEADLESS").is_err()
+    std::env::var("NXRS_NO_ACTIVATE").map_or(true, |v| v.is_empty() || v == "0")
+        && std::env::var("NXGFX_HEADLESS").is_err()
 }
 
 /// The error a game shows: (title, text).
@@ -30,7 +31,11 @@ pub enum Shown<'a> {
 pub fn error_text(e: &Shown) -> (String, String) {
     let title = "The game reports an error".to_string();
     let text = match e {
-        Shown::Result(r) => format!("Error {:04}-{:04} (Result {r:#x}).", 2000 + (r & 0x1FF), (r >> 9) & 0x1FFF),
+        Shown::Result(r) => format!(
+            "Error {:04}-{:04} (Result {r:#x}).",
+            2000 + (r & 0x1FF),
+            (r >> 9) & 0x1FFF
+        ),
         Shown::Code(cat, num) => format!("Error {cat:04}-{num:04}."),
         Shown::Application(Some(m)) => m.trim().to_string(),
         Shown::Application(None) => "The game reports an error of its own.".into(),
@@ -42,7 +47,10 @@ pub fn error_text(e: &Shown) -> (String, String) {
             format!("{t}.")
         }
     };
-    (title, format!("{text}\n\nThe game goes on; this is what it would show on its error screen."))
+    (
+        title,
+        format!("{text}\n\nThe game goes on; this is what it would show on its error screen."),
+    )
 }
 
 /// The game's error: logged, and shown in a message box when the option is on.
@@ -60,19 +68,36 @@ pub fn error(e: Shown) {
     }
     #[cfg(windows)]
     std::thread::spawn(move || {
-        use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONWARNING, MB_OK, MB_TOPMOST};
+        use windows_sys::Win32::UI::WindowsAndMessaging::{
+            MessageBoxW, MB_ICONWARNING, MB_OK, MB_TOPMOST,
+        };
         let w = |s: &str| s.encode_utf16().chain([0]).collect::<Vec<u16>>();
         let (t, x) = (w(&title), w(&text));
-        unsafe { MessageBoxW(std::ptr::null_mut(), x.as_ptr(), t.as_ptr(), MB_OK | MB_ICONWARNING | MB_TOPMOST) };
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                x.as_ptr(),
+                t.as_ptr(),
+                MB_OK | MB_ICONWARNING | MB_TOPMOST,
+            )
+        };
     });
 }
 
 /// The file an offline page's document path names in the data folder's `html-document/` (its query and anchor cut
 /// off; None outside that folder or missing).
 pub fn page_file(data: &Path, doc: &str) -> Option<PathBuf> {
-    let doc = doc.split(['#', '?']).next().unwrap_or("").trim_start_matches('/');
+    let doc = doc
+        .split(['#', '?'])
+        .next()
+        .unwrap_or("")
+        .trim_start_matches('/');
     let doc = doc.strip_prefix("html-document/").unwrap_or(doc);
-    if doc.is_empty() || doc.split('/').any(|c| c == ".." || c.is_empty()) || doc.contains(':') || doc.contains('\\') {
+    if doc.is_empty()
+        || doc.split('/').any(|c| c == ".." || c.is_empty())
+        || doc.contains(':')
+        || doc.contains('\\')
+    {
         return None;
     }
     let p = data.join("html-document").join(doc);
@@ -81,27 +106,47 @@ pub fn page_file(data: &Path, doc: &str) -> Option<PathBuf> {
 
 /// An offline page: opened in the PC's browser when the build has it and the option is on.
 pub fn offline_page(doc: &str) {
-    let Some(data) = crate::boot::try_process().map(|p| p.data_dir.clone()) else { return };
+    let Some(data) = crate::boot::try_process().map(|p| p.data_dir.clone()) else {
+        return;
+    };
     let Some(file) = page_file(&data, doc) else {
         crate::log!("web: offline page {doc:?}: not in this build's html-document/ (rebuild with nxrs-build to stage the game's manual)");
         return;
     };
     if !nxconfig::flag("offline_pages_in_browser") || !may_show() {
-        crate::log!("web: offline page {}: not opened (offline_pages_in_browser off, or a harness run)", file.display());
+        crate::log!(
+            "web: offline page {}: not opened (offline_pages_in_browser off, or a harness run)",
+            file.display()
+        );
         return;
     }
-    crate::log!("web: offline page {} opened in the PC's browser", file.display());
+    crate::log!(
+        "web: offline page {} opened in the PC's browser",
+        file.display()
+    );
     #[cfg(target_os = "linux")]
     if !crate::desk::open(&file) {
         crate::log!("[RED] web: xdg-open could not be started");
     }
     #[cfg(windows)]
     {
-    let wide: Vec<u16> = file.as_os_str().to_string_lossy().encode_utf16().chain([0]).collect();
-    let open: Vec<u16> = "open".encode_utf16().chain([0]).collect();
-    unsafe {
-        windows_sys::Win32::UI::Shell::ShellExecuteW(std::ptr::null_mut(), open.as_ptr(), wide.as_ptr(), std::ptr::null(), std::ptr::null(), 1);
-    }
+        let wide: Vec<u16> = file
+            .as_os_str()
+            .to_string_lossy()
+            .encode_utf16()
+            .chain([0])
+            .collect();
+        let open: Vec<u16> = "open".encode_utf16().chain([0]).collect();
+        unsafe {
+            windows_sys::Win32::UI::Shell::ShellExecuteW(
+                std::ptr::null_mut(),
+                open.as_ptr(),
+                wide.as_ptr(),
+                std::ptr::null(),
+                std::ptr::null(),
+                1,
+            );
+        }
     }
 }
 
@@ -111,10 +156,24 @@ mod tests {
 
     #[test]
     fn error_texts() {
-        assert!(error_text(&Shown::Result(0x2a2)).1.starts_with("Error 2162-0001 (Result 0x2a2)."), "{}", error_text(&Shown::Result(0x2a2)).1);
-        assert!(error_text(&Shown::Code(2306, 1)).1.starts_with("Error 2306-0001."));
-        assert!(error_text(&Shown::Application(Some(" Could not connect. "))).1.starts_with("Could not connect.\n"));
-        assert!(error_text(&Shown::Other("game version mismatch")).1.starts_with("Game version mismatch."));
+        assert!(
+            error_text(&Shown::Result(0x2a2))
+                .1
+                .starts_with("Error 2162-0001 (Result 0x2a2)."),
+            "{}",
+            error_text(&Shown::Result(0x2a2)).1
+        );
+        assert!(error_text(&Shown::Code(2306, 1))
+            .1
+            .starts_with("Error 2306-0001."));
+        assert!(
+            error_text(&Shown::Application(Some(" Could not connect. ")))
+                .1
+                .starts_with("Could not connect.\n")
+        );
+        assert!(error_text(&Shown::Other("game version mismatch"))
+            .1
+            .starts_with("Game version mismatch."));
     }
 
     #[test]

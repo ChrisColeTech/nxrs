@@ -16,12 +16,20 @@ fn main() {
         return;
     }
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
-    let here = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("third_party");
-    for (dir, lib, name) in [("opus", "libopus.a", "nxopus"), ("vpx", "libvpx.a", "nxvpx"), ("dav1d", "libdav1d.a", "nxdav1d")] {
+    let here =
+        std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("third_party");
+    for (dir, lib, name) in [
+        ("opus", "libopus.a", "nxopus"),
+        ("vpx", "libvpx.a", "nxvpx"),
+        ("dav1d", "libdav1d.a", "nxdav1d"),
+    ] {
         let src = here.join(dir).join(lib);
         println!("cargo:rerun-if-changed={}", src.display());
         // MSVC looks for {name}.lib, the gnullvm toolchain for lib{name}.a
-        for dst in [out.join(format!("{name}.lib")), out.join(format!("lib{name}.a"))] {
+        for dst in [
+            out.join(format!("{name}.lib")),
+            out.join(format!("lib{name}.a")),
+        ] {
             std::fs::copy(&src, &dst).unwrap_or_else(|e| panic!("{}: {e}", src.display()));
         }
         println!("cargo:rustc-link-lib=static={name}");
@@ -49,7 +57,11 @@ fn linux() {
     println!("cargo:rerun-if-changed={src}");
     let mut b = cc::Build::new();
     b.file(src).opt_level(2).warnings(true).pic(true);
-    for p in avcodec.include_paths.iter().chain(avutil.include_paths.iter()) {
+    for p in avcodec
+        .include_paths
+        .iter()
+        .chain(avutil.include_paths.iter())
+    {
         b.include(p);
     }
     b.compile("nxffdec");

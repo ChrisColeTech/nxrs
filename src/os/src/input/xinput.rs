@@ -50,14 +50,24 @@ struct Api {
 fn api() -> Option<&'static Api> {
     static A: OnceLock<Option<Api>> = OnceLock::new();
     A.get_or_init(|| unsafe {
-        for (dll, z) in [("xinput1_4.dll", "xinput1_4.dll\0"), ("xinput1_3.dll", "xinput1_3.dll\0"), ("xinput9_1_0.dll", "xinput9_1_0.dll\0")] {
+        for (dll, z) in [
+            ("xinput1_4.dll", "xinput1_4.dll\0"),
+            ("xinput1_3.dll", "xinput1_3.dll\0"),
+            ("xinput9_1_0.dll", "xinput9_1_0.dll\0"),
+        ] {
             let h = LoadLibraryA(z.as_ptr());
             if h.is_null() {
                 continue;
             }
-            let Some(get) = GetProcAddress(h, c"XInputGetState".as_ptr() as *const u8) else { continue };
+            let Some(get) = GetProcAddress(h, c"XInputGetState".as_ptr() as *const u8) else {
+                continue;
+            };
             let set = GetProcAddress(h, c"XInputSetState".as_ptr() as *const u8);
-            return Some(Api { get: std::mem::transmute::<_, GetState>(get), set: set.map(|f| std::mem::transmute::<_, SetState>(f)), dll });
+            return Some(Api {
+                get: std::mem::transmute::<_, GetState>(get),
+                set: set.map(|f| std::mem::transmute::<_, SetState>(f)),
+                dll,
+            });
         }
         None
     })
@@ -80,8 +90,13 @@ pub fn state(i: u32) -> Option<Gamepad> {
 #[cfg(windows)]
 /// Sets user `i`'s motors (0..65535); returns the XInput status (0 = done).
 pub fn rumble(i: u32, low: u16, high: u16) -> u32 {
-    let Some(set) = api().and_then(|a| a.set) else { return 1 };
-    let mut v = Vibration { left: low, right: high };
+    let Some(set) = api().and_then(|a| a.set) else {
+        return 1;
+    };
+    let mut v = Vibration {
+        left: low,
+        right: high,
+    };
     unsafe { set(i, &mut v) }
 }
 
@@ -186,7 +201,10 @@ pub(crate) mod sdl {
 
     unsafe fn load() -> Option<Sdl> {
         let mut lib = "libSDL2-2.0.so.0";
-        let mut h = libc::dlopen(c"libSDL2-2.0.so.0".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
+        let mut h = libc::dlopen(
+            c"libSDL2-2.0.so.0".as_ptr(),
+            libc::RTLD_NOW | libc::RTLD_LOCAL,
+        );
         if h.is_null() {
             lib = "libSDL2.so";
             h = libc::dlopen(c"libSDL2.so".as_ptr(), libc::RTLD_NOW | libc::RTLD_LOCAL);
@@ -200,15 +218,20 @@ pub(crate) mod sdl {
                 match sym(h, $n) {
                     Some(f) => f,
                     None => {
-                        super::super::ilog!("SDL2 ({lib}) lacks {:?}: too old (2.0.9 or newer is needed)", $n);
+                        super::super::ilog!(
+                            "SDL2 ({lib}) lacks {:?}: too old (2.0.9 or newer is needed)",
+                            $n
+                        );
                         return None;
                     }
                 }
             };
         }
         let init: unsafe extern "C" fn(u32) -> c_int = need!(c"SDL_Init");
-        let hint: unsafe extern "C" fn(*const c_char, *const c_char) -> c_int = need!(c"SDL_SetHint");
-        let gc_events: unsafe extern "C" fn(c_int) -> c_int = need!(c"SDL_GameControllerEventState");
+        let hint: unsafe extern "C" fn(*const c_char, *const c_char) -> c_int =
+            need!(c"SDL_SetHint");
+        let gc_events: unsafe extern "C" fn(c_int) -> c_int =
+            need!(c"SDL_GameControllerEventState");
         let joy_events: unsafe extern "C" fn(c_int) -> c_int = need!(c"SDL_JoystickEventState");
         let err: unsafe extern "C" fn() -> *const c_char = need!(c"SDL_GetError");
         let s = Sdl {
@@ -270,7 +293,8 @@ pub(crate) mod sdl {
 
     /// The Sony / Nintendo vendor ids the native HID path keeps (unless turned off).
     pub fn native(vendor: u16) -> bool {
-        (vendor == 0x054c && !super::super::env_flag("NXRS_NO_SONY_HID")) || (vendor == 0x057e && !super::super::env_flag("NXRS_NO_NINTENDO_HID"))
+        (vendor == 0x054c && !super::super::env_flag("NXRS_NO_SONY_HID"))
+            || (vendor == 0x057e && !super::super::env_flag("NXRS_NO_NINTENDO_HID"))
     }
 }
 
@@ -294,13 +318,20 @@ mod linux {
     }
     // SAFETY: the controller pointers are only used under the mutex
     unsafe impl Send for Pads {}
-    static PADS: Mutex<Pads> = Mutex::new(Pads { slots: [None, None, None, None], updated: None, scanned: None, count: -1 });
+    static PADS: Mutex<Pads> = Mutex::new(Pads {
+        slots: [None, None, None, None],
+        updated: None,
+        scanned: None,
+        count: -1,
+    });
 
     /// SDL's state, read at most every 2 ms; detached controllers closed, new ones opened into free slots (a count
     /// change, or once a second).
     fn refresh(s: &sdl::Sdl, p: &mut Pads) {
         let now = Instant::now();
-        if p.updated.is_some_and(|t| now - t < Duration::from_millis(2)) {
+        if p.updated
+            .is_some_and(|t| now - t < Duration::from_millis(2))
+        {
             return;
         }
         p.updated = Some(now);
@@ -329,14 +360,22 @@ mod linux {
                 if p.slots.iter().flatten().any(|sl| sl.inst == inst) {
                     continue;
                 }
-                let Some(free) = p.slots.iter().position(|sl| sl.is_none()) else { break };
+                let Some(free) = p.slots.iter().position(|sl| sl.is_none()) else {
+                    break;
+                };
                 let gc = (s.GameControllerOpen)(i);
                 if gc.is_null() {
                     continue;
                 }
                 p.slots[free] = Some(Slot { gc, inst });
                 let name = (s.GameControllerName)(gc);
-                let name = if name.is_null() { "game controller".into() } else { std::ffi::CStr::from_ptr(name).to_string_lossy().into_owned() };
+                let name = if name.is_null() {
+                    "game controller".into()
+                } else {
+                    std::ffi::CStr::from_ptr(name)
+                        .to_string_lossy()
+                        .into_owned()
+                };
                 super::super::ilog!("SDL2 game controller {name:?} in XInput user {}", free + 1);
             }
         }
@@ -361,7 +400,9 @@ mod linux {
             (13, 0x0004),
             (14, 0x0008),
         ];
-        MAP.iter().filter(|(b, _)| down(*b)).fold(0, |m, (_, x)| m | x)
+        MAP.iter()
+            .filter(|(b, _)| down(*b))
+            .fold(0, |m, (_, x)| m | x)
     }
 
     /// SDL's Y axes point down, XInput's (and the Switch's) up.
@@ -400,9 +441,13 @@ mod linux {
 
     pub fn rumble(i: u32, low: u16, high: u16) -> u32 {
         let Some(s) = sdl::get() else { return 1 };
-        let Some(f) = s.GameControllerRumble else { return 1 };
+        let Some(f) = s.GameControllerRumble else {
+            return 1;
+        };
         let p = PADS.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(Some(sl)) = p.slots.get(i as usize) else { return 1 };
+        let Some(Some(sl)) = p.slots.get(i as usize) else {
+            return 1;
+        };
         // SAFETY: an open controller, under PADS. XInput holds a level until the next call: SDL its longest duration
         (unsafe { f(sl.gc, low, high, 0xFFFF) } != 0) as u32
     }
@@ -435,14 +480,27 @@ mod linux_tests {
         // SDL A (bottom) and D-pad up: XInput A and DPAD_UP, then positionally B (bottom) and up
         let b = xinput_buttons(|x| x == 0 || x == 11);
         assert_eq!(b, 0x1000 | 0x0001);
-        let g = super::Gamepad { buttons: b, lt: trigger(32767), ..Default::default() };
+        let g = super::Gamepad {
+            buttons: b,
+            lt: trigger(32767),
+            ..Default::default()
+        };
         assert_eq!(super::buttons(&g), 1 << 1 | 1 << 13 | 1 << 8);
         // SDL B (right) is the Switch A position
-        assert_eq!(super::buttons(&super::Gamepad { buttons: xinput_buttons(|x| x == 1), ..Default::default() }), 1);
+        assert_eq!(
+            super::buttons(&super::Gamepad {
+                buttons: xinput_buttons(|x| x == 1),
+                ..Default::default()
+            }),
+            1
+        );
         assert_eq!(flip(-32768), 32767, "SDL up is XInput up, clamped");
         assert_eq!(flip(1000), -1000);
         assert_eq!((trigger(0), trigger(-5), trigger(16384)), (0, 0, 127));
-        assert!(trigger(7700) < 60 && trigger(7900) > 60, "Turbo's 7700 threshold is XInput's 60");
+        assert!(
+            trigger(7700) < 60 && trigger(7900) > 60,
+            "Turbo's 7700 threshold is XInput's 60"
+        );
     }
 
     /// SDL loads and starts here (libsdl2 installed) and sees no controller in a plain WSL.
@@ -460,7 +518,15 @@ mod linux_tests {
 mod tests {
     #[test]
     fn positional() {
-        let g = super::Gamepad { buttons: 0x1000 | 0x0001, lt: 200, ..Default::default() };
-        assert_eq!(super::buttons(&g), 1 << 1 | 1 << 13 | 1 << 8, "Xbox A is the bottom (B) position");
+        let g = super::Gamepad {
+            buttons: 0x1000 | 0x0001,
+            lt: 200,
+            ..Default::default()
+        };
+        assert_eq!(
+            super::buttons(&g),
+            1 << 1 | 1 << 13 | 1 << 8,
+            "Xbox A is the bottom (B) position"
+        );
     }
 }

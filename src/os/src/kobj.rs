@@ -47,7 +47,9 @@ pub struct SysEvent {
 
 impl SysEvent {
     pub const fn new() -> SysEvent {
-        SysEvent { ends: std::sync::Mutex::new((false, Vec::new())) }
+        SysEvent {
+            ends: std::sync::Mutex::new((false, Vec::new())),
+        }
     }
     /// A read end for a client, in the event's current state.
     pub fn handout(&self) -> u32 {

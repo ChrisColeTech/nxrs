@@ -22,7 +22,12 @@ use std::sync::Mutex;
 static BOUND: Mutex<Vec<(u64, u32)>> = Mutex::new(Vec::new());
 
 fn find(ev: u64) -> Option<u32> {
-    BOUND.lock().unwrap().iter().find(|(e, _)| *e == ev).map(|(_, h)| *h)
+    BOUND
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(e, _)| *e == ev)
+        .map(|(_, h)| *h)
 }
 
 fn signal(h: u32) {
@@ -41,8 +46,11 @@ pub unsafe fn bind_system_event(c: *mut Cpu, ev: u64, autoclear: bool) -> Option
     if let Some(h) = find(ev) {
         return Some(h);
     }
-    let create = crate::hle::sym("_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb")?;
-    let getw = crate::hle::sym("_ZN2nn2os30GetWritableHandleOfSystemEventEPKNS0_15SystemEventTypeE")?;
+    let create = crate::hle::sym(
+        "_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb",
+    )?;
+    let getw =
+        crate::hle::sym("_ZN2nn2os30GetWritableHandleOfSystemEventEPKNS0_15SystemEventTypeE")?;
     let r = crate::guest::call(c, create, &[ev, autoclear as u64, 1])?;
     if r as u32 != 0 {
         crate::log!("[RED] os: CreateSystemEvent for a host event failed {r:#x}");
@@ -121,8 +129,12 @@ fn game_env() -> &'static [(String, u64)] {
         let spec = crate::options::game("game_env", "");
         let mut v = vec![];
         for word in spec.split_whitespace() {
-            let Some((k, val)) = word.split_once('=') else { continue };
-            let p = nxrt::kernel::get().space.kernel_alloc(val.len() as u64 + 1, 16);
+            let Some((k, val)) = word.split_once('=') else {
+                continue;
+            };
+            let p = nxrt::kernel::get()
+                .space
+                .kernel_alloc(val.len() as u64 + 1, 16);
             crate::guest::put_cstr(p, val.len() as u64 + 1, val);
             v.push((k.to_string(), p));
         }
@@ -135,8 +147,15 @@ fn game_env() -> &'static [(String, u64)] {
 
 unsafe fn getenv(c: *mut Cpu) {
     let p = (*c).x[0];
-    let name = if p != 0 { crate::guest::cstr(p, 256) } else { String::new() };
-    if let Some((_, v)) = game_env().iter().find(|(k, _)| !name.is_empty() && *k == name) {
+    let name = if p != 0 {
+        crate::guest::cstr(p, 256)
+    } else {
+        String::new()
+    };
+    if let Some((_, v)) = game_env()
+        .iter()
+        .find(|(k, _)| !name.is_empty() && *k == name)
+    {
         (*c).x[0] = *v;
         return;
     }
@@ -152,11 +171,21 @@ unsafe fn getenv(c: *mut Cpu) {
 /// StandardAllocator::Allocate(self, size): blocks of 64 KB or more through Allocate(self, size, 64 KB).
 unsafe fn sa_allocate(c: *mut Cpu) {
     let (this, size) = ((*c).x[0], (*c).x[1]);
-    let sym = |n: &str| crate::hle::sym(n).unwrap_or_else(|| nxrt::rt::fatal(&format!("os: the SDK has no {n}")));
+    let sym = |n: &str| {
+        crate::hle::sym(n).unwrap_or_else(|| nxrt::rt::fatal(&format!("os: the SDK has no {n}")))
+    };
     let r = if size >= 0x10000 {
-        crate::guest::call(c, sym("_ZN2nn3mem17StandardAllocator8AllocateEmm"), &[this, size, 0x10000])
+        crate::guest::call(
+            c,
+            sym("_ZN2nn3mem17StandardAllocator8AllocateEmm"),
+            &[this, size, 0x10000],
+        )
     } else {
-        crate::guest::call(c, sym("_ZN2nn3mem17StandardAllocator8AllocateEm"), &[this, size])
+        crate::guest::call(
+            c,
+            sym("_ZN2nn3mem17StandardAllocator8AllocateEm"),
+            &[this, size],
+        )
     };
     if let Some(r) = r {
         (*c).x[0] = r;
@@ -165,12 +194,24 @@ unsafe fn sa_allocate(c: *mut Cpu) {
 
 pub fn register(r: &mut Registry) {
     if !crate::options::game("game_env", "").trim().is_empty() {
-        r.force("getenv", "the game's environment (game_env), the SDK's getenv for the rest", getenv);
+        r.force(
+            "getenv",
+            "the game's environment (game_env), the SDK's getenv for the rest",
+            getenv,
+        );
     }
     if crate::options::game_flag("alloc_big_align", false) {
         crate::log!("StandardAllocator::Allocate: allocations of 64 KB or more are 64 KB aligned (alloc_big_align)");
-        r.force("_ZN2nn3mem17StandardAllocator8AllocateEm", "blocks of 64 KB or more 64 KB aligned (alloc_big_align)", sa_allocate);
+        r.force(
+            "_ZN2nn3mem17StandardAllocator8AllocateEm",
+            "blocks of 64 KB or more 64 KB aligned (alloc_big_align)",
+            sa_allocate,
+        );
     }
     r.hle("getentropy", getentropy);
-    r.force("_ZN2nn6crypto36GenerateCryptographicallyRandomBytesEPvm", "csrng service: host entropy", csrng);
+    r.force(
+        "_ZN2nn6crypto36GenerateCryptographicallyRandomBytesEPvm",
+        "csrng service: host entropy",
+        csrng,
+    );
 }

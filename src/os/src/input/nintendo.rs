@@ -50,7 +50,11 @@ pub fn encode_side(amp_low: f32, freq_low: f32, amp_high: f32, freq_high: f32) -
         ((f / 10.0).log2() * 32.0).round().clamp(0.0, 255.0) as u8
     }
     fn amp(a: f32) -> u8 {
-        let a = if a.is_finite() { a.clamp(0.0, 1.0) } else { 0.0 };
+        let a = if a.is_finite() {
+            a.clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
         if a < 0.01 {
             return 0;
         }
@@ -72,7 +76,12 @@ pub fn encode_side(amp_low: f32, freq_low: f32, amp_high: f32, freq_high: f32) -
     if ea_high == 0 && ea_low == 0 {
         return [0x00, 0x01, 0x40, 0x40];
     }
-    [(hf & 0xff) as u8, (hf_amp + ((hf >> 8) & 0xff)) as u8, (lf as u16 + ((lf_amp >> 8) & 0xff)) as u8, (lf_amp & 0xff) as u8]
+    [
+        (hf & 0xff) as u8,
+        (hf_amp + ((hf >> 8) & 0xff)) as u8,
+        (lf as u16 + ((lf_amp >> 8) & 0xff)) as u8,
+        (lf_amp & 0xff) as u8,
+    ]
 }
 
 /// A stick's calibration state, per axis: rest and the reach below and above it (12-bit units).
@@ -86,7 +95,12 @@ pub struct Sticks {
 
 impl Default for Sticks {
     fn default() -> Self {
-        Sticks { seen: false, cal: [0; 2], rest: [2048; 4], reach: [[1200; 2]; 4] }
+        Sticks {
+            seen: false,
+            cal: [0; 2],
+            rest: [2048; 4],
+            reach: [[1200; 2]; 4],
+        }
     }
 }
 
@@ -112,7 +126,8 @@ fn cal_decode(d: &[u8], right: bool) -> [i32; 6] {
 }
 
 fn cal_sane(c: &[i32; 6]) -> bool {
-    (0..2).all(|a| (c[a] - 2048).abs() <= 500 && (1..3).all(|k| (400..=2048).contains(&c[2 * k + a])))
+    (0..2)
+        .all(|a| (c[a] - 2048).abs() <= 500 && (1..3).all(|k| (400..=2048).contains(&c[2 * k + a])))
 }
 
 impl Sticks {
@@ -127,7 +142,11 @@ impl Sticks {
         let Some(d) = r.get(20..20 + n) else { return 0 };
         let mut set = 0;
         for stick in 0..2 {
-            let (at, kind) = if addr == SPI_USER && n >= 22 && d[11 * stick] == 0xb2 && d[11 * stick + 1] == 0xa1 {
+            let (at, kind) = if addr == SPI_USER
+                && n >= 22
+                && d[11 * stick] == 0xb2
+                && d[11 * stick + 1] == 0xa1
+            {
                 (&d[11 * stick + 2..], 2)
             } else if addr == SPI_FACTORY && n >= 18 && self.cal[stick] < 2 {
                 (&d[9 * stick..], 1)
@@ -197,7 +216,11 @@ pub fn decode(st: &mut Sticks, r: &[u8], side: u8) -> Option<Report> {
     if !st.seen {
         st.seen = true;
         for a in 0..4 {
-            st.rest[a] = if (raw[a] - 2048).abs() <= 500 { raw[a] } else { 2048 };
+            st.rest[a] = if (raw[a] - 2048).abs() <= 500 {
+                raw[a]
+            } else {
+                2048
+            };
             st.reach[a] = [1200; 2];
         }
     }
@@ -273,8 +296,16 @@ pub fn decode(st: &mut Sticks, r: &[u8], side: u8) -> Option<Report> {
 pub fn imu_switch(s: &[i16; 6], side: u8) -> ([f32; 3], [f32; 3]) {
     const ACC_G: f32 = 0.000_244_14; // ±8 G
     const GYRO_RAD: f32 = 0.061_035 * std::f32::consts::PI / 180.0; // ±2000 deg/s
-    let f = [s[0] as f32 * ACC_G, s[1] as f32 * ACC_G, s[2] as f32 * ACC_G];
-    let g = [s[3] as f32 * GYRO_RAD, s[4] as f32 * GYRO_RAD, s[5] as f32 * GYRO_RAD];
+    let f = [
+        s[0] as f32 * ACC_G,
+        s[1] as f32 * ACC_G,
+        s[2] as f32 * ACC_G,
+    ];
+    let g = [
+        s[3] as f32 * GYRO_RAD,
+        s[4] as f32 * GYRO_RAD,
+        s[5] as f32 * GYRO_RAD,
+    ];
     if side == 3 {
         ([-f[1], -f[0], f[2]], [g[1], g[0], -g[2]])
     } else {
@@ -284,7 +315,12 @@ pub fn imu_switch(s: &[i16; 6], side: u8) -> ([f32; 3], [f32; 3]) {
 
 /// The player-light pattern for player p (0-based), as the console lights them.
 pub fn lights(p: usize) -> u8 {
-    [0b0001, 0b0011, 0b0111, 0b1111, 0b1001, 0b0101, 0b1101, 0b0110].get(p).copied().unwrap_or(0)
+    [
+        0b0001, 0b0011, 0b0111, 0b1111, 0b1001, 0b0101, 0b1101, 0b0110,
+    ]
+    .get(p)
+    .copied()
+    .unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -293,7 +329,11 @@ mod tests {
 
     #[test]
     fn rumble_encoding() {
-        assert_eq!(encode_side(0.0, 160.0, 0.0, 320.0), [0x00, 0x01, 0x40, 0x40], "silence is the neutral pattern");
+        assert_eq!(
+            encode_side(0.0, 160.0, 0.0, 320.0),
+            [0x00, 0x01, 0x40, 0x40],
+            "silence is the neutral pattern"
+        );
         let s = encode_side(1.0, 160.0, 1.0, 320.0);
         // 320 Hz: round(log2(32)*32) = 160 = 0xa0, (0xa0 - 0x60) * 4 = 0x100; amplitude 1.0: round(log2(8.7)*32) = 100
         assert_eq!(s[0], 0x00);
@@ -310,7 +350,7 @@ mod tests {
         r[3] = 0x08 | 0x80; // A, ZR
         r[4] = 0x02 | 0x10; // Plus, Home
         r[5] = 0x02; // Up
-        // sticks at rest: 0x800 each
+                     // sticks at rest: 0x800 each
         r[6] = 0x00;
         r[7] = 0x08;
         r[8] = 0x80;
@@ -327,7 +367,10 @@ mod tests {
         assert_eq!(rep.sticks, [0; 4]);
         assert!(rep.has_imu);
         let (acc, _) = imu_switch(&rep.imu[0], 1);
-        assert!((acc[2] + 1.0).abs() < 0.01, "face up reads gravity down: {acc:?}");
+        assert!(
+            (acc[2] + 1.0).abs() < 0.01,
+            "face up reads gravity down: {acc:?}"
+        );
         // left stick pushed right
         r[6] = 0xff;
         r[7] = 0x0f | 0x80;
@@ -345,7 +388,13 @@ mod tests {
         r[15..19].copy_from_slice(&SPI_FACTORY.to_le_bytes());
         r[19] = 18;
         // left stick: above (0x600, 0x600), centre (0x7f0, 0x810), below (0x600, 0x600)
-        let enc = |x: i32, y: i32| [(x & 0xff) as u8, ((x >> 8) & 0x0f | (y & 0x0f) << 4) as u8, (y >> 4) as u8];
+        let enc = |x: i32, y: i32| {
+            [
+                (x & 0xff) as u8,
+                ((x >> 8) & 0x0f | (y & 0x0f) << 4) as u8,
+                (y >> 4) as u8,
+            ]
+        };
         let mut d = vec![];
         d.extend(enc(0x600, 0x600));
         d.extend(enc(0x7f0, 0x810));

@@ -8,7 +8,11 @@ fn nacp_corpus_is_read_or_refused_cleanly() {
     for e in std::fs::read_dir(&d).unwrap().flatten() {
         let data = std::fs::read(e.path()).unwrap();
         let r = std::panic::catch_unwind(|| nxos::boot::nacp_version(&data));
-        assert!(r.is_ok(), "{}: the NACP reader panicked", e.path().display());
+        assert!(
+            r.is_ok(),
+            "{}: the NACP reader panicked",
+            e.path().display()
+        );
         n += 1;
     }
     assert!(n > 0, "no corpus");

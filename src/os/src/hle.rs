@@ -127,7 +127,9 @@ pub fn install(reg: &Registry, syms: &ModuleSyms) -> Installed {
             Kind::Force => {
                 hostfn::add_override(name, *f);
                 provided.insert(name.clone());
-                if syms.referenced.contains(name.as_str()) || syms.imports.iter().any(|(_, n)| n == name) {
+                if syms.referenced.contains(name.as_str())
+                    || syms.imports.iter().any(|(_, n)| n == name)
+                {
                     out.forced += 1;
                 }
             }
@@ -147,14 +149,21 @@ pub fn install(reg: &Registry, syms: &ModuleSyms) -> Installed {
             provided.insert(name.clone());
             out.aliased += 1;
         } else {
-            crate::log!("[RED] alias {name} -> {target}: no module defines the target; left as it binds");
+            crate::log!(
+                "[RED] alias {name} -> {target}: no module defines the target; left as it binds"
+            );
         }
     }
     let mut stubbed: Vec<String> = syms
         .imports
         .iter()
         .map(|(_, n)| n.clone())
-        .filter(|n| !defined.contains(n.as_str()) && !provided.contains(n) && !n.starts_with("__rel_") && !syms.weak_imports.contains(n))
+        .filter(|n| {
+            !defined.contains(n.as_str())
+                && !provided.contains(n)
+                && !n.starts_with("__rel_")
+                && !syms.weak_imports.contains(n)
+        })
         .collect::<std::collections::BTreeSet<_>>()
         .into_iter()
         .collect();
@@ -169,7 +178,8 @@ pub fn install(reg: &Registry, syms: &ModuleSyms) -> Installed {
 /// Is `name` an import nothing in the ExeFS defines, bound to the reporting stub at boot? (an NRO loaded later may
 /// define it: `services::ro`)
 pub fn stubbed_import(name: &str) -> bool {
-    hostfn::override_of(name).is_some_and(|f| f as *const () as usize == unimpl_import as *const () as usize)
+    hostfn::override_of(name)
+        .is_some_and(|f| f as *const () as usize == unimpl_import as *const () as usize)
 }
 
 static ALIASES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
@@ -178,7 +188,12 @@ static ALIASES: Mutex<BTreeMap<String, String>> = Mutex::new(BTreeMap::new());
 /// stack arguments as they are.
 unsafe fn alias_forward(c: *mut Cpu) {
     let name = hostfn::name_of((*c).pc).unwrap_or_default();
-    let target = ALIASES.lock().unwrap().get(&name).cloned().unwrap_or_default();
+    let target = ALIASES
+        .lock()
+        .unwrap()
+        .get(&name)
+        .cloned()
+        .unwrap_or_default();
     let Some(t) = sym(&target) else {
         nxrt::rt::guest_fatal(c, &format!("alias {name}: target {target} is not loaded"));
     };
@@ -192,7 +207,16 @@ unsafe fn alias_forward(c: *mut Cpu) {
 unsafe fn unimpl_import(c: *mut Cpu) {
     let name = hostfn::name_of((*c).pc).unwrap_or_default();
     let a = Args(&mut *c);
-    crate::log::gap(crate::log::Gap::Import, &name, &format!("x0={:#x} x1={:#x} x2={:#x}, answered 0", a.x(0), a.x(1), a.x(2)));
+    crate::log::gap(
+        crate::log::Gap::Import,
+        &name,
+        &format!(
+            "x0={:#x} x1={:#x} x2={:#x}, answered 0",
+            a.x(0),
+            a.x(1),
+            a.x(2)
+        ),
+    );
     (*c).x[0] = 0;
 }
 

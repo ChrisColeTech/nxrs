@@ -13,7 +13,11 @@ use std::sync::OnceLock;
 
 unsafe fn nvos_open(c: *mut Cpu) {
     let p = (*c).x[0];
-    let path = if p != 0 { crate::guest::cstr(p, 256) } else { "(null)".into() };
+    let path = if p != 0 {
+        crate::guest::cstr(p, 256)
+    } else {
+        "(null)".into()
+    };
     crate::log_once!("nvdrv open", "[RED] nvdrv: cannot open {path} (the host has no nvdrv; only hardware movie decoding uses it)");
     (*c).x[0] = (-1i64) as u64;
 }
@@ -23,7 +27,10 @@ fn capture_dir() -> Option<&'static PathBuf> {
     D.get_or_init(|| {
         let d = PathBuf::from(std::env::var("NXOS_GLSLC_CAPTURE").ok()?);
         let _ = std::fs::create_dir_all(&d);
-        crate::log!("glslc: run-time compile outputs are saved to {}", d.display());
+        crate::log!(
+            "glslc: run-time compile outputs are saved to {}",
+            d.display()
+        );
         Some(d)
     })
     .as_ref()
@@ -31,7 +38,9 @@ fn capture_dir() -> Option<&'static PathBuf> {
 
 /// FNV-1a 64 of a GLSLC output: its file name.
 fn fnv1a(b: &[u8]) -> u64 {
-    b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| (h ^ x as u64).wrapping_mul(0x100_0000_01b3))
+    b.iter().fold(0xcbf2_9ce4_8422_2325u64, |h, &x| {
+        (h ^ x as u64).wrapping_mul(0x100_0000_01b3)
+    })
 }
 
 /// The compile object's first word points at its last results {GLSLCcompilationStatus *, GLSLCoutput *}; the
@@ -47,7 +56,10 @@ fn capture(obj: u64, dir: &std::path::Path) {
     }
     let n = r32(out + 0x44);
     if r32(out) != 0x1986_6891 || !(0x48..=64 << 20).contains(&n) {
-        crate::log!("[RED] glslc: unknown output header (magic {:#x} length {n:#x}), not saved", r32(out));
+        crate::log!(
+            "[RED] glslc: unknown output header (magic {:#x} length {n:#x}), not saved",
+            r32(out)
+        );
         return;
     }
     let data = crate::guest::bytes(out, n as u64);
@@ -56,7 +68,10 @@ fn capture(obj: u64, dir: &std::path::Path) {
         return;
     }
     match std::fs::write(&path, data) {
-        Ok(()) => crate::log!("glslc: saved a run-time compile output {} ({n} bytes)", path.display()),
+        Ok(()) => crate::log!(
+            "glslc: saved a run-time compile output {} ({n} bytes)",
+            path.display()
+        ),
         Err(e) => crate::log!("[RED] glslc: cannot write {}: {e}", path.display()),
     }
 }
@@ -67,7 +82,9 @@ unsafe fn glslc_compile(c: *mut Cpu) {
     let Some(orig) = crate::hle::sym("glslcCompile") else {
         nxrt::rt::guest_fatal(c, "glslcCompile is not in the game");
     };
-    let Some(ok) = crate::guest::call(c, orig, &[obj]) else { return };
+    let Some(ok) = crate::guest::call(c, orig, &[obj]) else {
+        return;
+    };
     if ok as u8 != 0 {
         if let Some(d) = capture_dir() {
             capture(obj, d);
@@ -77,10 +94,18 @@ unsafe fn glslc_compile(c: *mut Cpu) {
 }
 
 pub fn register(r: &mut Registry) {
-    r.force("NvOsDrvOpen", "nvdrv: the host has none, the open fails", nvos_open);
+    r.force(
+        "NvOsDrvOpen",
+        "nvdrv: the host has none, the open fails",
+        nvos_open,
+    );
     // Only with a capture folder: otherwise the game's compiler runs untouched.
     if std::env::var_os("NXOS_GLSLC_CAPTURE").is_some() {
-        r.force("glslcCompile", "the game's run-time GLSL compile, its outputs saved (NXOS_GLSLC_CAPTURE)", glslc_compile);
+        r.force(
+            "glslcCompile",
+            "the game's run-time GLSL compile, its outputs saved (NXOS_GLSLC_CAPTURE)",
+            glslc_compile,
+        );
     }
 }
 

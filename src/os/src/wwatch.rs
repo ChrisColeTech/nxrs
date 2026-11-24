@@ -11,11 +11,17 @@
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 #[cfg(windows)]
-use windows_sys::Win32::Foundation::{EXCEPTION_SINGLE_STEP, NTSTATUS, STATUS_GUARD_PAGE_VIOLATION};
+use windows_sys::Win32::Foundation::{
+    EXCEPTION_SINGLE_STEP, NTSTATUS, STATUS_GUARD_PAGE_VIOLATION,
+};
 #[cfg(windows)]
-use windows_sys::Win32::System::Diagnostics::Debug::{AddVectoredExceptionHandler, EXCEPTION_POINTERS};
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    AddVectoredExceptionHandler, EXCEPTION_POINTERS,
+};
 #[cfg(windows)]
-use windows_sys::Win32::System::Memory::{VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_GUARD};
+use windows_sys::Win32::System::Memory::{
+    VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_GUARD,
+};
 
 const PAGE: u64 = 0x1000;
 const MAX_LINES: u32 = 600;
@@ -30,13 +36,17 @@ thread_local! {
 }
 
 fn watched(a: u64) -> bool {
-    RANGES.lock().map(|r| r.iter().any(|&(s, e)| a >= s && a < e)).unwrap_or(false)
+    RANGES
+        .lock()
+        .map(|r| r.iter().any(|&(s, e)| a >= s && a < e))
+        .unwrap_or(false)
 }
 
 #[cfg(target_os = "linux")]
 fn guard(page: u64) -> bool {
     // committed read-write pages only (a read-only page faults on writes by itself)
-    matches!(nxrt::linux::query(page), Some((true, 2, _, _))) && nxrt::mem::protect(page, PAGE, nxrt::mem::Prot::Read)
+    matches!(nxrt::linux::query(page), Some((true, 2, _, _)))
+        && nxrt::mem::protect(page, PAGE, nxrt::mem::Prot::Read)
 }
 
 #[cfg(target_os = "linux")]
@@ -55,7 +65,10 @@ unsafe fn hook(f: &mut nxrt::linux::Fault) -> bool {
         }
         let n = LINES.fetch_add(1, Ordering::Relaxed);
         if n < MAX_LINES {
-            crate::log!("wwatch: write to {a:#x} by {}", nxrt::fault::describe_host(f.rip()));
+            crate::log!(
+                "wwatch: write to {a:#x} by {}",
+                nxrt::fault::describe_host(f.rip())
+            );
         } else if n == MAX_LINES {
             crate::log!("wwatch: {MAX_LINES} writes logged: the watch stops");
         }
@@ -64,7 +77,9 @@ unsafe fn hook(f: &mut nxrt::linux::Fault) -> bool {
         if !nxrt::linux::CAN_SINGLE_STEP {
             // AArch64: no single step to close the page after this write, so it stays open: its first write is the
             // only one logged
-            crate::log!("wwatch: page {page:#x} is no longer watched (no single step on this host)");
+            crate::log!(
+                "wwatch: page {page:#x} is no longer watched (no single step on this host)"
+            );
         } else if LINES.load(Ordering::Relaxed) <= MAX_LINES {
             REARM.with(|r| r.set(page));
             f.set_trap(true); // trap after this instruction
@@ -87,11 +102,22 @@ unsafe fn hook(f: &mut nxrt::linux::Fault) -> bool {
 fn guard(page: u64) -> bool {
     unsafe {
         let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
-        if VirtualQuery(page as *const _, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) == 0 || mbi.State != 0x1000 {
+        if VirtualQuery(
+            page as *const _,
+            &mut mbi,
+            std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        ) == 0
+            || mbi.State != 0x1000
+        {
             return false; // not committed
         }
         let mut old = 0;
-        VirtualProtect(page as *mut _, PAGE as usize, (mbi.Protect & !PAGE_GUARD) | PAGE_GUARD, &mut old) != 0
+        VirtualProtect(
+            page as *mut _,
+            PAGE as usize,
+            (mbi.Protect & !PAGE_GUARD) | PAGE_GUARD,
+            &mut old,
+        ) != 0
     }
 }
 
@@ -109,7 +135,10 @@ unsafe extern "system" fn veh(info: *mut EXCEPTION_POINTERS) -> i32 {
         if rec.ExceptionInformation[0] == 1 {
             let n = LINES.fetch_add(1, Ordering::Relaxed);
             if n < MAX_LINES {
-                crate::log!("wwatch: write to {a:#x} by {}", nxrt::fault::describe_host(ctx.Rip));
+                crate::log!(
+                    "wwatch: write to {a:#x} by {}",
+                    nxrt::fault::describe_host(ctx.Rip)
+                );
             } else if n == MAX_LINES {
                 crate::log!("wwatch: {MAX_LINES} writes logged: the watch stops");
             }
@@ -167,9 +196,20 @@ pub fn disarm() -> String {
             #[cfg(windows)]
             unsafe {
                 let mut mbi: MEMORY_BASIC_INFORMATION = std::mem::zeroed();
-                if VirtualQuery(p as *const _, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0 && mbi.Protect & PAGE_GUARD != 0 {
+                if VirtualQuery(
+                    p as *const _,
+                    &mut mbi,
+                    std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                ) != 0
+                    && mbi.Protect & PAGE_GUARD != 0
+                {
                     let mut old = 0;
-                    VirtualProtect(p as *mut _, PAGE as usize, mbi.Protect & !PAGE_GUARD, &mut old);
+                    VirtualProtect(
+                        p as *mut _,
+                        PAGE as usize,
+                        mbi.Protect & !PAGE_GUARD,
+                        &mut old,
+                    );
                 }
             }
             p += PAGE;
@@ -186,8 +226,17 @@ mod tests {
         // a page of its own (a heap page would be shared with other tests' allocations)
         #[cfg(windows)]
         let base = {
-            use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
-            unsafe { VirtualAlloc(std::ptr::null(), 0x1000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE) as u64 }
+            use windows_sys::Win32::System::Memory::{
+                VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE,
+            };
+            unsafe {
+                VirtualAlloc(
+                    std::ptr::null(),
+                    0x1000,
+                    MEM_COMMIT | MEM_RESERVE,
+                    PAGE_READWRITE,
+                ) as u64
+            }
         };
         #[cfg(target_os = "linux")]
         let base = {
@@ -204,6 +253,9 @@ mod tests {
         let after = super::LINES.load(super::Ordering::Relaxed);
         assert_eq!(unsafe { std::ptr::read_volatile(base as *const u64) }, 7);
         super::disarm();
-        assert!(after >= before + 2, "two writes logged: {before} -> {after}");
+        assert!(
+            after >= before + 2,
+            "two writes logged: {before} -> {after}"
+        );
     }
 }

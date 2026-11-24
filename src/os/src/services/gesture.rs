@@ -50,7 +50,14 @@ impl Entry {
         let mut b = [0u8; 0x60];
         b[0..8].copy_from_slice(&self.samp.to_le_bytes());
         b[8..16].copy_from_slice(&self.ctx.to_le_bytes());
-        for (o, v) in [(0x10, self.ty), (0x14, self.dir), (0x18, self.x), (0x1c, self.y), (0x20, self.dx), (0x24, self.dy)] {
+        for (o, v) in [
+            (0x10, self.ty),
+            (0x14, self.dir),
+            (0x18, self.x),
+            (0x1c, self.y),
+            (0x20, self.dx),
+            (0x24, self.dy),
+        ] {
             b[o..o + 4].copy_from_slice(&v.to_le_bytes());
         }
         b[0x28..0x2c].copy_from_slice(&self.vx.to_le_bytes());
@@ -119,10 +126,17 @@ impl Recognizer {
         let mut g = props(fingers);
         let le = self.hist.last().copied();
         let ltype = le.map_or(IDLE, |e| e.ty);
-        let dt = if self.upd_ns != 0 { now.saturating_sub(self.upd_ns) as f32 / 1e9 } else { 0.0 };
+        let dt = if self.upd_ns != 0 {
+            now.saturating_sub(self.upd_ns) as f32 / 1e9
+        } else {
+            0.0
+        };
         if g.n > 0 && g.n == self.last.n && !self.slop {
             // within the slop the fingers stay where they went down
-            let out = (0..g.n).any(|i| (g.pt[i][0] - self.down.pt[i][0]).abs() > SLOP || (g.pt[i][1] - self.down.pt[i][1]).abs() > SLOP);
+            let out = (0..g.n).any(|i| {
+                (g.pt[i][0] - self.down.pt[i][0]).abs() > SLOP
+                    || (g.pt[i][1] - self.down.pt[i][1]).abs() > SLOP
+            });
             if out {
                 self.slop = true;
             } else {
@@ -137,7 +151,10 @@ impl Recognizer {
             return;
         }
         self.force = false;
-        let mut s = Entry { samp: le.map_or(1, |e| e.samp + 1), ..Default::default() };
+        let mut s = Entry {
+            samp: le.map_or(1, |e| e.samp + 1),
+            ..Default::default()
+        };
         let mut ty = IDLE;
         if g.n > 0 {
             if self.last.n == 0 {
@@ -167,7 +184,11 @@ impl Recognizer {
                 self.pan_dt = dt;
                 if (g.dist - self.last.dist).abs() > 0.5 {
                     ty = PINCH;
-                    s.scale = if self.last.dist > 0.0 { g.dist / self.last.dist } else { 1.0 };
+                    s.scale = if self.last.dist > 0.0 {
+                        g.dist / self.last.dist
+                    } else {
+                        1.0
+                    };
                 }
                 let turn = ((g.angle - self.last.angle) / (1.0 + g.angle * self.last.angle)).atan();
                 if turn.abs() > 0.015 {
@@ -201,7 +222,11 @@ impl Recognizer {
                 PAN => {
                     let e = le.unwrap();
                     let t = self.pan_dt + dt;
-                    let (vx, vy) = if t > 0.0 { (e.dx as f32 / t, e.dy as f32 / t) } else { (0.0, 0.0) };
+                    let (vx, vy) = if t > 0.0 {
+                        (e.dx as f32 / t, e.dy as f32 / t)
+                    } else {
+                        (0.0, 0.0)
+                    };
                     self.force = true;
                     if vx.hypot(vy) <= 400.0 {
                         ty = COMPLETE;
@@ -212,7 +237,17 @@ impl Recognizer {
                         s.vy = vy;
                         s.dx = e.dx;
                         s.dy = e.dy;
-                        s.dir = if s.dx.abs() > s.dy.abs() { if s.dx > 0 { 3 } else { 1 } } else if s.dy > 0 { 4 } else { 2 };
+                        s.dir = if s.dx.abs() > s.dy.abs() {
+                            if s.dx > 0 {
+                                3
+                            } else {
+                                1
+                            }
+                        } else if s.dy > 0 {
+                            4
+                        } else {
+                            2
+                        };
                     }
                 }
                 _ => {}
@@ -267,7 +302,11 @@ mod tests {
         r.sample(&[], 30 * ms);
         r.sample(&[], 40 * ms);
         r.sample(&[], 50 * ms);
-        assert_eq!(types(&r), vec![TOUCH, TAP, COMPLETE, IDLE], "a click is a tap");
+        assert_eq!(
+            types(&r),
+            vec![TOUCH, TAP, COMPLETE, IDLE],
+            "a click is a tap"
+        );
         assert_eq!(r.hist[0].attr & 1 << 4, 1 << 4, "IsNewTouch");
         // a second tap within 0.35 s is a double tap
         r.sample(&[(100, 100)], 200 * ms);
@@ -284,7 +323,12 @@ mod tests {
         r.sample(&[(300, 300)], 100 * ms);
         r.sample(&[], 110 * ms);
         let e = *r.hist.last().unwrap();
-        assert_eq!((e.ty, e.dir), (SWIPE, 3), "a fast drag right is a swipe right: {:?}", types(&r));
+        assert_eq!(
+            (e.ty, e.dir),
+            (SWIPE, 3),
+            "a fast drag right is a swipe right: {:?}",
+            types(&r)
+        );
         let b = e.bytes();
         assert_eq!(i32::from_le_bytes(b[0x10..0x14].try_into().unwrap()), SWIPE);
     }
@@ -302,9 +346,16 @@ mod tests {
         assert_eq!(e.ty, PINCH);
         assert!((e.scale - 1.5).abs() < 1e-6, "{}", e.scale);
         let b = e.bytes();
-        assert_eq!(f32::from_le_bytes(b[0x34..0x38].try_into().unwrap()), e.scale);
+        assert_eq!(
+            f32::from_le_bytes(b[0x34..0x38].try_into().unwrap()),
+            e.scale
+        );
         assert_eq!(i32::from_le_bytes(b[0x3c..0x40].try_into().unwrap()), 2);
-        assert_eq!(i32::from_le_bytes(b[0x48..0x4c].try_into().unwrap()), 700, "the second point's x");
+        assert_eq!(
+            i32::from_le_bytes(b[0x48..0x4c].try_into().unwrap()),
+            700,
+            "the second point's x"
+        );
         r.sample(&[], 40 * ms);
         assert_eq!(r.hist.last().unwrap().ty, COMPLETE);
 
@@ -319,7 +370,11 @@ mod tests {
         // point (180 degrees, then -160), not the plain 20 degrees
         let (a0, a1) = (props(&at(0.0)).angle, props(&at(20.0)).angle);
         let want = ((a1 - a0) / (1.0 + a1 * a0)).atan().to_degrees();
-        assert!((e.rot - want).abs() < 1e-4 && e.rot > 30.0, "{} degrees, want {want}", e.rot);
+        assert!(
+            (e.rot - want).abs() < 1e-4 && e.rot > 30.0,
+            "{} degrees, want {want}",
+            e.rot
+        );
         assert_eq!(e.scale, 0.0);
 
         // the finger count changes: Cancel, and the next touch has no IsNewTouch

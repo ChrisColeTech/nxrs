@@ -7,11 +7,13 @@ use std::process::{Child, Command, Stdio};
 
 /// A display to open a window on (X11 or Wayland).
 pub fn has_display() -> bool {
-    std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty()) || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
+    std::env::var_os("DISPLAY").is_some_and(|v| !v.is_empty())
+        || std::env::var_os("WAYLAND_DISPLAY").is_some_and(|v| !v.is_empty())
 }
 
 fn have(tool: &str) -> bool {
-    std::env::var_os("PATH").is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file()))
+    std::env::var_os("PATH")
+        .is_some_and(|p| std::env::split_paths(&p).any(|d| d.join(tool).is_file()))
 }
 
 /// Which dialog tool there is: "zenity" or "kdialog".
@@ -28,17 +30,35 @@ pub fn message(title: &str, text: &str, warning: bool) -> bool {
     let mut c = match tool() {
         Some("zenity") => {
             let mut c = Command::new("zenity");
-            c.args([if warning { "--warning" } else { "--info" }, "--no-markup", "--no-wrap", "--title", title, "--text", text]);
+            c.args([
+                if warning { "--warning" } else { "--info" },
+                "--no-markup",
+                "--no-wrap",
+                "--title",
+                title,
+                "--text",
+                text,
+            ]);
             c
         }
         Some(_) => {
             let mut c = Command::new("kdialog");
-            c.args(["--title", title, if warning { "--sorry" } else { "--msgbox" }, text]);
+            c.args([
+                "--title",
+                title,
+                if warning { "--sorry" } else { "--msgbox" },
+                text,
+            ]);
             c
         }
         None => return false,
     };
-    match c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn() {
+    match c
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
         Ok(mut ch) => {
             std::thread::spawn(move || ch.wait());
             true
@@ -51,8 +71,22 @@ pub fn message(title: &str, text: &str, warning: bool) -> bool {
 /// Cancel / Escape; Err when no dialog could be shown.
 pub fn entry(title: &str, prompt: &str, default: &str) -> Result<Option<String>, String> {
     let out = match tool() {
-        Some("zenity") => Command::new("zenity").args(["--entry", "--title", title, "--text", prompt, "--entry-text", default]).stdin(Stdio::null()).output(),
-        Some(_) => Command::new("kdialog").args(["--title", title, "--inputbox", prompt, default]).stdin(Stdio::null()).output(),
+        Some("zenity") => Command::new("zenity")
+            .args([
+                "--entry",
+                "--title",
+                title,
+                "--text",
+                prompt,
+                "--entry-text",
+                default,
+            ])
+            .stdin(Stdio::null())
+            .output(),
+        Some(_) => Command::new("kdialog")
+            .args(["--title", title, "--inputbox", prompt, default])
+            .stdin(Stdio::null())
+            .output(),
         None => return Err("no display or no zenity / kdialog".into()),
     }
     .map_err(|e| e.to_string())?;
@@ -65,9 +99,16 @@ pub fn entry(title: &str, prompt: &str, default: &str) -> Result<Option<String>,
 
 /// Opens a file or URL with the desktop's handler (the browser for a page).
 pub fn open(path: &std::path::Path) -> bool {
-    Command::new("xdg-open").arg(path).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().map(|mut c| {
-        std::thread::spawn(move || c.wait());
-    }).is_ok()
+    Command::new("xdg-open")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .map(|mut c| {
+            std::thread::spawn(move || c.wait());
+        })
+        .is_ok()
 }
 
 /// A question dialog that stays open until it is answered or closed from here: the prompt window of `ui.rs`.
@@ -81,16 +122,42 @@ impl Question {
         let mut c = match tool()? {
             "zenity" => {
                 let mut c = Command::new("zenity");
-                c.args(["--question", "--no-markup", "--no-wrap", "--title", title, "--text", text, "--ok-label", "OK", "--cancel-label", "Cancel"]);
+                c.args([
+                    "--question",
+                    "--no-markup",
+                    "--no-wrap",
+                    "--title",
+                    title,
+                    "--text",
+                    text,
+                    "--ok-label",
+                    "OK",
+                    "--cancel-label",
+                    "Cancel",
+                ]);
                 c
             }
             _ => {
                 let mut c = Command::new("kdialog");
-                c.args(["--title", title, "--yesno", text, "--yes-label", "OK", "--no-label", "Cancel"]);
+                c.args([
+                    "--title",
+                    title,
+                    "--yesno",
+                    text,
+                    "--yes-label",
+                    "OK",
+                    "--no-label",
+                    "Cancel",
+                ]);
                 c
             }
         };
-        c.stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn().ok().map(|child| Question { child })
+        c.stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .ok()
+            .map(|child| Question { child })
     }
 
     /// The answer once the player gave one: Some(true) confirm, Some(false) cancel, None still open.

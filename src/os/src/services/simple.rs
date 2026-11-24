@@ -59,10 +59,15 @@ unsafe fn answer(c: *mut Cpu) {
         crate::services::os::signal_system_event(c, arg(i));
     }
     let ret = match name.as_str() {
-        "_ZN2nn3ssl10InitializeEv" | "_ZN2nn3ssl8FinalizeEv" => ssl_count(name.ends_with("InitializeEv")),
+        "_ZN2nn3ssl10InitializeEv" | "_ZN2nn3ssl8FinalizeEv" => {
+            ssl_count(name.ends_with("InitializeEv"))
+        }
         _ => s.ret,
     };
-    crate::log_once!(format!("simple {name}"), "offline stand-in: {name} -> {ret:#x}");
+    crate::log_once!(
+        format!("simple {name}"),
+        "offline stand-in: {name} -> {ret:#x}"
+    );
     (*c).x[0] = ret;
 }
 

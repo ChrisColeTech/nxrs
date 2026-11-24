@@ -40,13 +40,16 @@ const AHEAD: usize = 8;
 const SQRT_HALF: f32 = std::f32::consts::FRAC_1_SQRT_2;
 
 fn rd32(b: &[u8], o: usize) -> u32 {
-    b.get(o..o + 4).map_or(0, |s| u32::from_le_bytes(s.try_into().unwrap()))
+    b.get(o..o + 4)
+        .map_or(0, |s| u32::from_le_bytes(s.try_into().unwrap()))
 }
 fn rd16(b: &[u8], o: usize) -> i16 {
-    b.get(o..o + 2).map_or(0, |s| i16::from_le_bytes(s.try_into().unwrap()))
+    b.get(o..o + 2)
+        .map_or(0, |s| i16::from_le_bytes(s.try_into().unwrap()))
 }
 fn rd64(b: &[u8], o: usize) -> u64 {
-    b.get(o..o + 8).map_or(0, |s| u64::from_le_bytes(s.try_into().unwrap()))
+    b.get(o..o + 8)
+        .map_or(0, |s| u64::from_le_bytes(s.try_into().unwrap()))
 }
 fn rdf(b: &[u8], o: usize) -> f32 {
     let v = f32::from_bits(rd32(b, o));
@@ -141,7 +144,12 @@ impl Voice {
             Some(c) if !restart => c,
             _ => (0, 0),
         };
-        self.ad = Adpcm { frame: self.ad.frame, h0, h1, ..Default::default() };
+        self.ad = Adpcm {
+            frame: self.ad.frame,
+            h0,
+            h1,
+            ..Default::default()
+        };
         if let Some(w) = self.q.first() {
             if w.ctx_size >= 6 && crate::guest::readable(w.ctx, 6) {
                 let p = crate::guest::bytes(w.ctx, 6);
@@ -181,13 +189,21 @@ impl Voice {
             }
             let a = &mut self.ad;
             a.prev = a.pcm;
-            let first = if w.start as i64 > f * 14 { (w.start as i64 - f * 14) as usize } else { 0 };
+            let first = if w.start as i64 > f * 14 {
+                (w.start as i64 - f * 14) as usize
+            } else {
+                0
+            };
             for i in first..14 {
                 let mut nib = ((p[1 + i / 2] >> if i % 2 == 1 { 0 } else { 4 }) & 15) as i64;
                 if nib >= 8 {
                     nib -= 16;
                 }
-                let x = (nib * (1i64 << shift) * 2048 + co[pred * 2] as i64 * a.h0 as i64 + co[pred * 2 + 1] as i64 * a.h1 as i64 + 1024) >> 11;
+                let x = (nib * (1i64 << shift) * 2048
+                    + co[pred * 2] as i64 * a.h0 as i64
+                    + co[pred * 2 + 1] as i64 * a.h1 as i64
+                    + 1024)
+                    >> 11;
                 let x = x.clamp(-32768, 32767) as i16;
                 a.h1 = a.h0;
                 a.h0 = x;
@@ -213,7 +229,11 @@ impl Voice {
                 return;
             }
             if format == 6 {
-                let last1 = if w.end - w.start > 1 { (self.ad_sample(&w, w.end as i64 - 2, co) * 32768.0).round() as i16 } else { self.ad.seed0 };
+                let last1 = if w.end - w.start > 1 {
+                    (self.ad_sample(&w, w.end as i64 - 2, co) * 32768.0).round() as i16
+                } else {
+                    self.ad.seed0
+                };
                 let last0 = (self.ad_sample(&w, w.end as i64 - 1, co) * 32768.0).round() as i16;
                 self.carry = Some((last0, last1));
             }
@@ -221,10 +241,22 @@ impl Voice {
             self.pop_wave();
         }
     }
-    fn sample(&mut self, w: &Wave, n: i64, ch: u32, channels: u32, format: u8, co: &[i16; 16]) -> f32 {
+    fn sample(
+        &mut self,
+        w: &Wave,
+        n: i64,
+        ch: u32,
+        channels: u32,
+        format: u8,
+        co: &[i16; 16],
+    ) -> f32 {
         let n = n.clamp(w.start as i64, w.end as i64 - 1);
         if format == 6 {
-            return if channels == 1 { self.ad_sample(w, n, co) } else { 0.0 };
+            return if channels == 1 {
+                self.ad_sample(w, n, co)
+            } else {
+                0.0
+            };
         }
         let b = bytes_of(format);
         let index = n as u64 * channels as u64 + ch as u64;
@@ -253,13 +285,39 @@ impl Voice {
         for j in 0..4 {
             let k = (head + j) % 4;
             let p = &vi[0x60 + k * 0x38..0x60 + (k + 1) * 0x38];
-            let (addr, size, start, end, sent) = (rd64(p, 0), rd64(p, 8), rd32(p, 0x10) as i32, rd32(p, 0x14) as i32, p[0x1a] != 0);
-            let sig = addr ^ size.wrapping_mul(31) ^ ((start as u32 as u64) << 32) ^ end as u32 as u64;
-            let fresh = !self.seen[k] || self.accepted[k] != serial || self.sent[k] || self.sig[k] != sig;
+            let (addr, size, start, end, sent) = (
+                rd64(p, 0),
+                rd64(p, 8),
+                rd32(p, 0x10) as i32,
+                rd32(p, 0x14) as i32,
+                p[0x1a] != 0,
+            );
+            let sig =
+                addr ^ size.wrapping_mul(31) ^ ((start as u32 as u64) << 32) ^ end as u32 as u64;
+            let fresh =
+                !self.seen[k] || self.accepted[k] != serial || self.sent[k] || self.sig[k] != sig;
             if addr != 0 && size != 0 && !sent && !self.busy[k] && fresh && self.q.len() < 4 {
-                let capacity = if format == 6 { (size / 8) * 14 } else { size / (channels as u64 * bytes_of(format)) };
-                if start >= 0 && end > start && end as u64 <= capacity && size <= 128 << 20 && crate::guest::readable(addr, size) {
-                    self.q.push(Wave { addr, size, start, end, looped: p[0x18] != 0, slot: k, ctx: rd64(p, 0x20), ctx_size: rd64(p, 0x28) });
+                let capacity = if format == 6 {
+                    (size / 8) * 14
+                } else {
+                    size / (channels as u64 * bytes_of(format))
+                };
+                if start >= 0
+                    && end > start
+                    && end as u64 <= capacity
+                    && size <= 128 << 20
+                    && crate::guest::readable(addr, size)
+                {
+                    self.q.push(Wave {
+                        addr,
+                        size,
+                        start,
+                        end,
+                        looped: p[0x18] != 0,
+                        slot: k,
+                        ctx: rd64(p, 0x20),
+                        ctx_size: rd64(p, 0x28),
+                    });
                     self.busy[k] = true;
                     self.accepted[k] = serial;
                     if self.q.len() == 1 {
@@ -313,7 +371,14 @@ impl Default for Mixer {
             mixtab: (0..NM).map(|_| None).collect(),
             nmix: 0,
             split: vec![vec![]; NSPL],
-            sdst: vec![SplitDest { in_use: false, mix: -1, vol: [0.0; NC] }; NSD],
+            sdst: vec![
+                SplitDest {
+                    in_use: false,
+                    mix: -1,
+                    vol: [0.0; NC]
+                };
+                NSD
+            ],
             sdd_size: 0,
             effects: vec![],
             order: vec![],
@@ -333,12 +398,18 @@ fn voice_v2_to_legacy(s: &[u8]) -> [u8; VOICE] {
     for f in 0..2 {
         let (sf, df) = (0x24 + f * 0x18, 0x24 + f * 0x0c);
         d[df] = s[sf];
-        let q = |x: f32| (if x.is_finite() { x * 16384.0 } else { 0.0 }).clamp(-32768.0, 32767.0).round() as i16;
+        let q = |x: f32| {
+            (if x.is_finite() { x * 16384.0 } else { 0.0 })
+                .clamp(-32768.0, 32767.0)
+                .round() as i16
+        };
         for j in 0..3 {
-            d[df + 2 + j * 2..df + 4 + j * 2].copy_from_slice(&q(rdf(s, sf + 4 + j * 4)).to_le_bytes());
+            d[df + 2 + j * 2..df + 4 + j * 2]
+                .copy_from_slice(&q(rdf(s, sf + 4 + j * 4)).to_le_bytes());
         }
         for j in 0..2 {
-            d[df + 8 + j * 2..df + 10 + j * 2].copy_from_slice(&q(rdf(s, sf + 0x10 + j * 4)).to_le_bytes());
+            d[df + 8 + j * 2..df + 10 + j * 2]
+                .copy_from_slice(&q(rdf(s, sf + 0x10 + j * 4)).to_le_bytes());
         }
     }
     d[0x3c..0x40].copy_from_slice(&s[0x54..0x58]);
@@ -364,7 +435,13 @@ impl Mixer {
             return;
         }
         if self.effects.len() != count {
-            self.effects = (0..count).map(|_| Effect { config: [0; EFFECT], filter: [Biquad::default(); 6], aux_logged: false }).collect();
+            self.effects = (0..count)
+                .map(|_| Effect {
+                    config: [0; EFFECT],
+                    filter: [Biquad::default(); 6],
+                    aux_logged: false,
+                })
+                .collect();
         }
         for (i, e) in self.effects.iter_mut().enumerate() {
             let p = &data[i * stride..i * stride + EFFECT];
@@ -375,7 +452,8 @@ impl Mixer {
         }
         self.order = (0..count).collect();
         let effects = &self.effects;
-        self.order.sort_by_key(|&i| (rd32(&effects[i].config, 0x18), i));
+        self.order
+            .sort_by_key(|&i| (rd32(&effects[i].config, 0x18), i));
     }
 
     /// The update's splitter section and mix section into the kept tables (Turbo a22b102).
@@ -394,7 +472,9 @@ impl Mixer {
                             break;
                         }
                         if id < NSPL {
-                            self.split[id] = (0..n.min(SPLD)).map(|k| rd32(spl, off + 0x10 + 4 * k) as i32).collect();
+                            self.split[id] = (0..n.min(SPLD))
+                                .map(|k| rd32(spl, off + 0x10 + 4 * k) as i32)
+                                .collect();
                         }
                         ninfo += 1;
                         off += 0x10 + 4 * n;
@@ -411,9 +491,16 @@ impl Mixer {
                         // end 12 bytes after it: the size is learned from the first record with one behind it
                         if next + 4 <= spl.len() && self.sdd_size == 0 {
                             self.sdd_size = next - off;
-                            crate::log!("audren:u: splitter destinations of {:#x} bytes", self.sdd_size);
+                            crate::log!(
+                                "audren:u: splitter destinations of {:#x} bytes",
+                                self.sdd_size
+                            );
                         }
-                        let mut size = if self.sdd_size != 0 { self.sdd_size } else { 0x70 };
+                        let mut size = if self.sdd_size != 0 {
+                            self.sdd_size
+                        } else {
+                            0x70
+                        };
                         if off + size > spl.len() {
                             size = 0x70;
                         }
@@ -436,7 +523,10 @@ impl Mixer {
         // the whole list, or (0x20 bytes over a whole number of mixes) only the mixes that changed
         let dirty = mixes.len() >= 0x20 && mixes.len() % MIX == 0x20;
         let (list, n) = if dirty {
-            (&mixes[0x20..], (rd32(mixes, 4) as usize).min((mixes.len() - 0x20) / MIX))
+            (
+                &mixes[0x20..],
+                (rd32(mixes, 4) as usize).min((mixes.len() - 0x20) / MIX),
+            )
         } else if !mixes.is_empty() && mixes.len() % MIX == 0 {
             for m in self.mixtab.iter_mut() {
                 *m = None;
@@ -457,7 +547,11 @@ impl Mixer {
                 self.mixtab[id] = None;
             }
         }
-        self.nmix = self.mixtab.iter().rposition(|m| m.is_some()).map_or(0, |i| i + 1);
+        self.nmix = self
+            .mixtab
+            .iter()
+            .rposition(|m| m.is_some())
+            .map_or(0, |i| i + 1);
         if !self.route_logged && (n > 0 || ninfo > 0 || ndest > 0) {
             self.route_logged = true;
             crate::log!(
@@ -488,7 +582,8 @@ impl Mixer {
                         continue;
                     }
                     for k in 0..count {
-                        let (src, dst, vol) = (v[k] as usize, v[24 + k] as usize, rdf(v, 48 + k * 4));
+                        let (src, dst, vol) =
+                            (v[k] as usize, v[24 + k] as usize, rdf(v, 48 + k * 4));
                         if src >= buffers || dst >= buffers {
                             continue;
                         }
@@ -519,7 +614,11 @@ impl Mixer {
                         let o = v[6 + k] as usize;
                         if o < buffers {
                             for f in 0..NF {
-                                mix[o * NF + f] = if enabled { filters[k].run(&c, inp[f]) } else { inp[f] };
+                                mix[o * NF + f] = if enabled {
+                                    filters[k].run(&c, inp[f])
+                                } else {
+                                    inp[f]
+                                };
                             }
                         }
                     }
@@ -534,7 +633,17 @@ impl Mixer {
     /// (u32), 0x10 bytes a voice. `running`: the renderer was started (a stopped one keeps its voices where they
     /// are). Returns the voices that played.
     #[allow(clippy::too_many_arguments)]
-    pub fn mix(&mut self, voices: &[u8], count: usize, stride: usize, resources: &[u8], sinks: &[u8], status: &mut [u8], stereo: &mut [f32], running: bool) -> usize {
+    pub fn mix(
+        &mut self,
+        voices: &[u8],
+        count: usize,
+        stride: usize,
+        resources: &[u8],
+        sinks: &[u8],
+        status: &mut [u8],
+        stereo: &mut [f32],
+        running: bool,
+    ) -> usize {
         stereo[..NF * 2].fill(0.0);
         if count > NV || (stride < VOICE && stride != VOICE2) || voices.len() < count * stride {
             return 0;
@@ -603,7 +712,9 @@ impl Mixer {
                 }
                 if state == 0 && !v.q.is_empty() && running && !deferred {
                     active += 1;
-                    self.play_voice(&mut v, vi, id, channels, format, &map, &nbuf, resources, stereo);
+                    self.play_voice(
+                        &mut v, vi, id, channels, format, &map, &nbuf, resources, stereo,
+                    );
                 }
             } else {
                 v.q.clear();
@@ -655,8 +766,14 @@ impl Mixer {
                 let (mut l, mut r) = (ch[0], if ninput > 1 { ch[1] } else { ch[0] });
                 // a 5.1 sink: FL FR FC LFE BL BR folded to the PC's stereo, centre and rears kept
                 if ninput == 6 {
-                    l = downmix[0] * ch[0] + downmix[1] * ch[2] + downmix[2] * ch[3] + downmix[3] * ch[4];
-                    r = downmix[0] * ch[1] + downmix[1] * ch[2] + downmix[2] * ch[3] + downmix[3] * ch[5];
+                    l = downmix[0] * ch[0]
+                        + downmix[1] * ch[2]
+                        + downmix[2] * ch[3]
+                        + downmix[3] * ch[4];
+                    r = downmix[0] * ch[1]
+                        + downmix[1] * ch[2]
+                        + downmix[2] * ch[3]
+                        + downmix[3] * ch[5];
                 }
                 stereo[f * 2] += l * volume;
                 stereo[f * 2 + 1] += r * volume;
@@ -664,7 +781,14 @@ impl Mixer {
         }
         if active > 0 && !self.logged {
             self.logged = true;
-            crate::log!("audren:u: host mixer active ({active} voices, {nm} mixes, {})", if nm > 0 { "mix routing" } else { "straight to stereo" });
+            crate::log!(
+                "audren:u: host mixer active ({active} voices, {nm} mixes, {})",
+                if nm > 0 {
+                    "mix routing"
+                } else {
+                    "straight to stereo"
+                }
+            );
         }
         self.update_blocks = self.update_blocks.saturating_sub(1);
         active
@@ -672,7 +796,18 @@ impl Mixer {
 
     /// One playing voice's block into its mix, its splitter's mixes, the final mix (unrouted) or `stereo` (no mixes).
     #[allow(clippy::too_many_arguments)]
-    fn play_voice(&mut self, v: &mut Voice, vi: &[u8], id: usize, channels: u32, format: u8, map: &[i32; NM], nbuf: &[usize; NM], resources: &[u8], stereo: &mut [f32]) {
+    fn play_voice(
+        &mut self,
+        v: &mut Voice,
+        vi: &[u8],
+        id: usize,
+        channels: u32,
+        format: u8,
+        map: &[i32; NM],
+        nbuf: &[usize; NM],
+        resources: &[u8],
+        stereo: &mut [f32],
+    ) {
         let nm = self.nmix;
         let rate = match rd32(vi, 0xc) {
             r @ 1..=192_000 => r,
@@ -708,7 +843,8 @@ impl Mixer {
                         *g = rdf(resources, cid * RES + 4 + k * 4);
                     }
                 } else {
-                    r[if ch < nbuf[d] { ch } else { 0 }] = if channels == 1 { SQRT_HALF } else { 1.0 };
+                    r[if ch < nbuf[d] { ch } else { 0 }] =
+                        if channels == 1 { SQRT_HALF } else { 1.0 };
                     if channels == 1 && nbuf[d] > 1 {
                         r[1] = SQRT_HALF;
                     }
@@ -756,7 +892,11 @@ impl Mixer {
         }
         v.normalize(format, &co);
         let sid = rd32(vi, 0x5c) as usize;
-        let split = if dest < 0 && nm > 0 && sid < NSPL && !self.split[sid].is_empty() { Some(self.split[sid].clone()) } else { None };
+        let split = if dest < 0 && nm > 0 && sid < NSPL && !self.split[sid].is_empty() {
+            Some(self.split[sid].clone())
+        } else {
+            None
+        };
         for ch in 0..channels as usize {
             let mut routed = false;
             if dest >= 0 {
@@ -773,8 +913,15 @@ impl Mixer {
             } else if let Some(sp) = &split {
                 // channel ch of N goes to the splitter's destinations ch, ch + N, ch + 2N...
                 for &did in sp.iter().skip(ch).step_by(channels as usize) {
-                    let Some(sd) = usize::try_from(did).ok().and_then(|d| self.sdst.get(d)).copied() else { continue };
-                    if !sd.in_use || sd.mix < 0 || sd.mix as usize >= NM || map[sd.mix as usize] < 0 {
+                    let Some(sd) = usize::try_from(did)
+                        .ok()
+                        .and_then(|d| self.sdst.get(d))
+                        .copied()
+                    else {
+                        continue;
+                    };
+                    if !sd.in_use || sd.mix < 0 || sd.mix as usize >= NM || map[sd.mix as usize] < 0
+                    {
                         continue;
                     }
                     let dm = map[sd.mix as usize] as usize;
@@ -841,7 +988,9 @@ impl Mixer {
         let mut done = [false; NM];
         let target = |m: &[u8]| (rd32(m, 0x924) as usize, rd32(m, 0x928) as usize);
         for i in 0..nm {
-            let Some(m) = self.mixtab[i].as_deref().filter(|_| map[i] >= 0) else { continue };
+            let Some(m) = self.mixtab[i].as_deref().filter(|_| map[i] >= 0) else {
+                continue;
+            };
             let (id, sid) = target(m);
             if id < NM && map[id] >= 0 {
                 if map[id] != i as i32 {
@@ -849,8 +998,15 @@ impl Mixer {
                 }
             } else if sid < NSPL {
                 for &did in &self.split[sid] {
-                    let Some(d) = usize::try_from(did).ok().and_then(|d| self.sdst.get(d)) else { continue };
-                    if d.in_use && d.mix >= 0 && (d.mix as usize) < NM && map[d.mix as usize] >= 0 && map[d.mix as usize] != i as i32 {
+                    let Some(d) = usize::try_from(did).ok().and_then(|d| self.sdst.get(d)) else {
+                        continue;
+                    };
+                    if d.in_use
+                        && d.mix >= 0
+                        && (d.mix as usize) < NM
+                        && map[d.mix as usize] >= 0
+                        && map[d.mix as usize] != i as i32
+                    {
                         incoming[map[d.mix as usize] as usize] += 1;
                     }
                 }
@@ -876,7 +1032,8 @@ impl Mixer {
                             let g = rdf(&m, 0x24 + (sc * NC + dc) * 4) * volume;
                             if g != 0.0 {
                                 for f in 0..NF {
-                                    self.mix[(dst * NC + dc) * NF + f] += self.mix[(i * NC + sc) * NF + f] * g;
+                                    self.mix[(dst * NC + dc) * NF + f] +=
+                                        self.mix[(i * NC + sc) * NF + f] * g;
                                 }
                             }
                         }
@@ -885,8 +1042,19 @@ impl Mixer {
                 } else if dst < 0 && sid < NSPL {
                     // destination j of the splitter takes the mix's buffer j % buffers with its own volumes
                     for (j, &did) in self.split[sid].clone().iter().enumerate() {
-                        let Some(d) = usize::try_from(did).ok().and_then(|d| self.sdst.get(d)).copied() else { continue };
-                        if !d.in_use || d.mix < 0 || d.mix as usize >= NM || map[d.mix as usize] < 0 || map[d.mix as usize] == i as i32 {
+                        let Some(d) = usize::try_from(did)
+                            .ok()
+                            .and_then(|d| self.sdst.get(d))
+                            .copied()
+                        else {
+                            continue;
+                        };
+                        if !d.in_use
+                            || d.mix < 0
+                            || d.mix as usize >= NM
+                            || map[d.mix as usize] < 0
+                            || map[d.mix as usize] == i as i32
+                        {
                             continue;
                         }
                         let dm = map[d.mix as usize] as usize;
@@ -895,7 +1063,8 @@ impl Mixer {
                             let g = d.vol[dc] * volume;
                             if g != 0.0 {
                                 for f in 0..NF {
-                                    self.mix[(dm * NC + dc) * NF + f] += self.mix[(i * NC + sc) * NF + f] * g;
+                                    self.mix[(dm * NC + dc) * NF + f] +=
+                                        self.mix[(i * NC + sc) * NF + f] * g;
                                 }
                             }
                         }
@@ -923,7 +1092,10 @@ fn aux(e: &mut Effect, mix: &mut [f32], buffers: usize) {
     }
     let (send, ret) = (rd64(v, 0x40), rd64(v, 0x50));
     let ring = 0x80 + capacity as u64 * 4;
-    let valid = capacity >= channels * NF && capacity <= 1 << 24 && crate::guest::readable(send, ring) && crate::guest::readable(ret, ring);
+    let valid = capacity >= channels * NF
+        && capacity <= 1 << 24
+        && crate::guest::readable(send, ring)
+        && crate::guest::readable(ret, ring);
     if e.config[2] == 0 {
         if valid {
             crate::guest::zero(send + 0x40, 12);
@@ -944,7 +1116,10 @@ fn aux(e: &mut Effect, mix: &mut [f32], buffers: usize) {
         }
         return;
     }
-    let (write, read) = (crate::guest::r32(send + 0x44) as usize, crate::guest::r32(ret + 0x40) as usize);
+    let (write, read) = (
+        crate::guest::r32(send + 0x44) as usize,
+        crate::guest::r32(ret + 0x40) as usize,
+    );
     if write >= capacity || read >= capacity {
         return;
     }
@@ -956,7 +1131,8 @@ fn aux(e: &mut Effect, mix: &mut [f32], buffers: usize) {
             crate::guest::w32(send + 0x80 + wi as u64 * 4, s as u32);
             let o = v[24 + c] as usize;
             if o < buffers {
-                mix[o * NF + f] = crate::guest::r32(ret + 0x80 + ri as u64 * 4) as i32 as f32 / 32768.0;
+                mix[o * NF + f] =
+                    crate::guest::r32(ret + 0x80 + ri as u64 * 4) as i32 as f32 / 32768.0;
             }
         }
     }
@@ -986,7 +1162,15 @@ pub struct Params {
 
 impl Params {
     pub fn read(b: &[u8]) -> Params {
-        Params { rate: rd32(b, 0), samples: rd32(b, 4), mix_buffers: rd32(b, 8), voices: rd32(b, 0x10), sinks: rd32(b, 0x14), effects: rd32(b, 0x18), revision: rd32(b, 0x30) }
+        Params {
+            rate: rd32(b, 0),
+            samples: rd32(b, 4),
+            mix_buffers: rd32(b, 8),
+            voices: rd32(b, 0x10),
+            sinks: rd32(b, 0x14),
+            effects: rd32(b, 0x18),
+            revision: rd32(b, 0x30),
+        }
     }
 }
 
@@ -1000,7 +1184,11 @@ impl Service for Manager {
         match ctx.cmd() {
             // OpenAudioRenderer(parameter, work size, aruid; transfer memory, process)
             0 | 4 => {
-                let raw = ctx.input().get(..0x34).map(|s| s.to_vec()).unwrap_or_default();
+                let raw = ctx
+                    .input()
+                    .get(..0x34)
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default();
                 let p = Params::read(&raw);
                 crate::log!(
                     "audren:u: OpenAudioRenderer rate {} samples {} mix buffers {} voices {} sinks {} effects {} revision REV{} (the host mixes)",
@@ -1017,7 +1205,11 @@ impl Service for Manager {
             }
             // GetWorkBufferSize(parameter)
             1 => {
-                let raw = ctx.input().get(..0x34).map(|s| s.to_vec()).unwrap_or_default();
+                let raw = ctx
+                    .input()
+                    .get(..0x34)
+                    .map(|s| s.to_vec())
+                    .unwrap_or_default();
                 let mut p = raw.clone();
                 p.resize(0x40, 0);
                 let n = crate::services::audren::service_work_size(&p, rd32(&raw, 0x30));
@@ -1052,7 +1244,16 @@ pub struct Renderer {
 
 impl Renderer {
     pub fn new(p: Params) -> Renderer {
-        Renderer { p, mixer: Mixer::default(), started: false, stream: None, shared: Arc::new(Mutex::new(Shared { event: None })), frames: 0, tag: 0, limit: 100 }
+        Renderer {
+            p,
+            mixer: Mixer::default(),
+            started: false,
+            stream: None,
+            shared: Arc::new(Mutex::new(Shared { event: None })),
+            frames: 0,
+            tag: 0,
+            limit: 100,
+        }
     }
 
     fn stream(&mut self) -> &Arc<Stream> {
@@ -1071,7 +1272,12 @@ impl Renderer {
 
     /// RequestUpdate: the game's update in `input`, the answer into `out` (its size); `blocks` 5 ms blocks mixed
     /// (`None`: as many as the sound card has room for). The mixed blocks are returned (interleaved stereo).
-    pub fn update(&mut self, input: &[u8], out: &mut Vec<u8>, blocks: Option<usize>) -> Result<Vec<f32>, u32> {
+    pub fn update(
+        &mut self,
+        input: &[u8],
+        out: &mut Vec<u8>,
+        blocks: Option<usize>,
+    ) -> Result<Vec<f32>, u32> {
         const R_BAD: u32 = 153 | 4 << 9; // nn::audio, 4
         if input.len() < 0x40 {
             return Err(R_BAD);
@@ -1083,12 +1289,22 @@ impl Renderer {
         }
         let rev = ih[0];
         let revn = ((rev >> 24) & 0xff).saturating_sub(b'0' as u32);
-        let (behav, mp, vo, vr, ef) = (ih[1] as usize, ih[2] as usize, ih[3] as usize, ih[4] as usize, ih[5] as usize);
+        let (behav, mp, vo, vr, ef) = (
+            ih[1] as usize,
+            ih[2] as usize,
+            ih[3] as usize,
+            ih[4] as usize,
+            ih[5] as usize,
+        );
         let (mut nvoices, mut neff, mut nsinks) = (vo / VOICE, ef / EFFECT, ih[7] as usize / SINK);
         let npools = mp / 0x20;
         let (mut vstride, mut estride) = (VOICE, EFFECT);
         // the counts the renderer was opened with; the input strides from size / count (newer SDKs grew them)
-        let (pv, ps, pe) = (self.p.voices as usize, self.p.sinks as usize, self.p.effects as usize);
+        let (pv, ps, pe) = (
+            self.p.voices as usize,
+            self.p.sinks as usize,
+            self.p.effects as usize,
+        );
         if pv > 0 && pv <= 4096 && vo > 0 && vo % pv == 0 && vo / pv >= VOICE {
             nvoices = pv;
             vstride = vo / pv;
@@ -1128,11 +1344,36 @@ impl Renderer {
         let mixes = take(ih[6] as usize);
         let sinks = take(ih[7] as usize);
         let eff_v2 = revn >= 9;
-        let (o_mp, o_vo, o_ef, o_sk, o_pf, o_bh, o_ri) = (npools * 0x10, nvoices * 0x10, neff * if eff_v2 { 0x90 } else { 0x10 }, nsinks * 0x20, 0x10, 0xb0, if revn >= 5 { 0x10 } else { 0 });
+        let (o_mp, o_vo, o_ef, o_sk, o_pf, o_bh, o_ri) = (
+            npools * 0x10,
+            nvoices * 0x10,
+            neff * if eff_v2 { 0x90 } else { 0x10 },
+            nsinks * 0x20,
+            0x10,
+            0xb0,
+            if revn >= 5 { 0x10 } else { 0 },
+        );
         let total = 0x40 + o_mp + o_vo + o_ef + o_sk + o_pf + o_bh + o_ri;
         out.clear();
         out.resize(total, 0);
-        let oh = [rev, o_bh as u32, o_mp as u32, o_vo as u32, 0, o_ef as u32, 0, o_sk as u32, o_pf as u32, 0, o_ri as u32, 0, 0, 0, 0, total as u32];
+        let oh = [
+            rev,
+            o_bh as u32,
+            o_mp as u32,
+            o_vo as u32,
+            0,
+            o_ef as u32,
+            0,
+            o_sk as u32,
+            o_pf as u32,
+            0,
+            o_ri as u32,
+            0,
+            0,
+            0,
+            0,
+            total as u32,
+        ];
         for (k, w) in oh.iter().enumerate() {
             out[k * 4..k * 4 + 4].copy_from_slice(&w.to_le_bytes());
         }
@@ -1174,7 +1415,16 @@ impl Renderer {
             };
             let running = self.started && n > 0;
             let status = &mut out[status_at..status_at + o_vo];
-            self.mixer.mix(vin, nvoices, vstride, resources, sinks, status, &mut stereo, running);
+            self.mixer.mix(
+                vin,
+                nvoices,
+                vstride,
+                resources,
+                sinks,
+                status,
+                &mut stereo,
+                running,
+            );
             if running {
                 pcm.extend_from_slice(&stereo);
             }
@@ -1189,7 +1439,12 @@ impl Renderer {
         // effects: enabled (3) / disabled (4)
         let mut q = status_at + o_vo;
         for i in 0..neff {
-            out[q + i * if eff_v2 { 0x90 } else { 0x10 }] = if effects.get(i * estride + 2).copied().unwrap_or(0) != 0 { 3 } else { 4 };
+            out[q + i * if eff_v2 { 0x90 } else { 0x10 }] =
+                if effects.get(i * estride + 2).copied().unwrap_or(0) != 0 {
+                    3
+                } else {
+                    4
+                };
         }
         q += o_ef + o_sk + o_pf + o_bh;
         if o_ri > 0 {
@@ -1281,7 +1536,11 @@ struct Device {
     event: Option<crate::kobj::Event>,
 }
 
-const DEVICES: [&str; 3] = ["AudioTvOutput", "AudioStereoJackOutput", "AudioBuiltInSpeakerOutput"];
+const DEVICES: [&str; 3] = [
+    "AudioTvOutput",
+    "AudioStereoJackOutput",
+    "AudioBuiltInSpeakerOutput",
+];
 
 impl Service for Device {
     fn name(&self) -> String {
@@ -1416,12 +1675,20 @@ mod tests {
         near(out[0], 0.25 * SQRT_HALF);
         near(out[1], out[0]);
         assert_eq!(u64::from_le_bytes(st[..8].try_into().unwrap()), 240);
-        assert_eq!(u32::from_le_bytes(st[8..12].try_into().unwrap()), 1, "the wave buffer is consumed");
+        assert_eq!(
+            u32::from_le_bytes(st[8..12].try_into().unwrap()),
+            1,
+            "the wave buffer is consumed"
+        );
         let mut v = voice(&pcm);
         v[0x60 + 0x1a] = 1; // the client marks the buffer sent
         let (out, st) = run(&mut m, &v);
         near(out[0], 0.0);
-        assert_eq!(u32::from_le_bytes(st[8..12].try_into().unwrap()), 1, "the same buffer is not played twice");
+        assert_eq!(
+            u32::from_le_bytes(st[8..12].try_into().unwrap()),
+            1,
+            "the same buffer is not played twice"
+        );
     }
 
     /// Turbo a22b102: an update with only the changed mixes (behind a 0x20-byte header) keeps the others; the next
@@ -1470,7 +1737,11 @@ mod tests {
         mix_entry(&mut mixes[0x20..0x20 + MIX], 0, u32::MAX, u32::MAX);
         mix_entry(&mut mixes[0x20 + MIX..], 1, 0, u32::MAX);
         // destination 0: the final mix, buffer 0 at 0.5; destination 1: mix 1, buffer 1 at 0.25
-        m_split(&mut v, &mixes, &splitter(&[(0, 0, 0.5, 0.0), (1, 1, 0.0, 0.25)]));
+        m_split(
+            &mut v,
+            &mixes,
+            &splitter(&[(0, 0, 0.5, 0.0), (1, 1, 0.0, 0.25)]),
+        );
 
         fn m_split(v: &mut [u8; VOICE], mixes: &[u8], spl: &[u8]) {
             let mut m = Mixer::default();
@@ -1536,19 +1807,43 @@ mod tests {
         w32(&mut param, 0x30, 0x3156_4552); // REV1
         let h = crate::ipc::connect("audren:u").unwrap();
         let send = |h: u32, cmd: u32, data: Vec<u8>, a: Vec<Buf>, b: Vec<Buf>| {
-            let mut m = Builder { ty: T_REQUEST, cmd, data, a, b, ..Default::default() }.build();
+            let mut m = Builder {
+                ty: T_REQUEST,
+                cmd,
+                data,
+                a,
+                b,
+                ..Default::default()
+            }
+            .build();
             crate::ipc::process(h, &mut m);
             hipc::parse_response(&m, false).unwrap()
         };
         let r = send(h, 1, param.clone(), vec![], vec![]);
         assert_eq!(r.result, 0);
         assert!(u64::from_le_bytes(r.data[..8].try_into().unwrap()) >= 0x1000);
-        let r = send(h, 0, [param.clone(), vec![0; 12], 0x10000u64.to_le_bytes().to_vec(), 0u64.to_le_bytes().to_vec()].concat(), vec![], vec![]);
+        let r = send(
+            h,
+            0,
+            [
+                param.clone(),
+                vec![0; 12],
+                0x10000u64.to_le_bytes().to_vec(),
+                0u64.to_le_bytes().to_vec(),
+            ]
+            .concat(),
+            vec![],
+            vec![],
+        );
         assert_eq!((r.result, r.moved.len()), (0, 1));
         let ar = r.moved[0];
         for (cmd, want) in [(0, 48000u32), (1, 240), (2, 24), (3, 1)] {
             let r = send(ar, cmd, vec![], vec![], vec![]);
-            assert_eq!(u32::from_le_bytes(r.data[..4].try_into().unwrap()), want, "command {cmd}");
+            assert_eq!(
+                u32::from_le_bytes(r.data[..4].try_into().unwrap()),
+                want,
+                "command {cmd}"
+            );
         }
         // an update: one pool to attach, 4 voices (voice 0 playing 240 samples), no mixes, one sink
         let pcm = vec![8192i16; 240];
@@ -1561,17 +1856,40 @@ mod tests {
         let mut pool = vec![0u8; 0x20];
         w32(&mut pool, 0x10, 4);
         let sink = vec![0u8; SINK];
-        for (k, n) in [(0usize, 0x3156_4552u32), (2, 0x20), (3, 4 * VOICE as u32), (7, SINK as u32)] {
+        for (k, n) in [
+            (0usize, 0x3156_4552u32),
+            (2, 0x20),
+            (3, 4 * VOICE as u32),
+            (7, SINK as u32),
+        ] {
             w32(&mut input, k * 4, n);
         }
         input.extend_from_slice(&pool);
         input.extend_from_slice(&voices);
         input.extend_from_slice(&sink);
         let mut out = vec![0u8; 0x1000];
-        let r = send(ar, 4, vec![], vec![Buf { addr: input.as_ptr() as u64, size: input.len() as u64, tag: 0 }], vec![Buf { addr: out.as_mut_ptr() as u64, size: out.len() as u64, tag: 0 }]);
+        let r = send(
+            ar,
+            4,
+            vec![],
+            vec![Buf {
+                addr: input.as_ptr() as u64,
+                size: input.len() as u64,
+                tag: 0,
+            }],
+            vec![Buf {
+                addr: out.as_mut_ptr() as u64,
+                size: out.len() as u64,
+                tag: 0,
+            }],
+        );
         assert_eq!(r.result, 0);
         assert_eq!(rd32(&out, 0), 0x3156_4552, "revision echoed");
-        assert_eq!((rd32(&out, 8), rd32(&out, 12)), (0x10, 4 * 0x10), "pool and voice status sizes");
+        assert_eq!(
+            (rd32(&out, 8), rd32(&out, 12)),
+            (0x10, 4 * 0x10),
+            "pool and voice status sizes"
+        );
         assert_eq!(rd32(&out, 0x40), 5, "the pool is attached");
         // not started: the voice has not moved
         assert_eq!(rd64(&out, 0x50), 0);

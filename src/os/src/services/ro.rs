@@ -66,7 +66,9 @@ struct State {
 static ST: OnceLock<Mutex<State>> = OnceLock::new();
 
 fn st() -> std::sync::MutexGuard<'static, State> {
-    ST.get_or_init(|| Mutex::new(State::default())).lock().unwrap_or_else(|p| p.into_inner())
+    ST.get_or_init(|| Mutex::new(State::default()))
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
 }
 
 fn hex32(s: &str) -> Option<[u8; 32]> {
@@ -87,9 +89,14 @@ fn num(s: &str) -> Option<u64> {
 /// The NRO modules of the build (`<data>\nro.tsv`), read at boot: the module names `boot` must not load from the
 /// ExeFS.
 pub fn read_table(data: &Path) -> Vec<String> {
-    let Ok(text) = std::fs::read_to_string(data.join("nro.tsv")) else { return vec![] };
+    let Ok(text) = std::fs::read_to_string(data.join("nro.tsv")) else {
+        return vec![];
+    };
     let mut s = st();
-    for l in text.lines().filter(|l| !l.starts_with('#') && !l.trim().is_empty()) {
+    for l in text
+        .lines()
+        .filter(|l| !l.starts_with('#') && !l.trim().is_empty())
+    {
         let f: Vec<&str> = l.split('\t').collect();
         if f.len() < 6 {
             continue;
@@ -99,11 +106,28 @@ pub fn read_table(data: &Path) -> Vec<String> {
             s.refused.push(bid);
             continue;
         }
-        let (Some(base), Some(size), Some(nro_size)) = (num(f[1]), num(f[2]), num(f[3])) else { continue };
-        s.nros.push(Nro { name: f[0].to_string(), base, size, nro_size, build_id: bid, module: None, loaded: false, loads: 0, init: 0, fini: 0 });
+        let (Some(base), Some(size), Some(nro_size)) = (num(f[1]), num(f[2]), num(f[3])) else {
+            continue;
+        };
+        s.nros.push(Nro {
+            name: f[0].to_string(),
+            base,
+            size,
+            nro_size,
+            build_id: bid,
+            module: None,
+            loaded: false,
+            loads: 0,
+            init: 0,
+            fini: 0,
+        });
     }
     if !s.nros.is_empty() {
-        crate::log!("ro: {} NRO modules built for loading at run time ({} online SDKs refused)", s.nros.len(), s.refused.len());
+        crate::log!(
+            "ro: {} NRO modules built for loading at run time ({} online SDKs refused)",
+            s.nros.len(),
+            s.refused.len()
+        );
     }
     s.nros.iter().map(|n| n.name.clone()).collect()
 }
@@ -114,7 +138,11 @@ pub fn set_base(loaded: &[Loaded]) {
 }
 
 fn defines(m: &Loaded, name: &str) -> Option<u64> {
-    m.dynamic.syms.iter().find(|s| s.defined() && s.name == name).map(|s| m.base.wrapping_add(s.value))
+    m.dynamic
+        .syms
+        .iter()
+        .find(|s| s.defined() && s.name == name)
+        .map(|s| m.base.wrapping_add(s.value))
 }
 
 /// A symbol as rtld binds it now: a host function by that name, else the first definition in the ExeFS modules,
@@ -126,14 +154,20 @@ fn resolve(s: &State, name: &str) -> Option<u64> {
             return Some(a);
         }
     }
-    let found = s.base.iter().find_map(|m| defines(m, name)).or_else(|| s.order.iter().find_map(|&i| s.nros[i].module.as_ref().and_then(|m| defines(m, name))));
+    let found = s.base.iter().find_map(|m| defines(m, name)).or_else(|| {
+        s.order
+            .iter()
+            .find_map(|&i| s.nros[i].module.as_ref().and_then(|m| defines(m, name)))
+    });
     // an import only a module not loaded now defines keeps its reporting stub
     found.or_else(|| if stub { nxrt::hostfn::bind(name) } else { None })
 }
 
 /// The value a symbol relocation of `m` takes now (None: leave the slot, a weak symbol nothing defines is 0).
 fn bind(s: &State, m: &Loaded, sym: u32, typ: u32, addend: i64) -> u64 {
-    let Some(y) = m.dynamic.syms.get(sym as usize) else { return 0 };
+    let Some(y) = m.dynamic.syms.get(sym as usize) else {
+        return 0;
+    };
     let t = if y.name.is_empty() {
         Some(m.base.wrapping_add(y.value))
     } else {
@@ -150,7 +184,10 @@ fn bind(s: &State, m: &Loaded, sym: u32, typ: u32, addend: i64) -> u64 {
 fn dyn_tag(img: &[u8], d: &Dynamic, want: u64) -> u64 {
     let mut o = d.dynamic as usize;
     while let (Some(t), Some(v)) = (img.get(o..o + 8), img.get(o + 8..o + 16)) {
-        let (t, v) = (u64::from_le_bytes(t.try_into().unwrap()), u64::from_le_bytes(v.try_into().unwrap()));
+        let (t, v) = (
+            u64::from_le_bytes(t.try_into().unwrap()),
+            u64::from_le_bytes(v.try_into().unwrap()),
+        );
         if t == 0 {
             break;
         }
@@ -167,17 +204,36 @@ fn dyn_tag(img: &[u8], d: &Dynamic, want: u64) -> u64 {
 fn rebind(s: &State, skip: usize, nro: &Loaded, load: bool) -> u32 {
     let (lo, hi) = (nro.base, nro.base + nro.size);
     let mut n = 0;
-    let mods: Vec<&Loaded> = s.base.iter().chain(s.order.iter().filter(|&&i| i != skip).filter_map(|&i| s.nros[i].module.as_ref())).collect();
+    let mods: Vec<&Loaded> = s
+        .base
+        .iter()
+        .chain(
+            s.order
+                .iter()
+                .filter(|&&i| i != skip)
+                .filter_map(|&i| s.nros[i].module.as_ref()),
+        )
+        .collect();
     for m in mods {
         for r in &m.dynamic.relocs {
             if !matches!(r.typ, R_ABS64 | R_GLOB_DAT | R_JUMP_SLOT) || r.sym == 0 {
                 continue;
             }
-            let Some(y) = m.dynamic.syms.get(r.sym as usize) else { continue };
+            let Some(y) = m.dynamic.syms.get(r.sym as usize) else {
+                continue;
+            };
             let at = m.base + r.off;
-            let add = if r.typ == R_JUMP_SLOT { 0 } else { r.addend as u64 };
+            let add = if r.typ == R_JUMP_SLOT {
+                0
+            } else {
+                r.addend as u64
+            };
             let cur = crate::guest::r64(at).wrapping_sub(add);
-            let hit = if load { y.shndx == 0 && !y.name.is_empty() && defines(nro, &y.name).is_some() } else { cur >= lo && cur < hi };
+            let hit = if load {
+                y.shndx == 0 && !y.name.is_empty() && defines(nro, &y.name).is_some()
+            } else {
+                cur >= lo && cur < hi
+            };
             if !hit {
                 continue;
             }
@@ -195,11 +251,20 @@ fn rebind(s: &State, skip: usize, nro: &Loaded, load: bool) -> u32 {
 /// bound to it).
 fn load(s: &mut State, i: usize, img: u64) -> Result<(u64, u32), String> {
     let space = crate::mem::get().space;
-    let (base, size, nro_size, first) = (s.nros[i].base, s.nros[i].size, s.nros[i].nro_size, s.nros[i].module.is_none());
+    let (base, size, nro_size, first) = (
+        s.nros[i].base,
+        s.nros[i].size,
+        s.nros[i].nro_size,
+        s.nros[i].module.is_none(),
+    );
     let raw = crate::guest::bytes(img, nro_size);
     let image = nxrt::loader::parse(raw)?;
     if image.bytes.len() as u64 != size {
-        return Err(format!("{}: the image is {:#x} bytes, the build laid it out for {size:#x}", s.nros[i].name, image.bytes.len()));
+        return Err(format!(
+            "{}: the image is {:#x} bytes, the build laid it out for {size:#x}",
+            s.nros[i].name,
+            image.bytes.len()
+        ));
     }
     let dynamic = nxrt::loader::dynamic(&image.bytes)?;
     if first {
@@ -209,12 +274,24 @@ fn load(s: &mut State, i: usize, img: u64) -> Result<(u64, u32), String> {
         nxrt::mem::protect(base, size, nxrt::mem::Prot::ReadWrite);
     }
     unsafe { core::ptr::copy_nonoverlapping(image.bytes.as_ptr(), base as *mut u8, size as usize) };
-    let (init, fini) = (dyn_tag(&image.bytes, &dynamic, 12), dyn_tag(&image.bytes, &dynamic, 13));
+    let (init, fini) = (
+        dyn_tag(&image.bytes, &dynamic, 12),
+        dyn_tag(&image.bytes, &dynamic, 13),
+    );
     // whole pages, up to the read-only data (as `nxrt::loader::load`)
-    let text = (image.text.0, image.rodata.0.max(image.text.0 + image.text.1) - image.text.0);
+    let text = (
+        image.text.0,
+        image.rodata.0.max(image.text.0 + image.text.1) - image.text.0,
+    );
     let ro = (image.rodata.0, image.data.0 - image.rodata.0);
     let data_at = image.data.0;
-    let m = Loaded { name: s.nros[i].name.clone(), base, size, image, dynamic };
+    let m = Loaded {
+        name: s.nros[i].name.clone(),
+        base,
+        size,
+        image,
+        dynamic,
+    };
     s.nros[i].module = Some(m);
     s.order.push(i);
     {
@@ -222,21 +299,39 @@ fn load(s: &mut State, i: usize, img: u64) -> Result<(u64, u32), String> {
         for r in &m.dynamic.relocs {
             let at = base + r.off;
             if r.off + 8 > size {
-                return Err(format!("{}: relocation at {:#x} outside the image", m.name, r.off));
+                return Err(format!(
+                    "{}: relocation at {:#x} outside the image",
+                    m.name, r.off
+                ));
             }
             let v = match r.typ {
                 0 => continue,
                 R_RELATIVE => base.wrapping_add(r.addend as u64),
                 R_ABS64 | R_GLOB_DAT | R_JUMP_SLOT => bind(s, m, r.sym, r.typ, r.addend),
-                t => return Err(format!("{}: unsupported relocation type {t} at {:#x}", m.name, r.off)),
+                t => {
+                    return Err(format!(
+                        "{}: unsupported relocation type {t} at {:#x}",
+                        m.name, r.off
+                    ))
+                }
             };
             w64(at, v);
         }
     }
     if first {
-        space.protect_segment(base + text.0, text.1, nxrt::mem::ST_CODE, nxrt::mem::PERM_RX)?;
+        space.protect_segment(
+            base + text.0,
+            text.1,
+            nxrt::mem::ST_CODE,
+            nxrt::mem::PERM_RX,
+        )?;
         space.protect_segment(base + ro.0, ro.1, nxrt::mem::ST_CODE, nxrt::mem::PERM_R)?;
-        space.protect_segment(base + data_at, size - data_at, nxrt::mem::ST_CODEDATA, nxrt::mem::PERM_RW)?;
+        space.protect_segment(
+            base + data_at,
+            size - data_at,
+            nxrt::mem::ST_CODEDATA,
+            nxrt::mem::PERM_RW,
+        )?;
     } else {
         nxrt::mem::protect(base + text.0, data_at - text.0, nxrt::mem::Prot::Read);
     }
@@ -263,10 +358,23 @@ fn module_of(s: &State, rm: u64) -> Option<usize> {
 /// `<data>\nro`). Under `NXRS_NRO_CAPTURE` (the build's capture boot) the run ends once it is written.
 fn capture(img: u64, n: u64) -> Option<std::path::PathBuf> {
     let boot = std::env::var_os("NXRS_NRO_CAPTURE").filter(|v| !v.is_empty());
-    let dir = boot.clone().map(std::path::PathBuf::from).or_else(|| crate::boot::try_process().map(|p| p.data_dir.join("nro")))?;
-    let path = capture_to(&dir, crate::guest::bytes(img, n)).map_err(|e| crate::log!("[RED] ro::LoadModule: cannot keep the image in {}: {e}", dir.display())).ok()?;
+    let dir = boot
+        .clone()
+        .map(std::path::PathBuf::from)
+        .or_else(|| crate::boot::try_process().map(|p| p.data_dir.join("nro")))?;
+    let path = capture_to(&dir, crate::guest::bytes(img, n))
+        .map_err(|e| {
+            crate::log!(
+                "[RED] ro::LoadModule: cannot keep the image in {}: {e}",
+                dir.display()
+            )
+        })
+        .ok()?;
     if boot.is_some() {
-        crate::log!("ro::LoadModule: captured {} ({n} bytes) for the build; the capture boot ends here", path.display());
+        crate::log!(
+            "ro::LoadModule: captured {} ({n} bytes) for the build; the capture boot ends here",
+            path.display()
+        );
         nxrt::process::exit(0);
     }
     Some(path)
@@ -274,7 +382,10 @@ fn capture(img: u64, n: u64) -> Option<std::path::PathBuf> {
 
 /// Writes `image` to `<dir>\<sha256>.nro` (through a `.partial` file) unless it is there already.
 pub fn capture_to(dir: &Path, image: &[u8]) -> std::io::Result<std::path::PathBuf> {
-    let hex: String = translator::package::nro::sha256(image).iter().map(|b| format!("{b:02x}")).collect();
+    let hex: String = translator::package::nro::sha256(image)
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect();
     let path = dir.join(format!("{hex}.nro"));
     if !path.exists() {
         std::fs::create_dir_all(dir)?;
@@ -310,11 +421,18 @@ unsafe fn ro_load(c: *mut Cpu) {
                 return RO_FAIL;
             };
             if s.nros[i].loaded {
-                crate::log!("[RED] ro::LoadModule: {} ({hex}…) is loaded already", s.nros[i].name);
+                crate::log!(
+                    "[RED] ro::LoadModule: {} ({hex}…) is loaded already",
+                    s.nros[i].name
+                );
                 return RO_FAIL;
             }
             if s.nros[i].nro_size != n {
-                crate::log!("[RED] ro::LoadModule: {} is {n:#x} bytes, nro.tsv says {:#x}: the load fails", s.nros[i].name, s.nros[i].nro_size);
+                crate::log!(
+                    "[RED] ro::LoadModule: {} is {n:#x} bytes, nro.tsv says {:#x}: the load fails",
+                    s.nros[i].name,
+                    s.nros[i].nro_size
+                );
                 return RO_FAIL;
             }
             match load(&mut s, i, img) {
@@ -331,7 +449,11 @@ unsafe fn ro_load(c: *mut Cpu) {
             w64(rm + 0x10, img);
             w64(rm + 0x18, buf);
         }
-        let loads = st().nros.iter().find(|m| m.base == base).map_or(0, |m| m.loads);
+        let loads = st()
+            .nros
+            .iter()
+            .find(|m| m.base == base)
+            .map_or(0, |m| m.loads);
         crate::log!(
             "ro::LoadModule {name} at {base:#x} (build id {hex}…, {n:#x} bytes, buffer {bufsize:#x}, bind {}, load {loads}): {bound} imports of earlier modules bound to it; init {}",
             if flag & 1 != 0 { "now" } else { "lazy" },
@@ -363,7 +485,9 @@ unsafe fn ro_unload(c: *mut Cpu) {
         return;
     }
     let mut s = st();
-    let Some(i) = s.nros.iter().position(|n| n.base == base) else { return };
+    let Some(i) = s.nros.iter().position(|n| n.base == base) else {
+        return;
+    };
     s.order.retain(|&k| k != i);
     s.nros[i].loaded = false;
     let m = s.nros[i].module.take().unwrap();
@@ -387,15 +511,24 @@ macro_rules! rfn {
 }
 
 rfn!(ro_init, |c, a| {
-    crate::log_once!("ro init", "ro::Initialize: no ldr:ro session (symbol lookups search the loaded modules)");
+    crate::log_once!(
+        "ro init",
+        "ro::Initialize: no ldr:ro session (symbol lookups search the loaded modules)"
+    );
     0
 });
 rfn!(ro_lookup, |c, a| {
     let (out, name) = (a.x(0), a.x(1));
-    let n = if name != 0 { crate::guest::cstr(name, 512) } else { String::new() };
+    let n = if name != 0 {
+        crate::guest::cstr(name, 512)
+    } else {
+        String::new()
+    };
     let found = crate::hle::sym(&n).or_else(|| {
         let s = st();
-        s.order.iter().find_map(|&i| s.nros[i].module.as_ref().and_then(|m| defines(m, &n)))
+        s.order
+            .iter()
+            .find_map(|&i| s.nros[i].module.as_ref().and_then(|m| defines(m, &n)))
     });
     match found {
         Some(p) => {
@@ -403,7 +536,10 @@ rfn!(ro_lookup, |c, a| {
             0
         }
         None => {
-            crate::log_once!("ro lookup", "[RED] ro::LookupSymbol cannot find {n} (first case)");
+            crate::log_once!(
+                "ro lookup",
+                "[RED] ro::LookupSymbol cannot find {n} (first case)"
+            );
             RO_FAIL
         }
     }
@@ -412,7 +548,11 @@ rfn!(ro_lookup, |c, a| {
 // fails, as on Horizon (games probe for one).
 rfn!(ro_lookup_module, |c, a| {
     let (out, rm, name) = (a.x(0), a.x(1), a.x(2));
-    let n = if name != 0 { crate::guest::cstr(name, 512) } else { String::new() };
+    let n = if name != 0 {
+        crate::guest::cstr(name, 512)
+    } else {
+        String::new()
+    };
     let s = st();
     match module_of(&s, rm) {
         Some(i) => match s.nros[i].module.as_ref().and_then(|m| defines(m, &n)) {
@@ -423,7 +563,10 @@ rfn!(ro_lookup_module, |c, a| {
             None => RO_FAIL,
         },
         None => {
-            crate::log_once!("ro lookup module", "[RED] ro::LookupModuleSymbol {n}: not a loaded module");
+            crate::log_once!(
+                "ro lookup module",
+                "[RED] ro::LookupModuleSymbol {n}: not a loaded module"
+            );
             RO_FAIL
         }
     }
@@ -456,23 +599,74 @@ rfn!(ro_finalize, |c, a| { 0 });
 unsafe fn jit_info(c: *mut Cpu) {
     let (out, h) = ((*c).x[8], (*c).x[0]);
     for k in 0..4u64 {
-        w64(out + 8 * k, if h != 0 { crate::guest::r64(h + 8 + 8 * k) } else { 0 });
+        w64(
+            out + 8 * k,
+            if h != 0 {
+                crate::guest::r64(h + 8 + 8 * k)
+            } else {
+                0
+            },
+        );
     }
 }
 
 pub fn register(r: &mut Registry) {
     for (n, w, f) in [
-        ("_ZN2nn2ro10InitializeEv", "no ldr:ro: lookups search the loaded modules", ro_init as unsafe fn(*mut Cpu)),
-        ("_ZN2nn2ro8FinalizeEv", "Initialize opened no ldr:ro session", ro_finalize),
-        ("_ZN2nn2ro12LookupSymbolEPmPKc", "a definition in the loaded modules", ro_lookup),
-        ("_ZN2nn2ro18LookupModuleSymbolEPmPKNS0_6ModuleEPKc", "a definition in one loaded NRO", ro_lookup_module),
-        ("_ZN2nn2ro13GetBufferSizeEPmPKv", "the bss size from the NRO header", ro_buffer_size),
-        ("_ZN2nn2ro18RegisterModuleInfoEPNS0_16RegistrationInfoEPKv", "an NRR: its form checked", ro_register),
-        ("_ZN2nn2ro20UnregisterModuleInfoEPNS0_16RegistrationInfoE", "NRRs are not registered", ro_unregister),
-        ("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi", "an NRO translated at build time: mapped at its place, relocated, its init called", ro_load),
-        ("_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmib", "an NRO translated at build time (the form with the bool)", ro_load),
-        ("_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE", "its fini, then out of the symbol lookups", ro_unload),
-        ("_ZN2nn3jit21GetJitEnvironmentInfoENS0_9JitHandleE", "the environment's memory, from its own layout", jit_info),
+        (
+            "_ZN2nn2ro10InitializeEv",
+            "no ldr:ro: lookups search the loaded modules",
+            ro_init as unsafe fn(*mut Cpu),
+        ),
+        (
+            "_ZN2nn2ro8FinalizeEv",
+            "Initialize opened no ldr:ro session",
+            ro_finalize,
+        ),
+        (
+            "_ZN2nn2ro12LookupSymbolEPmPKc",
+            "a definition in the loaded modules",
+            ro_lookup,
+        ),
+        (
+            "_ZN2nn2ro18LookupModuleSymbolEPmPKNS0_6ModuleEPKc",
+            "a definition in one loaded NRO",
+            ro_lookup_module,
+        ),
+        (
+            "_ZN2nn2ro13GetBufferSizeEPmPKv",
+            "the bss size from the NRO header",
+            ro_buffer_size,
+        ),
+        (
+            "_ZN2nn2ro18RegisterModuleInfoEPNS0_16RegistrationInfoEPKv",
+            "an NRR: its form checked",
+            ro_register,
+        ),
+        (
+            "_ZN2nn2ro20UnregisterModuleInfoEPNS0_16RegistrationInfoE",
+            "NRRs are not registered",
+            ro_unregister,
+        ),
+        (
+            "_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmi",
+            "an NRO translated at build time: mapped at its place, relocated, its init called",
+            ro_load,
+        ),
+        (
+            "_ZN2nn2ro10LoadModuleEPNS0_6ModuleEPKvPvmib",
+            "an NRO translated at build time (the form with the bool)",
+            ro_load,
+        ),
+        (
+            "_ZN2nn2ro12UnloadModuleEPNS0_6ModuleE",
+            "its fini, then out of the symbol lookups",
+            ro_unload,
+        ),
+        (
+            "_ZN2nn3jit21GetJitEnvironmentInfoENS0_9JitHandleE",
+            "the environment's memory, from its own layout",
+            jit_info,
+        ),
     ] {
         r.force(n, w, f);
     }
@@ -485,10 +679,17 @@ mod capture_tests {
         let dir = std::env::temp_dir().join(format!("nxos-nro-capture-{}", std::process::id()));
         let img = b"\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0NRO0 an image".to_vec();
         let p = super::capture_to(&dir, &img).unwrap();
-        let hex: String = translator::package::nro::sha256(&img).iter().map(|b| format!("{b:02x}")).collect();
+        let hex: String = translator::package::nro::sha256(&img)
+            .iter()
+            .map(|b| format!("{b:02x}"))
+            .collect();
         assert_eq!(p, dir.join(format!("{hex}.nro")));
         assert_eq!(std::fs::read(&p).unwrap(), img);
-        assert_eq!(super::capture_to(&dir, &img).unwrap(), p, "a second capture keeps the first");
+        assert_eq!(
+            super::capture_to(&dir, &img).unwrap(),
+            p,
+            "a second capture keeps the first"
+        );
         assert!(!dir.join(format!("{hex}.nro.partial")).exists());
         let _ = std::fs::remove_dir_all(&dir);
     }

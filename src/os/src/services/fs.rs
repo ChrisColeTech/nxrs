@@ -68,7 +68,11 @@ const DIRENT_SIZE: u64 = 0x310;
 #[derive(Clone)]
 enum Backing {
     Rom(Arc<RomFs>),
-    Dir { root: PathBuf, ro: bool, txn: Option<usize> },
+    Dir {
+        root: PathBuf,
+        ro: bool,
+        txn: Option<usize>,
+    },
 }
 
 struct Txn {
@@ -77,8 +81,16 @@ struct Txn {
 }
 
 enum Open {
-    Rom { fs: Arc<RomFs>, path: String, size: u64 },
-    Host { file: File, #[allow(dead_code)] txn: Option<usize> },
+    Rom {
+        fs: Arc<RomFs>,
+        path: String,
+        size: u64,
+    },
+    Host {
+        file: File,
+        #[allow(dead_code)]
+        txn: Option<usize>,
+    },
 }
 
 struct FileH {
@@ -106,15 +118,22 @@ static ROMFS: OnceLock<Option<Arc<RomFs>>> = OnceLock::new();
 
 fn with<R>(f: impl FnOnce(&mut State) -> R) -> R {
     let mut g = ST.lock().unwrap();
-    f(g.get_or_insert_with(|| State { next: 1, ..Default::default() }))
+    f(g.get_or_insert_with(|| State {
+        next: 1,
+        ..Default::default()
+    }))
 }
 
 pub fn data_dir() -> PathBuf {
-    crate::boot::try_process().map(|p| p.data_dir.clone()).unwrap_or_else(|| PathBuf::from("."))
+    crate::boot::try_process()
+        .map(|p| p.data_dir.clone())
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 pub fn save_dir() -> PathBuf {
-    crate::boot::try_process().map(|p| p.save_dir.clone()).unwrap_or_else(|| PathBuf::from("save"))
+    crate::boot::try_process()
+        .map(|p| p.save_dir.clone())
+        .unwrap_or_else(|| PathBuf::from("save"))
 }
 
 /// The game's RomFS, opened at the first mount.
@@ -124,7 +143,12 @@ pub fn romfs() -> Option<Arc<RomFs>> {
             let t0 = std::time::Instant::now();
             match translator::package::open_data_dir(&data_dir(), None) {
                 Ok(r) => {
-                    crate::log!("fs: RomFS from {} ({} files, {:.2} s)", r.source, r.walk().len(), t0.elapsed().as_secs_f64());
+                    crate::log!(
+                        "fs: RomFS from {} ({} files, {:.2} s)",
+                        r.source,
+                        r.walk().len(),
+                        t0.elapsed().as_secs_f64()
+                    );
                     Some(Arc::new(r))
                 }
                 Err(e) => {
@@ -138,7 +162,10 @@ pub fn romfs() -> Option<Arc<RomFs>> {
 
 /// Whether this is the game's own RomFS (the one the player's mods layer over).
 fn is_game(fs: &Arc<RomFs>) -> bool {
-    ROMFS.get().and_then(|r| r.as_ref()).is_some_and(|g| Arc::ptr_eq(g, fs))
+    ROMFS
+        .get()
+        .and_then(|r| r.as_ref())
+        .is_some_and(|g| Arc::ptr_eq(g, fs))
 }
 
 /// Splits `mount:/a/b` into the mount and the normalized path (`a/b`).
@@ -187,7 +214,10 @@ fn txn_open(st: &mut State, dir: &Path) -> std::io::Result<usize> {
     std::fs::create_dir_all(dir)?;
     let _ = std::fs::remove_dir_all(&work);
     copy_tree(dir, &work)?;
-    st.txns.push(Txn { committed: dir.to_path_buf(), work });
+    st.txns.push(Txn {
+        committed: dir.to_path_buf(),
+        work,
+    });
     Ok(st.txns.len() - 1)
 }
 
@@ -214,15 +244,31 @@ fn mount_dir(name: &str, dir: PathBuf, ro: bool, transactional: bool) -> u64 {
     let r = with(|st| -> std::io::Result<Backing> {
         if transactional {
             let i = txn_open(st, &dir)?;
-            Ok(Backing::Dir { root: st.txns[i].work.clone(), ro, txn: Some(i) })
+            Ok(Backing::Dir {
+                root: st.txns[i].work.clone(),
+                ro,
+                txn: Some(i),
+            })
         } else {
             std::fs::create_dir_all(&dir)?;
-            Ok(Backing::Dir { root: dir.clone(), ro, txn: None })
+            Ok(Backing::Dir {
+                root: dir.clone(),
+                ro,
+                txn: None,
+            })
         }
     });
     match r {
         Ok(b) => {
-            crate::log!("fs: {name}: -> {}{}", dir.display(), if transactional { " (transactional save)" } else { "" });
+            crate::log!(
+                "fs: {name}: -> {}{}",
+                dir.display(),
+                if transactional {
+                    " (transactional save)"
+                } else {
+                    ""
+                }
+            );
             mount(name, b)
         }
         Err(e) => {
@@ -239,13 +285,26 @@ enum Target {
 }
 
 fn resolve(path: &str) -> Result<Target, u64> {
-    let Some((m, rest)) = split(path) else { return Err(RES_PATH_NOT_FOUND) };
+    let Some((m, rest)) = split(path) else {
+        return Err(RES_PATH_NOT_FOUND);
+    };
     let b = with(|st| st.mounts.get(&m).cloned());
     match b {
         Some(Backing::Rom(fs)) => Ok(Target::Rom(fs, rest)),
-        Some(Backing::Dir { root, ro, txn }) => Ok(Target::Host(if rest.is_empty() { root } else { root.join(&rest) }, ro, txn)),
+        Some(Backing::Dir { root, ro, txn }) => Ok(Target::Host(
+            if rest.is_empty() {
+                root
+            } else {
+                root.join(&rest)
+            },
+            ro,
+            txn,
+        )),
         None => {
-            crate::log_once!(format!("fs nomount {m}"), "[RED] fs: {path}: no mount {m:?}");
+            crate::log_once!(
+                format!("fs nomount {m}"),
+                "[RED] fs: {path}: no mount {m:?}"
+            );
             Err(RES_PATH_NOT_FOUND)
         }
     }
@@ -296,10 +355,20 @@ fn open_file_at(path: &str, mode: u32) -> Result<u64, u64> {
             }
             if let Some(hp) = is_game(&fs).then(|| crate::mods::romfs_file(&p)).flatten() {
                 let f = std::fs::File::open(&hp).map_err(|e| io_res(&e))?;
-                crate::log_once!(format!("mod file {p}"), "fs: {path} from a mod ({})", hp.display());
+                crate::log_once!(
+                    format!("mod file {p}"),
+                    "fs: {path} from a mod ({})",
+                    hp.display()
+                );
                 return Ok(with(|st| {
                     let h = new_handle(st);
-                    st.files.insert(h, FileH { open: Open::Host { file: f, txn: None }, mode });
+                    st.files.insert(
+                        h,
+                        FileH {
+                            open: Open::Host { file: f, txn: None },
+                            mode,
+                        },
+                    );
                     h
                 }));
             }
@@ -308,7 +377,17 @@ fn open_file_at(path: &str, mode: u32) -> Result<u64, u64> {
                     let size = n.size();
                     Ok(with(|st| {
                         let h = new_handle(st);
-                        st.files.insert(h, FileH { open: Open::Rom { fs: fs.clone(), path: p, size }, mode });
+                        st.files.insert(
+                            h,
+                            FileH {
+                                open: Open::Rom {
+                                    fs: fs.clone(),
+                                    path: p,
+                                    size,
+                                },
+                                mode,
+                            },
+                        );
                         h
                     }))
                 }
@@ -323,10 +402,20 @@ fn open_file_at(path: &str, mode: u32) -> Result<u64, u64> {
             if hp.is_dir() {
                 return Err(RES_PATH_NOT_FOUND);
             }
-            let f = std::fs::OpenOptions::new().read(true).write(write).open(&hp).map_err(|e| io_res(&e))?;
+            let f = std::fs::OpenOptions::new()
+                .read(true)
+                .write(write)
+                .open(&hp)
+                .map_err(|e| io_res(&e))?;
             Ok(with(|st| {
                 let h = new_handle(st);
-                st.files.insert(h, FileH { open: Open::Host { file: f, txn }, mode });
+                st.files.insert(
+                    h,
+                    FileH {
+                        open: Open::Host { file: f, txn },
+                        mode,
+                    },
+                );
                 h
             }))
         }
@@ -335,8 +424,14 @@ fn open_file_at(path: &str, mode: u32) -> Result<u64, u64> {
 
 pub fn read_file(h: u64, off: u64, len: u64) -> Result<Vec<u8>, u64> {
     let (fs, p, file) = with(|st| match st.files.get(&h) {
-        Some(FileH { open: Open::Rom { fs, path, .. }, .. }) => Ok((Some(fs.clone()), path.clone(), None)),
-        Some(FileH { open: Open::Host { file, .. }, .. }) => Ok((None, String::new(), file.try_clone().ok())),
+        Some(FileH {
+            open: Open::Rom { fs, path, .. },
+            ..
+        }) => Ok((Some(fs.clone()), path.clone(), None)),
+        Some(FileH {
+            open: Open::Host { file, .. },
+            ..
+        }) => Ok((None, String::new(), file.try_clone().ok())),
         None => Err(RES_FAIL),
     })?;
     if let Some(fs) = fs {
@@ -346,10 +441,10 @@ pub fn read_file(h: u64, off: u64, len: u64) -> Result<Vec<u8>, u64> {
         });
     }
     let f = file.ok_or(RES_FAIL)?;
-    #[cfg(windows)]
-    use std::os::windows::fs::FileExt;
     #[cfg(unix)]
     use crate::services::fs::posio::FileExt;
+    #[cfg(windows)]
+    use std::os::windows::fs::FileExt;
     let mut buf = vec![0u8; len as usize];
     let mut got = 0usize;
     while got < buf.len() {
@@ -365,14 +460,17 @@ pub fn read_file(h: u64, off: u64, len: u64) -> Result<Vec<u8>, u64> {
 
 pub fn write_file(h: u64, off: u64, data: &[u8]) -> u64 {
     let f = with(|st| match st.files.get(&h) {
-        Some(FileH { open: Open::Host { file, .. }, mode }) if mode & (MODE_WRITE | MODE_APPEND) != 0 => file.try_clone().ok(),
+        Some(FileH {
+            open: Open::Host { file, .. },
+            mode,
+        }) if mode & (MODE_WRITE | MODE_APPEND) != 0 => file.try_clone().ok(),
         _ => None,
     });
     let Some(f) = f else { return RES_FAIL };
-    #[cfg(windows)]
-    use std::os::windows::fs::FileExt;
     #[cfg(unix)]
     use crate::services::fs::posio::FileExt;
+    #[cfg(windows)]
+    use std::os::windows::fs::FileExt;
     let mut put = 0usize;
     while put < data.len() {
         match f.seek_write(&data[put..], off + put as u64) {
@@ -386,15 +484,24 @@ pub fn write_file(h: u64, off: u64, data: &[u8]) -> u64 {
 
 pub fn file_size(h: u64) -> Result<u64, u64> {
     with(|st| match st.files.get(&h) {
-        Some(FileH { open: Open::Rom { size, .. }, .. }) => Ok(*size),
-        Some(FileH { open: Open::Host { file, .. }, .. }) => file.metadata().map(|m| m.len()).map_err(|e| io_res(&e)),
+        Some(FileH {
+            open: Open::Rom { size, .. },
+            ..
+        }) => Ok(*size),
+        Some(FileH {
+            open: Open::Host { file, .. },
+            ..
+        }) => file.metadata().map(|m| m.len()).map_err(|e| io_res(&e)),
         None => Err(RES_FAIL),
     })
 }
 
 pub fn set_file_size(h: u64, n: u64) -> u64 {
     with(|st| match st.files.get(&h) {
-        Some(FileH { open: Open::Host { file, .. }, .. }) => file.set_len(n).map_or_else(|e| io_res(&e), |_| RES_OK),
+        Some(FileH {
+            open: Open::Host { file, .. },
+            ..
+        }) => file.set_len(n).map_or_else(|e| io_res(&e), |_| RES_OK),
         _ => RES_FAIL,
     })
 }
@@ -420,7 +527,11 @@ pub fn create_file(path: &str, size: u64) -> u64 {
             if ro {
                 return RES_FAIL;
             }
-            match std::fs::OpenOptions::new().write(true).create_new(true).open(&hp) {
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&hp)
+            {
                 Ok(f) => f.set_len(size).map_or_else(|e| io_res(&e), |_| RES_OK),
                 Err(e) => io_res(&e),
             }
@@ -502,17 +613,30 @@ fn entry_type_at(path: &str) -> Result<bool, u64> {
             }
             fs.find(&p).map(|n| !n.is_file()).ok_or(RES_PATH_NOT_FOUND)
         }
-        Target::Host(hp, _, _) => std::fs::metadata(&hp).map(|m| m.is_dir()).map_err(|e| io_res(&e)),
+        Target::Host(hp, _, _) => std::fs::metadata(&hp)
+            .map(|m| m.is_dir())
+            .map_err(|e| io_res(&e)),
     }
 }
 
 pub fn open_dir(path: &str, mode: u32) -> Result<u64, u64> {
     let entries: Vec<(String, i8, u64)> = match resolve(path)? {
         Target::Rom(fs, p) => {
-            let layered = if is_game(&fs) { crate::mods::romfs_dir(&p) } else { vec![] };
+            let layered = if is_game(&fs) {
+                crate::mods::romfs_dir(&p)
+            } else {
+                vec![]
+            };
             let mut v: Vec<(String, i8, u64)> = match fs.list(&p) {
-                Ok(l) => l.into_iter().map(|e| (e.name, if e.is_dir { ENT_DIR } else { ENT_FILE }, e.size)).collect(),
-                Err(_) if !layered.is_empty() || (is_game(&fs) && crate::mods::romfs_has_dir(&p)) => vec![],
+                Ok(l) => l
+                    .into_iter()
+                    .map(|e| (e.name, if e.is_dir { ENT_DIR } else { ENT_FILE }, e.size))
+                    .collect(),
+                Err(_)
+                    if !layered.is_empty() || (is_game(&fs) && crate::mods::romfs_has_dir(&p)) =>
+                {
+                    vec![]
+                }
                 Err(_) => return Err(RES_PATH_NOT_FOUND),
             };
             for (name, dir, size) in layered {
@@ -529,16 +653,36 @@ pub fn open_dir(path: &str, mode: u32) -> Result<u64, u64> {
             for e in std::fs::read_dir(&hp).map_err(|e| io_res(&e))? {
                 let Ok(e) = e else { continue };
                 let Ok(md) = e.metadata() else { continue };
-                v.push((e.file_name().to_string_lossy().into_owned(), if md.is_dir() { ENT_DIR } else { ENT_FILE }, if md.is_dir() { 0 } else { md.len() }));
+                v.push((
+                    e.file_name().to_string_lossy().into_owned(),
+                    if md.is_dir() { ENT_DIR } else { ENT_FILE },
+                    if md.is_dir() { 0 } else { md.len() },
+                ));
             }
             v.sort();
             v
         }
     };
-    let entries = entries.into_iter().filter(|e| mode & if e.1 == ENT_DIR { DIRMODE_DIR } else { DIRMODE_FILE } != 0).collect();
+    let entries = entries
+        .into_iter()
+        .filter(|e| {
+            mode & if e.1 == ENT_DIR {
+                DIRMODE_DIR
+            } else {
+                DIRMODE_FILE
+            } != 0
+        })
+        .collect();
     Ok(with(|st| {
         let h = new_handle(st);
-        st.dirs.insert(h, DirH { entries, pos: 0, mode });
+        st.dirs.insert(
+            h,
+            DirH {
+                entries,
+                pos: 0,
+                mode,
+            },
+        );
         h
     }))
 }
@@ -555,7 +699,12 @@ pub fn read_dir(h: u64, max: usize) -> Result<Vec<(String, i8, u64)>, u64> {
 }
 
 pub fn dir_count(h: u64) -> Result<u64, u64> {
-    with(|st| st.dirs.get(&h).map(|d| d.entries.len() as u64).ok_or(RES_FAIL))
+    with(|st| {
+        st.dirs
+            .get(&h)
+            .map(|d| d.entries.len() as u64)
+            .ok_or(RES_FAIL)
+    })
 }
 
 pub fn close_dir(h: u64) {
@@ -564,13 +713,24 @@ pub fn close_dir(h: u64) {
 
 pub fn commit(name: &str) -> u64 {
     let t = with(|st| match st.mounts.get(name) {
-        Some(Backing::Dir { txn: Some(i), .. }) => Some((st.txns[*i].committed.clone(), st.txns[*i].work.clone())),
+        Some(Backing::Dir { txn: Some(i), .. }) => {
+            Some((st.txns[*i].committed.clone(), st.txns[*i].work.clone()))
+        }
         _ => None,
     });
-    let Some((committed, work)) = t else { return RES_OK };
-    match txn_commit(&Txn { committed: committed.clone(), work }) {
+    let Some((committed, work)) = t else {
+        return RES_OK;
+    };
+    match txn_commit(&Txn {
+        committed: committed.clone(),
+        work,
+    }) {
         Ok(()) => {
-            crate::log_once!(format!("commit {}", committed.display()), "fs: commit {name}: {} (first commit of this save)", committed.display());
+            crate::log_once!(
+                format!("commit {}", committed.display()),
+                "fs: commit {name}: {} (first commit of this save)",
+                committed.display()
+            );
             RES_OK
         }
         Err(e) => {
@@ -618,7 +778,10 @@ fn cache_size_path(index: i32) -> PathBuf {
 
 pub fn create_cache(index: i32, size: i64, journal: i64) -> u64 {
     let d = cache_dir(index);
-    crate::log!("fs: create cache storage {index} ({size} bytes, journal {journal}) -> {}", d.display());
+    crate::log!(
+        "fs: create cache storage {index} ({size} bytes, journal {journal}) -> {}",
+        d.display()
+    );
     if let Err(e) = std::fs::create_dir_all(&d) {
         crate::log!("[RED] fs: create cache storage {index}: {e}");
         return RES_FAIL;
@@ -626,8 +789,14 @@ pub fn create_cache(index: i32, size: i64, journal: i64) -> u64 {
     let rec = cache_size_path(index);
     if !rec.exists() {
         let tmp = rec.with_extension("size.tmp");
-        if std::fs::write(&tmp, format!("{size} {journal}\n")).and_then(|_| std::fs::rename(&tmp, &rec)).is_err() {
-            crate::log!("[RED] fs: cache storage {index}: cannot record its size in {}", rec.display());
+        if std::fs::write(&tmp, format!("{size} {journal}\n"))
+            .and_then(|_| std::fs::rename(&tmp, &rec))
+            .is_err()
+        {
+            crate::log!(
+                "[RED] fs: cache storage {index}: cannot record its size in {}",
+                rec.display()
+            );
             let _ = std::fs::remove_file(&tmp);
         }
     }
@@ -651,12 +820,19 @@ pub fn cache_size(index: i32) -> Option<(i64, i64)> {
     if !cache_dir(index).is_dir() {
         return None;
     }
-    let rec = std::fs::read_to_string(cache_size_path(index)).ok().and_then(|t| {
-        let mut w = t.split_whitespace().map(|x| x.parse::<i64>());
-        Some((w.next()?.ok()?, w.next()?.ok()?))
-    });
+    let rec = std::fs::read_to_string(cache_size_path(index))
+        .ok()
+        .and_then(|t| {
+            let mut w = t.split_whitespace().map(|x| x.parse::<i64>());
+            Some((w.next()?.ok()?, w.next()?.ok()?))
+        });
     Some(rec.unwrap_or_else(|| {
-        let c = control(0x3170, 16).map(|b| (i64::from_le_bytes(b[0..8].try_into().unwrap()), i64::from_le_bytes(b[8..16].try_into().unwrap())));
+        let c = control(0x3170, 16).map(|b| {
+            (
+                i64::from_le_bytes(b[0..8].try_into().unwrap()),
+                i64::from_le_bytes(b[8..16].try_into().unwrap()),
+            )
+        });
         match c {
             Some((s, j)) if s != 0 || j != 0 => (s, j),
             _ => (256 << 20, 256 << 20),
@@ -673,7 +849,9 @@ pub fn cache_indices() -> Vec<u16> {
                 .filter_map(|e| {
                     let n = e.file_name().to_string_lossy().to_string();
                     let d = n.strip_prefix("cache")?;
-                    let ok = !d.is_empty() && d.bytes().all(|b| b.is_ascii_digit()) && (d == "0" || !d.starts_with('0'));
+                    let ok = !d.is_empty()
+                        && d.bytes().all(|b| b.is_ascii_digit())
+                        && (d == "0" || !d.starts_with('0'));
                     if ok {
                         d.parse::<u16>().ok()
                     } else {
@@ -701,20 +879,31 @@ impl translator::package::storage::Storage for ImageFile {
     fn size(&self) -> u64 {
         self.size
     }
-    fn read(&self, offset: u64, size: u64) -> std::result::Result<Vec<u8>, translator::package::PackageError> {
-        #[cfg(windows)]
-        use std::os::windows::fs::FileExt;
+    fn read(
+        &self,
+        offset: u64,
+        size: u64,
+    ) -> std::result::Result<Vec<u8>, translator::package::PackageError> {
         #[cfg(unix)]
         use crate::services::fs::posio::FileExt;
+        #[cfg(windows)]
+        use std::os::windows::fs::FileExt;
         if offset.checked_add(size).is_none_or(|e| e > self.size) {
-            return Err(translator::package::PackageError::Format("read past the end of the RomFS image".into()));
+            return Err(translator::package::PackageError::Format(
+                "read past the end of the RomFS image".into(),
+            ));
         }
         let mut buf = vec![0u8; size as usize];
         let mut done = 0;
         while done < buf.len() {
-            let n = self.file.seek_read(&mut buf[done..], offset + done as u64).map_err(|e| translator::package::PackageError::Format(e.to_string()))?;
+            let n = self
+                .file
+                .seek_read(&mut buf[done..], offset + done as u64)
+                .map_err(|e| translator::package::PackageError::Format(e.to_string()))?;
             if n == 0 {
-                return Err(translator::package::PackageError::Format("the RomFS image is cut short".into()));
+                return Err(translator::package::PackageError::Format(
+                    "the RomFS image is cut short".into(),
+                ));
             }
             done += n;
         }
@@ -731,16 +920,23 @@ pub fn program_data_dir(data: &Path, index: u32) -> Option<PathBuf> {
         Some((b, n)) if !n.is_empty() && n.bytes().all(|c| c.is_ascii_digit()) => b,
         _ => stem,
     };
-    let name = if index == 0 { format!("{base}_data") } else { format!("{base}_p{index}_data") };
+    let name = if index == 0 {
+        format!("{base}_data")
+    } else {
+        format!("{base}_p{index}_data")
+    };
     Some(data.with_file_name(name))
 }
 
 /// Another program's RomFS: `romfs_programs/<index>.img` beside the game's data, else that program's own build
 /// beside this one (`program_data_dir`, its RomFS marker read as the game's is).
 fn program_romfs(index: i32) -> Option<Arc<RomFs>> {
-    let img = data_dir().join("romfs_programs").join(format!("{index}.img"));
+    let img = data_dir()
+        .join("romfs_programs")
+        .join(format!("{index}.img"));
     if !img.is_file() {
-        let dir = program_data_dir(&data_dir(), u32::try_from(index).ok()?).filter(|d| d.is_dir() && *d != data_dir())?;
+        let dir = program_data_dir(&data_dir(), u32::try_from(index).ok()?)
+            .filter(|d| d.is_dir() && *d != data_dir())?;
         return match translator::package::open_data_dir(&dir, None) {
             Ok(r) => {
                 crate::log!("fs: program {index}'s RomFS from its build ({})", r.source);
@@ -774,7 +970,14 @@ fn romfs_buckets(n: usize) -> usize {
         return n | 1;
     }
     let mut n = n;
-    while !(!n.is_multiple_of(2) && !n.is_multiple_of(3) && !n.is_multiple_of(5) && !n.is_multiple_of(7) && !n.is_multiple_of(11) && !n.is_multiple_of(13) && !n.is_multiple_of(17)) {
+    while !(!n.is_multiple_of(2)
+        && !n.is_multiple_of(3)
+        && !n.is_multiple_of(5)
+        && !n.is_multiple_of(7)
+        && !n.is_multiple_of(11)
+        && !n.is_multiple_of(13)
+        && !n.is_multiple_of(17))
+    {
         n += 1;
     }
     n
@@ -784,7 +987,13 @@ fn romfs_buckets(n: usize) -> usize {
 /// (0x18 / 0x20 bytes plus the name, padded to 4).
 pub fn romfs_work_size(fs: &RomFs) -> u64 {
     let (mut ndir, mut dbytes, mut nfile, mut fbytes) = (1usize, 0x18usize, 0usize, 0usize);
-    fn walk(n: &translator::package::romfs::Node, nd: &mut usize, db: &mut usize, nf: &mut usize, fb: &mut usize) {
+    fn walk(
+        n: &translator::package::romfs::Node,
+        nd: &mut usize,
+        db: &mut usize,
+        nf: &mut usize,
+        fb: &mut usize,
+    ) {
         for k in n.children() {
             let name = (k.name.len() + 3) & !3;
             if k.is_file() {
@@ -818,7 +1027,10 @@ fn aoc_romfs(index: u32) -> Option<Arc<RomFs>> {
             Some(r)
         }
         Err(e) => {
-            crate::log_once!(format!("aoc {index}"), "fs: add-on content {index} ({id:016X}) is not installed: {e}");
+            crate::log_once!(
+                format!("aoc {index}"),
+                "fs: add-on content {index} ({id:016X}) is not installed: {e}"
+            );
             None
         }
     }
@@ -832,14 +1044,22 @@ pub fn aoc_indices() -> Vec<u32> {
     static V: std::sync::OnceLock<Vec<u32>> = std::sync::OnceLock::new();
     V.get_or_init(|| {
         let base = crate::profile::get().program_id + 0x1000;
-        aoc_offered(base, &translator::package::dlc::read_manifest(&data_dir()), |i| aoc_romfs(i).is_some())
+        aoc_offered(
+            base,
+            &translator::package::dlc::read_manifest(&data_dir()),
+            |i| aoc_romfs(i).is_some(),
+        )
     })
     .clone()
 }
 
 /// The indices of the manifest's titles owned by the game (`base` = its program id + 0x1000) to offer: stubs, and
 /// titles `readable` says have data.
-fn aoc_offered(base: u64, manifest: &[translator::package::dlc::Entry], readable: impl Fn(u32) -> bool) -> Vec<u32> {
+fn aoc_offered(
+    base: u64,
+    manifest: &[translator::package::dlc::Entry],
+    readable: impl Fn(u32) -> bool,
+) -> Vec<u32> {
     let mut v: Vec<u32> = vec![];
     for e in manifest {
         let id = e.0;
@@ -925,15 +1145,22 @@ fsfn!(commit_list_fn, |a| {
     if !(0..=64).contains(&n) || (n > 0 && names == 0) {
         return RES_FAIL;
     }
-    let v: Vec<String> = (0..n as u64).map(|i| cstr(crate::guest::r64(names + 8 * i), 32)).collect();
+    let v: Vec<String> = (0..n as u64)
+        .map(|i| cstr(crate::guest::r64(names + 8 * i), 32))
+        .collect();
     commit_list(&v)
 });
-fsfn!(create_cache_fn, |a| { create_cache(a.i(0), a.x(1) as i64, a.x(2) as i64) });
+fsfn!(create_cache_fn, |a| {
+    create_cache(a.i(0), a.x(1) as i64, a.x(2) as i64)
+});
 fsfn!(delete_cache_fn, |a| { delete_cache(a.i(0)) });
 // GetCacheStorageMax(int *index, i64 *size): the control data's limits.
 fsfn!(cache_max, |a| {
     let Some(b) = control(0x3180, 10) else {
-        crate::log!("[RED] fs: GetCacheStorageMax: no control data ({})", data_dir().join("control.nacp").display());
+        crate::log!(
+            "[RED] fs: GetCacheStorageMax: no control data ({})",
+            data_dir().join("control.nacp").display()
+        );
         return RES_TARGET_NOT_FOUND;
     };
     let size = i64::from_le_bytes(b[0..8].try_into().unwrap());
@@ -1011,7 +1238,14 @@ fsfn!(mount_sysdata, |a| {
     } else if let Some(dir) = crate::services::mii::system_data(id) {
         return_mount(&name, dir)
     } else {
-        crate::log::gap(crate::log::Gap::Other, &format!("system data {id:016x}"), &format!("{name}: the host has none (a console's own goes in {})", own.display()));
+        crate::log::gap(
+            crate::log::Gap::Other,
+            &format!("system data {id:016x}"),
+            &format!(
+                "{name}: the host has none (a console's own goes in {})",
+                own.display()
+            ),
+        );
         RES_TARGET_NOT_FOUND
     }
 });
@@ -1028,11 +1262,18 @@ fsfn!(mount_cache0, |a| {
 });
 fsfn!(mount_cache, |a| {
     let name = cstr(a.x(0), 32);
-    mount_dir(&name, save_dir().join(format!("cache{}", a.w(1))), false, false)
+    mount_dir(
+        &name,
+        save_dir().join(format!("cache{}", a.w(1))),
+        false,
+        false,
+    )
 });
 fsfn!(mount_save, |a| {
     let name = cstr(a.x(0), 32);
-    let Some(user) = crate::services::account::user_of(a.x(1)) else { return RES_TARGET_NOT_FOUND };
+    let Some(user) = crate::services::account::user_of(a.x(1)) else {
+        return RES_TARGET_NOT_FOUND;
+    };
     let dir = save_dir().join(format!("user{}", user + 1));
     if user == 0 {
         adopt_turbo_save(&save_dir(), &dir);
@@ -1052,8 +1293,16 @@ fn adopt_turbo_save(root: &Path, dir: &Path) {
         let from = root.join(old);
         if from.is_dir() && std::fs::read_dir(&from).is_ok_and(|mut d| d.next().is_some()) {
             match copy_tree(&from, dir) {
-                Ok(()) => crate::log!("fs: {} is a Turbo build's save: copied to {} (the original is kept)", from.display(), dir.display()),
-                Err(e) => crate::log!("[RED] fs: copying the Turbo save {} to {}: {e}", from.display(), dir.display()),
+                Ok(()) => crate::log!(
+                    "fs: {} is a Turbo build's save: copied to {} (the original is kept)",
+                    from.display(),
+                    dir.display()
+                ),
+                Err(e) => crate::log!(
+                    "[RED] fs: copying the Turbo save {} to {}: {e}",
+                    from.display(),
+                    dir.display()
+                ),
             }
             return;
         }
@@ -1062,11 +1311,20 @@ fn adopt_turbo_save(root: &Path, dir: &Path) {
 fsfn!(mount_save_ro, |a| {
     let (name, app) = (cstr(a.x(0), 32), a.x(1));
     if app != crate::profile::get().program_id {
-        crate::log!("[RED] fs: read-only mount {name} of another program's save data ({app:016x}): none");
-        return RES_TARGET_NOT_FOUND
+        crate::log!(
+            "[RED] fs: read-only mount {name} of another program's save data ({app:016x}): none"
+        );
+        return RES_TARGET_NOT_FOUND;
     }
-    let Some(user) = crate::services::account::user_of(a.x(2)) else { return RES_TARGET_NOT_FOUND };
-    mount_dir(&name, save_dir().join(format!("user{}", user + 1)), true, false)
+    let Some(user) = crate::services::account::user_of(a.x(2)) else {
+        return RES_TARGET_NOT_FOUND;
+    };
+    mount_dir(
+        &name,
+        save_dir().join(format!("user{}", user + 1)),
+        true,
+        false,
+    )
 });
 fsfn!(mount_device_save, |a| {
     let name = cstr(a.x(0), 32);
@@ -1078,7 +1336,10 @@ fsfn!(save_size, |a| {
     RES_OK
 });
 fsfn!(ok_fn, |a| { RES_OK });
-fsfn!(save_existing_app, |a| { (a.x(0) == crate::profile::get().program_id && crate::services::account::user_of(a.x(1)).is_some()) as u64 });
+fsfn!(save_existing_app, |a| {
+    (a.x(0) == crate::profile::get().program_id
+        && crate::services::account::user_of(a.x(1)).is_some()) as u64
+});
 fsfn!(save_existing, |a| { 1 });
 fsfn!(free_space, |a| {
     crate::guest::out(a.x(0), 256u64 << 20);
@@ -1120,7 +1381,11 @@ unsafe fn read_into(h: u64, off: u64, buf: u64, n: u64) -> Result<u64, u64> {
     let t = std::time::Instant::now();
     let data = read_file(h, off, n)?;
     if crate::trace::on("fsread") {
-        crate::log!("fs read {h:#x} at {off:#x} {n:#x} bytes: {:#x} in {:.2} ms", data.len(), t.elapsed().as_secs_f64() * 1e3);
+        crate::log!(
+            "fs read {h:#x} at {off:#x} {n:#x} bytes: {:#x} in {:.2} ms",
+            data.len(),
+            t.elapsed().as_secs_f64() * 1e3
+        );
     }
     crate::guest::write_bytes(buf, &data);
     Ok(data.len() as u64)
@@ -1140,7 +1405,9 @@ fsfn!(read_file_exact, |a| {
     match read_into(h, off, buf, n) {
         Ok(got) if got == n => RES_OK,
         Ok(got) => {
-            crate::log!("[RED] fs: short read of handle {h:#x} at {off:#x}: wanted {n:#x}, got {got:#x}");
+            crate::log!(
+                "[RED] fs: short read of handle {h:#x} at {off:#x}: wanted {n:#x}, got {got:#x}"
+            );
             RES_OUT_OF_RANGE
         }
         Err(r) => r,
@@ -1165,14 +1432,24 @@ fsfn!(close_file_fn, |a| {
     close_file(a.x(0));
     0
 });
-fsfn!(file_open_mode, |a| { with(|st| st.files.get(&a.x(0)).map_or(0, |f| f.mode as u64)) });
-fsfn!(create_file_fn, |a| { create_file(&cstr(a.x(0), 0x301), a.x(1)) });
+fsfn!(file_open_mode, |a| {
+    with(|st| st.files.get(&a.x(0)).map_or(0, |f| f.mode as u64))
+});
+fsfn!(create_file_fn, |a| {
+    create_file(&cstr(a.x(0), 0x301), a.x(1))
+});
 fsfn!(delete_file_fn, |a| { delete_file(&cstr(a.x(0), 0x301)) });
 fsfn!(create_dir_fn, |a| { create_dir(&cstr(a.x(0), 0x301)) });
 fsfn!(delete_dir_fn, |a| { delete_dir(&cstr(a.x(0), 0x301)) });
-fsfn!(delete_dir_rec_fn, |a| { delete_dir_rec(&cstr(a.x(0), 0x301)) });
-fsfn!(clean_dir_rec_fn, |a| { clean_dir_rec(&cstr(a.x(0), 0x301)) });
-fsfn!(rename_fn, |a| { rename(&cstr(a.x(0), 0x301), &cstr(a.x(1), 0x301)) });
+fsfn!(delete_dir_rec_fn, |a| {
+    delete_dir_rec(&cstr(a.x(0), 0x301))
+});
+fsfn!(clean_dir_rec_fn, |a| {
+    clean_dir_rec(&cstr(a.x(0), 0x301))
+});
+fsfn!(rename_fn, |a| {
+    rename(&cstr(a.x(0), 0x301), &cstr(a.x(1), 0x301))
+});
 fsfn!(entry_type_fn, |a| {
     let (out, path) = (a.x(0), cstr(a.x(1), 0x301));
     match entry_type(&path) {
@@ -1331,12 +1608,21 @@ pub(crate) mod tests {
     #[test]
     fn other_programs_data_folders() {
         let d = Path::new(r"D:\b\Sonic_data");
-        assert_eq!(program_data_dir(d, 1).unwrap(), Path::new(r"D:\b\Sonic_p1_data"));
+        assert_eq!(
+            program_data_dir(d, 1).unwrap(),
+            Path::new(r"D:\b\Sonic_p1_data")
+        );
         assert_eq!(program_data_dir(d, 0).unwrap(), d);
         let p1 = Path::new(r"D:\b\Sonic_p1_data");
         assert_eq!(program_data_dir(p1, 0).unwrap(), d);
-        assert_eq!(program_data_dir(p1, 2).unwrap(), Path::new(r"D:\b\Sonic_p2_data"));
-        assert_eq!(program_data_dir(Path::new(r"D:\b\Top_pad_data"), 1).unwrap(), Path::new(r"D:\b\Top_pad_p1_data"));
+        assert_eq!(
+            program_data_dir(p1, 2).unwrap(),
+            Path::new(r"D:\b\Sonic_p2_data")
+        );
+        assert_eq!(
+            program_data_dir(Path::new(r"D:\b\Top_pad_data"), 1).unwrap(),
+            Path::new(r"D:\b\Top_pad_p1_data")
+        );
         assert!(program_data_dir(Path::new(r"D:\b\other"), 1).is_none());
     }
 
@@ -1353,7 +1639,11 @@ pub(crate) mod tests {
         assert!(root.join("user/sub/main").exists(), "the original stays");
         std::fs::write(root.join("user/sub/main"), b"newer").unwrap();
         adopt_turbo_save(&root, &dir);
-        assert_eq!(std::fs::read(dir.join("sub/main")).unwrap(), b"turbo", "only when user 1 has no save yet");
+        assert_eq!(
+            std::fs::read(dir.join("sub/main")).unwrap(),
+            b"turbo",
+            "only when user 1 has no save yet"
+        );
         let _ = std::fs::remove_dir_all(&root);
     }
 
@@ -1367,7 +1657,12 @@ pub(crate) mod tests {
             (base + 2, 1, "data".into(), "P:/here.nsp".into()),
             (base + 3, 1, "stub".into(), String::new()),
             (base + 2, 1, "data".into(), "P:/here.nsp".into()),
-            (0x0100_0000_0001_1001, 1, "data".into(), "P:/other.nsp".into()),
+            (
+                0x0100_0000_0001_1001,
+                1,
+                "data".into(),
+                "P:/other.nsp".into(),
+            ),
         ];
         assert_eq!(aoc_offered(base, &m, |i| i == 2), vec![2, 3]);
     }
@@ -1390,7 +1685,11 @@ pub(crate) mod tests {
         fn size(&self) -> u64 {
             self.0.len() as u64
         }
-        fn read(&self, offset: u64, size: u64) -> std::result::Result<Vec<u8>, translator::package::PackageError> {
+        fn read(
+            &self,
+            offset: u64,
+            size: u64,
+        ) -> std::result::Result<Vec<u8>, translator::package::PackageError> {
             Ok(self.0[offset as usize..(offset + size) as usize].to_vec())
         }
     }
@@ -1432,7 +1731,18 @@ pub(crate) mod tests {
         let dirs_at = 0x50u64;
         let files_at = dirs_at + dirs.len() as u64;
         let data_at = files_at + files.len() as u64;
-        let head = [0x50u64, dirs_at, 0, dirs_at, dirs.len() as u64, files_at, 0, files_at, files.len() as u64, data_at];
+        let head = [
+            0x50u64,
+            dirs_at,
+            0,
+            dirs_at,
+            dirs.len() as u64,
+            files_at,
+            0,
+            files_at,
+            files.len() as u64,
+            data_at,
+        ];
         let mut img: Vec<u8> = head.iter().flat_map(|w| w.to_le_bytes()).collect();
         img.extend(dirs);
         img.extend(files);
@@ -1442,21 +1752,38 @@ pub(crate) mod tests {
 
     #[test]
     fn package_romfs_in_place() {
-        let rom = Arc::new(RomFs::from_image(Arc::new(Image(image())), "synthetic".into()).unwrap());
+        let rom =
+            Arc::new(RomFs::from_image(Arc::new(Image(image())), "synthetic".into()).unwrap());
         mount("pkg", Backing::Rom(rom.clone()));
         let h = open_file("pkg:/a.txt", 1).unwrap();
         assert_eq!(read_file(h, 0, 64).unwrap(), b"hello in place");
         close_file(h);
         let h = open_file("pkg:/d/c.txt", 1).unwrap();
-        assert_eq!((file_size(h), read_file(h, 1, 8).unwrap()), (Ok(2), b"c".to_vec()));
+        assert_eq!(
+            (file_size(h), read_file(h, 1, 8).unwrap()),
+            (Ok(2), b"c".to_vec())
+        );
         close_file(h);
         let d = open_dir("pkg:/d", DIRMODE_FILE).unwrap();
-        assert_eq!(read_dir(d, 8).unwrap(), vec![("b.bin".to_string(), ENT_FILE, 4), ("c.txt".to_string(), ENT_FILE, 2)]);
+        assert_eq!(
+            read_dir(d, 8).unwrap(),
+            vec![
+                ("b.bin".to_string(), ENT_FILE, 4),
+                ("c.txt".to_string(), ENT_FILE, 2)
+            ]
+        );
         close_dir(d);
         assert_eq!(entry_type("pkg:/d"), Ok(true));
-        assert_eq!(create_file("pkg:/a.txt", 1), RES_PATH_EXISTS, "a read-only mount says it exists");
+        assert_eq!(
+            create_file("pkg:/a.txt", 1),
+            RES_PATH_EXISTS,
+            "a read-only mount says it exists"
+        );
         // 2 directories (3 buckets), 3 files (3 buckets), 0x18 + 0x18 + 4 directory bytes, 3 x (0x20 + 8) file bytes
-        assert_eq!(romfs_work_size(&rom), 4 * 3 + 0x18 + 0x18 + 4 + 4 * 3 + 3 * 0x28);
+        assert_eq!(
+            romfs_work_size(&rom),
+            4 * 3 + 0x18 + 0x18 + 4 + 4 * 3 + 3 * 0x28
+        );
     }
 
     /// A folder RomFS (the translator's folder backend) and a transactional save, through the same calls the
@@ -1476,13 +1803,22 @@ pub(crate) mod tests {
         assert_eq!(read_file(h, 6, 100).unwrap(), b"romfs");
         assert_eq!(read_file(h, 20, 4).unwrap(), b"");
         close_file(h);
-        assert_eq!(open_file("trom:/Data/nope", MODE_READ), Err(RES_PATH_NOT_FOUND));
+        assert_eq!(
+            open_file("trom:/Data/nope", MODE_READ),
+            Err(RES_PATH_NOT_FOUND)
+        );
         assert_eq!(open_file("trom:/Data/a.bin", MODE_WRITE), Err(RES_FAIL));
         assert_eq!(entry_type("trom:/Data/Sub"), Ok(true));
         let d = open_dir("trom:/Data", DIRMODE_DIR | DIRMODE_FILE).unwrap();
         assert_eq!(dir_count(d), Ok(2));
         let v = read_dir(d, 10).unwrap();
-        assert_eq!(v, vec![("Sub".to_string(), ENT_DIR, 0), ("a.bin".to_string(), ENT_FILE, 11)]);
+        assert_eq!(
+            v,
+            vec![
+                ("Sub".to_string(), ENT_DIR, 0),
+                ("a.bin".to_string(), ENT_FILE, 11)
+            ]
+        );
         assert!(read_dir(d, 10).unwrap().is_empty());
         close_dir(d);
         assert!(romfs_work_size(&rom) > 0x18);
@@ -1502,7 +1838,11 @@ pub(crate) mod tests {
         assert_eq!(rename("tsave:/dir/f.dat", "tsave:/dir/g.dat"), RES_OK);
         assert_eq!(delete_file("tsave:/dir/g.dat"), RES_OK);
         assert_eq!(delete_file("tsave:/dir/g.dat"), RES_PATH_NOT_FOUND);
-        assert_eq!(std::fs::read(save.join("dir/f.dat")).unwrap(), b"abcdef", "uncommitted changes stay in the work copy");
+        assert_eq!(
+            std::fs::read(save.join("dir/f.dat")).unwrap(),
+            b"abcdef",
+            "uncommitted changes stay in the work copy"
+        );
         let _ = std::fs::remove_dir_all(&tmp);
     }
 }

@@ -10,7 +10,9 @@ static T0: OnceLock<std::time::Instant> = OnceLock::new();
 
 /// Seconds since the os layer started, for the log's time column.
 pub fn secs() -> f64 {
-    T0.get_or_init(std::time::Instant::now).elapsed().as_secs_f64()
+    T0.get_or_init(std::time::Instant::now)
+        .elapsed()
+        .as_secs_f64()
 }
 
 pub fn line(msg: &str) {
@@ -60,8 +62,12 @@ static GAPS: Mutex<BTreeMap<(Gap, String), u64>> = Mutex::new(BTreeMap::new());
 #[macro_export]
 macro_rules! metric {
     ($name:literal, $n:expr) => {{
-        static C: std::sync::OnceLock<&'static std::sync::atomic::AtomicU64> = std::sync::OnceLock::new();
-        nxconfig::metrics::add(C.get_or_init(|| nxconfig::metrics::counter($name)), $n as u64);
+        static C: std::sync::OnceLock<&'static std::sync::atomic::AtomicU64> =
+            std::sync::OnceLock::new();
+        nxconfig::metrics::add(
+            C.get_or_init(|| nxconfig::metrics::counter($name)),
+            $n as u64,
+        );
     }};
 }
 
@@ -73,13 +79,31 @@ pub fn gap(kind: Gap, what: &str, detail: &str) {
     *n += 1;
     if *n == 1 {
         drop(g);
-        line(&format!("UNIMPL {kind:?} {what}{}{detail}", if detail.is_empty() { "" } else { ": " }));
+        line(&format!(
+            "UNIMPL {kind:?} {what}{}{detail}",
+            if detail.is_empty() { "" } else { ": " }
+        ));
     }
 }
 
 /// Every gap met so far, with its hit count.
 pub fn gaps() -> Vec<(Gap, String, u64)> {
-    GAPS.lock().unwrap().iter().map(|((k, w), n)| (*k, w.clone(), *n)).collect()
+    GAPS.lock()
+        .unwrap()
+        .iter()
+        .map(|((k, w), n)| (*k, w.clone(), *n))
+        .collect()
+}
+
+/// A control-channel-friendly snapshot of the gaps met so far.
+pub fn gap_summary() -> String {
+    let gaps = gaps();
+    let hits: u64 = gaps.iter().map(|(_, _, n)| n).sum();
+    let mut out = format!("gaps distinct {} hits {}\n", gaps.len(), hits);
+    for (kind, what, n) in gaps {
+        out.push_str(&format!("{kind:?}\t{n}\t{what}\n"));
+    }
+    out
 }
 
 /// The summary block: one line per gap.
@@ -99,12 +123,28 @@ mod tests {
         assert!(!super::first("log-test-key"));
         super::gap(super::Gap::Other, "log-test-gap", "");
         super::gap(super::Gap::Other, "log-test-gap", "");
-        assert!(super::gaps().iter().any(|(_, w, n)| w == "log-test-gap" && *n == 2));
+        assert!(super::gaps()
+            .iter()
+            .any(|(_, w, n)| w == "log-test-gap" && *n == 2));
+        let summary = super::gap_summary();
+        assert!(
+            summary
+                .lines()
+                .next()
+                .is_some_and(|l| l.starts_with("gaps distinct ") && l.contains(" hits ")),
+            "{summary}"
+        );
+        assert!(
+            summary.lines().any(|l| l == "Other\t2\tlog-test-gap"),
+            "{summary}"
+        );
     }
 }
 
 /// A diagnostic line from instrumented generated code (a debugging aid: `void nxos_dbg(uint64_t tag, ...6 values)`).
 #[no_mangle]
 pub extern "C" fn nxos_dbg(tag: u64, a: u64, b: u64, c: u64, d: u64, e: u64, f: u64) {
-    line(&format!("DBG {tag:#x}: {a:#x} {b:#x} {c:#x} {d:#x} {e:#x} {f:#x}"));
+    line(&format!(
+        "DBG {tag:#x}: {a:#x} {b:#x} {c:#x} {d:#x} {e:#x} {f:#x}"
+    ));
 }

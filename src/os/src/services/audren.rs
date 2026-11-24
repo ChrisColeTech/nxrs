@@ -59,15 +59,33 @@ pub fn service_work_size(p: &[u8], revision: u32) -> u64 {
         }
         *v = x as u64;
     }
-    let (mix, sub, voices, sinks, effects, perf, splitters, dest) = (n[2], n[3], n[4], n[5], n[6], n[7], n[9], n[10]);
+    let (mix, sub, voices, sinks, effects, perf, splitters, dest) =
+        (n[2], n[3], n[4], n[5], n[6], n[7], n[9], n[10]);
     let mixes = sub + 1;
     let mut size = align(((sinks + sub) * 0x3c0 + n[1] * 4) * (mix + 6), 64);
     size += align(mix * 4, 64) + sub * 0x400 + mixes * 0x940 + align(mixes * 8, 16);
-    size += voices * 0x1d0 + align(voices * if r >= 15 { 0x238 } else { 0x220 }, 16) + align(voices * 8, 16);
+    size += voices * 0x1d0
+        + align(voices * if r >= 15 { 0x238 } else { 0x220 }, 16)
+        + align(voices * 8, 16);
     if r >= 2 {
-        let graph = mixes * mixes * 4 + mixes * 12 + 2 * align(mixes, 64) / 8 + align(mixes * mixes, 64) / 8;
+        let graph = mixes * mixes * 4
+            + mixes * 12
+            + 2 * align(mixes, 64) / 8
+            + align(mixes * mixes, 64) / 8;
         size += align(graph, 16);
-        size += splitters * 0x20 + align(dest * if r >= 12 { if r >= 15 { 0x130 } else { 8 } } else { 0xe0 }, 16);
+        size += splitters * 0x20
+            + align(
+                dest * if r >= 12 {
+                    if r >= 15 {
+                        0x130
+                    } else {
+                        8
+                    }
+                } else {
+                    0xe0
+                },
+                16,
+            );
         if r < 5 {
             size += align(dest * 4, 16);
         }
@@ -77,14 +95,25 @@ pub fn service_work_size(p: &[u8], revision: u32) -> u64 {
         size += align(dest * if r >= 14 { 0xe0 } else { 0x80 }, 64);
     }
     size = align(size + if r >= 9 { effects * 0x80 } else { 0 }, 64);
-    size += (sinks + sub) * 0x280 + effects * if r >= 9 { 0x530 } else { 0x4b0 } + sinks * 0x170 + voices * 0x100 + 0x40;
+    size += (sinks + sub) * 0x280
+        + effects * if r >= 9 { 0x530 } else { 0x4b0 }
+        + sinks * 0x170
+        + voices * 0x100
+        + 0x40;
     if perf != 0 {
-        let frame = (sub + voices + sinks + effects + 1) * if r >= 5 { 0x18 } else { 0x10 } + if r >= 5 { 0x990 } else { 0x658 };
+        let frame = (sub + voices + sinks + effects + 1) * if r >= 5 { 0x18 } else { 0x10 }
+            + if r >= 5 { 0x990 } else { 0x658 };
         size += align(frame * (perf + 1), 64) + 0xc0;
     }
     let mut commands = 0x18000;
     if r >= 5 {
-        commands = effects * 0x540 + sub * 0x3f24 + sinks * 0x130 + dest * 0x360 + voices * (splitters * 0x50 + if r >= 8 { 0x284 } else { 0x250 }) + (voices + sub + effects + sinks + 0x65) * 0x28 + 0x2c4;
+        commands = effects * 0x540
+            + sub * 0x3f24
+            + sinks * 0x130
+            + dest * 0x360
+            + voices * (splitters * 0x50 + if r >= 8 { 0x284 } else { 0x250 })
+            + (voices + sub + effects + sinks + 0x65) * 0x28
+            + 0x2c4;
     }
     align(size + commands + 0x7e, WORK_PAGE)
 }
@@ -114,12 +143,15 @@ fn cpu_manual(param: u64) -> u64 {
 }
 
 fn sdk(name: &str) -> u64 {
-    crate::hle::sym(name).unwrap_or_else(|| nxrt::rt::fatal(&format!("audren: the SDK has no {name}")))
+    crate::hle::sym(name)
+        .unwrap_or_else(|| nxrt::rt::fatal(&format!("audren: the SDK has no {name}")))
 }
 
-const WORK_SIZE: &str = "_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE";
+const WORK_SIZE: &str =
+    "_ZN2nn5audio30GetAudioRendererWorkBufferSizeERKNS0_22AudioRendererParameterE";
 const OPEN_EV: &str = "_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleEPNS_2os11SystemEventERKNS0_22AudioRendererParameterEPvm";
-const OPEN: &str = "_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleERKNS0_22AudioRendererParameterEPvm";
+const OPEN: &str =
+    "_ZN2nn5audio17OpenAudioRendererEPNS0_19AudioRendererHandleERKNS0_22AudioRendererParameterEPvm";
 const CLOSE: &str = "_ZN2nn5audio18CloseAudioRendererENS0_19AudioRendererHandleE";
 const EXEC: &str = "_ZN2nn5audio29ExecuteAudioRendererRenderingENS0_19AudioRendererHandleE";
 const IMPL_EXEC: &str = "_ZN2nn5audio6server24AudioRendererManagerImpl17AudioRendererImpl29ExecuteAudioRendererRenderingEv";
@@ -149,11 +181,20 @@ unsafe fn work_size(c: *mut Cpu) {
         return;
     }
     let p = cpu_manual(param);
-    let Some(local) = crate::guest::call(c, sdk(WORK_SIZE), &[p]) else { return };
+    let Some(local) = crate::guest::call(c, sdk(WORK_SIZE), &[p]) else {
+        return;
+    };
     let bytes = crate::guest::bytes(param, P_SIZE).to_vec();
-    let service = if r32(param + P_DEVICE) == 0 { param_service_size(&bytes) } else { 0 };
+    let service = if r32(param + P_DEVICE) == 0 {
+        param_service_size(&bytes)
+    } else {
+        0
+    };
     let n = if service != 0 { service } else { local };
-    crate::log_once!("audren work", "audren: work buffer {n:#x} for the game (the local CPU renderer needs {local:#x})");
+    crate::log_once!(
+        "audren work",
+        "audren: work buffer {n:#x} for the game (the local CPU renderer needs {local:#x})"
+    );
     (*c).x[0] = n;
 }
 
@@ -191,10 +232,16 @@ thread_local! { static T_AR: Cell<usize> = const { Cell::new(usize::MAX) }; }
 
 fn ar_of_sys(sys: u64) -> Option<&'static Ar> {
     let g = ARS.lock().unwrap();
-    if let Some(a) = g.iter().find(|a| a.open.load(Ordering::Relaxed) && a.sys.load(Ordering::Relaxed) == sys) {
+    if let Some(a) = g
+        .iter()
+        .find(|a| a.open.load(Ordering::Relaxed) && a.sys.load(Ordering::Relaxed) == sys)
+    {
         return Some(a);
     }
-    let unknown: Vec<&&Ar> = g.iter().filter(|a| a.open.load(Ordering::Relaxed) && a.sys.load(Ordering::Relaxed) == 0).collect();
+    let unknown: Vec<&&Ar> = g
+        .iter()
+        .filter(|a| a.open.load(Ordering::Relaxed) && a.sys.load(Ordering::Relaxed) == 0)
+        .collect();
     if unknown.len() == 1 {
         unknown[0].sys.store(sys, Ordering::Relaxed);
         return Some(unknown[0]);
@@ -206,11 +253,18 @@ static IN_OPEN: AtomicBool = AtomicBool::new(false);
 
 unsafe fn open_common(c: *mut Cpu, with_event: bool) {
     let a = &*c;
-    let (handle, ev, param, mut work, mut size) =
-        if with_event { (a.x[0], a.x[1], a.x[2], a.x[3], a.x[4]) } else { (a.x[0], 0, a.x[1], a.x[2], a.x[3]) };
+    let (handle, ev, param, mut work, mut size) = if with_event {
+        (a.x[0], a.x[1], a.x[2], a.x[3], a.x[4])
+    } else {
+        (a.x[0], 0, a.x[1], a.x[2], a.x[3])
+    };
     if IN_OPEN.load(Ordering::Relaxed) || !in_process() {
         // the SDK's event form calls the form without one: straight to the SDK
-        let r = if with_event { crate::guest::call(c, sdk(OPEN_EV), &[handle, ev, param, work, size]) } else { crate::guest::call(c, sdk(OPEN), &[handle, param, work, size]) };
+        let r = if with_event {
+            crate::guest::call(c, sdk(OPEN_EV), &[handle, ev, param, work, size])
+        } else {
+            crate::guest::call(c, sdk(OPEN), &[handle, param, work, size])
+        };
         if let Some(r) = r {
             (*c).x[0] = r;
         }
@@ -231,17 +285,24 @@ unsafe fn open_common(c: *mut Cpu, with_event: bool) {
         r32(param + P_DEVICE),
         r32(param + P_MODE)
     );
-    let Some(need) = crate::guest::call(c, sdk(WORK_SIZE), &[p]) else { return };
+    let Some(need) = crate::guest::call(c, sdk(WORK_SIZE), &[p]) else {
+        return;
+    };
     if size < need {
         // the local renderer's own storage, beyond the service budget the game allocated
-        let layout = std::alloc::Layout::from_size_align(need as usize, WORK_PAGE as usize).unwrap();
+        let layout =
+            std::alloc::Layout::from_size_align(need as usize, WORK_PAGE as usize).unwrap();
         let owned = std::alloc::alloc_zeroed(layout) as u64;
         crate::log!("audren: the host backs the local renderer's work buffer {owned:#x}+{need:#x}");
         work = owned;
         size = need;
     }
     IN_OPEN.store(true, Ordering::Relaxed);
-    let r = if with_event { crate::guest::call(c, sdk(OPEN_EV), &[handle, ev, p, work, size]) } else { crate::guest::call(c, sdk(OPEN), &[handle, p, work, size]) };
+    let r = if with_event {
+        crate::guest::call(c, sdk(OPEN_EV), &[handle, ev, p, work, size])
+    } else {
+        crate::guest::call(c, sdk(OPEN), &[handle, p, work, size])
+    };
     IN_OPEN.store(false, Ordering::Relaxed);
     let Some(r) = r else { return };
     if r as u32 != 0 {
@@ -275,7 +336,10 @@ unsafe fn open_common(c: *mut Cpu, with_event: bool) {
         last_r: AtomicU64::new(0),
         updated: AtomicBool::new(false),
         sink_logged: AtomicBool::new(false),
-        up: Mutex::new(Up { buf: vec![0; 2 * (RS_T - 1 + FRAME_MAX)], pos: 0 }),
+        up: Mutex::new(Up {
+            buf: vec![0; 2 * (RS_T - 1 + FRAME_MAX)],
+            pos: 0,
+        }),
         out: Mutex::new(None),
     }));
     ARS.lock().unwrap().push(ar);
@@ -283,13 +347,20 @@ unsafe fn open_common(c: *mut Cpu, with_event: bool) {
     let malloc = sdk("malloc");
     let create = sdk("_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mi");
     let start = sdk("_ZN2nn2os11StartThreadEPNS0_10ThreadTypeE");
-    let Some(tt) = crate::guest::call(c, malloc, &[0x200]) else { return };
+    let Some(tt) = crate::guest::call(c, malloc, &[0x200]) else {
+        return;
+    };
     crate::guest::zero(tt, 0x200);
     let stack_size = 0x10000;
-    let Some(sa) = crate::guest::call(c, malloc, &[stack_size + 0x1000]) else { return };
+    let Some(sa) = crate::guest::call(c, malloc, &[stack_size + 0x1000]) else {
+        return;
+    };
     let stack = align(sa, 0x1000);
     let entry = crate::hle::addr("audren render thread", render_main);
-    let Some(rc) = crate::guest::call(c, create, &[tt, entry, idx as u64, stack, stack_size, 9]) else { return };
+    let Some(rc) = crate::guest::call(c, create, &[tt, entry, idx as u64, stack, stack_size, 9])
+    else {
+        return;
+    };
     if rc as u32 != 0 {
         crate::log!("[RED] audren: CreateThread for the render thread failed {rc:#x}");
     } else {
@@ -310,7 +381,9 @@ unsafe fn open_noev(c: *mut Cpu) {
 /// The render thread: one frame per block the sound card hands back.
 unsafe fn render_main(c: *mut Cpu) {
     let idx = (*c).x[0] as usize;
-    let Some(a) = ARS.lock().unwrap().get(idx).copied() else { return };
+    let Some(a) = ARS.lock().unwrap().get(idx).copied() else {
+        return;
+    };
     T_AR.with(|t| t.set(idx));
     let exec = sdk(EXEC);
     let out = sink::open(&format!("renderer {idx}"));
@@ -356,12 +429,18 @@ unsafe fn render_main(c: *mut Cpu) {
 unsafe fn close(c: *mut Cpu) {
     let (h0, h1) = ((*c).x[0], (*c).x[1]);
     if in_process() {
-        let ar = ARS.lock().unwrap().iter().find(|r| r.handle[0] == h0 && r.open.load(Ordering::Relaxed)).copied();
+        let ar = ARS
+            .lock()
+            .unwrap()
+            .iter()
+            .find(|r| r.handle[0] == h0 && r.open.load(Ordering::Relaxed))
+            .copied();
         if let Some(r) = ar {
             r.open.store(false, Ordering::Relaxed);
             let tt = r.thread.load(Ordering::Relaxed);
             if tt != 0 {
-                let _ = crate::guest::call(c, sdk("_ZN2nn2os10WaitThreadEPNS0_10ThreadTypeE"), &[tt]);
+                let _ =
+                    crate::guest::call(c, sdk("_ZN2nn2os10WaitThreadEPNS0_10ThreadTypeE"), &[tt]);
             }
             crate::log!(
                 "audren: renderer {} closed: {} frames rendered, {} not silent, {} catch-up frames",
@@ -403,7 +482,13 @@ static LAYOUT: Mutex<Layout> = Mutex::new(Layout {
 });
 
 fn cmd_size(l: &Layout, q: u64) -> i32 {
-    r16(q + if l.hdr21 { 2 } else if l.hdr6 { 4 } else { 6 }) as i16 as i32
+    r16(q + if l.hdr21 {
+        2
+    } else if l.hdr6 {
+        4
+    } else {
+        6
+    }) as i16 as i32
 }
 fn cmd_id(l: &Layout, q: u64) -> i32 {
     if l.hdr21 {
@@ -424,7 +509,13 @@ fn cmd_on(l: &Layout, q: u64) -> bool {
     }
 }
 fn cmd_ok(l: &Layout, q: u64, end: u64) -> bool {
-    let header = if l.hdr21 { 0x10 } else if l.hdr6 { 0x11 } else { 8 };
+    let header = if l.hdr21 {
+        0x10
+    } else if l.hdr6 {
+        0x11
+    } else {
+        8
+    };
     if q > end || end - q < header {
         return false;
     }
@@ -464,9 +555,14 @@ fn up_taps() -> &'static [[f32; RS_T]; 3] {
             for (k, wk) in w.iter_mut().enumerate() {
                 let x = p as f64 / 3.0 + (RS_T / 2) as f64 - 1.0 - k as f64;
                 let fc = 0.9;
-                let s = if x == 0.0 { fc } else { (std::f64::consts::PI * fc * x).sin() / (std::f64::consts::PI * x) };
+                let s = if x == 0.0 {
+                    fc
+                } else {
+                    (std::f64::consts::PI * fc * x).sin() / (std::f64::consts::PI * x)
+                };
                 let t = (x + (RS_T / 2) as f64) / RS_T as f64;
-                let win = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * t).cos() + 0.08 * (4.0 * std::f64::consts::PI * t).cos();
+                let win = 0.42 - 0.5 * (2.0 * std::f64::consts::PI * t).cos()
+                    + 0.08 * (4.0 * std::f64::consts::PI * t).cos();
                 *wk = s * win;
                 sum += *wk;
             }
@@ -585,7 +681,12 @@ fn capture(a: &Ar, cl: u64, len: u64) -> Vec<i16> {
             }
             q += sz as u64;
         }
-        let line: String = hist.iter().enumerate().filter(|(_, n)| **n != 0).map(|(k, n)| format!(" {k}x{n}")).collect();
+        let line: String = hist
+            .iter()
+            .enumerate()
+            .filter(|(_, n)| **n != 0)
+            .map(|(k, n)| format!(" {k}x{n}"))
+            .collect();
         crate::log!("audren: first full command list: {ncmd} commands, by command ID:{line}");
         let have = hist[(l.sink_id & 63) as usize] != 0;
         if !have && ncand == 1 {
@@ -613,7 +714,11 @@ fn capture(a: &Ar, cl: u64, len: u64) -> Vec<i16> {
             let nin = r32(b + if l.sink4 { 0x120 } else { 0x130 });
             let mut inp = [0i64; 6];
             for (j, v) in inp.iter_mut().enumerate() {
-                *v = if l.sink4 && !l.sink5 { r8(b + 0x124 + j as u64) as i8 as i64 } else { r16(b + if l.sink4 { 0x124 } else { 0x134 } + 2 * j as u64) as i16 as i64 };
+                *v = if l.sink4 && !l.sink5 {
+                    r8(b + 0x124 + j as u64) as i8 as i64
+                } else {
+                    r16(b + if l.sink4 { 0x124 } else { 0x134 } + 2 * j as u64) as i16 as i64
+                };
             }
             if !a.sink_logged.swap(true, Ordering::Relaxed) {
                 crate::log!(
@@ -624,7 +729,14 @@ fn capture(a: &Ar, cl: u64, len: u64) -> Vec<i16> {
                     if rate == 32000 { " (32 kHz: upsampled to 48 kHz by the host)" } else { "" }
                 );
             }
-            if nin == 0 || samples > if rate == 48000 { FRAME_MAX } else { FRAME_MAX * 2 / 3 - 1 } {
+            if nin == 0
+                || samples
+                    > if rate == 48000 {
+                        FRAME_MAX
+                    } else {
+                        FRAME_MAX * 2 / 3 - 1
+                    }
+            {
                 return vec![];
             }
             if rate != 48000 && rate != 32000 {
@@ -632,7 +744,9 @@ fn capture(a: &Ar, cl: u64, len: u64) -> Vec<i16> {
                 return vec![];
             }
             let k = (nin as usize).min(6);
-            let ch: Vec<u64> = (0..k).map(|j| mix + (inp[j] as u64).wrapping_mul(samples as u64 * 4)).collect();
+            let ch: Vec<u64> = (0..k)
+                .map(|j| mix + (inp[j] as u64).wrapping_mul(samples as u64 * 4))
+                .collect();
             let s32 = |c: u64, s: usize| r32(c + 4 * s as u64) as i32 as i64;
             // six channels to stereo with the system's default downmix (front 1.0, center 0.707, LFE 0.251, back 0.707, Q15)
             const CF: i64 = 32768;
@@ -650,7 +764,11 @@ fn capture(a: &Ar, cl: u64, len: u64) -> Vec<i16> {
                     st.push(if k > 1 { s32(ch[1], s) } else { s32(ch[0], s) } as i32);
                 }
             }
-            let st = if rate == 48000 { st } else { up_3_2(&mut a.up.lock().unwrap(), &st) };
+            let st = if rate == 48000 {
+                st
+            } else {
+                up_3_2(&mut a.up.lock().unwrap(), &st)
+            };
             let mut loud = false;
             let pcm: Vec<i16> = st
                 .iter()
@@ -664,7 +782,11 @@ fn capture(a: &Ar, cl: u64, len: u64) -> Vec<i16> {
                 a.nonsilent.fetch_add(1, Ordering::Relaxed);
             }
             if f == 200 || f % 12000 == 0 {
-                crate::log!("audren: renderer {} rendered {f} frames, {} of them not silent", a.idx, a.nonsilent.load(Ordering::Relaxed));
+                crate::log!(
+                    "audren: renderer {} rendered {f} frames, {} of them not silent",
+                    a.idx,
+                    a.nonsilent.load(Ordering::Relaxed)
+                );
             }
             return pcm;
         }
@@ -713,7 +835,11 @@ fn lock_in(f: Option<u64>) -> Option<(u64, bool)> {
     let mut x0 = -1i64;
     for i in 0..24u64 {
         let w = r32(f + 4 * i);
-        let (rd, rn, rm) = ((w & 31) as usize, ((w >> 5) & 31) as usize, ((w >> 16) & 31) as usize);
+        let (rd, rn, rm) = (
+            (w & 31) as usize,
+            ((w >> 5) & 31) as usize,
+            ((w >> 16) & 31) as usize,
+        );
         if w & 0xffe0_ffe0 == 0xaa00_03e0 {
             if this >> rm & 1 != 0 {
                 this |= 1 << rd;
@@ -808,7 +934,10 @@ unsafe fn render_once(c: *mut Cpu, a: &Ar, sys: u64) -> Option<(u64, Vec<i16>)> 
     let f = fns();
     let (md, dv) = match f.gen20 {
         Some(_) => (r32(sys + 0x4c), r32(sys + 0x48)),
-        None => (crate::guest::call(c, f.mode, &[sys])? as u32, crate::guest::call(c, f.device, &[sys])? as u32),
+        None => (
+            crate::guest::call(c, f.mode, &[sys])? as u32,
+            crate::guest::call(c, f.device, &[sys])? as u32,
+        ),
     };
     if md != 1 || dv != 1 {
         return Some((0x40299, vec![]));
@@ -879,18 +1008,25 @@ unsafe fn exec_sys(c: *mut Cpu, sys: u64) {
     let a = if idx != usize::MAX {
         let a = ARS.lock().unwrap().get(idx).copied();
         if let Some(a) = a {
-            let _ = a.sys.compare_exchange(0, sys, Ordering::Relaxed, Ordering::Relaxed);
+            let _ = a
+                .sys
+                .compare_exchange(0, sys, Ordering::Relaxed, Ordering::Relaxed);
         }
         a
     } else {
         ar_of_sys(sys)
     };
     let Some(a) = a else {
-        crate::log_once!("audren foreign", "[RED] audren: a render of a renderer the host did not open");
+        crate::log_once!(
+            "audren foreign",
+            "[RED] audren: a render of a renderer the host did not open"
+        );
         (*c).x[0] = crate::hle::RES_FAIL;
         return;
     };
-    let Some((r, pcm)) = render_once(c, a, sys) else { return };
+    let Some((r, pcm)) = render_once(c, a, sys) else {
+        return;
+    };
     if idx == a.idx {
         *a.frame.lock().unwrap() = pcm;
     }
@@ -931,14 +1067,17 @@ unsafe fn sys_update(c: *mut Cpu) {
                     q = a.cq_cv.wait_timeout(q, deadline - now).unwrap().0;
                 }
             });
-            let Some((_, pcm)) = render_once(c, a, sys) else { return };
+            let Some((_, pcm)) = render_once(c, a, sys) else {
+                return;
+            };
             let mut q = a.cq.lock().unwrap();
             if q.len() < CQ {
                 q.push_back(pcm);
             }
         }
         let res = crate::guest::call(c, sdk(SYS_UPDATE), &args);
-        a.last_r.store(a.renders.load(Ordering::Relaxed), Ordering::Relaxed);
+        a.last_r
+            .store(a.renders.load(Ordering::Relaxed), Ordering::Relaxed);
         a.updated.store(true, Ordering::Relaxed);
         if let Some(r) = res {
             (*c).x[0] = r;
@@ -982,7 +1121,8 @@ pub fn report() -> Vec<String> {
 }
 
 pub fn register(r: &mut Registry) {
-    const W: &str = "audren: the SDK's renderer in-process (CPU, manual), its DeviceSink to the sound card";
+    const W: &str =
+        "audren: the SDK's renderer in-process (CPU, manual), its DeviceSink to the sound card";
     for (n, f) in [
         (WORK_SIZE, work_size as unsafe fn(*mut Cpu)),
         (OPEN_EV, open_ev),
@@ -1042,7 +1182,10 @@ mod tests {
             last_r: AtomicU64::new(0),
             updated: AtomicBool::new(false),
             sink_logged: AtomicBool::new(false),
-            up: Mutex::new(Up { buf: vec![], pos: 0 }),
+            up: Mutex::new(Up {
+                buf: vec![],
+                pos: 0,
+            }),
             out: Mutex::new(None),
         }
     }
@@ -1082,7 +1225,10 @@ mod tests {
 
     #[test]
     fn upsample_32k() {
-        let mut up = Up { buf: vec![], pos: 0 };
+        let mut up = Up {
+            buf: vec![],
+            pos: 0,
+        };
         let mut n = 0;
         for _ in 0..10 {
             n += up_3_2(&mut up, &vec![1000i32; 160 * 2]).len() / 2;

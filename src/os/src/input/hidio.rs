@@ -63,7 +63,10 @@ fn describe(path: Vec<u16>) -> Option<HidInfo> {
     if h == INVALID_HANDLE_VALUE {
         return None;
     }
-    let mut info = HidInfo { path, ..Default::default() };
+    let mut info = HidInfo {
+        path,
+        ..Default::default()
+    };
     unsafe {
         let mut a: HIDD_ATTRIBUTES = std::mem::zeroed();
         a.Size = std::mem::size_of::<HIDD_ATTRIBUTES>() as u32;
@@ -92,7 +95,9 @@ fn describe(path: Vec<u16>) -> Option<HidInfo> {
         CloseHandle(h);
     }
     let p = info.path_string().to_ascii_lowercase();
-    info.bluetooth = p.contains("{00001124-0000-1000-8000-00805f9b34fb}") || p.contains("bthenum") || p.contains("&col") && p.contains("bth");
+    info.bluetooth = p.contains("{00001124-0000-1000-8000-00805f9b34fb}")
+        || p.contains("bthenum")
+        || p.contains("&col") && p.contains("bth");
     Some(info)
 }
 
@@ -102,7 +107,12 @@ pub fn enumerate() -> Vec<HidInfo> {
     let mut out = vec![];
     unsafe {
         let guid = GUID_DEVINTERFACE_HID;
-        let list = SetupDiGetClassDevsW(&guid, std::ptr::null(), std::ptr::null_mut(), DIGCF_PRESENT | DIGCF_DEVICEINTERFACE);
+        let list = SetupDiGetClassDevsW(
+            &guid,
+            std::ptr::null(),
+            std::ptr::null_mut(),
+            DIGCF_PRESENT | DIGCF_DEVICEINTERFACE,
+        );
         if list == INVALID_HANDLE_VALUE as HDEVINFO {
             return out;
         }
@@ -113,14 +123,29 @@ pub fn enumerate() -> Vec<HidInfo> {
                 break;
             }
             let mut needed = 0u32;
-            SetupDiGetDeviceInterfaceDetailW(list, &iface, std::ptr::null_mut(), 0, &mut needed, std::ptr::null_mut());
+            SetupDiGetDeviceInterfaceDetailW(
+                list,
+                &iface,
+                std::ptr::null_mut(),
+                0,
+                &mut needed,
+                std::ptr::null_mut(),
+            );
             if needed < 8 {
                 continue;
             }
             let mut buf = vec![0u64; (needed as usize).div_ceil(8)];
             let detail = buf.as_mut_ptr() as *mut SP_DEVICE_INTERFACE_DETAIL_DATA_W;
             (*detail).cbSize = std::mem::size_of::<SP_DEVICE_INTERFACE_DETAIL_DATA_W>() as u32;
-            if SetupDiGetDeviceInterfaceDetailW(list, &iface, detail, needed, std::ptr::null_mut(), std::ptr::null_mut()) == 0 {
+            if SetupDiGetDeviceInterfaceDetailW(
+                list,
+                &iface,
+                detail,
+                needed,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+            ) == 0
+            {
                 continue;
             }
             let p = std::ptr::addr_of!((*detail).DevicePath) as *const u16;
@@ -169,7 +194,11 @@ impl HidDev {
     pub fn open(info: &HidInfo, write: bool) -> Option<HidDev> {
         let mut writable = write;
         let mut err = 0;
-        let mut h = open_raw(&info.path, GENERIC_READ | if write { GENERIC_WRITE } else { 0 }, true);
+        let mut h = open_raw(
+            &info.path,
+            GENERIC_READ | if write { GENERIC_WRITE } else { 0 },
+            true,
+        );
         if h == INVALID_HANDLE_VALUE && write {
             err = unsafe { GetLastError() };
             h = open_raw(&info.path, GENERIC_READ, true);
@@ -185,7 +214,15 @@ impl HidDev {
             return None;
         }
         let len = (info.input_len as usize).max(64);
-        Some(HidDev { h, ov, buf: vec![0; len], pending: false, writable, info: info.clone(), open_error: err })
+        Some(HidDev {
+            h,
+            ov,
+            buf: vec![0; len],
+            pending: false,
+            writable,
+            info: info.clone(),
+            open_error: err,
+        })
     }
 
     /// The next queued input report, without blocking.
@@ -206,7 +243,14 @@ impl HidDev {
             }
             ResetEvent(self.ov.hEvent);
             let want = self.info.input_len.max(1) as u32;
-            if ReadFile(self.h, self.buf.as_mut_ptr(), want.min(self.buf.len() as u32), &mut n, &mut *self.ov) == 0 {
+            if ReadFile(
+                self.h,
+                self.buf.as_mut_ptr(),
+                want.min(self.buf.len() as u32),
+                &mut n,
+                &mut *self.ov,
+            ) == 0
+            {
                 let e = GetLastError();
                 if e == ERROR_IO_PENDING {
                     self.pending = true;
@@ -271,7 +315,8 @@ impl HidDev {
     pub fn feature(&self, id: u8, len: usize) -> Option<Vec<u8>> {
         let mut b = vec![0u8; len.max(2)];
         b[0] = id;
-        unsafe { HidD_GetFeature(self.h, b.as_mut_ptr() as *mut c_void, b.len() as u32) }.then_some(b)
+        unsafe { HidD_GetFeature(self.h, b.as_mut_ptr() as *mut c_void, b.len() as u32) }
+            .then_some(b)
     }
 }
 
@@ -357,7 +402,11 @@ pub fn parse_descriptor(d: &[u8]) -> DescCaps {
                     10 => {
                         if depth == 0 && !top_found {
                             let u = usages.first().copied().unwrap_or(0);
-                            caps.usage_page = if u > 0xffff { (u >> 16) as u16 } else { g.page as u16 };
+                            caps.usage_page = if u > 0xffff {
+                                (u >> 16) as u16
+                            } else {
+                                g.page as u16
+                            };
                             caps.usage = u as u16;
                             top_found = true;
                         }
@@ -391,7 +440,11 @@ pub fn parse_descriptor(d: &[u8]) -> DescCaps {
         i += 1 + size;
     }
     let len = |k: u8| -> u16 {
-        let m = bits.iter().filter(|((kk, _), _)| *kk == k).map(|(_, &b)| b.div_ceil(8)).max();
+        let m = bits
+            .iter()
+            .filter(|((kk, _), _)| *kk == k)
+            .map(|(_, &b)| b.div_ceil(8))
+            .max();
         m.map_or(0, |m| (m + 1).min(u16::MAX as u32) as u16)
     };
     caps.input_len = len(0);
@@ -408,9 +461,14 @@ fn wide(s: &str) -> Vec<u16> {
 /// Describes /sys/class/hidraw/<node> (the `uevent` of its HID device, its report descriptor).
 #[cfg(target_os = "linux")]
 fn describe_node(node: &str) -> Option<HidInfo> {
-    let sys = std::path::Path::new("/sys/class/hidraw").join(node).join("device");
+    let sys = std::path::Path::new("/sys/class/hidraw")
+        .join(node)
+        .join("device");
     let uevent = std::fs::read_to_string(sys.join("uevent")).ok()?;
-    let mut info = HidInfo { path: wide(&format!("/dev/{node}")), ..Default::default() };
+    let mut info = HidInfo {
+        path: wide(&format!("/dev/{node}")),
+        ..Default::default()
+    };
     let mut bus = 0u32;
     for l in uevent.lines() {
         if let Some(id) = l.strip_prefix("HID_ID=") {
@@ -448,8 +506,14 @@ fn describe_node(node: &str) -> Option<HidInfo> {
 /// Every present HID interface (the hidraw nodes), in node order.
 #[cfg(target_os = "linux")]
 pub fn enumerate() -> Vec<HidInfo> {
-    let Ok(rd) = std::fs::read_dir("/sys/class/hidraw") else { return vec![] };
-    let mut nodes: Vec<String> = rd.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).filter(|n| n.starts_with("hidraw")).collect();
+    let Ok(rd) = std::fs::read_dir("/sys/class/hidraw") else {
+        return vec![];
+    };
+    let mut nodes: Vec<String> = rd
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with("hidraw"))
+        .collect();
     nodes.sort_by_key(|n| n[6..].parse::<u32>().unwrap_or(u32::MAX));
     nodes.iter().filter_map(|n| describe_node(n)).collect()
 }
@@ -479,7 +543,12 @@ impl HidDev {
         let mut err = 0;
         let flags = libc::O_NONBLOCK | libc::O_CLOEXEC;
         // SAFETY: open(2) on a path of ours
-        let mut fd = unsafe { libc::open(path.as_ptr(), flags | if write { libc::O_RDWR } else { libc::O_RDONLY }) };
+        let mut fd = unsafe {
+            libc::open(
+                path.as_ptr(),
+                flags | if write { libc::O_RDWR } else { libc::O_RDONLY },
+            )
+        };
         if fd < 0 && write {
             err = errno();
             // SAFETY: as above
@@ -490,7 +559,13 @@ impl HidDev {
             return None;
         }
         let len = (info.input_len as usize).max(64);
-        Some(HidDev { fd, buf: vec![0; len], writable, info: info.clone(), open_error: err })
+        Some(HidDev {
+            fd,
+            buf: vec![0; len],
+            writable,
+            info: info.clone(),
+            open_error: err,
+        })
     }
 
     /// The next queued input report, without blocking.
@@ -526,7 +601,11 @@ impl HidDev {
             // SAFETY: writing our own buffer
             let n = unsafe { libc::write(self.fd, pkt.as_ptr() as *const _, pkt.len()) };
             if n >= 0 {
-                return if n as usize == pkt.len() { 0 } else { libc::EIO as u32 };
+                return if n as usize == pkt.len() {
+                    0
+                } else {
+                    libc::EIO as u32
+                };
             }
             let e = errno();
             if e != libc::EAGAIN as u32 && e != libc::EINTR as u32 {
@@ -536,7 +615,11 @@ impl HidDev {
             if left.is_zero() {
                 return libc::ETIMEDOUT as u32;
             }
-            let mut p = libc::pollfd { fd: self.fd, events: libc::POLLOUT, revents: 0 };
+            let mut p = libc::pollfd {
+                fd: self.fd,
+                events: libc::POLLOUT,
+                revents: 0,
+            };
             // SAFETY: one pollfd of ours
             unsafe { libc::poll(&mut p, 1, left.as_millis().max(1) as i32) };
         }
@@ -598,19 +681,50 @@ mod tests {
     #[test]
     fn dualsense_usb_and_bluetooth_lengths() {
         // USB: input 0x01 (63 bytes), output 0x02 (47), features 0x05 (40), 0x20 (63)
-        let usb = parse_descriptor(&gamepad(&[(IN, 1, 63), (OUT, 2, 47), (FEAT, 5, 40), (FEAT, 0x20, 63)]));
-        assert_eq!(usb, DescCaps { usage_page: 1, usage: 5, input_len: 64, output_len: 48, feature_len: 64 });
-        assert_eq!(sony::transport(sony::DS5, usb.input_len, usb.output_len), sony::USB);
+        let usb = parse_descriptor(&gamepad(&[
+            (IN, 1, 63),
+            (OUT, 2, 47),
+            (FEAT, 5, 40),
+            (FEAT, 0x20, 63),
+        ]));
+        assert_eq!(
+            usb,
+            DescCaps {
+                usage_page: 1,
+                usage: 5,
+                input_len: 64,
+                output_len: 48,
+                feature_len: 64
+            }
+        );
+        assert_eq!(
+            sony::transport(sony::DS5, usb.input_len, usb.output_len),
+            sony::USB
+        );
         // Bluetooth: input 0x01 (9) and 0x31 (77), output 0x31 (77)
-        let bt = parse_descriptor(&gamepad(&[(IN, 1, 9), (IN, 0x31, 77), (OUT, 0x31, 77), (FEAT, 5, 40)]));
+        let bt = parse_descriptor(&gamepad(&[
+            (IN, 1, 9),
+            (IN, 0x31, 77),
+            (OUT, 0x31, 77),
+            (FEAT, 5, 40),
+        ]));
         assert_eq!((bt.input_len, bt.output_len), (78, 78));
-        assert_eq!(sony::transport(sony::DS5, bt.input_len, bt.output_len), sony::BT);
+        assert_eq!(
+            sony::transport(sony::DS5, bt.input_len, bt.output_len),
+            sony::BT
+        );
     }
 
     #[test]
     fn switch_pro_lengths_and_bit_fields() {
         // input 0x21 / 0x81 and output 0x01 / 0x10 / 0x80 (63 bytes each): 64, as Windows reports them
-        let mut d = gamepad(&[(IN, 0x21, 63), (IN, 0x81, 63), (OUT, 0x01, 63), (OUT, 0x10, 63), (OUT, 0x80, 63)]);
+        let mut d = gamepad(&[
+            (IN, 0x21, 63),
+            (IN, 0x81, 63),
+            (OUT, 0x01, 63),
+            (OUT, 0x10, 63),
+            (OUT, 0x80, 63),
+        ]);
         // report 0x30 from bit fields: 10 one-bit buttons, 6 padding bits, then 61 bytes
         d.pop();
         item(&mut d, 0x84, &[0x30]);
@@ -625,7 +739,16 @@ mod tests {
         item(&mut d, 0x80, &[0x02]);
         d.push(0xC0);
         let c = parse_descriptor(&d);
-        assert_eq!(c, DescCaps { usage_page: 1, usage: 5, input_len: 64, output_len: 64, feature_len: 0 });
+        assert_eq!(
+            c,
+            DescCaps {
+                usage_page: 1,
+                usage: 5,
+                input_len: 64,
+                output_len: 64,
+                feature_len: 0
+            }
+        );
     }
 
     #[test]
@@ -642,7 +765,10 @@ mod tests {
         item(&mut d, 0x80, &[0x02]);
         d.push(0xC0);
         let c = parse_descriptor(&d);
-        assert_eq!((c.usage_page, c.usage, c.input_len, c.output_len), (1, 4, 9, 0));
+        assert_eq!(
+            (c.usage_page, c.usage, c.input_len, c.output_len),
+            (1, 4, 9, 0)
+        );
     }
 
     /// The hidraw nodes this machine has describe without error (none in a plain WSL).

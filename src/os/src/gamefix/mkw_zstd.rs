@@ -36,7 +36,11 @@ const DCTX_EXPECTED: u64 = 0x7068;
 const ADDRESS_LIMIT: u64 = 1 << 40;
 
 pub(super) fn install(page: u64) {
-    nxrt::hostfn::alias(page + HOST_MULTIFRAME, "gamefix:mkw_zstd_multiframe", host_multiframe);
+    nxrt::hostfn::alias(
+        page + HOST_MULTIFRAME,
+        "gamefix:mkw_zstd_multiframe",
+        host_multiframe,
+    );
     nxrt::hostfn::alias(page + HOST_STREAM, "gamefix:mkw_zstd_stream", host_stream);
 }
 
@@ -86,7 +90,11 @@ fn is_error(r: usize) -> bool {
 }
 
 fn error_name(r: usize) -> String {
-    unsafe { std::ffi::CStr::from_ptr(z::ZSTD_getErrorName(r)).to_string_lossy().into_owned() }
+    unsafe {
+        std::ffi::CStr::from_ptr(z::ZSTD_getErrorName(r))
+            .to_string_lossy()
+            .into_owned()
+    }
 }
 
 /// Size, both ends and a sample of the middle: what tells a new dictionary at a reused address from the old one.
@@ -109,13 +117,29 @@ fn fingerprint(p: &[u8]) -> u64 {
 
 /// The host dictionary for a guest ZSTD_DDict or raw dictionary bytes (guest == 0); null when its fields look wrong.
 fn dict_for(guest_dd: u64, content: u64, size: u64) -> *mut z::ZSTD_DDict {
-    if content == 0 || size == 0 || size > MAX_DICT || content >= ADDRESS_LIMIT || content + size > ADDRESS_LIMIT || !guest::readable(content, size) {
+    if content == 0
+        || size == 0
+        || size > MAX_DICT
+        || content >= ADDRESS_LIMIT
+        || content + size > ADDRESS_LIMIT
+        || !guest::readable(content, size)
+    {
         return core::ptr::null_mut();
     }
     let bytes = guest::bytes(content, size);
     let print = fingerprint(bytes);
-    let find = |v: &Vec<Dict>| v.iter().find(|d| d.guest == guest_dd && d.content == content && d.size == size && d.print == print).map(|d| d.dd);
-    if let Some(dd) = find(&DICTS.read().unwrap_or_else(std::sync::PoisonError::into_inner)) {
+    let find = |v: &Vec<Dict>| {
+        v.iter()
+            .find(|d| {
+                d.guest == guest_dd && d.content == content && d.size == size && d.print == print
+            })
+            .map(|d| d.dd)
+    };
+    if let Some(dd) = find(
+        &DICTS
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner),
+    ) {
         return dd as *mut z::ZSTD_DDict;
     }
     // a copy: the guest may free or reuse its buffer
@@ -123,17 +147,27 @@ fn dict_for(guest_dd: u64, content: u64, size: u64) -> *mut z::ZSTD_DDict {
     if made.is_null() {
         return made;
     }
-    let mut v = DICTS.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut v = DICTS
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(dd) = find(&v) {
         unsafe { z::ZSTD_freeDDict(made) };
         return dd as *mut z::ZSTD_DDict;
     }
     if v.len() >= NDICT {
         unsafe { z::ZSTD_freeDDict(made) };
-        crate::log!("gamefix: zstd: more than {NDICT} dictionaries: further ones decode in the guest");
+        crate::log!(
+            "gamefix: zstd: more than {NDICT} dictionaries: further ones decode in the guest"
+        );
         return core::ptr::null_mut();
     }
-    v.push(Dict { guest: guest_dd, content, size, print, dd: made as usize });
+    v.push(Dict {
+        guest: guest_dd,
+        content,
+        size,
+        print,
+        dd: made as usize,
+    });
     crate::log!(
         "gamefix: zstd: host dictionary {} for {} {:#x}: {size} bytes at {content:#x}, id {}",
         v.len() - 1,
@@ -153,7 +187,9 @@ fn ddict_of(ddict: u64) -> *mut z::ZSTD_DDict {
     if dd.is_null() {
         static LOGGED: AtomicUsize = AtomicUsize::new(0);
         if LOGGED.fetch_add(1, Ordering::Relaxed) < 4 {
-            let w: Vec<String> = (0..8).map(|i| format!("{:x}", guest::r64(ddict + 8 * i))).collect();
+            let w: Vec<String> = (0..8)
+                .map(|i| format!("{:x}", guest::r64(ddict + 8 * i)))
+                .collect();
             crate::log!("gamefix: zstd: DDict {ddict:#x} not taken: {}", w.join(" "));
         }
     }
@@ -166,8 +202,20 @@ thread_local! {
 
 /// Decodes on this thread's host context into host memory `dst` (a guest address or a host buffer). Returns libzstd's
 /// result, or None when the inputs cannot be taken.
-fn host_decode(dst: *mut u8, cap: u64, src: u64, size: u64, dict: u64, dict_size: u64, ddict: u64) -> Option<usize> {
-    if (cap != 0 && dst.is_null()) || src == 0 || src + size > ADDRESS_LIMIT || !guest::readable(src, size.max(1)) {
+fn host_decode(
+    dst: *mut u8,
+    cap: u64,
+    src: u64,
+    size: u64,
+    dict: u64,
+    dict_size: u64,
+    ddict: u64,
+) -> Option<usize> {
+    if (cap != 0 && dst.is_null())
+        || src == 0
+        || src + size > ADDRESS_LIMIT
+        || !guest::readable(src, size.max(1))
+    {
         return None;
     }
     let dd = if ddict != 0 {
@@ -199,7 +247,14 @@ fn host_decode(dst: *mut u8, cap: u64, src: u64, size: u64, dict: u64, dict_size
         if dd.is_null() {
             z::ZSTD_decompressDCtx(ctx, dst as *mut c_void, cap as usize, s, size as usize)
         } else {
-            z::ZSTD_decompress_usingDDict(ctx, dst as *mut c_void, cap as usize, s, size as usize, dd)
+            z::ZSTD_decompress_usingDDict(
+                ctx,
+                dst as *mut c_void,
+                cap as usize,
+                s,
+                size as usize,
+                dd,
+            )
         }
     })
 }
@@ -282,7 +337,10 @@ unsafe fn host_multiframe(c: *mut Cpu) {
             S.fallbacks.fetch_add(1, Ordering::Relaxed);
             static LOGGED: AtomicUsize = AtomicUsize::new(0);
             if LOGGED.fetch_add(1, Ordering::Relaxed) < 8 {
-                crate::log!("gamefix: zstd: {size} bytes at {src:#x} go to the guest decoder: {}", other.map_or("inputs not taken".into(), error_name));
+                crate::log!(
+                    "gamefix: zstd: {size} bytes at {src:#x} go to the guest decoder: {}",
+                    other.map_or("inputs not taken".into(), error_name)
+                );
             }
             run_guest(c);
         }
@@ -305,7 +363,9 @@ static SS_GUEST: AtomicU64 = AtomicU64::new(0);
 
 /// The host context of a stream; create: a new one for a new frame. Null: not a host stream.
 fn stream_ctx(obj: u64, create: bool) -> *mut z::ZSTD_DCtx {
-    let mut v = STREAMS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut v = STREAMS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if let Some(s) = v.iter().find(|s| s.obj == obj) {
         return s.d as *mut z::ZSTD_DCtx;
     }
@@ -320,7 +380,9 @@ fn stream_ctx(obj: u64, create: bool) -> *mut z::ZSTD_DCtx {
 }
 
 fn stream_drop(obj: u64) {
-    let mut v = STREAMS.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut v = STREAMS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     v.retain(|s| {
         if s.obj == obj {
             unsafe { z::ZSTD_freeDCtx(s.d as *mut z::ZSTD_DCtx) };
@@ -342,19 +404,27 @@ fn stream_block(obj: u64, d: *mut z::ZSTD_DCtx, src: *const u8, n: usize) -> Res
     let dst = guest::r64(obj + 8);
     let room = guest::r32(obj + 0x10) as i32 as i64 as usize;
     crate::mem::prepare(dst, room as u64);
-    let r = unsafe { z::ZSTD_decompressContinue(d, dst as *mut c_void, room, src as *const c_void, n) };
+    let r =
+        unsafe { z::ZSTD_decompressContinue(d, dst as *mut c_void, room, src as *const c_void, n) };
     if is_error(r) {
         static LOGGED: AtomicUsize = AtomicUsize::new(0);
         if LOGGED.fetch_add(1, Ordering::Relaxed) < 8 {
             crate::log!("gamefix: zstd stream {obj:#x}: {}", error_name(r));
         }
         // the guest: -2 when the output is too small, else -1
-        let small = unsafe { z::ZSTD_getErrorCode(r) } == z::ZSTD_ErrorCode::ZSTD_error_dstSize_tooSmall;
+        let small =
+            unsafe { z::ZSTD_getErrorCode(r) } == z::ZSTD_ErrorCode::ZSTD_error_dstSize_tooSmall;
         return Err(if small { -2 } else { -1 });
     }
     guest::w64(obj + 8, dst.wrapping_add(r as u64));
-    guest::w32(obj + 0x10, (guest::r32(obj + 0x10) as i32 - r as i32) as u32);
-    guest::w32(obj + 0x14, (guest::r32(obj + 0x14) as i32 - r as i32) as u32);
+    guest::w32(
+        obj + 0x10,
+        (guest::r32(obj + 0x10) as i32 - r as i32) as u32,
+    );
+    guest::w32(
+        obj + 0x14,
+        (guest::r32(obj + 0x14) as i32 - r as i32) as u32,
+    );
     SS_OUT.fetch_add(r as u64, Ordering::Relaxed);
     Ok(())
 }
@@ -382,12 +452,22 @@ fn stream_chunk(obj: u64, src0: u64, size0: i32, ddict: u64) -> Result<i32, ()> 
             return Err(());
         }
         let mut h: z::ZSTD_FrameHeader = unsafe { core::mem::zeroed() };
-        let r = unsafe { z::ZSTD_getFrameHeader(&mut h, src0 as *const c_void, size0.max(0) as usize) };
-        if r != 0 || h.frameType == z::ZSTD_FrameType_e::ZSTD_skippableFrame || h.frameContentSize >= (z::ZSTD_CONTENTSIZE_ERROR as i64 as u64) {
+        let r =
+            unsafe { z::ZSTD_getFrameHeader(&mut h, src0 as *const c_void, size0.max(0) as usize) };
+        if r != 0
+            || h.frameType == z::ZSTD_FrameType_e::ZSTD_skippableFrame
+            || h.frameContentSize >= (z::ZSTD_CONTENTSIZE_ERROR as i64 as u64)
+        {
             return Ok(stream_fail(obj, -1));
         }
         guest::w32(obj + 0x14, h.frameContentSize as u32);
-        let b = unsafe { if dd.is_null() { z::ZSTD_decompressBegin(d) } else { z::ZSTD_decompressBegin_usingDDict(d, dd) } };
+        let b = unsafe {
+            if dd.is_null() {
+                z::ZSTD_decompressBegin(d)
+            } else {
+                z::ZSTD_decompressBegin_usingDDict(d, dd)
+            }
+        };
         if is_error(b) {
             return Ok(stream_fail(obj, -1));
         }

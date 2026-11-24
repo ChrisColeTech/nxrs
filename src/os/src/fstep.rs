@@ -115,10 +115,26 @@ impl Fstep {
     /// game has set itself (0 = none); `slow`: the GPU (or CPU) runs below its speed for the longer hold, so a cost
     /// above k − 1 is no evidence against kmin (probes). Returns the step for the next frame; `self.k` is how long
     /// that frame stays on screen.
-    pub fn next(&mut self, shown: f64, cost: f64, kmin: u32, kmax: u32, fixed: u32, slow: bool) -> u32 {
-        let pv = if self.per_vsync > 0 { self.per_vsync as f64 } else { 1.0 };
+    pub fn next(
+        &mut self,
+        shown: f64,
+        cost: f64,
+        kmin: u32,
+        kmax: u32,
+        fixed: u32,
+        slow: bool,
+    ) -> u32 {
+        let pv = if self.per_vsync > 0 {
+            self.per_vsync as f64
+        } else {
+            1.0
+        };
         let (hold0, hold_max) = (HOLD0 * pv, HOLD_MAX * pv);
-        let smax = if self.smax > 0 && self.smax < MAX { self.smax } else { MAX };
+        let smax = if self.smax > 0 && self.smax < MAX {
+            self.smax
+        } else {
+            MAX
+        };
         let mut kmin = kmin.max(1);
         let mut kmax = kmax.min(smax);
         if kmin > smax {
@@ -202,7 +218,12 @@ impl Fstep {
             self.plate += late as i32;
             self.ptotal += 1;
             self.grace -= 1;
-            if self.grace == 0 && self.ramp && self.plate > 0 && self.ptotal + GRACE <= PROBE_MAX && self.pb <= (1.0 - RAMP) * self.pa {
+            if self.grace == 0
+                && self.ramp
+                && self.plate > 0
+                && self.ptotal + GRACE <= PROBE_MAX
+                && self.pb <= (1.0 - RAMP) * self.pa
+            {
                 // still getting cheaper: another window
                 self.grace = GRACE;
                 self.pa = 0.0;
@@ -228,13 +249,21 @@ impl Fstep {
             self.ckmin = kmin;
             self.run = 0.0;
             self.crun = 0.0;
-            self.cref = if kmin <= MAX { self.cref_at[kmin as usize] } else { 0.0 };
+            self.cref = if kmin <= MAX {
+                self.cref_at[kmin as usize]
+            } else {
+                0.0
+            };
         }
         if held <= kmin {
             self.run += shown;
             self.cn = 0;
             if !late && self.probe != 1 {
-                self.crun = if self.crun > 0.0 { self.crun + (cost - self.crun) / 32.0 } else { cost };
+                self.crun = if self.crun > 0.0 {
+                    self.crun + (cost - self.crun) / 32.0
+                } else {
+                    cost
+                };
             }
         } else {
             self.run = 0.0;
@@ -243,7 +272,11 @@ impl Fstep {
                 self.cn = 0;
             }
             if !late {
-                self.ccur = if self.cn > 0 { self.ccur + (cost - self.ccur) / 8.0 } else { cost };
+                self.ccur = if self.cn > 0 {
+                    self.ccur + (cost - self.ccur) / 8.0
+                } else {
+                    cost
+                };
                 self.cn += 1;
             }
         }
@@ -253,7 +286,9 @@ impl Fstep {
         if self.late_run >= 3 && self.k < kmax && short_of_k {
             // step up to the cost of the cheapest of the three late frames, at least one vsync
             let c3 = self.last_cost.iter().cloned().fold(f64::MAX, f64::min);
-            let want = ((c3 - 0.05).ceil().max(0.0) as u32).max(self.k + 1).min(kmax);
+            let want = ((c3 - 0.05).ceil().max(0.0) as u32)
+                .max(self.k + 1)
+                .min(kmax);
             if self.trial > 0 || self.tpend || (self.probe == 2 && self.since < hold_max) {
                 self.failed += 1;
                 self.trial = 0;
@@ -285,16 +320,28 @@ impl Fstep {
             }
         }
         // a frame also fits k − 1 while the running mean of this hold's frames on time does
-        let fitc = if self.ck == self.k && self.cn > 0 && self.ccur < cost { self.ccur } else { cost };
+        let fitc = if self.ck == self.k && self.cn > 0 && self.ccur < cost {
+            self.ccur
+        } else {
+            cost
+        };
         if !late {
-            self.fit_run = if self.k > kmin && fitc <= FIT * (self.k - 1) as f64 { self.fit_run + 1 } else { 0 };
+            self.fit_run = if self.k > kmin && fitc <= FIT * (self.k - 1) as f64 {
+                self.fit_run + 1
+            } else {
+                0
+            };
         }
         if self.fit_run >= RUN as u32 && self.since >= self.holdoff && self.trial == 0 {
             self.k -= 1;
             self.downs += 1;
             self.trial = RUN as u32;
             self.fit_run = 0;
-        } else if (slow || self.same()) && self.k > kmin && self.since >= self.holdoff && self.trial == 0 {
+        } else if (slow || self.same())
+            && self.k > kmin
+            && self.since >= self.holdoff
+            && self.trial == 0
+        {
             // probe: straight to kmin, so the clocks see the whole deadline
             self.k = kmin;
             self.downs += 1;
@@ -396,7 +443,11 @@ impl Fgpu {
             self.fail = false;
         }
         if probe == 1 && self.was != 1 {
-            self.pre_k = if self.kmin == kmin && self.k > kmin && self.k <= MAX && self.n >= GPU_N { self.k } else { 0 };
+            self.pre_k = if self.kmin == kmin && self.k > kmin && self.k <= MAX && self.n >= GPU_N {
+                self.k
+            } else {
+                0
+            };
             self.pre = self.cur.min(self.avg);
             self.post = 0.0;
             self.pn = 0;
@@ -406,7 +457,11 @@ impl Fgpu {
         }
         self.was = probe;
         if probe == 1 && k <= kmin && gpu > 0.0 && s.grace <= GRACE / 2 {
-            self.post = if self.pn > 0 { self.post + (gpu - self.post) / 4.0 } else { gpu };
+            self.post = if self.pn > 0 {
+                self.post + (gpu - self.post) / 4.0
+            } else {
+                gpu
+            };
             self.pn += 1;
         }
         self.reference = self.ref_at[kmin as usize];
@@ -416,7 +471,11 @@ impl Fgpu {
         }
         if k <= kmin {
             if probe != 1 {
-                self.reference = if self.reference > 0.0 { self.reference + (gpu - self.reference) / 32.0 } else { gpu };
+                self.reference = if self.reference > 0.0 {
+                    self.reference + (gpu - self.reference) / 32.0
+                } else {
+                    gpu
+                };
                 self.ref_at[kmin as usize] = self.reference;
             }
             self.n = 0;
@@ -429,8 +488,16 @@ impl Fgpu {
             self.n = 0;
         }
         self.n += 1;
-        self.cur = if self.n > 1 { self.cur + (gpu - self.cur) / 8.0 } else { gpu };
-        self.avg = if self.n > 1 { self.avg + (gpu - self.avg) / self.n.min(32) as f64 } else { gpu };
+        self.cur = if self.n > 1 {
+            self.cur + (gpu - self.cur) / 8.0
+        } else {
+            gpu
+        };
+        self.avg = if self.n > 1 {
+            self.avg + (gpu - self.avg) / self.n.min(32) as f64
+        } else {
+            gpu
+        };
         if self.fail && self.n >= GPU_N && k <= MAX {
             let t = self.cur.min(self.avg);
             if k == self.pre_k {
@@ -474,16 +541,26 @@ static STATE: Mutex<Option<State>> = Mutex::new(None);
 /// Boot: the state page (the stubs module's first page) and the build's facts.
 pub fn init(page: u64, data: &std::path::Path) {
     let facts = std::fs::read_to_string(data.join("frame_step.txt")).unwrap_or_default();
-    let get = |k: &str| facts.lines().find_map(|l| l.strip_prefix(k).map(|v| v.trim().to_string())).unwrap_or_default();
+    let get = |k: &str| {
+        facts
+            .lines()
+            .find_map(|l| l.strip_prefix(k).map(|v| v.trim().to_string()))
+            .unwrap_or_default()
+    };
     let smax: u32 = get("step_max ").parse().unwrap_or(0);
     let render_scale: u32 = get("render_scale ").parse().unwrap_or(0);
-    let dynres = get("capabilities ").split(',').any(|c| c == "DYNAMIC_RESOLUTION");
+    let dynres = get("capabilities ")
+        .split(',')
+        .any(|c| c == "DYNAMIC_RESOLUTION");
     let target = crate::fpslock::target();
     let hold = crate::options::game_flag("fps_hold", true);
     if !hold {
         crate::log!("frame step: frames are not held longer than the target's vsyncs (game profile fps_hold)");
     }
-    let fs = Fstep { smax, ..Default::default() };
+    let fs = Fstep {
+        smax,
+        ..Default::default()
+    };
     crate::log!(
         "frame step: state page {page:#x}, target {target} fps (0 = off: the game's own timing), largest step {}, render scale {render_scale}{}",
         if smax > 0 && smax < MAX { smax } else { MAX },
@@ -529,10 +606,14 @@ pub fn kmax_of(kmin: u32, hold: bool) -> u32 {
 }
 
 fn put32(a: u64, v: u32) {
-    unsafe { (*(a as *const std::sync::atomic::AtomicU32)).store(v, std::sync::atomic::Ordering::Release) }
+    unsafe {
+        (*(a as *const std::sync::atomic::AtomicU32)).store(v, std::sync::atomic::Ordering::Release)
+    }
 }
 fn get32(a: u64) -> u32 {
-    unsafe { (*(a as *const std::sync::atomic::AtomicU32)).load(std::sync::atomic::Ordering::Acquire) }
+    unsafe {
+        (*(a as *const std::sync::atomic::AtomicU32)).load(std::sync::atomic::Ordering::Acquire)
+    }
 }
 
 /// The present tick: the frame's time and cost, the controller, the state page for the game's next frame.
@@ -547,14 +628,29 @@ pub fn present() {
     }
     let (start, wait) = nxgfx::nvn::window::frame_start_take();
     let gpu_ns = nxgfx::vk::perf::frame_gpu_take();
-    let now = if start > 0 { start } else { nxgfx::nvn::device::now_ns() };
+    let now = if start > 0 {
+        start
+    } else {
+        nxgfx::nvn::device::now_ns()
+    };
     const V: f64 = 1e9 / 60.0;
-    let shown = if st.prev > 0 && now > st.prev { (now - st.prev) as f64 / V } else { 0.0 };
+    let shown = if st.prev > 0 && now > st.prev {
+        (now - st.prev) as f64 / V
+    } else {
+        0.0
+    };
     let first = st.prev == 0;
     st.prev = now;
     let gpu = gpu_ns as f64 / V;
     let cost = (shown - wait as f64 / V).max(gpu);
-    put32(st.page, if target > 0 { (target as f32).to_bits() } else { 0 });
+    put32(
+        st.page,
+        if target > 0 {
+            (target as f32).to_bits()
+        } else {
+            0
+        },
+    );
     put32(st.page + 0x10, st.render_scale);
     put32(st.page + 0x40, st.dynres as u32);
     if target == 0 {
@@ -567,7 +663,11 @@ pub fn present() {
     let fixed = get32(st.page + 0x24);
     let k0 = st.fs.k;
     let slow = !first && st.gpu.slowed(gpu, &st.fs, kmin);
-    let step = if first { st.fs.next(0.0, 0.0, kmin, kmax, fixed, false) } else { st.fs.next(shown, cost, kmin, kmax, fixed, slow) };
+    let step = if first {
+        st.fs.next(0.0, 0.0, kmin, kmax, fixed, false)
+    } else {
+        st.fs.next(shown, cost, kmin, kmax, fixed, slow)
+    };
     put32(st.page + 0x20, step);
     st.held[st.fs.k.min(MAX) as usize] += 1;
     if fixed > 0 {
@@ -576,15 +676,26 @@ pub fn present() {
     if fixed != st.fixed_was && st.nlog < 40 {
         st.nlog += 1;
         if fixed > 0 {
-            crate::log!("frame step: the game fixes its own step at {fixed} vsyncs at present {}", st.presents);
+            crate::log!(
+                "frame step: the game fixes its own step at {fixed} vsyncs at present {}",
+                st.presents
+            );
         } else {
-            crate::log!("frame step: the game hands the step back to the host at present {}", st.presents);
+            crate::log!(
+                "frame step: the game hands the step back to the host at present {}",
+                st.presents
+            );
         }
     }
     st.fixed_was = fixed;
     if k0 > 0 && st.fs.k != k0 && st.nlog < 40 {
         st.nlog += 1;
-        crate::log!("frame step: hold {k0} -> {} vsyncs at present {} (cost {cost:.2}, GPU {gpu:.2}{})", st.fs.k, st.presents, if slow { ", GPU slowed: probe" } else { "" });
+        crate::log!(
+            "frame step: hold {k0} -> {} vsyncs at present {} (cost {cost:.2}, GPU {gpu:.2}{})",
+            st.fs.k,
+            st.presents,
+            if slow { ", GPU slowed: probe" } else { "" }
+        );
     }
     if st.presents % 1800 == 0 {
         // game time against real time (1.000 = normal speed)
@@ -619,7 +730,11 @@ pub fn present() {
 fn apply_hold(st: &mut State, want: u32) {
     if want != st.applied_k {
         st.applied_k = want;
-        nxgfx::nvn::window::set_profile_interval(if want > 0 { want as i32 } else { crate::profile::get().present_interval });
+        nxgfx::nvn::window::set_profile_interval(if want > 0 {
+            want as i32
+        } else {
+            crate::profile::get().present_interval
+        });
         crate::log!("frame step: frames held {want} vsync(s)");
     }
 }
@@ -664,16 +779,25 @@ mod tests {
     fn steady_60_and_steady_22_ms() {
         let mut m = Sim::default();
         m.run(600, 0.5, 1, 3, 0);
-        assert!(m.s.k == 1 && m.s.ups == 0 && m.s.paid == 0 && m.game == m.real, "steady 60: hold 1, step 1, game time = real time");
+        assert!(
+            m.s.k == 1 && m.s.ups == 0 && m.s.paid == 0 && m.game == m.real,
+            "steady 60: hold 1, step 1, game time = real time"
+        );
         let mut m = Sim::default();
         m.run(120, 0.5, 1, 3, 0);
         m.run(600, 1.32, 1, 3, 0);
-        assert!(m.s.k == 2 && m.s.ups == 1 && m.s.downs == 0, "22 ms frames: 30 fps, no flapping");
+        assert!(
+            m.s.k == 2 && m.s.ups == 1 && m.s.downs == 0,
+            "22 ms frames: 30 fps, no flapping"
+        );
         assert!(m.balanced() && m.s.debt < 1.0);
         let mut m = Sim::default();
         m.run(120, 0.5, 1, 3, 0);
         m.run(300, 1.12, 1, 3, 0);
-        assert!(m.s.k == 2 && m.s.ups == 1, "18.7 ms frames (53 fps): 30 fps");
+        assert!(
+            m.s.k == 2 && m.s.ups == 1,
+            "18.7 ms frames (53 fps): 30 fps"
+        );
     }
 
     /// Mario Kart World on an M4 Max (nxnative issue #1823): near-misses and lone stalls keep hold 1.
@@ -684,20 +808,39 @@ mod tests {
         for i in 0..3000 {
             m.run(1, if i % 20 < 3 { 1.25 } else { 0.9 }, 1, 3, 0);
         }
-        assert!(m.s.k == 1 && m.s.ups == 0 && m.s.late >= 400, "3 of every 20 frames late by 4 ms: hold 1");
+        assert!(
+            m.s.k == 1 && m.s.ups == 0 && m.s.late >= 400,
+            "3 of every 20 frames late by 4 ms: hold 1"
+        );
         assert!(m.balanced() && m.s.paid > 0);
         let mut h = Sim::default();
         h.run(120, 0.5, 1, 3, 0);
         h.run(600, 0.9, 1, 3, 0);
         h.run(3, 1.6, 1, 3, 0);
         h.run(60, 0.9, 1, 3, 0);
-        assert!(h.s.k == 1 && h.s.ups == 0, "a hitch of three 27 ms frames among frames on time: hold 1");
-        let stalls = [(1913, 67.7), (10267, 57.7), (10286, 43.1), (10454, 54.9), (11396, 65.4)];
-        let mut s = Fstep { smax: 2, ..Default::default() };
+        assert!(
+            h.s.k == 1 && h.s.ups == 0,
+            "a hitch of three 27 ms frames among frames on time: hold 1"
+        );
+        let stalls = [
+            (1913, 67.7),
+            (10267, 57.7),
+            (10286, 43.1),
+            (10454, 54.9),
+            (11396, 65.4),
+        ];
+        let mut s = Fstep {
+            smax: 2,
+            ..Default::default()
+        };
         let (mut next, mut at2, mut real, mut game) = (1u32, 0, 0.0, 0.0);
         for p in 0..12000 {
             let k = if s.k > 0 { s.k } else { 1 };
-            let mut shown = if k == 1 && (5..8).contains(&(p % 20)) { 1.3 } else { k as f64 };
+            let mut shown = if k == 1 && (5..8).contains(&(p % 20)) {
+                1.3
+            } else {
+                k as f64
+            };
             for &(at, ms) in &stalls {
                 if p == at {
                     shown = ms / (1000.0 / 60.0);
@@ -708,7 +851,11 @@ mod tests {
             next = s.next(shown, 0.45, 1, 3, 0, false);
             at2 += (s.k > 1) as u32;
         }
-        assert!(s.ups == 0 && at2 == 0, "lone stalls of 43-68 ms among near-misses: hold 1 (ups {}, {at2} frames at hold 2)", s.ups);
+        assert!(
+            s.ups == 0 && at2 == 0,
+            "lone stalls of 43-68 ms among near-misses: hold 1 (ups {}, {at2} frames at hold 2)",
+            s.ups
+        );
         let d = real - game - s.debt;
         assert!(d > -1.01 && d < 1.01);
     }
@@ -720,18 +867,39 @@ mod tests {
         m.run(11, 1.3, 1, 3, 0);
         assert_eq!(m.s.k, 1, "eleven late frames are not yet short of hold 1");
         m.run(1, 3.0, 1, 3, 0);
-        assert!(m.s.k == 2 && m.s.ups == 1, "a 3-vsync frame then: hold 2, not 3");
-        let mut m = Sim { s: Fstep { smax: 2, ..Default::default() }, ..Default::default() };
+        assert!(
+            m.s.k == 2 && m.s.ups == 1,
+            "a 3-vsync frame then: hold 2, not 3"
+        );
+        let mut m = Sim {
+            s: Fstep {
+                smax: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         m.run(120, 0.5, 1, 3, 0);
         let mut over = 0;
         for i in 0..600 {
             m.run(1, if i < 300 { 2.6 } else { 1.3 }, 1, 3, 0);
             over += (m.next > 2) as u32;
         }
-        assert!(m.s.k == 2 && over == 0, "step cap 2 (MKW): hold 2 at most, steps at most 2");
-        let mut f = Sim { s: Fstep { smax: 2, ..Default::default() }, ..Default::default() };
+        assert!(
+            m.s.k == 2 && over == 0,
+            "step cap 2 (MKW): hold 2 at most, steps at most 2"
+        );
+        let mut f = Sim {
+            s: Fstep {
+                smax: 2,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         f.run(10, 0.5, 1, 3, 3);
-        assert!(f.s.k == 2 && f.next == 2, "a step the game fixes at 3 is held at the cap");
+        assert!(
+            f.s.k == 2 && f.next == 2,
+            "a step the game fixes at 3 is held at the cap"
+        );
     }
 
     #[test]
@@ -741,7 +909,10 @@ mod tests {
         m.real += 6.0;
         m.game += m.next as f64;
         m.next = m.s.next(6.0, 6.0, 1, 3, 0, false);
-        assert!(m.next == 2 && m.s.k == 1, "100 ms hitch: one vsync paid back, hold stays 1");
+        assert!(
+            m.next == 2 && m.s.k == 1,
+            "100 ms hitch: one vsync paid back, hold stays 1"
+        );
         let mut two = 0;
         for _ in 0..20 {
             let st = m.next;
@@ -755,7 +926,10 @@ mod tests {
         m.game += m.next as f64;
         m.next = m.s.next(30.0, 30.0, 1, 3, 0, false);
         m.run(60, 0.5, 1, 3, 0);
-        assert!(m.s.dropped == 14.0 && m.s.paid == 15 && m.real - m.game == 14.0 && m.s.k == 1, "0.5 s stall: 15 paid back, 14 dropped");
+        assert!(
+            m.s.dropped == 14.0 && m.s.paid == 15 && m.real - m.game == 14.0 && m.s.k == 1,
+            "0.5 s stall: 15 paid back, 14 dropped"
+        );
     }
 
     #[test]
@@ -767,9 +941,15 @@ mod tests {
         m.run(29, 0.6, 1, 3, 0);
         assert_eq!(m.s.k, 2, "29 frames that fit 1 are not enough");
         m.run(1, 0.6, 1, 3, 0);
-        assert!(m.s.k == 1 && m.s.trial == RUN as u32, "the 30th starts a trial");
+        assert!(
+            m.s.k == 1 && m.s.trial == RUN as u32,
+            "the 30th starts a trial"
+        );
         m.run(RUN + 10, 0.6, 1, 3, 0);
-        assert!(m.s.k == 1 && m.s.trial == 0 && m.s.holdoff == HOLD0 && m.s.failed == 0, "the trial holds");
+        assert!(
+            m.s.k == 1 && m.s.trial == 0 && m.s.holdoff == HOLD0 && m.s.failed == 0,
+            "the trial holds"
+        );
         let mut m = Sim::default();
         m.run(60, 0.5, 1, 3, 0);
         m.run(30, 1.5, 1, 3, 0);
@@ -787,14 +967,26 @@ mod tests {
                 last = m.real;
             }
         }
-        assert!(gaps.len() == 4 && gaps[0] >= 60.0 && gaps[1] >= 120.0 && gaps[2] >= 240.0 && gaps[3] >= 480.0 && gaps[3] < 560.0 && m.s.failed >= 3, "{gaps:?}");
+        assert!(
+            gaps.len() == 4
+                && gaps[0] >= 60.0
+                && gaps[1] >= 120.0
+                && gaps[2] >= 240.0
+                && gaps[3] >= 480.0
+                && gaps[3] < 560.0
+                && m.s.failed >= 3,
+            "{gaps:?}"
+        );
     }
 
     #[test]
     fn caps_fixed_steps_and_fps_hold() {
         let mut m = Sim::default();
         m.run(300, 0.5, 2, 2, 0);
-        assert!(m.s.k == 2 && m.next == 2 && m.game == m.real, "30 fps cap: hold 2, step 2");
+        assert!(
+            m.s.k == 2 && m.next == 2 && m.game == m.real,
+            "30 fps cap: hold 2, step 2"
+        );
         m.real += 6.0;
         m.game += m.next as f64;
         m.next = m.s.next(6.0, 6.0, 2, 2, 0, false);
@@ -804,19 +996,40 @@ mod tests {
             m.run(1, 0.5, 2, 2, 0);
             three += (st == 3) as u32;
         }
-        assert!(three == 4 && m.s.k == 2 && m.game == m.real, "a hitch at the 30 cap is paid back with steps of 3");
+        assert!(
+            three == 4 && m.s.k == 2 && m.game == m.real,
+            "a hitch at the 30 cap is paid back with steps of 3"
+        );
         let mut m = Sim::default();
         m.run(60, 0.5, 1, 3, 0);
         m.run(120, 0.5, 1, 3, 2);
-        assert!(m.s.k == 2 && m.next == 2 && m.s.debt == 0.0, "the game fixes its step at 2");
+        assert!(
+            m.s.k == 2 && m.next == 2 && m.s.debt == 0.0,
+            "the game fixes its step at 2"
+        );
         m.run(2, 0.5, 1, 3, 0);
-        assert!(m.s.k == 1 && m.next == 1 && m.s.late == 0, "the override ends: hold 1, step 1");
+        assert!(
+            m.s.k == 1 && m.next == 1 && m.s.late == 0,
+            "the override ends: hold 1, step 1"
+        );
         // fps_hold off: the longest hold is the target's; late frames are still paid back in the step
         let mut m = Sim::default();
         m.run(60, 0.5, 1, kmax_of(1, false), 0);
         m.run(300, 1.9, 1, kmax_of(1, false), 0);
-        assert!(m.s.k == 1 && m.s.paid > 0, "fps_hold off: hold 1 whatever the frames take");
-        assert_eq!((kmax_of(1, true), kmax_of(2, true), kmin_of(30), kmin_of(60), kmin_of(0)), (3, 2, 2, 1, 1));
+        assert!(
+            m.s.k == 1 && m.s.paid > 0,
+            "fps_hold off: hold 1 whatever the frames take"
+        );
+        assert_eq!(
+            (
+                kmax_of(1, true),
+                kmax_of(2, true),
+                kmin_of(30),
+                kmin_of(60),
+                kmin_of(0)
+            ),
+            (3, 2, 2, 1, 1)
+        );
     }
 
     /// The GPU clock follows the hold (Breath of the Wild on an iPhone; a desktop GPU's boost clock does the same):
@@ -843,7 +1056,13 @@ mod tests {
             m.slow = g.slowed(w, &m.s, 1);
             m.run(1, w, 1, 3, 0);
         }
-        assert!(stepped && m.s.k == 1 && m.s.probes == 1 && m.s.failed == 0, "k {} probes {} failed {}", m.s.k, m.s.probes, m.s.failed);
+        assert!(
+            stepped && m.s.k == 1 && m.s.probes == 1 && m.s.failed == 0,
+            "k {} probes {} failed {}",
+            m.s.k,
+            m.s.probes,
+            m.s.failed
+        );
         assert!(m.balanced() && m.s.dropped == 0.0);
         let (mut m, mut g) = (Sim::default(), Fgpu::default());
         for i in 0..2000 {
@@ -851,7 +1070,10 @@ mod tests {
             m.slow = g.slowed(w, &m.s, 1);
             m.run(1, w, 1, 3, 0);
         }
-        assert!(m.s.k == 2 && m.s.probes == 0, "heavier scene, GPU 0.86 -> 1.12 at hold 2: not slowed");
+        assert!(
+            m.s.k == 2 && m.s.probes == 0,
+            "heavier scene, GPU 0.86 -> 1.12 at hold 2: not slowed"
+        );
         // a slowed report while hold 1 does not fit: the first probe lasts its grace + 3 late frames
         let mut m = Sim::default();
         m.run(60, 0.5, 1, 3, 0);

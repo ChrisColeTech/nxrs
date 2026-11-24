@@ -65,13 +65,23 @@ struct G {
 fn g() -> &'static G {
     static S: OnceLock<G> = OnceLock::new();
     S.get_or_init(|| {
-        let need = |n: &str| crate::hle::sym(n).unwrap_or_else(|| nxrt::rt::fatal(&format!("movie: the SDK has no {n}")));
-        let either = |a: &str, b: &str| crate::hle::sym(a).or_else(|| crate::hle::sym(b)).unwrap_or_else(|| nxrt::rt::fatal(&format!("movie: the SDK has no {a}")));
+        let need = |n: &str| {
+            crate::hle::sym(n)
+                .unwrap_or_else(|| nxrt::rt::fatal(&format!("movie: the SDK has no {n}")))
+        };
+        let either = |a: &str, b: &str| {
+            crate::hle::sym(a)
+                .or_else(|| crate::hle::sym(b))
+                .unwrap_or_else(|| nxrt::rt::fatal(&format!("movie: the SDK has no {a}")))
+        };
         G {
             set_data: need("_ZN5movie6Buffer18SetDataAndCapacityEPvm"),
             set_range: need("_ZN5movie6Buffer8SetRangeEii"),
             data: either("_ZNK5movie6Buffer4DataEv", "_ZN5movie6Buffer4DataEv"),
-            cap: either("_ZNK5movie6Buffer8CapacityEv", "_ZN5movie6Buffer8CapacityEv"),
+            cap: either(
+                "_ZNK5movie6Buffer8CapacityEv",
+                "_ZN5movie6Buffer8CapacityEv",
+            ),
             size: either("_ZNK5movie6Buffer4SizeEv", "_ZN5movie6Buffer4SizeEv"),
             set_i32: need("_ZN5movie9MediaData8SetInt32EPKci"),
             set_rect: need("_ZN5movie9MediaData7SetRectEPKciiii"),
@@ -276,7 +286,11 @@ unsafe fn md_event(c: *mut Cpu, d: &Dec, i: usize) {
         let st = d.st.lock().unwrap();
         (st.evc, st.ev[i])
     };
-    let live = if evc != 0 && crate::guest::readable(evc + 8 * i as u64, 8) { r64(evc + 8 * i as u64) } else { 0 };
+    let live = if evc != 0 && crate::guest::readable(evc + 8 * i as u64, 8) {
+        r64(evc + 8 * i as u64)
+    } else {
+        0
+    };
     let p = if live != 0 && ev_ok(live) { live } else { reg };
     if p != 0 {
         let _ = crate::guest::call(c, g().signal, &[p]);
@@ -287,7 +301,9 @@ unsafe fn md_event(c: *mut Cpu, d: &Dec, i: usize) {
 
 fn defer(d: &Dec, ev: usize, due: Instant) {
     let mut q = SIGQ.lock().unwrap();
-    if q.iter().any(|s| s.dec == d.id && s.ev == ev && s.due <= due) {
+    if q.iter()
+        .any(|s| s.dec == d.id && s.ev == ev && s.due <= due)
+    {
         return;
     }
     q.push(Signal { dec: d.id, ev, due });
@@ -306,11 +322,22 @@ unsafe fn signaller(c: *mut Cpu) {
                 if let Some(k) = q.iter().position(|s| s.due <= now) {
                     return q.remove(k);
                 }
-                let wait = q.iter().map(|s| s.due - now).min().unwrap_or(Duration::from_millis(100));
+                let wait = q
+                    .iter()
+                    .map(|s| s.due - now)
+                    .min()
+                    .unwrap_or(Duration::from_millis(100));
                 q = SIGCV.wait_timeout(q, wait).unwrap().0;
             }
         });
-        let Some(d) = DECS.lock().unwrap().as_ref().and_then(|m| m.get(&next.dec).cloned()) else { continue };
+        let Some(d) = DECS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|m| m.get(&next.dec).cloned())
+        else {
+            continue;
+        };
         let _g = without_core(|| SIG_MU.lock().unwrap());
         if d.st.lock().unwrap().started {
             md_event(c, &d, next.ev);
@@ -319,7 +346,9 @@ unsafe fn signaller(c: *mut Cpu) {
 }
 
 unsafe fn ensure_signaller(c: *mut Cpu) {
-    if !SIG_THREAD.swap(true, Ordering::SeqCst) && crate::guest::spawn(c, "movie signaller", signaller, 0, 16, 0x10000).is_none() {
+    if !SIG_THREAD.swap(true, Ordering::SeqCst)
+        && crate::guest::spawn(c, "movie signaller", signaller, 0, 16, 0x10000).is_none()
+    {
         SIG_THREAD.store(false, Ordering::SeqCst);
     }
 }
@@ -355,14 +384,31 @@ fn open_codec(d: &Dec, st: &St) -> Result<Codec, String> {
             Ok(Codec::Avc(Box::new(a)))
         }
         T_VORBIS => {
-            let ident = lewton::header::read_header_ident(&st.csd[0]).map_err(|e| format!("Vorbis identification header: {e:?}"))?;
-            let setup = lewton::header::read_header_setup(&st.csd[1], ident.audio_channels, (ident.blocksize_0, ident.blocksize_1))
-                .map_err(|e| format!("Vorbis setup header: {e:?}"))?;
-            crate::log!("[movie] Vorbis: {} channels {} Hz (lewton)", ident.audio_channels, ident.audio_sample_rate);
-            Ok(Codec::Vorbis(Box::new(VorbisDec { ident, setup, pwr: lewton::audio::PreviousWindowRight::new() })))
+            let ident = lewton::header::read_header_ident(&st.csd[0])
+                .map_err(|e| format!("Vorbis identification header: {e:?}"))?;
+            let setup = lewton::header::read_header_setup(
+                &st.csd[1],
+                ident.audio_channels,
+                (ident.blocksize_0, ident.blocksize_1),
+            )
+            .map_err(|e| format!("Vorbis setup header: {e:?}"))?;
+            crate::log!(
+                "[movie] Vorbis: {} channels {} Hz (lewton)",
+                ident.audio_channels,
+                ident.audio_sample_rate
+            );
+            Ok(Codec::Vorbis(Box::new(VorbisDec {
+                ident,
+                setup,
+                pwr: lewton::audio::PreviousWindowRight::new(),
+            })))
         }
         T_AAC => {
-            let asc = if st.csd[0].len() >= 2 { st.csd[0].clone() } else { mf::aac_lc_config(st.rate.max(8000) as u32, st.ch.max(1) as u32).to_vec() };
+            let asc = if st.csd[0].len() >= 2 {
+                st.csd[0].clone()
+            } else {
+                mf::aac_lc_config(st.rate.max(8000) as u32, st.ch.max(1) as u32).to_vec()
+            };
             let (rate, ch) = aac_shape(&asc, st.rate, st.ch);
             crate::log!("[movie] AAC: {ch} channels {rate} Hz, AudioSpecificConfig {} bytes (object type {})", asc.len(), asc[0] >> 3);
             mf::Aac::new(rate as u32, ch as u32, &asc).map(Codec::Aac)
@@ -373,7 +419,9 @@ fn open_codec(d: &Dec, st: &St) -> Result<Codec, String> {
 
 /// The rate and channels an AudioSpecificConfig names (what Configure did not).
 fn aac_shape(asc: &[u8], rate: i32, ch: i32) -> (i32, i32) {
-    const RATES: [i32; 13] = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+    const RATES: [i32; 13] = [
+        96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+    ];
     let (mut r, mut c) = (rate, ch);
     if asc.len() >= 2 {
         let fi = (((asc[0] & 7) << 1) | (asc[1] >> 7)) as usize;
@@ -439,7 +487,17 @@ fn put_picture(d: &Dec, st: &mut St, slot: usize, p: &Picture) {
 
 /// Decodes one packet (or, with `take_only`, takes the next queued H.264 picture) into `slot`; true when the
 /// slot got output. `pts_out` is the picture's own time (H.264 reorders).
-fn decode_one(d: &Dec, codec: &mut Codec, st: &mut St, data: &[u8], pts: i64, slot: usize, flush: bool, take_only: bool, pts_out: &mut i64) -> bool {
+fn decode_one(
+    d: &Dec,
+    codec: &mut Codec,
+    st: &mut St,
+    data: &[u8],
+    pts: i64,
+    slot: usize,
+    flush: bool,
+    take_only: bool,
+    pts_out: &mut i64,
+) -> bool {
     match codec {
         Codec::None => false,
         Codec::Vpx(v) => match v.decode(data, pts) {
@@ -465,7 +523,10 @@ fn decode_one(d: &Dec, codec: &mut Codec, st: &mut St, data: &[u8], pts: i64, sl
                 if let Err(e) = a.decode(data, pts) {
                     st.red_dec += 1;
                     if st.red_dec == 1 {
-                        crate::log!("[RED] movie: H.264 decode error ({} bytes): {e}", data.len());
+                        crate::log!(
+                            "[RED] movie: H.264 decode error ({} bytes): {e}",
+                            data.len()
+                        );
                     }
                 }
             }
@@ -487,14 +548,19 @@ fn decode_one(d: &Dec, codec: &mut Codec, st: &mut St, data: &[u8], pts: i64, sl
         }
         Codec::Vorbis(v) => {
             let prev_n = st.hold.len();
-            match lewton::audio::read_audio_packet_generic::<lewton::samples::InterleavedSamples<i16>>(&v.ident, &v.setup, data, &mut v.pwr) {
+            match lewton::audio::read_audio_packet_generic::<lewton::samples::InterleavedSamples<i16>>(
+                &v.ident, &v.setup, data, &mut v.pwr,
+            ) {
                 Ok(s) => {
                     st.hold.extend_from_slice(&s.samples);
                 }
                 Err(e) => {
                     st.red_dec += 1;
                     if st.red_dec == 1 {
-                        crate::log!("[RED] movie: Vorbis packet of {} bytes does not decode ({e:?})", data.len());
+                        crate::log!(
+                            "[RED] movie: Vorbis packet of {} bytes does not decode ({e:?})",
+                            data.len()
+                        );
                     }
                 }
             }
@@ -658,7 +724,9 @@ fn worker(d: Arc<Dec>) {
                     crate::log!(
                         "[movie] decoder {:#x}: {} with {}",
                         d.obj,
-                        ["?", "H.264", "VP8", "VP9", "AAC", "Vorbis"].get(d.ty as usize).unwrap_or(&"?"),
+                        ["?", "H.264", "VP8", "VP9", "AAC", "Vorbis"]
+                            .get(d.ty as usize)
+                            .unwrap_or(&"?"),
                         match d.ty {
                             T_VP9 | T_VP8 => format!("libvpx {}", vpx::version()),
                             T_AVC | T_AAC => "Media Foundation".into(),
@@ -743,13 +811,25 @@ fn reset(d: &Dec, close: bool) {
 
 const VT: &str = "_ZTVN5movie7DecoderE";
 
-unsafe fn construct(c: *mut Cpu, self_: u64, ty: i32, fmt: i32, mode: i32, prio: i32, out_align: i32) {
-    let vt = crate::hle::sym(VT).unwrap_or_else(|| nxrt::rt::fatal("movie: the SDK has no movie::Decoder vtable")) + 0x10;
+unsafe fn construct(
+    c: *mut Cpu,
+    self_: u64,
+    ty: i32,
+    fmt: i32,
+    mode: i32,
+    prio: i32,
+    out_align: i32,
+) {
+    let vt = crate::hle::sym(VT)
+        .unwrap_or_else(|| nxrt::rt::fatal("movie: the SDK has no movie::Decoder vtable"))
+        + 0x10;
     let _ = g();
     w64(self_, vt);
     w64(self_ + 8, 0);
     let audio = (ty == T_VORBIS || ty == T_AAC) && fmt == FMT_PCM16;
-    if !audio && (!(1..=3).contains(&ty) || (fmt != FMT_NV12 && !(fmt == FMT_ABGR && mode == MODE_TEX))) {
+    if !audio
+        && (!(1..=3).contains(&ty) || (fmt != FMT_NV12 && !(fmt == FMT_ABGR && mode == MODE_TEX)))
+    {
         crate::log!("[RED] movie: decoder type {ty} output {fmt} mode {mode} is not one the host decodes: every call fails");
         return;
     }
@@ -761,7 +841,13 @@ unsafe fn construct(c: *mut Cpu, self_: u64, ty: i32, fmt: i32, mode: i32, prio:
 fn make(self_: u64, ty: i32, fmt: i32, mode: i32, prio: i32, out_align: i32) -> Arc<Dec> {
     let audio = (ty == T_VORBIS || ty == T_AAC) && fmt == FMT_PCM16;
     let id = NEXT.fetch_add(1, Ordering::Relaxed);
-    let nout = if !audio { NOUT_VIDEO } else if ty == T_AAC { NOUT_AAC } else { NOUT };
+    let nout = if !audio {
+        NOUT_VIDEO
+    } else if ty == T_AAC {
+        NOUT_AAC
+    } else {
+        NOUT
+    };
     let d = Arc::new(Dec {
         id,
         obj: self_,
@@ -771,15 +857,28 @@ fn make(self_: u64, ty: i32, fmt: i32, mode: i32, prio: i32, out_align: i32) -> 
         nout,
         out_align,
         audio,
-        inbuf: (0..NIN).map(|_| vec![0u8; INCAP].into_boxed_slice()).collect(),
-        st: Mutex::new(St { infree: (0..NIN).collect(), out: vec![Slot::default(); NOUT], ..Default::default() }),
+        inbuf: (0..NIN)
+            .map(|_| vec![0u8; INCAP].into_boxed_slice())
+            .collect(),
+        st: Mutex::new(St {
+            infree: (0..NIN).collect(),
+            out: vec![Slot::default(); NOUT],
+            ..Default::default()
+        }),
         cv: Condvar::new(),
         calls: Default::default(),
     });
-    DECS.lock().unwrap().get_or_insert_with(HashMap::new).insert(id, d.clone());
+    DECS.lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(id, d.clone());
     w64(self_ + 8, id);
     let dw = d.clone();
-    std::thread::Builder::new().name("nxos movie decoder".into()).stack_size(4 << 20).spawn(move || worker(dw)).expect("movie decoder thread");
+    std::thread::Builder::new()
+        .name("nxos movie decoder".into())
+        .stack_size(4 << 20)
+        .spawn(move || worker(dw))
+        .expect("movie decoder thread");
     crate::log!("[movie] decoder {self_:#x}: type {ty} output {fmt} mode {mode} priority {prio}");
     d
 }
@@ -796,7 +895,21 @@ unsafe fn ctor4(c: *mut Cpu) {
 unsafe fn ctor3(c: *mut Cpu) {
     let a = Args(&mut *c);
     let f = a.i(2);
-    construct(c, a.x(0), a.i(1), if f == 3 { FMT_NV12 } else if f == 2 { FMT_ABGR } else { f }, 1, 0, 0x20);
+    construct(
+        c,
+        a.x(0),
+        a.i(1),
+        if f == 3 {
+            FMT_NV12
+        } else if f == 2 {
+            FMT_ABGR
+        } else {
+            f
+        },
+        1,
+        0,
+        0x20,
+    );
 }
 
 fn free(self_: u64) {
@@ -830,7 +943,9 @@ unsafe fn dtor0(c: *mut Cpu) {
         Some(del) => {
             let _ = crate::guest::call(c, del, &[s]);
         }
-        None => crate::log!("[RED] movie: no operator delete in the game; the decoder object is not freed"),
+        None => crate::log!(
+            "[RED] movie: no operator delete in the game; the decoder object is not freed"
+        ),
     }
 }
 
@@ -861,8 +976,16 @@ mfn!(configure, |c, a, d| {
                 }
             }
         }
-        let ch = if md != 0 { md_i32(c, md, "channel-count").unwrap_or(0) } else { 0 };
-        let rate = if md != 0 { md_i32(c, md, "sample-rate").unwrap_or(0) } else { 0 };
+        let ch = if md != 0 {
+            md_i32(c, md, "channel-count").unwrap_or(0)
+        } else {
+            0
+        };
+        let rate = if md != 0 {
+            md_i32(c, md, "sample-rate").unwrap_or(0)
+        } else {
+            0
+        };
         let mut st = d.st.lock().unwrap();
         for (k, cs) in csd.into_iter().enumerate() {
             if !cs.is_empty() {
@@ -877,7 +1000,12 @@ mfn!(configure, |c, a, d| {
         }
         let (n0, n1) = (st.csd[0].len(), st.csd[1].len());
         drop(st);
-        d.trace(0, || format!("Configure ({}): {ch} channels {rate} Hz, headers {n0} + {n1} bytes", if d.ty == T_AAC { "AAC" } else { "Vorbis" }));
+        d.trace(0, || {
+            format!(
+                "Configure ({}): {ch} channels {rate} Hz, headers {n0} + {n1} bytes",
+                if d.ty == T_AAC { "AAC" } else { "Vorbis" }
+            )
+        });
         return 0;
     }
     if d.ty == T_AVC && md != 0 {
@@ -895,7 +1023,14 @@ mfn!(configure, |c, a, d| {
             st.avcc = b;
         }
     }
-    let (w, h) = if md != 0 { (md_i32(c, md, "width").unwrap_or(0), md_i32(c, md, "height").unwrap_or(0)) } else { (0, 0) };
+    let (w, h) = if md != 0 {
+        (
+            md_i32(c, md, "width").unwrap_or(0),
+            md_i32(c, md, "height").unwrap_or(0),
+        )
+    } else {
+        (0, 0)
+    };
     let mut st = d.st.lock().unwrap();
     if w > 0 && h > 0 && !st.fmt_sent {
         st.w = w;
@@ -916,7 +1051,12 @@ mfn!(register_events, |c, a, d| {
     st.evc = ev;
     let evs = st.ev;
     drop(st);
-    d.trace(1, || format!("RegisterClientEvents {:#x} {:#x} {:#x} {:#x}", evs[0], evs[1], evs[2], evs[3]));
+    d.trace(1, || {
+        format!(
+            "RegisterClientEvents {:#x} {:#x} {:#x} {:#x}",
+            evs[0], evs[1], evs[2], evs[3]
+        )
+    });
     0
 });
 
@@ -962,7 +1102,13 @@ mfn!(acquire_input, |c, a, d| {
     w32(idx, u32::MAX);
     w32(left, 0);
     let now = Instant::now();
-    let k = if st.in_eos { None } else { st.infree.iter().position(|&x| st.instale[x].is_none_or(|t| now - t >= STALE)) };
+    let k = if st.in_eos {
+        None
+    } else {
+        st.infree
+            .iter()
+            .position(|&x| st.instale[x].is_none_or(|t| now - t >= STALE))
+    };
     let mut wake = None;
     let r = match k {
         Some(k) if st.started => {
@@ -975,7 +1121,12 @@ mfn!(acquire_input, |c, a, d| {
         }
         _ => {
             if !st.infree.is_empty() && st.started && !st.in_eos {
-                wake = st.infree.iter().filter_map(|&x| st.instale[x]).map(|t| t + STALE).min();
+                wake = st
+                    .infree
+                    .iter()
+                    .filter_map(|&x| st.instale[x])
+                    .map(|t| t + STALE)
+                    .min();
             }
             NO_INPUT
         }
@@ -999,8 +1150,15 @@ mfn!(get_input, |c, a, d| {
 });
 
 mfn!(send_input, |c, a, d| {
-    let (i, off, size, pts, flags) = (a[1] as i32, a[2] as i32, a[3] as i32, a[4] as i64, a[5] as u32);
-    if !(0..NIN as i32).contains(&i) || off < 0 || size < 0 || off as usize + size as usize > INCAP {
+    let (i, off, size, pts, flags) = (
+        a[1] as i32,
+        a[2] as i32,
+        a[3] as i32,
+        a[4] as i64,
+        a[5] as u32,
+    );
+    if !(0..NIN as i32).contains(&i) || off < 0 || size < 0 || off as usize + size as usize > INCAP
+    {
         return BAD_ARG;
     }
     let i = i as usize;
@@ -1030,11 +1188,19 @@ mfn!(send_input, |c, a, d| {
     let mut fmt_now = false;
     if (d.ty == T_VP9 || d.ty == T_VP8) && st.w == 0 && size > 0 {
         let pkt = &d.inbuf[i][off as usize..off as usize + size as usize];
-        let wh = if d.ty == T_VP8 { vpx::vp8_key_frame_size(pkt) } else { vpx::key_frame_size(pkt) };
+        let wh = if d.ty == T_VP8 {
+            vpx::vp8_key_frame_size(pkt)
+        } else {
+            vpx::key_frame_size(pkt)
+        };
         if let Some((w, h)) = wh {
             st.w = w as i32;
             st.h = h as i32;
-            crate::log!("[movie] decoder {:#x}: {} key frame {w}x{h}", d.obj, if d.ty == T_VP8 { "VP8" } else { "VP9" });
+            crate::log!(
+                "[movie] decoder {:#x}: {} key frame {w}x{h}",
+                d.obj,
+                if d.ty == T_VP8 { "VP8" } else { "VP9" }
+            );
         }
     }
     if !st.fmt_sent {
@@ -1045,7 +1211,13 @@ mfn!(send_input, |c, a, d| {
             st.h = 1080;
         }
     }
-    st.pend.push_back(Pkt { inp: i, off: off as usize, size: size as usize, pts, flags });
+    st.pend.push_back(Pkt {
+        inp: i,
+        off: off as usize,
+        size: size as usize,
+        pts,
+        flags,
+    });
     st.packets += 1;
     if flags & EOS != 0 {
         st.in_eos = true;
@@ -1071,7 +1243,9 @@ mfn!(acquire_output, |c, a, d| {
     if !st.started {
         return NO_OUTPUT;
     }
-    let Some(s) = st.outq.pop_front() else { return NO_OUTPUT };
+    let Some(s) = st.outq.pop_front() else {
+        return NO_OUTPUT;
+    };
     w32(idx, s as u32);
     w64(pts, st.out[s].pts as u64);
     w32(flags, st.out[s].flags);
@@ -1079,14 +1253,23 @@ mfn!(acquire_output, |c, a, d| {
     st.out[s].cli = true;
     let (t, f) = (st.out[s].pts, st.out[s].flags);
     drop(st);
-    d.trace(8, || format!("AcquireOutputBufferIndex -> {s} time {t} flags {f:#x}"));
+    d.trace(8, || {
+        format!("AcquireOutputBufferIndex -> {s} time {t} flags {f:#x}")
+    });
     0
 });
 
 unsafe fn format(c: *mut Cpu, d: &Dec, md: u64) {
     let (w, h, ch, rate, b709, full) = {
         let st = d.st.lock().unwrap();
-        (if st.w > 0 { st.w } else { 1920 }, if st.h > 0 { st.h } else { 1080 }, st.ch, st.rate, st.bt709, st.full)
+        (
+            if st.w > 0 { st.w } else { 1920 },
+            if st.h > 0 { st.h } else { 1080 },
+            st.ch,
+            st.rate,
+            st.bt709,
+            st.full,
+        )
     };
     if d.audio {
         md_set(c, md, "channel-count", if ch > 0 { ch } else { 2 });
@@ -1095,8 +1278,21 @@ unsafe fn format(c: *mut Cpu, d: &Dec, md: u64) {
     }
     md_set(c, md, "width", w);
     md_set(c, md, "height", h);
-    let _ = crate::guest::call(c, g().set_rect, &[md, key("crop"), 0, 0, (w - 1) as u64, (h - 1) as u64]);
-    for (k, v) in [("stride", w), ("slice-height", h), ("nv12-y-stride", w), ("nv12-y-offset", 0), ("nv12-uv-offset", w * h), ("nv12-uv-stride", w), ("nv12-width", w), ("nv12-height", h)] {
+    let _ = crate::guest::call(
+        c,
+        g().set_rect,
+        &[md, key("crop"), 0, 0, (w - 1) as u64, (h - 1) as u64],
+    );
+    for (k, v) in [
+        ("stride", w),
+        ("slice-height", h),
+        ("nv12-y-stride", w),
+        ("nv12-y-offset", 0),
+        ("nv12-uv-offset", w * h),
+        ("nv12-uv-stride", w),
+        ("nv12-width", w),
+        ("nv12-height", h),
+    ] {
         md_set(c, md, k, v);
     }
     let cs = (if b709.unwrap_or(h >= 720) { 3 } else { 1 }) + full as i32;
@@ -1116,7 +1312,9 @@ mfn!(buffer_format, |c, a, d| {
         return BAD_ARG;
     }
     format(c, &d, a[2]);
-    d.trace(10, || format!("GetOutputBufferFormat index {}", a[1] as i32));
+    d.trace(10, || {
+        format!("GetOutputBufferFormat index {}", a[1] as i32)
+    });
     0
 });
 mfn!(output_size, |c, a, d| {
@@ -1125,15 +1323,26 @@ mfn!(output_size, |c, a, d| {
         return BAD_ARG;
     }
     let st = d.st.lock().unwrap();
-    let m = if d.out_align != 0 { d.out_align } else { d.mode };
+    let m = if d.out_align != 0 {
+        d.out_align
+    } else {
+        d.mode
+    };
     if d.audio {
         let sbr = !st.csd[0].is_empty() && matches!(st.csd[0][0] >> 3, 5 | 29);
-        let n = if d.ty == T_AAC && st.ch > 0 { 1024 * if sbr { 2 } else { 1 } * st.ch * 2 } else { PCM_CAP as i32 };
+        let n = if d.ty == T_AAC && st.ch > 0 {
+            1024 * if sbr { 2 } else { 1 } * st.ch * 2
+        } else {
+            PCM_CAP as i32
+        };
         w32(size, n as u32);
         w32(mode, m as u32);
         return 0;
     }
-    let (w, h) = (if st.w > 0 { st.w } else { 1920 }, if st.h > 0 { st.h } else { 1080 });
+    let (w, h) = (
+        if st.w > 0 { st.w } else { 1920 },
+        if st.h > 0 { st.h } else { 1080 },
+    );
     w32(size, (w * h * 3 / 2) as u32);
     w32(mode, m as u32);
     0
@@ -1144,11 +1353,15 @@ mfn!(output_size, |c, a, d| {
 unsafe fn out_tex(c: *mut Cpu, d: &Dec, i: usize, buf: u64) -> u64 {
     let tex = crate::guest::call(c, g().data, &[buf]).unwrap_or(0);
     if tex == 0 {
-        crate::log!("[RED] movie: the client's buffer in the native-texture mode has no texture object");
+        crate::log!(
+            "[RED] movie: the client's buffer in the native-texture mode has no texture object"
+        );
         return BAD_ARG;
     }
     let Some((tw, th, f)) = gfx::texture_info(tex) else {
-        crate::log!("[RED] movie: buffer data {tex:#x} in the native-texture mode is not a texture object");
+        crate::log!(
+            "[RED] movie: buffer data {tex:#x} in the native-texture mode is not a texture object"
+        );
         return BAD_ARG;
     };
     let bgr = (0x99..=0x9c).contains(&f);
@@ -1177,7 +1390,10 @@ unsafe fn out_tex(c: *mut Cpu, d: &Dec, i: usize, buf: u64) -> u64 {
     if !st.tex_rel {
         for k in 0..d.nout {
             if k != i && st.out[k].rnd && st.out[k].cli {
-                st.out[k] = Slot { frm: std::mem::take(&mut st.out[k].frm), ..Default::default() };
+                st.out[k] = Slot {
+                    frm: std::mem::take(&mut st.out[k].frm),
+                    ..Default::default()
+                };
                 n += 1;
             }
         }
@@ -1187,7 +1403,16 @@ unsafe fn out_tex(c: *mut Cpu, d: &Dec, i: usize, buf: u64) -> u64 {
     }
     let more = !st.pend.is_empty() || st.avc_drain;
     drop(st);
-    d.trace(12, || format!("GetOutputBuffer index {i} -> texture {tex:#x} ({tw}x{th} format {f:#x}){}", if pic { "" } else { " (no picture: the texture keeps its last frame)" }));
+    d.trace(12, || {
+        format!(
+            "GetOutputBuffer index {i} -> texture {tex:#x} ({tw}x{th} format {f:#x}){}",
+            if pic {
+                ""
+            } else {
+                " (no picture: the texture keeps its last frame)"
+            }
+        )
+    });
     if n > 0 && more {
         kick(c, d);
     }
@@ -1221,7 +1446,10 @@ mfn!(get_output, |c, a, d| {
         let _ = crate::guest::call(c, g().set_range, &[buf, 0, n as u64]);
         return 0;
     }
-    let (w, h) = (if st.w > 0 { st.w } else { 1920 } as usize, if st.h > 0 { st.h } else { 1080 } as usize);
+    let (w, h) = (
+        if st.w > 0 { st.w } else { 1920 } as usize,
+        if st.h > 0 { st.h } else { 1080 } as usize,
+    );
     let need = w * h * 3 / 2;
     if p == 0 || cap < need {
         drop(st);
@@ -1236,17 +1464,39 @@ mfn!(get_output, |c, a, d| {
             let n = DUMPED.fetch_add(1, Ordering::Relaxed);
             if n < 8 || n % 100 == 0 {
                 let f = &st.out[i].frm;
-                let p = Picture { w, h, y: f[..w * h].to_vec(), uv: f[w * h..need].to_vec(), bt709: st.bt709, full_range: st.full, pts: 0 };
+                let p = Picture {
+                    w,
+                    h,
+                    y: f[..w * h].to_vec(),
+                    uv: f[w * h..need].to_vec(),
+                    bt709: st.bt709,
+                    full_range: st.full,
+                    pts: 0,
+                };
                 let mut rgba = vec![0u8; w * h * 4];
                 p.rgba_into(&mut rgba, w, h);
-                let _ = crate::media::yuv::write_png(&std::path::Path::new(&dir).join(format!("movie-{:x}-{n:04}.png", d.obj)), &rgba, w, h);
+                let _ = crate::media::yuv::write_png(
+                    &std::path::Path::new(&dir).join(format!("movie-{:x}-{n:04}.png", d.obj)),
+                    &rgba,
+                    w,
+                    h,
+                );
             }
         }
     }
     nv12_out(&st, i, w, h, crate::guest::bytes_mut(p, need as u64));
     drop(st);
     let _ = crate::guest::call(c, g().set_range, &[buf, 0, need as u64]);
-    d.trace(12, || format!("GetOutputBuffer index {i} -> {need} bytes{}", if pic { "" } else { " (no picture in this output: end of stream)" }));
+    d.trace(12, || {
+        format!(
+            "GetOutputBuffer index {i} -> {need} bytes{}",
+            if pic {
+                ""
+            } else {
+                " (no picture in this output: end of stream)"
+            }
+        )
+    });
     0
 });
 
@@ -1296,7 +1546,12 @@ mfn!(release_output, |c, a, d| {
     }
     let more = !st.pend.is_empty() || st.avc_drain;
     drop(st);
-    d.trace(13, || format!("release output index {i}{}", if held { "" } else { ": not held by the client" }));
+    d.trace(13, || {
+        format!(
+            "release output index {i}{}",
+            if held { "" } else { ": not held by the client" }
+        )
+    });
     if held && (more || d.ty == T_AVC) {
         kick(c, &d);
     }
@@ -1328,7 +1583,10 @@ mod gfx {
     use nxrt::cpu::Cpu;
 
     fn proc_(name: &str) -> Option<nxrt::hostfn::HostFn> {
-        nxgfx::nvn::procs().iter().find(|e| e.name == name).map(|e| e.f)
+        nxgfx::nvn::procs()
+            .iter()
+            .find(|e| e.name == name)
+            .map(|e| e.f)
     }
     fn call(name: &str, args: &[u64]) -> Option<u64> {
         let f = proc_(name)?;
@@ -1352,7 +1610,17 @@ mod gfx {
     /// RGBA rows into the texture's top-left w x h (WriteTexelsStrided).
     pub fn write_texture(tex: u64, rgba: &[u8], w: i32, h: i32, row: usize) {
         let region: [i32; 6] = [0, 0, 0, w, h, 1];
-        let _ = call("nvnTextureWriteTexelsStrided", &[tex, 0, region.as_ptr() as u64, rgba.as_ptr() as u64, row as u64, (row * h as usize) as u64]);
+        let _ = call(
+            "nvnTextureWriteTexelsStrided",
+            &[
+                tex,
+                0,
+                region.as_ptr() as u64,
+                rgba.as_ptr() as u64,
+                row as u64,
+                (row * h as usize) as u64,
+            ],
+        );
     }
     /// The buffer's sync as the SDK's consumer leaves it once its copy is done: signalled. A sync not fenced since
     /// its initialization is signalled in the graphics layer, so it is initialized again.
@@ -1365,17 +1633,38 @@ pub fn register(r: &mut Registry) {
     const W: &str = "movie::Decoder: decoded on the host (VP9 libvpx, H.264 / AAC Media Foundation, Vorbis lewton)";
     let p = "_ZN5movie7Decoder";
     for (n, f) in [
-        (format!("{p}C1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi"), ctor as unsafe fn(*mut Cpu)),
-        (format!("{p}C2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi"), ctor),
-        (format!("{p}C1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE"), ctor4),
-        (format!("{p}C2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE"), ctor4),
-        (format!("{p}C1ENS_11DecoderTypeENS_19DecoderOutputFormatE"), ctor3),
-        (format!("{p}C2ENS_11DecoderTypeENS_19DecoderOutputFormatE"), ctor3),
+        (
+            format!("{p}C1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi"),
+            ctor as unsafe fn(*mut Cpu),
+        ),
+        (
+            format!("{p}C2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeEi"),
+            ctor,
+        ),
+        (
+            format!("{p}C1ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE"),
+            ctor4,
+        ),
+        (
+            format!("{p}C2ENS_11DecoderTypeENS_19DecoderOutputFormatENS_11DecoderModeE"),
+            ctor4,
+        ),
+        (
+            format!("{p}C1ENS_11DecoderTypeENS_19DecoderOutputFormatE"),
+            ctor3,
+        ),
+        (
+            format!("{p}C2ENS_11DecoderTypeENS_19DecoderOutputFormatE"),
+            ctor3,
+        ),
         (format!("{p}D2Ev"), dtor),
         (format!("{p}D1Ev"), dtor),
         (format!("{p}D0Ev"), dtor0),
         (format!("{p}9ConfigureEPNS_9MediaDataE"), configure),
-        (format!("{p}20RegisterClientEventsEPNS_13DecoderEventsE"), register_events),
+        (
+            format!("{p}20RegisterClientEventsEPNS_13DecoderEventsE"),
+            register_events,
+        ),
         (format!("{p}5StartEv"), start),
         (format!("{p}4StopEv"), stop),
         (format!("{p}5ResetEv"), reset_fn),
@@ -1383,12 +1672,24 @@ pub fn register(r: &mut Registry) {
         (format!("{p}23AcquireInputBufferIndexEPiS1_"), acquire_input),
         (format!("{p}14GetInputBufferEiPNS_6BufferE"), get_input),
         (format!("{p}24SendInputBufferForDecodeEiiilj"), send_input),
-        (format!("{p}24AcquireOutputBufferIndexEPiPlPjS1_"), acquire_output),
-        (format!("{p}15GetOutputFormatEPNS_9MediaDataE"), output_format),
-        (format!("{p}21GetOutputBufferFormatEiPNS_9MediaDataE"), buffer_format),
+        (
+            format!("{p}24AcquireOutputBufferIndexEPiPlPjS1_"),
+            acquire_output,
+        ),
+        (
+            format!("{p}15GetOutputFormatEPNS_9MediaDataE"),
+            output_format,
+        ),
+        (
+            format!("{p}21GetOutputBufferFormatEiPNS_9MediaDataE"),
+            buffer_format,
+        ),
         (format!("{p}19GetOutputBufferSizeEPiS1_"), output_size),
         (format!("{p}15GetOutputBufferEiPNS_6BufferE"), get_output),
-        (format!("{p}15GetOutputBufferEiPNS_6BufferEPNS_9MediaDataE"), get_output_fmt),
+        (
+            format!("{p}15GetOutputBufferEiPNS_6BufferEPNS_9MediaDataE"),
+            get_output_fmt,
+        ),
         (format!("{p}24ReleaseOutputBufferIndexEi"), release_output),
         (format!("{p}12GetLastErrorEv"), last_error),
     ] {
@@ -1399,12 +1700,19 @@ pub fn register(r: &mut Registry) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::services::codec_video::tests::{clip, fnv, h264_access_units, ivf_frames, reference, H, W};
+    use crate::services::codec_video::tests::{
+        clip, fnv, h264_access_units, ivf_frames, reference, H, W,
+    };
 
     #[test]
     fn avcc_to_annexb() {
-        let avcc = [1, 0x64, 0, 0x28, 0xff, 0xe1, 0, 2, 0x67, 0x64, 1, 0, 2, 0x68, 0xee];
-        assert_eq!(super::avcc_annexb(&avcc), vec![0, 0, 0, 1, 0x67, 0x64, 0, 0, 0, 1, 0x68, 0xee]);
+        let avcc = [
+            1, 0x64, 0, 0x28, 0xff, 0xe1, 0, 2, 0x67, 0x64, 1, 0, 2, 0x68, 0xee,
+        ];
+        assert_eq!(
+            super::avcc_annexb(&avcc),
+            vec![0, 0, 0, 1, 0x67, 0x64, 0, 0, 0, 1, 0x68, 0xee]
+        );
         assert_eq!(super::aac_shape(&[0x11, 0x90], 0, 0), (48000, 2));
     }
 
@@ -1441,16 +1749,30 @@ mod tests {
         let mut frame = vec![0u8; w * h * 3 / 2];
         let t0 = Instant::now();
         while !eos_seen {
-            assert!(t0.elapsed().as_secs() < 30, "type {ty}: {next} packets in, {} pictures out", sums.len());
+            assert!(
+                t0.elapsed().as_secs() < 30,
+                "type {ty}: {next} packets in, {} pictures out",
+                sums.len()
+            );
             if next < packets.len() {
                 let (mut idx, mut left) = (0u32, 0u32);
                 match call(acquire_input, &[o, p(&mut idx), p(&mut left)]) {
                     0 => {
                         let pk = &packets[next];
                         crate::guest::write_bytes(d.input_addr(idx as usize), pk);
-                        let flags = if next + 1 == packets.len() { EOS as u64 } else { 0 };
+                        let flags = if next + 1 == packets.len() {
+                            EOS as u64
+                        } else {
+                            0
+                        };
                         let pts_us = (next as u64 * 1_000_000) / 24;
-                        assert_eq!(call(send_input, &[o, idx as u64, 0, pk.len() as u64, pts_us, flags]), 0);
+                        assert_eq!(
+                            call(
+                                send_input,
+                                &[o, idx as u64, 0, pk.len() as u64, pts_us, flags]
+                            ),
+                            0
+                        );
                         next += 1;
                     }
                     NO_INPUT => {}
@@ -1458,7 +1780,10 @@ mod tests {
                 }
             }
             let (mut idx, mut pts, mut flags, mut left) = (0u32, 0u64, 0u32, 0u32);
-            match call(acquire_output, &[o, p(&mut idx), p(&mut pts), p(&mut flags), p(&mut left)]) {
+            match call(
+                acquire_output,
+                &[o, p(&mut idx), p(&mut pts), p(&mut flags), p(&mut left)],
+            ) {
                 0 => {
                     let pic = nv12_out(&d.st.lock().unwrap(), idx as usize, w, h, &mut frame);
                     if pic {
@@ -1476,21 +1801,42 @@ mod tests {
                         let mut outs = 0;
                         while t1.elapsed().as_millis() < 300 {
                             let (mut i2, mut l2) = (0u32, 0u32);
-                            if call(acquire_input, &[o, p(&mut i2), p(&mut l2)]) == 0 && next < packets.len() {
+                            if call(acquire_input, &[o, p(&mut i2), p(&mut l2)]) == 0
+                                && next < packets.len()
+                            {
                                 let pk = &packets[next];
                                 crate::guest::write_bytes(d.input_addr(i2 as usize), pk);
-                                assert_eq!(call(send_input, &[o, i2 as u64, 0, pk.len() as u64, (next as u64 * 1_000_000) / 24, 0]), 0);
+                                assert_eq!(
+                                    call(
+                                        send_input,
+                                        &[
+                                            o,
+                                            i2 as u64,
+                                            0,
+                                            pk.len() as u64,
+                                            (next as u64 * 1_000_000) / 24,
+                                            0
+                                        ]
+                                    ),
+                                    0
+                                );
                                 next += 1;
                             } else {
                                 no_input += 1;
                             }
                             let (mut a, mut b, mut c2, mut e) = (0u32, 0u64, 0u32, 0u32);
-                            if call(acquire_output, &[o, p(&mut a), p(&mut b), p(&mut c2), p(&mut e)]) == 0 {
+                            if call(
+                                acquire_output,
+                                &[o, p(&mut a), p(&mut b), p(&mut c2), p(&mut e)],
+                            ) == 0
+                            {
                                 outs += 1;
                             }
                             std::thread::sleep(std::time::Duration::from_millis(1));
                         }
-                        pressure = Some(outs == 0 && no_input > 0 && d.st.lock().unwrap().pend.len() == NIN);
+                        pressure = Some(
+                            outs == 0 && no_input > 0 && d.st.lock().unwrap().pend.len() == NIN,
+                        );
                     }
                     for i in held.drain(..) {
                         assert_eq!(call(release_output, &[o, i as u64]), 0);
@@ -1511,8 +1857,14 @@ mod tests {
         assert!(eos, "type {ty}: end of stream flagged");
         assert_eq!(got.len(), want.len(), "type {ty}: pictures out");
         let bad: Vec<usize> = (0..want.len()).filter(|&i| got[i] != want[i]).collect();
-        assert!(bad.is_empty(), "type {ty}: pictures {bad:?} differ from ffmpeg's decode");
-        assert!(pressure, "type {ty}: with every output slot held, packets stay queued and no output comes");
+        assert!(
+            bad.is_empty(),
+            "type {ty}: pictures {bad:?} differ from ffmpeg's decode"
+        );
+        assert!(
+            pressure,
+            "type {ty}: with every output slot held, packets stay queued and no output comes"
+        );
     }
 
     /// Real clips (ffmpeg, `testdata/media`) through the movie decoder's service path, every picture checked
@@ -1524,6 +1876,10 @@ mod tests {
 
     #[test]
     fn movie_h264_clip_decodes_as_ffmpeg() {
-        check(T_AVC, "clip_h264.h264", h264_access_units(&clip("clip_h264.h264")));
+        check(
+            T_AVC,
+            "clip_h264.h264",
+            h264_access_units(&clip("clip_h264.h264")),
+        );
     }
 }

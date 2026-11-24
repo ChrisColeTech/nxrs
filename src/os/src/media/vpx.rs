@@ -56,8 +56,20 @@ const CS_SMPTE170: c_int = 3;
 extern "C" {
     fn vpx_codec_vp8_dx() -> *mut c_void;
     fn vpx_codec_vp9_dx() -> *mut c_void;
-    fn vpx_codec_dec_init_ver(ctx: *mut Ctx, iface: *mut c_void, cfg: *const Cfg, flags: i64, ver: c_int) -> c_int;
-    fn vpx_codec_decode(ctx: *mut Ctx, data: *const u8, n: c_uint, user: *mut c_void, deadline: i64) -> c_int;
+    fn vpx_codec_dec_init_ver(
+        ctx: *mut Ctx,
+        iface: *mut c_void,
+        cfg: *const Cfg,
+        flags: i64,
+        ver: c_int,
+    ) -> c_int;
+    fn vpx_codec_decode(
+        ctx: *mut Ctx,
+        data: *const u8,
+        n: c_uint,
+        user: *mut c_void,
+        deadline: i64,
+    ) -> c_int;
     fn vpx_codec_get_frame(ctx: *mut Ctx, iter: *mut *const c_void) -> *const Image;
     fn vpx_codec_destroy(ctx: *mut Ctx) -> c_int;
     fn vpx_codec_version_str() -> *const c_char;
@@ -94,7 +106,15 @@ impl Vpx {
         Vpx::new(unsafe { vpx_codec_vp9_dx() }, "VP9", w, h)
     }
     fn new(iface: *mut c_void, name: &'static str, w: u32, h: u32) -> Result<Vpx, String> {
-        let mut ctx = Box::new(Ctx { name: std::ptr::null(), iface: std::ptr::null_mut(), err: 0, err_detail: std::ptr::null(), init_flags: 0, config: std::ptr::null(), priv_: std::ptr::null_mut() });
+        let mut ctx = Box::new(Ctx {
+            name: std::ptr::null(),
+            iface: std::ptr::null_mut(),
+            err: 0,
+            err_detail: std::ptr::null(),
+            init_flags: 0,
+            config: std::ptr::null(),
+            priv_: std::ptr::null_mut(),
+        });
         let cfg = Cfg { threads: 1, w, h };
         let e = unsafe { vpx_codec_dec_init_ver(&mut *ctx, iface, &cfg, 0, ABI) };
         if e != 0 {
@@ -104,9 +124,21 @@ impl Vpx {
     }
     /// One frame's packet (a VP9 superframe included); the last picture it shows, if any.
     pub fn decode(&mut self, data: &[u8], pts: i64) -> Result<Option<Picture>, String> {
-        let e = unsafe { vpx_codec_decode(&mut *self.ctx, data.as_ptr(), data.len() as c_uint, std::ptr::null_mut(), 0) };
+        let e = unsafe {
+            vpx_codec_decode(
+                &mut *self.ctx,
+                data.as_ptr(),
+                data.len() as c_uint,
+                std::ptr::null_mut(),
+                0,
+            )
+        };
         if e != 0 {
-            return Err(format!("{} {}", cs(unsafe { vpx_codec_err_to_string(e) }), cs(unsafe { vpx_codec_error_detail(&*self.ctx) })));
+            return Err(format!(
+                "{} {}",
+                cs(unsafe { vpx_codec_err_to_string(e) }),
+                cs(unsafe { vpx_codec_error_detail(&*self.ctx) })
+            ));
         }
         let mut it: *const c_void = std::ptr::null();
         let mut last: *const Image = std::ptr::null();
@@ -125,7 +157,11 @@ impl Vpx {
             return Err(format!("picture format {:#x} is not 8-bit 4:2:0", im.fmt));
         }
         let (w, h) = (im.d_w as usize, im.d_h as usize);
-        let (ys, us, vs) = (im.stride[0] as usize, im.stride[1] as usize, im.stride[2] as usize);
+        let (ys, us, vs) = (
+            im.stride[0] as usize,
+            im.stride[1] as usize,
+            im.stride[2] as usize,
+        );
         let ch = h.div_ceil(2);
         let y = unsafe { std::slice::from_raw_parts(im.planes[0], ys * (h - 1) + w) };
         let u = unsafe { std::slice::from_raw_parts(im.planes[1], us * (ch - 1) + w.div_ceil(2)) };
@@ -210,22 +246,41 @@ mod tests {
     fn opens() {
         // Windows links the bundled libvpx 1.14; Linux uses the system's (1.14 or newer)
         #[cfg(windows)]
-        assert!(super::version().starts_with("v1.14"), "{}", super::version());
+        assert!(
+            super::version().starts_with("v1.14"),
+            "{}",
+            super::version()
+        );
         #[cfg(not(windows))]
         assert!(super::version().starts_with("v1."), "{}", super::version());
         let mut d = super::Vpx::vp9(64, 64).unwrap();
-        assert!(d.decode(&[0u8; 4], 0).is_err(), "garbage is refused, not a black picture");
+        assert!(
+            d.decode(&[0u8; 4], 0).is_err(),
+            "garbage is refused, not a black picture"
+        );
     }
 
     #[test]
     fn opens_vp8() {
         let mut d = super::Vpx::vp8(64, 64).unwrap();
         assert_eq!(d.name, "VP8");
-        assert!(d.decode(&[0u8; 4], 0).is_err(), "garbage is refused, not a black picture");
+        assert!(
+            d.decode(&[0u8; 4], 0).is_err(),
+            "garbage is refused, not a black picture"
+        );
         // a key frame header claiming 1280x720 (scale bits set) with no partition behind it
         let kf = [0x10, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x00, 0x45, 0xd0, 0x42];
         assert_eq!(super::vp8_key_frame_size(&kf), Some((1280, 720)));
-        assert!(d.decode(&kf, 0).is_err(), "a truncated key frame is refused");
-        assert_eq!(super::vp8_key_frame_size(&[0x11, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x00, 0x05, 0xd0, 0x02]), None, "inter frame");
+        assert!(
+            d.decode(&kf, 0).is_err(),
+            "a truncated key frame is refused"
+        );
+        assert_eq!(
+            super::vp8_key_frame_size(&[
+                0x11, 0x02, 0x00, 0x9d, 0x01, 0x2a, 0x00, 0x05, 0xd0, 0x02
+            ]),
+            None,
+            "inter frame"
+        );
     }
 }

@@ -75,7 +75,9 @@ pub(super) fn ticks60() -> u64 {
 
 /// After the modules are loaded: the host functions of MKW 1.8.0's patch sets.
 pub fn install(loaded: &[nxrt::loader::Loaded]) {
-    let Some(main) = loaded.iter().find(|m| m.name == "main") else { return };
+    let Some(main) = loaded.iter().find(|m| m.name == "main") else {
+        return;
+    };
     if !hex(&main.image.build_id).starts_with(MKW_180_MAIN) {
         return;
     }
@@ -83,7 +85,8 @@ pub fn install(loaded: &[nxrt::loader::Loaded]) {
     MAIN.store(main.base, Ordering::Relaxed);
     let page = (main.base + main.size + 0xfff) & !0xfff;
     PAGE.store(page, Ordering::Relaxed);
-    let al = |off: u64, name: &str, f: nxrt::hostfn::HostFn| nxrt::hostfn::alias(page + off, name, f);
+    let al =
+        |off: u64, name: &str, f: nxrt::hostfn::HostFn| nxrt::hostfn::alias(page + off, name, f);
     al(SHADOW_POOL_HOST, "gamefix:mkw_shadow_pool", shadow_pool);
     al(SHADOW_HOST, "gamefix:mkw_shadow_rb", shadow_rb);
     al(SEED_HOST, "gamefix:mkw_seed_tick", seed_tick_host);
@@ -101,9 +104,14 @@ pub fn install(loaded: &[nxrt::loader::Loaded]) {
         ("shadow", "NXRS_PATCH_MKW_SHADOW", true),
         ("seed", "NXRS_PATCH_MKW_SEED", false),
     ];
-    let list: Vec<String> =
-        sets.iter().map(|(n, e, d)| format!("{n} {}", if set_on(e, *d) { "on" } else { "off" })).collect();
-    crate::log!("gamefix: Mario Kart World 1.8.0 (mkw-recomp's patch sets): {} (page {page:#x})", list.join(", "));
+    let list: Vec<String> = sets
+        .iter()
+        .map(|(n, e, d)| format!("{n} {}", if set_on(e, *d) { "on" } else { "off" }))
+        .collect();
+    crate::log!(
+        "gamefix: Mario Kart World 1.8.0 (mkw-recomp's patch sets): {} (page {page:#x})",
+        list.join(", ")
+    );
     shadow_settings();
     super::mkw_romfs::install();
     output_size(page);
@@ -142,10 +150,18 @@ fn env_u64(k: &str) -> Option<u64> {
 }
 
 fn shadow_settings() {
-    SHADOW_SIZE.store(env_u64("NXRS_MKW_SHADOW_SIZE").unwrap_or(0), Ordering::Relaxed);
-    RB_EXTRA_MIB.store(env_u64("NXRS_MKW_RB_EXTRA_MIB").unwrap_or(0), Ordering::Relaxed);
+    SHADOW_SIZE.store(
+        env_u64("NXRS_MKW_SHADOW_SIZE").unwrap_or(0),
+        Ordering::Relaxed,
+    );
+    RB_EXTRA_MIB.store(
+        env_u64("NXRS_MKW_RB_EXTRA_MIB").unwrap_or(0),
+        Ordering::Relaxed,
+    );
     // mkw-recomp: MKW_RESOLUTION's lines (romfs_res.c), 0 at "original" (the 1440 lines of the console's pool)
-    let lines = env_u64("NXRS_MKW_SCENE_LINES").or_else(|| env_u64("NXRS_MKW_RESOLUTION")).unwrap_or(0);
+    let lines = env_u64("NXRS_MKW_SCENE_LINES")
+        .or_else(|| env_u64("NXRS_MKW_RESOLUTION"))
+        .unwrap_or(0);
     SCENE_LINES.store(lines, Ordering::Relaxed);
 }
 
@@ -163,7 +179,8 @@ fn second_pool_bytes() -> u64 {
         b += map_bytes(shadow) - map_bytes(3072);
     }
     let lines = if scene != 0 { scene } else { 1440 };
-    b += (PHOTO_MIB_1440 << 20) * lines * lines / (1440 * 1440) + map_bytes(if shadow != 0 { shadow } else { 3072 });
+    b += (PHOTO_MIB_1440 << 20) * lines * lines / (1440 * 1440)
+        + map_bytes(if shadow != 0 { shadow } else { 3072 });
     if scene > 1440 {
         b += ((250u64 << 20) - map_bytes(3072)) * (scene * scene - 1440 * 1440) / (1440 * 1440);
     }
@@ -198,7 +215,9 @@ unsafe fn shadow_rb(c: *mut Cpu) {
     if size != 0 && map && (size <= 3072 || POOL_OK.load(Ordering::Relaxed)) {
         static LOGS: AtomicUsize = AtomicUsize::new(0);
         if w != size && LOGS.fetch_add(1, Ordering::Relaxed) < 4 {
-            crate::log!("gamefix: shadow map {size}x{size} instead of {w}x{h} (NXRS_MKW_SHADOW_SIZE)");
+            crate::log!(
+                "gamefix: shadow map {size}x{size} instead of {w}x{h} (NXRS_MKW_SHADOW_SIZE)"
+            );
         }
         guest::w32(a[0] + 0x68, size);
         guest::w32(a[0] + 0x88, size);
@@ -227,8 +246,13 @@ fn host_region(size: u64) -> u64 {
 unsafe fn second_pool(c: *mut Cpu) -> bool {
     let saved: [u64; 4] = [(*c).x[0], (*c).x[1], (*c).x[2], (*c).x[3]];
     let rb = RB_OBJ.load(Ordering::Relaxed);
-    if rb == 0 || (guest::r32(rb + 0x2a88) as i32) < 2 || guest::r64(guest::r64(rb + 0x2a90) + 8) != 0 {
-        crate::log!("[RED] gamefix: the render-buffer allocator has no free second slot; no second pool");
+    if rb == 0
+        || (guest::r32(rb + 0x2a88) as i32) < 2
+        || guest::r64(guest::r64(rb + 0x2a90) + 8) != 0
+    {
+        crate::log!(
+            "[RED] gamefix: the render-buffer allocator has no free second slot; no second pool"
+        );
         return false;
     }
     let table = guest::r64(rb + 0x2a90);
@@ -238,12 +262,23 @@ unsafe fn second_pool(c: *mut Cpu) -> bool {
     let mut heap = 0;
     if region != 0 {
         let text = b"nxrs render-buffer pool\0";
-        let name = nxrt::kernel::get().space.kernel_alloc(8 + text.len() as u64, 8);
+        let name = nxrt::kernel::get()
+            .space
+            .kernel_alloc(8 + text.len() as u64, 8);
         core::ptr::copy_nonoverlapping(text.as_ptr(), (name + 8) as *mut u8, text.len());
         guest::w64(name, name + 8);
-        heap = guest::call(c, main_addr(EXPHEAP_CREATE), &[region, region_size, name, 1, 0]).unwrap_or(0);
+        heap = guest::call(
+            c,
+            main_addr(EXPHEAP_CREATE),
+            &[region, region_size, name, 1, 0],
+        )
+        .unwrap_or(0);
     }
-    let pool = if heap != 0 { guest::call(c, main_addr(RB_POOL_NEW), &[0x58, heap, 8]).unwrap_or(0) } else { 0 };
+    let pool = if heap != 0 {
+        guest::call(c, main_addr(RB_POOL_NEW), &[0x58, heap, 8]).unwrap_or(0)
+    } else {
+        0
+    };
     if pool != 0 {
         // mkw-recomp passes the allocator's record count ([rb+0x11c0]); it is 0 while the init has not filled it
         // (NXRS_MKW_POOL_MODE=early), where the first pool's region count stands in (a region without records
@@ -252,8 +287,16 @@ unsafe fn second_pool(c: *mut Cpu) -> bool {
         if count == 0 {
             count = (guest::r32(guest::r64(guest::r64(table) + 0x50) + 0x48) as u64).max(0x100);
         }
-        let flags = if guest::r8(rb + 0x2a68) & 0x80 != 0 { 0x104 } else { 4 };
-        guest::call(c, main_addr(RB_POOL_INIT), &[pool, 0, 1, 7, count, size, flags, heap]);
+        let flags = if guest::r8(rb + 0x2a68) & 0x80 != 0 {
+            0x104
+        } else {
+            4
+        };
+        guest::call(
+            c,
+            main_addr(RB_POOL_INIT),
+            &[pool, 0, 1, 7, count, size, flags, heap],
+        );
         guest::w64(table + 8, pool);
     }
     crate::log!(
@@ -302,7 +345,11 @@ fn seed_tick(lr: u64) -> u64 {
         }
         i += 1;
     }
-    let n = if i < SEED_SITES { SEED_N[i].fetch_add(1, Ordering::Relaxed) } else { 0 };
+    let n = if i < SEED_SITES {
+        SEED_N[i].fetch_add(1, Ordering::Relaxed)
+    } else {
+        0
+    };
     let base = env_u64("NXRS_MKW_SEED").unwrap_or(0);
     mix(base ^ mix(lr) ^ (n + 1).wrapping_mul(0x9e3779b97f4a7c15)) >> 8 // a 56-bit tick
 }
@@ -336,15 +383,21 @@ unsafe fn camera_unavailable(c: *mut Cpu) {
 }
 
 unsafe fn camera_event(c: *mut Cpu) {
-    let Some(create) = crate::hle::sym("_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb") else {
-        nxrt::rt::fatal("gamefix: nn::os::CreateSystemEvent not found (Mario Kart World's camera set)");
+    let Some(create) = crate::hle::sym(
+        "_ZN2nn2os17CreateSystemEventEPNS0_15SystemEventTypeENS0_14EventClearModeEb",
+    ) else {
+        nxrt::rt::fatal(
+            "gamefix: nn::os::CreateSystemEvent not found (Mario Kart World's camera set)",
+        );
     };
     let ev = (*c).x[0];
     let at = main_addr(CAMERA_SERVICE);
     if guest::r64(at) == 0 {
         let absent = crate::hle::addr("gamefix:mkw_camera_absent", camera_absent);
         let unavailable = crate::hle::addr("gamefix:mkw_camera_unavailable", camera_unavailable);
-        let obj = nxrt::kernel::get().space.kernel_alloc(16 + 8 * CAMERA_SLOTS, 16);
+        let obj = nxrt::kernel::get()
+            .space
+            .kernel_alloc(16 + 8 * CAMERA_SLOTS, 16);
         let vt = obj + 16;
         for i in 0..CAMERA_SLOTS {
             guest::w64(vt + 8 * i, if i == 0xd8 / 8 { absent } else { unavailable });
@@ -365,7 +418,10 @@ unsafe fn camera_event(c: *mut Cpu) {
 static OUTPUT_WH: [AtomicU64; 2] = [AtomicU64::new(0), AtomicU64::new(0)];
 
 pub(super) fn output_wh() -> (u32, u32) {
-    (OUTPUT_WH[0].load(Ordering::Relaxed) as u32, OUTPUT_WH[1].load(Ordering::Relaxed) as u32)
+    (
+        OUTPUT_WH[0].load(Ordering::Relaxed) as u32,
+        OUTPUT_WH[1].load(Ordering::Relaxed) as u32,
+    )
 }
 
 fn output_size(page: u64) {
@@ -377,7 +433,11 @@ fn output_size(page: u64) {
     let (aspect_out, scale) = super::mkw_view::aspect();
     let display = set_on("NXRS_PATCH_MKW_DISPLAY", false);
     // 1.8.0 (final_at_screen): "original" keeps the game's output; a wider aspect takes 1440 lines
-    let lines = if lines == 0 && aspect_out > 0.0 && !(scale < 1.0) { 1440 } else { lines };
+    let lines = if lines == 0 && aspect_out > 0.0 && !(scale < 1.0) {
+        1440
+    } else {
+        lines
+    };
     if !on {
         if lines != 0 {
             crate::log!("[RED] gamefix: NXRS_MKW_RESOLUTION / ASPECT need the output set (NXRS_PATCH_MKW_OUTPUT=1); the output stays {}x{native}", native * 16 / 9);
@@ -389,7 +449,11 @@ fn output_size(page: u64) {
         return;
     }
     let tall_at_screen = aspect_out > 0.0 && scale < 1.0;
-    let wide = if aspect_out > 0.0 && !tall_at_screen { ((lines as f32 * aspect_out + 0.5) as u32 + 1) & !1 } else { 0 };
+    let wide = if aspect_out > 0.0 && !tall_at_screen {
+        ((lines as f32 * aspect_out + 0.5) as u32 + 1) & !1
+    } else {
+        0
+    };
     let mut wh = [if wide != 0 { wide } else { lines * 16 / 9 }, lines];
     if aspect_out > 0.0 && scale < 1.0 && display {
         // aspect_tall_target: keep the width, add rows
@@ -401,7 +465,9 @@ fn output_size(page: u64) {
     // the page holds the output size: committed only for it (its hooks are host aliases, no memory). Committed for
     // every run, the page after main changed the module region's memory state and main's init aborted (Result 0xe801,
     // main+0xf42348, run K-mkw1-port)
-    if !nxrt::mem::commit(page, 0x1000) && !(nxrt::mem::reserve(page, 0x1000, false) && nxrt::mem::commit(page, 0x1000)) {
+    if !nxrt::mem::commit(page, 0x1000)
+        && !(nxrt::mem::reserve(page, 0x1000, false) && nxrt::mem::commit(page, 0x1000))
+    {
         crate::log!("[RED] gamefix: cannot commit Mario Kart World's patch page {page:#x}: the output stays the game's");
         return;
     }
@@ -471,13 +537,32 @@ struct FpsAuto {
 
 impl FpsAuto {
     const fn new() -> Self {
-        FpsAuto { hist: [0.0; FPS_AUTO_HIST], real: [0.0; UP_FRAMES], head: 0, n: 0, n_real: 0, since: 0, hold: 0, hold_s: 0, iv: 1, downed: false, fits: false, stall_ms: 0.0 }
+        FpsAuto {
+            hist: [0.0; FPS_AUTO_HIST],
+            real: [0.0; UP_FRAMES],
+            head: 0,
+            n: 0,
+            n_real: 0,
+            since: 0,
+            hold: 0,
+            hold_s: 0,
+            iv: 1,
+            downed: false,
+            fits: false,
+            stall_ms: 0.0,
+        }
     }
     fn median(&self, count: usize) -> f64 {
         let n = count.min(self.n);
-        let mut v: Vec<f64> = (0..n).map(|i| self.hist[(self.head + FPS_AUTO_HIST - 1 - i) % FPS_AUTO_HIST]).collect();
+        let mut v: Vec<f64> = (0..n)
+            .map(|i| self.hist[(self.head + FPS_AUTO_HIST - 1 - i) % FPS_AUTO_HIST])
+            .collect();
         v.sort_by(|a, b| a.total_cmp(b));
-        if n > 0 { v[n / 2] } else { 0.0 }
+        if n > 0 {
+            v[n / 2]
+        } else {
+            0.0
+        }
     }
     fn median_real(&self) -> f64 {
         let mut v = self.real;
@@ -485,7 +570,9 @@ impl FpsAuto {
         v[UP_FRAMES / 2]
     }
     fn fitting(ms: f64, margin: f64) -> i32 {
-        (1..FPS_AUTO_MAX).find(|&iv| ms <= iv as f64 * PERIOD_MS * margin).unwrap_or(FPS_AUTO_MAX)
+        (1..FPS_AUTO_MAX)
+            .find(|&iv| ms <= iv as f64 * PERIOD_MS * margin)
+            .unwrap_or(FPS_AUTO_MAX)
     }
     fn step(&mut self, measured_ms: f64, real_ms: f64) -> i32 {
         self.hist[self.head] = measured_ms;
@@ -504,17 +591,33 @@ impl FpsAuto {
         }
         if self.since as usize >= UP_FRAMES && self.n >= UP_FRAMES {
             let m = self.median(UP_FRAMES);
-            let r = if self.n_real >= UP_FRAMES { self.median_real() } else { 0.0 };
+            let r = if self.n_real >= UP_FRAMES {
+                self.median_real()
+            } else {
+                0.0
+            };
             let v = m.max(r);
             let stalled = self.fits && v > FPS_AUTO_MAX as f64 * PERIOD_MS * STALL_FACTOR;
-            self.stall_ms = if stalled { self.stall_ms + real_ms.max(measured_ms) } else { 0.0 };
-            let up = if stalled && self.stall_ms < STALL_MAX_S * 1000.0 { self.iv } else { Self::fitting(v, UP_MARGIN) };
+            self.stall_ms = if stalled {
+                self.stall_ms + real_ms.max(measured_ms)
+            } else {
+                0.0
+            };
+            let up = if stalled && self.stall_ms < STALL_MAX_S * 1000.0 {
+                self.iv
+            } else {
+                Self::fitting(v, UP_MARGIN)
+            };
             if !stalled {
                 self.fits = up <= self.iv;
             }
             if up > self.iv {
                 let undid_down = self.downed && self.since < PINGPONG_S * 60 / self.iv as u32;
-                self.hold_s = if undid_down { (self.hold_s * 2).min(HOLD_MAX_S) } else { HOLD_MIN_S };
+                self.hold_s = if undid_down {
+                    (self.hold_s * 2).min(HOLD_MAX_S)
+                } else {
+                    HOLD_MIN_S
+                };
                 self.iv = up;
                 self.since = 0;
                 self.downed = false;
@@ -523,7 +626,12 @@ impl FpsAuto {
             }
         }
         let window = DOWN_SECONDS * 60 / self.iv as u32;
-        if self.iv > 1 && self.hold == 0 && self.since >= window && self.n >= window as usize && Self::fitting(self.median(window as usize), DOWN_MARGIN) < self.iv {
+        if self.iv > 1
+            && self.hold == 0
+            && self.since >= window
+            && self.n >= window as usize
+            && Self::fitting(self.median(window as usize), DOWN_MARGIN) < self.iv
+        {
             self.iv -= 1;
             self.since = 0;
             self.downed = true;
@@ -539,10 +647,16 @@ static WAS_MOVIE: AtomicBool = AtomicBool::new(false);
 static SPEED: Mutex<(u64, u32, u32)> = Mutex::new((0, 0, 0));
 
 fn auto_want(obj: u64) -> i32 {
-    let mut g = AUTO.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut g = AUTO
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let now = now_ns();
     let ms = guest::r64(obj + FRAME_MEASURED) as i64 as f64 * TICK_NS / 1e6;
-    let real = if g.1 != 0 { (now - g.1) as f64 / 1e6 } else { 0.0 };
+    let real = if g.1 != 0 {
+        (now - g.1) as f64 / 1e6
+    } else {
+        0.0
+    };
     g.1 = now;
     let prev = g.0.iv;
     let iv = g.0.step(ms, real);
@@ -550,14 +664,20 @@ fn auto_want(obj: u64) -> i32 {
         crate::log!("gamefix: auto interval {prev} -> {iv} (frame {ms:.1} ms, real {real:.1} ms)");
     }
     // the game's own choice (1 or 2) while 30 fps fits; 3 or 4 only in a race
-    if iv > OUT_OF_RACE_MAX && race_on() { iv } else { 0 }
+    if iv > OUT_OF_RACE_MAX && race_on() {
+        iv
+    } else {
+        0
+    }
 }
 
 /// Game seconds per real second every 5 s (game.c speed_note): below 1 the game runs in slow motion.
 fn speed_note() {
     let clock = guest::r32(main_addr(GAME_CLOCK));
     let now = now_ns();
-    let mut s = SPEED.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut s = SPEED
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if s.0 == 0 {
         *s = (now, clock, 0);
         return;
@@ -567,7 +687,12 @@ fn speed_note() {
         return;
     }
     let real = (now - s.0) as f64 / 1e9;
-    crate::log!("gamefix: game speed {:.2}x over {real:.1} s ({} frames, NXRS_MKW_FPS {})", clock.wrapping_sub(s.1) as f64 / 60.0 / real, s.2, env_str("NXRS_MKW_FPS"));
+    crate::log!(
+        "gamefix: game speed {:.2}x over {real:.1} s ({} frames, NXRS_MKW_FPS {})",
+        clock.wrapping_sub(s.1) as f64 / 60.0 / real,
+        s.2,
+        env_str("NXRS_MKW_FPS")
+    );
     *s = (now, clock, 0);
 }
 
@@ -577,7 +702,14 @@ unsafe fn frame_update(c: *mut Cpu) {
     let fps = env_str("NXRS_MKW_FPS");
     let movie = crate::services::movie::playing();
     if movie != WAS_MOVIE.swap(movie, Ordering::Relaxed) {
-        crate::log!("gamefix: {}", if movie { "a movie plays: the game picks the interval" } else { "movie over" });
+        crate::log!(
+            "gamefix: {}",
+            if movie {
+                "a movie plays: the game picks the interval"
+            } else {
+                "movie over"
+            }
+        );
     }
     let mut want = if movie || fps == "game" {
         0
@@ -589,7 +721,14 @@ unsafe fn frame_update(c: *mut Cpu) {
     // 20 and 15 only in a race: menus and loads go at 30 at most, as on the console
     let capped = want > OUT_OF_RACE_MAX && !race_on();
     if capped != WAS_CAPPED.swap(capped, Ordering::Relaxed) {
-        crate::log!("gamefix: interval {want} {}", if capped { "capped at 2 (out of a race)" } else { "no longer capped" });
+        crate::log!(
+            "gamefix: interval {want} {}",
+            if capped {
+                "capped at 2 (out of a race)"
+            } else {
+                "no longer capped"
+            }
+        );
     }
     if capped {
         want = OUT_OF_RACE_MAX;
@@ -703,7 +842,10 @@ unsafe fn node_start(c: *mut Cpu, k: usize) {
     }
     let now = IN_RACE.load(Ordering::Relaxed);
     if now != was {
-        crate::log!("gamefix: race: {} at the start of {name}", if now { "in a race" } else { "out of the race" });
+        crate::log!(
+            "gamefix: race: {} at the start of {name}",
+            if now { "in a race" } else { "out of the race" }
+        );
     }
     let x = (*c).x;
     let a: Vec<u64> = x[..8].to_vec();

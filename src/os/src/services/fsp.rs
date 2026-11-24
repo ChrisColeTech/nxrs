@@ -43,7 +43,10 @@ impl Service for Fsp {
             }
             60..=62 => {
                 let space = ctx.u8(0);
-                let all = saves(&crate::services::fs::save_dir(), crate::profile::get().program_id);
+                let all = saves(
+                    &crate::services::fs::save_dir(),
+                    crate::profile::get().program_id,
+                );
                 let v = match ctx.cmd() {
                     60 => all,
                     // by space: the game's saves are all in the user space (1)
@@ -104,17 +107,38 @@ fn saves(dir: &Path, program: u64) -> Vec<[u8; 0x60]> {
     for n in 1..=USERS {
         let p = dir.join(format!("user{n}"));
         if p.is_dir() {
-            v.push(save_info(0x10 + n, SAVE_ACCOUNT, (UID0 + n - 1, UID1), program, tree_size(&p), 0));
+            v.push(save_info(
+                0x10 + n,
+                SAVE_ACCOUNT,
+                (UID0 + n - 1, UID1),
+                program,
+                tree_size(&p),
+                0,
+            ));
         }
     }
     let d = dir.join("device");
     if d.is_dir() {
-        v.push(save_info(0x20, SAVE_DEVICE, (0, 0), program, tree_size(&d), 0));
+        v.push(save_info(
+            0x20,
+            SAVE_DEVICE,
+            (0, 0),
+            program,
+            tree_size(&d),
+            0,
+        ));
     }
     for i in 0..256u16 {
         let p = dir.join(format!("cache{i}"));
         if p.is_dir() {
-            v.push(save_info(0x100 + i as u64, SAVE_CACHE, (0, 0), program, tree_size(&p), i));
+            v.push(save_info(
+                0x100 + i as u64,
+                SAVE_CACHE,
+                (0, 0),
+                program,
+                tree_size(&p),
+                i,
+            ));
         }
     }
     v
@@ -188,7 +212,14 @@ pub struct HostFs {
 /// The client's path in X buffer `i` (NUL-terminated, at most 0x301 bytes), under `root`; None when it leaves it.
 fn path_in(ctx: &Ctx, root: &Path, i: usize) -> Option<PathBuf> {
     let raw = ctx.read_in(i);
-    let s = String::from_utf8_lossy(&raw[..raw.iter().position(|&b| b == 0).unwrap_or(raw.len()).min(0x301)]).to_string();
+    let s = String::from_utf8_lossy(
+        &raw[..raw
+            .iter()
+            .position(|&b| b == 0)
+            .unwrap_or(raw.len())
+            .min(0x301)],
+    )
+    .to_string();
     let mut p = root.to_path_buf();
     for part in s.split(['/', '\\']).filter(|c| !c.is_empty() && *c != ".") {
         if part == ".." || part.contains(':') {
@@ -206,7 +237,9 @@ fn free_space(p: &Path) -> (u64, u64) {
         use windows_sys::Win32::Storage::FileSystem::GetDiskFreeSpaceExW;
         let w: Vec<u16> = p.as_os_str().encode_wide().chain([0]).collect();
         let (mut free, mut total) = (0u64, 0u64);
-        if unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut free, &mut total, std::ptr::null_mut()) } != 0 {
+        if unsafe { GetDiskFreeSpaceExW(w.as_ptr(), &mut free, &mut total, std::ptr::null_mut()) }
+            != 0
+        {
             return (free, total);
         }
         (0, 0)
@@ -217,14 +250,19 @@ fn free_space(p: &Path) -> (u64, u64) {
         let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap_or_default();
         let mut s: libc::statvfs = unsafe { std::mem::zeroed() };
         if unsafe { libc::statvfs(c.as_ptr(), &mut s) } == 0 {
-            return (s.f_bavail as u64 * s.f_frsize as u64, s.f_blocks as u64 * s.f_frsize as u64);
+            return (
+                s.f_bavail as u64 * s.f_frsize as u64,
+                s.f_blocks as u64 * s.f_frsize as u64,
+            );
         }
         (0, 0)
     }
 }
 
 fn secs(t: std::io::Result<std::time::SystemTime>) -> u64 {
-    t.ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map_or(0, |d| d.as_secs())
+    t.ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_secs())
 }
 
 impl Service for HostFs {
@@ -241,7 +279,9 @@ impl Service for HostFs {
             }
             return 0;
         }
-        let Some(p) = path_in(ctx, &self.root, 0) else { return R_INVALID_PATH };
+        let Some(p) = path_in(ctx, &self.root, 0) else {
+            return R_INVALID_PATH;
+        };
         let io = |r: std::io::Result<()>| match r {
             Ok(()) => 0,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => R_EXISTS,
@@ -264,7 +304,9 @@ impl Service for HostFs {
             4 if p.is_dir() && p != self.root => io(fs::remove_dir_all(&p)),
             // RenameFile / RenameDirectory(old, new)
             5 | 6 => {
-                let Some(q) = path_in(ctx, &self.root, 1) else { return R_INVALID_PATH };
+                let Some(q) = path_in(ctx, &self.root, 1) else {
+                    return R_INVALID_PATH;
+                };
                 if (cmd == 5 && !p.is_file()) || (cmd == 6 && !p.is_dir()) {
                     return R_NOT_FOUND;
                 }
@@ -285,9 +327,16 @@ impl Service for HostFs {
             // OpenFile(mode: 1 read, 2 write, 4 append)
             8 if p.is_file() => {
                 let mode = ctx.u32(0);
-                match fs::OpenOptions::new().read(true).write(mode & 6 != 0).open(&p) {
+                match fs::OpenOptions::new()
+                    .read(true)
+                    .write(mode & 6 != 0)
+                    .open(&p)
+                {
                     Ok(f) => {
-                        ctx.object(HostFile { f, append: mode & 4 != 0 });
+                        ctx.object(HostFile {
+                            f,
+                            append: mode & 4 != 0,
+                        });
                         0
                     }
                     Err(_) => R_NOT_FOUND,
@@ -304,8 +353,18 @@ impl Service for HostFs {
                         d.flatten()
                             .filter_map(|e| {
                                 let m = e.metadata().ok()?;
-                                let want = if m.is_dir() { filter & 1 != 0 } else { filter & 2 != 0 };
-                                want.then(|| (e.file_name().to_string_lossy().into_owned(), m.is_dir(), if m.is_dir() { 0 } else { m.len() }))
+                                let want = if m.is_dir() {
+                                    filter & 1 != 0
+                                } else {
+                                    filter & 2 != 0
+                                };
+                                want.then(|| {
+                                    (
+                                        e.file_name().to_string_lossy().into_owned(),
+                                        m.is_dir(),
+                                        if m.is_dir() { 0 } else { m.len() },
+                                    )
+                                })
                             })
                             .collect()
                     })
@@ -318,7 +377,11 @@ impl Service for HostFs {
             13 if p.is_dir() => {
                 for e in fs::read_dir(&p).into_iter().flatten().flatten() {
                     let q = e.path();
-                    let r = if q.is_dir() { fs::remove_dir_all(&q) } else { fs::remove_file(&q) };
+                    let r = if q.is_dir() {
+                        fs::remove_dir_all(&q)
+                    } else {
+                        fs::remove_file(&q)
+                    };
                     if r.is_err() {
                         return R_NOT_FOUND;
                     }
@@ -327,7 +390,9 @@ impl Service for HostFs {
             }
             // GetFileTimeStampRaw: created, modified, accessed (POSIX seconds), valid
             14 if p.exists() => {
-                let Ok(m) = fs::metadata(&p) else { return R_NOT_FOUND };
+                let Ok(m) = fs::metadata(&p) else {
+                    return R_NOT_FOUND;
+                };
                 let mut b = [0u8; 0x20];
                 b[0..8].copy_from_slice(&secs(m.created()).to_le_bytes());
                 b[8..16].copy_from_slice(&secs(m.modified()).to_le_bytes());
@@ -358,7 +423,11 @@ impl Service for HostFile {
             0 => {
                 let (off, size) = (ctx.u64(8), ctx.u64(16).min(ctx.buf_out(0).size));
                 let mut b = vec![0u8; size.min(64 << 20) as usize];
-                let n = match self.f.seek(SeekFrom::Start(off)).and_then(|_| read_full(&mut self.f, &mut b)) {
+                let n = match self
+                    .f
+                    .seek(SeekFrom::Start(off))
+                    .and_then(|_| read_full(&mut self.f, &mut b))
+                {
                     Ok(n) => n,
                     Err(_) => return R_NOT_FOUND,
                 };
@@ -376,7 +445,11 @@ impl Service for HostFile {
                     // fs ResultFileExtensionWithoutOpenModeAllowAppend (2-6062)
                     return 2 | 6062 << 9;
                 }
-                let r = self.f.seek(SeekFrom::Start(off)).and_then(|_| self.f.write_all(data)).and_then(|_| if opt & 1 != 0 { self.f.flush() } else { Ok(()) });
+                let r = self
+                    .f
+                    .seek(SeekFrom::Start(off))
+                    .and_then(|_| self.f.write_all(data))
+                    .and_then(|_| if opt & 1 != 0 { self.f.flush() } else { Ok(()) });
                 if r.is_err() {
                     return R_NOT_FOUND;
                 }
@@ -466,15 +539,35 @@ mod tests {
     use super::*;
     use crate::ipc::hipc::{self, Buf, Builder, T_REQUEST};
 
-    fn send(h: u32, cmd: u32, data: Vec<u8>, x: Vec<Buf>, a: Vec<Buf>, b: Vec<Buf>) -> hipc::Response {
-        let mut m = Builder { ty: T_REQUEST, cmd, data, x, a, b, ..Default::default() }.build();
+    fn send(
+        h: u32,
+        cmd: u32,
+        data: Vec<u8>,
+        x: Vec<Buf>,
+        a: Vec<Buf>,
+        b: Vec<Buf>,
+    ) -> hipc::Response {
+        let mut m = Builder {
+            ty: T_REQUEST,
+            cmd,
+            data,
+            x,
+            a,
+            b,
+            ..Default::default()
+        }
+        .build();
         crate::ipc::process(h, &mut m);
         hipc::parse_response(&m, false).unwrap()
     }
     fn path(s: &str) -> (Vec<u8>, Vec<Buf>) {
         let mut v = s.as_bytes().to_vec();
         v.resize(0x301, 0);
-        let b = vec![Buf { addr: v.as_ptr() as u64, size: 0x301, tag: 0 }];
+        let b = vec![Buf {
+            addr: v.as_ptr() as u64,
+            size: 0x301,
+            tag: 0,
+        }];
         (v, b)
     }
     fn u64_at(r: &hipc::Response, o: usize) -> u64 {
@@ -492,49 +585,155 @@ mod tests {
         let h = crate::ipc::open(Box::new(HostFs { root: root.clone() }));
         let (_p, x) = path("/dir");
         assert_eq!(send(h, 2, vec![], x.clone(), vec![], vec![]).result, 0);
-        assert_eq!(send(h, 2, vec![], x.clone(), vec![], vec![]).result, R_EXISTS);
+        assert_eq!(
+            send(h, 2, vec![], x.clone(), vec![], vec![]).result,
+            R_EXISTS
+        );
         let (_q, xf) = path("/dir/a.bin");
-        assert_eq!(send(h, 0, [0u64.to_le_bytes(), 4u64.to_le_bytes()].concat(), xf.clone(), vec![], vec![]).result, 0);
+        assert_eq!(
+            send(
+                h,
+                0,
+                [0u64.to_le_bytes(), 4u64.to_le_bytes()].concat(),
+                xf.clone(),
+                vec![],
+                vec![]
+            )
+            .result,
+            0
+        );
         assert_eq!(fs::metadata(root.join("dir/a.bin")).unwrap().len(), 4);
-        let r = send(h, 8, 6u32.to_le_bytes().to_vec(), xf.clone(), vec![], vec![]);
+        let r = send(
+            h,
+            8,
+            6u32.to_le_bytes().to_vec(),
+            xf.clone(),
+            vec![],
+            vec![],
+        );
         assert_eq!((r.result, r.moved.len()), (0, 1));
         let f = r.moved[0];
         let data = *b"hello world";
-        let wa = vec![Buf { addr: data.as_ptr() as u64, size: data.len() as u64, tag: 0 }];
-        assert_eq!(send(f, 1, [1u64.to_le_bytes(), 2u64.to_le_bytes(), (data.len() as u64).to_le_bytes()].concat(), vec![], wa, vec![]).result, 0);
+        let wa = vec![Buf {
+            addr: data.as_ptr() as u64,
+            size: data.len() as u64,
+            tag: 0,
+        }];
+        assert_eq!(
+            send(
+                f,
+                1,
+                [
+                    1u64.to_le_bytes(),
+                    2u64.to_le_bytes(),
+                    (data.len() as u64).to_le_bytes()
+                ]
+                .concat(),
+                vec![],
+                wa,
+                vec![]
+            )
+            .result,
+            0
+        );
         assert_eq!(u64_at(&send(f, 4, vec![], vec![], vec![], vec![]), 0), 13);
         let mut rb = [0u8; 32];
-        let r = send(f, 0, [0u64.to_le_bytes(), 0u64.to_le_bytes(), 32u64.to_le_bytes()].concat(), vec![], vec![], vec![Buf { addr: rb.as_mut_ptr() as u64, size: 32, tag: 0 }]);
+        let r = send(
+            f,
+            0,
+            [0u64.to_le_bytes(), 0u64.to_le_bytes(), 32u64.to_le_bytes()].concat(),
+            vec![],
+            vec![],
+            vec![Buf {
+                addr: rb.as_mut_ptr() as u64,
+                size: 32,
+                tag: 0,
+            }],
+        );
         assert_eq!(u64_at(&r, 0), 13);
         assert_eq!(&rb[..13], b"\0\0hello world");
         crate::ipc::close(f);
         let (_r, xr) = path("/dir/a.bin");
         let r = send(h, 8, 2u32.to_le_bytes().to_vec(), xr, vec![], vec![]);
         let wb = *b"zz";
-        let wa = vec![Buf { addr: wb.as_ptr() as u64, size: 2, tag: 0 }];
-        assert_eq!(send(r.moved[0], 1, [0u64.to_le_bytes(), 13u64.to_le_bytes(), 2u64.to_le_bytes()].concat(), vec![], wa, vec![]).result, 2 | 6062 << 9, "no growing without append");
+        let wa = vec![Buf {
+            addr: wb.as_ptr() as u64,
+            size: 2,
+            tag: 0,
+        }];
+        assert_eq!(
+            send(
+                r.moved[0],
+                1,
+                [0u64.to_le_bytes(), 13u64.to_le_bytes(), 2u64.to_le_bytes()].concat(),
+                vec![],
+                wa,
+                vec![]
+            )
+            .result,
+            2 | 6062 << 9,
+            "no growing without append"
+        );
         crate::ipc::close(r.moved[0]);
-        assert_eq!(&send(h, 7, vec![], xf.clone(), vec![], vec![]).data[..4], &1u32.to_le_bytes());
-        assert_eq!(&send(h, 7, vec![], x.clone(), vec![], vec![]).data[..4], &0u32.to_le_bytes());
+        assert_eq!(
+            &send(h, 7, vec![], xf.clone(), vec![], vec![]).data[..4],
+            &1u32.to_le_bytes()
+        );
+        assert_eq!(
+            &send(h, 7, vec![], x.clone(), vec![], vec![]).data[..4],
+            &0u32.to_le_bytes()
+        );
         let (_n, xn) = path("/nope");
         assert_eq!(send(h, 7, vec![], xn, vec![], vec![]).result, R_NOT_FOUND);
         let (_e, xe) = path("/../escape");
-        assert_eq!(send(h, 7, vec![], xe, vec![], vec![]).result, R_INVALID_PATH);
+        assert_eq!(
+            send(h, 7, vec![], xe, vec![], vec![]).result,
+            R_INVALID_PATH
+        );
         let r = send(h, 9, 3u32.to_le_bytes().to_vec(), x.clone(), vec![], vec![]);
         let d = r.moved[0];
         assert_eq!(u64_at(&send(d, 1, vec![], vec![], vec![], vec![]), 0), 1);
         let mut ents = vec![0u8; 0x310 * 2];
-        let r = send(d, 0, vec![], vec![], vec![], vec![Buf { addr: ents.as_mut_ptr() as u64, size: ents.len() as u64, tag: 0 }]);
+        let r = send(
+            d,
+            0,
+            vec![],
+            vec![],
+            vec![],
+            vec![Buf {
+                addr: ents.as_mut_ptr() as u64,
+                size: ents.len() as u64,
+                tag: 0,
+            }],
+        );
         assert_eq!(u64_at(&r, 0), 1);
         assert_eq!(&ents[..6], b"a.bin\0");
-        assert_eq!((ents[0x304], u64::from_le_bytes(ents[0x308..0x310].try_into().unwrap())), (1, 13));
+        assert_eq!(
+            (
+                ents[0x304],
+                u64::from_le_bytes(ents[0x308..0x310].try_into().unwrap())
+            ),
+            (1, 13)
+        );
         let (_m, xm) = path("/dir/b.bin");
-        assert_eq!(send(h, 5, vec![], [xf[0], xm[0]].to_vec(), vec![], vec![]).result, 0);
+        assert_eq!(
+            send(h, 5, vec![], [xf[0], xm[0]].to_vec(), vec![], vec![]).result,
+            0
+        );
         assert!(root.join("dir/b.bin").is_file());
         let r = send(h, 14, vec![], xm.clone(), vec![], vec![]);
-        assert!(u64_at(&r, 8) > 1_600_000_000 && r.data[24] == 1, "modified time, valid");
-        assert!(u64_at(&send(h, 12, vec![], vec![], vec![], vec![]), 0) > 0, "the disk's size");
-        assert_eq!(send(h, 3, vec![], x.clone(), vec![], vec![]).result, R_NOT_EMPTY);
+        assert!(
+            u64_at(&r, 8) > 1_600_000_000 && r.data[24] == 1,
+            "modified time, valid"
+        );
+        assert!(
+            u64_at(&send(h, 12, vec![], vec![], vec![], vec![]), 0) > 0,
+            "the disk's size"
+        );
+        assert_eq!(
+            send(h, 3, vec![], x.clone(), vec![], vec![]).result,
+            R_NOT_EMPTY
+        );
         assert_eq!(send(h, 4, vec![], x, vec![], vec![]).result, 0);
         assert!(!root.join("dir").exists());
         let _ = fs::remove_dir_all(&root);
@@ -552,19 +751,41 @@ mod tests {
         let v = saves(&dir, 0x0100_0000_0000_1000);
         assert_eq!(v.len(), 2);
         assert_eq!((v[0][8], v[0][9]), (1, SAVE_ACCOUNT));
-        assert_eq!(u64::from_le_bytes(v[0][0x10..0x18].try_into().unwrap()), crate::services::account::UID0);
-        assert_eq!(u64::from_le_bytes(v[0][0x28..0x30].try_into().unwrap()), 0x0100_0000_0000_1000);
-        assert_eq!(u64::from_le_bytes(v[0][0x30..0x38].try_into().unwrap()), 100);
-        assert_eq!((v[1][9], u16::from_le_bytes([v[1][0x38], v[1][0x39]])), (SAVE_CACHE, 2));
+        assert_eq!(
+            u64::from_le_bytes(v[0][0x10..0x18].try_into().unwrap()),
+            crate::services::account::UID0
+        );
+        assert_eq!(
+            u64::from_le_bytes(v[0][0x28..0x30].try_into().unwrap()),
+            0x0100_0000_0000_1000
+        );
+        assert_eq!(
+            u64::from_le_bytes(v[0][0x30..0x38].try_into().unwrap()),
+            100
+        );
+        assert_eq!(
+            (v[1][9], u16::from_le_bytes([v[1][0x38], v[1][0x39]])),
+            (SAVE_CACHE, 2)
+        );
         let h = crate::ipc::open(Box::new(SaveInfoReader { v, next: 0 }));
         let mut b = [0u8; 0x60];
         let ba = b.as_mut_ptr() as u64;
-        let one = move || vec![Buf { addr: ba, size: 0x60, tag: 0 }];
+        let one = move || {
+            vec![Buf {
+                addr: ba,
+                size: 0x60,
+                tag: 0,
+            }]
+        };
         assert_eq!(u64_at(&send(h, 0, vec![], vec![], vec![], one()), 0), 1);
         assert_eq!(b[9], SAVE_ACCOUNT);
         assert_eq!(u64_at(&send(h, 0, vec![], vec![], vec![], one()), 0), 1);
         assert_eq!(b[9], SAVE_CACHE);
-        assert_eq!(u64_at(&send(h, 0, vec![], vec![], vec![], one()), 0), 0, "then none");
+        assert_eq!(
+            u64_at(&send(h, 0, vec![], vec![], vec![], one()), 0),
+            0,
+            "then none"
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -584,6 +805,23 @@ mod tests {
         assert_eq!(nxrt::kernel::get().event_signaled(r.copy[0]), Some(false));
         let rd = send(h, 61, vec![0], vec![], vec![], vec![]).moved[0];
         let mut b = [0u8; 0x60];
-        assert_eq!(u64_at(&send(rd, 0, vec![], vec![], vec![], vec![Buf { addr: b.as_mut_ptr() as u64, size: 0x60, tag: 0 }]), 0), 0);
+        assert_eq!(
+            u64_at(
+                &send(
+                    rd,
+                    0,
+                    vec![],
+                    vec![],
+                    vec![],
+                    vec![Buf {
+                        addr: b.as_mut_ptr() as u64,
+                        size: 0x60,
+                        tag: 0
+                    }]
+                ),
+                0
+            ),
+            0
+        );
     }
 }

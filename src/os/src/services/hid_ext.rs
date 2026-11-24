@@ -48,7 +48,12 @@ struct Mice {
     range: [i32; 2],
 }
 static MICE: Mutex<Mice> = Mutex::new(Mice {
-    ring: [[[JcmsState { sampling: 0, dx: 0, dy: 0, attributes: 0 }; JCMS_RING]; 2]; PLAYERS],
+    ring: [[[JcmsState {
+        sampling: 0,
+        dx: 0,
+        dy: 0,
+        attributes: 0,
+    }; JCMS_RING]; 2]; PLAYERS],
     n: [[0; 2]; PLAYERS],
     pos: [[[0.0; 2]; 2]; PLAYERS],
     d: [[[0; 2]; 2]; PLAYERS],
@@ -65,15 +70,26 @@ pub fn feed_mouse(p: usize, side: usize, dx: i32, dy: i32, state: u32) {
     let mut m = MICE.lock().unwrap();
     m.n[p][side] += 1;
     let n = m.n[p][side];
-    m.ring[p][side][((n - 1) as usize) % JCMS_RING] = JcmsState { sampling: n, dx, dy, attributes: state & 3 };
+    m.ring[p][side][((n - 1) as usize) % JCMS_RING] = JcmsState {
+        sampling: n,
+        dx,
+        dy,
+        attributes: state & 3,
+    };
     let w = if m.range[0] > 0 { m.range[0] } else { 1920 } as f32;
     let h = if m.range[1] > 0 { m.range[1] } else { 1080 } as f32;
     if n == 1 {
         m.pos[p][side] = [w / 2.0, h / 2.0];
     }
     let xy = m.pos[p][side];
-    m.pos[p][side] = [(xy[0] + dx as f32 * NMOUSE_SCALE).clamp(0.0, w - 1.0), (xy[1] + dy as f32 * NMOUSE_SCALE).clamp(0.0, h - 1.0)];
-    m.d[p][side] = [(dx as f32 * NMOUSE_SCALE).round() as i32, (dy as f32 * NMOUSE_SCALE).round() as i32];
+    m.pos[p][side] = [
+        (xy[0] + dx as f32 * NMOUSE_SCALE).clamp(0.0, w - 1.0),
+        (xy[1] + dy as f32 * NMOUSE_SCALE).clamp(0.0, h - 1.0),
+    ];
+    m.d[p][side] = [
+        (dx as f32 * NMOUSE_SCALE).round() as i32,
+        (dy as f32 * NMOUSE_SCALE).round() as i32,
+    ];
     m.state[p][side] = state;
     if state & MOUSE_ON_SURFACE != 0 {
         m.last[p] = side as i32;
@@ -91,7 +107,9 @@ fn jcms_target(h: u32) -> Option<(usize, usize)> {
 }
 
 fn jcms_copy(out: u64, n: i32, h: u32) -> u64 {
-    let Some((p, side)) = jcms_target(h) else { return 0 };
+    let Some((p, side)) = jcms_target(h) else {
+        return 0;
+    };
     if out == 0 || n <= 0 {
         return 0;
     }
@@ -143,8 +161,16 @@ f!(jcms_fini, |a| {
     MOUSE_WANTED.fetch_and(!1, Ordering::AcqRel);
     0
 });
-f!(jcms_handle, |a| { ((r32(a.x(0)) & 0xff) | (r32(a.x(1)) & 0xff) << 8) as u64 });
-f!(jcms_states, |a| { if a.x(2) != 0 { jcms_copy(a.x(0), a.i(1), r32(a.x(2))) } else { 0 } });
+f!(jcms_handle, |a| {
+    ((r32(a.x(0)) & 0xff) | (r32(a.x(1)) & 0xff) << 8) as u64
+});
+f!(jcms_states, |a| {
+    if a.x(2) != 0 {
+        jcms_copy(a.x(0), a.i(1), r32(a.x(2)))
+    } else {
+        0
+    }
+});
 f!(jcms_state, |a| {
     let out = a.x(0);
     if out != 0 {
@@ -188,7 +214,9 @@ f!(nmouse_handles, |a| {
                 break;
             }
             let h = NMOUSE_TAG | ((id & 0xff) as u64) << 8 | side;
-            let Some((p, sd)) = nmouse_of(h) else { continue };
+            let Some((p, sd)) = nmouse_of(h) else {
+                continue;
+            };
             let last = MICE.lock().unwrap().last[p];
             let first = if last < 0 { sd == 1 } else { last == sd as i32 };
             if first == (pass == 0) {
@@ -210,7 +238,9 @@ f!(nmouse_get_range, |a| {
     0
 });
 f!(nmouse_std, |a| { 0 });
-f!(nmouse_enable, |a| { (a.x(0) == 0 || nmouse_of(a.x(0)).is_some()) as u64 });
+f!(nmouse_enable, |a| {
+    (a.x(0) == 0 || nmouse_of(a.x(0)).is_some()) as u64
+});
 f!(nmouse_pos, |a| {
     let h = a.x(0);
     match nmouse_of(h) {
@@ -224,12 +254,18 @@ f!(nmouse_pos, |a| {
 f!(nmouse_state, |a| {
     // NmouseState (48 bytes): 8 bytes, sampling, x, y, dx, dy, wheel x / y, buttons (1 left, 2 right), attributes
     let (out, h) = (a.x(0), a.x(1));
-    let Some((p, side)) = nmouse_of(h) else { return 0 };
+    let Some((p, side)) = nmouse_of(h) else {
+        return 0;
+    };
     if out == 0 {
         return 0;
     }
     let (b, _) = input::JOY[p][side].peek();
-    let buttons = if side == 1 { (b >> 7 & 1) as u32 | ((b >> 9 & 1) as u32) << 1 } else { (b >> 6 & 1) as u32 | ((b >> 8 & 1) as u32) << 1 };
+    let buttons = if side == 1 {
+        (b >> 7 & 1) as u32 | ((b >> 9 & 1) as u32) << 1
+    } else {
+        (b >> 6 & 1) as u32 | ((b >> 8 & 1) as u32) << 1
+    };
     let m = MICE.lock().unwrap();
     crate::guest::zero(out, 48);
     w64(out + 8, m.n[p][side] as u64);
@@ -238,7 +274,10 @@ f!(nmouse_state, |a| {
     w32(out + 0x18, m.d[p][side][0] as u32);
     w32(out + 0x1c, m.d[p][side][1] as u32);
     w32(out + 0x28, buttons);
-    w32(out + 0x2c, 2 | (m.state[p][side] & MOUSE_ON_SURFACE != 0) as u32);
+    w32(
+        out + 0x2c,
+        2 | (m.state[p][side] & MOUSE_ON_SURFACE != 0) as u32,
+    );
     1
 });
 f!(nmouse_npad, |a| { 0 });
@@ -246,7 +285,9 @@ f!(scene_set, |a| {
     SCENE.store(a.i(0), Ordering::Release);
     0
 });
-f!(scene_get, |a| { SCENE.load(Ordering::Acquire) as u32 as u64 });
+f!(scene_get, |a| {
+    SCENE.load(Ordering::Acquire) as u32 as u64
+});
 unsafe fn mouse_speed(c: *mut Cpu) {
     (*c).v[0] = 1.0f32.to_bits() as u128;
 }
@@ -317,8 +358,12 @@ f!(six_ic, |a| {
         crate::log!("[RED] hid GetSixAxisSensorIcInformation: handle {h:#x} refused ({e:#x})");
         return e;
     }
-    let smin = [0.95f32, -0.003, -0.003, -0.003, 0.95, -0.003, -0.003, -0.003, 0.95];
-    let smax = [1.05f32, 0.003, 0.003, 0.003, 1.05, 0.003, 0.003, 0.003, 1.05];
+    let smin = [
+        0.95f32, -0.003, -0.003, -0.003, 0.95, -0.003, -0.003, -0.003, 0.95,
+    ];
+    let smax = [
+        1.05f32, 0.003, 0.003, 0.003, 1.05, 0.003, 0.003, 0.003, 1.05,
+    ];
     for (half, (range, off)) in [(2000.0f32, 10.0f32), (8.0, 0.0612)].iter().enumerate() {
         let b = out + 0x64 * half as u64;
         let mut v = vec![*range, -off, -off, -off, *off, *off, *off];
@@ -348,7 +393,10 @@ f!(six_cal_load, |a| {
     };
     crate::guest::zero(out, SIX_CAL_SIZE as u64);
     let c = SIX_CAL.lock().unwrap();
-    if let Some((_, _, d)) = c.iter().find(|(s, dv, _)| *s == slot && *dv == cal_dev(dev)) {
+    if let Some((_, _, d)) = c
+        .iter()
+        .find(|(s, dv, _)| *s == slot && *dv == cal_dev(dev))
+    {
         crate::guest::write_bytes(out, d);
         return RES_OK;
     }
@@ -382,7 +430,10 @@ f!(palma_handle, |a| {
 
 // every call on a Palma handle: none is ever connected (the operation complete event is never bound)
 f!(palma_fail, |a| {
-    crate::log_once!("palma fail", "hid: a Poké Ball Plus call on a handle: none connected (ResultPalmaInvalidHandle)");
+    crate::log_once!(
+        "palma fail",
+        "hid: a Poké Ball Plus call on a handle: none connected (ResultPalmaInvalidHandle)"
+    );
     RES_PALMA_INVALID_HANDLE
 });
 
@@ -484,8 +535,13 @@ mod tests {
         assert_eq!(crate::guest::r64(a + 8), 2);
         assert_eq!(r32(a + 0x10), 8);
         assert_eq!(r32(a + 32 + 0x14) as i32, -40);
-        assert!(nmouse_of(NMOUSE_TAG | (super::super::hid::connected_id() as u64) << 8 | 1).is_some());
-        assert!(nmouse_of(NMOUSE_TAG | 5 << 8).is_none(), "no sensor on that npad");
+        assert!(
+            nmouse_of(NMOUSE_TAG | (super::super::hid::connected_id() as u64) << 8 | 1).is_some()
+        );
+        assert!(
+            nmouse_of(NMOUSE_TAG | 5 << 8).is_none(),
+            "no sensor on that npad"
+        );
     }
 
     /// Palma (Poké Ball Plus) as nxnative answers it: all 24 calls taken over; no handle, every call on one fails
@@ -494,7 +550,10 @@ mod tests {
     fn palma_calls_fail_as_none_connected() {
         let mut r = crate::hle::Registry::default();
         register(&mut r);
-        let n = r.names().filter(|n| n.starts_with("_ZN2nn3hid") && n.contains("Palma")).count();
+        let n = r
+            .names()
+            .filter(|n| n.starts_with("_ZN2nn3hid") && n.contains("Palma"))
+            .count();
         assert_eq!(n, 24);
         let mut c = nxrt::cpu::Cpu::new_boxed();
         unsafe { palma_fail(&mut *c) };

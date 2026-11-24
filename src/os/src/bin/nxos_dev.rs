@@ -31,7 +31,9 @@ fn llvm(tool: &str) -> PathBuf {
 }
 
 fn run(cmd: &mut Command) -> R<String> {
-    let out = cmd.output().map_err(|e| format!("{:?}: {e}", cmd.get_program()))?;
+    let out = cmd
+        .output()
+        .map_err(|e| format!("{:?}: {e}", cmd.get_program()))?;
     if !out.status.success() {
         return Err(format!(
             "{:?} {:?} failed:\n{}{}",
@@ -94,7 +96,8 @@ const GEN_FLAGS: &[&str] = &[
 ];
 
 fn layout_modules(gen: &Path) -> R<Vec<(String, String, String)>> {
-    let layout = std::fs::read_to_string(gen.join("layout.json")).map_err(|e| format!("layout.json: {e}"))?;
+    let layout = std::fs::read_to_string(gen.join("layout.json"))
+        .map_err(|e| format!("layout.json: {e}"))?;
     let field = |chunk: &str, k: &str| -> Option<String> {
         let i = chunk.find(&format!("\"{k}\""))?;
         let rest = &chunk[i + k.len() + 2..];
@@ -104,7 +107,11 @@ fn layout_modules(gen: &Path) -> R<Vec<(String, String, String)>> {
     };
     let mut mods = vec![];
     for chunk in layout.split('{').skip(1) {
-        let (Some(n), Some(b), Some(s)) = (field(chunk, "name"), field(chunk, "base"), field(chunk, "size")) else {
+        let (Some(n), Some(b), Some(s)) = (
+            field(chunk, "name"),
+            field(chunk, "base"),
+            field(chunk, "size"),
+        ) else {
             return Err("layout.json: unexpected shape".into());
         };
         if gen.join(&n).join(format!("{n}_table.c")).is_file() {
@@ -127,13 +134,18 @@ fn modules_c(mods: &[(String, String, String)], entry: &str) -> String {
     }
     s.push_str("\nint main(int argc, char **argv) {\n    RtModule mods[] = {\n");
     for (n, b, z) in mods {
-        s.push_str(&format!("        {{\"{n}\", {b}ull, {z}ull, {n}_fn_addrs, {n}_fn_ptrs, 0}},\n"));
+        s.push_str(&format!(
+            "        {{\"{n}\", {b}ull, {z}ull, {n}_fn_addrs, {n}_fn_ptrs, 0}},\n"
+        ));
     }
     s.push_str("    };\n");
     for (i, (n, _, _)) in mods.iter().enumerate() {
         s.push_str(&format!("    mods[{i}].count = {n}_fn_count;\n"));
     }
-    s.push_str(&format!("    return {entry}(argc, argv, mods, {});\n}}\n", mods.len()));
+    s.push_str(&format!(
+        "    return {entry}(argc, argv, mods, {});\n}}\n",
+        mods.len()
+    ));
     s
 }
 
@@ -149,7 +161,10 @@ fn build(gen: &Path, obj: &Path, out: &Path, jobs: usize, front: bool) -> R<()> 
     let mods = layout_modules(gen)?;
     let mut srcs = vec![];
     for (n, _, _) in &mods {
-        for f in std::fs::read_dir(gen.join(n)).map_err(|e| e.to_string())?.filter_map(|e| e.ok()) {
+        for f in std::fs::read_dir(gen.join(n))
+            .map_err(|e| e.to_string())?
+            .filter_map(|e| e.ok())
+        {
             if f.path().extension().is_some_and(|x| x == "c") {
                 srcs.push(f.path());
             }
@@ -157,9 +172,17 @@ fn build(gen: &Path, obj: &Path, out: &Path, jobs: usize, front: bool) -> R<()> 
     }
     srcs.sort();
     let mc = obj.join("modules.c");
-    std::fs::write(&mc, modules_c(&mods, if front { "nxfront_main" } else { "nxos_main" })).map_err(|e| e.to_string())?;
+    std::fs::write(
+        &mc,
+        modules_c(&mods, if front { "nxfront_main" } else { "nxos_main" }),
+    )
+    .map_err(|e| e.to_string())?;
     let cpu_h = root().join("../translator/runtime/cpu.h");
-    let incs = [gen.join("include"), root().join("../translator/runtime"), root().join("../runtime/include")];
+    let incs = [
+        gen.join("include"),
+        root().join("../translator/runtime"),
+        root().join("../runtime/include"),
+    ];
     let mut cmds = vec![];
     let mut objs = vec![];
     for src in srcs.iter().chain(std::iter::once(&mc)) {
@@ -176,22 +199,68 @@ fn build(gen: &Path, obj: &Path, out: &Path, jobs: usize, front: bool) -> R<()> 
         }
         objs.push(o);
     }
-    eprintln!("nxos-dev: {} modules, {} sources, {} to compile", mods.len(), objs.len(), cmds.len());
+    eprintln!(
+        "nxos-dev: {} modules, {} sources, {} to compile",
+        mods.len(),
+        objs.len(),
+        cmds.len()
+    );
     parallel(cmds, jobs)?;
     let exe = std::env::current_exe().unwrap();
-    let lib = exe.parent().unwrap().join(if front { "nxfront.lib" } else { "nxos.lib" });
+    let lib = exe
+        .parent()
+        .unwrap()
+        .join(if front { "nxfront.lib" } else { "nxos.lib" });
     if !lib.is_file() {
-        return Err(format!("{} missing: cargo build -p {}", lib.display(), if front { "front" } else { "os" }));
+        return Err(format!(
+            "{} missing: cargo build -p {}",
+            lib.display(),
+            if front { "front" } else { "os" }
+        ));
     }
     let mut c = Command::new(llvm("clang"));
     c.arg("-fuse-ld=lld")
         .arg("-fms-runtime-lib=dll")
         .args(&objs)
         .arg(&lib)
-        .args(["-lkernel32", "-lntdll", "-luserenv", "-lws2_32", "-ldbghelp", "-ladvapi32", "-lbcrypt", "-lsynchronization", "-lole32", "-loleaut32"])
+        .args([
+            "-lkernel32",
+            "-lntdll",
+            "-luserenv",
+            "-lws2_32",
+            "-ldbghelp",
+            "-ladvapi32",
+            "-lbcrypt",
+            "-lsynchronization",
+            "-lole32",
+            "-loleaut32",
+        ])
         // the graphics layer and its host window (winit): user32, gdi32 and the shell libraries
-        .args(["-luser32", "-lgdi32", "-lshell32", "-ldwmapi", "-luxtheme", "-limm32", "-lcomctl32", "-lwinmm", "-lpropsys", "-llegacy_stdio_definitions"])
-        .args(if front { &["-lsetupapi", "-lhid", "-lmfplat", "-lmfreadwrite", "-lmfuuid", "-Wl,/SUBSYSTEM:WINDOWS", "-Wl,/ENTRY:mainCRTStartup"][..] } else { &[][..] })
+        .args([
+            "-luser32",
+            "-lgdi32",
+            "-lshell32",
+            "-ldwmapi",
+            "-luxtheme",
+            "-limm32",
+            "-lcomctl32",
+            "-lwinmm",
+            "-lpropsys",
+            "-llegacy_stdio_definitions",
+        ])
+        .args(if front {
+            &[
+                "-lsetupapi",
+                "-lhid",
+                "-lmfplat",
+                "-lmfreadwrite",
+                "-lmfuuid",
+                "-Wl,/SUBSYSTEM:WINDOWS",
+                "-Wl,/ENTRY:mainCRTStartup",
+            ][..]
+        } else {
+            &[][..]
+        })
         .arg("-Wl,/STACK:0x1000000")
         .arg("-o")
         .arg(out);
@@ -201,7 +270,9 @@ fn build(gen: &Path, obj: &Path, out: &Path, jobs: usize, front: bool) -> R<()> 
 }
 
 fn arg(args: &[String], name: &str) -> Option<String> {
-    args.iter().position(|a| a == name).and_then(|i| args.get(i + 1).cloned())
+    args.iter()
+        .position(|a| a == name)
+        .and_then(|i| args.get(i + 1).cloned())
 }
 
 fn main() {
@@ -213,12 +284,24 @@ fn main() {
                 std::process::exit(2);
             };
             let gen = PathBuf::from(&g);
-            let obj = arg(&args, "--obj").map(PathBuf::from).unwrap_or_else(|| gen.parent().unwrap_or(Path::new(".")).join("obj"));
-            let jobs = arg(&args, "--jobs").and_then(|j| j.parse().ok()).unwrap_or(4);
-            build(&gen, &obj, Path::new(&o), jobs, args.iter().any(|a| a == "--front"))
+            let obj = arg(&args, "--obj")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| gen.parent().unwrap_or(Path::new(".")).join("obj"));
+            let jobs = arg(&args, "--jobs")
+                .and_then(|j| j.parse().ok())
+                .unwrap_or(4);
+            build(
+                &gen,
+                &obj,
+                Path::new(&o),
+                jobs,
+                args.iter().any(|a| a == "--front"),
+            )
         }
         _ => {
-            eprintln!("usage: nxos-dev build --gen <dir> --out <exe> [--obj <dir>] [--jobs 4] [--front]");
+            eprintln!(
+                "usage: nxos-dev build --gen <dir> --out <exe> [--obj <dir>] [--jobs 4] [--front]"
+            );
             std::process::exit(2);
         }
     };

@@ -119,13 +119,25 @@ impl Service for Creator {
             0 | 3 => {
                 let (id, mode) = (ctx.u32(0), ctx.u32(4));
                 crate::log!("applet: library applet {id:#04x} created over IPC (mode {mode}): completed at once, no applet UI");
-                ctx.object(Accessor { id, popped: false, pushed: 0 });
+                ctx.object(Accessor {
+                    id,
+                    popped: false,
+                    pushed: 0,
+                });
                 0
             }
             // CreateStorage(size), CreateTransferMemoryStorage(.., size)
             10 | 11 => {
-                let size = if ctx.cmd() == 10 { ctx.u64(0) } else { ctx.u64(8) };
-                ctx.object(Storage(Arc::new(Mutex::new(vec![0; size.min(64 << 20) as usize]))));
+                let size = if ctx.cmd() == 10 {
+                    ctx.u64(0)
+                } else {
+                    ctx.u64(8)
+                };
+                ctx.object(Storage(Arc::new(Mutex::new(vec![
+                    0;
+                    size.min(64 << 20)
+                        as usize
+                ]))));
                 0
             }
             _ => ctx.unimplemented(),
@@ -169,7 +181,16 @@ impl Service for Accessor {
                 }
                 self.popped = true;
                 let out = applet_output(self.id);
-                crate::log!("applet: library applet {:#04x} closed: {} bytes of output{}", self.id, out.len(), if self.id == MII_EDIT { " (MiiEdit: cancelled)" } else { "" });
+                crate::log!(
+                    "applet: library applet {:#04x} closed: {} bytes of output{}",
+                    self.id,
+                    out.len(),
+                    if self.id == MII_EDIT {
+                        " (MiiEdit: cancelled)"
+                    } else {
+                        ""
+                    }
+                );
                 ctx.object(Storage(Arc::new(Mutex::new(out))));
                 0
             }
@@ -255,7 +276,15 @@ mod tests {
     use crate::ipc::hipc::{self, Buf, Builder, T_REQUEST};
 
     fn send(h: u32, cmd: u32, data: Vec<u8>, a: Vec<Buf>, b: Vec<Buf>) -> hipc::Response {
-        let mut m = Builder { ty: T_REQUEST, cmd, data, a, b, ..Default::default() }.build();
+        let mut m = Builder {
+            ty: T_REQUEST,
+            cmd,
+            data,
+            a,
+            b,
+            ..Default::default()
+        }
+        .build();
         crate::ipc::process(h, &mut m);
         hipc::parse_response(&m, false).unwrap()
     }
@@ -274,9 +303,26 @@ mod tests {
         let st = send(creator, 10, 0x100u64.to_le_bytes().to_vec(), vec![], vec![]).moved[0];
         let acc = send(st, 0, vec![], vec![], vec![]).moved[0];
         let input = [3u8; 0x100];
-        let r = send(acc, 10, 0u64.to_le_bytes().to_vec(), vec![Buf { addr: input.as_ptr() as u64, size: 0x100, tag: 0 }], vec![]);
+        let r = send(
+            acc,
+            10,
+            0u64.to_le_bytes().to_vec(),
+            vec![Buf {
+                addr: input.as_ptr() as u64,
+                size: 0x100,
+                tag: 0,
+            }],
+            vec![],
+        );
         assert_eq!(r.result, 0);
-        let a = send(creator, 0, [MII_EDIT.to_le_bytes(), 0u32.to_le_bytes()].concat(), vec![], vec![]).moved[0];
+        let a = send(
+            creator,
+            0,
+            [MII_EDIT.to_le_bytes(), 0u32.to_le_bytes()].concat(),
+            vec![],
+            vec![],
+        )
+        .moved[0];
         assert_eq!(send(a, 100, vec![], vec![], vec![]).result, 0, "PushInData");
         assert_eq!(send(a, 10, vec![], vec![], vec![]).result, 0, "Start");
         assert_eq!(send(a, 1, vec![], vec![], vec![]).data[0], 1, "IsCompleted");
@@ -284,24 +330,50 @@ mod tests {
         let r = send(a, 101, vec![], vec![], vec![]);
         assert_eq!((r.result, r.moved.len()), (0, 1), "PopOutData");
         let out_acc = send(r.moved[0], 0, vec![], vec![], vec![]).moved[0];
-        let size = u64::from_le_bytes(send(out_acc, 0, vec![], vec![], vec![]).data[..8].try_into().unwrap());
+        let size = u64::from_le_bytes(
+            send(out_acc, 0, vec![], vec![], vec![]).data[..8]
+                .try_into()
+                .unwrap(),
+        );
         assert_eq!(size, 0x100);
         let mut got = [0u8; 0x100];
-        let r = send(out_acc, 11, 0u64.to_le_bytes().to_vec(), vec![], vec![Buf { addr: got.as_mut_ptr() as u64, size: 0x100, tag: 0 }]);
+        let r = send(
+            out_acc,
+            11,
+            0u64.to_le_bytes().to_vec(),
+            vec![],
+            vec![Buf {
+                addr: got.as_mut_ptr() as u64,
+                size: 0x100,
+                tag: 0,
+            }],
+        );
         assert_eq!(r.result, 0);
         // Turbo 9ae9441: u8 r[0x100] = {0}; r[0] = 1; r[4..8] = 0xFF
         let mut want = [0u8; 0x100];
         want[0] = 1;
         want[4..8].fill(0xff);
         assert_eq!(got, want);
-        assert_eq!(send(a, 101, vec![], vec![], vec![]).result, R_NO_DATA, "the output pops once");
+        assert_eq!(
+            send(a, 101, vec![], vec![], vec![]).result,
+            R_NO_DATA,
+            "the output pops once"
+        );
         // a read past the end
-        assert_eq!(send(out_acc, 11, 0x101u64.to_le_bytes().to_vec(), vec![], vec![]).result, R_OUT_OF_RANGE);
+        assert_eq!(
+            send(out_acc, 11, 0x101u64.to_le_bytes().to_vec(), vec![], vec![]).result,
+            R_OUT_OF_RANGE
+        );
         // PlayerSelect gives the PC's player (option `pc_user`; account's pc_user_option test changes it in parallel,
         // so read the slot rather than assuming user 1)
         let p = applet_output(PLAYER_SELECT);
-        assert_eq!((p.len(), u64::from_le_bytes(p[..8].try_into().unwrap())), (0x18, 0));
+        assert_eq!(
+            (p.len(), u64::from_le_bytes(p[..8].try_into().unwrap())),
+            (0x18, 0)
+        );
         let uid = u64::from_le_bytes(p[8..16].try_into().unwrap());
-        assert!((crate::services::account::UID0..crate::services::account::UID0 + crate::services::account::USERS).contains(&uid));
+        assert!((crate::services::account::UID0
+            ..crate::services::account::UID0 + crate::services::account::USERS)
+            .contains(&uid));
     }
 }

@@ -38,7 +38,10 @@ pub fn presents() -> u64 {
 pub fn note_present(window: u64, index: u32) {
     let n = PRESENTS.fetch_add(1, Ordering::Relaxed);
     if n == 0 {
-        crate::log!("nvn: first present (window {window:#x}, texture {index}), {:.3} s after start", crate::log::secs());
+        crate::log!(
+            "nvn: first present (window {window:#x}, texture {index}), {:.3} s after start",
+            crate::log::secs()
+        );
     }
     frame_row(n + 1);
     crate::services::vi::frame_queued(n + 1);
@@ -59,13 +62,25 @@ fn frame_row(n: u64) {
     let (s, c) = (submits(), calls());
     let mut l = LAST.lock().unwrap();
     if n == 1 {
-        nxconfig::metrics::frame(format!("#present,guest_s,frame_ms,submits,nvn_calls,threads,{}", nxgfx::vk::perf::FRAME_COLUMNS));
+        nxconfig::metrics::frame(format!(
+            "#present,guest_s,frame_ms,submits,nvn_calls,threads,{}",
+            nxgfx::vk::perf::FRAME_COLUMNS
+        ));
     }
-    let dt = if l.0 == 0 { 0.0 } else { (now - l.0) as f64 / 1e6 };
+    let dt = if l.0 == 0 {
+        0.0
+    } else {
+        (now - l.0) as f64 / 1e6
+    };
     let threads = nxrt::kernel::try_get().map_or(0, |k| k.thread_count());
     // graphics' own columns: draws, passes, GPU / replay / wait times since the previous row
     let gfx = nxgfx::vk::perf::frame_columns();
-    nxconfig::metrics::frame(format!("{n},{:.4},{dt:.3},{},{},{threads},{gfx}", now as f64 / 1e9, s - l.1, c - l.2));
+    nxconfig::metrics::frame(format!(
+        "{n},{:.4},{dt:.3},{},{},{threads},{gfx}",
+        now as f64 / 1e9,
+        s - l.1,
+        c - l.2
+    ));
     *l = (now, s, c);
 }
 
@@ -81,7 +96,9 @@ pub fn first_submit_age() -> Option<f64> {
 pub(crate) fn count(name: &str) {
     TOTAL.fetch_add(1, Ordering::Relaxed);
     let mut g = CALLS.lock().unwrap();
-    *g.get_or_insert_with(HashMap::new).entry(name.to_string()).or_insert(0) += 1;
+    *g.get_or_insert_with(HashMap::new)
+        .entry(name.to_string())
+        .or_insert(0) += 1;
 }
 
 /// Called by whichever `nvnQueueSubmitCommands` runs (the null device's, or the graphics layer's through
@@ -89,7 +106,10 @@ pub(crate) fn count(name: &str) {
 pub fn note_submit(queue: u64, n: u64) {
     if SUBMITS.fetch_add(1, Ordering::Relaxed) == 0 {
         FIRST_SUBMIT_NS.store(nxrt::rt::now_ns(), Ordering::Relaxed);
-        crate::log!("FIRST NVN QUEUE SUBMIT: queue {queue:#x}, {n} command handle(s), {:.3} s after start", crate::log::secs());
+        crate::log!(
+            "FIRST NVN QUEUE SUBMIT: queue {queue:#x}, {n} command handle(s), {:.3} s after start",
+            crate::log::secs()
+        );
         report();
         crate::log::report_gaps("first submit");
     }
@@ -114,7 +134,16 @@ unsafe fn stub(c: *mut Cpu) {
     let name = name.strip_prefix("nvn:").unwrap_or(&name).to_string();
     count(&name);
     if !recorded(&name) {
-        crate::log::gap(crate::log::Gap::Nvn, &name, &format!("x0={:#x} x1={:#x} x2={:#x}, answered 0", (*c).x[0], (*c).x[1], (*c).x[2]));
+        crate::log::gap(
+            crate::log::Gap::Nvn,
+            &name,
+            &format!(
+                "x0={:#x} x1={:#x} x2={:#x}, answered 0",
+                (*c).x[0],
+                (*c).x[1],
+                (*c).x[2]
+            ),
+        );
     }
     (*c).x[0] = 0;
 }
@@ -135,7 +164,9 @@ pub fn recorded(name: &str) -> bool {
     ];
     let set_or_default = |n: &str| n.contains("Set") || n.ends_with("SetDefaults");
     (name.starts_with("nvnCommandBuffer") && !name.contains("Get"))
-        || STATE.iter().any(|p| name.starts_with(p) && set_or_default(&name[p.len()..]))
+        || STATE
+            .iter()
+            .any(|p| name.starts_with(p) && set_or_default(&name[p.len()..]))
         || name.ends_with("SetDebugLabel")
         || name.starts_with("nvnTextureView")
         || name.starts_with("nvnSamplerBuilderSet")
@@ -166,7 +197,10 @@ unsafe fn bt_proc(c: *mut Cpu) {
     static N: AtomicU64 = AtomicU64::new(0);
     if N.fetch_add(1, Ordering::Relaxed) < 64 {
         let r = &*c;
-        let mut s = format!("x0 {:#x} x1 {:#x} x2 {:#x}; lr {:#x}", r.x[0], r.x[1], r.x[2], r.x[30]);
+        let mut s = format!(
+            "x0 {:#x} x1 {:#x} x2 {:#x}; lr {:#x}",
+            r.x[0], r.x[1], r.x[2], r.x[30]
+        );
         let mut fp = r.x[29];
         for _ in 0..8 {
             if fp == 0 || fp & 7 != 0 || !nxrt::mem::readable(fp, 16) {
@@ -175,7 +209,10 @@ unsafe fn bt_proc(c: *mut Cpu) {
             s.push_str(&format!(" {:#x}", *((fp + 8) as *const u64)));
             fp = *(fp as *const u64);
         }
-        crate::log!("NVN bt {}: {s}", std::env::var("NXOS_NVN_BT").unwrap_or_default());
+        crate::log!(
+            "NVN bt {}: {s}",
+            std::env::var("NXOS_NVN_BT").unwrap_or_default()
+        );
     }
     if let Some(f) = BT_TARGET.get() {
         f(c);
@@ -198,25 +235,43 @@ fn sdk_major(data: &std::path::Path, switch2: bool) -> i32 {
         let i = b.windows(pat.len()).position(|w| w == pat)?;
         // Switch 2 SDKs name a variant first: "nnSdk-Generic_21_4_0" (Mario Kart World), as nxnative's dm_sdk_major
         let mut s = &b[i + pat.len()..];
-        let alpha = s.iter().take(16).take_while(|c| c.is_ascii_alphabetic()).count();
+        let alpha = s
+            .iter()
+            .take(16)
+            .take_while(|c| c.is_ascii_alphabetic())
+            .count();
         if alpha > 0 && s.get(alpha) == Some(&b'_') {
             s = &s[alpha + 1..];
         }
-        let digits: String = s.iter().take(4).map(|&c| c as char).take_while(|c| c.is_ascii_digit()).collect();
+        let digits: String = s
+            .iter()
+            .take(4)
+            .map(|&c| c as char)
+            .take_while(|c| c.is_ascii_digit())
+            .collect();
         digits.parse().ok()
     }
-    let v = std::fs::read(data.join("exefs").join("sdk")).ok().and_then(|raw| match nxrt::loader::parse(&raw) {
-        Ok(img) => {
-            // NVN2's device answers are constants of the driver in the sdk (graphics reads its switch)
-            if switch2 {
-                nxgfx::nvn::device::set_sdk_image(&img.bytes);
+    let v = std::fs::read(data.join("exefs").join("sdk"))
+        .ok()
+        .and_then(|raw| match nxrt::loader::parse(&raw) {
+            Ok(img) => {
+                // NVN2's device answers are constants of the driver in the sdk (graphics reads its switch)
+                if switch2 {
+                    nxgfx::nvn::device::set_sdk_image(&img.bytes);
+                }
+                scan(&img.bytes)
             }
-            scan(&img.bytes)
-        }
-        Err(_) => scan(&raw),
-    });
+            Err(_) => scan(&raw),
+        });
     let major = v.unwrap_or(19);
-    crate::log!("sdk: NintendoSDK {major}{}", if v.is_none() { " (no version string: taken as 19)" } else { "" });
+    crate::log!(
+        "sdk: NintendoSDK {major}{}",
+        if v.is_none() {
+            " (no version string: taken as 19)"
+        } else {
+            ""
+        }
+    );
     major
 }
 
@@ -241,14 +296,20 @@ fn bind_graphics() {
     nxgfx::vk::counters::set_guest_clock(crate::svc::guest_ns);
     apply_present_interval(crate::profile::get());
     nxgfx::register_controls();
-    nxgfx::nvn::set_hooks(nxgfx::nvn::Hooks { submit: note_submit, present: note_present, blocking: |f| crate::sched::without_core(f) });
+    nxgfx::nvn::set_hooks(nxgfx::nvn::Hooks {
+        submit: note_submit,
+        present: note_present,
+        blocking: |f| crate::sched::without_core(f),
+    });
     let prof = crate::profile::get();
     let data = crate::boot::process().data_dir.clone();
     nxgfx::nvn::device::SWITCH2.store(prof.switch2, Ordering::Relaxed);
     let major = sdk_major(&data, prof.switch2);
     nxgfx::nvn::device::SDK_MAJOR.store(major, Ordering::Relaxed);
     nxgfx::nvn::vpool::APP_POOL.store(prof.pool, Ordering::Relaxed);
-    let shaders = std::env::var("NXGFX_SHADERS").map(std::path::PathBuf::from).unwrap_or_else(|_| data.join("shaders"));
+    let shaders = std::env::var("NXGFX_SHADERS")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| data.join("shaders"));
     if !shaders.join("manifest.tsv").is_file() {
         crate::log!("[RED] graphics: no translated shaders at {} (nxshaders prebuild-data): draws with a missing shader wait for none", shaders.display());
     }
@@ -257,13 +318,21 @@ fn bind_graphics() {
     nxgfx::set_shader_key_skip(skip);
     nxgfx::set_shader_dir(shaders.clone());
     nxgfx::set_cache_dir(data.clone());
-    crate::log!("graphics: NVN on Vulkan, {} procs, SDK {major}{}, shaders {}", nxgfx::nvn::procs().len(), if prof.switch2 { ", NVN2" } else { "" }, shaders.display());
+    crate::log!(
+        "graphics: NVN on Vulkan, {} procs, SDK {major}{}, shaders {}",
+        nxgfx::nvn::procs().len(),
+        if prof.switch2 { ", NVN2" } else { "" },
+        shaders.display()
+    );
     // the front end (lane I, src/front) owns the game window when it is linked: it set FRONT_WINDOW and gave graphics its window
     if std::env::var("NXGFX_HEADLESS").is_err() && !FRONT_WINDOW.load(Ordering::Acquire) {
         nxgfx::host_window::set_key_handler(window_key);
         nxgfx::host_window::open(&prof.name, 1920, 1080);
     }
-    let threads = std::env::var("NXGFX_PREWARM_THREADS").ok().and_then(|v| v.parse().ok()).unwrap_or(4);
+    let threads = std::env::var("NXGFX_PREWARM_THREADS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(4);
     std::thread::spawn(move || {
         let r = nxgfx::prewarm(threads);
         crate::log!("graphics: pipeline prewarm {r:?}");
@@ -300,9 +369,23 @@ fn window_key(vk: u32, down: bool) {
         0x4B => 1 << 47,
         _ => return,
     };
-    let h = if down { HELD.fetch_or(bit, Ordering::Relaxed) | bit } else { HELD.fetch_and(!bit, Ordering::Relaxed) & !bit };
-    let axis = |neg: u64, pos: u64| -> i16 { (if h & pos != 0 { 0x7fff } else { 0 }) - (if h & neg != 0 { 0x7fff } else { 0 }) };
-    crate::input::set_keyboard(h & 0xffff, [axis(1 << 40, 1 << 42) as i32, axis(1 << 43, 1 << 41) as i32, axis(1 << 44, 1 << 46) as i32, axis(1 << 47, 1 << 45) as i32]);
+    let h = if down {
+        HELD.fetch_or(bit, Ordering::Relaxed) | bit
+    } else {
+        HELD.fetch_and(!bit, Ordering::Relaxed) & !bit
+    };
+    let axis = |neg: u64, pos: u64| -> i16 {
+        (if h & pos != 0 { 0x7fff } else { 0 }) - (if h & neg != 0 { 0x7fff } else { 0 })
+    };
+    crate::input::set_keyboard(
+        h & 0xffff,
+        [
+            axis(1 << 40, 1 << 42) as i32,
+            axis(1 << 43, 1 << 41) as i32,
+            axis(1 << 44, 1 << 46) as i32,
+            axis(1 << 47, 1 << 45) as i32,
+        ],
+    );
 }
 
 /// Set by the front end before the boot: it owns the game window (graphics' host window is not opened).
@@ -314,9 +397,17 @@ pub fn finish_registration(reg: &mut crate::hle::Registry) {
     // NVN2 native images (decoded video pictures as textures): sdk symbols, the graphics layer's over the decoders' pictures
     nxgfx::nvn::native::set_source(crate::services::codec_video::native_image);
     for (name, f) in nxgfx::nvn::native::takeovers() {
-        reg.force(name, "native images are the graphics layer's, over the video decoders' pictures", f);
+        reg.force(
+            name,
+            "native images are the graphics layer's, over the video decoders' pictures",
+            f,
+        );
     }
-    reg.force("nvnBootstrapLoader", "the NVN entry: the graphics layer's procs (logging stubs for names it lacks)", bootstrap_loader);
+    reg.force(
+        "nvnBootstrapLoader",
+        "the NVN entry: the graphics layer's procs (logging stubs for names it lacks)",
+        bootstrap_loader,
+    );
     nv::register_nv(reg);
     let n = GRAPHICS.lock().unwrap().len();
     crate::log!("NVN: {n} procs from the graphics layer, the rest logging stubs");

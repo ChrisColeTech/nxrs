@@ -22,12 +22,22 @@ pub struct Sample {
 
 impl Default for Sample {
     fn default() -> Self {
-        Sample { t: 0.0, acc: [0.0, 0.0, -1.0], gyro: [0.0; 3], angle: [0.0; 3], dir: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]] }
+        Sample {
+            t: 0.0,
+            acc: [0.0, 0.0, -1.0],
+            gyro: [0.0; 3],
+            angle: [0.0; 3],
+            dir: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        }
     }
 }
 
 fn cross(a: [f32; 3], b: [f32; 3]) -> [f32; 3] {
-    [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]]
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
 }
 fn dot(a: [f32; 3], b: [f32; 3]) -> f32 {
     a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
@@ -65,7 +75,14 @@ pub struct Stream {
 
 impl Default for Stream {
     fn default() -> Self {
-        Stream { dir: Sample::default().dir, angle: [0.0; 3], last: 0.0, ring: vec![Sample::default(); RING], head: 0, count: 0 }
+        Stream {
+            dir: Sample::default().dir,
+            angle: [0.0; 3],
+            last: 0.0,
+            ring: vec![Sample::default(); RING],
+            head: 0,
+            count: 0,
+        }
     }
 }
 
@@ -83,7 +100,11 @@ impl Stream {
         if self.count > 0 && t <= self.last {
             return;
         }
-        let dt = if self.count > 0 { (t - self.last) as f32 } else { 0.0 };
+        let dt = if self.count > 0 {
+            (t - self.last) as f32
+        } else {
+            0.0
+        };
         // the measured gravity in the controller's frame against the one the direction predicts (world down = -z)
         let g_meas = norm(acc);
         let g_pred = [-self.dir[0][2], -self.dir[1][2], -self.dir[2][2]];
@@ -114,7 +135,13 @@ impl Stream {
             }
         }
         self.last = t;
-        let s = Sample { t, acc, gyro: [rad[0] / TAU, rad[1] / TAU, rad[2] / TAU], angle: self.angle, dir: self.dir };
+        let s = Sample {
+            t,
+            acc,
+            gyro: [rad[0] / TAU, rad[1] / TAU, rad[2] / TAU],
+            angle: self.angle,
+            dir: self.dir,
+        };
         let at = (self.head + self.count) % RING;
         self.ring[at] = s;
         if self.count < RING {
@@ -171,17 +198,30 @@ mod tests {
         let mut s = Stream::default();
         // a quarter turn about z in one second, flat
         for i in 0..=200 {
-            s.add(i as f64 * 0.005, [0.0, 0.0, -1.0], [0.0, 0.0, TAU / 4.0], 0.0);
+            s.add(
+                i as f64 * 0.005,
+                [0.0, 0.0, -1.0],
+                [0.0, 0.0, TAU / 4.0],
+                0.0,
+            );
         }
         let n = s.at(1.0);
         assert!((n.angle[2] - 0.25).abs() < 0.01, "{:?}", n.angle);
-        assert!((n.dir[0][1] - 1.0).abs() < 0.02, "x axis now points along world y: {:?}", n.dir);
+        assert!(
+            (n.dir[0][1] - 1.0).abs() < 0.02,
+            "x axis now points along world y: {:?}",
+            n.dir
+        );
         // tilt correction pulls a wrong attitude back to the measured gravity
         let mut s = Stream::default();
         s.dir = [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]]; // stood on end
         for i in 0..=2000 {
             s.add(i as f64 * 0.005, [0.0, 0.0, -1.0], [0.0; 3], 0.5);
         }
-        assert!((s.dir[2][2] - 1.0).abs() < 0.05, "back to flat: {:?}", s.dir);
+        assert!(
+            (s.dir[2][2] - 1.0).abs() < 0.05,
+            "back to flat: {:?}",
+            s.dir
+        );
     }
 }

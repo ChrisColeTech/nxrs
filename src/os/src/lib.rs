@@ -3,12 +3,11 @@
 //! the services behind it, the memory and IPC SVCs, the system counter, and the process boot. See README.md.
 #![allow(clippy::missing_safety_doc)]
 
-pub mod log;
 pub mod boot;
 pub mod cheats;
+pub mod clock;
 #[cfg(target_os = "linux")]
 pub mod desk;
-pub mod clock;
 pub mod fpslock;
 pub mod fstep;
 pub mod gamefix;
@@ -17,9 +16,10 @@ pub mod hle;
 pub mod input;
 pub mod ipc;
 pub mod kobj;
+pub mod log;
+pub mod media;
 pub mod mem;
 pub mod mods;
-pub mod media;
 pub mod nvn;
 pub mod options;
 pub mod profile;

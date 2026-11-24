@@ -35,11 +35,27 @@ pub struct CtrlPrompt {
 
 impl CtrlPrompt {
     pub fn open(min: i32, max: i32, joined: i32, a: bool, b: bool) -> CtrlPrompt {
-        CtrlPrompt { phase: CpPhase::Open, min, max, joined, a_up: !a, b_up: !b, ok: false }
+        CtrlPrompt {
+            phase: CpPhase::Open,
+            min,
+            max,
+            joined,
+            a_up: !a,
+            b_up: !b,
+            ok: false,
+        }
     }
     /// One step: `joined` players the game sees, `waiting` connected controllers that are no player yet, A / B held on
     /// any controller, Return / Escape pressed since the last step.
-    pub fn step(&mut self, joined: i32, waiting: i32, a: bool, b: bool, confirm: bool, cancel: bool) -> CpPhase {
+    pub fn step(
+        &mut self,
+        joined: i32,
+        waiting: i32,
+        a: bool,
+        b: bool,
+        confirm: bool,
+        cancel: bool,
+    ) -> CpPhase {
         match self.phase {
             CpPhase::Idle => {}
             CpPhase::Open => {
@@ -58,7 +74,12 @@ impl CtrlPrompt {
                 if (b && self.b_up) || cancel {
                     self.phase = CpPhase::Settle;
                     self.ok = false;
-                } else if joined >= self.min && ((a && self.a_up) || confirm || (self.max > 0 && joined >= self.max) || waiting == 0) {
+                } else if joined >= self.min
+                    && ((a && self.a_up)
+                        || confirm
+                        || (self.max > 0 && joined >= self.max)
+                        || waiting == 0)
+                {
                     self.phase = CpPhase::Settle;
                     self.ok = true;
                 }
@@ -95,12 +116,25 @@ impl UserPicker {
     /// Opens on `current` (a slot of `choices`, else the first) with A, B, Up, Down as held now.
     pub fn open(choices: Vec<(u64, String)>, current: u64, held: [bool; 4]) -> UserPicker {
         let cursor = choices.iter().position(|c| c.0 == current).unwrap_or(0);
-        UserPicker { phase: CpPhase::Open, choices, cursor, chosen: None, held }
+        UserPicker {
+            phase: CpPhase::Open,
+            choices,
+            cursor,
+            chosen: None,
+            held,
+        }
     }
 
     /// One step: A, B, Up, Down held on any controller; Return / Escape, an arrow (-1 up, 1 down) and a digit
     /// (1-based line) from the keyboard since the last step.
-    pub fn step(&mut self, pads: [bool; 4], confirm: bool, cancel: bool, arrow: i32, digit: Option<usize>) -> CpPhase {
+    pub fn step(
+        &mut self,
+        pads: [bool; 4],
+        confirm: bool,
+        cancel: bool,
+        arrow: i32,
+        digit: Option<usize>,
+    ) -> CpPhase {
         let edge: Vec<bool> = (0..4).map(|i| pads[i] && !self.held[i]).collect();
         self.held = pads;
         match self.phase {
@@ -113,7 +147,9 @@ impl UserPicker {
                 if edge[3] || arrow > 0 {
                     self.cursor = (self.cursor + 1) % n;
                 }
-                let pick = digit.filter(|&d| d >= 1 && d <= self.choices.len()).map(|d| d - 1);
+                let pick = digit
+                    .filter(|&d| d >= 1 && d <= self.choices.len())
+                    .map(|d| d - 1);
                 if let Some(k) = pick {
                     self.cursor = k;
                 }
@@ -141,7 +177,13 @@ impl UserPicker {
             .choices
             .iter()
             .enumerate()
-            .map(|(i, (_, name))| if i == self.cursor { format!("[ {} {name} ]", i + 1) } else { format!("{} {name}", i + 1) })
+            .map(|(i, (_, name))| {
+                if i == self.cursor {
+                    format!("[ {} {name} ]", i + 1)
+                } else {
+                    format!("{} {name}", i + 1)
+                }
+            })
             .collect();
         (title, format!("{}\n{hint}", line.join("     ")))
     }
@@ -152,7 +194,10 @@ impl UserPicker {
 pub fn pick_user(choices: Vec<(u64, String)>, current: u64) -> Option<u64> {
     let held = pads_nav();
     let mut q = UserPicker::open(choices, current, held);
-    crate::log!("account: profile picker open ({} profiles; ask_user)", q.choices.len());
+    crate::log!(
+        "account: profile picker open ({} profiles; ask_user)",
+        q.choices.len()
+    );
     crate::services::oe::applet_enter("profile picker");
     crate::input::set_prompt(true);
     let mut shown = String::new();
@@ -176,7 +221,11 @@ pub fn pick_user(choices: Vec<(u64, String)>, current: u64) -> Option<u64> {
     }
     crate::input::set_prompt(false);
     crate::services::oe::applet_leave();
-    crate::log!("account: profile picker: {}", q.chosen.map_or("cancelled".into(), |s| format!("profile {}", s + 1)));
+    crate::log!(
+        "account: profile picker: {}",
+        q.chosen
+            .map_or("cancelled".into(), |s| format!("profile {}", s + 1))
+    );
     q.chosen
 }
 
@@ -217,12 +266,26 @@ pub struct HomeQuit {
 
 impl Default for HomeQuit {
     fn default() -> Self {
-        HomeQuit { phase: HqPhase::Idle, since: 0.0, home: false, a_up: true, b_up: true }
+        HomeQuit {
+            phase: HqPhase::Idle,
+            since: 0.0,
+            home: false,
+            a_up: true,
+            b_up: true,
+        }
     }
 }
 
 impl HomeQuit {
-    pub fn step(&mut self, now: f64, home: bool, a: bool, b: bool, confirm: bool, cancel: bool) -> HqPhase {
+    pub fn step(
+        &mut self,
+        now: f64,
+        home: bool,
+        a: bool,
+        b: bool,
+        confirm: bool,
+        cancel: bool,
+    ) -> HqPhase {
         let pressed = home && !self.home;
         self.home = home;
         match self.phase {
@@ -268,12 +331,18 @@ impl HomeQuit {
 /// A or B held on any controller (positional: right and bottom, before the button layout).
 pub fn pads_ab() -> (bool, bool) {
     let d = crate::input::devices();
-    (d.iter().any(|x| x.2 & 1 != 0), d.iter().any(|x| x.2 & 2 != 0))
+    (
+        d.iter().any(|x| x.2 & 1 != 0),
+        d.iter().any(|x| x.2 & 2 != 0),
+    )
 }
 
 /// Connected controllers that are no player yet.
 pub fn pads_waiting() -> i32 {
-    crate::input::devices().iter().filter(|x| x.1.is_none()).count() as i32
+    crate::input::devices()
+        .iter()
+        .filter(|x| x.1.is_none())
+        .count() as i32
 }
 
 // ---- the window
@@ -298,11 +367,17 @@ fn w(s: &str) -> Vec<u16> {
 
 /// Shows (or updates) the prompt window: a title and a line of text.
 pub fn show(title: &str, text: &str) {
-    *SHOWN.lock().unwrap() = Some(Shown { title: w(title), text: w(text) });
+    *SHOWN.lock().unwrap() = Some(Shown {
+        title: w(title),
+        text: w(text),
+    });
     if !THREAD.swap(true, Ordering::SeqCst) {
         CONFIRM.store(false, Ordering::SeqCst);
         CANCEL.store(false, Ordering::SeqCst);
-        std::thread::Builder::new().name("nxos prompt".into()).spawn(window::run).ok();
+        std::thread::Builder::new()
+            .name("nxos prompt".into())
+            .spawn(window::run)
+            .ok();
     }
     window::repaint();
 }
@@ -315,7 +390,10 @@ pub fn hide() {
 
 /// Return / Escape pressed in the window since the last call.
 pub fn keys() -> (bool, bool) {
-    (CONFIRM.swap(false, Ordering::SeqCst), CANCEL.swap(false, Ordering::SeqCst))
+    (
+        CONFIRM.swap(false, Ordering::SeqCst),
+        CANCEL.swap(false, Ordering::SeqCst),
+    )
 }
 
 /// Arrow keys (-1 up, +1 down, 0 none) and a digit (1-9) typed in the window since the last call.
@@ -333,7 +411,10 @@ pub fn hnav_keys() -> i32 {
 /// D-pad left and right held on any controller (positional).
 pub fn pads_lr() -> (bool, bool) {
     let d = crate::input::devices();
-    (d.iter().any(|x| x.2 >> 12 & 1 != 0), d.iter().any(|x| x.2 >> 14 & 1 != 0))
+    (
+        d.iter().any(|x| x.2 >> 12 & 1 != 0),
+        d.iter().any(|x| x.2 >> 14 & 1 != 0),
+    )
 }
 
 /// The prompt on Linux: the desktop's question dialog (zenity / kdialog, `desk.rs`) with the title and the line;
@@ -360,7 +441,11 @@ mod window {
         let mut warned = false;
         loop {
             std::thread::sleep(std::time::Duration::from_millis(30));
-            let want = SHOWN.lock().unwrap().as_ref().map(|s| (s.title.clone(), s.text.clone()));
+            let want = SHOWN
+                .lock()
+                .unwrap()
+                .as_ref()
+                .map(|s| (s.title.clone(), s.text.clone()));
             if want != cur {
                 if let Some(old) = q.take() {
                     old.close();
@@ -421,7 +506,10 @@ mod window {
                 0
             }
             WM_KEYDOWN if wp == VK_LEFT as usize || wp == VK_RIGHT as usize => {
-                HARROW.fetch_add(if wp == VK_LEFT as usize { -1 } else { 1 }, Ordering::SeqCst);
+                HARROW.fetch_add(
+                    if wp == VK_LEFT as usize { -1 } else { 1 },
+                    Ordering::SeqCst,
+                );
                 0
             }
             WM_CLOSE => {
@@ -430,12 +518,22 @@ mod window {
             }
             WM_APP => {
                 // as tall as the text's lines need (the prompts: two lines; the cheat panel: its rows)
-                let lines = SHOWN.lock().unwrap().as_ref().map_or(0, |s| s.text.iter().filter(|&&c| c == b'\n' as u16).count() as i32 + 1);
+                let lines = SHOWN.lock().unwrap().as_ref().map_or(0, |s| {
+                    s.text.iter().filter(|&&c| c == b'\n' as u16).count() as i32 + 1
+                });
                 let mut wr: RECT = std::mem::zeroed();
                 GetWindowRect(h, &mut wr);
                 let want = (80 + 24 * lines + 24).max(170);
                 if lines > 0 && wr.bottom - wr.top != want {
-                    SetWindowPos(h, std::ptr::null_mut(), 0, 0, wr.right - wr.left, want, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
+                    SetWindowPos(
+                        h,
+                        std::ptr::null_mut(),
+                        0,
+                        0,
+                        wr.right - wr.left,
+                        want,
+                        SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
                 }
                 let shown = SHOWN.lock().unwrap().is_some();
                 ShowWindow(h, if shown { SW_SHOWNOACTIVATE } else { SW_HIDE });
@@ -454,14 +552,25 @@ mod window {
                 if let Some(s) = SHOWN.lock().unwrap().as_ref() {
                     let face = w("Segoe UI");
                     let big = CreateFontW(30, 0, 0, 0, 600, 0, 0, 0, 0, 0, 0, 5, 0, face.as_ptr());
-                    let small = CreateFontW(20, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 5, 0, face.as_ptr());
+                    let small =
+                        CreateFontW(20, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 5, 0, face.as_ptr());
                     let old = SelectObject(dc, big as _);
                     SetTextColor(dc, 0x00ff_ffff);
-                    let mut r1 = RECT { left: 28, top: 22, right: rc.right - 28, bottom: 70 };
+                    let mut r1 = RECT {
+                        left: 28,
+                        top: 22,
+                        right: rc.right - 28,
+                        bottom: 70,
+                    };
                     DrawTextW(dc, s.title.as_ptr(), -1, &mut r1, DT_LEFT | DT_SINGLELINE);
                     SelectObject(dc, small as _);
                     SetTextColor(dc, 0x00c8_c8c8);
-                    let mut r2 = RECT { left: 28, top: 80, right: rc.right - 28, bottom: rc.bottom - 16 };
+                    let mut r2 = RECT {
+                        left: 28,
+                        top: 80,
+                        right: rc.right - 28,
+                        bottom: rc.bottom - 16,
+                    };
                     DrawTextW(dc, s.text.as_ptr(), -1, &mut r2, DT_LEFT | DT_WORDBREAK);
                     SelectObject(dc, old);
                     DeleteObject(big as _);
@@ -478,18 +587,45 @@ mod window {
         unsafe {
             let cls = w("nxos prompt");
             let hi = GetModuleHandleW(std::ptr::null());
-            let wc = WNDCLASSW { lpfnWndProc: Some(proc_), hInstance: hi, lpszClassName: cls.as_ptr(), hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), ..std::mem::zeroed() };
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(proc_),
+                hInstance: hi,
+                lpszClassName: cls.as_ptr(),
+                hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
+                ..std::mem::zeroed()
+            };
             RegisterClassW(&wc);
             // over the game's window (the front end's class), else centred on the screen
             let gcls = w("NxrsGameWindow");
             let owner = FindWindowW(gcls.as_ptr(), std::ptr::null());
             let mut orc: RECT = std::mem::zeroed();
             if owner.is_null() || GetWindowRect(owner, &mut orc) == 0 {
-                orc = RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) };
+                orc = RECT {
+                    left: 0,
+                    top: 0,
+                    right: GetSystemMetrics(SM_CXSCREEN),
+                    bottom: GetSystemMetrics(SM_CYSCREEN),
+                };
             }
             let (ww, wh) = (720, 170);
-            let (x, y) = ((orc.left + orc.right - ww) / 2, (orc.top + orc.bottom - wh) / 2);
-            let hw = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE, cls.as_ptr(), cls.as_ptr(), WS_POPUP | WS_BORDER, x, y, ww, wh, owner, std::ptr::null_mut(), hi, std::ptr::null());
+            let (x, y) = (
+                (orc.left + orc.right - ww) / 2,
+                (orc.top + orc.bottom - wh) / 2,
+            );
+            let hw = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+                cls.as_ptr(),
+                cls.as_ptr(),
+                WS_POPUP | WS_BORDER,
+                x,
+                y,
+                ww,
+                wh,
+                owner,
+                std::ptr::null_mut(),
+                hi,
+                std::ptr::null(),
+            );
             if hw.is_null() {
                 THREAD.store(false, Ordering::SeqCst);
                 return;
@@ -514,22 +650,46 @@ mod tests {
     #[test]
     fn controller_prompt() {
         let mut q = CtrlPrompt::open(2, 4, 1, false, false);
-        assert_eq!(q.step(1, 1, true, false, false, false), CpPhase::Open, "A with too few players does nothing");
-        assert_eq!(q.step(2, 1, true, false, false, false), CpPhase::Open, "the A that joined a player is no answer");
+        assert_eq!(
+            q.step(1, 1, true, false, false, false),
+            CpPhase::Open,
+            "A with too few players does nothing"
+        );
+        assert_eq!(
+            q.step(2, 1, true, false, false, false),
+            CpPhase::Open,
+            "the A that joined a player is no answer"
+        );
         assert_eq!(q.step(2, 1, false, false, false, false), CpPhase::Open);
         assert_eq!(q.step(2, 1, true, false, false, false), CpPhase::Settle);
         assert!(q.ok);
-        assert_eq!(q.step(2, 1, true, false, false, false), CpPhase::Settle, "held until A is up");
+        assert_eq!(
+            q.step(2, 1, true, false, false, false),
+            CpPhase::Settle,
+            "held until A is up"
+        );
         assert_eq!(q.step(2, 1, false, false, false, false), CpPhase::Idle);
         let mut q = CtrlPrompt::open(2, 0, 0, false, true);
-        assert_eq!(q.step(0, 1, false, true, false, false), CpPhase::Open, "B held when it opened does not cancel");
+        assert_eq!(
+            q.step(0, 1, false, true, false, false),
+            CpPhase::Open,
+            "B held when it opened does not cancel"
+        );
         q.step(0, 1, false, false, false, false);
         assert_eq!(q.step(0, 1, false, true, false, false), CpPhase::Settle);
         assert!(!q.ok);
         let mut q = CtrlPrompt::open(1, 2, 0, false, false);
-        assert_eq!(q.step(2, 0, false, false, false, false), CpPhase::Settle, "the maximum joined");
+        assert_eq!(
+            q.step(2, 0, false, false, false, false),
+            CpPhase::Settle,
+            "the maximum joined"
+        );
         let mut q = CtrlPrompt::open(2, 0, 0, false, false);
-        assert_eq!(q.step(0, 0, false, false, false, true), CpPhase::Settle, "Escape");
+        assert_eq!(
+            q.step(0, 0, false, false, false, true),
+            CpPhase::Settle,
+            "Escape"
+        );
         assert!(!q.ok);
     }
 
@@ -537,10 +697,18 @@ mod tests {
     /// cancels, a digit picks its line.
     #[test]
     fn user_picker() {
-        let users = vec![(0, "Player".to_string()), (2, "Player 3".to_string()), (5, "Player 6".to_string())];
+        let users = vec![
+            (0, "Player".to_string()),
+            (2, "Player 3".to_string()),
+            (5, "Player 6".to_string()),
+        ];
         let mut q = UserPicker::open(users.clone(), 2, [true, false, false, false]);
         assert_eq!(q.cursor, 1, "opens on the current profile");
-        assert_eq!(q.step([true, false, false, false], false, false, 0, None), CpPhase::Open, "A held as it opened");
+        assert_eq!(
+            q.step([true, false, false, false], false, false, 0, None),
+            CpPhase::Open,
+            "A held as it opened"
+        );
         q.step([false, false, false, true], false, false, 0, None);
         assert_eq!(q.cursor, 2);
         q.step([false, false, false, true], false, false, 0, None);
@@ -548,9 +716,16 @@ mod tests {
         q.step([false, false, false, false], false, false, 1, None);
         assert_eq!(q.cursor, 0, "wraps");
         assert!(q.text().1.contains("[ 1 Player ]"));
-        assert_eq!(q.step([true, false, false, false], false, false, 0, None), CpPhase::Settle);
+        assert_eq!(
+            q.step([true, false, false, false], false, false, 0, None),
+            CpPhase::Settle
+        );
         assert_eq!(q.chosen, Some(0));
-        assert_eq!(q.step([true, false, false, false], false, false, 0, None), CpPhase::Settle, "held until A is up");
+        assert_eq!(
+            q.step([true, false, false, false], false, false, 0, None),
+            CpPhase::Settle,
+            "held until A is up"
+        );
         assert_eq!(q.step([false; 4], false, false, 0, None), CpPhase::Idle);
         let mut q = UserPicker::open(users.clone(), 0, [false; 4]);
         q.step([false; 4], false, true, 0, None);
@@ -564,16 +739,40 @@ mod tests {
     #[test]
     fn home_quit() {
         let mut q = HomeQuit::default();
-        assert_eq!(q.step(0.0, true, false, false, false, false), HqPhase::Holding);
-        assert_eq!(q.step(1.0, false, false, false, false, false), HqPhase::Idle, "let go early");
+        assert_eq!(
+            q.step(0.0, true, false, false, false, false),
+            HqPhase::Holding
+        );
+        assert_eq!(
+            q.step(1.0, false, false, false, false, false),
+            HqPhase::Idle,
+            "let go early"
+        );
         q.step(10.0, true, false, false, false, false);
-        assert_eq!(q.step(12.1, true, false, false, false, false), HqPhase::Prompt);
-        assert_eq!(q.step(12.2, false, false, true, false, false), HqPhase::Settle, "B closes it");
-        assert_eq!(q.step(12.3, false, false, false, false, false), HqPhase::Idle);
+        assert_eq!(
+            q.step(12.1, true, false, false, false, false),
+            HqPhase::Prompt
+        );
+        assert_eq!(
+            q.step(12.2, false, false, true, false, false),
+            HqPhase::Settle,
+            "B closes it"
+        );
+        assert_eq!(
+            q.step(12.3, false, false, false, false, false),
+            HqPhase::Idle
+        );
         q.step(20.0, true, false, false, false, false);
         q.step(22.0, true, true, false, false, false);
-        assert_eq!(q.step(22.1, false, true, false, false, false), HqPhase::Prompt, "A held as it opened does not quit");
+        assert_eq!(
+            q.step(22.1, false, true, false, false, false),
+            HqPhase::Prompt,
+            "A held as it opened does not quit"
+        );
         q.step(22.2, false, false, false, false, false);
-        assert_eq!(q.step(22.3, false, true, false, false, false), HqPhase::Quit);
+        assert_eq!(
+            q.step(22.3, false, true, false, false, false),
+            HqPhase::Quit
+        );
     }
 }

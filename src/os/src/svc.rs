@@ -51,18 +51,23 @@ pub fn guest_ns() -> u64 {
 static COUNTS: [AtomicU64; 0x80] = [const { AtomicU64::new(0) }; 0x80];
 
 pub fn counts() -> Vec<(u32, u64)> {
-    COUNTS.iter().enumerate().filter_map(|(i, c)| {
-        let n = c.load(Ordering::Relaxed);
-        (n > 0).then_some((i as u32, n))
-    }).collect()
+    COUNTS
+        .iter()
+        .enumerate()
+        .filter_map(|(i, c)| {
+            let n = c.load(Ordering::Relaxed);
+            (n > 0).then_some((i as u32, n))
+        })
+        .collect()
 }
 
 /// The SVCs os registers: its own and the kernel's (0x07 ExitProcess and 0x0A ExitThread are counted, then left to
 /// the runtime).
 const SERVED: &[u8] = &[
-    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10, 0x11, 0x12, 0x13, 0x14, 0x15,
-    0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x21, 0x22, 0x24, 0x25, 0x26, 0x27, 0x29, 0x2C, 0x2D,
-    0x2E, 0x2F, 0x30, 0x31, 0x34, 0x35, 0x36, 0x37, 0x45, 0x6F, 0x80,
+    0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x0A, 0x09, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+    0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x21,
+    0x22, 0x24, 0x25, 0x26, 0x27, 0x29, 0x2C, 0x2D, 0x2E, 0x2F, 0x30, 0x31, 0x34, 0x35, 0x36, 0x37,
+    0x45, 0x6F, 0x80,
 ];
 
 /// Registers os's SVCs, the fallback and the counter's clock with the runtime (before any guest code runs).
@@ -164,13 +169,22 @@ static NEXT_SHARED: AtomicU32 = AtomicU32::new(0);
 /// A shared memory object for a service: the guest maps it with MapSharedMemory, the service writes its views.
 pub fn new_shared(size: u64) -> &'static SharedMem {
     let h = crate::hle::MEMORY_BASE | 0x8000 | NEXT_SHARED.fetch_add(1, Ordering::Relaxed);
-    let s: &'static SharedMem = Box::leak(Box::new(SharedMem { handle: h, size, views: std::sync::Mutex::new(vec![]) }));
+    let s: &'static SharedMem = Box::leak(Box::new(SharedMem {
+        handle: h,
+        size,
+        views: std::sync::Mutex::new(vec![]),
+    }));
     SHARED.lock().unwrap().push(s);
     s
 }
 
 fn shared_of(h: u32) -> Option<&'static SharedMem> {
-    SHARED.lock().unwrap().iter().find(|s| s.handle == h).copied()
+    SHARED
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|s| s.handle == h)
+        .copied()
 }
 
 /// os's handler for every SVC in `SERVED`: true = answered (the checkpoint follows), false = the runtime's.
@@ -191,7 +205,14 @@ fn unhandled(cpu: &mut Cpu, imm: u32) -> bool {
         n.fetch_add(1, Ordering::Relaxed);
     }
     let pc = nxrt::svc::caller_pc();
-    crate::log::gap(Gap::Svc, &format!("svc {imm:#x} {}", name(imm)), &format!("at {}, answered NotImplemented", nxrt::dispatch::guest_name(pc)));
+    crate::log::gap(
+        Gap::Svc,
+        &format!("svc {imm:#x} {}", name(imm)),
+        &format!(
+            "at {}, answered NotImplemented",
+            nxrt::dispatch::guest_name(pc)
+        ),
+    );
     cpu.x[0] = R_NOT_IMPLEMENTED;
     crate::sched::checkpoint(false);
     true
@@ -207,7 +228,15 @@ unsafe fn svc(cpu: &mut Cpu, imm: u32, pc: u64) -> bool {
         n.fetch_add(1, Ordering::Relaxed);
     }
     if crate::trace::on("svc") && imm != 0x27 && imm != 0x1E {
-        crate::log!("svc {imm:#04x} {} at {} x0 {:#x} x1 {:#x} x2 {:#x} x3 {:#x}", name(imm), nxrt::dispatch::guest_name(pc), cpu.x[0], cpu.x[1], cpu.x[2], cpu.x[3]);
+        crate::log!(
+            "svc {imm:#04x} {} at {} x0 {:#x} x1 {:#x} x2 {:#x} x3 {:#x}",
+            name(imm),
+            nxrt::dispatch::guest_name(pc),
+            cpu.x[0],
+            cpu.x[1],
+            cpu.x[2],
+            cpu.x[3]
+        );
     }
     let m = crate::mem::get();
     match imm {
@@ -219,10 +248,19 @@ unsafe fn svc(cpu: &mut Cpu, imm: u32, pc: u64) -> bool {
             Err(r) => cpu.x[0] = r,
         },
         0x02 => cpu.x[0] = m.set_permission(cpu.x[0], cpu.x[1], cpu.x[2] as u32),
-        0x03 => cpu.x[0] = m.set_attribute(cpu.x[0], cpu.x[1], cpu.x[2] as u32, cpu.x[3] as u32, false),
+        0x03 => {
+            cpu.x[0] = m.set_attribute(cpu.x[0], cpu.x[1], cpu.x[2] as u32, cpu.x[3] as u32, false)
+        }
         0x80 => {
             let r = m.set_attribute(cpu.x[0], cpu.x[1], cpu.x[2] as u32, cpu.x[3] as u32, true);
-            crate::log_once!("svc 0x80", "svc SetGpuMemoryAttribute {:#x}+{:#x} {:#x}/{:#x}: recorded (result {r:#x})", cpu.x[0], cpu.x[1], cpu.x[3], cpu.x[2]);
+            crate::log_once!(
+                "svc 0x80",
+                "svc SetGpuMemoryAttribute {:#x}+{:#x} {:#x}/{:#x}: recorded (result {r:#x})",
+                cpu.x[0],
+                cpu.x[1],
+                cpu.x[3],
+                cpu.x[2]
+            );
             cpu.x[0] = r;
         }
         0x30 | 0x37 => {
@@ -241,7 +279,12 @@ unsafe fn svc(cpu: &mut Cpu, imm: u32, pc: u64) -> bool {
         }
         0x6F => {
             // GetSystemInfo(type, handle, subtype): newer SDKs abort at boot on 0
-            cpu.x[1] = system_info(cpu.x[1] as u32, cpu.x[3], m.info(6).unwrap_or(0), m.info(7).unwrap_or(0));
+            cpu.x[1] = system_info(
+                cpu.x[1] as u32,
+                cpu.x[3],
+                m.info(6).unwrap_or(0),
+                m.info(7).unwrap_or(0),
+            );
             cpu.x[0] = 0;
         }
         // GetDebugFutureThreadInfo / GetLastThreadInfo: no debugger
@@ -260,9 +303,15 @@ unsafe fn svc(cpu: &mut Cpu, imm: u32, pc: u64) -> bool {
             // MapSharedMemory(w0 handle, x1 address, x2 size, w3 permission)
             let (h, a, n) = (cpu.x[0] as u32, cpu.x[1], cpu.x[2]);
             cpu.x[0] = match shared_of(h) {
-                Some(s) if n <= crate::mem::PAGE * (s.size.div_ceil(crate::mem::PAGE)) && m.map_shared(a, n) => {
+                Some(s)
+                    if n <= crate::mem::PAGE * (s.size.div_ceil(crate::mem::PAGE))
+                        && m.map_shared(a, n) =>
+                {
                     s.views.lock().unwrap().push(a);
-                    crate::log_once!(format!("shm {h:#x}"), "MapSharedMemory {h:#x} at {a:#x}+{n:#x}");
+                    crate::log_once!(
+                        format!("shm {h:#x}"),
+                        "MapSharedMemory {h:#x} at {a:#x}+{n:#x}"
+                    );
                     0
                 }
                 Some(_) => crate::mem::R_INVALID_SIZE,
@@ -282,7 +331,12 @@ unsafe fn svc(cpu: &mut Cpu, imm: u32, pc: u64) -> bool {
         }
         0x15 => {
             // CreateTransferMemory(-> w1 handle; x1 address, x2 size, w3 permission): stays where it is
-            crate::log_once!("transfer", "CreateTransferMemory {:#x}+{:#x}: host services read it in place", cpu.x[1], cpu.x[2]);
+            crate::log_once!(
+                "transfer",
+                "CreateTransferMemory {:#x}+{:#x}: host services read it in place",
+                cpu.x[1],
+                cpu.x[2]
+            );
             cpu.x[0] = 0;
             cpu.x[1] = (0xD100_0000 | (TRANSFER.fetch_add(1, Ordering::Relaxed) & 0x7FFF)) as u64;
         }
@@ -296,7 +350,11 @@ unsafe fn svc(cpu: &mut Cpu, imm: u32, pc: u64) -> bool {
                 cpu.x[0] = 0;
                 cpu.x[1] = crate::ipc::open(Box::new(crate::ipc::Sm)) as u64;
             } else {
-                crate::log::gap(Gap::Service, &format!("port {name}"), "ConnectToNamedPort refused");
+                crate::log::gap(
+                    Gap::Service,
+                    &format!("port {name}"),
+                    "ConnectToNamedPort refused",
+                );
                 cpu.x[0] = 0xF201; // NotFound
             }
         }
@@ -315,7 +373,11 @@ unsafe fn svc(cpu: &mut Cpu, imm: u32, pc: u64) -> bool {
             crate::ipc::close(cpu.x[0] as u32);
             cpu.x[0] = 0;
         }
-        0x16 if cpu.x[0] as u32 & 0xFFF0_0000 == 0xD100_0000 || shared_of(cpu.x[0] as u32).is_some() => cpu.x[0] = 0,
+        0x16 if cpu.x[0] as u32 & 0xFFF0_0000 == 0xD100_0000
+            || shared_of(cpu.x[0] as u32).is_some() =>
+        {
+            cpu.x[0] = 0
+        }
         0x24 => {
             cpu.x[0] = 0;
             cpu.x[1] = PID;
@@ -324,8 +386,15 @@ unsafe fn svc(cpu: &mut Cpu, imm: u32, pc: u64) -> bool {
             // Break(w0 reason, x1 buffer, x2 size): the SDK's abort. Log its Result before the runtime's report.
             let (reason, buf, n) = (cpu.x[0], cpu.x[1], cpu.x[2]);
             if reason & 0x8000_0000 == 0 {
-                let res = if buf != 0 && n >= 4 && nxrt::mem::readable(buf, 4) { r32(buf) } else { 0 };
-                crate::log!("svcBreak reason {reason:#x} result {res:#x} at {}", nxrt::dispatch::guest_name(pc));
+                let res = if buf != 0 && n >= 4 && nxrt::mem::readable(buf, 4) {
+                    r32(buf)
+                } else {
+                    0
+                };
+                crate::log!(
+                    "svcBreak reason {reason:#x} result {res:#x} at {}",
+                    nxrt::dispatch::guest_name(pc)
+                );
                 crate::log::report_gaps("svcBreak");
             }
             return false;
@@ -440,16 +509,40 @@ mod tests {
     /// does not serve; the unhandled path no longer answers success.
     #[test]
     fn unserved_svcs_answer_as_turbo() {
-        assert_eq!((resource_limit(1), resource_limit(2), resource_limit(3), resource_limit(4)), (800, 800, 256, 64));
+        assert_eq!(
+            (
+                resource_limit(1),
+                resource_limit(2),
+                resource_limit(3),
+                resource_limit(4)
+            ),
+            (800, 800, 256, 64)
+        );
         assert_eq!(system_info(0, 0, 0xCD50_0000, 0), 0xCD50_0000);
-        assert_eq!((system_info(0, 1, 0, 0), system_info(0, 2, 0, 0), system_info(0, 3, 0, 0)), (0x1FB0_0000, 0x29D0_0000, 0x600_0000));
-        assert_eq!((system_info(1, 0, 0, 0x1234), system_info(1, 1, 0, 0)), (0x1234, 0x100_0000));
-        assert_eq!((system_info(2, 0, 0, 0), system_info(2, 1, 0, 0)), (1, 0x50));
+        assert_eq!(
+            (
+                system_info(0, 1, 0, 0),
+                system_info(0, 2, 0, 0),
+                system_info(0, 3, 0, 0)
+            ),
+            (0x1FB0_0000, 0x29D0_0000, 0x600_0000)
+        );
+        assert_eq!(
+            (system_info(1, 0, 0, 0x1234), system_info(1, 1, 0, 0)),
+            (0x1234, 0x100_0000)
+        );
+        assert_eq!(
+            (system_info(2, 0, 0, 0), system_info(2, 1, 0, 0)),
+            (1, 0x50)
+        );
         let mut cpu: Box<Cpu> = Box::new(unsafe { std::mem::zeroed() });
         assert!(unhandled(&mut cpu, 0x4B));
         assert_eq!(cpu.x[0], R_NOT_IMPLEMENTED);
         for imm in [0x02u8, 0x03, 0x2E, 0x2F, 0x30, 0x31, 0x37, 0x6F, 0x80] {
-            assert!(SERVED.contains(&imm), "{imm:#x} is served, not answered by the fallback");
+            assert!(
+                SERVED.contains(&imm),
+                "{imm:#x} is served, not answered by the fallback"
+            );
         }
     }
 }

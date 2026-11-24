@@ -74,15 +74,24 @@ fn aspect_of() -> f32 {
     }
     let mut it = a.split(':').map(|v| v.trim().parse::<i32>().unwrap_or(0));
     let (w, h) = (it.next().unwrap_or(0), it.next().unwrap_or(0));
-    let r = if w > 0 && h > 0 { w as f32 / h as f32 } else { 0.0 };
+    let r = if w > 0 && h > 0 {
+        w as f32 / h as f32
+    } else {
+        0.0
+    };
     if r > 0.0 && r < R169 {
         return r; // taller: the vertplus set (1.8.0 has its FOV site)
     }
-    if r > R169 + 0.01 { r } else { 0.0 }
+    if r > R169 + 0.01 {
+        r
+    } else {
+        0.0
+    }
 }
 
 pub(super) fn install(page: u64) {
-    let al = |off: u64, name: &str, f: nxrt::hostfn::HostFn| nxrt::hostfn::alias(page + off, name, f);
+    let al =
+        |off: u64, name: &str, f: nxrt::hostfn::HostFn| nxrt::hostfn::alias(page + off, name, f);
     al(ASPECT_HOST, "gamefix:mkw_aspect", aspect_host);
     al(UI_PROJ_HOST, "gamefix:mkw_ui_proj", ui_proj);
     al(UI_ROWS2_HOST, "gamefix:mkw_ui_rows2", ui_rows2);
@@ -107,7 +116,11 @@ pub(super) fn install(page: u64) {
     ASPECT_OUT.store(out.to_bits(), Ordering::Relaxed);
     ASPECT_SCALE.store((out / R169).to_bits(), Ordering::Relaxed);
     if out > 0.0 {
-        crate::log!("gamefix: camera aspect {out:.3}, x{:.3} over 16:9 (NXRS_MKW_ASPECT {})", out / R169, env_str("NXRS_MKW_ASPECT"));
+        crate::log!(
+            "gamefix: camera aspect {out:.3}, x{:.3} over 16:9 (NXRS_MKW_ASPECT {})",
+            out / R169,
+            env_str("NXRS_MKW_ASPECT")
+        );
     }
 }
 
@@ -126,19 +139,32 @@ fn aspect_widen(w: f32, h: f32) -> f32 {
         SPLIT_AT.store(ticks60() + 1, Ordering::Relaxed);
     }
     static SEEN: Mutex<Vec<(u32, u32)>> = Mutex::new(Vec::new());
-    let mut seen = SEEN.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut seen = SEEN
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if seen.len() < 16 && !seen.contains(&(w.to_bits(), h.to_bits())) {
         seen.push((w.to_bits(), h.to_bits()));
-        crate::log!("gamefix: camera view {w:.0}x{h:.0} ({a:.3}): {}", if on { "fitted" } else { "kept" });
+        crate::log!(
+            "gamefix: camera view {w:.0}x{h:.0} ({a:.3}): {}",
+            if on { "fitted" } else { "kept" }
+        );
     }
-    if on { f(&ASPECT_SCALE) } else { 1.0 }
+    if on {
+        f(&ASPECT_SCALE)
+    } else {
+        1.0
+    }
 }
 
 /// In place of fdiv s0, s0, s1: the camera's aspect, fitted. The first projection's (return main+0x8a6d8) keeps its
 /// 16:9 calibration on a taller output (the race camera's FOV is corrected at main+0x894a4).
 unsafe fn aspect_host(c: *mut Cpu) {
     let (w, h) = (s_of((*c).v[0]), s_of((*c).v[1]));
-    let mut scale = if f(&ASPECT_OUT) > 0.0 { aspect_widen(w, h) } else { 1.0 };
+    let mut scale = if f(&ASPECT_OUT) > 0.0 {
+        aspect_widen(w, h)
+    } else {
+        1.0
+    };
     if scale < 1.0 && (*c).x[30] == main_addr(ASPECT_FIRST_LR) {
         scale = 1.0;
     }
@@ -168,7 +194,12 @@ unsafe fn camera_fov(c: *mut Cpu) {
 fn display_fit(wh: u64) -> u64 {
     let (w, h) = (wh as u32, (wh >> 32) as u32);
     let (out, scale) = aspect();
-    if !(scale > 0.0) || scale == 1.0 || w == 0 || h == 0 || (w as f32 / h as f32 - R169).abs() > 0.01 {
+    if !(scale > 0.0)
+        || scale == 1.0
+        || w == 0
+        || h == 0
+        || (w as f32 / h as f32 - R169).abs() > 0.01
+    {
         return wh;
     }
     let (mut fw, mut fh) = (w as f32, h as f32);
@@ -178,7 +209,11 @@ fn display_fit(wh: u64) -> u64 {
         fh = fw / out;
     }
     let (ow, oh) = output_wh();
-    let fit = if ow != 0 && oh != 0 { 1.0f32.min((ow as f32 / fw).min(oh as f32 / fh)) } else { 1.0 };
+    let fit = if ow != 0 && oh != 0 {
+        1.0f32.min((ow as f32 / fw).min(oh as f32 / fh))
+    } else {
+        1.0
+    };
     let nw = ((fw * fit + 0.5) as u32 + 1) & !1;
     let nh = ((fh * fit + 0.5) as u32 + 1) & !1;
     nw as u64 | (nh as u64) << 32
@@ -188,7 +223,13 @@ fn display_note(wh: u64, fitted: u64) {
     static LOGGED: AtomicI32 = AtomicI32::new(0);
     if fitted != wh && LOGGED.fetch_add(1, Ordering::Relaxed) == 0 {
         let (ow, oh) = output_wh();
-        crate::log!("gamefix: display {}x{} made {}x{} (NXRS_MKW_ASPECT, output {ow}x{oh})", wh as u32, wh >> 32, fitted as u32, fitted >> 32);
+        crate::log!(
+            "gamefix: display {}x{} made {}x{} (NXRS_MKW_ASPECT, output {ow}x{oh})",
+            wh as u32,
+            wh >> 32,
+            fitted as u32,
+            fitted >> 32
+        );
     }
 }
 
@@ -228,7 +269,15 @@ fn put_mat(a: u64, m: &[f32; 16]) {
 
 /// x and y unskewed and an aspect m[5] / m[0] of 16:9 (row-major, x row first)
 fn is_16x9(m: &[f32; 16]) -> bool {
-    if m[1] != 0.0 || m[2] != 0.0 || m[4] != 0.0 || m[6] != 0.0 || m[8] != 0.0 || m[9] != 0.0 || m[12] != 0.0 || m[13] != 0.0 {
+    if m[1] != 0.0
+        || m[2] != 0.0
+        || m[4] != 0.0
+        || m[6] != 0.0
+        || m[8] != 0.0
+        || m[9] != 0.0
+        || m[12] != 0.0
+        || m[13] != 0.0
+    {
         return false;
     }
     let a = if m[0] != 0.0 { m[5] / m[0] } else { 0.0 };
@@ -254,7 +303,11 @@ fn ui_full_screen(c: &Cpu, tx: &mut f32) -> i32 {
     let mtx = if text { c.x[21] + 0x70 } else { c.x[23] };
     let size = if text { c.x[21] + 0x50 } else { c.x[22] };
     *tx = 0.0;
-    if size != mtx.wrapping_sub(0x20) || mtx & 3 != 0 || mtx < 0x70 || !guest::readable(mtx - 0x70, 0xa0) {
+    if size != mtx.wrapping_sub(0x20)
+        || mtx & 3 != 0
+        || mtx < 0x70
+        || !guest::readable(mtx - 0x70, 0xa0)
+    {
         return -1;
     }
     let g: [f32; 4] = [guest::rd(mtx), 0.0, 0.0, guest::rd(mtx + 12)];
@@ -298,10 +351,13 @@ fn ui_tall_backdrop(c: &Cpu) -> bool {
     }
     let (s0, s1): (f32, f32) = (guest::rd(c.x[22]), guest::rd(c.x[22] + 4));
     let name = mtx + 0x40;
-    if (s0 - 1080.0).abs() < 0.01 && (s1 - 1080.0).abs() < 0.01 && name_at(name, 8) == b"P_BG_00\0" {
+    if (s0 - 1080.0).abs() < 0.01 && (s1 - 1080.0).abs() < 0.01 && name_at(name, 8) == b"P_BG_00\0"
+    {
         return true;
     }
-    (s0 - 100.0).abs() < 0.01 && (900.0..=1080.0).contains(&s1) && (name_at(name, 9) == b"P_Cap_00\0" || name_at(name, 9) == b"P_Cap_01\0")
+    (s0 - 100.0).abs() < 0.01
+        && (900.0..=1080.0).contains(&s1)
+        && (name_at(name, 9) == b"P_Cap_00\0" || name_at(name, 9) == b"P_Cap_01\0")
 }
 
 const UI_MASK_REST: f32 = 900.0;
@@ -321,17 +377,27 @@ fn ui_list_mask(pane: u64) -> i32 {
         return 0;
     }
     let parent = pane_parent(pane);
-    if parent == 0 || !name_is(pane_name(parent), "N_Root_02", 24) || pane_parent(parent) == 0 || pane_parent(pane_parent(parent)) != 0 {
+    if parent == 0
+        || !name_is(pane_name(parent), "N_Root_02", 24)
+        || pane_parent(parent) == 0
+        || pane_parent(pane_parent(parent)) != 0
+    {
         return 0;
     }
-    if n[7] == b'0' { -1 } else { 1 }
+    if n[7] == b'0' {
+        -1
+    } else {
+        1
+    }
 }
 
 /// The masks placed by pane_matrix (add) and whether a drawn pane is one (query), by address and name.
 fn ui_mask_mark(pane: u64, add: bool) -> bool {
     static SET: Mutex<(Vec<(u64, Vec<u8>)>, usize)> = Mutex::new((Vec::new(), 0));
     let name = name_at(pane_name(pane), 24);
-    let mut g = SET.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut g = SET
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     if g.0.iter().any(|(p, n)| *p == pane && *n == name) {
         return true;
     }
@@ -441,7 +507,11 @@ unsafe fn ui_proj(c: *mut Cpu) {
         put_mat(s, &m);
     }
     let mut tx = 0.0;
-    let full = if f(&ASPECT_OUT) > 0.0 { ui_full_screen(&*c, &mut tx) } else { -1 };
+    let full = if f(&ASPECT_OUT) > 0.0 {
+        ui_full_screen(&*c, &mut tx)
+    } else {
+        -1
+    };
     if (full == 1 || ui_tall_backdrop(&*c)) && !crate::services::movie::playing() {
         if scale < 1.0 {
             m[5] /= scale;
@@ -460,7 +530,8 @@ unsafe fn ui_proj(c: *mut Cpu) {
         m[3] *= scale;
     }
     let at = SPLIT_AT.load(Ordering::Relaxed);
-    let moved = scale > 1.0 && full == 0 && at != 0 && ticks60() + 1 - at < 30 && (tx > 1.0 || tx < -1.0);
+    let moved =
+        scale > 1.0 && full == 0 && at != 0 && ticks60() + 1 - at < 30 && (tx > 1.0 || tx < -1.0);
     if moved {
         let d = (if tx > 0.0 { 0.5 } else { -0.5 }) * (1.0 - 1.0 / scale);
         for i in 0..4 {
@@ -504,7 +575,11 @@ unsafe fn fx_view(c: *mut Cpu) {
     let f2 = if f1 != 0 { guest::r64(f1) } else { 0 };
     let fg = if FX_GROUP_FRAME == 1 { f1 } else { f2 };
     let lr2 = if f2 != 0 { guest::r64(f2 + 8) } else { 0 };
-    let group = if fg != 0 { guest::r64(fg + 8 * FX_GROUP_WORD) } else { 0 };
+    let group = if fg != 0 {
+        guest::r64(fg + 8 * FX_GROUP_WORD)
+    } else {
+        0
+    };
     let wide = all || (lr2 == main_addr(FX_GROUP_LR) && group == FX_SCREEN_GROUP);
     if !wide {
         return;

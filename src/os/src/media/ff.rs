@@ -26,7 +26,15 @@ impl Default for FfPicture {
 }
 
 extern "C" {
-    fn nxff_open(codec: c_int, extra: *const u8, extra_len: c_int, rate: c_int, channels: c_int, err: *mut c_char, errlen: c_int) -> *mut c_void;
+    fn nxff_open(
+        codec: c_int,
+        extra: *const u8,
+        extra_len: c_int,
+        rate: c_int,
+        channels: c_int,
+        err: *mut c_char,
+        errlen: c_int,
+    ) -> *mut c_void;
     fn nxff_close(d: *mut c_void);
     fn nxff_send(d: *mut c_void, data: *const u8, len: c_int, pts: i64) -> c_int;
     fn nxff_picture(d: *mut c_void, out: *mut FfPicture) -> c_int;
@@ -38,21 +46,42 @@ extern "C" {
 
 /// FFmpeg's version ("6.1.1-3ubuntu5"), for the logs.
 pub fn version() -> String {
-    unsafe { CStr::from_ptr(nxff_version()) }.to_string_lossy().into_owned()
+    unsafe { CStr::from_ptr(nxff_version()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn error(e: c_int) -> String {
     let mut b = [0 as c_char; 128];
     unsafe { nxff_error(e, b.as_mut_ptr(), b.len() as c_int) };
-    unsafe { CStr::from_ptr(b.as_ptr()) }.to_string_lossy().into_owned()
+    unsafe { CStr::from_ptr(b.as_ptr()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 fn open(codec: c_int, extra: &[u8], rate: u32, channels: u32) -> Result<*mut c_void, String> {
     let mut err = [0 as c_char; 256];
-    let d = unsafe { nxff_open(codec, extra.as_ptr(), extra.len() as c_int, rate as c_int, channels as c_int, err.as_mut_ptr(), err.len() as c_int) };
+    let d = unsafe {
+        nxff_open(
+            codec,
+            extra.as_ptr(),
+            extra.len() as c_int,
+            rate as c_int,
+            channels as c_int,
+            err.as_mut_ptr(),
+            err.len() as c_int,
+        )
+    };
     if d.is_null() {
-        let what = if codec == 0 { "the H.264 decoder" } else { "the AAC decoder" };
-        return Err(format!("{what} (FFmpeg): {}", unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()));
+        let what = if codec == 0 {
+            "the H.264 decoder"
+        } else {
+            "the AAC decoder"
+        };
+        return Err(format!(
+            "{what} (FFmpeg): {}",
+            unsafe { CStr::from_ptr(err.as_ptr()) }.to_string_lossy()
+        ));
     }
     Ok(d)
 }
@@ -76,7 +105,12 @@ impl Drop for H264 {
 
 impl H264 {
     pub fn new() -> Result<H264, String> {
-        Ok(H264 { d: open(0, &[], 0, 0)?, out: Default::default(), errors: 0, held: Vec::new() })
+        Ok(H264 {
+            d: open(0, &[], 0, 0)?,
+            out: Default::default(),
+            errors: 0,
+            held: Vec::new(),
+        })
     }
 
     fn collect(&mut self) {
@@ -91,17 +125,47 @@ impl H264 {
                 }
             }
             let (w, h) = (p.w.max(0) as usize, p.h.max(0) as usize);
-            if w == 0 || h == 0 || p.stride[0] <= 0 || p.stride[1] <= 0 || (p.layout == 0 && p.stride[2] <= 0) {
+            if w == 0
+                || h == 0
+                || p.stride[0] <= 0
+                || p.stride[1] <= 0
+                || (p.layout == 0 && p.stride[2] <= 0)
+            {
                 self.errors += 1;
                 continue;
             }
             let (cw, ch) = (w.div_ceil(2), h.div_ceil(2));
-            let plane = |i: usize, rows: usize| unsafe { std::slice::from_raw_parts(p.plane[i], p.stride[i] as usize * (rows - 1) + if i == 0 { w } else { cw * if p.layout == 1 { 2 } else { 1 } }) };
+            let plane = |i: usize, rows: usize| unsafe {
+                std::slice::from_raw_parts(
+                    p.plane[i],
+                    p.stride[i] as usize * (rows - 1)
+                        + if i == 0 {
+                            w
+                        } else {
+                            cw * if p.layout == 1 { 2 } else { 1 }
+                        },
+                )
+            };
             let mut pic = if p.layout == 1 {
                 // one stride for both planes in Picture::from_nv12: libavcodec gives NV12 planes equal strides
-                Picture::from_nv12(w, h, plane(0, h), plane(1, ch), p.stride[0].min(p.stride[1]) as usize)
+                Picture::from_nv12(
+                    w,
+                    h,
+                    plane(0, h),
+                    plane(1, ch),
+                    p.stride[0].min(p.stride[1]) as usize,
+                )
             } else {
-                Picture::from_i420(w, h, plane(0, h), p.stride[0] as usize, plane(1, ch), p.stride[1] as usize, plane(2, ch), p.stride[2] as usize)
+                Picture::from_i420(
+                    w,
+                    h,
+                    plane(0, h),
+                    p.stride[0] as usize,
+                    plane(1, ch),
+                    p.stride[1] as usize,
+                    plane(2, ch),
+                    p.stride[2] as usize,
+                )
             };
             pic.bt709 = match p.matrix {
                 1 => Some(true),
@@ -164,7 +228,8 @@ impl H264 {
 
 /// Whether an Annex B unit holds a coded slice (NAL types 1 and 5), not only delimiters, parameter sets or SEI.
 fn has_slice(au: &[u8]) -> bool {
-    au.windows(4).any(|w| w[..3] == [0, 0, 1] && matches!(w[3] & 0x1f, 1 | 5))
+    au.windows(4)
+        .any(|w| w[..3] == [0, 0, 1] && matches!(w[3] & 0x1f, 1 | 5))
 }
 
 /// AAC (raw frames, the AudioSpecificConfig given) to interleaved PCM16 in `channels` channels.
@@ -184,7 +249,11 @@ impl Drop for Aac {
 
 impl Aac {
     pub fn new(rate: u32, channels: u32, asc: &[u8]) -> Result<Aac, String> {
-        Ok(Aac { d: open(1, asc, rate, channels)?, channels, rate })
+        Ok(Aac {
+            d: open(1, asc, rate, channels)?,
+            channels,
+            rate,
+        })
     }
 
     /// One raw AAC frame; the PCM16 bytes it gives (may be none at the start).
@@ -198,12 +267,23 @@ impl Aac {
                 return Err(error(r));
             }
             loop {
-                let n = unsafe { nxff_audio(self.d, buf.as_mut_ptr(), buf.len() as c_int, self.channels as c_int) };
+                let n = unsafe {
+                    nxff_audio(
+                        self.d,
+                        buf.as_mut_ptr(),
+                        buf.len() as c_int,
+                        self.channels as c_int,
+                    )
+                };
                 if n == 0 {
                     break;
                 }
                 if n < 0 {
-                    return Err(if n == -2 { "an AAC frame larger than 8192 samples".into() } else { error(n) });
+                    return Err(if n == -2 {
+                        "an AAC frame larger than 8192 samples".into()
+                    } else {
+                        error(n)
+                    });
                 }
                 for s in &buf[..n as usize] {
                     pcm.extend_from_slice(&s.to_le_bytes());
@@ -227,9 +307,14 @@ impl Aac {
 
 /// The AudioSpecificConfig for AAC-LC of a rate and channel count (when a stream brings none).
 pub fn aac_lc_config(rate: u32, channels: u32) -> [u8; 2] {
-    const RATES: [u32; 13] = [96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350];
+    const RATES: [u32; 13] = [
+        96000, 88200, 64000, 48000, 44100, 32000, 24000, 22050, 16000, 12000, 11025, 8000, 7350,
+    ];
     let fi = RATES.iter().position(|&r| r == rate).unwrap_or(3) as u8;
-    [(2 << 3) | (fi >> 1), ((fi & 1) << 7) | (((channels & 15) as u8) << 3)]
+    [
+        (2 << 3) | (fi >> 1),
+        ((fi & 1) << 7) | (((channels & 15) as u8) << 3),
+    ]
 }
 
 #[cfg(test)]
@@ -241,7 +326,10 @@ mod tests {
     fn h264_clip_matches_the_reference() {
         let mut h = super::H264::new().expect("FFmpeg's H.264 decoder");
         let _ = h.decode(&[0, 0, 0, 1, 9, 0xf0], 0);
-        assert!(h.out.is_empty(), "a lone access unit delimiter gives no picture");
+        assert!(
+            h.out.is_empty(),
+            "a lone access unit delimiter gives no picture"
+        );
         let aus = h264_access_units(&clip("clip_h264.h264"));
         let mut got = vec![];
         for (i, au) in aus.iter().enumerate() {
@@ -262,7 +350,12 @@ mod tests {
         // each picture carries its own unit's time (units go in decode order, so the times are those of the units)
         let mut t: Vec<i64> = got.iter().map(|p| p.pts).collect();
         t.sort();
-        assert_eq!(t, (0..want.len() as i64).map(|i| i * 41_666).collect::<Vec<_>>());
+        assert_eq!(
+            t,
+            (0..want.len() as i64)
+                .map(|i| i * 41_666)
+                .collect::<Vec<_>>()
+        );
     }
 
     /// A 0.2 s 440 Hz stereo tone (ffmpeg's AAC-LC encoder, ADTS): 1024 samples a frame, two channels, not silent.
@@ -274,15 +367,25 @@ mod tests {
         let (mut o, mut frames, mut pcm) = (0usize, 0, vec![]);
         while o + 7 <= b.len() {
             assert_eq!(b[o], 0xff);
-            let len = ((b[o + 3] as usize & 3) << 11) | (b[o + 4] as usize) << 3 | (b[o + 5] as usize) >> 5;
+            let len = ((b[o + 3] as usize & 3) << 11)
+                | (b[o + 4] as usize) << 3
+                | (b[o + 5] as usize) >> 5;
             let hdr = if b[o + 1] & 1 == 0 { 9 } else { 7 };
             pcm.extend(a.decode(&b[o + hdr..o + len]).unwrap());
             o += len;
             frames += 1;
         }
         assert!(frames >= 9);
-        assert_eq!(pcm.len(), frames * 1024 * 2 * 2, "1024 stereo PCM16 samples a frame");
-        let peak = pcm.chunks(2).map(|s| i16::from_le_bytes([s[0], s[1]]).unsigned_abs()).max().unwrap();
+        assert_eq!(
+            pcm.len(),
+            frames * 1024 * 2 * 2,
+            "1024 stereo PCM16 samples a frame"
+        );
+        let peak = pcm
+            .chunks(2)
+            .map(|s| i16::from_le_bytes([s[0], s[1]]).unsigned_abs())
+            .max()
+            .unwrap();
         assert!(peak > 3000, "a tone, not silence: peak {peak}");
         assert!(!super::version().is_empty());
     }

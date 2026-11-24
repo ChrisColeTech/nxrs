@@ -19,7 +19,11 @@ use std::sync::Mutex;
 
 /// Answers a command quietly with success (one log line per service and command).
 fn quiet(ctx: &mut Ctx, name: &str) -> u32 {
-    crate::log_once!(format!("system {name} {}", ctx.cmd()), "ipc: {name} #{}: success with no output (the host has nothing more to say)", ctx.cmd());
+    crate::log_once!(
+        format!("system {name} {}", ctx.cmd()),
+        "ipc: {name} #{}: success with no output (the host has nothing more to say)",
+        ctx.cmd()
+    );
     0
 }
 
@@ -32,33 +36,52 @@ pub struct Power {
     pub charging: bool,
 }
 
-const MAINS: Power = Power { percent: 100, charging: true };
+const MAINS: Power = Power {
+    percent: 100,
+    charging: true,
+};
 
 #[cfg(windows)]
 pub fn power() -> Power {
     use windows_sys::Win32::System::Power::{GetSystemPowerStatus, SYSTEM_POWER_STATUS};
     let mut s: SYSTEM_POWER_STATUS = unsafe { std::mem::zeroed() };
     // BatteryFlag 128: no system battery; 255 / percent 255: unknown
-    if unsafe { GetSystemPowerStatus(&mut s) } == 0 || s.BatteryFlag & 128 != 0 || s.BatteryLifePercent > 100 {
+    if unsafe { GetSystemPowerStatus(&mut s) } == 0
+        || s.BatteryFlag & 128 != 0
+        || s.BatteryLifePercent > 100
+    {
         return MAINS;
     }
-    Power { percent: s.BatteryLifePercent as u32, charging: s.ACLineStatus == 1 }
+    Power {
+        percent: s.BatteryLifePercent as u32,
+        charging: s.ACLineStatus == 1,
+    }
 }
 
 /// Linux: the first battery of /sys/class/power_supply, on mains when a Mains supply is online (else by the
 /// battery's own status).
 #[cfg(not(windows))]
 pub fn power() -> Power {
-    let num = |p: std::path::PathBuf| std::fs::read_to_string(p).ok().and_then(|s| s.trim().parse::<u32>().ok());
+    let num = |p: std::path::PathBuf| {
+        std::fs::read_to_string(p)
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok())
+    };
     let (mut bat, mut mains) = (None::<Power>, None::<bool>);
     if let Ok(d) = std::fs::read_dir("/sys/class/power_supply") {
         for e in d.flatten() {
             let p = e.path();
-            match std::fs::read_to_string(p.join("type")).unwrap_or_default().trim() {
+            match std::fs::read_to_string(p.join("type"))
+                .unwrap_or_default()
+                .trim()
+            {
                 "Battery" if bat.is_none() => {
                     if let Some(c) = num(p.join("capacity")).filter(|c| *c <= 100) {
                         let st = std::fs::read_to_string(p.join("status")).unwrap_or_default();
-                        bat = Some(Power { percent: c, charging: st.trim() != "Discharging" });
+                        bat = Some(Power {
+                            percent: c,
+                            charging: st.trim() != "Discharging",
+                        });
                     }
                 }
                 "Mains" => mains = Some(mains.unwrap_or(false) || num(p.join("online")) == Some(1)),
@@ -134,8 +157,13 @@ pub fn pc_name() -> String {
     #[cfg(windows)]
     let n = std::env::var("COMPUTERNAME").ok();
     #[cfg(not(windows))]
-    let n = std::fs::read_to_string("/proc/sys/kernel/hostname").ok().or_else(|| std::env::var("HOSTNAME").ok());
-    let n = n.map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).unwrap_or_else(|| "nxrs".into());
+    let n = std::fs::read_to_string("/proc/sys/kernel/hostname")
+        .ok()
+        .or_else(|| std::env::var("HOSTNAME").ok());
+    let n = n
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "nxrs".into());
     let mut end = n.len().min(0x7f);
     while !n.is_char_boundary(end) {
         end -= 1;
@@ -194,14 +222,23 @@ impl Service for Set {
 /// The firmware the host reports (FirmwareVersion, 0x100 bytes): 12.1.0, or 20.1.0 to a Switch 2 program.
 pub fn firmware(switch2: bool) -> [u8; 0x100] {
     let mut f = [0u8; 0x100];
-    let (maj, min, ver) = if switch2 { (20, 1, "20.1.0") } else { (12, 1, "12.1.0") };
+    let (maj, min, ver) = if switch2 {
+        (20, 1, "20.1.0")
+    } else {
+        (12, 1, "12.1.0")
+    };
     f[..3].copy_from_slice(&[maj, min, 0]);
     f[4..6].copy_from_slice(&[maj, min]);
-    let put = |f: &mut [u8; 0x100], at: usize, s: &str| f[at..at + s.len()].copy_from_slice(s.as_bytes());
+    let put =
+        |f: &mut [u8; 0x100], at: usize, s: &str| f[at..at + s.len()].copy_from_slice(s.as_bytes());
     put(&mut f, 0x08, "NintendoSDK Firmware for NX");
     put(&mut f, 0x28, &format!("{ver}-1.0"));
     put(&mut f, 0x68, ver);
-    put(&mut f, 0x80, &format!("NintendoSDK Firmware for NX {ver}-1.0"));
+    put(
+        &mut f,
+        0x80,
+        &format!("NintendoSDK Firmware for NX {ver}-1.0"),
+    );
     f
 }
 
@@ -252,7 +289,11 @@ impl Service for Fatal {
     fn call(&mut self, ctx: &mut Ctx) -> u32 {
         // ThrowFatal (0), ThrowFatalWithPolicy (1), ThrowFatalWithCpuContext (2): the result first
         let r = ctx.u32(0);
-        let msg = format!("the game called fatal:u #{} with result {r:#x} (error {})", ctx.cmd(), error_code(r));
+        let msg = format!(
+            "the game called fatal:u #{} with result {r:#x} (error {})",
+            ctx.cmd(),
+            error_code(r)
+        );
         #[cfg(test)]
         {
             *FATAL.lock().unwrap() = Some(msg);
@@ -269,13 +310,17 @@ impl Service for Fatal {
 pub fn os_random(out: &mut [u8]) -> bool {
     #[cfg(windows)]
     {
-        use windows_sys::Win32::Security::Cryptography::{BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG};
+        use windows_sys::Win32::Security::Cryptography::{
+            BCryptGenRandom, BCRYPT_USE_SYSTEM_PREFERRED_RNG,
+        };
         out.chunks_mut(u32::MAX as usize).all(|c| unsafe { BCryptGenRandom(std::ptr::null_mut(), c.as_mut_ptr(), c.len() as u32, BCRYPT_USE_SYSTEM_PREFERRED_RNG) } >= 0)
     }
     #[cfg(not(windows))]
     {
         use std::io::Read;
-        std::fs::File::open("/dev/urandom").and_then(|mut f| f.read_exact(out)).is_ok()
+        std::fs::File::open("/dev/urandom")
+            .and_then(|mut f| f.read_exact(out))
+            .is_ok()
     }
 }
 
@@ -377,7 +422,9 @@ impl Service for BcatService {
     fn call(&mut self, ctx: &mut Ctx) -> u32 {
         match ctx.cmd() {
             // RequestSyncDeliveryCache(WithDirectoryName), the ByApplicationId forms
-            10100 | 10101 | 20100 | 20101 | 20300 | 20301 => ctx.object(BcatProgress { events: vec![] }),
+            10100 | 10101 | 20100 | 20101 | 20300 | 20301 => {
+                ctx.object(BcatProgress { events: vec![] })
+            }
             _ => return quiet(ctx, "IBcatService"),
         }
         0
@@ -504,10 +551,18 @@ impl Service for Aoc {
                 if off > v.len() {
                     return R_AOC_OFFSET;
                 }
-                let n = count.min((ctx.buf_out(0).size / 4) as usize).min(v.len() - off);
-                let b: Vec<u8> = v[off..off + n].iter().flat_map(|i| i.to_le_bytes()).collect();
+                let n = count
+                    .min((ctx.buf_out(0).size / 4) as usize)
+                    .min(v.len() - off);
+                let b: Vec<u8> = v[off..off + n]
+                    .iter()
+                    .flat_map(|i| i.to_le_bytes())
+                    .collect();
                 ctx.write_out(0, &b);
-                crate::log_once!("aoc ipc list", "aoc: ListAddOnContent offset {off} count {count} -> {n}");
+                crate::log_once!(
+                    "aoc ipc list",
+                    "aoc: ListAddOnContent offset {off} count {count} -> {n}"
+                );
                 ctx.push_u32(n as u32);
             }
             // GetAddOnContentBaseId(ByApplicationId)
@@ -569,7 +624,14 @@ mod tests {
     use crate::ipc::hipc::{self, Buf, Builder, T_REQUEST};
 
     fn send(h: u32, cmd: u32, data: Vec<u8>, b: Vec<Buf>) -> hipc::Response {
-        let mut m = Builder { ty: T_REQUEST, cmd, data, b, ..Default::default() }.build();
+        let mut m = Builder {
+            ty: T_REQUEST,
+            cmd,
+            data,
+            b,
+            ..Default::default()
+        }
+        .build();
         crate::ipc::process(h, &mut m);
         hipc::parse_response(&m, false).unwrap()
     }
@@ -580,7 +642,11 @@ mod tests {
         u64::from_le_bytes(r.data[o..o + 8].try_into().unwrap())
     }
     fn out(v: &mut [u8]) -> Vec<Buf> {
-        vec![Buf { addr: v.as_mut_ptr() as u64, size: v.len() as u64, tag: 0 }]
+        vec![Buf {
+            addr: v.as_mut_ptr() as u64,
+            size: v.len() as u64,
+            tag: 0,
+        }]
     }
     fn open(name: &str) -> u32 {
         super::register();
@@ -611,20 +677,34 @@ mod tests {
     fn set_and_set_sys_answer_as_turbo() {
         use crate::services::settings::code;
         let h = open("set");
-        assert_eq!(u64_at(&send(h, 0, vec![], vec![]), 0), crate::services::oe::language_code());
+        assert_eq!(
+            u64_at(&send(h, 0, vec![], vec![]), 0),
+            crate::services::oe::language_code()
+        );
         let mut b = [0u8; 8 * 20];
         let r = send(h, 1, vec![], out(&mut b));
         assert_eq!(u32_at(&r, 0), 15);
         assert_eq!(&b[..5], b"ja\0\0\0");
         assert_eq!(u64::from_le_bytes(b[8..16].try_into().unwrap()), code(1));
-        assert_eq!(&b[15 * 8..15 * 8 + 8], &[0; 8], "GetAvailableLanguageCodes stops at 15");
+        assert_eq!(
+            &b[15 * 8..15 * 8 + 8],
+            &[0; 8],
+            "GetAvailableLanguageCodes stops at 15"
+        );
         let r = send(h, 5, vec![], out(&mut b));
         assert_eq!(u32_at(&r, 0), 18);
         assert_eq!(&b[17 * 8..17 * 8 + 5], b"pt-BR");
-        assert_eq!(u64_at(&send(h, 2, 12u32.to_le_bytes().to_vec(), vec![]), 0), code(12), "MakeLanguageCode en-GB");
+        assert_eq!(
+            u64_at(&send(h, 2, 12u32.to_le_bytes().to_vec(), vec![]), 0),
+            code(12),
+            "MakeLanguageCode en-GB"
+        );
         assert_eq!(u32_at(&send(h, 3, vec![], vec![]), 0), 15);
         assert_eq!(u32_at(&send(h, 6, vec![], vec![]), 0), 18);
-        assert_eq!(u32_at(&send(h, 4, vec![], vec![]), 0), crate::services::oe::region_code());
+        assert_eq!(
+            u32_at(&send(h, 4, vec![], vec![]), 0),
+            crate::services::oe::region_code()
+        );
         assert_eq!(u32_at(&send(h, 8, vec![], vec![]), 0), 0, "not a kiosk");
         let mut km = [0xAAu8; 0x40];
         assert_eq!(send(h, 7, vec![], out(&mut km)).result, 0);
@@ -640,15 +720,35 @@ mod tests {
         let mut fw = [0u8; 0x100];
         assert_eq!(send(s, 3, vec![], out(&mut fw)).result, 0);
         assert_eq!(&fw[..8], &[12, 1, 0, 0, 12, 1, 0, 0]);
-        assert_eq!(crate::guest::cstr(fw.as_ptr() as u64 + 0x08, 0x20), "NintendoSDK Firmware for NX");
-        assert_eq!(crate::guest::cstr(fw.as_ptr() as u64 + 0x28, 0x40), "12.1.0-1.0");
-        assert_eq!(crate::guest::cstr(fw.as_ptr() as u64 + 0x68, 0x18), "12.1.0");
-        assert_eq!(crate::guest::cstr(fw.as_ptr() as u64 + 0x80, 0x80), "NintendoSDK Firmware for NX 12.1.0-1.0");
-        assert_eq!(&super::firmware(true)[..3], &[20, 1, 0], "a Switch 2 program sees a Switch 2 firmware");
+        assert_eq!(
+            crate::guest::cstr(fw.as_ptr() as u64 + 0x08, 0x20),
+            "NintendoSDK Firmware for NX"
+        );
+        assert_eq!(
+            crate::guest::cstr(fw.as_ptr() as u64 + 0x28, 0x40),
+            "12.1.0-1.0"
+        );
+        assert_eq!(
+            crate::guest::cstr(fw.as_ptr() as u64 + 0x68, 0x18),
+            "12.1.0"
+        );
+        assert_eq!(
+            crate::guest::cstr(fw.as_ptr() as u64 + 0x80, 0x80),
+            "NintendoSDK Firmware for NX 12.1.0-1.0"
+        );
+        assert_eq!(
+            &super::firmware(true)[..3],
+            &[20, 1, 0],
+            "a Switch 2 program sees a Switch 2 firmware"
+        );
         assert_eq!(u32_at(&send(s, 23, vec![], vec![]), 0), 0, "colour set");
         let mut item = [0xAAu8; 8];
         let r = send(s, 37, vec![], out(&mut item));
-        assert_eq!((r.result, u64_at(&r, 0), item), (0, 0, [0; 8]), "settings item size 0");
+        assert_eq!(
+            (r.result, u64_at(&r, 0), item),
+            (0, 0, [0; 8]),
+            "settings item size 0"
+        );
     }
 
     /// fatal:u ends the run with the game's result (Turbo: "The game called fatal:u (code ...)").
@@ -665,7 +765,10 @@ mod tests {
     #[test]
     fn spl_csrng_mm() {
         let h = open("spl:");
-        assert_eq!(u64_at(&send(h, 0, 5u32.to_le_bytes().to_vec(), vec![]), 0), 0);
+        assert_eq!(
+            u64_at(&send(h, 0, 5u32.to_le_bytes().to_vec(), vec![]), 0),
+            0
+        );
         let mut r1 = [0u8; 64];
         let mut r2 = [0u8; 64];
         assert_eq!(send(h, 7, vec![], out(&mut r1)).result, 0);
@@ -684,23 +787,38 @@ mod tests {
         crate::mem::tests::test_kernel();
         let h = open("bcat:u");
         let r = send(h, 1, vec![0; 8], vec![]);
-        assert_eq!((r.result, r.moved.len()), (0, 1), "CreateDeliveryCacheStorageService");
+        assert_eq!(
+            (r.result, r.moved.len()),
+            (0, 1),
+            "CreateDeliveryCacheStorageService"
+        );
         let st = r.moved[0];
         assert_eq!(u32_at(&send(st, 10, vec![], vec![]), 0), 0, "no directory");
         let dir = send(st, 1, vec![], vec![]).moved[0];
         assert_eq!(send(dir, 0, vec![0; 32], vec![]).result, 0);
         assert_eq!(u32_at(&send(dir, 2, vec![], vec![]), 0), 0, "no file");
         let file = send(st, 0, vec![], vec![]).moved[0];
-        assert_eq!(send(file, 0, vec![0; 64], vec![]).result, super::R_BCAT_NOT_FOUND);
+        assert_eq!(
+            send(file, 0, vec![0; 64], vec![]).result,
+            super::R_BCAT_NOT_FOUND
+        );
         assert_eq!(super::R_BCAT_NOT_FOUND, 0x47a);
         let svc = send(h, 0, vec![0; 8], vec![]).moved[0];
         let prog = send(svc, 10100, vec![], vec![]).moved[0];
         let r = send(prog, 0, vec![], vec![]);
         assert_eq!(r.copy.len(), 1);
-        assert_eq!(nxrt::kernel::get().event_signaled(r.copy[0]), Some(true), "the progress event is signalled");
+        assert_eq!(
+            nxrt::kernel::get().event_signaled(r.copy[0]),
+            Some(true),
+            "the progress event is signalled"
+        );
         let mut imp = [0xAAu8; 0x200];
         send(prog, 1, vec![], out(&mut imp));
-        assert_eq!((&imp[..4], &imp[4..8]), (&9u32.to_le_bytes()[..], &[0u8; 4][..]), "Done, success");
+        assert_eq!(
+            (&imp[..4], &imp[4..8]),
+            (&9u32.to_le_bytes()[..], &[0u8; 4][..]),
+            "Done, success"
+        );
         assert!(imp[8..].iter().all(|&x| x == 0));
     }
 
@@ -712,18 +830,56 @@ mod tests {
         crate::mem::tests::test_kernel();
         let h = open("aoc:u");
         let have = crate::services::fs::aoc_indices();
-        assert_eq!(u32_at(&send(h, 2, vec![0; 8], vec![]), 0) as usize, have.len());
-        assert_eq!(u32_at(&send(h, 0, 0x0100_0000_0000_9000u64.to_le_bytes().to_vec(), vec![]), 0), 0, "another program's");
+        assert_eq!(
+            u32_at(&send(h, 2, vec![0; 8], vec![]), 0) as usize,
+            have.len()
+        );
+        assert_eq!(
+            u32_at(
+                &send(
+                    h,
+                    0,
+                    0x0100_0000_0000_9000u64.to_le_bytes().to_vec(),
+                    vec![]
+                ),
+                0
+            ),
+            0,
+            "another program's"
+        );
         let mut l = [0u8; 16];
-        let r = send(h, 3, [0u32, 4, 0, 0].iter().flat_map(|v| v.to_le_bytes()).collect(), out(&mut l));
+        let r = send(
+            h,
+            3,
+            [0u32, 4, 0, 0]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect(),
+            out(&mut l),
+        );
         assert_eq!((r.result, u32_at(&r, 0) as usize), (0, have.len().min(4)));
-        let r = send(h, 3, [have.len() as u32 + 1, 4, 0, 0].iter().flat_map(|v| v.to_le_bytes()).collect(), out(&mut l));
+        let r = send(
+            h,
+            3,
+            [have.len() as u32 + 1, 4, 0, 0]
+                .iter()
+                .flat_map(|v| v.to_le_bytes())
+                .collect(),
+            out(&mut l),
+        );
         assert_eq!(r.result, super::R_AOC_OFFSET);
-        assert_eq!(u64_at(&send(h, 5, vec![0; 8], vec![]), 0), (crate::profile::get().program_id & !0xfff) + 0x1000);
+        assert_eq!(
+            u64_at(&send(h, 5, vec![0; 8], vec![]), 0),
+            (crate::profile::get().program_id & !0xfff) + 0x1000
+        );
         assert_eq!(send(h, 9, vec![0; 16], vec![]).result, 0);
         let r = send(h, 8, vec![], vec![]);
         assert_eq!(r.copy.len(), 1);
-        assert_eq!(nxrt::kernel::get().event_signaled(r.copy[0]), Some(false), "the list never changes");
+        assert_eq!(
+            nxrt::kernel::get().event_signaled(r.copy[0]),
+            Some(false),
+            "the list never changes"
+        );
         let pm = send(h, 100, vec![], vec![]).moved[0];
         assert_eq!(send(pm, 2, vec![], vec![]).copy.len(), 1);
         assert_eq!(send(pm, 3, vec![], vec![]).result, super::R_NO_PURCHASE);

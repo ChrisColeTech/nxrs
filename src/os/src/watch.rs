@@ -16,7 +16,11 @@ pub fn run() {
     let after = env_secs("NXOS_EXIT_AFTER");
     let after_submit = env_secs("NXOS_EXIT_AFTER_SUBMIT");
     let mut last = Instant::now();
-    nxconfig::ctl::register("threads", ": every guest thread, what it waits for and its guest frames", |_| nxrt::kernel::dump_threads());
+    nxconfig::ctl::register(
+        "threads",
+        ": every guest thread, what it waits for and its guest frames",
+        |_| nxrt::kernel::dump_threads(),
+    );
     nxconfig::ctl::register("peek", "<address hex> [bytes hex, at most 0x1000]: guest memory as hex words (readable pages only)", |a| {
         let h = |s: &str| u64::from_str_radix(s.trim_start_matches("0x"), 16).ok();
         let (Some(at), n) = (a.first().and_then(|s| h(s)), a.get(1).and_then(|s| h(s)).unwrap_or(0x40).min(0x1000)) else {
@@ -67,7 +71,11 @@ pub fn run() {
             if crate::log::secs() as u64 % 60 < beat as u64 + 1 {
                 // where the process's private memory is: the guest's heap and physical maps (committed pages)
                 let (heap, alias) = nxrt::kernel::get().space.committed();
-                crate::log!("memory: guest heap {} MB committed, physical maps {} MB", heap >> 20, alias >> 20);
+                crate::log!(
+                    "memory: guest heap {} MB committed, physical maps {} MB",
+                    heap >> 20,
+                    alias >> 20
+                );
                 for l in crate::services::audio::report() {
                     crate::log!("{l}");
                 }
@@ -95,19 +103,33 @@ fn hex(s: &str) -> Option<u64> {
 /// file, the environment, the guest clock's speed, focus and touch gestures for scripted runs.
 pub fn register_debug_commands() {
     crate::cheats::register_commands();
-    nxconfig::ctl::register("wpage", "<page hex>: log each write to a guest page and the function that made it (up to 600)", |a| match a.first().and_then(|s| hex(s)) {
-        Some(p) => crate::wwatch::arm(p, p + 0x1000),
-        None => "wpage <page hex>
-".into(),
-    });
-    nxconfig::ctl::register("wtrace", "<from hex> <to hex>: log each write to a guest range (at most 64 MB, up to 600)", |a| {
-        match (a.first().and_then(|s| hex(s)), a.get(1).and_then(|s| hex(s))) {
+    register_gap_command();
+    nxconfig::ctl::register(
+        "wpage",
+        "<page hex>: log each write to a guest page and the function that made it (up to 600)",
+        |a| match a.first().and_then(|s| hex(s)) {
+            Some(p) => crate::wwatch::arm(p, p + 0x1000),
+            None => "wpage <page hex>
+"
+            .into(),
+        },
+    );
+    nxconfig::ctl::register(
+        "wtrace",
+        "<from hex> <to hex>: log each write to a guest range (at most 64 MB, up to 600)",
+        |a| match (
+            a.first().and_then(|s| hex(s)),
+            a.get(1).and_then(|s| hex(s)),
+        ) {
             (Some(lo), Some(hi)) => crate::wwatch::arm(lo, hi),
             _ => "wtrace <from hex> <to hex>
-".into(),
-        }
+"
+            .into(),
+        },
+    );
+    nxconfig::ctl::register("wclear", ": stop every write watch", |_| {
+        crate::wwatch::disarm()
     });
-    nxconfig::ctl::register("wclear", ": stop every write watch", |_| crate::wwatch::disarm());
     nxconfig::ctl::register("addr", "<mangled name>: the guest address a loaded module defines it at (and its host takeover, if any)", |a| {
         let Some(n) = a.first() else { return "addr <mangled name>\n".into() };
         match crate::hle::sym(n) {
@@ -115,45 +137,77 @@ pub fn register_debug_commands() {
             None => format!("{n}: not defined by the loaded modules\n"),
         }
     });
-    nxconfig::ctl::register("memdump", "<address hex> <bytes hex> <file>: guest memory into a file (readable pages only)", |a| {
-        let (Some(at), Some(n), Some(f)) = (a.first().and_then(|s| hex(s)), a.get(1).and_then(|s| hex(s)), a.get(2)) else {
-            return "memdump <address hex> <bytes hex> <file>\n".into();
-        };
-        let n = n.min(256 << 20);
-        let (mut out, mut p) = (Vec::with_capacity(n as usize), at);
-        while p < at + n {
-            let info = crate::mem::get().query(p);
-            let end = (info.addr + info.size).min(at + n);
-            if info.perm & 1 == 0 || info.state == crate::mem::ST_FREE || !nxrt::mem::readable(p, end - p) {
-                break;
+    nxconfig::ctl::register(
+        "memdump",
+        "<address hex> <bytes hex> <file>: guest memory into a file (readable pages only)",
+        |a| {
+            let (Some(at), Some(n), Some(f)) = (
+                a.first().and_then(|s| hex(s)),
+                a.get(1).and_then(|s| hex(s)),
+                a.get(2),
+            ) else {
+                return "memdump <address hex> <bytes hex> <file>\n".into();
+            };
+            let n = n.min(256 << 20);
+            let (mut out, mut p) = (Vec::with_capacity(n as usize), at);
+            while p < at + n {
+                let info = crate::mem::get().query(p);
+                let end = (info.addr + info.size).min(at + n);
+                if info.perm & 1 == 0
+                    || info.state == crate::mem::ST_FREE
+                    || !nxrt::mem::readable(p, end - p)
+                {
+                    break;
+                }
+                out.extend_from_slice(crate::guest::bytes(p, end - p));
+                p = end;
             }
-            out.extend_from_slice(crate::guest::bytes(p, end - p));
-            p = end;
-        }
-        match std::fs::write(f, &out) {
-            Ok(()) => format!("{:#x} bytes from {at:#x} into {f}{}\n", out.len(), if (out.len() as u64) < n { " (stopped at an unreadable page)" } else { "" }),
-            Err(e) => format!("{f}: {e}\n"),
-        }
-    });
-    nxconfig::ctl::register("env", "<NAME>: an environment variable of the game's process", |a| match a.first() {
-        Some(n) => format!("{n}={}\n", std::env::var(n).unwrap_or_default()),
-        None => "env <NAME>\n".into(),
-    });
-    nxconfig::ctl::register("speed", "[rate]: the guest clock's rate (1 = real time, 0.05..4); none: the rate now", |a| {
-        if let Some(r) = a.first().and_then(|v| v.parse::<f64>().ok()) {
-            crate::clock::set_rate(r);
-        }
-        format!("clock rate {}\n", crate::clock::rate())
-    });
-    nxconfig::ctl::register("focus", "<1|2|3>: the window's focus as the game sees it (1 in focus, 2 out, 3 background)", |a| {
-        match a.first().and_then(|v| v.parse::<i32>().ok()) {
+            match std::fs::write(f, &out) {
+                Ok(()) => format!(
+                    "{:#x} bytes from {at:#x} into {f}{}\n",
+                    out.len(),
+                    if (out.len() as u64) < n {
+                        " (stopped at an unreadable page)"
+                    } else {
+                        ""
+                    }
+                ),
+                Err(e) => format!("{f}: {e}\n"),
+            }
+        },
+    );
+    nxconfig::ctl::register(
+        "env",
+        "<NAME>: an environment variable of the game's process",
+        |a| match a.first() {
+            Some(n) => format!("{n}={}\n", std::env::var(n).unwrap_or_default()),
+            None => "env <NAME>\n".into(),
+        },
+    );
+    nxconfig::ctl::register(
+        "speed",
+        "[rate]: the guest clock's rate (1 = real time, 0.05..4); none: the rate now",
+        |a| {
+            if let Some(r) = a.first().and_then(|v| v.parse::<f64>().ok()) {
+                crate::clock::set_rate(r);
+            }
+            format!("clock rate {}\n", crate::clock::rate())
+        },
+    );
+    nxconfig::ctl::register(
+        "focus",
+        "<1|2|3>: the window's focus as the game sees it (1 in focus, 2 out, 3 background)",
+        |a| match a.first().and_then(|v| v.parse::<i32>().ok()) {
             Some(st @ 1..=3) => {
                 crate::services::oe::set_focus(st);
                 format!("focus {}\n", crate::services::oe::focus())
             }
-            _ => format!("focus {} (focus <1|2|3> to change it)\n", crate::services::oe::focus()),
-        }
-    });
+            _ => format!(
+                "focus {} (focus <1|2|3> to change it)\n",
+                crate::services::oe::focus()
+            ),
+        },
+    );
     nxconfig::ctl::register("drag", "<x0> <y0> <x1> <y1> [seconds]: a finger dragged on the touch screen (1280x720), 0.3 s by default", |a| {
         let v: Vec<u32> = a.iter().take(4).filter_map(|s| s.parse().ok()).collect();
         if v.len() < 4 {
@@ -179,7 +233,12 @@ pub fn register_debug_commands() {
             let mut last = [(0, 0); 2];
             for i in 0..=steps {
                 let t = i as f64 / steps as f64;
-                last = crate::input::two_fingers(cx, cy, r.0 + (r.1 - r.0) * t, deg.0 + (deg.1 - deg.0) * t);
+                last = crate::input::two_fingers(
+                    cx,
+                    cy,
+                    r.0 + (r.1 - r.0) * t,
+                    deg.0 + (deg.1 - deg.0) * t,
+                );
                 for (k, &(x, y)) in last.iter().enumerate() {
                     crate::input::set_finger(k, true, x, y);
                 }
@@ -210,6 +269,14 @@ pub fn register_debug_commands() {
     });
 }
 
+fn register_gap_command() {
+    nxconfig::ctl::register(
+        "gaps",
+        ": unimplemented services, commands, SVCs, imports and NVN calls met so far",
+        |_| crate::log::gap_summary(),
+    );
+}
+
 /// The stall dumps (Turbo main.c's front loop): presents stopped after the first one -> a thread dump after 6 s
 /// (people close a frozen game before 15), then one every further 15 s without an image, at most 4 in a run; a new
 /// image starts the count again. Not before the first image (the boot's loading is not a stall).
@@ -229,7 +296,10 @@ impl Stall {
             return None;
         }
         let sec = if self.dumps == 0 { 6 } else { 15 };
-        if presents == 0 || self.dumps >= 4 || now.duration_since(self.since?).as_secs() < sec as u64 {
+        if presents == 0
+            || self.dumps >= 4
+            || now.duration_since(self.since?).as_secs() < sec as u64
+        {
             return None;
         }
         self.dumps += 1;
@@ -257,12 +327,14 @@ impl ThreadCpu {
             total += d;
             *self.window.entry(h).or_default() += d;
             if on {
-                static NAMES: std::sync::Mutex<Vec<(u32, &'static std::sync::atomic::AtomicU64)>> = std::sync::Mutex::new(Vec::new());
+                static NAMES: std::sync::Mutex<Vec<(u32, &'static std::sync::atomic::AtomicU64)>> =
+                    std::sync::Mutex::new(Vec::new());
                 let mut n = NAMES.lock().unwrap();
                 let c = match n.iter().find(|x| x.0 == h) {
                     Some(x) => x.1,
                     None => {
-                        let name: &'static str = Box::leak(format!("cpu_t{h:x}_ms").into_boxed_str());
+                        let name: &'static str =
+                            Box::leak(format!("cpu_t{h:x}_ms").into_boxed_str());
                         let c = nxconfig::metrics::counter(name);
                         n.push((h, c));
                         c
@@ -278,9 +350,17 @@ impl ThreadCpu {
         if self.ticks % 10 == 0 {
             let mut v: Vec<(u32, f64)> = self.window.drain().collect();
             v.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-            let busy: Vec<String> = v.iter().take(4).filter(|x| x.1 > 0.05).map(|(h, t)| format!("{h:#x} {:.0}%", t * 10.0)).collect();
+            let busy: Vec<String> = v
+                .iter()
+                .take(4)
+                .filter(|x| x.1 > 0.05)
+                .map(|(h, t)| format!("{h:#x} {:.0}%", t * 10.0))
+                .collect();
             if !busy.is_empty() {
-                crate::log!("cpu: busiest guest threads over 10 s (percent of a core): {}", busy.join(", "));
+                crate::log!(
+                    "cpu: busiest guest threads over 10 s (percent of a core): {}",
+                    busy.join(", ")
+                );
             }
         }
     }
@@ -306,8 +386,30 @@ mod tests {
         assert_eq!(st.tick(5, at(51.0)), Some(15));
         assert_eq!(st.tick(6, at(52.0)), None, "an image");
         assert_eq!(st.tick(6, at(66.9)), None);
-        assert_eq!(st.tick(6, at(67.0)), Some(15), "the 6 s dump is only the first");
+        assert_eq!(
+            st.tick(6, at(67.0)),
+            Some(15),
+            "the 6 s dump is only the first"
+        );
         assert_eq!(st.tick(6, at(82.0)), Some(15));
         assert_eq!(st.tick(6, at(200.0)), None, "four dumps a run");
+    }
+
+    #[test]
+    fn gaps_control_reports_live_counts() {
+        crate::log::gap(crate::log::Gap::Command, "watch-test-command", "");
+        register_gap_command();
+        let reply = nxconfig::ctl::run("gaps");
+        assert!(
+            reply
+                .lines()
+                .next()
+                .is_some_and(|l| l.starts_with("gaps distinct ") && l.contains(" hits ")),
+            "{reply}"
+        );
+        assert!(
+            reply.lines().any(|l| l == "Command\t1\twatch-test-command"),
+            "{reply}"
+        );
     }
 }

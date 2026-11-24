@@ -105,7 +105,11 @@ thread_local! {
 fn table() -> MutexGuard<'static, Option<Table>> {
     let mut g = T.lock().unwrap();
     if g.is_none() {
-        *g = Some(Table { d: (0..MAX).map(|_| Desc::default()).collect(), generation: 0, ephemeral: 49152 });
+        *g = Some(Table {
+            d: (0..MAX).map(|_| Desc::default()).collect(),
+            generation: 0,
+            ephemeral: 49152,
+        });
     }
     g
 }
@@ -140,15 +144,27 @@ impl Table {
         slot(fd).map_or(0, |k| self.d[k].generation)
     }
     fn new_desc(&mut self, kind: Kind) -> i32 {
-        let Some(k) = self.d.iter().position(|d| d.kind == Kind::Free) else { return fail(EMFILE) };
+        let Some(k) = self.d.iter().position(|d| d.kind == Kind::Free) else {
+            return fail(EMFILE);
+        };
         self.generation += 1;
-        self.d[k] = Desc { kind, generation: self.generation, rcvbuf: DEFAULT_BUF, sndbuf: DEFAULT_BUF, ..Default::default() };
+        self.d[k] = Desc {
+            kind,
+            generation: self.generation,
+            rcvbuf: DEFAULT_BUF,
+            sndbuf: DEFAULT_BUF,
+            ..Default::default()
+        };
         FD0 + k as i32
     }
     fn port_free(&self, fd: i32, addr: u32, port: u16) -> bool {
         let me = slot(fd).map_or(0, |k| self.d[k].reuse);
         self.d.iter().enumerate().all(|(i, d)| {
-            if FD0 + i as i32 == fd || d.kind != Kind::Udp || d.port != port || !(addr == 0 || d.addr == 0 || addr == d.addr) {
+            if FD0 + i as i32 == fd
+                || d.kind != Kind::Udp
+                || d.port != port
+                || !(addr == 0 || d.addr == 0 || addr == d.addr)
+            {
                 return true;
             }
             let both = d.reuse & me;
@@ -219,7 +235,10 @@ pub fn eventfd(init: u64, flags: i32) -> i32 {
         let d = t.get(fd).unwrap();
         d.count = init;
         d.flags = flags;
-        crate::log_once!("socket evfd", "socket: event descriptor {fd} (offline: the process's own wake-ups work)");
+        crate::log_once!(
+            "socket evfd",
+            "socket: event descriptor {fd} (offline: the process's own wake-ups work)"
+        );
     }
     fd
 }
@@ -232,7 +251,10 @@ pub fn socket(family: i32, ty: i32, proto: i32) -> i32 {
     let mut g = table();
     let fd = g.as_mut().unwrap().new_desc(Kind::Udp);
     if fd >= 0 {
-        crate::log_once!("socket udp", "socket: loopback UDP descriptor {fd} (offline: datagrams stay in the process)");
+        crate::log_once!(
+            "socket udp",
+            "socket: loopback UDP descriptor {fd} (offline: datagrams stay in the process)"
+        );
     }
     fd
 }
@@ -240,8 +262,13 @@ pub fn socket(family: i32, ty: i32, proto: i32) -> i32 {
 pub fn close(fd: i32) -> i32 {
     let mut g = table();
     let t = g.as_mut().unwrap();
-    let Some(d) = t.get(fd) else { return fail(ENETDOWN) };
-    *d = Desc { generation: d.generation, ..Default::default() };
+    let Some(d) = t.get(fd) else {
+        return fail(ENETDOWN);
+    };
+    *d = Desc {
+        generation: d.generation,
+        ..Default::default()
+    };
     CV.notify_all();
     0
 }
@@ -340,7 +367,11 @@ pub fn name(fd: i32, peer: bool) -> Result<[u8; 16], i32> {
     if peer && !d.connected {
         return Err(fail(ENOTCONN));
     }
-    Ok(if peer { addr_bytes(d.peer_addr, d.peer_port) } else { addr_bytes(d.addr, d.port) })
+    Ok(if peer {
+        addr_bytes(d.peer_addr, d.peer_port)
+    } else {
+        addr_bytes(d.addr, d.port)
+    })
 }
 
 pub fn shutdown(fd: i32, how: i32) -> i32 {
@@ -370,7 +401,9 @@ pub fn shutdown(fd: i32, how: i32) -> i32 {
 pub fn fcntl(fd: i32, cmd: i32, value: i32) -> i32 {
     let mut g = table();
     let t = g.as_mut().unwrap();
-    let Some(d) = t.get(fd) else { return fail(EBADF) };
+    let Some(d) = t.get(fd) else {
+        return fail(EBADF);
+    };
     let event = d.kind == Kind::Event;
     match cmd {
         1 => d.fdflags,
@@ -409,7 +442,10 @@ pub fn setopt(fd: i32, level: i32, opt: i32, v: &[u8]) -> i32 {
         return fail(ENOPROTOOPT);
     }
     if (opt == 0x1006 || opt == 0x1005) && v.len() >= 16 {
-        let (s, us) = (i64::from_le_bytes(v[0..8].try_into().unwrap()), i64::from_le_bytes(v[8..16].try_into().unwrap()));
+        let (s, us) = (
+            i64::from_le_bytes(v[0..8].try_into().unwrap()),
+            i64::from_le_bytes(v[8..16].try_into().unwrap()),
+        );
         if s < 0 || s > i64::MAX / 1_000_000_000 - 1 || !(0..1_000_000).contains(&us) {
             return fail(EINVAL);
         }
@@ -461,7 +497,11 @@ pub fn getopt(fd: i32, level: i32, opt: i32, size: u32) -> Result<Vec<u8>, i32> 
         return Err(fail(ENOPROTOOPT));
     }
     if (opt == 0x1006 || opt == 0x1005) && size >= 16 {
-        let ns = if opt == 0x1006 { d.recv_timeout } else { d.send_timeout };
+        let ns = if opt == 0x1006 {
+            d.recv_timeout
+        } else {
+            d.send_timeout
+        };
         let mut v = (ns / 1_000_000_000).to_le_bytes().to_vec();
         v.extend_from_slice(&(ns % 1_000_000_000 / 1000).to_le_bytes());
         return Ok(v);
@@ -526,7 +566,8 @@ pub fn sendto(fd: i32, data: &[u8], flags: i32, to: Option<&[u8]>) -> i64 {
     let mut target = None;
     let mut best = -1;
     for (i, r) in t.d.iter().enumerate() {
-        if r.kind != Kind::Udp || r.shut_read || r.port != port || !(r.addr == 0 || r.addr == addr) {
+        if r.kind != Kind::Udp || r.shut_read || r.port != port || !(r.addr == 0 || r.addr == addr)
+        {
             continue;
         }
         if r.connected && (r.peer_addr != src || r.peer_port != sport) {
@@ -542,7 +583,11 @@ pub fn sendto(fd: i32, data: &[u8], flags: i32, to: Option<&[u8]>) -> i64 {
         let r = &mut t.d[i];
         let cap = r.rcvbuf.max(0) as usize;
         if r.queue.len() < PACKETS_MAX && data.len() <= cap && r.queued <= cap - data.len() {
-            r.queue.push_back(Packet { addr: src, port: sport, data: data.to_vec() });
+            r.queue.push_back(Packet {
+                addr: src,
+                port: sport,
+                data: data.to_vec(),
+            });
             r.queued += data.len();
             CV.notify_all();
         }
@@ -568,7 +613,10 @@ pub fn recvfrom(fd: i32, n: usize, flags: i32) -> Result<(Vec<u8>, [u8; 16]), i3
         }
         let d = t.get(fd).unwrap();
         if let Some(p) = d.queue.front() {
-            let out = (p.data[..n.min(p.data.len())].to_vec(), addr_bytes(p.addr, p.port));
+            let out = (
+                p.data[..n.min(p.data.len())].to_vec(),
+                addr_bytes(p.addr, p.port),
+            );
             if flags & MSG_PEEK == 0 {
                 let p = d.queue.pop_front().unwrap();
                 d.queued -= p.data.len();
@@ -628,7 +676,11 @@ pub fn poll(fds: &mut [(i32, i16, i16)], ms: i32) -> i32 {
             }
             let d = t.get(f.0).unwrap();
             let event = d.kind == Kind::Event;
-            let readable = if event { d.count != 0 } else { !d.queue.is_empty() || d.shut_read };
+            let readable = if event {
+                d.count != 0
+            } else {
+                !d.queue.is_empty() || d.shut_read
+            };
             if readable {
                 f.2 |= f.1 & (POLLIN | POLLRDNORM);
             }
@@ -745,7 +797,11 @@ unsafe fn g_bind(c: *mut Cpu) {
 unsafe fn g_connect(c: *mut Cpu) {
     let a = Args(&mut *c);
     let b = sa(a.x(1), a.w(2));
-    let r = if b.is_empty() { fail(EINVAL) } else { connect(a.i(0), &b) };
+    let r = if b.is_empty() {
+        fail(EINVAL)
+    } else {
+        connect(a.i(0), &b)
+    };
     ret(c, r as i64);
 }
 unsafe fn g_name(c: *mut Cpu, peer: bool) {
@@ -781,7 +837,11 @@ unsafe fn g_fcntl(c: *mut Cpu) {
 unsafe fn g_setopt(c: *mut Cpu) {
     let a = Args(&mut *c);
     let (fd, level, opt, v, n) = (a.i(0), a.i(1), a.i(2), a.x(3), a.w(4));
-    let r = if v == 0 { fail(EINVAL) } else { setopt(fd, level, opt, crate::guest::bytes(v, n.min(64) as u64)) };
+    let r = if v == 0 {
+        fail(EINVAL)
+    } else {
+        setopt(fd, level, opt, crate::guest::bytes(v, n.min(64) as u64))
+    };
     ret(c, r as i64);
 }
 unsafe fn g_getopt(c: *mut Cpu) {
@@ -808,7 +868,11 @@ fn g_send_impl(fd: i32, buf: u64, n: u64, flags: i32, to: Option<Vec<u8>>) -> i6
     if n as usize > UDP_MAX {
         return fail(EMSGSIZE) as i64;
     }
-    let data = if n == 0 { &[][..] } else { crate::guest::bytes(buf, n) };
+    let data = if n == 0 {
+        &[][..]
+    } else {
+        crate::guest::bytes(buf, n)
+    };
     sendto(fd, data, flags, to.as_deref())
 }
 unsafe fn g_send(c: *mut Cpu) {
@@ -891,7 +955,15 @@ unsafe fn g_poll(c: *mut Cpu) {
         ret(c, fail(EINVAL) as i64);
         return;
     }
-    let mut v: Vec<(i32, i16, i16)> = (0..n).map(|i| (r32(p + 8 * i) as i32, crate::guest::r16(p + 8 * i + 4) as i16, 0)).collect();
+    let mut v: Vec<(i32, i16, i16)> = (0..n)
+        .map(|i| {
+            (
+                r32(p + 8 * i) as i32,
+                crate::guest::r16(p + 8 * i + 4) as i16,
+                0,
+            )
+        })
+        .collect();
     let r = poll(&mut v, ms);
     for (i, f) in v.iter().enumerate() {
         crate::guest::w16(p + 8 * i as u64 + 6, f.2 as u16);
@@ -904,14 +976,21 @@ unsafe fn g_select(c: *mut Cpu) {
     let ms = if tv == 0 {
         -1
     } else {
-        let (s, us) = (crate::guest::r64(tv) as i64, crate::guest::r64(tv + 8) as i64);
+        let (s, us) = (
+            crate::guest::r64(tv) as i64,
+            crate::guest::r64(tv + 8) as i64,
+        );
         if s < 0 || !(0..1_000_000).contains(&us) {
             ret(c, fail(EINVAL) as i64);
             return;
         }
-        s.saturating_mul(1000).saturating_add(us / 1000).min(i32::MAX as i64)
+        s.saturating_mul(1000)
+            .saturating_add(us / 1000)
+            .min(i32::MAX as i64)
     };
-    let read = |p: u64| -> Option<[u64; 16]> { (p != 0).then(|| core::array::from_fn(|i| crate::guest::r64(p + 8 * i as u64))) };
+    let read = |p: u64| -> Option<[u64; 16]> {
+        (p != 0).then(|| core::array::from_fn(|i| crate::guest::r64(p + 8 * i as u64)))
+    };
     let ptrs = [a.x(1), a.x(2), a.x(3)];
     let mut sets = ptrs.map(read);
     let [s0, s1, s2] = &mut sets;
@@ -979,7 +1058,10 @@ pub fn register(r: &mut Registry) {
     const W: &str = "the BSD descriptors offline: loopback UDP and event descriptors";
     for (n, f) in [
         ("_ZN2nn6socket6SocketEiii", g_socket as unsafe fn(*mut Cpu)),
-        ("_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE", g_socket),
+        (
+            "_ZN2nn6socket6SocketENS0_6FamilyENS0_4TypeENS0_8ProtocolE",
+            g_socket,
+        ),
         ("nnsocketSocket", g_socket),
         ("_ZN2nn6socket5CloseEi", g_close),
         ("nnsocketClose", g_close),
@@ -1002,22 +1084,34 @@ pub fn register(r: &mut Registry) {
         ("_ZN2nn6socket5FcntlEiNS0_12FcntlCommandEz", g_fcntl),
         ("nnsocketFcntl", g_fcntl),
         ("_ZN2nn6socket10SetSockOptEiiiPKvj", g_setopt),
-        ("_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj", g_setopt),
+        (
+            "_ZN2nn6socket10SetSockOptEiNS0_5LevelENS0_6OptionEPKvj",
+            g_setopt,
+        ),
         ("nnsocketSetSockOpt", g_setopt),
         ("_ZN2nn6socket10GetSockOptEiiiPvPj", g_getopt),
-        ("_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj", g_getopt),
+        (
+            "_ZN2nn6socket10GetSockOptEiNS0_5LevelENS0_6OptionEPvPj",
+            g_getopt,
+        ),
         ("nnsocketGetSockOpt", g_getopt),
         ("_ZN2nn6socket4SendEiPKvmi", g_send),
         ("_ZN2nn6socket4SendEiPKvmNS0_7MsgFlagE", g_send),
         ("nnsocketSend", g_send),
         ("_ZN2nn6socket6SendToEiPKvmiPK8sockaddrj", g_sendto),
-        ("_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj", g_sendto),
+        (
+            "_ZN2nn6socket6SendToEiPKvmNS0_7MsgFlagEPKNS0_8SockAddrEj",
+            g_sendto,
+        ),
         ("nnsocketSendTo", g_sendto),
         ("_ZN2nn6socket4RecvEiPvmi", g_recv),
         ("_ZN2nn6socket4RecvEiPvmNS0_7MsgFlagE", g_recv),
         ("nnsocketRecv", g_recv),
         ("_ZN2nn6socket8RecvFromEiPvmiP8sockaddrPj", g_recvfrom),
-        ("_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj", g_recvfrom),
+        (
+            "_ZN2nn6socket8RecvFromEiPvmNS0_7MsgFlagEPNS0_8SockAddrEPj",
+            g_recvfrom,
+        ),
         ("nnsocketRecvFrom", g_recvfrom),
         ("_ZN2nn6socket4ReadEiPvm", g_read),
         ("nnsocketRead", g_read),
@@ -1028,7 +1122,10 @@ pub fn register(r: &mut Registry) {
         ("nnsocketPoll", g_poll),
         ("poll", g_poll),
         ("_ZN2nn6socket6SelectEiP6fd_setS2_S2_P7timeval", g_select),
-        ("_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE", g_select),
+        (
+            "_ZN2nn6socket6SelectEiPNS0_5FdSetES2_S2_PNS0_7TimeValE",
+            g_select,
+        ),
         ("_ZN2nn6socket7EventFdEmNS0_12EventFdFlagsE", g_eventfd),
         ("_ZN2nn6socket11EventFdReadEiPm", g_efd_read),
         ("_ZN2nn6socket12EventFdWriteEim", g_efd_write),
@@ -1037,10 +1134,19 @@ pub fn register(r: &mut Registry) {
         ("nnsocketGetLastErrno", g_errno),
         ("nnsocketSetLastErrno", g_set_errno),
         ("_ZN2nn6socket16GetHostEntByNameEPKc", g_netdown_null),
-        ("_ZN2nn6socket16GetHostEntByNameEPKcPKNS0_14ResolverOptionEm", g_netdown_null),
+        (
+            "_ZN2nn6socket16GetHostEntByNameEPKcPKNS0_14ResolverOptionEm",
+            g_netdown_null,
+        ),
         ("nnsocketGetHostByNameWithOptions", g_netdown_null),
-        ("_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE", g_netdown),
-        ("_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE", g_netdown),
+        (
+            "_ZN2nn6socket17ResolverGetOptionEPNS0_14ResolverOptionENS0_17ResolverOptionKeyE",
+            g_netdown,
+        ),
+        (
+            "_ZN2nn6socket17ResolverSetOptionERKNS0_14ResolverOptionE",
+            g_netdown,
+        ),
         ("nnsocketResolverGetOption", g_netdown),
         ("nnsocketResolverSetOption", g_netdown),
         ("_ZN2nn6socket6ListenEii", g_no_stream),
@@ -1079,7 +1185,11 @@ mod tests {
         assert_eq!(errno(), EAGAIN);
         assert_eq!(socket(2, 1, 0), -1, "no streams: the network is down");
         assert_eq!(errno(), ENETDOWN);
-        assert_eq!(sendto(a, b"x", 0, Some(&addr_bytes(0x0a00_0001, 80))), -1, "not loopback");
+        assert_eq!(
+            sendto(a, b"x", 0, Some(&addr_bytes(0x0a00_0001, 80))),
+            -1,
+            "not loopback"
+        );
 
         let e = eventfd(0, 4);
         let mut fds = [(e, POLLIN, 0), (a, POLLIN | POLLOUT, 0)];

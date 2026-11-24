@@ -58,7 +58,11 @@ impl Service for AudOut {
             0 | 2 => {
                 let mut b = vec![0u8; 0x100];
                 b[..9].copy_from_slice(b"DeviceOut");
-                let n = if ctx.buf_out(0).size >= 0x100 { ctx.write_out(0, &b) / 0x100 } else { 0 };
+                let n = if ctx.buf_out(0).size >= 0x100 {
+                    ctx.write_out(0, &b) / 0x100
+                } else {
+                    0
+                };
                 ctx.push_u32(n as u32);
                 0
             }
@@ -67,7 +71,10 @@ impl Service for AudOut {
                 let (rate, ch) = match open_params(ctx.u32(0), ctx.arg::<u16>(4)) {
                     Ok(v) => v,
                     Err(r) => {
-                        crate::log!("[RED] audout:u: OpenAudioOut at {} Hz: 48 kHz only", ctx.u32(0));
+                        crate::log!(
+                            "[RED] audout:u: OpenAudioOut at {} Hz: 48 kHz only",
+                            ctx.u32(0)
+                        );
                         return r;
                     }
                 };
@@ -88,7 +95,15 @@ impl Service for AudOut {
                 for v in [rate, ch, FMT_PCM16, STOPPED] {
                     ctx.push_u32(v);
                 }
-                ctx.object(IAudioOut { stream, ch, state: STOPPED, volume: 1.0, event, played: 0, sizes: vec![] });
+                ctx.object(IAudioOut {
+                    stream,
+                    ch,
+                    state: STOPPED,
+                    volume: 1.0,
+                    event,
+                    played: 0,
+                    sizes: vec![],
+                });
                 0
             }
             _ => ctx.unimplemented(),
@@ -111,7 +126,9 @@ impl IAudioOut {
     fn released(&mut self, room: usize) -> Vec<u64> {
         let mut v = vec![];
         while v.len() < room {
-            let Some(t) = self.stream.released() else { break };
+            let Some(t) = self.stream.released() else {
+                break;
+            };
             if let Some(i) = self.sizes.iter().position(|s| s.0 == t) {
                 self.played += self.sizes.remove(i).1;
             }
@@ -144,11 +161,20 @@ impl Service for IAudioOut {
                     return R_TOO_MANY;
                 }
                 let tag = ctx.u64(0);
-                let Some((ptr, size)) = buffer_span(&ctx.read_in(0)) else { return R_NO_DEVICE };
+                let Some((ptr, size)) = buffer_span(&ctx.read_in(0)) else {
+                    return R_NO_DEVICE;
+                };
                 let b = crate::guest::bytes(ptr, size & !1);
-                let pcm: Vec<i16> = b.chunks_exact(2).map(|x| i16::from_le_bytes([x[0], x[1]])).collect();
-                self.sizes.push((tag, (pcm.len() / self.ch as usize) as u64));
-                self.stream.append(tag, crate::services::audio::to_stereo(&pcm, self.ch as usize, self.volume));
+                let pcm: Vec<i16> = b
+                    .chunks_exact(2)
+                    .map(|x| i16::from_le_bytes([x[0], x[1]]))
+                    .collect();
+                self.sizes
+                    .push((tag, (pcm.len() / self.ch as usize) as u64));
+                self.stream.append(
+                    tag,
+                    crate::services::audio::to_stereo(&pcm, self.ch as usize, self.volume),
+                );
             }
             // RegisterBufferEvent
             4 => ctx.copy_handle(self.event.readable),
@@ -249,7 +275,13 @@ impl Service for AudIn {
                     ctx.push_u32(v);
                 }
                 crate::log!("audin:u: AudioIn open on {dev}, {ch} channels (IPC)");
-                ctx.object(IAudioIn { cap, ch, state: STOPPED, event, tags: Mutex::new(vec![]) });
+                ctx.object(IAudioIn {
+                    cap,
+                    ch,
+                    state: STOPPED,
+                    event,
+                    tags: Mutex::new(vec![]),
+                });
                 0
             }
             _ => ctx.unimplemented(),
@@ -286,7 +318,9 @@ impl Service for IAudioIn {
             // AppendAudioInBuffer(Auto)(tag; buffer): captured into the client's data
             3 | 8 => {
                 let tag = ctx.u64(0);
-                let Some((ptr, size)) = buffer_span(&ctx.read_in(0)) else { return R_NO_DEVICE };
+                let Some((ptr, size)) = buffer_span(&ctx.read_in(0)) else {
+                    return R_NO_DEVICE;
+                };
                 crate::mem::prepare(ptr, size);
                 self.cap.append(tag, ptr, size & !1, self.ch);
                 self.tags.lock().unwrap().push(tag);
@@ -353,7 +387,15 @@ mod tests {
     use crate::ipc::hipc::{self, Buf, Builder, T_REQUEST};
 
     fn send(h: u32, cmd: u32, data: Vec<u8>, a: Vec<Buf>, b: Vec<Buf>) -> hipc::Response {
-        let mut m = Builder { ty: T_REQUEST, cmd, data, a, b, ..Default::default() }.build();
+        let mut m = Builder {
+            ty: T_REQUEST,
+            cmd,
+            data,
+            a,
+            b,
+            ..Default::default()
+        }
+        .build();
         crate::ipc::process(h, &mut m);
         hipc::parse_response(&m, false).unwrap()
     }
@@ -371,16 +413,47 @@ mod tests {
         super::register();
         let h = crate::ipc::connect("audout:u").unwrap();
         let mut names = [0u8; 0x100];
-        let r = send(h, 0, vec![], vec![], vec![Buf { addr: names.as_mut_ptr() as u64, size: 0x100, tag: 0 }]);
+        let r = send(
+            h,
+            0,
+            vec![],
+            vec![],
+            vec![Buf {
+                addr: names.as_mut_ptr() as u64,
+                size: 0x100,
+                tag: 0,
+            }],
+        );
         assert_eq!((u32_at(&r, 0), &names[..10]), (1, &b"DeviceOut\0"[..]));
-        let r = send(h, 1, [44100u32.to_le_bytes(), 2u32.to_le_bytes()].concat(), vec![], vec![]);
+        let r = send(
+            h,
+            1,
+            [44100u32.to_le_bytes(), 2u32.to_le_bytes()].concat(),
+            vec![],
+            vec![],
+        );
         assert_eq!(r.result, 0x699);
-        let r = send(h, 1, [0u32.to_le_bytes(), 2u32.to_le_bytes()].concat(), vec![], vec![Buf { addr: names.as_mut_ptr() as u64, size: 0x100, tag: 0 }]);
+        let r = send(
+            h,
+            1,
+            [0u32.to_le_bytes(), 2u32.to_le_bytes()].concat(),
+            vec![],
+            vec![Buf {
+                addr: names.as_mut_ptr() as u64,
+                size: 0x100,
+                tag: 0,
+            }],
+        );
         assert_eq!(r.result, 0);
-        assert_eq!((u32_at(&r, 0), u32_at(&r, 4), u32_at(&r, 8), u32_at(&r, 12)), (48000, 2, 2, 1));
+        assert_eq!(
+            (u32_at(&r, 0), u32_at(&r, 4), u32_at(&r, 8), u32_at(&r, 12)),
+            (48000, 2, 2, 1)
+        );
         let o = r.moved[0];
         let ev = send(o, 4, vec![], vec![], vec![]).copy[0];
-        let pcm: Vec<i16> = (0..960).map(|i| ((i as f32 * 0.05).sin() * 8000.0) as i16).collect();
+        let pcm: Vec<i16> = (0..960)
+            .map(|i| ((i as f32 * 0.05).sin() * 8000.0) as i16)
+            .collect();
         let mut descs = vec![];
         for _ in 0..2 {
             let mut d = vec![0u8; 0x28];
@@ -390,11 +463,24 @@ mod tests {
             descs.push(d);
         }
         for (i, d) in descs.iter().enumerate() {
-            let r = send(o, 3, (0x100 + i as u64).to_le_bytes().to_vec(), vec![Buf { addr: d.as_ptr() as u64, size: 0x28, tag: 0 }], vec![]);
+            let r = send(
+                o,
+                3,
+                (0x100 + i as u64).to_le_bytes().to_vec(),
+                vec![Buf {
+                    addr: d.as_ptr() as u64,
+                    size: 0x28,
+                    tag: 0,
+                }],
+                vec![],
+            );
             assert_eq!(r.result, 0);
         }
         assert_eq!(u32_at(&send(o, 9, vec![], vec![], vec![]), 0), 2);
-        assert_eq!(send(o, 6, 0x101u64.to_le_bytes().to_vec(), vec![], vec![]).data[0], 1);
+        assert_eq!(
+            send(o, 6, 0x101u64.to_le_bytes().to_vec(), vec![], vec![]).data[0],
+            1
+        );
         assert_eq!(send(o, 1, vec![], vec![], vec![]).result, 0);
         assert_eq!(u32_at(&send(o, 0, vec![], vec![], vec![]), 0), 0, "started");
         let mut tags = [0u64; 4];
@@ -402,16 +488,40 @@ mod tests {
         let t0 = std::time::Instant::now();
         while got.len() < 2 && t0.elapsed().as_secs() < 3 {
             std::thread::sleep(std::time::Duration::from_millis(5));
-            let r = send(o, 5, vec![], vec![], vec![Buf { addr: tags.as_mut_ptr() as u64, size: 32, tag: 0 }]);
+            let r = send(
+                o,
+                5,
+                vec![],
+                vec![],
+                vec![Buf {
+                    addr: tags.as_mut_ptr() as u64,
+                    size: 32,
+                    tag: 0,
+                }],
+            );
             got.extend_from_slice(&tags[..u32_at(&r, 0) as usize]);
         }
-        assert_eq!(got, vec![0x100, 0x101], "both back, in order, in real time ({:?})", t0.elapsed());
+        assert_eq!(
+            got,
+            vec![0x100, 0x101],
+            "both back, in order, in real time ({:?})",
+            t0.elapsed()
+        );
         assert!(t0.elapsed().as_millis() >= 15, "not before they played");
         assert!(nxrt::kernel::get().event_signaled(ev).is_some());
         let r = send(o, 10, vec![], vec![], vec![]);
         assert_eq!(u64::from_le_bytes(r.data[..8].try_into().unwrap()), 960);
-        send(o, 12, 0.5f32.to_bits().to_le_bytes().to_vec(), vec![], vec![]);
-        assert_eq!(f32::from_bits(u32_at(&send(o, 13, vec![], vec![], vec![]), 0)), 0.5);
+        send(
+            o,
+            12,
+            0.5f32.to_bits().to_le_bytes().to_vec(),
+            vec![],
+            vec![],
+        );
+        assert_eq!(
+            f32::from_bits(u32_at(&send(o, 13, vec![], vec![], vec![]), 0)),
+            0.5
+        );
         assert_eq!(send(o, 2, vec![], vec![], vec![]).result, 0);
         assert_eq!(u32_at(&send(o, 0, vec![], vec![], vec![]), 0), 1, "stopped");
         crate::ipc::close(o);
@@ -425,8 +535,28 @@ mod tests {
         super::register();
         let h = crate::ipc::connect("audin:u").unwrap();
         let mut names = [0u8; 0x100];
-        let r = send(h, 0, vec![], vec![], vec![Buf { addr: names.as_mut_ptr() as u64, size: 0x100, tag: 0 }]);
-        let r2 = send(h, 1, [0u32.to_le_bytes(), 2u32.to_le_bytes()].concat(), vec![], vec![Buf { addr: names.as_mut_ptr() as u64, size: 0x100, tag: 0 }]);
+        let r = send(
+            h,
+            0,
+            vec![],
+            vec![],
+            vec![Buf {
+                addr: names.as_mut_ptr() as u64,
+                size: 0x100,
+                tag: 0,
+            }],
+        );
+        let r2 = send(
+            h,
+            1,
+            [0u32.to_le_bytes(), 2u32.to_le_bytes()].concat(),
+            vec![],
+            vec![Buf {
+                addr: names.as_mut_ptr() as u64,
+                size: 0x100,
+                tag: 0,
+            }],
+        );
         match crate::media::mic::device() {
             None => {
                 assert_eq!(u32_at(&r, 0), 0);

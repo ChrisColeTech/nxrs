@@ -89,11 +89,32 @@ unsafe fn ao_open(c: *mut Cpu, obj: u64, ev: u64, name: u64, param: u64) {
             crate::services::os::signal_bound(ev);
         });
     }
-    let ao = Arc::new(AudioOut { id, ch, state: AtomicU32::new(STATE_STOPPED), volume: Mutex::new(1.0), stream });
-    OUTS.lock().unwrap().get_or_insert_with(HashMap::new).insert(obj, ao);
+    let ao = Arc::new(AudioOut {
+        id,
+        ch,
+        state: AtomicU32::new(STATE_STOPPED),
+        volume: Mutex::new(1.0),
+        stream,
+    });
+    OUTS.lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(obj, ao);
     au_info(obj, ch, STATE_STOPPED);
-    let nm = if name != 0 { crate::guest::cstr(name, 256) } else { "(default)".into() };
-    crate::log!("audio: AudioOut #{id} open {nm}, {ch} channels, on {}{}", sink::device(), if ev != 0 { "" } else { ", no release event (the game polls)" });
+    let nm = if name != 0 {
+        crate::guest::cstr(name, 256)
+    } else {
+        "(default)".into()
+    };
+    crate::log!(
+        "audio: AudioOut #{id} open {nm}, {ch} channels, on {}{}",
+        sink::device(),
+        if ev != 0 {
+            ""
+        } else {
+            ", no release event (the game polls)"
+        }
+    );
     (*c).x[0] = RES_OK;
 }
 unsafe fn ao_open_ev_name(c: *mut Cpu) {
@@ -134,7 +155,11 @@ afn!(ao_stop, |a| {
     0
 });
 afn!(ao_close, |a| {
-    let o = OUTS.lock().unwrap().as_mut().and_then(|m| m.remove(&a.x(0)));
+    let o = OUTS
+        .lock()
+        .unwrap()
+        .as_mut()
+        .and_then(|m| m.remove(&a.x(0)));
     if let Some(o) = o {
         o.stream.stop();
         o.stream.close();
@@ -143,10 +168,18 @@ afn!(ao_close, |a| {
     }
     0
 });
-afn!(ao_state, |a| { out_of(a.x(0)).map_or(STATE_STOPPED as u64, |o| o.state.load(Ordering::Relaxed) as u64) });
-afn!(ao_count, |a| { out_of(a.x(0)).map_or(0, |o| o.stream.blocks() as u64) });
+afn!(ao_state, |a| {
+    out_of(a.x(0)).map_or(STATE_STOPPED as u64, |o| {
+        o.state.load(Ordering::Relaxed) as u64
+    })
+});
+afn!(ao_count, |a| {
+    out_of(a.x(0)).map_or(0, |o| o.stream.blocks() as u64)
+});
 afn!(ao_rate, |a| { RATE as u64 });
-afn!(ao_channels, |a| { out_of(a.x(0)).map_or(2, |o| o.ch as u64) });
+afn!(ao_channels, |a| {
+    out_of(a.x(0)).map_or(2, |o| o.ch as u64)
+});
 afn!(ao_format, |a| { FMT_PCM16 as u64 });
 
 /// Interleaved PCM16 of `ch` channels as stereo floats (six channels folded with the system's downmix).
@@ -183,7 +216,9 @@ afn!(ao_append, |a| {
     let (ptr, size) = (r64(buf + 8), r64(buf + 0x18));
     let pcm: Vec<i16> = if ptr != 0 && size >= 2 {
         let b = crate::guest::bytes(ptr, size & !1);
-        b.chunks_exact(2).map(|x| i16::from_le_bytes([x[0], x[1]])).collect()
+        b.chunks_exact(2)
+            .map(|x| i16::from_le_bytes([x[0], x[1]]))
+            .collect()
     } else {
         vec![]
     };
@@ -191,14 +226,26 @@ afn!(ao_append, |a| {
     if crate::trace::on("audio") {
         static N: AtomicU32 = AtomicU32::new(0);
         if N.fetch_add(1, Ordering::Relaxed) < 200 {
-            crate::log!("audio: AudioOut #{} append {} frames ({} blocks, {} frames queued before)", o.id, pcm.len() / o.ch.max(1) as usize, o.stream.blocks(), o.stream.queued());
+            crate::log!(
+                "audio: AudioOut #{} append {} frames ({} blocks, {} frames queued before)",
+                o.id,
+                pcm.len() / o.ch.max(1) as usize,
+                o.stream.blocks(),
+                o.stream.queued()
+            );
         }
     }
     o.stream.append(buf, to_stereo(&pcm, o.ch as usize, gain));
     1
 });
-afn!(ao_released, |a| { out_of(a.x(0)).and_then(|o| o.stream.released()).unwrap_or(0) });
-afn!(ao_contains, |a| { out_of(a.x(0)).is_some_and(|o| o.stream.contains(a.x(1))) as u64 });
+afn!(ao_released, |a| {
+    out_of(a.x(0))
+        .and_then(|o| o.stream.released())
+        .unwrap_or(0)
+});
+afn!(ao_contains, |a| {
+    out_of(a.x(0)).is_some_and(|o| o.stream.contains(a.x(1))) as u64
+});
 unsafe fn ao_set_volume(c: *mut Cpu) {
     let a = Args(&mut *c);
     let v = a.f(0);
@@ -261,7 +308,9 @@ afn!(dev_set_autotune, |a| {
     AUTOTUNE.store(a.x(0) as u32 & 1, Ordering::Relaxed);
     0
 });
-afn!(dev_autotune, |a| { AUTOTUNE.load(Ordering::Relaxed) as u64 });
+afn!(dev_autotune, |a| {
+    AUTOTUNE.load(Ordering::Relaxed) as u64
+});
 /// The output change notification: 0x499 when already acquired (the SDK keeps that flag for the process).
 unsafe fn dev_notify(c: *mut Cpu) {
     let ev = (*c).x[0];
@@ -355,7 +404,14 @@ unsafe fn ai_open(c: *mut Cpu, obj: u64, ev: u64, param: u64) {
     w32(obj + 8, FMT_PCM16);
     w32(obj + 0xc, STATE_STOPPED);
     crate::log!("audio: AudioIn open on {dev}, {ch} channels");
-    INS.lock().unwrap().get_or_insert_with(HashMap::new).insert(obj, Arc::new(AudioIn { ch, state: AtomicU32::new(STATE_STOPPED), mic: cap }));
+    INS.lock().unwrap().get_or_insert_with(HashMap::new).insert(
+        obj,
+        Arc::new(AudioIn {
+            ch,
+            state: AtomicU32::new(STATE_STOPPED),
+            mic: cap,
+        }),
+    );
     (*c).x[0] = RES_OK;
 }
 unsafe fn ai_open_ev(c: *mut Cpu) {
@@ -371,7 +427,9 @@ unsafe fn ai_open_default(c: *mut Cpu) {
     ai_open(c, a.x[0], a.x[1], a.x[2]);
 }
 afn!(ai_start, |a| {
-    let Some(i) = in_of(a.x(0)) else { return RES_FAIL };
+    let Some(i) = in_of(a.x(0)) else {
+        return RES_FAIL;
+    };
     i.state.store(STATE_STARTED, Ordering::Relaxed);
     w32(a.x(0) + 0xc, STATE_STARTED);
     match i.mic.start() {
@@ -410,11 +468,21 @@ afn!(ai_append, |a| {
     i.mic.append(buf, ptr, n & !1, i.ch);
     1
 });
-afn!(ai_released, |a| { in_of(a.x(0)).and_then(|i| i.mic.released()).unwrap_or(0) });
-afn!(ai_state, |a| { in_of(a.x(0)).map_or(STATE_STOPPED as u64, |i| i.state.load(Ordering::Relaxed) as u64) });
-afn!(ai_count, |a| { in_of(a.x(0)).map_or(0, |i| i.mic.pending() as u64) });
+afn!(ai_released, |a| {
+    in_of(a.x(0)).and_then(|i| i.mic.released()).unwrap_or(0)
+});
+afn!(ai_state, |a| {
+    in_of(a.x(0)).map_or(STATE_STOPPED as u64, |i| {
+        i.state.load(Ordering::Relaxed) as u64
+    })
+});
+afn!(ai_count, |a| {
+    in_of(a.x(0)).map_or(0, |i| i.mic.pending() as u64)
+});
 afn!(ai_rate, |a| { RATE as u64 });
-afn!(ai_channels, |a| { in_of(a.x(0)).map_or(2, |i| i.ch as u64) });
+afn!(ai_channels, |a| {
+    in_of(a.x(0)).map_or(2, |i| i.ch as u64)
+});
 afn!(ai_format, |a| { FMT_PCM16 as u64 });
 
 // ---- SDK 21's OutputStream / InputStream
@@ -465,7 +533,9 @@ afn!(os_dev_props, |a| {
     let (p, name) = (a.x(0), a.x(1));
     let n = crate::guest::cstr(name, VDEV_NAME as usize);
     if n != VDEV_OUT {
-        crate::log!("[RED] audio: virtual output device {n}: the host has only {VDEV_OUT}, no properties");
+        crate::log!(
+            "[RED] audio: virtual output device {n}: the host has only {VDEV_OUT}, no properties"
+        );
         return RES_FAIL;
     }
     crate::guest::zero(p, 0x110);
@@ -497,13 +567,32 @@ unsafe fn os_open(c: *mut Cpu, g: u64, ev: u64, fmt: u64, frames: i32) -> u64 {
             crate::services::os::signal_bound(ev);
         });
     }
-    let o = OStream { id, ch: ch as usize, fmt: f, cap: frames as i64, queued: 0, frames: HashMap::new(), next: 1, state: OS_STOPPED, gain: 1.0, stream };
-    OSTREAMS.lock().unwrap().get_or_insert_with(HashMap::new).insert(g, Arc::new(Mutex::new(o)));
+    let o = OStream {
+        id,
+        ch: ch as usize,
+        fmt: f,
+        cap: frames as i64,
+        queued: 0,
+        frames: HashMap::new(),
+        next: 1,
+        state: OS_STOPPED,
+        gain: 1.0,
+        stream,
+    };
+    OSTREAMS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(g, Arc::new(Mutex::new(o)));
     crate::log!(
         "audio: OutputStream #{id} open, {ch} channels {}, {frames} frames, on {}{}",
         if f == OS_FLOAT { "float" } else { "PCM16" },
         sink::device(),
-        if ev != 0 { "" } else { ", no event (the game polls)" }
+        if ev != 0 {
+            ""
+        } else {
+            ", no event (the game polls)"
+        }
     );
     RES_OK
 }
@@ -563,7 +652,11 @@ afn!(os_purge, |a| {
     0
 });
 afn!(os_close, |a| {
-    let o = OSTREAMS.lock().unwrap().as_mut().and_then(|m| m.remove(&a.x(0)));
+    let o = OSTREAMS
+        .lock()
+        .unwrap()
+        .as_mut()
+        .and_then(|m| m.remove(&a.x(0)));
     if let Some(o) = o {
         let o = o.lock().unwrap();
         o.stream.stop();
@@ -572,7 +665,9 @@ afn!(os_close, |a| {
     }
     0
 });
-afn!(os_state, |a| { ostream(a.x(0)).map_or(0, |o| o.lock().unwrap().state as u64) });
+afn!(os_state, |a| {
+    ostream(a.x(0)).map_or(0, |o| o.lock().unwrap().state as u64)
+});
 afn!(os_free, |a| {
     let Some(o) = ostream(a.x(0)) else { return 0 };
     let mut o = o.lock().unwrap();
@@ -604,10 +699,16 @@ afn!(os_write, |a| {
     let pcm: Vec<i16> = if o.fmt == OS_FLOAT {
         crate::guest::bytes(data, n as u64 * 4)
             .chunks_exact(4)
-            .map(|b| (f32::from_le_bytes([b[0], b[1], b[2], b[3]]) * 32767.0).clamp(-32768.0, 32767.0) as i16)
+            .map(|b| {
+                (f32::from_le_bytes([b[0], b[1], b[2], b[3]]) * 32767.0).clamp(-32768.0, 32767.0)
+                    as i16
+            })
             .collect()
     } else {
-        crate::guest::bytes(data, n as u64 * 2).chunks_exact(2).map(|b| i16::from_le_bytes([b[0], b[1]])).collect()
+        crate::guest::bytes(data, n as u64 * 2)
+            .chunks_exact(2)
+            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .collect()
     };
     let tag = o.next;
     o.next += 1;
@@ -764,7 +865,9 @@ mod tests {
             param[4..6].copy_from_slice(&2u16.to_le_bytes());
             let dev = mic::device();
             if dev.is_none() {
-                eprintln!("test: this PC has no capture device: only the no-device answer is checked");
+                eprintln!(
+                    "test: this PC has no capture device: only the no-device answer is checked"
+                );
             }
             if let Some(dev) = dev {
                 assert_eq!(call(ai_list, &[names.as_mut_ptr() as u64, 1]), 1);
@@ -792,7 +895,11 @@ mod tests {
                         t => got.push(t),
                     }
                 }
-                assert_eq!(got, vec![bufs[0].as_ptr() as u64, bufs[1].as_ptr() as u64], "both buffers come back full, in order");
+                assert_eq!(
+                    got,
+                    vec![bufs[0].as_ptr() as u64, bufs[1].as_ptr() as u64],
+                    "both buffers come back full, in order"
+                );
                 assert_eq!(bufs[0][3], 480 * 4, "10 ms of 48 kHz stereo PCM16 captured");
                 call(ai_stop, &[o]);
                 assert_eq!(call(ai_state, &[o]), STATE_STOPPED as u64);
@@ -801,9 +908,20 @@ mod tests {
             }
 
             mic::HIDE_DEVICE.store(true, std::sync::atomic::Ordering::SeqCst);
-            assert_eq!(call(ai_list, &[names.as_mut_ptr() as u64, 1]), 0, "no device listed");
+            assert_eq!(
+                call(ai_list, &[names.as_mut_ptr() as u64, 1]),
+                0,
+                "no device listed"
+            );
             let mut obj2 = vec![0u64; 8];
-            assert_eq!(call(ai_open_noev, &[obj2.as_mut_ptr() as u64, 0, param.as_ptr() as u64]), RES_FAIL, "the open fails");
+            assert_eq!(
+                call(
+                    ai_open_noev,
+                    &[obj2.as_mut_ptr() as u64, 0, param.as_ptr() as u64]
+                ),
+                RES_FAIL,
+                "the open fails"
+            );
             mic::HIDE_DEVICE.store(false, std::sync::atomic::Ordering::SeqCst);
         }
     }

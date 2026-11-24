@@ -32,11 +32,19 @@ const STEADY_ID: &[u8; 16] = b"nxos-steady-0001";
 
 fn fixed_time() -> Option<i64> {
     static F: OnceLock<Option<i64>> = OnceLock::new();
-    *F.get_or_init(|| std::env::var("NXOS_FIXED_TIME").ok().and_then(|v| v.parse().ok()))
+    *F.get_or_init(|| {
+        std::env::var("NXOS_FIXED_TIME")
+            .ok()
+            .and_then(|v| v.parse().ok())
+    })
 }
 
 pub fn now() -> i64 {
-    fixed_time().unwrap_or_else(|| std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_secs() as i64))
+    fixed_time().unwrap_or_else(|| {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |d| d.as_secs() as i64)
+    })
 }
 
 fn steady_secs() -> i64 {
@@ -54,7 +62,11 @@ pub fn local_offset() -> (i64, String) {
         tm.tm_gmtoff
     };
     let h = off / 3600;
-    let name = if off == 0 { "UTC".to_string() } else { format!("UTC{h:+}") };
+    let name = if off == 0 {
+        "UTC".to_string()
+    } else {
+        format!("UTC{h:+}")
+    };
     (off, name)
 }
 
@@ -72,7 +84,11 @@ pub fn local_offset() -> (i64, String) {
     }
     let off = -bias * 60;
     let h = off / 3600;
-    let name = if off == 0 { "UTC".to_string() } else { format!("UTC{h:+}") };
+    let name = if off == 0 {
+        "UTC".to_string()
+    } else {
+        format!("UTC{h:+}")
+    };
     (off, name)
 }
 
@@ -120,7 +136,13 @@ pub fn calendar(t: i64) -> ([u8; 8], u32, u32) {
 
 fn from_calendar(ct: u64) -> i64 {
     let y = crate::guest::r16(ct) as i16 as i64;
-    let (mo, d, h, mi, s) = (crate::guest::r8(ct + 2), crate::guest::r8(ct + 3), crate::guest::r8(ct + 4), crate::guest::r8(ct + 5), crate::guest::r8(ct + 6));
+    let (mo, d, h, mi, s) = (
+        crate::guest::r8(ct + 2),
+        crate::guest::r8(ct + 3),
+        crate::guest::r8(ct + 4),
+        crate::guest::r8(ct + 5),
+        crate::guest::r8(ct + 6),
+    );
     days_from_civil(y, mo as u32, d as u32) * 86_400 + h as i64 * 3600 + mi as i64 * 60 + s as i64
 }
 
@@ -162,7 +184,9 @@ fn context_bytes() -> [u8; 0x20] {
     let steady = steady_secs();
     let mut g = CONTEXT.lock().unwrap();
     let d = now - steady;
-    if g.as_ref().is_none_or(|(_, drift)| fixed_time().is_none() && (d - drift).abs() > 1) {
+    if g.as_ref()
+        .is_none_or(|(_, drift)| fixed_time().is_none() && (d - drift).abs() > 1)
+    {
         let mut ctx = [0u8; 0x20];
         ctx[0..8].copy_from_slice(&(now - steady).to_le_bytes());
         ctx[8..16].copy_from_slice(&steady.to_le_bytes());
@@ -207,9 +231,14 @@ tfn!(get_context, |a| {
     RES_OK
 });
 tfn!(timespec, |a| {
-    let ns = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.subsec_nanos());
+    let ns = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| d.subsec_nanos());
     w64(a.x(0), now() as u64);
-    w64(a.x(0) + 8, if fixed_time().is_some() { 0 } else { ns as u64 });
+    w64(
+        a.x(0) + 8,
+        if fixed_time().is_some() { 0 } else { ns as u64 },
+    );
     0
 });
 tfn!(mono_timespec, |a| {
@@ -243,7 +272,11 @@ tfn!(location, |a| {
     RES_OK
 });
 tfn!(load_rule, |a| {
-    crate::log_once!("tzrule", "time::LoadTimeZoneRule {} (the host's zone is used)", crate::guest::cstr(a.x(1), 0x24));
+    crate::log_once!(
+        "tzrule",
+        "time::LoadTimeZoneRule {} (the host's zone is used)",
+        crate::guest::cstr(a.x(1), 0x24)
+    );
     RES_OK
 });
 tfn!(snapshot, |a| {
@@ -387,7 +420,12 @@ fn page_new() -> Page {
 /// The page's first contents: the steady clock from `base`, both system clock contexts, automatic correction on,
 /// the ContinuousAdjustmentTimePoint set up at system counter `now_ns`.
 fn page_fill(shm: &'static crate::svc::SharedMem, base: i64, now_ns: i64) -> Page {
-    let mut p = Page { shm, img: vec![0; SHM_SIZE], filled: vec![], ctx: context_bytes() };
+    let mut p = Page {
+        shm,
+        img: vec![0; SHM_SIZE],
+        filled: vec![],
+        ctx: context_bytes(),
+    };
     let mut steady = [0u8; 0x18];
     steady[0..8].copy_from_slice(&base.to_le_bytes());
     steady[8..24].copy_from_slice(STEADY_ID);
@@ -417,7 +455,11 @@ fn page_tick() -> bool {
         if !p.filled.contains(&v) {
             crate::guest::write_bytes(v, &p.img);
             p.filled.push(v);
-            crate::log_once!(format!("time shm {v:#x}"), "time: shared memory written at {v:#x} (steady base {} ns)", steady_base());
+            crate::log_once!(
+                format!("time shm {v:#x}"),
+                "time: shared memory written at {v:#x} (steady base {} ns)",
+                steady_base()
+            );
         }
     }
     let ctx = context_bytes();
@@ -577,7 +619,11 @@ impl crate::ipc::Service for TimeZone {
                     return crate::hle::RES_FAIL as u32;
                 }
                 let y = i16::from_le_bytes([raw[0], raw[1]]) as i64;
-                let t = days_from_civil(y, raw[2] as u32, raw[3] as u32) * 86_400 + raw[4] as i64 * 3600 + raw[5] as i64 * 60 + raw[6] as i64 - local_offset().0;
+                let t = days_from_civil(y, raw[2] as u32, raw[3] as u32) * 86_400
+                    + raw[4] as i64 * 3600
+                    + raw[5] as i64 * 60
+                    + raw[6] as i64
+                    - local_offset().0;
                 let n = ctx.write_out(0, &t.to_le_bytes());
                 ctx.push_u32((n >= 8) as u32);
             }
@@ -656,7 +702,11 @@ mod tests {
     fn calendar_math() {
         assert_eq!(civil(0), (1970, 1, 1));
         assert_eq!(civil(days_from_civil(2026, 11, 19)), (2026, 11, 19));
-        assert_eq!(days_from_civil(2000, 3, 1) - days_from_civil(2000, 2, 28), 2, "2000 is a leap year");
+        assert_eq!(
+            days_from_civil(2000, 3, 1) - days_from_civil(2000, 2, 28),
+            2,
+            "2000 is a leap year"
+        );
         let (c, wday, yday) = calendar(1_700_000_000); // 2023-11-14 22:13:20 UTC, a Tuesday
         assert_eq!(i16::from_le_bytes([c[0], c[1]]), 2023);
         assert_eq!(&c[2..7], &[11, 14, 22, 13, 20]);
@@ -666,8 +716,17 @@ mod tests {
     #[test]
     fn lock_free_pairs() {
         // the page writer's pairs: the counter picks the copy, a write fills the other one first
-        let shm: &'static crate::svc::SharedMem = Box::leak(Box::new(crate::svc::SharedMem { handle: 0, size: 0x1000, views: Mutex::new(vec![]) }));
-        let mut p = Page { shm, img: vec![0; SHM_SIZE], filled: vec![], ctx: [0; 0x20] };
+        let shm: &'static crate::svc::SharedMem = Box::leak(Box::new(crate::svc::SharedMem {
+            handle: 0,
+            size: 0x1000,
+            views: Mutex::new(vec![]),
+        }));
+        let mut p = Page {
+            shm,
+            img: vec![0; SHM_SIZE],
+            filled: vec![],
+            ctx: [0; 0x20],
+        };
         p.put(&[], 0x38, 8, 0x20, &[7; 0x20]);
         assert_eq!(u32::from_le_bytes(p.img[0x38..0x3c].try_into().unwrap()), 1);
         assert_eq!(&p.img[0x60..0x80], &[7; 0x20], "counter 1: the second copy");
@@ -678,7 +737,11 @@ mod tests {
         let mut adj = [0u8; 0x38];
         adj[0x28..0x38].copy_from_slice(STEADY_ID);
         p.put(&[], 0xD0, 8, 0x38, &adj);
-        assert_eq!(&p.img[0x110 + 0x28..0x110 + 0x38], STEADY_ID, "the adjustment's clock source id at +0x28");
+        assert_eq!(
+            &p.img[0x110 + 0x28..0x110 + 0x38],
+            STEADY_ID,
+            "the adjustment's clock source id at +0x28"
+        );
     }
 
     /// The page as Turbo 1f12977 lays it out, read the way SDK 22's SharedMemoryClient does: the local context's
@@ -687,14 +750,22 @@ mod tests {
     /// result 52340 and clock_gettime(CLOCK_REALTIME) fails), multiplier and shift 0; and the steady clock's id.
     #[test]
     fn shared_page_layout_as_turbo() {
-        let shm: &'static crate::svc::SharedMem = Box::leak(Box::new(crate::svc::SharedMem { handle: 0, size: 0x1000, views: Mutex::new(vec![]) }));
+        let shm: &'static crate::svc::SharedMem = Box::leak(Box::new(crate::svc::SharedMem {
+            handle: 0,
+            size: 0x1000,
+            views: Mutex::new(vec![]),
+        }));
         let p = page_fill(shm, 1_000_000_000, 123_456);
         let img = &p.img;
         let rd32 = |o: usize| u32::from_le_bytes(img[o..o + 4].try_into().unwrap());
         let rd64 = |o: usize| i64::from_le_bytes(img[o..o + 8].try_into().unwrap());
-        let pick = |off: usize, align: usize, size: usize| off + align + (rd32(off) as usize & 1) * size;
+        let pick =
+            |off: usize, align: usize, size: usize| off + align + (rd32(off) as usize & 1) * size;
         let steady = pick(0x00, 8, 0x18);
-        assert_eq!((rd64(steady), &img[steady + 8..steady + 24]), (1_000_000_000, &STEADY_ID[..]));
+        assert_eq!(
+            (rd64(steady), &img[steady + 8..steady + 24]),
+            (1_000_000_000, &STEADY_ID[..])
+        );
         let local = pick(0x38, 8, 0x20);
         let ctx_id = &img[local + 0x10..local + 0x20];
         assert_eq!(ctx_id, STEADY_ID);
@@ -702,8 +773,19 @@ mod tests {
         assert_eq!(rd32(0xD0), 1, "the adjustment's counter");
         let adj = pick(0xD0, 8, 0x38);
         assert_eq!(adj, 0xD8 + 0x38, "counter 1: the second 0x38-byte entry");
-        assert_eq!(&img[adj + 0x28..adj + 0x38], ctx_id, "the entry's id at +0x28 is the context's");
-        assert_eq!((rd64(adj), rd64(adj + 8), rd64(adj + 0x10)), (123_456, 0, 0), "set up now, multiplier 0, shift 0");
-        assert!(img[0xD8..0xD8 + 0x38].iter().all(|&b| b == 0), "the other entry untouched");
+        assert_eq!(
+            &img[adj + 0x28..adj + 0x38],
+            ctx_id,
+            "the entry's id at +0x28 is the context's"
+        );
+        assert_eq!(
+            (rd64(adj), rd64(adj + 8), rd64(adj + 0x10)),
+            (123_456, 0, 0),
+            "set up now, multiplier 0, shift 0"
+        );
+        assert!(
+            img[0xD8..0xD8 + 0x38].iter().all(|&b| b == 0),
+            "the other entry untouched"
+        );
     }
 }

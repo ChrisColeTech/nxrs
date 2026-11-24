@@ -41,12 +41,16 @@ ofn!(stpl_set_styles, |c, a| {
     STPL_STYLES.store(a.w(0), Ordering::Relaxed);
     0
 });
-ofn!(stpl_styles, |c, a| { STPL_STYLES.load(Ordering::Relaxed) as u64 });
+ofn!(stpl_styles, |c, a| {
+    STPL_STYLES.load(Ordering::Relaxed) as u64
+});
 ofn!(stpl_set_hold, |c, a| {
     STPL_HOLD.store(a.w(0), Ordering::Relaxed);
     0
 });
-ofn!(stpl_hold, |c, a| { STPL_HOLD.load(Ordering::Relaxed) as u64 });
+ofn!(stpl_hold, |c, a| {
+    STPL_HOLD.load(Ordering::Relaxed) as u64
+});
 ofn!(stpl_event, |c, a| { quiet_event(c, &STPL_EV) });
 
 // ---- the shop's purchased-item queue and the friends notifications: events that never fire
@@ -80,7 +84,10 @@ ofn!(chat_storage_init, |c, a| {
     w32(t, CHAT_MAGIC);
     w32(t + 4, n as u32);
     for i in 0..n as u64 {
-        w32(t + 8 + 4 * i, crate::services::codec_video::native_image_blank(w as u32, h as u32));
+        w32(
+            t + 8 + 4 * i,
+            crate::services::codec_video::native_image_blank(w as u32, h as u32),
+        );
     }
     crate::log_once!("chat cam", "chat: camera video storage {w}x{h} x{n}: blank images (the host has no camera and no chat members)");
     0
@@ -158,7 +165,11 @@ struct Web {
     reason: u64,
     msgs: VecDeque<Vec<u8>>,
 }
-static WEB: Mutex<Web> = Mutex::new(Web { state: 0, reason: 0, msgs: VecDeque::new() });
+static WEB: Mutex<Web> = Mutex::new(Web {
+    state: 0,
+    reason: 0,
+    msgs: VecDeque::new(),
+});
 static WEB_CV: Condvar = Condvar::new();
 static WEB_EV: OnceLock<u64> = OnceLock::new();
 
@@ -177,7 +188,10 @@ fn web_doc(arg: u64) -> String {
         if o + 8 > 0x2000 {
             break;
         }
-        let (t, sz) = (crate::guest::r16(arg + o), crate::guest::r16(arg + o + 2) as u64);
+        let (t, sz) = (
+            crate::guest::r16(arg + o),
+            crate::guest::r16(arg + o + 2) as u64,
+        );
         if o + 8 + sz > 0x2000 {
             break;
         }
@@ -252,7 +266,10 @@ ofn!(webs_start, |c, a| {
 ofn!(webs_appear, |c, a| {
     let mut w = WEB.lock().unwrap();
     if w.state == 1 || w.state == 2 {
-        crate::log_once!("web appear", "web::OfflineWebSession::Appear: the stand-in closes at once (no page shown)");
+        crate::log_once!(
+            "web appear",
+            "web::OfflineWebSession::Appear: the stand-in closes at once (no page shown)"
+        );
         w.state = 2;
         web_end(&mut w, 0);
     }
@@ -281,7 +298,9 @@ ofn!(webs_send, |c, a| { 1 });
 // TryReceiveContentMessage(size_t *out, char *buf, size_t n): the oldest message from the page, without its zero.
 ofn!(webs_recv, |c, a| {
     let (out, buf, n) = (a.x(1), a.x(2), a.x(3));
-    let Some(m) = WEB.lock().unwrap().msgs.pop_front() else { return 0 };
+    let Some(m) = WEB.lock().unwrap().msgs.pop_front() else {
+        return 0;
+    };
     let k = (m.len() as u64).min(n.saturating_sub(1));
     if buf != 0 && n != 0 {
         crate::guest::write_bytes(buf, &m[..k as usize]);
@@ -290,7 +309,9 @@ ofn!(webs_recv, |c, a| {
     crate::guest::out(out, k);
     1
 });
-ofn!(webs_needs_wait, |c, a| { (WEB.lock().unwrap().state != 0) as u64 });
+ofn!(webs_needs_wait, |c, a| {
+    (WEB.lock().unwrap().state != 0) as u64
+});
 // ShowOfflineHtmlPage(rv, arg): the synchronous form fails without a page shown.
 ofn!(web_show_offline, |c, a| {
     web_start(c, a.x(1));
@@ -307,7 +328,10 @@ unsafe fn prepo_send(c: *mut Cpu) {
     if ctx != 0 {
         crate::guest::w64(ctx, 0);
     }
-    crate::log_once!("prepo send", "prepo: PlayReport::Send: nothing is sent, the default context completes with success");
+    crate::log_once!(
+        "prepo send",
+        "prepo: PlayReport::Send: nothing is sent, the default context completes with success"
+    );
 }
 
 pub fn register(r: &mut Registry) {
@@ -372,10 +396,22 @@ mod tests {
         ] {
             assert!(names.contains(&n), "{n}");
         }
-        let row = |n: &str| crate::services::simple::TABLE.iter().find(|s| s.name == n).unwrap();
+        let row = |n: &str| {
+            crate::services::simple::TABLE
+                .iter()
+                .find(|s| s.name == n)
+                .unwrap()
+        };
         let s = row("_ZN2nn3ngc47CheckProfanityWordsInTextForPlatformRegionChinaEPbPKc");
-        assert_eq!((s.ret, s.outs), (0, &[(0usize, 1u32, 0u64)][..]), "no profanity");
-        assert_eq!(row("_ZN2nn5album21GetSharePostedLastUrlEPcmRKNS0_7ShareIdE").ret, crate::hle::RES_FAIL);
+        assert_eq!(
+            (s.ret, s.outs),
+            (0, &[(0usize, 1u32, 0u64)][..]),
+            "no profanity"
+        );
+        assert_eq!(
+            row("_ZN2nn5album21GetSharePostedLastUrlEPcmRKNS0_7ShareIdE").ret,
+            crate::hle::RES_FAIL
+        );
         let mut c = nxrt::cpu::Cpu::new_boxed();
         let mut ctx = 0xdead_beefu64;
         c.x[8] = &mut ctx as *mut u64 as u64;

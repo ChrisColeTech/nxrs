@@ -399,7 +399,7 @@ oefn!(execute_program, |a| {
 /// index (`NXRS_PREV_PROGRAM`); a relaunch (`param` None) passes neither (`NXRS_RELAUNCH=1`).
 fn successor(cur: i32, exe: &std::path::Path, param: Option<&std::path::Path>) -> std::process::Command {
     let mut cmd = std::process::Command::new(exe);
-    cmd.args(std::env::args_os().skip(1)).env_remove("NXRS_DATA").env_remove("NXRT_EXEFS");
+    cmd.args(successor_args(exe, std::env::args_os().skip(1))).env_remove("NXOS_DATA").env_remove("NXRS_DATA").env_remove("NXRT_EXEFS");
     if let Some(d) = exe.parent() {
         cmd.current_dir(d);
     }
@@ -412,6 +412,23 @@ fn successor(cur: i32, exe: &std::path::Path, param: Option<&std::path::Path>) -
         }
     }
     cmd
+}
+
+/// The front end's first positional argument is this program's data folder. A different program must use the data
+/// built beside its own executable, while run options are inherited unchanged.
+fn successor_args(exe: &std::path::Path, args: impl IntoIterator<Item = std::ffi::OsString>) -> Vec<std::ffi::OsString> {
+    let data = exe.with_file_name(format!("{}_data", exe.file_stem().unwrap_or_default().to_string_lossy()));
+    let mut replaced = false;
+    args.into_iter()
+        .map(|arg| {
+            if !replaced && !arg.to_string_lossy().starts_with('-') {
+                replaced = true;
+                data.clone().into_os_string()
+            } else {
+                arg
+            }
+        })
+        .collect()
 }
 
 /// Starts the successor (`successor`) and says so with the `exec:` line the harness follows; the caller ends this run.
@@ -566,6 +583,13 @@ mod tests {
         let e = envs(&x);
         assert!(e.contains(&("NXRS_LAUNCH_PARAM".into(), Some("p.bin".into()))) && e.contains(&("NXRS_PREV_PROGRAM".into(), Some("2".into()))));
         assert!(e.contains(&("NXRS_RELAUNCH".into(), None)));
+    }
+
+    #[test]
+    fn successor_uses_its_own_data_folder() {
+        let exe = std::path::Path::new(r"C:\games\Sonic_p1.exe");
+        let args = successor_args(exe, [r"C:\games\Sonic_data".into(), "--fullscreen=0".into()]);
+        assert_eq!(args, [r"C:\games\Sonic_p1_data", "--fullscreen=0"]);
     }
 
     #[test]

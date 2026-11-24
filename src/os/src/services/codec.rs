@@ -30,9 +30,18 @@ fn with_dec<R>(obj: u64, f: impl FnOnce(&mut Decoder) -> R) -> Option<R> {
 }
 
 fn put_dec(obj: u64, d: Decoder) {
-    let first = DECS.lock().unwrap().get_or_insert_with(HashMap::new).insert(obj, d).is_none();
+    let first = DECS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(obj, d)
+        .is_none();
     if first {
-        crate::log_once!("opus up", "codec: Opus decoders are {} on the host (hwopus)", opus::version());
+        crate::log_once!(
+            "opus up",
+            "codec: Opus decoders are {} on the host (hwopus)",
+            opus::version()
+        );
     }
 }
 
@@ -41,9 +50,17 @@ fn valid_rate(r: i32) -> bool {
 }
 
 // One framed packet decoded into a guest buffer: (OpusResult, consumed, samples a channel).
-fn decode_into(d: &mut Decoder, inp: u64, in_size: u64, out: u64, out_size: u64) -> (u64, u64, i32) {
+fn decode_into(
+    d: &mut Decoder,
+    inp: u64,
+    in_size: u64,
+    out: u64,
+    out_size: u64,
+) -> (u64, u64, i32) {
     let data = crate::guest::bytes(inp, in_size);
-    let Some((pkt, used)) = opus::frame(data) else { return (OR_BROKEN, 0, 0) };
+    let Some((pkt, used)) = opus::frame(data) else {
+        return (OR_BROKEN, 0, 0);
+    };
     let ch = d.channels.max(1) as usize;
     let mut pcm = vec![0i16; 5760 * ch];
     match d.decode(pkt, &mut pcm) {
@@ -59,7 +76,11 @@ fn decode_into(d: &mut Decoder, inp: u64, in_size: u64, out: u64, out_size: u64)
             (OR_OK, used as u64, n as i32)
         }
         Err(e) => {
-            crate::log_once!(format!("opus err {e}"), "[RED] codec: libopus refused a {}-byte packet ({e})", pkt.len());
+            crate::log_once!(
+                format!("opus err {e}"),
+                "[RED] codec: libopus refused a {}-byte packet ({e})",
+                pkt.len()
+            );
             (OR_BROKEN, 0, 0)
         }
     }
@@ -88,7 +109,10 @@ unsafe fn ctor(c: *mut Cpu, orig: &str) {
         }
         None => crate::guest::zero(this, 0x10),
     }
-    DECS.lock().unwrap().get_or_insert_with(HashMap::new).remove(&this);
+    DECS.lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&this);
 }
 unsafe fn ctor1(c: *mut Cpu) {
     ctor(c, "_ZN2nn5codec19HardwareOpusDecoderC1Ei")
@@ -97,11 +121,16 @@ unsafe fn ctor_ms(c: *mut Cpu) {
     ctor(c, "_ZN2nn5codec30HardwareOpusMultiStreamDecoderC1Ei")
 }
 cfn!(dtor, |a| {
-    DECS.lock().unwrap().get_or_insert_with(HashMap::new).remove(&a.x(0));
+    DECS.lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&a.x(0));
     0
 });
 cfn!(work_size, |a| { Decoder::size(a.i(2)).max(0x100) });
-cfn!(work_size_ms, |a| { Decoder::multi_size(a.i(3), a.i(4)).max(0x100) });
+cfn!(work_size_ms, |a| {
+    Decoder::multi_size(a.i(3), a.i(4)).max(0x100)
+});
 cfn!(is_init, |a| { with_dec(a.x(0), |_| ()).is_some() as u64 });
 cfn!(init, |a| {
     let (this, rate, ch) = (a.x(0), a.i(1), a.i(2));
@@ -134,13 +163,24 @@ cfn!(init_ms, |a| {
     }
 });
 cfn!(fini, |a| {
-    DECS.lock().unwrap().get_or_insert_with(HashMap::new).remove(&a.x(0));
+    DECS.lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&a.x(0));
     0
 });
-cfn!(rate, |a| { with_dec(a.x(0), |d| d.rate as u64).unwrap_or(0) });
-cfn!(channels, |a| { with_dec(a.x(0), |d| d.channels as u64).unwrap_or(0) });
-cfn!(streams, |a| { with_dec(a.x(0), |d| d.streams as u64).unwrap_or(0) });
-cfn!(stereo, |a| { with_dec(a.x(0), |d| d.stereo as u64).unwrap_or(0) });
+cfn!(rate, |a| {
+    with_dec(a.x(0), |d| d.rate as u64).unwrap_or(0)
+});
+cfn!(channels, |a| {
+    with_dec(a.x(0), |d| d.channels as u64).unwrap_or(0)
+});
+cfn!(streams, |a| {
+    with_dec(a.x(0), |d| d.streams as u64).unwrap_or(0)
+});
+cfn!(stereo, |a| {
+    with_dec(a.x(0), |d| d.stereo as u64).unwrap_or(0)
+});
 cfn!(reset, |a| {
     with_dec(a.x(0), |d| d.reset());
     0
@@ -148,9 +188,12 @@ cfn!(reset, |a| {
 cfn!(set_context, |a| { OR_OK });
 // DecodeInterleaved(this, size_t *consumed, int *samples, int16 *out, size_t out_size, const void *in, size_t in_size)
 cfn!(decode_il, |a| {
-    let (this, consumed, samples, out, out_size, inp, in_size) = (a.x(0), a.x(1), a.x(2), a.x(3), a.x(4), a.x(5), a.x(6));
+    let (this, consumed, samples, out, out_size, inp, in_size) =
+        (a.x(0), a.x(1), a.x(2), a.x(3), a.x(4), a.x(5), a.x(6));
     let r = with_dec(this, |d| decode_into(d, inp, in_size, out, out_size));
-    let Some((res, used, n)) = r else { return OR_BROKEN };
+    let Some((res, used, n)) = r else {
+        return OR_BROKEN;
+    };
     crate::guest::out(consumed, used);
     crate::guest::out(samples, n);
     res
@@ -158,10 +201,21 @@ cfn!(decode_il, |a| {
 // Decode(this, size_t *consumed, int *samples, int16 **outs, int count, size_t out_size, const void *in, size_t in_size):
 // one buffer a channel
 cfn!(decode_planar, |a| {
-    let (this, consumed, samples, outs, count, out_size, inp, in_size) = (a.x(0), a.x(1), a.x(2), a.x(3), a.i(4), a.x(5), a.x(6), a.x(7));
+    let (this, consumed, samples, outs, count, out_size, inp, in_size) = (
+        a.x(0),
+        a.x(1),
+        a.x(2),
+        a.x(3),
+        a.i(4),
+        a.x(5),
+        a.x(6),
+        a.x(7),
+    );
     let r = with_dec(this, |d| {
         let data = crate::guest::bytes(inp, in_size);
-        let Some((pkt, used)) = opus::frame(data) else { return (OR_BROKEN, 0, 0) };
+        let Some((pkt, used)) = opus::frame(data) else {
+            return (OR_BROKEN, 0, 0);
+        };
         let ch = d.channels.max(1) as usize;
         let mut pcm = vec![0i16; 5760 * ch];
         match d.decode(pkt, &mut pcm) {
@@ -181,7 +235,9 @@ cfn!(decode_planar, |a| {
             Err(_) => (OR_BROKEN, 0, 0),
         }
     });
-    let Some((res, used, n)) = r else { return OR_BROKEN };
+    let Some((res, used, n)) = r else {
+        return OR_BROKEN;
+    };
     crate::guest::out(consumed, used);
     crate::guest::out(samples, n);
     res
@@ -190,7 +246,9 @@ cfn!(decode_planar, |a| {
 // ---- the C interface (HardwareOpusDecoderType*: the object's address is the key)
 
 cfn!(c_work_size, |a| { Decoder::size(a.i(1)).max(0x100) });
-cfn!(c_work_size_ms, |a| { Decoder::multi_size(a.i(2), a.i(3)).max(0x100) });
+cfn!(c_work_size_ms, |a| {
+    Decoder::multi_size(a.i(2), a.i(3)).max(0x100)
+});
 // InitializeHardwareOpusDecoder(type, rate, ch, buf, size, option)
 cfn!(c_init, |a| {
     let (t, rate, ch) = (a.x(0), a.i(1), a.i(2));
@@ -225,7 +283,10 @@ unsafe fn c_fini(c: *mut Cpu) {
     if mgr_dec_fini(t) {
         return;
     }
-    DECS.lock().unwrap().get_or_insert_with(HashMap::new).remove(&t);
+    DECS.lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&t);
 }
 unsafe fn c_reset(c: *mut Cpu) {
     let t = (*c).x[0];
@@ -234,12 +295,23 @@ unsafe fn c_reset(c: *mut Cpu) {
     }
     with_dec(t, |d| d.reset());
 }
-cfn!(c_rate, |a| { with_dec(a.x(0), |d| d.rate as u64).or_else(|| mgr_dec(a.x(0), |d| d.dec.rate as u64)).unwrap_or(0) });
-cfn!(c_channels, |a| { with_dec(a.x(0), |d| d.channels as u64).or_else(|| mgr_dec(a.x(0), |d| d.dec.channels as u64)).unwrap_or(0) });
+cfn!(c_rate, |a| {
+    with_dec(a.x(0), |d| d.rate as u64)
+        .or_else(|| mgr_dec(a.x(0), |d| d.dec.rate as u64))
+        .unwrap_or(0)
+});
+cfn!(c_channels, |a| {
+    with_dec(a.x(0), |d| d.channels as u64)
+        .or_else(|| mgr_dec(a.x(0), |d| d.dec.channels as u64))
+        .unwrap_or(0)
+});
 // DecodeOpusInterleavedWithHardware(type, size_t *consumed, int *samples, int16 *out, size_t out_size, in, in_size)
 cfn!(c_decode, |a| {
-    let (t, consumed, samples, out, out_size, inp, in_size) = (a.x(0), a.x(1), a.x(2), a.x(3), a.x(4), a.x(5), a.x(6));
-    let Some((res, used, n)) = with_dec(t, |d| decode_into(d, inp, in_size, out, out_size)) else { return OR_BROKEN };
+    let (t, consumed, samples, out, out_size, inp, in_size) =
+        (a.x(0), a.x(1), a.x(2), a.x(3), a.x(4), a.x(5), a.x(6));
+    let Some((res, used, n)) = with_dec(t, |d| decode_into(d, inp, in_size, out, out_size)) else {
+        return OR_BROKEN;
+    };
     crate::guest::out(consumed, used);
     crate::guest::out(samples, n);
     res
@@ -268,14 +340,21 @@ fn mgr_dec<R>(gd: u64, f: impl FnOnce(&mut MgrDec) -> R) -> Option<R> {
 fn mgr_dec_fini(gd: u64) -> bool {
     let d = MDECS.lock().unwrap().as_mut().and_then(|m| m.remove(&gd));
     let Some(d) = d else { return false };
-    if let Some(m) = MGRS.lock().unwrap().as_mut().and_then(|m| m.get_mut(&d.mgr)) {
+    if let Some(m) = MGRS
+        .lock()
+        .unwrap()
+        .as_mut()
+        .and_then(|m| m.get_mut(&d.mgr))
+    {
         m.io_used -= (d.wait.len() + d.done.len()) as i32;
     }
     true
 }
 fn mgr_dec_reset(gd: u64) -> bool {
     let mut g = MDECS.lock().unwrap();
-    let Some(d) = g.as_mut().and_then(|m| m.get_mut(&gd)) else { return false };
+    let Some(d) = g.as_mut().and_then(|m| m.get_mut(&gd)) else {
+        return false;
+    };
     let n = (d.wait.len() + d.done.len()) as i32;
     d.wait.clear();
     d.done.clear();
@@ -294,24 +373,61 @@ unsafe fn mgr_init(c: *mut Cpu) {
     let (gm, ev, io) = (a.x(0), a.x(1), a.i(6));
     crate::services::os::bind_system_event(c, ev, true);
     w64(gm, gm);
-    MGRS.lock().unwrap().get_or_insert_with(HashMap::new).insert(gm, Mgr { event: ev, io_total: io, io_used: 0 });
-    crate::log!("codec: Opus decoder manager {gm:#x}: {io} I/O buffers, decoded by libopus at each Execute");
+    MGRS.lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .insert(
+            gm,
+            Mgr {
+                event: ev,
+                io_total: io,
+                io_used: 0,
+            },
+        );
+    crate::log!(
+        "codec: Opus decoder manager {gm:#x}: {io} I/O buffers, decoded by libopus at each Execute"
+    );
     (*c).x[0] = 0;
 }
 cfn!(mgr_fini, |a| {
     let gm = a.x(0);
-    MGRS.lock().unwrap().get_or_insert_with(HashMap::new).remove(&gm);
-    MDECS.lock().unwrap().get_or_insert_with(HashMap::new).retain(|_, d| d.mgr != gm);
+    MGRS.lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .remove(&gm);
+    MDECS
+        .lock()
+        .unwrap()
+        .get_or_insert_with(HashMap::new)
+        .retain(|_, d| d.mgr != gm);
     w64(gm, 0);
     0
 });
-cfn!(mgr_free_io, |a| { MGRS.lock().unwrap().as_ref().and_then(|m| m.get(&a.x(0))).map_or(0, |m| (m.io_total - m.io_used).max(0) as u64) });
+cfn!(mgr_free_io, |a| {
+    MGRS.lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|m| m.get(&a.x(0)))
+        .map_or(0, |m| (m.io_total - m.io_used).max(0) as u64)
+});
 // InitializeHardwareOpusDecoder(type, rate, ch, TimeSpan frame, mgr)
 cfn!(mgr_dec_init, |a| {
     let (gd, rate, ch, gm) = (a.x(0), a.i(1), a.i(2), a.x(4));
     match Decoder::new(rate, ch) {
         Ok(dec) => {
-            MDECS.lock().unwrap().get_or_insert_with(HashMap::new).insert(gd, MgrDec { mgr: gm, dec, wait: VecDeque::new(), done: VecDeque::new() });
+            MDECS
+                .lock()
+                .unwrap()
+                .get_or_insert_with(HashMap::new)
+                .insert(
+                    gd,
+                    MgrDec {
+                        mgr: gm,
+                        dec,
+                        wait: VecDeque::new(),
+                        done: VecDeque::new(),
+                    },
+                );
             0
         }
         Err(_) => R_CODEC,
@@ -321,10 +437,14 @@ cfn!(mgr_dec_init, |a| {
 cfn!(mgr_enqueue, |a| {
     let (gd, consumed, inp, n) = (a.x(0), a.x(1), a.x(2), a.x(3));
     crate::guest::out(consumed, 0u64);
-    let Some(gm) = mgr_dec(gd, |d| d.mgr) else { return R_CODEC };
+    let Some(gm) = mgr_dec(gd, |d| d.mgr) else {
+        return R_CODEC;
+    };
     {
         let mut g = MGRS.lock().unwrap();
-        let Some(m) = g.as_mut().and_then(|m| m.get_mut(&gm)) else { return R_CODEC };
+        let Some(m) = g.as_mut().and_then(|m| m.get_mut(&gm)) else {
+            return R_CODEC;
+        };
         if !(8..=0x1800).contains(&n) || m.io_used >= m.io_total {
             return R_CODEC;
         }
@@ -358,7 +478,13 @@ cfn!(mgr_execute, |a| {
         }
     }
     if any {
-        if let Some(ev) = MGRS.lock().unwrap().as_ref().and_then(|m| m.get(&gm)).map(|m| m.event) {
+        if let Some(ev) = MGRS
+            .lock()
+            .unwrap()
+            .as_ref()
+            .and_then(|m| m.get(&gm))
+            .map(|m| m.event)
+        {
             crate::services::os::signal_bound(ev);
         }
     }
@@ -385,9 +511,13 @@ cfn!(mgr_dequeue, |a| {
         _ => R_CODEC,
     }
 });
-cfn!(mgr_waiting, |a| { mgr_dec(a.x(0), |d| d.wait.len() as u64).unwrap_or(0) });
+cfn!(mgr_waiting, |a| {
+    mgr_dec(a.x(0), |d| d.wait.len() as u64).unwrap_or(0)
+});
 cfn!(mgr_executing, |a| { 0 });
-cfn!(mgr_completed, |a| { mgr_dec(a.x(0), |d| d.done.len() as u64).unwrap_or(0) });
+cfn!(mgr_completed, |a| {
+    mgr_dec(a.x(0), |d| d.done.len() as u64).unwrap_or(0)
+});
 
 // ---- the hwopus IPC service (IHardwareOpusDecoderManager, IHardwareOpusDecoder)
 
@@ -397,9 +527,15 @@ struct HwDecoder {
 }
 
 fn ms_params(b: &[u8]) -> (i32, i32, i32, i32, Vec<u8>) {
-    let g = |o: usize| b.get(o..o + 4).map_or(0, |s| i32::from_le_bytes(s.try_into().unwrap()));
+    let g = |o: usize| {
+        b.get(o..o + 4)
+            .map_or(0, |s| i32::from_le_bytes(s.try_into().unwrap()))
+    };
     let ch = g(4);
-    let mapping = b.get(16..16 + ch.clamp(0, 255) as usize).map(|s| s.to_vec()).unwrap_or_default();
+    let mapping = b
+        .get(16..16 + ch.clamp(0, 255) as usize)
+        .map(|s| s.to_vec())
+        .unwrap_or_default();
     (g(0), ch, g(8), g(12), mapping)
 }
 
@@ -414,7 +550,11 @@ impl Service for HwOpus {
                 let (rate, ch) = (ctx.u32(0) as i32, ctx.u32(4) as i32);
                 match Decoder::new(rate, ch) {
                     Ok(dec) => {
-                        crate::log_once!("hwopus ipc", "hwopus: decoders opened through the service, decoded by {}", opus::version());
+                        crate::log_once!(
+                            "hwopus ipc",
+                            "hwopus: decoders opened through the service, decoded by {}",
+                            opus::version()
+                        );
                         ctx.object(HwDecoder { dec });
                         0
                     }
@@ -460,13 +600,18 @@ impl Service for HwDecoder {
                     self.dec.reset();
                 }
                 let input = ctx.read_in(0);
-                let Some((pkt, used)) = opus::frame(&input) else { return R_CODEC as u32 };
+                let Some((pkt, used)) = opus::frame(&input) else {
+                    return R_CODEC as u32;
+                };
                 let ch = self.dec.channels.max(1) as usize;
                 let mut pcm = vec![0i16; 5760 * ch];
                 let n = match self.dec.decode(pkt, &mut pcm) {
                     Ok(n) => n,
                     Err(e) => {
-                        crate::log_once!("hwopus ipc err", "[RED] hwopus: libopus refused a packet ({e})");
+                        crate::log_once!(
+                            "hwopus ipc err",
+                            "[RED] hwopus: libopus refused a packet ({e})"
+                        );
                         return R_CODEC as u32;
                     }
                 };
@@ -597,13 +742,25 @@ mod tests {
     }
 
     fn send(h: u32, cmd: u32, data: Vec<u8>, a: &[u8], b: &mut [u8]) -> hipc::Response {
-        let bd = |addr: u64, size: usize| Buf { addr, size: size as u64, tag: 0 };
+        let bd = |addr: u64, size: usize| Buf {
+            addr,
+            size: size as u64,
+            tag: 0,
+        };
         let mut m = Builder {
             ty: T_REQUEST,
             cmd,
             data,
-            a: if a.is_empty() { vec![] } else { vec![bd(a.as_ptr() as u64, a.len())] },
-            b: if b.is_empty() { vec![] } else { vec![bd(b.as_mut_ptr() as u64, b.len())] },
+            a: if a.is_empty() {
+                vec![]
+            } else {
+                vec![bd(a.as_ptr() as u64, a.len())]
+            },
+            b: if b.is_empty() {
+                vec![]
+            } else {
+                vec![bd(b.as_mut_ptr() as u64, b.len())]
+            },
             ..Default::default()
         }
         .build();
@@ -617,15 +774,30 @@ mod tests {
         let mut out = vec![0u8; 5760 * 2 * 2];
         for (i, p) in packets.iter().enumerate() {
             let input = framed(p);
-            let data = if cmd >= 6 { vec![(i == 0) as u8, 0, 0, 0] } else { vec![] };
+            let data = if cmd >= 6 {
+                vec![(i == 0) as u8, 0, 0, 0]
+            } else {
+                vec![]
+            };
             let r = send(dec, cmd, data, &input, &mut out);
             assert_eq!(r.result, 0, "packet {i}");
             let consumed = u32::from_le_bytes(r.data[0..4].try_into().unwrap()) as usize;
             let samples = u32::from_le_bytes(r.data[4..8].try_into().unwrap()) as usize;
-            assert_eq!(consumed, input.len(), "packet {i}: the whole frame is consumed");
+            assert_eq!(
+                consumed,
+                input.len(),
+                "packet {i}: the whole frame is consumed"
+            );
             assert_eq!(samples, 960, "packet {i}: 20 ms at 48 kHz");
-            assert!(cmd < 4 || r.data.len() >= 16, "the WithPerf commands add the decode time");
-            pcm.extend(out[..samples * 4].chunks_exact(2).map(|s| i16::from_le_bytes([s[0], s[1]])));
+            assert!(
+                cmd < 4 || r.data.len() >= 16,
+                "the WithPerf commands add the decode time"
+            );
+            pcm.extend(
+                out[..samples * 4]
+                    .chunks_exact(2)
+                    .map(|s| i16::from_le_bytes([s[0], s[1]])),
+            );
         }
         pcm
     }
@@ -635,7 +807,11 @@ mod tests {
     /// libopus decoding the same packets, and against the tone itself.
     #[test]
     fn hwopus_ipc_decodes_real_opus_as_libopus() {
-        let file = std::fs::read(concat!(env!("CARGO_MANIFEST_DIR"), "/testdata/media/tone.opus")).unwrap();
+        let file = std::fs::read(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/testdata/media/tone.opus"
+        ))
+        .unwrap();
         let (pre_skip, packets) = ogg_opus_packets(&file);
         assert!(packets.len() >= 100, "{} packets", packets.len());
 
@@ -656,14 +832,27 @@ mod tests {
         assert!(u32::from_le_bytes(r.data[..4].try_into().unwrap()) >= Decoder::size(2) as u32);
 
         // OpenHardwareOpusDecoder(48000, 2), DecodeInterleavedOld
-        let r = send(mgr, 0, [rate_ch.clone(), 0x1000u32.to_le_bytes().to_vec()].concat(), &[], &mut none);
+        let r = send(
+            mgr,
+            0,
+            [rate_ch.clone(), 0x1000u32.to_le_bytes().to_vec()].concat(),
+            &[],
+            &mut none,
+        );
         assert_eq!((r.result, r.moved.len()), (0, 1));
         let got = decode_ipc(r.moved[0], 0, &packets);
         assert_eq!(got.len(), want.len());
-        assert!(got == want, "hwopus PCM differs from libopus at sample {:?}", got.iter().zip(&want).position(|(a, b)| a != b));
+        assert!(
+            got == want,
+            "hwopus PCM differs from libopus at sample {:?}",
+            got.iter().zip(&want).position(|(a, b)| a != b)
+        );
 
         // OpenHardwareOpusDecoderForMultiStream (one coupled stream, mapping 0 1), DecodeInterleaved with reset
-        let mut params = [48000u32, 2, 1, 1].iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+        let mut params = [48000u32, 2, 1, 1]
+            .iter()
+            .flat_map(|v| v.to_le_bytes())
+            .collect::<Vec<u8>>();
         params.extend_from_slice(&[0, 1]);
         params.resize(0x110, 0);
         // an X descriptor carries a 39-bit address, as any guest buffer has: the parameters go below 2^39 (a Linux
@@ -679,7 +868,18 @@ mod tests {
             s.copy_from_slice(&params);
             s
         };
-        let mut m = Builder { ty: T_REQUEST, cmd: 2, data: 0x1000u32.to_le_bytes().to_vec(), x: vec![Buf { addr: params.as_ptr() as u64, size: params.len() as u64, tag: 0 }], ..Default::default() }.build();
+        let mut m = Builder {
+            ty: T_REQUEST,
+            cmd: 2,
+            data: 0x1000u32.to_le_bytes().to_vec(),
+            x: vec![Buf {
+                addr: params.as_ptr() as u64,
+                size: params.len() as u64,
+                tag: 0,
+            }],
+            ..Default::default()
+        }
+        .build();
         crate::ipc::process(mgr, &mut m);
         let r = hipc::parse_response(&m, false).unwrap();
         assert_eq!((r.result, r.moved.len()), (0, 1));

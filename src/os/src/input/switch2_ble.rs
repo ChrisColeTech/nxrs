@@ -13,9 +13,9 @@ use super::{ilog, motion, Vib};
 #[cfg(windows)]
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
+use std::sync::mpsc::Sender;
 #[cfg(windows)]
 use std::sync::mpsc::{channel, Receiver};
-use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex};
 #[cfg(windows)]
 use std::time::Duration;
@@ -60,14 +60,30 @@ impl S2Dev {
         }
     }
     pub fn name(&self) -> String {
-        format!("{} {} Bluetooth LE", match self.pid { s2::PID_PRO => "Pro Controller 2", s2::PID_JOY_L => "Joy-Con 2 (L)", _ => "Joy-Con 2 (R)" }, self.serial)
+        format!(
+            "{} {} Bluetooth LE",
+            match self.pid {
+                s2::PID_PRO => "Pro Controller 2",
+                s2::PID_JOY_L => "Joy-Con 2 (L)",
+                _ => "Joy-Con 2 (R)",
+            },
+            self.serial
+        )
     }
     pub fn lights(&self, p: Option<usize>) {
         let pat = p.map(|p| s2::LED_PATTERN[p.min(7)]).unwrap_or(0);
-        let _ = self.out.lock().unwrap().send(Out::Cmd(s2::command(s2::CMD_LEDS, s2::SUB_LEDS_SET, &[pat, 0, 0, 0])));
+        let _ = self.out.lock().unwrap().send(Out::Cmd(s2::command(
+            s2::CMD_LEDS,
+            s2::SUB_LEDS_SET,
+            &[pat, 0, 0, 0],
+        )));
     }
     pub fn rumble(&self, a: &Vib, b: &Vib, seq: u8) {
-        let _ = self.out.lock().unwrap().send(Out::Vib(s2::rumble_packet(a, b, seq)));
+        let _ = self
+            .out
+            .lock()
+            .unwrap()
+            .send(Out::Vib(s2::rumble_packet(a, b, seq)));
     }
     /// Positional buttons and sticks from the newest report.
     pub fn state(&self) -> Option<(u64, [i32; 4], bool)> {
@@ -99,7 +115,9 @@ pub static DEVICES: Mutex<Vec<Arc<S2Dev>>> = Mutex::new(Vec::new());
 
 #[cfg(windows)]
 fn bytes(b: &IBuffer) -> Vec<u8> {
-    let Ok(r) = DataReader::FromBuffer(b) else { return vec![] };
+    let Ok(r) = DataReader::FromBuffer(b) else {
+        return vec![];
+    };
     let n = r.UnconsumedBufferLength().unwrap_or(0) as usize;
     let mut v = vec![0u8; n];
     let _ = r.ReadBytes(&mut v);
@@ -115,7 +133,13 @@ fn buffer(d: &[u8]) -> windows::core::Result<IBuffer> {
 
 #[cfg(windows)]
 fn write(c: &GattCharacteristic, d: &[u8]) -> bool {
-    buffer(d).and_then(|b| c.WriteValueWithOptionAsync(&b, GattWriteOption::WriteWithoutResponse)?.join()).map(|s| s == GattCommunicationStatus::Success).unwrap_or(false)
+    buffer(d)
+        .and_then(|b| {
+            c.WriteValueWithOptionAsync(&b, GattWriteOption::WriteWithoutResponse)?
+                .join()
+        })
+        .map(|s| s == GattCommunicationStatus::Success)
+        .unwrap_or(false)
 }
 
 #[cfg(windows)]
@@ -148,23 +172,39 @@ impl Link {
         None
     }
     fn read(&self, len: u8, addr: u32) -> Option<Vec<u8>> {
-        let r = self.command(s2::CMD_MEMORY, s2::SUB_MEMORY_READ, &s2::memory_payload(len, addr))?;
+        let r = self.command(
+            s2::CMD_MEMORY,
+            s2::SUB_MEMORY_READ,
+            &s2::memory_payload(len, addr),
+        )?;
         r.get(s2::REPLY_DATA..).map(|d| d.to_vec())
     }
 }
 
 #[cfg(windows)]
 fn open(addr: u64) -> Result<Link, String> {
-    let dev = BluetoothLEDevice::FromBluetoothAddressAsync(addr).and_then(|o| o.join()).map_err(|e| format!("Windows did not open it: {e}"))?;
-    let res = dev.GetGattServicesWithCacheModeAsync(BluetoothCacheMode::Uncached).and_then(|o| o.join()).map_err(|e| format!("its services were not read: {e}"))?;
+    let dev = BluetoothLEDevice::FromBluetoothAddressAsync(addr)
+        .and_then(|o| o.join())
+        .map_err(|e| format!("Windows did not open it: {e}"))?;
+    let res = dev
+        .GetGattServicesWithCacheModeAsync(BluetoothCacheMode::Uncached)
+        .and_then(|o| o.join())
+        .map_err(|e| format!("its services were not read: {e}"))?;
     if res.Status().ok() != Some(GattCommunicationStatus::Success) {
         return Err("its services were not read (the connection failed)".into());
     }
     let (mut cmd, mut rsp, mut input, mut vib) = (None, None, None, None);
     let mut keep = vec![];
     for svc in res.Services().map_err(|e| e.to_string())? {
-        let Ok(cr) = svc.GetCharacteristicsWithCacheModeAsync(BluetoothCacheMode::Uncached).and_then(|o| o.join()) else { continue };
-        let Ok(chars) = cr.Characteristics() else { continue };
+        let Ok(cr) = svc
+            .GetCharacteristicsWithCacheModeAsync(BluetoothCacheMode::Uncached)
+            .and_then(|o| o.join())
+        else {
+            continue;
+        };
+        let Ok(chars) = cr.Characteristics() else {
+            continue;
+        };
         let mut any = false;
         for c in chars {
             let u = c.Uuid().unwrap_or_default();
@@ -174,7 +214,10 @@ fn open(addr: u64) -> Result<Link, String> {
                 &mut rsp
             } else if u == GUID::from_u128(s2::UUID_INPUT) {
                 &mut input
-            } else if [s2::UUID_VIB_R, s2::UUID_VIB_L, s2::UUID_VIB_PRO].iter().any(|&v| u == GUID::from_u128(v)) {
+            } else if [s2::UUID_VIB_R, s2::UUID_VIB_L, s2::UUID_VIB_PRO]
+                .iter()
+                .any(|&v| u == GUID::from_u128(v))
+            {
                 &mut vib
             } else {
                 continue;
@@ -188,9 +231,14 @@ fn open(addr: u64) -> Result<Link, String> {
             keep.push(svc);
         }
     }
-    let (Some(cmd), Some(rsp), Some(input)) = (cmd, rsp, input) else { return Err("not the GATT service of a Switch 2 controller".into()) };
+    let (Some(cmd), Some(rsp), Some(input)) = (cmd, rsp, input) else {
+        return Err("not the GATT service of a Switch 2 controller".into());
+    };
     let (tx, rx) = channel();
-    rsp.ValueChanged(&TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(move |_, a| {
+    rsp.ValueChanged(&TypedEventHandler::<
+        GattCharacteristic,
+        GattValueChangedEventArgs,
+    >::new(move |_, a| {
         if let Some(a) = a.as_ref() {
             if let Ok(b) = a.CharacteristicValue() {
                 let _ = tx.send(bytes(&b));
@@ -199,23 +247,56 @@ fn open(addr: u64) -> Result<Link, String> {
         Ok(())
     }))
     .map_err(|e| e.to_string())?;
-    rsp.WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue::Notify)
-        .and_then(|o| o.join())
-        .map_err(|e| format!("no replies: {e}"))?;
-    Ok(Link { dev, cmd, _rsp: rsp, input, vib, replies: rx, _keep: keep })
+    rsp.WriteClientCharacteristicConfigurationDescriptorAsync(
+        GattClientCharacteristicConfigurationDescriptorValue::Notify,
+    )
+    .and_then(|o| o.join())
+    .map_err(|e| format!("no replies: {e}"))?;
+    Ok(Link {
+        dev,
+        cmd,
+        _rsp: rsp,
+        input,
+        vib,
+        replies: rx,
+        _keep: keep,
+    })
 }
 
 #[cfg(windows)]
-fn handshake(l: &Link, addr: u64, adv_pid: u16, pair: bool, host: Option<[u8; 6]>) -> Result<Arc<S2Dev>, String> {
-    let info = l.read(0x40, s2::ADDR_INFO).ok_or("it did not answer the identity read")?;
+fn handshake(
+    l: &Link,
+    addr: u64,
+    adv_pid: u16,
+    pair: bool,
+    host: Option<[u8; 6]>,
+) -> Result<Arc<S2Dev>, String> {
+    let info = l
+        .read(0x40, s2::ADDR_INFO)
+        .ok_or("it did not answer the identity read")?;
     if info.len() < 0x16 || u16::from_le_bytes([info[18], info[19]]) != s2::VENDOR {
         return Err("its identity is not Nintendo's".into());
     }
     let pid = u16::from_le_bytes([info[20], info[21]]);
-    let pid = if matches!(pid, s2::PID_PRO | s2::PID_JOY_L | s2::PID_JOY_R) { pid } else { adv_pid };
-    let serial: String = info[2..16].iter().map(|&c| if (0x20..0x7f).contains(&c) { c as char } else { '?' }).collect();
+    let pid = if matches!(pid, s2::PID_PRO | s2::PID_JOY_L | s2::PID_JOY_R) {
+        pid
+    } else {
+        adv_pid
+    };
+    let serial: String = info[2..16]
+        .iter()
+        .map(|&c| {
+            if (0x20..0x7f).contains(&c) {
+                c as char
+            } else {
+                '?'
+            }
+        })
+        .collect();
     if let (true, Some(h)) = (pair, host) {
-        let mut ok = l.command(s2::CMD_PAIR, s2::SUB_PAIR_HOST, &s2::pair_host_payload(&h)).is_some();
+        let mut ok = l
+            .command(s2::CMD_PAIR, s2::SUB_PAIR_HOST, &s2::pair_host_payload(&h))
+            .is_some();
         for k in 0..2 {
             let mut key = [0u8; 17];
             for (i, b) in key[1..].iter_mut().enumerate() {
@@ -224,29 +305,81 @@ fn handshake(l: &Link, addr: u64, adv_pid: u16, pair: bool, host: Option<[u8; 6]
                 h.write_u64(addr ^ i as u64);
                 *b = h.finish() as u8;
             }
-            ok = ok && l.command(s2::CMD_PAIR, if k == 0 { s2::SUB_PAIR_KEY1 } else { s2::SUB_PAIR_KEY2 }, &key).is_some();
+            ok = ok
+                && l.command(
+                    s2::CMD_PAIR,
+                    if k == 0 {
+                        s2::SUB_PAIR_KEY1
+                    } else {
+                        s2::SUB_PAIR_KEY2
+                    },
+                    &key,
+                )
+                .is_some();
         }
         ok = ok && l.command(s2::CMD_PAIR, s2::SUB_PAIR_DONE, &[0]).is_some();
-        ilog!("Switch 2 controller {addr:012X}: {}", if ok { "bonded to this PC (it wakes toward it from now on)" } else { "bonding failed; Sync it again next time" });
+        ilog!(
+            "Switch 2 controller {addr:012X}: {}",
+            if ok {
+                "bonded to this PC (it wakes toward it from now on)"
+            } else {
+                "bonding failed; Sync it again next time"
+            }
+        );
     }
     let mut cal = [s2::Cal::default(); 2];
     let sticks = if pid == s2::PID_PRO { 2 } else { 1 };
-    for (i, (blk, user)) in [(s2::ADDR_STICK1, s2::ADDR_USER_STICK1), (s2::ADDR_STICK2, s2::ADDR_USER_STICK2)].iter().enumerate().take(sticks) {
+    for (i, (blk, user)) in [
+        (s2::ADDR_STICK1, s2::ADDR_USER_STICK1),
+        (s2::ADDR_STICK2, s2::ADDR_USER_STICK2),
+    ]
+    .iter()
+    .enumerate()
+    .take(sticks)
+    {
         let b = l.read(s2::STICK_BLOCK as u8, *blk);
         let u = l.read(0x0b, *user);
         let (c, kind) = s2::cal_from_flash(b.as_deref(), u.as_deref());
         cal[i] = c;
-        ilog!("Switch 2 controller {addr:012X}: stick {} calibration {}", i + 1, ["none (typical travel)", "factory", "user"][kind as usize]);
+        ilog!(
+            "Switch 2 controller {addr:012X}: stick {} calibration {}",
+            i + 1,
+            ["none (typical travel)", "factory", "user"][kind as usize]
+        );
     }
     // a Joy-Con 2's mouse sensor too: the game reads it when it asks (hid_ext's Jcms / Nmouse)
-    let feat = [s2::FEATURES | if pid == s2::PID_PRO { 0 } else { s2::FEATURE_MOUSE }, 0, 0, 0];
+    let feat = [
+        s2::FEATURES
+            | if pid == s2::PID_PRO {
+                0
+            } else {
+                s2::FEATURE_MOUSE
+            },
+        0,
+        0,
+        0,
+    ];
     l.command(s2::CMD_FEATURE, s2::SUB_FEATURE_SET, &feat);
-    l.command(s2::CMD_FEATURE, s2::SUB_FEATURE_ENABLE, &feat).ok_or("enabling its reports was refused")?;
+    l.command(s2::CMD_FEATURE, s2::SUB_FEATURE_ENABLE, &feat)
+        .ok_or("enabling its reports was refused")?;
     let (otx, orx) = channel::<Out>();
-    let d = Arc::new(S2Dev { addr, pid, serial, cal, report: Mutex::new(None), last: Mutex::new(motion::now_s()), gone: AtomicBool::new(false), slot: AtomicI32::new(-1), out: Mutex::new(otx) });
+    let d = Arc::new(S2Dev {
+        addr,
+        pid,
+        serial,
+        cal,
+        report: Mutex::new(None),
+        last: Mutex::new(motion::now_s()),
+        gone: AtomicBool::new(false),
+        slot: AtomicI32::new(-1),
+        out: Mutex::new(otx),
+    });
     let dd = d.clone();
     l.input
-        .ValueChanged(&TypedEventHandler::<GattCharacteristic, GattValueChangedEventArgs>::new(move |_, a| {
+        .ValueChanged(&TypedEventHandler::<
+            GattCharacteristic,
+            GattValueChangedEventArgs,
+        >::new(move |_, a| {
             let Some(a) = a.as_ref() else { return Ok(()) };
             let v = bytes(&a.CharacteristicValue()?);
             if let Some(r) = s2::parse_report(&v) {
@@ -255,10 +388,18 @@ fn handshake(l: &Link, addr: u64, adv_pid: u16, pair: bool, host: Option<[u8; 6]
                 let p = dd.slot.load(Ordering::Acquire);
                 if let (Some(side), Some(prev)) = (dd.joy(), prev) {
                     let present = r.mouse != [0, 0] || r.mouse_q != 0 || r.mouse_s != 0;
-                    if p >= 0 && present && crate::services::hid_ext::MOUSE_WANTED.load(Ordering::Acquire) != 0 {
+                    if p >= 0
+                        && present
+                        && crate::services::hid_ext::MOUSE_WANTED.load(Ordering::Acquire) != 0
+                    {
                         let dx = r.mouse[0].wrapping_sub(prev.mouse[0]) as i32;
                         let dy = r.mouse[1].wrapping_sub(prev.mouse[1]) as i32;
-                        let st = crate::services::hid_ext::MOUSE_CONNECTED | if r.mouse_s < s2::MOUSE_SURFACE_MAX { crate::services::hid_ext::MOUSE_ON_SURFACE } else { 0 };
+                        let st = crate::services::hid_ext::MOUSE_CONNECTED
+                            | if r.mouse_s < s2::MOUSE_SURFACE_MAX {
+                                crate::services::hid_ext::MOUSE_ON_SURFACE
+                            } else {
+                                0
+                            };
                         crate::services::hid_ext::feed_mouse(p as usize, side, dx, dy, st);
                     }
                 }
@@ -278,7 +419,9 @@ fn handshake(l: &Link, addr: u64, adv_pid: u16, pair: bool, host: Option<[u8; 6]
         }))
         .map_err(|e| e.to_string())?;
     l.input
-        .WriteClientCharacteristicConfigurationDescriptorAsync(GattClientCharacteristicConfigurationDescriptorValue::Notify)
+        .WriteClientCharacteristicConfigurationDescriptorAsync(
+            GattClientCharacteristicConfigurationDescriptorValue::Notify,
+        )
         .and_then(|o| o.join())
         .map_err(|e| format!("its reports could not be subscribed: {e}"))?;
     // the writer: commands and rumble from the input thread, in order, off it
@@ -308,7 +451,9 @@ fn handshake(l: &Link, addr: u64, adv_pid: u16, pair: bool, host: Option<[u8; 6]
 
 #[cfg(windows)]
 fn adapter_host() -> Option<[u8; 6]> {
-    let a = BluetoothAdapter::GetDefaultAsync().and_then(|o| o.join()).ok()?;
+    let a = BluetoothAdapter::GetDefaultAsync()
+        .and_then(|o| o.join())
+        .ok()?;
     if !a.IsLowEnergySupported().unwrap_or(false) {
         ilog!("Switch 2 controllers: this Bluetooth adapter has no LE");
         return None;
@@ -322,7 +467,8 @@ fn adapter_host() -> Option<[u8; 6]> {
 #[cfg(windows)]
 pub fn start() {
     static STARTED: AtomicBool = AtomicBool::new(false);
-    if std::env::var("NXRS_SWITCH2").is_ok_and(|v| v == "0") || STARTED.swap(true, Ordering::AcqRel) {
+    if std::env::var("NXRS_SWITCH2").is_ok_and(|v| v == "0") || STARTED.swap(true, Ordering::AcqRel)
+    {
         return;
     }
     let trace = std::env::var("NXRS_SWITCH2").is_ok_and(|v| v == "2");
@@ -412,7 +558,8 @@ pub fn start() {
 #[cfg(target_os = "linux")]
 pub fn start() {
     static STARTED: AtomicBool = AtomicBool::new(false);
-    if std::env::var("NXRS_SWITCH2").is_ok_and(|v| v == "0") || STARTED.swap(true, Ordering::AcqRel) {
+    if std::env::var("NXRS_SWITCH2").is_ok_and(|v| v == "0") || STARTED.swap(true, Ordering::AcqRel)
+    {
         return;
     }
     let trace = std::env::var("NXRS_SWITCH2").is_ok_and(|v| v == "2");
@@ -429,7 +576,7 @@ pub fn start() {
 /// The BlueZ transport (mkw-recomp's flow, as on Windows): every D-Bus call blocks this module's own threads only.
 #[cfg(target_os = "linux")]
 mod bluez {
-    use super::{s2, ilog, motion, Out, S2Dev, DEVICES};
+    use super::{ilog, motion, s2, Out, S2Dev, DEVICES};
     use std::collections::{HashMap, HashSet};
     use std::os::fd::{AsRawFd, OwnedFd};
     use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -444,7 +591,14 @@ mod bluez {
 
     /// A 128-bit UUID constant in BlueZ's text form.
     pub fn uuid_text(u: u128) -> String {
-        format!("{:08x}-{:04x}-{:04x}-{:04x}-{:012x}", (u >> 96) as u32, (u >> 80) as u16, (u >> 64) as u16, (u >> 48) as u16, u & 0xffff_ffff_ffff)
+        format!(
+            "{:08x}-{:04x}-{:04x}-{:04x}-{:012x}",
+            (u >> 96) as u32,
+            (u >> 80) as u16,
+            (u >> 64) as u16,
+            (u >> 48) as u16,
+            u & 0xffff_ffff_ffff
+        )
     }
 
     /// "AA:BB:CC:DD:EE:FF" as the 48-bit number Windows calls the Bluetooth address.
@@ -453,7 +607,9 @@ mod bluez {
         if p.len() != 6 {
             return None;
         }
-        p.iter().try_fold(0u64, |a, b| u8::from_str_radix(b, 16).ok().map(|v| a << 8 | v as u64))
+        p.iter().try_fold(0u64, |a, b| {
+            u8::from_str_radix(b, 16).ok().map(|v| a << 8 | v as u64)
+        })
     }
 
     /// The manufacturer data of Nintendo's company id in a Device1 property map.
@@ -465,13 +621,27 @@ mod bluez {
     }
 
     fn prop<T: TryFrom<OwnedValue>>(p: &Props, k: &str) -> Option<T> {
-        p.get(k).and_then(|v| v.try_clone().ok()).and_then(|v| T::try_from(v).ok())
+        p.get(k)
+            .and_then(|v| v.try_clone().ok())
+            .and_then(|v| T::try_from(v).ok())
     }
 
     fn objects(c: &Connection) -> zbus::Result<HashMap<OwnedObjectPath, HashMap<String, Props>>> {
-        let om = zbus::blocking::fdo::ObjectManagerProxy::builder(c).destination(BLUEZ)?.path("/")?.build()?;
+        let om = zbus::blocking::fdo::ObjectManagerProxy::builder(c)
+            .destination(BLUEZ)?
+            .path("/")?
+            .build()?;
         let o = om.get_managed_objects().map_err(zbus::Error::from)?;
-        Ok(o.into_iter().map(|(p, ifs)| (p, ifs.into_iter().map(|(i, props)| (i.to_string(), props)).collect())).collect())
+        Ok(o.into_iter()
+            .map(|(p, ifs)| {
+                (
+                    p,
+                    ifs.into_iter()
+                        .map(|(i, props)| (i.to_string(), props))
+                        .collect(),
+                )
+            })
+            .collect())
     }
 
     fn proxy<'a>(c: &Connection, path: &str, iface: &'a str) -> zbus::Result<Proxy<'a>> {
@@ -488,10 +658,19 @@ mod bluez {
     impl Writer {
         fn new(c: &Connection, path: &str) -> Writer {
             let fd = proxy(c, path, "org.bluez.GattCharacteristic1")
-                .and_then(|p| p.call::<_, _, (zbus::zvariant::OwnedFd, u16)>("AcquireWrite", &(HashMap::<String, Value>::new(),)))
+                .and_then(|p| {
+                    p.call::<_, _, (zbus::zvariant::OwnedFd, u16)>(
+                        "AcquireWrite",
+                        &(HashMap::<String, Value>::new(),),
+                    )
+                })
                 .ok()
                 .map(|(fd, _mtu)| OwnedFd::from(fd));
-            Writer { c: c.clone(), path: path.to_string(), fd }
+            Writer {
+                c: c.clone(),
+                path: path.to_string(),
+                fd,
+            }
         }
         fn write(&self, d: &[u8]) -> bool {
             if let Some(fd) = &self.fd {
@@ -501,15 +680,25 @@ mod bluez {
             }
             let mut o: HashMap<&str, Value> = HashMap::new();
             o.insert("type", Value::from("command"));
-            proxy(&self.c, &self.path, "org.bluez.GattCharacteristic1").and_then(|p| p.call_method("WriteValue", &(d.to_vec(), o))).is_ok()
+            proxy(&self.c, &self.path, "org.bluez.GattCharacteristic1")
+                .and_then(|p| p.call_method("WriteValue", &(d.to_vec(), o)))
+                .is_ok()
         }
     }
 
     /// Notifications of a characteristic, each to `f` on a thread of its own: an AcquireNotify socket, else
     /// StartNotify and its Value changes. Ends when the link goes (`stop`) or the socket closes.
-    fn subscribe(c: &Connection, path: &str, stop: Arc<AtomicBool>, f: impl Fn(&[u8]) + Send + 'static) -> Result<(), String> {
+    fn subscribe(
+        c: &Connection,
+        path: &str,
+        stop: Arc<AtomicBool>,
+        f: impl Fn(&[u8]) + Send + 'static,
+    ) -> Result<(), String> {
         let p = proxy(c, path, "org.bluez.GattCharacteristic1").map_err(|e| e.to_string())?;
-        match p.call::<_, _, (zbus::zvariant::OwnedFd, u16)>("AcquireNotify", &(HashMap::<String, Value>::new(),)) {
+        match p.call::<_, _, (zbus::zvariant::OwnedFd, u16)>(
+            "AcquireNotify",
+            &(HashMap::<String, Value>::new(),),
+        ) {
             Ok((fd, mtu)) => {
                 let fd = OwnedFd::from(fd);
                 std::thread::Builder::new()
@@ -517,13 +706,19 @@ mod bluez {
                     .spawn(move || {
                         let mut b = vec![0u8; (mtu as usize).max(512)];
                         while !stop.load(Ordering::Acquire) {
-                            let mut pf = libc::pollfd { fd: fd.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+                            let mut pf = libc::pollfd {
+                                fd: fd.as_raw_fd(),
+                                events: libc::POLLIN,
+                                revents: 0,
+                            };
                             // SAFETY: one pollfd of ours
                             if unsafe { libc::poll(&mut pf, 1, 250) } <= 0 {
                                 continue;
                             }
                             // SAFETY: reading into our buffer
-                            let n = unsafe { libc::read(fd.as_raw_fd(), b.as_mut_ptr() as *mut _, b.len()) };
+                            let n = unsafe {
+                                libc::read(fd.as_raw_fd(), b.as_mut_ptr() as *mut _, b.len())
+                            };
                             if n <= 0 {
                                 break;
                             }
@@ -534,7 +729,8 @@ mod bluez {
                     .map_err(|e| e.to_string())
             }
             Err(_) => {
-                p.call_method("StartNotify", &()).map_err(|e| format!("notifications refused: {e}"))?;
+                p.call_method("StartNotify", &())
+                    .map_err(|e| format!("notifications refused: {e}"))?;
                 let rule = zbus::MatchRule::builder()
                     .msg_type(zbus::message::Type::Signal)
                     .sender(BLUEZ)
@@ -543,7 +739,8 @@ mod bluez {
                     .and_then(|r| r.path(path.to_string()))
                     .map_err(|e| e.to_string())?
                     .build();
-                let it = zbus::blocking::MessageIterator::for_match_rule(rule, c, Some(256)).map_err(|e| e.to_string())?;
+                let it = zbus::blocking::MessageIterator::for_match_rule(rule, c, Some(256))
+                    .map_err(|e| e.to_string())?;
                 std::thread::Builder::new()
                     .name("switch2 notify".into())
                     .spawn(move || {
@@ -552,7 +749,11 @@ mod bluez {
                                 break;
                             }
                             let Ok(m) = m else { break };
-                            let Ok((_, ch, _)) = m.body().deserialize::<(String, Props, Vec<String>)>() else { continue };
+                            let Ok((_, ch, _)) =
+                                m.body().deserialize::<(String, Props, Vec<String>)>()
+                            else {
+                                continue;
+                            };
                             if let Some(v) = prop::<Vec<u8>>(&ch, "Value") {
                                 f(&v);
                             }
@@ -591,11 +792,17 @@ mod bluez {
             None
         }
         fn read(&self, len: u8, addr: u32) -> Option<Vec<u8>> {
-            let r = self.command(s2::CMD_MEMORY, s2::SUB_MEMORY_READ, &s2::memory_payload(len, addr))?;
+            let r = self.command(
+                s2::CMD_MEMORY,
+                s2::SUB_MEMORY_READ,
+                &s2::memory_payload(len, addr),
+            )?;
             r.get(s2::REPLY_DATA..).map(|d| d.to_vec())
         }
         fn connected(&self, c: &Connection) -> bool {
-            proxy(c, &self.dev, "org.bluez.Device1").and_then(|p| p.get_property::<bool>("Connected")).unwrap_or(false)
+            proxy(c, &self.dev, "org.bluez.Device1")
+                .and_then(|p| p.get_property::<bool>("Connected"))
+                .unwrap_or(false)
         }
     }
 
@@ -607,7 +814,8 @@ mod bluez {
 
     fn open(c: &Connection, dev: &str) -> Result<Link, String> {
         let d = proxy(c, dev, "org.bluez.Device1").map_err(|e| e.to_string())?;
-        d.call_method("Connect", &()).map_err(|e| format!("BlueZ did not connect it: {e}"))?;
+        d.call_method("Connect", &())
+            .map_err(|e| format!("BlueZ did not connect it: {e}"))?;
         let end = Instant::now() + Duration::from_secs(10);
         while !d.get_property::<bool>("ServicesResolved").unwrap_or(false) {
             if Instant::now() > end {
@@ -615,7 +823,11 @@ mod bluez {
             }
             std::thread::sleep(Duration::from_millis(100));
         }
-        let (u_cmd, u_rsp, u_in) = (uuid_text(s2::UUID_CMD), uuid_text(s2::UUID_RSP), uuid_text(s2::UUID_INPUT));
+        let (u_cmd, u_rsp, u_in) = (
+            uuid_text(s2::UUID_CMD),
+            uuid_text(s2::UUID_RSP),
+            uuid_text(s2::UUID_INPUT),
+        );
         let u_vib = [s2::UUID_VIB_R, s2::UUID_VIB_L, s2::UUID_VIB_PRO].map(uuid_text);
         let (mut cmd, mut rsp, mut input, mut vib) = (None, None, None, None);
         let prefix = format!("{dev}/");
@@ -623,7 +835,11 @@ mod bluez {
             .map_err(|e| e.to_string())?
             .into_iter()
             .filter(|(p, _)| p.as_str().starts_with(&prefix))
-            .filter_map(|(p, ifs)| ifs.get("org.bluez.GattCharacteristic1").and_then(|pr| prop::<String>(pr, "UUID")).map(|u| (p.to_string(), u.to_lowercase())))
+            .filter_map(|(p, ifs)| {
+                ifs.get("org.bluez.GattCharacteristic1")
+                    .and_then(|pr| prop::<String>(pr, "UUID"))
+                    .map(|u| (p.to_string(), u.to_lowercase()))
+            })
             .collect();
         chars.sort();
         for (p, u) in chars {
@@ -642,7 +858,9 @@ mod bluez {
                 *slot = Some(p);
             }
         }
-        let (Some(cmd), Some(rsp), Some(input)) = (cmd, rsp, input) else { return Err("not the GATT service of a Switch 2 controller".into()) };
+        let (Some(cmd), Some(rsp), Some(input)) = (cmd, rsp, input) else {
+            return Err("not the GATT service of a Switch 2 controller".into());
+        };
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, rx) = channel();
         let tx = Mutex::new(tx);
@@ -650,7 +868,14 @@ mod bluez {
             let _ = tx.lock().unwrap().send(v.to_vec());
         })
         .map_err(|e| format!("no replies: {e}"))?;
-        Ok(Link { dev: dev.to_string(), cmd: Arc::new(Writer::new(c, &cmd)), vib: vib.map(|v| Arc::new(Writer::new(c, &v))), input, replies: rx, stop })
+        Ok(Link {
+            dev: dev.to_string(),
+            cmd: Arc::new(Writer::new(c, &cmd)),
+            vib: vib.map(|v| Arc::new(Writer::new(c, &v))),
+            input,
+            replies: rx,
+            stop,
+        })
     }
 
     /// One input report (Windows: the input characteristic's ValueChanged handler).
@@ -661,10 +886,18 @@ mod bluez {
         let p = dd.slot.load(Ordering::Acquire);
         if let (Some(side), Some(prev)) = (dd.joy(), prev) {
             let present = r.mouse != [0, 0] || r.mouse_q != 0 || r.mouse_s != 0;
-            if p >= 0 && present && crate::services::hid_ext::MOUSE_WANTED.load(Ordering::Acquire) != 0 {
+            if p >= 0
+                && present
+                && crate::services::hid_ext::MOUSE_WANTED.load(Ordering::Acquire) != 0
+            {
                 let dx = r.mouse[0].wrapping_sub(prev.mouse[0]) as i32;
                 let dy = r.mouse[1].wrapping_sub(prev.mouse[1]) as i32;
-                let st = crate::services::hid_ext::MOUSE_CONNECTED | if r.mouse_s < s2::MOUSE_SURFACE_MAX { crate::services::hid_ext::MOUSE_ON_SURFACE } else { 0 };
+                let st = crate::services::hid_ext::MOUSE_CONNECTED
+                    | if r.mouse_s < s2::MOUSE_SURFACE_MAX {
+                        crate::services::hid_ext::MOUSE_ON_SURFACE
+                    } else {
+                        0
+                    };
                 crate::services::hid_ext::feed_mouse(p as usize, side, dx, dy, st);
             }
         }
@@ -681,16 +914,40 @@ mod bluez {
         }
     }
 
-    fn handshake(c: &Connection, l: &Link, addr: u64, adv_pid: u16, pair: bool, host: Option<[u8; 6]>) -> Result<Arc<S2Dev>, String> {
-        let info = l.read(0x40, s2::ADDR_INFO).ok_or("it did not answer the identity read")?;
+    fn handshake(
+        c: &Connection,
+        l: &Link,
+        addr: u64,
+        adv_pid: u16,
+        pair: bool,
+        host: Option<[u8; 6]>,
+    ) -> Result<Arc<S2Dev>, String> {
+        let info = l
+            .read(0x40, s2::ADDR_INFO)
+            .ok_or("it did not answer the identity read")?;
         if info.len() < 0x16 || u16::from_le_bytes([info[18], info[19]]) != s2::VENDOR {
             return Err("its identity is not Nintendo's".into());
         }
         let pid = u16::from_le_bytes([info[20], info[21]]);
-        let pid = if matches!(pid, s2::PID_PRO | s2::PID_JOY_L | s2::PID_JOY_R) { pid } else { adv_pid };
-        let serial: String = info[2..16].iter().map(|&c| if (0x20..0x7f).contains(&c) { c as char } else { '?' }).collect();
+        let pid = if matches!(pid, s2::PID_PRO | s2::PID_JOY_L | s2::PID_JOY_R) {
+            pid
+        } else {
+            adv_pid
+        };
+        let serial: String = info[2..16]
+            .iter()
+            .map(|&c| {
+                if (0x20..0x7f).contains(&c) {
+                    c as char
+                } else {
+                    '?'
+                }
+            })
+            .collect();
         if let (true, Some(h)) = (pair, host) {
-            let mut ok = l.command(s2::CMD_PAIR, s2::SUB_PAIR_HOST, &s2::pair_host_payload(&h)).is_some();
+            let mut ok = l
+                .command(s2::CMD_PAIR, s2::SUB_PAIR_HOST, &s2::pair_host_payload(&h))
+                .is_some();
             for k in 0..2 {
                 let mut key = [0u8; 17];
                 for (i, b) in key[1..].iter_mut().enumerate() {
@@ -699,27 +956,77 @@ mod bluez {
                     h.write_u64(addr ^ i as u64);
                     *b = h.finish() as u8;
                 }
-                ok = ok && l.command(s2::CMD_PAIR, if k == 0 { s2::SUB_PAIR_KEY1 } else { s2::SUB_PAIR_KEY2 }, &key).is_some();
+                ok = ok
+                    && l.command(
+                        s2::CMD_PAIR,
+                        if k == 0 {
+                            s2::SUB_PAIR_KEY1
+                        } else {
+                            s2::SUB_PAIR_KEY2
+                        },
+                        &key,
+                    )
+                    .is_some();
             }
             ok = ok && l.command(s2::CMD_PAIR, s2::SUB_PAIR_DONE, &[0]).is_some();
-            ilog!("Switch 2 controller {addr:012X}: {}", if ok { "bonded to this PC (it wakes toward it from now on)" } else { "bonding failed; Sync it again next time" });
+            ilog!(
+                "Switch 2 controller {addr:012X}: {}",
+                if ok {
+                    "bonded to this PC (it wakes toward it from now on)"
+                } else {
+                    "bonding failed; Sync it again next time"
+                }
+            );
         }
         let mut cal = [s2::Cal::default(); 2];
         let sticks = if pid == s2::PID_PRO { 2 } else { 1 };
-        for (i, (blk, user)) in [(s2::ADDR_STICK1, s2::ADDR_USER_STICK1), (s2::ADDR_STICK2, s2::ADDR_USER_STICK2)].iter().enumerate().take(sticks) {
+        for (i, (blk, user)) in [
+            (s2::ADDR_STICK1, s2::ADDR_USER_STICK1),
+            (s2::ADDR_STICK2, s2::ADDR_USER_STICK2),
+        ]
+        .iter()
+        .enumerate()
+        .take(sticks)
+        {
             let b = l.read(s2::STICK_BLOCK as u8, *blk);
             let u = l.read(0x0b, *user);
             let (cl, kind) = s2::cal_from_flash(b.as_deref(), u.as_deref());
             cal[i] = cl;
-            ilog!("Switch 2 controller {addr:012X}: stick {} calibration {}", i + 1, ["none (typical travel)", "factory", "user"][kind as usize]);
+            ilog!(
+                "Switch 2 controller {addr:012X}: stick {} calibration {}",
+                i + 1,
+                ["none (typical travel)", "factory", "user"][kind as usize]
+            );
         }
-        let feat = [s2::FEATURES | if pid == s2::PID_PRO { 0 } else { s2::FEATURE_MOUSE }, 0, 0, 0];
+        let feat = [
+            s2::FEATURES
+                | if pid == s2::PID_PRO {
+                    0
+                } else {
+                    s2::FEATURE_MOUSE
+                },
+            0,
+            0,
+            0,
+        ];
         l.command(s2::CMD_FEATURE, s2::SUB_FEATURE_SET, &feat);
-        l.command(s2::CMD_FEATURE, s2::SUB_FEATURE_ENABLE, &feat).ok_or("enabling its reports was refused")?;
+        l.command(s2::CMD_FEATURE, s2::SUB_FEATURE_ENABLE, &feat)
+            .ok_or("enabling its reports was refused")?;
         let (otx, orx) = channel::<Out>();
-        let d = Arc::new(S2Dev { addr, pid, serial, cal, report: Mutex::new(None), last: Mutex::new(motion::now_s()), gone: AtomicBool::new(false), slot: AtomicI32::new(-1), out: Mutex::new(otx) });
+        let d = Arc::new(S2Dev {
+            addr,
+            pid,
+            serial,
+            cal,
+            report: Mutex::new(None),
+            last: Mutex::new(motion::now_s()),
+            gone: AtomicBool::new(false),
+            slot: AtomicI32::new(-1),
+            out: Mutex::new(otx),
+        });
         let dd = d.clone();
-        subscribe(c, &l.input, l.stop.clone(), move |v| on_input(&dd, v)).map_err(|e| format!("its reports could not be subscribed: {e}"))?;
+        subscribe(c, &l.input, l.stop.clone(), move |v| on_input(&dd, v))
+            .map_err(|e| format!("its reports could not be subscribed: {e}"))?;
         // the writer: commands and rumble from the input thread, in order, off it
         let (cmd, vib, dg) = (l.cmd.clone(), l.vib.clone(), d.clone());
         std::thread::Builder::new()
@@ -756,7 +1063,8 @@ mod bluez {
                 if let Some(addr) = addr {
                     if found.is_none() || powered {
                         let b = addr.to_le_bytes();
-                        found = Some((p.to_string(), [b[0], b[1], b[2], b[3], b[4], b[5]], powered));
+                        found =
+                            Some((p.to_string(), [b[0], b[1], b[2], b[3], b[4], b[5]], powered));
                     }
                     if powered {
                         break;
@@ -772,23 +1080,46 @@ mod bluez {
     }
 
     /// The advertisements: Device1 properties as they change (DuplicateData: every advertisement) and new devices.
-    fn watch(c: &Connection, tx: Sender<(String, u64, s2::Advert)>, trace: bool) -> Result<(), String> {
-        let rule = zbus::MatchRule::builder().msg_type(zbus::message::Type::Signal).sender(BLUEZ).map_err(|e| e.to_string())?.build();
-        let it = zbus::blocking::MessageIterator::for_match_rule(rule, c, Some(1024)).map_err(|e| e.to_string())?;
+    fn watch(
+        c: &Connection,
+        tx: Sender<(String, u64, s2::Advert)>,
+        trace: bool,
+    ) -> Result<(), String> {
+        let rule = zbus::MatchRule::builder()
+            .msg_type(zbus::message::Type::Signal)
+            .sender(BLUEZ)
+            .map_err(|e| e.to_string())?
+            .build();
+        let it = zbus::blocking::MessageIterator::for_match_rule(rule, c, Some(1024))
+            .map_err(|e| e.to_string())?;
         let c2 = c.clone();
         std::thread::Builder::new()
             .name("switch2 adverts".into())
             .spawn(move || {
                 let mut seen = HashSet::new();
                 let mut send = |path: &str, props: &Props| {
-                    let Some(d) = nintendo_data(props) else { return };
+                    let Some(d) = nintendo_data(props) else {
+                        return;
+                    };
                     let addr = prop::<String>(props, "Address")
-                        .or_else(|| proxy(&c2, path, "org.bluez.Device1").ok().and_then(|p| p.get_property::<String>("Address").ok()))
+                        .or_else(|| {
+                            proxy(&c2, path, "org.bluez.Device1")
+                                .ok()
+                                .and_then(|p| p.get_property::<String>("Address").ok())
+                        })
                         .and_then(|s| parse_addr(&s));
                     let Some(addr) = addr else { return };
                     let adv = s2::parse_advert(&d);
                     if trace && seen.insert(addr) {
-                        ilog!("Switch 2 trace: {addr:012X} Nintendo advertisement, {} bytes{}", d.len(), if adv.is_some() { ", a Switch 2 controller" } else { "" });
+                        ilog!(
+                            "Switch 2 trace: {addr:012X} Nintendo advertisement, {} bytes{}",
+                            d.len(),
+                            if adv.is_some() {
+                                ", a Switch 2 controller"
+                            } else {
+                                ""
+                            }
+                        );
                     }
                     if let Some(adv) = adv {
                         let _ = tx.send((path.to_string(), addr, adv));
@@ -800,13 +1131,18 @@ mod bluez {
                     let member = h.member().map(|m| m.to_string()).unwrap_or_default();
                     if member == "PropertiesChanged" {
                         let path = h.path().map(|p| p.to_string()).unwrap_or_default();
-                        if let Ok((iface, ch, _)) = m.body().deserialize::<(String, Props, Vec<String>)>() {
+                        if let Ok((iface, ch, _)) =
+                            m.body().deserialize::<(String, Props, Vec<String>)>()
+                        {
                             if iface == "org.bluez.Device1" {
                                 send(&path, &ch);
                             }
                         }
                     } else if member == "InterfacesAdded" {
-                        if let Ok((path, ifs)) = m.body().deserialize::<(OwnedObjectPath, HashMap<String, Props>)>() {
+                        if let Ok((path, ifs)) = m
+                            .body()
+                            .deserialize::<(OwnedObjectPath, HashMap<String, Props>)>()
+                        {
                             if let Some(p) = ifs.get("org.bluez.Device1") {
                                 send(path.as_str(), p);
                             }
@@ -828,12 +1164,16 @@ mod bluez {
         filter.insert("Transport", Value::from("le"));
         filter.insert("DuplicateData", Value::from(true));
         let _ = a.call_method("SetDiscoveryFilter", &(filter,));
-        a.call_method("StartDiscovery", &()).map_err(|e| format!("LE discovery did not start ({e})"))?;
+        a.call_method("StartDiscovery", &())
+            .map_err(|e| format!("LE discovery did not start ({e})"))?;
         // controllers BlueZ already knows: their last advertisement counts as seen now
         if let Ok(objs) = objects(&c) {
             for (p, ifs) in objs {
                 if let Some(d) = ifs.get("org.bluez.Device1") {
-                    if let (Some(data), Some(addr)) = (nintendo_data(d), prop::<String>(d, "Address").and_then(|s| parse_addr(&s))) {
+                    if let (Some(data), Some(addr)) = (
+                        nintendo_data(d),
+                        prop::<String>(d, "Address").and_then(|s| parse_addr(&s)),
+                    ) {
                         if let Some(adv) = s2::parse_advert(&data) {
                             let _ = tx.send((p.to_string(), addr, adv));
                         }
@@ -858,15 +1198,30 @@ mod bluez {
                 }
                 alive
             });
-            let Ok((path, addr, adv)) = rx.recv_timeout(Duration::from_millis(500)) else { continue };
+            let Ok((path, addr, adv)) = rx.recv_timeout(Duration::from_millis(500)) else {
+                continue;
+            };
             let usage = s2::advert_use(&adv, host);
             let now = motion::now_s();
-            if usage == s2::Use::Ignore || links.iter().any(|(a, _)| *a == addr) || failed.iter().any(|(a, t)| *a == addr && now < *t) {
+            if usage == s2::Use::Ignore
+                || links.iter().any(|(a, _)| *a == addr)
+                || failed.iter().any(|(a, t)| *a == addr && now < *t)
+            {
                 continue;
             }
             failed.retain(|(_, t)| now < *t);
-            ilog!("Switch 2 controller {addr:012X} (product {:04x}) {}, connecting", adv.pid, if adv.pairing { "in Sync" } else { "woke toward this PC" });
-            let r = open(&c, &path).and_then(|l| handshake(&c, &l, addr, adv.pid, usage == s2::Use::Pair, host).map(|d| (l, d)));
+            ilog!(
+                "Switch 2 controller {addr:012X} (product {:04x}) {}, connecting",
+                adv.pid,
+                if adv.pairing {
+                    "in Sync"
+                } else {
+                    "woke toward this PC"
+                }
+            );
+            let r = open(&c, &path).and_then(|l| {
+                handshake(&c, &l, addr, adv.pid, usage == s2::Use::Pair, host).map(|d| (l, d))
+            });
             match r {
                 Ok((l, d)) => {
                     ilog!("{} connected", d.name());
@@ -886,9 +1241,18 @@ mod bluez {
     mod tests {
         #[test]
         fn uuid_and_address_forms() {
-            assert_eq!(super::uuid_text(super::s2::UUID_CMD), "649d4ac9-8eb7-4e6c-af44-1ea54fe5f005");
-            assert_eq!(super::uuid_text(super::s2::UUID_INPUT), "ab7de9be-89fe-49ad-828f-118f09df7fd2");
-            assert_eq!(super::parse_addr("98:B6:E9:01:02:0A"), Some(0x98B6_E901_020A));
+            assert_eq!(
+                super::uuid_text(super::s2::UUID_CMD),
+                "649d4ac9-8eb7-4e6c-af44-1ea54fe5f005"
+            );
+            assert_eq!(
+                super::uuid_text(super::s2::UUID_INPUT),
+                "ab7de9be-89fe-49ad-828f-118f09df7fd2"
+            );
+            assert_eq!(
+                super::parse_addr("98:B6:E9:01:02:0A"),
+                Some(0x98B6_E901_020A)
+            );
             assert_eq!(super::parse_addr("98:B6:E9"), None);
         }
 

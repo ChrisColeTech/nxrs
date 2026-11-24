@@ -67,7 +67,15 @@ pub fn parse(text: &str) -> Vec<Cheat> {
         .zip(envs)
         .map(|(e, env)| {
             let broken = validate(&e.words).err();
-            Cheat { name: e.name, enabled: e.master, master: e.master, words: e.words, broken, env, ..Default::default() }
+            Cheat {
+                name: e.name,
+                enabled: e.master,
+                master: e.master,
+                words: e.words,
+                broken,
+                env,
+                ..Default::default()
+            }
         })
         .collect()
 }
@@ -101,7 +109,11 @@ struct Ins {
 
 fn op_kind(w: u32) -> u32 {
     let hi = w >> 28;
-    if hi == 0xC { w >> 24 } else { hi }
+    if hi == 0xC {
+        w >> 24
+    } else {
+        hi
+    }
 }
 
 /// One instruction at `p` (the words left), the reference's DecodeNextOpcode field by field.
@@ -111,9 +123,25 @@ fn decode(p: &[u32]) -> Result<Ins, String> {
         return Err("truncated".into());
     }
     let w = p[0];
-    let mut o = Ins { op: op_kind(w), len: 1, ..Default::default() };
-    let need = |k: usize| if n < k { Err("truncated".to_string()) } else { Ok(()) };
-    let width = |t: u32| if width_ok(t) { Ok(t) } else { Err(format!("width {t}")) };
+    let mut o = Ins {
+        op: op_kind(w),
+        len: 1,
+        ..Default::default()
+    };
+    let need = |k: usize| {
+        if n < k {
+            Err("truncated".to_string())
+        } else {
+            Ok(())
+        }
+    };
+    let width = |t: u32| {
+        if width_ok(t) {
+            Ok(t)
+        } else {
+            Err(format!("width {t}"))
+        }
+    };
     match o.op {
         0 => {
             o.t = width((w >> 24) & 0xF)?;
@@ -394,7 +422,12 @@ impl Vm {
     }
 
     /// One run of a cheat's program; Err: it cannot run (turned off). `failed` counts failed accesses.
-    pub fn run(&mut self, words: &[u32], mem: &mut dyn Mem, failed: &mut u64) -> Result<(), String> {
+    pub fn run(
+        &mut self,
+        words: &[u32],
+        mem: &mut dyn Mem,
+        failed: &mut u64,
+    ) -> Result<(), String> {
         if self.statics.len() < 256 {
             self.statics.resize(256, 0);
         }
@@ -403,7 +436,9 @@ impl Vm {
         while idx < words.len() {
             steps += 1;
             if steps > STEP_CAP {
-                return Err(format!("over {STEP_CAP} instructions in one pass: a runaway loop"));
+                return Err(format!(
+                    "over {STEP_CAP} instructions in one pass: a runaway loop"
+                ));
             }
             let i = decode(&words[idx..])?;
             // a region not set up yet (the heap before the game asks for one): this pass of the cheat stops there
@@ -428,7 +463,11 @@ impl Vm {
             };
             match i.op {
                 0 => {
-                    if !mem.write(mem.base(i.m) + i.rel + self.reg[i.r as usize], i.t, i.val & width_mask(i.t)) {
+                    if !mem.write(
+                        mem.base(i.m) + i.rel + self.reg[i.r as usize],
+                        i.t,
+                        i.val & width_mask(i.t),
+                    ) {
                         *failed += 1;
                     }
                 }
@@ -438,10 +477,20 @@ impl Vm {
                         8 => self.held & i.val == i.val,
                         0xC4 => {
                             let now = self.held & i.val == i.val;
-                            if i.flags != 0 { now } else { now && self.keyold & i.val != i.val }
+                            if i.flags != 0 {
+                                now
+                            } else {
+                                now && self.keyold & i.val != i.val
+                            }
                         }
                         _ => {
-                            let a = mem.base(i.m) + i.rel + if i.flags != 0 { self.reg[i.x as usize] } else { 0 };
+                            let a = mem.base(i.m)
+                                + i.rel
+                                + if i.flags != 0 {
+                                    self.reg[i.x as usize]
+                                } else {
+                                    0
+                                };
                             let got = rd(mem, a, i.t, failed);
                             cond_met(i.c, got & width_mask(i.t), i.val & width_mask(i.t))
                         }
@@ -456,10 +505,21 @@ impl Vm {
                     depth += 1;
                     let got = self.reg[i.s as usize] & width_mask(i.t);
                     let want = match i.o {
-                        0 => { let a = mem.base(i.m) + i.rel; rd(mem, a, i.t, failed) }
-                        1 => { let a = mem.base(i.m) + self.reg[i.x as usize]; rd(mem, a, i.t, failed) }
+                        0 => {
+                            let a = mem.base(i.m) + i.rel;
+                            rd(mem, a, i.t, failed)
+                        }
+                        1 => {
+                            let a = mem.base(i.m) + self.reg[i.x as usize];
+                            rd(mem, a, i.t, failed)
+                        }
                         2 => rd(mem, self.reg[i.r as usize] + i.rel, i.t, failed),
-                        3 => rd(mem, self.reg[i.r as usize] + self.reg[i.x as usize], i.t, failed),
+                        3 => rd(
+                            mem,
+                            self.reg[i.r as usize] + self.reg[i.x as usize],
+                            i.t,
+                            failed,
+                        ),
                         4 => i.val,
                         _ => self.reg[i.x as usize],
                     };
@@ -514,7 +574,11 @@ impl Vm {
                     }
                 }
                 6 => {
-                    let a = self.reg[i.r as usize].wrapping_add(if i.flags & 2 != 0 { self.reg[i.x as usize] } else { 0 });
+                    let a = self.reg[i.r as usize].wrapping_add(if i.flags & 2 != 0 {
+                        self.reg[i.x as usize]
+                    } else {
+                        0
+                    });
                     if !mem.write(a, i.t, i.val & width_mask(i.t)) {
                         *failed += 1;
                     }
@@ -535,7 +599,11 @@ impl Vm {
                 }
                 9 => {
                     let a = self.reg[i.s as usize];
-                    let b = if i.flags != 0 { i.val } else { self.reg[i.x as usize] };
+                    let b = if i.flags != 0 {
+                        i.val
+                    } else {
+                        self.reg[i.x as usize]
+                    };
                     let r = match i.c {
                         0 => a.wrapping_add(b),
                         1 => a.wrapping_sub(b),
@@ -685,11 +753,22 @@ fn writable(a: u64, n: u64) -> bool {
 
 #[cfg(windows)]
 fn writable(a: u64, n: u64) -> bool {
-    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_READWRITE, PAGE_WRITECOPY};
+    use windows_sys::Win32::System::Memory::{
+        VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_EXECUTE_READWRITE, PAGE_READWRITE,
+        PAGE_WRITECOPY,
+    };
     let mut p = a;
     while p < a + n {
         let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { std::mem::zeroed() };
-        if unsafe { VirtualQuery(p as *const _, &mut mbi, std::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 || mbi.State != 0x1000 {
+        if unsafe {
+            VirtualQuery(
+                p as *const _,
+                &mut mbi,
+                std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+            )
+        } == 0
+            || mbi.State != 0x1000
+        {
             return false;
         }
         if mbi.Protect & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE | PAGE_WRITECOPY) == 0 {
@@ -705,7 +784,16 @@ fn held_keys() -> u64 {
     let (b, a) = crate::input::peek_player1();
     let mut k = b & 0xFFFF;
     let d = 16384;
-    let dirs = [(a[0] < -d, 16), (a[1] > d, 17), (a[0] > d, 18), (a[1] < -d, 19), (a[2] < -d, 20), (a[3] > d, 21), (a[2] > d, 22), (a[3] < -d, 23)];
+    let dirs = [
+        (a[0] < -d, 16),
+        (a[1] > d, 17),
+        (a[0] > d, 18),
+        (a[1] < -d, 19),
+        (a[2] < -d, 20),
+        (a[3] > d, 21),
+        (a[2] > d, 22),
+        (a[3] < -d, 23),
+    ];
     for (on, bit) in dirs {
         if on {
             k |= 1 << bit;
@@ -727,7 +815,13 @@ struct State {
 static STATE: Mutex<Option<Option<State>>> = Mutex::new(None);
 
 fn folder() -> std::path::PathBuf {
-    std::env::var("NXOS_CHEATS").map(Into::into).unwrap_or_else(|_| crate::boot::try_process().map(|p| p.data_dir.join("cheats")).unwrap_or_default())
+    std::env::var("NXOS_CHEATS")
+        .map(Into::into)
+        .unwrap_or_else(|_| {
+            crate::boot::try_process()
+                .map(|p| p.data_dir.join("cheats"))
+                .unwrap_or_default()
+        })
 }
 
 fn load() -> Option<State> {
@@ -735,16 +829,35 @@ fn load() -> Option<State> {
     let build: String = m.build[..16.min(m.build.len())].to_ascii_uppercase();
     let dir = folder();
     let tid = format!("{:016X}", crate::profile::get().program_id);
-    let candidates = [dir.join(format!("{build}.txt")), dir.join("atmosphere").join("contents").join(&tid).join("cheats").join(format!("{build}.txt"))];
+    let candidates = [
+        dir.join(format!("{build}.txt")),
+        dir.join("atmosphere")
+            .join("contents")
+            .join(&tid)
+            .join("cheats")
+            .join(format!("{build}.txt")),
+    ];
     let file = candidates.into_iter().find(|p| p.is_file())?;
     let text = std::fs::read_to_string(&file).ok()?;
     let mut cheats = parse(&text);
     let meta = std::fs::read_to_string(file.with_extension("meta.tsv")).unwrap_or_default();
     let unresolved = meta_load(&mut cheats, &meta);
     link_pairs(&mut cheats);
-    values_load(&mut cheats, &std::fs::read_to_string(file.with_extension("values")).unwrap_or_default());
-    let enabled: Vec<String> = std::fs::read_to_string(file.with_extension("enabled")).unwrap_or_default().lines().map(|l| l.trim().to_string()).collect();
-    let on: Vec<String> = std::env::var("NXOS_CHEATS_ON").unwrap_or_default().split(',').map(|s| s.trim().to_string()).filter(|s| !s.is_empty()).collect();
+    values_load(
+        &mut cheats,
+        &std::fs::read_to_string(file.with_extension("values")).unwrap_or_default(),
+    );
+    let enabled: Vec<String> = std::fs::read_to_string(file.with_extension("enabled"))
+        .unwrap_or_default()
+        .lines()
+        .map(|l| l.trim().to_string())
+        .collect();
+    let on: Vec<String> = std::env::var("NXOS_CHEATS_ON")
+        .unwrap_or_default()
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
     for c in cheats.iter_mut() {
         if !c.master && !c.pair_off && (enabled.contains(&c.name) || on.contains(&c.name)) {
             c.enabled = true;
@@ -752,21 +865,48 @@ fn load() -> Option<State> {
     }
     bind_code(&mut cheats, (m.text_end, nxrt::patchset::has));
     let n_on = cheats.iter().filter(|c| c.enabled && !c.master).count();
-    let broken: Vec<String> = cheats.iter().filter_map(|c| c.broken.as_ref().map(|b| format!("{} ({b})", c.name))).collect();
+    let broken: Vec<String> = cheats
+        .iter()
+        .filter_map(|c| c.broken.as_ref().map(|b| format!("{} ({b})", c.name)))
+        .collect();
     crate::log!(
         "cheats: {} ({} cheats, {} masters, {n_on} on){}",
         file.display(),
         cheats.iter().filter(|c| !c.master).count(),
         cheats.iter().filter(|c| c.master).count(),
-        if broken.is_empty() { String::new() } else { format!("; off for good: {}", broken.join(", ")) }
+        if broken.is_empty() {
+            String::new()
+        } else {
+            format!("; off for good: {}", broken.join(", "))
+        }
     );
-    Some(State { file, build, cheats, unresolved, vm: Vm::default(), mem: GuestMem { main: m.base, main_text: (m.base, m.base + m.text_end) } })
+    Some(State {
+        file,
+        build,
+        cheats,
+        unresolved,
+        vm: Vm::default(),
+        mem: GuestMem {
+            main: m.base,
+            main_text: (m.base, m.base + m.text_end),
+        },
+    })
 }
 
 fn save_enabled(st: &State) {
-    let names: Vec<&str> = st.cheats.iter().filter(|c| c.enabled && !c.master && !c.once && !c.pair_off).map(|c| c.name.as_str()).collect();
+    let names: Vec<&str> = st
+        .cheats
+        .iter()
+        .filter(|c| c.enabled && !c.master && !c.once && !c.pair_off)
+        .map(|c| c.name.as_str())
+        .collect();
     let _ = std::fs::write(st.file.with_extension("enabled"), names.join("\n") + "\n");
-    let vals: Vec<String> = st.cheats.iter().filter(|c| c.ask.is_some()).filter_map(|c| value_get(c).map(|v| format!("{}\t{v}", c.name))).collect();
+    let vals: Vec<String> = st
+        .cheats
+        .iter()
+        .filter(|c| c.ask.is_some())
+        .filter_map(|c| value_get(c).map(|v| format!("{}\t{v}", c.name)))
+        .collect();
     if !vals.is_empty() {
         let _ = std::fs::write(st.file.with_extension("values"), vals.join("\n") + "\n");
     }
@@ -778,7 +918,9 @@ pub fn present() {
     let st = g.get_or_insert_with(load);
     let Some(st) = st.as_mut() else { return };
     let held = held_keys();
-    let State { cheats, vm, mem, .. } = st;
+    let State {
+        cheats, vm, mem, ..
+    } = st;
     if vm.pass(cheats, mem, held) {
         save_enabled(st);
     }
@@ -786,49 +928,62 @@ pub fn present() {
 
 /// The control pipe's cheat commands.
 pub fn register_commands() {
-    nxconfig::ctl::register("cheats", "[reload]: the cheats of this build and whether each is on (reload: read the file again)", |a| {
-        let mut g = STATE.lock().unwrap();
-        if a.first() == Some(&"reload") {
-            *g = Some(load());
-        }
-        match g.as_ref().and_then(|s| s.as_ref()) {
-            None => format!("no cheat file for this build in {}\n", folder().display()),
-            Some(st) => {
-                let mut s = format!("{} (build {})\n", st.file.display(), st.build);
-                for c in &st.cheats {
-                    let mut extra = String::new();
-                    if !c.section.is_empty() {
-                        extra.push_str(&format!(" [{}]", c.section));
-                    }
-                    if c.once {
-                        extra.push_str(" (one pass)");
-                    }
-                    if c.pair_off {
-                        extra.push_str(" (the restore of its pair)");
-                    }
-                    if c.nd.is_some() {
-                        extra.push_str(&format!(" (never decreases, {})", c.ty));
-                    }
-                    if let Some(v) = value_get(c) {
-                        extra.push_str(&format!(" = {v} {}", c.ty));
-                    }
-                    if !c.note.is_empty() {
-                        extra.push_str(&format!(" -- {}", c.note));
-                    }
-                    s.push_str(&format!(
-                        "{} {}{extra}{}\n",
-                        if c.master { "master" } else if c.enabled { "on    " } else { "off   " },
-                        c.name,
-                        c.broken.as_ref().map(|b| format!(" (off: {b})")).unwrap_or_default()
-                    ));
-                }
-                for (n, why) in &st.unresolved {
-                    s.push_str(&format!("left out {n}: {why}\n"));
-                }
-                s
+    nxconfig::ctl::register(
+        "cheats",
+        "[reload]: the cheats of this build and whether each is on (reload: read the file again)",
+        |a| {
+            let mut g = STATE.lock().unwrap();
+            if a.first() == Some(&"reload") {
+                *g = Some(load());
             }
-        }
-    });
+            match g.as_ref().and_then(|s| s.as_ref()) {
+                None => format!("no cheat file for this build in {}\n", folder().display()),
+                Some(st) => {
+                    let mut s = format!("{} (build {})\n", st.file.display(), st.build);
+                    for c in &st.cheats {
+                        let mut extra = String::new();
+                        if !c.section.is_empty() {
+                            extra.push_str(&format!(" [{}]", c.section));
+                        }
+                        if c.once {
+                            extra.push_str(" (one pass)");
+                        }
+                        if c.pair_off {
+                            extra.push_str(" (the restore of its pair)");
+                        }
+                        if c.nd.is_some() {
+                            extra.push_str(&format!(" (never decreases, {})", c.ty));
+                        }
+                        if let Some(v) = value_get(c) {
+                            extra.push_str(&format!(" = {v} {}", c.ty));
+                        }
+                        if !c.note.is_empty() {
+                            extra.push_str(&format!(" -- {}", c.note));
+                        }
+                        s.push_str(&format!(
+                            "{} {}{extra}{}\n",
+                            if c.master {
+                                "master"
+                            } else if c.enabled {
+                                "on    "
+                            } else {
+                                "off   "
+                            },
+                            c.name,
+                            c.broken
+                                .as_ref()
+                                .map(|b| format!(" (off: {b})"))
+                                .unwrap_or_default()
+                        ));
+                    }
+                    for (n, why) in &st.unresolved {
+                        s.push_str(&format!("left out {n}: {why}\n"));
+                    }
+                    s
+                }
+            }
+        },
+    );
     nxconfig::ctl::register("cheat", "on|off <name> | set <name> <value>: turn a cheat on or off (kept in <build>.enabled), set an ask cheat's value (<build>.values)", |a| {
         let (Some(what), name) = (a.first(), a[1.min(a.len())..].join(" ")) else { return "cheat on|off <name>\n".into() };
         let mut g = STATE.lock().unwrap();
@@ -891,7 +1046,15 @@ impl CheatPanel {
     }
     /// One step over `n` rows: the pads (A, B, up, down, left, right), Return / Escape, the vertical and horizontal
     /// arrows typed since the last step.
-    pub fn step(&mut self, n: usize, pads: [bool; 6], confirm: bool, cancel: bool, vert: i32, horiz: i32) -> PanelAct {
+    pub fn step(
+        &mut self,
+        n: usize,
+        pads: [bool; 6],
+        confirm: bool,
+        cancel: bool,
+        vert: i32,
+        horiz: i32,
+    ) -> PanelAct {
         let e: Vec<bool> = (0..6).map(|i| pads[i] && !self.held[i]).collect();
         self.held = pads;
         if e[1] || cancel {
@@ -943,19 +1106,40 @@ pub fn panel_text(cheats: &[Cheat], rows: &[usize], cursor: usize) -> String {
         } else {
             "off"
         };
-        let value = value_get(c).map(|v| format!("   < {v} >")).unwrap_or_default();
+        let value = value_get(c)
+            .map(|v| format!("   < {v} >"))
+            .unwrap_or_default();
         let mark = if k == cursor { "\u{25b6} " } else { "   " };
-        s.push_str(&format!("{mark}{}{}  [{state}]{value}\n", if c.section.is_empty() { String::new() } else { format!("{}: ", c.section) }, c.name));
+        s.push_str(&format!(
+            "{mark}{}{}  [{state}]{value}\n",
+            if c.section.is_empty() {
+                String::new()
+            } else {
+                format!("{}: ", c.section)
+            },
+            c.name
+        ));
     }
-    s.push_str(&format!("{} of {}   A / Return: on-off   Left / Right: value   B / Esc: close", cursor + 1, rows.len()));
+    s.push_str(&format!(
+        "{} of {}   A / Return: on-off   Left / Right: value   B / Esc: close",
+        cursor + 1,
+        rows.len()
+    ));
     s
 }
 
 /// A value one step up or down in its type (1 for integers and floats), within its bounds.
 pub fn value_step(c: &mut Cheat, d: i32) -> Result<(), String> {
-    let v: f64 = value_get(c).ok_or("takes no value")?.parse().map_err(|_| "no value".to_string())?;
+    let v: f64 = value_get(c)
+        .ok_or("takes no value")?
+        .parse()
+        .map_err(|_| "no value".to_string())?;
     let n = v + d as f64;
-    let text = if c.ty.starts_with('f') { format!("{n}") } else { format!("{}", n as i128) };
+    let text = if c.ty.starts_with('f') {
+        format!("{n}")
+    } else {
+        format!("{}", n as i128)
+    };
     value_set(c, &text)
 }
 
@@ -967,7 +1151,11 @@ pub fn panel_open() {
     if PANEL_OPEN.swap(true, std::sync::atomic::Ordering::SeqCst) {
         return;
     }
-    if std::thread::Builder::new().name("nxos cheat panel".into()).spawn(panel_run).is_err() {
+    if std::thread::Builder::new()
+        .name("nxos cheat panel".into())
+        .spawn(panel_run)
+        .is_err()
+    {
         PANEL_OPEN.store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
@@ -994,7 +1182,10 @@ fn panel_run() {
         let text = {
             let mut g = STATE.lock().unwrap();
             let st = g.get_or_insert_with(load);
-            let rows = st.as_ref().map(|s| panel_rows(&s.cheats)).unwrap_or_default();
+            let rows = st
+                .as_ref()
+                .map(|s| panel_rows(&s.cheats))
+                .unwrap_or_default();
             match p.step(rows.len(), panel_pads(), confirm, cancel, vert, horiz) {
                 PanelAct::Close => break,
                 PanelAct::Toggle(r) => {
@@ -1051,14 +1242,19 @@ pub fn bind_code(cheats: &mut [Cheat], (text_end, has): (u64, fn(&str) -> bool))
             continue;
         }
         c.code = true;
-        c.code_only = profiles::cheatfile::main_writes(&c.words).is_some_and(|w| w.iter().all(|(o, b)| o + b.len() as u64 <= text_end));
+        c.code_only = profiles::cheatfile::main_writes(&c.words)
+            .is_some_and(|w| w.iter().all(|(o, b)| o + b.len() as u64 <= text_end));
         sync_code(c);
         n += 1;
     }
     if n > 0 {
         crate::log!("cheats: {n} code cheats compiled into this build, switched by their toggles");
     }
-    for c in cheats.iter().filter(|c| !c.code && profiles::cheatfile::main_writes(&c.words).is_some_and(|w| w.iter().any(|(o, _)| *o < text_end))) {
+    for c in cheats.iter().filter(|c| {
+        !c.code
+            && profiles::cheatfile::main_writes(&c.words)
+                .is_some_and(|w| w.iter().any(|(o, _)| *o < text_end))
+    }) {
         crate::log!("[RED] cheats: {:?} writes main's code but is not compiled into this build (rebuild with the cheat file in place): its code writes have no effect", c.name);
     }
 }
@@ -1083,7 +1279,9 @@ fn type_width(t: &str) -> u32 {
 fn value_word(words: &[u32], k: usize) -> bool {
     let mut a = 0;
     while a < words.len() {
-        let Ok(i) = decode(&words[a..]) else { return false };
+        let Ok(i) = decode(&words[a..]) else {
+            return false;
+        };
         let first = match i.op {
             0 | 1 => Some(a + 2),
             4 | 6 | 7 => Some(a + 1),
@@ -1102,7 +1300,20 @@ fn value_word(words: &[u32], k: usize) -> bool {
 /// Applies a meta file's rows to the cheats; returns the unresolved ones (name, why).
 pub fn meta_load(cheats: &mut Vec<Cheat>, text: &str) -> Vec<(String, String)> {
     let mut unresolved = vec![];
-    let cols = ["name", "kind", "section", "type", "action", "ask", "value_words", "once", "pair", "resolved", "note", "address"];
+    let cols = [
+        "name",
+        "kind",
+        "section",
+        "type",
+        "action",
+        "ask",
+        "value_words",
+        "once",
+        "pair",
+        "resolved",
+        "note",
+        "address",
+    ];
     let mut at: Option<Vec<Option<usize>>> = None;
     let mut cursor = 0;
     for line in text.lines() {
@@ -1111,7 +1322,8 @@ pub fn meta_load(cheats: &mut Vec<Cheat>, text: &str) -> Vec<(String, String)> {
         }
         let f: Vec<&str> = line.split('\t').map(|x| x.trim_end_matches('\r')).collect();
         let Some(idx) = at.as_ref() else {
-            let h: Vec<Option<usize>> = cols.iter().map(|c| f.iter().position(|x| x == c)).collect();
+            let h: Vec<Option<usize>> =
+                cols.iter().map(|c| f.iter().position(|x| x == c)).collect();
             if h[0].is_none() {
                 break;
             }
@@ -1128,7 +1340,10 @@ pub fn meta_load(cheats: &mut Vec<Cheat>, text: &str) -> Vec<(String, String)> {
             Some(j) => j,
             // a never-decrease entry has no code words (the file's entry is empty, so parsing left it out)
             None if col(4) == "never-decrease" => {
-                cheats.push(Cheat { name: name.to_string(), ..Default::default() });
+                cheats.push(Cheat {
+                    name: name.to_string(),
+                    ..Default::default()
+                });
                 cheats.len() - 1
             }
             None => continue,
@@ -1142,21 +1357,39 @@ pub fn meta_load(cheats: &mut Vec<Cheat>, text: &str) -> Vec<(String, String)> {
         c.once = col(7) == "1";
         c.pair_off = kind == "patch-off";
         let (res, note) = (col(9), col(10));
-        c.note = [res, note].iter().filter(|s| !s.is_empty()).copied().collect::<Vec<_>>().join("; ");
+        c.note = [res, note]
+            .iter()
+            .filter(|s| !s.is_empty())
+            .copied()
+            .collect::<Vec<_>>()
+            .join("; ");
         if !col(5).is_empty() {
             let a = col(5);
             let (lo, hi) = a.split_once("..").unwrap_or((a, ""));
             c.ask = Some((lo.trim().parse().ok(), hi.trim().parse().ok()));
-            c.vw = col(6).split(|ch: char| !ch.is_ascii_digit()).filter_map(|s| s.parse().ok()).filter(|&v: &usize| v < c.words.len()).collect();
+            c.vw = col(6)
+                .split(|ch: char| !ch.is_ascii_digit())
+                .filter_map(|s| s.parse().ok())
+                .filter(|&v: &usize| v < c.words.len())
+                .collect();
             let w = type_width(&c.ty);
-            if w == 0 || c.vw.is_empty() || (w == 8 && c.vw.len() % 2 != 0) || c.broken.is_some() || !c.vw.iter().all(|&k| value_word(&c.words, k)) {
+            if w == 0
+                || c.vw.is_empty()
+                || (w == 8 && c.vw.len() % 2 != 0)
+                || c.broken.is_some()
+                || !c.vw.iter().all(|&k| value_word(&c.words, k))
+            {
                 c.ask = None;
             }
         }
         if col(4) == "never-decrease" && c.words.is_empty() {
             if let Some((r, off)) = col(11).split_once(':') {
-                let off = u64::from_str_radix(off.trim_start_matches("0x").trim_start_matches("0X"), 16).ok();
-                if let (Ok(r @ 0..=1), Some(off), true) = (r.trim().parse::<u32>(), off, type_width(&c.ty) != 0) {
+                let off =
+                    u64::from_str_radix(off.trim_start_matches("0x").trim_start_matches("0X"), 16)
+                        .ok();
+                if let (Ok(r @ 0..=1), Some(off), true) =
+                    (r.trim().parse::<u32>(), off, type_width(&c.ty) != 0)
+                {
                     c.nd = Some((r, off));
                 }
             }
@@ -1175,9 +1408,18 @@ pub fn meta_load(cheats: &mut Vec<Cheat>, text: &str) -> Vec<(String, String)> {
 /// "X - on" / "X - off" (also "X on", "X: off", "X (off)"): the base name and whether it is the off half.
 fn onoff_split(name: &str) -> Option<(String, bool)> {
     let n = name.trim_end();
-    let n = n.strip_suffix(')').or_else(|| n.strip_suffix(']')).unwrap_or(n);
+    let n = n
+        .strip_suffix(')')
+        .or_else(|| n.strip_suffix(']'))
+        .unwrap_or(n);
     let low = n.to_ascii_lowercase();
-    let (rest, off) = if low.ends_with("off") { (&n[..n.len() - 3], true) } else if low.ends_with("on") { (&n[..n.len() - 2], false) } else { return None };
+    let (rest, off) = if low.ends_with("off") {
+        (&n[..n.len() - 3], true)
+    } else if low.ends_with("on") {
+        (&n[..n.len() - 2], false)
+    } else {
+        return None;
+    };
     let base = rest.trim_end_matches([' ', '-', ':', '_', '(', '[']);
     (base.len() < rest.len() && !base.is_empty()).then(|| (base.to_string(), off))
 }
@@ -1188,8 +1430,15 @@ pub fn link_pairs(cheats: &mut [Cheat]) {
         if cheats[i].pair.is_some() || cheats[i].master {
             continue;
         }
-        let Some((base, off)) = onoff_split(&cheats[i].name) else { continue };
-        let j = (0..cheats.len()).find(|&j| j != i && !cheats[j].master && onoff_split(&cheats[j].name).is_some_and(|(b, o)| b.eq_ignore_ascii_case(&base) && o != off));
+        let Some((base, off)) = onoff_split(&cheats[i].name) else {
+            continue;
+        };
+        let j = (0..cheats.len()).find(|&j| {
+            j != i
+                && !cheats[j].master
+                && onoff_split(&cheats[j].name)
+                    .is_some_and(|(b, o)| b.eq_ignore_ascii_case(&base) && o != off)
+        });
         if let Some(j) = j {
             cheats[i].pair = Some(j);
             cheats[i].pair_off = off;
@@ -1208,7 +1457,9 @@ pub fn link_pairs(cheats: &mut [Cheat]) {
 /// Turns a cheat on or off: turning the on half of a pair off runs its off half once (the restore); the off half is
 /// never on by itself (turning it on or off acts on its partner). The reply line, or why not.
 pub fn toggle(cheats: &mut [Cheat], name: &str, on: bool) -> Result<String, String> {
-    let Some(mut i) = cheats.iter().position(|c| c.name == name && !c.master) else { return Err(format!("no cheat {name:?}\n")) };
+    let Some(mut i) = cheats.iter().position(|c| c.name == name && !c.master) else {
+        return Err(format!("no cheat {name:?}\n"));
+    };
     if cheats[i].pair_off {
         if let Some(j) = cheats[i].pair {
             i = j;
@@ -1227,17 +1478,32 @@ pub fn toggle(cheats: &mut [Cheat], name: &str, on: bool) -> Result<String, Stri
         cheats[j].restore_once = was && !on;
     }
     sync_code(&cheats[i]);
-    Ok(format!("{}: {}{}\n", cheats[i].name, if on { "on" } else { "off" }, if was && !on && cheats[i].pair.is_some() { " (its restore runs once)" } else { "" }))
+    Ok(format!(
+        "{}: {}{}\n",
+        cheats[i].name,
+        if on { "on" } else { "off" },
+        if was && !on && cheats[i].pair.is_some() {
+            " (its restore runs once)"
+        } else {
+            ""
+        }
+    ))
 }
 
 fn width_bits(w: u32) -> u64 {
-    if w >= 8 { u64::MAX } else { (1u64 << (8 * w)) - 1 }
+    if w >= 8 {
+        u64::MAX
+    } else {
+        (1u64 << (8 * w)) - 1
+    }
 }
 
 /// Sets an ask cheat's value from text in its type, within its bounds ("0x" hexadecimal, else decimal).
 pub fn value_set(c: &mut Cheat, text: &str) -> Result<(), String> {
     let w = type_width(&c.ty);
-    let Some((lo, hi)) = c.ask else { return Err("takes no value".into()) };
+    let Some((lo, hi)) = c.ask else {
+        return Err("takes no value".into());
+    };
     let t = text.trim();
     let int = |t: &str| -> Option<i128> {
         let (neg, d) = match t.strip_prefix('-') {
@@ -1253,7 +1519,14 @@ pub fn value_set(c: &mut Cheat, text: &str) -> Result<(), String> {
     let (raw, d): (u64, f64) = match c.ty.chars().next() {
         Some('f') => {
             let d: f64 = t.parse().map_err(|_| format!("not a number: {t}"))?;
-            (if w == 4 { (d as f32).to_bits() as u64 } else { d.to_bits() }, d)
+            (
+                if w == 4 {
+                    (d as f32).to_bits() as u64
+                } else {
+                    d.to_bits()
+                },
+                d,
+            )
         }
         Some('s') => {
             let v = int(t).ok_or(format!("not a number: {t}"))?;
@@ -1290,7 +1563,11 @@ pub fn value_set(c: &mut Cheat, text: &str) -> Result<(), String> {
 pub fn value_get(c: &Cheat) -> Option<String> {
     let w = type_width(&c.ty);
     c.ask?;
-    let raw = if w == 8 { (c.words[*c.vw.first()?] as u64) << 32 | c.words[*c.vw.get(1)?] as u64 } else { c.words[*c.vw.first()?] as u64 & width_bits(w) };
+    let raw = if w == 8 {
+        (c.words[*c.vw.first()?] as u64) << 32 | c.words[*c.vw.get(1)?] as u64
+    } else {
+        c.words[*c.vw.first()?] as u64 & width_bits(w)
+    };
     Some(match c.ty.chars().next() {
         Some('f') if w == 4 => format!("{}", f32::from_bits(raw as u32)),
         Some('f') => format!("{}", f64::from_bits(raw)),
@@ -1353,7 +1630,11 @@ mod tests {
     }
     impl Mem for Fake {
         fn base(&self, m: u32) -> u64 {
-            if m == 4 { 0 } else { self.base }
+            if m == 4 {
+                0
+            } else {
+                self.base
+            }
         }
         fn read(&mut self, a: u64, w: u32) -> Option<u64> {
             let mut v = 0u64;
@@ -1373,7 +1654,10 @@ mod tests {
         }
     }
     fn fake() -> Fake {
-        let mut m = Fake { mem: HashMap::new(), base: 0x1000_0000 };
+        let mut m = Fake {
+            mem: HashMap::new(),
+            base: 0x1000_0000,
+        };
         for a in 0..0x100 {
             m.mem.insert(0x1000_0000 + a, 0);
         }
@@ -1384,11 +1668,18 @@ mod tests {
     fn parse_entries() {
         let t = "{Master}\n580F0000 01234567\n[Infinite Money]\n04000000 00ABCDEF 0098967F\nby someone\n[Label only]\n[99 Lives][Glued]\n04000000 00000010 00000063\n";
         let c = parse(t);
-        assert_eq!(c.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(), vec!["Master", "Infinite Money", "Glued"]);
+        assert_eq!(
+            c.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
+            vec!["Master", "Infinite Money", "Glued"]
+        );
         assert!(c[0].master && c[0].enabled && !c[1].enabled);
         assert_eq!(c[1].words, vec![0x0400_0000, 0x00AB_CDEF, 0x0098_967F]);
         let bad = parse("[Pause]\nFF000000\n");
-        assert!(bad[0].broken.as_deref().unwrap().contains("unsupported opcode"));
+        assert!(bad[0]
+            .broken
+            .as_deref()
+            .unwrap()
+            .contains("unsupported opcode"));
     }
 
     /// Opcode by opcode, as the reference runs them.
@@ -1398,31 +1689,89 @@ mod tests {
         let mut vm = Vm::default();
         let mut failed = 0;
         // 0: store 4 bytes 0x63 at main + 0x10; 1: if [main+0x10] == 0x63 then store 2 bytes 7 at +0x20, else 9
-        let p = [0x0400_0000, 0x10, 0x63, 0x1405_0000, 0x10, 0x63, 0x0200_0000, 0x20, 7, 0x2100_0000, 0x0200_0000, 0x20, 9, 0x2000_0000];
+        let p = [
+            0x0400_0000,
+            0x10,
+            0x63,
+            0x1405_0000,
+            0x10,
+            0x63,
+            0x0200_0000,
+            0x20,
+            7,
+            0x2100_0000,
+            0x0200_0000,
+            0x20,
+            9,
+            0x2000_0000,
+        ];
         vm.run(&p, &mut m, &mut failed).unwrap();
-        assert_eq!((m.read(0x1000_0010, 4), m.read(0x1000_0020, 2)), (Some(0x63), Some(7)));
+        assert_eq!(
+            (m.read(0x1000_0010, 4), m.read(0x1000_0020, 2)),
+            (Some(0x63), Some(7))
+        );
         // 4 / 5 / 7 / 9 / A: r0 = r1 = main + 0x10; r1 = [r1] (5, from a register); r1 += 5 (7); r2 = r1 * 2 (9 immediate);
         // [r0 + 8] = r2 (A, offset type 2)
-        let p = [0x4000_0000, 0, 0x1000_0010, 0x4001_0000, 0, 0x1000_0010, 0x5401_1000, 0, 0x7401_0000, 5, 0x9422_1100, 2, 0xA420_0200, 8];
+        let p = [
+            0x4000_0000,
+            0,
+            0x1000_0010,
+            0x4001_0000,
+            0,
+            0x1000_0010,
+            0x5401_1000,
+            0,
+            0x7401_0000,
+            5,
+            0x9422_1100,
+            2,
+            0xA420_0200,
+            8,
+        ];
         let mut vm = Vm::default();
         vm.run(&p, &mut m, &mut failed).unwrap();
         assert_eq!(vm.reg[1], 0x68);
         assert_eq!(m.read(0x1000_0018, 4), Some(0xd0));
         // 3: a loop of 4 writing [r0] with 6 and post increment (I=1)
-        let p = [0x4000_0000, 0, 0x1000_0040, 0x3001_0000, 4, 0x6100_1000, 0, 0xAA, 0x3101_0000];
+        let p = [
+            0x4000_0000,
+            0,
+            0x1000_0040,
+            0x3001_0000,
+            4,
+            0x6100_1000,
+            0,
+            0xAA,
+            0x3101_0000,
+        ];
         let mut vm = Vm::default();
         vm.run(&p, &mut m, &mut failed).unwrap();
         assert_eq!(m.read(0x1000_0040, 4), Some(0xAAAA_AAAA));
         // 8 / C4: keys
         let p = [0x8000_0003, 0x0400_0000, 0x80, 1, 0x2000_0000];
-        let mut vm = Vm { held: 1, ..Default::default() };
+        let mut vm = Vm {
+            held: 1,
+            ..Default::default()
+        };
         vm.run(&p, &mut m, &mut failed).unwrap();
         assert_eq!(m.read(0x1000_0080, 4), Some(0), "A alone: A+B not held");
         vm.held = 3;
         vm.run(&p, &mut m, &mut failed).unwrap();
         assert_eq!(m.read(0x1000_0080, 4), Some(1));
         // C0 against a static value, C1 save / restore, C3 statics
-        let p = [0x4000_0000, 0, 5, 0xC042_0400, 5, 0x4001_0000, 0, 9, 0x2000_0000, 0xC101_0110, 0xC300_0801];
+        let p = [
+            0x4000_0000,
+            0,
+            5,
+            0xC042_0400,
+            5,
+            0x4001_0000,
+            0,
+            9,
+            0x2000_0000,
+            0xC101_0110,
+            0xC300_0801,
+        ];
         let mut vm = Vm::default();
         vm.run(&p, &mut m, &mut failed).unwrap();
         assert_eq!((vm.reg[1], vm.saved[1], vm.statics[0x80]), (9, 9, 9));
@@ -1433,12 +1782,20 @@ mod tests {
         vm.run(&p, &mut m, &mut f).unwrap();
         assert_eq!(f, 1);
         // float add (9, C = 10, T = 4)
-        let p = [0x4000_0000, 0, 1.5f32.to_bits(), 0x94A0_0100, 2.25f32.to_bits()];
+        let p = [
+            0x4000_0000,
+            0,
+            1.5f32.to_bits(),
+            0x94A0_0100,
+            2.25f32.to_bits(),
+        ];
         let mut vm = Vm::default();
         vm.run(&p, &mut m, &mut failed).unwrap();
         assert_eq!(f32::from_bits(vm.reg[0] as u32), 3.75);
         // an else at depth 0 turns the cheat off
-        assert!(Vm::default().run(&[0x2100_0000], &mut m, &mut failed).is_err());
+        assert!(Vm::default()
+            .run(&[0x2100_0000], &mut m, &mut failed)
+            .is_err());
     }
 
     /// <build>.meta.tsv as nxnative reads it: section / type / note, an ask value (bounds, value words, set and read
@@ -1468,15 +1825,27 @@ Lost one	unresolved									no anchor
         let un = meta_load(&mut c, meta);
         link_pairs(&mut c);
         assert_eq!(un, vec![("Lost one".to_string(), "no anchor".to_string())]);
-        assert_eq!((c[0].section.as_str(), c[0].ty.as_str(), c[0].note.as_str()), ("Items", "u32", "strong; the purse"));
-        assert_eq!((c[0].ask, c[0].vw.clone()), (Some((Some(0.0), Some(9999.0))), vec![2]));
+        assert_eq!(
+            (c[0].section.as_str(), c[0].ty.as_str(), c[0].note.as_str()),
+            ("Items", "u32", "strong; the purse")
+        );
+        assert_eq!(
+            (c[0].ask, c[0].vw.clone()),
+            (Some((Some(0.0), Some(9999.0))), vec![2])
+        );
         assert_eq!(value_get(&c[0]).as_deref(), Some("5"));
         assert!(value_set(&mut c[0], "10000").is_err() && value_set(&mut c[0], "-1").is_err());
-        values_load(&mut c, "Coins	0x4D2
-");
+        values_load(
+            &mut c,
+            "Coins	0x4D2
+",
+        );
         assert_eq!(c[0].words[2], 1234);
         assert!(c[1].once);
-        assert_eq!((c[2].pair, c[2].pair_off, c[3].pair, c[3].pair_off), (Some(3), false, Some(2), true));
+        assert_eq!(
+            (c[2].pair, c[2].pair_off, c[3].pair, c[3].pair_off),
+            (Some(3), false, Some(2), true)
+        );
         let nd = c.iter().position(|x| x.name == "Score floor").unwrap();
         assert_eq!(c[nd].nd, Some((0, 0x20)));
 
@@ -1484,12 +1853,17 @@ Lost one	unresolved									no anchor
         let mut vm = Vm::default();
         let rd = |m: &mut Fake, o: u64| m.read(0x1000_0000 + o, 4).unwrap();
         c[1].enabled = true;
-        assert!(vm.pass(&mut c, &mut m, 0), "a one-pass cheat turned itself off");
+        assert!(
+            vm.pass(&mut c, &mut m, 0),
+            "a one-pass cheat turned itself off"
+        );
         assert_eq!((rd(&mut m, 0x14), c[1].enabled), (7, false));
         toggle(&mut c, "Infinite HP - on", true).unwrap();
         vm.pass(&mut c, &mut m, 0);
         assert_eq!(rd(&mut m, 0x18), 999);
-        assert!(toggle(&mut c, "Infinite HP - on", false).unwrap().contains("restore"));
+        assert!(toggle(&mut c, "Infinite HP - on", false)
+            .unwrap()
+            .contains("restore"));
         assert!(vm.pass(&mut c, &mut m, 0));
         assert_eq!(rd(&mut m, 0x18), 100, "the restore ran");
         m.write(0x1000_0018, 4, 5);
@@ -1506,7 +1880,10 @@ Lost one	unresolved									no anchor
         m.write(0x1000_0020, 4, 79);
         vm.pass(&mut c, &mut m, 0);
         assert_eq!(rd(&mut m, 0x20), 80);
-        assert_eq!(onoff_split("God mode (off)"), Some(("God mode".to_string(), true)));
+        assert_eq!(
+            onoff_split("God mode (off)"),
+            Some(("God mode".to_string(), true))
+        );
         assert_eq!(onoff_split("Wagon"), None);
     }
 
@@ -1525,10 +1902,19 @@ Lost one	unresolved									no anchor
 04000000 00009000 00000001
 ";
         let mut c = parse(txt);
-        let envs: Vec<std::ffi::CString> = c[..2].iter().map(|x| std::ffi::CString::new(x.env.clone()).unwrap()).collect();
+        let envs: Vec<std::ffi::CString> = c[..2]
+            .iter()
+            .map(|x| std::ffi::CString::new(x.env.clone()).unwrap())
+            .collect();
         let names: Vec<*const std::ffi::c_char> = envs.iter().map(|e| e.as_ptr()).collect();
         static mut ON: [u8; 2] = [0, 0];
-        unsafe { nxrt::patchset::nxrt_patch_table(std::ptr::addr_of_mut!(ON) as *mut u8, names.as_ptr(), 2) };
+        unsafe {
+            nxrt::patchset::nxrt_patch_table(
+                std::ptr::addr_of_mut!(ON) as *mut u8,
+                names.as_ptr(),
+                2,
+            )
+        };
         bind_code(&mut c, (0x8000, nxrt::patchset::has));
         assert!(c[0].code && c[0].code_only && c[1].code && !c[2].code && !c[3].code);
         assert_eq!(unsafe { ON }, [0, 1], "off by default, the master on");
@@ -1540,7 +1926,11 @@ Lost one	unresolved									no anchor
             m.mem.insert(0x1000_1000 + a, 0xAA);
         }
         Vm::default().pass(&mut c, &mut m, 0);
-        assert_eq!(m.read(0x1000_1000, 4), Some(0xAAAA_AAAA), "the VM leaves a compiled-in cheat to its set");
+        assert_eq!(
+            m.read(0x1000_1000, 4),
+            Some(0xAAAA_AAAA),
+            "the VM leaves a compiled-in cheat to its set"
+        );
         toggle(&mut c, "No damage", false).unwrap();
         assert_eq!(nxrt::patchset::get(&c[0].env), Some(false));
     }
@@ -1552,27 +1942,73 @@ Lost one	unresolved									no anchor
     fn cheat_panel() {
         let txt = "[Coins]\n04000000 00000010 00000005\n[HP - on]\n04000000 00000018 000003E7\n[HP - off]\n04000000 00000018 00000064\n{Always}\n04000000 00000020 00000001\n";
         let mut c = parse(txt);
-        meta_load(&mut c, "name\ttype\task\tvalue_words\nCoins\tu32\t0..6\t2\n");
+        meta_load(
+            &mut c,
+            "name\ttype\task\tvalue_words\nCoins\tu32\t0..6\t2\n",
+        );
         link_pairs(&mut c);
         let rows = panel_rows(&c);
         assert_eq!(rows, vec![0, 1, 3], "the restore half is not a row");
         let mut p = CheatPanel::open([true, false, false, false, false, false]);
-        assert_eq!(p.step(3, [true, false, false, false, false, false], false, false, 0, 0), PanelAct::None, "A held as it opened");
+        assert_eq!(
+            p.step(
+                3,
+                [true, false, false, false, false, false],
+                false,
+                false,
+                0,
+                0
+            ),
+            PanelAct::None,
+            "A held as it opened"
+        );
         assert_eq!(p.step(3, [false; 6], false, false, -1, 0), PanelAct::None);
         assert_eq!(p.cursor, 2, "wraps up");
-        p.step(3, [false, false, false, true, false, false], false, false, 0, 0);
+        p.step(
+            3,
+            [false, false, false, true, false, false],
+            false,
+            false,
+            0,
+            0,
+        );
         assert_eq!(p.cursor, 0);
-        assert_eq!(p.step(3, [false; 6], false, false, 0, 1), PanelAct::Step(0, 1));
+        assert_eq!(
+            p.step(3, [false; 6], false, false, 0, 1),
+            PanelAct::Step(0, 1)
+        );
         assert!(value_step(&mut c[0], 1).is_ok());
         assert_eq!(value_get(&c[0]).as_deref(), Some("6"));
         assert!(value_step(&mut c[0], 1).is_err(), "bounded");
         p.step(3, [false; 6], false, false, 1, 0);
-        assert_eq!(p.step(3, [false; 6], true, false, 0, 0), PanelAct::Toggle(1));
+        assert_eq!(
+            p.step(3, [false; 6], true, false, 0, 0),
+            PanelAct::Toggle(1)
+        );
         let name = c[rows[1]].name.clone();
         toggle(&mut c, &name, true).unwrap();
         let t = panel_text(&c, &rows, p.cursor);
-        assert!(t.contains("\u{25b6} HP - on  [ON]") && t.contains("Coins  [off]   < 6 >") && t.contains("Always  [always]"), "{t}");
-        assert_eq!(p.step(3, [false, true, false, false, false, false], false, false, 0, 0), PanelAct::Close);
-        assert_eq!(CheatPanel::open([false; 6]).step(0, [false; 6], false, true, 0, 0), PanelAct::Close, "Escape");
+        assert!(
+            t.contains("\u{25b6} HP - on  [ON]")
+                && t.contains("Coins  [off]   < 6 >")
+                && t.contains("Always  [always]"),
+            "{t}"
+        );
+        assert_eq!(
+            p.step(
+                3,
+                [false, true, false, false, false, false],
+                false,
+                false,
+                0,
+                0
+            ),
+            PanelAct::Close
+        );
+        assert_eq!(
+            CheatPanel::open([false; 6]).step(0, [false; 6], false, true, 0, 0),
+            PanelAct::Close,
+            "Escape"
+        );
     }
 }

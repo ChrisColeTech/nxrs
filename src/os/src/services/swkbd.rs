@@ -33,15 +33,28 @@ fn u16s(a: u64, max: usize) -> String {
 
 /// The text the player gives (or the default, with no window); None = cancelled.
 pub fn ask(title: &str, default: &str, max: usize) -> Option<String> {
-    let auto = !nxconfig::flag("keyboard_box") || std::env::var("NXOS_SWKBD").is_ok_and(|v| v == "auto") || std::env::var("NXGFX_HEADLESS").is_ok();
+    let auto = !nxconfig::flag("keyboard_box")
+        || std::env::var("NXOS_SWKBD").is_ok_and(|v| v == "auto")
+        || std::env::var("NXGFX_HEADLESS").is_ok();
     crate::services::oe::applet_enter("swkbd");
-    let r = if auto { Some(default.to_string()) } else { without_core(|| window::input(title, default, max)) };
+    let r = if auto {
+        Some(default.to_string())
+    } else {
+        without_core(|| window::input(title, default, max))
+    };
     crate::services::oe::applet_leave();
-    let r = r.map(|t| t.chars().take(if max > 0 { max } else { 500 }).collect::<String>());
-    crate::log!("swkbd: \"{title}\" -> {}", match &r {
-        Some(t) => format!("OK '{t}'"),
-        None => "cancelled".into(),
+    let r = r.map(|t| {
+        t.chars()
+            .take(if max > 0 { max } else { 500 })
+            .collect::<String>()
     });
+    crate::log!(
+        "swkbd: \"{title}\" -> {}",
+        match &r {
+            Some(t) => format!("OK '{t}'"),
+            None => "cancelled".into(),
+        }
+    );
     r
 }
 
@@ -62,9 +75,20 @@ unsafe fn show(c: *mut Cpu) {
     let max = r32(arg + ARG_MAXLEN) as usize;
     let utf8 = r8(arg + ARG_UTF8) != 0;
     let work = r64(arg + ARG_WORKBUF);
-    let (off, len) = (r32(arg + ARG_INIT_OFF) as u64, r32(arg + ARG_INIT_LEN) as usize);
-    let init = if work != 0 && len > 0 { u16s(work + off, len.min(500)) } else { String::new() };
-    let def = if init.is_empty() { default_text() } else { init };
+    let (off, len) = (
+        r32(arg + ARG_INIT_OFF) as u64,
+        r32(arg + ARG_INIT_LEN) as usize,
+    );
+    let init = if work != 0 && len > 0 {
+        u16s(work + off, len.min(500))
+    } else {
+        String::new()
+    };
+    let def = if init.is_empty() {
+        default_text()
+    } else {
+        init
+    };
     let Some(text) = ask(&title, &def, max) else {
         (*c).x[0] = CANCELED;
         return;
@@ -75,7 +99,10 @@ unsafe fn show(c: *mut Cpu) {
         if utf8 {
             crate::guest::put_cstr(buf, cap, &text);
         } else {
-            let u: Vec<u16> = text.encode_utf16().take((cap as usize / 2).saturating_sub(1)).collect();
+            let u: Vec<u16> = text
+                .encode_utf16()
+                .take((cap as usize / 2).saturating_sub(1))
+                .collect();
             for (i, ch) in u.iter().enumerate() {
                 crate::guest::w16(buf + 2 * i as u64, *ch);
             }
@@ -112,7 +139,10 @@ fn with_ikb<R>(kb: u64, f: impl FnOnce(&mut Ikb) -> R) -> R {
     let i = match g.iter().position(|k| k.kb == kb) {
         Some(i) => i,
         None => {
-            g.push(Ikb { kb, ..Default::default() });
+            g.push(Ikb {
+                kb,
+                ..Default::default()
+            });
             g.len() - 1
         }
     };
@@ -133,7 +163,10 @@ macro_rules! kfn {
 
 kfn!(ikb_init, |a| {
     with_ikb(a.x(0), |k| k.fin_init_due = true);
-    crate::log!("swkbd: inline keyboard {:#x} initialized (Appear asks for the text as ShowKeyboard does)", a.x(0));
+    crate::log!(
+        "swkbd: inline keyboard {:#x} initialized (Appear asks for the text as ShowKeyboard does)",
+        a.x(0)
+    );
     1
 });
 kfn!(ikb_fin, |a| {
@@ -169,11 +202,19 @@ kfn!(ikb_unset_words, |a| {
     0
 });
 kfn!(ikb_appear, |a| {
-    let max = if a.x(1) != 0 { r32(a.x(1) + 0x20) as i32 } else { 0 };
+    let max = if a.x(1) != 0 {
+        r32(a.x(1) + 0x20) as i32
+    } else {
+        0
+    };
     with_ikb(a.x(0), |k| {
         k.pending = true;
         k.state = 3;
-        k.max = if max > 0 && max <= 500 { max as usize } else { 0 };
+        k.max = if max > 0 && max <= 500 {
+            max as usize
+        } else {
+            0
+        };
     });
     0
 });
@@ -253,7 +294,11 @@ unsafe fn ikb_calc(c: *mut Cpu) {
         (*c).x[0] = with_ikb(kb, |k| k.state);
         return;
     }
-    let text = if k.enter != 0 { ask("", &default_text(), k.max) } else { None };
+    let text = if k.enter != 0 {
+        ask("", &default_text(), k.max)
+    } else {
+        None
+    };
     with_ikb(kb, |k| k.state = 1);
     let Some(text) = text else {
         call0(k.cancel);
@@ -264,7 +309,10 @@ unsafe fn ikb_calc(c: *mut Cpu) {
     static ARG: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     let arg = *ARG.get_or_init(|| nxrt::kernel::get().space.kernel_alloc(0x400, 16));
     crate::guest::zero(arg, 0x400);
-    let u: Vec<u16> = text.encode_utf16().take(if k.max > 0 { k.max } else { 500 }).collect();
+    let u: Vec<u16> = text
+        .encode_utf16()
+        .take(if k.max > 0 { k.max } else { 500 })
+        .collect();
     for (i, ch) in u.iter().enumerate() {
         crate::guest::w16(arg + 2 * i as u64, *ch);
     }
@@ -283,8 +331,16 @@ unsafe fn ikb_calc(c: *mut Cpu) {
 #[cfg(target_os = "linux")]
 mod window {
     pub fn input(title: &str, default: &str, max: usize) -> Option<String> {
-        let prompt = if max > 0 { format!("Up to {max} characters (Enter: OK, Esc: keep the default)") } else { "Enter: OK, Esc: keep the default".to_string() };
-        let title = if title.trim().is_empty() { "Enter text" } else { title };
+        let prompt = if max > 0 {
+            format!("Up to {max} characters (Enter: OK, Esc: keep the default)")
+        } else {
+            "Enter: OK, Esc: keep the default".to_string()
+        };
+        let title = if title.trim().is_empty() {
+            "Enter text"
+        } else {
+            title
+        };
         match crate::desk::entry(title, &prompt, default) {
             Ok(Some(t)) => Some(t),
             Ok(None) => Some(default.to_string()),
@@ -324,7 +380,9 @@ mod window {
 
     unsafe extern "system" fn proc_(h: HWND, m: u32, wp: WPARAM, lp: LPARAM) -> LRESULT {
         #[allow(static_mut_refs)]
-        let Some(kb) = KB.as_mut() else { return DefWindowProcW(h, m, wp, lp) };
+        let Some(kb) = KB.as_mut() else {
+            return DefWindowProcW(h, m, wp, lp);
+        };
         match m {
             WM_CHAR => {
                 let ch = wp as u16;
@@ -367,25 +425,61 @@ mod window {
                 let small = CreateFontW(22, 0, 0, 0, 400, 0, 0, 0, 0, 0, 0, 5, 0, face.as_ptr());
                 let old = SelectObject(dc, small as _);
                 SetTextColor(dc, 0x00e1_c800);
-                let mut r1 = RECT { left: 28, top: 18, right: rc.right - 28, bottom: 60 };
-                let t = if kb.title.len() > 1 { kb.title.clone() } else { w("Enter text") };
-                DrawTextW(dc, t.as_ptr(), -1, &mut r1, DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS);
-                let field = RECT { left: 24, top: 70, right: rc.right - 24, bottom: 140 };
+                let mut r1 = RECT {
+                    left: 28,
+                    top: 18,
+                    right: rc.right - 28,
+                    bottom: 60,
+                };
+                let t = if kb.title.len() > 1 {
+                    kb.title.clone()
+                } else {
+                    w("Enter text")
+                };
+                DrawTextW(
+                    dc,
+                    t.as_ptr(),
+                    -1,
+                    &mut r1,
+                    DT_LEFT | DT_SINGLELINE | DT_END_ELLIPSIS,
+                );
+                let field = RECT {
+                    left: 24,
+                    top: 70,
+                    right: rc.right - 24,
+                    bottom: 140,
+                };
                 let fb = CreateSolidBrush(if kb.all { 0x0050_3c14 } else { 0x0034_302c });
                 FillRect(dc, &field, fb);
                 DeleteObject(fb as _);
                 SelectObject(dc, big as _);
                 SetTextColor(dc, 0x00ff_ffff);
-                let mut r2 = RECT { left: 40, top: 70, right: rc.right - 40, bottom: 140 };
+                let mut r2 = RECT {
+                    left: 40,
+                    top: 70,
+                    right: rc.right - 40,
+                    bottom: 140,
+                };
                 let mut shown = kb.text.clone();
                 if !kb.all {
                     shown.push('|' as u16);
                 }
                 shown.push(0);
-                DrawTextW(dc, shown.as_ptr(), -1, &mut r2, DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS);
+                DrawTextW(
+                    dc,
+                    shown.as_ptr(),
+                    -1,
+                    &mut r2,
+                    DT_LEFT | DT_SINGLELINE | DT_VCENTER | DT_END_ELLIPSIS,
+                );
                 SelectObject(dc, small as _);
                 SetTextColor(dc, 0x00a0_a0a0);
-                let mut r3 = RECT { left: 28, top: 160, right: rc.right - 28, bottom: 200 };
+                let mut r3 = RECT {
+                    left: 28,
+                    top: 160,
+                    right: rc.right - 28,
+                    bottom: 200,
+                };
                 let hint = w("Type with your keyboard.   Enter = OK   Esc = keep the text shown");
                 DrawTextW(dc, hint.as_ptr(), -1, &mut r3, DT_LEFT | DT_SINGLELINE);
                 SelectObject(dc, old);
@@ -407,20 +501,58 @@ mod window {
         let (title, default) = (title.to_string(), default.to_string());
         std::thread::spawn(move || unsafe {
             let mut n = 0u32;
-            AddFontMemResourceEx(FONT.as_ptr() as _, FONT.len() as u32, std::ptr::null(), &mut n);
-            KB = Some(Kb { title: w(&title), text: default.encode_utf16().collect(), all: true, max, done: None });
+            AddFontMemResourceEx(
+                FONT.as_ptr() as _,
+                FONT.len() as u32,
+                std::ptr::null(),
+                &mut n,
+            );
+            KB = Some(Kb {
+                title: w(&title),
+                text: default.encode_utf16().collect(),
+                all: true,
+                max,
+                done: None,
+            });
             let cls = w("nxos keyboard");
             let hi = GetModuleHandleW(std::ptr::null());
-            let wc = WNDCLASSW { lpfnWndProc: Some(proc_), hInstance: hi, lpszClassName: cls.as_ptr(), hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW), ..std::mem::zeroed() };
+            let wc = WNDCLASSW {
+                lpfnWndProc: Some(proc_),
+                hInstance: hi,
+                lpszClassName: cls.as_ptr(),
+                hCursor: LoadCursorW(std::ptr::null_mut(), IDC_ARROW),
+                ..std::mem::zeroed()
+            };
             RegisterClassW(&wc);
             let owner = GetForegroundWindow();
             let mut orc: RECT = std::mem::zeroed();
             if owner.is_null() || GetWindowRect(owner, &mut orc) == 0 {
-                orc = RECT { left: 0, top: 0, right: GetSystemMetrics(SM_CXSCREEN), bottom: GetSystemMetrics(SM_CYSCREEN) };
+                orc = RECT {
+                    left: 0,
+                    top: 0,
+                    right: GetSystemMetrics(SM_CXSCREEN),
+                    bottom: GetSystemMetrics(SM_CYSCREEN),
+                };
             }
             let (ww, wh) = (680, 220);
-            let (x, y) = ((orc.left + orc.right - ww) / 2, (orc.top + orc.bottom - wh) / 2);
-            let hw = CreateWindowExW(WS_EX_TOPMOST | WS_EX_TOOLWINDOW, cls.as_ptr(), cls.as_ptr(), WS_POPUP | WS_VISIBLE | WS_BORDER, x, y, ww, wh, owner, std::ptr::null_mut(), hi, std::ptr::null());
+            let (x, y) = (
+                (orc.left + orc.right - ww) / 2,
+                (orc.top + orc.bottom - wh) / 2,
+            );
+            let hw = CreateWindowExW(
+                WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+                cls.as_ptr(),
+                cls.as_ptr(),
+                WS_POPUP | WS_VISIBLE | WS_BORDER,
+                x,
+                y,
+                ww,
+                wh,
+                owner,
+                std::ptr::null_mut(),
+                hi,
+                std::ptr::null(),
+            );
             if hw.is_null() {
                 let _ = tx.send(Some(default.clone()));
                 return;
@@ -429,7 +561,9 @@ mod window {
             SetFocus(hw);
             let mut msg: MSG = std::mem::zeroed();
             #[allow(static_mut_refs)]
-            while KB.as_ref().is_some_and(|k| k.done.is_none()) && GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {
+            while KB.as_ref().is_some_and(|k| k.done.is_none())
+                && GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0
+            {
                 TranslateMessage(&msg);
                 DispatchMessageW(&msg);
             }
@@ -439,7 +573,11 @@ mod window {
             if !owner.is_null() {
                 SetForegroundWindow(owner);
             }
-            let r = if k.done == Some(true) { String::from_utf16_lossy(&k.text) } else { default.clone() };
+            let r = if k.done == Some(true) {
+                String::from_utf16_lossy(&k.text)
+            } else {
+                default.clone()
+            };
             let _ = tx.send(Some(r));
         });
         rx.recv().ok().flatten()
@@ -450,19 +588,46 @@ pub fn register(r: &mut Registry) {
     const W: &str = "swkbd: a text box over the game window (keyboard_text by default)";
     let k = "_ZN2nn5swkbd14InlineKeyboard";
     for (n, f) in [
-        ("_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE".to_string(), show as unsafe fn(*mut Cpu)),
+        (
+            "_ZN2nn5swkbd12ShowKeyboardEPNS0_6StringERKNS0_15ShowKeyboardArgE".to_string(),
+            show as unsafe fn(*mut Cpu),
+        ),
         (format!("{k}10InitializeEPv"), ikb_init),
         (format!("{k}8FinalizeEv"), ikb_fin),
         (format!("{k}D1Ev"), ikb_fin),
-        (format!("{k}24SetDecidedCancelCallbackEPFvvE"), ikb_set_cancel),
-        (format!("{k}23SetDecidedEnterCallbackEPFvPKNS0_15DecidedEnterArgEE"), ikb_set_enter),
-        (format!("{k}24SetChangedStringCallbackEPFvPKNS0_16ChangedStringArgEE"), ikb_set_changed),
-        (format!("{k}27SetFinishedKeyboardCallbackEPFvvE"), ikb_set_finished),
-        (format!("{k}29SetFinishedInitializeCallbackEPFvvE"), ikb_set_fin_init),
-        (format!("{k}31SetReleasedUserWordInfoCallbackEPFvvE"), ikb_set_released),
+        (
+            format!("{k}24SetDecidedCancelCallbackEPFvvE"),
+            ikb_set_cancel,
+        ),
+        (
+            format!("{k}23SetDecidedEnterCallbackEPFvPKNS0_15DecidedEnterArgEE"),
+            ikb_set_enter,
+        ),
+        (
+            format!("{k}24SetChangedStringCallbackEPFvPKNS0_16ChangedStringArgEE"),
+            ikb_set_changed,
+        ),
+        (
+            format!("{k}27SetFinishedKeyboardCallbackEPFvvE"),
+            ikb_set_finished,
+        ),
+        (
+            format!("{k}29SetFinishedInitializeCallbackEPFvvE"),
+            ikb_set_fin_init,
+        ),
+        (
+            format!("{k}31SetReleasedUserWordInfoCallbackEPFvvE"),
+            ikb_set_released,
+        ),
         (format!("{k}17UnsetUserWordInfoEv"), ikb_unset_words),
-        (format!("{k}15SetUserWordInfoERKNS0_12UserWordInfoE"), ikb_ok),
-        (format!("{k}25SetCustomizedDictionariesERKNS0_23CustomizedDictionarySetE"), ikb_ok),
+        (
+            format!("{k}15SetUserWordInfoERKNS0_12UserWordInfoE"),
+            ikb_ok,
+        ),
+        (
+            format!("{k}25SetCustomizedDictionariesERKNS0_23CustomizedDictionarySetE"),
+            ikb_ok,
+        ),
         (format!("{k}27UnsetCustomizedDictionariesEv"), ikb_ok),
         (format!("{k}6AppearERKNS0_9AppearArgE"), ikb_appear),
         (format!("{k}9DisappearEv"), ikb_disappear),
@@ -471,8 +636,14 @@ pub fn register(r: &mut Registry) {
         (format!("{k}12GetMaxHeightEv"), ikb_height),
         (format!("{k}12SetInputTextERKNS0_9InputTextE"), ikb_ok),
         (format!("{k}12SetCursorPosEi"), ikb_ok),
-        (format!("{k}22SetMovedCursorCallbackEPFvPKNS0_14MovedCursorArgEE"), ikb_set_moved),
-        (format!("{k}13SetWindowModeENS1_10WindowModeE"), ikb_appearance),
+        (
+            format!("{k}22SetMovedCursorCallbackEPFvPKNS0_14MovedCursorArgEE"),
+            ikb_set_moved,
+        ),
+        (
+            format!("{k}13SetWindowModeENS1_10WindowModeE"),
+            ikb_appearance,
+        ),
         (format!("{k}14SetFooterAlphaEf"), ikb_appearance),
         (format!("{k}14SetKeytopAlphaEf"), ikb_appearance),
         (format!("{k}14SetKeytopScaleEf"), ikb_appearance),
@@ -480,7 +651,10 @@ pub fn register(r: &mut Registry) {
         (format!("{k}15SetTouchEnabledEb"), ikb_appearance),
         (format!("{k}26SetHardwareKeyboardEnabledEb"), ikb_appearance),
         (format!("{k}8GetImageEPvm"), ikb_image),
-        ("_ZNK2nn5swkbd14InlineKeyboard13GetWindowSizeEPiS2_".to_string(), ikb_window_size),
+        (
+            "_ZNK2nn5swkbd14InlineKeyboard13GetWindowSizeEPiS2_".to_string(),
+            ikb_window_size,
+        ),
     ] {
         r.force(&n, W, f);
     }
@@ -533,7 +707,10 @@ mod ikb_tests {
         c.x[0] = kb;
         unsafe { super::ikb_appearance(&mut *c) };
         assert_eq!(super::with_ikb(kb, |k| (k.state, k.pending)), before);
-        super::super::swkbd::IKB.lock().unwrap().retain(|k| k.kb != kb);
+        super::super::swkbd::IKB
+            .lock()
+            .unwrap()
+            .retain(|k| k.kb != kb);
     }
 }
 
@@ -568,11 +745,20 @@ mod tests {
     #[ignore]
     fn win32_text_box_answers_what_was_typed() {
         type_into(&[b'A' as u16, b'x' as u16, 0x08, b'b' as u16, 0x0d]);
-        assert_eq!(super::window::input("Your name", "Player", 10).as_deref(), Some("Ab"));
+        assert_eq!(
+            super::window::input("Your name", "Player", 10).as_deref(),
+            Some("Ab")
+        );
         type_into(&[b'Z' as u16, 0x1b]);
-        assert_eq!(super::window::input("Your name", "Player", 10).as_deref(), Some("Player"));
+        assert_eq!(
+            super::window::input("Your name", "Player", 10).as_deref(),
+            Some("Player")
+        );
         // the length limit
         type_into(&[b'1' as u16, b'2' as u16, b'3' as u16, 0x0d]);
-        assert_eq!(super::window::input("Your name", "", 2).as_deref(), Some("12"));
+        assert_eq!(
+            super::window::input("Your name", "", 2).as_deref(),
+            Some("12")
+        );
     }
 }

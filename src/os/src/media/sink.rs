@@ -55,7 +55,7 @@ struct St {
     appended: u64,                 // frames appended so far
     paced: u64,                    // the release clock: frames due by now (never past `appended`)
     clock0: Option<(Instant, u64)>, // the release clock's start (time, `paced` then); None while it waits for frames
-    high: f64,     // the queue's high-water mark, decaying (the slowdown's reserve)
+    high: f64, // the queue's high-water mark, decaying (the slowdown's reserve)
     primed: bool,
     waiting: u32,
     phase: f64,
@@ -172,7 +172,11 @@ impl Stream {
             st.started = false;
         }
         self.cv.notify_all();
-        sink().streams.lock().unwrap().retain(|s| !Arc::ptr_eq(s, self));
+        sink()
+            .streams
+            .lock()
+            .unwrap()
+            .retain(|s| !Arc::ptr_eq(s, self));
         let st = self.st.lock().unwrap();
         if st.played > 0 {
             crate::log!("{}", stats_line(&self.name, &st));
@@ -218,7 +222,10 @@ impl Stream {
         }
         let next = peek(st);
         let p = st.phase as f32;
-        let s = [st.prev[0] + (next[0] - st.prev[0]) * p, st.prev[1] + (next[1] - st.prev[1]) * p];
+        let s = [
+            st.prev[0] + (next[0] - st.prev[0]) * p,
+            st.prev[1] + (next[1] - st.prev[1]) * p,
+        ];
         out[0] += s[0];
         out[1] += s[1];
         if s[0] != 0.0 || s[1] != 0.0 {
@@ -258,12 +265,14 @@ fn peek(st: &St) -> [f32; 2] {
 
 /// Advances one frame; true when a block was finished (and released).
 fn take(st: &mut St) -> bool {
-    let Some(b) = st.blocks.front_mut() else { return false };
+    let Some(b) = st.blocks.front_mut() else {
+        return false;
+    };
     st.cur = [b.pcm[b.at * 2], b.pcm[b.at * 2 + 1]];
     b.at += 1;
     st.queued -= 1;
     if b.at * 2 >= b.pcm.len() {
-            st.blocks.pop_front();
+        st.blocks.pop_front();
     }
     false
 }
@@ -333,7 +342,11 @@ pub fn open(name: &str) -> Arc<Stream> {
     start();
     let s = Arc::new(Stream {
         name: name.to_string(),
-        st: Mutex::new(St { rate: 1.0, env: 1.0, ..Default::default() }),
+        st: Mutex::new(St {
+            rate: 1.0,
+            env: 1.0,
+            ..Default::default()
+        }),
         cv: Condvar::new(),
         hook: Mutex::new(None),
     });
@@ -354,7 +367,8 @@ pub fn set_smooth(on: bool) {
 /// The output's line for the log: the device and each open stream.
 pub fn report() -> Vec<String> {
     let s = sink();
-    let mut v = vec![format!(
+    let mut v =
+        vec![format!(
         "audio: output {} ({} callbacks, {:.1} s of output, limiter engaged {} times, slowdown {})",
         s.device.lock().unwrap(),
         s.callbacks.load(Ordering::Relaxed),
@@ -388,7 +402,12 @@ impl Timeline {
     const CAP: u64 = RATE as u64 * 4; // a block further ahead is cut
 
     pub fn new(now: u64) -> Timeline {
-        Timeline { base: now, buf: VecDeque::new(), next: Default::default(), gain: 1.0 }
+        Timeline {
+            base: now,
+            buf: VecDeque::new(),
+            next: Default::default(),
+            gain: 1.0,
+        }
     }
 
     /// Where a block of `frames` that arrives at `now` starts, for a stream that ended at `next`.
@@ -480,7 +499,14 @@ static MUTED: AtomicBool = AtomicBool::new(false);
 /// Silences the device (true) or lets the sound through again; the streams play on either way.
 pub fn set_muted(on: bool) {
     if MUTED.swap(on, Ordering::Relaxed) != on {
-        crate::log!("audio: {}", if on { "muted (the window lost the focus: mute_on_focus_loss)" } else { "unmuted" });
+        crate::log!(
+            "audio: {}",
+            if on {
+                "muted (the window lost the focus: mute_on_focus_loss)"
+            } else {
+                "unmuted"
+            }
+        );
     }
 }
 
@@ -518,7 +544,10 @@ impl Meter {
         if self.n < 5 * RATE as u64 {
             return None;
         }
-        let (l, r) = ((self.sq[0] / self.n as f64).sqrt(), (self.sq[1] / self.n as f64).sqrt());
+        let (l, r) = (
+            (self.sq[0] / self.n as f64).sqrt(),
+            (self.sq[1] / self.n as f64).sqrt(),
+        );
         let db = |x: f64| if x > 0.0 { 20.0 * x.log10() } else { -200.0 };
         let quiet = l < 1e-5 && r < 1e-5;
         let say = if quiet {
@@ -528,7 +557,15 @@ impl Meter {
             self.silent = 0;
             self.lines < 60 || self.lines % 12 == 0
         };
-        let line = say.then(|| format!("audio: output, last {:.0} s: RMS {l:.5} / {r:.5} ({:.1} / {:.1} dBFS), peak {:.4}", self.n as f64 / RATE as f64, db(l), db(r), self.peak));
+        let line = say.then(|| {
+            format!(
+                "audio: output, last {:.0} s: RMS {l:.5} / {r:.5} ({:.1} / {:.1} dBFS), peak {:.4}",
+                self.n as f64 / RATE as f64,
+                db(l),
+                db(r),
+                self.peak
+            )
+        });
         self.lines += 1;
         (self.sq, self.peak, self.n) = ([0.0; 2], 0.0, 0);
         line
@@ -544,7 +581,10 @@ pub struct Wav {
 
 impl Wav {
     pub fn create(path: &std::path::Path) -> std::io::Result<Wav> {
-        let mut w = Wav { f: std::fs::File::create(path)?, data: 0 };
+        let mut w = Wav {
+            f: std::fs::File::create(path)?,
+            data: 0,
+        };
         w.header()?;
         Ok(w)
     }
@@ -572,7 +612,10 @@ impl Wav {
     /// Appends stereo samples (full scale = 1).
     pub fn write(&mut self, pcm: &[f32]) -> std::io::Result<()> {
         use std::io::Write;
-        let b: Vec<u8> = pcm.iter().flat_map(|&x| ((x.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes()).collect();
+        let b: Vec<u8> = pcm
+            .iter()
+            .flat_map(|&x| ((x.clamp(-1.0, 1.0) * 32767.0).round() as i16).to_le_bytes())
+            .collect();
         self.f.write_all(&b)?;
         self.data += b.len() as u64;
         self.header()
@@ -583,7 +626,9 @@ impl Wav {
 fn dump_tx() -> Option<&'static Mutex<mpsc::Sender<Vec<f32>>>> {
     static TX: OnceLock<Option<Mutex<mpsc::Sender<Vec<f32>>>>> = OnceLock::new();
     TX.get_or_init(|| {
-        let path = std::path::PathBuf::from(std::env::var_os("NXOS_AUDIO_DUMP").filter(|p| !p.is_empty())?);
+        let path = std::path::PathBuf::from(
+            std::env::var_os("NXOS_AUDIO_DUMP").filter(|p| !p.is_empty())?,
+        );
         let mut w = match Wav::create(&path) {
             Ok(w) => w,
             Err(e) => {
@@ -591,7 +636,10 @@ fn dump_tx() -> Option<&'static Mutex<mpsc::Sender<Vec<f32>>>> {
                 return None;
             }
         };
-        crate::log!("audio: the mix is written to {} as it goes out (NXOS_AUDIO_DUMP)", path.display());
+        crate::log!(
+            "audio: the mix is written to {} as it goes out (NXOS_AUDIO_DUMP)",
+            path.display()
+        );
         let (tx, rx) = mpsc::channel::<Vec<f32>>();
         std::thread::Builder::new()
             .name("nxos audio dump".into())
@@ -649,7 +697,9 @@ impl Mixer {
         }
         // linked peak limiter: instant attack to 0.95 of full scale, 100 ms release
         let frames = out.len() / 2;
-        let peak = out.iter().fold(0f32, |m, &x| if x.is_finite() { m.max(x.abs()) } else { m });
+        let peak = out
+            .iter()
+            .fold(0f32, |m, &x| if x.is_finite() { m.max(x.abs()) } else { m });
         let ceiling = if peak > 0.95 { 0.95 / peak } else { 1.0 };
         let released = 1.0 - (1.0 - self.gain) * (-(frames as f32) / 4800.0).exp();
         self.gain = ceiling.min(released);
@@ -669,7 +719,11 @@ impl Mixer {
         if let Some(tx) = dump_tx() {
             let _ = tx.lock().unwrap().send(out.to_vec());
         }
-        mute_fade(&mut self.level, MUTED.load(Ordering::Relaxed) || mute_run(), out);
+        mute_fade(
+            &mut self.level,
+            MUTED.load(Ordering::Relaxed) || mute_run(),
+            out,
+        );
     }
 }
 
@@ -680,7 +734,11 @@ fn mute_fade(level: &mut f32, muted: bool, out: &mut [f32]) {
         return;
     }
     for f in out.chunks_exact_mut(2) {
-        *level = if want > *level { (*level + 1.0 / 480.0).min(1.0) } else { (*level - 1.0 / 480.0).max(0.0) };
+        *level = if want > *level {
+            (*level + 1.0 / 480.0).min(1.0)
+        } else {
+            (*level - 1.0 / 480.0).max(0.0)
+        };
         f[0] *= *level;
         f[1] *= *level;
     }
@@ -699,7 +757,19 @@ struct Resampler {
 
 impl Resampler {
     fn new(dev_rate: u32) -> Resampler {
-        Resampler { mixer: Mixer { gain: 1.0, level: 1.0, meter: Meter::default() }, buf: vec![0.0; CHUNK * 2], pos: CHUNK, a: [0.0; 2], b: [0.0; 2], phase: 1.0, step: RATE as f64 / dev_rate as f64 }
+        Resampler {
+            mixer: Mixer {
+                gain: 1.0,
+                level: 1.0,
+                meter: Meter::default(),
+            },
+            buf: vec![0.0; CHUNK * 2],
+            pos: CHUNK,
+            a: [0.0; 2],
+            b: [0.0; 2],
+            phase: 1.0,
+            step: RATE as f64 / dev_rate as f64,
+        }
     }
     fn next48(&mut self) -> [f32; 2] {
         if self.pos >= CHUNK {
@@ -721,7 +791,10 @@ impl Resampler {
         }
         let p = self.phase as f32;
         self.phase += self.step;
-        [self.a[0] + (self.b[0] - self.a[0]) * p, self.a[1] + (self.b[1] - self.a[1]) * p]
+        [
+            self.a[0] + (self.b[0] - self.a[0]) * p,
+            self.a[1] + (self.b[1] - self.a[1]) * p,
+        ]
     }
 }
 
@@ -730,7 +803,10 @@ fn start() {
     if s.started.swap(true, Ordering::SeqCst) {
         return;
     }
-    s.smooth.store(crate::options::int("audio_slowdown") != 0, Ordering::Relaxed);
+    s.smooth.store(
+        crate::options::int("audio_slowdown") != 0,
+        Ordering::Relaxed,
+    );
     let (tx, rx) = mpsc::channel::<Arc<Stream>>();
     *s.notify.lock().unwrap() = Some(tx);
     std::thread::Builder::new()
@@ -741,7 +817,10 @@ fn start() {
             }
         })
         .expect("audio release thread");
-    std::thread::Builder::new().name("nxos audio device".into()).spawn(device_thread).expect("audio device thread");
+    std::thread::Builder::new()
+        .name("nxos audio device".into())
+        .spawn(device_thread)
+        .expect("audio device thread");
     std::thread::Builder::new()
         .name("nxos audio clock".into())
         .spawn(|| loop {
@@ -774,7 +853,14 @@ fn device_thread() {
             Ok((stream, name)) => {
                 failures = 0;
                 *sink().device.lock().unwrap() = name.clone();
-                crate::log!("audio: output on {name}; smooth slowdown {}", if sink().smooth.load(Ordering::Relaxed) { "on" } else { "off" });
+                crate::log!(
+                    "audio: output on {name}; smooth slowdown {}",
+                    if sink().smooth.load(Ordering::Relaxed) {
+                        "on"
+                    } else {
+                        "off"
+                    }
+                );
                 while !lost.load(Ordering::SeqCst) {
                     std::thread::sleep(Duration::from_millis(100));
                 }
@@ -817,8 +903,14 @@ fn open_device(lost: Arc<AtomicBool>) -> Result<(cpal::Stream, String), String> 
     use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
     let host = cpal::default_host();
     let mut picked = None;
-    if let Some(want) = std::env::var("NXOS_AUDIO_DEVICE").ok().filter(|w| !w.trim().is_empty()) {
-        let devs: Vec<cpal::Device> = host.output_devices().map(|d| d.collect()).unwrap_or_default();
+    if let Some(want) = std::env::var("NXOS_AUDIO_DEVICE")
+        .ok()
+        .filter(|w| !w.trim().is_empty())
+    {
+        let devs: Vec<cpal::Device> = host
+            .output_devices()
+            .map(|d| d.collect())
+            .unwrap_or_default();
         let names: Vec<String> = devs.iter().map(|d| d.to_string()).collect();
         match pick_device(&names, &want) {
             Some(i) => picked = Some(devs[i].clone()),
@@ -827,10 +919,19 @@ fn open_device(lost: Arc<AtomicBool>) -> Result<(cpal::Stream, String), String> 
     }
     let dev = match picked {
         Some(d) => d,
-        None => host.default_output_device().ok_or("no default output device")?,
+        None => host
+            .default_output_device()
+            .ok_or("no default output device")?,
     };
     let cfg = dev.default_output_config().map_err(|e| e.to_string())?;
-    let name = format!("{} ({:?}, {} Hz, {} channels, {:?})", dev, host.id(), cfg.sample_rate(), cfg.channels(), cfg.sample_format());
+    let name = format!(
+        "{} ({:?}, {} Hz, {} channels, {:?})",
+        dev,
+        host.id(),
+        cfg.sample_rate(),
+        cfg.channels(),
+        cfg.sample_format()
+    );
     let fmt = cfg.sample_format();
     let config: cpal::StreamConfig = cfg.into();
     let ch = config.channels as usize;
@@ -854,7 +955,11 @@ fn open_device(lost: Arc<AtomicBool>) -> Result<(cpal::Stream, String), String> 
                                 1 => s[1],
                                 _ => 0.0,
                             };
-                            *o = <$t as cpal::FromSample<f32>>::from_sample_(if ch == 1 { (s[0] + s[1]) * 0.5 } else { v });
+                            *o = <$t as cpal::FromSample<f32>>::from_sample_(if ch == 1 {
+                                (s[0] + s[1]) * 0.5
+                            } else {
+                                v
+                            });
                         }
                     }
                 },
@@ -885,8 +990,16 @@ mod tests {
     #[test]
     fn timeline_mixes_streams_on_the_game_clock() {
         assert_eq!(Timeline::place(10_000, 960, None), 9_040);
-        assert_eq!(Timeline::place(10_000, 960, Some(9_000)), 9_000, "40 frames of jitter: contiguous");
-        assert_eq!(Timeline::place(20_000, 960, Some(9_000)), 19_040, "a real gap stays");
+        assert_eq!(
+            Timeline::place(10_000, 960, Some(9_000)),
+            9_000,
+            "40 frames of jitter: contiguous"
+        );
+        assert_eq!(
+            Timeline::place(20_000, 960, Some(9_000)),
+            19_040,
+            "a real gap stays"
+        );
         let lag = Timeline::LAG;
         let mut tl = Timeline::new(0);
         let a = vec![0.25f32; 2 * 960];
@@ -914,7 +1027,16 @@ mod tests {
         assert!(out.iter().all(|&x| x <= 0.95 + 1e-6) && out[0] > 0.9);
     }
     fn st() -> Stream {
-        Stream { name: "t".into(), st: Mutex::new(St { rate: 1.0, env: 1.0, ..Default::default() }), cv: Condvar::new(), hook: Mutex::new(None) }
+        Stream {
+            name: "t".into(),
+            st: Mutex::new(St {
+                rate: 1.0,
+                env: 1.0,
+                ..Default::default()
+            }),
+            cv: Condvar::new(),
+            hook: Mutex::new(None),
+        }
     }
     fn ms(t0: Instant, n: u64) -> Instant {
         t0 + Duration::from_micros(n * 1000)
@@ -925,13 +1047,25 @@ mod tests {
     #[test]
     fn rms_and_peak_line_every_5_s() {
         let mut m = Meter::default();
-        let tone: Vec<f32> = (0..2 * 480).map(|i| if (i / 2) % 2 == 0 { 0.5 } else { -0.5 }).collect();
+        let tone: Vec<f32> = (0..2 * 480)
+            .map(|i| if (i / 2) % 2 == 0 { 0.5 } else { -0.5 })
+            .collect();
         let lines: Vec<String> = (0..500).filter_map(|_| m.add(&tone)).collect();
-        assert_eq!(lines, vec!["audio: output, last 5 s: RMS 0.50000 / 0.50000 (-6.0 / -6.0 dBFS), peak 0.5000".to_string()]);
+        assert_eq!(
+            lines,
+            vec![
+                "audio: output, last 5 s: RMS 0.50000 / 0.50000 (-6.0 / -6.0 dBFS), peak 0.5000"
+                    .to_string()
+            ]
+        );
         let quiet = vec![0f32; 2 * 480];
         let said = (0..500 * 24).filter_map(|_| m.add(&quiet)).count();
         assert_eq!(said, 2, "24 silent periods: said at the first and the 13th");
-        assert_eq!((0..500).filter_map(|_| m.add(&tone)).count(), 1, "sound again: said");
+        assert_eq!(
+            (0..500).filter_map(|_| m.add(&tone)).count(),
+            1,
+            "sound again: said"
+        );
     }
 
     /// NXOS_AUDIO_DUMP's file: a WAV whose header (RIFF / data sizes, 48 kHz stereo 16-bit) is right after each block,
@@ -942,14 +1076,27 @@ mod tests {
         let mut w = Wav::create(&p).unwrap();
         w.write(&[0.5, -0.5, 1.0, -2.0]).unwrap();
         let b = std::fs::read(&p).unwrap();
-        assert_eq!((&b[..4], &b[8..16], &b[36..40]), (&b"RIFF"[..], &b"WAVEfmt "[..], &b"data"[..]));
+        assert_eq!(
+            (&b[..4], &b[8..16], &b[36..40]),
+            (&b"RIFF"[..], &b"WAVEfmt "[..], &b"data"[..])
+        );
         assert_eq!(u32::from_le_bytes(b[24..28].try_into().unwrap()), 48000);
         assert_eq!(u32::from_le_bytes(b[40..44].try_into().unwrap()), 8);
-        let s: Vec<i16> = b[44..].chunks(2).map(|c| i16::from_le_bytes([c[0], c[1]])).collect();
+        let s: Vec<i16> = b[44..]
+            .chunks(2)
+            .map(|c| i16::from_le_bytes([c[0], c[1]]))
+            .collect();
         assert_eq!(s, vec![16384, -16384, 32767, -32767]);
         w.write(&[0.0; 4]).unwrap();
         let b = std::fs::read(&p).unwrap();
-        assert_eq!((b.len(), u32::from_le_bytes(b[4..8].try_into().unwrap()), u32::from_le_bytes(b[40..44].try_into().unwrap())), (60, 52, 16));
+        assert_eq!(
+            (
+                b.len(),
+                u32::from_le_bytes(b[4..8].try_into().unwrap()),
+                u32::from_le_bytes(b[40..44].try_into().unwrap())
+            ),
+            (60, 52, 16)
+        );
         drop(w);
         let _ = std::fs::remove_file(&p);
     }
@@ -957,7 +1104,10 @@ mod tests {
     /// NXOS_AUDIO_DEVICE: a part of a device's name, case aside; none: the default.
     #[test]
     fn output_device_by_name() {
-        let names = vec!["Speakers (Realtek(R) Audio)".to_string(), "Headphones (DualSense Wireless Controller)".to_string()];
+        let names = vec![
+            "Speakers (Realtek(R) Audio)".to_string(),
+            "Headphones (DualSense Wireless Controller)".to_string(),
+        ];
         assert_eq!(pick_device(&names, "dualsense"), Some(1));
         assert_eq!(pick_device(&names, " Realtek"), Some(0));
         assert_eq!(pick_device(&names, "HDMI"), None);
@@ -969,7 +1119,10 @@ mod tests {
         let mut out = vec![0.5f32; 2 * 960];
         mute_fade(&mut level, true, &mut out);
         assert!(out[0] > 0.49 && out[0] < 0.5, "fades, no click");
-        assert!(out[2 * 480..].iter().all(|&x| x == 0.0), "silent after 10 ms");
+        assert!(
+            out[2 * 480..].iter().all(|&x| x == 0.0),
+            "silent after 10 ms"
+        );
         let mut out = vec![0.5f32; 2 * 960];
         mute_fade(&mut level, false, &mut out);
         assert_eq!(out[2 * 959], 0.5, "back to full");
@@ -994,7 +1147,10 @@ mod tests {
         assert_eq!(st.underruns, 1, "one gap after the block");
         // the samples come out in order, none skipped
         assert!(got[..3000].windows(2).all(|w| w[1] > w[0]));
-        assert!(got[3000..].windows(2).all(|w| w[1] <= w[0]), "then the last sample fades out");
+        assert!(
+            got[3000..].windows(2).all(|w| w[1] <= w[0]),
+            "then the last sample fades out"
+        );
     }
 
     #[test]
@@ -1027,7 +1183,10 @@ mod tests {
         assert_eq!(st.released.iter().copied().collect::<Vec<_>>(), vec![1]);
         assert!(pace(&mut st, ms(t0, 11)));
         assert_eq!(st.released.len(), 2);
-        assert_eq!(st.queued, 512, "nothing played yet: the samples stay queued for the device");
+        assert_eq!(
+            st.queued, 512,
+            "nothing played yet: the samples stay queued for the device"
+        );
     }
 
     #[test]
@@ -1044,7 +1203,10 @@ mod tests {
         drop(st);
         s.append(2, vec![0.1; 2 * 480]);
         let mut st = s.st.lock().unwrap();
-        assert!(!pace(&mut st, ms(t0, 100)), "starts again from the new frames");
+        assert!(
+            !pace(&mut st, ms(t0, 100)),
+            "starts again from the new frames"
+        );
         assert!(!pace(&mut st, ms(t0, 105)));
         assert!(pace(&mut st, ms(t0, 111)));
     }

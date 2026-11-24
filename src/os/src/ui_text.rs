@@ -141,7 +141,13 @@ pub enum Prompt {
 }
 
 /// (title, hint) of a prompt in `language`, with a front end's override lines and the numbers put in.
-pub fn texts_in(p: Prompt, language: i64, over: Option<&str>, min: i32, joined: i32) -> (String, String) {
+pub fn texts_in(
+    p: Prompt,
+    language: i64,
+    over: Option<&str>,
+    min: i32,
+    joined: i32,
+) -> (String, String) {
     let t = table(language);
     let i = match p {
         Prompt::Controllers => 0,
@@ -149,8 +155,17 @@ pub fn texts_in(p: Prompt, language: i64, over: Option<&str>, min: i32, joined: 
         Prompt::UserPicker => 4,
     };
     let lines: Vec<&str> = over.map(|o| o.lines().collect()).unwrap_or_default();
-    let pick = |k: usize| lines.get(k).map(|s| s.trim()).filter(|s| !s.is_empty()).unwrap_or(t.0[i + k]);
-    let fill = |s: &str| s.replace("{min}", &min.to_string()).replace("{joined}", &joined.to_string());
+    let pick = |k: usize| {
+        lines
+            .get(k)
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .unwrap_or(t.0[i + k])
+    };
+    let fill = |s: &str| {
+        s.replace("{min}", &min.to_string())
+            .replace("{joined}", &joined.to_string())
+    };
     (fill(pick(0)), fill(pick(1)))
 }
 
@@ -161,7 +176,13 @@ pub fn texts(p: Prompt, min: i32, joined: i32) -> (String, String) {
         Prompt::HomeQuit => "NXRS_HOME_QUIT_TEXT",
         Prompt::UserPicker => "NXRS_USER_PROMPT_TEXT",
     };
-    texts_in(p, nxconfig::int("language"), std::env::var(env).ok().as_deref(), min, joined)
+    texts_in(
+        p,
+        nxconfig::int("language"),
+        std::env::var(env).ok().as_deref(),
+        min,
+        joined,
+    )
 }
 
 #[cfg(test)]
@@ -173,13 +194,37 @@ mod tests {
         let (t, h) = texts_in(Prompt::Controllers, 1, None, 2, 1);
         assert_eq!(t, "2 players wanted");
         assert!(h.contains("Players: 1 of 2"));
-        assert_eq!(texts_in(Prompt::HomeQuit, 0, None, 0, 0).0, "ゲームを終了しますか？");
-        assert_eq!(texts_in(Prompt::HomeQuit, 3, None, 0, 0).0, "Spiel beenden?");
-        assert_eq!(texts_in(Prompt::UserPicker, 13, None, 0, 0).0, "Qui joue ?", "French (Canada)");
-        assert_eq!(texts_in(Prompt::UserPicker, 12, None, 0, 0).0, "Who is playing?", "English (UK)");
-        assert_eq!(texts_in(Prompt::UserPicker, 99, None, 0, 0).0, "Who is playing?", "unknown: English");
+        assert_eq!(
+            texts_in(Prompt::HomeQuit, 0, None, 0, 0).0,
+            "ゲームを終了しますか？"
+        );
+        assert_eq!(
+            texts_in(Prompt::HomeQuit, 3, None, 0, 0).0,
+            "Spiel beenden?"
+        );
+        assert_eq!(
+            texts_in(Prompt::UserPicker, 13, None, 0, 0).0,
+            "Qui joue ?",
+            "French (Canada)"
+        );
+        assert_eq!(
+            texts_in(Prompt::UserPicker, 12, None, 0, 0).0,
+            "Who is playing?",
+            "English (UK)"
+        );
+        assert_eq!(
+            texts_in(Prompt::UserPicker, 99, None, 0, 0).0,
+            "Who is playing?",
+            "unknown: English"
+        );
         // a front end's line replaces the table's; an empty line keeps it
-        let (t, h) = texts_in(Prompt::Controllers, 2, Some("\nAppuie {joined}/{min}"), 3, 2);
+        let (t, h) = texts_in(
+            Prompt::Controllers,
+            2,
+            Some("\nAppuie {joined}/{min}"),
+            3,
+            2,
+        );
         assert_eq!(t, "3 joueurs requis");
         assert_eq!(h, "Appuie 2/3");
         // every language has all six texts

@@ -16,7 +16,9 @@ use std::sync::{Mutex, OnceLock};
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{EXCEPTION_ACCESS_VIOLATION, NTSTATUS};
 #[cfg(windows)]
-use windows_sys::Win32::System::Diagnostics::Debug::{AddVectoredExceptionHandler, EXCEPTION_POINTERS};
+use windows_sys::Win32::System::Diagnostics::Debug::{
+    AddVectoredExceptionHandler, EXCEPTION_POINTERS,
+};
 #[cfg(windows)]
 use windows_sys::Win32::System::Memory::{VirtualAlloc, MEM_COMMIT, MEM_RESERVE, PAGE_READWRITE};
 
@@ -90,7 +92,11 @@ pub struct Memory {
 static MEM: OnceLock<Memory> = OnceLock::new();
 
 pub fn init(space: &'static Space, fig: Figures) -> &'static Memory {
-    let _ = MEM.set(Memory { space, fig, st: Mutex::new(State::default()) });
+    let _ = MEM.set(Memory {
+        space,
+        fig,
+        st: Mutex::new(State::default()),
+    });
     if cfg!(test) {
         install_fault_handler();
     }
@@ -196,9 +202,14 @@ fn first_touch(a: u64) -> bool {
 fn heap_max() -> u64 {
     static M: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *M.get_or_init(|| {
-        let mb = nxconfig::string("heap_max_mb").trim().parse::<u64>().unwrap_or(0);
+        let mb = nxconfig::string("heap_max_mb")
+            .trim()
+            .parse::<u64>()
+            .unwrap_or(0);
         if mb > 0 {
-            crate::log!("heap_max_mb={mb}: the heap may grow to {mb} MB even past the application pool");
+            crate::log!(
+                "heap_max_mb={mb}: the heap may grow to {mb} MB even past the application pool"
+            );
         }
         mb << 20
     })
@@ -217,24 +228,39 @@ impl Memory {
             return Err(R_INVALID_SIZE);
         }
         if size > self.space.heap.size {
-            crate::log!("SetHeapSize {size:#x}: larger than the heap region {:#x} (ResultOutOfMemory)", self.space.heap.size);
+            crate::log!(
+                "SetHeapSize {size:#x}: larger than the heap region {:#x} (ResultOutOfMemory)",
+                self.space.heap.size
+            );
             return Err(R_OUT_OF_MEMORY);
         }
         let mut st = self.st.lock().unwrap();
         let used = self.fig.used_beside_heap + st.phys_bytes;
         if size > heap_cap(self.fig.pool, used, heap_max()) {
-            crate::log_once!("heap-limit", "SetHeapSize {size:#x} > pool {:#x} less used {used:#x} (ResultLimitReached)", self.fig.pool);
+            crate::log_once!(
+                "heap-limit",
+                "SetHeapSize {size:#x} > pool {:#x} less used {used:#x} (ResultLimitReached)",
+                self.fig.pool
+            );
             return Err(R_LIMIT_REACHED);
         }
         let b = self.space.heap.base;
         if size < st.heap_size {
-            if st.maps.iter().any(|m| m.src < b + st.heap_size && m.src + m.size > b + size) {
+            if st
+                .maps
+                .iter()
+                .any(|m| m.src < b + st.heap_size && m.src + m.size > b + size)
+            {
                 return Err(R_INVALID_STATE);
             }
             rmem::decommit(b + size, st.heap_size - size);
         }
         if size > st.heap_size {
-            crate::log!("heap {:.2} GB (lazily committed; region {:.2} GB)", size as f64 / 1e9, self.space.heap.size as f64 / 1e9);
+            crate::log!(
+                "heap {:.2} GB (lazily committed; region {:.2} GB)",
+                size as f64 / 1e9,
+                self.space.heap.size as f64 / 1e9
+            );
         }
         st.heap_size = size;
         st.heap_seen = st.heap_seen.max(size);
@@ -281,16 +307,25 @@ impl Memory {
             return R_INVALID_ADDRESS;
         }
         let mut st = self.st.lock().unwrap();
-        if !self.in_heap(&st, src, size) && !Self::in_phys(&st, src, size) && !rmem::readable(src, size) {
+        if !self.in_heap(&st, src, size)
+            && !Self::in_phys(&st, src, size)
+            && !rmem::readable(src, size)
+        {
             crate::log!("[RED] MapMemory {dst:#x} <- {src:#x} +{size:#x}: source is not mapped");
             return R_INVALID_STATE;
         }
         let overl = |a: u64, b: u64, c: u64, d: u64| a < c + d && c < a + b;
-        if st.maps.iter().any(|m| overl(m.dst, m.size, dst, size) || overl(m.src, m.size, src, size)) {
+        if st
+            .maps
+            .iter()
+            .any(|m| overl(m.dst, m.size, dst, size) || overl(m.src, m.size, src, size))
+        {
             return R_INVALID_STATE;
         }
         if !commit_rw(dst, size) {
-            nxrt::rt::fatal(&format!("os: MapMemory commit of {dst:#x}+{size:#x} failed"));
+            nxrt::rt::fatal(&format!(
+                "os: MapMemory commit of {dst:#x}+{size:#x} failed"
+            ));
         }
         prepare_locked(self, &st, src, size);
         unsafe { core::ptr::copy_nonoverlapping(src as *const u8, dst as *mut u8, size as usize) };
@@ -300,7 +335,11 @@ impl Memory {
 
     pub fn unmap_memory(&self, dst: u64, src: u64, size: u64) -> u64 {
         let mut st = self.st.lock().unwrap();
-        let Some(i) = st.maps.iter().position(|m| m.dst == dst && m.src == src && m.size == size) else {
+        let Some(i) = st
+            .maps
+            .iter()
+            .position(|m| m.dst == dst && m.src == src && m.size == size)
+        else {
             crate::log!("[RED] UnmapMemory {dst:#x} <- {src:#x} +{size:#x}: no such mapping");
             return R_INVALID_STATE;
         };
@@ -315,7 +354,10 @@ impl Memory {
     pub fn physical(&self, a: u64, size: u64, map: bool) -> u64 {
         let al = self.space.alias;
         if size == 0 || (a | size) & (PAGE - 1) != 0 || a < al.base || a + size > al.end() {
-            crate::log!("[RED] {}PhysicalMemory {a:#x}+{size:#x} outside the alias region", if map { "Map" } else { "Unmap" });
+            crate::log!(
+                "[RED] {}PhysicalMemory {a:#x}+{size:#x} outside the alias region",
+                if map { "Map" } else { "Unmap" }
+            );
             return R_INVALID_ADDRESS;
         }
         let mut st = self.st.lock().unwrap();
@@ -331,11 +373,15 @@ impl Memory {
             .sum();
         if map {
             let need = size - mapped_in;
-            if self.fig.used_beside_heap + st.heap_size + st.phys_bytes + need > self.fig.pool && map_limit() {
+            if self.fig.used_beside_heap + st.heap_size + st.phys_bytes + need > self.fig.pool
+                && map_limit()
+            {
                 return R_LIMIT_REACHED;
             }
             if !commit_rw(a, size) {
-                nxrt::rt::fatal(&format!("os: MapPhysicalMemory commit of {a:#x}+{size:#x} failed"));
+                nxrt::rt::fatal(&format!(
+                    "os: MapPhysicalMemory commit of {a:#x}+{size:#x} failed"
+                ));
             }
             st.phys_bytes += need;
             st.phys.push((a, size));
@@ -400,13 +446,24 @@ impl Memory {
                 continue;
             }
             if m.base < a {
-                out.push(Mark { size: a - m.base, ..m });
+                out.push(Mark {
+                    size: a - m.base,
+                    ..m
+                });
             }
             if me > end {
-                out.push(Mark { base: end, size: me - end, ..m });
+                out.push(Mark {
+                    base: end,
+                    size: me - end,
+                    ..m
+                });
             }
             let (lo, hi) = (m.base.max(a), me.min(end));
-            let mut x = Mark { base: lo, size: hi - lo, ..m };
+            let mut x = Mark {
+                base: lo,
+                size: hi - lo,
+                ..m
+            };
             if perm.is_some() {
                 x.perm = perm;
             }
@@ -420,7 +477,13 @@ impl Memory {
         let mut at = a;
         for (lo, hi) in covered.into_iter().chain(std::iter::once((end, end))) {
             if lo > at {
-                out.push(Mark { base: at, size: lo - at, perm, attr_mask: mask, attr: value & mask });
+                out.push(Mark {
+                    base: at,
+                    size: lo - at,
+                    perm,
+                    attr_mask: mask,
+                    attr: value & mask,
+                });
             }
             at = at.max(hi);
         }
@@ -501,10 +564,26 @@ impl Memory {
         let st = self.st.lock().unwrap();
         let mut own: Vec<(Range, u32, u32, u32)> = vec![];
         if st.heap_size > 0 {
-            own.push((Range { base: self.space.heap.base, size: st.heap_size }, ST_NORMAL, 0, 3));
+            own.push((
+                Range {
+                    base: self.space.heap.base,
+                    size: st.heap_size,
+                },
+                ST_NORMAL,
+                0,
+                3,
+            ));
         }
         for m in &st.maps {
-            own.push((Range { base: m.dst, size: m.size }, ST_STACK, 0, 3));
+            own.push((
+                Range {
+                    base: m.dst,
+                    size: m.size,
+                },
+                ST_STACK,
+                0,
+                3,
+            ));
         }
         for &(b, n) in &st.phys {
             own.push((Range { base: b, size: n }, ST_NORMAL, 0, 3));
@@ -516,7 +595,14 @@ impl Memory {
         // a heap range lent to MapMemory: Normal, locked, no access
         for m in &st.maps {
             if a >= m.src && a < m.src + m.size {
-                return MemoryInfo { addr: m.src, size: m.size, state: ST_NORMAL, attr: ATTR_LOCKED, perm: 0, ..Default::default() };
+                return MemoryInfo {
+                    addr: m.src,
+                    size: m.size,
+                    state: ST_NORMAL,
+                    attr: ATTR_LOCKED,
+                    perm: 0,
+                    ..Default::default()
+                };
             }
         }
         if let Some(r) = own.iter().find(|r| r.0.contains(a)) {
@@ -532,7 +618,14 @@ impl Memory {
                     }
                 }
             }
-            return MemoryInfo { addr: lo, size: hi - lo, state: r.1, attr: r.2, perm: r.3, ..Default::default() };
+            return MemoryInfo {
+                addr: lo,
+                size: hi - lo,
+                state: r.1,
+                attr: r.2,
+                perm: r.3,
+                ..Default::default()
+            };
         }
         let q = self.space.query(a);
         if q.state != ST_FREE {
@@ -549,10 +642,20 @@ impl Memory {
         }
         // the address space ends at 2^39: beyond it nothing is mapped (Inaccessible, as Horizon reports)
         if a >= rmem::ADDRESS_LIMIT {
-            return MemoryInfo { addr: rmem::ADDRESS_LIMIT, size: 0u64.wrapping_sub(rmem::ADDRESS_LIMIT), state: 0x10, ..Default::default() };
+            return MemoryInfo {
+                addr: rmem::ADDRESS_LIMIT,
+                size: 0u64.wrapping_sub(rmem::ADDRESS_LIMIT),
+                state: 0x10,
+                ..Default::default()
+            };
         }
         hi = hi.min(rmem::ADDRESS_LIMIT);
-        MemoryInfo { addr: lo, size: hi - lo, state: ST_FREE, ..Default::default() }
+        MemoryInfo {
+            addr: lo,
+            size: hi - lo,
+            state: ST_FREE,
+            ..Default::default()
+        }
     }
 
     /// svcGetInfo for the memory ids; None for ids this layer does not answer.
@@ -587,7 +690,10 @@ impl Memory {
 /// Z-A, Ocarina of Time) and every profile with nxnative's `mem_map_limit on` (Pokémon Scarlet / Violet: start-up
 /// probes all allocatable memory and gives the cached pages back only after a map fails); `SWR_MAP_LIMIT=1/0` for any.
 fn map_limit() -> bool {
-    if let Some(v) = std::env::var("SWR_MAP_LIMIT").ok().filter(|v| !v.is_empty()) {
+    if let Some(v) = std::env::var("SWR_MAP_LIMIT")
+        .ok()
+        .filter(|v| !v.is_empty())
+    {
         return v.trim().parse::<i64>().map_or(true, |n| n > 0);
     }
     let p = crate::profile::get();
@@ -611,9 +717,21 @@ pub(crate) mod tests {
     pub(crate) fn test_memory() -> &'static Memory {
         static M: OnceLock<&'static Memory> = OnceLock::new();
         M.get_or_init(|| {
-            let mods = Range { base: 0x6C_0000_0000, size: 0x10_0000 };
-            let space: &'static Space = Box::leak(Box::new(Space::new(mods, 0x6D_0000_0000, false).expect("space")));
-            init(space, Figures { pool: 0xCD50_0000, used_beside_heap: 64 << 20, sys_resource: 0 })
+            let mods = Range {
+                base: 0x6C_0000_0000,
+                size: 0x10_0000,
+            };
+            let space: &'static Space = Box::leak(Box::new(
+                Space::new(mods, 0x6D_0000_0000, false).expect("space"),
+            ));
+            init(
+                space,
+                Figures {
+                    pool: 0xCD50_0000,
+                    used_beside_heap: 64 << 20,
+                    sys_resource: 0,
+                },
+            )
         })
     }
 
@@ -635,29 +753,74 @@ pub(crate) mod tests {
         // marks are kept per range whatever the region; a heap-sized test region keeps it simple
         let a = s;
         assert_eq!(m.set_permission(a, 0x2000, 1), 0);
-        assert_eq!(m.set_attribute(a + 0x1000, 0x2000, 0x20, 0x20, true), 0, "GPU attribute");
+        assert_eq!(
+            m.set_attribute(a + 0x1000, 0x2000, 0x20, 0x20, true),
+            0,
+            "GPU attribute"
+        );
         let st = m.st.lock().unwrap();
         let marks = st.marks.clone();
         drop(st);
         assert_eq!(marks.len(), 3, "{marks:?}");
-        assert_eq!((marks[0].base, marks[0].size, marks[0].perm, marks[0].attr), (a, 0x1000, Some(1), 0));
-        assert_eq!((marks[1].base, marks[1].size, marks[1].perm, marks[1].attr), (a + 0x1000, 0x1000, Some(1), 0x20));
-        assert_eq!((marks[2].base, marks[2].size, marks[2].perm, marks[2].attr), (a + 0x2000, 0x1000, None, 0x20));
-        let info = MemoryInfo { addr: a - 0x10000, size: 0x40000, state: ST_STACK, perm: 3, ..Default::default() };
+        assert_eq!(
+            (marks[0].base, marks[0].size, marks[0].perm, marks[0].attr),
+            (a, 0x1000, Some(1), 0)
+        );
+        assert_eq!(
+            (marks[1].base, marks[1].size, marks[1].perm, marks[1].attr),
+            (a + 0x1000, 0x1000, Some(1), 0x20)
+        );
+        assert_eq!(
+            (marks[2].base, marks[2].size, marks[2].perm, marks[2].attr),
+            (a + 0x2000, 0x1000, None, 0x20)
+        );
+        let info = MemoryInfo {
+            addr: a - 0x10000,
+            size: 0x40000,
+            state: ST_STACK,
+            perm: 3,
+            ..Default::default()
+        };
         let q = m.with_marks(a + 0x1800, info);
-        assert_eq!((q.addr, q.size, q.perm, q.attr), (a + 0x1000, 0x1000, 1, 0x20), "both recorded on the overlap");
+        assert_eq!(
+            (q.addr, q.size, q.perm, q.attr),
+            (a + 0x1000, 0x1000, 1, 0x20),
+            "both recorded on the overlap"
+        );
         let q = m.with_marks(a + 0x2000, info);
-        assert_eq!((q.addr, q.size, q.perm, q.attr), (a + 0x2000, 0x1000, 3, 0x20));
+        assert_eq!(
+            (q.addr, q.size, q.perm, q.attr),
+            (a + 0x2000, 0x1000, 3, 0x20)
+        );
         let q = m.with_marks(a - 0x1000, info);
-        assert_eq!((q.addr, q.addr + q.size, q.perm), (a - 0x10000, a, 3), "the block ends where the runs start");
-        assert_eq!(m.set_attribute(a + 0x1000, 0x2000, 0x20, 0, true), 0, "cleared");
+        assert_eq!(
+            (q.addr, q.addr + q.size, q.perm),
+            (a - 0x10000, a, 3),
+            "the block ends where the runs start"
+        );
+        assert_eq!(
+            m.set_attribute(a + 0x1000, 0x2000, 0x20, 0, true),
+            0,
+            "cleared"
+        );
         assert_eq!(m.with_marks(a + 0x2000, info).attr, 0);
         assert_eq!(m.set_permission(a + 1, 0x1000, 1), R_INVALID_ADDRESS);
         assert_eq!(m.set_permission(a, 0x1001, 1), R_INVALID_SIZE);
         assert_eq!(m.set_permission(a, 0x1000, 7), R_INVALID_NEW_PERMISSION);
-        assert_eq!(m.set_attribute(a, 0x1000, 0x20, 0x40, true), R_INVALID_COMBINATION);
-        assert_eq!(m.set_attribute(a, 0x1000, 0x08, 0x08, true), R_INVALID_COMBINATION, "SetGpuMemoryAttribute takes only 0x20");
-        assert_eq!(m.set_attribute(a, 0x1000, 0xff, 0x48, false), 0, "SetMemoryAttribute records any bits (Turbo; DKB)");
+        assert_eq!(
+            m.set_attribute(a, 0x1000, 0x20, 0x40, true),
+            R_INVALID_COMBINATION
+        );
+        assert_eq!(
+            m.set_attribute(a, 0x1000, 0x08, 0x08, true),
+            R_INVALID_COMBINATION,
+            "SetGpuMemoryAttribute takes only 0x20"
+        );
+        assert_eq!(
+            m.set_attribute(a, 0x1000, 0xff, 0x48, false),
+            0,
+            "SetMemoryAttribute records any bits (Turbo; DKB)"
+        );
         assert_eq!(m.set_permission(a, 0x2000, 3), 0);
         m.st.lock().unwrap().marks.clear();
         drop(lent);
@@ -668,7 +831,10 @@ pub(crate) mod tests {
         let m = test_memory();
         let h = m.set_heap_size(0x400_0000).unwrap();
         assert_eq!(h, m.space.heap.base);
-        assert!(!rmem::readable(h + 0x10_0000, 8), "not committed before the first touch");
+        assert!(
+            !rmem::readable(h + 0x10_0000, 8),
+            "not committed before the first touch"
+        );
         unsafe { *((h + 0x10_0008) as *mut u64) = 0x55 }; // faults, the handler commits, the store retries
         assert_eq!(unsafe { *((h + 0x10_0008) as *const u64) }, 0x55);
         assert_eq!(m.query(h + 0x20).state, ST_NORMAL);
@@ -677,17 +843,36 @@ pub(crate) mod tests {
         let dst = m.space.stack.base + 0x80_0000;
         unsafe { *((h + 0x10_0010) as *mut u64) = 7 };
         assert_eq!(m.map_memory(dst, h + 0x10_0000, 0x2000), 0);
-        assert_eq!(unsafe { *((dst + 0x10) as *const u64) }, 7, "contents moved");
+        assert_eq!(
+            unsafe { *((dst + 0x10) as *const u64) },
+            7,
+            "contents moved"
+        );
         let q = m.query(dst + 0x1000);
         assert_eq!((q.addr, q.size, q.state), (dst, 0x2000, ST_STACK));
         let s = m.query(h + 0x10_0800);
-        assert_eq!((s.addr, s.size, s.attr), (h + 0x10_0000, 0x2000, ATTR_LOCKED));
+        assert_eq!(
+            (s.addr, s.size, s.attr),
+            (h + 0x10_0000, 0x2000, ATTR_LOCKED)
+        );
         let before = m.query(h);
-        assert_eq!(before.addr + before.size, h + 0x10_0000, "the heap is split around the lent range");
+        assert_eq!(
+            before.addr + before.size,
+            h + 0x10_0000,
+            "the heap is split around the lent range"
+        );
         unsafe { *((dst + 0x18) as *mut u64) = 9 };
-        assert_eq!(m.map_memory(dst, h + 0x20_0000, 0x1000), R_INVALID_STATE, "overlap");
+        assert_eq!(
+            m.map_memory(dst, h + 0x20_0000, 0x1000),
+            R_INVALID_STATE,
+            "overlap"
+        );
         assert_eq!(m.unmap_memory(dst, h + 0x10_0000, 0x2000), 0);
-        assert_eq!(unsafe { *((h + 0x10_0018) as *const u64) }, 9, "contents moved back");
+        assert_eq!(
+            unsafe { *((h + 0x10_0018) as *const u64) },
+            9,
+            "contents moved back"
+        );
         assert_eq!(m.query(dst).state, ST_FREE);
     }
 
@@ -699,9 +884,17 @@ pub(crate) mod tests {
         assert_eq!(m.physical(a + 0x2000, 0x4000, true), 0);
         assert_eq!(m.query(a + 0x5000).state, ST_NORMAL);
         let dst = m.space.stack.base + 0x40_0000;
-        assert_eq!(m.map_memory(dst, a + 0x1000, 0x4000), 0, "mapped alias memory is a MapMemory source");
+        assert_eq!(
+            m.map_memory(dst, a + 0x1000, 0x4000),
+            0,
+            "mapped alias memory is a MapMemory source"
+        );
         assert_eq!(m.unmap_memory(dst, a + 0x1000, 0x4000), 0);
-        assert_eq!(m.map_memory(dst, a + 0x8000, 0x1000), R_INVALID_STATE, "unmapped alias memory is not");
+        assert_eq!(
+            m.map_memory(dst, a + 0x8000, 0x1000),
+            R_INVALID_STATE,
+            "unmapped alias memory is not"
+        );
         let used0 = m.info(7).unwrap();
         assert_eq!(m.physical(a, 0x6000, false), 0);
         assert_eq!(m.info(7).unwrap(), used0 - 0x6000);

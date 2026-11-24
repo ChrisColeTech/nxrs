@@ -97,7 +97,8 @@ extern "C" {
 /// MinGW's import slot for `_setjmp(buf, frame)` (clang's setjmp): the same register save as `__intrinsic_setjmpex`.
 #[no_mangle]
 #[used]
-pub static __imp__setjmp: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int = __intrinsic_setjmpex;
+pub static __imp__setjmp: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int =
+    __intrinsic_setjmpex;
 
 /// MinGW's import slot for longjmp.
 #[no_mangle]
@@ -105,13 +106,19 @@ pub static __imp__setjmp: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_in
 pub static __imp_longjmp: unsafe extern "C" fn(*mut c_void, c_int) -> ! = nxos_mingw_longjmp;
 
 #[no_mangle]
-pub unsafe extern "C" fn __mingw_vfprintf(f: *mut c_void, fmt: *const c_char, ap: *mut c_void) -> c_int {
+pub unsafe extern "C" fn __mingw_vfprintf(
+    f: *mut c_void,
+    fmt: *const c_char,
+    ap: *mut c_void,
+) -> c_int {
     vfprintf(f, fmt, ap)
 }
 
 /// Keeps this module's symbols in a link that otherwise reaches them only from the archives.
 pub fn keep() -> usize {
-    __imp_longjmp as *const () as usize ^ __imp__setjmp as *const () as usize ^ __mingw_vfprintf as *const () as usize
+    __imp_longjmp as *const () as usize
+        ^ __imp__setjmp as *const () as usize
+        ^ __mingw_vfprintf as *const () as usize
 }
 
 #[cfg(test)]

@@ -61,7 +61,9 @@ impl<'a> Ctx<'a> {
         self.req.pid.unwrap_or(0)
     }
     pub fn push<T: Copy>(&mut self, v: T) {
-        let b = unsafe { core::slice::from_raw_parts(&v as *const T as *const u8, core::mem::size_of::<T>()) };
+        let b = unsafe {
+            core::slice::from_raw_parts(&v as *const T as *const u8, core::mem::size_of::<T>())
+        };
         self.resp.data.extend_from_slice(b);
     }
     pub fn push_u8(&mut self, v: u8) {
@@ -94,12 +96,22 @@ impl<'a> Ctx<'a> {
     }
     /// The client's input buffer `i`: its A (send) descriptor, or else its X (pointer) descriptor.
     pub fn buf_in(&self, i: usize) -> Buf {
-        let a = self.req.a.get(i).copied().filter(|b| b.addr != 0 || b.size != 0);
+        let a = self
+            .req
+            .a
+            .get(i)
+            .copied()
+            .filter(|b| b.addr != 0 || b.size != 0);
         a.or_else(|| self.req.x.get(i).copied()).unwrap_or_default()
     }
     /// The client's output buffer `i`: its B (receive) descriptor, or else its C (receive list) entry.
     pub fn buf_out(&self, i: usize) -> Buf {
-        let b = self.req.b.get(i).copied().filter(|b| b.addr != 0 || b.size != 0);
+        let b = self
+            .req
+            .b
+            .get(i)
+            .copied()
+            .filter(|b| b.addr != 0 || b.size != 0);
         b.or_else(|| self.req.c.get(i).copied()).unwrap_or_default()
     }
     pub fn read_in(&self, i: usize) -> Vec<u8> {
@@ -117,7 +129,11 @@ impl<'a> Ctx<'a> {
     }
     /// The command has no handler here: zeroed output, success, one gap line.
     pub fn unimplemented(&mut self) -> u32 {
-        crate::log::gap(Gap::Command, &format!("{} #{}", self.iface, self.req.cmd), "answered success with zeroed output");
+        crate::log::gap(
+            Gap::Command,
+            &format!("{} #{}", self.iface, self.req.cmd),
+            "answered success with zeroed output",
+        );
         0
     }
 }
@@ -159,12 +175,21 @@ pub fn register(name: &str, f: Factory) {
 }
 
 pub fn lookup(name: &str) -> Option<Factory> {
-    REGISTRY.lock().unwrap().iter().find(|(n, _)| n == name).map(|(_, f)| *f)
+    REGISTRY
+        .lock()
+        .unwrap()
+        .iter()
+        .find(|(n, _)| n == name)
+        .map(|(_, f)| *f)
 }
 
 fn new_session(obj: Obj, domain: bool) -> u32 {
     let mut s = SESSIONS.lock().unwrap();
-    let sess = Arc::new(Mutex::new(Session { objects: HashMap::from([(1, obj)]), next: 2, domain }));
+    let sess = Arc::new(Mutex::new(Session {
+        objects: HashMap::from([(1, obj)]),
+        next: 2,
+        domain,
+    }));
     let i = s.slots.iter().position(|x| x.is_none()).unwrap_or_else(|| {
         s.slots.push(None);
         s.slots.len() - 1
@@ -181,7 +206,8 @@ pub fn open(svc: Box<dyn Service>) -> u32 {
 /// A session to the service registered as `name`, or sm's refusal (with its gap line). A Switch 2 program gets a
 /// catch-all session for a name nobody registered (`Unknown`; `NXOS_NS2_STRICT=1` refuses it as for a Switch game).
 pub fn connect(name: &str) -> Result<u32, u32> {
-    let switch2 = crate::profile::get().program_id >> 56 == 0x04 && std::env::var("NXOS_NS2_STRICT").map_or(true, |v| v != "1");
+    let switch2 = crate::profile::get().program_id >> 56 == 0x04
+        && std::env::var("NXOS_NS2_STRICT").map_or(true, |v| v != "1");
     connect_as(name, switch2)
 }
 
@@ -189,7 +215,10 @@ fn connect_as(name: &str, switch2: bool) -> Result<u32, u32> {
     match lookup(name) {
         Some(f) => {
             let h = open(f());
-            crate::log_once!(format!("connect {name}"), "sm: {name} -> host session {h:#x}");
+            crate::log_once!(
+                format!("connect {name}"),
+                "sm: {name} -> host session {h:#x}"
+            );
             Ok(h)
         }
         None if switch2 => {
@@ -224,7 +253,12 @@ impl Service for Unknown {
 
 fn session(h: u32) -> Option<Arc<Mutex<Session>>> {
     let i = h.wrapping_sub(SESSION_BASE) as usize;
-    SESSIONS.lock().unwrap().slots.get(i).and_then(|s| s.clone())
+    SESSIONS
+        .lock()
+        .unwrap()
+        .slots
+        .get(i)
+        .and_then(|s| s.clone())
 }
 
 pub fn is_session(h: u32) -> bool {
@@ -276,7 +310,10 @@ pub fn duplicate(h: u32) -> Option<u32> {
 pub fn process(h: u32, msg: &mut [u8]) -> u32 {
     crate::metric!("ipc_requests", 1);
     let Some(sess) = session(h) else {
-        crate::log_once!(format!("bad session {h:#x}"), "[RED] ipc: request on {h:#x}, not a host session");
+        crate::log_once!(
+            format!("bad session {h:#x}"),
+            "[RED] ipc: request on {h:#x}, not a host session"
+        );
         return R_INVALID_HANDLE;
     };
     let domain = sess.lock().unwrap().domain;
@@ -288,7 +325,13 @@ pub fn process(h: u32, msg: &mut [u8]) -> u32 {
         }
     };
     if crate::trace::on("ipc") {
-        crate::log!("ipc: {h:#x} type {} cmd {} domain {:?} data {} bytes", req.ty, req.cmd, req.domain, req.data.len());
+        crate::log!(
+            "ipc: {h:#x} type {} cmd {} domain {:?} data {} bytes",
+            req.ty,
+            req.cmd,
+            req.domain,
+            req.data.len()
+        );
     }
     match req.ty {
         hipc::T_CLOSE => {
@@ -305,7 +348,9 @@ pub fn process(h: u32, msg: &mut [u8]) -> u32 {
                 }
                 1 => {
                     // CopyFromCurrentDomain(object id) -> a session of that object
-                    let id = u32::from_le_bytes(req.data.get(0..4).unwrap_or(&[0; 4]).try_into().unwrap());
+                    let id = u32::from_le_bytes(
+                        req.data.get(0..4).unwrap_or(&[0; 4]).try_into().unwrap(),
+                    );
                     let obj = sess.lock().unwrap().objects.get(&id).cloned();
                     match obj {
                         Some(o) => resp.moved.push(new_session(o, false)),
@@ -347,17 +392,34 @@ pub fn process(h: u32, msg: &mut [u8]) -> u32 {
     let obj = sess.lock().unwrap().objects.get(&target).cloned();
     let Some(obj) = obj else {
         crate::log!("[RED] ipc: domain object {target} of {h:#x} does not exist");
-        hipc::write_response(msg, &Response { result: R_INVALID_HANDLE, ..Default::default() }, domain, req.version, req.token);
+        hipc::write_response(
+            msg,
+            &Response {
+                result: R_INVALID_HANDLE,
+                ..Default::default()
+            },
+            domain,
+            req.version,
+            req.token,
+        );
         return 0;
     };
-    let mut ctx = Ctx { req: &req, resp: Response::default(), iface: String::new(), new_objects: vec![] };
+    let mut ctx = Ctx {
+        req: &req,
+        resp: Response::default(),
+        iface: String::new(),
+        new_objects: vec![],
+    };
     let result = {
         let mut o = obj.lock().unwrap();
         ctx.iface = o.name();
         o.call(&mut ctx)
     };
     ctx.resp.result = result;
-    if crate::trace::on("ipc") || (result != 0 && crate::log::first(&format!("fail {} {} {result:#x}", ctx.iface, req.cmd))) {
+    if crate::trace::on("ipc")
+        || (result != 0
+            && crate::log::first(&format!("fail {} {} {result:#x}", ctx.iface, req.cmd)))
+    {
         crate::log!("ipc: {} #{} -> {result:#x}", ctx.iface, req.cmd);
     }
     let news = std::mem::take(&mut ctx.new_objects);
@@ -391,7 +453,12 @@ impl Service for Sm {
             0 | 4 => 0, // RegisterClient, DetachClient
             1 => {
                 let raw: u64 = ctx.arg(0);
-                let name: String = raw.to_le_bytes().iter().take_while(|&&b| b != 0).map(|&b| b as char).collect();
+                let name: String = raw
+                    .to_le_bytes()
+                    .iter()
+                    .take_while(|&&b| b != 0)
+                    .map(|&b| b as char)
+                    .collect();
                 match connect(&name) {
                     Ok(h) => {
                         ctx.move_handle(h);
@@ -413,7 +480,12 @@ impl Service for Silent {
         self.0.into()
     }
     fn call(&mut self, ctx: &mut Ctx) -> u32 {
-        crate::log_once!(format!("silent {} {}", self.0, ctx.cmd()), "ipc: {} #{}: success with zeroed output (offline stand-in)", self.0, ctx.cmd());
+        crate::log_once!(
+            format!("silent {} {}", self.0, ctx.cmd()),
+            "ipc: {} #{}: success with zeroed output (offline stand-in)",
+            self.0,
+            ctx.cmd()
+        );
         0
     }
 }
@@ -461,26 +533,111 @@ mod tests {
         let sm = open(Box::new(Sm));
         let mut name = [0u8; 8];
         name[..6].copy_from_slice(b"test:c");
-        let (r, resp) = send(sm, Builder { ty: T_REQUEST, cmd: 1, data: name.to_vec(), ..Default::default() }, false);
+        let (r, resp) = send(
+            sm,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 1,
+                data: name.to_vec(),
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!((r, resp.result), (0, 0));
         let h = resp.moved[0];
         assert!(is_session(h));
-        let (_, resp) = send(h, Builder { ty: T_REQUEST, cmd: 0, data: 5u32.to_le_bytes().to_vec(), ..Default::default() }, false);
+        let (_, resp) = send(
+            h,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 0,
+                data: 5u32.to_le_bytes().to_vec(),
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(&resp.data[..4], &5u32.to_le_bytes());
-        let (_, resp) = send(h, Builder { ty: T_REQUEST, cmd: 0, data: 2u32.to_le_bytes().to_vec(), ..Default::default() }, false);
-        assert_eq!(&resp.data[..4], &7u32.to_le_bytes(), "the session keeps its object's state");
-        let (_, resp) = send(h, Builder { ty: T_REQUEST, cmd: 2, ..Default::default() }, false);
+        let (_, resp) = send(
+            h,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 0,
+                data: 2u32.to_le_bytes().to_vec(),
+                ..Default::default()
+            },
+            false,
+        );
+        assert_eq!(
+            &resp.data[..4],
+            &7u32.to_le_bytes(),
+            "the session keeps its object's state"
+        );
+        let (_, resp) = send(
+            h,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 2,
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(resp.copy, vec![0x77]);
-        let (_, resp) = send(h, Builder { ty: T_REQUEST, cmd: 3, ..Default::default() }, false);
+        let (_, resp) = send(
+            h,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 3,
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(resp.result, 0x1234);
-        let (_, resp) = send(h, Builder { ty: T_REQUEST, cmd: 99, ..Default::default() }, false);
+        let (_, resp) = send(
+            h,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 99,
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(resp.result, 0, "an unknown command answers success");
-        let (_, resp) = send(h, Builder { ty: T_REQUEST, cmd: 1, ..Default::default() }, false);
+        let (_, resp) = send(
+            h,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 1,
+                ..Default::default()
+            },
+            false,
+        );
         let sub = resp.moved[0];
-        let (_, resp) = send(sub, Builder { ty: T_REQUEST, cmd: 0, data: 1u32.to_le_bytes().to_vec(), ..Default::default() }, false);
-        assert_eq!(&resp.data[..4], &101u32.to_le_bytes(), "an out object is a session of its own");
+        let (_, resp) = send(
+            sub,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 0,
+                data: 1u32.to_le_bytes().to_vec(),
+                ..Default::default()
+            },
+            false,
+        );
+        assert_eq!(
+            &resp.data[..4],
+            &101u32.to_le_bytes(),
+            "an out object is a session of its own"
+        );
         name[..6].copy_from_slice(b"nope:x");
-        let (_, resp) = send(sm, Builder { ty: T_REQUEST, cmd: 1, data: name.to_vec(), ..Default::default() }, false);
+        let (_, resp) = send(
+            sm,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 1,
+                data: name.to_vec(),
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(resp.result, R_NOT_REGISTERED);
         assert!(close(sub) && !is_session(sub));
         assert_eq!(process(sub, &mut [0u8; 0x100]), R_INVALID_HANDLE);
@@ -492,10 +649,26 @@ mod tests {
     fn unknown_switch2_services_are_caught() {
         assert_eq!(connect_as("nope:s2", false), Err(R_NOT_REGISTERED));
         let h = connect_as("nope:s2", true).unwrap();
-        let (_, resp) = send(h, Builder { ty: T_REQUEST, cmd: 0, ..Default::default() }, false);
+        let (_, resp) = send(
+            h,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 0,
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!((resp.result, resp.moved.len()), (0, 1));
         let obj = resp.moved[0];
-        let (_, resp) = send(obj, Builder { ty: T_REQUEST, cmd: 7, ..Default::default() }, false);
+        let (_, resp) = send(
+            obj,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 7,
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!((resp.result, resp.moved.len()), (0, 0));
         assert!(resp.data.iter().all(|&b| b == 0));
     }
@@ -503,21 +676,63 @@ mod tests {
     #[test]
     fn domains() {
         let h = open(Box::new(Counter(0)));
-        let (_, resp) = send(h, Builder { ty: T_CONTROL, cmd: 0, ..Default::default() }, false);
+        let (_, resp) = send(
+            h,
+            Builder {
+                ty: T_CONTROL,
+                cmd: 0,
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(&resp.data[..4], &1u32.to_le_bytes());
-        let (_, resp) = send(h, Builder { ty: T_CONTROL, cmd: 3, ..Default::default() }, false);
+        let (_, resp) = send(
+            h,
+            Builder {
+                ty: T_CONTROL,
+                cmd: 3,
+                ..Default::default()
+            },
+            false,
+        );
         assert_eq!(&resp.data[..2], &0x8000u16.to_le_bytes());
         // in the domain: object 1 opens a sub-object, which gets id 2
-        let mut m = Builder { ty: T_REQUEST, cmd: 1, domain_object: Some(1), ..Default::default() }.build();
+        let mut m = Builder {
+            ty: T_REQUEST,
+            cmd: 1,
+            domain_object: Some(1),
+            ..Default::default()
+        }
+        .build();
         assert_eq!(process(h, &mut m), 0);
         let resp = hipc::parse_response(&m, true).unwrap();
         assert_eq!(resp.result, 0);
         assert!(resp.moved.is_empty(), "no session moved in a domain");
         let id = u32::from_le_bytes(resp.data[..4].try_into().unwrap());
         assert_eq!(id, 2);
-        let (_, resp) = send(h, Builder { ty: T_REQUEST, cmd: 0, data: 3u32.to_le_bytes().to_vec(), domain_object: Some(2), ..Default::default() }, true);
+        let (_, resp) = send(
+            h,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 0,
+                data: 3u32.to_le_bytes().to_vec(),
+                domain_object: Some(2),
+                ..Default::default()
+            },
+            true,
+        );
         assert_eq!(&resp.data[..4], &103u32.to_le_bytes());
-        let (_, resp) = send(h, Builder { ty: T_REQUEST, cmd: 0, data: 3u32.to_le_bytes().to_vec(), domain_object: Some(9), ..Default::default() }, true);
+        let (_, resp) = send(
+            h,
+            Builder {
+                ty: T_REQUEST,
+                cmd: 0,
+                data: 3u32.to_le_bytes().to_vec(),
+                domain_object: Some(9),
+                ..Default::default()
+            },
+            true,
+        );
         assert_eq!(resp.result, R_INVALID_HANDLE);
     }
 }

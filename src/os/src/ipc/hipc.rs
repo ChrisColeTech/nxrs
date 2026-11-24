@@ -69,20 +69,34 @@ pub enum ParseError {
 }
 
 fn w(b: &[u8], i: usize) -> Result<u32, ParseError> {
-    b.get(i * 4..i * 4 + 4).map(|s| u32::from_le_bytes(s.try_into().unwrap())).ok_or(ParseError::Short)
+    b.get(i * 4..i * 4 + 4)
+        .map(|s| u32::from_le_bytes(s.try_into().unwrap()))
+        .ok_or(ParseError::Short)
 }
 
 fn abw(p0: u32, p1: u32, p2: u32) -> Buf {
     let addr = p1 as u64 | ((p2 as u64 >> 28) & 0xF) << 32 | ((p2 as u64 >> 2) & 0x3F_FFFF) << 36;
     let size = p0 as u64 | ((p2 as u64 >> 24) & 0xF) << 32;
-    Buf { addr, size, tag: p2 & 3 }
+    Buf {
+        addr,
+        size,
+        tag: p2 & 3,
+    }
 }
 
 /// Parses a request message. `domain` says whether the session is a domain (then requests carry a domain header).
 pub fn parse(msg: &[u8], domain: bool) -> Result<Request, ParseError> {
     let (h0, h1) = (w(msg, 0)?, w(msg, 1)?);
-    let mut r = Request { ty: (h0 & 0xFFFF) as u16, ..Default::default() };
-    let (nx, na, nb, nw) = ((h0 >> 16) & 15, (h0 >> 20) & 15, (h0 >> 24) & 15, (h0 >> 28) & 15);
+    let mut r = Request {
+        ty: (h0 & 0xFFFF) as u16,
+        ..Default::default()
+    };
+    let (nx, na, nb, nw) = (
+        (h0 >> 16) & 15,
+        (h0 >> 20) & 15,
+        (h0 >> 24) & 15,
+        (h0 >> 28) & 15,
+    );
     let ndw = (h1 & 0x3FF) as usize;
     let cmode = (h1 >> 10) & 15;
     let mut p = 2usize;
@@ -105,7 +119,11 @@ pub fn parse(msg: &[u8], domain: bool) -> Result<Request, ParseError> {
     for _ in 0..nx {
         let (d0, d1) = (w(msg, p)?, w(msg, p + 1)?);
         let addr = d1 as u64 | ((d0 as u64 >> 12) & 0xF) << 32 | ((d0 as u64 >> 6) & 0x3F) << 36;
-        r.x.push(Buf { addr, size: (d0 >> 16) as u64, tag: d0 & 0x3F });
+        r.x.push(Buf {
+            addr,
+            size: (d0 >> 16) as u64,
+            tag: d0 & 0x3F,
+        });
         p += 2;
     }
     for k in 0..na + nb + nw {
@@ -133,7 +151,11 @@ pub fn parse(msg: &[u8], domain: bool) -> Result<Request, ParseError> {
     let mut q = data_end / 4;
     for _ in 0..nc {
         let (c0, c1) = (w(msg, q)?, w(msg, q + 1)?);
-        r.c.push(Buf { addr: c0 as u64 | ((c1 & 0xFFFF) as u64) << 32, size: (c1 >> 16) as u64, tag: 0 });
+        r.c.push(Buf {
+            addr: c0 as u64 | ((c1 & 0xFFFF) as u64) << 32,
+            size: (c1 >> 16) as u64,
+            tag: 0,
+        });
         q += 2;
     }
     if r.ty == T_CLOSE {
@@ -147,7 +169,11 @@ pub fn parse(msg: &[u8], domain: bool) -> Result<Request, ParseError> {
         let nobj = ((d0 >> 8) & 0xFF) as usize;
         let dsize = (d0 >> 16) as usize;
         let object = w(msg, cm / 4 + 1)?;
-        let mut dom = Domain { kind, object, in_objects: vec![] };
+        let mut dom = Domain {
+            kind,
+            object,
+            in_objects: vec![],
+        };
         cm += 16;
         if kind == D_SEND {
             payload_end = cm + dsize;
@@ -169,7 +195,10 @@ pub fn parse(msg: &[u8], domain: bool) -> Result<Request, ParseError> {
     r.token = w(msg, cm / 4 + 3)?;
     let a = cm + 16;
     if payload_end > a {
-        r.data = msg.get(a..payload_end.min(msg.len())).ok_or(ParseError::Short)?.to_vec();
+        r.data = msg
+            .get(a..payload_end.min(msg.len()))
+            .ok_or(ParseError::Short)?
+            .to_vec();
     }
     Ok(r)
 }
@@ -247,7 +276,9 @@ impl Builder {
         let mut words: Vec<u32> = vec![0, 0];
         let special = self.pid || !self.copy.is_empty() || !self.moved.is_empty();
         if special {
-            words.push(self.pid as u32 | (self.copy.len() as u32) << 1 | (self.moved.len() as u32) << 5);
+            words.push(
+                self.pid as u32 | (self.copy.len() as u32) << 1 | (self.moved.len() as u32) << 5,
+            );
             if self.pid {
                 words.extend([0, 0]);
             }
@@ -255,13 +286,23 @@ impl Builder {
             words.extend(&self.moved);
         }
         for x in &self.x {
-            words.push(x.tag & 0x3F | (((x.addr >> 36) & 0x3F) as u32) << 6 | (((x.addr >> 32) & 0xF) as u32) << 12 | (x.size as u32) << 16);
+            words.push(
+                x.tag & 0x3F
+                    | (((x.addr >> 36) & 0x3F) as u32) << 6
+                    | (((x.addr >> 32) & 0xF) as u32) << 12
+                    | (x.size as u32) << 16,
+            );
             words.push(x.addr as u32);
         }
         for d in self.a.iter().chain(&self.b) {
             words.push(d.size as u32);
             words.push(d.addr as u32);
-            words.push(d.tag & 3 | (((d.addr >> 36) & 0x3F_FFFF) as u32) << 2 | (((d.size >> 32) & 0xF) as u32) << 24 | (((d.addr >> 32) & 0xF) as u32) << 28);
+            words.push(
+                d.tag & 3
+                    | (((d.addr >> 36) & 0x3F_FFFF) as u32) << 2
+                    | (((d.size >> 32) & 0xF) as u32) << 24
+                    | (((d.addr >> 32) & 0xF) as u32) << 28,
+            );
         }
         let start = words.len() * 4;
         let cm = (start + 15) & !15;
@@ -286,15 +327,24 @@ impl Builder {
             body.extend_from_slice(&payload);
         }
         let ndw = body.len().div_ceil(4) + 4;
-        let cmode = if self.c.is_empty() { 0 } else { self.c.len() as u32 + 2 };
-        words[0] = self.ty as u32 | (self.x.len() as u32) << 16 | (self.a.len() as u32) << 20 | (self.b.len() as u32) << 24;
+        let cmode = if self.c.is_empty() {
+            0
+        } else {
+            self.c.len() as u32 + 2
+        };
+        words[0] = self.ty as u32
+            | (self.x.len() as u32) << 16
+            | (self.a.len() as u32) << 20
+            | (self.b.len() as u32) << 24;
         words[1] = ndw as u32 | cmode << 10 | if special { 1 << 31 } else { 0 };
         let mut out: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
         out.extend_from_slice(&body);
         out.resize(start + ndw * 4, 0);
         for c in &self.c {
             out.extend_from_slice(&(c.addr as u32).to_le_bytes());
-            out.extend_from_slice(&((((c.addr >> 32) & 0xFFFF) as u32) | (c.size as u32) << 16).to_le_bytes());
+            out.extend_from_slice(
+                &((((c.addr >> 32) & 0xFFFF) as u32) | (c.size as u32) << 16).to_le_bytes(),
+            );
         }
         out.resize(0x100.max(out.len()), 0);
         out
@@ -350,10 +400,26 @@ mod tests {
             data: vec![1, 2, 3, 4, 5, 6, 7, 8],
             pid: true,
             copy: vec![0x1234],
-            x: vec![Buf { addr: 0x7_1234_5678, size: 0x40, tag: 3 }],
-            a: vec![Buf { addr: 0x3F_8765_4321, size: 0x1_0000_0010, tag: 1 }],
-            b: vec![Buf { addr: 0x55_0000_1000, size: 0x200, tag: 0 }],
-            c: vec![Buf { addr: 0xABCD_0000_0100, size: 0x80, tag: 0 }],
+            x: vec![Buf {
+                addr: 0x7_1234_5678,
+                size: 0x40,
+                tag: 3,
+            }],
+            a: vec![Buf {
+                addr: 0x3F_8765_4321,
+                size: 0x1_0000_0010,
+                tag: 1,
+            }],
+            b: vec![Buf {
+                addr: 0x55_0000_1000,
+                size: 0x200,
+                tag: 0,
+            }],
+            c: vec![Buf {
+                addr: 0xABCD_0000_0100,
+                size: 0x80,
+                tag: 0,
+            }],
             ..Default::default()
         };
         let m = b.build();
@@ -362,22 +428,59 @@ mod tests {
         assert_eq!(r.cmd, 42);
         assert_eq!(r.pid, Some(0));
         assert_eq!(r.copy, vec![0x1234]);
-        assert_eq!(r.x, vec![Buf { addr: 0x7_1234_5678, size: 0x40, tag: 3 }]);
-        assert_eq!(r.a, vec![Buf { addr: 0x3F_8765_4321, size: 0x1_0000_0010, tag: 1 }]);
+        assert_eq!(
+            r.x,
+            vec![Buf {
+                addr: 0x7_1234_5678,
+                size: 0x40,
+                tag: 3
+            }]
+        );
+        assert_eq!(
+            r.a,
+            vec![Buf {
+                addr: 0x3F_8765_4321,
+                size: 0x1_0000_0010,
+                tag: 1
+            }]
+        );
         assert_eq!(r.b[0].addr, 0x55_0000_1000);
-        assert_eq!(r.c, vec![Buf { addr: 0xABCD_0000_0100, size: 0x80, tag: 0 }]);
+        assert_eq!(
+            r.c,
+            vec![Buf {
+                addr: 0xABCD_0000_0100,
+                size: 0x80,
+                tag: 0
+            }]
+        );
         assert_eq!(&r.data[..8], &[1, 2, 3, 4, 5, 6, 7, 8]);
     }
 
     #[test]
     fn domain_request() {
-        let b = Builder { ty: T_REQUEST, cmd: 7, data: 9u32.to_le_bytes().to_vec(), domain_object: Some(5), in_objects: vec![3], ..Default::default() };
+        let b = Builder {
+            ty: T_REQUEST,
+            cmd: 7,
+            data: 9u32.to_le_bytes().to_vec(),
+            domain_object: Some(5),
+            in_objects: vec![3],
+            ..Default::default()
+        };
         let r = parse(&b.build(), true).unwrap();
         let d = r.domain.unwrap();
-        assert_eq!((d.kind, d.object, d.in_objects.clone()), (D_SEND, 5, vec![3]));
+        assert_eq!(
+            (d.kind, d.object, d.in_objects.clone()),
+            (D_SEND, 5, vec![3])
+        );
         assert_eq!(r.cmd, 7);
         assert_eq!(r.data, 9u32.to_le_bytes().to_vec());
-        let mut close = Builder { ty: T_REQUEST, cmd: 0, domain_object: Some(5), ..Default::default() }.build();
+        let mut close = Builder {
+            ty: T_REQUEST,
+            cmd: 0,
+            domain_object: Some(5),
+            ..Default::default()
+        }
+        .build();
         let cm = 16; // no descriptors: the CMIF part at 0x10
         close[cm] = D_CLOSE;
         let r = parse(&close, true).unwrap();
@@ -387,7 +490,13 @@ mod tests {
     #[test]
     fn response_layout() {
         let mut m = vec![0xAAu8; 0x100];
-        let resp = Response { result: 0, data: 0x1122_3344u32.to_le_bytes().to_vec(), copy: vec![0x9], moved: vec![0xD0001], objects: vec![] };
+        let resp = Response {
+            result: 0,
+            data: 0x1122_3344u32.to_le_bytes().to_vec(),
+            copy: vec![0x9],
+            moved: vec![0xD0001],
+            objects: vec![],
+        };
         write_response(&mut m, &resp, false, 1, 0);
         let r = parse_response(&m, false).unwrap();
         assert_eq!(r.result, 0);
@@ -395,8 +504,20 @@ mod tests {
         assert_eq!(r.moved, vec![0xD0001]);
         assert_eq!(&r.data[..4], &0x1122_3344u32.to_le_bytes());
         // the CMIF part is 16-byte aligned: header (2 words) + special header + 2 handles = 20 bytes -> 0x20
-        assert_eq!(u32::from_le_bytes(m[0x20..0x24].try_into().unwrap()), MAGIC_SFCO);
-        write_response(&mut m, &Response { result: 0xE15, ..Default::default() }, true, 1, 0);
+        assert_eq!(
+            u32::from_le_bytes(m[0x20..0x24].try_into().unwrap()),
+            MAGIC_SFCO
+        );
+        write_response(
+            &mut m,
+            &Response {
+                result: 0xE15,
+                ..Default::default()
+            },
+            true,
+            1,
+            0,
+        );
         let r = parse_response(&m, true).unwrap();
         assert_eq!(r.result, 0xE15);
     }
@@ -404,7 +525,12 @@ mod tests {
     #[test]
     fn errors() {
         assert_eq!(parse(&[0u8; 4], false), Err(ParseError::Short));
-        let mut m = Builder { ty: T_REQUEST, cmd: 1, ..Default::default() }.build();
+        let mut m = Builder {
+            ty: T_REQUEST,
+            cmd: 1,
+            ..Default::default()
+        }
+        .build();
         m[0x10] = 0;
         assert!(matches!(parse(&m, false), Err(ParseError::BadMagic(_))));
     }

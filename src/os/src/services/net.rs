@@ -24,7 +24,10 @@ impl Service for Btm {
     }
     fn call(&mut self, ctx: &mut Ctx) -> u32 {
         if ctx.cmd() == 0 {
-            crate::log_once!("btm", "btm:u: Bluetooth LE interface handed out (no adapter: scans find nothing)");
+            crate::log_once!(
+                "btm",
+                "btm:u: Bluetooth LE interface handed out (no adapter: scans find nothing)"
+            );
             ctx.object(BtmCore { events: vec![] });
         }
         0
@@ -55,7 +58,10 @@ impl Service for Bt {
         "bt".into()
     }
     fn call(&mut self, ctx: &mut Ctx) -> u32 {
-        crate::log_once!("bt", "bt: Bluetooth user service opened (no adapter: its BLE event never fires)");
+        crate::log_once!(
+            "bt",
+            "bt: Bluetooth user service opened (no adapter: its BLE event never fires)"
+        );
         if ctx.cmd() == 9 {
             let e = Event::new();
             ctx.copy_handle(e.readable);
@@ -110,7 +116,11 @@ impl Service for Bsd {
                 if !socket::is_ours(fd) {
                     return Self::ret_err(ctx, socket::ENETDOWN);
                 }
-                let r = match socket::efd_write(fd, b.get(..8).map_or(0, |s| u64::from_le_bytes(s.try_into().unwrap()))) {
+                let r = match socket::efd_write(
+                    fd,
+                    b.get(..8)
+                        .map_or(0, |s| u64::from_le_bytes(s.try_into().unwrap())),
+                ) {
                     0 if b.len() >= 8 => 8,
                     _ if socket::errno() == 9 => socket::sendto(fd, &b, 0, None),
                     _ => -1,
@@ -160,7 +170,13 @@ impl Service for Bsd {
                     return Self::ret_err(ctx, 22);
                 }
                 let mut v: Vec<(i32, i16, i16)> = (0..n)
-                    .map(|i| (i32::from_le_bytes(fds[8 * i..8 * i + 4].try_into().unwrap()), i16::from_le_bytes(fds[8 * i + 4..8 * i + 6].try_into().unwrap()), 0))
+                    .map(|i| {
+                        (
+                            i32::from_le_bytes(fds[8 * i..8 * i + 4].try_into().unwrap()),
+                            i16::from_le_bytes(fds[8 * i + 4..8 * i + 6].try_into().unwrap()),
+                            0,
+                        )
+                    })
                     .collect();
                 let r = socket::poll(&mut v, timeout);
                 let mut out = fds[..n * 8].to_vec();
@@ -193,12 +209,23 @@ mod tests {
     use crate::ipc::hipc::{self, Buf, Builder, T_REQUEST};
 
     fn send(h: u32, cmd: u32, data: Vec<u8>, a: Vec<Buf>, b: Vec<Buf>) -> hipc::Response {
-        let mut m = Builder { ty: T_REQUEST, cmd, data, a, b, ..Default::default() }.build();
+        let mut m = Builder {
+            ty: T_REQUEST,
+            cmd,
+            data,
+            a,
+            b,
+            ..Default::default()
+        }
+        .build();
         crate::ipc::process(h, &mut m);
         hipc::parse_response(&m, false).unwrap()
     }
     fn ret(r: &hipc::Response) -> (i32, i32) {
-        (i32::from_le_bytes(r.data[0..4].try_into().unwrap()), i32::from_le_bytes(r.data[4..8].try_into().unwrap()))
+        (
+            i32::from_le_bytes(r.data[0..4].try_into().unwrap()),
+            i32::from_le_bytes(r.data[4..8].try_into().unwrap()),
+        )
     }
 
     /// btm:u as Turbo 13a2693 answers it: command 0 hands out IBtmUserCore; its four Acquire...Event commands (0,
@@ -213,7 +240,11 @@ mod tests {
         let core = r.moved[0];
         for cmd in [0, 17, 26, 33] {
             let r = send(core, cmd, vec![], vec![], vec![]);
-            assert_eq!((r.result, r.data[0], r.copy.len()), (0, 1, 1), "Acquire...Event {cmd}");
+            assert_eq!(
+                (r.result, r.data[0], r.copy.len()),
+                (0, 1, 1),
+                "Acquire...Event {cmd}"
+            );
         }
         let r = send(core, 5, vec![], vec![], vec![]);
         assert_eq!((r.result, r.copy.len()), (0, 0));
@@ -226,30 +257,126 @@ mod tests {
         super::register();
         let h = crate::ipc::connect("bsd:s").unwrap();
         // non-blocking (EFD_NONBLOCK, 4): a read with no count answers EAGAIN instead of waiting
-        let r = send(h, 31, [5u64.to_le_bytes().to_vec(), 4u32.to_le_bytes().to_vec()].concat(), vec![], vec![]);
+        let r = send(
+            h,
+            31,
+            [5u64.to_le_bytes().to_vec(), 4u32.to_le_bytes().to_vec()].concat(),
+            vec![],
+            vec![],
+        );
         let (fd, e) = ret(&r);
         assert!(fd >= 0 && e == 0, "EventFd -> {fd}, errno {e}");
         let three = 3u64.to_le_bytes();
-        let r = send(h, 24, (fd as u32).to_le_bytes().to_vec(), vec![Buf { addr: three.as_ptr() as u64, size: 8, tag: 0 }], vec![]);
+        let r = send(
+            h,
+            24,
+            (fd as u32).to_le_bytes().to_vec(),
+            vec![Buf {
+                addr: three.as_ptr() as u64,
+                size: 8,
+                tag: 0,
+            }],
+            vec![],
+        );
         assert_eq!(ret(&r), (8, 0), "Write");
         let mut fds = [0u8; 8];
         fds[..4].copy_from_slice(&fd.to_le_bytes());
         fds[4..6].copy_from_slice(&(1i16 | 4).to_le_bytes());
         let mut out = [0u8; 8];
-        let r = send(h, 6, [1u32.to_le_bytes(), 0u32.to_le_bytes()].concat(), vec![Buf { addr: fds.as_ptr() as u64, size: 8, tag: 0 }], vec![Buf { addr: out.as_mut_ptr() as u64, size: 8, tag: 0 }]);
+        let r = send(
+            h,
+            6,
+            [1u32.to_le_bytes(), 0u32.to_le_bytes()].concat(),
+            vec![Buf {
+                addr: fds.as_ptr() as u64,
+                size: 8,
+                tag: 0,
+            }],
+            vec![Buf {
+                addr: out.as_mut_ptr() as u64,
+                size: 8,
+                tag: 0,
+            }],
+        );
         assert_eq!(ret(&r), (1, 0), "Poll: one ready");
-        assert_eq!(i16::from_le_bytes([out[6], out[7]]), 1 | 4, "POLLIN with a count, POLLOUT always");
+        assert_eq!(
+            i16::from_le_bytes([out[6], out[7]]),
+            1 | 4,
+            "POLLIN with a count, POLLOUT always"
+        );
         let mut v = [0u8; 8];
-        let r = send(h, 25, (fd as u32).to_le_bytes().to_vec(), vec![], vec![Buf { addr: v.as_mut_ptr() as u64, size: 8, tag: 0 }]);
-        assert_eq!((ret(&r), u64::from_le_bytes(v)), ((8, 0), 8), "Read takes the whole count");
-        let r = send(h, 25, (fd as u32).to_le_bytes().to_vec(), vec![], vec![Buf { addr: v.as_mut_ptr() as u64, size: 8, tag: 0 }]);
+        let r = send(
+            h,
+            25,
+            (fd as u32).to_le_bytes().to_vec(),
+            vec![],
+            vec![Buf {
+                addr: v.as_mut_ptr() as u64,
+                size: 8,
+                tag: 0,
+            }],
+        );
+        assert_eq!(
+            (ret(&r), u64::from_le_bytes(v)),
+            ((8, 0), 8),
+            "Read takes the whole count"
+        );
+        let r = send(
+            h,
+            25,
+            (fd as u32).to_le_bytes().to_vec(),
+            vec![],
+            vec![Buf {
+                addr: v.as_mut_ptr() as u64,
+                size: 8,
+                tag: 0,
+            }],
+        );
         assert_eq!(ret(&r), (-1, 35), "then EAGAIN");
-        let r = send(h, 6, [1u32.to_le_bytes(), 0u32.to_le_bytes()].concat(), vec![Buf { addr: fds.as_ptr() as u64, size: 8, tag: 0 }], vec![Buf { addr: out.as_mut_ptr() as u64, size: 8, tag: 0 }]);
-        assert_eq!(i16::from_le_bytes([out[6], out[7]]), 4, "no count: only POLLOUT");
+        let r = send(
+            h,
+            6,
+            [1u32.to_le_bytes(), 0u32.to_le_bytes()].concat(),
+            vec![Buf {
+                addr: fds.as_ptr() as u64,
+                size: 8,
+                tag: 0,
+            }],
+            vec![Buf {
+                addr: out.as_mut_ptr() as u64,
+                size: 8,
+                tag: 0,
+            }],
+        );
+        assert_eq!(
+            i16::from_le_bytes([out[6], out[7]]),
+            4,
+            "no count: only POLLOUT"
+        );
         let _ = r;
-        assert_eq!(ret(&send(h, 26, (fd as u32).to_le_bytes().to_vec(), vec![], vec![])), (0, 0), "Close");
-        assert_eq!(ret(&send(h, 36, vec![], vec![], vec![])), (0, 0), "SDK 22's registration");
-        let r = send(h, 2, [2u32, 1, 0].iter().flat_map(|v| v.to_le_bytes()).collect(), vec![], vec![]);
+        assert_eq!(
+            ret(&send(
+                h,
+                26,
+                (fd as u32).to_le_bytes().to_vec(),
+                vec![],
+                vec![]
+            )),
+            (0, 0),
+            "Close"
+        );
+        assert_eq!(
+            ret(&send(h, 36, vec![], vec![], vec![])),
+            (0, 0),
+            "SDK 22's registration"
+        );
+        let r = send(
+            h,
+            2,
+            [2u32, 1, 0].iter().flat_map(|v| v.to_le_bytes()).collect(),
+            vec![],
+            vec![],
+        );
         assert_eq!(ret(&r).0, -1, "a TCP socket: no network");
     }
 }

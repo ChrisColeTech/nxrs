@@ -59,7 +59,11 @@ unsafe fn vsync_event(c: *mut Cpu) {
 
 /// printf for the guest: integer and pointer arguments from `ints`, doubles from `floats`, strings read from
 /// guest memory.
-pub fn format(fmt: &str, ints: &mut dyn Iterator<Item = u64>, floats: &mut dyn Iterator<Item = f64>) -> String {
+pub fn format(
+    fmt: &str,
+    ints: &mut dyn Iterator<Item = u64>,
+    floats: &mut dyn Iterator<Item = f64>,
+) -> String {
     let mut out = String::new();
     let b = fmt.as_bytes();
     let mut i = 0;
@@ -82,30 +86,60 @@ pub fn format(fmt: &str, ints: &mut dyn Iterator<Item = u64>, floats: &mut dyn I
         let spec = &fmt[start..i];
         let Some(&conv) = b.get(i) else { break };
         i += 1;
-        let width: usize = spec.trim_start_matches(['-', '+', ' ', '#', '0']).split('.').next().unwrap_or("").parse().unwrap_or(0);
-        let long = spec.contains('l') || spec.contains('z') || spec.contains('j') || spec.contains('t') || spec.contains('q');
+        let width: usize = spec
+            .trim_start_matches(['-', '+', ' ', '#', '0'])
+            .split('.')
+            .next()
+            .unwrap_or("")
+            .parse()
+            .unwrap_or(0);
+        let long = spec.contains('l')
+            || spec.contains('z')
+            || spec.contains('j')
+            || spec.contains('t')
+            || spec.contains('q');
         let s = match conv {
             b'd' | b'i' => {
                 let v = ints.next().unwrap_or(0);
-                if long { (v as i64).to_string() } else { (v as i32).to_string() }
+                if long {
+                    (v as i64).to_string()
+                } else {
+                    (v as i32).to_string()
+                }
             }
             b'u' => {
                 let v = ints.next().unwrap_or(0);
-                if long { v.to_string() } else { (v as u32).to_string() }
+                if long {
+                    v.to_string()
+                } else {
+                    (v as u32).to_string()
+                }
             }
             b'x' | b'X' => {
                 let v = ints.next().unwrap_or(0);
                 let v = if long { v } else { v as u32 as u64 };
-                if conv == b'x' { format!("{v:x}") } else { format!("{v:X}") }
+                if conv == b'x' {
+                    format!("{v:x}")
+                } else {
+                    format!("{v:X}")
+                }
             }
             b'p' => format!("{:#x}", ints.next().unwrap_or(0)),
             b'c' => ((ints.next().unwrap_or(0) as u8) as char).to_string(),
             b's' => {
                 let p = ints.next().unwrap_or(0);
-                if p == 0 { "(null)".into() } else { cstr(p, 1024) }
+                if p == 0 {
+                    "(null)".into()
+                } else {
+                    cstr(p, 1024)
+                }
             }
             b'f' | b'F' | b'e' | b'g' | b'G' => {
-                let prec: usize = spec.split('.').nth(1).and_then(|p| p.parse().ok()).unwrap_or(6);
+                let prec: usize = spec
+                    .split('.')
+                    .nth(1)
+                    .and_then(|p| p.parse().ok())
+                    .unwrap_or(6);
                 format!("{:.*}", prec, floats.next().unwrap_or(0.0))
             }
             _ => format!("%{spec}{}", conv as char),
@@ -129,7 +163,11 @@ fn va_streams(va: u64) -> (Vec<u64>, Vec<f64>) {
             ints.push(r64((gr_top as i64 + gr) as u64));
             gr += 8;
         } else {
-            ints.push(if nxrt::mem::readable(sp, 8) { r64(sp) } else { 0 });
+            ints.push(if nxrt::mem::readable(sp, 8) {
+                r64(sp)
+            } else {
+                0
+            });
             sp += 8;
         }
     }
@@ -174,22 +212,43 @@ unsafe fn diag_abort(c: *mut Cpu) {
     let cpu = &mut *c;
     let name = nxrt::hostfn::name_of(cpu.pc).unwrap_or_default();
     // AbortImpl(const char *condition, const char *function, const char *file, int line, ...)
-    let (cond, func, file, line) = (cstr(cpu.x[0], 256), cstr(cpu.x[1], 256), cstr(cpu.x[2], 256), cpu.x[3] as i32);
+    let (cond, func, file, line) = (
+        cstr(cpu.x[0], 256),
+        cstr(cpu.x[1], 256),
+        cstr(cpu.x[2], 256),
+        cpu.x[3] as i32,
+    );
     let msg = if name.contains("10VAbortImpl") {
         let (i, f) = va_streams(cpu.arg_x(7));
-        format(&cstr(cpu.x[6], 1024), &mut i.into_iter(), &mut f.into_iter())
+        format(
+            &cstr(cpu.x[6], 1024),
+            &mut i.into_iter(),
+            &mut f.into_iter(),
+        )
     } else if name.contains("PKNS_6ResultES3_z") {
         let fmt = cstr(cpu.x[5], 1024);
         let mut ints = (6..32).map(|i| cpu.arg_x(i));
-        format(&fmt, &mut ints, &mut (0..8).map(|i| f64::from_bits(cpu.v[i] as u64)))
+        format(
+            &fmt,
+            &mut ints,
+            &mut (0..8).map(|i| f64::from_bits(cpu.v[i] as u64)),
+        )
     } else if name.contains("iS3_z") {
         let fmt = cstr(cpu.x[4], 1024);
         let mut ints = (5..32).map(|i| cpu.arg_x(i));
-        format(&fmt, &mut ints, &mut (0..8).map(|i| f64::from_bits(cpu.v[i] as u64)))
+        format(
+            &fmt,
+            &mut ints,
+            &mut (0..8).map(|i| f64::from_bits(cpu.v[i] as u64)),
+        )
     } else {
         String::new()
     };
-    let res = if name.contains("PKNS_6ResultE") && cpu.x[4] != 0 { r32(cpu.x[4]) } else { 0 };
+    let res = if name.contains("PKNS_6ResultE") && cpu.x[4] != 0 {
+        r32(cpu.x[4])
+    } else {
+        0
+    };
     crate::log!("[RED] the game aborted (nn::diag): {cond} in {func} ({file}:{line}) Result {res:#x}: {msg}");
     crate::log::report_gaps("guest abort");
     crate::nvn::report();
@@ -199,8 +258,15 @@ unsafe fn diag_abort(c: *mut Cpu) {
 unsafe fn diag_abort_short(c: *mut Cpu) {
     let cpu = &mut *c;
     let name = nxrt::hostfn::name_of(cpu.pc).unwrap_or_default();
-    let res = if name.ends_with("PKNS_6ResultE") && cpu.x[0] != 0 { r32(cpu.x[0]) } else { 0 };
-    crate::log!("[RED] the game aborted (nn::diag) Result {res:#x}, called from {}", nxrt::dispatch::guest_name(cpu.x[30]));
+    let res = if name.ends_with("PKNS_6ResultE") && cpu.x[0] != 0 {
+        r32(cpu.x[0])
+    } else {
+        0
+    };
+    crate::log!(
+        "[RED] the game aborted (nn::diag) Result {res:#x}, called from {}",
+        nxrt::dispatch::guest_name(cpu.x[30])
+    );
     crate::log::report_gaps("guest abort");
     crate::nvn::report();
     nxrt::rt::guest_fatal(c, "nn::diag abort");
@@ -215,7 +281,9 @@ mfn!(zero, |a| { 0 });
 
 // ---- add-on content
 
-mfn!(aoc_count, |a| { crate::services::fs::aoc_indices().len() as u64 });
+mfn!(aoc_count, |a| {
+    crate::services::fs::aoc_indices().len() as u64
+});
 mfn!(aoc_list, |a| {
     // ListAddOnContent(int *out, int offset, int count)
     let (out, off, n) = (a.x(0), a.i(1).max(0) as usize, a.i(2));
@@ -228,7 +296,12 @@ mfn!(aoc_list, |a| {
         w32(out + 4 * w, *idx);
         w += 1;
     }
-    crate::log_once!("aoc list", "aoc: {} add-on content installed: {:?}", v.len(), v);
+    crate::log_once!(
+        "aoc list",
+        "aoc: {} add-on content installed: {:?}",
+        v.len(),
+        v
+    );
     w
 });
 unsafe fn aoc_event(c: *mut Cpu) {
@@ -241,7 +314,14 @@ unsafe fn aoc_event(c: *mut Cpu) {
 /// The six shared font slots (pl::SharedFontType): the console's are firmware content, so each slot is the player's
 /// own `<data>\fonts\<Name>.bfttf` (decrypted) or `.ttf` when there is one (Turbo main.c fonts_fill), else one system
 /// TTF for every slot (Arial, Segoe UI, Tahoma; `NXOS_FONT` names another).
-const FONT_NAMES: [&str; 6] = ["FontStandard", "FontChineseSimplified", "FontExtendedChineseSimplified", "FontChineseTraditional", "FontKorean", "FontNintendoExtended"];
+const FONT_NAMES: [&str; 6] = [
+    "FontStandard",
+    "FontChineseSimplified",
+    "FontExtendedChineseSimplified",
+    "FontChineseTraditional",
+    "FontKorean",
+    "FontNintendoExtended",
+];
 
 #[derive(Clone, Copy)]
 struct Font {
@@ -284,7 +364,10 @@ fn fallback_ttf() -> Option<(Vec<u8>, std::path::PathBuf)> {
         return std::fs::read(&p).ok().map(|d| (d, p.into()));
     }
     let w = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
-    ["arial.ttf", "segoeui.ttf", "tahoma.ttf"].iter().map(|n| std::path::Path::new(&w).join("Fonts").join(n)).find_map(|p| std::fs::read(&p).ok().map(|d| (d, p)))
+    ["arial.ttf", "segoeui.ttf", "tahoma.ttf"]
+        .iter()
+        .map(|n| std::path::Path::new(&w).join("Fonts").join(n))
+        .find_map(|p| std::fs::read(&p).ok().map(|d| (d, p)))
 }
 
 /// A TTF placed in guest memory behind its BFTTF header (a "decrypted" marker and the length, XOR-keyed).
@@ -294,7 +377,10 @@ fn place(ttf: &[u8]) -> Font {
     w32(a, 0x1802_9a7f);
     w32(a + 4, (n as u32 ^ 0x4962_1806).swap_bytes());
     crate::guest::write_bytes(a + 8, ttf);
-    Font { addr: a, size: n + 8 }
+    Font {
+        addr: a,
+        size: n + 8,
+    }
 }
 
 fn fonts() -> &'static [Option<Font>; 6] {
@@ -402,14 +488,19 @@ static NFP_STATE: AtomicI32 = AtomicI32::new(0);
 const NFP_NO_TAG: u64 = 115 | 97 << 9;
 mfn!(nfp_init, |a| {
     NFP_LIB.store(1, Ordering::Relaxed);
-    crate::log_once!("nfp", "nfp::Initialize: one NFC device that never finds an amiibo");
+    crate::log_once!(
+        "nfp",
+        "nfp::Initialize: one NFC device that never finds an amiibo"
+    );
     0
 });
 mfn!(nfp_fini, |a| {
     NFP_LIB.store(0, Ordering::Relaxed);
     0
 });
-mfn!(nfp_lib_state, |a| { NFP_LIB.load(Ordering::Relaxed) as u64 });
+mfn!(nfp_lib_state, |a| {
+    NFP_LIB.load(Ordering::Relaxed) as u64
+});
 mfn!(nfp_list, |a| {
     let (out, n, max) = (a.x(0), a.x(1), a.i(2));
     w32(n, 0);
@@ -432,7 +523,9 @@ mfn!(nfp_stop, |a| {
     NFP_STATE.store(0, Ordering::Relaxed);
     RES_OK
 });
-mfn!(nfp_dev_state, |a| { NFP_STATE.load(Ordering::Relaxed) as u64 });
+mfn!(nfp_dev_state, |a| {
+    NFP_STATE.load(Ordering::Relaxed) as u64
+});
 mfn!(nfp_no_tag, |a| { NFP_NO_TAG });
 // Reading an application area: no tag, and nothing read.
 mfn!(nfp_get_area, |a| {
@@ -441,7 +534,10 @@ mfn!(nfp_get_area, |a| {
 });
 mfn!(nfp_init_ext, |a| {
     NFP_LIB.store(1, Ordering::Relaxed);
-    crate::log_once!("nfp", "nfp::InitializeWithExtendedApplicationArea: one NFC device that never finds an amiibo");
+    crate::log_once!(
+        "nfp",
+        "nfp::InitializeWithExtendedApplicationArea: one NFC device that never finds an amiibo"
+    );
     0
 });
 
@@ -450,7 +546,10 @@ mfn!(nfp_init_ext, |a| {
 static NFC_STATE: AtomicI32 = AtomicI32::new(0);
 mfn!(nfc_init, |a| {
     NFC_STATE.store(1, Ordering::Relaxed);
-    crate::log_once!("nfc", "nfc::Initialize: NFC is disabled (the PC has no NFC reader)");
+    crate::log_once!(
+        "nfc",
+        "nfc::Initialize: NFC is disabled (the PC has no NFC reader)"
+    );
     0
 });
 mfn!(nfc_fini, |a| {
@@ -490,10 +589,22 @@ unsafe fn ngc_ctor(c: *mut Cpu) {
         let mask = crate::hle::addr("ngc vtable mask", ngc_mask);
         let none = crate::hle::addr("ngc vtable zero", zero);
         let named = [
-            ("_ZN2nn3ngc15ProfanityFilter19CheckProfanityWordsEPjjPPKcm", check),
-            ("_ZN2nn3ngc15ProfanityFilter19CheckProfanityWordsEPjjPPKtm", check),
-            ("_ZN2nn3ngc15ProfanityFilter24MaskProfanityWordsInTextEPiPcj", mask),
-            ("_ZN2nn3ngc15ProfanityFilter24MaskProfanityWordsInTextEPiPtj", mask),
+            (
+                "_ZN2nn3ngc15ProfanityFilter19CheckProfanityWordsEPjjPPKcm",
+                check,
+            ),
+            (
+                "_ZN2nn3ngc15ProfanityFilter19CheckProfanityWordsEPjjPPKtm",
+                check,
+            ),
+            (
+                "_ZN2nn3ngc15ProfanityFilter24MaskProfanityWordsInTextEPiPcj",
+                mask,
+            ),
+            (
+                "_ZN2nn3ngc15ProfanityFilter24MaskProfanityWordsInTextEPiPtj",
+                mask,
+            ),
         ];
         if sdk != 0 {
             w64(table, r64(sdk));
@@ -501,7 +612,10 @@ unsafe fn ngc_ctor(c: *mut Cpu) {
         }
         for k in 0..40u64 {
             let slot = if sdk != 0 { r64(sdk + 16 + 8 * k) } else { 0 };
-            let f = named.iter().find(|(n, _)| crate::hle::sym(n) == Some(slot)).map_or(none, |(_, f)| *f);
+            let f = named
+                .iter()
+                .find(|(n, _)| crate::hle::sym(n) == Some(slot))
+                .map_or(none, |(_, f)| *f);
             w64(table + 16 + 8 * k, f);
         }
         vt = table + 16;
@@ -531,7 +645,9 @@ unsafe fn err_log(c: *mut Cpu) {
     if name.contains("ApplicationError") {
         // nn::err::ApplicationErrorArg: its message text after the header, error number and language (+0x14)
         let arg = (*c).x[0];
-        let msg = (arg != 0).then(|| crate::guest::cstr(arg + 0x14, 0x800)).filter(|m| m.len() >= 2 && !m.chars().any(|ch| ch.is_control() && ch != '\n'));
+        let msg = (arg != 0)
+            .then(|| crate::guest::cstr(arg + 0x14, 0x800))
+            .filter(|m| m.len() >= 2 && !m.chars().any(|ch| ch.is_control() && ch != '\n'));
         error(Shown::Application(msg.as_deref()));
         (*c).x[0] = 0;
         return;
@@ -707,8 +823,14 @@ mod tests {
         let s = b"str\0";
         let mut ints = [42u64, (-7i64) as u64, 0xbeef, s.as_ptr() as u64].into_iter();
         let mut fl = [1.5f64].into_iter();
-        assert_eq!(super::format("a %d b %ld c %x %s %.2f %%", &mut ints, &mut fl), "a 42 b -7 c beef str 1.50 %");
+        assert_eq!(
+            super::format("a %d b %ld c %x %s %.2f %%", &mut ints, &mut fl),
+            "a 42 b -7 c beef str 1.50 %"
+        );
         let mut ints = [5u64].into_iter();
-        assert_eq!(super::format("[%4d]", &mut ints, &mut [].into_iter()), "[   5]");
+        assert_eq!(
+            super::format("[%4d]", &mut ints, &mut [].into_iter()),
+            "[   5]"
+        );
     }
 }

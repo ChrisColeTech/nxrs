@@ -72,7 +72,13 @@ impl Capture {
         *self.hook.lock().unwrap() = Some(Box::new(f));
     }
     pub fn append(&self, tag: u64, ptr: u64, bytes: u64, ch: u32) {
-        self.q.lock().unwrap().push_back(Buf { tag, ptr, bytes, filled: 0, ch: ch.clamp(1, 2) });
+        self.q.lock().unwrap().push_back(Buf {
+            tag,
+            ptr,
+            bytes,
+            filled: 0,
+            ch: ch.clamp(1, 2),
+        });
     }
     pub fn released(&self) -> Option<u64> {
         self.released.lock().unwrap().pop_front()
@@ -103,7 +109,11 @@ impl Capture {
                             .chunks(dch)
                             .map(|f| {
                                 let l = <f32 as cpal::FromSample<$t>>::from_sample_(f[0]);
-                                let r = if dch > 1 { <f32 as cpal::FromSample<$t>>::from_sample_(f[1]) } else { l };
+                                let r = if dch > 1 {
+                                    <f32 as cpal::FromSample<$t>>::from_sample_(f[1])
+                                } else {
+                                    l
+                                };
                                 [l, r]
                             })
                             .collect();
@@ -146,7 +156,10 @@ impl Capture {
                 // 48 kHz positions between the previous device frame and this one
                 while rs.0 < 1.0 {
                     let p = rs.0 as f32;
-                    out48.push([rs.1[0] + (rs.2[0] - rs.1[0]) * p, rs.1[1] + (rs.2[1] - rs.1[1]) * p]);
+                    out48.push([
+                        rs.1[0] + (rs.2[0] - rs.1[0]) * p,
+                        rs.1[1] + (rs.2[1] - rs.1[1]) * p,
+                    ]);
                     rs.0 += step;
                 }
                 rs.0 -= 1.0;

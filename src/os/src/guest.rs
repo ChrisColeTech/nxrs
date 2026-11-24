@@ -164,7 +164,10 @@ pub fn call_current(addr: u64, args: &[u64]) -> u64 {
     match nxrt::kernel::current_cpu() {
         Some(c) => unsafe { call(c, addr, args) }.unwrap_or(0),
         None => {
-            crate::log_once!("call_current", "[RED] a guest call from a host thread that runs no guest code ({addr:#x})");
+            crate::log_once!(
+                "call_current",
+                "[RED] a guest call from a host thread that runs no guest code ({addr:#x})"
+            );
             0
         }
     }
@@ -176,9 +179,20 @@ pub fn call_current(addr: u64, args: &[u64]) -> u64 {
 ///
 /// # Safety
 /// `c` is the calling guest thread's state.
-pub unsafe fn spawn(c: *mut Cpu, name: &str, entry: nxrt::hostfn::HostFn, arg: u64, prio: u64, stack_size: u64) -> Option<u64> {
+pub unsafe fn spawn(
+    c: *mut Cpu,
+    name: &str,
+    entry: nxrt::hostfn::HostFn,
+    arg: u64,
+    prio: u64,
+    stack_size: u64,
+) -> Option<u64> {
     let sym = |n: &str| crate::hle::sym(n);
-    let (malloc, create, start) = (sym("malloc")?, sym("_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mi")?, sym("_ZN2nn2os11StartThreadEPNS0_10ThreadTypeE")?);
+    let (malloc, create, start) = (
+        sym("malloc")?,
+        sym("_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mi")?,
+        sym("_ZN2nn2os11StartThreadEPNS0_10ThreadTypeE")?,
+    );
     let tt = call(c, malloc, &[0x200])?;
     zero(tt, 0x200);
     let sa = call(c, malloc, &[stack_size + 0x1000])?;
@@ -202,13 +216,24 @@ pub fn readable(a: u64, n: u64) -> bool {
 /// True when `a` is committed, readable memory (a pointer the guest handed over that may be stale).
 #[cfg(windows)]
 pub fn readable(a: u64, n: u64) -> bool {
-    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS};
+    use windows_sys::Win32::System::Memory::{
+        VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS,
+    };
     if a < 0x1000 {
         return false;
     }
     let mut m: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
-    let got = unsafe { VirtualQuery(a as *const _, &mut m, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) };
-    got != 0 && m.State == MEM_COMMIT && m.Protect & (PAGE_NOACCESS | PAGE_GUARD) == 0 && a + n <= m.BaseAddress as u64 + m.RegionSize as u64
+    let got = unsafe {
+        VirtualQuery(
+            a as *const _,
+            &mut m,
+            core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        )
+    };
+    got != 0
+        && m.State == MEM_COMMIT
+        && m.Protect & (PAGE_NOACCESS | PAGE_GUARD) == 0
+        && a + n <= m.BaseAddress as u64 + m.RegionSize as u64
 }
 
 #[cfg(test)]

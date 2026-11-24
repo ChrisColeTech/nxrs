@@ -20,7 +20,8 @@ pub fn user_of(uid: u64) -> Option<u64> {
         return None;
     }
     let (v0, v1) = (r64(uid), r64(uid + 8));
-    (v1 == UID1 && (UID0..UID0 + USERS).contains(&v0) && registered() & (1 << (v0 - UID0)) != 0).then(|| v0 - UID0)
+    (v1 == UID1 && (UID0..UID0 + USERS).contains(&v0) && registered() & (1 << (v0 - UID0)) != 0)
+        .then(|| v0 - UID0)
 }
 
 /// The PC's player's slot (option `pc_user`, read live).
@@ -32,7 +33,10 @@ pub fn pc_user() -> u64 {
 pub fn registered() -> u64 {
     let mut m = 1 << pc_user();
     for i in 1..USERS {
-        if crate::services::fs::save_dir().join(format!("user{}.registered", i + 1)).exists() {
+        if crate::services::fs::save_dir()
+            .join(format!("user{}.registered", i + 1))
+            .exists()
+        {
             m |= 1 << i;
         }
     }
@@ -55,7 +59,11 @@ struct Sessions {
     token: u64,
     last: u64,
 }
-static S: Mutex<Sessions> = Mutex::new(Sessions { open: Vec::new(), token: 0x5553_4552_0000_0000, last: u64::MAX });
+static S: Mutex<Sessions> = Mutex::new(Sessions {
+    open: Vec::new(),
+    token: 0x5553_4552_0000_0000,
+    last: u64::MAX,
+});
 
 fn put_uid(a: u64, user: u64) {
     w64(a, UID0 + user);
@@ -100,7 +108,12 @@ macro_rules! accfn {
 
 accfn!(init, |a| { 0 });
 accfn!(list_open, |a| {
-    let mask = S.lock().unwrap().open.iter().fold(0u64, |m, (_, u)| m | 1 << u);
+    let mask = S
+        .lock()
+        .unwrap()
+        .open
+        .iter()
+        .fold(0u64, |m, (_, u)| m | 1 << u);
     let n = list(a.x(1), a.i(2) as i64, mask);
     crate::guest::w32(a.x(0), n as u32);
     RES_OK
@@ -123,7 +136,9 @@ accfn!(pop_open, |a| {
     0
 });
 accfn!(push_open, |a| { 0 });
-accfn!(try_open_pre, |a| { (open_user(a.x(0), pc_user()) == RES_OK) as u64 });
+accfn!(try_open_pre, |a| {
+    (open_user(a.x(0), pc_user()) == RES_OK) as u64
+});
 accfn!(open_pre, |a| { open_user(a.x(0), pc_user()) });
 accfn!(open, |a| {
     match user_of(a.x(1)) {
@@ -168,10 +183,17 @@ const RES_CANCELLED: u64 = 124 | (1 << 9);
 pub fn choose_user() -> Option<u64> {
     let users = registered();
     if !nxconfig::flag("ask_user") || users.count_ones() < 2 {
-        crate::log_once!("acc select", "account: user selector answered with the PC's player (pc_user {})", pc_user() + 1);
+        crate::log_once!(
+            "acc select",
+            "account: user selector answered with the PC's player (pc_user {})",
+            pc_user() + 1
+        );
         return Some(pc_user());
     }
-    let choices: Vec<(u64, String)> = (0..USERS).filter(|i| users >> i & 1 != 0).map(|i| (i, nickname(i))).collect();
+    let choices: Vec<(u64, String)> = (0..USERS)
+        .filter(|i| users >> i & 1 != 0)
+        .map(|i| (i, nickname(i)))
+        .collect();
     crate::ui::pick_user(choices, pc_user())
 }
 
@@ -198,7 +220,11 @@ fn create_user_in(dir: &std::path::Path, registered: u64) -> Option<u64> {
 accfn!(creator, |a| {
     match create_user_in(&crate::services::fs::save_dir(), registered()) {
         Some(u) => {
-            crate::log!("account: user creator: profile {} ({}) made", u + 1, nickname(u));
+            crate::log!(
+                "account: user creator: profile {} ({}) made",
+                u + 1,
+                nickname(u)
+            );
             RES_OK
         }
         None => {
@@ -343,7 +369,11 @@ mod tests {
         assert_eq!(h[0], UID0);
         assert_eq!(user_of(a), Some(0));
         let bad = [UID0 + 1, UID1];
-        assert_eq!(user_of(bad.as_ptr() as u64), None, "user 2 is not registered");
+        assert_eq!(
+            user_of(bad.as_ptr() as u64),
+            None,
+            "user 2 is not registered"
+        );
         let mut out = [0u64; 4];
         assert_eq!(list(out.as_mut_ptr() as u64, 2, 0b11), 2);
         assert_eq!(out, [UID0, UID1, UID0 + 1, UID1]);

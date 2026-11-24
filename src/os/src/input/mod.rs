@@ -26,8 +26,8 @@ pub mod script;
 pub mod sony;
 pub mod switch2;
 pub mod switch2_ble;
-pub mod xinput;
 pub mod winmm;
+pub mod xinput;
 
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -36,11 +36,25 @@ pub const PLAYERS: usize = 8;
 pub const STICK_MAX: i32 = 32767;
 
 pub fn env_flag(name: &str) -> bool {
-    let get = |n: &str| std::env::var(n).ok().is_some_and(|v| !v.is_empty() && v != "0");
-    get(name) || name.strip_prefix("NXRS_").is_some_and(|rest| get(&format!("SWR_{rest}")))
+    let get = |n: &str| {
+        std::env::var(n)
+            .ok()
+            .is_some_and(|v| !v.is_empty() && v != "0")
+    };
+    get(name)
+        || name
+            .strip_prefix("NXRS_")
+            .is_some_and(|rest| get(&format!("SWR_{rest}")))
 }
 pub fn env_str(name: &str) -> Option<String> {
-    std::env::var(name).ok().filter(|v| !v.is_empty()).or_else(|| name.strip_prefix("NXRS_").and_then(|r| std::env::var(format!("SWR_{r}")).ok()).filter(|v| !v.is_empty()))
+    std::env::var(name)
+        .ok()
+        .filter(|v| !v.is_empty())
+        .or_else(|| {
+            name.strip_prefix("NXRS_")
+                .and_then(|r| std::env::var(format!("SWR_{r}")).ok())
+                .filter(|v| !v.is_empty())
+        })
 }
 
 macro_rules! ilog {
@@ -49,7 +63,9 @@ macro_rules! ilog {
 pub(crate) use ilog;
 
 pub fn pack(a: [i32; 4]) -> u64 {
-    a.iter().enumerate().fold(0u64, |v, (i, &x)| v | ((x.clamp(-32768, 32767) as i16 as u16 as u64) << (16 * i)))
+    a.iter().enumerate().fold(0u64, |v, (i, &x)| {
+        v | ((x.clamp(-32768, 32767) as i16 as u16 as u64) << (16 * i))
+    })
 }
 pub fn unpack(v: u64) -> [i32; 4] {
     std::array::from_fn(|i| (v >> (16 * i)) as u16 as i16 as i32)
@@ -73,7 +89,11 @@ pub struct Path {
 
 impl Path {
     pub const fn new() -> Path {
-        Path { btn: AtomicU64::new(0), latch: AtomicU64::new(0), axes: AtomicU64::new(0) }
+        Path {
+            btn: AtomicU64::new(0),
+            latch: AtomicU64::new(0),
+            axes: AtomicU64::new(0),
+        }
     }
     pub fn set(&self, b: u64, a: [i32; 4]) {
         let old = self.btn.swap(b, Ordering::AcqRel);
@@ -82,10 +102,16 @@ impl Path {
     }
     /// The held buttons and the presses latched since the last take, and the sticks.
     pub fn take(&self) -> (u64, [i32; 4]) {
-        (self.btn.load(Ordering::Acquire) | self.latch.swap(0, Ordering::AcqRel), unpack(self.axes.load(Ordering::Acquire)))
+        (
+            self.btn.load(Ordering::Acquire) | self.latch.swap(0, Ordering::AcqRel),
+            unpack(self.axes.load(Ordering::Acquire)),
+        )
     }
     pub fn peek(&self) -> (u64, [i32; 4]) {
-        (self.btn.load(Ordering::Acquire), unpack(self.axes.load(Ordering::Acquire)))
+        (
+            self.btn.load(Ordering::Acquire),
+            unpack(self.axes.load(Ordering::Acquire)),
+        )
     }
     pub fn clear(&self) {
         self.set(0, [0; 4]);
@@ -109,7 +135,8 @@ pub static SCRIPT_P: [Path; PLAYERS] = [const { Path::new() }; PLAYERS];
 pub static PADS: [Path; PLAYERS] = [const { Path::new() }; PLAYERS];
 /// A pad's Joy-Cons one by one: [player][0 left, 1 right], guest buttons with the rail buttons, each its own stick in
 /// the first two axes.
-pub static JOY: [[Path; 2]; PLAYERS] = [const { [const { Path::new() }, const { Path::new() }] }; PLAYERS];
+pub static JOY: [[Path; 2]; PLAYERS] =
+    [const { [const { Path::new() }, const { Path::new() }] }; PLAYERS];
 /// Bit 0 left, bit 1 right: the Joy-Cons a player's pad holds (0: a Pro-like pad).
 pub static JOY_SIDES: [AtomicU32; PLAYERS] = [const { AtomicU32::new(0) }; PLAYERS];
 /// Bit p: player p has a controller (player 1 always counts: the keyboard).
@@ -135,20 +162,44 @@ pub struct Vib {
 }
 impl Default for Vib {
     fn default() -> Self {
-        Vib { amp_low: 0.0, freq_low: 160.0, amp_high: 0.0, freq_high: 320.0 }
+        Vib {
+            amp_low: 0.0,
+            freq_low: 160.0,
+            amp_high: 0.0,
+            freq_high: 320.0,
+        }
     }
 }
 fn clean(v: Vib) -> Vib {
-    let a = |x: f32| if x.is_finite() { x.clamp(0.0, 1.0) } else { 0.0 };
+    let a = |x: f32| {
+        if x.is_finite() {
+            x.clamp(0.0, 1.0)
+        } else {
+            0.0
+        }
+    };
     let f = |x: f32, d: f32| if x.is_finite() && x > 0.0 { x } else { d };
-    Vib { amp_low: a(v.amp_low), freq_low: f(v.freq_low, 160.0), amp_high: a(v.amp_high), freq_high: f(v.freq_high, 320.0) }
+    Vib {
+        amp_low: a(v.amp_low),
+        freq_low: f(v.freq_low, 160.0),
+        amp_high: a(v.amp_high),
+        freq_high: f(v.freq_high, 320.0),
+    }
 }
 
 struct Rumble {
     v: [[Vib; 2]; PLAYERS],
     dirty: [bool; PLAYERS],
 }
-static RUMBLE: Mutex<Rumble> = Mutex::new(Rumble { v: [[Vib { amp_low: 0.0, freq_low: 160.0, amp_high: 0.0, freq_high: 320.0 }; 2]; PLAYERS], dirty: [false; PLAYERS] });
+static RUMBLE: Mutex<Rumble> = Mutex::new(Rumble {
+    v: [[Vib {
+        amp_low: 0.0,
+        freq_low: 160.0,
+        amp_high: 0.0,
+        freq_high: 320.0,
+    }; 2]; PLAYERS],
+    dirty: [false; PLAYERS],
+});
 
 /// The player's rumble settings (nxnative docs/settings.md, global): `rumble` 0 = off, `rumble_gain` 0..3 scales the
 /// strength, `rumble_min` 0..0.9: levels below it stay silent and the rest is stretched over the full range (for
@@ -162,8 +213,19 @@ pub struct RumbleSettings {
 
 impl RumbleSettings {
     pub fn from_ini() -> RumbleSettings {
-        let f = |k: &str, d: f32| nxconfig::string(k).trim().parse::<f32>().ok().filter(|v| v.is_finite()).unwrap_or(d);
-        RumbleSettings { on: nxconfig::string("rumble").trim() != "0", gain: f("rumble_gain", 1.0).clamp(0.0, 3.0), min: f("rumble_min", 0.0).clamp(0.0, 0.9) }
+        let f = |k: &str, d: f32| {
+            nxconfig::string(k)
+                .trim()
+                .parse::<f32>()
+                .ok()
+                .filter(|v| v.is_finite())
+                .unwrap_or(d)
+        };
+        RumbleSettings {
+            on: nxconfig::string("rumble").trim() != "0",
+            gain: f("rumble_gain", 1.0).clamp(0.0, 3.0),
+            min: f("rumble_min", 0.0).clamp(0.0, 0.9),
+        }
     }
 
     /// One amplitude as the pad gets it (nxnative haptics_apple.m `controller_level(x * gain)`).
@@ -171,12 +233,24 @@ impl RumbleSettings {
         if !self.on {
             return 0.0;
         }
-        let x = if x.is_finite() { (x * self.gain).clamp(0.0, 1.0) } else { 0.0 };
-        if x <= self.min { 0.0 } else { (x - self.min) / (1.0 - self.min) }
+        let x = if x.is_finite() {
+            (x * self.gain).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        if x <= self.min {
+            0.0
+        } else {
+            (x - self.min) / (1.0 - self.min)
+        }
     }
 
     pub fn apply(&self, v: Vib) -> Vib {
-        Vib { amp_low: self.level(v.amp_low), amp_high: self.level(v.amp_high), ..v }
+        Vib {
+            amp_low: self.level(v.amp_low),
+            amp_high: self.level(v.amp_high),
+            ..v
+        }
     }
 }
 
@@ -207,12 +281,18 @@ pub fn motion() -> &'static Motion {
     static M: OnceLock<Motion> = OnceLock::new();
     M.get_or_init(|| Motion {
         pad: std::array::from_fn(|_| Mutex::new(motion::Stream::default())),
-        joy: std::array::from_fn(|_| std::array::from_fn(|_| Mutex::new(motion::Stream::default()))),
+        joy: std::array::from_fn(|_| {
+            std::array::from_fn(|_| Mutex::new(motion::Stream::default()))
+        }),
     })
 }
 fn motion_gain() -> f32 {
     static G: OnceLock<f32> = OnceLock::new();
-    *G.get_or_init(|| env_str("NXRS_MOTION_GAIN").and_then(|v| v.parse().ok()).unwrap_or(0.5))
+    *G.get_or_init(|| {
+        env_str("NXRS_MOTION_GAIN")
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0.5)
+    })
 }
 
 /// The touch screen as the front end reports it (the mouse's left button over the window, or `touch` from the control
@@ -244,7 +324,15 @@ struct TouchSt {
     started: bool,
     released_at: Option<std::time::Instant>,
 }
-const UP: TouchSt = TouchSt { down: false, x: 0, y: 0, finger: 0, since: None, started: false, released_at: None };
+const UP: TouchSt = TouchSt {
+    down: false,
+    x: 0,
+    y: 0,
+    finger: 0,
+    since: None,
+    started: false,
+    released_at: None,
+};
 /// The fingers by slot (slot 0: the mouse or `touch`; more for `pinch` / `rotate` and the two-finger mouse) and the
 /// last finger id handed out.
 static TOUCH: Mutex<([TouchSt; FINGERS], u32)> = Mutex::new(([UP; FINGERS], 0));
@@ -272,7 +360,10 @@ pub fn set_finger(slot: usize, down: bool, x: u32, y: u32) {
             t.finger = id;
             t.since = Some(now);
             t.started = false;
-            crate::log_once!("touch first", "input: touch screen from the mouse / control pipe (first press at {x}, {y})");
+            crate::log_once!(
+                "touch first",
+                "input: touch screen from the mouse / control pipe (first press at {x}, {y})"
+            );
         }
         t.down = true;
         t.released_at = None;
@@ -286,7 +377,14 @@ pub fn set_finger(slot: usize, down: bool, x: u32, y: u32) {
 /// Every finger down without taking a sample (the gesture recognizer's view): down, or released but still inside its
 /// latch, in slot order.
 pub fn touches_peek() -> Vec<(u32, u32)> {
-    TOUCH.lock().unwrap().0.iter().filter(|t| t.down).map(|t| (t.x, t.y)).collect()
+    TOUCH
+        .lock()
+        .unwrap()
+        .0
+        .iter()
+        .filter(|t| t.down)
+        .map(|t| (t.x, t.y))
+        .collect()
 }
 
 /// The first finger, as `touches_peek`.
@@ -300,14 +398,22 @@ pub fn touches_now() -> Vec<Touch> {
     let now = std::time::Instant::now();
     let mut v = vec![];
     for t in g.0.iter_mut().filter(|t| t.down) {
-        let held_long_enough = t.since.is_some_and(|s| now.duration_since(s) >= TOUCH_LATCH);
+        let held_long_enough = t
+            .since
+            .is_some_and(|s| now.duration_since(s) >= TOUCH_LATCH);
         let end = t.released_at.is_some() && held_long_enough;
         let start = !t.started;
         t.started = true;
         if end {
             t.down = false;
         }
-        v.push(Touch { x: t.x, y: t.y, finger: t.finger, start, end });
+        v.push(Touch {
+            x: t.x,
+            y: t.y,
+            finger: t.finger,
+            start,
+            end,
+        });
     }
     v
 }
@@ -335,11 +441,17 @@ pub fn mouse_fingers(mode: MouseTouch, anchor: (i32, i32), m: (i32, i32)) -> Vec
     let (mx, my) = (m.0 as f64, m.1 as f64);
     match mode {
         MouseTouch::One => vec![(c(mx, 1279.0), c(my, 719.0))],
-        MouseTouch::Pinch => vec![(c(mx, 1279.0), c(my, 719.0)), (c(2.0 * ax - mx, 1279.0), c(2.0 * ay - my, 719.0))],
+        MouseTouch::Pinch => vec![
+            (c(mx, 1279.0), c(my, 719.0)),
+            (c(2.0 * ax - mx, 1279.0), c(2.0 * ay - my, 719.0)),
+        ],
         MouseTouch::Rotate => {
             let a = (my - ay).atan2(mx - ax);
             let (dx, dy) = (ROTATE_R * a.cos(), ROTATE_R * a.sin());
-            vec![(c(ax + dx, 1279.0), c(ay + dy, 719.0)), (c(ax - dx, 1279.0), c(ay - dy, 719.0))]
+            vec![
+                (c(ax + dx, 1279.0), c(ay + dy, 719.0)),
+                (c(ax - dx, 1279.0), c(ay - dy, 719.0)),
+            ]
         }
     }
 }
@@ -349,7 +461,10 @@ pub fn two_fingers(cx: f64, cy: f64, r: f64, deg: f64) -> [(u32, u32); 2] {
     let a = deg.to_radians();
     let (dx, dy) = (r * a.cos(), r * a.sin());
     let c = |v: f64, hi: f64| v.round().clamp(0.0, hi) as u32;
-    [(c(cx + dx, 1279.0), c(cy + dy, 719.0)), (c(cx - dx, 1279.0), c(cy - dy, 719.0))]
+    [
+        (c(cx + dx, 1279.0), c(cy + dy, 719.0)),
+        (c(cx - dx, 1279.0), c(cy - dy, 719.0)),
+    ]
 }
 
 /// The front end: player 1's keyboard and mouse state (guest buttons, sticks).
@@ -376,7 +491,10 @@ pub fn device_changed() {
 
 fn active() -> bool {
     static BG: OnceLock<bool> = OnceLock::new();
-    !SUSPENDED.load(Ordering::Acquire) && !PROMPT.load(Ordering::Acquire) && (FOCUS.load(Ordering::Acquire) || *BG.get_or_init(|| env_flag("NXRS_CONTROLLER_BACKGROUND")))
+    !SUSPENDED.load(Ordering::Acquire)
+        && !PROMPT.load(Ordering::Acquire)
+        && (FOCUS.load(Ordering::Acquire)
+            || *BG.get_or_init(|| env_flag("NXRS_CONTROLLER_BACKGROUND")))
 }
 
 fn trace() -> bool {
@@ -457,7 +575,12 @@ impl Dev {
             Kind::X(i) => match xinput::state(*i) {
                 Some(g) => {
                     self.buttons = xinput::buttons(&g);
-                    self.axes = [xinput::dz(g.lx as i32), xinput::dz(g.ly as i32), xinput::dz(g.rx as i32), xinput::dz(g.ry as i32)];
+                    self.axes = [
+                        xinput::dz(g.lx as i32),
+                        xinput::dz(g.ly as i32),
+                        xinput::dz(g.rx as i32),
+                        xinput::dz(g.ry as i32),
+                    ];
                     self.home = g.buttons & 0x0400 != 0;
                 }
                 None => self.gone = true,
@@ -473,12 +596,21 @@ impl Dev {
                                 if st.imu {
                                     let (acc, rad) = sony::to_switch(&st);
                                     if let Some(p) = self.slot {
-                                        motion().pad[p].lock().unwrap().add(now, acc, rad, motion_gain());
+                                        motion().pad[p].lock().unwrap().add(
+                                            now,
+                                            acc,
+                                            rad,
+                                            motion_gain(),
+                                        );
                                     }
                                 }
                             } else if s.errors < 8 {
                                 s.errors += 1;
-                                ilog!("Sony input rejected id={:02x} bytes={} (length/report/CRC)", r.first().copied().unwrap_or(0), r.len());
+                                ilog!(
+                                    "Sony input rejected id={:02x} bytes={} (length/report/CRC)",
+                                    r.first().copied().unwrap_or(0),
+                                    r.len()
+                                );
                             }
                         }
                         hidio::Read::Empty => break,
@@ -504,7 +636,15 @@ impl Dev {
                     match n.hid.read() {
                         hidio::Read::Report(r) => {
                             if r.first() == Some(&0x21) && n.sticks.spi_reply(&r) != 0 {
-                                ilog!("{}: stick calibration read ({})", self.name, if n.sticks.cal.contains(&2) { "user" } else { "factory" });
+                                ilog!(
+                                    "{}: stick calibration read ({})",
+                                    self.name,
+                                    if n.sticks.cal.contains(&2) {
+                                        "user"
+                                    } else {
+                                        "factory"
+                                    }
+                                );
                             }
                             if let Some(rep) = nintendo::decode(&mut n.sticks, &r, n.side) {
                                 n.rep = rep;
@@ -556,7 +696,8 @@ impl Dev {
                     self.gone = true;
                     return;
                 }
-                d.slot.store(self.slot.map(|p| p as i32).unwrap_or(-1), Ordering::Release);
+                d.slot
+                    .store(self.slot.map(|p| p as i32).unwrap_or(-1), Ordering::Release);
                 if let Some((b, a, home)) = d.state() {
                     self.buttons = b;
                     self.axes = a;
@@ -609,7 +750,8 @@ impl Dev {
             }
             Kind::Sony(s) => sony_write(s, &self.name, low, high, false),
             Kind::Nin(n) => {
-                let side = |x: &Vib| nintendo::encode_side(x.amp_low, x.freq_low, x.amp_high, x.freq_high);
+                let side =
+                    |x: &Vib| nintendo::encode_side(x.amp_low, x.freq_low, x.amp_high, x.freq_high);
                 let (l, r) = match n.side {
                     2 => (side(&v[0]), [0x00, 0x01, 0x40, 0x40]),
                     3 => ([0x00, 0x01, 0x40, 0x40], side(&v[1])),
@@ -662,7 +804,17 @@ fn sony_write(s: &mut SonyDev, name: &str, low: u32, high: u32, reset: bool) {
         return;
     }
     let mut pkt = [0u8; 78];
-    let mut n = sony::output(s.model, s.transport, s.seq, low, high, s.leds != 0, reset, s.v2, &mut pkt);
+    let mut n = sony::output(
+        s.model,
+        s.transport,
+        s.seq,
+        low,
+        high,
+        s.leds != 0,
+        reset,
+        s.v2,
+        &mut pkt,
+    );
     s.seq = s.seq.wrapping_add(1);
     if s.model == sony::DS5 && !reset && s.leds != 0 {
         let o = if s.transport == sony::BT { 3 } else { 1 };
@@ -683,13 +835,23 @@ fn sony_write(s: &mut SonyDev, name: &str, low: u32, high: u32, reset: bool) {
         s.failed = true;
         if s.errors < 8 {
             s.errors += 1;
-            ilog!("{name}: output FAILED id={:02x} bytes={n} error={e}", pkt[0]);
+            ilog!(
+                "{name}: output FAILED id={:02x} bytes={n} error={e}",
+                pkt[0]
+            );
         }
     } else if s.writes < 8 || trace() {
         s.writes += 1;
         ilog!("{name}: output sent id={:02x} bytes={n} low={low} high={high} leds={:#04x} reset={reset}", pkt[0], s.leds);
         if trace() {
-            ilog!("{name}: report {}", pkt[..n].iter().map(|b| format!("{b:02x}")).collect::<Vec<_>>().join(" "));
+            ilog!(
+                "{name}: report {}",
+                pkt[..n]
+                    .iter()
+                    .map(|b| format!("{b:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
         }
     }
 }
@@ -764,7 +926,14 @@ impl Slots {
     /// The slot a new pad takes under the player's pad settings (nxnative pad_slots.h / docs/settings.md):
     /// `merge` every pad is player 1 (owning nothing); `lowest` (press to join) the lowest free player whatever the
     /// pad; `first` the first player a pad may take (1 when the keyboard is player 1 on its own).
-    pub fn take_with(&mut self, key: &str, name: &str, merge: bool, lowest: bool, first: usize) -> Option<usize> {
+    pub fn take_with(
+        &mut self,
+        key: &str,
+        name: &str,
+        merge: bool,
+        lowest: bool,
+        first: usize,
+    ) -> Option<usize> {
         if merge {
             return Some(0);
         }
@@ -809,8 +978,17 @@ struct Inputs {
 }
 
 fn device_name(i: &hidio::HidInfo) -> String {
-    let n = if i.product.is_empty() { "HID pad".to_string() } else { i.product.clone() };
-    format!("{n} {:04x}:{:04x} {}", i.vid, i.pid, if i.bluetooth { "Bluetooth" } else { "USB" })
+    let n = if i.product.is_empty() {
+        "HID pad".to_string()
+    } else {
+        i.product.clone()
+    };
+    format!(
+        "{n} {:04x}:{:04x} {}",
+        i.vid,
+        i.pid,
+        if i.bluetooth { "Bluetooth" } else { "USB" }
+    )
 }
 
 impl Inputs {
@@ -822,8 +1000,14 @@ impl Inputs {
         self.last_scan = now;
         // XInput users come and go every tick (cheap); HID and WinMM on the scan
         let hid = hidio::enumerate();
-        let (no_sony, no_nin) = (env_flag("NXRS_NO_SONY_HID"), env_flag("NXRS_NO_NINTENDO_HID"));
-        for info in hid.iter().filter(|i| i.is_gamepad() || nintendo::kind(i.vid, i.pid) != 0) {
+        let (no_sony, no_nin) = (
+            env_flag("NXRS_NO_SONY_HID"),
+            env_flag("NXRS_NO_NINTENDO_HID"),
+        );
+        for info in hid
+            .iter()
+            .filter(|i| i.is_gamepad() || nintendo::kind(i.vid, i.pid) != 0)
+        {
             let key = info.path_string();
             if self.has(&key) {
                 continue;
@@ -844,9 +1028,23 @@ impl Inputs {
                 if model == sony::DS5 {
                     let f = hid.feature(0x20, (info.feature_len as usize).clamp(46, 80));
                     v2 = sony::vibration_v2(info.pid, f.as_deref());
-                    firmware = f.as_ref().map(|f| u16::from_le_bytes([f[44], f[45]])).unwrap_or(0);
+                    firmware = f
+                        .as_ref()
+                        .map(|f| u16::from_le_bytes([f[44], f[45]]))
+                        .unwrap_or(0);
                 }
-                let name = format!("{}{} {:04x}:{:04x} {}", if model == sony::DS5 { "DualSense" } else { "DualShock 4" }, if info.pid == 0x0df2 { " Edge" } else { "" }, info.vid, info.pid, if tr == sony::USB { "USB" } else { "Bluetooth" });
+                let name = format!(
+                    "{}{} {:04x}:{:04x} {}",
+                    if model == sony::DS5 {
+                        "DualSense"
+                    } else {
+                        "DualShock 4"
+                    },
+                    if info.pid == 0x0df2 { " Edge" } else { "" },
+                    info.vid,
+                    info.pid,
+                    if tr == sony::USB { "USB" } else { "Bluetooth" }
+                );
                 ilog!(
                     "{name} backend=native-HID input={} output={} output-access={} firmware-update={firmware:04x} rumble={}",
                     info.input_len,
@@ -854,42 +1052,101 @@ impl Inputs {
                     if hid.writable { "read+write (lights+rumble)".to_string() } else { format!("read-only, open error {} (input only, no lights or rumble)", hid.open_error) },
                     if model == sony::DS5 { if v2 { "compatible-v2" } else { "compatible-v1" } } else { "classic" }
                 );
-                let mut s = SonyDev { hid, model, transport: tr, v2, seq: 0, state: Default::default(), last_input: now, failed: false, writes: 0, errors: 0, leds: 0 };
+                let mut s = SonyDev {
+                    hid,
+                    model,
+                    transport: tr,
+                    v2,
+                    seq: 0,
+                    state: Default::default(),
+                    last_input: now,
+                    failed: false,
+                    writes: 0,
+                    errors: 0,
+                    leds: 0,
+                };
                 if model == sony::DS5 {
                     sony_write(&mut s, &name, 0, 0, true); // release the firmware's lightbar animation
                 }
-                self.devs.push(Dev::new(Kind::Sony(Box::new(s)), key, name, None));
+                self.devs
+                    .push(Dev::new(Kind::Sony(Box::new(s)), key, name, None));
             } else if nk != 0 && !no_nin {
                 let Some(hid) = hidio::HidDev::open(info, true) else {
                     ilog!("{}: cannot open", device_name(info));
                     continue;
                 };
-                let name = format!("{} {:04x}:{:04x} {}", match nk { 2 => "Joy-Con (L)", 3 => "Joy-Con (R)", _ => if info.pid == nintendo::PRO { "Pro Controller" } else { "Nintendo Online controller" } }, info.vid, info.pid, if info.bluetooth { "Bluetooth" } else { "USB" });
-                ilog!("{name} backend=native-HID input={} output={} output-access={}", info.input_len, info.output_len, if hid.writable { "read+write (lights+HD rumble)" } else { "read-only" });
+                let name = format!(
+                    "{} {:04x}:{:04x} {}",
+                    match nk {
+                        2 => "Joy-Con (L)",
+                        3 => "Joy-Con (R)",
+                        _ =>
+                            if info.pid == nintendo::PRO {
+                                "Pro Controller"
+                            } else {
+                                "Nintendo Online controller"
+                            },
+                    },
+                    info.vid,
+                    info.pid,
+                    if info.bluetooth { "Bluetooth" } else { "USB" }
+                );
+                ilog!(
+                    "{name} backend=native-HID input={} output={} output-access={}",
+                    info.input_len,
+                    info.output_len,
+                    if hid.writable {
+                        "read+write (lights+HD rumble)"
+                    } else {
+                        "read-only"
+                    }
+                );
                 let usb = !info.bluetooth && info.pid == nintendo::PRO;
-                let n = NinDev { hid, side: nk, sticks: Default::default(), counter: 0, step: 0, next_step: now, last_input: now, rep: Default::default(), rumble: nintendo::NEUTRAL_RUMBLE, usb, leds: 0 };
+                let n = NinDev {
+                    hid,
+                    side: nk,
+                    sticks: Default::default(),
+                    counter: 0,
+                    step: 0,
+                    next_step: now,
+                    last_input: now,
+                    rep: Default::default(),
+                    rumble: nintendo::NEUTRAL_RUMBLE,
+                    usb,
+                    leds: 0,
+                };
                 let joy = match nk {
                     2 => Some(0),
                     3 => Some(1),
                     _ => None,
                 };
-                self.devs.push(Dev::new(Kind::Nin(Box::new(n)), key, name, joy));
+                self.devs
+                    .push(Dev::new(Kind::Nin(Box::new(n)), key, name, joy));
             }
         }
         for d in switch2_ble::DEVICES.lock().unwrap().iter() {
             let key = format!("s2:{:012x}", d.addr);
             if !self.has(&key) {
                 let joy = d.joy();
-                self.devs.push(Dev::new(Kind::S2(d.clone(), 0), key, d.name(), joy));
+                self.devs
+                    .push(Dev::new(Kind::S2(d.clone(), 0), key, d.name(), joy));
             }
         }
         // WinMM only when nothing else is there (it lists XInput and Sony pads as joysticks too)
         let others = self.devs.iter().any(|d| !matches!(d.kind, Kind::Mm(_)));
         if !others && !self.devs.iter().any(|d| matches!(d.kind, Kind::Mm(_))) {
             if let Some(j) = winmm::open(0) {
-                let name = format!("joystick {:04x}:{:04x} ({} axes, {} buttons)", j.vid, j.pid, j.axes, j.buttons);
+                let name = format!(
+                    "joystick {:04x}:{:04x} ({} axes, {} buttons)",
+                    j.vid, j.pid, j.axes, j.buttons
+                );
                 ilog!("{name} backend=WinMM (no XInput or native-HID pad)");
-                self.devs.push(Dev::new(Kind::Mm(j.clone()), format!("winmm:{}", j.id), name, None));
+                self.devs.push(Dev::new(
+                    Kind::Mm(j.clone()),
+                    format!("winmm:{}", j.id),
+                    name,
+                    None,
+                ));
             }
         }
     }
@@ -904,7 +1161,10 @@ impl Inputs {
                 // a WinMM stand-in for the same pad goes
                 self.devs.retain(|d| !matches!(d.kind, Kind::Mm(_)));
                 let name = format!("XInput pad {}", i + 1);
-                ilog!("{name} connected (backend=XInput {})", xinput::dll().unwrap_or("?"));
+                ilog!(
+                    "{name} connected (backend=XInput {})",
+                    xinput::dll().unwrap_or("?")
+                );
                 self.devs.push(Dev::new(Kind::X(i), key, name, None));
             }
         }
@@ -919,7 +1179,8 @@ impl Inputs {
             let mut slot = None;
             if let Some(side) = self.devs[i].joy {
                 for p in 0..PLAYERS {
-                    let holders: Vec<&Dev> = self.devs.iter().filter(|d| d.slot == Some(p)).collect();
+                    let holders: Vec<&Dev> =
+                        self.devs.iter().filter(|d| d.slot == Some(p)).collect();
                     if holders.len() == 1 && holders[0].joy == Some(1 - side) {
                         slot = Some(p);
                         break;
@@ -929,11 +1190,18 @@ impl Inputs {
             if slot.is_none() {
                 // the player's pad settings: pad_merge, pad_press_to_join (a pad is no player until one of its
                 // buttons is pressed), keyboard_player own (the keyboard alone is player 1)
-                let (merge, join) = (nxconfig::flag("pad_merge"), nxconfig::flag("pad_press_to_join") && !nxconfig::flag("pad_merge"));
+                let (merge, join) = (
+                    nxconfig::flag("pad_merge"),
+                    nxconfig::flag("pad_press_to_join") && !nxconfig::flag("pad_merge"),
+                );
                 if join && self.devs[i].buttons == 0 {
                     continue;
                 }
-                let first = if nxconfig::string("keyboard_player").trim() == "own" && !merge { 1 } else { 0 };
+                let first = if nxconfig::string("keyboard_player").trim() == "own" && !merge {
+                    1
+                } else {
+                    0
+                };
                 let (key, name) = (self.devs[i].key.clone(), self.devs[i].name.clone());
                 slot = self.slots.take_with(&key, &name, merge, join, first);
             }
@@ -962,7 +1230,12 @@ impl Inputs {
                         motion().pad[p].lock().unwrap().last = 0.0;
                     } else if self.slots.of(&d.key).is_some() {
                         // hand the slot's ownership to the remaining half
-                        let other = self.devs.iter().find(|o| o.slot == Some(p)).map(|o| o.key.clone()).unwrap();
+                        let other = self
+                            .devs
+                            .iter()
+                            .find(|o| o.slot == Some(p))
+                            .map(|o| o.key.clone())
+                            .unwrap();
                         self.slots.owner[p] = Some(other);
                     }
                     if let Some(s) = d.joy {
@@ -982,7 +1255,10 @@ impl Inputs {
             return;
         }
         self.map_gen = g;
-        let (m, bad, err) = layout::build(&nxconfig::string("button_layout"), &nxconfig::string("button_map"));
+        let (m, bad, err) = layout::build(
+            &nxconfig::string("button_layout"),
+            &nxconfig::string("button_map"),
+        );
         if bad > 0 {
             ilog!("{err}; {bad} setting(s) ignored");
         }
@@ -999,7 +1275,12 @@ impl Inputs {
         let act = active();
         if act != self.active {
             self.active = act;
-            ilog!("input {} (focus={} suspended={})", if act { "enabled" } else { "suppressed" }, FOCUS.load(Ordering::Relaxed), SUSPENDED.load(Ordering::Relaxed));
+            ilog!(
+                "input {} (focus={} suspended={})",
+                if act { "enabled" } else { "suppressed" },
+                FOCUS.load(Ordering::Relaxed),
+                SUSPENDED.load(Ordering::Relaxed)
+            );
         }
         let mut mask = 1u32 | SCRIPT_PLAYERS.load(Ordering::Relaxed);
         let mut sides = [0u32; PLAYERS];
@@ -1009,8 +1290,16 @@ impl Inputs {
             let Some(p) = d.slot else { continue };
             mask |= 1 << p;
             // a Nintendo pad by its printed labels, any other by button_layout
-            let map = if matches!(d.kind, Kind::Nin(_) | Kind::S2(..)) { &self.map_nin } else { &self.map };
-            let (b, a) = if act { (layout::apply(map, d.buttons), d.axes) } else { (0, [0; 4]) };
+            let map = if matches!(d.kind, Kind::Nin(_) | Kind::S2(..)) {
+                &self.map_nin
+            } else {
+                &self.map
+            };
+            let (b, a) = if act {
+                (layout::apply(map, d.buttons), d.axes)
+            } else {
+                (0, [0; 4])
+            };
             let m = &mut merged[p];
             m.0 |= b & 0xffff;
             for k in 0..4 {
@@ -1018,7 +1307,11 @@ impl Inputs {
             }
             if let Some(s) = d.joy {
                 sides[p] |= 1 << s;
-                let st = if s == 0 { [a[0], a[1], 0, 0] } else { [a[2], a[3], 0, 0] };
+                let st = if s == 0 {
+                    [a[0], a[1], 0, 0]
+                } else {
+                    [a[2], a[3], 0, 0]
+                };
                 joys[p][s] = (b, st);
             }
         }
@@ -1060,7 +1353,10 @@ impl Inputs {
             let Some(p) = d.slot else { continue };
             if let Some(t0) = d.selftest {
                 let t0 = if t0 == 0.0 {
-                    ilog!("{}: self-test: lights on, low motor 0.5 s, high motor 0.5 s, stop", d.name);
+                    ilog!(
+                        "{}: self-test: lights on, low motor 0.5 s, high motor 0.5 s, stop",
+                        d.name
+                    );
                     d.selftest = Some(now);
                     now
                 } else {
@@ -1068,9 +1364,15 @@ impl Inputs {
                 };
                 let t = now - t0;
                 let v = if t < 0.5 {
-                    Vib { amp_low: 0.5, ..Default::default() }
+                    Vib {
+                        amp_low: 0.5,
+                        ..Default::default()
+                    }
                 } else if t < 1.0 {
-                    Vib { amp_high: 0.5, ..Default::default() }
+                    Vib {
+                        amp_high: 0.5,
+                        ..Default::default()
+                    }
                 } else {
                     d.selftest = None;
                     ilog!("{}: self-test finished", d.name);
@@ -1088,10 +1390,17 @@ impl Inputs {
             let mut v = vals[p];
             if let Some(s) = d.joy {
                 // a Joy-Con takes its own side's value
-                v = if s == 0 { [vals[p][0], Vib::default()] } else { [Vib::default(), vals[p][1]] };
+                v = if s == 0 {
+                    [vals[p][0], Vib::default()]
+                } else {
+                    [Vib::default(), vals[p][1]]
+                };
             }
             let want_zero = v.iter().all(|x| x.amp_low == 0.0 && x.amp_high == 0.0);
-            if dirty[p] || (!want_zero && now - d.rumble_last > 0.5) || (want_zero && d.rumble_sent != (0, 0)) {
+            if dirty[p]
+                || (!want_zero && now - d.rumble_last > 0.5)
+                || (want_zero && d.rumble_sent != (0, 0))
+            {
                 d.rumble(v, now);
             }
         }
@@ -1100,7 +1409,21 @@ impl Inputs {
 
 impl Dev {
     fn new(kind: Kind, key: String, name: String, joy: Option<usize>) -> Dev {
-        Dev { kind, key, name, slot: None, joy, buttons: 0, axes: [0; 4], home: false, lights: None, rumble_last: 0.0, rumble_sent: (0, 0), selftest: None, gone: false }
+        Dev {
+            kind,
+            key,
+            name,
+            slot: None,
+            joy,
+            buttons: 0,
+            axes: [0; 4],
+            home: false,
+            lights: None,
+            rumble_last: 0.0,
+            rumble_sent: (0, 0),
+            selftest: None,
+            gone: false,
+        }
     }
 }
 
@@ -1191,7 +1514,17 @@ pub fn shutdown() {
 
 /// The devices now: (name, player, buttons, sticks) for logs, the probe and the control pipe.
 pub fn devices() -> Vec<(String, Option<usize>, u64, [i32; 4])> {
-    INPUTS.lock().unwrap().as_ref().map(|i| i.devs.iter().map(|d| (d.name.clone(), d.slot, d.buttons, d.axes)).collect()).unwrap_or_default()
+    INPUTS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|i| {
+            i.devs
+                .iter()
+                .map(|d| (d.name.clone(), d.slot, d.buttons, d.axes))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// One synchronous pass (the probe, without the thread): scan, read, assign, publish.
@@ -1217,12 +1550,19 @@ pub fn peek_player1() -> (u64, [i32; 4]) {
     let (kb, ka) = KEYS.peek();
     let (pb, pa) = PADS[0].peek();
     let (sb, sa) = SCRIPT.peek();
-    (kb | pb | sb, std::array::from_fn(|i| pick(pick(ka[i], pa[i]), sa[i])))
+    (
+        kb | pb | sb,
+        std::array::from_fn(|i| pick(pick(ka[i], pa[i]), sa[i])),
+    )
 }
 
 /// Whether a pad's Home button is held on any device (the front end's menu).
 pub fn home_held() -> bool {
-    INPUTS.lock().unwrap().as_ref().is_some_and(|i| i.devs.iter().any(|d| d.home))
+    INPUTS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|i| i.devs.iter().any(|d| d.home))
 }
 
 #[cfg(test)]
@@ -1231,7 +1571,11 @@ mod tests {
 
     #[test]
     fn rumble_settings_as_nxnative() {
-        let s = RumbleSettings { on: true, gain: 1.0, min: 0.0 };
+        let s = RumbleSettings {
+            on: true,
+            gain: 1.0,
+            min: 0.0,
+        };
         assert_eq!(s.level(0.5), 0.5);
         // gain 2: doubled, at most 1; gain 0 silent
         assert_eq!(RumbleSettings { gain: 2.0, ..s }.level(0.3), 0.6);
@@ -1242,8 +1586,16 @@ mod tests {
         assert_eq!(m.level(0.4), 0.0);
         assert!((m.level(0.725) - 0.5).abs() < 1e-6 && m.level(1.0) == 1.0);
         // off: nothing; frequencies kept
-        let v = RumbleSettings { on: false, ..s }.apply(Vib { amp_low: 0.9, freq_low: 100.0, amp_high: 0.9, freq_high: 300.0 });
-        assert_eq!((v.amp_low, v.amp_high, v.freq_low, v.freq_high), (0.0, 0.0, 100.0, 300.0));
+        let v = RumbleSettings { on: false, ..s }.apply(Vib {
+            amp_low: 0.9,
+            freq_low: 100.0,
+            amp_high: 0.9,
+            freq_high: 300.0,
+        });
+        assert_eq!(
+            (v.amp_low, v.amp_high, v.freq_low, v.freq_high),
+            (0.0, 0.0, 100.0, 300.0)
+        );
         assert_eq!(s.level(f32::NAN), 0.0);
     }
 
@@ -1254,7 +1606,10 @@ mod tests {
         let p = PLAYERS - 1;
         RUMBLE.lock().unwrap().dirty[p] = false;
         vibrate(p, 0, Vib::default());
-        assert!(!RUMBLE.lock().unwrap().dirty[p], "the same value: nothing to send");
+        assert!(
+            !RUMBLE.lock().unwrap().dirty[p],
+            "the same value: nothing to send"
+        );
         vibrate_with(p, 0, Vib::default(), true);
         assert!(RUMBLE.lock().unwrap().dirty[p], "initialised: sent");
         RUMBLE.lock().unwrap().dirty[p] = false;
@@ -1265,7 +1620,11 @@ mod tests {
     fn slot_rules_of_the_pad_settings() {
         let mut s = Slots::default();
         assert_eq!(s.take_with("a", "Pad", true, false, 0), Some(0));
-        assert_eq!(s.take_with("b", "Pad", true, false, 0), Some(0), "merged: everyone is player 1");
+        assert_eq!(
+            s.take_with("b", "Pad", true, false, 0),
+            Some(0),
+            "merged: everyone is player 1"
+        );
         assert!(s.owner.iter().all(|o| o.is_none()));
         // keyboard own: the first pad is player 2
         let mut s = Slots::default();
@@ -1277,9 +1636,17 @@ mod tests {
         s.take_with("b", "Pad B", false, false, 0);
         s.free("a");
         s.free("b");
-        assert_eq!(s.take_with("b2", "Pad B", false, false, 0), Some(1), "by default a reconnecting pad gets its player back");
+        assert_eq!(
+            s.take_with("b2", "Pad B", false, false, 0),
+            Some(1),
+            "by default a reconnecting pad gets its player back"
+        );
         s.free("b2");
-        assert_eq!(s.take_with("b3", "Pad B", false, true, 0), Some(0), "press to join: the lowest free player");
+        assert_eq!(
+            s.take_with("b3", "Pad B", false, true, 0),
+            Some(0),
+            "press to join: the lowest free player"
+        );
         // the default rule is nxnative's own
         let (mut x, mut y) = (Slots::default(), Slots::default());
         for (k, n) in [("a", "A"), ("b", "B"), ("c", "C")] {
@@ -1295,8 +1662,16 @@ mod tests {
         assert_eq!(s.free("a"), Some(0));
         assert_eq!(s.take("c", "Pad C"), Some(0), "player 1 when free");
         assert_eq!(s.free("b"), Some(1));
-        assert_eq!(s.take("d", "Pad D"), Some(2), "a slot never held before one a pad left");
-        assert_eq!(s.take("b2", "Pad B"), Some(1), "the same name gets its player back");
+        assert_eq!(
+            s.take("d", "Pad D"),
+            Some(2),
+            "a slot never held before one a pad left"
+        );
+        assert_eq!(
+            s.take("b2", "Pad B"),
+            Some(1),
+            "the same name gets its player back"
+        );
     }
 
     #[test]
@@ -1304,7 +1679,11 @@ mod tests {
         let p = Path::new();
         p.set(1, [0; 4]);
         p.set(0, [0; 4]);
-        assert_eq!(p.take().0, 1, "a press shorter than a read still reaches it");
+        assert_eq!(
+            p.take().0,
+            1,
+            "a press shorter than a read still reaches it"
+        );
         assert_eq!(p.take().0, 0);
         assert_eq!(unpack(pack([-32768, 32767, 5, -5])), [-32768, 32767, 5, -5]);
     }
@@ -1332,7 +1711,10 @@ mod touch_tests {
         assert_eq!(super::touch_now(), None);
         super::set_touch(true, 5000, 5000);
         let d = super::touch_now().unwrap();
-        assert!(d.start && d.finger == a.finger + 1 && (d.x, d.y) == (1279, 719), "a new finger, clamped: {d:?}");
+        assert!(
+            d.start && d.finger == a.finger + 1 && (d.x, d.y) == (1279, 719),
+            "a new finger, clamped: {d:?}"
+        );
         super::set_touch(false, 0, 0);
     }
 
@@ -1345,13 +1727,19 @@ mod touch_tests {
         super::set_finger(3, true, 300, 100);
         let peek = super::touches_peek();
         assert!(peek.contains(&(100, 100)) && peek.contains(&(300, 100)));
-        let v: Vec<_> = super::touches_now().into_iter().filter(|t| t.y == 100).collect();
+        let v: Vec<_> = super::touches_now()
+            .into_iter()
+            .filter(|t| t.y == 100)
+            .collect();
         assert_eq!(v.len(), 2);
         assert!(v[0].start && v[1].start && v[0].finger != v[1].finger);
         super::set_finger(2, false, 100, 100);
         super::set_finger(3, false, 300, 100);
         std::thread::sleep(super::TOUCH_LATCH);
-        let v: Vec<_> = super::touches_now().into_iter().filter(|t| t.y == 100).collect();
+        let v: Vec<_> = super::touches_now()
+            .into_iter()
+            .filter(|t| t.y == 100)
+            .collect();
         assert!(v.len() == 2 && v.iter().all(|t| t.end));
         assert!(super::touches_now().iter().all(|t| t.y != 100));
     }
@@ -1361,12 +1749,34 @@ mod touch_tests {
     #[test]
     fn mouse_and_pipe_fingers() {
         use super::{mouse_fingers, two_fingers, MouseTouch};
-        assert_eq!(mouse_fingers(MouseTouch::One, (0, 0), (50, 60)), vec![(50, 60)]);
-        assert_eq!(mouse_fingers(MouseTouch::Pinch, (640, 360), (700, 360)), vec![(700, 360), (580, 360)]);
-        assert_eq!(mouse_fingers(MouseTouch::Pinch, (10, 10), (100, 100)), vec![(100, 100), (0, 0)], "clamped to the screen");
-        assert_eq!(mouse_fingers(MouseTouch::Rotate, (640, 360), (900, 360)), vec![(740, 360), (540, 360)]);
-        assert_eq!(mouse_fingers(MouseTouch::Rotate, (640, 360), (640, 400)), vec![(640, 460), (640, 260)]);
-        assert_eq!(two_fingers(640.0, 360.0, 50.0, 0.0), [(690, 360), (590, 360)]);
-        assert_eq!(two_fingers(640.0, 360.0, 50.0, 90.0), [(640, 410), (640, 310)]);
+        assert_eq!(
+            mouse_fingers(MouseTouch::One, (0, 0), (50, 60)),
+            vec![(50, 60)]
+        );
+        assert_eq!(
+            mouse_fingers(MouseTouch::Pinch, (640, 360), (700, 360)),
+            vec![(700, 360), (580, 360)]
+        );
+        assert_eq!(
+            mouse_fingers(MouseTouch::Pinch, (10, 10), (100, 100)),
+            vec![(100, 100), (0, 0)],
+            "clamped to the screen"
+        );
+        assert_eq!(
+            mouse_fingers(MouseTouch::Rotate, (640, 360), (900, 360)),
+            vec![(740, 360), (540, 360)]
+        );
+        assert_eq!(
+            mouse_fingers(MouseTouch::Rotate, (640, 360), (640, 400)),
+            vec![(640, 460), (640, 260)]
+        );
+        assert_eq!(
+            two_fingers(640.0, 360.0, 50.0, 0.0),
+            [(690, 360), (590, 360)]
+        );
+        assert_eq!(
+            two_fingers(640.0, 360.0, 50.0, 90.0),
+            [(640, 410), (640, 310)]
+        );
     }
 }

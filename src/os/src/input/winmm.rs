@@ -37,7 +37,9 @@ pub fn open(from: u32) -> Option<Joy> {
                 continue;
             }
             let mut c: JOYCAPSW = std::mem::zeroed();
-            if joyGetDevCapsW(id as usize, &mut c, std::mem::size_of::<JOYCAPSW>() as u32) != JOYERR_NOERROR {
+            if joyGetDevCapsW(id as usize, &mut c, std::mem::size_of::<JOYCAPSW>() as u32)
+                != JOYERR_NOERROR
+            {
                 continue;
             }
             return Some(Joy {
@@ -46,7 +48,9 @@ pub fn open(from: u32) -> Option<Joy> {
                 pid: c.wPid,
                 axes: c.wNumAxes,
                 buttons: c.wNumButtons,
-                caps: (c.wXmin, c.wXmax, c.wYmin, c.wYmax, c.wZmin, c.wZmax, c.wRmin, c.wRmax),
+                caps: (
+                    c.wXmin, c.wXmax, c.wYmin, c.wYmax, c.wZmin, c.wZmax, c.wRmin, c.wRmax,
+                ),
             });
         }
     }
@@ -211,7 +215,9 @@ pub fn poll(j: &Joy) -> Option<(u64, [i32; 4])> {
             return None;
         }
         let nb = (s.JoystickNumButtons)(h).clamp(0, 32);
-        let mask = (0..nb).filter(|&k| (s.JoystickGetButton)(h, k) != 0).fold(0u32, |m, k| m | 1 << k);
+        let mask = (0..nb)
+            .filter(|&k| (s.JoystickGetButton)(h, k) != 0)
+            .fold(0u32, |m, k| m | 1 << k);
         let mut b = buttons(mask, j.vid == 0x054c);
         if (s.JoystickNumHats)(h) > 0 {
             b |= hat_bits((s.JoystickGetHat)(h, 0));
@@ -222,7 +228,11 @@ pub fn poll(j: &Joy) -> Option<(u64, [i32; 4])> {
                 return 0;
             }
             let v = (s.JoystickGetAxis)(h, k) as i32;
-            super::xinput::dz(if invert { (-v).min(32767) } else { v.max(-32767) })
+            super::xinput::dz(if invert {
+                (-v).min(32767)
+            } else {
+                v.max(-32767)
+            })
         };
         Some((b, [ax(0, false), ax(1, true), ax(2, false), ax(3, true)]))
     }

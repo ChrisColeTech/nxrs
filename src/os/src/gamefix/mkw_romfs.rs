@@ -44,7 +44,11 @@ fn sarc_find(s: &[u8], name: &str) -> Option<(usize, usize)> {
         if e + 16 > n {
             return None;
         }
-        let (attr, lo, hi) = (u32le(s, e + 4), u32le(s, e + 8) as usize, u32le(s, e + 12) as usize);
+        let (attr, lo, hi) = (
+            u32le(s, e + 4),
+            u32le(s, e + 8) as usize,
+            u32le(s, e + 12) as usize,
+        );
         let off = names + (attr & 0xffffff) as usize * 4;
         if off >= n || data_start + hi > n {
             return None;
@@ -60,7 +64,16 @@ fn sarc_find(s: &[u8], name: &str) -> Option<(usize, usize)> {
 /// Every integer field whose dotted name has For3D or Screen set to r3d / screen (0: kept), LODDistanceRatio to lod
 /// when lod > 0. Returns how many changed.
 #[allow(clippy::too_many_arguments)]
-fn patch_dict(b: &mut [u8], keys_off: usize, node: usize, prefix: &str, r3d: u32, screen: u32, lod: f32, depth: u32) -> u32 {
+fn patch_dict(
+    b: &mut [u8],
+    keys_off: usize,
+    node: usize,
+    prefix: &str,
+    r3d: u32,
+    screen: u32,
+    lod: f32,
+    depth: u32,
+) -> u32 {
     let n = b.len();
     if node + 4 > n || depth > 4 {
         return 0;
@@ -82,12 +95,27 @@ fn patch_dict(b: &mut [u8], keys_off: usize, node: usize, prefix: &str, r3d: u32
         let name = format!("{prefix}{}", String::from_utf8_lossy(&b[ko..kend]));
         if ty == 0xC1 {
             let sub = u32le(b, e + 4) as usize;
-            changed += patch_dict(b, keys_off, sub, &format!("{name}."), r3d, screen, lod, depth + 1);
+            changed += patch_dict(
+                b,
+                keys_off,
+                sub,
+                &format!("{name}."),
+                r3d,
+                screen,
+                lod,
+                depth + 1,
+            );
         } else if ty == 0xD2 && lod > 0.0 && name == "LODDistanceRatio" {
             b[e + 4..e + 8].copy_from_slice(&lod.to_le_bytes());
             changed += 1;
         } else if ty == 0xD1 || ty == 0xD3 {
-            let v = if name.contains("For3D") { r3d } else if name.contains("Screen") { screen } else { 0 };
+            let v = if name.contains("For3D") {
+                r3d
+            } else if name.contains("Screen") {
+                screen
+            } else {
+                0
+            };
             if v != 0 {
                 b[e + 4..e + 8].copy_from_slice(&v.to_le_bytes());
                 changed += 1;
@@ -100,7 +128,10 @@ fn patch_dict(b: &mut [u8], keys_off: usize, node: usize, prefix: &str, r3d: u32
 /// At start, before the game reads the archive: the overlay for NXRS_MKW_RESOLUTION / NXRS_MKW_DETAIL_DISTANCE.
 pub(super) fn install() {
     let lines: u32 = env_str("NXRS_MKW_RESOLUTION").trim().parse().unwrap_or(0);
-    let mut lod: f32 = env_str("NXRS_MKW_DETAIL_DISTANCE").trim().parse().unwrap_or(0.0);
+    let mut lod: f32 = env_str("NXRS_MKW_DETAIL_DISTANCE")
+        .trim()
+        .parse()
+        .unwrap_or(0.0);
     if lod == 2.0 {
         lod = 0.0; // the console's value writes nothing
     }
@@ -115,17 +146,26 @@ pub(super) fn install() {
 
 fn write_overlay(lines: u32, lod: f32) -> Result<std::path::PathBuf, String> {
     let handheld = crate::services::oe::opmode() == 0;
-    let r3d = if lines > 0 { (lines as f64 / if handheld { 1.0 } else { SCENE_SCALE }).ceil() as u32 } else { 0 };
+    let r3d = if lines > 0 {
+        (lines as f64 / if handheld { 1.0 } else { SCENE_SCALE }).ceil() as u32
+    } else {
+        0
+    };
     let fs = crate::services::fs::romfs().ok_or("no RomFS")?;
     let archive = fs
         .list(ARCHIVE_DIR)
         .map_err(|e| e.to_string())?
         .into_iter()
-        .find(|e| !e.is_dir && e.name.starts_with("general_format.Product_") && e.name.ends_with(".sarc.zs"))
+        .find(|e| {
+            !e.is_dir
+                && e.name.starts_with("general_format.Product_")
+                && e.name.ends_with(".sarc.zs")
+        })
         .map(|e| format!("{ARCHIVE_DIR}/{}", e.name))
         .ok_or(format!("no {ARCHIVE_DIR}/general_format.Product_*.sarc.zs"))?;
     let z = fs.read_file(&archive).map_err(|e| e.to_string())?;
-    let mut s = zstd::decode_all(&z[..]).map_err(|e| format!("{archive} does not decompress: {e}"))?;
+    let mut s =
+        zstd::decode_all(&z[..]).map_err(|e| format!("{archive} does not decompress: {e}"))?;
     let (at, len) = sarc_find(&s, MEMBER).ok_or(format!("no {MEMBER} in {archive}"))?;
     let changed = if len > 16 && &s[at..at + 2] == b"YB" {
         let m = &mut s[at..at + len];
@@ -138,8 +178,20 @@ fn write_overlay(lines: u32, lod: f32) -> Result<std::path::PathBuf, String> {
         return Err(format!("no resolution fields in {MEMBER}"));
     }
     let out = zstd::encode_all(&s[..], 9).map_err(|e| e.to_string())?;
-    let data = crate::boot::try_process().map(|p| p.data_dir.clone()).ok_or("no data folder")?;
-    let name = if lod > 0.0 { format!("graphics-r{lines}{}-lod{lod}", if handheld { "-handheld" } else { "" }) } else { format!("resolution-{lines}{}", if handheld { "-handheld" } else { "" }) };
+    let data = crate::boot::try_process()
+        .map(|p| p.data_dir.clone())
+        .ok_or("no data folder")?;
+    let name = if lod > 0.0 {
+        format!(
+            "graphics-r{lines}{}-lod{lod}",
+            if handheld { "-handheld" } else { "" }
+        )
+    } else {
+        format!(
+            "resolution-{lines}{}",
+            if handheld { "-handheld" } else { "" }
+        )
+    };
     let dir = data.join("cache").join(name);
     let path = dir.join(&archive);
     std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;

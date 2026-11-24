@@ -5,7 +5,10 @@ use crate::guest::Args;
 use crate::hle::Registry;
 use nxrt::cpu::Cpu;
 
-pub const LANG_CODES: [&str; 18] = ["ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB", "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR"];
+pub const LANG_CODES: [&str; 18] = [
+    "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB",
+    "fr-CA", "es-419", "zh-Hans", "zh-Hant", "pt-BR",
+];
 
 pub fn code(lang: i32) -> u64 {
     let mut b = [0u8; 8];
@@ -18,7 +21,11 @@ pub fn code(lang: i32) -> u64 {
 fn matches(lang: i32, code_at: u64) -> bool {
     let c = crate::guest::cstr(code_at, 8);
     let want = LANG_CODES.get(lang as usize).copied().unwrap_or("");
-    c == want || (lang == 6 && c == "zh-Hans") || (lang == 11 && c == "zh-Hant") || (lang == 15 && c == "zh-CN") || (lang == 16 && c == "zh-TW")
+    c == want
+        || (lang == 6 && c == "zh-Hans")
+        || (lang == 11 && c == "zh-Hant")
+        || (lang == 15 && c == "zh-CN")
+        || (lang == 16 && c == "zh-TW")
 }
 
 unsafe fn make(c: *mut Cpu) {
@@ -52,10 +59,26 @@ unsafe fn eq_code_lang(c: *mut Cpu) {
 pub fn register(r: &mut Registry) {
     const W: &str = "set: the fixed language table";
     r.force("_ZN2nn8settings12LanguageCode4MakeENS0_8LanguageE", W, make);
-    r.force("_ZN2nn8settings25GetAvailableLanguageCodesEPNS0_12LanguageCodeEi", W, available);
-    r.force("_ZN2nn8settings29GetAvailableLanguageCodeCountEv", W, available_count);
-    r.force("_ZN2nn8settingseqERKNS0_8LanguageERKNS0_12LanguageCodeE", W, eq_lang_code);
-    r.force("_ZN2nn8settingseqERKNS0_12LanguageCodeERKNS0_8LanguageE", W, eq_code_lang);
+    r.force(
+        "_ZN2nn8settings25GetAvailableLanguageCodesEPNS0_12LanguageCodeEi",
+        W,
+        available,
+    );
+    r.force(
+        "_ZN2nn8settings29GetAvailableLanguageCodeCountEv",
+        W,
+        available_count,
+    );
+    r.force(
+        "_ZN2nn8settingseqERKNS0_8LanguageERKNS0_12LanguageCodeE",
+        W,
+        eq_lang_code,
+    );
+    r.force(
+        "_ZN2nn8settingseqERKNS0_12LanguageCodeERKNS0_8LanguageE",
+        W,
+        eq_code_lang,
+    );
 }
 
 #[cfg(test)]

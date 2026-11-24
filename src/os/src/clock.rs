@@ -10,7 +10,11 @@ struct State {
     rate: f64,
 }
 
-static S: Mutex<State> = Mutex::new(State { real: 0, virt: 0, rate: 1.0 });
+static S: Mutex<State> = Mutex::new(State {
+    real: 0,
+    virt: 0,
+    rate: 1.0,
+});
 
 fn at(s: &State, real: u64) -> u64 {
     if s.rate == 1.0 {
@@ -31,7 +35,11 @@ pub fn now_ns() -> u64 {
 
 /// The guest clock's rate (1.0 normal, lower = slow motion); time already passed is kept.
 pub fn set_rate(rate: f64) {
-    let rate = if rate.is_finite() { rate.clamp(0.05, 4.0) } else { 1.0 };
+    let rate = if rate.is_finite() {
+        rate.clamp(0.05, 4.0)
+    } else {
+        1.0
+    };
     let real = nxrt::rt::now_ns();
     let mut s = S.lock().unwrap();
     let virt = if s.real == 0 { real } else { at(&s, real) };

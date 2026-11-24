@@ -143,7 +143,12 @@ pub fn parse_advert(d: &[u8]) -> Option<Advert> {
     if d.len() < 16 {
         return None;
     }
-    let mut a = Advert { vid: u16le(d, 3), pid: u16le(d, 5), pairing: true, host: [0; 6] };
+    let mut a = Advert {
+        vid: u16le(d, 3),
+        pid: u16le(d, 5),
+        pairing: true,
+        host: [0; 6],
+    };
     for i in 10..16 {
         a.host[i - 10] = d[i];
         if d[i] != 0 {
@@ -195,7 +200,16 @@ pub struct Cal {
 }
 impl Default for Cal {
     fn default() -> Self {
-        Cal { cx: 2048.0, cy: 2048.0, maxx: 1200.0, maxy: 1200.0, minx: 1200.0, miny: 1200.0, valid: false, dead: 0.0 }
+        Cal {
+            cx: 2048.0,
+            cy: 2048.0,
+            maxx: 1200.0,
+            maxy: 1200.0,
+            minx: 1200.0,
+            miny: 1200.0,
+            valid: false,
+            dead: 0.0,
+        }
     }
 }
 
@@ -212,7 +226,16 @@ pub fn parse_cal(d: &[u8]) -> Option<Cal> {
     let (maxx, maxy) = pair12(&d[3..6]);
     let (minx, miny) = pair12(&d[6..9]);
     let valid = maxx > 100.0 && maxy > 100.0 && minx > 100.0 && miny > 100.0;
-    valid.then_some(Cal { cx, cy, maxx, maxy, minx, miny, valid, dead: 0.0 })
+    valid.then_some(Cal {
+        cx,
+        cy,
+        maxx,
+        maxy,
+        minx,
+        miny,
+        valid,
+        dead: 0.0,
+    })
 }
 
 /// The stick parameters' third pair: the model's dead zone in counts (0 when not of that shape).
@@ -234,28 +257,50 @@ pub fn cal_from_flash(block: Option<&[u8]>, user: Option<&[u8]>) -> (Cal, u8) {
     if let Some(c) = user.and_then(parse_cal) {
         return (Cal { dead, ..c }, 2);
     }
-    if let Some(c) = block.filter(|b| b.len() >= STICK_BLOCK).and_then(|b| parse_cal(&b[STICK_PARAMS..])) {
+    if let Some(c) = block
+        .filter(|b| b.len() >= STICK_BLOCK)
+        .and_then(|b| parse_cal(&b[STICK_PARAMS..]))
+    {
         return (Cal { dead, ..c }, 1);
     }
-    (Cal { dead, ..Default::default() }, 0)
+    (
+        Cal {
+            dead,
+            ..Default::default()
+        },
+        0,
+    )
 }
 
 /// A stick in -32767..32767 (y up): each axis over its travel on that side, a round dead zone (the stick's own when
 /// plausible, else 10%), scaled back to start at 0.
 pub fn apply_cal(c: &Cal, rx: u16, ry: u16) -> (i32, i32) {
     let (sx, sy) = (rx as f32 - c.cx, ry as f32 - c.cy);
-    let (tx, ty) = (if sx >= 0.0 { c.maxx } else { c.minx }, if sy >= 0.0 { c.maxy } else { c.miny });
-    let (nx, ny) = (if tx > 0.0 { sx / tx } else { 0.0 }, if ty > 0.0 { sy / ty } else { 0.0 });
+    let (tx, ty) = (
+        if sx >= 0.0 { c.maxx } else { c.minx },
+        if sy >= 0.0 { c.maxy } else { c.miny },
+    );
+    let (nx, ny) = (
+        if tx > 0.0 { sx / tx } else { 0.0 },
+        if ty > 0.0 { sy / ty } else { 0.0 },
+    );
     let r = (nx * nx + ny * ny).sqrt();
     let travel = (c.maxx + c.minx + c.maxy + c.miny) / 4.0;
     let own = if travel > 0.0 { c.dead / travel } else { 0.0 };
-    let dead = if (0.03..=0.25).contains(&own) { own } else { 0.10 };
+    let dead = if (0.03..=0.25).contains(&own) {
+        own
+    } else {
+        0.10
+    };
     if r <= dead {
         return (0, 0);
     }
     let k = (r - dead) / (1.0 - dead) / r;
     ((nx * k).clamp(-1.0, 1.0) as f64 * 32767.0).round() as i32;
-    (((nx * k).clamp(-1.0, 1.0) * 32767.0).round() as i32, ((ny * k).clamp(-1.0, 1.0) * 32767.0).round() as i32)
+    (
+        ((nx * k).clamp(-1.0, 1.0) * 32767.0).round() as i32,
+        ((ny * k).clamp(-1.0, 1.0) * 32767.0).round() as i32,
+    )
 }
 
 /// The device's buttons as NpadButtons (positional = labels on Nintendo pads); `rail` adds SL/SR at 24..27 for a
@@ -347,7 +392,10 @@ pub fn sample(v: &super::Vib) -> [u8; 5] {
     let k = if sum > 1.0 { 0.98 / sum } else { 0.98 };
     lo *= k;
     hi *= k;
-    let x = freq_code(v.freq_low) as u64 & 0x3ff | (amp_code(lo) as u64 & 0x3ff) << 10 | (freq_code(v.freq_high) as u64 & 0x3ff) << 20 | (amp_code(hi) as u64 & 0x3ff) << 30;
+    let x = freq_code(v.freq_low) as u64 & 0x3ff
+        | (amp_code(lo) as u64 & 0x3ff) << 10
+        | (freq_code(v.freq_high) as u64 & 0x3ff) << 20
+        | (amp_code(hi) as u64 & 0x3ff) << 30;
     std::array::from_fn(|i| (x >> (8 * i)) as u8)
 }
 
@@ -374,7 +422,10 @@ mod tests {
     use super::*;
     #[test]
     fn protocol() {
-        assert_eq!(command(CMD_LEDS, SUB_LEDS_SET, &[1, 0, 0, 0]), vec![9, 0x91, 1, 7, 0, 4, 0, 0, 1, 0, 0, 0]);
+        assert_eq!(
+            command(CMD_LEDS, SUB_LEDS_SET, &[1, 0, 0, 0]),
+            vec![9, 0x91, 1, 7, 0, 4, 0, 0, 1, 0, 0, 0]
+        );
         let mut adv = vec![0u8; 16];
         adv[3..5].copy_from_slice(&VENDOR.to_le_bytes());
         adv[5..7].copy_from_slice(&PID_JOY_L.to_le_bytes());
@@ -388,7 +439,11 @@ mod tests {
         // frequency code: 333 at 110 Hz
         assert_eq!(freq_code(110.0), 333);
         assert_eq!(amp_code(1.0), 1023);
-        let p = rumble_packet(&super::super::Vib::default(), &super::super::Vib::default(), 5);
+        let p = rumble_packet(
+            &super::super::Vib::default(),
+            &super::super::Vib::default(),
+            5,
+        );
         assert_eq!((p.len(), p[1]), (33, 0x75));
     }
     #[test]

@@ -24,7 +24,10 @@ struct Mods {
 static MODS: OnceLock<Mods> = OnceLock::new();
 
 fn exe_dir() -> PathBuf {
-    std::env::current_exe().ok().and_then(|p| p.parent().map(Path::to_path_buf)).unwrap_or_else(|| PathBuf::from("."))
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 /// The on / off rule for one mod.
@@ -36,16 +39,31 @@ pub fn enabled_by(env: Option<&str>, marker: bool, default_on: bool) -> bool {
 }
 
 fn parse(text: &str, exe: &Path) -> Mods {
-    let mut m = Mods { mods: vec![], bytes: vec![] };
+    let mut m = Mods {
+        mods: vec![],
+        bytes: vec![],
+    };
     for l in text.lines() {
         let f: Vec<&str> = l.split('\t').collect();
         match f.as_slice() {
             ["mod", env, def, folder, romfs] => {
-                let on = enabled_by(std::env::var(env).ok().as_deref(), exe.join("mods").join(folder).join("disabled").exists(), *def == "1");
-                m.mods.push(ModRow { env: env.to_string(), on, folder: folder.to_string(), romfs: (*romfs != "-").then(|| PathBuf::from(romfs)) });
+                let on = enabled_by(
+                    std::env::var(env).ok().as_deref(),
+                    exe.join("mods").join(folder).join("disabled").exists(),
+                    *def == "1",
+                );
+                m.mods.push(ModRow {
+                    env: env.to_string(),
+                    on,
+                    folder: folder.to_string(),
+                    romfs: (*romfs != "-").then(|| PathBuf::from(romfs)),
+                });
             }
             ["bytes", env, module, off, hex] => {
-                if let (Ok(o), Ok(b)) = (u64::from_str_radix(off.trim_start_matches("0x"), 16), u8::from_str_radix(hex, 16)) {
+                if let (Ok(o), Ok(b)) = (
+                    u64::from_str_radix(off.trim_start_matches("0x"), 16),
+                    u8::from_str_radix(hex, 16),
+                ) {
                     m.bytes.push((env.to_string(), module.to_string(), o, b));
                 }
             }
@@ -57,21 +75,31 @@ fn parse(text: &str, exe: &Path) -> Mods {
 
 /// Reads `<data>\mods.tsv` once and says which mods are on.
 pub fn init(data: &Path) -> bool {
-    let m = MODS.get_or_init(|| parse(&std::fs::read_to_string(data.join("mods.tsv")).unwrap_or_default(), &exe_dir()));
+    let m = MODS.get_or_init(|| {
+        parse(
+            &std::fs::read_to_string(data.join("mods.tsv")).unwrap_or_default(),
+            &exe_dir(),
+        )
+    });
     for r in &m.mods {
         crate::log!(
             "mods: {} {} ({}{})",
             r.folder,
             if r.on { "on" } else { "off" },
             r.env,
-            if r.romfs.is_some() { ", RomFS files layered" } else { "" }
+            if r.romfs.is_some() {
+                ", RomFS files layered"
+            } else {
+                ""
+            }
         );
     }
     !m.mods.is_empty()
 }
 
 fn on(env: &str) -> bool {
-    MODS.get().is_some_and(|m| m.mods.iter().any(|r| r.env == env && r.on))
+    MODS.get()
+        .is_some_and(|m| m.mods.iter().any(|r| r.env == env && r.on))
 }
 
 /// Writes the enabled mods' data bytes into the loaded modules (name, base, size).
@@ -82,7 +110,9 @@ pub fn apply_bytes(loaded: &[(String, u64, u64)]) {
         if !on(env) {
             continue;
         }
-        let Some((_, base, size)) = loaded.iter().find(|(nm, _, _)| nm == module) else { continue };
+        let Some((_, base, size)) = loaded.iter().find(|(nm, _, _)| nm == module) else {
+            continue;
+        };
         if *off >= *size {
             continue;
         }
@@ -131,8 +161,18 @@ pub fn apply_bytes(loaded: &[(String, u64, u64)]) {
 /// The enabled mods' RomFS folders, the first given the most weight (folder order reversed: a later folder name wins
 /// as in Ryujinx's load order).
 fn layers() -> Vec<&'static Path> {
-    let mut v: Vec<&'static Path> = OVERLAYS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
-    v.extend(MODS.get().map_or(vec![], |m| m.mods.iter().rev().filter(|r| r.on).filter_map(|r| r.romfs.as_deref()).collect::<Vec<_>>()));
+    let mut v: Vec<&'static Path> = OVERLAYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .clone();
+    v.extend(MODS.get().map_or(vec![], |m| {
+        m.mods
+            .iter()
+            .rev()
+            .filter(|r| r.on)
+            .filter_map(|r| r.romfs.as_deref())
+            .collect::<Vec<_>>()
+    }));
     v
 }
 
@@ -143,19 +183,27 @@ static OVERLAYS: std::sync::Mutex<Vec<&'static Path>> = std::sync::Mutex::new(Ve
 /// Layers `dir` (a RomFS-shaped folder) over the game's RomFS, above every mod.
 pub fn add_overlay(dir: PathBuf) {
     let d: &'static Path = Box::leak(dir.into_boxed_path());
-    OVERLAYS.lock().unwrap_or_else(std::sync::PoisonError::into_inner).insert(0, d);
+    OVERLAYS
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(0, d);
 }
 
 /// A mod's file for this path of the game's RomFS (`a/b.bin`), if one replaces or adds it.
 pub fn romfs_file(path: &str) -> Option<PathBuf> {
-    layers().into_iter().map(|d| d.join(path)).find(|p| p.is_file())
+    layers()
+        .into_iter()
+        .map(|d| d.join(path))
+        .find(|p| p.is_file())
 }
 
 /// The mods' entries of a RomFS directory: (name, is dir, size).
 pub fn romfs_dir(path: &str) -> Vec<(String, bool, u64)> {
     let mut v: Vec<(String, bool, u64)> = vec![];
     for d in layers() {
-        let Ok(rd) = std::fs::read_dir(d.join(path)) else { continue };
+        let Ok(rd) = std::fs::read_dir(d.join(path)) else {
+            continue;
+        };
         for e in rd.flatten() {
             let name = e.file_name().to_string_lossy().into_owned();
             if v.iter().any(|x| x.0 == name) {
@@ -187,6 +235,9 @@ mod tests {
         let m = parse("# x\nmod\tNXRS_MOD_T_A\t1\tA\t-\nmod\tNXRS_MOD_T_B\t0\tB\tC:\\r\nbytes\tNXRS_MOD_T_A\tmain\t0x10\tff\n", Path::new("."));
         assert_eq!(m.mods.len(), 2);
         assert!(m.mods[0].on && !m.mods[1].on);
-        assert_eq!(m.bytes, vec![("NXRS_MOD_T_A".into(), "main".into(), 0x10, 0xff)]);
+        assert_eq!(
+            m.bytes,
+            vec![("NXRS_MOD_T_A".into(), "main".into(), 0x10, 0xff)]
+        );
     }
 }

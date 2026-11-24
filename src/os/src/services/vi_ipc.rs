@@ -47,15 +47,26 @@ struct Maps {
     next: u32,
 }
 
-static MAPS: std::sync::LazyLock<Mutex<Maps>> = std::sync::LazyLock::new(|| Mutex::new(Maps { by_handle: HashMap::new(), next: 1 }));
+static MAPS: std::sync::LazyLock<Mutex<Maps>> = std::sync::LazyLock::new(|| {
+    Mutex::new(Maps {
+        by_handle: HashMap::new(),
+        next: 1,
+    })
+});
 
 /// The nvmap object an id names (vi's GraphicBuffer carries the id).
 pub fn nvmap_by_id(id: u32) -> Option<NvMap> {
-    MAPS.lock().unwrap().by_handle.values().find(|m| m.id == id).copied()
+    MAPS.lock()
+        .unwrap()
+        .by_handle
+        .values()
+        .find(|m| m.id == id)
+        .copied()
 }
 
 fn rd(b: &[u8], o: usize) -> u32 {
-    b.get(o..o + 4).map_or(0, |s| u32::from_le_bytes(s.try_into().unwrap()))
+    b.get(o..o + 4)
+        .map_or(0, |s| u32::from_le_bytes(s.try_into().unwrap()))
 }
 fn wr(b: &mut [u8], o: usize, v: u32) {
     if let Some(s) = b.get_mut(o..o + 4) {
@@ -76,7 +87,15 @@ fn nvmap_ioctl(cmd: u32, io: &mut [u8]) -> u32 {
             let h = m.next;
             m.next += 1;
             // ids are the handles' own numbers here (the driver's ids are global, handles per client)
-            m.by_handle.insert(h, NvMap { size, align: 0x1000, id: h, ..Default::default() });
+            m.by_handle.insert(
+                h,
+                NvMap {
+                    size,
+                    align: 0x1000,
+                    id: h,
+                    ..Default::default()
+                },
+            );
             wr(io, 4, h);
             NV_OK
         }
@@ -93,7 +112,9 @@ fn nvmap_ioctl(cmd: u32, io: &mut [u8]) -> u32 {
         0xC020_0104 => {
             let h = rd(io, 0);
             let addr = u64::from_le_bytes(io[0x18..0x20].try_into().unwrap());
-            let Some(o) = m.by_handle.get_mut(&h) else { return NV_BAD_VALUE };
+            let Some(o) = m.by_handle.get_mut(&h) else {
+                return NV_BAD_VALUE;
+            };
             o.heap = rd(io, 4);
             o.align = rd(io, 0xc).max(0x1000);
             o.kind = io[0x10];
@@ -102,7 +123,9 @@ fn nvmap_ioctl(cmd: u32, io: &mut [u8]) -> u32 {
         }
         // Free {handle, pad; address, size, flags out}
         0xC018_0105 => {
-            let Some(o) = m.by_handle.remove(&rd(io, 0)) else { return NV_BAD_VALUE };
+            let Some(o) = m.by_handle.remove(&rd(io, 0)) else {
+                return NV_BAD_VALUE;
+            };
             io[8..16].copy_from_slice(&o.addr.to_le_bytes());
             wr(io, 0x10, o.size);
             wr(io, 0x14, 0);
@@ -110,7 +133,9 @@ fn nvmap_ioctl(cmd: u32, io: &mut [u8]) -> u32 {
         }
         // Param {handle, param; result out}: 1 size, 2 alignment, 3 base, 4 heap, 5 kind, 6 compression
         0xC00C_0109 => {
-            let Some(o) = m.by_handle.get(&rd(io, 0)).copied() else { return NV_BAD_VALUE };
+            let Some(o) = m.by_handle.get(&rd(io, 0)).copied() else {
+                return NV_BAD_VALUE;
+            };
             let v = match rd(io, 4) {
                 1 => o.size,
                 2 => o.align,
@@ -125,12 +150,17 @@ fn nvmap_ioctl(cmd: u32, io: &mut [u8]) -> u32 {
         }
         // GetId {id out; handle}
         0xC008_010E => {
-            let Some(o) = m.by_handle.get(&rd(io, 4)).copied() else { return NV_BAD_VALUE };
+            let Some(o) = m.by_handle.get(&rd(io, 4)).copied() else {
+                return NV_BAD_VALUE;
+            };
             wr(io, 0, o.id);
             NV_OK
         }
         _ => {
-            crate::log_once!(format!("nvmap {cmd:#x}"), "[RED] nvdrv: /dev/nvmap ioctl {cmd:#x} is not served");
+            crate::log_once!(
+                format!("nvmap {cmd:#x}"),
+                "[RED] nvdrv: /dev/nvmap ioctl {cmd:#x} is not served"
+            );
             NV_NOT_SUPPORTED
         }
     }
@@ -162,7 +192,10 @@ fn ctrl_ioctl(cmd: u32, io: &mut [u8]) -> u32 {
             }
         }
         _ => {
-            crate::log_once!(format!("nvhost-ctrl {cmd:#x}"), "[RED] nvdrv: /dev/nvhost-ctrl ioctl {cmd:#x} is not served");
+            crate::log_once!(
+                format!("nvhost-ctrl {cmd:#x}"),
+                "[RED] nvdrv: /dev/nvhost-ctrl ioctl {cmd:#x} is not served"
+            );
             NV_NOT_SUPPORTED
         }
     }
@@ -190,7 +223,10 @@ impl Service for NvDrv {
             // Open(path) -> fd, error
             0 => {
                 let p = ctx.read_in(0);
-                let path = String::from_utf8_lossy(&p[..p.iter().position(|&b| b == 0).unwrap_or(p.len())]).to_string();
+                let path = String::from_utf8_lossy(
+                    &p[..p.iter().position(|&b| b == 0).unwrap_or(p.len())],
+                )
+                .to_string();
                 let dev = match path.as_str() {
                     "/dev/nvmap" => Some(Dev::Map),
                     "/dev/nvhost-ctrl" => Some(Dev::Ctrl),
@@ -229,7 +265,11 @@ impl Service for NvDrv {
             }
             // Close(fd)
             2 => {
-                let r = if self.fds.remove(&ctx.u32(0)).is_some() { NV_OK } else { NV_BAD_VALUE };
+                let r = if self.fds.remove(&ctx.u32(0)).is_some() {
+                    NV_OK
+                } else {
+                    NV_BAD_VALUE
+                };
                 ctx.push_u32(r);
                 0
             }
@@ -321,7 +361,11 @@ pub fn to_rgba(s: &Slot, mem: &[u8]) -> Option<Vec<u8>> {
     for y in 0..h {
         for x in 0..w {
             let xb = x * bpp;
-            let o = if s.layout == 3 { block_linear_offset(xb, y, row_bytes, s.block_height_log2) } else { (y * row_bytes + xb) as usize };
+            let o = if s.layout == 3 {
+                block_linear_offset(xb, y, row_bytes, s.block_height_log2)
+            } else {
+                (y * row_bytes + xb) as usize
+            };
             let p = mem.get(o..o + bpp as usize)?;
             let d = ((y * w + x) * 4) as usize;
             let px: [u8; 4] = match s.format {
@@ -331,7 +375,12 @@ pub fn to_rgba(s: &Slot, mem: &[u8]) -> Option<Vec<u8>> {
                 _ => {
                     let v = u16::from_le_bytes([p[0], p[1]]);
                     let (r, g, b) = ((v >> 11) & 31, (v >> 5) & 63, v & 31);
-                    [(r * 255 / 31) as u8, (g * 255 / 63) as u8, (b * 255 / 31) as u8, 255]
+                    [
+                        (r * 255 / 31) as u8,
+                        (g * 255 / 63) as u8,
+                        (b * 255 / 31) as u8,
+                        255,
+                    ]
                 }
             };
             out[d..d + 4].copy_from_slice(&px);
@@ -357,7 +406,13 @@ struct Queue {
     presents: u64,
 }
 
-static QUEUE: Mutex<Queue> = Mutex::new(Queue { slots: Vec::new(), connected: false, crop: [0; 4], transform: 0, presents: 0 });
+static QUEUE: Mutex<Queue> = Mutex::new(Queue {
+    slots: Vec::new(),
+    connected: false,
+    crop: [0; 4],
+    transform: 0,
+    presents: 0,
+});
 static FREED: Condvar = Condvar::new();
 static BUFFER_FREE: SysEvent = SysEvent::new();
 static VSYNC: SysEvent = SysEvent::new();
@@ -445,7 +500,11 @@ const WOULD_BLOCK: i32 = -11;
 /// Shows the slot's picture; the status.
 fn present_slot(s: &Slot) -> i32 {
     let Some(m) = nvmap_by_id(s.nvmap_id) else {
-        crate::log_once!("binder nvmap", "[RED] vi: a queued buffer names nvmap id {} the client never made", s.nvmap_id);
+        crate::log_once!(
+            "binder nvmap",
+            "[RED] vi: a queued buffer names nvmap id {} the client never made",
+            s.nvmap_id
+        );
         return BAD_VALUE;
     };
     if m.addr == 0 || s.offset as u64 >= m.size as u64 {
@@ -453,7 +512,14 @@ fn present_slot(s: &Slot) -> i32 {
     }
     let mem = crate::guest::bytes(m.addr + s.offset as u64, (m.size - s.offset) as u64);
     let Some(rgba) = to_rgba(s, mem) else {
-        crate::log_once!(format!("binder fmt {}", s.format), "[RED] vi: a queued buffer of pixel format {} ({}x{}, layout {}) is not shown", s.format, s.width, s.height, s.layout);
+        crate::log_once!(
+            format!("binder fmt {}", s.format),
+            "[RED] vi: a queued buffer of pixel format {} ({}x{}, layout {}) is not shown",
+            s.format,
+            s.width,
+            s.height,
+            s.layout
+        );
         return BAD_VALUE;
     };
     let sink = *SINK.lock().unwrap();
@@ -496,10 +562,17 @@ fn transact(code: u32, input: &[u8]) -> Vec<u8> {
                 o.i32(NO_INIT);
                 return o.parcel();
             }
-            let pick = |q: &Queue| q.slots.iter().position(|s| s.as_ref().is_some_and(|s| !s.dequeued));
+            let pick = |q: &Queue| {
+                q.slots
+                    .iter()
+                    .position(|s| s.as_ref().is_some_and(|s| !s.dequeued))
+            };
             let mut slot = pick(&q);
             if slot.is_none() && q.slots.iter().any(|s| s.is_some()) {
-                q = FREED.wait_timeout(q, std::time::Duration::from_millis(100)).unwrap().0;
+                q = FREED
+                    .wait_timeout(q, std::time::Duration::from_millis(100))
+                    .unwrap()
+                    .0;
                 slot = pick(&q);
             }
             match slot {
@@ -523,7 +596,12 @@ fn transact(code: u32, input: &[u8]) -> Vec<u8> {
             let i = r.u32() as usize;
             let qi = r.flat().to_vec();
             if qi.len() >= 0x24 {
-                q.crop = [rd(&qi, 0xc) as i32, rd(&qi, 0x10) as i32, rd(&qi, 0x14) as i32, rd(&qi, 0x18) as i32];
+                q.crop = [
+                    rd(&qi, 0xc) as i32,
+                    rd(&qi, 0x10) as i32,
+                    rd(&qi, 0x14) as i32,
+                    rd(&qi, 0x18) as i32,
+                ];
                 q.transform = rd(&qi, 0x20);
             }
             let status = match q.slots.get_mut(i).and_then(|s| s.as_mut()) {
@@ -590,7 +668,11 @@ fn transact(code: u32, input: &[u8]) -> Vec<u8> {
                 o.i32(BAD_VALUE);
                 return o.parcel();
             }
-            q.slots[i] = if has != 0 { Slot::parse(r.flat()) } else { None };
+            q.slots[i] = if has != 0 {
+                Slot::parse(r.flat())
+            } else {
+                None
+            };
             if let Some(s) = &q.slots[i] {
                 crate::log!("vi: buffer slot {i}: {}x{} format {} pitch {} layout {} block height {} nvmap id {}", s.width, s.height, s.format, s.pitch, s.layout, 1 << s.block_height_log2, s.nvmap_id);
             }
@@ -602,7 +684,10 @@ fn transact(code: u32, input: &[u8]) -> Vec<u8> {
             o.i32(0);
         }
         c => {
-            crate::log_once!(format!("binder {c}"), "[RED] vi: binder transaction {c} is not served (status BAD_VALUE)");
+            crate::log_once!(
+                format!("binder {c}"),
+                "[RED] vi: binder transaction {c} is not served (status BAD_VALUE)"
+            );
             o.i32(BAD_VALUE);
         }
     }
@@ -730,7 +815,11 @@ impl Service for AppDisplay {
             // GetIndirectLayerImageRequiredMemoryInfo(width, height) -> size, alignment
             2460 => {
                 let (iw, ih) = (ctx.u64(0), ctx.u64(8));
-                let sz = if iw == 0 || ih == 0 || iw > 8192 || ih > 8192 { 0x1000 } else { ((iw * 4 + 63) & !63) * ((ih + 127) & !127) };
+                let sz = if iw == 0 || ih == 0 || iw > 8192 || ih > 8192 {
+                    0x1000
+                } else {
+                    ((iw * 4 + 63) & !63) * ((ih + 127) & !127)
+                };
                 ctx.push_u64((sz + 0x1ffff) & !0x1ffff);
                 ctx.push_u64(0x1000);
             }
@@ -812,7 +901,14 @@ impl Service for Vi {
 
 pub fn register() {
     for n in ["nvdrv", "nvdrv:a", "nvdrv:s", "nvdrv:t"] {
-        ipc::register(n, || Box::new(NvDrv { name: "nvdrv", fds: HashMap::new(), next: 1, events: vec![] }));
+        ipc::register(n, || {
+            Box::new(NvDrv {
+                name: "nvdrv",
+                fds: HashMap::new(),
+                next: 1,
+                events: vec![],
+            })
+        });
     }
     ipc::register("vi:u", || Box::new(Vi("vi:u")));
     ipc::register("vi:s", || Box::new(Vi("vi:s")));
@@ -825,15 +921,31 @@ mod tests {
     use crate::ipc::hipc::{self, Buf, Builder, T_REQUEST};
 
     fn send(h: u32, cmd: u32, data: Vec<u8>, a: Vec<Buf>, b: Vec<Buf>) -> hipc::Response {
-        let mut m = Builder { ty: T_REQUEST, cmd, data, a, b, ..Default::default() }.build();
+        let mut m = Builder {
+            ty: T_REQUEST,
+            cmd,
+            data,
+            a,
+            b,
+            ..Default::default()
+        }
+        .build();
         crate::ipc::process(h, &mut m);
         hipc::parse_response(&m, false).unwrap()
     }
     fn bin(v: &[u8]) -> Vec<Buf> {
-        vec![Buf { addr: v.as_ptr() as u64, size: v.len() as u64, tag: 0 }]
+        vec![Buf {
+            addr: v.as_ptr() as u64,
+            size: v.len() as u64,
+            tag: 0,
+        }]
     }
     fn bout(v: &mut [u8]) -> Vec<Buf> {
-        vec![Buf { addr: v.as_mut_ptr() as u64, size: v.len() as u64, tag: 0 }]
+        vec![Buf {
+            addr: v.as_mut_ptr() as u64,
+            size: v.len() as u64,
+            tag: 0,
+        }]
     }
     fn u32s(v: &[u32]) -> Vec<u8> {
         v.iter().flat_map(|x| x.to_le_bytes()).collect()
@@ -853,9 +965,21 @@ mod tests {
         assert_eq!(block_linear_offset(0, 1, 256, 0), 16);
         assert_eq!(block_linear_offset(32, 0, 256, 0), 256);
         assert_eq!(block_linear_offset(0, 2, 256, 0), 64);
-        assert_eq!(block_linear_offset(64, 0, 256, 0), 512, "the next GOB to the right");
-        assert_eq!(block_linear_offset(0, 8, 256, 0), 4 * 512, "a row of 4 GOBs");
-        assert_eq!(block_linear_offset(0, 8, 256, 1), 512, "the second GOB of a 2-GOB block");
+        assert_eq!(
+            block_linear_offset(64, 0, 256, 0),
+            512,
+            "the next GOB to the right"
+        );
+        assert_eq!(
+            block_linear_offset(0, 8, 256, 0),
+            4 * 512,
+            "a row of 4 GOBs"
+        );
+        assert_eq!(
+            block_linear_offset(0, 8, 256, 1),
+            512,
+            "the second GOB of a 2-GOB block"
+        );
         assert_eq!(block_linear_offset(64, 0, 256, 1), 1024);
     }
 
@@ -881,7 +1005,10 @@ mod tests {
         let fd = u32::from_le_bytes(r.data[..4].try_into().unwrap());
         assert_eq!(&r.data[4..8], &[0; 4]);
         let r = send(nv, 0, vec![], bin(b"/dev/nvhost-gpu\0"), vec![]);
-        assert_eq!(u32::from_le_bytes(r.data[4..8].try_into().unwrap()), NV_NOT_SUPPORTED);
+        assert_eq!(
+            u32::from_le_bytes(r.data[4..8].try_into().unwrap()),
+            NV_NOT_SUPPORTED
+        );
         // a 64x16 BGRA surface, block-linear, block height 2 GOBs: 256 bytes a row, 2 blocks of 2 GOBs down
         let (w, h) = (64u32, 16u32);
         let mut mem = vec![0u8; 0x8000];
@@ -898,9 +1025,17 @@ mod tests {
         let mut io = u32s(&[handle, 1, 0]);
         assert_eq!(ioctl(nv, fd, 0xC00C_0109, &mut io), 0);
         assert_eq!(rd(&io, 8), 0x8000, "Param size");
-        let ctrl = u32::from_le_bytes(send(nv, 0, vec![], bin(b"/dev/nvhost-ctrl\0"), vec![]).data[..4].try_into().unwrap());
+        let ctrl = u32::from_le_bytes(
+            send(nv, 0, vec![], bin(b"/dev/nvhost-ctrl\0"), vec![]).data[..4]
+                .try_into()
+                .unwrap(),
+        );
         let mut io = u32s(&[7, 0, 0, 0]);
-        assert_eq!(ioctl(nv, ctrl, 0xC010_0019, &mut io), 0, "a wait already reached");
+        assert_eq!(
+            ioctl(nv, ctrl, 0xC010_0019, &mut io),
+            0,
+            "a wait already reached"
+        );
         let mut io = u32s(&[7, 5, 0, 0]);
         assert_eq!(ioctl(nv, ctrl, 0xC010_0019, &mut io), NV_TIMEOUT);
 
@@ -908,11 +1043,27 @@ mod tests {
         let ads = send(vi, 0, vec![0; 4], vec![], vec![]).moved[0];
         let mut name = vec![0u8; 0x40];
         name[..7].copy_from_slice(b"Default");
-        assert_eq!(u64::from_le_bytes(send(ads, 1010, name, vec![], vec![]).data[..8].try_into().unwrap()), 1);
+        assert_eq!(
+            u64::from_le_bytes(
+                send(ads, 1010, name, vec![], vec![]).data[..8]
+                    .try_into()
+                    .unwrap()
+            ),
+            1
+        );
         let mut nw = vec![0u8; 0x100];
-        let r = send(ads, 2030, [0u64.to_le_bytes(), 1u64.to_le_bytes()].concat(), vec![], bout(&mut nw));
+        let r = send(
+            ads,
+            2030,
+            [0u64.to_le_bytes(), 1u64.to_le_bytes()].concat(),
+            vec![],
+            bout(&mut nw),
+        );
         assert_eq!(u64::from_le_bytes(r.data[8..16].try_into().unwrap()), 0x3c);
-        assert_eq!((rd(&nw, 0x10), rd(&nw, 0x18), &nw[0x28..0x30]), (2, BINDER_ID, &b"dispdrv\0"[..]));
+        assert_eq!(
+            (rd(&nw, 0x10), rd(&nw, 0x18), &nw[0x28..0x30]),
+            (2, BINDER_ID, &b"dispdrv\0"[..])
+        );
         let vsync = send(ads, 5202, 1u64.to_le_bytes().to_vec(), vec![], vec![]).copy[0];
         let binder = send(ads, 100, vec![], vec![], vec![]).moved[0];
 
@@ -924,14 +1075,24 @@ mod tests {
             d.0.extend_from_slice(body);
             let p = d.parcel();
             let mut out = vec![0u8; 0x200];
-            let r = send(binder, 0, u32s(&[BINDER_ID, code, 0]), bin(&p), bout(&mut out));
+            let r = send(
+                binder,
+                0,
+                u32s(&[BINDER_ID, code, 0]),
+                bin(&p),
+                bout(&mut out),
+            );
             assert_eq!(r.result, 0);
             let n = rd(&out, 0) as usize;
             out[0x10..0x10 + n].to_vec()
         };
         // the status is the reply's last word
         let status = |r: &[u8]| rd(r, r.len() - 4) as i32;
-        assert_eq!(status(&tx(3, &u32s(&[1, w, h, 0, 0x100]))), NO_INIT, "dequeue before connect");
+        assert_eq!(
+            status(&tx(3, &u32s(&[1, w, h, 0, 0x100]))),
+            NO_INIT,
+            "dequeue before connect"
+        );
         let r = tx(10, &u32s(&[0, 2, 0]));
         assert_eq!((rd(&r, 0), status(&r)), (display_size().0, 0));
         // GraphicBuffer: format 5 (BGRA) at +0x10, nvmap id at +0x2c, plane at +0x5c
@@ -939,16 +1100,31 @@ mod tests {
         gb[..4].copy_from_slice(b"GBFR");
         gb[0x10..0x14].copy_from_slice(&5u32.to_le_bytes());
         gb[0x2c..0x30].copy_from_slice(&id.to_le_bytes());
-        for (o, v) in [(0x5c, w), (0x60, h), (0x6c, 3), (0x70, w * 4), (0x78, 0), (0x80, 1)] {
+        for (o, v) in [
+            (0x5c, w),
+            (0x60, h),
+            (0x6c, 3),
+            (0x70, w * 4),
+            (0x78, 0),
+            (0x80, 1),
+        ] {
             gb[o..o + 4].copy_from_slice(&v.to_le_bytes());
         }
         let mut body = u32s(&[0, 1, gb.len() as u32, 0]);
         body.extend_from_slice(&gb);
         assert_eq!(status(&tx(14, &body)), 0);
         let r = tx(3, &u32s(&[1, w, h, 0, 0x100]));
-        assert_eq!((rd(&r, 0), rd(&r, 4), status(&r)), (0, 1, 0), "slot 0, a fence");
+        assert_eq!(
+            (rd(&r, 0), rd(&r, 4), status(&r)),
+            (0, 1, 0),
+            "slot 0, a fence"
+        );
         let r = tx(1, &u32s(&[0]));
-        assert_eq!((rd(&r, 0), rd(&r, 4) as usize, &r[0xc..0x10]), (1, gb.len(), &b"GBFR"[..]), "REQUEST_BUFFER gives the GraphicBuffer back");
+        assert_eq!(
+            (rd(&r, 0), rd(&r, 4) as usize, &r[0xc..0x10]),
+            (1, gb.len(), &b"GBFR"[..]),
+            "REQUEST_BUFFER gives the GraphicBuffer back"
+        );
         // the client draws: pixel (x, y) = BGRA (x, y, 7, 255)
         for y in 0..h {
             for x in 0..w {
@@ -967,33 +1143,79 @@ mod tests {
         assert_eq!((seen.0, seen.1), (w, h));
         for (x, y) in [(0u32, 0u32), (63, 0), (5, 9), (63, 15)] {
             let o = ((y * w + x) * 4) as usize;
-            assert_eq!(&seen.2[o..o + 4], &[x as u8, y as u8, 7, 255], "pixel {x},{y} as RGBA");
+            assert_eq!(
+                &seen.2[o..o + 4],
+                &[x as u8, y as u8, 7, 255],
+                "pixel {x},{y} as RGBA"
+            );
         }
-        assert_eq!(nxrt::kernel::get().event_signaled(vsync), Some(true), "vsync at the present");
+        assert_eq!(
+            nxrt::kernel::get().event_signaled(vsync),
+            Some(true),
+            "vsync at the present"
+        );
         assert_eq!(status(&tx(7, &body)), BAD_VALUE, "a slot not dequeued");
         tx(3, &u32s(&[1, w, h, 0, 0x100]));
         assert_eq!(status(&tx(8, &u32s(&[0]))), 0, "cancel");
         let r = tx(9, &u32s(&[1]));
         assert_eq!(rd(&r, 0), display_size().1);
-        assert_eq!(send(binder, 2, u32s(&[BINDER_ID, 0xf]), vec![], vec![]).copy.len(), 1, "the buffer event");
+        assert_eq!(
+            send(binder, 2, u32s(&[BINDER_ID, 0xf]), vec![], vec![])
+                .copy
+                .len(),
+            1,
+            "the buffer event"
+        );
         assert_eq!(status(&tx(11, &[])), 0);
         // a GraphicBuffer naming an id nobody made is not shown
         let mut bad = gb.clone();
         bad[0x2c..0x30].copy_from_slice(&999u32.to_le_bytes());
-        assert_eq!(present_slot(&Slot { dequeued: true, ..Slot::parse(&bad).unwrap() }), BAD_VALUE);
+        assert_eq!(
+            present_slot(&Slot {
+                dequeued: true,
+                ..Slot::parse(&bad).unwrap()
+            }),
+            BAD_VALUE
+        );
         *SINK.lock().unwrap() = present_to_window;
     }
 
     /// Pitch-linear RGB565 and RGBA8888 slots become RGBA rows.
     #[test]
     fn pixel_formats() {
-        let s = Slot { format: 4, width: 2, height: 1, pitch: 8, layout: 1, ..Default::default() };
+        let s = Slot {
+            format: 4,
+            width: 2,
+            height: 1,
+            pitch: 8,
+            layout: 1,
+            ..Default::default()
+        };
         let m = [0x00u8, 0xF8, 0xE0, 0x07, 0, 0, 0, 0];
-        assert_eq!(to_rgba(&s, &m).unwrap(), vec![255, 0, 0, 255, 0, 255, 0, 255]);
-        let s = Slot { format: 1, width: 1, height: 2, pitch: 16, layout: 1, ..Default::default() };
+        assert_eq!(
+            to_rgba(&s, &m).unwrap(),
+            vec![255, 0, 0, 255, 0, 255, 0, 255]
+        );
+        let s = Slot {
+            format: 1,
+            width: 1,
+            height: 2,
+            pitch: 16,
+            layout: 1,
+            ..Default::default()
+        };
         let mut m = [0u8; 32];
         m[16..20].copy_from_slice(&[1, 2, 3, 4]);
         assert_eq!(to_rgba(&s, &m).unwrap()[4..], [1, 2, 3, 4]);
-        assert!(to_rgba(&Slot { format: 9, width: 1, height: 1, ..Default::default() }, &m).is_none());
+        assert!(to_rgba(
+            &Slot {
+                format: 9,
+                width: 1,
+                height: 1,
+                ..Default::default()
+            },
+            &m
+        )
+        .is_none());
     }
 }

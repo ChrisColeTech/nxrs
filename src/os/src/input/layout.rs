@@ -27,7 +27,11 @@ pub struct PadMap {
 
 impl Default for PadMap {
     fn default() -> Self {
-        PadMap { to: std::array::from_fn(|i| i as u8), layout: SWITCH, overrides: 0 }
+        PadMap {
+            to: std::array::from_fn(|i| i as u8),
+            layout: SWITCH,
+            overrides: 0,
+        }
     }
 }
 
@@ -53,7 +57,10 @@ const PHYS: &[(&str, u8)] = &[
     ("right", 14),
     ("down", 15),
 ];
-pub const GUEST: [&str; 16] = ["a", "b", "x", "y", "lstick", "rstick", "l", "r", "zl", "zr", "plus", "minus", "left", "up", "right", "down"];
+pub const GUEST: [&str; 16] = [
+    "a", "b", "x", "y", "lstick", "rstick", "l", "r", "zl", "zr", "plus", "minus", "left", "up",
+    "right", "down",
+];
 const POS: [&str; 4] = ["right", "bottom", "top", "left"];
 
 pub fn layout_id(v: &str) -> Option<u8> {
@@ -87,7 +94,10 @@ pub fn build(layout: &str, map: &str) -> (PadMap, u32, String) {
             SWITCH
         }
     };
-    let mut m = PadMap { layout: id, ..Default::default() };
+    let mut m = PadMap {
+        layout: id,
+        ..Default::default()
+    };
     if id == XBOX {
         m.to[0] = 1;
         m.to[1] = 0;
@@ -96,7 +106,9 @@ pub fn build(layout: &str, map: &str) -> (PadMap, u32, String) {
     }
     for tok in map.split([' ', ',', ';', '\t']).filter(|t| !t.is_empty()) {
         let tok = tok.to_ascii_lowercase();
-        let pair = tok.split_once(':').and_then(|(p, g)| Some((name(p, false)?, name(g, true)?)));
+        let pair = tok
+            .split_once(':')
+            .and_then(|(p, g)| Some((name(p, false)?, name(g, true)?)));
         match pair {
             Some((p, g)) => {
                 m.to[p as usize] = g;
@@ -134,7 +146,12 @@ pub fn describe(m: &PadMap) -> String {
     let mut s = format!("{} (", if m.layout == XBOX { "xbox" } else { "switch" });
     for g in 0..4 {
         let ph = if m.layout == XBOX { base_x[g] } else { g };
-        s.push_str(&format!("{}{}={}", if g > 0 { " " } else { "" }, ["A", "B", "X", "Y"][g], POS[ph]));
+        s.push_str(&format!(
+            "{}{}={}",
+            if g > 0 { " " } else { "" },
+            ["A", "B", "X", "Y"][g],
+            POS[ph]
+        ));
     }
     s.push(')');
     if m.overrides > 0 {
@@ -142,8 +159,20 @@ pub fn describe(m: &PadMap) -> String {
         s.push_str(" button_map:");
         for i in 0..16 {
             if m.to[i] != base.to[i] {
-                let ph = PHYS.iter().find(|(_, b)| *b as usize == i).map(|(n, _)| *n).unwrap_or("?");
-                s.push_str(&format!(" {}:{}", ph, if m.to[i] == 0xff { "none" } else { GUEST[m.to[i] as usize] }));
+                let ph = PHYS
+                    .iter()
+                    .find(|(_, b)| *b as usize == i)
+                    .map(|(n, _)| *n)
+                    .unwrap_or("?");
+                s.push_str(&format!(
+                    " {}:{}",
+                    ph,
+                    if m.to[i] == 0xff {
+                        "none"
+                    } else {
+                        GUEST[m.to[i] as usize]
+                    }
+                ));
             }
         }
     }

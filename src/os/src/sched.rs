@@ -54,7 +54,12 @@ struct State {
     seq: u64,
 }
 
-static ST: Mutex<State> = Mutex::new(State { threads: Vec::new(), owner: [None; MAX_CORES], ncores: 3, seq: 0 });
+static ST: Mutex<State> = Mutex::new(State {
+    threads: Vec::new(),
+    owner: [None; MAX_CORES],
+    ncores: 3,
+    seq: 0,
+});
 static CV: Condvar = Condvar::new();
 static OFF: OnceLock<bool> = OnceLock::new();
 pub static HANDOFFS: AtomicU64 = AtomicU64::new(0);
@@ -78,10 +83,15 @@ pub static STEALS_GUEST: AtomicU64 = AtomicU64::new(0);
 /// (default 20; 0 = never, as Horizon, where an equal priority holder keeps its core until it blocks or yields).
 fn steal_any() -> Option<Duration> {
     static V: OnceLock<Option<Duration>> = OnceLock::new();
-    *V.get_or_init(|| match std::env::var("NXOS_STEAL_ANY_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
-        Some(0) => None,
-        Some(ms) => Some(Duration::from_millis(ms)),
-        None => Some(STEAL_ANY),
+    *V.get_or_init(|| {
+        match std::env::var("NXOS_STEAL_ANY_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            Some(0) => None,
+            Some(ms) => Some(Duration::from_millis(ms)),
+            None => Some(STEAL_ANY),
+        }
     })
 }
 
@@ -89,10 +99,15 @@ fn steal_any() -> Option<Duration> {
 /// 2; 0 = never: with `NXOS_CORES=1` and `NXOS_STEAL_ANY_MS=0` no two guest threads ever run at once).
 fn steal_worse() -> Option<Duration> {
     static V: OnceLock<Option<Duration>> = OnceLock::new();
-    *V.get_or_init(|| match std::env::var("NXOS_STEAL_WORSE_MS").ok().and_then(|v| v.parse::<u64>().ok()) {
-        Some(0) => None,
-        Some(ms) => Some(Duration::from_millis(ms)),
-        None => Some(STEAL_WORSE),
+    *V.get_or_init(|| {
+        match std::env::var("NXOS_STEAL_WORSE_MS")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+        {
+            Some(0) => None,
+            Some(ms) => Some(Duration::from_millis(ms)),
+            None => Some(STEAL_WORSE),
+        }
     })
 }
 
@@ -103,22 +118,51 @@ fn off() -> bool {
 /// Configures the core count from the process core mask and installs the scheduler (before any thread starts).
 pub fn init(core_mask: u64) {
     // `NXOS_CORES=<n>` (debugging): fewer virtual cores than the process mask gives (1 = every guest thread in turn)
-    let want = std::env::var("NXOS_CORES").ok().and_then(|v| v.parse::<usize>().ok()).filter(|&n| n >= 1);
-    let n = want.unwrap_or(core_mask.count_ones() as usize).clamp(1, MAX_CORES);
+    let want = std::env::var("NXOS_CORES")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|&n| n >= 1);
+    let n = want
+        .unwrap_or(core_mask.count_ones() as usize)
+        .clamp(1, MAX_CORES);
     ST.lock().unwrap().ncores = n;
     STARTED.store(true, Ordering::Relaxed);
     nxrt::kernel::set_scheduler(&Cores);
     crate::log!(
         "scheduler: {n} virtual cores{}",
-        if off() { " are OFF (NXOS_FREE_CORES=1): threads run freely" } else { ", the best ready thread on each; checkpoints at SVCs and spin waits" }
+        if off() {
+            " are OFF (NXOS_FREE_CORES=1): threads run freely"
+        } else {
+            ", the best ready thread on each; checkpoints at SVCs and spin waits"
+        }
     );
 }
 
 fn new_thread(st: &mut State, prio: i32, ideal: i32, mask: u64, handle: u32) -> usize {
     let all = (1u64 << st.ncores) - 1;
-    let ideal = if ideal < 0 || ideal as usize >= st.ncores { 0 } else { ideal as usize };
-    let mask = if mask & all == 0 { 1 << ideal } else { mask & all };
-    st.threads.push(Th { prio, ideal, mask, core: None, waiting: false, wseq: 0, displaced: false, handle, alive: true, host: Default::default(), disp: Default::default() });
+    let ideal = if ideal < 0 || ideal as usize >= st.ncores {
+        0
+    } else {
+        ideal as usize
+    };
+    let mask = if mask & all == 0 {
+        1 << ideal
+    } else {
+        mask & all
+    };
+    st.threads.push(Th {
+        prio,
+        ideal,
+        mask,
+        core: None,
+        waiting: false,
+        wseq: 0,
+        displaced: false,
+        handle,
+        alive: true,
+        host: Default::default(),
+        disp: Default::default(),
+    });
     st.threads.len() - 1
 }
 
@@ -186,13 +230,17 @@ fn acquire(i: usize) {
         if steal_worse().is_some_and(|d| waited >= d) || steal_any().is_some_and(|d| waited >= d) {
             // a core the waiter may use, held by a thread worse than it (or any holder after STEAL_ANY)
             let me = st.threads[i].clone();
-            let pick = (0..st.ncores).filter(|&c| me.mask >> c & 1 != 0).find(|&c| {
-                st.owner[c].is_some_and(|o| {
-                    let t = &st.threads[o];
-                    let in_host = t.host.load(Ordering::Relaxed) > 0 || waited >= STEAL_GUEST;
-                    in_host && ((t.prio > me.prio && steal_worse().is_some_and(|d| waited >= d)) || steal_any().is_some_and(|d| waited >= d))
-                }) && best_waiter(&st, c) == Some(i)
-            });
+            let pick = (0..st.ncores)
+                .filter(|&c| me.mask >> c & 1 != 0)
+                .find(|&c| {
+                    st.owner[c].is_some_and(|o| {
+                        let t = &st.threads[o];
+                        let in_host = t.host.load(Ordering::Relaxed) > 0 || waited >= STEAL_GUEST;
+                        in_host
+                            && ((t.prio > me.prio && steal_worse().is_some_and(|d| waited >= d))
+                                || steal_any().is_some_and(|d| waited >= d))
+                    }) && best_waiter(&st, c) == Some(i)
+                });
             // the holder may be leaving its host function right now: it reads `disp` after it drops `host` (SeqCst on
             // both sides), so either it sees the flag and waits for a core, or this sees it back in guest code and
             // leaves it the core (before STEAL_GUEST)
@@ -201,7 +249,9 @@ fn acquire(i: usize) {
                 st.threads[o].disp.store(true, Ordering::SeqCst);
                 let ok = st.threads[o].host.load(Ordering::SeqCst) > 0 || waited >= STEAL_GUEST;
                 if !ok {
-                    st.threads[o].disp.store(st.threads[o].displaced, Ordering::SeqCst);
+                    st.threads[o]
+                        .disp
+                        .store(st.threads[o].displaced, Ordering::SeqCst);
                 }
                 ok
             });
@@ -209,7 +259,9 @@ fn acquire(i: usize) {
                 if let Some(o) = st.owner[c] {
                     st.threads[o].displaced = true;
                     st.threads[o].disp.store(true, Ordering::SeqCst);
-                    if st.threads[o].host.load(Ordering::Relaxed) == 0 && STEALS_GUEST.fetch_add(1, Ordering::Relaxed) < 16 {
+                    if st.threads[o].host.load(Ordering::Relaxed) == 0
+                        && STEALS_GUEST.fetch_add(1, Ordering::Relaxed) < 16
+                    {
                         crate::log!(
                             "scheduler: thread {:#x} took core {c} from thread {:#x}, which ran guest code with no checkpoint for {:.0} ms",
                             me.handle,
@@ -217,7 +269,9 @@ fn acquire(i: usize) {
                             waited.as_secs_f64() * 1e3
                         );
                     }
-                    if st.threads[o].prio <= me.prio && STEALS_ANY.fetch_add(1, Ordering::Relaxed) < 16 {
+                    if st.threads[o].prio <= me.prio
+                        && STEALS_ANY.fetch_add(1, Ordering::Relaxed) < 16
+                    {
                         crate::log!(
                             "scheduler: thread {:#x} (priority {}) took core {c} from thread {:#x} (priority {}) after {:.1} ms: the holder runs on until its next checkpoint",
                             me.handle,
@@ -334,7 +388,11 @@ pub fn created(handle: u32, prio: i32, core: i32) {
 fn start(handle: u32) {
     let i = {
         let mut st = ST.lock().unwrap();
-        match st.threads.iter().position(|t| t.handle == handle && t.alive) {
+        match st
+            .threads
+            .iter()
+            .position(|t| t.handle == handle && t.alive)
+        {
             Some(i) => i,
             None => {
                 let (prio, core) = MAIN.get().copied().unwrap_or((44, 0));
@@ -415,7 +473,11 @@ impl nxrt::kernel::Scheduler for Cores {
         }
     }
     fn host_suspend(&self) -> bool {
-        let inside = ME_HOST.with(|m| m.borrow().as_ref().is_some_and(|(h, _)| h.load(Ordering::SeqCst) > 0));
+        let inside = ME_HOST.with(|m| {
+            m.borrow()
+                .as_ref()
+                .is_some_and(|(h, _)| h.load(Ordering::SeqCst) > 0)
+        });
         if inside {
             self.host_leave();
         }
@@ -456,7 +518,10 @@ pub fn note_core_mask(h: u32, ideal: i32, mask: u64) {
 
 pub fn stats() -> String {
     let st = ST.lock().unwrap();
-    let held: Vec<String> = st.owner[..st.ncores].iter().map(|o| o.map_or("-".into(), |i| format!("{:#x}", st.threads[i].handle))).collect();
+    let held: Vec<String> = st.owner[..st.ncores]
+        .iter()
+        .map(|o| o.map_or("-".into(), |i| format!("{:#x}", st.threads[i].handle)))
+        .collect();
     let waiting = st.threads.iter().filter(|t| t.waiting).count();
     format!(
         "cores [{}], {waiting} waiting, {} handoffs, {} steals ({} from an equal or better holder, {} from a holder in guest code)",
@@ -474,7 +539,12 @@ mod tests {
 
     #[test]
     fn best_waiter_and_take() {
-        let mut st = State { threads: vec![], owner: [None; MAX_CORES], ncores: 3, seq: 0 };
+        let mut st = State {
+            threads: vec![],
+            owner: [None; MAX_CORES],
+            ncores: 3,
+            seq: 0,
+        };
         let a = new_thread(&mut st, 44, 0, 0, 1);
         let b = new_thread(&mut st, 30, 0, 0, 2);
         let m = new_thread(&mut st, 40, 1, 0b111, 3);
@@ -488,6 +558,9 @@ mod tests {
         assert_eq!(st.owner[0], Some(b));
         assert!(try_take(&mut st, m), "core 1 is m's ideal");
         assert_eq!(st.threads[m].core, Some(1));
-        assert!(!try_take(&mut st, a), "core 0 is held and a may run nowhere else");
+        assert!(
+            !try_take(&mut st, a),
+            "core 0 is held and a may run nowhere else"
+        );
     }
 }

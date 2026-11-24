@@ -13,12 +13,33 @@ struct OpusMSDecoder {
 
 extern "C" {
     fn opus_decoder_create(fs: i32, channels: c_int, error: *mut c_int) -> *mut OpusDecoder;
-    fn opus_decode(st: *mut OpusDecoder, data: *const u8, len: i32, pcm: *mut i16, frame_size: c_int, decode_fec: c_int) -> c_int;
+    fn opus_decode(
+        st: *mut OpusDecoder,
+        data: *const u8,
+        len: i32,
+        pcm: *mut i16,
+        frame_size: c_int,
+        decode_fec: c_int,
+    ) -> c_int;
     fn opus_decoder_ctl(st: *mut OpusDecoder, request: c_int, ...) -> c_int;
     fn opus_decoder_destroy(st: *mut OpusDecoder);
     fn opus_decoder_get_size(channels: c_int) -> c_int;
-    fn opus_multistream_decoder_create(fs: i32, channels: c_int, streams: c_int, coupled: c_int, mapping: *const u8, error: *mut c_int) -> *mut OpusMSDecoder;
-    fn opus_multistream_decode(st: *mut OpusMSDecoder, data: *const u8, len: i32, pcm: *mut i16, frame_size: c_int, decode_fec: c_int) -> c_int;
+    fn opus_multistream_decoder_create(
+        fs: i32,
+        channels: c_int,
+        streams: c_int,
+        coupled: c_int,
+        mapping: *const u8,
+        error: *mut c_int,
+    ) -> *mut OpusMSDecoder;
+    fn opus_multistream_decode(
+        st: *mut OpusMSDecoder,
+        data: *const u8,
+        len: i32,
+        pcm: *mut i16,
+        frame_size: c_int,
+        decode_fec: c_int,
+    ) -> c_int;
     fn opus_multistream_decoder_ctl(st: *mut OpusMSDecoder, request: c_int, ...) -> c_int;
     fn opus_multistream_decoder_destroy(st: *mut OpusMSDecoder);
     fn opus_multistream_decoder_get_size(streams: c_int, coupled: c_int) -> c_int;
@@ -28,7 +49,9 @@ extern "C" {
 const OPUS_RESET_STATE: c_int = 4028;
 
 pub fn version() -> String {
-    unsafe { std::ffi::CStr::from_ptr(opus_get_version_string()) }.to_string_lossy().into_owned()
+    unsafe { std::ffi::CStr::from_ptr(opus_get_version_string()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 enum Inner {
@@ -55,18 +78,38 @@ impl Decoder {
         if d.is_null() {
             return Err(e);
         }
-        Ok(Decoder { inner: Inner::One(d), rate, channels, streams: 1, stereo: (channels == 2) as i32 })
+        Ok(Decoder {
+            inner: Inner::One(d),
+            rate,
+            channels,
+            streams: 1,
+            stereo: (channels == 2) as i32,
+        })
     }
-    pub fn multi(rate: i32, channels: i32, streams: i32, stereo: i32, mapping: &[u8]) -> Result<Decoder, i32> {
+    pub fn multi(
+        rate: i32,
+        channels: i32,
+        streams: i32,
+        stereo: i32,
+        mapping: &[u8],
+    ) -> Result<Decoder, i32> {
         let mut e = 0;
         let mut m = [0u8; 256];
         let n = mapping.len().min(256);
         m[..n].copy_from_slice(&mapping[..n]);
-        let d = unsafe { opus_multistream_decoder_create(rate, channels, streams, stereo, m.as_ptr(), &mut e) };
+        let d = unsafe {
+            opus_multistream_decoder_create(rate, channels, streams, stereo, m.as_ptr(), &mut e)
+        };
         if d.is_null() {
             return Err(e);
         }
-        Ok(Decoder { inner: Inner::Multi(d), rate, channels, streams, stereo })
+        Ok(Decoder {
+            inner: Inner::Multi(d),
+            rate,
+            channels,
+            streams,
+            stereo,
+        })
     }
     pub fn size(channels: i32) -> u64 {
         unsafe { opus_decoder_get_size(channels) }.max(0) as u64
@@ -88,8 +131,22 @@ impl Decoder {
         let frames = (pcm.len() / self.channels.max(1) as usize) as c_int;
         let r = unsafe {
             match self.inner {
-                Inner::One(d) => opus_decode(d, packet.as_ptr(), packet.len() as i32, pcm.as_mut_ptr(), frames, 0),
-                Inner::Multi(d) => opus_multistream_decode(d, packet.as_ptr(), packet.len() as i32, pcm.as_mut_ptr(), frames, 0),
+                Inner::One(d) => opus_decode(
+                    d,
+                    packet.as_ptr(),
+                    packet.len() as i32,
+                    pcm.as_mut_ptr(),
+                    frames,
+                    0,
+                ),
+                Inner::Multi(d) => opus_multistream_decode(
+                    d,
+                    packet.as_ptr(),
+                    packet.len() as i32,
+                    pcm.as_mut_ptr(),
+                    frames,
+                    0,
+                ),
             }
         };
         if r < 0 {

@@ -48,7 +48,13 @@ pub fn transport(model: u8, input: u16, output: u16) -> u8 {
     if input == 78 && output == 78 {
         return BT;
     }
-    if input == 64 && (if model == DS5 { output == 48 || output == 63 } else { output == 32 }) {
+    if input == 64
+        && (if model == DS5 {
+            output == 48 || output == 63
+        } else {
+            output == 32
+        })
+    {
         return USB;
     }
     0
@@ -86,11 +92,27 @@ pub fn vibration_v2(pid: u16, feature: Option<&[u8]>) -> bool {
 /// One output packet: motors (0..255), the player LED and lightbar on or off, or (`reset`) the DualSense's lightbar
 /// release. Returns its length (0 for an unsupported combination).
 #[allow(clippy::too_many_arguments)]
-pub fn output(model: u8, transport: u8, seq: u32, low: u32, high: u32, lit: bool, reset: bool, v2: bool, out: &mut [u8; 78]) -> usize {
+pub fn output(
+    model: u8,
+    transport: u8,
+    seq: u32,
+    low: u32,
+    high: u32,
+    lit: bool,
+    reset: bool,
+    v2: bool,
+    out: &mut [u8; 78],
+) -> usize {
     if (model != DS4 && model != DS5) || (transport != USB && transport != BT) {
         return 0;
     }
-    let n = if transport == BT { 78 } else if model == DS5 { 48 } else { 32 };
+    let n = if transport == BT {
+        78
+    } else if model == DS5 {
+        48
+    } else {
+        32
+    };
     out.fill(0);
     let (low, high) = (low.min(255) as u8, high.min(255) as u8);
     let o = if transport == BT { 3 } else { 1 };
@@ -137,7 +159,11 @@ pub fn output(model: u8, transport: u8, seq: u32, low: u32, high: u32, lit: bool
 
 fn axis(v: u8, invert: bool) -> i32 {
     let a = v as i32 - 128;
-    let a = if a < 0 { a * 32767 / 128 } else { a * 32767 / 127 };
+    let a = if a < 0 {
+        a * 32767 / 128
+    } else {
+        a * 32767 / 127
+    };
     let a = if a > -7000 && a < 7000 { 0 } else { a };
     if invert {
         -a
@@ -176,7 +202,11 @@ pub fn input(model: u8, transport: u8, r: &[u8], s: &mut SonyState) -> bool {
                 if crc(0xa1, &r[..74]) != c {
                     return false;
                 }
-                (&r[if model == DS5 { 2 } else { 3 }..], if model == DS5 { 7 } else { 4 }, true)
+                (
+                    &r[if model == DS5 { 2 } else { 3 }..],
+                    if model == DS5 { 7 } else { 4 },
+                    true,
+                )
             }
         }
         _ => return false,
@@ -248,9 +278,20 @@ mod tests {
         assert_eq!(output(DS5, USB, 0, 0, 0, true, false, true, &mut p), 48);
         assert_eq!(&p[..3], &[0x02, 0x03, 0x14]);
         assert_eq!(p[39], 4, "compatible vibration 2");
-        assert_eq!(&p[44..48], &[0x04, 0x00, 0x28, 0x80], "centre player LED, blue lightbar");
-        assert_eq!(output(DS5, USB, 0, 255, 128, false, false, false, &mut p), 48);
-        assert_eq!((p[3], p[4]), (128, 255), "high (right) motor then low (left)");
+        assert_eq!(
+            &p[44..48],
+            &[0x04, 0x00, 0x28, 0x80],
+            "centre player LED, blue lightbar"
+        );
+        assert_eq!(
+            output(DS5, USB, 0, 255, 128, false, false, false, &mut p),
+            48
+        );
+        assert_eq!(
+            (p[3], p[4]),
+            (128, 255),
+            "high (right) motor then low (left)"
+        );
         assert_eq!(output(DS5, USB, 0, 0, 0, false, true, true, &mut p), 48);
         assert_eq!((p[39], p[42]), (2, 2), "lightbar release");
     }
@@ -260,7 +301,10 @@ mod tests {
         let mut p = [0u8; 78];
         assert_eq!(output(DS5, BT, 3, 10, 20, true, false, false, &mut p), 78);
         assert_eq!((p[0], p[1], p[2]), (0x31, 0x30, 0x10));
-        assert_eq!(u32::from_le_bytes(p[74..78].try_into().unwrap()), crc(0xa2, &p[..74]));
+        assert_eq!(
+            u32::from_le_bytes(p[74..78].try_into().unwrap()),
+            crc(0xa2, &p[..74])
+        );
         assert_eq!(output(DS4, BT, 0, 1, 2, true, false, false, &mut p), 78);
         assert_eq!((p[0], p[1], p[3 + 3], p[3 + 4]), (0x11, 0xc4, 2, 1));
         assert_eq!(output(DS4, USB, 0, 1, 2, false, false, false, &mut p), 32);
@@ -292,7 +336,10 @@ mod tests {
         assert_eq!(acc, [-0.0, 0.0, -1.0], "flat and still reads gravity down");
         r[8] = 0x20 | 1; // Cross, hat up-right
         assert!(input(DS5, USB, &r, &mut s));
-        assert_eq!(s.buttons & 0xffff, 1 << 1 | 1 << 13 | 1 << 14 | 1 << 6 | 1 << 10);
+        assert_eq!(
+            s.buttons & 0xffff,
+            1 << 1 | 1 << 13 | 1 << 14 | 1 << 6 | 1 << 10
+        );
         assert!(!input(DS5, USB, &r[..63], &mut s), "wrong length rejected");
     }
 
