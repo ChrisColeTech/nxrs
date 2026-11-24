@@ -50,7 +50,18 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       deterministic poison reproducer runs clean (`20261124-162011-repro-final`, `-163340-repro-final2`; canary 0
       stray writes vs 6-15 without), two plain runs 17/17 with no loss (`-162115-plain1`, `-162441-plain2`, sheet read:
       road, kart, title, Single Player menu). graphics lib 176 passed (lead re-ran).
-- [ ] mkw follow-ups: (a) name the shader that reaches set 0's slot 33 during task/mesh draws (with the fill its
+- [x] mkw follow-ups (wave `docs/waves/MKW-RACE.md`): the scenario reaches and drives a Grand Prix race (fresh
+      save: unskippable opening, A through the menus); stray slot access fixed (every graphics stage set's layout
+      names every graphics stage incl. task/mesh; canary 0 strays with the fill off); race FPS 7.2-9.9 -> 14.0-16.1
+      (crashed-pipeline draws skipped without per-draw relinking: 17 ms -> 0.3 ms; pool scans skipped when an
+      earlier scan covers the op and no CPU event signal came since). Audited; audit HIGH fixed by the lead.
+- [ ] mkw: race FPS 14-16 of 60. Frame 61-71 ms: pool sync 34-41 ms (parked-queue resumes each scan), descriptor
+      sets ~12 ms, replay ~21 ms.
+- [ ] mkw: `texture ID 58700: target 1 bound where the shader samples target 6` (~415 lines a race run; a 2D texture
+      where a cube is sampled; same class as plza's cube mismatches).
+- [ ] Startup check of per-stage descriptor limits (`maxPerStageDescriptor*`, `maxPerStageResources`) for the shared
+      layout: every graphics stage now sees all five stage sets (~880 descriptors); fine on NVIDIA, unchecked elsewhere.
+- [ ] _(done, history)_ mkw follow-ups as first listed: (a) name the shader that reaches set 0's slot 33 during task/mesh draws (with the fill its
       writes land in the sink: possibly lost rendering data; A/B in the wave report points at the task/mesh draw
       reading set 0); (b) FPS in the window 7.1-7.4 vs round 1's 12.5 (pool sync 48 vs 20 ms/frame after ~60 s;
       not shown to be caused by the fill); (c) the scenario reaches the attract loop, not a race: the title's

@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicU32, Ordering};
 pub fn event_publish(val: *mut u32, mode: u32, v: u32) {
     // SAFETY: the event's storage is a u32 in a memory pool the game keeps alive while the event is live.
     let a = unsafe { &*(val as *const AtomicU32) };
+    // before the word changes: no scan that started earlier may then count as covering work released by it
+    vk::mem::note_cpu_signal();
     if mode == event_signal::ADD {
         a.fetch_add(v, Ordering::Release);
     } else {

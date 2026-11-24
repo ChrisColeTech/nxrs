@@ -1378,6 +1378,12 @@ pub fn aq_wait_until(timeout_ns: u64, ready: impl Fn() -> bool) {
     }
 }
 
+/// The sequence number of the last op queued (0: none). Read before a pool scan: the game's CPU writes before it
+/// queued any op up to this one happened before the read (`mem::scan_covers`).
+pub fn aq_tail() -> u64 {
+    AQ.get().map(|a| a.tail.load(Ordering::Acquire)).unwrap_or(0)
+}
+
 /// Ops queued and not replayed yet.
 pub fn aq_backlog() -> u64 {
     AQ.get()
@@ -1454,11 +1460,11 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
                 if let Some(p) = st.parked.get_mut(&q) {
                     p.stream.extend_from_slice(&stream);
                 } else {
-                    run_stream(g, &mut st, q, ll, stream, Vec::new());
+                    run_stream_due(g, &mut st, q, ll, stream, Vec::new(), Some(seq));
                 }
             }
             Op::Present { q, ll, t, crop } => {
-                present_now(g, q, ll, &t, crop);
+                present_now(g, q, ll, &t, crop, Some(seq));
                 AQ_PRESENTS.fetch_sub(1, Ordering::AcqRel);
             }
             Op::Call(f) => f(g),
@@ -1667,6 +1673,19 @@ fn run_stream(
     stream: Vec<u8>,
     receipts: Vec<u64>,
 ) {
+    run_stream_due(g, st, qserial, origin_ll, stream, receipts, None)
+}
+
+/// `run_stream` for replay op `due` (its pool sync may be covered by an earlier scan: `mem::scan_covers`).
+fn run_stream_due(
+    g: &'static Gpu,
+    st: &mut SubmitState,
+    qserial: u64,
+    origin_ll: bool,
+    stream: Vec<u8>,
+    receipts: Vec<u64>,
+    due: Option<u64>,
+) {
     wait_diag::mark(1, "new submission", [qserial, 0]);
     let mut sub = new_sub(g, st);
     wait_diag::mark(1, "prepare pools/textures", [qserial, sub.serial]);
@@ -1676,8 +1695,9 @@ fn run_stream(
     let mut nd = 0;
     let mut tp = 0.0;
     super::perf::timed(super::perf::C::PrepNs, || {
+        super::mem::SYNC_BY[0].fetch_add(1, Ordering::Relaxed);
         let dirty = super::perf::timed(super::perf::C::PoolSyncNs, || {
-            super::mem::begin_submit(g, &mut sub)
+            super::mem::begin_submit(g, &mut sub, due)
         });
         tp = t0.elapsed().as_secs_f64();
         nd = dirty.len();
@@ -1818,7 +1838,7 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
                 None => {
                     for (t, crop) in p.presents {
                         let frame = present_frame(&t, crop, ll, false);
-                        present_locked(g, st, q, ll, &t, crop, frame);
+                        present_locked(g, st, q, ll, &t, crop, frame, None);
                     }
                 }
             }
@@ -1996,7 +2016,7 @@ pub fn present(
                 },
             );
     }
-    present_now(g, qserial, origin_ll, t, crop)
+    present_now(g, qserial, origin_ll, t, crop, None)
 }
 
 fn present_now(
@@ -2005,6 +2025,7 @@ fn present_now(
     origin_ll: bool,
     t: &crate::nvn::obj::tex_t,
     crop: Option<[i32; 4]>,
+    due: Option<u64>,
 ) -> u64 {
     {
         let mut st = g.q.sub.lock().unwrap();
@@ -2020,7 +2041,7 @@ fn present_now(
     let frame = present_frame(t, crop, origin_ll, true);
     let mut st = g.q.sub.lock().unwrap();
     take_recycled(g, &mut st);
-    present_locked(g, &mut st, qserial, origin_ll, t, crop, frame)
+    present_locked(g, &mut st, qserial, origin_ll, t, crop, frame, due)
 }
 
 /// A present's frame number, telemetry and pass-dump bookkeeping, and the screenshot requested for it (`shot`:
@@ -2050,13 +2071,15 @@ fn present_locked(
     t: &crate::nvn::obj::tex_t,
     crop: Option<[i32; 4]>,
     _frame: u64,
+    due: Option<u64>,
 ) -> u64 {
     wait_diag::mark(1, "present: new submission", [_qserial, 0]);
     let mut sub = new_sub(g, st);
     wait_diag::mark(1, "present: prepare pools/textures", [_qserial, sub.serial]);
+    super::mem::SYNC_BY[1].fetch_add(1, Ordering::Relaxed);
     super::perf::timed(super::perf::C::PrepNs, || {
         let dirty = super::perf::timed(super::perf::C::PoolSyncNs, || {
-            super::mem::begin_submit(g, &mut sub)
+            super::mem::begin_submit(g, &mut sub, due)
         });
         g.image_begin_submit(&mut sub, &dirty);
     });
@@ -2085,9 +2108,10 @@ pub fn oneoff(_g: &Gpu, f: impl FnOnce(&Gpu, &mut Sub, &mut super::image::Images
     wait_diag::mark(1, "oneoff: new submission", [0, 0]);
     let mut sub = new_sub(g, &mut st);
     wait_diag::mark(1, "oneoff: prepare pools/textures", [0, sub.serial]);
+    super::mem::SYNC_BY[2].fetch_add(1, Ordering::Relaxed);
     super::perf::timed(super::perf::C::PrepNs, || {
         let dirty = super::perf::timed(super::perf::C::PoolSyncNs, || {
-            super::mem::begin_submit(g, &mut sub)
+            super::mem::begin_submit(g, &mut sub, None)
         });
         g.image_begin_submit(&mut sub, &dirty);
     });

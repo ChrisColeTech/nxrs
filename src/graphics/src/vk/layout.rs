@@ -57,6 +57,26 @@ pub fn stage_flag(s: u32) -> vk::ShaderStageFlags {
     }
 }
 
+/// The stages a stage set's layout names. Every graphics stage set names every graphics stage (task and mesh
+/// included when the device has them): NVN2's task and mesh shaders take the tessellation stages' sets 3 / 4, and with
+/// those sets naming only TESSELLATION_CONTROL|TASK / TESSELLATION_EVALUATION|MESH, Mario Kart World's task/mesh
+/// draws wrote storage binding 33 through set 0 (the vertex set) on NVIDIA's descriptor-buffer path: a stale
+/// descriptor there named freed memory (the MKW device loss); with every set naming every stage the poison canary
+/// finds no such write (MKW-RACE: 5-6 a run before, 0 after, `NXGFX_DB_FILL=0`). One stage mask for all graphics sets also keeps
+/// every set's descriptor-buffer size and binding offsets those of set 0, which the writer uses for all of them.
+pub fn stage_set_flags(s: u32, mesh: bool) -> vk::ShaderStageFlags {
+    if s == 5 {
+        return vk::ShaderStageFlags::COMPUTE;
+    }
+    if mesh {
+        vk::ShaderStageFlags::ALL_GRAPHICS
+            | vk::ShaderStageFlags::TASK_EXT
+            | vk::ShaderStageFlags::MESH_EXT
+    } else {
+        vk::ShaderStageFlags::ALL_GRAPHICS
+    }
+}
+
 /// The descriptor type of a binding of a stage set.
 pub fn stage_binding_type(b: u32) -> vk::DescriptorType {
     match b {
@@ -97,13 +117,7 @@ impl Layout {
         let dev = &d.dev;
         let mut stage_sets = [vk::DescriptorSetLayout::null(); STAGE_SETS as usize];
         for (s, slot) in stage_sets.iter_mut().enumerate() {
-            // NVN2's task and mesh shaders take the tessellation stages' sets (a mesh pipeline has no tessellation)
-            let sf = stage_flag(s as u32)
-                | match (s, d.caps.mesh) {
-                    (3, true) => vk::ShaderStageFlags::TASK_EXT,
-                    (4, true) => vk::ShaderStageFlags::MESH_EXT,
-                    _ => vk::ShaderStageFlags::empty(),
-                };
+            let sf = stage_set_flags(s as u32, d.caps.mesh);
             let binds: Vec<_> = (0..STAGE_BINDINGS)
                 .map(|b| {
                     vk::DescriptorSetLayoutBinding::default()
@@ -212,6 +226,17 @@ impl Layout {
                     d.db.get_descriptor_set_layout_binding_offset(stage_sets[0], b)
                 })
                 .collect();
+            // the writer places every stage set by set 0's offsets: say so when a set's own layout differs
+            for (s, &l) in stage_sets.iter().enumerate().skip(1) {
+                let size = unsafe { d.db.get_descriptor_set_layout_size(l) }.next_multiple_of(al);
+                let off = (0..STAGE_BINDINGS).find(|&b| {
+                    let o = unsafe { d.db.get_descriptor_set_layout_binding_offset(l, b) };
+                    o != db_stage_off[b as usize]
+                });
+                if size != db_stage_size || off.is_some() {
+                    crate::vklog!("[RED] descriptor buffers: stage set {s}'s layout differs from set 0's (size {size} vs {db_stage_size}, first other binding offset {off:?})");
+                }
+            }
             db_pool_size = unsafe { d.db.get_descriptor_set_layout_size(pool_set) };
             for (i, o) in db_pool_off.iter_mut().enumerate() {
                 *o = unsafe {
@@ -250,5 +275,34 @@ impl Layout {
             db_pool_size,
             db_pool_off,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use vk::ShaderStageFlags as F;
+
+    /// Every graphics stage set names every graphics stage, task and mesh included (a task shader in set 3 and a
+    /// mesh shader in set 4 reached set 0's descriptors when those sets named only their own stages), and all of them
+    /// one mask, so the descriptor-buffer layout of set 0 (sizes, binding offsets) holds for each.
+    #[test]
+    fn graphics_stage_sets_name_every_graphics_stage() {
+        for mesh in [false, true] {
+            let first = stage_set_flags(0, mesh);
+            for s in 0..5 {
+                let f = stage_set_flags(s, mesh);
+                assert_eq!(f, first, "set {s} (mesh {mesh})");
+                assert!(f.contains(F::ALL_GRAPHICS), "set {s}: {f:?}");
+                assert_eq!(f.contains(F::TASK_EXT | F::MESH_EXT), mesh, "set {s}: {f:?}");
+                assert!(f.contains(stage_flag(s)), "set {s} names its own stage");
+            }
+            assert_eq!(stage_set_flags(5, mesh), F::COMPUTE);
+        }
+        // the task and mesh shaders' own sets (3 / 4) name them
+        assert!(stage_set_flags(3, true).contains(F::TASK_EXT));
+        assert!(stage_set_flags(4, true).contains(F::MESH_EXT));
+        // and the vertex set does too: a set 0 a task/mesh draw reaches is one its layout allows
+        assert!(stage_set_flags(0, true).contains(F::TASK_EXT | F::MESH_EXT));
     }
 }

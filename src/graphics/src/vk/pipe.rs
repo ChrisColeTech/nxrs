@@ -399,6 +399,18 @@ fn read_keys(b: &[u8]) -> Vec<Key> {
     v
 }
 
+/// The draw keys (before IO linking) whose linked key `crashed` matched: skipped at once from then on (the list is
+/// fixed for the session).
+static CRASHED_SEEN: Mutex<Option<std::collections::HashSet<GfxKey>>> = Mutex::new(None);
+
+fn crashed_seen(k: &GfxKey) -> bool {
+    CRASHED_SEEN.lock().unwrap().as_ref().is_some_and(|s| s.contains(k))
+}
+
+fn note_crashed_seen(k: GfxKey) {
+    CRASHED_SEEN.lock().unwrap().get_or_insert_with(Default::default).insert(k);
+}
+
 /// Whether `k` crashed the compiler in an earlier session (the crash list is read once, the in-flight file of the
 /// last session folded into it then).
 fn crashed(g: &Gpu, k: &GfxKey) -> bool {
@@ -1170,6 +1182,12 @@ impl Gpu {
         if let Some(p) = self.pipes.map.lock().unwrap().get(&key) {
             return Some(*p);
         }
+        // a key already found on the crash list: its draws are skipped without the IO linking (SPIR-V parsed, variants
+        // looked up) and the list lookup again at every draw (Mario Kart World: 18 such draws a frame, ~16 ms of
+        // `pipeline lookups` a race frame, MKW-RACE)
+        if crashed_seen(k) {
+            return None;
+        }
         let at = *k;
         let (k, mods) = {
             let (mut k2, mut m2) = (*k, mods.to_vec());
@@ -1180,6 +1198,7 @@ impl Gpu {
         // it crashed the driver's compiler in an earlier session: not compiled again, its draws are skipped
         if crashed(self, k) {
             crate::log::red_once("a pipeline that crashed the driver's compiler in an earlier session is not compiled again: its draws are skipped (pipeline-crashed.bin)");
+            note_crashed_seen(at);
             return None;
         }
         let t0 = std::time::Instant::now();
@@ -1579,6 +1598,24 @@ mod pipeline_identity_tests {
             assert!(crash_matches(&new_blocked, &ka));
             assert!(!crash_matches(&new_blocked, &kb));
         }
+    }
+}
+
+#[cfg(test)]
+mod crashed_seen_tests {
+    use super::*;
+
+    /// A draw key once matched on the crash list is skipped at once afterwards; other keys are not.
+    #[test]
+    fn a_crashed_key_is_remembered_and_only_it() {
+        let mut a = GfxKey::default();
+        a.shaders[0] = [0xc4; 8];
+        let mut b = a;
+        b.ncolor = 1;
+        assert!(!crashed_seen(&a));
+        note_crashed_seen(a);
+        assert!(crashed_seen(&a));
+        assert!(!crashed_seen(&b), "another key still goes through linking and the list");
     }
 }
 

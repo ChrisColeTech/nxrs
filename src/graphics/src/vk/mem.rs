@@ -1596,6 +1596,19 @@ pub static WATCH_POOLS: AtomicU64 = AtomicU64::new(0);
 pub static WATCH_WARM_B: AtomicU64 = AtomicU64::new(0);
 pub static WATCH_LUKE_B: AtomicU64 = AtomicU64::new(0);
 pub static WATCH_LUKE_HITS: AtomicU64 = AtomicU64::new(0);
+/// Pool sync's parts a submission (`begin_submit`): waiting for the pool lock, the write-watch scan with its set-up,
+/// the pass over every pool (logged with the line above).
+pub static SYNC_LOCK_NS: AtomicU64 = AtomicU64::new(0);
+pub static SYNC_SCAN_NS: AtomicU64 = AtomicU64::new(0);
+pub static SYNC_LOOP_NS: AtomicU64 = AtomicU64::new(0);
+/// Pool syncs by the submission that asked: a stream's replay, a present, a one-off (texel reads, tools, decodes)
+pub static SYNC_BY: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+struct SyncLoopTimer(std::time::Instant);
+impl Drop for SyncLoopTimer {
+    fn drop(&mut self) {
+        SYNC_LOOP_NS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
+}
 struct WatchTimer(std::time::Instant);
 impl Drop for WatchTimer {
     fn drop(&mut self) {
@@ -1750,8 +1763,62 @@ mod watch_batch_tests {
 
 /// Start of a submission: every CPU write since the last one goes up to the mirrors (recorded into the
 /// submission's upload command buffer). Returns the written ranges (textures over them may need a new upload).
-pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
+/// The write-watch scans' coverage, as replay-queue sequence numbers (`queue::aq_tail` read as a scan started): the
+/// last scan's, and the last one that asked every pool (cold ones too). 0: none yet.
+static SCAN_TAIL_ANY: AtomicU64 = AtomicU64::new(0);
+static SCAN_TAIL_FULL: AtomicU64 = AtomicU64::new(0);
+/// Submissions whose pool sync needed no scan (`scan_covers`).
+pub static SCANS_SKIPPED: AtomicU64 = AtomicU64::new(0);
+
+/// CPU event signals so far (`note_cpu_signal`), and their count when the last scans started.
+static CPU_SIGNALS: AtomicU64 = AtomicU64::new(0);
+static SCAN_SIG_ANY: AtomicU64 = AtomicU64::new(u64::MAX);
+static SCAN_SIG_FULL: AtomicU64 = AtomicU64::new(u64::MAX);
+
+/// The game's CPU signals an event, before the event's word changes. Work already queued may wait on it and then
+/// read what the CPU wrote just before signalling: a scan that started before the signal does not cover that work
+/// (MKW-RACE audit: a wait that already passes at replay does not park, so the "parked resumes scan" rule misses it).
+pub fn note_cpu_signal() {
+    CPU_SIGNALS.fetch_add(1, Ordering::SeqCst);
+}
+
+fn cpu_signals() -> u64 {
+    CPU_SIGNALS.load(Ordering::SeqCst)
+}
+
+/// A scan that started once the replay queue's tail was `tail` and `signals` CPU event signals had been made (`full`:
+/// no pool left out).
+fn note_scan(tail: u64, signals: u64, full: bool) {
+    SCAN_TAIL_ANY.store(tail, Ordering::Release);
+    SCAN_SIG_ANY.store(signals, Ordering::Release);
+    if full {
+        SCAN_TAIL_FULL.store(tail, Ordering::Release);
+        SCAN_SIG_FULL.store(signals, Ordering::Release);
+    }
+}
+
+/// Whether work the game queued as replay op `due` needs no write-watch scan of its own: a scan (of every pool when
+/// `full` is asked for) started after the op was queued, so it took every CPU write the game made before queuing it;
+/// the uploads it made are in an earlier submission, which the GPU runs first. Mario Kart World replays ~10 streams a
+/// frame, each scanning ~2.8 GB of mirrors (~4 ms): ~44 ms of its ~107 ms race frame (MKW-RACE). Work not from the
+/// queue (`None`: replay on the game's thread, a parked queue's rest after a CPU event, one-offs) always scans.
+/// `NXGFX_SCAN_COVER=0`: every submission scans.
+fn scan_covers(due: Option<u64>, full: bool) -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("NXGFX_SCAN_COVER").as_deref() != Ok("0")) {
+        return false;
+    }
+    let last = if full { &SCAN_TAIL_FULL } else { &SCAN_TAIL_ANY }.load(Ordering::Acquire);
+    let sig = if full { &SCAN_SIG_FULL } else { &SCAN_SIG_ANY }.load(Ordering::Acquire);
+    // no CPU event signal since that scan started (a signal may release work that reads newer CPU writes)
+    due.is_some_and(|d| d != 0 && d <= last) && sig == cpu_signals()
+}
+
+pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub, due: Option<u64>) -> Vec<(u64, u64)> {
+    let t_lock = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
+    SYNC_LOCK_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let t_scan = std::time::Instant::now();
     m.gen = m.gen.wrapping_add(1);
     let gen = m.gen;
     let mut all = Vec::new();
@@ -1759,19 +1826,25 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
     // most of them neighbours: one GetWriteWatch each was 3.5 ms a frame of `pools`; Mario Kart World 21 ms)
     let mut taken: HashMap<u64, Vec<u64>> = HashMap::new();
     let mut retry_watch = std::collections::HashSet::new();
-    let cold_skipped: std::collections::HashSet<u64>;
+    let mut cold_skipped: std::collections::HashSet<u64> = std::collections::HashSet::new();
+    // cold pools (no CPU write for 60 frames) are asked once a frame, not at every submission: GetWriteWatch walks
+    // every page of its range, and Donkey Kong Bananza's ~1,300 mirrors (1.9 GB) at 9 submissions a frame cost
+    // ~33 ms a frame. A write to a cold pool reaches the GPU at the next frame's first submission (the pool is hot
+    // from then on). NXGFX_POOL_COLD=0: every pool at every submission.
+    let frame = super::present::frames();
+    static COLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let cold_on = *COLD.get_or_init(|| std::env::var("NXGFX_POOL_COLD").as_deref() != Ok("0"));
+    let new_frame = m.scan_frame != frame;
     // a later submission of this frame (its first one asked every pool already)
-    let mid_frame;
-    {
-        // cold pools (no CPU write for 60 frames) are asked once a frame, not at every submission: GetWriteWatch walks
-        // every page of its range, and Donkey Kong Bananza's ~1,300 mirrors (1.9 GB) at 9 submissions a frame cost
-        // ~33 ms a frame. A write to a cold pool reaches the GPU at the next frame's first submission (the pool is hot
-        // from then on). NXGFX_POOL_COLD=0: every pool at every submission.
-        let frame = super::present::frames();
-        static COLD: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-        let cold_on = *COLD.get_or_init(|| std::env::var("NXGFX_POOL_COLD").as_deref() != Ok("0"));
-        let new_frame = m.scan_frame != frame;
-        mid_frame = !new_frame;
+    let mid_frame = !new_frame;
+    // the scan this one would make (every pool, or the cold ones left out) already started after the game queued this
+    // work: every CPU write made before it was queued has been taken (`scan_covers`)
+    let covered = scan_covers(due, new_frame || !cold_on);
+    if covered {
+        SCANS_SKIPPED.fetch_add(1, Ordering::Relaxed);
+    } else {
+        let signals = cpu_signals();
+        let tail = super::queue::aq_tail();
         m.scan_frame = frame;
         let skip = |p: &Pool| cold_on && !new_frame && frame.saturating_sub(p.dirty_frame) > 60;
         cold_skipped = m
@@ -1852,7 +1925,14 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
                 recovered as u64,
             );
         }
+        // a scan whose write-watch read failed for some batch covers nothing (those pools are asked one by one below,
+        // and their writes may come later than this scan claims)
+        if retry_watch.is_empty() {
+            note_scan(tail, signals, new_frame || !cold_on);
+        }
     }
+    SYNC_SCAN_NS.fetch_add(t_scan.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    let _loop_t = SyncLoopTimer(std::time::Instant::now());
     for p in m.by_base.values_mut() {
         if !matches!(p.placement, Placement::Mirror | Placement::Host) && p.pending.is_empty() {
             continue;
@@ -1860,7 +1940,16 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub) -> Vec<(u64, u64)> {
         if p.pending.is_empty() && cold_skipped.contains(&p.base) && !taken.contains_key(&p.base) {
             continue;
         }
-        let mut pre = taken.remove(&p.base);
+        // no scan this time: a watched pool's writes were taken by the last one (what it left pending or deferred
+        // still goes now)
+        if covered && p.watched && p.pending.is_empty() && p.deferred.is_empty() {
+            continue;
+        }
+        let mut pre = if covered && p.watched {
+            Some(Vec::new())
+        } else {
+            taken.remove(&p.base)
+        };
         if retry_watch.contains(&p.base) {
             // Pages recovered from another scan are only partial coverage here.
             // Retain them while allowing the existing individual-scan fallback.
@@ -2196,8 +2285,13 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
     let wb = WRITEBACK_BYTES.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
     let wbms = WRITEBACK_NS.swap(0, Ordering::Relaxed) as f64 / f / 1e6;
     let kept = WRITEBACK_KEPT.load(Ordering::Relaxed);
+    let t = |a: &AtomicU64| a.swap(0, Ordering::Relaxed) as f64 / f / 1e6;
+    let (lk, sc, lp) = (t(&SYNC_LOCK_NS), t(&SYNC_SCAN_NS), t(&SYNC_LOOP_NS));
+    let by = |i: usize| SYNC_BY[i].swap(0, Ordering::Relaxed) as f64 / f;
+    let (bs, bp, bo) = (by(0), by(1), by(2));
+    let skipped = SCANS_SKIPPED.swap(0, Ordering::Relaxed) as f64 / f;
     format!(
-        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms ({kept} CPU-written bytes inside write-backs kept so far); {sn} mirrors without write watch ({} MB)",
+        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms ({kept} CPU-written bytes inside write-backs kept so far); {sn} mirrors without write watch ({} MB); pool sync a frame: lock wait {lk:.2} ms, write-watch scan {sc:.2} ms, per-pool pass {lp:.2} ms; syncs a frame {bs:.1} replays, {bp:.1} presents, {bo:.1} one-offs, {skipped:.1} of them covered by an earlier scan",
         cnt[0],
         bytes[0] >> 20,
         cnt[1],
@@ -2207,6 +2301,39 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         cnt[3],
         sb >> 20
     ) + &super::lazy::summary(f)
+}
+
+#[cfg(test)]
+mod scan_cover_tests {
+    use super::*;
+
+    /// A submission needs no write-watch scan only when a scan began after the game queued its op (one of every
+    /// pool when it would ask every pool); work from outside the queue always scans.
+    #[test]
+    fn a_scan_after_the_op_was_queued_covers_it() {
+        let s = cpu_signals();
+        assert!(!scan_covers(Some(1), false), "no scan yet");
+        note_scan(5, s, false);
+        assert!(scan_covers(Some(5), false), "a scan began once op 5 was queued");
+        assert!(scan_covers(Some(3), false), "and covers the ops before it");
+        assert!(!scan_covers(Some(6), false), "op 6 was queued after the scan began");
+        assert!(!scan_covers(Some(5), true), "that scan left cold pools out: a frame's first submission scans");
+        assert!(!scan_covers(None, false), "not from the queue (parked rest, one-off): scans");
+        assert!(!scan_covers(Some(0), false));
+        note_scan(9, s, true);
+        assert!(scan_covers(Some(9), true), "a scan of every pool covers a frame's first submission");
+        assert!(scan_covers(Some(9), false));
+        note_scan(12, s, false);
+        assert!(!scan_covers(Some(10), true), "the last full scan began before op 10");
+        assert!(scan_covers(Some(10), false));
+        // The audit's case: op 10 waits on an event the CPU signals after this scan, having written what the op's
+        // draws read; the wait passes at replay, so nothing parks. The scan no longer covers it.
+        note_cpu_signal();
+        assert!(!scan_covers(Some(10), false), "a CPU event signal since the scan: scan again");
+        assert!(!scan_covers(Some(9), true));
+        note_scan(13, cpu_signals(), false);
+        assert!(scan_covers(Some(10), false), "a scan after the signal covers it again");
+    }
 }
 
 #[cfg(test)]
