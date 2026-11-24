@@ -64,7 +64,11 @@ pub struct Mouse {
 
 impl Mouse {
     pub const fn new() -> Mouse {
-        Mouse { last: None, rx: 0, ry: 0 }
+        Mouse {
+            last: None,
+            rx: 0,
+            ry: 0,
+        }
     }
     /// The right stick from the mouse motion since the last read (every 8 ms at most).
     pub fn stick(&mut self, focused: bool) -> (i32, i32) {
@@ -100,7 +104,10 @@ impl Mouse {
             }
         }
         let inv = nxconfig::int("mouse_invert") & 3;
-        (if inv & 1 != 0 { -self.rx } else { self.rx }, if inv & 2 != 0 { -self.ry } else { self.ry })
+        (
+            if inv & 1 != 0 { -self.rx } else { self.rx },
+            if inv & 2 != 0 { -self.ry } else { self.ry },
+        )
     }
 }
 
@@ -113,7 +120,12 @@ impl Default for Mouse {
 /// Player 1's keyboard (and mouse) state: guest buttons and sticks.
 pub fn state(held: u64, mouse: Option<(i32, i32)>) -> (u64, [i32; 4]) {
     let b = held & 0xffff;
-    let mut a = [axis(held, 40, 42), axis(held, 43, 41), axis(held, 44, 46), axis(held, 47, 45)];
+    let mut a = [
+        axis(held, 40, 42),
+        axis(held, 43, 41),
+        axis(held, 44, 46),
+        axis(held, 47, 45),
+    ];
     if let Some((x, y)) = mouse {
         a[2] = x;
         a[3] = y;
@@ -127,10 +139,20 @@ pub fn state(held: u64, mouse: Option<(i32, i32)>) -> (u64, [i32; 4]) {
 pub fn script_buttons(spec: &str, elapsed_ms: u64) -> u64 {
     let mut b = 0;
     for e in spec.split(',') {
-        let Some((t, m)) = e.split_once(':') else { break };
-        let Ok(t) = t.trim().parse::<u64>() else { break };
+        let Some((t, m)) = e.split_once(':') else {
+            break;
+        };
+        let Ok(t) = t.trim().parse::<u64>() else {
+            break;
+        };
         let m = m.trim();
-        let m = u64::from_str_radix(m.strip_prefix("0x").or_else(|| m.strip_prefix("0X")).unwrap_or(m), 16).unwrap_or(0);
+        let m = u64::from_str_radix(
+            m.strip_prefix("0x")
+                .or_else(|| m.strip_prefix("0X"))
+                .unwrap_or(m),
+            16,
+        )
+        .unwrap_or(0);
         if elapsed_ms >= t && elapsed_ms < t + 300 {
             b |= m;
         }
@@ -153,14 +175,24 @@ mod tests {
         assert_eq!(script_buttons(s, 5299), 0x400);
         assert_eq!(script_buttons(s, 5300), 0);
         assert_eq!(script_buttons("", 0), 0);
-        assert_eq!(script_buttons("x:1,0:1", 100), 0, "stops at the first entry it cannot read, as strtoull");
+        assert_eq!(
+            script_buttons("x:1,0:1", 100),
+            0,
+            "stops at the first entry it cannot read, as strtoull"
+        );
     }
     #[test]
     fn keyboard() {
         let h = keymap(0x58) | keymap(0x57) | keymap(0x4C);
         assert_eq!(state(h, None), (1, [0, 32767, 32767, 0]));
-        assert_eq!(state(h, Some((-5, 7))).1, [0, 32767, -5, 7], "the mouse drives the right stick");
-        assert!((mouse_factor(10.0) - 5.0).abs() < 1e-9 && (mouse_factor(500.0) - 1250.0).abs() < 1e-6);
+        assert_eq!(
+            state(h, Some((-5, 7))).1,
+            [0, 32767, -5, 7],
+            "the mouse drives the right stick"
+        );
+        assert!(
+            (mouse_factor(10.0) - 5.0).abs() < 1e-9 && (mouse_factor(500.0) - 1250.0).abs() < 1e-6
+        );
         assert!((mouse_factor(100.0) - 13.7).abs() < 0.2);
     }
 }

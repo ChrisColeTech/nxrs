@@ -44,7 +44,11 @@ pub static FRAME_SKIP: AtomicU32 = AtomicU32::new(0);
 /// `[front t] ...` on stderr (the run's log).
 pub fn line(msg: &str) {
     use std::io::Write;
-    let _ = writeln!(std::io::stderr().lock(), "[front {:8.3}] {msg}", nxos::log::secs());
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "[front {:8.3}] {msg}",
+        nxos::log::secs()
+    );
 }
 #[macro_export]
 macro_rules! flog {
@@ -80,8 +84,17 @@ fn log_to_file_when_detached(dir: &Path, name: &str) {
         if open && !devnull {
             return;
         }
-        let p = std::ffi::CString::new(dir.join(format!("{name}.log")).as_os_str().as_encoded_bytes()).unwrap_or_default();
-        let fd = libc::open(p.as_ptr(), libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC, 0o644);
+        let p = std::ffi::CString::new(
+            dir.join(format!("{name}.log"))
+                .as_os_str()
+                .as_encoded_bytes(),
+        )
+        .unwrap_or_default();
+        let fd = libc::open(
+            p.as_ptr(),
+            libc::O_WRONLY | libc::O_CREAT | libc::O_TRUNC | libc::O_CLOEXEC,
+            0o644,
+        );
         if fd >= 0 {
             libc::dup2(fd, 1);
             libc::dup2(fd, 2);
@@ -101,7 +114,15 @@ fn log_to_file_when_detached(dir: &Path, name: &str) {
             return;
         }
         let p: Vec<u16> = dir.join(format!("{name}.log")).as_os_str().encode_wide_z();
-        let h = CreateFileW(p.as_ptr(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, std::ptr::null(), CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, std::ptr::null_mut());
+        let h = CreateFileW(
+            p.as_ptr(),
+            GENERIC_WRITE,
+            FILE_SHARE_READ | FILE_SHARE_WRITE,
+            std::ptr::null(),
+            CREATE_ALWAYS,
+            FILE_ATTRIBUTE_NORMAL,
+            std::ptr::null_mut(),
+        );
         if h != INVALID_HANDLE_VALUE {
             SetStdHandle(STD_OUTPUT_HANDLE, h);
             SetStdHandle(STD_ERROR_HANDLE, h);
@@ -120,7 +141,10 @@ impl WideZ for std::ffi::OsStr {
     }
     #[cfg(not(windows))]
     fn encode_wide_z(&self) -> Vec<u16> {
-        self.to_string_lossy().encode_utf16().chain(std::iter::once(0)).collect()
+        self.to_string_lossy()
+            .encode_utf16()
+            .chain(std::iter::once(0))
+            .collect()
     }
 }
 impl WideZ for str {
@@ -138,14 +162,22 @@ pub const EXIT_DEADLINE: std::time::Duration = std::time::Duration::from_millis(
 /// recording finished), the sound paused, graphics drained beside the rest (waited for at most `drain_for`: a draw
 /// compiling its pipeline can take seconds), then what the run keeps written (the pipeline cache, the settings).
 /// Returns whether the drain finished in time.
-pub fn graceful_exit(stop_writers: &dyn Fn(), pause_audio: &dyn Fn(), drain: Box<dyn FnOnce() + Send>, keep: &dyn Fn(), drain_for: std::time::Duration) -> bool {
+pub fn graceful_exit(
+    stop_writers: &dyn Fn(),
+    pause_audio: &dyn Fn(),
+    drain: Box<dyn FnOnce() + Send>,
+    keep: &dyn Fn(),
+    drain_for: std::time::Duration,
+) -> bool {
     stop_writers();
     pause_audio();
     let (tx, rx) = std::sync::mpsc::channel();
-    let _ = std::thread::Builder::new().name("exit drain".into()).spawn(move || {
-        drain();
-        let _ = tx.send(());
-    });
+    let _ = std::thread::Builder::new()
+        .name("exit drain".into())
+        .spawn(move || {
+            drain();
+            let _ = tx.send(());
+        });
     let drained = rx.recv_timeout(drain_for).is_ok();
     keep();
     drained
@@ -158,11 +190,19 @@ pub fn quit(why: &str) -> ! {
     if !QUIT.swap(true, Ordering::AcqRel) {
         let t0 = std::time::Instant::now();
         flog!("exit: {why}");
-        let _ = std::thread::Builder::new().name("exit deadline".into()).spawn(|| {
-            std::thread::sleep(EXIT_DEADLINE);
-            flog!("[RED] graceful exit not done in {:.1} s, exiting at once", EXIT_DEADLINE.as_secs_f64());
-            end_process();
-        });
+        // Before the watchdog can terminate us: detached pipeline compiles are not crashes on normal quit.
+        // This only closes their disk journal; it never waits for a driver compile or a GPU fence.
+        nxgfx::vk::pipe::begin_clean_shutdown();
+        let _ = std::thread::Builder::new()
+            .name("exit deadline".into())
+            .spawn(|| {
+                std::thread::sleep(EXIT_DEADLINE);
+                flog!(
+                    "[RED] graceful exit not done in {:.1} s, exiting at once",
+                    EXIT_DEADLINE.as_secs_f64()
+                );
+                end_process();
+            });
         let drained = graceful_exit(
             &|| {
                 nxos::input::shutdown();
@@ -171,8 +211,19 @@ pub fn quit(why: &str) -> ! {
             &nxos::media::sink::pause_for_exit,
             Box::new(nxgfx::vk::queue::finish),
             &|| {
+                metrics::tick();
                 nxgfx::save_caches();
                 nxconfig::flush();
+                nxos::nvn::report();
+                for line in nxos::services::audio::report() {
+                    nxos::log::line(&line);
+                }
+                if let Some(_k) = nxrt::kernel::try_get() {
+                    nxos::log::line("guest threads at exit:");
+                    for line in nxrt::kernel::dump_threads().lines() {
+                        nxos::log::line(&format!("  {line}"));
+                    }
+                }
                 nxos::log::report_gaps("exit");
                 ctl::cleanup();
             },
@@ -220,19 +271,28 @@ pub fn install_exit_handlers() {
         libc::signal(libc::SIGTERM, on_sig as *const () as libc::sighandler_t);
         libc::signal(libc::SIGINT, on_sig as *const () as libc::sighandler_t);
         // the exit runs on an ordinary thread, not in the handler
-        let _ = std::thread::Builder::new().name("exit signals".into()).spawn(|| loop {
-            match SIG.load(Ordering::Acquire) {
-                0 => std::thread::sleep(std::time::Duration::from_millis(20)),
-                s => quit(if s == libc::SIGTERM { "SIGTERM" } else { "SIGINT" }),
-            }
-        });
+        let _ = std::thread::Builder::new()
+            .name("exit signals".into())
+            .spawn(|| loop {
+                match SIG.load(Ordering::Acquire) {
+                    0 => std::thread::sleep(std::time::Duration::from_millis(20)),
+                    s => quit(if s == libc::SIGTERM {
+                        "SIGTERM"
+                    } else {
+                        "SIGINT"
+                    }),
+                }
+            });
     }
 }
 
 fn end_process() -> ! {
     #[cfg(windows)]
     unsafe {
-        windows_sys::Win32::System::Threading::TerminateProcess(windows_sys::Win32::System::Threading::GetCurrentProcess(), 0);
+        windows_sys::Win32::System::Threading::TerminateProcess(
+            windows_sys::Win32::System::Threading::GetCurrentProcess(),
+            0,
+        );
     }
     // Linux: _exit ends the process at once, without joining the guest threads or running exit handlers (the drivers'
     // atexit work under a live device can hang)
@@ -253,14 +313,32 @@ fn front_loop() {
     let period = std::time::Duration::from_nanos(16_666_667);
     let mut next = std::time::Instant::now();
     let mut tick: u64 = 0;
-    let seconds = std::env::var("NXRS_SECONDS").ok().and_then(|v| v.parse::<f64>().ok()).or_else(|| nxconfig::string("seconds").parse().ok()).filter(|s| *s > 0.0);
+    let mut fps_at = std::time::Instant::now();
+    let mut fps_presents = nxos::nvn::presents();
+    let seconds = std::env::var("NXRS_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .or_else(|| nxconfig::string("seconds").parse().ok())
+        .filter(|s| *s > 0.0);
     let t0 = std::time::Instant::now();
     loop {
         window::poll_input();
         rec::tick();
         if tick % 60 == 0 {
+            let now_presents = nxos::nvn::presents();
+            let elapsed = fps_at.elapsed().as_secs_f64();
+            if elapsed > 0.0 {
+                window::set_fps(now_presents.saturating_sub(fps_presents) as f64 / elapsed);
+            }
+            fps_at = std::time::Instant::now();
+            fps_presents = now_presents;
             if nxconfig::poll() {
-                flog!("settings: {} reloaded", nxconfig::path().map(|p| p.display().to_string()).unwrap_or_default());
+                flog!(
+                    "settings: {} reloaded",
+                    nxconfig::path()
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_default()
+                );
             }
             metrics::tick();
         }
@@ -271,7 +349,12 @@ fn front_loop() {
         // every 15 s, `threads.txt` beside the game: every guest thread's state (Turbo main.c), for a hang
         if tick % 900 == 0 && tick > 0 {
             if let Some(_k) = nxrt::kernel::try_get() {
-                let s = format!("second {}, frames {}\n{}", tick / 60, nxos::nvn::presents(), nxrt::kernel::dump_threads());
+                let s = format!(
+                    "second {}, frames {}\n{}",
+                    tick / 60,
+                    nxos::nvn::presents(),
+                    nxrt::kernel::dump_threads()
+                );
                 let _ = std::fs::write(game().exe_dir.join("threads.txt"), s);
             }
         }
@@ -337,9 +420,14 @@ fn settings_log() {
 /// Sets up the front end for `exe` (its folder holds `<name>.ini`, `<name>_data`). Returns the arguments left for
 /// the os layer (the `--key=value` ones applied and removed). Usable without booting a game (tests, nxfront-dev).
 pub fn setup(args: &[String]) -> Vec<String> {
-    let exe = std::env::current_exe().unwrap_or_else(|_| PathBuf::from(args.first().cloned().unwrap_or_default()));
+    let exe = std::env::current_exe()
+        .unwrap_or_else(|_| PathBuf::from(args.first().cloned().unwrap_or_default()));
     let exe_dir = exe.parent().map(Path::to_path_buf).unwrap_or_default();
-    let name = std::env::var("NXRS_NAME").unwrap_or_else(|_| exe.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "game".into()));
+    let name = std::env::var("NXRS_NAME").unwrap_or_else(|_| {
+        exe.file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "game".into())
+    });
     log_to_file_when_detached(&exe_dir, &name);
     let mut rest = vec![args.first().cloned().unwrap_or_default()];
     let mut data: Option<PathBuf> = None;
@@ -360,7 +448,9 @@ pub fn setup(args: &[String]) -> Vec<String> {
         rest.push(data.display().to_string());
     }
     let title = title_of(&data, &name);
-    let ini = std::env::var("NXRS_INI").map(PathBuf::from).unwrap_or_else(|_| exe_dir.join(format!("{name}.ini")));
+    let ini = std::env::var("NXRS_INI")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| exe_dir.join(format!("{name}.ini")));
     if let Err(e) = nxconfig::open(&ini, &title) {
         flog!("[RED] settings: cannot write {}: {e}", ini.display());
     }
@@ -374,8 +464,17 @@ pub fn setup(args: &[String]) -> Vec<String> {
         }
     }
     hidden_keys_log();
-    let _ = GAME.set(Game { exe_dir, name, title, data });
-    flog!("{} - nxrs front end; settings {}", game().title, ini.display());
+    let _ = GAME.set(Game {
+        exe_dir,
+        name,
+        title,
+        data,
+    });
+    flog!(
+        "{} - nxrs front end; settings {}",
+        game().title,
+        ini.display()
+    );
     settings_log();
     rest
 }
@@ -397,7 +496,10 @@ pub fn script_now() -> u64 {
 fn hidden_keys_log() {
     let _ = script_now();
     if nxconfig::is_set("script") {
-        flog!("settings: script={} (test input: buttons held 300 ms at those times)", nxconfig::string("script"));
+        flog!(
+            "settings: script={} (test input: buttons held 300 ms at those times)",
+            nxconfig::string("script")
+        );
     }
     for (k, what) in [
         ("loop_limit", "the loop guard of Turbo's OpenGL shader translator"),
@@ -421,18 +523,35 @@ pub fn start() {
     metrics::start();
     lsfg::start();
     nxgfx::vk::framegen::set_lsfg_state(lsfg::state);
-    std::thread::Builder::new().name("front".into()).spawn(front_loop).expect("front thread");
+    std::thread::Builder::new()
+        .name("front".into())
+        .spawn(front_loop)
+        .expect("front thread");
 }
 
 /// `int nxfront_main(int argc, char **argv, const RtModule *mods, int count)`: the game's entry.
 #[no_mangle]
-pub unsafe extern "C" fn nxfront_main(argc: i32, argv: *const *const core::ffi::c_char, mods: *const nxrt::dispatch::RtModule, count: i32) -> i32 {
+pub unsafe extern "C" fn nxfront_main(
+    argc: i32,
+    argv: *const *const core::ffi::c_char,
+    mods: *const nxrt::dispatch::RtModule,
+    count: i32,
+) -> i32 {
     // the guest map's fixed regions first, before the window and the GPU driver take address space
     nxrt::process::claim_fixed_regions(mods, count);
-    let args: Vec<String> = (0..argc as usize).map(|i| std::ffi::CStr::from_ptr(*argv.add(i)).to_string_lossy().into_owned()).collect();
+    let args: Vec<String> = (0..argc as usize)
+        .map(|i| {
+            std::ffi::CStr::from_ptr(*argv.add(i))
+                .to_string_lossy()
+                .into_owned()
+        })
+        .collect();
     let rest = setup(&args);
     start();
-    let cs: Vec<std::ffi::CString> = rest.iter().map(|s| std::ffi::CString::new(s.as_str()).unwrap_or_default()).collect();
+    let cs: Vec<std::ffi::CString> = rest
+        .iter()
+        .map(|s| std::ffi::CString::new(s.as_str()).unwrap_or_default())
+        .collect();
     let ptrs: Vec<*const core::ffi::c_char> = cs.iter().map(|c| c.as_ptr()).collect();
     nxos::boot::nxos_main_with(ptrs.len() as i32, ptrs.as_ptr(), mods, count, None)
 }
@@ -460,8 +579,17 @@ mod exit_tests {
         let t = Instant::now();
         let kept = Arc::new(Mutex::new(false));
         let k = kept.clone();
-        let ok = super::graceful_exit(&|| {}, &|| {}, Box::new(|| std::thread::sleep(Duration::from_secs(3))), &move || *k.lock().unwrap() = true, Duration::from_millis(100));
-        assert!(!ok && *kept.lock().unwrap(), "a stuck drain: the cache is written all the same");
+        let ok = super::graceful_exit(
+            &|| {},
+            &|| {},
+            Box::new(|| std::thread::sleep(Duration::from_secs(3))),
+            &move || *k.lock().unwrap() = true,
+            Duration::from_millis(100),
+        );
+        assert!(
+            !ok && *kept.lock().unwrap(),
+            "a stuck drain: the cache is written all the same"
+        );
         assert!(t.elapsed() < Duration::from_secs(1));
     }
 }

@@ -23,7 +23,11 @@ use windows_sys::Win32::System::Pipes::*;
 #[cfg(target_os = "linux")]
 pub fn socket_path(name: &str) -> std::path::PathBuf {
     // XDG_RUNTIME_DIR when it exists (a session without systemd's user manager may name one that does not)
-    let dir = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()).map(std::path::PathBuf::from).filter(|d| d.is_dir()).unwrap_or_else(|| "/tmp".into());
+    let dir = std::env::var_os("XDG_RUNTIME_DIR")
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .filter(|d| d.is_dir())
+        .unwrap_or_else(|| "/tmp".into());
     dir.join(name)
 }
 
@@ -92,7 +96,16 @@ unsafe impl Send for Pipe {}
 impl Read for Pipe {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         let mut n = 0u32;
-        if unsafe { ReadFile(self.0, buf.as_mut_ptr(), buf.len() as u32, &mut n, std::ptr::null_mut()) } == 0 {
+        if unsafe {
+            ReadFile(
+                self.0,
+                buf.as_mut_ptr(),
+                buf.len() as u32,
+                &mut n,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
             return Err(std::io::Error::last_os_error());
         }
         Ok(n as usize)
@@ -102,7 +115,16 @@ impl Read for Pipe {
 impl Write for Pipe {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut n = 0u32;
-        if unsafe { WriteFile(self.0, buf.as_ptr(), buf.len() as u32, &mut n, std::ptr::null_mut()) } == 0 {
+        if unsafe {
+            WriteFile(
+                self.0,
+                buf.as_ptr(),
+                buf.len() as u32,
+                &mut n,
+                std::ptr::null_mut(),
+            )
+        } == 0
+        {
             return Err(std::io::Error::last_os_error());
         }
         Ok(n as usize)
@@ -117,12 +139,27 @@ impl Write for Pipe {
 fn serve(name: String) {
     let wname = name.as_str().encode_wide_z();
     loop {
-        let h = unsafe { CreateNamedPipeW(wname.as_ptr(), PIPE_ACCESS_DUPLEX, PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT, PIPE_UNLIMITED_INSTANCES, 65536, 65536, 0, std::ptr::null()) };
+        let h = unsafe {
+            CreateNamedPipeW(
+                wname.as_ptr(),
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_BYTE | PIPE_READMODE_BYTE | PIPE_WAIT,
+                PIPE_UNLIMITED_INSTANCES,
+                65536,
+                65536,
+                0,
+                std::ptr::null(),
+            )
+        };
         if h == INVALID_HANDLE_VALUE {
-            crate::flog!("[RED] control pipe {name}: CreateNamedPipe failed ({})", unsafe { GetLastError() });
+            crate::flog!(
+                "[RED] control pipe {name}: CreateNamedPipe failed ({})",
+                unsafe { GetLastError() }
+            );
             return;
         }
-        let ok = unsafe { ConnectNamedPipe(h, std::ptr::null_mut()) } != 0 || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
+        let ok = unsafe { ConnectNamedPipe(h, std::ptr::null_mut()) } != 0
+            || unsafe { GetLastError() } == ERROR_PIPE_CONNECTED;
         if !ok {
             unsafe { CloseHandle(h) };
             continue;
@@ -140,8 +177,11 @@ fn serve(name: String) {
 
 fn register() {
     use nxconfig::ctl::register;
-    register("status", ": frames presented, seconds, FPS limit, recording, window", |_| {
-        format!(
+    register(
+        "status",
+        ": frames presented, seconds, FPS limit, recording, window",
+        |_| {
+            format!(
             "frame {}\nseconds {:.1}\nfps_limit {}\nrecording {}\nfullscreen {}\nfocused {}\nlsfg {}\n",
             nxos::nvn::presents(),
             nxos::log::secs(),
@@ -151,11 +191,14 @@ fn register() {
             crate::window::focused() as u8,
             crate::lsfg::state()
         )
-    });
+        },
+    );
     register("shot", "[path]: the window as shown, now (PNG)", |a| {
         let p = match a.first() {
             Some(p) => std::path::PathBuf::from(p),
-            None => crate::capture::captures_dir().join(format!("ctl_{}.png", nxos::nvn::presents())),
+            None => {
+                crate::capture::captures_dir().join(format!("ctl_{}.png", nxos::nvn::presents()))
+            }
         };
         if crate::capture::screenshot_to(&p) {
             format!("{}", p.display())
@@ -163,28 +206,40 @@ fn register() {
             "failed".into()
         }
     });
-    register("fullres", "[path]: the game's picture at its own resolution at the next present (graphics)", |a| {
-        nxgfx::vk::shot::request(a.first().copied().unwrap_or(""));
-        "the next present".into()
-    });
+    register(
+        "fullres",
+        "[path]: the game's picture at its own resolution at the next present (graphics)",
+        |a| {
+            nxgfx::vk::shot::request(a.first().copied().unwrap_or(""));
+            "the next present".into()
+        },
+    );
     register("get", "<key>: an ini value", |a| match a.first() {
         Some(k) => format!("{k} = {}", nxconfig::string(k)),
         None => "get <key>".into(),
     });
-    register("set", "<key> <value>: an ini value, kept in the file", |a| match (a.first(), a.get(1)) {
-        (Some(k), Some(v)) => {
-            nxconfig::set(k, v);
-            format!("{k} = {}", nxconfig::string(k))
-        }
-        _ => "set <key> <value>".into(),
-    });
-    register("run", "<key> <value>: an ini value for this run only", |a| match (a.first(), a.get(1)) {
-        (Some(k), Some(v)) => {
-            nxconfig::apply_arg(&format!("{k}={v}"));
-            format!("{k} = {}", nxconfig::string(k))
-        }
-        _ => "run <key> <value>".into(),
-    });
+    register(
+        "set",
+        "<key> <value>: an ini value, kept in the file",
+        |a| match (a.first(), a.get(1)) {
+            (Some(k), Some(v)) => {
+                nxconfig::set(k, v);
+                format!("{k} = {}", nxconfig::string(k))
+            }
+            _ => "set <key> <value>".into(),
+        },
+    );
+    register(
+        "run",
+        "<key> <value>: an ini value for this run only",
+        |a| match (a.first(), a.get(1)) {
+            (Some(k), Some(v)) => {
+                nxconfig::apply_arg(&format!("{k}={v}"));
+                format!("{k} = {}", nxconfig::string(k))
+            }
+            _ => "run <key> <value>".into(),
+        },
+    );
     register("record", "start | stop: F7", |a| {
         let want = a.first().copied().unwrap_or("");
         if (want == "start") != crate::rec::recording() {
@@ -196,25 +251,46 @@ fn register() {
         let on = a.first().is_some_and(|v| *v == "1");
         #[cfg(windows)]
         unsafe {
-            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(crate::window::hwnd(), crate::window::WM_APP_FULLSCREEN, on as usize, 0)
+            windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                crate::window::hwnd(),
+                crate::window::WM_APP_FULLSCREEN,
+                on as usize,
+                0,
+            )
         };
         #[cfg(target_os = "linux")]
         crate::window::set_fullscreen(on);
         format!("fullscreen {}", on as u8)
     });
-    register("touch", "<x> <y> [seconds]: a press on the touch screen (1280x720) held that long (0.1)", |a| {
-        let (Some(x), Some(y)) = (a.first().and_then(|v| v.parse::<u32>().ok()), a.get(1).and_then(|v| v.parse::<u32>().ok())) else {
-            return "usage: touch <x> <y> [seconds]\n".into();
-        };
-        let secs = a.get(2).and_then(|v| v.parse::<f64>().ok()).unwrap_or(0.1).clamp(0.0, 30.0);
-        nxos::input::set_touch(true, x, y);
-        std::thread::spawn(move || {
-            std::thread::sleep(std::time::Duration::from_secs_f64(secs));
-            nxos::input::set_touch(false, x, y);
-        });
-        format!("touched {x} {y} for {secs} s\n")
+    register(
+        "touch",
+        "<x> <y> [seconds]: a press on the touch screen (1280x720) held that long (0.1)",
+        |a| {
+            let (Some(x), Some(y)) = (
+                a.first().and_then(|v| v.parse::<u32>().ok()),
+                a.get(1).and_then(|v| v.parse::<u32>().ok()),
+            ) else {
+                return "usage: touch <x> <y> [seconds]\n".into();
+            };
+            let secs = a
+                .get(2)
+                .and_then(|v| v.parse::<f64>().ok())
+                .unwrap_or(0.1)
+                .clamp(0.0, 30.0);
+            nxos::input::set_touch(true, x, y);
+            std::thread::spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs_f64(secs));
+                nxos::input::set_touch(false, x, y);
+            });
+            format!("touched {x} {y} for {secs} s\n")
+        },
+    );
+    register("counters", ": every engine counter", |_| {
+        nxconfig::metrics::snapshot()
+            .iter()
+            .map(|(k, v)| format!("{k} {v}\n"))
+            .collect()
     });
-    register("counters", ": every engine counter", |_| nxconfig::metrics::snapshot().iter().map(|(k, v)| format!("{k} {v}\n")).collect());
     register("quit", ": ends the game", |_| {
         std::thread::spawn(|| {
             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -229,18 +305,30 @@ pub fn start() {
     let pid = std::process::id();
     #[cfg(windows)]
     {
-        for n in [format!(r"\\.\pipe\nxrs_ctl_{pid}"), format!(r"\\.\pipe\swr_ctl_{pid}")] {
+        for n in [
+            format!(r"\\.\pipe\nxrs_ctl_{pid}"),
+            format!(r"\\.\pipe\swr_ctl_{pid}"),
+        ] {
             let name = n.clone();
-            std::thread::Builder::new().name("control pipe".into()).spawn(move || serve(name)).ok();
+            std::thread::Builder::new()
+                .name("control pipe".into())
+                .spawn(move || serve(name))
+                .ok();
         }
         crate::flog!("control pipe: \\\\.\\pipe\\nxrs_ctl_{pid} (and swr_ctl_{pid})");
     }
     #[cfg(target_os = "linux")]
     {
         for n in [format!("nxrs_ctl_{pid}"), format!("swr_ctl_{pid}")] {
-            std::thread::Builder::new().name("control pipe".into()).spawn(move || serve(n)).ok();
+            std::thread::Builder::new()
+                .name("control pipe".into())
+                .spawn(move || serve(n))
+                .ok();
         }
-        crate::flog!("control socket: {} (and swr_ctl_{pid})", socket_path(&format!("nxrs_ctl_{pid}")).display());
+        crate::flog!(
+            "control socket: {} (and swr_ctl_{pid})",
+            socket_path(&format!("nxrs_ctl_{pid}")).display()
+        );
     }
     let _ = Ordering::Relaxed;
 }

@@ -14,7 +14,11 @@ pub struct Section {
 
 macro_rules! o {
     ($k:expr, $d:expr, $h:expr) => {
-        Opt { key: $k, default: $d, help: $h }
+        Opt {
+            key: $k,
+            default: $d,
+            help: $h,
+        }
     };
 }
 
@@ -73,6 +77,7 @@ pub const SECTIONS: &[Section] = &[
             o!("dynamic_resolution_min", "0.6", "The lowest internal resolution dynamic_resolution goes to"),
             o!("game_dynamic_resolution", "auto", "The game's own dynamic resolution and frame pacing, as on the console: auto = on (the game is told the GPU's\n;   real times), 1 = on, 0 = off (the game is told the GPU takes no time: always its largest size, for a fast graphics card)"),
             o!("shadows", "1", "0 = no shadow maps (more FPS)"),
+            o!("image_noflag", "1", "1 = allow shader image writes to textures without the IMAGE flag (required by some games); 0 = diagnostic override"),
         ],
     },
     Section {
@@ -152,11 +157,18 @@ pub const ALIASES: &[(&str, &str)] = &[
 pub const REMOVED: &[&str] = &["vsync"];
 
 pub fn canonical(key: &str) -> &str {
-    ALIASES.iter().find(|(a, _)| *a == key).map(|(_, k)| *k).unwrap_or(key)
+    ALIASES
+        .iter()
+        .find(|(a, _)| *a == key)
+        .map(|(_, k)| *k)
+        .unwrap_or(key)
 }
 
 pub fn find(key: &str) -> Option<&'static Opt> {
-    SECTIONS.iter().flat_map(|s| s.opts.iter()).find(|o| o.key == key)
+    SECTIONS
+        .iter()
+        .flat_map(|s| s.opts.iter())
+        .find(|o| o.key == key)
 }
 
 fn clamp_f(v: &str, lo: f64, hi: f64, def: f64) -> String {
@@ -182,7 +194,12 @@ fn int(v: &str) -> i64 {
         Some(r) => (true, r),
         None => (false, t.strip_prefix('+').unwrap_or(t)),
     };
-    let n: i64 = d.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
+    let n: i64 = d
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0);
     if neg {
         -n
     } else {
@@ -210,10 +227,25 @@ pub fn normalise(key: &str, v: &str) -> Option<String> {
         "recording_fps" => int(v).clamp(15, 60).to_string(),
         "fps_limit" => {
             let n = int(v);
-            (if n != 30 && n != 0 && n < 60 { if n == 1 { 1 } else { 60 } } else { n }).to_string()
+            (if n != 30 && n != 0 && n < 60 {
+                if n == 1 {
+                    1
+                } else {
+                    60
+                }
+            } else {
+                n
+            })
+            .to_string()
         }
         "lsfg_flow" => clamp_f(v, 0.25, 1.0, 0.5),
-        "frame_gen_type" => if v.eq_ignore_ascii_case("lsfg") { "lsfg".into() } else { "builtin".into() },
+        "frame_gen_type" => {
+            if v.eq_ignore_ascii_case("lsfg") {
+                "lsfg".into()
+            } else {
+                "builtin".into()
+            }
+        }
         "lsfg_multiplier" => int(v).clamp(2, 4).to_string(),
         "lsfg_resolution" => int(v).clamp(240, 2160).to_string(),
         "lsfg_target" => trim_float(v.parse::<f64>().unwrap_or(60.0).max(30.0)),
@@ -229,7 +261,11 @@ pub fn normalise(key: &str, v: &str) -> Option<String> {
                 // OpenGL and Eden are Turbo's other renderers; this engine has the NVN layer on Vulkan only (the
                 // owner decides whether OpenGL comes back): said once, not silently
                 static SAID: std::sync::Once = std::sync::Once::new();
-                SAID.call_once(|| eprintln!("[config] renderer={v}: this engine has no {v} renderer; Vulkan is used"));
+                SAID.call_once(|| {
+                    eprintln!(
+                        "[config] renderer={v}: this engine has no {v} renderer; Vulkan is used"
+                    )
+                });
                 "vulkan".into()
             } else {
                 "vulkan".into()
@@ -254,7 +290,10 @@ mod tests {
         assert_eq!(normalise("fps_limit", "144").unwrap(), "144");
         assert_eq!(normalise("mouse_invert", "7").unwrap(), "3");
         assert_eq!(normalise("button_layout", "labels").unwrap(), "xbox");
-        assert_eq!(normalise("game_dynamic_resolution", "auto").unwrap(), "auto");
+        assert_eq!(
+            normalise("game_dynamic_resolution", "auto").unwrap(),
+            "auto"
+        );
         assert_eq!(normalise("recording_fps", "100").unwrap(), "60");
         assert!(normalise("vsync", "1").is_none());
         assert_eq!(canonical("idioma"), "language");
@@ -268,10 +307,21 @@ pub fn settings_markdown() -> String {
         "# Settings\n\nThe game's ini (`<game>.ini` beside the executable; `NXRS_INI` names another) holds these keys. A missing key takes its\ndefault; values outside a key's range are brought into it when read. Turbo's Spanish key names are still read and written\nback under these names. Environment switches for diagnostics and tests are listed in [env_switches.tsv](env_switches.tsv).\n\nThis page is generated from `src/config/src/options.rs` (`cargo test -p config settings_page_is_current` checks it).\n",
     );
     for sec in SECTIONS {
-        s += &format!("\n## {}\n\n| Key | Default | What it does |\n|---|---|---|\n", sec.title);
+        s += &format!(
+            "\n## {}\n\n| Key | Default | What it does |\n|---|---|---|\n",
+            sec.title
+        );
         for o in sec.opts {
-            let help = o.help.replace("\n;   ", " ").replace('\n', " ").replace('|', "\\|");
-            let d = if o.default.is_empty() { "(empty)".to_string() } else { format!("`{}`", o.default) };
+            let help = o
+                .help
+                .replace("\n;   ", " ")
+                .replace('\n', " ")
+                .replace('|', "\\|");
+            let d = if o.default.is_empty() {
+                "(empty)".to_string()
+            } else {
+                format!("`{}`", o.default)
+            };
             s += &format!("| `{}` | {d} | {help} |\n", o.key);
         }
     }
@@ -286,7 +336,9 @@ mod settings_doc {
     fn settings_page_is_current() {
         let p = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs/settings.md");
         let want = super::settings_markdown();
-        let have = std::fs::read_to_string(&p).unwrap_or_default().replace("\r\n", "\n");
+        let have = std::fs::read_to_string(&p)
+            .unwrap_or_default()
+            .replace("\r\n", "\n");
         if have != want {
             std::fs::write(&p, &want).unwrap();
             panic!("docs/settings.md was out of date and has been written again: check it in");

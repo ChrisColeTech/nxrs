@@ -23,6 +23,7 @@ static FULLSCREEN: AtomicBool = AtomicBool::new(false);
 pub static HELP_OPEN: AtomicBool = AtomicBool::new(false);
 static PLACEMENT: Mutex<Option<WINDOWPLACEMENT>> = Mutex::new(None);
 static TITLE: Mutex<String> = Mutex::new(String::new());
+static FPS: Mutex<String> = Mutex::new(String::new());
 static STATE: Mutex<[String; 3]> = Mutex::new([String::new(), String::new(), String::new()]);
 
 pub const WM_APP_TITLE: u32 = WM_APP + 1;
@@ -41,8 +42,21 @@ pub fn set_state(slot: usize, text: &str) {
     }
 }
 
+pub fn set_fps(fps: f64) {
+    *FPS.lock().unwrap() = format!("{fps:.1} FPS");
+    let h = hwnd();
+    if !h.is_null() {
+        unsafe { PostMessageW(h, WM_APP_TITLE, 0, 0) };
+    }
+}
+
 fn title_text() -> String {
     let mut t = TITLE.lock().unwrap().clone();
+    let fps = FPS.lock().unwrap();
+    if !fps.is_empty() {
+        t.push_str("  |  ");
+        t.push_str(&fps);
+    }
     for s in STATE.lock().unwrap().iter().filter(|s| !s.is_empty()) {
         t.push_str("  |  ");
         t.push_str(s);
@@ -73,13 +87,29 @@ pub fn set_fullscreen(on: bool) {
             *PLACEMENT.lock().unwrap() = Some(wp);
             let r = monitor_rect(h);
             SetWindowLongW(h, GWL_STYLE, (st & !WS_OVERLAPPEDWINDOW) as i32);
-            SetWindowPos(h, HWND_TOP, r.left, r.top, r.right - r.left, r.bottom - r.top, SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            SetWindowPos(
+                h,
+                HWND_TOP,
+                r.left,
+                r.top,
+                r.right - r.left,
+                r.bottom - r.top,
+                SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+            );
         } else {
             SetWindowLongW(h, GWL_STYLE, (st | WS_OVERLAPPEDWINDOW) as i32);
             if let Some(wp) = PLACEMENT.lock().unwrap().take() {
                 SetWindowPlacement(h, &wp);
             }
-            SetWindowPos(h, std::ptr::null_mut(), 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED);
+            SetWindowPos(
+                h,
+                std::ptr::null_mut(),
+                0,
+                0,
+                0,
+                0,
+                SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOOWNERZORDER | SWP_FRAMECHANGED,
+            );
         }
     }
     FULLSCREEN.store(on, Ordering::Release);
@@ -105,11 +135,19 @@ fn mouse_mode() -> bool {
 pub fn mouse_capture() {
     let h = hwnd();
     unsafe {
-        let active = mouse_mode() && !HELP_OPEN.load(Ordering::Acquire) && GetForegroundWindow() == h && IsIconic(h) == 0;
+        let active = mouse_mode()
+            && !HELP_OPEN.load(Ordering::Acquire)
+            && GetForegroundWindow() == h
+            && IsIconic(h) == 0;
         if active {
             let mut r: RECT = std::mem::zeroed();
             GetClientRect(h, &mut r);
-            MapWindowPoints(h, std::ptr::null_mut(), &mut r as *mut RECT as *mut POINT, 2);
+            MapWindowPoints(
+                h,
+                std::ptr::null_mut(),
+                &mut r as *mut RECT as *mut POINT,
+                2,
+            );
             ClipCursor(&r);
         } else {
             ClipCursor(std::ptr::null());
@@ -128,7 +166,9 @@ pub fn focused() -> bool {
 /// The power request while the game is in front (Turbo plat.c: the display and the system kept awake while playing):
 /// ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED, and ES_CONTINUOUS alone (released) behind other windows.
 pub fn awake_state(focused: bool) -> u32 {
-    use windows_sys::Win32::System::Power::{ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED};
+    use windows_sys::Win32::System::Power::{
+        ES_CONTINUOUS, ES_DISPLAY_REQUIRED, ES_SYSTEM_REQUIRED,
+    };
     if focused {
         ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED
     } else {
@@ -152,14 +192,28 @@ pub fn poll_input() {
     nxos::input::set_focus(f);
     // the game's focus state (oe message 15): in front 1, behind another window 2, minimised 3
     let h = hwnd();
-    let st = if !h.is_null() && unsafe { IsIconic(h) } != 0 { 3 } else if f { 1 } else { 2 };
+    let st = if !h.is_null() && unsafe { IsIconic(h) } != 0 {
+        3
+    } else if f {
+        1
+    } else {
+        2
+    };
     nxos::services::oe::set_focus(st);
     // NXRS_CONTROLLER_BACKGROUND=1: the keyboard counts out of focus too (keys posted by a test script)
     static BG: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     let f = f || *BG.get_or_init(|| nxos::input::env_flag("NXRS_CONTROLLER_BACKGROUND"));
     nxos::input::set_suspended(HELP_OPEN.load(Ordering::Acquire));
-    let held = if f { keys::HELD.load(Ordering::Acquire) } else { 0 };
-    let m = if mouse_mode() { Some(MOUSE.lock().unwrap().stick(f)) } else { None };
+    let held = if f {
+        keys::HELD.load(Ordering::Acquire)
+    } else {
+        0
+    };
+    let m = if mouse_mode() {
+        Some(MOUSE.lock().unwrap().stick(f))
+    } else {
+        None
+    };
     let (b, a) = keys::state(held, m);
     nxos::input::set_keyboard(b | crate::script_now(), a);
     home_quit();
@@ -191,8 +245,19 @@ fn home_quit() {
     let (q, t0) = g.get_or_insert_with(|| (HomeQuit::default(), std::time::Instant::now()));
     let before = q.phase;
     let (pa, pb) = nxos::ui::pads_ab();
-    let (confirm, cancel) = if before == HqPhase::Prompt { nxos::ui::keys() } else { (false, false) };
-    let now = q.step(t0.elapsed().as_secs_f64(), nxos::input::home_held(), pa, pb, confirm, cancel);
+    let (confirm, cancel) = if before == HqPhase::Prompt {
+        nxos::ui::keys()
+    } else {
+        (false, false)
+    };
+    let now = q.step(
+        t0.elapsed().as_secs_f64(),
+        nxos::input::home_held(),
+        pa,
+        pb,
+        confirm,
+        cancel,
+    );
     if now == before {
         return;
     }
@@ -218,14 +283,21 @@ fn fps_limit_toggle(h: HWND) {
     let now = nxconfig::fps_limit_hz();
     let v = if now == 0 { "1" } else { "0" };
     nxconfig::set("fps_limit", v);
-    let text = if v == "0" { "FPS limit: unlimited".to_string() } else { format!("FPS limit: {}", nxconfig::fps_limit_hz()) };
+    let text = if v == "0" {
+        "FPS limit: unlimited".to_string()
+    } else {
+        format!("FPS limit: {}", nxconfig::fps_limit_hz())
+    };
     crate::flog!("F4: {text}");
     let _ = h;
     set_state(0, &text);
 }
 
 pub fn diag_dump() {
-    crate::flog!("F5: diagnostic dump (presents {}, the os gaps so far below)", nxos::nvn::presents());
+    crate::flog!(
+        "F5: diagnostic dump (presents {}, the os gaps so far below)",
+        nxos::nvn::presents()
+    );
     nxos::log::report_gaps("F5");
     let dir = crate::game().exe_dir.join("captures");
     let _ = std::fs::create_dir_all(&dir);
@@ -235,12 +307,18 @@ pub fn diag_dump() {
     }
     s.push_str(&nxconfig::ctl::run("pads"));
     // every guest thread: what it waits for, the host function it is in, its guest frames (Turbo's F5)
-    let threads = nxrt::kernel::try_get().map(|_| nxrt::kernel::dump_threads()).unwrap_or_default();
-    crate::flog!("F5: guest threads
-{threads}");
-    s.push_str("
+    let threads = nxrt::kernel::try_get()
+        .map(|_| nxrt::kernel::dump_threads())
+        .unwrap_or_default();
+    crate::flog!(
+        "F5: guest threads
+{threads}"
+    );
+    s.push_str(
+        "
 # guest threads
-");
+",
+    );
     s.push_str(&threads);
     // the render targets, and a pass dump of the next frame (Turbo's F5 gpu_gl_dump_rts)
     let rts = nxgfx::diag_dump();
@@ -303,7 +381,10 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
                 ReleaseCapture();
             }
             if m != WM_MOUSEMOVE || down {
-                let (x, y) = ((l & 0xffff) as i16 as i32, ((l >> 16) & 0xffff) as i16 as i32);
+                let (x, y) = (
+                    (l & 0xffff) as i16 as i32,
+                    ((l >> 16) & 0xffff) as i16 as i32,
+                );
                 let mut cr: RECT = std::mem::zeroed();
                 GetClientRect(h, &mut cr);
                 let sx = (x.max(0) as i64 * 1280 / cr.right.max(1) as i64) as i32;
@@ -314,10 +395,25 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
                 static TWO: Mutex<(MouseTouch, (i32, i32))> = Mutex::new((MouseTouch::One, (0, 0)));
                 let mut two = TWO.lock().unwrap();
                 if m == WM_LBUTTONDOWN {
-                    let (ctrl, shift) = (GetKeyState(VK_CONTROL as i32) < 0, GetKeyState(VK_SHIFT as i32) < 0);
-                    *two = (if ctrl { MouseTouch::Pinch } else if shift { MouseTouch::Rotate } else { MouseTouch::One }, (sx, sy));
+                    let (ctrl, shift) = (
+                        GetKeyState(VK_CONTROL as i32) < 0,
+                        GetKeyState(VK_SHIFT as i32) < 0,
+                    );
+                    *two = (
+                        if ctrl {
+                            MouseTouch::Pinch
+                        } else if shift {
+                            MouseTouch::Rotate
+                        } else {
+                            MouseTouch::One
+                        },
+                        (sx, sy),
+                    );
                 }
-                for (k, (fx, fy)) in nxos::input::mouse_fingers(two.0, two.1, (sx, sy)).into_iter().enumerate() {
+                for (k, (fx, fy)) in nxos::input::mouse_fingers(two.0, two.1, (sx, sy))
+                    .into_iter()
+                    .enumerate()
+                {
                     nxos::input::set_finger(k, down, fx, fy);
                 }
             }
@@ -357,7 +453,11 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
                     return DefWindowProcW(h, m, w, l); // Alt+F4
                 }
             }
-            let hot = [VK_ESCAPE, VK_F1, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F11].iter().any(|&k| k as u32 == vk);
+            let hot = [
+                VK_ESCAPE, VK_F1, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F11,
+            ]
+            .iter()
+            .any(|&k| k as u32 == vk);
             if hot {
                 if repeat {
                     return 0;
@@ -366,9 +466,12 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
                     VK_ESCAPE => {
                         // NXRS_ESC_QUIT=0 (scripted runs): Esc is logged and ignored; the foreground state says
                         // whether a key press reached the window or a message was posted to it from outside
-                        let fg = windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() == h;
+                        let fg =
+                            windows_sys::Win32::UI::WindowsAndMessaging::GetForegroundWindow() == h;
                         if std::env::var("NXRS_ESC_QUIT").is_ok_and(|v| v.trim() == "0") {
-                            crate::flog!("Esc ignored (NXRS_ESC_QUIT=0; window in the foreground: {fg})");
+                            crate::flog!(
+                                "Esc ignored (NXRS_ESC_QUIT=0; window in the foreground: {fg})"
+                            );
                         } else {
                             crate::flog!("Esc: quit (window in the foreground: {fg})");
                             std::thread::spawn(|| crate::quit("Esc"));
@@ -399,7 +502,13 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
             if mouse_mode() && focused() {
                 let mut raw: RAWINPUT = std::mem::zeroed();
                 let mut size = std::mem::size_of::<RAWINPUT>() as u32;
-                if GetRawInputData(l as HRAWINPUT, RID_INPUT, &mut raw as *mut _ as *mut _, &mut size, std::mem::size_of::<RAWINPUTHEADER>() as u32) != u32::MAX
+                if GetRawInputData(
+                    l as HRAWINPUT,
+                    RID_INPUT,
+                    &mut raw as *mut _ as *mut _,
+                    &mut size,
+                    std::mem::size_of::<RAWINPUTHEADER>() as u32,
+                ) != u32::MAX
                     && raw.header.dwType == RIM_TYPEMOUSE
                     && raw.data.mouse.usFlags as u32 & MOUSE_MOVE_ABSOLUTE as u32 == 0
                 {
@@ -421,7 +530,7 @@ unsafe extern "system" fn wndproc(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRES
 
 /// Opens the window on its own thread and gives it to graphics; returns once it exists.
 pub fn open(title: &str) {
-    *TITLE.lock().unwrap() = format!("{title} - nxrs  (F1 help)");
+    *TITLE.lock().unwrap() = format!("{title} - nxrs");
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     std::thread::Builder::new()
         .name("window".into())
@@ -446,14 +555,40 @@ pub fn open(title: &str) {
             let mut wa: RECT = std::mem::zeroed();
             SystemParametersInfoW(SPI_GETWORKAREA, 0, &mut wa as *mut _ as *mut _, 0);
             let (aw, ah) = ((wa.right - wa.left) * 3 / 4, (wa.bottom - wa.top) * 3 / 4);
-            let (cw, ch) = if aw * 9 > ah * 16 { (ah * 16 / 9, ah) } else { (aw, aw * 9 / 16) };
-            let mut r = RECT { left: 0, top: 0, right: cw.max(640), bottom: ch.max(360) };
+            let (cw, ch) = if aw * 9 > ah * 16 {
+                (ah * 16 / 9, ah)
+            } else {
+                (aw, aw * 9 / 16)
+            };
+            let mut r = RECT {
+                left: 0,
+                top: 0,
+                right: cw.max(640),
+                bottom: ch.max(360),
+            };
             AdjustWindowRectEx(&mut r, WS_OVERLAPPEDWINDOW, 0, 0);
             let t = title_text().encode_wide_z();
             // NXRS_NO_ACTIVATE=1 (scripted runs): the window shows without taking the focus from whoever works at the PC
             let no_activate = std::env::var("NXRS_NO_ACTIVATE").is_ok_and(|v| v.trim() == "1");
-            let style = if no_activate { WS_OVERLAPPEDWINDOW } else { WS_OVERLAPPEDWINDOW | WS_VISIBLE };
-            let h = CreateWindowExW(0, class.as_ptr(), t.as_ptr(), style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left, r.bottom - r.top, std::ptr::null_mut(), std::ptr::null_mut(), hi, std::ptr::null());
+            let style = if no_activate {
+                WS_OVERLAPPEDWINDOW
+            } else {
+                WS_OVERLAPPEDWINDOW | WS_VISIBLE
+            };
+            let h = CreateWindowExW(
+                0,
+                class.as_ptr(),
+                t.as_ptr(),
+                style,
+                CW_USEDEFAULT,
+                CW_USEDEFAULT,
+                r.right - r.left,
+                r.bottom - r.top,
+                std::ptr::null_mut(),
+                std::ptr::null_mut(),
+                hi,
+                std::ptr::null(),
+            );
             if h.is_null() {
                 crate::flog!("[RED] window: CreateWindowExW failed ({})", GetLastError());
                 let _ = tx.send(());
@@ -464,7 +599,12 @@ pub fn open(title: &str) {
                 ShowWindow(h, SW_SHOWNOACTIVATE);
                 crate::flog!("window: shown without taking the focus (NXRS_NO_ACTIVATE=1)");
             }
-            let rid = RAWINPUTDEVICE { usUsagePage: 1, usUsage: 2, dwFlags: 0, hwndTarget: h };
+            let rid = RAWINPUTDEVICE {
+                usUsagePage: 1,
+                usUsage: 2,
+                dwFlags: 0,
+                hwndTarget: h,
+            };
             RegisterRawInputDevices(&rid, 1, std::mem::size_of::<RAWINPUTDEVICE>() as u32);
             if nxconfig::flag("fullscreen") {
                 set_fullscreen(true);
@@ -472,7 +612,16 @@ pub fn open(title: &str) {
             UpdateWindow(h);
             let mut cr: RECT = std::mem::zeroed();
             GetClientRect(h, &mut cr);
-            crate::flog!("window: {}x{} client ({})", cr.right, cr.bottom, if fullscreen() { "fullscreen" } else { "windowed" });
+            crate::flog!(
+                "window: {}x{} client ({})",
+                cr.right,
+                cr.bottom,
+                if fullscreen() {
+                    "fullscreen"
+                } else {
+                    "windowed"
+                }
+            );
             nxgfx::set_window(h as isize, hi as isize);
             crate::lsfg::launch_app();
             mouse_capture();
@@ -496,8 +645,17 @@ mod tests {
         assert_eq!(super::awake_state(true), 0x8000_0003);
         assert_eq!(super::awake_state(false), 0x8000_0000);
         // the request is accepted by Windows (the previous state comes back), and released again
-        let prev = unsafe { windows_sys::Win32::System::Power::SetThreadExecutionState(super::awake_state(true)) };
+        let prev = unsafe {
+            windows_sys::Win32::System::Power::SetThreadExecutionState(super::awake_state(true))
+        };
         assert_ne!(prev, 0);
-        assert_ne!(unsafe { windows_sys::Win32::System::Power::SetThreadExecutionState(super::awake_state(false)) }, 0);
+        assert_ne!(
+            unsafe {
+                windows_sys::Win32::System::Power::SetThreadExecutionState(super::awake_state(
+                    false,
+                ))
+            },
+            0
+        );
     }
 }

@@ -30,7 +30,10 @@ pub fn grab() -> Option<Frame> {
     let h = crate::window::hwnd();
     // Never copy from the screen: anything over the window (another app, a notification) would be captured. Only the
     // window's own content, through PrintWindow, whatever is in front of it. NXRS_SCREEN_GRAB=1 restores the screen copy.
-    if !h.is_null() && std::env::var("NXRS_SCREEN_GRAB").as_deref() == Ok("1") && unsafe { GetForegroundWindow() == h && IsIconic(h) == 0 } {
+    if !h.is_null()
+        && std::env::var("NXRS_SCREEN_GRAB").as_deref() == Ok("1")
+        && unsafe { GetForegroundWindow() == h && IsIconic(h) == 0 }
+    {
         if let Some(f) = grab_screen(h) {
             return Some(f);
         }
@@ -65,11 +68,16 @@ fn grab_screen(h: HWND) -> Option<Frame> {
             let old = SelectObject(dc, bm as _);
             if BitBlt(dc, 0, 0, w, ht, sdc, tl.x, tl.y, SRCCOPY) != 0 {
                 GdiFlush();
-                let mut v = std::slice::from_raw_parts(bits as *const u8, (w * ht * 4) as usize).to_vec();
+                let mut v =
+                    std::slice::from_raw_parts(bits as *const u8, (w * ht * 4) as usize).to_vec();
                 for px in v.chunks_exact_mut(4) {
                     px[3] = 255;
                 }
-                out = Some(Frame { w: w as u32, h: ht as u32, bgra: v });
+                out = Some(Frame {
+                    w: w as u32,
+                    h: ht as u32,
+                    bgra: v,
+                });
             }
             SelectObject(dc, old);
             DeleteObject(bm as _);
@@ -116,7 +124,11 @@ pub fn grab_print() -> Option<Frame> {
                 for px in v.chunks_exact_mut(4) {
                     px[3] = 255;
                 }
-                out = Some(Frame { w: w as u32, h: ht as u32, bgra: v });
+                out = Some(Frame {
+                    w: w as u32,
+                    h: ht as u32,
+                    bgra: v,
+                });
             }
             SelectObject(dc, old);
             DeleteObject(bm as _);
@@ -147,7 +159,15 @@ pub fn stamp() -> String {
         let t = libc::time(std::ptr::null_mut());
         let mut tm: libc::tm = std::mem::zeroed();
         libc::localtime_r(&t, &mut tm);
-        format!("{:04}{:02}{:02}_{:02}{:02}{:02}", tm.tm_year + 1900, tm.tm_mon + 1, tm.tm_mday, tm.tm_hour, tm.tm_min, tm.tm_sec)
+        format!(
+            "{:04}{:02}{:02}_{:02}{:02}{:02}",
+            tm.tm_year + 1900,
+            tm.tm_mon + 1,
+            tm.tm_mday,
+            tm.tm_hour,
+            tm.tm_min,
+            tm.tm_sec
+        )
     }
 }
 
@@ -156,7 +176,10 @@ pub fn stamp() -> String {
     unsafe {
         let mut t: windows_sys::Win32::Foundation::SYSTEMTIME = std::mem::zeroed();
         windows_sys::Win32::System::SystemInformation::GetLocalTime(&mut t);
-        format!("{:04}{:02}{:02}_{:02}{:02}{:02}", t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond)
+        format!(
+            "{:04}{:02}{:02}_{:02}{:02}{:02}",
+            t.wYear, t.wMonth, t.wDay, t.wHour, t.wMinute, t.wSecond
+        )
     }
 }
 
@@ -175,7 +198,11 @@ pub fn screenshot_to(path: &std::path::Path) -> bool {
     nxgfx::vk::shot::request(&path.display().to_string());
     while t.elapsed() < std::time::Duration::from_secs(2) {
         if nxgfx::vk::shot::count() > before && path.is_file() {
-            crate::flog!("screenshot: {} ({:.0} ms)", path.display(), t.elapsed().as_secs_f64() * 1000.0);
+            crate::flog!(
+                "screenshot: {} ({:.0} ms)",
+                path.display(),
+                t.elapsed().as_secs_f64() * 1000.0
+            );
             return true;
         }
         std::thread::sleep(std::time::Duration::from_millis(5));
@@ -191,7 +218,13 @@ pub fn screenshot_to(path: &std::path::Path) -> bool {
     match grab() {
         Some(f) => match write_png(path, &f) {
             Ok(()) => {
-                crate::flog!("screenshot: {} ({}x{}, {:.0} ms)", path.display(), f.w, f.h, t.elapsed().as_secs_f64() * 1000.0);
+                crate::flog!(
+                    "screenshot: {} ({}x{}, {:.0} ms)",
+                    path.display(),
+                    f.w,
+                    f.h,
+                    t.elapsed().as_secs_f64() * 1000.0
+                );
                 true
             }
             Err(e) => {
@@ -210,14 +243,19 @@ pub fn screenshot_to(path: &std::path::Path) -> bool {
 /// window grab stays for the control pipe's `shot`.
 pub fn screenshot() {
     let p = captures_dir().join(format!("screenshot_{}.png", stamp()));
-    crate::flog!("F3: the game's picture at the next present -> {}", p.display());
+    crate::flog!(
+        "F3: the game's picture at the next present -> {}",
+        p.display()
+    );
     nxgfx::vk::shot::request(&p.display().to_string());
 }
 
 /// F8: the game's picture at its own resolution, from graphics at the next present.
 pub fn full_res() {
     let p = captures_dir().join(format!("fullres_{}.png", stamp()));
-    crate::flog!("F8: full-resolution capture of the next present -> {}", p.display());
+    crate::flog!(
+        "F8: full-resolution capture of the next present -> {}",
+        p.display()
+    );
     nxgfx::vk::shot::request(&p.display().to_string());
 }
-

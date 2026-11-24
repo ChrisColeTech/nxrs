@@ -15,14 +15,26 @@ struct Cmd {
 static CMDS: Mutex<BTreeMap<String, Cmd>> = Mutex::new(BTreeMap::new());
 
 /// Registers `name` (replacing an earlier one). `help` is one line: arguments and what it does.
-pub fn register(name: &str, help: &'static str, f: impl Fn(&[&str]) -> String + Send + Sync + 'static) {
-    CMDS.lock().unwrap().insert(name.to_string(), Cmd { help, f: std::sync::Arc::new(Box::new(f)) });
+pub fn register(
+    name: &str,
+    help: &'static str,
+    f: impl Fn(&[&str]) -> String + Send + Sync + 'static,
+) {
+    CMDS.lock().unwrap().insert(
+        name.to_string(),
+        Cmd {
+            help,
+            f: std::sync::Arc::new(Box::new(f)),
+        },
+    );
 }
 
 /// Runs one command line ("name arg arg..."); unknown names and an empty line answer with the list.
 pub fn run(line: &str) -> String {
     let args: Vec<&str> = line.split_whitespace().collect();
-    let Some(&name) = args.first() else { return help() };
+    let Some(&name) = args.first() else {
+        return help();
+    };
     let f = CMDS.lock().unwrap().get(name).map(|c| c.f.clone());
     match f {
         Some(f) => {

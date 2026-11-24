@@ -29,7 +29,10 @@ struct Store {
     run: BTreeMap<String, String>,
 }
 
-static STORE: RwLock<Store> = RwLock::new(Store { file: BTreeMap::new(), run: BTreeMap::new() });
+static STORE: RwLock<Store> = RwLock::new(Store {
+    file: BTreeMap::new(),
+    run: BTreeMap::new(),
+});
 static GEN: AtomicU64 = AtomicU64::new(1);
 
 struct FileState {
@@ -38,7 +41,12 @@ struct FileState {
     mtime: Option<SystemTime>,
     dirty: bool,
 }
-static FILE: Mutex<FileState> = Mutex::new(FileState { path: None, title: String::new(), mtime: None, dirty: false });
+static FILE: Mutex<FileState> = Mutex::new(FileState {
+    path: None,
+    title: String::new(),
+    mtime: None,
+    dirty: false,
+});
 
 type Listener = Box<dyn Fn(&str, &str) + Send + Sync>;
 static LISTENERS: Mutex<Vec<Listener>> = Mutex::new(Vec::new());
@@ -59,7 +67,9 @@ pub fn string(key: &str) -> String {
     if let Some(v) = s.run.get(key).or_else(|| s.file.get(key)) {
         return v.clone();
     }
-    options::find(key).map(|o| o.default.to_string()).unwrap_or_default()
+    options::find(key)
+        .map(|o| o.default.to_string())
+        .unwrap_or_default()
 }
 
 /// Whether the key has a value from the file or the command line (not just the default).
@@ -69,7 +79,11 @@ pub fn is_set(key: &str) -> bool {
 }
 
 pub fn f32(key: &str) -> f32 {
-    string(key).trim().parse().unwrap_or_else(|_| options::find(key).and_then(|o| o.default.parse().ok()).unwrap_or(0.0))
+    string(key).trim().parse().unwrap_or_else(|_| {
+        options::find(key)
+            .and_then(|o| o.default.parse().ok())
+            .unwrap_or(0.0)
+    })
 }
 
 /// The leading integer (C's atoi, as Turbo reads its ints).
@@ -80,7 +94,12 @@ pub fn int(key: &str) -> i64 {
         Some(r) => (true, r),
         None => (false, t),
     };
-    let n: i64 = d.chars().take_while(|c| c.is_ascii_digit()).collect::<String>().parse().unwrap_or(0);
+    let n: i64 = d
+        .chars()
+        .take_while(|c| c.is_ascii_digit())
+        .collect::<String>()
+        .parse()
+        .unwrap_or(0);
     if neg {
         -n
     } else {
@@ -129,7 +148,11 @@ pub fn lsfg() -> (bool, u32, f32) {
     if int("fps_target") == 120 {
         return (true, 2, 120.0);
     }
-    (flag("lsfg"), int("lsfg_multiplier").clamp(2, 4) as u32, f32("lsfg_target"))
+    (
+        flag("lsfg"),
+        int("lsfg_multiplier").clamp(2, 4) as u32,
+        f32("lsfg_target"),
+    )
 }
 
 fn changed(key: &str, value: &str) {
@@ -142,7 +165,9 @@ fn changed(key: &str, value: &str) {
 /// Stores a value from the file or the game (written back to the file). Returns false for a removed key.
 fn store_file(key: &str, value: &str) -> bool {
     let k = options::canonical(key.trim());
-    let Some(v) = options::normalise(k, value) else { return false };
+    let Some(v) = options::normalise(k, value) else {
+        return false;
+    };
     let old = {
         let mut s = STORE.write().unwrap();
         s.file.insert(k.to_string(), v.clone())
@@ -164,9 +189,13 @@ pub fn set(key: &str, value: &str) {
 /// the argument is not of that form.
 pub fn apply_arg(arg: &str) -> bool {
     let a = arg.strip_prefix("--").unwrap_or(arg);
-    let Some((k, v)) = a.split_once('=') else { return false };
+    let Some((k, v)) = a.split_once('=') else {
+        return false;
+    };
     let k = options::canonical(k.trim()).to_string();
-    let Some(v) = options::normalise(&k, v) else { return true };
+    let Some(v) = options::normalise(&k, v) else {
+        return true;
+    };
     STORE.write().unwrap().run.insert(k.clone(), v.clone());
     changed(&k, &v);
     true
@@ -205,7 +234,11 @@ pub fn render(title: &str) -> String {
     for sec in options::SECTIONS {
         o.push_str(&format!("\n[{}]\n", sec.title));
         for opt in sec.opts {
-            let v = s.file.get(opt.key).map(|v| v.as_str()).unwrap_or(opt.default);
+            let v = s
+                .file
+                .get(opt.key)
+                .map(|v| v.as_str())
+                .unwrap_or(opt.default);
             o.push_str(&format!("; {}\n{}={}\n", opt.help, opt.key, v));
         }
     }
@@ -234,7 +267,9 @@ fn mtime(p: &Path) -> Option<SystemTime> {
 }
 
 fn write_file(f: &mut FileState) -> std::io::Result<()> {
-    let Some(p) = f.path.clone() else { return Ok(()) };
+    let Some(p) = f.path.clone() else {
+        return Ok(());
+    };
     let tmp = p.with_extension("ini.tmp");
     std::fs::write(&tmp, render(&f.title).replace('\n', "\r\n"))?;
     // a rename over the file: a reader never sees half of it
@@ -279,7 +314,9 @@ pub fn path() -> Option<PathBuf> {
 /// writes it back normalised). Returns true when it reloaded.
 pub fn poll() -> bool {
     let mut f = FILE.lock().unwrap();
-    let Some(p) = f.path.clone() else { return false };
+    let Some(p) = f.path.clone() else {
+        return false;
+    };
     if f.dirty {
         let _ = write_file(&mut f);
         return false;
@@ -292,8 +329,18 @@ pub fn poll() -> bool {
     let keys: Vec<(String, String)> = parse(&text);
     {
         // a key deleted from the file goes back to its default
-        let present: std::collections::HashSet<String> = keys.iter().map(|(k, _)| options::canonical(k).to_string()).collect();
-        let gone: Vec<String> = STORE.read().unwrap().file.keys().filter(|k| !present.contains(*k)).cloned().collect();
+        let present: std::collections::HashSet<String> = keys
+            .iter()
+            .map(|(k, _)| options::canonical(k).to_string())
+            .collect();
+        let gone: Vec<String> = STORE
+            .read()
+            .unwrap()
+            .file
+            .keys()
+            .filter(|k| !present.contains(*k))
+            .cloned()
+            .collect();
         for k in gone {
             STORE.write().unwrap().file.remove(&k);
             changed(&k, &string(&k));
@@ -323,18 +370,44 @@ mod tests {
         let d = std::env::temp_dir().join(format!("nxconfig-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
         let p = d.join("g.ini");
-        std::fs::write(&p, "[Display]\nmodo_tv=0\nidioma = 5\nvsync=1\nfps_limit=45\nmy_key=hello\n").unwrap();
+        std::fs::write(
+            &p,
+            "[Display]\nmodo_tv=0\nidioma = 5\nvsync=1\nfps_limit=45\nmy_key=hello\n",
+        )
+        .unwrap();
         open(&p, "Game").unwrap();
-        assert_eq!(string("docked"), "1", "settings_version < 2 moves docked to 1 once");
+        assert_eq!(
+            string("docked"),
+            "1",
+            "settings_version < 2 moves docked to 1 once"
+        );
         assert_eq!(int("language"), 5, "the Spanish alias");
         assert_eq!(fps_limit_hz(), 60);
         assert_eq!(string("game_dynamic_resolution"), "auto");
+        assert_eq!(
+            tristate("image_noflag"),
+            Some(true),
+            "missing storage-image option must default on"
+        );
+        assert!(apply_arg("--image_noflag=0"));
+        assert_eq!(tristate("image_noflag"), Some(false));
+        assert!(apply_arg("--image_noflag=1"));
+        assert_eq!(tristate("image_noflag"), Some(true));
         let text = std::fs::read_to_string(&p).unwrap();
-        assert!(text.contains("\r\n; Game language"), "comments above the keys");
-        assert!(text.contains("[Other]\r\nmy_key=hello"), "unknown keys kept");
+        assert!(
+            text.contains("\r\n; Game language"),
+            "comments above the keys"
+        );
+        assert!(
+            text.contains("[Other]\r\nmy_key=hello"),
+            "unknown keys kept"
+        );
         assert!(text.contains("settings_version=4"));
         assert!(!text.contains("vsync=1"), "a removed key is dropped");
-        assert!(!text.contains("modo_tv"), "aliases are written under the current name");
+        assert!(
+            !text.contains("modo_tv"),
+            "aliases are written under the current name"
+        );
         // a game-side change
         set("fps_limit", "0");
         poll();
@@ -343,7 +416,9 @@ mod tests {
         // per-run argument
         assert!(apply_arg("--resolution=2"));
         assert_eq!(f32("resolution"), 2.0);
-        assert!(!std::fs::read_to_string(&p).unwrap().contains("resolution=2"));
+        assert!(!std::fs::read_to_string(&p)
+            .unwrap()
+            .contains("resolution=2"));
         assert!(apply_arg("--fps_target=120"));
         assert_eq!(lsfg(), (true, 2, 120.0));
         assert!(apply_arg("--fps_target=0"));
@@ -355,7 +430,11 @@ mod tests {
         assert!(!lsfg().0);
         std::fs::write(&p, "settings_version=4\nlsfg=1\n").unwrap();
         open(&p, "Game").unwrap();
-        assert_eq!(string("lsfg"), "1", "a player's 1 after the migration stays");
+        assert_eq!(
+            string("lsfg"),
+            "1",
+            "a player's 1 after the migration stays"
+        );
         assert!(lsfg().0);
         let _ = std::fs::remove_dir_all(&d);
     }

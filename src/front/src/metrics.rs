@@ -42,9 +42,11 @@ pub fn private_mb() -> f64 {
 #[cfg(windows)]
 pub fn cpu_seconds() -> f64 {
     unsafe {
-        let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) = std::mem::zeroed();
+        let (mut c, mut e, mut k, mut u): (FILETIME, FILETIME, FILETIME, FILETIME) =
+            std::mem::zeroed();
         GetProcessTimes(GetCurrentProcess(), &mut c, &mut e, &mut k, &mut u);
-        let ft = |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
+        let ft =
+            |f: FILETIME| ((f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64) as f64 / 1e7;
         ft(k) + ft(u)
     }
 }
@@ -63,7 +65,10 @@ pub fn start() {
     if !nxconfig::metrics::enabled() {
         return;
     }
-    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let t = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     // NXRS_METRICS=<folder>: the files go there (the harness's run folder), else beside the game
     let dir = match std::env::var("NXRS_METRICS") {
         Ok(v) if v.len() > 1 => std::path::PathBuf::from(v),
@@ -75,8 +80,20 @@ pub fn start() {
     match std::fs::File::create(&p) {
         Ok(f) => {
             let frames = std::fs::File::create(dir.join(format!("frames-{t}.csv"))).ok();
-            crate::flog!("metrics: {} each second, frames-{t}.csv each frame", p.display());
-            *M_.lock().unwrap() = Some(M { f, frames, names: vec![], last: vec![], t0: std::time::Instant::now(), last_t: 0.0, last_cpu: cpu_seconds(), last_frames: 0 });
+            crate::flog!(
+                "metrics: {} each second, frames-{t}.csv each frame",
+                p.display()
+            );
+            *M_.lock().unwrap() = Some(M {
+                f,
+                frames,
+                names: vec![],
+                last: vec![],
+                t0: std::time::Instant::now(),
+                last_t: 0.0,
+                last_cpu: cpu_seconds(),
+                last_frames: 0,
+            });
         }
         Err(e) => crate::flog!("[RED] metrics: cannot write {}: {e}", p.display()),
     }
@@ -93,7 +110,11 @@ pub fn tick() {
     let snap = nxconfig::metrics::snapshot();
     let names: Vec<&'static str> = snap.iter().map(|(k, _)| *k).collect();
     if names != m.names {
-        let _ = writeln!(m.f, "#seconds,frames,fps,cpu_percent,private_mb,xmon{}", names.iter().map(|n| format!(",{n}")).collect::<String>());
+        let _ = writeln!(
+            m.f,
+            "#seconds,frames,fps,cpu_percent,private_mb,xmon{}",
+            names.iter().map(|n| format!(",{n}")).collect::<String>()
+        );
         m.last.resize(names.len(), 0);
         m.names = names;
     }

@@ -35,7 +35,11 @@ static LATEST: Mutex<(Option<crate::capture::Frame>, u64)> = Mutex::new((None, 0
 /// Graphics' frame sink (its completion thread): the presented picture, BGRA top-down.
 fn game_frame(bgra: &[u8], w: u32, h: u32) {
     let mut l = LATEST.lock().unwrap();
-    l.0 = Some(crate::capture::Frame { w, h, bgra: bgra.to_vec() });
+    l.0 = Some(crate::capture::Frame {
+        w,
+        h,
+        bgra: bgra.to_vec(),
+    });
     l.1 += 1;
 }
 
@@ -77,7 +81,13 @@ pub fn stalled(now: u64, entered: u64, progress: u64) -> bool {
 pub fn tick() {
     // the stall watchdog: a writer stuck in the encoder (Media Foundation) ends the recording, the game's clock back
     // to real time, instead of the game staying slowed down behind it
-    if recording() && stalled(now_ms(), STARTED_MS.load(Ordering::Acquire), PROGRESS_MS.load(Ordering::Acquire)) {
+    if recording()
+        && stalled(
+            now_ms(),
+            STARTED_MS.load(Ordering::Acquire),
+            PROGRESS_MS.load(Ordering::Acquire),
+        )
+    {
         crate::flog!("[RED] F7: the encoder made no progress for 5 seconds; the recording stops (its file may be incomplete)");
         ON.store(false, Ordering::Release);
         nxos::media::sink::set_pre_tap(None);
@@ -125,7 +135,12 @@ struct Writer {
 
 #[cfg(windows)]
 impl Writer {
-    unsafe fn new(path: &std::path::Path, width: u32, height: u32, fps: u32) -> windows::core::Result<Writer> {
+    unsafe fn new(
+        path: &std::path::Path,
+        width: u32,
+        height: u32,
+        fps: u32,
+    ) -> windows::core::Result<Writer> {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         MFStartup(MF_VERSION, MFSTARTUP_FULL)?;
         let mut attrs: Option<IMFAttributes> = None;
@@ -134,14 +149,21 @@ impl Writer {
         attrs.SetUINT32(&MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, 1)?;
         // interleaving is ours (write_audio): the writer must never block a stream waiting for the other
         attrs.SetUINT32(&MF_SINK_WRITER_DISABLE_THROTTLING, 1)?;
-        let w = MFCreateSinkWriterFromURL(PCWSTR(HSTRING::from(path.as_os_str()).as_ptr()), None, &attrs)?;
+        let w = MFCreateSinkWriterFromURL(
+            PCWSTR(HSTRING::from(path.as_os_str()).as_ptr()),
+            None,
+            &attrs,
+        )?;
         let size = (width as u64) << 32 | height as u64;
         let rate = (fps as u64) << 32 | 1;
         let out = MFCreateMediaType()?;
         out.SetGUID(&MF_MT_MAJOR_TYPE, &MFMediaType_Video)?;
         out.SetGUID(&MF_MT_SUBTYPE, &MFVideoFormat_H264)?;
         // about 0.15 bits a pixel at 60 FPS: 1080p60 gets 19 Mbit/s
-        out.SetUINT32(&MF_MT_AVG_BITRATE, ((width as u64 * height as u64 * fps as u64) / 6).clamp(4_000_000, 60_000_000) as u32)?;
+        out.SetUINT32(
+            &MF_MT_AVG_BITRATE,
+            ((width as u64 * height as u64 * fps as u64) / 6).clamp(4_000_000, 60_000_000) as u32,
+        )?;
         out.SetUINT32(&MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive.0 as u32)?;
         out.SetUINT64(&MF_MT_FRAME_SIZE, size)?;
         out.SetUINT64(&MF_MT_FRAME_RATE, rate)?;
@@ -181,7 +203,16 @@ impl Writer {
             crate::flog!("F7: no sound in this recording (the AAC encoder refused: {e})");
         }
         w.BeginWriting()?;
-        Ok(Writer { w, video, audio: audio.ok(), width, height, fps, frame: 0, samples: 0 })
+        Ok(Writer {
+            w,
+            video,
+            audio: audio.ok(),
+            width,
+            height,
+            fps,
+            frame: 0,
+            samples: 0,
+        })
     }
 
     /// One frame (BGRA top-down of any size: cropped or padded to the video's).
@@ -225,7 +256,9 @@ impl Writer {
             let (pcm, rate, ch, speed) = match next {
                 Some(x) => x,
                 // the game is silent (or its sound late by half a second): silence keeps the streams together
-                None if (self.samples as f64 / AUDIO_RATE as f64) < video_end - 0.5 => (vec![0f32; 2 * 960], AUDIO_RATE, 2, 1.0),
+                None if (self.samples as f64 / AUDIO_RATE as f64) < video_end - 0.5 => {
+                    (vec![0f32; 2 * 960], AUDIO_RATE, 2, 1.0)
+                }
                 None => return Ok(()),
             };
             if rate != AUDIO_RATE || ch == 0 {
@@ -233,13 +266,21 @@ impl Writer {
             }
             let src = pcm.len() / ch as usize;
             // game time: the block shortened by the clock's rate (linear resampling)
-            let frames = if speed < 0.999 { ((src as f64 * speed).round() as usize).max(1) } else { src };
+            let frames = if speed < 0.999 {
+                ((src as f64 * speed).round() as usize).max(1)
+            } else {
+                src
+            };
             if src == 0 {
                 continue;
             }
             let mut b = Vec::with_capacity(frames * 4);
             for f in 0..frames {
-                let at = if frames > 1 { f as f64 * (src - 1) as f64 / (frames - 1) as f64 } else { 0.0 };
+                let at = if frames > 1 {
+                    f as f64 * (src - 1) as f64 / (frames - 1) as f64
+                } else {
+                    0.0
+                };
                 let (i, fr) = (at as usize, (at - at.floor()) as f32);
                 let j = (i + 1).min(src - 1);
                 for c in 0..2usize {
@@ -423,6 +464,9 @@ mod tests {
         assert!(!super::stalled(12_000, 10_000, 0), "counted from the start");
         assert!(!super::stalled(12_000, 0, 8_000), "a write 4 s ago");
         assert!(super::stalled(13_000, 0, 8_000));
-        assert!(!super::stalled(100, 5_000, 0), "a clock before the start is no stall");
+        assert!(
+            !super::stalled(100, 5_000, 0),
+            "a clock before the start is no stall"
+        );
     }
 }

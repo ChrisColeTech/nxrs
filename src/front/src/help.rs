@@ -31,8 +31,18 @@ const NOPT: usize = 4;
 #[cfg(windows)]
 static SEL: AtomicUsize = AtomicUsize::new(0);
 
-const NAMES: [&str; NOPT] = ["Right stick", "Mouse direction", "Mouse sensitivity", "Smooth audio slowdown"];
-const INVERSION: [&str; 4] = ["Normal", "Left / right inverted", "Up / down inverted", "Both inverted"];
+const NAMES: [&str; NOPT] = [
+    "Right stick",
+    "Mouse direction",
+    "Mouse sensitivity",
+    "Smooth audio slowdown",
+];
+const INVERSION: [&str; 4] = [
+    "Normal",
+    "Left / right inverted",
+    "Up / down inverted",
+    "Both inverted",
+];
 const KEYS: [(&str, &str); 7] = [
     ("D-Pad", "Arrows"),
     ("Left stick", "W A S D"),
@@ -56,27 +66,62 @@ const FKEYS: [(&str, &str); 9] = [
 
 fn value(i: usize) -> String {
     match i {
-        0 => if nxconfig::flag("mouse_right_stick") { "Mouse" } else { "I J K L keys" }.into(),
+        0 => if nxconfig::flag("mouse_right_stick") {
+            "Mouse"
+        } else {
+            "I J K L keys"
+        }
+        .into(),
         1 => INVERSION[(nxconfig::int("mouse_invert") & 3) as usize].into(),
         2 => {
             let p = (nxconfig::f32("mouse_sensitivity") * 100.0).round() as i32;
-            format!("{}{p}%{}", if p > 10 { "<  " } else { "" }, if p < 500 { "  >" } else { "" })
+            format!(
+                "{}{p}%{}",
+                if p > 10 { "<  " } else { "" },
+                if p < 500 { "  >" } else { "" }
+            )
         }
-        _ => if nxconfig::flag("audio_slowdown") { "On" } else { "Off" }.into(),
+        _ => if nxconfig::flag("audio_slowdown") {
+            "On"
+        } else {
+            "Off"
+        }
+        .into(),
     }
 }
 
 #[cfg_attr(not(windows), allow(dead_code))]
 fn change(i: usize, dir: i32) {
     match i {
-        0 => nxconfig::set("mouse_right_stick", if nxconfig::flag("mouse_right_stick") { "0" } else { "1" }),
-        1 => nxconfig::set("mouse_invert", &((nxconfig::int("mouse_invert") + if dir < 0 { 3 } else { 1 }) & 3).to_string()),
+        0 => nxconfig::set(
+            "mouse_right_stick",
+            if nxconfig::flag("mouse_right_stick") {
+                "0"
+            } else {
+                "1"
+            },
+        ),
+        1 => nxconfig::set(
+            "mouse_invert",
+            &((nxconfig::int("mouse_invert") + if dir < 0 { 3 } else { 1 }) & 3).to_string(),
+        ),
         2 => {
             let p = (nxconfig::f32("mouse_sensitivity") * 100.0).round() as i32;
-            let n = if dir == 0 { 100 } else { (p + dir * 10).clamp(10, 500) };
+            let n = if dir == 0 {
+                100
+            } else {
+                (p + dir * 10).clamp(10, 500)
+            };
             nxconfig::set("mouse_sensitivity", &format!("{:.2}", n as f32 / 100.0));
         }
-        _ => nxconfig::set("audio_slowdown", if nxconfig::flag("audio_slowdown") { "0" } else { "1" }),
+        _ => nxconfig::set(
+            "audio_slowdown",
+            if nxconfig::flag("audio_slowdown") {
+                "0"
+            } else {
+                "1"
+            },
+        ),
     }
     crate::window::mouse_capture();
 }
@@ -84,22 +129,53 @@ fn change(i: usize, dir: i32) {
 #[cfg(windows)]
 unsafe fn font(px: i32, weight: i32) -> HFONT {
     let face = "Segoe UI".encode_wide_z();
-    CreateFontW(-px, 0, 0, 0, weight, 0, 0, 0, DEFAULT_CHARSET as u32, OUT_DEFAULT_PRECIS as u32, CLIP_DEFAULT_PRECIS as u32, CLEARTYPE_QUALITY as u32, DEFAULT_PITCH as u32, face.as_ptr())
+    CreateFontW(
+        -px,
+        0,
+        0,
+        0,
+        weight,
+        0,
+        0,
+        0,
+        DEFAULT_CHARSET as u32,
+        OUT_DEFAULT_PRECIS as u32,
+        CLIP_DEFAULT_PRECIS as u32,
+        CLEARTYPE_QUALITY as u32,
+        DEFAULT_PITCH as u32,
+        face.as_ptr(),
+    )
 }
 #[cfg(windows)]
 unsafe fn rect(dc: HDC, x: i32, y: i32, w: i32, h: i32, c: u32) {
-    let r = RECT { left: x, top: y, right: x + w, bottom: y + h };
+    let r = RECT {
+        left: x,
+        top: y,
+        right: x + w,
+        bottom: y + h,
+    };
     let b = CreateSolidBrush(c);
     FillRect(dc, &r, b);
     DeleteObject(b as _);
 }
 #[cfg(windows)]
 unsafe fn text(dc: HDC, f: HFONT, t: &str, x: i32, y: i32, w: i32, h: i32, fmt: u32, c: u32) {
-    let mut r = RECT { left: x, top: y, right: x + w, bottom: y + h };
+    let mut r = RECT {
+        left: x,
+        top: y,
+        right: x + w,
+        bottom: y + h,
+    };
     SelectObject(dc, f as _);
     SetTextColor(dc, c);
     let mut s: Vec<u16> = t.encode_utf16().collect();
-    DrawTextW(dc, s.as_mut_ptr(), s.len() as i32, &mut r, fmt | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX);
+    DrawTextW(
+        dc,
+        s.as_mut_ptr(),
+        s.len() as i32,
+        &mut r,
+        fmt | DT_SINGLELINE | DT_VCENTER | DT_NOPREFIX,
+    );
 }
 #[cfg(windows)]
 const fn rgb(r: u32, g: u32, b: u32) -> u32 {
@@ -115,7 +191,13 @@ unsafe fn paint(h: HWND) {
     let obm = SelectObject(dc, bm as _);
     SetBkMode(dc, TRANSPARENT as i32);
     let (fh, fb, fs) = (font(30, 400), font(21, 400), font(17, 400));
-    let (bg, fg, dim, accent, sep) = (rgb(235, 235, 235), rgb(45, 45, 45), rgb(130, 130, 130), rgb(8, 175, 200), rgb(205, 205, 205));
+    let (bg, fg, dim, accent, sep) = (
+        rgb(235, 235, 235),
+        rgb(45, 45, 45),
+        rgb(130, 130, 130),
+        rgb(8, 175, 200),
+        rgb(205, 205, 205),
+    );
     rect(dc, 0, 0, W, H, bg);
     text(dc, fh, "Controls", 40, 18, 500, 48, DT_LEFT, fg);
     rect(dc, 20, 66, W - 40, 1, fg);
@@ -147,7 +229,17 @@ unsafe fn paint(h: HWND) {
         text(dc, fs, b, 460, y, 260, 28, DT_LEFT, fg);
     }
     rect(dc, 30, H - 60, W - 60, 1, fg);
-    text(dc, fs, "Arrows / Enter or a click: change    Esc or F1: back to the game", 40, H - 46, W - 80, 32, DT_LEFT, dim);
+    text(
+        dc,
+        fs,
+        "Arrows / Enter or a click: change    Esc or F1: back to the game",
+        40,
+        H - 46,
+        W - 80,
+        32,
+        DT_LEFT,
+        dim,
+    );
     BitBlt(wdc, 0, 0, W, H, dc, 0, 0, SRCCOPY);
     for f in [fh, fb, fs] {
         DeleteObject(f as _);
@@ -179,7 +271,12 @@ unsafe extern "system" fn proc_(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESUL
                 SEL.store((sel + 1).min(NOPT - 1), Ordering::Relaxed);
             } else if k == VK_LEFT || k == b'A' as u16 {
                 change(sel, -1);
-            } else if k == VK_RIGHT || k == b'D' as u16 || k == VK_RETURN || k == VK_SPACE || k == b'X' as u16 {
+            } else if k == VK_RIGHT
+                || k == b'D' as u16
+                || k == VK_RETURN
+                || k == VK_SPACE
+                || k == b'X' as u16
+            {
                 change(sel, 1);
             } else if k == b'R' as u16 && sel == 2 {
                 change(2, 0);
@@ -197,7 +294,14 @@ unsafe extern "system" fn proc_(h: HWND, m: u32, w: WPARAM, l: LPARAM) -> LRESUL
                     InvalidateRect(h, std::ptr::null(), 0);
                 }
                 if m != WM_MOUSEMOVE {
-                    change(i, if m == WM_RBUTTONDOWN || (i == 2 && x < W / 2) { -1 } else { 1 });
+                    change(
+                        i,
+                        if m == WM_RBUTTONDOWN || (i == 2 && x < W / 2) {
+                            -1
+                        } else {
+                            1
+                        },
+                    );
                     InvalidateRect(h, std::ptr::null(), 0);
                 }
             } else if m == WM_LBUTTONDOWN && y > H - 60 {
@@ -236,12 +340,33 @@ pub fn show(parent: HWND) {
         RegisterClassW(&wc);
         let mut pr: RECT = std::mem::zeroed();
         GetWindowRect(parent, &mut pr);
-        let mut r = RECT { left: 0, top: 0, right: W, bottom: H };
+        let mut r = RECT {
+            left: 0,
+            top: 0,
+            right: W,
+            bottom: H,
+        };
         AdjustWindowRect(&mut r, WS_CAPTION | WS_SYSMENU, 0);
         let (ww, wh) = (r.right - r.left, r.bottom - r.top);
-        let (x, y) = (((pr.left + pr.right - ww) / 2).max(0), ((pr.top + pr.bottom - wh) / 2).max(0));
+        let (x, y) = (
+            ((pr.left + pr.right - ww) / 2).max(0),
+            ((pr.top + pr.bottom - wh) / 2).max(0),
+        );
         let title = "nxrs - Controls".encode_wide_z();
-        let h = CreateWindowExW(0, class.as_ptr(), title.as_ptr(), WS_CAPTION | WS_SYSMENU, x, y, ww, wh, parent, std::ptr::null_mut(), hi, std::ptr::null());
+        let h = CreateWindowExW(
+            0,
+            class.as_ptr(),
+            title.as_ptr(),
+            WS_CAPTION | WS_SYSMENU,
+            x,
+            y,
+            ww,
+            wh,
+            parent,
+            std::ptr::null_mut(),
+            hi,
+            std::ptr::null(),
+        );
         crate::flog!("F1: the controls page");
         EnableWindow(parent, 0);
         ShowWindow(h, SW_SHOW);
@@ -288,7 +413,18 @@ pub fn show() {
             table.push_str(&format!("    {a:<14} {b}\n"));
         }
         table.push_str("\nNow: ");
-        table.push_str(&(0..NOPT).map(|i| format!("{} {}", NAMES[i], value(i).trim_matches(|c| c == '<' || c == '>' || c == ' '))).collect::<Vec<_>>().join(", "));
+        table.push_str(
+            &(0..NOPT)
+                .map(|i| {
+                    format!(
+                        "{} {}",
+                        NAMES[i],
+                        value(i).trim_matches(|c| c == '<' || c == '>' || c == ' ')
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(", "),
+        );
         match nxos::desk::tool() {
             Some("zenity") => {
                 let sens: Vec<String> = (1..=50).map(|i| format!("{}%", i * 10)).collect();

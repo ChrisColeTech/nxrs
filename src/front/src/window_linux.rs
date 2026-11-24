@@ -22,6 +22,7 @@ static FULLSCREEN: AtomicBool = AtomicBool::new(false);
 static FOCUSED: AtomicBool = AtomicBool::new(false);
 pub static HELP_OPEN: AtomicBool = AtomicBool::new(false);
 static TITLE: Mutex<String> = Mutex::new(String::new());
+static FPS: Mutex<String> = Mutex::new(String::new());
 static STATE: Mutex<[String; 3]> = Mutex::new([String::new(), String::new(), String::new()]);
 /// The last cursor position in the client area (pixels) and the client size.
 static CURSOR: Mutex<(f64, f64)> = Mutex::new((0.0, 0.0));
@@ -40,8 +41,20 @@ pub fn set_state(slot: usize, text: &str) {
     }
 }
 
+pub fn set_fps(fps: f64) {
+    *FPS.lock().unwrap() = format!("{fps:.1} FPS");
+    if let Some(w) = window() {
+        w.set_title(&title_text());
+    }
+}
+
 fn title_text() -> String {
     let mut t = TITLE.lock().unwrap().clone();
+    let fps = FPS.lock().unwrap();
+    if !fps.is_empty() {
+        t.push_str("  |  ");
+        t.push_str(&fps);
+    }
     for s in STATE.lock().unwrap().iter().filter(|s| !s.is_empty()) {
         t.push_str("  |  ");
         t.push_str(s);
@@ -54,7 +67,11 @@ pub fn set_fullscreen(on: bool) {
     if FULLSCREEN.load(Ordering::Acquire) == on {
         return;
     }
-    w.set_fullscreen(if on { Some(Fullscreen::Borderless(None)) } else { None });
+    w.set_fullscreen(if on {
+        Some(Fullscreen::Borderless(None))
+    } else {
+        None
+    });
     FULLSCREEN.store(on, Ordering::Release);
     crate::flog!("window: {}", if on { "fullscreen" } else { "windowed" });
     mouse_capture();
@@ -83,7 +100,10 @@ fn minimized() -> bool {
 /// fullscreen too.
 pub fn mouse_capture() {
     if let Some(w) = window() {
-        let active = mouse_mode() && !HELP_OPEN.load(Ordering::Acquire) && FOCUSED.load(Ordering::Acquire) && !minimized();
+        let active = mouse_mode()
+            && !HELP_OPEN.load(Ordering::Acquire)
+            && FOCUSED.load(Ordering::Acquire)
+            && !minimized();
         if active {
             if w.set_cursor_grab(CursorGrabMode::Locked).is_err() {
                 let _ = w.set_cursor_grab(CursorGrabMode::Confined);
@@ -108,7 +128,13 @@ pub fn poll_input() {
     let f = focused();
     nxos::input::set_focus(f);
     // the game's focus state (oe message 15): in front 1, behind another window 2, minimised 3
-    let st = if minimized() { 3 } else if f { 1 } else { 2 };
+    let st = if minimized() {
+        3
+    } else if f {
+        1
+    } else {
+        2
+    };
     nxos::services::oe::set_focus(st);
     // nothing is presented while minimised (graphics asks Windows itself)
     nxgfx::vk::present::set_minimised(st == 3);
@@ -116,8 +142,16 @@ pub fn poll_input() {
     static BG: OnceLock<bool> = OnceLock::new();
     let f = f || *BG.get_or_init(|| nxos::input::env_flag("NXRS_CONTROLLER_BACKGROUND"));
     nxos::input::set_suspended(HELP_OPEN.load(Ordering::Acquire));
-    let held = if f { keys::HELD.load(Ordering::Acquire) } else { 0 };
-    let m = if mouse_mode() { Some(MOUSE.lock().unwrap().stick(f)) } else { None };
+    let held = if f {
+        keys::HELD.load(Ordering::Acquire)
+    } else {
+        0
+    };
+    let m = if mouse_mode() {
+        Some(MOUSE.lock().unwrap().stick(f))
+    } else {
+        None
+    };
     let (b, a) = keys::state(held, m);
     nxos::input::set_keyboard(b | crate::script_now(), a);
     home_quit();
@@ -149,8 +183,19 @@ fn home_quit() {
     let (q, t0) = g.get_or_insert_with(|| (HomeQuit::default(), std::time::Instant::now()));
     let before = q.phase;
     let (pa, pb) = nxos::ui::pads_ab();
-    let (confirm, cancel) = if before == HqPhase::Prompt { nxos::ui::keys() } else { (false, false) };
-    let now = q.step(t0.elapsed().as_secs_f64(), nxos::input::home_held(), pa, pb, confirm, cancel);
+    let (confirm, cancel) = if before == HqPhase::Prompt {
+        nxos::ui::keys()
+    } else {
+        (false, false)
+    };
+    let now = q.step(
+        t0.elapsed().as_secs_f64(),
+        nxos::input::home_held(),
+        pa,
+        pb,
+        confirm,
+        cancel,
+    );
     if now == before {
         return;
     }
@@ -176,13 +221,20 @@ fn fps_limit_toggle() {
     let now = nxconfig::fps_limit_hz();
     let v = if now == 0 { "1" } else { "0" };
     nxconfig::set("fps_limit", v);
-    let text = if v == "0" { "FPS limit: unlimited".to_string() } else { format!("FPS limit: {}", nxconfig::fps_limit_hz()) };
+    let text = if v == "0" {
+        "FPS limit: unlimited".to_string()
+    } else {
+        format!("FPS limit: {}", nxconfig::fps_limit_hz())
+    };
     crate::flog!("F4: {text}");
     set_state(0, &text);
 }
 
 pub fn diag_dump() {
-    crate::flog!("F5: diagnostic dump (presents {}, the os gaps so far below)", nxos::nvn::presents());
+    crate::flog!(
+        "F5: diagnostic dump (presents {}, the os gaps so far below)",
+        nxos::nvn::presents()
+    );
     nxos::log::report_gaps("F5");
     let dir = crate::game().exe_dir.join("captures");
     let _ = std::fs::create_dir_all(&dir);
@@ -192,7 +244,9 @@ pub fn diag_dump() {
     }
     s.push_str(&nxconfig::ctl::run("pads"));
     // every guest thread: what it waits for, the host function it is in, its guest frames (Turbo's F5)
-    let threads = nxrt::kernel::try_get().map(|_| nxrt::kernel::dump_threads()).unwrap_or_default();
+    let threads = nxrt::kernel::try_get()
+        .map(|_| nxrt::kernel::dump_threads())
+        .unwrap_or_default();
     crate::flog!("F5: guest threads\n{threads}");
     s.push_str("\n# guest threads\n");
     s.push_str(&threads);
@@ -204,17 +258,65 @@ pub fn diag_dump() {
 pub fn vk_of(k: KeyCode) -> u32 {
     use KeyCode as K;
     const LETTERS: [KeyCode; 26] = [
-        K::KeyA, K::KeyB, K::KeyC, K::KeyD, K::KeyE, K::KeyF, K::KeyG, K::KeyH, K::KeyI, K::KeyJ, K::KeyK, K::KeyL, K::KeyM, K::KeyN, K::KeyO, K::KeyP, K::KeyQ, K::KeyR,
-        K::KeyS, K::KeyT, K::KeyU, K::KeyV, K::KeyW, K::KeyX, K::KeyY, K::KeyZ,
+        K::KeyA,
+        K::KeyB,
+        K::KeyC,
+        K::KeyD,
+        K::KeyE,
+        K::KeyF,
+        K::KeyG,
+        K::KeyH,
+        K::KeyI,
+        K::KeyJ,
+        K::KeyK,
+        K::KeyL,
+        K::KeyM,
+        K::KeyN,
+        K::KeyO,
+        K::KeyP,
+        K::KeyQ,
+        K::KeyR,
+        K::KeyS,
+        K::KeyT,
+        K::KeyU,
+        K::KeyV,
+        K::KeyW,
+        K::KeyX,
+        K::KeyY,
+        K::KeyZ,
     ];
     if let Some(i) = LETTERS.iter().position(|&l| l == k) {
         return b'A' as u32 + i as u32;
     }
-    const DIGITS: [KeyCode; 10] = [K::Digit0, K::Digit1, K::Digit2, K::Digit3, K::Digit4, K::Digit5, K::Digit6, K::Digit7, K::Digit8, K::Digit9];
+    const DIGITS: [KeyCode; 10] = [
+        K::Digit0,
+        K::Digit1,
+        K::Digit2,
+        K::Digit3,
+        K::Digit4,
+        K::Digit5,
+        K::Digit6,
+        K::Digit7,
+        K::Digit8,
+        K::Digit9,
+    ];
     if let Some(i) = DIGITS.iter().position(|&d| d == k) {
         return b'0' as u32 + i as u32;
     }
-    const FKEYS: [KeyCode; 12] = [K::F1, K::F2, K::F3, K::F4, K::F5, K::F6, K::F7, K::F8, K::F9, K::F10, K::F11, K::F12];
+    const FKEYS: [KeyCode; 12] = [
+        K::F1,
+        K::F2,
+        K::F3,
+        K::F4,
+        K::F5,
+        K::F6,
+        K::F7,
+        K::F8,
+        K::F9,
+        K::F10,
+        K::F11,
+        K::F12,
+    ];
     if let Some(i) = FKEYS.iter().position(|&f| f == k) {
         return 0x70 + i as u32;
     }
@@ -257,7 +359,10 @@ fn key(vk: u32, down: bool, repeat: bool, alt: bool) {
         }
         return;
     }
-    let hot = [VK_ESCAPE, VK_F1, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F11].contains(&vk);
+    let hot = [
+        VK_ESCAPE, VK_F1, VK_F3, VK_F4, VK_F5, VK_F6, VK_F7, VK_F8, VK_F11,
+    ]
+    .contains(&vk);
     if hot && down {
         if repeat {
             return;
@@ -318,16 +423,29 @@ impl ApplicationHandler for App {
             return;
         }
         // the client area: the largest 16:9 that fits three quarters of the primary monitor
-        let mon = el.primary_monitor().or_else(|| el.available_monitors().next());
-        let (mw, mh) = mon.as_ref().map(|m| (m.size().width as i32, m.size().height as i32)).unwrap_or((1920, 1080));
-        nxos::services::vi::HOST_SCREEN.store((mw as u64) << 32 | mh as u32 as u64, Ordering::Release);
+        let mon = el
+            .primary_monitor()
+            .or_else(|| el.available_monitors().next());
+        let (mw, mh) = mon
+            .as_ref()
+            .map(|m| (m.size().width as i32, m.size().height as i32))
+            .unwrap_or((1920, 1080));
+        nxos::services::vi::HOST_SCREEN
+            .store((mw as u64) << 32 | mh as u32 as u64, Ordering::Release);
         let (aw, ah) = (mw * 3 / 4, mh * 3 / 4);
-        let (cw, ch) = if aw * 9 > ah * 16 { (ah * 16 / 9, ah) } else { (aw, aw * 9 / 16) };
+        let (cw, ch) = if aw * 9 > ah * 16 {
+            (ah * 16 / 9, ah)
+        } else {
+            (aw, aw * 9 / 16)
+        };
         // NXRS_NO_ACTIVATE=1 (scripted runs): the window shows without taking the focus from whoever works at the PC
         let no_activate = std::env::var("NXRS_NO_ACTIVATE").is_ok_and(|v| v.trim() == "1");
         let attrs = Window::default_attributes()
             .with_title(title_text())
-            .with_inner_size(winit::dpi::PhysicalSize::new(cw.max(640) as u32, ch.max(360) as u32))
+            .with_inner_size(winit::dpi::PhysicalSize::new(
+                cw.max(640) as u32,
+                ch.max(360) as u32,
+            ))
             .with_active(!no_activate);
         let w = match el.create_window(attrs) {
             Ok(w) => Arc::new(w),
@@ -348,11 +466,18 @@ impl ApplicationHandler for App {
             set_fullscreen(true);
         }
         let sz = w.inner_size();
-        CLIENT.store(sz.width.min(0xffff) << 16 | sz.height.min(0xffff), Ordering::Relaxed);
+        CLIENT.store(
+            sz.width.min(0xffff) << 16 | sz.height.min(0xffff),
+            Ordering::Relaxed,
+        );
         use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
         let ws = match (w.display_handle(), w.window_handle()) {
             (Ok(d), Ok(h)) => match nxgfx::set_window_raw(d.as_raw(), h.as_raw()) {
-                Ok(()) => format!("{:?}", d.as_raw()).split('(').next().unwrap_or("").to_string(),
+                Ok(()) => format!("{:?}", d.as_raw())
+                    .split('(')
+                    .next()
+                    .unwrap_or("")
+                    .to_string(),
                 Err(e) => {
                     crate::flog!("[RED] window: {e}");
                     String::new()
@@ -363,7 +488,16 @@ impl ApplicationHandler for App {
                 String::new()
             }
         };
-        crate::flog!("window: {}x{} client ({}, {ws})", sz.width, sz.height, if fullscreen() { "fullscreen" } else { "windowed" });
+        crate::flog!(
+            "window: {}x{} client ({}, {ws})",
+            sz.width,
+            sz.height,
+            if fullscreen() {
+                "fullscreen"
+            } else {
+                "windowed"
+            }
+        );
         crate::lsfg::launch_app();
         mouse_capture();
         if let Some(tx) = self.tx.take() {
@@ -397,14 +531,22 @@ impl ApplicationHandler for App {
             }
             WindowEvent::Moved(_) | WindowEvent::Occluded(_) => mouse_capture(),
             WindowEvent::Resized(sz) => {
-                CLIENT.store(sz.width.min(0xffff) << 16 | sz.height.min(0xffff), Ordering::Relaxed);
+                CLIENT.store(
+                    sz.width.min(0xffff) << 16 | sz.height.min(0xffff),
+                    Ordering::Relaxed,
+                );
                 mouse_capture();
                 nxgfx::vk::present::window_resized();
             }
             WindowEvent::ModifiersChanged(m) => self.mods = m.state(),
             WindowEvent::KeyboardInput { event, .. } => {
                 if let PhysicalKey::Code(k) = event.physical_key {
-                    key(vk_of(k), event.state == ElementState::Pressed, event.repeat, self.mods.alt_key());
+                    key(
+                        vk_of(k),
+                        event.state == ElementState::Pressed,
+                        event.repeat,
+                        self.mods.alt_key(),
+                    );
                 }
             }
             WindowEvent::CursorMoved { position, .. } => {
@@ -413,7 +555,11 @@ impl ApplicationHandler for App {
                     touch(true);
                 }
             }
-            WindowEvent::MouseInput { state, button: MouseButton::Left, .. } if !mouse_mode() => {
+            WindowEvent::MouseInput {
+                state,
+                button: MouseButton::Left,
+                ..
+            } if !mouse_mode() => {
                 let down = state == ElementState::Pressed;
                 LBUTTON.store(down, Ordering::Relaxed);
                 touch(down);
@@ -435,7 +581,7 @@ impl ApplicationHandler for App {
 
 /// Opens the window on its own thread and gives it to graphics; returns once it exists.
 pub fn open(title: &str) {
-    *TITLE.lock().unwrap() = format!("{title} - nxrs  (F1 help)");
+    *TITLE.lock().unwrap() = format!("{title} - nxrs");
     let (tx, rx) = std::sync::mpsc::channel::<()>();
     std::thread::Builder::new()
         .name("window".into())

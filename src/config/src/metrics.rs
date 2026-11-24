@@ -24,7 +24,12 @@ pub fn add(c: &AtomicU64, n: u64) {
 
 /// Every counter's (name, value), in registration order.
 pub fn snapshot() -> Vec<(&'static str, u64)> {
-    NAMES.lock().unwrap().iter().map(|(k, c)| (*k, c.load(Ordering::Relaxed))).collect()
+    NAMES
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|(k, c)| (*k, c.load(Ordering::Relaxed)))
+        .collect()
 }
 
 /// Whether metrics were asked for (`metrics=1` in the ini, or `NXRS_METRICS`).
