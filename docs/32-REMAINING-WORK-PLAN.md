@@ -85,7 +85,9 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       on today's engine), OOT-PIPE (the `d15370a382630d4e` compile). Owner: "stop those three and run them after mkw":
       SMASH-POLISH, VIOLET and OOT-PIPE parked minutes in (each wave doc has a parked report) and ran after
       MKW-PERF5 (the lead then ran them one at a time; that was the lead's choice, not an owner rule). MKW-RECORD (record-time translation, `docs/waves/MKW-RECORD.md`) opened 2026-11-25:
-      phase 1 design running beside OOT-NAN (read-only); phase 2 code after OOT-NAN. Queued: GFX row 3 (MS
+      phase 1 design done and accepted (replay-time worker pool, not record-time: entry state and ~10 of 15 ms
+      depend on replay-time state; walker thread for the 4.4 ms write-watch walk; target replay ~11-13 ms/frame);
+      phase 2 code after OOT-NAN. Queued: GFX row 3 (MS
       declaration variants). Last: the preemption row below, then retranslate Arceus and relink the rest.
 - [x] **OOT-PIPE** (2026-11-25, `docs/waves/OOT-PIPE.md`, **accepted**; lead read the sheet). Independent audit of
       `vk/mem.rs` (`placement_for`: physical pools get a buffer) and `vk/lazy.rs`: no HIGH; no double coverage (an
