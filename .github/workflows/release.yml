@@ -93,7 +93,8 @@ jobs:
           export NXGFX_GLSLANG=$(command -v glslangValidator)
           cargo build --release --locked --jobs 4 -p nxrs-cli -p front -p runtime
       - name: Launcher release build
-        run: cargo build --release --locked --jobs 4 --manifest-path src/launcher/Cargo.toml
+        # its own workspace: its .cargo/config.toml (the root target/) only applies from inside src/launcher
+        run: cargo build --release --locked --jobs 4 --manifest-path src/launcher/Cargo.toml --target-dir target
       - name: dmsh_xlate (nxnative's shader translator)
         run: |
           git init -q ~/nxnative && cd ~/nxnative
