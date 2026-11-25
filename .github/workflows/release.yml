@@ -1,4 +1,4 @@
-# The portable Windows release: dist/nxrs (nxrs.exe + nxrs-engine/) zipped as nxrs-windows-x64.zip and published as a
+# The portable release: dist/nxrs (Windows) and nxrs/ with the Linux launcher and engine, published together as a
 # GitHub Release. Runs when a version tag (v*) is pushed, or by hand with a tag name.
 name: Release
 on:
@@ -64,10 +64,76 @@ jobs:
       - name: Zip
         shell: pwsh
         run: Compress-Archive -Path dist\nxrs -DestinationPath nxrs-windows-x64.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nxrs-windows-x64
+          path: nxrs-windows-x64.zip
+
+  linux:
+    name: nxrs-linux-x64.tar.gz
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: System packages
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends clang lld cmake pkg-config libvulkan-dev libasound2-dev \
+            libopus-dev libvpx-dev libdav1d-dev libavcodec-dev libavutil-dev zlib1g-dev spirv-tools glslang-tools \
+            libgtk-3-dev libxkbcommon-dev libwayland-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev
+      - name: Rust
+        run: |
+          rustup toolchain install $RUST_VERSION --profile minimal
+          rustup default $RUST_VERSION
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: Engine release build
+        run: |
+          export NXGFX_GLSLANG=$(command -v glslangValidator)
+          cargo build --release --locked --jobs 4 -p nxrs-cli -p front -p runtime
+      - name: Launcher release build
+        run: cargo build --release --locked --jobs 4 --manifest-path src/launcher/Cargo.toml
+      - name: dmsh_xlate (nxnative's shader translator)
+        run: |
+          git init -q ~/nxnative && cd ~/nxnative
+          git config core.autocrlf true   # the CRLF files the Windows tool was built from: the same --source-sha
+          git remote add origin https://github.com/seedds/nxnative.git
+          git sparse-checkout set dm/gfx/tools/dmsh_xlate dm/third_party/ryujinx
+          git fetch -q --depth 1 --filter=blob:none origin $NXNATIVE_XLATE
+          git checkout -q FETCH_HEAD
+          cd "$GITHUB_WORKSPACE"
+          bash src/shaders/tools/build_dmsh_xlate.sh ~/nxnative build/tools/dmsh_xlate-linux
+          sha=$(build/tools/dmsh_xlate-linux/dmsh_xlate --source-sha)
+          [ "$sha" = "$XLATE_SHA" ] || { echo "dmsh_xlate --source-sha is $sha, expected $XLATE_SHA"; exit 1; }
+      - name: Package nxrs/ (launcher + nxrs-engine/)
+        run: |
+          python3 -I scripts/package_engine.py --platform linux --target target/release \
+            --xlate build/tools/dmsh_xlate-linux/dmsh_xlate --spirv-val "$(command -v spirv-val)" --out dist
+          mkdir -p stage/nxrs
+          tar -xzf dist/nxrs-engine-linux-x64.tar.gz -C stage/nxrs
+          cp target/release/nxrs stage/nxrs/
+          stage/nxrs/nxrs-engine/nxrs-build contract
+          tar -czf nxrs-linux-x64.tar.gz -C stage nxrs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: nxrs-linux-x64
+          path: nxrs-linux-x64.tar.gz
+
+  publish:
+    name: GitHub Release
+    needs: [windows, linux]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: out
+          merge-multiple: true
       - name: Publish the release
-        shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $tag = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { $env:GITHUB_REF_NAME }
-          gh release create $tag nxrs-windows-x64.zip --target $env:GITHUB_SHA --title "nxrs $tag" --generate-notes
+          tag="${{ inputs.tag }}"
+          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || tag="$GITHUB_REF_NAME"
+          gh release create "$tag" out/nxrs-windows-x64.zip out/nxrs-linux-x64.tar.gz -R "$GITHUB_REPOSITORY" \
+            --target "$GITHUB_SHA" --title "nxrs $tag" --generate-notes
