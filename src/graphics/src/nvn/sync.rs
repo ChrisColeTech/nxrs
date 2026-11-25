@@ -10,12 +10,16 @@ use super::types::*;
 use crate::vk;
 use std::sync::atomic::{AtomicU32, Ordering};
 
-/// A CPU-side event write with release ordering (the GPU's arrive at their submission's completion).
-pub fn event_publish(val: *mut u32, mode: u32, v: u32) {
+/// A CPU-side event write with release ordering (the GPU's arrive at their submission's completion: `cpu` false).
+pub fn event_publish(val: *mut u32, mode: u32, v: u32, cpu: bool) {
     // SAFETY: the event's storage is a u32 in a memory pool the game keeps alive while the event is live.
     let a = unsafe { &*(val as *const AtomicU32) };
-    // before the word changes: no scan that started earlier may then count as covering work released by it
-    vk::mem::note_cpu_signal();
+    // before the word changes: no scan that started earlier may then count as covering work released by it. A GPU
+    // signal landing is not one: what the work it releases reads was written by the CPU before the game queued that
+    // work or the signalling op, both replayed by now (`queue::resume_due`), or by the GPU
+    if cpu {
+        vk::mem::note_cpu_signal();
+    }
     if mode == event_signal::ADD {
         a.fetch_add(v, Ordering::Release);
     } else {
@@ -105,7 +109,7 @@ nvn_fns! {
     }
     fn nvnEventFinalize(e: *mut NVNevent) { (*(e as *mut ev_t)).magic = 0; }
     fn nvnEventGetValue(e: *const NVNevent) -> u32 { (*((*(e as *const ev_t)).val as *const AtomicU32)).load(Ordering::Acquire) }
-    fn nvnEventSignal(e: *mut NVNevent, mode: u32, v: u32) { event_publish((*(e as *const ev_t)).val, mode, v); }
+    fn nvnEventSignal(e: *mut NVNevent, mode: u32, v: u32) { event_publish((*(e as *const ev_t)).val, mode, v, true); }
     fn nvnEventGetMemoryPool(e: *const NVNevent) -> *mut NVNmemoryPool { (*(e as *const ev_t)).pool as *mut NVNmemoryPool }
     fn nvnEventGetMemoryOffset(e: *const NVNevent) -> i64 { (*(e as *const ev_t)).off }
 }

@@ -975,7 +975,7 @@ fn completion_loop(g: &'static Gpu) {
         for p in sub.post.drain(..) {
             match p {
                 Post::Event { addr, mode, value } => {
-                    crate::nvn::sync::event_publish(addr as *mut u32, mode, value);
+                    crate::nvn::sync::event_publish(addr as *mut u32, mode, value, false);
                     signalled = true;
                 }
                 Post::Counter { addr, kind, query } => {
@@ -1384,6 +1384,21 @@ pub fn aq_tail() -> u64 {
     AQ.get().map(|a| a.tail.load(Ordering::Acquire)).unwrap_or(0)
 }
 
+/// The newest op the replay thread has taken (set before the op runs).
+static AQ_TAKEN: AtomicU64 = AtomicU64::new(0);
+/// Parked work that ran on (a sync of its own), and submits that parked at their first record (no submission made).
+pub static RESUMES: AtomicU64 = AtomicU64::new(0);
+pub static PARKED_AT_ONCE: AtomicU64 = AtomicU64::new(0);
+
+/// The replay op a parked queue's rest counts as for its pool sync (`mem::scan_covers`), as it runs on now. What it
+/// may read was written by the CPU before the game queued the parked work, or before the game queued the op whose GPU
+/// signal or receipt released it (both replayed, so at most the newest op taken), or before a CPU event signal (which
+/// `scan_covers` refuses on its own). Every such op is at most `AQ_TAKEN`; 0 (no replay thread): it scans.
+fn resume_due() -> Option<u64> {
+    RESUMES.fetch_add(1, Ordering::Relaxed);
+    Some(AQ_TAKEN.load(Ordering::Acquire))
+}
+
 /// Ops queued and not replayed yet.
 pub fn aq_backlog() -> u64 {
     AQ.get()
@@ -1439,6 +1454,8 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
                 }
             }
         }
+        // before it runs: a parked queue that runs on from now was released by this op or an earlier one
+        AQ_TAKEN.fetch_max(seq, Ordering::AcqRel);
         let t0 = std::time::Instant::now();
         // the NVN queue of a submit or present: its fence is a receipt while that queue stays parked
         let opq = match &op {
@@ -1686,6 +1703,27 @@ fn run_stream_due(
     receipts: Vec<u64>,
     due: Option<u64>,
 ) {
+    // a stream that starts at a wait not passing parks before any work: no submission and no pool sync for it (the
+    // sync its work needs is made when it runs on)
+    if receipts.is_empty() && !exec::wait_passes(g, &stream) {
+        PARKED_AT_ONCE.fetch_add(1, Ordering::Relaxed);
+        // the queue's origin is read from its state when it runs on
+        st.qstates
+            .entry(qserial)
+            .or_insert_with(|| QState::new(origin_ll));
+        st.parked.insert(
+            qserial,
+            Parked {
+                stream,
+                receipts,
+                wait_receipt: None,
+                presents: Vec::new(),
+                later: Vec::new(),
+            },
+        );
+        request_retry(g);
+        return;
+    }
     wait_diag::mark(1, "new submission", [qserial, 0]);
     let mut sub = new_sub(g, st);
     wait_diag::mark(1, "prepare pools/textures", [qserial, sub.serial]);
@@ -1801,7 +1839,7 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
                 let later: Vec<(usize, u64)> =
                     p.later[1..].iter().map(|&(o, x)| (o - off, x)).collect();
                 if !p.stream.is_empty() {
-                    run_stream(g, st, q, ll, p.stream, Vec::new());
+                    run_stream_due(g, st, q, ll, p.stream, Vec::new(), resume_due());
                 }
                 match st.parked.get_mut(&q) {
                     Some(again) => {
@@ -1830,7 +1868,7 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
                 continue;
             }
             if !p.stream.is_empty() || !p.receipts.is_empty() {
-                run_stream(g, st, q, ll, p.stream, p.receipts);
+                run_stream_due(g, st, q, ll, p.stream, p.receipts, resume_due());
             }
             match st.parked.get_mut(&q) {
                 // parked again: its presents stay behind
@@ -1838,7 +1876,7 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
                 None => {
                     for (t, crop) in p.presents {
                         let frame = present_frame(&t, crop, ll, false);
-                        present_locked(g, st, q, ll, &t, crop, frame, None);
+                        present_locked(g, st, q, ll, &t, crop, frame, resume_due());
                     }
                 }
             }

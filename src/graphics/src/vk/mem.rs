@@ -1800,8 +1800,9 @@ fn note_scan(tail: u64, signals: u64, full: bool) {
 /// Whether work the game queued as replay op `due` needs no write-watch scan of its own: a scan (of every pool when
 /// `full` is asked for) started after the op was queued, so it took every CPU write the game made before queuing it;
 /// the uploads it made are in an earlier submission, which the GPU runs first. Mario Kart World replays ~10 streams a
-/// frame, each scanning ~2.8 GB of mirrors (~4 ms): ~44 ms of its ~107 ms race frame (MKW-RACE). Work not from the
-/// queue (`None`: replay on the game's thread, a parked queue's rest after a CPU event, one-offs) always scans.
+/// frame, each scanning ~2.8 GB of mirrors (~4 ms): ~44 ms of its ~107 ms race frame (MKW-RACE). A parked queue's
+/// rest counts as the newest op the replay thread has taken (`queue::resume_due`; a CPU event signal that released it
+/// is refused below). Work not from the queue (`None`: replay on the game's thread, one-offs) always scans.
 /// `NXGFX_SCAN_COVER=0`: every submission scans.
 fn scan_covers(due: Option<u64>, full: bool) -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -2290,8 +2291,10 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
     let by = |i: usize| SYNC_BY[i].swap(0, Ordering::Relaxed) as f64 / f;
     let (bs, bp, bo) = (by(0), by(1), by(2));
     let skipped = SCANS_SKIPPED.swap(0, Ordering::Relaxed) as f64 / f;
+    let resumes = super::queue::RESUMES.swap(0, Ordering::Relaxed) as f64 / f;
+    let at_once = super::queue::PARKED_AT_ONCE.swap(0, Ordering::Relaxed) as f64 / f;
     format!(
-        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms ({kept} CPU-written bytes inside write-backs kept so far); {sn} mirrors without write watch ({} MB); pool sync a frame: lock wait {lk:.2} ms, write-watch scan {sc:.2} ms, per-pool pass {lp:.2} ms; syncs a frame {bs:.1} replays, {bp:.1} presents, {bo:.1} one-offs, {skipped:.1} of them covered by an earlier scan",
+        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms ({kept} CPU-written bytes inside write-backs kept so far); {sn} mirrors without write watch ({} MB); pool sync a frame: lock wait {lk:.2} ms, write-watch scan {sc:.2} ms, per-pool pass {lp:.2} ms; syncs a frame {bs:.1} replays, {bp:.1} presents, {bo:.1} one-offs, {skipped:.1} of them covered by an earlier scan, {resumes:.1} of them parked work run on; {at_once:.1} submits a frame parked at their first wait (no sync)",
         cnt[0],
         bytes[0] >> 20,
         cnt[1],
@@ -2333,6 +2336,28 @@ mod scan_cover_tests {
         assert!(!scan_covers(Some(9), true));
         note_scan(13, cpu_signals(), false);
         assert!(scan_covers(Some(10), false), "a scan after the signal covers it again");
+        // A parked queue's rest (op 14 parked at a wait) runs on as the newest op taken (`queue::resume_due`): op 15
+        // of another queue signals its event on the GPU, and op 15's own sync scanned once it was queued.
+        note_scan(15, cpu_signals(), false);
+        assert!(scan_covers(Some(15), false), "released by op 15's GPU signal: op 15's scan covers the rest");
+        assert!(
+            !scan_covers(Some(16), false),
+            "released by op 16, queued after that scan began (the CPU may have written before queuing it)"
+        );
+        note_cpu_signal();
+        assert!(
+            !scan_covers(Some(15), false),
+            "released by a CPU event signal after the scan began: what the CPU wrote before it is not taken yet"
+        );
+        // A GPU signal landing at its submission's completion (the event word written by the completion thread) is not
+        // a CPU signal: it leaves the coverage alone; nvnEventSignal's does not.
+        note_scan(20, cpu_signals(), false);
+        let mut word = 0u32;
+        crate::nvn::sync::event_publish(&mut word, 0, 3, false);
+        assert_eq!(word, 3);
+        assert!(scan_covers(Some(20), false), "a GPU signal landed: op 20's scan still covers");
+        crate::nvn::sync::event_publish(&mut word, 0, 4, true);
+        assert!(!scan_covers(Some(20), false), "the game's nvnEventSignal: scan again");
     }
 }
 
