@@ -70,11 +70,13 @@ pub fn buttons(ui: &mut Ui, p: &Palette, row: Rect) -> ([Rect; 3], bool) {
         rects[i] = r;
         let resp = ui.interact(r, ui.scope_id().with(("caption", i)), Sense::click());
         resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, *name));
-        let (mut hot, mut down) = (resp.hovered(), resp.is_pointer_button_down_on());
+        let (hot, down) = (resp.hovered(), resp.is_pointer_button_down_on());
         #[cfg(windows)]
-        if i == 1 && native::installed() {
-            (hot, down) = native::max_state();
-        }
+        let (hot, down) = if i == 1 && native::installed() {
+            native::max_state()
+        } else {
+            (hot, down)
+        };
         paint(ui, p, r, i, (hot, down), max);
         if resp.clicked() {
             match i {

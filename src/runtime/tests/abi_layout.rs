@@ -45,8 +45,11 @@ fn c_and_rust_layouts_agree() {
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("probe.c"), PROBE).unwrap();
     let exe = dir.join("probe.exe");
+    // the generated code's x86-64 baseline; an arm64 host compiles the probe for itself
+    let march: &[&str] = if cfg!(target_arch = "x86_64") { &["-march=x86-64-v3"] } else { &[] };
     let out = Command::new(clang())
-        .args(["-O0", "-march=x86-64-v3", "-w"])
+        .args(["-O0", "-w"])
+        .args(march)
         .arg(format!(
             "-I{}",
             root.join("../translator/runtime").display()

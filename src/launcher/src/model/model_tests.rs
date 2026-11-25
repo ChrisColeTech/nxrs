@@ -8,7 +8,7 @@ use super::game::Game;
 use super::game_json;
 use super::names::{build_folder_for, output_name_for, title_from_name};
 use super::output_lines::{UpdateLine, progress, reports_package_dlc, update_line};
-use super::path_text::{clean, native, parent, same_path, suffix};
+use super::path_text::{clean, native, same_path, suffix};
 use super::play::{
     effective_button_layout, effective_docked, normalize_button_layout, normalize_screen_mode,
     valid_button_layout,
@@ -23,7 +23,7 @@ fn path_formatting_does_not_invalidate_build() {
         assert!(same_path("P:\\Games\\Title.nup", "P:/Games/Title.nup"));
         assert_eq!(clean("D:\\x\\..\\y\\"), "D:/y");
         assert_eq!(clean("D:/"), "D:/");
-        assert_eq!(parent("D:/a"), "D:/");
+        assert_eq!(super::path_text::parent("D:/a"), "D:/");
         assert_eq!(native("D:/a b/c"), "D:\\a b\\c");
     }
     assert!(same_path("", "") && !same_path("", "x"));
