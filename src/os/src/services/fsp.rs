@@ -560,9 +560,39 @@ mod tests {
         crate::ipc::process(h, &mut m);
         hipc::parse_response(&m, false).unwrap()
     }
-    fn path(s: &str) -> (Vec<u8>, Vec<Buf>) {
-        let mut v = s.as_bytes().to_vec();
-        v.resize(0x301, 0);
+    /// `n` bytes the test owns at an address a guest could have: an X (pointer) descriptor carries 42 address bits, so
+    /// a Linux heap pointer (~2^47) would reach the service truncated. Windows heaps are already low.
+    fn low_bytes(n: usize) -> &'static mut [u8] {
+        #[cfg(target_os = "linux")]
+        {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            const SIZE: usize = 1 << 20;
+            static BASE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+            static USED: AtomicUsize = AtomicUsize::new(0);
+            let base = *BASE.get_or_init(|| {
+                // a hint, not MAP_FIXED: the kernel places it there when the range is free
+                let p = unsafe {
+                    libc::mmap(0x10_0000_0000 as *mut libc::c_void, SIZE, libc::PROT_READ | libc::PROT_WRITE,
+                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0)
+                };
+                assert_ne!(p, libc::MAP_FAILED);
+                p as usize
+            });
+            let off = USED.fetch_add(n.next_multiple_of(16), Ordering::Relaxed);
+            assert!(off + n <= SIZE, "test scratch exhausted");
+            let s = unsafe { std::slice::from_raw_parts_mut((base + off) as *mut u8, n) };
+            assert!((s.as_ptr() as u64) < 1 << 42, "test buffer must fit an X descriptor's address");
+            s
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Box::leak(vec![0u8; n].into_boxed_slice())
+        }
+    }
+    fn path(s: &str) -> (&'static [u8], Vec<Buf>) {
+        let v = low_bytes(0x301);
+        v.fill(0);
+        v[..s.len()].copy_from_slice(s.as_bytes());
         let b = vec![Buf {
             addr: v.as_ptr() as u64,
             size: 0x301,
