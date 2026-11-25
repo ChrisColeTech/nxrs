@@ -103,7 +103,7 @@ jobs:
           git fetch -q --depth 1 --filter=blob:none origin $NXNATIVE_XLATE
           git checkout -q FETCH_HEAD
           cd "$GITHUB_WORKSPACE"
-          bash src/shaders/tools/build_dmsh_xlate.sh ~/nxnative build/tools/dmsh_xlate-linux
+          DMSH_COMMIT=$NXNATIVE_XLATE bash src/shaders/tools/build_dmsh_xlate.sh ~/nxnative build/tools/dmsh_xlate-linux
           sha=$(build/tools/dmsh_xlate-linux/dmsh_xlate --source-sha)
           [ "$sha" = "$XLATE_SHA" ] || { echo "dmsh_xlate --source-sha is $sha, expected $XLATE_SHA"; exit 1; }
       - name: Package nxrs/ (launcher + nxrs-engine/)

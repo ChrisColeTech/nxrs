@@ -13,7 +13,8 @@ here="$(cd "$(dirname "$0")" && pwd)"
 nxnative="${1:-/mnt/d/Projects/RecompLauncherEngine/build/Q/nxnative-up}"
 out="${2:-$here/../../../build/tools/dmsh_xlate-linux}"
 src="${3:-$here/../../../build/DELEGATION/R1A/dmsh_xlate_src_linux}"
-required_commit=7ebb76eda8ec1c532a4fc52170f2c5e13b18e80f
+# CI and the release pass their pin (NXNATIVE_XLATE, checked out with core.autocrlf true: the shipped --source-sha)
+required_commit="${DMSH_COMMIT:-7ebb76eda8ec1c532a4fc52170f2c5e13b18e80f}"
 tracked_source=(dm/third_party/ryujinx dm/gfx/tools/dmsh_xlate)
 if [ ! -e "$nxnative/.git" ]; then
     echo "Pinned nxnative checkout is absent: $nxnative" >&2
