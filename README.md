@@ -21,9 +21,19 @@ any other PC game.
 - F1 controls page · F3 screenshot · F4 FPS limit · F6 cheats · F7 record video · F11 fullscreen.
 - Game mods and cheats, saves kept per game.
 
-| Per-game settings | Search & filter |
-|---|---|
-| ![Per-game settings](docs/images/readme/game-settings.png) | ![Search and filter](docs/images/readme/filters.png) |
+## Games
+
+Captured from nxrs builds of each game. FPS is the average over a stretch of scripted gameplay (with the slowest 5% of
+seconds in brackets), measured at 1080p docked on a GeForce RTX 5090 and Core Ultra 9 285K.
+
+| | | |
+|---|---|---|
+| ![Super Mario Bros. Wonder](docs/images/readme/games/wonder.jpg)<br>**Super Mario Bros. Wonder**<br>60.1 FPS (59.4) | ![Donkey Kong Bananza](docs/images/readme/games/dkb.jpg)<br>**Donkey Kong Bananza**<br>59.4 FPS (53.4) | ![Mario Kart 8 Deluxe](docs/images/readme/games/mk8d.jpg)<br>**Mario Kart 8 Deluxe**<br>59.8 FPS (58.0) |
+| ![Pokémon Legends: Z-A](docs/images/readme/games/plza.jpg)<br>**Pokémon Legends: Z-A**<br>59.6 FPS (57.9) | ![Super Mario Party Jamboree](docs/images/readme/games/jamboree.jpg)<br>**Super Mario Party Jamboree**<br>56.0 FPS (36.5) | ![Mario Kart World](docs/images/readme/games/mkw.jpg)<br>**Mario Kart World**<br>22.9 FPS (19.0), in progress |
+| ![Pokémon Legends: Arceus](docs/images/readme/games/arceus.jpg)<br>**Pokémon Legends: Arceus**<br>30.0 FPS (29.5), the game's own 30 FPS cap | ![Anime Girls: Sun of a Beach](docs/images/readme/games/anime-girls.jpg)<br>**Anime Girls: Sun of a Beach**<br>60.0 FPS (59.8) | ![Beach Bounce Remastered](docs/images/readme/games/beach-bounce.jpg)<br>**Beach Bounce Remastered**<br>60.0 FPS (59.1) |
+
+Not working yet: The Legend of Zelda: Ocarina of Time, Pokémon Violet, SONIC X SHADOW GENERATIONS (Shadow) and Super
+Smash Bros. Ultimate have open issues.
 
 ## Getting started
 
