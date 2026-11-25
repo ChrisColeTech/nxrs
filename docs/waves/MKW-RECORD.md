@@ -48,6 +48,22 @@ titles' routes.
 - Phase 2 starts when OOT-NAN has landed (it may edit `vk/mem.rs`, so step 1 waits too). Deadline: 8 hours for
   steps 1-3, then a checkpoint report; steps 4-6 after the lead reads it. Perf pairs under the machine lock.
 
+## Phase 2 go (lead, 2026-11-25, after OOT-NAN landed as commit `9903fc7`)
+
+- **Work in your own git worktree** branched from `9903fc7` (branch `mkw-record`), with its **own `target/` and
+  `dist/`**: build there with `scripts/build/build.ps1 -KeepCache -SkipGnu`, relink only Mario Kart World with
+  *the worktree's* `dist\nxrs\nxrs.exe --select-title "Mario Kart World" --build`, and run it with the worktree's
+  `scripts/play.py mkw --env NXGFX_GPU=0` (check that it launches the worktree's build, not the main `dist`). If the
+  build needs untracked local tools from the main tree's `build/`, point at them read-only; never use the main
+  `target/` or `dist/`.
+- **Locks are the main tree's**: `D:\Projects\RecompLauncherEngine\build\locks\` (`dist.lock` around your relinks,
+  `machine.lock` around every perf-measurement run, and wait until no other game is running before measuring).
+- **Beside you**: wave OOT-FOREST2 works in the main tree on Ocarina (GPU 1) and does not touch Mario Kart World or
+  `vk/queue.rs`. Keep your commits on `mkw-record` (you may commit on your branch; the lead merges). Run
+  `cargo test -p graphics --lib --release` in the worktree after each step.
+- Report the checkpoint after steps 1-3 under "## Report" in the worktree's copy of this file and in your final
+  message.
+
 ## Design (agent, phase 1, 2026-11-25)
 
 Read only. No source edited, no build, no game run. The numbers come from the MKW-PERF5 runs
