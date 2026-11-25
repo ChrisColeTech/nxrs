@@ -1,0 +1,679 @@
+diff --git a/docs/waves/POOL-ORDER.md b/docs/waves/POOL-ORDER.md
+index b5b70e8..ec7f131 100644
+--- a/docs/waves/POOL-ORDER.md
++++ b/docs/waves/POOL-ORDER.md
+@@ -44,4 +44,92 @@ read `report.md`, look at every `sheet-*.png`. Tests: `cargo test --jobs 4 -p gr
+ 
+ ## Report (agent, protocol §5)
+ 
+-_(Built / Tests / Verified / Unproven / Slips / Questions — lead with what is verified working now.)_
++**Verified now:** MK8D is correct with the corrected design: 0 "in no memory pool" lines (47 before the first
++attempt), 59.9 FPS mean, 59.0 5% low, 58 min in [95, 175] s, 23/23 steps (`build/play/20261124-195919-mk8d`).
++**MKW is not cleared:** three runs tonight all stopped presenting a few frames after a harness screenshot, and the
++control run with this change switched off did the same (below).
++
++### Built
++The first attempt is replaced (`take_same` and the `after_queued` removal are gone). The change is
++`src/graphics/src/vk/{mem,queue}.rs`.
++- **Live map vs. replay view.** `pool_del` takes the pool out of `by_base` at once. So does `pool_add` for a pool it
++  replaces at the same base. The pool goes to `Pools::retired` with `until = aq_tail()`, and each pool keeps
++  `since = aq_tail()` from when it was registered. Lookups on the game's threads (`find`, `addr_known`, `room`,
++  `cpu_flushed`) and the write-watch scan in `begin_submit` see only the live map, which fixes defect (3).
++- **Lookups during replay.** `find_at` serves `resolve`, `room` and `prepared_span`, and `note_gpu_write` uses it
++  too. It sees the pools as they were when the op was queued: live pools with `since < view`, and retired pools with
++  `since < view <= until`. If nothing matches, it falls back to the live map and then to the retired pools.
++  - The replay thread sets the view per op (`mem::view_scope`, the first seq of a merged run).
++  - `resolve`'s 16-entry cache is keyed by view while any pool is retired.
++  - This fixes defect (1): an op queued before a same-base reuse gets the old pool.
++- **Parked queues.** `Parked` now carries `oldest`, the oldest op whose work it holds. A parked stream replays with
++  that view. `mem::reap` releases a retired pool only when
++  `until <= queue::replayed_through() = min(done, oldest parked - 1)`. This fixes defect (2).
++- **When reap runs.** `reap` runs after every replay op, and on the game thread after `pool_add`/`pool_del`. The game
++  thread uses `try_lock`, so it never waits on a replay.
++- **CPU writes at retirement.** When a pool is retired, its pages dirty in the write watch are read without resetting
++  the watch and kept as its `pending` ranges. `begin_submit` uploads them to the retired buffer. The watch stays with
++  the live pools.
++- **Write-backs.** GPU writes that resolve to a retired pool get no write-back to guest memory.
++- `NXGFX_POOL_DEL_ORDER=0` turns all of this off: pools are released at once, as originally.
++
++### Tests
++`cargo test --jobs 4 -p graphics --lib`: 186 passed, 0 failed. It ran before the game runs and again after the last
++MKW run. Three new tests are in `vk::mem::pool_del_tests`:
++- `same_base_reuse_keeps_the_old_pool_for_the_work_queued_before`: op 5 gets the old pool, op 6 and the game thread
++  get the new one. A control in the test (`order` false, the first attempt's `pool_add`) shows op 5 getting the new
++  pool.
++- `a_parked_queues_work_keeps_a_retired_pool`: a queue parked with op 4's work keeps a pool retired at 5, even with
++  `done` at 10. The pool is released once the parked work is newer. The first attempt released it at `done`.
++- `a_retired_pool_does_not_shadow_a_new_lower_pool`: the game's `find` gets the new, lower pool, and the retired pool
++  is not in the watched map. Old work gets the retired pool. A parked stream's later records still reach a pool
++  registered after its view. A control (both pools in the live map) shows the shadowing.
++
++These tests were not run against the first attempt's code. Its behaviour is reproduced inside each test as the
++control.
++
++### Verified
++- Engine built (`build.ps1 -Jobs 4 -SkipGnu -KeepCache`), then MK8D and MKW rebuilt.
++- **MK8D** `20261124-195919-mk8d`:
++  - Sheet: title, grid, driving in 1st, lap 2/3 at 161 s and 169 s, rendering normal.
++  - The metrics memory column is flat over the window (4719 to 4730 MB), so retired pools do not pile up. The
++    report's 4935 MB is its last sample.
++  - One red line, `audio: no output device (... Cannot change thread mode after it is set)`. This is environmental,
++    not this change: it is a COM apartment-mode error (RPC_E_CHANGED_MODE) when the audio client opens on an OS
++    thread, and this change touches only graphics pool bookkeeping.
++- **MKW**:
++  - `20261125-000131-mkw`: hung at about 250 s, a few presents after the `04-grid` screenshot. The main thread sat in
++    `nvnSyncWait`; submits stopped at 20726.
++  - Control `20261125-000658-mkw` (`--env NXGFX_POOL_DEL_ORDER=0`): hung even earlier, at about 40 s, after the
++    `01-boot` screenshot.
++  - Re-run `20261125-000839-mkw`: the sheet shows the map, desert, the Grand Prix menu, the grid and the race
++    countdown at 324 s. It hung about 7 presents after the `05-race` screenshot (42/43 steps, 20.9 FPS mean in the
++    window).
++  - No new red lines apart from the hang's own `graceful exit` line. The `texture ID 337` and `pipeline-crashed`
++    lines are known.
++
++### Unproven
++- **The MKW hang.** Each hang follows a harness screenshot. It happens with this change switched off (control) and
++  did not happen in the baseline `-193353-mkw-lazykeep`.
++  - The control still has the parts that do nothing when no pool is retired: the per-op view scope, the `reap` call
++    and `Parked.oldest`. So this change is not cleared.
++  - Next step: run MKW on HEAD's committed engine (stash `mem.rs`/`queue.rs`, then rebuild). If that hangs too, the
++    cause is machine or driver state. If not, bisect the view scope and reap.
++- **Parked and merged streams use one view.** A parked stream, or a merged submit run, replays with its oldest op's
++  view. A same-base reuse inside one parked stream therefore resolves the newer records to the old pool. It falls back
++  correctly for pools at new addresses.
++- **Not covered here:** raw global memory (`gmem`) lists only live pools. `tex_release` has the same parked-queue gap
++  (from the audit).
++- **Lazy pages come back late.** `lazy::touch` at release now runs at reap time, so it can write device-held pages
++  over memory the game has reused since. The first attempt had the same timing.
++- The lazy-keep cost item was not reached.
++
++### Slips
++- I stalled about 4 hours waiting on a background notification and missed the 21:52 deadline. The lead re-scoped
++  the work after midnight.
++- Two MKW runs were added beyond the one requested: the `NXGFX_POOL_DEL_ORDER=0` control, and a re-run of the same
++  path after a hang (a hang, not a device loss).
++- No device loss. Nothing is committed. Nothing is left running. Changed files: `vk/mem.rs` and `vk/queue.rs`.
++
++### Questions
++None.
+diff --git a/src/graphics/src/vk/mem.rs b/src/graphics/src/vk/mem.rs
+index 13bb960..500b0f2 100644
+--- a/src/graphics/src/vk/mem.rs
++++ b/src/graphics/src/vk/mem.rs
+@@ -39,6 +39,8 @@ pub enum Placement {
+ pub struct Pool {
+     /// Registration identity, distinct even when guest base and Vulkan handles are reused.
+     pub identity: u64,
++    /// the last replay op queued before it was registered (`queue::aq_tail` then): ops after it may name it
++    pub since: u64,
+     pub base: u64,
+     pub size: u64,
+     pub flags: u32,
+@@ -237,6 +239,42 @@ pub struct Pools {
+     pub gen: u32,
+     /// the frame the last submission's pool sync was in
+     pub scan_frame: u64,
++    /// pools finalized or replaced while replay work queued before still names them: out of the live map (the game
++    /// thread's lookups and the write watch see only `by_base`), kept for the replay of that work (`find_at`)
++    pub retired: Vec<Retired>,
++}
++
++/// A finalized (or replaced) pool kept for the replay of the work queued before it went.
++pub struct Retired {
++    pub pool: Pool,
++    /// the last replay op queued before it went (`queue::aq_tail` then): ops up to it may name it
++    pub until: u64,
++}
++
++/// Retired pools (a lock-free look before `reap`).
++static RETIRED_N: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
++
++thread_local! {
++    /// The replay op whose work this thread replays now (its pools as they were when it was queued); u64::MAX: none
++    /// (the game's threads: the live map only).
++    static VIEW: std::cell::Cell<u64> = const { std::cell::Cell::new(u64::MAX) };
++}
++
++/// The replay op this thread replays (u64::MAX: none).
++pub fn view() -> u64 {
++    VIEW.with(|v| v.get())
++}
++
++/// This thread replays the work of op `seq` until the scope ends (the previous view comes back).
++pub fn view_scope(seq: u64) -> ViewScope {
++    ViewScope(VIEW.with(|v| v.replace(seq)))
++}
++
++pub struct ViewScope(u64);
++impl Drop for ViewScope {
++    fn drop(&mut self) {
++        VIEW.with(|v| v.set(self.0));
++    }
+ }
+ 
+ pub static UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
+@@ -552,6 +590,7 @@ pub fn pool_add(p: &pool_t) {
+         && watch::take(lo, hi, false).is_some();
+     let pool = Pool {
+         identity: POOL_GEN.fetch_add(1, Ordering::AcqRel) + 1,
++        since: super::queue::aq_tail(),
+         base,
+         size: p.size,
+         flags: p.flags,
+@@ -582,7 +621,8 @@ pub fn pool_add(p: &pool_t) {
+     }
+     let old = {
+         let mut m = g.mem.lock().unwrap();
+-        let old = m.by_base.insert(base, pool);
++        let tail = super::queue::aq_tail();
++        let old = m.by_base.insert(base, pool).and_then(|o| retire(&mut m, o, tail, order_on()));
+         POOL_GEN.fetch_add(1, Ordering::Release);
+         old
+     };
+@@ -590,6 +630,72 @@ pub fn pool_add(p: &pool_t) {
+         release(g, o);
+     }
+     g.tables.requeue_buf_texs(base, base + p.size);
++    reap(g);
++}
++
++/// Pool finalize in replay order (`pool_del`); `NXGFX_POOL_DEL_ORDER=0`: a pool goes at once.
++fn order_on() -> bool {
++    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
++    *ON.get_or_init(|| std::env::var("NXGFX_POOL_DEL_ORDER").as_deref() != Ok("0"))
++        && super::queue::aq_on()
++}
++
++/// A pool out of the live map: kept for the replay of the work queued up to op `tail` (`order`), or handed back to be
++/// released now. The CPU writes the write watch holds for it are kept as its own (`pending`, uploaded before that
++/// work runs: `begin_submit`) without resetting the watch, which belongs to the live pools from now on.
++fn retire(m: &mut Pools, mut p: Pool, tail: u64, order: bool) -> Option<Pool> {
++    if !order {
++        return Some(p);
++    }
++    if p.watched {
++        let (lo, hi) = page_range(p.base, p.size);
++        let end = p.base + p.size;
++        for pg in watch::take(lo, hi, false).unwrap_or_default() {
++            let (a, e) = (pg.max(p.base), (pg + PAGE).min(end));
++            if a < e {
++                p.pending.push((a, e - a));
++            }
++        }
++    }
++    m.retired.push(Retired { pool: p, until: tail });
++    RETIRED_N.store(m.retired.len(), Ordering::Release);
++    None
++}
++
++/// Retired pools the replay is through with: every op up to their `until` replayed, none of it held by a parked queue
++/// (`queue::replayed_through`).
++fn take_reaped(m: &mut Pools, through: u64) -> Vec<Pool> {
++    let mut out = Vec::new();
++    let mut i = 0;
++    while i < m.retired.len() {
++        if m.retired[i].until <= through {
++            out.push(m.retired.remove(i).pool);
++        } else {
++            i += 1;
++        }
++    }
++    RETIRED_N.store(m.retired.len(), Ordering::Release);
++    out
++}
++
++/// Releases the retired pools no queued or parked work can name any more.
++pub fn reap(g: &Gpu) {
++    if RETIRED_N.load(Ordering::Acquire) == 0 {
++        return;
++    }
++    let through = super::queue::replayed_through(g);
++    let gone = {
++        let mut m = g.mem.lock().unwrap();
++        let gone = take_reaped(&mut m, through);
++        if !gone.is_empty() {
++            POOL_GEN.fetch_add(1, Ordering::Release);
++        }
++        gone
++    };
++    for p in gone {
++        g.tables.requeue_buf_texs(p.base, p.base + p.size);
++        release(g, p);
++    }
+ }
+ 
+ fn release(g: &Gpu, p: Pool) {
+@@ -636,13 +742,18 @@ fn release(g: &Gpu, p: Pool) {
+     }
+ }
+ 
+-/// nvnMemoryPoolFinalize.
++/// nvnMemoryPoolFinalize: the pool leaves the live map at once (the game's own lookups and the write watch see the
++/// memory as the game now has it), and is kept for the replay of the work the game queued before finalizing it, which
++/// still names its addresses (asynchronous replay runs behind the game; released at once, Mario Kart 8 Deluxe's draws
++/// queued at a scene change bound uniform bank c3 in a pool already gone: "is in no memory pool: zeros bound"). It is
++/// released once that work, parked queues' included, has run (`reap`). `NXGFX_POOL_DEL_ORDER=0`: at once.
+ pub fn pool_del(base: u64) {
+     super::capture::pool_del(base);
+     let Some(g) = Gpu::try_get() else { return };
+     let p = {
+         let mut m = g.mem.lock().unwrap();
+-        let p = m.by_base.remove(&base);
++        let tail = super::queue::aq_tail();
++        let p = m.by_base.remove(&base).and_then(|p| retire(&mut m, p, tail, order_on()));
+         POOL_GEN.fetch_add(1, Ordering::Release);
+         p
+     };
+@@ -651,8 +762,10 @@ pub fn pool_del(base: u64) {
+         g.tables.requeue_buf_texs(base, base + p.size);
+         release(g, p);
+     }
++    reap(g);
+ }
+ 
++/// The live pool owning [a, a + n): the one with the highest base at or below `a` (pools laid over each other).
+ fn find(m: &Pools, a: u64, n: u64) -> Option<u64> {
+     let (b, p) = m.by_base.range(..=a).next_back()?;
+     if a + n <= p.base + p.size {
+@@ -662,6 +775,57 @@ fn find(m: &Pools, a: u64, n: u64) -> Option<u64> {
+     }
+ }
+ 
++/// A pool found for a lookup: live (its base) or retired (its index in `Pools::retired`).
++#[derive(Clone, Copy, Debug, PartialEq, Eq)]
++enum At {
++    Live(u64),
++    Retired(usize),
++}
++
++fn pool_at(m: &Pools, at: At) -> &Pool {
++    match at {
++        At::Live(b) => &m.by_base[&b],
++        At::Retired(i) => &m.retired[i].pool,
++    }
++}
++
++fn pool_at_mut(m: &mut Pools, at: At) -> &mut Pool {
++    match at {
++        At::Live(b) => m.by_base.get_mut(&b).unwrap(),
++        At::Retired(i) => &mut m.retired[i].pool,
++    }
++}
++
++/// The pool owning [a, a + n) for the replay of op `view`: the pools as they were when it was queued (live ones
++/// registered before it, retired ones that went after it), highest base at or below `a` as in `find`. Not there
++/// (a parked queue's later records replay with its oldest op's view; work naming memory already gone): the live map,
++/// then the retired pools, newest first. `view` u64::MAX (the game's threads): the live map only.
++fn find_at(m: &Pools, a: u64, n: u64, view: u64) -> Option<At> {
++    if view == u64::MAX || m.retired.is_empty() {
++        return find(m, a, n).map(At::Live);
++    }
++    let holds = |p: &Pool| p.base <= a && a + n <= p.base + p.size;
++    let live = m.by_base.range(..=a).rev().find(|(_, p)| p.since < view).map(|(b, _)| *b);
++    let old = m
++        .retired
++        .iter()
++        .enumerate()
++        .filter(|(_, r)| r.pool.since < view && view <= r.until && r.pool.base <= a)
++        .max_by_key(|(i, r)| (r.pool.base, *i));
++    let pick = match (live, old) {
++        (Some(b), Some((i, r))) if r.pool.base >= b => Some(At::Retired(i)),
++        (Some(b), _) => Some(At::Live(b)),
++        (None, Some((i, _))) => Some(At::Retired(i)),
++        (None, None) => None,
++    };
++    if let Some(at) = pick.filter(|&at| holds(pool_at(m, at))) {
++        return Some(at);
++    }
++    find(m, a, n)
++        .map(At::Live)
++        .or_else(|| m.retired.iter().rposition(|r| holds(&r.pool)).map(At::Retired))
++}
++
+ /// Whether [a, a + n) lies in one known memory pool.
+ pub fn addr_known(a: u64, n: u64) -> bool {
+     match Gpu::try_get() {
+@@ -679,9 +843,9 @@ pub fn room(a: u64) -> u64 {
+         a
+     };
+     let m = g.mem.lock().unwrap();
+-    match find(&m, a, 1) {
+-        Some(b) => {
+-            let p = &m.by_base[&b];
++    match find_at(&m, a, 1, view()) {
++        Some(at) => {
++            let p = pool_at(&m, at);
+             // to the end of the window holding `a` (a pool over the device's largest buffer has several)
+             if p.win == 0 {
+                 p.base + p.size - a
+@@ -1359,12 +1523,15 @@ pub(crate) fn prepared_span(g: &Gpu, a: u64, n: u64) -> Option<(vk::Buffer, u64)
+     let end = a.checked_add(n)?;
+     if a == 0 || n == 0 || crate::nvn::vpool::is_sparse(a) { return None; }
+     let m = g.mem.lock().unwrap();
+-    let (&base, p) = m.by_base.range(..=a).next_back()?;
++    let at = find_at(&m, a, n, view())?;
++    let p = pool_at(&m, at);
+     if end > p.base.checked_add(p.size)? || p.gran.is_some() || !p.deferred.is_empty() {
+         return None;
+     }
+-    if m.by_base.range((std::ops::Bound::Excluded(base), std::ops::Bound::Unbounded))
+-        .next().is_some_and(|(&next, _)| end > next) { return None; }
++    if let At::Live(base) = at {
++        if m.by_base.range((std::ops::Bound::Excluded(base), std::ops::Bound::Unbounded))
++            .next().is_some_and(|(&next, _)| end > next) { return None; }
++    }
+     let (buffer, offset, _, _) = p.one(a, n)?;
+     let owner = p.buf.iter().chain(p.wins.iter()).find(|b| b.buf == buffer)?;
+     (offset.checked_add(n)? <= owner.size).then_some((buffer, offset))
+@@ -1402,11 +1569,13 @@ fn resolve_in(
+     // ranges of the same few (Donkey Kong Bananza: dozens, 7.5 ms of lookups a frame with 4 kept): the pool lock and lookup were most of the replay's 1.1 ms of `memory` in Z-A; Turbo's
+     // vkm_use fast path)
+     thread_local! {
+-        // (generation, pool base, pool size, the next pool's base, buffer, buffer offset of base)
+-        static LAST: std::cell::Cell<[(u64, u64, u64, u64, vk::Buffer, u64, u64); 16]> = const { std::cell::Cell::new([(0, 0, 0, 0, vk::Buffer::null(), 0, 0); 16]) };
++        // (generation, pool base, pool size, the next pool's base, buffer, buffer offset of base, pool, view: 0 any)
++        static LAST: std::cell::Cell<[(u64, u64, u64, u64, vk::Buffer, u64, u64, u64); 16]> = const { std::cell::Cell::new([(0, 0, 0, 0, vk::Buffer::null(), 0, 0, 0); 16]) };
+     }
+     let gen = POOL_GEN.load(Ordering::Acquire);
+     let n1 = n.max(1);
++    // with pools retired, what an address names depends on the op replayed: an entry holds for its own op only
++    let vkey = if RETIRED_N.load(Ordering::Acquire) == 0 { 0 } else { view() };
+     // `find` takes the pool with the highest base at or below the address (pools laid over each other): a hit only
+     // below the next pool's base
+     let hit = LAST.with(|l| {
+@@ -1414,6 +1583,7 @@ fn resolve_in(
+             .iter()
+             .find(|e| {
+                 e.0 == gen
++                    && (e.7 == 0 || e.7 == vkey)
+                     && a >= e.1
+                     && a + n1 <= e.1 + e.2
+                     && a < e.3
+@@ -1421,11 +1591,11 @@ fn resolve_in(
+             })
+             .copied()
+     });
+-    if let Some((_, lo, _, _, buf, off, pool)) = hit {
++    if let Some((_, lo, _, _, buf, off, pool, _)) = hit {
+         return Some((buf, off + (a - lo), pool));
+     }
+     let mut m = g.mem.lock().unwrap();
+-    let Some(b) = find(&m, a, n1) else {
++    let Some(at) = find_at(&m, a, n1, view()) else {
+         static N: AtomicU64 = AtomicU64::new(0);
+         if N.fetch_add(1, Ordering::Relaxed) < 8 {
+             crate::log::red(&format!(
+@@ -1434,7 +1604,8 @@ fn resolve_in(
+         }
+         return None;
+     };
+-    let p = m.by_base.get_mut(&b).unwrap();
++    let p = pool_at_mut(&mut m, at);
++    let b = p.base;
+     if let Err(e) = p.ensure_buffer(g, sub) {
+         crate::log::red_once(&e);
+         return None;
+@@ -1468,18 +1639,22 @@ fn resolve_in(
+ 
+     let (pb, ps) = (wlo, wlen);
+     let cache = p.deferred.is_empty();
++    // (a retired pool above it may own addresses there for another op: below it too)
+     let next = m
+         .by_base
+         .range(b + 1..)
+         .next()
+         .map(|(k, _)| *k)
++        .into_iter()
++        .chain(m.retired.iter().map(|r| r.pool.base).filter(|&k| k > b))
++        .min()
+         .unwrap_or(u64::MAX);
+     // a pool with deferred writes is not cached: each use looks at them
+     if cache {
+         LAST.with(|l| {
+             let mut v = l.get();
+             v.rotate_right(1);
+-            v[0] = (gen, pb, ps, next, buf, off, b);
++            v[0] = (gen, pb, ps, next, buf, off, b, vkey);
+             l.set(v);
+         });
+     }
+@@ -2007,6 +2182,19 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub, due: Option<u64>) -> V
+         }
+         all.extend(ranges);
+     }
++    // retired pools: the CPU writes they held when they went (`retire`), for the work queued before (no watch: those
++    // pages belong to the live pools now; a pool without a buffer yet takes its bytes when it gets one)
++    for r in m.retired.iter_mut() {
++        let p = &mut r.pool;
++        if p.buf.is_none() || !matches!(p.placement, Placement::Mirror | Placement::Vram) {
++            continue;
++        }
++        let mut ranges = std::mem::take(&mut p.pending);
++        ranges.append(&mut p.deferred);
++        for &(a, n) in &ranges {
++            p.upload_now(g, sub, a, n);
++        }
++    }
+     all
+ }
+ 
+@@ -2036,7 +2224,9 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
+         }
+     }
+     let m = g.mem.lock().unwrap();
+-    let Some(b) = find(&m, a, n) else { return };
++    // a retired pool's memory is no longer its own (the game finalized it): nothing lands back from its buffer, and a
++    // live pool over the same addresses was not what this work wrote
++    let Some(At::Live(b)) = find_at(&m, a, n, view()) else { return };
+     let p = &m.by_base[&b];
+     if !writeback_identity_matches(identity, p.identity) { return; }
+     if p.placement == Placement::Mirror && p.buf.is_some() {
+@@ -2336,6 +2526,104 @@ mod scan_cover_tests {
+     }
+ }
+ 
++#[cfg(test)]
++mod pool_del_tests {
++    use super::*;
++
++    fn pool(base: u64, size: u64, identity: u64, since: u64) -> Pool {
++        Pool {
++            identity,
++            since,
++            base,
++            size,
++            flags: 0,
++            placement: Placement::Mirror,
++            buf: None,
++            buf_off: 0,
++            watched: false,
++            snapshot: None,
++            page_gen: Vec::new(),
++            page_lo: base,
++            pending: Vec::new(),
++            da: 0,
++            alloc_base: 0,
++            dirty_frame: 0,
++            win: 0,
++            wins: Vec::new(),
++            wins_da: Vec::new(),
++            gran: None,
++            deferred: Vec::new(),
++        }
++    }
++
++    fn id(m: &Pools, at: Option<At>) -> Option<u64> {
++        at.map(|at| pool_at(m, at).identity)
++    }
++
++    /// Audit (1): a pool registered again at the same base while work queued before still names the old one. The
++    /// old one is kept for that work (ops up to 5), the new one serves the work after; the game's lookups see the new
++    /// one. Before: `pool_add` released the old pool at once (`order` false here), so op 5 resolved to the new buffer.
++    #[test]
++    fn same_base_reuse_keeps_the_old_pool_for_the_work_queued_before() {
++        let mut m = Pools::default();
++        m.by_base.insert(0x10000, pool(0x10000, 0x1000, 1, 0));
++        let old = m.by_base.insert(0x10000, pool(0x10000, 0x1000, 2, 5)).unwrap();
++        assert!(retire(&mut m, old, 5, true).is_none(), "kept, not released");
++        assert_eq!(id(&m, find_at(&m, 0x10100, 4, 5)), Some(1), "op 5 was queued before: the old pool");
++        assert_eq!(id(&m, find_at(&m, 0x10100, 4, 6)), Some(2), "op 6 after: the new one");
++        assert_eq!(id(&m, find_at(&m, 0x10100, 4, u64::MAX)), Some(2), "the game's thread: the new one");
++        assert_eq!(find(&m, 0x10100, 4), Some(0x10000));
++        // the earlier behaviour: released at registration, op 5 gets the new pool
++        let mut before = Pools::default();
++        before.by_base.insert(0x10000, pool(0x10000, 0x1000, 1, 0));
++        let old = before.by_base.insert(0x10000, pool(0x10000, 0x1000, 2, 5)).unwrap();
++        assert!(retire(&mut before, old, 5, false).is_some(), "released now");
++        assert_eq!(id(&before, find_at(&before, 0x10100, 4, 5)), Some(2));
++    }
++
++    /// Audit (2): work of ops before a finalize held by a parked queue keeps the pool, though every op up to the
++    /// finalize has been through the replay thread. Before: the deferred removal ran once `done` passed it (a
++    /// parked queue's stream was only appended), so `through` was `done` (10) and the pool went.
++    #[test]
++    fn a_parked_queues_work_keeps_a_retired_pool() {
++        let mut m = Pools::default();
++        let p = pool(0x10000, 0x1000, 1, 0);
++        assert!(retire(&mut m, p, 5, true).is_none());
++        let through = super::super::queue::through_of(10, [4u64].into_iter());
++        assert_eq!(through, 3, "a queue parked with op 4's work");
++        assert!(take_reaped(&mut m, through).is_empty(), "op 4's work has not run");
++        assert_eq!(id(&m, find_at(&m, 0x10100, 4, 4)), Some(1), "and replays with op 4's view");
++        let through = super::super::queue::through_of(10, [6u64].into_iter());
++        assert_eq!(take_reaped(&mut m, through).len(), 1, "parked work is newer: released");
++        assert!(m.retired.is_empty());
++        assert_eq!(super::super::queue::through_of(10, std::iter::empty()), 10);
++    }
++
++    /// Audit (3): a finalized pool kept for queued work does not hide a new pool below it from the game's lookups
++    /// (`addr_known`, `room`) nor share the write watch with it: it is out of the live map, the one `begin_submit`
++    /// watches. Before: it stayed in the live map, and `find` gave it for the new pool's addresses above its base.
++    #[test]
++    fn a_retired_pool_does_not_shadow_a_new_lower_pool() {
++        let mut m = Pools::default();
++        m.by_base.insert(0x20000, pool(0x20000, 0x10000, 1, 0));
++        let r = m.by_base.remove(&0x20000).unwrap();
++        assert!(retire(&mut m, r, 5, true).is_none());
++        m.by_base.insert(0x18000, pool(0x18000, 0x20000, 2, 5));
++        assert_eq!(find(&m, 0x22000, 4), Some(0x18000), "the game's lookups: the new pool");
++        assert_eq!(id(&m, find_at(&m, 0x22000, 4, u64::MAX)), Some(2));
++        assert!(!m.by_base.contains_key(&0x20000), "the watch scans the live map only");
++        assert_eq!(id(&m, find_at(&m, 0x22000, 4, 5)), Some(1), "work queued before: the finalized pool");
++        assert_eq!(id(&m, find_at(&m, 0x22000, 4, 6)), Some(2), "work queued after: the new one");
++        // a parked queue's later records (replayed with an older op's view) still reach a pool registered after it
++        assert_eq!(id(&m, find_at(&m, 0x19000, 4, 3)), Some(2));
++        // the earlier behaviour: both in the live map, the old one shadows the new one's addresses above its base
++        let mut before = Pools::default();
++        before.by_base.insert(0x20000, pool(0x20000, 0x10000, 1, 0));
++        before.by_base.insert(0x18000, pool(0x18000, 0x20000, 2, 5));
++        assert_eq!(find(&before, 0x22000, 4), Some(0x20000));
++    }
++}
++
+ #[cfg(test)]
+ mod inflight_tests {
+     /// A CPU-dirty range over in-flight write-backs: the parts outside upload now, the parts over them later.
+diff --git a/src/graphics/src/vk/queue.rs b/src/graphics/src/vk/queue.rs
+index a82c100..6e17543 100644
+--- a/src/graphics/src/vk/queue.rs
++++ b/src/graphics/src/vk/queue.rs
+@@ -144,6 +144,9 @@ struct Parked {
+     presents: Vec<(crate::nvn::obj::tex_t, Option<[i32; 4]>)>,
+     /// waits queued while parked: (stream offset, receipt): the work from that offset on runs once the receipt resolved
+     later: Vec<(usize, u64)>,
++    /// the oldest replay op whose work it holds (u64::MAX: none known): pools retired after it stay until it has run
++    /// (`mem::reap`), and it replays with that op's view of the pools (`mem::view_scope`)
++    oldest: u64,
+ }
+ 
+ pub struct SubmitState {
+@@ -1198,6 +1201,7 @@ fn park_on_receipt(st: &mut SubmitState, q: u64, r: u64) {
+                     wait_receipt: Some(r),
+                     presents: Vec::new(),
+                     later: Vec::new(),
++                    oldest: super::mem::view(),
+                 },
+             );
+         }
+@@ -1440,6 +1444,9 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
+             }
+         }
+         let t0 = std::time::Instant::now();
++        // the pools as they were when this op (the first of a merged run) was queued
++        let first = merged.first().copied().unwrap_or(seq);
++        let view = super::mem::view_scope(first);
+         // the NVN queue of a submit or present: its fence is a receipt while that queue stays parked
+         let opq = match &op {
+             Op::Submit { q, .. } | Op::Present { q, .. } | Op::WaitReceipt { q, .. } => Some(*q),
+@@ -1459,6 +1466,7 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
+                 take_recycled(g, &mut st);
+                 if let Some(p) = st.parked.get_mut(&q) {
+                     p.stream.extend_from_slice(&stream);
++                    p.oldest = p.oldest.min(first);
+                 } else {
+                     run_stream_due(g, &mut st, q, ll, stream, Vec::new(), Some(seq));
+                 }
+@@ -1528,7 +1536,10 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
+             }
+         }
+         wait_diag::mark(0, "publish async fence/wake", [opq.unwrap_or(0), seq]);
++        drop(view);
+         a.done.store(seq, Ordering::Release);
++        // pools finalized after this op went once nothing queued or parked can name them
++        super::mem::reap(g);
+         {
+             let _l = a.idle_mu.lock().unwrap();
+             a.idle_cv.notify_all();
+@@ -1559,6 +1570,27 @@ fn aq_physical(f: u64) -> Option<u64> {
+     Some(v)
+ }
+ 
++/// The last replay op whose work has all run: every op up to it replayed, none of its work held by a parked queue
++/// (`mem::reap`). Not on the replay thread: a replay holding the queues' lock answers 0 (the replay thread asks again
++/// after each op) rather than holding the game thread for it.
++pub fn replayed_through(g: &Gpu) -> u64 {
++    let done = AQ.get().map(|a| a.done.load(Ordering::Acquire)).unwrap_or(u64::MAX);
++    let st = if on_replay_thread() {
++        g.q.sub.lock().unwrap()
++    } else {
++        match g.q.sub.try_lock() {
++            Ok(st) => st,
++            Err(_) => return 0,
++        }
++    };
++    through_of(done, st.parked.values().map(|p| p.oldest))
++}
++
++/// `replayed_through` of `done` replayed ops and the parked queues' oldest ops.
++pub(crate) fn through_of(done: u64, parked_oldest: impl Iterator<Item = u64>) -> u64 {
++    parked_oldest.fold(done, |t, o| t.min(o.saturating_sub(1)))
++}
++
+ /// Runs `f` after every op queued so far (on the replay thread), or now when nothing is queued.
+ pub fn after_queued(f: Box<dyn FnOnce(&'static Gpu) + Send>) {
+     let Some(g) = Gpu::try_get() else { return };
+@@ -1731,6 +1763,7 @@ fn run_stream_due(
+                     wait_receipt: None,
+                     presents: Vec::new(),
+                     later: Vec::new(),
++                    oldest: super::mem::view(),
+                 },
+             );
+             // the retry thread (it also logs a queue parked for long)
+@@ -1795,6 +1828,8 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
+         for q in ready {
+             let mut p = st.parked.remove(&q).unwrap();
+             let ll = st.qstates.get(&q).map(|s| s.origin_ll).unwrap_or(true);
++            // its work replays with its oldest op's view of the pools (and parks again with that op)
++            let _view = super::mem::view_scope(p.oldest);
+             if let Some(&(off, r)) = p.later.first() {
+                 // the work up to a queued wait runs; the rest parks behind that wait (its receipts and presents last)
+                 let tail = p.stream.split_off(off.min(p.stream.len()));
+@@ -1823,6 +1858,7 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
+                                 wait_receipt: Some(r),
+                                 presents: p.presents,
+                                 later,
++                                oldest: p.oldest,
+                             },
+                         );
+                     }

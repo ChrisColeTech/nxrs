@@ -68,9 +68,10 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       >50 ms frames are the harness's own screenshots. A one-layer 2D-array view sampled as a cube gets the cube twin.
 - [x] **mkw180 races** (`-193941-mkw180-final`, 16.9 FPS) with the base game's route. Owner question: this entry
       builds the same base package as `[mkw]` (no 1.8.0 update attached or on disk).
-- [ ] **Pool finalize ordering** (uncommitted `vk/mem.rs` in the tree; fixed MK8D's 49 "uniform bank c3 is in no
-      memory pool" lines): correct the audit's three findings (same-base reuse defeats it; parked queues; overlap
-      shadowing and write-watch double scan) before committing. Also the lazy-keep `materialize_all` spike.
+- [ ] **Pool finalize ordering: shelved** (wave `docs/waves/POOL-ORDER.md`, diff `docs/waves/POOL-ORDER.patch`). The
+      redesign fixed the audit's three findings and MK8D's "in no memory pool" lines, but hangs MKW a few frames after
+      a screenshot (3/3; HEAD 0/1). MK8D passes without it (those lines are cosmetic, at transitions). Revisit only
+      with the hang explained. Separate: the lazy-keep `materialize_all` spike (MK-PAIR audit).
 - [ ] mkw `texture ID 337: target 2 bound where the shader samples target 1` (3D noise read by a 2D instruction;
       fetch semantics unconfirmed). Risk to check off NVIDIA: single-sample views bound where SPIR-V declares MS.
 - [ ] Startup check of per-stage descriptor limits (`maxPerStageDescriptor*`, `maxPerStageResources`) for the shared
