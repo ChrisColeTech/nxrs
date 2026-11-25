@@ -1,0 +1,73 @@
+# The portable Windows release: dist/nxrs (nxrs.exe + nxrs-engine/) zipped as nxrs-windows-x64.zip and published as a
+# GitHub Release. Runs when a version tag (v*) is pushed, or by hand with a tag name.
+name: Release
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Release tag to create (e.g. v0.1.0)'
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  RUST_VERSION: '1.99.0'
+  # the shader translator's nxnative source, as in ci.yml; checked out with core.autocrlf true it gives the shipped
+  # tool's --source-sha, which games' shader caches are keyed by
+  NXNATIVE_XLATE: 'e4b0d9b75d39c41c10fdcfec2f0b070df496d7e5'
+  XLATE_SHA: 'e11dc43d4ddc5b58'
+
+jobs:
+  windows:
+    name: nxrs-windows-x64.zip
+    runs-on: windows-latest
+    timeout-minutes: 150
+    steps:
+      - uses: actions/checkout@v4
+      - name: Rust ${{ env.RUST_VERSION }}
+        shell: pwsh
+        run: |
+          rustup toolchain install $env:RUST_VERSION --profile minimal
+          rustup default $env:RUST_VERSION
+      - name: Vulkan SDK (spirv-val, glslangValidator)
+        shell: pwsh
+        run: |
+          Invoke-WebRequest https://sdk.lunarg.com/sdk/download/latest/windows/vulkan-sdk.exe -OutFile vulkan-sdk.exe
+          Start-Process -Wait -FilePath .\vulkan-sdk.exe -ArgumentList '--root','C:\VulkanSDK','--accept-licenses','--default-answer','--confirm-command','install'
+          if (-not (Test-Path C:\VulkanSDK\Bin\spirv-val.exe)) { throw 'Vulkan SDK install failed' }
+          "VULKAN_SDK=C:\VulkanSDK" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+          "NXGFX_GLSLANG=C:\VulkanSDK\Bin\glslangValidator.exe" | Out-File -Append -Encoding utf8 $env:GITHUB_ENV
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - name: dmsh_xlate (nxnative's shader translator)
+        shell: pwsh
+        run: |
+          git init -q C:\nxnative
+          git -C C:\nxnative config core.autocrlf true
+          git -C C:\nxnative remote add origin https://github.com/seedds/nxnative.git
+          git -C C:\nxnative sparse-checkout set dm/gfx/tools/dmsh_xlate dm/third_party/ryujinx
+          git -C C:\nxnative fetch -q --depth 1 --filter=blob:none origin $env:NXNATIVE_XLATE
+          git -C C:\nxnative checkout -q FETCH_HEAD
+          pwsh src/shaders/tools/build_dmsh_xlate.ps1 -Nxnative C:\nxnative -Out build\tools\dmsh_xlate -Work C:\dmsh_src -Commit $env:NXNATIVE_XLATE
+          $sha = (& build\tools\dmsh_xlate\dmsh_xlate.exe --source-sha).Trim()
+          if ($sha -ne $env:XLATE_SHA) { throw "dmsh_xlate --source-sha is $sha, expected $env:XLATE_SHA" }
+      - name: Build dist/nxrs
+        shell: pwsh
+        run: scripts/build/build.ps1 -Jobs 4 -SkipGnu
+      - name: Check the release answers its contract
+        shell: pwsh
+        run: dist\nxrs\nxrs-engine\nxrs-build.exe contract
+      - name: Zip
+        shell: pwsh
+        run: Compress-Archive -Path dist\nxrs -DestinationPath nxrs-windows-x64.zip
+      - name: Publish the release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch') { '${{ inputs.tag }}' } else { $env:GITHUB_REF_NAME }
+          gh release create $tag nxrs-windows-x64.zip --target $env:GITHUB_SHA --title "nxrs $tag" --generate-notes

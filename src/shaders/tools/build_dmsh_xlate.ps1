@@ -9,13 +9,16 @@
 param(
     [string]$Nxnative = (Join-Path $PSScriptRoot "..\..\..\build\Q\nxnative-up"),
     [string]$Out = (Join-Path $PSScriptRoot "..\..\..\build\tools\dmsh_xlate"),
-    [string]$Work = (Join-Path $PSScriptRoot "..\..\..\build\DELEGATION\R1A\dmsh_xlate_src")
+    [string]$Work = (Join-Path $PSScriptRoot "..\..\..\build\DELEGATION\R1A\dmsh_xlate_src"),
+    # the release workflow passes CI's pin (NXNATIVE_XLATE, checked out with core.autocrlf true), which gives the same
+    # --source-sha as the shipped tool
+    [string]$Commit = "7ebb76eda8ec1c532a4fc52170f2c5e13b18e80f"
 )
 $ErrorActionPreference = "Stop"
 $Nxnative = [System.IO.Path]::GetFullPath($Nxnative)
 $Out = [System.IO.Path]::GetFullPath($Out)
 $Work = [System.IO.Path]::GetFullPath($Work)
-$requiredCommit = "7ebb76eda8ec1c532a4fc52170f2c5e13b18e80f"
+$requiredCommit = $Commit
 $trackedSource = @("dm/third_party/ryujinx", "dm/gfx/tools/dmsh_xlate")
 if (-not (Test-Path -LiteralPath (Join-Path $Nxnative ".git"))) {
     throw "Pinned nxnative checkout is absent: $Nxnative"
