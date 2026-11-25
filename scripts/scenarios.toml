@@ -36,10 +36,11 @@ steps = ["wait 40", "shot boot", "press A ; 6 * 16", "shot title", "press A ; 6 
 [mkw180]
 title = "Mario Kart World v1.8.0"
 about = "as mkw, on the 1.8.0 build"
-seconds = 230
-window = [150, 185]
-steps = ["wait 44", "shot boot", "press L+R ; 5", "shot title", "press A ; 6 * 8", "shot menus done",
-         "replay mkw_drive.txt ; 42", "shot race", "replay mkw_drive.txt ; 42", "shot race later"]
+seconds = 360
+window = [250, 325]
+steps = ["wait 40", "shot boot", "press A ; 6 * 16", "shot title", "press A ; 6 * 3", "shot menus",
+         "press A ; 6 * 15", "shot grid", "replay mkw_drive.txt ; 42", "shot race",
+         "replay mkw_drive.txt ; 42", "shot race later"]
 
 [plza]
 title = "Pokemon Legends Z-A"
@@ -74,11 +75,14 @@ steps = ["wait 40", "shot boot", "wait 25", "shot title", "press A ; 15", "shot 
 [mk8d]
 title = "Mario Kart 8 Deluxe"
 about = "Mii, menus, a Grand Prix, drive"
-seconds = 240
-window = [100, 140]
+# Fresh save: the race grid is up by ~76 s; two 40 s drive replays keep the window in the race
+# (build/play/20261124-185259-mk8d-first).
+seconds = 200
+window = [95, 175]
 steps = ["wait 9", "shot boot", "press L+R ; 4", "press Right ; 1.5", "press A ; 3 * 3", "press A ; 5",
          "press A ; 4", "press A ; 2 * 2", "press A ; 4 * 2", "press A ; 30", "shot grand prix",
-         "replay mkw_drive.txt ; 20", "shot driving", "wait 18", "shot driving later"]
+         "replay mkw_drive.txt ; 21", "shot driving", "wait 21", "shot driving later",
+         "replay mkw_drive.txt ; 42", "shot driving lap", "wait 8", "shot end"]
 
 [arceus]
 title = "Pokemon Legends Arceus (1G+1U)"

@@ -62,6 +62,15 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       (cube) lines -> 0 via a six-face cube twin of its one-layer 32x32 fallback texture (`NXGFX_CUBE_TWIN=0` off).
 - [x] **plza PASS** (`build/play/20261124-182844-plza-final`): fresh save through appearance and confirm, train
       arrival, platform with the Move HUD, walking into the station hall; 166/166, 59.6 FPS (5% low 57.9), 0 red lines.
+- [x] **mk8d PASS** (wave `docs/waves/MK-PAIR.md`, `build/play/20261124-193052-mk8d-lazykeep`): fresh save to a
+      driven Grand Prix through lap 2/3, 59.9 FPS (5% low 59), 0 red lines (were 49), 0 zero-stand-in texture binds
+      (were 4314: finalized-but-unused lazy registrations are kept), peak memory 4950 MB (was 5228); the remaining
+      >50 ms frames are the harness's own screenshots. A one-layer 2D-array view sampled as a cube gets the cube twin.
+- [x] **mkw180 races** (`-193941-mkw180-final`, 16.9 FPS) with the base game's route. Owner question: this entry
+      builds the same base package as `[mkw]` (no 1.8.0 update attached or on disk).
+- [ ] **Pool finalize ordering** (uncommitted `vk/mem.rs` in the tree; fixed MK8D's 49 "uniform bank c3 is in no
+      memory pool" lines): correct the audit's three findings (same-base reuse defeats it; parked queues; overlap
+      shadowing and write-watch double scan) before committing. Also the lazy-keep `materialize_all` spike.
 - [ ] mkw `texture ID 337: target 2 bound where the shader samples target 1` (3D noise read by a 2D instruction;
       fetch semantics unconfirmed). Risk to check off NVIDIA: single-sample views bound where SPIR-V declares MS.
 - [ ] Startup check of per-stage descriptor limits (`maxPerStageDescriptor*`, `maxPerStageResources`) for the shared

@@ -2146,9 +2146,18 @@ impl Gpu {
 
     /// The image of texture ID `id` registered lazily, made now (its first use). Cheap when nothing waits.
     pub fn materialize(&self, id: i32) {
-        if let Some((t, v)) = lazy::take(id) {
+        if let Some((t, v, gone)) = lazy::take(id) {
             self.reg_tex_now(id, &t, v, false);
+            if gone {
+                self.release_after_use(t.serial);
+            }
         }
+    }
+
+    /// The image of a texture object finalized before its first use, made now for that use: released (parked, its
+    /// slots kept until it is evicted) once the submission being recorded can no longer use it.
+    fn release_after_use(&self, serial: u64) {
+        self.q.defer_after_use(Box::new(move |g: &Gpu| g.tex_release_now(serial)));
     }
 
     /// Every lazily registered texture made now (a shader indexes the texture pool itself: any ID may be read).
@@ -2158,8 +2167,11 @@ impl Gpu {
             return;
         }
         let n = all.len();
-        for (id, (t, v)) in all {
+        for (id, (t, v, gone)) in all {
             self.reg_tex_now(id, &t, v, false);
+            if gone {
+                self.release_after_use(t.serial);
+            }
         }
         static SAID: std::sync::Once = std::sync::Once::new();
         SAID.call_once(|| {
@@ -2244,7 +2256,7 @@ impl Gpu {
     fn tex_release_now(&self, serial: u64) {
         self.tables.invalidate_images();
         super::capture::tex_release(serial);
-        lazy::forget_serial(serial);
+        lazy::finalized(serial);
         self.forget_cube_twin(serial);
         let mut imgs = self.images.lock().unwrap();
         let Some(mut im) = imgs.by_serial.remove(&serial) else {
@@ -4539,6 +4551,8 @@ mod lazy {
     struct L {
         by_id: HashMap<i32, (tex_t, Option<view_t>)>,
         by_serial: HashMap<u64, Vec<i32>>,
+        /// texture objects finalized while registrations of them still wait (`finalized`)
+        gone: std::collections::HashSet<u64>,
     }
     static ST: Mutex<Option<L>> = Mutex::new(None);
     static N: AtomicUsize = AtomicUsize::new(0);
@@ -4555,7 +4569,8 @@ mod lazy {
             N.fetch_add(1, Ordering::Relaxed);
         }
     }
-    pub fn take(id: i32) -> Option<(tex_t, Option<view_t>)> {
+    /// The registration waiting at `id`, and whether its texture object was finalized since (`finalized`).
+    pub fn take(id: i32) -> Option<(tex_t, Option<view_t>, bool)> {
         if N.load(Ordering::Relaxed) == 0 {
             return None;
         }
@@ -4563,23 +4578,42 @@ mod lazy {
         let l = g.as_mut()?;
         let (t, v) = l.by_id.remove(&id)?;
         N.fetch_sub(1, Ordering::Relaxed);
+        let gone = l.gone.contains(&t.serial);
         if let Some(ids) = l.by_serial.get_mut(&t.serial) {
             ids.retain(|&i| i != id);
             if ids.is_empty() {
                 l.by_serial.remove(&t.serial);
+                l.gone.remove(&t.serial);
             }
         }
-        Some((t, v))
+        Some((t, v, gone))
     }
     pub fn forget_id(id: i32) {
         let _ = take(id);
     }
-    pub fn forget_serial(serial: u64) {
+    /// Whether a finalized texture's waiting registrations stay (`NXGFX_LAZY_KEEP=0`: dropped, as before).
+    fn keep() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("NXGFX_LAZY_KEEP").as_deref() != Ok("0"))
+    }
+    /// nvnTextureFinalize of texture object `serial`: its pool slots still name its storage on the console (the
+    /// descriptor outlives the object), so registrations of it that wait for their image stay, marked finalized: the
+    /// first use makes the image and lets it go after that submission, as an image made at registration would have
+    /// been parked. Mario Kart 8 Deluxe's menus register and finalize thousands a second; dropped, every later draw
+    /// read the zero stand-in.
+    pub fn finalized(serial: u64) {
         if N.load(Ordering::Relaxed) == 0 {
             return;
         }
         let mut g = ST.lock().unwrap();
         let Some(l) = g.as_mut() else { return };
+        if !l.by_serial.contains_key(&serial) {
+            return;
+        }
+        if keep() {
+            l.gone.insert(serial);
+            return;
+        }
         for id in l.by_serial.remove(&serial).unwrap_or_default() {
             if l.by_id.get(&id).is_some_and(|(t, _)| t.serial == serial) {
                 l.by_id.remove(&id);
@@ -4587,7 +4621,7 @@ mod lazy {
             }
         }
     }
-    pub fn take_all() -> Vec<(i32, (tex_t, Option<view_t>))> {
+    pub fn take_all() -> Vec<(i32, (tex_t, Option<view_t>, bool))> {
         if N.load(Ordering::Relaxed) == 0 {
             return Vec::new();
         }
@@ -4597,7 +4631,39 @@ mod lazy {
         };
         N.store(0, Ordering::Relaxed);
         l.by_serial.clear();
-        l.by_id.drain().collect()
+        let gone = std::mem::take(&mut l.gone);
+        l.by_id
+            .drain()
+            .map(|(id, (t, v))| (id, (t, v, gone.contains(&t.serial))))
+            .collect()
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn tex(serial: u64) -> tex_t {
+            // SAFETY: tex_t is plain data (repr(C) integers and a raw pointer); all zero is a valid value.
+            let mut t: tex_t = unsafe { std::mem::zeroed() };
+            t.serial = serial;
+            t
+        }
+
+        /// A registration waiting for its image survives its texture object's finalize, marked finalized, and is
+        /// taken once; one never finalized is not marked.
+        #[test]
+        fn a_finalized_textures_waiting_registration_stays_marked() {
+            put(910_001, tex(0xF1_0001), None);
+            put(910_002, tex(0xF1_0001), None);
+            put(910_003, tex(0xF1_0002), None);
+            finalized(0xF1_0001);
+            assert!(matches!(take(910_001), Some((t, None, true)) if t.serial == 0xF1_0001));
+            assert!(matches!(take(910_002), Some((_, _, true))));
+            assert!(take(910_001).is_none(), "taken once");
+            assert!(matches!(take(910_003), Some((_, _, false))), "not finalized");
+            put(910_004, tex(0xF1_0001), None);
+            assert!(matches!(take(910_004), Some((_, _, false))), "the mark went with its last registration");
+        }
     }
     /// Registrations waiting (the memory line).
     pub fn waiting() -> usize {

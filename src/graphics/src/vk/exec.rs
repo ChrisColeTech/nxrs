@@ -2830,6 +2830,28 @@ fn view_compatible(base: i32, want: i32, cube_ok: bool) -> bool {
     }
 }
 
+/// Whether a texture viewed as `base` and sampled as `want` gets a cube twin (`cube_twin_view` then checks the image
+/// is one square 2D layer). A one-layer 2D-array view of a 2D image counts (Mario Kart 8 Deluxe's race start: a
+/// 1024x1024 2D texture registered with a 2D-array view, sampled as a cube).
+fn cube_twin_target(base: i32, want: i32) -> bool {
+    matches!(base, target::T2D | target::RECTANGLE | target::T2D_ARRAY)
+        && matches!(want, target::CUBE | target::CUBE_ARRAY)
+}
+
+#[cfg(test)]
+mod cube_twin_target_tests {
+    use super::*;
+
+    #[test]
+    fn two_d_and_one_layer_array_views_sampled_as_cubes_get_a_twin() {
+        assert!(cube_twin_target(target::T2D, target::CUBE));
+        assert!(cube_twin_target(target::RECTANGLE, target::CUBE_ARRAY));
+        assert!(cube_twin_target(target::T2D_ARRAY, target::CUBE), "MK8D: a 2D-array view of a 2D image");
+        assert!(!cube_twin_target(target::T3D, target::CUBE));
+        assert!(!cube_twin_target(target::T2D_ARRAY, target::T2D_ARRAY));
+    }
+}
+
 fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::ImageView {
     let (ty, ifmt) = (ty & 0xffff, (ty >> 16) as u16);
     let want = target_of(ty);
@@ -2901,8 +2923,7 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
             if !compatible
                 && !*TWIN_OFF.get_or_init(|| std::env::var("NXGFX_CUBE_TWIN").as_deref() == Ok("0"))
                 && !storage
-                && matches!(base_target, target::T2D | target::RECTANGLE)
-                && matches!(want, target::CUBE | target::CUBE_ARRAY)
+                && cube_twin_target(base_target, want)
             {
                 if let Some(view) = g.cube_twin_view(im, view.as_ref(), want, sub) {
                     return view;
