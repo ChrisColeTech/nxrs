@@ -570,13 +570,17 @@ mod tests {
             static BASE: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
             static USED: AtomicUsize = AtomicUsize::new(0);
             let base = *BASE.get_or_init(|| {
-                // a hint, not MAP_FIXED: the kernel places it there when the range is free
-                let p = unsafe {
-                    libc::mmap(0x10_0000_0000 as *mut libc::c_void, SIZE, libc::PROT_READ | libc::PROT_WRITE,
-                        libc::MAP_PRIVATE | libc::MAP_ANONYMOUS, -1, 0)
-                };
-                assert_ne!(p, libc::MAP_FAILED);
-                p as usize
+                // exactly there or not at all (a plain hint is ignored): the first free candidate below 2^42
+                (1..64usize)
+                    .find_map(|k| {
+                        let want = k << 32;
+                        let p = unsafe {
+                            libc::mmap(want as *mut libc::c_void, SIZE, libc::PROT_READ | libc::PROT_WRITE,
+                                libc::MAP_PRIVATE | libc::MAP_ANONYMOUS | libc::MAP_FIXED_NOREPLACE, -1, 0)
+                        };
+                        (p != libc::MAP_FAILED).then_some(p as usize)
+                    })
+                    .expect("no free low range for the test's path buffers")
             });
             let off = USED.fetch_add(n.next_multiple_of(16), Ordering::Relaxed);
             assert!(off + n <= SIZE, "test scratch exhausted");
