@@ -1,61 +1,54 @@
-# nxrs-engine
+# nxrs
 
-A Rust engine that runs Switch games as native programs: their ARM64 code is translated to C ahead of time, and the
-game's data is read in place from its own packages. Windows x86-64; Linux x86-64 built and packaged in CI. License: MIT ([LICENSE](LICENSE)); third-party credits below.
+**A game launcher and static recompiler for your Nintendo Switch games.** Point it at a dump you own (NSP, NUP, XCI or
+an extracted game folder) and nxrs rebuilds the game as a native Windows program, then runs it from a library like
+any other PC game.
 
-| Part | What |
+![The nxrs library](docs/images/readme/library.png)
+
+## Features
+
+**Library**
+- Add games from NSP, NUP, XCI or extracted game folders; box art, gallery or list view, search, filter and sort.
+- One click to build, one click to play. Build progress and logs in the build-output panel.
+- Updates and DLC: install update and DLC packages, choose which version to build.
+- Per-game settings: docked or handheld, Switch or Xbox button layout, artwork, compiler workers.
+- Built-in checks that your PC has what a build needs (compiler, Vulkan, keys, disk space).
+
+**In game**
+- Native x86-64 code (no emulation of the CPU), Vulkan graphics.
+- Controllers: Xbox, DualSense / DualShock 4, Switch Pro and Joy-Con, with rumble and motion.
+- F1 controls page · F3 screenshot · F4 FPS limit · F6 cheats · F7 record video · F11 fullscreen.
+- Game mods and cheats, saves kept per game.
+
+| Per-game settings | Search & filter |
 |---|---|
-| [`src/translator`](src/translator/README.md) | package input (folder, NSP, NUP, XCI, NCA; updates and DLC in place) and the ARM64 → C translator, with its development CLI `nxrs-translate` |
-| `src/runtime` | the host runtime |
-| [`src/cli`](src/cli/README.md) | `nxrs-cli`, the `nxrs-build` executable: the build (clang, chunk cache, `<name>_code.dll` + loader), updates, DLC, the launcher contract ([docs/LAUNCHER_CONTRACT.md](docs/LAUNCHER_CONTRACT.md)) |
-| [`src/profiles`](src/profiles/README.md) | game profiles (nxnative's 207, as data) and their lookup by title and build id |
-| [`src/shaders`](src/shaders/README.md) | every shader of a game found at build time (ExeFS and RomFS, the containers of many engines, zstd / Yaz0 / ZBIC / Oodle) and translated to SPIR-V for Vulkan, validated, with a manifest by shader key; CLI `nxshaders` |
-| [`src/os`](src/os/README.md) | the OS services: the SDK's service clients replaced by name (file system over the packages in place, saves, accounts, applet / oe, time, settings, hid, audio renderer, vi, Mii, the offline stand-ins), the IPC framework and `sm`, the memory and IPC SVCs, virtual cores, the process boot, and the NVN bootstrap handing NVN to graphics (Vulkan) |
+| ![Per-game settings](docs/images/readme/game-settings.png) | ![Search and filter](docs/images/readme/filters.png) |
 
-Build and test: `cargo build --release`, `cargo test` (seconds). The build tool the launcher runs is `target/release/nxrs-build`; it links games
-against `target/release/nxrt.lib` (`cargo build --release -p runtime`).
+## Getting started
 
-## Credits and licenses
+**You need:** Windows 10/11 x64 with an AVX2 CPU (x86-64-v3), a Vulkan GPU, [LLVM/clang](https://releases.llvm.org/),
+the Visual Studio C++ build tools, and your own Nintendo keys (`prod.keys`) and game dumps. nxrs ships no games or keys.
 
-The engine builds on these projects. Their license texts are in [`LICENSES/`](LICENSES/).
+1. Start `nxrs.exe`. **Keys > Install keys** and pick your `prod.keys`.
+2. **Add game** and pick an NSP, NUP, XCI or game folder.
+3. **Build**: the first build of a game takes a few minutes; later ones reuse what was built.
+4. **Play.**
 
-| Source | Copyright and license | What it contributed |
-|---|---|---|
-| mkw-recomp | © 2026 Adrià, MIT ([text](LICENSES/mkw-recomp.txt)) | the translator, ported to Rust: NSO loading, module seeds and layout (`loader/`), the lifter, NEON/FP lowering, local flags and registers, jump tables (`xlate/`), function discovery, chunked emission and the patch table (`aot/`); the runtime headers the generated C includes (`src/translator/runtime/`, vendored; only their attribution line moved here) |
-| totk-pc-recomp | © 2026 Valiantsin Dzerakh, MIT ([text](LICENSES/totk-pc-recomp.txt)) | the translator code mkw-recomp took from it (its `recomp/`) |
-| LAS Recomp | © 2026 Peiikai, MIT ([text](LICENSES/las-recomp.txt)) | the original NSO loader, lifter, NEON/FP lowering, generator and `cpu.h` / `simd.h` / `simd_fp.h` that totk-pc-recomp and mkw-recomp built on |
-| nxnative | © 2026 seedds, MIT ([text](LICENSES/nxnative.txt)) | the engine's design: this is a Rust port of nxnative, which runs ARM code natively; the translator fills that gap |
-| the owner's code | ChrisColeTech | package input: NSP / NCA / ticket / key handling, BKTR updates, NUP, DLC install and the RomFS markers, ported from the owner's earlier package readers |
-| mkw-recomp (runtime) | © 2026 Adrià, MIT ([text](LICENSES/mkw-recomp.txt)) | the runtime's mechanisms, ported to Rust in `src/runtime/`: the flat PC → function dispatch table (`dispatch.rs`, `asm.rs`), host functions at synthetic guest addresses and the `HOST_OVERRIDE` binding rule (`hostfn.rs`, `loader.rs`), guest setjmp/longjmp owners (`sjlj.rs`, `asm.rs`), nn::os fibers on host fibers (`fiber.rs`), the Windows guest memory model (`mem.rs`: fixed reservations below 2^39, write watch, GetInfo ids, QueryMemory states), the `rt_*` services and the crash report's guest backtrace (`rt.rs`, `fault.rs`); `tools/mkw_gen.py` runs its unmodified `recomp/gen.py` |
-| mkw-recomp (Mario Kart World) | © 2026 Adrià, MIT ([text](LICENSES/mkw-recomp.txt)) | its game layer for Mario Kart World 1.8.0: the code patch table (`src/profiles/games/0400C3F00006E000/recomp.txt`) and its host functions in `src/os/src/gamefix/` (render-buffer pool, zstd on the host, camera stand-in, seed, output / aspect / Vert+ / display, frame rate and race scene, the RomFS resolution overlay) |
-| LAS Recomp (runtime) | © 2026 Peiikai, MIT ([text](LICENSES/las-recomp.txt)) | through mkw-recomp: the host-function registry and dispatch it started from, and the GetWriteWatch use in the memory layer |
-| nxnative (runtime) | © 2026 seedds, MIT ([text](LICENSES/nxnative.txt)) | the minimal kernel (`kernel.rs`: threads, ArbitrateLock/Unlock, the process-wide-key condition variable, address arbitration, events, WaitSynchronization) ported from `dm/host/hle_thread.c`; import binding by symbol name with an UNIMPL report from `hle.c` / `loader.c` |
-| mkw-recomp (build step) | © 2026 Adrià, MIT ([text](LICENSES/mkw-recomp.txt)) | the compile step in `src/cli/` (`cc.rs`), re-expressed from `tools/prepare/gamecode.py` and `tools/build/build.py`: the game-code flag set, objects reused under a content key of the compiler, headers, flags and C, the retry of a compiler crash, the link through a response file |
-| nxnative (profiles) | © 2026 seedds, MIT ([text](LICENSES/nxnative.txt)) | the 187 game profiles of `dm/games` (`game.tsv`, the `patches.py` tables and stubs), `dm/tools/sdk_patches.py`, `engine_patches.py` and `dm/games/settings.tsv`, imported as data into `src/profiles/`; the profile checks and defaults of `game.py` |
-| the owner's code (launcher contract) | ChrisColeTech | the launcher-facing options the `nxrs` contract keeps (`--update`, `--update-info`, the DLC options, their messages and exit codes), and the Pokémon Legends: Z-A 60 FPS patch (`src/profiles/games/0100F43008C44000/turbo.toml`) |
-| nxnative (shaders) | © 2026 seedds, MIT ([text](LICENSES/nxnative.txt)) | the shader readers of `dm/gfx/tools/shader_split.py` and `cpk.py`, ported to Rust in `src/shaders/src/formats/` (BNSH, agl BAHS and its program variations, NDSR / NDVE, sead's primitive drawer, SHN!, MSHD, GLSLC outputs, Snowdrop, Heaps, Hedgehog PACx 403 and Needle, CRI CPK / CRILAYLA, GFPAK, Trinity packs, Yaz0 / SARC / zstd dictionaries) with the shader key and checks (`nvn.rs`); `dmsh_build.py`'s translation jobs (`job.rs`: VertexA/B merge, c1, NVN2 compute layout and stage banks, task / mesh stage memory, transform feedback, tessellation mode); the `dmsh_xlate` tool (`dm/gfx/tools/dmsh_xlate`), built from its source with `src/shaders/tools/dmsh_xlate.patch` (the Vulkan target and a descriptor set per stage) |
-| Ryujinx | © Ryujinx Team and Contributors, MIT ([text](LICENSES/ryujinx.txt)) | the shader translator in `dmsh_xlate` (`Ryujinx.Graphics.Shader`, `Ryujinx.Common`, `Spv.Generator` 1.3.2 with nxnative's changes), compiled into the tool, not linked into the engine |
-| MacNativeGames | © 2026 MacNativeGames contributors, MIT ([text](LICENSES/macnativegames.txt)) | through nxnative: `dmsh_xlate`'s `VertexCounterLowering` |
-| lztans | © 2026 patodois, MIT OR Apache-2.0 ([text](LICENSES/lztans.txt)) | the Oodle decoder (Kraken, Mermaid / Selkie, Leviathan; a crate dependency, written clean-room) for Game Freak's GFPAK entries and Trinity packs |
-| the owner's code (shaders) | ChrisColeTech | the ZBIC decoder for Switch 2 NSO segments (`src/translator/src/loader/zbic.rs`, shared by the build and `src/shaders`), ported from the owner's earlier `zbic.py`, and its test vector |
-| the owner's code (runtime) | ChrisColeTech | from the owner's earlier engine: the ZBIC NSOs staged unpacked, XCI as the game's package, the global exclusive monitor for Switch 1 programs and the LDAR/STLR/LDXR atomics (`cpu.h`), the system tick per console, the process memory cap (a job object), the start-up choices of `SWR_XMON` / `SWR_TICK_HZ` / `SWR_MAP_LIMIT` / `SWR_MEMORY_CAP_GB`, and the build options `--chunk` and `--native` |
-| nxnative (runtime, lane T) | © 2026 seedds, MIT ([text](LICENSES/nxnative.txt)) | maps past the application pool failing with ResultLimitReached (`mem_map_limit`), the thread ID at TLS+0x110 (SDK 22), WaitIfEqual64; the per-game shader tables (`pso_manifest.tsv`, `pso_pairs.tsv`, `shader_pairs.tsv`, `shader_facts.tsv`) imported as data into `src/profiles/games/*/shaders.tsv.zst` |
-| llvm-mingw | © the LLVM project and Martin Storsjö, Apache-2.0 WITH LLVM-exception and others ([text](LICENSES/llvm-mingw.txt)) | the bundled compiler for machines without Visual Studio (clang, lld, compiler-rt and libunwind; libunwind and compiler-rt are linked into the game's code DLL) |
-| mkw-recomp (shaders) | © 2026 Adrià, MIT ([text](LICENSES/mkw-recomp.txt)) | not included: its `sm86` translator is run from its own checkout as the cross-check of `dmsh_xlate` (`src/shaders/tools/crosscheck_sm86.py`) |
-| nxnative (os) | © 2026 seedds, MIT ([text](LICENSES/nxnative.txt)) | the OS services in `src/os/`, ported from `dm/host`: the HLE takeovers by name and their answers (`hle_fs.c`, `hle_oe.c`, `hle_account.c`, `hle_time.c`, `hle_hid.c`, `hle_mii.c`, `hle_audren.c`, `hle_audio.c`, `hle_sdk16.c`, `hle_misc.c`, `hle_offline.c`, `hle_net.c`, `hle_friends.c`, `hle_sf.c`, `hle_sdkinit.c`; the offline stand-in table in `services/simple_table.rs` is generated from them), the boot order of `main.c`, the memory SVCs of `hle_svc.c`, the NVN device properties and object semantics of `dm/gfx/nvn/hle_nvn.c`, `dm/gfx/hle_nv.c`, `dm/gfx/hle_vi.c`, and the texture layout of `nvn_tex.c` (itself deko3d's algorithm: © 2018-2020 fincs, zlib, [text](LICENSES/deko3d.txt)) |
-| mkw-recomp (os) | © 2026 Adrià, MIT ([text](LICENSES/mkw-recomp.txt)) | the virtual-core design of `src/os/src/sched.rs` (one guest thread per application core, checkpoints at SVCs and spin waits, from its `kernel_cores.c`) |
-| libopus 1.5.2 | © Xiph.Org Foundation and contributors, BSD-3-Clause ([text](LICENSES/libopus.txt)) | the hardware Opus decoder's packets (`src/os/src/media/opus.rs`, `services/codec.rs`); the static archive `src/os/third_party/opus/libopus.a`, built from the release archive by the owner's `build_opus.py`, unmodified |
-| libvpx 1.14.0 | © the WebM project authors, BSD-3-Clause with a patent grant ([text](LICENSES/libvpx.txt)) | VP8 and VP9 decoding for the movie and video decoders (`media/vpx.rs`); `src/os/third_party/vpx/libvpx.a` (1,208,770 bytes, SHA-256 `26468f561af0965bbe9570c9061b0f91155602c343a0b564b37b65387098d6ba`), the VP8 and VP9 decoders only (no encoders, single-threaded), built for this engine from Ubuntu's source package `libvpx_1.14.0-1ubuntu2.3` (its full patch series, CVE fixes included) with llvm-mingw (clang 23.1.5), NASM 2.16.03 and GNU Make 4.4.1 (MSYS2 `make-4.4.1-2`): `--target=x86_64-win64-gcc --enable-static --disable-shared --enable-vp8-decoder --disable-vp8-encoder --enable-vp9-decoder --disable-vp9-encoder --disable-examples --disable-tools --disable-docs --disable-unit-tests --disable-multithread --as=nasm`, `CROSS=x86_64-w64-mingw32-` |
-| dav1d 1.5.5 | © VideoLAN and dav1d authors, BSD-2-Clause ([text](LICENSES/dav1d.txt)) | AV1 decoding for the Switch 2's video decoders (`media/av1.rs`, driven as the owner's `av1video.inc` drives it); `src/os/third_party/dav1d/libdav1d.a`, built by the owner's `build_dav1d.py`, unmodified |
-| lewton | © 2016 est31 and contributors, MIT OR Apache-2.0 ([text](LICENSES/lewton.txt)) | Vorbis decoding of movie audio tracks (a crate dependency) |
-| cpal | © the cpal contributors, Apache-2.0 ([text](LICENSES/cpal.txt)) | the sound card and capture device through WASAPI (a crate dependency) |
-| nxnative (os media) | © 2026 seedds, MIT ([text](LICENSES/nxnative.txt)) | the renderer's in-process output (`services/audren.rs`: DeviceSink capture in every SDK's command layout, the update lock, catch-up frames, the 3:2 upsampler), the movie decoder (`services/movie.rs`, from `hle_movie.c`), the Switch 2 video decoders and sync points (`services/codec_video.rs`, from `hle_codec_video.c`), the Opus manager (`hle_codec.c`) |
-| the owner's code (os media) | ChrisColeTech | the dav1d driving rules (`av1video.inc`), the codec archives' builds, the `docked` / `language` / `keyboard_text` / `audio_slowdown` options and their defaults |
-| nxnative (graphics) | © 2026 seedds, MIT ([text](LICENSES/nxnative.txt)) | the NVN record layer in `src/graphics/src/nvn/`, ported from `dm/gfx/nvn/hle_nvn.c` and `nvn_obj.h` (objects in place, command memory and control lists, compact records, shader keys, descriptor pool numbering, device properties, syncs and events, window and present pacing from `nvn_pace.h`, timestamps from `nvn_timestamp.h`); the texture layout and deswizzle (`src/graphics/src/tex/layout.rs`, `deswizzle.rs`) from `nvn_tex.c` and `dm/gfx/tex/nvn_deswizzle.c` (deko3d's algorithm: © 2018-2020 fincs, zlib, [text](LICENSES/deko3d.txt)) with the driver shapes of `t_tex_layout.c` as tests; the structure of the Vulkan replay after `nvn_mtl.m` and the rules of `docs/reference` |
-| mkw-recomp (graphics) | © 2026 Adrià, MIT ([text](LICENSES/mkw-recomp.txt)) | the GPU ASTC decoder and BC7 encoder (`src/graphics/shaders/astc_decode.comp`, `bc7_encode.comp`, vendored; their dispatch and unquantization tables in `src/graphics/src/tex/astc.rs` from `vk/tex/vk_astc.c`); the discrete-GPU memory model of `src/graphics/src/vk/mem.rs` (VRAM mirrors with write-watch uploads, write-back at fences, host import) after `vk/mem/*`; host-side binding rewrites into one layout after `vk/pipe/vk_spirv_patch.c`; the pipeline key file and prewarm after `vk/pipe/vk_pipe_keys.c` |
-| the owner's code (input, front, harness) | ChrisColeTech | the DualSense / DualShock 4 report decoder and output packets and the shared-write HID open (`src/os/src/input/sony.rs`, from `controller_sony.h` / `controller_sony_win32.h`), `button_layout` / `button_map` (`input/layout.rs`, from `pad_layout.h`), the input record / replay format, the scenario harness's input scripts (`scripts/inputs/`) |
-| nxnative (input) | © 2026 seedds, MIT ([text](LICENSES/nxnative.txt)) | the design of the controller layer: `hle_hid.c`'s players, npad styles, Joy-Con assignment, merged one-player input, the controller applet's player counts and six-axis answers (`src/os/src/services/hid.rs`), `pad_slots.h` (player slots), `pad_pro.h` / `pad_jc1.h` (Switch Pro / Joy-Con reports, SPI calibration), `motion_fusion.h`, `switch2_proto.h` (Switch 2 controllers), `DM_KEYS` scripted input; reimplemented in Rust |
-| mkw-recomp (input) | © 2026 Adrià, MIT ([text](LICENSES/mkw-recomp.txt)) | the Windows Bluetooth LE flow for Switch 2 controllers (`switch2_win.c`: advertisement watcher, uncached GATT reads, the handshake order), reimplemented on WinRT in `input/switch2_ble.rs` |
-| lsfg-vk | © 2025 lsfg-vk, MIT ([text](LICENSES/lsfg-vk.txt)) | LSFG 3.1's pass order and binding counts, used to identify the shaders in the player's own Lossless.dll (`src/front/src/lsfg.rs`); no shader is shipped |
-| Linux hid-playstation | protocol reference only | DualSense / DualShock 4 report layouts and the compatible-vibration firmware gate, as the owner's earlier code documents them; no code from it |
-| LAS Recomp (graphics) | © 2026 Peiikai, MIT ([text](LICENSES/las-recomp.txt)) | through mkw-recomp: the ASTC decoder its GPU decoder was ported from |
+## Building from source
+
+Rust (stable), the Vulkan SDK, LLVM and the Visual Studio C++ build tools:
+
+```powershell
+scripts/build/build.ps1 -Run     # builds the engine and launcher into dist/nxrs and starts it
+```
+
+`dist/nxrs` is the complete app (`nxrs.exe` plus `nxrs-engine/`). For developers: `AGENTS.md` and
+`docs/ARCHITECTURE-AND-STYLE-GUIDE.md` describe the layout and rules.
+
+## Credits
+
+nxrs builds on the work of mkw-recomp, LAS Recomp, totk-pc-recomp, nxnative, Ryujinx, MacNativeGames, deko3d, lsfg-vk,
+lztans, dav1d, libvpx, libopus, lewton, cpal and llvm-mingw. Thank you. Their licenses are in [`LICENSES/`](LICENSES/).
+
+nxrs is MIT licensed ([LICENSE](LICENSE)). It is not affiliated with Nintendo.
