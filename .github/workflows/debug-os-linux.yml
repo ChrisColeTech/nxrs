@@ -56,7 +56,9 @@ jobs:
         run: |
           bin=$(ls -t target/debug/deps/nxos-* | grep -v '\.d$' | head -1)
           echo "binary: $bin"
-          for t in services::codec_video::tests::vp9_clip_decodes_as_ffmpeg services::codec_video::tests::av1_clip_decodes_as_ffmpeg services::movie::tests::movie_vp9_clip_decodes_as_ffmpeg; do
-            echo "=================== $t"
-            timeout 600 gdb -batch -q -ex run -ex bt -ex 'info registers rip' --args "$bin" "$t" --exact --test-threads=1 --nocapture 2>&1 | tail -60 || true
-          done
+          echo "=================== whole binary, one thread"
+          timeout 1200 gdb -batch -q -ex run -ex bt -ex 'info threads' --args "$bin" --test-threads=1 2>&1 \
+            | grep -v '^\[New Thread\|^\[Thread .* exited\]\|ALSA lib' | tail -80 || true
+          echo "=================== whole binary, default threads"
+          timeout 1200 gdb -batch -q -ex run -ex 'thread apply all bt 8' --args "$bin" 2>&1 \
+            | grep -v '^\[New Thread\|^\[Thread .* exited\]\|ALSA lib' | tail -120 || true
