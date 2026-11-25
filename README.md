@@ -13,13 +13,16 @@ A Rust static recompiler and launcher for Switch and Switch 2 games. Add your NS
 
 ## Install
 
-1. Download `nxrs-windows-x64.zip` from the [latest release](https://github.com/ChrisColeTech/nxrs/releases/latest).
-2. Unzip it anywhere and run `nxrs.exe`. Nothing else is installed; the folder is the whole app.
-3. Install [LLVM](https://github.com/llvm/llvm-project/releases) and the
-   [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) ("Desktop development with
-   C++"). nxrs uses them to build each game. **Settings > Engine** checks your PC and tells you if anything is missing.
+Download from the [latest release](https://github.com/ChrisColeTech/nxrs/releases/latest). You need a 64-bit CPU with
+AVX2 and a graphics card with Vulkan. **Settings > Engine** checks your PC and lists anything missing.
 
-You need Windows 10 or 11 (64-bit), a CPU with AVX2 and a graphics card with Vulkan.
+**Windows 10 / 11:** unzip `nxrs-windows-x64.zip` anywhere and run `nxrs.exe`. Install
+[LLVM](https://github.com/llvm/llvm-project/releases) and the
+[Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) ("Desktop development with C++");
+nxrs uses them to build each game.
+
+**Linux:** extract `nxrs-linux-x64.tar.gz` anywhere and run `nxrs/nxrs`. Install clang and lld, a Vulkan driver, and the
+ALSA, Opus, libvpx, dav1d and FFmpeg (libavcodec) libraries from your distribution.
 
 ## Build from source
 
