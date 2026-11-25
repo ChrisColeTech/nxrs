@@ -65,19 +65,52 @@ steps = ["wait 12", "shot boot", "wait 880"]
 
 [oot]
 title = "The Legend of Zelda Ocarina of Time"
-about = "fresh save: title, New Game, the opening story and nightmare, the title card, Kokiri Forest's Deku Tree talk"
+about = "fresh save: title, New Game, the opening, Kokiri Forest's Deku Tree talk, Navi's flight, Link woken, walk"
 # Fresh save: the title is up by ~25 s (with the pipeline cache; a cold compile of the NDVE upscaler d15370a382630d4e
 # takes ~60 s first); A on "New Game" starts the opening at once (no file menu). The opening (story tapestry, Link's
-# nightmare, his house, the title card) does not skip and A does not hurry it; Kokiri Forest loads at ~330 s and the
-# Deku Tree / Navi talk advances with A. First gameplay (Link woken in his house) is not reached yet: from the forest
-# on the picture is black or white behind the subtitles (E5B9G9R9 storage images bound as zero stand-ins, OOT-PIPE).
-# The window covers the opening's cutscenes, which the game runs at 30 FPS (held 2 vsyncs).
-seconds = 470
+# nightmare, his house, the title card) does not skip and A does not hurry it; Kokiri Forest loads at ~330-345 s
+# (one 6 s stall) and the Deku Tree / Navi talk advances with A. Navi then flies over the village to Link's house
+# (~20 s without a present entering it, ~620-640 s), wakes him (~750-1030 s, the Navi title card ~1020 s) and he
+# dresses (~1060-1290 s; the dialogue moves one line per A, so its timing varies by a minute between runs). First
+# controllable gameplay is not reached yet: route6 ends with the camera behind Link standing in his house at ~1232 s,
+# route7 still on "So, come on. Let's go together!" at 1284 s (OOT-NAN: build/play/20261125-170343-oot-route6,
+# -172447-oot-route7). The walks are exploration and do nothing in the cutscenes. The window covers the opening's
+# cutscenes, which the game runs at 30 FPS (held 2 vsyncs).
+seconds = 1360
 window = [100, 300]
 fps = 59
 steps = ["wait 25", "shot title", "press A ; 3 * 25", "shot story", "press A ; 3 * 25", "shot nightmare",
          "press A ; 3 * 25", "shot house", "press A ; 3 * 25", "shot forest load", "press A ; 3 * 10",
-         "shot deku tree", "press A ; 3 * 10", "shot navi", "press A ; 3 * 10", "shot end"]
+         "shot deku tree", "press A ; 3 * 10", "shot navi", "press A ; 3 * 10", "shot end",
+         "press A ; 3 * 10", "shot x1", "press A ; 3 * 10", "shot x2", "press A ; 3 * 10", "shot x3",
+         "press A ; 3 * 10", "shot x4", "press A ; 3 * 10", "shot x5", "replay violet_bedroom_walk.txt ; 2",
+         "shot walk1", "wait 2", "shot walk2", "wait 4", "shot walk3", "press A ; 3 * 10", "shot x6",
+         "replay violet_bedroom_walk.txt ; 2", "shot walk4", "wait 2", "shot walk5", "wait 4", "shot x7",
+         "press A ; 3 * 10", "shot x8", "press A ; 3 * 10", "shot x9", "press A ; 3 * 10", "shot x10",
+         "replay violet_bedroom_walk.txt ; 2", "shot walk6", "wait 2", "shot walk7", "wait 4", "shot walk8",
+         "press A ; 3 * 5", "shot x11", "replay violet_bedroom_walk.txt ; 2", "shot walk9", "wait 2",
+         "shot walk10", "wait 4", "shot end2", "press A ; 3 * 10", "shot x12", "press A ; 3 * 10", "shot x13",
+         "press A ; 3 * 10", "shot x14", "replay violet_bedroom_walk.txt ; 2", "shot walk11", "wait 2",
+         "shot walk12", "wait 4", "shot walk13", "press A ; 3 * 5", "shot x15",
+         "replay violet_bedroom_walk.txt ; 2", "shot walk14", "wait 2", "shot walk15", "wait 4", "shot end3",
+         "press A ; 3 * 10", "shot x16", "press A ; 3 * 10", "shot x17", "replay violet_bedroom_walk.txt ; 2",
+         "shot walk16", "wait 2", "shot walk17", "wait 4", "shot walk18", "press A ; 3 * 10", "shot x18",
+         "replay violet_bedroom_walk.txt ; 2", "shot walk19", "wait 2", "shot walk20", "wait 4", "shot walk21",
+         "replay violet_bedroom_walk.txt ; 2", "shot walk22", "wait 2", "shot walk23", "wait 4", "shot end4",
+         "press A ; 3 * 10", "shot x19", "press A ; 3 * 10", "shot x20", "replay violet_bedroom_walk.txt ; 2",
+         "shot walk24", "wait 2", "shot walk25", "wait 4", "shot walk26", "press A ; 3 * 10", "shot x21",
+         "replay violet_bedroom_walk.txt ; 2", "shot walk27", "wait 2", "shot walk28", "wait 4", "shot walk29",
+         "replay violet_bedroom_walk.txt ; 2", "shot walk30", "wait 2", "shot walk31", "wait 4", "shot end5",
+         "press A ; 3 * 8", "shot x22", "replay violet_bedroom_walk.txt ; 2", "shot walk32", "wait 2",
+         "shot walk33", "wait 4", "shot walk34", "press A ; 3 * 5", "shot x23",
+         "replay violet_bedroom_walk.txt ; 2", "shot walk35", "wait 2", "shot walk36", "wait 4", "shot walk37",
+         "replay violet_bedroom_walk.txt ; 2", "shot walk38", "wait 2", "shot walk39", "wait 4", "shot end6",
+         "replay violet_bedroom_walk.txt ; 1", "shot play1", "wait 1.5", "shot play2", "wait 2", "shot play3",
+         "wait 3.5", "shot play4", "replay violet_bedroom_walk.txt ; 1", "shot play5", "wait 1.5", "shot play6",
+         "wait 2", "shot play7", "wait 3.5", "shot play8", "press A ; 3 * 4", "shot play9",
+         "replay violet_bedroom_walk.txt ; 1", "shot play10", "wait 1.5", "shot play11", "wait 2", "shot play12",
+         "wait 3.5", "shot play13", "replay violet_bedroom_walk.txt ; 1", "shot play14", "wait 1.5",
+         "shot play15", "wait 2", "shot play16", "wait 3.5", "shot end7"]
 
 [mk8d]
 title = "Mario Kart 8 Deluxe"
