@@ -107,6 +107,21 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       agent's restore copied the wrong way and **lost the original 152 MB `pipeline-cache.bin`** (regenerable cache;
       the live one is this session's 357 MB); keys and crashed lists restored byte-identical. Owner option: drop the
       old-machine `pipeline-crashed.bin` entry that now compiles cleanly (`-xoot5-noblack`).
+- [x] **OOT-NAN** (2026-11-25, `docs/waves/OOT-NAN.md`, commit `9903fc7`; lead re-ran graphics 209/209 and read the
+      oot and mkw sheets; **independent audit running**). Cause of the white forest: **NVN2 compute shaders read the
+      dispatch group counts at c0 + 0x4; nxrs wrote only 0x200** (NVN1's place) -> the sky irradiance compute
+      divided by 0 -> Inf/NaN spherical harmonics -> NaN in the forward pass, spread by fog. `c0_bytes` now writes
+      both for Switch 2 titles (MKW too). The `0x13dc17000` suspect was the game's own transient aliasing, not a bug.
+      Also fixed OOT-RGB9E5's audit M1-M3, L3, L5, L7 (L1 not done). `build/play/20261125-153150-oot-nan-fix`: Deku
+      Tree, Navi, roots render (white before), 2 known red lines; `-172447-oot-route7` to Link dressing in his house
+      (~1284 s, still a cutscene). MKW `-154021-mkw-nan` race 29.2 FPS, 1 known red line, sheet correct. Lead's
+      sheet read: the forest haze looks too strong. Open -> wave **OOT-FOREST2** (indirect dispatches still put CPU
+      counts in c0; the haze; forest frames 70-380 ms with ~56 MB uploaded per frame and ~20 s without presents
+      entering the house; route to Link moving). Slip: one shader `.spv` swapped for a trap run, restored
+      byte-identical (SHA-256 checked).
+- [ ] **Running 2026-11-25 evening:** MKW-RECORD phase 2 (steps 1-3, 8 h) in worktree
+      `D:\Projects\RecompLauncherEngine-mkw` (branch `mkw-record`, own target/dist, relinks only MKW, main-tree
+      locks); OOT-FOREST2 in the main tree (OoT only, regression `wonder`, no `vk/queue.rs`); the OOT-NAN audit.
 - [~] **OOT-RGB9E5** (2026-11-25, `docs/waves/OOT-RGB9E5.md`; lead re-ran graphics 208/208 and read both sheets;
       accepted pending OOT-NAN's audit fixes). New `vk/storemu.rs`: emulated storage formats (E5B9G9R9 via an R32_UINT view;
       the game's own E5B9G9R9 view gets the RGB9E5 pack, its own `r32ui` view the raw bits), `image.rs`
