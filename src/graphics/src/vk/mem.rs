@@ -678,20 +678,50 @@ pub fn room(a: u64) -> u64 {
     } else {
         a
     };
+    // the windows this thread asked about last, while no pool came, went or got its buffer: (generation, window
+    // start, window end, the next pool's base); every read-only storage buffer of a stage set asks (MKW: thousands a
+    // frame, each taking the pool lock the completion thread holds ~9 ms a frame)
+    thread_local! {
+        static LAST: std::cell::Cell<[(u64, u64, u64, u64); 8]> = const { std::cell::Cell::new([(0, 0, 0, 0); 8]) };
+    }
+    let gen = POOL_GEN.load(Ordering::Acquire);
+    if let Some(e) = LAST.with(|l| l.get().into_iter().find(|e| room_hit(*e, gen, a))) {
+        return e.2 - a;
+    }
     let m = g.mem.lock().unwrap();
     match find(&m, a, 1) {
         Some(b) => {
             let p = &m.by_base[&b];
             // to the end of the window holding `a` (a pool over the device's largest buffer has several)
-            if p.win == 0 {
-                p.base + p.size - a
+            let (lo, hi) = if p.win == 0 {
+                (p.base, p.base + p.size)
             } else {
                 let k = (a - p.base) / p.win;
-                (p.base + ((k + 1) * p.win).min(p.size)) - a
-            }
+                (p.base + k * p.win, p.base + ((k + 1) * p.win).min(p.size))
+            };
+            let next = m
+                .by_base
+                .range(b + 1..)
+                .next()
+                .map(|(k, _)| *k)
+                .unwrap_or(u64::MAX);
+            // the generation read before the lookup: a pool change since makes the entry miss
+            LAST.with(|l| {
+                let mut v = l.get();
+                v.rotate_right(1);
+                v[0] = (gen, lo, hi, next);
+                l.set(v);
+            });
+            hi - a
         }
         None => 0,
     }
+}
+
+/// Whether `room`'s remembered window `e` (generation, start, end, the next pool's base) holds `a` now: the same
+/// pools, `a` in the window and below the next pool (a pool laid over this one owns what lies past its base).
+fn room_hit(e: (u64, u64, u64, u64), gen: u64, a: u64) -> bool {
+    e.0 == gen && e.0 != 0 && a >= e.1 && a < e.2 && a < e.3
 }
 
 /// The OS write watch of [a, a + n) reset (the host wrote it, not the game).
@@ -2304,6 +2334,27 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         cnt[3],
         sb >> 20
     ) + &super::lazy::summary(f)
+}
+
+#[cfg(test)]
+mod room_cache_tests {
+    use super::*;
+
+    /// `room`'s remembered window answers only for the same pools (generation), inside the window and below the next
+    /// pool's base (a pool laid over it owns the rest); never for an empty slot.
+    #[test]
+    fn a_remembered_window_answers_only_inside_it_under_the_same_pools() {
+        let e = (7, 0x1000, 0x5000, 0x3000);
+        assert!(room_hit(e, 7, 0x1000));
+        assert!(room_hit(e, 7, 0x2fff));
+        assert!(!room_hit(e, 7, 0x3000), "past the next pool's base");
+        assert!(!room_hit(e, 7, 0xfff));
+        assert!(!room_hit(e, 8, 0x2000), "a pool came, went or got its buffer");
+        assert!(!room_hit((0, 0, 0, 0), 0, 0));
+        let e = (7, 0x1000, 0x5000, u64::MAX);
+        assert!(room_hit(e, 7, 0x4fff));
+        assert!(!room_hit(e, 7, 0x5000), "the window ends there");
+    }
 }
 
 #[cfg(test)]

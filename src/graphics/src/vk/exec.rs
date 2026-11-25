@@ -126,6 +126,10 @@ pub struct QState {
     tpart: std::cell::RefCell<[Option<TexPart>; 7]>,
     /// a stage's whole set as last written into the descriptor buffer, and what it was made from (`SetKey`)
     sets: std::cell::RefCell<super::lost::bindings::SetCache<SetKey>>,
+    /// a stage's last sets in host memory, one per module, newest first (`Shadow`, descriptor buffers): bound again
+    /// when the key is the same, patched for the next set of that module when only its uniform buffers or push
+    /// constants changed
+    shadow: std::cell::RefCell<[Vec<Box<Shadow>>; 7]>,
     /// the id of the c2 bank `banks` returned last
     c2id: std::cell::Cell<u64>,
     /// the vertex input and vertex buffers last set in this queue's command buffer: (submission, layout words,
@@ -199,6 +203,181 @@ struct SetKey {
     mesh: (u64, u64, u64),
 }
 
+/// A stage's last set as written into the descriptor buffer, kept in host memory with the key it was made for: a set
+/// whose key differs from it only in uniform buffers or push constants is this copy with those slots written again
+/// (`patch_set`) instead of the whole set resolved and written (MKW binds new uniform buffers at nearly every draw).
+struct Shadow {
+    /// the module the set is of
+    module: (usize, crate::nvn::prog::ShaderKey),
+    /// the key (None: the copy is of a set no key covers, or of an unfinished patch)
+    key: Option<SetKey>,
+    /// where the keyed set was written (in the key's submission and chunk)
+    off: u64,
+    /// the bytes are a whole set as written into a chunk (a set written without the fill leaves them stale)
+    valid: bool,
+    /// the whole set: the filled buffer slots, the set's own descriptors, zeros elsewhere
+    bytes: Vec<u8>,
+    /// POOL_GEN sampled before the set's descriptors were resolved
+    memory_generation: u64,
+    /// the loss ring's record of the set's buffer descriptors (`lost::ring::note_set`)
+    ring: [(u32, i32, u64, u64, u64); super::lost::ring::MAXB],
+    nr: usize,
+}
+
+/// Stage sets are written in host memory first and patched from their copy (`Shadow`) unless `NXGFX_SET_PATCH=0`, the
+/// fill is off (`NXGFX_DB_FILL=0`: unbound slots keep what the chunk held) or a descriptor diagnosis reads the chunk
+/// (`NXGFX_DB_POISON`, `NXGFX_MESH_BINDINGS`).
+fn set_patch_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("NXGFX_SET_PATCH").as_deref() != Ok("0")
+            && db_fill_on()
+            && !db_poison_on()
+            && !super::lost::bindings::enabled()
+    })
+}
+
+/// Host copies kept per stage (one per module, the least recently written replaced): draws interleave shaders per
+/// stage, each with its own sets (MKW's race: with 8, a third of the whole sets found no copy of their module).
+const SHADOWS: usize = 32;
+
+/// The host copy for a set of `module` about to be written: that module's, or a new one, or the least recently written
+/// one's; moved to the front (newest).
+fn shadow_slot(list: &mut Vec<Box<Shadow>>, module: (usize, crate::nvn::prog::ShaderKey)) -> &mut Shadow {
+    let i = match list.iter().position(|s| s.module == module) {
+        Some(i) => i,
+        None if list.len() < SHADOWS => {
+            list.push(Box::new(Shadow {
+                module,
+                key: None,
+                off: 0,
+                valid: false,
+                bytes: Vec::new(),
+                memory_generation: 0,
+                ring: Default::default(),
+                nr: 0,
+            }));
+            list.len() - 1
+        }
+        None => list.len() - 1,
+    };
+    list[..=i].rotate_right(1);
+    let s = &mut list[0];
+    if s.module != module {
+        // another module's copy: nothing of it is this module's set
+        s.module = module;
+        s.key = None;
+        s.valid = false;
+    }
+    s
+}
+
+/// What a stage-set slot is made from, for patching (`res_class`, `patch_classes`): bits 0..16 the uniform buffer
+/// c(3 + k) bound there (or a storage address read from its memory), then these.
+const CL_PUSH: u32 = 1 << 16;
+/// c0: the bank bound itself, or a storage buffer whose address is read from it
+const CL_C0: u32 = 1 << 17;
+/// c2: the bank bound itself, or a storage buffer whose address is read from it
+const CL_C2: u32 = 1 << 18;
+const CL_SUPPORT: u32 = 1 << 19;
+const CL_MESH: u32 = 1 << 20;
+/// textures and images (their handles are in c2; the views depend on the pools and the registered images)
+const CL_TEX: u32 = 1 << 21;
+
+/// The classes stage-set resource `r` depends on (0: only on the module and the submission).
+fn res_class(r: &Res) -> u32 {
+    let slot = |s: i32| match s {
+        0 => CL_C0,
+        -1 | 2 => CL_C2,
+        3..=18 => 1 << (s - 3),
+        _ => 0,
+    };
+    match r {
+        Res::Cbuf { bank: 24..=29 } => CL_PUSH,
+        Res::Cbuf { bank } => slot(*bank as i32),
+        Res::Support => CL_SUPPORT,
+        Res::Sbuf { cb_slot: super::gmem::CB_SLOT, .. } => u32::MAX,
+        Res::Sbuf { cb_slot, .. } => slot(*cb_slot),
+        Res::Tex { .. } | Res::Img { .. } => CL_TEX,
+        Res::MeshDraw => CL_MESH,
+        Res::Pool => 0,
+    }
+}
+
+/// The classes whose slots a set keyed `new` needs written again over the module's set keyed `old` (`patch_set`);
+/// None when it is another module's or another submission's set (staging is per submission). Every other slot names
+/// what a whole set would: a slot's class holds everything its descriptor is made from.
+fn patch_classes(old: &SetKey, new: &SetKey) -> Option<u32> {
+    if old.module != new.module || old.serial != new.serial {
+        return None;
+    }
+    let mut c = ubos_changed(old, new) as u32;
+    if old.pgen != new.pgen {
+        c |= CL_PUSH;
+    }
+    if old.bgen[0] != new.bgen[0] || old.base_instance != new.base_instance || old.dispatch != new.dispatch {
+        c |= CL_C0;
+    }
+    if old.bgen[1] != new.bgen[1] {
+        c |= CL_C2 | CL_TEX;
+    }
+    if old.image_gen != new.image_gen || old.pools != new.pools {
+        c |= CL_TEX;
+    }
+    if old.extent != new.extent {
+        c |= CL_SUPPORT;
+    }
+    if old.mesh != new.mesh {
+        c |= CL_MESH;
+    }
+    Some(c)
+}
+
+/// (diagnosis, `NXGFX_PROFILE=1`) why stage sets were built whole: what differed from the module's last set, counted
+/// and logged every 20,000 whole sets.
+fn note_set_miss(old: Option<&SetKey>, new: Option<&SetKey>) {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    const NAMES: [&str; 12] = [
+        "no key", "no last set", "c0", "c2", "base instance/dispatch", "submission", "images", "pools",
+        "extent", "draw records", "uniforms read as addresses", "pools changed/other",
+    ];
+    static N: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
+    static ALL: AtomicU64 = AtomicU64::new(0);
+    if !super::perf::fine() {
+        return;
+    }
+    let i = match (old, new) {
+        (_, None) => 0,
+        (None, _) => 1,
+        (Some(o), Some(n)) if o.bgen[0] != n.bgen[0] => 2,
+        (Some(o), Some(n)) if o.bgen[1] != n.bgen[1] => 3,
+        (Some(o), Some(n)) if o.base_instance != n.base_instance || o.dispatch != n.dispatch => 4,
+        (Some(o), Some(n)) if o.serial != n.serial => 5,
+        (Some(o), Some(n)) if o.image_gen != n.image_gen => 6,
+        (Some(o), Some(n)) if o.pools != n.pools => 7,
+        (Some(o), Some(n)) if o.extent != n.extent => 8,
+        (Some(o), Some(n)) if o.mesh != n.mesh => 9,
+        (Some(o), Some(n)) if o.module == n.module && ubos_changed(o, n) != 0 => 10,
+        _ => 11,
+    };
+    N[i].fetch_add(1, Relaxed);
+    if ALL.fetch_add(1, Relaxed) % 20000 == 19999 {
+        let s: Vec<String> = (0..12).map(|k| format!("{} {}", NAMES[k], N[k].swap(0, Relaxed))).collect();
+        crate::vklog!("whole stage sets, last 20000, by what differed from the module's last set: {}", s.join(", "));
+    }
+}
+
+/// The uniform buffers (bit k: c(3 + k)) whose bound range differs between two keys.
+fn ubos_changed(old: &SetKey, new: &SetKey) -> u16 {
+    let mut v = 0u16;
+    for k in 0..16 {
+        if old.ubo[k] != new.ubo[k] {
+            v |= 1 << k;
+        }
+    }
+    v
+}
+
 /// The key of stage set `m` for this draw, or None when the set reads something the key does not cover: texture
 /// handles from a uniform buffer or a bound buffer (bindless), buffer textures, the resolution scale, a pass dump.
 fn set_key(
@@ -216,28 +395,29 @@ fn set_key(
     {
         return None;
     }
-    let plain = m.res.iter().all(|(_, r)| match r {
-        Res::Tex { cbuf_slot, ty, .. } | Res::Img { cbuf_slot, ty, .. } => {
-            let (t, s) = tex_slots(*cbuf_slot);
-            (t == 2 || t == -1) && (s == 2 || s == -1) && *ty != 2
-        }
-        _ => true,
-    });
-    if !plain {
-        return None;
-    }
+    let d = set_deps(m)?;
     let st = m.stage as usize;
-    let (di, bi) = if st == 5 {
+    // the dispatch size and the base instance are in c0 only
+    let (di, bi) = if !d.c0 {
+        ([0; 3], 0)
+    } else if st == 5 {
         (dispatch, 0)
     } else {
         ([0; 3], base_instance)
     };
     Some(SetKey {
         module: (m as *const Module as usize, m.key),
-        bgen: qs.bgen[st],
-        ubo: qs.ubo[st],
-        pgen: qs.pgen,
-        extent: (qs.pass_extent.width, qs.pass_extent.height),
+        bgen: [
+            if d.c0 { qs.bgen[st][0] } else { 0 },
+            if d.c2 { qs.bgen[st][1] } else { 0 },
+        ],
+        ubo: masked_ubos(&qs.ubo[st], d.ubo),
+        pgen: if d.push { qs.pgen } else { 0 },
+        extent: if d.support {
+            (qs.pass_extent.width, qs.pass_extent.height)
+        } else {
+            (0, 0)
+        },
         pools: pool_bases(qs),
         dispatch: di,
         base_instance: bi,
@@ -251,6 +431,95 @@ fn set_key(
             _ => (0, 0, 0),
         },
     })
+}
+
+/// What a stage set reads of the queue's state besides its module, the submission, the pools and the images
+/// (`set_deps`): the key holds only these, so a bind the shader does not read keeps its set (MKW: ~5,000 sets a
+/// frame, ~4% reused, while the game binds new uniform buffers and push constants at nearly every draw).
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+struct SetDeps {
+    /// c0 (storage-buffer table; compute's uniform table, dispatch size; a graphics stage's base instance)
+    c0: bool,
+    /// c2 (texture, sampler and image handles)
+    c2: bool,
+    /// the uniform buffers c3..c18 bound in the set or read for a storage buffer's address, by bit (bank - 3)
+    ubo: u16,
+    /// the push-constant banks c24..c29
+    push: bool,
+    /// the support buffer (the pass extent)
+    support: bool,
+}
+
+/// The set's dependencies, or None when it reads texture handles from somewhere other than c2 (bindless) or binds
+/// a buffer texture (the key does not cover those).
+fn set_deps(m: &Module) -> Option<SetDeps> {
+    let mut d = SetDeps::default();
+    let slot = |d: &mut SetDeps, s: i32| match s {
+        0 => d.c0 = true,
+        -1 | 2 => d.c2 = true,
+        3..=18 => d.ubo |= 1 << (s - 3),
+        _ => {}
+    };
+    for (_, r) in &m.res {
+        match r {
+            Res::Tex { cbuf_slot, ty, .. } | Res::Img { cbuf_slot, ty, .. } => {
+                let (t, s) = tex_slots(*cbuf_slot);
+                if !((t == 2 || t == -1) && (s == 2 || s == -1) && *ty != 2) {
+                    return None;
+                }
+                d.c2 = true;
+            }
+            Res::Cbuf { bank } => match *bank {
+                24..=29 => d.push = true,
+                b => slot(&mut d, b as i32),
+            },
+            Res::Sbuf { cb_slot, .. } if *cb_slot != super::gmem::CB_SLOT => slot(&mut d, *cb_slot),
+            Res::Support => d.support = true,
+            _ => {}
+        }
+    }
+    Some(d)
+}
+
+/// Which of c0 / c2 a stage set of `m` uses: (its bytes are read: storage-buffer addresses, texture handles; the bank
+/// is bound itself), for `QState::banks`.
+fn bank_needs(m: &Module) -> [(bool, bool); 2] {
+    let mut n = [(false, false); 2];
+    let mut read = |s: i32| match s {
+        0 => n[0].0 = true,
+        -1 | 2 => n[1].0 = true,
+        _ => {}
+    };
+    for (_, r) in &m.res {
+        match r {
+            Res::Tex { cbuf_slot, .. } | Res::Img { cbuf_slot, .. } => {
+                let (t, s) = tex_slots(*cbuf_slot);
+                read(t);
+                read(s);
+            }
+            Res::Sbuf { cb_slot, .. } if *cb_slot != super::gmem::CB_SLOT => read(*cb_slot),
+            _ => {}
+        }
+    }
+    for (_, r) in &m.res {
+        match r {
+            Res::Cbuf { bank: 0 } => n[0].1 = true,
+            Res::Cbuf { bank: 2 } => n[1].1 = true,
+            _ => {}
+        }
+    }
+    n
+}
+
+/// The uniform buffers of `mask` (bit k: c(3 + k)); the others as unbound.
+fn masked_ubos(ubo: &[(u64, u64); 16], mask: u16) -> [(u64, u64); 16] {
+    let mut v = [(0, 0); 16];
+    for (k, u) in ubo.iter().enumerate() {
+        if mask >> k & 1 != 0 {
+            v[k] = *u;
+        }
+    }
+    v
 }
 
 /// A stage's c0 or c2 as last built: valid while its generation (and for c0 the dispatch size and base instance)
@@ -270,6 +539,12 @@ struct CBank {
 }
 
 type C2Src = ([u32; 256], [u32; 128], [u32; 32]);
+
+/// The bytes of a bank a set does not read (`QState::banks`).
+fn empty_bank() -> Arc<Vec<u8>> {
+    static E: std::sync::OnceLock<Arc<Vec<u8>>> = std::sync::OnceLock::new();
+    E.get_or_init(|| Arc::new(Vec::new())).clone()
+}
 
 fn new_bgen() -> u64 {
     static G: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -314,6 +589,9 @@ impl QState {
     }
 
     /// c0 / c2 of stage `st` and where they are staged in `sub` (built and staged again only when they changed).
+    /// `need[i]` = (the set reads bank i's bytes, the set binds the bank itself): a bank the set does not read is
+    /// neither built nor staged (empty bytes, a null buffer), one it only reads is not staged (MKW: c0 holds the
+    /// base instance, new at most draws, and was built and staged again for every stage of them).
     fn banks(
         &self,
         g: &Gpu,
@@ -321,6 +599,7 @@ impl QState {
         st: usize,
         dispatch: [u32; 3],
         base_instance: u32,
+        need: [(bool, bool); 2],
     ) -> (
         Arc<Vec<u8>>,
         Arc<Vec<u8>>,
@@ -367,24 +646,28 @@ impl QState {
                 }
             }
         };
-        renew(b0, self.bgen[st][0], di, bi, &|| {
-            c0_bytes(self, st, dispatch, base_instance)
-        });
+        if need[0].0 || need[0].1 {
+            renew(b0, self.bgen[st][0], di, bi, &|| {
+                c0_bytes(self, st, dispatch, base_instance)
+            });
+        }
         // c2: the handles themselves compared first (a few hundred words; building the bank wrote 2.5 KB)
         let gen2 = self.bgen[st][1];
-        if let Some(c) = b2.as_mut() {
-            if c.gen != gen2
-                && c.src.as_ref().is_some_and(|s| {
-                    s.0 == self.tex[st] && s.1 == self.samp[st] && s.2 == self.img[st]
-                })
-            {
-                c.gen = gen2;
-            }
-        }
-        if !b2.as_ref().is_some_and(|c| c.gen == gen2) {
-            renew(b2, gen2, [0; 3], 0, &|| c2_bytes(self, st));
+        if need[1].0 || need[1].1 {
             if let Some(c) = b2.as_mut() {
-                c.src = Some(Box::new((self.tex[st], self.samp[st], self.img[st])));
+                if c.gen != gen2
+                    && c.src.as_ref().is_some_and(|s| {
+                        s.0 == self.tex[st] && s.1 == self.samp[st] && s.2 == self.img[st]
+                    })
+                {
+                    c.gen = gen2;
+                }
+            }
+            if !b2.as_ref().is_some_and(|c| c.gen == gen2) {
+                renew(b2, gen2, [0; 3], 0, &|| c2_bytes(self, st));
+                if let Some(c) = b2.as_mut() {
+                    c.src = Some(Box::new((self.tex[st], self.samp[st], self.img[st])));
+                }
             }
         }
         // staged once per submission (equal bytes staged earlier in it are shared: equal sets are bound again)
@@ -396,10 +679,19 @@ impl QState {
                 s
             }
         };
-        let (c0, c2) = (b0.as_mut().unwrap(), b2.as_mut().unwrap());
-        let (s0, s2) = (staged(c0), staged(c2));
-        self.c2id.set(c2.id);
-        (c0.bytes.clone(), c2.bytes.clone(), s0, s2)
+        let none = (vk::Buffer::null(), 0);
+        let (s0, s2) = (
+            if need[0].1 { staged(b0.as_mut().unwrap()) } else { none },
+            if need[1].1 { staged(b2.as_mut().unwrap()) } else { none },
+        );
+        let bytes = |c: &Option<CBank>, n: (bool, bool)| match c {
+            Some(c) if n.0 || n.1 => c.bytes.clone(),
+            _ => empty_bank(),
+        };
+        if let Some(c) = b2.as_ref().filter(|_| need[1].0 || need[1].1) {
+            self.c2id.set(c.id);
+        }
+        (bytes(b0, need[0]), bytes(b2, need[1]), s0, s2)
     }
 
     pub fn new(origin_ll: bool) -> QState {
@@ -485,6 +777,7 @@ impl QState {
             cbank: Default::default(),
             tpart: Default::default(),
             sets: Default::default(),
+            shadow: Default::default(),
             c2id: Default::default(),
             vin_last: std::cell::RefCell::new((0, 0, [(vk::Buffer::null(), u64::MAX); 32])),
             vin_from: std::cell::Cell::new((u64::MAX, 0, 0)),
@@ -2704,7 +2997,7 @@ fn prepare_storage_bindings(
             continue;
         }
         let st = m.stage as usize;
-        let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, base_instance);
+        let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, base_instance, [(true, false); 2]);
         let tb = pool_bases(qs).0;
         for (_, r) in &m.res {
             let Res::Img {
@@ -3248,7 +3541,81 @@ fn binding_scales(
     v
 }
 
-/// The descriptor set of one stage of the draw or dispatch.
+/// Uniform bank c`bank` (3..=18) of a stage set: the bound range `(a, n)` in its pool, or the zero buffer.
+fn ubo_info(
+    g: &Gpu,
+    sub: &mut Sub,
+    m: &Module,
+    bank: u32,
+    (a, n): (u64, u64),
+    zero: vk::Buffer,
+    max_ubo: u64,
+) -> vk::DescriptorBufferInfo {
+    let r = if a != 0 && n != 0 {
+        super::mem::resolve(g, sub, a, n.min(max_ubo))
+    } else {
+        None
+    };
+    match r {
+        Some((buf, off, _)) => {
+            if off % g.d.caps.uniform_align != 0 {
+                crate::log::red_once(&format!(
+                    "uniform buffer at {a:#x}: offset not aligned to {}",
+                    g.d.caps.uniform_align
+                ));
+            }
+            vk::DescriptorBufferInfo {
+                buffer: buf,
+                offset: off,
+                range: n.min(max_ubo),
+            }
+        }
+        None => {
+            if a != 0 {
+                let k: String = m.key.iter().map(|b| format!("{b:02x}")).collect();
+                let st = m.stage;
+                crate::log::red_once(&format!("shader {k} (stage {st}): uniform bank c{bank} at {a:#x} (+{n:#x}) is in no memory pool: zeros bound"));
+            }
+            vk::DescriptorBufferInfo {
+                buffer: zero,
+                offset: 0,
+                range: max_ubo,
+            }
+        }
+    }
+}
+
+/// Push-constant bank c`bank` (24..=29) of a stage set: the push constants staged in this submission.
+fn push_info(
+    g: &Gpu,
+    sub: &mut Sub,
+    qs: &QState,
+    st: usize,
+    bank: u32,
+) -> vk::DescriptorBufferInfo {
+    if bank == 24 {
+        let grp = (st == 5) as usize;
+        let (buf, off) = qs.staged(g, sub, 2 + grp as u8, qs.pgen, || qs.push[grp][..].to_vec());
+        return vk::DescriptorBufferInfo {
+            buffer: buf,
+            offset: off,
+            range: 0x800,
+        };
+    }
+    // graphics stage i reads its push block 1 + i through its own bank (NVN2)
+    let b = (bank - 24) as usize * 0x100;
+    let (buf, off) = qs.staged(g, sub, bank as u8, qs.pgen, || {
+        qs.push[0][b..b + 0x100].to_vec()
+    });
+    vk::DescriptorBufferInfo {
+        buffer: buf,
+        offset: off,
+        range: 0x100,
+    }
+}
+
+/// The descriptor set of one stage of the draw or dispatch. `only` (descriptor buffers, `patch_set`): the set is the
+/// module's host copy (`Shadow`, at the front) with the slots of these classes (`res_class`) made again.
 fn stage_set(
     g: &Gpu,
     sub: &mut Sub,
@@ -3256,6 +3623,7 @@ fn stage_set(
     m: &Module,
     dispatch: [u32; 3],
     base_instance: u32,
+    only: Option<u32>,
 ) -> (SetRef, Option<Arc<super::lost::bindings::Stage>>, Option<super::lost::bindings::RawVersion>, u64) {
     // Covers ordinary UBO/SSBO backing even when no raw-table resource is present.
     // Resolution may itself create backing. If this epoch changes, publication
@@ -3266,8 +3634,13 @@ fn stage_set(
 
     let zero = zero_buffer(g, sub);
     let max_ubo = (g.d.props.limits.max_uniform_buffer_range as u64).min(65536);
+    let need = if super::scale::active() || passdump::active() {
+        [(true, true); 2]
+    } else {
+        bank_needs(m)
+    };
     let (c0, c2, c0s, c2s) = super::perf::timed_fine(super::perf::C::BankNs, || {
-        qs.banks(g, sub, st, dispatch, base_instance)
+        qs.banks(g, sub, st, dispatch, base_instance, need)
     });
     // the handle bank's identity (its bytes are kept while they stay the same)
     let c2id = qs.c2id.get();
@@ -3306,6 +3679,10 @@ fn stage_set(
     for (b, r) in &m.res {
         let b = *b;
         if cached && matches!(r, Res::Tex { .. } | Res::Img { .. }) {
+            continue;
+        }
+        // a patch: the slots of the classes that did not change are the copy's
+        if only.is_some_and(|c| res_class(r) & c == 0) {
             continue;
         }
         match r {
@@ -3377,28 +3754,7 @@ fn stage_set(
                         offset: c2s.1,
                         range: DRV_SIZE as u64,
                     },
-                    24 => {
-                        let grp = (st == 5) as usize;
-                        let (buf, off) =
-                            qs.staged(g, sub, 2 + grp as u8, qs.pgen, || qs.push[grp][..].to_vec());
-                        vk::DescriptorBufferInfo {
-                            buffer: buf,
-                            offset: off,
-                            range: 0x800,
-                        }
-                    }
-                    k @ 25..=29 => {
-                        // graphics stage i reads its push block 1 + i through its own bank (NVN2)
-                        let b = (k - 24) as usize * 0x100;
-                        let (buf, off) = qs.staged(g, sub, k as u8, qs.pgen, || {
-                            qs.push[0][b..b + 0x100].to_vec()
-                        });
-                        vk::DescriptorBufferInfo {
-                            buffer: buf,
-                            offset: off,
-                            range: 0x100,
-                        }
-                    }
+                    k @ 24..=29 => push_info(g, sub, qs, st, k),
                     k @ 3..=18 => {
                         let (a, n) = qs.ubo[st][(k - 3) as usize];
                         let nf = (n.min(64) / 4) as usize;
@@ -3414,37 +3770,7 @@ fn stage_set(
                         } else if dumping {
                             said.push(format!("c{k}@{a:#x}+{n:#x}"));
                         }
-                        match if a != 0 && n != 0 {
-                            super::mem::resolve(g, sub, a, n.min(max_ubo))
-                        } else {
-                            None
-                        } {
-                            Some((buf, off, _)) => {
-                                if off % g.d.caps.uniform_align != 0 {
-                                    crate::log::red_once(&format!(
-                                        "uniform buffer at {a:#x}: offset not aligned to {}",
-                                        g.d.caps.uniform_align
-                                    ));
-                                }
-                                vk::DescriptorBufferInfo {
-                                    buffer: buf,
-                                    offset: off,
-                                    range: n.min(max_ubo),
-                                }
-                            }
-                            None => {
-                                if a != 0 {
-                                    let k: String =
-                                        m.key.iter().map(|b| format!("{b:02x}")).collect();
-                                    crate::log::red_once(&format!("shader {k} (stage {st}): uniform bank c{k2} at {a:#x} (+{n:#x}) is in no memory pool: zeros bound", k2 = *bank));
-                                }
-                                vk::DescriptorBufferInfo {
-                                    buffer: zero,
-                                    offset: 0,
-                                    range: max_ubo,
-                                }
-                            }
-                        }
+                        ubo_info(g, sub, m, k, (a, n), zero, max_ubo)
                     }
                     _ => vk::DescriptorBufferInfo {
                         buffer: zero,
@@ -3800,7 +4126,7 @@ fn stage_set(
             bufs.push((binding, vk::DescriptorType::STORAGE_BUFFER, info));
         }
     }
-    if cacheable && !cached {
+    if cacheable && !cached && only.is_none_or(|c| c & CL_TEX != 0) {
         qs.tpart.borrow_mut()[st] = Some(TexPart {
             module: mkey,
             gen: c2id,
@@ -3819,7 +4145,12 @@ fn stage_set(
         );
     }
     if g.d.caps.descbuf {
-        let (off, evidence) = write_db_set(g, sub, m, &bufs, &imgs, &taddrs);
+        let mut sh = qs.shadow.borrow_mut();
+        let mut host = set_patch_on().then(|| shadow_slot(&mut sh[st], mkey));
+        if let Some(h) = host.as_deref_mut().filter(|_| only.is_none()) {
+            h.memory_generation = memory_generation;
+        }
+        let (off, evidence) = write_db_set(g, sub, m, &bufs, &imgs, &taddrs, host, only.is_some());
         return (SetRef::Buf(off), evidence, raw_version, memory_generation);
     }
     // the same writes for the same stage layout earlier in this submission: that set is bound again
@@ -3883,6 +4214,58 @@ fn stage_set(
     (SetRef::Set(set), None, raw_version, memory_generation)
 }
 
+/// Descriptor buffers: stage set `m` keyed `k` from the module's last set (`Shadow`): (its offset, true) when that set
+/// has this very key (written earlier in this submission and chunk: bound again), else that set with the slots of
+/// every class that changed (`patch_classes`: uniform buffers, push constants, c0 and the storage buffers read from it,
+/// c2 and the textures...) made again by `stage_set`, copied into the current chunk: (its offset, false). None (the
+/// whole set is built) when there is no such set of this submission, or a pool changed (before or while patching: the
+/// copy's other descriptors are as old as a cached set's). Every slot names what a whole set would: the slots of a
+/// class that did not change are made from exactly what they were made from before.
+fn patch_set(
+    g: &Gpu,
+    sub: &mut Sub,
+    qs: &QState,
+    m: &Module,
+    k: &SetKey,
+    dispatch: [u32; 3],
+    base_instance: u32,
+) -> Option<(u64, bool)> {
+    use std::sync::atomic::Ordering::Acquire;
+    let st = m.stage as usize;
+    let gen = super::mem::POOL_GEN.load(Acquire);
+    let mut sh = qs.shadow.borrow_mut();
+    let list = &mut sh[st];
+    let i = list.iter().position(|s| s.module == k.module)?;
+    let h = &mut list[i];
+    let old = h.key.as_ref()?;
+    if !h.valid || h.memory_generation != gen {
+        return None;
+    }
+    // the same set written earlier in this chunk (an older one than the set cache keeps): bound again
+    if old == k {
+        return Some((h.off, true));
+    }
+    let classes = patch_classes(old, k)?;
+    // the module's copy to the front, unkeyed while it is patched (`stage_set` writes the front one)
+    list[..=i].rotate_right(1);
+    list[0].key = None;
+    drop(sh);
+    let (set, _, _, _) = stage_set(g, sub, qs, m, dispatch, base_instance, Some(classes));
+    let SetRef::Buf(off) = set else { return None };
+    // a resolve made a pool's buffer: the copy's other descriptors may be older than a fresh set's (this one is not
+    // used: the whole set is built; the copy stays unkeyed until then)
+    if super::mem::POOL_GEN.load(Acquire) != gen {
+        return None;
+    }
+    let mut sh = qs.shadow.borrow_mut();
+    // the copy is this whole set, written there (not a patch that could not be made: `write_db_set`)
+    let h = sh[st].first_mut().filter(|h| h.module == k.module && h.valid && h.off == off)?;
+    h.key = Some(*k);
+    h.off = off;
+    super::perf::inc(super::perf::C::SetsPatched);
+    Some((off, false))
+}
+
 /// A stage's descriptors: a set (classic) or its offset in the submission's descriptor buffer.
 #[derive(Clone, Copy)]
 enum SetRef {
@@ -3893,7 +4276,11 @@ enum SetRef {
 /// Descriptor buffers: a stage set written into the submission's current chunk (vkGetDescriptorEXT: a few
 /// nanoseconds a descriptor, against ~40 ns for a vkUpdateDescriptorSets write and a set allocation; 2,170 sets of
 /// 15 uniform buffers took 0.12 ms against 1.8 ms on this machine's RTX 5090, tests/desc_bench.rs). Every set is
-/// written: no key, no hash.
+/// written: no key, no hash. With `host` (`set_patch_on`) the set is made in that copy, all of it written (zeros where
+/// nothing is bound), then copied into the chunk; the copy is left marked valid (`key` still None). `patch`: the copy
+/// is a valid whole set already (`patch_set` checked it; the fill it was made with stays on): only the descriptors
+/// given are written over it.
+#[allow(clippy::too_many_arguments)]
 fn write_db_set(
     g: &Gpu,
     sub: &mut Sub,
@@ -3901,12 +4288,34 @@ fn write_db_set(
     bufs: &[(u32, vk::DescriptorType, vk::DescriptorBufferInfo)],
     imgs: &[(u32, vk::DescriptorType, vk::DescriptorImageInfo)],
     taddrs: &[(u32, vk::DescriptorType, vk::DescriptorAddressInfoEXT)],
+    mut host: Option<&mut Shadow>,
+    patch: bool,
 ) -> (u64, Option<Arc<super::lost::bindings::Stage>>) {
     let tw = super::perf::fine().then(std::time::Instant::now);
     let l = &g.layout;
     let p = &g.d.db_props;
     let off = sub.db_alloc(l.db_stage_size);
-    let ptr = sub.db[sub.db_cur].ptr;
+    let chunk_ptr = sub.db[sub.db_cur].ptr;
+    let fill = db_fill_on()
+        && ZERO.get().is_some_and(|b| b.addr != 0)
+        && SINK.get().is_some_and(|b| b.addr != 0);
+    // (never otherwise: a patch's descriptors are only some of the set's; written alone, the copy is marked invalid
+    // below and `patch_set` builds the whole set instead)
+    let partial = patch;
+    let patch = patch && host.as_deref().is_some_and(|h| h.valid) && fill;
+    if let Some(h) = host.as_deref_mut().filter(|_| !patch) {
+        h.key = None;
+        h.valid = false;
+        h.nr = 0;
+        h.bytes.resize(l.db_stage_size as usize, 0);
+    }
+    // without the fill the chunk's unbound slots are left as they are: no copy
+    let mut host = host.filter(|_| fill);
+    // where the set is written: (base pointer, the set's offset from it)
+    let (ptr, set_off) = match host.as_deref_mut() {
+        Some(h) => (h.bytes.as_mut_ptr() as usize, 0),
+        None => (chunk_ptr, off),
+    };
     let mut evidence = super::lost::bindings::enabled().then(|| super::lost::bindings::Stage {
         serial: sub.serial,
         chunk: sub.db_cur,
@@ -3924,7 +4333,7 @@ fn write_db_set(
     // freed since, and a GPU access through it lost the device (MKW-LOSS: the canary runs saw MKW's GPU write through
     // such a slot of a vertex shader's set that binds no storage buffer). NXGFX_DB_FILL=0 leaves them (diagnosis).
     let sink = SINK.get().map(|b| b.addr).unwrap_or(0);
-    if db_fill_on() && zero != 0 && sink != 0 {
+    if fill && zero != 0 && sink != 0 && !patch {
         static T: std::sync::OnceLock<Vec<u8>> = std::sync::OnceLock::new();
         let t = T.get_or_init(|| {
             let mut v = vec![0u8; l.db_stage_size as usize];
@@ -3941,9 +4350,14 @@ fn write_db_set(
             }
             v
         });
-        // the buffer slots' span, each slot written whole
-        let (start, end) = db_fill_span(&l.db_stage_off, |b| super::device::desc_size(p, super::layout::stage_binding_type(b)));
-        unsafe { core::ptr::copy_nonoverlapping(t.as_ptr().add(start), (ptr + off as usize + start) as *mut u8, end - start) };
+        if host.is_some() {
+            // the host copy whole: the filled buffer slots, zeros elsewhere (it is copied into the chunk whole)
+            unsafe { core::ptr::copy_nonoverlapping(t.as_ptr(), ptr as *mut u8, t.len()) };
+        } else {
+            // the buffer slots' span, each slot written whole
+            let (start, end) = db_fill_span(&l.db_stage_off, |b| super::device::desc_size(p, super::layout::stage_binding_type(b)));
+            unsafe { core::ptr::copy_nonoverlapping(t.as_ptr().add(start), (ptr + set_off as usize + start) as *mut u8, end - start) };
+        }
     }
     // the distinct buffers' addresses (a set names a few: a staging chunk, the zero buffer, some pools)
     let mut seen: [(vk::Buffer, u64); 8] = [(vk::Buffer::null(), 0); 8];
@@ -3978,8 +4392,16 @@ fn write_db_set(
         } else {
             (zero, 65536)
         };
-        if nr < ring.len() {
-            ring[nr] = (*b, ty.as_raw(), a, range, vk::Handle::as_raw(info.buffer));
+        let rec = (*b, ty.as_raw(), a, range, vk::Handle::as_raw(info.buffer));
+        if patch {
+            // the copy's record of the set: this slot's entry replaced
+            if let Some(h) = host.as_deref_mut() {
+                if let Some(e) = h.ring[..h.nr].iter_mut().find(|e| e.0 == *b) {
+                    *e = rec;
+                }
+            }
+        } else if nr < ring.len() {
+            ring[nr] = rec;
             nr += 1;
         }
         if let Some(e) = evidence.as_mut() {
@@ -4032,7 +4454,7 @@ fn write_db_set(
             )
         };
         unsafe {
-            super::tables::put_descriptor(&g.d, ptr, off + l.db_stage_off[*b as usize], &gi, size)
+            super::tables::put_descriptor(&g.d, ptr, set_off + l.db_stage_off[*b as usize], &gi, size)
         };
     }
     for (b, ty, info) in imgs {
@@ -4056,7 +4478,7 @@ fn write_db_set(
             )
         };
         unsafe {
-            super::tables::put_descriptor(&g.d, ptr, off + l.db_stage_off[*b as usize], &gi, size)
+            super::tables::put_descriptor(&g.d, ptr, set_off + l.db_stage_off[*b as usize], &gi, size)
         };
     }
     for (b, ty, ai) in taddrs {
@@ -4093,12 +4515,28 @@ fn write_db_set(
             )
         };
         unsafe {
-            super::tables::put_descriptor(&g.d, ptr, off + l.db_stage_off[*b as usize], &gi, size)
+            super::tables::put_descriptor(&g.d, ptr, set_off + l.db_stage_off[*b as usize], &gi, size)
         };
+    }
+    let mut noted = (ring, nr);
+    if let Some(h) = host {
+        // the set made in the host copy goes into the chunk in one copy
+        unsafe {
+            core::ptr::copy_nonoverlapping(h.bytes.as_ptr(), (chunk_ptr + off as usize) as *mut u8, h.bytes.len())
+        };
+        if !patch {
+            h.ring = ring;
+            h.nr = nr;
+        }
+        noted = (h.ring, h.nr);
+        // a whole set (written whole, or a patch over a whole set) where it was written; a patch that could not be
+        // made is not one
+        h.valid = patch || !partial;
+        h.off = off;
     }
     super::perf::inc(super::perf::C::DescSets);
     if m.mesh != 0 || m.stage == 1 {
-        super::lost::ring::note_set(sub.serial, sub.db_cur, sub.db[sub.db_cur].addr, off, m.stage, m.key, &ring[..nr]);
+        super::lost::ring::note_set(sub.serial, sub.db_cur, sub.db[sub.db_cur].addr, off, m.stage, m.key, &noted.0[..noted.1]);
     }
     if db_poison_on() {
         sub.db_log.push((sub.db_cur, off, m.stage));
@@ -4182,6 +4620,171 @@ fn db_fill_span(off: &[u64], size: impl Fn(u32) -> usize) -> (usize, usize) {
     let start = off[..64].iter().copied().min().unwrap_or(0) as usize;
     let end = (0..64u32).map(|b| off[b as usize] as usize + size(b)).max().unwrap_or(start);
     (start, end.max(start))
+}
+
+#[cfg(test)]
+mod set_patch_tests {
+    use super::*;
+
+    fn module(res: Vec<(u32, Res)>) -> Module {
+        Module {
+            key: [1; 8],
+            stage: 0,
+            module: vk::ShaderModule::null(),
+            entry: std::ffi::CString::default(),
+            res,
+            uses_pool: false,
+            inputs: Vec::new(),
+            c1: None,
+            id: 0,
+            omap: None,
+            mesh: 0,
+            xfb: None,
+            words: Vec::new(),
+            per_primitive: Vec::new(),
+        }
+    }
+
+    fn key() -> SetKey {
+        SetKey {
+            module: (16, [1; 8]),
+            bgen: [3, 4],
+            ubo: [(0, 0); 16],
+            pgen: 5,
+            extent: (64, 64),
+            pools: (0, 0),
+            dispatch: [0; 3],
+            base_instance: 0,
+            serial: 9,
+            image_gen: 2,
+            chunk: 0,
+            mesh: (0, 0, 0),
+        }
+    }
+
+    /// A set depends on the banks, uniform buffers and push constants its shader binds, nothing else: a uniform
+    /// buffer it does not bind (MKW: new ones at nearly every draw) leaves its key as it was.
+    #[test]
+    fn the_key_covers_only_what_the_set_reads() {
+        let m = module(vec![
+            (0, Res::Cbuf { bank: 3 }),
+            (1, Res::Cbuf { bank: 25 }),
+            (32, Res::Sbuf { cb_slot: 0, cb_off: 0x110, written: false }),
+            (33, Res::Sbuf { cb_slot: 5, cb_off: 0x40, written: true }),
+            (64, Res::Tex { handle: 1, cbuf_slot: 2, ty: 1 }),
+        ]);
+        let d = set_deps(&m).unwrap();
+        assert_eq!(
+            d,
+            SetDeps { c0: true, c2: true, ubo: 0b101, push: true, support: false }
+        );
+        let only_c3 = set_deps(&module(vec![(0, Res::Cbuf { bank: 3 }), (1, Res::Support)])).unwrap();
+        assert_eq!(only_c3, SetDeps { c0: false, c2: false, ubo: 1, push: false, support: true });
+        // texture handles read from a uniform buffer (bindless): no key
+        assert!(set_deps(&module(vec![(64, Res::Tex { handle: 1, cbuf_slot: 3, ty: 1 })])).is_none());
+        let mut ubo = [(0x1000u64, 0x100u64); 16];
+        ubo[7] = (0x9000, 0x40);
+        let a = masked_ubos(&ubo, only_c3.ubo);
+        ubo[7] = (0xa000, 0x40);
+        assert_eq!(a, masked_ubos(&ubo, only_c3.ubo), "an unbound uniform buffer does not change the key");
+        ubo[0] = (0xb000, 0x100);
+        assert_ne!(a, masked_ubos(&ubo, only_c3.ubo), "a bound one does");
+    }
+
+    /// One host copy per module, newest first; a new module past `SHADOWS` takes the least recently written one's
+    /// place, unkeyed until its set is written (a stale copy is never patched for another module).
+    #[test]
+    fn host_copies_are_kept_per_module_newest_first() {
+        let mut list = Vec::new();
+        for i in 0..SHADOWS {
+            let s = shadow_slot(&mut list, (i, [0; 8]));
+            s.key = Some(key());
+            s.valid = true;
+        }
+        assert_eq!(list.len(), SHADOWS);
+        assert_eq!(list[0].module.0, SHADOWS - 1);
+        shadow_slot(&mut list, (2, [0; 8]));
+        assert_eq!(list[0].module.0, 2, "written again: newest");
+        assert!(list[0].key.is_some(), "its copy is kept for the writer to replace");
+        let s = shadow_slot(&mut list, (100, [0; 8]));
+        assert_eq!(s.module.0, 100);
+        assert!(s.key.is_none() && !s.valid, "another module's copy is not this module's set");
+        assert_eq!(list.len(), SHADOWS);
+        assert!(list.iter().all(|s| s.module.0 != 0), "module 0 was the least recently written");
+        assert_eq!(list.iter().filter(|s| s.module.0 == 2).count(), 1);
+    }
+
+    /// A bank is built when the set reads it (storage addresses, texture handles) and staged only when the set binds
+    /// it; a set that does neither leaves it alone (its base instance changed at most of MKW's draws).
+    #[test]
+    fn banks_are_built_and_staged_only_for_sets_that_use_them() {
+        let none = module(vec![(0, Res::Cbuf { bank: 3 }), (1, Res::Support)]);
+        assert_eq!(bank_needs(&none), [(false, false); 2]);
+        let sbuf = module(vec![(32, Res::Sbuf { cb_slot: 0, cb_off: 0x110, written: false })]);
+        assert_eq!(bank_needs(&sbuf), [(true, false), (false, false)]);
+        let tex = module(vec![(64, Res::Tex { handle: 1, cbuf_slot: -1, ty: 1 })]);
+        assert_eq!(bank_needs(&tex), [(false, false), (true, false)]);
+        let bound = module(vec![(0, Res::Cbuf { bank: 0 }), (1, Res::Cbuf { bank: 2 })]);
+        assert_eq!(bank_needs(&bound), [(false, true), (false, true)]);
+        let raw = module(vec![(32, Res::Sbuf { cb_slot: super::super::gmem::CB_SLOT, cb_off: 0, written: false })]);
+        assert_eq!(bank_needs(&raw), [(false, false); 2]);
+    }
+
+    /// A patch makes again every slot whose class changed between the module's last key and this one: each key field
+    /// names the classes made from it, and a slot's class covers everything its descriptor is made from (a storage
+    /// buffer whose address is read from c0, c2 or a uniform buffer is in that bank's class). Another module's or
+    /// another submission's set is never patched (staging is per submission).
+    #[test]
+    fn a_patch_remakes_every_slot_whose_inputs_changed() {
+        let old = key();
+        let mut new = key();
+        new.ubo[0] = (0x2000, 0x100);
+        new.pgen = 6;
+        new.chunk = 3;
+        assert_eq!(patch_classes(&old, &new), Some(0b1 | CL_PUSH));
+        let mut same = key();
+        same.chunk = 1;
+        assert_eq!(patch_classes(&old, &same), Some(0), "only the place differs");
+        let cases: [(fn(&mut SetKey), u32); 9] = [
+            (|k| k.bgen[0] += 1, CL_C0),
+            (|k| k.base_instance += 1, CL_C0),
+            (|k| k.dispatch[0] += 1, CL_C0),
+            (|k| k.bgen[1] += 1, CL_C2 | CL_TEX),
+            (|k| k.image_gen += 1, CL_TEX),
+            (|k| k.pools.1 += 1, CL_TEX),
+            (|k| k.extent.0 += 1, CL_SUPPORT),
+            (|k| k.mesh.1 += 1, CL_MESH),
+            (|k| k.ubo[5] = (0x40, 0x10), 1 << 5),
+        ];
+        for (change, classes) in cases {
+            let mut k = key();
+            change(&mut k);
+            assert_eq!(patch_classes(&old, &k), Some(classes));
+        }
+        for change in [|k: &mut SetKey| k.serial += 1, |k: &mut SetKey| k.module.0 += 1] {
+            let mut k = key();
+            change(&mut k);
+            assert_eq!(patch_classes(&old, &k), None);
+        }
+        // the slots each class makes again
+        assert_eq!(res_class(&Res::Cbuf { bank: 3 }), 1);
+        assert_eq!(res_class(&Res::Cbuf { bank: 18 }), 1 << 15);
+        assert_eq!(res_class(&Res::Cbuf { bank: 27 }), CL_PUSH);
+        assert_eq!(res_class(&Res::Cbuf { bank: 0 }), CL_C0);
+        assert_eq!(res_class(&Res::Cbuf { bank: 2 }), CL_C2);
+        assert_eq!(res_class(&Res::Cbuf { bank: 1 }), 0, "c1 is the module's own");
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: 0, cb_off: 0x110, written: true }), CL_C0);
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: -1, cb_off: 0x20, written: false }), CL_C2);
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: 5, cb_off: 0x40, written: false }), 1 << 2);
+        assert_eq!(
+            res_class(&Res::Sbuf { cb_slot: super::super::gmem::CB_SLOT, cb_off: 0, written: false }),
+            u32::MAX
+        );
+        assert_eq!(res_class(&Res::Tex { handle: 1, cbuf_slot: 2, ty: 1 }), CL_TEX);
+        assert_eq!(res_class(&Res::Img { handle: 1, cbuf_slot: 2, ty: 1, fmt: 0 }), CL_TEX);
+        assert_eq!(res_class(&Res::Support), CL_SUPPORT);
+        assert_eq!(res_class(&Res::MeshDraw), CL_MESH);
+    }
 }
 
 #[cfg(test)]
@@ -4522,7 +5125,10 @@ fn bind_sets(
     }
     if g.d.caps.descbuf {
         // descriptor buffers: the draw's sets in one chunk, the pool set's buffer and that chunk bound, then offsets
-        sub.db_reserve(g, g.layout.db_stage_size * mods.len().max(1) as u64);
+        // Two sets a module: a patch that is discarded (a pool change while it was made) has already taken its own
+        // offset before the whole set is written at a new one, so a draw can write up to twice its module count; the
+        // chunk must hold all of them (MKW-PERF2 audit: one set past a full chunk's end).
+        sub.db_reserve(g, g.layout.db_stage_size * 2 * mods.len().max(1) as u64);
         if sub.db_bound != Some(sub.db_cur) {
             let usage = vk::BufferUsageFlags::RESOURCE_DESCRIPTOR_BUFFER_EXT
                 | vk::BufferUsageFlags::SAMPLER_DESCRIPTOR_BUFFER_EXT;
@@ -4560,18 +5166,46 @@ fn bind_sets(
                     (SetRef::Buf(off), evidence)
                 }
                 None => {
+                    // the module's last set with the slots of what changed made again
+                    let patched = key.filter(|_| !uses_raw && set_patch_on()).and_then(|k| {
+                        super::perf::timed(super::perf::C::SetNs, || {
+                            patch_set(g, sub, qs, m, &k, dispatch, base_instance)
+                        })
+                        .map(|r| (k, r))
+                    });
+                    if let Some((k, (off, again))) = patched {
+                        if again {
+                            super::perf::inc(super::perf::C::SetsReused);
+                        }
+                        let gen = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
+                        qs.sets.borrow_mut().store_version(st, Some(k), off, None, None, gen, gen);
+                        (SetRef::Buf(off), None)
+                    } else {
+                    if super::perf::fine() {
+                        let mkey = (Arc::as_ptr(m) as usize, m.key);
+                        let sh = qs.shadow.borrow();
+                        let old = sh[st].iter().find(|s| s.module == mkey && s.valid).and_then(|s| s.key.as_ref());
+                        note_set_miss(old, key.as_ref());
+                    }
                     let (set, evidence, captured_raw, captured_memory) = super::perf::timed(super::perf::C::SetNs, || {
-                        stage_set(g, sub, qs, m, dispatch, base_instance)
+                        stage_set(g, sub, qs, m, dispatch, base_instance, None)
                     });
                     // the key again: building the set may have moved to a new descriptor-buffer chunk
                     if let (SetRef::Buf(off), Some(old)) = (set, key) {
                         let key = set_key(g, sub, qs, m, dispatch, base_instance)
                             .filter(|k| k.image_gen == old.image_gen && (!uses_raw || captured_raw.is_some()));
+                        // the host copy is of this set (unkeyed when the pools changed while it was made: as the cache)
+                        let mkey = (Arc::as_ptr(m) as usize, m.key);
+                        if let Some(h) = qs.shadow.borrow_mut()[st].first_mut().filter(|h| h.module == mkey) {
+                            let gen = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
+                            h.key = key.filter(|_| h.valid && h.memory_generation == gen && !uses_raw);
+                        }
                         qs.sets.borrow_mut().store_version(st, key, off, evidence.clone(), captured_raw,
                             captured_memory,
                             super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire));
                     }
                     (set, evidence)
+                    }
                 }
             };
             if let SetRef::Buf(off) = set {
@@ -4636,7 +5270,7 @@ fn bind_sets(
     }
     for m in mods {
         let (set, _, _, _) = super::perf::timed(super::perf::C::SetNs, || {
-            stage_set(g, sub, qs, m, dispatch, base_instance)
+            stage_set(g, sub, qs, m, dispatch, base_instance, None)
         });
         if let SetRef::Set(set) = set {
             unsafe {
@@ -5890,7 +6524,7 @@ fn dkb_ndsr_copy(g: &Gpu, sub: &mut Sub, qs: &QState, cs: &Module, dispatch: [u3
         return false;
     }
     let st = cs.stage as usize;
-    let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, 0);
+    let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, 0, [(true, false); 2]);
     let tb = pool_bases(qs).0;
     let id_of = |handle: u32, cbuf_slot: i32| {
         let word = bank_word(
@@ -6080,7 +6714,7 @@ fn compute_image_ids(
     dispatch: [u32; 3],
 ) -> (Vec<(i32, u32, i32)>, Vec<(i32, u32, i32)>) {
     let st = cs.stage as usize;
-    let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, 0);
+    let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, 0, [(true, false); 2]);
     let tb = pool_bases(qs).0;
     let id = |handle: u32, cbuf_slot: i32| {
         if !matches!(tex_slots(cbuf_slot).0, -1 | 2) { return 0; }

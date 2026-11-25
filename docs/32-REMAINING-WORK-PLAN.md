@@ -55,7 +55,7 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       names every graphics stage incl. task/mesh; canary 0 strays with the fill off); race FPS 7.2-9.9 -> 14.0-16.1
       (crashed-pipeline draws skipped without per-draw relinking: 17 ms -> 0.3 ms; pool scans skipped when an
       earlier scan covers the op and no CPU event signal came since). Audited; audit HIGH fixed by the lead.
-- [ ] **mkw: race FPS 22.9 of 60** (wave `docs/waves/MKW-PERF.md`, audited: 17.7 -> 22.9, 5% low 13 -> 19; GPU event
+- [ ] **mkw: race FPS 28.8 of 60** (MKW-PERF2: sets reused/patched, 22.9 -> 28.8, audited; MKW-PERF: 17.7 -> 22.9, 5% low 13 -> 19; GPU event
       landings no longer void scan coverage, parked resumes reuse covering scans). Left a frame: ~3 write-watch scans
       ~14.5 ms (the frame's first must ask every pool), descriptor sets ~12 ms (~5,000 a frame, ~4% reused: per-draw
       uniform buffers change the key), replay ~8 ms; the replay thread is the bottleneck. Next: descriptor sets.

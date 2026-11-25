@@ -447,6 +447,12 @@ impl Sub {
     pub fn db_alloc(&mut self, size: u64) -> u64 {
         let off = self.db_used;
         self.db_used += size;
+        // never past the chunk: the host copy would write outside the mapping and the GPU read outside the bound
+        // descriptor buffer (callers reserve enough with `db_reserve`; this is the backstop)
+        if self.db.get(self.db_cur).is_none_or(|c| self.db_used > c.size) {
+            crate::log::red("descriptor buffer: a set would end past its chunk (reservation too small)");
+            submission_safety::resource_safety_fatal();
+        }
         off
     }
     /// A staging or scratch buffer of this submission's own.

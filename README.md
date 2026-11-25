@@ -1,6 +1,13 @@
 # nxrs
 
+[![CI](https://github.com/ChrisColeTech/nxrs/actions/workflows/ci.yml/badge.svg)](https://github.com/ChrisColeTech/nxrs/actions/workflows/ci.yml)
+[![Launcher](https://github.com/ChrisColeTech/nxrs/actions/workflows/launcher.yml/badge.svg)](https://github.com/ChrisColeTech/nxrs/actions/workflows/launcher.yml)
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+
 A Rust static recompiler and launcher for Switch and Switch 2 games. Add your NSP, NUP or game dump, build, play.
+
+> [!IMPORTANT]
+> No games, keys or firmware are included. Use your own legally obtained dumps and console keys.
 
 ![The nxrs library](docs/images/readme/library.png)
 
@@ -27,7 +34,7 @@ seconds in brackets), measured at 1080p docked on a GeForce RTX 5090 and Core Ul
 | | | |
 |---|---|---|
 | ![Super Mario Bros. Wonder](docs/images/readme/games/wonder.jpg)<br>**Super Mario Bros. Wonder**<br>60.1 FPS (59.4) | ![Donkey Kong Bananza](docs/images/readme/games/dkb.jpg)<br>**Donkey Kong Bananza**<br>59.4 FPS (53.4) | ![Mario Kart 8 Deluxe](docs/images/readme/games/mk8d.jpg)<br>**Mario Kart 8 Deluxe**<br>59.8 FPS (58.0) |
-| ![Pokémon Legends: Z-A](docs/images/readme/games/plza.jpg)<br>**Pokémon Legends: Z-A**<br>59.6 FPS (57.9) | ![Super Mario Party Jamboree](docs/images/readme/games/jamboree.jpg)<br>**Super Mario Party Jamboree**<br>56.0 FPS (36.5) | ![Mario Kart World](docs/images/readme/games/mkw.jpg)<br>**Mario Kart World**<br>22.9 FPS (19.0), in progress |
+| ![Pokémon Legends: Z-A](docs/images/readme/games/plza.jpg)<br>**Pokémon Legends: Z-A**<br>59.6 FPS (57.9) | ![Super Mario Party Jamboree](docs/images/readme/games/jamboree.jpg)<br>**Super Mario Party Jamboree**<br>56.0 FPS (36.5) | ![Mario Kart World](docs/images/readme/games/mkw.jpg)<br>**Mario Kart World**<br>28.8 FPS (25.0), in progress |
 | ![Pokémon Legends: Arceus](docs/images/readme/games/arceus.jpg)<br>**Pokémon Legends: Arceus**<br>30.0 FPS (29.5), the game's own 30 FPS cap | ![Anime Girls: Sun of a Beach](docs/images/readme/games/anime-girls.jpg)<br>**Anime Girls: Sun of a Beach**<br>60.0 FPS (59.8) | ![Beach Bounce Remastered](docs/images/readme/games/beach-bounce.jpg)<br>**Beach Bounce Remastered**<br>60.0 FPS (59.1) |
 
 Not working yet: The Legend of Zelda: Ocarina of Time, Pokémon Violet, SONIC X SHADOW GENERATIONS (Shadow) and Super
@@ -36,7 +43,7 @@ Smash Bros. Ultimate have open issues.
 ## Getting started
 
 **You need:** Windows 10/11 x64 with an AVX2 CPU (x86-64-v3), a Vulkan GPU, [LLVM/clang](https://releases.llvm.org/),
-the Visual Studio C++ build tools, and your own Nintendo keys (`prod.keys`) and game dumps. nxrs ships no games or keys.
+the Visual Studio C++ build tools, and your own Nintendo keys (`prod.keys`) and game dumps.
 
 1. Start `nxrs.exe`. **Keys > Install keys** and pick your `prod.keys`.
 2. **Add game** and pick an NSP, NUP, XCI or game folder.

@@ -436,9 +436,16 @@ pub fn name_object(handle: u64, name: &str) {
         m.clear();
     }
     m.insert(handle, name.to_string());
+    NAMED.store(true, Ordering::Release);
 }
+/// Whether any buffer was named (the address report is on): asked first, the replay's descriptor writes ask a name
+/// for every buffer they bind (`stale_check`) and took this lock each time with nothing named.
+static NAMED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 /// The name a buffer was made with (address report on), if known.
 pub fn buf_name(handle: u64) -> Option<String> {
+    if !NAMED.load(Ordering::Acquire) {
+        return None;
+    }
     NAMES
         .lock()
         .unwrap()
