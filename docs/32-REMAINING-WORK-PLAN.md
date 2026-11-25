@@ -108,7 +108,11 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       the live one is this session's 357 MB); keys and crashed lists restored byte-identical. Owner option: drop the
       old-machine `pipeline-crashed.bin` entry that now compiles cleanly (`-xoot5-noblack`).
 - [x] **OOT-NAN** (2026-11-25, `docs/waves/OOT-NAN.md`, commit `9903fc7`; lead re-ran graphics 209/209 and read the
-      oot and mkw sheets; **independent audit running**). Cause of the white forest: **NVN2 compute shaders read the
+      oot and mkw sheets). **Audit done: no HIGH**; c0 layout, platform gate, every cache path (bank cache, set key,
+      patching) checked correct. MEDIUM M1 gap (an R32_UINT image with an E5B9G9R9 view still gets a pool storage
+      view) and LOW dump crash on sparse pools handed to OOT-FOREST2. Recorded LOWs: M3 queries only the 2D shape;
+      capture replays never set `SWITCH2` (NVN2 captures lose dispatch words and deswizzle wrong); Bits32 read alpha;
+      `SWITCH2` gated on program-id prefix 04 (a Switch 2 Edition under 01 needs the `switch2 1` override). Cause of the white forest: **NVN2 compute shaders read the
       dispatch group counts at c0 + 0x4; nxrs wrote only 0x200** (NVN1's place) -> the sky irradiance compute
       divided by 0 -> Inf/NaN spherical harmonics -> NaN in the forward pass, spread by fog. `c0_bytes` now writes
       both for Switch 2 titles (MKW too). The `0x13dc17000` suspect was the game's own transient aliasing, not a bug.
