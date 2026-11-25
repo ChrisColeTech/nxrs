@@ -1,6 +1,7 @@
 # nxrs
 
-**A static recompiler for Nintendo Switch games, written in Rust, with its own launcher.** It is not an emulator and
+**The first static recompiler written in Rust that runs Nintendo Switch 2 games**, as well as Switch 1 games, with its
+own launcher. It is not an emulator and
 not a port of one game: point it at any dump you own (NSP, NUP, XCI or an extracted game folder) and nxrs translates
 the game's code ahead of time into a native Windows program, then runs it from a library like any other PC game.
 
