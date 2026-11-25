@@ -65,12 +65,19 @@ steps = ["wait 12", "shot boot", "wait 880"]
 
 [oot]
 title = "The Legend of Zelda Ocarina of Time"
-about = "title and file menus"
-seconds = 140
-window = [45, 100]
+about = "fresh save: title, New Game, the opening story and nightmare, the title card, Kokiri Forest's Deku Tree talk"
+# Fresh save: the title is up by ~25 s (with the pipeline cache; a cold compile of the NDVE upscaler d15370a382630d4e
+# takes ~60 s first); A on "New Game" starts the opening at once (no file menu). The opening (story tapestry, Link's
+# nightmare, his house, the title card) does not skip and A does not hurry it; Kokiri Forest loads at ~330 s and the
+# Deku Tree / Navi talk advances with A. First gameplay (Link woken in his house) is not reached yet: from the forest
+# on the picture is black or white behind the subtitles (E5B9G9R9 storage images bound as zero stand-ins, OOT-PIPE).
+# The window covers the opening's cutscenes, which the game runs at 30 FPS (held 2 vsyncs).
+seconds = 470
+window = [100, 300]
 fps = 59
-steps = ["wait 40", "shot boot", "wait 25", "shot title", "press A ; 15", "shot menu", "press A ; 15",
-         "shot menu 2", "wait 10", "shot end"]
+steps = ["wait 25", "shot title", "press A ; 3 * 25", "shot story", "press A ; 3 * 25", "shot nightmare",
+         "press A ; 3 * 25", "shot house", "press A ; 3 * 25", "shot forest load", "press A ; 3 * 10",
+         "shot deku tree", "press A ; 3 * 10", "shot navi", "press A ; 3 * 10", "shot end"]
 
 [mk8d]
 title = "Mario Kart 8 Deluxe"
@@ -86,29 +93,53 @@ steps = ["wait 9", "shot boot", "press L+R ; 4", "press Right ; 1.5", "press A ;
 
 [arceus]
 title = "Pokemon Legends Arceus (1G+1U)"
-about = "A through the opening to the field, walk"
-seconds = 240
-window = [105, 220]
+about = "fresh save: A through language, Arceus' questions, the fall and Laventon to Prelude Beach, walk"
+# A every 3 s takes every default (English, the first look, Yes, the first answer; the name is NXOS_SWKBD's).
+# The fall ends in the title card and a ~40 s load (~250-290 s); Laventon's beach talk runs to "Wait, you
+# three!", after which the player moves (Move / Dash prompt), ~370-400 s with A every 3 s (each press step
+# takes ~3.16 s; the opening's loader stalls vary, 5-20 s; build/play/20261125-043927-xarc, -045023-arceus-fresh,
+# -051356-arceus-base-alone). A there does nothing. The first walk up the path loads the next area ("Prelude
+# Beach" banner): one to three ~5 s stalls without a present within ~22 s of the first walk (docs/32 "no
+# preemption inside long guest loops"; build/play/20261125-052153-arceus-final), so three walks run before the
+# window. The walk is a closed square: further up the path a beeping-object event starts a dialogue.
+seconds = 600
+window = [485, 504]
 fps = 30
-steps = ["wait 30", "shot boot", "press A ; 3 * 20", "wait 15", "shot field",
-         "replay arceus_gameplay.txt ; 15", "shot gameplay", "wait 30", "shot end"]
+steps = ["wait 30", "shot boot", "press A ; 3 * 90", "shot opening", "press A ; 3 * 40", "shot beach",
+         "replay arceus_beach_walk.txt ; 14 * 3", "shot after banner", "replay arceus_beach_walk.txt ; 1.5",
+         "shot walk up", "wait 3", "shot walk right", "wait 3", "shot walk down", "wait 2.5", "shot walk left",
+         "wait 4", "replay arceus_beach_walk.txt ; 6", "shot end"]
 
 [arceus-base]
 title = "Pokemon Legends Arceus base"
 about = "as arceus, on the base game"
-seconds = 240
-window = [105, 220]
+# Not in the launcher library: run it with --exe (the base build's exe under the title's dump folder).
+seconds = 600
+window = [485, 504]
 fps = 30
-steps = ["wait 30", "shot boot", "press A ; 3 * 20", "wait 15", "shot field",
-         "replay arceus_gameplay.txt ; 15", "shot gameplay", "wait 30", "shot end"]
+steps = ["wait 30", "shot boot", "press A ; 3 * 90", "shot opening", "press A ; 3 * 40", "shot beach",
+         "replay arceus_beach_walk.txt ; 14 * 3", "shot after banner", "replay arceus_beach_walk.txt ; 1.5",
+         "shot walk up", "wait 3", "shot walk right", "wait 3", "shot walk down", "wait 2.5", "shot walk left",
+         "wait 4", "replay arceus_beach_walk.txt ; 6", "shot end"]
 
 [violet]
 title = "Pokemon Violet"
-about = "into the house, walk, interact"
-seconds = 240
-window = [60, 210]
-steps = ["wait 20", "shot boot", "press A ; 4 * 3", "wait 8", "shot house",
-         "replay violet_gameplay.txt ; 27", "shot gameplay", "press A ; 8", "shot interact", "wait 30", "shot end"]
+about = "fresh save: language, a look, A through the opening to the bedroom, get up, walk"
+# A takes English; "Choose a look" (up by ~60 s) has no default, so the stick picks one (LUp: the top row's 2nd)
+# and A takes it. The name is NXOS_SWKBD's. A then runs the opening (enrolment, director's speech, the academy,
+# the region flyover) to the bedroom desk and its "Get Up" (left stick) prompt, ~270 s after the look
+# (build/play/20261125-114618-xviolet1: Get Up shown by 474 s with the look picked at ~200 s). After getting up the
+# game saves and opens the Adventure Guide: A there opens it again, B closes it, so the A presses stop before.
+seconds = 480
+window = [425, 452]
+fps = 30
+steps = ["wait 30", "shot boot", "press A ; 3 * 12", "shot look", "press LUp~0.5 ; 2", "press A ; 3 * 35",
+         "shot opening", "press A ; 3 * 35", "shot academy", "press A ; 3 * 35", "shot get up",
+         "press LLeft~1.5 ; 8", "shot guide", "press B ; 3", "press B ; 3", "shot bedroom",
+         "replay violet_bedroom_walk.txt ; 9", "replay violet_bedroom_walk.txt ; 1.5", "shot walk left",
+         "wait 2", "shot walk down", "wait 2", "shot walk right", "wait 3.5", "shot walk up",
+         "replay violet_bedroom_walk.txt ; 1.5", "shot walk left 2", "wait 2", "shot walk down 2", "wait 2",
+         "shot walk right 2", "wait 3.5", "shot end"]
 
 [agsob]
 title = "Anime Girls Sun of a Beach"
@@ -128,39 +159,72 @@ steps = ["wait 30", "shot boot", "press A ; 4 * 14", "shot min 1", "press A ; 4 
 
 [shadow]
 title = "SONIC X SHADOW GENERATIONS"
-about = "Shadow Generations, New Game, intro skipped, run"
-seconds = 400
-window = [250, 390]
+about = "Shadow Generations, New Game, intro skipped, boost through Space Colony ARK"
+seconds = 240
+window = [130, 202]
 fps = 30
-steps = ["wait 40", "shot title", "press A ; 8", "press Right ; 3", "press A ; 25", "press Down ; 3",
-         "press A ; 20", "press A ; 20", "shot new game", "replay skip_hold.txt ; 18 * 5",
-         "replay run_jump.txt ; 30", "shot run", "wait 30", "shot run later", "wait 30", "shot end"]
+# The title ("press any button") is sometimes still up at 40 s and sometimes already past to the Sonic / Shadow
+# selection, where Left and Right both toggle between the two (so two Rights picked Sonic about half the time).
+# R passes the title and does nothing on the selection: two Rs, then exactly one Right, is Shadow either way
+# (build/play/20261125-091344-xmenu3). The stage starts ~126 s on a rail that Shadow grinds by himself, where a
+# jump leaves the rail into the void (shadow_rail.txt: forward + boost, no jump); dash rings follow. B is the jump
+# (A does nothing in a stage: the old run_jump.txt left Shadow standing at the first jump prompt) and B -> Y the
+# homing attack: shadow_boost.txt holds forward + boost (ZR) and does both every 1.5 s. ~20-24 s of it reach a
+# side-on ledge where forward does nothing: shadow_side.txt steps right off it onto a road that ends at an edge
+# (the way on, a grind rail to the right, is not found yet: build/play/20261125-092155-shadow-route2). Shadow
+# either falls off the road soon after landing or stands at that edge, where one B jumps him off: either way the
+# stage restarts on its first rail and the route runs it again (build/play/20261125-094632-shadow-route3).
+steps = ["wait 40", "shot title", "press R ; 5", "press R ; 3", "press Right ; 3", "shot shadow",
+         "press A ; 25", "press Down ; 3", "press A ; 20", "press A ; 20", "shot new game",
+         "replay skip_hold.txt ; 10", "shot rail", "wait 8", "replay shadow_boost.txt ; 12", "shot run 1",
+         "replay shadow_boost.txt ; 12", "shot run 2", "replay shadow_boost.txt ; 4", "shot ledge",
+         "replay shadow_side.txt ; 2.6", "shot road", "replay shadow_rail.txt ; 7", "shot edge",
+         "replay shadow_boost.txt ; 1.6", "replay shadow_rail.txt ; 12", "shot restart rail", "replay shadow_boost.txt ; 12",
+         "shot end"]
 
 [sonic]
 title = "SONIC X SHADOW GENERATIONS"
-about = "Sonic Generations (successor process), intro skipped, spin dash"
-seconds = 400
-window = [250, 390]
+about = "Sonic Generations (successor process), intro skipped, run, jump and spin dash through Green Hill"
+seconds = 300
+window = [185, 275]
 fps = 30
+# Green Hill starts ~140-170 s. B is the jump (A does nothing in a stage: the old spindash.txt left Sonic at the
+# first rock wall); classic_run_jump.txt spin dashes (down + B) then runs right jumping, replayed back to back
+# with the shots between (build/play/20261125-084105-xsonic).
 steps = ["wait 40", "shot title", "press A ; 8", "press A ; 45", "shot program 1",
-         "replay hold_a.txt ; 8 * 8", "replay spindash.txt ; 30", "shot run", "wait 30", "shot run later",
-         "wait 30", "shot end"]
+         "replay hold_a.txt ; 8 * 8", "replay classic_run_jump.txt ; 12 * 2",
+         "replay classic_run_jump.txt ; 12", "shot run 1", "replay classic_run_jump.txt ; 12", "shot run 2",
+         "replay classic_run_jump.txt ; 12", "shot run 3", "replay classic_run_jump.txt ; 12", "shot run 4",
+         "replay classic_run_jump.txt ; 12", "shot run 5", "replay classic_run_jump.txt ; 12", "shot run 6",
+         "replay classic_run_jump.txt ; 12", "shot run 7", "replay classic_run_jump.txt ; 12", "shot run 8"]
 
 [jamboree]
 title = "Super Mario Party Jamboree"
-about = "unskippable opening, L+R at the title, to the plaza, move"
+about = "fresh save: unskippable opening, L+R at the title, A through players/character/Toad to the plaza, walk"
+# The title ("Press L+R") is up by ~300 s; A then takes 1 player, Mario, Ready! and Toad's first-run talk,
+# ending on "hop on the Hot-Air Balloon": Mario walks from ~400 s (build/play/20261125-043913-xjam). A there
+# is a jump; walking up the balloon stairs would board it, so the walk keeps to the plaza floor. The walk
+# ends where it began: the shots are taken inside it (down, right, left, back up).
 seconds = 520
-window = [300, 510]
-steps = ["wait 260", "shot title", "replay hold_lr.txt ; 5", "press A ; 6 * 20", "wait 15", "shot post menu",
-         "replay run_jump.txt ; 30", "shot movement", "wait 30", "shot end"]
+window = [405, 445]
+steps = ["wait 305", "shot title", "press L+R~1 ; 5", "shot players", "press A ; 3 * 30", "shot plaza",
+         "replay jamboree_walk.txt ; 2.5", "shot walk down", "wait 3", "shot walk right", "wait 4.5",
+         "shot walk left", "wait 5", "shot walk up", "wait 3", "replay jamboree_walk.txt ; 5.5",
+         "shot walk right again", "wait 12.5", "shot end"]
 
 [smash]
 title = "Super Smash Bros Ultimate"
-about = "menus to a match vs a CPU, fight"
-seconds = 300
-window = [130, 290]
+about = "menus to a match vs a CPU, fight; results; a second match (memory between the two)"
+# The 2:30 timed match ends at ~285 s; the replay's 20 s blocks (A for results, + + = Ready to Fight at the
+# character select) carry on into a second match (Norfair again; the CPU fighter is random, so each match may
+# bring new pipelines). `window` is the first match; compare private_mb of metrics-*.csv between the two
+# matches for the memory check (SMASH-POLISH).
+seconds = 560
+window = [130, 280]
 steps = ["wait 40", "shot boot", "press A ; 8 * 7", "wait 3", "shot character select",
-         "replay smash_fight.txt ; 30", "shot fight", "wait 30", "shot fight later", "wait 30", "shot fight end"]
+         "replay smash_fight.txt ; 30", "shot fight", "wait 30", "shot fight later", "wait 30", "shot fight end",
+         "wait 100", "shot results", "wait 60", "shot second fight", "wait 60", "shot second fight later",
+         "wait 60", "shot second fight end"]
 
 [smoke]
 title = "Super Mario Bros Wonders"

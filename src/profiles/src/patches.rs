@@ -1,4 +1,4 @@
-//! Patch tables as data (`games/<id>/patches.toml`, `shared/*.toml`, and the owner's `games/<id>/turbo.toml`).
+//! Patch tables as data (`games/<id>/patches.toml`, `shared/*.toml`, and the owner's `games/<id>/owner.toml`).
 //!
 //! The exporter (`tools/export.py`) turns nxnative's `patches.py` into this; see its header for how stubs become
 //! words plus relocations. Offsets are module offsets (the module image starts at 0), as the rewriter's.
@@ -41,7 +41,7 @@ pub struct Cut {
     pub original: String,
     pub replacement: String,
     pub reason: String,
-    /// The module (nxnative keys a cut by build id alone; Turbo's entries name it)
+    /// The module (nxnative keys a cut by build id alone; the owner's entries name it)
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub module: Option<String>,
     /// `build`: nxrs applies it when it builds the game (the translator's patch table). Absent: data for the lanes
@@ -222,7 +222,7 @@ impl PatchFile {
 }
 
 /// Whether a table's build key names a module's build id: both as lowercase hex, equal over the shorter of the
-/// two, which must be at least 16 bytes (nxnative keys 16 bytes, Turbo 20, a module's id runs to 32).
+/// two, which must be at least 16 bytes (nxnative keys 16 bytes, the owner's 20, a module's id runs to 32).
 pub fn build_matches(key: &str, build_id: &str) -> bool {
     let (k, b) = (key.to_ascii_lowercase(), build_id.to_ascii_lowercase());
     let n = k.len().min(b.len());

@@ -20,7 +20,6 @@ impl App {
             Action::Properties(tab) => self.show_properties(tab),
             Action::InstallDlc => self.show_dlc(),
             Action::InstallUpdates => self.show_updates(),
-            Action::CopySaves => self.copy_saves(true, true),
             Action::RemoveGame => self.remove_game(),
             Action::InstallKeys => self.install_keys(),
             Action::OpenKeysFolder => {
@@ -66,14 +65,6 @@ impl App {
                 self.lib.games.retain(|g| g.id != id);
                 self.selected.clear();
                 self.save();
-            }
-            Action::ConfirmCopySaves => self.copy_saves(true, false),
-            Action::OfferedCopy(id, yes) => {
-                self.select(&id);
-                if yes {
-                    self.copy_saves(true, false);
-                }
-                self.launch();
             }
             Action::ConfirmClose => self.close_after_cancel(),
         }

@@ -1280,8 +1280,8 @@ fn resolution_scale_renders_at_twice_the_size() {
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
-/// A texture made without NVN's IMAGE flag, registered as an image and written by image stores (Turbo caa07ad,
-/// `NXGFX_IMAGE_NOFLAG=1`): its image gets storage use (an sRGB one through its UNORM twin) and the writes land. The
+/// A texture made without NVN's IMAGE flag, registered as an image and written by image stores
+/// (`NXGFX_IMAGE_NOFLAG=1`): its image gets storage use (an sRGB one through its UNORM twin) and the writes land. The
 /// texture is registered as a sampled texture first, so its image is made without storage use and made again.
 #[test]
 fn image_stores_to_a_texture_without_the_image_flag() {
@@ -1352,7 +1352,7 @@ fn image_stores_to_a_texture_without_the_image_flag() {
 }
 
 /// A pixel shader whose float output writes an R32UI target (the translator's outputs are float register containers):
-/// drawn through its integer-output variant (Turbo's `vkspv_int_outputs`), the target gets the bits it wrote.
+/// drawn through its integer-output variant, the target gets the bits it wrote.
 #[test]
 fn float_output_bits_reach_an_integer_target() {
     let _g = setup();
@@ -1379,7 +1379,7 @@ fn float_output_bits_reach_an_integer_target() {
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
-/// NVN's alpha test, applied in the pixel shader (Turbo `vkspv_alpha_test`): with GREATER 0.5 the half drawn at
+/// NVN's alpha test, applied in the pixel shader: with GREATER 0.5 the half drawn at
 /// alpha 0.3 is discarded and the half at alpha 0.7 is drawn.
 #[test]
 fn alpha_test_discards_in_the_shader() {
@@ -1426,7 +1426,7 @@ fn alpha_test_discards_in_the_shader() {
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
-/// Dual-source blending: the pixel shader's output 1 is target 0's second source (Turbo `vkspv_dual_source`):
+/// Dual-source blending: the pixel shader's output 1 is target 0's second source:
 /// colour = src x ONE + dst x SRC1_COLOR over a white target.
 #[test]
 fn dual_source_blending_reads_output_1() {
@@ -1570,7 +1570,7 @@ fn append_counter_as_indirect_draw_arguments() {
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
-/// A linear render target in a CPU-visible pool (Turbo's `rt_readback`): what a pass draws there is in its storage
+/// A linear render target in a CPU-visible pool: what a pass draws there is in its storage
 /// for the CPU at the fence, without a texel read or a copy by the game.
 #[test]
 fn linear_render_target_reaches_guest_memory() {
@@ -1633,7 +1633,7 @@ fn linear_render_target_reaches_guest_memory() {
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
-/// NVN's warp-aggregated atomic counter after an early return (hangs RTX 50 cards, Turbo #12): the module is loaded
+/// NVN's warp-aggregated atomic counter after an early return (hangs RTX 50 cards): the module is loaded
 /// with each ballot made per lane (`shaders::link::ballot_per_lane`) and the count is still right.
 #[test]
 fn ballot_counter_made_per_lane_counts_right() {
@@ -1668,7 +1668,7 @@ fn ballot_counter_made_per_lane_counts_right() {
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
-/// VRAM eviction (Turbo `vk_budget`): over the budget's threshold (`NXGFX_VRAM_EVICT_PCT`, 0 here so any use is
+/// VRAM eviction: over the budget's threshold (`NXGFX_VRAM_EVICT_PCT`, 0 here so any use is
 /// over it) the images parked for a re-initialization are freed.
 #[test]
 fn vram_budget_frees_parked_images() {
@@ -2172,7 +2172,7 @@ fn reused_command_buffer_sync_covers_the_new_submission() {
     assert_eq!(validation_errors(), e0, "validation errors");
 }
 
-/// agl's "clear once" (Turbo's render_cond): a clear wrapped in SetRenderEnableConditional(equal) on a record the CPU
+/// agl's "clear once" (conditional rendering): a clear wrapped in SetRenderEnableConditional(equal) on a record the CPU
 /// set to 1 and a reference of 1 at +16, followed by ReportCounter(TIMESTAMP_TOP) on that record: the second wrapped
 /// clear of the same target is skipped, since the timestamp's counter field (0) no longer equals the reference, even
 /// though the report has not landed yet when the replay reaches the second condition.

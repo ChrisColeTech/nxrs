@@ -1,4 +1,4 @@
-//! Sharp upscale at present (Turbo `vk_present.c`, its default): when the window is larger than the picture, the
+//! Sharp upscale at present (on by default): when the window is larger than the picture, the
 //! picture is upscaled by a contrast-adaptive sharpening pass (`shaders/upscale.comp`) into an image of the window's
 //! letterboxed size, which is then copied 1:1 into the swap chain image; otherwise the present's linear blit is used.
 //! `NXGFX_UPSCALE=standard` (or the ini's `upscale=standard`) keeps the linear blit; `NXGFX_SHARPNESS` 0..1 (0.5).

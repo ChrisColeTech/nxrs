@@ -1,5 +1,5 @@
 //! docs/game-patches.md, the index of game-specific code (nxnative `dm/tools/docs_patches.py` for this engine's
-//! profiles): per game, its patch tables (nxnative's `patches.toml`, the owner's `turbo.toml`, a `recomp.txt` table)
+//! profiles): per game, its patch tables (nxnative's `patches.toml`, the owner's `owner.toml`, a `recomp.txt` table)
 //! with each patch's build, module, place and reason, whether nxrs builds apply it and the switch that turns it off;
 //! the binding notes (why a patch is bound the way it is); and the profile keys that move run-time behaviour away
 //! from its default. Then the patch sets shared by many games. Written from the profiles themselves, so the page is
@@ -159,7 +159,7 @@ pub fn game_patches_markdown() -> String {
             .map(|(k, v)| format!("`{k}` {}", v.join(" ")))
             .collect();
         let has =
-            p.patches.is_some() || p.turbo.is_some() || p.recomp.is_some() || !keys.is_empty();
+            p.patches.is_some() || p.owner.is_some() || p.recomp.is_some() || !keys.is_empty();
         if !has {
             continue;
         }
@@ -171,8 +171,8 @@ pub fn game_patches_markdown() -> String {
         if let Some(f) = &p.patches {
             table(&mut out, "nxnative's patches", f);
         }
-        if let Some(f) = &p.turbo {
-            table(&mut out, "the owner's patches (Turbo)", f);
+        if let Some(f) = &p.owner {
+            table(&mut out, "the owner's patches", f);
         }
         if p.recomp.is_some() {
             out.push_str("\n### A code patch table (`recomp.txt`)\n\nApplied by nxrs builds of the module build it names.\n");

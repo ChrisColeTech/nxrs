@@ -234,7 +234,7 @@ fn connect_as(name: &str, switch2: bool) -> Result<u32, u32> {
 
 /// A Switch 2 service the host does not serve (chat:u, GameChat...): their clients hand out their interface with
 /// command 0 and call through it, so command 0 answers an object of the same kind; every command succeeds with
-/// zeroed output and its gap line (Turbo `svc_core.c` generic_disp: Mario Kart World's nn::chat::Initialize called
+/// zeroed output and its gap line (Mario Kart World's nn::chat::Initialize called
 /// through the object it did not get).
 pub struct Unknown(pub String);
 

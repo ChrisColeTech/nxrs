@@ -312,7 +312,7 @@ impl State {
         self.wake(w, 0);
     }
 
-    /// Whether the owner a lock word names cannot release it (Turbo kernel.c `owner_is_stale_nl`): no owner, an
+    /// Whether the owner a lock word names cannot release it: no owner, an
     /// exited thread, or a thread itself waiting for this lock (or on a condition variable over it). The pseudo-handle
     /// and anything that is not a thread are left alone: never steal from a real owner.
     fn owner_is_stale(&self, v: u32, addr: u64) -> bool {
@@ -341,7 +341,7 @@ impl State {
     }
 
     /// The sweep for lock waiters stuck behind a stale owner or whose waiters bit was cleared (then the owner unlocks
-    /// in user mode without calling the kernel): Turbo kernel.c `kernel_heal_mutexes`, run each frame. The stale
+    /// in user mode without calling the kernel), run each frame. The stale
     /// lock goes to its first waiter in kernel order; a lost bit is set again. What it repaired: (address, what, the
     /// word it found).
     fn heal_locks(&mut self) -> Vec<(u64, &'static str, u32)> {
@@ -476,7 +476,7 @@ impl State {
     }
 }
 
-/// A repaired lock: the first 20 logged, then every 1024th (Turbo `heal_note`).
+/// A repaired lock: the first 20 logged, then every 1024th.
 fn heal_note(addr: u64, what: &str, v: u32) {
     static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
@@ -488,7 +488,7 @@ fn heal_note(addr: u64, what: &str, v: u32) {
 }
 
 impl Kernel {
-    /// The stuck-mutex healer (Turbo `kernel_heal_mutexes`): the host calls it each frame. How many locks it repaired.
+    /// The stuck-mutex healer: the host calls it each frame. How many locks it repaired.
     pub fn heal_mutexes(&self) -> usize {
         let notes = lock(&self.g).heal_locks();
         for (a, what, v) in &notes {
@@ -854,7 +854,7 @@ fn thread_body(slot: usize) {
     }
     let core = lock(&k.g).t(slot).core;
     sched().thread_start(handle, core);
-    crate::profile::add_current(handle);
+    crate::profile::add_current(handle, cpu);
     CPU.set(cpu);
     // SAFETY: this thread owns its Cpu until it exits.
     unsafe {
@@ -896,10 +896,18 @@ pub fn svc(c: &mut Cpu, imm: u32) -> bool {
     }
     sched().block_enter();
     let t0 = std::time::Instant::now();
+    crate::profile::mark(match imm {
+        0x0B => crate::profile::W_SLEEP,
+        0x18 => crate::profile::W_SYNC,
+        0x1A => crate::profile::W_MUTEX,
+        0x1C => crate::profile::W_CONDVAR,
+        _ => crate::profile::W_ADDRESS,
+    });
     let r = svc_inner(c, imm);
+    crate::profile::mark(crate::profile::RUN);
     let us = t0.elapsed().as_micros() as u64;
     sched().block_leave();
-    // metrics (Turbo kernel.c's waits by kind): how many waits and how long, per second in metrics-*.csv
+    // metrics (waits by kind): how many waits and how long, per second in metrics-*.csv
     let (n, t) = wait_counters(imm);
     nxconfig::metrics::add(n, 1);
     nxconfig::metrics::add(t, us);
@@ -1032,7 +1040,7 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
             let mut r = R_OK;
             let mut v = ld32(addr);
             if v == (c.x[0] as u32 | WAITERS_BIT) && g.owner_is_stale(v, addr) {
-                // already released (Turbo `svc_arbitrate_lock`): hand it to the caller, the waiters bit kept if anyone
+                // already released: hand it to the caller, the waiters bit kept if anyone
                 // else is queued; the caller rereads the word
                 let nv = tag
                     | if g.lock_waiters(addr, None) {
@@ -1288,7 +1296,7 @@ fn svc_inner(c: &mut Cpu, imm: u32) -> bool {
             }
             c.x[0] = R_OK;
         }
-        // SetThreadActivity(w0 handle, w1 pause / run): accepted, the thread keeps running (as Turbo). Unity's
+        // SetThreadActivity(w0 handle, w1 pause / run): accepted, the thread keeps running. Unity's
         // garbage collector pauses every thread around GetThreadContext3.
         0x32 => {
             let g = lock(&k.g);
@@ -1464,10 +1472,10 @@ mod tests {
         assert_eq!(ld32(a), 0, "free");
     }
 
-    /// Turbo kernel.c `kernel_heal_mutexes` / `owner_is_stale_nl`: a lock held by an exited thread or by one of its
+    /// The stuck-mutex healer: a lock held by an exited thread or by one of its
     /// own waiters goes to the best waiter; a lost waiters bit is set again; a live owner is never robbed.
     #[test]
-    fn stuck_mutexes_are_healed_as_turbo() {
+    fn stuck_mutexes_are_healed() {
         let mut s = state_with_threads(5); // handles 0x1001..0x1005
         let words = Box::new([0u32; 3]);
         let (a, b, c) = (

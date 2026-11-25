@@ -44,10 +44,6 @@ pub fn card_state(
         };
     }
     let can_build = !other_build && tools_ready && f.source_available;
-    // an entry the Turbo engine built: the game is built again with nxrs
-    if f.turbo {
-        return state(m::BUILD, w::NEEDS_NXRS, can_build, true);
-    }
     if f.has_build {
         if f.source_offline() {
             return state(m::PLAY, w::OFFLINE, false, true);
@@ -77,8 +73,6 @@ pub fn status_for(f: &Facts, demo: bool, building: bool, running: bool) -> &'sta
         w::BUILDING
     } else if running {
         w::RUNNING
-    } else if f.turbo {
-        w::NEEDS_NXRS
     } else if f.has_build && f.source_offline() {
         w::OFFLINE
     } else if f.update_pending {

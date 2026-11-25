@@ -1,9 +1,9 @@
-//! nxconfig: the game's settings, `<name>.ini` beside the executable, with every option Turbo's runtime reads, and the
+//! nxconfig: the game's settings, `<name>.ini` beside the executable, with every option the runtime reads, and the
 //! engine-wide registries other parts publish into (control commands, counters).
 //!
 //! The front end opens the ini (`open`), applies `--key=value` arguments for one run (`apply_arg`), and polls the file
 //! (`poll`) so an edit applies live. Every other part reads values here (`f32`, `int`, `string`, `flag` and the
-//! helpers) and may watch `generation()` to notice a change. Values are already normalised to Turbo's ranges.
+//! helpers) and may watch `generation()` to notice a change. Values are already normalised to their ranges.
 //! The file is rewritten sorted into sections with a comment above each key; keys the table does not know are kept
 //! under `[Other]`.
 
@@ -17,7 +17,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, RwLock};
 use std::time::SystemTime;
 
-/// The current settings version (Turbo's `settings_version`): 2 moved docked to 1, 3 moved game_dynamic_resolution
+/// The current settings version (`settings_version`): 2 moved docked to 1, 3 moved game_dynamic_resolution
 /// to auto, 4 moved lsfg from the old default 1 to 0 (frame generation off by default, one global setting:
 /// docs/DECISIONS.md 1). An ini below a version gets that change once.
 pub const SETTINGS_VERSION: u32 = 4;
@@ -86,7 +86,7 @@ pub fn f32(key: &str) -> f32 {
     })
 }
 
-/// The leading integer (C's atoi, as Turbo reads its ints).
+/// The leading integer (as C's atoi reads it).
 pub fn int(key: &str) -> i64 {
     let v = string(key);
     let t = v.trim();
@@ -143,7 +143,7 @@ pub fn frame_skip() -> u32 {
 }
 
 /// Frame generation wanted, its multiplier and target: `lsfg` + `lsfg_multiplier` + `lsfg_target`, with
-/// `fps_target=120` forcing x2 at 120 (Turbo's rule).
+/// `fps_target=120` forcing x2 at 120.
 pub fn lsfg() -> (bool, u32, f32) {
     if int("fps_target") == 120 {
         return (true, 2, 120.0);

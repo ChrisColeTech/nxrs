@@ -7,7 +7,7 @@
 //! - 400 OpenDeviceOperator: an SD card is inserted (the folder above), no game card;
 //! - 500 / 501 the SD card and game card detection notifiers: events that never fire (nothing is ever removed).
 //!
-//! Turbo's `svc_fs.c` serves the same commands (its save info reader lists nothing; here it lists what exists).
+//! The save info reader lists what exists.
 
 use crate::ipc::{self, Ctx, Service};
 use crate::kobj::Event;
@@ -608,7 +608,7 @@ mod tests {
         u64::from_le_bytes(r.data[o..o + 8].try_into().unwrap())
     }
 
-    /// A host folder as the SD card's IFileSystem (fsp 18's object; Turbo hostfs): create, write past the end only
+    /// A host folder as the SD card's IFileSystem (fsp 18's object): create, write past the end only
     /// with append, read back, size, entry types, directory listing (DirectoryEntry layout), rename, time stamps,
     /// free space, the not-found / exists results and a path leaving the root refused.
     #[test]

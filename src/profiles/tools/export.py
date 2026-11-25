@@ -10,7 +10,7 @@ Writes, under src/profiles/:
   shared/engine_patches.toml dm/tools/engine_patches.py (middleware: Unity, Unreal, ...)
   shared/settings.tsv       dm/games/settings.tsv (the player-facing settings list)
   shared/source.txt         the nxnative commit the files came from
-Hand-written files beside them (games/<id>/turbo.toml: the owner's patches) are never touched.
+Hand-written files beside them (games/<id>/owner.toml: the owner's patches) are never touched.
 
 A patches.py is code: CUTS / OBS / CAPABILITIES / BINDING are data already; FRAME_STEP and STUBS (by build id) and the
 stubs of MATCH_* rules are functions that assemble ARM words into the rewriter's patch area through a context

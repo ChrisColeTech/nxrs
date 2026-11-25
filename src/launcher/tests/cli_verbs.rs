@@ -51,9 +51,6 @@ fn build_dlc_updates_and_saves_verbs() {
     assert_eq!(o.status.code(), Some(1));
     let o = nxrs(&data, &[&sel[..], &["--remove-update", &update]].concat());
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
-    let o = nxrs(&data, &[&sel[..], &["--copy-saves"]].concat());
-    assert_eq!(o.status.code(), Some(1));
-    assert!(text(&o).contains("Saves error: The Turbo build has no saves to copy"));
     let o = nxrs(&data, &[&sel[..], &["--build"]].concat());
     assert_eq!(o.status.code(), Some(0), "{}", text(&o));
     assert!(
@@ -110,15 +107,11 @@ fn engine_doctor_and_images() {
             "--select-title",
             "Kart",
             "--engine",
-            "turbo",
+            "other",
             "--build",
         ],
     );
-    assert_eq!(
-        o.status.code(),
-        Some(2),
-        "Turbo is no longer an engine choice"
-    );
+    assert_eq!(o.status.code(), Some(2), "nxrs is the only engine");
     let o = nxrs(&data, &["--library", &lib, "--nxrs-doctor"]);
     assert_eq!(o.status.code(), Some(1));
     assert!(text(&o).contains("\u{2717} Vulkan device: Old GPU"));

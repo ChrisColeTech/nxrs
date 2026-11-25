@@ -5,6 +5,7 @@ use super::dates;
 use super::game::Game;
 use super::game_update::GameUpdate;
 use super::json_fields::{bool_of, int_of, paths_of, str_of};
+use super::names::build_folder_for;
 use super::path_text::same_path;
 use super::play::{normalize_button_layout, normalize_screen_mode};
 use crate::constants::engine as e;
@@ -89,12 +90,7 @@ pub fn from_json(value: &Value) -> Game {
             }
         }
     }
-    let engine = if str_of(o, "engine") == e::ENGINE_NXRS {
-        e::ENGINE_NXRS
-    } else {
-        e::ENGINE_TURBO
-    };
-    Game {
+    let mut g = Game {
         id: str_of(o, "id"),
         title: str_of(o, "title"),
         source: str_of(o, "source"),
@@ -103,7 +99,7 @@ pub fn from_json(value: &Value) -> Game {
         cover: str_of(o, "cover"),
         background: str_of(o, "background"),
         renderer,
-        engine: engine.into(),
+        engine: e::ENGINE_NXRS.into(),
         button_layout: normalize_button_layout(&str_of(o, "buttonLayout")),
         screen_mode: normalize_screen_mode(&str_of(o, "screenMode")),
         built_source: str_of(o, "builtSource"),
@@ -123,5 +119,13 @@ pub fn from_json(value: &Value) -> Game {
             .filter(|(k, _)| !KNOWN.contains(&k.as_str()))
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
+    };
+    // an entry saved with another engine (or none) loads as nxrs, in its `[nxrs]` folder and not built
+    if str_of(o, "engine") != e::ENGINE_NXRS && !g.build_dir.is_empty() {
+        g.build_dir = build_folder_for(&g.build_dir);
+        g.built_source.clear();
+        g.built_update.clear();
+        g.build_incomplete = false;
     }
+    g
 }

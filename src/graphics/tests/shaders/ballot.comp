@@ -1,6 +1,6 @@
 #version 450
 #extension GL_KHR_shader_subgroup_ballot : require
-// NVN's warp-aggregated counter after an early return (Turbo #12, shader d2c50cca6e386abc): the highest lane of the
+// NVN's warp-aggregated counter after an early return (shader d2c50cca6e386abc): the highest lane of the
 // ballot adds their number; the add's result is not read
 layout(local_size_x = 64) in;
 layout(set = 5, binding = 1) buffer Count { uint count; };

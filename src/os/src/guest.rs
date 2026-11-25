@@ -207,21 +207,25 @@ pub unsafe fn spawn(
     Some(tt)
 }
 
-/// True when `a` is committed, readable memory (a pointer the guest handed over that may be stale).
-#[cfg(target_os = "linux")]
+/// True when host code may read [a, a+n) (a pointer the guest handed over that may be stale). Memory the os layer
+/// keeps mapped (the heap, physical maps, shared views) is answered from its table (`mem::Memory::mapped`) without
+/// asking the OS; the rest by the host's query. Yes does **not** mean committed: an untouched heap page or a page the
+/// GPU write-back holds is restored by the fault handlers on first touch, which covers host reads but not an OS call
+/// (file, socket, `process_vm_readv`) handed the pointer — commit it first with `mem::prepare`.
 pub fn readable(a: u64, n: u64) -> bool {
-    a >= 0x1000 && nxrt::mem::readable(a, n)
+    a >= 0x1000 && (crate::mem::try_get().is_some_and(|m| m.mapped(a, n)) || host_readable(a, n))
 }
 
-/// True when `a` is committed, readable memory (a pointer the guest handed over that may be stale).
+#[cfg(target_os = "linux")]
+fn host_readable(a: u64, n: u64) -> bool {
+    nxrt::mem::readable(a, n)
+}
+
 #[cfg(windows)]
-pub fn readable(a: u64, n: u64) -> bool {
+fn host_readable(a: u64, n: u64) -> bool {
     use windows_sys::Win32::System::Memory::{
         VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, PAGE_GUARD, PAGE_NOACCESS,
     };
-    if a < 0x1000 {
-        return false;
-    }
     let mut m: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
     let got = unsafe {
         VirtualQuery(

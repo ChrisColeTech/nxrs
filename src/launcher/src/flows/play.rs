@@ -1,11 +1,10 @@
 //! Play and Stop (`Window::play`, `Window::stop`): the guards, the DLC sync first when needed, the
-//! one-time offer of the Turbo build's saves, the INI settings, the detached start.
+//! INI settings, the detached start.
 
-use super::{Action, App, DlcReason};
-use crate::constants::{engine as e, words_play as w};
+use super::{App, DlcReason};
+use crate::constants::words_play as w;
 use crate::model::dates;
-use crate::model::fill::fill;
-use crate::services::{dlc_files, ini_file, platform, saves};
+use crate::services::{dlc_files, ini_file, platform};
 
 impl App {
     pub fn play(&mut self) {
@@ -31,27 +30,6 @@ impl App {
         }
         if !self.lib.find(&id).is_some_and(dlc_files::up_to_date) {
             self.start_dlc_sync(&id, DlcReason::Play);
-            return;
-        }
-        // the Turbo build's saves are offered once (a copy, after a backup of this build's)
-        let offer = self
-            .lib
-            .find(&id)
-            .filter(|g| g.saves_offered.is_empty() && saves::turbo_build_has_saves(g))
-            .map(|g| g.title.clone());
-        if let Some(title) = offer {
-            if let Some(g) = self.lib.find_mut(&id) {
-                g.saves_offered = e::ENGINE_TURBO.into();
-            }
-            self.save();
-            let text = fill(w::COPY_OFFER, &[&title]);
-            self.question(
-                w::COPY_TITLE,
-                &text,
-                Action::OfferedCopy(id.clone(), true),
-                Some(Action::OfferedCopy(id, false)),
-                true,
-            );
             return;
         }
         self.launch();

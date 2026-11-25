@@ -1,0 +1,8 @@
+# Jamboree Party Plaza (first-run, "hop on the Hot-Air Balloon"): walk down, right, left, down-left and back up,
+# away from the balloon stairs (walking up them boards it and starts the next cutscene), ~16 s
+0 0 0 -32767 0 0
+3000 0 32767 0 0 0
+6000 0 -32767 0 0 0
+11000 0 -23000 -23000 0 0
+13000 0 0 32767 0 0
+16000 0 0 0 0 0

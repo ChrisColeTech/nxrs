@@ -2,8 +2,8 @@
 //! guest code runs): the memory, IPC, information and counter SVCs are answered here; the kernel's (threads,
 //! synchronization) go to `nxrt::kernel::svc`, which tells the scheduler (`sched.rs`) about blocking waits; ExitThread,
 //! ExitProcess and Break are left to the runtime. After every SVC answered here comes the scheduler's checkpoint. An
-//! SVC nobody handles (the runtime's fallback) answers NotImplemented (0xF601) with an `UNIMPL Svc` gap line, as
-//! Turbo does (audit 2026-11-20: answering success was a fake).
+//! SVC nobody handles (the runtime's fallback) answers NotImplemented (0xF601) with an `UNIMPL Svc` gap line
+//! (audit 2026-11-20: answering success was a fake).
 //!
 //! The counter (CNTPCT/CNTVCT and GetSystemTick, the runtime's `rt_ticks`) runs at the title's rate (19.2 MHz on
 //! Switch 1, 31.25 MHz on Switch 2: the runtime's `rt_tick_hz`, also what CNTFRQ reads) on the guest clock
@@ -120,11 +120,11 @@ pub fn name(imm: u32) -> &'static str {
     }
 }
 
-/// Horizon's kernel results for an SVC the host does not serve (Turbo kernel.c R_NOTIMPL / R_NOTFOUND).
+/// Horizon's kernel results for an SVC the host does not serve (NotImplemented / NotFound).
 pub const R_NOT_IMPLEMENTED: u64 = 0xF601;
 pub const R_NOT_FOUND: u64 = 0xF201;
 
-/// A resource limit's limit (and peak) value (Turbo kernel.c): 0 physical memory (the pool), 1 threads 800,
+/// A resource limit's limit (and peak) value: 0 physical memory (the pool), 1 threads 800,
 /// 2 events 800, 3 transfer memories 256, the rest (sessions) 64.
 pub fn resource_limit(which: u32) -> u64 {
     match which {
@@ -135,7 +135,7 @@ pub fn resource_limit(which: u32) -> u64 {
     }
 }
 
-/// GetSystemInfo(type, subtype) (Turbo kernel.c): type 0 a pool's physical size (the application's, then the
+/// GetSystemInfo(type, subtype): type 0 a pool's physical size (the application's, then the
 /// applet, system and unsafe pools), 1 its use, 2 the initial process id range.
 pub fn system_info(ty: u32, sub: u64, pool: u64, used: u64) -> u64 {
     match (ty, sub) {
@@ -413,7 +413,7 @@ unsafe fn svc(cpu: &mut Cpu, imm: u32, pc: u64) -> bool {
                 20 => Some(user_exception_context()),
                 23 => Some(1),
                 24 => Some(96u64.saturating_sub(THREADS.load(Ordering::Relaxed))),
-                // 29, 30: Switch 2 kernels' newer ids (0 as Turbo answers); 33: their page size (Turbo kernel.c)
+                // 29, 30: Switch 2 kernels' newer ids (0); 33: their page size
                 25..=30 => Some(0),
                 33 => Some(0x1000),
                 _ => m.info(id0),
@@ -505,10 +505,10 @@ pub(crate) fn write_info(a: u64, base: u64, size: u64, state: u32) {
 mod tests {
     use super::*;
 
-    /// Turbo's answers (kernel.c): resource limits, GetSystemInfo, and NotImplemented / NotFound for what the host
+    /// The answers: resource limits, GetSystemInfo, and NotImplemented / NotFound for what the host
     /// does not serve; the unhandled path no longer answers success.
     #[test]
-    fn unserved_svcs_answer_as_turbo() {
+    fn unserved_svcs_answer_not_implemented() {
         assert_eq!(
             (
                 resource_limit(1),

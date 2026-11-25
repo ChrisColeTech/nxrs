@@ -1,6 +1,5 @@
 //! XInput pads (Xbox controllers and anything a driver presents as one), loaded at run time from xinput1_4 /
-//! xinput1_3 / xinput9_1_0; on Linux the same surface over SDL2's game controllers (`linux` below), as Turbo reads
-//! pads there. Buttons by position like a Switch pad: right (Xbox B) = A position, bottom (Xbox A) = B,
+//! xinput1_3 / xinput9_1_0; on Linux the same surface over SDL2's game controllers (`linux` below). Buttons by position like a Switch pad: right (Xbox B) = A position, bottom (Xbox A) = B,
 //! top (Y) = X, left (X) = Y; the triggers press ZL / ZR past 60 of 255. Rumble through XInputSetState (left = low
 //! frequency motor, right = high).
 
@@ -133,7 +132,7 @@ pub fn buttons(g: &Gamepad) -> u64 {
     b
 }
 
-/// Turbo's dead zone: ±7000 reads 0.
+/// The dead zone: ±7000 reads 0.
 pub fn dz(v: i32) -> i32 {
     if v > -7000 && v < 7000 {
         0
@@ -144,7 +143,7 @@ pub fn dz(v: i32) -> i32 {
 
 // ---------------------------------------------------------------- Linux: SDL2 game controllers
 
-/// SDL2, loaded at run time (libSDL2-2.0.so.0, else libSDL2.so) as Turbo's Linux backend does, initialised once
+/// SDL2, loaded at run time (libSDL2-2.0.so.0, else libSDL2.so), initialised once
 /// for game controllers (and with them joysticks: `winmm.rs`). SDL's own HID drivers for PlayStation and Nintendo
 /// pads are turned off, so those stay with the native HID path (`hidio`) unless NXRS_NO_SONY_HID /
 /// NXRS_NO_NINTENDO_HID hands them to SDL. SDL installs no signal handlers and queues no events: everything is
@@ -499,7 +498,7 @@ mod linux_tests {
         assert_eq!((trigger(0), trigger(-5), trigger(16384)), (0, 0, 127));
         assert!(
             trigger(7700) < 60 && trigger(7900) > 60,
-            "Turbo's 7700 threshold is XInput's 60"
+            "a 7700 threshold is XInput's 60"
         );
     }
 

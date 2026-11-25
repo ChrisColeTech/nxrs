@@ -1,0 +1,4 @@
+# Modern stage rail stretch, 12 s: stick forward and boost (ZR) held, no jump (a jump there leaves the rail into
+# the void; held forward Shadow grinds through to the dash rings).
+0 200 0 30000 0 0
+12000 200 0 30000 0 0

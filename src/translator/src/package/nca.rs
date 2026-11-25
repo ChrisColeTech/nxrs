@@ -116,7 +116,7 @@ pub fn decrypt_header(blob: &Blob, offset: u64, keys: &Keys) -> Result<Vec<u8>> 
 }
 
 impl Nca {
-    /// nca.py `Nca(path, member, keys, tickets)`: an Err carries Turbo's reason.
+    /// nca.py `Nca(path, member, keys, tickets)`: an Err carries the reason.
     pub fn open(blob: &Arc<Blob>, member: &Member, keys: &Keys, tickets: &Tickets) -> Result<Nca> {
         let path = blob.path.display();
         let name = &member.name;

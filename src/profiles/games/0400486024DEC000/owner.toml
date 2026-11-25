@@ -1,4 +1,4 @@
-# The owner's patches for The Legend of Zelda: Ocarina of Time (Switch 2), from Turbo (nxloader.py BUILTIN_PATCHES);
+# The owner's patches for The Legend of Zelda: Ocarina of Time (Switch 2);
 # kept by hand, never written by the exporter. nxrs applies them when it builds the game (apply = "build"): the
 # translator lifts the replacement and the original both, and the runtime picks one by the set's switch
 # (NXRS_PATCH_OOT_FULLRES=0 lets the game's own dynamic resolution run). NXRS_NO_PROFILE_PATCHES=1 at build time
@@ -11,7 +11,7 @@
 # instead, which returns scale 1.0 without calling the level function at all (main+0x805bd0 tbz -> b main+0x80640c,
 # its return value 1.0 with the level kept). With this set on, the stub's site on that path is not reached; with it
 # off, the stub decides (full size, or the climb when the frame step's dynamic resolution flag is set).
-source = "Turbo nxloader.py (the owner's built-in patches)"
+source = "the owner's built-in patches"
 
 [[cut]]
 build = "e0f3ccfaf50065ae4ea01eb5aeb13b1a45da3348"

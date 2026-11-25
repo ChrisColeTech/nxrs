@@ -1,22 +1,22 @@
 # Launcher contract
 
 How the nxrs launcher (`nxrs.exe`, formerly RecompLauncher) drives the engine's build tool, `nxrs-build.exe`. v1 is
-what the launcher does with Turbo's `switchrecomp.py`; nxrs-build answers it unchanged. v2 is what the launcher does
-for a game set to the nxrs engine: it runs nxrs-build itself, without Python (implemented on both sides, 2026-11-19).
+the legacy launcher's command line, run through Python; nxrs-build answers it unchanged. v2 is what the launcher does
+for every game: it runs nxrs-build itself, without Python (implemented on both sides, 2026-11-19).
 
-## v1 (Turbo's command line)
+## v1 (the legacy launcher's command line)
 
 ### How the launcher starts the engine
 
 The launcher runs `<python> -u <engine>\recomp_cli.py <args>` (working directory: the engine folder; stdout and
-stderr merged; environment `PYTHONUTF8=1`, `PYTHONUNBUFFERED=1`, `SWR_PROD_KEYS=<keys>`, its tool folders on `PATH`).
+stderr merged; environment `PYTHONUTF8=1`, `PYTHONUNBUFFERED=1`, `NXRS_PROD_KEYS=<keys>`, its tool folders on `PATH`).
 `recomp_cli.py` imports `switchrecomp` from beside itself and returns `switchrecomp.main()`. For nxrs, that module is
-`src/cli/launcher/switchrecomp.py`: it runs `nxrs-build.exe` (`NXRS_BUILD`, `NXRS_EXE`, beside it, or
+the shim `src/cli/launcher/switchrecomp.py` (the file name is the one `recomp_cli.py` imports): it runs `nxrs-build.exe` (`NXRS_BUILD`, `NXRS_EXE`, beside it, or
 `bin\nxrs-build.exe`) with the same arguments and returns its exit code. Cancel kills the tree (`taskkill /PID <python>
 /T /F`), nxrs-build with it. The launcher no longer needs this path (it speaks v2); it stays for tools that drive
-`switchrecomp.py`.
+the shim.
 
-An engine folder the launcher accepts (`Toolchain::problem()`) holds `switchrecomp.py` (the shim), a Python, a file at
+An engine folder the legacy launcher accepts (`Toolchain::problem()`) holds the shim, a Python, a file at
 one of its gcc paths (`gcc\bin\gcc.exe`, …) and `bin\runtime_win64_win32.exe`. nxrs uses neither of the last two:
 `--cc` and `--runtime` are ignored. A release puts the bundled clang and the loader there to satisfy the check.
 
@@ -28,7 +28,7 @@ one of its gcc paths (`gcc\bin\gcc.exe`, …) and `bin\runtime_win64_win32.exe`.
 | Update probe | `<source> --update-info <pkg>...` | `UPDATE` lines |
 | DLC | `--sync-dlc [<pkg>...] --datadir <buildDir>\<name>_data` | the translator's DLC API |
 
-Also accepted, as Turbo: `--install-dlc`, `--remove-dlc`, `--list-dlc`, `--datadir` / `--outdir -o`, `--no-build`,
+Also accepted: `--install-dlc`, `--remove-dlc`, `--list-dlc`, `--datadir` / `--outdir -o`, `--no-build`,
 `--no-shaders`, `-q`, `--build-runtime` (checks `nxrt.lib` and clang, builds nothing). `--interp-only` and `--target
 linux` fail (no interpreter, Windows only). nxrs adds `--keys` and `--contract`.
 
@@ -58,27 +58,13 @@ Lines end in CRLF (Python's text mode); the launcher trims them. Exit codes: 0 d
 
 `<outdir>` defaults to `<the input's folder>\SwitchRecomp Builds\<name>` (the launcher always passes it).
 
-### Verified against Turbo (2026-11-19)
+### Output notes
 
-The launcher's own argument lists were run against Turbo (`py switchrecomp.py`, Switch2RECOMP-main) and nxrs, each
-into `build\cli\` (never the owner's build folders), and through the launcher's `recomp_cli.py` + the shim:
-
-| Case | Result |
-|---|---|
-| `--update-info`: an update of the game; a package that is no update; both together; no game | byte-identical output and exit codes (0, 1, 1, 0) |
-| `--sync-dlc` / `--remove-dlc` / `--list-dlc` / `--sync-dlc` with no package / no `--datadir` | identical, except the install lines (below) and the argument-error text |
-| Build MK8D (1G+1U+1D NSP, `--jobs 8`) | exit 0 both; the launcher-read lines all present; `_data` byte-identical (marker, control.nacp, icon, every ExeFS file); `dlc.manifest` identical after a sync |
-| Build errors: an update of another game, a missing input | exit 1 both; the package refusal is the same line |
-| Build of a homebrew folder (the runtime's `hello` test) | exit 0 both; the launcher-read files present |
-| Through `recomp_cli.py` + `switchrecomp.py` shim | same output, same exit codes |
-
-Intentional differences:
-
-1. Banner `nxrs - use your own copy…` instead of Turbo's; one `nxrs-build: ignored (…)` line after it.
-2. Module lines show the translator's layout (`7000000000`…) and each build id, not `.eh_frame functions`; a
-   `Profile:` line; the translator's per-module discovery and C summaries, `C code: … functions` (not `entries`);
-   `patch applied: …` for the profile's build-time patches (Turbo printed the same words for its built-in ones).
-3. `C generated: n/m chunks` counts the translator's chunks (124 for MK8D, Turbo 160); an unchanged program says
+1. Banner `nxrs - use your own copy…`; one `nxrs-build: ignored (…)` line after it.
+2. Module lines show the translator's layout (`7000000000`…) and each build id; a `Profile:` line; the translator's
+   per-module discovery and C summaries, `C code: … functions`; `patch applied: …` for the profile's build-time
+   patches.
+3. `C generated: n/m chunks` counts the translator's chunks (124 for MK8D); an unchanged program says
    `(unchanged since the last build)` and is not translated again.
 4. `Compiling with clang.exe 21.1.8 (-O1, N at a time)` (mkw-recomp's flag set; `-O` is ignored), plus a
    `compile: k of n units compiled, the rest reused` line and a `time:` line.
@@ -87,13 +73,12 @@ Intentional differences:
 6. A dumped folder's RomFS is read in place (`romfs.dir` marker), not copied into `_data\romfs\`.
 7. Add-on content encrypted with AES-CTR is read in place (`dlc\<id>\romfs.nsp` marker, `Reading … in place`) instead
    of decrypted by hactool into `romfs.bin` (`Decrypting …`); nxrs needs no hactool.
-8. The first `<name>.ini` has a different comment; Turbo's runtime rewrote it at first start anyway.
+8. The first `<name>.ini` carries nxrs's own comment.
 9. Argument errors are clap's text (exit 2 as argparse).
-10. Without `--outdir`, the default is the launcher's `SwitchRecomp Builds\<name>` beside the input (Turbo: the
-    working directory).
-11. A missing input says `Cannot load the game: <path> does not exist`, before the banner (Turbo: `Cannot find
-    exefs/main in <path>` after it); the launcher checks the source before it starts a build. Package errors are the
-    same lines (e.g. `Cannot load the game: <update>: this update is for <id>, not for this game (<id>)`).
+10. Without `--outdir`, the default is the launcher's `SwitchRecomp Builds\<name>` beside the input.
+11. A missing input says `Cannot load the game: <path> does not exist`, before the banner; the launcher checks the
+    source before it starts a build. Package errors are lines like `Cannot load the game: <update>: this update is for
+    <id>, not for this game (<id>)`.
 
 ## v2 (the launcher runs nxrs-build; no Python)
 
@@ -118,7 +103,7 @@ is.
 ### The invocations
 
 The program is nxrs-build itself; working directory: its folder; stdout and stderr merged; environment as in v1
-(`SWR_PROD_KEYS` included); keys are also passed as `--keys` when the installed file exists.
+(`NXRS_PROD_KEYS` included); keys are also passed as `--keys` when the installed file exists.
 
 | What | Arguments (`nxrsBuildArguments`, `nxrsUpdateInfoArguments`, `nxrsDlcSyncArguments`) |
 |---|---|
@@ -139,18 +124,17 @@ exit codes 0 / 1 / 2, the output layout and the data folder), plus, with `--mach
   them.
 - One final `@result\tok\t<exe>` or `@result\terror\t<reason>`; the exit code still decides.
 
-### Per-game engine and the build folder
+### Engine and the build folder
 
-- `library.json` game field `"engine": "turbo" | "nxrs"`. Absent (every entry from before) or anything else is
-  `turbo`: existing entries keep building with Turbo until the user switches (Properties > Build > Engine, or
-  `nxrs.exe --select-title <game> --engine nxrs`).
-- An nxrs build goes to `<build folder> [nxrs]` (e.g. `<dump>\SwitchRecomp Builds\<name> [nxrs]\`), Turbo's stays in
-  `<build folder>`: both can exist. Switching moves the entry to the other folder and reads what is built there
-  (source and applied update from the data folder's marker), so switching back to a finished build needs no rebuild.
+- Every game builds with nxrs. `library.json`'s game field `"engine"` is written as `"nxrs"`; an entry saved with
+  another value or none loads as nxrs and is moved to its `<build folder> [nxrs]` folder, so it shows as needing a
+  build until it is built there. `nxrs.exe --engine` accepts only `nxrs`.
+- An nxrs build goes to `<build folder> [nxrs]` (e.g. `<dump>\SwitchRecomp Builds\<name> [nxrs]\`); the entry reads
+  what is built there (source and applied update from the data folder's marker).
 - **Import build** / discover: a build whose `<name>_build*\gen\nxrs.gen.key` exists is an nxrs build (the entry gets
   `"engine": "nxrs"`).
-- **Play**: an nxrs game skips Turbo's checks (Python, .NET, `tools\nxshader`: nxrs translates shaders in the
-  build). The DLC check before Play and the INI settings (renderer, button layout) are the same.
+- **Play**: no Python, .NET or `tools\nxshader` checks (nxrs translates shaders in the build). The DLC check before
+  Play and the INI settings (renderer, button layout) apply.
 
 ### Release layout (`scripts/package-release.py --nxrs-engine <engine checkout>`)
 
@@ -169,7 +153,6 @@ bundled llvm-mingw with `gnu\`: a release may ship only the gnullvm set.
 ### Not done
 
 Nothing of v2 (2026-11-20). Done since: the launcher runs `doctor` (Settings > Engine, `nxrs --nxrs-doctor`; launcher
-2d3ea0d) and copies saves between a Turbo and an nxrs build of a game (Game > Copy saves, offered once on Play;
 2d3ea0d); releases bundle `nxrs-engine/` for Windows and Linux by default (b3cd6a5); nxrs games are Vulkan-only
 (b3cd6a5). An arm64 Linux engine bundle is built by the engine's CI (`nxrs-engine-linux-arm64`); the launcher has no
 arm64 release.

@@ -38,7 +38,7 @@ fn main() {
             "game.tsv",
             "engine.tsv",
             "patches.toml",
-            "turbo.toml",
+            "owner.toml",
             "recomp.txt",
             "shaders.tsv.zst",
         ] {
@@ -46,11 +46,11 @@ fn main() {
         }
         writeln!(
             s,
-            "    RawProfile {{ id: {id:?}, game_tsv: {}, engine_tsv: {}, patches: {}, turbo: {}, recomp: {}, shaders: {} }},",
+            "    RawProfile {{ id: {id:?}, game_tsv: {}, engine_tsv: {}, patches: {}, owner: {}, recomp: {}, shaders: {} }},",
             lit(&d.join("game.tsv")),
             opt(d.join("engine.tsv")),
             opt(d.join("patches.toml")),
-            opt(d.join("turbo.toml")),
+            opt(d.join("owner.toml")),
             opt(d.join("recomp.txt")),
             opt_bytes(d.join("shaders.tsv.zst"))
         )

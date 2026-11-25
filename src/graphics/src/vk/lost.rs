@@ -1,4 +1,4 @@
-//! A lost device (the GPU stopped responding: a hang the driver reset, TDR, or a fault). Turbo `vk_dev.c` `vk_lost`.
+//! A lost device (the GPU stopped responding: a hang the driver reset, TDR, or a fault).
 //!
 //! Checkpoints (VK_NV_device_diagnostic_checkpoints, `NXGFX_CHECKPOINTS`: default on for dispatches and indirect draws,
 //! `all` for every draw, `0` off) mark each such command with a number; the replay keeps what each number was (shader

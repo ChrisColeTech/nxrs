@@ -3,7 +3,7 @@
 //!   nxrs translate <input> --out <dir> [--data <dir>] [--update <pkg> | --no-update] [--keys prod.keys] [--jobs 4]
 //!   nxrs extract   <input> --out <dir> [--update <pkg> | --no-update]   write the ExeFS files to <dir>
 //!   nxrs info      <input>                                               package listing, ExeFS, build ids
-//!   nxrs update-info [--game <input>] <package>...                       one UPDATE line a package (Turbo's)
+//!   nxrs update-info [--game <input>] <package>...                       one UPDATE line a package
 //!   nxrs romfs ls|cat|sha256 <input> [path...] [--update <pkg> | --no-update] [--dlc <title id>]
 //!   nxrs dlc install|sync|remove|list --datadir <dir> [package or title id...]
 //!
@@ -32,7 +32,7 @@ struct Cli {
 
 #[derive(Args, Clone, Default)]
 struct Pkg {
-    /// prod.keys (default: SWR_PROD_KEYS, else %LOCALAPPDATA%\nxrs\keys\prod.keys, then %LOCALAPPDATA%\RecompLauncher\RecompLauncher\keys\prod.keys)
+    /// prod.keys (default: NXRS_PROD_KEYS, else %LOCALAPPDATA%\nxrs\keys\prod.keys, then %LOCALAPPDATA%\RecompLauncher\RecompLauncher\keys\prod.keys)
     #[arg(long, global = true)]
     keys: Option<PathBuf>,
     /// Apply the game update in this package of its own (.nsp, .xci, or .nca with its .tik beside it)
@@ -251,7 +251,7 @@ fn romfs_of(src: &RomfsSource) -> Result<RomFs> {
     Ok(std::sync::Arc::try_unwrap(game.romfs).map_err(|_| anyhow::anyhow!("shared RomFS"))?)
 }
 
-/// One line as Turbo's Python prints it: text mode, so CRLF on Windows (the launcher compares the bytes).
+/// One line in text mode, so CRLF on Windows (the launcher compares the bytes).
 fn say(m: &str) {
     let nl = if cfg!(windows) { "\r\n" } else { "\n" };
     let mut out = std::io::stdout().lock();

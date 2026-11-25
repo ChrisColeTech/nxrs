@@ -151,7 +151,7 @@ pub fn spv_dir(key: &ShaderKey) -> Option<PathBuf> {
 
 static WAITED: Mutex<Option<HashSet<u64>>> = Mutex::new(None);
 
-/// A frame's shader waits end after this many ms (Turbo 283c6b6: five new shader sets in one frame of a race were a
+/// A frame's shader waits end after this many ms (five new shader sets in one frame of a race were a
 /// stop of 2.3 s): the rest of the frame's draws that lack shaders are skipped and looked at again in the next frame.
 /// `NXGFX_SHADER_WAIT_FRAME_MS` (default 1500; 0: no cap).
 pub fn frame_cap_ms() -> u64 {

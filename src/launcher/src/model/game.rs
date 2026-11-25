@@ -17,7 +17,7 @@ pub struct Game {
     pub cover: String,
     pub background: String,
     pub renderer: String,
-    /// "nxrs", or "turbo" for an entry the Turbo engine built (it needs an nxrs build now)
+    /// "nxrs" (an entry saved with another engine loads as nxrs, `game_json::from_json`)
     pub engine: String,
     pub button_layout: String,
     pub screen_mode: String,
@@ -50,7 +50,7 @@ impl Default for Game {
             cover: String::new(),
             background: String::new(),
             renderer: "vulkan".into(),
-            engine: e::ENGINE_TURBO.into(),
+            engine: e::ENGINE_NXRS.into(),
             button_layout: String::new(),
             screen_mode: String::new(),
             built_source: String::new(),
@@ -73,10 +73,6 @@ impl Default for Game {
 impl Game {
     pub fn nxrs(&self) -> bool {
         self.engine == e::ENGINE_NXRS
-    }
-    /// An entry built with the Turbo engine: it plays no more and needs an nxrs build.
-    pub fn turbo(&self) -> bool {
-        !self.nxrs()
     }
     pub fn executable(&self) -> String {
         join(

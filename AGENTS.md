@@ -7,15 +7,17 @@ before changing behaviour or structure. The tree is often dirty: preserve unrela
 stage or commit another person's changes.
 
 **Delegated work follows `docs/31-DELEGATION-PROTOCOL.md` (binding).** Read it before a wave. An agent owns a bug
-end to end: it implements, builds, tests and verifies in the game; the lead may implement too. One compiler-heavy
-command and one game/GPU workload at a time; no builds while a game runs. Use the normal CLI builds, the real
+end to end: it implements, builds, tests and verifies in the game; the lead may implement too. Builds and games may run
+concurrently at full parallelism, except that a perf-measurement run (FPS/timing before/after) has the machine to
+itself; two GPUs, `NXGFX_GPU=<index>` picks one. Use the normal CLI builds, the real
 library and the configured build folders (owner-authorized); no per-run copies of games. Diagnostics, tests and
 audits are steps, never milestones: work ends with a source correction and its game result. A device loss stops
 that workload and becomes the top-priority bug: fix it and re-run that path with the fix, never unchanged.
 Blacklists stay unless a corrected pipeline is proven safe.
 Back up and restore saves. Audits are for genuinely dangerous changes, after a fix exists. Keep evidence compact.
 The game-outcome roadmap is `docs/33-REFERENCE-DELTA-ROADMAP.md`; `docs/32-REMAINING-WORK-PLAN.md` is the ledger.
-Commit only when the owner explicitly asks.
+The lead commits as work lands (after every accepted wave; checkpoints before branch/worktree work); delegated
+agents do not commit. Push when the owner asks.
 
 **Gameplay harness (2026-11-24):** `scripts/play.py` runs one built title through a scenario from
 `scripts/scenarios.toml` and writes `build/play/<run>/report.md` plus `sheet-N.png` contact sheets of the
@@ -50,8 +52,8 @@ py -m unittest scripts.test_play          # the harness's own checks (under a se
 cargo build --release -p nxrs-cli -p front -p runtime   # the engine: nxrs-build + nxfront.lib + nxrt.lib
 cargo build --release --manifest-path src/launcher/Cargo.toml   # the launcher: target/release/nxrs.exe
 cargo test                                          # engine (seconds; GPU and game tests are opt-in)
-cd src/launcher; cargo test --jobs 4                # launcher (seconds: fake engine, kittest, CLI)
-cd src/launcher; cargo clippy --all-targets --jobs 4 -- -D warnings; cargo fmt   # max_width 100
+cd src/launcher; cargo test                         # launcher (seconds: fake engine, kittest, CLI)
+cd src/launcher; cargo clippy --all-targets -- -D warnings; cargo fmt   # max_width 100
 scripts/build/build.ps1 -Run       # release build into dist/nxrs, then all of target/ removed; starts it
 scripts/build/build.ps1 -KeepCache # keep target/: fast incremental rebuilds
 scripts/build/prune.ps1            # shrink target/ without removing it (-BudgetGB, -KeepDays, -Lanes, -WhatIf)
@@ -59,8 +61,8 @@ scripts/build/prune.ps1            # shrink target/ without removing it (-Budget
 
 `dist/nxrs` is a release laid out as it ships (`nxrs.exe`, `nxrs-engine/`, `legal/`) and runs on its own; the
 default build leaves only it. Don't keep stale lane folders (`target/L2`, `target/K`, ...): build in the normal
-`target/` and remove a lane when its work is done. Cargo uses `--jobs 4` on this machine (heavy parallel builds
-crash its compilers).
+`target/` and remove a lane when its work is done. Cargo and `build.ps1` use every core (the old `--jobs 4` cap
+belonged to the previous hardware's compiler crashes; the machine was replaced).
 
 ## Rules that bite (full text: docs/ARCHITECTURE-AND-STYLE-GUIDE.md)
 

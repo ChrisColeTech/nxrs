@@ -25,6 +25,8 @@ const RECEIPT: u64 = 1 << 63;
 pub(crate) mod wait_diag;
 #[path = "submission_safety.rs"]
 pub(crate) mod submission_safety;
+#[path = "chain_trace.rs"]
+pub(crate) mod chain_trace;
 
 /// One submission being recorded: its two command buffers, staging memory, descriptor pools and what its completion
 /// must do.
@@ -79,7 +81,7 @@ pub struct Sub {
     pub db_log: Vec<(usize, u64, u32)>,
 }
 
-const DB_CHUNK: u64 = 4 << 20;
+pub(crate) const DB_CHUNK: u64 = 4 << 20;
 unsafe impl Send for Sub {}
 
 /// A 128-bit content hash (two FNV-1a lanes) for the submission's memos.
@@ -730,8 +732,8 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
             )
             .expect("readback");
         // the same ranges as the device had them before this submission's work (after its uploads, in `pre`): only
-        // the words the GPU changed land in guest memory, so what the CPU wrote beside them meanwhile stays (Turbo's
-        // vk_mem.c wr_land). Landing the whole range put back stale bytes the CPU had changed since the upload: a
+        // the words the GPU changed land in guest memory, so what the CPU wrote beside them meanwhile stays.
+        // Landing the whole range put back stale bytes the CPU had changed since the upload: a
         // storage buffer bound read-write over a pool the CPU also writes (a size-0 one runs to the end of its pool)
         let bf = g
             .buffer(
@@ -859,6 +861,7 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         panic!("vkQueueSubmit2: {e}")
     });
     q.last.store(value, Ordering::Release);
+    chain_trace::note("vk_submit", value, s.present.len() as u64);
     super::lost::ring::note_submit(s.serial, value);
     super::newndve::trace::link(s.serial, value, true);
     {
@@ -940,6 +943,7 @@ fn completion_loop(g: &'static Gpu) {
         );
         let completion = submission_safety::resource_safety_result(completion);
         super::lost::ring::COMPLETED.store(item.value, Ordering::Relaxed);
+        chain_trace::note("gpu_done", item.value, item.wb.len() as u64);
         // Failure above terminates with status 72, without entering any logger/cleanup.
         // Userspace still cannot preempt a driver call that never returns or prevent TDR.
         let mut signalled = false;
@@ -991,7 +995,7 @@ fn completion_loop(g: &'static Gpu) {
                         None
                     };
                     let t = super::counters::report_time(stamp, t0, t1);
-                    // a timestamp's counter field is 0 (Turbo; agl's "already cleared" records compare it), other kinds 0 too
+                    // a timestamp's counter field is 0 (agl's "already cleared" records compare it), other kinds 0 too
                     let ts = kind == crate::nvn::types::counter::TIMESTAMP
                         || kind == crate::nvn::types::counter::TIMESTAMP_TOP;
                     super::counters::write_record(addr, 0, t);
@@ -1111,6 +1115,7 @@ fn completion_loop(g: &'static Gpu) {
             .unwrap()
             .retain(|_, v| v.2 > item.value);
         *q.done.lock().unwrap() = item.value;
+        chain_trace::note("cpl_done", item.value, signalled as u64);
         q.done_cv.notify_all();
         if signalled {
             // never block on the submit lock here (its holder may be waiting for this thread): the retry thread does
@@ -1162,7 +1167,7 @@ fn take_recycled(g: &Gpu, st: &mut SubmitState) {
 // ---------- asynchronous submission ----------
 //
 // The game's thread only copies a submission's records (or notes a present) and goes on; the replay thread records
-// and submits them in order (Turbo's translation thread). Fences the game takes meanwhile name the op (ASYNC | its
+// and submits them in order (the translation thread). Fences the game takes meanwhile name the op (ASYNC | its
 // sequence number) and resolve to its timeline value once it ran. `NXGFX_ASYNC=0`: replay on the game's thread.
 
 const ASYNC: u64 = 1 << 62;
@@ -1227,7 +1232,7 @@ static AQ: std::sync::OnceLock<Aq> = std::sync::OnceLock::new();
 pub fn aq_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| {
-        // on by default (Turbo's default): Pokemon Legends Z-A in Lumiose 49.5-52.4 FPS against 42.5-48 replayed on the
+        // on by default: Pokemon Legends Z-A in Lumiose 49.5-52.4 FPS against 42.5-48 replayed on the
         // game's thread (lane G3 z6 / z5), MK8D's demo 300 s at 60 with no stall (a1). NXGFX_ASYNC=0: on the game's thread
         let on = std::env::var("NXGFX_ASYNC").as_deref() != Ok("0");
         crate::vklog!("asynchronous submission: {}", if on { "submissions and presents are replayed on a thread of their own (NXGFX_ASYNC=0: on the game's thread)" } else { "off (NXGFX_ASYNC=0)" });
@@ -1263,7 +1268,7 @@ fn aq(g: &'static Gpu) -> &'static Aq {
     a
 }
 
-/// Ops queued and not replayed at most (Turbo's AQ_N), presents among them at most (AQ_PRESENTS: frames in flight).
+/// Ops queued and not replayed at most (AQ_N), presents among them at most (AQ_PRESENTS: frames in flight).
 const AQ_MAX: u64 = 64;
 /// `NXGFX_ASYNC_PRESENTS` (default 2): presents queued at most.
 fn aq_max_presents() -> u64 {
@@ -1335,6 +1340,16 @@ fn aq_push_with(g: &'static Gpu, op: Op, before: impl FnOnce(u64)) -> u64 {
     }
     let mut q = a.ops.lock().unwrap();
     let seq = a.tail.fetch_add(1, Ordering::AcqRel) + 1;
+    if chain_trace::on() {
+        let (k, oq) = match &op {
+            Op::Submit { q, .. } => (1, *q),
+            Op::Present { q, .. } => (2, *q),
+            Op::Call(_) => (3, 0),
+            Op::Retry => (4, 0),
+            Op::WaitReceipt { q, .. } => (5, *q),
+        };
+        chain_trace::note("push", seq, k << 32 | (oq & 0xffff_ffff));
+    }
     before(seq);
     q.push_back((seq, op));
     drop(q);
@@ -1476,6 +1491,7 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
             Op::WaitReceipt { .. } => "wait receipt",
         };
         wait_diag::mark(0, kind, [opq.unwrap_or(0), seq]);
+        chain_trace::note("op", seq, merged.len() as u64);
         match op {
             Op::Submit { q, ll, stream } => {
                 let mut st = g.q.sub.lock().unwrap();
@@ -1551,6 +1567,7 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
             }
         }
         wait_diag::mark(0, "publish async fence/wake", [opq.unwrap_or(0), seq]);
+        chain_trace::note("op_done", seq, fence);
         a.done.store(seq, Ordering::Release);
         {
             let _l = a.idle_mu.lock().unwrap();
@@ -1624,7 +1641,7 @@ pub fn submit(qserial: u64, origin_ll: bool, handles: &[u64]) {
         }
         // a sync fenced inside these command buffers covers this submission from now: one reused every frame still held
         // last frame's (done) fence until the replay thread reached it, so a wait on it passed while this frame's work was
-        // still queued and the game rewrote memory that work reads (Turbo fences at submit; NXGFX_ASYNC=0 replays at
+        // still queued and the game rewrote memory that work reads (NXGFX_ASYNC=0 replays at
         // once). Written before the replay thread can see the op: its exact value (set when the replay reaches the
         // record, before a later event wait parks the queue) must not be overwritten by this one (that waited for the
         // parked rest: Donkey Kong Bananza's main thread held 15 s in nvnSyncWait)
@@ -1749,6 +1766,7 @@ fn run_stream_due(
         g.image_begin_submit(&mut sub, &dirty);
     });
     let tt = t0.elapsed().as_secs_f64();
+    chain_trace::note("prep", (tp * 1e6) as u64, (tt * 1e6) as u64);
     if tt > 1.0 {
         crate::vklog!("a submission's set-up took {tt:.2} s: pools {tp:.2} s ({nd} CPU-written ranges), textures {:.2} s", tt - tp);
     }
@@ -1908,7 +1926,7 @@ pub fn event_signalled() {
 pub fn queue_fence(qserial: u64) -> u64 {
     let Some(g) = Gpu::try_get() else { return 0 };
     if let Some(a) = AQ.get() {
-        // the queue's own last op (Turbo's last_seq: another queue's parked work is not waited for); 0: every queue's
+        // the queue's own last op (another queue's parked work is not waited for); 0: every queue's
         let t = a.tail.load(Ordering::Acquire);
         let s = if qserial != 0 {
             LAST_SEQ
@@ -2098,6 +2116,7 @@ fn present_frame(
 ) -> u64 {
     let frame = super::present::note_present();
     super::perf::frame(frame);
+    super::exec::op_times::frame(frame);
     super::scale::frame();
     super::exec::passdump::frame(frame, crate::log::elapsed());
     if shot {

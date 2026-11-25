@@ -16,7 +16,6 @@ pub mod markers;
 pub mod pickers;
 pub mod platform;
 pub mod run;
-pub mod saves;
 pub mod shell_open;
 pub mod sources;
 pub mod startup_log;

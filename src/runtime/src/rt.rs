@@ -41,7 +41,7 @@ pub fn trace(what: &str) -> bool {
     !t.is_empty() && (t == "all" || t.split(',').any(|w| w == what))
 }
 
-/// The traces on: `NXRT_TRACE` when set, else everything for the ini's `log=2` (Turbo's g_verbose), else none.
+/// The traces on: `NXRT_TRACE` when set, else everything for the ini's `log=2`, else none.
 pub fn trace_spec(env: Option<String>, log: i64) -> String {
     env.filter(|v| !v.is_empty()).unwrap_or_else(|| {
         if log >= 2 {

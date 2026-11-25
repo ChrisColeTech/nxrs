@@ -200,8 +200,8 @@ fn make(
 }
 
 /// Bindings a module declares at 0 (its constant buffer).
-/// The size the LSFG passes work at for a game region of `w` x `h`: at most `lsfg_resolution` rows (240..2160, Turbo
-/// gpu_gl.c: min(content, lsfg_resolution) high, the width in proportion and even); the region's own size when it is
+/// The size the LSFG passes work at for a game region of `w` x `h`: at most `lsfg_resolution` rows (240..2160:
+/// min(content, lsfg_resolution) high, the width in proportion and even); the region's own size when it is
 /// smaller or the key is 0.
 pub fn work_size(w: u32, h: u32, res: i64) -> (u32, u32) {
     if res <= 0 || h == 0 {

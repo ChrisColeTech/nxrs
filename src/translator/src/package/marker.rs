@@ -1,5 +1,5 @@
 //! The RomFS markers a build writes into the game's data folder, and opening a RomFS from them (what the runtime
-//! does at start). Formats (Turbo's, unchanged; docs/COMBINED_NSP.md §3, UPDATES.md §4, NUP_IN_PLACE.md):
+//! does at start). Formats:
 //!
 //! ```text
 //! romfs.nsp  SWRNSP1                     a plaintext RomFS: the package and the image's byte range
@@ -24,7 +24,7 @@
 //! romfs.dir  <folder path>               (this engine) a dumped folder's romfs/, read in place
 //! ```
 //! Content keys stay wrapped as the package holds them; they are unwrapped with prod.keys when the marker is opened
-//! (the explicit keys, else SWR_PROD_KEYS, else the marker's `keys` path). No key is written by the build.
+//! (the explicit keys, else NXRS_PROD_KEYS, else the marker's `keys` path). No key is written by the build.
 use crate::package::bktr::Patched;
 use crate::package::compressed::Compressed;
 use crate::package::crypto::ecb_decrypt;
@@ -178,14 +178,14 @@ pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
                 let p = keys
                     .map(Path::to_path_buf)
                     .or_else(|| {
-                        std::env::var_os("SWR_PROD_KEYS")
+                        std::env::var_os("NXRS_PROD_KEYS")
                             .filter(|v| !v.is_empty())
                             .map(PathBuf::from)
                     })
                     .or(keys_file.clone());
                 match p {
                     Some(p) if p.is_file() => Keys::load(&p),
-                    _ => fmt("Nintendo keys are not installed. In the launcher use Keys > Install keys, or set SWR_PROD_KEYS."),
+                    _ => fmt("Nintendo keys are not installed. In the launcher use Keys > Install keys, or set NXRS_PROD_KEYS."),
                 }
             };
             let needs_key = [&base_row, &patch_row].iter().any(|r| {

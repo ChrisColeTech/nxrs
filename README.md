@@ -60,5 +60,6 @@ FPS is the average during gameplay, with the slowest 5% in brackets.
 
 ## Credits
 
-Built on mkw-recomp, LAS Recomp, totk-pc-recomp, nxnative, Ryujinx and others; see [LICENSES](LICENSES/). nxrs is MIT
+Built on mkw-recomp, LAS Recomp, totk-pc-recomp, nxnative, Ryujinx and others; see [LICENSES](LICENSES/). HD rumble
+uses Three-Dola's RenHDrum 0.5.0 (MIT OR Apache-2.0, used under MIT; `src/os/third_party/renhdrum/`). nxrs is MIT
 licensed and not affiliated with Nintendo.

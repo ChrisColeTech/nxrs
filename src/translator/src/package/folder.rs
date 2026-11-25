@@ -1,9 +1,8 @@
 //! A dumped game folder: either it holds an `exefs/` directory (with `romfs/` beside it), or the folder itself is an
 //! ExeFS; one level deeper is searched too. A directory counts as an ExeFS when it has a `main` file (`main.npdm`
-//! is optional, as in Turbo's loader). The `exefs/` child is preferred over the folder itself.
+//! is optional). The `exefs/` child is preferred over the folder itself.
 //! The RomFS is `romfs/` (or `RomFS/`) beside an `exefs/` directory, or inside a flat folder (the ExeFS files and
-//! `romfs/` side by side), and optional; `control.nacp` and the icon come from the folder or its `control/`
-//! (Turbo switchrecomp.py / nxloader.py).
+//! `romfs/` side by side), and optional; `control.nacp` and the icon come from the folder or its `control/`.
 use crate::package::error::{fmt, PackageError, Result};
 use crate::package::{ExeFs, SourceKind};
 use std::collections::BTreeMap;
@@ -177,7 +176,7 @@ mod tests {
             vec!["main", "main.npdm"]
         );
         assert_eq!(find_romfs(&root).unwrap(), game.join("romfs"));
-        // a flat folder (Turbo): the ExeFS files, romfs/ and control/ side by side; no RomFS is allowed too
+        // a flat folder: the ExeFS files, romfs/ and control/ side by side; no RomFS is allowed too
         let flat = root.join("flat");
         std::fs::create_dir_all(flat.join("control")).unwrap();
         std::fs::write(flat.join("main"), b"NSO0").unwrap();

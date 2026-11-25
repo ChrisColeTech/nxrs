@@ -99,7 +99,7 @@ fn hex(s: &str) -> Option<u64> {
     u64::from_str_radix(s.trim_start_matches("0x"), 16).ok()
 }
 
-/// The control pipe's debugging commands on the os side (Turbo vk_ctl.c / nxnative DM_CTL): symbols, memory to a
+/// The control pipe's debugging commands on the os side (nxnative DM_CTL): symbols, memory to a
 /// file, the environment, the guest clock's speed, focus and touch gestures for scripted runs.
 pub fn register_debug_commands() {
     crate::cheats::register_commands();
@@ -277,7 +277,7 @@ fn register_gap_command() {
     );
 }
 
-/// The stall dumps (Turbo main.c's front loop): presents stopped after the first one -> a thread dump after 6 s
+/// The stall dumps (the front loop's): presents stopped after the first one -> a thread dump after 6 s
 /// (people close a frozen game before 15), then one every further 15 s without an image, at most 4 in a run; a new
 /// image starts the count again. Not before the first image (the boot's loading is not a stall).
 #[derive(Default)]
@@ -308,7 +308,7 @@ impl Stall {
     }
 }
 
-/// Guest CPU per thread (Turbo kernel.c): each second, every guest thread's CPU time since the last second goes to
+/// Guest CPU per thread: each second, every guest thread's CPU time since the last second goes to
 /// the metrics as `cpu_t<handle>_ms` and the total as `guest_cpu_ms` (metrics=1); the busiest threads of the last
 /// 10 s are logged.
 #[derive(Default)]
@@ -370,10 +370,10 @@ impl ThreadCpu {
 mod tests {
     use super::*;
 
-    /// Turbo main.c: the first stall dump after 6 s, then every 15 s, at most 4 in a run; a new image restarts the
+    /// The first stall dump after 6 s, then every 15 s, at most 4 in a run; a new image restarts the
     /// count; nothing before the first image.
     #[test]
-    fn stall_dumps_as_turbo() {
+    fn stall_dump_schedule() {
         let t0 = Instant::now();
         let at = |s: f64| t0 + Duration::from_secs_f64(s);
         let mut st = Stall::default();

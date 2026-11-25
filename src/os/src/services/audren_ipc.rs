@@ -1,6 +1,6 @@
 //! The audio renderer service `audren:u` served by the host, for SDKs that ship no renderer of their own (SDK 1.x:
 //! their nn::audio is only the service's client; later SDKs run their own renderer in-process, `audren.rs`).
-//! Turbo's design (runtime/audio.c, main.c audren_update), reimplemented: every RequestUpdate parses the game's
+//! Every RequestUpdate parses the game's
 //! update (voices, their channel resources, effects, splitters, mixes, sinks), mixes 5 ms blocks of 48 kHz stereo
 //! for the sound card and answers each voice's played samples and consumed wave buffers.
 //!
@@ -9,9 +9,9 @@
 //! * Routing: a voice goes to its mix through its channel resources' volumes, or through its splitter to several
 //!   mixes; mixes go to their destination mix by their matrix, or through a splitter; the final mix (id 0) through
 //!   the device sink's inputs (5.1 folded to stereo with the sink's downmix).
-//! * Turbo a22b102: since REV7 an update carries only the mixes that changed (behind a 0x20-byte header) and only
+//! * Since REV7 an update carries only the mixes that changed (behind a 0x20-byte header) and only
 //!   the splitters that changed, so mixes and splitters are kept by id between updates.
-//! * Turbo 8a265ab: a voice that names no mix and whose splitter reaches no mix in use stays audible in the final
+//! * A voice that names no mix and whose splitter reaches no mix in use stays audible in the final
 //!   mix's front pair (Ocarina of Time's opening plays on such voices).
 //! * Effects: buffer mixer, biquad filter and auxiliary sends (the game's DSP rings in its memory).
 //! * Pacing: blocks go to the sound card (`media::sink`) ahead by at most 8 (40 ms); each block the card plays back
@@ -456,7 +456,7 @@ impl Mixer {
             .sort_by_key(|&i| (rd32(&effects[i].config, 0x18), i));
     }
 
-    /// The update's splitter section and mix section into the kept tables (Turbo a22b102).
+    /// The update's splitter section and mix section into the kept tables.
     pub fn update_routing(&mut self, spl: &[u8], mixes: &[u8]) {
         const SNDH: u32 = 0x4844_4E53;
         const SNDI: u32 = 0x4944_4E53;
@@ -938,7 +938,7 @@ impl Mixer {
                 }
             }
             if dest < 0 && !routed && nm > 0 && map[0] >= 0 {
-                // Turbo 8a265ab: the mixes are known and this voice reaches none (no mix named, its splitter has
+                // the mixes are known and this voice reaches none (no mix named, its splitter has
                 // no destination in use): kept audible in the final mix's front pair
                 let fm = map[0] as usize;
                 if !v.unrouted_logged {
@@ -1691,7 +1691,7 @@ mod tests {
         );
     }
 
-    /// Turbo a22b102: an update with only the changed mixes (behind a 0x20-byte header) keeps the others; the next
+    /// An update with only the changed mixes (behind a 0x20-byte header) keeps the others; the next
     /// update with no mix changed keeps them all.
     #[test]
     fn mixes_are_kept_between_updates() {
@@ -1723,7 +1723,7 @@ mod tests {
         near(out[0], 0.25 * SQRT_HALF);
     }
 
-    /// Turbo a22b102: a voice through a splitter reaches each destination's mix with that destination's volumes,
+    /// A voice through a splitter reaches each destination's mix with that destination's volumes,
     /// and the splitter is kept when the next update sends none; a mix through a splitter likewise.
     #[test]
     fn splitters_route_voices_and_mixes() {
@@ -1770,7 +1770,7 @@ mod tests {
         near(out[1], 0.5 * SQRT_HALF * 0.25);
     }
 
-    /// Turbo 8a265ab: with mixes known, a voice that names no mix and whose splitter has no destination in use is
+    /// With mixes known, a voice that names no mix and whose splitter has no destination in use is
     /// played in the final mix's front pair instead of going silent.
     #[test]
     fn a_voice_reaching_no_mix_stays_audible() {

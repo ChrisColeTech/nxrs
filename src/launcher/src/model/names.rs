@@ -23,8 +23,8 @@ pub fn output_name_for(title: &str) -> String {
     }
 }
 
-/// `<folder> [nxrs]` for the nxrs engine, `<folder>` for Turbo (an nxrs build sits beside a Turbo one).
-pub fn build_folder_for(build_dir: &str, nxrs: bool) -> String {
+/// `<folder> [nxrs]`, the folder a build goes into (once: a folder that has the suffix keeps it).
+pub fn build_folder_for(build_dir: &str) -> String {
     let suffix = crate::constants::engine::NXRS_FOLDER_SUFFIX;
     let mut base = super::path_text::from_native(build_dir);
     while base.ends_with('/') {
@@ -33,7 +33,7 @@ pub fn build_folder_for(build_dir: &str, nxrs: bool) -> String {
     if let Some(stripped) = base.strip_suffix(suffix) {
         base = stripped.to_string();
     }
-    if nxrs { base + suffix } else { base }
+    base + suffix
 }
 
 /// A title from a file or folder name (no suffix for a file): `[...]` tags removed.

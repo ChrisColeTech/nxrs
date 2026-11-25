@@ -840,7 +840,7 @@ typedef int (*nxrs_entry)(int argc, char **argv);
 
 /* Hybrid systems otherwise put this unknown executable on the integrated GPU. These exports are the documented
    NVIDIA / AMD application hints (read from the executable, not a DLL) and do nothing on systems without switchable
-   graphics (Turbo 6aace78). */
+   graphics. */
 __declspec(dllexport) DWORD NvOptimusEnablement = 1;
 __declspec(dllexport) int AmdPowerXpressRequestHighPerformance = 1;
 
@@ -1117,7 +1117,7 @@ mod tests {
             .collect()
     }
 
-    /// Turbo 6aace78: the game's executable exports NvOptimusEnablement and AmdPowerXpressRequestHighPerformance, so a
+    /// The game's executable exports NvOptimusEnablement and AmdPowerXpressRequestHighPerformance, so a
     /// hybrid laptop runs it on the discrete GPU. Built with the clang a build would use (skipped without one).
     #[cfg(windows)]
     #[test]

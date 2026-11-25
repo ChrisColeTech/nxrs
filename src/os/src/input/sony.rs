@@ -1,5 +1,5 @@
 //! DualSense, DualSense Edge and DualShock 4 over raw HID: the report decoder and the output packets (rumble, player
-//! LED, lightbar), from the owner's `controller_sony.h` / `controller_sony_win32.h` in the Turbo fork, with the
+//! LED, lightbar), from the owner's `controller_sony.h` / `controller_sony_win32.h`, with the
 //! sensors (gyro and accelerometer) added. Report layouts follow Linux's hid-playstation.
 //!
 //! | Model | Products | USB in / out | Bluetooth in / out |

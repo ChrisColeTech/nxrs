@@ -35,10 +35,14 @@ what an agent may run for its own work.
 These hold for everyone, lead included:
 
 - **Preserve the dirty tree.** Inspect unfamiliar edits before touching them; never reset, revert or reformat other
-  work; never stage or commit it. Edit with `apply_patch` or the editor tools; no scripts that rewrite `.rs`,
+  work; agents never stage or commit it (the lead's commits are below). Edit with `apply_patch` or the editor tools; no scripts that rewrite `.rs`,
   `.toml` or `.md`.
-- **One compiler-heavy command and one game/GPU workload at a time** on this machine (`--jobs 4`). Check before
-  starting one; don't build while a game runs.
+- **Builds and games may run concurrently, at full parallelism** (owner, 2026-11-25: the old "one build / one game
+  at a time, `--jobs 4`" rules came from the previous hardware's compiler crashes and the hypervisor-error crash;
+  the machine is now a Core Ultra 9 285K / Z890 with a new GPU, and that Windows feature is disabled). Cargo's own
+  lock on `target/` serializes builds in one checkout. Exception: a run whose FPS or timing is the measurement
+  (before/after perf numbers) has the machine to itself — no other game or build during it — and its report says so.
+  Two GPUs: `NXGFX_GPU=<index>` puts a game on one (`py scripts/play.py <s> --env NXGFX_GPU=1`).
 - **Use the normal paths.** Build with the normal CLI into `target/release` and the configured build folders; run
   games from the real library (`%LOCALAPPDATA%\nxrs`) and the launcher, which the owner has authorized. Don't make
   a full copy of a game, its data or its shaders per run.
@@ -49,7 +53,9 @@ These hold for everyone, lead included:
   Other titles and other work carry on meanwhile.
 - **Blacklists** stay unless a specific corrected pipeline is shown safe; then remove that entry, not the list.
 - Close only your own processes, by PID, never by image name.
-- **Commit or push only when the owner asks.**
+- **Commits (owner, 2026-11-25): the lead commits as work lands** — after every accepted wave, and as a checkpoint
+  before opening work that needs one (a branch or worktree) — so work never piles up uncommitted. Delegated agents
+  do not commit (they share the tree). Push when the owner asks.
 
 ## 4. Verification
 

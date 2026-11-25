@@ -59,7 +59,7 @@ under a second.
 
 ## Verification (2026-11-19, the owner's games, read in place; 4 translator processes)
 
-| Game | Found | Translated | Failed | spirv-val clean | Scan / translate / validate / total (s) | Keys the game used (Turbo's cache): found, ok |
+| Game | Found | Translated | Failed | spirv-val clean | Scan / translate / validate / total (s) | Keys the game used (a run's shader cache): found, ok |
 |---|---|---|---|---|---|---|
 | Mario Kart 8 Deluxe (NSP 1G+1U+1D) | 29,651 | 29,651 | 0 | 29,651 | 8 / 27 / 93 / 148 | 2,515 / 2,515, 2,515 ok |
 | Mario Kart World (NUP) | 11,609 | 11,609 | 0 | 11,609 | 27 / 26 / 46 / 112 | 1,200 / 1,200, 1,200 ok |
@@ -73,7 +73,7 @@ under a second.
   area starts with a 0x80-byte Ampere SPH (word 0 0x020c0481, "instruction 0x481" does not exist), taken off by
   `job::is_ampere_sph`; Ocarina's d17eefaff4f0bc23 and Violet's abd67260d710b0a0 fetch with a computed offset
   (`fixes::dynamic_offsets`). MKW, Violet and Ocarina re-run with 0 failed and 0 invalid (`build/G/shaders/`).
-- The key sets equal Turbo's prebuild scans for MKW, MK8D, DKB and OoT (Turbo could not read the Pokémon games), and
+- The key sets equal an earlier prebuild scan's for MKW, MK8D, DKB and OoT (it could not read the Pokémon games), and
   nxnative's documented counts for Arceus (12,851) and MK8D (29,650 + one sdk shader).
 - A rebuild with nothing changed reuses every output (Violet: 18 s).
 - Cross-check, mkw-recomp's sm86 against dmsh_xlate on 500 MKW programs spread over the key range (318 pixel, 154

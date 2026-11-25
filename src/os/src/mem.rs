@@ -198,7 +198,7 @@ fn first_touch(a: u64) -> bool {
     commit_rw(lo, hi - lo)
 }
 
-/// The ini's hidden `heap_max_mb` (Turbo main.c / mem.c `g_heap_max`), in bytes; 0 when unset.
+/// The ini's hidden `heap_max_mb`, in bytes; 0 when unset.
 fn heap_max() -> u64 {
     static M: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
     *M.get_or_init(|| {
@@ -216,7 +216,7 @@ fn heap_max() -> u64 {
 }
 
 /// The largest heap SetHeapSize grants: what the application pool has left beside the memory in use (Horizon), or
-/// the ini's `heap_max_mb` when that is more (Turbo mem.c: the cap never goes below what the game is told it has).
+/// the ini's `heap_max_mb` when that is more (the cap never goes below what the game is told it has).
 pub fn heap_cap(pool: u64, used: u64, heap_max: u64) -> u64 {
     pool.saturating_sub(used).max(heap_max)
 }
@@ -271,6 +271,20 @@ impl Memory {
         self.st.lock().unwrap().heap_size
     }
 
+    /// Whether [a, a+n) is wholly guest memory this layer keeps mapped: the heap within its size (an uncommitted
+    /// page commits at its first touch, the host's included), MapPhysicalMemory runs and shared memory views. From
+    /// the table only: VirtualQuery inside the heap walks the page tables to the end of its committed run (13 ms a
+    /// call on Smash's 1.2 GB heap, up to 100 ms) holding the address space's lock, which stalled every write-watch
+    /// scan behind it (`guest::readable`, the movie decoder's event checks: the intro movie at 10 FPS).
+    pub fn mapped(&self, a: u64, n: u64) -> bool {
+        let Some(end) = a.checked_add(n.max(1)) else { return false };
+        let st = self.st.lock().unwrap();
+        let n = end - a;
+        self.in_heap(&st, a, n)
+            || Self::in_phys(&st, a, n)
+            || st.shared.iter().any(|&(b, k)| a >= b && end <= b + k)
+    }
+
     fn in_heap(&self, st: &State, a: u64, n: u64) -> bool {
         let b = self.space.heap.base;
         a >= b && a + n <= b + st.heap_size
@@ -280,10 +294,10 @@ impl Memory {
     /// be MapMemory's source as heap memory is: Pokémon Legends: Z-A maps its thread stacks from its allocator's
     /// pages in the alias region).
     fn in_phys(st: &State, a: u64, n: u64) -> bool {
-        let mut runs: Vec<(u64, u64)> = st.phys.iter().map(|&(b, k)| (b, b + k)).collect();
-        runs.sort_unstable();
+        // `st.phys` is kept sorted and merged (`physical`), so it is walked in place under the lock.
         let mut at = a;
-        for (lo, hi) in runs {
+        for &(lo, k) in &st.phys {
+            let hi = lo + k;
             if lo > at {
                 break;
             }
@@ -296,7 +310,7 @@ impl Memory {
     }
 
     /// svcMapMemory(dst, src, size): dst in the stack region, src heap, mapped alias-region memory or other mapped memory
-    /// (a module's .bss: Pokémon Violet maps a thread stack from main's; Turbo checks no source state).
+    /// (a module's .bss: Pokémon Violet maps a thread stack from main's).
     pub fn map_memory(&self, dst: u64, src: u64, size: u64) -> u64 {
         if size == 0 || (dst | src | size) & (PAGE - 1) != 0 {
             return R_INVALID_SIZE;
@@ -518,8 +532,8 @@ impl Memory {
         }
         // SetMemoryAttribute's bits include 0x10 PermissionLocked, the RELRO lock every SDK module's init sets (MKW
         // 1.8.0 aborted at main's DT_INIT with 0xE801 when it was refused, lane K) and DKB's at 0.9 s; nothing is refused.
-        // SetGpuMemoryAttribute takes only bit 0x20 (Turbo: 0xE801 otherwise); SetMemoryAttribute records whatever
-        // bits the game names, as Turbo's mem_set_attr does (Donkey Kong Bananza's SDK aborts at 0.9 s on a refusal)
+        // SetGpuMemoryAttribute takes only bit 0x20 (0xE801 otherwise); SetMemoryAttribute records whatever bits
+        // the game names (Donkey Kong Bananza's SDK aborts at 0.9 s on a refusal)
         if gpu && (value & !mask != 0 || (mask | value) & !0x20 != 0) {
             return R_INVALID_COMBINATION;
         }
@@ -686,11 +700,11 @@ impl Memory {
     }
 }
 
-/// Whether a map past the application pool fails with ResultLimitReached: Turbo's titles (b316a9f: Pokémon Legends:
-/// Z-A, Ocarina of Time) and every profile with nxnative's `mem_map_limit on` (Pokémon Scarlet / Violet: start-up
-/// probes all allocatable memory and gives the cached pages back only after a map fails); `SWR_MAP_LIMIT=1/0` for any.
+/// Whether a map past the application pool fails with ResultLimitReached: Pokémon Legends: Z-A, Ocarina of Time,
+/// and every profile with nxnative's `mem_map_limit on` (Pokémon Scarlet / Violet: start-up probes all allocatable
+/// memory and gives the cached pages back only after a map fails); `NXRS_MAP_LIMIT=1/0` for any.
 fn map_limit() -> bool {
-    if let Some(v) = std::env::var("SWR_MAP_LIMIT")
+    if let Some(v) = std::env::var("NXRS_MAP_LIMIT")
         .ok()
         .filter(|v| !v.is_empty())
     {
@@ -742,7 +756,7 @@ pub(crate) mod tests {
     }
 
     /// SetMemoryPermission / SetMemoryAttribute / SetGpuMemoryAttribute are recorded and QueryMemory reports them
-    /// (Turbo kernel.c: mem_set_state / mem_set_attr), with Horizon's checks; the block is cut around a marked run.
+    /// with Horizon's checks; the block is cut around a marked run.
     #[test]
     fn permissions_and_attributes_are_recorded() {
         let m = test_memory();
@@ -819,7 +833,7 @@ pub(crate) mod tests {
         assert_eq!(
             m.set_attribute(a, 0x1000, 0xff, 0x48, false),
             0,
-            "SetMemoryAttribute records any bits (Turbo; DKB)"
+            "SetMemoryAttribute records any bits (DKB)"
         );
         assert_eq!(m.set_permission(a, 0x2000, 3), 0);
         m.st.lock().unwrap().marks.clear();
@@ -901,5 +915,27 @@ pub(crate) mod tests {
         assert_eq!(m.query(a).state, ST_FREE);
         assert_eq!(m.info(6), Some(0xCD50_0000));
         assert_eq!(m.physical(0x1000, 0x1000, true), R_INVALID_ADDRESS);
+    }
+
+    /// `mapped` answers from the table: an untouched heap page (not committed yet) is guest memory the host may
+    /// read (its first touch commits it), as are physical maps; past the heap's size and unmapped alias pages are
+    /// not, and `guest::readable` agrees.
+    #[test]
+    fn mapped_memory_comes_from_the_table() {
+        let m = test_memory();
+        let h = m.set_heap_size(0x400_0000).unwrap();
+        let a = h + 0x30_0000;
+        assert!(!rmem::readable(a, 8), "not committed before the first touch");
+        assert!(m.mapped(a, 8) && crate::guest::readable(a, 8));
+        assert_eq!(unsafe { *(a as *const u64) }, 0, "the host's read commits it");
+        assert!(m.mapped(h, 0x400_0000));
+        assert!(!m.mapped(h + 0x3FF_F000, 0x2000), "past the heap's size");
+        assert!(!m.mapped(u64::MAX - 4, 8));
+        let p = m.space.alias.base + 0x200_0000;
+        assert!(!m.mapped(p, 8) && !crate::guest::readable(p, 8));
+        assert_eq!(m.physical(p, 0x2000, true), 0);
+        assert!(m.mapped(p + 0x1000, 0x1000) && !m.mapped(p + 0x1000, 0x2000));
+        assert_eq!(m.physical(p, 0x2000, false), 0);
+        assert!(!m.mapped(p, 8));
     }
 }

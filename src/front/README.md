@@ -12,14 +12,14 @@ with no dependencies every part can read.
 |---|---|
 | `lib.rs` | `nxfront_main`, `setup` / `start`, the 60 Hz front-end loop (input, ini reload once a second, metrics, the timed exit `seconds=` + `shot=`), `quit` (controllers quiet, ini and caches written, recording finished, TerminateProcess), `<name>.log` when the exe has no redirected output |
 | `window.rs` | the one game window (Win32, own thread, per-monitor DPI): windowed / borderless fullscreen (`fullscreen`, F11, Alt+Enter, kept in the ini), title with state (FPS limit, RECORDING, LSFG), hotkeys, raw mouse, focus, device-change rescans |
-| `keys.rs` | keyboard as player 1 (Turbo's keys: arrows d-pad, WASD left stick, IJKL right stick, X/Space Z C V = A B X Y, Q E 1 3 = L R ZL ZR, Enter Backspace = + -), the mouse as the right stick (`mouse_right_stick`, `mouse_sensitivity` 0.1..5 on Turbo's curve, `mouse_invert`) |
+| `keys.rs` | keyboard as player 1 (the default keys: arrows d-pad, WASD left stick, IJKL right stick, X/Space Z C V = A B X Y, Q E 1 3 = L R ZL ZR, Enter Backspace = + -), the mouse as the right stick (`mouse_right_stick`, `mouse_sensitivity` 0.1..5 on a speed curve, `mouse_invert`) |
 | `help.rs` | F1: the controls page (right stick source, mouse direction, sensitivity, audio slowdown; the key tables), saved to the ini |
 | `capture.rs` | F3 window screenshot (`captures\screenshot_<time>.png`; screen copy when in front, PrintWindow otherwise), F8 the game's picture at its own resolution through graphics (`captures\fullres_<time>.png`) |
 | `rec.rs` | F7: H.264 MP4 through Media Foundation's sink writer at `recording_fps`, constant frame rate (`recordings\recording_<time>.mp4`) |
-| `lsfg.rs` | LSFG 3.1 from the player's Lossless.dll (`lsfg_dll`, beside the game, Steam libraries): PE resources, SPIR-V, the pass set identified as Turbo does; `lossless_scaling=1` starts the Lossless Scaling app |
-| `ctl.rs` | the control pipe `\\.\pipe\nxrs_ctl_<pid>` (and `swr_ctl_<pid>`), commands from `nxconfig::ctl` |
+| `lsfg.rs` | LSFG 3.1 from the player's Lossless.dll (`lsfg_dll`, beside the game, Steam libraries): PE resources, SPIR-V, the pass set identified by pass order and bindings; `lossless_scaling=1` starts the Lossless Scaling app |
+| `ctl.rs` | the control pipe `\\.\pipe\nxrs_ctl_<pid>`, commands from `nxconfig::ctl` |
 | `metrics.rs` | `metrics=1`: `metrics-<time>.csv` each second (frames, FPS, CPU, private MB, every counter), `frames-<time>.csv` per frame rows graphics pushes |
-| `../config/src/options.rs` | every Turbo ini option: default, comment, section, range; the Spanish aliases |
+| `../config/src/options.rs` | every ini option: default, comment, section, range; the Spanish aliases |
 | `../config/src/lib.rs` | the ini: read, settings_version migrations (2: docked=1, 3: game_dynamic_resolution=auto), written back with comments, live reload, `--key=value`, the typed getters |
 
 ## Hotkeys

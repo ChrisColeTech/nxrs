@@ -12,7 +12,7 @@ use crate::model::path_text::{display, ends_with_ci, file_name, parent};
 use crate::model::play::effective_button_layout;
 use crate::model::{args, output_lines};
 use crate::services::jobs::{Job, Spec, open_build_log};
-use crate::services::{files, markers, sources};
+use crate::services::{files, sources};
 
 impl App {
     pub fn start_build(&mut self) {
@@ -21,8 +21,6 @@ impl App {
             return;
         }
         if let Some(g) = self.lib.find_mut(&id) {
-            // an entry the Turbo engine built is built with nxrs: it moves to its [nxrs] folder first
-            markers::set_game_engine(g, true);
             // a name from an older library keeps step with what the engine writes
             g.output_name = output_name_for(&g.output_name);
         }

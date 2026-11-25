@@ -1,6 +1,6 @@
 //! `nxrs-build`: the engine's command line (the launcher runs it).
 //!
-//! Contract v1 (what RecompLauncher sends Turbo's `switchrecomp.py` today, docs/LAUNCHER_CONTRACT.md):
+//! Contract v1 (the Qt launcher's legacy command line, docs/LAUNCHER_CONTRACT.md):
 //!
 //!   nxrs-build <input> --outdir <dir> -o <name> [--jobs N] [--update <pkg> | --no-update] [ignored: --target --backend
 //!        --cc -O --runtime --native --chunk]
@@ -42,7 +42,7 @@ pub const CONTRACT: &str = "nxrs-contract 2";
 
 // ------------------------------------------------------------------------------------------------ contract v1
 
-/// Turbo's switchrecomp.py options, as the launcher passes them.
+/// The legacy launcher's build options, as it passes them.
 #[derive(Parser, Debug)]
 #[command(
     name = "nxrs-build",
@@ -119,7 +119,7 @@ struct V1 {
     update_info: Option<Vec<PathBuf>>,
     #[arg(short, long)]
     quiet: bool,
-    /// prod.keys (default: SWR_PROD_KEYS, else the launcher's keys folder)
+    /// prod.keys (default: NXRS_PROD_KEYS, else the launcher's keys folder)
     #[arg(long)]
     keys: Option<PathBuf>,
     /// print the contract version and exit
@@ -259,7 +259,7 @@ fn run_v1(args: Vec<String>) -> i32 {
         v1: true,
         ignored: (!ignored.is_empty()).then(|| {
             format!(
-                "nxrs-build: ignored (Turbo options with no meaning here): {}",
+                "nxrs-build: ignored (options with no meaning here): {}",
                 ignored.join(" ")
             )
         }),
@@ -369,7 +369,7 @@ struct V2 {
 
 #[derive(Args, Clone, Default)]
 struct PkgArgs {
-    /// prod.keys (default: SWR_PROD_KEYS, else %LOCALAPPDATA%\nxrs\keys\prod.keys, then %LOCALAPPDATA%\RecompLauncher\RecompLauncher\keys\prod.keys)
+    /// prod.keys (default: NXRS_PROD_KEYS, else %LOCALAPPDATA%\nxrs\keys\prod.keys, then %LOCALAPPDATA%\RecompLauncher\RecompLauncher\keys\prod.keys)
     #[arg(long)]
     keys: Option<PathBuf>,
     /// apply the game update in this package of its own (.nsp, .xci, or .nca with its .tik beside it)
@@ -787,7 +787,7 @@ fn doctor() -> i32 {
     }
     match translator::package::default_keys_path() {
         Some(p) => check(p.is_file(), format!("keys: {} (present; never read here)", p.display())),
-        None => check(false, "keys: none installed (SWR_PROD_KEYS or the launcher's keys folder); NSP games need them".into()),
+        None => check(false, "keys: none installed (NXRS_PROD_KEYS or the launcher's keys folder); NSP games need them".into()),
     }
     i32::from(bad > 0)
 }

@@ -1,4 +1,4 @@
 # Kept by hand by the engine's lanes (format of game.tsv; these rows are read first). Lane P, 2026-11-19.
-# 60 FPS (5A.6): the owner's turbo.toml patch (base frame rate FPS60) for 2.0.2; the game steps by measured time
-# (Turbo's GAMEPLAY_INVESTIGATION.md section 9). Ran 60.0 FPS on the title and menus here.
+# 60 FPS (5A.6): the owner's owner.toml patch (base frame rate FPS60) for 2.0.2; the game steps by measured time.
+# Ran 60.0 FPS on the title and menus here.
 fps60	needs_patch

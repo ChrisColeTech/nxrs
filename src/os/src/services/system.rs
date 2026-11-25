@@ -1,5 +1,4 @@
-//! System services a game opens through sm when its SDK client is not taken over by name, answered by the host
-//! (the shapes of Turbo's dispatchers, written anew here):
+//! System services a game opens through sm when its SDK client is not taken over by name, answered by the host:
 //! - `psm`: the PC's own battery and charger (a desktop without a battery: 100 % on mains); a session's state-change
 //!   event is signalled when a later question finds the charge or the charger changed;
 //! - `set`: the language codes (the `language` setting), the region that follows from it, no quest (kiosk) mode, an
@@ -123,7 +122,7 @@ impl Service for Psm {
             0 => ctx.push_u32(psm_power().percent),
             // GetChargerType: 1 a charger that gives enough power, 0 none
             1 => ctx.push_u32(psm_power().charging as u32),
-            // IsBatteryChargingEnabled (4), and Turbo's byte for 5
+            // IsBatteryChargingEnabled (4), and the same byte for 5
             4 | 5 => ctx.push_u8(psm_power().charging as u8),
             // OpenSession
             7 => ctx.object(PsmSession),
@@ -653,7 +652,7 @@ mod tests {
         crate::ipc::connect(name).unwrap()
     }
 
-    /// psm as Turbo answers it, from the PC's own power state: 0 the charge, 1 the charger (1 on mains), 7 a session
+    /// psm from the PC's own power state: 0 the charge, 1 the charger (1 on mains), 7 a session
     /// whose command 0 gives the state-change event.
     #[test]
     fn psm_reports_the_pcs_power() {
@@ -669,12 +668,11 @@ mod tests {
         assert_eq!((r.result, r.copy.len()), (0, 1), "BindStateChangeEvent");
     }
 
-    /// set and set:sys against Turbo's replies: language codes (15 / 18 of nn::settings' table), MakeLanguageCode, the
-    /// counts, the region, the quest flag 0, an empty key code map, the device nickname (the PC's name where Turbo
-    /// answers "SwitchRecomp"), and set:sys's firmware block (version bytes, platform, hash, display version and
+    /// set and set:sys: language codes (15 / 18 of nn::settings' table), MakeLanguageCode, the counts, the region,
+    /// the quest flag 0, an empty key code map, the device nickname (the PC's name), and set:sys's firmware block (version bytes, platform, hash, display version and
     /// title at 0x08 / 0x28 / 0x68 / 0x80), colour set 0, a settings item of size 0.
     #[test]
-    fn set_and_set_sys_answer_as_turbo() {
+    fn set_and_set_sys_answers() {
         use crate::services::settings::code;
         let h = open("set");
         assert_eq!(
@@ -751,7 +749,7 @@ mod tests {
         );
     }
 
-    /// fatal:u ends the run with the game's result (Turbo: "The game called fatal:u (code ...)").
+    /// fatal:u ends the run with the game's result ("The game called fatal:u (code ...)").
     #[test]
     fn fatal_u_ends_the_run_with_the_code() {
         let h = open("fatal:u");
@@ -760,8 +758,8 @@ mod tests {
         assert!(m.contains("0x2a2") && m.contains("2162-0001"), "{m}");
     }
 
-    /// spl: GetConfig 0 and GenerateRandomBytes (the OS's bytes where Turbo fills 0x5A); csrng the same; mm:u 4 and 6
-    /// answer 1 as Turbo.
+    /// spl: GetConfig 0 and GenerateRandomBytes (the OS's bytes); csrng the same; mm:u 4 and 6
+    /// answer 1.
     #[test]
     fn spl_csrng_mm() {
         let h = open("spl:");
@@ -779,7 +777,7 @@ mod tests {
         assert_eq!(u32_at(&send(m, 6, vec![0; 4], vec![]), 0), 1);
     }
 
-    /// bcat: an empty delivery cache as Turbo serves it: the storage service, no directory listed, a directory with
+    /// bcat: an empty delivery cache: the storage service, no directory listed, a directory with
     /// no file, a file open answering not found (0x47a); a sync's progress whose event is signalled and whose state
     /// is Done (9) with success.
     #[test]
@@ -822,7 +820,7 @@ mod tests {
         assert!(imp[8..].iter().all(|&x| x == 0));
     }
 
-    /// aoc:u against Turbo's dispatcher, over the installed list: count and list (the ByApplicationId forms for
+    /// aoc:u over the installed list: count and list (the ByApplicationId forms for
     /// another program find none), an offset past the end fails (128-150), the base id, prepare, the list-changed
     /// event, and a purchase manager whose event never fires and which has nothing to pop (164-400).
     #[test]

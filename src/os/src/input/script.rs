@@ -1,6 +1,6 @@
 //! Scripted input, for tests and the harness:
 //! - `NXRS_INPUT_RECORD=<file>`: every change of player 1's physical input (keyboard, mouse, controller) appended as
-//!   `<ms> <buttons hex> <lx> <ly> <rx> <ry>`, ms from the first sample (Turbo's format, 8f5410f).
+//!   `<ms> <buttons hex> <lx> <ly> <rx> <ry>`, ms from the first sample.
 //! - `NXRS_INPUT_REPLAY=<file>`: once the file exists (it may be written while the game runs) its lines replace
 //!   player 1 from that moment, each state held until the next line's ms; after the last line the real input is back.
 //!   Rewritten (another time or size), it plays again. `#` lines are comments.
@@ -235,7 +235,7 @@ fn register_commands() {
     });
 }
 
-/// Turbo's input recording.
+/// The input recording.
 pub struct Recorder {
     f: std::io::BufWriter<std::fs::File>,
     t0: Option<f64>,
@@ -286,7 +286,7 @@ impl Recorder {
     }
 }
 
-/// Turbo's input replay.
+/// The input replay.
 pub struct Replay {
     path: String,
     stamp: Option<(std::time::SystemTime, u64)>,

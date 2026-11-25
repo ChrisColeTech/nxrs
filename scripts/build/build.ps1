@@ -22,7 +22,7 @@
 param(
     [switch]$Run,
     [switch]$KeepCache,
-    [ValidateRange(1, 64)][int]$Jobs = 4,
+    [ValidateRange(1, 64)][int]$Jobs = [Environment]::ProcessorCount,
     [switch]$SkipGnu,
     [switch]$RetainPrevious,
     [string]$PublicationJournal

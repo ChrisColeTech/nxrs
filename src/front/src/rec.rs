@@ -1,16 +1,16 @@
 //! F7: video recording. The game's own presented picture (graphics' frame sink, `nxgfx::vk::shot::set_frame_sink`:
-//! read back at the present, so overlays, other windows and DWM never get in; Turbo's F7) at `recording_fps` (15..60)
+//! read back at the present, so overlays, other windows and DWM never get in) at `recording_fps` (15..60)
 //! as H.264 and the mixed
 //! game sound (the os layer's pre-slowdown tap: every stream as the game produced it, mixed on the game clock, 48 kHz\n//! stereo) as AAC, in an MP4 written by Media Foundation's sink writer
 //! (QuickSync / NVENC / VCE when the system has them): `recordings\recording_<date>_<time>.mp4` beside the game. The
 //! title bar says RECORDING while it runs.
 //!
 //! Video frames are numbered at the constant rate on the game's clock (`nxos::clock`): frame n shows the game at
-//! n / fps seconds of game time. With `smooth_recording=1` (Turbo's virtual time) the game's clock is slowed while the
+//! n / fps seconds of game time. With `smooth_recording=1` (virtual time) the game's clock is slowed while the
 //! PC cannot keep up (the game presents, or the grab captures, fewer than `recording_fps` pictures a second of real
 //! time), so every video frame is a new picture and the video plays smooth at normal speed; the clock goes back to
 //! real time when the recording stops. With `smooth_recording=0` the clock is real time and a frame the grab could not
-//! deliver repeats the last one. Audio and video are interleaved within a second of each other (Turbo's rec_flow.h).
+//! deliver repeats the last one. Audio and video are interleaved within a second of each other.
 
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -72,7 +72,7 @@ fn now_ms() -> u64 {
 }
 
 /// The encoder made no progress for 5 s since the later of the recording's start and its last finished write
-/// (Turbo's recording stall watchdog, reimplemented).
+/// (the recording's stall watchdog).
 pub fn stalled(now: u64, entered: u64, progress: u64) -> bool {
     now.saturating_sub(progress.max(entered)) >= 5000
 }
@@ -107,7 +107,7 @@ pub fn tick() {
 }
 
 /// The game's sound as it produced it, on the game clock (`sink::set_pre_tap`: before the slowdown and the device's
-/// limiter, Turbo's recording), so it is already in game time: no stretching for a slowed clock.
+/// limiter), so it is already in game time: no stretching for a slowed clock.
 fn audio_tap(s: &[f32], rate: u32, ch: u32) {
     let mut q = AUDIO.lock().unwrap();
     if q.len() < 4096 {

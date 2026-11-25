@@ -1,6 +1,5 @@
 //! The desktop's own dialogs on Linux, where Windows draws a message box, a text box or a small prompt window
-//! itself: zenity (GNOME and most desktops) or kdialog (KDE, the Steam Deck's desktop), as Turbo's Linux runtime does
-//! for its messages (`plat_message`), and `xdg-open` for files the browser opens. Without either dialog tool, or
+//! itself: zenity (GNOME and most desktops) or kdialog (KDE, the Steam Deck's desktop), and `xdg-open` for files the browser opens. Without either dialog tool, or
 //! without a display, nothing opens and the callers log what they would have shown.
 
 use std::process::{Child, Command, Stdio};

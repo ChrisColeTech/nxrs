@@ -18,7 +18,7 @@ use std::sync::Arc;
 /// Which update to apply to a game.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum UpdateChoice {
-    /// The update its own package holds, if any (Turbo's default).
+    /// The update its own package holds, if any (the default).
     #[default]
     Embedded,
     /// `--no-update`: the game as it was released, without the update its package holds.

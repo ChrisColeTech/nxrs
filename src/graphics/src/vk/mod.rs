@@ -41,6 +41,7 @@ pub mod shader;
 pub mod shot;
 pub mod sparse;
 pub mod spvfix;
+pub mod storemu;
 pub mod tables;
 pub mod upscale;
 pub mod xfb;
@@ -152,7 +153,7 @@ impl Gpu {
         name: &str,
     ) -> Result<Buf, String> {
         let size = size.max(16);
-        // what this layer takes from system memory is capped (Turbo 8a4618c): 8 GB or a quarter of the machine's
+        // what this layer takes from system memory is capped: 8 GB or a quarter of the machine's
         // memory, NXGFX_HOST_MB (0 = no cap); over it the allocation is refused and its caller's fallback applies
         if loc != MemoryLocation::GpuOnly {
             let cap = host_cap();

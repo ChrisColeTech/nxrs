@@ -2,8 +2,8 @@
 //! published for the hid service (`services/hid.rs`), which shows them to the game as its npads.
 //!
 //! Sources, by kind: XInput users (Xbox pads), native HID (DualSense / DualSense Edge / DualShock 4 with lights,
-//! rumble and motion; Switch Pro Controller, Joy-Con L / R and Nintendo's Online pads with HD rumble, player lights
-//! and motion), WinMM joysticks as the fallback when no other pad is there; the keyboard and mouse through the front
+//! rumble and motion; Switch Pro Controller, Joy-Con L / R and Nintendo's Online pads with HD rumble (RenHDrum's core
+//! on a rumble thread of its own, `rumble.rs`, while `hd_rumble` is on), player lights and motion), WinMM joysticks as the fallback when no other pad is there; the keyboard and mouse through the front
 //! end (`set_keyboard`); scripted presses (`NXRS_KEYS`, the control pipe's `press`); a replayed recording.
 //!
 //! Every pad reports its buttons by position (`layout.rs`), mapped once here through `button_layout` / `button_map`.
@@ -15,13 +15,14 @@
 //! Switches: `NXRS_CONTROLLER_TRACE=1` (every change and output), `NXRS_CONTROLLER_SELFTEST=1` (lights, low motor
 //! 0.5 s, high motor 0.5 s on each rumble pad once it is active), `NXRS_CONTROLLER_BACKGROUND=1` (input while the window
 //! is not in front), `NXRS_NO_SONY_HID=1` / `NXRS_NO_NINTENDO_HID=1` (skip those native paths, e.g. under DS4Windows
-//! without HidHide), `NXRS_INPUT_RECORD=<file>` / `NXRS_INPUT_REPLAY=<file>` (Turbo's record / replay format),
-//! `NXRS_KEYS=<steps>` (scripted presses), `NXRS_MOTION_GAIN`. Turbo's `SWR_` names are read too.
+//! without HidHide), `NXRS_INPUT_RECORD=<file>` / `NXRS_INPUT_REPLAY=<file>` (record / replay),
+//! `NXRS_KEYS=<steps>` (scripted presses), `NXRS_MOTION_GAIN`.
 
 pub mod hidio;
 pub mod layout;
 pub mod motion;
 pub mod nintendo;
+pub mod rumble;
 pub mod script;
 pub mod sony;
 pub mod switch2;
@@ -36,25 +37,12 @@ pub const PLAYERS: usize = 8;
 pub const STICK_MAX: i32 = 32767;
 
 pub fn env_flag(name: &str) -> bool {
-    let get = |n: &str| {
-        std::env::var(n)
-            .ok()
-            .is_some_and(|v| !v.is_empty() && v != "0")
-    };
-    get(name)
-        || name
-            .strip_prefix("NXRS_")
-            .is_some_and(|rest| get(&format!("SWR_{rest}")))
-}
-pub fn env_str(name: &str) -> Option<String> {
     std::env::var(name)
         .ok()
-        .filter(|v| !v.is_empty())
-        .or_else(|| {
-            name.strip_prefix("NXRS_")
-                .and_then(|r| std::env::var(format!("SWR_{r}")).ok())
-                .filter(|v| !v.is_empty())
-        })
+        .is_some_and(|v| !v.is_empty() && v != "0")
+}
+pub fn env_str(name: &str) -> Option<String> {
+    std::env::var(name).ok().filter(|v| !v.is_empty())
 }
 
 macro_rules! ilog {
@@ -264,7 +252,12 @@ pub fn vibrate_with(p: usize, side: usize, v: Vib, force: bool) {
     if p >= PLAYERS || side > 1 {
         return;
     }
-    let v = RumbleSettings::from_ini().apply(clean(v));
+    let v = clean(v);
+    // HD rumble takes the raw value for the player's claimed pads (its own gain); the standard path the rest
+    if rumble::push(p, side, v, rumble::now_us()) {
+        return;
+    }
+    let v = RumbleSettings::from_ini().apply(v);
     let mut r = RUMBLE.lock().unwrap();
     if r.v[p][side] != v || force {
         r.v[p][side] = v;
@@ -489,7 +482,7 @@ pub fn device_changed() {
     RESCAN.store(true, Ordering::Release);
 }
 
-fn active() -> bool {
+pub(crate) fn active() -> bool {
     static BG: OnceLock<bool> = OnceLock::new();
     !SUSPENDED.load(Ordering::Acquire)
         && !PROMPT.load(Ordering::Acquire)
@@ -497,7 +490,7 @@ fn active() -> bool {
             || *BG.get_or_init(|| env_flag("NXRS_CONTROLLER_BACKGROUND")))
 }
 
-fn trace() -> bool {
+pub(crate) fn trace() -> bool {
     static T: OnceLock<bool> = OnceLock::new();
     *T.get_or_init(|| env_flag("NXRS_CONTROLLER_TRACE"))
 }
@@ -538,6 +531,31 @@ struct NinDev {
     rumble: [u8; 8],
     usb: bool,
     leds: u8,
+    /// Claimed for HD rumble (`rumble.rs`): its packets go out on the rumble thread, and the subcommands here take
+    /// the packet counter from it.
+    hd: Option<std::sync::Arc<rumble::HdPad>>,
+    /// The claim failed (no second handle): not retried until `hd_rumble` changes.
+    hd_failed: bool,
+}
+
+impl NinDev {
+    fn next_counter(&mut self) -> u8 {
+        match &self.hd {
+            Some(h) => h.next_counter(),
+            None => {
+                let c = self.counter;
+                self.counter = self.counter.wrapping_add(1);
+                c
+            }
+        }
+    }
+    /// The rumble bytes a subcommand carries: the running rumble's, so a light change does not cut it.
+    fn rumble_bytes(&self) -> [u8; 8] {
+        self.hd
+            .as_ref()
+            .map(|h| h.last_rumble())
+            .unwrap_or(self.rumble)
+    }
 }
 
 struct Dev {
@@ -722,9 +740,8 @@ impl Dev {
             Kind::S2(d, _) => d.lights(p),
             Kind::Nin(n) => {
                 n.leds = p.map(nintendo::lights).unwrap_or(0);
-                let c = n.counter;
-                n.counter = n.counter.wrapping_add(1);
-                let pkt = nintendo::subcommand(c, &nintendo::NEUTRAL_RUMBLE, 0x30, &[n.leds]);
+                let c = n.next_counter();
+                let pkt = nintendo::subcommand(c, &n.rumble_bytes(), 0x30, &[n.leds]);
                 let _ = n.hid.write(&pkt);
             }
             _ => {}
@@ -750,8 +767,7 @@ impl Dev {
             }
             Kind::Sony(s) => sony_write(s, &self.name, low, high, false),
             Kind::Nin(n) => {
-                let side =
-                    |x: &Vib| nintendo::encode_side(x.amp_low, x.freq_low, x.amp_high, x.freq_high);
+                let side = rumble::encode_side;
                 let (l, r) = match n.side {
                     2 => (side(&v[0]), [0x00, 0x01, 0x40, 0x40]),
                     3 => ([0x00, 0x01, 0x40, 0x40], side(&v[1])),
@@ -759,8 +775,7 @@ impl Dev {
                 };
                 n.rumble[..4].copy_from_slice(&l);
                 n.rumble[4..].copy_from_slice(&r);
-                let c = n.counter;
-                n.counter = n.counter.wrapping_add(1);
+                let c = n.next_counter();
                 let e = n.hid.write(&nintendo::rumble_report(c, &n.rumble));
                 if e != 0 || t {
                     ilog!("{} rumble {:02x?} error={e}", self.name, n.rumble);
@@ -863,7 +878,10 @@ fn nin_handshake(n: &mut NinDev, now: f64) {
         return;
     }
     let neutral = nintendo::NEUTRAL_RUMBLE;
-    let c = n.counter;
+    let c = match &n.hd {
+        Some(h) if n.step >= 4 => h.next_counter(),
+        _ => n.counter,
+    };
     let pkt: Vec<u8> = match n.step {
         0 if n.usb => vec![0x80, 0x02],
         1 if n.usb => vec![0x80, 0x03],
@@ -885,7 +903,7 @@ fn nin_handshake(n: &mut NinDev, now: f64) {
             nintendo::subcommand(c, &neutral, 0x10, &[a[0], a[1], a[2], a[3], 22])
         }
     };
-    if n.step >= 4 {
+    if n.step >= 4 && n.hd.is_none() {
         n.counter = n.counter.wrapping_add(1);
     }
     let e = n.hid.write(&pkt);
@@ -1114,6 +1132,8 @@ impl Inputs {
                     rumble: nintendo::NEUTRAL_RUMBLE,
                     usb,
                     leds: 0,
+                    hd: None,
+                    hd_failed: false,
                 };
                 let joy = match nk {
                     2 => Some(0),
@@ -1249,6 +1269,57 @@ impl Inputs {
         }
     }
 
+    /// HD rumble claims (`rumble.rs`): a writable Nintendo pad is claimed while `hd_rumble` is on and released when it
+    /// goes off (live); a claimed pad may write once its handshake has enabled vibration. The registry gets each
+    /// player's claimed pads and how many of its rumble pads stay on the standard path.
+    fn hd_update(&mut self) {
+        let on = rumble::config().hd;
+        let mut claimed = vec![];
+        let mut others = [0u32; PLAYERS];
+        for d in self.devs.iter_mut() {
+            if let Kind::Nin(n) = &mut d.kind {
+                if on && n.hd.is_none() && !n.hd_failed && n.hid.writable {
+                    n.hd = rumble::HdPad::open(&n.hid.info, &d.name, n.side);
+                    match &n.hd {
+                        None => {
+                            n.hd_failed = true;
+                            ilog!("{}: HD rumble unavailable (no second handle); standard rumble", d.name);
+                        }
+                        Some(h) => {
+                            // the pad's counter carries on from the subcommands sent so far
+                            for _ in 0..(n.counter & 0x0f) {
+                                h.next_counter();
+                            }
+                        }
+                    }
+                } else if !on && n.hd.is_some() {
+                    if let Some(h) = n.hd.take() {
+                        h.release();
+                        ilog!("{}: HD rumble off; standard rumble", d.name);
+                    }
+                }
+                if !on {
+                    n.hd_failed = false;
+                }
+                if let Some(h) = &n.hd {
+                    if n.step >= 9 {
+                        h.set_ready();
+                    }
+                    if let Some(p) = d.slot {
+                        claimed.push((p, h.clone()));
+                    }
+                    continue;
+                }
+            }
+            if let Some(p) = d.slot {
+                if d.rumble_capable() {
+                    others[p] += 1;
+                }
+            }
+        }
+        rumble::sync(&claimed, others);
+    }
+
     fn layout_update(&mut self) {
         let g = nxconfig::generation();
         if g == self.map_gen {
@@ -1381,6 +1452,9 @@ impl Inputs {
                 d.rumble([v, v], now);
                 continue;
             }
+            if matches!(&d.kind, Kind::Nin(n) if n.hd.is_some()) {
+                continue; // HD rumble: the rumble thread drives it (and mutes it out of focus)
+            }
             if !act {
                 if d.rumble_sent != (0, 0) {
                     d.rumble([Vib::default(); 2], now);
@@ -1441,6 +1515,7 @@ fn tick(inp: &mut Inputs) {
     }
     inp.drop_gone();
     inp.assign();
+    inp.hd_update();
     inp.publish(now);
     if let Some(r) = inp.record.as_mut() {
         let (kb, ka) = KEYS.peek();
@@ -1492,9 +1567,11 @@ pub fn start() {
 }
 
 /// Rumble off, lights off and the devices closed; waits at most ~200 ms for the input lock, so an exit never hangs
-/// on it (Turbo's `backend_controller_shutdown`).
+/// on it.
 pub fn shutdown() {
     SHUTDOWN.store(true, Ordering::Release);
+    // the HD rumble thread first (bounded), then the neutral packet to each claimed pad
+    rumble::shutdown();
     for _ in 0..200 {
         if let Ok(mut g) = INPUTS.try_lock() {
             if let Some(inp) = g.as_mut() {

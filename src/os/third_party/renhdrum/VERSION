@@ -1,0 +1,13 @@
+RenHDrum 0.5.0 (https://github.com/trzz1214/RenHDrum), copied 2026-11-25 from a release checkout (no git metadata).
+License: MIT OR Apache-2.0, used under MIT (LICENSE-MIT; NOTICE kept as shipped).
+
+Copied: src/** (44 files) unchanged, Cargo.toml (edited: rlib only, build = false, no [build-dependencies], no
+[profile], no readme), LICENSE-MIT, LICENSE-APACHE, NOTICE.
+Not copied: build.rs and vendor/opus (nxos already links libopus 1.5.2), tests/, integrations/, examples/, docs/,
+include/, reference/.
+
+Tree hash: SHA-256 of the manifest "<sha256 of file>  <path under src/, forward slashes>\n" sorted by path:
+44e7e79c5e52a6f1fab5bfe249695a757a12405f92201a11ce61a0198ce35683
+
+Updating: re-copy src/ from a newer release, re-apply the Cargo.toml edits, recompute the hash, re-run
+`cargo test -p os rumble` and the owner's feel table (docs/waves/RENHDRUM.md 5.6).

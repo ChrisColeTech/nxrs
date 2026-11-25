@@ -354,6 +354,8 @@ pub struct Module {
     pub words: Vec<u32>,
     /// a mesh shader's per-primitive output locations (the pixel shader drawn with it reads them per primitive)
     pub per_primitive: Vec<u32>,
+    /// what its stage set needs, read from `res` at its first set (`exec::facts`)
+    pub facts: std::sync::OnceLock<super::exec::Facts>,
 }
 
 impl Module {
@@ -1073,7 +1075,7 @@ impl Library {
     }
 
     /// Pixel shader `m` with its outputs at the locations of integer targets retyped (`kinds`: 1 unsigned, 2 signed;
-    /// `shaders::link::int_outputs`, Turbo's integer output variant); made once per (module, kinds).
+    /// `shaders::link::int_outputs`, the integer output variant); made once per (module, kinds).
     pub fn with_int_outputs(
         &self,
         dev: &ash::Device,
@@ -1161,6 +1163,36 @@ impl Library {
         made
     }
 
+    /// Module `m` with its storage images at `binds` (bindings of its stage set) read and written through an
+    /// emulated storage format's view (`storemu::rewrite`: RGB9E5 packed into r32ui); made once per (module, bindings).
+    pub fn with_storage_emulation(
+        &self,
+        dev: &ash::Device,
+        m: &Arc<Module>,
+        binds: &[(u32, super::storemu::Emul)],
+    ) -> Option<Arc<Module>> {
+        let tag = super::storemu::tag(binds);
+        let made = self.variant(dev, m, 5, &tag, || {
+            super::storemu::rewrite(&m.words, m.stage, binds)
+        });
+        match &made {
+            Some(v) => {
+                static SAID: Mutex<Option<std::collections::HashSet<ShaderKey>>> = Mutex::new(None);
+                if SAID.lock().unwrap().get_or_insert_with(Default::default).insert(v.key) {
+                    crate::vklog!(
+                        "shader {}: storage images at bindings {tag:?} (binding, conversion) packed into their emulated view format",
+                        key_hex(&m.key)
+                    );
+                }
+            }
+            None => crate::log::red_once(&format!(
+                "shader {}: no storage-format emulation variant for bindings {tag:?}: its texels are written unconverted",
+                key_hex(&m.key)
+            )),
+        }
+        made
+    }
+
     /// A variant of module `m` made from the words `make` gives (what: 1 added outputs, 2 integer outputs, 4 inputs; `tag` tells
     /// variants of one kind apart), cached; its key differs from the shader's (pipeline parts and caches key on it).
     fn variant(
@@ -1205,6 +1237,7 @@ impl Library {
                 xfb: m.xfb.clone(),
                 words: w,
                 per_primitive: m.per_primitive.clone(),
+                facts: Default::default(),
             }))
         });
         MADE.lock()
@@ -1264,7 +1297,7 @@ impl Library {
         } else {
             w
         };
-        // NVN's warp-aggregated atomic add made per lane (the RTX 50 ballot hang, Turbo #12; NXGFX_BALLOT_FIX=0 off)
+        // NVN's warp-aggregated atomic add made per lane (the RTX 50 ballot hang; NXGFX_BALLOT_FIX=0 off)
         let w = if std::env::var("NXGFX_BALLOT_FIX").as_deref() != Ok("0") {
             match shaders::link::ballot_per_lane(&w) {
                 Some((nw, n)) => {
@@ -1335,6 +1368,7 @@ impl Library {
             id: self
                 .next_id
                 .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+            facts: Default::default(),
         }))
     }
 }

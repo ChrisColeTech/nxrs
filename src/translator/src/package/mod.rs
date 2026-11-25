@@ -9,7 +9,7 @@
 //! | [`Game::write_data`] | stage a build's data folder: `exefs/`, the RomFS marker (`romfs.nsp` / `romfs.nup` / `romfs.dir`), `control.nacp` and icon |
 //! | [`open_data_dir`] | what the runtime calls at start: the game's [`RomFs`] from its data folder's marker |
 //! | [`RomFs`] | `list(dir)`, `walk()`, `find(path)`, `read(path, offset, len)`, `read_file(path)`, `image()`; `Send + Sync` |
-//! | [`update_info`] | what an update package is (and, with the game, that it belongs to it): Turbo's `UPDATE\t...` line |
+//! | [`update_info`] | what an update package is (and, with the game, that it belongs to it): the `UPDATE\t...` line |
 //! | [`dlc`] | `install`, `sync`, `remove`, `describe`, `read_manifest`, `title_romfs` (a title's RomFS, in place) |
 //! | [`open_exefs`], [`list`] | the ExeFS alone (the translator's input), a debugging listing |
 
@@ -186,7 +186,7 @@ pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
     match detected {
         Detected::Folder => {
             let exefs = folder::exefs(&path)?;
-            // the RomFS is optional (a game without data, homebrew): Turbo builds such a folder with an empty one
+            // the RomFS is optional (a game without data, homebrew): such a folder builds with an empty one
             let (romfs, marker) = match folder::find_romfs(&path) {
                 Some(d) => (
                     RomFs::from_folder(&d)?,
@@ -324,7 +324,7 @@ pub fn open_game(input: &Path, opts: &OpenOptions) -> Result<Game> {
     }
 }
 
-/// An ExeFS name that is safe as a file in the data folder on Windows (switchrecomp.py:440): no separators or drive
+/// An ExeFS name that is safe as a file in the data folder on Windows: no separators or drive
 /// colon, not `.` / `..`, no trailing dot or space (Windows drops them), and not a reserved device name (CON, PRN,
 /// AUX, NUL, COM1-9, LPT1-9, with or without an extension).
 pub fn safe_exefs_name(name: &str) -> bool {
@@ -344,9 +344,9 @@ pub fn safe_exefs_name(name: &str) -> bool {
 }
 
 impl Game {
-    /// Stage the data folder a build hands the runtime (switchrecomp.py `copy_data`): `exefs/` (modules only the
+    /// Stage the data folder a build hands the runtime: `exefs/` (modules only the
     /// other version had are removed), the RomFS marker (the other markers removed), `control.nacp` and the icon.
-    /// Says what was applied, in Turbo's words.
+    /// Says what was applied, in the words the launcher reads.
     pub fn write_data(&self, datadir: &Path, say: &dyn Fn(&str)) -> Result<()> {
         let io_err = |p: &Path| {
             let p = p.to_path_buf();
@@ -506,7 +506,7 @@ mod tests {
         assert!(nso_build_id(b"NSO0").is_none());
     }
 
-    /// switchrecomp.py:440: names Windows cannot hold as files are refused, ordinary module names pass.
+    /// Names Windows cannot hold as files are refused, ordinary module names pass.
     #[test]
     fn reserved_windows_names_refused() {
         for ok in [

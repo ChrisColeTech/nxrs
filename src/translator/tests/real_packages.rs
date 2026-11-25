@@ -48,7 +48,7 @@ fn arceus_combined_nsp_takes_the_update() {
     let combined =
         find_nsp(&Path::new(DUMPS).join("Pokemon Legends Arceus [01001F5010DFA800][v262144]"));
     let base = PathBuf::from(
-        r"D:\Projects\Switch2RECOMP-main\build\evidence\updates\packages\Pokemon Legends Arceus base [01001F5010DFA000][v0].nsp",
+        r"P:\Games\Nintendo\DUMPS\Pokemon Legends Arceus base [01001F5010DFA000][v0]\Pokemon Legends Arceus base [01001F5010DFA000][v0].nsp",
     );
     let (Some(combined), true) = (combined, base.exists()) else {
         return eprintln!("skip: Arceus packages not present");

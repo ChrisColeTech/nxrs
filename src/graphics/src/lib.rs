@@ -33,7 +33,7 @@ pub fn set_shader_key_skip(skip: Option<(u32, u32)>) {
     shaders::nvn::set_key_skip(skip);
 }
 
-/// F5's graphics part (Turbo's `gpu_gl_dump_rts`): the render targets that exist now, as text, and a pass dump of
+/// F5's graphics part: the render targets that exist now, as text, and a pass dump of
 /// the next frame (each pass's colour targets as PNGs in `captures`, `vk::exec::passdump`).
 pub fn diag_dump() -> String {
     let Some(g) = vk::Gpu::try_get() else {

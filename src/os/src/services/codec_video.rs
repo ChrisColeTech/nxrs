@@ -1,6 +1,5 @@
 //! nn::codec's video decoders (the Switch 2's SDK: VP9, H.264, AV1, VP8 decoder types), taken over and decoded on
-//! the host (nxnative `hle_codec_video.c`, ported; Turbo serves the same through the graphics supervisor's decoder,
-//! f9c8469 / 6c4578c / 0ae160a). The SDK's protocol:
+//! the host (nxnative `hle_codec_video.c`, ported). The SDK's protocol:
 //! - the client makes one image pool per picture (MakeDecodeImagePreference -> CalculateDecoderImagePoolBuffer ->
 //!   InitializeDecoderImagePool) and registers each under an index; registering makes it acquirable (a queue 8
 //!   deep) with a sync handle already signalled;

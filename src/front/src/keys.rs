@@ -1,4 +1,4 @@
-//! The keyboard and mouse as player 1's controller (Turbo's default keys, shown on the F1 page):
+//! The keyboard and mouse as player 1's controller (the default keys, shown on the F1 page):
 //!
 //! | Keys | Controller |
 //! |---|---|
@@ -9,7 +9,7 @@
 //! | Q, E, 1, 3 | L, R, ZL, ZR |
 //! | Enter, Backspace | Plus, Minus |
 //!
-//! The mouse: raw motion summed between reads, turned into a stick deflection by `mouse_sensitivity` on Turbo's curve
+//! The mouse: raw motion summed between reads, turned into a stick deflection by `mouse_sensitivity` on a speed curve
 //! (10% = 5x, 100% about 14x, 500% = 1250x of a count per 0.5 ms) and `mouse_invert` (1 horizontal, 2 vertical, 3 both).
 
 use std::sync::atomic::{AtomicI32, AtomicU64, Ordering};
@@ -51,7 +51,7 @@ fn axis(b: u64, neg: u32, pos: u32) -> i32 {
     (if b >> pos & 1 != 0 { 32767 } else { 0 }) - (if b >> neg & 1 != 0 { 32767 } else { 0 })
 }
 
-/// Turbo's sensitivity curve: percent 10..500 → speed factor 5..1250.
+/// The sensitivity curve: percent 10..500 → speed factor 5..1250.
 pub fn mouse_factor(percent: f64) -> f64 {
     5.0 * 250f64.powf((percent - 10.0) / 490.0)
 }
@@ -133,7 +133,7 @@ pub fn state(held: u64, mouse: Option<(i32, i32)>) -> (u64, [i32; 4]) {
     (b, a)
 }
 
-/// The ini's hidden `script` (Turbo backend_win32.c, test input as the X11 backend has it): `ms:hex,ms:hex,...`, each
+/// The ini's hidden `script` (test input): `ms:hex,ms:hex,...`, each
 /// entry holds those controller buttons (hex, as the guest's button bits) for 300 ms from that many milliseconds after
 /// start. The buttons held at `elapsed_ms`.
 pub fn script_buttons(spec: &str, elapsed_ms: u64) -> u64 {
@@ -164,7 +164,7 @@ pub fn script_buttons(spec: &str, elapsed_ms: u64) -> u64 {
 mod tests {
     use super::*;
 
-    /// Turbo's script: "ms:hex" entries, each held 300 ms.
+    /// The script: "ms:hex" entries, each held 300 ms.
     #[test]
     fn script_holds_buttons_300_ms() {
         let s = "1000:1,1200:0x10,5000:400";

@@ -1,5 +1,5 @@
 //! Add-on content (DLC) for a built game: install / sync / remove / list, and each title's RomFS read in place.
-//! The manifest format and the messages are Turbo's (its docs/DLC.md).
+//! The manifest format and the messages are the ones the launcher reads.
 //!
 //! The game's data folder gets:
 //! ```text
@@ -9,8 +9,8 @@
 //! dlc/<title id>/romfs.bin      the RomFS image unpacked once from an NSZ / XCZ (its data is zstd-compressed)
 //! dlc/<title id>/install.json   what was installed from where (to skip the work next time)
 //! ```
-//! One difference from Turbo, on purpose: an AES-CTR title is not decrypted into `romfs.bin` with hactool; it is
-//! read in place through a version 2 marker, which Turbo's runtime already reads for games (`nsp_open_marker`).
+//! An AES-CTR title is not decrypted into `romfs.bin`; it is read in place through a version 2 marker, as games
+//! are.
 use crate::package::app::pfs_files;
 use crate::package::cnmt::{self, base_of, is_addon_of};
 use crate::package::container::{self, Member};

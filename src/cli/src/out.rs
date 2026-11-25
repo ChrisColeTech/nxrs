@@ -1,5 +1,5 @@
-//! Console output as the launcher reads it: one line at a time, flushed, CRLF on Windows (what Turbo's Python
-//! prints in text mode; the launcher trims either). With `--machine` (contract v2) the progress and the result are
+//! Console output as the launcher reads it: one line at a time, flushed, CRLF on Windows (text mode; the
+//! launcher trims either). With `--machine` (contract v2) the progress and the result are
 //! also given as tab-separated `@progress` / `@result` lines.
 
 use std::io::Write;

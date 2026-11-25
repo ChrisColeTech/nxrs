@@ -1,0 +1,20 @@
+[package]
+name = "renhdrum"
+version = "0.5.0"
+edition = "2021"
+authors = ["Three-Dola"]
+description = "Real-time Nintendo Switch HD Rumble & Sony DualSense audio haptics engine in Rust with a zero-allocation C ABI"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/trzz1214/RenHDrum"
+homepage = "https://ryuhdr.threedola.workers.dev"
+keywords = ["hd-rumble", "dualsense", "haptics", "sdl3", "emulation"]
+categories = ["game-development", "hardware-support", "multimedia::audio"]
+# nxrs: a path dependency of nxos. No build script: its Opus functions resolve against the libopus nxos links
+# (third_party/opus on Windows, the system's on Linux). rlib only, so no cdylib / staticlib per engine build.
+build = false
+
+[lib]
+name = "renhdrum"
+crate-type = ["rlib"]
+
+[dependencies]

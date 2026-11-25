@@ -1,7 +1,7 @@
 //! What can be added to the library: a source package or folder, or a native build on disk.
 
 use super::files::{is_dir, is_file, read_at};
-use super::markers::{adopt_built_update, build_cover, built_with_nxrs, source_of_build};
+use super::markers::{adopt_built_update, build_cover, source_of_build};
 use crate::constants::{engine as e, words_library as w};
 use crate::model::fill::fill;
 use crate::model::game::Game;
@@ -65,7 +65,7 @@ pub fn game_from_source(source: &str, output_root: &str) -> Game {
     Game {
         id: uuid::Uuid::new_v4().to_string(),
         source: absolute(source),
-        build_dir: build_folder_for(&join(&base, &output_name), true),
+        build_dir: build_folder_for(&join(&base, &output_name)),
         engine: e::ENGINE_NXRS.into(),
         title,
         output_name,
@@ -73,8 +73,8 @@ pub fn game_from_source(source: &str, output_root: &str) -> Game {
     }
 }
 
-/// A native build on disk: its executable, code module and data folder; source, update, engine,
-/// renderer and cover read from what is there.
+/// A native build on disk: its executable, code module and data folder; source, update, renderer and
+/// cover read from what is there.
 pub fn game_from_executable(path: &str) -> Result<Game, String> {
     if !is_file(path) {
         return Err(w::NO_EXECUTABLE.into());
@@ -95,12 +95,6 @@ pub fn game_from_executable(path: &str) -> Result<Game, String> {
     }
     g.source = source_of_build(&g.data_dir());
     adopt_built_update(&mut g);
-    g.engine = if built_with_nxrs(&g.build_dir, &g.output_name) {
-        e::ENGINE_NXRS
-    } else {
-        e::ENGINE_TURBO
-    }
-    .into();
     g.built_source = g.source.clone();
     g.renderer = super::ini_file::read_renderer(&g.ini_path());
     g.cover = build_cover(&g.data_dir());

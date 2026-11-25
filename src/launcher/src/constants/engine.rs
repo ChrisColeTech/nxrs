@@ -1,8 +1,7 @@
 //! nxrs-build's launcher contract and the names the build folder uses.
 
-pub const ENGINE_TURBO: &str = "turbo";
 pub const ENGINE_NXRS: &str = "nxrs";
-/// An nxrs build sits beside a Turbo one: `<build folder> [nxrs]`.
+/// A build goes into `<build folder> [nxrs]`.
 pub const NXRS_FOLDER_SUFFIX: &str = " [nxrs]";
 /// `nxrs-build contract` answers `nxrs-contract <n>`; this launcher needs 2 (subcommands + `@` lines).
 pub const CONTRACT_NEEDED: i64 = 2;
@@ -14,7 +13,7 @@ pub const MANIFEST: &str = "engine.json";
 pub const ENV_NXRS_BUILD: &str = "NXRS_BUILD";
 /// `NXRS_DATA_DIR`: the launcher's data folder instead of `%LOCALAPPDATA%\nxrs` (development, tests).
 pub const ENV_DATA_DIR: &str = "NXRS_DATA_DIR";
-pub const ENV_KEYS: &str = "SWR_PROD_KEYS";
+pub const ENV_KEYS: &str = "NXRS_PROD_KEYS";
 pub const DATA_FOLDER: &str = "nxrs";
 pub const LIBRARY_FILE: &str = "library.json";
 pub const QT_BACKUP: &str = "library.qt-backup";
@@ -57,4 +56,3 @@ pub const NACP_VERSION_AT: u64 = 0x3060;
 pub const DLC_MANIFEST: &str = "dlc.manifest";
 pub const ROMFS_NUP: &str = "romfs.nup";
 pub const ROMFS_NSP: &str = "romfs.nsp";
-pub const GEN_KEY: &str = "gen/nxrs.gen.key";

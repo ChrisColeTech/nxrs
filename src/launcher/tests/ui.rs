@@ -50,7 +50,6 @@ fn game_menu_installs_dlc() {
         "-",
         "Install DLC…",
         "Install Updates…",
-        "Copy saves from the Turbo build…",
         "-",
         "Remove from library…",
     ];
@@ -59,10 +58,6 @@ fn game_menu_installs_dlc() {
         menu.iter()
             .any(|i| matches!(i, Item::Command { label: l, enabled: true, .. } if l == label))
     };
-    assert!(
-        !enabled("Copy saves from the Turbo build…"),
-        "no Turbo build, no saves"
-    );
     assert!(
         !enabled("Install DLC…"),
         "the preview library has nothing to install into"

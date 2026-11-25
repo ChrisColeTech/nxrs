@@ -72,7 +72,7 @@ fn title_of(data: &Path, name: &str) -> String {
 }
 
 /// A GUI-subsystem process started without redirected output has no stdout / stderr: the log goes to
-/// `<name>.log` beside the executable (Turbo's place), so a player's run always leaves one.
+/// `<name>.log` beside the executable, so a player's run always leaves one.
 #[cfg(target_os = "linux")]
 fn log_to_file_when_detached(dir: &Path, name: &str) {
     // Linux: started from a desktop entry or a file manager, stderr is /dev/null (or closed): the log goes to the file
@@ -184,7 +184,7 @@ pub fn graceful_exit(
 }
 
 /// Ends the run: controllers quiet, recording finished, the sound paused, graphics drained, settings and caches
-/// written, then the process ends without joining the guest threads (Turbo's TerminateProcess); a watchdog ends it
+/// written, then the process ends without joining the guest threads (TerminateProcess); a watchdog ends it
 /// all the same if the exit is stuck.
 pub fn quit(why: &str) -> ! {
     if !QUIT.swap(true, Ordering::AcqRel) {
@@ -245,7 +245,7 @@ pub fn quit(why: &str) -> ! {
 }
 
 /// The console's Ctrl+C, Ctrl+Break and close (Windows), SIGINT and SIGTERM (Linux): the graceful exit, as the
-/// window's close does (nxnative hle_lifecycle.c's SIGTERM; Turbo has no handler and the process just dies).
+/// window's close does (nxnative hle_lifecycle.c's SIGTERM).
 pub fn install_exit_handlers() {
     #[cfg(windows)]
     unsafe {
@@ -342,11 +342,11 @@ fn front_loop() {
             }
             metrics::tick();
         }
-        // the stuck-mutex healer, each frame (Turbo main.c `kernel_heal_mutexes`)
+        // the stuck-mutex healer, each frame
         if let Some(k) = nxrt::kernel::try_get() {
             k.heal_mutexes();
         }
-        // every 15 s, `threads.txt` beside the game: every guest thread's state (Turbo main.c), for a hang
+        // every 15 s, `threads.txt` beside the game: every guest thread's state, for a hang
         if tick % 900 == 0 && tick > 0 {
             if let Some(_k) = nxrt::kernel::try_get() {
                 let s = format!(
@@ -358,7 +358,7 @@ fn front_loop() {
                 let _ = std::fs::write(game().exe_dir.join("threads.txt"), s);
             }
         }
-        // diag=1: the diagnostic dump (F5) by itself at 20 s and 40 s (Turbo's automatic dumps)
+        // diag=1: the diagnostic dump (F5) by itself at 20 s and 40 s
         if (tick == 60 * 20 || tick == 60 * 40) && nxconfig::flag("diag") {
             window::diag_dump();
         }
@@ -458,7 +458,7 @@ pub fn setup(args: &[String]) -> Vec<String> {
         if a.starts_with("--") && a.contains('=') && nxconfig::apply_arg(a) {
             flog!("settings: {a} for this run");
         }
-        // -v (Turbo main.c: g_verbose=2): everything logged for this run, as log=2
+        // -v: everything logged for this run, as log=2
         if a == "-v" && nxconfig::apply_arg("log=2") {
             flog!("settings: -v: log=2 for this run");
         }
@@ -479,7 +479,7 @@ pub fn setup(args: &[String]) -> Vec<String> {
     rest
 }
 
-/// The buttons the ini's hidden `script` holds now (Turbo's test input; `keys::script_buttons`), from the front end's
+/// The buttons the ini's hidden `script` holds now (test input; `keys::script_buttons`), from the front end's
 /// start.
 pub fn script_now() -> u64 {
     static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
@@ -491,8 +491,8 @@ pub fn script_now() -> u64 {
     keys::script_buttons(&s, t0.elapsed().as_millis() as u64)
 }
 
-/// Turbo's hidden ini keys (never written, read when present): `script` (test input), `heap_max_mb` (os), and the
-/// three of Turbo's OpenGL renderer, which this Vulkan engine has no use for: said once when set.
+/// The hidden ini keys (never written, read when present): `script` (test input), `heap_max_mb` (os), and three
+/// of an older OpenGL renderer, which this Vulkan engine has no use for: said once when set.
 fn hidden_keys_log() {
     let _ = script_now();
     if nxconfig::is_set("script") {
@@ -502,9 +502,9 @@ fn hidden_keys_log() {
         );
     }
     for (k, what) in [
-        ("loop_limit", "the loop guard of Turbo's OpenGL shader translator"),
-        ("show_game_rt", "Turbo's OpenGL render-target view"),
-        ("shader_process", "Turbo's OpenGL helper process for driver crashes; pipelines are built on threads here (shader_thread)"),
+        ("loop_limit", "the loop guard of an OpenGL shader translator"),
+        ("show_game_rt", "an OpenGL render-target view"),
+        ("shader_process", "an OpenGL helper process for driver crashes; pipelines are built on threads here (shader_thread)"),
     ] {
         if nxconfig::is_set(k) {
             flog!("settings: {k}={} has no effect: {what}, and this engine renders with Vulkan only", nxconfig::string(k));

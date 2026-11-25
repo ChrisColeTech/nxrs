@@ -1,5 +1,5 @@
 //! Host functions that game patches call, keyed by the patched module's build id. A profile's code patch table
-//! (`games/<id>/recomp.txt` or `turbo.toml` cuts, applied by the translator at build time) puts a `bl` to the patch
+//! (`games/<id>/recomp.txt` or `owner.toml` cuts, applied by the translator at build time) puts a `bl` to the patch
 //! page after `main`; `install` makes those addresses run the functions here (`nxrt::hostfn::alias`).
 //!
 //! - **Mario Kart World 1.8.0** (main build id d00e4f399e411d06): mkw-recomp's game layer (MIT): its patch sets

@@ -1,10 +1,9 @@
-//! The control pipe: `\\.\pipe\nxrs_ctl_<process id>` (and Turbo's name `\\.\pipe\swr_ctl_<process id>`), one
-//! command line per connection, the reply text back (Turbo's vk_ctl.c protocol; scripts/play.py is the
-//! client). Commands come from the engine-wide registry (`nxconfig::ctl`): the input layer's `press`, `P2`..`P8` and
+//! The control pipe: `\\.\pipe\nxrs_ctl_<process id>`, one command line per connection, the reply text back
+//! (scripts/play.py is the client). Commands come from the engine-wide registry (`nxconfig::ctl`): the input layer's `press`, `P2`..`P8` and
 //! `pads`, graphics' own, and the front end's below.
 
 //!
-//! Linux: a Unix domain socket `$XDG_RUNTIME_DIR/nxrs_ctl_<process id>` (and `swr_ctl_<process id>`; /tmp without
+//! Linux: a Unix domain socket `$XDG_RUNTIME_DIR/nxrs_ctl_<process id>` (/tmp without
 //! XDG_RUNTIME_DIR), the same protocol: one command line per connection, the reply, then the socket closes. The
 //! socket files go when the run ends (and a stale one of a dead process is replaced).
 
@@ -305,30 +304,21 @@ pub fn start() {
     let pid = std::process::id();
     #[cfg(windows)]
     {
-        for n in [
-            format!(r"\\.\pipe\nxrs_ctl_{pid}"),
-            format!(r"\\.\pipe\swr_ctl_{pid}"),
-        ] {
-            let name = n.clone();
-            std::thread::Builder::new()
-                .name("control pipe".into())
-                .spawn(move || serve(name))
-                .ok();
-        }
-        crate::flog!("control pipe: \\\\.\\pipe\\nxrs_ctl_{pid} (and swr_ctl_{pid})");
+        let name = format!(r"\\.\pipe\nxrs_ctl_{pid}");
+        std::thread::Builder::new()
+            .name("control pipe".into())
+            .spawn(move || serve(name))
+            .ok();
+        crate::flog!("control pipe: \\\\.\\pipe\\nxrs_ctl_{pid}");
     }
     #[cfg(target_os = "linux")]
     {
-        for n in [format!("nxrs_ctl_{pid}"), format!("swr_ctl_{pid}")] {
-            std::thread::Builder::new()
-                .name("control pipe".into())
-                .spawn(move || serve(n))
-                .ok();
-        }
-        crate::flog!(
-            "control socket: {} (and swr_ctl_{pid})",
-            socket_path(&format!("nxrs_ctl_{pid}")).display()
-        );
+        let name = format!("nxrs_ctl_{pid}");
+        crate::flog!("control socket: {}", socket_path(&name).display());
+        std::thread::Builder::new()
+            .name("control pipe".into())
+            .spawn(move || serve(name))
+            .ok();
     }
     let _ = Ordering::Relaxed;
 }

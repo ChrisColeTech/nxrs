@@ -1,0 +1,6 @@
+# Violet fresh save: a closed ~8 s square on the bedroom floor (left, down, right, up), from beside the desk.
+0 0 -32767 0 0 0
+2000 0 0 -32767 0 0
+3500 0 32767 0 0 0
+5500 0 0 32767 0 0
+7000 0 0 0 0 0

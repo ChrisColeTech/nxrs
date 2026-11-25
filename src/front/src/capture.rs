@@ -239,7 +239,7 @@ pub fn screenshot_to(path: &std::path::Path) -> bool {
     }
 }
 
-/// F3: the game's own picture at the next present (graphics reads the presented image back), as Turbo's F3; the
+/// F3: the game's own picture at the next present (graphics reads the presented image back); the
 /// window grab stays for the control pipe's `shot`.
 pub fn screenshot() {
     let p = captures_dir().join(format!("screenshot_{}.png", stamp()));

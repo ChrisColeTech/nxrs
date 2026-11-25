@@ -89,6 +89,311 @@ pub fn stage_binding_type(b: u32) -> vk::DescriptorType {
     }
 }
 
+/// Descriptor counts by the kinds Vulkan limits (`maxPerStageDescriptor*` / `maxDescriptorSet*`, `maxPerStageResources`).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct Counts {
+    pub samplers: u64,
+    pub uniform_buffers: u64,
+    pub storage_buffers: u64,
+    pub sampled_images: u64,
+    pub storage_images: u64,
+    pub resources: u64,
+}
+
+impl Counts {
+    fn add(self, o: Counts) -> Counts {
+        Counts {
+            samplers: self.samplers + o.samplers,
+            uniform_buffers: self.uniform_buffers + o.uniform_buffers,
+            storage_buffers: self.storage_buffers + o.storage_buffers,
+            sampled_images: self.sampled_images + o.sampled_images,
+            storage_images: self.storage_images + o.storage_images,
+            resources: self.resources + o.resources,
+        }
+    }
+}
+
+/// What `sets` stage sets hold, counted the way the limits count them: a combined image sampler is a sampler and a
+/// sampled image, a uniform texel buffer a sampled image, a storage texel buffer a storage image; every one a resource.
+pub fn stage_sets_count(sets: u64) -> Counts {
+    let mut c = Counts::default();
+    for b in 0..STAGE_BINDINGS {
+        match stage_binding_type(b) {
+            vk::DescriptorType::UNIFORM_BUFFER => c.uniform_buffers += 1,
+            vk::DescriptorType::STORAGE_BUFFER => c.storage_buffers += 1,
+            vk::DescriptorType::COMBINED_IMAGE_SAMPLER => {
+                c.samplers += 1;
+                c.sampled_images += 1;
+            }
+            vk::DescriptorType::UNIFORM_TEXEL_BUFFER => c.sampled_images += 1,
+            _ => c.storage_images += 1,
+        }
+        c.resources += 1;
+    }
+    Counts {
+        samplers: c.samplers * sets,
+        uniform_buffers: c.uniform_buffers * sets,
+        storage_buffers: c.storage_buffers * sets,
+        sampled_images: c.sampled_images * sets,
+        storage_images: c.storage_images * sets,
+        resources: c.resources * sets,
+    }
+}
+
+/// What the pool set holds: sampled images and uniform texel buffers, storage images and storage texel buffers by
+/// texture ID, samplers by sampler ID.
+pub fn pool_set_count(tex: u32, samp: u32) -> Counts {
+    let t = tex as u64;
+    Counts {
+        samplers: samp as u64,
+        uniform_buffers: 0,
+        storage_buffers: 0,
+        sampled_images: 2 * t,
+        storage_images: 2 * t,
+        resources: 4 * t,
+    }
+}
+
+/// The device limits the shared layout must fit. `stage` / `set`: `maxPerStageDescriptor*` (+ `maxPerStageResources`)
+/// and `maxDescriptorSet*`, which count the sets made without update-after-bind; `stage_uab` / `set_uab`: their
+/// `UpdateAfterBind` forms, which count every set of a layout that has an update-after-bind set.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    pub stage: Counts,
+    pub stage_uab: Counts,
+    pub set: Counts,
+    pub set_uab: Counts,
+    pub bound_sets: u32,
+    pub push_size: u32,
+    pub colour_attachments: u32,
+}
+
+/// VK_EXT_descriptor_buffer's limits the layout relies on: two buffers bound at once (the pool set's and the draw's
+/// chunk of stage sets), each a resource and a sampler descriptor buffer.
+#[derive(Clone, Copy, Debug)]
+pub struct DbLimits {
+    pub bindings: u32,
+    pub resource_bindings: u32,
+    pub sampler_bindings: u32,
+    pub resource_range: u64,
+    pub sampler_range: u64,
+    pub resource_space: u64,
+    pub sampler_space: u64,
+    pub space: u64,
+}
+
+const COUNT_NAMES: [&str; 6] = [
+    "Samplers",
+    "UniformBuffers",
+    "StorageBuffers",
+    "SampledImages",
+    "StorageImages",
+    "Resources",
+];
+
+fn fields(c: Counts) -> [u64; 6] {
+    [
+        c.samplers,
+        c.uniform_buffers,
+        c.storage_buffers,
+        c.sampled_images,
+        c.storage_images,
+        c.resources,
+    ]
+}
+
+/// Each way `need` exceeds `have`, as "<limit name>: needs N, the device allows M".
+fn over(need: Counts, have: Counts, stage: bool, uab: bool, out: &mut Vec<String>) {
+    for ((n, h), name) in fields(need).into_iter().zip(fields(have)).zip(COUNT_NAMES) {
+        if n > h {
+            let limit = match (stage, uab, name) {
+                (true, false, "Resources") => "maxPerStageResources".to_string(),
+                (true, true, "Resources") => "maxPerStageUpdateAfterBindResources".to_string(),
+                (true, false, _) => format!("maxPerStageDescriptor{name}"),
+                (true, true, _) => format!("maxPerStageDescriptorUpdateAfterBind{name}"),
+                (false, false, _) => format!("maxDescriptorSet{name}"),
+                (false, true, _) => format!("maxDescriptorSetUpdateAfterBind{name}"),
+            };
+            out.push(format!("{limit}: needs {n}, the device allows {h}"));
+        }
+    }
+}
+
+/// The pool set's texture and sampler capacities (`want_tex` / `want_samp`, lowered to what the limits leave once the
+/// stage sets are counted), or every limit the shared layout breaks. A graphics stage sees five stage sets (every
+/// graphics set names every graphics stage) and the pool set; a pipeline layout holds six stage sets and the pool
+/// set; the fragment stage's colour attachments count as resources. With descriptor buffers no set is
+/// update-after-bind, so everything counts against the plain limits; without them the stage sets count against the
+/// plain limits and all sets together against the update-after-bind ones (the pool set is update-after-bind).
+pub fn fit(
+    l: &Limits,
+    descbuf: bool,
+    want_tex: u32,
+    want_samp: u32,
+) -> Result<(u32, u32), String> {
+    let stage_fixed = stage_sets_count(5);
+    let set_fixed = stage_sets_count(STAGE_SETS as u64);
+    let colour = l.colour_attachments.min(8) as u64;
+    let (stage_lim, set_lim) = if descbuf {
+        (l.stage, l.set)
+    } else {
+        (l.stage_uab, l.set_uab)
+    };
+    let room = |have: u64, fixed: u64, per: u64| have.saturating_sub(fixed) / per;
+    let tex = [
+        room(stage_lim.sampled_images, stage_fixed.sampled_images, 2),
+        room(stage_lim.storage_images, stage_fixed.storage_images, 2),
+        room(stage_lim.resources, stage_fixed.resources + colour, 4),
+        room(set_lim.sampled_images, set_fixed.sampled_images, 2),
+        room(set_lim.storage_images, set_fixed.storage_images, 2),
+    ]
+    .into_iter()
+    .fold(want_tex as u64, u64::min)
+    .max(256) as u32;
+    let samp = [
+        room(stage_lim.samplers, stage_fixed.samplers, 1),
+        room(set_lim.samplers, set_fixed.samplers, 1),
+    ]
+    .into_iter()
+    .fold(want_samp as u64, u64::min)
+    .max(64) as u32;
+    let pool = pool_set_count(tex, samp);
+    let attach = Counts {
+        resources: colour,
+        ..Counts::default()
+    };
+    let mut bad = Vec::new();
+    if descbuf {
+        over(stage_fixed.add(pool).add(attach), l.stage, true, false, &mut bad);
+        over(set_fixed.add(pool), l.set, false, false, &mut bad);
+    } else {
+        over(stage_fixed.add(attach), l.stage, true, false, &mut bad);
+        over(set_fixed, l.set, false, false, &mut bad);
+        over(stage_fixed.add(pool).add(attach), l.stage_uab, true, true, &mut bad);
+        over(set_fixed.add(pool), l.set_uab, false, true, &mut bad);
+    }
+    if l.bound_sets < STAGE_SETS + 1 {
+        bad.push(format!(
+            "maxBoundDescriptorSets: needs {}, the device allows {}",
+            STAGE_SETS + 1,
+            l.bound_sets
+        ));
+    }
+    if l.push_size < PUSH_SIZE {
+        bad.push(format!(
+            "maxPushConstantsSize: needs {PUSH_SIZE}, the device allows {}",
+            l.push_size
+        ));
+    }
+    if bad.is_empty() {
+        Ok((tex, samp))
+    } else {
+        Err(format!(
+            "the shared pipeline layout (6 stage sets of {STAGE_BINDINGS} bindings, a pool set of {tex} textures / {samp} samplers) exceeds this device's descriptor limits: {}",
+            bad.join("; ")
+        ))
+    }
+}
+
+/// Whether the descriptor buffers fit VK_EXT_descriptor_buffer's limits: two bound at once, the pool set's buffer
+/// (`pool_size`) and a chunk of stage sets (`chunk`) each within a buffer's range, both within the address spaces.
+pub fn db_fit(l: &DbLimits, pool_size: u64, chunk: u64) -> Result<(), String> {
+    let mut bad = Vec::new();
+    for (name, have) in [
+        ("maxDescriptorBufferBindings", l.bindings),
+        ("maxResourceDescriptorBufferBindings", l.resource_bindings),
+        ("maxSamplerDescriptorBufferBindings", l.sampler_bindings),
+    ] {
+        if have < 2 {
+            bad.push(format!("{name}: needs 2, the device allows {have}"));
+        }
+    }
+    let big = pool_size.max(chunk);
+    for (name, have) in [
+        ("maxResourceDescriptorBufferRange", l.resource_range),
+        ("maxSamplerDescriptorBufferRange", l.sampler_range),
+    ] {
+        if big > have {
+            bad.push(format!("{name}: needs {big} bytes, the device allows {have}"));
+        }
+    }
+    let both = pool_size + chunk;
+    for (name, have) in [
+        ("resourceDescriptorBufferAddressSpaceSize", l.resource_space),
+        ("samplerDescriptorBufferAddressSpaceSize", l.sampler_space),
+        ("descriptorBufferAddressSpaceSize", l.space),
+    ] {
+        if both > have {
+            bad.push(format!("{name}: needs {both} bytes, the device allows {have}"));
+        }
+    }
+    if bad.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "the descriptor buffers (a {} KB pool set, {} KB chunks of stage sets) exceed this device's limits: {}",
+            pool_size >> 10,
+            chunk >> 10,
+            bad.join("; ")
+        ))
+    }
+}
+
+/// The device's limits for `fit`.
+fn device_limits(d: &Device) -> Limits {
+    let lim = &d.props.limits;
+    let mut p12 = vk::PhysicalDeviceVulkan12Properties::default();
+    {
+        let mut p2 = vk::PhysicalDeviceProperties2::default().push_next(&mut p12);
+        unsafe { d.instance.get_physical_device_properties2(d.pdev, &mut p2) };
+    }
+    let c = |samplers: u32, ubo: u32, ssbo: u32, sampled: u32, storage: u32, res: u32| Counts {
+        samplers: samplers as u64,
+        uniform_buffers: ubo as u64,
+        storage_buffers: ssbo as u64,
+        sampled_images: sampled as u64,
+        storage_images: storage as u64,
+        resources: res as u64,
+    };
+    Limits {
+        stage: c(
+            lim.max_per_stage_descriptor_samplers,
+            lim.max_per_stage_descriptor_uniform_buffers,
+            lim.max_per_stage_descriptor_storage_buffers,
+            lim.max_per_stage_descriptor_sampled_images,
+            lim.max_per_stage_descriptor_storage_images,
+            lim.max_per_stage_resources,
+        ),
+        stage_uab: c(
+            p12.max_per_stage_descriptor_update_after_bind_samplers,
+            p12.max_per_stage_descriptor_update_after_bind_uniform_buffers,
+            p12.max_per_stage_descriptor_update_after_bind_storage_buffers,
+            p12.max_per_stage_descriptor_update_after_bind_sampled_images,
+            p12.max_per_stage_descriptor_update_after_bind_storage_images,
+            p12.max_per_stage_update_after_bind_resources,
+        ),
+        set: c(
+            lim.max_descriptor_set_samplers,
+            lim.max_descriptor_set_uniform_buffers,
+            lim.max_descriptor_set_storage_buffers,
+            lim.max_descriptor_set_sampled_images,
+            lim.max_descriptor_set_storage_images,
+            u32::MAX,
+        ),
+        set_uab: c(
+            p12.max_descriptor_set_update_after_bind_samplers,
+            p12.max_descriptor_set_update_after_bind_uniform_buffers,
+            p12.max_descriptor_set_update_after_bind_storage_buffers,
+            p12.max_descriptor_set_update_after_bind_sampled_images,
+            p12.max_descriptor_set_update_after_bind_storage_images,
+            u32::MAX,
+        ),
+        bound_sets: lim.max_bound_descriptor_sets,
+        push_size: lim.max_push_constants_size,
+        colour_attachments: lim.max_color_attachments,
+    }
+}
+
 pub struct Layout {
     pub stage_sets: [vk::DescriptorSetLayout; STAGE_SETS as usize],
     /// descriptor buffers (`Device::caps.descbuf`): a stage set's size and its bindings' offsets in it, the pool set's
@@ -115,6 +420,15 @@ fn env_u32(n: &str, d: u32) -> u32 {
 impl Layout {
     pub fn new(d: &Device) -> Result<Layout, String> {
         let dev = &d.dev;
+        // Mario Kart World registers texture IDs up to ~131,400 (its texture pool's; 65,536 left the rest unbound).
+        // Checked against the device's limits before any layout is made: a layout past them is undefined behaviour
+        // (fine on NVIDIA's 1M-per-stage limits, unchecked elsewhere), so the device is refused with the limits named.
+        let (tex_cap, samp_cap) = fit(
+            &device_limits(d),
+            d.caps.descbuf,
+            env_u32("NXGFX_TEX_CAP", 262144),
+            env_u32("NXGFX_SAMP_CAP", 16384),
+        )?;
         let mut stage_sets = [vk::DescriptorSetLayout::null(); STAGE_SETS as usize];
         for (s, slot) in stage_sets.iter_mut().enumerate() {
             let sf = stage_set_flags(s as u32, d.caps.mesh);
@@ -142,14 +456,6 @@ impl Layout {
             *slot = unsafe { dev.create_descriptor_set_layout(&ci, None) }
                 .map_err(|e| format!("stage set layout: {e}"))?;
         }
-        let lim = &d.props.limits;
-        // Mario Kart World registers texture IDs up to ~131,400 (its texture pool's; 65,536 left the rest unbound)
-        let tex_cap = env_u32("NXGFX_TEX_CAP", 262144)
-            .min(lim.max_per_stage_descriptor_sampled_images / 2)
-            .max(256);
-        let samp_cap = env_u32("NXGFX_SAMP_CAP", 16384)
-            .min(lim.max_per_stage_descriptor_samplers / 2)
-            .max(64);
         let all = vk::ShaderStageFlags::ALL;
         let binds = [
             vk::DescriptorSetLayoutBinding::default()
@@ -243,6 +549,21 @@ impl Layout {
                     d.db.get_descriptor_set_layout_binding_offset(pool_set, i as u32)
                 };
             }
+            let p = &d.db_props;
+            db_fit(
+                &DbLimits {
+                    bindings: p.max_descriptor_buffer_bindings,
+                    resource_bindings: p.max_resource_descriptor_buffer_bindings,
+                    sampler_bindings: p.max_sampler_descriptor_buffer_bindings,
+                    resource_range: p.max_resource_descriptor_buffer_range,
+                    sampler_range: p.max_sampler_descriptor_buffer_range,
+                    resource_space: p.resource_descriptor_buffer_address_space_size,
+                    sampler_space: p.sampler_descriptor_buffer_address_space_size,
+                    space: p.descriptor_buffer_address_space_size,
+                },
+                db_pool_size,
+                super::queue::DB_CHUNK.max(db_stage_size * 2),
+            )?;
         }
         crate::vklog!(
             "graphics options: driver_exclusive {} ({}), shader_thread {}, low_priority_shader_compiler {}, fps_target {} (frame skip {})",
@@ -304,5 +625,138 @@ mod tests {
         assert!(stage_set_flags(4, true).contains(F::MESH_EXT));
         // and the vertex set does too: a set 0 a task/mesh draw reaches is one its layout allows
         assert!(stage_set_flags(0, true).contains(F::TASK_EXT | F::MESH_EXT));
+    }
+
+    fn all(n: u64) -> Counts {
+        Counts {
+            samplers: n,
+            uniform_buffers: n,
+            storage_buffers: n,
+            sampled_images: n,
+            storage_images: n,
+            resources: n,
+        }
+    }
+
+    /// Per-set limits: Vulkan has no per-set resource limit (`device_limits` puts u32::MAX there).
+    fn set_of(n: u64) -> Counts {
+        Counts {
+            resources: u32::MAX as u64,
+            ..all(n)
+        }
+    }
+
+    /// The RTX 5090's limits (vulkaninfo, this machine): 1,048,576 per stage, resources u32::MAX.
+    fn nvidia() -> Limits {
+        let mut stage = all(1 << 20);
+        stage.resources = u32::MAX as u64;
+        Limits {
+            stage,
+            stage_uab: stage,
+            set: set_of(1 << 20),
+            set_uab: set_of(1 << 20),
+            bound_sets: 32,
+            push_size: 256,
+            colour_attachments: 8,
+        }
+    }
+
+    /// An older Intel / mobile-class set: small plain limits (update-after-bind ones large).
+    fn strict() -> Limits {
+        Limits {
+            stage: Counts {
+                samplers: 64,
+                uniform_buffers: 200,
+                storage_buffers: 200,
+                sampled_images: 200,
+                storage_images: 16,
+                resources: 200,
+            },
+            stage_uab: all(1 << 20),
+            set: set_of(1024),
+            set_uab: set_of(1 << 20),
+            bound_sets: 8,
+            push_size: 128,
+            colour_attachments: 8,
+        }
+    }
+
+    /// One graphics stage sees five stage sets: 880 descriptors (the ledger's ~880).
+    #[test]
+    fn five_stage_sets_count_as_the_limits_do() {
+        let c = stage_sets_count(5);
+        assert_eq!(c.uniform_buffers, 160);
+        assert_eq!(c.storage_buffers, 160);
+        assert_eq!(c.samplers, 320);
+        assert_eq!(c.sampled_images, 400, "combined image samplers and uniform texel buffers");
+        assert_eq!(c.storage_images, 160, "storage images and storage texel buffers");
+        assert_eq!(c.resources, 880);
+    }
+
+    /// NVIDIA keeps the full pool set with and without descriptor buffers.
+    #[test]
+    fn nvidia_fits_the_whole_pool_set() {
+        assert_eq!(fit(&nvidia(), true, 262144, 16384), Ok((262144, 16384)));
+        assert_eq!(fit(&nvidia(), false, 262144, 16384), Ok((262144, 16384)));
+    }
+
+    /// A tighter set (half NVIDIA's per-stage counts, resources under a million): the pool set is sized down to what
+    /// the stage sets leave, never past a limit. The old rule (half the sampled-image limit) ignored the stage sets' 400 sampled
+    /// images and the 4 resources per texture ID.
+    #[test]
+    fn the_pool_set_is_sized_from_the_limits_the_stage_sets_leave() {
+        let mut l = nvidia();
+        l.stage = all(524_288);
+        l.stage.resources = 1_000_000;
+        let (tex, samp) = fit(&l, true, 262144, 16384).unwrap();
+        assert_eq!(tex, (1_000_000 - 880 - 8) / 4, "resources bound it");
+        assert_eq!(samp, 16384);
+        let need = stage_sets_count(5).add(pool_set_count(tex, samp));
+        assert!(need.sampled_images <= 524_288 && need.resources + 8 <= 1_000_000);
+        // an explicit NXGFX_TEX_CAP below the room stays
+        assert_eq!(fit(&l, true, 4096, 1024), Ok((4096, 1024)));
+    }
+
+    /// A device whose plain limits cannot hold even the stage sets is refused, naming each broken limit.
+    #[test]
+    fn a_strict_device_is_refused_with_the_limits_named() {
+        let e = fit(&strict(), false, 262144, 16384).unwrap_err();
+        assert!(e.contains("maxPerStageDescriptorStorageImages: needs 160, the device allows 16"), "{e}");
+        assert!(e.contains("maxPerStageDescriptorSamplers: needs 320"), "{e}");
+        assert!(e.contains("maxPerStageResources: needs 888"), "{e}");
+        assert!(!e.contains("UpdateAfterBind"), "{e}");
+        // with descriptor buffers the pool set counts against the plain limits too
+        let e = fit(&strict(), true, 262144, 16384).unwrap_err();
+        assert!(e.contains("maxPerStageDescriptorSampledImages"), "{e}");
+        let mut l = nvidia();
+        l.bound_sets = 4;
+        assert!(fit(&l, true, 262144, 16384).unwrap_err().contains("maxBoundDescriptorSets: needs 7"));
+    }
+
+    /// Descriptor buffers: two bound at once, the pool set's buffer within the range and address spaces.
+    #[test]
+    fn descriptor_buffer_limits_are_checked() {
+        let big = DbLimits {
+            bindings: 32,
+            resource_bindings: 32,
+            sampler_bindings: 32,
+            resource_range: 1 << 40,
+            sampler_range: 1 << 40,
+            resource_space: 1 << 40,
+            sampler_space: 1 << 40,
+            space: 1 << 40,
+        };
+        assert_eq!(db_fit(&big, 10304 << 10, 4 << 20), Ok(()));
+        let small = DbLimits {
+            sampler_bindings: 1,
+            sampler_range: 8 << 20,
+            sampler_space: 12 << 20,
+            ..big
+        };
+        let e = db_fit(&small, 10304 << 10, 4 << 20).unwrap_err();
+        assert!(e.contains("maxSamplerDescriptorBufferBindings: needs 2"), "{e}");
+        assert!(e.contains("maxSamplerDescriptorBufferRange"), "{e}");
+        assert!(e.contains("samplerDescriptorBufferAddressSpaceSize"), "{e}");
+        assert!(!e.contains("maxResource"), "{e}");
     }
 }

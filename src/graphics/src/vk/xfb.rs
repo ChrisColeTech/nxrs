@@ -1,5 +1,4 @@
-//! Transform feedback: the capture variant of a vertex (or geometry) shader, from the owner's Turbo engine
-//! (`vk_shader.c` vksh_xfb_variant, 78ece7b; MIT).
+//! Transform feedback: the capture variant of a vertex (or geometry) shader.
 //!
 //! An NVN program's control section says what its last vertex-processing stage captures; the shader build records
 //! it in the reflection json as `transform_feedback` (per buffer: its stride and its outputs as [location, components],
@@ -278,6 +277,7 @@ pub fn variant_module(dev: &ash::Device, m: &Arc<Module>) -> Option<Arc<Module>>
             xfb: None,
             words: w,
             per_primitive: m.per_primitive.clone(),
+            facts: Default::default(),
         }))
     });
     let hex: String = m.key.iter().map(|b| format!("{b:02x}")).collect();

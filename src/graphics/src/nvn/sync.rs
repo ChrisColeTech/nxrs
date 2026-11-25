@@ -19,6 +19,7 @@ pub fn event_publish(val: *mut u32, mode: u32, v: u32, cpu: bool) {
     // work or the signalling op, both replayed by now (`queue::resume_due`), or by the GPU
     if cpu {
         vk::mem::note_cpu_signal();
+        vk::queue::chain_trace::note("cpu_sig", val as u64, v as u64);
     }
     if mode == event_signal::ADD {
         a.fetch_add(v, Ordering::Release);
@@ -26,6 +27,14 @@ pub fn event_publish(val: *mut u32, mode: u32, v: u32, cpu: bool) {
         a.store(v, Ordering::Release);
     }
     vk::queue::event_signalled();
+}
+
+/// The chain trace's note of a SyncWait's return.
+struct SwOut(u64);
+impl Drop for SwOut {
+    fn drop(&mut self) {
+        vk::queue::chain_trace::note("sw_out", self.0, 0);
+    }
 }
 
 /// Whether an event's current value passes a wait (EQUAL, or wrapping GEQUAL).
@@ -49,11 +58,13 @@ nvn_fns! {
         let _ = (cond, flags);
         let qs = (*(q as *const queue_t)).serial;
         let f = vk::queue::queue_fence(qs);
+        vk::queue::chain_trace::note("fence_sync", s as u64, f);
         (*(s as *mut sync_t)).fenced = 1;
         (*(s as *mut sync_t)).fence = f;
     }
     fn nvnQueueWaitSync(q: *mut NVNqueue, s: *const NVNsync) -> NVNboolean {
         let o = &*(s as *const sync_t);
+        vk::queue::chain_trace::note("q_wait", (*(q as *const queue_t)).serial, o.fence);
         if o.fenced != 0 {
             vk::queue::queue_wait_fence((*(q as *const queue_t)).serial, o.fence);
         }
@@ -61,8 +72,10 @@ nvn_fns! {
     }
     fn nvnSyncWait(s: *const NVNsync, timeout: u64) -> u32 {
         let diag = vk::queue::wait_diag::Wait::new(s as usize, timeout);
-        // a fence recorded in a command buffer still queued for the replay thread is set once that replays (Turbo's
-        // aq_wait_fenced: until the sync is fenced or the queue has run dry, within the timeout; a poll does not wait)
+        vk::queue::chain_trace::note("sw_in", s as u64, (*(s as *const sync_t)).fence | ((*(s as *const sync_t)).fenced as u64) << 56);
+        let _out = SwOut(s as u64);
+        // a fence recorded in a command buffer still queued for the replay thread is set once that replays
+        // (until the sync is fenced or the queue has run dry, within the timeout; a poll does not wait)
         if (*(s as *const sync_t)).fenced == 0 && timeout > 0 && vk::queue::aq_busy() {
             diag.set("publication wait: blocking hook entry", None);
             let fenced = &(*(s as *const sync_t)).fenced as *const u32 as usize;
@@ -70,6 +83,7 @@ nvn_fns! {
                 diag.set("await command-buffer fence publication", None);
                 vk::queue::aq_wait_until(timeout, || unsafe { core::ptr::read_volatile(fenced as *const u32) } != 0);
                 diag.set("publication wait returned: blocking hook re-entry", None);
+                vk::queue::chain_trace::note("sw_pub", s as u64, 0);
             });
         }
         let o = &*(s as *const sync_t);

@@ -163,7 +163,7 @@ pub fn focused() -> bool {
 }
 
 /// From the front-end loop: player 1's keyboard and mouse, and the focus.
-/// The power request while the game is in front (Turbo plat.c: the display and the system kept awake while playing):
+/// The power request while the game is in front (the display and the system kept awake while playing):
 /// ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED, and ES_CONTINUOUS alone (released) behind other windows.
 pub fn awake_state(focused: bool) -> u32 {
     use windows_sys::Win32::System::Power::{
@@ -306,7 +306,7 @@ pub fn diag_dump() {
         s.push_str(&format!("{k:?}\t{w}\t{n}\n"));
     }
     s.push_str(&nxconfig::ctl::run("pads"));
-    // every guest thread: what it waits for, the host function it is in, its guest frames (Turbo's F5)
+    // every guest thread: what it waits for, the host function it is in, its guest frames (F5)
     let threads = nxrt::kernel::try_get()
         .map(|_| nxrt::kernel::dump_threads())
         .unwrap_or_default();
@@ -320,7 +320,7 @@ pub fn diag_dump() {
 ",
     );
     s.push_str(&threads);
-    // the render targets, and a pass dump of the next frame (Turbo's F5 gpu_gl_dump_rts)
+    // the render targets, and a pass dump of the next frame (F5)
     let rts = nxgfx::diag_dump();
     crate::flog!("F5: {}", rts.lines().next().unwrap_or("no graphics"));
     s.push('\n');
@@ -639,7 +639,7 @@ pub fn open(title: &str) {
 
 #[cfg(test)]
 mod tests {
-    /// Turbo plat.c: display and system kept awake while playing; released when the window is behind others.
+    /// Display and system kept awake while playing; released when the window is behind others.
     #[test]
     fn display_kept_awake_while_focused() {
         assert_eq!(super::awake_state(true), 0x8000_0003);

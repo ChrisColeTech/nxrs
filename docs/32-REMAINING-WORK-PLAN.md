@@ -31,12 +31,149 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       starts from an empty save (none of them has one), and a fresh save asks for a name: the harness now sets
       `NXOS_SWKBD=auto` (the first arceus run hung 15 s in a host text box nobody typed into). Jamboree's 12 GB is
       its reservation from second 30, flat, not a leak.
-- [ ] Scenarios for fresh saves: extend arceus / arceus-base / jamboree through their openings to first gameplay
+- [x] Arceus base repointed (2026-11-25): source, its 1.1.1 update package (copied too, hash-verified), buildDir and
+      cover now under `P:\Games\Nintendo\DUMPS\Pokemon Legends Arceus base [01001F5010DFA000][v0]\`. `--source` does
+      not move an entry's buildDir (no CLI option does): it was edited in `library.json` (backup
+      `library.pre-arceus-repoint.json`) and the old build copied across so the rebuild relinked (12 s).
+      `build/play/20261125-025127-arceus-base`: completed 28/28, 30.0 FPS (5% low 29.5), 0 red lines, same
+      fresh-save opening as before. Nothing in the library names `D:\Projects\Switch2RECOMP-main` any more.
+- [x] **CLEANUP-S2R** (2026-11-25, `docs/waves/CLEANUP-S2R.md`, accepted): `SWR_*` -> `NXRS_*` (no aliases),
+      `swr_ctl` pipe dropped, launcher "turbo" engine and the copy-saves-from-Turbo feature removed (old `turbo` /
+      engine-less entries load as nxrs), `turbo.toml` -> `owner.toml` (Z-A and OoT), Turbo attribution comments
+      rewritten, `scripts/pkg/` deleted, Arceus test repointed to P:. Lead re-checked: the done-search finds only the
+      deliberate `"turbo"` load test; launcher tests pass. Wonder smoke `build/play/20261125-043916-smoke` 60 FPS through
+      the new pipe. Kept on purpose: `src/cli/launcher/switchrecomp.py` (Qt launcher imports it by name, contract v1),
+      `toolRoot` in library.json (Qt format). Unproven: Linux `ctl.rs` not built (CI will).
+- [ ] **RENHDRUM phases 0-1** (2026-11-25, `docs/waves/RENHDRUM.md`; built, **awaiting the owner's feel test** —
+      checklist in the report): RenHDrum 0.5.0 vendored (`src/os/third_party/renhdrum`, rlib, nxos's one libopus),
+      `input/rumble.rs` claims writable Pro / Joy-Con pads (1 ms thread, 250 ms silence cut-off, 40/150 ms restates,
+      mute on focus loss/prompt/permission, neutral at exit), `system::`/`detail::PermitVibration` taken over,
+      `hd_rumble` ini key (default 1, live), `nxinput rumble --hd`; unclaimed Nintendo pads use RenHDrum's encoder.
+      os 165 passed (lead re-ran). No Nintendo pad on this machine: no real HD packet sent yet;
+      `build/play/20261125-045606-dkb` (legacy path, no pad) 58.5 FPS, 0 red lines, sheet read. Open: real USB/BT
+      packets and Joy-Con, BT input lag, `IsOunceVibrationDeviceMounted` trace, untaken-over send functions
+      (`detail::SendVibrationValue`, `Enqueue/FlushEnqueuedVibrationValues`), F1 row (owner's call).
+- [x] **GFX-ROWS** (2026-11-25, `docs/waves/GFX-ROWS.md`, accepted after an audit fix): (1) startup check of the shared
+      layout against per-stage / per-layout / update-after-bind / descriptor-buffer limits, pool set sized from the
+      room left (RTX 5090 unchanged: 262144 / 16384; a device that cannot fit gets one red line naming the limits);
+      (2) MKW ID 337: a 3D texture read by a 2D fetch binds a 2D twin of slice 0 (`TwinKind::Slice`); (4)
+      `materialize_all` cap (256 images / 32 MB a frame, live first) built but **off by default** after the lead's A/B
+      on Jamboree alone: capped opening 15-39 FPS vs 38-49 all-at-once, frames > 50 ms 1295 vs 709, replay 146 vs 94 s
+      (per-frame pool churn) against one ~0.7 s boot frame saved (`build/play/20261125-054831-ab-capped` vs
+      `-055600-ab-allatonce`); `NXGFX_LAZY_ALL_FRAME=<n>` turns it on. Capped peak memory was 7.1 GB vs 12.2 GB —
+      a lead for a cheaper bound (make pool-indexed images without churning the table every frame). (3) MS declarations over single-sample views: **parked**, needs per-mask module variants (plan in
+      the wave doc). Audit HIGH fixed by the lead: a lazily registered slot kept its previous descriptor (possibly a
+      destroyed view) or zeros while the budget left it waiting; it now names the zero stand-in at registration
+      (`image.rs` `reg_tex`; not a placeholder mark, so a bound use still materializes). Verified: graphics 200 passed;
+      `build/play/20261125-052405-lazy-slot-fix` MKW 43/43, 28.9 FPS, 1 known red line, sheet read. Jamboree check
+      (the pool-indexing title) requested from FRESH-SAVE. Audit LOWs: `db_fit` checks one chunk/one pool buffer
+      (necessary, not sufficient); `maxUpdateAfterBindDescriptorsInAllPools` unchecked without descriptor buffers;
+      the 32 MB cap overshoots by one texture; finalized registrations can starve behind a stream of live ones.
+- [x] **FRESH-SAVE** (2026-11-25, `docs/waves/FRESH-SAVE.md`, accepted): routes reach first gameplay from a fresh
+      save; sheets show the player moving under input. arceus `build/play/20261125-053050-arceus-final2` 30.0 FPS
+      (5% low 30.0) of 30; arceus-base `-053830-arceus-base-final2` 30.0 (29.5); jamboree `-053049-jamboree-relinked`
+      59.6 (58.0) of 60. The Arceus route walks three times before its window to absorb the 5 s loader stalls (engine
+      row below). **arceus-base has no library entry any more** (it and "Mario Kart World v1.8.0" vanished from
+      `library.json` between 02:49 and ~05:13; no launcher code found that removes entries; the build is intact on P:):
+      the run used `--exe`. **Restored** by the lead on the owner's go-ahead ("fix the other issues"), with the P:
+      paths (backup `library.pre-arceus-restore.json`); "Mario Kart World v1.8.0" left out (owner's call). `scripts/inputs/hold_lr.txt` writes 0x192, not L+R
+      (unused now).
+- [x] Scenarios for fresh saves (done by FRESH-SAVE above): extend arceus / arceus-base / jamboree through their openings to first gameplay
+- [ ] **Parallel waves opened 2026-11-25** (owner: fix the other issues, then the preemption fix and rebuild last;
+      shared rules `docs/waves/PARALLEL-RULES.md`): MKW-PERF5 (race to 60, GPU 0), SMASH-POLISH (hitches, audio
+      underruns, repeated-match memory), ROUTES-SS (Shadow/Sonic moving through the window), VIOLET (first gameplay
+      on today's engine), OOT-PIPE (the `d15370a382630d4e` compile). Owner: "stop those three and run them after mkw":
+      SMASH-POLISH, VIOLET and OOT-PIPE parked minutes in (each wave doc has a parked report) and ran after
+      MKW-PERF5 (the lead then ran them one at a time; that was the lead's choice, not an owner rule). MKW-RECORD (record-time translation, `docs/waves/MKW-RECORD.md`) opened 2026-11-25:
+      phase 1 design running beside OOT-NAN (read-only); phase 2 code after OOT-NAN. Queued: GFX row 3 (MS
+      declaration variants). Last: the preemption row below, then retranslate Arceus and relink the rest.
+- [x] **OOT-PIPE** (2026-11-25, `docs/waves/OOT-PIPE.md`, **accepted**; lead read the sheet). Independent audit of
+      `vk/mem.rs` (`placement_for`: physical pools get a buffer) and `vk/lazy.rs`: no HIGH; no double coverage (an
+      alias virtual pool is never a pool; sparse ranges resolve to the physical pool). **MEDIUM fixed by the lead:**
+      GPU writes through a sparse virtual pool were never written back (`note_gpu_write_version` got the virtual
+      address) — it and `sync_range` now `vpool::translate` first (graphics 203 passed). Recorded LOWs: `vpool::copy`
+      reads possibly-held physical pages without `lazy::touch` (fault -> bring_back under the POOLS read lock: a
+      spike); all physical pools now write-watched/scanned (perf-check a sparse-pool title: MKW asked of OOT-RGB9E5);
+      Vram physical pools' GPU writes never reach guest memory (pre-existing); `make_lazy` ignores a `protect_n`
+      failure after a concurrent decommit (page listed held but reachable). Original findings: the `d15370a382630d4e` compile is long but finite (~66 s
+      cold, 195,001 SPIR-V instructions from `dmsh_xlate`; the dispatch waits, nothing skipped). Fixes: lazy
+      write-back no longer holds never-committed heap pages (New Game lost 11,616 pages / 45 MB and logged 11,616 red
+      lines; now 0); physical memory pools get GPU access (a 305 MB virtual pool over a physical pool read zeros).
+      Route: title -> New Game -> opening -> Kokiri Forest. `build/play/20261125-131719-oot-final` 139/139: title,
+      story, nightmare, Link's house correct; **forest black/white behind subtitles** — 630 red lines: E5B9G9R9
+      storage images the GPU cannot store -> zero stand-in. Next: wave OOT-RGB9E5 (opened, running). Slip: the
+      agent's restore copied the wrong way and **lost the original 152 MB `pipeline-cache.bin`** (regenerable cache;
+      the live one is this session's 357 MB); keys and crashed lists restored byte-identical. Owner option: drop the
+      old-machine `pipeline-crashed.bin` entry that now compiles cleanly (`-xoot5-noblack`).
+- [~] **OOT-RGB9E5** (2026-11-25, `docs/waves/OOT-RGB9E5.md`; lead re-ran graphics 208/208 and read both sheets;
+      accepted pending OOT-NAN's audit fixes). New `vk/storemu.rs`: emulated storage formats (E5B9G9R9 via an R32_UINT view;
+      the game's own E5B9G9R9 view gets the RGB9E5 pack, its own `r32ui` view the raw bits), `image.rs`
+      `EXTENDED_USAGE`, shader variant kind 5, dispatch pipeline created after storage preparation; `NXGFX_STOREMU=0`
+      off. **Audit (done): no HIGH; 3 MEDIUM handed to OOT-NAN** (which owns these files): M1 bindless image pool
+      gets the R32_UINT emulated view but pool shaders are never emulated (a NaN suspect); M2 view remap by
+      requested format vs emulation by image format; M3 no format-properties check for E5B9G9R9+STORAGE (a driver
+      that refuses loses the texture). LOWs: failed dispatch still marks storage writes; constant texels refused;
+      Bits32 read alpha; per-draw scan cost for all titles; rescale drops `EXTENDED_USAGE` for sRGB storage
+      (pre-existing); `NXGFX_STOREMU` missing from `docs/env_switches.tsv`. Maths and SPIR-V rewrite checked correct.
+      `build/play/20261125-140847-oot`: **red lines 632 -> 2** (both known), no device loss; title/story/
+      nightmare correct, **forest still white** — a separate NaN: forward pass `9f36b8ee91e736c6` writes NaN into
+      42-57% of the HDR target, fog draw `888c1068ac8f7043` spreads it. MKW regression `-142730-mkw` 29.6 FPS (was
+      29.1), 1 known red line, sheet correct. Lead: the "dozen textures at `0x13dc17000`" (physical pool base) is
+      the first NaN suspect. Next: wave **OOT-NAN** (opened, running, `docs/waves/OOT-NAN.md`). OoT's
+      `pipeline-crashed.bin` pipeline compiled cleanly with the file aside (restored byte-identical) — owner option
+      to drop it. Slip: one `sed` edit of the report header.
+- [x] **VIOLET** (2026-11-25, `docs/waves/VIOLET.md`, accepted; lead read the sheets and the `begin_pass` change):
+      fresh save to the bedroom with the player walking, `build/play/20261125-120752-violet-final` 29.9 FPS (5% low
+      29.5) of 30, **0 red lines**, memory flat. Route stops were game behaviour ("Choose a look" has no default; A
+      re-opens the Adventure Guide, B closes it). Engine (classification only, same draws skipped): a draw with no
+      target set at all and no side effects (no written storage, image or xfb) logs one `[vk]` line instead of red;
+      a target that fails to attach or a program with side effects stays red with slot counts; a non-texture colour
+      pointer in `SET_RT` now red (was dropped silently). Unproven: ~60 s route margin before "Get Up"; leaving the
+      house not revisited; history's 21 red lines did not reproduce.
+- [x] **SMASH-POLISH** (2026-11-25, `docs/waves/SMASH-POLISH.md`, **accepted**; lead read the final sheet — two
+      matches, results; os 166 / graphics 202 passed, lead re-ran). Independent audit of `guest::readable` /
+      `Memory::mapped`: no HIGH/MEDIUM (fault handlers commit/restore on any thread, both platforms; the memory lock
+      is a leaf). LOWs: (3) `in_phys` copied+sorted the run list per call — fixed by the lead (walks the sorted, merged
+      `st.phys` in place); (4) the doc said "committed" — fixed (yes ≠ committed; OS calls must `mem::prepare`
+      first); recorded, not changed: (1) movie `ev_ok` accepts a stale pointer into untouched heap (signals a zeroed
+      struct), (2) audio renderer accepts a garbage wave-buffer range inside the heap (commits zeros).
+      Causes: the movie decoder's `guest::readable` called `VirtualQuery` over the 1.2 GB heap under the process memory
+      lock (13-100 ms) and every write-watch scan waited behind it; mid-match hitches were the fixed 6 GB shader-part
+      cap. Fixes: `Memory::mapped` (os table) answers guest ranges first; parts cap = RAM/8 (min 6 GB); prewarm
+      most-recent keys first, budget RAM/16 (2-8 GB); `[smash]` plays a second match. `build/play/20261125-111130-
+      smash-polish-final`: movie 12.8 -> 59.9 FPS, match 58.2 -> 60.0 (frames > 50 ms 18 -> 1), second match 59.9,
+      underruns 17 -> 2 (at match loads: the preemption row). Memory +~110 MB a match with a changing random opponent
+      (unproven either way). MKW 29.1 (`-112011-mkw-smashpolish`), peak 17.4 GB vs 17.0. Next: `engine_private_bytes`
+      still walks the heap per pipeline at boot.
+- [x] **MKW-PERF5** (2026-11-25, `docs/waves/MKW-PERF5.md`, accepted, no audit owed: only two opt-in diagnostics
+      remain, `NXGFX_CHAIN_TRACE` and `NXGFX_OP_TIMES`; lead read the final sheet — correct race, lap 2/3): no FPS
+      gain, 28.9 (5% low 25.1) `build/play/20261125-101138-mkw-perf5-final`. Corrected diagnosis: main waits on the
+      *previous* frame's fence; the limit is the replay thread's own ~28 ms of serial work a frame (draw translation
+      ~15 ms over ~2,200 indexed draws, write-watch ~7 ms, passes ~2.4 ms; the op's 7 sub-submissions chain on events).
+      Four cuts tried and reverted (parallel walks worse, present-only pool, clean-pool skip, P-core pinning).
+      Checkpoints cost 0.5-0.7 ms (29.7 off vs 28.9 on; default stays on). Hold 2 is near saturation (scan swings
+      7.3-11.5 ms between runs -> 26-29 FPS): a steady 3-5 ms cut would hold a stable 30. **Route to 60: translate
+      command buffers when recorded on the game's worker threads (`CallCommands`) — its own multi-day design wave,
+      queued after GFX row 3.**
+- [x] **ROUTES-SS** (2026-11-25, `docs/waves/ROUTES-SS.md`, accepted; lead read both sheets): stage jump is B, not A
+      (old replays pressed A); Shadow's menu toggle fixed (R, R, Right). shadow `build/play/20261125-095656-shadow-final`
+      30.0 FPS (5% low 29.4) of 30, Shadow moving on every window shot (loops the stage: the way past the road's edge
+      is not found); sonic `-100648-sonic-final` 31.5 (31.0) of 30, eight different Green Hill places incl. the loop.
+- [ ] **Engine: two processes of one title share `pipeline-*.bin`** (found by ROUTES-SS): a second process reads the
+      first's in-flight compile list as a crashed session and blacklists those pipelines (`pipe.rs` `load_crashed`;
+      `build/play/20261125-085055-sonic-route1/run.log` line 26), and the cache write failed. Fix: per-process
+      in-flight file (or a lock) so only a dead owner's list counts. Until then: never run two copies of one title.
+      **Owner decision:** the 2 false entries it added to Sonic X Shadow's `pipeline-crashed.bin` (no compiler
+      crashed) — drop them or keep them.
+- [ ] Shadow: 2x `texture ID 356: target 1 bound where the shader samples target 2` at the stage load; Shadow
+      Generations main menu / post-title dialog show button glyphs without text (`-090643-xmenu/x-n1.png`,
+      `-091344-xmenu3/x-s3.png`) — possible text-rendering defect.
 - [ ] **Engine: no preemption inside long guest loops.** Fresh-save Arceus 99-114 s: low-priority thread 0x1004
       (prio 46) holds virtual core 2 in a loader loop with no SVC; the better threads wait `STEAL_GUEST` (5 s) per
       steal, presents fall to 0.2 FPS. Horizon would preempt it. Fix: a displaced-flag check on translated loop
-      back-edges (generalising `rt_spin_gate`) so a displaced holder yields at once; needs a Cpu-struct field and a
-      full retranslation of every title. STEAL_GUEST stays 5 s until then (200 ms broke DKB's loaders).
+      back-edges (generalising `rt_spin_gate`) so a displaced holder yields at once; needs a Cpu-struct field (appended
+      at the end, so existing offsets hold) and a retranslation of each title that needs the check (Arceus first);
+      titles not retranslated keep their current code and only relink. STEAL_GUEST stays 5 s until then (200 ms broke DKB's loaders).
 - [x] dkb (`build/play/20261124-124926-dkb`): completed 13/13, 59.4 FPS (5% low 53) over 100-150 s, 0 red lines
       (the texture-target mismatch is gone), 0 audio underruns; fresh save: mode select, opening, lit mine tunnel,
       walking moves the camera. All three recorded issues are resolved on this engine; scenario now ends with a
@@ -55,7 +192,27 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       names every graphics stage incl. task/mesh; canary 0 strays with the fill off); race FPS 7.2-9.9 -> 14.0-16.1
       (crashed-pipeline draws skipped without per-draw relinking: 17 ms -> 0.3 ms; pool scans skipped when an
       earlier scan covers the op and no CPU event signal came since). Audited; audit HIGH fixed by the lead.
-- [ ] **mkw: race FPS 28.8 of 60** (MKW-PERF2: sets reused/patched, 22.9 -> 28.8, audited; MKW-PERF: 17.7 -> 22.9, 5% low 13 -> 19; GPU event
+- [ ] **mkw: race FPS 29.1 of 60 — the frame is a 30 FPS hold, the real chain is ~28 ms.** MKW-PERF4 (2026-11-25,
+      `docs/waves/MKW-PERF4.md`, `build/play/20261125-043019-mkw-perf4-final` 28.7 FPS, sheet read by the lead, runtime
+      46 passed): the game threads are mostly idle; the frame step holds each frame for 2 vsyncs, and a 1-vsync frame
+      really costs 27.4-28.8 ms (game work then replay in series: main waits in `nvnSyncWait` for the replay to reach
+      its fence; replay ~15 ms = pool sync 8-9 + sets ~7). 60 FPS needs that chain under ~18.3 ms; smaller cuts do not
+      move FPS. MKW-PERF3's "game waits 7.4 ms / its threads take 27 ms" read an incomplete counter. Kept: per-thread
+      split in the CPU profiler (`profile=1`). Scan-ahead thread tried and reverted (no lead time: the game queues just
+      before the replay takes). Next: which fence main waits on; if its own frame's, cut replay latency (translate
+      command buffers as recorded on the worker threads — large). Owner decision pending: keep `fps_hold` (steady 30)
+      or drop it (~35-36 uneven); lead recommends keeping it.
+      MKW-PERF3 (2026-11-25, `docs/waves/MKW-PERF3.md`, **accepted**: independent audit
+      found draw-word keying, module facts and write-watch batching safe; one LOW, `NXGFX_TEX_WB=1` only: a resetting
+      scan over a <= 1 MiB gap clears the watch bits `cpu_written` reads for a texture stored in that gap, so a
+      write-back could overwrite newer CPU bytes — pre-existing with the old gap rule, now unbounded in total gap
+      length per call; fix if `TEX_WB` is ever turned on by default): scans
+      11.0 -> 8.5 ms a frame (write-watch batches skip gaps > 1 MiB), FPS 28.8 -> 29.1 (within run-to-run noise);
+      `build/play/20261125-034357-mkw-perf3-final`, sheet read by the lead, graphics lib 193 passed (lead re-ran).
+      **The replay thread is no longer the limit:** the game waits only ~7.4 ms a frame on syncs; its own threads take
+      ~27 of ~34 ms. Next: profile the game threads (engine calls on them, the pool lock the completion thread holds
+      ~6 ms a frame, recompiled guest code). Cross-submission patching (~520 whole sets, ~2 ms) parked.
+      Earlier: (MKW-PERF2: sets reused/patched, 22.9 -> 28.8, audited; MKW-PERF: 17.7 -> 22.9, 5% low 13 -> 19; GPU event
       landings no longer void scan coverage, parked resumes reuse covering scans). Left a frame: ~3 write-watch scans
       ~14.5 ms (the frame's first must ask every pool), descriptor sets ~12 ms (~5,000 a frame, ~4% reused: per-draw
       uniform buffers change the key), replay ~8 ms; the replay thread is the bottleneck. Next: descriptor sets.
@@ -104,9 +261,28 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       last *submitted* fence, while replay of already-recorded command streams can lag behind the guest.
       Next: a lock-free, fixed-size per-draw descriptor-address ring for task/mesh draws (no allocation, no mutex)
       so the fault report names the binding without changing timing.
+- [ ] **SONIC-SMASH** (2026-11-25, `docs/waves/SONIC-SMASH.md`, **accepted** after an audit fix; all on GPU 1). Audit:
+      3D twin, vpool refusal and the Windows budget safe; MEDIUM fixed by the lead: on Linux a guest commit is only an
+      `mprotect`, so subtracting committed bytes from resident+swap could keep the prewarm budget from ever tripping
+      (OOM risk) — the guest subtraction is now Windows-only (`pipe.rs` `engine_private_bytes`). LOWs recorded: a 3D/cube
+      twin copied in `sub.pre` shows the previous submission's content if rendered and sampled in one submission; an
+      unsupported 3D format is re-queried every submission; an aligned unmap after a refused one in the same batch is
+      not applied (pre-existing); budget checks walk the guest ranges per pipeline: Shadow 29.99 of 30
+      FPS, red lines 218 -> 1 (the blacklist notice): `SXSG-B01` is the game's own unmap passing 64 KB tile counts as
+      byte offsets (refused as before, now logged once per pool, no rebind for refused requests); texture 519 gets a
+      one-slice 3D twin. Sonic 31.5 FPS, Green Hill. Smash 58.15 of 60, frames > 50 ms 117 -> 18, worst 830 -> 271 ms:
+      the stutters were mid-match pipeline compiles — prewarm's 2 GB budget counted the guest's own memory growth
+      (fixed: subtracts guest heap + physical maps); 874 of 1,712 pipelines still prewarmed, 18 hitches left.
+      Lead read all three sheets: in the final windows Shadow and Sonic stand still (route input ends earlier; timers
+      run, rings collected before) — controllability over the window is thin evidence. Open: Smash prewarm budget
+      sizing, Smash audio underruns (17 over the run), repeated-match memory, Shadow/Sonic routes that keep moving.
 - [ ] Other failing titles one at a time, each ending with a fix and its run: mkw180 (task/mesh fault, race stability; GAR-5), plza (cube mismatches, pacing), mk8d
       (stutters, memory), shadow / sonic (resource diagnostics, blacklisted pipelines), smash (pacing)
-- [ ] Blocked titles: oot (native NDVE stays off; submission-4764 fault), violet (first-run progression, display reset)
+- [ ] Blocked titles: oot (native NDVE stays off; submission-4764 fault), violet (first-run progression, display reset).
+      2026-11-25 OOT-PIPE (parked after one run): **the `d15370a382630d4e` compile no longer hangs** — made in ~70 ms
+      (likely a pipeline-cache hit), 1,316 presents, title screen drawn (`build/play/20261125-084021-oot-pipe-base`).
+      Owed: a cold-compile timing and the menus toward first gameplay. Violet: relink interrupted
+      (`buildIncomplete: true`), its scenario needs a ~10 min fresh-save route.
 - [ ] Final pass: every scenario, one run each
 
 ## Execution update — 2026-11-23, thermal monitoring (history)

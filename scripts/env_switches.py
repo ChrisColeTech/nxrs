@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """The environment switches the engine reads, as one table: docs/env_switches.tsv (name, class, meaning, where).
-nxnative's dm/tools/env_switches.py for this tree's switches (NXGFX_, NXOS_, NXRS_, NXRT_, NXSHADERS_, NXCFG_, SWR_).
+nxnative's dm/tools/env_switches.py for this tree's switches (NXGFX_, NXOS_, NXRS_, NXRT_, NXSHADERS_, NXCFG_).
 
   env_switches.py           write the table: a new switch gets a row whose class is guessed and whose meaning is the
                             comment line that names it in the code (empty when none does); class and meaning of rows
@@ -19,7 +19,7 @@ REPO = Path(__file__).resolve().parents[1]
 TABLE = REPO / 'docs' / 'env_switches.tsv'
 HEAD = 'name\tclass\tmeaning\twhere\n'
 CLASSES = ('player', 'path', 'switch', 'diagnostic', 'test')
-NAME = r'(?:NXGFX|NXOS|NXRS|NXRT|NXSHADERS|NXCFG|SWR)_[A-Z0-9_]*[A-Z0-9]'
+NAME = r'(?:NXGFX|NXOS|NXRS|NXRT|NXSHADERS|NXCFG)_[A-Z0-9_]*[A-Z0-9]'
 # a literal name the code reads: env::var / var_os / env_flag-like helpers all take it as a string literal
 READ = re.compile(r'"(' + NAME + r')"')
 

@@ -6,7 +6,7 @@
 //!
 //! What is not here yet: the NVN2 command entry points (`nvnCommandBufferBuildAccelerationStructure`, `…DispatchRays`,
 //! copy / compact / relocate, binds): their argument layouts are not known (no symbolized implementation in the owner's
-//! games; Turbo and nxnative have none). They call `build` and `lookup` once known (PORT_PLAN 5A.4).
+//! games; nxnative has none). They call `build` and `lookup` once known (PORT_PLAN 5A.4).
 
 use super::queue::Sub;
 use super::Gpu;

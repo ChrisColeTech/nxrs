@@ -191,7 +191,7 @@ pub fn proc_address(name: &str) -> u64 {
 
 static BT_TARGET: std::sync::OnceLock<HostFn> = std::sync::OnceLock::new();
 
-/// `NXOS_NVN_BT=<proc>` (Turbo's SWR_NVN_INTERVAL_BT): the first 64 calls of that proc log their arguments and the
+/// `NXOS_NVN_BT=<proc>`: the first 64 calls of that proc log their arguments and the
 /// guest's return chain (x30, then the x29 frames), e.g. where a game sets its present interval.
 unsafe fn bt_proc(c: *mut Cpu) {
     static N: AtomicU64 = AtomicU64::new(0);
@@ -226,8 +226,8 @@ unsafe fn bootstrap_loader(c: *mut Cpu) {
     (*c).x[0] = proc_address(&name);
 }
 
-/// The game's NintendoSDK major from its `sdk` module's "NintendoSdk_nnSdk-<major>_<minor>_<micro>-Release" (Turbo
-/// 2f8f44e): it picks the NVN API the device reports (SDK 10 and older are API 53; Mario Kart 8 Deluxe, SDK 4.4.0,
+/// The game's NintendoSDK major from its `sdk` module's "NintendoSdk_nnSdk-<major>_<minor>_<micro>-Release":
+/// it picks the NVN API the device reports (SDK 10 and older are API 53; Mario Kart 8 Deluxe, SDK 4.4.0,
 /// creates no graphics system on another). 19 when the string is absent. (Read from the module file before the load: the parsed image, or the raw file.)
 fn sdk_major(data: &std::path::Path, switch2: bool) -> i32 {
     fn scan(b: &[u8]) -> Option<i32> {
@@ -339,8 +339,8 @@ fn bind_graphics() {
     });
 }
 
-/// The keyboard as player 1's controller while the graphics layer's host window is the game window (Turbo's
-/// layout: X / Space A, Z B, C X, V Y, Q L, E R, 1 ZL, 3 ZR, Enter +, Backspace -, arrows the d-pad, WASD the left
+/// The keyboard as player 1's controller while the graphics layer's host window is the game window (the
+/// default layout: X / Space A, Z B, C X, V Y, Q L, E R, 1 ZL, 3 ZR, Enter +, Backspace -, arrows the d-pad, WASD the left
 /// stick, IJKL the right stick). The front end's input layer replaces it when it owns the window.
 fn window_key(vk: u32, down: bool) {
     static HELD: AtomicU64 = AtomicU64::new(0);

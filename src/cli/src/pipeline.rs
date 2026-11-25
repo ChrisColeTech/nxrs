@@ -1,4 +1,4 @@
-//! `nxrs-build build`: package → data folder → C → shaders → code DLL + loader, in Turbo's output layout:
+//! `nxrs-build build`: package → data folder → C → shaders → code DLL + loader, in this output layout:
 //!
 //! ```text
 //! <outdir>\<name>.exe            the loader (cc::STUB_C)
@@ -34,14 +34,14 @@ pub struct BuildArgs {
     pub cc: Option<String>,
     /// generate the C and stage the data folder, compile nothing
     pub no_build: bool,
-    /// `--chunk`: about this many ARM instructions per C file (Turbo's default 30000); None: the translator's sizing
+    /// `--chunk`: about this many ARM instructions per C file (the legacy default was 30000); None: the translator's sizing
     pub chunk: Option<u64>,
     /// `--native`: compile for this processor (-march=native) instead of the baseline (`cc::MARCH`)
     pub native: bool,
     pub no_shaders: bool,
     /// v1: the DLC hint names `--install-dlc` (what a v1 caller passes); v2: `nxrs-build dlc install`
     pub v1: bool,
-    /// v1: the Turbo options that were passed and mean nothing here, said after the banner
+    /// v1: the legacy options that were passed and mean nothing here, said after the banner
     pub ignored: Option<String>,
     /// `--interp-only` (diagnostics): translate no function; the runtime interprets the whole game
     pub interp_only: bool,
@@ -469,7 +469,7 @@ pub fn units(
 /// (`shaders::prebuild_data`: the ExeFS, the RomFS the marker names and the add-on content installed there), and the
 /// profile's shader tables (nxnative's prewarm seed, pairs and translation answers) into `<data>\shaders\profile\`.
 /// A rebuild reuses every translated shader whose inputs and tools are unchanged. It runs beside the compile
-/// (Turbo 6d04b3b `start_shader_prebuild`, at most 4 translators so the compile keeps the CPU) and is never fatal:
+/// (at most 4 translators so the compile keeps the CPU) and is never fatal:
 /// a failure is a warning, the game's live translator covers what the build did not translate.
 fn shaders_step(
     out: &Out,
@@ -714,14 +714,14 @@ pub fn probe_lines(spec: &str) -> Result<Vec<String>> {
     }
     Ok(out)
 }
-/// `SWR_CFLAGS` (switchrecomp.py:769): extra compiler flags for the game code, split on white space (e.g. `-march`
+/// `NXRS_CFLAGS`: extra compiler flags for the game code, split on white space (e.g. `-march`
 /// for another machine's processor). They join the object keys, so changing them recompiles.
 pub fn extra_cflags(env: Option<&str>) -> Vec<String> {
     env.map(|s| s.split_whitespace().map(String::from).collect())
         .unwrap_or_default()
 }
 
-/// `--jobs` when none is given: the processor count (switchrecomp.py:634), 4 if it cannot be read.
+/// `--jobs` when none is given: the processor count, 4 if it cannot be read.
 pub fn default_jobs() -> usize {
     std::thread::available_parallelism().map_or(4, |n| n.get())
 }
@@ -891,7 +891,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         ..GenOptions::default()
     };
     if let Some(n) = a.chunk.filter(|&n| n > 0) {
-        // Turbo counts ARM instructions per C file; the translator sizes chunks by the C they make
+        // `--chunk` counts ARM instructions per C file; the translator sizes chunks by the C they make
         opts.chunk_bytes = n as i64 * translator::aot::discover::EST_INT;
         opts.chunk_fns = usize::MAX;
     }
@@ -1059,7 +1059,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         let t = Instant::now();
         let mods = layout_modules(&gen)?;
         let mut units = units(&clang, &gen, &obj, &mods, &engine)?;
-        let extra = extra_cflags(std::env::var("SWR_CFLAGS").ok().as_deref());
+        let extra = extra_cflags(std::env::var("NXRS_CFLAGS").ok().as_deref());
         for u in &mut units {
             for f in &mut u.flags {
                 if a.native && f == crate::cc::MARCH {
@@ -1076,7 +1076,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             if extra.is_empty() {
                 String::new()
             } else {
-                format!(", SWR_CFLAGS {}", extra.join(" "))
+                format!(", NXRS_CFLAGS {}", extra.join(" "))
             },
             a.jobs.max(1)
         ));
@@ -1125,7 +1125,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             .name("shader prebuild".into())
             .spawn_scoped(s, move || {
                 let t = Instant::now();
-                // never fatal, a panic included (Turbo catches every exception of the prebuild thread)
+                // never fatal, a panic of the prebuild thread included
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shaders_step(out, data, profile_id, exact_profile_build, a))).is_err() {
                     out.say("shaders: not translated at build time (the prebuild stopped); the game translates them while it runs");
                 }
@@ -1196,9 +1196,9 @@ mod tests {
         assert_eq!(default_outdir(Path::new(input), "X"), PathBuf::from(want));
     }
 
-    /// switchrecomp.py:634 / :769: `--jobs` defaults to the CPU count; SWR_CFLAGS adds white-space separated flags.
+    /// `--jobs` defaults to the CPU count; NXRS_CFLAGS adds white-space separated flags.
     #[test]
-    fn swr_cflags_and_default_jobs() {
+    fn nxrs_cflags_and_default_jobs() {
         assert_eq!(
             extra_cflags(Some(" -march=znver4  -mtune=znver4\t")),
             vec!["-march=znver4", "-mtune=znver4"]

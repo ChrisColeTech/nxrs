@@ -18,7 +18,7 @@ byte for byte, apart from three additions the runtime needs (below). Credits and
   applies its own update unless `--no-update`), an `.xci` (card image, with or without the key area; its secure
   partition read like an NSP), a `.nup`, or a homebrew `.nro` (its asset section's icon, control.nacp and RomFS). For
   `romfs`, also a built game's data folder.
-- Keys: `--keys`, else `SWR_PROD_KEYS`, else `%LOCALAPPDATA%\RecompLauncher\RecompLauncher\keys\prod.keys`. Inputs
+- Keys: `--keys`, else `NXRS_PROD_KEYS`, else `%LOCALAPPDATA%\RecompLauncher\RecompLauncher\keys\prod.keys`. Inputs
   are only read; key values are never printed or written (markers carry content keys still wrapped, as the package
   holds them).
 - `translate` writes the generated C (`layout.h/json`, `patches.h`, `<module>/<module>_NNNN.c`, `<module>_table.c`,
@@ -26,9 +26,9 @@ byte for byte, apart from three additions the runtime needs (below). Credits and
   marker, `control.nacp` and the icon.
 - `update-info` prints `UPDATE<tab>path<tab>title id<tab>version<tab>display version` or `UPDATE error: <reason>`
   per package and exits 1 when any failed; with `--game` the update is opened over the game, which proves it
-  belongs to it. Lines end in CRLF on Windows, as Turbo's Python prints them.
-- `dlc` keeps Turbo's `dlc.manifest`, `install.json`, messages (`DLC: installed ...`, `DLC error: <reason>`) and
-  exit codes.
+  belongs to it. Lines end in CRLF on Windows (text mode; the launcher compares the bytes).
+- `dlc` writes `dlc.manifest` and `install.json`, with the messages (`DLC: installed ...`, `DLC error: <reason>`) and
+  exit codes the launcher reads.
 
 ## Modules
 
@@ -59,10 +59,10 @@ The runtime's file system calls this API on every read; everything it returns is
 | Call | What |
 |---|---|
 | `open_game(input, &OpenOptions { keys, update })` | `Game`: `exefs` (the update's code when one is applied), `romfs`, `display_version`, `control`, `addons`, `applied` (`None` / `Embedded` / `Separate(path)` / `LeftOut`), `marker` |
-| `Game::write_data(datadir, say)` | stage `exefs/`, the marker, `control.nacp` + icon; says what was applied in Turbo's words |
+| `Game::write_data(datadir, say)` | stage `exefs/`, the marker, `control.nacp` + icon; says what was applied in the launcher's words |
 | `open_data_dir(datadir, keys)` | what the runtime calls at start: the game's `RomFs` from `romfs.nup`, `romfs.nsp`, `romfs.dir` or `romfs/` |
 | `RomFs` | `list(dir)`, `walk()`, `find(path)`, `read(path, offset, len)`, `read_file(path)`, `image()` (the raw RomFS image for NSP sources) |
-| `update_info(package, keys, game)` | `UpdateInfo` (`line()` is the `UPDATE` line), or Turbo's refusal |
+| `update_info(package, keys, game)` | `UpdateInfo` (`line()` is the `UPDATE` line), or the refusal |
 | `dlc::{install, sync, remove, describe, read_manifest, title_romfs}` | add-on content; `title_romfs` is a title's RomFS as `OpenDataStorageByDataId` mounts it |
 
 How each source is read, with nothing extracted:
@@ -78,7 +78,7 @@ How each source is read, with nothing extracted:
 | folder | its `romfs/` |
 | DLC | each title's own package: NSP, XCI, bare NCA (plaintext or AES-CTR, read in place); NSZ / XCZ unpacked once into `romfs.bin` |
 
-Refused with Turbo's reasons: an update for another game (`this update is for <id>, not for this game (<id>)`), a
+Refused, with the reason: an update for another game (`this update is for <id>, not for this game (<id>)`), a
 package with no update, an update on its own as the game, a console-bound (personalized) ticket, a missing ticket,
 keys without the content's generation, compressed NSZ / XCZ updates and games, sparse NCA storage, a separate update
 for a NUP or folder game.
@@ -89,8 +89,6 @@ decoder (`loader/zbic.rs`). The build writes such an NSO into `<data>\exefs` wit
 build id and hashes; compression flags cleared), since the runtime reads LZ4 only.
 
 ### Markers (the build records what the runtime reads)
-
-Turbo's formats, unchanged:
 
 ```text
 romfs.nsp  SWRNSP1 / <package> / <offset hex> / <size hex>              a plaintext RomFS
@@ -106,9 +104,8 @@ romfs.nup  <package path>
 
 This engine adds `romfs.dir` (`<folder path>`): a dumped folder's `romfs/`, read where it is instead of copied.
 
-Two deliberate differences from Turbo: an AES-CTR DLC title is read in place through a version 2 marker instead
-of being decrypted into `romfs.bin` with hactool (Turbo's runtime reads that marker too), and paths are printed as
-UTF-8 (Turbo's Python prints them in the console code page).
+An AES-CTR DLC title is read in place through a version 2 marker instead of being decrypted into `romfs.bin`, and
+paths are printed as UTF-8.
 
 ## Verification
 
@@ -124,13 +121,12 @@ UTF-8 (Turbo's Python prints them in the console code page).
   read through the LZ4 blocks match the game's NRR list).
 - Real builds: Ocarina of Time (ZBIC `main`, 297,043 functions) translates and builds; MK8D's six bignum routines are
   lifted functions; Super Mario Party Jamboree opens as an XCI (ExeFS, 1,539 RomFS files).
-- `scripts/pkg/`: reference listings and hashes from the owner's Turbo readers, and `compare.sh` for nxrs.
 - `scripts/compare_gen.py <ref> <ours>`, `scripts/cc_check.sh <gen dir> <chunks...>`: generated C against
   mkw-recomp, and a clang compile check.
 
 ## Not done yet
 
-- NSZ / XCZ as the game's own package or update (Turbo refuses them too; DLC from NSZ / XCZ is unpacked once),
+- NSZ / XCZ as the game's own package or update (DLC from NSZ / XCZ is unpacked once),
   sparse NCA storage, a compressed section under an update's patch (no such package on hand to verify).
 - The inline-asm SIMD path (AArch64 hosts only).
 - Differential testing against dynarmic.

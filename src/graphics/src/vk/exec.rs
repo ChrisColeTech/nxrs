@@ -238,7 +238,8 @@ fn set_patch_on() -> bool {
 }
 
 /// Host copies kept per stage (one per module, the least recently written replaced): draws interleave shaders per
-/// stage, each with its own sets (MKW's race: with 8, a third of the whole sets found no copy of their module).
+/// stage, each with its own sets (MKW's race: with 8, a third of the whole sets found no copy of their module; 128 left
+/// its ~520 whole sets a frame as they were, MKW-PERF3).
 const SHADOWS: usize = 32;
 
 /// The host copy for a set of `module` about to be written: that module's, or a new one, or the least recently written
@@ -334,17 +335,22 @@ fn patch_classes(old: &SetKey, new: &SetKey) -> Option<u32> {
 }
 
 /// (diagnosis, `NXGFX_PROFILE=1`) why stage sets were built whole: what differed from the module's last set, counted
-/// and logged every 20,000 whole sets.
-fn note_set_miss(old: Option<&SetKey>, new: Option<&SetKey>) {
+/// and logged every 20,000 whole sets. `copy` (no last set): 0 the stage keeps no copy of the module, 1 its copy is not
+/// a valid set, 2 it is one but unkeyed, 3 the set has raw global memory (never patched).
+fn note_set_miss(old: Option<&SetKey>, new: Option<&SetKey>, copy: u8) {
     use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
-    const NAMES: [&str; 12] = [
+    const NAMES: [&str; 16] = [
         "no key", "no last set", "c0", "c2", "base instance/dispatch", "submission", "images", "pools",
         "extent", "draw records", "uniforms read as addresses", "pools changed/other",
+        "(no last set: no copy of the module", "a copy not valid", "a valid copy unkeyed", "raw global memory)",
     ];
-    static N: [AtomicU64; 12] = [const { AtomicU64::new(0) }; 12];
+    static N: [AtomicU64; 16] = [const { AtomicU64::new(0) }; 16];
     static ALL: AtomicU64 = AtomicU64::new(0);
     if !super::perf::fine() {
         return;
+    }
+    if old.is_none() && new.is_some() {
+        N[12 + copy.min(3) as usize].fetch_add(1, Relaxed);
     }
     let i = match (old, new) {
         (_, None) => 0,
@@ -362,8 +368,52 @@ fn note_set_miss(old: Option<&SetKey>, new: Option<&SetKey>) {
     };
     N[i].fetch_add(1, Relaxed);
     if ALL.fetch_add(1, Relaxed) % 20000 == 19999 {
-        let s: Vec<String> = (0..12).map(|k| format!("{} {}", NAMES[k], N[k].swap(0, Relaxed))).collect();
+        let s: Vec<String> = (0..16).map(|k| format!("{} {}", NAMES[k], N[k].swap(0, Relaxed))).collect();
         crate::vklog!("whole stage sets, last 20000, by what differed from the module's last set: {}", s.join(", "));
+    }
+}
+
+/// (diagnosis, `NXGFX_PROFILE=1`) the classes stage-set patches remade, counted and logged every 100,000 patches.
+fn note_patch(classes: u32) {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    const NAMES: [&str; 7] = ["uniform buffers", "push", "c0", "c2", "support", "draw records", "textures"];
+    static N: [AtomicU64; 7] = [const { AtomicU64::new(0) }; 7];
+    static ALL: AtomicU64 = AtomicU64::new(0);
+    if !super::perf::fine() {
+        return;
+    }
+    if classes & 0xffff != 0 {
+        N[0].fetch_add(1, Relaxed);
+    }
+    for (k, n) in N.iter().enumerate().skip(1) {
+        if classes & (1 << (15 + k)) != 0 {
+            n.fetch_add(1, Relaxed);
+        }
+    }
+    if ALL.fetch_add(1, Relaxed) % 100_000 == 99_999 {
+        let s: Vec<String> = (0..7).map(|k| format!("{} {}", NAMES[k], N[k].swap(0, Relaxed))).collect();
+        let part = |i: usize| {
+            let n = SET_PARTS[i][3].swap(0, Relaxed).max(1) as f64;
+            let v: Vec<String> = (0..3).map(|k| format!("{:.0}", SET_PARTS[i][k].swap(0, Relaxed) as f64 / n)).collect();
+            format!("{} ({n:.0} sets)", v.join("/"))
+        };
+        crate::vklog!(
+            "stage-set patches, last 100000, by class remade: {}; ns a set before the bindings / bindings / chunk copy: whole {}, patched {}",
+            s.join(", "),
+            part(0),
+            part(1)
+        );
+    }
+}
+
+/// (diagnosis, `NXGFX_PROFILE=1`) `stage_set`'s parts, [whole, patched]: ns before the bindings loop (banks, checks),
+/// in it, copying the host set into the chunk; the sets counted.
+static SET_PARTS: [[std::sync::atomic::AtomicU64; 4]; 2] =
+    [const { [const { std::sync::atomic::AtomicU64::new(0) }; 4] }; 2];
+
+fn note_set_part(patch: bool, part: usize, t: Option<std::time::Instant>) {
+    if let Some(t) = t {
+        SET_PARTS[patch as usize][part].fetch_add(t.elapsed().as_nanos() as u64, std::sync::atomic::Ordering::Relaxed);
     }
 }
 
@@ -395,10 +445,10 @@ fn set_key(
     {
         return None;
     }
-    let d = set_deps(m)?;
+    let d = facts(m).deps?;
     let st = m.stage as usize;
-    // the dispatch size and the base instance are in c0 only
-    let (di, bi) = if !d.c0 {
+    // the dispatch size and the base instance are in c0 only, and matter only to a set that reads their words
+    let (di, bi) = if !d.c0 || !d.draw {
         ([0; 3], 0)
     } else if st == 5 {
         (dispatch, 0)
@@ -448,6 +498,66 @@ struct SetDeps {
     push: bool,
     /// the support buffer (the pass extent)
     support: bool,
+    /// c0's draw words (`reads_draw_words`: the base instance, compute's dispatch size)
+    draw: bool,
+}
+
+/// What a module's stage set needs, read from its bindings once (`Module::facts`): each draw read them again, six passes
+/// over the bindings a set (MKW: ~4,000 sets a frame).
+#[derive(Debug)]
+pub(super) struct Facts {
+    deps: Option<SetDeps>,
+    need: [(bool, bool); 2],
+    draw: bool,
+    /// its texture part can be kept (`TexPart`): every texture / image handle in c2, no buffer texture
+    tex_cacheable: bool,
+    /// it binds raw global memory (`gmem::CB_SLOT`)
+    raw: bool,
+}
+
+fn facts(m: &Module) -> &Facts {
+    m.facts.get_or_init(|| Facts {
+        deps: set_deps(m),
+        need: bank_needs(m),
+        draw: reads_draw_words(m),
+        tex_cacheable: m.res.iter().all(|(_, r)| match r {
+            Res::Tex { cbuf_slot, ty, .. } | Res::Img { cbuf_slot, ty, .. } => {
+                let (t, s) = tex_slots(*cbuf_slot);
+                (t == 2 || t == -1) && (s == 2 || s == -1) && *ty != 2
+            }
+            _ => true,
+        }),
+        raw: m
+            .res
+            .iter()
+            .any(|(_, r)| matches!(r, Res::Sbuf { cb_slot: super::gmem::CB_SLOT, .. })),
+    })
+}
+
+/// Whether a set of `m` reads the words of c0 that each draw or dispatch writes (a graphics stage's base instance at
+/// 0x644, compute's dispatch size at 0x200..0x20c): c0 bound itself, or a storage-buffer record or a handle read over
+/// them. A set that reads c0 only for other storage-buffer records (their addresses) is the same set for every base
+/// instance: MKW draws with a new base instance at most draws, and each one made its storage buffers and c0 again.
+fn reads_draw_words(m: &Module) -> bool {
+    let (lo, hi) = if m.stage == 5 { (0x200u32, 0x20cu32) } else { (0x644, 0x648) };
+    // NVN2 compute's copy of the dispatch size (`C0_DISPATCH_NVN2`)
+    let (lo2, hi2) = if m.stage == 5 {
+        (C0_DISPATCH_NVN2 as u32, C0_DISPATCH_NVN2 as u32 + 12)
+    } else {
+        (lo, hi)
+    };
+    m.res.iter().any(|(_, r)| match r {
+        Res::Cbuf { bank: 0 } => true,
+        Res::Sbuf { cb_slot: 0, cb_off, .. } => {
+            let end = cb_off.saturating_add(12);
+            (*cb_off < hi && lo < end) || (*cb_off < hi2 && lo2 < end)
+        }
+        Res::Tex { cbuf_slot, .. } | Res::Img { cbuf_slot, .. } => {
+            let (t, s) = tex_slots(*cbuf_slot);
+            t == 0 || s == 0
+        }
+        _ => false,
+    })
 }
 
 /// The set's dependencies, or None when it reads texture handles from somewhere other than c2 (bindless) or binds
@@ -478,6 +588,7 @@ fn set_deps(m: &Module) -> Option<SetDeps> {
             _ => {}
         }
     }
+    d.draw = d.c0 && reads_draw_words(m);
     Some(d)
 }
 
@@ -600,6 +711,7 @@ impl QState {
         dispatch: [u32; 3],
         base_instance: u32,
         need: [(bool, bool); 2],
+        draw0: bool,
     ) -> (
         Arc<Vec<u8>>,
         Arc<Vec<u8>>,
@@ -614,16 +726,20 @@ impl QState {
         } else {
             ([0; 3], base_instance)
         };
+        // c0's draw words (base instance, dispatch size) count only when the set binds c0 or reads them
+        // (`reads_draw_words`): a bank built for another draw has the same storage-buffer records; it keeps the draw
+        // words it was built with, so a set that does read them builds it again
+        let draw0 = draw0 || need[0].1;
         // a bind that leaves the bytes as they were (the same handles bound again) keeps the staged copy
         let renew = |slot: &mut Option<CBank>,
                      gen: u64,
                      di: [u32; 3],
                      bi: u32,
+                     draw: bool,
                      build: &dyn Fn() -> Vec<u8>| {
-            if slot
-                .as_ref()
-                .is_some_and(|c| c.gen == gen && c.dispatch == di && c.base_instance == bi)
-            {
+            if slot.as_ref().is_some_and(|c| {
+                c.gen == gen && (!draw || (c.dispatch == di && c.base_instance == bi))
+            }) {
                 return;
             }
             let bytes = build();
@@ -647,7 +763,7 @@ impl QState {
             }
         };
         if need[0].0 || need[0].1 {
-            renew(b0, self.bgen[st][0], di, bi, &|| {
+            renew(b0, self.bgen[st][0], di, bi, draw0, &|| {
                 c0_bytes(self, st, dispatch, base_instance)
             });
         }
@@ -664,7 +780,7 @@ impl QState {
                 }
             }
             if !b2.as_ref().is_some_and(|c| c.gen == gen2) {
-                renew(b2, gen2, [0; 3], 0, &|| c2_bytes(self, st));
+                renew(b2, gen2, [0; 3], 0, true, &|| c2_bytes(self, st));
                 if let Some(c) = b2.as_mut() {
                     c.src = Some(Box::new((self.tex[st], self.samp[st], self.img[st])));
                 }
@@ -1977,7 +2093,7 @@ fn end_query(g: &Gpu, sub: &mut Sub, qs: &mut QState) {
 }
 
 /// Linear render targets the CPU can read (NVN_TEXTURE_FLAGS_LINEAR / LINEAR_RENDER_TARGET in a pool the CPU can
-/// access; Turbo `rt_readback`, on by default): on the console the pool is the CPU's memory too, so what the GPU draws
+/// access; on by default): on the console the pool is the CPU's memory too, so what the GPU draws
 /// there the CPU reads (Mario Kart World draws its decoded animations into an 8x1218 RGBA16F linear target that its CPU
 /// animation decoder reads). At the end of a pass each such target's level / layer is copied into its storage, which
 /// reaches guest memory at the submission's fence (the write-back). `NXGFX_RT_READBACK=0` off.
@@ -2423,7 +2539,28 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
         }
     }
     if extent.width == u32::MAX {
-        crate::log::red_once("a draw or clear with no render target bound");
+        let set = qs.rt[..qs.rt_n].iter().filter(|r| r.tex.is_some()).count();
+        // With no target at all (none set, none failing to attach) the GPU draws nothing either; only a program
+        // that writes storage or captures transform feedback would have an effect the skip loses.
+        let side_effects = qs.prog[..5].iter().flatten().any(|m| {
+            m.xfb.is_some()
+                || m.res.iter().any(|(_, r)| {
+                    matches!(r, Res::Img { .. } | Res::Sbuf { written: true, .. })
+                })
+        });
+        let what = format!(
+            "a draw with no render target bound ({} colour slots, {set} with a texture, depth {})",
+            qs.rt_n,
+            if qs.rt_depth.tex.is_some() { "set" } else { "none" }
+        );
+        if set == 0 && qs.rt_depth.tex.is_none() && !side_effects {
+            static ONCE: std::sync::Once = std::sync::Once::new();
+            ONCE.call_once(|| {
+                crate::vklog!("{what}: its program writes no storage, so it draws nothing, as on the GPU")
+            });
+        } else {
+            crate::log::red_once(&format!("{what}: skipped"));
+        }
         return false;
     }
     // the targets' resolution scale (render targets are scaled together; a pass mixing scales draws at the first's)
@@ -2767,6 +2904,20 @@ fn missing_storage(
     }
 }
 
+/// Where NVN2 compute shaders read the dispatch's workgroup counts x, y, z in c0 (NVN1: 0x200).
+const C0_DISPATCH_NVN2: usize = 0x4;
+
+/// A compute c0's dispatch size: at 0x200, and for an NVN2 game also at `C0_DISPATCH_NVN2`.
+fn put_dispatch(v: &mut [u8], dispatch: [u32; 3], nvn2: bool) {
+    for (i, d) in dispatch.iter().enumerate() {
+        v[0x200 + 4 * i..0x204 + 4 * i].copy_from_slice(&d.to_le_bytes());
+        if nvn2 {
+            v[C0_DISPATCH_NVN2 + 4 * i..C0_DISPATCH_NVN2 + 4 + 4 * i]
+                .copy_from_slice(&d.to_le_bytes());
+        }
+    }
+}
+
 /// The driver's constant segment c0 of a stage: storage buffer table, compute dispatch size and uniform table, base
 /// instance.
 fn c0_bytes(qs: &QState, st: usize, dispatch: [u32; 3], base_instance: u32) -> Vec<u8> {
@@ -2790,9 +2941,11 @@ fn c0_bytes(qs: &QState, st: usize, dispatch: [u32; 3], base_instance: u32) -> V
         }
     }
     if st == 5 {
-        for (i, d) in dispatch.iter().enumerate() {
-            v[0x200 + 4 * i..0x204 + 4 * i].copy_from_slice(&d.to_le_bytes());
-        }
+        // NVN2 compute reads them at 0x4 (nxnative dmsh_abi.h DMSH_C0_DISPATCH_NVN2, written for NVN2 games only):
+        // Ocarina of Time's sky irradiance pass sums over (x * 32) * (y * 32) samples and divided by 0, every sum
+        // was Inf / NaN and the forest's forward pass and fog turned the whole frame NaN (white)
+        let nvn2 = crate::nvn::device::SWITCH2.load(std::sync::atomic::Ordering::Relaxed);
+        put_dispatch(&mut v, dispatch, nvn2);
         for r in 0..16 {
             let (a, n) = qs.ubo[5][r];
             let o = 0x210 + 0x10 * r;
@@ -2980,6 +3133,8 @@ fn uses_storage_pool(m: &Module) -> bool {
 /// Resolve storage use before opening a pass or consulting descriptor caches. Ownership is a property of this
 /// draw/dispatch, not of a cache miss or optional CPU readback. All upgrades precede resolution of sampled views
 /// in every stage, so a shader sampling and storing the same backing cannot retain a pre-upgrade view.
+/// Returns, per stage, the storage images bound to an emulated storage format's view (`storemu`): (stage, [(binding,
+/// conversion)]); those stages run as their packing variant (`emulate_storage`).
 fn prepare_storage_bindings(
     g: &Gpu,
     sub: &mut Sub,
@@ -2987,7 +3142,8 @@ fn prepare_storage_bindings(
     mods: &[Arc<Module>],
     dispatch: [u32; 3],
     base_instance: u32,
-) {
+) -> Vec<(u32, Vec<(u32, super::storemu::Emul)>)> {
+    let mut emulated = Vec::new();
     for m in mods {
         if !m
             .res
@@ -2997,9 +3153,10 @@ fn prepare_storage_bindings(
             continue;
         }
         let st = m.stage as usize;
-        let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, base_instance, [(true, false); 2]);
+        let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, base_instance, [(true, false); 2], true);
         let tb = pool_bases(qs).0;
-        for (_, r) in &m.res {
+        let mut binds = Vec::new();
+        for (binding, r) in &m.res {
             let Res::Img {
                 handle,
                 cbuf_slot,
@@ -3033,9 +3190,48 @@ fn prepare_storage_bindings(
                 end_pass(g, sub, qs);
             }
             let view = tex_view(g, sub, id, *ty | (*fmt as u32) << 16, true);
-            if let Some((serial, _)) = g.tables.tex_at(id) {
+            if let Some((serial, registered)) = g.tables.tex_at(id) {
                 let mut imgs = g.images.lock().unwrap();
                 note_storage_write(g, sub, &mut imgs, serial, view);
+                // a formatless image whose storage view is an emulated format's (E5B9G9R9 as R32_UINT): the format
+                // the game asked for (the image's own or its registered view's) says what the shader's texel is
+                let live = imgs.live(serial);
+                // only formatless bindings can need a variant: formatted ones skip the view lookup (every title's
+                // storage bindings pass here)
+                let emul = imgs.by_serial.get(&live).filter(|_| *fmt == 0).and_then(|im| {
+                    let requested = g.view_format(im, registered.as_ref());
+                    let e = super::storemu::emulation(im.format, requested, im.format_of_view(view)?);
+                    if e.is_some() {
+                        static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                        if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
+                            crate::vklog!("texture ID {id} ser{live}: storage of a {:?} image asked as {requested:?} through its emulated view: {e:?}", im.format);
+                        }
+                    }
+                    e
+                });
+                if let Some(e) = emul {
+                    binds.push((*binding, e));
+                }
+            }
+        }
+        if !binds.is_empty() {
+            emulated.push((m.stage, binds));
+        }
+    }
+    emulated
+}
+
+/// The stages of `mods` with storage images bound to emulated views (`prepare_storage_bindings`) replaced by their
+/// packing variants. A stage whose variant cannot be made keeps its module (said in red once).
+fn emulate_storage(
+    g: &Gpu,
+    mods: &mut [Arc<Module>],
+    emulated: &[(u32, Vec<(u32, super::storemu::Emul)>)],
+) {
+    for (stage, binds) in emulated {
+        if let Some(m) = mods.iter_mut().find(|m| m.stage == *stage) {
+            if let Some(v) = g.shaders.with_storage_emulation(g.dev(), m, binds) {
+                *m = v;
             }
         }
     }
@@ -3125,10 +3321,13 @@ fn view_compatible(base: i32, want: i32, cube_ok: bool) -> bool {
 
 /// Whether a texture viewed as `base` and sampled as `want` gets a cube twin (`cube_twin_view` then checks the image
 /// is one square 2D layer). A one-layer 2D-array view of a 2D image counts (Mario Kart 8 Deluxe's race start: a
-/// 1024x1024 2D texture registered with a 2D-array view, sampled as a cube).
+/// 1024x1024 2D texture registered with a 2D-array view, sampled as a cube). Sampled as a 3D texture, the same views
+/// get a one-slice 3D twin (SONIC X SHADOW GENERATIONS; `cube_twin_view` checks for one 2D layer of any shape). A 3D
+/// texture sampled as 2D gets a 2D twin of its first slice (Mario Kart World's texture ID 337).
 fn cube_twin_target(base: i32, want: i32) -> bool {
-    matches!(base, target::T2D | target::RECTANGLE | target::T2D_ARRAY)
-        && matches!(want, target::CUBE | target::CUBE_ARRAY)
+    (matches!(base, target::T2D | target::RECTANGLE | target::T2D_ARRAY)
+        && matches!(want, target::CUBE | target::CUBE_ARRAY | target::T3D))
+        || (base == target::T3D && matches!(want, target::T2D | target::T2D_ARRAY))
 }
 
 #[cfg(test)]
@@ -3142,6 +3341,11 @@ mod cube_twin_target_tests {
         assert!(cube_twin_target(target::T2D_ARRAY, target::CUBE), "MK8D: a 2D-array view of a 2D image");
         assert!(!cube_twin_target(target::T3D, target::CUBE));
         assert!(!cube_twin_target(target::T2D_ARRAY, target::T2D_ARRAY));
+        assert!(cube_twin_target(target::T2D, target::T3D), "SXSG: a 2D texture sampled as 3D");
+        assert!(!cube_twin_target(target::T3D, target::T3D));
+        assert!(cube_twin_target(target::T3D, target::T2D), "MKW ID 337: a 3D texture sampled as 2D");
+        assert!(cube_twin_target(target::T3D, target::T2D_ARRAY));
+        assert!(!cube_twin_target(target::T3D, target::T2D_MS));
     }
 }
 
@@ -3197,7 +3401,7 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
                 im.tex.d.target
             };
             // a square 2D array of whole cubes is made cube compatible (image.rs): viewed as a cube where the shader
-            // samples one (environment maps kept as 2D arrays; Turbo 78ece7b)
+            // samples one (environment maps kept as 2D arrays)
             let first = if v.bits & VW_LAYERS != 0 {
                 v.min_layer as u32
             } else {
@@ -3629,18 +3833,19 @@ fn stage_set(
     // Resolution may itself create backing. If this epoch changes, publication
     // declines caching this encoding rather than assigning it the later epoch.
     let memory_generation = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
+    let t_part = super::perf::fine().then(std::time::Instant::now);
     super::queue::wait_diag::phase("descriptors: banks");
     let st = m.stage as usize;
 
     let zero = zero_buffer(g, sub);
     let max_ubo = (g.d.props.limits.max_uniform_buffer_range as u64).min(65536);
-    let need = if super::scale::active() || passdump::active() {
-        [(true, true); 2]
+    let (need, draw0) = if super::scale::active() || passdump::active() {
+        ([(true, true); 2], true)
     } else {
-        bank_needs(m)
+        (facts(m).need, facts(m).draw)
     };
     let (c0, c2, c0s, c2s) = super::perf::timed_fine(super::perf::C::BankNs, || {
-        qs.banks(g, sub, st, dispatch, base_instance, need)
+        qs.banks(g, sub, st, dispatch, base_instance, need, draw0)
     });
     // the handle bank's identity (its bytes are kept while they stay the same)
     let c2id = qs.c2id.get();
@@ -3655,14 +3860,7 @@ fn stage_set(
     let dumping = passdump::active();
     let mut said: Vec<String> = Vec::new();
     // the texture part of the last set of this stage, when nothing it depends on changed
-    let cacheable = !dumping
-        && m.res.iter().all(|(_, r)| match r {
-            Res::Tex { cbuf_slot, ty, .. } | Res::Img { cbuf_slot, ty, .. } => {
-                let (t, s) = tex_slots(*cbuf_slot);
-                (t == 2 || t == -1) && (s == 2 || s == -1) && *ty != 2
-            }
-            _ => true,
-        });
+    let cacheable = !dumping && facts(m).tex_cacheable;
     let mkey = (m as *const Module as usize, m.key);
     let image_gen = g.tables.generation();
     let cached = cacheable
@@ -3676,6 +3874,8 @@ fn stage_set(
     if cached {
         imgs.extend_from_slice(&qs.tpart.borrow()[st].as_ref().unwrap().imgs);
     }
+    note_set_part(only.is_some(), 0, t_part);
+    let t_part = t_part.map(|_| std::time::Instant::now());
     for (b, r) in &m.res {
         let b = *b;
         if cached && matches!(r, Res::Tex { .. } | Res::Img { .. }) {
@@ -3826,6 +4026,17 @@ fn stage_set(
                 }
                 if *written && st < 5 && a != 0 {
                     append::bound(a);
+                }
+                if dumping {
+                    // pass dumps: the storage buffer's address, bound size and its first words in guest memory
+                    let nf = (bound_n.min(160) / 4) as usize;
+                    let f: Vec<f32> = if a != 0 && nf > 0 && super::mem::room(a) >= 4 * nf as u64 {
+                        // SAFETY: guest memory inside a registered pool (identity mapped)
+                        unsafe { core::slice::from_raw_parts(a as *const f32, nf) }.to_vec()
+                    } else {
+                        Vec::new()
+                    };
+                    said.push(format!("s{cb_slot}:{cb_off:#x}@{a:#x}+{bound_n:#x} w{} {f:?}", *written as u8));
                 }
                 let info = match if a != 0 && n != 0 {
                     super::mem::resolve(g, sub, a, n)
@@ -4144,6 +4355,10 @@ fn stage_set(
             said.join("; ")
         );
     }
+    note_set_part(only.is_some(), 1, t_part);
+    if t_part.is_some() {
+        SET_PARTS[only.is_some() as usize][3].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
     if g.d.caps.descbuf {
         let mut sh = qs.shadow.borrow_mut();
         let mut host = set_patch_on().then(|| shadow_slot(&mut sh[st], mkey));
@@ -4246,6 +4461,7 @@ fn patch_set(
         return Some((h.off, true));
     }
     let classes = patch_classes(old, k)?;
+    note_patch(classes);
     // the module's copy to the front, unkeyed while it is patched (`stage_set` writes the front one)
     list[..=i].rotate_right(1);
     list[0].key = None;
@@ -4521,9 +4737,11 @@ fn write_db_set(
     let mut noted = (ring, nr);
     if let Some(h) = host {
         // the set made in the host copy goes into the chunk in one copy
+        let tc = tw.map(|_| std::time::Instant::now());
         unsafe {
             core::ptr::copy_nonoverlapping(h.bytes.as_ptr(), (chunk_ptr + off as usize) as *mut u8, h.bytes.len())
         };
+        note_set_part(partial, 2, tc);
         if !patch {
             h.ring = ring;
             h.nr = nr;
@@ -4626,6 +4844,27 @@ fn db_fill_span(off: &[u64], size: impl Fn(u32) -> usize) -> (usize, usize) {
 mod set_patch_tests {
     use super::*;
 
+    /// NVN2 compute reads the dispatch size at c0 + 0x4 (Ocarina of Time's sky irradiance pass divided by the
+    /// sample count it makes of words 1 and 2); NVN1 at 0x200 only, its words 1..3 stay 0.
+    #[test]
+    fn nvn2_compute_reads_the_dispatch_size_at_0x4() {
+        let word = |v: &[u8], o: usize| u32::from_le_bytes(v[o..o + 4].try_into().unwrap());
+        let mut v = vec![0u8; DRV_SIZE];
+        put_dispatch(&mut v, [8, 8, 1], true);
+        assert_eq!([word(&v, 4), word(&v, 8), word(&v, 12)], [8, 8, 1]);
+        assert_eq!([word(&v, 0x200), word(&v, 0x204), word(&v, 0x208)], [8, 8, 1]);
+        assert_eq!(word(&v, 0), 0);
+        assert_eq!(word(&v, 0x10), 0, "NVN2's per-shader layout from 0x10 is left alone");
+        let mut v1 = vec![0u8; DRV_SIZE];
+        put_dispatch(&mut v1, [8, 8, 1], false);
+        assert_eq!([word(&v1, 4), word(&v1, 8), word(&v1, 12)], [0, 0, 0]);
+        assert_eq!(word(&v1, 0x200), 8);
+        // a compute set that binds c0 itself depends on the dispatch words
+        let mut cs = module(vec![(1, Res::Cbuf { bank: 0 })]);
+        cs.stage = 5;
+        assert!(reads_draw_words(&cs));
+    }
+
     fn module(res: Vec<(u32, Res)>) -> Module {
         Module {
             key: [1; 8],
@@ -4642,6 +4881,7 @@ mod set_patch_tests {
             xfb: None,
             words: Vec::new(),
             per_primitive: Vec::new(),
+            facts: Default::default(),
         }
     }
 
@@ -4676,10 +4916,13 @@ mod set_patch_tests {
         let d = set_deps(&m).unwrap();
         assert_eq!(
             d,
-            SetDeps { c0: true, c2: true, ubo: 0b101, push: true, support: false }
+            SetDeps { c0: true, c2: true, ubo: 0b101, push: true, support: false, draw: false }
         );
         let only_c3 = set_deps(&module(vec![(0, Res::Cbuf { bank: 3 }), (1, Res::Support)])).unwrap();
-        assert_eq!(only_c3, SetDeps { c0: false, c2: false, ubo: 1, push: false, support: true });
+        assert_eq!(
+            only_c3,
+            SetDeps { c0: false, c2: false, ubo: 1, push: false, support: true, draw: false }
+        );
         // texture handles read from a uniform buffer (bindless): no key
         assert!(set_deps(&module(vec![(64, Res::Tex { handle: 1, cbuf_slot: 3, ty: 1 })])).is_none());
         let mut ubo = [(0x1000u64, 0x100u64); 16];
@@ -4689,6 +4932,63 @@ mod set_patch_tests {
         assert_eq!(a, masked_ubos(&ubo, only_c3.ubo), "an unbound uniform buffer does not change the key");
         ubo[0] = (0xb000, 0x100);
         assert_ne!(a, masked_ubos(&ubo, only_c3.ubo), "a bound one does");
+    }
+
+    /// The base instance (graphics, c0 + 0x644) and the dispatch size (compute, c0 + 0x200..0x20c) are in the key only
+    /// of a set that binds c0 or reads a record over those words: a set reading other storage records from c0 is the
+    /// same set for every base instance (MKW: a new base instance at most draws remade its storage buffers).
+    #[test]
+    fn draw_words_count_only_for_sets_that_read_them() {
+        let records = module(vec![(32, Res::Sbuf { cb_slot: 0, cb_off: 0x510, written: false })]);
+        assert!(!reads_draw_words(&records));
+        assert!(!set_deps(&records).unwrap().draw);
+        let bound = module(vec![(0, Res::Cbuf { bank: 0 })]);
+        assert!(reads_draw_words(&bound) && set_deps(&bound).unwrap().draw);
+        // a record whose 12 bytes reach the base instance word, from either side
+        for off in [0x639, 0x640, 0x644, 0x647] {
+            let m = module(vec![(32, Res::Sbuf { cb_slot: 0, cb_off: off, written: false })]);
+            assert!(reads_draw_words(&m), "record at {off:#x}");
+        }
+        let past = module(vec![(32, Res::Sbuf { cb_slot: 0, cb_off: 0x648, written: false })]);
+        assert!(!reads_draw_words(&past));
+        let below = module(vec![(32, Res::Sbuf { cb_slot: 0, cb_off: 0x638, written: false })]);
+        assert!(!reads_draw_words(&below));
+        // compute: the dispatch size
+        let mut cs = module(vec![(32, Res::Sbuf { cb_slot: 0, cb_off: 0x1f8, written: false })]);
+        cs.stage = 5;
+        assert!(reads_draw_words(&cs));
+        cs.res = vec![(32, Res::Sbuf { cb_slot: 0, cb_off: 0x310, written: false })];
+        assert!(!reads_draw_words(&cs));
+        // a handle read from c0
+        let tex = module(vec![(64, Res::Tex { handle: 1, cbuf_slot: 0, ty: 1 })]);
+        assert!(reads_draw_words(&tex));
+        // another bank's record at the same offset is not c0
+        let other = module(vec![(32, Res::Sbuf { cb_slot: 3, cb_off: 0x644, written: false })]);
+        assert!(!reads_draw_words(&other));
+    }
+
+    /// A module's facts, read once, are what the bindings say (the same answers as asking each time).
+    #[test]
+    fn module_facts_match_its_bindings() {
+        let raw = super::super::gmem::CB_SLOT;
+        let cases = [
+            module(vec![(0, Res::Cbuf { bank: 0 }), (64, Res::Tex { handle: 1, cbuf_slot: 2, ty: 1 })]),
+            module(vec![(32, Res::Sbuf { cb_slot: 0, cb_off: 0x110, written: true }), (1, Res::Support)]),
+            module(vec![(64, Res::Tex { handle: 1, cbuf_slot: 3, ty: 1 })]),
+            module(vec![(64, Res::Tex { handle: 1, cbuf_slot: 2, ty: 2 })]),
+            module(vec![(32, Res::Sbuf { cb_slot: raw, cb_off: 0, written: false })]),
+        ];
+        for m in &cases {
+            let f = facts(m);
+            assert_eq!(f.deps, set_deps(m));
+            assert_eq!(f.need, bank_needs(m));
+            assert_eq!(f.draw, reads_draw_words(m));
+            assert!(std::ptr::eq(f, facts(m)), "read once");
+        }
+        assert!(facts(&cases[0]).tex_cacheable && facts(&cases[0]).draw && !facts(&cases[0]).raw);
+        assert!(!facts(&cases[2]).tex_cacheable, "handles from a uniform buffer");
+        assert!(!facts(&cases[3]).tex_cacheable, "a buffer texture");
+        assert!(facts(&cases[4]).raw);
     }
 
     /// One host copy per module, newest first; a new module past `SHADOWS` takes the least recently written one's
@@ -4706,8 +5006,8 @@ mod set_patch_tests {
         shadow_slot(&mut list, (2, [0; 8]));
         assert_eq!(list[0].module.0, 2, "written again: newest");
         assert!(list[0].key.is_some(), "its copy is kept for the writer to replace");
-        let s = shadow_slot(&mut list, (100, [0; 8]));
-        assert_eq!(s.module.0, 100);
+        let s = shadow_slot(&mut list, (SHADOWS + 100, [0; 8]));
+        assert_eq!(s.module.0, SHADOWS + 100);
         assert!(s.key.is_none() && !s.valid, "another module's copy is not this module's set");
         assert_eq!(list.len(), SHADOWS);
         assert!(list.iter().all(|s| s.module.0 != 0), "module 0 was the least recently written");
@@ -5151,8 +5451,7 @@ fn bind_sets(
         }
         for m in mods {
             let st = m.stage as usize;
-            let uses_raw = m.res.iter().any(|(_, r)| matches!(r,
-                Res::Sbuf { cb_slot: super::gmem::CB_SLOT, .. }));
+            let uses_raw = facts(m).raw;
             let raw = if uses_raw { sub.gmem.as_ref().map(|v| v.token()) } else { None };
             let key = set_key(g, sub, qs, m, dispatch, base_instance);
             let hit = key.filter(|_| !uses_raw || raw.is_some()).and_then(|k| {
@@ -5185,7 +5484,13 @@ fn bind_sets(
                         let mkey = (Arc::as_ptr(m) as usize, m.key);
                         let sh = qs.shadow.borrow();
                         let old = sh[st].iter().find(|s| s.module == mkey && s.valid).and_then(|s| s.key.as_ref());
-                        note_set_miss(old, key.as_ref());
+                        let copy = match sh[st].iter().find(|s| s.module == mkey) {
+                            _ if uses_raw => 3,
+                            None => 0,
+                            Some(s) if !s.valid => 1,
+                            Some(_) => 2,
+                        };
+                        note_set_miss(old, key.as_ref(), copy);
                     }
                     let (set, evidence, captured_raw, captured_memory) = super::perf::timed(super::perf::C::SetNs, || {
                         stage_set(g, sub, qs, m, dispatch, base_instance, None)
@@ -5441,6 +5746,7 @@ fn draw_setup_ex(
         super::perf::inc(super::perf::C::SkipNoShader);
         return false;
     };
+    let mut emulated = Vec::new();
     if qs.prog[..5].iter().flatten().any(|m| {
         m.res
             .iter()
@@ -5452,7 +5758,7 @@ fn draw_setup_ex(
             .filter(|m| (m.mesh != 0) == mesh || m.stage == 1)
             .cloned()
             .collect();
-        prepare_storage_bindings(g, sub, qs, &image_mods, [0; 3], base_instance);
+        emulated = prepare_storage_bindings(g, sub, qs, &image_mods, [0; 3], base_instance);
     }
     if !super::perf::timed(super::perf::C::PassNs, || begin_pass(g, sub, qs)) {
         super::perf::inc(super::perf::C::DrawsSkipped);
@@ -5578,7 +5884,7 @@ fn draw_setup_ex(
         }
     }
     // the pixel shader for the blend and alpha state: target 0 blending with a second source (dual-source variant) and
-    // NVN's alpha test (in the shader, as Turbo / nxnative do)
+    // NVN's alpha test (in the shader, as nxnative does)
     let mut dual = false;
     if let Some(i) = mods.iter().position(|m| m.stage == 1) {
         let n = qs.pass_formats.1;
@@ -5619,6 +5925,8 @@ fn draw_setup_ex(
         }
     }
     qs.dual = dual;
+    // storage images bound to an emulated format's view: those stages pack and unpack their texels
+    emulate_storage(g, &mut mods, &emulated);
     let mut key = super::pipe::GfxKey::default();
     for m in &mods {
         key.shaders[m.stage as usize] = m.key;
@@ -5923,7 +6231,7 @@ fn draw_setup_ex(
             let eq: Vec<vk::ColorBlendEquationEXT> = (0..n)
                 .map(|i| {
                     let b = qs.blend[i];
-                    // a second source the shader does not give counts as zero (Turbo / nvn_mtl.m blend_zero_src1)
+                    // a second source the shader does not give counts as zero (nvn_mtl.m blend_zero_src1)
                     let bf = |f: u32| {
                         if i == 0 && qs.dual {
                             blend_factor(f)
@@ -5942,7 +6250,7 @@ fn draw_setup_ex(
                 })
                 .collect();
             // The shader's scalar output stores select components. The dynamic mask is NVN's channel state, disabled
-            // only for locations absent from the output map (Turbo's Vulkan path); do not apply OmapTargets twice.
+            // only for locations absent from the output map; do not apply OmapTargets twice.
             let omap = qs.prog[1].as_ref().and_then(|m| m.omap).unwrap_or(u32::MAX);
             let wm = fragment_write_masks(qs.chmask, omap, n);
             e3.cmd_set_color_blend_enable(cb, 0, &en);
@@ -6524,7 +6832,7 @@ fn dkb_ndsr_copy(g: &Gpu, sub: &mut Sub, qs: &QState, cs: &Module, dispatch: [u3
         return false;
     }
     let st = cs.stage as usize;
-    let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, 0, [(true, false); 2]);
+    let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, 0, [(true, false); 2], true);
     let tb = pool_bases(qs).0;
     let id_of = |handle: u32, cbuf_slot: i32| {
         let word = bank_word(
@@ -6714,7 +7022,7 @@ fn compute_image_ids(
     dispatch: [u32; 3],
 ) -> (Vec<(i32, u32, i32)>, Vec<(i32, u32, i32)>) {
     let st = cs.stage as usize;
-    let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, 0, [(true, false); 2]);
+    let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, 0, [(true, false); 2], true);
     let tb = pool_bases(qs).0;
     let id = |handle: u32, cbuf_slot: i32| {
         if !matches!(tex_slots(cbuf_slot).0, -1 | 2) { return 0; }
@@ -7423,10 +7731,6 @@ fn dispatch_guest(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
         super::perf::inc(super::perf::C::Dispatches);
         return;
     }
-    super::queue::wait_diag::phase("dispatch: compute pipeline");
-    let Some(pipe) = g.compute_pipeline(&cs) else {
-        return;
-    };
     // an indirect dispatch's group counts held to the device's limits, before the dispatch's own bindings
     super::queue::wait_diag::phase("dispatch: indirect/storage preparation");
     let ind = if d.ind != 0 {
@@ -7436,7 +7740,7 @@ fn dispatch_guest(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
         None
     };
     super::perf::inc(super::perf::C::Dispatches);
-    prepare_storage_bindings(
+    let emulated = prepare_storage_bindings(
         g,
         sub,
         qs,
@@ -7444,6 +7748,14 @@ fn dispatch_guest(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
         [d.x as u32, d.y as u32, d.z as u32],
         0,
     );
+    // storage images bound to an emulated format's view: the shader's packing variant (`storemu`)
+    let mut m = [cs];
+    emulate_storage(g, &mut m, &emulated);
+    let [cs] = m;
+    super::queue::wait_diag::phase("dispatch: compute pipeline");
+    let Some(pipe) = g.compute_pipeline(&cs) else {
+        return;
+    };
     unsafe {
         g.dev()
             .cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe)
@@ -7705,6 +8017,7 @@ fn event_wait_passes(g: &Gpu, addr: u64, mode: u32, value: u32) -> bool {
 /// Replays `stream` (canonical records). Returns the offset of a wait that parks the queue, if any.
 pub fn run(g: &Gpu, sub: &mut Sub, qs: &mut QState, stream: &[u8]) -> Option<usize> {
     let mut p = 0usize;
+    let timing = op_times::on();
     while p + 8 <= stream.len() {
         let h = unsafe { rd::<op_hdr>(stream.as_ptr().add(p)) };
         let sz = h.size as usize;
@@ -7714,12 +8027,52 @@ pub fn run(g: &Gpu, sub: &mut Sub, qs: &mut QState, stream: &[u8]) -> Option<usi
         }
         let rec = &stream[p..p + sz];
         super::queue::wait_diag::record(p, h.op, qs.prog[5].as_ref().map(|m| m.key));
-        if !record(g, sub, qs, h.op, rec) {
+        let t0 = timing.then(std::time::Instant::now);
+        let ok = record(g, sub, qs, h.op, rec);
+        if let Some(t0) = t0 {
+            op_times::add(h.op, t0.elapsed().as_nanos() as u64);
+        }
+        if !ok {
             return Some(p);
         }
         p += sz;
     }
     None
+}
+
+/// Replay time by record kind (`NXGFX_OP_TIMES=1`, diagnosis): every 600 presents a `[vk] replay by record` line
+/// with the kinds that took the most time, per frame.
+pub mod op_times {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static NS: [AtomicU64; 128] = [const { AtomicU64::new(0) }; 128];
+    static N: [AtomicU64; 128] = [const { AtomicU64::new(0) }; 128];
+    pub fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("NXGFX_OP_TIMES").as_deref() == Ok("1"))
+    }
+    pub fn add(op: u32, ns: u64) {
+        let i = (op as usize).min(127);
+        NS[i].fetch_add(ns, Ordering::Relaxed);
+        N[i].fetch_add(1, Ordering::Relaxed);
+    }
+    /// Called once a present: the line every 600.
+    pub fn frame(frame: u64) {
+        if !on() || frame % 600 != 0 {
+            return;
+        }
+        let mut v: Vec<(u64, u64, usize)> = (0..128)
+            .map(|i| (NS[i].swap(0, Ordering::Relaxed), N[i].swap(0, Ordering::Relaxed), i))
+            .filter(|x| x.1 > 0)
+            .collect();
+        v.sort_unstable_by(|a, b| b.0.cmp(&a.0));
+        let total: u64 = v.iter().map(|x| x.0).sum();
+        let parts: Vec<String> = v
+            .iter()
+            .take(14)
+            .map(|&(ns, n, i)| format!("op {i}: {:.2} ms ({:.0} x {:.2} us)", ns as f64 / 600.0 / 1e6, n as f64 / 600.0, ns as f64 / n as f64 / 1e3))
+            .collect();
+        crate::vklog!("replay by record, per frame over the last 600: {:.2} ms in all; {}", total as f64 / 600.0 / 1e6, parts.join(", "));
+    }
 }
 
 /// One record; false = this wait parks the queue.
@@ -7932,6 +8285,9 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
                 };
                 if i < qs.rt_n && !r.color[i].is_null() {
                     let t = unsafe { record_texture::<p_set_rt>(rec, i, r.color[i]) };
+                    if !t.valid() {
+                        crate::log::red_once("SetRenderTargets: a colour target is not an initialized texture");
+                    }
                     if t.valid() {
                         qs.rt[i] = Rt {
                             tex: Some(t),
@@ -7963,7 +8319,7 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             }
         }
         op::CLEAR_COLOR => {
-            // conditional rendering covers clears too (agl's clear-once records; Turbo render_skip)
+            // conditional rendering covers clears too (agl's clear-once records)
             if !qs.render_on {
                 return true;
             }
@@ -8877,7 +9233,7 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
         }
         op::RESOLVE_DEPTH => {
             // NVN's depth resolve finishes the bound depth target's compressed / culled state so it can be read as a
-            // texture (Turbo leaves it a stub). Vulkan keeps no such state: what remains is that its writes so far are
+            // texture. Vulkan keeps no such state: what remains is that its writes so far are
             // done and visible to what follows: the pass ends there and a barrier follows.
             end_pass(g, sub, qs);
             barrier(g, sub);

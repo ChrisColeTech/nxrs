@@ -1,4 +1,4 @@
-//! Write watches for debugging (Turbo vk_ctl.c `wpage` / `wtrace`): the watched guest pages are guard pages; each
+//! Write watches for debugging (the control pipe's `wpage` / `wtrace`): the watched guest pages are guard pages; each
 //! write to them is logged with the guest function that made it (`nxrt::fault::describe_host`) and the value range,
 //! then the page is guarded again after that one instruction (single step). At most 600 lines a watch.
 

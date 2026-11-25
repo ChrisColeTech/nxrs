@@ -1,5 +1,5 @@
 //! The software keyboard (nn::swkbd: ShowKeyboard and the InlineKeyboard), answered on the host. A game asking for
-//! text gets a text box over its window (Turbo's keyboard window: a dark panel, the Hind font, typed on the PC's
+//! text gets a text box over its window (a dark panel, the Hind font, typed on the PC's
 //! keyboard in any layout; Enter = OK, Esc = keep the default text). The default is the game's initial text, else
 //! the `keyboard_text` setting ("Player"). With no window to show it over (`NXOS_SWKBD=auto`, a headless run) the
 //! default is answered at once. nxnative `hle_swkbd.c`: the ShowKeyboardArg layout and the inline keyboard's

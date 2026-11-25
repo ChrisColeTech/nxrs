@@ -3,8 +3,6 @@
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Facts {
-    /// built by the Turbo engine (or from before the engine choice)
-    pub turbo: bool,
     /// its build is there and is the one the entry asks for (`Game::hasBuild`)
     pub has_build: bool,
     /// built, but with another update than the one chosen now
@@ -17,9 +15,9 @@ pub struct Facts {
 }
 
 impl Facts {
-    /// Play can start it: an nxrs build that is there.
+    /// Play can start it: its build is there.
     pub fn playable(&self) -> bool {
-        !self.turbo && self.has_build
+        self.has_build
     }
     /// A built game whose in-place package cannot be reached: one rule for the cards and the list.
     pub fn source_offline(&self) -> bool {

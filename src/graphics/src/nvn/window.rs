@@ -200,6 +200,7 @@ nvn_fns! {
         let tk = o.ticket[i as usize & 3];
         let until = o.pace;
         let t_in = super::device::now_ns();
+        vk::queue::chain_trace::note("acq_in", wait, tk);
         super::blocking(|| {
             if wait > 0 { sleep_until(until); }
             // the GPU side only: the vsync pacing above is not the GPU's
@@ -208,6 +209,7 @@ nvn_fns! {
             vk::perf::add(vk::perf::C::WaitAcquireNs, t0.elapsed().as_nanos() as u64);
         });
         frame_started(t_in, super::device::now_ns());
+        vk::queue::chain_trace::note("acq_out", i as u64, 0);
         o.ticket[i as usize & 3] = 0;
         if !s.is_null() {
             let so = &mut *(s as *mut sync_t);

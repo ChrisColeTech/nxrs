@@ -27,15 +27,14 @@ fn outcome(app: &mut App) -> i32 {
         if let Some(o) = app.outcomes.first().cloned() {
             let ok = match &o {
                 Outcome::Smoke(ok) => *ok,
-                Outcome::Dlc(ok, _) | Outcome::Update(ok, _) | Outcome::SaveCopy(ok, _) => *ok,
+                Outcome::Dlc(ok, _) | Outcome::Update(ok, _) => *ok,
             };
             let prefix = match &o {
                 Outcome::Dlc(..) => "DLC",
                 Outcome::Update(..) => "Updates",
-                Outcome::SaveCopy(..) => "Saves",
                 Outcome::Smoke(_) => "",
             };
-            if let Outcome::Dlc(_, d) | Outcome::Update(_, d) | Outcome::SaveCopy(_, d) = &o {
+            if let Outcome::Dlc(_, d) | Outcome::Update(_, d) = &o {
                 lines(prefix, ok, d);
             }
             return i32::from(!ok);
@@ -87,8 +86,6 @@ pub fn run(app: &mut App, o: &Options) -> i32 {
         app.choose_update(choice);
     } else if !o.install_update.is_empty() {
         app.install_update_packages(&o.install_update, false);
-    } else if o.copy_saves {
-        app.copy_saves(false, false);
     } else if o.build {
         app.start_build();
     } else if source_changed {

@@ -117,7 +117,7 @@ impl Toolchain {
     pub fn keys_exist(&self) -> bool {
         is_file(&self.keys)
     }
-    /// The launcher's environment plus `SWR_PROD_KEYS`.
+    /// The launcher's environment plus `NXRS_PROD_KEYS`.
     pub fn environment(&self) -> Vec<(String, String)> {
         if self.keys.is_empty() {
             Vec::new()

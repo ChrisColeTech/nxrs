@@ -19,7 +19,7 @@ pub fn apply(app: &mut App, o: &Options) -> Result<(), i32> {
         && !app.set_engine(engine)
     {
         eprintln!(
-            "Cannot set the engine: select a game that is not running or building, and use nxrs (Turbo is no longer supported)"
+            "Cannot set the engine: select a game that is not running or building, and use nxrs (the only engine)"
         );
         return Err(2);
     }

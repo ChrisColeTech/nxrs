@@ -91,7 +91,7 @@ fn find<T>(entries: &[T], key: impl Fn(&T) -> u64, offset: u64) -> usize {
 
 impl Patched {
     /// The patched RomFS section: `patch` is the update's RomFS section (type 4), `base` the game's RomFS section
-    /// (None for an update without its game, which is refused with Turbo's reason).
+    /// (None for an update without its game, which is refused with a reason).
     pub fn new(patch: SectionStorage, base: Option<Arc<dyn Storage>>) -> Result<Patched> {
         let path = patch.blob.path.display().to_string();
         let fs = &patch.fs;

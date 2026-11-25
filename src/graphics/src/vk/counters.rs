@@ -53,7 +53,7 @@ static CLOCK: Mutex<Clock> = Mutex::new(Clock {
     prev_end: 0,
 });
 
-/// Which idle time reports leave out (Turbo 283c6b6 `rep_gaps`): the time the GPU sat idle between the submissions of
+/// Which idle time reports leave out: the time the GPU sat idle between the submissions of
 /// one frame (2, the default: present to present), or only inside one submission (1, nxnative's rule:
 /// `NXGFX_REP_GAPS=1`). A game that spans its frame with two reports read the host's translation between its
 /// submissions as GPU time with the second (Donkey Kong Bananza, 8 submissions a frame, sat at its smallest size).
@@ -129,7 +129,7 @@ pub fn vis() -> u64 {
     VIS.load(Ordering::Relaxed)
 }
 
-/// Conditional rendering (Turbo `vk_replay.c` render_cond): SetRenderEnableConditional compares the 64-bit counters
+/// Conditional rendering: SetRenderEnableConditional compares the 64-bit counters
 /// at addr and addr + 16. agl wraps its clears in it: the CPU sets the record to 1 when a target needs a clear, each
 /// clear is followed by ReportCounter(TIMESTAMP_TOP) there, and a timestamp's counter field is 0, so a target already
 /// cleared is not cleared again. A timestamp report replayed but not landed yet (it lands when its submission

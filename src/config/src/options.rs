@@ -1,5 +1,6 @@
-//! The option table: every key Turbo's runtime reads from the game's ini, its default, and the comment written above
-//! it. The order is the file's order. Values are normalised by `normalise` (Turbo's ranges) before anything reads them.
+//! The option table: every key the runtime reads from the game's ini, its default, and the comment written above
+//! it. The order is the file's order. Values are normalised by `normalise` (each key's range) before anything reads
+//! them.
 
 pub struct Opt {
     pub key: &'static str,
@@ -55,8 +56,11 @@ pub const SECTIONS: &[Section] = &[
             o!("home_quit", "1", "1 = holding a controller's Home (logo) button 2 s asks whether to quit; 0 = off"),
             o!("rumble", "1", "1 = the game's rumble reaches the controllers; 0 = off. Applies live"),
             o!("rumble_gain", "1.00", "Rumble strength, 0 to 3 (0 = silent, 1 = as the game sends it). Applies live"),
-            o!("rumble_min", "0", "Rumble cutoff, 0 to 0.9: levels below it stay silent and the rest is stretched over the full range
-;   (for controllers with rotating motors that a game's quiet rumble keeps running: Mario Kart 8 Deluxe 0.45). Applies live"),
+            o!("rumble_min", "0", "Standard rumble only: a cutoff, 0 to 0.9: levels below it stay silent and the rest is stretched over
+;   the full range (for controllers with rotating motors that a game's quiet rumble keeps running: Mario Kart 8 Deluxe 0.45).
+;   Applies live"),
+            o!("hd_rumble", "1", "HD Rumble: the game's vibration in full detail on a Switch Pro Controller or Joy-Con; 0 = the standard
+;   rumble. Applies live"),
             o!("pad_press_to_join", "0", "1 = a controller is no player until one of its buttons is pressed, then it is the lowest player free;
 ;   0 = each controller connected is a player at once (the one it had before, else player 1 first)"),
             o!("pad_merge", "0", "1 = every controller is player 1 together; 0 = each controller is a player of its own"),
@@ -130,7 +134,7 @@ pub const SECTIONS: &[Section] = &[
     },
 ];
 
-/// Turbo's Spanish key names (still read, written back under the current name).
+/// Older Spanish key names (still read, written back under the current name).
 pub const ALIASES: &[(&str, &str)] = &[
     ("modo_tv", "docked"),
     ("idioma", "language"),
@@ -153,7 +157,7 @@ pub const ALIASES: &[(&str, &str)] = &[
     ("controles_opacidad", "touch_controls_opacity"),
 ];
 
-/// Keys Turbo removed: read and dropped.
+/// Keys no longer used: read and dropped.
 pub const REMOVED: &[&str] = &["vsync"];
 
 pub fn canonical(key: &str) -> &str {
@@ -207,7 +211,7 @@ fn int(v: &str) -> i64 {
     }
 }
 
-/// A value as the engine uses it (Turbo's ranges and fallbacks), or `None` to drop the key.
+/// A value as the engine uses it (ranges and fallbacks), or `None` to drop the key.
 pub fn normalise(key: &str, v: &str) -> Option<String> {
     let v = v.trim();
     Some(match key {
@@ -258,7 +262,7 @@ pub fn normalise(key: &str, v: &str) -> Option<String> {
         }
         "renderer" => {
             if v != "vulkan" && !v.is_empty() {
-                // OpenGL and Eden are Turbo's other renderers; this engine has the NVN layer on Vulkan only (the
+                // OpenGL and Eden are other renderers' names; this engine has the NVN layer on Vulkan only (the
                 // owner decides whether OpenGL comes back): said once, not silently
                 static SAID: std::sync::Once = std::sync::Once::new();
                 SAID.call_once(|| {
@@ -304,7 +308,7 @@ mod tests {
 /// engine's ini). Written from `SECTIONS`, so the page is the table; `settings_page_is_current` checks it.
 pub fn settings_markdown() -> String {
     let mut s = String::from(
-        "# Settings\n\nThe game's ini (`<game>.ini` beside the executable; `NXRS_INI` names another) holds these keys. A missing key takes its\ndefault; values outside a key's range are brought into it when read. Turbo's Spanish key names are still read and written\nback under these names. Environment switches for diagnostics and tests are listed in [env_switches.tsv](env_switches.tsv).\n\nThis page is generated from `src/config/src/options.rs` (`cargo test -p config settings_page_is_current` checks it).\n",
+        "# Settings\n\nThe game's ini (`<game>.ini` beside the executable; `NXRS_INI` names another) holds these keys. A missing key takes its\ndefault; values outside a key's range are brought into it when read. Older Spanish key names are still read and written\nback under these names. Environment switches for diagnostics and tests are listed in [env_switches.tsv](env_switches.tsv).\n\nThis page is generated from `src/config/src/options.rs` (`cargo test -p config settings_page_is_current` checks it).\n",
     );
     for sec in SECTIONS {
         s += &format!(

@@ -1,6 +1,6 @@
 //! nxnative's jump-table cases (`dm/tools/tests/test_jump_solver.py`): each offset jump table form a game brought, with
-//! that game's instruction sequence, through this translator's resolver (`xlate::jumptables`, Switch2RECOMP's
-//! method) instead of nxnative's `jump_solver.py`. A case nxnative proves and this resolver does not is a test of its
+//! that game's instruction sequence, through this translator's resolver (`xlate::jumptables`, this
+//! engine's method) instead of nxnative's `jump_solver.py`. A case nxnative proves and this resolver does not is a test of its
 //! own, `#[ignore]`d with what is missing, so the gap is listed and runs with `--ignored` (2026-11-20: 8 forms proved,
 //! 4 not: the shifted 64-bit index, the complemented index, a mask's excluded top value, a bit test above a mask).
 

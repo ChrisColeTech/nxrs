@@ -14,7 +14,6 @@ pub enum Action {
     Properties(usize),
     InstallDlc,
     InstallUpdates,
-    CopySaves,
     RemoveGame,
     InstallKeys,
     OpenKeysFolder,
@@ -38,8 +37,6 @@ pub enum Action {
     CardActivate(String),
     /// answers of question boxes
     ConfirmRemove(String),
-    ConfirmCopySaves,
-    OfferedCopy(String, bool),
     ConfirmClose,
 }
 
@@ -49,7 +46,6 @@ pub enum Outcome {
     Smoke(bool),
     Dlc(bool, String),
     Update(bool, String),
-    SaveCopy(bool, String),
 }
 
 /// Why a DLC sync runs: what its end says and does.

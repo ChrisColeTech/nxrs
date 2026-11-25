@@ -36,7 +36,6 @@ pub struct Options {
     pub show_engine_settings: bool,
     pub show_play_settings: bool,
     pub nxrs_doctor: bool,
-    pub copy_saves: bool,
     pub smoke_build: Option<String>,
     pub build_output: Option<String>,
 }
@@ -53,7 +52,6 @@ impl Options {
                 || !self.remove_update.is_empty()
                 || self.update_choice.is_some()
                 || self.source.is_some()
-                || self.copy_saves
                 || self.nxrs_doctor)
     }
 }
@@ -82,7 +80,7 @@ pub fn command() -> Command {
     Command::new("nxrs")
         .about("nxrs — native game library and build launcher")
         .version(env!("NXRS_VERSION"))
-        .arg(value("root", "directory", "Kept for older scripts (the Turbo engine folder); has no effect"))
+        .arg(value("root", "directory", "Kept for older scripts; has no effect"))
         .arg(value("library", "file", "Use a specific library file"))
         .arg(value("import-build", "exe", "Import an existing native game executable"))
         .arg(flag("demo", "Show a non-persistent preview library"))
@@ -114,7 +112,6 @@ pub fn command() -> Command {
         .arg(flag("show-engine-settings", "Open Settings > Engine (nxrs-build doctor runs there)"))
         .arg(flag("show-play-settings", "Open Settings > Play (screen mode, background pause and mute: every game)"))
         .arg(flag("nxrs-doctor", "Run nxrs-build doctor for the configured nxrs-build, print its checks and exit (0 = all ok)"))
-        .arg(flag("copy-saves", "Copy the --select-title game's saves from its Turbo build into its nxrs build (backup first) and exit"))
         .arg(value("smoke-build", "input", "Build a synthetic test input and exit (diagnostics)"))
         .arg(value("build-output", "directory", "Output folder for --smoke-build"))
 }
@@ -173,7 +170,6 @@ fn from_matches(m: &ArgMatches) -> Options {
         show_engine_settings: f("show-engine-settings"),
         show_play_settings: f("show-play-settings"),
         nxrs_doctor: f("nxrs-doctor"),
-        copy_saves: f("copy-saves"),
         smoke_build: s("smoke-build"),
         build_output: s("build-output"),
     }

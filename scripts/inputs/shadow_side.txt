@@ -1,0 +1,9 @@
+# Space Colony ARK's first side-on ledge (reached ~24 s into shadow_boost.txt, where forward does nothing), 2.5 s:
+# stick right off the ledge, then B (jump) and Y (homing attack) toward the road beyond; shadow_boost.txt follows.
+# Right held longer than this runs Shadow off the far side into the void.
+0 0 30000 0 0 0
+1500 2 30000 0 0 0
+1700 0 30000 0 0 0
+1750 8 30000 0 0 0
+1900 0 30000 0 0 0
+2500 0 30000 0 0 0

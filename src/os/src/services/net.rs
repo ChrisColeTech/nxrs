@@ -1,9 +1,9 @@
-//! Services a game opens at start that the host answers offline (Turbo 13a2693, 362b172):
+//! Services a game opens at start that the host answers offline:
 //! - `btm:u` (Bluetooth LE): command 0 hands out IBtmUserCore, whose four Acquire…Event commands (scan, connection,
 //!   service discovery, MTU) answer "valid" with an event that never fires; everything else succeeds and finds
 //!   nothing (Pokémon Violet 4.0.0 aborted at start without the interface, for the Pokémon GO Plus +);
 //! - `bt` (IBluetoothUser): command 9 RegisterBleEvent hands out an event that never fires, the rest succeed (Violet
-//!   4.0.0 opens it after btm:u and aborted when sm refused it; Turbo answers it with its generic stub);
+//!   4.0.0 opens it after btm:u and aborted when sm refused it);
 //! - `bsd:u` / `bsd:s`: no network (a socket other than loopback UDP answers -1 with ENETDOWN), but event descriptors
 //!   and loopback UDP work (`socket.rs`, the table the by-name takeovers share; EventFd is 31):
 //!   a counter written, read, closed and polled, as newer network libraries make one for their worker's wake-up at
@@ -228,7 +228,7 @@ mod tests {
         )
     }
 
-    /// btm:u as Turbo 13a2693 answers it: command 0 hands out IBtmUserCore; its four Acquire...Event commands (0,
+    /// btm:u: command 0 hands out IBtmUserCore; its four Acquire...Event commands (0,
     /// 17, 26, 33) answer true with an event; the rest succeed with nothing.
     #[test]
     fn btm_u_hands_out_its_interface() {
@@ -250,7 +250,7 @@ mod tests {
         assert_eq!((r.result, r.copy.len()), (0, 0));
     }
 
-    /// bsd event descriptors over IPC (Turbo 362b172): EventFd, Write adds to the counter, Poll reports it readable
+    /// bsd event descriptors over IPC: EventFd, Write adds to the counter, Poll reports it readable
     /// (and writable), Read takes it (then, non-blocking, EAGAIN 35), Close; the registrations past command 33 succeed.
     #[test]
     fn bsd_event_descriptors() {

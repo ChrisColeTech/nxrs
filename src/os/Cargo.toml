@@ -26,6 +26,8 @@ profiles = { path = "../profiles" }
 translator = { path = "../translator" }
 nxgfx = { package = "graphics", path = "../graphics" }
 nxconfig = { package = "config", path = "../config" }
+# HD rumble core (RenHDrum 0.5.0, vendored; third_party/renhdrum/VERSION): packets, pacing and envelopes, no I/O
+renhdrum = { path = "third_party/renhdrum" }
 
 [[bin]]
 name = "nxinput"

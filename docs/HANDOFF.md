@@ -11,10 +11,12 @@ Read this, then `AGENTS.md`, `docs/31-DELEGATION-PROTOCOL.md` (binding) and the 
   `src/launcher/src/model/model_tests.rs`).
 - The owner has asked for commits throughout: commit accepted work with clear messages and push to `origin main`
   (`git push origin gameplay-harness:main`). Commit footer: `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>`.
-- `dist/nxrs` = the HEAD engine + launcher (contract 2). Build: `pwsh -NoProfile -File scripts/build/build.ps1 -Jobs 4
+- `dist/nxrs` = the HEAD engine + launcher (contract 2). Build: `pwsh -NoProfile -File scripts/build/build.ps1
   -SkipGnu -KeepCache` (~4 min). Rebuild a title after an engine change:
   `dist\nxrs\nxrs.exe --select-title "<library title>" --build` (relinks in ~30-60 s).
-- **One compiler-heavy command and one game at a time on this machine**, never a build while a game runs. Kill by PID
+- **Builds and games may run concurrently at full parallelism** (owner, 2026-11-25: new hardware, Core Ultra 9
+  285K + new GPU; the hypervisor feature behind the crash is disabled), except a perf-measurement run, which runs
+  alone. Two RTX 5090s: `--env NXGFX_GPU=1` puts a game on the second. Kill by PID
   only. Run long commands in the foreground (< 10 min) or poll them yourself: **never end a turn waiting on a background
   notification** (an agent lost 4 hours that way).
 

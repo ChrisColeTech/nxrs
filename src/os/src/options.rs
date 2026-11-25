@@ -1,9 +1,9 @@
-//! The game's settings the os layer reads (Turbo's ini keys, published by `nxconfig`): `docked`, `language`,
+//! The game's settings the os layer reads (ini keys, published by `nxconfig`): `docked`, `language`,
 //! `keyboard_text`, `audio_slowdown`. An environment variable `NXOS_<KEY>` (upper case) overrides the ini for a test.
 //! Changes made while the game runs (the ini edited, a hotkey) apply live: the operation mode (with the console's
 //! notification to the game) and the sound's slowdown.
 
-/// A setting's value (the ini's, else Turbo's default).
+/// A setting's value (the ini's, else the default).
 pub fn get(key: &str) -> String {
     if let Ok(v) = std::env::var(format!("NXOS_{}", key.to_ascii_uppercase())) {
         return v;
@@ -68,7 +68,7 @@ pub fn launch_param_bytes(spec: &str, lang8: u64) -> (Vec<u8>, Vec<String>) {
     (p, bad)
 }
 
-/// Turbo's `language` numbers (nn::settings::Language order) as language codes.
+/// The `language` numbers (nn::settings::Language order) as language codes.
 pub const LANGUAGES: [&str; 15] = [
     "ja", "en-US", "fr", "de", "it", "es", "zh-CN", "ko", "nl", "pt", "ru", "zh-TW", "en-GB",
     "fr-CA", "es-419",

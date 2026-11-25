@@ -5,7 +5,7 @@ use super::App;
 use crate::model::game::Game;
 use crate::model::path_text::native;
 use crate::model::update_text;
-use crate::services::{build_facts, dlc_files, files, saves, update_files};
+use crate::services::{build_facts, dlc_files, files, update_files};
 
 impl App {
     /// The DLC list's rows for `packages` (a Properties draft's, or the game's).
@@ -29,15 +29,6 @@ impl App {
     }
     pub fn exists(&self, path: &str) -> bool {
         files::exists(path)
-    }
-    /// Copy saves can run for the selected game.
-    pub fn can_copy_saves(&self) -> bool {
-        self.selected_game().is_some_and(|g| {
-            !self.demo
-                && self.facts_of(&g.id).playable()
-                && !self.busy(&g.id)
-                && saves::turbo_build_has_saves(g)
-        })
     }
     pub fn has_log(&self) -> bool {
         self.selected_game().is_some_and(build_facts::has_log)

@@ -69,10 +69,10 @@ fn env_flag(name: &str) -> Option<bool> {
 }
 
 /// What start-up decides, once per process (from `kernel::init`, before any guest thread runs):
-/// - the system counter: 19.2 MHz for a Switch program, 31.25 MHz for a Switch 2 one (`SWR_TICK_HZ=<Hz>` sets it);
-/// - the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`SWR_XMON=1` / `SWR_NO_XMON=1`);
+/// - the system counter: 19.2 MHz for a Switch program, 31.25 MHz for a Switch 2 one (`NXRS_TICK_HZ=<Hz>` sets it);
+/// - the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`NXRS_XMON=1` / `NXRS_NO_XMON=1`);
 /// - a map past the application pool fails (ResultLimitReached) for the titles that need it (Pokemon Legends: Z-A,
-///   Ocarina of Time; `SWR_MAP_LIMIT=1/0` for any title);
+///   Ocarina of Time; `NXRS_MAP_LIMIT=1/0` for any title);
 /// - the lazy heap (`NXRT_LAZY_HEAP=1`);
 /// - the process's memory cap (`memory_cap`).
 pub fn startup(space: &Space) {
@@ -86,7 +86,7 @@ pub fn startup(space: &Space) {
     } else {
         crate::rt::TICK_HZ_SWITCH1
     };
-    if let Some(v) = std::env::var("SWR_TICK_HZ")
+    if let Some(v) = std::env::var("NXRS_TICK_HZ")
         .ok()
         .and_then(|v| v.trim().parse::<f64>().ok())
         .filter(|v| *v >= 1e6)
@@ -94,10 +94,10 @@ pub fn startup(space: &Space) {
         hz = v as u32;
     }
     crate::rt::set_tick_hz(hz);
-    let xmon = env_flag("SWR_XMON")
-        .unwrap_or_else(|| env_flag("SWR_NO_XMON").map_or(!p.switch2(), |no| !no));
+    let xmon = env_flag("NXRS_XMON")
+        .unwrap_or_else(|| env_flag("NXRS_NO_XMON").map_or(!p.switch2(), |no| !no));
     crate::cpu::set_exclusive_monitor(xmon);
-    let limit = env_flag("SWR_MAP_LIMIT").unwrap_or(matches!(
+    let limit = env_flag("NXRS_MAP_LIMIT").unwrap_or(matches!(
         p.program_id,
         0x0100_F430_08C4_4000 | 0x0400_4860_24DE_C000
     ));
@@ -120,7 +120,7 @@ pub fn startup(space: &Space) {
     crate::profile::start(nxconfig::flag("profile"));
     crate::hostprof::start();
     crate::rt::log(&format!(
-        "program {:016x}: system tick {:.2} MHz{}; exclusive monitor {} (SWR_XMON=1 / SWR_NO_XMON=1); maps past the pool {}",
+        "program {:016x}: system tick {:.2} MHz{}; exclusive monitor {} (NXRS_XMON=1 / NXRS_NO_XMON=1); maps past the pool {}",
         p.program_id,
         hz as f64 / 1e6,
         if p.switch2() { " (a Switch 2 program)" } else { "" },
@@ -156,7 +156,7 @@ static MEMORY_CAP: OnceLock<u64> = OnceLock::new();
 /// past the limit allocations fail in this process (it stops, with the reason in its log) instead of in every other
 /// program. On 2026-11-18 Ocarina of Time's process grew by 1 GB a second (the NVIDIA driver's own allocations while
 /// pipelines were made) and Windows went down with it. The limit: half of the machine's memory, at least 12 GB and
-/// at most 32 GB; `SWR_MEMORY_CAP_GB` sets it, 0 turns it off.
+/// at most 32 GB; `NXRS_MEMORY_CAP_GB` sets it, 0 turns it off.
 #[cfg(windows)]
 pub fn memory_cap(pool: u64) {
     use windows_sys::Win32::System::JobObjects::*;
@@ -172,7 +172,7 @@ pub fn memory_cap(pool: u64) {
     let mut cap = (ms.ullTotalPhys / 2)
         .clamp(12 << 30, 32 << 30)
         .max((pool + (8 << 30)).min(ms.ullTotalPhys));
-    if let Some(gb) = std::env::var("SWR_MEMORY_CAP_GB")
+    if let Some(gb) = std::env::var("NXRS_MEMORY_CAP_GB")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
     {
@@ -180,7 +180,7 @@ pub fn memory_cap(pool: u64) {
     }
     let _ = MEMORY_CAP.set(cap);
     if cap == 0 {
-        crate::rt::log("process memory cap: off (SWR_MEMORY_CAP_GB=0)");
+        crate::rt::log("process memory cap: off (NXRS_MEMORY_CAP_GB=0)");
         return;
     }
     // SAFETY: job object calls on handles we own; the job stays open for the life of the process
@@ -203,7 +203,7 @@ pub fn memory_cap(pool: u64) {
     };
     if ok {
         crate::rt::log(&format!(
-            "process memory cap: {} MB of committed memory (half of the machine's {} MB, between 12 and 32 GB; SWR_MEMORY_CAP_GB sets it, 0 = off). Past it this game stops instead of the machine",
+            "process memory cap: {} MB of committed memory (half of the machine's {} MB, between 12 and 32 GB; NXRS_MEMORY_CAP_GB sets it, 0 = off). Past it this game stops instead of the machine",
             cap >> 20,
             ms.ullTotalPhys >> 20
         ));
@@ -223,7 +223,7 @@ pub fn memory_cap(pool: u64) {
     let mut cap = (total / 2)
         .clamp(12 << 30, 32 << 30)
         .max((pool + (8 << 30)).min(total));
-    if let Some(gb) = std::env::var("SWR_MEMORY_CAP_GB")
+    if let Some(gb) = std::env::var("NXRS_MEMORY_CAP_GB")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
     {
@@ -231,12 +231,12 @@ pub fn memory_cap(pool: u64) {
     }
     let _ = MEMORY_CAP.set(cap);
     if cap == 0 {
-        crate::rt::log("process memory cap: off (SWR_MEMORY_CAP_GB=0)");
+        crate::rt::log("process memory cap: off (NXRS_MEMORY_CAP_GB=0)");
         return;
     }
     match crate::linux::memory_cap(cap) {
         Ok(how) => crate::rt::log(&format!(
-            "process memory cap: {} MB ({how}; half of the machine's {} MB, between 12 and 32 GB; SWR_MEMORY_CAP_GB sets it, 0 = off). Past it this game stops instead of the machine",
+            "process memory cap: {} MB ({how}; half of the machine's {} MB, between 12 and 32 GB; NXRS_MEMORY_CAP_GB sets it, 0 = off). Past it this game stops instead of the machine",
             cap >> 20,
             total >> 20
         )),
@@ -518,7 +518,7 @@ fn run(exefs: &Path, modules: Vec<Module>) -> Result<(), String> {
 
 #[cfg(test)]
 mod option_tests {
-    //! The ini options the runtime honours at start-up (Turbo runtime/main.c's option table): one test each.
+    //! The ini options the runtime honours at start-up: one test each.
     use super::*;
 
     /// `memory_gb`: 0 automatic (the console's 3285 MB, Tears of the Kingdom 5.2 GB, a Switch 2 program 9 GB), 4 the
@@ -550,8 +550,8 @@ mod option_tests {
         assert!(nxconfig::apply_arg("--memory_gb=0"));
     }
 
-    /// `null_trap`: Turbo makes the guest's page 0 (its first 64 KB) read-only so a write through NULL stops the
-    /// game with a log. Guest addresses are host addresses here and Windows maps nothing below 64 KB, so such a
+    /// `null_trap`: the guest's page 0 (its first 64 KB) is read-only so a write through NULL stops the game with
+    /// a log. Guest addresses are host addresses here and Windows maps nothing below 64 KB, so such a
     /// write always faults (the fault handler reports it): the option is on by construction, and start-up says so.
     #[test]
     fn null_trap_page_zero_never_maps() {
@@ -562,7 +562,7 @@ mod option_tests {
         }
     }
 
-    /// `log`: 2 turns every trace on (Turbo's g_verbose), 1 none; `NXRT_TRACE` names its own set over it.
+    /// `log`: 2 turns every trace on, 1 none; `NXRT_TRACE` names its own set over it.
     #[test]
     fn log_two_traces_everything() {
         assert_eq!(crate::rt::trace_spec(None, 1), "");

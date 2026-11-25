@@ -243,7 +243,7 @@ pub fn diag_dump() {
         s.push_str(&format!("{k:?}\t{w}\t{n}\n"));
     }
     s.push_str(&nxconfig::ctl::run("pads"));
-    // every guest thread: what it waits for, the host function it is in, its guest frames (Turbo's F5)
+    // every guest thread: what it waits for, the host function it is in, its guest frames (F5)
     let threads = nxrt::kernel::try_get()
         .map(|_| nxrt::kernel::dump_threads())
         .unwrap_or_default();

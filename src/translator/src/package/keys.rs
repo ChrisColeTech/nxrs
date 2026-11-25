@@ -102,22 +102,22 @@ impl Keys {
     }
 }
 
-/// nsp.py `_keys_path`: the explicit path, else SWR_PROD_KEYS, else the launcher's copy; a missing file is the
-/// error Turbo gives.
+/// The explicit path, else NXRS_PROD_KEYS, else the launcher's copy; a missing file is an error that says how to
+/// install keys.
 pub fn keys_path(explicit: Option<&Path>) -> Result<PathBuf> {
     let p = explicit.map(Path::to_path_buf).or_else(default_keys_path);
     match p {
         Some(p) if p.is_file() => Ok(crate::package::io::abspath(&p)),
         _ => Err(PackageError::Format(
-            "Nintendo keys are not installed. In the launcher use Keys > Install keys, or set SWR_PROD_KEYS.".into(),
+            "Nintendo keys are not installed. In the launcher use Keys > Install keys, or set NXRS_PROD_KEYS.".into(),
         )),
     }
 }
 
-/// env SWR_PROD_KEYS, else the launcher's data folder's `keys\prod.keys`: %LOCALAPPDATA%\nxrs (launcher d538b31),
+/// env NXRS_PROD_KEYS, else the launcher's data folder's `keys\prod.keys`: %LOCALAPPDATA%\nxrs (launcher d538b31),
 /// then the older %LOCALAPPDATA%\RecompLauncher\RecompLauncher; the first that exists.
 pub fn default_keys_path() -> Option<PathBuf> {
-    if let Some(p) = std::env::var_os("SWR_PROD_KEYS") {
+    if let Some(p) = std::env::var_os("NXRS_PROD_KEYS") {
         if !p.is_empty() {
             return Some(PathBuf::from(p));
         }

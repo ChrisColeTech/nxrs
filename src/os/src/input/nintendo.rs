@@ -42,48 +42,6 @@ pub fn rumble_report(counter: u8, rumble: &[u8; 8]) -> Vec<u8> {
     o
 }
 
-/// One side's HD rumble (4 bytes) for a high band (frequency, amplitude) and a low band, as nn::hid::VibrationValue
-/// gives them: amplitudes 0..1, frequencies in Hz.
-pub fn encode_side(amp_low: f32, freq_low: f32, amp_high: f32, freq_high: f32) -> [u8; 4] {
-    fn freq(f: f32, lo: f32, hi: f32) -> u8 {
-        let f = if f.is_finite() { f.clamp(lo, hi) } else { lo };
-        ((f / 10.0).log2() * 32.0).round().clamp(0.0, 255.0) as u8
-    }
-    fn amp(a: f32) -> u8 {
-        let a = if a.is_finite() {
-            a.clamp(0.0, 1.0)
-        } else {
-            0.0
-        };
-        if a < 0.01 {
-            return 0;
-        }
-        let v = if a > 0.23 {
-            (a * 8.7).log2() * 32.0
-        } else if a > 0.12 {
-            (a * 17.0).log2() * 16.0
-        } else {
-            ((a.log2() * 32.0) - 96.0) / (4.0 - 2.0 * a)
-        };
-        v.round().clamp(0.0, 100.0) as u8
-    }
-    let hf = (freq(freq_high, 81.75, 1252.0) as u16).saturating_sub(0x60) * 4;
-    let lf = freq(freq_low, 40.875, 626.0).saturating_sub(0x40);
-    let ea_high = amp(amp_high);
-    let ea_low = amp(amp_low);
-    let hf_amp = (ea_high as u16) * 2;
-    let lf_amp = (ea_low as u16) / 2 + 64;
-    if ea_high == 0 && ea_low == 0 {
-        return [0x00, 0x01, 0x40, 0x40];
-    }
-    [
-        (hf & 0xff) as u8,
-        (hf_amp + ((hf >> 8) & 0xff)) as u8,
-        (lf as u16 + ((lf_amp >> 8) & 0xff)) as u8,
-        (lf_amp & 0xff) as u8,
-    ]
-}
-
 /// A stick's calibration state, per axis: rest and the reach below and above it (12-bit units).
 #[derive(Clone, Copy, Debug)]
 pub struct Sticks {
@@ -326,22 +284,6 @@ pub fn lights(p: usize) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn rumble_encoding() {
-        assert_eq!(
-            encode_side(0.0, 160.0, 0.0, 320.0),
-            [0x00, 0x01, 0x40, 0x40],
-            "silence is the neutral pattern"
-        );
-        let s = encode_side(1.0, 160.0, 1.0, 320.0);
-        // 320 Hz: round(log2(32)*32) = 160 = 0xa0, (0xa0 - 0x60) * 4 = 0x100; amplitude 1.0: round(log2(8.7)*32) = 100
-        assert_eq!(s[0], 0x00);
-        assert_eq!(s[1], 200 + 1);
-        // 160 Hz: round(log2(16)*32) = 128 = 0x80, - 0x40 = 0x40; low amplitude 100 / 2 + 64 = 114
-        assert_eq!(s[2], 0x40);
-        assert_eq!(s[3], 114);
-    }
 
     #[test]
     fn report_30() {

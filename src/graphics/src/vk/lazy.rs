@@ -105,6 +105,8 @@ pub fn take_lazy(a: u64, n: u64) -> Vec<u64> {
         hist: HashMap::new(),
         returning: HashSet::new(),
     });
+    // the committed state of the region around `p` ([lo, hi), committed), asked once per run of like pages
+    let mut region = (0u64, 0u64, false);
     let mut p = lo;
     while p < hi {
         let h = st.hist.entry(p).or_default();
@@ -115,11 +117,50 @@ pub fn take_lazy(a: u64, n: u64) -> Vec<u64> {
         }
         h.last_frame = f;
         if h.streak >= STREAK && f >= h.eager_until {
-            out.push(p);
+            // A page not committed yet (the heap is committed at first touch) cannot be held: protecting it fails,
+            // so it stayed reachable, and its first touch then committed a zero page over the device's bytes
+            // (Ocarina of Time: 11,616 pages of one pool lost at once, a red line each). It lands eagerly instead
+            // (its first changed byte commits it) and may go lazy later.
+            if st.lazy.contains_key(&p) || {
+                if p < region.0 || p >= region.1 {
+                    region = committed_region(p);
+                }
+                region.2
+            } {
+                out.push(p);
+            }
         }
         p += PAGE;
     }
     out
+}
+
+/// The run of pages around `p` that share its committed state: (start, end, committed).
+#[cfg(windows)]
+fn committed_region(p: u64) -> (u64, u64, bool) {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
+    let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+    // SAFETY: a query of this process's own address space
+    let n = unsafe {
+        VirtualQuery(
+            p as *const _,
+            &mut mbi,
+            core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+        )
+    };
+    if n == 0 {
+        return (p, p + PAGE, false);
+    }
+    let lo = mbi.BaseAddress as u64;
+    (lo, lo + (mbi.RegionSize as u64).max(PAGE), mbi.State == MEM_COMMIT)
+}
+#[cfg(target_os = "linux")]
+fn committed_region(p: u64) -> (u64, u64, bool) {
+    let committed = match nxrt::linux::query(p) {
+        Some((committed, _, _, _)) => committed,
+        None => nxrt::mem::readable(p, 1),
+    };
+    (p, p + PAGE, committed)
 }
 
 /// At completion: `pages` (of the pool buffer `buf`, page `p` at `off0 + (p - base)`) stay on the device.
@@ -530,5 +571,27 @@ mod tests {
         assert!(super::take_lazy(a, 0x2000).is_empty());
         // partial pages never go lazy
         assert!(super::take_lazy(a + 8, 0x100).is_empty());
+    }
+
+    /// A reserved page the heap has not committed yet is never held on the device; a committed one may be.
+    #[cfg(windows)]
+    #[test]
+    fn only_committed_pages_can_be_held() {
+        use windows_sys::Win32::System::Memory::{
+            VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+        };
+        let page = super::PAGE as usize;
+        // SAFETY: a fresh reservation of four pages, the second committed, released at the end
+        unsafe {
+            let a = VirtualAlloc(core::ptr::null(), 4 * page, MEM_RESERVE, PAGE_READWRITE) as u64;
+            assert_ne!(a, 0);
+            assert!(!VirtualAlloc((a + page as u64) as _, page, MEM_COMMIT, PAGE_READWRITE).is_null());
+            let r0 = super::committed_region(a);
+            assert!(!r0.2 && r0.0 <= a && r0.1 == a + page as u64);
+            let r1 = super::committed_region(a + page as u64);
+            assert!(r1.2 && r1.1 == a + 2 * page as u64);
+            assert!(!super::committed_region(a + 3 * page as u64).2);
+            VirtualFree(a as _, 0, MEM_RELEASE);
+        }
     }
 }

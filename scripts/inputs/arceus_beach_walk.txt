@@ -1,0 +1,7 @@
+# Arceus fresh save, Prelude Beach after "Wait, you three!" (Move / Dash prompt): a square, up the path, right,
+# down, left, back where it began (~11 s), so repeats stay short of the beeping-object event further up the path
+0 0 0 32767 0 0
+3000 0 32767 0 0 0
+5500 0 0 -32767 0 0
+8500 0 -32767 0 0 0
+11000 0 0 0 0 0

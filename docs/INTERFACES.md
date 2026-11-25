@@ -264,7 +264,7 @@ Guest CPU ABI (`cpu.h`), dispatch, host-call bridge (`hostfn`: host functions re
 1. SVCs: `nxrt::svc::set_handler(imm: u8, f: fn(&mut Cpu, u32) -> bool)` runs before the runtime's own handling
    (`false` = let the runtime do it); `nxrt::svc::set_fallback(f)` for anything nobody handles, instead of the fatal.
 2. Counter: cpu.h's `RT_TICK_HZ` is the variable `rt_tick_hz` (`nxrt::rt::{tick_hz, set_tick_hz}`), `rt_ticks` runs
-   at it. Start-up sets 19.2 MHz for a Switch program, 31.25 MHz for a Switch 2 one (`SWR_TICK_HZ` overrides).
+   at it. Start-up sets 19.2 MHz for a Switch program, 31.25 MHz for a Switch 2 one (`NXRS_TICK_HZ` overrides).
 3. Scheduler: `nxrt::kernel::set_scheduler(&'static dyn Scheduler)`: `thread_start(handle, core)`,
    `thread_exit(handle)`, `block_enter()` / `block_leave()` around the blocking SVCs (0x0B, 0x18, 0x1A, 0x1C, 0x34),
    `priority_changed`, `affinity_changed`, `current_processor() -> Option<u32>` (GetCurrentProcessorNumber). Never
@@ -277,16 +277,16 @@ Guest CPU ABI (`cpu.h`), dispatch, host-call bridge (`hostfn`: host functions re
 
 Also: `nxrt::process::startup` (from `kernel::init`, once) decides from main.npdm's program id (`set_program` to give
 it explicitly): the counter rate, the **global exclusive monitor** (`rt_excl_mon`, on for Switch 1 programs, off for
-Switch 2; `SWR_XMON=1` / `SWR_NO_XMON=1`), **maps past the pool fail with ResultLimitReached** (MapPhysicalMemory
-0x2C/0x2D in the runtime, `Space::{set_pool, set_map_limit}`; on for Z-A and Ocarina, `SWR_MAP_LIMIT=1/0`) and the
-**process memory cap** (a job object, half of RAM within 12..32 GB, `SWR_MEMORY_CAP_GB`; `process::memory_cap_bytes()`).
+Switch 2; `NXRS_XMON=1` / `NXRS_NO_XMON=1`), **maps past the pool fail with ResultLimitReached** (MapPhysicalMemory
+0x2C/0x2D in the runtime, `Space::{set_pool, set_map_limit}`; on for Z-A and Ocarina, `NXRS_MAP_LIMIT=1/0`) and the
+**process memory cap** (a job object, half of RAM within 12..32 GB, `NXRS_MEMORY_CAP_GB`; `process::memory_cap_bytes()`).
 **Heap region 10 GiB** (lead, 2026-11-19: `mem.rs` stack+heap block 8 -> 12 GiB, `HEAP_CAP` 6 -> 10 GiB) so a Switch 2
 pool's SetHeapSize (~6.2 GB of the 9 GB pool) fits; os's profile now comes from the `profiles` crate and takes its pool
 from `nxrt::process::app_pool` (Switch 2: 31.25 MHz, 9 GB). Every thread's ID is at TLS+0x110 (SDK 22). WaitForAddress type 3 (WaitIfEqual64) is served.
-**Lane O:** os's own MapPhysicalMemory gates the limit on `sys_resource != 0`; Turbo gates it per title
-(`mem_map_limit` / `SWR_MAP_LIMIT`) as the runtime now does — use `Space::map_physical` or the same rule.
-**Lane G:** Turbo's 8a4618c also counts `vkAllocateMemory` per heap and caps system-heap allocations (8 GB or a quarter
-of the heap, `NXRT_VK_HOST_MB`); that half is graphics'.
+**Lane O:** os's own MapPhysicalMemory gates the limit on `sys_resource != 0`; the runtime gates it per title
+(`mem_map_limit` / `NXRS_MAP_LIMIT`) — use `Space::map_physical` or the same rule.
+**Lane G:** the memory cap's other half counts `vkAllocateMemory` per heap and caps system-heap allocations (8 GB or a
+quarter of the heap, `NXRT_VK_HOST_MB`); that half is graphics'.
 **Lane O (build.rs):** for the toolchain without Visual Studio, os's codec archives must also be found as
 `lib{nxopus,nxvpx,nxdav1d}.a` on the gnullvm target (build.rs copies only `{name}.lib`); lane T builds with
 `-L native=build\tools\gnu-libs` meanwhile.
@@ -317,7 +317,7 @@ memory / IPC / info SVCs, the system counter, virtual cores, the process boot. S
 **NVN (lane O, 2026-11-19; rule 1.1.6): the null device is gone.** `os/src/nvn/null.rs` and `tex.rs` are deleted;
 `nxos::nvn::finish_registration` binds the graphics layer first (`bind_graphics`, graphics' section below), so a
 proc graphics lacks gets the logging stub (`UNIMPL Nvn`), never a stand-in answer. `nvnBootstrapLoader`, the nv::
-glue (`nvn/nv.rs`) and the call counting stay in os. `sdk_major` follows Turbo 2f8f44e: the `sdk` module's
+glue (`nvn/nv.rs`) and the call counting stay in os. `sdk_major` is the `sdk` module's
 "NintendoSdk_nnSdk-<major>" string, **19 when absent**, logged as `sdk: NintendoSDK n`. Checked: MK8D boots on
 Vulkan to its menus, 407 graphics procs, no null device line.
 
@@ -328,7 +328,7 @@ Vulkan to its menus, 407 graphics procs, no null device line.
 - **Lane I's request 2:** `nxos::clock::set_rate(f64)` (1.0 real time, 0.05..4): the system counter, the steady
   clock and vi's vsync follow it (`nxos::clock::now_ns()`). The kernel's own timeouts are the runtime's (not scaled).
 - Settings read through `nxconfig::string` (an `NXOS_<KEY>` variable overrides): `docked` (default 1; a live change
-  sends the operation-mode notification), `language` (Turbo's numbers), `keyboard_text`, `audio_slowdown` (live).
+  sends the operation-mode notification), `language` (the options file's numbers), `keyboard_text`, `audio_slowdown` (live).
 - Video decoders for graphics: `nxos::services::codec_video::native_image(handle) -> Option<(mem, size, w, h,
   stride)>`: the RGBA picture a Switch 2 video decoder pool keeps for `GetDecoderImagePoolNativeImageHandle`
   (handle = slot << 8 | picture). **Lane G: answer nvnNativeImage (`nvnTextureBuilderSetNativeImage` /
@@ -342,8 +342,7 @@ Vulkan to its menus, 407 graphics procs, no null device line.
   writes what the game was given as PNG, e.g. the Grand Prix preview). The game takes NV12 into its own buffer
   (`movie::Decoder::GetOutputBuffer`, CPU mode, 512x608) and draws it from there: the CPU-written buffer is not
   reaching the texture it samples.
-- **Lane G, Ocarina of Time (2026-11-19, lane O):** with os's start-up fixes (GetInfo 29 / 30 = 0, 33 = 0x1000 as
-  Turbo; the Switch 2 oe / gs calls; socket event descriptors) Ocarina runs nnMain, reads its RomFS heap and address
+- **Lane G, Ocarina of Time (2026-11-19, lane O):** with os's start-up fixes (GetInfo 29 / 30 = 0, 33 = 0x1000; the Switch 2 oe / gs calls; socket event descriptors) Ocarina runs nnMain, reads its RomFS heap and address
   tables, initializes nv / vi and calls `nvnBootstrapLoader(nvnDeviceInitialize)` and `(nvnDeviceGetProcAddress)`,
   then faults reading +0x20 of a null object in main+0x946a20 (called from nnMain+0xc06 through main+0xf28c30,
   main+0x946760, main+0x946800) with no graphics log line after the prewarm: the game's graphics setup right after
@@ -431,7 +430,7 @@ and its fallback in `proc_address`** (a name graphics lacks then gets the loggin
 **One game window, owned by the front end (agreed lane G with lane I):** until the front end (`src/front`) opens the
 window, `bind_graphics` opens graphics' interim host window (`nxgfx::host_window::open(title, 1920, 1080)`: a winit
 window on a thread of its own, `set_window` on creation, close = save caches and exit, F3 = screenshot, keys to
-`set_key_handler`, which os maps to `nxos::input::set_keyboard` with Turbo's keyboard layout). The front end takes over by calling
+`set_key_handler`, which os maps to `nxos::input::set_keyboard` with the default keyboard layout). The front end takes over by calling
 `nxgfx::set_window(hwnd, hinstance)` **before** `nxos_main_with`'s hook returns (or before the first present):
 `host_window::open` does nothing once a window is set, so there is never a second window. The front end then owns
 fullscreen, hotkeys, input and the window's life, and calls `nxgfx::close_window()` before it destroys the window and
@@ -447,13 +446,14 @@ presented texture at the game's resolution (crop applied, NVN's bottom-up rows t
   presents are counted and paced, not shown). `NVNwindowBuilderSetNativeWindow`'s value is kept, not used.
   `nxgfx::close_window()` before the window goes.
 - `nxgfx::set_shader_dir(<data>/shaders)`, `nxgfx::set_cache_dir(<data>)` (pipeline key file `pipeline-keys.bin`,
-  `pipeline-cache.bin`), `nxgfx::prewarm(threads) -> PrewarmReport` (builds the keys earlier runs used, stopping at
-  `NXGFX_PREWARM_BUDGET_MB` of private-memory growth, default 2048), `nxgfx::save_caches()` at exit.
+  `pipeline-cache.bin`), `nxgfx::prewarm(threads) -> PrewarmReport` (builds the keys earlier runs used, the latest
+  runs' first, stopping at `NXGFX_PREWARM_BUDGET_MB` of private-memory growth, default a sixteenth of the machine's
+  memory, 2048-8192), `nxgfx::save_caches()` at exit.
 - `nxgfx::log::set_sink(Fn(&str))`: where log lines go (`<name>.log`). Lines are `[   t.tt] [vk] …` / `[nvn] …`; red
   ones `[RED] …`. Every 300 presents (`NXGFX_PACE_N`) or 5 s: `[vk] pacing: F FPS | p95 a p99 b max c ms | >16.67 n
   >33/50/100 x/y/z (last N intervals)` (the launcher's format) and `[vk] pools: …` (placement, upload and write-back
   MB and ms per frame).
-- Switches: `NXGFX_VALIDATION=1` (Vulkan validation layer), `NXGFX_GPU=<name part>`, `NXGFX_POOL=mirror|host|vram`,
+- Switches: `NXGFX_VALIDATION=1` (Vulkan validation layer), `NXGFX_GPU=<device index | name part>` (an index picks between identical GPUs), `NXGFX_POOL=mirror|host|vram`,
   `NXGFX_PRESENT=fifo|mailbox|immediate`, `NXGFX_ASTC=rgba8` (no BC7 re-encode), `NXGFX_TEX_CAP` / `NXGFX_SAMP_CAP`
   (pool set size, 262144 / 4096), `NXGFX_SHADERS`, `NXGFX_CACHE`, `NXGFX_POOL_LOG=1`.
   Added by lane G (rev 4): `NXGFX_SHADER_WAIT_MS` (3000: a draw's longest wait for the live translator; 0 = skip),
@@ -533,7 +533,7 @@ start of this file and by later G3/G4/G5 evidence; retained for investigation de
 - **Forced present interval (5A.6):** ini `present_interval` (0 = the game's, 1-3 forced) or, when it is 0, the
   profile's value: **lane O / profiles**, call `nxgfx::nvn::window::set_profile_interval(n)` at start-up with the
   profile's `present_interval` key (0 / absent = not forced). Graphics paces AcquireTexture by the forced interval.
-- **Asynchronous submission** (Turbo's translation thread): `nvnQueueSubmitCommands` copies the records and returns;
+- **Asynchronous submission** (a translation thread): `nvnQueueSubmitCommands` copies the records and returns;
   the `vk replay` thread replays submits and presents in order. Fences taken while ops are queued are `1 << 62 | op
   sequence` and resolve once the op ran (`vk::queue::wait_fence` / `fence_done` handle them); `nvnSyncWait` on a sync
   a queued command buffer will set drains first; `oneoff` (ReadTexels, tools) and `finish` drain;
@@ -666,20 +666,20 @@ start of this file and by later G3/G4/G5 evidence; retained for investigation de
   queued, a fence the game took (`nvnQueueFenceSync`) named the latest op of any queue, and resolved to the timeline
   value after it even when that op's queue had parked at an event wait: a SyncWait passed before the parked work ran
   (GPU test `event_wait_parks_a_queue_until_another_queue_signals` failed with async on). Now a fence names its own
-  queue's last op (Turbo's `last_seq`), and an op whose queue is parked afterwards resolves through a receipt of that
-  queue (when its parked work has run). Also from Turbo: at most 64 ops and 2 presents queued (the game's thread waits
+  queue's last op (`last_seq`), and an op whose queue is parked afterwards resolves through a receipt of that
+  queue (when its parked work has run). Also: at most 64 ops and 2 presents queued (the game's thread waits
   in the OS's blocking hook), a SyncWait on a sync no queued command buffer has fenced yet waits only with a timeout
   and only until it is fenced or the queue runs dry. Runs: MK8D's demo 300 s at 60 FPS (`a1`, before the receipt fix;
   r22 / r24's stops did not come back), Z-A `z6` above, and with the receipt fix Z-A `z7` 49-52.4 FPS for 58 s (then its window was closed from outside, as in `v9`: lane G3's runs now set `NXRS_CLOSE_QUIT=0`).
 - **MK8D's menu preview (item 3) fixed.** `nvnTextureWriteTexels` (the movie decoder's frames) writes the texture's
-  storage, swizzled (Turbo's `write_texels`), and every image over that storage uploads from it again; it wrote only the
+  storage, swizzled, and every image over that storage uploads from it again; it wrote only the
   one object's image, and the menu samples its own texture object over the same memory. Picture:
   `build/I/runs/20261119-183639-G3-mk8d-movie/0004-a_first_Mii.png` (the Grand Prix panel plays the race movie). GPU test
   `write_texels_reach_every_texture_over_the_storage`.
 - **Wonder's long frames (item 4).** Lane X's run: 63 frames over 50 ms in 240 s, 6.2 s of pipeline creation inside them
   (single frames of 0.3-2.1 s at new places), texture streaming 40-60 ms, and the 2.8-3.0 s frames at 200 / 263 / 322 s
   were its own pass dumps (`NXGFX_DUMP_AT_S`). Pipelines are now linked from parts (VK_EXT_graphics_pipeline_library,
-  Turbo's `NXRT_VK_GPL`, here on by default: `NXGFX_GPL=0` off): a new combination of known shaders links in about a
+  on by default: `NXGFX_GPL=0` off): a new combination of known shaders links in about a
   millisecond, the optimized whole pipeline is built on two background threads and replaces it; and a program's shader
   parts are made ahead on two background threads when the game sets it (`nvnProgramSetShaders`, for the depth formats
   and sample counts seen lately; within the prewarm's memory budget). `x1` (parts, nothing made ahead): 22 slow frames,
@@ -698,10 +698,10 @@ start of this file and by later G3/G4/G5 evidence; retained for investigation de
   the completion path's lazy bookkeeping or the landing beside it, not found yet. **(Rev 8: on by default, see below.)** Lazy write-back stayed off by
   default: clean in Violet now (`v8` 150 s, `v9`), slower than copying back (30 FPS in `v7`).
 - **MKW null command buffer (item 6; lane X2's root cause: the render-buffer pool fills).** Graphics now answers NVN2's
-  device integers as Turbo does (`DEVINFO2`, 0xAA items, and the constants of the driver compiled into the game's sdk:
+  device integers (`DEVINFO2`, 0xAA items, and the constants of the driver compiled into the game's sdk:
   `nvn::device::set_sdk_image`, called by os with the sdk module's image; MKW's sdk gives API 231.39, GPU code 201.20);
-  MKW still faults the same way (`w12`). The storage sizes lane X2 measured are the reference rule's: Turbo's
-  `nvn_tex.c`, nxnative's and mkw-recomp's `runtime/gfx/nvn/tex/nvn_tex.c` (MIT) all pick the block height from
+  MKW still faults the same way (`w12`). The storage sizes lane X2 measured are the reference rule's:
+  nxnative's and mkw-recomp's `runtime/gfx/nvn/tex/nvn_tex.c` (MIT) all pick the block height from
   height x 1.5 / 8 GOBs and align to 512 bytes, as `tex/layout.rs` does (2560x1440 RGBA8 = 0xf00000: 1440 rows in
   128-row blocks = 1536; the 3072x3072 one is the shadow map, 3 layers of D16 = 0x3600000); the only NVN goldens anyone
   has are the X1 SDK's (mkw-recomp `probes/nvn_tex_probe.c`), which this layout passes. 2560x1440 is the console's own
@@ -720,12 +720,12 @@ start of this file and by later G3/G4/G5 evidence; retained for investigation de
   under constant slot 255, pools copied back after a shader wrote them through a loaded pointer, at most 64 MB each);
   resolution scale and the host's dynamic resolution (`vk/scale.rs`, the module's notes; GPU test
   `resolution_scale_renders_at_twice_the_size`); `nvnCommandBufferResolveDepthBuffer` (the pass ends, a barrier: the
-  depth target's writes visible to later reads; Turbo leaves it a stub); per-title texture rewrites are every title's
-  here (CPU writes to a texture's storage reload it for all games, Turbo's two titles included). **Ray tracing: not
+  depth target's writes visible to later reads); per-title texture rewrites are every title's
+  here (CPU writes to a texture's storage reload it for all games). **Ray tracing: not
   done.** NVN2's ray-tracing entry points are known by name from MKW's sdk (`CommandBufferDispatchRays` / `…Indirect`,
   `CommandBufferBuild` / `Copy` / `Compact` / `Relocate` / `Bind…AccelerationStructure(s)(Deferred)`, `Device…
   AccelerationStructure…`, `ProgramBuilder…RayTracing…`); graphics has the memory-requirement query and the queue
-  builder's sizes, not the rest. Turbo has no ray-tracing path either (its prebuild skips `rt` keys). What is left: the
+  builder's sizes, not the rest. What is left: the
   argument layouts of the builds, binds and dispatch (from the sdk's own code, or a game that uses them: none of the
   owner's do), VK_KHR_acceleration_structure + VK_KHR_ray_query on the device, BLAS / TLAS builds from the game's
   geometry, and a dispatch as one compute dispatch of lane S's `rt_library` with its set-0 resources (`rt_scene`,
@@ -733,7 +733,7 @@ start of this file and by later G3/G4/G5 evidence; retained for investigation de
 - **Texture pool set: 262,144 IDs** by default (`NXGFX_TEX_CAP`; MKW registers up to ~131,400).
 - **Review of lane X2's write-back landing (`vk/queue.rs` "write-back base", `vk/mem.rs land_changed`): correct.**
   The base is copied in `pre` after the submission's uploads, so it is the device as the GPU work found it; only bytes
-  the work changed land, the rest keeps what the CPU wrote meanwhile (Turbo's `wr_land`), pages the GPU left alone are
+  the work changed land, the rest keeps what the CPU wrote meanwhile, pages the GPU left alone are
   not touched, and the write watch / snapshot are kept consistent around the landing. Costs: every write-back is read
   back twice (the base and the result) and compared byte by byte; fine at MK8D's 34 small write-backs a frame. Pages
   held on the device by lazy write-back no longer reach it (`lazy::outside`, above): bringing them back there made the
@@ -919,7 +919,7 @@ shared by every program** (no per-program layouts, so pipelines key only on shad
 - MKW after the first present: a null `sead` heap allocation (`main+0x3e3550`, 0x58 bytes, heap `[[sp+0x90]+0x2a78]`)
   read at main+0xa66e0+0x2df5 (`read of 0xa0`) 4-5 s after the first present, in 3 of 4 runs; DKB faults at
   different places 30-35 s in (main+0x8a2d80 reading 0x100000001, main+0x26c620 reading 0x48) and once ran 89 s
-  clean. `SWR_XMON=1` and `NXGFX_WB_LAZY=0` do not change either; `NXGFX_POOL=host` does not change MKW (DKB ran 120 s
+  clean. `NXRS_XMON=1` and `NXGFX_WB_LAZY=0` do not change either; `NXGFX_POOL=host` does not change MKW (DKB ran 120 s
   clean with it, but that run also never committed its save, so it proves nothing yet). Details: lane X section.
 
 **Lane W2 findings for lane G (2026-11-19, engine built from the main tree at 120a8a0 + lane W2's files):**
@@ -964,7 +964,7 @@ game's objects, read only, a data folder of its own with the shaders through a j
 up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features gpu-tests --test gpu -- --test-threads=1`
 (17 now, all validation clean).
 - **shaders `link.rs` (new, used by graphics at module load and pipeline creation; built modules on disk unchanged):**
-  `trim_cull` (Turbo `vkspv_trim_cull`: gl_PerVertex's unused CullDistance member dropped when clip + cull pass
+  `trim_cull` (gl_PerVertex's unused CullDistance member dropped when clip + cull pass
   `maxCombinedClipAndCullDistances`; a red line names a shader whose cull distances are used), `io_locations` /
   `missing` / `add_outputs` (a pixel shader reading a varying its vertex / geometry / tessellation shader never
   writes: the earlier stage gets that output, holding (0, 0, 0, 1)), `int_outputs` / `output_kinds` (integer colour
@@ -998,8 +998,8 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   (shader `6aa6c36ed6065b7d`) writes an RGBA8 shadow mask at 0x15cf60600 (R = a constant from c3, G / B = the
   shadow terms from the depth, the 2048x2048 RG32F VSM and the 1024x1024x2 D16 cascades); passes 29 / 30 multiply its
   R by the karts' blob shadows (colour mask R only, ZERO / ONE_MINUS_SRC_ALPHA); pass 31 (the forward / G-buffer pass)
-  samples it through texture ser352412 whose **texture swizzle and view swizzle are both (G, B, A, R)**. Composed (as
-  Turbo does) that is (B, A, R, G); a view replacing the texture's would give (G, B, A, R). Tried
+  samples it through texture ser352412 whose **texture swizzle and view swizzle are both (G, B, A, R)**. Composed
+  that is (B, A, R, G); a view replacing the texture's would give (G, B, A, R). Tried
   (`NXGFX_SWZ_OVERRIDE=1`, run `-mk8d-lap2-swz`): the stretch past the grandstand is still flat cyan with black shadow
   (`0019-shot_lap.png`); in `-lap1` the same stretch came out black (`0022`, `0027`), the rest of the lap right
   (`0016`). The VSM is still all zero (G3 rev 9). Next: decompile pass 31's pixel shaders (`044c744ceb0df7c2` and the
@@ -1025,7 +1025,7 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
   - **MKW:** lane K's runs `-K-mkw13-demote` / `-K-mkw14-robust` were reported: a mesh draw (task fea1d6ca04512de1,
     mesh ddc034e8e009ebfc, pixel 3cc3501255bb2d74), the driver's fault an **invalid read** (0xca19c6000,
     0xcbf689000). The task shader reads storage buffers through descriptors: **robust buffer access is now on by
-    default on NVIDIA** (Turbo, Ryujinx; `NXGFX_ROBUST=0` off). Details in the MKW (lane K) section.
+    default on NVIDIA** (as in Ryujinx; `NXGFX_ROBUST=0` off). Details in the MKW (lane K) section.
   - **DKB** (`-G4-dkb-pools2`, 03:44 reset): lost right after a new pipeline (pipeline lookups 446 ms) at 116 s, the
     frame rate falling 60 → 20 → 1 FPS before it; no checkpoints then. **With the loop bound and robust buffer access** (`-G4-dkb-hang4`, `NXGFX_CHECKPOINTS=all`): no device loss in 167 s, through the opening (55-60 FPS) into play (5-12 FPS) past the 116 s where `-pools2` was lost; the GPU at 11 ms a frame, the replay's CPU 45 ms (pool sync 32.5, sets 18): DKB's frame rate is the pool sync (item 10), not the GPU.
   - **Every shader loop is bounded** (`shaders::link::loop_guard`, applied at module load: a counter per function,
@@ -1123,19 +1123,19 @@ up); runs `build/I/runs/*-G4-*`. GPU tests: `cargo test -p graphics --features g
 - **MK8D lap with both async fixes (`-G4-mk8d-asyncfix`, 59.7 FPS, exit 0):** the command-buffer sync fix is exercised
   (MK8D fences syncs inside its command buffers), but the stretch past the grandstand still comes out **black with only
   the lights' glow** (`0016`, `0019`; `0024` later in the lap is right). So that was not the race.
-- **Conditional rendering ported from Turbo (`counters.rs rc_*`, exec `RENDER_COND`, clears): very likely the black
+- **Conditional rendering (`counters.rs rc_*`, exec `RENDER_COND`, clears): very likely the black
   world.** SetRenderEnableConditional compares the counters at addr and **addr + 16** (we compared addr + 8, the first
   report's timestamp); a timestamp report's counter field is **0** (we wrote the time); a timestamp report replayed but
   not landed yet counts as 0 (it lands at completion: how late depends on the async lag, which is why only async
   showed it); an address a samples-passed report writes is unknown at replay and keeps drawing; and **colour / depth
   clears obey the condition** (they ignored it). agl wraps its clears this way (clear once, then a TIMESTAMP_TOP report
-  on the record); Turbo's note on the same bug: "the second clear ran and wiped the lit scene ... came out black".
+  on the record); without the condition the second clear runs and wipes the lit scene, which comes out black.
   GPU test `conditional_clear_runs_once_after_a_timestamp_report`. MK8D lap queued (`chain11` -> `c11_mk8d.out`).
 - **Pipelines replaced by their optimized build are destroyed** (`pipe.rs retire`, once the work recorded with them
   has run; `NXGFX_RETIRE_KEEP=1` keeps them): they were kept for the session (part of MKW's growth in play).
 - **MK8D kart blob:** pass 31's pixel shader `044c744ceb0df7c2` reads the screen-space shadow mask (`fp_t_tcb_26`,
   sampled at the projected position) as `.x` only. With its texture and view swizzles both (G, B, A, R), `.x` is B
-  composed (Turbo's rule) or G with the view replacing; neither is R, where passes 29 / 30 put the karts' blobs. The
+  composed or G with the view replacing; neither is R, where passes 29 / 30 put the karts' blobs. The
   blob reaches the picture through another shader; not traced further this round.
 - **Capture / replay: not started** (no nxnative capture source in reach; lower than the hangs and the races).
 
@@ -1348,8 +1348,8 @@ through every 1920x1080 pass dump).
   measured (`pool sync, last 600 submissions: ...` now splits it): ~240 MB a submission in pools written this / last
   frame and ~208 MB in pools written 2-60 frames ago, and **~1 write a submission lands in those older pools after the
   frame's first submission**, so scanning them once a frame would delay real writes; tried anyway
-  (`-G5-dkb-warm`): pool sync 9.3 -> 8.3 ms only, removed. Turbo instead write-protects pools and takes faults
-  (`nvn_dirty.c`, hot pages copied each submission); that needs a host pre-write hook in os (file reads into guest
+  (`-G5-dkb-warm`): pool sync 9.3 -> 8.3 ms only, removed. The other design write-protects pools and takes faults
+  (hot pages copied each submission); that needs a host pre-write hook in os (file reads into guest
   memory would fail on protected pages) and is not done. "dropped work" in the replay line counted reused sets and
   other plain counts: it now sums only the drop counters.
 - **Smash / Anime Girls banding (item 3):** Smash on G4's last run (`-G4-smash-fault5/0012`) shows none. **Anime Girls
@@ -1401,7 +1401,7 @@ through every 1920x1080 pass dump).
 - **MK8D at the 5B bar (coordinator, 13:50):** `-G5-mk8d-m5` on HEAD 6bdccef, exclusive, boot into a Mushroom Cup
   race (200 s): all 16 race shots right (black fraction 0.002-0.14, the highest a night shot with star power), 59.65
   FPS over 100-190 s, exit 0: **marked Playable (M5) in PORT_PLAN**, with the cyan kart blob as the known issue.
-- **DKB pool sync, Turbo's write-protect design (coordinator item 4): not implemented this round.** What it needs here,
+- **DKB pool sync, the write-protect design (coordinator item 4): not implemented this round.** What it needs here,
   read through: pools not written in the last frame made read-only and left out of every scan until a write faults
   (one VEH, first in the chain, unprotects the pool and marks it for the next scan; GetWriteWatch still holds the
   write). Host writes are user-mode copies (fs reads come back as host buffers and are copied; HID ReadFile reads into
@@ -1588,9 +1588,10 @@ The build and the launcher contract (docs/LAUNCHER_CONTRACT.md). What a built ga
 - `nxrs-build translate <input> --out <dir>` keeps what `nxrt-dev e2e` calls (the translator's dev binary is now `nxrs-translate`).
 - Toolchain default (lane L): MSVC only when Visual Studio, a clang and `nxfront.lib` beside nxrs-build are all there (`cc::msvc_ready`), else llvm-mingw when found: a release may ship only `gnu\`.
 
-**Launcher (lane L, M9).** The launcher (D:\Projects\RecompLauncher, `nxrs.exe`) has a per-game engine (`library.json`
-`"engine": "turbo" | "nxrs"`, Turbo for every existing entry) and runs nxrs-build itself with contract v2 for build,
-Install Updates (`update-info --game`), DLC (`dlc sync`) and before Play; an nxrs build goes to `<build folder> [nxrs]`.
+**Launcher (lane L, M9).** The launcher (`src/launcher`, `nxrs.exe`) builds every game with nxrs (a `library.json`
+entry saved with another or no `engine` loads as nxrs, its build folder moved to `<build folder> [nxrs]`, so it shows
+as needing a build) and runs nxrs-build itself with contract v2 for build, Install Updates (`update-info --game`), DLC
+(`dlc sync`) and before Play; an nxrs build goes to `<build folder> [nxrs]`.
 Contract v2 as implemented: docs/LAUNCHER_CONTRACT.md. **Keep these stable** (the launcher parses them): the
 `@progress` / `@result` lines, `nxrs-contract <n>`, the `DLC: this package also holds add-on content` prefix, `UPDATE` /
 `UPDATE error:` / `DLC error:` lines, `<name>_build*\gen\nxrs.gen.key` (how an imported build is known as nxrs's).
@@ -1601,7 +1602,7 @@ Release: the launcher's `scripts/package-release.py --nxrs-engine <this checkout
 `engine.json`, `nxfront.lib`/`nxrt.lib`, `gnu\*.a`) and `toolchain\llvm-mingw\` (x86_64 only).
 
 ## profiles (src/profiles)
-nxnative's 187 `dm/games` profiles + its shared patch tables, embedded as data (`games/<id>/game.tsv`, `patches.toml`; the owner's `turbo.toml`), and the lookup:
+nxnative's 187 `dm/games` profiles + its shared patch tables, embedded as data (`games/<id>/game.tsv`, `patches.toml`; the owner's patches in `owner.toml`), and the lookup:
 - `profiles::lookup(title_id: Option<u64>, main_build_id: Option<&str>) -> Option<Match { profile, build: Option<&Build>, how: How::Build | How::Title }>`; `by_title(u64)`, `by_build(&str)`, `get(folder id)`, `all()`. Build ids are lowercase hex; a key matches over the shorter of the two (≥ 16 bytes).
 - `Profile`: `title_id`, `program_id`, `name`, `builds` (`version`, `display`, `modules` (name, build id)), `modules_of(build)` (load order), `memory` (`reserve`, `alias`, `stack`, `app_pool`, `used`, `sys_resource`, `stdalloc_cap`, `map_limit`), `settings` (fps_target, fps_max, op_mode, perf_mode, core_preempt, shared_font, device_api, game_args, game_env, …, with nxnative's defaults), `platform()` / `tick_hz()` (19.2 MHz Switch, 31.25 MHz Switch 2), `get(key)` for any other `game.tsv` key.
 - Patches: `profiles::patches_for(module_build_id)` → every `Cut` / `Obs` / `Stub` / `Capability` keyed by that build, from any profile or `shared_patches()` (SDK, engine). A recorded `StubBody` places itself: `body.place(&Layout { area, state, base, others })` → words with relocations applied. `translator_patches(&[(module, build id)])` → the translator's patch-table text for the entries nxrs applies at build time (today the owner's Z-A 60 FPS cut).
@@ -1627,12 +1628,12 @@ F3 window screenshot (`captures\screenshot_<time>.png`), F4 fps_limit 60 / unlim
 (`recordings\recording_<time>.mp4`, H.264 through Media Foundation), F8 `nxgfx::vk::shot::request` (game resolution,
 `captures\fullres_<time>.png`), F11 / Alt+Enter fullscreen (kept in the ini), Esc quit.
 
-**Options (`nxconfig`).** The front end opens `<exe dir>\<name>.ini` (every Turbo option, sections and comments,
+**Options (`nxconfig`).** The front end opens `<exe dir>\<name>.ini` (every option, sections and comments,
 Spanish aliases, settings_version 3 migrations, unknown keys kept under `[Other]`), applies `--key=value`, reloads
 the file when it changes (once a second) and writes in-game changes. **Any crate reads values directly:**
 `nxconfig::string(key)`, `f32`, `int`, `flag`, `tristate` (auto = None), `fps_limit_hz()` (0 / 30 / 60..240),
 `frame_skip()` (fps_target 30 → 1, 20 → 2), `lsfg()` (on, multiplier, target; fps_target=120 → x2 at 120);
-`generation()` changes on every change, `on_change(f)` calls back. Values are already in Turbo's ranges. Who applies
+`generation()` changes on every change, `on_change(f)` calls back. Values are already in their valid ranges. Who applies
 what:
 
 | Options | Applied by |
@@ -1641,14 +1642,14 @@ what:
 | `resolution`, `dynamic_resolution(_min)`, `game_dynamic_resolution`, `shadows`, `fps_target` (frame skip), `fps_limit`, `forced_vsync`, `driver_exclusive`, `shader_thread`, `low_priority_shader_compiler`, `diag` | lane G (graphics) — read live (`generation()`), the F4 hotkey flips `fps_limit` |
 | `fullscreen`, `mouse_*`, `button_layout`, `button_map`, `smooth_recording`, `recording_fps`, `lsfg*`, `lossless_*`, `metrics`, `seconds`, `shot` | lane I (front, input) |
 
-**Control pipe** `\\.\pipe\nxrs_ctl_<pid>` (also `swr_ctl_<pid>`): one command per connection, reply text
+**Control pipe** `\\.\pipe\nxrs_ctl_<pid>`: one command per connection, reply text
 (`scripts/gamectl.py`). Any crate registers commands with `nxconfig::ctl::register(name, help, |args| reply)`.
 Front: status, shot, fullres, get, set, run, record, fullscreen, counters, quit; input: press, P2..P8, pads.
-**Graphics: register `pause`, `resume`, `step`, `passdump`, `hide`... (Turbo vk_ctl.c) there.**
+**Graphics: register `pause`, `resume`, `step`, `passdump`, `hide`... there.**
 
 **Metrics** (`metrics=1` / `NXRS_METRICS=1`): `metrics-<time>.csv` once a second (frames, FPS, CPU, private memory,
 then every counter's change). Any crate counts with `nxconfig::metrics::counter("name")` (a static `AtomicU64`;
-graphics: draws skipped, textures dropped... as Turbo's 8f5410f), and pushes per-frame CSV rows with
+graphics: draws skipped, textures dropped...), and pushes per-frame CSV rows with
 `nxconfig::metrics::frame(row)` while `nxconfig::metrics::enabled()` (first row a `#` header) → `frames-<time>.csv`.
 
 **Controllers (`nxos::input`, lane I).** The input thread reads XInput, DualSense / DS4, Switch Pro / Joy-Con / NSO
@@ -1673,22 +1674,21 @@ pads, WinMM; `nxos::services::hid` shows them as npads. The front end calls `set
 Builds: `build\games\{plza,arceus,violet}` (`nxrs-build build <package> -o <g> --outdir build\games\<g> --jobs 4`;
 Violet's add-on content installed with `nxrs-build dlc install`). Runs: `build\games\<g>\runs\<time>-<label>\` (run.log,
 screenshots through the control pipe). Engine fixes of lane P (uncommitted):
-- **runtime `mem.rs`: the alias region is 64 GiB** (was 4): Horizon's size for a 39-bit space and Turbo's
-  `g_alias_size`. Z-A's nninitStartup puts a StandardAllocator over 12 GiB of it (`StandardAllocator::Initialize(nullptr,
+- **runtime `mem.rs`: the alias region is 64 GiB** (was 4): Horizon's size for a 39-bit space. Z-A's nninitStartup puts a StandardAllocator over 12 GiB of it (`StandardAllocator::Initialize(nullptr,
   0x300000000)`); with 4 GiB the SDK aborted in nninitStartup (sdk+0x134214). Address space only.
 - **os `mem.rs`: MapMemory takes mapped alias-region memory as its source** (MapPhysicalMemory pages are Normal on
   Horizon): Z-A maps its thread stacks from its allocator's pages; before, every try was refused ("source is not heap")
   and the SDK aborted (sdk+0x13e81c).
 - **os `profile.rs` / `mem.rs`: maps past the pool fail for every profile with `mem_map_limit on`** (nxnative's key,
-  Violet / Scarlet), besides Turbo's two titles.
-- **os `mem.rs`: MapMemory takes any mapped source** (Turbo checks none): Violet maps a thread stack from main's .bss
+  Violet / Scarlet), besides Z-A and Ocarina.
+- **os `mem.rs`: MapMemory takes any mapped source**: Violet maps a thread stack from main's .bss
   (`MapMemory ... <- 0x70046fd000`) and aborted at 3.6 s.
 - **os `services/net.rs`: the `bt` service** (IBluetoothUser; command 9 RegisterBleEvent gives an event that never
   fires): Violet 4.0.0 aborted at 2.7 s when sm refused it.
 - **graphics `nvn/cmd.rs`: nxnative's host-lent command memory reclaim** (below, for lane G to review).
 - **Diagnostics:** `nxrt::kernel::dump_threads()` (each guest thread: wait kind and address, the host function it is
   in, guest frames), logged by os's watcher at a stall (no present for 15 s) and printed by the control command
-  `threads`; `NXOS_NVN_BT=<proc>` logs a proc's first 64 calls with guest frames (Turbo's `SWR_NVN_INTERVAL_BT`).
+  `threads`; `NXOS_NVN_BT=<proc>` logs a proc's first 64 calls with guest frames.
 - **Mods (5A.6):** `profiles::mods`, `cli/src/mods.rs`, `os/src/mods.rs` (src/cli/README.md "Mods"); profiles'
   `games/<id>/engine.tsv` (hand-kept keys, read before game.tsv's: `fps60`, `present_interval`); os hands a profile's
   `present_interval display` to graphics (`nxgfx::nvn::window::set_profile_interval(1)`).
@@ -1702,18 +1702,17 @@ segments a second, never given back. nxnative met the same (issue #2717, Arceus 
 `hle_nvn.c` `cmd_alloc` / `hostseg_take`: "a record that does not fit claims its position for command memory reclaim"
 (docs/reference/nvn-objects.md, "A recording that runs short before it writes into the game's memory"): the lent pool
 stays at 132 segments. **Lane P ported it (2026-11-19, `nvn/cmd.rs`: `hostseg_take` / `hostseg_written` / `hostseg_size`, a separate
-`ctlseg_take` for control memory, never reclaimed), since it stopped all three games; lane G please review.** Also in that run: `[RED] transform feedback captures are not replayed yet` (6.9 s; Turbo's
+`ctlseg_take` for control memory, never reclaimed), since it stopped all three games; lane G please review.** Also in that run: `[RED] transform feedback captures are not replayed yet` (6.9 s; the
 skinned characters in Z-A need it), many `[RED] texture ID n: target 1 bound where the shader samples target 8` at 34 s
-(the cube placeholders Turbo also logs), `nvnCommandBufferSetConservativeRasterEnable` / `SetShaderScratchMemory` stubs.
+(cube placeholders), `nvnCommandBufferSetConservativeRasterEnable` / `SetShaderScratchMemory` stubs.
 
 **For lane G — Z-A in gameplay draws a black world** (2026-11-19 13:58, `build\games\plza\runs\20261119-135546-run4`,
 with the host-segment reclaim: the lent pool stays at 208 segments / 52 MB through 16,384 loans in 170 s, no stop).
 The game runs title → language → name → the opening dialogue; from ~40 s on every screenshot is black except the UI
-(`0008-t160.png`: only "A Talk" and the dialogue arrow). Turbo had exactly this (GAMEPLAY_INVESTIGATION.md, "Pokemon
-Legends Z-A: the black world", 78ece7b): the colour-grading table is a 32x32x32 target drawn with one instance per
+(`0008-t160.png`: only "A Talk" and the dialogue arrow). The cause: the colour-grading table is a 32x32x32 target drawn with one instance per
 plane (the vertex shader writes the layer, `vs=b29f08619f379a83 inst=32`); a pass begun with `layerCount` 1 leaves 31
 planes black and the tone mapping multiplies the world by black. Fix there: a pass has as many layers as every
-attachment's view holds. Same commit, also needed by Z-A: transform feedback replay (`[RED] transform feedback captures
+attachment's view holds. Also needed by Z-A: transform feedback replay (`[RED] transform feedback captures
 are not replayed yet` at 6.9 s; 116 captures a frame in the station, the skinned characters) and cube views of 2D arrays
 of six layers or more. FPS in that run (another lane compiling): 44-52 in the dialogue, p95 22-35 ms.
 
@@ -1813,7 +1812,7 @@ inaccessible while the CPU copy into it runs).
 **For lane G — Arceus: garbled text bubbles and smeared house textures in Jubilife Village** (2026-11-19 15:48,
 `build\games\arceus\runs\20261119-153916-long1\m6.png`, a PrintWindow capture at 555 s). The opening, the beach and
 the field (`m2.png`, `m4.png`) look right; in the village the speech bubbles' text is unreadable (glyph rows
-displaced, as Turbo's "garbled UI labels" in Z-A before its GOB-order fix) and the house walls / roofs look smeared
+displaced, like garbled UI labels from a wrong GOB order) and the house walls / roofs look smeared
 (blocky, misplaced texel rows). 30.0 FPS (p95 34-35 ms) throughout the 600 s run.
 - **os `profile.rs` (lane W, for lane O):** a title no profile describes takes its system resource size from its
   NPDM (META +0x14) instead of 0, so its virtual address memory works: Anime Girls: Sun of a Beach, Beach Bounce
@@ -1882,7 +1881,7 @@ files of the moment); every lane W game relinked from it. Runs go through `scrip
   index read, the first present comes at 3.5 s and no shader is missed (`20261119-190947-W2-smash-trace`). The fs
   and SVC trace showed nothing slow (the 38 MB table read in 61 ms). `NXOS_TRACE=fsread` (new, os `fs.rs`) logs
   every file read with its time.
-- **runtime `kernel.rs`: SetThreadActivity (0x32) and GetThreadContext3 (0x33)**, as Turbo: the first accepts (the
+- **runtime `kernel.rs`: SetThreadActivity (0x32) and GetThreadContext3 (0x33)**: the first accepts (the
   thread keeps running), the second copies the thread's `Cpu` (x0-x28, fp, lr, sp, pc, pstate, v0-v31, fpcr, fpsr,
   tpidr; 0x320 bytes). Unity's garbage collector (Anime Girls) called them 120 / 56 times a minute as gaps.
 - **os `simple.rs`: nn::ssl Initialize / Finalize keep a count**; Finalize fails once it is back at zero.
@@ -1915,7 +1914,7 @@ files of the moment); every lane W game relinked from it. Runs go through `scrip
   s), `smash_fight.txt` (character pick from the top-left corner, then moves and attacks in 20 s blocks, no B),
   `shooter.txt` (walk, turn, ZR, jump). The replay's ly is positive up (Smash's first pick moved the hand up).
 - **Lane W2, second round (2026-11-20 00:55).**
-  - **os `media/sink.rs`: AudioOut buffers go back on a wall clock (Turbo's audout clock).** A block was released
+  - **os `media/sink.rs`: AudioOut buffers go back on a wall clock.** A block was released
     when the device's playback reached its end. Two consequences: a producer that keeps two 5 ms buffers in flight
     and refills on release (Beach Bounce, AudioOut #1) saw its queue drain at every device period (10 ms+ callbacks):
     ~38 underruns a second; and once the smooth slowdown slowed playback down, the releases slowed too, the producer
@@ -2016,11 +2015,11 @@ Not `fullres`/F8 (deadlocks, lane G section) and never a screen grab (it reads w
 - MKW: first present 25-69 s after start (graphics' RegisterTexture, lane G section), then 4-5 s later a null object
   in the game's render thread (`main+0xa66e0`, or a host NVN proc reading 0x8 from `main+0xa0040`); the object at
   `[sp+0x90]` has its `+0x2a78` heap pointer 0 (`build\I\runs\20261119-155719-X-mkw8-peek`). Not changed by
-  `SWR_XMON=1`, `NXGFX_WB_LAZY=0` or `NXGFX_POOL=host`. Next: which NVN query feeds that object (texture / pool
+  `NXRS_XMON=1`, `NXGFX_WB_LAZY=0` or `NXGFX_POOL=host`. Next: which NVN query feeds that object (texture / pool
   sizes for NVN2) and a PDB for the code DLL so host frames get names.
 - DKB: title at 54-60 FPS; 20-35 s in, after the game writes `save:/config.sav` and commits, it faults on bad
   pointers in its own data (`0x100000001`, `0x100000062`, null+0xa0, a branch to code bytes) at a different place
-  each run; not changed by `SWR_XMON=1` or `NXGFX_WB_LAZY=0`; one 120 s run with `NXGFX_POOL=host` and one without
+  each run; not changed by `NXRS_XMON=1` or `NXGFX_WB_LAZY=0`; one 120 s run with `NXGFX_POOL=host` and one without
   the commit did not crash. Sound: 0.9 s not silent in 2 minutes of title (check the title music).
 - Wonder: the NUP is the Switch 1 game 1.2.1. 12.5 minutes from boot through the title and file select into the
   first course with scripted input (`build\I\runs\20261119-164407-X-wonder4-10min`: 30 x A, then
@@ -2066,11 +2065,11 @@ GPU-progress check). Not the scheduler (`NXOS_STEAL_ANY_MS=0`, `x2-mkw3-nosteal`
 **For lane G3:** the sizes above against the real NVN2 driver; the entries' reuse (ids `7d05`.. come back, offsets are
 reused) suggests frees do happen.
 
-**Write-back lands only what the GPU changed (graphics, lane X2, Turbo parity; lane G please review):**
+**Write-back lands only what the GPU changed (graphics, lane X2; lane G please review):**
 `vk/queue.rs submit_sub` copies each write-back range as the device had it before the submission's work (into a
 "write-back base" buffer, recorded in `pre` after the uploads), and `vk/mem.rs land_changed` writes into guest memory
-only the bytes where the device's result differs from that base, page by page (Turbo `vk_mem.c wr_land`, "a storage
-buffer is written in part"). Landing the whole range put stale device bytes over what the CPU wrote meanwhile
+only the bytes where the device's result differs from that base, page by page (a storage
+buffer is written in part). Landing the whole range put stale device bytes over what the CPU wrote meanwhile
 (a read-write storage buffer over a pool the CPU also writes; a size-0 one runs to the end of its pool, up to 1 MB).
 The pools line now counts them: `(N CPU-written bytes inside write-backs kept so far)`; Super Mario Bros. Wonder kept
 1,936 in its first 4 minutes (`x2-wonder1-10min`), DKB 0. It is not the MKW / DKB crash.
@@ -2088,9 +2087,9 @@ it).
   `main+0x372de4` (`x2-dkb-nosteal`, no equal-priority steals); with `NXOS_FREE_CORES=1` it dies at 11 s
   (`x2-dkb-free`), so it is corruption that depends on how threads interleave. Ruled out: the write-back (0 CPU bytes
   kept), equal-priority steals, the HID state sizes it imports (touch, Npad, six-axis, Jcms checked against
-  nxnative). The address arbiter and condvar SVCs match Turbo's `kernel.c`. Next: crumbs on the faulting functions'
-  pointers at the moment of the second press; Turbo runs this game with every thread free, so compare its loader
-  and file reads around the save load. Title music: the BGM stream is never opened (0.9 s of renderer sound in 60 s).
+  nxnative). The address arbiter and condvar SVCs were checked too. Next: crumbs on the faulting functions'
+  pointers at the moment of the second press; compare the loader and file reads around the save load with every
+  thread free. Title music: the BGM stream is never opened (0.9 s of renderer sound in 60 s).
 - Super Mario Bros. Wonder: 12.7 min, no crash, picture right, sound, memory flat after minute 5; FPS median 59.8 /
   p10 54.7 (another lane's build ran during minutes 2-5). **Historical status: later marked Playable; first-run
   level-entry prewarm was fixed in G4 round 6.**
@@ -2108,8 +2107,8 @@ that waited 2 ms for a core held by a worse thread (20 ms for any thread) took i
 next checkpoint": on Horizon the holder is paused, here both ran, and the game's per-core / same-core data (loaders
 decompressing in parallel when the game starts) was corrupted at a different place each run. Experiments
 (`build\I\runs\20261119-2*-X-x2-dkb-*`): one core with no steals (`NXOS_CORES=1 NXOS_STEAL_ANY_MS=0
-NXOS_STEAL_WORSE_MS=0`, with or without `SWR_XMON=1`) and three cores with no steals both ran clean past the point;
-the exclusive monitor alone (`SWR_XMON=1`) and every-thread-free (`NXOS_FREE_CORES=1`) still crashed. **Fix:** the
+NXOS_STEAL_WORSE_MS=0`, with or without `NXRS_XMON=1`) and three cores with no steals both ran clean past the point;
+the exclusive monitor alone (`NXRS_XMON=1`) and every-thread-free (`NXOS_FREE_CORES=1`) still crashed. **Fix:** the
 runtime tells the scheduler when a guest thread enters and leaves a host function (`Scheduler::host_enter` /
 `host_leave`, around `nxrt_host_invoke`); a core is taken only from a holder that is inside a host function (no guest
 code runs there), checked Dekker-style against its leaving (SeqCst on both sides); a holder whose core was taken waits
@@ -2124,7 +2123,7 @@ opening movie starts; it was a fatal. The "nearly silent title" was the new-save
 which has no music; the music plays once the game starts.
 
 **Lane X2 (2026-11-20 00:45): MKW 1.8.0 render-buffer pool patch ported; MKW still stops at 15.5 s.**
-- Profile `src/profiles/games/0400C3F00006E000/turbo.toml` (set `mkw_rbpool`, `NXRS_PATCH_MKW_RBPOOL`, build
+- Profile patch file in `src/profiles/games/0400C3F00006E000/` (since removed; set `mkw_rbpool`, `NXRS_PATCH_MKW_RBPOOL`, build
   d00e4f399e411d06): mkw-recomp's four sites (pool table 2 slots; `bl` at main+0xd65720 / main+0xb6f90 to the patch
   page + 0xf90 / 0xfc0). nxrs applies them at build ("patch applied" x4 in `build\games\mkw.buildX2.log`).
 - Runtime `hostfn::alias` / `aliased` + `dispatch.rs`: a guest address outside the host window (the patch page)
@@ -2154,7 +2153,7 @@ which has no music; the music plays once the game starts.
   patch off, where the out-of-memory comes first.
 - Display: MKW 1.8.0 makes its 3840x2160 swap chain at 0.8 s before any display query; `NXOS_DISPLAY_MAX=0..3` (new,
   os `vi.rs`) caps QueryDisplayBufferMaxResolution for tests (MKW never calls it).
-- **The double free, traced (2026-11-20 01:10, `x2-mkw47-ev`, `x2-mkw49-view`, `x2-mkw50-ev`):** `main+0xa13b0` is a per-view render-phase handler: phase 0 allocates the view's render buffer (`main+0xa163c` -> slot+0x98), phase 0xf frees it (`main+0xa14e8`); the event 0xf branch in `main+0xa07b0` (flag tests at main+0xa0c94..0xa0cc4) only picks arguments for a lighting call, it allocates nothing. The phases come from `main+0xb5080` through `main+0xa0040`: phase 0xf is sent every time (main+0xb5928), phase 0 only when `main+0xa26b0` returns 1, i.e. when bit 4 of the view's entry word (table at `[[obj+0x1e38]+0x18]+0x10`, 0x4468-byte entries) is clear. Traced: one phase 0, then 0xc / 0xf from four render contexts (`x21` = 0x1130aa798, 0x11b2fc798, 0x115b1c798, 0x11d2ab798) on the same view (index 0), two 0xf -> the second frees the freed buffer. So on the console that bit is clear every frame for view 0 and here it stays set after the first frame. Next: find the writer of bit 4 (likely a "skip this view" state tied to GPU progress, an NVN query / sync result or the present cadence) and compare its input with Turbo / mkw-recomp. Not the scheduler steals (`NXOS_STEAL_ANY_MS=0` same), not game dynamic resolution (`game_dynamic_resolution=0` same), not the camera service (ours answers 0x7c4 as mkw-recomp's stand-in); `NXOS_CORES=1` dies earlier (main+0x308520 at 5 s).
+- **The double free, traced (2026-11-20 01:10, `x2-mkw47-ev`, `x2-mkw49-view`, `x2-mkw50-ev`):** `main+0xa13b0` is a per-view render-phase handler: phase 0 allocates the view's render buffer (`main+0xa163c` -> slot+0x98), phase 0xf frees it (`main+0xa14e8`); the event 0xf branch in `main+0xa07b0` (flag tests at main+0xa0c94..0xa0cc4) only picks arguments for a lighting call, it allocates nothing. The phases come from `main+0xb5080` through `main+0xa0040`: phase 0xf is sent every time (main+0xb5928), phase 0 only when `main+0xa26b0` returns 1, i.e. when bit 4 of the view's entry word (table at `[[obj+0x1e38]+0x18]+0x10`, 0x4468-byte entries) is clear. Traced: one phase 0, then 0xc / 0xf from four render contexts (`x21` = 0x1130aa798, 0x11b2fc798, 0x115b1c798, 0x11d2ab798) on the same view (index 0), two 0xf -> the second frees the freed buffer. So on the console that bit is clear every frame for view 0 and here it stays set after the first frame. Next: find the writer of bit 4 (likely a "skip this view" state tied to GPU progress, an NVN query / sync result or the present cadence) and compare its input with mkw-recomp. Not the scheduler steals (`NXOS_STEAL_ANY_MS=0` same), not game dynamic resolution (`game_dynamic_resolution=0` same), not the camera service (ours answers 0x7c4 as mkw-recomp's stand-in); `NXOS_CORES=1` dies earlier (main+0x308520 at 5 s).
 
 **Lane X2 (2026-11-20 00:50), other games.** Super Mario Bros. Wonder, exclusive 229 s on the new scheduler (`x2-wonder-sched2`): median 60.0 / p10 59.9, memory flat, no crash; with the `call_guest` change relinked (`x2-wonder-suspend`, 150 s) 59.3-60.0 per minute, no crash. Arceus "lost progress": the game's, not ours (the 21.7 min run wrote nothing to the save or its work tree; at that story step the game has no menu Save, only its autosave points). Violet: in-game Save commits (`fs: commit save0`, `x2-violet5-obj`); still no way out of the house (menu has Options / Save only, Mom not found). Saves backed up in `build\X\saves\` before each run. **Concurrent runs in one lane share its claim file:** an exclusive run of mine waited while my own non-exclusive runs rewrote and removed `GAME_LOCK.X2`, and run_game's give-up path then failed on `os.remove` (FileNotFoundError). Exclusive runs now use their own lane name (`X2W`).
 
@@ -2178,7 +2177,7 @@ which has no music; the music plays once the game starts.
 
 **Lane X2 final (2026-11-20 02:10, loop stopped by the owner): open findings.**
 - Violet new game (`x2-violet9-new`, save moved aside and restored afterwards; original back in place, backup also in `build\X\saves\violet-before-newgame\`): language choice and "Choose a look" work; after picking a look the screen stays the plain menu gradient for 2+ minutes while the game presents at ~30 FPS, no file errors. Most likely the name entry: os `swkbd.rs` shows a host text box and waits for PC typing, which a scripted run cannot answer. The rerun with `NXOS_SWKBD=auto` (answer the default at once) was stopped before it started. **Next:** rerun the new game with `NXOS_SWKBD=auto`; if Mom appears in the opening, the old save is the odd one; if not, it is ours.
-- Z-A floor / FPCR: **not a physics bug.** The player was blocked by an NPC (the boy in the yellow hoodie and his Helioptile stand at the hall arch: moving diagonally shows "A Talk" / "Interact Helioptile", `x2-plza10-move`); diagonal movement works and the camera follows it. FPCR handling matches Turbo by design: MSR FPCR keeps FZ/DN/AHP/RMode (`c->fpcr = v & 0x7c00000`), MXCSR mirrors FZ as FTZ+DAZ, directed rounding (RMode != 0) takes the slow paths of `runtime/simd.h` (Turbo instead sets MXCSR RC; same results); Z-A writes FPCR in 9 places; FRSQRTE/FRECPE are emulated (`rsqrte_s` 1161 / `recpe_s` 677 uses). Open: the camera stays put when she walks into the arch area behind the benches (`x2-plza11-gates`): the picture shows the platform with the player out of view. The ticket gates are past that arch (objective marker to the right of the bench pillar). Save: `build\X\saves\plza-0118\`.
+- Z-A floor / FPCR: **not a physics bug.** The player was blocked by an NPC (the boy in the yellow hoodie and his Helioptile stand at the hall arch: moving diagonally shows "A Talk" / "Interact Helioptile", `x2-plza10-move`); diagonal movement works and the camera follows it. FPCR handling is right by design: MSR FPCR keeps FZ/DN/AHP/RMode (`c->fpcr = v & 0x7c00000`), MXCSR mirrors FZ as FTZ+DAZ, directed rounding (RMode != 0) takes the slow paths of `runtime/simd.h` (setting MXCSR RC instead gives the same results); Z-A writes FPCR in 9 places; FRSQRTE/FRECPE are emulated (`rsqrte_s` 1161 / `recpe_s` 677 uses). Open: the camera stays put when she walks into the arch area behind the benches (`x2-plza11-gates`): the picture shows the platform with the player out of view. The ticket gates are past that arch (objective marker to the right of the bench pillar). Save: `build\X\saves\plza-0118\`.
 - MKW scene-ready flag: stage dispatch `main+0x76f60` skips stages 7/9 while `[obj+0x901]` bit 3 is set; bit 3 comes from `[x0+0x79]` in `main+0x4cd130` (called from `main+0x4cc580`), which clears `+0x79` only while `[x0+0x2dc] & 0x3f == 0`. `+0x2dc` has ~120 writers in main (many different classes use the offset), so the writer for this object needs a dynamic watch: a crumbs dump of `[x0+0x2dc]` / `[x0+0x79]` at `main+0x4cd204` per frame, then a write watch on that address. Expected answer: a resource-load or async-task count (fs async read, a thread signal, or a GPU fence the game polls) that never drains here.
 - Tools left in `build\X\` (lane X2 only): `xplay.py`, `icmd.sh`, `inst\inst.py` / `crumbs.py` (crumbs now guard their helper definitions when two functions of one chunk are instrumented), `relink.sh`, `ilink.sh`, inputs.
 
@@ -2301,7 +2300,7 @@ main+0xf42348 -> sdk+0x1793a0). Allowed for svcSetMemoryAttribute now (mkw-recom
 
 **Patch layer.** mkw-recomp's `recomp/patches-mkw-180.txt` is the profile's `games/0400C3F00006E000/recomp.txt`
 (the translator's own table format, which is that file's; new profile file kind `RecompTable`, keyed by `build main
-d00e4f39…`, appended by `profiles::translator_patches`; MKW's `turbo.toml` is gone, its four shadow sites are in the
+d00e4f39…`, appended by `profiles::translator_patches`; MKW's separate patch file is gone, its four shadow sites are in the
 table). 149 entries: 97 spin waits + 43 sites in 9 sets + 9 set lines; every original word checked at build ("patch
 applied: Mario Kart World: 9 code patch sets, 43 sites, 97 spin waits"). Host side: os `gamefix.rs` +
 `gamefix/mkw.rs`, `mkw_zstd.rs`, `mkw_view.rs`, `mkw_romfs.rs`. os `Cargo.toml` gets `zstd-sys` (experimental
@@ -2342,10 +2341,10 @@ the 187 existing folders changed. Re-import: `py -I src/profiles/tools/export.py
 `uv run --no-project --python 3.14 src/profiles/tools/export_shaders.py <nxnative>` (a sparse clone of upstream is at
 `build\Q\nxnative-up`), then `--check`.
 
-**PORT_MAP.tsv** (repository root): one row per file of nxnative (`NX`), Turbo (`TB`) and the mkw-recomp donor files
+**PORT_MAP.tsv** (repository root): one row per file of nxnative (`NX`) and the mkw-recomp donor files
 (`MR`): lines, destination crate/module, action, status, note. `scripts/port_map.py` writes it from ordered rules
 (edit a rule, not the TSV) and `--check` compares with the trees (defaults: `build\Q\nxnative-up`, else
-`D:\Projects\nxnative`; `D:\Projects\Switch2RECOMP-main`; `D:\Projects\mkw-recomp-main`; `--format-only` in CI);
+`D:\Projects\nxnative`; `D:\Projects\mkw-recomp-main`; `--format-only` in CI);
 `cargo test -p profiles --test port_map` checks the format. **Every lane: when a row's work lands, change its rule's
 status in `scripts/port_map.py` and regenerate.**
 
@@ -3046,10 +3045,10 @@ unchanged (wrapped in `cfg(windows)`, nothing restructured). The windows / windo
 | SetProcessAffinityMask (NXOS_HOST_CPUS) | `sched_setaffinity` on every thread | os `boot.rs` |
 | SetThreadPriority (shader threads), CreateWaitableTimerEx (frame pacing) | per-thread nice (`setpriority`), `clock_nanosleep` TIMER_ABSTIME | graphics `vk/pipe.rs`, `vk/present.rs` |
 | GlobalMemoryStatusEx, GetProcessMemoryInfo, GetProcessTimes | `sysconf`, `/proc/self/status` (VmRSS + VmSwap), CLOCK_PROCESS_CPUTIME_ID | graphics `vk/mod.rs`, `vk/perf.rs`, `vk/pipe.rs`; front `metrics.rs` |
-| Named pipe control channel `\\.\pipe\nxrs_ctl_<pid>` (+ `swr_ctl_<pid>`) | Unix domain socket `$XDG_RUNTIME_DIR/nxrs_ctl_<pid>` (+ `swr_ctl_<pid>`; /tmp without XDG_RUNTIME_DIR), same one-line protocol, removed at exit | front `ctl.rs` |
+| Named pipe control channel `\\.\pipe\nxrs_ctl_<pid>` | Unix domain socket `$XDG_RUNTIME_DIR/nxrs_ctl_<pid>` (/tmp without XDG_RUNTIME_DIR), same one-line protocol, removed at exit | front `ctl.rs` |
 | WASAPI output and capture (cpal) | cpal's ALSA backend (PulseAudio / PipeWire through ALSA's default device); a capture device counts only when it opens (ALSA always names "default") | os `media/sink.rs`, `media/mic.rs` |
 | MMCSS | none needed (no equivalent call; real-time scheduling would need privileges): not ported | - |
-| XInput pads | SDL2 game controllers loaded at run time (libSDL2-2.0.so.0), as Turbo's Linux backend; SDL's own PS4 / PS5 / Switch HID drivers off so the native HID path keeps those pads | os `input/xinput.rs` |
+| XInput pads | SDL2 game controllers loaded at run time (libSDL2-2.0.so.0); SDL's own PS4 / PS5 / Switch HID drivers off so the native HID path keeps those pads | os `input/xinput.rs` |
 | WinMM joysticks (fallback) | SDL2 joysticks | os `input/winmm.rs` |
 | Raw HID (SetupAPI + HidD_*: DualSense / DS4, Switch Pro, Joy-Con, NSO pads) | hidraw: `/sys/class/hidraw` (uevent HID_ID / HID_NAME, bus 5 = Bluetooth), usages and report lengths from the report descriptor (report-id byte counted as HidP_GetCaps does), non-blocking read, 30 ms bounded write, HIDIOCGFEATURE | os `input/hidio.rs` |
 | Switch 2 controllers over Bluetooth LE (WinRT) | BlueZ over D-Bus (zbus): discovery, Nintendo manufacturer data, connect, GATT by UUID, AcquireNotify / AcquireWrite with StartNotify / WriteValue fallbacks | os `input/switch2_ble.rs` |
@@ -3058,7 +3057,7 @@ unchanged (wrapped in `cfg(windows)`, nothing restructured). The windows / windo
 | Media Foundation H.264 and AAC decoders | FFmpeg libavcodec through a small C shim compiled against the system headers (`media/ffdec.c`, `media/ff.rs`, same `mf::{H264, Aac}` API); libopus / libvpx / libdav1d from the system (pkg-config) instead of the MinGW archives | os `media/`, `build.rs` |
 | Media Foundation sink writer (F7 recording) | the `ffmpeg` program: BGRA frames on its stdin (libx264, else libopenh264 / NVENC / VA-API), the sound as 48 kHz s16 beside it, muxed with AAC when the recording stops | front `rec_linux.rs` |
 | PrintWindow capture (control `shot`, `shot=`) | the presented picture read back by graphics at the next present (Wayland lets no program read another window) | front `capture.rs` |
-| MessageBox, the swkbd text box, the prompt window, F1 page (GDI) | the desktop's dialogs (zenity, else kdialog) as Turbo's `plat_message`: message box, `--entry` text box, `--question` prompt (closed by PID when the pads answer), `--forms` F1 page with the four options; ShellExecute -> `xdg-open` | os `desk.rs`, `services/notice.rs`, `services/swkbd.rs`, `ui.rs`; front `help.rs` |
+| MessageBox, the swkbd text box, the prompt window, F1 page (GDI) | the desktop's dialogs (zenity, else kdialog): message box, `--entry` text box, `--question` prompt (closed by PID when the pads answer), `--forms` F1 page with the four options; ShellExecute -> `xdg-open` | os `desk.rs`, `services/notice.rs`, `services/swkbd.rs`, `ui.rs`; front `help.rs` |
 | Lossless Scaling app launch / registry Steam path | Steam's Linux library folders for Lossless.dll (in-engine LSFG); the Windows app itself is not started (it captures Windows windows only) | front `lsfg.rs` |
 | GetTimeZoneInformation, GetLocalTime | `localtime_r` (`tm_gmtoff`) | os `services/time.rs`; front `capture.rs` |
 | GetSystemMetrics (screen size) | the window system's primary monitor through winit (`services::vi::HOST_SCREEN`) | os `services/vi.rs`, front `window_linux.rs` |
@@ -3066,7 +3065,7 @@ unchanged (wrapped in `cfg(windows)`, nothing restructured). The windows / windo
 | GUI-subsystem log redirect | stderr at /dev/null or closed -> `<name>.log` beside the game | front `lib.rs` |
 | ExecuteProgram (`<name>_p<N>.exe`) | the same `std::process` launch (fork / exec), no extension | os `services/oe.rs` |
 | seek_read / seek_write | `pread` / `pwrite` | os `services/fs.rs` (`posio`) |
-| Keys under %LOCALAPPDATA% | `$XDG_DATA_HOME` (~/.local/share)`/nxrs/keys/prod.keys`, the launcher's layout, then `~/.switch/prod.keys`; SWR_PROD_KEYS first as before | translator `package/keys.rs` |
+| Keys under %LOCALAPPDATA% | `$XDG_DATA_HOME` (~/.local/share)`/nxrs/keys/prod.keys`, the launcher's layout, then `~/.switch/prod.keys`; NXRS_PROD_KEYS first as before | translator `package/keys.rs` |
 | clang for x86_64-pc-windows-msvc / llvm-mingw, `<name>.exe` + `<name>_code.dll` | clang for x86_64-unknown-linux-gnu + ld.lld: `<name>` (loader: dlopen of `<name>_code.so`, NXRS_DATA / NXRT_EXEFS, a 16 MB main stack by setrlimit + re-exec) and `<name>_code.so` (-fPIC objects, `-Bsymbolic` so the generated code's runtime calls bind without a PLT, `--no-undefined`; system libraries: `-lopus -lvpx -ldav1d -lavcodec -lavutil -lasound -lgcc_s -lutil -lrt -lpthread -lm -ldl -lc`); `nxrs_game_main` exported with default visibility; the mods' disabled markers read through /proc/self/exe | cli `cc.rs`, `pipeline.rs`, `mods.rs` |
 | dmsh_xlate.exe, spirv-val.exe (shader build tools) | `build/tools/dmsh_xlate-linux/dmsh_xlate` (NativeAOT linux-x64, `src/shaders/tools/build_dmsh_xlate.sh`: same source, same `--source-sha` e11dc43d4ddc5b58 as the Windows tool), `spirv-val` from PATH (spirv-tools) | shaders `xlate.rs` |
 | nxrt-dev (homebrew e2e) toolchain | PATH clang / ld.lld, `libnxrt.a` | runtime `bin/nxrt_dev.rs` |

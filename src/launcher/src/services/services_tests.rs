@@ -1,14 +1,10 @@
-//! Fixtures the services' tests share, and the save import (`savesCopyBetweenEngines`, Turbo to nxrs).
+//! Fixtures the services' tests share, and an entry saved with another engine loading as nxrs.
 
-use super::markers::set_game_engine;
-use super::saves::{copy_from_turbo, turbo_build_has_saves};
-use super::sources::game_from_source;
+use super::build_facts::has_build;
 use crate::constants::engine as e;
 use crate::model::game::Game;
 use crate::model::game_json;
-use crate::model::names::build_folder_for;
 use crate::model::path_text::from_native;
-use crate::model::save_plan::save_folder;
 
 pub fn tmp() -> (tempfile::TempDir, String) {
     let t = tempfile::tempdir().unwrap();
@@ -41,102 +37,27 @@ pub fn built_game(dir: &str) -> Game {
     g
 }
 
+/// An entry an older engine built (`"engine": "turbo"`, or no engine) loads as nxrs, moved to its
+/// `[nxrs]` folder and not built, even with the older build still on disk; it saves back as nxrs, and
+/// `savesOffered` is kept as it was.
 #[test]
-fn saves_copy_from_turbo() {
+fn other_engine_entries_load_as_nxrs() {
     let (_t, dir) = tmp();
-    let source = format!("{dir}/Kart.nsp");
-    write(&source, b"PFS0");
-    let mut game = game_from_source(&source, "");
-    game.engine = e::ENGINE_TURBO.into();
-    game.build_dir = format!("{dir}/builds/Kart");
-    game.output_name = "Kart".into();
-    let turbo_save = save_folder(&game.build_dir, "Kart");
-    let nxrs_dir = build_folder_for(&game.build_dir, true);
-    let nxrs_save = save_folder(&nxrs_dir, "Kart");
-    write(
-        &format!("{turbo_save}/user/progress.dat"),
-        b"turbo progress",
-    );
-    write(
-        &format!("{turbo_save}/user/sub/options.bin"),
-        b"turbo options",
-    );
-    write(&format!("{turbo_save}/device/device.bin"), b"turbo device");
-    write(&format!("{turbo_save}/temp/scratch"), b"temporary");
-    write(&format!("{turbo_save}/bcat/news"), b"bcat");
-    write(&format!("{nxrs_save}/user1/progress.dat"), b"nxrs progress");
-    write(
-        &format!("{nxrs_save}/user1.new/progress.dat"),
-        b"half-committed",
-    );
-    assert!(
-        !turbo_build_has_saves(&game),
-        "a Turbo entry has nothing to import into"
-    );
-    assert!(set_game_engine(&mut game, true));
-    assert_eq!(game.build_dir, nxrs_dir);
-    assert!(turbo_build_has_saves(&game));
-    let copy = copy_from_turbo(&game).unwrap();
-    assert_eq!(
-        read(&format!("{nxrs_save}/user1/progress.dat")),
-        b"turbo progress"
-    );
-    assert_eq!(
-        read(&format!("{nxrs_save}/user1/sub/options.bin")),
-        b"turbo options"
-    );
-    assert_eq!(
-        read(&format!("{nxrs_save}/device/device.bin")),
-        b"turbo device"
-    );
-    for gone in ["temp", "bcat", "user1.new"] {
-        assert!(
-            !std::path::Path::new(&format!("{nxrs_save}/{gone}")).exists(),
-            "{gone}"
-        );
+    let old = built_game(&dir);
+    for engine in [serde_json::json!("turbo"), serde_json::Value::Null] {
+        let mut v = game_json::to_json(&old);
+        v["engine"] = engine;
+        v["builtSource"] = serde_json::json!("D:/x.nsp");
+        v["savesOffered"] = serde_json::json!("offered");
+        let g = game_json::from_json(&v);
+        assert_eq!(g.engine, e::ENGINE_NXRS);
+        assert_eq!(g.build_dir, format!("{dir}/Build output [nxrs]"));
+        assert!(g.nxrs() && g.built_source.is_empty() && !has_build(&g));
+        assert_eq!(g.saves_offered, "offered");
+        let back = game_json::to_json(&g);
+        assert_eq!(back["engine"], e::ENGINE_NXRS);
+        assert_eq!(game_json::from_json(&back).build_dir, g.build_dir);
     }
-    assert_eq!(
-        read(&format!("{}/user1/progress.dat", copy.backup)),
-        b"nxrs progress"
-    );
-    assert_eq!(
-        read(&format!("{}/user1.new/progress.dat", copy.backup)),
-        b"half-committed"
-    );
-    assert_eq!(
-        read(&format!("{turbo_save}/user/progress.dat")),
-        b"turbo progress"
-    );
-    assert!(copy.report.contains("user1"));
-    // Turbo's runtimes before the split kept the user saves in save/system
-    let (_t2, old) = tmp();
-    let mut legacy = game_from_source(&source, "");
-    legacy.engine = e::ENGINE_TURBO.into();
-    legacy.build_dir = format!("{old}/Kart");
-    legacy.output_name = "Kart".into();
-    write(
-        &format!("{}/system/slot0", save_folder(&legacy.build_dir, "Kart")),
-        b"old turbo",
-    );
-    assert!(set_game_engine(&mut legacy, true));
-    assert!(
-        copy_from_turbo(&legacy)
-            .unwrap_err()
-            .contains("Build the game")
-    );
-    std::fs::create_dir_all(legacy.data_dir()).unwrap();
-    let copy = copy_from_turbo(&legacy).unwrap();
-    assert!(copy.backup.is_empty());
-    assert_eq!(
-        read(&format!(
-            "{}/user1/slot0",
-            save_folder(&legacy.build_dir, "Kart")
-        )),
-        b"old turbo"
-    );
-    legacy.saves_offered = e::ENGINE_TURBO.into();
-    assert_eq!(
-        game_json::from_json(&game_json::to_json(&legacy)).saves_offered,
-        e::ENGINE_TURBO
-    );
+    assert!(has_build(&game_json::from_json(&game_json::to_json(&old))));
+    assert!(contains(&read(&old.executable()), "fixture"));
 }

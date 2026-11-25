@@ -273,6 +273,15 @@ impl Image {
             && view.image == vk::Handle::as_raw(self.image)).then_some(*view)
     }
 
+    /// The format of `view`, one of this image's views.
+    pub(crate) fn format_of_view(&self, view: vk::ImageView) -> Option<vk::Format> {
+        let raw = vk::Handle::as_raw(view);
+        self.view_metadata
+            .values()
+            .find(|v| v.view == raw)
+            .map(|v| vk::Format::from_raw(v.format))
+    }
+
     pub(crate) fn backing_creation(&self) -> Option<ImageCreation> {
         self.creation.and_then(|c| c.for_image(self.image))
     }
@@ -522,7 +531,7 @@ mod creation_provenance_tests {
 
 const HPAGE: u64 = 4096;
 
-/// Image use without NVN's IMAGE flag (Turbo caa07ad). A game may register or bind a texture made without
+/// Image use without NVN's IMAGE flag. A game may register or bind a texture made without
 /// `NVN_TEXTURE_FLAGS_IMAGE` as an image (Ocarina of Time's movie network writes its pictures by image store into
 /// RGBA8 1920x1080 and RGBA8_SRGB 2560x1440 textures made with flags 0); the console takes that. Here such an image had
 /// no storage use and the writes were lost. On by default (`NXGFX_IMAGE_NOFLAG=0` or `--image_noflag=0` disables it),
@@ -1049,7 +1058,8 @@ impl Images {
     }
 }
 
-/// A six-face copy of a one-layer 2D image that shaders sample as a cube (`Gpu::cube_twin_view`).
+/// A six-face copy of a one-layer 2D image that shaders sample as a cube, a one-slice 3D copy of one they sample as
+/// a 3D texture, or a 2D copy of a 3D image's first slice that they sample as 2D (`Gpu::cube_twin_view`).
 struct CubeTwin {
     /// the source's Vulkan image when the twin was made (a new backing makes a new twin)
     src: vk::Image,
@@ -1061,7 +1071,110 @@ struct CubeTwin {
     copied_sub: Option<u64>,
 }
 
-static CUBE_TWINS: Mutex<Option<HashMap<u64, CubeTwin>>> = Mutex::new(None);
+/// What a twin holds (`Gpu::cube_twin_view`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TwinKind {
+    /// a one-layer 2D image's layer in six cube faces
+    Cube,
+    /// a one-layer 2D image's layer as the one slice of a 3D image
+    Volume,
+    /// a 3D image's first slice (every level) as a 2D image
+    Slice,
+}
+
+impl TwinKind {
+    /// The twin a texture whose image is of type `ty` needs where a shader samples `want`; None: no twin fits.
+    pub fn of(ty: vk::ImageType, want: i32) -> Option<TwinKind> {
+        match want {
+            target::T3D if ty == vk::ImageType::TYPE_2D => Some(TwinKind::Volume),
+            target::CUBE | target::CUBE_ARRAY if ty == vk::ImageType::TYPE_2D => Some(TwinKind::Cube),
+            target::T2D | target::T2D_ARRAY if ty == vk::ImageType::TYPE_3D => Some(TwinKind::Slice),
+            _ => None,
+        }
+    }
+}
+
+/// A twin's levels: the source's, as many as a 2D image of its width and height has (a 3D image deeper than it is
+/// wide has more levels than its slice can).
+fn twin_levels(im: &Image) -> u32 {
+    let side = im.extent.width.max(im.extent.height).max(1);
+    im.levels.min(32 - side.leading_zeros()).max(1)
+}
+
+/// Twins by (texture serial, kind).
+static CUBE_TWINS: Mutex<Option<HashMap<(u64, TwinKind), CubeTwin>>> = Mutex::new(None);
+
+/// Whether an image is a single-sample, one-layer 2D colour image (any aspect): the shape a 3D twin copies.
+pub fn volume_twin_fits(
+    ty: vk::ImageType,
+    extent: vk::Extent3D,
+    layers: u32,
+    samples: vk::SampleCountFlags,
+    kind: Kind,
+) -> bool {
+    ty == vk::ImageType::TYPE_2D
+        && extent.depth == 1
+        && layers == 1
+        && samples == vk::SampleCountFlags::TYPE_1
+        && !matches!(kind, Kind::Depth | Kind::DepthStencil | Kind::Stencil)
+}
+
+#[cfg(test)]
+mod volume_twin_tests {
+    use super::*;
+
+    #[test]
+    fn a_one_layer_2d_colour_image_of_any_shape_gets_a_3d_twin() {
+        let e = |w, h| vk::Extent3D {
+            width: w,
+            height: h,
+            depth: 1,
+        };
+        let (d2, one) = (vk::ImageType::TYPE_2D, vk::SampleCountFlags::TYPE_1);
+        assert!(volume_twin_fits(d2, e(256, 64), 1, one, Kind::Float));
+        assert!(!volume_twin_fits(d2, e(256, 64), 2, one, Kind::Float));
+        assert!(!volume_twin_fits(d2, e(256, 64), 1, one, Kind::Depth));
+        assert!(!volume_twin_fits(d2, e(256, 64), 1, vk::SampleCountFlags::TYPE_4, Kind::Float));
+        assert!(!volume_twin_fits(vk::ImageType::TYPE_3D, e(32, 32), 1, one, Kind::Float));
+    }
+}
+
+/// Whether an image is a single-sample 3D colour image: the shape a slice twin copies.
+pub fn slice_twin_fits(
+    ty: vk::ImageType,
+    layers: u32,
+    samples: vk::SampleCountFlags,
+    kind: Kind,
+) -> bool {
+    ty == vk::ImageType::TYPE_3D
+        && layers == 1
+        && samples == vk::SampleCountFlags::TYPE_1
+        && !matches!(kind, Kind::Depth | Kind::DepthStencil | Kind::Stencil)
+}
+
+#[cfg(test)]
+mod slice_twin_tests {
+    use super::*;
+
+    /// Mario Kart World's texture ID 337 (a 64x64x64 R8 noise volume, NVN target 2) read by a 2D instruction gets a
+    /// 2D twin of its first slice; 2D images and sampling as 3D or cube do not.
+    #[test]
+    fn a_3d_image_sampled_as_2d_gets_a_slice_twin() {
+        let (d2, d3) = (vk::ImageType::TYPE_2D, vk::ImageType::TYPE_3D);
+        assert_eq!(TwinKind::of(d3, target::T2D), Some(TwinKind::Slice));
+        assert_eq!(TwinKind::of(d3, target::T2D_ARRAY), Some(TwinKind::Slice));
+        assert_eq!(TwinKind::of(d3, target::T3D), None);
+        assert_eq!(TwinKind::of(d3, target::CUBE), None);
+        assert_eq!(TwinKind::of(d2, target::T2D), None);
+        assert_eq!(TwinKind::of(d2, target::T3D), Some(TwinKind::Volume));
+        assert_eq!(TwinKind::of(d2, target::CUBE_ARRAY), Some(TwinKind::Cube));
+        let one = vk::SampleCountFlags::TYPE_1;
+        assert!(slice_twin_fits(d3, 1, one, Kind::Float));
+        assert!(!slice_twin_fits(d2, 1, one, Kind::Float));
+        assert!(!slice_twin_fits(d3, 1, one, Kind::Depth));
+        assert!(!slice_twin_fits(d3, 1, vk::SampleCountFlags::TYPE_4, Kind::Float));
+    }
+}
 
 /// Whether an image is a square, single-sample, one-layer 2D colour image: the shape a cube twin copies.
 pub fn cube_twin_fits(
@@ -1357,12 +1470,20 @@ impl Gpu {
                 && (t.d.flags as u32 & tex_flags::IMAGE != 0)
             {
                 usage |= vk::ImageUsageFlags::STORAGE;
+            } else if t.d.flags as u32 & tex_flags::IMAGE != 0 && self.emulated_storage(tf.vk) {
+                // a format the device cannot store (E5B9G9R9): storage use through its emulated view format
+                // (`storemu`; the shader packs and unpacks the texels)
+                usage |= vk::ImageUsageFlags::STORAGE;
+                flags |= vk::ImageCreateFlags::EXTENDED_USAGE;
             } else if t.d.flags as u32 & tex_flags::IMAGE == 0 && tf.astc.is_none() && img_wanted(t)
             {
-                // used as an image without the flag (`want_image`): storage use, through the UNORM twin when the
-                // format itself has none
+                // used as an image without the flag (`want_image`): storage use, through the UNORM twin (or the
+                // emulated view format) when the format itself has none
                 if feat.contains(vk::FormatFeatureFlags::STORAGE_IMAGE) {
                     usage |= vk::ImageUsageFlags::STORAGE;
+                } else if self.emulated_storage(tf.vk) {
+                    usage |= vk::ImageUsageFlags::STORAGE;
+                    flags |= vk::ImageCreateFlags::EXTENDED_USAGE;
                 } else if unorm_twin(tf.vk).is_some_and(|u| {
                     self.d
                         .format_features(u)
@@ -1729,6 +1850,16 @@ impl Gpu {
     /// which every face reads. A Vulkan image of one layer cannot take a cube view, so a cube-compatible twin holds
     /// that layer in all six faces (every level), copied in the submission's upload buffer whenever the texture's
     /// content may have changed (a CPU rewrite, a GPU write, or once per submission for a GPU-written texture).
+    ///
+    /// The same holds for a one-layer 2D texture a shader samples as a 3D texture (`want` T3D; SONIC X SHADOW
+    /// GENERATIONS): the 2D descriptor fetches its one layer at (s, t) whatever r is. A 2D Vulkan image cannot take a
+    /// 3D view, so a 3D twin of depth 1 holds that layer as its one slice (every level): with depth 1 every r reads
+    /// that slice.
+    ///
+    /// And the inverse: a 3D texture a shader samples as 2D (`want` T2D / T2D_ARRAY; Mario Kart World's 64^3 noise
+    /// volume, texture ID 337). The 3D descriptor decides the fetch; the 2D instruction supplies no r, which reads as
+    /// 0, the first slice at every level. A 3D Vulkan image takes no 2D view without VK_EXT_image_2d_view_of_3d and an
+    /// image made for it, so a 2D twin holds the first slice of every level.
     pub fn cube_twin_view(
         &self,
         im: &Image,
@@ -1736,32 +1867,43 @@ impl Gpu {
         want: i32,
         sub: &mut Sub,
     ) -> Option<vk::ImageView> {
-        if !cube_twin_fits(im.ty, im.extent, im.layers, im.samples, im.tf.kind)
-            || im.sparse.is_some()
-            || !matches!(want, target::CUBE | target::CUBE_ARRAY)
-        {
+        let kind = TwinKind::of(im.ty, want)?;
+        let fits = match kind {
+            TwinKind::Volume => {
+                volume_twin_fits(im.ty, im.extent, im.layers, im.samples, im.tf.kind)
+            }
+            TwinKind::Cube => cube_twin_fits(im.ty, im.extent, im.layers, im.samples, im.tf.kind),
+            TwinKind::Slice => slice_twin_fits(im.ty, im.layers, im.samples, im.tf.kind),
+        };
+        if !fits || im.sparse.is_some() {
             return None;
         }
         let serial = im.tex.serial;
+        let key = (serial, kind);
         let mut all = CUBE_TWINS.lock().unwrap();
         let m = all.get_or_insert_with(HashMap::new);
-        if m.get(&serial).is_some_and(|t| t.src != im.image) {
-            if let Some(old) = m.remove(&serial) {
+        if m.get(&key).is_some_and(|t| t.src != im.image) {
+            if let Some(old) = m.remove(&key) {
                 self.drop_cube_twin(old);
             }
         }
-        if !m.contains_key(&serial) {
-            let twin = self.make_cube_twin(im, sub)?;
+        if !m.contains_key(&key) {
+            let twin = self.make_cube_twin(im, sub, kind)?;
             crate::vklog!(
-                "texture ser{serial} ({}x{} {:?}, {} levels, target {}) sampled as a cube: a six-face twin of its one layer",
-                im.extent.width, im.extent.height, im.format, im.levels, im.tex.d.target
+                "texture ser{serial} ({}x{}x{} {:?}, {} levels, target {}) sampled as {}",
+                im.extent.width, im.extent.height, im.extent.depth, im.format, im.levels, im.tex.d.target,
+                match kind {
+                    TwinKind::Volume => "a 3D texture: a one-slice 3D twin of its one layer",
+                    TwinKind::Cube => "a cube: a six-face twin of its one layer",
+                    TwinKind::Slice => "a 2D texture: a 2D twin of its first slice",
+                }
             );
-            m.insert(serial, twin);
+            m.insert(key, twin);
         }
-        let t = m.get_mut(&serial).unwrap();
+        let t = m.get_mut(&key).unwrap();
         let version = (im.rewrites, im.gpu_seq);
         if (t.version != Some(version) || im.gpu_owned) && t.copied_sub != Some(sub.serial) {
-            self.copy_cube_twin(im, t.image, sub.pre);
+            self.copy_cube_twin(im, t.image, sub.pre, kind);
             t.version = Some(version);
             t.copied_sub = Some(sub.serial);
         }
@@ -1769,10 +1911,11 @@ impl Gpu {
         if let Some(&view) = t.views.get(&key) {
             return Some(view);
         }
-        let (mut base_level, mut nlevels) = (0, im.levels);
+        let levels = twin_levels(im);
+        let (mut base_level, mut nlevels) = (0, levels);
         if let Some(v) = v.filter(|v| v.bits & VW_LEVELS != 0) {
-            base_level = (v.base_level as u32).min(im.levels - 1);
-            nlevels = (v.nlevels as u32).max(1).min(im.levels - base_level);
+            base_level = (v.base_level as u32).min(levels - 1);
+            nlevels = (v.nlevels as u32).max(1).min(levels - base_level);
         }
         let ci = vk::ImageViewCreateInfo::default()
             .image(t.image)
@@ -1784,7 +1927,7 @@ impl Gpu {
                 base_mip_level: base_level,
                 level_count: nlevels,
                 base_array_layer: 0,
-                layer_count: 6,
+                layer_count: if kind == TwinKind::Cube { 6 } else { 1 },
             });
         let view = match unsafe { self.dev().create_image_view(&ci, None) } {
             Ok(v) => v,
@@ -1797,17 +1940,54 @@ impl Gpu {
         Some(view)
     }
 
-    fn make_cube_twin(&self, im: &Image, sub: &mut Sub) -> Option<CubeTwin> {
+    fn make_cube_twin(&self, im: &Image, sub: &mut Sub, kind: TwinKind) -> Option<CubeTwin> {
+        let usage = vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST;
+        let vol = kind == TwinKind::Volume;
+        let (flags, ty, layers) = match kind {
+            TwinKind::Volume => (vk::ImageCreateFlags::empty(), vk::ImageType::TYPE_3D, 1),
+            TwinKind::Cube => (vk::ImageCreateFlags::CUBE_COMPATIBLE, vk::ImageType::TYPE_2D, 6),
+            TwinKind::Slice => (vk::ImageCreateFlags::empty(), vk::ImageType::TYPE_2D, 1),
+        };
+        // the slice twin is one slice deep
+        let extent = vk::Extent3D {
+            depth: 1,
+            ..im.extent
+        };
+        if vol {
+            // 3D support is per format (block-compressed 3D images are optional)
+            let p = unsafe {
+                self.d.instance.get_physical_device_image_format_properties(
+                    self.d.pdev,
+                    im.format,
+                    ty,
+                    vk::ImageTiling::OPTIMAL,
+                    usage,
+                    flags,
+                )
+            };
+            let fits = p.is_ok_and(|p| {
+                p.max_extent.width >= im.extent.width
+                    && p.max_extent.height >= im.extent.height
+                    && p.max_mip_levels >= im.levels
+            });
+            if !fits {
+                crate::log::red_once(&format!(
+                    "3D twin: {:?} {}x{} with {} levels cannot be a 3D image here",
+                    im.format, im.extent.width, im.extent.height, im.levels
+                ));
+                return None;
+            }
+        }
         let ci = vk::ImageCreateInfo::default()
-            .flags(vk::ImageCreateFlags::CUBE_COMPATIBLE)
-            .image_type(vk::ImageType::TYPE_2D)
+            .flags(flags)
+            .image_type(ty)
             .format(im.format)
-            .extent(im.extent)
-            .mip_levels(im.levels)
-            .array_layers(6)
+            .extent(extent)
+            .mip_levels(twin_levels(im))
+            .array_layers(layers)
             .samples(vk::SampleCountFlags::TYPE_1)
             .tiling(vk::ImageTiling::OPTIMAL)
-            .usage(vk::ImageUsageFlags::SAMPLED | vk::ImageUsageFlags::TRANSFER_DST)
+            .usage(usage)
             .initial_layout(vk::ImageLayout::UNDEFINED);
         let image = match unsafe { self.dev().create_image(&ci, None) } {
             Ok(i) => i,
@@ -1864,16 +2044,19 @@ impl Gpu {
         })
     }
 
-    /// Every level of the source's one layer into each of the twin's six faces.
-    fn copy_cube_twin(&self, im: &Image, twin: vk::Image, cb: vk::CommandBuffer) {
-        let regions: Vec<vk::ImageCopy> = (0..im.levels)
+    /// Every level of the source's one layer into each of the twin's six faces (a 3D twin: into its one slice, which
+    /// a 2D-to-3D copy addresses as layer 0 and depth 1; a slice twin: the source's slice z = 0, which a 3D-to-2D
+    /// copy addresses the same way).
+    fn copy_cube_twin(&self, im: &Image, twin: vk::Image, cb: vk::CommandBuffer, kind: TwinKind) {
+        let faces = if kind == TwinKind::Cube { 6 } else { 1 };
+        let regions: Vec<vk::ImageCopy> = (0..twin_levels(im))
             .flat_map(|level| {
                 let extent = vk::Extent3D {
                     width: (im.extent.width >> level).max(1),
                     height: (im.extent.height >> level).max(1),
                     depth: 1,
                 };
-                (0..6).map(move |face| vk::ImageCopy {
+                (0..faces).map(move |face| vk::ImageCopy {
                     src_subresource: vk::ImageSubresourceLayers {
                         aspect_mask: vk::ImageAspectFlags::COLOR,
                         mip_level: level,
@@ -1920,13 +2103,15 @@ impl Gpu {
 
     /// The texture goes: its cube twin too.
     fn forget_cube_twin(&self, serial: u64) {
-        let twin = CUBE_TWINS
-            .lock()
-            .unwrap()
-            .as_mut()
-            .and_then(|m| m.remove(&serial));
-        if let Some(t) = twin {
-            self.drop_cube_twin(t);
+        for kind in [TwinKind::Cube, TwinKind::Volume, TwinKind::Slice] {
+            let twin = CUBE_TWINS
+                .lock()
+                .unwrap()
+                .as_mut()
+                .and_then(|m| m.remove(&(serial, kind)));
+            if let Some(t) = twin {
+                self.drop_cube_twin(t);
+            }
         }
     }
 
@@ -1964,6 +2149,54 @@ impl Gpu {
     /// A storage-image view (identity swizzle).
     pub fn storage_view(&self, im: &mut Image, v: Option<&view_t>) -> Option<vk::ImageView> {
         self.image_view_kind(im, v, false, true)
+    }
+
+    /// Whether format `f` has no storage use on this device and gets it through `storemu`'s emulated view format
+    /// (NXGFX_STOREMU=0: not, as before: such storage images are zero stand-ins).
+    pub fn emulated_storage(&self, f: vk::Format) -> bool {
+        static OFF: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        !*OFF.get_or_init(|| std::env::var("NXGFX_STOREMU").as_deref() == Ok("0"))
+            && !self
+                .d
+                .format_features(f)
+                .contains(vk::FormatFeatureFlags::STORAGE_IMAGE)
+            && super::storemu::of(f).is_some_and(|(v, _)| {
+                self.d
+                    .format_features(v)
+                    .contains(vk::FormatFeatureFlags::STORAGE_IMAGE)
+            })
+            && self.emulated_storage_creatable(f)
+    }
+
+    /// The device accepts a 2D image of format `f` with storage use through EXTENDED_USAGE | MUTABLE_FORMAT (asked
+    /// once per format); refused, the image is made as before, without storage, rather than failing to exist.
+    fn emulated_storage_creatable(&self, f: vk::Format) -> bool {
+        static SEEN: std::sync::Mutex<Vec<(i32, bool)>> = std::sync::Mutex::new(Vec::new());
+        let mut s = SEEN.lock().unwrap();
+        if let Some(&(_, ok)) = s.iter().find(|e| e.0 == f.as_raw()) {
+            return ok;
+        }
+        let p = unsafe {
+            self.d.instance.get_physical_device_image_format_properties(
+                self.d.pdev,
+                f,
+                vk::ImageType::TYPE_2D,
+                vk::ImageTiling::OPTIMAL,
+                vk::ImageUsageFlags::SAMPLED
+                    | vk::ImageUsageFlags::STORAGE
+                    | vk::ImageUsageFlags::TRANSFER_SRC
+                    | vk::ImageUsageFlags::TRANSFER_DST,
+                vk::ImageCreateFlags::EXTENDED_USAGE | vk::ImageCreateFlags::MUTABLE_FORMAT,
+            )
+        };
+        let ok = p.is_ok();
+        if !ok {
+            crate::log::red_once(&format!(
+                "{f:?} with storage through an emulated view is not supported by the device: no storage emulation"
+            ));
+        }
+        s.push((f.as_raw(), ok));
+        ok
     }
 
     fn image_view_kind(
@@ -2054,6 +2287,9 @@ impl Gpu {
                     .contains(vk::FormatFeatureFlags::STORAGE_IMAGE)
             }) {
                 fmt = u;
+            } else if self.emulated_storage(fmt) {
+                // the emulated view format (`storemu`): the bound shader stage is its packing variant (exec)
+                fmt = super::storemu::of(fmt).map_or(fmt, |e| e.0);
             }
         }
         let comps = if attach || storage {
@@ -2138,6 +2374,18 @@ impl Gpu {
                 .contains_key(&t.serial)
         {
             self.tables.note_tex(id, t.serial, v);
+            // Until the image is made the slot names the zero stand-in, never what it held before: a shader that
+            // indexes the pool can read it while `materialize_all`'s per-frame budget leaves it waiting, and the old
+            // descriptor may name a texture whose views are gone (its slots are found by serial, so `scrub_slots` no
+            // longer finds this one). Not a placeholder mark: a bound use must still make the image (`materialize`).
+            let target = match v {
+                Some(v) if v.bits & VW_TARGET != 0 => v.target as i32,
+                _ => t.d.target,
+            };
+            if let Some(view) = super::exec::dummy_view_ready(self, target, false) {
+                let sview = super::exec::dummy_view_ready(self, target, true);
+                self.tables.write_image(&self.d, id, view, sview);
+            }
             lazy::put(id, *t, v);
             return;
         }
@@ -2160,9 +2408,10 @@ impl Gpu {
         self.q.defer_after_use(Box::new(move |g: &Gpu| g.tex_release_now(serial)));
     }
 
-    /// Every lazily registered texture made now (a shader indexes the texture pool itself: any ID may be read).
+    /// Lazily registered textures made now (a shader indexes the texture pool itself: any ID may be read), at most a
+    /// frame's budget of them (`lazy::take_for_frame`; the rest in the next frames).
     pub fn materialize_all(&self) {
-        let all = lazy::take_all();
+        let all = lazy::take_for_frame(super::present::frames());
         if all.is_empty() {
             return;
         }
@@ -2176,7 +2425,8 @@ impl Gpu {
         static SAID: std::sync::Once = std::sync::Once::new();
         SAID.call_once(|| {
             crate::vklog!(
-                "lazy images: a shader indexing the texture pool made the {n} waiting ones"
+                "lazy images: a shader indexing the texture pool made {n} waiting ones, {} still waiting (a frame's budget; NXGFX_LAZY_ALL_FRAME)",
+                lazy::waiting()
             )
         });
     }
@@ -2227,7 +2477,10 @@ impl Gpu {
         let Some(view) = self.image_view(im, v.as_ref(), false) else {
             return;
         };
-        let sview = if storage {
+        // an image whose format the device cannot store has storage only through an emulated view, which a shader
+        // must pack/unpack for (`storemu`); shaders that index the pool's storage slots get no variant, so the pool
+        // keeps no storage view of it (a formatless float store through a uint view is undefined)
+        let sview = if storage && !self.emulated_storage(im.format) {
             self.storage_view(im, v.as_ref())
         } else {
             None
@@ -2315,7 +2568,7 @@ impl Gpu {
         }
     }
 
-    /// VRAM budget (Turbo `vk_budget`, its default; `NXGFX_VRAM_EVICT=0` off): once a frame, the device-local heaps'
+    /// VRAM budget (on by default; `NXGFX_VRAM_EVICT=0` off): once a frame, the device-local heaps'
     /// use against their budget (VK_EXT_memory_budget). Over 90% every parked image is freed (the render targets and
     /// textures kept for a re-initialization the same way, which the game has let go), then the pipeline cache's
     /// retired pipelines are left as they are. Returns the bytes freed.
@@ -2438,6 +2691,10 @@ impl Gpu {
             let mut flags = vk::ImageCreateFlags::empty();
             if !matches!(im.tf.kind, Kind::Depth | Kind::DepthStencil | Kind::Stencil) {
                 flags |= vk::ImageCreateFlags::MUTABLE_FORMAT;
+            }
+            // storage use through an emulated storage format's view, as made (`storemu`)
+            if im.usage.contains(vk::ImageUsageFlags::STORAGE) && self.emulated_storage(im.format) {
+                flags |= vk::ImageCreateFlags::EXTENDED_USAGE;
             }
             if ext.width == ext.height
                 && im.layers >= 6
@@ -2821,7 +3078,12 @@ impl Gpu {
             }
             if let Some(im) = imgs.by_serial.get_mut(&serial) {
                 if let Some(view) = self.image_view(im, v.as_ref(), false) {
-                    let sview = self.storage_view(im, v.as_ref());
+                    // emulated storage stays out of the pool (see reg_tex_now)
+                    let sview = if self.emulated_storage(im.format) {
+                        None
+                    } else {
+                        self.storage_view(im, v.as_ref())
+                    };
                     self.tables.write_image(&self.d, id, view, sview);
                 }
             }
@@ -3835,7 +4097,7 @@ impl Gpu {
         row: usize,
         img: usize,
     ) {
-        // Turbo's write_texels: the texels go into the texture's storage and every image over that storage uploads
+        // write_texels: the texels go into the texture's storage and every image over that storage uploads
         // from it again. Written into the image alone they were lost to the next upload from the storage and never
         // reached another texture object over the same memory (Mario Kart 8 Deluxe's mode-select preview: the movie
         // decoder writes its frames into the client's texture, the menu samples the game's own object: black).
@@ -4575,9 +4837,15 @@ mod lazy {
             return None;
         }
         let mut g = ST.lock().unwrap();
-        let l = g.as_mut()?;
+        let got = remove(g.as_mut()?, id);
+        if got.is_some() {
+            N.fetch_sub(1, Ordering::Relaxed);
+        }
+        got
+    }
+    /// `take` on `l` (the caller counts `N` down).
+    fn remove(l: &mut L, id: i32) -> Option<(tex_t, Option<view_t>, bool)> {
         let (t, v) = l.by_id.remove(&id)?;
-        N.fetch_sub(1, Ordering::Relaxed);
         let gone = l.gone.contains(&t.serial);
         if let Some(ids) = l.by_serial.get_mut(&t.serial) {
             ids.retain(|&i| i != id);
@@ -4638,6 +4906,98 @@ mod lazy {
             .collect()
     }
 
+    /// What a frame may still make for pool-indexing shaders (`take_for_frame`).
+    #[derive(Default)]
+    struct Budget {
+        frame: u64,
+        made: usize,
+        bytes: u64,
+    }
+    impl Budget {
+        /// Images and bytes left in `frame` under the caps (a new frame starts a new budget).
+        fn room(&mut self, frame: u64, cap_n: usize, cap_bytes: u64) -> (usize, u64) {
+            if frame != self.frame {
+                *self = Budget {
+                    frame,
+                    ..Budget::default()
+                };
+            }
+            (
+                cap_n.saturating_sub(self.made),
+                cap_bytes.saturating_sub(self.bytes),
+            )
+        }
+        fn spend(&mut self, n: usize, bytes: u64) {
+            self.made += n;
+            self.bytes += bytes;
+        }
+    }
+    static BUDGET: Mutex<Option<Budget>> = Mutex::new(None);
+
+    /// Images a frame makes for pool-indexing shaders at most, and their guest bytes. Off by default (every waiting
+    /// one at once): measured alone on Jamboree, a 256-a-frame cap trades the boot's one ~0.7 s frame for minutes of
+    /// pool churn — opening 15-39 FPS vs 38-49, frames > 50 ms 1295 vs 709, replay 146 vs 94 s
+    /// (`build/play/20261125-054831-ab-capped` vs `-055600-ab-allatonce`). `NXGFX_LAZY_ALL_FRAME=<images>` turns it on.
+    fn caps() -> Option<(usize, u64)> {
+        static C: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let n = *C.get_or_init(|| {
+            std::env::var("NXGFX_LAZY_ALL_FRAME")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(0)
+        });
+        (n > 0).then_some((n, 32 << 20))
+    }
+
+    /// At most `max_n` waiting registrations, until their textures' guest bytes reach `max_bytes` (one at least):
+    /// those of live textures first (a finalized texture's image is made only to be let go after this use), the rest
+    /// left waiting for the next call. None is dropped.
+    fn pick(l: &mut L, max_n: usize, max_bytes: u64) -> Vec<(i32, (tex_t, Option<view_t>, bool))> {
+        let mut ids = Vec::new();
+        let mut bytes = 0u64;
+        for finalized in [false, true] {
+            for (&id, (t, _)) in &l.by_id {
+                if ids.len() >= max_n || (!ids.is_empty() && bytes >= max_bytes) {
+                    break;
+                }
+                if l.gone.contains(&t.serial) == finalized {
+                    ids.push(id);
+                    bytes += t.l.size;
+                }
+            }
+        }
+        ids.into_iter()
+            .filter_map(|id| remove(l, id).map(|r| (id, r)))
+            .collect()
+    }
+
+    /// Waiting registrations for a shader that indexes the texture pool, within frame `frame`'s budget (`caps`): the
+    /// first such shader used to make every waiting image at once (Super Mario Party Jamboree: 3173 at 5.1 s, a
+    /// 745 ms frame with 418 ms of uploads; Mario Kart World keeps ~38,000 waiting, 7.2 GB). The rest wait for the
+    /// next frames' pool-indexing draws (or their own first use as a bound texture).
+    pub fn take_for_frame(frame: u64) -> Vec<(i32, (tex_t, Option<view_t>, bool))> {
+        if N.load(Ordering::Relaxed) == 0 {
+            return Vec::new();
+        }
+        let Some((cap_n, cap_bytes)) = caps() else {
+            return take_all();
+        };
+        let mut b = BUDGET.lock().unwrap();
+        let b = b.get_or_insert_with(Budget::default);
+        let (n, bytes) = b.room(frame, cap_n, cap_bytes);
+        if n == 0 || bytes == 0 {
+            return Vec::new();
+        }
+        let mut g = ST.lock().unwrap();
+        let Some(l) = g.as_mut() else {
+            return Vec::new();
+        };
+        let got = pick(l, n, bytes);
+        N.fetch_sub(got.len(), Ordering::Relaxed);
+        b.spend(got.len(), got.iter().map(|(_, (t, _, _))| t.l.size).sum());
+        got
+    }
+
     #[cfg(test)]
     mod tests {
         use super::*;
@@ -4663,6 +5023,49 @@ mod lazy {
             assert!(matches!(take(910_003), Some((_, _, false))), "not finalized");
             put(910_004, tex(0xF1_0001), None);
             assert!(matches!(take(910_004), Some((_, _, false))), "the mark went with its last registration");
+        }
+
+        /// A pool-indexing shader makes at most a frame's budget of the waiting images, live textures first; the
+        /// rest stay waiting (none dropped) and come in later calls; the budget renews each frame.
+        #[test]
+        fn pool_indexing_makes_waiting_images_within_a_frame_budget() {
+            let mut l = L::default();
+            for i in 0..1000 {
+                let mut t = tex(0xB0_0000 + i as u64);
+                t.l.size = 64 << 10;
+                l.by_id.insert(i, (t, None));
+                l.by_serial.insert(t.serial, vec![i]);
+            }
+            for i in 0..10 {
+                l.gone.insert(0xB0_0000 + i);
+            }
+            // the old materialize_all made all 1000 here
+            let first = pick(&mut l, 256, 32 << 20);
+            assert_eq!(first.len(), 256);
+            assert!(first.iter().all(|(_, (_, _, gone))| !gone), "live textures first");
+            assert_eq!(l.by_id.len(), 744, "the rest still wait");
+            // the byte cap: 64 KB each, 1 MB -> 16
+            assert_eq!(pick(&mut l, 256, 1 << 20).len(), 16);
+            // one at least, however big
+            assert_eq!(pick(&mut l, 256, 1).len(), 1);
+            let mut seen: Vec<i32> = first.iter().map(|(id, _)| *id).collect();
+            loop {
+                let more = pick(&mut l, 256, 32 << 20);
+                if more.is_empty() {
+                    break;
+                }
+                seen.extend(more.iter().map(|(id, _)| *id));
+            }
+            assert_eq!(seen.len() + 17, 1000, "every registration is made in time");
+            assert!(l.by_serial.is_empty() && l.gone.is_empty());
+
+            let mut b = Budget::default();
+            assert_eq!(b.room(7, 256, 32 << 20), (256, 32 << 20));
+            b.spend(200, 10 << 20);
+            assert_eq!(b.room(7, 256, 32 << 20), (56, 22 << 20), "the same frame");
+            b.spend(56, 1);
+            assert_eq!(b.room(7, 256, 32 << 20).0, 0, "spent");
+            assert_eq!(b.room(8, 256, 32 << 20), (256, 32 << 20), "a new frame");
         }
     }
     /// Registrations waiting (the memory line).

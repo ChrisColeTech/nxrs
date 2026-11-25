@@ -1,4 +1,4 @@
-//! The guest's clock: the host's monotonic time at a rate the front end may lower (Turbo's virtual time, for
+//! The guest's clock: the host's monotonic time at a rate the front end may lower (virtual time, for
 //! `smooth_recording`: a video recorded while the PC cannot keep up stays smooth). The system counter, the steady
 //! clock and vi's vsync follow it; 1.0 is real time.
 

@@ -37,7 +37,7 @@ impl Default for ConsolePanel {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Library {
     pub path: String,
-    /// The Turbo engine folder the Qt launcher kept: read and written back, not used.
+    /// The engine folder the Qt launcher kept: read and written back, not used.
     pub tool_root: String,
     pub tool_root_chosen: bool,
     pub output_root: String,

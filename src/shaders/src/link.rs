@@ -4,7 +4,7 @@
 //! - `trim_cull`: the translator's gl_PerVertex declares ClipDistance[8] and CullDistance[1] (Maxwell has 8 clip
 //!   distances), more than a device with maxCombinedClipAndCullDistances 8 takes. The cull member goes from every
 //!   over-limit block when nothing reaches it: it is the block's last member, no access chain names it, the block is
-//!   never loaded, stored or built whole (Turbo's `vkspv_trim_cull`). Geometry modules have separate input and output
+//!   never loaded, stored or built whole. Geometry modules have separate input and output
 //!   blocks, which must be trimmed together.
 //! - `io_locations` / `add_outputs`: a pixel shader may read a varying its vertex shader never writes (undefined on the
 //!   console; Vulkan requires the previous stage to declare it). The vertex shader of such a pair gets an output at
@@ -521,7 +521,7 @@ pub fn add_outputs(w: &[u32], add: &[Varying]) -> Option<Vec<u32>> {
     Some(o)
 }
 
-/// A pixel shader writing integer targets (Turbo `vkspv_int_outputs`, 3d77358): the translator's float outputs are
+/// A pixel shader writing integer targets: the translator's float outputs are
 /// only register containers, and an integer attachment takes their bits. `kinds[l]`: 1 the target at location `l` is
 /// unsigned, 2 signed, 0 unchanged. The outputs at those locations become integer typed; stores bitcast what the code
 /// writes, loads bitcast back. Integer types the module declares after the first retyped output are moved before it.
@@ -813,7 +813,7 @@ fn outputs_at(w: &[u32], v: &[(usize, u32, usize)]) -> [i64; 8] {
     at
 }
 
-/// Dual-source blending (Turbo `vkspv_dual_source`, nxnative's fs_dual): output 1 becomes Location 0 Index 1, the
+/// Dual-source blending (nxnative's fs_dual): output 1 becomes Location 0 Index 1, the
 /// second source of target 0. Only for a pixel shader writing exactly outputs 0 and 1.
 pub fn dual_source(w: &[u32]) -> Option<Vec<u32>> {
     let v = walk(w)?;
@@ -837,7 +837,7 @@ pub fn dual_source(w: &[u32]) -> Option<Vec<u32>> {
 /// (f32).
 pub const ALPHA_PUSH_OFFSET: u32 = 16;
 
-/// The alpha test (Turbo `vkspv_alpha_test`, nxnative's dmsh_alpha): before each return of the entry point, colour 0's
+/// The alpha test (nxnative's dmsh_alpha): before each return of the entry point, colour 0's
 /// alpha is compared with the reference by NVN's alpha function, both push constants at `ALPHA_PUSH_OFFSET`, and the
 /// fragment is discarded when the comparison fails (function − 1 is a mask of less 1, equal 2, greater 4). A module
 /// with a push constant block gets the two members appended to it; one without gets a block of its own. Needs colour
@@ -1121,9 +1121,9 @@ pub fn alpha_test(w: &[u32]) -> Option<Vec<u32>> {
 }
 
 /// NVN's compiler aggregates an atomic add over a warp: ballot(true), the highest lane leads and adds the bit count
-/// for all. After some lanes have returned that ballot never completes on NVIDIA's RTX 50 cards (Turbo #12, shader
+/// for all. After some lanes have returned that ballot never completes on NVIDIA's RTX 50 cards (shader
 /// d2c50cca6e386abc, driver 617). Where the add's result is never read, a ballot of only the lane's own bit gives the
-/// same sum (every lane leads itself and adds 1). Only that shape is rewritten (Turbo `vkspv_ballot_per_lane`): a
+/// same sum (every lane leads itself and adds 1). Only that shape is rewritten: a
 /// ballot(true) reaching a FindUMsb / FindSMsb and a bit count, the bit count an OpAtomicIAdd whose result goes nowhere
 /// (or only into a variable nothing reads). → (the new words, ballots rewritten); None when nothing changed.
 pub fn ballot_per_lane(w: &[u32]) -> Option<(Vec<u32>, u32)> {

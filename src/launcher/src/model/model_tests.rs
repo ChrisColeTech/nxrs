@@ -96,18 +96,6 @@ fn per_card_action_targets_correct_operation() {
     let s = card_state(&offline, false, false, false, true);
     assert!(s.status == "Source offline" && !s.action_enabled && s.needs_attention);
     assert_eq!(status_for(&offline, false, false, false), "Source offline");
-    let turbo = Facts {
-        turbo: true,
-        has_build: true,
-        source_available: true,
-        ..Facts::default()
-    };
-    let s = card_state(&turbo, false, false, false, true);
-    assert_eq!(
-        (s.action.as_str(), s.status.as_str()),
-        ("Build", "Needs nxrs build")
-    );
-    assert_eq!(status_for(&turbo, false, false, false), "Needs nxrs build");
     let pending = Facts {
         update_pending: true,
         source_available: true,
@@ -164,8 +152,8 @@ fn names_and_folders() {
     assert_eq!(output_name_for("\u{30bc}\u{30eb}\u{30c0}"), "Game");
     assert_eq!(title_from_name("My Game [v1]"), "My Game");
     assert_eq!(title_from_name("[x]"), "Untitled game");
-    assert_eq!(build_folder_for("D:/B/Kart/", true), "D:/B/Kart [nxrs]");
-    assert_eq!(build_folder_for("D:/B/Kart [nxrs]", false), "D:/B/Kart");
+    assert_eq!(build_folder_for("D:/B/Kart/"), "D:/B/Kart [nxrs]");
+    assert_eq!(build_folder_for("D:/B/Kart [nxrs]/"), "D:/B/Kart [nxrs]");
 }
 
 #[test]

@@ -1,7 +1,7 @@
 //! nn::codec's hardware Opus decoders (the hwopus service on a console), decoded on the host with libopus:
 //! the `HardwareOpusDecoder` / `HardwareOpusMultiStreamDecoder` classes, their C interface, SDK 21's
 //! asynchronous decoder manager, and the `hwopus` IPC service itself for SDK clients that talk to it directly
-//! (Turbo c406ae6: before libopus was linked every packet decoded to silence).
+//! (without libopus every packet would decode to silence).
 //!
 //! Packets carry the Switch's 8-byte header (size and final range, big-endian); the PCM comes out interleaved
 //! 16-bit. A game's work buffer is not used: the host keeps each decoder's state by the guest object's address.

@@ -1,13 +1,12 @@
 #!/usr/bin/env python3
 """PORT_MAP.tsv: every file of the trees nxrs ports from, and where it went (plan section 4).
 
-    py -I scripts/port_map.py [--nx <nxnative>] [--turbo <Switch2RECOMP-main>] [--mr <mkw-recomp-main>]   write
+    py -I scripts/port_map.py [--nx <nxnative>] [--mr <mkw-recomp-main>]                                  write
     py -I scripts/port_map.py --check [...]                                                                 verify
     py -I scripts/port_map.py --check --format-only                                                         rows only (CI)
 
 Trees (tree column):
   NX  nxnative (every tracked file)                    default build/Q/nxnative-up, else D:/Projects/nxnative
-  TB  Turbo, the owner's engine (branch turbo, tracked) default D:/Projects/Switch2RECOMP-main
   MR  mkw-recomp, only the donor files of section 4.7  default D:/Projects/mkw-recomp-main
 
 Columns: tree, path, lines (wc -l), dest (crate/module, or - ), action, status, note.
@@ -49,7 +48,7 @@ NX = [
     (r"dm/host/hle_lifecycle\.c$", "os::services::oe", "PORT", "Partial", "console control handler: front's quit path"),
     (r"dm/host/(hle_account(_users)?\.c|account_users\.h)$", "os::services::account", "PORT", "Partial", "ShowUserCreator answers ok without a creator"),
     (r"dm/host/user_select_mac\.h$", "front", "REWRITE", "Not started", "user picker"),
-    (r"dm/host/hle_fs\.c$", "os::services::fs", "PORT", "Partial", "RomFS in place; SD card, BCAT save, save-data info reader missing; save\\user<N> differs from Turbo's save\\user (AUDIT)"),
+    (r"dm/host/hle_fs\.c$", "os::services::fs", "PORT", "Partial", "RomFS in place; SD card, BCAT save, save-data info reader missing; save\\user<N> differs from the single-user save\\user (AUDIT)"),
     (r"dm/host/romfs_(image|identity)\.h$", "-", "DROP", "Dropped", "iOS RomFS image; read in place"),
     (r"dm/host/save_sync\.[ch]$", "-", "DROP", "Dropped", "iCloud"),
     (r"dm/host/(hle_hid\.c|dm_input\.h)$", "os::services::hid, os::input", "PORT", "Partial", "Palma 4 of 24; DM_PAD_* / DM_RUMBLE settings missing"),
@@ -154,7 +153,7 @@ NX = [
     (r"dm/tools/jit_capture\.py$", "-", "DROP", "Dropped", "iOS"),
     (r"dm/tools/(romfs|nacp)\.py$", "translator::package::{romfs,cnmt}", "PORT", "Done", ""),
     (r"dm/tools/(romfs_image|tree_tar|vol_space)\.py$", "-", "DROP", "Dropped", "iOS packaging"),
-    (r"dm/tools/nx_extract(_bin)?/", "translator::package", "REWRITE", "Done", "Turbo's in-place reading"),
+    (r"dm/tools/nx_extract(_bin)?/", "translator::package", "REWRITE", "Done", "in-place reading"),
     (r"dm/tools/(shader_cache|shader_lib)\.py$", "shaders::prebuild", "PORT", "Done", ""),
     (r"dm/tools/make_(shared|ext)_fonts?\.py$", "os::services::misc (shared font)", "PORT", "Partial", ""),
     (r"dm/tools/(ue_.*|unity_.*|il2cpp_sym|snowdrop_pools)\.py$", "profiles (engines)", "DEFER", "Deferred", ""),
@@ -199,67 +198,6 @@ NX = [
     (r"\.github/", "-", "DROP", "Dropped", "own CI: .github/workflows/ci.yml"),
     (r"(\.gitignore|dm/\.gitignore|\.clang-tidy|pyproject\.toml)$", "-", "DROP", "Dropped", ""),
     (r"(README\.md|AGENTS\.md|CONTRIBUTING\.md|LICENSE)$", "README.md, LICENSES/", "REF", "Reference", "credits"),
-]
-
-TB_OWNER = "the owner's fork code (MIT)"
-TB = [
-    (r"(nca|nsp|nup|dlc|zbic|nxloader)\.py$", "translator::package, translator::loader", "PORT", "Done", ""),
-    (r"switchrecomp\.py$", "cli", "PORT", "Partial", "options mapped (src/cli/README.md); SWR_CFLAGS, hints / interpreter fallback, --target linux missing (AUDIT)"),
-    (r"(a64|codegen|brt|tools_sym)\.py$", "translator::xlate (mkw-recomp lifter instead)", "DROP", "Dropped", "Turbo's own translator; the lifter is mkw-recomp's"),
-    (r"runtime/(nsp|nup)\.c$", "translator::package", "PORT", "Done", "in-place reading"),
-    (r"runtime/dlc\.c$", "translator::package::dlc, os::services::fs", "PORT", "Partial", "DLC whose data is missing is still offered (AUDIT)"),
-    (r"runtime/(kernel|svc_core|mem|ipc|loader|entry|cpu_helpers|plat|glibc_compat)\.c$", "runtime, os", "REF", "Reference", "MZ Labs; nxnative's host is the base"),
-    (r"runtime/svc_(fs|hid|ns2|vi)\.c$", "os::services", "REF", "Reference", "MZ Labs; nxnative's services are the base"),
-    (r"runtime/(audio\.[ch]|audio_limit\.h|audio_queue\.h)$", "os::services::audren, os::media::sink", "REF", "Reference", ""),
-    (r"runtime/main\.c$", "config::options (option table)", "PORT", "Partial", "every option in nxconfig; renderer=opengl/eden silently becomes vulkan (owner decision)"),
-    (r"runtime/backend_win32\.c$", "front::{window,keys}", "PORT", "Partial", "hotkeys, window; F5 dump is a stub (AUDIT)"),
-    (r"runtime/backend_(x11|headless)\.c$", "-", "DEFER", "Deferred", "Linux (M10); headless dropped (real I/O)"),
-    (r"runtime/(controller_sony(_win32)?\.h|pad_layout\.h|hid_layout\.h)$", "os::input::{sony,layout}", "PORT", "Done", ""),
-    (r"runtime/(rec_win32\.c|rec_flow\.h|rec_audio_time\.h)$", "front::rec", "PORT", "Partial", "F7 recording; stall watchdog and original-timeline audio missing"),
-    (r"runtime/lsfg.*$", "front::lsfg, graphics::vk::lsfg", "PORT", "Done", ""),
-    (r"runtime/(render_scale|render_condition)\.h$", "graphics::vk::scale", "PORT", "Done", ""),
-    (r"runtime/(gpu.*|host1x|nvdrv|gl_load|glq.*|glfn|nvn_glue|nvn_hook|shader|shader_proc|sm86|astc)\.(c|h)$", "graphics", "REF", "Reference", "Turbo's GPU path; nxnative's NVN layer is the base"),
-    (r"runtime/edenvk.*", "-", "DROP", "Dropped", "Eden Vulkan renderer (renderer=vulkan); nxrs replays NVN on Vulkan itself"),
-    (r"runtime/(av1|vp9|opus|oh264)/", "os::media", "TOOL", "Done", "codec libraries built for os (build.rs)"),
-    (r"runtime/(av1video|vp9video)\.inc$", "os::media::{av1,vpx}", "PORT", "Done", ""),
-    (r"runtime/bcn/", "graphics::tex", "REF", "Reference", ""),
-    (r"runtime/spvc/", "-", "DROP", "Dropped", "SPIRV-Cross for the GL path"),
-    (r"runtime/(swkbd_font|splash_img)\.h$", "os::services::swkbd, front", "REF", "Reference", ""),
-    (r"runtime/(cpu|rt)\.h$", "runtime::cpu", "REF", "Reference", "mkw-recomp's cpu.h is the ABI"),
-    (r"runtime/nvn/vk/vk_ctl\.c$", "front::ctl, config::ctl", "PORT", "Partial", "graphics' pause/step/passdump commands (lane G4)"),
-    (r"runtime/nvn/vk/vk_(mem|sparse)\.(c|h|inc)$", "graphics::vk::{mem,sparse,gmem}", "PORT", "Done", ""),
-    (r"runtime/nvn/vk/vk_shot\.[ch]$", "graphics::vk::shot", "PORT", "Done", ""),
-    (r"runtime/nvn/vk/vk_(pcache|pipe)\.[ch]$", "graphics::vk::{pipe,pcache}", "PORT", "Done", ""),
-    (r"runtime/nvn/vk/vk_(perf|flight|aftermath)\.[ch]$", "graphics::vk::{perf,counters}", "PORT", "Partial", ""),
-    (r"runtime/nvn/vk/vk_present\.[ch]$", "graphics::vk::present", "PORT", "Done", ""),
-    (r"runtime/nvn/vk/vk_(tex|fmt|astc)\.(c|h|cpp)$", "graphics::{tex,vk::image}", "PORT", "Done", ""),
-    (r"runtime/nvn/vk/vk_(shader)\.[ch]$", "graphics::vk::{shader,xfb}", "PORT", "Done", ""),
-    (r"runtime/nvn/vk/vk_(submit|replay|defer|dev|window|fn|json|hmap|internal)\.[ch]$", "graphics::vk", "PORT", "Partial", "5A.4 (lane G4)"),
-    (r"runtime/nvn/vk/gfx_vk\.c$", "graphics::vk", "PORT", "Partial", "5A.4 (lane G4)"),
-    (r"runtime/nvn/vk/shaders/test_", "graphics/tests", "PORT", "Partial", ""),
-    (r"runtime/nvn/vk/shaders/", "graphics (shaders/)", "PORT", "Done", ""),
-    (r"runtime/nvn/vk/third_party/", "graphics (astc_decode / bc7_encode compute)", "DROP", "Dropped", "GPU transcode instead"),
-    (r"runtime/nvn/vk/CMakeLists\.txt$", "-", "DROP", "Dropped", "Cargo"),
-    (r"runtime/nvn/(gfx|gen|host|s2tex)/", "graphics::nvn, os", "REF", "Reference", "nxnative's NVN layer is the base"),
-    (r"runtime/nvn/hle_nvn\.c$", "graphics::nvn", "REF", "Reference", ""),
-    (r"runtime/nvn/third_party/", "LICENSES/", "REF", "Reference", ""),
-    (r"runtime/edenvk_stub\.c$", "-", "DROP", "Dropped", ""),
-    (r"tools/play_scenario\.py$", "scripts/play_scenario.py", "PORT", "Done", ""),
-    (r"tools/plza_inputs/", "scripts/inputs", "DATA", "Done", ""),
-    (r"tools/nxshader/pipelines/", "profiles (shaders.tsv.zst)", "DATA", "Done", "nxnative tables are the source"),
-    (r"tools/nxshader/xlate_bin/", "shaders::xlate (dmsh_xlate)", "TOOL", "Done", ""),
-    (r"tools/nxshader/", "shaders", "PORT", "Done", "prebuild"),
-    (r"tools/(mkw_.*|plza_probe|host_prof|build_nvn|s2r_paths)\.py$", "scripts", "REF", "Reference", "game probes"),
-    (r"tools/hactool/", "-", "DROP", "Dropped", ""),
-    (r"tool/", "-", "DROP", "Dropped", "Turbo's own launcher tool (the Qt launcher is separate)"),
-    (r"scripts/", "-", "DROP", "Dropped", "Turbo build scripts; nxrs-build replaces them"),
-    (r"(build_runtime\.bat|Install\.(bat|sh)|SwitchRecomp)$", "-", "DROP", "Dropped", ""),
-    (r"tests/", "crate tests", "REF", "Reference", "Turbo's test vectors"),
-    (r"validation/", "-", "REF", "Reference", ""),
-    (r"docs/images/", "-", "DROP", "Dropped", ""),
-    (r"docs/", "docs", "REF", "Reference", "investigations read by the lanes"),
-    (r"\.github/", "-", "DROP", "Dropped", "own CI"),
-    (r"(\.gitattributes|\.gitignore|CHANGELOG\.txt|DEVELOPER_GUIDE\.md|LICENSE\.txt|NOTICE\.txt|README\.(md|txt)|REGRESSION\.md)$", "README.md, LICENSES/", "REF", "Reference", ""),
 ]
 
 # mkw-recomp donor files (section 4.7): which paths are part of the map, then the rules.
@@ -356,7 +294,6 @@ def main():
     check = "--check" in argv
     trees = {
         "NX": find(opt("--nx"), ROOT / "build/Q/nxnative-up", "D:/Projects/nxnative"),
-        "TB": find(opt("--turbo"), "D:/Projects/Switch2RECOMP-main"),
         "MR": find(opt("--mr"), "D:/Projects/mkw-recomp-main"),
     }
     gen = {}
@@ -370,18 +307,18 @@ def main():
         else:
             files = git_files(root)
             heads[t] = git_head(root)
-        gen[t] = rows_for(t, root, files, {"NX": NX, "TB": TB, "MR": MR}[t])
+        gen[t] = rows_for(t, root, files, {"NX": NX, "MR": MR}[t])
 
     if not check:
         missing = [t for t in trees if t not in gen]
         if missing:
-            sys.exit(f"tree(s) not found: {missing}; pass --nx/--turbo/--mr")
+            sys.exit(f"tree(s) not found: {missing}; pass --nx/--mr")
         with open(OUT, "w", encoding="utf-8", newline="\n") as fh:
             fh.write("# PORT_MAP.tsv: every file of the trees nxrs ports from -> its place in nxrs (docs/PORT_PLAN.md section 4).\n")
-            fh.write(f"# NX = nxnative {heads['NX']}, TB = Turbo (Switch2RECOMP-main, branch turbo) {heads['TB']}, MR = mkw-recomp-main ({heads['MR']}).\n")
+            fh.write(f"# NX = nxnative {heads['NX']}, MR = mkw-recomp-main ({heads['MR']}).\n")
             fh.write("# Regenerate / verify: py -I scripts/port_map.py [--check]\n")
             fh.write("tree\tpath\tlines\tdest\taction\tstatus\tnote\n")
-            for t in ("NX", "TB", "MR"):
+            for t in ("NX", "MR"):
                 for r in gen[t]:
                     fh.write("\t".join(r) + "\n")
         n = sum(len(v) for v in gen.values())
@@ -402,7 +339,7 @@ def main():
             errors.append(f"row {i}: {len(c)} columns")
             continue
         t, p, n, d, a, s, _ = c
-        if t not in ("NX", "TB", "MR") or not n.isdigit() or not d or a not in ACTIONS or s not in STATUSES:
+        if t not in ("NX", "MR") or not n.isdigit() or not d or a not in ACTIONS or s not in STATUSES:
             errors.append(f"row {i}: {l[:120]}")
         if (t, p) in have:
             errors.append(f"duplicate {t} {p}")

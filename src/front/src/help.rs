@@ -1,4 +1,4 @@
-//! F1: the help and controls page, over the game (Turbo's design): four options changed with the arrows, Enter or a
+//! F1: the help and controls page, over the game: four options changed with the arrows, Enter or a
 //! click (right stick from the mouse or I J K L, mouse direction, mouse sensitivity 10%..500%, smooth audio slowdown),
 //! saved into the ini, and the keyboard and hotkey tables. Esc, F1 or Backspace goes back; the game reads no pads
 //! meanwhile and a fullscreen game is windowed while it is open.

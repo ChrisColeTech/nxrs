@@ -1,8 +1,8 @@
 //! Execution hints: `discovered.tsv`, the code a running game reached that the build had not translated (the
 //! runtime's interpreter ran it and wrote it down: `nxrt::interp`). Each entry becomes a function start at the next
 //! build of the same program, when the module still has the entry's instruction words there; an entry of another
-//! version of the program (an update applied or taken back) is left out, not misplaced (Turbo's `program_hints` found
-//! that another version's hints can stop a game at start).
+//! version of the program (an update applied or taken back) is left out, not misplaced (another version's hints can
+//! stop a game at start).
 //!
 //! Format, one entry a line (`#` comments): `module \t 0xoffset \t word word word word` (hex words, the first
 //! instructions at the entry as the game had them).

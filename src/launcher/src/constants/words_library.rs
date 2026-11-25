@@ -55,7 +55,6 @@ pub const KEYS_DONE: &str = "prod.keys was installed in the launcher data folder
 /// The statuses (`cardState`, `statusFor`).
 pub const READY: &str = "Ready to play";
 pub const NEEDS_BUILD: &str = "Needs build";
-pub const NEEDS_NXRS: &str = "Needs nxrs build";
 pub const INCOMPLETE: &str = "Build incomplete";
 pub const UPDATE_CHANGED: &str = "Update changed";
 pub const UPDATE_CHANGED_LIST: &str = "Update changed — build again";

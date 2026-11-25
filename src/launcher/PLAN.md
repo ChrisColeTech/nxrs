@@ -25,26 +25,26 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 | D-02 | One-time copy of the legacy data folders `RecompLauncher/RecompLauncher`, then `RecompLauncher/SwitchRecompLauncher`, into `nxrs` when `nxrs/library.json` does not exist; old folders untouched; skipped with `--library` | `main.cpp` `migrateLegacyData` |
 | D-03 | Load: missing file = empty library; unreadable or invalid JSON or `schema != 1` = error message, and the library is marked unwritable (never overwritten) | `Library::load`, `Library::save` (`writable`) |
 | D-04 | Top-level keys and clamps: `toolRoot`, `toolRootChosen`, `outputRoot`, `keysPath`, `nxrsBuild`, `jobs` (1..64, 8), `viewMode` (0..1), `coverWidth` (130..240, 180), `showBackground` (true), `colorMode` (dark/light, else dark), `accentColor` (lime), `buttonLayout` (normalized, else `switch`), `pauseOnFocusLoss`, `muteOnFocusLoss` (false), `docked` (true), `askUser` (false), `geometry`, `dockState` (Qt base64 blobs) | `Library::load` / `save` |
-| D-05 | Game keys: `id`, `title`, `source`, `buildDir`, `outputName`, `cover`, `background`, `renderer` (default vulkan; anything but vulkan/opengl becomes opengl), `buttonLayout` / `screenMode` (normalized, aliases accepted), `workers` (0..64), `optimization` (0..3, 2), `engine` (`nxrs` or else `turbo`), `builtSource`, `savesOffered`, `hintsBuilt` (>= 0), `buildIncomplete`, `lastPlayed` / `lastBuilt` (Qt ISO local time, `""` when unset), `updates[] {path,titleId,version,display}` and `dlc[]` (deduplicated with `samePath`, empty entries dropped), `updateChoice`, `builtUpdate` | `Game::json`, `Game::fromJson` |
+| D-05 | Game keys: `id`, `title`, `source`, `buildDir`, `outputName`, `cover`, `background`, `renderer` (default vulkan; anything but vulkan/opengl becomes opengl), `buttonLayout` / `screenMode` (normalized, aliases accepted), `workers` (0..64), `optimization` (0..3, 2), `engine` (written `nxrs`; another value or none loads as nxrs and moves the entry to its `[nxrs]` folder), `builtSource`, `savesOffered` (read and written back unchanged), `hintsBuilt` (>= 0), `buildIncomplete`, `lastPlayed` / `lastBuilt` (Qt ISO local time, `""` when unset), `updates[] {path,titleId,version,display}` and `dlc[]` (deduplicated with `samePath`, empty entries dropped), `updateChoice`, `builtUpdate` | `Game::json`, `Game::fromJson` |
 | D-06 | Load-time repairs: `adoptBuiltUpdate` per game (a build whose `romfs.nsp` marker names an update); a library without `screenMode` gets `handheld` for a built game whose INI says `docked=0`; entries without id or title, or with a duplicate id, are skipped; a per-game `pauseOnFocusLoss` (from 382ff33) is ignored and dropped at the next save | `Library::load` |
 | D-07 | Atomic save (QSaveFile), creates the folder; keys sorted (QJsonObject order), 4-space indent | `Library::save` |
 | D-08 | Add refuses a duplicate source or executable; `importBuild` merges into an unbuilt entry of the same source (keeps title, cover, build options) or appends; repeated import of the same exe is a no-op | `Library::add`, `Library::importBuild` |
 | D-09 | `discoverBuilds(folder)`: imports every `*_code.dll/.so` build in a folder and its subfolders (no UI entry; tested API) | `Library::discoverBuilds` |
 | D-10 | Installed keys found at startup: `keysPath` empty and `%LOCALAPPDATA%\nxrs\keys\prod.keys` exists -> used | `Window::Window` |
-| D-11 | `--root` sets `toolRoot`; `resolveToolRoot`: the engine beside the launcher wins over a remembered one unless one was chosen in Settings and still exists | `resolveToolRoot`, `Toolchain::discoverRoot` |
+| D-11 | `--root` is accepted for older scripts and has no effect; `toolRoot` / `toolRootChosen` are kept in the file | `resolveToolRoot`, `Toolchain::discoverRoot` |
 
 ### 1.2 Games, sources, builds (`lib`)
 
 | ID | Feature | Source |
 |---|---|---|
 | G-01 | Accepted sources: folder with `main` / `exefs/main` / `ExeFS/main`; `.nup` (`NUP\1`), `.nsp` (`PFS0`), `.nro` (`NRO0` at 0x10), `.xci` (`HEAD` at 0x100 or 0x1100); exact error texts | `validSource` |
-| G-02 | New entry: UUID id, title from the file/folder name with `[...]` removed, ASCII output name (NFKD, letters/digits/`-_ `, else `Game`), build folder `<outputRoot or source folder\SwitchRecomp Builds>\<name>`; an XCI starts on nxrs in `<folder> [nxrs]` | `gameFromSource`, `titleForSource`, `outputNameFor` |
+| G-02 | New entry: UUID id, title from the file/folder name with `[...]` removed, ASCII output name (NFKD, letters/digits/`-_ `, else `Game`), build folder `<outputRoot or source folder\SwitchRecomp Builds>\<name> [nxrs]` | `gameFromSource`, `titleForSource`, `outputNameFor` |
 | G-03 | Format labels: DIRECT NUP / NSP / XCI, HOMEBREW, EXTRACTED, NATIVE BUILD | `Game::format` |
 | G-04 | Display version from `<data>\control.nacp` at 0x3060 (digit-first only) | `Game::version` |
 | G-05 | "Has a build": not incomplete, exe + `<name>_code.dll/.so` + `<name>_data\` exist, built source = source (or no source), built update = chosen update; `updatePending` = built but with another update | `Game::hasBuild`, `updatePending`, `builtFiles`, `sameToken` |
 | G-06 | Import a native build: needs exe + code module + data; source from `romfs.nup` (line 1) or `romfs.nsp` (`SWRNSP1/2`, line 2); applied update from `SWRNSP2` `update` row; engine from `<name>_build*\gen\nxrs.gen.key`; renderer from INI; cover from `icon.jpg` / `icon.png` / `icon_AmericanEnglish.dat` in data | `gameFromExecutable`, `sourceOfBuild`, `builtWithNxrs`, `adoptBuiltUpdate` |
 | G-07 | Path equality: clean absolute, `/` and `\` equal, case-insensitive on Windows | `samePath` |
-| G-08 | Per-game engine: `setGameEngine` moves the entry to `buildFolderFor(dir, engine)` (`" [nxrs]"` suffix) and reads back what that folder has built | `setGameEngine`, `buildFolderFor` |
+| G-08 | Build folder: `buildFolderFor(dir)` (`" [nxrs]"` suffix); an entry loaded from another engine moves there and reads back what that folder has built | `setGameEngine`, `buildFolderFor` |
 | G-09 | A package that holds game + DLC: the first build from it puts the package on the game's DLC list (never re-adds after the user removed it) | `adoptPackageDlc`, `BuildManager::reportsPackageDlc` |
 | G-10 | "Rebuild for full speed": `<data>\discovered.tsv` non-comment lines minus `hintsBuilt`, nxrs games only | `discoveredCount`, `newDiscoveries` |
 
@@ -55,16 +55,16 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 | E-01 | nxrs-build lookup: `NXRS_BUILD` (file or folder), Settings / `--nxrs-build` choice, `<app dir>\nxrs-engine\` | `Toolchain::findNxrs` |
 | E-02 | Contract: `engine.json` beside nxrs-build (`contract`, `version`), else `nxrs-build contract` (10 s) parsing `nxrs-contract <n>`; needs 2 | `findNxrs`, `nxrsContractNeeded` |
 | E-03 | nxrs problems text (missing, old contract); **on non-Windows nxrs is refused outright** (see 1.13) | `Toolchain::nxrsProblem` |
-| E-04 | Turbo toolchain: release layout (`engine/` + `toolchain/`) vs checkout (`third_party/Switch2RECOMP`); Python order `SWR_PYTHON`, `.venv`, `venv`, `python/`, PATH, each probed with `-c` (5 s, version >= 3.8); gcc, runtime exe, dotnet paths per platform | `Toolchain::find`, `pythonTool`, `switchrSearchRoots`, `isReleaseEngine`, `recompCli`, `toolkitProjectRoot` |
-| E-05 | Turbo problems text (no engine, no switchrecomp.py, Python, GCC, runtime) | `Toolchain::problem` |
-| E-06 | Child environment: shader-tools on PATH + `NXSHADER_TOOLS`, launcher dir, python/gcc/dotnet dirs on PATH, `SWR_PYTHON`, `DOTNET_ROOT`, `SWR_PROD_KEYS`; Linux `LD_LIBRARY_PATH` (`lib`, `gcc/lib`, `shader-tools/lib`) | `Toolchain::environment` |
+| E-04 | Python engine toolchain discovery (Python, gcc, runtime exe, dotnet): not ported, the launcher runs no Python engine | `Toolchain::find`, `pythonTool`, `isReleaseEngine`, `recompCli` |
+| E-05 | Python engine problems text: not ported | `Toolchain::problem` |
+| E-06 | Child environment: the launcher's own plus `NXRS_PROD_KEYS` when keys are installed | `Toolchain::environment` |
 | E-07 | .NET 10 check: `dotnet --list-runtimes` async, 10 s, `Microsoft.NETCore.App 10.` | `Window::refreshTools` |
-| E-08 | v1 (Turbo) arguments: `-u recomp_cli.py <src> --outdir -o --target --backend --cc --jobs -O --runtime [--no-update/--update]`; update probe `--update-info`; DLC `--sync-dlc ... --datadir` | `BuildManager::arguments`, `updateInfoArguments`, `dlcSyncArguments` |
+| E-08 | v1 (the legacy command line) arguments: not ported; nxrs-build still answers them (docs/LAUNCHER_CONTRACT.md) | `BuildManager::arguments`, `updateInfoArguments`, `dlcSyncArguments` |
 | E-09 | v2 (nxrs) arguments: `build <src> --outdir -o --jobs <game or default, 1..64> --machine [--no-update/--update] [--keys]`; `update-info --game <src> [--keys] <pkg>...`; `dlc sync --datadir <data> [--keys] <pkg>...`; `--keys` only when the file exists | `nxrsBuildArguments`, `nxrsUpdateInfoArguments`, `nxrsDlcSyncArguments` |
-| E-10 | Process: program = python or nxrs-build; working dir = Turbo engine folder or nxrs-build's folder; stdout+stderr merged; `PYTHONUTF8=1`, `PYTHONUNBUFFERED=1`; Linux new session | `BuildManager::start`, `program`, `engineFolder` |
+| E-10 | Process: program = nxrs-build; working dir = its folder; stdout+stderr merged; `PYTHONUTF8=1`, `PYTHONUNBUFFERED=1`; Linux new session | `BuildManager::start`, `program`, `engineFolder` |
 | E-11 | Doctor: `nxrs-build doctor`, `ok ` / `FAIL ` / note lines, `@` lines skipped, error when no checks; 60 s; tick/cross text | `parseNxrsDoctor`, `runNxrsDoctor`, `NxrsDoctor::text` |
-| E-12 | Engine badge: ready when the engines the library's games use can build (Turbo for an empty library); problem text per engine | `refreshTools`, `toolProblem` |
-| E-13 | Health text (Turbo Python/GCC/Runtime, nxrs-build path + contract + version, Keys, .NET 10 checking/Ready/Not found/Could not start dotnet), refreshed live in Settings | `refreshTools`, `healthText` |
+| E-12 | Engine badge: ready when nxrs-build can build; its problem text | `refreshTools`, `toolProblem` |
+| E-13 | Health text (nxrs-build path + contract + version, Keys), refreshed live in Settings | `refreshTools`, `healthText` |
 
 ### 1.4 Build (`bm`, `win`)
 
@@ -84,9 +84,9 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 
 | ID | Feature | Source |
 |---|---|---|
-| P-01 | Play guards: has build, not running/building; in-place package offline message; Turbo Vulkan needs .NET + Python and `tools\nxshader\nxs_live.py` | `Window::play` |
+| P-01 | Play guards: has build, not running/building; in-place package offline message | `Window::play` |
 | P-02 | DLC up to date before Play, else sync first, then Play (`DlcPlay`) | `play`, `dlcInstaller` finished |
-| P-03 | One-time "Copy saves" offer after an engine switch (`savesOffered`) | `play` |
+| P-03 | One-time save-copy offer after an engine switch: not ported (`savesOffered` kept in the file) | `play` |
 | P-04 | Writes renderer, effective button layout and play settings into the INI, then starts the exe detached (cwd = build dir, toolchain env); records pid and `lastPlayed`; "Game launched" | `play`, `writeGameSettings` |
 | P-05 | Running detection every 2.5 s by full exe path (Windows Toolhelp + `QueryFullProcessImageNameW`; Linux `/proc/*/exe`), so games started outside the launcher count | `findRunningGames`, poll timer |
 | P-06 | On a game's exit with new discoveries: status line "rebuild for full speed (n new functions...)" | poll timer |
@@ -119,9 +119,7 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 
 | ID | Feature | Source |
 |---|---|---|
-| S-01 | Plan: Turbo `user` (or legacy `system`) <-> nxrs `user1`, `device` <-> `device`, `cache` <-> `cache0`; temp/bcat never | `saveCopyPlan` |
-| S-02 | Copy: needs this build's data folder; refuses with nothing to copy; backs up the whole destination `save` to `save-backup-yyyyMMdd-HHmmss`; removes nxrs `.work/.new/.old`; replaces each destination folder; report lines with file counts | `copySavesFromOtherEngine`, `copyTree` |
-| S-03 | Game > Copy saves from the Turbo / nxrs build… (label follows the engine; enabled only when the other build has saves); confirmation; `--copy-saves` without dialogs | `Window::copySaves`, `refreshSelection` |
+| S-01 | Save copy between engines' builds (plan, copy, Game menu item, `--copy-saves`): not ported, there is one engine | `saveCopyPlan`, `copySavesFromOtherEngine`, `Window::copySaves` |
 
 ### 1.9 INI writing (`lib`)
 
@@ -137,7 +135,7 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 | ID | Feature | Source |
 |---|---|---|
 | W-01 | Client-drawn title bar (36 px): accent app glyph, menus File/Game/Keys/View/Help in the caption row, themed min/max/close (close red `#c42b1c` / `#b3261e`), double-click maximize, right-click system menu, Windows Snap Layouts on the maximize button (`HTMAXBUTTON`), native resize borders and shadow, maximized top inset; Linux frameless with system move and 6 px edge resize | `TitleBar`, `CaptionButton`, `handleNativeEvent`, `EdgeResizer` |
-| W-02 | Menus. File: Add game (Ctrl+O), Add extracted folder…, Import build…, Settings, Exit (Alt+F4). Game: Play, Stop/Cancel build, Build/Rebuild (Ctrl+B), Install DLC…, Install Updates…, Copy saves…, Remove from library…. Keys: Install keys…, Open keys folder. View: Gallery, List, Search & Filter (Ctrl+F), Show selected game background, Refresh library (F5), View console (Ctrl+L), Build output toggle. Help: About nxrs | `createMenusAndToolbar`, `createActions` |
+| W-02 | Menus. File: Add game (Ctrl+O), Add extracted folder…, Import build…, Settings, Exit (Alt+F4). Game: Play, Stop/Cancel build, Build/Rebuild (Ctrl+B), Install DLC…, Install Updates…, Remove from library…. Keys: Install keys…, Open keys folder. View: Gallery, List, Search & Filter (Ctrl+F), Show selected game background, Refresh library (F5), View console (Ctrl+L), Build output toggle. Help: About nxrs | `createMenusAndToolbar`, `createActions` |
 | W-03 | Commands strip: Add game split button (Add game / Add extracted folder / Import build), Search & Filter with active count | `createMenusAndToolbar` |
 | W-04 | Gallery: wrapping grid, card width 130..240 (slider), card height `w*0.64+78`; cover crop-to-fill, rounded 5; placeholder gamepad + "Add artwork" / "Image unavailable"; attention badge (pencil for Needs build, `!` otherwise); build progress strip; title footer (semibold, selected tint); primary button (Play/Build/Rebuild/Stop/Cancel build with painted icon) + Properties button | `GameCard`, `CoverView`, `localIcon` |
 | W-05 | List: columns Name, Status, Format, Renderer, Last played (`yyyy-MM-dd HH:mm` / `—`), Build folder; sortable; alternating rows; 32 px rows; sort preset kept in step with the filter popup | `createLibrary`, `refreshLibrary` |
@@ -166,9 +164,9 @@ fetching.
 
 | ID | Feature | Source |
 |---|---|---|
-| X-01 | Add game / Properties (670x400): General (Display name, Source + browse + Choose extracted folder…, Format, Version, Status, note), Build (Build folder, Executable name read-only unless adding, Compiler workers 0 = default, Optimization O0..O3 for Turbo only, Engine combo that rewrites the folder field), Runtime (Graphics backend combo for Turbo / fixed "Vulkan" for nxrs, Controller layout "Use default — X", Screen mode "Use default — TV mode/Handheld", engine-dependent note, Open game settings file), Artwork (cover, background, note), DLC, Updates; Build and Runtime locked while running/building; OK checks title, folder and image decodability | `editGame` |
-| X-02 | Properties apply: field copy, engine switch carries the other folder's build state, update removal resets a stale choice, screen mode and layout written to a built game's INI now, artwork cache cleared, DLC removal synced | `showProperties` |
-| X-03 | Settings (690x440): Engine (Turbo engine folder, nxrs-build, health text, nxrs checks with Check again run on open, Open setup guide in a checkout), Build defaults (Build location, Compiler workers 1..64), Controller (Button layout + note), Appearance (Color mode, Accent with swatches, background toggle, library file path), Play (Screen mode, Pause, Mute, Ask who is playing, note); OK rules (no engine/build changes during a build, folder must hold switchrecomp.py, empty = bundled, nxrs-build must exist, layout/play changes written to every built game with a failure count) | `showSettings` |
+| X-01 | Add game / Properties (670x400): General (Display name, Source + browse + Choose extracted folder…, Format, Version, Status, note), Build (Build folder, Executable name read-only unless adding, Compiler workers 0 = default), Runtime (Graphics backend fixed "Vulkan", Controller layout "Use default — X", Screen mode "Use default — TV mode/Handheld", engine-dependent note, Open game settings file), Artwork (cover, background, note), DLC, Updates; Build and Runtime locked while running/building; OK checks title, folder and image decodability | `editGame` |
+| X-02 | Properties apply: field copy, update removal resets a stale choice, screen mode and layout written to a built game's INI now, artwork cache cleared, DLC removal synced | `showProperties` |
+| X-03 | Settings (690x440): Engine (nxrs-build, health text, nxrs checks with Check again run on open, Open setup guide in a checkout), Build defaults (Build location, Compiler workers 1..64), Controller (Button layout + note), Appearance (Color mode, Accent with swatches, background toggle, library file path), Play (Screen mode, Pause, Mute, Ask who is playing, note); OK rules (no engine/build changes during a build, empty = bundled, nxrs-build must exist, layout/play changes written to every built game with a failure count) | `showSettings` |
 | X-04 | Install keys: picker for `prod.keys`, must contain `header_key`/`header_key_source`, atomic copy to `<data>\keys\prod.keys`, texts | `installKeys` |
 | X-05 | Remove from library: confirmation, files untouched | `removeGame` |
 | X-06 | About text; message boxes (info/warning) and question boxes with exact texts | `createMenusAndToolbar`, `message` |
@@ -182,7 +180,7 @@ engine's docs) depend on them.
 | Flag | Behaviour / exit |
 |---|---|
 | `--help`, `--version` | Qt standard; version from `VERSION` |
-| `--root <dir>` | Turbo engine folder for this run |
+| `--root <dir>` | kept for older scripts; no effect |
 | `--library <file>` | library file; skips legacy migration |
 | `--import-build <exe>` | import after the window opens |
 | `--demo` | non-persistent preview library |
@@ -191,12 +189,11 @@ engine's docs) depend on them.
 | `--show-menu <File\|Game\|Keys\|View\|Help>` | pop a title-bar menu (after 300 ms) |
 | `--preview-theme <mode>`, `--preview-accent <id>` | appearance without saving |
 | `--select-title <title>` | select by display title (case-insensitive) |
-| `--engine turbo\|nxrs` | saved engine for the selection; exit 2 when invalid or the game is busy |
+| `--engine nxrs` | saved engine for the selection (only `nxrs`); exit 2 when invalid or the game is busy |
 | `--nxrs-build <exe>` | saved nxrs-build path (empty = bundled) |
 | `--build` | build the selection, exit 0/1 after the build (and its DLC sync) |
 | `--install-dlc <pkg>` (repeatable), `--remove-dlc <pkg>` | headless DLC actions; `DLC: …` / `DLC error: …` lines; exit 0/1 |
 | `--install-update <pkg>` (repeatable), `--remove-update <pkg>`, `--update-choice newest\|none\|<pkg>` | headless update actions; `Updates: …` lines; exit 0/1 |
-| `--copy-saves` | headless save copy; `Saves: …`; exit 0/1 |
 | `--nxrs-doctor` | prints the checks; exit 0 all ok, else 1 |
 | `--smoke-build <input>` + `--build-output <dir>` | import + build a synthetic input; exit 2 without `--build-output` or `--library`; 0/1 |
 | `--check-image <file>` | decode test; exit 0/1 |
@@ -264,7 +261,7 @@ src/launcher/
       ini.rs           write_ini_key, readers, write_game_settings / play settings
       engine.rs        engine choice, build folders, v1/v2 arguments, UPDATE parsing, labels
       dlc.rs  saves.rs  doctor.rs  status.rs (card_state, status_for, filter, sort)  keys.rs
-      toolchain.rs     nxrs lookup + contract, problems, child environment; Turbo discovery (if kept)
+      toolchain.rs     nxrs lookup + contract, problems, child environment
     jobs/              one module per engine job, all on worker threads
       runner.rs        spawn, merged pipe, line splitter, log file, cancel (job object / process group)
       build.rs  update_probe.rs  dlc_sync.rs  doctor.rs  tools_check.rs (toolchain + dotnet, off the UI thread)
@@ -291,14 +288,13 @@ user-visible strings copied from the Qt source.
 **Recommendation: spawn `nxrs-build` per contract v2, exactly as the Qt launcher does. Link nothing from the engine.**
 
 - The contract is the tested boundary: arguments, `@progress`/`@result`, `UPDATE`/`DLC error` lines and exit codes
-  are verified against Turbo and both launchers can share it. Linking would bypass it and fork the behaviour.
+  are verified and both launchers can share it. Linking would bypass it and fork the behaviour.
 - nxrs-build is found at run time (`NXRS_BUILD`, Settings, bundle) so a developer points the launcher at any
   `target\<lane>\release\nxrs-build.exe`. Linking pins one engine into the launcher binary and removes that feature.
 - A build is long, spawns clang many times and can crash; in a child process a crash or a cancel (kill the tree) never
   takes the UI down. In-process, cancel needs cooperative cancellation through the translator and shaders crates.
 - Linking `cli` pulls `translator`, `shaders`, `profiles`, `ash`; the launcher would then build only where the engine
   builds (glslang, LLVM-mingw setup), slowing its CI and coupling every engine commit to it.
-- Turbo (if kept) is a child process anyway; one process path serves both engines.
 
 Linking would buy typed progress and no output parsing; the parser is 30 lines and already specified.
 
@@ -368,20 +364,12 @@ the acceptance phase (section 8, phase 7).
 
 ---
 
-## 4. Turbo support [OWNER]
+## 4. One engine
 
-What Turbo costs the launcher today: E-04..E-08, the Python/.NET/`nxs_live.py` checks at Play (P-01), the renderer and
-optimization rows (X-01), the engine folder setting (X-03), the default engine for every non-XCI game (G-02), and in
-releases `engine/` + `toolchain/` (Python 3.14, GCC 16.2, .NET 10, SPIRV-Tools, hactool), the AGPL notices and the
-source archive with the submodule.
-
-| Option | Launcher work | Release / CI | Users |
-|---|---|---|---|
-| **A. Keep Turbo through its CLI, as today** | +1.5 agent-days (toolchain discovery, v1 arguments, Turbo rows, 3 extra tests) | Unchanged except the Qt steps (release-deps, Python/GCC/.NET bundle, engine tests, AGPL source archive stay) | Nothing changes |
-| **B. Drop Turbo** | -1.0 for the above, +0.5 for existing Turbo entries: shown as "Turbo build (no longer supported)", Play disabled, one action "Switch to nxrs" (rebuild) + Copy saves from the Turbo build kept | Release loses `engine/`, `toolchain/` (except llvm-mingw), the submodule, Python tests, hactool, AGPL source archive: much smaller bundle and pipeline | Games that run only on Turbo stop working; Turbo builds can no longer be played from the launcher |
-| **C. Phase out** | As A now; marks Turbo "legacy" in Properties; the owner may switch the default engine for new games to nxrs; removal later (~1 day) behind exit criteria (e.g. every library game the owner plays runs on nxrs at its FPS goal) | As A now, as B at removal | No break now |
-
-This plan does not choose. Phases in section 8 show A and B separately.
+The launcher drives only nxrs (owner decision, section 10). Not ported: the Python engine's toolchain discovery and
+problems (E-04, E-05), v1 arguments (E-08), its Play checks (P-01), the renderer and optimization rows (X-01), the
+engine folder setting (X-03) and the save copy between engines (P-03, S-01). Releases carry no Python, GCC, .NET or
+hactool bundle. An entry saved with another engine loads as nxrs in its `[nxrs]` folder and shows as needing a build.
 
 ---
 
@@ -391,7 +379,7 @@ This plan does not choose. Phases in section 8 show A and B separately.
 
 - Remove: `jurplel/install-qt-action`, the Qt CMake build, `build-launcher.ps1/.sh/.bat`, `windeployqt`, Qt DLLs and
   plugin folders, `qt.conf`, Qt source archives in `legal/sources`, the Qt rows of `required_files` and `check_layout`,
-  the Linux Qt/xcb library collection for the launcher (`linux_libraries` keeps the Turbo runtime's libraries if A/C).
+  the Linux Qt/xcb library collection for the launcher.
 - Add: Rust 1.99 (already installed by the engine steps), `cargo build --release --locked` of the launcher,
   `cargo test` of the launcher (seconds), a Windows static CRT (`+crt-static`) so `nxrs.exe` is one file with no MSVC
   DLLs, and third-party licence texts for the launcher's crates into `legal/licenses/nxrs-launcher/` (generated with
@@ -411,9 +399,9 @@ This plan does not choose. Phases in section 8 show A and B separately.
 |---|---|---|
 | 1. Stay in ChrisColeTech/nxrs (replace `src/launcher`) | One repo for the product; release.yml already there; no cross-repo pin | Two Rust toolchains/CIs to keep in step; contract changes span two repos |
 | **2. Source in the engine workspace (`src/launcher`, its own cargo workspace), releases still published from ChrisColeTech/nxrs** | Contract v3 and the launcher change in one commit; one Rust CI; MIT with the engine; release URL, tags and `VERSION` history stay where users look | release.yml checks out the engine for the launcher too (it already does for nxrs-engine at `NXRS_ENGINE_REF`); release notes read two repos |
-| 3. Everything in the engine repo, nxrs repo retired | One place | Only sensible with Turbo dropped (the Turbo submodule, Python bundle and AGPL archive belong to nxrs); loses the release history location |
+| 3. Everything in the engine repo, nxrs repo retired | One place | Loses the release history location |
 
-**Recommendation: 2** (the location the brief names). If Turbo is dropped (option B), 3 becomes possible later.
+**Recommendation: 2** (the location the brief names); 3 is possible later.
 Licence note: the new crate would be MIT like the workspace. The Qt launcher repo carries AGPL notices for the vendored
 engine; the launcher code is the owner's (all commits ChrisColeTech), and a Rust reimplementation copies no C++ code,
 only behaviour and UI strings. The owner confirms the crate's licence.
@@ -449,8 +437,8 @@ pushes do not run it and launcher pushes do not run the 90-minute engine jobs.
 | Context menus over toolbars | No toolbar (above); game context menu as W-07; empty-space context menu: Add game…, Add extracted folder…, Import build…, Refresh; console context menu: Open log, Clear view, Dock bottom/right, Pop out (the Qt dock toolbar's two buttons move here) |
 | Fixed letterbox players | Not applicable: the launcher plays no media. Cover art stays crop-to-fill as in Qt (cards, not players) |
 | Resizable panels everywhere | Console panel with a 1 px sash, height/width saved; list columns resizable; dialogs resizable with lists that grow |
-| Native PC app, not an emulator | Wording from Qt kept ("TV mode — sharper", "Handheld — lighter", pause/mute as PC behaviour); About text rewritten only if Turbo goes |
-| New player settings global, per-game overrides stay | Existing overrides kept (layout, screen mode, renderer and optimization for Turbo, workers); anything new goes to Settings > Play |
+| Native PC app, not an emulator | Wording from Qt kept ("TV mode — sharper", "Handheld — lighter", pause/mute as PC behaviour); About text rewritten for the one engine |
+| New player settings global, per-game overrides stay | Existing overrides kept (layout, screen mode, workers); anything new goes to Settings > Play |
 
 ### 6.3 What egui does well and badly here
 
@@ -472,7 +460,7 @@ pushes do not run it and launcher pushes do not run the 90-minute engine jobs.
 
 - **Core tests** (`#[test]` beside each `core` module): the 33 cases of `src/launcher/tests.cpp`, one Rust test per
   Qt slot, same fixtures and assertions: pythonPrecedenceAndEnvironment, releaseAndCheckoutLayouts,
-  bundledEngineWinsOverRememberedOne, argumentsPreserveLiteralPaths (Turbo; option A/C only),
+  bundledEngineWinsOverRememberedOne,
   discoverNspBuildAndPreserveLibrary, themeTextContrast, searchAndFiltersCombine, rendererPreservesSettings,
   screenModeIni, pauseOnFocusLossIni, askUserAndDiscoveries, screenModePerGameOverDefault, buttonLayoutIni,
   libraryRoundTripAndCorruption, dlcListRoundTrip, dlcManifestAndState, dlcPackagesAreCheckedBeforeTheEngineRuns,
@@ -501,7 +489,7 @@ pushes do not run it and launcher pushes do not run the 90-minute engine jobs.
 
 ## 8. Phases, exit criteria, effort
 
-Effort in agent-days. "A" = Turbo kept (or phased out), "B" = Turbo dropped.
+Effort in agent-days. "A" = a second (Python) engine kept, "B" = nxrs only (the owner's choice, section 10).
 
 | Phase | Work | Exit criteria | A | B |
 |---|---|---|---|---|
@@ -511,12 +499,10 @@ Effort in agent-days. "A" = Turbo kept (or phased out), "B" = Turbo dropped.
 | 3. Main window | Title bar + menus, gallery (virtualized, artwork pipeline), list, canvas, filter popover, status bar + badge popup, console panel, drag & drop, shortcuts, context menus, empty states, demo, window state | Side-by-side screenshots vs Qt for every W row; kittest for filters and the Game menu; 300-game synthetic library scrolls smoothly | 4.0 | 4.0 |
 | 4. Dialogs + flows | Add/Properties (6 tabs), Settings (5 tabs + doctor), DLC, Updates, keys, saves, remove, about, message boxes; every flow of 1.4–1.8 wired | Every X/B/P row checked; the 8 UI tests pass; a real nxrs build + Play + Stop of the `hello` homebrew through the UI with a temp library | 4.5 | 4.0 |
 | 5. CLI parity | All flags of 1.12, headless verbs, exit codes, workflow tests | Each flag tested; `smoke-release.py` passes against a locally packaged bundle | 1.5 | 1.5 |
-| 6. Packaging + CI | release.yml, package-release.py, smoke-release.py, test_release.py, licences, icons | CI green on Windows and Linux; relocated archive smoke passes; draft release artifacts | 2.0 | 2.0 (+0.5 Turbo entry handling counted in 4) |
+| 6. Packaging + CI | release.yml, package-release.py, smoke-release.py, test_release.py, licences, icons | CI green on Windows and Linux; relocated archive smoke passes; draft release artifacts | 2.0 | 2.0 (+0.5 for entries from another engine, counted in 4) |
 | 7. Acceptance + cut-over | Owner runs the Rust launcher on the live library (backup made first), works through the parity list; fixes; Qt sources removed from the release; LAUNCHER.md / RELEASES.md / LAUNCHER_CONTRACT.md updated | Owner sign-off | 1.0 | 1.0 |
 | **Total** | | | **20.5** | **19.0** |
 | Contingency | Title bar, CI display, fonts | | +3 | +3 |
-
-Option C (phase out) = A now plus about 1 day at removal.
 
 **Riskiest parts**
 
@@ -558,7 +544,7 @@ Option C (phase out) = A now plus about 1 day at removal.
 
 ## 10. Owner decisions
 
-1. **Turbo** (section 4): keep, drop, or phase out; with phase-out, whether new games default to nxrs.
+1. **Engine** (section 4): nxrs only, or a second engine kept.
 2. **Repository** (5.2): recommended option 2 (source in the engine workspace, releases from ChrisColeTech/nxrs);
    and the crate's licence (MIT recommended).
 3. **One home per control** (6.2): confirm the proposed removals (Commands strip, status-bar Settings button) and homes.
@@ -568,7 +554,7 @@ Option C (phase out) = A now plus about 1 day at removal.
 
 ## Owner decisions (2026-11-20)
 
-- Engine: the Rust launcher drives only the nxrs engine (no Turbo). Use the 'Turbo dropped' estimates (~19 agent-days + contingency).
+- Engine: the Rust launcher drives only the nxrs engine. Use the nxrs-only estimates (B, ~19 agent-days + contingency).
 - Location: engine repo, src/launcher, its own cargo workspace (MIT); may be renamed later.
 - Fix the four Qt problems: hintsBuilt recording (window.cpp:874), nxrs games allowed on Linux, one 'source offline' rule (the cards'), Drop the dead 'Build options...' entry. Correction (owner): keep the Qt layout as is: the top bar (Add game with its drop-down, Search & Filter) and the status-bar Settings button stay; the port replicates the Qt UI, it does not redesign it.
 

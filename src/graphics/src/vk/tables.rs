@@ -16,7 +16,7 @@ pub struct Tables {
     /// descriptor buffers (`caps.descbuf`): the pool set is this buffer, written in place (host-visible, mapped)
     pub db: Option<DescBuf>,
     inner: Mutex<Inner>,
-    /// Registrations and image backing changes invalidate every dependent replay cache (Turbo's g_vkt_reg_gen).
+    /// Registrations and image backing changes invalidate every dependent replay cache.
     generation: AtomicU64,
     /// Only actual descriptor-content changes invalidate immutable pool snapshots.
     pool_generation: AtomicU64,

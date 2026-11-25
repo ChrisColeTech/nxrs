@@ -61,7 +61,7 @@ pub struct Pool {
     /// the frame its CPU writes were last seen (cold pools are asked once a frame: `begin_submit`)
     pub dirty_frame: u64,
     /// A pool larger than the device's largest buffer (maintenance4 `maxBufferSize`; AMD: 2 GiB) has several buffers,
-    /// windows side by side over it (Turbo `vk_mem.c` pool windows): window k holds pool bytes [k * win, (k + 1) *
+    /// windows side by side over it: window k holds pool bytes [k * win, (k + 1) *
     /// win), window 0 is `buf`, the others are here. `win` 0: one buffer for all of it.
     pub win: u64,
     pub wins: Vec<Buf>,
@@ -74,12 +74,12 @@ pub struct Pool {
     pub deferred: Vec<(u64, u64)>,
 }
 
-/// The per-frame upload budget (Turbo `vk_mem.c` g_budget, NXRT_VK_UPLOAD_MB, 64 MB): CPU writes uploaded at the
-/// start of a submission count against it; past it, a range waits in its pool (`Pool::deferred`) and goes when a draw,
-/// dispatch or copy of this submission resolves an address in it (Turbo: `vkm_use` syncs what a use needs whatever the
-/// budget), when raw global memory's table is bound (every pool at once), or at the next submissions within theirs.
-/// Turbo's budget bounds its background page sync; here every CPU write was uploaded before each submission, so a
-/// frame that rewrote hundreds of MB the GPU did not read (a load's staging areas) staged all of it at once.
+/// The per-frame upload budget (64 MB): CPU writes uploaded at the start of a submission count against it; past it,
+/// a range waits in its pool (`Pool::deferred`) and goes when a draw, dispatch or copy of this submission resolves an
+/// address in it (a use syncs what it needs whatever the budget), when raw global memory's table is bound (every pool
+/// at once), or at the next submissions within theirs. Without the budget every CPU write was uploaded before each
+/// submission, so a frame that rewrote hundreds of MB the GPU did not read (a load's staging areas) staged all of it
+/// at once.
 /// `NXGFX_UPLOAD_MB` (default 64; 0: no budget).
 pub fn upload_budget() -> u64 {
     match BUDGET_OVERRIDE.load(Ordering::Relaxed) {
@@ -123,7 +123,7 @@ fn budget_take(n: u64) -> bool {
     true
 }
 
-/// A pool buffer backed in granules on first use (Turbo `vk_dev.c:271` / `vk_mem.c` pool_bind): device memory for a
+/// A pool buffer backed in granules on first use: device memory for a
 /// granule is allocated and bound (before the submission that first uses it, `sparse::bind_buffer`) when a range in it
 /// is first resolved, and filled then with the guest memory's committed bytes there. A large pool the game uses a
 /// little of holds only that much device memory (Mario Kart World's pools of gigabytes). Raw global memory's table
@@ -136,7 +136,7 @@ pub struct Granules {
     pub bound: u64,
 }
 
-/// The granule (Turbo's GRAN: 2 MiB, a whole number of the device's sparse blocks).
+/// The granule (2 MiB, a whole number of the device's sparse blocks).
 pub const GRAN: u64 = 2 << 20;
 /// Pools smaller than this are backed whole (a bind per first use of a 16 KB pool cost more than its memory).
 pub const GRAN_MIN: u64 = 8 << 20;
@@ -337,11 +337,13 @@ mod watch {
             // asking from `lo` again walked the whole range once per 4,096 written pages, so a scene that wrote
             // gigabytes of a pool held the replay for 28-34 s (Mario Kart World, lane K2)
             let (lo0, t0, mut calls) = (lo, std::time::Instant::now(), 0u32);
+            let (k0, u0) = thread_times();
             let slow = |out: &Vec<u64>, calls: u32| {
                 static N: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
                 let ms = t0.elapsed().as_secs_f64() * 1e3;
                 if ms > 100.0 && N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
-                    crate::vklog!("write watch: {:#x}+{} MB took {ms:.0} ms ({} written pages, {calls} calls)", lo0, (hi - lo0) >> 20, out.len());
+                    let (k1, u1) = thread_times();
+                    crate::vklog!("write watch: {:#x}+{} MB took {ms:.0} ms ({} written pages, {calls} calls; thread CPU kernel {:.0} ms, user {:.0} ms)", lo0, (hi - lo0) >> 20, out.len(), (k1 - k0) as f64 / 1e4, (u1 - u0) as f64 / 1e4);
                 }
             };
             let mut lo = lo;
@@ -369,6 +371,16 @@ mod watch {
                 }
             }
         })
+    }
+    /// This thread's kernel and user CPU time (100 ns units).
+    fn thread_times() -> (u64, u64) {
+        use windows_sys::Win32::Foundation::FILETIME;
+        use windows_sys::Win32::System::Threading::{GetCurrentThread, GetThreadTimes};
+        let z = FILETIME { dwLowDateTime: 0, dwHighDateTime: 0 };
+        let (mut c, mut e, mut k, mut u) = (z, z, z, z);
+        unsafe { GetThreadTimes(GetCurrentThread(), &mut c, &mut e, &mut k, &mut u) };
+        let ft = |f: FILETIME| (f.dwHighDateTime as u64) << 32 | f.dwLowDateTime as u64;
+        (ft(k), ft(u))
     }
     pub fn reset(lo: u64, hi: u64) {
         if unsafe { ResetWriteWatch(lo as *const _, (hi - lo) as usize) } == 0 {
@@ -528,7 +540,11 @@ fn page_range(a: u64, n: u64) -> (u64, u64) {
 }
 
 fn placement_for(flags: u32) -> Placement {
-    if flags & mem_flags::GPU_NO_ACCESS != 0 {
+    // A physical pool is GPU_NO_ACCESS by NVN's rule, yet the GPU reaches it through the virtual pools mapped onto it
+    // (an alias resolves its buffers into this pool, a sparse pool its contiguous ranges): it needs a GPU buffer, made
+    // at its first GPU use like any pool's (Ocarina of Time: a 305 MB physical pool behind a whole-pool alias; its
+    // compute shaders' storage buffers were bound to zero stand-ins, "pool has no GPU access").
+    if flags & mem_flags::GPU_NO_ACCESS != 0 && flags & mem_flags::PHYSICAL == 0 {
         return Placement::CpuOnly;
     }
     if flags & mem_flags::CPU_NO_ACCESS != 0 {
@@ -789,6 +805,15 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     if !*ON.get_or_init(|| std::env::var("NXGFX_COPY_SYNC").as_deref() != Ok("0")) || n == 0 {
         return;
     }
+    // a sparse virtual pool's range: the physical memory it maps (as `resolve_in` binds it)
+    let a = if crate::nvn::vpool::is_sparse(a) {
+        match crate::nvn::vpool::translate(a, n) {
+            Some(p) => p,
+            None => return,
+        }
+    } else {
+        a
+    };
     let frame = super::present::frames();
     let mut m = g.mem.lock().unwrap();
     let gen = m.gen;
@@ -1429,8 +1454,7 @@ fn resolve_in(
         a
     };
     // the 16 pools this thread resolved last, while no pool came, went or got its buffer (thousands of draws a frame bind
-    // ranges of the same few (Donkey Kong Bananza: dozens, 7.5 ms of lookups a frame with 4 kept): the pool lock and lookup were most of the replay's 1.1 ms of `memory` in Z-A; Turbo's
-    // vkm_use fast path)
+    // ranges of the same few (Donkey Kong Bananza: dozens, 7.5 ms of lookups a frame with 4 kept): the pool lock and lookup were most of the replay's 1.1 ms of `memory` in Z-A)
     thread_local! {
         // (generation, pool base, pool size, the next pool's base, buffer, buffer offset of base)
         static LAST: std::cell::Cell<[(u64, u64, u64, u64, vk::Buffer, u64, u64); 16]> = const { std::cell::Cell::new([(0, 0, 0, 0, vk::Buffer::null(), 0, 0); 16]) };
@@ -1649,25 +1673,28 @@ impl Drop for WatchTimer {
 /// (pool base, page start, page end, allocation base), ordered by pool base.
 type WatchedPool = (u64, u64, u64, u64);
 
+/// The largest gap between two watched pools of one allocation that one write-watch call spans. GetWriteWatch walks
+/// every page of its range, written or not, at a few nanoseconds a page (~1-1.7 ms a GB here), and a call costs about
+/// as much as walking a megabyte: a gap past this is cheaper asked as two calls. (The old rule let the gaps of a run
+/// grow to half the pools' bytes: a run over pools of 400 MB walked up to 200 MB that no pool holds, at every scan.)
+const WATCH_GAP: u64 = 1 << 20;
+
 fn watch_batch_end(watched: &[WatchedPool], i: usize) -> (usize, u64) {
-    let (mut j, lo, mut hi, ab) = (i + 1, watched[i].1, watched[i].2, watched[i].3);
-    let mut covered = hi - lo;
+    let (mut j, mut hi, ab) = (i + 1, watched[i].2, watched[i].3);
     while j < watched.len() {
         let (_, next_lo, next_hi, next_ab) = watched[j];
-        let end = hi.max(next_hi);
-        let next_covered = covered + next_hi.saturating_sub(hi.max(next_lo));
-        // Limit total holes, not each individual hole. Otherwise thousands of small
-        // pools can join one huge mostly-empty scan while each gap passes the test.
-        let holes = (end - lo).saturating_sub(next_covered);
-        if next_lo > hi && (ab == 0 || next_ab != ab || holes > (next_covered / 2).max(4 << 20)) {
+        if next_lo > hi && (ab == 0 || next_ab != ab || next_lo - hi > WATCH_GAP) {
             break;
         }
-        covered = next_covered;
-        hi = end;
+        WATCH_GAP_B.fetch_add(next_lo.saturating_sub(hi), Ordering::Relaxed);
+        hi = hi.max(next_hi);
         j += 1;
     }
     (j, hi)
 }
+
+/// Bytes of gaps between pools the write-watch calls walked (pool sync's breakdown with NXGFX_PROFILE=1).
+pub static WATCH_GAP_B: AtomicU64 = AtomicU64::new(0);
 
 /// Resetting a scan clears pages belonging to *every* overlapping pool, including
 /// cold pools between the requested ones and aliases sharing a boundary page.
@@ -1770,10 +1797,25 @@ mod watch_batch_tests {
                 (base, base, base + PAGE, 1)
             })
             .collect();
-        // Old loop joined all 100 because each <4 MiB gap qualified separately.
-        assert_eq!(watch_batch_end(&pools, 0), (2, (4 << 20) + PAGE));
+        // a gap of nearly 4 MiB costs more to walk than a second call
+        assert_eq!(watch_batch_end(&pools, 0), (1, PAGE));
         let contiguous = [(0, 0, PAGE, 1), (PAGE, PAGE, 2 * PAGE, 1)];
         assert_eq!(watch_batch_end(&contiguous, 0), (2, 2 * PAGE));
+    }
+
+    /// Two pools of one allocation share a call while the gap between them is at most `WATCH_GAP`, however large the
+    /// pools are (the old rule let a run over large pools walk gaps of up to half their bytes).
+    #[test]
+    fn a_run_spans_only_small_gaps() {
+        let mb = 1u64 << 20;
+        let near = [(0, 0, 400 * mb, 1), (401 * mb, 401 * mb, 800 * mb, 1)];
+        assert_eq!(watch_batch_end(&near, 0), (2, 800 * mb), "a 1 MiB gap is walked");
+        let far = [(0, 0, 400 * mb, 1), (401 * mb + PAGE, 401 * mb + PAGE, 800 * mb, 1)];
+        assert_eq!(watch_batch_end(&far, 0), (1, 400 * mb), "past 1 MiB: two calls");
+        let three = [(0, 0, PAGE, 1), (mb, mb, mb + PAGE, 1), (2 * mb + PAGE, 2 * mb + PAGE, 3 * mb, 1)];
+        assert_eq!(watch_batch_end(&three, 0), (3, 3 * mb), "each gap is judged by itself");
+        let other_allocation = [(0, 0, PAGE, 1), (2 * PAGE, 2 * PAGE, 3 * PAGE, 2)];
+        assert_eq!(watch_batch_end(&other_allocation, 0), (1, PAGE));
     }
 
     #[test]
@@ -1920,13 +1962,15 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub, due: Option<u64>) -> V
                 WATCH_LUKE_B.swap(0, Ordering::Relaxed),
                 WATCH_LUKE_HITS.swap(0, Ordering::Relaxed),
             );
+            let gap = WATCH_GAP_B.swap(0, Ordering::Relaxed);
             crate::vklog!(
-                "pool sync, last 600 submissions: {:.0} watched pools, {:.0} write-watch calls, {:.2} ms in them a submission; scanned a submission {:.0} MB in pools written this / last frame, {:.0} MB in pools written 2-60 frames ago ({lh} later-submission writes found in those)",
+                "pool sync, last 600 submissions: {:.0} watched pools, {:.0} write-watch calls, {:.2} ms in them a submission; scanned a submission {:.0} MB in pools written this / last frame, {:.0} MB in pools written 2-60 frames ago, {:.0} MB of gaps between pools ({lh} later-submission writes found in those)",
                 np as f64 / 600.0,
                 c as f64 / 600.0,
                 ns as f64 / 600.0 / 1e6,
                 wb as f64 / 600.0 / 1048576.0,
-                lb as f64 / 600.0 / 1048576.0
+                lb as f64 / 600.0 / 1048576.0,
+                gap as f64 / 600.0 / 1048576.0
             );
         }
         // a run: pools whose pages touch, or pools of one allocation with gaps between them (one call over the run
@@ -1963,6 +2007,7 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub, due: Option<u64>) -> V
         }
     }
     SYNC_SCAN_NS.fetch_add(t_scan.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    super::queue::chain_trace::note("scan", t_scan.elapsed().as_micros() as u64, covered as u64);
     let _loop_t = SyncLoopTimer(std::time::Instant::now());
     for p in m.by_base.values_mut() {
         if !matches!(p.placement, Placement::Mirror | Placement::Host) && p.pending.is_empty() {
@@ -2066,6 +2111,16 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
             }
         }
     }
+    // a sparse virtual pool's range was bound at the physical memory it maps (`resolve_in`): the write-back goes there
+    // too, or the GPU's bytes are lost and a later CPU write to the page uploads stale guest memory over them
+    let a = if crate::nvn::vpool::is_sparse(a) {
+        match crate::nvn::vpool::translate(a, n) {
+            Some(p) => p,
+            None => return,
+        }
+    } else {
+        a
+    };
     let m = g.mem.lock().unwrap();
     let Some(b) = find(&m, a, n) else { return };
     let p = &m.by_base[&b];
@@ -2115,6 +2170,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
     let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
     super::lazy::T_LOCK.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    super::queue::chain_trace::note("wb_lock", t0.elapsed().as_micros() as u64, wbs.len() as u64);
     for &(pool, a, n, src, pre, identity) in wbs {
         let Some(p) = m.by_base.get_mut(&pool) else {
             continue;
@@ -2237,7 +2293,7 @@ fn land(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
 
 /// Bytes the GPU changed in a write-back's range (where `src`, the device after the submission, differs from `base`,
 /// the device before its work) land in guest memory; the rest of the range keeps what the CPU has, including what it
-/// wrote while the GPU worked (Turbo's `wr_land`: a storage buffer is written in part). Pages the GPU left alone are
+/// wrote while the GPU worked (a storage buffer is written in part). Pages the GPU left alone are
 /// not touched. Counts the guest bytes the CPU had changed meanwhile that a whole-range landing would have reverted.
 pub(crate) fn writeback_identity_matches(expected: Option<u64>, actual: u64) -> bool {
     expected.is_none_or(|expected| expected == actual)

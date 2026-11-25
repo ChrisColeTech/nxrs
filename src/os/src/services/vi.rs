@@ -328,7 +328,7 @@ vifn!(list_frame_history, |a| {
 
 // GetIndirectImage(u64 *w, u64 *h, void *buffer, size_t size, u64 consumer, int width, int height[, 4 floats: the
 // crop]): the picture of an indirect layer (the inline keyboard's applet draws into it; the game draws it over its
-// screen). The host's keyboard is a window of its own, so the picture is fully transparent (Turbo vi 2450 / 2451:
+// screen). The host's keyboard is a window of its own, so the picture is fully transparent (vi 2450 / 2451:
 // the buffer zeroed, sizes 0); left as it was, whatever that memory held would be drawn over the game.
 vifn!(indirect_image, |a| {
     let (buf, size) = (a.x(2), a.x(3));
@@ -468,7 +468,7 @@ pub fn register(r: &mut Registry) {
 mod tests {
     /// ListFrameHistory as nxnative answers it: the size (8) for a null buffer; the frames up to the latest, newest
     /// first, status 2 with a present tick once the present queue handed them on, 1 before; frames older than 8 are
-    /// gone. GetIndirectImage leaves a transparent picture (Turbo 2450).
+    /// gone. GetIndirectImage leaves a transparent picture (2450).
     #[test]
     fn frame_history_and_indirect_image() {
         for f in 1..=10 {

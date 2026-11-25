@@ -1,6 +1,5 @@
 //! Resolution scale: the ini's `resolution` (0.25 .. 4, live) and the host's dynamic resolution (`dynamic_resolution`,
-//! down to `dynamic_resolution_min` while the GPU cannot keep up). Turbo has both in its GL renderer only; this is the
-//! same design on the Vulkan replay.
+//! down to `dynamic_resolution_min` while the GPU cannot keep up), on the Vulkan replay.
 //!
 //! - **What is scaled:** render targets: compressible textures (NVN's flag for colour and depth targets) that are 2D
 //!   (or 2D arrays), not storage images, not block-compressed, and more than one texel in both directions (one-row /
@@ -255,7 +254,7 @@ pub fn note_gpu(ns: u64) {
 }
 
 /// At every present: once a second, the dynamic resolution steps down 0.1 when the GPU is busy over 90% of the time,
-/// and up 0.1 after four seconds in a row under 65% and 20 s after the last step down (Turbo's rule; frames that make
+/// and up 0.1 after four seconds in a row under 65% and 20 s after the last step down (frames that make
 /// pipelines do not count).
 pub fn frame() {
     DRS_FRAMES.fetch_add(1, Ordering::Relaxed);

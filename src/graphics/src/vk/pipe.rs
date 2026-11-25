@@ -5,14 +5,15 @@
 //! layout (`layout`). That keeps the pipeline count close to the program count, which is what bounds the driver's
 //! memory: NVIDIA's driver grew to 61 GB when one game's pipelines multiplied per state.
 //!
-//! A pipeline nothing built yet is linked from four parts (VK_EXT_graphics_pipeline_library, Turbo's NXRT_VK_GPL):
+//! A pipeline nothing built yet is linked from four parts (VK_EXT_graphics_pipeline_library):
 //! vertex input, pre-rasterization shaders, fragment shader, fragment output, each compiled once and kept by what it
 //! depends on; a new combination of known parts is only linked (about a millisecond against 50-250 ms for a whole
 //! pipeline: Super Mario Bros. Wonder's frames of 60-2,000 ms at every new place). The whole, optimized pipeline is
 //! then built on a background thread and takes the linked one's place. `NXGFX_GPL=0`: whole pipelines only.
 //!
-//! New keys are appended to a key file; `prewarm` builds the keys of earlier runs on background threads, stopping at a
-//! private-memory budget (`NXGFX_PREWARM_BUDGET_MB`, default 2048) or a count cap. A VkPipelineCache is kept on disk.
+//! New keys are appended to a key file; `prewarm` builds the keys of earlier runs on background threads, the latest
+//! runs' first, stopping at a private-memory budget (`NXGFX_PREWARM_BUDGET_MB`, default a sixteenth of the machine's
+//! memory, 2048-8192) or a count cap. A VkPipelineCache is kept on disk.
 
 use super::shader::Module;
 use super::Gpu;
@@ -1016,15 +1017,21 @@ pub fn prebuild(g: &'static Gpu, keys: Vec<ShaderKey>) {
     let _ = tx.as_ref().unwrap().send(keys);
 }
 
-/// The private memory past which no more shader parts are made ahead: NXGFX_PARTS_PRIVATE_MB, default 6 GB. (A
-/// budget on the parts' own growth stopped them at 4.3 s in Super Mario Bros. Wonder's first run, the game's boot
-/// loading counted with them: 3,100 parts, the process at 2.4 GB, and the first level compiled 61 pipelines in 2 s.)
+/// The private memory past which no more shader parts are made ahead: NXGFX_PARTS_PRIVATE_MB, default an eighth of
+/// the machine's memory, at least 6 GB. (A budget on the parts' own growth stopped them at 4.3 s in Super Mario Bros.
+/// Wonder's first run, the game's boot loading counted with them: 3,100 parts, the process at 2.4 GB, and the first
+/// level compiled 61 pipelines in 2 s. The fixed 6 GB counts the guest's own memory too: Super Smash Bros. Ultimate's
+/// process passes it before its first match, so every new stage's and effect's parts were made at their draws on the
+/// replay thread, 50-330 ms frames mid-match.)
 fn parts_cap() -> u64 {
     std::env::var("NXGFX_PARTS_PRIVATE_MB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(6144)
-        << 20
+        .map_or_else(|| parts_cap_for(super::total_phys()), |mb| mb << 20)
+}
+
+fn parts_cap_for(total_phys: u64) -> u64 {
+    (total_phys / 8).max(6 << 30)
 }
 
 /// A pipeline replaced (its optimized build took its place, or another thread made the same one first): destroyed once
@@ -1127,7 +1134,7 @@ fn link_io(g: &Gpu, k: &mut GfxKey, mods: &mut [Arc<Module>]) {
     let Some(ps) = mods.iter().position(|m| m.stage == 1) else {
         return;
     };
-    // integer colour targets: the pixel shader's float outputs there retyped (Turbo's integer output variant)
+    // integer colour targets: the pixel shader's float outputs there retyped (the integer output variant)
     let outs = shaders::link::output_kinds(&mods[ps].words);
     let mut kinds = [0u8; 8];
     for (l, kind) in kinds.iter_mut().enumerate().take(k.ncolor as usize) {
@@ -1413,6 +1420,44 @@ fn pipeline_shader_keys(key: &Key) -> Vec<ShaderKey> {
     }
 }
 
+/// The process's private memory less the guest's own committed memory (its heap and physical memory maps). Prewarm
+/// runs while the game boots, and a boot commits gigabytes of guest memory in the same seconds (Super Smash Bros.
+/// Ultimate: +2,039 MB in 3 s stopped the prewarm at 258 of 1,587 pipelines, leaving the rest to compile on the replay
+/// thread mid-match, 50-880 ms frames); that growth is not the pipelines'.
+///
+/// Windows only: there a guest commit is a private `VirtualAlloc` commit, counted once in `private_bytes`. On Linux a
+/// commit is only an `mprotect` (pages resident once touched) while `private_bytes` is resident + swap, so subtracting
+/// the committed size would hide real growth and could leave the budget never tripping; Linux keeps the plain figure.
+#[cfg(windows)]
+fn engine_private_bytes() -> u64 {
+    let guest = nxrt::kernel::try_get().map_or(0, |k| {
+        let (heap, alias) = k.space.committed();
+        heap + alias
+    });
+    private_bytes().saturating_sub(guest)
+}
+#[cfg(not(windows))]
+fn engine_private_bytes() -> u64 {
+    private_bytes()
+}
+
+/// The key file's keys once each, at their last place in it, so the queue (taken from its end) builds the latest
+/// runs' keys first: the file only grows, and a budget stop used to leave an arbitrary half unbuilt (the keys were
+/// built in the order of their `Debug` text; Super Smash Bros. Ultimate: 874 of 1,712, the match's among the rest).
+fn newest_last(keys: Vec<Key>) -> Vec<Key> {
+    let mut seen = std::collections::HashSet::new();
+    let mut out: Vec<Key> = keys.into_iter().rev().filter(|k| seen.insert(*k)).collect();
+    out.reverse();
+    out
+}
+
+/// The prewarm's private-memory budget, scaled to the machine: a sixteenth of its memory, 2 to 8 GB. A prewarmed
+/// pipeline costs about 1 MB of private memory (Super Smash Bros. Ultimate: 1,804 for +1,879 MB); the fixed 2 GB
+/// stopped that title's prewarm halfway on a 128 GB machine.
+fn prewarm_budget(total_phys: u64) -> u64 {
+    (total_phys / 16).clamp(2 << 30, 8 << 30)
+}
+
 /// Builds the pipelines of the key file on `threads` background threads until done or over the memory budget, and
 /// returns when they have finished.
 pub fn prewarm(g: &'static Gpu, threads: usize) -> PrewarmReport {
@@ -1435,18 +1480,16 @@ pub fn prewarm(g: &'static Gpu, threads: usize) -> PrewarmReport {
             None => break,
         }
     }
-    keys.sort_by_key(|k| format!("{k:?}"));
-    keys.dedup();
+    let keys = newest_last(keys);
     let budget = std::env::var("NXGFX_PREWARM_BUDGET_MB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(2048)
-        << 20;
+        .map_or_else(|| prewarm_budget(super::total_phys()), |mb| mb << 20);
     let cap = std::env::var("NXGFX_PREWARM_MAX")
         .ok()
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(50_000);
-    let base = private_bytes();
+    let base = engine_private_bytes();
     let queue = Arc::new(Mutex::new(keys.clone()));
     let built = Arc::new(AtomicU64::new(0));
     let skipped = Arc::new(AtomicU64::new(0));
@@ -1464,7 +1507,7 @@ pub fn prewarm(g: &'static Gpu, threads: usize) -> PrewarmReport {
                 return;
             };
             if built.load(Ordering::Relaxed) as usize >= cap
-                || private_bytes().saturating_sub(base) > budget
+                || engine_private_bytes().saturating_sub(base) > budget
             {
                 over.store(true, Ordering::Relaxed);
                 return;
@@ -1514,7 +1557,7 @@ pub fn prewarm(g: &'static Gpu, threads: usize) -> PrewarmReport {
         keys: keys.len(),
         built: built.load(Ordering::Relaxed) as usize,
         skipped: skipped.load(Ordering::Relaxed) as usize,
-        private_growth: private_bytes().saturating_sub(base),
+        private_growth: engine_private_bytes().saturating_sub(base),
         stopped_by_budget: over.load(Ordering::Relaxed),
         secs: t0.elapsed().as_secs_f64(),
     };
@@ -1544,6 +1587,31 @@ mod pipeline_identity_tests {
         gfx.shaders[1] = b;
         assert_eq!(pipeline_shader_keys(&Key::Gfx(gfx)), vec![a, b]);
         assert_eq!(pipeline_shader_keys(&Key::Compute(b)), vec![b]);
+    }
+
+    /// The prewarm's queue (taken from its end) holds each key once, at its last place in the file: the latest runs'
+    /// keys are built first, and a key a later run wrote again counts as that run's.
+    #[test]
+    fn prewarm_builds_the_latest_keys_first() {
+        let k = |n: u8| Key::Compute([n; 8]);
+        let file = vec![k(1), k(2), k(3), k(1), k(4)];
+        let mut q = newest_last(file);
+        assert_eq!(q, vec![k(2), k(3), k(1), k(4)]);
+        assert_eq!(q.pop(), Some(k(4)), "the newest key goes first");
+        assert_eq!(newest_last(vec![]), vec![]);
+    }
+
+    #[test]
+    fn prewarm_budget_scales_with_the_machine() {
+        const G: u64 = 1 << 30;
+        assert_eq!(prewarm_budget(0), 2 * G, "unknown memory: the old 2 GB");
+        assert_eq!(prewarm_budget(16 * G), 2 * G);
+        assert_eq!(prewarm_budget(64 * G), 4 * G);
+        assert_eq!(prewarm_budget(128 * G), 8 * G);
+        assert_eq!(prewarm_budget(512 * G), 8 * G);
+        assert_eq!(parts_cap_for(0), 6 * G, "unknown memory: the old 6 GB");
+        assert_eq!(parts_cap_for(32 * G), 6 * G);
+        assert_eq!(parts_cap_for(128 * G), 16 * G);
     }
 
     #[test]

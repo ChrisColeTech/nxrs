@@ -15,7 +15,6 @@ pub const REBUILD: &str = "Rebuild";
 pub const PROPERTIES: &str = "Properties";
 pub const INSTALL_DLC: &str = "Install DLC…";
 pub const INSTALL_UPDATES: &str = "Install Updates…";
-pub const COPY_SAVES: &str = "Copy saves from the Turbo build…";
 pub const REMOVE: &str = "Remove from library…";
 pub const INSTALL_KEYS: &str = "Install keys…";
 pub const KEYS_FOLDER: &str = "Open keys folder";

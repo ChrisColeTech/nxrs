@@ -1,0 +1,29 @@
+# Classic 2D stage, 12 s (replayed back to back): a spin dash first (stick down, B three times, released toward
+# the right: it gets through the rock walls a plain run stops at), then stick right held with B (the jump in Sonic X
+# Shadow Generations; A does nothing in a stage) held 0.45 s every 1.2 s, so Sonic rolls through the badniks.
+0 0 0 -30000 0 0
+300 2 0 -30000 0 0
+400 0 0 -30000 0 0
+500 2 0 -30000 0 0
+600 0 0 -30000 0 0
+700 2 0 -30000 0 0
+800 0 0 -30000 0 0
+900 0 30000 0 0 0
+1900 2 30000 0 0 0
+2350 0 30000 0 0 0
+3100 2 30000 0 0 0
+3550 0 30000 0 0 0
+4300 2 30000 0 0 0
+4750 0 30000 0 0 0
+5500 2 30000 0 0 0
+5950 0 30000 0 0 0
+6700 2 30000 0 0 0
+7150 0 30000 0 0 0
+7900 2 30000 0 0 0
+8350 0 30000 0 0 0
+9100 2 30000 0 0 0
+9550 0 30000 0 0 0
+10300 2 30000 0 0 0
+10750 0 30000 0 0 0
+11500 0 30000 0 0 0
+12000 0 30000 0 0 0

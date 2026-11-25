@@ -10,23 +10,36 @@ NXGFX_ASTC_CACHE	switch	big enough that a read beats an encode (`MIN_BYTES`). `N
 NXGFX_ASTC_CACHE_MB	switch	big enough that a read beats an encode (`MIN_BYTES`). `NXGFX_ASTC_CACHE=0` off, `NXGFX_ASTC_CACHE_MB` the most the	src/graphics/src/tex/astc_cache.rs
 NXGFX_ASYNC	switch	sequence number) and resolve to its timeline value once it ran. `NXGFX_ASYNC=0`: replay on the game's thread.	src/graphics/src/vk/queue.rs
 NXGFX_ASYNC_PRESENTS	switch	`NXGFX_ASYNC_PRESENTS` (default 2): presents queued at most.	src/graphics/src/vk/queue.rs
-NXGFX_BALLOT_FIX	switch	NVN's warp-aggregated atomic add made per lane (the RTX 50 ballot hang, Turbo #12; NXGFX_BALLOT_FIX=0 off)	src/graphics/src/vk/shader.rs
+NXGFX_BALLOT_FIX	switch	NVN's warp-aggregated atomic add made per lane (the RTX 50 ballot hang; NXGFX_BALLOT_FIX=0 off)	src/graphics/src/vk/shader.rs
 NXGFX_BC7_MODE6	switch	The BC7 encoder writes mode 6 only (the earlier encoder; `NXGFX_BC7_MODE6=1`, tests compare against it).	src/graphics/src/tex/astc.rs
 NXGFX_CACHE	path	the folder of the pipeline key file and pipeline cache (default: the game data folder)	src/graphics/src/vk/pipe.rs
 NXGFX_CAPTURE	diagnostic	`NXGFX_CAPTURE=<file>` keeps, from the boot, what the GPU side was told that later work depends on (memory pools,	src/graphics/src/vk/capture.rs
 NXGFX_CAPTURE_AT	diagnostic	texture and sampler registrations, descriptor pools). At present `NXGFX_CAPTURE_AT` (default 600) it writes guest	src/graphics/src/vk/capture.rs
 NXGFX_CAPTURE_FRAMES	diagnostic	command records, flattened), texture release and present for `NXGFX_CAPTURE_FRAMES` presents (default 2), each	src/graphics/src/vk/capture.rs
+NXGFX_CHAIN_EXTENTS	switch		src/graphics/src/vk/render_chain.rs
+NXGFX_CHAIN_PASSES	switch		src/graphics/src/vk/render_chain.rs
+NXGFX_CHAIN_TRACE	diagnostic	Frame-chain trace (`NXGFX_CHAIN_TRACE=<start s>[:<length s>]`): queue ops, their replay, GPU completion and sync waits, timed, then logged as `[vk] chain` lines	src/graphics/src/vk/chain_trace.rs
 NXGFX_CHECKPOINTS	diagnostic	Checkpoints (VK_NV_device_diagnostic_checkpoints, `NXGFX_CHECKPOINTS`: default on for dispatches and indirect draws,	src/graphics/src/vk/lost.rs
 NXGFX_CLAMP_INDIRECT	path	`NXGFX_CLAMP_INDIRECT=0`: the records as they are. Returns where to read them from.	src/graphics/src/vk/exec.rs
 NXGFX_COPY_SYNC	switch	`NXGFX_COPY_SYNC=0` off.	src/graphics/src/vk/mem.rs
-NXGFX_DEFER	switch	Deferred recording (`NXGFX_DEFER=1`, off by default as in Turbo; Turbo `vk_defer.c`): the replay's Vulkan commands	src/graphics/src/vk/defer.rs, src/graphics/tests/defer.rs
+NXGFX_CUBE_TWIN	test	NXGFX_CUBE_TWIN=0: the zero stand-in as before (A/B comparisons)	src/graphics/src/vk/exec.rs
+NXGFX_DB_FILL	test	fill is off (`NXGFX_DB_FILL=0`: unbound slots keep what the chunk held) or a descriptor diagnosis reads the chunk	src/graphics/src/vk/exec.rs
+NXGFX_DB_POISON	test	(`NXGFX_DB_POISON`, `NXGFX_MESH_BINDINGS`).	src/graphics/src/vk/exec.rs
+NXGFX_DB_POISON_CANARY	test	`NXGFX_DB_POISON_CANARY=1` (with `NXGFX_DB_POISON`; diagnosis, MKW-LOSS round 2): the poisoned slots name 64-byte	src/graphics/src/vk/exec.rs
+NXGFX_DB_POISON_FREED	test	NXGFX_DB_POISON_FREED=1: a buffer's range freed right after its descriptors are made (a read faults there,	src/graphics/src/vk/exec.rs
+NXGFX_DB_POISON_ONLY	test		src/graphics/src/vk/exec.rs
+NXGFX_DB_POISON_STAGES	test	NXGFX_DB_POISON_STAGES=<mask>: only the sets these stages wrote (bit n: stage n; default all)	src/graphics/src/vk/exec.rs
+NXGFX_DB_POISON_ZERO	test	NXGFX_DB_POISON_ZERO=1: the same writes naming the zero buffer instead (harmless: the cost alone)	src/graphics/src/vk/exec.rs
+NXGFX_DEFER	switch	Deferred recording (`NXGFX_DEFER=1`, off by default): the replay's Vulkan commands	src/graphics/src/vk/defer.rs, src/graphics/tests/defer.rs
 NXGFX_DEMOTE_FIX	switch	midway (mkw-recomp #22 / #231; NXGFX_DEMOTE_FIX=0 off)	src/graphics/src/vk/shader.rs
 NXGFX_DESCBUF	switch	`0` binds descriptor sets instead of descriptor buffers (VK_EXT_descriptor_buffer)	src/graphics/src/vk/device.rs, src/graphics/tests/desc_bench.rs
 NXGFX_DESTROY_DELAY	switch	An image's (or its views') destruction after the GPU is past its last use; `NXGFX_DESTROY_DELAY=<frames>`	src/graphics/src/vk/image.rs
 NXGFX_DRAW_LIMIT	switch	drew for seconds; NXGFX_DRAW_LIMIT = the product's limit in millions).	src/graphics/src/vk/exec.rs
 NXGFX_DUMP_AT_S	diagnostic	Pass dumps (diagnostics): `NXGFX_DUMP_AT_S=<s>[,<s>...]` (or the control command `passdump`): at each moment the	src/graphics/src/vk/exec.rs
 NXGFX_DUMP_DIR	path	(`NXGFX_DUMP_DIR`, default `captures`), with one log line per pass (its draws, targets, formats).	src/graphics/src/vk/capture.rs, src/graphics/src/vk/exec.rs
+NXGFX_DUMP_PASSES	diagnostic		src/graphics/src/vk/exec.rs
 NXGFX_DUMP_PNG	diagnostic	NXGFX_DUMP_PNG=0: the log lines only (dumps every few seconds over a long run)	src/graphics/src/vk/exec.rs
+NXGFX_DUMP_RAW	diagnostic		src/graphics/src/vk/exec.rs
 NXGFX_DUMP_TEX	diagnostic	`NXGFX_DUMP_TEX=<w>x<h>`: a sampled texture of that size, once per dump frame, is read back at the end of the	src/graphics/src/vk/exec.rs
 NXGFX_FG_SHOT	diagnostic	`NXGFX_FG_SHOT=<s>`: once, after that many seconds, the first generated frame of a game frame and its two	src/graphics/src/vk/framegen.rs
 NXGFX_FRAMEGEN	switch	`0` turns frame generation off whatever the settings say	src/graphics/src/vk/framegen.rs
@@ -41,8 +54,10 @@ NXGFX_HOST_MB	switch	memory, NXGFX_HOST_MB (0 = no cap); over it the allocation 
 NXGFX_IMAGE_NOFLAG	switch	no storage use and the writes were lost. With `NXGFX_IMAGE_NOFLAG=1` (or the ini / `--image_noflag=1`; off by	src/graphics/src/lib.rs, src/graphics/src/vk/image.rs, src/graphics/tests/gpu.rs
 NXGFX_IMG_FORMAT	switch	`0` leaves storage image views in the texture's format instead of the format the shader declares	src/graphics/src/vk/exec.rs
 NXGFX_LATE_OUTPUTS	switch	a vertex shader's outputs written once at the end (`spvfix`; NXGFX_LATE_OUTPUTS=0: as translated)	src/graphics/src/vk/shader.rs
+NXGFX_LAZY_ALL_FRAME	switch	Images a frame makes for shaders that index the texture pool, at most (with 32 MB of guest bytes); default `0`: every waiting one at once (a cap measured slower on Jamboree's opening)	src/graphics/src/vk/image.rs
 NXGFX_LAZY_CPU_CHECK	switch	`0` skips the check that lazily written-back pages were not written by the CPU meanwhile	src/graphics/src/vk/mem.rs
-NXGFX_LAZY_IMAGES	switch	textures, 7.2 GB of images, most never drawn in a race. `NXGFX_LAZY_IMAGES=0`: every image at registration.	src/graphics/src/vk/image.rs
+NXGFX_LAZY_IMAGES	switch	textures, 7.2 GB of images, most never drawn in a race. `NXGFX_LAZY_IMAGES=0`: every image at registration.	src/graphics/src/vk/image.rs, src/graphics/tests/gpu.rs
+NXGFX_LAZY_KEEP	test	Whether a finalized texture's waiting registrations stay (`NXGFX_LAZY_KEEP=0`: dropped, as before).	src/graphics/src/vk/image.rs
 NXGFX_LINK_IO	switch	`NXGFX_LINK_IO=0` off.	src/graphics/src/vk/pipe.rs
 NXGFX_LIVE	switch	`0` turns the live shader translator off (a draw whose shader the build did not translate is skipped)	src/graphics/src/vk/live.rs
 NXGFX_LIVE_JOBS	switch	as many translators as the build uses (NXGFX_LIVE_JOBS, 4)	src/graphics/src/vk/live.rs
@@ -50,11 +65,16 @@ NXGFX_LOG_SHADER	diagnostic	NXGFX_LOG_SHADER=<key> (diagnosis, lane K): every te
 NXGFX_LOOP_GUARD	switch	`NXGFX_LOOP_GUARD`: the back-edges a shader invocation's function may take (0: loops left unbounded).	src/graphics/src/vk/shader.rs
 NXGFX_MAX_BUFFER_MB	switch	`NXGFX_MAX_BUFFER_MB` asks for it (to try pool windows on a device whose largest buffer is larger than any pool).	src/graphics/src/vk/mem.rs
 NXGFX_MESH	switch	`0` leaves VK_EXT_mesh_shader off (task / mesh draws are not replayed)	src/graphics/src/vk/device.rs
+NXGFX_MESH_BINDINGS	switch		src/graphics/src/vk/lost_bindings.rs
 NXGFX_MESH_INDEX_FIX	switch	primitive indices held below the vertex count (NXGFX_MESH_INDEX_FIX=0 off; MKW's mesh-draw device losses)	src/graphics/src/vk/shader.rs
 NXGFX_MESH_REF	switch	NXGFX_MESH_REF=1 (diagnosis, lane K): mkw-recomp's rule for MKW's mesh draws: only direct 1D draws, from group 0	src/graphics/src/vk/exec.rs
+NXGFX_NATIVE_TRACE	test		src/graphics/src/vk/queue.rs
+NXGFX_NDVE	test		src/graphics/src/vk/newndve.rs
+NXGFX_NDVE_COMPARE_8	test		src/graphics/src/vk/newndve/kernels.rs
 NXGFX_OCCL_SYNC	switch	frame's results otherwise read them two presents late: Mario Kart 8 Deluxe's black stretches). NXGFX_OCCL_SYNC=0 off	src/graphics/src/vk/queue.rs
+NXGFX_OP_TIMES	diagnostic	Replay time by record kind (`NXGFX_OP_TIMES=1`): every 600 presents a `[vk] replay by record` line	src/graphics/src/vk/exec.rs
 NXGFX_PACE_N	diagnostic	presents per pacing line (default 300)	src/graphics/src/vk/present.rs, src/graphics/tests/window.rs
-NXGFX_PARTS_PRIVATE_MB	switch	The private memory past which no more shader parts are made ahead: NXGFX_PARTS_PRIVATE_MB, default 6 GB. (A	src/graphics/src/vk/pipe.rs
+NXGFX_PARTS_PRIVATE_MB	switch	The process private memory in MB past which no more shader parts are made ahead (default an eighth of the machine's memory, at least 6144).	src/graphics/src/vk/pipe.rs
 NXGFX_PART_LTO	switch	make (NXGFX_PART_LTO=1: retained, as before)	src/graphics/src/vk/pipe.rs
 NXGFX_PCACHE_QUIET_MS	switch	is killed. A saver thread writes it a few seconds after new pipelines stop arriving (`NXGFX_PCACHE_QUIET_MS`,	src/graphics/src/vk/pcache.rs
 NXGFX_PIPE_LOG	diagnostic	`NXGFX_PIPE_LOG=1`: every pipeline the driver compiles is logged as it starts and ends (the one a compiler crash	src/graphics/src/vk/pipe.rs
@@ -64,14 +84,23 @@ NXGFX_POOL_COLD	switch	from then on). NXGFX_POOL_COLD=0: every pool at every sub
 NXGFX_POOL_LOG	diagnostic	set: a line per memory pool with its placement	src/graphics/src/vk/mem.rs
 NXGFX_POOL_SPARSE	switch	`NXGFX_POOL_SPARSE=0` backs every pool whole.	src/graphics/src/vk/mem.rs
 NXGFX_PRESENT	switch	the swap chain present mode: `fifo`, `mailbox` or `immediate`	src/graphics/src/vk/present.rs
-NXGFX_PREWARM_BUDGET_MB	switch	private-memory budget (`NXGFX_PREWARM_BUDGET_MB`, default 2048) or a count cap. A VkPipelineCache is kept on disk.	src/graphics/src/vk/pipe.rs, src/graphics/tests/shaders_lane_c.rs
+NXGFX_PREWARM_BUDGET_MB	switch	The pipeline prewarm's private-memory budget in MB (default a sixteenth of the machine's memory, 2048-8192); the prewarm stops there or at a count cap. A VkPipelineCache is kept on disk.	src/graphics/src/vk/pipe.rs, src/graphics/tests/shaders_lane_c.rs
 NXGFX_PREWARM_MAX	switch	pipelines built ahead at most (default 50,000)	src/graphics/src/vk/pipe.rs, src/graphics/tests/shaders_lane_c.rs
 NXGFX_PREWARM_THREADS	switch	threads building pipelines ahead (default 4)	src/os/src/nvn/mod.rs
 NXGFX_PROFILE	path	frame, a clock read each side (~1-2 ms a frame in Pokemon Legends Z-A). `NXGFX_PROFILE=1` turns them on.	src/graphics/src/vk/perf.rs
 NXGFX_PROFILE_PREWARM	path	parts instead of compiling them at the first draw. `NXGFX_PROFILE_PREWARM=0` off. Returns the programs queued.	src/graphics/src/vk/pipe.rs
 NXGFX_PROFILE_PREWARM_MIN	path	A first run (the pipeline key file holds fewer than `NXGFX_PROFILE_PREWARM_MIN` keys, 64): the shader parts of the	src/graphics/src/vk/pipe.rs
+NXGFX_RASTER_PROBE_AT_S	test	NXGFX_RASTER_PROBE_VS=<key>, NXGFX_RASTER_PROBE_AT_S=100, NXGFX_RASTER_PROBE_STEP_S=5.	src/graphics/src/vk/exec.rs
+NXGFX_RASTER_PROBE_STEP_S	test	NXGFX_RASTER_PROBE_VS=<key>, NXGFX_RASTER_PROBE_AT_S=100, NXGFX_RASTER_PROBE_STEP_S=5.	src/graphics/src/vk/exec.rs
+NXGFX_RASTER_PROBE_VS	test	NXGFX_RASTER_PROBE_VS=<key>, NXGFX_RASTER_PROBE_AT_S=100, NXGFX_RASTER_PROBE_STEP_S=5.	src/graphics/src/vk/exec.rs
+NXGFX_RAW_PROBE_AT_S	switch	NXGFX_RAW_PROBE_SHADER=<16 hex digits>, NXGFX_RAW_PROBE_AT_S=106, NXGFX_RAW_PROBE_COUNT=8 (1..32).	src/graphics/src/vk/gmem.rs
+NXGFX_RAW_PROBE_COUNT	switch	NXGFX_RAW_PROBE_SHADER=<16 hex digits>, NXGFX_RAW_PROBE_AT_S=106, NXGFX_RAW_PROBE_COUNT=8 (1..32).	src/graphics/src/vk/gmem.rs
+NXGFX_RAW_PROBE_SHADER	switch	NXGFX_RAW_PROBE_SHADER=<16 hex digits>, NXGFX_RAW_PROBE_AT_S=106, NXGFX_RAW_PROBE_COUNT=8 (1..32).	src/graphics/src/vk/gmem.rs
+NXGFX_RECYCLE_DELAY	test	NXGFX_RECYCLE_DELAY=<n> (diagnosis): a completed submission's `Sub` waits until n later ones completed before	src/graphics/src/vk/queue.rs
 NXGFX_RELEASE_ORDER	switch	NXGFX_RELEASE_ORDER=0: at once, as before.	src/graphics/src/vk/image.rs
+NXGFX_RENDER_CHAIN	switch		src/graphics/src/vk/image.rs, src/graphics/src/vk/render_chain.rs
 NXGFX_REPLAY_DUMP	diagnostic	NXGFX_REPLAY_DUMP=1: the passes of the frame after the first present as PNGs into <out> (pass dump), to diff two	src/graphics/src/vk/capture.rs
+NXGFX_REPLAY_SHADER_DIR	path		src/graphics/src/vk/capture.rs
 NXGFX_REPLAY_TRACE	diagnostic	set: nxgfx-replay logs every record it replays	src/graphics/src/vk/capture.rs
 NXGFX_REP_GAPS	switch	`NXGFX_REP_GAPS=1`). A game that spans its frame with two reports read the host's translation between its	src/graphics/src/vk/counters.rs
 NXGFX_RETIRE_KEEP	diagnostic	`1` keeps retired pipelines instead of destroying them	src/graphics/src/vk/pipe.rs
@@ -85,10 +114,12 @@ NXGFX_SAMP_CAP	switch	samplers in the shared descriptor table at most (default 1
 NXGFX_SAMP_LINEAR	switch	NXGFX_SAMP_LINEAR=1 (diagnosis): every sampler filters linearly (is a picture's banding a nearest read?)	src/graphics/src/vk/tables.rs
 NXGFX_SBUF0_MB	switch	The size a storage buffer bound with size 0 gets at most (`NXGFX_SBUF0_MB`, default 1 MB).	src/graphics/src/vk/exec.rs
 NXGFX_SBUF_TO_END	switch	NXGFX_SBUF_TO_END=0: read-only storage buffers bound with the size the game gave (as before lane K3).	src/graphics/src/vk/exec.rs
+NXGFX_SCAN_COVER	test	`NXGFX_SCAN_COVER=0`: every submission scans.	src/graphics/src/vk/mem.rs
 NXGFX_SCISSOR_CLAMP	switch	scissor: "invalid write" just past a memory block, in no memory of ours, and the device lost; NXGFX_SCISSOR_CLAMP=0 off)	src/graphics/src/vk/exec.rs
 NXGFX_SCREEN_MATCH	switch	it back at once. A window keeps the screen's rate. `NXGFX_SCREEN_MATCH=0` keeps the rate in fullscreen too.	src/graphics/src/vk/screen.rs
 NXGFX_SCRUB_SLOTS	switch	MKW's device losses at addresses no live allocation held). `NXGFX_SCRUB_SLOTS=0` off.	src/graphics/src/vk/image.rs
 NXGFX_SET_CACHE	switch	`0` writes every draw's descriptor sets again instead of reusing equal ones	src/graphics/src/vk/exec.rs
+NXGFX_SET_PATCH	switch	Stage sets are written in host memory first and patched from their copy (`Shadow`) unless `NXGFX_SET_PATCH=0`, the	src/graphics/src/vk/exec.rs
 NXGFX_SHADERS	path	the translated shader folder (default: `<data>\shaders`)	src/graphics/src/vk/shader.rs, src/os/src/nvn/mod.rs
 NXGFX_SHADER_WAIT_FRAME_MS	switch	`NXGFX_SHADER_WAIT_FRAME_MS` (default 1500; 0: no cap).	src/graphics/src/vk/live.rs
 NXGFX_SHADER_WAIT_MS	switch	A draw whose shaders have not arrived waits for them, once per set of programs and at most `NXGFX_SHADER_WAIT_MS`	src/graphics/src/vk/live.rs
@@ -101,23 +132,29 @@ NXGFX_SKIP_PS	switch	`NXGFX_SKIP_PS=<key>[,<key>...]` (diagnosis, with a replay)
 NXGFX_SLOW_MS	switch	frames the sizes the game renders at (`[vk] render sizes …`); a frame longer than `NXGFX_SLOW_MS` (50) gets a	src/graphics/src/vk/perf.rs
 NXGFX_SPARSE	switch	waits on. `NXGFX_SPARSE=0`: sparse textures are whole images (as before). `NXGFX_SPARSE_MIB`: slot memory cap	src/graphics/src/vk/sparse.rs
 NXGFX_SPARSE_MIB	switch	waits on. `NXGFX_SPARSE=0`: sparse textures are whole images (as before). `NXGFX_SPARSE_MIB`: slot memory cap	src/graphics/src/vk/sparse.rs
+NXGFX_SPIRV_VAL	test		src/graphics/src/vk/shader.rs
 NXGFX_SPVFIX_IN	test	The two rewrites over a folder of translated modules (`NXGFX_SPVFIX_IN`), written to `NXGFX_SPVFIX_OUT` for	src/graphics/src/vk/spvfix.rs
 NXGFX_SPVFIX_OUT	test	The two rewrites over a folder of translated modules (`NXGFX_SPVFIX_IN`), written to `NXGFX_SPVFIX_OUT` for	src/graphics/src/vk/spvfix.rs
 NXGFX_STAGE_HOLD	switch	NXGFX_STAGE_HOLD=<s> (diagnosis, lane K2): they are freed that many seconds later instead (MKW's 128x128x5 pass	src/graphics/src/vk/queue.rs
-NXGFX_SWZ_OVERRIDE	switch	a view's swizzle applied over the texture's (Turbo's `compose`). NXGFX_SWZ_OVERRIDE=1: the view's replaces	src/graphics/src/vk/image.rs
+NXGFX_STORAGE_PROBE	switch	NXGFX_STORAGE_PROBE=<texture ID>: four uncached bindings during normal play and four during a pass dump.	src/graphics/src/vk/exec.rs
+NXGFX_STOREMU	switch	Storage access to formats the device cannot store (E5B9G9R9) through an R32_UINT view, the shader packing and unpacking (`storemu`); `NXGFX_STOREMU=0` off.	src/graphics/src/vk/image.rs
+NXGFX_STOREMU_IN	test	The opt-in `storemu_folder` test: every formatless float storage image of a folder of translated modules (`NXGFX_STOREMU_IN=<shaders/spv>`) emulated and checked with spirv-val.	src/graphics/src/vk/storemu.rs
 NXGFX_TAKEOVER_FORWARD	switch	NXGFX_TAKEOVER_FORWARD=0: a texture object whose image another took over has none (as before).	src/graphics/src/vk/image.rs
 NXGFX_TEST_PAIR	test	`NXGFX_TEST_PAIR` = `<vertex key> <pixel key>`): a driver compiler crash reproduced outside the game.	src/graphics/tests/shaders_lane_c.rs
 NXGFX_TEST_PAIRS	test	vertex / pixel pairs the lane C shader test builds (default 400)	src/graphics/tests/shaders_lane_c.rs
+NXGFX_TEST_PROGRAM	test	`NXGFX_TEST_PROGRAM` = its stage keys, including vertex and pixel; `NXGFX_TEST_PAIR` remains the two-stage form):	src/graphics/tests/shaders_lane_c.rs
 NXGFX_TEST_SDK	test	NXGFX_TEST_SDK=<a Switch 2 game's exefs/sdk>	src/graphics/tests/desc_bench.rs
 NXGFX_TEST_SHADERS	test	memory budget. Uses `NXGFX_TEST_SHADERS` (default: the workspace's `build/shaders/mk8d`); skipped when absent.	src/graphics/tests/shaders_lane_c.rs
 NXGFX_TEX_CAP	switch	textures in the shared descriptor table at most (default 262144, within the device limit)	src/graphics/src/vk/layout.rs
-NXGFX_TEX_WB	switch	are the storage's bytes: true for every format let through here). `NXGFX_TEX_WB=1` on (off by default: `K2-mkw16`'s race washed out with it).	src/graphics/src/vk/exec.rs
+NXGFX_TEX_WB	switch	are the storage's bytes: true for every format let through here). `NXGFX_TEX_WB=1` on (off by default: `K2-mkw16`'s race washed out with it).	src/graphics/src/vk/exec.rs, src/graphics/tests/gpu.rs
 NXGFX_UPLOAD_MB	switch	`NXGFX_UPLOAD_MB` (default 64; 0: no budget).	src/graphics/src/vk/mem.rs
 NXGFX_UPSCALE	switch	`NXGFX_UPSCALE=standard` (or the ini's `upscale=standard`) keeps the linear blit; `NXGFX_SHARPNESS` 0..1 (0.5).	src/graphics/src/vk/upscale.rs
-NXGFX_VALIDATION	diagnostic	`1` turns the Vulkan validation layer on (the GPU tests set it)	src/graphics/src/vk/device.rs, src/graphics/tests/common/mod.rs
+NXGFX_VALIDATION	diagnostic	`1` turns the Vulkan validation layer on (the GPU tests set it)	src/graphics/src/vk/device.rs, src/graphics/src/vk/newndve/gpu_tests.rs, src/graphics/tests/common/mod.rs
 NXGFX_VIN_SKIP	switch	NXGFX_VIN_SKIP=0: vertex input set up at every draw.	src/graphics/src/vk/exec.rs
-NXGFX_VRAM_EVICT	switch	VRAM budget (Turbo `vk_budget`, its default; `NXGFX_VRAM_EVICT=0` off): once a frame, the device-local heaps'	src/graphics/src/vk/image.rs
-NXGFX_VRAM_EVICT_PCT	switch	VRAM eviction (Turbo `vk_budget`): over the budget's threshold (`NXGFX_VRAM_EVICT_PCT`, 0 here so any use is	src/graphics/src/vk/image.rs, src/graphics/tests/gpu.rs
+NXGFX_VIN_TEST_DIR	test		src/graphics/src/vk/shader.rs
+NXGFX_VRAM_EVICT	switch	VRAM budget (on by default; `NXGFX_VRAM_EVICT=0` off): once a frame, the device-local heaps'	src/graphics/src/vk/image.rs
+NXGFX_VRAM_EVICT_PCT	switch	VRAM eviction: over the budget's threshold (`NXGFX_VRAM_EVICT_PCT`, 0 here so any use is	src/graphics/src/vk/image.rs, src/graphics/tests/gpu.rs
+NXGFX_WAIT_DIAG	switch	Opt-in CPU-side wait ledger (NXGFX_WAIT_DIAG=1). No driver calls or guest-memory reads on the observer.	src/graphics/src/vk/wait_diag.rs, src/os/src/services/codec_video.rs
 NXGFX_WATCH_ADDR	switch	`NXGFX_WATCH_ADDR=<hex>`: images made / released over that address are logged (diagnostics).	src/graphics/src/vk/image.rs, src/graphics/src/vk/mem.rs
 NXGFX_WB_GUARD	switch	stale, the black stretches). Those pieces upload once it has landed (NXGFX_WB_GUARD=0: uploaded at once, as before).	src/graphics/src/vk/mem.rs
 NXGFX_WB_LAZY	switch	On by default (`NXGFX_WB_LAZY=0` off) since Pokemon Violet runs clean with it (lane G3 `v12`). A page the completion thread must write (an eager write-back landing on it) is	src/graphics/src/vk/lazy.rs
@@ -129,7 +166,7 @@ NXOS_CHEATS	switch	<build>.txt` (`NXOS_CHEATS=<folder>` names another folder), t
 NXOS_CHEATS_ON	switch	commands `cheats`, `cheat on|off <name>`, `cheats reload`; `NXOS_CHEATS_ON=<name>,...` at launch.	src/os/src/cheats.rs
 NXOS_CORES	switch	2; 0 = never: with `NXOS_CORES=1` and `NXOS_STEAL_ANY_MS=0` no two guest threads ever run at once).	src/os/src/sched.rs
 NXOS_CTRL_PROMPT	switch	NXOS_CTRL_PROMPT=0, scripted runs) answers at once	src/os/src/services/hid.rs
-NXOS_DATA	switch	Arguments: `<game>.exe <data dir>` (or `NXOS_DATA`): the build's data folder, holding `exefs/` and the RomFS	src/front/src/lib.rs, src/os/src/boot.rs
+NXOS_DATA	switch	Arguments: `<game>.exe <data dir>` (or `NXOS_DATA`): the build's data folder, holding `exefs/` and the RomFS	src/front/src/lib.rs, src/os/src/boot.rs, src/os/src/services/oe.rs
 NXOS_DISPLAY_MAX	switch	NXOS_DISPLAY_MAX=0..3 caps it (debug: a game's 2160 layer against its 1440 one)	src/os/src/services/vi.rs
 NXOS_EXIT_AFTER	switch	(`NXOS_HEARTBEAT` seconds, default 10, 0 = none), and the end of a measured run: `NXOS_EXIT_AFTER=<seconds>`	src/os/src/watch.rs
 NXOS_EXIT_AFTER_SUBMIT	switch	ends the process after that long, and `NXOS_EXIT_AFTER_SUBMIT=<seconds>` that long after the first NVN queue	src/os/src/watch.rs
@@ -143,17 +180,20 @@ NXOS_GLSLC_CAPTURE	diagnostic	`simple_table.rs`) and the game's own run-time GLS
 NXOS_HEARTBEAT	switch	(`NXOS_HEARTBEAT` seconds, default 10, 0 = none), and the end of a measured run: `NXOS_EXIT_AFTER=<seconds>`	src/os/src/watch.rs
 NXOS_HOME_QUIT	switch	Home closes it. The ini's `home_quit=0` (or `NXOS_HOME_QUIT=0`) turns it off.	src/front/src/window.rs, src/front/src/window_linux.rs
 NXOS_HOST_CPUS	switch	host cores the guest scheduler uses (1-63; default the machine's)	src/os/src/boot.rs
-NXOS_LANG	switch	operation-mode notification; the language is the `language` setting (Turbo's numbers; `NXOS_LANG` overrides).	src/os/src/services/oe.rs
+NXOS_INIT_ARRAY	switch		src/os/src/boot.rs
+NXOS_LANG	switch	operation-mode notification; the language is the `language` setting (`NXOS_LANG` overrides).	src/os/src/services/oe.rs
 NXOS_MOVIE_DUMP	diagnostic	NXOS_MOVIE_DUMP=<dir>: the first pictures handed out, as PNG (a check of what the game was given)	src/os/src/services/movie.rs
 NXOS_NICK	switch	(`NXOS_NICK` overrides): opened at launch, answered by the user picker, always registered. With `ask_user=1` and	src/os/src/services/account.rs
 NXOS_NS2_STRICT	switch	catch-all session for a name nobody registered (`Unknown`; `NXOS_NS2_STRICT=1` refuses it as for a Switch game).	src/os/src/ipc/mod.rs
-NXOS_NVN_BT	switch	`NXOS_NVN_BT=<proc>` (Turbo's SWR_NVN_INTERVAL_BT): the first 64 calls of that proc log their arguments and the	src/os/src/nvn/mod.rs
+NXOS_NVN_BT	switch	`NXOS_NVN_BT=<proc>`: the first 64 calls of that proc log their arguments and the	src/os/src/nvn/mod.rs
 NXOS_OPMODE	switch	mode by default, so games draw for a television; `NXOS_OPMODE` overrides), changed live with the console's	src/os/src/services/oe.rs
 NXOS_SAVE	switch	marker (`romfs.nsp`, `romfs.nup`, `romfs.dir` or `romfs/`). Saves go to `<data dir>/save` (or `NXOS_SAVE`).	src/os/src/boot.rs
 NXOS_STEAL_ANY_MS	switch	`NXOS_STEAL_ANY_MS=<ms>` (debugging): how long a waiter waits before it takes a core from an equal or better holder	src/os/src/sched.rs
 NXOS_STEAL_WORSE_MS	switch	`NXOS_STEAL_WORSE_MS=<ms>` (debugging): how long a waiter waits before it takes a core from a worse holder (default	src/os/src/sched.rs
 NXOS_SWKBD	switch	the `keyboard_text` setting ("Player"). With no window to show it over (`NXOS_SWKBD=auto`, a headless run) the	src/os/src/services/swkbd.rs
 NXOS_TRACE	diagnostic	`NXOS_TRACE=svc,ipc,hle,nvn,fs` (or `all`).	src/os/src/lib.rs
+NXRS_BUILD	switch	`NXRS_BUILD`: a development nxrs-build (a file or its folder).	src/launcher/src/constants/engine.rs, src/launcher/tests/common/mod.rs, src/launcher/tests/process.rs
+NXRS_CFLAGS	switch	`NXRS_CFLAGS`: extra compiler flags for the game code, split on white space (e.g. `-march`	src/cli/src/pipeline.rs
 NXRS_CHEAT_0000ABCD	test	a patch-set name the runtime's patchset unit test declares (not read at run time)	src/runtime/src/patchset.rs
 NXRS_CHEAT_FFFFFFFF	test	a patch-set name the runtime's patchset unit test declares (not read at run time)	src/runtime/src/patchset.rs
 NXRS_CLANG	switch	Where clang is looked for, in order: `NXRS_CLANG`; `--cc` when it names a clang; the bundled one beside nxrs	src/cli/src/cc.rs
@@ -163,20 +203,26 @@ NXRS_CONTROLLER_SELFTEST	switch	Switches: `NXRS_CONTROLLER_TRACE=1` (every chang
 NXRS_CONTROLLER_TRACE	diagnostic	Switches: `NXRS_CONTROLLER_TRACE=1` (every change and output), `NXRS_CONTROLLER_SELFTEST=1` (lights, low motor	src/os/src/input/mod.rs, src/os/src/services/hid.rs
 NXRS_CTRL_PROMPT_TEXT	switch	any line with `NXRS_CTRL_PROMPT_TEXT`, `NXRS_HOME_QUIT_TEXT`, `NXRS_USER_PROMPT_TEXT` (the lines of a prompt, one per	src/os/src/ui_text.rs
 NXRS_DATA	switch	folder `<name>_data` is handed over as NXRS_DATA, and its `exefs` as NXRT_EXEFS (the runtime's module folder),	src/cli/src/cc.rs, src/front/src/lib.rs, src/os/src/services/oe.rs, src/runtime/src/process.rs
+NXRS_DATA_DIR	path	`NXRS_DATA_DIR`: the launcher's data folder instead of `%LOCALAPPDATA%\nxrs` (development, tests).	src/launcher/src/constants/engine.rs, src/launcher/tests/common/mod.rs
+NXRS_DOCTOR_EXE	test	the real engine, when the developer names it (NXRS_DOCTOR_EXE): it answers in the same format	src/launcher/tests/process.rs
 NXRS_DUMP_FRAMES	diagnostic	NXRS_DUMP_FRAMES=<ret>[,<ret>..]: the 16 words at the frame record of a frame returning there (its	src/runtime/src/kernel.rs
 NXRS_ENGINE_LIB	switch	found, the MSVC engine library beside nxrs-build or `NXRS_ENGINE_LIB`), else the bundled llvm-mingw when it is	src/cli/src/cc.rs
 NXRS_ESC_QUIT	switch	NXRS_ESC_QUIT=0 (scripted runs): Esc is logged and ignored; the foreground state says	src/front/src/window.rs, src/front/src/window_linux.rs
 NXRS_GNU_LIBS	switch	The folder of the gnullvm engine libraries: `NXRS_GNU_LIBS`, else `gnu\` beside nxrs.	src/cli/src/cc.rs
 NXRS_HOME_QUIT_TEXT	switch	any line with `NXRS_CTRL_PROMPT_TEXT`, `NXRS_HOME_QUIT_TEXT`, `NXRS_USER_PROMPT_TEXT` (the lines of a prompt, one per	src/os/src/ui_text.rs
+NXRS_HOST_PROF	switch	`NXRS_HOST_PROF=<start s>,<seconds>[,<file>]` samples one host thread about 2000 times a second for that window	src/runtime/src/hostprof.rs
+NXRS_HOST_PROF_THREAD	switch	and writes where it was. The thread is found by its name (`NXRS_HOST_PROF_THREAD`, default `vk replay`: graphics'	src/runtime/src/hostprof.rs
 NXRS_INI	path	the settings file (default `<exe name>.ini` beside the executable)	src/front/src/lib.rs
-NXRS_INPUT_RECORD	switch	without HidHide), `NXRS_INPUT_RECORD=<file>` / `NXRS_INPUT_REPLAY=<file>` (Turbo's record / replay format),	src/os/src/input/mod.rs
-NXRS_INPUT_REPLAY	switch	without HidHide), `NXRS_INPUT_RECORD=<file>` / `NXRS_INPUT_REPLAY=<file>` (Turbo's record / replay format),	src/os/src/input/mod.rs
+NXRS_INPUT_RECORD	switch	without HidHide), `NXRS_INPUT_RECORD=<file>` / `NXRS_INPUT_REPLAY=<file>` (record / replay),	src/os/src/input/mod.rs
+NXRS_INPUT_REPLAY	switch	without HidHide), `NXRS_INPUT_RECORD=<file>` / `NXRS_INPUT_REPLAY=<file>` (record / replay),	src/os/src/input/mod.rs
 NXRS_INTERP_ONLY	switch	owner holds it (`dispatch::nxrt_dispatch_resolve`): before, a fatal miss. With `NXRS_INTERP_ONLY=1`, or a build	src/runtime/src/interp/mod.rs
 NXRS_KEEP_FOCUS	switch	prompt is open over it (it may pause, as a console game would). `NXRS_KEEP_FOCUS=1` (the harness) forces in focus.	src/cli/src/pipeline.rs, src/os/src/services/oe.rs
 NXRS_KEYS	switch	- `NXRS_KEYS=<steps>` (or `@<file>`): "seconds:key[+key][~hold][*count/interval],..." as nxnative's DM_KEYS: keys	src/os/src/input/script.rs
 NXRS_LAUNCH_PARAM	switch	this one passed to ExecuteProgram (`NXRS_LAUNCH_PARAM`, a file), once	src/os/src/services/oe.rs
 NXRS_LINK_LIBS	switch	loader uses. `NXRS_LINK_LIBS` (space-separated) adds more when a runtime crate starts needing them.	src/cli/src/cc.rs
 NXRS_LLVM_MINGW	switch	The bundled llvm-mingw's clang: `NXRS_LLVM_MINGW\bin`, beside nxrs (`llvm-mingw\bin`, `..\toolchain\llvm-mingw\bin`),	src/cli/src/cc.rs, src/oracle/src/main.rs
+NXRS_MAP_LIMIT	switch	memory and gives the cached pages back only after a map fails); `NXRS_MAP_LIMIT=1/0` for any.	src/os/src/mem.rs, src/runtime/src/process.rs
+NXRS_MEMORY_CAP_GB	switch	at most 32 GB; `NXRS_MEMORY_CAP_GB` sets it, 0 turns it off.	src/runtime/src/process.rs
 NXRS_METRICS	switch	Whether metrics were asked for (`metrics=1` in the ini, or `NXRS_METRICS`).	src/config/src/metrics.rs, src/front/src/metrics.rs
 NXRS_MKW_ASPECT	switch	`NXRS_MKW_SEED` (a number: fixed random seeds), `NXRS_MKW_RESOLUTION` (lines of the output), `NXRS_MKW_ASPECT`	src/os/src/gamefix/mkw.rs, src/os/src/gamefix/mkw_view.rs
 NXRS_MKW_DETAIL_DISTANCE	switch	lines; `NXRS_MKW_DETAIL_DISTANCE=<x>` sets the float LODDistanceRatio (the console's 2: the distance at which	src/os/src/gamefix/mkw_romfs.rs
@@ -192,13 +238,14 @@ NXRS_MKW_ZSTD_CHECK	diagnostic	`NXRS_MKW_ZSTD_CHECK=1` decodes each one-shot cal
 NXRS_MODS	switch	(`NXRS_MODS=<folder>` names another). They are the player's files: nxrs never ships or downloads one.	src/cli/src/mods.rs
 NXRS_MOD_A	test	a patch-set name the runtime's patchset unit test declares (not read at run time)	src/runtime/src/patchset.rs
 NXRS_MOD_T_A	test	a name the mods unit test declares (not read at run time)	src/os/src/mods.rs
-NXRS_MOTION_GAIN	switch	`NXRS_KEYS=<steps>` (scripted presses), `NXRS_MOTION_GAIN`. Turbo's `SWR_` names are read too.	src/os/src/input/mod.rs
+NXRS_MOTION_GAIN	switch	`NXRS_KEYS=<steps>` (scripted presses), `NXRS_MOTION_GAIN`.	src/os/src/input/mod.rs
 NXRS_NAME	switch	the game name the front end uses for its files and window (default the executable's name)	src/front/src/lib.rs
 NXRS_NO_ACTIVATE	switch	NXRS_NO_ACTIVATE=1 (scripted runs): the window shows without taking the focus from whoever works at the PC	src/cli/src/pipeline.rs, src/front/src/window.rs, src/front/src/window_linux.rs, src/os/src/services/notice.rs
 NXRS_NO_CAPTURE_BOOT	switch	set: the build does not boot the game to capture the NROs it loads	src/cli/src/pipeline.rs
 NXRS_NO_NINTENDO_HID	switch	is not in front), `NXRS_NO_SONY_HID=1` / `NXRS_NO_NINTENDO_HID=1` (skip those native paths, e.g. under DS4Windows	src/os/src/input/mod.rs, src/os/src/input/xinput.rs
 NXRS_NO_PROFILE_PATCHES	path	The translator's patch table for this program, or None (also with NXRS_NO_PROFILE_PATCHES=1).	src/cli/src/pipeline.rs, src/cli/src/profile.rs
 NXRS_NO_SONY_HID	switch	is not in front), `NXRS_NO_SONY_HID=1` / `NXRS_NO_NINTENDO_HID=1` (skip those native paths, e.g. under DS4Windows	src/os/src/input/mod.rs, src/os/src/input/xinput.rs
+NXRS_NO_XMON	switch	- the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`NXRS_XMON=1` / `NXRS_NO_XMON=1`);	src/runtime/src/process.rs
 NXRS_NRO_CAPTURE	diagnostic	Boots the built game with `NXRS_NRO_CAPTURE` (os ro: the image of a LoadModule with no built copy is written to	src/cli/src/pipeline.rs, src/os/src/services/ro.rs
 NXRS_PATCH_MKW_ASPECT	switch	with `NXRS_PATCH_MKW_ASPECT=1` widens each camera that is 16:9 (Hor+) and fits the 2D layouts in the middle 16:9	src/os/src/gamefix/mkw.rs, src/os/src/gamefix/mkw_view.rs
 NXRS_PATCH_MKW_CAMERA	switch	`0` / `1`: Mario Kart World's camera patch off / on (on by default)	src/os/src/gamefix/mkw.rs
@@ -212,6 +259,7 @@ NXRS_PATCH_MKW_ZSTD	switch	profile's `zstd` set, `NXRS_PATCH_MKW_ZSTD`, on by de
 NXRS_PATCH_PROFILE	switch	`0` turns off a profile's code patches that name no switch of their own	src/profiles/src/lib.rs
 NXRS_PREV_PROGRAM	switch	The program that started this one with ExecuteProgram (`NXRS_PREV_PROGRAM`), else -1.	src/os/src/services/oe.rs
 NXRS_PROBE	switch	`NXRS_PROBE=<module>:<offset>[,...]` (nxnative's DM_PROBE syntax, hex offsets): the patch table's `probe` lines.	src/cli/src/pipeline.rs
+NXRS_PROD_KEYS	path	prod.keys for builds and games (else the launcher's keys folder); the launcher sets it for nxrs-build.	src/launcher/src/constants/engine.rs, src/translator/src/package/keys.rs, src/translator/src/package/marker.rs
 NXRS_PROGRAM_INDEX	switch	unless `NXRS_PROGRAM_INDEX` (the cli's `--program`) names another	src/cli/src/main.rs, src/translator/src/package/app.rs
 NXRS_RELAUNCH	switch	index (`NXRS_PREV_PROGRAM`); a relaunch (`param` None) passes neither (`NXRS_RELAUNCH=1`).	src/os/src/services/oe.rs
 NXRS_RUNTIME_LIB	switch	The runtime library the code DLL links: `NXRS_RUNTIME_LIB`, else `nxrt.lib` beside nxrs (`gnu\libnxrt.a`).	src/cli/src/cc.rs
@@ -219,8 +267,11 @@ NXRS_SCREEN_GRAB	switch	window's own content, through PrintWindow, whatever is i
 NXRS_SECONDS	test	the run ends after that many seconds (harness runs)	src/front/src/lib.rs
 NXRS_STACK_SET	test	set by the build's compiler wrapper after raising its stack limit (internal)	src/cli/src/cc.rs
 NXRS_SWITCH2	switch	a button press wakes it toward this PC and it connects without Sync. `NXRS_SWITCH2=0` turns it off,	src/os/src/input/switch2_ble.rs
+NXRS_TICK_HZ	switch	- the system counter: 19.2 MHz for a Switch program, 31.25 MHz for a Switch 2 one (`NXRS_TICK_HZ=<Hz>` sets it);	src/runtime/src/process.rs
 NXRS_TOOLCHAIN	switch	Which toolchain: `NXRS_TOOLCHAIN=msvc|gnu`, else MSVC when it can work here (Visual Studio installed, a clang	src/cli/src/cc.rs
 NXRS_USER_PROMPT_TEXT	switch	any line with `NXRS_CTRL_PROMPT_TEXT`, `NXRS_HOME_QUIT_TEXT`, `NXRS_USER_PROMPT_TEXT` (the lines of a prompt, one per	src/os/src/ui_text.rs
+NXRS_VERSION	switch		src/launcher/build.rs, src/launcher/src/cli/options.rs, src/launcher/src/main.rs
+NXRS_XMON	switch	- the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`NXRS_XMON=1` / `NXRS_NO_XMON=1`);	src/runtime/src/process.rs
 NXRT_CLANG	test	the clang the runtime ABI layout test compiles with	src/runtime/tests/abi_layout.rs
 NXRT_EXEFS	switch	folder `<name>_data` is handed over as NXRS_DATA, and its `exefs` as NXRT_EXEFS (the runtime's module folder),	src/cli/src/cc.rs, src/os/src/services/oe.rs, src/runtime/src/process.rs
 NXRT_FATAL_PEEK	switch	`NXRT_FATAL_PEEK=<chain>[;<chain>...]` (a debugging aid for crash reports): a chain is `<reg or hex>[+-off]`	src/runtime/src/rt.rs
@@ -236,15 +287,7 @@ NXRT_PROBE_EVERY	switch	registers' frame chain; then the instruction runs on. `N
 NXRT_PROBE_LIMIT	switch	true count), `NXRT_PROBE_LIMIT=N` at most N printed per probe (20 by default; 0 no limit).	src/runtime/src/rt.rs
 NXRT_TRACE	diagnostic	`NXRT_TRACE=svc,host,sjlj,thread,load` (or `all`).	src/runtime/src/rt.rs
 NXSHADERS_NRO_DIR	path	own): NXSHADERS_NRO_DIR, scanned like main	src/shaders/src/scan.rs
-NXSHADERS_SPIRV_VAL	switch	its paired pixel shaders made per-primitive and checked with spirv-val (`NXSHADERS_SPIRV_VAL`).	src/shaders/src/mesh.rs, src/shaders/src/xlate.rs
+NXSHADERS_SPIRV_VAL	switch	its paired pixel shaders made per-primitive and checked with spirv-val (`NXSHADERS_SPIRV_VAL`).	src/shaders/src/link.rs, src/shaders/src/mesh.rs, src/shaders/src/xlate.rs
 NXSHADERS_TEST_BUILD	test	On a real build (`NXSHADERS_TEST_BUILD=<shader folder>`, opt-in): every mesh shader with per-primitive outputs,	src/shaders/src/mesh.rs
+NXSHADERS_TEST_CULL_SPV	test		src/shaders/src/link.rs
 NXSHADERS_XLATE	switch	`NXSHADERS_XLATE` / `NXSHADERS_SPIRV_VAL`, else beside this executable (`tools/`), else the repository's	src/shaders/src/xlate.rs
-SWR_CFLAGS	switch	`SWR_CFLAGS` (switchrecomp.py:769): extra compiler flags for the game code, split on white space (e.g. `-march`	src/cli/src/pipeline.rs
-SWR_HOST_PROF	switch	The host sampling profiler (Turbo's `SWR_HOST_PROF`, runtime/nvn/host/nvn_host.c, and `tools/host_prof.py`):	src/runtime/src/hostprof.rs
-SWR_HOST_PROF_THREAD	switch	and writes where it was. The thread is found by its name (`SWR_HOST_PROF_THREAD`, default `vk replay`: graphics'	src/runtime/src/hostprof.rs
-SWR_MAP_LIMIT	switch	probes all allocatable memory and gives the cached pages back only after a map fails); `SWR_MAP_LIMIT=1/0` for any.	src/os/src/mem.rs, src/runtime/src/process.rs
-SWR_MEMORY_CAP_GB	switch	at most 32 GB; `SWR_MEMORY_CAP_GB` sets it, 0 turns it off.	src/runtime/src/process.rs
-SWR_NO_XMON	switch	- the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`SWR_XMON=1` / `SWR_NO_XMON=1`);	src/runtime/src/process.rs
-SWR_PROD_KEYS	switch	nsp.py `_keys_path`: the explicit path, else SWR_PROD_KEYS, else the launcher's copy; a missing file is the	src/translator/src/package/keys.rs, src/translator/src/package/marker.rs
-SWR_TICK_HZ	switch	- the system counter: 19.2 MHz for a Switch program, 31.25 MHz for a Switch 2 one (`SWR_TICK_HZ=<Hz>` sets it);	src/runtime/src/process.rs
-SWR_XMON	switch	- the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`SWR_XMON=1` / `SWR_NO_XMON=1`);	src/runtime/src/process.rs

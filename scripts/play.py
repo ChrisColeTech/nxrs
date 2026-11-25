@@ -281,7 +281,7 @@ def start(a, sc, name):
     seconds = a.seconds or sc['seconds']
     meta = dict(scenario=name, exe=str(exe), args=args, seconds=seconds, stall=a.stall,
                 window=sc.get('window'), fps=sc.get('fps', 60), diag=a.diag, real_save=a.real_save,
-                env={k: v for k, v in env.items() if k.startswith(('NX', 'SWR_'))},
+                env={k: v for k, v in env.items() if k.startswith('NX')},
                 steps=sc['steps'], started=stamp)
     (folder / 'run.json').write_text(json.dumps(meta, indent=1), encoding='utf-8')
     print(folder, flush=True)

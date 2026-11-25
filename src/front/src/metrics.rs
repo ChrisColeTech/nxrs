@@ -118,7 +118,7 @@ pub fn tick() {
         m.last.resize(names.len(), 0);
         m.names = names;
     }
-    // xmon: the global exclusive monitor on (1) or off (Turbo kernel.c's metrics column)
+    // xmon: the global exclusive monitor on (1) or off (0)
     let mut row = format!(
         "{t:.1},{frames},{:.1},{:.0},{:.0},{}",
         (frames - m.last_frames) as f64 / dt,

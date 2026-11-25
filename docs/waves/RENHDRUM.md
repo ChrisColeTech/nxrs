@@ -357,3 +357,167 @@ a DualSense USB unplug and replug mid-game.
 | 3 | Xbox ~120, BT after-input ~150, options ~5, tests ~40 | 1 day + owner check |
 
 The total is about 2k lines of nxrs code, with RenHDrum's 25k used as a crate.
+
+## Brief: phases 0 and 1 (lead, 2026-11-25)
+
+**Goal / done.** Implement §5.1 (vendor and wire) and §5.2 (Switch Pro / Joy-Con / Switch 2 games) as written above.
+Done = `cargo build --release -p runtime` links with one libopus; `cargo test -p os` passes and stays seconds-fast,
+with the §5.5 tests for phase 1; the engine builds (`build.ps1 -SkipGnu -KeepCache`); `nxinput rumble --hd` exists;
+if a Pro Controller or Joy-Con is connected (`nxinput` lists devices), a `NXRS_CONTROLLER_TRACE=1` run of
+`nxinput rumble --hd` and of one game (`py scripts/play.py dkb --env NXGFX_GPU=1`, DKB is a rumble-heavy pass title)
+shows HD packets written and neutral on exit; with no Nintendo pad connected, say so and show the legacy path is
+unchanged (same game run, no red lines, normal exit). The final check is the owner's feel test (§5.6): list exactly
+what the owner should try.
+
+**Scope.** Phases 0 and 1 only — no DualSense (phase 2), no Xbox / Bluetooth Detailed (phase 3). Skip the
+`IsOunceVibrationDeviceMounted` change unless the before/after trace in §5.2 is done. The F1 row is not added (owner's
+call, ask in Questions).
+
+**Machine / tree.** Builds and games may overlap at full parallelism; games on GPU 1 (`--env NXGFX_GPU=1`). Another
+agent (FRESH-SAVE) runs Arceus/Jamboree routes on GPU 1 and edits `scripts/scenarios.toml` — don't touch it. The tree
+carries the lead's and earlier waves' accepted uncommitted edits: leave them; never revert or reformat other hunks.
+
+**Rules:** `AGENTS.md` (editor tools only; copying the vendored crate's files with `cp` is fine — it is a copy, not a
+rewrite; `py` with `PYTHONDONTWRITEBYTECODE=1`; kill by PID), protocol §3. Foreground commands under 10 minutes; never
+end a turn waiting on a background notification. Don't edit `docs/32-REMAINING-WORK-PLAN.md`. **No commits.**
+**Deadline:** 2 hours wall clock; park after ~90 min; no early hand-off.
+
+## Report (agent, protocol §5)
+
+Phases 0 and 1, 2026-11-25. No Nintendo controller is connected to this machine (`nxinput list`: no HID pads, no
+XInput user, no WinMM joystick; no `VID_057E` device present), so HD packets have been tested on the CPU and not
+written to a real pad. The owner's feel test (below) is what's left.
+
+**Built**
+
+- *Phase 0 (vendor and wire).* `src/os/third_party/renhdrum/` holds RenHDrum 0.5.0: `src/**` (44 files, unchanged),
+  `LICENSE-MIT`, `LICENSE-APACHE` and `NOTICE`, plus an edited `Cargo.toml` (rlib only, `build = false`, no
+  `[build-dependencies]`, `[profile]` or `readme`) and a `VERSION` file with the source and the SHA-256 of the copied
+  tree (`44e7e79c…35683`). `build.rs`, `vendor/opus`, `tests/`, `integrations/`, `examples/` and `docs/` were not
+  copied. In the root `Cargo.toml` the crate is in `exclude`, and `src/os/Cargo.toml` declares it as a path
+  dependency. The licence goes in `LICENSES/renhdrum.txt` (MIT text, Three-Dola; it also notes the Ryujinx/Ryuhdr
+  credit and the libopus encoder use). The README Credits paragraph names RenHDrum. The README no longer has a
+  per-library "Credits and licenses" table, so §3's "row" edits went into that paragraph and the LICENSES file.
+- *Phase 1.* New `src/os/src/input/rumble.rs`:
+  - `HdPad` holds the core engine (`renhdrum_engine_create`, then `renhdrum_engine_apply_settings` with settings from
+    a `RenHdcStore` → `renhdrum_store_to_config` → `renhdrum_settings_resolve_pure`), a second output handle on the
+    pad's HID path, the 4-bit counter shared with the input thread's subcommands, and `ready`.
+  - The settings are the recommended preset with Bluetooth Compatible (`switch_bt_mode` = Compatible,
+    `bt_after_input` off) and `gain` = `rumble_gain` × 100.
+  - Amplitudes are shaped by `renhdrum_store_shape_amplitude`, the only place intensity is applied.
+  - A registry per player.
+  - `push` / `push_with` return whether every rumble pad of the player is claimed.
+  - A `rumble` thread (1 ms) runs these host rules: the 250 ms watchdog per side, a restate of a running packet
+    (40 ms USB, 150 ms Bluetooth), mute plus neutral on focus loss, prompt, F1, `rumble=0` or
+    `PermitVibration(false)`, and writes that are never queued (synchronous, so the newest value wins).
+  - `release()` handles `hd_rumble` turned off live, and `shutdown()` stops the thread (bounded to 200 ms), then
+    writes the neutral packet to each pad.
+  - `set_program()` sets nx2 mode 2 for 04… programs.
+  - `encode_side()` is RenHDrum's `hd_encode_side`.
+- `input/mod.rs`:
+  - `vibrate_with` pushes the raw cleaned value first and skips the standard store when every pad of that player is
+    claimed.
+  - `Inputs::hd_update` (each tick) claims writable Nintendo pads (kind 1/2/3; a Joy-Con only its own side) while
+    `hd_rumble` is on, releases them when it goes off, sets `ready` once the handshake is done (step 9), and syncs
+    the registry with each player's count of unclaimed rumble pads.
+  - The rumble loop skips claimed pads.
+  - Handshake, light and standard-rumble subcommands take the counter from the claimed pad.
+  - The light subcommand carries the last rumble bytes, not `NEUTRAL_RUMBLE`, for both paths, so a light change no
+    longer cuts a running rumble.
+  - `shutdown()` calls `rumble::shutdown()` first.
+  - The standard path's Nintendo encoder is now `rumble::encode_side`. `nintendo::encode_side` and its test are gone.
+- `services/hid.rs` takes over `nn::hid::system::PermitVibration(bool)` and `nn::hid::detail::PermitVibration(bool)`.
+  I found the exact names by decompressing DKB's `sdk` NSO: there is no plain `nn::hid::PermitVibration` there.
+  `IsVibrationPermitted` now reflects the permission.
+- `boot.rs` calls `input::rumble::set_program(prof.program_id)` once, after the profile is loaded.
+- Settings: `hd_rumble` (1 / 0, default 1, applies live) is in the Controls section of `src/config/src/options.rs`
+  and in `docs/settings.md`, and `rumble_min`'s help now says "Standard rumble only". `hd_rumble_bt` is not added (it
+  waits for phase 3).
+- `nxinput rumble --hd`, in `src/os/src/bin/nxinput.rs`:
+  - It waits until the claimed pads are ready, then sends this script through `input::vibrate` every 5 ms: an
+    8-note ladder from 160 to 1000 Hz with a decaying 5 ms-step envelope, ten 10 ms clicks, then silence.
+  - After the script it waits 400 ms and calls `input::shutdown`.
+  - The plain `nxinput rumble` now re-sends its value every tick, as a game does, so the HD watchdog does not cut it.
+
+**Tests** (`cargo test -p os`: 165 passed, 1 ignored, 0.38 s; all new, so none can have failed before):
+
+- `rumble::tests::engine_path_packets_counter_watchdog` covers plan test 1. A note sequence on both sides of a USB Pro
+  pad gives rumbling 0x10 packets whose byte 1 follows the shared counter (a subcommand's `next_counter` takes the
+  next one). After the last push it ends neutral, between 240 and 290 ms later (watchdog plus the core's envelope
+  window).
+- `resend_usb_bt_not_neutral` covers test 2. A held value never goes more than 40 ms (USB) or 150 ms (Bluetooth)
+  without a packet. Once neutral, nothing is restated.
+- `claims_and_master_switch` covers test 3. With one claimed and one unclaimed pad, `vibrate` still marks `RUMBLE`
+  dirty. With all pads claimed it leaves `RUMBLE` alone. `rumble=0` pushes nothing: no packet in 200 ms.
+- `settings_from_ini_keys` covers test 4. `rumble_gain` 2.0 gives gain 200 and the shape doubles. Gain 0 is silent,
+  and 50.0 clamps to 1000. The config is HD on, Bluetooth level 4, `bt_fast` and `bt_after_input` off. The resolved
+  settings have `envelope_5ms` and `usb_no_queue` on. With `hd_rumble=0`, nothing is claimed.
+- `nx2_mode_from_program` covers test 5: 04… gives 2 and 01… gives 0, serialised under a test lock.
+- `legacy_encoder_table` covers test 6. Neutral; full high band at 320 Hz gives `00 c9 40 40`; full low band at
+  160 Hz gives `00 01 40 72`; both at full scale trigger the motor protection.
+- `cargo test -p config` passes. The existing `input::tests` pass, including `vibration_init_sends_idle`.
+
+**Verified**
+
+- *Link, one libopus.* `cargo build --release -p runtime` passes. `scripts/build/build.ps1 -SkipGnu -KeepCache`
+  passes (rc 0, 59 s). DKB was relinked through `nxrs-build` into its library `buildDir` with no duplicate or
+  unresolved symbols. `Donkey Kong Bananza_code.dll` grew from 210,053,632 to 210,543,104 bytes (+0.47 MB, about the
+  core plus the Opus encoder objects pulled from `libopus.a`). The DLL contains the rumble module's strings and
+  `opus_encode_float`.
+- *No Nintendo pad, so the legacy path.* `py scripts/play.py dkb --env NXGFX_GPU=1 --env NXRS_CONTROLLER_TRACE=1`
+  completed 15/15 steps with a normal exit and 0 red lines. FPS in [100, 150] s: mean 58.5, 5 % low 53.0. Run folder:
+  `build/play/20261125-045606-dkb`; `sheet-1.png` shows boot, Continue, walking, punching and the dig tutorial.
+- *What DKB sends.* The game sent 19,086 traced `hid: vibration` values, one per side **every ~5 ms** (from 23.3 s on).
+  The game feeds rumble continuously, so the 250 ms watchdog does not cut held rumble in this title.
+- *nxinput.* `nxinput rumble --hd` with no pads prints `no controllers` and exits 0.
+- *Not shown.* Real HD packets and the exit neutral packet on a pad: none is connected.
+- *Unrelated to this change.* The run's worst pacing was a single 4.9 s frame at 86.8 s, during boot and Continue
+  loading. No pad was claimed, so the rumble code never ran.
+
+**Unproven**
+
+- Packets on real hardware, over USB and Bluetooth: the trace run of `nxinput rumble --hd` and of DKB with a Pro
+  Controller or Joy-Con. The log should show `<pad>: HD rumble (RenHDrum 0.5.0, …)`, `HD rumble [10, …]` lines while
+  playing (with `NXRS_CONTROLLER_TRACE=1`), and `HD rumble neutral at exit`.
+- Feel (§5.6) and Joy-Con, which RenHDrum has not verified upstream.
+- The writes run on their own thread but still use hidio's 30 ms synchronous write. A congested Bluetooth link delays
+  only the rumble thread now, not input reads. That has not been measured on an adapter.
+- `IsOunceVibrationDeviceMounted` is still 0. The before/after MKW + DKB trace needs a pad, so it was not done.
+- The SDK also has `nn::hid::detail::SendVibrationValue`, `EnqueueVibrationValue` / `FlushEnqueuedVibrationValues` and
+  `SendVibrationGcErmCommand`, which nxrs does not take over. DKB's values all arrive through the taken-over
+  functions. If a title is silent, check those next.
+- The 250 ms watchdog follows RenHDrum's hosts. A game that sends a value once and holds it would be cut after
+  250 ms on claimed pads (DKB re-sends every 5 ms).
+
+**Slips:** None. No commits, `scripts/scenarios.toml` and `docs/32` were not touched, and processes were killed by PID
+only. `rustfmt` ran only on the new `rumble.rs`: other edited files already carried others' uncommitted hunks, so they
+were not reformatted. `cargo clippy -p os` fails on three existing `0.7071` lints in `services/audio.rs`, which I did
+not touch. The new code adds no clippy errors.
+
+**Questions**
+
+1. The F1 row "HD Rumble On / Off" (`help.rs`, NOPT 4 → 5): add it? I'd wait for the feel test. If the owner flips it
+   often, add the row. Until then the ini key applies live.
+
+**Owner's feel-test checklist** (Pro Controller over USB, then Bluetooth; then a Joy-Con pair over Bluetooth; set
+`NXRS_CONTROLLER_TRACE=1` so the log shows the packets):
+
+1. `target\release\nxinput.exe rumble --hd`. It should print "N pad(s) claimed for HD rumble, N ready", then you
+   should feel eight distinct rising pitches (each fading within its 120 ms), ten crisp separate clicks, and a clean
+   stop with no tail. Then run `nxinput rumble` (the standard test) and compare.
+2. DKB (`py scripts/play.py dkb --env NXRS_CONTROLLER_TRACE=1`, or play it): punch terrain, which should give heavy
+   hits and fine texture. Pause, or wait for a load: rumble should stop within about 0.25 s. Alt+Tab mid-rumble
+   should stop it at once, and it should come back on refocus.
+3. MK8D, a 50cc race: engine idle texture, drift sparks, boost pads, an item hit. On the pause menu, no endless buzz.
+4. Mario Kart World over **Bluetooth**: road rumble at a sensible strength (nx2 mode), and **no button lag** compared
+   with `hd_rumble=0`.
+5. Wonder, World 1-1: jump and land taps, coin ticks. USB vs Bluetooth Compatible: Bluetooth is coarser, USB has the
+   5 ms detail.
+6. Live toggle mid-game: set `hd_rumble=0` in the game's ini. The standard rumble should take over with no restart
+   (log: "HD rumble off; standard rumble"). Set it back to 1 to re-claim. With `rumble_gain=2`, HD should feel about
+   twice as strong; with `rumble=0`, there should be nothing.
+7. Exits: window close, Esc quit, Home-hold quit. No rumble left running, and a wired Pro reads normally in
+   `joy.cpl` afterwards.
+8. Lights: when a player LED changes mid-rumble (a pad joining), the rumble must not cut out.
+9. Two players: player 1 on a Pro, player 2 on Xbox or DualSense. Each pad gets only its own player's rumble. Also
+   check that a Switch 2 Pro Controller (unchanged path) still rumbles.

@@ -1,8 +1,8 @@
 //! nn::oe (and the bits of nn::applet / am an application reaches through it): the operation mode, focus, the
 //! notification queue, performance configuration, language, launch parameter and the switches the system keeps.
-//! The host runs one application in the foreground. The operation mode is the `docked` setting (Turbo d5b36a1: TV
+//! The host runs one application in the foreground. The operation mode is the `docked` setting (TV
 //! mode by default, so games draw for a television; `NXOS_OPMODE` overrides), changed live with the console's
-//! operation-mode notification; the language is the `language` setting (Turbo's numbers; `NXOS_LANG` overrides).
+//! operation-mode notification; the language is the `language` setting (`NXOS_LANG` overrides).
 
 use crate::guest::{w32, w64, Args};
 use crate::hle::{Registry, RES_OK};
@@ -485,8 +485,8 @@ pub fn register_switch2(r: &mut Registry) {
 
 pub fn register(r: &mut Registry) {
     register_switch2(r);
-    // am tells an application it has the focus as it starts (Turbo svc_core.c pushes FocusStateChanged at boot; its
-    // ChangeIntoForeground is the SDK's own and never reaches nn::oe): a game that fades in once it is told
+    // am tells an application it has the focus as it starts (FocusStateChanged pushed at boot; ChangeIntoForeground
+    // is the SDK's own and never reaches nn::oe): a game that fades in once it is told
     // (focus handling mode 1 / 2) waits for it
     {
         let mut q = QUEUE.lock().unwrap();

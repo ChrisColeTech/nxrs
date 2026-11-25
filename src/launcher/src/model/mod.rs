@@ -20,7 +20,6 @@ pub mod output_lines;
 pub mod path_text;
 pub mod play;
 pub mod qtjson;
-pub mod save_plan;
 pub mod update_text;
 
 #[cfg(test)]

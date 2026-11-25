@@ -84,12 +84,7 @@ pub fn build(ui: &mut Ui, d: &mut PropertiesDraft) {
             .speed(0.1);
         ui.add(value.custom_formatter(move |_, _| shown.clone()));
     });
-    let engine = if d.game.nxrs() {
-        w::ENGINE_NXRS
-    } else {
-        w::ENGINE_TURBO
-    };
-    row(ui, "Engine", "", |ui| readout(ui, engine));
+    row(ui, "Engine", "", |ui| readout(ui, w::ENGINE_NXRS));
 }
 
 pub fn runtime(ui: &mut Ui, app: &App, d: &mut PropertiesDraft) {

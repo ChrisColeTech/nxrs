@@ -1,11 +1,10 @@
 //! What a build folder says about itself: the package its data comes from (`romfs.nup` / `romfs.nsp`),
-//! the update applied (`SWRNSP2` `update` row), whether nxrs-build made it (`nxrs.gen.key`).
+//! the update applied (`SWRNSP2` `update` row), its cover.
 
-use super::files::{is_dir, is_file, list, read_text};
+use super::files::{is_dir, is_file, read_text};
 use crate::constants::engine as e;
 use crate::model::game::Game;
 use crate::model::game_update::GameUpdate;
-use crate::model::names::build_folder_for;
 use crate::model::path_text::{from_native, join, same_path};
 
 /// The package a build reads its data from (empty: none, or a folder build).
@@ -27,17 +26,6 @@ pub fn source_of_build(data_dir: &str) -> String {
     } else {
         String::new()
     }
-}
-
-/// A build on disk made by nxrs-build: its generated C carries `nxrs.gen.key`.
-pub fn built_with_nxrs(build_dir: &str, output_name: &str) -> bool {
-    if build_dir.is_empty() || output_name.is_empty() {
-        return false;
-    }
-    let prefix = format!("{output_name}_build");
-    list(build_dir).iter().any(|(name, dir)| {
-        *dir && name.starts_with(&prefix) && is_file(&join(&join(build_dir, name), e::GEN_KEY))
-    })
 }
 
 /// The build was made with an update of its own package (its romfs.nsp names it) but the entry does
@@ -67,33 +55,6 @@ pub fn adopt_built_update(game: &mut Game) -> bool {
         });
     }
     game.built_update = path;
-    true
-}
-
-/// Moves the entry to that engine's build folder and reads back what is built there. True when
-/// something changed.
-pub fn set_game_engine(game: &mut Game, nxrs: bool) -> bool {
-    let next = if nxrs {
-        e::ENGINE_NXRS
-    } else {
-        e::ENGINE_TURBO
-    };
-    if game.engine == next {
-        return false;
-    }
-    game.engine = next.into();
-    if game.build_dir.is_empty() {
-        return true;
-    }
-    game.build_dir = build_folder_for(&game.build_dir, nxrs);
-    game.build_incomplete = false;
-    game.built_update.clear();
-    game.built_source = if is_file(&game.executable()) {
-        source_of_build(&game.data_dir())
-    } else {
-        String::new()
-    };
-    adopt_built_update(game);
     true
 }
 

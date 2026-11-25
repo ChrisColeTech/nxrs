@@ -744,12 +744,12 @@ mod tests {
         );
     }
 
-    /// The page as Turbo 1f12977 lays it out, read the way SDK 22's SharedMemoryClient does: the local context's
+    /// The page, read the way SDK 22's SharedMemoryClient does: the local context's
     /// current copy (counter & 1), the ContinuousAdjustmentTimePoint at 0xD0 with 0x38-byte entries at 0xD8 / 0x110,
     /// the current one picked by counter & 1, its clock source id at +0x28 equal to the context's (a mismatch is
     /// result 52340 and clock_gettime(CLOCK_REALTIME) fails), multiplier and shift 0; and the steady clock's id.
     #[test]
-    fn shared_page_layout_as_turbo() {
+    fn shared_page_layout() {
         let shm: &'static crate::svc::SharedMem = Box::leak(Box::new(crate::svc::SharedMem {
             handle: 0,
             size: 0x1000,

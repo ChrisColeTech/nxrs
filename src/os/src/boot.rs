@@ -87,8 +87,8 @@ pub unsafe extern "C" fn nxos_main_with(
     }
 }
 
-/// The display version of a control.nacp (+0x3060, a C string of up to 16 bytes), when it is one (Turbo svc_fs.c:
-/// it starts with a digit).
+/// The display version of a control.nacp (+0x3060, a C string of up to 16 bytes), when it is one (it starts
+/// with a digit).
 pub fn nacp_version(nacp: &[u8]) -> Option<String> {
     let v = nacp.get(0x3060..0x3070)?;
     let v = &v[..v.iter().position(|&c| c == 0).unwrap_or(v.len())];
@@ -138,6 +138,8 @@ fn run(data: &Path, modules: Vec<Module>, hook: Option<InitHook>) -> Result<(), 
         prof.core_mask,
         if prof.switch2 { ", Switch 2" } else { "" }
     );
+    // HD rumble: a Switch 2 program's amplitudes take RenHDrum's Switch 2 laws (process-wide in the core)
+    crate::input::rumble::set_program(prof.program_id);
 
     let lo = modules.iter().map(|m| m.base).min().unwrap();
     let hi = modules.iter().map(|m| m.base + m.size).max().unwrap();
@@ -198,7 +200,7 @@ fn run(data: &Path, modules: Vec<Module>, hook: Option<InitHook>) -> Result<(), 
             (name.clone(), *base, *size, init)
         })
         .collect();
-    // the title's version in the boot log (Turbo 13a2693: the build's control data, the update's when it came with one)
+    // the title's version in the boot log (the build's control data, the update's when it came with one)
     let version = std::fs::read(data.join("control.nacp"))
         .ok()
         .and_then(|n| nacp_version(&n));
@@ -384,7 +386,7 @@ unsafe fn boot_main(c: *mut Cpu) {
 
 #[cfg(test)]
 mod tests {
-    /// Turbo 13a2693: control.nacp's display version at +0x3060, logged when it starts with a digit.
+    /// control.nacp's display version at +0x3060, logged when it starts with a digit.
     #[test]
     fn title_version_from_control_nacp() {
         let mut n = vec![0u8; 0x4000];

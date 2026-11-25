@@ -1,10 +1,12 @@
-//! nxinput: the controllers the engine sees, without a game (Turbo's `controller_device` / `test_controllers.py`).
+//! nxinput: the controllers the engine sees, without a game.
 //!
 //!     nxinput list                  every HID interface that is a pad, XInput users, WinMM joysticks, and what the
 //!                                   input layer makes of them (player, backend)
 //!     nxinput read [seconds=20]     prints each change of each player's buttons and sticks (guest bits after
 //!                                   button_layout), and each physical button as both layouts name it
 //!     nxinput rumble [--short]      lights, low motor 1 s, high motor 1 s, both 1 s, off (--short: 0.4 s each, under a second)
+//!     nxinput rumble --hd           HD rumble on a Pro Controller / Joy-Con (`rumble.rs`, the game's path): a note ladder in
+//!                                   5 ms steps, a click train, then silence (about 3 s)
 //!
 //! `--layout xbox` / `--map south:a` set button_layout / button_map for the run.
 
@@ -172,7 +174,7 @@ fn read(secs: f64) {
     }
 }
 
-/// `rumble` (or `--owner`): Turbo's physical check (controller_device --rumble), strong and long enough to feel: lights,
+/// `rumble` (or `--owner`): the physical check, strong and long enough to feel: lights,
 /// low motor 160/255 1 s, high motor 160/255 1 s, both 200/255 1 s, stop. `rumble --short`: 128/255 0.4 s each
 /// (under a second: the agents' bounded check). `rumble <low 0..255> <high 0..255> <ms>`: one setting for that long.
 fn rumble() {
@@ -189,6 +191,10 @@ fn rumble() {
         println!("no controllers");
         return;
     }
+    if a.iter().any(|x| x == "--hd") {
+        return rumble_hd();
+    }
+    // the value is sent on every tick, as a game does (HD rumble's watchdog silences a side left unfed for 250 ms)
     let run = |low: u32, high: u32, ms: u64, what: &str| {
         println!("{what}: low {low}/255 high {high}/255 for {ms} ms");
         let v = input::Vib {
@@ -196,12 +202,12 @@ fn rumble() {
             amp_high: high as f32 / 255.0,
             ..Default::default()
         };
-        for p in 0..PLAYERS {
-            input::vibrate(p, 0, v);
-            input::vibrate(p, 1, v);
-        }
         let t = Instant::now();
         while t.elapsed() < Duration::from_millis(ms) {
+            for p in 0..PLAYERS {
+                input::vibrate(p, 0, v);
+                input::vibrate(p, 1, v);
+            }
             input::probe_tick();
             std::thread::sleep(Duration::from_millis(4));
         }
@@ -230,6 +236,96 @@ fn rumble() {
         run(200, 200, 1000, "both motors");
     }
     run(0, 0, 50, "off");
+    input::shutdown();
+    println!("done");
+}
+
+/// The scripted HD rumble envelope at `ms` into the script (None: the end).
+fn hd_script(ms: u64) -> Option<(input::Vib, &'static str)> {
+    let silent = input::Vib::default();
+    match ms {
+        // eight notes, 120 ms on (a decaying 5 ms-step envelope), 80 ms apart, 160 Hz up to 1000 Hz
+        0..1600 => {
+            let (k, t) = (ms / 200, ms % 200);
+            if t >= 120 {
+                return Some((silent, "note ladder"));
+            }
+            let f = 160.0 * (1000.0f32 / 160.0).powf(k as f32 / 7.0);
+            let a = 0.7 * (1.0 - 0.6 * (t / 5 * 5) as f32 / 120.0);
+            Some((
+                input::Vib {
+                    amp_low: 0.2 * a,
+                    freq_low: (f / 2.0).max(41.0),
+                    amp_high: a,
+                    freq_high: f,
+                },
+                "note ladder",
+            ))
+        }
+        // ten clicks: 10 ms full scale, 90 ms silent
+        1600..2600 => Some((
+            if (ms - 1600) % 100 < 10 {
+                input::Vib {
+                    amp_low: 0.5,
+                    freq_low: 160.0,
+                    amp_high: 1.0,
+                    freq_high: 320.0,
+                }
+            } else {
+                silent
+            },
+            "click train",
+        )),
+        2600..3000 => Some((silent, "silence")),
+        _ => None,
+    }
+}
+
+/// `rumble --hd`: the scripted envelope through the game's path (`input::vibrate` → `rumble.rs`), every 5 ms.
+fn rumble_hd() {
+    let t = Instant::now();
+    loop {
+        input::probe_tick();
+        let (n, ready) = input::rumble::claimed();
+        if (n > 0 && ready == n) || t.elapsed() > Duration::from_secs(3) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(4));
+    }
+    let (n, ready) = input::rumble::claimed();
+    if n == 0 {
+        println!("no Pro Controller / Joy-Con claimed for HD rumble (none connected, or hd_rumble=0): the script runs on the standard rumble");
+    } else {
+        println!("{n} pad(s) claimed for HD rumble, {ready} ready (NXRS_CONTROLLER_TRACE=1 logs each packet)");
+    }
+    let t0 = Instant::now();
+    let mut phase = "";
+    let mut step = 0u64;
+    loop {
+        let ms = t0.elapsed().as_millis() as u64;
+        let Some((v, what)) = hd_script(step * 5) else {
+            break;
+        };
+        if ms >= step * 5 {
+            if what != phase {
+                println!("[{:5} ms] {what}", step * 5);
+                phase = what;
+            }
+            for p in 0..PLAYERS {
+                input::vibrate(p, 0, v);
+                input::vibrate(p, 1, v);
+            }
+            step += 1;
+        }
+        input::probe_tick();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    // the watchdog and the stop packet, then the neutral packet at exit
+    let t = Instant::now();
+    while t.elapsed() < Duration::from_millis(400) {
+        input::probe_tick();
+        std::thread::sleep(Duration::from_millis(4));
+    }
     input::shutdown();
     println!("done");
 }

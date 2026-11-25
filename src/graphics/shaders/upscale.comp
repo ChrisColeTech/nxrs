@@ -1,5 +1,5 @@
 #version 450
-// The presented picture upscaled sharp to the window (Turbo's present.frag mode 2): each of the four source texels
+// The presented picture upscaled sharp to the window: each of the four source texels
 // around a point is sharpened against its four neighbours by how much contrast they leave room for (strong where the
 // picture is flat, gentle at edges, so no halos), then the four are blended bilinearly. Used only when the window is
 // larger than the picture; the result is copied 1:1 into the swap chain image.

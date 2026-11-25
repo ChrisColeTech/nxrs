@@ -2,7 +2,7 @@
 //!
 //! The shaders belong to THS / Lossless Scaling and are not shipped: they are read at start from the player's
 //! `Lossless.dll` (`lsfg_dll`, else beside the game, else every Steam library's `Lossless Scaling` folder), whose
-//! RCDATA resources hold them as SPIR-V. The set is identified as Turbo identifies it (the pass order and binding
+//! RCDATA resources hold them as SPIR-V. The set is identified by its passes (the pass order and binding
 //! counts come from lsfg-vk, MIT): the mip pass (one input, seven outputs, 32x32 groups), the generation pass (five
 //! inputs, two samplers, one output), then the 23-pass fp32 performance and quality sets checked binding by binding,
 //! so another Lossless Scaling version is refused with its reason, never run half-matched. The passes run on the

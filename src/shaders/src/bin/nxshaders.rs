@@ -6,7 +6,7 @@
 //!     nxshaders prebuild-data <data> [--jobs 4]              the build's call: <data>/shaders from <data>
 //!     nxshaders tex-census <export dir> [--keys N]           texture instructions whose LOD clamp / residency the
 //!                                                 translator drops (nxnative tex_census.py)
-//!     nxshaders coverage <out dir> <used>...     how many of the keys a game used (Turbo's <game>_nvn folders:
+//!     nxshaders coverage <out dir> <used>...     how many of the keys a game used (`<game>_nvn` folders:
 //!                                                 vk/pipelines.tsv and cache/dumps) the build found and translated
 
 use clap::{Parser, Subcommand};
@@ -52,7 +52,7 @@ enum Cmd {
         #[arg(long, default_value_t = 64)]
         batch: usize,
     },
-    /// Keys a game used at run time (Turbo's `<game>_nvn` folders) against a build's manifest.
+    /// Keys a game used at run time (`<game>_nvn` folders) against a build's manifest.
     Coverage { out: PathBuf, used: Vec<PathBuf> },
     /// The texture instructions whose LOD clamp or residency predicate the translator drops, over an `export` folder.
     TexCensus {

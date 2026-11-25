@@ -26,7 +26,8 @@ pub struct RawProfile {
     /// `games/<id>/engine.tsv`: keys the engine's lanes keep by hand (results of their runs), over game.tsv's.
     pub engine_tsv: Option<&'static str>,
     pub patches: Option<&'static str>,
-    pub turbo: Option<&'static str>,
+    /// `games/<id>/owner.toml`: the owner's patches, kept by hand
+    pub owner: Option<&'static str>,
     /// `games/<id>/recomp.txt`: a static recompilation's code patch table (the translator's format) for one build
     pub recomp: Option<&'static str>,
     /// nxnative's shader tables, zstd-compressed (`tools/export_shaders.py`)
@@ -169,8 +170,8 @@ pub struct Profile {
     pub program_of: Option<String>,
     /// nxnative's patches.py of this game, as data
     pub patches: Option<PatchFile>,
-    /// The owner's patches for this game (Turbo's), applied by nxrs builds
-    pub turbo: Option<PatchFile>,
+    /// The owner's patches for this game (`owner.toml`), applied by nxrs builds
+    pub owner: Option<PatchFile>,
     /// A code patch table in the translator's own format (`recomp.txt`, ported from a static recompilation such as
     /// mkw-recomp), applied by nxrs builds of the module build it names
     pub recomp: Option<RecompTable>,
@@ -239,7 +240,7 @@ impl Profile {
             programs: vec![],
             program_of: None,
             patches: None,
-            turbo: None,
+            owner: None,
             recomp: None,
             rows,
         };
@@ -384,7 +385,7 @@ impl Profile {
 
     /// Both patch files of the profile.
     pub fn patch_files(&self) -> impl Iterator<Item = &PatchFile> {
-        self.patches.iter().chain(self.turbo.iter())
+        self.patches.iter().chain(self.owner.iter())
     }
 }
 
@@ -613,11 +614,11 @@ fn db() -> &'static Db {
                     .map(PatchFile::parse)
                     .transpose()
                     .map_err(|e| format!("{}: patches.toml: {e}", r.id))?;
-                p.turbo = r
-                    .turbo
+                p.owner = r
+                    .owner
                     .map(PatchFile::parse)
                     .transpose()
-                    .map_err(|e| format!("{}: turbo.toml: {e}", r.id))?;
+                    .map_err(|e| format!("{}: owner.toml: {e}", r.id))?;
                 p.recomp = r
                     .recomp
                     .map(RecompTable::parse)

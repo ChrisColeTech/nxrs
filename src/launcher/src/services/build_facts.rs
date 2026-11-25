@@ -38,7 +38,6 @@ pub fn playable(g: &Game) -> bool {
 
 pub fn facts(g: &Game) -> Facts {
     Facts {
-        turbo: g.turbo(),
         has_build: has_build(g),
         update_pending: update_pending(g),
         source_available: source_available(g),

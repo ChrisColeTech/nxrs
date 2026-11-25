@@ -45,7 +45,6 @@ pub struct Enabled {
     pub remove: bool,
     pub per_game: bool,
     pub save_folder: bool,
-    pub copy_saves: bool,
     pub log: bool,
 }
 
@@ -71,7 +70,6 @@ pub fn enabled(app: &App) -> Enabled {
         remove: exists && !playing && !building,
         per_game: exists && !app.demo,
         save_folder: exists && f.has_build,
-        copy_saves: app.can_copy_saves(),
         log: app.has_log(),
     }
 }
@@ -104,7 +102,6 @@ pub fn menu(app: &App, name: &str) -> Vec<Item> {
             Item::Separator,
             cmd(m::INSTALL_DLC, "", e.per_game, Action::InstallDlc),
             cmd(m::INSTALL_UPDATES, "", e.per_game, Action::InstallUpdates),
-            cmd(m::COPY_SAVES, "", e.copy_saves, Action::CopySaves),
             Item::Separator,
             cmd(m::REMOVE, "", e.remove, Action::RemoveGame),
         ],

@@ -221,6 +221,14 @@ fn acquire(i: usize) {
         t.waiting = true;
         t.wseq = s;
     }
+    // the profiler's samples count this as a wait for a core (back to the state before on any return)
+    struct Mark(u32);
+    impl Drop for Mark {
+        fn drop(&mut self) {
+            nxrt::profile::mark(self.0);
+        }
+    }
+    let _mark = Mark(nxrt::profile::mark(nxrt::profile::W_CORE));
     let t0 = Instant::now();
     loop {
         if try_take(&mut st, i) {

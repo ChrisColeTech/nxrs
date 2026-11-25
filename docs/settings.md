@@ -1,7 +1,7 @@
 # Settings
 
 The game's ini (`<game>.ini` beside the executable; `NXRS_INI` names another) holds these keys. A missing key takes its
-default; values outside a key's range are brought into it when read. Turbo's Spanish key names are still read and written
+default; values outside a key's range are brought into it when read. Older Spanish key names are still read and written
 back under these names. Environment switches for diagnostics and tests are listed in [env_switches.tsv](env_switches.tsv).
 
 This page is generated from `src/config/src/options.rs` (`cargo test -p config settings_page_is_current` checks it).
@@ -34,7 +34,8 @@ This page is generated from `src/config/src/options.rs` (`cargo test -p config s
 | `home_quit` | `1` | 1 = holding a controller's Home (logo) button 2 s asks whether to quit; 0 = off |
 | `rumble` | `1` | 1 = the game's rumble reaches the controllers; 0 = off. Applies live |
 | `rumble_gain` | `1.00` | Rumble strength, 0 to 3 (0 = silent, 1 = as the game sends it). Applies live |
-| `rumble_min` | `0` | Rumble cutoff, 0 to 0.9: levels below it stay silent and the rest is stretched over the full range (for controllers with rotating motors that a game's quiet rumble keeps running: Mario Kart 8 Deluxe 0.45). Applies live |
+| `rumble_min` | `0` | Standard rumble only: a cutoff, 0 to 0.9: levels below it stay silent and the rest is stretched over the full range (for controllers with rotating motors that a game's quiet rumble keeps running: Mario Kart 8 Deluxe 0.45). Applies live |
+| `hd_rumble` | `1` | HD Rumble: the game's vibration in full detail on a Switch Pro Controller or Joy-Con; 0 = the standard rumble. Applies live |
 | `pad_press_to_join` | `0` | 1 = a controller is no player until one of its buttons is pressed, then it is the lowest player free; 0 = each controller connected is a player at once (the one it had before, else player 1 first) |
 | `pad_merge` | `0` | 1 = every controller is player 1 together; 0 = each controller is a player of its own |
 | `keyboard_player` | `shared` | shared = the keyboard is player 1 together with the first controller; own = the keyboard alone is player 1 and the controllers are players 2 and on |

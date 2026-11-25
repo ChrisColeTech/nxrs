@@ -1,4 +1,4 @@
-//! AV1 with dav1d (third_party/dav1d, 1.5.5), driven as Turbo's av1video.inc drives it:
+//! AV1 with dav1d (third_party/dav1d, 1.5.5), driven so:
 //! - frame threads: a temporal unit of a hierarchical stream holds several frames, so with max_frame_delay above 1
 //!   they decode side by side and a picture comes out later than its unit went in; each unit's time rides with it;
 //! - one dav1d_get_picture for each dav1d_send_data (a second in a row is dav1d's drain);

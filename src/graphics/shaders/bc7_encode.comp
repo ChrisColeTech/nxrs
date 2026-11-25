@@ -2,7 +2,7 @@
 // texture at 1 byte per texel instead of 4 (RGBA8), as Ryujinx does with EnableTextureRecompression (it encodes BC7 on
 // the CPU). Bit layouts: Khronos Data Format Specification 1.3, BC7 section.
 //
-// Modes (bc7enc's choice, Turbo's high-quality pass: modes 1 and 6 for opaque blocks, 6 and 7 for blocks with alpha;
+// Modes (bc7enc's choice, the high-quality pass: modes 1 and 6 for opaque blocks, 6 and 7 for blocks with alpha;
 // mode 3 added): every block tries mode 6 (one subset, RGBA 7.7.7.7 + a p-bit each, 4-bit indices). A block mode 6 does
 // not fit well (two colours that are not on one line: edges, text, a gradient meeting a flat area) also tries the
 // two-subset modes over the partition that fits best of the 64: an opaque block mode 1 (RGB 6.6.6 + a shared p-bit per

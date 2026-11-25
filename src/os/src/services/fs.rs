@@ -1036,7 +1036,7 @@ fn aoc_romfs(index: u32) -> Option<Arc<RomFs>> {
     }
 }
 
-/// The add-on content indices installed in the data folder whose data the host can read (Turbo 2cdeabd): a title in
+/// The add-on content indices installed in the data folder whose data the host can read: a title in
 /// the manifest whose package was moved or whose image was deleted is left out with a warning (a game told about DLC
 /// it then cannot read can hang: Mario Kart 8 Deluxe on its loading screen); a `stub` line is listed regardless (an
 /// empty RomFS, for diagnostics). Decided once, at the first question.
@@ -1276,16 +1276,15 @@ fsfn!(mount_save, |a| {
     };
     let dir = save_dir().join(format!("user{}", user + 1));
     if user == 0 {
-        adopt_turbo_save(&save_dir(), &dir);
+        adopt_single_user_save(&save_dir(), &dir);
     }
     mount_dir(&name, dir, false, true)
 });
 
-/// A Turbo build of the same game keeps the account save in `save\user` (older ones in `save\system`); an nxrs build
-/// keeps one per user (`save\user<N>`). The first time user 1's save opens and there is none, Turbo's is copied in
-/// (left where it was), so a player moving from a Turbo build keeps their progress (as Turbo svc_fs.c copies its own
-/// older `save\system`).
-fn adopt_turbo_save(root: &Path, dir: &Path) {
+/// The older single-user save layout keeps the account save in `save\user` (older still: `save\system`); this
+/// engine keeps one per user (`save\user<N>`). The first time user 1's save opens and there is none, the older one
+/// is copied in (left where it was), so a player's progress carries over.
+fn adopt_single_user_save(root: &Path, dir: &Path) {
     if dir.exists() {
         return;
     }
@@ -1294,12 +1293,12 @@ fn adopt_turbo_save(root: &Path, dir: &Path) {
         if from.is_dir() && std::fs::read_dir(&from).is_ok_and(|mut d| d.next().is_some()) {
             match copy_tree(&from, dir) {
                 Ok(()) => crate::log!(
-                    "fs: {} is a Turbo build's save: copied to {} (the original is kept)",
+                    "fs: {} is a single-user save: copied to {} (the original is kept)",
                     from.display(),
                     dir.display()
                 ),
                 Err(e) => crate::log!(
-                    "[RED] fs: copying the Turbo save {} to {}: {e}",
+                    "[RED] fs: copying the single-user save {} to {}: {e}",
                     from.display(),
                     dir.display()
                 ),
@@ -1626,28 +1625,28 @@ pub(crate) mod tests {
         assert!(program_data_dir(Path::new(r"D:\b\other"), 1).is_none());
     }
 
-    /// A Turbo build's `save\user` (or older `save\system`) becomes user 1's save the first time, once.
+    /// A single-user `save\user` (or older `save\system`) becomes user 1's save the first time, once.
     #[test]
-    fn turbo_save_is_adopted() {
-        let root = std::env::temp_dir().join(format!("nxos-turbo-save-{}", std::process::id()));
+    fn single_user_save_is_adopted() {
+        let root = std::env::temp_dir().join(format!("nxos-single-save-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("user/sub")).unwrap();
-        std::fs::write(root.join("user/sub/main"), b"turbo").unwrap();
+        std::fs::write(root.join("user/sub/main"), b"older").unwrap();
         let dir = root.join("user1");
-        adopt_turbo_save(&root, &dir);
-        assert_eq!(std::fs::read(dir.join("sub/main")).unwrap(), b"turbo");
+        adopt_single_user_save(&root, &dir);
+        assert_eq!(std::fs::read(dir.join("sub/main")).unwrap(), b"older");
         assert!(root.join("user/sub/main").exists(), "the original stays");
         std::fs::write(root.join("user/sub/main"), b"newer").unwrap();
-        adopt_turbo_save(&root, &dir);
+        adopt_single_user_save(&root, &dir);
         assert_eq!(
             std::fs::read(dir.join("sub/main")).unwrap(),
-            b"turbo",
+            b"older",
             "only when user 1 has no save yet"
         );
         let _ = std::fs::remove_dir_all(&root);
     }
 
-    /// Turbo 2cdeabd: a manifest title whose data is gone is not offered; a stub line is; other titles' DLC and
+    /// A manifest title whose data is gone is not offered; a stub line is; other titles' DLC and
     /// duplicates are left out.
     #[test]
     fn dlc_with_missing_data_is_not_offered() {

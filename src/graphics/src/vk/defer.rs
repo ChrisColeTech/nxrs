@@ -1,4 +1,4 @@
-//! Deferred recording (`NXGFX_DEFER=1`, off by default as in Turbo; Turbo `vk_defer.c`): the replay's Vulkan commands
+//! Deferred recording (`NXGFX_DEFER=1`, off by default): the replay's Vulkan commands
 //! for the submission being recorded are made by a recorder thread of their own, so translating the next draws (state,
 //! bindings, descriptors) overlaps the driver's command recording.
 //!

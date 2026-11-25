@@ -36,6 +36,8 @@ struct VPool {
     size: u64,
     top: u64,
     pt: Vec<Option<Box<[Pte; LEAF]>>>,
+    /// unmaps refused for an offset in tiles (`unscaled_unmap`)
+    unscaled: u32,
 }
 
 static POOLS: RwLock<Vec<VPool>> = RwLock::new(Vec::new());
@@ -108,6 +110,7 @@ pub fn initialize(o: &mut pool_t) -> u64 {
         size: o.size,
         top: 0,
         pt: (0..leaves).map(|_| None).collect(),
+        unscaled: 0,
     });
     a
 }
@@ -145,15 +148,14 @@ pub fn map(o: &mut pool_t, rq: &[MapReq]) -> bool {
             return false;
         };
         let base = v.base;
-        let ok = rq.iter().all(|r| map_sparse(v, r));
+        // requests apply in order up to the first one refused
+        let applied = rq.iter().take_while(|r| map_sparse(v, r)).count();
         drop(g);
-        // sparse images over the remapped ranges bind their blocks again
-        for r in rq {
-            if r.voff >= 0 {
-                crate::vk::sparse::remap(base + r.voff as u64, r.size);
-            }
+        // sparse images over the remapped ranges bind their blocks again (a refused request changed nothing)
+        for r in &rq[..applied] {
+            crate::vk::sparse::remap(base + r.voff as u64, r.size);
         }
-        return ok;
+        return applied == rq.len();
     }
     for r in rq {
         if r.phys.is_null() {
@@ -231,6 +233,18 @@ fn map_sparse(v: &mut VPool, r: &MapReq) -> bool {
         return false;
     }
     if (r.voff as u64 | r.size | r.poff as u64) & (PG - 1) != 0 {
+        if unscaled_unmap(r) {
+            // The guest's own unmap with its virtual offset left in 64 KB tiles (SONIC X SHADOW GENERATIONS' texture
+            // streamer, main 0x7001774130: its unmap of mip k passes the cumulative tile count of the mips before k,
+            // while its map path at 0x70017742d0 multiplies that count by the tile size). NVN requires page-aligned
+            // offsets and the MIT reference refuses them; refused here too, so the mapping stays as it was. A guest
+            // bug with a defined outcome, not an engine failure: noted once per pool, not red.
+            v.unscaled += 1;
+            if v.unscaled == 1 {
+                crate::nvnlog!("virtual pool {:#x}: the guest unmaps {:#x}+{:#x} with an offset that is not a page multiple (a tile count, not bytes); refused, the mapping is unchanged (further ones of this pool are not logged)", v.pool, r.voff, r.size);
+            }
+            return false;
+        }
         crate::log::red(&format!(
             "virtual pool {:#x}: request {:#x}+{:#x} (physical offset {:#x}) is not 4 KB aligned",
             v.pool, r.voff, r.size, r.poff
@@ -263,6 +277,18 @@ fn map_sparse(v: &mut VPool, r: &MapReq) -> bool {
         v.top = end;
     }
     true
+}
+
+/// An unmap (no physical pool, physical offset 0) of whole pages at a virtual offset below the 64 KB tile size that is
+/// not a page multiple: the shape of a tile index passed where NVN takes bytes.
+fn unscaled_unmap(r: &MapReq) -> bool {
+    r.phys.is_null()
+        && r.poff == 0
+        && r.voff > 0
+        && (r.voff as u64) < 0x10000
+        && r.voff as u64 & (PG - 1) != 0
+        && r.size != 0
+        && r.size & (PG - 1) == 0
 }
 
 fn pte(v: &VPool, off: u64) -> Pte {
@@ -447,5 +473,44 @@ mod tests {
         assert!(gen_in(base, 0x3000) > 0);
         finalize(&mut s);
         assert!(!is_sparse(base));
+    }
+
+    /// SONIC X SHADOW GENERATIONS unmaps mip k at its tile count (offset 2 for the third 64 KB tile): refused, the
+    /// mapping and its generation stay, and the requests after it in the same call are not applied.
+    #[test]
+    fn an_unmap_at_a_tile_count_is_refused_and_changes_nothing() {
+        let mut phys_mem = vec![7u8; 0x30000];
+        let ph = pool(0x30000, phys_mem.as_mut_ptr(), 0);
+        let mut s = pool(0x30000, core::ptr::null_mut(), mem_flags::VIRTUAL);
+        s.mem = initialize(&mut s) as *mut u8;
+        let base = s.mem as u64;
+        let map_rq = |voff: i64, size: u64| MapReq {
+            phys: &ph,
+            poff: voff,
+            voff,
+            size,
+            storage_class: 0,
+            pad: 0,
+        };
+        assert!(map(&mut s, &[map_rq(0, 0x20000), map_rq(0x20000, 0x10000)]));
+        let before = gen_in(base + 0x20000, 0x10000);
+        let unmap = |voff: i64, size: u64| MapReq {
+            phys: core::ptr::null(),
+            poff: 0,
+            voff,
+            size,
+            storage_class: 0,
+            pad: 0,
+        };
+        assert!(unscaled_unmap(&unmap(2, 0x10000)));
+        assert!(!unscaled_unmap(&unmap(0x20000, 0x10000)));
+        assert!(!unscaled_unmap(&MapReq { phys: &ph, ..unmap(2, 0x10000) }));
+        assert!(!map(&mut s, &[unmap(2, 0x10000), unmap(0, 0x10000)]));
+        assert_eq!(gen_in(base + 0x20000, 0x10000), before);
+        assert_eq!(translate(base, 0x30000), Some(phys_mem.as_ptr() as u64));
+        // the page-aligned unmap of the same tile does apply
+        assert!(map(&mut s, &[unmap(0x20000, 0x10000)]));
+        assert_eq!(translate(base + 0x20000, 0x10), None);
+        finalize(&mut s);
     }
 }

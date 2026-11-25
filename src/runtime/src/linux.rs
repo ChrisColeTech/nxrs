@@ -1029,7 +1029,7 @@ pub fn memory_cap(cap: u64) -> Result<String, String> {
             let (rss, swap) = process_memory();
             if rss + swap > cap {
                 crate::rt::log(&format!(
-                    "[RED] process memory cap: {} MB in use passes the cap of {} MB: the game stops here instead of the machine (SWR_MEMORY_CAP_GB sets the cap, 0 = off)",
+                    "[RED] process memory cap: {} MB in use passes the cap of {} MB: the game stops here instead of the machine (NXRS_MEMORY_CAP_GB sets the cap, 0 = off)",
                     (rss + swap) >> 20,
                     cap >> 20
                 ));

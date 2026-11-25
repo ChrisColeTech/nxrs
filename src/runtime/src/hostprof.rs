@@ -1,10 +1,10 @@
-//! The host sampling profiler (Turbo's `SWR_HOST_PROF`, runtime/nvn/host/nvn_host.c, and `tools/host_prof.py`):
-//! `SWR_HOST_PROF=<start s>,<seconds>[,<file>]` samples one host thread about 2000 times a second for that window
-//! and writes where it was. The thread is found by its name (`SWR_HOST_PROF_THREAD`, default `vk replay`: graphics'
-//! command-buffer translation thread; Turbo's `completion` names the submit-completion thread, any other value is
+//! The host sampling profiler:
+//! `NXRS_HOST_PROF=<start s>,<seconds>[,<file>]` samples one host thread about 2000 times a second for that window
+//! and writes where it was. The thread is found by its name (`NXRS_HOST_PROF_THREAD`, default `vk replay`: graphics'
+//! command-buffer translation thread; `completion` names the submit-completion thread, any other value is
 //! matched against the start of the thread names, e.g. a guest thread's).
 //!
-//! The file keeps Turbo's sample lines, so its `host_prof.py` reads it: `<address> <return address or 0> <module>`,
+//! The file holds one sample a line, as `host_prof.py` reads it: `<address> <return address or 0> <module>`,
 //! the address relative to this image (module `-`) or to the module it is in, the return address the first stack
 //! word pointing into this image's code. After the samples come the tables host_prof.py prints, as `#` lines (that
 //! script skips them): by function (lifted guest functions by name, other code by the nearest export below the
@@ -12,7 +12,7 @@
 
 use std::collections::HashMap;
 
-/// `SWR_HOST_PROF=<start s>,<seconds>[,<file>]` (Turbo's sscanf "%lf,%lf,%[^\n]"; a missing number keeps 0 / 10).
+/// `NXRS_HOST_PROF=<start s>,<seconds>[,<file>]` (as sscanf "%lf,%lf,%[^\n]"; a missing number keeps 0 / 10).
 #[derive(Debug, Clone, PartialEq)]
 pub struct Spec {
     pub start: f64,
@@ -40,7 +40,7 @@ pub fn parse(v: &str) -> Spec {
     s
 }
 
-/// The thread name a `SWR_HOST_PROF_THREAD` value stands for.
+/// The thread name a `NXRS_HOST_PROF_THREAD` value stands for.
 pub fn thread_name(v: Option<&str>) -> String {
     match v.map(str::trim).filter(|v| !v.is_empty()) {
         None => "vk replay".into(),
@@ -144,18 +144,18 @@ pub fn report(head: &str, samples: &[Sample], image: u64, names: &Names, top: us
     s
 }
 
-/// Starts the sampler thread when `SWR_HOST_PROF` is set (once).
+/// Starts the sampler thread when `NXRS_HOST_PROF` is set (once).
 pub fn start() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
-        let Some(v) = std::env::var("SWR_HOST_PROF")
+        let Some(v) = std::env::var("NXRS_HOST_PROF")
             .ok()
             .filter(|v| !v.is_empty())
         else {
             return;
         };
         let spec = parse(&v);
-        let name = thread_name(std::env::var("SWR_HOST_PROF_THREAD").ok().as_deref());
+        let name = thread_name(std::env::var("NXRS_HOST_PROF_THREAD").ok().as_deref());
         let path = spec
             .file
             .clone()
@@ -384,7 +384,7 @@ mod win {
                 break t;
             }
             if t0.elapsed().as_secs() > 600 {
-                return Err(format!("no thread named {name:?} (SWR_HOST_PROF_THREAD)"));
+                return Err(format!("no thread named {name:?} (NXRS_HOST_PROF_THREAD)"));
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
         };
@@ -466,16 +466,16 @@ mod win {
 
 #[cfg(not(windows))]
 pub fn run(_name: &str, _seconds: f64, _t0: std::time::Instant) -> Result<String, String> {
-    Err("SWR_HOST_PROF samples a host thread on Windows only".into())
+    Err("NXRS_HOST_PROF samples a host thread on Windows only".into())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Turbo's sscanf("%lf,%lf,%[^\n]") and SWR_HOST_PROF_THREAD.
+    /// The spec as sscanf("%lf,%lf,%[^\n]") reads it, and NXRS_HOST_PROF_THREAD.
     #[test]
-    fn spec_as_turbo() {
+    fn spec_and_thread_name() {
         assert_eq!(
             parse("100,25"),
             Spec {
@@ -514,7 +514,7 @@ mod tests {
         assert_eq!(thread_name(Some("MainThread")), "MainThread");
     }
 
-    /// host_prof.py's three tables from Turbo-format samples.
+    /// host_prof.py's three tables from samples.
     #[test]
     fn report_tables_as_host_prof_py() {
         let own = |a: u64| {

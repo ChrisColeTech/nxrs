@@ -566,11 +566,11 @@ Bindings:
 
 Profile keys: `pad_layout` simple
 
-### the owner's patches (Turbo) (Turbo nxloader.py (the owner's built-in patches))
+### the owner's patches (the owner's built-in patches)
 
 | Cut | Build | Module | Offset | Applied by nxrs | Off switch | Reason |
 |---|---|---|---|---|---|---|
-| 1 | `b1f12fd919eae86a` | main | 0x1b296d8 | yes | `NXRS_PATCH_ZA_60FPS=0` | Pokemon Legends Z-A: base frame rate 60 instead of 30 (ldrsb w20, [x9, #0x20] -> mov w20, wzr). Update 2.0.2: once a frame main+0x1B29660 reads the frame rate the game runs at from its frame-rate settings (the byte at +0x20 of the object at +0x40: 0 FPS60, 1 FPS30, 2 FPS20, 3 FPS15, 4 FPS12, trinity_config's baseFrameRate) and hands it to the window (present interval = value + 1, main+0x17FB5E0). The package's trinity_config.trowc does not set it and the program's own value is FPS30. With FPS60 read there the game steps by measured time as before (falling back to 30, 20... by its own rule when frames take longer) and held 58 to 60 in Turbo. |
+| 1 | `b1f12fd919eae86a` | main | 0x1b296d8 | yes | `NXRS_PATCH_ZA_60FPS=0` | Pokemon Legends Z-A: base frame rate 60 instead of 30 (ldrsb w20, [x9, #0x20] -> mov w20, wzr). Update 2.0.2: once a frame main+0x1B29660 reads the frame rate the game runs at from its frame-rate settings (the byte at +0x20 of the object at +0x40: 0 FPS60, 1 FPS30, 2 FPS20, 3 FPS15, 4 FPS12, trinity_config's baseFrameRate) and hands it to the window (present interval = value + 1, main+0x17FB5E0). The package's trinity_config.trowc does not set it and the program's own value is FPS30. With FPS60 read there the game steps by measured time as before (falling back to 30, 20... by its own rule when frames take longer) and holds 58 to 60. |
 
 ## Pokémon Scarlet (`0100A3D008C5C000`)
 
@@ -803,7 +803,7 @@ Bindings:
 - **frame ratio from the host's step**: bound game (goal: game); the game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function
 - **dynamic resolution: full size, or a climb on the load measured at each level**: bound game (goal: game); the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)
 
-### the owner's patches (Turbo) (Turbo nxloader.py (the owner's built-in patches))
+### the owner's patches (the owner's built-in patches)
 
 | Cut | Build | Module | Offset | Applied by nxrs | Off switch | Reason |
 |---|---|---|---|---|---|---|

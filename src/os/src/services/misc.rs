@@ -312,7 +312,7 @@ unsafe fn aoc_event(c: *mut Cpu) {
 // ---- shared fonts
 
 /// The six shared font slots (pl::SharedFontType): the console's are firmware content, so each slot is the player's
-/// own `<data>\fonts\<Name>.bfttf` (decrypted) or `.ttf` when there is one (Turbo main.c fonts_fill), else one system
+/// own `<data>\fonts\<Name>.bfttf` (decrypted) or `.ttf` when there is one, else one system
 /// TTF for every slot (Arial, Segoe UI, Tahoma; `NXOS_FONT` names another).
 const FONT_NAMES: [&str; 6] = [
     "FontStandard",
@@ -800,7 +800,7 @@ pub fn register(r: &mut Registry) {
 
 #[cfg(test)]
 mod tests {
-    /// A BFTTF the player put in `fonts\` decrypts to its TTF (Turbo main.c's key from the first word).
+    /// A BFTTF the player put in `fonts\` decrypts to its TTF (the key from the first word).
     #[test]
     fn bfttf_decrypts() {
         let ttf: Vec<u8> = (0..37u8).collect();

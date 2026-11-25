@@ -1,10 +1,10 @@
-//! The ASTC -> BC7 disk cache (Turbo `vk_astc.cpp`'s pack): every BC7 level the GPU encoded goes into one append-only
+//! The ASTC -> BC7 disk cache: every BC7 level the GPU encoded goes into one append-only
 //! pack file, so a texture is encoded once, ever, and later runs upload the BC7 blocks straight from it.
 //!
 //! Keyed by the ASTC bytes, the shape, block size, sRGB and the encoder's version (`ENCODER`): nothing here knows the
 //! game. Two files in the game's cache folder (`set_dir`, the game's `_data`): `astc_bc7.pack` holds the blocks and
 //! `astc_bc7.idx` 32 bytes per entry, written after its blocks, so a killed game loses at most its last entry. A fully
-//! opaque level is not compacted (BC7 has no separate alpha half to drop, unlike Turbo's BC3 pack).
+//! opaque level is not compacted (BC7 has no separate alpha half to drop, unlike a BC3 pack).
 //!
 //! Writes go to a thread of their own; reads happen where the upload is recorded (the replay thread), only for levels
 //! big enough that a read beats an encode (`MIN_BYTES`). `NXGFX_ASTC_CACHE=0` off, `NXGFX_ASTC_CACHE_MB` the most the

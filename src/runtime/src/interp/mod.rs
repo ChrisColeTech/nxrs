@@ -26,7 +26,7 @@
 //!
 //! **Execution hints.** Every address the interpreter is entered at is appended to `<data>\discovered.tsv` (module,
 //! offset, and the first four instruction words there as a stamp); `nxrs-build` adds those as function starts at the
-//! next build of the same program, so they are translated from then on (Turbo's `.hints`; PORT_PLAN 3.1).
+//! next build of the same program, so they are translated from then on (PORT_PLAN 3.1).
 
 pub mod exec;
 pub mod fp;

@@ -118,7 +118,7 @@ fn patch_tables_round_trip() {
             + f.capability.len()
             + f.binding.len();
     }
-    assert_eq!(files.len(), 29 + 2 + 2, "29 patches.py, the owner's turbo.toml (Z-A, OoT; MKW's patches are its recomp.txt), sdk + engine");
+    assert_eq!(files.len(), 29 + 2 + 2, "29 patches.py, the owner's owner.toml (Z-A, OoT; MKW's patches are its recomp.txt), sdk + engine");
     assert!(entries > 150, "{entries}");
 }
 
@@ -201,7 +201,7 @@ fn za_60fps_is_applied_at_build() {
     assert!(text.is_empty());
 }
 
-/// Turbo nxloader.py BUILTIN_PATCHES: Ocarina of Time's full resolution (main+0x805BD0, 0x360041E8 -> 0x1400020F)
+/// The owner's built-in patch: Ocarina of Time's full resolution (main+0x805BD0, 0x360041E8 -> 0x1400020F)
 /// on its v131072 main, as a switchable set.
 #[test]
 fn oot_fullres_is_applied_at_build() {

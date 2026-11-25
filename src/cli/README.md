@@ -1,7 +1,7 @@
 # cli (`nxrs-build`)
 
 The engine's command line: the build (package → data folder → C → shaders → code DLL + loader), updates, DLC, and
-the launcher contract (v1 drop-in for Turbo's `switchrecomp.py`, v2 subcommands): [docs/LAUNCHER_CONTRACT.md](../../docs/LAUNCHER_CONTRACT.md).
+the launcher contract (v1 the Qt launcher's legacy command line, v2 subcommands): [docs/LAUNCHER_CONTRACT.md](../../docs/LAUNCHER_CONTRACT.md).
 
     nxrs-build build <input> [-o <name>] [--outdir <dir>] [--jobs N] [--update <pkg> | --no-update] [--keys <file>]
                      [--no-build] [--no-shaders] [--chunk N] [--native] [-q] [--machine]
@@ -10,7 +10,7 @@ the launcher contract (v1 drop-in for Turbo's `switchrecomp.py`, v2 subcommands)
     nxrs-build profile [<title id> [<main build id>]] [--package <input>]
     nxrs-build doctor | contract
     nxrs-build translate <input> --out <dir>                      (development: C + data folder, for nxrt-dev e2e)
-    nxrs-build <input> --outdir <dir> -o <name> ...                (contract v1: Turbo's options)
+    nxrs-build <input> --outdir <dir> -o <name> ...                (contract v1: the legacy options)
 
 Build and test: `cargo build --release -p nxrs-cli -p runtime -p front` (`nxrs-build.exe` finds `nxfront.lib` and `nxrt.lib` beside
 itself), `cargo test -p nxrs-cli`. Input: a folder, NSP, XCI, NUP or a homebrew NRO.
@@ -23,8 +23,8 @@ itself), `cargo test -p nxrs-cli`. Input: a folder, NSP, XCI, NUP or a homebrew 
 | Profile | `profiles::lookup(title id, main build id)`; its build-time patches become the translator's patch table |
 | Translate | `translator::aot::generate` into `<name>_build\gen`, `jobs` threads; skipped when nothing it reads changed (`gen\nxrs.gen.key`: this executable, the ExeFS, the patch table, the options) |
 | Data | `Game::write_data` into `<name>_data` (the RomFS marker, ExeFS (names Windows cannot hold refused: CON, NUL, COM1, a trailing dot or space), control.nacp, icon); `<name>.ini` when missing; `@progress data` |
-| Shaders | on a thread beside the compile (Turbo 6d04b3b), at most 4 translators: `shaders::prebuild_data(<name>_data)`, every shader found and translated into `<name>_data\shaders\` (an unchanged one is reused), `@progress shaders <done> <found>` as they go; the profile's nxnative shader tables into `shaders\profile\`. Never fatal: a failure is a warning, the game's live translator covers it |
-| Compile | every chunk, table and `modules.c` with clang, `jobs` at a time (default: the CPU count, as Turbo), the largest first; `SWR_CFLAGS` (white-space separated) added to the game code's flags and to the object keys |
+| Shaders | on a thread beside the compile, at most 4 translators: `shaders::prebuild_data(<name>_data)`, every shader found and translated into `<name>_data\shaders\` (an unchanged one is reused), `@progress shaders <done> <found>` as they go; the profile's nxnative shader tables into `shaders\profile\`. Never fatal: a failure is a warning, the game's live translator covers it |
+| Compile | every chunk, table and `modules.c` with clang, `jobs` at a time (default: the CPU count), the largest first; `NXRS_CFLAGS` (white-space separated) added to the game code's flags and to the object keys |
 | Link | `<name>_code.dll` (objects + `nxfront.lib`, the whole engine, for a retail title; `nxrt.lib` for the runtime's homebrew) and `<name>.exe` (the loader) |
 
 **Compiler.** With Visual Studio's C++ build tools installed: clang for `x86_64-pc-windows-msvc` (the engine's ABI),
@@ -43,7 +43,7 @@ crate's import library). Flags: mkw-recomp's game-code set, `-std=gnu11 -O1 -fno
 plus `-fms-runtime-lib=dll` on MSVC; `--native` builds for `-march=native` instead. A retail title's code is compiled
 with os's `cpu.h` overlay first (SVCs, the counter and spin waits to the os layer).
 
-**Turbo's options (contract v1).** Every `switchrecomp.py` option is accepted: `--chunk N` (ARM instructions per C
+**The legacy options (contract v1).** Every option of the Qt launcher's command line is accepted: `--chunk N` (ARM instructions per C
 file; the default lets the translator size chunks), `--native` (`-march=native`), `--no-build`, `--no-shaders`,
 `--keep-c` (the C is always kept), `--dlc-stub`, the DLC, update and `--update-info` options, `-q`, `--build-runtime`
 (checks the engine libraries and the compiler). Launcher-agreed replacements (docs/LAUNCHER_CONTRACT.md): `-O`
@@ -81,7 +81,6 @@ when it is redirected). The same 11 KB file serves every game.
 | cold, `--jobs 8` (what the launcher passes) | 70.5 s (translate 4.9, compile 64.9, link 0.6) |
 | one chunk changed | 6.5 s (1 of 125 units compiled in 5.8 s, link 0.5) |
 | nothing changed | 0.75 s |
-| Turbo, same launcher command (gcc -O2, `--jobs 8`) | 353 s |
 
 The DLL is 80 MB and imports only system DLLs and the MSVC runtime (`VCRUNTIME140.dll`, the UCRT). Pokémon Legends:
 Z-A (Switch 2 Edition NUP, 270,366 functions, 1.05 GB of C, with the profile's 60 FPS patch) builds cold in 233.7 s at
@@ -108,13 +107,13 @@ Mods are the player's files: nxrs never ships or downloads one.
 
 | File | What |
 |---|---|
-| `main.rs` | argument parsing: contract v1 (Turbo's options) and v2 (subcommands); update-info, DLC, doctor, translate |
+| `main.rs` | argument parsing: contract v1 (the legacy options) and v2 (subcommands); update-info, DLC, doctor, translate |
 | `pipeline.rs` | `build`: the steps above, the output layout, `modules.c` |
 | `cc.rs` | clang discovery, flags, the chunk cache and compile pool, the DLL and loader links, the loader's C |
 | `profile.rs` | the build's profile line and patch table; `nxrs-build profile` |
 | `mods.rs` | the player's mods (below) |
 | `out.rs` | console lines (CRLF, flushed), `-q`, the v2 `@progress` / `@result` lines |
-| `launcher/switchrecomp.py` | the v1 shim the launcher's `recomp_cli.py` imports: runs `nxrs-build.exe` |
+| `launcher/` | the v1 shim, the module the Qt launcher's `recomp_cli.py` imports: runs `nxrs-build.exe` |
 
 ## Not done
 

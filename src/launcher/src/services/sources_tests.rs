@@ -1,10 +1,10 @@
 //! Sources and builds on disk (`importedBuildBringsItsUpdate`, `importChecksAllArtifacts`,
-//! `combinedNspBuild`, `nspSourceClassification`, `xciSourceIsAnNxrsGame`, Turbo entries).
+//! `combinedNspBuild`, `nspSourceClassification`, `xciSourceIsAnNxrsGame`, the `[nxrs]` folder).
 
 use super::build_facts::{facts, has_build, playable, update_pending, version};
 use super::library_file::{Store, load};
 use super::library_ops::{add, import_build};
-use super::markers::{adopt_built_update, adopt_package_dlc, built_with_nxrs, set_game_engine};
+use super::markers::{adopt_built_update, adopt_package_dlc};
 use super::services_tests::{built_game, tmp, write};
 use super::sources::{game_from_executable, game_from_source, valid_source};
 use crate::constants::engine as e;
@@ -160,56 +160,37 @@ fn nsp_and_xci_sources() {
     assert!(valid_source(&bad).unwrap_err().contains("XCI"));
 }
 
-/// Every new game is nxrs's; a Turbo entry needs an nxrs build, which moves it to its `[nxrs]`
-/// folder and reads back what is built there.
+/// Every new game builds into its `[nxrs]` folder and plays from there; an entry saved without an
+/// engine loads as nxrs, moved to its `[nxrs]` folder, and needs a build.
 #[test]
-fn turbo_entries_need_an_nxrs_build() {
+fn games_build_into_their_nxrs_folder() {
     let (_t, dir) = tmp();
     let source = format!("{dir}/Kart [v0].nsp");
     write(&source, b"PFS0");
     let mut game = game_from_source(&source, "");
     assert!(game.nxrs() && game.build_dir.ends_with("/Kart [nxrs]"));
-    assert_eq!(
-        game_json::from_json(&serde_json::json!({"id": "x", "title": "Old"})).engine,
-        e::ENGINE_TURBO
-    );
     let nxrs_dir = game.build_dir.clone();
-    assert!(set_game_engine(&mut game, false));
-    let turbo_dir = game.build_dir.clone();
+    let mut old = game_json::to_json(&game);
+    old["engine"] = serde_json::Value::Null;
+    old["buildDir"] = serde_json::json!(nxrs_dir.trim_end_matches(e::NXRS_FOLDER_SUFFIX));
+    let moved = game_json::from_json(&old);
+    assert!(moved.nxrs() && moved.build_dir == nxrs_dir && !has_build(&moved));
+    let s = card_state(&facts(&moved), false, false, false, true);
+    assert!(s.action == "Build" && s.status == "Needs build");
+    assert_eq!(build_folder_for(&format!("{nxrs_dir}/")), nxrs_dir);
     for p in [game.executable(), game.code_module()] {
-        write(&p, b"x");
-    }
-    std::fs::create_dir_all(game.data_dir()).unwrap();
-    game.built_source = game.source.clone();
-    assert!(has_build(&game) && !playable(&game));
-    let s = card_state(&facts(&game), false, false, false, true);
-    assert!(s.action == "Build" && s.status == "Needs nxrs build" && s.action_enabled);
-    assert!(set_game_engine(&mut game, true) && game.build_dir == nxrs_dir && !has_build(&game));
-    assert_eq!(build_folder_for(&format!("{nxrs_dir}/"), true), nxrs_dir);
-    for p in [
-        game.executable(),
-        game.code_module(),
-        format!(
-            "{}/{}_build/gen/nxrs.gen.key",
-            game.build_dir, game.output_name
-        ),
-    ] {
         write(&p, b"x");
     }
     write(
         &format!("{}/romfs.nsp", game.data_dir()),
         format!("SWRNSP2\n{}\nkeys k\n", native(&source)).as_bytes(),
     );
-    assert!(
-        built_with_nxrs(&game.build_dir, &game.output_name)
-            && !built_with_nxrs(&turbo_dir, &game.output_name)
-    );
-    assert!(set_game_engine(&mut game, false) && set_game_engine(&mut game, true));
-    assert!(playable(&game), "the nxrs folder's build counts again");
+    game.built_source = game.source.clone();
+    assert!(playable(&game), "the nxrs folder's build plays");
     let imported = game_from_executable(&game.executable()).unwrap();
     let mut library = Library::new(&format!("{dir}/library.json"));
     let mut unbuilt = game_from_source(&source, "");
-    (unbuilt.engine, unbuilt.build_dir) = (e::ENGINE_TURBO.into(), format!("{dir}/elsewhere/Kart"));
+    unbuilt.build_dir = format!("{dir}/elsewhere/Kart");
     assert!(add(&mut library, unbuilt.clone()));
     assert_eq!(import_build(&mut library, &imported), unbuilt.id);
     assert!(playable(&library.games[0]));

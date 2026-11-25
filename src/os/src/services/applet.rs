@@ -1,6 +1,6 @@
 //! The applet manager's IPC path (`appletOE` / `appletAE`) for library applets an SDK starts itself (nn::la over
 //! nn::applet), where no takeover by name (`mii.rs` AppendMii, `swkbd.rs`, the controller applet in `hid.rs`)
-//! catches it first. Turbo's design (9ae9441), reimplemented: the proxy hands out the library applet creator; an
+//! catches it first. The proxy hands out the library applet creator; an
 //! applet "runs" and is completed at once, its output is what a player closing it would give:
 //!
 //! * MiiEdit (0x12): MiiEditAppletOutput { u32 result = 1 (cancelled); s32 index = -1 } in 0x100 bytes. Zeros read as
@@ -290,7 +290,7 @@ mod tests {
     }
 
     /// The MiiEdit applet over IPC, as an SDK's nn::la drives it: appletOE's proxy, the creator, the applet (its
-    /// input pushed, started, completed), its output popped and read: Turbo's reply (cancelled, index -1, 0x100
+    /// input pushed, started, completed), its output popped and read: the reply (cancelled, index -1, 0x100
     /// bytes), once.
     #[test]
     fn mii_edit_applet_over_ipc_answers_cancelled() {
@@ -349,7 +349,7 @@ mod tests {
             }],
         );
         assert_eq!(r.result, 0);
-        // Turbo 9ae9441: u8 r[0x100] = {0}; r[0] = 1; r[4..8] = 0xFF
+        // u8 r[0x100] = {0}; r[0] = 1; r[4..8] = 0xFF
         let mut want = [0u8; 0x100];
         want[0] = 1;
         want[4..8].fill(0xff);

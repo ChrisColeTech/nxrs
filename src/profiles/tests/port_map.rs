@@ -1,6 +1,6 @@
 //! PORT_MAP.tsv (the repository root) is well formed: every row names its tree, a file, its line count, where it went,
 //! an action and a status from plan section 4, once. Completeness against the source trees needs the trees:
-//! `py -I scripts/port_map.py --check` (it regenerates and compares when nxnative, Turbo and mkw-recomp are present).
+//! `py -I scripts/port_map.py --check` (it regenerates and compares when nxnative and mkw-recomp are present).
 
 use std::collections::HashSet;
 
@@ -30,7 +30,7 @@ fn port_map_rows_are_well_formed() {
         let c: Vec<&str> = row.split('\t').collect();
         assert_eq!(c.len(), 7, "row {}: {row}", i + 2);
         assert!(
-            ["NX", "TB", "MR"].contains(&c[0]),
+            ["NX", "MR"].contains(&c[0]),
             "row {}: tree {}",
             i + 2,
             c[0]
@@ -44,6 +44,6 @@ fn port_map_rows_are_well_formed() {
         assert!(seen.insert((c[0], c[1])), "duplicate {} {}", c[0], c[1]);
         trees.insert(c[0]);
     }
-    assert_eq!(trees.len(), 3, "rows of all three trees");
-    assert!(seen.len() > 5000, "{} rows", seen.len());
+    assert_eq!(trees.len(), 2, "rows of both trees");
+    assert!(seen.len() > 4000, "{} rows", seen.len());
 }

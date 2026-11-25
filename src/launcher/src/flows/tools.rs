@@ -4,8 +4,8 @@
 use super::App;
 use crate::constants::{engine as e, words_build as w};
 use crate::model::path_text::absolute;
+use crate::services::run;
 use crate::services::toolchain::Toolchain;
-use crate::services::{markers, run};
 use std::sync::mpsc::channel;
 
 impl App {
@@ -78,23 +78,12 @@ impl App {
         self.doctor_rx = Some(rx);
     }
 
-    /// `--engine`: nxrs only (Turbo is no longer supported); refused for a busy game.
+    /// `--engine`: kept for older scripts; nxrs is the only engine, refused for a busy game.
     pub fn set_engine(&mut self, engine: &str) -> bool {
         let Some(id) = self.selected_id() else {
             return false;
         };
-        if engine != e::ENGINE_NXRS || self.demo || self.busy(&id) {
-            return false;
-        }
-        if self
-            .lib
-            .find_mut(&id)
-            .is_some_and(|g| markers::set_game_engine(g, true))
-        {
-            self.save();
-            self.refresh_facts();
-        }
-        true
+        engine == e::ENGINE_NXRS && !self.demo && !self.busy(&id)
     }
     /// `--nxrs-build`: saved; empty = the bundled one.
     pub fn set_nxrs_build(&mut self, path: &str) {

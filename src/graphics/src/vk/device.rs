@@ -263,11 +263,13 @@ impl Device {
             None
         };
 
-        // The device: NXGFX_GPU names one (substring of its name), else the discrete GPU with the most local memory.
+        // The device: NXGFX_GPU names one — its index in Vulkan's device list ("1"), needed when two GPUs share a
+        // name, or a substring of its name — else the discrete GPU with the most local memory (the first on a tie).
         let pdevs = unsafe { instance.enumerate_physical_devices() }.map_err(|e| format!("{e}"))?;
         let want = std::env::var("NXGFX_GPU").ok();
+        let want_index = want.as_deref().and_then(|w| w.trim().parse::<usize>().ok());
         let mut best: Option<(vk::PhysicalDevice, u64)> = None;
-        for &p in &pdevs {
+        for (i, &p) in pdevs.iter().enumerate() {
             let pr = unsafe { instance.get_physical_device_properties(p) };
             if pr.api_version < vk::API_VERSION_1_3 {
                 continue;
@@ -285,16 +287,20 @@ impl Device {
             if pr.device_type == vk::PhysicalDeviceType::DISCRETE_GPU {
                 score += 1 << 50;
             }
-            if let Some(w) = &want {
-                if name.to_lowercase().contains(&w.to_lowercase()) {
-                    score += 1 << 60;
-                }
+            let named = match (want_index, &want) {
+                (Some(n), _) => n == i,
+                (None, Some(w)) => name.to_lowercase().contains(&w.to_lowercase()),
+                (None, None) => false,
+            };
+            if named {
+                score += 1 << 60;
             }
             if best.is_none_or(|b| score > b.1) {
                 best = Some((p, score));
             }
         }
         let pdev = best.ok_or("no Vulkan 1.3 device")?.0;
+        let pidx = pdevs.iter().position(|&p| p == pdev).unwrap_or(0);
         let props = unsafe { instance.get_physical_device_properties(pdev) };
         let mem_props = unsafe { instance.get_physical_device_memory_properties(pdev) };
         let name = unsafe { CStr::from_ptr(props.device_name.as_ptr()) }
@@ -563,7 +569,7 @@ impl Device {
         );
         let en_base = vk::PhysicalDeviceFeatures {
             // reads past a bound buffer's range return in-range data or zero instead of faulting the GPU: on by default on
-            // NVIDIA (Turbo, Ryujinx). Mario Kart World's GPU resets were a task shader's read of 0xca19c6000 (a device
+            // NVIDIA (as Ryujinx). Mario Kart World's GPU resets were a task shader's read of 0xca19c6000 (a device
             // fault report of lane K's run 20261120-040222-K-mkw13-demote). NXGFX_ROBUST=0 off, =1 on other GPUs too
             robust_buffer_access: if robustness.buffer_access {
                 vk::TRUE
@@ -827,7 +833,7 @@ impl Device {
         };
         let li = shadow.as_ref().unwrap_or(&instance);
         crate::vklog!(
-            "device {name} (Vulkan {}.{}.{}), validation {}, host import {} (align {:#x}), divisor {}, index u8 {}, mesh shaders {}, transform feedback {}, pipeline libraries {}, descriptor buffers {}",
+            "device {pidx} {name} (Vulkan {}.{}.{}), validation {}, host import {} (align {:#x}), divisor {}, index u8 {}, mesh shaders {}, transform feedback {}, pipeline libraries {}, descriptor buffers {}",
             vk::api_version_major(props.api_version),
             vk::api_version_minor(props.api_version),
             vk::api_version_patch(props.api_version),

@@ -26,7 +26,7 @@ pub const DEVINFO: [i32; 0x69] = [
 
 /// An NVN2 item the driver reads from the GPU's own description at run time (not knowable from the binary).
 const RT: i32 = -1;
-/// The Switch 2's answers (Turbo's g_devinfo2: NVN2 compiled into the game's sdk answers from constants, read from
+/// The Switch 2's answers (NVN2 compiled into the game's sdk answers from constants, read from
 /// Donkey Kong Bananza's sdk 20.5.19 and SDK 21.4.4's). Ampere differs from the X1 in 32 vertex bindings, 1,024
 /// compute threads, an unbounded dispatch width, 16 texture levels, 16 KB scratch granularity, 2 KB shader code
 /// padding, 32 separate sampler bindings, and items up to 0xA9. `RT` items keep the X1 value below 0x60 and answer 0
@@ -54,7 +54,7 @@ pub const DEVINFO2: [i32; 0xAA] = [
 static NVN2_ITEMS: std::sync::OnceLock<Vec<Option<i32>>> = std::sync::OnceLock::new();
 
 /// The game's sdk module as loaded (text and data at their offsets from the module's start): the Switch 2's device
-/// answers come from its driver's switch where it has a constant case (Turbo's dm_sdk_nvn2_item). os calls this once
+/// answers come from its driver's switch where it has a constant case. os calls this once
 /// before nvnDeviceInitialize; without it the table above answers.
 pub fn set_sdk_image(img: &[u8]) {
     let items = nvn2_items(img);

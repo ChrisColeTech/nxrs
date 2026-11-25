@@ -1,13 +1,13 @@
 //! The sound card: every audio stream of the game (each audio renderer's output, each AudioOut) is a queue of
 //! 48 kHz stereo blocks that one output device plays, mixed. The device is the system's default output through
 //! WASAPI (cpal), in its own format and rate (resampled linearly from 48 kHz). A block goes back to its producer
-//! (released, with its tag) once a 48 kHz wall clock has gone past its end (as Turbo's audout clock: the guest's
+//! (released, with its tag) once a 48 kHz wall clock has gone past its end (the audout clock: the guest's
 //! buffers come back in real time, smoothly every 2 ms, not when the device's callback or the slowed-down playback
 //! reaches them; the samples were copied at append), and the producer's release hook runs on a host thread. A
 //! producer paced by its releases (two 5 ms buffers in flight, Beach Bounce) so keeps real time, and its queue
 //! fills the playback's reserve instead of draining it at every device period.
 //!
-//! Smooth slowdown (`audio_slowdown`, Turbo's option, on by default): when a stream runs short because the PC
+//! Smooth slowdown (`audio_slowdown`, on by default): when a stream runs short because the PC
 //! cannot produce its sound in real time, it plays slower, eased toward the fill of its queue, instead of breaking
 //! into gaps; every queued sample is kept. Off, a stream that runs dry is an underrun: its last sample fades out
 //! and the gap is counted. A stream starts playing once it holds 50 ms or has waited 50 ms. The mix goes through a
@@ -20,7 +20,7 @@
 //! silence, faded over 10 ms; the streams play on at their pace (the game is not slowed or told), and a recording
 //! (the tap) keeps the sound.
 //!
-//! Diagnostics (Turbo 9ce9b8e, nxnative DM_AUDIO_*): every 5 s of output the log gets each channel's RMS and the
+//! Diagnostics (nxnative DM_AUDIO_*): every 5 s of output the log gets each channel's RMS and the
 //! peak (silence once, then every minute; sound every 5 s for the first 5 minutes, then every minute), so "is there
 //! sound" can be read from a log; `NXOS_AUDIO_DEVICE=<part of a name>` plays on that output device instead of the
 //! default (a name no device has: the default, said in red); `NXOS_AUDIO_DUMP=<file.wav>` writes the mix as it goes
@@ -382,7 +382,7 @@ pub fn report() -> Vec<String> {
     v
 }
 
-/// The game's sound as it produced it, for F7 (Turbo rec_audio_time.h's design, reimplemented): every stream's
+/// The game's sound as it produced it, for F7: every stream's
 /// appended blocks are mixed on the game clock's timeline, before the slowdown (which stretches what the sound card
 /// plays) and the device's limiter. A block is placed so that it ends now; when that is within 10 ms of where the
 /// stream's last block ended, it follows it (the event jitter snaps to the sample clock, real gaps stay). Mixed
@@ -985,7 +985,7 @@ fn open_device(lost: Arc<AtomicBool>) -> Result<(cpal::Stream, String), String> 
 mod tests {
     use super::*;
 
-    /// F7's timeline (Turbo rec_audio_time.h's rules): a block ends where it arrives, follows its stream's last one
+    /// F7's timeline: a block ends where it arrives, follows its stream's last one
     /// when that is within 10 ms, real gaps stay; two streams mix; frames come out LAG behind, gaps silent.
     #[test]
     fn timeline_mixes_streams_on_the_game_clock() {
@@ -1042,7 +1042,7 @@ mod tests {
         t0 + Duration::from_micros(n * 1000)
     }
 
-    /// The output measured every 5 s (Turbo 9ce9b8e's line): a 0.5 square wave's RMS and peak; silence said once,
+    /// The output measured every 5 s: a 0.5 square wave's RMS and peak; silence said once,
     /// then every 12th time (a minute); sound every 5 s while the first 60 lines last.
     #[test]
     fn rms_and_peak_line_every_5_s() {

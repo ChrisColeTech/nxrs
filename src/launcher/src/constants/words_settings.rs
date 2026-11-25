@@ -26,8 +26,6 @@ pub const PATHS_NOTE: &str =
 pub const RUNTIME_NOTE: &str = "Other runtime options remain in the game's INI; the background settings are in Settings > Play. The screen mode and the controller layout are saved right away (their defaults are in Settings > Play and Settings > Controller).";
 pub const ARTWORK_NOTE: &str = "The background follows your selected game and is dimmed behind the gallery. Leave it empty to use the cover. Clear both paths to restore generated artwork.";
 pub const ENGINE_NXRS: &str = "nxrs";
-pub const ENGINE_TURBO: &str =
-    "Turbo — no longer supported: Build makes an nxrs build (in the [nxrs] folder)";
 pub const VULKAN: &str = "Vulkan";
 pub const USE_DEFAULT: &str = "Use default";
 pub const NOT_BUILT: &str = "Not built";

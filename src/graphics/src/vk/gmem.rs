@@ -1,4 +1,4 @@
-//! Raw global memory: a shader's reads and writes at addresses it loaded from memory (Turbo 78ece7b, nxnative's
+//! Raw global memory: a shader's reads and writes at addresses it loaded from memory (nxnative's
 //! design; the translator's GlobalToStorage.TryGenerateRawStorageOp).
 //!
 //! Such an access cannot be given a buffer of its own. The translator reserves two storage buffers under constant

@@ -143,10 +143,12 @@ multiplied per state).
 - **Pipeline libraries** (VK_EXT_graphics_pipeline_library): vertex input, pre-rasterization, fragment shader and
   fragment output parts compiled once each; a new combination is only linked (about 1 ms against 50-250 ms), and the
   optimized whole pipeline replaces it from a background thread. `NXGFX_GPL=0`: whole pipelines only;
-  `NXGFX_PART_LTO=1` retained parts; `NXGFX_PARTS_PRIVATE_MB` (6 GB) stops making parts ahead.
+  `NXGFX_PART_LTO=1` retained parts; `NXGFX_PARTS_PRIVATE_MB` (an eighth of the machine's memory, at least 6 GB)
+  stops making parts ahead.
 - **Key file and prewarm:** new keys are appended to a key file in `NXGFX_CACHE` (default the data folder); the next
-  run builds them on background threads (`NXGFX_PREWARM_THREADS` 4) up to `NXGFX_PREWARM_BUDGET_MB` (2048) private
-  memory or `NXGFX_PREWARM_MAX` (50,000) pipelines.
+  run builds them on background threads (`NXGFX_PREWARM_THREADS` 4), the latest runs' keys first, up to
+  `NXGFX_PREWARM_BUDGET_MB` (a sixteenth of the machine's memory, 2048-8192) private memory or `NXGFX_PREWARM_MAX`
+  (50,000) pipelines.
 - **First run:** with fewer than `NXGFX_PROFILE_PREWARM_MIN` (64) keys, the profile's pipeline manifest seeds the
   prewarm (`pipe::prewarm_profile`, `NXGFX_PROFILE_PREWARM=0` off).
 - **VkPipelineCache on disk** (`vk::pcache`): saved a few seconds after new pipelines stop (`NXGFX_PCACHE_QUIET_MS`,

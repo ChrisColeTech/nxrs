@@ -964,6 +964,13 @@ hidfn!(vib_many, |a| {
     }
     RES_OK
 });
+// nn::hid::system::PermitVibration(bool) (and its detail:: twin; both in the SDK, Donkey Kong Bananza's included): false
+// silences the HD rumble pads and mutes them until it is permitted again; IsVibrationPermitted reflects it
+hidfn!(vib_permit, |a| {
+    input::rumble::permit(a.x(0) & 1 != 0);
+    0
+});
+hidfn!(vib_permitted, |a| { input::rumble::permitted() as u64 });
 hidfn!(vib_actual, |a| {
     let o = a.x(0);
     crate::guest::zero(o, 16);
@@ -1124,7 +1131,9 @@ pub fn register(r: &mut Registry) {
         ("18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", vib_one),
         ("6detail19SendVibrationValuesEPKNS0_21VibrationDeviceHandleEPKNS0_14VibrationValueEi", vib_many),
         ("23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", vib_actual),
-        ("20IsVibrationPermittedEv", one),
+        ("20IsVibrationPermittedEv", vib_permitted),
+        ("6system15PermitVibrationEb", vib_permit),
+        ("6detail15PermitVibrationEb", vib_permit),
         ("27BeginForcedVibrationSessionEv", nothing),
         ("25EndForcedVibrationSessionEv", nothing),
         ("21InitializeTouchScreenEv", nothing),
