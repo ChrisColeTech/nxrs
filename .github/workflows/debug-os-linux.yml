@@ -56,9 +56,10 @@ jobs:
         run: |
           bin=$(ls -t target/debug/deps/nxos-* | grep -v '\.d$' | head -1)
           echo "binary: $bin"
-          echo "=================== whole binary, one thread"
-          timeout 1200 gdb -batch -q -ex run -ex bt -ex 'info threads' --args "$bin" --test-threads=1 2>&1 \
-            | grep -v '^\[New Thread\|^\[Thread .* exited\]\|ALSA lib' | tail -80 || true
-          echo "=================== whole binary, default threads"
-          timeout 1200 gdb -batch -q -ex run -ex 'thread apply all bt 8' --args "$bin" 2>&1 \
+          echo "=================== whole binary, one thread, no debugger (the last 'test X ...' is the crasher)"
+          timeout 1200 "$bin" --test-threads=1 2>&1 | grep -v 'ALSA lib' | grep -E '^test |test result|signal|panicked' | tail -15 || true
+          echo "exit: ${PIPESTATUS[0]}"
+          echo "=================== whole binary, default threads, gdb passing the SIGSEGVs the engine handles"
+          timeout 1200 gdb -batch -q -ex 'handle SIGSEGV nostop noprint pass' -ex 'handle SIGBUS nostop noprint pass' \
+            -ex run -ex 'thread apply all bt 10' --args "$bin" 2>&1 \
             | grep -v '^\[New Thread\|^\[Thread .* exited\]\|ALSA lib' | tail -120 || true
