@@ -165,7 +165,13 @@ SN T FN(redo)(Cpu *c, int op, T a, T b, T d, T r) {
 }
 
 // Scalar FP op (constant op folds the selection). RMode = nearest runs on the host, with or without FZ.
+// wasm has no FTZ / DAZ: under FPCR.FZ the software path flushes inputs and tiny results (docs/35 W2; Anime Girls runs
+// with FZ). One case stays approximate there: a result rounded up to the smallest normal from just below it is kept
+// (the recompute toward zero needs a rounding mode wasm lacks).
 SI T FN(op)(Cpu *c, int op, T a, T b, T d) {
+#if defined(__wasm__)
+    if (__builtin_expect((c->fpcr & FPCR_FZ) != 0, 0)) return FN(slow)(c, op, a, b, d);
+#endif
     if (simd_directed(c)) return FN(slow)(c, op, a, b, d);
     if (FMINMAX(op)) {
         if (c->fpcr & FPCR_FZ) a = FN(flush)(a), b = FN(flush)(b);
@@ -200,6 +206,10 @@ SI VT FN(vflush)(VT a) {
 
 // Vector FP op: native lanes; any lane FREDO flags (or FPCR.RMode) reruns all lanes through the scalar path.
 SI VT FN(vop)(Cpu *c, int op, VT a, VT b, VT d) {
+#if defined(__wasm__)
+    // FZ: lane by lane through the software flush (FN(op) above)
+    if (__builtin_expect((c->fpcr & FPCR_FZ) != 0, 0)) return FN(vslow)(c, op, a, b, d);
+#endif
     if (simd_directed(c)) return FN(vslow)(c, op, a, b, d);
     VT r;
     if (FMINMAX(op)) {

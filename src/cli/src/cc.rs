@@ -1155,6 +1155,8 @@ pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir
             "-sDEFAULT_PTHREAD_STACK_SIZE=8MB",
             "-sERROR_ON_UNDEFINED_SYMBOLS=0",
             "-sWARN_ON_UNDEFINED_SYMBOLS=0",
+            // the page (src/web/boot.js) maps the data folder into the file system before main
+            "-sEXPORTED_RUNTIME_METHODS=FS,addRunDependency,removeRunDependency",
         ])
         .args(&extra)
         .arg(format!("@{}", rsp.display()))
