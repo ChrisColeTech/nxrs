@@ -105,8 +105,16 @@ runs), one `oot`; every sheet and report.md read.
   not mean the cause was gone; this wave's count is 1 in 61 shots of the house. A follow-up `oot --faults` run is
   below.
 - `20261126-093834-u2-faults-oot`: stopped by the harness as hung at 378 s: one frame at the forest load took 31.3 s,
-  29.6 s of it texture uploads (`u2-oot`'s same frame: 8.4 s, 6.9 s texture uploads); not pool sync. Not counted;
-  re-run with `--stall 90`.
+  29.6 s of it texture uploads (`u2-oot`'s same frame: 8.4 s, 6.9 s texture uploads); not pool sync. Not counted.
+- `20261126-094543-u2-faults-oot-b` (`--stall 90`): **OFF-ROUTE** (FPS invalid). Eleven frames of 6-68 s, mostly with
+  the guest idle (no submits, all cores asleep, replay < 10 ms: the game was not waiting on the GPU), from 45 s on,
+  so the timed inputs ran ~100 s ahead of the game. Its pictures are all correct, only late. Both this run and the one
+  above (09:38-10:01) were slow; the runs before and after on the same binary had one 7-9 s load stall each, as the
+  previous wave's runs did: machine-side, not identified (nothing heavy was running when I looked at 10:02).
+- `20261126-100211-u2-faults-oot-c` (`--faults --stall 90`): completed, on route (6/6), 18.5 / 13.0 FPS; all 30 shots
+  correct, house and walk included; 11 fault captures, the same legitimate set as the dense runs plus the known
+  full-black frame after the scene-change stand-in burst (449 s); no capture in the house. Raced-copy counter 0.
+- House pictures over the wave: 1 wrong (`u2-oot/23-walk3`) in 96 on-route shots (60 dense, 36 in two `oot` runs).
 
 ### 4. Needs audit
 
@@ -124,7 +132,7 @@ runs), one `oot`; every sheet and report.md read.
 
 ### 5. Unproven
 
-- **The white-props frame is not fixed** (1 in 61 house shots here, `u2-oot/23-walk3`; 0 in the previous wave's 90
+- **The white-props frame is not fixed** (1 in 96 house shots here, `u2-oot/23-walk3`; 0 in the previous wave's 90
   fixed shots; seen with the skip off in the first wave). This wave's changes do not show a path to it, and nothing
   logged near it. Next: catch it with `--faults` (the white area there is large) to see whether it is one frame and
   which draws; an A/B against `ade9a6c` needs ~100+ shots a side at this rate.
