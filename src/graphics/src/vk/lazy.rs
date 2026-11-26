@@ -391,7 +391,7 @@ pub fn bring_back(p: u64) -> bool {
         return ok;
     };
     let t0 = std::time::Instant::now();
-    let data = read_page(g, l.buf, l.off);
+    let (data, upto) = read_page(g, l.buf, l.off);
     BACK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     // The write watch is not reset (MKW-RECORD L6): the copy's store below reads as a CPU write, and the upload skip
     // leaves the page out at its pool's next sync while it still holds exactly these bytes (`upskip::brought_back`),
@@ -401,7 +401,7 @@ pub fn bring_back(p: u64) -> bool {
     // the reset: that write never reached the GPU. With the skip off (`NXGFX_UPLOAD_SKIP=0`) the old reset stays.
     let skip = super::upskip::on();
     if skip {
-        super::upskip::brought_back(l.pool, p, &data);
+        super::upskip::brought_back(l.pool, p, &data, upto);
     }
     if !protect(p, true) || !accessible(p) {
         // the page is no longer the one made lazy (unmapped or decommitted since): nothing to bring back; the access
@@ -413,7 +413,12 @@ pub fn bring_back(p: u64) -> bool {
         done();
         return false;
     }
-    // SAFETY: the guest page, accessible again; other threads' faults on it wait in `returning` until it is filled
+    // SAFETY: the guest page, accessible again. Only threads that faulted before `protect` above wait in `returning`;
+    // from `protect` until this copy ends, other threads reach the page without faulting: a read there sees the guest's
+    // older bytes, and a store there is overwritten by the copy (UPSYNC2 L3). Guest memory is plain committed memory
+    // with no second view to fill it through first, so the gap stays (a few microseconds); the pool sync drops its
+    // upload of a page brought back while it copied it (`upskip::upload_changed` step 5), so its torn copy never reaches
+    // the GPU
     unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, PAGE as usize) };
     if !skip {
         super::mem::reset_watch(p, PAGE);
@@ -455,12 +460,14 @@ struct Reader {
 unsafe impl Send for Reader {}
 static READER: Mutex<Option<Reader>> = Mutex::new(None);
 
-/// One page of a pool buffer, copied by a submission of its own after everything submitted so far.
-fn read_page(g: &Gpu, buf: vk::Buffer, off: u64) -> Vec<u8> {
+/// One page of a pool buffer, copied by a submission of its own after everything submitted so far, and the GPU timeline
+/// value its bytes include (every submission up to it; later ones submitted before the copy may be in them too).
+fn read_page(g: &Gpu, buf: vk::Buffer, off: u64) -> (Vec<u8>, u64) {
     // what the device holds once the work already submitted is done: a wait on the GPU timeline itself, not on the
     // completion thread's bookkeeping (the completion thread may be the one asking)
     let sems = [g.q.timeline];
-    let vals = [g.q.last_fence()];
+    let upto = g.q.last_fence();
+    let vals = [upto];
     unsafe {
         g.dev().wait_semaphores(
             &vk::SemaphoreWaitInfo::default()
@@ -538,7 +545,7 @@ fn read_page(g: &Gpu, buf: vk::Buffer, off: u64) -> Vec<u8> {
         let si = [vk::SubmitInfo2::default().command_buffer_infos(&cbs)];
         super::queue::submit_raw(g, &si, r.fence);
         d.wait_for_fences(&[r.fence], true, u64::MAX).ok();
-        core::slice::from_raw_parts(r.stage.ptr, PAGE as usize).to_vec()
+        (core::slice::from_raw_parts(r.stage.ptr, PAGE as usize).to_vec(), upto)
     }
 }
 

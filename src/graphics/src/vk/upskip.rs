@@ -28,19 +28,23 @@ use std::sync::Mutex;
 const PAGE: u64 = 4096;
 
 /// A page's GPU-copy knowledge: the hash of its bytes (0: unknown), the hash parked by a GPU-write note, the
-/// recording epoch that noted it (0: none; `COPYING` while the pool sync copies it for an upload), and the hash of the
-/// bytes a lazy write-back brought back from this pool's buffer into guest memory (0: none; `brought_back`).
+/// recording epoch that noted it (0: none; a `COPYING` value while the pool sync copies it for an upload), and the hash
+/// of the bytes a lazy write-back brought back from this pool's buffer into guest memory (0: none; `brought_back`) with
+/// the GPU timeline value those bytes include (every submission up to it, UPSYNC2 M2).
 #[derive(Clone, Copy, Default)]
 struct Pg {
     hash: u64,
     kept: u64,
     stamp: u64,
     brought: u64,
+    brought_at: u64,
 }
 
-/// `Pg::stamp` of a page `upload_changed` decided to upload and is copying with the lock released: its hash is kept
-/// only if nothing changed the page's state meanwhile (any note, forget or raw log replaces the stamp).
-const COPYING: u64 = u64::MAX;
+/// `Pg::stamp` of a page `upload_changed` decided to upload and is copying with the lock released: this bit plus a
+/// sequence number of the call (UPSYNC2 L4: unique, whatever the callers hold). Its hash is kept only if nothing
+/// changed the page's state meanwhile (any note, forget or raw log replaces the stamp). Epochs never reach this bit.
+const COPYING: u64 = 1 << 63;
+static COPY_SEQ: AtomicU64 = AtomicU64::new(1);
 
 struct PoolH {
     end: u64,
@@ -74,6 +78,8 @@ static FORGOT: AtomicU64 = AtomicU64::new(0);
 static REARMED: AtomicU64 = AtomicU64::new(0);
 /// pages a lazy write-back brought back and the CPU did not change, left out (bytes)
 static BROUGHT_SKIPPED: AtomicU64 = AtomicU64::new(0);
+/// pages brought back from the device while `upload_changed` copied them: their upload dropped (count, UPSYNC2 L3)
+static BROUGHT_RACED: AtomicU64 = AtomicU64::new(0);
 /// The recording epoch: moves at every submission (`next_epoch`); a GPU-write note stamps pages with the current one.
 static EPOCH: AtomicU64 = AtomicU64::new(1);
 /// Time in `landed` (the completion thread) and in `upload_changed` (copy, hash, decide; the uploads themselves are
@@ -233,6 +239,8 @@ pub fn upload_changed(
         /// the hash of the guest bytes (of the copy, for a page uploaded)
         gh: u64,
         skip: bool,
+        /// where its copy starts in the batch's buffer (a page uploaded)
+        at: usize,
     }
     thread_local! {
         static SCRATCH: std::cell::RefCell<Vec<u8>> = const { std::cell::RefCell::new(Vec::new()) };
@@ -244,6 +252,7 @@ pub fn upload_changed(
         return 0;
     }
     let mut sent = 0u64;
+    let copying = COPYING | COPY_SEQ.fetch_add(1, Ordering::Relaxed);
     let mut pg = a & !(PAGE - 1);
     // a large range's pages hashed on several threads first (OoT rewrites mirrors of 6-15 MB a frame: ~56 MB hashed
     // on the replay thread was 6.5 ms); the hash of guest memory only decides a skip, which uploads nothing
@@ -279,7 +288,7 @@ pub fn upload_changed(
                     let whole = s == ps && t == pe && t - s == PAGE;
                     let page = p.pages[((q - first) / PAGE) as usize];
                     let (h, br) = if whole { (if p.raw { 0 } else { page.hash }, page.brought) } else { (0, 0) };
-                    cand.push(Cand { pg: q, s, t, whole, h, br, gh: 0, skip: false });
+                    cand.push(Cand { pg: q, s, t, whole, h, br, gh: 0, skip: false, at: 0 });
                     q += PAGE;
                 }
             }
@@ -293,6 +302,8 @@ pub fn upload_changed(
             // 3. left out where the page still is as step 1 found it and the guest bytes match; else marked for upload
             {
                 let mut g = state();
+                // the recording in progress: a page it already noted as GPU-written (UPSYNC2 H1)
+                let epoch = EPOCH.load(Ordering::Acquire);
                 // (the entry may have gone meanwhile, a pool made or released: its pages are then uploaded, unknown)
                 let mut p = g.as_mut().and_then(|st| st.pools.get_mut(&base)).filter(|p| p.end == end);
                 for c in cand.iter_mut() {
@@ -300,9 +311,13 @@ pub fn upload_changed(
                     let raw = p.raw;
                     // (an entry made again since step 1 may not reach this page yet: uploaded, unknown)
                     let Some(page) = p.pages.get_mut(((c.pg - first) / PAGE) as usize) else { continue };
-                    // the "write" was this pool's lazy page coming back from the device, and the CPU has not changed it
+                    // the "write" was this pool's lazy page coming back from the device, and the CPU has not changed it:
+                    // the GPU copy holds those bytes (also their hash from now on, where no unlanded note stamped it)
                     if c.br != 0 && page.brought == c.br && c.gh == c.br {
                         page.brought = 0;
+                        if page.stamp == 0 {
+                            page.hash = c.br;
+                        }
                         BROUGHT_SKIPPED.fetch_add(PAGE, Ordering::Relaxed);
                         back.push(c.pg);
                         c.skip = true;
@@ -318,36 +333,54 @@ pub fn upload_changed(
                     }
                     if c.whole {
                         (if page.hash == 0 { &UNKNOWN } else { &DIFFER }).fetch_add(PAGE, Ordering::Relaxed);
-                        *page = Pg { stamp: COPYING, ..Pg::default() };
+                    }
+                    if page.stamp == epoch {
+                        // UPSYNC2 H1: this upload goes into the recording's upload buffer, which runs before the noted
+                        // GPU write recorded already: the GPU copy will hold the GPU's bytes, not these. The page keeps
+                        // its stamp with nothing parked, so its landing re-arms it with the hash of the GPU's bytes
+                        *page = Pg { stamp: epoch, ..Pg::default() };
+                    } else if c.whole {
+                        *page = Pg { stamp: copying, ..Pg::default() };
                     } else {
                         *page = Pg::default();
                     }
                 }
             }
-            // 4. copied once, hashed from the copy and uploaded from it (audit M1), with the lock released
+            // 4. copied once and hashed from the copy (audit M1), with the lock released
             for c in cand.iter_mut().filter(|c| !c.skip) {
-                let at = buf.len();
+                c.at = buf.len();
                 buf.extend_from_slice(guest(c.s, c.t));
-                c.gh = if c.whole { page_hash(&buf[at..]) } else { 0 };
-                match runs.last_mut() {
-                    Some(r) if r.0 + r.2 as u64 == c.s => r.2 += (c.t - c.s) as usize,
-                    _ => runs.push((c.s, at, (c.t - c.s) as usize)),
-                }
+                c.gh = if c.whole { page_hash(&buf[c.at..]) } else { 0 };
             }
-            // 5. the hash of what is uploaded kept, where no note, forget or raw log changed the page since step 3
-            if cand.iter().any(|c| c.whole && !c.skip) {
+            // 5. the hash of what is uploaded kept, where no note, forget or raw log changed the page since step 3. A page
+            // brought back from the device meanwhile (its record set since step 3) is not uploaded: its copy may hold the
+            // guest's older bytes (another thread can read the page between the bring-back making it accessible and
+            // filling it, UPSYNC2 L3); the GPU copy holds the brought bytes, and the guest now too
+            if cand.iter().any(|c| !c.skip) {
                 let mut g = state();
                 if let Some(p) = g.as_mut().and_then(|st| st.pools.get_mut(&base)).filter(|p| p.end == end) {
-                    for c in cand.iter().filter(|c| c.whole && !c.skip) {
-                        if let Some(page) = p.pages.get_mut(((c.pg - first) / PAGE) as usize) {
-                            if page.stamp == COPYING {
-                                *page = Pg { hash: c.gh, ..Pg::default() };
+                    for c in cand.iter_mut().filter(|c| !c.skip) {
+                        let Some(page) = p.pages.get_mut(((c.pg - first) / PAGE) as usize) else { continue };
+                        if page.brought != 0 {
+                            c.skip = true;
+                            if page.stamp == copying {
+                                *page = Pg { hash: page.brought, stamp: 0, kept: 0, ..*page };
                             }
+                            BROUGHT_RACED.fetch_add(1, Ordering::Relaxed);
+                        } else if c.whole && page.stamp == copying {
+                            *page = Pg { hash: c.gh, ..Pg::default() };
                         }
                     }
                 }
             }
             drop(t0);
+            // uploaded from the copy
+            for c in cand.iter().filter(|c| !c.skip) {
+                match runs.last_mut() {
+                    Some(r) if r.0 + r.2 as u64 == c.s => r.2 += (c.t - c.s) as usize,
+                    _ => runs.push((c.s, c.at, (c.t - c.s) as usize)),
+                }
+            }
             for &(at, o, len) in &runs {
                 upload(at, &buf[o..o + len]);
                 sent += len as u64;
@@ -520,7 +553,7 @@ pub fn gpu_writes(a: u64, n: u64) {
         // (a lazy write-back's record goes: the GPU copy will hold other bytes, audit H1)
         st.each_page(base, a, n, |pg, _| {
             if pg.stamp != epoch {
-                *pg = Pg { hash: 0, kept: pg.hash, stamp: epoch, brought: 0 };
+                *pg = Pg { kept: pg.hash, stamp: epoch, ..Pg::default() };
             } else {
                 pg.hash = 0;
                 pg.brought = 0;
@@ -532,10 +565,11 @@ pub fn gpu_writes(a: u64, n: u64) {
 /// A submission of recording epoch `epoch` completed: its write-back of [a, a + n) from the buffer of the pool at
 /// `pool` holds the GPU's bytes `src`, and `before` (may be null) the same range as the GPU had it before the
 /// submission's work. That pool's pages it noted and nothing changed since get the hash of what its GPU copy now holds;
-/// other pools over the range (with buffers of their own, audit M1) only lose the stamp and stay unknown. Returns the
-/// whole pages it found the GPU left unchanged (`src` equal to `before`), ascending: the landing need not compare them
-/// again (`mem::land_changed`).
-pub fn landed(pool: u64, a: u64, n: u64, src: *const u8, before: *const u8, epoch: u64) -> Vec<u64> {
+/// other pools over the range (with buffers of their own, audit M1) are left alone: their own write-back of this
+/// submission, if any, re-arms them. `value`: the submission's GPU timeline value: a lazy write-back's record made
+/// from bytes that already include it stays (UPSYNC2 M2). Returns the whole pages it found the GPU left unchanged
+/// (`src` equal to `before`), ascending: the landing need not compare them again (`mem::land_changed`).
+pub fn landed(pool: u64, a: u64, n: u64, src: *const u8, before: *const u8, epoch: u64, value: u64) -> Vec<u64> {
     let mut same_pages = Vec::new();
     if !on() || n == 0 || src.is_null() {
         return same_pages;
@@ -571,17 +605,17 @@ pub fn landed(pool: u64, a: u64, n: u64, src: *const u8, before: *const u8, epoc
     for base in st.owners(a, n) {
         let end = st.pools[&base].end;
         if base != pool {
-            // another pool's GPU copy: this write-back says nothing of its bytes (its own landing, if any, re-arms it)
-            st.each_page(base, a, n, |pg, _| {
-                if pg.stamp == epoch {
-                    *pg = Pg::default();
-                }
-            });
+            // another pool's GPU copy: this write-back says nothing of its bytes. Its pages stay stamped (hash 0,
+            // unknown), so its own landing of this submission, if any, still re-arms them (clearing the stamp here lost
+            // that when this write-back came first); with none, the old stamp never matches again
             continue;
         }
         st.each_page(base, a, n, |pg, p| {
-            // the GPU copy changed under any record of a lazy write-back (audit H1)
-            pg.brought = 0;
+            // the GPU copy changed under any record of a lazy write-back made before this submission's bytes were on
+            // the device (audit H1); one read back after it (its bytes include these) still holds (UPSYNC2 M2)
+            if value > pg.brought_at {
+                pg.brought = 0;
+            }
             // whole pages of the pool inside the write-back only
             if pg.stamp != epoch || p < a || p + PAGE > a + n || p < base || p + PAGE > end {
                 return;
@@ -618,7 +652,9 @@ pub fn landed(pool: u64, a: u64, n: u64, src: *const u8, before: *const u8, epoc
 /// (`forget`, `gpu_writes`, `landed`, `raw_written`, the pool's entry dropped) and with any upload or skip of the
 /// page, so it never outlives the bytes it describes. Recorded before the copy, so a scan taking the copy's store
 /// finds it. Called by a faulting thread: hashes before taking the lock, and nothing holding it reads guest memory.
-pub fn brought_back(pool: u64, p: u64, bytes: &[u8]) {
+/// `at`: the GPU timeline value the bytes include (the read waited for it): a landing or raw log of a submission up to
+/// it does not drop the record, its bytes are among these (UPSYNC2 M2).
+pub fn brought_back(pool: u64, p: u64, bytes: &[u8], at: u64) {
     if !on() {
         return;
     }
@@ -631,6 +667,7 @@ pub fn brought_back(pool: u64, p: u64, bytes: &[u8]) {
     st.each_page(pool, p, PAGE, |pg, q| {
         if q == p {
             pg.brought = h;
+            pg.brought_at = at;
         }
     });
 }
@@ -645,9 +682,10 @@ pub fn not_brought_back(pool: u64, p: u64) {
     }
 }
 
-/// A raw global memory write log named [lo, hi): its hashes go, and pages there are never skipped again (the log comes
-/// only at the submission's completion, after later syncs may have compared against bytes the shaders replaced).
-pub fn raw_written(lo: u64, hi: u64) {
+/// A raw global memory write log of the submission with GPU timeline value `value` named [lo, hi): its hashes go, and
+/// pages there are never skipped again (the log comes only at the submission's completion, after later syncs may have
+/// compared against bytes the shaders replaced).
+pub fn raw_written(lo: u64, hi: u64, value: u64) {
     if !on() || hi <= lo {
         return;
     }
@@ -659,31 +697,46 @@ pub fn raw_written(lo: u64, hi: u64) {
     }
     for base in st.owners(lo, hi - lo) {
         let p = st.pools.get_mut(&base).unwrap();
-        if !p.raw {
-            p.raw = true;
-            st.each_page(base, lo, hi - lo, |pg, _| *pg = Pg::default());
-        } else if p.any_brought {
-            // a raw pool's hashes are never compared, but a lazy write-back's record is: the shaders changed the GPU
-            // copy under it (audit H1)
-            st.each_page(base, lo, hi - lo, |pg, _| pg.brought = 0);
+        let first = !p.raw;
+        p.raw = true;
+        if first || p.any_brought {
+            st.each_page(base, lo, hi - lo, |pg, _| {
+                if first {
+                    *pg = Pg { brought: pg.brought, brought_at: pg.brought_at, ..Pg::default() };
+                }
+                // a raw pool's hashes are never compared, but a lazy write-back's record is: the shaders changed the GPU
+                // copy under it (audit H1), unless the record's bytes were read back after this submission (they
+                // include its stores, UPSYNC2 M2)
+                if value > pg.brought_at {
+                    pg.brought = 0;
+                }
+            });
         }
     }
 }
 
-/// A pool goes: nothing is known of its GPU copy, and the raw write logs inside it are forgotten (audit L4).
-pub fn drop_pool(base: u64) {
+/// The pool [base, end) goes: nothing is known of its GPU copy. Its entry goes only if it is that pool's (a pool
+/// registered anew at the same base with another size keeps its own, UPSYNC2 L5); the raw write logs inside it are
+/// forgotten (audit L4) unless another kept pool (one nested in it, or over it) still overlaps them.
+pub fn drop_pool(base: u64, end: u64) {
     if let Some(st) = state().as_mut() {
-        if let Some(p) = st.pools.remove(&base) {
-            let end = p.end;
-            let gone: Vec<u64> = st.raw.range(base..end).filter(|(_, &e)| e <= end).map(|(&s, _)| s).collect();
-            for s in gone {
-                st.raw.remove(&s);
-            }
-            if st.raw.is_empty() {
-                st.raw_max = 0;
-            }
+        if st.pools.get(&base).is_none_or(|p| p.end != end) {
+            return;
         }
+        st.pools.remove(&base);
         st.over.retain(|&b| b != base);
+        let gone: Vec<u64> = st
+            .raw
+            .range(base..end)
+            .filter(|(&s, &e)| e <= end && st.owners(s, e - s).is_empty())
+            .map(|(&s, _)| s)
+            .collect();
+        for s in gone {
+            st.raw.remove(&s);
+        }
+        if st.raw.is_empty() {
+            st.raw_max = 0;
+        }
     }
 }
 
@@ -711,7 +764,8 @@ pub fn report(frames: f64) -> String {
     let ms = |a: &AtomicU64| a.swap(0, Ordering::Relaxed) as f64 / frames / 1e6;
     let (hm, rm) = (ms(&HASH_NS), ms(&REARM_NS));
     let bk = BROUGHT_SKIPPED.swap(0, Ordering::Relaxed) as f64 / frames / 1024.0;
-    format!("; upload skip a frame: {s:.2} MB of CPU-written pages not uploaded (same bytes as the GPU copy), whole pages uploaded {u:.2} MB with no hash kept and {d:.2} MB changed, {f:.2} MB forgotten or GPU-written, {r:.2} MB re-armed at landings, {bk:.1} KB of pages brought back from the device unchanged; copy and hash {hm:.2} ms, re-arming {rm:.2} ms")
+    let race = BROUGHT_RACED.swap(0, Ordering::Relaxed);
+    format!("; upload skip a frame: {s:.2} MB of CPU-written pages not uploaded (same bytes as the GPU copy), whole pages uploaded {u:.2} MB with no hash kept and {d:.2} MB changed, {f:.2} MB forgotten or GPU-written, {r:.2} MB re-armed at landings, {bk:.1} KB of pages brought back from the device unchanged ({race} brought back while copied, upload dropped); copy and hash {hm:.2} ms, re-arming {rm:.2} ms")
 }
 
 #[cfg(test)]
@@ -751,6 +805,123 @@ mod tests {
         unsafe { core::ptr::copy_nonoverlapping(b.as_ptr(), a as *mut u8, b.len()) };
     }
 
+    /// The entry at `base` dropped, whatever its extent.
+    fn drop_any(base: u64) {
+        let end = state().as_ref().and_then(|s| s.pools.get(&base).map(|p| p.end));
+        if let Some(end) = end {
+            drop_pool(base, end);
+        }
+    }
+
+    /// UPSYNC2 H1: a copy's source sync uploads a page the recording in progress already noted as GPU-written. The
+    /// upload runs before that GPU write (the upload buffer goes first), so the GPU copy ends with the GPU's bytes G:
+    /// the landing must re-arm the page with G's hash, not keep the upload's U. Before the fix the upload kept h(U) with
+    /// no stamp, the landing re-armed nothing, and the CPU writing U again was skipped while the GPU kept G.
+    #[test]
+    fn an_upload_after_a_note_in_the_same_recording_rearms_with_the_gpu_bytes() {
+        let _s = SERIAL.lock().unwrap();
+        let (_m, base) = pool(2);
+        let size = 2 * PAGE;
+        drop_any(base);
+        runs(base, size, base, size);
+        let u = vec![0x11u8; PAGE as usize];
+        let g = vec![0x6eu8; PAGE as usize];
+        // draw D of recording E writes page 0 (noted), then the CPU writes U and E's copy syncs its source
+        gpu_writes(base, PAGE);
+        set(base, &u);
+        assert_eq!(runs(base, size, base, PAGE), vec![(base, PAGE)], "U uploaded");
+        // the same range noted again in E (filtered as a repeat): the page must still be stamped by E
+        gpu_writes(base, PAGE);
+        let k = next_epoch();
+        // E lands: baseline U (end of the upload buffer), the GPU's bytes G, merged into guest memory
+        landed(base, base, PAGE, g.as_ptr(), u.as_ptr(), k, 1);
+        set(base, &g);
+        assert_eq!(runs(base, size, base, PAGE), vec![], "guest G = the GPU copy G");
+        set(base, &u); // the CPU writes U again
+        assert_eq!(runs(base, size, base, PAGE), vec![(base, PAGE)], "the GPU holds G: U must be uploaded");
+        // a partial page uploaded after the note keeps the stamp too: re-armed at the landing
+        gpu_writes(base + PAGE, PAGE);
+        assert_eq!(runs(base, size, base + PAGE + 8, 8), vec![(base + PAGE + 8, 8)]);
+        let k = next_epoch();
+        let now = bytes(base + PAGE, PAGE);
+        landed(base, base + PAGE, PAGE, now.as_ptr(), now.as_ptr(), k, 1);
+        assert_eq!(runs(base, size, base + PAGE, PAGE), vec![], "re-armed with the GPU's bytes");
+        drop_any(base);
+    }
+
+    /// UPSYNC2 M2: a brought-back record stays through a landing or raw log of a submission its bytes already include
+    /// (timeline value <= the one the read waited for), and goes with a later one.
+    #[test]
+    fn a_brought_back_record_outlives_only_submissions_it_includes() {
+        let _s = SERIAL.lock().unwrap();
+        let (_m, base) = pool(2);
+        let size = 2 * PAGE;
+        drop_any(base);
+        new_pool(base, base + size);
+        let d = bytes(base, PAGE);
+        let g = vec![0x6eu8; PAGE as usize];
+        // the page noted by a submission, brought back (bytes d) before that submission landed
+        gpu_writes(base, PAGE);
+        let k = next_epoch();
+        brought_back(base, base, &d, 10);
+        landed(base, base, PAGE, g.as_ptr(), d.as_ptr(), k, 7);
+        assert_eq!(runs_back(base, size, base, PAGE), (vec![], vec![base]), "landing 7 <= 10: still left out");
+        gpu_writes(base, PAGE);
+        let k = next_epoch();
+        brought_back(base, base, &d, 10);
+        landed(base, base, PAGE, g.as_ptr(), d.as_ptr(), k, 11);
+        assert_eq!(runs_back(base, size, base, PAGE), (vec![(base, PAGE)], vec![]), "landing 11 > 10: uploaded");
+        brought_back(base, base, &d, 10);
+        raw_written(base, base + size, 10);
+        assert_eq!(runs_back(base, size, base, PAGE), (vec![], vec![base]), "raw log 10: still left out");
+        brought_back(base, base, &d, 10);
+        raw_written(base, base + size, 12);
+        assert_eq!(runs_back(base, size, base, PAGE), (vec![(base, PAGE)], vec![]), "raw log 12: uploaded");
+        drop_any(base);
+    }
+
+    /// UPSYNC2 L5: a pool's entry goes only with that pool (another extent at the same base is kept), and the raw logs
+    /// of a pool nested in a dropped one stay while the nested pool does.
+    #[test]
+    fn dropping_a_pool_keeps_what_belongs_to_others() {
+        let _s = SERIAL.lock().unwrap();
+        let (_m, base) = pool(4);
+        let (outer, inner) = (base, base + PAGE);
+        drop_any(outer);
+        drop_any(inner);
+        runs(outer, 4 * PAGE, outer, 4 * PAGE);
+        runs(inner, PAGE, inner, PAGE);
+        raw_written(inner, inner + PAGE, 1);
+        drop_pool(outer, outer + 4 * PAGE);
+        assert!(state().as_ref().unwrap().raw.contains_key(&inner), "the nested pool's raw log stays");
+        drop_pool(inner, inner + 2 * PAGE);
+        assert!(state().as_ref().unwrap().pools.contains_key(&inner), "another extent: kept");
+        drop_pool(inner, inner + PAGE);
+        assert!(!state().as_ref().unwrap().raw.contains_key(&inner), "gone with its pool");
+    }
+
+    /// A landing of one pool's write-back leaves another pool's stamp of the same submission, so that pool's own
+    /// write-back re-arms it.
+    #[test]
+    fn each_pools_own_landing_rearms_it() {
+        let _s = SERIAL.lock().unwrap();
+        let (_m, base) = pool(4);
+        let (outer, inner) = (base, base + PAGE);
+        drop_any(outer);
+        drop_any(inner);
+        runs(outer, 4 * PAGE, outer, 4 * PAGE);
+        runs(inner, PAGE, inner, PAGE);
+        gpu_writes(inner, PAGE);
+        let k = next_epoch();
+        let now = bytes(inner, PAGE);
+        landed(outer, inner, PAGE, now.as_ptr(), now.as_ptr(), k, 1);
+        landed(inner, inner, PAGE, now.as_ptr(), now.as_ptr(), k, 1);
+        assert_eq!(runs(inner, PAGE, inner, PAGE), vec![], "re-armed by its own landing");
+        assert_eq!(runs(outer, 4 * PAGE, inner, PAGE), vec![]);
+        drop_any(outer);
+        drop_any(inner);
+    }
+
     /// A page written again with its last upload's bytes is left out; changed, partial, or forgotten pages are
     /// uploaded; the bytes handed to the upload are the bytes hashed.
     #[test]
@@ -758,7 +929,7 @@ mod tests {
         let _s = SERIAL.lock().unwrap();
         let (_m, base) = pool(4);
         let size = 4 * PAGE;
-        drop_pool(base);
+        drop_any(base);
         assert_eq!(runs(base, size, base, size), vec![(base, size)]);
         assert_eq!(runs(base, size, base, size), vec![], "same bytes: nothing");
         unsafe { *((base + PAGE + 5) as *mut u8) = 9 };
@@ -768,14 +939,14 @@ mod tests {
         // a partial page is always uploaded, and its hash forgotten
         assert_eq!(runs(base, size, base + 10, 20), vec![(base + 10, 20)]);
         assert_eq!(runs(base, size, base, PAGE), vec![(base, PAGE)]);
-        drop_pool(base);
+        drop_any(base);
         assert_eq!(runs(base, size, base, PAGE), vec![(base, PAGE)]);
         // what is uploaded is the copy that was hashed
         let mut seen = Vec::new();
         unsafe { *((base + 3 * PAGE) as *mut u8) = 7 };
         upload_changed(base, size, base + 3 * PAGE, PAGE, &mut Vec::new(), |_, b| seen.extend_from_slice(b));
         assert_eq!(seen[0], 7);
-        drop_pool(base);
+        drop_any(base);
         assert_ne!(page_hash(&[0u8; 4096]), page_hash(&[0u8; 4095]));
         let mut a = [0u8; 4096];
         a[8] = 1;
@@ -791,7 +962,7 @@ mod tests {
         let pages = (PAR_MIN / PAGE) + 3;
         let (_m, base) = pool(pages);
         let size = pages * PAGE;
-        drop_pool(base);
+        drop_any(base);
         assert_eq!(runs(base, size, base, size), vec![(base, size)]);
         assert_eq!(runs(base, size, base, size), vec![]);
         unsafe { *((base + 700 * PAGE + 9) as *mut u8) = 3 };
@@ -804,11 +975,11 @@ mod tests {
         after[(5 * PAGE) as usize] ^= 0xff;
         gpu_writes(base, size);
         let k = next_epoch();
-        let same = landed(base, base, size, after.as_ptr(), before.as_ptr(), k);
+        let same = landed(base, base, size, after.as_ptr(), before.as_ptr(), k, 1);
         assert_eq!(same.len() as u64, pages - 1, "every page but the changed one");
         assert!(!same.contains(&(base + 5 * PAGE)));
         assert_eq!(runs(base, size, base, size), vec![(base + 5 * PAGE, PAGE)], "the guest lacks the GPU's change");
-        drop_pool(base);
+        drop_any(base);
     }
 
     /// Audit H2: a forget reaches every pool over the range, also past a nested pool that ends below it.
@@ -817,16 +988,16 @@ mod tests {
         let _s = SERIAL.lock().unwrap();
         let (_m, base) = pool(8);
         let (outer, inner) = (base, base + PAGE);
-        drop_pool(outer);
-        drop_pool(inner);
+        drop_any(outer);
+        drop_any(inner);
         runs(outer, 8 * PAGE, outer, 8 * PAGE);
         runs(inner, PAGE, inner, PAGE);
         assert_eq!(runs(outer, 8 * PAGE, outer, 8 * PAGE), vec![]);
         // a GPU copy change at page 5 of the outer pool: the inner pool (ends at page 2) lies between in key order
         forget(outer + 5 * PAGE, 16);
         assert_eq!(runs(outer, 8 * PAGE, outer, 8 * PAGE), vec![(outer + 5 * PAGE, PAGE)]);
-        drop_pool(outer);
-        drop_pool(inner);
+        drop_any(outer);
+        drop_any(inner);
     }
 
     /// A GPU-written page gets its hash back at its own submission's landing: the parked one when the GPU left it as
@@ -836,7 +1007,7 @@ mod tests {
         let _s = SERIAL.lock().unwrap();
         let (_m, base) = pool(3);
         let size = 3 * PAGE;
-        drop_pool(base);
+        drop_any(base);
         runs(base, size, base, size);
         let before: Vec<u8> = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) }.to_vec();
         // recording K notes the whole pool
@@ -846,7 +1017,7 @@ mod tests {
         // page 0 was uploaded again above (by the sync of K+1): K's landing must not touch it
         let mut after = before.clone();
         after[2 * PAGE as usize] = 0x55; // the GPU changed page 2
-        landed(base, base, size, after.as_ptr(), before.as_ptr(), k);
+        landed(base, base, size, after.as_ptr(), before.as_ptr(), k, 1);
         // page 1: unchanged and re-armed with the parked hash: the CPU rewriting the same bytes is skipped
         assert_eq!(runs(base, size, base + PAGE, PAGE), vec![]);
         // page 2: re-armed with the GPU's bytes: the guest still holds the old bytes, so it is uploaded
@@ -857,14 +1028,14 @@ mod tests {
         gpu_writes(base, size);
         let k2 = next_epoch();
         let now: Vec<u8> = unsafe { core::slice::from_raw_parts(base as *const u8, size as usize) }.to_vec();
-        landed(base, base, size, now.as_ptr(), now.as_ptr(), k1);
+        landed(base, base, size, now.as_ptr(), now.as_ptr(), k1, 1);
         assert_eq!(runs(base, size, base + PAGE, PAGE), vec![(base + PAGE, PAGE)], "restamped by K+2");
         gpu_writes(base, size);
         let k3 = next_epoch();
-        landed(base, base, size, now.as_ptr(), now.as_ptr(), k2);
-        landed(base, base, size, now.as_ptr(), now.as_ptr(), k3);
+        landed(base, base, size, now.as_ptr(), now.as_ptr(), k2, 1);
+        landed(base, base, size, now.as_ptr(), now.as_ptr(), k3, 1);
         assert_eq!(runs(base, size, base, size), vec![], "K+3's landing re-armed every page");
-        drop_pool(base);
+        drop_any(base);
     }
 
     /// L6: a page a lazy write-back brought back reads as written; while it holds exactly those bytes it is left out
@@ -873,25 +1044,25 @@ mod tests {
     fn a_page_brought_back_unchanged_is_not_uploaded() {
         let _s = SERIAL.lock().unwrap();
         let (_m, base) = pool(2);
-        drop_pool(base);
-        raw_written(base, base + 2 * PAGE);
+        drop_any(base);
+        raw_written(base, base + 2 * PAGE, 1);
         new_pool(base, base + 2 * PAGE);
         let page0 = bytes(base, PAGE);
-        brought_back(base, base, &page0);
+        brought_back(base, base, &page0, 0);
         assert_eq!(
             runs_back(base, 2 * PAGE, base, 2 * PAGE),
             (vec![(base + PAGE, PAGE)], vec![base]),
             "page 0 left out and reported back (not a CPU write), page 1 raw"
         );
         assert_eq!(runs(base, 2 * PAGE, base, PAGE), vec![(base, PAGE)], "consumed: a later write is uploaded");
-        brought_back(base, base, &page0);
+        brought_back(base, base, &page0, 0);
         unsafe { *(base as *mut u8) ^= 1 };
         assert_eq!(runs_back(base, 2 * PAGE, base, PAGE), (vec![(base, PAGE)], vec![]), "changed by the CPU since");
         // a pool with no entry keeps no record: its page is uploaded
-        drop_pool(base);
-        brought_back(base, base, &bytes(base, PAGE));
+        drop_any(base);
+        brought_back(base, base, &bytes(base, PAGE), 0);
         assert_eq!(runs(base, 2 * PAGE, base, PAGE), vec![(base, PAGE)]);
-        drop_pool(base);
+        drop_any(base);
         state().as_mut().unwrap().raw.clear();
     }
 
@@ -904,48 +1075,48 @@ mod tests {
         let _s = SERIAL.lock().unwrap();
         let (_m, base) = pool(2);
         let size = 2 * PAGE;
-        drop_pool(base);
+        drop_any(base);
         new_pool(base, base + size);
         set(base, &[0xd0; PAGE as usize]);
         let d = bytes(base, PAGE);
         let g: Vec<u8> = vec![0x6e; PAGE as usize];
         assert_eq!(runs(base, size, base, size), vec![(base, size)]);
         // P brought back with D; no sync before the GPU writes it
-        brought_back(base, base, &d);
+        brought_back(base, base, &d, 0);
         let before = bytes(base, size);
         gpu_writes(base, size);
         let k = next_epoch();
         set(base, &g); // the landing puts G into guest memory
         let after = bytes(base, size);
-        landed(base, base, size, after.as_ptr(), before.as_ptr(), k);
+        landed(base, base, size, after.as_ptr(), before.as_ptr(), k, 1);
         assert_eq!(runs(base, size, base, size), vec![], "guest G = the GPU copy G: nothing to send");
         set(base, &d); // the CPU writes D again
         assert_eq!(runs_back(base, size, base, PAGE), (vec![(base, PAGE)], vec![]), "a real CPU write: uploaded");
         // the record dropped by a note even before its landing
-        brought_back(base, base, &d);
+        brought_back(base, base, &d, 0);
         gpu_writes(base, PAGE);
         next_epoch();
         assert_eq!(runs(base, size, base, PAGE), vec![(base, PAGE)], "noted since: uploaded");
         // by a forget (another upload path, e.g. a texture copy's source sync)
-        brought_back(base, base, &d);
+        brought_back(base, base, &d, 0);
         forget(base, PAGE);
         assert_eq!(runs(base, size, base, PAGE), vec![(base, PAGE)], "forgotten since: uploaded");
         // by a raw log over the pool (also once the pool is raw)
-        brought_back(base, base, &d);
-        raw_written(base, base + size);
+        brought_back(base, base, &d, 0);
+        raw_written(base, base + size, 1);
         assert_eq!(runs(base, size, base, PAGE), vec![(base, PAGE)], "raw store since: uploaded");
-        brought_back(base, base, &d);
-        raw_written(base, base + size);
+        brought_back(base, base, &d, 0);
+        raw_written(base, base + size, 1);
         assert_eq!(runs(base, size, base, PAGE), vec![(base, PAGE)], "raw store since, raw pool: uploaded");
         // by the pool's GPU copy made anew
-        brought_back(base, base, &d);
+        brought_back(base, base, &d, 0);
         new_pool(base, base + size);
         assert_eq!(runs(base, size, base, PAGE), vec![(base, PAGE)], "new GPU copy: uploaded");
         // a bring-back that failed after recording
-        brought_back(base, base, &d);
+        brought_back(base, base, &d, 0);
         not_brought_back(base, base);
         assert_eq!(runs(base, size, base, PAGE), vec![(base, PAGE)]);
-        drop_pool(base);
+        drop_any(base);
         assert!(state().as_ref().unwrap().raw.range(base..base + size).next().is_none(), "raw logs go with the pool");
     }
 
@@ -956,8 +1127,8 @@ mod tests {
         let _s = SERIAL.lock().unwrap();
         let (_m, base) = pool(4);
         let (outer, inner) = (base, base + PAGE);
-        drop_pool(outer);
-        drop_pool(inner);
+        drop_any(outer);
+        drop_any(inner);
         runs(outer, 4 * PAGE, outer, 4 * PAGE);
         runs(inner, 2 * PAGE, inner, 2 * PAGE);
         let before = bytes(inner, 2 * PAGE);
@@ -966,12 +1137,12 @@ mod tests {
         let mut after = before.clone();
         after[0] ^= 0x5a; // the outer pool's buffer changed page 1
         set(inner, &after); // landed in guest memory
-        landed(outer, inner, 2 * PAGE, after.as_ptr(), before.as_ptr(), k);
+        landed(outer, inner, 2 * PAGE, after.as_ptr(), before.as_ptr(), k, 1);
         assert_eq!(runs(outer, 4 * PAGE, inner, 2 * PAGE), vec![], "the outer buffer holds these bytes");
         assert_eq!(runs(inner, 2 * PAGE, inner, 2 * PAGE), vec![(inner, 2 * PAGE)], "the inner buffer: unknown");
         assert_eq!(runs(inner, 2 * PAGE, inner, 2 * PAGE), vec![], "then known again");
-        drop_pool(outer);
-        drop_pool(inner);
+        drop_any(outer);
+        drop_any(inner);
     }
 
     /// Audit H1: a pool a raw write log named is never skipped, also when its entry comes later; a pool that goes
@@ -980,19 +1151,19 @@ mod tests {
     fn raw_written_pools_are_always_uploaded() {
         let _s = SERIAL.lock().unwrap();
         let (_m, base) = pool(2);
-        drop_pool(base);
+        drop_any(base);
         runs(base, 2 * PAGE, base, 2 * PAGE);
-        raw_written(base, base + 2 * PAGE);
+        raw_written(base, base + 2 * PAGE, 1);
         assert_eq!(runs(base, 2 * PAGE, base, 2 * PAGE), vec![(base, 2 * PAGE)]);
         assert_eq!(runs(base, 2 * PAGE, base, 2 * PAGE), vec![(base, 2 * PAGE)]);
-        drop_pool(base);
+        drop_any(base);
         assert_eq!(runs(base, 2 * PAGE, base, 2 * PAGE), vec![(base, 2 * PAGE)]);
         assert_eq!(runs(base, 2 * PAGE, base, 2 * PAGE), vec![], "a new pool: its own GPU copy, no raw store yet");
-        drop_pool(base);
-        raw_written(base, base + 2 * PAGE);
+        drop_any(base);
+        raw_written(base, base + 2 * PAGE, 1);
         assert_eq!(runs(base, 2 * PAGE, base, 2 * PAGE), vec![(base, 2 * PAGE)]);
         assert_eq!(runs(base, 2 * PAGE, base, 2 * PAGE), vec![(base, 2 * PAGE)], "an entry made after the log");
-        drop_pool(base);
+        drop_any(base);
         state().as_mut().unwrap().raw.clear();
     }
 }
