@@ -64,13 +64,56 @@ fn dpool_add(m: &Mutex<DpoolBases>, pool: usize, n: i32, kind: &str) -> i32 {
     base
 }
 fn dpool_base(m: &Mutex<DpoolBases>, pool: usize) -> i32 {
-    m.lock()
-        .unwrap()
-        .t
-        .iter()
-        .find(|e| e.0 == pool)
-        .map(|e| e.1)
-        .unwrap_or(0)
+    // the published copy first (lock-free: the replay looks the bound pools' bases up several times a draw on every
+    // translation lane); entries are only ever added, and a pool's base never changes
+    let f = if std::ptr::eq(m, &TEX_BASES) { &TEX_FAST } else { &SAMP_FAST };
+    if let Some(b) = f.find(pool) {
+        return b;
+    }
+    let g = m.lock().unwrap();
+    let r = g.t.iter().find(|e| e.0 == pool).map(|e| e.1);
+    // publish what the table holds (an entry added since the copy was last published)
+    f.publish(&g.t);
+    r.unwrap_or(0)
+}
+
+/// A lock-free copy of a `DpoolBases` table (`dpool_base`): (pool, base) pairs, published under the table's lock.
+struct FastBases {
+    pools: [std::sync::atomic::AtomicUsize; NDPOOL],
+    bases: [std::sync::atomic::AtomicI32; NDPOOL],
+    n: std::sync::atomic::AtomicUsize,
+}
+static TEX_FAST: FastBases = FastBases::new();
+static SAMP_FAST: FastBases = FastBases::new();
+
+impl FastBases {
+    const fn new() -> FastBases {
+        FastBases {
+            pools: [const { std::sync::atomic::AtomicUsize::new(0) }; NDPOOL],
+            bases: [const { std::sync::atomic::AtomicI32::new(0) }; NDPOOL],
+            n: std::sync::atomic::AtomicUsize::new(0),
+        }
+    }
+    fn find(&self, pool: usize) -> Option<i32> {
+        use std::sync::atomic::Ordering::{Acquire, Relaxed};
+        let n = self.n.load(Acquire);
+        (0..n.min(NDPOOL))
+            .find(|&k| self.pools[k].load(Relaxed) == pool)
+            .map(|k| self.bases[k].load(Relaxed))
+    }
+    /// Under the table's lock: its entries past those published.
+    fn publish(&self, t: &[(usize, i32)]) {
+        use std::sync::atomic::Ordering::{Relaxed, Release};
+        let n = self.n.load(Relaxed);
+        if t.len() <= n {
+            return;
+        }
+        for (k, e) in t.iter().enumerate().take(NDPOOL).skip(n) {
+            self.pools[k].store(e.0, Relaxed);
+            self.bases[k].store(e.1, Relaxed);
+        }
+        self.n.store(t.len().min(NDPOOL), Release);
+    }
 }
 /// The texture (tex = true) or sampler descriptor pools initialized so far: (pool object address, host table base).
 pub fn dpool_list(tex: bool) -> Vec<(usize, i32)> {

@@ -151,3 +151,111 @@ runs), one `oot`; every sheet and report.md read.
 ### 7. Questions
 
 None.
+
+## Send-back 2 (third audit of `git diff ade9a6c upsync2 -- src`; commit `4f575e0`)
+
+### 1. Built
+
+- **MEDIUM, a hash the GPU no longer holds after a brought-back skip.** Diagnosis (the audit's interleaving): page P is
+  held; thread T faults, `read_page` waits for `last_fence()` = 100 and copies B; submission 101 (noted P, writes G,
+  submitted after T's copy) lands while P is in `returning`: `lazy::outside` counts P as held, so the landing skips it,
+  and `make_lazy` skipped a returning page too, so G never reached guest memory; `upskip::landed` had no record to drop
+  yet and re-armed hash = h(G); T then recorded brought = h(B) at 100 and copied B; the sync left P out (guest = B =
+  record) and set hash = h(B). GPU G, hash B: the CPU writing B again was skipped. Corrections:
+  - `upskip::upload_changed` step 3: the brought-back skip no longer sets `hash = brought` (removed, not needed: a
+    skip by the record is a skip either way; the next upload re-arms). The L3 path in step 5 likewise leaves the page
+    unknown (`hash 0`, record kept) instead of `hash = brought`.
+  - Root, `lazy`: `St::relanded` flags a page of `returning` that a landing skipped (`outside`, which every landing
+    goes through via `mem::land`, and `make_lazy`). `bring_back` reads the page again while the flag is set before the
+    guest copy (`take_relanded`), and after the copy `settle` takes the flag and the end of `returning` under one lock:
+    a flag set after the first check makes it read again, record the new bytes (`brought_back`, new value) and merge
+    only what the device changed since the last read into the guest (`mem::merge_changed_bytes`, as a landing does,
+    so a CPU store made since the copy stays). The page stops being returning only with no flag pending, so a landing
+    either flags it or finds it accessible and lands normally. Counted in the lazy line (`N read again for a landing
+    during the read`).
+- **LOW, H1 undone by a same-recording forget.** `upskip::forget` keeps a stamp equal to the current `EPOCH` (hash,
+  parked hash and record cleared): the page noted by the recording in progress, forgotten by `upload_deferred` or a
+  granule binding (both recorded into `sub.pre`, before the recording's draws), then uploaded, still re-arms at its
+  landing with the GPU's bytes although `gpu_writes`' RECENT filters the repeat note.
+- **LOW, a game store lost when a page is made lazy.** `make_lazy` returns the pages it newly protected;
+  `apply_writebacks` then asks the write watch again (under the same watch lock) for those pages: a written one is
+  released (`lazy::unhold`: out of `lazy`, made accessible) and this write-back lands on it (`land`: the watch bits go
+  to `pending`, the GPU-changed bytes merged). Counted (`N released at once for a CPU store`).
+
+### 2. Tests (`cargo test --release -p graphics`: lib 256 passed, 6 ignored; other targets pass)
+
+- `upskip::a_brought_back_skip_does_not_arm_the_hash` (MEDIUM, the unit-testable part): note, landing 101 re-arms h(G)
+  before the record, record h(B) at 100, sync skips P (back), the CPU writes B again -> uploaded. **Failed with the old
+  assignment restored** (`left: []`), passes now.
+- `upskip::a_forget_after_a_note_in_the_same_recording_keeps_the_stamp` (LOW): note, forget, upload U, repeat note
+  (filtered), landing G, the CPU writes U before the next sync -> uploaded; and a forget after the note's recording
+  still clears that stamp. **Failed with the old forget** (`left: []` at "U must be uploaded"), passes now.
+- `lazy::a_landing_during_a_read_back_reaches_the_guest` (root): a returning page counts as held in `outside` and is
+  flagged; `take_relanded` reports it once; `make_lazy` on a returning page holds nothing and flags it; `settle` reads
+  again once, merges the GPU's bytes, keeps a CPU store made after the copy, and ends `returning` (the next `outside`
+  is None). New mechanism (no flag existed before).
+- `lazy::a_page_just_held_can_be_released` (LOW 2, the lazy half; Windows): `make_lazy` returns the newly held page
+  (inaccessible), `unhold` makes it accessible and holds it no more. The watch re-check in `apply_writebacks` needs a
+  device: no unit test.
+- To show the two upskip tests fail without their fixes I disabled each fix in place with the Edit tool, ran them, and
+  restored both before the commit (checked: no leftover).
+
+### 3. Verified (GPU 1; OoT relinked from this worktree's dist with its `nxrs-build` before each run, the code DLL's
+time checked unchanged after each run; OOT-FLASH relinked and ran OoT between my runs until the lead stopped it)
+
+| Run (`build/play/`) | FPS / 5% low (window) | route | house shots wrong | notes |
+|---|---|---|---|---|
+| `20261126-105129-s2-faults-oot-house` | 19.3 / 18.0 | on route (5/5) | 0 of 30 | 12 captures: Deku Tree fog, Navi in the dark cut, the known no-target / `pipeline-crashed.bin` reds, the house frame of the 573 s red (correct picture); **1 bring-back read again** (365 s) |
+| `20261126-111956-s2-faults2-oot-house` | 19.2 / 18.0 | on route (5/5) | 0 of 30 | 11 captures, same legitimate set (forest fog with Navi, the known full-black scene-change frame at 446 s); 6 zero stand-ins at 688 s near shots 31-33, those pictures correct; **2 read again** |
+| `20261126-120401-s2-oot3` (relink 12:03:15, `_code.dll` 337,792,512 bytes = mine, unchanged after) | 17.8 / 15.0 | on route (6/6) | 0 of 30 (walk3 included) | the known reds only; 44 stand-ins over the run, no picture wrong; **1 read again** |
+
+Which runs were on this build: `105129-s2-faults-oot-house` (relink 10:50:51), `111956-s2-faults2-oot-house` (relink
+11:19:26), `120401-s2-oot3` (relink 12:03:15), and the partial `113428-s2-oot` (relink 11:34:00; its harness process
+ended at 385 s for a reason I did not find, game closed by PID; 6 opening shots correct, not counted). **Invalid:
+`114517-s2-oot2`**: my relink failed (`_code.dll` in use by OOT-FLASH's game, which started during my relink), the run
+used OOT-FLASH's build of 11:41 and overlapped its run `114437` (two copies at once; the lead confirmed
+`pipeline-crashed.bin` unchanged). Not counted.
+
+- House pictures over this send-back: 0 wrong in 90 valid shots on route (60 dense + 30 in `s2-oot3`).
+- Lazy line: `released at once for a CPU store` stayed 0 in all three runs; `read again for a landing during the
+  read` 1, 2 and 1: the MEDIUM's root race happens in OoT, and those landings now reach the guest. Raced-copy counter (L3) 0.
+- Pools line (house window): upload ~1.45-1.5 MB a frame, per-pool pass ~6.2 ms, ~56 MB a frame left out: the skip
+  still works without the brought-hash arming.
+- Red lines: the known set (no render target x2-3, occlusion query use-up, `pipeline-crashed.bin`).
+
+### 4. Needs audit
+
+- `lazy::bring_back` / `settle` / `take_relanded`: the flag protocol (`relanded` set under `ST` by `outside` and
+  `make_lazy`; the end of `returning` taken under the same lock only with no flag), the second `brought_back` record
+  and the merge into a guest page other threads may already use.
+- `upskip::forget` keeping a current-epoch stamp: rests on every forget during a recording describing a GPU change
+  that runs before that recording's draws (`sub.pre`); a forget from a path that writes the GPU copy after the draws
+  would re-arm wrongly.
+- `apply_writebacks`' watch re-check and `unhold` + `land` for pages just held.
+
+### 5. Unproven
+
+- A landing whose write-back comes from another pool's buffer than the one the page is read from (nested pools): the
+  read again gets the held pool's buffer, as the held-page skip always assumed.
+- `unhold` cannot release a page another thread faulted on between its protection and the re-check (it is being
+  brought back): a store in that window is still overwritten by the bring-back (a few microseconds; counter shows 0
+  releases at all in OoT). The L3 gap inside `bring_back` stays as before.
+- The white-props frame of the first report: not seen in these runs (0 of 90 house shots, `walk3` clean); its rate
+  was 1 in 96, so this proves nothing about it.
+- Perf indicative (shared machine: OOT-FLASH builds between runs).
+
+### 6. Slips
+
+- The in-place disabling of two fixes to check the tests (Edit tool, restored). One `git stash` / `stash pop` to
+  check a compiler warning was older than my change (restored, verified with `git status`).
+- My first relink went through `dist\nxrs\nxrs.exe --select-title ... --build` while OOT-FLASH's launcher was
+  running; it returned at once and OOT-FLASH's build ran instead (not mine). Later relinks ran this worktree's
+  `nxrs-build` directly with the launcher's own command line.
+- **Two copies of OoT at once** (`114517-s2-oot2` with OOT-FLASH's `114437`): my wait script took a quiet gap for
+  idle, its relink then failed on the DLL in use, and the script still started the run (it printed BUSY but did not
+  stop). Fixed in the script (stop on a failed relink or anything running); the last run was started by hand after the
+  lead gave me OoT alone, with the game detected by its full path (`Win32_Process.ExecutablePath`).
+
+### 7. Questions
+
+None.

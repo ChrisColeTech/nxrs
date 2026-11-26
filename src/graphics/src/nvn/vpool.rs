@@ -112,6 +112,7 @@ pub fn initialize(o: &mut pool_t) -> u64 {
         pt: (0..leaves).map(|_| None).collect(),
         unscaled: 0,
     });
+    publish_bounds(&g);
     a
 }
 
@@ -121,6 +122,21 @@ fn drop_range(pool: usize) {
         let v = g.swap_remove(i);
         unreserve(v.base);
     }
+    publish_bounds(&g);
+}
+
+/// The span every virtual pool's range lies in, [lo, hi) (lo >= hi: none): `with_pool` answers an address outside it
+/// without the pools' lock (the replay asks for every buffer it binds, on every translation lane).
+static SPAN: [AtomicU64; 2] = [AtomicU64::new(u64::MAX), AtomicU64::new(0)];
+
+/// Under the pools' write lock: `SPAN` of `g`.
+fn publish_bounds(g: &[VPool]) {
+    let lo = g.iter().map(|v| v.base).min().unwrap_or(u64::MAX);
+    let hi = g.iter().map(|v| v.base + v.len.max(v.size)).max().unwrap_or(0);
+    SPAN[0].store(lo, Ordering::Release);
+    SPAN[1].store(hi, Ordering::Release);
+    // what the virtual ranges are changed: caches of `is_sparse` / `translate` answers key on `generation`
+    GEN.fetch_add(1, Ordering::Release);
 }
 
 /// nvnMemoryPoolFinalize of a virtual pool.
@@ -299,6 +315,9 @@ fn pte(v: &VPool, off: u64) -> Pte {
 }
 
 fn with_pool<R>(a: u64, f: impl FnOnce(&VPool, u64) -> R) -> Option<R> {
+    if a < SPAN[0].load(Ordering::Acquire) || a >= SPAN[1].load(Ordering::Acquire) {
+        return None;
+    }
     let g = POOLS.read().unwrap();
     let v = g
         .iter()

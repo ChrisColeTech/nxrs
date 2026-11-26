@@ -9,9 +9,11 @@ stage or commit another person's changes.
 **Delegated work follows `docs/31-DELEGATION-PROTOCOL.md` (binding, strictly enforced).** Read it before any wave,
 send-back or audit: roles, one worktree and branch per parallel wave (its own `target/` and `dist/`, no lock files),
 titles owned by one wave at a time, the brief's parts, the rules while working, the report's headings, how a
-question is settled before the owner is asked, and the lead's acceptance list (re-run tests, read sheets, audit
-dangerous changes, the lead's own quiet-machine perf numbers, merge, commit, rebuild). Agents commit only on their
+question is settled before the owner is asked, and the lead's acceptance list (re-run tests, read sheets, the
+lead's own quiet-machine perf numbers, merge, commit, rebuild). Audits only when the owner asks for one. Agents commit only on their
 own wave branch; the lead merges into `gameplay-harness`; push when the owner asks. Two GPUs: `NXGFX_GPU=<index>`.
+Use the normal CLI builds, the real library and the configured build folders (owner-authorized); no throwaway temp
+builds or per-run copies of games.
 The game-outcome roadmap is `docs/33-REFERENCE-DELTA-ROADMAP.md`; `docs/32-REMAINING-WORK-PLAN.md` is the ledger.
 
 **Gameplay harness (2026-11-24):** `scripts/play.py` runs one built title through a scenario from

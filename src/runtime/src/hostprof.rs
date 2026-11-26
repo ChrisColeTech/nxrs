@@ -2,11 +2,19 @@
 //! `NXRS_HOST_PROF=<start s>,<seconds>[,<file>]` samples one host thread about 2000 times a second for that window
 //! and writes where it was. The thread is found by its name (`NXRS_HOST_PROF_THREAD`, default `vk replay`: graphics'
 //! command-buffer translation thread; `completion` names the submit-completion thread, any other value is
-//! matched against the start of the thread names, e.g. a guest thread's).
+//! matched against the start of the thread names, e.g. a guest thread's). Several names, comma-separated, and every
+//! thread whose name starts with one of them is sampled (`vk replay,vk translate`: the replay thread and its
+//! translation lanes).
 //!
 //! The file holds one sample a line, as `host_prof.py` reads it: `<address> <return address or 0> <module>`,
 //! the address relative to this image (module `-`) or to the module it is in, the return address the first stack
-//! word pointing into this image's code. After the samples come the tables host_prof.py prints, as `#` lines (that
+//! word pointing into this image's code. With `NXRS_HOST_PROF_STACK=1` the line goes on with ` | ` and the return
+//! addresses into this image of the unwound stack (relative to it, innermost first, up to 32 frames).
+//! A sampled thread is stopped only to read its context and copy its stack's top (4 KB, 64 KB with stacks) into a
+//! buffer made before; the unwinding and every allocation happen after it runs again (it may hold the heap's or the
+//! loader's lock while stopped). Threads that start later are taken in (the list is read again every 250 ms); the
+//! sampler's own thread is never one of them. The head names each thread sampled and its sample count.
+//! After the samples come the tables host_prof.py prints, as `#` lines (that
 //! script skips them): by function (lifted guest functions by name, other code by the nearest export below the
 //! address), the time in other modules and the function of this image that called into them. Costs nothing unless set.
 
@@ -49,11 +57,42 @@ pub fn thread_name(v: Option<&str>) -> String {
     }
 }
 
-/// One sample: where the thread was, and the first return address into this image found on its stack.
+/// The most return addresses kept for one sample's stack.
+pub const MAX_DEPTH: usize = 32;
+
+/// One sample: where the thread was, and the first return address into this image found on its stack. Its unwound
+/// stack (`NXRS_HOST_PROF_STACK=1`), if any, is `stacks[first..first + depth]` of the side list the sampler keeps, so
+/// a sample without one costs 24 bytes.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Sample {
     pub ip: u64,
     pub ret: u64,
+    pub first: u32,
+    pub depth: u8,
+}
+
+impl Sample {
+    pub fn at(ip: u64, ret: u64) -> Sample {
+        Sample {
+            ip,
+            ret,
+            first: 0,
+            depth: 0,
+        }
+    }
+}
+
+/// ` | a b c` for a sample with a stack (relative to `image`), else nothing.
+fn stack_text(sm: &Sample, stacks: &[u64], image: u64) -> String {
+    if sm.depth == 0 {
+        return String::new();
+    }
+    let mut s = String::from(" |");
+    let f = sm.first as usize;
+    for a in &stacks[f..f + sm.depth as usize] {
+        s.push_str(&format!(" {:x}", a - image));
+    }
+    s
 }
 
 /// What an address is: `own` = in this image (with its name), else the module's path and the name in it.
@@ -62,8 +101,15 @@ pub struct Names<'a> {
     pub module: &'a dyn Fn(u64) -> Option<(String, u64, String)>,
 }
 
-/// The sample lines and the tables (host_prof.py's three), `image` = this image's base.
-pub fn report(head: &str, samples: &[Sample], image: u64, names: &Names, top: usize) -> String {
+/// The sample lines and the tables (host_prof.py's three), `image` = this image's base, `stacks` the samples' stacks.
+pub fn report(
+    head: &str,
+    samples: &[Sample],
+    stacks: &[u64],
+    image: u64,
+    names: &Names,
+    top: usize,
+) -> String {
     let mut s = format!("{head}\n");
     let (mut own, mut outside, mut via, mut outfn): (
         HashMap<String, u64>,
@@ -76,9 +122,10 @@ pub fn report(head: &str, samples: &[Sample], image: u64, names: &Names, top: us
         match (names.own)(sm.ip) {
             Some(name) => {
                 s.push_str(&format!(
-                    "{:x} {:x} -\n",
+                    "{:x} {:x} -{}\n",
                     sm.ip - image,
-                    if sm.ret != 0 { sm.ret - image } else { 0 }
+                    if sm.ret != 0 { sm.ret - image } else { 0 },
+                    stack_text(sm, stacks, image)
                 ));
                 *own.entry(name).or_default() += 1;
                 n_own += 1;
@@ -87,9 +134,10 @@ pub fn report(head: &str, samples: &[Sample], image: u64, names: &Names, top: us
                 let (path, rel, fname) =
                     (names.module)(sm.ip).unwrap_or_else(|| ("?".into(), sm.ip, "?".into()));
                 s.push_str(&format!(
-                    "{:x} {:x} {path}\n",
+                    "{:x} {:x} {path}{}\n",
                     rel,
-                    if sm.ret != 0 { sm.ret - image } else { 0 }
+                    if sm.ret != 0 { sm.ret - image } else { 0 },
+                    stack_text(sm, stacks, image)
                 ));
                 let base = path.rsplit(['\\', '/']).next().unwrap_or(&path).to_string();
                 let f = format!("{base}!{fname}");
@@ -195,9 +243,10 @@ pub use win::{own_name, run};
 #[cfg(windows)]
 mod win {
     use super::*;
-    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, HMODULE};
+    use windows_sys::Win32::Foundation::{CloseHandle, FILETIME, HANDLE, HMODULE, STILL_ACTIVE};
     use windows_sys::Win32::System::Diagnostics::Debug::{
-        GetThreadContext, CONTEXT, IMAGE_NT_HEADERS64,
+        GetThreadContext, RtlLookupFunctionEntry, RtlVirtualUnwind, CONTEXT, IMAGE_NT_HEADERS64,
+        UNW_FLAG_NHANDLER,
     };
     use windows_sys::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Thread32First, Thread32Next, TH32CS_SNAPTHREAD, THREADENTRY32,
@@ -206,12 +255,16 @@ mod win {
         GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
     };
-    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
+    use windows_sys::Win32::System::Memory::{
+        VirtualAlloc, VirtualFree, VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_RELEASE,
+        MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD,
+        PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
+    };
     use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
     use windows_sys::Win32::System::Threading::{
-        GetCurrentProcessId, GetThreadDescription, GetThreadTimes, OpenThread, ResumeThread,
-        SuspendThread, THREAD_GET_CONTEXT, THREAD_QUERY_INFORMATION,
-        THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
+        GetCurrentProcessId, GetCurrentThreadId, GetExitCodeThread, GetThreadDescription,
+        GetThreadTimes, OpenThread, ResumeThread, SuspendThread, THREAD_GET_CONTEXT,
+        THREAD_QUERY_INFORMATION, THREAD_QUERY_LIMITED_INFORMATION, THREAD_SUSPEND_RESUME,
     };
 
     const CONTEXT_CONTROL: u32 = 0x0010_0001;
@@ -330,34 +383,47 @@ mod win {
         ))
     }
 
-    /// The first thread of this process whose name starts with `name`.
-    pub fn find_thread(name: &str) -> Option<u32> {
+    /// Every thread of this process whose name starts with one of `names` (id, name, a handle open for sampling),
+    /// never the calling thread (the sampler must not suspend itself). The handle that read the name is the one
+    /// kept: a thread id reused between a lookup and a second open cannot slip in. The caller closes the handles.
+    pub fn find_threads(names: &[&str]) -> Vec<(u32, String, HANDLE)> {
+        let mut found = Vec::new();
         // SAFETY: a thread snapshot of this process, our own buffers and handles
         unsafe {
             let snap = CreateToolhelp32Snapshot(TH32CS_SNAPTHREAD, 0);
             if snap as isize == -1 {
-                return None;
+                return found;
             }
             let me = GetCurrentProcessId();
+            let self_tid = GetCurrentThreadId();
             let mut te: THREADENTRY32 = core::mem::zeroed();
             te.dwSize = core::mem::size_of::<THREADENTRY32>() as u32;
-            let mut found = None;
             let mut ok = Thread32First(snap, &mut te) != 0;
-            while ok && found.is_none() {
-                if te.th32OwnerProcessID == me {
-                    let h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, te.th32ThreadID);
+            while ok {
+                if te.th32OwnerProcessID == me && te.th32ThreadID != self_tid {
+                    let h = OpenThread(
+                        THREAD_SUSPEND_RESUME
+                            | THREAD_GET_CONTEXT
+                            | THREAD_QUERY_INFORMATION
+                            | THREAD_QUERY_LIMITED_INFORMATION,
+                        0,
+                        te.th32ThreadID,
+                    );
                     if !h.is_null() {
+                        let mut keep = false;
                         let mut p: *mut u16 = core::ptr::null_mut();
                         if GetThreadDescription(h, &mut p) >= 0 && !p.is_null() {
                             let len = (0..).take_while(|&i| *p.add(i) != 0).count();
-                            if String::from_utf16_lossy(core::slice::from_raw_parts(p, len))
-                                .starts_with(name)
-                            {
-                                found = Some(te.th32ThreadID);
+                            let n = String::from_utf16_lossy(core::slice::from_raw_parts(p, len));
+                            if names.iter().any(|x| n.starts_with(x)) {
+                                found.push((te.th32ThreadID, n, h));
+                                keep = true;
                             }
                             windows_sys::Win32::Foundation::LocalFree(p as _);
                         }
-                        CloseHandle(h);
+                        if !keep {
+                            CloseHandle(h);
+                        }
                     }
                 }
                 ok = Thread32Next(snap, &mut te) != 0;
@@ -365,6 +431,178 @@ mod win {
             CloseHandle(snap);
             found
         }
+    }
+
+    /// Bytes of a sampled thread's stack copied (from its rsp up) while it is suspended: with stacks, enough for the
+    /// frames that matter; without, the 512 words searched for the first return address into this image.
+    const COPY_STACK: usize = 64 << 10;
+    const COPY_RET: usize = 4 << 10;
+    /// Zeros past the end of a thread's stack span in its mirror (an unwind of garbage reading a little above it).
+    const MIRROR_PAD: usize = 64 << 10;
+
+    /// A CONTEXT as GetThreadContext needs it: 16-byte aligned (windows-sys' CONTEXT is not declared so).
+    #[repr(C, align(16))]
+    struct Ctx(CONTEXT);
+
+    /// Whether a committed page of this protection can be read without a fault or a side effect: no guard page
+    /// (reading one from the sampler raises STATUS_GUARD_PAGE_VIOLATION and takes the thread's guard away), no
+    /// no-access page, and one of the readable protections.
+    pub fn readable(protect: u32) -> bool {
+        protect & (PAGE_GUARD | PAGE_NOACCESS) == 0
+            && protect
+                & (PAGE_READWRITE
+                    | PAGE_READONLY
+                    | PAGE_EXECUTE_READ
+                    | PAGE_EXECUTE_READWRITE
+                    | PAGE_WRITECOPY
+                    | PAGE_EXECUTE_WRITECOPY)
+                != 0
+    }
+
+    /// The frame register an UNWIND_INFO names (its byte 3, low 4 bits; 0 = none), as an index into `gprs`.
+    pub fn frame_register(unwind_info: *const u8) -> usize {
+        // SAFETY: the caller passes a loaded image's UNWIND_INFO (at least 4 bytes)
+        (unsafe { *unwind_info.add(3) } & 0xf) as usize
+    }
+
+    /// A sampled thread's stack span [lo, hi) mirrored in a buffer of the same layout (address `lo` at the buffer's
+    /// start, `MIRROR_PAD` zeros after `hi`), committed up front and touched only where samples copy: any stack
+    /// address a register or a saved frame pointer holds maps into it, so an unwind of the copy never reads the live
+    /// stack or outside the buffer.
+    struct Mirror {
+        lo: u64,
+        hi: u64,
+        buf: *mut u8,
+    }
+
+    impl Mirror {
+        /// The mirror of the stack reservation `rsp` is in (all its regions with one allocation base).
+        fn of(rsp: u64) -> Option<Mirror> {
+            // SAFETY: queries of this process's address space; a fresh allocation of our own
+            unsafe {
+                let mut mb: MEMORY_BASIC_INFORMATION = core::mem::zeroed();
+                let q = |a: u64, mb: &mut MEMORY_BASIC_INFORMATION| {
+                    VirtualQuery(a as _, mb, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0
+                };
+                if !q(rsp, &mut mb) || mb.AllocationBase.is_null() {
+                    return None;
+                }
+                let alloc = mb.AllocationBase;
+                let lo = alloc as u64;
+                let mut hi = lo;
+                while q(hi, &mut mb) && mb.AllocationBase == alloc && mb.RegionSize > 0 {
+                    hi = mb.BaseAddress as u64 + mb.RegionSize as u64;
+                }
+                if rsp < lo || rsp >= hi || hi - lo > 1 << 30 {
+                    return None;
+                }
+                let buf = VirtualAlloc(
+                    core::ptr::null(),
+                    (hi - lo) as usize + MIRROR_PAD,
+                    MEM_RESERVE | MEM_COMMIT,
+                    PAGE_READWRITE,
+                ) as *mut u8;
+                (!buf.is_null()).then_some(Mirror { lo, hi, buf })
+            }
+        }
+
+        /// The mirror address of a stack address in [lo, hi).
+        fn at(&self, a: u64) -> u64 {
+            self.buf as u64 + (a - self.lo)
+        }
+    }
+
+    impl Drop for Mirror {
+        fn drop(&mut self) {
+            // SAFETY: our own allocation
+            unsafe { VirtualFree(self.buf as _, 0, MEM_RELEASE) };
+        }
+    }
+
+    /// The general registers of a context, for moving stack addresses between the thread's stack and the copy.
+    fn gprs(c: &mut CONTEXT) -> [&mut u64; 16] {
+        [
+            &mut c.Rax, &mut c.Rcx, &mut c.Rdx, &mut c.Rbx, &mut c.Rsp, &mut c.Rbp, &mut c.Rsi,
+            &mut c.Rdi, &mut c.R8, &mut c.R9, &mut c.R10, &mut c.R11, &mut c.R12, &mut c.R13,
+            &mut c.R14, &mut c.R15,
+        ]
+    }
+
+    /// The return addresses into this image's code [tlo, thi), innermost first, of a stack copied while its thread
+    /// was suspended: `m` mirrors the thread's stack and holds its bytes [from, from + len) (zeros elsewhere), `cx`
+    /// its context at that moment. Runs after the thread was resumed: the unwind tables' lookups may take the
+    /// loader's locks, which a suspended thread could hold. Every register that points anywhere into the stack span
+    /// is moved into the mirror (again after each step, for the frame pointers restored from it); a step is taken
+    /// only while rsp is inside the copied bytes and the function's frame register (if it has one) points into the
+    /// mirror, so the unwind reads the mirror only (an address past the copied bytes reads zeros there).
+    ///
+    /// SAFETY: `m` is a live mirror, [from, from + len) inside its span.
+    unsafe fn unwind_copy(
+        cx: &CONTEXT,
+        m: &Mirror,
+        from: u64,
+        len: u64,
+        tlo: u64,
+        thi: u64,
+        out: &mut Vec<u64>,
+    ) -> u8 {
+        let (blo, bhi) = (m.at(m.lo), m.at(m.hi) + MIRROR_PAD as u64);
+        let (wlo, whi) = (m.at(from), m.at(from) + len);
+        let relocate = |c: &mut CONTEXT| {
+            for r in gprs(c) {
+                if *r >= m.lo && *r < m.hi {
+                    *r = m.at(*r);
+                }
+            }
+        };
+        let mut c: CONTEXT = *cx;
+        relocate(&mut c);
+        let mut n = 0u8;
+        for _ in 0..64 {
+            if c.Rsp < wlo || c.Rsp + 8 > whi {
+                break;
+            }
+            let mut base = 0u64;
+            let f = RtlLookupFunctionEntry(c.Rip, &mut base, core::ptr::null_mut());
+            if f.is_null() {
+                // a leaf: the return address is at rsp
+                c.Rip = *(c.Rsp as *const u64);
+                c.Rsp += 8;
+            } else {
+                let fr = frame_register((base + (*f).Anonymous.UnwindData as u64) as *const u8);
+                if fr != 0 {
+                    let v = *gprs(&mut c)[fr];
+                    if v < blo || v >= bhi {
+                        // the unwind would read through a frame pointer outside the mirror
+                        break;
+                    }
+                }
+                let mut hd = core::ptr::null_mut();
+                let mut est = 0u64;
+                RtlVirtualUnwind(
+                    UNW_FLAG_NHANDLER,
+                    base,
+                    c.Rip,
+                    f,
+                    &mut c,
+                    &mut hd,
+                    &mut est,
+                    core::ptr::null_mut(),
+                );
+                relocate(&mut c);
+            }
+            if c.Rip == 0 || c.Rsp < wlo || c.Rsp > whi {
+                break;
+            }
+            if c.Rip >= tlo && c.Rip < thi {
+                out.push(c.Rip);
+                n += 1;
+                if n as usize == MAX_DEPTH {
+                    break;
+                }
+            }
+        }
+        n
     }
 
     fn cpu_seconds(h: HANDLE) -> f64 {
@@ -377,83 +615,201 @@ mod win {
         ft(k) + ft(u)
     }
 
-    /// Samples thread `name` for `seconds` (waiting up to 10 minutes for it to exist) and returns the file's text.
+    /// How often the thread list is read again for threads started after the sampler.
+    const RESCAN: std::time::Duration = std::time::Duration::from_millis(250);
+
+    /// A sampled thread.
+    struct Target {
+        tid: u32,
+        name: String,
+        h: HANDLE,
+        cpu0: f64,
+        from: std::time::Instant,
+        n: u64,
+        alive: bool,
+        /// its stack's mirror, made after its first sample (that one is taken without a stack copy)
+        mirror: Option<Mirror>,
+    }
+
+    /// Takes in the threads of `found` not sampled yet (by thread id); closes the other handles.
+    fn add_new(ths: &mut Vec<Target>, found: Vec<(u32, String, HANDLE)>) {
+        for (tid, name, h) in found {
+            if ths.iter().any(|t| t.tid == tid) {
+                // SAFETY: the handle find_threads opened for us
+                unsafe { CloseHandle(h) };
+                continue;
+            }
+            ths.push(Target {
+                tid,
+                name,
+                h,
+                cpu0: cpu_seconds(h),
+                from: std::time::Instant::now(),
+                n: 0,
+                alive: true,
+                mirror: None,
+            });
+        }
+    }
+
+    /// Samples the threads `name` names (comma-separated name prefixes; waiting up to 10 minutes for one to exist,
+    /// and taking in the ones that start later) for `seconds` and returns the file's text.
     pub fn run(name: &str, seconds: f64, t0: std::time::Instant) -> Result<String, String> {
-        let tid = loop {
-            if let Some(t) = find_thread(name) {
-                break t;
+        let stack = std::env::var("NXRS_HOST_PROF_STACK").as_deref() == Ok("1");
+        run_ex(name, seconds, t0, stack)
+    }
+
+    /// As `run`; `stack`: each sample with its unwound stack.
+    pub fn run_ex(
+        name: &str,
+        seconds: f64,
+        t0: std::time::Instant,
+        stack: bool,
+    ) -> Result<String, String> {
+        let names: Vec<&str> = name
+            .split(',')
+            .map(str::trim)
+            .filter(|n| !n.is_empty())
+            .collect();
+        let mut ths: Vec<Target> = Vec::new();
+        loop {
+            add_new(&mut ths, find_threads(&names));
+            if !ths.is_empty() {
+                break;
             }
             if t0.elapsed().as_secs() > 600 {
-                return Err(format!("no thread named {name:?} (NXRS_HOST_PROF_THREAD)"));
+                return Err(format!(
+                    "no thread named {name:?} (NXRS_HOST_PROF_THREAD) that can be opened"
+                ));
             }
             std::thread::sleep(std::time::Duration::from_millis(50));
-        };
-        // SAFETY: opening a thread of this process
-        let th = unsafe {
-            OpenThread(
-                THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
-                0,
-                tid,
-            )
-        };
-        if th.is_null() {
-            return Err(format!("cannot open the thread {name:?}"));
         }
         let (lo, hi, tlo, thi) = own_range();
-        let mut samples = Vec::with_capacity(1 << 14);
-        let cpu0 = cpu_seconds(th);
-        let end = std::time::Instant::now() + std::time::Duration::from_secs_f64(seconds.max(0.0));
-        while std::time::Instant::now() < end && samples.len() < 1 << 16 {
+        // nothing below allocates while a thread is stopped (it may hold the heap's lock): the mirrors are made after
+        // a thread's first sample, the sample lists grow after the thread runs again
+        let copy_len = if stack { COPY_STACK } else { COPY_RET } as u64;
+        let mut samples: Vec<Sample> = Vec::with_capacity(1 << 16);
+        let mut stacks: Vec<u64> = Vec::with_capacity(if stack { 1 << 20 } else { 0 });
+        let start = std::time::Instant::now();
+        let end = start + std::time::Duration::from_secs_f64(seconds.max(0.0));
+        let mut rescan = start + RESCAN;
+        while std::time::Instant::now() < end && samples.len() < 1 << 20 {
             // ~0.5 ms, without the 1 ms sleep granularity
             let t = std::time::Instant::now();
             while t.elapsed() < std::time::Duration::from_micros(480) {
                 core::hint::spin_loop();
             }
-            // SAFETY: suspended, its context read, resumed; nothing else is done while it is stopped (it may hold any lock)
-            unsafe {
-                if SuspendThread(th) == u32::MAX {
-                    break;
+            if t >= rescan {
+                // lanes start lazily, after the sampler: take them in as they appear; drop the ones that ended
+                for tg in ths.iter_mut().filter(|t| t.alive) {
+                    let mut code = 0u32;
+                    // SAFETY: our handle (opened with THREAD_QUERY_INFORMATION)
+                    if unsafe { GetExitCodeThread(tg.h, &mut code) } == 0
+                        || code != STILL_ACTIVE as u32
+                    {
+                        tg.alive = false;
+                    }
                 }
-                let mut cx: CONTEXT = core::mem::zeroed();
-                cx.ContextFlags = CONTEXT_CONTROL;
-                if GetThreadContext(th, &mut cx) != 0 {
-                    let mut s = Sample { ip: cx.Rip, ret: 0 };
-                    if cx.Rip < lo || cx.Rip >= hi {
-                        // the first stack word that points into this image's code
-                        let sp = cx.Rsp as *const u64;
+                add_new(&mut ths, find_threads(&names));
+                rescan = t + RESCAN;
+            }
+            for tg in ths.iter_mut().filter(|t| t.alive) {
+                let mut cx = Ctx(unsafe { core::mem::zeroed() });
+                // CONTEXT_FULL with a stack (the unwind needs the integer registers)
+                cx.0.ContextFlags = if stack { 0x0010_000b } else { CONTEXT_CONTROL };
+                let (mut from, mut len) = (0u64, 0u64);
+                // SAFETY: while the thread is stopped (it may hold any lock: the heap's, the loader's) only its
+                // context is read, the kernel asked about the page its rsp is in, and readable stack bytes copied
+                // into its mirror (committed before); no allocation, no lookup in the unwind tables
+                let got = unsafe {
+                    if SuspendThread(tg.h) == u32::MAX {
+                        // gone (a lane that ended): it is dropped from the sampling
+                        tg.alive = false;
+                        continue;
+                    }
+                    let ok = GetThreadContext(tg.h, &mut cx.0) != 0;
+                    let a = cx.0.Rsp & !15;
+                    if let (true, Some(m)) = (ok, tg.mirror.as_ref()) {
                         let mut mb: MEMORY_BASIC_INFORMATION = core::mem::zeroed();
-                        if VirtualQuery(
-                            sp as _,
-                            &mut mb,
-                            core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-                        ) != 0
+                        if a >= m.lo
+                            && a < m.hi
+                            && VirtualQuery(
+                                a as _,
+                                &mut mb,
+                                core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                            ) != 0
                             && mb.State == MEM_COMMIT
+                            && readable(mb.Protect)
                         {
-                            let rend = mb.BaseAddress as u64 + mb.RegionSize as u64;
-                            for k in 0..512u64 {
-                                if cx.Rsp + (k + 1) * 8 > rend {
-                                    break;
-                                }
-                                let w = *sp.add(k as usize);
-                                if w >= tlo && w < thi {
-                                    s.ret = w;
-                                    break;
-                                }
-                            }
+                            // one region: the same protection to its end
+                            let rend = (mb.BaseAddress as u64 + mb.RegionSize as u64).min(m.hi);
+                            from = a;
+                            len = rend.saturating_sub(a).min(copy_len) & !7;
+                            core::ptr::copy_nonoverlapping(
+                                a as *const u8,
+                                m.at(a) as *mut u8,
+                                len as usize,
+                            );
                         }
                     }
-                    samples.push(s);
+                    ResumeThread(tg.h);
+                    ok
+                };
+                if !got {
+                    continue;
                 }
-                ResumeThread(th);
+                let cx = &cx.0;
+                if tg.mirror.is_none() {
+                    // the first sample (no copy): the stack span is known now, its mirror made while it runs
+                    tg.mirror = Mirror::of(cx.Rsp);
+                }
+                // the thread runs again: everything below works on the copy
+                let mut s = Sample::at(cx.Rip, 0);
+                if let (true, Some(m)) = (len > 0, tg.mirror.as_ref()) {
+                    // SAFETY: [from, from + len) was copied into the mirror just now
+                    let words = unsafe {
+                        core::slice::from_raw_parts(m.at(from) as *const u64, len as usize / 8)
+                    };
+                    if cx.Rip < lo || cx.Rip >= hi {
+                        // the first stack word from rsp on that points into this image's code
+                        s.ret = words[((cx.Rsp - from) / 8) as usize..]
+                            .iter()
+                            .take(512)
+                            .copied()
+                            .find(|&w| w >= tlo && w < thi)
+                            .unwrap_or(0);
+                    }
+                    if stack {
+                        s.first = stacks.len() as u32;
+                        // SAFETY: a live mirror holding [from, from + len)
+                        s.depth = unsafe { unwind_copy(cx, m, from, len, tlo, thi, &mut stacks) };
+                    }
+                    // back to zeros: the next unwind finds nothing stale in the mirror
+                    // SAFETY: the same bytes, in our own buffer
+                    unsafe { core::ptr::write_bytes(m.at(from) as *mut u8, 0, len as usize) };
+                }
+                samples.push(s);
+                tg.n += 1;
             }
         }
-        let cpu = cpu_seconds(th) - cpu0;
-        // SAFETY: our handle
-        unsafe { CloseHandle(th) };
-        let head = format!("# host profile of thread {name:?}: {} samples in {seconds:.1} s, thread CPU {cpu:.2} s, image {lo:x}..{hi:x}", samples.len());
+        let cpu: f64 = ths.iter().map(|t| cpu_seconds(t.h) - t.cpu0).sum();
+        let mut head = format!("# host profile of thread {name:?} ({} threads): {} samples in {seconds:.1} s, thread CPU {cpu:.2} s, image {lo:x}..{hi:x}", ths.len(), samples.len());
+        for t in &ths {
+            head.push_str(&format!(
+                "\n# thread {} {:?}: {} samples, from {:.2} s{}",
+                t.tid,
+                t.name,
+                t.n,
+                t.from.saturating_duration_since(start).as_secs_f64(),
+                if t.alive { "" } else { ", ended" }
+            ));
+            // SAFETY: our handle
+            unsafe { CloseHandle(t.h) };
+        }
         Ok(report(
             &head,
             &samples,
+            &stacks,
             lo,
             &Names {
                 own: &own_name,
@@ -537,23 +893,24 @@ mod tests {
             own: &own,
             module: &module,
         };
-        let s = [
-            Sample { ip: 0x1100, ret: 0 },
-            Sample { ip: 0x1200, ret: 0 },
-            Sample { ip: 0x1900, ret: 0 },
-            Sample {
-                ip: 0x9010,
-                ret: 0x1110,
-            },
+        let mut s = [
+            Sample::at(0x1100, 0),
+            Sample::at(0x1200, 0),
+            Sample::at(0x1900, 0),
+            Sample::at(0x9010, 0x1110),
         ];
-        let r = report("# head", &s, 0x1000, &names, 40);
+        // a stack: its return addresses after ` | `, relative to the image (from the side list)
+        let stacks = [0x1f00, 0x1300, 0x1400];
+        s[1].first = 1;
+        s[1].depth = 2;
+        let r = report("# head", &s, &stacks, 0x1000, &names, 40);
         let l: Vec<&str> = r.lines().collect();
         assert_eq!(
             &l[..5],
             [
                 "# head",
                 "100 0 -",
-                "200 0 -",
+                "200 0 - | 300 400",
                 "900 0 -",
                 "10 110 C:\\Windows\\System32\\nvoglv64.dll"
             ]
@@ -586,7 +943,7 @@ mod tests {
         let text = text.unwrap();
         let head = text.lines().next().unwrap();
         assert!(
-            head.starts_with("# host profile of thread \"hostprof test spinner\": "),
+            head.starts_with("# host profile of thread \"hostprof test spinner\" (1 threads): "),
             "{head}"
         );
         let n: usize = head
@@ -598,10 +955,156 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        assert!(n > 50, "{head}");
+        // a floor, not a rate: how many samples 0.2 s gives depends on the machine (a CI runner gave 37-38 where
+        // this one gives ~400); the test is that sampling happens and lands in this image
+        assert!(n >= MIN_SAMPLES, "{head}");
         assert!(
             text.lines().filter(|l| l.ends_with(" -")).count() > n / 2,
             "most samples in this image"
         );
+    }
+
+    /// With stacks: the spinner's samples carry return addresses into this image (the test harness's frames).
+    #[cfg(windows)]
+    #[test]
+    fn samples_carry_the_unwound_stack() {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let s2 = stop.clone();
+        #[inline(never)]
+        fn spin(s: &std::sync::atomic::AtomicBool) -> u64 {
+            let mut x = 0u64;
+            while !s.load(std::sync::atomic::Ordering::Relaxed) {
+                x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7));
+            }
+            x
+        }
+        let h = std::thread::Builder::new()
+            .name("hostprof stack spinner".into())
+            .spawn(move || spin(&s2))
+            .unwrap();
+        let text = win::run_ex(
+            "hostprof stack spinner",
+            0.2,
+            std::time::Instant::now(),
+            true,
+        );
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        h.join().unwrap();
+        let text = text.unwrap();
+        let with = text
+            .lines()
+            .filter(|l| !l.starts_with('#') && l.contains(" | "))
+            .count();
+        let all = text.lines().filter(|l| !l.starts_with('#')).count();
+        assert!(
+            all >= MIN_SAMPLES && with > all / 2,
+            "{with} of {all} samples with a stack"
+        );
+    }
+
+    /// Guard and no-access pages are never read; the readable protections are; the context wrapper is aligned.
+    #[cfg(windows)]
+    #[test]
+    fn only_readable_stack_pages_are_copied() {
+        use windows_sys::Win32::System::Memory::{
+            PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY,
+            PAGE_READWRITE,
+        };
+        assert!(win::readable(PAGE_READWRITE));
+        assert!(win::readable(PAGE_READONLY));
+        assert!(win::readable(PAGE_EXECUTE_READ));
+        assert!(
+            !win::readable(PAGE_READWRITE | PAGE_GUARD),
+            "a stack's guard page"
+        );
+        assert!(!win::readable(PAGE_NOACCESS));
+        assert!(!win::readable(PAGE_EXECUTE));
+        assert!(!win::readable(0));
+        // UNWIND_INFO byte 3: frame register in the low 4 bits (5 = rbp), offset in the high ones
+        assert_eq!(win::frame_register([1u8, 4, 2, 0x35].as_ptr()), 5);
+        assert_eq!(win::frame_register([1u8, 4, 2, 0x00].as_ptr()), 0);
+    }
+
+    /// The fewest samples a sampling test expects: independent of the machine's speed and timer resolution.
+    #[cfg(windows)]
+    const MIN_SAMPLES: usize = 10;
+
+    /// A spinner named `name` until `stop`.
+    #[cfg(windows)]
+    fn spinner(
+        name: &str,
+        stop: &std::sync::Arc<std::sync::atomic::AtomicBool>,
+    ) -> std::thread::JoinHandle<u64> {
+        let s2 = stop.clone();
+        std::thread::Builder::new()
+            .name(name.into())
+            .spawn(move || {
+                let mut x = 0u64;
+                while !s2.load(std::sync::atomic::Ordering::Relaxed) {
+                    x = std::hint::black_box(x.wrapping_mul(31).wrapping_add(7));
+                }
+                x
+            })
+            .unwrap()
+    }
+
+    /// The sampler never stops itself, though its own thread's name matches (before: it suspended itself and hung).
+    #[cfg(windows)]
+    #[test]
+    fn the_sampler_skips_its_own_thread() {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let lane = spinner("hostprof self lane", &stop);
+        let me = std::thread::Builder::new()
+            .name("hostprof self sampler".into())
+            .spawn(|| win::run_ex("hostprof self", 0.2, std::time::Instant::now(), true))
+            .unwrap();
+        let text = me.join().unwrap();
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        lane.join().unwrap();
+        let text = text.unwrap();
+        assert!(
+            text.contains("(1 threads)"),
+            "{}",
+            text.lines().next().unwrap()
+        );
+        assert!(text.contains("\"hostprof self lane\""));
+        assert!(!text.contains("\"hostprof self sampler\""));
+    }
+
+    /// A thread started after the sampler is taken in at the next rescan and named in the head (before: never).
+    #[cfg(windows)]
+    #[test]
+    fn threads_started_later_are_sampled() {
+        let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let first = spinner("hostprof late 0", &stop);
+        let st = stop.clone();
+        let later = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            spinner("hostprof late 1", &st)
+        });
+        let text = win::run_ex("hostprof late", 0.8, std::time::Instant::now(), false);
+        stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        first.join().unwrap();
+        later.join().unwrap().join().unwrap();
+        let text = text.unwrap();
+        assert!(
+            text.contains("(2 threads)"),
+            "{}",
+            text.lines().next().unwrap()
+        );
+        let late = text
+            .lines()
+            .find(|l| l.contains("\"hostprof late 1\""))
+            .expect("the late thread named");
+        let n: u64 = late
+            .split(": ")
+            .nth(1)
+            .unwrap()
+            .split(' ')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        assert!(n as usize >= MIN_SAMPLES, "{late}");
     }
 }
