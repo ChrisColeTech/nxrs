@@ -48,7 +48,7 @@ pub const PICKER: &str = "Add update";
 pub const FILTER: (&str, &[&str]) = ("Game updates", &["nsp", "xci", "nca"]);
 pub const HINT_LOCKED: &str = "Updates cannot be changed while the game is running or building.";
 pub const HINT_EMPTY: &str = "No update is installed for this game. Click Add update… or drop files here: NSP, XCI or NCA, several at once. The game itself has to be an NSP package; a package that holds another game's update is refused.";
-pub const HINT_SOME: &str = "Add update… installs more packages, several at once. Select one or more entries and click Remove to take them off. One update applies at a time: the newest, unless Version to build says otherwise. The original files are never changed; the update's data is read from its package while you play, so keep it in place.";
+pub const HINT_SOME: &str = "Add update… installs more packages, several at once. Select one or more entries and click Remove to take them off. One update applies at a time: the newest, unless Version to build says otherwise. The original files are never changed; a build copies the update's data into the game, which then plays without the package.";
 pub const PANEL_EMPTY: &str = "No update is installed for this game. Add one with Game > Install Updates… (NSP, XCI or NCA; the game itself has to be an NSP package).";
 pub const PANEL_NOTE: &str = "Right-click an entry and choose Remove (or press Delete) to take it off; it takes effect when you click Apply and needs the game built again. Add updates and choose the version in Game > Install Updates…";
 
@@ -59,7 +59,7 @@ pub const UNKNOWN: &str = "version unknown";
 pub const APPLIED: &str = " — applied";
 pub const SELECTED: &str = " — selected, build the game to apply it";
 pub const IN_BUILD: &str = " — in the current build, not selected";
-pub const COMPRESSED: &str = "{} is a compressed package. An update is read in place while the game runs, which a compressed file does not allow: decompress it to an NSP or XCI first (nsz -D).";
+pub const COMPRESSED: &str = "{} is a compressed package. An update is read in place by the build, which a compressed file does not allow: decompress it to an NSP or XCI first (nsz -D).";
 pub const NOT_UPDATE: &str = "{} is not an update package. Select an NSP, XCI or NCA file.";
 pub const BAD_NSP: &str = "{} is not a valid NSP package (no PFS0 header).";
 pub const BAD_XCI: &str = "{} is not a valid XCI card image.";
