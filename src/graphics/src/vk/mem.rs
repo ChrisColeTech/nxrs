@@ -2674,29 +2674,35 @@ fn seal_some(g: &Gpu) {
             NEXT.store(b, Ordering::Relaxed);
             return;
         }
+        if budget == 0 {
+            NEXT.store(b, Ordering::Relaxed);
+            return;
+        }
         let p = m.by_base.get_mut(&b).unwrap();
         let (lo, hi) = page_range(p.base, p.size);
-        if !p.seal_entry {
-            if hi - lo > budget {
-                NEXT.store(b, Ordering::Relaxed);
-                return;
-            }
-            // every page committed and read-write (the protection call would fail on the rest; a page read-only or
-            // guarded for another reason is not this module's to change)
-            if !host_writable(lo, hi - lo) {
-                continue;
-            }
+        // every page committed and read-write (the protection call would fail on the rest; a page read-only or guarded
+        // for another reason is not this module's to change); a pool with an entry is read-only in part already
+        if !p.seal_entry && !host_writable(lo, hi - lo) {
+            continue;
         }
         if super::lazy::holds_any(lo, hi - lo) {
             continue;
         }
         done += 1;
-        if !p.seal_entry {
-            budget -= hi - lo;
-        }
-        if !super::seal::arm(p.base, lo, hi) {
-            p.seal_entry = super::seal::holds(lo);
-            continue;
+        // a large pool's first arming goes in pieces of the budget, one a pass
+        let (arm, bytes) = super::seal::arm(p.base, lo, hi, budget);
+        budget = budget.saturating_sub(bytes);
+        match arm {
+            super::seal::Arm::Refused => {
+                p.seal_entry = super::seal::holds(lo);
+                continue;
+            }
+            super::seal::Arm::Part => {
+                p.seal_entry = true;
+                NEXT.store(b, Ordering::Relaxed);
+                return;
+            }
+            super::seal::Arm::Done => {}
         }
         p.seal_entry = true;
         match watch::take(lo, hi, true) {
@@ -3804,7 +3810,7 @@ mod seal_tests {
         let mut m = pools(&[(a, n)]);
         {
             let p = m.by_base.get_mut(&a).unwrap();
-            assert!(super::super::seal::arm(a, a, a + n));
+            assert_eq!(super::super::seal::arm(a, a, a + n, n).0, super::super::seal::Arm::Done);
             p.seal_entry = true;
             p.sealed = true;
             p.dirty_frame = 0;

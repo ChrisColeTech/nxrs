@@ -30,6 +30,20 @@ struct Entry {
     armed: bool,
     /// chunks made read-write since the last arming (protected again at the next one), ascending
     open: Vec<u64>,
+    /// a first arming in pieces (a pool of hundreds of MB is protected over several passes): [todo, end) is not
+    /// protected yet; `end` when it is all done
+    todo: u64,
+}
+
+/// What `arm` did.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Arm {
+    /// all of it read-only now, armed (the caller takes the write watch, then counts it sealed while `armed`)
+    Done,
+    /// a first piece more protected; the rest at the next call
+    Part,
+    /// not armed (another entry lies over the range, or the protection failed: read-write again, no entry)
+    Refused,
 }
 
 struct Reg {
@@ -107,12 +121,13 @@ fn chunk_of(lo: u64, end: u64, a: u64) -> (u64, u64) {
 }
 
 /// Arms the pages [lo, hi) of the pool at `pool`: read-only from now (a pool sealed before: only the chunks opened
-/// since), so its first store wakes it. The caller then takes the write watch over it (a store made before the
-/// protection) and counts the pool sealed only while `armed(lo)` still holds. False: not armed (another entry lies over
-/// the range, or the protection failed: the range is read-write again and has no entry).
-pub fn arm(pool: u64, lo: u64, hi: u64) -> bool {
+/// since), so its first store wakes it. A first arming protects at most `max` bytes a call (a pool of hundreds of MB is
+/// protected over several calls; a store into a piece already protected faults and wakes it as any). When it is all
+/// protected (`Arm::Done`) the caller takes the write watch over it (a store made before the protection) and counts
+/// the pool sealed only while `armed(lo)` still holds. Also the bytes protected by this call.
+pub fn arm(pool: u64, lo: u64, hi: u64, max: u64) -> (Arm, u64) {
     if !on() || hi <= lo {
-        return false;
+        return (Arm::Refused, 0);
     }
     install();
     let t0 = std::time::Instant::now();
@@ -126,43 +141,45 @@ pub fn arm(pool: u64, lo: u64, hi: u64) -> bool {
     let below = r.0.by_lo.range(..lo).next_back().is_some_and(|(_, e)| e.end > lo);
     let inside = r.0.by_lo.range(lo + 1..hi).next().is_some();
     if below || inside {
-        return false;
+        return (Arm::Refused, 0);
     }
-    let (ranges, bytes) = match r.0.by_lo.get_mut(&lo) {
-        Some(e) => {
-            e.armed = true;
-            let v: Vec<(u64, u64)> = std::mem::take(&mut e.open)
-                .into_iter()
-                .map(|c| chunk_of(lo, hi, c))
-                .collect();
-            let b = v.iter().map(|c| c.1 - c.0).sum();
-            (v, b)
-        }
-        None => {
-            r.0.by_lo.insert(
-                lo,
-                Entry {
-                    end: hi,
-                    pool,
-                    armed: true,
-                    open: Vec::new(),
-                },
-            );
-            (vec![(lo, hi)], hi - lo)
-        }
-    };
+    let e = r.0.by_lo.entry(lo).or_insert(Entry {
+        end: hi,
+        pool,
+        armed: true,
+        open: Vec::new(),
+        todo: lo,
+    });
+    let mut ranges = Vec::new();
+    let mut todo = e.todo;
+    if todo < hi {
+        let to = (todo + max.max(CHUNK)).min(hi);
+        ranges.push((todo, to));
+        todo = to;
+    }
+    let done = todo >= hi;
+    if done {
+        // the chunks a store or a host write opened since the last arming (or during this one) closed again
+        ranges.extend(std::mem::take(&mut e.open).into_iter().map(|c| chunk_of(lo, hi, c)));
+    }
+    let bytes = ranges.iter().map(|c| c.1 - c.0).sum();
     for &(a, b) in &ranges {
         if !protect(a, b, false) {
             // not all committed, or another allocation: back to read-write, no entry
             r.0.by_lo.remove(&lo);
             open_all(lo, hi);
-            return false;
+            return (Arm::Refused, 0);
         }
     }
-    ARMS.fetch_add(1, Ordering::Relaxed);
+    let e = r.0.by_lo.get_mut(&lo).unwrap();
+    e.todo = todo;
+    if done {
+        e.armed = true;
+        ARMS.fetch_add(1, Ordering::Relaxed);
+    }
     ARM_B.fetch_add(bytes, Ordering::Relaxed);
     ARM_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
-    true
+    (if done { Arm::Done } else { Arm::Part }, bytes)
 }
 
 /// Whether the entry at `lo` is armed (sealed and not written since).
@@ -439,6 +456,39 @@ mod tests {
         let r = reg();
         r.0.woken.contains(&pool)
     }
+    /// Armed in one call.
+    fn arm1(pool: u64, lo: u64, hi: u64) -> bool {
+        arm(pool, lo, hi, u64::MAX >> 1).0 == Arm::Done
+    }
+
+    /// A first arming in pieces: each call protects at most its bytes; a store into a piece already protected wakes
+    /// it (the pool is never counted sealed); once all of it is protected the chunks opened meanwhile are closed too and
+    /// it is armed.
+    #[test]
+    fn a_large_pool_is_armed_in_pieces() {
+        if !on() {
+            return;
+        }
+        let m = alloc(4 * CHUNK);
+        let (lo, hi) = (m.0, m.0 + m.1);
+        written(lo, hi);
+        assert_eq!(arm(lo, lo, hi, CHUNK), (Arm::Part, CHUNK));
+        assert_eq!(arm(lo, lo, hi, CHUNK), (Arm::Part, CHUNK));
+        // the first two chunks are read-only: a store there faults and wakes it
+        unsafe { ((lo + 8) as *mut u8).write_volatile(1) };
+        assert!(woken_has(lo));
+        // past the protected pieces: no fault
+        let wakes = WAKES.load(Ordering::Relaxed);
+        unsafe { ((lo + 3 * CHUNK) as *mut u8).write_volatile(1) };
+        assert_eq!(WAKES.load(Ordering::Relaxed), wakes);
+        assert_eq!(arm(lo, lo, hi, CHUNK), (Arm::Part, CHUNK));
+        // the last piece, and the chunk the store opened
+        assert_eq!(arm(lo, lo, hi, CHUNK), (Arm::Done, 2 * CHUNK));
+        assert!(armed(lo));
+        assert_eq!(written(lo, hi), vec![lo, lo + 3 * CHUNK], "both stores in the write watch");
+        unsafe { ((lo + 8) as *mut u8).write_volatile(2) };
+        assert!(!armed(lo), "the opened chunk is read-only again");
+    }
 
     /// A store into an armed range faults once, wakes its pool (queued for the syncs), opens only its chunk, lands in
     /// memory and is in the write watch; the next store into another chunk opens that one without waking again.
@@ -452,7 +502,7 @@ mod tests {
         let (lo, hi) = (m.0, m.0 + m.1);
         let pool = lo + 0x10;
         written(lo, hi);
-        assert!(arm(pool, lo, hi));
+        assert!(arm1(pool, lo, hi));
         assert!(armed(lo));
         assert!(holds(lo + CHUNK));
         let wakes = WAKES.load(Ordering::Relaxed);
@@ -473,7 +523,7 @@ mod tests {
             assert_eq!(r.0.by_lo[&lo].open, vec![lo + CHUNK, lo + 3 * CHUNK]);
         }
         // armed again: the open chunks are closed; a store wakes it once more
-        assert!(arm(pool, lo, hi));
+        assert!(arm1(pool, lo, hi));
         assert!(reg().0.by_lo[&lo].open.is_empty());
         written(lo, hi);
         unsafe { (lo as *mut u8).write_volatile(1) };
@@ -490,13 +540,13 @@ mod tests {
         }
         let m = alloc(4 * CHUNK);
         let (lo, hi) = (m.0, m.0 + m.1);
-        assert!(arm(lo, lo, hi));
+        assert!(arm1(lo, lo, hi));
         let hw = HOST_WAKES.load(Ordering::Relaxed);
         host_write(lo + CHUNK - 8, 16);
         assert!(!armed(lo));
         assert!(HOST_WAKES.load(Ordering::Relaxed) > hw);
         assert_eq!(reg().0.by_lo[&lo].open, vec![lo, lo + CHUNK], "both chunks the write spans");
-        assert!(arm(lo, lo, hi));
+        assert!(arm1(lo, lo, hi));
         assert_eq!(remove(lo, hi), vec![lo]);
         assert!(!holds(lo));
         let wakes = WAKES.load(Ordering::Relaxed);
@@ -513,9 +563,9 @@ mod tests {
         }
         let m = alloc(4 * CHUNK);
         let (lo, hi) = (m.0, m.0 + m.1);
-        assert!(arm(lo, lo + CHUNK, lo + 3 * CHUNK));
-        assert!(!arm(lo, lo, lo + 2 * CHUNK), "over an entry");
-        assert!(!arm(lo, lo + 2 * CHUNK, hi), "inside an entry");
+        assert!(arm1(lo, lo + CHUNK, lo + 3 * CHUNK));
+        assert!(!arm1(lo, lo, lo + 2 * CHUNK), "over an entry");
+        assert!(!arm1(lo, lo + 2 * CHUNK, hi), "inside an entry");
         assert!(leaked(lo + CHUNK));
         assert!(!leaked(lo + CHUNK), "once");
         remove(lo, hi);
@@ -523,7 +573,7 @@ mod tests {
         let r = unsafe { VirtualAlloc(core::ptr::null(), (2 * CHUNK) as usize, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE) } as u64;
         assert!(r != 0);
         assert!(!unsafe { VirtualAlloc(r as *mut _, 4096, MEM_COMMIT, PAGE_READWRITE) }.is_null());
-        assert!(!arm(r, r, r + 2 * CHUNK));
+        assert!(!arm1(r, r, r + 2 * CHUNK));
         assert!(!holds(r));
         unsafe { (r as *mut u8).write_volatile(1) };
         unsafe { VirtualFree(r as *mut _, 0, MEM_RELEASE) };
