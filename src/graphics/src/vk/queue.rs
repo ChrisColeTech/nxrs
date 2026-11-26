@@ -139,8 +139,8 @@ pub enum Post {
     },
     Callback(Box<dyn FnOnce(&Gpu) + Send>),
     /// run at completion before the write-backs land and before the other posts (raw global memory's write log: what
-    /// it names must be known before the game can see this submission complete)
-    Early(Box<dyn FnOnce(&Gpu) + Send>),
+    /// it names must be known before the game can see this submission complete); gets the submission's GPU timeline value
+    Early(Box<dyn FnOnce(&Gpu, u64) + Send>),
 }
 unsafe impl Send for Post {}
 
@@ -1200,13 +1200,13 @@ fn completion_loop(g: &'static Gpu) {
         for p in item.sub.post.iter_mut() {
             if matches!(p, Post::Early(_)) {
                 if let Post::Early(f) = std::mem::replace(p, Post::Callback(Box::new(|_: &Gpu| {}))) {
-                    f(g);
+                    f(g, item.value);
                 }
             }
         }
         // CPU-visible effects, in order: write-backs first (an event may tell the game to read them)
         wait_diag::mark(2, "CPU writebacks", [item.value, 0]);
-        super::mem::apply_writebacks(g, &item.wb, item.epoch);
+        super::mem::apply_writebacks(g, &item.wb, item.epoch, item.value);
         wait_diag::mark(2, "queries/post effects", [item.value, 0]);
         let mut sub = item.sub;
         if super::exec::db_poison_on() {
@@ -1271,7 +1271,8 @@ fn completion_loop(g: &'static Gpu) {
                 Post::Readback { dst, src, n } => unsafe {
                     core::ptr::copy_nonoverlapping(src, dst, n)
                 },
-                Post::Callback(f) | Post::Early(f) => f(g),
+                Post::Callback(f) => f(g),
+                Post::Early(f) => f(g, item.value),
             }
         }
         wait_diag::mark(2, "recycle/deferred callbacks", [item.value, 0]);
