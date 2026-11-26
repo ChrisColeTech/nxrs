@@ -145,6 +145,11 @@ pub struct QState {
     /// a module's c1, the push banks by generation; each was hashed and staged again at every draw)
     scache: std::cell::RefCell<std::collections::HashMap<(u8, u64), (u64, (vk::Buffer, u64))>>,
     ndve: NdveTransaction,
+    /// a segment of a stream is translated (`run_segmented`): the stream's pre-pass made its ordered global effects
+    /// (event signals' pending writes, fence values, counter notes) and evaluated its waits and render conditions; the
+    /// conditions' results, in record order, are in `seg_rc`
+    seg: bool,
+    seg_rc: std::collections::VecDeque<bool>,
 }
 
 #[derive(Clone)]
@@ -922,7 +927,110 @@ impl QState {
             mesh_stride: 0,
             raw_probe: std::cell::RefCell::new(None),
             raw_probe_source: std::cell::Cell::new(None),
+            seg: false,
+            seg_rc: Default::default(),
         }
+    }
+
+    /// The queue's state as a new segment of a stream starts from it: the state records' fields copied, no pass open,
+    /// every per-submission cache empty (a segment records into a command buffer of its own).
+    fn fork_state(&self) -> QState {
+        let mut q = QState::new(self.origin_ll);
+        q.prog = self.prog.clone();
+        q.blend = self.blend;
+        q.color = self.color;
+        q.chmask = self.chmask;
+        q.ms = self.ms;
+        q.poly = self.poly;
+        q.ds = self.ds;
+        q.vattr = self.vattr;
+        q.nvattr = self.nvattr;
+        q.vstream = self.vstream;
+        q.vbuf = self.vbuf;
+        q.vgen = self.vgen;
+        q.ubo = self.ubo;
+        q.ssbo = self.ssbo;
+        q.tex = self.tex;
+        q.samp = self.samp;
+        q.img = self.img;
+        q.tex_pool = self.tex_pool;
+        q.samp_pool = self.samp_pool;
+        q.rt_n = self.rt_n;
+        q.rt = self.rt;
+        q.rt_depth = self.rt_depth;
+        q.vp = self.vp;
+        q.vp_origin = self.vp_origin;
+        q.depth_range = self.depth_range;
+        q.scissor = self.scissor;
+        q.stencil = self.stencil;
+        q.poly_off = self.poly_off;
+        q.blend_color = self.blend_color;
+        q.prim_restart = self.prim_restart;
+        q.line_width = self.line_width;
+        q.depth_clamp = self.depth_clamp;
+        q.rast_discard = self.rast_discard;
+        q.cons_raster = self.cons_raster;
+        q.patch = self.patch;
+        q.vis_on = self.vis_on;
+        q.last_color = self.last_color;
+        q.push = self.push.clone();
+        q.render_on = self.render_on;
+        q.alpha_ref = self.alpha_ref;
+        q.dual = self.dual;
+        q.depth_bounds = self.depth_bounds;
+        q.sample_mask = self.sample_mask;
+        q.point_size = self.point_size;
+        q.tess_levels = self.tess_levels;
+        q.provoking_last = self.provoking_last;
+        q.vp_swizzle = self.vp_swizzle;
+        q.tf = self.tf;
+        q.tf_on = self.tf_on;
+        q.tf_cont = self.tf_cont;
+        q.mesh_stride = self.mesh_stride;
+        q.missing = self.missing.clone();
+        q.bgen = self.bgen;
+        q.pgen = self.pgen;
+        q
+    }
+
+    /// The state fields that differ between two states (`NXGFX_TRANSLATE_CHECK=1`: a segment's pre-pass entry state
+    /// against the state the segment before it left). Generations are left out (each side makes its own).
+    fn state_diff(&self, o: &QState) -> Vec<&'static str> {
+        fn pod<T>(a: &T, b: &T) -> bool {
+            let n = core::mem::size_of::<T>();
+            // SAFETY: plain-data state words read as bytes, both of the same type
+            unsafe {
+                core::slice::from_raw_parts(a as *const T as *const u8, n)
+                    == core::slice::from_raw_parts(b as *const T as *const u8, n)
+            }
+        }
+        let prog = |q: &QState| q.prog.clone().map(|m| m.map(|m| m.key));
+        let rt = |q: &QState| q.rt.map(|r| r.tex.map(|t| t.serial));
+        let mut d = Vec::new();
+        let mut chk = |same: bool, name: &'static str| {
+            if !same {
+                d.push(name)
+            }
+        };
+        chk(prog(self) == prog(o), "programs");
+        chk(pod(&self.blend, &o.blend), "blend");
+        chk(pod(&self.color, &o.color), "colour");
+        chk(self.chmask == o.chmask, "channel mask");
+        chk(pod(&self.ds, &o.ds), "depth/stencil");
+        chk(pod(&self.poly, &o.poly), "polygon");
+        chk(self.vattr == o.vattr && self.nvattr == o.nvattr, "vertex attributes");
+        chk(self.vbuf == o.vbuf && self.vgen == o.vgen, "vertex buffers");
+        chk(self.ubo == o.ubo, "uniform buffers");
+        chk(self.ssbo == o.ssbo, "storage buffers");
+        chk(self.tex == o.tex && self.samp == o.samp && self.img == o.img, "handles");
+        chk(self.tex_pool == o.tex_pool && self.samp_pool == o.samp_pool, "pools");
+        chk(self.rt_n == o.rt_n && rt(self) == rt(o), "targets");
+        chk(pod(&self.vp, &o.vp) && self.scissor == o.scissor, "viewports");
+        chk(self.stencil == o.stencil, "stencil");
+        chk(self.render_on == o.render_on && self.vis_on == o.vis_on, "conditions");
+        chk(self.push[..] == o.push[..], "push constants");
+        chk(self.missing.len() == o.missing.len(), "missing shaders");
+        d
     }
 }
 
@@ -8040,6 +8148,317 @@ pub fn run(g: &Gpu, sub: &mut Sub, qs: &mut QState, stream: &[u8]) -> Option<usi
     None
 }
 
+// ---------- segmented translation (MKW-RECORD steps 3-4) ----------
+//
+// A long stream is cut into segments at records that end the pass anyway (targets, barriers, dispatches, copies,
+// texture clears); each segment is translated from the queue state its first record sees into a command buffer of its
+// own (a child submission, `Sub::children`), and they are submitted in order with the stream's submission. A pre-pass
+// over the stream works out each segment's entry state with the state records alone (`is_state_op`, SetRenderTargets'
+// targets, a counter reset's samples-passed switch) and makes the ordered global effects (`global_op`), waits and
+// render conditions in stream order, so the segments need nothing from each other.
+
+/// `NXGFX_TRANSLATE_THREADS`: translation lanes for a stream's segments (0, the default: one piece, as before).
+/// Step 3: segments are translated one after another on the replay thread whatever the number.
+pub fn translate_lanes() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("NXGFX_TRANSLATE_THREADS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(0)
+    })
+}
+
+fn env_usize(name: &str, default: usize) -> usize {
+    std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)
+}
+
+/// Streams with fewer draws stay in one piece (`NXGFX_TRANSLATE_MIN`, 64).
+fn translate_min() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| env_usize("NXGFX_TRANSLATE_MIN", 64))
+}
+
+/// A segment ends at the first cut point after this many draws (`NXGFX_TRANSLATE_SEG`, 256).
+fn translate_seg() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| env_usize("NXGFX_TRANSLATE_SEG", 256).max(1))
+}
+
+/// `NXGFX_TRANSLATE_CHECK=1` (diagnosis): each segment's pre-pass entry state is compared with the state the segment
+/// before it left; differences are logged.
+fn translate_check() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_TRANSLATE_CHECK").as_deref() == Ok("1"))
+}
+
+fn is_draw(opc: u32) -> bool {
+    matches!(opc, op::DRAW | op::DRAW_IDX | op::MULTI_DRAW | op::DRAW_TEX | op::MESH)
+}
+
+/// Records before which a segment may start: each ends the pass first and changes no state a later draw reads from
+/// the pass itself.
+fn is_cut(opc: u32) -> bool {
+    matches!(
+        opc,
+        op::SET_RT
+            | op::BARRIER
+            | op::DISPATCH
+            | op::COPY_B2B
+            | op::UPDATE_UB
+            | op::CLEAR_BUF
+            | op::COPY_B2T
+            | op::COPY_T2B
+            | op::COPY_T2T
+            | op::CLEAR_TEX
+    )
+}
+
+/// One segment of a stream: records [start, end) translated from `entry`, with its render conditions' results.
+struct Segment {
+    start: usize,
+    end: usize,
+    entry: QState,
+    rc: std::collections::VecDeque<bool>,
+}
+
+/// Segment statistics (a `[vk] translate` line every 600 presents).
+pub mod seg_stats {
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    pub static STREAMS: AtomicU64 = AtomicU64::new(0);
+    pub static SERIAL: AtomicU64 = AtomicU64::new(0);
+    pub static SEGMENTS: AtomicU64 = AtomicU64::new(0);
+    pub static LARGEST: AtomicU64 = AtomicU64::new(0);
+    pub static PRE_NS: AtomicU64 = AtomicU64::new(0);
+    pub static RUN_NS: AtomicU64 = AtomicU64::new(0);
+    pub static DIFFS: AtomicU64 = AtomicU64::new(0);
+    /// streams kept in one piece by: a diagnosis or switch, the queue's state (transform feedback, NDVE, a probe),
+    /// transform feedback records, too few draws
+    pub static WHY: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+    /// write-back ranges submitted (every submission, segmented or not)
+    pub static WB_RANGES: AtomicU64 = AtomicU64::new(0);
+    pub fn frame(frame: u64) {
+        if frame % 600 != 0 {
+            return;
+        }
+        let s = STREAMS.swap(0, Relaxed);
+        let w = WHY.each_ref().map(|x| x.swap(0, Relaxed));
+        crate::vklog!(
+            "translate, per frame over the last 600: {:.1} streams in segments ({:.1} in one piece: switches {}, queue state {}, feedback records {}, few draws {} in all), {:.1} segments, largest {} draws, pre-pass {:.2} ms, segments {:.2} ms; {} entry-state differences (NXGFX_TRANSLATE_CHECK); {:.1} write-back ranges",
+            s as f64 / 600.0,
+            SERIAL.swap(0, Relaxed) as f64 / 600.0,
+            w[0],
+            w[1],
+            w[2],
+            w[3],
+            SEGMENTS.swap(0, Relaxed) as f64 / 600.0,
+            LARGEST.swap(0, Relaxed),
+            PRE_NS.swap(0, Relaxed) as f64 / 600.0 / 1e6,
+            RUN_NS.swap(0, Relaxed) as f64 / 600.0 / 1e6,
+            DIFFS.swap(0, Relaxed),
+            WB_RANGES.swap(0, Relaxed) as f64 / 600.0,
+        );
+    }
+}
+
+/// Whether a stream may be translated in segments: enough draws, and nothing that carries state from a draw to the
+/// next one inside the pass machinery (transform feedback, mesh draws), no diagnosis that follows one command buffer.
+fn segmentable(qs: &QState, stream: &[u8]) -> bool {
+    use std::sync::atomic::Ordering::Relaxed;
+    if translate_lanes() == 0 {
+        return false;
+    }
+    if passdump::active()
+        || super::defer::active()
+        || db_poison_on()
+        || super::lost::bindings::enabled()
+        || super::newndve::mode() != super::newndve::Mode::Off
+        || std::env::var("NXGFX_SKIP_PS").is_ok()
+        || !shadows_on()
+    {
+        seg_stats::WHY[0].fetch_add(1, Relaxed);
+        return false;
+    }
+    if !qs.ndve.pending.is_empty() || qs.raw_probe.borrow().is_some() || qs.tf_on || qs.tf_active != 0 {
+        seg_stats::WHY[1].fetch_add(1, Relaxed);
+        return false;
+    }
+    let (mut p, mut draws) = (0usize, 0usize);
+    while p + 8 <= stream.len() {
+        let h = unsafe { rd::<op_hdr>(stream.as_ptr().add(p)) };
+        let sz = h.size as usize;
+        if sz < 8 || p + sz > stream.len() {
+            return false;
+        }
+        match h.op {
+            // a capture continues from draw to draw (`tf_cont`); a mesh draw's records live within the draw
+            op::TF_BIND | op::TF_STATE => {
+                seg_stats::WHY[2].fetch_add(1, Relaxed);
+                return false;
+            }
+            o if is_draw(o) => draws += 1,
+            _ => {}
+        }
+        p += sz;
+    }
+    if draws < translate_min() {
+        seg_stats::WHY[3].fetch_add(1, Relaxed);
+        return false;
+    }
+    true
+}
+
+/// The pre-pass: the stream's segments and the offset of a wait that parks it (as `run` returns). Makes the stream's
+/// ordered global effects.
+fn plan(g: &Gpu, qs: &QState, stream: &[u8]) -> (Vec<Segment>, Option<usize>) {
+    let target = translate_seg();
+    let mut shadow = qs.fork_state();
+    let mut segs = Vec::new();
+    let mut cur = Segment {
+        start: 0,
+        end: 0,
+        entry: qs.fork_state(),
+        rc: Default::default(),
+    };
+    let (mut p, mut draws) = (0usize, 0usize);
+    let mut park = None;
+    while p + 8 <= stream.len() {
+        let h = unsafe { rd::<op_hdr>(stream.as_ptr().add(p)) };
+        let sz = h.size as usize;
+        let rec = &stream[p..p + sz];
+        if draws >= target && p > cur.start && is_cut(h.op) {
+            cur.end = p;
+            let next = Segment {
+                start: p,
+                end: 0,
+                entry: shadow.fork_state(),
+                rc: Default::default(),
+            };
+            segs.push(std::mem::replace(&mut cur, next));
+            draws = 0;
+        }
+        if is_draw(h.op) {
+            draws += 1;
+        }
+        let ok = if is_state_op(h.op) {
+            let r = state_op(g, &mut shadow, h.op, rec);
+            if h.op == op::RENDER_COND {
+                cur.rc.push_back(shadow.render_on);
+            }
+            r
+        } else {
+            match h.op {
+                op::SET_RT => set_rt_state(&mut shadow, rec),
+                op::RESET_COUNTER => {
+                    let kind: u64 = unsafe { rd_at(rec, 0) };
+                    if kind as u32 == counter::SAMPLES_PASSED {
+                        shadow.vis_on = true;
+                    }
+                }
+                op::SIGNAL_EVENT | op::FENCE_SYNC | op::REPORT_COUNTER => global_op(g, h.op, rec),
+                _ => {}
+            }
+            if h.op == op::WAIT_EVENT {
+                let (addr, mode, value): (u64, u32, u32) =
+                    unsafe { (rd_at(rec, 0), rd_at(rec, 8), rd_at(rec, 12)) };
+                event_wait_passes(g, addr, mode, value)
+            } else {
+                true
+            }
+        };
+        if !ok {
+            park = Some(p);
+            break;
+        }
+        p += sz;
+    }
+    cur.end = p;
+    if cur.end > cur.start {
+        segs.push(cur);
+    }
+    (segs, park)
+}
+
+/// Replays `stream` in segments when it qualifies (`segmentable`): None when it does not (the caller runs it in one
+/// piece); else what `run` returns. `child` makes a child submission; each segment is translated into one, joined
+/// into `sub` (its posts, write-backs and query counts) and kept in `sub.children`, submitted in order after `sub`'s
+/// own command buffers. The queue's state after the stream is the last segment's.
+pub fn run_segmented(
+    g: &Gpu,
+    sub: &mut Sub,
+    qs: &mut QState,
+    stream: &[u8],
+    child: &mut dyn FnMut() -> Sub,
+) -> Option<Option<usize>> {
+    if !segmentable(qs, stream) {
+        if translate_lanes() != 0 {
+            seg_stats::SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        return None;
+    }
+    use std::sync::atomic::Ordering::Relaxed;
+    let t0 = std::time::Instant::now();
+    let (segs, park) = plan(g, qs, stream);
+    seg_stats::PRE_NS.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+    seg_stats::STREAMS.fetch_add(1, Relaxed);
+    seg_stats::SEGMENTS.fetch_add(segs.len() as u64, Relaxed);
+    let t1 = std::time::Instant::now();
+    let timing = op_times::on();
+    let n = segs.len();
+    let mut segs = segs.into_iter().peekable();
+    let mut last: Option<QState> = None;
+    while let Some(s) = segs.next() {
+        let mut c = child();
+        super::queue::child_begin(sub, &mut c);
+        let mut wq = s.entry;
+        wq.seg = true;
+        wq.seg_rc = s.rc;
+        let (mut p, mut draws) = (s.start, 0u64);
+        while p < s.end {
+            let h = unsafe { rd::<op_hdr>(stream.as_ptr().add(p)) };
+            let sz = h.size as usize;
+            let rec = &stream[p..p + sz];
+            super::queue::wait_diag::record(p, h.op, wq.prog[5].as_ref().map(|m| m.key));
+            let t = timing.then(std::time::Instant::now);
+            record(g, &mut c, &mut wq, h.op, rec);
+            if let Some(t) = t {
+                op_times::add(h.op, t.elapsed().as_nanos() as u64);
+            }
+            draws += is_draw(h.op) as u64;
+            p += sz;
+        }
+        end(g, &mut c, &mut wq);
+        super::gmem::end(g, &mut c);
+        seg_stats::LARGEST.fetch_max(draws, Relaxed);
+        if translate_check() {
+            if let Some(next) = segs.peek() {
+                let d = next.entry.state_diff(&wq);
+                if !d.is_empty() {
+                    static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+                    seg_stats::DIFFS.fetch_add(1, Relaxed);
+                    if N.fetch_add(1, Relaxed) < 20 {
+                        crate::vklog!(
+                            "translate check: segment at {} of a stream of {} bytes ({n} segments) starts from a state that differs from the one before it left in: {}",
+                            next.start,
+                            stream.len(),
+                            d.join(", ")
+                        );
+                    }
+                }
+            }
+        }
+        super::queue::child_join(sub, c);
+        last = Some(wq);
+    }
+    if let Some(mut q) = last {
+        q.seg = false;
+        q.seg_rc.clear();
+        *qs = q;
+    }
+    seg_stats::RUN_NS.fetch_add(t1.elapsed().as_nanos() as u64, Relaxed);
+    Some(park)
+}
+
 /// Replay time by record kind (`NXGFX_OP_TIMES=1`, diagnosis): every 600 presents a `[vk] replay by record` line
 /// with the kinds that took the most time, per frame.
 pub mod op_times {
@@ -8327,6 +8746,96 @@ fn is_state_op(opc: u32) -> bool {
     )
 }
 
+/// SetRenderTargets' state: the targets (the pass they were drawn in is ended first by the caller).
+fn set_rt_state(qs: &mut QState, rec: &[u8]) {
+    let r: p_set_rt = rd_payload(rec);
+    qs.rt_n = r.n.clamp(0, 8) as usize;
+    for i in 0..8 {
+        qs.rt[i] = Rt {
+            tex: None,
+            view: None,
+        };
+        if i < qs.rt_n && !r.color[i].is_null() {
+            let t = unsafe { record_texture::<p_set_rt>(rec, i, r.color[i]) };
+            if !t.valid() {
+                crate::log::red_once("SetRenderTargets: a colour target is not an initialized texture");
+            }
+            if t.valid() {
+                qs.rt[i] = Rt {
+                    tex: Some(t),
+                    view: if r.has_cview[i] != 0 {
+                        Some(r.cview[i])
+                    } else {
+                        None
+                    },
+                };
+            }
+        }
+    }
+    qs.rt_depth = Rt {
+        tex: None,
+        view: None,
+    };
+    if !r.depth.is_null() {
+        let t = unsafe { record_texture::<p_set_rt>(rec, qs.rt_n, r.depth) };
+        if t.valid() {
+            qs.rt_depth = Rt {
+                tex: Some(t),
+                view: if r.has_dview != 0 {
+                    Some(r.dview)
+                } else {
+                    None
+                },
+            };
+        }
+    }
+}
+
+/// The ordered global effects of a record (MKW-RECORD): a GPU event signal's pending write (later waits of this
+/// stream pass on it), a fence sync's value, a counter report's note (later render conditions read it). They run in
+/// stream order: by `record_op` on the serial path, by the stream's pre-pass when it is translated in segments.
+fn global_op(g: &Gpu, opc: u32, rec: &[u8]) {
+    match opc {
+        op::SIGNAL_EVENT => {
+            let (addr, mode, value): (u64, u32, u32) =
+                unsafe { (rd_at(rec, 0), rd_at(rec, 8), rd_at(rec, 12)) };
+            let mut ps = g.q.pending_signals.lock().unwrap();
+            if mode == event_signal::WRITE {
+                ps.insert(addr, (mode, value, g.q.last_fence() + 1));
+            } else {
+                ps.remove(&addr);
+            }
+        }
+        op::FENCE_SYNC => {
+            let s: u64 = unsafe { rd_at(rec, 0) };
+            if s != 0 {
+                let so = s as *mut sync_t;
+                unsafe {
+                    (*so).fenced = 1;
+                    (*so).fence = g.q.last_fence() + 1;
+                }
+            }
+        }
+        op::REPORT_COUNTER => {
+            let (kind, addr): (u64, u64) = unsafe { (rd_at(rec, 0), rd_at(rec, 8)) };
+            let kind = kind as u32;
+            super::counters::rc_note(
+                addr,
+                kind == counter::TIMESTAMP || kind == counter::TIMESTAMP_TOP,
+            );
+            if kind == counter::SAMPLES_PASSED {
+                static SAID: std::sync::Once = std::sync::Once::new();
+                SAID.call_once(|| crate::vklog!("samples-passed (occlusion) reports in use: each present now waits for the replay to catch up, so their results come back as without asynchronous replay (NXGFX_OCCL_SYNC=0 off)"));
+                super::queue::OCCL_FRAME.store(
+                    super::present::frames().max(1),
+                    std::sync::atomic::Ordering::Relaxed,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 /// A record that records commands or changes the submission (every record `is_state_op` leaves out): render targets
 /// and clears here, the rest in `emit_op2` and `emit_op3`.
 fn emit_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool {
@@ -8334,47 +8843,7 @@ fn emit_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> boo
     match opc {
         op::SET_RT => {
             end_pass(g, sub, qs);
-            let r: p_set_rt = rd_payload(rec);
-            qs.rt_n = r.n.clamp(0, 8) as usize;
-            for i in 0..8 {
-                qs.rt[i] = Rt {
-                    tex: None,
-                    view: None,
-                };
-                if i < qs.rt_n && !r.color[i].is_null() {
-                    let t = unsafe { record_texture::<p_set_rt>(rec, i, r.color[i]) };
-                    if !t.valid() {
-                        crate::log::red_once("SetRenderTargets: a colour target is not an initialized texture");
-                    }
-                    if t.valid() {
-                        qs.rt[i] = Rt {
-                            tex: Some(t),
-                            view: if r.has_cview[i] != 0 {
-                                Some(r.cview[i])
-                            } else {
-                                None
-                            },
-                        };
-                    }
-                }
-            }
-            qs.rt_depth = Rt {
-                tex: None,
-                view: None,
-            };
-            if !r.depth.is_null() {
-                let t = unsafe { record_texture::<p_set_rt>(rec, qs.rt_n, r.depth) };
-                if t.valid() {
-                    qs.rt_depth = Rt {
-                        tex: Some(t),
-                        view: if r.has_dview != 0 {
-                            Some(r.dview)
-                        } else {
-                            None
-                        },
-                    };
-                }
-            }
+            set_rt_state(qs, rec);
         }
         op::CLEAR_COLOR => {
             // conditional rendering covers clears too (agl's clear-once records)
@@ -8970,45 +9439,31 @@ fn emit_op2(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bo
             let (addr, mode, value): (u64, u32, u32) =
                 unsafe { (rd_at(rec, 0), rd_at(rec, 8), rd_at(rec, 12)) };
             sub.post.push(Post::Event { addr, mode, value });
-            let mut ps = g.q.pending_signals.lock().unwrap();
-            if mode == event_signal::WRITE {
-                ps.insert(addr, (mode, value, g.q.last_fence() + 1));
-            } else {
-                ps.remove(&addr);
+            if !qs.seg {
+                global_op(g, opc, rec);
             }
         }
         op::WAIT_EVENT => {
             let (addr, mode, value): (u64, u32, u32) =
                 unsafe { (rd_at(rec, 0), rd_at(rec, 8), rd_at(rec, 12)) };
-            if !event_wait_passes(g, addr, mode, value) {
+            // a segment's waits passed in its stream's pre-pass (the stream ends at the first that does not)
+            if !qs.seg && !event_wait_passes(g, addr, mode, value) {
                 end_pass(g, sub, qs);
                 return false;
             }
         }
         op::FENCE_SYNC => {
-            let s: u64 = unsafe { rd_at(rec, 0) };
-            if s != 0 {
-                let so = s as *mut sync_t;
-                unsafe {
-                    (*so).fenced = 1;
-                    (*so).fence = g.q.last_fence() + 1;
-                }
+            if !qs.seg {
+                global_op(g, opc, rec);
             }
         }
         op::REPORT_COUNTER => {
             let (kind, addr): (u64, u64) = unsafe { (rd_at(rec, 0), rd_at(rec, 8)) };
             let kind = kind as u32;
-            super::counters::rc_note(
-                addr,
-                kind == counter::TIMESTAMP || kind == counter::TIMESTAMP_TOP,
-            );
+            if !qs.seg {
+                global_op(g, opc, rec);
+            }
             if kind == counter::SAMPLES_PASSED {
-                static SAID: std::sync::Once = std::sync::Once::new();
-                SAID.call_once(|| crate::vklog!("samples-passed (occlusion) reports in use: each present now waits for the replay to catch up, so their results come back as without asynchronous replay (NXGFX_OCCL_SYNC=0 off)"));
-                super::queue::OCCL_FRAME.store(
-                    super::present::frames().max(1),
-                    std::sync::atomic::Ordering::Relaxed,
-                );
                 end_query(g, sub, qs);
                 sub.post.push(Post::OcclReport { addr });
             } else {
@@ -9081,6 +9536,9 @@ fn state_op2(g: &Gpu, qs: &mut QState, opc: u32, rec: &[u8]) -> bool {
                 }
             }
         }
+        // a segment's conditions were evaluated in order by its stream's pre-pass (the counters they read are noted
+        // there, the stream's later reports among them)
+        op::RENDER_COND if qs.seg => qs.render_on = qs.seg_rc.pop_front().unwrap_or(true),
         op::RENDER_COND => {
             let r: crate::nvn::cmd2::p_render_cond = rd_payload(rec);
             qs.render_on = match r.mode {
@@ -9351,6 +9809,30 @@ fn emit_op3(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bo
 #[cfg(test)]
 mod downstream_tests {
     use super::*;
+
+    /// A segment's entry state carries every state field and no pass or per-submission cache; `state_diff` names a
+    /// field that differs.
+    #[test]
+    fn fork_keeps_state_and_drops_the_pass() {
+        let mut a = QState::new(false);
+        a.ubo[1][3] = (0x1000, 256);
+        a.tex[0][7] = 42;
+        a.render_on = false;
+        a.push[1][5] = 9;
+        a.vgen = 7;
+        a.in_pass = true;
+        a.vin_last.borrow_mut().0 = 99;
+        a.seg = true;
+        let b = a.fork_state();
+        assert!(b.state_diff(&a).is_empty(), "{:?}", b.state_diff(&a));
+        assert!(!b.in_pass && b.vin_last.borrow().0 == 0 && !b.seg);
+        let mut c = a.fork_state();
+        c.tex[0][7] = 43;
+        c.stencil[0][0] = 1;
+        assert_eq!(c.state_diff(&a), vec!["handles", "stencil"]);
+        assert!(is_cut(op::SET_RT) && is_cut(op::BARRIER) && !is_cut(op::DRAW_IDX));
+        assert!(!is_cut(op::CLEAR_COLOR), "a clear draws into the open pass");
+    }
 
     /// No record that records commands, touches the submission or orders global effects is taken for a state record
     /// (a state record is run ahead of its stream's commands).

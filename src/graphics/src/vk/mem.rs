@@ -2420,6 +2420,14 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
     }
 }
 
+/// A child submission's write-backs join its parent's (`queue::child_join`), merged as one submission's are: a range
+/// segments wrote one after another is copied and landed once.
+pub(crate) fn join_writebacks(parent: &mut super::queue::Sub, wbs: Vec<(u64, u64, u64, vk::Buffer, u64, u64)>) {
+    for (b, a, n, buf, off, identity) in wbs {
+        note_writeback(parent, b, a, n, buf, off, identity);
+    }
+}
+
 fn note_writeback(sub: &mut super::queue::Sub, b: u64, a: u64, n: u64, buf: vk::Buffer, off: u64, identity: u64) {
     {
         // ranges that follow each other (or one inside another) in the same pool's buffer are one copy
