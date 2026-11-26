@@ -130,7 +130,7 @@ fn title_of(app: &App, surface: &Surface) -> String {
 
 fn body(ui: &mut egui::Ui, app: &mut App, surface: &mut Surface) -> Reply {
     match surface {
-        Surface::Message { text, error, .. } => message::message(ui, text, *error),
+        Surface::Message { text, .. } => message::message(ui, text),
         Surface::Question {
             text,
             yes,

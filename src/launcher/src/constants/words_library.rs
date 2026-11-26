@@ -24,6 +24,8 @@ pub const REMOVE_TITLE: &str = "Remove from library";
 pub const REMOVE_TEXT: &str =
     "Remove “{}” from the library?\n\nThe game's package is never deleted.";
 pub const DELETE_BUILD: &str = "Also delete the build ({})";
+pub const REMOVE_GROUP_TIP: &str =
+    "Takes the game off the library. The game's package is never deleted.";
 pub const DELETE_BUILD_TIP: &str = "Deletes the build folder {}. Saves, SD card files, cheats and \
     mods are moved first to {}; when the game is added and built again they go back into it. \
     Unticked, every file stays where it is.";

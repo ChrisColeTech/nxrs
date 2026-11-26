@@ -45,12 +45,13 @@ impl App {
             &[&native(&g.build_dir), &native(&self.saves_root())],
         );
         let check = Check {
+            heading: g.title.clone(),
             label: fill(l::DELETE_BUILD, &[&size]),
             tip,
             on: true,
             yes_on: Action::ConfirmRemove(id, true),
         };
-        self.question_checked(l::REMOVE_TITLE, &text, yes, check);
+        self.question_checked(l::REMOVE_TITLE, l::REMOVE_GROUP_TIP, yes, check);
     }
 
     /// The answer: the entry goes; with `delete`, its saves are kept and its build folder deleted first

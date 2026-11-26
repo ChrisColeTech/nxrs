@@ -49,6 +49,7 @@ pub fn windows(app: &mut App, o: &Options) {
         (o.show_controller, Action::Settings(2)),
         (o.show_engine_settings, Action::Settings(0)),
         (o.show_play_settings, Action::Settings(4)),
+        (o.show_remove, Action::RemoveGame),
     ];
     for (wanted, action) in opens {
         if wanted {

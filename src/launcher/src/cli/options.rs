@@ -39,6 +39,7 @@ pub struct Options {
     pub smoke_build: Option<String>,
     pub build_output: Option<String>,
     pub migrate_builds: bool,
+    pub show_remove: bool,
 }
 
 impl Options {
@@ -103,20 +104,21 @@ pub fn command() -> Command {
         .arg(many("install-update", "package", "Add an update package to the --select-title game and exit (repeatable)"))
         .arg(many("remove-update", "package", "Remove an update package from the --select-title game and exit (repeatable)"))
         .arg(value("update-choice", "choice", "Version to build for the --select-title game: newest, none or an installed package"))
-        .arg(flag("show-updates", "Open the selected game's Updates window (Game > Install Updates…)"))
+        .arg(flag("show-updates", "Open the selected game's Updates window"))
         .arg(flag("build", "Build the --select-title game with its saved options and exit"))
         .arg(value("engine", "engine", "Engine of the --select-title game, saved: nxrs (before --build and the DLC/update options)"))
         .arg(value("nxrs-build", "exe", "nxrs-build to use instead of the bundled one, saved in the library (empty: the bundled one)"))
         .arg(flag("show-dlc", "Open the selected game's DLC window (Game > Install DLC…)"))
         .arg(value("show-menu", "name", "Open a menu of the title bar (File, Game, Keys, View, Help)"))
         .arg(value("screenshot", "png", "Save a launcher preview and exit"))
-        .arg(value("screenshot-delay", "ms", "Milliseconds before --screenshot grabs the window (default 1100)"))
+        .arg(value("screenshot-delay", "ms", "Delay of --screenshot in ms (default 1100)"))
         .arg(flag("show-engine-settings", "Open Settings > Engine (nxrs-build doctor runs there)"))
         .arg(flag("show-play-settings", "Open Settings > Play (screen mode, background pause and mute: every game)"))
         .arg(flag("nxrs-doctor", "Run nxrs-build doctor for the configured nxrs-build, print its checks and exit (0 = all ok)"))
         .arg(value("smoke-build", "input", "Build a synthetic test input and exit (diagnostics)"))
         .arg(value("build-output", "directory", "Output folder for --smoke-build"))
-        .arg(flag("migrate-builds", "Move build folders of the old layout (SwitchRecomp Builds\\<name> [nxrs]) to <source folder>\\nxrs\\<name>, print what moved and exit (with --select-title: that game only)"))
+        .arg(flag("migrate-builds", "Move old-layout builds to <source folder>\\nxrs\\<name>, exit"))
+        .arg(flag("show-remove", "Ask to remove the selected game (Remove from library…)"))
 }
 
 pub fn parse_from<I, T>(args: I) -> Result<Options, clap::Error>
@@ -176,6 +178,7 @@ fn from_matches(m: &ArgMatches) -> Options {
         smoke_build: s("smoke-build"),
         build_output: s("build-output"),
         migrate_builds: f("migrate-builds"),
+        show_remove: f("show-remove"),
     }
 }
 
