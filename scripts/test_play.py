@@ -26,6 +26,19 @@ def png(path, w, h, rgb, sub_filter=False):
                      + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
 
 
+def png_box(path, w, h, bg, box=None, fg=None):
+    """An RGB PNG of colour bg with the pixel box (x0, y0, x1, y1) in colour fg (a HUD element over a scene)."""
+    rows = []
+    for y in range(h):
+        row = bytearray(bytes(bg) * w)
+        if box and box[1] <= y < box[3]:
+            row[3 * box[0]:3 * box[2]] = bytes(fg) * (box[2] - box[0])
+        rows.append(b'\0' + bytes(row))
+    chunk = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d))
+    path.write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
+                     + chunk(b'IDAT', zlib.compress(b''.join(rows))) + chunk(b'IEND', b''))
+
+
 LOG = '''\
 [   1.00] [vk] replay up to frame 60, per frame: 1.0 draws (0.0 skipped: no shader 0, no pipeline 0, no target 0 in all), x; dropped work 0
 [   2.00] [vk] replay up to frame 120, per frame: 1.0 draws (0.0 skipped: no shader 0, no pipeline 10, no target 5 in all), x; dropped work 0
@@ -124,6 +137,42 @@ class Route(unittest.TestCase):
         self.assertIn('**INVALID (off route)** FPS', text)
         self.assertEqual(json.loads((bad / 'report.json').read_text())['off_route'], ['01-house.png'])
 
+    def test_region_check_follows_the_hud_not_the_scene(self):
+        # a 100x50 frame; the HUD region is the box [0.1, 0.1, 0.3, 0.5] = pixels (10, 5)-(30, 25)
+        check = {'race': {'about': 'in the race', 'regions': {'hud': [0.1, 0.1, 0.3, 0.5, 0.6]}}}
+        hud, white = (10, 5, 30, 25), (250, 250, 250)
+        runs = {n: self.f / n for n in ('ref', 'elsewhere', 'bleed', 'menu')}
+        for r in runs.values():
+            r.mkdir()
+        png_box(runs['ref'] / '05-race.png', 100, 50, (40, 160, 40), hud, white)  # green track
+        png_box(runs['elsewhere'] / '05-race.png', 100, 50, (200, 120, 60), hud, white)  # sand: another spot
+        png_box(runs['bleed'] / '05-race.png', 100, 50, (200, 120, 60), (10, 5, 30, 20), white)  # 3/4 of the HUD
+        png_box(runs['menu'] / '05-race.png', 100, 50, (200, 120, 60))  # no HUD at all
+        self.assertEqual(play_route.record(runs['ref'], 't', check), ['race'])
+        got = {n: play_route.check(r, 't', check, [r / '05-race.png'])[0] for n, r in runs.items()}
+        self.assertEqual(got['elsewhere']['regions'], {'hud': (1.0, 0.6)})
+        self.assertFalse(got['elsewhere']['off'])
+        # the whole-frame histogram would call the other spot off route
+        sig = play_route.signature(runs['elsewhere'] / '05-race.png')
+        self.assertGreater(play_route.distance(sig, play_route.load()['t']['race'])[0], play_route.OFF_ROUTE_HIST)
+        self.assertFalse(got['bleed']['off'])
+        self.assertEqual(got['bleed']['regions']['hud'][0], 0.67)
+        self.assertTrue(got['menu']['off'])
+        self.assertEqual(play_route.describe(got['menu']), 'hud 0.0 (min 0.6)')
+
+    def test_region_check_needs_a_reference_with_regions(self):
+        png_box(self.f / '05-race.png', 100, 50, (40, 160, 40))
+        play_route.record(self.f, 't', {'race': 'whole frame'})
+        got = play_route.check(self.f, 't', {'race': {'about': 'x', 'regions': 'kart-hud'}}, [self.f / '05-race.png'])
+        self.assertIsNone(got[0]['off'])
+        self.assertIn('record it again', got[0]['why'])
+
+    def test_bad_region_specs_are_refused(self):
+        with self.assertRaises(ValueError):
+            play_route.spec({'regions': 'no-such-set'})
+        with self.assertRaises(ValueError):
+            play_route.spec({'regions': {'hud': [0.5, 0.1, 0.3, 0.5, 0.6]}})  # x1 before x0
+
 
 class Steps(unittest.TestCase):
     def test_wait_and_repeat(self):
@@ -145,6 +194,8 @@ class Steps(unittest.TestCase):
                 # route checks name shots the steps take (as play.py names their files)
                 shots = {play.shot_file(step[5:]) for step, _ in play.expand(sc['steps']) if step.startswith('shot ')}
                 self.assertLessEqual(set(sc.get('checks', {})), shots)
+                for value in sc.get('checks', {}).values():
+                    play_route.spec(value)  # every check is a valid whole-frame or region check
 
 
 class Report(unittest.TestCase):

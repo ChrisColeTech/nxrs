@@ -9,6 +9,14 @@ room): the run is OFF-ROUTE and its FPS numbers measure the wrong thing.
 A signature is cheap and tolerant of camera motion: a 4x4x4 colour histogram of a sparse sample of the picture and a
 24x14 grey thumbnail. PNGs are decoded here (no PIL on this machine); the engine writes unfiltered rows, other
 encoders' filters are undone row by row.
+
+Whole-frame similarity suits a place the camera holds still (a house, a menu, a start grid). A race never lands at
+the same spot of the track twice (game time drifts with FPS), so a check can instead name screen regions that must
+match: `race = { about = "racing", regions = "kart-hud" }` (a named set in REGION_SETS) or inline
+`regions = { coin = [x0, y0, x1, y1, min] }` (fractions of the frame; min = the share of the region's 12x6 sample
+points that must match the reference, 0..1). A point matches when its mean RGB difference is at most CELL_MATCH, so
+the background showing around or through a HUD element spoils only the points it covers. The shot is off route when
+any region's share falls below its min.
 """
 import json
 import struct
@@ -23,6 +31,38 @@ SAMPLE = 96  # histogram sample grid: SAMPLE x SAMPLE*9/16 points
 # distance (mean grey difference, 0..255) is reported beside it. Calibrated on OoT (2026-11-26): the same in-house
 # shots of six on-route runs 0.01-0.20; the options menu of the desynced 20261126-054320-v5-oot 0.42-0.70
 OFF_ROUTE_HIST = 0.3
+REGION_W, REGION_H = 12, 6  # a region's sample points
+CELL_MATCH = 40  # mean RGB difference (0..255) at which a region's sample point still matches
+# Named region sets: name -> {region: (x0, y0, x1, y1, min share matching)}. Calibrated 2026-11-26 (DIAGFIX) on the
+# MKW runs in build/play since 11-25 (race and t37-t46 shots of ~45 runs, the lead's included, against
+# 20261126-055832-v5-mkw/05-race.png) and every boot / title shot and every OoT run as the negatives: the coin icon
+# of the coin counter matches 0.90-1.00 in a race, at most 0.28 elsewhere; the place badge ("24th", the box kept
+# inside the numerals' outline) 0.88-1.00 in a race, at most 0.32 elsewhere. One race shot taken during the start
+# countdown (20261125-000839-mkw, no place badge yet: the run was behind) matches 0.06, off route, rightly.
+# Both are up from the start grid on, so the grid's own check stays whole-frame.
+REGION_SETS = {
+    'kart-hud': {
+        'coin': (0.034, 0.911, 0.056, 0.950, 0.6),
+        'place': (0.845, 0.845, 0.935, 0.96, 0.6),
+    },
+}
+
+
+def spec(value):
+    """A declared check as {'about', 'regions'}: regions None for a whole-frame check, else {name: (box..., max)}."""
+    if isinstance(value, str):
+        return dict(about=value, regions=None)
+    regions = value.get('regions')
+    if isinstance(regions, str):
+        if regions not in REGION_SETS:
+            raise ValueError('unknown region set %r (play_route.REGION_SETS)' % regions)
+        regions = REGION_SETS[regions]
+    elif regions is not None:
+        regions = {k: tuple(v) for k, v in regions.items()}
+        for k, v in regions.items():
+            if len(v) != 5 or not (0 <= v[0] < v[2] <= 1 and 0 <= v[1] < v[3] <= 1 and 0 < v[4] <= 1):
+                raise ValueError('region %s must be [x0, y0, x1, y1, min share] with fractions' % k)
+    return dict(about=value.get('about', ''), regions=regions)
 
 
 def decode(path):
@@ -77,14 +117,43 @@ def unfilter(f, cur, prev, bpp):
     return bytes(cur)
 
 
-def signature(path):
-    """{'hist': [64 fractions], 'thumb': [24*14 greys]} of a screenshot; None when it cannot be read."""
+def region_thumb(img, box):
+    """REGION_W x REGION_H RGB points (flat r, g, b, ...) sampled inside box (x0, y0, x1, y1 as fractions)."""
+    w, h, ch, rows = img
+    x0, y0, x1, y1 = int(box[0] * w), int(box[1] * h), int(box[2] * w), int(box[3] * h)
+    out = []
+    for j in range(REGION_H):
+        row = rows[min(h - 1, y0 + (2 * j + 1) * (y1 - y0) // (2 * REGION_H))]
+        for i in range(REGION_W):
+            o = min(w - 1, x0 + (2 * i + 1) * (x1 - x0) // (2 * REGION_W)) * ch
+            out += row[o:o + 3]
+    return out
+
+
+def region_match(a, b):
+    """The share (0..1) of two regions' sample points whose mean RGB difference is at most CELL_MATCH."""
+    n = len(a) // 3
+    ok = sum(1 for i in range(0, 3 * n, 3)
+             if abs(a[i] - b[i]) + abs(a[i + 1] - b[i + 1]) + abs(a[i + 2] - b[i + 2]) <= 3 * CELL_MATCH)
+    return round(ok / n, 2) if n else 0.0
+
+
+def signature(path, regions=None):
+    """{'hist': [64 fractions], 'thumb': [24*14 greys]} of a screenshot, plus 'regions': {name: greys} for the
+    given regions; None when it cannot be read."""
     try:
         img = decode(path)
     except (OSError, zlib.error, struct.error, IndexError):
         return None
     if not img:
         return None
+    sig = whole(img)
+    if regions:
+        sig['regions'] = {k: region_thumb(img, v[:4]) for k, v in regions.items()}
+    return sig
+
+
+def whole(img):
     w, h, ch, rows = img
     sh = max(1, SAMPLE * 9 // 16)
     hist = [0] * HIST_BINS ** 3
@@ -135,9 +204,10 @@ def record(folder, scenario, checks):
     for png in sorted(folder.glob('[0-9][0-9]-*.png')):
         name = shot_name(png)
         if name in checks:
-            sig = signature(png)
+            s = spec(checks[name])
+            sig = signature(png, s['regions'])
             if sig:
-                mine[name] = dict(about=checks[name], run=folder.name, shot=png.name, **sig)
+                mine[name] = dict(about=s['about'], run=folder.name, shot=png.name, **sig)
                 stored.append(name)
     # one line per reference shot: readable diffs when a reference is replaced
     text = ',\n'.join('%s: {\n%s\n}' % (json.dumps(sc), ',\n'.join(
@@ -150,20 +220,41 @@ def record(folder, scenario, checks):
 def check(folder, scenario, checks, shots):
     """Each declared shot against its reference: [{shot, about, hist, thumb, off}], and whether the run is off route.
 
-    `shots` are the run's screenshot paths. A declared shot with no reference yet is listed with off=None."""
+    `shots` are the run's screenshot paths. A declared shot with no reference yet is listed with off=None. A region
+    check gives 'regions': {name: (share matching, min)} and no 'hist'."""
     refs = load().get(scenario, {})
     out = []
     for png in shots:
         name = shot_name(png)
         if name not in checks:
             continue
+        s = spec(checks[name])
         ref = refs.get(name)
-        sig = signature(png) if ref else None
+        regions = s['regions']
+        if ref and regions and set(regions) - set(ref.get('regions', {})):
+            out.append(dict(shot=png.name, about=s['about'], off=None,
+                            why='reference lacks regions %s (record it again)' % ', '.join(
+                                sorted(set(regions) - set(ref.get('regions', {}))))))
+            continue
+        sig = signature(png, regions) if ref else None
         if not ref or not sig:
-            out.append(dict(shot=png.name, about=checks[name], off=None,
+            out.append(dict(shot=png.name, about=s['about'], off=None,
                             why='no reference yet' if not ref else 'unreadable'))
             continue
-        hd, td = distance(sig, ref)
-        out.append(dict(shot=png.name, about=checks[name], hist=hd, thumb=td, off=hd > OFF_ROUTE_HIST,
-                        ref='%s/%s' % (ref['run'], ref['shot'])))
+        r = dict(shot=png.name, about=s['about'], ref='%s/%s' % (ref['run'], ref['shot']))
+        if regions:
+            r['regions'] = {k: (region_match(sig['regions'][k], ref['regions'][k]), v[4])
+                            for k, v in regions.items()}
+            r['off'] = any(s < m for s, m in r['regions'].values())
+        else:
+            r['hist'], r['thumb'] = distance(sig, ref)
+            r['off'] = r['hist'] > OFF_ROUTE_HIST
+        out.append(r)
     return out
+
+
+def describe(r):
+    """The distance column of a route check row."""
+    if 'regions' in r:
+        return ', '.join('%s %s (min %s)' % (k, s, m) for k, (s, m) in r['regions'].items())
+    return str(r.get('hist', '-'))
