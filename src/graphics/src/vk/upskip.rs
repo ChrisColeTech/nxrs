@@ -706,8 +706,19 @@ pub fn landing_pre(a: u64, n: u64, src: *const u8, before: *const u8) -> Option<
             h[k].store(page_hash(s), Ordering::Relaxed);
         }
     };
+    // not on the `vk page hash` threads: they serve one job at a time, and a landing's job there took them from the
+    // replay thread's sync (`par_hashes`), the frame's critical path (od-v3-oot: its copy and hash 4.8 -> 6.2 ms a
+    // frame). A large write-back (OoT: two of ~32 MB a frame) is split over three short-lived threads of its own.
     if n >= PAR_MIN {
-        par_for(pages, &page);
+        const PARTS: usize = 4;
+        let per = pages.div_ceil(PARTS);
+        std::thread::scope(|s| {
+            for k in 1..PARTS {
+                let page = &page;
+                s.spawn(move || (k * per..((k + 1) * per).min(pages)).for_each(page));
+            }
+            (0..per.min(pages)).for_each(&page);
+        });
     } else {
         (0..pages).for_each(page);
     }
@@ -1361,7 +1372,7 @@ mod tests {
     /// OOT-DESC: a landing whose pages were compared and hashed before the pool lock (`landing_pre`) leaves the same
     /// page states and the same unchanged pages as one that compares them itself: pages the GPU left alone (with a kept
     /// hash, and one without), pages it changed, a partial page at each end, and a page another note restamped since.
-    /// Large enough for the threaded compare, and small for the serial one.
+    /// Small, and large enough for `landed`'s own threaded compare.
     #[test]
     fn a_landing_compared_beforehand_decides_as_one_that_compares_itself() {
         let _s = SERIAL.lock().unwrap();
