@@ -179,8 +179,16 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       30.1 FPS (5% low 28.0) of 60, was 26.9/22.0; replay thread 23.4 ms (was 30.3). Smash 59.8/59.0 unchanged.
       Lead: graphics 235/235, race and Smash sheets correct. Independent audit: HIGH H1 (pre buffers run in
       segment order but were recorded in lane time order → stale pool bytes / twin copied before upload: a
-      pop-in candidate), MEDIUM M1 (image takeover not gated), LOW L1-L6. Not merged; audit-fix agent running in
-      the worktree, then re-measure, merge, commit.
+      pop-in candidate), MEDIUM M1 (image takeover not gated), LOW L1-L6.
+- [x] **MKW-RECORD audit fixes + dark turn** (2026-11-26, `ea5dcbf`, `06f2a6e`; merged into gameplay-harness as
+      `16e1592`). H1: one shared pre buffer per parallel run, recorded under a lock in real time order. M1: takeovers
+      recorded per run, earlier segments see the taken-over image (gating it cost 26.8 FPS). L1-L5 fixed; L6 (lazy
+      bring-back reset without WATCH_MU) open: taking the lock there can deadlock. Dark banked turn in
+      `233849-audit-perf` was a lanes fault: a later segment sampled a texture before an earlier one made its image
+      → zero stand-in (shadow map). Fix: such a lookup asks the gate; race stand-ins 27-69 → 0 (serial 0). MKW
+      ~30 FPS (5% low 27-28) of 60, replay thread 21.6 ms; Smash 59.8/59.0. Lead: graphics 238/238, sheets read
+      (fix-1 crosses the turn lit). Open: bindless pool slots (`prepare_pool_images`) not ordered by the fix (no
+      stand-ins seen); one loading submission uses all 256 timestamp queries (red line, nothing refused in race).
 - [ ] **Running 2026-11-25 evening:** MKW-RECORD phase 2 (steps 1-3, 8 h) in worktree
       `D:\Projects\RecompLauncherEngine-mkw` (branch `mkw-record`, own target/dist, relinks only MKW, main-tree
       locks); OOT-FOREST2 in the main tree (OoT only, regression `wonder`, no `vk/queue.rs`); the OOT-NAN audit.
