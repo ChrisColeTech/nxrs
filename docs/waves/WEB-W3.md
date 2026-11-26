@@ -103,4 +103,23 @@ saves,audio,input}.rs` (new, emscripten), `src/os/src/boot.rs`, `src/os/src/serv
 
 ## Report
 
-(at the end, protocol §5)
+1. **Built.** (a) Data: `RomFs::from_stored` (file list + callback reader); `os::webdata` (ExeFS / control reads,
+   `NXRS_BOOTSET` recorder, save packing); `os::web::io` (slot table, published once through `nxrs-lib.js`;
+   engine threads futex-wait on their slot); `io-worker.js` (4 KiB blocks, OPFS store + journal keyed by the data
+   version, range fetch with exact Content-Range checks and retries, demand at high priority joining in-flight boot
+   fetches, memory cache fallback); `webpack.rs` writes `data.json` + `bootset.json` for `--target web`. (b) Saves:
+   commit → pack → slot op 2 → OPFS `.new`/flush/move, ack bound 10 s; restore before main, refuse on damage. (c)
+   Audio: sink's web device thread fills a shared ring from the same mixer; worklet plays it, counts underruns;
+   real-time consumption (said in the log) until the context runs. (d) Input: block with held key bits, a press
+   latch, 4 gamepads; input thread maps via the front's default keys, gamepad 0 by position.
+2. **Tests.** `translator` `stored_romfs`; `os` `ranges_merge_within_a_block`, `save_blob_layout`,
+   `keys_and_pad_map_like_the_front`; `nxrs-cli` `bootset_is_checked_against_the_manifest`,
+   `manifest_lists_the_data_folder_but_saves`. All green with runtime, os, nxrs-cli, translator, graphics.
+3. **Verified.** See the four W3 rows of docs/35. Native: `build/play/20261126-182220-web-w3-native` (59.9 FPS,
+   normal exit, 0 red lines, sheet read).
+4. **Unproven.** A save written by the game itself in Chrome (needs W4 frames to reach Ren'Py's Save menu);
+   a real gamepad; read-ahead / hint ring (not needed: this title reads its whole RomFS in 30 s).
+5. **Slips.** The shared `build\tools\libc-wasm64` was wiped by `web.ps1` (CRLF patch); restored at once (Notes).
+   One native build went to `<input>\nxrs\...` (default outdir) instead of the library folder; removed, rebuilt there.
+6. **Questions.** `os/src/nvn/mod.rs` (W4's) reads `exefs/sdk` with `std::fs`: on the web it now finds nothing and
+   logs "NintendoSDK 19 (taken)" instead of 10; the fix is reading it with `crate::webdata::read(&data, "exefs/sdk")`.
