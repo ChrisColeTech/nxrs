@@ -74,11 +74,33 @@ in range" query), `src/os/src/mem.rs` (the commit hook), `docs/env_switches.tsv`
 | Run (`build/play/`) | build | FPS / 5% low | replay | prep | pool sync | lock / scan / pass | write-back MB (ms) | GPU | route |
 |---|---|---|---|---|---|---|---|---|---|
 | `20261126-154635-sc-base-oot` | base `1619d31` (relink 15:46) | 16.2 / 14.0 | 20.5 | 29.6 | 23.6 | 2.7 / 12.2 / 7.7 | 1.2 (13.7) | 10.6 | 6/6 on |
+| `20261126-163048-sc-v4-oot` | v4 `f61f20c` (relink 16:30) | **19.4 / 17.3** | 18.9 | **16.1** | **11.9** | 2.5 / **2.5** / 5.9 | 1.1 (9.5) | 9.5 | 6/6 on |
+
+v4 in the window: 3,646-3,651 pools (3.7 GB) sealed out of ~4,400; 0.00-0.05 pools a frame woken by a store, none by a
+host write, none found written without a fault; the sealing pass 0.04 ms a frame under the pool lock once all is
+sealed (~30 s after boot). Not sealed (census at 910 s): 683 pools (485 MB) written by the CPU in the last 60 frames,
+58 (503 MB) with write-backs. Syncs a frame: 10 replays + 1 present, 9.1 covered by an earlier scan; the walker's walk
+1.86 ms (was ~10-14 ms), and it now covers the present's sync more often (88 of the last 600 walks). The per-pool pass
+is now mostly the upload skip's copy-and-hash of the ~57 MB a frame of pages the CPU rewrites with the bytes the GPU
+already holds (4.8 ms), the iteration ~1 ms (was ~3.5). The frame (51 ms) is no longer bounded by the replay thread
+(replay + prep 35 ms); `descriptor_ms` 19 ms a frame and the guest are the larger parts now (outside this wave).
 
 - `20261126-160352-sc-v1-oot` (v1, `420b389` + walker list cache): stopped by PID at ~300 s. Sealing stalled at
   1,250 pools (51 MB): a pass stopped at the first pool larger than its budget (32 MB) and every later pass stopped at
   the same pool. No red line, no fault, no wrong picture up to the stop. Fixed in `6d42235`: a first sealing goes in
   pieces of the budget, one piece a pass (a store into a piece already read-only wakes the pool as any store does).
+
+- `20261126-161318-sc-v2-oot` (v2, `6d42235`), stopped at ~250 s: 3,094 pools (646 MB) sealed, then no more; scan
+  ~8 ms; lock wait up to 7 ms. `20261126-162*-sc-v3-oot` (v3: + `Pools::busy`, a census of why pools are not
+  sealed), stopped at ~295 s: **81 pools (3.1 GB) failed the "every page committed and read-write" check** (memory
+  committed in parts, 64 KiB at a time), 586 (313 MB) had CPU writes in the last 60 frames, 2 (48 MB) write-backs; and
+  that check, a VirtualQuery walk over those fragmented pools at every pass, held the pool lock **16.7 ms a frame**
+  (the lock-wait rise). Corrections (`47dd5eb`, `f61f20c`): the committed runs of a pool are protected (listed by
+  VirtualQuery, a piece at a time), its uncommitted pages need none: they cannot be written before they are committed,
+  and every commit now wakes the pools it touches (the OS layer's `commit_rw` and the runtime's own `mem::commit`,
+  through a hook the seal module registers); a store into a page that is still uncommitted is left to the runtime's
+  first-touch handler (which commits it, waking the pool). No committed check per pass any more.
+- `sc-v1`-`sc-v3`: no red line, no fault, every picture up to the stop correct.
 
 The base run had TRANSLATE-REUSE's MKW relink and my own test compiles beside it in its first minutes (not in the
 window); numbers indicative. Sheets (3) correct: title, story, nightmare, house, title card, Deku Tree, Navi, Link
