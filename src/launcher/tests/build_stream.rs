@@ -7,8 +7,7 @@ mod common;
 use common::*;
 use nxrs_launcher::flows::Outcome;
 use nxrs_launcher::model::game::Game;
-use nxrs_launcher::model::path_text::{from_native, parent};
-use nxrs_launcher::services::{build_facts, platform};
+use nxrs_launcher::services::build_facts;
 use std::time::{Duration, Instant};
 
 fn unbuilt(dir: &str) -> Game {
@@ -25,22 +24,23 @@ fn unbuilt(dir: &str) -> Game {
     }
 }
 
-/// How many fake engines run (listed, never killed, by image name).
+/// How many fake engines run (listed, never killed, by image name). On Linux every process whose
+/// executable is the fake counts (`find_running_games` keeps one PID per game, so it can't count two).
 fn fake_processes() -> usize {
-    let path = from_native(FAKE);
     let name = std::path::Path::new(FAKE)
         .file_stem()
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let probe = Game {
-        id: "fake".into(),
-        output_name: name.clone(),
-        build_dir: parent(&path),
-        ..Game::default()
-    };
     if !cfg!(windows) {
-        return platform::find_running_games(&[probe]).len();
+        let want = std::fs::canonicalize(FAKE).ok();
+        let Ok(procs) = std::fs::read_dir("/proc") else {
+            return 0;
+        };
+        return procs
+            .flatten()
+            .filter(|e| std::fs::read_link(e.path().join("exe")).ok() == want)
+            .count();
     }
     let out = std::process::Command::new("tasklist")
         .args(["/FI", &format!("IMAGENAME eq {name}.exe"), "/NH"])
