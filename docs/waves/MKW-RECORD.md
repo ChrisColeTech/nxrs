@@ -711,3 +711,87 @@ note, `220232-m1-check` after the second merge).
 ### 6. Questions
 
 None.
+
+## Audit fixes (agent, 2026-11-25 night)
+
+Findings of the independent audit of `git diff 5bce4ff 2d02e3b -- src`. Runs in the worktree's `build/play/`, GPU 1.
+
+### 1. Built
+
+- **H1, upload-buffer order.** A parallel run's segments record their first-use initializations into one upload
+  buffer, the parent's (`queue::share_pre` / `unshare_pre` around each lane's segment; `ChildInit` carries it). Each
+  recording site takes `gate::pre_lock` (a mutex, re-entrant per thread, taken only on a lane of a parallel run)
+  inside the images' or the pools' lock it changes state under, so the buffer holds the uploads in the order the
+  state changed: `sync_range`, `Pool::ensure_buffer`, `Pool::bind`, `Pool::upload_now` (deferred uploads, `gmem`),
+  `prepare_image` (with ASTC / GPU deswizzle inside), `cube_twin_view`, `block_alias`, the stand-in images and the
+  zero buffer. Lock order: images or pools, then `PRE_MU`; no holder takes either again. The replay thread makes its
+  children under the same lock (their upload buffers come from the shared buffer's command pool). A dropped child's
+  upload buffer now holds only its start. `Sub::upload` writes a red line if a lane records without the lock.
+  Segments translated again at the join record into their own upload buffers, after every parallel one, in order.
+- **M1, takeover order.** Gating the takeover with `gate::pass(true)` as suggested was built and measured first
+  (`232300-audit-check`): MKW takes over live images every frame in segments, so the gate asked ~13 times a frame,
+  ~5 segments a frame gave up and ~7 were translated again; 26.8 / 23.0 FPS. Built instead: each run records its
+  takeovers (old serial -> segment, new serial; `gate::note_takeover`). A draw or copy of the old object from a
+  segment before the taker in the stream (in parallel, or translated again at the join: `Run::redo`) gets the
+  image where it is now (`Gpu::ensure_target`, `Images::target_serial`, used by `target_image`, `source_image`,
+  `attach_view_layers`), which is the image it would have drawn into before the takeover; a use after it still
+  makes an image of its own, as in order. The old image's GPU ownership is already frontier-only. The reference
+  mode (`NXGFX_TRANSLATE_GATE=all`) still gates the takeover.
+- **L1.** One predicate, `ub_update_kept` (bytes present, range in one pool window by `room`), queues an inline
+  uniform update for handle reads in the record and in the pre-pass, read before the record's `resolve`.
+- **L2.** `defer_after_use` on a lane during its segment (`gate::parallel`) uses the per-submission list.
+- **L3.** `walk_some` steps aside before it claims a piece; `walk_finish` gives up after 100 ms (`WALK_LATE`, a log
+  line): the walk then covers nothing and the sync scans itself.
+- **L4.** `take_query` / `take_occl` count refusals (`QUERIES_OUT`, in the translate line) and write a red line once.
+  No draw is skipped.
+- **L5.** A twin's copy runs once per upload buffer (`Sub::pre_serial`), not once per child.
+- **L6 open.** Taking `WATCH_MU` in the lazy bring-back is not clearly safe: the fault can come from a thread that
+  holds it (a sync reading guest memory for an upload under `watch_lock`), which would deadlock.
+
+### 2. Tests (`cargo test --release -p graphics`: 238 lib tests pass, plus the integration tests)
+
+- `gate::tests::the_shared_upload_buffer_is_recorded_by_one_thread_at_a_time`: held on a lane, re-entrant, another
+  lane excluded, nothing held outside a run.
+- `gate::tests::a_takeover_is_seen_by_earlier_segments_only`: segments before the taker see it, the taker and later
+  ones do not, also translated again at the join.
+- `walker_tests::a_piece_that_never_ends_does_not_hold_the_sync`: L3, the finish gives up and covers nothing.
+- All new; none can fail on the old code as written (the functions did not exist). H1's ordering is shown by the
+  game runs, not by a unit test.
+
+### 3. Verified
+
+| Run | Build | FPS / 5% low | Replay | Prep | Replay thread |
+|---|---|---|---|---|---|
+| `224333-final-mkw` (before) | steps 4-6 final | 30.1 / 28.0 | 11.8 | 11.6 | 23.4 |
+| `232300-audit-check` | M1 gated (rejected), check on | 26.8 / 23.0 | | | |
+| `233246-audit-check2` | final, `NXGFX_TRANSLATE_CHECK=1` | 30.2 / 28.0 | 11.8 | 9.5 | 21.3 |
+| `233849-audit-perf` | final, machine lock | 30.0 / 27.0 | 11.9 | 9.8 | 21.6 |
+| `234603-audit-repeat` | final | 29.9 / 26.0 | | | |
+| `235152-audit-smash` | final, Smash relinked, machine lock, window [130, 280] | 59.8 / 59.0 | | | |
+
+- **Smash:** as before (59.8 / 59.0); 0 red lines; sheet correct (boot, character select, VS screen, both Norfair
+  matches, results).
+
+- **Check run:** 0 entry-state differences, 0 segments translated again, the gate asked 0 times in the race, the
+  shared upload buffer's lock waited 0.000-0.004 ms a frame, no queries refused in the race, 0 uses of a later
+  takeover in the race (the case does not occur there).
+- **Sheets read:** `232300-audit-check`, `233246-audit-check2`, `234603-audit-repeat` correct (boot, title, menus,
+  grid, race, lap 2). `233849-audit-perf`'s `05-race` shows a large dark area over the banked turn with crisp
+  edges while the kart rides a Bullet Bill; `233246` and `234603` show the same turn lit. One frame, not repeated.
+- **Red lines:** the known `pipeline-crashed.bin` line, plus the new L4 line in every run: `a submission used all
+  256 timestamp queries` at ~8.4 s (loading). That was silent before; the race refuses none.
+- **No device loss**; every run exited normally.
+
+### 4. Unproven / next
+
+- The dark banked turn in `233849-audit-perf/05-race.png`: a shadow or a rendering fault; not seen in the other two
+  runs at that place. Next: shots of that turn in a few runs, with `NXGFX_TRANSLATE_THREADS=0` against 6.
+- A use of the old object after a takeover made by an earlier segment that is still being translated can draw into
+  the taken-over image (as before this fix); no game is known to do that.
+- The loading submission that uses up 256 timestamp queries (counter reports without a GPU timestamp): a larger pool
+  or a per-submission split.
+- L6 (above).
+
+### 5. Slips
+
+- None known. M1 was built as the audit suggested first, measured, and replaced (above).

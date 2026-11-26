@@ -2534,18 +2534,17 @@ fn target_image(
     vk::SampleCountFlags,
 )> {
     let mut imgs = super::gate::lock(&g.images, 2);
-    if !g.ensure_image(&mut imgs, t) {
-        return None;
-    }
-    g.prepare_image(&mut imgs, t.serial, sub);
-    g.tex_gpu_written(&mut imgs, t.serial);
+    // (the image a later segment's takeover holds now, when this use comes first in the stream: audit M1)
+    let serial = g.ensure_target(&mut imgs, t)?;
+    g.prepare_image(&mut imgs, serial, sub);
+    g.tex_gpu_written(&mut imgs, serial);
     static WB: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     if *WB.get_or_init(|| std::env::var("NXGFX_TEX_WB").as_deref() == Ok("1"))
         && t.l.size <= 512 << 10
     {
-        sub.tex_wb.push(t.serial);
+        sub.tex_wb.push(serial);
     }
-    let im = &imgs.by_serial[&t.serial];
+    let im = imgs.by_serial.get(&serial)?;
     Some((im.image, im.tf, im.extent, im.samples))
 }
 fn source_image(
@@ -2554,11 +2553,9 @@ fn source_image(
     t: &tex_t,
 ) -> Option<(vk::Image, format::TexFormat, vk::Extent3D)> {
     let mut imgs = g.images.lock().unwrap();
-    if !g.ensure_image(&mut imgs, t) {
-        return None;
-    }
-    g.prepare_image(&mut imgs, t.serial, sub);
-    let im = &imgs.by_serial[&t.serial];
+    let serial = g.ensure_target(&mut imgs, t)?;
+    g.prepare_image(&mut imgs, serial, sub);
+    let im = imgs.by_serial.get(&serial)?;
     Some((im.image, im.tf, im.extent))
 }
 /// The resolution scale of a texture's image (1 when nothing is scaled).
@@ -2612,7 +2609,8 @@ fn attach_view_layers(
 )> {
     let _ = target_image(g, sub, t)?;
     let mut imgs = super::gate::lock(&g.images, 2);
-    let im = imgs.by_serial.get_mut(&t.serial)?;
+    let serial = imgs.target_serial(t.serial);
+    let im = imgs.by_serial.get_mut(&serial)?;
     let lvl = v
         .filter(|v| v.bits & VW_LEVELS != 0)
         .map(|v| v.base_level as u32)
@@ -2680,6 +2678,8 @@ fn block_alias(
     if !super::gate::pass_pre(true) {
         return None;
     }
+    // (its layout set in the upload buffer: a parallel run's shared one, audit H1)
+    let _pre = super::gate::pre_lock();
     let ci = vk::ImageCreateInfo::default()
         .image_type(vk::ImageType::TYPE_2D)
         .format(fmt)
@@ -3149,6 +3149,7 @@ fn zero_buffer(g: &Gpu, sub: &mut Sub) -> vk::Buffer {
             )
             .expect("descriptor sink buffer")
         });
+        let _pre = super::gate::pre_lock();
         unsafe {
             g.dev()
                 .cmd_fill_buffer(sub.pre, b.buf, 0, vk::WHOLE_SIZE, 0);
@@ -3989,6 +3990,7 @@ fn dummy_view(g: &Gpu, sub: &mut Sub, target: i32, storage: bool) -> vk::ImageVi
         };
         let i2 = mk(vk::ImageType::TYPE_2D, 6, true);
         let i3 = mk(vk::ImageType::TYPE_3D, 1, false);
+        let _pre = super::gate::pre_lock();
         for (im, layers) in [(i2, 6), (i3, 1)] {
             let range = vk::ImageSubresourceRange {
                 aspect_mask: vk::ImageAspectFlags::COLOR,
@@ -8851,7 +8853,7 @@ pub mod seg_stats {
         let w = WHY.each_ref().map(|x| x.swap(0, Relaxed));
         if super::translate_lanes() > 1 {
             crate::vklog!(
-                "translate (parallel), over the last 600 frames: {} streams in parallel, {} cuts inside a pass, lanes translated {:.2} ms a frame together (waiting for locks: pools {:.2} ms at GPU writes, {:.2} ms at resolves, images {:.2} ms), the replay thread waited {:.2} ms a frame for the lanes, {} segments translated again; the gate asked {} times, {} segments gave up; asked at {}",
+                "translate (parallel), over the last 600 frames: {} streams in parallel, {} cuts inside a pass, lanes translated {:.2} ms a frame together (waiting for locks: pools {:.2} ms at GPU writes, {:.2} ms at resolves, images {:.2} ms), the replay thread waited {:.2} ms a frame for the lanes, {} segments translated again; the gate asked {} times, {} segments gave up; asked at {}; {} uses of an object a later segment's takeover holds",
                 PAR.swap(0, Relaxed),
                 MIDCUT.swap(0, Relaxed),
                 LANE_NS.swap(0, Relaxed) as f64 / 600.0 / 1e6,
@@ -8863,10 +8865,11 @@ pub mod seg_stats {
                 super::super::gate::ASKED.swap(0, Relaxed),
                 super::super::gate::GAVE_UP.swap(0, Relaxed),
                 super::super::gate::sites(),
+                super::super::gate::TAKEN_LATER.swap(0, Relaxed),
             );
         }
         crate::vklog!(
-            "translate, per frame over the last 600: {:.1} streams in segments ({:.1} in one piece: switches {}, queue state {}, feedback records {}, few draws {} in all), {:.1} segments, largest {} draws, pre-pass {:.2} ms, segments {:.2} ms; {} entry-state differences (NXGFX_TRANSLATE_CHECK); {:.1} write-back ranges",
+            "translate, per frame over the last 600: {:.1} streams in segments ({:.1} in one piece: switches {}, queue state {}, feedback records {}, few draws {} in all), {:.1} segments, largest {} draws, pre-pass {:.2} ms, segments {:.2} ms; {} entry-state differences (NXGFX_TRANSLATE_CHECK); {:.1} write-back ranges; queries refused (a submission's 256 used up): {} timestamp, {} occlusion; the shared upload buffer's lock waited {:.3} ms a frame",
             s as f64 / 600.0,
             SERIAL.swap(0, Relaxed) as f64 / 600.0,
             w[0],
@@ -8879,6 +8882,9 @@ pub mod seg_stats {
             RUN_NS.swap(0, Relaxed) as f64 / 600.0 / 1e6,
             DIFFS.swap(0, Relaxed),
             WB_RANGES.swap(0, Relaxed) as f64 / 600.0,
+            super::super::queue::QUERIES_OUT[0].swap(0, Relaxed),
+            super::super::queue::QUERIES_OUT[1].swap(0, Relaxed),
+            super::super::gate::LOCK_NS[3].swap(0, Relaxed) as f64 / 600.0 / 1e6,
         );
     }
 }
@@ -8928,6 +8934,14 @@ fn segmentable(qs: &QState, stream: &[u8]) -> bool {
         return false;
     }
     true
+}
+
+/// Whether an inline uniform update of `n` bytes at `dst` (a record of `len` bytes) is queued for the handle reads that
+/// follow it (`ub_upd`): its bytes are in the record and its range lies in one pool buffer. The one rule of the record
+/// and of the segments' pre-pass (audit L1: the record asked whether `resolve` succeeded, the pre-pass `room`), read
+/// before the record's `resolve` makes the pool's buffer.
+fn ub_update_kept(dst: u64, n: u64, len: usize) -> bool {
+    n > 0 && 24 + n as usize <= len && super::mem::room(dst) >= n
 }
 
 /// The pre-pass: the stream's segments and the offset of a wait that parks it (as `run` returns). Makes the stream's
@@ -8990,12 +9004,12 @@ fn plan(g: &Gpu, qs: &QState, stream: &[u8]) -> (Vec<Segment>, Option<usize>) {
                     }
                 }
                 op::SIGNAL_EVENT | op::FENCE_SYNC | op::REPORT_COUNTER => global_op(g, h.op, rec),
-                // the stream's inline uniform updates so far: later segments' handle reads see them (`ub_upd`), as
-                // the record queues them when its address is in a pool (`room`, read-only: no pool is made here)
+                // the stream's inline uniform updates so far: later segments' handle reads see them (`ub_upd`), by the
+                // record's own rule (`ub_update_kept`, read-only: no pool is made here)
                 op::UPDATE_UB => {
                     let [dst, n]: [u64; 2] = unsafe { rd_at(rec, 0) };
                     shadow.ugen = new_bgen();
-                    if n > 0 && super::mem::room(dst) >= n && 24 + n as usize <= rec.len() {
+                    if ub_update_kept(dst, n, rec.len()) {
                         shadow.ub_upd.push(dst, &rec[24..24 + n as usize]);
                     }
                 }
@@ -9236,6 +9250,8 @@ mod par {
             };
             let mut c = mk();
             queue::child_begin_with(&job.init, &mut c);
+            // first-use initializations go into the parent's upload buffer, in the order they are made (audit H1)
+            let own_pre = queue::share_pre(&job.init, &mut c);
             let mut wq = s.entry;
             wq.seg = true;
             wq.seg_rc = s.rc;
@@ -9247,6 +9263,7 @@ mod par {
             let draws = translate_segment(job.g, &mut c, &mut wq, stream, s.start, s.end);
             seg_stats::LANE_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
             job.run.leave(k);
+            queue::unshare_pre(&mut c, own_pre);
             *job.out[k].lock().unwrap() = Some(Own((c, wq, draws)));
         }
     }
@@ -9297,7 +9314,12 @@ mod par {
             p.job = Some(job.clone());
         }
         WAKE.notify_all();
-        work(&job, child);
+        // the replay thread's children come from the command pool of the parent's upload buffer, which the lanes
+        // record into meanwhile (`queue::share_pre`): made under that buffer's lock
+        work(&job, &mut || {
+            let _l = gate::pre_pool_lock();
+            child()
+        });
         POOL.lock().unwrap().job = None;
         let tw = std::time::Instant::now();
         {
@@ -9329,7 +9351,9 @@ mod par {
                 wq.seg_rc = s.rc;
                 wq.seg_mem = s.mem;
                 let before = gate::changes();
+                job.run.redo(Some(k));
                 translate_segment(g, &mut c, &mut wq, stream, s.start, s.end);
+                job.run.redo(None);
                 if gate::changes() != before {
                     // every later parallel result was made before this change
                     later = u64::MAX;
@@ -10085,8 +10109,11 @@ fn emit_op2(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bo
             let data = &rec[24..24 + n as usize];
             // a cached set holding a storage address read from uniform memory is stale after this (`SetKey::ugen`)
             qs.ugen = new_bgen();
-            if let Some((db, doff, _)) = super::mem::resolve(g, sub, dst, n) {
+            // queued for handle reads by the same rule as the segments' pre-pass (audit L1), before the pool is made
+            if ub_update_kept(dst, n, rec.len()) {
                 qs.ub_upd.push(dst, data);
+            }
+            if let Some((db, doff, _)) = super::mem::resolve(g, sub, dst, n) {
                 let (sb, so) = sub.stage_bytes(g, data);
                 unsafe {
                     dev.cmd_copy_buffer(

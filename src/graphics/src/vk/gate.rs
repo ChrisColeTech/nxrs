@@ -3,11 +3,11 @@
 //! A stream's segments are translated at the same time on several threads, each into a child submission of its own.
 //! Reading shared state (images, pools, tables) is safe from any of them. Changes of shared state come in two kinds:
 //!
-//! - First-use initialization whose commands all go into the child's upload buffer (`pass_pre`: a pool's buffer made
-//!   or bound, CPU writes uploaded, an image made and given its first content, a lazy registration made, a twin
-//!   copied, the waiting pool images prepared). Every upload buffer of a submission runs before all of its main
-//!   buffers, as the serial path's single one does, and a dropped child's upload buffer is still submitted: any
-//!   segment may make these.
+//! - First-use initialization whose commands all go into the upload buffer (`pass_pre`: a pool's buffer made or
+//!   bound, CPU writes uploaded, an image made and given its first content, a lazy registration made, a twin copied,
+//!   the waiting pool images prepared). The segments of a parallel run share one upload buffer, the parent's, recorded
+//!   under `pre_lock` in the order the changes are made (they depend on each other: audit H1); it runs before every
+//!   main buffer, as the serial path's single one does: any segment may make these.
 //! - Changes whose effect depends on where in the stream they are made (`pass`: an image's first GPU write, which ends
 //!   its uploads from storage; a storage upgrade, copied at its place in the main buffer). Only the oldest segment
 //!   still being translated makes one, and only when every older segment's result stands: the *frontier*. Any other
@@ -49,6 +49,10 @@ struct St {
 /// The gate of one parallel run of a stream's segments.
 pub struct Run {
     st: Mutex<St>,
+    /// live images taken over by a new texture object in this run (`image::ensure_image`): old serial -> (the segment
+    /// that took it over, the new serial). A segment before that one in the stream that uses the old object after the
+    /// takeover uses the image where it is now (`taken_later`, audit M1).
+    takeovers: Mutex<std::collections::HashMap<u64, (usize, u64)>>,
 }
 
 thread_local! {
@@ -58,7 +62,46 @@ thread_local! {
     static CHANGES: Cell<u64> = const { Cell::new(0) };
     /// this thread's segment of a parallel run has given up
     static GIVEN_UP: Cell<bool> = const { Cell::new(false) };
+    /// the run and the segment translated again at its join on this thread (`Run::redo`): takeovers only
+    static JOIN: Cell<(*const Run, usize)> = const { Cell::new((core::ptr::null(), 0)) };
 }
+
+/// The run and segment of this thread: a parallel segment's, or one translated again at the join.
+fn seg_ctx() -> (*const Run, usize) {
+    let c = CTX.with(|c| c.get());
+    if !c.0.is_null() {
+        return c;
+    }
+    JOIN.with(|c| c.get())
+}
+
+/// The live image of texture object `old` was taken over by object `new` (`image::ensure_image`) in this thread's
+/// segment of a parallel run (or its translation again at the join).
+pub fn note_takeover(old: u64, new: u64) {
+    let (r, k) = seg_ctx();
+    if r.is_null() {
+        return;
+    }
+    // SAFETY: as in `pass`: the context names a run only while it lives
+    let run = unsafe { &*r };
+    run.takeovers.lock().unwrap().insert(old, (k, new));
+}
+
+/// The object that took over `old`'s image, when a later segment of this thread's run did: this thread's use of `old`
+/// comes before the takeover in the stream, so it uses that image (audit M1).
+pub fn taken_later(old: u64) -> Option<u64> {
+    let (r, k) = seg_ctx();
+    if r.is_null() {
+        return None;
+    }
+    // SAFETY: as in `pass`
+    let run = unsafe { &*r };
+    let t = run.takeovers.lock().unwrap();
+    t.get(&old).filter(|e| e.0 > k).map(|e| e.1)
+}
+
+/// Uses of a taken-over object's image by a segment before the takeover (`taken_later`), for the translate line.
+pub static TAKEN_LATER: AtomicU64 = AtomicU64::new(0);
 
 /// Gate statistics, per frame in the `[vk] translate` line.
 pub static ASKED: AtomicU64 = AtomicU64::new(0);
@@ -124,9 +167,10 @@ pub fn sites() -> String {
 /// Before a change of shared state whose commands all go into the submission's upload buffer (`Sub::pre`) and whose
 /// result does not depend on when in the stream it is made: first-use initialization (a pool's buffer made or its
 /// granules bound, CPU writes uploaded, an image made and given its first content, a lazy registration made, a twin
-/// copied). Every upload buffer of a submission runs before all of its main buffers, as the serial path's single one
-/// does, and a dropped child's upload buffer is still submitted, so any segment may make it. Gated as `pass` only in
-/// the reference mode (`NXGFX_TRANSLATE_GATE=all`).
+/// copied). A parallel run's segments record these into one shared upload buffer under `pre_lock` (taken by the
+/// caller after this), in the order they are made, and it runs before all of the submission's main buffers, as the
+/// serial path's single one does, so any segment may make it. Gated as `pass` only in the reference mode
+/// (`NXGFX_TRANSLATE_GATE=all`).
 #[track_caller]
 pub fn pass_pre(need: bool) -> bool {
     if all() {
@@ -135,9 +179,68 @@ pub fn pass_pre(need: bool) -> bool {
     true
 }
 
+/// The upload buffer every segment of a parallel run records into (audit H1). The first-use initializations depend on
+/// each other (a pool uploaded whole, then a page of it the CPU wrote since; an image made and uploaded, then copied
+/// into a twin): they must run in the order they were made, not in segment order. Each is made under the lock of what
+/// it changes (the pools' or the images'), and its commands are recorded under this lock taken inside that one, so the
+/// shared buffer holds them in the order they were made. Lock order: the images' or the pools' lock, then this; a
+/// holder takes neither of those (nor this again: `pre_lock` counts nested takes on this thread).
+static PRE_MU: Mutex<()> = Mutex::new(());
+
+thread_local! {
+    /// `pre_lock`s held on this thread (the outermost holds `PRE_MU`)
+    static PRE_DEPTH: Cell<u32> = const { Cell::new(0) };
+}
+
+/// Held while commands are recorded into the shared upload buffer (`pre_lock`).
+pub struct PreGuard {
+    counted: bool,
+    _held: Option<std::sync::MutexGuard<'static, ()>>,
+}
+
+impl Drop for PreGuard {
+    fn drop(&mut self) {
+        if self.counted {
+            PRE_DEPTH.with(|d| d.set(d.get() - 1));
+        }
+    }
+}
+
+/// Before recording into the upload buffer (`Sub::pre`) on a translation lane of a parallel run, after the gate passed
+/// (`pass_pre`) and under the images' or the pools' lock: the run's segments share one upload buffer (`queue::share_pre`),
+/// recorded by one thread at a time, in the order the changes are made. Nothing to hold outside a parallel run.
+pub fn pre_lock() -> PreGuard {
+    if !parallel() {
+        return PreGuard {
+            counted: false,
+            _held: None,
+        };
+    }
+    let d = PRE_DEPTH.with(|d| {
+        let v = d.get();
+        d.set(v + 1);
+        v
+    });
+    PreGuard {
+        counted: true,
+        _held: (d == 0).then(|| lock(&PRE_MU, 3)),
+    }
+}
+
+/// `PRE_MU` itself, for the replay thread making a child submission during a parallel run: its upload buffer comes from
+/// the command pool of the shared one (`queue::new_sub`), which another lane may be recording into.
+pub fn pre_pool_lock() -> std::sync::MutexGuard<'static, ()> {
+    PRE_MU.lock().unwrap()
+}
+
+/// Whether this thread may record into a shared upload buffer now (outside a parallel run: always).
+pub fn pre_held() -> bool {
+    !parallel() || PRE_DEPTH.with(|d| d.get() > 0)
+}
+
 /// Time parallel segments waited for shared locks (diagnosis): the pool lock in `note_gpu_write`, in `resolve`, the
-/// images' lock (views, targets), in ns.
-pub static LOCK_NS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+/// images' lock (views, targets), the shared upload buffer's (`pre_lock`), in ns.
+pub static LOCK_NS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
 
 /// Takes `m`, timing the wait into `LOCK_NS[k]` on a translation lane.
 pub fn lock<'a, T>(m: &'a Mutex<T>, k: usize) -> std::sync::MutexGuard<'a, T> {
@@ -172,7 +275,18 @@ impl Run {
                 maxfin: 0,
                 seg: vec![Seg::default(); n],
             }),
+            takeovers: Mutex::new(Default::default()),
         }
+    }
+
+    /// This thread translates segment `k` again at the join, in order (`taken_later` knows its place); `None` ends it.
+    pub fn redo(&self, k: Option<usize>) {
+        JOIN.with(|c| {
+            c.set(match k {
+                Some(k) => (self as *const Run, k),
+                None => (core::ptr::null(), 0),
+            })
+        });
     }
 
     /// This thread starts translating segment `k`.
@@ -310,6 +424,49 @@ mod tests {
         // a change at the join (a segment translated again) makes every later parallel result stale
         let mut later = u64::MAX;
         assert!(!r.stands(1, &mut later));
+    }
+
+    /// The shared upload buffer's lock (audit H1): held by one lane at a time while it records, taken again on the same
+    /// thread without waiting, and not taken at all outside a parallel run.
+    #[test]
+    fn the_shared_upload_buffer_is_recorded_by_one_thread_at_a_time() {
+        {
+            let g = pre_lock();
+            assert!(g._held.is_none(), "outside a run nothing is shared");
+            assert!(pre_held());
+        }
+        let r = Run::new(2);
+        r.enter(0);
+        assert!(!pre_held(), "a lane records into the shared buffer only under its lock");
+        {
+            let a = pre_lock();
+            assert!(a._held.is_some());
+            let b = pre_lock();
+            assert!(b._held.is_none(), "nested on the same thread");
+            assert!(pre_held());
+            assert!(PRE_MU.try_lock().is_err(), "another lane waits");
+            drop(b);
+            assert!(pre_held());
+        }
+        assert!(!pre_held());
+        assert!(PRE_MU.try_lock().is_ok());
+        r.leave(0);
+    }
+
+    /// A takeover made by a segment is seen by the segments before it in the stream only (audit M1), also when one is
+    /// translated again at the join; outside a run there is none.
+    #[test]
+    fn a_takeover_is_seen_by_earlier_segments_only() {
+        assert_eq!(taken_later(7), None);
+        let r = Run::new(3);
+        run_in(&r, 1, || note_takeover(7, 9));
+        run_in(&r, 0, || assert_eq!(taken_later(7), Some(9), "segment 0 comes first: the image is 9's now"));
+        run_in(&r, 1, || assert_eq!(taken_later(7), None, "its own takeover"));
+        run_in(&r, 2, || assert_eq!(taken_later(7), None, "after the takeover: 7 is gone, as in order"));
+        r.redo(Some(0));
+        assert_eq!(taken_later(7), Some(9));
+        r.redo(None);
+        assert_eq!(taken_later(7), None);
     }
 
     /// Calls that change nothing pass without asking; outside a run every change passes.

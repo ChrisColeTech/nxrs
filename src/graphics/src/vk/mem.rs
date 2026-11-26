@@ -852,6 +852,9 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     if !super::gate::pass_pre(true) {
         return;
     }
+    // taken and uploaded under the shared upload buffer's lock in a parallel run, so the upload lands after any older
+    // upload of the same pages (audit H1)
+    let _pre = super::gate::pre_lock();
     let (lo, hi) = page_range(a, n);
     let Some(pages) = watch::take(lo, hi, true) else {
         return;
@@ -1022,6 +1025,9 @@ impl Pool {
         super::lazy::touch(self.base, self.size);
         // a new GPU copy: no page of it was uploaded by the pool sync yet
         super::upskip::drop_pool(self.base);
+        // filled, uploaded and its watch taken under the shared upload buffer's lock in a parallel run: a later sync of
+        // a page of it lands after this (audit H1)
+        let _pre = super::gate::pre_lock();
         unsafe {
             g.dev()
                 .cmd_fill_buffer(sub.pre, b.buf, 0, vk::WHOLE_SIZE, 0)
@@ -1191,6 +1197,8 @@ impl Pool {
             fresh.push(i);
         }
         let gsz = gr.size;
+        // (in the upload buffer: a parallel run's shared one, audit H1)
+        let _pre = super::gate::pre_lock();
         // the new granules' content: zeros, then what the guest memory holds there (its committed parts)
         for &i in &fresh {
             unsafe {
@@ -1236,6 +1244,8 @@ impl Pool {
     }
 
     fn upload_now(&self, g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
+        // (in the upload buffer: a parallel run's shared one, audit H1)
+        let _pre = super::gate::pre_lock();
         for (buf, boff, pa, pn) in self.pieces(a, n) {
             // granules not bound yet take the guest bytes when they are bound
             for (qa, qn) in self.bound_parts(pa, pn) {
@@ -2120,16 +2130,18 @@ fn walk_for(due: Option<u64>) -> Option<std::sync::Arc<WalkJob>> {
 /// watch lock go first.
 fn walk_some(job: &WalkJob, step_aside: bool) {
     loop {
-        let i = job.next.fetch_add(1, Ordering::AcqRel);
-        let Some(&(lo, hi)) = job.pieces.get(i) else {
-            return;
-        };
-        if step_aside {
+        // stepping aside before a piece is claimed (audit L3: a claimed piece a sync waits for in `walk_finish` was
+        // held back up to 50 ms by the walker's stepping aside)
+        if step_aside && job.next.load(Ordering::Acquire) < job.pieces.len() {
             let t = std::time::Instant::now();
             while WATCH_WANT.load(Ordering::Acquire) != 0 && t.elapsed().as_millis() < 50 {
                 std::thread::yield_now();
             }
         }
+        let i = job.next.fetch_add(1, Ordering::AcqRel);
+        let Some(&(lo, hi)) = job.pieces.get(i) else {
+            return;
+        };
         let mut s = WATCH_MU.lock().unwrap();
         // a range no longer mapped (a pool gone meanwhile) reads as failed: this walk covers nothing; the pages it did
         // take (reset already) are kept (audit L1)
@@ -2146,9 +2158,33 @@ fn walk_some(job: &WalkJob, step_aside: bool) {
     }
 }
 
-/// Waits until every taken piece of `job` was walked (at most one piece each by the others).
+/// Waits until every taken piece of `job` was walked (at most one piece each by the others). False when the walk
+/// covers nothing: a range could not be read, or a piece another thread took did not end within `WALK_FINISH` (audit
+/// L3: a walker that died or stalled mid-piece made the waiting sync spin forever, holding the submit lock); the
+/// caller then scans itself, which waits for the watch lock as any scan does.
 fn walk_finish(job: &WalkJob) -> bool {
+    walk_finish_within(job, WALK_FINISH)
+}
+
+const WALK_FINISH: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Walks whose pieces did not end in time (`walk_finish`).
+pub static WALK_LATE: AtomicU64 = AtomicU64::new(0);
+
+fn walk_finish_within(job: &WalkJob, limit: std::time::Duration) -> bool {
+    let t = std::time::Instant::now();
     while job.done.load(Ordering::Acquire) < job.pieces.len() {
+        if t.elapsed() > limit {
+            if WALK_LATE.fetch_add(1, Ordering::Relaxed) < 4 {
+                crate::vklog!(
+                    "pool walker: a walk's pieces did not end within {} ms ({} of {}): the sync scans itself",
+                    limit.as_millis(),
+                    job.done.load(Ordering::Acquire),
+                    job.pieces.len()
+                );
+            }
+            return false;
+        }
         std::thread::yield_now();
     }
     job.ok.load(Ordering::Acquire)
@@ -2456,6 +2492,22 @@ mod walker_tests {
         assert_eq!(j.done.load(Ordering::Acquire), 64);
         assert!(j.next.load(Ordering::Acquire) >= 64);
         let _ = walk_finish(&j);
+    }
+
+    /// A piece another thread took and never ends (a walker that died mid-piece): finishing gives up after its limit
+    /// and the walk covers nothing (audit L3), instead of spinning forever.
+    #[test]
+    fn a_piece_that_never_ends_does_not_hold_the_sync() {
+        let j = WalkJob::new(1, 0, vec![(0, 0); 2]);
+        // both pieces claimed, none done
+        j.next.store(2, Ordering::Release);
+        walk_some(&j, true);
+        let t = std::time::Instant::now();
+        assert!(!walk_finish_within(&j, std::time::Duration::from_millis(5)));
+        assert!(t.elapsed() < std::time::Duration::from_secs(1));
+        // once they end, it covers as before
+        j.done.store(2, Ordering::Release);
+        assert!(walk_finish_within(&j, std::time::Duration::from_millis(5)));
     }
 
     /// A pool counts as walked only when walked pieces cover all of it, without a gap.

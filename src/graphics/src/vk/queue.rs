@@ -67,6 +67,9 @@ pub struct Sub {
     pub pool_snapshot: Option<(u64, vk::DescriptorSet, u64)>,
     /// which recording this is (a stage's staged driver constants are reused by it while they stand)
     pub serial: u64,
+    /// which upload buffer `pre` is: this recording's (`serial`), or while a parallel run's segment is translated the
+    /// parent's it shares (`share_pre`); what runs once per upload buffer (a GPU-written twin's copy) is keyed by it
+    pub pre_serial: u64,
     /// the present count when it was recorded (counter reports: the frame it belongs to)
     pub frame: u64,
     /// raw global memory (`gmem`): the staged memory pool table, the write log and the table's ranges
@@ -261,8 +264,10 @@ impl Queue {
     /// Runs `f` once the GPU can no longer use what it frees: after everything submitted so far, and after the
     /// submission being recorded now (which may have referenced it before its owner let it go).
     pub fn defer_after_use(&self, f: Box<dyn FnOnce(&Gpu) + Send>) {
-        // ops still queued for the replay thread may use it: after them
-        if aq_busy() && !on_replay_thread() {
+        // ops still queued for the replay thread may use it: after them. A translation lane of a parallel run records
+        // for the replay thread, inside its current submission: the list below (audit L2; queued as a call it bumped
+        // the queue's tail, split submit merging and woke the walker)
+        if aq_busy() && !on_replay_thread() && !super::gate::parallel() {
             after_queued(Box::new(move |g: &'static Gpu| g.q.defer_after_use(f)));
             return;
         }
@@ -375,6 +380,10 @@ impl Sub {
     pub fn upload(&mut self, g: &Gpu, src: &[u8], dst: vk::Buffer, off: u64) {
         if src.is_empty() {
             return;
+        }
+        // a parallel run's segments share the upload buffer: recorded under its lock only (`gate::pre_lock`)
+        if !super::gate::pre_held() {
+            crate::log::red_once("an upload recorded into a parallel run's shared upload buffer without its lock (gate::pre_lock)");
         }
         let (sb, so) = self.stage_bytes(g, src);
         let r = [vk::BufferCopy {
@@ -494,25 +503,46 @@ impl Sub {
     }
     /// A timestamp query of the pool's 256, if one is left.
     pub fn take_query(&mut self) -> Option<u32> {
-        if let Some(c) = &self.qshare {
-            return c[0]
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 256).then_some(n + 1))
-                .ok();
+        let q = if let Some(c) = &self.qshare {
+            c[0].try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 256).then_some(n + 1))
+                .ok()
+        } else {
+            (self.queries < 256).then(|| self.query())
+        };
+        if q.is_none() {
+            queries_out(0);
         }
-        (self.queries < 256).then(|| self.query())
+        q
     }
     /// An occlusion query of the pool's 256, if one is left.
     pub fn take_occl(&mut self) -> Option<u32> {
-        if let Some(c) = &self.qshare {
-            return c[1]
-                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 256).then_some(n + 1))
-                .ok();
+        let q = if let Some(c) = &self.qshare {
+            c[1].try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 256).then_some(n + 1))
+                .ok()
+        } else {
+            (self.occl_n < 256).then(|| {
+                self.occl_n += 1;
+                self.occl_n - 1
+            })
+        };
+        if q.is_none() {
+            queries_out(1);
         }
-        (self.occl_n < 256).then(|| {
-            self.occl_n += 1;
-            self.occl_n - 1
-        })
+        q
     }
+}
+
+/// Queries refused because the submission's pool of 256 was used up: timestamp (counter reports), occlusion (audit
+/// L4: a parallel run's dropped children and in-pass cuts spend them faster). Counted in the translate line.
+pub static QUERIES_OUT: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+fn queries_out(k: usize) {
+    QUERIES_OUT[k].fetch_add(1, Ordering::Relaxed);
+    crate::log::red_once(if k == 0 {
+        "a submission used all 256 timestamp queries: a counter report gets no GPU timestamp"
+    } else {
+        "a submission used all 256 occlusion queries: a samples-passed count misses the draws after it"
+    });
 }
 
 fn full_dependency() -> vk::MemoryBarrier2<'static> {
@@ -704,6 +734,7 @@ fn make_sub(
             memo_views: Default::default(),
             pool_snapshot: None,
             serial: 0,
+            pre_serial: 0,
             frame: 0,
             gmem: None,
             db: Vec::new(),
@@ -720,6 +751,7 @@ fn make_sub(
     };
     static SUB_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     s.serial = SUB_SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
+    s.pre_serial = s.serial;
     s.frame = super::present::frames();
     g.q.recording.store(true, Ordering::Release);
     let bi =
@@ -798,6 +830,9 @@ pub struct ChildInit {
     occl: vk::QueryPool,
     pool_snapshot: Option<(u64, vk::DescriptorSet, u64)>,
     share: std::sync::Arc<[std::sync::atomic::AtomicU32; 2]>,
+    /// the parent's upload buffer and serial (`share_pre`)
+    pre: vk::CommandBuffer,
+    pre_serial: u64,
 }
 unsafe impl Send for ChildInit {}
 unsafe impl Sync for ChildInit {}
@@ -809,7 +844,25 @@ pub fn child_init(parent: &Sub) -> ChildInit {
         occl: parent.occl,
         pool_snapshot: parent.pool_snapshot,
         share: std::sync::Arc::new([AtomicU32::new(parent.queries), AtomicU32::new(parent.occl_n)]),
+        pre: parent.pre,
+        pre_serial: parent.pre_serial,
     }
+}
+
+/// A parallel run's segment records its first-use initializations into its parent's upload buffer, shared by every
+/// segment of the run and recorded under `gate::pre_lock`, in the order they are made (audit H1: in each child's own
+/// upload buffer they ran in segment order, so a page uploaded by an older segment could be overwritten by a younger
+/// segment's earlier upload of the whole pool, and an image's twin copied before the image's first upload). Returns
+/// the child's own upload buffer, for `unshare_pre` once the segment is translated.
+pub fn share_pre(ci: &ChildInit, c: &mut Sub) -> vk::CommandBuffer {
+    c.pre_serial = ci.pre_serial;
+    std::mem::replace(&mut c.pre, ci.pre)
+}
+
+/// The child's own upload buffer back (`share_pre`); it holds no initialization, only its start.
+pub fn unshare_pre(c: &mut Sub, own: vk::CommandBuffer) {
+    c.pre = own;
+    c.pre_serial = c.serial;
 }
 
 pub fn child_begin_with(ci: &ChildInit, c: &mut Sub) {
@@ -960,8 +1013,8 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
             super::defer::end(c.main);
             g.dev().end_command_buffer(c.main).unwrap();
         }
-        // a dropped child's upload buffer holds the first-use initializations its segment made (`gate::pass_pre`):
-        // submitted with the others; its main buffer is not
+        // a dropped child's upload buffer: begun, so ended and submitted with the others (a parallel segment's
+        // initializations are in the shared one, `share_pre`); its main buffer is not
         for c in &s.dropped {
             g.dev().end_command_buffer(c.pre).unwrap();
         }
