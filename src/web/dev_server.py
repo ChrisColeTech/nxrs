@@ -2,22 +2,23 @@
 
     py -I src/web/dev_server.py <web build folder> [--port 8770]
 
-  /                 the page (src/web/index.html; boot.js, gpu.js and gpu-worker.js beside this file)
-  /game.js, /game.wasm, ...   the build folder (nxrs-build build --target web)
-  /data/<path>      the build's <name>_data folder, with HTTP range requests
-  /files.json       that folder's files: [[path, size], ...]
+  /                 the page (src/web/index.html; its scripts beside this file: boot.js, input.js, saves.js,
+                    io-worker.js, audio-worklet.js, gpu.js, gpu-worker.js)
+  /game.js, /game.wasm, /data.json, /bootset.json   the build folder (nxrs-build build --target web)
+  /data/<path>      the build's <name>_data folder, with HTTP range requests (exact 206 + Content-Range)
+  POST /log         the page's engine log lines, appended to --log (development)
 
 Every response carries COOP/COEP (shared memory and threads need a cross-origin isolated page). Binds 127.0.0.1 only.
 """
 import argparse
 import http.server
-import json
-import os
 import re
 import sys
+import urllib.parse
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+PAGE = {'boot.js', 'input.js', 'saves.js', 'io-worker.js', 'audio-worklet.js', 'gpu.js', 'gpu-worker.js'}
 TYPES = {'.wasm': 'application/wasm', '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json'}
 
 
@@ -40,17 +41,15 @@ def make_handler(build: Path, data: Path, log_file=None):
             p = self.path.split('?', 1)[0]
             if p in ('/', '/index.html'):
                 return HERE / 'index.html'
-            if p in ('/boot.js', '/gpu.js', '/gpu-worker.js'):
+            if p.lstrip('/') in PAGE:
                 return HERE / p.lstrip('/')
-            if p == '/files.json':
-                return 'files'
             if p.startswith('/data/'):
                 rel = p[len('/data/'):]
                 base = data
             else:
                 rel = p.lstrip('/')
                 base = build
-            rel = rel.replace('%20', ' ')
+            rel = urllib.parse.unquote(rel)
             f = (base / rel).resolve()
             return f if f.is_file() and base.resolve() in f.parents else None
 
@@ -73,18 +72,6 @@ def make_handler(build: Path, data: Path, log_file=None):
 
         def send(self, head):
             f = self.resolve()
-            if f == 'files':
-                files = sorted(
-                    [str(p.relative_to(data)).replace('\\', '/'), p.stat().st_size]
-                    for p in data.rglob('*') if p.is_file() and 'shaders' not in p.relative_to(data).parts
-                )
-                body = json.dumps(files).encode()
-                self.send_response(200)
-                self.headers_common('application/json', len(body))
-                self.end_headers()
-                if not head:
-                    self.wfile.write(body)
-                return
             if f is None:
                 self.send_response(404)
                 self.headers_common('text/plain', 0)
@@ -136,8 +123,8 @@ def main():
     a = ap.parse_args()
     build = Path(a.build).resolve()
     datas = [d for d in build.iterdir() if d.is_dir() and d.name.endswith('_data')]
-    if not (build / 'game.js').is_file() or len(datas) != 1:
-        sys.exit(f'{build}: not a web build (game.js and one <name>_data folder)')
+    if not (build / 'game.js').is_file() or not (build / 'data.json').is_file() or len(datas) != 1:
+        sys.exit(f'{build}: not a web build (game.js, data.json and one <name>_data folder)')
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, datas[0], a.log))
     print(f'serving {build} on http://127.0.0.1:{a.port}/', flush=True)
     srv.serve_forever()

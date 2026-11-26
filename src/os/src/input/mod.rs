@@ -27,6 +27,7 @@ pub mod script;
 pub mod sony;
 pub mod switch2;
 pub mod switch2_ble;
+pub mod web;
 pub mod winmm;
 pub mod xinput;
 
@@ -1505,6 +1506,9 @@ static INPUTS: Mutex<Option<Inputs>> = Mutex::new(None);
 
 fn tick(inp: &mut Inputs) {
     let now = motion::now_s();
+    // the web: the page's keyboard and gamepads (no front end there)
+    #[cfg(target_os = "emscripten")]
+    web::poll();
     inp.layout_update();
     inp.xinput();
     if RESCAN.swap(false, Ordering::AcqRel) || now - inp.last_scan > 2.0 {

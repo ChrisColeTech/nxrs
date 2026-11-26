@@ -114,6 +114,8 @@ pub const WEB_FLAGS: &[&str] = &["-sMEMORY64=1", "-pthread", "-msimd128", "-mtai
 
 /// The web build's boundary between generated code and Rust (asm.rs on the other hosts), compiled into each web link.
 const WEB_BOUNDARY: &str = include_str!("../../runtime/web/boundary.c");
+/// The engine's calls into the page (docs/35 W3), linked with `--js-library`.
+const WEB_JS_LIBRARY: &str = include_str!("../../web/nxrs-lib.js");
 /// The GPU's Emscripten JS library (docs/35 W4): starts the page's GPU worker, fetches shader files.
 const WEB_GPU_LIB: &str = include_str!("../../web/nxgfx.lib.js");
 
@@ -1131,6 +1133,10 @@ pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir
     }
     let rsp = obj_dir.join("link-web.rsp");
     std::fs::write(&rsp, response_file(&all))?;
+    // the engine's calls into the page (shared blocks for the I/O worker, the audio ring, the input block)
+    let js_lib = obj_dir.join("nxrs-lib.js");
+    std::fs::write(&js_lib, WEB_JS_LIBRARY)?;
+    // the GPU's (docs/35 W4)
     let gpu_lib = obj_dir.join("nxgfx.lib.js");
     std::fs::write(&gpu_lib, WEB_GPU_LIB)?;
     // NXRS_WEB_LINK_FLAGS: more emcc link flags (development: -sNODERAWFS=1 runs the module under Node on the real
@@ -1159,9 +1165,11 @@ pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir
             "-sDEFAULT_PTHREAD_STACK_SIZE=8MB",
             "-sERROR_ON_UNDEFINED_SYMBOLS=0",
             "-sWARN_ON_UNDEFINED_SYMBOLS=0",
-            // the page (src/web/boot.js) maps the data folder into the file system before main
-            "-sEXPORTED_RUNTIME_METHODS=FS,addRunDependency,removeRunDependency",
+            // the page (src/web/boot.js) puts the host files and the restored saves into the file system before
+            // main, and the engine's variables (?env=) into its environment
+            "-sEXPORTED_RUNTIME_METHODS=FS,ENV,addRunDependency,removeRunDependency",
         ])
+        .arg(format!("--js-library={}", js_lib.display()))
         .arg(format!("--js-library={}", gpu_lib.display()))
         .args(&extra)
         .arg(format!("@{}", rsp.display()))

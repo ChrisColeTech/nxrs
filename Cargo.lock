@@ -1815,6 +1815,7 @@ dependencies = [
  "profiles",
  "renhdrum",
  "runtime",
+ "serde_json",
  "translator",
  "windows",
  "windows-sys 0.61.2",

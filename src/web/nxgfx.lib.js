@@ -6,14 +6,16 @@
 //   pthread: synchronous XHR is allowed in workers), the body kept until taken into wasm memory.
 addToLibrary({
   nxgfx_web_start__proxy: 'sync',
+  nxgfx_web_start__sig: 'ip',
   nxgfx_web_start: (ring) => {
-    const g = globalThis.NXRS_GPU;
-    if (!g) return 0;
-    g.start(wasmMemory, Number(ring));
+    const host = Module['nxrsHost'];
+    if (!host || !host.gpu) return 0;
+    host.gpu(wasmMemory, Number(ring));
     return 1;
   },
   $nxgfxFetched: null,
   nxgfx_web_fetch__deps: ['$nxgfxFetched'],
+  nxgfx_web_fetch__sig: 'ipp',
   nxgfx_web_fetch: (url, len) => {
     const u = UTF8ToString(Number(url), Number(len));
     try {
@@ -29,6 +31,7 @@ addToLibrary({
     }
   },
   nxgfx_web_fetch_take__deps: ['$nxgfxFetched'],
+  nxgfx_web_fetch_take__sig: 'vp',
   nxgfx_web_fetch_take: (dst) => {
     if (nxgfxFetched) HEAPU8.set(nxgfxFetched, Number(dst));
     nxgfxFetched = null;
