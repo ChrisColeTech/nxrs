@@ -179,6 +179,7 @@ NXGFX_VRAM_EVICT_PCT	switch	VRAM eviction: over the budget's threshold (`NXGFX_V
 NXGFX_WAIT_DIAG	switch	Opt-in CPU-side wait ledger (NXGFX_WAIT_DIAG=1). No driver calls or guest-memory reads on the observer.	src/graphics/src/vk/wait_diag.rs, src/os/src/services/codec_video.rs
 NXGFX_WATCH_ADDR	switch	`NXGFX_WATCH_ADDR=<hex>`: images made / released over that address are logged (diagnostics).	src/graphics/src/vk/image.rs, src/graphics/src/vk/mem.rs
 NXGFX_WB_GUARD	switch	stale, the black stretches). Those pieces upload once it has landed (NXGFX_WB_GUARD=0: uploaded at once, as before).	src/graphics/src/vk/mem.rs
+NXGFX_WB_RECYCLE	switch	`NXGFX_WB_RECYCLE=0`: a submission's write-back host buffers are made and freed per submission as before (OOT-DESC); by default they are kept and reused (power-of-two sizes from 64 KiB, at most 64 MB kept)	src/graphics/src/vk/queue.rs
 NXGFX_WALKER_PARKED	switch	`NXGFX_WALKER_PARKED=0`: a present behind parked work is not covered by the pool walker's walk (it scans every pool)	src/graphics/src/vk/queue.rs
 NXGFX_WALKER_REWALK	switch	`NXGFX_WALKER_REWALK=0`: the pool walker does not walk again while a present waits in the queue	src/graphics/src/vk/mem.rs
 NXGFX_WALKER_SYNCS	switch	`NXGFX_WALKER_SYNCS=0`: the pool walker's walks cover presents' syncs only (not other syncs, which then scan themselves)	src/graphics/src/vk/mem.rs

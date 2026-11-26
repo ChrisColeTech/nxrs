@@ -610,12 +610,13 @@ pub fn memory_line() -> String {
         .collect();
     let (ni, parked) = g.image_counts();
     format!(
-        "memory: private {private} MB; allocator {} MB in blocks, {} MB allocated ({}); this layer's system memory {} MB ({} refused over its cap); images {ni}, parked {parked}, {} registered without one yet; replay queue {} ops behind, {} submits replayed with the one before",
+        "memory: private {private} MB; allocator {} MB in blocks, {} MB allocated ({}); this layer's system memory {} MB ({} refused over its cap); {}; images {ni}, parked {parked}, {} registered without one yet; replay queue {} ops behind, {} submits replayed with the one before",
         rep.total_reserved_bytes >> 20,
         rep.total_allocated_bytes >> 20,
         top.join(", "),
         super::HOST_LIVE.load(std::sync::atomic::Ordering::Relaxed) >> 20,
         super::HOST_REFUSED.load(std::sync::atomic::Ordering::Relaxed),
+        super::queue::wb_bufs::line(),
         super::image::lazy_waiting(),
         super::queue::aq_backlog(),
         super::queue::AQ_MERGED.load(std::sync::atomic::Ordering::Relaxed)

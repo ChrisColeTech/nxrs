@@ -933,26 +933,12 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
     let mut wb = Vec::new();
     if total > 0 {
         barrier_all(g, s.main);
-        let rb = g
-            .buffer(
-                total,
-                vk::BufferUsageFlags::TRANSFER_DST,
-                MemoryLocation::GpuToCpu,
-                "write-back",
-            )
-            .expect("readback");
+        let rb = wb_bufs::take(g, total, "write-back").expect("readback");
         // the same ranges as the device had them before this submission's work (after its uploads, in `pre`): only
         // the words the GPU changed land in guest memory, so what the CPU wrote beside them meanwhile stays.
         // Landing the whole range put back stale bytes the CPU had changed since the upload: a
         // storage buffer bound read-write over a pool the CPU also writes (a size-0 one runs to the end of its pool)
-        let bf = g
-            .buffer(
-                total,
-                vk::BufferUsageFlags::TRANSFER_DST,
-                MemoryLocation::GpuToCpu,
-                "write-back base",
-            )
-            .ok();
+        let bf = wb_bufs::take(g, total, "write-back base").ok();
         if bf.is_some() {
             barrier_all(g, s.pre);
         }
@@ -1153,6 +1139,137 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
     value
 }
 
+/// The host buffers a submission's write-backs are copied into (the GPU-written ranges and their baseline), kept for
+/// the next submissions instead of freed at completion (OOT-DESC). Made and freed per submission, each one was a fresh
+/// block of host memory from the driver (`vkAllocateMemory`, ~15 % of Ocarina of Time's replay thread, and its
+/// `vkFreeMemory` ~6 % of the completion thread's). A kept buffer is handed out again only after the completion of the
+/// submission that used it has landed its write-backs (`give` runs after `apply_writebacks`), and a submission writes
+/// every byte of the ranges it reads back (`submit_sub`). `NXGFX_WB_RECYCLE=0`: made and freed each time, as before.
+pub(crate) mod wb_bufs {
+    use super::{Buf, Gpu};
+    use ash::vk;
+    use gpu_allocator::MemoryLocation;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    /// Bytes kept at most; a buffer that would pass it is freed.
+    const KEEP: u64 = 64 << 20;
+    /// The smallest buffer made.
+    const MIN: u64 = 64 << 10;
+
+    pub(crate) fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("NXGFX_WB_RECYCLE").as_deref() != Ok("0"))
+    }
+
+    /// The size a buffer for `n` bytes is made at: a power of two from 64 KiB, so nearby sizes serve each other.
+    pub(crate) fn class(n: u64) -> u64 {
+        n.max(MIN).next_power_of_two()
+    }
+
+    /// Kept buffers with their sizes; the smallest one holding the bytes asked for is taken.
+    pub(crate) struct Shelf<T> {
+        items: Vec<(u64, T)>,
+        bytes: u64,
+    }
+
+    impl<T> Shelf<T> {
+        pub(crate) const fn new() -> Self {
+            Shelf {
+                items: Vec::new(),
+                bytes: 0,
+            }
+        }
+        /// The smallest kept item of at least `n` bytes.
+        pub(crate) fn take(&mut self, n: u64) -> Option<T> {
+            let i = self
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, (s, _))| *s >= n)
+                .min_by_key(|(_, (s, _))| *s)
+                .map(|(i, _)| i)?;
+            let (s, t) = self.items.swap_remove(i);
+            self.bytes -= s;
+            Some(t)
+        }
+        /// Keeps `t` of `size` bytes, or hands it back when the shelf would hold more than `keep` bytes.
+        pub(crate) fn put(&mut self, size: u64, t: T, keep: u64) -> Option<T> {
+            if self.bytes + size > keep {
+                return Some(t);
+            }
+            self.bytes += size;
+            self.items.push((size, t));
+            None
+        }
+        pub(crate) fn bytes(&self) -> u64 {
+            self.bytes
+        }
+    }
+
+    static SHELF: Mutex<Shelf<Buf>> = Mutex::new(Shelf::new());
+    /// Buffers made, and buffers handed out again (the memory line).
+    pub(crate) static MADE: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static REUSED: AtomicU64 = AtomicU64::new(0);
+
+    /// A mapped host buffer of at least `n` bytes for a submission's write-back copies.
+    pub(crate) fn take(g: &Gpu, n: u64, name: &str) -> Result<Buf, String> {
+        if !on() {
+            return g.buffer(n, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, name);
+        }
+        if let Some(b) = SHELF.lock().unwrap().take(n) {
+            REUSED.fetch_add(1, Ordering::Relaxed);
+            return Ok(b);
+        }
+        MADE.fetch_add(1, Ordering::Relaxed);
+        g.buffer(class(n), vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, name)
+    }
+
+    /// A completed submission's write-back buffer: kept for the next ones (or freed past the cap, or with the switch off).
+    pub(crate) fn give(g: &Gpu, b: Buf) {
+        if !on() {
+            g.free_buffer(b);
+            return;
+        }
+        let size = b.size;
+        let back = SHELF.lock().unwrap().put(size, b, KEEP);
+        if let Some(b) = back {
+            g.free_buffer(b);
+        }
+    }
+
+    /// `write-back buffers N made, M reused, K MB kept`.
+    pub(crate) fn line() -> String {
+        format!(
+            "write-back buffers {} made, {} reused, {} MB kept",
+            MADE.load(Ordering::Relaxed),
+            REUSED.load(Ordering::Relaxed),
+            SHELF.lock().unwrap().bytes() >> 20
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The smallest kept buffer that holds the bytes is handed out; nothing past the cap is kept.
+        #[test]
+        fn the_smallest_fitting_buffer_is_reused_and_the_cap_holds() {
+            let mut s: Shelf<&str> = Shelf::new();
+            assert_eq!(s.put(class(100_000), "128k", 1 << 20), None);
+            assert_eq!(s.put(class(10), "64k", 1 << 20), None);
+            assert_eq!(s.put(class(600_000), "1m", 1 << 20), Some("1m"), "past the cap: handed back");
+            assert_eq!(s.bytes(), (128 << 10) + (64 << 10));
+            assert_eq!(s.take(70_000), Some("128k"), "64 KiB is too small");
+            assert_eq!(s.take(200_000), None, "nothing large enough");
+            assert_eq!(s.take(1), Some("64k"));
+            assert_eq!(s.bytes(), 0);
+            assert_eq!(class(0), 64 << 10);
+            assert_eq!(class((64 << 10) + 1), 128 << 10);
+        }
+    }
+}
+
 fn start_completion(g: &'static Gpu) {
     if g.q.thread_started.swap(true, Ordering::AcqRel) {
         return;
@@ -1276,11 +1393,12 @@ fn completion_loop(g: &'static Gpu) {
             }
         }
         wait_diag::mark(2, "recycle/deferred callbacks", [item.value, 0]);
+        // the write-backs have landed (`apply_writebacks` above): nothing reads these buffers any more
         if let Some(rb) = item.readback {
-            g.free_buffer(rb);
+            wb_bufs::give(g, rb);
         }
         if let Some(b) = item.before {
-            g.free_buffer(b);
+            wb_bufs::give(g, b);
         }
         for b in sub.transient.drain(..) {
             g.free_buffer(b);
