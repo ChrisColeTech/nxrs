@@ -19,6 +19,7 @@ pub mod defer;
 pub mod device;
 pub mod exec;
 pub mod framegen;
+pub mod gate;
 pub mod gmem;
 pub mod image;
 pub mod layout;

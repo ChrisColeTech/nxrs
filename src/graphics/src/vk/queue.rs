@@ -67,6 +67,9 @@ pub struct Sub {
     pub pool_snapshot: Option<(u64, vk::DescriptorSet, u64)>,
     /// which recording this is (a stage's staged driver constants are reused by it while they stand)
     pub serial: u64,
+    /// which upload buffer `pre` is: this recording's (`serial`), or while a parallel run's segment is translated the
+    /// parent's it shares (`share_pre`); what runs once per upload buffer (a GPU-written twin's copy) is keyed by it
+    pub pre_serial: u64,
     /// the present count when it was recorded (counter reports: the frame it belongs to)
     pub frame: u64,
     /// raw global memory (`gmem`): the staged memory pool table, the write log and the table's ranges
@@ -79,6 +82,17 @@ pub struct Sub {
     pub db_bound: Option<usize>,
     /// `NXGFX_DB_POISON` (diagnosis): the stage sets written, (chunk, offset, stage)
     pub db_log: Vec<(usize, u64, u32)>,
+    /// segments of this submission's stream translated into command buffers of their own (`exec::run_segmented`),
+    /// in stream order: submitted after this one's, retired with it
+    pub children: Vec<Sub>,
+    /// a child's own query pools while it writes its parent's (`child_begin`)
+    own_queries: Option<(vk::QueryPool, vk::QueryPool)>,
+    /// the translation lane whose command pools its buffers come from (0: the replay thread's, `lane_sub`)
+    pub lane: usize,
+    /// children translated at the same time take their parent's timestamp and occlusion queries from these counters
+    qshare: Option<std::sync::Arc<[std::sync::atomic::AtomicU32; 2]>>,
+    /// children whose segment was translated again (`exec::run_segmented`): never submitted, retired with this one
+    pub dropped: Vec<Sub>,
 }
 
 pub(crate) const DB_CHUNK: u64 = 4 << 20;
@@ -250,8 +264,10 @@ impl Queue {
     /// Runs `f` once the GPU can no longer use what it frees: after everything submitted so far, and after the
     /// submission being recorded now (which may have referenced it before its owner let it go).
     pub fn defer_after_use(&self, f: Box<dyn FnOnce(&Gpu) + Send>) {
-        // ops still queued for the replay thread may use it: after them
-        if aq_busy() && !on_replay_thread() {
+        // ops still queued for the replay thread may use it: after them. A translation lane of a parallel run records
+        // for the replay thread, inside its current submission: the list below (audit L2; queued as a call it bumped
+        // the queue's tail, split submit merging and woke the walker)
+        if aq_busy() && !on_replay_thread() && !super::gate::parallel() {
             after_queued(Box::new(move |g: &'static Gpu| g.q.defer_after_use(f)));
             return;
         }
@@ -365,6 +381,10 @@ impl Sub {
         if src.is_empty() {
             return;
         }
+        // a parallel run's segments share the upload buffer: recorded under its lock only (`gate::pre_lock`)
+        if !super::gate::pre_held() {
+            crate::log::red_once("an upload recorded into a parallel run's shared upload buffer without its lock (gate::pre_lock)");
+        }
         let (sb, so) = self.stage_bytes(g, src);
         let r = [vk::BufferCopy {
             src_offset: so,
@@ -474,10 +494,55 @@ impl Sub {
             .filter(|&a| a != 0)
     }
     pub fn query(&mut self) -> u32 {
+        if let Some(c) = &self.qshare {
+            return c[0].fetch_add(1, Ordering::Relaxed);
+        }
         let q = self.queries;
         self.queries += 1;
         q
     }
+    /// A timestamp query of the pool's 256, if one is left.
+    pub fn take_query(&mut self) -> Option<u32> {
+        let q = if let Some(c) = &self.qshare {
+            c[0].try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 256).then_some(n + 1))
+                .ok()
+        } else {
+            (self.queries < 256).then(|| self.query())
+        };
+        if q.is_none() {
+            queries_out(0);
+        }
+        q
+    }
+    /// An occlusion query of the pool's 256, if one is left.
+    pub fn take_occl(&mut self) -> Option<u32> {
+        let q = if let Some(c) = &self.qshare {
+            c[1].try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 256).then_some(n + 1))
+                .ok()
+        } else {
+            (self.occl_n < 256).then(|| {
+                self.occl_n += 1;
+                self.occl_n - 1
+            })
+        };
+        if q.is_none() {
+            queries_out(1);
+        }
+        q
+    }
+}
+
+/// Queries refused because the submission's pool of 256 was used up: timestamp (counter reports), occlusion (audit
+/// L4: a parallel run's dropped children and in-pass cuts spend them faster). Counted in the translate line.
+pub static QUERIES_OUT: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+fn queries_out(k: usize) {
+    QUERIES_OUT[k].fetch_add(1, Ordering::Relaxed);
+    crate::log::red_once(if k == 0 {
+        "a submission used all 256 timestamp queries: a counter report gets no GPU timestamp"
+    } else {
+        "a submission used all 256 occlusion queries: a samples-passed count misses the draws after it"
+    });
 }
 
 fn full_dependency() -> vk::MemoryBarrier2<'static> {
@@ -580,16 +645,57 @@ mod upload_entry_tests {
 }
 
 fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
-    let mut s = if let Some(s) = st.free_subs.pop() {
+    let reuse = st.free_subs.pop();
+    make_sub(g, reuse, st.cmd_pool, st.main_pool, 0)
+}
+
+/// Translation lanes 1.. (`exec::run_segmented`): a command pool each (a pool's buffers may be recorded on one thread
+/// at a time) and their free child submissions.
+struct Lane {
+    pool: vk::CommandPool,
+    free: Mutex<Vec<Sub>>,
+}
+static LANES: Mutex<Vec<&'static Lane>> = Mutex::new(Vec::new());
+
+fn lane(g: &Gpu, i: usize) -> &'static Lane {
+    let mut l = LANES.lock().unwrap();
+    while l.len() < i {
+        let pci = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(g.d.qfam)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let pool = unsafe { g.dev().create_command_pool(&pci, None) }.expect("command pool");
+        l.push(Box::leak(Box::new(Lane {
+            pool,
+            free: Mutex::new(Vec::new()),
+        })));
+    }
+    l[i - 1]
+}
+
+/// A child submission recorded on translation lane `i` (1..), from that lane's command pool.
+pub fn lane_sub(g: &Gpu, i: usize) -> Sub {
+    let l = lane(g, i);
+    let reuse = l.free.lock().unwrap().pop();
+    make_sub(g, reuse, l.pool, l.pool, i)
+}
+
+fn make_sub(
+    g: &Gpu,
+    reuse: Option<Sub>,
+    pre_pool: vk::CommandPool,
+    main_pool: vk::CommandPool,
+    lane: usize,
+) -> Sub {
+    let mut s = if let Some(s) = reuse {
         s
     } else {
         let ai = vk::CommandBufferAllocateInfo::default()
-            .command_pool(st.cmd_pool)
+            .command_pool(pre_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
         let pre = unsafe { g.dev().allocate_command_buffers(&ai) }.expect("command buffers")[0];
         let ai = vk::CommandBufferAllocateInfo::default()
-            .command_pool(st.main_pool)
+            .command_pool(main_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
         let main = unsafe { g.dev().allocate_command_buffers(&ai) }.expect("command buffers")[0];
@@ -628,6 +734,7 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
             memo_views: Default::default(),
             pool_snapshot: None,
             serial: 0,
+            pre_serial: 0,
             frame: 0,
             gmem: None,
             db: Vec::new(),
@@ -635,10 +742,16 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
             db_used: 0,
             db_bound: None,
             db_log: Vec::new(),
+            children: Vec::new(),
+            own_queries: None,
+            lane,
+            qshare: None,
+            dropped: Vec::new(),
         }
     };
     static SUB_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     s.serial = SUB_SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
+    s.pre_serial = s.serial;
     s.frame = super::present::frames();
     g.q.recording.store(true, Ordering::Release);
     let bi =
@@ -702,6 +815,86 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
     s
 }
 
+/// A child submission (`new_sub`) starts a segment of `parent`'s stream: its timestamp and occlusion queries go into
+/// the parent's pools after the parent's (completion reads them there, with the posts that name them), and it binds
+/// the parent's texture pool snapshot.
+pub fn child_begin(parent: &Sub, c: &mut Sub) {
+    child_begin_with(&child_init(parent), c);
+}
+
+/// What children translated at the same time take from their parent (`child_begin_with`); the parent's query counts
+/// come back with `child_settle` once they are all translated.
+#[derive(Clone)]
+pub struct ChildInit {
+    query: vk::QueryPool,
+    occl: vk::QueryPool,
+    pool_snapshot: Option<(u64, vk::DescriptorSet, u64)>,
+    share: std::sync::Arc<[std::sync::atomic::AtomicU32; 2]>,
+    /// the parent's upload buffer and serial (`share_pre`)
+    pre: vk::CommandBuffer,
+    pre_serial: u64,
+}
+unsafe impl Send for ChildInit {}
+unsafe impl Sync for ChildInit {}
+
+pub fn child_init(parent: &Sub) -> ChildInit {
+    use std::sync::atomic::AtomicU32;
+    ChildInit {
+        query: parent.query,
+        occl: parent.occl,
+        pool_snapshot: parent.pool_snapshot,
+        share: std::sync::Arc::new([AtomicU32::new(parent.queries), AtomicU32::new(parent.occl_n)]),
+        pre: parent.pre,
+        pre_serial: parent.pre_serial,
+    }
+}
+
+/// A parallel run's segment records its first-use initializations into its parent's upload buffer, shared by every
+/// segment of the run and recorded under `gate::pre_lock`, in the order they are made (audit H1: in each child's own
+/// upload buffer they ran in segment order, so a page uploaded by an older segment could be overwritten by a younger
+/// segment's earlier upload of the whole pool, and an image's twin copied before the image's first upload). Returns
+/// the child's own upload buffer, for `unshare_pre` once the segment is translated.
+pub fn share_pre(ci: &ChildInit, c: &mut Sub) -> vk::CommandBuffer {
+    c.pre_serial = ci.pre_serial;
+    std::mem::replace(&mut c.pre, ci.pre)
+}
+
+/// The child's own upload buffer back (`share_pre`); it holds no initialization, only its start.
+pub fn unshare_pre(c: &mut Sub, own: vk::CommandBuffer) {
+    c.pre = own;
+    c.pre_serial = c.serial;
+}
+
+pub fn child_begin_with(ci: &ChildInit, c: &mut Sub) {
+    c.own_queries = Some((c.query, c.occl));
+    c.query = ci.query;
+    c.occl = ci.occl;
+    c.qshare = Some(ci.share.clone());
+    c.pool_snapshot = ci.pool_snapshot;
+    c.db_bound = None;
+}
+
+/// The parent's query counts after its children's (`child_begin_with`).
+pub fn child_settle(parent: &mut Sub, ci: &ChildInit) {
+    parent.queries = ci.share[0].load(Ordering::Relaxed).min(256);
+    parent.occl_n = ci.share[1].load(Ordering::Relaxed).min(256);
+}
+
+/// A child's segment is translated: its CPU-side effects join the parent's, in stream order, and it is kept with it.
+pub fn child_join(parent: &mut Sub, mut c: Sub) {
+    if let Some(s) = &c.qshare {
+        parent.queries = s[0].load(Ordering::Relaxed).min(256);
+        parent.occl_n = s[1].load(Ordering::Relaxed).min(256);
+    }
+    parent.post.append(&mut c.post);
+    super::mem::join_writebacks(parent, std::mem::take(&mut c.writebacks));
+    parent.tex_wb.append(&mut c.tex_wb);
+    if c.pool_snapshot.is_some() {
+        parent.pool_snapshot = c.pool_snapshot;
+    }
+    parent.children.push(c);
+}
+
 /// A submission of the host's own (the lazy page reader), in queue order with the replay's.
 pub fn submit_raw(g: &Gpu, si: &[vk::SubmitInfo2], fence: vk::Fence) {
     let _vq = g.q.vkq.lock().unwrap();
@@ -715,8 +908,18 @@ pub fn submit_raw(g: &Gpu, si: &[vk::SubmitInfo2], fence: vk::Fence) {
 fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
     wait_diag::phase("submit: writebacks");
     let q = &g.q;
+    // segments in child submissions (`exec::run_segmented`): the last child's buffers are the submission's last, so
+    // what is recorded below at the end of `pre` (sparse fills, write-back baselines) and of `main` (write-back copies,
+    // the end timestamp) goes there, after every child's work; swapped back once submitted
+    let nchild = s.children.len();
+    if nchild > 0 {
+        let l = &mut s.children[nchild - 1];
+        std::mem::swap(&mut s.pre, &mut l.pre);
+        std::mem::swap(&mut s.main, &mut l.main);
+    }
     super::gmem::end(g, &mut s);
     // write-backs: copy the GPU-written ranges into one readback buffer at the end of the replay
+    exec::seg_stats::WB_RANGES.fetch_add(s.writebacks.len() as u64, Ordering::Relaxed);
     let total: u64 = s.writebacks.iter().map(|w| (w.2 + 15) & !15).sum();
     let mut readback = None;
     let mut before: Option<Buf> = None;
@@ -805,15 +1008,42 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         g.dev().end_command_buffer(s.pre).unwrap();
         super::defer::end(s.main);
         g.dev().end_command_buffer(s.main).unwrap();
+        for c in &s.children {
+            g.dev().end_command_buffer(c.pre).unwrap();
+            super::defer::end(c.main);
+            g.dev().end_command_buffer(c.main).unwrap();
+        }
+        // a dropped child's upload buffer: begun, so ended and submitted with the others (a parallel segment's
+        // initializations are in the shared one, `share_pre`); its main buffer is not
+        for c in &s.dropped {
+            g.dev().end_command_buffer(c.pre).unwrap();
+        }
     }
     wait_diag::phase("submit: driver/queue lock");
     let _x = super::pipe::driver_exclusive(g).then(|| super::pipe::EXCLUSIVE.lock().unwrap());
     let _vq = q.vkq.lock().unwrap();
     let value = q.last.load(Ordering::Acquire) + 1;
-    let cbs = [
-        vk::CommandBufferSubmitInfo::default().command_buffer(s.pre),
-        vk::CommandBufferSubmitInfo::default().command_buffer(s.main),
-    ];
+    // in stream order: the parent's buffers (now in the last child), the children's, the last child's (now in `s`);
+    // every upload buffer before every main buffer, as one submission's single `pre` and `main`
+    let order = |pick: fn(&Sub) -> vk::CommandBuffer| -> Vec<vk::CommandBufferSubmitInfo> {
+        let mut v: Vec<vk::CommandBuffer> = Vec::with_capacity(nchild + 1);
+        if nchild > 0 {
+            v.push(pick(&s.children[nchild - 1]));
+            v.extend(s.children[..nchild - 1].iter().map(pick));
+        }
+        v.push(pick(&s));
+        v.into_iter()
+            .map(|cb| vk::CommandBufferSubmitInfo::default().command_buffer(cb))
+            .collect()
+    };
+    let mut cbs = order(|x| x.pre);
+    cbs.splice(
+        1..1,
+        s.dropped
+            .iter()
+            .map(|c| vk::CommandBufferSubmitInfo::default().command_buffer(c.pre)),
+    );
+    cbs.extend(order(|x| x.main));
     let mut sig = vec![vk::SemaphoreSubmitInfo::default()
         .semaphore(q.timeline)
         .value(value)
@@ -863,6 +1093,14 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
     q.last.store(value, Ordering::Release);
     chain_trace::note("vk_submit", value, s.present.len() as u64);
     super::lost::ring::note_submit(s.serial, value);
+    for c in &s.children {
+        super::lost::ring::note_submit(c.serial, value);
+    }
+    if nchild > 0 {
+        let l = &mut s.children[nchild - 1];
+        std::mem::swap(&mut s.pre, &mut l.pre);
+        std::mem::swap(&mut s.main, &mut l.main);
+    }
     super::newndve::trace::link(s.serial, value, true);
     {
         let mut l = q.after_current.lock().unwrap();
@@ -1055,6 +1293,63 @@ fn completion_loop(g: &'static Gpu) {
             .unwrap_or_else(|_| submission_safety::resource_safety_fatal());
         super::newndve::trace::retire(sub.serial, item.value);
         sub.dpool_i = 0;
+        // segments' child submissions (and those translated again, never submitted): their resources as the parent's,
+        // then back to their lane's free list
+        let dropped = std::mem::take(&mut sub.dropped);
+        for mut c in std::mem::take(&mut sub.children).into_iter().chain(dropped) {
+            for b in c.transient.drain(..) {
+                g.free_buffer(b);
+            }
+            c.arena_used = 0;
+            while c.arena.len() > 1 || c.arena.last().is_some_and(|b| b.size > ARENA_CHUNK) {
+                let b = c.arena.pop().unwrap();
+                g.free_buffer(b);
+            }
+            for v in c.transient_views.drain(..) {
+                unsafe { g.dev().destroy_image_view(v, None) };
+            }
+            for v in c.buffer_views.drain(..) {
+                unsafe { g.dev().destroy_buffer_view(v, None) };
+            }
+            c.dpools
+                .recycle(
+                    item.value,
+                    &completion,
+                    |p| {
+                        unsafe {
+                            g.dev()
+                                .reset_descriptor_pool(*p, vk::DescriptorPoolResetFlags::empty())
+                        }
+                        .ok();
+                    },
+                    |p| unsafe { g.dev().destroy_descriptor_pool(p, None) },
+                )
+                .unwrap_or_else(|_| submission_safety::resource_safety_fatal());
+            super::newndve::trace::retire(c.serial, item.value);
+            c.dpool_i = 0;
+            if let Some((qp, op)) = c.own_queries.take() {
+                c.query = qp;
+                c.occl = op;
+            }
+            c.db_cur = 0;
+            c.db_used = 0;
+            c.db_bound = None;
+            c.memo_bytes.clear();
+            c.memo_sets.clear();
+            c.memo_views.clear();
+            c.pool_snapshot = None;
+            c.writebacks.clear();
+            c.tex_wb.clear();
+            c.post.clear();
+            c.queries = 2;
+            c.occl_n = 0;
+            c.qshare = None;
+            if c.lane > 0 {
+                lane(g, c.lane).free.lock().unwrap().push(c);
+            } else {
+                q.recycled.lock().unwrap().push(c);
+            }
+        }
         // NXGFX_RECYCLE_DELAY=<n> (diagnosis): a completed submission's `Sub` waits until n later ones completed before
         // it is poisoned (NXGFX_DB_POISON) and reused
         static DELAY: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
@@ -1415,6 +1710,12 @@ pub static PARKED_AT_ONCE: AtomicU64 = AtomicU64::new(0);
 /// may read was written by the CPU before the game queued the parked work, or before the game queued the op whose GPU
 /// signal or receipt released it (both replayed, so at most the newest op taken), or before a CPU event signal (which
 /// `scan_covers` refuses on its own). Every such op is at most `AQ_TAKEN`; 0 (no replay thread): it scans.
+/// `NXGFX_WALKER_PARKED=0`: a present behind parked work is not covered by the pool walker's walk.
+fn walker_parked() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_WALKER_PARKED").as_deref() != Ok("0"))
+}
+
 fn resume_due() -> Option<u64> {
     RESUMES.fetch_add(1, Ordering::Relaxed);
     Some(AQ_TAKEN.load(Ordering::Acquire))
@@ -1775,7 +2076,9 @@ fn run_stream_due(
         .remove(&qserial)
         .unwrap_or_else(|| QState::new(origin_ll));
     let rest = super::perf::timed(super::perf::C::ReplayNs, || {
-        exec::run(g, &mut sub, &mut qs, &stream)
+        // a long stream in segments (`NXGFX_TRANSLATE_THREADS`), each in a child submission of this one
+        exec::run_segmented(g, &mut sub, &mut qs, &stream, &mut || new_sub(g, st))
+            .unwrap_or_else(|| exec::run(g, &mut sub, &mut qs, &stream))
     });
     wait_diag::phase("end replay/pass");
     exec::end(g, &mut sub, &mut qs);
@@ -1900,7 +2203,13 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
                 None => {
                     for (t, crop) in p.presents {
                         let frame = present_frame(&t, crop, ll, false);
-                        present_locked(g, st, q, ll, &t, crop, frame, resume_due());
+                        // a present behind parked work: the pool walker's walk covers its sync as a direct one's when
+                        // it started after every op taken so far (`resume_due`, at or after this present's queuing);
+                        // the parked work ran first with syncs of its own. Without it this sync walked every pool,
+                        // cold ones too (4-9 ms in Mario Kart World, whose presents often wait behind parked work).
+                        // `NXGFX_WALKER_PARKED=0`: the strict rule as before.
+                        let direct = walker_parked();
+                        present_locked(g, st, q, ll, &t, crop, frame, resume_due(), direct);
                     }
                 }
             }
@@ -2067,8 +2376,9 @@ pub fn present(
     let Some(g) = Gpu::try_get() else { return 0 };
     super::capture::present(qserial, origin_ll, t, crop);
     if aq_on() {
+        // the pool walker starts the frame's walk of every pool now, before the replay thread can take the present
         return ASYNC
-            | aq_push(
+            | aq_push_with(
                 g,
                 Op::Present {
                     q: qserial,
@@ -2076,6 +2386,7 @@ pub fn present(
                     t: *t,
                     crop,
                 },
+                |_| super::mem::walker_kick(),
             );
     }
     present_now(g, qserial, origin_ll, t, crop, None)
@@ -2103,7 +2414,7 @@ fn present_now(
     let frame = present_frame(t, crop, origin_ll, true);
     let mut st = g.q.sub.lock().unwrap();
     take_recycled(g, &mut st);
-    present_locked(g, &mut st, qserial, origin_ll, t, crop, frame, due)
+    present_locked(g, &mut st, qserial, origin_ll, t, crop, frame, due, due.is_some())
 }
 
 /// A present's frame number, telemetry and pass-dump bookkeeping, and the screenshot requested for it (`shot`:
@@ -2117,6 +2428,7 @@ fn present_frame(
     let frame = super::present::note_present();
     super::perf::frame(frame);
     super::exec::op_times::frame(frame);
+    super::exec::seg_stats::frame(frame);
     super::scale::frame();
     super::exec::passdump::frame(frame, crate::log::elapsed());
     if shot {
@@ -2135,6 +2447,8 @@ fn present_locked(
     crop: Option<[i32; 4]>,
     _frame: u64,
     due: Option<u64>,
+    // taken straight from the replay queue (not behind parked work): the pool walker's walk may cover its sync
+    direct: bool,
 ) -> u64 {
     wait_diag::mark(1, "present: new submission", [_qserial, 0]);
     let mut sub = new_sub(g, st);
@@ -2142,7 +2456,7 @@ fn present_locked(
     super::mem::SYNC_BY[1].fetch_add(1, Ordering::Relaxed);
     super::perf::timed(super::perf::C::PrepNs, || {
         let dirty = super::perf::timed(super::perf::C::PoolSyncNs, || {
-            super::mem::begin_submit(g, &mut sub, due)
+            super::mem::begin_submit_ex(g, &mut sub, due, direct)
         });
         g.image_begin_submit(&mut sub, &dirty);
     });

@@ -33,6 +33,16 @@ steps = ["wait 40", "shot boot", "press A ; 6 * 16", "shot title", "press A ; 6 
          "press A ; 6 * 15", "shot grid", "replay mkw_drive.txt ; 42", "shot race",
          "replay mkw_drive.txt ; 42", "shot race later"]
 
+[mkw-turn]
+title = "Mario Kart World"
+about = "as mkw to the race, then shots about every second around the banked desert turn (dark-turn check)"
+seconds = 300
+window = [250, 290]
+steps = ["wait 40", "shot boot", "press A ; 6 * 16", "shot title", "press A ; 6 * 3", "shot menus",
+         "press A ; 6 * 15", "shot grid", "replay mkw_drive.txt ; 37", "shot t37 ; 0.5", "shot t38 ; 0.5",
+         "shot t39 ; 0.5", "shot t40 ; 0.5", "shot t41 ; 0.5", "shot t42 ; 0.5", "shot t43 ; 0.5",
+         "shot t44 ; 0.5", "shot t45 ; 0.5", "shot t46"]
+
 [mkw180]
 title = "Mario Kart World v1.8.0"
 about = "as mkw, on the 1.8.0 build"

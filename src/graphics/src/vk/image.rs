@@ -1015,6 +1015,25 @@ impl Images {
         }
     }
 
+    /// The serial whose image a draw into or copy of texture object `serial` uses (`Gpu::ensure_target`): itself, or,
+    /// when a later segment of this thread's parallel run took its image over already, the object holding it now.
+    pub fn target_serial(&self, serial: u64) -> u64 {
+        if self.by_serial.contains_key(&serial) {
+            return serial;
+        }
+        match super::gate::taken_later(serial) {
+            Some(n) => {
+                let s = self.live(n);
+                if self.by_serial.contains_key(&s) {
+                    s
+                } else {
+                    serial
+                }
+            }
+            None => serial,
+        }
+    }
+
     /// The serial whose image texture object `serial` now views: itself, or the object that took its image over
     /// (followed through later take-overs).
     pub fn live(&self, serial: u64) -> u64 {
@@ -1621,7 +1640,12 @@ impl Gpu {
     }
 
     pub fn ensure_image(&self, imgs: &mut Images, t: &tex_t) -> bool {
-        if imgs.by_serial.contains_key(&t.serial) {
+        let have = imgs.by_serial.contains_key(&t.serial);
+        // a parallel translation's segment makes an image only at the gate's frontier (`gate`)
+        if !super::gate::pass_pre(!have) {
+            return false;
+        }
+        if have {
             return true;
         }
         watch_log("image", t, None);
@@ -1672,6 +1696,12 @@ impl Gpu {
         // object takes it over (Mario Kart 8 Deluxe initializes new objects over its render targets' storage every
         // frame without finalizing the old ones: each was a new image uploaded from storage, 15-50 ms a frame, and
         // the old ones were never freed)
+        // The takeover depends on where in the stream it is made (audit M1): the old image's GPU ownership (set only at
+        // the gate's frontier, `tex_gpu_written`), and the old object's serial leaving `by_serial`. A segment before
+        // this one in the stream that draws into or copies from the old object after the takeover is made finds the
+        // taken-over image through `ensure_target` (`gate::taken_later`), as it would have before the takeover. In
+        // the gate's reference mode only the frontier takes over.
+        let refused = std::cell::Cell::new(false);
         let reused = reused.or_else(|| {
             let old = imgs
                 .by_addr
@@ -1684,7 +1714,12 @@ impl Gpu {
                         .get(s)
                         .is_some_and(|im| im.gpu_owned && tex_identity(&im.tex) == key)
                 })?;
+            if super::gate::all() && !super::gate::pass(true) {
+                refused.set(true);
+                return None;
+            }
             let mut im = imgs.by_serial.remove(&old)?;
+            super::gate::note_takeover(old, t.serial);
             if let Some(v) = imgs.by_addr.get_mut(&(t.mem as u64)) {
                 v.retain(|s| *s != old);
             }
@@ -1714,6 +1749,9 @@ impl Gpu {
             life_log(t, || format!("takes over the image of ser{old}"));
             Some(im)
         });
+        if refused.get() {
+            return false;
+        }
         let reused = reused.or_else(|| {
             let a = self.alias_image(imgs, t);
             if a.is_some() {
@@ -1738,6 +1776,19 @@ impl Gpu {
         imgs.by_serial.insert(t.serial, im);
         self.tables.invalidate_images();
         true
+    }
+
+    /// `ensure_image` for a use that draws into or copies from the texture (a render target, a copy's source or
+    /// destination): the serial whose image to use. In a parallel run a later segment of the stream may have taken
+    /// over this object's image already (`ensure_image`); this use comes first in the stream, so it gets that image,
+    /// as it would have before the takeover (audit M1: it made an image of its own, which the new object never saw).
+    pub fn ensure_target(&self, imgs: &mut Images, t: &tex_t) -> Option<u64> {
+        let s = imgs.target_serial(t.serial);
+        if s != t.serial {
+            super::gate::TAKEN_LATER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            return Some(s);
+        }
+        self.ensure_image(imgs, t).then_some(t.serial)
     }
 
     /// A new texture object over the storage of a live image of the same shape (size, levels, layers, samples, bytes
@@ -1882,6 +1933,17 @@ impl Gpu {
         let key = (serial, kind);
         let mut all = CUBE_TWINS.lock().unwrap();
         let m = all.get_or_insert_with(HashMap::new);
+        // a twin made, replaced or brought up to date (a GPU-owned image's is copied by every submission that samples
+        // it): a parallel translation's segment does it only at the gate's frontier (`gate`)
+        let version = (im.rewrites, im.gpu_seq);
+        let stale = m
+            .get(&key)
+            .is_none_or(|t| t.src != im.image || t.version != Some(version) && !im.gpu_owned);
+        if !super::gate::pass_pre(stale) {
+            return None;
+        }
+        // made and copied in the upload buffer (a parallel run's shared one: audit H1)
+        let _pre = super::gate::pre_lock();
         if m.get(&key).is_some_and(|t| t.src != im.image) {
             if let Some(old) = m.remove(&key) {
                 self.drop_cube_twin(old);
@@ -1902,10 +1964,11 @@ impl Gpu {
         }
         let t = m.get_mut(&key).unwrap();
         let version = (im.rewrites, im.gpu_seq);
-        if (t.version != Some(version) || im.gpu_owned) && t.copied_sub != Some(sub.serial) {
+        // once per upload buffer: a parallel run's segments share one (audit L5: copied once per child before)
+        if (t.version != Some(version) || im.gpu_owned) && t.copied_sub != Some(sub.pre_serial) {
             self.copy_cube_twin(im, t.image, sub.pre, kind);
             t.version = Some(version);
-            t.copied_sub = Some(sub.serial);
+            t.copied_sub = Some(sub.pre_serial);
         }
         let key = (v.copied().unwrap_or_default(), want);
         if let Some(&view) = t.views.get(&key) {
@@ -2394,7 +2457,12 @@ impl Gpu {
 
     /// The image of texture ID `id` registered lazily, made now (its first use). Cheap when nothing waits.
     pub fn materialize(&self, id: i32) {
+        // (a parallel translation's segment: only at the gate's frontier, `gate`)
+        if super::gate::all() && super::gate::parallel() && !super::gate::pass(lazy::has(id)) {
+            return;
+        }
         if let Some((t, v, gone)) = lazy::take(id) {
+            super::gate::count();
             self.reg_tex_now(id, &t, v, false);
             if gone {
                 self.release_after_use(t.serial);
@@ -3409,6 +3477,11 @@ impl Gpu {
         let Some(im) = imgs.by_serial.get_mut(&serial) else {
             return;
         };
+        // the first GPU write takes the image from its storage (a parallel translation's segment: only at the gate's
+        // frontier, `gate`); later ones only count
+        if !super::gate::pass(!im.gpu_owned || im.needs_upload) {
+            return;
+        }
         im.gpu_owned = true;
         im.needs_upload = false;
         im.gpu_seq += 1;
@@ -3845,13 +3918,16 @@ impl Gpu {
     /// Layout and contents of an image, in the submission's upload command buffer (also used mid-replay for a render
     /// target created there: the upload command buffer runs before the replay).
     pub fn prepare_image(&self, imgs: &mut Images, serial: u64, sub: &mut Sub) {
-        if imgs
+        let need = imgs
             .by_serial
             .get(&serial)
-            .is_none_or(|im| !im.needs_init && !im.needs_upload)
-        {
+            .is_some_and(|im| im.needs_init || im.needs_upload);
+        // (a parallel translation's segment: only at the gate's frontier, `gate`)
+        if !super::gate::pass_pre(need) || !need {
             return;
         }
+        // recorded in the upload buffer (a parallel run's shared one, in the order images are prepared: audit H1)
+        let _pre = super::gate::pre_lock();
         self.prepare_image_in(imgs, serial, sub, 0);
         // An alias's upload initializes the shared backing too. Leaving the owner's pending upload set could
         // later overwrite an ordered upgrade (or a GPU write) with stale guest bytes.
@@ -4869,6 +4945,11 @@ mod lazy {
         if l.by_id.insert(id, (t, v)).is_none() {
             N.fetch_add(1, Ordering::Relaxed);
         }
+    }
+    /// Whether a registration waits at `id` (`take` would make it).
+    pub fn has(id: i32) -> bool {
+        N.load(Ordering::Relaxed) != 0
+            && ST.lock().unwrap().as_ref().is_some_and(|l| l.by_id.contains_key(&id))
     }
     /// The registration waiting at `id`, and whether its texture object was finalized since (`finalized`).
     pub fn take(id: i32) -> Option<(tex_t, Option<view_t>, bool)> {

@@ -26,12 +26,28 @@ pub fn line(msg: &str) {
     }
 }
 
+thread_local! {
+    static MUTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
+/// Red lines of this thread are dropped while muted: a translation thrown away (a segment of a parallel translation
+/// that gave up at the gate, `vk::gate`) reports what it skipped because it gave up, not anything wrong.
+pub fn mute(on: bool) {
+    MUTED.with(|m| m.set(on));
+}
+
 pub fn red(msg: &str) {
+    if MUTED.with(|m| m.get()) {
+        return;
+    }
     line(&format!("[RED] {msg}"));
 }
 
 /// A red line printed once per distinct text.
 pub fn red_once(msg: &str) {
+    if MUTED.with(|m| m.get()) {
+        return;
+    }
     static SEEN: Mutex<Option<HashSet<String>>> = Mutex::new(None);
     let mut g = SEEN.lock().unwrap();
     if g.get_or_insert_with(HashSet::new).insert(msg.to_string()) {

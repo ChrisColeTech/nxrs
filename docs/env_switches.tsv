@@ -84,6 +84,7 @@ NXGFX_POOL	switch	- **Host** (`NXGFX_POOL=host`): the guest pages imported into 
 NXGFX_POOL_COLD	switch	from then on). NXGFX_POOL_COLD=0: every pool at every submission.	src/graphics/src/vk/mem.rs
 NXGFX_POOL_LOG	diagnostic	set: a line per memory pool with its placement	src/graphics/src/vk/mem.rs
 NXGFX_POOL_SPARSE	switch	`NXGFX_POOL_SPARSE=0` backs every pool whole.	src/graphics/src/vk/mem.rs
+NXGFX_POOL_WALKER	switch	`NXGFX_POOL_WALKER=0`: no pool walker thread (MKW-RECORD step 1); the present's sync walks every pool itself	src/graphics/src/vk/mem.rs
 NXGFX_PRESENT	switch	the swap chain present mode: `fifo`, `mailbox` or `immediate`	src/graphics/src/vk/present.rs
 NXGFX_PREWARM_BUDGET_MB	switch	The pipeline prewarm's private-memory budget in MB (default a sixteenth of the machine's memory, 2048-8192); the prewarm stops there or at a count cap. A VkPipelineCache is kept on disk.	src/graphics/src/vk/pipe.rs, src/graphics/tests/shaders_lane_c.rs
 NXGFX_PREWARM_MAX	switch	pipelines built ahead at most (default 50,000)	src/graphics/src/vk/pipe.rs, src/graphics/tests/shaders_lane_c.rs
@@ -148,6 +149,12 @@ NXGFX_TEST_SDK	test	NXGFX_TEST_SDK=<a Switch 2 game's exefs/sdk>	src/graphics/te
 NXGFX_TEST_SHADERS	test	memory budget. Uses `NXGFX_TEST_SHADERS` (default: the workspace's `build/shaders/mk8d`); skipped when absent.	src/graphics/tests/shaders_lane_c.rs
 NXGFX_TEX_CAP	switch	textures in the shared descriptor table at most (default 262144, within the device limit)	src/graphics/src/vk/layout.rs
 NXGFX_TEX_WB	switch	are the storage's bytes: true for every format let through here). `NXGFX_TEX_WB=1` on (off by default: `K2-mkw16`'s race washed out with it).	src/graphics/src/vk/exec.rs, src/graphics/tests/gpu.rs
+NXGFX_TRANSLATE_CHECK	diagnostic	`NXGFX_TRANSLATE_CHECK=1`: each segment's pre-pass entry state is compared with the state the segment before it left; differences logged	src/graphics/src/vk/exec.rs
+NXGFX_TRANSLATE_GATE	diagnostic	`NXGFX_TRANSLATE_GATE=all`: every gated change of shared state in a parallel translation counts as order-dependent (reference mode for A/B runs)	src/graphics/src/vk/gate.rs
+NXGFX_TRANSLATE_MIDCUT	switch	a segment is also cut before a draw inside a pass once it holds this many draws (default 256; 0: only where the pass ends anyway)	src/graphics/src/vk/exec.rs
+NXGFX_TRANSLATE_MIN	switch	streams with fewer draws are translated in one piece (default 64)	src/graphics/src/vk/exec.rs
+NXGFX_TRANSLATE_SEG	switch	a segment ends at the first record that ends the pass after this many draws (default 256)	src/graphics/src/vk/exec.rs
+NXGFX_TRANSLATE_THREADS	switch	translation lanes for long streams (MKW-RECORD): 0 one piece as before, 1 segments one after another on the replay thread, N > 1 the replay thread and N - 1 `vk translate` threads in parallel	src/graphics/src/vk/exec.rs
 NXGFX_UPLOAD_MB	switch	`NXGFX_UPLOAD_MB` (default 64; 0: no budget).	src/graphics/src/vk/mem.rs
 NXGFX_UPLOAD_SKIP	switch	`NXGFX_UPLOAD_SKIP=1`: a CPU-written page whose bytes are those of its last upload is not uploaded again (`upskip`; off by default until the OOT-FOREST2 audit's H1/H2/M1 are fixed).	src/graphics/src/vk/upskip.rs
 NXGFX_UPLOAD_TRACE	diagnostic`NXGFX_UPLOAD_TRACE=1` (diagnosis): the pool summary also logs what the pool sync uploads, by pool, and how much of it was unchanged since its last upload.	src/graphics/src/vk/uptrace.rs
@@ -160,6 +167,9 @@ NXGFX_VRAM_EVICT_PCT	switch	VRAM eviction: over the budget's threshold (`NXGFX_V
 NXGFX_WAIT_DIAG	switch	Opt-in CPU-side wait ledger (NXGFX_WAIT_DIAG=1). No driver calls or guest-memory reads on the observer.	src/graphics/src/vk/wait_diag.rs, src/os/src/services/codec_video.rs
 NXGFX_WATCH_ADDR	switch	`NXGFX_WATCH_ADDR=<hex>`: images made / released over that address are logged (diagnostics).	src/graphics/src/vk/image.rs, src/graphics/src/vk/mem.rs
 NXGFX_WB_GUARD	switch	stale, the black stretches). Those pieces upload once it has landed (NXGFX_WB_GUARD=0: uploaded at once, as before).	src/graphics/src/vk/mem.rs
+NXGFX_WALKER_PARKED	switch	`NXGFX_WALKER_PARKED=0`: a present behind parked work is not covered by the pool walker's walk (it scans every pool)	src/graphics/src/vk/queue.rs
+NXGFX_WALKER_REWALK	switch	`NXGFX_WALKER_REWALK=0`: the pool walker does not walk again while a present waits in the queue	src/graphics/src/vk/mem.rs
+NXGFX_WALKER_SYNCS	switch	`NXGFX_WALKER_SYNCS=0`: the pool walker's walks cover presents' syncs only (not other syncs, which then scan themselves)	src/graphics/src/vk/mem.rs
 NXGFX_WB_LAZY	switch	On by default (`NXGFX_WB_LAZY=0` off) since Pokemon Violet runs clean with it (lane G3 `v12`). A page the completion thread must write (an eager write-back landing on it) is	src/graphics/src/vk/lazy.rs
 NXGFX_ZERO_SHARED	switch	task / mesh shared memory starts zeroed (NXGFX_ZERO_SHARED=0 off; the device's shaderZeroInitializeWorkgroupMemory)	src/graphics/src/vk/shader.rs
 NXOS_AUDIO_DEVICE	switch	sound" can be read from a log; `NXOS_AUDIO_DEVICE=<part of a name>` plays on that output device instead of the	src/os/src/media/sink.rs
