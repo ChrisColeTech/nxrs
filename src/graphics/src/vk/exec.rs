@@ -4245,10 +4245,28 @@ fn room_cached(a: u64) -> u64 {
     r
 }
 
-/// `NXGFX_ADDR_CACHE=0`: `room_cached` and `resolve_cached` ask `mem` every time (as before TRANSLATE-COST).
+/// `NXGFX_ADDR_CACHE=0`: `room_cached` and `resolve_cached` ask `mem` every time (as before TRANSLATE-COST). Off too
+/// in the gate's reference mode (`NXGFX_TRANSLATE_GATE=all`): there every `mem::resolve` must reach the gate
+/// (`gate::pass_pre`), and a remembered answer would skip it.
 fn addr_cache_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("NXGFX_ADDR_CACHE").as_deref() != Ok("0"))
+    *ON.get_or_init(|| addr_cache_wanted(std::env::var("NXGFX_ADDR_CACHE").ok().as_deref(), super::gate::all()))
+}
+
+fn addr_cache_wanted(switch: Option<&str>, gate_all: bool) -> bool {
+    switch != Some("0") && !gate_all
+}
+
+#[cfg(test)]
+mod addr_cache_tests {
+    #[test]
+    fn the_gates_reference_mode_turns_the_address_memos_off() {
+        assert!(super::addr_cache_wanted(None, false));
+        assert!(super::addr_cache_wanted(Some("1"), false));
+        assert!(!super::addr_cache_wanted(Some("0"), false));
+        assert!(!super::addr_cache_wanted(None, true), "NXGFX_TRANSLATE_GATE=all: every resolve reaches the gate");
+        assert!(!super::addr_cache_wanted(Some("1"), true));
+    }
 }
 
 /// Hits and misses of `room_cached` (k 0) and `resolve_cached` (k 1), counted on the thread and added to
