@@ -325,6 +325,8 @@ fn bind_graphics() {
         shaders.display()
     );
     // the front end (lane I, src/front) owns the game window when it is linked: it set FRONT_WINDOW and gave graphics its window
+    // (a web build has no host window: the page's canvas is the window, docs/35 W4)
+    #[cfg(not(target_os = "emscripten"))]
     if std::env::var("NXGFX_HEADLESS").is_err() && !FRONT_WINDOW.load(Ordering::Acquire) {
         nxgfx::host_window::set_key_handler(window_key);
         nxgfx::host_window::open(&prof.name, 1920, 1080);

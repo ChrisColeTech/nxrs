@@ -188,6 +188,8 @@ SI VT FN(vflush)(VT a) {
     VTU u = (VTU)a;
 #if defined(__aarch64__)
     __asm__("" : "+w"(u));
+#elif defined(__wasm__)
+    __asm__("" : "+r"(u));
 #else
     __asm__("" : "+x"(u));
 #endif

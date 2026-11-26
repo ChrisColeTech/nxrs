@@ -264,6 +264,7 @@ fn run_v1(args: Vec<String>) -> i32 {
             )
         }),
         interp_only: a.interp_only,
+        web: false,
     };
     build(&o, &b)
 }
@@ -418,6 +419,9 @@ enum Cmd {
         /// (diagnostics) translate no function: the runtime interprets the whole game
         #[arg(long, hide = true)]
         interp_only: bool,
+        /// `web`: a browser build (wasm + JS, docs/35) into <input folder>\nxrs-web\<name> instead of a Windows build
+        #[arg(long, value_parser = ["web"])]
+        target: Option<String>,
     },
     /// Say what each update package is; with --game, check it belongs to that game (exit 1 on any error).
     UpdateInfo {
@@ -527,6 +531,7 @@ fn run_v2(args: Vec<String>) -> i32 {
             quiet,
             machine,
             interp_only,
+            target,
         } => {
             if let Some(n) = pkg.program {
                 std::env::set_var("NXRS_PROGRAM_INDEX", n.to_string());
@@ -547,6 +552,7 @@ fn run_v2(args: Vec<String>) -> i32 {
                 v1: false,
                 ignored: None,
                 interp_only,
+                web: target.as_deref() == Some("web"),
             };
             build(&o, &b)
         }

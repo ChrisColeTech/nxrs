@@ -229,6 +229,7 @@ NXRS_DATA	switch	folder `<name>_data` is handed over as NXRS_DATA, and its `exef
 NXRS_DATA_DIR	path	`NXRS_DATA_DIR`: the launcher's data folder instead of `%LOCALAPPDATA%\nxrs` (development, tests).	src/launcher/src/constants/engine.rs, src/launcher/tests/common/mod.rs
 NXRS_DOCTOR_EXE	test	the real engine, when the developer names it (NXRS_DOCTOR_EXE): it answers in the same format	src/launcher/tests/process.rs
 NXRS_DUMP_FRAMES	diagnostic	NXRS_DUMP_FRAMES=<ret>[,<ret>..]: the 16 words at the frame record of a frame returning there (its	src/runtime/src/kernel.rs
+NXRS_EMSDK	path	The Emscripten SDK for `nxrs-build build --target web` (docs/35): `NXRS_EMSDK`, else `emsdk` beside nxrs-build, else the development tree's `build\tools\emsdk`.	src/cli/src/cc.rs
 NXRS_ENGINE_LIB	switch	found, the MSVC engine library beside nxrs-build or `NXRS_ENGINE_LIB`), else the bundled llvm-mingw when it is	src/cli/src/cc.rs
 NXRS_ESC_QUIT	switch	NXRS_ESC_QUIT=0 (scripted runs): Esc is logged and ignored; the foreground state says	src/front/src/window.rs, src/front/src/window_linux.rs
 NXRS_FNPROF	diagnostic	`NXRS_FNPROF=<file>`: record every guest function entered at least once and rewrite the file every 5 s with their addresses (the web build's hot set, docs/35 W0(c)).	src/runtime/src/rt.rs

@@ -46,6 +46,9 @@ pub struct BuildArgs {
     pub ignored: Option<String>,
     /// `--interp-only` (diagnostics): translate no function; the runtime interprets the whole game
     pub interp_only: bool,
+    /// `--target web`: a browser build (docs/35): emcc instead of clang, `game.js` + `game.wasm` instead of the
+    /// executable and code DLL, into `<input folder>\nxrs-web\<name>` by default
+    pub web: bool,
 }
 
 /// What the build produced.
@@ -104,6 +107,21 @@ pub fn default_outdir(input: &Path, name: &str) -> PathBuf {
         .join(BUILDS_FOLDER)
         .join(name)
 }
+
+/// The folder beside the input that holds its web builds (`--target web`, docs/35): `<the input's folder>\nxrs-web\<name>`.
+pub const WEB_BUILDS_FOLDER: &str = "nxrs-web";
+
+pub fn default_web_outdir(input: &Path, name: &str) -> PathBuf {
+    let abs = std::path::absolute(input).unwrap_or_else(|_| input.to_path_buf());
+    abs.parent()
+        .unwrap_or(Path::new("."))
+        .join(WEB_BUILDS_FOLDER)
+        .join(name)
+}
+
+/// The web build's entry (`int (int argc, char **argv, const RtModule *mods, int count)`), the web front's
+/// `nxfront_main`; defined by the runtime once it is linked into the module (docs/35 W1/W2).
+pub const WEB_ENTRY: &str = "nxweb_main";
 
 /// A running game holds its executable and DLL open: say so before minutes of work, not after.
 fn check_writable(paths: &[&Path]) -> Result<()> {
@@ -342,12 +360,13 @@ fn layout_modules(gen: &Path) -> Result<Vec<(String, String, String)>> {
 
 /// modules.c: the module table for the engine and the DLL's entry point, which calls `entry` (`nxfront_main` or
 /// `nxrt_main`, both `int (int argc, char **argv, const RtModule *mods, int count)`).
-pub fn modules_c(mods: &[(String, String, String)], entry: &str) -> String {
+pub fn modules_c(mods: &[(String, String, String)], entry: &str, web: bool) -> String {
     let mut s = String::from(
         "// Written by nxrs: the translated modules for nxrt_main, and the entry the loader calls.\n#include <stdlib.h>\n#include \"nxrt.h\"\n#include \"patches.h\"\n\n\
          volatile int g_fnprof __attribute__((visibility(\"hidden\")));\n\
          uint8_t rt_patch_on[256] __attribute__((visibility(\"hidden\")));\n\
-         int nxfront_main(int argc, char **argv, const RtModule *mods, int count);\n\n\
+         int nxfront_main(int argc, char **argv, const RtModule *mods, int count);\n\
+         int nxweb_main(int argc, char **argv, const RtModule *mods, int count);\n\n\
          // A patch set is on by its default; its environment switch set to 0 turns it off, to anything else on.\n\
          static void nxrs_patch_sets(void) {\n\
          #define NXRS_SET(i, name, env, def) { const char *v = getenv(env); rt_patch_on[i] = (v && v[0]) ? (v[0] != '0') : (def); }\n\
@@ -355,15 +374,24 @@ pub fn modules_c(mods: &[(String, String, String)], entry: &str) -> String {
          #undef NXRS_SET\n\
          }\n\n",
     );
-    s.push_str(crate::mods::C_DECLS);
-    s.push_str(&crate::mods::c_code());
+    if web {
+        // the mod markers find the executable's folder through the OS; a web build has neither (its data, mods
+        // included, is packaged by docs/35 W3/W5)
+        s.push_str("#include <stdio.h>\n#include <string.h>\nstatic void nxrs_mod_markers(void) {}\n\n");
+    } else {
+        s.push_str(crate::mods::C_DECLS);
+        s.push_str(&crate::mods::c_code());
+    }
     for (n, _, _) in mods {
         s.push_str(&format!(
             "extern const uint64_t {n}_fn_addrs[];\nextern const GuestFn {n}_fn_ptrs[];\nextern const uint64_t {n}_fn_count;\n"
         ));
     }
-    // the code library's one export: dllexport on Windows, default visibility in the Linux shared object
-    let export = if cfg!(windows) {
+    // the code library's one export: dllexport on Windows, default visibility in the Linux shared object, a kept
+    // default-visibility symbol in the web module (emcc exports it by name)
+    let export = if web {
+        "__attribute__((used, visibility(\"default\")))"
+    } else if cfg!(windows) {
         "__declspec(dllexport)"
     } else {
         "__attribute__((visibility(\"default\")))"
@@ -399,7 +427,7 @@ pub fn units(
     gen: &Path,
     obj: &Path,
     mods: &[(String, String, String)],
-    engine: &cc::Engine,
+    entry: &str,
 ) -> Result<Vec<Unit>> {
     let include = gen.join("include");
     let mut headers: Vec<PathBuf> = std::fs::read_dir(&include)
@@ -448,7 +476,7 @@ pub fn units(
     crate::write_if_changed(&obj.join("nxrt.h"), NXRT_H.as_bytes())?;
     crate::write_if_changed(
         &obj.join("modules.c"),
-        modules_c(mods, engine.entry()).as_bytes(),
+        modules_c(mods, entry, clang.web.is_some()).as_bytes(),
     )?;
     let mut h2 = headers.clone();
     h2.push(obj.join("nxrt.h"));
@@ -758,6 +786,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     // the compiler and the runtime are checked first, not after minutes of translation
     let clang = if a.no_build {
         None
+    } else if a.web {
+        Some(cc::find_emcc()?)
     } else {
         Some(cc::find_clang(a.cc.as_deref())?)
     };
@@ -782,6 +812,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     }
     // a title on Nintendo's SDK runs on the whole engine; homebrew brings its own and gets the runtime alone
     let engine = match &clang {
+        // the web build links no engine library yet: its runtime joins the module in docs/35 W1
+        Some(c) if c.web.is_some() => None,
         // a retail title (Nintendo's rtld and an NPDM beside its sdk); the runtime's own homebrew has neither
         Some(c) => Some(cc::find_engine(
             game.exefs.files.contains_key("sdk")
@@ -837,16 +869,20 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         .or_else(|| game.exefs.files.get("main.npdm").and_then(|n| npdm_name(n)))
         .unwrap_or_else(|| source_name(&a.input));
     let name = output_name(&title);
-    let outdir = std::path::absolute(
-        a.outdir
-            .clone()
-            .unwrap_or_else(|| default_outdir(&a.input, &name)),
-    )?;
+    let outdir = std::path::absolute(a.outdir.clone().unwrap_or_else(|| {
+        if a.web {
+            default_web_outdir(&a.input, &name)
+        } else {
+            default_outdir(&a.input, &name)
+        }
+    }))?;
     std::fs::create_dir_all(&outdir).with_context(|| format!("creating {}", outdir.display()))?;
     let base = outdir.join(&name);
     let with = |suffix: &str| PathBuf::from(format!("{}{suffix}", base.display()));
-    // Linux: `<name>` and `<name>_code.so`
-    let (exe, dll, data) = if cfg!(target_os = "linux") {
+    // Linux: `<name>` and `<name>_code.so`; web: `game.js` and `game.wasm` (the folder is the game's)
+    let (exe, dll, data) = if a.web {
+        (outdir.join("game.js"), outdir.join("game.wasm"), with("_data"))
+    } else if cfg!(target_os = "linux") {
         (with(""), with("_code.so"), with("_data"))
     } else {
         (with(".exe"), with("_code.dll"), with("_data"))
@@ -1079,7 +1115,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         crate::write_if_changed(&nro_tsv, package::nro::tsv(&nros, &lay).as_bytes())?;
     }
     let ini = with(".ini");
-    if !ini.exists() {
+    // the web build has no executable to read an ini; its settings come with the host (docs/35 W5)
+    if !a.web && !ini.exists() {
         std::fs::write(&ini, ini_text(&name))?;
     }
     timings.push(("data", t.elapsed().as_secs_f64()));
@@ -1087,7 +1124,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     if a.no_build {
         return Ok(Built { exe, data, timings });
     }
-    let (clang, engine) = (clang.unwrap(), engine.unwrap());
+    let clang = clang.unwrap();
+    let entry = engine.as_ref().map_or(WEB_ENTRY, |e| e.entry());
 
     // ---- shaders (on a thread beside the compile) and compile and link
     let profile_id = prof.as_ref().map(|m| m.profile.id.as_str());
@@ -1095,8 +1133,11 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     let compile_link = |timings: &mut Vec<(&'static str, f64)>| -> Result<()> {
         let t = Instant::now();
         let mods = layout_modules(&gen)?;
-        let mut units = units(&clang, &gen, &obj, &mods, &engine)?;
+        let mut units = units(&clang, &gen, &obj, &mods, entry)?;
         let extra = extra_cflags(std::env::var("NXRS_CFLAGS").ok().as_deref());
+        if clang.web.is_some() {
+            cc::warm_emcc(&clang, &obj)?;
+        }
         for u in &mut units {
             for f in &mut u.flags {
                 if a.native && f == crate::cc::MARCH {
@@ -1105,10 +1146,17 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             }
             u.flags.extend(extra.iter().cloned());
         }
+        let (cc_name, cc_version) = match &clang.web {
+            Some(e) => (format!("emcc from {}", e.root.display()), clang.version.clone()),
+            None => (
+                clang.path.file_name().unwrap().to_string_lossy().into_owned(),
+                clang.version.trim_start_matches("clang version ").to_string(),
+            ),
+        };
         out.say(&format!(
             "Compiling with {} {} (-O1{}{}, {} at a time)...",
-            clang.path.file_name().unwrap().to_string_lossy(),
-            clang.version.trim_start_matches("clang version "),
+            cc_name,
+            cc_version,
             if a.native { ", -march=native" } else { "" },
             if extra.is_empty() {
                 String::new()
@@ -1146,22 +1194,35 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         ));
         out.progress("link", 0, 0);
         let objs: Vec<PathBuf> = units.iter().map(|u| u.obj.clone()).collect();
-        out.say(&format!(
-            "  with {} ({})",
-            engine.lib.file_name().unwrap().to_string_lossy(),
-            engine.entry()
-        ));
-        cc::link_dll(&clang, &objs, &engine, &obj, &dll)?;
-        cc::link_exe(&clang, &obj, &exe)?;
+        match &engine {
+            Some(engine) => {
+                out.say(&format!(
+                    "  with {} ({})",
+                    engine.lib.file_name().unwrap().to_string_lossy(),
+                    engine.entry()
+                ));
+                cc::link_dll(&clang, &objs, engine, &obj, &dll)?;
+                cc::link_exe(&clang, &obj, &exe)?;
+            }
+            None => {
+                out.say("  the runtime is not linked into the web module yet: its symbols are imports (docs/35 W1)");
+                cc::link_web(&clang, &objs, None, &obj, &exe)?;
+            }
+        }
         timings.push(("link", t.elapsed().as_secs_f64()));
         Ok(())
     };
     let (built, shader_secs) = std::thread::scope(|s| {
         let data = &data;
+        let web = a.web;
         let sh = std::thread::Builder::new()
             .name("shader prebuild".into())
             .spawn_scoped(s, move || {
                 let t = Instant::now();
+                // the web build's shaders are WGSL packs (docs/35 W4), not this SPIR-V prebuild
+                if web {
+                    return 0.0;
+                }
                 // never fatal, a panic of the prebuild thread included
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shaders_step(out, data, profile_id, exact_profile_build, a))).is_err() {
                     out.say("shaders: not translated at build time (the prebuild stopped); the game translates them while it runs");
@@ -1180,7 +1241,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     timings.push(("total", t_all.elapsed().as_secs_f64()));
     // NROs the game's NRRs register and no file holds: the game decodes them at run time. Boot it once to capture
     // them (nxnative's capture boot), then build again with them
-    if !nros.missing.is_empty()
+    if !a.web
+        && !nros.missing.is_empty()
         && std::env::var_os("NXRS_NO_CAPTURE_BOOT").is_none()
         && !CAPTURE_BOOTED.swap(true, std::sync::atomic::Ordering::Relaxed)
     {
@@ -1343,6 +1405,7 @@ mod tests {
         let s = modules_c(
             &[("main".into(), "0x7000000000".into(), "0x1000".into())],
             "nxrt_main",
+            false,
         );
         assert!(s.contains(if cfg!(windows) {
             "__declspec(dllexport) int nxrs_game_main"
@@ -1353,5 +1416,19 @@ mod tests {
             s.contains("{\"main\", 0x7000000000ull, 0x1000ull, main_fn_addrs, main_fn_ptrs, 0}")
         );
         assert!(s.contains("mods[0].count = main_fn_count;"));
+        let w = modules_c(
+            &[("main".into(), "0x7000000000".into(), "0x1000".into())],
+            WEB_ENTRY,
+            true,
+        );
+        assert!(w.contains("__attribute__((used, visibility(\"default\"))) int nxrs_game_main"));
+        assert!(w.contains("return nxweb_main(argc, argv, mods, 1);"));
+    }
+
+    #[test]
+    fn web_builds_go_beside_the_input() {
+        let input = if cfg!(windows) { r"P:\Games\x\game.nsp" } else { "/games/x/game.nsp" };
+        let want = if cfg!(windows) { r"P:\Games\x\nxrs-web\X" } else { "/games/x/nxrs-web/X" };
+        assert_eq!(default_web_outdir(Path::new(input), "X"), PathBuf::from(want));
     }
 }

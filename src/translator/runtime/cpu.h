@@ -13,11 +13,19 @@ typedef struct __attribute__((aligned(16))) Cpu {
     uint64_t tpidrro;        // 288
     uint64_t excl_addr;      // 296
     uint64_t excl_val;       // 304
+#if defined(__wasm__)
+    uint64_t thread;         // 312: runtime thread object (a 64-bit slot on every wasm width)
+#else
     void *thread;            // 312: runtime thread object
+#endif
     uint64_t fpcr;           // 320: guest FPCR/FPSR (portable FP/SIMD lowering only; the asm path uses the host's)
     uint64_t fpsr;           // 328
     uint64_t excl_val_hi;    // 336: upper half of a 128-bit exclusive pair (LDXP/LDAXP of two X registers)
+#if defined(__wasm__)
+    uint64_t sj;             // 344: the newest live setjmp owner of this guest thread (cpu/sjlj.c)
+#else
     void *sj;                // 344: the newest live setjmp owner of this guest thread (cpu/sjlj.c)
+#endif
     uint32_t excl_seq;       // 352: the exclusive monitor bucket's sequence at the last LDXR (rt_excl_mon)
     uint8_t _pad[512 - 356];
     __uint128_t v[32];       // 512
@@ -63,6 +71,10 @@ static inline void rt_fpcr_sync(const Cpu *c) {
     want = (cur & ~((1ull << 24) | (3ull << 22))) | (c->fpcr & (1ull << 24));
     if (cur != want) __asm__ volatile("msr fpcr, %0" ::"r"(want));
 }
+#elif defined(__wasm__)
+// wasm floats always round to nearest and never flush denormals, and there is no host FP state to mirror. FPCR.FZ and
+// RMode other than nearest are not honoured yet (docs/35 W2; build/WEB/W0-fp measured the gap).
+static inline void rt_fpcr_sync(const Cpu *c) { (void)c; }
 #else
 // The MXCSR of a host thread running guest code mirrors c->fpcr: FTZ|DAZ = FPCR.FZ, RC = nearest (FPCR.RMode takes
 // the slow paths of runtime/simd.h, which switch RC around one operation). The FP helpers rely on it without checking,
@@ -76,6 +88,14 @@ static inline void rt_fpcr_sync(const Cpu *c) {
 #endif
 
 // ---- memory: guest addresses are host addresses
+// On wasm a guest address is an offset into the one linear memory: host = guest - rt_guest_off (the runtime sets it
+// from the compact guest layout before guest code runs). Elsewhere RT_HOST is the plain cast.
+#if defined(__wasm__)
+extern uint64_t rt_guest_off;
+#define RT_HOST(a) ((uintptr_t)((uint64_t)(a) - rt_guest_off))
+#else
+#define RT_HOST(a) ((uintptr_t)(a))
+#endif
 typedef uint16_t __attribute__((aligned(1), may_alias)) u16u;
 typedef uint32_t __attribute__((aligned(1), may_alias)) u32u;
 typedef uint64_t __attribute__((aligned(1), may_alias)) u64u;
@@ -89,14 +109,14 @@ extern uint8_t rt_patch_on[] __attribute__((visibility("hidden")));
 void fnprof_hit(uint64_t addr, uint64_t lr, uint64_t x0);
 #define FN_ENTER(a) do { if (__builtin_expect(g_fnprof, 0)) fnprof_hit(a, c->x[30], c->x[0]); } while (0)
 
-#define LD8(a)  (*(const u8a *)(uintptr_t)(a))
-#define LD16(a) (*(const u16u *)(uintptr_t)(a))
-#define LD32(a) (*(const u32u *)(uintptr_t)(a))
-#define LD64(a) (*(const u64u *)(uintptr_t)(a))
-#define ST8(a, v)  (*(u8a *)(uintptr_t)(a) = (uint8_t)(v))
-#define ST16(a, v) (*(u16u *)(uintptr_t)(a) = (uint16_t)(v))
-#define ST32(a, v) (*(u32u *)(uintptr_t)(a) = (uint32_t)(v))
-#define ST64(a, v) (*(u64u *)(uintptr_t)(a) = (uint64_t)(v))
+#define LD8(a)  (*(const u8a *)RT_HOST(a))
+#define LD16(a) (*(const u16u *)RT_HOST(a))
+#define LD32(a) (*(const u32u *)RT_HOST(a))
+#define LD64(a) (*(const u64u *)RT_HOST(a))
+#define ST8(a, v)  (*(u8a *)RT_HOST(a) = (uint8_t)(v))
+#define ST16(a, v) (*(u16u *)RT_HOST(a) = (uint16_t)(v))
+#define ST32(a, v) (*(u32u *)RT_HOST(a) = (uint32_t)(v))
+#define ST64(a, v) (*(u64u *)RT_HOST(a) = (uint64_t)(v))
 
 // ---- exclusive monitor (emulated with compare-and-swap)
 // A STXR succeeds when the value still matches its LDXR's and, with the global monitor on, no other exclusive store
@@ -135,7 +155,7 @@ static inline void rt_xm_end(Cpu *c, uint64_t a, int stored) {
 #define EXCL(N, T)                                                                         \
     static inline uint64_t ldx##N(Cpu *c, uint64_t a) {                                    \
         rt_xm_mark(c, a);                                                                  \
-        T v = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                        \
+        T v = __atomic_load_n((T *)RT_HOST(a), __ATOMIC_ACQUIRE);                        \
         c->excl_addr = a;                                                                  \
         c->excl_val = v;                                                                   \
         return v;                                                                          \
@@ -145,16 +165,16 @@ static inline void rt_xm_end(Cpu *c, uint64_t a, int stored) {
         c->excl_addr = ~0ull;                                                              \
         if (!rt_xm_begin(c, a)) return 1;                                                  \
         T expected = (T)c->excl_val;                                                       \
-        int ok = __atomic_compare_exchange_n((T *)(uintptr_t)a, &expected, (T)v, 0,        \
+        int ok = __atomic_compare_exchange_n((T *)RT_HOST(a), &expected, (T)v, 0,        \
                                              __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST);          \
         rt_xm_end(c, a, ok);                                                               \
         return !ok;                                                                        \
     }                                                                                      \
     static inline uint64_t lda##N(uint64_t a) {                                            \
-        return __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_ACQUIRE);                       \
+        return __atomic_load_n((T *)RT_HOST(a), __ATOMIC_ACQUIRE);                       \
     }                                                                                      \
     static inline void stl##N(uint64_t a, uint64_t v) {                                    \
-        __atomic_store_n((T *)(uintptr_t)a, (T)v, __ATOMIC_SEQ_CST);                       \
+        __atomic_store_n((T *)RT_HOST(a), (T)v, __ATOMIC_SEQ_CST);                       \
     }
 EXCL(8, uint8_t)
 EXCL(16, uint16_t)
@@ -165,7 +185,7 @@ EXCL(64, uint64_t)
 // A pair of two W registers is a 64-bit exclusive and uses ldx64/stx64.
 static inline __uint128_t ldxp128(Cpu *c, uint64_t a) {
     rt_xm_mark(c, a);
-    __uint128_t v = __atomic_load_n((__uint128_t *)(uintptr_t)a, __ATOMIC_ACQUIRE);
+    __uint128_t v = __atomic_load_n((__uint128_t *)RT_HOST(a), __ATOMIC_ACQUIRE);
     c->excl_addr = a;
     c->excl_val = (uint64_t)v;
     c->excl_val_hi = (uint64_t)(v >> 64);
@@ -177,7 +197,7 @@ static inline uint32_t stxp128(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
     if (!rt_xm_begin(c, a)) return 1;
     __uint128_t expected = ((__uint128_t)c->excl_val_hi << 64) | c->excl_val;
     __uint128_t v = ((__uint128_t)hi << 64) | lo;
-    int ok = __atomic_compare_exchange_n((__uint128_t *)(uintptr_t)a, &expected, v, 0, __ATOMIC_SEQ_CST,
+    int ok = __atomic_compare_exchange_n((__uint128_t *)RT_HOST(a), &expected, v, 0, __ATOMIC_SEQ_CST,
                                          __ATOMIC_SEQ_CST);
     rt_xm_end(c, a, ok);
     return !ok;
@@ -187,26 +207,26 @@ static inline uint32_t stxp128(Cpu *c, uint64_t a, uint64_t lo, uint64_t hi) {
 // Add, clear, xor, set and swap map to __atomic builtins in the lifter; min/max need a CAS loop. Return the old value.
 #define ATOMIC_MINMAX(N, T, S)                                                             \
     static inline T atomic_smax##N(uint64_t a, T v) {                                      \
-        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
-        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, (S)o > (S)v ? o : v, 1, \
+        T o = __atomic_load_n((T *)RT_HOST(a), __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)RT_HOST(a), &o, (S)o > (S)v ? o : v, 1, \
                                             __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
         return o;                                                                          \
     }                                                                                      \
     static inline T atomic_smin##N(uint64_t a, T v) {                                      \
-        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
-        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, (S)o < (S)v ? o : v, 1, \
+        T o = __atomic_load_n((T *)RT_HOST(a), __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)RT_HOST(a), &o, (S)o < (S)v ? o : v, 1, \
                                             __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
         return o;                                                                          \
     }                                                                                      \
     static inline T atomic_umax##N(uint64_t a, T v) {                                      \
-        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
-        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, o > v ? o : v, 1,       \
+        T o = __atomic_load_n((T *)RT_HOST(a), __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)RT_HOST(a), &o, o > v ? o : v, 1,       \
                                             __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
         return o;                                                                          \
     }                                                                                      \
     static inline T atomic_umin##N(uint64_t a, T v) {                                      \
-        T o = __atomic_load_n((T *)(uintptr_t)a, __ATOMIC_RELAXED);                        \
-        while (!__atomic_compare_exchange_n((T *)(uintptr_t)a, &o, o < v ? o : v, 1,       \
+        T o = __atomic_load_n((T *)RT_HOST(a), __ATOMIC_RELAXED);                        \
+        while (!__atomic_compare_exchange_n((T *)RT_HOST(a), &o, o < v ? o : v, 1,       \
                                             __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {}        \
         return o;                                                                          \
     }
