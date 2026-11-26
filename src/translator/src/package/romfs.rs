@@ -19,6 +19,15 @@ pub enum FileLoc {
     Image(u64),
     Nup(NupFile),
     Disk(PathBuf),
+    /// A file of a [`StoredFiles`] by its number (the web build's data manifest).
+    Stored(u32),
+}
+
+/// Files read by number through someone else (the web build's I/O worker, docs/35 W3): the RomFS knows only their
+/// paths and sizes.
+pub trait StoredFiles: Send + Sync {
+    /// Up to `len` bytes of file `id` from `offset` (the caller keeps within the file's size).
+    fn read(&self, id: u32, offset: u64, len: u64) -> Result<Vec<u8>>;
 }
 
 #[derive(Debug, Clone)]
@@ -63,6 +72,7 @@ pub(crate) enum Backend {
     Image(Arc<dyn Storage>),
     Nup(Arc<NupReader>),
     Folder(OpenFiles),
+    Stored(Arc<dyn StoredFiles>),
 }
 
 /// A folder RomFS's open files, read positionally (one handle a file, shared by every reader thread) instead of
@@ -280,6 +290,70 @@ impl RomFs {
         })
     }
 
+    /// A RomFS of listed files (`/`-separated paths, sizes and numbers) whose bytes `store` reads.
+    pub fn from_stored(
+        files: &[(String, u64, u32)],
+        store: Arc<dyn StoredFiles>,
+        source: String,
+    ) -> Result<RomFs> {
+        fn insert(kids: &mut Vec<Node>, parts: &[&str], size: u64, id: u32) -> Result<()> {
+            let (first, rest) = (parts[0], &parts[1..]);
+            let at = kids.iter().position(|k| k.name == first);
+            if rest.is_empty() {
+                if at.is_some() {
+                    return fmt(format!("{first}: listed twice"));
+                }
+                kids.push(Node {
+                    name: first.to_string(),
+                    kind: NodeKind::File {
+                        size,
+                        loc: FileLoc::Stored(id),
+                    },
+                });
+                return Ok(());
+            }
+            let i = match at {
+                Some(i) => i,
+                None => {
+                    kids.push(Node {
+                        name: first.to_string(),
+                        kind: NodeKind::Dir(vec![]),
+                    });
+                    kids.len() - 1
+                }
+            };
+            match &mut kids[i].kind {
+                NodeKind::Dir(k) => insert(k, rest, size, id),
+                NodeKind::File { .. } => fmt(format!("{first}: a file and a directory")),
+            }
+        }
+        fn sort_all(kids: &mut [Node]) {
+            sort_kids(kids);
+            for k in kids {
+                if let NodeKind::Dir(c) = &mut k.kind {
+                    sort_all(c);
+                }
+            }
+        }
+        let mut kids = vec![];
+        for (path, size, id) in files {
+            let parts: Vec<&str> = path.split('/').filter(|p| !p.is_empty()).collect();
+            if parts.is_empty() {
+                return fmt(format!("{path:?}: not a file path"));
+            }
+            insert(&mut kids, &parts, *size, *id)?;
+        }
+        sort_all(&mut kids);
+        Ok(RomFs {
+            root: Node {
+                name: String::new(),
+                kind: NodeKind::Dir(kids),
+            },
+            backend: Backend::Stored(store),
+            source,
+        })
+    }
+
     pub(crate) fn from_nup(reader: Arc<NupReader>, root: Node, source: String) -> RomFs {
         RomFs {
             root,
@@ -407,6 +481,7 @@ impl RomFs {
                 let len = len.min(blob.size.saturating_sub(offset));
                 blob.read_at(offset, len)
             }
+            (FileLoc::Stored(id), Backend::Stored(s)) => s.read(*id, offset, len),
             _ => fmt(format!("{path}: file location does not match its RomFS")),
         }
     }
@@ -603,5 +678,40 @@ mod tests {
         assert_eq!(r.walk(), [("sub/f.dat".to_string(), 6), ("top".into(), 1)]);
         assert_eq!(r.read("sub/f.dat", 2, 2).unwrap(), b"cd");
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Files read by number: the tree comes from the list, reads go to the store with the file's number and are
+    /// clipped to its size.
+    #[test]
+    fn stored_romfs() {
+        struct Store(Vec<Vec<u8>>);
+        impl StoredFiles for Store {
+            fn read(&self, id: u32, offset: u64, len: u64) -> Result<Vec<u8>> {
+                let f = &self.0[id as usize];
+                Ok(f[offset as usize..(offset + len) as usize].to_vec())
+            }
+        }
+        let store = Arc::new(Store(vec![b"zero".to_vec(), b"one-1".to_vec(), b"t".to_vec()]));
+        let list = [
+            ("data/b/one.bin".to_string(), 5, 1),
+            ("a".to_string(), 4, 0),
+            ("data/a.txt".to_string(), 1, 2),
+        ];
+        let r = RomFs::from_stored(&list, store.clone(), "stored".into()).unwrap();
+        assert_eq!(
+            r.walk(),
+            [
+                ("a".to_string(), 4),
+                ("data/a.txt".into(), 1),
+                ("data/b/one.bin".into(), 5)
+            ]
+        );
+        assert_eq!(r.read("data/b/one.bin", 2, 100).unwrap(), b"e-1");
+        assert_eq!(r.read("a", 0, 4).unwrap(), b"zero");
+        assert!(r.list("data/b").unwrap()[0].name == "one.bin");
+        let twice = [("x".to_string(), 1, 0), ("x".to_string(), 1, 1)];
+        assert!(RomFs::from_stored(&twice, store.clone(), "s".into()).is_err());
+        let clash = [("x".to_string(), 1, 0), ("x/y".to_string(), 1, 1)];
+        assert!(RomFs::from_stored(&clash, store, "s".into()).is_err());
     }
 }

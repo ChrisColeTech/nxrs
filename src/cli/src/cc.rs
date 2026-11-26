@@ -114,6 +114,8 @@ pub const WEB_FLAGS: &[&str] = &["-sMEMORY64=1", "-pthread", "-msimd128", "-mtai
 
 /// The web build's boundary between generated code and Rust (asm.rs on the other hosts), compiled into each web link.
 const WEB_BOUNDARY: &str = include_str!("../../runtime/web/boundary.c");
+/// The engine's calls into the page (docs/35 W3), linked with `--js-library`.
+const WEB_JS_LIBRARY: &str = include_str!("../../web/nxrs-lib.js");
 
 impl Clang {
     /// The command that runs this compiler: clang itself, or emcc.py under emsdk's Python with its config.
@@ -1129,6 +1131,9 @@ pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir
     }
     let rsp = obj_dir.join("link-web.rsp");
     std::fs::write(&rsp, response_file(&all))?;
+    // the engine's calls into the page (shared blocks for the I/O worker, the audio ring, the input block)
+    let js_lib = obj_dir.join("nxrs-lib.js");
+    std::fs::write(&js_lib, WEB_JS_LIBRARY)?;
     // NXRS_WEB_LINK_FLAGS: more emcc link flags (development: -sNODERAWFS=1 runs the module under Node on the real
     // data folder)
     let extra: Vec<String> = std::env::var("NXRS_WEB_LINK_FLAGS")
@@ -1155,9 +1160,11 @@ pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir
             "-sDEFAULT_PTHREAD_STACK_SIZE=8MB",
             "-sERROR_ON_UNDEFINED_SYMBOLS=0",
             "-sWARN_ON_UNDEFINED_SYMBOLS=0",
-            // the page (src/web/boot.js) maps the data folder into the file system before main
-            "-sEXPORTED_RUNTIME_METHODS=FS,addRunDependency,removeRunDependency",
+            // the page (src/web/boot.js) puts the host files and the restored saves into the file system before
+            // main, and the engine's variables (?env=) into its environment
+            "-sEXPORTED_RUNTIME_METHODS=FS,ENV,addRunDependency,removeRunDependency",
         ])
+        .arg(format!("--js-library={}", js_lib.display()))
         .args(&extra)
         .arg(format!("@{}", rsp.display()))
         .arg("-o")
