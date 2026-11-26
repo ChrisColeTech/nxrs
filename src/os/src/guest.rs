@@ -216,7 +216,7 @@ pub fn readable(a: u64, n: u64) -> bool {
     a >= 0x1000 && (crate::mem::try_get().is_some_and(|m| m.mapped(a, n)) || host_readable(a, n))
 }
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "emscripten"))]
 fn host_readable(a: u64, n: u64) -> bool {
     nxrt::mem::readable(a, n)
 }

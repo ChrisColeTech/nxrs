@@ -112,6 +112,12 @@ pub fn set_window_raw(
     }
 }
 
+/// The web has no Vulkan surface: the GPU worker draws into the page's canvas (docs/35 W4).
+#[cfg(target_os = "emscripten")]
+fn create_surface(_g: &Gpu, _p: &Presenter) -> Result<vk::SurfaceKHR, String> {
+    Err("no Vulkan surface in a web build: the page's GPU worker presents (docs/35 W4)".into())
+}
+
 /// The Vulkan surface of the host window.
 #[cfg(windows)]
 fn create_surface(g: &Gpu, p: &Presenter) -> Result<vk::SurfaceKHR, String> {

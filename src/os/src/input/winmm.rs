@@ -134,6 +134,25 @@ pub fn poll(j: &Joy) -> Option<(u64, [i32; 4])> {
     }
 }
 
+/// The web: no system joysticks (browser gamepads come through the page's input block, docs/35 W3).
+#[cfg(target_os = "emscripten")]
+#[derive(Clone, Default)]
+pub struct Joy {
+    pub id: u32,
+    pub vid: u16,
+    pub pid: u16,
+    pub axes: u32,
+    pub buttons: u32,
+}
+#[cfg(target_os = "emscripten")]
+pub fn open(_from: u32) -> Option<Joy> {
+    None
+}
+#[cfg(target_os = "emscripten")]
+pub fn poll(_j: &Joy) -> Option<(u64, [i32; 4])> {
+    None
+}
+
 /// A joystick SDL2 opened (Linux): `id` is its SDL instance id, stable while it stays connected.
 #[cfg(target_os = "linux")]
 #[derive(Clone, Default)]

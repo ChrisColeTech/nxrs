@@ -94,8 +94,37 @@ pub fn enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     // on by default since lane G3 rev 8 (Pokemon Violet 150 s clean at its 30 FPS cap, write-back 0.5 ms a frame
     // against 1.3 ms copied back eagerly); NXGFX_WB_LAZY=0: every write-back lands at completion
-    *V.get_or_init(|| std::env::var("NXGFX_WB_LAZY").as_deref() != Ok("0"))
+    // the web has no page protection or access faults to bring a page back with: always off there (docs/35)
+    *V.get_or_init(|| {
+        cfg!(not(target_os = "emscripten")) && std::env::var("NXGFX_WB_LAZY").as_deref() != Ok("0")
+    })
 }
+
+// The web: lazy write-back is off (`enabled`), so nothing below protects a page or waits for a fault there; these
+// stop loudly if that ever changes.
+#[cfg(target_os = "emscripten")]
+fn off_on_the_web() -> ! {
+    panic!("lazy write-back reached on the web, where it is off (no page protection)")
+}
+#[cfg(target_os = "emscripten")]
+fn committed_region(_p: u64) -> (u64, u64, bool) {
+    off_on_the_web()
+}
+#[cfg(target_os = "emscripten")]
+fn protect_n(_p: u64, _n: u64, _access: bool) {
+    off_on_the_web()
+}
+#[cfg(target_os = "emscripten")]
+fn protect(_p: u64, _access: bool) -> bool {
+    off_on_the_web()
+}
+#[cfg(target_os = "emscripten")]
+fn accessible(_p: u64) -> bool {
+    // every committed page is accessible on the web
+    true
+}
+#[cfg(target_os = "emscripten")]
+fn install() {}
 
 fn frame() -> u64 {
     super::present::frames()

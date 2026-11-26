@@ -751,6 +751,12 @@ fn writable(a: u64, n: u64) -> bool {
     nxrt::linux::writable(a, n)
 }
 
+/// The web: committed linear memory is writable (no page protection).
+#[cfg(target_os = "emscripten")]
+fn writable(a: u64, n: u64) -> bool {
+    nxrt::mem::readable(a, n)
+}
+
 #[cfg(windows)]
 fn writable(a: u64, n: u64) -> bool {
     use windows_sys::Win32::System::Memory::{

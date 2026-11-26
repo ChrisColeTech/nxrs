@@ -244,7 +244,14 @@ fn free_space(p: &Path) -> (u64, u64) {
         }
         (0, 0)
     }
-    #[cfg(not(windows))]
+    // the web: the browser's storage quota comes from the page (navigator.storage.estimate, docs/35 W3); until then
+    // the unknown answer the other hosts give on failure
+    #[cfg(target_os = "emscripten")]
+    {
+        let _ = p;
+        (0, 0)
+    }
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::ffi::OsStrExt;
         let c = std::ffi::CString::new(p.as_os_str().as_bytes()).unwrap_or_default();

@@ -117,6 +117,11 @@ fn thread_cpu_ns() -> u64 {
         unsafe { libc::clock_gettime(libc::CLOCK_THREAD_CPUTIME_ID, &mut ts) };
         ts.tv_sec as u64 * 1_000_000_000 + ts.tv_nsec as u64
     }
+    // a page cannot read a thread's CPU time: the frame-thread figures are absent on the web
+    #[cfg(target_os = "emscripten")]
+    {
+        0
+    }
 }
 
 /// The period of a frame the threads are measured against (ns; the present interval's).

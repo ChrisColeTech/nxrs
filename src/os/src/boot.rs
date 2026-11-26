@@ -51,6 +51,21 @@ pub unsafe extern "C" fn nxos_main(
     nxos_main_with(argc, argv, mods, count, None)
 }
 
+/// `int nxweb_main(int argc, char **argv, const RtModule *mods, int count)`: a web build's entry (docs/35), what
+/// `nxfront_main` is to the Windows build: the guest map's fixed regions first (the linear memory under them is
+/// claimed before the heap grows over it), then the os layer. No window or front-end loop: the page is the window.
+#[cfg(target_os = "emscripten")]
+#[no_mangle]
+pub unsafe extern "C" fn nxweb_main(
+    argc: i32,
+    argv: *const *const core::ffi::c_char,
+    mods: *const RtModule,
+    count: i32,
+) -> i32 {
+    nxrt::process::claim_fixed_regions(mods, count);
+    nxos_main_with(argc, argv, mods, count, None)
+}
+
 /// The same with a hook the executable runs once the os layer is set up, before the modules are bound.
 #[no_mangle]
 pub unsafe extern "C" fn nxos_main_with(
@@ -114,6 +129,9 @@ fn run(data: &Path, modules: Vec<Module>, hook: Option<InitHook>) -> Result<(), 
         };
         #[cfg(target_os = "linux")]
         let ok = nxrt::linux::limit_cpus(n);
+        // a page cannot pin its workers to CPUs
+        #[cfg(target_os = "emscripten")]
+        let ok = false;
         crate::log!(
             "host CPUs limited to {n} (NXOS_HOST_CPUS){}",
             if ok { "" } else { ": failed" }
@@ -381,6 +399,7 @@ unsafe fn boot_main(c: *mut Cpu) {
         return;
     }
     crate::log!("nnMain returned");
+    nxrt::rt::fnprof_flush();
     crate::log::report_gaps("nnMain returned");
     nxrt::process::exit(0);
 }

@@ -297,7 +297,9 @@ NXRS_TICK_HZ	switch	- the system counter: 19.2 MHz for a Switch program, 31.25 M
 NXRS_TOOLCHAIN	switch	Which toolchain: `NXRS_TOOLCHAIN=msvc|gnu`, else MSVC when it can work here (Visual Studio installed, a clang	src/cli/src/cc.rs
 NXRS_USER_PROMPT_TEXT	switch	any line with `NXRS_CTRL_PROMPT_TEXT`, `NXRS_HOME_QUIT_TEXT`, `NXRS_USER_PROMPT_TEXT` (the lines of a prompt, one per	src/os/src/ui_text.rs
 NXRS_VERSION	switch		src/launcher/build.rs, src/launcher/src/cli/options.rs, src/launcher/src/main.rs
-NXRS_XMON	switch	- the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`NXRS_XMON=1` / `NXRS_NO_XMON=1`);	src/runtime/src/process.rs
+NXRS_WEB_LIB	path	The web engine library (`libnxos.a` for wasm64) a `--target web` build links: `NXRS_WEB_LIB`, else `web\libnxos.a` beside nxrs-build, else the development tree's `target\wasm64-unknown-emscripten\release\libnxos.a` (docs/35).	src/cli/src/cc.rs
+NXRS_WEB_LINK_FLAGS	diagnostic	More emcc link flags for a `--target web` build (development: `-sNODERAWFS=1` runs the module under Node on the real data folder).	src/cli/src/cc.rs
+NXRS_XMON	switch- the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`NXRS_XMON=1` / `NXRS_NO_XMON=1`);	src/runtime/src/process.rs
 NXRT_CLANG	test	the clang the runtime ABI layout test compiles with	src/runtime/tests/abi_layout.rs
 NXRT_COMPACT_ALIAS_MB	diagnostic	Alias region size in MiB for `NXRT_LAYOUT=compact` (default 2304).	src/runtime/src/mem.rs
 NXRT_EXEFS	switchfolder `<name>_data` is handed over as NXRS_DATA, and its `exefs` as NXRT_EXEFS (the runtime's module folder),	src/cli/src/cc.rs, src/os/src/services/oe.rs, src/runtime/src/process.rs

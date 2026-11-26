@@ -16,6 +16,8 @@ pub mod kernel;
 #[cfg(target_os = "linux")]
 pub mod linux;
 pub mod loader;
+#[cfg(target_os = "emscripten")]
+pub mod web;
 pub mod mem;
 pub mod patchset;
 pub mod process;

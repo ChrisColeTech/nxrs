@@ -295,6 +295,11 @@ pub(crate) fn total_phys() -> u64 {
 pub(crate) fn total_phys() -> u64 {
     nxrt::linux::total_memory()
 }
+/// The web: what the page may hold, the linear memory's limit (a page cannot see the machine's memory).
+#[cfg(target_os = "emscripten")]
+pub(crate) fn total_phys() -> u64 {
+    nxrt::web::LINEAR_LIMIT
+}
 
 /// Validation messages counted since the process started (errors, warnings).
 pub fn validation_counts() -> (u64, u64) {

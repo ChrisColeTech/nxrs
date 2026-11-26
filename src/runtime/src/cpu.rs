@@ -48,6 +48,13 @@ pub struct Cpu {
 #[allow(non_upper_case_globals)]
 pub static mut rt_excl_mon: *mut u32 = core::ptr::null_mut();
 
+/// cpu.h `rt_guest_off` on the web: guest address minus linear-memory address. 0, because the web build translates
+/// the modules at `WEB_FIRST_BASE` and the guest map lies inside the linear memory (docs/35 W2).
+#[cfg(target_os = "emscripten")]
+#[no_mangle]
+#[allow(non_upper_case_globals)]
+pub static rt_guest_off: u64 = 0;
+
 /// Turns the global exclusive monitor on or off; call before any guest code runs.
 pub fn set_exclusive_monitor(on: bool) {
     static TABLE: [core::sync::atomic::AtomicU32; 1 << 16] =

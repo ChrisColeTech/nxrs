@@ -108,7 +108,12 @@ pub struct Emsdk {
 
 /// The web build's flags on top of `GEN_FLAGS` (less `-march` and the MSVC CRT choice): 64-bit memory (a Switch
 /// title's guest window does not fit 4 GiB: docs/35 W0(d)), shared-memory threads, wasm SIMD.
-pub const WEB_FLAGS: &[&str] = &["-sMEMORY64=1", "-pthread", "-msimd128"];
+/// `-mtail-call`: the dispatch's tail calls (src/runtime/web/boundary.c), and the generated code's calls of it in tail
+/// position, so guest indirect-branch chains keep the host stack flat.
+pub const WEB_FLAGS: &[&str] = &["-sMEMORY64=1", "-pthread", "-msimd128", "-mtail-call"];
+
+/// The web build's boundary between generated code and Rust (asm.rs on the other hosts), compiled into each web link.
+const WEB_BOUNDARY: &str = include_str!("../../runtime/web/boundary.c");
 
 impl Clang {
     /// The command that runs this compiler: clang itself, or emcc.py under emsdk's Python with its config.
@@ -116,6 +121,14 @@ impl Clang {
         let mut c = Command::new(&self.path);
         if let Some(e) = &self.web {
             c.arg("-E").arg(&e.emcc_py).env("EM_CONFIG", &e.config);
+            // emcc builds missing system libraries with emcc.exe sub-processes, which find Python on PATH
+            if let Some(py_dir) = self.path.parent() {
+                let mut paths = vec![py_dir.to_path_buf()];
+                paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+                if let Ok(p) = std::env::join_paths(paths) {
+                    c.env("PATH", p);
+                }
+            }
         }
         c
     }
@@ -1049,6 +1062,29 @@ pub fn warm_emcc(clang: &Clang, obj_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The web engine (`libnxos.a` built for wasm64 by `scripts/build/web.ps1`: the os layer with the runtime and
+/// graphics): `NXRS_WEB_LIB`, else `web\libnxos.a` beside nxrs-build, else the development tree's
+/// `target\wasm64-unknown-emscripten\release\libnxos.a`. None when there is none yet.
+pub fn find_web_lib() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("NXRS_WEB_LIB") {
+        return Some(PathBuf::from(p)).filter(|p| p.is_file());
+    }
+    let here = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let beside = here.join("web").join("libnxos.a");
+    if beside.is_file() {
+        return Some(beside);
+    }
+    here.ancestors()
+        .map(|d| d.join("target").join("wasm64-unknown-emscripten").join("release").join("libnxos.a"))
+        .find(|p| p.is_file())
+}
+
+/// The web build's `main`: the game's entry (modules.c) with the page's arguments, on a thread of its own
+/// (`-sPROXY_TO_PTHREAD`), so it may block as the native one does.
+const WEB_MAIN: &str = "// Written by nxrs: the web build's main.\n\
+int nxrs_game_main(int argc, char **argv);\n\
+int main(int argc, char **argv) { return nxrs_game_main(argc, argv); }\n";
+
 /// The runtime's variables the generated code reads (wasm imports functions, never data). The runtime defines them
 /// once it is linked into the web module (docs/35 W2); until then the web link compiles these definitions.
 const WEB_RUNTIME_DATA: &str = "// Written by nxrs: the runtime's data the generated code reads, until the runtime joins the web module.\n\
@@ -1061,36 +1097,66 @@ uint32_t *rt_excl_mon;\n";
 /// complete; without it the runtime's functions stay undefined and become imports of the module, and its data is
 /// defined here (`WEB_RUNTIME_DATA`).
 pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir: &Path, js: &Path) -> Result<()> {
-    let mut all = objs.to_vec();
-    match runtime {
-        Some(lib) => all.push(lib.to_path_buf()),
-        None => {
-            let c = obj_dir.join("runtime_data.c");
-            let o = obj_dir.join("runtime_data.o");
-            std::fs::write(&c, WEB_RUNTIME_DATA)?;
-            let out = clang.command().args(clang.gen_flags()).arg("-c").arg(&c).arg("-o").arg(&o).output()?;
-            if !out.status.success() {
-                bail!("runtime_data.c: {}", tail(&String::from_utf8_lossy(&out.stderr), 2000));
-            }
-            all.push(o);
+    // the generated tree's headers (cpu.h): <build>\gen\include beside <build>\obj
+    let include = obj_dir.parent().unwrap_or(obj_dir).join("gen").join("include");
+    let compile = |name: &str, text: &str, extra: &[&str]| -> Result<PathBuf> {
+        let c = obj_dir.join(format!("{name}.c"));
+        let o = obj_dir.join(format!("{name}.o"));
+        std::fs::write(&c, text)?;
+        let out = clang
+            .command()
+            .args(clang.gen_flags())
+            .args(extra)
+            .arg(format!("-I{}", include.display()))
+            .arg("-c")
+            .arg(&c)
+            .arg("-o")
+            .arg(&o)
+            .output()?;
+        if !out.status.success() {
+            bail!("{name}.c: {}", tail(&String::from_utf8_lossy(&out.stderr), 2000));
         }
+        Ok(o)
+    };
+    let mut all = objs.to_vec();
+    all.push(compile("web_main", WEB_MAIN, &[])?);
+    match runtime {
+        Some(lib) => {
+            all.push(compile("boundary", WEB_BOUNDARY, &["-sSUPPORT_LONGJMP=wasm", "-fwasm-exceptions"])?);
+            all.push(lib.to_path_buf());
+        }
+        None => all.push(compile("runtime_data", WEB_RUNTIME_DATA, &[])?),
     }
     let rsp = obj_dir.join("link-web.rsp");
     std::fs::write(&rsp, response_file(&all))?;
+    // NXRS_WEB_LINK_FLAGS: more emcc link flags (development: -sNODERAWFS=1 runs the module under Node on the real
+    // data folder)
+    let extra: Vec<String> = std::env::var("NXRS_WEB_LINK_FLAGS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(String::from)
+        .collect();
     let o = clang
         .command()
         .args(["-O1"])
         .args(WEB_FLAGS)
         .args([
-            "--no-entry",
+            "-sPROXY_TO_PTHREAD=1",
+            "-sEXIT_RUNTIME=1",
+            // the Rust code's unwinding and the runtime's setjmp/longjmp use wasm exception handling (not JS invoke_*)
+            "-fwasm-exceptions",
+            "-sSUPPORT_LONGJMP=wasm",
             "-sALLOW_MEMORY_GROWTH=1",
-            "-sINITIAL_MEMORY=64MB",
+            "-sINITIAL_MEMORY=256MB",
             "-sMAXIMUM_MEMORY=16GB",
-            "-sPTHREAD_POOL_SIZE=0",
-            "-sEXPORTED_FUNCTIONS=_nxrs_game_main",
+            "-sPTHREAD_POOL_SIZE=16",
+            // guest calls nest on the host stack: as deep as the native build's 8 MiB thread stacks
+            "-sSTACK_SIZE=8MB",
+            "-sDEFAULT_PTHREAD_STACK_SIZE=8MB",
             "-sERROR_ON_UNDEFINED_SYMBOLS=0",
             "-sWARN_ON_UNDEFINED_SYMBOLS=0",
         ])
+        .args(&extra)
         .arg(format!("@{}", rsp.display()))
         .arg("-o")
         .arg(js)

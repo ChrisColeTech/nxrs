@@ -642,3 +642,12 @@ fn private_mb() -> u64 {
     let (rss, swap) = nxrt::linux::process_memory();
     (rss + swap) >> 20
 }
+/// The web: the linear memory's current size.
+#[cfg(target_os = "emscripten")]
+fn private_mb() -> u64 {
+    extern "C" {
+        fn emscripten_get_heap_size() -> usize;
+    }
+    // SAFETY: a plain size read
+    (unsafe { emscripten_get_heap_size() } as u64) >> 20
+}

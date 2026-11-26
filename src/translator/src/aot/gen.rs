@@ -4,7 +4,7 @@
 use crate::aot::discover::{discover, estimate_sizes, partition, DiscoverStats};
 use crate::aot::emit::{table_text, EmitOptions, Emitter, GENERATED_MARKER};
 use crate::aot::patches::Table;
-use crate::loader::layout::{layout_h, layout_json, layout_names, ModLayout};
+use crate::loader::layout::{layout_h, layout_json, ModLayout};
 use crate::loader::{Module, Nso};
 use anyhow::{anyhow, Context, Result};
 use serde_json::json;
@@ -32,6 +32,8 @@ pub struct GenOptions {
     pub hints: BTreeMap<String, Vec<crate::aot::hints::Hint>>,
     /// Emit no functions at all (`--interp-only`, a diagnostic): the runtime interprets everything.
     pub interp_only: bool,
+    /// The first module's base (`layout::FIRST_BASE`; `WEB_FIRST_BASE` for a web build).
+    pub first_base: u64,
 }
 
 impl Default for GenOptions {
@@ -48,6 +50,7 @@ impl Default for GenOptions {
             emit: EmitOptions::default(),
             hints: BTreeMap::new(),
             interp_only: false,
+            first_base: crate::loader::layout::FIRST_BASE,
         }
     }
 }
@@ -137,8 +140,12 @@ pub fn generate(
             );
         }
     }
-    let mods =
-        layout_names(&names, &|n: &str| nsos.get(n).map(|x| x.size)).map_err(|e| anyhow!(e))?;
+    let mods = crate::loader::layout::layout_names_at(
+        &names,
+        &|n: &str| nsos.get(n).map(|x| x.size),
+        opts.first_base,
+    )
+    .map_err(|e| anyhow!(e))?;
     std::fs::create_dir_all(&opts.out)?;
     // gen.py writes these two with Path.write_text, so they carry the platform's line ends.
     write_if_changed(

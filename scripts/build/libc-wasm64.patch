@@ -1,0 +1,49 @@
+diff --git src/unix/linux_like/emscripten/mod.rs src/unix/linux_like/emscripten/mod.rs
+index 289fbdf..f159cb3 100644
+--- src/unix/linux_like/emscripten/mod.rs
++++ src/unix/linux_like/emscripten/mod.rs
+@@ -27,6 +27,11 @@ pub type ino_t = u64;
+ pub type off_t = i64;
+ pub type blkcnt_t = i32;
+ 
++// wasm64 (nxrs web target): Emscripten's musl defines blksize_t as int and nlink_t as an unsigned register-sized
++// integer, so on a 64-bit memory they are 4 and 8 bytes (struct stat's st_size sits at 32, not 24).
++#[cfg(target_pointer_width = "64")]
++pub type blksize_t = c_int;
++#[cfg(not(target_pointer_width = "64"))]
+ pub type blksize_t = c_long;
+ cfg_if! {
+     // `fsblkcnt_t` and `fsfilcnt_t` are 64-bit since v4.0.12, see:
+@@ -40,6 +45,9 @@ cfg_if! {
+     }
+ }
+ pub type rlim_t = u64;
++#[cfg(target_pointer_width = "64")]
++pub type nlink_t = u64;
++#[cfg(not(target_pointer_width = "64"))]
+ pub type nlink_t = u32;
+ 
+ // FIXME(1.0,deprecate): lfs binding to be removed
+@@ -123,6 +131,8 @@ s! {
+         pub f_ffree: crate::fsfilcnt_t,
+         pub f_favail: crate::fsfilcnt_t,
+         pub f_fsid: c_ulong,
++        // musl's `unsigned :8*(2*sizeof(int)-sizeof(long))`: none where long is 64-bit
++        #[cfg(not(target_pointer_width = "64"))]
+         __f_unused: Padding<c_int>,
+         pub f_flag: c_ulong,
+         pub f_namemax: c_ulong,
+@@ -239,8 +249,13 @@ s! {
+         pub msg_namelen: crate::socklen_t,
+         pub msg_iov: *mut crate::iovec,
+         pub msg_iovlen: c_int,
++        // musl pads after msg_iovlen and msg_controllen where long is 64-bit (little-endian)
++        #[cfg(target_pointer_width = "64")]
++        __pad1: Padding<c_int>,
+         pub msg_control: *mut c_void,
+         pub msg_controllen: crate::socklen_t,
++        #[cfg(target_pointer_width = "64")]
++        __pad2: Padding<c_int>,
+         pub msg_flags: c_int,
+     }
+ 

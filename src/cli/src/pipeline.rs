@@ -162,7 +162,7 @@ struct ModLine {
     build_id: String,
 }
 
-fn module_lines(exefs: &BTreeMap<String, Vec<u8>>) -> Result<Vec<ModLine>> {
+fn module_lines(exefs: &BTreeMap<String, Vec<u8>>, first_base: u64) -> Result<Vec<ModLine>> {
     let mut nsos = BTreeMap::new();
     let names = translator::loader::layout::order_with(exefs.keys());
     for name in &names {
@@ -173,9 +173,12 @@ fn module_lines(exefs: &BTreeMap<String, Vec<u8>>) -> Result<Vec<ModLine>> {
             );
         }
     }
-    let lay =
-        translator::loader::layout::layout_names(&names, &|n: &str| nsos.get(n).map(|x| x.size))
-            .map_err(|e| anyhow!(e))?;
+    let lay = translator::loader::layout::layout_names_at(
+        &names,
+        &|n: &str| nsos.get(n).map(|x| x.size),
+        first_base,
+    )
+    .map_err(|e| anyhow!(e))?;
     Ok(lay
         .into_iter()
         .map(|m| {
@@ -823,7 +826,12 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         )?),
         None => None,
     };
-    for m in module_lines(&game.exefs.files)? {
+    let first_base = if a.web {
+        translator::loader::layout::WEB_FIRST_BASE
+    } else {
+        translator::loader::layout::FIRST_BASE
+    };
+    for m in module_lines(&game.exefs.files, first_base)? {
         out.say(&format!(
             "  {:<8} {:010X}  code {:.1} MB  build id {}",
             m.name,
@@ -947,6 +955,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         jobs: a.jobs.max(1),
         emit: EmitOptions::default(),
         patches,
+        first_base,
         ..GenOptions::default()
     };
     if let Some(n) = a.chunk.filter(|&n| n > 0) {
@@ -1204,10 +1213,16 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
                 cc::link_dll(&clang, &objs, engine, &obj, &dll)?;
                 cc::link_exe(&clang, &obj, &exe)?;
             }
-            None => {
-                out.say("  the runtime is not linked into the web module yet: its symbols are imports (docs/35 W1)");
-                cc::link_web(&clang, &objs, None, &obj, &exe)?;
-            }
+            None => match cc::find_web_lib() {
+                Some(lib) => {
+                    out.say(&format!("  with {} ({WEB_ENTRY})", lib.display()));
+                    cc::link_web(&clang, &objs, Some(&lib), &obj, &exe)?;
+                }
+                None => {
+                    out.say("  no web engine library (scripts/build/web.ps1 -Crates os): the runtime's symbols are imports");
+                    cc::link_web(&clang, &objs, None, &obj, &exe)?;
+                }
+            },
         }
         timings.push(("link", t.elapsed().as_secs_f64()));
         Ok(())

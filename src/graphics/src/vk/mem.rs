@@ -421,6 +421,21 @@ mod watch {
         }
     }
 }
+// ---------- web: no write watch (wasm cannot track writes; docs/35 W4 replaces pool sync's use of it) ----------
+// Every answer is "not watched", which pool sync already treats as "take the whole range".
+#[cfg(target_os = "emscripten")]
+mod watch {
+    pub fn take(_lo: u64, _hi: u64, _reset: bool) -> Option<Vec<u64>> {
+        None
+    }
+    pub fn take_partial(_lo: u64, _hi: u64, _reset: bool) -> (Vec<u64>, bool) {
+        (Vec::new(), false)
+    }
+    pub fn alloc_of(_lo: u64, _hi: u64) -> u64 {
+        0
+    }
+    pub fn reset(_lo: u64, _hi: u64) {}
+}
 // ---------- Linux write watch (the runtime's userfaultfd watch, PAGEMAP_SCAN: one scan over any range) ----------
 #[cfg(target_os = "linux")]
 mod watch {
@@ -814,10 +829,15 @@ pub fn host_writable(a: u64, n: u64) -> bool {
     }
     true
 }
-#[cfg(not(windows))]
+#[cfg(target_os = "linux")]
 pub fn host_writable(a: u64, n: u64) -> bool {
     nxrt::mem::readable(a, n)
         && matches!(nxrt::linux::query(a), Some((true, prot, _, _)) if prot & 2 != 0)
+}
+/// The web: committed linear memory is always writable (wasm has no page protection).
+#[cfg(target_os = "emscripten")]
+pub fn host_writable(a: u64, n: u64) -> bool {
+    nxrt::mem::readable(a, n)
 }
 
 /// Whether the CPU wrote any page of [a, a + n) since the write watch was last taken there (a peek: nothing reset).

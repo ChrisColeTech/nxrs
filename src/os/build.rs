@@ -15,6 +15,12 @@ fn main() {
         linux();
         return;
     }
+    // the web (docs/35): the archives here are x86-64 objects; wasm builds of libopus, libvpx and dav1d come with the
+    // web build's audio and video (docs/35 W3). Until then their functions are imports of the module, which stop the
+    // game with the function's name if a codec is opened.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("emscripten") {
+        return;
+    }
     let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
     let here =
         std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap()).join("third_party");

@@ -503,6 +503,37 @@ fn describe_node(node: &str) -> Option<HidInfo> {
     Some(info)
 }
 
+/// The web: a page sees no HID interfaces (WebHID needs a user prompt per device; browser gamepads come through the
+/// page's input block, docs/35 W3).
+#[cfg(target_os = "emscripten")]
+pub fn enumerate() -> Vec<HidInfo> {
+    vec![]
+}
+#[cfg(target_os = "emscripten")]
+pub struct HidDev {
+    pub writable: bool,
+    pub info: HidInfo,
+    pub open_error: u32,
+}
+/// ERROR_DEVICE_NOT_CONNECTED: nothing opens on the web.
+#[cfg(target_os = "emscripten")]
+const NOT_CONNECTED: u32 = 1167;
+#[cfg(target_os = "emscripten")]
+impl HidDev {
+    pub fn open(_info: &HidInfo, _write: bool) -> Option<HidDev> {
+        None
+    }
+    pub fn read(&mut self) -> Read {
+        Read::Gone(NOT_CONNECTED)
+    }
+    pub fn write(&mut self, _data: &[u8]) -> u32 {
+        NOT_CONNECTED
+    }
+    pub fn feature(&self, _id: u8, _len: usize) -> Option<Vec<u8>> {
+        None
+    }
+}
+
 /// Every present HID interface (the hidraw nodes), in node order.
 #[cfg(target_os = "linux")]
 pub fn enumerate() -> Vec<HidInfo> {
