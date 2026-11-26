@@ -31,7 +31,9 @@ Owner, 2026-11-25: builds and games may run concurrently at full parallelism. Wa
 - **A worktree's `build\tools` is a junction** into the main checkout: remove the junction (`rmdir`) before removing
   the worktree, never `rm -rf` it. Check disk (`duf`) before opening one; each `target/` is large.
 - **One wave alone** may work in the main tree instead (no worktree); the rules below still hold.
-- **GPU:** two GPUs; the brief names one (`--env NXGFX_GPU=<n>` on every `play.py` run).
+- **GPU:** two GPUs; the brief names one (`--env NXGFX_GPU=<n>` on every `play.py` run). Two waves running games
+  at once get different GPUs (the lead checks `run.json` of recent runs; 2026-11-26 every brief said GPU 1 and four
+  games ran on it while GPU 0 sat idle).
 - **Perf numbers:** agents measure freely, and their numbers are indicative (the machine is shared). **The accepted
   numbers are the lead's**, taken at acceptance (§7) with nothing else running. An agent's report says what else was
   running during its runs if it knows.
