@@ -87,6 +87,7 @@ NXGFX_PIPE_NOOPT	diagnostic	`1` makes pipelines with optimization disabled (driv
 NXGFX_POOL	switch	- **Host** (`NXGFX_POOL=host`): the guest pages imported into Vulkan (VK_EXT_external_memory_host): zero-copy,	src/graphics/src/vk/mem.rs, src/graphics/tests/gpu.rs
 NXGFX_POOL_COLD	switch	from then on). NXGFX_POOL_COLD=0: every pool at every submission.	src/graphics/src/vk/mem.rs
 NXGFX_POOL_LOG	diagnostic	set: a line per memory pool with its placement	src/graphics/src/vk/mem.rs
+NXGFX_POOL_STICKY	switch	`NXGFX_POOL_STICKY=0`: a pool found written after 60 quiet frames goes cold again after the next 60 (as before OOT-FLASH); by default it is asked at every sync from then on	src/graphics/src/vk/mem.rs
 NXGFX_POOL_SPARSE	switch	`NXGFX_POOL_SPARSE=0` backs every pool whole.	src/graphics/src/vk/mem.rs
 NXGFX_POOL_WALKER	switch	`NXGFX_POOL_WALKER=0`: no pool walker thread (MKW-RECORD step 1); the present's sync walks every pool itself	src/graphics/src/vk/mem.rs
 NXGFX_PRESENT	switch	the swap chain present mode: `fifo`, `mailbox` or `immediate`	src/graphics/src/vk/present.rs

@@ -58,5 +58,34 @@ its 4 captures on the forest's fog (`NXGFX_FAULT_PER_REASON` added). The white o
 herbs, pots, baskets, vines; in `064040-hd/16-d13` the same props displaced), so per-object data (transforms / material
 constants) wrong for one frame is the working hypothesis; texture stand-ins are ruled out by the trace (none logged).
 
+**Fault A, measured.** With `NXGFX_FAULT_PER_REASON=40` the white-flash check catches it on its own: run
+`110401-of-fix2-oot-house` has 6 one-frame white flashes in the house (presents 14660, 15188, 15296, 15840, 16128,
+16698; every one "100% of the white area gone again" at the next present), all the same props, Link standing still.
+Nothing else is logged near them. Ruled out by reading: inline uniform updates (ordered GPU copies), compute → draw
+ordering (a full barrier after every dispatch), the pool descriptor snapshots (recycled after use, refreshed with
+every edit since their generation), the texture view memo (keyed by the table generation).
+
+**Working hypothesis: the cold-pool rule (`mem.rs` `begin_submit`).** A pool with no CPU write for 60 frames is
+asked only at a frame's first sync; "a write to a cold pool reaches the GPU at the next frame's first submission". OoT
+makes 11 submissions a frame, so a CPU write into a cold pool after the frame's first sync is not uploaded before the
+later submissions of that frame: their draws read the pool's older bytes (per-object transforms / constants: displaced
+or white props). A/B `114437-of-ring-cold0-oot-house` (`NXGFX_POOL_COLD=0`): **INVALID** — UPSYNC2's `114517-s2-oot2` ran at the
+same time from 11:45 (two OoT copies; see Provenance), which also explains its 13 FPS; its numbers and its 0 flashes
+count for nothing.
+
+**Provenance of the OoT runs (lead's check).** UPSYNC2 relinks OoT into the same library folder from its own dist
+(without rewriting the build log); my relinks write the build log. Runs and the build they used:
+
+| Run | relink before it | build | valid |
+|---|---|---|---|
+| `102501-of-trace1-oot-house` | mine 10:23-10:24 (UPSYNC2's last run ended 10:17) | ootflash (trace) | yes |
+| `103850-of-fix1-oot-house` | mine 10:37:34-10:38:22; UPSYNC2 relinked next at 10:50:51, after it ended | ootflash (B fixes) | yes |
+| `110401-of-fix2-oot-house` | mine 11:03:27 (UPSYNC2's `105129` ended 11:03:07) | ootflash (B fixes) | yes |
+| `114437-of-ring-cold0-oot-house` | mine 11:41 | ootflash, but a second OoT copy (`s2-oot2`) ran from 11:45 | **no** |
+
+UPSYNC2's `114517-s2-oot2` logged no stand-in line in 935 s (its build logs a burst every ~80 s), so it ran on the
+ootflash 11:41 build. My relink at 12:00:30-12:00:59 (sticky fix) left OoT on the ootflash build with no run started;
+the lead was told.
+
 **Verification:** `cargo test --release -p graphics`; dense `py scripts/play.py oot-house --faults --env NXGFX_GPU=1`
 runs totalling >= 90 house shots with zero faults of either kind; every sheet, report.md and capture read.

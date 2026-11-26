@@ -60,6 +60,8 @@ pub struct Pool {
     pub alloc_base: u64,
     /// the frame its CPU writes were last seen (cold pools are asked once a frame: `begin_submit`)
     pub dirty_frame: u64,
+    /// found written after a quiet stretch (`is_cold`): never cold again (`NXGFX_POOL_STICKY=0`: as before)
+    pub sporadic: bool,
     /// A pool larger than the device's largest buffer (maintenance4 `maxBufferSize`; AMD: 2 GiB) has several buffers,
     /// windows side by side over it: window k holds pool bytes [k * win, (k + 1) *
     /// win), window 0 is `buf`, the others are here. `win` 0: one buffer for all of it.
@@ -617,6 +619,7 @@ pub fn pool_add(p: &pool_t) {
         da: 0,
         alloc_base: if watched { watch::alloc_of(lo, hi) } else { 0 },
         dirty_frame: super::present::frames(),
+        sporadic: false,
         win: 0,
         wins: Vec::new(),
         wins_da: Vec::new(),
@@ -837,6 +840,37 @@ pub fn cpu_flushed(a: u64, n: u64) {
     }
 }
 
+/// Whether `begin_submit` leaves a pool out of a frame's later syncs (asks it only at the frame's first): no CPU write
+/// for 60 frames, and never found written after such a quiet stretch. A pool the game writes now and then (OoT: the
+/// per-object data of the house's hanging props, every few seconds) was cold between its writes, so a write made after
+/// a frame's first sync reached the GPU only at the next frame's: that frame's later submissions drew those props
+/// with the older bytes (white or displaced for one frame, OOT-FLASH). Once found written after a quiet stretch
+/// (`Pool::sporadic`), it is asked at every sync. `NXGFX_POOL_STICKY=0`: cold again after 60 quiet frames, as before.
+fn is_cold(p: &Pool, frame: u64) -> bool {
+    static STICKY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let sticky = *STICKY.get_or_init(|| std::env::var("NXGFX_POOL_STICKY").as_deref() != Ok("0"));
+    cold_rule(p.dirty_frame, p.sporadic, frame, sticky)
+}
+
+/// `is_cold` on its inputs: last written at `dirty_frame`, found written after a quiet stretch before (`sporadic`).
+fn cold_rule(dirty_frame: u64, sporadic: bool, frame: u64, sticky: bool) -> bool {
+    frame.saturating_sub(dirty_frame) > 60 && !(sticky && sporadic)
+}
+
+#[cfg(test)]
+mod cold_rule_tests {
+    use super::cold_rule;
+
+    #[test]
+    fn a_pool_written_after_going_quiet_is_never_cold_again() {
+        assert!(!cold_rule(100, false, 160, true), "written 60 frames ago: asked at every sync");
+        assert!(cold_rule(100, false, 161, true), "61 quiet frames: asked once a frame");
+        // the old rule made it cold again after every write, so a write after a frame's first sync waited a frame
+        assert!(!cold_rule(100, true, 10_000, true), "found written while cold once: asked at every sync");
+        assert!(cold_rule(100, true, 10_000, false), "NXGFX_POOL_STICKY=0: as before");
+    }
+}
+
 /// The CPU's writes to [a, a + n) of a cold pool, taken now: a buffer -> texture copy reads them in this submission.
 /// `begin_submit` asks a cold pool (no CPU write for 60 frames) once a frame only, so a texture copied from memory the
 /// CPU wrote since kept the old bytes for good (the copy's texture is the GPU's from then on): Mario Kart World's menu
@@ -863,7 +897,7 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     let Some(b) = find(&m, a, n) else { return };
     let p = m.by_base.get_mut(&b).unwrap();
     // a hot pool was asked at this submission's start; only a watched mirror's pages are taken here
-    if !p.watched || p.placement != Placement::Mirror || frame.saturating_sub(p.dirty_frame) <= 60 {
+    if !p.watched || p.placement != Placement::Mirror || !is_cold(p, frame) {
         return;
     }
     // taking the watch and uploading the CPU writes: a first-use initialization in the upload buffer (`gate::pass_pre`)
@@ -2366,7 +2400,7 @@ fn walker_main() {
                     } else {
                         // the pools a sync of this frame would scan (`begin_submit`'s cold rule)
                         let frame = super::present::frames();
-                        watched_pools_where(&m, |p| frame.saturating_sub(p.dirty_frame) <= 60)
+                        watched_pools_where(&m, |p| !is_cold(p, frame))
                     }
                 };
                 let mut job = WalkJob::new(tail, signals, walk_pieces(&list, WALK_PIECE));
@@ -2750,7 +2784,7 @@ pub fn begin_submit_ex(
         let signals = cpu_signals();
         let tail = super::queue::aq_tail();
         m.scan_frame = frame;
-        let skip = |p: &Pool| cold_on && !new_frame && frame.saturating_sub(p.dirty_frame) > 60;
+        let skip = |p: &Pool| cold_on && !new_frame && is_cold(p, frame);
         cold_skipped = m
             .by_base
             .values()
@@ -2964,6 +2998,23 @@ pub fn begin_submit_ex(
             }
             if f.saturating_sub(p.dirty_frame) > 60 {
                 COLD_GEN.fetch_add(1, Ordering::AcqRel);
+                p.sporadic = true;
+                // (diagnosis, OOT-FLASH) a cold pool's writes are taken only at a frame's first sync: a later
+                // submission of the frame they were made in read the pool's older bytes
+                static SAID: AtomicU64 = AtomicU64::new(0);
+                if SAID.fetch_add(1, Ordering::Relaxed) < 400 {
+                    let bytes: u64 = ranges.iter().map(|r| r.1).sum();
+                    crate::vklog!(
+                        "cold pool written: {:#x} (+{:#x}) at frame {f} ({}), last written at frame {}: {} range(s), {} bytes, first {:#x}",
+                        p.base,
+                        p.size,
+                        if mid_frame { "a later sync of the frame" } else { "the frame's first sync" },
+                        p.dirty_frame,
+                        ranges.len(),
+                        bytes,
+                        ranges[0].0
+                    );
+                }
             }
             p.dirty_frame = f;
         }
