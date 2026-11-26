@@ -277,10 +277,47 @@ fn samp_key(p: &samp_par) -> [u32; 10] {
     ]
 }
 
+/// The storage-view list (`storage_tex`, walked by `storage_views` at every draw or dispatch of a shader that indexes
+/// the storage pool) after slot `id` gets storage descriptor `storage`: listed only when that view is the image's own
+/// (`own`). The zero stand-in a slot with no storage view gets is written as its descriptor but not listed: listing it
+/// made every registered texture a "storage view" walked per such draw (audit of 78c7f82, MEDIUM 4).
+fn list_storage(list: &mut BTreeMap<i32, vk::ImageView>, id: i32, storage: Option<vk::ImageView>, own: bool) {
+    match storage {
+        Some(v) if own => {
+            list.insert(id, v);
+        }
+        _ => {
+            list.remove(&id);
+        }
+    }
+}
+
 #[cfg(test)]
 mod registration_boundary_tests {
     use super::*;
     use std::cell::Cell;
+
+    /// A slot's own storage view is listed for storage-write tracking; the stand-in, or none, takes it off the list.
+    #[test]
+    fn stand_in_storage_views_stay_off_the_storage_list() {
+        let tables = cpu_tables();
+        let own = vk::Handle::from_raw(0x11);
+        let stand_in: vk::ImageView = vk::Handle::from_raw(0x22);
+        {
+            let mut i = tables.inner.lock().unwrap();
+            i.tex_pools.insert(0, 8);
+            for id in 0..3 {
+                i.tex.insert(id, (100 + id as u64, None));
+            }
+            list_storage(&mut i.storage_tex, 0, Some(own), true);
+            list_storage(&mut i.storage_tex, 1, Some(stand_in), false);
+            list_storage(&mut i.storage_tex, 2, None, false);
+        }
+        assert_eq!(tables.storage_views(0), vec![(100, own)]);
+        // the image's own view replaced by the stand-in (the slot lost its storage use): off the list
+        list_storage(&mut tables.inner.lock().unwrap().storage_tex, 0, Some(stand_in), false);
+        assert!(tables.storage_views(0).is_empty());
+    }
 
     fn cpu_tables() -> Tables {
         Tables { pool: vk::DescriptorPool::null(), set: vk::DescriptorSet::null(), db: None,
@@ -977,19 +1014,18 @@ impl Tables {
         self.descriptors_changed();
     }
 
+    /// Texture slot `id`'s descriptors: `view` sampled, `storage` its storage descriptor; `own`: that storage view is
+    /// the image's own, not the zero stand-in (`list_storage`).
     pub fn write_image(
         &self,
         d: &Device,
         id: i32,
         view: vk::ImageView,
         storage: Option<vk::ImageView>,
+        own: bool,
     ) {
         let mut i = self.inner.lock().unwrap();
-        if let Some(v) = storage {
-            i.storage_tex.insert(id, v);
-        } else {
-            i.storage_tex.remove(&id);
-        }
+        list_storage(&mut i.storage_tex, id, storage, own);
         if i.image_desc.get(&id) == Some(&(view, storage)) {
             return;
         }

@@ -352,6 +352,31 @@ pub fn translate(a: u64, n: u64) -> Option<u64> {
     .flatten()
 }
 
+/// The bytes from `a`, at most `max`, over which a sparse pool's pages are mapped to contiguous physical memory: the
+/// range `translate` resolves (0: `a`'s page is unmapped, or `a` is in no sparse pool). A buffer bound with no size
+/// at a sparse address runs over this mapped run, not to the end of the pool (nxnative binds "a sparse pool's mapped
+/// run"; PRAGMATA / Resident Evil 4 map 0xc0000 bytes at the base of a 1 GB pool).
+pub fn run_len(a: u64, max: u64) -> u64 {
+    with_pool(a, |v, off| {
+        let first = pte(v, off);
+        if first.phys == 0 || off >= v.size {
+            return 0;
+        }
+        let page0 = first.phys;
+        let limit = (v.size - off).min(max);
+        let mut o = (off & !(PG - 1)) + PG;
+        while o < off + limit {
+            let p = pte(v, o);
+            if p.phys == 0 || p.phys != page0 + (o - (off & !(PG - 1))) {
+                return o - off;
+            }
+            o += PG;
+        }
+        limit
+    })
+    .unwrap_or(0)
+}
+
 /// Reads [a, a + dst.len()) through the page table: unmapped pages read as 0. Returns the physical ranges read
 /// (for dirty tracking) or None when `a` is in no sparse pool.
 pub fn copy(a: u64, dst: &mut [u8]) -> Option<Vec<(u64, u64)>> {
@@ -464,6 +489,26 @@ mod tests {
             Some(phys_mem.as_ptr() as u64 + 0x3010)
         );
         assert_eq!(translate(base, 0x10), None);
+        // the mapped run from an address: up to the first unmapped page, the pool's end or the cap
+        assert_eq!(run_len(base + 0x1010, 1 << 20), 0x1ff0);
+        assert_eq!(translate(base + 0x1010, run_len(base + 0x1010, 1 << 20)), Some(phys_mem.as_ptr() as u64 + 0x3010));
+        assert_eq!(run_len(base + 0x1010, 0x100), 0x100);
+        assert_eq!(run_len(base, 1 << 20), 0, "an unmapped page");
+        assert_eq!(run_len(0x10, 1 << 20), 0, "no sparse pool");
+        // a next page mapped elsewhere in physical memory ends the run too
+        assert!(map(
+            &mut s,
+            &[MapReq {
+                phys: &ph,
+                poff: 0x8000,
+                voff: 0x3000,
+                size: 0x1000,
+                storage_class: 0,
+                pad: 0
+            }]
+        ));
+        assert_eq!(run_len(base + 0x1000, 1 << 20), 0x2000);
+        assert_eq!(run_len(base + 0x3000, 1 << 20), 0x1000);
         let mut buf = vec![0xffu8; 0x3000];
         let runs = copy(base, &mut buf).unwrap();
         assert_eq!(buf[0], 0);

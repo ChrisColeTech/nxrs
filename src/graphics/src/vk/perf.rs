@@ -77,6 +77,12 @@ pub enum C {
     PoolPrepareImages,
     /// stage sets made from the stage's last set with only uniform buffers / push constants written again
     SetsPatched,
+    /// inline uniform buffer updates (UPDATE_UB), and those that ended an open render pass
+    UbUpdates,
+    UbPassEnds,
+    /// written storage buffers bound with no size (a pushed plain address): noted as GPU-written over their whole
+    /// binding (up to `NXGFX_SBUF0_MB`) at every submission
+    SbufSize0Written,
     N,
 }
 
@@ -137,6 +143,9 @@ const NAMES: [&str; C::N as usize] = [
     "pool_prepare_scans",
     "pool_prepare_images",
     "sets_patched",
+    "uniform_updates",
+    "uniform_update_pass_ends",
+    "sbuf_size0_written",
 ];
 
 static COUNT: [AtomicU64; C::N as usize] = [const { AtomicU64::new(0) }; C::N as usize];
@@ -509,7 +518,7 @@ pub fn frame(frame: u64) {
         );
     }
     crate::vklog!(
-        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets ({:.1} reused, {:.1} patched), {:.1} vertex inputs unchanged, {:.1} write-backs; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms; {} linked from parts, {} of them optimized since, {} shader parts made ahead); dropped work {}",
+        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets ({:.1} reused, {:.1} patched), {:.1} vertex inputs unchanged, {:.1} write-backs, {:.1} uniform updates ({:.1} ending a pass), {:.1} written storage buffers with no size; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms; {} linked from parts, {} of them optimized since, {} shader parts made ahead); dropped work {}",
         d(C::Draws, &p) as f64 / df,
         d(C::DrawsSkipped, &p) as f64 / df,
         cur[C::SkipNoShader as usize],
@@ -525,6 +534,9 @@ pub fn frame(frame: u64) {
         d(C::SetsPatched, &p) as f64 / df,
         d(C::VinSkipped, &p) as f64 / df,
         d(C::Writebacks, &p) as f64 / df,
+        d(C::UbUpdates, &p) as f64 / df,
+        d(C::UbPassEnds, &p) as f64 / df,
+        d(C::SbufSize0Written, &p) as f64 / df,
         cur[C::PipesGfx as usize],
         cur[C::PipesCompute as usize],
         cur[C::PipeNs as usize] as f64 / 1e6,
