@@ -984,7 +984,8 @@ mod tests {
             .unwrap();
         let text = win::run_ex(
             "hostprof stack spinner",
-            0.2,
+            1.0, // a stack sample is slow on CI runners (6 in 0.2 s there); 1 s gives the floor room
+
             std::time::Instant::now(),
             true,
         );

@@ -5,6 +5,25 @@ use super::build_layout::{build_dir_for, migrated_build_dir, nxrs_folder_for};
 use super::card_state::{card_state, status_for};
 use super::facts::Facts;
 
+// The tests below use Windows drive paths ("P:/…"), which only Windows treats as absolute.
+#[cfg(not(windows))]
+#[test]
+fn new_builds_go_to_the_nxrs_folder_beside_the_source_unix() {
+    assert_eq!(
+        build_dir_for("/dumps/Kart [v0]/Kart.nsp", "", "Kart"),
+        "/dumps/Kart [v0]/nxrs/Kart"
+    );
+    assert_eq!(
+        migrated_build_dir("/dumps/Kart/SwitchRecomp Builds/Kart [nxrs]").as_deref(),
+        Some("/dumps/Kart/nxrs/Kart")
+    );
+    assert_eq!(
+        nxrs_folder_for("/d/SwitchRecomp Builds/Kart"),
+        "/d/nxrs/Kart"
+    );
+}
+
+#[cfg(windows)]
 #[test]
 fn new_builds_go_to_the_nxrs_folder_beside_the_source() {
     assert_eq!(
@@ -18,6 +37,7 @@ fn new_builds_go_to_the_nxrs_folder_beside_the_source() {
     );
 }
 
+#[cfg(windows)]
 #[test]
 fn only_the_old_default_layout_migrates() {
     let old = "P:/Dumps/Arceus/SwitchRecomp Builds/Pokemon Legends - Arceus 1G1U [nxrs]";
@@ -40,6 +60,7 @@ fn only_the_old_default_layout_migrates() {
     }
 }
 
+#[cfg(windows)]
 #[test]
 fn other_engine_entries_get_a_folder_of_their_own() {
     assert_eq!(
