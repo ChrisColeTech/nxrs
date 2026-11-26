@@ -312,13 +312,10 @@ pub fn upload_changed(
                     // (an entry made again since step 1 may not reach this page yet: uploaded, unknown)
                     let Some(page) = p.pages.get_mut(((c.pg - first) / PAGE) as usize) else { continue };
                     // the "write" was this pool's lazy page coming back from the device, and the CPU has not changed it:
-                    // the GPU copy holds those bytes (also their hash from now on, where no unlanded note stamped it)
+                    // the GPU copy holds those bytes. The hash stays as it is (UPSYNC2 send-back 2: arming it with the
+                    // brought hash kept a hash the GPU no longer held when a write-back landed while the page was read)
                     if c.br != 0 && page.brought == c.br && c.gh == c.br {
-                        page.brought = 0;
-                        if page.stamp == 0 {
-                            page.hash = c.br;
-                        }
-                        BROUGHT_SKIPPED.fetch_add(PAGE, Ordering::Relaxed);
+                        page.brought = 0;                        BROUGHT_SKIPPED.fetch_add(PAGE, Ordering::Relaxed);
                         back.push(c.pg);
                         c.skip = true;
                         continue;
@@ -363,8 +360,9 @@ pub fn upload_changed(
                         let Some(page) = p.pages.get_mut(((c.pg - first) / PAGE) as usize) else { continue };
                         if page.brought != 0 {
                             c.skip = true;
+                            // unknown, the record kept for the next sync (no hash from a brought record, as in step 3)
                             if page.stamp == copying {
-                                *page = Pg { hash: page.brought, stamp: 0, kept: 0, ..*page };
+                                *page = Pg { hash: 0, stamp: 0, kept: 0, ..*page };
                             }
                             BROUGHT_RACED.fetch_add(1, Ordering::Relaxed);
                         } else if c.whole && page.stamp == copying {
@@ -513,8 +511,12 @@ pub fn forget(a: u64, n: u64) {
     }
     let mut g = state();
     let Some(st) = g.as_mut() else { return };
+    // a page the recording in progress noted keeps that stamp (hash and parked hash gone): a repeat note of the same
+    // range in this recording is filtered (`gpu_writes`' RECENT), so only the stamp lets the landing re-arm it with the
+    // GPU's bytes (UPSYNC2 send-back 2; a forget here undid H1)
+    let cur = EPOCH.load(Ordering::Acquire);
     for base in st.owners(a, n) {
-        st.each_page(base, a, n, |pg, _| *pg = Pg::default());
+        st.each_page(base, a, n, |pg, _| *pg = Pg { stamp: if pg.stamp == cur { cur } else { 0 }, ..Pg::default() });
     }
 }
 
@@ -846,6 +848,63 @@ mod tests {
         let now = bytes(base + PAGE, PAGE);
         landed(base, base + PAGE, PAGE, now.as_ptr(), now.as_ptr(), k, 1);
         assert_eq!(runs(base, size, base + PAGE, PAGE), vec![], "re-armed with the GPU's bytes");
+        drop_any(base);
+    }
+
+    /// UPSYNC2 send-back 2 (H1 kept through a forget): the recording noted P, another upload path forgot P (the
+    /// recording's upload buffer), the sync uploaded U, a repeat note was filtered; the landing must still re-arm P with
+    /// the GPU's bytes G. Before the fix the forget cleared the stamp: the upload kept h(U), the landing re-armed nothing,
+    /// and the CPU writing U again was skipped while the GPU held G.
+    #[test]
+    fn a_forget_after_a_note_in_the_same_recording_keeps_the_stamp() {
+        let _s = SERIAL.lock().unwrap();
+        let (_m, base) = pool(1);
+        drop_any(base);
+        runs(base, PAGE, base, PAGE);
+        let u = vec![0x11u8; PAGE as usize];
+        let g = vec![0x6eu8; PAGE as usize];
+        gpu_writes(base, PAGE);
+        forget(base, PAGE);
+        set(base, &u);
+        assert_eq!(runs(base, PAGE, base, PAGE), vec![(base, PAGE)], "U uploaded");
+        gpu_writes(base, PAGE); // filtered as a repeat
+        let k = next_epoch();
+        landed(base, base, PAGE, g.as_ptr(), u.as_ptr(), k, 1);
+        set(base, &g); // merged into guest memory
+        set(base, &u); // the CPU writes U again before the next sync
+        assert_eq!(runs(base, PAGE, base, PAGE), vec![(base, PAGE)], "the GPU holds G: U must be uploaded");
+        set(base, &g);
+        assert_eq!(runs(base, PAGE, base, PAGE), vec![(base, PAGE)], "G uploaded back over U");
+        assert_eq!(runs(base, PAGE, base, PAGE), vec![], "and known");
+        // a forget outside any note still clears the stamp of an earlier recording
+        gpu_writes(base, PAGE);
+        let k = next_epoch();
+        forget(base, PAGE);
+        landed(base, base, PAGE, u.as_ptr(), u.as_ptr(), k, 1);
+        assert_eq!(runs(base, PAGE, base, PAGE), vec![(base, PAGE)], "forgotten after the note's recording: unknown");
+        drop_any(base);
+    }
+
+    /// UPSYNC2 send-back 2 (MEDIUM): a page left out as brought back unchanged keeps its hash; it is not armed with the
+    /// brought hash. The interleaving: submission 101 noted P and wrote G after the bring-back's copy read B (value
+    /// 100); 101 landed before the record existed (hash h(G)); the sync found guest B = the record and left P out.
+    /// Arming hash = h(B) there let the CPU writing B again be skipped while the GPU held G.
+    #[test]
+    fn a_brought_back_skip_does_not_arm_the_hash() {
+        let _s = SERIAL.lock().unwrap();
+        let (_m, base) = pool(1);
+        drop_any(base);
+        new_pool(base, base + PAGE);
+        let b = vec![0xb0u8; PAGE as usize];
+        let g = vec![0x6eu8; PAGE as usize];
+        set(base, &b);
+        gpu_writes(base, PAGE);
+        let k = next_epoch();
+        landed(base, base, PAGE, g.as_ptr(), b.as_ptr(), k, 101);
+        brought_back(base, base, &b, 100);
+        assert_eq!(runs_back(base, PAGE, base, PAGE), (vec![], vec![base]), "the bring-back's store: left out");
+        set(base, &b); // the CPU writes B again
+        assert_eq!(runs(base, PAGE, base, PAGE), vec![(base, PAGE)], "the GPU may hold other bytes: uploaded");
         drop_any(base);
     }
 

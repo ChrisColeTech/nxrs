@@ -3145,13 +3145,30 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
                 at = (pg + PAGE).min(a + n).max(at);
             }
             let tm = std::time::Instant::now();
+            let mut fresh: Vec<u64> = Vec::new();
             for &(wlo, wn, buf, off0) in &windows {
                 let pages: Vec<u64> = lazy
                     .iter()
                     .copied()
                     .filter(|&pg| pg >= wlo && pg < wlo + wn)
                     .collect();
-                super::lazy::make_lazy(&pages, buf, wlo, off0, pool);
+                fresh.extend(super::lazy::make_lazy(&pages, buf, wlo, off0, pool));
+            }
+            // a game store between the write-watch check above and a page's protection is in guest memory only: such a
+            // page is not held (bringing it back would put the buffer's page over the store), it is released and this
+            // write-back lands on it instead (UPSYNC2 send-back 2)
+            if !fresh.is_empty() && std::env::var("NXGFX_LAZY_CPU_CHECK").as_deref() != Ok("0") {
+                fresh.sort_unstable();
+                let (lo, hi) = (fresh[0], fresh[fresh.len() - 1] + PAGE);
+                if let Some(cpu) = watch::take(lo, hi, false) {
+                    let written: Vec<u64> = fresh.iter().copied().filter(|pg| cpu.binary_search(pg).is_ok()).collect();
+                    for pg in super::lazy::unhold(&written) {
+                        let o = (pg - a) as usize;
+                        let at = |q: *const u8| if q.is_null() { q } else { unsafe { q.add(o) } };
+                        land(p, pg, PAGE, at(src), at(pre), &same);
+                        super::lazy::UNHELD.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
             super::lazy::T_MAKE.fetch_add(tm.elapsed().as_nanos() as u64, Ordering::Relaxed);
             continue;
