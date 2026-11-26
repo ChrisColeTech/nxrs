@@ -23,19 +23,6 @@ pub fn output_name_for(title: &str) -> String {
     }
 }
 
-/// `<folder> [nxrs]`, the folder a build goes into (once: a folder that has the suffix keeps it).
-pub fn build_folder_for(build_dir: &str) -> String {
-    let suffix = crate::constants::engine::NXRS_FOLDER_SUFFIX;
-    let mut base = super::path_text::from_native(build_dir);
-    while base.ends_with('/') {
-        base.pop();
-    }
-    if let Some(stripped) = base.strip_suffix(suffix) {
-        base = stripped.to_string();
-    }
-    base + suffix
-}
-
 /// A title from a file or folder name (no suffix for a file): `[...]` tags removed.
 pub fn title_from_name(name: &str) -> String {
     let cleaned = match TAGS.as_ref() {

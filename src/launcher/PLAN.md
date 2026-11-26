@@ -25,7 +25,7 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 | D-02 | One-time copy of the legacy data folders `RecompLauncher/RecompLauncher`, then `RecompLauncher/SwitchRecompLauncher`, into `nxrs` when `nxrs/library.json` does not exist; old folders untouched; skipped with `--library` | `main.cpp` `migrateLegacyData` |
 | D-03 | Load: missing file = empty library; unreadable or invalid JSON or `schema != 1` = error message, and the library is marked unwritable (never overwritten) | `Library::load`, `Library::save` (`writable`) |
 | D-04 | Top-level keys and clamps: `toolRoot`, `toolRootChosen`, `outputRoot`, `keysPath`, `nxrsBuild`, `jobs` (1..64, 8), `viewMode` (0..1), `coverWidth` (130..240, 180), `showBackground` (true), `colorMode` (dark/light, else dark), `accentColor` (lime), `buttonLayout` (normalized, else `switch`), `pauseOnFocusLoss`, `muteOnFocusLoss` (false), `docked` (true), `askUser` (false), `geometry`, `dockState` (Qt base64 blobs) | `Library::load` / `save` |
-| D-05 | Game keys: `id`, `title`, `source`, `buildDir`, `outputName`, `cover`, `background`, `renderer` (default vulkan; anything but vulkan/opengl becomes opengl), `buttonLayout` / `screenMode` (normalized, aliases accepted), `workers` (0..64), `optimization` (0..3, 2), `engine` (written `nxrs`; another value or none loads as nxrs and moves the entry to its `[nxrs]` folder), `builtSource`, `savesOffered` (read and written back unchanged), `hintsBuilt` (>= 0), `buildIncomplete`, `lastPlayed` / `lastBuilt` (Qt ISO local time, `""` when unset), `updates[] {path,titleId,version,display}` and `dlc[]` (deduplicated with `samePath`, empty entries dropped), `updateChoice`, `builtUpdate` | `Game::json`, `Game::fromJson` |
+| D-05 | Game keys: `id`, `title`, `source`, `buildDir`, `outputName`, `cover`, `background`, `renderer` (default vulkan; anything but vulkan/opengl becomes opengl), `buttonLayout` / `screenMode` (normalized, aliases accepted), `workers` (0..64), `optimization` (0..3, 2), `engine` (written `nxrs`; another value or none loads as nxrs and moves the entry to an nxrs folder of its own, `<base>\nxrs\<name>`, G-08), `builtSource`, `savesOffered` (read and written back unchanged), `hintsBuilt` (>= 0), `buildIncomplete`, `lastPlayed` / `lastBuilt` (Qt ISO local time, `""` when unset), `updates[] {path,titleId,version,display}` and `dlc[]` (deduplicated with `samePath`, empty entries dropped), `updateChoice`, `builtUpdate` | `Game::json`, `Game::fromJson` |
 | D-06 | Load-time repairs: `adoptBuiltUpdate` per game (a build whose `romfs.nsp` marker names an update); a library without `screenMode` gets `handheld` for a built game whose INI says `docked=0`; entries without id or title, or with a duplicate id, are skipped; a per-game `pauseOnFocusLoss` (from 382ff33) is ignored and dropped at the next save | `Library::load` |
 | D-07 | Atomic save (QSaveFile), creates the folder; keys sorted (QJsonObject order), 4-space indent | `Library::save` |
 | D-08 | Add refuses a duplicate source or executable; `importBuild` merges into an unbuilt entry of the same source (keeps title, cover, build options) or appends; repeated import of the same exe is a no-op | `Library::add`, `Library::importBuild` |
@@ -38,13 +38,13 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 | ID | Feature | Source |
 |---|---|---|
 | G-01 | Accepted sources: folder with `main` / `exefs/main` / `ExeFS/main`; `.nup` (`NUP\1`), `.nsp` (`PFS0`), `.nro` (`NRO0` at 0x10), `.xci` (`HEAD` at 0x100 or 0x1100); exact error texts | `validSource` |
-| G-02 | New entry: UUID id, title from the file/folder name with `[...]` removed, ASCII output name (NFKD, letters/digits/`-_ `, else `Game`), build folder `<outputRoot or source folder\SwitchRecomp Builds>\<name> [nxrs]` | `gameFromSource`, `titleForSource`, `outputNameFor` |
+| G-02 | New entry: UUID id, title from the file/folder name with `[...]` removed, ASCII output name (NFKD, letters/digits/`-_ `, else `Game`), build folder `<source folder or outputRoot>\nxrs\<name>` (owner, 2026-11-26; was `SwitchRecomp Builds\<name> [nxrs]`) | `gameFromSource`, `titleForSource`, `outputNameFor` |
 | G-03 | Format labels: DIRECT NUP / NSP / XCI, HOMEBREW, EXTRACTED, NATIVE BUILD | `Game::format` |
 | G-04 | Display version from `<data>\control.nacp` at 0x3060 (digit-first only) | `Game::version` |
 | G-05 | "Has a build": not incomplete, exe + `<name>_code.dll/.so` + `<name>_data\` exist, built source = source (or no source), built update = chosen update; `updatePending` = built but with another update | `Game::hasBuild`, `updatePending`, `builtFiles`, `sameToken` |
 | G-06 | Import a native build: needs exe + code module + data; source from `romfs.nup` (line 1) or `romfs.nsp` (`SWRNSP1/2`, line 2); applied update from `SWRNSP2` `update` row; engine from `<name>_build*\gen\nxrs.gen.key`; renderer from INI; cover from `icon.jpg` / `icon.png` / `icon_AmericanEnglish.dat` in data | `gameFromExecutable`, `sourceOfBuild`, `builtWithNxrs`, `adoptBuiltUpdate` |
 | G-07 | Path equality: clean absolute, `/` and `\` equal, case-insensitive on Windows | `samePath` |
-| G-08 | Build folder: `buildFolderFor(dir)` (`" [nxrs]"` suffix); an entry loaded from another engine moves there and reads back what that folder has built | `setGameEngine`, `buildFolderFor` |
+| G-08 | Build folder: `model::build_layout` (`<base>\nxrs\<name>`); an entry loaded from another engine moves to `nxrs_folder_for` its old folder and reads back what that folder has built; entries in the old layout (`SwitchRecomp Builds\<name> [nxrs]`) are migrated only when asked, by `--migrate-builds` or Settings > Build defaults > Old build folders > Move, never at window start (renamed, `buildDir` updated, running / in-use / taken skipped and reported, `library.pre-layout.json` first; LAUNCHER_CONTRACT.md v2) | `setGameEngine`, `buildFolderFor` |
 | G-09 | A package that holds game + DLC: the first build from it puts the package on the game's DLC list (never re-adds after the user removed it) | `adoptPackageDlc`, `BuildManager::reportsPackageDlc` |
 | G-10 | "Rebuild for full speed": `<data>\discovered.tsv` non-comment lines minus `hintsBuilt`, nxrs games only | `discoveredCount`, `newDiscoveries` |
 
@@ -144,7 +144,7 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 | W-08 | Selection: single, kept across refresh, first game when lost; selection line "title · format · vX · renderer" with source tooltip | `selectGame`, `refreshSelection` |
 | W-09 | Background canvas: selected game's background (else cover), opacity .32 dark / .20 light, top-to-bottom fade; toggle | `LibraryCanvas` |
 | W-10 | Empty states: "Your library is empty …" / "No games match these filters …" | `refreshLibrary` |
-| W-11 | Search & Filter popover: Search, Status (All / Ready / Needs build / Running), Source (All / NUP-NSP / NRO / Extracted / Native builds), Sort (Name, Last played, Build status, "Custom table order"), Gallery/List, Card size (disabled in list), "x of y games shown", Clear filters (one change signal), Done; Esc/Enter close; anchored under its button, clamped to the screen | `FilterPopup`, `LibraryFilter::matches`, `activeCount` |
+| W-11 | Search & Filter popover: Search, Status (All / Ready / Needs build / Running), Source (All / NUP-NSP / NRO / Extracted / Native builds), Sort (Name, Last played, Build status, "Custom table order"), Gallery/List, Card size (disabled in list), "x of y games shown", Clear filters (one change signal); the shared header's X, Esc and Enter close (no Done: a Live popover commits nothing, 2026-11-26); anchored under its button, clamped to the screen | `FilterPopup`, `LibraryFilter::matches`, `activeCount` |
 | W-12 | Status bar: game count ("n games" / "x / y games"), progress bar (determinate or busy), selection line, job line, engine badge (click: popup with problem + health + Open Settings, Esc closes), Settings button, size grip | `createStatusBar`, `showToolPopup` |
 | W-13 | Build output dock: bottom or right, hide/undock, title follows state, Open log, Clear view, 12000-line cap, placeholder, opens at 190 px | `createBuildDock`, `showBuildOutput` |
 | W-14 | Drag & drop onto the window: native builds import, anything else goes through Add | `dropEvent` |
@@ -168,7 +168,7 @@ fetching.
 | X-02 | Properties apply: field copy, update removal resets a stale choice, screen mode and layout written to a built game's INI now, artwork cache cleared, DLC removal synced | `showProperties` |
 | X-03 | Settings (690x440): Engine (nxrs-build, health text, nxrs checks with Check again run on open, Open setup guide in a checkout), Build defaults (Build location, Compiler workers 1..64), Controller (Button layout + note), Appearance (Color mode, Accent with swatches, background toggle, library file path), Play (Screen mode, Pause, Mute, Ask who is playing, note); OK rules (no engine/build changes during a build, empty = bundled, nxrs-build must exist, layout/play changes written to every built game with a failure count) | `showSettings` |
 | X-04 | Install keys: picker for `prod.keys`, must contain `header_key`/`header_key_source`, atomic copy to `<data>\keys\prod.keys`, texts | `installKeys` |
-| X-05 | Remove from library: confirmation, files untouched | `removeGame` |
+| X-05 | Remove from library: confirmation with the tick box *Also delete the build (N GB)*, ticked by default (owner, 2026-11-26). Ticked: saves, SD card, cheats and mods moved to `<data>\saves\<title id>`, then the build folder deleted (refused while running or building); the next build of the game puts them back. Unticked: files untouched. The package is never deleted | `removeGame` |
 | X-06 | About text; message boxes (info/warning) and question boxes with exact texts | `createMenusAndToolbar`, `message` |
 | X-07 | Open build folder / save folder / game log / build log / INI, with "not available" messages | `openFolder`, `openGameFile`, dock toolbar |
 
@@ -184,7 +184,7 @@ engine's docs) depend on them.
 | `--library <file>` | library file; skips legacy migration |
 | `--import-build <exe>` | import after the window opens |
 | `--demo` | non-persistent preview library |
-| `--list-view`, `--show-console`, `--show-filters`, `--show-appearance`, `--show-controller`, `--show-engine-settings`, `--show-play-settings`, `--show-updates`, `--show-dlc` | open that view |
+| `--list-view`, `--show-console`, `--show-filters`, `--show-appearance`, `--show-controller`, `--show-engine-settings`, `--show-play-settings`, `--show-updates`, `--show-dlc`, `--show-window remove\|about\|build-settings\|tool`, `--show-add <package>` | open that view (the last two: captures of every dialog) |
 | `--show-properties` + `--properties-tab <0..5>` | Properties on a tab |
 | `--show-menu <File\|Game\|Keys\|View\|Help>` | pop a title-bar menu (after 300 ms) |
 | `--preview-theme <mode>`, `--preview-accent <id>` | appearance without saving |
@@ -369,7 +369,7 @@ the acceptance phase (section 8, phase 7).
 The launcher drives only nxrs (owner decision, section 10). Not ported: the Python engine's toolchain discovery and
 problems (E-04, E-05), v1 arguments (E-08), its Play checks (P-01), the renderer and optimization rows (X-01), the
 engine folder setting (X-03) and the save copy between engines (P-03, S-01). Releases carry no Python, GCC, .NET or
-hactool bundle. An entry saved with another engine loads as nxrs in its `[nxrs]` folder and shows as needing a build.
+hactool bundle. An entry saved with another engine loads as nxrs in an nxrs folder of its own and shows as needing a build.
 
 ---
 

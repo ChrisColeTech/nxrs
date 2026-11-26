@@ -1,5 +1,6 @@
-//! What a build folder says about itself: the package its data comes from (`romfs.nup` / `romfs.nsp`),
-//! the update applied (`SWRNSP2` `update` row), its cover.
+//! What a build folder says about itself: the package its data was made from (`romfs.source`, or the
+//! in-place marker `romfs.nup` / `romfs.nsp` of a build made before the build carried its data), the
+//! update applied (`SWRNSP2` `update` row), its cover.
 
 use super::files::{is_dir, is_file, read_text};
 use crate::constants::engine as e;
@@ -7,15 +8,24 @@ use crate::model::game::Game;
 use crate::model::game_update::GameUpdate;
 use crate::model::path_text::{from_native, join, same_path};
 
+/// The marker text the build left: (the marker's file name, its text). `romfs.source` names the marker
+/// it replaced in its `marker` row.
+fn record(data_dir: &str) -> Option<(String, String)> {
+    if let Some(text) = read_text(&join(data_dir, e::ROMFS_SOURCE)) {
+        let kind = text
+            .split('\n')
+            .find_map(|row| row.trim().strip_prefix("marker ").map(str::to_string))
+            .unwrap_or_default();
+        return Some((kind, text));
+    }
+    [e::ROMFS_NUP, e::ROMFS_NSP]
+        .iter()
+        .find_map(|m| read_text(&join(data_dir, m)).map(|t| (m.to_string(), t)))
+}
+
 /// The package a build reads its data from (empty: none, or a folder build).
 pub fn source_of_build(data_dir: &str) -> String {
-    if let Some(text) = read_text(&join(data_dir, e::ROMFS_NUP)) {
-        let line = text.split('\n').next().unwrap_or("").trim().to_string();
-        if !line.is_empty() {
-            return line;
-        }
-    }
-    let Some(text) = read_text(&join(data_dir, e::ROMFS_NSP)) else {
+    let Some((kind, text)) = record(data_dir) else {
         return String::new();
     };
     let mut lines = text.split('\n');
@@ -23,18 +33,28 @@ pub fn source_of_build(data_dir: &str) -> String {
     // SWRNSP2: an encrypted package, or one with the game and its update; line 2 is the package in both
     if first == "SWRNSP1" || first == "SWRNSP2" {
         lines.next().unwrap_or("").trim().to_string()
+    } else if kind == e::ROMFS_NUP {
+        first.to_string()
     } else {
         String::new()
     }
 }
 
-/// The build was made with an update of its own package (its romfs.nsp names it) but the entry does
+/// The build reads its data from its source while it plays (an in-place marker: a build made before
+/// the build carried its data). A build with its own copy plays with the source gone.
+pub fn reads_in_place(data_dir: &str) -> bool {
+    [e::ROMFS_NUP, e::ROMFS_NSP, e::ROMFS_DIR]
+        .iter()
+        .any(|m| is_file(&join(data_dir, m)))
+}
+
+/// The build was made with an update of its own package (its record names it) but the entry does
 /// not say so: the update joins the list and counts as built. True when the game changed.
 pub fn adopt_built_update(game: &mut Game) -> bool {
     if !game.built_update.is_empty() || game.build_dir.is_empty() || game.output_name.is_empty() {
         return false;
     }
-    let Some(text) = read_text(&join(&game.data_dir(), e::ROMFS_NSP)) else {
+    let Some((_, text)) = record(&game.data_dir()) else {
         return false;
     };
     let mut lines = text.split('\n');

@@ -46,9 +46,8 @@ fn spec<'a>(surface: &Surface, key: &'a str, title: &'a str) -> ChildSpec<'a> {
         Surface::Settings(_) => ChildSpec::surface(key, title, c::SETTINGS),
         Surface::Dlc(_) => ChildSpec::surface(key, title, c::DLC),
         Surface::Updates(_) => ChildSpec::surface(key, title, c::UPDATES),
-        Surface::Message { text, .. } | Surface::Question { text, .. } => {
-            message::spec(key, title, text)
-        }
+        Surface::Message { text, .. } => message::spec(key, title, text, false),
+        Surface::Question { text, check, .. } => message::spec(key, title, text, check.is_some()),
         Surface::ToolPopup => ChildSpec::work(key, title, 0.0, 0.0),
     }
 }
@@ -137,8 +136,9 @@ fn body(ui: &mut egui::Ui, app: &mut App, surface: &mut Surface) -> Reply {
             yes,
             no,
             default_no,
+            check,
             ..
-        } => message::question(ui, text, (yes, no.as_ref()), *default_no),
+        } => message::question(ui, text, (yes, no.as_ref()), *default_no, check.as_mut()),
         Surface::Properties(p) => properties::show(ui, app, p),
         Surface::Settings(s) => settings::show(ui, app, s),
         Surface::Dlc(w) => dlc::show(ui, app, w),

@@ -2,12 +2,14 @@
 //! spawn and watch.
 pub mod artwork_decode;
 pub mod build_facts;
+pub mod build_move;
 pub mod data_dir;
 pub mod dlc_files;
 pub mod files;
 pub mod font_files;
 pub mod ini_file;
 pub mod jobs;
+pub mod kept_saves;
 pub mod keys;
 pub mod legacy;
 pub mod library_file;

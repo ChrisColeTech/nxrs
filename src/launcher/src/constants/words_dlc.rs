@@ -47,6 +47,8 @@ pub const LIST_NAME: &str = "Installed DLC";
 pub const PICKER: &str = "Add DLC";
 pub const FILTER: (&str, &[&str]) = ("Add-on content", &["nsp", "nsz", "xci", "xcz", "nca"]);
 pub const HINT_LOCKED: &str = "DLC cannot be changed while the game is running or building.";
+/// The list's state under it when nothing is installed (how to add is in the heading's info mark).
+pub const LIST_EMPTY: &str = "No DLC is installed for this game.";
 pub const HINT_EMPTY: &str = "No DLC is installed for this game. Click Add DLC… or drop files here: NSP, NSZ, XCI, XCZ or NCA, several at once; a package that also holds the game or its update works too.";
 pub const HINT_BUILT: &str = "Add DLC… installs more packages, several at once. Select one or more entries and click Remove to uninstall them. The original files are never changed.";
 pub const HINT_UNBUILT: &str = "These packages are installed when the game is built. Select entries and click Remove to take them off the list.";

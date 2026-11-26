@@ -1,8 +1,11 @@
 //! nxrs-build's launcher contract and the names the build folder uses.
 
 pub const ENGINE_NXRS: &str = "nxrs";
-/// A build goes into `<build folder> [nxrs]`.
-pub const NXRS_FOLDER_SUFFIX: &str = " [nxrs]";
+/// A build goes into `<source folder or Build location>\nxrs\<name>` (owner, 2026-11-26).
+pub const BUILDS_FOLDER: &str = "nxrs";
+/// The layout before: `<source folder>\SwitchRecomp Builds\<name> [nxrs]` (moved by the migration).
+pub const LEGACY_BUILDS: &str = "SwitchRecomp Builds";
+pub const LEGACY_SUFFIX: &str = " [nxrs]";
 /// `nxrs-build contract` answers `nxrs-contract <n>`; this launcher needs 2 (subcommands + `@` lines).
 pub const CONTRACT_NEEDED: i64 = 2;
 pub const NXRS_BUILD_NAME: &str = "nxrs-build";
@@ -22,7 +25,16 @@ pub const LEGACY_FOLDERS: [&str; 2] = [
     "RecompLauncher/RecompLauncher",
     "RecompLauncher/SwitchRecompLauncher",
 ];
-pub const DEFAULT_BUILDS: &str = "SwitchRecomp Builds";
+/// The player's files of a removed game wait in `<data folder>\saves\<title id>` (kept_saves).
+pub const SAVES_FOLDER: &str = "saves";
+/// The player's folders in a data folder (saves, SD card, cheats), and the build's mods folder.
+pub const PLAYER_FOLDERS: [&str; 3] = ["save", "sdmc", "cheats"];
+pub const MODS_FOLDER: &str = "mods";
+pub const NPDM: &str = "exefs/main.npdm";
+pub const NOT_A_BUILD: &str = "Not deleted: this folder is not a build of this game, or it holds the \
+                               game's package: ";
+/// Before the migration's first write, the library file is copied here (once).
+pub const PRE_LAYOUT_BACKUP: &str = "library.pre-layout.json";
 
 #[cfg(windows)]
 pub const EXECUTABLE_SUFFIX: &str = ".exe";
@@ -54,5 +66,9 @@ pub const BUILD_ICONS: [&str; 3] = ["icon.jpg", "icon.png", "icon_AmericanEnglis
 pub const NACP: &str = "control.nacp";
 pub const NACP_VERSION_AT: u64 = 0x3060;
 pub const DLC_MANIFEST: &str = "dlc.manifest";
+/// What the build's extracted RomFS was made from (the old marker's text): the package, the update.
+pub const ROMFS_SOURCE: &str = "romfs.source";
+/// The in-place markers of builds made before the build carried its data (read from the package).
 pub const ROMFS_NUP: &str = "romfs.nup";
 pub const ROMFS_NSP: &str = "romfs.nsp";
+pub const ROMFS_DIR: &str = "romfs.dir";

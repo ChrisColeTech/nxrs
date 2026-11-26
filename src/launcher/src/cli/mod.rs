@@ -1,6 +1,7 @@
 //! The command line: the Qt launcher's flags with the same names, values and exit codes. A verb that
 //! needs no window (`--build`, `--smoke-build`, the DLC and update options,
 //! `--nxrs-doctor`, `--check-image`) runs headless; everything else opens the window.
+mod flags;
 mod headless;
 pub mod options;
 mod startup;

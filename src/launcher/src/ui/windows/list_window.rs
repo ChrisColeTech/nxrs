@@ -1,10 +1,12 @@
 //! What the DLC and Updates windows share: the list, the hint, the outcome, the busy bar and the
 //! buttons row.
 
+use crate::constants::popups::FOOTER;
 use crate::flows::surface::ListWindow;
+use crate::ui::popups::authored;
 use crate::ui::theme::Palette;
 use crate::ui::widgets::{button, form, pick_list};
-use egui::{Align, Layout, Ui};
+use egui::{Align, Layout, Ui, vec2};
 
 pub struct Buttons<'a> {
     pub add: &'a str,
@@ -37,25 +39,25 @@ pub fn show(
     let mut pressed = Pressed::default();
     // laid out from the bottom: the buttons, the outcome and the notes always show; the list takes the rest
     ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-        // every window's one filled action is last, at the right; the list's own verbs lead
-        ui.horizontal(|ui| {
-            let remove = button::ghost(
-                ui,
-                crate::constants::words_dlc::REMOVE,
-                editable && !w.picks.rows.is_empty(),
-            );
-            pressed.remove |= button::tip(remove, b.remove_tip).clicked();
+        // the shared footer: the list's own verbs lead, Close, the one filled action last
+        let (mut remove, mut build) = (false, false);
+        let can_remove = editable && !w.picks.rows.is_empty();
+        let lead = |ui: &mut Ui| {
+            let r = button::ghost(ui, crate::constants::words_dlc::REMOVE, can_remove);
+            remove = button::tip(r, b.remove_tip).clicked();
             if let Some((label, tip, enabled)) = b.build {
-                pressed.build =
-                    button::tip(button::ghost(ui, label, editable && enabled), tip).clicked();
+                build = button::tip(button::ghost(ui, label, editable && enabled), tip).clicked();
             }
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                pressed.add =
-                    button::tip(button::primary(ui, p, b.add, editable), b.add_tip).clicked();
-                pressed.close =
-                    button::ghost(ui, crate::constants::words_settings::CLOSE, true).clicked();
-            });
-        });
+        };
+        let size = vec2(ui.available_width(), FOOTER);
+        let close = crate::constants::words_settings::CLOSE;
+        let (closed, added) = ui
+            .allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
+                authored::footer_bar(ui, p, lead, close, Some((b.add, editable, b.add_tip)))
+            })
+            .inner;
+        (pressed.remove, pressed.build) = (remove, build);
+        (pressed.close, pressed.add) = (closed, added);
         ui.add_space(4.0);
         if busy {
             form::busy(ui, p);

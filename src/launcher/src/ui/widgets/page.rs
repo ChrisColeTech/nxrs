@@ -15,7 +15,7 @@ const ROW_GAP: f32 = 6.0;
 const TILE: f32 = 32.0;
 
 /// The info mark: a ringed "i" whose tooltip is the explanation.
-fn info(ui: &mut Ui, tip: &str) {
+pub fn info(ui: &mut Ui, tip: &str) {
     let (rect, response) = ui.allocate_exact_size(vec2(18.0, 18.0), Sense::hover());
     let p = theme::of(ui.ctx());
     let ink = if response.hovered() {

@@ -61,11 +61,7 @@ impl App {
                 self.show_properties(0);
             }
             Action::CardActivate(id) => self.card_activate(&id),
-            Action::ConfirmRemove(id) => {
-                self.lib.games.retain(|g| g.id != id);
-                self.selected.clear();
-                self.save();
-            }
+            Action::ConfirmRemove(id, delete) => self.confirm_remove(&id, delete),
             Action::ConfirmClose => self.close_after_cancel(),
         }
         self.refresh_facts();

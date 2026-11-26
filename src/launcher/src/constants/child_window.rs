@@ -33,12 +33,17 @@ pub const SCRIM_ID: &str = "child-window-scrim";
 /// The launcher's surfaces: (key, content width, body height, least width, least body), from the Qt
 /// dialogs' sizes (Properties 670 x 400, Settings 690 x 440, DLC 680 x 400, Updates 700 x 430).
 pub type Surface = (&'static str, f32, f32, f32, f32);
-pub const PROPERTIES: Surface = ("properties", 820.0, 440.0, 710.0, 360.0);
-pub const ADD_GAME: Surface = ("add-game", 820.0, 440.0, 710.0, 360.0);
-pub const SETTINGS: Surface = ("settings", 840.0, 440.0, 730.0, 360.0);
+/// The rail work windows share one size (content width, body height, least width, least body).
+const RAIL: (f32, f32, f32, f32) = (840.0, 440.0, 730.0, 360.0);
+pub const PROPERTIES: Surface = ("properties", RAIL.0, RAIL.1, RAIL.2, RAIL.3);
+pub const ADD_GAME: Surface = ("add-game", RAIL.0, RAIL.1, RAIL.2, RAIL.3);
+pub const SETTINGS: Surface = ("settings", RAIL.0, RAIL.1, RAIL.2, RAIL.3);
 pub const DLC: Surface = ("dlc", 680.0, 400.0, 520.0, 300.0);
 pub const UPDATES: Surface = ("updates", 700.0, 430.0, 540.0, 320.0);
 /// A message or a question: its width; its body is measured from its text.
 pub const MESSAGE_WIDTH: f32 = 440.0;
 pub const MESSAGE_LEAST: f32 = 340.0;
+/// A question's tick box: the paragraph gap over it, and the height it adds to the box.
+pub const MESSAGE_CHECK_GAP: f32 = 12.0;
+pub const MESSAGE_CHECK_ROW: f32 = 36.0;
 pub const MESSAGE_KEY: &str = "message";

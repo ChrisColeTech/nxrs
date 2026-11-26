@@ -1,11 +1,11 @@
 //! A game in the library file: the keys the Qt launcher wrote, read with its defaults and clamps; keys
 //! this launcher does not know are kept and written back.
 
+use super::build_layout::nxrs_folder_for;
 use super::dates;
 use super::game::Game;
 use super::game_update::GameUpdate;
 use super::json_fields::{bool_of, int_of, paths_of, str_of};
-use super::names::build_folder_for;
 use super::path_text::same_path;
 use super::play::{normalize_button_layout, normalize_screen_mode};
 use crate::constants::engine as e;
@@ -120,9 +120,9 @@ pub fn from_json(value: &Value) -> Game {
             .map(|(k, v)| (k.clone(), v.clone()))
             .collect(),
     };
-    // an entry saved with another engine (or none) loads as nxrs, in its `[nxrs]` folder and not built
+    // an entry saved with another engine (or none) loads as nxrs, in an nxrs folder and not built
     if str_of(o, "engine") != e::ENGINE_NXRS && !g.build_dir.is_empty() {
-        g.build_dir = build_folder_for(&g.build_dir);
+        g.build_dir = nxrs_folder_for(&g.build_dir);
         g.built_source.clear();
         g.built_update.clear();
         g.build_incomplete = false;

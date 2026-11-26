@@ -33,3 +33,13 @@ fn flags_parse_as_before() {
     assert_eq!(o.properties_tab, 3);
     assert!(parse_from(["nxrs", "--bogus"]).is_err());
 }
+
+/// The capture openers: a named window (one of four), the Add game window for a package.
+#[test]
+fn show_window_takes_known_names() {
+    let o = parse_from(["nxrs", "--show-window", "remove", "--show-add", "k.nsp"]).unwrap();
+    assert_eq!(o.show_window.as_deref(), Some("remove"));
+    assert_eq!(o.show_add.as_deref(), Some("k.nsp"));
+    assert!(!o.headless());
+    assert!(parse_from(["nxrs", "--show-window", "nothing"]).is_err());
+}

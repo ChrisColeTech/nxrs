@@ -1,7 +1,7 @@
 //! Opening the library (`Window::Window`), and what every command shares: the selected game, whether a
 //! game is busy, what the disk says, saving, message and question boxes.
 
-use super::surface::Surface;
+use super::surface::{Check, Surface};
 use super::{Action, App};
 use crate::constants::{engine as e, words_library as w};
 use crate::model::facts::Facts;
@@ -143,6 +143,18 @@ impl App {
             yes,
             no,
             default_no,
+            check: None,
+        });
+    }
+    /// A question with a tick box: Yes asks for `check.yes_on` while it is ticked.
+    pub fn question_checked(&mut self, title: &str, text: &str, yes: Action, check: Check) {
+        self.surfaces.push(Surface::Question {
+            title: title.into(),
+            text: text.into(),
+            yes,
+            no: None,
+            default_no: false,
+            check: Some(check),
         });
     }
     pub fn surface_open(&self, test: impl Fn(&Surface) -> bool) -> bool {

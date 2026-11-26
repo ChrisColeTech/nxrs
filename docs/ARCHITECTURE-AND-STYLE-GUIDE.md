@@ -75,7 +75,28 @@ bringing the engine to them is an owner decision, never a side task of other wor
 
 **Windows.** A dialog is a child window (its own OS window, modal over a scrim) with the shared header: the title
 and a trailing close button named `Close <title>`. Embedded in tests and `--screenshot`. Escape and the close button
-discard a Draft. Sizes come from `constants/child_window.rs`.
+discard a Draft. Sizes come from `constants/child_window.rs`; the rail work windows share one size.
+
+**One scaffold for every dialog** (owner, 2026-11-26: the dialogs must be consistent app-wide; BUILD-LAYOUT). Every
+surface is built from the shared parts in `ui/popups/authored.rs`, never with its own chrome:
+
+| Part | Shared block | Used by |
+|---|---|---|
+| Header: 12 pt semibold title, 28 pt, hairline under it, bordered 22 pt X named `Close <title>` | `authored::header` | every child window and every popover |
+| Footer: a hairline; the surface's own verbs as ghost buttons at the leading side; at the trailing side the ghost dismissal (Cancel, No, Close) and the one filled primary, last | `authored::footer_bar` (`footer`, `footer_at_bottom`) | every child window |
+| Popover frame: raised fill, border, shadow, the scaffold's inset | `authored::popover_frame` | Search & Filter, Build tools |
+
+- **Filled means commit.** A surface has at most one filled button, its commit (Apply, Add game, Yes, Add DLC…). A
+  surface with nothing to commit (a message, a Live popover) has none: a message's footer is a ghost Close, a
+  popover closes with its header X (no Done).
+- **Messages and questions** keep the message-box body: a ringed mark (`i`, `!` in the error red, `?`), the text,
+  and for a question with an option a tick box as the text's last paragraph with its explanation in an info mark
+  (Remove from library: "Also delete the build (N GB)", ticked by default). Footer: Close; or No and a filled Yes.
+- **Work windows** (rail or not) start their body with a Group heading; a labelled control is a Row (the 190 pt
+  column) wherever it appears, Updates' "Version to build" included.
+- Captures of every dialog as it should look: `docs/images/dialogs/` (PrintWindow at 3x;
+  `nxrs --show-window remove|about|build-settings|tool`, `--show-add <package>`, `--show-properties`,
+  `--properties-tab N`, `--show-dlc`, `--show-updates`, the `--show-*-settings` flags, `--show-filters` open each).
 
 **Work windows** (Settings, Properties, Add game) have a **rail** down the left (150 px; 32 px entries with an icon
 and a label; the chosen one has the selection tint, a 2 px accent bar and accent ink) and the chosen section's form
@@ -83,19 +104,23 @@ scrolling beside it, above the footer (`ui/windows/rail_window.rs`).
 
 **Forms use the page grammar** (`ui/widgets/page.rs`):
 
-- a **Group** is a heading: a 32 px accent-tinted icon tile, a bold 16 pt title, an info mark;
+- a **Group** is a heading: a 32 px accent-tinted icon tile, a bold 16 pt title, an info mark (every Group has
+  one);
 - a **Row** is a label in the 190 px column with its info mark, and the control after it; a label that does not fit
-  stacks above its control;
+  stacks above its control; a Row with nothing to explain has no info mark (the common form: Color mode, Format,
+  Status, Engine);
 - **explanations live in the info marks' tooltips**, never as grey hint text under controls;
 - an accent-cored hairline closes a Group; read-only values are boxed, selectable readouts;
-- a list's *state* (empty, locked while a game runs, an update waiting for a build) is a status line under it.
+- a list's *state* (empty, locked while a game runs, an update waiting for a build) is a status line under it, in
+  every window that shows the list (DLC, Updates, and their Properties tabs);
+- an immediate action inside a Draft window (Check again, Move) is a readout and a ghost button under it.
 
 **Buttons** (family: "Buttons and surfaces"):
 
 | Kind | Where |
 |---|---|
 | Ghost (`button::ghost`) | the default everywhere: Cancel, Close, row and panel verbs. No border at rest, the hover fill under the pointer |
-| Primary (`button::primary`) | the one filled accent action of a surface, last and rightmost (Apply, Add, Done) |
+| Primary (`button::primary`) | the one filled accent action of a surface, its commit, last and rightmost (Apply, Add game, Yes, Add DLC…); none on a surface with nothing to commit |
 | Icon (`icon_button`) | icon-only controls; the tooltip is the accessible name. Borderless, except a title header's close, which is bordered. Every close in the app is this button with the same X |
 | Outline | the title bar only |
 

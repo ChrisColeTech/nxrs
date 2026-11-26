@@ -1,21 +1,23 @@
-//! Add-on content (DLC) for a built game: install / sync / remove / list, and each title's RomFS read in place.
+//! Add-on content (DLC) for a built game: install / sync / remove / list, and each title's RomFS.
 //! The manifest format and the messages are the ones the launcher reads.
 //!
 //! The game's data folder gets:
 //! ```text
 //! dlc.manifest                  one line a title: <title id> <version> <data|stub> <package>
-//! dlc/<title id>/romfs.nsp      a marker: the title's RomFS read in place from its package (SWRNSP1 plaintext,
-//!                               SWRNSP2 AES-CTR with the content key still wrapped), or
-//! dlc/<title id>/romfs.bin      the RomFS image unpacked once from an NSZ / XCZ (its data is zstd-compressed)
+//! dlc/<title id>/romfs/         the title's RomFS extracted (decrypted) from its package (storage "folder"), or
+//! dlc/<title id>/romfs.bin      the RomFS image: unpacked from an NSZ / XCZ (its data is zstd-compressed), or a
+//!                               tree whose names a Windows folder cannot hold (storage "image")
 //! dlc/<title id>/install.json   what was installed from where (to skip the work next time)
 //! ```
-//! An AES-CTR title is not decrypted into `romfs.bin`; it is read in place through a version 2 marker, as games
-//! are.
+//! The built game carries its add-on content as it carries its own RomFS (BUILD-LAYOUT, 2026-11-26). A title
+//! installed before as a `romfs.nsp` marker (storage "package", read in place) is still read so, and extracted at
+//! the next sync that finds its package.
 use crate::package::app::pfs_files;
 use crate::package::cnmt::{self, base_of, is_addon_of};
 use crate::package::container::{self, Member};
 use crate::package::crypto::ecb_decrypt;
 use crate::package::error::{fmt, PackageError, Result};
+use crate::package::extract;
 use crate::package::io::{abspath, hex, u32le, u64le, Blob};
 use crate::package::keys::{keys_path, Keys};
 use crate::package::marker;
@@ -235,8 +237,8 @@ fn ncz_reader(blob: &Blob, member: &Member) -> Result<Box<dyn Read>> {
     Ok(Box::new(dec))
 }
 
-/// dlc.py `extract`, in place: put the title's RomFS in `folder`. Returns "package" (a marker, read in place) or
-/// "image" (romfs.bin unpacked from an NCZ).
+/// dlc.py `extract`: put the title's RomFS in `folder`. Returns "folder" (extracted into `romfs/`) or "image"
+/// (`romfs.bin`: unpacked from an NCZ, or a tree whose names a Windows folder cannot hold).
 pub fn extract(
     keys: &Keys,
     title: &Title,
@@ -252,6 +254,7 @@ pub fn extract(
     for name in ["romfs.nsp", "romfs.bin", "romfs.bin.tmp", "content.nca.tmp"] {
         let _ = std::fs::remove_file(folder.join(name));
     }
+    let _ = std::fs::remove_dir_all(folder.join(marker::FOLDER));
     let member = &title.member;
     let header = decrypt_header(&blob, member.offset, keys)
         .ok()
@@ -315,21 +318,38 @@ pub fn extract(
         })?;
         return Ok("image");
     }
-    let marker_path = folder.join(marker::NSP);
-    let write = |text: String| -> Result<()> {
-        std::fs::write(&marker_path, text).map_err(|source| PackageError::Io {
-            path: marker_path.clone(),
-            source,
-        })
+    // the title's RomFS is written into the build (romfs/, or romfs.bin for names a folder cannot hold): the game
+    // needs no package to play it
+    let write_out = |image: Arc<dyn Storage>| -> Result<&'static str> {
+        say(&format!(
+            "Extracting {:016x} ({mb:.1} MB)...",
+            title.title_id
+        ));
+        let rom = RomFs::from_image(image, format!("{p} {:016x}", title.title_id))?;
+        if extract::unsafe_name(&rom).is_some() {
+            extract::image(&rom, &folder.join("romfs.bin"), &|_, _| {})?;
+            return Ok("image");
+        }
+        extract::tree(
+            &rom,
+            &folder.join(marker::FOLDER),
+            extract::default_threads(),
+            &|_, _| {},
+        )?;
+        Ok("folder")
     };
     match crypto {
         1 => {
-            write(format!(
-                "SWRNSP1\n{p}\n{:x}\n{:x}\n",
-                member.offset + data_at,
-                data_size
-            ))?;
-            Ok("package")
+            let range = crate::package::storage::FileRange {
+                blob: Arc::new(Blob::open(&title.path)?),
+                offset: member.offset + data_at,
+                size: data_size,
+            };
+            let head = range.read(0, 0x50.min(data_size))?;
+            if !romfs_head_ok(&head, data_size) {
+                return Err(undecrypted());
+            }
+            write_out(Arc::new(range))
         }
         3 => {
             let rights: [u8; 16] = header[0x230..0x240].try_into().unwrap();
@@ -386,10 +406,6 @@ pub fn extract(
                     header[0x320..0x330].try_into().unwrap(),
                 )
             };
-            say(&format!(
-                "Reading {:016x} in place ({mb:.1} MB, decrypted per read)...",
-                title.title_id
-            ));
             let kek = keys.get16(&name).map_err(|_| undecrypted())?;
             let mut upper: [u8; 8] = fs[0x140..0x148].try_into().unwrap();
             upper.reverse();
@@ -407,15 +423,11 @@ pub fn extract(
             if !romfs_head_ok(&head, data_size) {
                 return Err(undecrypted());
             }
-            write(format!(
-                "SWRNSP2\n{p}\nkeys {}\nromfs {:x} {data_size:x}\nbase {:x} {section_size:x} {section_at:x} 3 {} {name}:{}\n",
-                keys.path.display(),
-                data_at - section_at,
-                member.offset + section_at,
-                hex(&upper),
-                hex(&wrapped)
-            ))?;
-            Ok("package")
+            write_out(Arc::new(Slice {
+                inner: Arc::new(section),
+                offset: data_at - section_at,
+                size: data_size,
+            }))
         }
         c => fmt(format!(
             "{p}: the data of {:016x} uses an encryption the installer does not read (type {c})",
@@ -601,15 +613,33 @@ fn installed(datadir: &Path, title_id: u64, source: &Path) -> bool {
     }
     match state.get("storage").and_then(|v| v.as_str()) {
         Some("image") => romfs_file_ok(&folder.join("romfs.bin")),
-        Some("package") => folder.join("romfs.nsp").is_file(),
+        Some("folder") => folder.join(marker::FOLDER).is_dir(),
+        // read in place from its package (installed before the build carried its data): extracted again
+        Some("package") => false,
         Some("stub") => true,
         _ => false,
     }
 }
 
+/// The bytes of the files under a folder.
+fn folder_bytes(p: &Path) -> u64 {
+    std::fs::read_dir(p)
+        .into_iter()
+        .flatten()
+        .flatten()
+        .map(|e| match e.metadata() {
+            Ok(m) if m.is_dir() => folder_bytes(&e.path()),
+            Ok(m) => m.len(),
+            Err(_) => 0,
+        })
+        .sum()
+}
+
 fn has_data(datadir: &Path, title_id: u64) -> bool {
     let f = title_folder(datadir, title_id);
-    f.join("romfs.nsp").is_file() || romfs_file_ok(&f.join("romfs.bin"))
+    f.join("romfs.nsp").is_file()
+        || romfs_file_ok(&f.join("romfs.bin"))
+        || f.join(marker::FOLDER).is_dir()
 }
 
 fn remove_empty_root(datadir: &Path) {
@@ -763,7 +793,10 @@ fn install_title(
     );
     write_manifest(datadir, &entries.values().cloned().collect::<Vec<_>>())?;
     let what = match storage {
-        "package" => "read in place from the package".to_string(),
+        "folder" => format!(
+            "extracted into romfs/, {:.1} MB",
+            folder_bytes(&folder.join(marker::FOLDER)) as f64 / 1048576.0
+        ),
         "image" => format!(
             "RomFS image, {:.1} KB",
             std::fs::metadata(folder.join("romfs.bin"))

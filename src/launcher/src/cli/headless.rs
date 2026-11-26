@@ -47,6 +47,14 @@ fn outcome(app: &mut App) -> i32 {
 }
 
 pub fn run(app: &mut App, o: &Options) -> i32 {
+    if o.migrate_builds {
+        let m = app.migrate_build_folders(o.select_title.as_deref());
+        if m.lines.is_empty() {
+            println!("{}", crate::constants::words_library::MIGRATE_NONE);
+        }
+        m.lines.iter().for_each(|l| println!("{l}"));
+        return i32::from(m.skipped > 0);
+    }
     app.refresh_tools_now();
     if let Err(code) = startup::apply(app, o) {
         return code;

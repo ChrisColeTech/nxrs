@@ -9,11 +9,11 @@ use super::services_tests::{built_game, tmp, write};
 use super::sources::{game_from_executable, game_from_source, valid_source};
 use crate::constants::engine as e;
 use crate::model::args;
+use crate::model::build_layout::nxrs_folder_for;
 use crate::model::card_state::card_state;
 use crate::model::filter::LibraryFilter;
 use crate::model::game_json;
 use crate::model::library::Library;
-use crate::model::names::build_folder_for;
 use crate::model::path_text::{native, same_path};
 
 #[test]
@@ -80,6 +80,14 @@ fn import_checks_all_artifacts() {
     g.source = format!("{dir}/Missing.nup");
     g.built_source = native(&g.source);
     assert!(has_build(&g));
+    // the build carries its data (no in-place marker): it plays with its package gone
+    let carried = card_state(&facts(&g), false, false, false, true);
+    assert!(carried.action_enabled && carried.status == "Ready to play");
+    // a build from before reads its package in place: offline while it is gone
+    write(
+        &format!("{dir}/My Game_data/{}", e::ROMFS_NUP),
+        b"P:/x/Missing.nup\n",
+    );
     let offline = card_state(&facts(&g), false, false, false, true);
     assert!(
         !offline.action_enabled && offline.needs_attention && offline.status == "Source offline"
@@ -151,7 +159,7 @@ fn nsp_and_xci_sources() {
         assert!(
             g.format() == "DIRECT XCI"
                 && g.nxrs()
-                && g.build_dir.ends_with(" [nxrs]")
+                && g.build_dir == format!("{dir}/nxrs/Party")
                 && g.title == "Party"
         );
     }
@@ -160,31 +168,38 @@ fn nsp_and_xci_sources() {
     assert!(valid_source(&bad).unwrap_err().contains("XCI"));
 }
 
-/// Every new game builds into its `[nxrs]` folder and plays from there; an entry saved without an
-/// engine loads as nxrs, moved to its `[nxrs]` folder, and needs a build.
+/// Every new game builds into `<source folder>\nxrs\<name>` (or `<Build location>\nxrs\<name>`) and
+/// plays from there; an entry saved without an engine loads as nxrs, moved to such a folder, and needs
+/// a build.
 #[test]
 fn games_build_into_their_nxrs_folder() {
     let (_t, dir) = tmp();
     let source = format!("{dir}/Kart [v0].nsp");
     write(&source, b"PFS0");
+    assert_eq!(
+        game_from_source(&source, "E:/Builds/").build_dir,
+        "E:/Builds/nxrs/Kart"
+    );
     let mut game = game_from_source(&source, "");
-    assert!(game.nxrs() && game.build_dir.ends_with("/Kart [nxrs]"));
+    assert!(game.nxrs() && game.build_dir == format!("{dir}/nxrs/Kart"));
     let nxrs_dir = game.build_dir.clone();
     let mut old = game_json::to_json(&game);
     old["engine"] = serde_json::Value::Null;
-    old["buildDir"] = serde_json::json!(nxrs_dir.trim_end_matches(e::NXRS_FOLDER_SUFFIX));
+    old["buildDir"] = serde_json::json!(format!("{dir}/{}/Kart", e::LEGACY_BUILDS));
     let moved = game_json::from_json(&old);
     assert!(moved.nxrs() && moved.build_dir == nxrs_dir && !has_build(&moved));
     let s = card_state(&facts(&moved), false, false, false, true);
     assert!(s.action == "Build" && s.status == "Needs build");
-    assert_eq!(build_folder_for(&format!("{nxrs_dir}/")), nxrs_dir);
+    assert_eq!(nxrs_folder_for(&format!("{nxrs_dir}/")), nxrs_dir);
     for p in [game.executable(), game.code_module()] {
         write(&p, b"x");
     }
+    // a build that carries its data: its record names the package
     write(
-        &format!("{}/romfs.nsp", game.data_dir()),
-        format!("SWRNSP2\n{}\nkeys k\n", native(&source)).as_bytes(),
+        &format!("{}/{}", game.data_dir(), e::ROMFS_SOURCE),
+        format!("SWRNSP2\n{}\nkeys k\nmarker romfs.nsp\n", native(&source)).as_bytes(),
     );
+    std::fs::create_dir_all(format!("{}/romfs", game.data_dir())).unwrap();
     game.built_source = game.source.clone();
     assert!(playable(&game), "the nxrs folder's build plays");
     let imported = game_from_executable(&game.executable()).unwrap();

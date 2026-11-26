@@ -54,7 +54,7 @@ struct V1 {
     /// output name (no extension)
     #[arg(short = 'o', long = "out")]
     out: Option<String>,
-    /// output folder (default: <the input's folder>\SwitchRecomp Builds\<name>)
+    /// output folder (default: <the input's folder>\nxrs\<name>)
     #[arg(long)]
     outdir: Option<PathBuf>,
     /// C compiler: used when it is a clang, ignored otherwise (nxrs compiles with clang)

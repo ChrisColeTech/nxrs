@@ -1,13 +1,14 @@
 //! Search & Filter (`FilterPopup`): search, status, source, sort, the library view, the card size, how
-//! many games are shown, Clear filters and Done. Anchored under its button, kept on the window; Escape
-//! and Enter close it.
+//! many games are shown, Clear filters. A Live popover with the shared header: anchored under its
+//! button, kept on the window; the X, Escape and Enter close it.
 
 use crate::constants::{layout, theme as tokens, words_library as w};
 use crate::flows::{Action, App};
 use crate::model::fill::fill;
+use crate::ui::popups::authored;
 use crate::ui::theme::{self, sans, semibold};
 use crate::ui::widgets::{button, select};
-use egui::{Align, Color32, CornerRadius, Id, Layout, Rect, RichText, Stroke, Ui, vec2};
+use egui::{Id, Rect, RichText, Ui, vec2};
 
 const STATES: [&str; 4] = ["All states", "Ready to play", "Needs build", "Running"];
 const SOURCES: [&str; 5] = [
@@ -29,36 +30,19 @@ pub fn show(ctx: &egui::Context, app: &mut App, anchor: Rect) -> Vec<Action> {
     let screen = ctx.content_rect();
     let x = (anchor.right() - width + layout::POPOVER_OVERHANG)
         .clamp(screen.left() + 8.0, screen.right() - width - 8.0);
-    let shadow = egui::epaint::Shadow {
-        offset: [0, 6],
-        blur: 24,
-        spread: 0,
-        color: Color32::from_black_alpha(190),
-    };
-    let frame = egui::Frame::new()
-        .fill(p.raised)
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::same(16))
-        .shadow(shadow);
+    let frame = authored::popover_frame(&p);
     let area = egui::Area::new(Id::unique("filter-popover"))
         .order(egui::Order::Foreground)
         .fixed_pos(egui::pos2(x, anchor.bottom() - 4.0));
     let shown = area.show(ctx, |ui| {
         frame.show(ui, |ui| {
-            ui.set_width(width - 32.0);
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(crate::constants::menus::FILTER)
-                        .font(semibold(tokens::FONT_POPUP_TITLE)),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    use crate::ui::widgets::icon_button::{Glyph, add};
-                    if add(ui, Glyph::Close, "Close (Esc)", true) {
-                        app.filters.open = false;
-                    }
-                });
-            });
+            let inner = width - 2.0 * f32::from(crate::constants::popups::PAD);
+            ui.set_width(inner);
+            let title = crate::constants::menus::FILTER;
+            if authored::header(ui, inner, title, "filter-popover-close") {
+                app.filters.open = false;
+            }
+            ui.add_space(crate::constants::popups::GAP);
             label(ui, "Search");
             let search = ui.add(
                 egui::TextEdit::singleline(&mut app.filters.search)
@@ -157,16 +141,10 @@ pub fn show(ctx: &egui::Context, app: &mut App, anchor: Rect) -> Vec<Action> {
                     .color(p.muted)
                     .font(sans(tokens::FONT_TOOL)),
             );
-            ui.horizontal(|ui| {
-                if button::ghost(ui, "Clear filters", true).clicked() {
-                    app.filters.clear();
-                }
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    if button::primary(ui, &p, "Done", true).clicked() {
-                        app.filters.open = false;
-                    }
-                });
-            });
+            // a Live popover: every change applies at once; no Done, the header's X closes it
+            if button::ghost(ui, "Clear filters", true).clicked() {
+                app.filters.clear();
+            }
         });
     });
     let outside = ctx.input(|i| {

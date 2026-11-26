@@ -7,6 +7,7 @@ mod build_finish;
 mod dispatch;
 mod dlc;
 mod dlc_sync;
+mod migrate;
 mod open;
 mod pick;
 mod play;

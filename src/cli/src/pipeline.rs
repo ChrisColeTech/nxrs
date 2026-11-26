@@ -3,13 +3,14 @@
 //! ```text
 //! <outdir>\<name>.exe            the loader (cc::STUB_C)
 //! <outdir>\<name>_code.dll       the game's code, compiled, with the runtime linked in
-//! <outdir>\<name>_data\          exefs\, the RomFS marker, control.nacp, the icon; DLC and saves later
+//! <outdir>\<name>_data\          exefs\, romfs\ (the game's data, extracted) + romfs.source, control.nacp, the
+//!                                icon; DLC (extracted too) and saves later
 //! <outdir>\<name>.ini            written once, when missing
 //! <outdir>\<name>_build[_v<N>|_base]\gen   the generated C (kept: a rebuild regenerates only what changed)
 //!                                     \obj   one object per chunk under its content key, link.rsp
 //! ```
 //!
-//! `<outdir>` defaults to `<the input's folder>\SwitchRecomp Builds\<name>`, the folder the launcher builds into.
+//! `<outdir>` defaults to `<the input's folder>\nxrs\<name>`, the folder the launcher builds into.
 
 use crate::cc::{self, Clang, Unit};
 use crate::out::Out;
@@ -93,11 +94,14 @@ fn source_name(input: &Path) -> String {
         .unwrap_or_else(|| "Game".into())
 }
 
+/// The folder beside the input that holds its builds: `<the input's folder>\nxrs\<name>` (owner, 2026-11-26).
+pub const BUILDS_FOLDER: &str = "nxrs";
+
 pub fn default_outdir(input: &Path, name: &str) -> PathBuf {
     let abs = std::path::absolute(input).unwrap_or_else(|_| input.to_path_buf());
     abs.parent()
         .unwrap_or(Path::new("."))
-        .join("SwitchRecomp Builds")
+        .join(BUILDS_FOLDER)
         .join(name)
 }
 
@@ -509,9 +513,13 @@ fn shaders_step(
     match shaders::prebuild_data(data, &opts, &say) {
         Ok(rep) => {
             match promote_live_shaders(&data.join("shaders")) {
-                Ok(n) if n > 0 => out.say(&format!("shaders: promoted {n} runtime-derived variants into the build library")),
+                Ok(n) if n > 0 => out.say(&format!(
+                    "shaders: promoted {n} runtime-derived variants into the build library"
+                )),
                 Ok(_) => {}
-                Err(e) => out.say(&format!("shaders: runtime-derived variants not promoted ({e})")),
+                Err(e) => out.say(&format!(
+                    "shaders: runtime-derived variants not promoted ({e})"
+                )),
             }
             match reconcile_shader_pairs(data) {
                 Ok(removed) if removed > 0 => out.say(&format!(
@@ -543,14 +551,26 @@ fn promote_live_shaders(root: &Path) -> Result<usize> {
     }
     let out_spv = root.join("spv");
     std::fs::create_dir_all(&out_spv)?;
-    let mut manifest = std::fs::read_to_string(root.join("manifest.tsv")).unwrap_or_else(|_| "# nxshaders 1\nkey\tstage\n".into());
-    let mut pairs = std::fs::read_to_string(root.join("pairs.tsv")).unwrap_or_else(|_| "# nxshaders pairs 1\n".into());
-    let mut keys: std::collections::HashSet<String> = manifest.lines().filter_map(|l| l.split_once('\t').map(|x| x.0.to_string())).collect();
-    let mut pair_rows: std::collections::HashSet<String> = pairs.lines().map(str::to_string).collect();
+    let mut manifest = std::fs::read_to_string(root.join("manifest.tsv"))
+        .unwrap_or_else(|_| "# nxshaders 1\nkey\tstage\n".into());
+    let mut pairs = std::fs::read_to_string(root.join("pairs.tsv"))
+        .unwrap_or_else(|_| "# nxshaders pairs 1\n".into());
+    let mut keys: std::collections::HashSet<String> = manifest
+        .lines()
+        .filter_map(|l| l.split_once('\t').map(|x| x.0.to_string()))
+        .collect();
+    let mut pair_rows: std::collections::HashSet<String> =
+        pairs.lines().map(str::to_string).collect();
     let mut promoted = 0;
     for entry in std::fs::read_dir(&live)? {
         let dir = entry?.path();
-        let Some(key) = dir.file_name().and_then(|n| n.to_str()).filter(|n| n.len() == 16 && n.bytes().all(|b| b.is_ascii_hexdigit())) else { continue };
+        let Some(key) = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .filter(|n| n.len() == 16 && n.bytes().all(|b| b.is_ascii_hexdigit()))
+        else {
+            continue;
+        };
         let spv = dir.join("spv").join(format!("{key}.spv"));
         let json = dir.join("spv").join(format!("{key}.json"));
         if !spv.is_file() || !json.is_file() {
@@ -568,7 +588,10 @@ fn promote_live_shaders(root: &Path) -> Result<usize> {
             promoted += 1;
         }
         if let Ok(rows) = std::fs::read_to_string(dir.join("pairs.tsv")) {
-            for row in rows.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
+            for row in rows
+                .lines()
+                .filter(|l| !l.is_empty() && !l.starts_with('#'))
+            {
                 if pair_rows.insert(row.to_string()) {
                     pairs.push_str(row);
                     pairs.push('\n');
@@ -984,20 +1007,34 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     let t = Instant::now();
     out.progress("data", 0, 0);
     let v1 = a.v1;
-    game.write_data(&data, &|m: &str| {
-        // the hint names the option the caller's contract has
-        if v1 {
-            out.say(&m.replace(
-                "install it with nxrs dlc install (the launcher does)",
-                "install it with --install-dlc (the launcher does)",
-            ));
-        } else {
-            out.say(&m.replace(
-                "install it with nxrs dlc install",
-                "install it with nxrs-build dlc install",
-            ));
+    // the RomFS is written into the data folder: @progress in MB, and a RomFS: line every few seconds
+    let said_at = std::cell::Cell::new(Instant::now());
+    let progress = |done: u64, total: u64| {
+        let mb = |b: u64| (b >> 20) as usize;
+        out.progress("data", mb(done), mb(total));
+        if said_at.get().elapsed().as_secs() >= 5 && done < total {
+            out.say(&format!("RomFS: {} of {} MB written", mb(done), mb(total)));
+            said_at.set(Instant::now());
         }
-    })?;
+    };
+    game.write_data_with(
+        &data,
+        &|m: &str| {
+            // the hint names the option the caller's contract has
+            if v1 {
+                out.say(&m.replace(
+                    "install it with nxrs dlc install (the launcher does)",
+                    "install it with --install-dlc (the launcher does)",
+                ));
+            } else {
+                out.say(&m.replace(
+                    "install it with nxrs dlc install",
+                    "install it with nxrs-build dlc install",
+                ));
+            }
+        },
+        &progress,
+    )?;
     // the frame step's facts for the host (its state page writer); none: no frame-step patches
     let fs_txt = data.join("frame_step.txt");
     match stub_facts.as_deref().filter(|f| f.contains("frame_step 1")) {
@@ -1190,9 +1227,9 @@ mod tests {
     #[test]
     fn default_outdir_is_beside_the_input() {
         #[cfg(windows)]
-        let (input, want) = (r"P:\Dumps\X\x.nsp", r"P:\Dumps\X\SwitchRecomp Builds\X");
+        let (input, want) = (r"P:\Dumps\X\x.nsp", r"P:\Dumps\X\nxrs\X");
         #[cfg(not(windows))]
-        let (input, want) = ("/dumps/X/x.nsp", "/dumps/X/SwitchRecomp Builds/X");
+        let (input, want) = ("/dumps/X/x.nsp", "/dumps/X/nxrs/X");
         assert_eq!(default_outdir(Path::new(input), "X"), PathBuf::from(want));
     }
 
@@ -1271,12 +1308,18 @@ mod tests {
         std::fs::write(good.join("spv/0123456789abcdef.spv"), b"spv").unwrap();
         std::fs::write(good.join("spv/0123456789abcdef.json"), b"{}").unwrap();
         std::fs::write(good.join("manifest.tsv"), "0123456789abcdef\tps\n").unwrap();
-        std::fs::write(good.join("pairs.tsv"), "0123456789abcdef\t1111111111111111\n").unwrap();
+        std::fs::write(
+            good.join("pairs.tsv"),
+            "0123456789abcdef\t1111111111111111\n",
+        )
+        .unwrap();
         std::fs::write(bad.join("spv/fedcba9876543210.json"), b"{}").unwrap();
         assert_eq!(super::promote_live_shaders(&root).unwrap(), 1);
         assert!(root.join("spv/0123456789abcdef.spv").is_file());
         assert!(!root.join("spv/fedcba9876543210.spv").is_file());
-        assert!(std::fs::read_to_string(root.join("manifest.tsv")).unwrap().contains("0123456789abcdef\tps"));
+        assert!(std::fs::read_to_string(root.join("manifest.tsv"))
+            .unwrap()
+            .contains("0123456789abcdef\tps"));
         let _ = std::fs::remove_dir_all(root);
     }
 

@@ -1,13 +1,14 @@
-//! Package input, read in place and read-only: the game's code (ExeFS) for translation, and its RomFS, updates and
-//! add-on content for the runtime's file system, with nothing extracted.
+//! Package input, read-only: the game's code (ExeFS) for translation, and its RomFS, updates and add-on content,
+//! which a build writes into the game's data folder (decrypted and patched) so the built game needs no package.
 //!
 //! # API
 //!
 //! | Call | What |
 //! |---|---|
 //! | [`open_game`] | a dumped folder, an `.nsp` (plain, encrypted, combined 1G+1U(+1D)), an `.xci` or a `.nup`, with an [`UpdateChoice`]: ExeFS, RomFS, version, control data, add-on hint |
-//! | [`Game::write_data`] | stage a build's data folder: `exefs/`, the RomFS marker (`romfs.nsp` / `romfs.nup` / `romfs.dir`), `control.nacp` and icon |
-//! | [`open_data_dir`] | what the runtime calls at start: the game's [`RomFs`] from its data folder's marker |
+//! | [`Game::write_data`] | stage a build's data folder: `exefs/`, the RomFS extracted into `romfs/` (or its image `romfs.bin`) with its record `romfs.source`, `control.nacp` and icon |
+//! | [`extract`] | a [`RomFs`] written out as a folder or an image |
+//! | [`open_data_dir`] | what the runtime calls at start: the game's [`RomFs`] from its data folder |
 //! | [`RomFs`] | `list(dir)`, `walk()`, `find(path)`, `read(path, offset, len)`, `read_file(path)`, `image()`; `Send + Sync` |
 //! | [`update_info`] | what an update package is (and, with the game, that it belongs to it): the `UPDATE\t...` line |
 //! | [`dlc`] | `install`, `sync`, `remove`, `describe`, `read_manifest`, `title_romfs` (a title's RomFS, in place) |
@@ -21,6 +22,7 @@ mod container;
 mod crypto;
 pub mod dlc;
 mod error;
+pub mod extract;
 mod folder;
 mod io;
 mod keys;
@@ -348,6 +350,16 @@ impl Game {
     /// other version had are removed), the RomFS marker (the other markers removed), `control.nacp` and the icon.
     /// Says what was applied, in the words the launcher reads.
     pub fn write_data(&self, datadir: &Path, say: &dyn Fn(&str)) -> Result<()> {
+        self.write_data_with(datadir, say, &|_, _| {})
+    }
+
+    /// [`Game::write_data`], with `progress(bytes, total)` called while the RomFS is written out.
+    pub fn write_data_with(
+        &self,
+        datadir: &Path,
+        say: &dyn Fn(&str),
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<()> {
         let io_err = |p: &Path| {
             let p = p.to_path_buf();
             move |source| PackageError::Io {
@@ -378,19 +390,7 @@ impl Game {
                 let _ = std::fs::remove_file(e.path());
             }
         }
-        for other in [marker::NSP, marker::NUP, marker::DIR, "romfs.bin"] {
-            if other != self.marker.0 {
-                let _ = std::fs::remove_file(datadir.join(other));
-            }
-        }
-        if self.marker.0 == marker::NONE {
-            // no RomFS: the runtime finds the empty romfs/ folder
-            let r = datadir.join("romfs");
-            std::fs::create_dir_all(&r).map_err(io_err(&r))?;
-        } else {
-            let m = datadir.join(self.marker.0);
-            std::fs::write(&m, &self.marker.1).map_err(io_err(&m))?;
-        }
+        self.write_romfs(datadir, say, progress)?;
         let icons: Vec<&String> = self
             .control
             .keys()
@@ -451,11 +451,6 @@ impl Game {
             )),
             Applied::None => {}
         }
-        if self.marker.0 == marker::NONE {
-            say(&format!("RomFS: {} has none", self.path.display()));
-        } else {
-            say(&format!("RomFS: using {} in place", self.path.display()));
-        }
         if !self.addons.is_empty() {
             let ids: Vec<String> = self.addons.iter().map(|t| format!("{t:016x}")).collect();
             say(&format!(
@@ -464,6 +459,117 @@ impl Game {
             ));
         }
         Ok(())
+    }
+}
+
+/// `<size> <modification time, ns since 1970>` of a package or folder; `- -` when it cannot be read.
+fn file_stamp(p: &Path) -> String {
+    let Ok(m) = std::fs::metadata(p) else {
+        return "- -".into();
+    };
+    let ns = m
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map_or(0, |d| d.as_nanos());
+    format!("{} {ns}", m.len())
+}
+
+impl Game {
+    /// The data folder's `romfs.source`: what the build's RomFS was made from (the old marker's text, which names
+    /// the package and the applied update), then `marker <the old marker's file name>`, `extracted <romfs |
+    /// romfs.bin> <files> <bytes>` and a `stamp <size> <mtime ns> <path>` row per package read. While it matches,
+    /// the copy in the data folder is current.
+    pub fn romfs_record(&self, into: &str) -> String {
+        let files = self.romfs.walk();
+        let bytes: u64 = files.iter().map(|f| f.1).sum();
+        let mut text = self.marker.1.clone();
+        text += &format!("marker {}\n", self.marker.0);
+        text += &format!("extracted {into} {} {bytes}\n", files.len());
+        text += &format!("stamp {} {}\n", file_stamp(&self.path), self.path.display());
+        if let Applied::Separate(u) = &self.applied {
+            text += &format!("stamp {} {}\n", file_stamp(u), u.display());
+        }
+        text
+    }
+
+    /// The game's RomFS into the data folder: `romfs/` (or `romfs.bin`, the image, for names a Windows folder
+    /// cannot hold), recorded in `romfs.source`; skipped while the record says the copy is current. The in-place
+    /// markers of older builds are removed.
+    fn write_romfs(
+        &self,
+        datadir: &Path,
+        say: &dyn Fn(&str),
+        progress: &dyn Fn(u64, u64),
+    ) -> Result<()> {
+        for old in [marker::NSP, marker::NUP, marker::DIR] {
+            let _ = std::fs::remove_file(datadir.join(old));
+        }
+        let (folder, image, record) = (
+            datadir.join(marker::FOLDER),
+            datadir.join(marker::IMAGE),
+            datadir.join(marker::SOURCE),
+        );
+        let threads = extract::default_threads();
+        if self.marker.0 == marker::NONE {
+            // no RomFS: the runtime finds an empty romfs/ folder
+            let _ = std::fs::remove_file(&record);
+            let _ = std::fs::remove_file(&image);
+            extract::tree(&self.romfs, &folder, threads, progress)?;
+            say(&format!("RomFS: {} has none", self.path.display()));
+            return Ok(());
+        }
+        let as_image = extract::unsafe_name(&self.romfs).is_some() && self.romfs.image().is_some();
+        let into = if as_image {
+            marker::IMAGE
+        } else {
+            marker::FOLDER
+        };
+        let text = self.romfs_record(into);
+        let present = if as_image {
+            image.is_file()
+        } else {
+            folder.is_dir()
+        };
+        if present && std::fs::read_to_string(&record).is_ok_and(|t| t == text) {
+            say(&format!(
+                "RomFS: {into} is current (unchanged since the last build)"
+            ));
+            return Ok(());
+        }
+        // the record goes first: a copy cut short is never taken as current
+        let _ = std::fs::remove_file(&record);
+        let t = std::time::Instant::now();
+        let mb = |b: u64| b as f64 / 1048576.0;
+        if as_image {
+            say(&format!(
+                "RomFS: {} has names a Windows folder cannot hold; writing its image into romfs.bin",
+                self.path.display()
+            ));
+            let n = extract::image(&self.romfs, &image, progress)?;
+            let _ = std::fs::remove_dir_all(&folder);
+            say(&format!(
+                "RomFS: written into romfs.bin ({:.1} MB, {:.1} s)",
+                mb(n),
+                t.elapsed().as_secs_f64()
+            ));
+        } else {
+            say(&format!(
+                "RomFS: extracting {} into romfs/",
+                self.path.display()
+            ));
+            let (files, n) = extract::tree(&self.romfs, &folder, threads, progress)?;
+            let _ = std::fs::remove_file(&image);
+            say(&format!(
+                "RomFS: extracted into romfs/ ({files} files, {:.1} MB, {:.1} s)",
+                mb(n),
+                t.elapsed().as_secs_f64()
+            ));
+        }
+        std::fs::write(&record, text).map_err(|source| PackageError::Io {
+            path: record.clone(),
+            source,
+        })
     }
 }
 
