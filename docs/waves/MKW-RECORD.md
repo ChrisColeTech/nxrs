@@ -378,3 +378,145 @@ The lead's independent audit fits after step 4. It covers the gate list, the wal
   - streams under 64 draws stay serial.
 - The phase 2 deadline, and machine-lock windows for about five perf pairs (~10 minutes each).
 - Whether `smash` or `wonder` is the regression title.
+
+## Report (agent, phase 2 checkpoint after steps 1-3, 2026-11-25)
+
+Worktree `D:\Projects\RecompLauncherEngine-mkw`, branch `mkw-record`. Commits: `3fadfd6` step 1, `58286e3` step 2,
+`f89bd0a` step 3 (each built, MKW relinked with the worktree's `dist`, run, sheet read). The worktree's `build/tools` is
+a junction to the main tree's `build/tools` (read-only use by `build.ps1`); remove it with `rmdir`, never `rm -rf`.
+All numbers are the race window [250, 325] s of `py scripts/play.py mkw --env NXGFX_GPU=0`, from the frames CSV:
+replay thread = `replay_ms` (translation) + `prep_ms` (pool sync, texture checks). Runs are in the worktree's
+`build/play/`. Perf pairs ran under the main tree's `machine.lock` with no other game running (the script waited
+for OOT-FOREST2's runs to end).
+
+### 1. Built
+
+**Step 1: pool walker (`mem.rs`, `queue.rs`; off: `NXGFX_POOL_WALKER=0`).**
+- **Cause.** A present's pool sync is the frame's first, so it walked every watched pool on the replay thread under
+  `g.mem`.
+- **The walker.** `present()` kicks a `vk pool walker` thread in `aq_push_with`'s `before`, so the kick comes before
+  the replay can see the op. The walker walks every watched mirror/host pool in 16 MB pieces. It takes only a new
+  `WATCH_MU` (after `g.mem` in lock order) and stashes the pages it takes.
+- **Draining the stash.** Every holder of `g.mem` that takes and resets the watch drains the stash into the pools'
+  `pending` first: `begin_submit` (for its whole sync), `apply_writebacks` (the landings and the lazy check) and
+  `sync_range`.
+- **Coverage.** A complete walk that started after the present was queued covers that present's sync
+  (`walker_covers`, waiting up to 200 ms for a walk in progress). The present then runs only the per-pool pass and
+  sets `scan_frame`, so later syncs leave the cold pools out as before.
+- **Lock hand-off.** Syncs that wait for `WATCH_MU` go before the walker's next piece (`WATCH_WANT`).
+- **Pending pages count as CPU writes.** `sync_range` (the cold-pool glyph fix, mkw-recomp #250) and the lazy
+  write-back CPU check now treat a page in `pending` as written. Without that, a page the walker took mid-replay
+  would be missed by a copy in the same submission.
+- **Diagnosis kept apart.** The first version held `g.mem` per piece. Its pair (s1-off/s1-on) moved ~6 ms into draw
+  translation: sets went from 7.1 to 13.2 ms, because draws take `g.mem` for every storage-buffer write. Hence
+  `WATCH_MU`. The next pair (s1c) showed 3 ms a frame of syncs waiting on the unfair mutex, hence the hand-off.
+
+**Step 2: `record_op` split (`exec.rs`, refactor).**
+- `record_op` keeps its prelude, then runs a state record (`is_state_op`) in `state_op` / `state_op2`, or a command
+  record in `emit_op` / `emit_op2` / `emit_op3`.
+- The arms are unchanged; only function boundaries were added.
+
+**Step 3: segmented translation, sequential (`exec.rs`, `queue.rs`, `mem.rs`; on: `NXGFX_TRANSLATE_THREADS>=1`,
+default 0 = old path).**
+- **Pre-pass.** `run_segmented` runs `plan`, which walks the stream once:
+  - it applies the state records, SetRenderTargets' targets (`set_rt_state`) and a counter reset's samples-passed
+    switch to a shadow `QState`;
+  - it makes the ordered global effects in stream order (`global_op`: pending event writes, fence values,
+    `rc_note` / `OCCL_FRAME`);
+  - it evaluates waits (the stream parks where it did) and records render-condition results;
+  - it cuts at SET_RT, BARRIER, DISPATCH, copies or texture clears once a segment holds 256 draws.
+- **Segments.** Each segment runs the unchanged `record` from `fork_state()` with `seg` set: no global effects again,
+  waits pass, render conditions popped from the pre-pass. It records into a child `Sub` (`new_sub`) whose timestamp
+  and occlusion queries go into the parent's pools after the parent's.
+- **Join.** `child_join` merges posts, write-backs (through `note_writeback`'s merge) and texture write-backs into
+  the parent in stream order.
+- **Submit.** `submit_sub` submits `[parent pre, child pres…, parent main, child mains…]` in one `vkQueueSubmit2` with
+  one timeline value. The last child's buffers are swapped in as the tail (sparse fills, write-back baselines and
+  copies, end timestamp) and swapped back after the submit.
+- **Completion** retires the children's resources with the parent and restores their own query pools.
+- **Mesh draws are segmented.** `mesh_rec` lives within one mesh draw. MKW issues mesh draws every frame, and the
+  first step-3 run, which excluded them, segmented nothing in the race.
+- **Kept in one piece:** pass dump, `NXGFX_DEFER`, DB poison, mesh-binding diagnosis, NDVE, raw probe,
+  `NXGFX_SKIP_PS`, shadows=0, transform feedback.
+- **Diagnosis tools.** `NXGFX_TRANSLATE_CHECK=1` compares each segment's pre-pass entry state with the state the
+  segment before it left (`state_diff`). A `[vk] translate` line every 600 presents gives streams segmented or kept
+  whole (with the reason), segments, the largest segment, pre-pass and segment ms, and write-back ranges.
+
+### 2. Tests (`cargo test -p graphics --lib --release`, 213 pass after each step)
+
+- `walker_tests::pieces_cover_each_run_and_nothing_else`: a walk asks the runs a sync asks, in pieces.
+- `walker_tests::coverage_needs_a_complete_walk_started_after_the_present`: a present is covered only by a complete
+  walk that started after it was queued; `None` or 0 never.
+- `state_records_record_nothing`: no command, submission or global-effect record is classed as a state record.
+- `fork_keeps_state_and_drops_the_pass`: a fork carries the state fields, no pass and no caches, and `state_diff`
+  names the fields that differ.
+- These are new; none tests a pre-existing failure. The real check is the game, plus 0 entry-state differences under
+  `NXGFX_TRANSLATE_CHECK=1` in two full runs (`*-s3-check`, `*-s3b-check`).
+
+### 3. Verified (FPS mean / 5% low; replay-thread ms = replay + prep)
+
+| Run (worktree `build/play/`) | Switches | FPS | Replay | Prep | Replay thread | Write-watch scan / completion pool lock (ms a frame) |
+|---|---|---|---|---|---|---|
+| lead's MKW-PERF5 final (main tree) | before this wave | 28.9 / 25.1 | 15.9 | 12.5 | 28.4 | — |
+| `181519-s1-off` | walker off | 29.4 / 26.1 | 14.8 | 13.8 | 28.6 | — |
+| `183447-s1c-off` | walker off | 28.6 / 25.0 | 16.0 | 13.8 | 29.9 | 8.0 / 6.6 |
+| `190204-s1d-off` | walker off | 26.8 / 24.3 | 15.9 | 16.7 | 32.5 | 12.3 / 8.5 |
+| `190742-s1d-on` | step 1 final | 29.1 / 25.0 | 15.6 | 10.4 | 26.0 | 3.6 / 2.6 |
+| `193620-s3-off` | step 1, segments off | 29.1 / 24.0 | 15.6 | 10.3 | 25.9 | 3.4 / 2.1 |
+| `194158-s3-on` | segments on (=1) | 26.5 / 22.0 | 17.6 | 14.0 | 31.6 | 9.2 / 6.2 |
+| `195122-s3c-off` | step 3 final, segments off | 27.6 / 22.8 | 15.8 | 13.5 | 29.4 | 9.0 / 5.8 |
+| `195700-s3c-on` | step 3 final, segments on | 28.7 / 25.0 | 16.6 | 10.5 | 27.1 | 3.7 / 3.0 |
+
+- **Step 1.** The present's walk leaves the replay thread: 600 of 600 presents' syncs covered, the replay never
+  waited for a walk, and the walk takes 11-15 ms on its own thread. With the scan in its fast mode, prep drops
+  3.4-6 ms (13.8-16.7 → 10.3-10.4) and completion's pool lock 6-8.5 → 2-3 ms. There is **no FPS gain**: 29.1 on vs
+  26.8-29.4 off. The frame is still bound by draw translation and main's chain.
+- **Step 3 cost (sequential).** Replay +0.8 ms (s3c) to +2.0 ms (s3), of which the pre-pass is 0.8 ms. Per race
+  frame: 3.1 streams in 6.5 segments, largest 1,100-1,370 draws, the other 6 streams under 64 draws. Write-back
+  ranges are unchanged (209 vs 211 a frame).
+- **Noise I could not explain.** The write-watch scan is bimodal from run to run, ~3.5 ms or ~9 ms a frame, with or
+  without segments, walker on or off (s1c-off 8.0, s1d-off 12.3, s3-on 9.2, s3c-off 9.0; the others 3.4-3.7). It
+  moves prep by ~4 ms and FPS by ~1-2 between runs of the same build. FPS comparisons below ~2 FPS are not
+  significant here.
+- **Sheets read** (boot, title, menus, grid, race, lap 2, all correct): `184025-s1c-on`, `191459-s3-check`,
+  `192200-s3b-check` (countdown at the grid), `195700-s3c-on`.
+- **Red lines.** One kind in every run, the known `pipeline-crashed.bin` line.
+- **No device loss**, every run exited normally.
+- **Not run:** the `smash` regression (planned for step 6).
+
+### 4. Unproven / next
+
+- **No FPS gain yet.** The worker lanes (step 4) are where the gain is.
+- **Load balance.** The largest race segment is ~1,300 draws, about 1/3 of the frame's translation, in one pass with no
+  natural cut. Step 4 alone would be capped by it; the mid-pass cuts planned for step 5 are needed for balance.
+- **Vulkan threading.** Children are recorded on the replay thread from the shared pools. Step 4 needs a command pool
+  per lane, an atomic query counter and the gate of §4 of the design. The swap of the last child's buffers into the
+  parent is undone right after the submit, so each `Sub` keeps its own pool's buffers.
+- **Memory.** Children cost ~24 MB of staging and ~320 MB of scratch arenas (64 MB chunks) more in the memory line
+  (allocator 7680 → 8000 MB in blocks). Per-lane reuse or a smaller child arena would cut it.
+- **The bimodal write-watch scan** (3.5 vs 9 ms, above): unexplained, worth a trace before tuning further.
+- **Behaviour changes for the lead's audit:**
+  - **Coherence.** The present's sync is covered by a walk made ~20 ms earlier. A cold pool written between the walk
+    and the present's sync now waits for the next frame's walk; before, the present's own scan took it. The design
+    accepted this, but it remains audit item 1.
+  - **Lazy write-back.** The fault handler (`lazy.rs:401`, copy then `reset_watch`) runs without `WATCH_MU`. The
+    walker may take that page's own stores as CPU writes, giving a redundant upload of the same bytes; the replay's
+    scans already had this race.
+  - **`tex_writeback_land`** (opt-in `NXGFX_TEX_WB=1`) peeks the watch without the stash.
+  - **Segments.** The pre-pass makes all of a stream's ordered global effects before its commands are translated: the
+    `rc_note` order, pending event writes, fence values. Waits are evaluated at pre-pass time and render conditions
+    taken from it. Draw-time `QState` changes that the pre-pass does not mirror (missing shaders resolved at a draw,
+    `dual`, `last_color`) are recomputed per draw, or covered by the serial-only list.
+
+### 5. Slips
+
+- The first relink returned at once (`nxrs.exe` is a GUI-subsystem program) and I released `dist.lock` about 5 s
+  early while it was still relinking. I took it again at once and held it until the process ended. Later relinks
+  wait on the PID.
+- Correctness runs ran beside OOT-FOREST2's games (allowed); their numbers are not used as measurements.
+- Step 2 was committed by re-applying its edits to the step-1 tree (step 3 was already in progress); the restored
+  step-3 files were byte-identical to the backups.
+
+### 6. Questions
+
+None.
