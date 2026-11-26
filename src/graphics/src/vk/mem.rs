@@ -816,6 +816,7 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     };
     let frame = super::present::frames();
     let mut m = g.mem.lock().unwrap();
+    let _watch = watch_lock(&mut m);
     let gen = m.gen;
     let Some(b) = find(&m, a, n) else { return };
     let p = m.by_base.get_mut(&b).unwrap();
@@ -827,7 +828,10 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     let Some(pages) = watch::take(lo, hi, true) else {
         return;
     };
-    if pages.is_empty() {
+    // pages a scan took and left for the next sync (the pool walker's, a landing's) are CPU writes too: they go now
+    // with the rest of the pool's pending ranges
+    let pending = p.pending.iter().any(|&(pa, pn)| pa < hi && lo < pa + pn);
+    if pages.is_empty() && !pending {
         return;
     }
     let ranges = p.take_cpu_writes(gen, Some(pages));
@@ -1887,9 +1891,286 @@ fn scan_covers(due: Option<u64>, full: bool) -> bool {
     due.is_some_and(|d| d != 0 && d <= last) && sig == cpu_signals()
 }
 
+// ---------- the pool walker (MKW-RECORD step 1) ----------
+//
+// A present's pool sync is the frame's first (`present_frame` counts the frame before it), so it asked every watched
+// pool, cold ones too: ~4.4 ms of write-watch walks a frame on the replay thread in Mario Kart World, under the pool
+// lock (completion's write-backs waited behind it). The game queues the present ~20 ms before the replay thread takes
+// it: when it does, a `vk pool walker` thread starts that walk at once, in pieces of `WALK_PIECE` bytes, each under the
+// pool lock (a piece's pages go into their pools' `pending` while the lock is held, so no sync, landing or lazy check
+// sees a reset page that is not pending). A walk that started after the present was queued and found every range
+// covers the present's sync (`walker_covers`): every CPU write the game made before queuing the present was taken and
+// is uploaded by the next sync, the present's included. Cold pools keep their rule (asked once a frame, at the walk).
+// `NXGFX_POOL_WALKER=0`: off (the present walks every pool itself).
+
+/// Bytes of guest memory one piece of the walker's walk asks under the pool lock (~25 us).
+const WALK_PIECE: u64 = 16 << 20;
+
+fn walker_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("NXGFX_POOL_WALKER").as_deref() != Ok("0")
+            && std::env::var("NXGFX_SCAN_COVER").as_deref() != Ok("0")
+    })
+}
+
+struct WalkState {
+    /// a walk is asked for (the present queued after the last walk started)
+    want: bool,
+    running: bool,
+    /// `queue::aq_tail` when the last complete walk started (0: none)
+    done_tail: u64,
+}
+static WALK: std::sync::Mutex<WalkState> = std::sync::Mutex::new(WalkState {
+    want: false,
+    running: false,
+    done_tail: 0,
+});
+static WALK_CV: std::sync::Condvar = std::sync::Condvar::new();
+/// Walks made, their time, walks that could not read some range (they cover nothing), presents whose sync a walk
+/// covered, and the replay thread's time waiting for a walk to end.
+pub static WALKS: AtomicU64 = AtomicU64::new(0);
+pub static WALK_NS: AtomicU64 = AtomicU64::new(0);
+pub static WALK_FAILED: AtomicU64 = AtomicU64::new(0);
+pub static WALK_COVERED: AtomicU64 = AtomicU64::new(0);
+pub static WALK_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+
+/// A present is being queued (replay queue op `seq`, before the replay thread can see it): the walker walks every
+/// watched pool. Its walk starts after the op is queued (the queue's tail is past `seq` already).
+pub fn walker_kick() {
+    if !walker_on() {
+        return;
+    }
+    static SPAWN: std::sync::Once = std::sync::Once::new();
+    SPAWN.call_once(|| {
+        if let Err(e) = std::thread::Builder::new()
+            .name("vk pool walker".into())
+            .spawn(walker_main)
+        {
+            crate::log::red_once(&format!("the pool walker thread did not start: {e}"));
+        }
+    });
+    WALK.lock().unwrap().want = true;
+    WALK_CV.notify_all();
+}
+
+fn walker_main() {
+    loop {
+        {
+            let mut w = WALK.lock().unwrap();
+            while !w.want {
+                w = WALK_CV.wait(w).unwrap();
+            }
+            w.want = false;
+            w.running = true;
+        }
+        // read before any page is taken: every op queued up to `tail` was queued before the walk took its pages
+        let tail = super::queue::aq_tail();
+        let t0 = std::time::Instant::now();
+        let ok = super::Gpu::try_get().is_some_and(walk_all);
+        WALK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        let n = WALKS.fetch_add(1, Ordering::Relaxed) + 1;
+        if !ok {
+            WALK_FAILED.fetch_add(1, Ordering::Relaxed);
+        }
+        {
+            let mut w = WALK.lock().unwrap();
+            w.running = false;
+            if ok {
+                w.done_tail = w.done_tail.max(tail);
+            }
+        }
+        WALK_CV.notify_all();
+        if n % 600 == 0 {
+            crate::vklog!(
+                "pool walker, last 600 walks: {:.2} ms a walk, {} could not read a range, {} presents' syncs covered, the replay waited {:.3} ms a walk for one; syncs and landings waited {:.3} ms a walk for the watch lock (with the drain)",
+                WALK_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6,
+                WALK_FAILED.swap(0, Ordering::Relaxed),
+                WALK_COVERED.swap(0, Ordering::Relaxed),
+                WALK_WAIT_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6,
+                WATCH_WAIT_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6
+            );
+        }
+    }
+}
+
+fn watched_pools(m: &Pools) -> Vec<WatchedPool> {
+    m.by_base
+        .values()
+        .filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host))
+        .map(|p| {
+            let (lo, hi) = page_range(p.base, p.size);
+            (p.base, lo, hi, p.alloc_base)
+        })
+        .collect()
+}
+
+/// [lo, hi) of each run of watched pools (`watch_batch_end`, as a sync asks them), cut into `piece` bytes.
+fn walk_pieces(list: &[WatchedPool], piece: u64) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < list.len() {
+        let (j, hi) = watch_batch_end(list, i);
+        let mut lo = list[i].1;
+        while lo < hi {
+            let e = (lo + piece).min(hi);
+            out.push((lo, e));
+            lo = e;
+        }
+        i = j;
+    }
+    out
+}
+
+/// The write watch's resets outside the pool lock: the walker's taken pages wait here until the next holder of the
+/// pool lock drains them into their pools (`drain_walk`). Lock order: `g.mem`, then this. Everything that takes the
+/// watch with a reset under the pool lock and relies on what it took (a sync's scan, a landing's take / copy /
+/// reset, `sync_range`) holds this too, and drains it first. (The walker under the pool lock held up the replay's
+/// draws, which take the pool lock for every storage buffer they write: MKW 7 -> 13 ms of sets a frame.)
+static WATCH_MU: std::sync::Mutex<Vec<u64>> = std::sync::Mutex::new(Vec::new());
+
+/// The walker's stashed pages into their pools' `pending` (the pools there now). Under the pool lock.
+fn drain_walk(m: &mut Pools, stash: &mut Vec<u64>) {
+    if stash.is_empty() {
+        return;
+    }
+    let list = watched_pools(m);
+    let mut taken = HashMap::new();
+    distribute_watched_pages(&list, stash, &mut taken);
+    stash.clear();
+    for (base, pgs) in taken {
+        if let Some(p) = m.by_base.get_mut(&base) {
+            p.pending.extend(pgs.into_iter().map(|pg| (pg, PAGE)));
+        }
+    }
+}
+
+/// Threads waiting for `WATCH_MU` other than the walker: the walker steps aside between its pieces while any wait
+/// (the lock is not fair: the walker took it again before a woken sync ran, 3 ms a frame of syncs waiting in MKW).
+static WATCH_WANT: AtomicU64 = AtomicU64::new(0);
+/// Syncs' and landings' time waiting for the watch lock (the walker's piece), with the drain.
+pub static WATCH_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+
+/// The pool lock's holder: the watch lock with the walker's pages drained.
+fn watch_lock(m: &mut Pools) -> std::sync::MutexGuard<'static, Vec<u64>> {
+    let t0 = std::time::Instant::now();
+    WATCH_WANT.fetch_add(1, Ordering::AcqRel);
+    let mut s = WATCH_MU.lock().unwrap();
+    WATCH_WANT.fetch_sub(1, Ordering::AcqRel);
+    drain_walk(m, &mut s);
+    WATCH_WAIT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    s
+}
+
+/// One walk of every watched pool; false when a range could not be read (the walk covers nothing then).
+fn walk_all(g: &Gpu) -> bool {
+    let list = {
+        let m = g.mem.lock().unwrap();
+        watched_pools(&m)
+    };
+    let mut ok = true;
+    for (lo, hi) in walk_pieces(&list, WALK_PIECE) {
+        // a sync or landing waiting for the lock goes first
+        let t = std::time::Instant::now();
+        while WATCH_WANT.load(Ordering::Acquire) != 0 && t.elapsed().as_millis() < 50 {
+            std::thread::yield_now();
+        }
+        let mut s = WATCH_MU.lock().unwrap();
+        // a range no longer mapped (a pool gone meanwhile) reads as failed: this walk covers nothing
+        match watch::take(lo, hi, true) {
+            Some(pages) => s.extend(pages),
+            None => ok = false,
+        }
+    }
+    ok
+}
+
+/// A present's sync (op `due`, taken straight from the replay queue): waits for the walk its queuing asked for, and
+/// whether a complete walk started after it was queued. The CPU-signal rule of `scan_covers` does not apply: a present
+/// waits on no event, and work a signal releases has syncs of its own.
+fn walker_covers(due: Option<u64>) -> bool {
+    if !walker_on() {
+        return false;
+    }
+    let Some(d) = due.filter(|&d| d != 0) else {
+        return false;
+    };
+    let t0 = std::time::Instant::now();
+    let mut w = WALK.lock().unwrap();
+    while w.done_tail < d && (w.running || w.want) && t0.elapsed().as_millis() < 200 {
+        w = WALK_CV
+            .wait_timeout(w, std::time::Duration::from_millis(20))
+            .unwrap()
+            .0;
+    }
+    WALK_WAIT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    w.done_tail >= d
+}
+
+#[cfg(test)]
+mod walker_tests {
+    use super::*;
+
+    /// A walk asks the runs a sync asks, in pieces, and nothing between runs that a sync would not walk.
+    #[test]
+    fn pieces_cover_each_run_and_nothing_else() {
+        let mb = 1u64 << 20;
+        let list = [
+            (0, 0, 40 * mb, 1),
+            (40 * mb, 40 * mb, 41 * mb, 1),
+            (100 * mb, 100 * mb, 100 * mb + PAGE, 1),
+        ];
+        let p = walk_pieces(&list, 16 * mb);
+        assert_eq!(
+            p,
+            vec![
+                (0, 16 * mb),
+                (16 * mb, 32 * mb),
+                (32 * mb, 41 * mb),
+                (100 * mb, 100 * mb + PAGE)
+            ]
+        );
+        assert!(walk_pieces(&[], 16 * mb).is_empty());
+    }
+
+    /// A present is covered only by a complete walk that started after it was queued; a present not from the queue
+    /// never is.
+    #[test]
+    fn coverage_needs_a_complete_walk_started_after_the_present() {
+        if !walker_on() {
+            return;
+        }
+        let keep = std::mem::replace(
+            &mut *WALK.lock().unwrap(),
+            WalkState { want: false, running: false, done_tail: 10 },
+        );
+        assert!(walker_covers(Some(10)));
+        assert!(walker_covers(Some(3)));
+        assert!(!walker_covers(Some(11)), "queued after the walk started");
+        assert!(!walker_covers(None));
+        assert!(!walker_covers(Some(0)));
+        *WALK.lock().unwrap() = keep;
+    }
+}
+
 pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub, due: Option<u64>) -> Vec<(u64, u64)> {
+    begin_submit_ex(g, sub, due, false)
+}
+
+/// As `begin_submit`; `present`: the sync of a present taken straight from the replay queue (the pool walker's walk
+/// may cover it).
+pub fn begin_submit_ex(
+    g: &Gpu,
+    sub: &mut super::queue::Sub,
+    due: Option<u64>,
+    present: bool,
+) -> Vec<(u64, u64)> {
+    // before the pool lock: the walker takes it for each piece
+    let walked = present && walker_covers(due);
     let t_lock = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
+    // the walker's pages first, and none taken by it while this sync scans and uploads
+    let _watch = watch_lock(&mut m);
     SYNC_LOCK_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let t_scan = std::time::Instant::now();
     m.gen = m.gen.wrapping_add(1);
@@ -1912,7 +2193,12 @@ pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub, due: Option<u64>) -> V
     let mid_frame = !new_frame;
     // the scan this one would make (every pool, or the cold ones left out) already started after the game queued this
     // work: every CPU write made before it was queued has been taken (`scan_covers`)
-    let covered = scan_covers(due, new_frame || !cold_on);
+    let covered = walked || scan_covers(due, new_frame || !cold_on);
+    if walked {
+        // the walk asked every pool, cold ones too: this frame's later syncs leave the cold ones out
+        WALK_COVERED.fetch_add(1, Ordering::Relaxed);
+        m.scan_frame = frame;
+    }
     if covered {
         SCANS_SKIPPED.fetch_add(1, Ordering::Relaxed);
     } else {
@@ -2169,6 +2455,9 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
     let _done = InflightDone(landed);
     let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
+    // landings take, write and reset pages: the walker must not take a landing's own stores for CPU writes, and the
+    // lazy check below sees the walker's pages as pending
+    let _watch = watch_lock(&mut m);
     super::lazy::T_LOCK.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     super::queue::chain_trace::note("wb_lock", t0.elapsed().as_micros() as u64, wbs.len() as u64);
     for &(pool, a, n, src, pre, identity) in wbs {
@@ -2192,6 +2481,10 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
                 if !cpu.is_empty() {
                     lazy.retain(|pg| cpu.binary_search(pg).is_err());
                 }
+            }
+            // pages a scan took and left for the next sync (the pool walker's, a landing's) are CPU writes too
+            if !p.pending.is_empty() {
+                lazy.retain(|&pg| !p.pending.iter().any(|&(pa, pn)| pg < pa + pn && pa < pg + PAGE));
             }
         }
         super::lazy::T_TAKE.fetch_add(tl.elapsed().as_nanos() as u64, Ordering::Relaxed);

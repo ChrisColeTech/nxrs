@@ -1900,7 +1900,7 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
                 None => {
                     for (t, crop) in p.presents {
                         let frame = present_frame(&t, crop, ll, false);
-                        present_locked(g, st, q, ll, &t, crop, frame, resume_due());
+                        present_locked(g, st, q, ll, &t, crop, frame, resume_due(), false);
                     }
                 }
             }
@@ -2067,8 +2067,9 @@ pub fn present(
     let Some(g) = Gpu::try_get() else { return 0 };
     super::capture::present(qserial, origin_ll, t, crop);
     if aq_on() {
+        // the pool walker starts the frame's walk of every pool now, before the replay thread can take the present
         return ASYNC
-            | aq_push(
+            | aq_push_with(
                 g,
                 Op::Present {
                     q: qserial,
@@ -2076,6 +2077,7 @@ pub fn present(
                     t: *t,
                     crop,
                 },
+                |_| super::mem::walker_kick(),
             );
     }
     present_now(g, qserial, origin_ll, t, crop, None)
@@ -2103,7 +2105,7 @@ fn present_now(
     let frame = present_frame(t, crop, origin_ll, true);
     let mut st = g.q.sub.lock().unwrap();
     take_recycled(g, &mut st);
-    present_locked(g, &mut st, qserial, origin_ll, t, crop, frame, due)
+    present_locked(g, &mut st, qserial, origin_ll, t, crop, frame, due, due.is_some())
 }
 
 /// A present's frame number, telemetry and pass-dump bookkeeping, and the screenshot requested for it (`shot`:
@@ -2135,6 +2137,8 @@ fn present_locked(
     crop: Option<[i32; 4]>,
     _frame: u64,
     due: Option<u64>,
+    // taken straight from the replay queue (not behind parked work): the pool walker's walk may cover its sync
+    direct: bool,
 ) -> u64 {
     wait_diag::mark(1, "present: new submission", [_qserial, 0]);
     let mut sub = new_sub(g, st);
@@ -2142,7 +2146,7 @@ fn present_locked(
     super::mem::SYNC_BY[1].fetch_add(1, Ordering::Relaxed);
     super::perf::timed(super::perf::C::PrepNs, || {
         let dirty = super::perf::timed(super::perf::C::PoolSyncNs, || {
-            super::mem::begin_submit(g, &mut sub, due)
+            super::mem::begin_submit_ex(g, &mut sub, due, direct)
         });
         g.image_begin_submit(&mut sub, &dirty);
     });
