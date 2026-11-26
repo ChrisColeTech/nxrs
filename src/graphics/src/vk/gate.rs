@@ -53,6 +53,73 @@ pub struct Run {
     /// that took it over, the new serial). A segment before that one in the stream that uses the old object after the
     /// takeover uses the image where it is now (`taken_later`, audit M1).
     takeovers: Mutex<std::collections::HashMap<u64, (usize, u64)>>,
+    /// texture views the run's segments looked up (`view_get` / `view_put`): key -> (the earliest segment that made
+    /// it, the view), shared by its lanes as the serial path's one submission shares `Sub::memo_views`
+    views: Mutex<std::collections::HashMap<ViewKey, (usize, u64, u64)>>,
+    /// `St::epoch`, readable without its lock: a view kept at an older epoch is not used (a change of shared state
+    /// since may have changed what the lookup finds)
+    epoch_now: AtomicU64,
+}
+
+/// `NXGFX_VIEW_SHARE=1`: later segments reuse views earlier segments looked up. Off by default (lead, 2026-11-26):
+/// ~3 % of lookups hit, no measured gain, and it touches segment ordering (where the dark-turn fault came from).
+fn share_views() -> bool {
+    if cfg!(test) {
+        return true; // the unit tests exercise the sharing itself
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_VIEW_SHARE").as_deref() == Ok("1"))
+}
+
+/// `exec::tex_view`'s memo key: (texture ID, type and image format, storage, the tables' generation).
+pub type ViewKey = (i32, u32, bool, u64);
+
+/// Views taken from the run's shared memo (`view_get`), and lookups that went on to the images (misses), for the
+/// translate line.
+pub static VIEW_HITS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+
+/// A view an earlier segment of this thread's run (or this one) looked up with this key: the serial translation of
+/// the stream would have found it in its submission's memo at this point too (a segment after the one that made it).
+/// None outside a run.
+pub fn view_get(key: &ViewKey) -> Option<u64> {
+    let (r, k) = seg_ctx();
+    if r.is_null() || !share_views() {
+        return None;
+    }
+    // SAFETY: as in `pass`
+    let run = unsafe { &*r };
+    let now = run.epoch_now.load(Relaxed);
+    let v = run.views.lock().unwrap().get(key).filter(|e| e.0 <= k && e.2 == now).map(|e| e.1);
+    VIEW_HITS[v.is_none() as usize].fetch_add(1, Relaxed);
+    v
+}
+
+/// A view this thread's segment looked up (`view_get`'s other half). Not kept from a segment that gave up (it bound
+/// a stand-in where the stream order may not), nor from one that overlapped an older segment's change of shared
+/// state (its lookups may predate the change; it is translated again at the join).
+pub fn view_put(key: ViewKey, view: u64) {
+    let (r, k) = seg_ctx();
+    if r.is_null() || given_up() || !share_views() {
+        return;
+    }
+    // SAFETY: as in `pass`
+    let run = unsafe { &*r };
+    let epoch = {
+        let st = run.st.lock().unwrap();
+        // a parallel segment that started before the latest change (a segment translated again at the join runs
+        // after every parallel one, in order: its lookups are current)
+        if CTX.with(|c| !c.get().0.is_null()) && st.seg[k].start != st.epoch {
+            return;
+        }
+        st.epoch
+    };
+    let mut m = run.views.lock().unwrap();
+    match m.get(&key) {
+        Some(e) if e.0 <= k && e.2 == epoch => {}
+        _ => {
+            m.insert(key, (k, view, epoch));
+        }
+    }
 }
 
 thread_local! {
@@ -276,6 +343,8 @@ impl Run {
                 seg: vec![Seg::default(); n],
             }),
             takeovers: Mutex::new(Default::default()),
+            views: Mutex::new(Default::default()),
+            epoch_now: AtomicU64::new(0),
         }
     }
 
@@ -287,6 +356,13 @@ impl Run {
                 None => (core::ptr::null(), 0),
             })
         });
+    }
+
+    /// A segment translated again at the join changed shared state: views looked up before are not used again.
+    pub fn changed_at_join(&self) {
+        let mut st = self.st.lock().unwrap();
+        st.epoch += 1;
+        self.epoch_now.store(st.epoch, Relaxed);
     }
 
     /// This thread starts translating segment `k`.
@@ -311,6 +387,7 @@ impl Run {
         if st.seg[k].changes {
             st.epoch += 1;
             st.seg[k].fin = st.epoch;
+            self.epoch_now.store(st.epoch, Relaxed);
         }
         if st.seg[k].state == 1 {
             st.seg[k].state = 2;
@@ -410,6 +487,34 @@ mod tests {
         let mut later = 0;
         assert!(r.stands(0, &mut later));
         assert!(!r.stands(1, &mut later));
+    }
+
+    /// A view one segment looked up is found by itself and later segments of the run, never by an earlier one (the
+    /// serial order would not have looked it up yet), nor after a change of shared state, nor from a segment that gave
+    /// up; outside a run there is nothing shared.
+    #[test]
+    fn views_are_shared_with_later_segments_only() {
+        let key = (7, 1, false, 3);
+        assert_eq!(view_get(&key), None);
+        let r = Run::new(4);
+        run_in(&r, 1, || {
+            assert_eq!(view_get(&key), None);
+            view_put(key, 0x99);
+            assert_eq!(view_get(&key), Some(0x99));
+        });
+        run_in(&r, 0, || assert_eq!(view_get(&key), None, "segment 0 comes before 1"));
+        run_in(&r, 2, || assert_eq!(view_get(&key), Some(0x99)));
+        // a segment that gave up keeps nothing
+        let other = (8, 1, false, 3);
+        let r2 = Run::new(2);
+        r2.enter(1);
+        assert!(!pass(true), "segment 0 is not translated yet");
+        view_put(other, 0x55);
+        r2.leave(1);
+        run_in(&r2, 1, || assert_eq!(view_get(&other), None));
+        // a change of shared state at the join: what was looked up before is not used again
+        r.changed_at_join();
+        run_in(&r, 2, || assert_eq!(view_get(&key), None));
     }
 
     /// A segment that started after the older segments' changes ended stands, and may change state itself.

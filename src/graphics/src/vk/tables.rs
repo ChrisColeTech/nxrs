@@ -211,6 +211,9 @@ struct Inner {
     samp_end: i32,
     /// host texture ID -> (serial, view) as registered
     tex: HashMap<i32, (u64, Option<view_t>)>,
+    /// `tex` by serial: the IDs registered with each texture object (`ids_of` walked all of `tex` under this lock
+    /// for every image that went: Mario Kart World ~1 ms a frame on the replay thread, and the lanes' `tex_at` waited)
+    tex_ids: HashMap<u64, Vec<i32>>,
     tex_versions: HashMap<i32, u64>,
     registration_epoch: u64,
     /// IDs whose finalized resource was replaced with a target-correct zero descriptor.
@@ -253,6 +256,33 @@ impl Inner {
         if self.placeholders.contains(&id) { return None; }
         let &(serial, view) = self.tex.get(&id)?;
         Some(TextureRegistration { id, serial, view, version: *self.tex_versions.get(&id)? })
+    }
+
+    /// `tex[id] = v`, with its reverse index (`tex_ids`).
+    fn tex_put(&mut self, id: i32, v: (u64, Option<view_t>)) {
+        if let Some(old) = self.tex.insert(id, v) {
+            if old.0 == v.0 {
+                return;
+            }
+            self.tex_ids_drop(old.0, id);
+        }
+        self.tex_ids.entry(v.0).or_default().push(id);
+    }
+
+    /// `tex[id]` removed, with its reverse index.
+    fn tex_del(&mut self, id: i32) {
+        if let Some(old) = self.tex.remove(&id) {
+            self.tex_ids_drop(old.0, id);
+        }
+    }
+
+    fn tex_ids_drop(&mut self, serial: u64, id: i32) {
+        if let Some(v) = self.tex_ids.get_mut(&serial) {
+            v.retain(|&x| x != id);
+            if v.is_empty() {
+                self.tex_ids.remove(&serial);
+            }
+        }
     }
 
     fn bump_registration(&mut self, id: i32) {
@@ -307,7 +337,7 @@ mod registration_boundary_tests {
             let mut i = tables.inner.lock().unwrap();
             i.tex_pools.insert(0, 8);
             for id in 0..3 {
-                i.tex.insert(id, (100 + id as u64, None));
+                i.tex_put(id, (100 + id as u64, None));
             }
             list_storage(&mut i.storage_tex, 0, Some(own), true);
             list_storage(&mut i.storage_tex, 1, Some(stand_in), false);
@@ -628,7 +658,7 @@ impl Tables {
     pub fn note_buf_tex(&self, id: i32, t: crate::nvn::obj::tex_t) {
         let mut i = self.inner.lock().unwrap();
         i.bump_registration(id);
-        i.tex.remove(&id);
+        i.tex_del(id);
         i.tex_versions.remove(&id);
         i.storage_tex.remove(&id);
         i.image_desc.remove(&id);
@@ -881,7 +911,7 @@ impl Tables {
         // A different object's view can reuse a retired Vulkan handle. Equality of handles is a sufficient
         // no-op check only within the same registration lifetime.
         i.image_desc.remove(&id);
-        i.tex.insert(id, (serial, view));
+        i.tex_put(id, (serial, view));
         i.storage_tex.remove(&id);
         self.invalidate_images();
     }
@@ -893,14 +923,16 @@ impl Tables {
         if serials.is_empty() {
             return Vec::new();
         }
-        self.inner
-            .lock()
-            .unwrap()
-            .tex
-            .iter()
-            .filter(|(_, (s, _))| serials.contains(s))
-            .map(|(id, (s, v))| (*id, *s, *v))
-            .collect()
+        let i = self.inner.lock().unwrap();
+        let mut out = Vec::new();
+        for s in serials {
+            for id in i.tex_ids.get(s).map(|v| &v[..]).unwrap_or(&[]) {
+                if let Some(&(serial, v)) = i.tex.get(id).filter(|e| e.0 == *s) {
+                    out.push((*id, serial, v));
+                }
+            }
+        }
+        out
     }
     pub fn tex_at(&self, id: i32) -> Option<(u64, Option<view_t>)> {
         self.inner.lock().unwrap().tex.get(&id).copied()

@@ -62,16 +62,16 @@ pub fn checkpoint(
         return 0;
     }
     let s = SEQ.fetch_add(1, Ordering::Relaxed) + 1;
-    {
+    // described before the ring's lock, and the slot's old text freed after it: the translation lanes checkpoint at
+    // once (TRANSLATE-COST: the text was made under the lock)
+    let text = what();
+    let _old = {
         let mut r = RING.lock().unwrap();
         if r.is_empty() {
             r.resize(N, Ck::default());
         }
-        r[s as usize % N] = Ck {
-            seq: s,
-            what: what(),
-        };
-    }
+        std::mem::replace(&mut r[s as usize % N], Ck { seq: s, what: text })
+    };
     unsafe {
         g.d.ck
             .cmd_set_checkpoint(cb, s as usize as *const core::ffi::c_void)

@@ -31,7 +31,9 @@ Owner, 2026-11-25: builds and games may run concurrently at full parallelism. Wa
 - **A worktree's `build\tools` is a junction** into the main checkout: remove the junction (`rmdir`) before removing
   the worktree, never `rm -rf` it. Check disk (`duf`) before opening one; each `target/` is large.
 - **One wave alone** may work in the main tree instead (no worktree); the rules below still hold.
-- **GPU:** two GPUs; the brief names one (`--env NXGFX_GPU=<n>` on every `play.py` run).
+- **GPU:** two GPUs; the brief names one (`--env NXGFX_GPU=<n>` on every `play.py` run). Two waves running games
+  at once get different GPUs (the lead checks `run.json` of recent runs; 2026-11-26 every brief said GPU 1 and four
+  games ran on it while GPU 0 sat idle).
 - **Perf numbers:** agents measure freely, and their numbers are indicative (the machine is shared). **The accepted
   numbers are the lead's**, taken at acceptance (§7) with nothing else running. An agent's report says what else was
   running during its runs if it knows.
@@ -114,10 +116,14 @@ The lead merges a wave only when every line holds:
 - [ ] Changes under §5 "Needs audit" had a fresh audit agent; its HIGH and MEDIUM findings are fixed (by a send-back)
       or recorded in the ledger with the reason.
 - [ ] Accepted perf numbers: the lead ran the wave's scenarios with nothing else running, and records those.
+      Titles already at their target (owner: work the broken titles, don't re-verify passing ones) get one
+      regression run each here, by the lead; agents spend their runs only on the titles below target.
 - [ ] Merge into `gameplay-harness` (`git merge --no-ff <wave>`), message ending with the attribution line; the
       ledger row updated and committed; the main `dist` rebuilt and the wave's titles relinked from it.
 - [ ] The worktree removed (junction first) when the wave is done.
-- [ ] Push only when the owner asks: `git push origin gameplay-harness:main`.
+- [ ] Push only when the owner asks, and to the feature branch (`git push origin gameplay-harness`), where CI builds
+      and tests. `main` changes only by merging a green feature branch (a pull request) when the owner says so; a push
+      to `main` is what builds and publishes the release (owner, 2026-11-26).
 
 Any unticked line sends the work back with the exact output and whether the product or the test is at fault.
 

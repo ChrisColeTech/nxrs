@@ -1714,16 +1714,25 @@ pub mod passdump {
 /// A checkpoint before a draw or dispatch (vk/lost.rs: what the GPU was doing if it stops responding).
 fn checkpoint(g: &Gpu, sub: &Sub, qs: &QState, direct: bool, what: impl FnOnce() -> String) -> u64 {
     super::lost::checkpoint(g, sub.main, direct, || {
-        let keys: Vec<String> = qs
-            .prog
-            .iter()
-            .enumerate()
-            .filter_map(|(i, m)| {
-                m.as_ref()
-                    .map(|m| format!("{}:{}", i, crate::nvn::prog::key_hex(&m.key)))
-            })
-            .collect();
-        format!("{} with shaders [{}]", what(), keys.join(" "))
+        // one string, no part strings (hundreds a frame on the translation lanes)
+        use std::fmt::Write;
+        let mut s = what();
+        s.push_str(" with shaders [");
+        let mut first = true;
+        for (i, m) in qs.prog.iter().enumerate() {
+            if let Some(m) = m {
+                if !first {
+                    s.push(' ');
+                }
+                first = false;
+                let _ = write!(s, "{i}:");
+                for b in m.key {
+                    let _ = write!(s, "{b:02x}");
+                }
+            }
+        }
+        s.push(']');
+        s
     })
 }
 
@@ -2819,6 +2828,7 @@ fn begin_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) -> bool {
                 crate::vklog!("{what}: its program writes no storage, so it draws nothing, as on the GPU")
             });
         } else {
+            super::shot::fault::no_target(&what, qs.rt[..qs.rt_n].iter().map(|r| r.tex.as_ref()), qs.rt_depth.tex.as_ref(), qs.prog[1].as_deref().map(|m| m.key), sub.serial);
             crate::log::red_once(&format!("{what}: skipped"));
         }
         return false;
@@ -3503,9 +3513,18 @@ fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::Imag
     if let Some(&v) = sub.memo_views.get(&(id, ty, storage, gen)) {
         return v;
     }
+    // a parallel run's segments share their lookups as the serial translation's one submission does (`gate::view_get`:
+    // each segment's own memo started empty, and every miss took the images' lock; TRANSLATE-COST)
+    let key = (id, ty, storage, gen);
+    if let Some(v) = super::gate::view_get(&key) {
+        let v = vk::Handle::from_raw(v);
+        sub.memo_views.insert(key, v);
+        return v;
+    }
     let v = tex_view_uncached(g, sub, id, ty, storage);
     if gen == g.tables.generation() {
-        sub.memo_views.insert((id, ty, storage, gen), v);
+        sub.memo_views.insert(key, v);
+        super::gate::view_put(key, vk::Handle::as_raw(v));
     }
     v
 }
@@ -3937,6 +3956,7 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
                 "texture ID {id} (target {want}{}) at frame {f}: {what}: a zero stand-in is bound",
                 if storage { ", image" } else { "" }
             );
+            super::shot::fault::note("stand-in", &format!("texture ID {id} (target {want}) at frame {f}: {what}"));
         }
     }
     dummy_view(g, sub, want, storage)
@@ -4186,6 +4206,113 @@ fn ub_bound(n: u64, room: u64, cap: u64) -> u64 {
     r.min(room.max(n)).min(cap)
 }
 
+/// `mem::room(a)`, remembered on this thread by address while no pool came, went or got its buffer (`POOL_GEN`) and no
+/// virtual pool's mapping changed (`vpool::generation`). `room`'s own cache keeps 8 pool windows; Mario Kart World binds
+/// uniform buffers from hundreds of pools a frame, and each miss took the pool lock, which the completion thread holds
+/// while it lands write-backs: ~15% of the translation lanes' time was spent waiting there (TRANSLATE-COST profile).
+/// `NXGFX_ROOM_CACHE=0` off.
+fn room_cached(a: u64) -> u64 {
+    if !addr_cache_on() {
+        return super::mem::room(a);
+    }
+    thread_local! {
+        static C: std::cell::RefCell<(u64, u64, std::collections::HashMap<u64, u64>)> =
+            std::cell::RefCell::new((0, 0, std::collections::HashMap::new()));
+    }
+    // the generations read before the lookup: a change during it makes the entry miss next time
+    let gen = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
+    let vgen = crate::nvn::vpool::generation();
+    let hit = C.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != gen || c.1 != vgen || c.2.len() >= 1 << 14 {
+            c.0 = gen;
+            c.1 = vgen;
+            c.2.clear();
+        }
+        c.2.get(&a).copied()
+    });
+    addr_cache_count(0, hit.is_some());
+    if let Some(r) = hit {
+        return r;
+    }
+    let r = super::mem::room(a);
+    C.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 == gen && c.1 == vgen {
+            c.2.insert(a, r);
+        }
+    });
+    r
+}
+
+/// `NXGFX_ADDR_CACHE=0`: `room_cached` and `resolve_cached` ask `mem` every time (as before TRANSLATE-COST).
+fn addr_cache_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_ADDR_CACHE").as_deref() != Ok("0"))
+}
+
+/// Hits and misses of `room_cached` (k 0) and `resolve_cached` (k 1), counted on the thread and added to
+/// `ADDR_CACHE` every 4,096 calls (the translate line).
+fn addr_cache_count(k: usize, hit: bool) {
+    thread_local! {
+        static N: std::cell::Cell<[u64; 4]> = const { std::cell::Cell::new([0; 4]) };
+    }
+    N.with(|n| {
+        let mut v = n.get();
+        v[k * 2 + !hit as usize] += 1;
+        if v.iter().sum::<u64>() >= 4096 {
+            for (i, x) in v.iter().enumerate() {
+                seg_stats::ADDR_CACHE[i].fetch_add(*x, std::sync::atomic::Ordering::Relaxed);
+            }
+            v = [0; 4];
+        }
+        n.set(v);
+    });
+}
+
+/// `mem::resolve(g, sub, a, n)`, remembered on this thread by (a, n) while no pool came, went, got its buffer or had
+/// CPU writes deferred (`POOL_GEN`, which a deferral moves) and no virtual pool's mapping changed. A second resolve of
+/// the same range then does nothing but find it (the buffer is made, the granules bound, the deferred writes in it
+/// uploaded), as `resolve`'s own cache of 16 windows assumes; past those it took the pool lock, which the completion
+/// thread holds while it lands write-backs (TRANSLATE-COST profile: 8.5 % of the lanes' time). Failures are not kept.
+/// `NXGFX_ADDR_CACHE=0` off.
+fn resolve_cached(g: &Gpu, sub: &mut Sub, a: u64, n: u64) -> Option<(vk::Buffer, u64, u64)> {
+    if !addr_cache_on() {
+        return super::mem::resolve(g, sub, a, n);
+    }
+    type Map = std::collections::HashMap<(u64, u64), (vk::Buffer, u64, u64)>;
+    thread_local! {
+        static C: std::cell::RefCell<(u64, u64, Map)> = std::cell::RefCell::new((0, 0, Map::new()));
+    }
+    let gen = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
+    let vgen = crate::nvn::vpool::generation();
+    let hit = C.with(|c| {
+        let mut c = c.borrow_mut();
+        if c.0 != gen || c.1 != vgen || c.2.len() >= 1 << 14 {
+            c.0 = gen;
+            c.1 = vgen;
+            c.2.clear();
+        }
+        c.2.get(&(a, n)).copied()
+    });
+    addr_cache_count(1, hit.is_some());
+    if hit.is_some() {
+        return hit;
+    }
+    let r = super::mem::resolve(g, sub, a, n);
+    if let Some(r) = r {
+        // kept only when nothing moved the generation while it was resolved (its own buffer or a deferral did)
+        let now = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
+        C.with(|c| {
+            let mut c = c.borrow_mut();
+            if c.0 == gen && c.1 == vgen && now == gen {
+                c.2.insert((a, n), r);
+            }
+        });
+    }
+    r
+}
+
 /// Uniform bank c`bank` (3..=18) of a stage set: the bound range `(a, n)` in its pool, or the zero buffer.
 fn ubo_info(
     g: &Gpu,
@@ -4197,12 +4324,12 @@ fn ubo_info(
     max_ubo: u64,
 ) -> vk::DescriptorBufferInfo {
     let range = if a != 0 && n != 0 {
-        ub_bound(n, super::mem::room(a), max_ubo)
+        ub_bound(n, room_cached(a), max_ubo)
     } else {
         0
     };
     let r = if range != 0 {
-        super::mem::resolve(g, sub, a, range)
+        resolve_cached(g, sub, a, range)
     } else {
         None
     };
@@ -4451,7 +4578,7 @@ fn stage_set(
                 // list its depth-sampling dispatch appends to this way. It runs to the end of its pool, at most 1 MB
                 // (NXGFX_SBUF0_MB=<n> another cap; with robustBufferAccess2 an access past it is dropped, lane K3).
                 if a != 0 && n == 0 {
-                    n = super::mem::room(a).min(sbuf0_cap());
+                    n = room_cached(a).min(sbuf0_cap());
                     super::perf::inc(super::perf::C::SbufSize0);
                     if *written {
                         super::perf::inc(super::perf::C::SbufSize0Written);
@@ -4473,7 +4600,7 @@ fn stage_set(
                     && !crate::nvn::vpool::is_sparse(a)
                 {
                     let r =
-                        super::mem::room(a).min(g.d.props.limits.max_storage_buffer_range as u64);
+                        room_cached(a).min(g.d.props.limits.max_storage_buffer_range as u64);
                     if r > n {
                         n = r;
                     }
@@ -4499,7 +4626,7 @@ fn stage_set(
                     said.push(format!("s{cb_slot}:{cb_off:#x}@{a:#x}+{bound_n:#x} w{} {f:?}", *written as u8));
                 }
                 let info = match if a != 0 && n != 0 {
-                    super::mem::resolve(g, sub, a, n)
+                    resolve_cached(g, sub, a, n)
                 } else {
                     None
                 } {
@@ -6879,11 +7006,16 @@ fn draw_setup_ex(
             );
         }
         if n > 0 {
-            let en: Vec<vk::Bool32> = (0..n)
-                .map(|i| (qs.color.blend_en() >> i & 1) as vk::Bool32)
-                .collect();
-            let eq: Vec<vk::ColorBlendEquationEXT> = (0..n)
-                .map(|i| {
+            // (fixed arrays: three heap vectors a draw on every lane before)
+            let n = n.min(8);
+            let en: [vk::Bool32; 8] =
+                core::array::from_fn(|i| (qs.color.blend_en() >> i & 1) as vk::Bool32);
+            let en = &en[..n];
+            let eq: [vk::ColorBlendEquationEXT; 8] = core::array::from_fn(|i| {
+                if i >= n {
+                    return vk::ColorBlendEquationEXT::default();
+                }
+                {
                     let b = qs.blend[i];
                     // a second source the shader does not give counts as zero (nvn_mtl.m blend_zero_src1)
                     let bf = |f: u32| {
@@ -6901,14 +7033,14 @@ fn draw_setup_ex(
                         dst_alpha_blend_factor: bf(b.get(blend_field::DST_A)),
                         alpha_blend_op: blend_op(b.get(blend_field::EQ_A)),
                     }
-                })
-                .collect();
+                }
+            });
             // The shader's scalar output stores select components. The dynamic mask is NVN's channel state, disabled
             // only for locations absent from the output map; do not apply OmapTargets twice.
             let omap = qs.prog[1].as_ref().and_then(|m| m.omap).unwrap_or(u32::MAX);
             let wm = fragment_write_masks(qs.chmask, omap, n);
-            e3.cmd_set_color_blend_enable(cb, 0, &en);
-            e3.cmd_set_color_blend_equation(cb, 0, &eq);
+            e3.cmd_set_color_blend_enable(cb, 0, en);
+            e3.cmd_set_color_blend_equation(cb, 0, &eq[..n]);
             e3.cmd_set_color_write_mask(cb, 0, &wm);
         }
     }
@@ -6996,7 +7128,7 @@ fn vertex_input(g: &Gpu, sub: &mut Sub, qs: &QState, vs: &Module) {
         );
         let (a, n) = qs.vbuf[s as usize];
         match if a != 0 {
-            super::mem::resolve(g, sub, a, n.max(1))
+            resolve_cached(g, sub, a, n.max(1))
         } else {
             None
         } {
@@ -7412,12 +7544,12 @@ fn draw_idx(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_draw_idx) {
         }
     }
     let room = if d.ind != 0 {
-        super::mem::room(d.ibuf)
+        room_cached(d.ibuf)
     } else {
         0
     };
     let span = index_binding_span(d.ind != 0, d.count, isz, room);
-    let resolved = span.and_then(|n| super::mem::resolve(g, sub, d.ibuf, n));
+    let resolved = span.and_then(|n| resolve_cached(g, sub, d.ibuf, n));
     raster_probe_index(qs, &d, room, span, resolved.is_some());
     let Some((ib, io, _)) = resolved else {
         return;
@@ -8855,6 +8987,13 @@ pub mod seg_stats {
     pub static JOIN_WAIT_NS: AtomicU64 = AtomicU64::new(0);
     /// the lanes' translation time, all lanes together
     pub static LANE_NS: AtomicU64 = AtomicU64::new(0);
+    /// parallel segments translated by the translation threads [0] and by the replay thread [1]
+    pub static LANE0_SEGS: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
+    /// translation threads joining a parallel run: how many, and their time from the run's start to joining it
+    pub static WAKES: AtomicU64 = AtomicU64::new(0);
+    pub static WAKE_NS: AtomicU64 = AtomicU64::new(0);
+    /// `room_cached` hits, misses; `resolve_cached` hits, misses (every thread, counted in batches)
+    pub static ADDR_CACHE: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
     pub fn frame(frame: u64) {
         // (no line while segments are off: audit L3)
         if frame % 600 != 0 || super::translate_lanes() == 0 {
@@ -8864,7 +9003,7 @@ pub mod seg_stats {
         let w = WHY.each_ref().map(|x| x.swap(0, Relaxed));
         if super::translate_lanes() > 1 {
             crate::vklog!(
-                "translate (parallel), over the last 600 frames: {} streams in parallel, {} cuts inside a pass, lanes translated {:.2} ms a frame together (waiting for locks: pools {:.2} ms at GPU writes, {:.2} ms at resolves, images {:.2} ms), the replay thread waited {:.2} ms a frame for the lanes, {} segments translated again; the gate asked {} times, {} segments gave up; asked at {}; {} uses of an object a later segment's takeover holds",
+                "translate (parallel), over the last 600 frames: {} streams in parallel, {} cuts inside a pass, lanes translated {:.2} ms a frame together (waiting for locks: pools {:.2} ms at GPU writes, {:.2} ms at resolves, images {:.2} ms), the replay thread waited {:.2} ms a frame for the lanes, {} segments translated again; the gate asked {} times, {} segments gave up; asked at {}; {} uses of an object a later segment's takeover holds; views shared between segments: {} found, {} looked up; segments translated by the threads {}, by the replay thread {}; a thread joined a run {:.3} ms after it began",
                 PAR.swap(0, Relaxed),
                 MIDCUT.swap(0, Relaxed),
                 LANE_NS.swap(0, Relaxed) as f64 / 600.0 / 1e6,
@@ -8877,10 +9016,18 @@ pub mod seg_stats {
                 super::super::gate::GAVE_UP.swap(0, Relaxed),
                 super::super::gate::sites(),
                 super::super::gate::TAKEN_LATER.swap(0, Relaxed),
+                super::super::gate::VIEW_HITS[0].swap(0, Relaxed),
+                super::super::gate::VIEW_HITS[1].swap(0, Relaxed),
+                LANE0_SEGS[0].swap(0, Relaxed),
+                LANE0_SEGS[1].swap(0, Relaxed),
+                {
+                    let (n, ns) = (WAKES.swap(0, Relaxed), WAKE_NS.swap(0, Relaxed));
+                    ns as f64 / n.max(1) as f64 / 1e6
+                },
             );
         }
         crate::vklog!(
-            "translate, per frame over the last 600: {:.1} streams in segments ({:.1} in one piece: switches {}, queue state {}, feedback records {}, few draws {} in all), {:.1} segments, largest {} draws, pre-pass {:.2} ms, segments {:.2} ms; {} entry-state differences (NXGFX_TRANSLATE_CHECK); {:.1} write-back ranges; queries refused (a submission's 256 used up): {} timestamp, {} occlusion; the shared upload buffer's lock waited {:.3} ms a frame",
+            "translate, per frame over the last 600: {:.1} streams in segments ({:.1} in one piece: switches {}, queue state {}, feedback records {}, few draws {} in all), {:.1} segments, largest {} draws, pre-pass {:.2} ms, segments {:.2} ms; {} entry-state differences (NXGFX_TRANSLATE_CHECK); {:.1} write-back ranges; queries refused (a submission's 256 used up): {} timestamp, {} occlusion; the shared upload buffer's lock waited {:.3} ms a frame; address caches a frame: room {:.0} found / {:.0} asked mem, resolve {:.0} found / {:.0} asked mem",
             s as f64 / 600.0,
             SERIAL.swap(0, Relaxed) as f64 / 600.0,
             w[0],
@@ -8896,16 +9043,22 @@ pub mod seg_stats {
             super::super::queue::QUERIES_OUT[0].swap(0, Relaxed),
             super::super::queue::QUERIES_OUT[1].swap(0, Relaxed),
             super::super::gate::LOCK_NS[3].swap(0, Relaxed) as f64 / 600.0 / 1e6,
+            ADDR_CACHE[0].swap(0, Relaxed) as f64 / 600.0,
+            ADDR_CACHE[1].swap(0, Relaxed) as f64 / 600.0,
+            ADDR_CACHE[2].swap(0, Relaxed) as f64 / 600.0,
+            ADDR_CACHE[3].swap(0, Relaxed) as f64 / 600.0,
         );
     }
 }
 
 /// Whether a stream may be translated in segments: enough draws, and nothing that carries state from a draw to the
 /// next one inside the pass machinery (transform feedback, mesh draws), no diagnosis that follows one command buffer.
-fn segmentable(qs: &QState, stream: &[u8]) -> bool {
+/// Some(whether it holds a record translated on the replay thread only, `is_rare`) when it may, None when not (one
+/// walk over the stream for both).
+fn segmentable(qs: &QState, stream: &[u8]) -> Option<bool> {
     use std::sync::atomic::Ordering::Relaxed;
     if translate_lanes() == 0 {
-        return false;
+        return None;
     }
     if passdump::active()
         || super::defer::active()
@@ -8916,35 +9069,36 @@ fn segmentable(qs: &QState, stream: &[u8]) -> bool {
         || !shadows_on()
     {
         seg_stats::WHY[0].fetch_add(1, Relaxed);
-        return false;
+        return None;
     }
     if !qs.ndve.pending.is_empty() || qs.raw_probe.borrow().is_some() || qs.tf_on || qs.tf_active != 0 {
         seg_stats::WHY[1].fetch_add(1, Relaxed);
-        return false;
+        return None;
     }
-    let (mut p, mut draws) = (0usize, 0usize);
+    let (mut p, mut draws, mut rare) = (0usize, 0usize, false);
     while p + 8 <= stream.len() {
         let h = unsafe { rd::<op_hdr>(stream.as_ptr().add(p)) };
         let sz = h.size as usize;
         if sz < 8 || p + sz > stream.len() {
-            return false;
+            return None;
         }
         match h.op {
             // a capture continues from draw to draw (`tf_cont`); a mesh draw's records live within the draw
             op::TF_BIND | op::TF_STATE => {
                 seg_stats::WHY[2].fetch_add(1, Relaxed);
-                return false;
+                return None;
             }
             o if is_draw(o) => draws += 1,
+            o if is_rare(o) => rare = true,
             _ => {}
         }
         p += sz;
     }
     if draws < translate_min() {
         seg_stats::WHY[3].fetch_add(1, Relaxed);
-        return false;
+        return None;
     }
-    true
+    Some(rare)
 }
 
 /// Whether an inline uniform update of `n` bytes at `dst` (a record of `len` bytes) is queued for the handle reads that
@@ -9058,12 +9212,12 @@ pub fn run_segmented(
     stream: &[u8],
     child: &mut dyn FnMut() -> Sub,
 ) -> Option<Option<usize>> {
-    if !segmentable(qs, stream) {
+    let Some(rare) = segmentable(qs, stream) else {
         if translate_lanes() != 0 {
             seg_stats::SERIAL.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         }
         return None;
-    }
+    };
     use std::sync::atomic::Ordering::Relaxed;
     let t0 = std::time::Instant::now();
     let (segs, park) = plan(g, qs, stream);
@@ -9072,8 +9226,12 @@ pub fn run_segmented(
     seg_stats::SEGMENTS.fetch_add(segs.len() as u64, Relaxed);
     let t1 = std::time::Instant::now();
     let n = segs.len();
-    if translate_lanes() > 1 && n > 1 && !has_rare(stream) {
-        let mut q = par::run(g, sub, stream, segs, child);
+    if translate_lanes() > 1 && n > 1 && (!rare || rare_split()) {
+        let mut q = if rare {
+            run_mixed(g, sub, stream, segs, child)
+        } else {
+            par::run(g, sub, stream, segs, child)
+        };
         q.seg = false;
         q.seg_rc.clear();
         *qs = q;
@@ -9122,16 +9280,129 @@ pub fn run_segmented(
 
 /// Whether `stream` holds a record that is translated on the replay thread only (DLSS, a downsample, a depth resolve:
 /// rare, with their own images and passes): its segments are translated one after another there.
-fn has_rare(stream: &[u8]) -> bool {
-    let mut p = 0usize;
-    while p + 8 <= stream.len() {
+fn is_rare(opc: u32) -> bool {
+    matches!(opc, op::DLSS | op::DOWNSAMPLE | op::RESOLVE_DEPTH)
+}
+
+/// A stream holding a rare record (`is_rare`) is translated one segment after another on the replay thread, all of
+/// it (as before TRANSLATE-COST). `NXGFX_TRANSLATE_RARE_SPLIT=1`: only the segments holding one (`run_mixed`). Off by
+/// default (lead, 2026-11-26): no title measured uses it (MKW never takes this path), so its ordering is unverified.
+fn rare_split() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_TRANSLATE_RARE_SPLIT").as_deref() == Ok("1"))
+}
+
+/// Whether segment `s` of `stream` holds a rare record.
+fn seg_has_rare(stream: &[u8], s: &Segment) -> bool {
+    let mut p = s.start;
+    while p + 8 <= s.end {
         let h = unsafe { rd::<op_hdr>(stream.as_ptr().add(p)) };
-        if matches!(h.op, op::DLSS | op::DOWNSAMPLE | op::RESOLVE_DEPTH) {
+        if is_rare(h.op) {
             return true;
         }
         p += (h.size as usize).max(8);
     }
     false
+}
+
+/// A stream with rare records (Mario Kart World: one a frame): the segments holding one are translated on the replay
+/// thread at their place, the runs of segments between them in parallel (`par::run`), one run after another. Every
+/// segment records its first-use initializations into the parent's upload buffer, as a parallel run's do, so the buffer
+/// holds them in the order they were made (audit H1). A parallel run that translated a segment again at its join (that
+/// one recorded into its own upload buffer, which runs after the parent's) ends the sharing: from there on every
+/// segment is translated on the replay thread into its own upload buffer, in order, as the sequential path does.
+/// Returns the queue's state after the last segment.
+fn run_mixed(
+    g: &'static Gpu,
+    sub: &mut Sub,
+    stream: &[u8],
+    segs: Vec<Segment>,
+    child: &mut dyn FnMut() -> Sub,
+) -> QState {
+    let mut shared = true;
+    let mut last: Option<QState> = None;
+    let mut group: Vec<Segment> = Vec::new();
+    for s in segs {
+        if !seg_has_rare(stream, &s) {
+            group.push(s);
+            continue;
+        }
+        mixed_group(g, sub, stream, std::mem::take(&mut group), child, &mut shared, &mut last);
+        mixed_check(&last, Some(&s));
+        last = Some(mixed_serial(g, sub, stream, s, child, shared));
+    }
+    mixed_group(g, sub, stream, group, child, &mut shared, &mut last);
+    last.expect("a stream in segments has segments")
+}
+
+/// A run of `run_mixed`'s segments without a rare record: in parallel while the upload buffer is shared, else one
+/// after another.
+fn mixed_group(
+    g: &'static Gpu,
+    sub: &mut Sub,
+    stream: &[u8],
+    group: Vec<Segment>,
+    child: &mut dyn FnMut() -> Sub,
+    shared: &mut bool,
+    last: &mut Option<QState>,
+) {
+    use std::sync::atomic::Ordering::Relaxed;
+    if group.len() >= 2 && *shared {
+        mixed_check(last, group.first());
+        let before = seg_stats::REDO.load(Relaxed);
+        *last = Some(par::run(g, sub, stream, group, child));
+        if seg_stats::REDO.load(Relaxed) != before {
+            *shared = false;
+        }
+        return;
+    }
+    for s in group {
+        mixed_check(last, Some(&s));
+        *last = Some(mixed_serial(g, sub, stream, s, child, *shared));
+    }
+}
+
+/// `NXGFX_TRANSLATE_CHECK` across `run_mixed`'s pieces: segment `next` starts from the state the one before it left.
+fn mixed_check(last: &Option<QState>, next: Option<&Segment>) {
+    if !translate_check() {
+        return;
+    }
+    if let (Some(l), Some(n)) = (last, next) {
+        let d = n.entry.state_diff(l);
+        if !d.is_empty() && seg_stats::DIFFS.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 20 {
+            crate::vklog!(
+                "translate check (mixed): segment at {} starts from a state that differs from the one before it left in: {}",
+                n.start,
+                d.join(", ")
+            );
+        }
+    }
+}
+
+/// One segment of `run_mixed` on the replay thread, into a child of `sub`; `shared`: its first-use initializations go
+/// into the parent's upload buffer. Returns the queue's state after it.
+fn mixed_serial(
+    g: &'static Gpu,
+    sub: &mut Sub,
+    stream: &[u8],
+    s: Segment,
+    child: &mut dyn FnMut() -> Sub,
+    shared: bool,
+) -> QState {
+    let mut c = child();
+    super::queue::child_begin(sub, &mut c);
+    let own = shared.then(|| super::queue::share_pre(&super::queue::child_init(sub), &mut c));
+    let mut wq = s.entry;
+    wq.seg = true;
+    wq.seg_rc = s.rc;
+    wq.seg_mem = s.mem;
+    let draws = translate_segment(g, &mut c, &mut wq, stream, s.start, s.end);
+    seg_stats::LARGEST.fetch_max(draws, std::sync::atomic::Ordering::Relaxed);
+    if let Some(own) = own {
+        super::queue::unshare_pre(&mut c, own);
+    }
+    super::queue::child_join(sub, c);
+    wq
 }
 
 /// Records [start, stop) of `stream` into the child `c` from the state `wq`, and ends its pass; a segment of a parallel
@@ -9202,6 +9473,8 @@ mod par {
         /// translation threads inside this job
         busy: Mutex<usize>,
         idle: Condvar,
+        /// when it was handed out (the lanes' wake-up time, `seg_stats::WAKE_NS`)
+        t0: std::time::Instant,
     }
 
     struct Pool {
@@ -9240,7 +9513,9 @@ mod par {
                 }
             };
             let g = job.g;
-            work(&job, &mut || queue::lane_sub(g, lane));
+            seg_stats::WAKE_NS.fetch_add(job.t0.elapsed().as_nanos() as u64, Relaxed);
+            seg_stats::WAKES.fetch_add(1, Relaxed);
+            work(&job, &mut || queue::lane_sub(g, lane), false);
             let mut b = job.busy.lock().unwrap();
             *b -= 1;
             if *b == 0 {
@@ -9250,12 +9525,13 @@ mod par {
     }
 
     /// Takes segments until none is left.
-    fn work(job: &Job, mk: &mut dyn FnMut() -> Sub) {
+    fn work(job: &Job, mk: &mut dyn FnMut() -> Sub, replay: bool) {
         loop {
             let k = job.next.fetch_add(1, Relaxed);
             if k >= job.segs.len() {
                 return;
             }
+            seg_stats::LANE0_SEGS[replay as usize].fetch_add(1, Relaxed);
             let Some(Own(s)) = job.segs[k].lock().unwrap().take() else {
                 continue;
             };
@@ -9318,6 +9594,7 @@ mod par {
             run: gate::Run::new(n),
             busy: Mutex::new(0),
             idle: Condvar::new(),
+            t0: std::time::Instant::now(),
         });
         {
             let mut p = POOL.lock().unwrap();
@@ -9327,10 +9604,14 @@ mod par {
         WAKE.notify_all();
         // the replay thread's children come from the command pool of the parent's upload buffer, which the lanes
         // record into meanwhile (`queue::share_pre`): made under that buffer's lock
-        work(&job, &mut || {
-            let _l = gate::pre_pool_lock();
-            child()
-        });
+        work(
+            &job,
+            &mut || {
+                let _l = gate::pre_pool_lock();
+                child()
+            },
+            true,
+        );
         POOL.lock().unwrap().job = None;
         let tw = std::time::Instant::now();
         {
@@ -9368,6 +9649,7 @@ mod par {
                 if gate::changes() != before {
                     // every later parallel result was made before this change
                     later = u64::MAX;
+                    job.run.changed_at_join();
                 }
                 (c, wq)
             };

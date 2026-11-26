@@ -7,8 +7,7 @@ mod common;
 use common::*;
 use nxrs_launcher::flows::Outcome;
 use nxrs_launcher::model::game::Game;
-use nxrs_launcher::model::path_text::{from_native, parent};
-use nxrs_launcher::services::{build_facts, platform};
+use nxrs_launcher::services::build_facts;
 use std::time::{Duration, Instant};
 
 fn unbuilt(dir: &str) -> Game {
@@ -25,22 +24,23 @@ fn unbuilt(dir: &str) -> Game {
     }
 }
 
-/// How many fake engines run (listed, never killed, by image name).
+/// How many fake engines run (listed, never killed, by image name). On Linux every process whose
+/// executable is the fake counts (`find_running_games` keeps one PID per game, so it can't count two).
 fn fake_processes() -> usize {
-    let path = from_native(FAKE);
     let name = std::path::Path::new(FAKE)
         .file_stem()
         .unwrap()
         .to_string_lossy()
         .into_owned();
-    let probe = Game {
-        id: "fake".into(),
-        output_name: name.clone(),
-        build_dir: parent(&path),
-        ..Game::default()
-    };
     if !cfg!(windows) {
-        return platform::find_running_games(&[probe]).len();
+        let want = std::fs::canonicalize(FAKE).ok();
+        let Ok(procs) = std::fs::read_dir("/proc") else {
+            return 0;
+        };
+        return procs
+            .flatten()
+            .filter(|e| std::fs::read_link(e.path().join("exe")).ok() == want)
+            .count();
     }
     let out = std::process::Command::new("tasklist")
         .args(["/FI", &format!("IMAGENAME eq {name}.exe"), "/NH"])
@@ -92,10 +92,26 @@ fn builds_stream_and_cancel_kills_the_tree() {
     let (_t2, dir2) = tmp();
     let mut app = app_with(&dir2, vec![unbuilt(&dir2)]);
     app.start_build();
-    std::thread::sleep(Duration::from_millis(700));
-    app.tick();
-    assert!(app.progress.total > 0, "progress arrived");
-    assert!(fake_processes() >= 2, "the build and its child run");
+    // wait for the state, not a fixed sleep: a loaded CI runner starts the fake and its child late
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut running = 0;
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        app.tick();
+        running = fake_processes();
+        if app.progress.total > 0 && running >= 2 {
+            break;
+        }
+    }
+    assert!(
+        app.progress.total > 0,
+        "progress arrived: total {}",
+        app.progress.total
+    );
+    assert!(
+        running >= 2,
+        "the build and its child run: {running} fake processes"
+    );
     app.stop();
     settle(&mut app);
     assert_eq!(app.outcomes, vec![Outcome::Smoke(false)]);

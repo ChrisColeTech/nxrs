@@ -174,6 +174,17 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       largest segment (~1,300 draws, a third of translation) needs step 5's mid-pass cuts. Write-watch scan cost
       flips 3.5 <-> 9 ms run to run (FPS noise of 1-2). Steps 4-6 handed to a fresh agent (after merging
       `gameplay-harness`); independent audit of steps 1-3 running.
+- [~] **2026-11-26 day** (lead). UPLOAD-SYNC (`5056038`) + audit fixes (`2f29f99`): OoT 14.1 → ~18.8 FPS of 59; second
+      audit found HIGH-1 (a copy's mid-recording sync keeps a hash the GPU no longer holds) → UPSYNC2 running in
+      worktree `RecompLauncherEngine-upsync2` (OoT, GPU 1). HARNESS-DIAG (`1a3bcca`): anomaly table, route checks,
+      `--faults`; open: race route checks are too strict (MKW race shots read OFF-ROUTE while on course). TRANSLATE-COST
+      (`09cac5b`): lead quiet A/B MKW GPU 0 off 29.4/25.7, on 30.7/29.0 (30 cap); view sharing and rare split
+      opt-in; audit: default path sound, sampler (`hostprof.rs`, opt-in only) M1 allocates while a thread is
+      suspended, M2 unwinds while suspended, L1 addr cache should be off under `NXGFX_TRANSLATE_GATE=all`, L2 skip
+      own thread — open. Next lever for MKW: the completion thread holds the pool lock ~4 ms while landing
+      write-backs (lanes wait ~20 %), after UPSYNC2 merges. Open bug, unowned: OoT textures sampled in the frame they
+      are registered (zero stand-ins at scene changes → one-frame black/red frames; also with lanes off).
+      docs/31 rewritten (giga-cut pattern, worktree per wave, no locks); CI: feature-branch CI, release only on main.
 - [ ] **MKW-RECORD steps 4-6** (2026-11-25 late, branch `mkw-record` up to `2d02e3b`, report in the worktree's
       `docs/waves/MKW-RECORD.md`): 6 translation lanes by default, in-pass cuts, walker walks count as scans. MKW
       30.1 FPS (5% low 28.0) of 60, was 26.9/22.0; replay thread 23.4 ms (was 30.3). Smash 59.8/59.0 unchanged.

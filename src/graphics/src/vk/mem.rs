@@ -897,20 +897,30 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
             ranges = keep;
         }
     }
+    // through the upload skip as the submission's sync does (audit H1/L2: a plain upload left lazy write-back records
+    // standing and could send the device's older bytes back over newer GPU writes); pages that only came back from
+    // the device unchanged are no CPU write: not uploaded, not told to the textures (M2), and the pool stays cold (L5)
+    if p.buf.is_some() {
+        let mut back = Vec::new();
+        for &(ra, rn) in &ranges {
+            if super::upskip::on() {
+                let (base, size) = (p.base, p.size);
+                super::upskip::upload_changed(base, size, ra, rn, &mut back, |at, b| p.upload_from(g, sub, at, b));
+            } else {
+                p.upload_now(g, sub, ra, rn);
+            }
+        }
+        if !back.is_empty() {
+            ranges = without_pages(&ranges, &mut back);
+        }
+    }
+    if ranges.is_empty() {
+        return;
+    }
     // (a cold pool written: a walk that left it out covers no sync now)
     COLD_GEN.fetch_add(1, Ordering::AcqRel);
     p.dirty_frame = frame;
     p.tex_dirty.extend(ranges.iter().copied());
-    if p.buf.is_some() {
-        for &(ra, rn) in &ranges {
-            super::upskip::forget(ra, rn);
-            for (buf, boff, pa, pn) in p.pieces(ra, rn) {
-                let src = unsafe { core::slice::from_raw_parts(pa as *const u8, pn as usize) };
-                sub.upload(g, src, buf, boff);
-            }
-            UPLOAD_BYTES.fetch_add(rn, Ordering::Relaxed);
-        }
-    }
     static N: AtomicU64 = AtomicU64::new(0);
     if N.fetch_add(1, Ordering::Relaxed) < 4 {
         crate::vklog!("a texture copy's source {a:#x} (+{n:#x}) in a cold pool: {} CPU-written range(s) taken first", ranges.len());
@@ -1040,8 +1050,9 @@ impl Pool {
         // guest's memory hold anything (a large pool the game has not written yet is zero and is not read here: reading
         // it would commit it, and staging it would double it in host memory; Mario Kart World's pools)
         super::lazy::touch(self.base, self.size);
-        // a new GPU copy: no page of it was uploaded by the pool sync yet
-        super::upskip::drop_pool(self.base);
+        // a new GPU copy: no page of it was uploaded by the pool sync yet (an empty entry: a page held on this buffer
+        // and brought back before the first sync is recorded there, `upskip::brought_back`)
+        super::upskip::new_pool(self.base, self.base + self.size);
         // filled, uploaded and its watch taken under the shared upload buffer's lock in a parallel run: a later sync of
         // a page of it lands after this (audit H1)
         let _pre = super::gate::pre_lock();
@@ -1700,6 +1711,39 @@ fn inflight_remove(wbs: &[(u64, u64)]) {
     }
     if v.by_start.is_empty() {
         v.max_len = 0;
+    }
+}
+
+/// `ranges` (sorted, not overlapping) without the whole pages starting at `pages` (sorted here).
+fn without_pages(ranges: &[(u64, u64)], pages: &mut [u64]) -> Vec<(u64, u64)> {
+    pages.sort_unstable();
+    let mut out = Vec::with_capacity(ranges.len());
+    for &(a, n) in ranges {
+        let mut at = a;
+        let e = a + n;
+        let i0 = pages.partition_point(|&p| p + PAGE <= a);
+        for &p in pages[i0..].iter().take_while(|&&p| p < e) {
+            if p > at {
+                out.push((at, p - at));
+            }
+            at = at.max(p + PAGE);
+        }
+        if e > at {
+            out.push((at, e - at));
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod without_pages_tests {
+    #[test]
+    fn brought_back_pages_are_cut_out_of_the_ranges() {
+        let p = super::PAGE;
+        let r = [(0, 4 * p), (10 * p, p), (20 * p + 8, 2 * p)];
+        let mut pages = vec![10 * p, 2 * p, 0];
+        assert_eq!(super::without_pages(&r, &mut pages), vec![(p, p), (3 * p, p), (20 * p + 8, 2 * p)]);
+        assert_eq!(super::without_pages(&r, &mut []), r.to_vec());
     }
 }
 
@@ -2873,18 +2917,10 @@ pub fn begin_submit_ex(
                 }
             }
         }
-        if !ranges.is_empty() {
-            let f = super::present::frames();
-            if super::perf::fine() && f.saturating_sub(p.dirty_frame) > 1 && mid_frame {
-                WATCH_LUKE_HITS.fetch_add(1, Ordering::Relaxed);
-            }
-            if f.saturating_sub(p.dirty_frame) > 60 {
-                COLD_GEN.fetch_add(1, Ordering::AcqRel);
-            }
-            p.dirty_frame = f;
-        }
         if p.buf.is_some() && (p.placement == Placement::Mirror || p.placement == Placement::Vram) {
             let mut deferred_now = false;
+            // pages left out as a lazy write-back's return, unchanged by the CPU since (`upskip::brought_back`)
+            let mut back = Vec::new();
             for &(a, n) in &ranges {
                 if !budget_fits(n) {
                     p.deferred.push((a, n));
@@ -2899,7 +2935,7 @@ pub fn begin_submit_ex(
                 // charged with what is uploaded (audit M2)
                 let sent = if super::upskip::on() {
                     let (base, size) = (p.base, p.size);
-                    super::upskip::upload_changed(base, size, a, n, |at, b| p.upload_from(g, sub, at, b))
+                    super::upskip::upload_changed(base, size, a, n, &mut back, |at, b| p.upload_from(g, sub, at, b))
                 } else {
                     p.upload_now(g, sub, a, n);
                     n
@@ -2910,6 +2946,22 @@ pub fn begin_submit_ex(
                 // resolves of this pool cached before must look at the deferred ranges
                 POOL_GEN.fetch_add(1, Ordering::Relaxed);
             }
+            // those pages are no CPU write: the texture check does not reload a texture over them from guest memory
+            // (a GPU-owned texture over held pages got the pool's bytes instead of its rendered content, UPLOAD-SYNC
+            // audit M2), and they do not make the pool warm (L5)
+            if !back.is_empty() {
+                ranges = without_pages(&ranges, &mut back);
+            }
+        }
+        if !ranges.is_empty() {
+            let f = super::present::frames();
+            if super::perf::fine() && f.saturating_sub(p.dirty_frame) > 1 && mid_frame {
+                WATCH_LUKE_HITS.fetch_add(1, Ordering::Relaxed);
+            }
+            if f.saturating_sub(p.dirty_frame) > 60 {
+                COLD_GEN.fetch_add(1, Ordering::AcqRel);
+            }
+            p.dirty_frame = f;
         }
         all.extend(ranges);
     }
@@ -3024,7 +3076,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
         if !writeback_identity_matches(Some(identity), p.identity) { continue; }
         // the GPU copy of the range is `src` now (unless a later submission changed it: then it restamped the pages);
         // the pages it found the GPU left alone are not compared again below
-        let same = super::upskip::landed(a, n, src, pre, epoch);
+        let same = super::upskip::landed(pool, a, n, src, pre, epoch);
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let tl = std::time::Instant::now();
         let mut lazy = if p.watched {
@@ -3090,7 +3142,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
                     .copied()
                     .filter(|&pg| pg >= wlo && pg < wlo + wn)
                     .collect();
-                super::lazy::make_lazy(&pages, buf, wlo, off0);
+                super::lazy::make_lazy(&pages, buf, wlo, off0, pool);
             }
             super::lazy::T_MAKE.fetch_add(tm.elapsed().as_nanos() as u64, Ordering::Relaxed);
             continue;

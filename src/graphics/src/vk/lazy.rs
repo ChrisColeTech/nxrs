@@ -22,6 +22,8 @@ const STREAK: u32 = 3;
 struct Lazy {
     buf: vk::Buffer,
     off: u64,
+    /// the base of the pool whose buffer holds it (the upload skip's record goes to that pool only)
+    pool: u64,
 }
 
 #[derive(Default)]
@@ -163,8 +165,9 @@ fn committed_region(p: u64) -> (u64, u64, bool) {
     (p, p + PAGE, committed)
 }
 
-/// At completion: `pages` (of the pool buffer `buf`, page `p` at `off0 + (p - base)`) stay on the device.
-pub fn make_lazy(pages: &[u64], buf: vk::Buffer, base: u64, off0: u64) {
+/// At completion: `pages` (of the buffer `buf` of the pool at `pool`, page `p` at `off0 + (p - base)`) stay on the
+/// device.
+pub fn make_lazy(pages: &[u64], buf: vk::Buffer, base: u64, off0: u64, pool: u64) {
     if pages.is_empty() {
         return;
     }
@@ -185,6 +188,7 @@ pub fn make_lazy(pages: &[u64], buf: vk::Buffer, base: u64, off0: u64) {
                 Lazy {
                     buf,
                     off: off0 + (p - base),
+                    pool,
                 },
             )
             .is_none()
@@ -389,24 +393,29 @@ pub fn bring_back(p: u64) -> bool {
     let t0 = std::time::Instant::now();
     let data = read_page(g, l.buf, l.off);
     BACK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    // The write watch is not reset (MKW-RECORD L6): the copy's store below reads as a CPU write, and the upload skip
+    // leaves the page out at its pool's next sync while it still holds exactly these bytes (`upskip::brought_back`),
+    // so only a real CPU write since uploads it. Recorded before the copy: a scan taking the copy's store finds it (audit
+    // H1). A reset here, without the watch lock (which a fault on a thread holding it would deadlock on), let the pool
+    // walker take this store for a CPU write anyway, and erased the watch bit of a game store made between the copy and
+    // the reset: that write never reached the GPU. With the skip off (`NXGFX_UPLOAD_SKIP=0`) the old reset stays.
+    let skip = super::upskip::on();
+    if skip {
+        super::upskip::brought_back(l.pool, p, &data);
+    }
     if !protect(p, true) || !accessible(p) {
         // the page is no longer the one made lazy (unmapped or decommitted since): nothing to bring back; the access
         // goes on to the other handlers
         crate::log::red(&format!("lazy write-back: page {p:#x} can no longer be made accessible (its memory changed while it was held on the device): dropped"));
+        if skip {
+            super::upskip::not_brought_back(l.pool, p);
+        }
         done();
         return false;
     }
     // SAFETY: the guest page, accessible again; other threads' faults on it wait in `returning` until it is filled
     unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, PAGE as usize) };
-    // The write watch is not reset (MKW-RECORD L6): this copy's store reads as a CPU write, and the upload skip leaves
-    // the page out at the next sync while it still holds exactly these bytes (`upskip::brought_back`), so only a real
-    // CPU write since uploads it. A reset here, without the watch lock (which a fault on a thread holding it would
-    // deadlock on), let the pool walker take this store for a CPU write anyway, and erased the watch bit of a game
-    // store made between the copy and the reset: that write never reached the GPU. With the skip off
-    // (`NXGFX_UPLOAD_SKIP=0`) the old reset stays.
-    if super::upskip::on() {
-        super::upskip::brought_back(p, &data);
-    } else {
+    if !skip {
         super::mem::reset_watch(p, PAGE);
     }
     done();
