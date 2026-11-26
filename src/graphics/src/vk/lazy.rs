@@ -40,6 +40,20 @@ struct St {
     /// Pages being read back right now (out of `lazy`, still inaccessible): a second thread's fault on one waits for
     /// the first to finish and then retries its access, instead of falling through to the crash handler
     returning: HashSet<u64>,
+    /// Pages of `returning` a write-back landing skipped (`outside`, `make_lazy`): the read may predate that write-back's
+    /// bytes, so `bring_back` reads the page again and gives the guest what the device changed (UPSYNC2 send-back 2)
+    relanded: HashSet<u64>,
+}
+
+impl St {
+    fn new() -> St {
+        St {
+            lazy: HashMap::new(),
+            hist: HashMap::new(),
+            returning: HashSet::new(),
+            relanded: HashSet::new(),
+        }
+    }
 }
 static ST: Mutex<Option<St>> = Mutex::new(None);
 static HANDLER: AtomicBool = AtomicBool::new(false);
@@ -57,8 +71,9 @@ pub fn summary(frames: f64) -> String {
     let skip = SKIP_BYTES.swap(0, Ordering::Relaxed) as f64 / frames / 1048576.0;
     let t = |a: &AtomicU64| a.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
     let (lk, tk, mk, ld, tc) = (t(&T_LOCK), t(&T_TAKE), t(&T_MAKE), t(&T_LAND), t(&T_TOUCH));
+    let (uh, rr) = (UNHELD.swap(0, Ordering::Relaxed), REREAD.swap(0, Ordering::Relaxed));
     format!(
-        "; lazy write-back: {} pages on the device, {skip:.2} MB a frame not copied back, {n:.1} pages a frame brought back in {ms:.2} ms (completion: pool lock {lk:.2} ms, pages chosen {tk:.2}, held {mk:.2}, whole write-backs landed {ld:.2}, pages touched {tc:.2})",
+        "; lazy write-back: {} pages on the device, {skip:.2} MB a frame not copied back, {n:.1} pages a frame brought back in {ms:.2} ms (completion: pool lock {lk:.2} ms, pages chosen {tk:.2}, held {mk:.2}, whole write-backs landed {ld:.2}, pages touched {tc:.2}; {uh} released at once for a CPU store, {rr} read again for a landing during the read)",
         pages()
     )
 }
@@ -70,6 +85,10 @@ pub static T_MAKE: AtomicU64 = AtomicU64::new(0);
 pub static T_LAND: AtomicU64 = AtomicU64::new(0);
 pub static T_TOUCH: AtomicU64 = AtomicU64::new(0);
 pub static SKIP_BYTES: AtomicU64 = AtomicU64::new(0);
+/// Pages released right after being held (a CPU store before their protection), and bring-backs that read a page
+/// again for a landing skipped while it was read (UPSYNC2 send-back 2), since the last summary.
+pub static UNHELD: AtomicU64 = AtomicU64::new(0);
+pub static REREAD: AtomicU64 = AtomicU64::new(0);
 
 pub fn enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
@@ -102,11 +121,7 @@ pub fn take_lazy(a: u64, n: u64) -> Vec<u64> {
     let hi = (a + n) & !(PAGE - 1);
     let mut out = vec![];
     let mut g = ST.lock().unwrap();
-    let st = g.get_or_insert_with(|| St {
-        lazy: HashMap::new(),
-        hist: HashMap::new(),
-        returning: HashSet::new(),
-    });
+    let st = g.get_or_insert_with(St::new);
     // the committed state of the region around `p` ([lo, hi), committed), asked once per run of like pages
     let mut region = (0u64, 0u64, false);
     let mut p = lo;
@@ -166,20 +181,24 @@ fn committed_region(p: u64) -> (u64, u64, bool) {
 }
 
 /// At completion: `pages` (of the buffer `buf` of the pool at `pool`, page `p` at `off0 + (p - base)`) stay on the
-/// device.
-pub fn make_lazy(pages: &[u64], buf: vk::Buffer, base: u64, off0: u64, pool: u64) {
+/// device. Returns the pages newly made inaccessible (ascending): a CPU store between the caller's write-watch check and
+/// their protection is in guest memory only, so the caller checks the watch again for them (`unhold`).
+pub fn make_lazy(pages: &[u64], buf: vk::Buffer, base: u64, off0: u64, pool: u64) -> Vec<u64> {
     if pages.is_empty() {
-        return;
+        return vec![];
     }
     install();
     let mut g = ST.lock().unwrap();
-    let st = g.as_mut().unwrap();
+    let st = g.get_or_insert_with(St::new);
     // pages already held stay protected (they were protected again at every frame: one VirtualProtect a page, ~20 ms a
     // frame in Pokemon Violet); new ones are protected in runs of neighbours
     let mut fresh: Vec<u64> = Vec::new();
     for &p in pages {
         if st.returning.contains(&p) {
-            continue; // being read back for a CPU access right now: stays eager
+            // being read back for a CPU access right now: not held, and this write-back is not landed here either; the
+            // bring-back reads the page again (its buffer holds these bytes now) before it is done
+            st.relanded.insert(p);
+            continue;
         }
         if st
             .lazy
@@ -207,6 +226,22 @@ pub fn make_lazy(pages: &[u64], buf: vk::Buffer, base: u64, off0: u64, pool: u64
         protect_n(fresh[i], (j - i) as u64, false);
         i = j;
     }
+    fresh
+}
+
+/// Pages `make_lazy` just held that the CPU wrote before their protection (UPSYNC2 send-back 2): no longer held, made
+/// accessible again. Returns those it released (a page another thread already faulted on is being brought back).
+pub fn unhold(pages: &[u64]) -> Vec<u64> {
+    let mut out = Vec::new();
+    let mut g = ST.lock().unwrap();
+    let Some(st) = g.as_mut() else { return out };
+    for &p in pages {
+        if st.lazy.remove(&p).is_some() {
+            protect(p, true);
+            out.push(p);
+        }
+    }
+    out
 }
 
 #[cfg(windows)]
@@ -269,24 +304,29 @@ fn protect(p: u64, access: bool) -> bool {
     )
 }
 
-/// Whether any page of [a, a + n) is held on the device (the host is about to touch it: read it back first).
-/// The parts of [a, a + n) outside the pages held on the device, as (offset, length); None when none is held.
+/// A write-back landing on [a, a + n): the parts outside the pages held on the device, as (offset, length); None when
+/// none is held. A page being read back counts as held, and is flagged: its bring-back reads it again before it is done,
+/// so the guest gets this write-back's bytes too (UPSYNC2 send-back 2: they were lost when the read came first).
 pub fn outside(a: u64, n: u64) -> Option<Vec<(u64, u64)>> {
-    let g = ST.lock().unwrap();
-    let st = g.as_ref()?;
+    let mut g = ST.lock().unwrap();
+    let st = g.as_mut()?;
     if st.lazy.is_empty() && st.returning.is_empty() {
         return None;
     }
-    let held = |p: u64| st.lazy.contains_key(&p) || st.returning.contains(&p);
     let mut p = a & !(PAGE - 1);
     let mut any = false;
     while p < a + n {
-        any |= held(p);
+        if st.returning.contains(&p) {
+            st.relanded.insert(p);
+            any = true;
+        }
+        any |= st.lazy.contains_key(&p);
         p += PAGE;
     }
     if !any {
         return None;
     }
+    let held = |p: u64| st.lazy.contains_key(&p) || st.returning.contains(&p);
     let mut out: Vec<(u64, u64)> = Vec::new();
     let mut p = a & !(PAGE - 1);
     while p < a + n {
@@ -382,6 +422,7 @@ pub fn bring_back(p: u64) -> bool {
         MINE.with(|m| m.set(u64::MAX));
         if let Some(st) = ST.lock().unwrap().as_mut() {
             st.returning.remove(&p);
+            st.relanded.remove(&p);
         }
     };
     MINE.with(|m| m.set(p));
@@ -391,7 +432,12 @@ pub fn bring_back(p: u64) -> bool {
         return ok;
     };
     let t0 = std::time::Instant::now();
-    let data = read_page(g, l.buf, l.off);
+    let (mut data, mut upto) = read_page(g, l.buf, l.off);
+    // a write-back that landed while the page was read was not landed on it (`outside`, `make_lazy`): its bytes may be
+    // newer than the read (submitted after the read's wait, completed before it): read again, before the guest copy
+    while take_relanded(p, false) {
+        (data, upto) = read_page(g, l.buf, l.off);
+    }
     BACK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     // The write watch is not reset (MKW-RECORD L6): the copy's store below reads as a CPU write, and the upload skip
     // leaves the page out at its pool's next sync while it still holds exactly these bytes (`upskip::brought_back`),
@@ -401,7 +447,7 @@ pub fn bring_back(p: u64) -> bool {
     // the reset: that write never reached the GPU. With the skip off (`NXGFX_UPLOAD_SKIP=0`) the old reset stays.
     let skip = super::upskip::on();
     if skip {
-        super::upskip::brought_back(l.pool, p, &data);
+        super::upskip::brought_back(l.pool, p, &data, upto);
     }
     if !protect(p, true) || !accessible(p) {
         // the page is no longer the one made lazy (unmapped or decommitted since): nothing to bring back; the access
@@ -413,14 +459,56 @@ pub fn bring_back(p: u64) -> bool {
         done();
         return false;
     }
-    // SAFETY: the guest page, accessible again; other threads' faults on it wait in `returning` until it is filled
+    // SAFETY: the guest page, accessible again. Only threads that faulted before `protect` above wait in `returning`;
+    // from `protect` until this copy ends, other threads reach the page without faulting: a read there sees the guest's
+    // older bytes, and a store there is overwritten by the copy (UPSYNC2 L3). Guest memory is plain committed memory
+    // with no second view to fill it through first, so the gap stays (a few microseconds); the pool sync drops its
+    // upload of a page brought back while it copied it (`upskip::upload_changed` step 5), so its torn copy never reaches
+    // the GPU
     unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, PAGE as usize) };
+    // SAFETY: the same accessible guest page
+    let guest = unsafe { core::slice::from_raw_parts_mut(p as *mut u8, PAGE as usize) };
     if !skip {
         super::mem::reset_watch(p, PAGE);
     }
-    done();
+    // a landing skipped between the check above and the end of this bring-back: merged as a landing would
+    settle(p, guest, data, || {
+        let (now, at) = read_page(g, l.buf, l.off);
+        if skip {
+            super::upskip::brought_back(l.pool, p, &now, at);
+        }
+        now
+    });
+    MINE.with(|m| m.set(u64::MAX));
     PAGES_IN.fetch_add(1, Ordering::Relaxed);
     true
+}
+
+/// Whether a landing was skipped on page `p` while it was read back (the flag cleared); with `finish`, a page with none
+/// stops being returning (under the same lock: a landing after that sees it accessible and lands on it).
+fn take_relanded(p: u64, finish: bool) -> bool {
+    let mut g = ST.lock().unwrap();
+    let Some(st) = g.as_mut() else { return false };
+    if st.relanded.remove(&p) {
+        REREAD.fetch_add(1, Ordering::Relaxed);
+        return true;
+    }
+    if finish {
+        st.returning.remove(&p);
+    }
+    false
+}
+
+/// The end of a bring-back of page `p` whose guest copy `guest` was filled from `last`: while a write-back landing was
+/// skipped on it meanwhile, the page is read again (`reread`) and the bytes the device changed since `last` merged into
+/// the guest, as a landing merges (`mem::merge_changed_bytes`: CPU stores elsewhere on the page stay); then the page is
+/// no longer returning (UPSYNC2 send-back 2).
+fn settle(p: u64, guest: &mut [u8], mut last: Vec<u8>, mut reread: impl FnMut() -> Vec<u8>) {
+    while take_relanded(p, true) {
+        let now = reread();
+        super::mem::merge_changed_bytes(guest, &now, &last);
+        last = now;
+    }
 }
 
 #[cfg(windows)]
@@ -455,12 +543,14 @@ struct Reader {
 unsafe impl Send for Reader {}
 static READER: Mutex<Option<Reader>> = Mutex::new(None);
 
-/// One page of a pool buffer, copied by a submission of its own after everything submitted so far.
-fn read_page(g: &Gpu, buf: vk::Buffer, off: u64) -> Vec<u8> {
+/// One page of a pool buffer, copied by a submission of its own after everything submitted so far, and the GPU timeline
+/// value its bytes include (every submission up to it; later ones submitted before the copy may be in them too).
+fn read_page(g: &Gpu, buf: vk::Buffer, off: u64) -> (Vec<u8>, u64) {
     // what the device holds once the work already submitted is done: a wait on the GPU timeline itself, not on the
     // completion thread's bookkeeping (the completion thread may be the one asking)
     let sems = [g.q.timeline];
-    let vals = [g.q.last_fence()];
+    let upto = g.q.last_fence();
+    let vals = [upto];
     unsafe {
         g.dev().wait_semaphores(
             &vk::SemaphoreWaitInfo::default()
@@ -538,7 +628,7 @@ fn read_page(g: &Gpu, buf: vk::Buffer, off: u64) -> Vec<u8> {
         let si = [vk::SubmitInfo2::default().command_buffer_infos(&cbs)];
         super::queue::submit_raw(g, &si, r.fence);
         d.wait_for_fences(&[r.fence], true, u64::MAX).ok();
-        core::slice::from_raw_parts(r.stage.ptr, PAGE as usize).to_vec()
+        (core::slice::from_raw_parts(r.stage.ptr, PAGE as usize).to_vec(), upto)
     }
 }
 
@@ -590,6 +680,64 @@ mod tests {
         assert!(super::take_lazy(a, 0x2000).is_empty());
         // partial pages never go lazy
         assert!(super::take_lazy(a + 8, 0x100).is_empty());
+    }
+
+    /// UPSYNC2 send-back 2: a write-back landing on a page being read back (skipped by `outside` or `make_lazy`) is not
+    /// lost: the bring-back reads the page again, before the guest copy (`take_relanded`) or after it (`settle`, merging
+    /// only what the device changed, so a CPU store made since stays), and only then stops returning.
+    #[test]
+    fn a_landing_during_a_read_back_reaches_the_guest() {
+        use super::*;
+        let mut mem = vec![0u8; 2 * PAGE as usize];
+        let p = (mem.as_mut_ptr() as u64 + PAGE - 1) & !(PAGE - 1);
+        let returning = |p: u64| ST.lock().unwrap().as_ref().is_some_and(|s| s.returning.contains(&p));
+        ST.lock().unwrap().get_or_insert_with(St::new).returning.insert(p);
+        // nothing landed meanwhile: no read again, done
+        assert!(!take_relanded(p, false));
+        // the landing of a write-back over the page: skipped, flagged, read again before the copy
+        assert_eq!(outside(p, PAGE), Some(vec![]), "the page counts as held: nothing of it lands");
+        assert!(take_relanded(p, false), "read again before the guest copy");
+        assert!(!take_relanded(p, false));
+        assert!(returning(p));
+        // a landing after that check (a held page's write-back skipped by make_lazy): merged at the end
+        assert!(make_lazy(&[p], vk::Buffer::null(), p, 0, p).is_empty(), "a returning page is not held");
+        let b = vec![0xb0u8; PAGE as usize];
+        let mut g = b.clone();
+        g[..64].fill(0x6e); // the GPU's write
+        let mut guest = b.clone();
+        guest[1000] = 0xc5; // a CPU store after the guest copy
+        let mut reads = 0;
+        settle(p, &mut guest, b.clone(), || {
+            reads += 1;
+            g.clone()
+        });
+        assert_eq!(reads, 1);
+        assert_eq!(&guest[..64], &g[..64], "the GPU's bytes reached the guest");
+        assert_eq!(guest[1000], 0xc5, "the CPU store stays");
+        assert_eq!(guest[64..1000], b[64..1000]);
+        assert!(!returning(p), "done");
+        assert_eq!(outside(p, PAGE), None, "no longer held: a later landing lands");
+    }
+
+    /// UPSYNC2 send-back 2: a page just held that the CPU wrote before its protection is released at once.
+    #[cfg(windows)]
+    #[test]
+    fn a_page_just_held_can_be_released() {
+        use windows_sys::Win32::System::Memory::{VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE};
+        let page = super::PAGE as usize;
+        // SAFETY: a fresh committed page, released at the end
+        unsafe {
+            let a = VirtualAlloc(core::ptr::null(), page, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE) as u64;
+            assert_ne!(a, 0);
+            let fresh = super::make_lazy(&[a], ash::vk::Buffer::null(), a, 0, a);
+            assert_eq!(fresh, vec![a], "newly held");
+            assert!(!super::accessible(a));
+            assert_eq!(super::unhold(&[a]), vec![a]);
+            assert!(super::accessible(a), "accessible again");
+            *(a as *mut u8) = 1;
+            assert!(super::unhold(&[a]).is_empty(), "no longer held");
+            VirtualFree(a as _, 0, MEM_RELEASE);
+        }
     }
 
     /// A reserved page the heap has not committed yet is never held on the device; a committed one may be.

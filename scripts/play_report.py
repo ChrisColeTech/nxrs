@@ -112,15 +112,15 @@ def sheets(folder, shots):
 
 
 def scenario_checks(meta):
-    """The scenario's declared route checks: run.json's copy, else scenarios.toml's current one."""
-    if 'checks' in meta:
-        return meta['checks'] or {}
+    """The scenario's declared route checks: scenarios.toml's current ones (they go with the current references in
+    checkpoints.json, so a regenerated report of an old run uses today's check kinds), else run.json's copy."""
     path = Path(__file__).resolve().parent / 'scenarios.toml'
     try:
         with path.open('rb') as f:
-            return tomllib.load(f).get(meta['scenario'], {}).get('checks', {})
+            current = tomllib.load(f).get(meta['scenario'], {}).get('checks')
     except (OSError, tomllib.TOMLDecodeError):
-        return {}
+        current = None
+    return current if current else meta.get('checks') or {}
 
 
 def anomalies(folder, window, shots):
@@ -171,12 +171,12 @@ def anomaly_md(an, window):
 def route_md(route):
     if not route:
         return []
-    md = ['', '## Route checks (colour-histogram distance to a known-good run; off route past %g)'
-          % play_route.OFF_ROUTE_HIST, '', '| shot | should show | distance | verdict | reference |',
-          '|---|---|---|---|---|']
+    md = ['', '## Route checks (against a known-good run: whole-frame colour-histogram distance, off route past %g; '
+          'region checks: share of each region matching, off route below its min)' % play_route.OFF_ROUTE_HIST, '',
+          '| shot | should show | distance | verdict | reference |', '|---|---|---|---|---|']
     for r in route:
         verdict = 'n/a (%s)' % r['why'] if r['off'] is None else '**OFF ROUTE**' if r['off'] else 'on route'
-        md.append('| `%s` | %s | %s | %s | %s |' % (r['shot'], r['about'], r.get('hist', '-'), verdict,
+        md.append('| `%s` | %s | %s | %s | %s |' % (r['shot'], r['about'], play_route.describe(r), verdict,
                                                    r.get('ref', '-')))
     return md
 

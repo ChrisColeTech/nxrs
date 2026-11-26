@@ -632,7 +632,9 @@ pub fn pool_add(p: &pool_t) {
             if watched { " (write watch)" } else { "" }
         );
     }
-    super::upskip::drop_pool(base);
+    // an entry of the same extent cannot tell the two pools apart: it goes now (the replaced pool's held pages then come
+    // back unrecorded: uploaded once more); one of another size goes in the replaced pool's `release`
+    super::upskip::drop_pool(base, base + p.size);
     let old = {
         let mut m = g.mem.lock().unwrap();
         let old = m.by_base.insert(base, pool);
@@ -647,7 +649,6 @@ pub fn pool_add(p: &pool_t) {
 
 fn release(g: &Gpu, p: Pool) {
     POOL_GEN.fetch_add(1, Ordering::Relaxed);
-    super::upskip::drop_pool(p.base);
     // pages of it held on the device (lazy write-back) come back now, from this buffer, while it still exists: left
     // in the lazy table they named a freed buffer, and the next touch of those pages (a new pool's buffer over the
     // same memory brings its range back first) copied from it on the GPU: an invalid read inside a buffer unbound
@@ -655,6 +656,9 @@ fn release(g: &Gpu, p: Pool) {
     if p.buf.is_some() {
         super::lazy::touch(p.base, p.size);
     }
+    // then its upload-skip entry, with the records those returns made (UPSYNC2 L5: dropped first, they recorded into
+    // nothing; a pool registered anew at this base with another size, and nested pools' raw logs, are kept)
+    super::upskip::drop_pool(p.base, p.base + p.size);
     if let Some(m) = ADDRS.write().unwrap().as_mut() {
         for b in p.buf.iter().chain(p.wins.iter()) {
             m.remove(&vk::Handle::as_raw(b.buf));
@@ -3055,8 +3059,8 @@ fn note_writeback(sub: &mut super::queue::Sub, b: u64, a: u64, n: u64, buf: vk::
 /// Completion of a submission: its write-backs land in guest memory. CPU writes the game made meanwhile to the same
 /// pages stay marked for the next upload; the write-back's own stores are not taken for CPU writes.
 /// `epoch`: the submission's recording epoch (`upskip::next_epoch`): pages it noted as GPU-written get the hash of the
-/// GPU's bytes back (`upskip::landed`).
-pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)], epoch: u64) {
+/// GPU's bytes back (`upskip::landed`); `value`: its GPU timeline value.
+pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)], epoch: u64, value: u64) {
     if wbs.is_empty() {
         return;
     }
@@ -3076,7 +3080,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
         if !writeback_identity_matches(Some(identity), p.identity) { continue; }
         // the GPU copy of the range is `src` now (unless a later submission changed it: then it restamped the pages);
         // the pages it found the GPU left alone are not compared again below
-        let same = super::upskip::landed(pool, a, n, src, pre, epoch);
+        let same = super::upskip::landed(pool, a, n, src, pre, epoch, value);
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let tl = std::time::Instant::now();
         let mut lazy = if p.watched {
@@ -3097,6 +3101,11 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
             // pages a scan took and left for the next sync (the pool walker's, a landing's) are CPU writes too
             if !p.pending.is_empty() {
                 lazy.retain(|&pg| !p.pending.iter().any(|&(pa, pn)| pg < pa + pn && pa < pg + PAGE));
+            }
+            // and so are the ones the upload budget left for later (taken from the watch, not on the device yet: held,
+            // a bring-back before their upload put the buffer's page over them, UPSYNC2 L6)
+            if !p.deferred.is_empty() {
+                lazy.retain(|&pg| !p.deferred.iter().any(|&(pa, pn)| pg < pa + pn && pa < pg + PAGE));
             }
         }
         super::lazy::T_TAKE.fetch_add(tl.elapsed().as_nanos() as u64, Ordering::Relaxed);
@@ -3136,13 +3145,30 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
                 at = (pg + PAGE).min(a + n).max(at);
             }
             let tm = std::time::Instant::now();
+            let mut fresh: Vec<u64> = Vec::new();
             for &(wlo, wn, buf, off0) in &windows {
                 let pages: Vec<u64> = lazy
                     .iter()
                     .copied()
                     .filter(|&pg| pg >= wlo && pg < wlo + wn)
                     .collect();
-                super::lazy::make_lazy(&pages, buf, wlo, off0, pool);
+                fresh.extend(super::lazy::make_lazy(&pages, buf, wlo, off0, pool));
+            }
+            // a game store between the write-watch check above and a page's protection is in guest memory only: such a
+            // page is not held (bringing it back would put the buffer's page over the store), it is released and this
+            // write-back lands on it instead (UPSYNC2 send-back 2)
+            if !fresh.is_empty() && std::env::var("NXGFX_LAZY_CPU_CHECK").as_deref() != Ok("0") {
+                fresh.sort_unstable();
+                let (lo, hi) = (fresh[0], fresh[fresh.len() - 1] + PAGE);
+                if let Some(cpu) = watch::take(lo, hi, false) {
+                    let written: Vec<u64> = fresh.iter().copied().filter(|pg| cpu.binary_search(pg).is_ok()).collect();
+                    for pg in super::lazy::unhold(&written) {
+                        let o = (pg - a) as usize;
+                        let at = |q: *const u8| if q.is_null() { q } else { unsafe { q.add(o) } };
+                        land(p, pg, PAGE, at(src), at(pre), &same);
+                        super::lazy::UNHELD.fetch_add(1, Ordering::Relaxed);
+                    }
+                }
             }
             super::lazy::T_MAKE.fetch_add(tm.elapsed().as_nanos() as u64, Ordering::Relaxed);
             continue;
