@@ -1657,6 +1657,12 @@ pub static PARKED_AT_ONCE: AtomicU64 = AtomicU64::new(0);
 /// may read was written by the CPU before the game queued the parked work, or before the game queued the op whose GPU
 /// signal or receipt released it (both replayed, so at most the newest op taken), or before a CPU event signal (which
 /// `scan_covers` refuses on its own). Every such op is at most `AQ_TAKEN`; 0 (no replay thread): it scans.
+/// `NXGFX_WALKER_PARKED=0`: a present behind parked work is not covered by the pool walker's walk.
+fn walker_parked() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_WALKER_PARKED").as_deref() != Ok("0"))
+}
+
 fn resume_due() -> Option<u64> {
     RESUMES.fetch_add(1, Ordering::Relaxed);
     Some(AQ_TAKEN.load(Ordering::Acquire))
@@ -2144,7 +2150,13 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
                 None => {
                     for (t, crop) in p.presents {
                         let frame = present_frame(&t, crop, ll, false);
-                        present_locked(g, st, q, ll, &t, crop, frame, resume_due(), false);
+                        // a present behind parked work: the pool walker's walk covers its sync as a direct one's when
+                        // it started after every op taken so far (`resume_due`, at or after this present's queuing);
+                        // the parked work ran first with syncs of its own. Without it this sync walked every pool,
+                        // cold ones too (4-9 ms in Mario Kart World, whose presents often wait behind parked work).
+                        // `NXGFX_WALKER_PARKED=0`: the strict rule as before.
+                        let direct = walker_parked();
+                        present_locked(g, st, q, ll, &t, crop, frame, resume_due(), direct);
                     }
                 }
             }

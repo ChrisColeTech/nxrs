@@ -1087,7 +1087,8 @@ impl QState {
         );
         chk(self.mesh_stride == o.mesh_stride, "mesh stride");
         chk(self.dual == o.dual, "dual source");
-        chk(pod(&self.last_color, &o.last_color), "last colour pass");
+        // (not `last_color`: set when a pass begins, which the pre-pass does not do, and read only with shadows=0,
+        // which keeps a stream in one piece)
         d
     }
 }
@@ -8339,6 +8340,13 @@ fn translate_seg() -> usize {
     *N.get_or_init(|| env_usize("NXGFX_TRANSLATE_SEG", 256).max(1))
 }
 
+/// A segment is also cut before a draw inside a pass once it holds this many draws (`NXGFX_TRANSLATE_MIDCUT`, 256;
+/// 0: only at records that end the pass). Mario Kart World's race draws ~1,300 of its ~2,000 draws a frame in one pass.
+fn translate_midcut() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| env_usize("NXGFX_TRANSLATE_MIDCUT", 256))
+}
+
 /// `NXGFX_TRANSLATE_CHECK=1` (diagnosis): each segment's pre-pass entry state is compared with the state the segment
 /// before it left; differences are logged.
 fn translate_check() -> bool {
@@ -8366,6 +8374,18 @@ fn is_cut(opc: u32) -> bool {
             | op::COPY_T2T
             | op::CLEAR_TEX
     )
+}
+
+/// Whether a segment holding `draws` draws ends before record `opc`: None, or Some(inside a pass). At a record that
+/// ends the pass anyway once it holds `target`; before a draw once it holds `midcut` (0: never).
+fn cut_before(opc: u32, draws: usize, target: usize, midcut: usize) -> Option<bool> {
+    if draws >= target && is_cut(opc) {
+        Some(false)
+    } else if midcut != 0 && draws >= midcut && is_draw(opc) {
+        Some(true)
+    } else {
+        None
+    }
 }
 
 /// One segment of a stream: records [start, end) translated from `entry`, with its render conditions' results.
@@ -8427,6 +8447,12 @@ pub mod seg_stats {
     /// streams translated in parallel, and their segments translated again at the join
     pub static PAR: AtomicU64 = AtomicU64::new(0);
     pub static REDO: AtomicU64 = AtomicU64::new(0);
+    /// cuts made before a draw inside a pass (`translate_midcut`)
+    pub static MIDCUT: AtomicU64 = AtomicU64::new(0);
+    /// the replay thread's time waiting for the other lanes at the end of a parallel run
+    pub static JOIN_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+    /// the lanes' translation time, all lanes together
+    pub static LANE_NS: AtomicU64 = AtomicU64::new(0);
     pub fn frame(frame: u64) {
         // (no line while segments are off: audit L3)
         if frame % 600 != 0 || super::translate_lanes() == 0 {
@@ -8436,8 +8462,11 @@ pub mod seg_stats {
         let w = WHY.each_ref().map(|x| x.swap(0, Relaxed));
         if super::translate_lanes() > 1 {
             crate::vklog!(
-                "translate (parallel), over the last 600 frames: {} streams in parallel, {} segments translated again; the gate asked {} times, {} segments gave up; asked at {}",
+                "translate (parallel), over the last 600 frames: {} streams in parallel, {} cuts inside a pass, lanes translated {:.2} ms a frame together, the replay thread waited {:.2} ms a frame for the lanes, {} segments translated again; the gate asked {} times, {} segments gave up; asked at {}",
                 PAR.swap(0, Relaxed),
+                MIDCUT.swap(0, Relaxed),
+                LANE_NS.swap(0, Relaxed) as f64 / 600.0 / 1e6,
+                JOIN_WAIT_NS.swap(0, Relaxed) as f64 / 600.0 / 1e6,
                 REDO.swap(0, Relaxed),
                 super::super::gate::ASKED.swap(0, Relaxed),
                 super::super::gate::GAVE_UP.swap(0, Relaxed),
@@ -8513,6 +8542,7 @@ fn segmentable(qs: &QState, stream: &[u8]) -> bool {
 /// ordered global effects.
 fn plan(g: &Gpu, qs: &QState, stream: &[u8]) -> (Vec<Segment>, Option<usize>) {
     let target = translate_seg();
+    let midcut = translate_midcut();
     let mut shadow = qs.fork_state();
     let mut segs = Vec::new();
     let mut cur = Segment {
@@ -8528,7 +8558,13 @@ fn plan(g: &Gpu, qs: &QState, stream: &[u8]) -> (Vec<Segment>, Option<usize>) {
         let h = unsafe { rd::<op_hdr>(stream.as_ptr().add(p)) };
         let sz = h.size as usize;
         let rec = &stream[p..p + sz];
-        if draws >= target && p > cur.start && is_cut(h.op) {
+        // a natural cut (the record ends the pass anyway), or one before a draw inside a long pass: the segment before
+        // it ends the rendering instance and the next begins it again (every attachment loads and stores, so the
+        // pixels are the same; an open occlusion query becomes two, summed)
+        if let Some(mid) = cut_before(h.op, draws, target, midcut).filter(|_| p > cur.start) {
+            if mid {
+                seg_stats::MIDCUT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            }
             cur.end = p;
             let next = Segment {
                 start: p,
@@ -8803,7 +8839,9 @@ mod par {
             // SAFETY: the stream outlives the job (`run` waits until no thread is inside it)
             let stream = unsafe { std::slice::from_raw_parts(job.stream.0 .0, job.stream.0 .1) };
             job.run.enter(k);
+            let t = std::time::Instant::now();
             let draws = translate_segment(job.g, &mut c, &mut wq, stream, s.start, s.end);
+            seg_stats::LANE_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
             job.run.leave(k);
             *job.out[k].lock().unwrap() = Some(Own((c, wq, draws)));
         }
@@ -8857,12 +8895,14 @@ mod par {
         WAKE.notify_all();
         work(&job, child);
         POOL.lock().unwrap().job = None;
+        let tw = std::time::Instant::now();
         {
             let mut b = job.busy.lock().unwrap();
             while *b > 0 {
                 b = job.idle.wait(b).unwrap();
             }
         }
+        seg_stats::JOIN_WAIT_NS.fetch_add(tw.elapsed().as_nanos() as u64, Relaxed);
         seg_stats::PAR.fetch_add(1, Relaxed);
         let mut later = 0u64;
         let mut last = None;
@@ -10322,6 +10362,14 @@ mod downstream_tests {
             vec!["line width", "depth bounds", "sample mask", "tessellation levels", "viewport swizzle"]
         );
         assert!(is_cut(op::SET_RT) && is_cut(op::BARRIER) && !is_cut(op::DRAW_IDX));
+        // step 5: a long pass is cut before a draw; a state record or a clear never starts a segment inside one
+        assert_eq!(cut_before(op::DRAW_IDX, 256, 256, 256), Some(true));
+        assert_eq!(cut_before(op::DRAW_IDX, 255, 256, 256), None);
+        assert_eq!(cut_before(op::MESH, 300, 256, 256), Some(true));
+        assert_eq!(cut_before(op::DRAW_IDX, 5000, 256, 0), None, "mid-pass cuts off");
+        assert_eq!(cut_before(op::SET_RT, 256, 256, 256), Some(false));
+        assert_eq!(cut_before(op::BIND_UBO, 900, 256, 256), None);
+        assert_eq!(cut_before(op::CLEAR_COLOR, 900, 256, 256), None);
         assert!(!is_cut(op::CLEAR_COLOR), "a clear draws into the open pass");
     }
 
