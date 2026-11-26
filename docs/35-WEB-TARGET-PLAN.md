@@ -32,12 +32,12 @@ Evidence under `build/WEB/`: `W0-shaders/report.md`, `W0-gta/graphics.md`, `W0-g
 |---|---|
 | Generated C | 416 units, 1,085 MiB of function bodies, **316,912 functions**; 685 trap-only |
 | (a) compile | **All 416 units compile** with emcc 7.0.1 (clang 22) for wasm32 (161 s, 24 jobs) and wasm64 (163 s) after a small header variant (`build/WEB/W0-wasm/include`: guest address rebase `RT_HOST`, 64-bit `Cpu` slots, no MXCSR, one asm constraint). Translator output itself unchanged |
-| (b) module | Linked at -O1, no wasm-opt: **wasm32 397 MiB, wasm64 414 MiB**, 327,683 functions, largest 0.40 MiB. V8 13.6 (Node 24): validate 0.3 s; lazy compile 0.5 s / ~0.9 GB; eager baseline 3.7 s / 2.3 GB (32) and 6.2 s / 3.0 GB (64); eager optimizing 100 s / 3.3 GB and 166 s / 3.9 GB. Not yet loaded in Chrome itself |
+| (b) module | Linked at -O1, no wasm-opt: **wasm32 397 MiB, wasm64 414 MiB**, 327,683 functions, largest 0.40 MiB. V8 13.6 (Node 24): validate 0.3 s; lazy compile 0.5 s / ~0.9 GB; eager baseline 3.7 s / 2.3 GB (32) and 6.2 s / 3.0 GB (64); eager optimizing 100 s / 3.3 GB and 166 s / 3.9 GB. **In Chrome 158** (cross-origin isolated, localhost): wasm64 streamed + compiled in 1.2 s, instantiated in 87 ms against a shared 64-bit memory with a 16 GiB maximum; the 108.5 MiB hot module compiles in 0.25 s and instantiates in 0.2 s with its 290,107 placeholder imports (`build/WEB/W0-chrome`) |
 | (c) hot set | 26,824 functions (8.5%) from boot through two minutes of beach gameplay, 12.1% of the C. `wasm-split`: **hot 108.5 MiB**, cold 296 MiB. Recorder: `NXRS_FNPROF=<file>` |
 | (d) memory | ~2.27 GB guest committed. `NXRT_LAYOUT=compact` runs with an alias region of **≥ 6 GiB** (6,144 / 8,192 MiB ok; 5,120 / 4,096 MiB crash; 3,072 MiB SDK abort): a ~7.3 GiB guest window, so **wasm64 is required** for this title; it fits Chrome's 16 GiB cap |
-| (e) shaders | Used set 111/114 → valid WGSL (naga) after five rewrites; random 1,000 of 53,109 variants: 834 (164 need a base-instance uniform, 2 naga defects). Used set 0.94 MB gzip. Chrome's own WGSL compiler not yet tried |
+| (e) shaders | Used set 111/114 → valid WGSL (naga) after five rewrites; random 1,000 of 53,109 variants: 834 (164 need a base-instance uniform, 2 naga defects). Used set 0.94 MB gzip. **Chrome 158 (RTX 5090) compiles all 111 used shaders** with no errors or warnings in 1.0 s. Of the 834 sample, 739 compile as is; 94 fail WGSL derivative uniformity (`textureSampleBias` in divergent flow, legal in Vulkan) and pass with `diagnostic(off, derivative_uniformity)`; 1 declares a read_write storage buffer in a vertex shader that it never writes and passes as `read`. Both become converter rules: **833+1 of 834** |
 | (f) fibers | Not used by this title |
-| (g) FP | Open: wasm has no rounding modes or flush-to-zero |
+| (g) FP | **Default FPCR and DN: all 27 FP/SIMD oracle classes bit-identical wasm vs native.** FZ and directed rounding differ (W0 header variant ignores them) and need software flush/rounding paths; the game writes FPCR at runtime from SDK code (values to log in W2). `build/WEB/W0-fp/report.md` |
 | (h) GTA reading | Done (design only, no code copied): see section 3 |
 | Pool sync | 43 pools / 706 MB tracked, 2.2-2.6 MB uploaded a frame; no write watch in wasm, so check only pools the frame's draws bind |
 
@@ -91,7 +91,8 @@ address → linear offset, one subtract), pointer-free 64-bit `Cpu` layout, no M
 
 Replay layer in wasm → command ring → our GPU worker (WebGPU). Shaders: Maxwell → SPIR-V → WGSL at build time with the
 W0(e) rewrites (drop unused capabilities, split combined samplers, PointSize/clip members to a dummy, exact
-isnan/isinf, base instance as a per-draw uniform). Textures: BC7 where `texture-compression-bc` exists, ASTC where
+isnan/isinf, base instance as a per-draw uniform, `diagnostic(off, derivative_uniformity)`, unwritten vertex-stage
+storage buffers declared `read`). Textures: BC7 where `texture-compression-bc` exists, ASTC where
 `texture-compression-astc` exists, else RGBA8. WebGPU gaps (geometry/tessellation/mesh shaders, transform feedback,
 sparse images) get explicit lowerings or a per-title refusal the launcher shows; never silently skipped draws.
 
@@ -113,7 +114,7 @@ Each phase closes with a measured result in `build/WEB/<phase>/report.md`; from 
 
 | Phase | Outcome | Exit criterion |
 |---|---|---|
-| **W0 Feasibility** | Mostly done (section 2) | Remaining: load the wasm64 module in **Chrome** (compile time, tab memory); Chrome's WGSL compiler on the used set; (g) FP classes under wasm |
+| **W0 Feasibility** | **Done** (section 2) | Chrome loads the module, compiles the shaders, FP measured. Carried into W2: log the game's FPCR values; FZ / directed-rounding software paths |
 | **W1 Toolchain** | `--target web` builds and links | Header variant upstreamed; `cc.rs` emcc lane (chunking, object cache); Rust crates linked into the module (D2); Windows build unchanged |
 | **W2 Runtime** | Guest code reaches `nnMain` in Chrome | Workers, compact layout, fault/lazy-heap replacements closed; log visible in the page |
 | **W3 Host I/O** | Real files, saves, audio, input | RomFS streaming with recorded boot set (cold/warm timed), OPFS save round trip, audible audio with underrun counter, keyboard + gamepad |
