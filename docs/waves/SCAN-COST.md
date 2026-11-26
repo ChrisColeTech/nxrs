@@ -69,6 +69,17 @@ the wakes a frame, so the first run tells.
 **Files expected:** `src/graphics/src/vk/seal.rs` (new), `vk/mem.rs`, `vk/mod.rs`, `vk/lazy.rs` (a pure "holds any page
 in range" query), `src/os/src/mem.rs` (the commit hook), `docs/env_switches.tsv`, this doc.
 
+## Runs (GPU 1; window [845, 915] s; per-frame means from the frames CSV, pool parts from the `[vk] pools:` lines)
+
+| Run (`build/play/`) | build | FPS / 5% low | replay | prep | pool sync | lock / scan / pass | write-back MB (ms) | GPU | route |
+|---|---|---|---|---|---|---|---|---|---|
+| `20261126-154635-sc-base-oot` | base `1619d31` (relink 15:46) | 16.2 / 14.0 | 20.5 | 29.6 | 23.6 | 2.7 / 12.2 / 7.7 | 1.2 (13.7) | 10.6 | 6/6 on |
+
+The base run had TRANSLATE-REUSE's MKW relink and my own test compiles beside it in its first minutes (not in the
+window); numbers indicative. Sheets (3) correct: title, story, nightmare, house, title card, Deku Tree, Navi, Link
+woken, every house and walk shot. Anomalies: the known set (one stand-in at the forest load, no-target, crashed
+pipeline, occlusion queries).
+
 **Verification:** `cargo test --release -p graphics` (and `-p os` if its test set is quick); `oot` before/after on GPU 1
 (FPS / 5% low vs 59, replay / prep / pool sync parts, write-back); `oot-house --faults` (>= 60 house shots over two
 runs, no new faults); every sheet and report read.

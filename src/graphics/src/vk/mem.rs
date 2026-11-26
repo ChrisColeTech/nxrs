@@ -655,6 +655,7 @@ pub fn pool_add(p: &pool_t) {
                 o.sealed = false;
                 o.seal_entry = false;
             }
+            SEAL_GEN.fetch_add(1, Ordering::AcqRel);
         }
         let old = m.by_base.insert(base, pool);
         POOL_GEN.fetch_add(1, Ordering::Release);
@@ -2380,6 +2381,7 @@ static PRESENT_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 fn walker_main() {
     let mut last_tail = 0;
+    let mut cached: ((u64, u64), Vec<WatchedPool>) = ((0, 0), Vec::new());
     loop {
         let full;
         {
@@ -2421,7 +2423,13 @@ fn walker_main() {
                     // after `tail` was read: a pool woken by a store made before an op this walk covers is walked
                     drain_woken(&mut m);
                     if full {
-                        watched_pools_where(&m, |p| !p.sealed)
+                        // the same list while no pool came, went, got its buffer or was sealed or woken (with most
+                        // pools sealed a walk is short, and its list was most of its time under the pool lock)
+                        let key = (POOL_GEN.load(Ordering::Acquire), SEAL_GEN.load(Ordering::Acquire));
+                        if cached.0 != key || cached.1.is_empty() {
+                            cached = (key, watched_pools_where(&m, |p| !p.sealed));
+                        }
+                        cached.1.clone()
                     } else {
                         // the pools a sync of this frame would scan (`begin_submit`'s cold rule)
                         let frame = super::present::frames();
@@ -2577,6 +2585,9 @@ fn watch_lock(m: &mut Pools) -> std::sync::MutexGuard<'static, Vec<u64>> {
     s
 }
 
+/// Moves whenever a pool is sealed or stops being sealed (the walker's list of the pools it walks is kept until then).
+static SEAL_GEN: AtomicU64 = AtomicU64::new(0);
+
 /// The pools a store woke since (`seal`): asked by every scan again, and warm, so the cold rule does not hold their
 /// writes back a frame either. Under the pool lock; a scan calls it again after reading the replay queue's tail (a
 /// store made before an op it covers woke its pool before that op was queued).
@@ -2585,6 +2596,7 @@ fn drain_woken(m: &mut Pools) {
     if woken.is_empty() {
         return;
     }
+    SEAL_GEN.fetch_add(1, Ordering::AcqRel);
     let frame = super::present::frames();
     for b in woken {
         if let Some(p) = m.by_base.get_mut(&b) {
@@ -2697,6 +2709,7 @@ fn seal_some(g: &Gpu) {
         }
         // a store since the protection woke it already (it stays asked by the scans)
         p.sealed = super::seal::armed(lo);
+        SEAL_GEN.fetch_add(1, Ordering::AcqRel);
     }
     NEXT.store(0, Ordering::Relaxed);
 }
@@ -3337,6 +3350,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
             super::seal::remove(lo, hi);
             p.seal_entry = false;
             p.sealed = false;
+            SEAL_GEN.fetch_add(1, Ordering::AcqRel);
         }
         // the GPU copy of the range is `src` now (unless a later submission changed it: then it restamped the pages);
         // the pages it found the GPU left alone are not compared again below
