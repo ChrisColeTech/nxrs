@@ -141,6 +141,9 @@ pub struct QState {
     vin_from: std::cell::Cell<(u64, usize, u64)>,
     /// push constants' generation (new at every PushConstants)
     pgen: u64,
+    /// inline uniform updates' generation (new at every UPDATE_UB): a set whose storage-buffer address is read from a
+    /// uniform buffer's memory depends on it, not only on the binding (`SetDeps::ubo_read`)
+    ugen: u64,
     /// staged constant blocks by (kind, key): where they are in submission `serial` (support buffer by pass size,
     /// a module's c1, the push banks by generation; each was hashed and staged again at every draw)
     scache: std::cell::RefCell<std::collections::HashMap<(u8, u64), (u64, (vk::Buffer, u64))>>,
@@ -236,6 +239,9 @@ struct SetKey {
     bgen: [u64; 2],
     ubo: [(u64, u64); 16],
     pgen: u64,
+    /// (the inline-update generation, the uniform buffers whose memory the set reads a storage address from, by bit
+    /// (bank - 3)): (0, 0) for a set that reads none
+    ugen: (u64, u16),
     extent: (u32, u32),
     pools: (i32, i32),
     dispatch: [u32; 3],
@@ -362,6 +368,10 @@ fn patch_classes(old: &SetKey, new: &SetKey) -> Option<u32> {
     if old.pgen != new.pgen {
         c |= CL_PUSH;
     }
+    // an inline update may have rewritten a storage address in a uniform buffer's memory: those slots again
+    if old.ugen.0 != new.ugen.0 {
+        c |= new.ugen.1 as u32;
+    }
     if old.bgen[0] != new.bgen[0] || old.base_instance != new.base_instance || old.dispatch != new.dispatch {
         c |= CL_C0;
     }
@@ -409,7 +419,7 @@ fn note_set_miss(old: Option<&SetKey>, new: Option<&SetKey>, copy: u8) {
         (Some(o), Some(n)) if o.pools != n.pools => 7,
         (Some(o), Some(n)) if o.extent != n.extent => 8,
         (Some(o), Some(n)) if o.mesh != n.mesh => 9,
-        (Some(o), Some(n)) if o.module == n.module && ubos_changed(o, n) != 0 => 10,
+        (Some(o), Some(n)) if o.module == n.module && (ubos_changed(o, n) != 0 || o.ugen != n.ugen) => 10,
         _ => 11,
     };
     N[i].fetch_add(1, Relaxed);
@@ -513,6 +523,7 @@ fn set_key(
         ],
         ubo: masked_ubos(&qs.ubo[st], d.ubo),
         pgen: if d.push { qs.pgen } else { 0 },
+        ugen: ub_read_key(qs, &d),
         extent: if d.support {
             (qs.pass_extent.width, qs.pass_extent.height)
         } else {
@@ -533,6 +544,17 @@ fn set_key(
     })
 }
 
+/// `SetKey::ugen`: a set that reads a storage buffer's address from a uniform buffer's memory is keyed by the inline
+/// updates queued since (`QState::ugen`), since an UPDATE_UB rewrites that memory under the same binding (a set built
+/// before it was bound again after it, holding the old address); other sets are not.
+fn ub_read_key(qs: &QState, d: &SetDeps) -> (u64, u16) {
+    if d.ubo_read != 0 {
+        (qs.ugen, d.ubo_read)
+    } else {
+        (0, 0)
+    }
+}
+
 /// What a stage set reads of the queue's state besides its module, the submission, the pools and the images
 /// (`set_deps`): the key holds only these, so a bind the shader does not read keeps its set (MKW: ~5,000 sets a
 /// frame, ~4% reused, while the game binds new uniform buffers and push constants at nearly every draw).
@@ -544,6 +566,9 @@ struct SetDeps {
     c2: bool,
     /// the uniform buffers c3..c18 bound in the set or read for a storage buffer's address, by bit (bank - 3)
     ubo: u16,
+    /// of those, the ones whose memory a storage buffer's address is read from (an inline update can change it
+    /// under the same binding: `QState::ugen`)
+    ubo_read: u16,
     /// the push-constant banks c24..c29
     push: bool,
     /// the support buffer (the pass extent)
@@ -635,7 +660,12 @@ fn set_deps(m: &Module) -> Option<SetDeps> {
                 24..=29 => d.push = true,
                 b => slot(&mut d, b as i32),
             },
-            Res::Sbuf { cb_slot, .. } if *cb_slot != super::gmem::CB_SLOT => slot(&mut d, *cb_slot),
+            Res::Sbuf { cb_slot, .. } if *cb_slot != super::gmem::CB_SLOT => {
+                slot(&mut d, *cb_slot);
+                if (3..=18).contains(cb_slot) {
+                    d.ubo_read |= 1 << (cb_slot - 3);
+                }
+            }
             Res::Support => d.support = true,
             _ => {}
         }
@@ -962,6 +992,7 @@ impl QState {
             vin_last: std::cell::RefCell::new((0, 0, [(vk::Buffer::null(), u64::MAX); 32])),
             vin_from: std::cell::Cell::new((u64::MAX, 0, 0)),
             pgen: new_bgen(),
+            ugen: new_bgen(),
             scache: Default::default(),
             ndve: Default::default(),
             ub_upd: Default::default(),
@@ -2876,6 +2907,22 @@ fn sbuf0_cap() -> u64 {
     })
 }
 
+/// A storage binding of `n` bytes at `a`, held in a sparse virtual pool to the mapped, physically contiguous run from
+/// `a` (`vpool::run_len`): the binding resolves only over mapped pages, and one unmapped page put the whole binding on
+/// the 64 KiB zero / scratch buffer. Past the run the shader reads 0 and its writes are dropped (robustBufferAccess2),
+/// as unmapped sparse memory behaves. nxnative binds "a sparse pool's mapped run" (PRAGMATA's GI voxeliser /
+/// Resident Evil 4: a 0xc0000-byte run mapped at the base of a 1 GB sparse pool, bound with size 0 = 1 MB here).
+/// Outside sparse pools, and when `a`'s own page is unmapped, `n` is kept.
+fn sparse_bound(a: u64, n: u64) -> u64 {
+    if n == 0 || !crate::nvn::vpool::is_sparse(a) {
+        return n;
+    }
+    match crate::nvn::vpool::run_len(a, n) {
+        0 => n,
+        r => r,
+    }
+}
+
 /// NXGFX_SBUF_TO_END=0: read-only storage buffers bound with the size the game gave (as before lane K3).
 fn sbuf_to_end() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -3177,8 +3224,8 @@ fn decode_record_addr(v: u64, nvn2: bool) -> (u64, bool) {
 
 /// A storage buffer record `{u64 address, u32 size}` at `byte` of bank `slot`: (address, size). The address word may
 /// be an NVN2 bindless handle (`device::ucb_handle`: the compute uniform table, a pushed handle), decoded to its
-/// address; a handle, and an address the game pushed (8 bytes only, nxnative NVN_RB_SBUFQ), carry no size (0: the
-/// binding runs to the end of its pool, as a buffer bound with size 0).
+/// address and the size it carries; an address the game pushed (8 bytes only, nxnative NVN_RB_SBUFQ) carries no size
+/// (0: the binding runs to the end of its pool, as a buffer bound with size 0).
 fn bank_u64(
     qs: &QState,
     st: usize,
@@ -3191,12 +3238,37 @@ fn bank_u64(
     let lo = bank_word(qs, st, m, c0, c2, slot, byte / 4) as u64;
     let hi = bank_word(qs, st, m, c0, c2, slot, byte / 4 + 1) as u64;
     let nvn2 = crate::nvn::device::SWITCH2.load(std::sync::atomic::Ordering::Relaxed);
-    let (a, handle) = decode_record_addr(lo | hi << 32, nvn2);
-    if handle || (24..=29).contains(&slot) {
-        return (a, 0);
+    record_addr_size(lo | hi << 32, nvn2, st, slot, byte, || {
+        bank_word(qs, st, m, c0, c2, slot, byte / 4 + 2) as u64
+    })
+}
+
+/// A storage buffer record's (address, size) from its address word `v`; `size` reads the record's size word, which
+/// only a plain address in a bank with records has. NVN2 compute's uniform table in c0 (rows 0x210 + 16 r) holds
+/// only `ucb_handle`s and is decoded as one always: a handle of size 0 has no bit at 45 or above and would read as
+/// the plain address `a >> 4`. A decoded handle's size is its own (`(v >> 45) * 16`, up to 8 MB): taking the record's
+/// size word or none cut handle-addressed buffers over 1 MB at 1 MB and noted small written ones as GPU-written
+/// over a whole MB.
+fn record_addr_size(
+    v: u64,
+    nvn2: bool,
+    st: usize,
+    slot: i32,
+    byte: u32,
+    size: impl FnOnce() -> u64,
+) -> (u64, u64) {
+    use crate::nvn::device::ucb_handle_size;
+    if nvn2 && st == 5 && slot == 0 && (0x210..0x310).contains(&byte) && (byte - 0x210) % 16 == 0 {
+        return ((v & ((1 << 45) - 1)) << 4, ucb_handle_size(v));
     }
-    let n = bank_word(qs, st, m, c0, c2, slot, byte / 4 + 2) as u64;
-    (a, n)
+    let (a, handle) = decode_record_addr(v, nvn2);
+    if handle {
+        (a, ucb_handle_size(v))
+    } else if (24..=29).contains(&slot) {
+        (a, 0)
+    } else {
+        (a, size())
+    }
 }
 
 /// The NVN target a shader's sampler type asks for (dimension | array 0x100 | multisample 0x400).
@@ -4178,6 +4250,9 @@ fn stage_set(
                 if a != 0 && n == 0 {
                     n = super::mem::room(a).min(sbuf0_cap());
                     super::perf::inc(super::perf::C::SbufSize0);
+                    if *written {
+                        super::perf::inc(super::perf::C::SbufSize0Written);
+                    }
                     static SAID: std::sync::atomic::AtomicBool =
                         std::sync::atomic::AtomicBool::new(false);
                     if n > 0 && !SAID.swap(true, std::sync::atomic::Ordering::Relaxed) {
@@ -4200,6 +4275,7 @@ fn stage_set(
                         n = r;
                     }
                 }
+                n = sparse_bound(a, n);
                 if *written && st < 5 && a != 0 {
                     append::bound(a);
                 }
@@ -5092,6 +5168,93 @@ mod set_patch_tests {
         assert_eq!(word64(&v1, 0x280), 0x8300_1000, "Link's Awakening reads the address at 0x280");
     }
 
+    /// A set reading a storage buffer's address from a uniform buffer's memory is keyed by the inline updates since:
+    /// an UPDATE_UB that rewrites the address under the same binding gives a new key, and a patch remakes those
+    /// slots. Before, the key held the binding only and the set with the old address was bound again (audit of
+    /// 78c7f82, MEDIUM 1). A set that only binds the uniform buffer keeps its key.
+    #[test]
+    fn inline_updates_renew_sets_reading_addresses_from_uniform_memory() {
+        let mut qs = QState::new(false);
+        let reads = module(vec![
+            (0, Res::Cbuf { bank: 3 }),
+            (32, Res::Sbuf { cb_slot: 5, cb_off: 0x38, written: false }),
+        ]);
+        let binds = module(vec![(0, Res::Cbuf { bank: 5 })]);
+        let (dr, db) = (set_deps(&reads).unwrap(), set_deps(&binds).unwrap());
+        assert_eq!((dr.ubo, dr.ubo_read), (0b101, 0b100));
+        assert_eq!(db.ubo_read, 0);
+        let before = ub_read_key(&qs, &dr);
+        assert_eq!(ub_read_key(&qs, &dr), before, "no update: the same key");
+        qs.ugen = new_bgen(); // UPDATE_UB
+        let after = ub_read_key(&qs, &dr);
+        assert_ne!(before, after);
+        assert_eq!(after.1, 0b100);
+        assert_eq!(ub_read_key(&qs, &db), (0, 0), "a bound uniform buffer is the same descriptor after an update");
+        let (mut old, mut new) = (key(), key());
+        old.ugen = before;
+        new.ugen = after;
+        assert!(old != new, "the set cache misses");
+        assert_eq!(patch_classes(&old, &new), Some(0b100), "the c5 slots are made again");
+    }
+
+    /// A decoded NVN2 handle's size is its own field ((v >> 45) * 16), not the record's size word nor 0 (1 MB to the
+    /// pool end); a pushed plain address has none; NVN2 compute's uniform table rows (c0 0x210 + 16 r) are decoded as
+    /// handles always, so a handle of size 0 (no bit at 45 or above) is not read as the address `a >> 4`.
+    #[test]
+    fn handle_records_keep_their_size_and_the_compute_table_always_decodes() {
+        use crate::nvn::device::ucb_handle;
+        let no_size_word = || -> u64 { panic!("a handle or a pushed address has no size word") };
+        let big = ucb_handle(0x8000_0000, 3 << 20);
+        assert_eq!(record_addr_size(big, true, 0, 26, 0x10, no_size_word), (0x8000_0000, 3 << 20), "3 MB, not 1 MB");
+        let small = ucb_handle(0x8000_1000, 0x40);
+        assert_eq!(record_addr_size(small, true, 5, 24, 0x10, no_size_word), (0x8000_1000, 0x40));
+        assert_eq!(record_addr_size(0x8000_1000, true, 5, 24, 0x10, no_size_word), (0x8000_1000, 0), "pushed: no size");
+        assert_eq!(record_addr_size(0x8000_1000, true, 0, 5, 0x40, || 0x80), (0x8000_1000, 0x80), "a plain record");
+        assert_eq!(record_addr_size(small, false, 0, 5, 0x40, || 0x80), (small, 0x80), "NVN: no handles");
+        // compute's uniform table: a size-0 handle is still a handle
+        let zero = ucb_handle(0x8300_1000, 0);
+        assert_eq!(zero, 0x8300_1000 >> 4, "no bit at 45 or above");
+        assert_eq!(record_addr_size(zero, true, 5, 0, 0x280, no_size_word), (0x8300_1000, 0));
+        assert_eq!(record_addr_size(ucb_handle(0x8300_1000, 144), true, 5, 0, 0x210, no_size_word), (0x8300_1000, 144));
+        // outside the table, a graphics stage, or NVN: as before
+        assert_eq!(record_addr_size(zero, true, 5, 0, 0x310, || 4), (zero, 4));
+        assert_eq!(record_addr_size(zero, true, 0, 0, 0x280, || 4), (zero, 4));
+        assert_eq!(record_addr_size(0x8300_1000, false, 5, 0, 0x280, || 4), (0x8300_1000, 4));
+    }
+
+    /// A storage binding in a sparse pool is held to the mapped, contiguous run from its address (PRAGMATA / RE4: a
+    /// 0xc0000-byte run at the base of a much larger sparse pool, bound with size 0 = 1 MB, failed to resolve and the
+    /// whole binding fell to the zero buffer); outside sparse pools, or at an unmapped page, the size is kept.
+    #[test]
+    fn sparse_storage_bindings_cover_the_mapped_run() {
+        use crate::nvn::obj::pool_t;
+        use crate::nvn::types::mem_flags;
+        use crate::nvn::vpool;
+        let pool = |size: u64, mem: *mut u8, flags: u32| pool_t {
+            magic: 0,
+            flags,
+            mem,
+            size,
+            vp: core::ptr::null_mut(),
+            vmode: 0,
+            serial: 0,
+        };
+        let mut phys = vec![0u8; 0xc0000];
+        let ph = pool(0xc0000, phys.as_mut_ptr(), 0);
+        let mut s = pool(0x400000, core::ptr::null_mut(), mem_flags::VIRTUAL);
+        s.mem = vpool::initialize(&mut s) as *mut u8;
+        let base = s.mem as u64;
+        let rq = vpool::MapReq { phys: &ph, poff: 0, voff: 0, size: 0xc0000, storage_class: 0, pad: 0 };
+        assert!(vpool::map(&mut s, &[rq]));
+        assert_eq!(vpool::translate(base, 1 << 20), None, "1 MB does not resolve: the old binding");
+        assert_eq!(sparse_bound(base, 1 << 20), 0xc0000);
+        assert_eq!(vpool::translate(base, sparse_bound(base, 1 << 20)), Some(phys.as_ptr() as u64));
+        assert_eq!(sparse_bound(base + 0x1000, 0x100), 0x100, "inside the run: kept");
+        assert_eq!(sparse_bound(base + 0x100000, 0x100), 0x100, "an unmapped page: kept (no binding)");
+        assert_eq!(sparse_bound(0x10, 0x100), 0x100, "not sparse");
+        vpool::finalize(&mut s);
+    }
+
     /// A two-word handle (kind 1) is both words ORed: the sampler's word may come first (UE5.4 on the Switch 2),
     /// where the first word alone named texture 0. One-word handles read their word.
     #[test]
@@ -5168,6 +5331,7 @@ mod set_patch_tests {
             bgen: [3, 4],
             ubo: [(0, 0); 16],
             pgen: 5,
+            ugen: (0, 0),
             extent: (64, 64),
             pools: (0, 0),
             dispatch: [0; 3],
@@ -5193,12 +5357,12 @@ mod set_patch_tests {
         let d = set_deps(&m).unwrap();
         assert_eq!(
             d,
-            SetDeps { c0: true, c2: true, ubo: 0b101, push: true, support: false, draw: false }
+            SetDeps { c0: true, c2: true, ubo: 0b101, ubo_read: 0b100, push: true, support: false, draw: false }
         );
         let only_c3 = set_deps(&module(vec![(0, Res::Cbuf { bank: 3 }), (1, Res::Support)])).unwrap();
         assert_eq!(
             only_c3,
-            SetDeps { c0: false, c2: false, ubo: 1, push: false, support: true, draw: false }
+            SetDeps { c0: false, c2: false, ubo: 1, ubo_read: 0, push: false, support: true, draw: false }
         );
         // texture handles read from a uniform buffer (bindless): no key
         assert!(set_deps(&module(vec![(64, Res::Tex { handle: 1, cbuf_slot: 3, ty: 1 })])).is_none());
@@ -5322,7 +5486,9 @@ mod set_patch_tests {
         let mut same = key();
         same.chunk = 1;
         assert_eq!(patch_classes(&old, &same), Some(0), "only the place differs");
-        let cases: [(fn(&mut SetKey), u32); 9] = [
+        let cases: [(fn(&mut SetKey), u32); 10] = [
+            // an inline update since: the storage buffers whose address is read from c5's memory
+            (|k| k.ugen = (7, 0b100), 0b100),
             (|k| k.bgen[0] += 1, CL_C0),
             (|k| k.base_instance += 1, CL_C0),
             (|k| k.dispatch[0] += 1, CL_C0),
@@ -8925,6 +9091,8 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             end_pass(g, sub, qs);
             let [dst, n]: [u64; 2] = unsafe { rd_at(rec, 0) };
             let data = &rec[24..24 + n as usize];
+            // a cached set holding a storage address read from uniform memory is stale after this (`SetKey::ugen`)
+            qs.ugen = new_bgen();
             if let Some((db, doff, _)) = super::mem::resolve(g, sub, dst, n) {
                 qs.ub_upd.push(dst, data);
                 let (sb, so) = sub.stage_bytes(g, data);

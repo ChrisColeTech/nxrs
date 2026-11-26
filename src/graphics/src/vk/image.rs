@@ -2384,7 +2384,7 @@ impl Gpu {
             };
             if let Some(view) = super::exec::dummy_view_ready(self, target, false) {
                 let sview = super::exec::dummy_view_ready(self, target, true);
-                self.tables.write_image(&self.d, id, view, sview);
+                self.tables.write_image(&self.d, id, view, sview, false);
             }
             lazy::put(id, *t, v);
             return;
@@ -2446,20 +2446,22 @@ impl Gpu {
 
     /// The storage descriptor a texture slot gets: its storage view, or with none (no storage use, an emulated storage
     /// format) the zero stand-in of the slot's target, so the slot never keeps the storage view it held before,
-    /// possibly another image's whose views are gone.
+    /// possibly another image's whose views are gone. Also whether it is the image's own (the stand-in is not listed
+    /// as a storage view: `tables::list_storage`).
     fn storage_or_stand_in(
         &self,
         sview: Option<vk::ImageView>,
         tex_target: i32,
         v: Option<&view_t>,
-    ) -> Option<vk::ImageView> {
-        sview.or_else(|| {
-            let target = match v {
-                Some(v) if v.bits & VW_TARGET != 0 => v.target as i32,
-                _ => tex_target,
-            };
-            super::exec::dummy_view_ready(self, target, true)
-        })
+    ) -> (Option<vk::ImageView>, bool) {
+        if sview.is_some() {
+            return (sview, true);
+        }
+        let target = match v {
+            Some(v) if v.bits & VW_TARGET != 0 => v.target as i32,
+            _ => tex_target,
+        };
+        (super::exec::dummy_view_ready(self, target, true), false)
     }
 
     fn reg_tex_now(&self, id: i32, t: &tex_t, v: Option<view_t>, as_image: bool) {
@@ -2508,10 +2510,10 @@ impl Gpu {
         } else {
             None
         };
-        let sview = self.storage_or_stand_in(sview, t.d.target, v.as_ref());
+        let (sview, own) = self.storage_or_stand_in(sview, t.d.target, v.as_ref());
         drop(imgs);
         self.tables.note_tex(id, t.serial, v);
-        self.tables.write_image(&self.d, id, view, sview);
+        self.tables.write_image(&self.d, id, view, sview, own);
     }
 
     /// nvnTextureFinalize: the image goes once the GPU no longer uses it.
@@ -2920,8 +2922,8 @@ impl Gpu {
                     } else {
                         self.storage_view(im, v.as_ref())
                     };
-                    let sview = self.storage_or_stand_in(sview, im.tex.d.target, v.as_ref());
-                    self.tables.write_image(&self.d, id, view, sview);
+                    let (sview, own) = self.storage_or_stand_in(sview, im.tex.d.target, v.as_ref());
+                    self.tables.write_image(&self.d, id, view, sview, own);
                 }
             }
         }
@@ -3120,8 +3122,8 @@ impl Gpu {
                     } else {
                         self.storage_view(im, v.as_ref())
                     };
-                    let sview = self.storage_or_stand_in(sview, im.tex.d.target, v.as_ref());
-                    self.tables.write_image(&self.d, id, view, sview);
+                    let (sview, own) = self.storage_or_stand_in(sview, im.tex.d.target, v.as_ref());
+                    self.tables.write_image(&self.d, id, view, sview, own);
                 }
             }
         }
@@ -3191,7 +3193,7 @@ impl Gpu {
                 continue;
             };
             let sview = super::exec::dummy_view_ready(self, target, true);
-            self.tables.write_image(&self.d, id, view, sview);
+            self.tables.write_image(&self.d, id, view, sview, false);
             n += 1;
         }
         static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);

@@ -22,7 +22,18 @@ pub fn set_guest_clock(f: fn() -> u64) {
     let _ = GUEST_CLOCK.set(f);
 }
 
+#[cfg(test)]
+thread_local! {
+    /// a test's guest clock, on its own thread only (the process-wide `GUEST_CLOCK` is set once and never reset:
+    /// setting it in a test moved every later test's clock)
+    static TEST_CLOCK: std::cell::Cell<Option<fn() -> u64>> = const { std::cell::Cell::new(None) };
+}
+
 pub fn guest_ns() -> u64 {
+    #[cfg(test)]
+    if let Some(f) = TEST_CLOCK.with(|c| c.get()) {
+        return f();
+    }
     match GUEST_CLOCK.get() {
         Some(f) => f(),
         None => crate::nvn::device::now_ns(),
@@ -238,13 +249,15 @@ mod tests {
         fn guest() -> u64 {
             crate::nvn::device::now_ns() + 5_000_000_000_000
         }
-        super::set_guest_clock(guest);
+        super::TEST_CLOCK.with(|c| c.set(Some(guest)));
         let scale = if super::drs() { 1 } else { 256 };
         let a = super::guest_ns() / scale;
         let t = crate::nvn::device::current_timestamp_ns();
         let b = super::guest_ns() / scale;
+        super::TEST_CLOCK.with(|c| c.set(None));
         assert!(a <= t && t <= b, "{a} <= {t} <= {b}");
         assert!(t > crate::nvn::device::now_ns() / scale + 4_000_000_000_000 / scale, "not graphics' own clock");
+        assert!(super::guest_ns() < guest(), "the clock is restored");
     }
 
     #[test]

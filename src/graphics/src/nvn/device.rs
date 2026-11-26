@@ -164,6 +164,11 @@ pub fn ucb_handle_addr(v: u64) -> (u64, bool) {
     }
 }
 
+/// The bytes a `ucb_handle` names: its size field in 16-byte units (0 for a plain address).
+pub fn ucb_handle_size(v: u64) -> u64 {
+    (v >> 45) * 16
+}
+
 /// nvnDeviceGetCurrentTimestampInNanoseconds: the guest clock, as the counter reports and the tick counter use (and
 /// 256 times slower with `game_dynamic_resolution=0`, as the reports are then).
 pub fn current_timestamp_ns() -> u64 {
