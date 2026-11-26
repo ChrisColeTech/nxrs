@@ -26,7 +26,9 @@ Owner, 2026-11-25: builds and games may run concurrently at full parallelism. Wa
   (its own `target/` and `dist/`) and relinks its titles from its own `dist`. Nothing is shared but the machine and
   the library, so there are no lock files and no waiting on other agents.
 - **Titles belong to one wave at a time.** The brief names them. A title's build folder in the library is shared by
-  every worktree, so only the owning wave relinks or runs it. **Never two copies of one title at once** (they share
+  every worktree, so only the owning wave relinks or runs it. Taking turns is not enough: each wave's relink replaces
+  the other's build (2026-11-26, UPSYNC2 and OOT-FLASH both on OoT ran each other's builds). The lead never gives one
+  title to two running waves. **Never two copies of one title at once** (they share
   `pipeline-*.bin`; the second blacklists the first's in-flight compiles).
 - **A worktree's `build\tools` is a junction** into the main checkout: remove the junction (`rmdir`) before removing
   the worktree, never `rm -rf` it. Check disk (`duf`) before opening one; each `target/` is large.
