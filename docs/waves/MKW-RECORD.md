@@ -48,6 +48,24 @@ titles' routes.
 - Phase 2 starts when OOT-NAN has landed (it may edit `vk/mem.rs`, so step 1 waits too). Deadline: 8 hours for
   steps 1-3, then a checkpoint report; steps 4-6 after the lead reads it. Perf pairs under the machine lock.
 
+## Steps 4-6 go (lead, 2026-11-25 evening, after reading the checkpoint report and the `195700-s3c-on` sheet)
+
+Steps 1-3 accepted (sheets correct, entry-state check 0 differences); an independent read-only audit of their
+coherence points runs beside you (walker coverage of the present's sync, `lazy.rs:401` copy-then-`reset_watch`
+without `WATCH_MU`, `tex_writeback_land` peeking without draining, step 3's pre-pass effects) — the lead will send
+its findings. A fresh agent takes steps 4-6:
+
+- **Step 0: merge `gameplay-harness` (commit `5a41213` or later) into `mkw-record`** so the work builds on the
+  current engine (OOT-NAN dispatch size, OOT-FOREST2 indirect c0 / snapshot recycling / `upskip` off by default).
+  Resolve conflicts by keeping both sides' intent (`vk/mem.rs` walker hooks and `upskip` forget hooks; `exec.rs`);
+  build, `cargo test -p graphics --lib --release`, one MKW run with its sheet; commit the merge on `mkw-record`.
+- **Step 4** worker lanes (command pool per lane, atomic query counter, the gate and the gate-everything reference
+  mode), **step 5** mid-pass cuts for the ~1,300-draw segment and tuning, **step 6** defaults on + the `smash`
+  regression (relink Smash from the worktree's dist under the dist lock; NVN2-PARITY in the main tree does not
+  touch Smash) and the final MKW measurement. Perf pairs under the machine lock; ignore FPS differences under ~2
+  (the write-watch scan noise) unless repeated.
+- Deadline: 8 hours. Report under "## Report (steps 4-6)" here.
+
 ## Phase 2 go (lead, 2026-11-25, after OOT-NAN landed as commit `9903fc7`)
 
 - **Work in your own git worktree** branched from `9903fc7` (branch `mkw-record`), with its **own `target/` and
@@ -516,6 +534,179 @@ default 0 = old path).**
 - Correctness runs ran beside OOT-FOREST2's games (allowed); their numbers are not used as measurements.
 - Step 2 was committed by re-applying its edits to the step-1 tree (step 3 was already in progress); the restored
   step-3 files were byte-identical to the backups.
+
+### 6. Questions
+
+None.
+
+## Report (steps 4-6, agent, 2026-11-25)
+
+Worktree `D:\Projects\RecompLauncherEngine-mkw`, branch `mkw-record`. Runs are in its `build/play/`; numbers are the
+race window [250, 325] s from the frames CSV (replay thread = `replay_ms` + `prep_ms`). "Pair" rows ran under the
+main tree's `machine.lock` with no other game or build (the script waited for other waves' runs to end).
+
+### 1. Built
+
+**Step 0, merges.** `2dee255` merged `gameplay-harness` (head `5489c92`, which includes `5a41213`) cleanly; `15859c7`
+merged it again for NVN2-PARITY / NVN2-FIX (one conflict, in `QState`'s fields: both kept). The second merge needed
+a segment fix: the new per-submission inline uniform updates (`ub_upd`, read back by handle reads) and `ugen` are
+queued by the pre-pass into its shadow state and carried by `fork_state`, and a segment ends its pass without
+clearing them (`run_stream_due`'s `exec::end` clears them once).
+
+**Step 4: parallel lanes (`4bfd307`; `NXGFX_TRANSLATE_THREADS=N`).**
+- **Lanes.** The replay thread is lane 0. N - 1 persistent `vk translate` threads are lanes 1.., each with its own
+  command pool and free child list (`queue::lane_sub`); completion returns a child to its lane. Segments are taken
+  in order from a counter, and the replay thread joins them in stream order. Timestamp and occlusion queries come
+  from shared atomic counters (`ChildInit`, `take_query` / `take_occl`).
+- **Gate (`vk/gate.rs`).** Shared-state changes come in two kinds:
+  - **First-use initializations** (`pass_pre`): the commands all go into the child's upload buffer. These are a
+    pool's buffer, granules or deferred uploads, `sync_range`, an image made or prepared, a lazy registration, the
+    waiting pool images, a twin copy, a block alias. Any segment may make them, and a dropped child's upload buffer
+    is still submitted (before every main buffer).
+  - **Order-dependent changes** (`pass`): an image's first GPU ownership (`tex_gpu_written`) and `upgrade_storage`.
+    Only the frontier may make them: the oldest segment still being translated, with every older result standing.
+    Any other segment gives up (its red lines are muted). A segment that overlapped an older segment's change is
+    stale. At the join, given-up and stale segments are translated again on the replay thread.
+  - `NXGFX_TRANSLATE_GATE=all` treats every gated call as order-dependent.
+  - Diagnosis kept apart: the first version gated everything strictly, and about half the race's segments were
+    translated again (2,200 per 600 frames, almost serial). The split brought that to 0.
+- **Not in parallel.** Streams with DLSS, downsample or depth-resolve records are translated sequentially. The zero
+  buffer and the stand-in images are made before the fork.
+
+**Steps 1-3 audit fixes (`4bfd307`).**
+- M1: `sync_range` takes only the copy's range of pending writes (`split_pending`) and keeps pieces under in-flight
+  write-backs back.
+- M3: no 200 ms wait. A present's sync finishes a running walk itself; no such walk means a normal scan.
+- M2: the walker walks again while the present waits (up to 3 times).
+- L1: `watch::take_partial` keeps the pages already reset.
+- L3: no translate line with segments off.
+- L4: covered by M3.
+- L5: `state_diff` compares every forked field. `last_color` is left out: it is set when a pass begins and read only
+  with shadows=0, which is serial-only.
+- L6: deferred push constants and buffer binds are read once, by the pre-pass (`seg_mem`).
+- L8: `debug_assert`.
+- L9: comment.
+- L2: noted; nothing locks `WATCH_MU` on the `bring_back` path.
+
+**Step 5: balance and the replay thread's prep.**
+- **In-pass cuts (`c2505ae`, `NXGFX_TRANSLATE_MIDCUT`, 256).** A segment is cut before a draw once it holds 256
+  draws. The largest segment went from 1,312 draws to 256, and segment wall time from 15.9 to 6-9 ms.
+- **Presents behind parked work (`c2505ae`, `NXGFX_WALKER_PARKED`).** These are covered by the walker too: the walk
+  started after every op taken so far.
+- **The 3.5-vs-9 ms "bimodal" scan.** It is the syncs no scan covered: ~2 a frame, each asking ~2 GB of warm and
+  luke-warm pools.
+  - `24b9e53`: a complete walk counts as a full scan (`note_walk`, with the CPU-signal rule), and the walker walks
+    while ops wait (`NXGFX_WALKER_SYNCS`). Scan 9.0 to 6.7 ms.
+  - `0ed0dc5`: a scanning sync leaves out the pools the walk in progress has walked since its op was queued
+    (`WalkJob::covers`, `NXGFX_WALKER_POOLS`). Scan 6.7 to ~2.5 ms.
+  - Measured and left off: a sync finishing a whole walk itself (`NXGFX_WALKER_HELP=1`, 12.5 vs 10.0 ms of pool
+    sync).
+
+**Step 6 (`0ed0dc5`).** `NXGFX_TRANSLATE_THREADS` defaults to 6 (`=0` gives the old path). `env_switches.tsv` has rows
+for the new switches.
+
+### 2. Tests (`cargo test -p graphics --lib --release`: 235 pass after the last merge)
+
+- `gate::tests` (4): only the frontier changes; a segment that overlapped an older change is stale; one after it
+  stands; no-change calls pass.
+- `copy_sync_takes_only_its_range_of_pending` (M1).
+- `coverage_needs_a_complete_walk_started_after_the_present` (extended for walks in progress and the CPU-signal
+  rule).
+- `a_walk_is_shared_piece_by_piece`.
+- `walked_pieces_cover_a_pool_whole`.
+- `fork_keeps_state_and_drops_the_pass` (extended: L5 fields, the fork carries the inline uniform updates).
+- The `cut_before` cases.
+
+All are new; none tests a pre-existing failure. The real checks are the game runs, plus 0 entry-state differences
+under `NXGFX_TRANSLATE_CHECK=1` with parallel lanes and in-pass cuts (`203934-s5-t4-check` after the `last_color`
+note, `220232-m1-check` after the second merge).
+
+### 3. Verified
+
+| Run | Build / switches | FPS / 5% low | Replay | Prep | Replay thread | Scan |
+|---|---|---|---|---|---|---|
+| `195700-s3c-on` (checkpoint) | step 3, =1 | 28.7 / 25.0 | 16.6 | 10.5 | 27.1 | 3.7 |
+| `205354-p5-off` pair | step 5, segments off | 26.9 / 22.0 | 16.5 | 13.8 | 30.3 | 8.9 |
+| `204814-p5-on` pair | step 5, 4 lanes | 29.4 / 25.0 | 11.6 | 14.1 | 25.7 | 9.1 |
+| `210126-p5c-on` pair | + walks cover syncs | 30.0 / 29.0 | 11.8 | 11.9 | 23.7 | 6.7 |
+| `211331-p5d-on` pair | + syncs finish walks (now off) | 30.0 / 27.0 | 10.9 | 14.8 | 25.7 | 2.1 |
+| `213820-p6a-minwalk` pair | walker as in step 1 | 29.4 / 25.0 | 11.1 | 13.8 | 24.9 | 9.2 |
+| `214359-p6b-t6` pair | 6 lanes | 30.4 / 29.0 | 11.2 | 9.4 | 20.6 | 2.7 |
+| `215340-p7-default` pair | step 6 defaults, before 2nd merge | 29.9 / 27.0 | 11.2 | 9.3 | 20.5 | 2.5 |
+| `224333-final-mkw` pair | final, after 2nd merge (defaults) | 30.1 / 28.0 | 11.8 | 11.6 | 23.4 | 6.6 |
+| `224912-smash-reg` pair | Smash, final build (window [130, 280]) | 59.8 / 59.0 | 2.4 | 2.3 | 4.7 | 1.3 |
+
+- **Smash regression.** Baseline in the main tree earlier today: 59.6-59.8 / 58.9-59.2 FPS (`112615-smash-3match`,
+  `111130-smash-polish-final`).
+  - Smash's one long stream runs in 2 parallel segments a frame, translated in 2.8 ms by the lanes together.
+  - Sheet correct: boot, character select, the VS screen, both Norfair matches.
+  - One red line, `movie: VP9 decode error` at 40 s: the OS movie decoder (the opening movie), not the graphics
+    path. It was not seen in the baselines; I did not re-run for it.
+
+- **Translation** leaves the replay thread: 16.5 ms becomes ~11 ms (segments 15.9 ms of wall time down to 6-9 ms;
+  lanes ~19-22 ms of CPU together). The lanes' extra CPU against serial is ~2.7 ms of lock waits (pool lock at
+  resolves ~2.0, images ~0.6) plus cold per-child caches and pass breaks.
+- **Prep** (pool sync) goes from 13.8 to 9.3 ms: write-watch scan 8.9 to 2.5 ms; lock wait ~1.1 and per-pool pass
+  ~1.9 remain.
+- **Replay thread** goes from 30.3 to 20.5 ms. That is still above 16.7, so the game holds 2: FPS stays at the
+  30 cap (29.9-30.4) and the 5% low rises from 22 to 27-29.
+- **Sheets read**, all correct (boot, title, menus, grid, race, lap 2):
+  - `202106-s4-t4`, `203106-s4b-t4`, `203934-s5-t4-check`, `212103-d6-prof`, `215340-p7-default`;
+  - `220232-m1-check`: 03-menus caught a fade between scenes, draws 1,241 that frame, the race after it correct;
+  - `223125-gate-all`: the reference mode, pictures as the gated runs;
+  - `224333-final-mkw`: full-size race shots show full detail (track plates, canyon, cacti, signs, karts), no
+    texture missing.
+- **Red lines.** One kind in every run, the known `pipeline-crashed.bin` line. Exception: the first step-4 run
+  (`202106-s4-t4`) logged 29 more, missing-pool and no-target lines from given-up segments. Muting them is in
+  `4bfd307`.
+- **No device loss**; every run exited normally.
+- **Gate reference (`NXGFX_TRANSLATE_GATE=all`, `223125-gate-all`).** 26.8 / 23.0 FPS, ~5,000 segments a minute
+  translated again, sheet correct, same pictures as the default runs.
+- **Validation layer (`*-valid`, 6 lanes; `*-valid-off`, translation off).** Both end with an access violation at
+  18 s, so this is pre-existing under the layer. The lanes started at 16.6 s: no threading or synchronization
+  messages in the ~1.4 s they ran; the only VUID is the old `vkCmdBindIndexBuffer-buffer-08784` usage flag.
+- **Set reuse after the second merge** (the `replay up to frame` line, per frame): before (`p7`) 3,002 sets (1,136
+  reused, 2,390 patched); after (`m1-check`) 2,613 (1,053 reused, 2,047 patched) and (`final-mkw`) 2,330 (918 reused, 1,779 patched). Reuse
+  per set is about the same (38-40%); the line averages from the start of the run, so it moves with load timing.
+
+### 4. Unproven / next
+
+- **60 FPS is not reached.** The replay thread is at ~20.5 ms against 16.7. What is left on it:
+  - ~11 ms of replay: segment wall time ~8 ms, pre-pass ~0.8, six small streams serial, submit;
+  - ~9 ms of prep: pool sync ~5.5 (lock wait 1.1, scan 2.5, per-pool pass 1.9), plus texture checks and the
+    present.
+- **The scan still varies from run to run** with the same build: 2.5 ms in `p7`, 6.6 ms in `final-mkw`, giving a
+  replay thread of 20.5 vs 23.4 ms. The ~1 uncovered sync a frame scans more or less, depending on how far the walk
+  in progress has got when it comes.
+- **Next candidates, measured costs:**
+  - **Pipeline the replay thread:** the next op's pool sync while the lanes translate this one. Uploads would land
+    in the next submission's upload buffer; the question to answer is the read window for guest memory.
+  - **The resolve path's pool-lock waits** (~2 ms of lane time): a read-mostly lock or a per-lane pool cache.
+  - **Per-child cold caches:** set shadows and staged constants start empty in every segment, about 1.5x the CPU.
+- **Validation-layer coverage of the lanes is thin** (1.4 s), because of the pre-existing crash at 18 s under the
+  layer.
+- **For the audit (new behaviour):**
+  - the gate split: which changes count as first-use initializations (`pass_pre`); a dropped child's upload buffer
+    is submitted;
+  - walks as scan coverage for every sync (`note_walk`), and per pool for a walk in progress (`WalkJob::covers`);
+  - presents behind parked work covered by the walker;
+  - the pre-pass queueing inline uniform updates (`ub_upd`) for segments.
+  - The M1-M3 fixes change step 1's paths too.
+- **Pop-in on race shots.** The two race shots (42 s apart) show full-detail track, kart, billboards and items in
+  every run. This scenario has no consecutive shots of one place, so pop-in between frames is not tested.
+- **Smash** is now built by the worktree's engine (its relink recompiled the whole game); the main tree's next Smash
+  relink will do the same.
+
+### 5. Slips
+
+- One `.rs` edit through `sed`: the two `fetch_update` → `try_update` renames in `queue.rs`. The AGENTS rule is
+  editor tools only.
+- `203934-s5-t4-check` was started while NVN2-PARITY held `machine.lock`. My script printed the lock but did not
+  stop, so my run may have disturbed their measurement, and its numbers are not used. Every later run waited for
+  the lock.
+- `cargo build -p graphics` ran during my own `210126-p5c-on` measurement, at about t = 180-210 s, before its
+  [250, 325] s window.
+- The first merge's commit message names `5a41213`; the branch head merged was `5489c92` (which includes it).
 
 ### 6. Questions
 
