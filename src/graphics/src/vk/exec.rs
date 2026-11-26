@@ -8203,7 +8203,6 @@ fn tf_end(g: &Gpu, sub: &mut Sub, qs: &mut QState) {
 }
 
 fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool {
-    let dev = g.dev();
     // Binding records may build a later immutable dispatch snapshot. Any command
     // with externally visible work first replays an incomplete transaction.
     if !matches!(
@@ -8272,8 +8271,67 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             );
         }
     }
+    if is_state_op(opc) {
+        return state_op(g, qs, opc, rec);
+    }
+    emit_op(g, sub, qs, opc, rec)
+}
+
+/// The records that only change the queue's state (`QState`): they record no command and touch no submission, so
+/// the state a stream leaves can be worked out ahead of its commands (MKW-RECORD: segments of one stream are
+/// translated from the state their first record sees). `state_op` and `state_op2` run them.
+fn is_state_op(opc: u32) -> bool {
+    matches!(
+        opc,
+        op::END
+            | op::WAIT_SYNC
+            | op::VIEWPORTS
+            | op::SCISSOR
+            | op::DEPTH_RANGE
+            | op::BIND_PROGRAM
+            | op::BIND_STATE
+            | op::BIND_VATTR
+            | op::BIND_VSTREAM
+            | op::BIND_VBUF
+            | op::BIND_VBUF1
+            | op::BIND_UBO
+            | op::BIND_UBO_SMALL
+            | op::BIND_SSBO
+            | op::BIND_TEX
+            | op::BIND_SAMP
+            | op::BIND_IMG
+            | op::BIND_TEX1
+            | op::SET_TEX_POOL
+            | op::SET_SAMP_POOL
+            | op::STENCIL
+            | op::POLY_OFFSET
+            | op::BLEND_COLOR
+            | op::PRIM_RESTART
+            | op::LINE_WIDTH
+            | op::DEPTH_CLAMP
+            | op::RAST_DISCARD
+            | op::CONS_RASTER
+            | op::PATCH_SIZE
+            | op::PUSH_CONST
+            | op::BUFS_DEFERRED
+            | op::RENDER_COND
+            | op::ALPHA_REF
+            | op::DEPTH_BOUNDS
+            | op::SAMPLE_MASK
+            | op::POINT_SIZE
+            | op::TESS_LEVELS
+            | op::PROVOKING
+            | op::VP_SWIZZLE
+            | op::TF_BIND
+            | op::TF_STATE
+    )
+}
+
+/// A record that records commands or changes the submission (every record `is_state_op` leaves out): render targets
+/// and clears here, the rest in `emit_op2` and `emit_op3`.
+fn emit_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool {
+    let dev = g.dev();
     match opc {
-        op::END => {}
         op::SET_RT => {
             end_pass(g, sub, qs);
             let r: p_set_rt = rd_payload(rec);
@@ -8395,6 +8453,16 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
                 }
             }
         }
+        _ => return emit_op2(g, sub, qs, opc, rec),
+    }
+    true
+}
+
+/// A state record (`is_state_op`); the rest of them in `state_op2`.
+fn state_op(g: &Gpu, qs: &mut QState, opc: u32, rec: &[u8]) -> bool {
+    let dev = g.dev();
+    match opc {
+        op::END | op::WAIT_SYNC => {}
         op::VIEWPORTS => {
             let v: p_viewports = rd_payload(rec);
             if v.first == 0 {
@@ -8594,6 +8662,15 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
         op::RAST_DISCARD => qs.rast_discard = rd_payload::<p_rast_discard>(rec).on != 0,
         op::CONS_RASTER => qs.cons_raster = rd_payload::<p_rast_discard>(rec).on != 0,
         op::PATCH_SIZE => qs.patch = rd_payload::<p_patch_size>(rec).n.max(1) as u32,
+        _ => return state_op2(g, qs, opc, rec),
+    }
+    true
+}
+
+/// Records that record commands: draws, dispatches, copies, events, counters.
+fn emit_op2(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool {
+    let dev = g.dev();
+    match opc {
         op::DRAW => draw(g, sub, qs, rd_payload(rec)),
         op::DRAW_IDX => draw_idx(g, sub, qs, rd_payload(rec)),
         op::DISPATCH => dispatch(g, sub, qs, rd_payload(rec)),
@@ -8908,7 +8985,6 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
                 return false;
             }
         }
-        op::WAIT_SYNC => {}
         op::FENCE_SYNC => {
             let s: u64 = unsafe { rd_at(rec, 0) };
             if s != 0 {
@@ -8959,6 +9035,14 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
                 });
             }
         }
+        _ => return emit_op3(g, sub, qs, opc, rec),
+    }
+    true
+}
+
+/// State records (`is_state_op`), continued.
+fn state_op2(g: &Gpu, qs: &mut QState, opc: u32, rec: &[u8]) -> bool {
+    match opc {
         op::PUSH_CONST => {
             let p: crate::nvn::cmd2::p_push_const = rd_payload(rec);
             let (o, n) = (p.offset as usize, p.size as usize);
@@ -9069,6 +9153,15 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
                 crate::log::red_once("transform feedback: the device has no VK_EXT_transform_feedback, captures are not written");
             }
         }
+        _ => {}
+    }
+    true
+}
+
+/// Records that record commands, continued.
+fn emit_op3(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bool {
+    let dev = g.dev();
+    match opc {
         op::MULTI_DRAW => {
             let m: crate::nvn::cmd2::p_multi_draw = rd_payload(rec);
             multi_draw(g, sub, qs, m);
@@ -9258,6 +9351,45 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
 #[cfg(test)]
 mod downstream_tests {
     use super::*;
+
+    /// No record that records commands, touches the submission or orders global effects is taken for a state record
+    /// (a state record is run ahead of its stream's commands).
+    #[test]
+    fn state_records_record_nothing() {
+        for o in [
+            op::SET_RT,
+            op::CLEAR_COLOR,
+            op::CLEAR_DS,
+            op::DRAW,
+            op::DRAW_IDX,
+            op::DISPATCH,
+            op::BARRIER,
+            op::COPY_B2B,
+            op::UPDATE_UB,
+            op::CLEAR_BUF,
+            op::COPY_B2T,
+            op::COPY_T2B,
+            op::COPY_T2T,
+            op::CLEAR_TEX,
+            op::SIGNAL_EVENT,
+            op::WAIT_EVENT,
+            op::FENCE_SYNC,
+            op::REPORT_COUNTER,
+            op::RESET_COUNTER,
+            op::MULTI_DRAW,
+            op::DRAW_TEX,
+            op::MESH,
+            op::REPORT_VALUE,
+            op::DOWNSAMPLE,
+            op::DLSS,
+            op::RESOLVE_DEPTH,
+        ] {
+            assert!(!is_state_op(o), "record {o}");
+        }
+        for o in [op::BIND_PROGRAM, op::BIND_TEX, op::PUSH_CONST, op::RENDER_COND, op::END] {
+            assert!(is_state_op(o), "record {o}");
+        }
+    }
 
     #[test]
     fn indirect_index_binding_accepts_a_short_valid_backing_tail() {
