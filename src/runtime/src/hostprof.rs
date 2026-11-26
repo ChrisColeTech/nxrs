@@ -844,7 +844,9 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        assert!(n > 50, "{head}");
+        // a floor, not a rate: how many samples 0.2 s gives depends on the machine (a CI runner gave 37-38 where
+        // this one gives ~400); the test is that sampling happens and lands in this image
+        assert!(n >= MIN_SAMPLES, "{head}");
         assert!(
             text.lines().filter(|l| l.ends_with(" -")).count() > n / 2,
             "most samples in this image"
@@ -884,10 +886,14 @@ mod tests {
             .count();
         let all = text.lines().filter(|l| !l.starts_with('#')).count();
         assert!(
-            all > 50 && with > all / 2,
+            all >= MIN_SAMPLES && with > all / 2,
             "{with} of {all} samples with a stack"
         );
     }
+
+    /// The fewest samples a sampling test expects: independent of the machine's speed and timer resolution.
+    #[cfg(windows)]
+    const MIN_SAMPLES: usize = 10;
 
     /// A spinner named `name` until `stop`.
     #[cfg(windows)]
@@ -965,6 +971,6 @@ mod tests {
             .unwrap()
             .parse()
             .unwrap();
-        assert!(n > 20, "{late}");
+        assert!(n as usize >= MIN_SAMPLES, "{late}");
     }
 }
