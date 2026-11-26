@@ -42,7 +42,7 @@ pub enum Arm {
     Done,
     /// a first piece more protected; the rest at the next call
     Part,
-    /// not armed (another entry lies over the range, or the protection failed: read-write again, no entry)
+    /// not armed: another entry lies over the range
     Refused,
 }
 
@@ -165,13 +165,9 @@ pub fn arm(pool: u64, lo: u64, hi: u64, max: u64) -> (Arm, u64) {
         ranges.extend(std::mem::take(&mut e.open).into_iter().map(|c| chunk_of(lo, hi, c)));
     }
     let bytes = ranges.iter().map(|c| c.1 - c.0).sum();
+    // the committed pages (the rest is committed later through `host_write`, which wakes the pool)
     for &(a, b) in &ranges {
-        if !protect(a, b, false) {
-            // not all committed, or another allocation: back to read-write, no entry
-            r.0.by_lo.remove(&lo);
-            open_all(lo, hi);
-            return (Arm::Refused, 0);
-        }
+        protect_some(a, b, false);
     }
     let e = r.0.by_lo.get_mut(&lo).unwrap();
     e.todo = todo;
@@ -203,10 +199,14 @@ pub fn fault(a: u64) -> bool {
     if a >= e.end {
         return false;
     }
-    let (c, ce) = chunk_of(lo, e.end, a);
-    if !protect(c, ce, true) {
+    // the page first: one that will not open (not committed) is not this handler's (the runtime commits it, which
+    // wakes the pool through `host_write`); retried here it would fault for ever
+    let pg = a & !4095;
+    if !protect(pg, pg + 4096, true) {
         return false;
     }
+    let (c, ce) = chunk_of(lo, e.end, a);
+    protect_some(c, ce, true);
     if let Err(i) = e.open.binary_search(&c) {
         e.open.insert(i, c);
     }
@@ -240,7 +240,7 @@ pub fn host_write(a: u64, n: u64) {
         let end = a.saturating_add(n).min(e.end);
         while at < end {
             let (c, ce) = chunk_of(lo, e.end, at);
-            protect(c, ce, true);
+            protect_some(c, ce, true);
             if let Err(i) = e.open.binary_search(&c) {
                 e.open.insert(i, c);
             }
@@ -360,6 +360,8 @@ fn installed() -> bool {
 fn install() {
     use windows_sys::Win32::System::Diagnostics::Debug::AddVectoredExceptionHandler;
     if !HANDLER.swap(true, Ordering::SeqCst) {
+        // the runtime's own commits (its lazy heap) wake what they make read-write, as the OS layer's do
+        nxrt::mem::set_commit_hook(host_write);
         // first in the chain: the runtime's first-touch commit (a recommit, read-write) and crash reporter must not
         // see a sealed page's store
         unsafe { AddVectoredExceptionHandler(1, Some(veh)) };
@@ -391,24 +393,31 @@ unsafe extern "system" fn veh(
     }
 }
 
-/// [lo, hi) read-write again, chunk by chunk where the whole range is refused (a part decommitted since: the rest must
-/// not stay read-only without an entry).
-fn open_all(lo: u64, hi: u64) {
-    if protect(lo, hi, true) {
+/// The committed pages of [lo, hi) read-write (`open`) or read-only: the whole range in one call, else chunk by chunk,
+/// else page by page (a pool's memory may be committed in parts, 64 KiB at a time: the protection call refuses a range
+/// with an uncommitted page in it). An uncommitted page needs no protection: it cannot be written before it is
+/// committed, and a commit goes through `host_write` (the runtime's commit), which wakes the pool.
+fn protect_some(lo: u64, hi: u64, open: bool) {
+    if protect(lo, hi, open) {
         return;
     }
     let mut at = lo;
     while at < hi {
         let e = ((at & !(CHUNK - 1)) + CHUNK).min(hi);
-        if !protect(at, e, true) {
+        if !protect(at, e, open) {
             let mut p = at;
             while p < e {
-                protect(p, (p + 4096).min(e), true);
+                protect(p, (p + 4096).min(e), open);
                 p += 4096;
             }
         }
         at = e;
     }
+}
+
+/// [lo, hi) read-write again (its entry goes, or never was).
+fn open_all(lo: u64, hi: u64) {
+    protect_some(lo, hi, true)
 }
 
 /// [a, b) read-write (`open`) or read-only.
@@ -553,8 +562,9 @@ mod tests {
         assert_eq!(WAKES.load(Ordering::Relaxed), wakes, "read-write again: no fault");
     }
 
-    /// A range over another entry is refused; a range not all committed is refused and left read-write without an
-    /// entry; the walker's check wakes an armed entry once.
+    /// A range over another entry is refused; the walker's check wakes an armed entry once. A range committed in part
+    /// is armed over its committed pages (a store there wakes it); its other pages are committed later through
+    /// `host_write` (the runtime's commit), which wakes it too, and the page is written without a fault.
     #[test]
     fn overlapping_and_uncommitted_ranges_are_not_sealed() {
         if !on() {
@@ -572,9 +582,19 @@ mod tests {
         let r = unsafe { VirtualAlloc(core::ptr::null(), (2 * CHUNK) as usize, MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE) } as u64;
         assert!(r != 0);
         assert!(!unsafe { VirtualAlloc(r as *mut _, 4096, MEM_COMMIT, PAGE_READWRITE) }.is_null());
-        assert!(!arm1(r, r, r + 2 * CHUNK));
-        assert!(!holds(r));
+        assert!(arm1(r, r, r + 2 * CHUNK));
+        assert!(holds(r));
         unsafe { (r as *mut u8).write_volatile(1) };
+        assert!(!armed(r), "the committed page is sealed: the store woke it");
+        assert!(arm1(r, r, r + 2 * CHUNK));
+        // a commit of the rest, announced as the runtime does
+        host_write(r + CHUNK, 4096);
+        assert!(!armed(r), "the commit woke it");
+        assert!(!unsafe { VirtualAlloc((r + CHUNK) as *mut _, 4096, MEM_COMMIT, PAGE_READWRITE) }.is_null());
+        let wakes = WAKES.load(Ordering::Relaxed);
+        unsafe { ((r + CHUNK) as *mut u8).write_volatile(1) };
+        assert_eq!(WAKES.load(Ordering::Relaxed), wakes, "committed read-write: no fault");
+        remove(r, r + 2 * CHUNK);
         unsafe { VirtualFree(r as *mut _, 0, MEM_RELEASE) };
     }
 }

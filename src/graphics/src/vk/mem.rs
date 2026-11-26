@@ -2707,8 +2707,6 @@ fn seal_some(g: &Gpu) {
                 "lazy pages"
             } else if p.seal_entry {
                 "being sealed"
-            } else if !host_writable(lo, hi - lo) {
-                "not all committed read-write"
             } else {
                 "queued"
             };
@@ -2741,11 +2739,8 @@ fn seal_some(g: &Gpu) {
         }
         let p = m.by_base.get_mut(&b).unwrap();
         let (lo, hi) = page_range(p.base, p.size);
-        // every page committed and read-write (the protection call would fail on the rest; a page read-only or guarded
-        // for another reason is not this module's to change); a pool with an entry is read-only in part already
-        if !p.seal_entry && !host_writable(lo, hi - lo) {
-            continue;
-        }
+        // (its committed pages are protected; the others are committed through the runtime, which wakes it. A page
+        // held by lazy write-back is inaccessible on purpose: such a pool is not sealed)
         if super::lazy::holds_any(lo, hi - lo) {
             continue;
         }
