@@ -43,6 +43,7 @@ NXGFX_DUMP_RAW	diagnostic		src/graphics/src/vk/exec.rs
 NXGFX_DUMP_TEX	diagnostic	`NXGFX_DUMP_TEX=<w>x<h>`: a sampled texture of that size, once per dump frame, is read back at the end of the	src/graphics/src/vk/exec.rs
 NXGFX_FAULT_FLASH	diagnostic	`NXGFX_FAULT_FLASH=<white>,<black>`: with NXGFX_FAULT_SHOTS, the fractions of the picture newly fully white / near black in one frame that trigger a capture (default `0.02,0.25`; 0 turns one off)	src/graphics/src/vk/shot/fault.rs
 NXGFX_FAULT_MAX	diagnostic	`NXGFX_FAULT_MAX=<n>`: with NXGFX_FAULT_SHOTS, the captures one run may write (default 32; at most 4 per reason)	src/graphics/src/vk/shot/fault.rs
+NXGFX_FAULT_PER_REASON	diagnostic	`NXGFX_FAULT_PER_REASON=<n>`: with NXGFX_FAULT_SHOTS, the captures one reason (a red line kind, a white flash, a black flash) may write (default 4)	src/graphics/src/vk/shot/fault.rs
 NXGFX_FAULT_SHOTS	diagnostic	`NXGFX_FAULT_SHOTS=<dir>` (`1`: `captures/faults`): fault-triggered captures. Every present is copied back and sampled; an engine anomaly (any red line, a zero stand-in bound, a draw with no render target) or a one-frame white/black flash writes that present (full size) and the one before (sampled) with a `fault capture N` log line. Off by default (one picture copy a frame); `play.py --faults` sets it	src/graphics/src/vk/shot/fault.rs
 NXGFX_FG_SHOT	diagnostic	`NXGFX_FG_SHOT=<s>`: once, after that many seconds, the first generated frame of a game frame and its two	src/graphics/src/vk/framegen.rs
 NXGFX_FRAMEGEN	switch	`0` turns frame generation off whatever the settings say	src/graphics/src/vk/framegen.rs
@@ -145,6 +146,7 @@ NXGFX_STORAGE_PROBE	switch	NXGFX_STORAGE_PROBE=<texture ID>: four uncached bindi
 NXGFX_STOREMU	switch	Storage access to formats the device cannot store (E5B9G9R9) through an R32_UINT view, the shader packing and unpacking (`storemu`); `NXGFX_STOREMU=0` off.	src/graphics/src/vk/image.rs
 NXGFX_STOREMU_IN	test	The opt-in `storemu_folder` test: every formatless float storage image of a folder of translated modules (`NXGFX_STOREMU_IN=<shaders/spv>`) emulated and checked with spirv-val.	src/graphics/src/vk/storemu.rs
 NXGFX_TAKEOVER_FORWARD	switch	NXGFX_TAKEOVER_FORWARD=0: a texture object whose image another took over has none (as before).	src/graphics/src/vk/image.rs
+NXGFX_TEX_TRACE	diagnostic	`NXGFX_TEX_TRACE=1`: each texture object's last registration / image events (registered, taken from the lazy list, made, finalized, released, evicted, taken over) printed with its zero stand-in line, and stand-ins logged every frame they happen.	src/graphics/src/vk/image.rs
 NXGFX_TEST_PAIR	test	`NXGFX_TEST_PAIR` = `<vertex key> <pixel key>`): a driver compiler crash reproduced outside the game.	src/graphics/tests/shaders_lane_c.rs
 NXGFX_TEST_PAIRS	test	vertex / pixel pairs the lane C shader test builds (default 400)	src/graphics/tests/shaders_lane_c.rs
 NXGFX_TEST_PROGRAM	test	`NXGFX_TEST_PROGRAM` = its stage keys, including vertex and pixel; `NXGFX_TEST_PAIR` remains the two-stage form):	src/graphics/tests/shaders_lane_c.rs
