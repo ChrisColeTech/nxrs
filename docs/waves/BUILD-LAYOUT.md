@@ -72,6 +72,21 @@ NXOS_SAVE row, `src/os/src/boot.rs` doc, README of os if it says "in place".
   restored.
 - Migration: a copy of the library in a temp data folder with fake build folders.
 
+## Added mid-wave (lead, owner 2026-11-26)
+
+Remove from library with a ticked-by-default "Also delete the build (N GB)": saves, sdmc, cheats and mods kept in
+`<data>\saves\<title id>` (title id from `exefs\main.npdm`, else the output name), the build folder deleted (refused
+while running / building, or when it holds the source or is not this game's build); the next successful build puts
+the kept folders back (launcher-side; the engine still reads only `<name>_data\save`). LAUNCHER_CONTRACT.md v2 and
+PLAN.md X-05.
+
+**Owner verdict on the dialog (2026-11-26): rejected, to be rolled back.** The question box was first extended with
+the tick box under the old QMessageBox icon, then reworked onto the Settings grammar (Group heading, info marks,
+shared footer). The owner: it looks bad, formatted after Settings, and the family's dialogs and docs were not read
+first. The agent read `docs/ARCHITECTURE-AND-STYLE-GUIDE.md` and the giga-cut popup docs only after the owner asked.
+Commit 384de45 (the message/question box rework and `--show-remove`) is the part to revert; the remove-with-delete
+behaviour itself is in 6c9656f.
+
 ## Results
 
-(filled in at the end)
+See the wave report (§5 headings) in the lead's session; key facts recorded here at the end of the wave.
