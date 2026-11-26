@@ -3778,6 +3778,17 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
         let mut imgs = super::gate::lock(&g.images, 2);
         let reg_serial = serial;
         let serial = imgs.live(serial);
+        // A parallel segment may look the texture up before an earlier segment of the stream has made its image (a
+        // target drawn there: Mario Kart World's shadow maps, new objects each frame); the zero stand-in would be
+        // bound where the stream order samples the image (a dark, sharp-edged turn). Unless at the gate's frontier,
+        // the segment gives up and is translated again at the join, in order (MKW-RECORD dark turn check).
+        if !imgs.by_serial.contains_key(&serial)
+            && super::gate::parallel()
+            && !super::gate::pass(true)
+        {
+            drop(imgs);
+            return dummy_view(g, sub, want, storage);
+        }
         if probe {
             let declared = crate::tex::format::tex_format(ifmt as i32)
                 .map(|f| (f.vk, g.d.format_features(f.vk)));

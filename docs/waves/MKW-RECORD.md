@@ -795,3 +795,33 @@ Findings of the independent audit of `git diff 5bce4ff 2d02e3b -- src`. Runs in 
 ### 5. Slips
 
 - None known. M1 was built as the audit suggested first, measured, and replaced (above).
+
+## Dark turn check (agent, 2026-11-26)
+
+**Verdict: a lanes fault, now fixed.** Not the game's shadow: the same viewpoint (Luigi Tires / Red Shell signs,
+Bullet Bill) is lit in `233246-audit-check2/05-race` and in `t45` of `darkturn-t6-2`, `-t0-3` and `-t6-3`.
+
+- **Runs** (new scenario `mkw-turn`: as `mkw` to the race, then 10 shots about a second apart across the banked
+  turn, `t37`..`t46`; GPU 1): serial `NXGFX_TRANSLATE_THREADS=0` `20261126-000114/-001108/-002102-darkturn-t0-1..3`,
+  default lanes `20261126-000611/-001605/-002559/-003137-darkturn-t6-1..4`. All 70 shots normal (`t0-2` was past the
+  turn by `t38`; the others cross it, `t0-1`, `t6-2` and `t6-3` with a Bullet Bill): the dark frame did not repeat, so the pictures
+  alone could not decide.
+- **Cause, from the logs.** `texture ID .. its slot names texture serN, which has no image now (live): a zero stand-in
+  is bound`: serial runs 19-21 in the whole run and **0 in the race**; lanes runs 27-69 in the race (`233849` among
+  them: a 2D array, target 4, at 290.4 s, the dark shot at 292 s). "(live)" means the image existed by the time the
+  line was written: a segment looked the sampled texture up (`tex_view_uncached`: `live` -> `by_serial`) before an
+  earlier segment of the stream had made its image (a target drawn there; MKW makes new objects over its targets each
+  frame). Image creation passes the gate as first-use initialization (`pass_pre`), so the later segment's miss was
+  never caught, and the zero stand-in was sampled where the serial order samples the image: a shadow or lighting
+  input of zeros gives the dark, sharp-edged turn.
+- **Fix** (`exec.rs` `tex_view_uncached`): on a lane, a lookup that finds no image asks the gate (`gate::pass(true)`);
+  unless the segment is at the frontier it gives up and is translated again at the join, in stream order (at the
+  frontier the lookup is the serial one). `cargo test --release -p graphics`: 238 lib tests pass, plus the
+  integration tests. Built (`build.ps1 -KeepCache -SkipGnu`), MKW relinked under `dist.lock`.
+- **Fixed runs** `20261126-003726/-004223/-004720-darkturn-fix-1..3`: stand-ins 19-21 in the run, **0 in the race**
+  (as serial); the gate gives up 7-22 segments per 600 frames (all at the new site); 28.9 / 29.6 / 29.7 FPS mean over
+  [250, 290] (not machine-locked; the lanes runs before were 28.8-30.0); sheets correct (`fix-1`, `fix-2` cross the turn
+  lit with a Bullet Bill, `fix-3` was past it in the stadium section); normal exits, no new red lines (`pipeline
+  compilation stopped for clean exit` at the time limit also appears in `t6-1`, before the fix).
+- **Not covered:** pool-indexed (bindless) slots made in `prepare_pool_images` are not segment-ordered by this; no
+  stand-in from them was seen in the race.
