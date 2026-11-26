@@ -147,6 +147,13 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       miss queued updates; uniform size not rounded to 256; sparse tile slots freed per mapping; device items
       0x06/0x62; DLSS is a plain blit; ray tracing absent; c0 sample table. Indirect dispatch sizes and pool
       snapshots are OOT-FOREST2's.
+- [ ] **MKW-RECORD steps 1-3 done** (branch `mkw-record`, commits `3fadfd6`, `58286e3`, `f89bd0a`, report `fd5c2b3`;
+      lead read the `195700-s3c-on` sheet: correct). Pool walker thread: replay+prep 32.5 -> 26.0 ms a frame
+      (paired), write-watch scan 8-12 -> 3.6 ms; segmented replay (off by default, `NXGFX_TRANSLATE_THREADS`): 0
+      entry-state differences, +0.8-2 ms. **No FPS gain yet (~29 of 60)**: the gain is step 4 (worker lanes); the
+      largest segment (~1,300 draws, a third of translation) needs step 5's mid-pass cuts. Write-watch scan cost
+      flips 3.5 <-> 9 ms run to run (FPS noise of 1-2). Steps 4-6 handed to a fresh agent (after merging
+      `gameplay-harness`); independent audit of steps 1-3 running.
 - [ ] **Running 2026-11-25 evening:** MKW-RECORD phase 2 (steps 1-3, 8 h) in worktree
       `D:\Projects\RecompLauncherEngine-mkw` (branch `mkw-record`, own target/dist, relinks only MKW, main-tree
       locks); OOT-FOREST2 in the main tree (OoT only, regression `wonder`, no `vk/queue.rs`); the OOT-NAN audit.
