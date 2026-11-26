@@ -116,6 +116,8 @@ The lead merges a wave only when every line holds:
 - [ ] Changes under §5 "Needs audit" had a fresh audit agent; its HIGH and MEDIUM findings are fixed (by a send-back)
       or recorded in the ledger with the reason.
 - [ ] Accepted perf numbers: the lead ran the wave's scenarios with nothing else running, and records those.
+      Titles already at their target (owner: work the broken titles, don't re-verify passing ones) get one
+      regression run each here, by the lead; agents spend their runs only on the titles below target.
 - [ ] Merge into `gameplay-harness` (`git merge --no-ff <wave>`), message ending with the attribution line; the
       ledger row updated and committed; the main `dist` rebuilt and the wave's titles relinked from it.
 - [ ] The worktree removed (junction first) when the wave is done.
