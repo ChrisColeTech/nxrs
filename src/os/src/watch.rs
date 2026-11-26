@@ -76,6 +76,7 @@ pub fn run() {
                     heap >> 20,
                     alias >> 20
                 );
+                crate::log!("memory layout: {}", nxrt::kernel::get().space.layout());
                 for l in crate::services::audio::report() {
                     crate::log!("{l}");
                 }

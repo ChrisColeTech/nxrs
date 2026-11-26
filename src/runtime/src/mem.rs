@@ -651,6 +651,30 @@ impl Space {
         )
     }
 
+    /// The regions with their bounds and committed bytes, for the memory report: what a web build's single linear
+    /// memory window would have to hold (docs/35 W0(d)).
+    pub fn layout(&self) -> String {
+        [
+            ("modules", self.modules),
+            ("aslr", self.aslr),
+            ("stack", self.stack),
+            ("heap", self.heap),
+            ("alias", self.alias),
+        ]
+        .iter()
+        .map(|(n, r)| {
+            format!(
+                "{n} {:#x}..{:#x} ({} MB, {} MB committed)",
+                r.base,
+                r.end(),
+                r.size >> 20,
+                Self::committed_in(r.base, r.size) >> 20
+            )
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
+    }
+
     /// Committed bytes of [a, a+n).
     #[cfg(target_os = "linux")]
     fn committed_in(a: u64, n: u64) -> u64 {

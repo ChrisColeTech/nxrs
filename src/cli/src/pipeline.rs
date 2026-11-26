@@ -372,7 +372,7 @@ pub fn modules_c(mods: &[(String, String, String)], entry: &str) -> String {
     // the game runs (a code cheat's toggle)
     s.push_str("\nstatic const char *const nxrs_patch_envs[] = {\n#define NXRS_ENV(i, name, env, def) [i] = env,\n    RT_PATCH_SETS(NXRS_ENV)\n#undef NXRS_ENV\n    0};\n");
     s.push_str(&format!(
-        "\n{export} int nxrs_game_main(int argc, char **argv) {{\n    nxrs_patch_sets();\n    nxrs_mod_markers();\n    nxrt_patch_table(rt_patch_on, nxrs_patch_envs, RT_PATCH_COUNT);\n    RtModule mods[] = {{\n"
+        "\n{export} int nxrs_game_main(int argc, char **argv) {{\n    nxrs_patch_sets();\n    {{ const char *fp = getenv(\"NXRS_FNPROF\"); g_fnprof = fp && fp[0]; }}\n    nxrs_mod_markers();\n    nxrt_patch_table(rt_patch_on, nxrs_patch_envs, RT_PATCH_COUNT);\n    RtModule mods[] = {{\n"
     ));
     for (n, b, z) in mods {
         s.push_str(&format!(
