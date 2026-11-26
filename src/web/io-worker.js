@@ -66,7 +66,7 @@ function verWords() {
   return [Number(v & 0xffffffffn), Number(v >> 32n)];
 }
 
-async function openStore() {
+async function openStore(fresh) {
   try {
     const root = await navigator.storage.getDirectory();
     const dir = await (await root.getDirectoryHandle('nxrs-data', { create: true })).getDirectoryHandle(safe(title), { create: true });
@@ -81,13 +81,13 @@ async function openStore() {
   const size = journal.getSize();
   const head = new Uint32Array(4);
   if (size >= 16) journal.read(head, { at: 0 });
-  if (size < 16 || head[0] !== JOURNAL_MAGIC || head[1] !== lo || head[2] !== hi) {
+  if (fresh || size < 16 || head[0] !== JOURNAL_MAGIC || head[1] !== lo || head[2] !== hi) {
     store.truncate(0);
     journal.truncate(0);
     journal.write(new Uint32Array([JOURNAL_MAGIC, lo, hi, 0]), { at: 0 });
     journal.flush();
     storeEnd = 0;
-    log(`io: OPFS store for data version ${version} started empty${size >= 16 ? ' (another data version was there)' : ''}`);
+    log(`io: OPFS store for data version ${version} started empty${fresh ? ' (asked for: ?fresh=1)' : size >= 16 ? ' (another data version was there)' : ''}`);
     return 'opfs';
   }
   const storeSize = store.getSize();
@@ -355,7 +355,7 @@ onmessage = async (e) => {
   const m = e.data;
   if (m.init) {
     ({ files, version, title } = m.init);
-    const kind = await openStore();
+    const kind = await openStore(m.init.fresh);
     setInterval(flushJournal, 2000);
     postMessage({ ready: kind });
     prefetch(m.init.bootset || []);

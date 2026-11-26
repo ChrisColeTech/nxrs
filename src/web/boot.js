@@ -6,7 +6,7 @@
 //
 // Game data (RomFS, ExeFS) is never copied into the in-memory file system: the engine reads it through the I/O worker
 // (io-worker.js), which fetches it by HTTP range into an OPFS cache. URL options: ?env=NAME=value,... sets engine
-// variables (e.g. NXRS_CONTROLLER_TRACE=1).
+// variables (e.g. NXRS_CONTROLLER_TRACE=1); ?fresh=1 empties the data cache first; ?bootset=0 skips the prefetch.
 'use strict';
 (() => {
   const status = document.getElementById('status');
@@ -66,22 +66,22 @@
   // ---- data: the I/O worker
   function startIo(manifest, bootset) {
     const worker = new Worker('io-worker.js');
-    let stats = null;
+    const stats = []; // waiting for the worker's answers, in order
     const ready = new Promise((resolve, reject) => {
       worker.onerror = (e) => reject(new Error('io-worker.js: ' + (e.message || e)));
       worker.onmessage = (e) => {
         const m = e.data;
         if (m.log) log('[web] ' + m.log);
         if (m.ready) resolve(m.ready);
-        if (m.stats && stats) stats(m.stats);
+        if (m.stats) stats.shift()?.(m.stats);
       };
     });
-    worker.postMessage({ init: { files: manifest.files, version: manifest.version, title: manifest.title, bootset } });
+    worker.postMessage({ init: { files: manifest.files, version: manifest.version, title: manifest.title, bootset, fresh: manifest.fresh } });
     addEventListener('pagehide', () => worker.postMessage({ close: true }));
     return {
       ready,
       start: (memory, table) => worker.postMessage({ start: { memory, table } }),
-      stats: () => new Promise((r) => { stats = r; worker.postMessage({ stats: true }); }),
+      stats: () => new Promise((r) => { stats.push(r); worker.postMessage({ stats: true }); }),
     };
   }
 
@@ -163,6 +163,15 @@
 
   function timeToMain(io, manifest) {
     const total = manifest.files.reduce((n, f) => n + f[1], 0);
+    // then every 30 s while the engine reads: what came from the network and what from the cache
+    let last = '';
+    setInterval(() => io.stats().then((s) => {
+      const now = `${s.reads}/${s.boot + s.demand}`;
+      if (now === last) return;
+      last = now;
+      const mib = (n) => (n / 2 ** 20).toFixed(1);
+      log(`[web] data at ${secs()} s: fetched ${mib(s.boot + s.demand)} MiB of ${mib(total)} MiB (boot set ${mib(s.boot)}, on demand ${mib(s.demand)}, ${s.fetches} requests); ${s.reads} engine reads, ${mib(s.hit)} MiB of them wholly from the cache`);
+    }), 30000);
     watchers.push((t) => {
       if (!t.includes('>>> nnMain')) return;
       const at = secs();
@@ -177,7 +186,12 @@
     status.textContent = 'reading the data manifest';
     const text = await (await fetch('data.json', { cache: 'no-store' })).text();
     const manifest = JSON.parse(text);
-    const bootset = await fetch('bootset.json', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : []), () => []);
+    // ?bootset=0: no prefetch (every read on demand); ?fresh=1: the cache emptied first (a cold start)
+    const q = new URLSearchParams(location.search);
+    const bootset = q.get('bootset') === '0'
+      ? []
+      : await fetch('bootset.json', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : []), () => []);
+    manifest.fresh = q.get('fresh') === '1';
     const io = startIo(manifest, bootset);
     timeToMain(io, manifest);
     const audio = audioHost();
