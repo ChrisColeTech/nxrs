@@ -146,6 +146,9 @@ fn commit_rw(a: u64, n: u64) -> bool {
     if n == 0 {
         return true;
     }
+    // a commit makes committed read-only pages read-write without a fault: a sealed pool there is woken first, so the
+    // store this commit prepares for is not missed (SCAN-COST)
+    nxgfx::vk::seal::host_write(a, n);
     if !unsafe { VirtualAlloc(a as _, n as usize, MEM_COMMIT, PAGE_READWRITE) }.is_null() {
         return true;
     }

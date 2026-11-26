@@ -101,6 +101,25 @@ fn frame() -> u64 {
     super::present::frames()
 }
 
+/// Whether any page of [a, a + n) is held on the device or being brought back (such a pool is not sealed: its pages'
+/// protection belongs to this module).
+pub fn holds_any(a: u64, n: u64) -> bool {
+    let g = ST.lock().unwrap();
+    let Some(st) = g.as_ref() else { return false };
+    if st.lazy.is_empty() && st.returning.is_empty() {
+        return false;
+    }
+    let (lo, hi) = (a & !(PAGE - 1), a.saturating_add(n));
+    // by page when the range is small, by entry otherwise
+    if (hi - lo) / PAGE <= (st.lazy.len() + st.returning.len()) as u64 {
+        (lo..hi)
+            .step_by(PAGE as usize)
+            .any(|p| st.lazy.contains_key(&p) || st.returning.contains(&p))
+    } else {
+        st.lazy.keys().chain(st.returning.iter()).any(|&p| p >= lo && p < hi)
+    }
+}
+
 /// Pages now held on the device only.
 pub fn pages() -> usize {
     ST.lock()
@@ -408,8 +427,9 @@ pub fn bring_back(p: u64) -> bool {
             continue;
         }
         let Some(l) = st.lazy.remove(&p) else {
-            // not ours: or one that came back between the fault and this lookup (accessible again: retry)
-            return st.hist.contains_key(&p) && accessible(p);
+            // not ours: or one that came back between the fault and this lookup (accessible again: retry); a page of a
+            // sealed pool is readable but read-only, its store is the seal handler's (retried here it faulted for ever)
+            return st.hist.contains_key(&p) && accessible(p) && !super::seal::holds(p);
         };
         st.returning.insert(p);
         let h = st.hist.entry(p).or_default();

@@ -125,6 +125,9 @@ NXGFX_SCAN_COVER	test	`NXGFX_SCAN_COVER=0`: every submission scans.	src/graphics
 NXGFX_SCISSOR_CLAMP	switch	scissor: "invalid write" just past a memory block, in no memory of ours, and the device lost; NXGFX_SCISSOR_CLAMP=0 off)	src/graphics/src/vk/exec.rs
 NXGFX_SCREEN_MATCH	switch	it back at once. A window keeps the screen's rate. `NXGFX_SCREEN_MATCH=0` keeps the rate in fullscreen too.	src/graphics/src/vk/screen.rs
 NXGFX_SCRUB_SLOTS	switch	MKW's device losses at addresses no live allocation held). `NXGFX_SCRUB_SLOTS=0` off.	src/graphics/src/vk/image.rs
+NXGFX_SEAL	switch	`NXGFX_SEAL=0`: no sealed pools (SCAN-COST): every watched mirror is asked by the write-watch scans as before; by default a pool quiet for `NXGFX_SEAL_FRAMES` is made read-only and left out of every scan until its first store wakes it (Windows)	src/graphics/src/vk/seal.rs
+NXGFX_SEAL_FRAMES	switch	Frames without a CPU write or a write-back landing before a pool is sealed (default 60)	src/graphics/src/vk/seal.rs
+NXGFX_SEAL_MB	switch	Bytes newly made read-only per sealing pass, at most one pass a frame (default 32)	src/graphics/src/vk/seal.rs
 NXGFX_SET_CACHE	switch	`0` writes every draw's descriptor sets again instead of reusing equal ones	src/graphics/src/vk/exec.rs
 NXGFX_SET_PATCH	switch	Stage sets are written in host memory first and patched from their copy (`Shadow`) unless `NXGFX_SET_PATCH=0`, the	src/graphics/src/vk/exec.rs
 NXGFX_SHADERS	path	the translated shader folder (default: `<data>\shaders`)	src/graphics/src/vk/shader.rs, src/os/src/nvn/mod.rs
