@@ -156,7 +156,7 @@ NXGFX_TRANSLATE_MIN	switch	streams with fewer draws are translated in one piece 
 NXGFX_TRANSLATE_SEG	switch	a segment ends at the first record that ends the pass after this many draws (default 256)	src/graphics/src/vk/exec.rs
 NXGFX_TRANSLATE_THREADS	switch	translation lanes for long streams (MKW-RECORD): 0 one piece as before, 1 segments one after another on the replay thread, N > 1 the replay thread and N - 1 `vk translate` threads in parallel	src/graphics/src/vk/exec.rs
 NXGFX_UPLOAD_MB	switch	`NXGFX_UPLOAD_MB` (default 64; 0: no budget).	src/graphics/src/vk/mem.rs
-NXGFX_UPLOAD_SKIP	switch	`NXGFX_UPLOAD_SKIP=1`: a CPU-written page whose bytes are those of its last upload is not uploaded again (`upskip`; off by default until the OOT-FOREST2 audit's H1/H2/M1 are fixed).	src/graphics/src/vk/upskip.rs
+NXGFX_UPLOAD_SKIP	switch	`NXGFX_UPLOAD_SKIP=0`: every CPU-written page is uploaded; by default a whole page whose bytes are what the GPU copy holds (its last upload, or the GPU's bytes re-armed at its write-back's landing) is left out (`upskip`; UPLOAD-SYNC fixed the OOT-FOREST2 audit's H1/H2/M1/M2).	src/graphics/src/vk/upskip.rs
 NXGFX_UPLOAD_TRACE	diagnostic`NXGFX_UPLOAD_TRACE=1` (diagnosis): the pool summary also logs what the pool sync uploads, by pool, and how much of it was unchanged since its last upload.	src/graphics/src/vk/uptrace.rs
 NXGFX_UPSCALE	switch`NXGFX_UPSCALE=standard` (or the ini's `upscale=standard`) keeps the linear blit; `NXGFX_SHARPNESS` 0..1 (0.5).	src/graphics/src/vk/upscale.rs
 NXGFX_VALIDATION	diagnostic	`1` turns the Vulkan validation layer on (the GPU tests set it)	src/graphics/src/vk/device.rs, src/graphics/src/vk/newndve/gpu_tests.rs, src/graphics/tests/common/mod.rs
@@ -170,6 +170,7 @@ NXGFX_WB_GUARD	switch	stale, the black stretches). Those pieces upload once it h
 NXGFX_WALKER_PARKED	switch	`NXGFX_WALKER_PARKED=0`: a present behind parked work is not covered by the pool walker's walk (it scans every pool)	src/graphics/src/vk/queue.rs
 NXGFX_WALKER_REWALK	switch	`NXGFX_WALKER_REWALK=0`: the pool walker does not walk again while a present waits in the queue	src/graphics/src/vk/mem.rs
 NXGFX_WALKER_SYNCS	switch	`NXGFX_WALKER_SYNCS=0`: the pool walker's walks cover presents' syncs only (not other syncs, which then scan themselves)	src/graphics/src/vk/mem.rs
+NXGFX_WALKER_WARM	switch	`NXGFX_WALKER_WARM=1` (off by default, UPLOAD-SYNC): the pool walker's walks for syncs leave the cold pools out, as a mid-frame scan does, and cover only mid-frame syncs	src/graphics/src/vk/mem.rs
 NXGFX_WB_LAZY	switch	On by default (`NXGFX_WB_LAZY=0` off) since Pokemon Violet runs clean with it (lane G3 `v12`). A page the completion thread must write (an eager write-back landing on it) is	src/graphics/src/vk/lazy.rs
 NXGFX_ZERO_SHARED	switch	task / mesh shared memory starts zeroed (NXGFX_ZERO_SHARED=0 off; the device's shaderZeroInitializeWorkgroupMemory)	src/graphics/src/vk/shader.rs
 NXOS_AUDIO_DEVICE	switch	sound" can be read from a log; `NXOS_AUDIO_DEVICE=<part of a name>` plays on that output device instead of the	src/os/src/media/sink.rs

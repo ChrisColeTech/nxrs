@@ -98,6 +98,27 @@ steps = ["wait 25", "shot title", "press A ; 3 * 25", "shot story", "press A ; 3
          "shot walk6", "wait 9", "replay oot_house_walk.txt ; 3", "shot walk7", "wait 6", "shot walk8",
          "wait 6", "shot walk9", "wait 9", "shot last"]
 
+[oot-house]
+title = "The Legend of Zelda Ocarina of Time"
+about = "as oot to Link under control in his house, then A every 1.5 s with a shot after each (UPLOAD-SYNC check)"
+# UPLOAD-SYNC: one v2 shot at 666 s (`20261126-023504-v2-oot/15-h2.png`) showed the house's herbs and pots pure white;
+# 30 shots ~1.6 s apart over the same stretch look for it again.
+seconds = 700
+window = [610, 690]
+fps = 59
+steps = ["wait 25", "shot title", "press A ; 3 * 25", "press A ; 3 * 25", "press A ; 3 * 25", "press A ; 3 * 25",
+         "press A ; 3 * 10", "press A ; 3 * 10", "press A ; 3 * 10", "press A ; 3 * 10", "press A ; 3 * 10",
+         "press A ; 3 * 10", "press A ; 3 * 10", "press A ; 3 * 10", "shot x5", "press A ; 1.5 * 20",
+         "shot h1", "press A ; 1.5 * 6",
+         "press A ; 1.5", "shot d01", "press A ; 1.5", "shot d02", "press A ; 1.5", "shot d03", "press A ; 1.5", "shot d04",
+         "press A ; 1.5", "shot d05", "press A ; 1.5", "shot d06", "press A ; 1.5", "shot d07", "press A ; 1.5", "shot d08",
+         "press A ; 1.5", "shot d09", "press A ; 1.5", "shot d10", "press A ; 1.5", "shot d11", "press A ; 1.5", "shot d12",
+         "press A ; 1.5", "shot d13", "press A ; 1.5", "shot d14", "press A ; 1.5", "shot d15", "press A ; 1.5", "shot d16",
+         "press A ; 1.5", "shot d17", "press A ; 1.5", "shot d18", "press A ; 1.5", "shot d19", "press A ; 1.5", "shot d20",
+         "press A ; 1.5", "shot d21", "press A ; 1.5", "shot d22", "press A ; 1.5", "shot d23", "press A ; 1.5", "shot d24",
+         "press A ; 1.5", "shot d25", "press A ; 1.5", "shot d26", "press A ; 1.5", "shot d27", "press A ; 1.5", "shot d28",
+         "press A ; 1.5", "shot d29", "press A ; 1.5", "shot d30", "shot last"]
+
 [mk8d]
 title = "Mario Kart 8 Deluxe"
 about = "Mii, menus, a Grand Prix, drive"

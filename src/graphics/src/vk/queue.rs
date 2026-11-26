@@ -138,6 +138,9 @@ pub enum Post {
         n: usize,
     },
     Callback(Box<dyn FnOnce(&Gpu) + Send>),
+    /// run at completion before the write-backs land and before the other posts (raw global memory's write log: what
+    /// it names must be known before the game can see this submission complete)
+    Early(Box<dyn FnOnce(&Gpu) + Send>),
 }
 unsafe impl Send for Post {}
 
@@ -147,6 +150,8 @@ struct Inflight {
     wb: Vec<(u64, u64, u64, *const u8, *const u8, u64)>,
     readback: Option<Buf>,
     before: Option<Buf>,
+    /// the recording epoch its GPU-write notes stamped (`upskip`)
+    epoch: u64,
 }
 unsafe impl Send for Inflight {}
 
@@ -385,7 +390,9 @@ impl Sub {
         if !super::gate::pre_held() {
             crate::log::red_once("an upload recorded into a parallel run's shared upload buffer without its lock (gate::pre_lock)");
         }
-        let (sb, so) = self.stage_bytes(g, src);
+        // staged fresh: memoising by content hashed every uploaded byte (OoT: ~56 MB a frame through a serial 128-bit
+        // FNV hash and a map insert, for pool pages never repeated within a submission)
+        let (sb, so) = self.stage_bytes_new(g, src);
         let r = [vk::BufferCopy {
             src_offset: so,
             dst_offset: off,
@@ -1111,6 +1118,8 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         q.recording.store(false, Ordering::Release);
     }
     wait_diag::phase("submit: present/enqueue completion");
+    // every GPU-write note of this recording is made: its landing re-arms the pages stamped with this epoch
+    let epoch = super::upskip::next_epoch();
     let presents = std::mem::take(&mut s.present);
     if presents.len() == 1 {
         super::present::queue_present(g, presents.into_iter().next().unwrap());
@@ -1125,6 +1134,7 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
             wb,
             readback,
             before,
+            epoch,
         });
         q.inflight_cv.notify_one();
         return value;
@@ -1137,6 +1147,7 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         wb,
         readback,
         before,
+        epoch,
     });
     q.inflight_cv.notify_one();
     value
@@ -1156,7 +1167,7 @@ fn completion_loop(g: &'static Gpu) {
     let q = &g.q;
     loop {
         wait_diag::mark(2, "idle", [0, 0]);
-        let item = {
+        let mut item = {
             let mut l = q.inflight.lock().unwrap();
             while l.is_empty() {
                 l = q.inflight_cv.wait(l).unwrap();
@@ -1185,9 +1196,17 @@ fn completion_loop(g: &'static Gpu) {
         // Failure above terminates with status 72, without entering any logger/cleanup.
         // Userspace still cannot preempt a driver call that never returns or prevent TDR.
         let mut signalled = false;
+        // effects that must precede what the game can see of this submission (raw global memory's write log)
+        for p in item.sub.post.iter_mut() {
+            if matches!(p, Post::Early(_)) {
+                if let Post::Early(f) = std::mem::replace(p, Post::Callback(Box::new(|_: &Gpu| {}))) {
+                    f(g);
+                }
+            }
+        }
         // CPU-visible effects, in order: write-backs first (an event may tell the game to read them)
         wait_diag::mark(2, "CPU writebacks", [item.value, 0]);
-        super::mem::apply_writebacks(g, &item.wb);
+        super::mem::apply_writebacks(g, &item.wb, item.epoch);
         wait_diag::mark(2, "queries/post effects", [item.value, 0]);
         let mut sub = item.sub;
         if super::exec::db_poison_on() {
@@ -1252,7 +1271,7 @@ fn completion_loop(g: &'static Gpu) {
                 Post::Readback { dst, src, n } => unsafe {
                     core::ptr::copy_nonoverlapping(src, dst, n)
                 },
-                Post::Callback(f) => f(g),
+                Post::Callback(f) | Post::Early(f) => f(g),
             }
         }
         wait_diag::mark(2, "recycle/deferred callbacks", [item.value, 0]);

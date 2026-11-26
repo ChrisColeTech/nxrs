@@ -72,6 +72,9 @@ pub struct Pool {
     /// CPU-written ranges past the frame's upload budget (`upload_budget`): uploaded when a use resolves them, or by
     /// the next submissions within their budget
     pub deferred: Vec<(u64, u64)>,
+    /// CPU-written ranges uploaded outside a sync (`sync_range`): the next sync hands them to the texture check, which
+    /// never saw them otherwise (their watch bits are gone)
+    pub tex_dirty: Vec<(u64, u64)>,
 }
 
 /// The per-frame upload budget (64 MB): CPU writes uploaded at the start of a submission count against it; past it,
@@ -104,8 +107,9 @@ static BUDGET_USED: std::sync::Mutex<(u64, u64)> = std::sync::Mutex::new((0, 0))
 pub static DEFERRED_BYTES: AtomicU64 = AtomicU64::new(0);
 pub static DEFERRED_USED: AtomicU64 = AtomicU64::new(0);
 
-/// Takes `n` bytes of this frame's budget: false (nothing taken) when they do not fit.
-fn budget_take(n: u64) -> bool {
+/// Whether a range of `n` CPU-written bytes goes now under this frame's budget (nothing taken: `budget_charge` takes
+/// what is uploaded of it, which the upload skip may make less).
+fn budget_fits(n: u64) -> bool {
     let b = upload_budget();
     if b == 0 {
         return true;
@@ -116,11 +120,20 @@ fn budget_take(n: u64) -> bool {
         *u = (f, 0);
     }
     // a frame's first range always goes (a range larger than the budget is not starved)
-    if u.1 > 0 && u.1 + n > b {
-        return false;
+    !(u.1 > 0 && u.1 + n > b)
+}
+
+/// `n` bytes uploaded count against this frame's budget.
+fn budget_charge(n: u64) {
+    if upload_budget() == 0 || n == 0 {
+        return;
+    }
+    let f = super::present::frames();
+    let mut u = BUDGET_USED.lock().unwrap();
+    if u.0 != f {
+        *u = (f, 0);
     }
     u.1 += n;
-    true
 }
 
 /// A pool buffer backed in granules on first use: device memory for a
@@ -609,6 +622,7 @@ pub fn pool_add(p: &pool_t) {
         wins_da: Vec::new(),
         gran: None,
         deferred: Vec::new(),
+        tex_dirty: Vec::new(),
     };
     if std::env::var("NXGFX_POOL_LOG").is_ok() {
         crate::vklog!(
@@ -883,7 +897,10 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
             ranges = keep;
         }
     }
+    // (a cold pool written: a walk that left it out covers no sync now)
+    COLD_GEN.fetch_add(1, Ordering::AcqRel);
     p.dirty_frame = frame;
+    p.tex_dirty.extend(ranges.iter().copied());
     if p.buf.is_some() {
         for &(ra, rn) in &ranges {
             super::upskip::forget(ra, rn);
@@ -1244,16 +1261,23 @@ impl Pool {
     }
 
     fn upload_now(&self, g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
+        // SAFETY: committed guest memory of this pool (the CPU-written range being uploaded)
+        let src = unsafe { core::slice::from_raw_parts(a as *const u8, n as usize) };
+        self.upload_from(g, sub, a, src);
+    }
+
+    /// Uploads `src`, the bytes of [a, a + src.len()) of this pool (a copy taken by the caller, or guest memory).
+    fn upload_from(&self, g: &Gpu, sub: &mut super::queue::Sub, a: u64, src: &[u8]) {
         // (in the upload buffer: a parallel run's shared one, audit H1)
         let _pre = super::gate::pre_lock();
-        for (buf, boff, pa, pn) in self.pieces(a, n) {
+        for (buf, boff, pa, pn) in self.pieces(a, src.len() as u64) {
             // granules not bound yet take the guest bytes when they are bound
             for (qa, qn) in self.bound_parts(pa, pn) {
-                let src = unsafe { core::slice::from_raw_parts(qa as *const u8, qn as usize) };
-                sub.upload(g, src, buf, boff + (qa - pa));
+                let o = (qa - a) as usize;
+                sub.upload(g, &src[o..o + qn as usize], buf, boff + (qa - pa));
             }
         }
-        UPLOAD_BYTES.fetch_add(n, Ordering::Relaxed);
+        UPLOAD_BYTES.fetch_add(src.len() as u64, Ordering::Relaxed);
     }
 
     /// [a, a + n) as the runs that lie in bound granules (all of it for a pool backed whole).
@@ -1728,8 +1752,10 @@ fn split_inflight(a: u64, n: u64, inflight: &[(u64, u64)]) -> (Vec<(u64, u64)>, 
     )
 }
 
-/// Uploads held back for an in-flight write-back (submissions that had some).
+/// Uploads held back for an in-flight write-back (submissions that had some), and their bytes (counted at every sync
+/// that holds them back again).
 pub static WB_DEFERRED: AtomicU64 = AtomicU64::new(0);
+pub static WB_HELD_B: AtomicU64 = AtomicU64::new(0);
 /// Removes landed write-backs from INFLIGHT when the landing is over (after the guest bytes are written).
 struct InflightDone(Vec<(u64, u64)>);
 impl Drop for InflightDone {
@@ -1976,9 +2002,13 @@ static SCAN_MU: std::sync::Mutex<()> = std::sync::Mutex::new(());
 /// CPU signals had been made, counts as a scan of every pool (`scan_covers`): it took every page written before it
 /// started, and the next sync drains what it took into the pools' pending writes and uploads them before its own
 /// work (`watch_lock`). Kept only when newer than the scans noted already.
-fn note_walk(tail: u64, signals: u64) {
+/// `full` false: a walk that left the cold pools out counts as a scan that did (a mid-frame sync's).
+fn note_walk(tail: u64, signals: u64, full: bool) {
     let _l = SCAN_MU.lock().unwrap();
     for (t, s) in [(&SCAN_TAIL_FULL, &SCAN_SIG_FULL), (&SCAN_TAIL_ANY, &SCAN_SIG_ANY)] {
+        if !full && std::ptr::eq(t, &SCAN_TAIL_FULL) {
+            continue;
+        }
         if tail > t.load(Ordering::Acquire) {
             t.store(tail, Ordering::Release);
             s.store(signals, Ordering::Release);
@@ -2074,6 +2104,9 @@ struct WalkJob {
     ok: std::sync::atomic::AtomicBool,
     /// each piece walked and answered (`walk_covers_pool`)
     piece_done: Vec<std::sync::atomic::AtomicBool>,
+    /// every watched pool, cold ones too (a present's walk); false: a walk for syncs, which leaves the cold pools out
+    /// as a mid-frame scan does, and covers only what such a scan covers (`note_walk`)
+    full: bool,
 }
 
 impl WalkJob {
@@ -2086,6 +2119,7 @@ impl WalkJob {
             next: Default::default(),
             done: Default::default(),
             ok: std::sync::atomic::AtomicBool::new(true),
+            full: true,
         }
     }
 
@@ -2130,6 +2164,16 @@ fn walk_for(due: Option<u64>) -> Option<std::sync::Arc<WalkJob>> {
 /// watch lock go first.
 fn walk_some(job: &WalkJob, step_aside: bool) {
     loop {
+        // a walk for syncs gives way to a present's full walk: the pieces left count as done but unwalked (the walk
+        // covers nothing as a whole; its walked pieces still stand for a scanning sync's pools, `WalkJob::covers`)
+        if !job.full && PRESENT_ASKED.load(Ordering::Acquire) {
+            let i = job.next.swap(job.pieces.len(), Ordering::AcqRel);
+            if i < job.pieces.len() {
+                job.ok.store(false, Ordering::Release);
+                job.done.fetch_add(job.pieces.len() - i, Ordering::AcqRel);
+            }
+            return;
+        }
         // stepping aside before a piece is claimed (audit L3: a claimed piece a sync waits for in `walk_finish` was
         // held back up to 50 ms by the walker's stepping aside)
         if step_aside && job.next.load(Ordering::Acquire) < job.pieces.len() {
@@ -2193,6 +2237,9 @@ static WALK_CV: std::sync::Condvar = std::sync::Condvar::new();
 /// Walks made, their time, walks that could not read some range (they cover nothing), presents whose sync a walk
 /// covered, and the replay thread's time waiting for a walk to end.
 pub static WALKS: AtomicU64 = AtomicU64::new(0);
+/// Walks for syncs without the cold pools, and those that covered nothing (`COLD_GEN` moved).
+pub static WALKS_WARM: AtomicU64 = AtomicU64::new(0);
+pub static WALKS_WARM_VOID: AtomicU64 = AtomicU64::new(0);
 pub static WALK_NS: AtomicU64 = AtomicU64::new(0);
 pub static WALK_FAILED: AtomicU64 = AtomicU64::new(0);
 pub static WALK_COVERED: AtomicU64 = AtomicU64::new(0);
@@ -2218,12 +2265,18 @@ pub fn walker_kick() {
         w.want = true;
         w.waiting = 3;
     }
+    // a walk for syncs in progress stops at its next piece: the present's full walk starts sooner
+    PRESENT_ASKED.store(true, Ordering::Release);
     WALK_CV.notify_all();
 }
+
+/// A present asked for a walk and no full walk has started since (`walk_some` ends a walk for syncs early).
+static PRESENT_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
 fn walker_main() {
     let mut last_tail = 0;
     loop {
+        let full;
         {
             let mut w = WALK.lock().unwrap();
             // a present asked; or (`walker_syncs`) ops were queued since the last walk started and wait for the
@@ -2239,6 +2292,13 @@ fn walker_main() {
                     .unwrap()
                     .0;
             }
+            // a present asked: every pool; else a walk for the syncs of ops waiting, which leaves the cold pools out
+            // (a mid-frame scan asks no cold pool either: MKW's full walks took ~10 ms each, ~3 a frame, so ops queued
+            // during one waited for the next and scanned for themselves)
+            full = w.want || !warm_walks();
+            if w.want {
+                PRESENT_ASKED.store(false, Ordering::Release);
+            }
             w.want = false;
             w.running = true;
         }
@@ -2246,16 +2306,24 @@ fn walker_main() {
         // no CPU signal after `signals` came before it
         let signals = cpu_signals();
         let tail = super::queue::aq_tail();
+        let cold_gen = COLD_GEN.load(Ordering::Acquire);
         last_tail = tail;
         let t0 = std::time::Instant::now();
         let ok = match super::Gpu::try_get() {
             Some(g) => {
-                let list = watched_pools(&g.mem.lock().unwrap());
-                let job = std::sync::Arc::new(WalkJob::new(
-                    tail,
-                    signals,
-                    walk_pieces(&list, WALK_PIECE),
-                ));
+                let list = {
+                    let m = g.mem.lock().unwrap();
+                    if full {
+                        watched_pools(&m)
+                    } else {
+                        // the pools a sync of this frame would scan (`begin_submit`'s cold rule)
+                        let frame = super::present::frames();
+                        watched_pools_where(&m, |p| frame.saturating_sub(p.dirty_frame) <= 60)
+                    }
+                };
+                let mut job = WalkJob::new(tail, signals, walk_pieces(&list, WALK_PIECE));
+                job.full = full;
+                let job = std::sync::Arc::new(job);
                 WALK.lock().unwrap().job = Some(job.clone());
                 walk_some(&job, true);
                 walk_finish(&job)
@@ -2272,10 +2340,19 @@ fn walker_main() {
             w.running = false;
             w.job = None;
             if ok {
-                w.done_tail = w.done_tail.max(tail);
-                if walker_syncs() {
-                    note_walk(tail, signals);
+                if full {
+                    w.done_tail = w.done_tail.max(tail);
                 }
+                // a walk without the cold pools stands for no scan once one of them was found written since it started
+                // (its pages are still drained by the next sync; it just covers none)
+                if walker_syncs() && (full || COLD_GEN.load(Ordering::Acquire) == cold_gen) {
+                    note_walk(tail, signals, full);
+                } else if !full {
+                    WALKS_WARM_VOID.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+            if !full {
+                WALKS_WARM.fetch_add(1, Ordering::Relaxed);
             }
             if w.waiting > 0 && rewalk() {
                 w.waiting -= 1;
@@ -2285,7 +2362,9 @@ fn walker_main() {
         WALK_CV.notify_all();
         if n % 600 == 0 {
             crate::vklog!(
-                "pool walker, last 600 walks: {:.2} ms a walk, {} could not read a range, {} presents' syncs covered ({} finishing a walk), {} other syncs finished one, the replay's syncs walked {:.3} ms a walk of them, scanning syncs left {} MB to walks in progress; syncs and landings waited {:.3} ms a walk for the watch lock (with the drain)",
+                "pool walker, last 600 walks: {} without the cold pools ({} of them covering no sync: a cold pool written meanwhile), {:.2} ms a walk, {} could not read a range, {} presents' syncs covered ({} finishing a walk), {} other syncs finished one, the replay's syncs walked {:.3} ms a walk of them, scanning syncs left {} MB to walks in progress; syncs and landings waited {:.3} ms a walk for the watch lock (with the drain)",
+                WALKS_WARM.swap(0, Ordering::Relaxed),
+                WALKS_WARM_VOID.swap(0, Ordering::Relaxed),
                 WALK_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6,
                 WALK_FAILED.swap(0, Ordering::Relaxed),
                 WALK_COVERED.swap(0, Ordering::Relaxed),
@@ -2300,14 +2379,33 @@ fn walker_main() {
 }
 
 fn watched_pools(m: &Pools) -> Vec<WatchedPool> {
+    watched_pools_where(m, |_| true)
+}
+
+fn watched_pools_where(m: &Pools, keep: impl Fn(&Pool) -> bool) -> Vec<WatchedPool> {
     m.by_base
         .values()
-        .filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host))
+        .filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host) && keep(p))
         .map(|p| {
             let (lo, hi) = page_range(p.base, p.size);
             (p.base, lo, hi, p.alloc_base)
         })
         .collect()
+}
+
+/// Moves whenever a cold pool (no CPU write for 60 frames) is found written: a walk that left it out as cold does not
+/// stand for a scan that would ask it now.
+static COLD_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// `NXGFX_WALKER_WARM=1`: the walker's walks for syncs leave the cold pools out. **Off by default** (UPLOAD-SYNC): no
+/// FPS gain measured in MKW (its walker is busy with the present's walks) or DKB, and a one-frame OoT render fault was
+/// seen only in builds with it on (3 in ~67 dense shots against 0 in 60 without; not proven either way).
+fn warm_walks() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        std::env::var("NXGFX_WALKER_WARM").as_deref() == Ok("1")
+            && std::env::var("NXGFX_POOL_COLD").as_deref() != Ok("0")
+    })
 }
 
 /// [lo, hi) of each run of watched pools (`watch_batch_end`, as a sync asks them), cut into `piece` bytes.
@@ -2392,7 +2490,8 @@ fn walker_covers_ex(due: Option<u64>, present: bool) -> bool {
     let Some(d) = due.filter(|&d| d != 0) else {
         return false;
     };
-    let job = {
+    let t_wait = std::time::Instant::now();
+    let job = loop {
         let mut w = WALK.lock().unwrap();
         if present {
             w.waiting = 0;
@@ -2400,9 +2499,21 @@ fn walker_covers_ex(due: Option<u64>, present: bool) -> bool {
                 return true;
             }
         }
-        w.job
+        // a present's sync asks every pool (and the help path stands in for a full scan): a full walk only
+        let job = w
+            .job
             .clone()
-            .filter(|j| j.tail >= d && (present || j.signals == cpu_signals()))
+            .filter(|j| j.full && j.tail >= d && (present || j.signals == cpu_signals()));
+        // a walk for syncs is ending early for this present's full walk (`walk_some`), or that one is about to start:
+        // wait for it (a piece at most) rather than scan every pool here; not longer than the scan would take (the
+        // walker builds its list under the pool lock, which a landing may hold for milliseconds)
+        let coming = (w.running && !w.job.as_ref().is_some_and(|j| j.full)) || (w.want && !w.running);
+        if job.is_none() && present && coming && t_wait.elapsed() < std::time::Duration::from_millis(2) {
+            drop(w);
+            std::thread::yield_now();
+            continue;
+        }
+        break job;
     };
     let Some(job) = job else {
         return false;
@@ -2701,6 +2812,9 @@ pub fn begin_submit_ex(
     super::queue::chain_trace::note("scan", t_scan.elapsed().as_micros() as u64, covered as u64);
     let _loop_t = SyncLoopTimer(std::time::Instant::now());
     for p in m.by_base.values_mut() {
+        if !p.tex_dirty.is_empty() {
+            all.append(&mut p.tex_dirty);
+        }
         if !matches!(p.placement, Placement::Mirror | Placement::Host) && p.pending.is_empty() {
             continue;
         }
@@ -2723,6 +2837,15 @@ pub fn begin_submit_ex(
             p.pending
                 .extend(pre.take().into_iter().flatten().map(|page| (page, PAGE)));
         }
+        // a watched pool the scan found unwritten, with nothing pending or deferred: nothing below would do anything
+        // (it cost a few hundred ns a pool: ~4,000 mirrors at each scanning sync in MKW)
+        if p.watched
+            && pre.as_ref().is_some_and(|v| v.is_empty())
+            && p.pending.is_empty()
+            && p.deferred.is_empty()
+        {
+            continue;
+        }
         let mut ranges = p.take_cpu_writes(gen, pre);
         // what the budget left for later comes first (the guest bytes as they are now)
         if !p.deferred.is_empty() {
@@ -2740,6 +2863,7 @@ pub fn begin_submit_ex(
                     for &(a, n) in &ranges {
                         let (now, later) = split_inflight(a, n, &mine);
                         keep.extend(now);
+                        WB_HELD_B.fetch_add(later.iter().map(|r| r.1).sum::<u64>(), Ordering::Relaxed);
                         p.pending.extend(later);
                     }
                     if !p.pending.is_empty() {
@@ -2754,12 +2878,15 @@ pub fn begin_submit_ex(
             if super::perf::fine() && f.saturating_sub(p.dirty_frame) > 1 && mid_frame {
                 WATCH_LUKE_HITS.fetch_add(1, Ordering::Relaxed);
             }
+            if f.saturating_sub(p.dirty_frame) > 60 {
+                COLD_GEN.fetch_add(1, Ordering::AcqRel);
+            }
             p.dirty_frame = f;
         }
         if p.buf.is_some() && (p.placement == Placement::Mirror || p.placement == Placement::Vram) {
             let mut deferred_now = false;
             for &(a, n) in &ranges {
-                if !budget_take(n) {
+                if !budget_fits(n) {
                     p.deferred.push((a, n));
                     DEFERRED_BYTES.fetch_add(n, Ordering::Relaxed);
                     deferred_now = true;
@@ -2768,10 +2895,16 @@ pub fn begin_submit_ex(
                 if super::uptrace::on() {
                     super::uptrace::note(p.base, p.size, a, n);
                 }
-                // written pages whose bytes the GPU copy already holds stay as they are (`upskip`)
-                for (ca, cn) in super::upskip::changed_runs(p.base, p.size, a, n) {
-                    p.upload_now(g, sub, ca, cn);
-                }
+                // written pages whose bytes the GPU copy already holds stay as they are (`upskip`); the budget is
+                // charged with what is uploaded (audit M2)
+                let sent = if super::upskip::on() {
+                    let (base, size) = (p.base, p.size);
+                    super::upskip::upload_changed(base, size, a, n, |at, b| p.upload_from(g, sub, at, b))
+                } else {
+                    p.upload_now(g, sub, a, n);
+                    n
+                };
+                budget_charge(sent);
             }
             if deferred_now {
                 // resolves of this pool cached before must look at the deferred ranges
@@ -2810,8 +2943,8 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
     }
     // a sparse virtual pool's range was bound at the physical memory it maps (`resolve_in`): the write-back goes there
     // too, or the GPU's bytes are lost and a later CPU write to the page uploads stale guest memory over them
-    // the GPU copy changes: its pages' last-upload hashes no longer describe it (`upskip`)
-    super::upskip::forget(a, n);
+    // the GPU copy changes: its pages' hashes are parked until this submission's write-back lands (`upskip`)
+    super::upskip::gpu_writes(a, n);
     let a = if crate::nvn::vpool::is_sparse(a) {
         match crate::nvn::vpool::translate(a, n) {
             Some(p) => p,
@@ -2820,7 +2953,7 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
     } else {
         a
     };
-    super::upskip::forget(a, n);
+    super::upskip::gpu_writes(a, n);
     let m = super::gate::lock(&g.mem, 0);
     let Some(b) = find(&m, a, n) else { return };
     let p = &m.by_base[&b];
@@ -2869,7 +3002,9 @@ fn note_writeback(sub: &mut super::queue::Sub, b: u64, a: u64, n: u64, buf: vk::
 
 /// Completion of a submission: its write-backs land in guest memory. CPU writes the game made meanwhile to the same
 /// pages stay marked for the next upload; the write-back's own stores are not taken for CPU writes.
-pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)]) {
+/// `epoch`: the submission's recording epoch (`upskip::next_epoch`): pages it noted as GPU-written get the hash of the
+/// GPU's bytes back (`upskip::landed`).
+pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)], epoch: u64) {
     if wbs.is_empty() {
         return;
     }
@@ -2887,6 +3022,9 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
             continue;
         };
         if !writeback_identity_matches(Some(identity), p.identity) { continue; }
+        // the GPU copy of the range is `src` now (unless a later submission changed it: then it restamped the pages);
+        // the pages it found the GPU left alone are not compared again below
+        let same = super::upskip::landed(a, n, src, pre, epoch);
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let tl = std::time::Instant::now();
         let mut lazy = if p.watched {
@@ -2940,6 +3078,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
                         } else {
                             unsafe { pre.add((at - a) as usize) }
                         },
+                        &same,
                     );
                 }
                 at = (pg + PAGE).min(a + n).max(at);
@@ -2957,14 +3096,15 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
             continue;
         }
         let tl = std::time::Instant::now();
-        land(p, a, n, src, pre);
+        land(p, a, n, src, pre, &same);
         super::lazy::T_LAND.fetch_add(tl.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
     WRITEBACK_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
 }
 
-/// One write-back's bytes into guest memory (pages held on the device are read back first).
-fn land(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
+/// One write-back's bytes into guest memory (pages held on the device are read back first). `same`: whole pages
+/// already found unchanged by the GPU (`src` equal to `base`, ascending): nothing of them lands.
+fn land(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8, same: &[u64]) {
     // pages held on the device (lazy write-back): its buffer has their newest bytes, this write-back's among them, so
     // they stay there; bringing them back here made the completion thread wait for all the GPU work submitted since
     // (Pokemon Violet: 48 ms of write-back a frame, 12 FPS)
@@ -2977,12 +3117,12 @@ fn land(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
                     unsafe { q.add(o as usize) }
                 }
             };
-            land(p, a + o, m, at(src), at(base));
+            land(p, a + o, m, at(src), at(base), same);
         }
         return;
     }
     if !base.is_null() {
-        return land_changed(p, a, n, src, base);
+        return land_changed(p, a, n, src, base, same);
     }
     {
         super::lazy::touch(a, n);
@@ -3027,7 +3167,7 @@ pub(crate) fn merge_changed_bytes(guest: &mut [u8], after: &[u8], before: &[u8])
     kept
 }
 
-fn land_changed(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
+fn land_changed(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8, same: &[u64]) {
     let (s, b) = unsafe {
         (
             core::slice::from_raw_parts(src, n as usize),
@@ -3039,7 +3179,9 @@ fn land_changed(p: &mut Pool, a: u64, n: u64, src: *const u8, base: *const u8) {
     while at < n {
         let pg_end = (((a + at) / PAGE + 1) * PAGE - a).min(n);
         let (lo, hi) = (at as usize, pg_end as usize);
-        if s[lo..hi] != b[lo..hi] {
+        // a whole page the upload skip's re-arm already compared and found unchanged (`upskip::landed`)
+        let known_same = pg_end - at == PAGE && same.binary_search(&(a + at)).is_ok();
+        if !known_same && s[lo..hi] != b[lo..hi] {
             super::lazy::touch(a + at, pg_end - at);
             let (plo, phi) = page_range(a + at, pg_end - at);
             if p.watched {
@@ -3094,8 +3236,11 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
     let skipped = SCANS_SKIPPED.swap(0, Ordering::Relaxed) as f64 / f;
     let resumes = super::queue::RESUMES.swap(0, Ordering::Relaxed) as f64 / f;
     let at_once = super::queue::PARKED_AT_ONCE.swap(0, Ordering::Relaxed) as f64 / f;
+    let held = WB_HELD_B.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
+    let held_n = WB_DEFERRED.swap(0, Ordering::Relaxed) as f64 / f;
+    let deferred = DEFERRED_BYTES.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
     format!(
-        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms ({kept} CPU-written bytes inside write-backs kept so far); {sn} mirrors without write watch ({} MB); pool sync a frame: lock wait {lk:.2} ms, write-watch scan {sc:.2} ms, per-pool pass {lp:.2} ms; syncs a frame {bs:.1} replays, {bp:.1} presents, {bo:.1} one-offs, {skipped:.1} of them covered by an earlier scan, {resumes:.1} of them parked work run on; {at_once:.1} submits a frame parked at their first wait (no sync)",
+        "pools: {} vram ({} MB), {} mirror ({} MB), {} host ({} MB), {} cpu-only; per frame upload {up:.2} MB, write-back {wb:.2} MB in {wbms:.3} ms ({kept} CPU-written bytes inside write-backs kept so far); {sn} mirrors without write watch ({} MB); pool sync a frame: lock wait {lk:.2} ms, write-watch scan {sc:.2} ms, per-pool pass {lp:.2} ms; syncs a frame {bs:.1} replays, {bp:.1} presents, {bo:.1} one-offs, {skipped:.1} of them covered by an earlier scan, {resumes:.1} of them parked work run on; {at_once:.1} submits a frame parked at their first wait (no sync); CPU writes held back a frame: {held:.2} MB under in-flight write-backs ({held_n:.1} syncs), {deferred:.2} MB past the upload budget",
         cnt[0],
         bytes[0] >> 20,
         cnt[1],
@@ -3182,6 +3327,31 @@ mod scan_cover_tests {
         assert!(scan_covers(Some(20), false), "a GPU signal landed: op 20's scan still covers");
         crate::nvn::sync::event_publish(&mut word, 0, 4, true);
         assert!(!scan_covers(Some(20), false), "the game's nvnEventSignal: scan again");
+        // a walk for syncs (cold pools left out) stands for a mid-frame scan only, never a frame's first
+        note_walk(30, cpu_signals(), false);
+        assert!(scan_covers(Some(30), false), "a walk without the cold pools covers a mid-frame sync");
+        assert!(!scan_covers(Some(30), true), "but not a frame's first sync, which asks the cold pools too");
+        note_walk(31, cpu_signals(), true);
+        assert!(scan_covers(Some(31), true), "a full walk covers both");
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+
+    /// Audit M2: the upload budget is charged with the bytes uploaded, not with the bytes the CPU wrote (the upload
+    /// skip leaves most of them out); a range still goes only when the bytes written would fit.
+    #[test]
+    fn the_budget_counts_what_is_uploaded() {
+        BUDGET_OVERRIDE.store(100, Ordering::Relaxed);
+        *BUDGET_USED.lock().unwrap() = (super::super::present::frames(), 0);
+        assert!(budget_fits(1000), "a frame's first range always goes");
+        budget_charge(10); // 10 of its 1000 bytes uploaded
+        assert!(budget_fits(80), "90 bytes left");
+        budget_charge(80);
+        assert!(!budget_fits(20), "past the budget: deferred");
+        BUDGET_OVERRIDE.store(0, Ordering::Relaxed);
     }
 }
 

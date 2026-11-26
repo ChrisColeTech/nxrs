@@ -259,9 +259,23 @@ pub fn end(g: &Gpu, sub: &mut Sub) {
         return;
     };
     let _ = g;
-    sub.post.push(super::queue::Post::Callback(Box::new(move |_g: &Gpu| {
+    // before the write-backs land and the game's events: the upload skip must know of these stores before the game
+    // can act on this submission's completion (audit H1)
+    sub.post.push(super::queue::Post::Early(Box::new(move |_g: &Gpu| {
         // SAFETY: the submission's staging memory (host-visible, mapped) stays until it is recycled, after this
         let log = unsafe { core::slice::from_raw_parts((ptr + off as usize) as *const u32, LOG_BYTES / 4) };
+        // every range the log names, whatever its size or identity (`logged_ranges` keeps only those written back):
+        // its upload-skip hashes go, and it is never skipped again
+        for (k, &word) in log.iter().enumerate() {
+            let mut bits = word;
+            while bits != 0 {
+                let i = k * 32 + bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                if let Some(&(lo, hi)) = ranges.get(i) {
+                    super::upskip::raw_written(lo, hi);
+                }
+            }
+        }
         let mut w = WRITTEN.lock().unwrap();
         for write in logged_ranges(log, &ranges, &identities) {
             if !w.contains(&write) {

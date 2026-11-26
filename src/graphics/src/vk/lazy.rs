@@ -398,7 +398,17 @@ pub fn bring_back(p: u64) -> bool {
     }
     // SAFETY: the guest page, accessible again; other threads' faults on it wait in `returning` until it is filled
     unsafe { core::ptr::copy_nonoverlapping(data.as_ptr(), p as *mut u8, PAGE as usize) };
-    super::mem::reset_watch(p, PAGE);
+    // The write watch is not reset (MKW-RECORD L6): this copy's store reads as a CPU write, and the upload skip leaves
+    // the page out at the next sync while it still holds exactly these bytes (`upskip::brought_back`), so only a real
+    // CPU write since uploads it. A reset here, without the watch lock (which a fault on a thread holding it would
+    // deadlock on), let the pool walker take this store for a CPU write anyway, and erased the watch bit of a game
+    // store made between the copy and the reset: that write never reached the GPU. With the skip off
+    // (`NXGFX_UPLOAD_SKIP=0`) the old reset stays.
+    if super::upskip::on() {
+        super::upskip::brought_back(p, &data);
+    } else {
+        super::mem::reset_watch(p, PAGE);
+    }
     done();
     PAGES_IN.fetch_add(1, Ordering::Relaxed);
     true
