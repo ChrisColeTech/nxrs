@@ -3384,6 +3384,14 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
         a
     };
     super::upskip::gpu_writes(a, n);
+    // the same range noted again by this recording with no pool change since (a storage buffer bound draw after draw):
+    // the note it made stands (the same pool, pieces and identity; `note_writeback` would find it), so the pool lock is
+    // not taken again (OOT-DESC: those takes waited for the completion thread's landings). `NXGFX_NOTE_MEMO=0`: off
+    let key = (sub.serial, POOL_GEN.load(Ordering::Acquire), a, n, identity.unwrap_or(u64::MAX));
+    if note_memo_on() && note_memo::seen(key) {
+        super::perf::inc(super::perf::C::Writebacks);
+        return;
+    }
     let m = super::gate::lock(&g.mem, 0);
     let Some(b) = find(&m, a, n) else { return };
     let p = &m.by_base[&b];
@@ -3393,6 +3401,54 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
         // one write-back per window the range lies in
         for (buf, off, a, n) in p.pieces(a, n) {
             note_writeback(sub, b, a, n, buf, off, p.identity);
+        }
+        note_memo::put(key);
+    }
+}
+
+fn note_memo_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_NOTE_MEMO").as_deref() != Ok("0"))
+}
+
+/// The GPU-write notes this thread made last: (recording serial, `POOL_GEN` then, address, bytes, identity). A key holds
+/// the recording, so a note of another recording (a later submission, another lane's child) never matches.
+mod note_memo {
+    type Key = (u64, u64, u64, u64, u64);
+    const N: usize = 16;
+    thread_local! {
+        static LAST: std::cell::RefCell<([Key; N], usize)> = const { std::cell::RefCell::new(([(0, 0, 0, 0, 0); N], 0)) };
+    }
+    pub(super) fn seen(k: Key) -> bool {
+        k.0 != 0 && LAST.with(|l| l.borrow().0.contains(&k))
+    }
+    pub(super) fn put(k: Key) {
+        LAST.with(|l| {
+            let mut l = l.borrow_mut();
+            let i = l.1;
+            l.0[i] = k;
+            l.1 = (i + 1) % N;
+        });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// A note is found again only with the same recording, pool generation, range and identity; the 16 last kept.
+        #[test]
+        fn only_the_same_note_of_the_same_recording_is_found() {
+            let k = (7, 3, 0x1000, 0x40, 9);
+            assert!(!super::seen(k));
+            super::put(k);
+            assert!(super::seen(k));
+            assert!(!super::seen((8, 3, 0x1000, 0x40, 9)), "another recording");
+            assert!(!super::seen((7, 4, 0x1000, 0x40, 9)), "the pools changed since");
+            assert!(!super::seen((7, 3, 0x1000, 0x80, 9)), "another range");
+            assert!(!super::seen((7, 3, 0x1000, 0x40, 1)), "another identity");
+            assert!(!super::seen((0, 0, 0, 0, 0)), "an empty slot is no note");
+            for i in 0..16 {
+                super::put((7, 3, 0x2000 + i, 1, 9));
+            }
+            assert!(!super::seen(k), "pushed out");
         }
     }
 }
