@@ -167,3 +167,104 @@ moves under input** in his house (Move / Change View prompt; in control by 600-8
    - `scripts/scenarios.toml` `[oot]` is now 935 s.
    - Saves: harness copies only.
 6. **Questions.** None.
+
+## Report (independent audit of `1eb9180`, read-only, 2026-11-25)
+
+Audited the committed source (`git show 1eb9180:<path>`; the working tree's `src/graphics` already has other edits).
+No builds, no games. Line numbers are in the committed files.
+
+**HIGH**
+
+- **H1 — `upskip` never learns of raw global-memory (gmem) stores in time, and never at all for pools > 64 MB.**
+  `vk/gmem.rs:236` (`hi - lo <= WB_MAX`), `vk/gmem.rs:276-281`, `vk/queue.rs:1761-1765`. The gmem write log is read in
+  the submission's completion callback, and `gmem::begin` notes those pools (→ `note_gpu_write_version` → `forget`)
+  at the start of a *later* submission, *after* that submission's `mem::begin_submit` has already run
+  `changed_runs`. Ranges over 64 MB, or with identity 0, are never noted. *Scenario:* sub K uploads page P (bytes X,
+  hash h(X)); a raw-pointer shader in K stores Z into P (DKB/MKW `c9a56f796ea4a4cd` write indirect records this way).
+  Frame N+1 the CPU writes X into P again (reset of the record): K+1's pool sync finds h(X) and **skips the upload**
+  — K has not completed, or has completed but `gmem::begin` runs after the sync — so the shader reads Z, not the
+  CPU's reset. In a > 64 MB pool the hash is never forgotten: every identical CPU rewrite is skipped for good. Before
+  this commit the rewrite was always uploaded. *Fix:* (a) call `upskip::forget` for every logged range in the
+  completion callback, regardless of `WB_MAX`/identity; (b) keep a sticky set of pools ever named by a gmem log (and
+  of every pool while a submission that bound a gmem log with stores is unretired) and return the whole range from
+  `changed_runs` for them; at minimum move `gmem::begin` before `mem::begin_submit`.
+- **H2 — `upskip::forget` stops early on nested pools.** `vk/upskip.rs:119-125`: `range(..a+n).rev().take_while(end >
+  a)` assumes pools do not overlap ("pools do not overlap"), but `mem.rs` supports pools laid over each other
+  (`find` comment at mem.rs:1471, `room_hit` mem.rs:740, `distribute_watched_pages` mem.rs:1706). *Scenario:* A =
+  [0x1000_0000, +16 MB) and B = [0x1000_2000, +4 KB) both have hashes; a storage write at 0x1008_0000 (resolves to A)
+  calls `forget`; the reverse walk meets B first (end ≤ a), `take_while` stops, A's page keeps h(X); the next identical
+  CPU rewrite of that page is skipped and A's GPU copy keeps the shader's bytes. *Fix:* skip rather than stop on
+  entries ending at or below `a`; bound the walk by the largest pool size kept in `H` (track `max_len`; stop when
+  `base + max_len <= a`).
+
+**MEDIUM**
+
+- **M1 — the hash and the upload read guest memory at different times.** `vk/upskip.rs:91-99` hashes a page, then
+  `mem.rs:2088-2089` (`upload_now` → `sub.upload`) copies it later (after the whole run is hashed: up to several MB,
+  ~1 ms). The game threads write concurrently. *Scenario:* page content X is rewritten each frame by "clear, then
+  fill" (or any transient different value); the hash sees X, the copy catches the half-cleared page M; the write watch
+  flags the page, the CPU finishes with X, the next sync finds h(X) == stored hash and **skips** — the GPU keeps M for
+  as long as the bytes stay X. Before the commit the flagged page was re-uploaded and the race healed itself. *Fix:*
+  hash exactly the bytes uploaded: copy each page to a local 4 KB buffer, hash it, upload from that copy (or hash the
+  CPU-side source after copying it into staging, never guest memory twice).
+- **M2 — skipped bytes still consume the upload budget.** `mem.rs:2078` charges `budget_take(n)` for the whole range
+  before `changed_runs` drops 98% of it, so real changes behind it are deferred a submission earlier than needed
+  (deferred ranges are then re-uploaded whole via `upload_deferred`, which also forgets their hashes). *Fix:* run
+  `changed_runs` first and charge `budget_take` per returned run (defer the unchanged-hash update for deferred runs).
+
+**LOW**
+
+- **L1 — `image.rs` M1-gap fix leaves the slot's old storage descriptor.** `image.rs:2483-2490` / `3086-3093` pass
+  `sview = None`; `tables.rs:1022`/`1053` then write no `B_IMG` descriptor, so the ID keeps whatever storage view was
+  registered there before (another image, if the ID was reused), while `storage_tex` forgets the ID (stores through it
+  go unnoted). Pre-existing for emulated `im.format`; the fix widens it. *Fix:* write a null / zero storage descriptor
+  at `B_IMG` when `storage` is None (as placeholders do).
+- **L2 — NDVE pool spans are not noted.** `newndve/kernels.rs:185` zero-fills and NDVE kernels write
+  `prepared_span` ranges (exec.rs:7429 `ndve_info`) without `note_gpu_write`, so no `forget`. Native NDVE is off; matters
+  only if it is enabled. *Fix:* `forget` (or note) every `prepared_span` bound writable.
+- **L3 — recycled snapshots are never returned.** `tables.rs:38-53`: up to 32 × 10 MB host-visible (BAR) buffers stay
+  allocated after a burst, and leak at shutdown. The count never exceeds the peak in flight, so no new peak; fine on
+  ReBAR. *Fix (optional):* free recycled buffers beyond a small count after N frames.
+- **L4 — `uptrace::Trace::last` grows without bound** (one entry per page ever uploaded) while `NXGFX_UPLOAD_TRACE=1`.
+  Diagnostic only.
+
+**Checked and found correct**
+
+- *tables.rs:* `Inner::shadow` has a single mutable access (`put_pool_descriptor`, tables.rs:495) besides the zero
+  init, so texel-buffer (B_TBUF/B_IBUF), image (B_TEX/B_IMG incl. placeholders and re-backing), and sampler writes are
+  all logged; the shadow has a fixed size (no pool resize). Generation logic: writes are logged under the `inner` lock
+  with the generation read there, `snapshot` reads its generation under the same lock, so a write logged below `from`
+  is always in the snapshot; `refresh` copies `gen >= from` (conservative for writes at `from`). Overflow: gens in the
+  log are non-decreasing, `edits_from = last dropped gen + 1`, so any buffer at or below a dropped generation is copied
+  whole, every newer one gets all its writes. Recycling: every `snapshot()` call registers `defer_after_use` for the
+  submission being recorded (`after_current`, attached at `submit_sub` to that submission's timeline value); there is
+  one Vulkan queue, a device loss ends the process (`lost::on_lost`), so a buffer reaches `RECYCLED` only after the
+  last submission that bound it completed. Lock order inner → RECYCLED is consistent (Drop takes only RECYCLED).
+  One `Tables` per process, so the global list cannot mix shadows.
+- *upskip forget paths:* `note_gpu_write_version` (both addresses) covers storage buffers, storage texel buffers,
+  transform feedback (`tf_begin`), report/fill (exec.rs:1000-1003), semaphores/copies (exec.rs:8722-8764), texture →
+  buffer copies (exec.rs:8834), gmem (late, H1). `sync_range`, `upload_deferred`, granule `bind`, `ensure_buffer`,
+  `pool_add`/`release` forget or drop. Write-back landings (`land`, `land_changed`, lazy bring-back) change only guest
+  memory, never the GPU copy, and the GPU write was forgotten when noted: correct. Image write-backs (`tex_wb`,
+  ReadTexels) write guest memory only: the GPU copy still equals the last upload, so a skip is right. Unbound
+  granules: hash set without an upload, but `bind` forgets and uploads the guest bytes: correct. Sparse pools
+  (`make_sparse`) skip `ensure_buffer`'s drop but `pool_add` already dropped; buffers are never recreated. Ordering:
+  `begin_submit` runs before the same submission's replay (queue.rs:1761/1778), uploads land in `pre`, so a write
+  noted while recording always clears a hash set by that submission's sync. vpool `translate` failure: no binding is
+  made either (`resolve_in`), so nothing to forget. Unwatched mirrors already diff against their snapshot. Hash:
+  xxHash64 round/merge (P3 for P4 in the merge, byte tail with P3: still 64-bit avalanche), length mixed in, never 0;
+  collision odds ~2^-64 per compare, acceptable; partial pages always uploaded and their hash cleared. Locks: `forget`
+  takes `H` without the pool lock; `changed_runs` takes it under the pool lock: no inversion.
+- *exec.rs indirect c0:* staged with `stage_bytes_fresh` (not memoised), the bank's `staged` cache untouched;
+  `set_key` → None, so no `hit_version`, no `patch_set`, no `store_version`; `write_db_set` clears the shadow's key on
+  the whole build, so no later direct dispatch patches from the private set; non-descbuf `memo_sets` keys by buffer +
+  offset (private offset is unique). `banks` runs once per compute set in `bind_sets`; `prepare_storage_bindings`'
+  call precedes the flag. Copy: 12 bytes to 0x200 always and 0x4 for NVN2, as `put_dispatch`; staging usage has
+  TRANSFER_DST; source is the clamp output after the clamp's full barrier (or the pool record after the previous
+  dispatch's full barrier); copy → full barrier → dispatch. Under pass dump / scaling `need` is forced (true,true) and
+  `set_key` is None: consistent. `NXGFX_INDIRECT_C0=0`: flag never set, identical to the old path.
+- *dump-only:* the blend constant, clear target, render-condition lines are inside `passdump::active()`; the
+  render-condition counters use `rc_value`, the same lookup the live path already makes; the uniform/storage reads
+  skip sparse virtual addresses before `room`. No cost when not dumping. `uptrace` is behind its OnceLock.
+- *image.rs M1 gap:* the condition matches `image_view_kind`'s remap (view format emulated → no pool storage view)
+  in both `reg_tex_now` and the re-backing loop; see L1 for the leftover slot.

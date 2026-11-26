@@ -5,7 +5,9 @@
 //! sync uploaded all of it every frame. Each whole page uploaded from a mirror keeps a hash of the bytes uploaded; a
 //! page written again with the same bytes is left out. A page's hash is forgotten when anything else changes the GPU
 //! copy (a GPU write, another upload path, the pool going), so a skip only ever happens when the GPU copy is exactly
-//! the last upload of those bytes. `NXGFX_UPLOAD_SKIP=0`: every written page is uploaded, as before.
+//! the last upload of those bytes. **Off by default** (lead, 2026-11-25): the OOT-FOREST2 audit found raw-pointer
+//! shader writes forget the hash only after the next upload pass (or never, for pools over 64 MB) and `forget` stops
+//! early under nested pools, so a skip could keep stale GPU bytes. `NXGFX_UPLOAD_SKIP=1` turns it on for A/B.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -22,8 +24,11 @@ static DIFFER: AtomicU64 = AtomicU64::new(0);
 static FORGOT: AtomicU64 = AtomicU64::new(0);
 
 pub fn on() -> bool {
+    if cfg!(test) {
+        return true; // the unit tests exercise the skip itself
+    }
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("NXGFX_UPLOAD_SKIP").as_deref() != Ok("0"))
+    *ON.get_or_init(|| std::env::var("NXGFX_UPLOAD_SKIP").as_deref() == Ok("1"))
 }
 
 /// xxHash64's round over 32-byte stripes, finished with its avalanche (never 0).

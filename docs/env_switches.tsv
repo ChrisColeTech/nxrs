@@ -149,7 +149,7 @@ NXGFX_TEST_SHADERS	test	memory budget. Uses `NXGFX_TEST_SHADERS` (default: the w
 NXGFX_TEX_CAP	switch	textures in the shared descriptor table at most (default 262144, within the device limit)	src/graphics/src/vk/layout.rs
 NXGFX_TEX_WB	switch	are the storage's bytes: true for every format let through here). `NXGFX_TEX_WB=1` on (off by default: `K2-mkw16`'s race washed out with it).	src/graphics/src/vk/exec.rs, src/graphics/tests/gpu.rs
 NXGFX_UPLOAD_MB	switch	`NXGFX_UPLOAD_MB` (default 64; 0: no budget).	src/graphics/src/vk/mem.rs
-NXGFX_UPLOAD_SKIP	switch	`NXGFX_UPLOAD_SKIP=0`: every CPU-written page is uploaded, also one whose bytes are those of its last upload (`upskip`).	src/graphics/src/vk/upskip.rs
+NXGFX_UPLOAD_SKIP	switch	`NXGFX_UPLOAD_SKIP=1`: a CPU-written page whose bytes are those of its last upload is not uploaded again (`upskip`; off by default until the OOT-FOREST2 audit's H1/H2/M1 are fixed).	src/graphics/src/vk/upskip.rs
 NXGFX_UPLOAD_TRACE	diagnostic`NXGFX_UPLOAD_TRACE=1` (diagnosis): the pool summary also logs what the pool sync uploads, by pool, and how much of it was unchanged since its last upload.	src/graphics/src/vk/uptrace.rs
 NXGFX_UPSCALE	switch`NXGFX_UPSCALE=standard` (or the ini's `upscale=standard`) keeps the linear blit; `NXGFX_SHARPNESS` 0..1 (0.5).	src/graphics/src/vk/upscale.rs
 NXGFX_VALIDATION	diagnostic	`1` turns the Vulkan validation layer on (the GPU tests set it)	src/graphics/src/vk/device.rs, src/graphics/src/vk/newndve/gpu_tests.rs, src/graphics/tests/common/mod.rs

@@ -124,7 +124,12 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       entering the house; route to Link moving). Slip: one shader `.spv` swapped for a trap run, restored
       byte-identical (SHA-256 checked).
 - [x] **OOT-FOREST2** (2026-11-25, `docs/waves/OOT-FOREST2.md`; lead re-ran graphics 212/212 and read the final
-      sheet; **independent audit running**). Indirect dispatches: private c0 per dispatch, the GPU copies the record
+      sheet). **Audit (in the wave doc): snapshot recycling and indirect c0 correct; upload skip has 2 HIGH** (raw-
+      pointer shader writes forget the hash only after the next upload pass, never for pools > 64 MB; `forget` stops
+      early under nested pools) **+ MEDIUM** (hash and upload read guest memory at different times; skipped bytes
+      still charge the upload budget) -> **lead turned the skip off by default** (`NXGFX_UPLOAD_SKIP=1` for A/B;
+      graphics 220/220); fixing it joins the GPU-written re-upload work after MKW-RECORD (`gmem`/`queue.rs`). LOW
+      L1 (M1-gap slot keeps an old storage view, should be null) handed to NVN2-PARITY. Indirect dispatches: private c0 per dispatch, the GPU copies the record
       to 0x200 (and NVN2 0x4) before it. Texture-pool snapshots recycled with only changed descriptors re-copied
       (were 8-24 a frame at 13-17 ms: 135 ms frames) -> ~0.1 ms. `upskip.rs`: identical re-uploads skipped
       (~8.5 of ~56 MB/frame); the other ~46 MB/frame are pages noted GPU-written every frame and need a per-write
