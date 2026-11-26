@@ -139,6 +139,16 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       not item 1; added by the game's bloom composite, engine inputs correct as far as checked; unproven without a
       reference capture. Wonder regression 59.5 FPS, 0 red. Slips: three runs overlapped MKW-RECORD's machine lock
       (their FPS indicative only); one crash from its own dump-log line (fixed, dump-only).
+- [x] **NVN2-PARITY done** (2026-11-25 ~20:50; lead re-ran graphics 220/220, read the dkb and oot sheets;
+      **independent audit running**). Fixed with tests: push banks c24-c29 readable, handle decode (`bank_u64`,
+      Switch 2), compute c0 uniform table as handles, `ucb_handle` size cap; timestamp on the guest clock; two-word
+      texture handles ORed (5 sites); CPU handle reads see the submission's queued uniform updates; uniform size
+      rounded to 256 (both NVN versions); device items 0x06=16, 0x62=32; emulated storage slots get a stand-in.
+      Measured, nothing to fix: `UPDATE_UB` ends a pass only 2-4 times a frame; no sparse tiles live in DKB/OoT.
+      Runs: DKB 58.7 -> 59.2 (5% low 53.0 -> 53.8) of 60; OoT 13.7 -> 15.0 of 59; Wonder 60.0. **Render size is not
+      the gap** (`NXOS_DISPLAY_MAX=1` no effect; DKB already scales to 2095x1179): OoT's ~70 ms frames are replay
+      24-27 ms + **pool sync 26-35 ms** + GPU 10-11 ms. **Pop-in not reproduced in these scenarios (before or
+      after)**: needs the owner's scene, and a Mario Kart World check once MKW-RECORD has merged this.
 - [ ] **NVN2-PARITY** (opened 2026-11-25, `docs/waves/NVN2-PARITY.md`, starts after OOT-FOREST2). Owner: every
       Switch 2 title misses 60 FPS and pops textures; Switch 1 titles fine. Read-only parity audit against nxnative
       (38 NVN2 items): missing/different — pushed buffer addresses (c24-c29) and uniform-buffer handles resolve to

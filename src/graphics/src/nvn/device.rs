@@ -29,11 +29,11 @@ const RT: i32 = -1;
 /// The Switch 2's answers (NVN2 compiled into the game's sdk answers from constants, read from
 /// Donkey Kong Bananza's sdk 20.5.19 and SDK 21.4.4's). Ampere differs from the X1 in 32 vertex bindings, 1,024
 /// compute threads, an unbounded dispatch width, 16 texture levels, 16 KB scratch granularity, 2 KB shader code
-/// padding, 32 separate sampler bindings, and items up to 0xA9. `RT` items keep the X1 value below 0x60 and answer 0
-/// (with a red line) above it.
+/// padding, 32 separate sampler bindings, and items up to 0xA9. `RT` items take the X1 table's value where it has one
+/// (0x62: 32, as nxnative) and answer 0 (with a red line) past it. 0x06 answers 16 vertex bindings: the host keeps 16.
 pub const DEVINFO2: [i32; 0xAA] = [
-    231, 39, 14, 65536, 256, 8, 32, 4, 16, 32, 16, 4, 4, 4, 32,
-    32, // 0x00 (0x06: 32, the 1.8.0 driver as mkw-recomp reads it; not a constant case of its switch)
+    231, 39, 14, 65536, 256, 8, 16, 4, 16, 32, 16, 4, 4, 4, 32,
+    32, // 0x00 (0x06: Ampere has 32 vertex bindings, the host keeps 16 as all its tables do; nxnative too)
     32, 256, 256, 4, 8, 512, 256, RT, RT, 4096, 16384, 16, 1024, 1024, 64, 1024, // 0x10
     2147483647, 65535, 65535, 8, 1048576, 4096, 16, 4096, 1, 1, 1, RT, 16, RT, 201,
     201, // 0x20
@@ -146,9 +146,68 @@ pub fn timestamp_to_ns(t: u64) -> u64 {
     }
 }
 
+/// NVN2's bindless uniform buffer handle in the hardware's layout (Ampere): bits 0..44 the address >> 4, 45..63 the
+/// size in 16-byte units, capped at 2^19 - 1 (nxnative `ucb_handle`). The driver writes it for
+/// nvnDeviceGetUniformBufferHandle and into compute's uniform table in c0.
+pub fn ucb_handle(addr: u64, size: u64) -> u64 {
+    let s = size.div_ceil(16).min((1 << 19) - 1);
+    (addr >> 4 & ((1 << 45) - 1)) | s << 45
+}
+
+/// The address a word holding either a plain address or a `ucb_handle` names: a handle of any size has a bit at 45
+/// or above, which no guest address has (nxnative `ucb_handle_addr`). Whether it was a handle is returned too.
+pub fn ucb_handle_addr(v: u64) -> (u64, bool) {
+    if v >> 45 != 0 {
+        ((v & ((1 << 45) - 1)) << 4, true)
+    } else {
+        (v, false)
+    }
+}
+
+/// nvnDeviceGetCurrentTimestampInNanoseconds: the guest clock, as the counter reports and the tick counter use (and
+/// 256 times slower with `game_dynamic_resolution=0`, as the reports are then).
+pub fn current_timestamp_ns() -> u64 {
+    let ns = crate::vk::counters::guest_ns();
+    if crate::vk::counters::drs() {
+        ns
+    } else {
+        ns / 256
+    }
+}
+
 pub fn now_ns() -> u64 {
     static T0: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     T0.get_or_init(std::time::Instant::now).elapsed().as_nanos() as u64
+}
+
+/// nvnDeviceGetInteger's answer for item `w` (`s2`: the Switch 2's driver).
+fn device_integer(w: usize, s2: bool) -> i32 {
+    if w <= 1 {
+        let a = api();
+        if w == 0 { a.0 } else { a.1 }
+    } else if s2 && w == 6 {
+        // vertex buffer bindings: the host's tables hold 16 (BindVertexBuffers refuses more), whatever the sdk says
+        16
+    } else if s2 && w < DEVINFO2.len() && (DEVINFO2[w] != RT || nvn2_item(w).is_some() || w >= DEVINFO.len()) {
+        // the Switch 2's driver: its own constant where its switch has one (GPU code versions move with the SDK)
+        if DEVINFO2[w] == RT && nvn2_item(w).is_none() {
+            crate::log::red_once(&format!("nvnDeviceGetInteger item {w:#x}: NVN2 reads it from the GPU at run time, not known here; returning 0"));
+            0
+        } else {
+            nvn2_item(w).unwrap_or(DEVINFO2[w])
+        }
+    } else if w == 0x67 {
+        // SDK 19 (FINAL FANTASY TACTICS): the alignment of its copies of a shader's control section and code
+        256
+    } else if w == 0x2E || w == 0x30 {
+        // the GPU code version the shader translation reads (1.16)
+        if w == 0x2E { 1 } else { 16 }
+    } else if w < DEVINFO.len() {
+        DEVINFO[w]
+    } else {
+        crate::log::red_once(&format!("nvnDeviceGetInteger item {w:#x}: unknown item; returning 0"));
+        0
+    }
 }
 
 fn api() -> (i32, i32) {
@@ -185,34 +244,12 @@ nvn_fns! {
     fn nvnDeviceGetProcAddress(d: *const NVNdevice, name: *const u8) -> u64 { let _ = d; super::resolve(&super::cstr(name)) }
     fn nvnDeviceGetInteger(d: *const NVNdevice, what: i32, out: *mut i32) {
         let _ = d;
-        let w = what as u32 as usize;
-        let s2 = SWITCH2.load(Ordering::Relaxed);
-        let v = if w <= 1 {
-            let a = api();
-            if w == 0 { a.0 } else { a.1 }
-        } else if s2 && w < DEVINFO2.len() && (DEVINFO2[w] != RT || w >= 0x60) {
-            // the Switch 2's driver: its own constant where its switch has one (GPU code versions move with the SDK)
-            if DEVINFO2[w] == RT && nvn2_item(w).is_none() {
-                crate::log::red_once(&format!("nvnDeviceGetInteger item {w:#x}: NVN2 reads it from the GPU at run time, not known here; returning 0"));
-                0
-            } else {
-                nvn2_item(w).unwrap_or(DEVINFO2[w])
-            }
-        } else if w == 0x67 {
-            // SDK 19 (FINAL FANTASY TACTICS): the alignment of its copies of a shader's control section and code
-            256
-        } else if w == 0x2E || w == 0x30 {
-            // the GPU code version the shader translation reads (1.16)
-            if w == 0x2E { 1 } else { 16 }
-        } else if w < DEVINFO.len() {
-            DEVINFO[w]
-        } else {
-            crate::log::red_once(&format!("nvnDeviceGetInteger item {w:#x}: unknown item; returning 0"));
-            0
-        };
-        *out = v;
+        *out = device_integer(what as u32 as usize, SWITCH2.load(Ordering::Relaxed));
     }
-    fn nvnDeviceGetCurrentTimestampInNanoseconds(d: *const NVNdevice) -> u64 { let _ = d; now_ns() }
+    /// The GPU's current time on the clock its counter timestamps report (`counters::report_time`): the guest clock.
+    /// It had graphics' own epoch, and a frame-rate controller comparing the two read a wrong GPU time (nxnative
+    /// hle_nvn.c: Donkey Kong Bananza held at 20 FPS by such a comparison).
+    fn nvnDeviceGetCurrentTimestampInNanoseconds(d: *const NVNdevice) -> u64 { let _ = d; current_timestamp_ns() }
     fn nvnDeviceGetTimestampInNanoseconds(d: *const NVNdevice, c: *const NVNcounterData) -> u64 { let _ = d; timestamp_to_ns((*c).timestamp) }
     fn nvnDeviceGetTextureHandle(d: *const NVNdevice, tex: i32, samp: i32) -> u64 { let _ = d; (tex as u32 as u64 & 0xfffff) | (samp as u32 as u64) << 20 }
     fn nvnDeviceGetTexelFetchHandle(d: *const NVNdevice, tex: i32) -> u64 { let _ = d; tex as u32 as u64 & 0xfffff }
@@ -239,5 +276,32 @@ nvn_fns! {
         let _ = (d, name);
         static NEXT: AtomicI32 = AtomicI32::new(0);
         NEXT.fetch_add(1, Ordering::Relaxed) + 1
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    /// The Switch 2's device: 16 vertex buffer bindings (the host's tables), 0x62 the X1 table's 32 (nxnative), and
+    /// a run-time item past the X1 table still 0.
+    #[test]
+    fn switch2_items_the_host_answers() {
+        assert_eq!(super::device_integer(6, true), 16);
+        assert_eq!(super::device_integer(0x62, true), 32);
+        assert_eq!(super::device_integer(0x62, false), 32);
+        assert_eq!(super::device_integer(0x7D, true), 0);
+        assert_eq!(super::device_integer(0x0E, true), 32, "a constant of NVN2's own still answers");
+        assert_eq!(super::device_integer(6, false), 16);
+    }
+
+    /// The hardware's bindless uniform buffer handle and its decode (nxnative ucb_handle / ucb_handle_addr): PRAGMATA
+    /// pushes 0x5a0083055d124: 0x83055d1240 with size field 0x2d (720 bytes); the size field is capped; a plain
+    /// address passes through.
+    #[test]
+    fn uniform_buffer_handles_round_trip() {
+        assert_eq!(super::ucb_handle(0x83055d1240, 720), 0x5a0083055d124);
+        assert_eq!(super::ucb_handle_addr(0x5a0083055d124), (0x83055d1240, true));
+        assert_eq!(super::ucb_handle_addr(0x83055d1240), (0x83055d1240, false));
+        assert_eq!(super::ucb_handle(0x1000, 1 << 40) >> 45, (1 << 19) - 1, "size capped at 2^19 - 1");
+        assert_eq!(super::ucb_handle_addr(super::ucb_handle(0x1000, 1 << 40)).0, 0x1000);
     }
 }

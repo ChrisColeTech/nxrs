@@ -368,8 +368,9 @@ nvn_fns! {
     // ---------- device ----------
     /// The builder's flags.
     fn nvnDeviceGetFlags(d: *const NVNdevice) -> i32 { (*(d as *const dev_t)).flags as i32 }
-    /// NVN2's bindless uniform buffer handle: (address >> 4) | ceil(size / 16) << 45.
-    fn nvnDeviceGetUniformBufferHandle(d: *const NVNdevice, addr: u64, size: u64) -> u64 { let _ = d; addr >> 4 | size.div_ceil(16) << 45 }
+    /// NVN2's bindless uniform buffer handle: (address >> 4) | ceil(size / 16) << 45, the size field capped at
+    /// 2^19 - 1 (`device::ucb_handle`).
+    fn nvnDeviceGetUniformBufferHandle(d: *const NVNdevice, addr: u64, size: u64) -> u64 { let _ = d; super::device::ucb_handle(addr, size) }
     /// The command memory size a direct (tag 2) handle encodes; the host's handles are control-list addresses (tag 0).
     fn nvnDeviceGetCommandHandleMemorySize(d: *const NVNdevice, h: u64) -> u64 { let _ = d; if h & 3 == 2 { (h >> 38) & 0x3ff_fffc } else { 0 } }
     fn nvnDeviceIsExternalDebuggerAttached(d: *const NVNdevice) -> NVNboolean { let _ = d; 0 }

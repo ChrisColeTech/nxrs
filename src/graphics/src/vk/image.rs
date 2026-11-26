@@ -2444,6 +2444,24 @@ impl Gpu {
         }
     }
 
+    /// The storage descriptor a texture slot gets: its storage view, or with none (no storage use, an emulated storage
+    /// format) the zero stand-in of the slot's target, so the slot never keeps the storage view it held before,
+    /// possibly another image's whose views are gone.
+    fn storage_or_stand_in(
+        &self,
+        sview: Option<vk::ImageView>,
+        tex_target: i32,
+        v: Option<&view_t>,
+    ) -> Option<vk::ImageView> {
+        sview.or_else(|| {
+            let target = match v {
+                Some(v) if v.bits & VW_TARGET != 0 => v.target as i32,
+                _ => tex_target,
+            };
+            super::exec::dummy_view_ready(self, target, true)
+        })
+    }
+
     fn reg_tex_now(&self, id: i32, t: &tex_t, v: Option<view_t>, as_image: bool) {
         if !t.valid() {
             crate::log::red_once("RegisterTexture of an uninitialized texture object");
@@ -2490,6 +2508,7 @@ impl Gpu {
         } else {
             None
         };
+        let sview = self.storage_or_stand_in(sview, t.d.target, v.as_ref());
         drop(imgs);
         self.tables.note_tex(id, t.serial, v);
         self.tables.write_image(&self.d, id, view, sview);
@@ -2892,7 +2911,17 @@ impl Gpu {
             }
             if let Some(im) = imgs.by_serial.get_mut(&serial) {
                 if let Some(view) = self.image_view(im, v.as_ref(), false) {
-                    self.tables.write_image(&self.d, id, view, None);
+                    // its storage view as at registration (emulated storage stays out of the pool), else the stand-in
+                    let sview = if !im.usage.contains(vk::ImageUsageFlags::STORAGE)
+                        || self.emulated_storage(im.format)
+                        || self.emulated_storage(self.view_format(im, v.as_ref()))
+                    {
+                        None
+                    } else {
+                        self.storage_view(im, v.as_ref())
+                    };
+                    let sview = self.storage_or_stand_in(sview, im.tex.d.target, v.as_ref());
+                    self.tables.write_image(&self.d, id, view, sview);
                 }
             }
         }
@@ -3091,6 +3120,7 @@ impl Gpu {
                     } else {
                         self.storage_view(im, v.as_ref())
                     };
+                    let sview = self.storage_or_stand_in(sview, im.tex.d.target, v.as_ref());
                     self.tables.write_image(&self.d, id, view, sview);
                 }
             }

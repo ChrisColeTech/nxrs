@@ -230,6 +230,23 @@ mod tests {
         assert_eq!(super::CLOCK.lock().unwrap().idle, 0, "a new frame");
     }
 
+    /// nvnDeviceGetCurrentTimestampInNanoseconds is on the clock the reports carry (the guest clock), not graphics'
+    /// own epoch: a controller comparing the two (Donkey Kong Bananza in nxnative) reads a true GPU time.
+    #[test]
+    fn the_current_timestamp_is_the_reports_clock() {
+        let _l = T.lock().unwrap_or_else(|e| e.into_inner());
+        fn guest() -> u64 {
+            crate::nvn::device::now_ns() + 5_000_000_000_000
+        }
+        super::set_guest_clock(guest);
+        let scale = if super::drs() { 1 } else { 256 };
+        let a = super::guest_ns() / scale;
+        let t = crate::nvn::device::current_timestamp_ns();
+        let b = super::guest_ns() / scale;
+        assert!(a <= t && t <= b, "{a} <= {t} <= {b}");
+        assert!(t > crate::nvn::device::now_ns() / scale + 4_000_000_000_000 / scale, "not graphics' own clock");
+    }
+
     #[test]
     fn report_times_follow_the_gpu_and_never_go_back() {
         let _l = T.lock().unwrap_or_else(|e| e.into_inner());

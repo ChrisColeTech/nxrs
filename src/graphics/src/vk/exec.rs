@@ -145,6 +145,51 @@ pub struct QState {
     /// a module's c1, the push banks by generation; each was hashed and staged again at every draw)
     scache: std::cell::RefCell<std::collections::HashMap<(u8, u64), (u64, (vk::Buffer, u64))>>,
     ndve: NdveTransaction,
+    /// this submission's inline uniform updates (UPDATE_UB), in order (`UbUpdates`): handle and address reads from
+    /// uniform banks on the CPU see them, as the GPU will (nxnative `ubo_read`)
+    ub_upd: UbUpdates,
+}
+
+/// Inline uniform updates queued in one submission: (guest address, offset into `bytes`, length), and the span of
+/// guest addresses they cover.
+#[derive(Default)]
+struct UbUpdates {
+    list: Vec<(u64, u32, u32)>,
+    bytes: Vec<u8>,
+    span: (u64, u64),
+}
+
+impl UbUpdates {
+    fn push(&mut self, dst: u64, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        if self.list.is_empty() {
+            self.span = (dst, dst + data.len() as u64);
+        } else {
+            self.span = (self.span.0.min(dst), self.span.1.max(dst + data.len() as u64));
+        }
+        self.list.push((dst, self.bytes.len() as u32, data.len() as u32));
+        self.bytes.extend_from_slice(data);
+    }
+    fn clear(&mut self) {
+        self.list.clear();
+        self.bytes.clear();
+    }
+    /// The 4 bytes at `a` with the queued updates over them applied, in order, on top of `mem`.
+    fn word(&self, a: u64, mem: u32) -> u32 {
+        if self.list.is_empty() || a + 4 <= self.span.0 || self.span.1 <= a {
+            return mem;
+        }
+        let mut w = mem.to_le_bytes();
+        for &(d, o, n) in &self.list {
+            let (lo, hi) = (d.max(a), (d + n as u64).min(a + 4));
+            for x in lo..hi {
+                w[(x - a) as usize] = self.bytes[o as usize + (x - d) as usize];
+            }
+        }
+        u32::from_le_bytes(w)
+    }
 }
 
 #[derive(Clone)]
@@ -291,6 +336,7 @@ fn res_class(r: &Res) -> u32 {
         0 => CL_C0,
         -1 | 2 => CL_C2,
         3..=18 => 1 << (s - 3),
+        24..=29 => CL_PUSH,
         _ => 0,
     };
     match r {
@@ -572,6 +618,8 @@ fn set_deps(m: &Module) -> Option<SetDeps> {
         0 => d.c0 = true,
         -1 | 2 => d.c2 = true,
         3..=18 => d.ubo |= 1 << (s - 3),
+        // a storage buffer whose address the game pushed (`bank_u64`)
+        24..=29 => d.push = true,
         _ => {}
     };
     for (_, r) in &m.res {
@@ -916,6 +964,7 @@ impl QState {
             pgen: new_bgen(),
             scache: Default::default(),
             ndve: Default::default(),
+            ub_upd: Default::default(),
             vis_on: false,
             occl_q: None,
             last_color: vk::Extent2D::default(),
@@ -2279,6 +2328,7 @@ fn end_pass(g: &Gpu, sub: &mut Sub, qs: &mut QState) {
 pub fn end(g: &Gpu, sub: &mut Sub, qs: &mut QState) {
     flush_ndve(g, sub, qs);
     end_pass(g, sub, qs);
+    qs.ub_upd.clear();
 }
 
 /// The image of a texture snapshot for writing (render target, copy destination): made GPU-owned, prepared in the
@@ -2966,6 +3016,24 @@ fn indirect_c0_copies(src: u64, c0: u64, nvn2: bool) -> Vec<vk::BufferCopy> {
     v
 }
 
+/// Compute's uniform table in c0 (0x210 + 16 r: 64-bit address, 32-bit size, ending at 0x310). NVN2's compute shaders
+/// read a row's first 8 bytes as a bindless constant buffer handle, which NVN2's driver writes there in the hardware's
+/// layout (`device::ucb_handle`, nxnative c0 DMSH_C0_CS_UBO); NVN's read the address itself.
+fn put_cs_ubos(v: &mut [u8], ubo: &[(u64, u64); 16], nvn2: bool) {
+    for (r, &(a, n)) in ubo.iter().enumerate() {
+        let o = 0x210 + 0x10 * r;
+        if o + 12 <= 0x310 {
+            let w = if nvn2 && a != 0 {
+                crate::nvn::device::ucb_handle(a, n)
+            } else {
+                a
+            };
+            v[o..o + 8].copy_from_slice(&w.to_le_bytes());
+            v[o + 8..o + 12].copy_from_slice(&(n as u32).to_le_bytes());
+        }
+    }
+}
+
 /// The driver's constant segment c0 of a stage: storage buffer table, compute dispatch size and uniform table, base
 /// instance.
 fn c0_bytes(qs: &QState, st: usize, dispatch: [u32; 3], base_instance: u32) -> Vec<u8> {
@@ -2994,14 +3062,7 @@ fn c0_bytes(qs: &QState, st: usize, dispatch: [u32; 3], base_instance: u32) -> V
         // was Inf / NaN and the forest's forward pass and fog turned the whole frame NaN (white)
         let nvn2 = crate::nvn::device::SWITCH2.load(std::sync::atomic::Ordering::Relaxed);
         put_dispatch(&mut v, dispatch, nvn2);
-        for r in 0..16 {
-            let (a, n) = qs.ubo[5][r];
-            let o = 0x210 + 0x10 * r;
-            if o + 12 <= 0x310 {
-                v[o..o + 8].copy_from_slice(&a.to_le_bytes());
-                v[o + 8..o + 12].copy_from_slice(&(n as u32).to_le_bytes());
-            }
-        }
+        put_cs_ubos(&mut v, &qs.ubo[5], nvn2);
     } else {
         v[0x644..0x648].copy_from_slice(&base_instance.to_le_bytes());
     }
@@ -3037,6 +3098,28 @@ fn tex_slots(s: i32) -> (i32, i32) {
     (t, if hi != 0 { hi as i32 - 1 } else { t })
 }
 
+/// The handle a texture / image binding reads: the word at its first offset, or for a two-word handle (kind 1,
+/// `handle >> 28`) both words ORed, as the shader ORs them; they hold the texture and the sampler in either order.
+/// Unreal Engine 5.4's lighting shaders on the Switch 2 put the shared sampler's word first, so the texture ID of the
+/// first word alone was 0 (nxnative `ubo_bind_handle`).
+fn handle_word(
+    qs: &QState,
+    st: usize,
+    m: &Module,
+    c0: &[u8],
+    c2: &[u8],
+    cbuf_slot: i32,
+    handle: u32,
+) -> u32 {
+    let (t, s) = tex_slots(cbuf_slot);
+    let w = bank_word(qs, st, m, c0, c2, t, handle & 0x3fff);
+    if handle >> 28 == 1 {
+        w | bank_word(qs, st, m, c0, c2, s, handle >> 14 & 0x3fff)
+    } else {
+        w
+    }
+}
+
 fn bank_word(
     qs: &QState,
     st: usize,
@@ -3058,16 +3141,44 @@ fn bank_word(
         1 => m.c1.as_deref().map(rd).unwrap_or(0),
         s if (3..19).contains(&s) => {
             let (a, n) = qs.ubo[st][(s - 3) as usize];
-            if a == 0 || at as u64 + 4 > n {
+            if a == 0 || at as u64 + 4 > n && at as u64 + 4 > ub_bound(n, super::mem::room(a), 65536)
+            {
                 0
             } else {
-                unsafe { core::ptr::read_unaligned((a + at as u64) as *const u32) }
+                let mem = unsafe { core::ptr::read_unaligned((a + at as u64) as *const u32) };
+                qs.ub_upd.word(a + at as u64, mem)
             }
         }
+        s @ 24..=29 => rd(push_bank(qs, st, s as u32)),
         _ => 0,
     }
 }
 
+/// The bytes of NVN2 push-constant bank c`bank` (24..=29) a stage reads, as `push_info` binds them: c24 its group's
+/// whole block (compute: group 1), c25..c29 the graphics group's block 1..5 (nxnative NVN_RB_SBUFQ / NVN_RB_PUSH).
+fn push_bank(qs: &QState, st: usize, bank: u32) -> &[u8] {
+    if bank == 24 {
+        &qs.push[(st == 5) as usize][..]
+    } else {
+        let b = (bank - 24) as usize * 0x100;
+        &qs.push[0][b..b + 0x100]
+    }
+}
+
+/// A storage buffer record's address word: an NVN2 handle decoded (and whether it was one); NVN has no such handles,
+/// and its words are taken as they are.
+fn decode_record_addr(v: u64, nvn2: bool) -> (u64, bool) {
+    if nvn2 {
+        crate::nvn::device::ucb_handle_addr(v)
+    } else {
+        (v, false)
+    }
+}
+
+/// A storage buffer record `{u64 address, u32 size}` at `byte` of bank `slot`: (address, size). The address word may
+/// be an NVN2 bindless handle (`device::ucb_handle`: the compute uniform table, a pushed handle), decoded to its
+/// address; a handle, and an address the game pushed (8 bytes only, nxnative NVN_RB_SBUFQ), carry no size (0: the
+/// binding runs to the end of its pool, as a buffer bound with size 0).
 fn bank_u64(
     qs: &QState,
     st: usize,
@@ -3079,8 +3190,13 @@ fn bank_u64(
 ) -> (u64, u64) {
     let lo = bank_word(qs, st, m, c0, c2, slot, byte / 4) as u64;
     let hi = bank_word(qs, st, m, c0, c2, slot, byte / 4 + 1) as u64;
+    let nvn2 = crate::nvn::device::SWITCH2.load(std::sync::atomic::Ordering::Relaxed);
+    let (a, handle) = decode_record_addr(lo | hi << 32, nvn2);
+    if handle || (24..=29).contains(&slot) {
+        return (a, 0);
+    }
     let n = bank_word(qs, st, m, c0, c2, slot, byte / 4 + 2) as u64;
-    (lo | hi << 32, n)
+    (a, n)
 }
 
 /// The NVN target a shader's sampler type asks for (dimension | array 0x100 | multisample 0x400).
@@ -3217,15 +3333,7 @@ fn prepare_storage_bindings(
             if *ty == 2 {
                 continue;
             }
-            let word = bank_word(
-                qs,
-                st,
-                m,
-                &c0,
-                &c2,
-                tex_slots(*cbuf_slot).0,
-                handle & 0x3fff,
-            );
+            let word = handle_word(qs, st, m, &c0, &c2, *cbuf_slot, *handle);
             let id = (word & 0xfffff) as i32 + tb;
             g.materialize(id);
             let upgrade = g.tables.tex_at(id).is_some_and(|(s, _)| {
@@ -3780,7 +3888,7 @@ fn binding_scales(
         if ty == 2 || 1 + idx >= v.len() {
             continue;
         }
-        let word = bank_word(qs, st, m, c0, c2, tex_slots(cbuf_slot).0, handle & 0x3fff);
+        let word = handle_word(qs, st, m, c0, c2, cbuf_slot, handle);
         let tid = (word & 0xfffff) as i32 + tb;
         if let Some((serial, _)) = g.tables.tex_at(tid) {
             if let Some(im) = imgs.by_serial.get(&imgs.live(serial)) {
@@ -3793,6 +3901,16 @@ fn binding_scales(
     v
 }
 
+/// The bytes a uniform binding of size `n` gives the GPU: the size rounded up to 256 as both drivers write it
+/// (NVN1 method 0x8e0 `(n + 0xff) & ~0xff`, NVN2 0xe02 `((n + 0xff) >> 8) << 20`; nxnative `ub_bound`), so a read
+/// between the size and the next multiple of 256 gives the memory there, not 0 (Ocarina of Time binds 16, 64, 144,
+/// 192, 464 ... bytes). Held to `room`, the bytes to the end of its pool (unless the binding itself runs past it),
+/// and to `cap`.
+fn ub_bound(n: u64, room: u64, cap: u64) -> u64 {
+    let r = n.div_ceil(256) * 256;
+    r.min(room.max(n)).min(cap)
+}
+
 /// Uniform bank c`bank` (3..=18) of a stage set: the bound range `(a, n)` in its pool, or the zero buffer.
 fn ubo_info(
     g: &Gpu,
@@ -3803,8 +3921,13 @@ fn ubo_info(
     zero: vk::Buffer,
     max_ubo: u64,
 ) -> vk::DescriptorBufferInfo {
-    let r = if a != 0 && n != 0 {
-        super::mem::resolve(g, sub, a, n.min(max_ubo))
+    let range = if a != 0 && n != 0 {
+        ub_bound(n, super::mem::room(a), max_ubo)
+    } else {
+        0
+    };
+    let r = if range != 0 {
+        super::mem::resolve(g, sub, a, range)
     } else {
         None
     };
@@ -3819,7 +3942,7 @@ fn ubo_info(
             vk::DescriptorBufferInfo {
                 buffer: buf,
                 offset: off,
-                range: n.min(max_ubo),
+                range,
             }
         }
         None => {
@@ -4170,15 +4293,7 @@ fn stage_set(
                 } else {
                     0
                 };
-                let word = bank_word(
-                    qs,
-                    st,
-                    m,
-                    &c0,
-                    &c2,
-                    tex_slots(*cbuf_slot).0,
-                    handle & 0x3fff,
-                );
+                let word = handle_word(qs, st, m, &c0, &c2, *cbuf_slot, *handle);
                 let kind = handle >> 28;
                 let tid = (word & 0xfffff) as i32 + tb;
                 if *ty == 2 {
@@ -4220,18 +4335,8 @@ fn stage_set(
                     continue;
                 }
                 let sid = match kind {
-                    0 => (word >> 20) as i32,
-                    1 => {
-                        (bank_word(
-                            qs,
-                            st,
-                            m,
-                            &c0,
-                            &c2,
-                            tex_slots(*cbuf_slot).1,
-                            handle >> 14 & 0x3fff,
-                        ) >> 20) as i32
-                    }
+                    // kind 1: `word` holds both words of the handle (`handle_word`)
+                    0 | 1 => (word >> 20) as i32,
                     2 => (handle >> 14 & 0x3fff) as i32,
                     _ => {
                         crate::log::red_once("constant sampler handles are not bound yet");
@@ -4941,6 +5046,100 @@ mod set_patch_tests {
         assert!(!private_c0(5, false), "a set that does not bind c0 cannot read the counts");
         assert!(!private_c0(0, true), "graphics stages are not dispatches");
         INDIRECT_C0.with(|c| c.set((false, None)));
+    }
+
+    /// NVN2 push-constant banks c24..c29 resolve to the pushed bytes (c24 the stage's group, c25.. the graphics
+    /// group's blocks), a pushed storage buffer address carries no size, an NVN2 handle decodes to its address (NVN's
+    /// words stay as they are), and such a set is keyed and patched by the push constants. Before: 0 for all of them.
+    #[test]
+    fn pushed_buffer_addresses_and_handles_resolve() {
+        let mut qs = QState::new(false);
+        qs.push[1][0x10..0x18].copy_from_slice(&0x8000_1000u64.to_le_bytes());
+        qs.push[1][0x18..0x1c].copy_from_slice(&0x40u32.to_le_bytes());
+        qs.push[0][0x10..0x14].copy_from_slice(&7u32.to_le_bytes());
+        qs.push[0][0x208..0x20c].copy_from_slice(&9u32.to_le_bytes());
+        let mut cs = module(vec![(32, Res::Sbuf { cb_slot: 24, cb_off: 0x10, written: true })]);
+        cs.stage = 5;
+        let gs = module(vec![]);
+        let (c0, c2) = (vec![0u8; DRV_SIZE], vec![0u8; DRV_SIZE]);
+        assert_eq!(bank_word(&qs, 5, &cs, &c0, &c2, 24, 4), 0x8000_1000, "compute reads group 1");
+        assert_eq!(bank_word(&qs, 0, &gs, &c0, &c2, 24, 4), 7, "graphics reads group 0");
+        assert_eq!(bank_word(&qs, 1, &gs, &c0, &c2, 26, 2), 9, "c26 is block 2 of group 0");
+        assert_eq!(bank_word(&qs, 1, &gs, &c0, &c2, 26, 0x40), 0, "past the block");
+        assert_eq!(bank_u64(&qs, 5, &cs, &c0, &c2, 24, 0x10), (0x8000_1000, 0), "pushed: no size");
+        let h = crate::nvn::device::ucb_handle(0x8000_1000, 0x40);
+        assert_eq!(decode_record_addr(h, true), (0x8000_1000, true));
+        assert_eq!(decode_record_addr(h, false), (h, false), "NVN has no bindless handles");
+        assert_eq!(decode_record_addr(0x8000_1000, true), (0x8000_1000, false));
+        let d = set_deps(&cs).unwrap();
+        assert!(d.push && !d.c0, "keyed by the push constants");
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: 27, cb_off: 0, written: false }), CL_PUSH);
+    }
+
+    /// NVN2 compute's uniform table in c0 holds hardware handles (size kept at +8); NVN's the address.
+    #[test]
+    fn nvn2_compute_uniform_table_holds_handles() {
+        let word64 = |v: &[u8], o: usize| u64::from_le_bytes(v[o..o + 8].try_into().unwrap());
+        let mut ubo = [(0u64, 0u64); 16];
+        ubo[7] = (0x8300_1000, 144);
+        let mut v = vec![0u8; DRV_SIZE];
+        put_cs_ubos(&mut v, &ubo, true);
+        assert_eq!(word64(&v, 0x280), crate::nvn::device::ucb_handle(0x8300_1000, 144));
+        assert_eq!(u32::from_le_bytes(v[0x288..0x28c].try_into().unwrap()), 144);
+        assert_eq!(word64(&v, 0x210), 0, "an unbound slot stays 0");
+        let mut v1 = vec![0u8; DRV_SIZE];
+        put_cs_ubos(&mut v1, &ubo, false);
+        assert_eq!(word64(&v1, 0x280), 0x8300_1000, "Link's Awakening reads the address at 0x280");
+    }
+
+    /// A two-word handle (kind 1) is both words ORed: the sampler's word may come first (UE5.4 on the Switch 2),
+    /// where the first word alone named texture 0. One-word handles read their word.
+    #[test]
+    fn two_word_texture_handles_or_both_words() {
+        let qs = QState::new(false);
+        let m = module(vec![]);
+        let c0 = vec![0u8; DRV_SIZE];
+        let mut c2 = vec![0u8; DRV_SIZE];
+        c2[0x20..0x24].copy_from_slice(&(5u32 << 20).to_le_bytes());
+        c2[0x28..0x2c].copy_from_slice(&0x123u32.to_le_bytes());
+        let two = 1 << 28 | (0x28 / 4) << 14 | 0x20 / 4;
+        assert_eq!(handle_word(&qs, 0, &m, &c0, &c2, -1, two), 0x123 | 5 << 20);
+        assert_eq!(handle_word(&qs, 0, &m, &c0, &c2, -1, 0x28 / 4), 0x123);
+        assert_eq!(handle_word(&qs, 0, &m, &c0, &c2, -1, 0x20 / 4), 5 << 20);
+    }
+
+    /// A handle read from a uniform bank on the CPU sees the inline updates queued over it in this submission, in
+    /// order, byte by byte (nxnative `ubo_read`); before, it read the memory the GPU had not updated yet.
+    #[test]
+    fn uniform_reads_see_this_submissions_inline_updates() {
+        let mut mem = vec![0u8; 64];
+        mem[8..12].copy_from_slice(&0x11u32.to_le_bytes());
+        let a = mem.as_ptr() as u64;
+        let mut qs = QState::new(false);
+        qs.ubo[0][0] = (a, 64);
+        let m = module(vec![]);
+        let (c0, c2) = (vec![0u8; DRV_SIZE], vec![0u8; DRV_SIZE]);
+        assert_eq!(bank_word(&qs, 0, &m, &c0, &c2, 3, 2), 0x11);
+        qs.ub_upd.push(a + 8, &0x22u32.to_le_bytes());
+        assert_eq!(bank_word(&qs, 0, &m, &c0, &c2, 3, 2), 0x22);
+        qs.ub_upd.push(a + 10, &[0x33]);
+        assert_eq!(bank_word(&qs, 0, &m, &c0, &c2, 3, 2), 0x33_0022, "the later update wins its byte");
+        assert_eq!(bank_word(&qs, 0, &m, &c0, &c2, 3, 3), 0, "a word no update covers");
+        qs.ub_upd.clear();
+        assert_eq!(bank_word(&qs, 0, &m, &c0, &c2, 3, 2), 0x11, "the next submission reads memory");
+        drop(mem);
+    }
+
+    /// A uniform binding gives the GPU its size rounded up to 256 (both drivers), within its pool and the cap.
+    #[test]
+    fn uniform_bindings_round_up_to_256() {
+        assert_eq!(ub_bound(16, 1 << 20, 65536), 256);
+        assert_eq!(ub_bound(464, 1 << 20, 65536), 512);
+        assert_eq!(ub_bound(512, 1 << 20, 65536), 512);
+        assert_eq!(ub_bound(144, 200, 65536), 200, "the pool ends first");
+        assert_eq!(ub_bound(144, 100, 65536), 144, "a binding past its pool keeps its size");
+        assert_eq!(ub_bound(65500, 1 << 20, 65536), 65536);
+        assert_eq!(ub_bound(16, 0, 65536), 16, "no pool known");
     }
 
     fn module(res: Vec<(u32, Res)>) -> Module {
@@ -6914,15 +7113,7 @@ fn dkb_ndsr_copy(g: &Gpu, sub: &mut Sub, qs: &QState, cs: &Module, dispatch: [u3
     let (c0, c2, _, _) = qs.banks(g, sub, st, dispatch, 0, [(true, false); 2], true);
     let tb = pool_bases(qs).0;
     let id_of = |handle: u32, cbuf_slot: i32| {
-        let word = bank_word(
-            qs,
-            st,
-            cs,
-            &c0,
-            &c2,
-            tex_slots(cbuf_slot).0,
-            handle & 0x3fff,
-        );
+        let word = handle_word(qs, st, cs, &c0, &c2, cbuf_slot, handle);
         (word & 0xfffff) as i32 + tb
     };
     let source_id = cs.res.iter().find_map(|(_, r)| match r {
@@ -7105,15 +7296,7 @@ fn compute_image_ids(
     let tb = pool_bases(qs).0;
     let id = |handle: u32, cbuf_slot: i32| {
         if !matches!(tex_slots(cbuf_slot).0, -1 | 2) { return 0; }
-        let word = bank_word(
-            qs,
-            st,
-            cs,
-            &c0,
-            &c2,
-            tex_slots(cbuf_slot).0,
-            handle & 0x3fff,
-        );
+        let word = handle_word(qs, st, cs, &c0, &c2, cbuf_slot, handle);
         (word & 0xfffff) as i32 + tb
     };
     let mut textures = Vec::new();
@@ -8735,10 +8918,15 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
             }
         }
         op::UPDATE_UB => {
+            super::perf::inc(super::perf::C::UbUpdates);
+            if qs.in_pass {
+                super::perf::inc(super::perf::C::UbPassEnds);
+            }
             end_pass(g, sub, qs);
             let [dst, n]: [u64; 2] = unsafe { rd_at(rec, 0) };
             let data = &rec[24..24 + n as usize];
             if let Some((db, doff, _)) = super::mem::resolve(g, sub, dst, n) {
+                qs.ub_upd.push(dst, data);
                 let (sb, so) = sub.stage_bytes(g, data);
                 unsafe {
                     dev.cmd_copy_buffer(
