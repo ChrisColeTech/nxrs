@@ -27,7 +27,11 @@ $libcVersion = '0.2.191'
 $libcSrc = Get-ChildItem (Join-Path $env:USERPROFILE '.cargo\registry\src') -Directory |
     ForEach-Object { Join-Path $_.FullName "libc-$libcVersion" } | Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $libcSrc) { throw "libc $libcVersion is not in the cargo registry (build std once for the web target, or cargo fetch)" }
-$libcWeb = Join-Path $repo 'build\tools\libc-wasm64'
+# A worktree's build\tools is a junction into the main checkout: name the copy by its real folder, so every worktree
+# writes the same line into the shared toolchain (a different spelling makes cargo build std again for the others).
+$tools = Get-Item (Join-Path $repo 'build\tools')
+$toolsDir = if ($tools.LinkType -eq 'Junction') { $tools.Target } else { $tools.FullName }
+$libcWeb = Join-Path $toolsDir 'libc-wasm64'
 $patch = Join-Path $PSScriptRoot 'libc-wasm64.patch'
 $stamp = Join-Path $libcWeb '.nxrs-patch'
 $want = (Get-FileHash $patch).Hash
