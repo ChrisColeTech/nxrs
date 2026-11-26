@@ -26,7 +26,7 @@ pub fn show(ui: &mut Ui, app: &mut App, s: &mut SettingsDraft) -> Reply {
     let mut tab = s.tab;
     super::rail_window::show(ui, "settings", &entries, &mut tab, |ui, tab| match tab {
         0 => settings_tabs::engine(ui, app, s),
-        1 => settings_tabs::builds(ui, s),
+        1 => settings_tabs::builds(ui, app, s),
         2 => settings_tabs::controller(ui, s),
         3 => settings_tabs::appearance(ui, app, s),
         _ => settings_tabs::play(ui, s),

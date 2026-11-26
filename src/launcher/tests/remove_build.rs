@@ -49,7 +49,6 @@ fn ticked_keeps_saves_deletes_the_build_and_a_rebuild_restores_them() {
         panic!("no question with a tick box");
     };
     assert!(c.on && c.label.starts_with("Also delete the build (") && c.label.ends_with("MB)"));
-    assert_eq!(c.heading, "Kart");
     assert_eq!(c.yes_on, Action::ConfirmRemove("k".into(), true));
     app.surfaces.clear();
     app.confirm_remove("k", true);

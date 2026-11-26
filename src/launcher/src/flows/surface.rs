@@ -25,11 +25,10 @@ pub struct ListWindow {
     pub status: Option<(String, bool)>,
 }
 
-/// A question with a tick box: the Group heading's title (its explanation is the question's text), the
-/// tick box's words and explanation, whether it is ticked, and what Yes asks for while it is.
+/// A question's tick box: its words, its explanation (the info mark), whether it is ticked, and what Yes
+/// asks for while it is.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Check {
-    pub heading: String,
     pub label: String,
     pub tip: String,
     pub on: bool,

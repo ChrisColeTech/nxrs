@@ -41,4 +41,7 @@ pub const UPDATES: Surface = ("updates", 700.0, 430.0, 540.0, 320.0);
 /// A message or a question: its width; its body is measured from its text.
 pub const MESSAGE_WIDTH: f32 = 440.0;
 pub const MESSAGE_LEAST: f32 = 340.0;
+/// A question's tick box: the paragraph gap over it, and the height it adds to the box.
+pub const MESSAGE_CHECK_GAP: f32 = 12.0;
+pub const MESSAGE_CHECK_ROW: f32 = 36.0;
 pub const MESSAGE_KEY: &str = "message";

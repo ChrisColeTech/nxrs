@@ -148,7 +148,8 @@ exit codes 0 / 1 / 2, the output layout and the data folder), plus, with `--mach
   setting is set); the entry reads what is built there (source and applied update from `romfs.source`).
 - **Migration** of the layout before (`<source folder>\SwitchRecomp Builds\<name> [nxrs]`): `nxrs.exe
   --migrate-builds [--select-title <title>] [--library <file>]` (prints a line an entry, exit 1 when one was left),
-  and once each time the window opens. Each such folder is renamed to `<source folder>\nxrs\<name>` and its entry's
+  or Settings > Build defaults > Old build folders > Move. It runs only when asked, never at start (other tools and
+  agents use build folders). Each such folder is renamed to `<source folder>\nxrs\<name>` and its entry's
   `buildDir` updated; a game running or building (process list, or its executable / module open), a folder whose new
   place exists, or a rename that fails is left and reported, and retried next time. `library.json` is copied to
   `library.pre-layout.json` before the first write (and to `library.qt-backup.json` by the Qt rule). A `SwitchRecomp

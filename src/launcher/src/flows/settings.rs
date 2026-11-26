@@ -22,6 +22,8 @@ pub struct SettingsDraft {
     pub docked: bool,
     pub pause: bool,
     pub mute: bool,
+    /// what Build defaults' Move said in this window (the move is done at once, not on Apply)
+    pub moved: Vec<String>,
 }
 
 impl App {
@@ -44,6 +46,7 @@ impl App {
             docked: l.docked,
             pause: l.pause_on_focus_loss,
             mute: l.mute_on_focus_loss,
+            moved: Vec::new(),
         };
         self.surfaces.push(Surface::Settings(Box::new(draft)));
         self.run_doctor();

@@ -44,7 +44,7 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 | G-05 | "Has a build": not incomplete, exe + `<name>_code.dll/.so` + `<name>_data\` exist, built source = source (or no source), built update = chosen update; `updatePending` = built but with another update | `Game::hasBuild`, `updatePending`, `builtFiles`, `sameToken` |
 | G-06 | Import a native build: needs exe + code module + data; source from `romfs.nup` (line 1) or `romfs.nsp` (`SWRNSP1/2`, line 2); applied update from `SWRNSP2` `update` row; engine from `<name>_build*\gen\nxrs.gen.key`; renderer from INI; cover from `icon.jpg` / `icon.png` / `icon_AmericanEnglish.dat` in data | `gameFromExecutable`, `sourceOfBuild`, `builtWithNxrs`, `adoptBuiltUpdate` |
 | G-07 | Path equality: clean absolute, `/` and `\` equal, case-insensitive on Windows | `samePath` |
-| G-08 | Build folder: `model::build_layout` (`<base>\nxrs\<name>`); an entry loaded from another engine moves to `nxrs_folder_for` its old folder and reads back what that folder has built; entries in the old layout (`SwitchRecomp Builds\<name> [nxrs]`) are migrated by `--migrate-builds` and at window start (renamed, `buildDir` updated, running / in-use / taken skipped and reported, `library.pre-layout.json` first; LAUNCHER_CONTRACT.md v2) | `setGameEngine`, `buildFolderFor` |
+| G-08 | Build folder: `model::build_layout` (`<base>\nxrs\<name>`); an entry loaded from another engine moves to `nxrs_folder_for` its old folder and reads back what that folder has built; entries in the old layout (`SwitchRecomp Builds\<name> [nxrs]`) are migrated only when asked, by `--migrate-builds` or Settings > Build defaults > Old build folders > Move, never at window start (renamed, `buildDir` updated, running / in-use / taken skipped and reported, `library.pre-layout.json` first; LAUNCHER_CONTRACT.md v2) | `setGameEngine`, `buildFolderFor` |
 | G-09 | A package that holds game + DLC: the first build from it puts the package on the game's DLC list (never re-adds after the user removed it) | `adoptPackageDlc`, `BuildManager::reportsPackageDlc` |
 | G-10 | "Rebuild for full speed": `<data>\discovered.tsv` non-comment lines minus `hintsBuilt`, nxrs games only | `discoveredCount`, `newDiscoveries` |
 
@@ -184,7 +184,7 @@ engine's docs) depend on them.
 | `--library <file>` | library file; skips legacy migration |
 | `--import-build <exe>` | import after the window opens |
 | `--demo` | non-persistent preview library |
-| `--list-view`, `--show-console`, `--show-filters`, `--show-appearance`, `--show-controller`, `--show-engine-settings`, `--show-play-settings`, `--show-updates`, `--show-dlc` | open that view |
+| `--list-view`, `--show-console`, `--show-filters`, `--show-appearance`, `--show-controller`, `--show-engine-settings`, `--show-play-settings`, `--show-updates`, `--show-dlc`, `--show-remove` | open that view |
 | `--show-properties` + `--properties-tab <0..5>` | Properties on a tab |
 | `--show-menu <File\|Game\|Keys\|View\|Help>` | pop a title-bar menu (after 300 ms) |
 | `--preview-theme <mode>`, `--preview-accent <id>` | appearance without saving |

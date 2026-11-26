@@ -117,8 +117,8 @@ pub fn command() -> Command {
         .arg(flag("nxrs-doctor", "Run nxrs-build doctor for the configured nxrs-build, print its checks and exit (0 = all ok)"))
         .arg(value("smoke-build", "input", "Build a synthetic test input and exit (diagnostics)"))
         .arg(value("build-output", "directory", "Output folder for --smoke-build"))
-        .arg(flag("migrate-builds", "Move old-layout builds to <source folder>\\nxrs\\<name>, exit"))
-        .arg(flag("show-remove", "Ask to remove the selected game (Remove from library…)"))
+        .arg(flag("migrate-builds", "Move old-layout builds to <source folder>\\nxrs\\<name>, print what moved, exit"))
+        .arg(flag("show-remove", "Open the selected game's Remove from library question"))
 }
 
 pub fn parse_from<I, T>(args: I) -> Result<Options, clap::Error>

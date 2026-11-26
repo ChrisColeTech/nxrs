@@ -45,7 +45,7 @@ pub fn engine(ui: &mut Ui, app: &mut App, s: &mut SettingsDraft) {
     }
 }
 
-pub fn builds(ui: &mut Ui, s: &mut SettingsDraft) {
+pub fn builds(ui: &mut Ui, app: &mut App, s: &mut SettingsDraft) {
     group(
         ui,
         Icon::Build,
@@ -64,9 +64,20 @@ pub fn builds(ui: &mut Ui, s: &mut SettingsDraft) {
             w::OUTPUT_PLACEHOLDER,
         );
     });
-    row(ui, "Compiler workers", WORKERS_TIP, |ui| {
-        ui.add(egui::DragValue::new(&mut s.jobs).range(1..=64).speed(0.1));
+    row(ui, w::WORKERS_ROW, WORKERS_TIP, |ui| {
+        let workers = ui.add(egui::DragValue::new(&mut s.jobs).range(1..=64).speed(0.1));
+        let name = w::WORKERS_ROW;
+        workers.widget_info(|| egui::WidgetInfo::labeled(egui::Role::SpinButton, true, name));
     });
+    rule(ui);
+    // the old layout's folders move only when asked, at once (as Check again: not a Draft change)
+    group(ui, Icon::Build, w::OLD_BUILDS_ROW, w::OLD_BUILDS_TIP);
+    readout(ui, &app.old_layout_text(&s.moved));
+    ui.add_space(8.0);
+    let can = !app.demo && app.old_layout_builds() > 0;
+    if crate::ui::widgets::button::ghost(ui, w::MOVE_OLD_BUILDS, can).clicked() {
+        s.moved = app.migrate_build_folders(None).lines;
+    }
 }
 
 pub fn controller(ui: &mut Ui, s: &mut SettingsDraft) {

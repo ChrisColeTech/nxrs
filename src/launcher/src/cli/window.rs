@@ -46,12 +46,8 @@ pub fn run(path: &str, o: &Options) -> i32 {
     let mut probe = App::new(path, o.demo, crate::services::jobs::noop());
     probe.open();
     crate::services::startup_log::note(&format!("library open: {} games", probe.lib.games.len()));
-    // build folders in the layout before move to theirs (a preview picture changes nothing)
-    if o.screenshot.is_none() {
-        for line in probe.migrate_build_folders(None).lines {
-            crate::services::startup_log::note(&line);
-        }
-    }
+    // no build-folder migration here: other tools use those folders; it runs only when asked
+    // (`--migrate-builds`, Settings > Build defaults)
     let builder = viewport(&probe);
     let native = eframe::NativeOptions {
         viewport: builder,
