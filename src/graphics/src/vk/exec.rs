@@ -6038,6 +6038,61 @@ thread_local! {
     /// The stage-set descriptor buffer this thread last bound (its device address).
     static BOUND_DB: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };}
 
+/// `NXGFX_DRAW_RING=1` (diagnosis, OOT-FLASH): the last stage sets bound, one record each (the replay's frame, the
+/// submission, the stage, the module, how the set was made: `R` reused, `P` patched, `W` whole; the c3 binding), written
+/// out by a fault capture (`shot::fault`) for the frames around its present, to compare a broken frame with its
+/// neighbours.
+pub mod draw_ring {
+    use std::collections::VecDeque;
+    use std::sync::Mutex;
+
+    struct Rec {
+        frame: u64,
+        sub: u64,
+        stage: u8,
+        key: [u8; 8],
+        path: u8,
+        c3: (u64, u64),
+    }
+    static R: Mutex<VecDeque<Rec>> = Mutex::new(VecDeque::new());
+    const CAP: usize = 1 << 16;
+
+    pub fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("NXGFX_DRAW_RING").as_deref() == Ok("1"))
+    }
+
+    pub fn note(sub: u64, stage: u8, key: [u8; 8], path: u8, c3: (u64, u64)) {
+        if !on() {
+            return;
+        }
+        let frame = super::super::present::frames();
+        let mut r = R.lock().unwrap();
+        if r.len() >= CAP {
+            r.pop_front();
+        }
+        r.push_back(Rec { frame, sub, stage, key, path, c3 });
+    }
+
+    /// The records of the frames `present - 4 ..= present + 1` into `path`, one line each.
+    pub fn dump(present: u64, path: &std::path::Path) {
+        if !on() {
+            return;
+        }
+        let mut s = String::new();
+        for x in R.lock().unwrap().iter() {
+            if x.frame + 4 >= present && x.frame <= present + 1 {
+                let k: String = x.key.iter().map(|b| format!("{b:02x}")).collect();
+                s.push_str(&format!(
+                    "{} {} {} {k} {} {:#x}+{:#x}\n",
+                    x.frame, x.sub, x.stage, x.path as char, x.c3.0, x.c3.1
+                ));
+            }
+        }
+        let _ = std::fs::write(path, s);
+    }
+}
+
 fn bind_sets(
     g: &Gpu,
     sub: &mut Sub,
@@ -6112,6 +6167,7 @@ fn bind_sets(
                     super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire))
             });
             let reused = hit.is_some();
+            let mut ring_path = b'R';
             let (set, evidence) = match hit {
                 Some((off, evidence)) => {
                     super::perf::inc(super::perf::C::SetsReused);
@@ -6126,6 +6182,7 @@ fn bind_sets(
                         .map(|r| (k, r))
                     });
                     if let Some((k, (off, again))) = patched {
+                        ring_path = b'P';
                         if again {
                             super::perf::inc(super::perf::C::SetsReused);
                         }
@@ -6133,6 +6190,7 @@ fn bind_sets(
                         qs.sets.borrow_mut().store_version(st, Some(k), off, None, None, gen, gen);
                         (SetRef::Buf(off), None)
                     } else {
+                    ring_path = b'W';
                     if super::perf::fine() {
                         let mkey = (Arc::as_ptr(m) as usize, m.key);
                         let sh = qs.shadow.borrow();
@@ -6166,6 +6224,9 @@ fn bind_sets(
                     }
                 }
             };
+            if draw_ring::on() && st < qs.ubo.len() {
+                draw_ring::note(sub.serial, m.stage as u8, m.key, ring_path, qs.ubo[st][0]);
+            }
             if let SetRef::Buf(off) = set {
                 if let Some(k) = db_canary(g).filter(|_| ((off / 1536) as usize) < CANARY_SETS) {
                     let d: Vec<String> = mods

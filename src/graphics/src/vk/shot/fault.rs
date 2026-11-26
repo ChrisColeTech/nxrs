@@ -299,6 +299,7 @@ fn landed(c: &'static Cfg, rb: &super::Readback, src: &[u8], flip: bool, frame: 
             .map(|p| format!(", the present before: {} ({w}x{h})", p.display()))
             .unwrap_or_default()
     );
+    super::super::exec::draw_ring::dump(frame, &c.dir.join(format!("fault-{n:02}-draws.txt")));
     std::thread::spawn(move || {
         if ok {
             if flip {
