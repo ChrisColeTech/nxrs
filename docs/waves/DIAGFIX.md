@@ -80,6 +80,8 @@ OFF-ROUTE (0.42-0.70), `053140-v5-diag-oot-house` OFF-ROUTE.
 - L2: `find_threads` never returns the calling thread. L3: the thread list is read again every 250 ms; threads that
   ended (`GetExitCodeThread`) or fail `SuspendThread` are dropped (before: a failed suspend ended all sampling). The
   head names every thread (`# thread <tid> "<name>": N samples, from T s[, ended]`).
+- **Superseded by the send-back below** (the first version's copy buffer, its "cannot fault" claim and the thread
+  handling had the faults the audit found).
 
 **3.** `exec.rs` `addr_cache_on()`: false under `gate::all()` (`addr_cache_wanted(switch, gate_all)`).
 
@@ -130,10 +132,11 @@ See "As built" (1-3 and the CI add). Diagnosis (calibration, sweep) kept apart f
 
 ### Unproven
 
-- M2 residual: a frame that uses a frame register (`UWOP_SET_FPREG`) whose value points above the copied 64 KB is not
-  moved into the copy, so that one unwind step reads the live (committed, still-running) stack before the walk stops;
-  no fault is possible there (committed stack memory), only a wrong frame. A frame with more than 64 KB of locals
-  near the copy's end could read past the zero pad: not seen on these threads.
+- M2 residual (as first written; **corrected** by the audit, fixed in the send-back below): a frame register pointing
+  above the copied 64 KB was not moved into the copy, so an unwind step read the live stack after the thread had been
+  resumed. That *can* fault (an access violation if the thread has exited and its stack is freed, a guard page), and a
+  frame allocation reaching past the copy plus the 64 KB pad read past the buffer. The earlier "no fault is possible"
+  was wrong.
 - The late-lane path ran only in the unit test; in MKW all lanes exist by 255 s.
 - Telling track position (the banked turn) needs another signal (minimap icon); mkw-turn's route check only says "in
   the race".
@@ -146,6 +149,62 @@ See "As built" (1-3 and the CI add). Diagnosis (calibration, sweep) kept apart f
   mine, kept formatted); `exec.rs` restored and my edit re-applied with the editor. Nothing of it was committed.
 - Re-reporting old runs rewrote their `report.md` / `report.json` / sheets in the main checkout's `build/play` (asked
   for by the brief).
+
+### Questions
+
+None.
+
+## Send-back 1 (lead's audit, 2026-11-26)
+
+### Built
+
+- **M1 (MEDIUM, guard pages):** the suspended-window copy now also requires a readable protection of the page `rsp`
+  is in: `readable(protect)` = no `PAGE_GUARD` / `PAGE_NOACCESS` and one of READWRITE, READONLY, EXECUTE_READ,
+  EXECUTE_READWRITE, WRITECOPY, EXECUTE_WRITECOPY. Otherwise nothing is copied and the sample keeps only its rip. The
+  copy stays inside the one region `VirtualQuery` returned, so every byte copied has that protection.
+- **L1 (unwind reads outside the copy):** each sampled thread has a **mirror** (`Mirror`): a `VirtualAlloc`'d buffer
+  covering its whole stack reservation [AllocationBase, end of the regions with that base) plus 64 KB of zeros, with
+  the same layout (stack address `a` at `buf + (a - lo)`). Committed up front (untouched pages cost no memory),
+  made after the thread's first sample (which takes no copy), freed with the target. Each sample copies up to 64 KB
+  from rsp into its place in the mirror, unwinds there, then zeros those bytes again. Every register pointing anywhere
+  in the stack span is moved into the mirror (again after each step). Before `RtlVirtualUnwind` the function's
+  UNWIND_INFO frame register (byte 3, low 4 bits) is read: when it names a register that is not inside the mirror, the
+  walk stops. So the unwind reads the mirror only, never the live stack and never past the buffer; addresses past the
+  copied bytes read zeros.
+- **L2 (alignment):** the context is a `#[repr(C, align(16))] struct Ctx(CONTEXT)`; the copy starts at `rsp & !15`.
+- **L3 (thread id reuse):** `find_threads` opens each matching thread once, with sampling access, and returns that
+  handle (the one that read its name); `add_new` keeps it, deduplicates on the thread id alone and closes duplicates.
+- Nit: `room_cached`'s doc names `NXGFX_ADDR_CACHE=0`.
+
+### Tests
+
+`cargo test --release -p runtime`: 50 + 2 pass. New `only_readable_stack_pages_are_copied` (`readable`: guard page,
+no-access and execute-only refused, the readable ones accepted; `frame_register` reads byte 3's low nibble). The
+stack test (`samples_carry_the_unwound_stack`) exercises the mirror unwind; the self / late-thread tests the handle
+path. The guard-page fault itself cannot be produced in a unit test without crashing the test process.
+
+### Verified
+
+`build/play/20261126-093454-df-prof2-mkw` (worktree; GPU 0; MKW relinked 09:33 from this dist;
+`NXRS_HOST_PROF=255,40,<file>`, `NXRS_HOST_PROF_THREAD=vk replay,vk translate`, `NXRS_HOST_PROF_STACK=1`): completed,
+normal exit, no hang; `host profile: written`; head names 6 threads (`vk replay`, `vk translate 1`..`5`, 35,550
+samples each), 213,300 samples in 40 s, 212,293 with a stack (as before the send-back). On route (coin 0.99-1.0,
+place 0.9-1.0); FPS 29.8 / 5 % low 27.0 with the sampler running. Sheet read: boot, title, menus, grid (already
+racing), race, lap 2 drawn correctly. UPSYNC2's OoT may have been running on GPU 1.
+
+### Needs audit
+
+`hostprof.rs` `Mirror::of`, the suspended window in `run_ex`, `unwind_copy` (frame-register check, relocation).
+
+### Unproven
+
+- `RtlVirtualUnwind` reading below the mirror's start (a corrupt rsp-relative offset): not bounded below; rsp is always
+  inside the span when a step starts, and x64 unwind codes only read at or above rsp.
+- The commit charge of the mirrors: one stack reservation per sampled thread (a few MB each for the lanes).
+
+### Slips
+
+None.
 
 ### Questions
 

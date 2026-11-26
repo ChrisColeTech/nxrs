@@ -255,7 +255,11 @@ mod win {
         GetModuleFileNameW, GetModuleHandleExW, GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
         GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
     };
-    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
+    use windows_sys::Win32::System::Memory::{
+        VirtualAlloc, VirtualFree, VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT, MEM_RELEASE,
+        MEM_RESERVE, PAGE_EXECUTE_READ, PAGE_EXECUTE_READWRITE, PAGE_EXECUTE_WRITECOPY, PAGE_GUARD,
+        PAGE_NOACCESS, PAGE_READONLY, PAGE_READWRITE, PAGE_WRITECOPY,
+    };
     use windows_sys::Win32::System::SystemServices::IMAGE_DOS_HEADER;
     use windows_sys::Win32::System::Threading::{
         GetCurrentProcessId, GetCurrentThreadId, GetExitCodeThread, GetThreadDescription,
@@ -379,9 +383,10 @@ mod win {
         ))
     }
 
-    /// Every thread of this process whose name starts with one of `names` (id, name), never the calling thread (the
-    /// sampler must not suspend itself).
-    pub fn find_threads(names: &[&str]) -> Vec<(u32, String)> {
+    /// Every thread of this process whose name starts with one of `names` (id, name, a handle open for sampling),
+    /// never the calling thread (the sampler must not suspend itself). The handle that read the name is the one
+    /// kept: a thread id reused between a lookup and a second open cannot slip in. The caller closes the handles.
+    pub fn find_threads(names: &[&str]) -> Vec<(u32, String, HANDLE)> {
         let mut found = Vec::new();
         // SAFETY: a thread snapshot of this process, our own buffers and handles
         unsafe {
@@ -396,18 +401,29 @@ mod win {
             let mut ok = Thread32First(snap, &mut te) != 0;
             while ok {
                 if te.th32OwnerProcessID == me && te.th32ThreadID != self_tid {
-                    let h = OpenThread(THREAD_QUERY_LIMITED_INFORMATION, 0, te.th32ThreadID);
+                    let h = OpenThread(
+                        THREAD_SUSPEND_RESUME
+                            | THREAD_GET_CONTEXT
+                            | THREAD_QUERY_INFORMATION
+                            | THREAD_QUERY_LIMITED_INFORMATION,
+                        0,
+                        te.th32ThreadID,
+                    );
                     if !h.is_null() {
+                        let mut keep = false;
                         let mut p: *mut u16 = core::ptr::null_mut();
                         if GetThreadDescription(h, &mut p) >= 0 && !p.is_null() {
                             let len = (0..).take_while(|&i| *p.add(i) != 0).count();
                             let n = String::from_utf16_lossy(core::slice::from_raw_parts(p, len));
                             if names.iter().any(|x| n.starts_with(x)) {
-                                found.push((te.th32ThreadID, n));
+                                found.push((te.th32ThreadID, n, h));
+                                keep = true;
                             }
                             windows_sys::Win32::Foundation::LocalFree(p as _);
                         }
-                        CloseHandle(h);
+                        if !keep {
+                            CloseHandle(h);
+                        }
                     }
                 }
                 ok = Thread32Next(snap, &mut te) != 0;
@@ -421,9 +437,87 @@ mod win {
     /// frames that matter; without, the 512 words searched for the first return address into this image.
     const COPY_STACK: usize = 64 << 10;
     const COPY_RET: usize = 4 << 10;
-    /// Zeros after the copy: an unwind step reads a frame's saved registers above its rsp, possibly past the copied
-    /// bytes; it reads zeros there (and stops at a zero return address) instead of past our buffer.
-    const COPY_PAD: usize = 64 << 10;
+    /// Zeros past the end of a thread's stack span in its mirror (an unwind of garbage reading a little above it).
+    const MIRROR_PAD: usize = 64 << 10;
+
+    /// A CONTEXT as GetThreadContext needs it: 16-byte aligned (windows-sys' CONTEXT is not declared so).
+    #[repr(C, align(16))]
+    struct Ctx(CONTEXT);
+
+    /// Whether a committed page of this protection can be read without a fault or a side effect: no guard page
+    /// (reading one from the sampler raises STATUS_GUARD_PAGE_VIOLATION and takes the thread's guard away), no
+    /// no-access page, and one of the readable protections.
+    pub fn readable(protect: u32) -> bool {
+        protect & (PAGE_GUARD | PAGE_NOACCESS) == 0
+            && protect
+                & (PAGE_READWRITE
+                    | PAGE_READONLY
+                    | PAGE_EXECUTE_READ
+                    | PAGE_EXECUTE_READWRITE
+                    | PAGE_WRITECOPY
+                    | PAGE_EXECUTE_WRITECOPY)
+                != 0
+    }
+
+    /// The frame register an UNWIND_INFO names (its byte 3, low 4 bits; 0 = none), as an index into `gprs`.
+    pub fn frame_register(unwind_info: *const u8) -> usize {
+        // SAFETY: the caller passes a loaded image's UNWIND_INFO (at least 4 bytes)
+        (unsafe { *unwind_info.add(3) } & 0xf) as usize
+    }
+
+    /// A sampled thread's stack span [lo, hi) mirrored in a buffer of the same layout (address `lo` at the buffer's
+    /// start, `MIRROR_PAD` zeros after `hi`), committed up front and touched only where samples copy: any stack
+    /// address a register or a saved frame pointer holds maps into it, so an unwind of the copy never reads the live
+    /// stack or outside the buffer.
+    struct Mirror {
+        lo: u64,
+        hi: u64,
+        buf: *mut u8,
+    }
+
+    impl Mirror {
+        /// The mirror of the stack reservation `rsp` is in (all its regions with one allocation base).
+        fn of(rsp: u64) -> Option<Mirror> {
+            // SAFETY: queries of this process's address space; a fresh allocation of our own
+            unsafe {
+                let mut mb: MEMORY_BASIC_INFORMATION = core::mem::zeroed();
+                let q = |a: u64, mb: &mut MEMORY_BASIC_INFORMATION| {
+                    VirtualQuery(a as _, mb, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) != 0
+                };
+                if !q(rsp, &mut mb) || mb.AllocationBase.is_null() {
+                    return None;
+                }
+                let alloc = mb.AllocationBase;
+                let lo = alloc as u64;
+                let mut hi = lo;
+                while q(hi, &mut mb) && mb.AllocationBase == alloc && mb.RegionSize > 0 {
+                    hi = mb.BaseAddress as u64 + mb.RegionSize as u64;
+                }
+                if rsp < lo || rsp >= hi || hi - lo > 1 << 30 {
+                    return None;
+                }
+                let buf = VirtualAlloc(
+                    core::ptr::null(),
+                    (hi - lo) as usize + MIRROR_PAD,
+                    MEM_RESERVE | MEM_COMMIT,
+                    PAGE_READWRITE,
+                ) as *mut u8;
+                (!buf.is_null()).then_some(Mirror { lo, hi, buf })
+            }
+        }
+
+        /// The mirror address of a stack address in [lo, hi).
+        fn at(&self, a: u64) -> u64 {
+            self.buf as u64 + (a - self.lo)
+        }
+    }
+
+    impl Drop for Mirror {
+        fn drop(&mut self) {
+            // SAFETY: our own allocation
+            unsafe { VirtualFree(self.buf as _, 0, MEM_RELEASE) };
+        }
+    }
 
     /// The general registers of a context, for moving stack addresses between the thread's stack and the copy.
     fn gprs(c: &mut CONTEXT) -> [&mut u64; 16] {
@@ -435,28 +529,29 @@ mod win {
     }
 
     /// The return addresses into this image's code [tlo, thi), innermost first, of a stack copied while its thread
-    /// was suspended: `copy` holds the thread's bytes [real, real + len) (then zeros, `COPY_PAD` of them), `cx` its
-    /// context at that moment. Runs after the thread was resumed: the unwind tables' lookups may take the loader's
-    /// locks, which a suspended thread could hold. Every register that points into the copied range is moved into
-    /// the copy (again after each step, for the frame pointers restored from it); the walk ends when rsp leaves the
-    /// copied bytes, so nothing is read from the live stack or past the buffer.
+    /// was suspended: `m` mirrors the thread's stack and holds its bytes [from, from + len) (zeros elsewhere), `cx`
+    /// its context at that moment. Runs after the thread was resumed: the unwind tables' lookups may take the
+    /// loader's locks, which a suspended thread could hold. Every register that points anywhere into the stack span
+    /// is moved into the mirror (again after each step, for the frame pointers restored from it); a step is taken
+    /// only while rsp is inside the copied bytes and the function's frame register (if it has one) points into the
+    /// mirror, so the unwind reads the mirror only (an address past the copied bytes reads zeros there).
     ///
-    /// SAFETY: `copy` is `len + COPY_PAD` bytes long at least, zero past `len`.
+    /// SAFETY: `m` is a live mirror, [from, from + len) inside its span.
     unsafe fn unwind_copy(
         cx: &CONTEXT,
-        copy: &[u64],
-        real: u64,
+        m: &Mirror,
+        from: u64,
         len: u64,
         tlo: u64,
         thi: u64,
         out: &mut Vec<u64>,
     ) -> u8 {
-        debug_assert!(copy.len() * 8 >= len as usize + COPY_PAD);
-        let lo = copy.as_ptr() as u64;
+        let (blo, bhi) = (m.at(m.lo), m.at(m.hi) + MIRROR_PAD as u64);
+        let (wlo, whi) = (m.at(from), m.at(from) + len);
         let relocate = |c: &mut CONTEXT| {
             for r in gprs(c) {
-                if *r >= real && *r < real + len {
-                    *r = *r - real + lo;
+                if *r >= m.lo && *r < m.hi {
+                    *r = m.at(*r);
                 }
             }
         };
@@ -464,7 +559,7 @@ mod win {
         relocate(&mut c);
         let mut n = 0u8;
         for _ in 0..64 {
-            if c.Rsp < lo || c.Rsp + 8 > lo + len {
+            if c.Rsp < wlo || c.Rsp + 8 > whi {
                 break;
             }
             let mut base = 0u64;
@@ -474,6 +569,14 @@ mod win {
                 c.Rip = *(c.Rsp as *const u64);
                 c.Rsp += 8;
             } else {
+                let fr = frame_register((base + (*f).Anonymous.UnwindData as u64) as *const u8);
+                if fr != 0 {
+                    let v = *gprs(&mut c)[fr];
+                    if v < blo || v >= bhi {
+                        // the unwind would read through a frame pointer outside the mirror
+                        break;
+                    }
+                }
                 let mut hd = core::ptr::null_mut();
                 let mut est = 0u64;
                 RtlVirtualUnwind(
@@ -488,7 +591,7 @@ mod win {
                 );
                 relocate(&mut c);
             }
-            if c.Rip == 0 || c.Rsp < lo || c.Rsp > lo + len {
+            if c.Rip == 0 || c.Rsp < wlo || c.Rsp > whi {
                 break;
             }
             if c.Rip >= tlo && c.Rip < thi {
@@ -524,33 +627,28 @@ mod win {
         from: std::time::Instant,
         n: u64,
         alive: bool,
+        /// its stack's mirror, made after its first sample (that one is taken without a stack copy)
+        mirror: Option<Mirror>,
     }
 
-    /// Opens the threads of `found` not sampled yet.
-    fn add_new(ths: &mut Vec<Target>, found: Vec<(u32, String)>) {
-        for (tid, name) in found {
-            if ths.iter().any(|t| t.tid == tid && t.alive) {
+    /// Takes in the threads of `found` not sampled yet (by thread id); closes the other handles.
+    fn add_new(ths: &mut Vec<Target>, found: Vec<(u32, String, HANDLE)>) {
+        for (tid, name, h) in found {
+            if ths.iter().any(|t| t.tid == tid) {
+                // SAFETY: the handle find_threads opened for us
+                unsafe { CloseHandle(h) };
                 continue;
             }
-            // SAFETY: opening a thread of this process
-            let h = unsafe {
-                OpenThread(
-                    THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT | THREAD_QUERY_INFORMATION,
-                    0,
-                    tid,
-                )
-            };
-            if !h.is_null() {
-                ths.push(Target {
-                    tid,
-                    name,
-                    h,
-                    cpu0: cpu_seconds(h),
-                    from: std::time::Instant::now(),
-                    n: 0,
-                    alive: true,
-                });
-            }
+            ths.push(Target {
+                tid,
+                name,
+                h,
+                cpu0: cpu_seconds(h),
+                from: std::time::Instant::now(),
+                n: 0,
+                alive: true,
+                mirror: None,
+            });
         }
     }
 
@@ -587,10 +685,9 @@ mod win {
             std::thread::sleep(std::time::Duration::from_millis(50));
         }
         let (lo, hi, tlo, thi) = own_range();
-        // made before any thread is stopped: nothing below allocates while one is (it may hold the heap's lock)
-        let copy_len = if stack { COPY_STACK } else { COPY_RET };
-        let mut copy = vec![0u64; (copy_len + COPY_PAD) / 8];
-        let mut copied = 0u64; // bytes of `copy` the last sample filled (the rest is zero)
+        // nothing below allocates while a thread is stopped (it may hold the heap's lock): the mirrors are made after
+        // a thread's first sample, the sample lists grow after the thread runs again
+        let copy_len = if stack { COPY_STACK } else { COPY_RET } as u64;
         let mut samples: Vec<Sample> = Vec::with_capacity(1 << 16);
         let mut stacks: Vec<u64> = Vec::with_capacity(if stack { 1 << 20 } else { 0 });
         let start = std::time::Instant::now();
@@ -617,34 +714,40 @@ mod win {
                 rescan = t + RESCAN;
             }
             for tg in ths.iter_mut().filter(|t| t.alive) {
-                let mut cx: CONTEXT = unsafe { core::mem::zeroed() };
+                let mut cx = Ctx(unsafe { core::mem::zeroed() });
                 // CONTEXT_FULL with a stack (the unwind needs the integer registers)
-                cx.ContextFlags = if stack { 0x0010_000b } else { CONTEXT_CONTROL };
-                let mut len = 0u64;
+                cx.0.ContextFlags = if stack { 0x0010_000b } else { CONTEXT_CONTROL };
+                let (mut from, mut len) = (0u64, 0u64);
                 // SAFETY: while the thread is stopped (it may hold any lock: the heap's, the loader's) only its
-                // context is read, the kernel asked where its stack region ends, and its stack bytes copied into the
-                // buffer made above; no allocation, no lookup in the unwind tables
+                // context is read, the kernel asked about the page its rsp is in, and readable stack bytes copied
+                // into its mirror (committed before); no allocation, no lookup in the unwind tables
                 let got = unsafe {
                     if SuspendThread(tg.h) == u32::MAX {
                         // gone (a lane that ended): it is dropped from the sampling
                         tg.alive = false;
                         continue;
                     }
-                    let ok = GetThreadContext(tg.h, &mut cx) != 0;
-                    if ok {
+                    let ok = GetThreadContext(tg.h, &mut cx.0) != 0;
+                    let a = cx.0.Rsp & !15;
+                    if let (true, Some(m)) = (ok, tg.mirror.as_ref()) {
                         let mut mb: MEMORY_BASIC_INFORMATION = core::mem::zeroed();
-                        if VirtualQuery(
-                            cx.Rsp as _,
-                            &mut mb,
-                            core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
-                        ) != 0
+                        if a >= m.lo
+                            && a < m.hi
+                            && VirtualQuery(
+                                a as _,
+                                &mut mb,
+                                core::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
+                            ) != 0
                             && mb.State == MEM_COMMIT
+                            && readable(mb.Protect)
                         {
-                            let rend = mb.BaseAddress as u64 + mb.RegionSize as u64;
-                            len = rend.saturating_sub(cx.Rsp).min(copy_len as u64) & !7;
+                            // one region: the same protection to its end
+                            let rend = (mb.BaseAddress as u64 + mb.RegionSize as u64).min(m.hi);
+                            from = a;
+                            len = rend.saturating_sub(a).min(copy_len) & !7;
                             core::ptr::copy_nonoverlapping(
-                                cx.Rsp as *const u8,
-                                copy.as_mut_ptr() as *mut u8,
+                                a as *const u8,
+                                m.at(a) as *mut u8,
                                 len as usize,
                             );
                         }
@@ -655,27 +758,35 @@ mod win {
                 if !got {
                     continue;
                 }
-                // the thread runs again: everything below works on the copy (zero past len: what the last, longer
-                // copy left there)
-                if len < copied {
-                    copy[len as usize / 8..copied as usize / 8].fill(0);
+                let cx = &cx.0;
+                if tg.mirror.is_none() {
+                    // the first sample (no copy): the stack span is known now, its mirror made while it runs
+                    tg.mirror = Mirror::of(cx.Rsp);
                 }
-                copied = len;
+                // the thread runs again: everything below works on the copy
                 let mut s = Sample::at(cx.Rip, 0);
-                if cx.Rip < lo || cx.Rip >= hi {
-                    // the first stack word that points into this image's code
-                    s.ret = copy[..len as usize / 8]
-                        .iter()
-                        .take(512)
-                        .copied()
-                        .find(|&w| w >= tlo && w < thi)
-                        .unwrap_or(0);
-                }
-                if stack && len > 0 {
-                    s.first = stacks.len() as u32;
-                    // SAFETY: `copy` is len + COPY_PAD bytes or more, zero past len
-                    s.depth =
-                        unsafe { unwind_copy(&cx, &copy, cx.Rsp, len, tlo, thi, &mut stacks) };
+                if let (true, Some(m)) = (len > 0, tg.mirror.as_ref()) {
+                    // SAFETY: [from, from + len) was copied into the mirror just now
+                    let words = unsafe {
+                        core::slice::from_raw_parts(m.at(from) as *const u64, len as usize / 8)
+                    };
+                    if cx.Rip < lo || cx.Rip >= hi {
+                        // the first stack word from rsp on that points into this image's code
+                        s.ret = words[((cx.Rsp - from) / 8) as usize..]
+                            .iter()
+                            .take(512)
+                            .copied()
+                            .find(|&w| w >= tlo && w < thi)
+                            .unwrap_or(0);
+                    }
+                    if stack {
+                        s.first = stacks.len() as u32;
+                        // SAFETY: a live mirror holding [from, from + len)
+                        s.depth = unsafe { unwind_copy(cx, m, from, len, tlo, thi, &mut stacks) };
+                    }
+                    // back to zeros: the next unwind finds nothing stale in the mirror
+                    // SAFETY: the same bytes, in our own buffer
+                    unsafe { core::ptr::write_bytes(m.at(from) as *mut u8, 0, len as usize) };
                 }
                 samples.push(s);
                 tg.n += 1;
@@ -889,6 +1000,29 @@ mod tests {
             all >= MIN_SAMPLES && with > all / 2,
             "{with} of {all} samples with a stack"
         );
+    }
+
+    /// Guard and no-access pages are never read; the readable protections are; the context wrapper is aligned.
+    #[cfg(windows)]
+    #[test]
+    fn only_readable_stack_pages_are_copied() {
+        use windows_sys::Win32::System::Memory::{
+            PAGE_EXECUTE, PAGE_EXECUTE_READ, PAGE_GUARD, PAGE_NOACCESS, PAGE_READONLY,
+            PAGE_READWRITE,
+        };
+        assert!(win::readable(PAGE_READWRITE));
+        assert!(win::readable(PAGE_READONLY));
+        assert!(win::readable(PAGE_EXECUTE_READ));
+        assert!(
+            !win::readable(PAGE_READWRITE | PAGE_GUARD),
+            "a stack's guard page"
+        );
+        assert!(!win::readable(PAGE_NOACCESS));
+        assert!(!win::readable(PAGE_EXECUTE));
+        assert!(!win::readable(0));
+        // UNWIND_INFO byte 3: frame register in the low 4 bits (5 = rbp), offset in the high ones
+        assert_eq!(win::frame_register([1u8, 4, 2, 0x35].as_ptr()), 5);
+        assert_eq!(win::frame_register([1u8, 4, 2, 0x00].as_ptr()), 0);
     }
 
     /// The fewest samples a sampling test expects: independent of the machine's speed and timer resolution.

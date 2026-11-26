@@ -4210,7 +4210,7 @@ fn ub_bound(n: u64, room: u64, cap: u64) -> u64 {
 /// virtual pool's mapping changed (`vpool::generation`). `room`'s own cache keeps 8 pool windows; Mario Kart World binds
 /// uniform buffers from hundreds of pools a frame, and each miss took the pool lock, which the completion thread holds
 /// while it lands write-backs: ~15% of the translation lanes' time was spent waiting there (TRANSLATE-COST profile).
-/// `NXGFX_ROOM_CACHE=0` off.
+/// `NXGFX_ADDR_CACHE=0` off.
 fn room_cached(a: u64) -> u64 {
     if !addr_cache_on() {
         return super::mem::room(a);
