@@ -1152,8 +1152,11 @@ pub(crate) mod wb_bufs {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
-    /// Bytes kept at most; a buffer that would pass it is freed.
-    const KEEP: u64 = 64 << 20;
+    /// Bytes kept at most, and buffers of one size at most; a buffer that would pass either is freed. (A size-0
+    /// storage buffer's write-back reaches to its pool's end: Ocarina of Time has two 32 MB ones in flight, which filled
+    /// a 64 MB cap and left every small buffer to be made again.)
+    const KEEP: u64 = 256 << 20;
+    const PER_SIZE: usize = 64;
     /// The smallest buffer made.
     const MIN: u64 = 64 << 10;
 
@@ -1193,9 +1196,12 @@ pub(crate) mod wb_bufs {
             self.bytes -= s;
             Some(t)
         }
-        /// Keeps `t` of `size` bytes, or hands it back when the shelf would hold more than `keep` bytes.
-        pub(crate) fn put(&mut self, size: u64, t: T, keep: u64) -> Option<T> {
-            if self.bytes + size > keep {
+        /// Keeps `t` of `size` bytes, or hands it back when the shelf would hold more than `keep` bytes or more than
+        /// `per_size` items of that size.
+        pub(crate) fn put(&mut self, size: u64, t: T, keep: u64, per_size: usize) -> Option<T> {
+            if self.bytes + size > keep
+                || self.items.iter().filter(|(s, _)| *s == size).count() >= per_size
+            {
                 return Some(t);
             }
             self.bytes += size;
@@ -1232,7 +1238,7 @@ pub(crate) mod wb_bufs {
             return;
         }
         let size = b.size;
-        let back = SHELF.lock().unwrap().put(size, b, KEEP);
+        let back = SHELF.lock().unwrap().put(size, b, KEEP, PER_SIZE);
         if let Some(b) = back {
             g.free_buffer(b);
         }
@@ -1256,9 +1262,10 @@ pub(crate) mod wb_bufs {
         #[test]
         fn the_smallest_fitting_buffer_is_reused_and_the_cap_holds() {
             let mut s: Shelf<&str> = Shelf::new();
-            assert_eq!(s.put(class(100_000), "128k", 1 << 20), None);
-            assert_eq!(s.put(class(10), "64k", 1 << 20), None);
-            assert_eq!(s.put(class(600_000), "1m", 1 << 20), Some("1m"), "past the cap: handed back");
+            assert_eq!(s.put(class(100_000), "128k", 1 << 20, 4), None);
+            assert_eq!(s.put(class(10), "64k", 1 << 20, 1), None);
+            assert_eq!(s.put(class(600_000), "1m", 1 << 20, 4), Some("1m"), "past the cap: handed back");
+            assert_eq!(s.put(class(20), "64k again", 1 << 20, 1), Some("64k again"), "one of a size at most");
             assert_eq!(s.bytes(), (128 << 10) + (64 << 10));
             assert_eq!(s.take(70_000), Some("128k"), "64 KiB is too small");
             assert_eq!(s.take(200_000), None, "nothing large enough");
