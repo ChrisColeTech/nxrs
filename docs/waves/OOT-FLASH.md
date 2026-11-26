@@ -99,3 +99,99 @@ the lead was told.
 
 **Verification:** `cargo test --release -p graphics`; dense `py scripts/play.py oot-house --faults --env NXGFX_GPU=1`
 runs totalling >= 90 house shots with zero faults of either kind; every sheet, report.md and capture read.
+
+## Report (agent, protocol §5)
+
+Branch `ootflash`: `1fd1ac6` (Fault B fixes, trace), `d0730f3`, `c4bcbb9` (diagnostics), `63a439b` + `66d0ecb` (cold-pool
+rule, doc), then `gameplay-harness` (`6453c76`, UPSYNC2 merged) merged in cleanly. All verification runs below are on
+that merge, relinked once at 12:22:14 (`_code.dll` 337,867,264 bytes, build log 12:21:54) and checked before each run.
+
+### 1. Built
+
+**Fault B: fixed.** Diagnosis (above, with `NXGFX_TEX_TRACE=1`) found two causes, both in `vk/image.rs`:
+- *Lazy-image batch race.* `materialize_all` takes every waiting registration off `image::lazy` at once and makes
+  them one by one (3,834 at OoT's forest load, ~0.5 s). A bound use on another translation lane meanwhile found its
+  registration neither waiting nor made, and bound the zero stand-in. Correction: `lazy::make_lock` / `making`. A
+  batch holds the lock until everything it took is made. `materialize` of an ID that is not waiting while a batch
+  runs takes the lock, so the image exists (made and uploaded from guest memory by `reg_tex_now`) before the use
+  samples it. No draw is skipped.
+- *Takeover forwards cleared whole.* A slot that names an object whose image a newer object over the same storage took
+  over reaches the image through `Images::forward`. That map (and `released`) was cleared in full at 65,536 entries.
+  OoT makes ~46 objects a frame, so about every 80 s the clear dropped the in-flight frame's forwards, and 5-20 slots
+  of the scene's targets bound the stand-in (the black and red frames). Correction: `Recent<V>` keeps the newest
+  65,536 entries and drops the oldest one at a time.
+
+**Fault A: not fixed; root cause not proven.** What was established:
+- It is one frame and a fixed set of props (hanging herbs, baskets, pots, vines; the same props displaced in
+  `064040-hd/16-d13`). Nothing in the engine log is near it. The white-flash check catches it on its own once its
+  per-reason cap is raised (`NXGFX_FAULT_PER_REASON`, new): 6 flashes in the house in pre-merge run `110401-of-fix2`.
+- Ruled out by reading: zero stand-ins (the trace logs none near it), inline uniform updates (ordered GPU copies),
+  compute→draw ordering (full barrier after each dispatch), pool descriptor snapshots, the texture view memo.
+- Hypothesis tested: the cold-pool rule in `mem.rs` `begin_submit`. Pools quiet for 60 frames are asked only at a
+  frame's first sync, so a later submission of the same frame reads older bytes. The new log shows OoT writes quiet
+  pools often: 249 of the first 400 such writes in `122243-of-v1` were taken by a later sync of their frame, and a run
+  of 1 MB pools (0x171393000 + k·0x111000) is written again after quiet stretches ~32 times a run. Correction kept
+  (`63a439b`, default on, `NXGFX_POOL_STICKY=0` off): a pool found written after a quiet stretch is never cold again.
+  This closes a documented coherence gap for repeat writers, but **it is not shown to remove Fault A**. On the merged
+  build the flash rate is ~1 a run with the fix on (0, 1) and with it off (1), against 6 before the merge. The drop
+  came with the UPSYNC2 merge, not with this change.
+- Diagnostics added: `NXGFX_TEX_TRACE`, `NXGFX_DRAW_RING` (stage sets around a capture: `fault-NN-draws.txt`),
+  `NXGFX_FAULT_PER_REASON`, the "cold pool written" line (first 400).
+
+### 2. Tests (`cargo test --release -p graphics`: lib 261 passed, 6 ignored; other targets pass, on the merged tree)
+
+- `image::recent_tests::a_full_map_drops_only_its_oldest_entries`: a full map keeps its newest entries; re-insert and
+  remove behave. Fails on the old code by construction (cleared whole at the cap).
+- `image::lazy::tests::a_use_waits_for_a_batch_that_took_its_registration`: a registration taken by a batch reads as
+  "being made", and the make lock is granted only after the batch finished. Fails by construction before (no lock).
+- `mem::cold_rule_tests::a_pool_written_after_going_quiet_is_never_cold_again`: the 60-frame rule, the sticky mark,
+  and the switch.
+
+### 3. Verified (GPU 1; OoT alone on the title, DLL checked before each run)
+
+| Run (`build/play/`) | build | route | house shots wrong | white flashes in the house (detector) | Fault B bursts | window FPS / 5% low |
+|---|---|---|---|---|---|---|
+| `102501-of-trace1-oot-house` | B fixes not yet (trace only) | 5/5 | 0 / 32 | (capped) | 4 bursts (336, 454, 536, 624 s) | 18.6 / 16.5 |
+| `103850-of-fix1-oot-house` | B fixes | 4/5 (`23-d20` = the fault) | **1 / 32** (`23-d20`) | (capped) | 0 | invalid (off route) |
+| `110401-of-fix2-oot-house` | B fixes | 5/5 | 0 / 32 | **6** (589-694 s) | 0 | 19.3 / 18.0 |
+| `122243-of-v1-oot-house` | merged, sticky on | 5/5 | 0 / 32 | **0** | 0 | 15.8 / 10.0 |
+| `123451-of-v2-oot-house` | merged, sticky on | 5/5 | 0 / 32 | **1** (660 s) | 0 | 14.9 / 7.0 |
+| `124706-of-sticky0-oot-house` | merged, sticky off (control) | 5/5 | 0 / 32 | **1** (598 s) | 0 | 12.2 / 1.0 |
+| `114437-of-ring-cold0-oot-house` | — | — | — | — | — | **invalid** (two OoT copies) |
+
+- **Fault B:** no stand-in burst and no black or red stand-in frame in any run with the fixes (5 runs, ~160 house
+  shots and every frame of the scene changes checked by the detector). The only stand-in line left is the known
+  `texture ID 0 ... nothing is registered there` once at the forest load.
+- **Fault A:** still present, ~1 a run on the merged build. 160 house shots are 159 correct (`fix1/23-d20` wrong).
+- Sheets read: all three sheets of trace1, fix1, fix2, v1, v2 and the sticky-off control. Captures read: trace1 05/06/07, fix2 18/22, v1 71,
+  v2 71, sticky0 74. The black captures in the house window are the game's own dark cutscene (Link waking up).
+- FPS: indicative only. The merged build's window is lower (15-12 vs 19); the sticky-off control is as slow, so this
+  is not the sticky rule. Write-watch scan 9-13 ms vs 6.6 ms; lock waits up to 6.8 ms (other agents' games and builds
+  ran meanwhile).
+
+### 4. Unproven
+
+- Fault A's cause. Next: (1) reproduce on the merged build with `NXGFX_DRAW_RING=1` and analyze the dump of a caught
+  flash (`fault-NN-draws.txt`, compare the white frame's sets with its neighbours'); (2) A/B the UPSYNC2 lazy
+  write-back paths (`NXGFX_WB_LAZY=0`), since the rate fell with that merge; (3) at ~1 a run, an A/B needs ~5 runs a
+  side.
+- The sticky rule's cost on titles with many mirrors (DKB): not run (OoT only). The residual it leaves (first write
+  after a pool's first quiet stretch) is not covered.
+- The fix's effect on the lazy race with translation threads at 0: not run separately (that burst never occurred with
+  tt0 anyway).
+
+### 5. Slips
+
+- One stray Windows PowerShell 5 call in a background command (hangs on this machine). It was stopped at once and
+  left no process.
+- My relink at 11:41 was followed by UPSYNC2's run on my build, overlapping my cold-off run (two OoT copies); my relink
+  at 12:00 left OoT on my build without a run. Both reported to the lead; the overlapped runs are marked invalid.
+- Several of my early title-free checks used `tasklist | grep ocarina`, which misses the truncated image name.
+- The investigation went past the 2-hour deadline (Fault A's tests waited on the shared title).
+- `mem.rs` edited (lead allowed it once the cause was tested there; it is not proven there).
+
+### 6. Questions
+
+- Keep `NXGFX_POOL_STICKY` on by default? It closes a real gap (later-sync writes into quiet pools are taken in their
+  own frame), costs nothing measurable in OoT, but is not shown to fix Fault A. Recommendation: keep it on, and have
+  DIRECT-MEM's rework decide the cold rule.
