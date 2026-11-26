@@ -74,7 +74,11 @@ in range" query), `src/os/src/mem.rs` (the commit hook), `docs/env_switches.tsv`
 | Run (`build/play/`) | build | FPS / 5% low | replay | prep | pool sync | lock / scan / pass | write-back MB (ms) | GPU | route |
 |---|---|---|---|---|---|---|---|---|---|
 | `20261126-154635-sc-base-oot` | base `1619d31` (relink 15:46) | 16.2 / 14.0 | 20.5 | 29.6 | 23.6 | 2.7 / 12.2 / 7.7 | 1.2 (13.7) | 10.6 | 6/6 on |
-| `20261126-163048-sc-v4-oot` | v4 `f61f20c` (relink 16:30) | **19.4 / 17.3** | 18.9 | **16.1** | **11.9** | 2.5 / **2.5** / 5.9 | 1.1 (9.5) | 9.5 | 6/6 on |
+| `20261126-163048-sc-v4-oot` | v4 `f61f20c` (relink 16:30) | **19.4 / 17.3** | 18.9 | **16.1** | **11.9** | 2.5 / **2.6** / 5.9 | 1.0 (9.7) | 9.5 | 6/6 on |
+| `20261126-170947-sc-v4-seal0-oot` | v4, `NXGFX_SEAL=0` (control, same build) | 17.7 / 15.2 | 19.8 | 26.3 | 21.3 | 2.6 / 11.7 / 6.5 | 1.0 (12.5) | 10.0 | 6/6 on |
+
+(Pool parts: means of the `[vk] pools:` lines in the window. All three runs overlapped TRANSLATE-REUSE's MKW runs on
+GPU 0. The control keeps `Pools::busy`, so its pass is already ~1 ms below the base.)
 
 v4 in the window: 3,646-3,651 pools (3.7 GB) sealed out of ~4,400; 0.00-0.05 pools a frame woken by a store, none by a
 host write, none found written without a fault; the sealing pass 0.04 ms a frame under the pool lock once all is
@@ -100,6 +104,20 @@ already holds (4.8 ms), the iteration ~1 ms (was ~3.5). The frame (51 ms) is no 
   and every commit now wakes the pools it touches (the OS layer's `commit_rw` and the runtime's own `mem::commit`,
   through a hook the seal module registers); a store into a page that is still uncommitted is left to the runtime's
   first-touch handler (which commits it, waking the pool). No committed check per pass any more.
+- `20261126-164609-sc-v4-house1` (`oot-house --faults`, v4): route check **OFF-ROUTE at `04-d01` only** (distance
+  0.32, limit 0.3): the opening ran a little later than the reference, so d01-d03 show the end of Link's dressing
+  cutscene (correct pictures); d04-d30 and `last` are Link in his house, all correct, and the other four checks are on
+  route (FPS of this run not used). 16 fault captures, all read: nightmare lightning (1-2), the known no-target draws
+  at the forest load (3-10), scene cuts during Navi's flight and the dressing cutscene (11-16); none in the house
+  stretch. No new red line, no sealed pool found written without a fault.
+- `20261126-165755-sc-v4-house2` (`oot-house --faults`, v4): **timed out, OFF-ROUTE** (d01, d10): 25 frames of 1-2 s
+  at 439-576 s with the guest idle (busiest guest threads 4-6% of a core) and the replay idle (10-15 ms), so the
+  timed inputs ran ~60 s ahead of the game; it ended in the Navi-wakes-Link cutscene. Those stalls lie exactly inside
+  TRANSLATE-REUSE's `170215-tr-r2-on3t10-mkw` run (MKW with 10 translation threads, 17:02:15-17:07:54; the stalls
+  17:05:14-17:07:31) and stop when it ends; seals in that stretch: 0.0-0.18 wakes a frame, nothing unusual. The
+  same symptom (frames of seconds, guest idle) was seen by UPSYNC2 under load. Read as machine-side, not this
+  change; no house shot from this run counts. Its 33 pictures (forest, Navi's flight, the wake-up) are all correct;
+  15 fault captures, the same legitimate set as house1.
 - `sc-v1`-`sc-v3`: no red line, no fault, every picture up to the stop correct.
 
 The base run had TRANSLATE-REUSE's MKW relink and my own test compiles beside it in its first minutes (not in the
