@@ -38,6 +38,7 @@ pub struct Options {
     pub nxrs_doctor: bool,
     pub smoke_build: Option<String>,
     pub build_output: Option<String>,
+    pub migrate_builds: bool,
 }
 
 impl Options {
@@ -52,7 +53,8 @@ impl Options {
                 || !self.remove_update.is_empty()
                 || self.update_choice.is_some()
                 || self.source.is_some()
-                || self.nxrs_doctor)
+                || self.nxrs_doctor
+                || self.migrate_builds)
     }
 }
 
@@ -114,6 +116,7 @@ pub fn command() -> Command {
         .arg(flag("nxrs-doctor", "Run nxrs-build doctor for the configured nxrs-build, print its checks and exit (0 = all ok)"))
         .arg(value("smoke-build", "input", "Build a synthetic test input and exit (diagnostics)"))
         .arg(value("build-output", "directory", "Output folder for --smoke-build"))
+        .arg(flag("migrate-builds", "Move build folders of the old layout (SwitchRecomp Builds\\<name> [nxrs]) to <source folder>\\nxrs\\<name>, print what moved and exit (with --select-title: that game only)"))
 }
 
 pub fn parse_from<I, T>(args: I) -> Result<Options, clap::Error>
@@ -172,6 +175,7 @@ fn from_matches(m: &ArgMatches) -> Options {
         nxrs_doctor: f("nxrs-doctor"),
         smoke_build: s("smoke-build"),
         build_output: s("build-output"),
+        migrate_builds: f("migrate-builds"),
     }
 }
 

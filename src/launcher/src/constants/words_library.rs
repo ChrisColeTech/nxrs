@@ -22,7 +22,25 @@ pub const BUSY_TITLE: &str = "Game is busy";
 pub const BUSY_IMPORT: &str = "Wait for this game's build or run to finish before importing it.";
 pub const REMOVE_TITLE: &str = "Remove from library";
 pub const REMOVE_TEXT: &str =
-    "Remove “{}” from the library?\n\nYour package, builds, and saves will not be deleted.";
+    "Remove “{}” from the library?\n\nThe game's package is never deleted.";
+pub const DELETE_BUILD: &str = "Also delete the build ({})";
+pub const DELETE_BUILD_TIP: &str = "Deletes the build folder {}. Saves, SD card files, cheats and \
+    mods are moved first to {}; when the game is added and built again they go back into it. \
+    Unticked, every file stays where it is.";
+pub const DELETE_TITLE: &str = "Cannot delete the build";
+pub const DELETE_BUSY: &str = "The game is running or building. Stop it, then remove it again.";
+pub const KEPT: &str = "The saves of {} were kept in {}.";
+pub const RESTORED: &str = "Kept saves put back into the build from {}";
+// the build-folder migration (`--migrate-builds`, and at start)
+pub const MOVED: &str = "Moved: {}: {} -> {}";
+pub const MOVE_NOTHING: &str = "Updated: {}: nothing is built in {}; it builds into {}";
+pub const MOVE_SKIPPED: &str = "Skipped: {}: {} stays (new place {}): ";
+pub const MOVE_RUNNING: &str = "the game is running or building";
+pub const MOVE_TAKEN: &str = "{} already exists";
+pub const MOVE_IN_USE: &str = "its files are in use (the game may be running)";
+pub const HOLDER_REMOVED: &str = "Removed the empty folder {}";
+pub const HOLDER_LEFT: &str = "Left {}: other folders remain in it";
+pub const MIGRATE_NONE: &str = "No build folder is in the old layout.";
 pub const EMPTY: &str = "Your library is empty.\n\nAdd a NUP or NRO, import an existing build,\nor drop a game package into this window.";
 pub const NO_MATCH: &str = "No games match these filters.\nPress Ctrl+F to adjust or clear them.";
 pub const NO_SELECTION: &str = "No selection";

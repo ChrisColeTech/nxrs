@@ -3,12 +3,12 @@
 
 use super::runs::BuildRun;
 use super::{App, DlcReason, Outcome};
-use crate::constants::{engine as e, timing, words_build as w};
+use crate::constants::{engine as e, timing, words_build as w, words_library as l};
 use crate::model::dates;
 use crate::model::fill::fill;
-use crate::model::path_text::file_name;
+use crate::model::path_text::{file_name, native};
 use crate::services::jobs::JobEvent;
-use crate::services::{build_facts, ini_file, markers};
+use crate::services::{build_facts, ini_file, kept_saves, markers};
 
 impl App {
     pub(super) fn drain_build(&mut self) {
@@ -73,6 +73,17 @@ impl App {
         }
         if let Some(n) = note {
             self.console.push(n);
+        }
+        // saves kept when the game was removed with its build go back into the new one
+        let game = self.lib.find(&id).cloned().filter(|_| ok);
+        match game.map(|g| kept_saves::restore(&g, &self.saves_root())) {
+            Some(Ok(Some(kept))) => {
+                let line = fill(l::RESTORED, &[&native(&kept)]);
+                run.job.log_line(&line);
+                self.console.push(line);
+            }
+            Some(Err(err)) => self.console.push(err),
+            _ => {}
         }
         self.save();
         self.console.push(format!("\n{detail}"));

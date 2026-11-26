@@ -6,7 +6,7 @@ use super::facts::Facts;
 use super::filter::LibraryFilter;
 use super::game::Game;
 use super::game_json;
-use super::names::{build_folder_for, output_name_for, title_from_name};
+use super::names::{output_name_for, title_from_name};
 use super::output_lines::{UpdateLine, progress, reports_package_dlc, update_line};
 use super::path_text::{clean, native, same_path, suffix};
 use super::play::{
@@ -152,8 +152,6 @@ fn names_and_folders() {
     assert_eq!(output_name_for("\u{30bc}\u{30eb}\u{30c0}"), "Game");
     assert_eq!(title_from_name("My Game [v1]"), "My Game");
     assert_eq!(title_from_name("[x]"), "Untitled game");
-    assert_eq!(build_folder_for("D:/B/Kart/"), "D:/B/Kart [nxrs]");
-    assert_eq!(build_folder_for("D:/B/Kart [nxrs]/"), "D:/B/Kart [nxrs]");
 }
 
 #[test]

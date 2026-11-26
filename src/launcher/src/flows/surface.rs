@@ -25,6 +25,16 @@ pub struct ListWindow {
     pub status: Option<(String, bool)>,
 }
 
+/// A question's tick box: its words, its explanation (the info mark), whether it is ticked, and what Yes
+/// asks for while it is.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Check {
+    pub label: String,
+    pub tip: String,
+    pub on: bool,
+    pub yes_on: Action,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Surface {
     Message {
@@ -38,6 +48,7 @@ pub enum Surface {
         yes: Action,
         no: Option<Action>,
         default_no: bool,
+        check: Option<Check>,
     },
     Properties(Box<PropertiesDraft>),
     Settings(Box<SettingsDraft>),
