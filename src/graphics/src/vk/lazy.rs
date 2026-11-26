@@ -94,11 +94,59 @@ pub fn enabled() -> bool {
     static V: OnceLock<bool> = OnceLock::new();
     // on by default since lane G3 rev 8 (Pokemon Violet 150 s clean at its 30 FPS cap, write-back 0.5 ms a frame
     // against 1.3 ms copied back eagerly); NXGFX_WB_LAZY=0: every write-back lands at completion
-    *V.get_or_init(|| std::env::var("NXGFX_WB_LAZY").as_deref() != Ok("0"))
+    // the web has no page protection or access faults to bring a page back with: always off there (docs/35)
+    *V.get_or_init(|| {
+        cfg!(not(target_os = "emscripten")) && std::env::var("NXGFX_WB_LAZY").as_deref() != Ok("0")
+    })
 }
+
+// The web: lazy write-back is off (`enabled`), so nothing below protects a page or waits for a fault there; these
+// stop loudly if that ever changes.
+#[cfg(target_os = "emscripten")]
+fn off_on_the_web() -> ! {
+    panic!("lazy write-back reached on the web, where it is off (no page protection)")
+}
+#[cfg(target_os = "emscripten")]
+fn committed_region(_p: u64) -> (u64, u64, bool) {
+    off_on_the_web()
+}
+#[cfg(target_os = "emscripten")]
+fn protect_n(_p: u64, _n: u64, _access: bool) {
+    off_on_the_web()
+}
+#[cfg(target_os = "emscripten")]
+fn protect(_p: u64, _access: bool) -> bool {
+    off_on_the_web()
+}
+#[cfg(target_os = "emscripten")]
+fn accessible(_p: u64) -> bool {
+    // every committed page is accessible on the web
+    true
+}
+#[cfg(target_os = "emscripten")]
+fn install() {}
 
 fn frame() -> u64 {
     super::present::frames()
+}
+
+/// Whether any page of [a, a + n) is held on the device or being brought back (such a pool is not sealed: its pages'
+/// protection belongs to this module).
+pub fn holds_any(a: u64, n: u64) -> bool {
+    let g = ST.lock().unwrap();
+    let Some(st) = g.as_ref() else { return false };
+    if st.lazy.is_empty() && st.returning.is_empty() {
+        return false;
+    }
+    let (lo, hi) = (a & !(PAGE - 1), a.saturating_add(n));
+    // by page when the range is small, by entry otherwise
+    if (hi - lo) / PAGE <= (st.lazy.len() + st.returning.len()) as u64 {
+        (lo..hi)
+            .step_by(PAGE as usize)
+            .any(|p| st.lazy.contains_key(&p) || st.returning.contains(&p))
+    } else {
+        st.lazy.keys().chain(st.returning.iter()).any(|&p| p >= lo && p < hi)
+    }
 }
 
 /// Pages now held on the device only.
@@ -408,8 +456,9 @@ pub fn bring_back(p: u64) -> bool {
             continue;
         }
         let Some(l) = st.lazy.remove(&p) else {
-            // not ours: or one that came back between the fault and this lookup (accessible again: retry)
-            return st.hist.contains_key(&p) && accessible(p);
+            // not ours: or one that came back between the fault and this lookup (accessible again: retry); a page of a
+            // sealed pool is readable but read-only, its store is the seal handler's (retried here it faulted for ever)
+            return st.hist.contains_key(&p) && accessible(p) && !super::seal::holds(p);
         };
         st.returning.insert(p);
         let h = st.hist.entry(p).or_default();

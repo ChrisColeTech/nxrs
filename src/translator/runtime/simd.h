@@ -45,8 +45,8 @@ typedef u128 __attribute__((aligned(1), may_alias)) u128u;
 #define VSF32(n) (*(saf32 *)&c->v[n])
 #define VSF64(n) (*(saf64 *)&c->v[n])
 #define VHI64(n) (((sa64 *)&c->v[n])[1])
-#define LD128(a) (*(const u128u *)(uintptr_t)(a))
-#define ST128(a, v) (*(u128u *)(uintptr_t)(a) = (u128)(v))
+#define LD128(a) (*(const u128u *)RT_HOST(a))
+#define ST128(a, v) (*(u128u *)RT_HOST(a) = (u128)(v))
 #define SHUF __builtin_shufflevector
 #define CVT __builtin_convertvector
 
@@ -231,6 +231,13 @@ SI void simd_rm_leave(uint64_t old) {
     uint64_t cur = simd_fpcr_get();
     if ((cur & SIMD_RM_MASK) != (old & SIMD_RM_MASK)) simd_fpcr_set((cur & ~SIMD_RM_MASK) | (old & SIMD_RM_MASK));
 }
+#elif defined(__wasm__)
+// wasm has no rounding-mode control: FPCR.RMode other than nearest is not honoured yet (W2 adds software paths if the
+// title's FPCR needs them; build/WEB/W0-fp measured the gap). The FP state is a placeholder.
+typedef unsigned simd_fpstate;
+SI unsigned simd_rm_enter(uint64_t fpcr) { (void)fpcr; return 0; }
+SI void simd_rm_rz(void) {}
+SI void simd_rm_leave(simd_fpstate old) { (void)old; }
 #else
 // MXCSR rounding control (bits 13-14) without fesetround's x87 + SSE double write; ldmxcsr only on change.
 #define SIMD_RC_MASK 0x6000u

@@ -125,6 +125,9 @@ NXGFX_SCAN_COVER	test	`NXGFX_SCAN_COVER=0`: every submission scans.	src/graphics
 NXGFX_SCISSOR_CLAMP	switch	scissor: "invalid write" just past a memory block, in no memory of ours, and the device lost; NXGFX_SCISSOR_CLAMP=0 off)	src/graphics/src/vk/exec.rs
 NXGFX_SCREEN_MATCH	switch	it back at once. A window keeps the screen's rate. `NXGFX_SCREEN_MATCH=0` keeps the rate in fullscreen too.	src/graphics/src/vk/screen.rs
 NXGFX_SCRUB_SLOTS	switch	MKW's device losses at addresses no live allocation held). `NXGFX_SCRUB_SLOTS=0` off.	src/graphics/src/vk/image.rs
+NXGFX_SEAL	switch	`NXGFX_SEAL=0`: no sealed pools (SCAN-COST): every watched mirror is asked by the write-watch scans as before; by default a pool quiet for `NXGFX_SEAL_FRAMES` is made read-only and left out of every scan until its first store wakes it (Windows)	src/graphics/src/vk/seal.rs
+NXGFX_SEAL_FRAMES	switch	Frames without a CPU write or a write-back landing before a pool is sealed (default 60)	src/graphics/src/vk/seal.rs
+NXGFX_SEAL_MB	switch	Bytes newly made read-only per sealing pass, at most one pass a frame (default 32)	src/graphics/src/vk/seal.rs
 NXGFX_SET_CACHE	switch	`0` writes every draw's descriptor sets again instead of reusing equal ones	src/graphics/src/vk/exec.rs
 NXGFX_SET_PATCH	switch	Stage sets are written in host memory first and patched from their copy (`Shadow`) unless `NXGFX_SET_PATCH=0`, the	src/graphics/src/vk/exec.rs
 NXGFX_SHADERS	path	the translated shader folder (default: `<data>\shaders`)	src/graphics/src/vk/shader.rs, src/os/src/nvn/mod.rs
@@ -229,6 +232,7 @@ NXRS_DATA	switch	folder `<name>_data` is handed over as NXRS_DATA, and its `exef
 NXRS_DATA_DIR	path	`NXRS_DATA_DIR`: the launcher's data folder instead of `%LOCALAPPDATA%\nxrs` (development, tests).	src/launcher/src/constants/engine.rs, src/launcher/tests/common/mod.rs
 NXRS_DOCTOR_EXE	test	the real engine, when the developer names it (NXRS_DOCTOR_EXE): it answers in the same format	src/launcher/tests/process.rs
 NXRS_DUMP_FRAMES	diagnostic	NXRS_DUMP_FRAMES=<ret>[,<ret>..]: the 16 words at the frame record of a frame returning there (its	src/runtime/src/kernel.rs
+NXRS_EMSDK	path	The Emscripten SDK for `nxrs-build build --target web` (docs/35): `NXRS_EMSDK`, else `emsdk` beside nxrs-build, else the development tree's `build\tools\emsdk`.	src/cli/src/cc.rs
 NXRS_ENGINE_LIB	switch	found, the MSVC engine library beside nxrs-build or `NXRS_ENGINE_LIB`), else the bundled llvm-mingw when it is	src/cli/src/cc.rs
 NXRS_ESC_QUIT	switch	NXRS_ESC_QUIT=0 (scripted runs): Esc is logged and ignored; the foreground state says	src/front/src/window.rs, src/front/src/window_linux.rs
 NXRS_FNPROF	diagnostic	`NXRS_FNPROF=<file>`: record every guest function entered at least once and rewrite the file every 5 s with their addresses (the web build's hot set, docs/35 W0(c)).	src/runtime/src/rt.rs
@@ -296,7 +300,9 @@ NXRS_TICK_HZ	switch	- the system counter: 19.2 MHz for a Switch program, 31.25 M
 NXRS_TOOLCHAIN	switch	Which toolchain: `NXRS_TOOLCHAIN=msvc|gnu`, else MSVC when it can work here (Visual Studio installed, a clang	src/cli/src/cc.rs
 NXRS_USER_PROMPT_TEXT	switch	any line with `NXRS_CTRL_PROMPT_TEXT`, `NXRS_HOME_QUIT_TEXT`, `NXRS_USER_PROMPT_TEXT` (the lines of a prompt, one per	src/os/src/ui_text.rs
 NXRS_VERSION	switch		src/launcher/build.rs, src/launcher/src/cli/options.rs, src/launcher/src/main.rs
-NXRS_XMON	switch	- the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`NXRS_XMON=1` / `NXRS_NO_XMON=1`);	src/runtime/src/process.rs
+NXRS_WEB_LIB	path	The web engine library (`libnxos.a` for wasm64) a `--target web` build links: `NXRS_WEB_LIB`, else `web\libnxos.a` beside nxrs-build, else the development tree's `target\wasm64-unknown-emscripten\release\libnxos.a` (docs/35).	src/cli/src/cc.rs
+NXRS_WEB_LINK_FLAGS	diagnostic	More emcc link flags for a `--target web` build (development: `-sNODERAWFS=1` runs the module under Node on the real data folder).	src/cli/src/cc.rs
+NXRS_XMON	switch- the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`NXRS_XMON=1` / `NXRS_NO_XMON=1`);	src/runtime/src/process.rs
 NXRT_CLANG	test	the clang the runtime ABI layout test compiles with	src/runtime/tests/abi_layout.rs
 NXRT_COMPACT_ALIAS_MB	diagnostic	Alias region size in MiB for `NXRT_LAYOUT=compact` (default 2304).	src/runtime/src/mem.rs
 NXRT_EXEFS	switchfolder `<name>_data` is handed over as NXRS_DATA, and its `exefs` as NXRT_EXEFS (the runtime's module folder),	src/cli/src/cc.rs, src/os/src/services/oe.rs, src/runtime/src/process.rs

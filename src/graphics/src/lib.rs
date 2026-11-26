@@ -9,6 +9,7 @@
 //! The interfaces other parts of the engine use are listed in docs/INTERFACES.md ("graphics").
 #![allow(clippy::missing_safety_doc, clippy::too_many_arguments)]
 
+#[cfg(not(target_os = "emscripten"))]
 pub mod host_window;
 pub mod log;
 pub mod nvn;

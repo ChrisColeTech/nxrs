@@ -352,6 +352,16 @@ mod window {
     }
 }
 
+/// The web: no text box yet (the page's own comes with the shell, docs/35 W5); as on a Linux desktop without a dialog
+/// tool, the game's default text is answered.
+#[cfg(target_os = "emscripten")]
+mod window {
+    pub fn input(title: &str, default: &str, _max: usize) -> Option<String> {
+        crate::log!("swkbd: no text box in a web build yet ({title:?}): the default is answered");
+        Some(default.to_string())
+    }
+}
+
 /// The keyboard window (Win32): a dark panel over the game's window with the game's title, the text in the Hind
 /// font (the default selected: the first key typed replaces it), Enter = OK, Esc = keep the default.
 #[cfg(windows)]

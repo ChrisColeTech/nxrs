@@ -213,6 +213,10 @@ pub fn memory_cap(pool: u64) {
     }
 }
 
+/// The web: the linear memory's own maximum (`-sMAXIMUM_MEMORY`) is the cap; the browser enforces it.
+#[cfg(target_os = "emscripten")]
+pub fn memory_cap(_pool: u64) {}
+
 /// The same cap on Linux (`linux::memory_cap`: a cgroup with memory.max, else a watchdog on the resident size).
 #[cfg(target_os = "linux")]
 pub fn memory_cap(pool: u64) {

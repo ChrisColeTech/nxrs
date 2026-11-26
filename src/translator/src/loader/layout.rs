@@ -5,6 +5,10 @@
 //! runtime maps each there when the game loads it.
 
 pub const FIRST_BASE: u64 = 0x70_0000_0000;
+/// The web build's first base (docs/35): 8 GiB, so the compact guest window around the modules (stack and heap block,
+/// alias region, the SDK's maps below; the kernel region above) lies inside wasm64's 16 GiB linear memory and a guest
+/// address is a linear-memory address.
+pub const WEB_FIRST_BASE: u64 = 0x2_0000_0000;
 pub const ALIGN: u64 = 0x20_0000;
 pub const ADDRESS_LIMIT: u64 = 1 << 39;
 
@@ -50,8 +54,17 @@ pub fn layout_names(
     names: &[String],
     size_of: &dyn Fn(&str) -> Option<usize>,
 ) -> Result<Vec<ModLayout>, String> {
+    layout_names_at(names, size_of, FIRST_BASE)
+}
+
+/// `layout_names` from another first base (`WEB_FIRST_BASE` for a web build).
+pub fn layout_names_at(
+    names: &[String],
+    size_of: &dyn Fn(&str) -> Option<usize>,
+    first: u64,
+) -> Result<Vec<ModLayout>, String> {
     let mut out = vec![];
-    let mut base = FIRST_BASE;
+    let mut base = first;
     for name in names.iter().cloned() {
         let Some(size) = size_of(&name) else { continue };
         out.push(ModLayout {

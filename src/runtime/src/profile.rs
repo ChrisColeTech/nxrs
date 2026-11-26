@@ -8,6 +8,10 @@
 //! host function its guest state names (`Cpu::pc` while a host function runs; an SVC's guest pc otherwise), split
 //! into running engine code, blocked in the OS (the sample's host pc in ntdll / win32u: a host lock, condition
 //! variable or sleep) and other modules (the driver, the C runtime).
+//!
+//! A web build has no sampling (a page cannot stop another thread): only the thread bookkeeping and `mark` remain,
+//! so the sampler's own pieces are unused there.
+#![cfg_attr(target_os = "emscripten", allow(dead_code, unused_imports))]
 
 use std::cell::Cell;
 use std::collections::HashMap;
@@ -70,6 +74,8 @@ fn new_slot(cpu: usize) -> &'static Slot {
 struct Threads(Vec<(u32, usize, &'static Slot)>);
 #[cfg(target_os = "linux")]
 struct Threads(Vec<(u32, crate::linux::HostThread, &'static Slot)>);
+#[cfg(target_os = "emscripten")]
+struct Threads(Vec<(u32, (), &'static Slot)>);
 // SAFETY: the handles are plain kernel handles, usable from any thread.
 unsafe impl Send for Threads {}
 
@@ -169,7 +175,15 @@ pub fn start(on: bool) {
         .ok()
         .and_then(|e| e.parent().map(|d| d.join("profile.txt")))
         .unwrap_or_else(|| "profile.txt".into());
+    // a page cannot stop or read another thread's registers: no sampling profiler on the web
+    #[cfg(target_os = "emscripten")]
+    {
+        crate::rt::log(&format!("profile: not available in web builds ({} not written)", out.display()));
+        return;
+    }
+    #[cfg(not(target_os = "emscripten"))]
     crate::rt::log(&format!("profile: active ({} every 10 s)", out.display()));
+    #[cfg(not(target_os = "emscripten"))]
     std::thread::Builder::new()
         .name("profiler".into())
         .spawn(move || {
@@ -247,6 +261,32 @@ pub fn start(on: bool) {
             }
         })
         .ok();
+}
+
+/// The calling host thread runs guest thread `handle` (web: kept for `mark` and the thread list; nothing samples it).
+#[cfg(target_os = "emscripten")]
+pub fn add_current(handle: u32, cpu: *mut crate::cpu::Cpu) {
+    let slot = new_slot(cpu as usize);
+    threads()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .0
+        .push((handle, (), slot));
+}
+
+#[cfg(target_os = "emscripten")]
+pub fn remove(handle: u32) {
+    threads()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .0
+        .retain(|t| t.0 != handle);
+}
+
+/// Per-thread CPU time is not visible to a page: none on the web.
+#[cfg(target_os = "emscripten")]
+pub fn thread_cpu() -> Vec<(u32, f64)> {
+    vec![]
 }
 
 /// The calling host thread runs guest thread `handle` (Linux: its pthread, sampled with SIGPROF).

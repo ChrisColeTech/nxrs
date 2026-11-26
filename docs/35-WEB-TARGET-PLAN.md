@@ -6,6 +6,49 @@ build**, delivered the way the GTA V web port in `P:\Games\Web\GTA5` is: Emscrip
 played in a tab or in Chrome's own app window (Install as app). No separate native player, no Electron. The Windows
 native target stays the reference and must not regress.
 
+## Work progression
+
+States: **Complete** (done and verified, evidence named), **In progress**, **Not started**. One row per deliverable;
+update the row when its state changes, with the evidence or commit.
+
+| Phase | Work item | Files | State | Evidence / notes |
+|---|---|---|---|---|
+| W0 | Generated C compiles to wasm32 and wasm64 | `build/WEB/W0-wasm/include`, `compile.sh` | Complete | 416/416 units, both widths |
+| W0 | Module links; V8 and Chrome load it | `build/WEB/W0-wasm`, `build/WEB/W0-chrome` | Complete | 414 MiB wasm64; Chrome 158 compile 1.2 s, instantiate 87 ms |
+| W0 | Hot set recorder + split | `src/runtime/src/rt.rs` (`NXRS_FNPROF`) | Complete | 8.5% of functions; hot module 108.5 MiB (`cd39cb3`) |
+| W0 | Compact guest layout switch | `src/runtime/src/mem.rs` (`NXRT_LAYOUT=compact`) | Complete | runs with ≥ 6 GiB alias (`58c6d7b`) |
+| W0 | Shaders to WGSL, checked in Chrome | `build/WEB/W0-shaders` | Complete | used 111/111 in Chrome; sample 834/834 with two rules |
+| W0 | FP under wasm | `build/WEB/W0-fp` | Complete | default FPCR + DN bit-identical; FZ / rounding modes differ |
+| W1 | `__wasm__` branches in the translator's runtime headers | `src/translator/runtime/cpu.h`, `simd.h`, `simd_fp.h` | Complete | `RT_HOST`, 64-bit `Cpu` slots, wasm FP branches; native machine code identical on 3 chunks (~400k instructions, `build/WEB/W1/hdrcheck`); wasm64 object identical to W0 |
+| W1 | emcc compile lane and `--target web` | `src/cli/src/cc.rs`, `main.rs`, `pipeline.rs` | Complete | `nxrs-build build <nsp> --target web` → `<input folder>\nxrs-web\<name>\game.js` + `game.wasm` (414 MiB) for Anime Girls: 417 units through the normal chunking and object cache, emsdk found as `build\tools\emsdk` or `NXRS_EMSDK`, cached rebuild 17 s (`build/WEB/W1/build-web.log`). Runtime data defined by the link until the runtime joins (W2) |
+| W1 | Platform-only dependencies gated off for wasm | `src/graphics/Cargo.toml`, `graphics/src/lib.rs`, `os/src/nvn/mod.rs` | Complete | winit is not built for `target_os = "emscripten"` (no host window on web); every other third-party crate builds for the web target as is; zstd-sys's C through emcc (`web.ps1`) |
+| W1 | Rust std on wasm64 + Emscripten | `scripts/build/wasm64-unknown-emscripten.json`, `scripts/build/web.ps1` | Complete | Rust ships no 64-bit Emscripten target: custom target spec, nightly `1.102.0-nightly (6c709eb42 2026-11-25)` pinned by `web.ps1`, `-Zbuild-std`. Probe (`build/WEB/W1/rustprobe`): 4 std threads joined under emcc pthreads, 64-bit pointers, correct result |
+| W1 | nxrs crates link into the module | `src/runtime`, `src/os`, `src/graphics`, `src/cli/src/cc.rs` | Complete | `web.ps1 -Crates os` builds `libnxos.a` (runtime + os + graphics) for wasm64; `nxrs-build --target web` links it with the game (`NXRS_WEB_LIB`), `main` on a pthread, wasm exceptions |
+| W2 | libc crate layouts for 64-bit Emscripten | `scripts/build/libc-wasm64.patch`, `scripts/build/web.ps1` | Complete | libc 0.2.191's Emscripten types are 32-bit: `nlink_t`, `blksize_t`, `statvfs`, `msghdr` differed from C (std::fs::metadata read every file as 0 bytes). Patched copy for the nightly std (`[patch]` in the toolchain's library workspace); 38 struct sizes/offsets checked against C (`build/WEB/W2/layout`) |
+| W2 | Boundary between generated code and Rust | `src/runtime/web/boundary.c` | Complete | asm.rs's dispatch, barriers and jumps in C: setjmp/longjmp over wasm exceptions, dispatch as a guaranteed tail call (`-mtail-call`) |
+| W1 | Windows build unchanged | — | Complete | engine tests green (graphics 261, os 166, runtime 50, cli 30); Anime Girls rebuilt natively with the new headers (417 units, 163 s) and played: beach gameplay, 59.9 FPS, normal exit (`build/play/20261126-162247-web-w1-native-check`) |
+| W2 | Web module base: translate modules at a low base so guest address = linear address | `src/translator/src/loader/layout.rs` (`FIRST_BASE` → option), `src/cli/src/pipeline.rs` | Complete | `WEB_FIRST_BASE` 8 GiB: Anime Girls' main at 0x2_0000_0000; `rt_guest_off` 0 | Design (2026-11-26): with modules at ~8 GiB instead of `0x70_0000_0000` and the compact layout around them, the whole guest window lies inside the 16 GiB linear memory, so the ~225 raw guest-pointer reads in `runtime`/`os` need no translation and `rt_guest_off` is 0 |
+| W2 | Linear-memory map (compact default, the guest window claimed from the heap's break) | `src/runtime/src/mem.rs`, `web.rs` | Complete | `web.rs`: reservations claimed with sbrk, commit/protection in a page table, decommit zeroes; compact map is the web default (alias 6144 MiB) |
+| W2 | Fault-based tricks replaced (lazy heap, faults) | `src/runtime/src/fault.rs`, `process.rs`, `os/src/mem.rs`, `graphics/src/vk/lazy.rs`, `os/src/wwatch.rs` | Complete | no fault handlers on the web; lazy heap and lazy write-back off there; wwatch says it is unavailable |
+| W2 | Guest threads as pthreads/workers | `src/runtime/src/kernel.rs` | Complete | std threads under emcc pthreads; 31 guest threads created under Node; host stack 32 MiB on the web (31 × 256 MiB did not fit beside the guest window) |
+| W2 | setjmp/longjmp via wasm exceptions; fibers refused | `src/runtime/web/boundary.c`, `fiber.rs` | In progress | built and linked; no guest jump has happened yet in a run, so the path is unexercised. Fibers stop with a message |
+| W2 | Other host services on the web | `src/os/src/input/*`, `media/webcodec.rs`, `ui.rs`, `services/swkbd.rs`, `services/time.rs`, `services/fsp.rs`, `graphics/src/vk/*` | Complete (stand-ins named) | no XInput/WinMM/HID/BLE pads (W3 input block), H.264/AAC refuse to open (WebCodecs later), prompts and keyboard answer the default, no Vulkan surface (W4) |
+| W2 | FPCR values logged; FZ / rounding software paths if needed | `src/runtime/src/svc.rs`, `src/translator/runtime/simd_fp.h` | Complete | Anime Girls runs with FPCR 0 and FZ (no directed rounding). On wasm, FZ ops take the software flush path: FZ differences against native fell from ~330 words in 9 classes to 2 (FMADD / FMLA rounding up to the smallest normal, the documented edge); FPCR 0 still bit-identical (`build/WEB/W0-fp`) |
+| W2 | Page, boot, on-page log, dev server | `src/web/index.html`, `boot.js`, `dev_server.py` | Complete | cross-origin and memory64 checks; engine log on the page and in the console; main on its own pthread (Emscripten). W2 data path: the whole data folder fetched into the in-memory file system before main (936 MiB in 4.4 s on localhost); W3 replaces it with reads on demand |
+| W2 | Anime Girls reaches `nnMain` in Chrome | — | Complete | **Chrome 158**: libc/SDK init, the modules' initializers, `nnMain`, SSL, oe, hid, NVN bootstrap (no Vulkan device: W4), audio open (no device: W3), save mounted (`/data/save/user1`), game threads scheduled; then quiet, waiting on the GPU. Before that, under Node (`NXRS_WEB_LINK_FLAGS=-sNODERAWFS=1`): libc/SDK init, the three modules' initializers, `nnMain`, then SSL, oe, hid, NVN bootstrap (no Vulkan device: W4), audio open (no device: W3); 31 threads; three runs of 120 s without a crash after the stack fix. Chrome needs the page and file worker |
+| W3 | I/O worker, RomFS manifest, boot set | `src/web/io-worker.js`, `src/os/src/services/fs.rs`, `fsp.rs`, `src/cli/src/webpack.rs` | Not started | |
+| W3 | Saves in OPFS with acknowledged commits | `src/web/saves.js`, `src/os/src/services/account.rs` | Not started | |
+| W3 | Audio ring + worklet | `src/web/audio-worklet.js`, `src/os/src/services/audio.rs`, `audren.rs` | Not started | |
+| W3 | Input block (keyboard, gamepad) | `src/web/input.js`, `src/os/src/services/hid.rs` | Not started | |
+| W4 | Graphics split: draw decisions vs Vulkan calls; command ring | `src/graphics/src/nvn/`, `vk/`, `ring.rs` | Not started | |
+| W4 | GPU worker (WebGPU executor) | `src/web/gpu-worker.js` | Not started | |
+| W4 | SPIR-V → WGSL stage and shader packs | `src/shaders/src/wgsl.rs` | Not started | |
+| W4 | Pool sync without write watch | `src/graphics/src/vk/mem.rs` | Not started | |
+| W4 | Anime Girls frames in Chrome | — | Not started | |
+| W5 | Output layout + `build.json`; launcher Build for web, serving, Play | `src/cli/src/webpack.rs`, `src/launcher/src/services/web_serve.rs`, `flows/`, `ui/`, `docs/LAUNCHER_CONTRACT.md` | Not started | |
+| W6 | Hot/cold split, wasm-opt, compressed data, lazy shader packs | `src/cli/src/webpack.rs`, `src/web/boot.js`, `io-worker.js` | Not started | |
+| W7 | Anime Girls to first gameplay at FPS goal in Chrome; second title; Android Chrome | `build/WEB/W7`, `docs/34-LIBRARY-VALIDATION.md` | Not started | |
+
 ## 1. What it is
 
 ```text
@@ -154,6 +197,8 @@ Converting finished Windows builds; cutting game data; a native player or Electr
 public hosting (builds stay local, user-supplied).
 
 ## 9. Owner decisions
+
+**D1-D4 approved by the owner, 2026-11-26.**
 
 | # | Decision | Recommendation |
 |---|---|---|

@@ -471,6 +471,17 @@ mod window {
     }
 }
 
+/// The prompt on the web: no window of its own yet (the page shows it with the shell, docs/35 W5); as on a Linux
+/// desktop without a dialog tool, the controllers answer it.
+#[cfg(target_os = "emscripten")]
+mod window {
+    pub fn repaint() {}
+
+    pub fn run() {
+        crate::log!("prompt: not shown in a web build yet: the controllers answer it");
+    }
+}
+
 #[cfg(windows)]
 mod window {
     use super::*;

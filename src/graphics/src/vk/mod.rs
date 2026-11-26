@@ -38,6 +38,7 @@ pub mod rt;
 pub mod rtclass;
 pub mod scale;
 pub mod screen;
+pub mod seal;
 pub mod shader;
 pub mod shot;
 pub mod sparse;
@@ -294,6 +295,11 @@ pub(crate) fn total_phys() -> u64 {
 #[cfg(target_os = "linux")]
 pub(crate) fn total_phys() -> u64 {
     nxrt::linux::total_memory()
+}
+/// The web: what the page may hold, the linear memory's limit (a page cannot see the machine's memory).
+#[cfg(target_os = "emscripten")]
+pub(crate) fn total_phys() -> u64 {
+    nxrt::web::LINEAR_LIMIT
 }
 
 /// Validation messages counted since the process started (errors, warnings).

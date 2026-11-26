@@ -3,6 +3,7 @@
 //! walked with the image's unwind tables (each return address mapped back the same way), the guest registers and the
 //! guest frame-pointer chain. Faults in other modules (drivers) are left alone.
 
+#[cfg(not(target_os = "emscripten"))]
 use std::io::Write;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
@@ -410,6 +411,11 @@ unsafe fn report(f: &mut crate::linux::Fault) -> bool {
 pub fn install() {
     crate::linux::add_fault_hook(hook);
 }
+
+/// wasm has no access faults to catch: a guest access outside the linear memory traps the module, which the page
+/// reports (docs/35 W2); nothing to install.
+#[cfg(target_os = "emscripten")]
+pub fn install() {}
 
 #[cfg(test)]
 mod tests {

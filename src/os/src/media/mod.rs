@@ -13,6 +13,11 @@ pub mod ff;
 pub use ff as mf;
 #[cfg(windows)]
 pub mod mf;
+// the web: the browser's WebCodecs, under the same name (not wired yet: the decoders refuse to open, with the reason)
+#[cfg(target_os = "emscripten")]
+pub mod webcodec;
+#[cfg(target_os = "emscripten")]
+pub use webcodec as mf;
 pub mod mic;
 pub mod opus;
 pub mod sink;

@@ -73,6 +73,21 @@ const RC_MASK: u32 = 3 << 22;
 #[cfg(target_arch = "aarch64")]
 const RC: [u32; 4] = [0, 1 << 22, 2 << 22, 3 << 22];
 
+// wasm: no host rounding mode (every operation rounds to nearest). Directed rounding is not honoured here yet, the
+// same gap as the generated code's (docs/35 W2; build/WEB/W0-fp measured it).
+#[cfg(target_family = "wasm")]
+const RC_MASK: u32 = 0;
+#[cfg(target_family = "wasm")]
+const RC: [u32; 4] = [0; 4];
+#[cfg(target_family = "wasm")]
+#[inline(always)]
+fn csr_get() -> u32 {
+    0
+}
+#[cfg(target_family = "wasm")]
+#[inline(always)]
+fn csr_set(_v: u32) {}
+
 /// Sets the host rounding mode from FPCR.RMode; returns the previous control word.
 pub fn rm_enter(fpcr: u64) -> u32 {
     let cur = csr_get();

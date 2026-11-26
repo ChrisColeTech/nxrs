@@ -70,6 +70,31 @@ pub fn local_offset() -> (i64, String) {
     (off, name)
 }
 
+/// The page's offset from UTC now, in seconds (daylight saving included): Emscripten's libc takes the browser's zone.
+#[cfg(target_os = "emscripten")]
+pub fn local_offset() -> (i64, String) {
+    // musl's struct tm (Emscripten's libc): nine ints, then long tm_gmtoff and const char *tm_zone
+    #[repr(C)]
+    struct Tm {
+        f: [i32; 9],
+        gmtoff: core::ffi::c_long,
+        zone: *const core::ffi::c_char,
+    }
+    extern "C" {
+        fn time(t: *mut i64) -> i64;
+        fn localtime_r(t: *const i64, tm: *mut Tm) -> *mut Tm;
+    }
+    // SAFETY: libc calls on locals of the right layout
+    let off = unsafe {
+        let t = time(core::ptr::null_mut());
+        let mut tm = Tm { f: [0; 9], gmtoff: 0, zone: core::ptr::null() };
+        localtime_r(&t, &mut tm);
+        tm.gmtoff as i64
+    };
+    let name = if off == 0 { "UTC".to_string() } else { format!("UTC{:+}", off / 3600) };
+    (off, name)
+}
+
 /// The host's offset from UTC now, in seconds (daylight saving included), and its zone abbreviation.
 #[cfg(windows)]
 pub fn local_offset() -> (i64, String) {

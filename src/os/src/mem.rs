@@ -110,6 +110,11 @@ pub fn install_fault_handler() {
     unsafe { AddVectoredExceptionHandler(1, Some(veh)) };
 }
 
+/// The web: no access faults, so no first-touch commit; the lazy heap (`NXRT_LAZY_HEAP`) stays off there and the heap
+/// is committed at SetHeapSize.
+#[cfg(target_os = "emscripten")]
+pub fn install_fault_handler() {}
+
 /// The same on Linux: a fault hook in the runtime's SIGSEGV handler, newest first.
 #[cfg(target_os = "linux")]
 pub fn install_fault_handler() {
@@ -141,11 +146,20 @@ fn commit_rw(a: u64, n: u64) -> bool {
     rmem::reserve(a, n, false) && rmem::commit(a, n)
 }
 
+/// The web: commit inside a reservation, or reserve and commit there (claimed from the linear memory).
+#[cfg(target_os = "emscripten")]
+fn commit_rw(a: u64, n: u64) -> bool {
+    n == 0 || rmem::commit(a, n) || (rmem::reserve(a, n, false) && rmem::commit(a, n))
+}
+
 #[cfg(windows)]
 fn commit_rw(a: u64, n: u64) -> bool {
     if n == 0 {
         return true;
     }
+    // a commit makes committed read-only pages read-write without a fault: a sealed pool there is woken first, so the
+    // store this commit prepares for is not missed (SCAN-COST)
+    nxgfx::vk::seal::host_write(a, n);
     if !unsafe { VirtualAlloc(a as _, n as usize, MEM_COMMIT, PAGE_READWRITE) }.is_null() {
         return true;
     }

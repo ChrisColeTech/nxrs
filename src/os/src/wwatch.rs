@@ -42,6 +42,14 @@ fn watched(a: u64) -> bool {
         .unwrap_or(false)
 }
 
+// the web never arms a page (`arm` says so), so these only keep the shared code whole there
+#[cfg(target_os = "emscripten")]
+fn guard(_page: u64) -> bool {
+    false
+}
+#[cfg(target_os = "emscripten")]
+fn unguard(_page: u64) {}
+
 #[cfg(target_os = "linux")]
 fn guard(page: u64) -> bool {
     // committed read-write pages only (a read-only page faults on writes by itself)
@@ -162,6 +170,13 @@ unsafe extern "system" fn veh(info: *mut EXCEPTION_POINTERS) -> i32 {
 
 /// Watches the guest range [lo, hi) for writes (its committed pages; a page committed later is not watched).
 pub fn arm(lo: u64, hi: u64) -> String {
+    // the diagnostic guards pages and catches the fault of each write: neither exists in wasm
+    #[cfg(target_os = "emscripten")]
+    {
+        let _ = (lo, hi);
+        return "wwatch: not available in a web build (no page protection)\n".into();
+    }
+    #[cfg(not(target_os = "emscripten"))]
     static HANDLER: std::sync::Once = std::sync::Once::new();
     #[cfg(windows)]
     HANDLER.call_once(|| unsafe {

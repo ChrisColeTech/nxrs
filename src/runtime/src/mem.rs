@@ -52,15 +52,19 @@ const COMPACT_SLACK: u64 = 256 << 20;
 
 fn compact() -> bool {
     static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *C.get_or_init(|| std::env::var("NXRT_LAYOUT").is_ok_and(|v| v == "compact"))
+    // the web build always uses it: its guest window must fit the linear memory (docs/35 W2)
+    *C.get_or_init(|| {
+        cfg!(target_os = "emscripten") || std::env::var("NXRT_LAYOUT").is_ok_and(|v| v == "compact")
+    })
 }
 
-/// The compact map's alias region: `NXRT_COMPACT_ALIAS_MB` (default 2304 MiB).
+/// The compact map's alias region: `NXRT_COMPACT_ALIAS_MB` (default 2304 MiB; 6144 MiB on the web, the least Anime
+/// Girls ran with in W0(d): its SDK reserves well past 4 GiB of alias address space).
 fn compact_alias() -> u64 {
     std::env::var("NXRT_COMPACT_ALIAS_MB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(2304)
+        .unwrap_or(if cfg!(target_os = "emscripten") { 6144 } else { 2304 })
         << 20
 }
 
@@ -114,7 +118,25 @@ pub fn release(addr: u64) {
 
 #[cfg(windows)]
 pub fn commit(addr: u64, n: u64) -> bool {
+    if n != 0 {
+        commit_hook(addr, n);
+    }
     n == 0 || !unsafe { VirtualAlloc(addr as _, n as usize, MEM_COMMIT, PAGE_READWRITE) }.is_null()
+}
+
+/// Told before every commit (`commit`): a commit makes committed read-only pages read-write without a fault, so the
+/// graphics side's sealed pools over them are woken first (nxgfx `vk::seal`). Set once.
+static COMMIT_HOOK: std::sync::OnceLock<fn(u64, u64)> = std::sync::OnceLock::new();
+
+pub fn set_commit_hook(f: fn(u64, u64)) {
+    let _ = COMMIT_HOOK.set(f);
+}
+
+#[cfg(windows)]
+fn commit_hook(addr: u64, n: u64) {
+    if let Some(f) = COMMIT_HOOK.get() {
+        f(addr, n);
+    }
 }
 
 #[cfg(windows)]
@@ -256,6 +278,56 @@ pub fn readable(addr: u64, n: u64) -> bool {
 #[cfg(target_os = "linux")]
 pub fn written_pages(addr: u64, n: u64, reset: bool) -> Option<Vec<u64>> {
     crate::linux::written_pages(addr, n, reset)
+}
+
+// The same layer on the web (`web.rs`: the one linear memory, a page table for commit and protection, no write watch).
+#[cfg(target_os = "emscripten")]
+pub fn reserve(addr: u64, n: u64, watch: bool) -> bool {
+    crate::web::reserve(addr, n, watch)
+}
+#[cfg(target_os = "emscripten")]
+pub fn reserve_anywhere(n: u64, watch: bool) -> Option<u64> {
+    crate::web::reserve_anywhere(n, watch)
+}
+#[cfg(target_os = "emscripten")]
+pub fn release(addr: u64) {
+    crate::web::release(addr)
+}
+#[cfg(target_os = "emscripten")]
+pub fn commit(addr: u64, n: u64) -> bool {
+    crate::web::commit(addr, n)
+}
+#[cfg(target_os = "emscripten")]
+pub fn decommit(addr: u64, n: u64) -> bool {
+    crate::web::decommit(addr, n)
+}
+#[cfg(target_os = "emscripten")]
+pub fn protect(addr: u64, n: u64, p: Prot) -> bool {
+    crate::web::protect(
+        addr,
+        n,
+        match p {
+            Prot::None => 0,
+            Prot::Read => 1,
+            Prot::ReadWrite => 2,
+        },
+    )
+}
+#[cfg(target_os = "emscripten")]
+pub fn host_alloc(n: u64) -> Option<*mut u8> {
+    crate::web::host_alloc(n)
+}
+/// wasm cannot seal memory: a host table stays writable (its readers never write it).
+#[cfg(target_os = "emscripten")]
+pub fn host_protect_readonly(_addr: u64, _n: u64) {}
+#[cfg(target_os = "emscripten")]
+pub fn readable(addr: u64, n: u64) -> bool {
+    crate::web::readable(addr, n)
+}
+/// No write watch on the web: pool sync checks what the frame's draws bind instead (docs/35 W4).
+#[cfg(target_os = "emscripten")]
+pub fn written_pages(_addr: u64, _n: u64, _reset: bool) -> Option<Vec<u64>> {
+    None
 }
 
 // ---- the guest address space (memory.c)
@@ -427,6 +499,12 @@ pub fn describe_taken(addr: u64) -> String {
             String::new()
         }
     )
+}
+
+/// What holds the address: the reservation, or the runtime heap under it.
+#[cfg(target_os = "emscripten")]
+pub fn describe_taken(addr: u64) -> String {
+    crate::web::describe(addr)
 }
 
 /// What holds the address: its /proc/self/maps line.
@@ -772,6 +850,12 @@ impl Space {
     #[cfg(target_os = "linux")]
     fn committed_in(a: u64, n: u64) -> u64 {
         crate::linux::committed_in(a, n)
+    }
+
+    /// Committed bytes of [a, a+n).
+    #[cfg(target_os = "emscripten")]
+    fn committed_in(a: u64, n: u64) -> u64 {
+        crate::web::committed_in(a, n)
     }
 
     /// Committed bytes of [a, a+n).

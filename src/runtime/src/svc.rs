@@ -79,7 +79,28 @@ fn name(imm: u32) -> &'static str {
 /// (`asm::ST_*`): ExitThread asks for the jump to the thread's next barrier.
 #[no_mangle]
 pub unsafe extern "C" fn nxrt_svc_impl(c: *mut Cpu, imm: u32, pc: u64) -> u32 {
+    note_fpcr((*c).fpcr);
     crate::boundary::guard("rt_svc", || svc(c, imm, pc))
+}
+
+/// Logs each FPCR mode (AHP, DN, FZ, RMode: bits 22-26) the first time a guest thread enters the kernel with it: the
+/// modes a title really runs with (docs/35: wasm has no flush-to-zero or directed rounding, so the web build needs
+/// software paths only for the modes that appear here). One atomic read per SVC once a mode has been seen.
+fn note_fpcr(fpcr: u64) {
+    use std::sync::atomic::{AtomicU32, Ordering};
+    static SEEN: AtomicU32 = AtomicU32::new(0);
+    let mode = ((fpcr >> 22) & 31) as u32;
+    let bit = 1u32 << mode;
+    if SEEN.load(Ordering::Relaxed) & bit == 0 && SEEN.fetch_or(bit, Ordering::Relaxed) & bit == 0 {
+        crate::rt::log(&format!(
+            "FPCR mode in use: {:#x} (FZ {}, DN {}, AHP {}, RMode {})",
+            fpcr & (31 << 22),
+            (fpcr >> 24) & 1,
+            (fpcr >> 25) & 1,
+            (fpcr >> 26) & 1,
+            ["nearest", "+inf", "-inf", "zero"][((fpcr >> 22) & 3) as usize]
+        ));
+    }
 }
 
 unsafe fn svc(c: *mut Cpu, imm: u32, pc: u64) -> u32 {

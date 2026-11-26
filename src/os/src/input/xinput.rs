@@ -470,6 +470,22 @@ pub fn rumble(i: u32, low: u16, high: u16) -> u32 {
     linux::rumble(i, low, high)
 }
 
+// The web: the browser's gamepads reach the game through the page's input block (docs/35 W3), not this API; no pad
+// is connected here.
+#[cfg(target_os = "emscripten")]
+pub fn dll() -> Option<&'static str> {
+    None
+}
+#[cfg(target_os = "emscripten")]
+pub fn state(_i: u32) -> Option<Gamepad> {
+    None
+}
+/// ERROR_DEVICE_NOT_CONNECTED, as XInput answers for an empty slot.
+#[cfg(target_os = "emscripten")]
+pub fn rumble(_i: u32, _low: u16, _high: u16) -> u32 {
+    1167
+}
+
 #[cfg(all(test, target_os = "linux"))]
 mod linux_tests {
     use super::linux::{flip, trigger, xinput_buttons};

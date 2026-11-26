@@ -10,7 +10,7 @@
 #[allow(unused_imports)]
 use crate::boundary;
 use crate::cpu::Cpu;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "emscripten"))]
 use host::{ConvertThreadToFiberEx, CreateFiberEx, DeleteFiber, SwitchToFiber};
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -253,6 +253,8 @@ unsafe fn initialize(c: *mut Cpu) {
         core::mem::transmute(crate::asm::nxrt_fiber_entry as *const () as usize);
     #[cfg(target_os = "linux")]
     let entry: unsafe extern "C" fn(*mut core::ffi::c_void) = crate::asm::nxrt_fiber_entry;
+    #[cfg(target_os = "emscripten")]
+    let entry: unsafe extern "C" fn(*mut core::ffi::c_void) = host::never_entered;
     let host = CreateFiberEx(
         64 << 10,
         HOST_STACK,
@@ -376,6 +378,38 @@ pub fn register() {
     crate::hostfn::add_override(SYM_FINALIZE, finalize);
     crate::hostfn::add_override(SYM_SWITCH, switch);
     crate::hostfn::add_override(SYM_CURRENT, current);
+}
+
+/// Host fibers on the web: wasm cannot switch stacks yet (no stack-switching in the shipped engines), so a game that
+/// starts a guest fiber stops with a clear message (docs/35: refused per title until then). The calls keep the
+/// Win32 shape so the rest of this file is shared.
+#[cfg(target_os = "emscripten")]
+#[allow(non_snake_case)]
+mod host {
+    fn refuse() -> ! {
+        crate::rt::fatal("this game uses nn::os fibers, which web builds cannot run yet (docs/35)")
+    }
+    pub unsafe fn ConvertThreadToFiberEx(_p: *const core::ffi::c_void, _flags: u32) -> *mut core::ffi::c_void {
+        refuse()
+    }
+    pub unsafe fn CreateFiberEx(
+        _commit: usize,
+        _reserve: usize,
+        _flags: u32,
+        _entry: Option<unsafe extern "C" fn(*mut core::ffi::c_void)>,
+        _param: *const core::ffi::c_void,
+    ) -> *mut core::ffi::c_void {
+        refuse()
+    }
+    pub unsafe fn DeleteFiber(_f: *const core::ffi::c_void) {
+        refuse()
+    }
+    pub unsafe fn SwitchToFiber(_to: *const core::ffi::c_void) {
+        refuse()
+    }
+    pub unsafe extern "C" fn never_entered(_p: *mut core::ffi::c_void) {
+        refuse()
+    }
 }
 
 /// Host fibers on Linux, with the Win32 calls' shape: a fiber is a stack of its own (mmap, a guard page below it) and

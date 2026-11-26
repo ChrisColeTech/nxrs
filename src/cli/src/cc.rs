@@ -93,11 +93,50 @@ pub struct Clang {
     pub id: String,
     /// llvm-mingw and the gnullvm engine (no Visual Studio), else clang with Visual Studio's libraries.
     pub gnu: bool,
+    /// `--target web`: Emscripten's compiler driver instead of clang (`path` is then emsdk's Python).
+    pub web: Option<Emsdk>,
 }
 
+/// A pinned Emscripten SDK (docs/35): emcc.py run by the SDK's own Python with its own config file, so nothing from
+/// the user's environment leaks in.
+#[derive(Debug, Clone)]
+pub struct Emsdk {
+    pub root: PathBuf,
+    pub emcc_py: PathBuf,
+    pub config: PathBuf,
+}
+
+/// The web build's flags on top of `GEN_FLAGS` (less `-march` and the MSVC CRT choice): 64-bit memory (a Switch
+/// title's guest window does not fit 4 GiB: docs/35 W0(d)), shared-memory threads, wasm SIMD.
+/// `-mtail-call`: the dispatch's tail calls (src/runtime/web/boundary.c), and the generated code's calls of it in tail
+/// position, so guest indirect-branch chains keep the host stack flat.
+pub const WEB_FLAGS: &[&str] = &["-sMEMORY64=1", "-pthread", "-msimd128", "-mtail-call"];
+
+/// The web build's boundary between generated code and Rust (asm.rs on the other hosts), compiled into each web link.
+const WEB_BOUNDARY: &str = include_str!("../../runtime/web/boundary.c");
+
 impl Clang {
+    /// The command that runs this compiler: clang itself, or emcc.py under emsdk's Python with its config.
+    pub fn command(&self) -> Command {
+        let mut c = Command::new(&self.path);
+        if let Some(e) = &self.web {
+            c.arg("-E").arg(&e.emcc_py).env("EM_CONFIG", &e.config);
+            // emcc builds missing system libraries with emcc.exe sub-processes, which find Python on PATH
+            if let Some(py_dir) = self.path.parent() {
+                let mut paths = vec![py_dir.to_path_buf()];
+                paths.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+                if let Ok(p) = std::env::join_paths(paths) {
+                    c.env("PATH", p);
+                }
+            }
+        }
+        c
+    }
+
     pub fn target(&self) -> &'static str {
-        if cfg!(target_os = "linux") {
+        if self.web.is_some() {
+            "wasm64-unknown-emscripten"
+        } else if cfg!(target_os = "linux") {
             TARGET_LINUX
         } else if self.gnu {
             TARGET_GNU
@@ -109,6 +148,14 @@ impl Clang {
     /// The game-code flags for this toolchain (the MSVC CRT choice only applies to the MSVC target; Linux objects go
     /// into a shared object: position-independent).
     pub fn gen_flags(&self) -> Vec<String> {
+        if self.web.is_some() {
+            return GEN_FLAGS
+                .iter()
+                .filter(|f| **f != MARCH && !f.starts_with("-fms-runtime-lib"))
+                .chain(WEB_FLAGS)
+                .map(|s| s.to_string())
+                .collect();
+        }
         let linux = cfg!(target_os = "linux");
         let mut v: Vec<String> = GEN_FLAGS
             .iter()
@@ -331,6 +378,7 @@ pub fn find_clang(cc_hint: Option<&str>) -> Result<Clang> {
             version,
             id: format!("{id}\ntarget {TARGET_GNU}"),
             gnu: true,
+            web: None,
         });
     }
     let tried = candidates(cc_hint);
@@ -342,11 +390,63 @@ pub fn find_clang(cc_hint: Option<&str>) -> Result<Clang> {
                 version,
                 id: format!("{id}\ntarget {TARGET}"),
                 gnu: false,
+                web: None,
             });
         }
     }
     bail!(
         "clang not found (tried NXRS_CLANG, --cc, the bundled clang, NXRT_LLVM, LLVM's folder, PATH): {}",
+        tried.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")
+    )
+}
+
+/// The Emscripten SDK for `--target web`: `NXRS_EMSDK`, else `emsdk` beside nxrs-build, else the development tree's
+/// `build\tools\emsdk` (above `target\<profile>`). Run through its own Python and `.emscripten` config.
+pub fn find_emcc() -> Result<Clang> {
+    let here = std::env::current_exe()?.parent().unwrap().to_path_buf();
+    let mut tried = vec![];
+    if let Some(p) = std::env::var_os("NXRS_EMSDK") {
+        tried.push(PathBuf::from(p));
+    }
+    tried.push(here.join("emsdk"));
+    if let Some(repo) = here.ancestors().find(|d| d.join("build").join("tools").join("emsdk").is_dir()) {
+        tried.push(repo.join("build").join("tools").join("emsdk"));
+    }
+    for root in &tried {
+        let emcc_py = root.join("upstream").join("emscripten").join("emcc.py");
+        let config = root.join(".emscripten");
+        let python = std::fs::read_dir(root.join("python"))
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|e| e.path().join(if cfg!(windows) { "python.exe" } else { "bin/python3" }))
+            .find(|p| p.is_file());
+        let (Some(python), true, true) = (python, emcc_py.is_file(), config.is_file()) else {
+            continue;
+        };
+        let web = Emsdk {
+            root: root.clone(),
+            emcc_py,
+            config,
+        };
+        let mut c = Clang {
+            path: python,
+            version: String::new(),
+            id: String::new(),
+            gnu: false,
+            web: Some(web),
+        };
+        let o = c.command().arg("--version").output().context("running emcc --version")?;
+        let first = String::from_utf8_lossy(&o.stdout).lines().next().unwrap_or("").trim().to_string();
+        if !o.status.success() || first.is_empty() {
+            bail!("emcc in {} does not run: {}", root.display(), String::from_utf8_lossy(&o.stderr).trim());
+        }
+        c.version = first.clone();
+        c.id = format!("{first}\ntarget {}", c.target());
+        return Ok(c);
+    }
+    bail!(
+        "the Emscripten SDK was not found for --target web (tried NXRS_EMSDK, emsdk beside nxrs-build, build\\tools\\emsdk): {}",
         tried.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")
     )
 }
@@ -532,8 +632,12 @@ fn compile_one(clang: &Clang, unit: &Unit, key: &str) -> Result<(), String> {
     let tmp = unit.obj.with_extension("o.part");
     let mut last = String::new();
     for attempt in 0..3 {
-        let out = Command::new(&clang.path)
-            .arg(format!("--target={}", clang.target()))
+        let mut cmd = clang.command();
+        // emcc picks the wasm target from its own settings (-sMEMORY64); clang is told the triple
+        if clang.web.is_none() {
+            cmd.arg(format!("--target={}", clang.target()));
+        }
+        let out = cmd
             .args(&unit.flags)
             .arg("-c")
             .arg(&unit.src)
@@ -936,6 +1040,137 @@ int main(int argc, char **argv) {
 "#;
 
 /// Builds the loader into `exe` (the object is cached under its key in `obj_dir`).
+/// Compiles one empty unit with the web flags before the parallel compile: emcc builds its system headers and
+/// libraries into its cache on first use, and two dozen emcc processes doing that at once failed at random (W0).
+pub fn warm_emcc(clang: &Clang, obj_dir: &Path) -> Result<()> {
+    let c = obj_dir.join("warm.c");
+    std::fs::write(&c, "#include <math.h>\n#include <string.h>\nint nxrs_warm(void) { return 0; }\n")?;
+    let o = clang
+        .command()
+        .args(clang.gen_flags())
+        .arg("-c")
+        .arg(&c)
+        .arg("-o")
+        .arg(obj_dir.join("warm.o"))
+        .output()
+        .context("running emcc")?;
+    let _ = std::fs::remove_file(&c);
+    let _ = std::fs::remove_file(obj_dir.join("warm.o"));
+    if !o.status.success() {
+        bail!("emcc does not compile: {}", tail(&String::from_utf8_lossy(&o.stderr), 3000));
+    }
+    Ok(())
+}
+
+/// The web engine (`libnxos.a` built for wasm64 by `scripts/build/web.ps1`: the os layer with the runtime and
+/// graphics): `NXRS_WEB_LIB`, else `web\libnxos.a` beside nxrs-build, else the development tree's
+/// `target\wasm64-unknown-emscripten\release\libnxos.a`. None when there is none yet.
+pub fn find_web_lib() -> Option<PathBuf> {
+    if let Some(p) = std::env::var_os("NXRS_WEB_LIB") {
+        return Some(PathBuf::from(p)).filter(|p| p.is_file());
+    }
+    let here = std::env::current_exe().ok()?.parent()?.to_path_buf();
+    let beside = here.join("web").join("libnxos.a");
+    if beside.is_file() {
+        return Some(beside);
+    }
+    here.ancestors()
+        .map(|d| d.join("target").join("wasm64-unknown-emscripten").join("release").join("libnxos.a"))
+        .find(|p| p.is_file())
+}
+
+/// The web build's `main`: the game's entry (modules.c) with the page's arguments, on a thread of its own
+/// (`-sPROXY_TO_PTHREAD`), so it may block as the native one does.
+const WEB_MAIN: &str = "// Written by nxrs: the web build's main.\n\
+int nxrs_game_main(int argc, char **argv);\n\
+int main(int argc, char **argv) { return nxrs_game_main(argc, argv); }\n";
+
+/// The runtime's variables the generated code reads (wasm imports functions, never data). The runtime defines them
+/// once it is linked into the web module (docs/35 W2); until then the web link compiles these definitions.
+const WEB_RUNTIME_DATA: &str = "// Written by nxrs: the runtime's data the generated code reads, until the runtime joins the web module.\n\
+#include <stdint.h>\n\
+uint64_t rt_guest_off;\n\
+uint32_t *rt_excl_mon;\n";
+
+/// Links the web build's objects into `js` (and the `.wasm` beside it): one 64-bit, shared-memory module whose
+/// export is `nxrs_game_main` (modules.c). With `runtime` (the runtime crates' static library) the module is
+/// complete; without it the runtime's functions stay undefined and become imports of the module, and its data is
+/// defined here (`WEB_RUNTIME_DATA`).
+pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir: &Path, js: &Path) -> Result<()> {
+    // the generated tree's headers (cpu.h): <build>\gen\include beside <build>\obj
+    let include = obj_dir.parent().unwrap_or(obj_dir).join("gen").join("include");
+    let compile = |name: &str, text: &str, extra: &[&str]| -> Result<PathBuf> {
+        let c = obj_dir.join(format!("{name}.c"));
+        let o = obj_dir.join(format!("{name}.o"));
+        std::fs::write(&c, text)?;
+        let out = clang
+            .command()
+            .args(clang.gen_flags())
+            .args(extra)
+            .arg(format!("-I{}", include.display()))
+            .arg("-c")
+            .arg(&c)
+            .arg("-o")
+            .arg(&o)
+            .output()?;
+        if !out.status.success() {
+            bail!("{name}.c: {}", tail(&String::from_utf8_lossy(&out.stderr), 2000));
+        }
+        Ok(o)
+    };
+    let mut all = objs.to_vec();
+    all.push(compile("web_main", WEB_MAIN, &[])?);
+    match runtime {
+        Some(lib) => {
+            all.push(compile("boundary", WEB_BOUNDARY, &["-sSUPPORT_LONGJMP=wasm", "-fwasm-exceptions"])?);
+            all.push(lib.to_path_buf());
+        }
+        None => all.push(compile("runtime_data", WEB_RUNTIME_DATA, &[])?),
+    }
+    let rsp = obj_dir.join("link-web.rsp");
+    std::fs::write(&rsp, response_file(&all))?;
+    // NXRS_WEB_LINK_FLAGS: more emcc link flags (development: -sNODERAWFS=1 runs the module under Node on the real
+    // data folder)
+    let extra: Vec<String> = std::env::var("NXRS_WEB_LINK_FLAGS")
+        .unwrap_or_default()
+        .split_whitespace()
+        .map(String::from)
+        .collect();
+    let o = clang
+        .command()
+        .args(["-O1"])
+        .args(WEB_FLAGS)
+        .args([
+            "-sPROXY_TO_PTHREAD=1",
+            "-sEXIT_RUNTIME=1",
+            // the Rust code's unwinding and the runtime's setjmp/longjmp use wasm exception handling (not JS invoke_*)
+            "-fwasm-exceptions",
+            "-sSUPPORT_LONGJMP=wasm",
+            "-sALLOW_MEMORY_GROWTH=1",
+            "-sINITIAL_MEMORY=256MB",
+            "-sMAXIMUM_MEMORY=16GB",
+            "-sPTHREAD_POOL_SIZE=16",
+            // guest calls nest on the host stack: as deep as the native build's 8 MiB thread stacks
+            "-sSTACK_SIZE=8MB",
+            "-sDEFAULT_PTHREAD_STACK_SIZE=8MB",
+            "-sERROR_ON_UNDEFINED_SYMBOLS=0",
+            "-sWARN_ON_UNDEFINED_SYMBOLS=0",
+            // the page (src/web/boot.js) maps the data folder into the file system before main
+            "-sEXPORTED_RUNTIME_METHODS=FS,addRunDependency,removeRunDependency",
+        ])
+        .args(&extra)
+        .arg(format!("@{}", rsp.display()))
+        .arg("-o")
+        .arg(js)
+        .current_dir(obj_dir)
+        .output()
+        .context("running emcc")?;
+    if !o.status.success() {
+        bail!("Linking failed:\n{}", tail(&String::from_utf8_lossy(&o.stderr), 4000));
+    }
+    Ok(())
+}
+
 pub fn link_exe(clang: &Clang, obj_dir: &Path, exe: &Path) -> Result<()> {
     if cfg!(target_os = "linux") {
         let src = obj_dir.join("nxrs_loader.c");
@@ -1023,6 +1258,7 @@ mod tests {
             version: "clang version 0".into(),
             id: "clang version 0\ntarget x".into(),
             gnu: false,
+            web: None,
         }
     }
 

@@ -157,6 +157,19 @@ pub unsafe fn stl(sz: u32, a: u64, v: u64) {
     });
 }
 
+/// wasm has no 16-byte atomic: compiler-rt's lock-based `__atomic_compare_exchange_16`, the same one the generated
+/// code's 128-bit atomics call, so the interpreter and lifted code exclude each other on the same lock.
+#[cfg(target_family = "wasm")]
+pub unsafe fn cas128(a: u64, expected: u128, new: u128) -> (bool, u128) {
+    extern "C" {
+        fn __atomic_compare_exchange_16(p: *mut u128, expected: *mut u128, desired: u128, s: i32, f: i32) -> bool;
+    }
+    let mut e = expected;
+    // SAFETY: `a` is a 16-byte-aligned guest address the caller checked; 5 = seq_cst
+    let ok = __atomic_compare_exchange_16(a as *mut u128, &mut e, new, 5, 5);
+    (ok, e)
+}
+
 /// lock cmpxchg16b: (success, the value found).
 #[cfg(target_arch = "x86_64")]
 pub unsafe fn cas128(a: u64, expected: u128, new: u128) -> (bool, u128) {

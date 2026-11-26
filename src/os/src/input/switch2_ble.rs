@@ -554,6 +554,13 @@ pub fn start() {
         .ok();
 }
 
+/// The web: a page cannot scan Bluetooth LE on its own (Web Bluetooth needs a user prompt per device); Switch 2
+/// controllers are not looked for.
+#[cfg(target_os = "emscripten")]
+pub fn start() {
+    ilog!("Switch 2 controllers over Bluetooth are not looked for in a web build");
+}
+
 /// Starts the watcher (once) on a thread of its own (Linux: BlueZ over the system D-Bus).
 #[cfg(target_os = "linux")]
 pub fn start() {
