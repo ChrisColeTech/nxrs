@@ -572,9 +572,28 @@ pub fn gpu_writes(a: u64, n: u64) {
 /// from bytes that already include it stays (UPSYNC2 M2). Returns the whole pages it found the GPU left unchanged
 /// (`src` equal to `before`), ascending: the landing need not compare them again (`mem::land_changed`).
 pub fn landed(pool: u64, a: u64, n: u64, src: *const u8, before: *const u8, epoch: u64, value: u64) -> Vec<u64> {
+    landed_with(pool, a, n, src, before, epoch, value, None)
+}
+
+/// `landed`; `pre`: the same write-back's pages compared and hashed beforehand (`landing_pre`, made before the caller
+/// took the pool lock); without it they are compared and hashed here.
+#[allow(clippy::too_many_arguments)]
+pub fn landed_with(
+    pool: u64,
+    a: u64,
+    n: u64,
+    src: *const u8,
+    before: *const u8,
+    epoch: u64,
+    value: u64,
+    pre: Option<&LandingPre>,
+) -> Vec<u64> {
     let mut same_pages = Vec::new();
     if !on() || n == 0 || src.is_null() {
         return same_pages;
+    }
+    if let Some(pre) = pre.filter(|p| p.a == a && p.n == n) {
+        return landed_pre(pool, a, n, src, before, epoch, value, pre);
     }
     let t0 = std::time::Instant::now();
     let _t = Timer(t0, &REARM_NS);
@@ -633,6 +652,119 @@ pub fn landed(pool: u64, a: u64, n: u64, src: *const u8, before: *const u8, epoc
                     _ => s == unsafe { core::slice::from_raw_parts(before.add(o), PAGE as usize) },
                 };
             pg.hash = if same { pg.kept } else { page_hash(s) };
+            pg.kept = 0;
+            pg.stamp = 0;
+            rearmed += PAGE;
+            if same {
+                same_pages.push(p);
+            }
+        });
+    }
+    REARMED.fetch_add(rearmed, Ordering::Relaxed);
+    same_pages.sort_unstable();
+    same_pages
+}
+
+/// A write-back's whole pages compared with its baseline, and the GPU's bytes of each changed one hashed, before it
+/// lands (`landing_pre`): the work `landed` did on the completion thread with the pool lock held (OoT: ~59 MB a frame,
+/// ~3.7 ms a frame under the lock the replay thread's syncs and lookups wait for), done before that lock is taken. It
+/// reads only the write-back's own readback and baseline buffers, which nothing changes after the submission completed.
+pub struct LandingPre {
+    a: u64,
+    n: u64,
+    lo_pg: u64,
+    /// by page from `lo_pg`: 0 not a whole page of the range, 1 the GPU left it as the baseline has it, 2 changed (or
+    /// no baseline)
+    eq: Vec<u8>,
+    /// the hash of the GPU's bytes of each changed whole page (0: none made)
+    h: Vec<u64>,
+}
+
+/// `LandingPre` of the write-back of [a, a + n) from `src` with baseline `before` (may be null); None when the skip is
+/// off or there is nothing to land.
+pub fn landing_pre(a: u64, n: u64, src: *const u8, before: *const u8) -> Option<LandingPre> {
+    if !on() || n == 0 || src.is_null() {
+        return None;
+    }
+    let _t = Timer(std::time::Instant::now(), &PRE_NS);
+    let lo_pg = a & !(PAGE - 1);
+    let pages = ((a + n - lo_pg).div_ceil(PAGE)) as usize;
+    let eq: Vec<std::sync::atomic::AtomicU8> = (0..pages).map(|_| Default::default()).collect();
+    let h: Vec<AtomicU64> = (0..pages).map(|_| AtomicU64::new(0)).collect();
+    let (s0, b0) = (src as usize, before as usize);
+    let page = |k: usize| {
+        let p = lo_pg + k as u64 * PAGE;
+        if p < a || p + PAGE > a + n {
+            return;
+        }
+        let o = (p - a) as usize;
+        // SAFETY: the write-back's readback (and baseline) buffers hold n bytes from `a`
+        let s = unsafe { core::slice::from_raw_parts((s0 + o) as *const u8, PAGE as usize) };
+        let same = b0 != 0 && s == unsafe { core::slice::from_raw_parts((b0 + o) as *const u8, PAGE as usize) };
+        eq[k].store(if same { 1 } else { 2 }, Ordering::Relaxed);
+        if !same {
+            h[k].store(page_hash(s), Ordering::Relaxed);
+        }
+    };
+    if n >= PAR_MIN {
+        par_for(pages, &page);
+    } else {
+        (0..pages).for_each(page);
+    }
+    Some(LandingPre {
+        a,
+        n,
+        lo_pg,
+        eq: eq.into_iter().map(|v| v.into_inner()).collect(),
+        h: h.into_iter().map(|v| v.into_inner()).collect(),
+    })
+}
+
+/// Time in `landing_pre` (the completion thread, before the pool lock), ns.
+static PRE_NS: AtomicU64 = AtomicU64::new(0);
+
+/// `landed` with the pages compared and hashed beforehand: the same decisions, from `pre`.
+#[allow(clippy::too_many_arguments)]
+fn landed_pre(
+    pool: u64,
+    a: u64,
+    n: u64,
+    src: *const u8,
+    before: *const u8,
+    epoch: u64,
+    value: u64,
+    pre: &LandingPre,
+) -> Vec<u64> {
+    let _t = Timer(std::time::Instant::now(), &REARM_NS);
+    let mut same_pages = Vec::new();
+    let mut g = state();
+    let Some(st) = g.as_mut() else { return same_pages };
+    let mut rearmed = 0u64;
+    for base in st.owners(a, n) {
+        let end = st.pools[&base].end;
+        if base != pool {
+            // (as `landed`: another pool's GPU copy is left stamped for its own landing)
+            continue;
+        }
+        st.each_page(base, a, n, |pg, p| {
+            if value > pg.brought_at {
+                pg.brought = 0;
+            }
+            if pg.stamp != epoch || p < a || p + PAGE > a + n || p < base || p + PAGE > end {
+                return;
+            }
+            let k = ((p - pre.lo_pg) / PAGE) as usize;
+            let (e, h) = (pre.eq.get(k).copied().unwrap_or(0), pre.h.get(k).copied().unwrap_or(0));
+            let same = !before.is_null() && pg.kept != 0 && e == 1;
+            pg.hash = if same {
+                pg.kept
+            } else if e == 2 && h != 0 {
+                h
+            } else {
+                // the GPU left the page as it was but no hash was kept for it: the hash of its bytes now
+                // SAFETY: the write-back's readback buffer holds n bytes from `a`
+                page_hash(unsafe { core::slice::from_raw_parts(src.add((p - a) as usize), PAGE as usize) })
+            };
             pg.kept = 0;
             pg.stamp = 0;
             rearmed += PAGE;
@@ -764,10 +896,10 @@ pub fn report(frames: f64) -> String {
     let mb = |a: &AtomicU64| a.swap(0, Ordering::Relaxed) as f64 / frames / 1048576.0;
     let (s, u, d, f, r) = (mb(&SKIPPED), mb(&UNKNOWN), mb(&DIFFER), mb(&FORGOT), mb(&REARMED));
     let ms = |a: &AtomicU64| a.swap(0, Ordering::Relaxed) as f64 / frames / 1e6;
-    let (hm, rm) = (ms(&HASH_NS), ms(&REARM_NS));
+    let (hm, rm, pm) = (ms(&HASH_NS), ms(&REARM_NS), ms(&PRE_NS));
     let bk = BROUGHT_SKIPPED.swap(0, Ordering::Relaxed) as f64 / frames / 1024.0;
     let race = BROUGHT_RACED.swap(0, Ordering::Relaxed);
-    format!("; upload skip a frame: {s:.2} MB of CPU-written pages not uploaded (same bytes as the GPU copy), whole pages uploaded {u:.2} MB with no hash kept and {d:.2} MB changed, {f:.2} MB forgotten or GPU-written, {r:.2} MB re-armed at landings, {bk:.1} KB of pages brought back from the device unchanged ({race} brought back while copied, upload dropped); copy and hash {hm:.2} ms, re-arming {rm:.2} ms")
+    format!("; upload skip a frame: {s:.2} MB of CPU-written pages not uploaded (same bytes as the GPU copy), whole pages uploaded {u:.2} MB with no hash kept and {d:.2} MB changed, {f:.2} MB forgotten or GPU-written, {r:.2} MB re-armed at landings, {bk:.1} KB of pages brought back from the device unchanged ({race} brought back while copied, upload dropped); copy and hash {hm:.2} ms, re-arming {rm:.2} ms under the pool lock and {pm:.2} ms before it")
 }
 
 #[cfg(test)]
@@ -1224,5 +1356,61 @@ mod tests {
         assert_eq!(runs(base, 2 * PAGE, base, 2 * PAGE), vec![(base, 2 * PAGE)], "an entry made after the log");
         drop_any(base);
         state().as_mut().unwrap().raw.clear();
+    }
+
+    /// OOT-DESC: a landing whose pages were compared and hashed before the pool lock (`landing_pre`) leaves the same
+    /// page states and the same unchanged pages as one that compares them itself: pages the GPU left alone (with a kept
+    /// hash, and one without), pages it changed, a partial page at each end, and a page another note restamped since.
+    /// Large enough for the threaded compare, and small for the serial one.
+    #[test]
+    fn a_landing_compared_beforehand_decides_as_one_that_compares_itself() {
+        let _s = SERIAL.lock().unwrap();
+        for pages in [6u64, (PAR_MIN / PAGE) + 2] {
+            let (_m, base) = pool(pages);
+            let size = pages * PAGE;
+            let (a, n) = (base + 100, size - 200);
+            let mut outcome = Vec::new();
+            for with_pre in [false, true] {
+                drop_any(base);
+                for k in 0..pages {
+                    set(base + k * PAGE, &vec![k as u8 + 1; PAGE as usize]);
+                }
+                assert_eq!(runs(base, size, base, size), vec![(base, size)]);
+                // page 2's kept hash gone (a forget), then the whole range noted as written by the GPU
+                forget(base + 2 * PAGE, PAGE);
+                gpu_writes(a, n);
+                let k = next_epoch();
+                let before = bytes(a, n);
+                let mut after = before.clone();
+                for pg in [1u64, 4] {
+                    let o = (pg * PAGE - 100) as usize;
+                    after[o + 7] ^= 0x5a;
+                }
+                // page 3 noted again by a later recording: not re-armed by this landing
+                gpu_writes(base + 3 * PAGE, PAGE);
+                next_epoch();
+                let pre = with_pre.then(|| landing_pre(a, n, after.as_ptr(), before.as_ptr()).unwrap());
+                let same = landed_with(base, a, n, after.as_ptr(), before.as_ptr(), k, 1, pre.as_ref());
+                let st = state();
+                let pgs: Vec<(u64, u64, u64)> = st.as_ref().unwrap().pools[&base]
+                    .pages
+                    .iter()
+                    .map(|p| (p.hash, p.kept, p.stamp))
+                    .collect();
+                outcome.push((same, pgs));
+            }
+            let (old, new) = (&outcome[0], &outcome[1]);
+            assert_eq!(old.0, new.0, "the same unchanged pages");
+            assert_eq!(old.1.len(), new.1.len());
+            for (i, (o, w)) in old.1.iter().zip(&new.1).enumerate() {
+                assert_eq!((o.0, o.1), (w.0, w.1), "page {i}: hash and kept hash");
+                assert_eq!(o.2 == 0, w.2 == 0, "page {i}: stamped or not");
+            }
+            assert!(!old.0.contains(&(base + 2 * PAGE)) && old.1[2].0 != 0, "page 2: no kept hash, hashed now");
+            assert!(!old.0.contains(&(base + PAGE)) && !old.0.contains(&(base + 4 * PAGE)), "pages 1, 4 changed");
+            assert!(old.1[1].0 != 0 && old.1[2].0 != 0, "re-armed with the GPU's bytes");
+            assert!(old.1[3].0 == 0 && old.1[3].2 != 0, "page 3: restamped since, left for its own landing");
+            drop_any(base);
+        }
     }
 }

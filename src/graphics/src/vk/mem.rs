@@ -3434,12 +3434,26 @@ fn note_writeback(sub: &mut super::queue::Sub, b: u64, a: u64, n: u64, buf: vk::
 /// pages stay marked for the next upload; the write-back's own stores are not taken for CPU writes.
 /// `epoch`: the submission's recording epoch (`upskip::next_epoch`): pages it noted as GPU-written get the hash of the
 /// GPU's bytes back (`upskip::landed`); `value`: its GPU timeline value.
+/// `NXGFX_LAND_PRE=0`: a landing's page compares and hashes are made under the pool lock (`upskip::landing_pre`).
+fn land_pre_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_LAND_PRE").as_deref() != Ok("0"))
+}
+
 pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)], epoch: u64, value: u64) {
     if wbs.is_empty() {
         return;
     }
     let landed: Vec<(u64, u64)> = wbs.iter().map(|w| (w.1, w.2)).collect();
     let _done = InflightDone(landed);
+    // each write-back's pages compared with its baseline and hashed before the pool lock is taken (OOT-DESC: that work
+    // under the lock held up the replay thread's syncs and lookups); it reads only the write-back's own buffers.
+    // `NXGFX_LAND_PRE=0`: done under the lock, as before
+    let pres: Vec<Option<super::upskip::LandingPre>> = if land_pre_on() {
+        wbs.iter().map(|w| super::upskip::landing_pre(w.1, w.2, w.3, w.4)).collect()
+    } else {
+        Vec::new()
+    };
     let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
     // landings take, write and reset pages: the walker must not take a landing's own stores for CPU writes, and the
@@ -3447,7 +3461,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
     let _watch = watch_lock(&mut m);
     super::lazy::T_LOCK.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     super::queue::chain_trace::note("wb_lock", t0.elapsed().as_micros() as u64, wbs.len() as u64);
-    for &(pool, a, n, src, pre, identity) in wbs {
+    for (i, &(pool, a, n, src, pre, identity)) in wbs.iter().enumerate() {
         // a landing keeps CPU writes it meets as pending (a sync that does not scan visits it for them)
         m.busy.insert(pool);
         let Some(p) = m.by_base.get_mut(&pool) else {
@@ -3466,7 +3480,16 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
         }
         // the GPU copy of the range is `src` now (unless a later submission changed it: then it restamped the pages);
         // the pages it found the GPU left alone are not compared again below
-        let same = super::upskip::landed(pool, a, n, src, pre, epoch, value);
+        let same = super::upskip::landed_with(
+            pool,
+            a,
+            n,
+            src,
+            pre,
+            epoch,
+            value,
+            pres.get(i).and_then(|p| p.as_ref()),
+        );
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let tl = std::time::Instant::now();
         let mut lazy = if p.watched {
