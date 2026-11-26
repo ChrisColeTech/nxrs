@@ -8311,18 +8311,21 @@ pub fn run(g: &Gpu, sub: &mut Sub, qs: &mut QState, stream: &[u8]) -> Option<usi
 // targets, a counter reset's samples-passed switch) and makes the ordered global effects (`global_op`), waits and
 // render conditions in stream order, so the segments need nothing from each other.
 
-/// `NXGFX_TRANSLATE_THREADS`: translation lanes for a stream's segments (0, the default: one piece, as before; 1: in
-/// segments one after another on the replay thread; N > 1: in parallel on the replay thread and N - 1 translation
-/// threads, `par`).
+/// `NXGFX_TRANSLATE_THREADS`: translation lanes for a stream's segments (0: one piece, as before; 1: in segments one
+/// after another on the replay thread; N > 1: in parallel on the replay thread and N - 1 translation threads, `par`).
+/// Default `TRANSLATE_LANES` (MKW-RECORD step 6).
 pub fn translate_lanes() -> usize {
     static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
     *N.get_or_init(|| {
         std::env::var("NXGFX_TRANSLATE_THREADS")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(0)
+            .unwrap_or(TRANSLATE_LANES)
     })
 }
+
+/// The default number of translation lanes (`translate_lanes`).
+const TRANSLATE_LANES: usize = 6;
 
 fn env_usize(name: &str, default: usize) -> usize {
     std::env::var(name).ok().and_then(|v| v.parse().ok()).unwrap_or(default)

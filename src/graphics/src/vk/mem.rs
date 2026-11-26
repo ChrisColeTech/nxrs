@@ -2062,6 +2062,58 @@ struct WalkJob {
     done: std::sync::atomic::AtomicUsize,
     /// every range answered
     ok: std::sync::atomic::AtomicBool,
+    /// each piece walked and answered (`walk_covers_pool`)
+    piece_done: Vec<std::sync::atomic::AtomicBool>,
+}
+
+impl WalkJob {
+    fn new(tail: u64, signals: u64, pieces: Vec<(u64, u64)>) -> WalkJob {
+        WalkJob {
+            tail,
+            signals,
+            piece_done: pieces.iter().map(|_| Default::default()).collect(),
+            pieces,
+            next: Default::default(),
+            done: Default::default(),
+            ok: std::sync::atomic::AtomicBool::new(true),
+        }
+    }
+
+    /// Whether pieces this walk has walked (and answered) cover [lo, hi) whole.
+    fn covers(&self, lo: u64, hi: u64) -> bool {
+        let first = self.pieces.partition_point(|p| p.1 <= lo);
+        let mut at = lo;
+        for (i, &(plo, phi)) in self.pieces.iter().enumerate().skip(first) {
+            if at >= hi || plo > at {
+                break;
+            }
+            if !self.piece_done[i].load(Ordering::Acquire) {
+                return false;
+            }
+            at = at.max(phi);
+        }
+        at >= hi
+    }
+}
+
+/// `NXGFX_WALKER_POOLS=0`: a sync that scans asks every watched pool, also those the walk in progress has walked.
+fn walker_pools() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_WALKER_POOLS").as_deref() != Ok("0"))
+}
+
+/// The walk in progress, when its pieces may stand for a sync's scan of op `due`: it started after the op was queued
+/// and no CPU signal came since (the `scan_covers` rule, per piece).
+fn walk_for(due: Option<u64>) -> Option<std::sync::Arc<WalkJob>> {
+    let d = due.filter(|&d| d != 0)?;
+    if !walker_on() || !walker_pools() {
+        return None;
+    }
+    WALK.lock()
+        .unwrap()
+        .job
+        .clone()
+        .filter(|j| j.tail >= d && j.signals == cpu_signals())
 }
 
 /// Walks pieces of `job` until none is left to take. `step_aside`: the walker lets a sync or landing waiting for the
@@ -2083,6 +2135,9 @@ fn walk_some(job: &WalkJob, step_aside: bool) {
         // take (reset already) are kept (audit L1)
         let (pages, ok) = watch::take_partial(lo, hi, true);
         s.extend(pages);
+        if ok {
+            job.piece_done[i].store(true, Ordering::Release);
+        }
         drop(s);
         if !ok {
             job.ok.store(false, Ordering::Release);
@@ -2160,14 +2215,11 @@ fn walker_main() {
         let ok = match super::Gpu::try_get() {
             Some(g) => {
                 let list = watched_pools(&g.mem.lock().unwrap());
-                let job = std::sync::Arc::new(WalkJob {
+                let job = std::sync::Arc::new(WalkJob::new(
                     tail,
                     signals,
-                    pieces: walk_pieces(&list, WALK_PIECE),
-                    next: Default::default(),
-                    done: Default::default(),
-                    ok: std::sync::atomic::AtomicBool::new(true),
-                });
+                    walk_pieces(&list, WALK_PIECE),
+                ));
                 WALK.lock().unwrap().job = Some(job.clone());
                 walk_some(&job, true);
                 walk_finish(&job)
@@ -2197,13 +2249,14 @@ fn walker_main() {
         WALK_CV.notify_all();
         if n % 600 == 0 {
             crate::vklog!(
-                "pool walker, last 600 walks: {:.2} ms a walk, {} could not read a range, {} presents' syncs covered ({} finishing a walk), {} other syncs finished one, the replay's syncs walked {:.3} ms a walk of them; syncs and landings waited {:.3} ms a walk for the watch lock (with the drain)",
+                "pool walker, last 600 walks: {:.2} ms a walk, {} could not read a range, {} presents' syncs covered ({} finishing a walk), {} other syncs finished one, the replay's syncs walked {:.3} ms a walk of them, scanning syncs left {} MB to walks in progress; syncs and landings waited {:.3} ms a walk for the watch lock (with the drain)",
                 WALK_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6,
                 WALK_FAILED.swap(0, Ordering::Relaxed),
                 WALK_COVERED.swap(0, Ordering::Relaxed),
                 WALK_HELPED.swap(0, Ordering::Relaxed),
                 WALK_HELPED_SYNCS.swap(0, Ordering::Relaxed),
                 WALK_WAIT_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6,
+                WALK_POOLS_B.swap(0, Ordering::Relaxed) >> 20,
                 WATCH_WAIT_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6
             );
         }
@@ -2326,6 +2379,9 @@ fn walker_covers_ex(due: Option<u64>, present: bool) -> bool {
     ok
 }
 
+/// Bytes of watched pools a scanning sync left to the walk in progress (`walk_for`).
+pub static WALK_POOLS_B: AtomicU64 = AtomicU64::new(0);
+
 /// Presents' syncs that finished a walk in progress (`walker_covers`), and other syncs that did (`walker_covers_ex`).
 pub static WALK_HELPED: AtomicU64 = AtomicU64::new(0);
 pub static WALK_HELPED_SYNCS: AtomicU64 = AtomicU64::new(0);
@@ -2374,16 +2430,7 @@ mod walker_tests {
         assert!(!walker_covers(Some(0)));
         // a walk in progress that started after the present: the sync finishes it (no wait for a whole walk); one
         // that started before it does not cover it
-        let job = |tail, signals| {
-            std::sync::Arc::new(WalkJob {
-                tail,
-                signals,
-                pieces: vec![],
-                next: Default::default(),
-                done: Default::default(),
-                ok: std::sync::atomic::AtomicBool::new(true),
-            })
-        };
+        let job = |tail, signals| std::sync::Arc::new(WalkJob::new(tail, signals, vec![]));
         WALK.lock().unwrap().job = Some(job(12, 0));
         assert!(walker_covers(Some(12)));
         WALK.lock().unwrap().job = Some(job(11, 0));
@@ -2400,14 +2447,7 @@ mod walker_tests {
     /// Pieces taken by two threads: each is walked once, and finishing waits for the other's piece in progress.
     #[test]
     fn a_walk_is_shared_piece_by_piece() {
-        let j = WalkJob {
-            tail: 1,
-            signals: 0,
-            pieces: vec![(0, 0); 64],
-            next: Default::default(),
-            done: Default::default(),
-            ok: std::sync::atomic::AtomicBool::new(true),
-        };
+        let j = WalkJob::new(1, 0, vec![(0, 0); 64]);
         // empty ranges: nothing is read, every piece counts as walked
         std::thread::scope(|s| {
             s.spawn(|| walk_some(&j, false));
@@ -2416,6 +2456,23 @@ mod walker_tests {
         assert_eq!(j.done.load(Ordering::Acquire), 64);
         assert!(j.next.load(Ordering::Acquire) >= 64);
         let _ = walk_finish(&j);
+    }
+
+    /// A pool counts as walked only when walked pieces cover all of it, without a gap.
+    #[test]
+    fn walked_pieces_cover_a_pool_whole() {
+        let j = WalkJob::new(1, 0, vec![(0, 100), (100, 200), (300, 400)]);
+        let done = |i: usize| j.piece_done[i].store(true, Ordering::Release);
+        assert!(!j.covers(10, 50));
+        done(0);
+        assert!(j.covers(10, 50));
+        assert!(!j.covers(50, 150), "the second piece is not walked yet");
+        done(1);
+        assert!(j.covers(50, 150));
+        done(2);
+        assert!(!j.covers(150, 350), "200..300 is in no piece");
+        assert!(j.covers(300, 400));
+        assert!(!j.covers(350, 450), "past the last piece");
     }
 }
 
@@ -2498,11 +2555,30 @@ pub fn begin_submit_ex(
                 (p.base, lo, hi, p.alloc_base)
             })
             .collect();
+        // pools the walk in progress has walked since this op was queued, with no CPU signal since: their pages were
+        // taken and drained into their pending writes when this sync took the watch lock (which it holds, so no piece
+        // changes meanwhile); they need no scan here (`NXGFX_WALKER_POOLS=0` off)
+        let walk = walk_for(due).filter(|j| j.signals == signals);
+        let mut by_walk = 0u64;
         let watched: Vec<_> = all_watched
             .iter()
             .copied()
             .filter(|p| !cold_skipped.contains(&p.0))
+            .filter(|p| {
+                let w = walk.as_ref().is_some_and(|j| j.covers(p.1, p.2));
+                if w {
+                    taken.entry(p.0).or_default();
+                    by_walk += p.2 - p.1;
+                }
+                !w
+            })
             .collect();
+        WALK_POOLS_B.fetch_add(by_walk, Ordering::Relaxed);
+        // the scan covers no newer op than the walk that stood for part of it
+        let tail = match &walk {
+            Some(j) if by_walk > 0 => tail.min(j.tail),
+            _ => tail,
+        };
         WATCH_POOLS.fetch_add(watched.len() as u64, Ordering::Relaxed);
         if super::perf::fine() {
             for p in m.by_base.values().filter(|p| {
