@@ -42,6 +42,23 @@ host fibers, `hostprof.rs`), `os` 20/89, `graphics` is ash/Vulkan with write-wat
 a winit window, `cli/cc.rs` drives clang-cl/lld-link. `runtime/src/linux.rs` and `front/src/window_linux.rs`
 establish the per-platform `cfg` pattern the web target follows.
 
+## 2a. W0 results so far (2026-11-26)
+
+Evidence: `build/WEB/W0-shaders/report.md`, `build/WEB/W0-gta/graphics.md`, `build/WEB/W0-gta/runtime-io.md`,
+run `build/play/20261126-141932-web-w0-fnprof` (scenario `agsob`, reached beach gameplay, 59.8 FPS with the
+recorder on), hot set `build/WEB/W0-run/fnprof-hot.txt`.
+
+| Step | Result |
+|---|---|
+| (a)/(b) emcc compile, Chrome limits | **Open.** emsdk/Binaryen not installed. Size estimate from the Windows DLL: 266 MiB `.text` at `-O1` + 44 MiB `.rdata`, so roughly 200-300 MB of wasm before splitting |
+| (c) hot set | **26,824 of 316,912 functions (8.5%) ran**, **12.1% of the C by size** (131 of 1,085 MiB), boot through two minutes of beach gameplay. At the estimate above the hot module is ~25-35 MB, below GTA's 60 MB. Recording costs nothing visible (`NXRS_FNPROF=<file>`, `rt.rs` `fnprof_hit`) |
+| (d) memory | Guest committed ≈ **2.27 GB** (modules 110 MB, stack 59 MB, physical maps 1,985 MB, heap 0); process peak 4.4 GB on Windows. Committed memory fits wasm32, but the reserved layout spans `0x1_1000_0000`..`0x14_0000_0000` plus modules at `0x70_0000_0000` (alias region alone 64 GiB). W1 needs a compact HLE layout (smaller region sizes reported to the game) and a Windows run proving the game accepts it |
+| (e) shaders | Used set 57 pipelines / 114 shaders: **111/114 convert to valid WGSL** after five representational rewrites; random 1,000 of 53,109 variants: 834 convert, 164 need a base-instance uniform, 2 hit a naga defect. No subgroup/f64/clip-distance use. Used set 0.94 MB gzip. Chrome/Tint acceptance untested |
+| (f) fibers | **Not used**: no `InitializeFiber` in either run (the engine logs every one) |
+| (g) FP under wasm | **Open** (needs emsdk) |
+| (h) GTA reading | Done. Graphics: shared-memory ring + JS WebGPU worker, writes straight from shared-memory views, offline WGSL packs fetched lazily, async pipelines + recipe warmup. Runtime: engine `main` in a worker (no PROXY_TO_PTHREAD), I/O worker with per-thread request slots + hint ring, OPFS block store + journal, recorded first-touch boot set (555 MiB), acknowledged saves, AudioWorklet ring, 1 ms timer trick on Windows, `crossOriginIsolated` + memory64 probes |
+| Pool sync | 43 mirror pools / 706 MB tracked, ~2.2-2.6 MB uploaded per frame. Hashing every pool every frame is not viable in a browser; the replacement must check only pools the frame's draws bind |
+
 ## 3. Reference: how the GTA web build is delivered
 
 From `P:\Games\Web\GTA5\mirror\playgta5.com` (inspected 2026-11-26):
