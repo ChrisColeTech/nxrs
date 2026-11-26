@@ -3923,13 +3923,14 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
         let f = super::present::frames();
         let mut l = LAST.lock().unwrap();
         let m = l.get_or_insert_with(Default::default);
-        let due = m.get(&id).is_none_or(|&at| f >= at + 600);
+        let due = m.get(&id).is_none_or(|&at| f >= at + 600 || super::image::textrace::on() && at != f);
         if due && m.len() < 4096 {
             m.insert(id, f);
             let what = match g.tables.tex_at(id) {
                 Some((serial, _)) => format!(
-                    "its slot names texture ser{serial}, which has no image now ({})",
-                    g.images.lock().unwrap().whereabouts(serial)
+                    "its slot names texture ser{serial}, which has no image now ({}){}",
+                    g.images.lock().unwrap().whereabouts(serial),
+                    super::image::textrace::dump(serial)
                 ),
                 None => "nothing is registered there".to_string(),
             };
