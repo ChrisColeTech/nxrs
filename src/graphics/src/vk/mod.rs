@@ -141,6 +141,8 @@ impl Gpu {
             astc: Mutex::new(None),
             d,
         };
+        #[cfg(target_os = "emscripten")]
+        present::web_canvas(&mut g.present.lock().unwrap());
         Ok(g)
     }
 

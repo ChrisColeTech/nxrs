@@ -2,7 +2,7 @@
 
     py -I src/web/dev_server.py <web build folder> [--port 8770]
 
-  /                 the page (src/web/index.html, boot.js beside this file)
+  /                 the page (src/web/index.html; boot.js, gpu.js and gpu-worker.js beside this file)
   /game.js, /game.wasm, ...   the build folder (nxrs-build build --target web)
   /data/<path>      the build's <name>_data folder, with HTTP range requests
   /files.json       that folder's files: [[path, size], ...]
@@ -21,7 +21,7 @@ HERE = Path(__file__).resolve().parent
 TYPES = {'.wasm': 'application/wasm', '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json'}
 
 
-def make_handler(build: Path, data: Path):
+def make_handler(build: Path, data: Path, log_file=None):
     class H(http.server.BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
 
@@ -40,8 +40,8 @@ def make_handler(build: Path, data: Path):
             p = self.path.split('?', 1)[0]
             if p in ('/', '/index.html'):
                 return HERE / 'index.html'
-            if p == '/boot.js':
-                return HERE / 'boot.js'
+            if p in ('/boot.js', '/gpu.js', '/gpu-worker.js'):
+                return HERE / p.lstrip('/')
             if p == '/files.json':
                 return 'files'
             if p.startswith('/data/'):
@@ -56,6 +56,17 @@ def make_handler(build: Path, data: Path):
 
         def do_HEAD(self):
             self.send(head=True)
+
+        def do_POST(self):
+            # /log: the page's engine log lines (gpu.js), appended to --log when given (development: read by tools)
+            n = int(self.headers.get('Content-Length', '0'))
+            body = self.rfile.read(n)
+            if self.path == '/log' and log_file is not None:
+                with open(log_file, 'ab') as fh:
+                    fh.write(body)
+            self.send_response(204)
+            self.headers_common('text/plain', 0)
+            self.end_headers()
 
         def do_GET(self):
             self.send(head=False)
@@ -121,12 +132,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('build')
     ap.add_argument('--port', type=int, default=8770)
+    ap.add_argument('--log', help='append the page\'s engine log to this file')
     a = ap.parse_args()
     build = Path(a.build).resolve()
     datas = [d for d in build.iterdir() if d.is_dir() and d.name.endswith('_data')]
     if not (build / 'game.js').is_file() or len(datas) != 1:
         sys.exit(f'{build}: not a web build (game.js and one <name>_data folder)')
-    srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, datas[0]))
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, datas[0], a.log))
     print(f'serving {build} on http://127.0.0.1:{a.port}/', flush=True)
     srv.serve_forever()
 

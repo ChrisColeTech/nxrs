@@ -15,6 +15,8 @@ pub mod log;
 pub mod nvn;
 pub mod tex;
 pub mod vk;
+#[cfg(target_os = "emscripten")]
+pub mod web;
 
 /// Where the game's translated shaders are (`<key>.spv` + `<key>.json`, lane C's output).
 pub fn set_shader_dir(p: std::path::PathBuf) {

@@ -1234,10 +1234,9 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             .name("shader prebuild".into())
             .spawn_scoped(s, move || {
                 let t = Instant::now();
-                // the web build's shaders are WGSL packs (docs/35 W4), not this SPIR-V prebuild
-                if web {
-                    return 0.0;
-                }
+                // the web build translates them too: its GPU turns each module the replay makes from them into WGSL
+                // when it is created (src/graphics/src/web), the page serves them on first use (docs/35 W4)
+                let _ = web;
                 // never fatal, a panic of the prebuild thread included
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shaders_step(out, data, profile_id, exact_profile_build, a))).is_err() {
                     out.say("shaders: not translated at build time (the prebuild stopped); the game translates them while it runs");

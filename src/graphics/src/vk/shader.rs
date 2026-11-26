@@ -929,6 +929,19 @@ impl Library {
                 return Some((words, json));
             }
         }
+        // the web build preloads no shaders: the library's files come from the page's server on first use
+        #[cfg(target_os = "emscripten")]
+        if let Some(bytes) = crate::web::fetch_data(&format!("shaders/spv/{hex}.spv")) {
+            if bytes.len() % 4 == 0 && !bytes.is_empty() {
+                let words = bytes
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                let json = crate::web::fetch_data(&format!("shaders/spv/{hex}.json"))
+                    .and_then(|b| String::from_utf8(b).ok());
+                return Some((words, json));
+            }
+        }
         None
     }
 
