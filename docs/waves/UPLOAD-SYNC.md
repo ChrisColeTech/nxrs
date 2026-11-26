@@ -286,3 +286,149 @@ walker's walk, which is not in the three parts (OoT: ~5-6 ms a frame, before as 
 ### 6. Questions
 
 None.
+
+## Audit fixes (agent, 2026-11-26 06:30 - 08:35)
+
+Audit of checkpoint `5056038`. Files: `vk/upskip.rs`, `vk/lazy.rs`, `vk/mem.rs` (no exec.rs, queue.rs or gmem.rs change).
+
+### 1. Built
+
+- **H1, stale brought-back records.** The side table (`BROUGHT`) is gone; the record is a field of the page's entry
+  (`Pg::brought`, under `H`), set for the pool whose buffer the page came from (`lazy::Lazy` now carries the pool base,
+  `make_lazy(.., pool)`), **before** the copy into guest memory (a scan taking the copy's store finds it), cleared if
+  the bring-back fails (`not_brought_back`). It goes with every change of that pool's GPU copy: `forget`, `gpu_writes`
+  (also the same-epoch repeat), `landed`, `raw_written` (also in pools already raw), the entry dropped or made anew,
+  and with any upload or skip of the page. A pool's buffer creation now makes an empty entry (`new_pool`) so a page
+  held there has somewhere to record before the pool's first sync. `sync_range` uploads through `upload_changed`
+  (H1/L2: no plain upload over newer GPU bytes, records consumed).
+- **L1, no guest memory read under `H`.** `upload_changed` works per 1 MB batch in five steps: page states read
+  (lock), guest bytes of the skip candidates hashed (no lock), decision only where the states did not change (lock),
+  pages to upload copied and hashed (no lock; stamped `COPYING`), hashes kept only where still `COPYING` (lock). Any
+  note, forget or raw log during the copy replaces the stamp, so it never arms a hash over a change. A fault on a held
+  page while hashing or copying brings it back without meeting the lock.
+- **M1.** `landed(pool, ..)` re-arms only the written-back pool; other stamped owners lose the stamp, hash 0.
+- **M2.** `upload_changed` returns the pages it left out as brought back unchanged; `begin_submit` and `sync_range`
+  cut them out of the ranges handed to the texture check (`without_pages`) and out of `tex_dirty`.
+- **L5.** The same filtered ranges decide `dirty_frame` / `COLD_GEN` (moved after the uploads), so a held page's
+  return no longer warms a pool.
+- **L3.** `par_for` keeps a raw pointer to the closure (a late worker holding the job never touches it); a panic in any
+  call aborts the process (`catch_unwind` per piece), so the caller can neither spin for ever nor unwind under borrowing
+  workers.
+- **L4.** `drop_pool` drops the pool's raw ranges and its `over` entry; `raw_overlaps` starts at the longest raw
+  range below the query (`raw_max`) instead of scanning every range.
+
+### 2. Tests (`cargo test --release -p graphics`: lib 249 passed, 6 ignored; integration tests pass)
+
+- `upskip::tests::a_brought_back_record_goes_with_the_bytes_it_describes` (H1): the audit's interleaving (held page D
+  brought back, GPU writes G and it lands, the CPU writes D again: uploaded), then the record dropped by a note before
+  its landing, a forget, a raw log (also in a pool already raw), a new GPU copy, a failed bring-back. Fails on
+  `5056038` by construction (the side table survived all of these and `still_brought_back` matched D).
+- `upskip::tests::a_landing_rearms_only_the_written_back_pool` (M1): an outer pool's landing re-arms the outer pool;
+  the nested pool with its own buffer stays unknown (uploaded), then is known again. Fails on `5056038` by
+  construction (both re-armed with the outer buffer's bytes, the nested upload skipped).
+- `upskip::tests::a_page_brought_back_unchanged_is_not_uploaded` (reworked): the left-out page is reported in `back`;
+  a pool without an entry keeps no record.
+- `upskip::tests::raw_written_pools_are_always_uploaded` (extended, L4): a dropped pool takes its raw logs with it; a
+  raw log before an entry still makes the entry raw.
+- `mem::without_pages_tests::brought_back_pages_are_cut_out_of_the_ranges` (M2).
+- The other upskip tests run unchanged against the new `upload_changed` (skip, partial pages, the parallel-hash path,
+  re-arming, H2).
+
+### 3. Verified (GPU 1; numbers indicative: other agents' MKW runs and builds overlapped, the lead re-measures)
+
+Build: dist `07:21` (my changes plus the tree at that time), OoT relinked `07:26`. The 06:52 OoT relink (dist
+`06:49`, my sources saved `06:40`-`06:41`) also carried the fix: `065807-hd-faults-oot-house` is a fixed-build run.
+
+| Run (`build/play/`) | build | FPS / 5% low | replay | prep | pool sync | lock / scan / per-pool pass | upload MB | completion write-back (lock wait) |
+|---|---|---|---|---|---|---|---|---|
+| `20261126-060428-v5b-oot` (wave final) | v5 | 18.8 / 13.0 | 21.16 | 18.19 | 14.28 | 1.62 / 5.75 / 6.10 | 1.40 | 9.91 (2.67) |
+| `20261126-072706-af-oot` | fixed | 17.8 / 14.0 | 21.86 | 22.56 | 17.25 | 2.26 / 6.30 / 7.35 | 1.56 | 12.72 (3.97) |
+| `20261126-081300-af-faults-oot` (fault capture on) | fixed | 18.1 / 14.8 | 21.23 | 20.51 | 16.18 | 2.54 / 6.54 / 6.47 | 1.59 | 11.00 (3.39) |
+
+The af-oot window (07:41-07:42) overlapped TRANSLATE-COST's `tc-r3-mkw` run and its relinks of three titles. The
+upload skip's own times rose alike in parts I changed and parts I did not (copy and hash 4.46 -> 5.19 ms; re-arm
+compare, untouched, 3.70 -> 4.52 ms), so the rise reads as load, not the five-step `upload_changed`; the lead's quiet
+re-measure decides. Upload still ~1.5 MB a frame, 56 MB a frame left out, 0.4 KB a frame of brought-back pages left out.
+MKW is TRANSLATE-COST's (lead: no MKW runs from this wave; an MKW check of the fix is for acceptance). DKB
+`20261126-075455-af-dkb`: 56.8 / 46.7, route correct to the punch tutorial (it overlapped `tc-r3-mkw-off`; indicative).
+DKB/Smash runs were stopped on the owner's direction (already at 60 FPS; the lead runs them at acceptance).
+
+**The one-frame house corruption (white objects, now also seen as displaced objects).** Dense `oot-house` shots
+(every ~1.9 s through the house window), read from the sheets and, where flagged, at full size:
+
+| Run | build | house shots wrong |
+|---|---|---|
+| `20261126-023504-v2-oot`, `-035202-v3-diag-oot-house`, `-040408-v3-diag-skip0-oot-house` | v2/v3 (no watch reset after bring-back) | 3 in ~67 (white herbs/pots) |
+| `20261126-064040-hd-oot-house` | v5 (`5056038`) | 1 in 30: `16-d13` @662 s, the same props (herbs, baskets, vines, ceiling pieces) drawn displaced and lit yellow-green |
+| `20261126-065807-hd-faults-oot-house` | fixed | 0 in 30 |
+| `20261126-074311-af-faults-oot-house` | fixed | 0 in 30 |
+| `20261126-080111-af-tt0-faults-oot-house` | fixed, `NXGFX_TRANSLATE_THREADS=0` | 0 in 30 |
+
+Every run that showed it reported brought-back pages as CPU writes (v1-v3: copy not reset; v4/v5: skipped but still
+handed to the texture check, M2) or could skip a real CPU write on a stale record (v4/v5, H1); both runs with the old
+watch reset (`041959-v4-diag-off`, HEAD `051028-base-diag`) and all 90 fixed-build shots show none. Consistent with
+H1/M2 as the cause; at ~1 in 30 base rate, 0 in 90 is suggestive (about 5% by chance), not proof. The fault captures
+do not detect this kind of frame (it is neither white nor black over 2% of the picture).
+
+**A different one-frame fault, not upload sync: zero stand-ins at scene changes.** Every OoT run (HEAD
+`051028-base-diag` included) has bursts of 5-20 textures sampled in the frame they are registered, before any image
+exists (`texture ID ... its slot names texture serN, which has no image now (released or never made): a zero stand-in
+is bound`, `exec.rs` `tex_view_uncached`), about every 80 s at scene changes. Usually invisible; sometimes the whole
+picture: `065807-hd-faults-oot-house` fault 14 (present 12170, all black between two bright Mido frames, 20 stand-ins
+in 12169: 17 target 1, 1 target 6, 2 bound as storage images); `074311-af-faults-oot-house` fault 19 (present 15048,
+**pure red** with the HUD on top, in the house, 20 stand-ins in 15047: 13 target 1, 1 target 1 as image, 2 target 2,
+4 target 2 as images, 1 target 6; the frame before is normal); `080111-af-tt0` fault 16 (black at the cut to "Finally,
+you're awake!", 12 stand-ins). It happens with parallel translation off too (`af-tt0`: bursts at 519 s and 689 s), so
+not the translate gate. M2 cannot change it (it only filters CPU-dirty ranges of textures that have an image). Owner of
+image registration / `materialize` (`image::lazy`) / exec.rs: why a texture registered in a frame is sampled with no
+image (lazy registration not materialized, or released before use).
+
+**The `depth set` red line.** Not reproduced: absent from every run since v5 (`af-oot` and `af-faults-oot` to 910 s,
+four dense `oot-house` runs, HARNESS-DIAG's runs); in v2-v5 it came once a run at 794-911 s (568 s in an off-route
+run). The no-target context line now logged on every skip (HARNESS-DIAG, `shot::fault::no_target`) names only pixel
+shader `e55f45d0df50c572` with **no** targets at all (`0 colour slots, depth none`, a program with side effects): about
+10 skips a present from ~337 s on, in v5 base and fixed builds alike (8,192 by 868 s); a different red line, not this
+one. From the code, `begin_pass` reports `depth set` when every set target failed `attach_view_layers`: `ensure_image`
+refused (`gate::pass_pre`, a parallel segment off the frontier: then the segment gave up and its red lines are muted,
+so not that), no image after `ensure_target` (released), `image_view` failing, or `block_alias` refused. Nothing in
+it reads pool memory; no upload-sync path leads there that I can find. Next time it fires, the context line names the
+targets.
+
+**Sheets read:** all three sheets of `064040-hd-oot-house` (plus `16-d13` full size), `065807-hd-faults-oot-house`
+(plus `16-d13`), `074311-af-faults-oot-house` (plus fault 19 and its frame before), `080111-af-tt0-faults-oot-house`
+(plus faults 16 and 17), `072706-af-oot`, `081300-af-faults-oot`; `075455-af-dkb`'s sheet. Plus `023504-v2-oot/15-h2`
+for comparison. No device loss; every run exited normally.
+
+### 4. Needs audit
+
+The H1 record's new lifetime and the five-step `upload_changed` (memory coherence): the `COPYING` stamp protocol and
+the per-batch re-check against step 1's states; `brought_back` taking `H` on a faulting thread (nothing holding `H`
+reads guest memory any more: `landed` reads only the write-back buffers, its `par_for` runs before the lock);
+`new_pool` at buffer creation; `raw_written` clearing records (trade-off: in a pool over 64 MB whose raw stores are
+never written back, the device's older bytes of a page brought back before a later raw store are uploaded again over
+it once; before, the record could instead hide a real CPU rewrite for good); `par_for`'s raw pointer and abort.
+
+### 5. Unproven
+
+- That H1/M2 caused the house corruption: 0 in 90 fixed shots vs 1 in 30 base is ~5% by chance. More dense runs (or
+  a detector for displaced geometry) would settle it.
+- Perf: indicative only (other agents' runs and builds overlapped); the lead re-measures OoT, MKW, DKB, Smash.
+- MKW with the fix: not run by this wave (TRANSLATE-COST's title); for the lead at acceptance.
+- The zero-stand-in red/black frames and the `depth set` line: outside upload sync, handed over above.
+
+### 6. Slips
+
+- `af-mkw` (07:42) started while TRANSLATE-COST's `tc-r3-mkw` ran: two MKW copies for ~3 min; stopped by PID, its
+  folder removed. MKW's `pipeline-crashed.bin` is unchanged (still 3 entries, dated 11-25).
+- A first DKB run ran on GPU 1 alongside my OoT fault run; stopped by PID, folder removed. A Smash run was stopped on
+  the owner's direction, folder removed.
+- I held `machine.lock` 07:23-07:43 while waiting for another agent's OoT run and during `af-oot` (until the lead
+  retired the lock).
+- My relink of OoT at 07:22 hit HARNESS-DIAG's running OoT and left only `_code.dll.part`; relinked at 07:26.
+- DKB and Smash were relinked by me at 07:22 and again by TRANSLATE-COST at 07:40/07:41 (their dist, which includes
+  this change).
+- No commits.
+
+### 7. Questions
+
+None.
