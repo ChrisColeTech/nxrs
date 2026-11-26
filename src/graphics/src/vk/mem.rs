@@ -258,6 +258,19 @@ pub struct Pools {
     pub gen: u32,
     /// the frame the last submission's pool sync was in
     pub scan_frame: u64,
+    /// pools that may hold work for a sync that does not scan (pending, deferred or texture-dirty ranges; mirrors
+    /// without a write watch): such a sync visits only these, not every pool (SCAN-COST: ~4,500 pools at 8 covered
+    /// syncs a frame in OoT). Every place that gives a pool such work adds it; a scanning sync visits every pool and
+    /// rebuilds it.
+    pub busy: std::collections::BTreeSet<u64>,
+}
+
+/// Whether a sync that does not scan has anything to do for `p` (`Pools::busy`).
+fn busy(p: &Pool) -> bool {
+    !p.pending.is_empty()
+        || !p.deferred.is_empty()
+        || !p.tex_dirty.is_empty()
+        || (!p.watched && matches!(p.placement, Placement::Mirror | Placement::Host))
 }
 
 pub static UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -657,6 +670,10 @@ pub fn pool_add(p: &pool_t) {
             }
             SEAL_GEN.fetch_add(1, Ordering::AcqRel);
         }
+        // a mirror without a write watch is compared at every sync, scanning or not
+        if !watched && matches!(placement, Placement::Mirror | Placement::Host) {
+            m.busy.insert(base);
+        }
         let old = m.by_base.insert(base, pool);
         POOL_GEN.fetch_add(1, Ordering::Release);
         old
@@ -859,6 +876,7 @@ pub fn cpu_flushed(a: u64, n: u64) {
     let mut m = g.mem.lock().unwrap();
     if let Some(b) = find(&m, a, n.max(1)) {
         m.by_base.get_mut(&b).unwrap().pending.push((a, n));
+        m.busy.insert(b);
     }
 }
 
@@ -917,6 +935,9 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     let _watch = watch_lock(&mut m);
     let gen = m.gen;
     let Some(b) = find(&m, a, n) else { return };
+    // it may be left with pending writes or texture-dirty ranges below (a sync that does not scan finds it; one with
+    // nothing leaves the set at that sync)
+    m.busy.insert(b);
     let p = m.by_base.get_mut(&b).unwrap();
     // a hot pool was asked at this submission's start; only a watched mirror's pages are taken here; a sealed one was
     // not written since it was sealed (a store would have woken it, and `watch_lock` took the woken ones back): only
@@ -2563,6 +2584,7 @@ fn drain_walk(m: &mut Pools, stash: &mut Vec<u64>) {
     for (base, pgs) in taken {
         if let Some(p) = m.by_base.get_mut(&base) {
             p.pending.extend(pgs.into_iter().map(|pg| (pg, PAGE)));
+            m.busy.insert(base);
         }
     }
 }
@@ -2716,6 +2738,8 @@ fn seal_some(g: &Gpu) {
         // a store since the protection woke it already (it stays asked by the scans)
         p.sealed = super::seal::armed(lo);
         SEAL_GEN.fetch_add(1, Ordering::AcqRel);
+        // what the watch held goes up at the next sync, scanning or not
+        m.busy.insert(b);
     }
     NEXT.store(0, Ordering::Relaxed);
 }
@@ -3106,24 +3130,25 @@ pub fn begin_submit_ex(
     SYNC_SCAN_NS.fetch_add(t_scan.elapsed().as_nanos() as u64, Ordering::Relaxed);
     super::queue::chain_trace::note("scan", t_scan.elapsed().as_micros() as u64, covered as u64);
     let _loop_t = SyncLoopTimer(std::time::Instant::now());
-    for p in m.by_base.values_mut() {
+    let Pools { by_base, busy: busy_set, .. } = &mut *m;
+    let mut one = |p: &mut Pool| {
         if !p.tex_dirty.is_empty() {
             all.append(&mut p.tex_dirty);
         }
         if !matches!(p.placement, Placement::Mirror | Placement::Host) && p.pending.is_empty() {
-            continue;
+            return;
         }
         if p.pending.is_empty() && cold_skipped.contains(&p.base) && !taken.contains_key(&p.base) {
-            continue;
+            return;
         }
         // sealed: no store since it was sealed; only what it holds (pending, deferred, a page a run's call handed it)
         if p.sealed && p.pending.is_empty() && p.deferred.is_empty() && !taken.contains_key(&p.base) {
-            continue;
+            return;
         }
         // no scan this time: a watched pool's writes were taken by the last one (what it left pending or deferred
         // still goes now)
         if covered && p.watched && p.pending.is_empty() && p.deferred.is_empty() {
-            continue;
+            return;
         }
         let mut pre = if covered && p.watched {
             Some(Vec::new())
@@ -3145,7 +3170,7 @@ pub fn begin_submit_ex(
             && p.pending.is_empty()
             && p.deferred.is_empty()
         {
-            continue;
+            return;
         }
         let mut ranges = p.take_cpu_writes(gen, pre);
         // what the budget left for later comes first (the guest bytes as they are now)
@@ -3183,7 +3208,7 @@ pub fn begin_submit_ex(
                     p.deferred.push((a, n));
                     DEFERRED_BYTES.fetch_add(n, Ordering::Relaxed);
                     deferred_now = true;
-                    continue;
+                    continue; // (the next range)
                 }
                 if super::uptrace::on() {
                     super::uptrace::note(p.base, p.size, a, n);
@@ -3238,6 +3263,31 @@ pub fn begin_submit_ex(
             p.dirty_frame = f;
         }
         all.extend(ranges);
+    };
+    if covered {
+        // no scan: only the pools with work of their own (`Pools::busy`); those left without any leave the set
+        let keys: Vec<u64> = busy_set.iter().copied().collect();
+        for b in keys {
+            match by_base.get_mut(&b) {
+                Some(p) => {
+                    one(p);
+                    if !busy(p) {
+                        busy_set.remove(&b);
+                    }
+                }
+                None => {
+                    busy_set.remove(&b);
+                }
+            }
+        }
+    } else {
+        busy_set.clear();
+        for p in by_base.values_mut() {
+            one(p);
+            if busy(p) {
+                busy_set.insert(p.base);
+            }
+        }
     }
     all
 }
@@ -3344,6 +3394,8 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
     super::lazy::T_LOCK.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     super::queue::chain_trace::note("wb_lock", t0.elapsed().as_micros() as u64, wbs.len() as u64);
     for &(pool, a, n, src, pre, identity) in wbs {
+        // a landing keeps CPU writes it meets as pending (a sync that does not scan visits it for them)
+        m.busy.insert(pool);
         let Some(p) = m.by_base.get_mut(&pool) else {
             continue;
         };
@@ -3788,6 +3840,35 @@ mod seal_tests {
             f(&mut c);
             assert!(!seal_eligible(&c, 160, q), "{what}");
         }
+    }
+
+    /// A sync that does not scan visits only `Pools::busy`: the walker's pages drained into a pool put it there, and
+    /// what makes a pool busy is any work of its own (pending, deferred, texture-dirty) or having no write watch.
+    #[test]
+    fn work_handed_to_a_pool_makes_it_busy() {
+        let p = PAGE;
+        let mut m = pools(&[(0, 4 * p), (8 * p, 4 * p)]);
+        assert!(m.busy.is_empty());
+        let mut stash = vec![9 * p, 9 * p];
+        drain_walk(&mut m, &mut stash);
+        assert!(stash.is_empty());
+        assert_eq!(m.busy.iter().copied().collect::<Vec<_>>(), vec![8 * p]);
+        assert_eq!(m.by_base[&(8 * p)].pending, vec![(9 * p, PAGE)]);
+        let mut q = pool(0, p);
+        assert!(!busy(&q));
+        for f in [
+            (|q: &mut Pool| q.pending.push((0, 1))) as fn(&mut Pool),
+            |q| q.deferred.push((0, 1)),
+            |q| q.tex_dirty.push((0, 1)),
+            |q| q.watched = false,
+        ] {
+            let mut c = pool(0, p);
+            f(&mut c);
+            assert!(busy(&c));
+        }
+        q.watched = false;
+        q.placement = Placement::Vram;
+        assert!(!busy(&q), "a pool with no CPU copy to compare");
     }
 
     /// A store into a sealed pool's pages wakes it; the next holder of the pool lock asks it again (`sealed` off) and

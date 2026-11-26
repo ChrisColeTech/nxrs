@@ -75,6 +75,11 @@ in range" query), `src/os/src/mem.rs` (the commit hook), `docs/env_switches.tsv`
 |---|---|---|---|---|---|---|---|---|---|
 | `20261126-154635-sc-base-oot` | base `1619d31` (relink 15:46) | 16.2 / 14.0 | 20.5 | 29.6 | 23.6 | 2.7 / 12.2 / 7.7 | 1.2 (13.7) | 10.6 | 6/6 on |
 
+- `20261126-160352-sc-v1-oot` (v1, `420b389` + walker list cache): stopped by PID at ~300 s. Sealing stalled at
+  1,250 pools (51 MB): a pass stopped at the first pool larger than its budget (32 MB) and every later pass stopped at
+  the same pool. No red line, no fault, no wrong picture up to the stop. Fixed in `6d42235`: a first sealing goes in
+  pieces of the budget, one piece a pass (a store into a piece already read-only wakes the pool as any store does).
+
 The base run had TRANSLATE-REUSE's MKW relink and my own test compiles beside it in its first minutes (not in the
 window); numbers indicative. Sheets (3) correct: title, story, nightmare, house, title card, Deku Tree, Navi, Link
 woken, every house and walk shot. Anomalies: the known set (one stand-in at the forest load, no-target, crashed
