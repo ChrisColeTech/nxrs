@@ -123,6 +123,14 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       counts in c0; the haze; forest frames 70-380 ms with ~56 MB uploaded per frame and ~20 s without presents
       entering the house; route to Link moving). Slip: one shader `.spv` swapped for a trap run, restored
       byte-identical (SHA-256 checked).
+- [ ] **NVN2-PARITY** (opened 2026-11-25, `docs/waves/NVN2-PARITY.md`, starts after OOT-FOREST2). Owner: every
+      Switch 2 title misses 60 FPS and pops textures; Switch 1 titles fine. Read-only parity audit against nxnative
+      (38 NVN2 items): missing/different — pushed buffer addresses (c24-c29) and uniform-buffer handles resolve to
+      nothing; compute c0 uniform table raw addresses instead of handles; `GetCurrentTimestampInNanoseconds` on its
+      own clock; two-word texture handles take the first word only; `UPDATE_UB` breaks passes and CPU handle reads
+      miss queued updates; uniform size not rounded to 256; sparse tile slots freed per mapping; device items
+      0x06/0x62; DLSS is a plain blit; ray tracing absent; c0 sample table. Indirect dispatch sizes and pool
+      snapshots are OOT-FOREST2's.
 - [ ] **Running 2026-11-25 evening:** MKW-RECORD phase 2 (steps 1-3, 8 h) in worktree
       `D:\Projects\RecompLauncherEngine-mkw` (branch `mkw-record`, own target/dist, relinks only MKW, main-tree
       locks); OOT-FOREST2 in the main tree (OoT only, regression `wonder`, no `vk/queue.rs`); the OOT-NAN audit.
