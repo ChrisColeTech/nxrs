@@ -89,4 +89,16 @@ behaviour itself is in 6c9656f.
 
 ## Results
 
-See the wave report (§5 headings) in the lead's session; key facts recorded here at the end of the wave.
+- Tests: translator 166 + package 35 (extract, synthetic NSP/update/DLC moved-away reads), nxrs-cli 29, os all pass;
+  launcher `cargo test` all pass (new: model `layout_tests`, `tests/migrate.rs` through the real CLI,
+  `tests/remove_build.rs` through the fake engine), clippy `-D warnings` and fmt clean.
+- Real library (owner-authorized): `nxrs --migrate-builds --select-title "Anime Girls Sun of a Beach"` moved
+  `...\SwitchRecomp Builds\Anime Girls Sun of a Beach [nxrs]` -> `...\nxrs\Anime Girls Sun of a Beach`; the old
+  Switch2RECOMP folder `SwitchRecomp Builds\Anime Girls Sun of a Beach` left. Backups: `library.pre-layout.json`,
+  `library.pre-build-layout-20261126.json`.
+- Built with `nxrs --select-title ... --build`: `RomFS: extracted into romfs/ (66 files, 886.3 MB, 2.6 s)` from the
+  AES-CTR + compressed NSP, `@result ok`, 356 s. Source NSP renamed away, `play.py agsob --env NXGFX_GPU=0`
+  (`build/play/20261126-121200-agsob`): completed 14/14, `fs: RomFS from folder ..._data\romfs`, 60.7 FPS mean
+  (target 60), 0 red lines, sheet read (menu, swim, beach, fire). NSP restored.
+- Not run for real: remove-with-delete (tests only; the dialog is to be rolled back), DLC extraction on a real DLC
+  package, a migration of the whole library.
