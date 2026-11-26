@@ -13,9 +13,9 @@ the owner's instructions govern both. The ledger is `32-REMAINING-WORK-PLAN.md`;
 | Role | Who | Does | Never does |
 |---|---|---|---|
 | **Owner** | the person | sets scope and order, decides real choices, authorizes | - |
-| **Lead** | the main session | writes briefs, opens and removes worktrees, reviews reports, re-runs tests, reads the sheets, takes the accepted perf numbers, orders audits, merges and commits, keeps the ledger, rebuilds the main `dist` | attributes its own inferences to the owner; lets accepted work sit uncommitted |
+| **Lead** | the main session | writes briefs, opens and removes worktrees, reviews reports, re-runs tests, reads the sheets, takes the accepted perf numbers, merges and commits, keeps the ledger, rebuilds the main `dist` | attributes its own inferences to the owner; lets accepted work sit uncommitted |
 | **Wave agent** | a subagent, one per wave | owns a bug or feature **end to end** in its own worktree: diagnosis, the fix, its tests, its build, verification in the game, the wave doc, commits on its own branch | touches another wave's worktree or branch, commits to `gameplay-harness`, pushes, edits the ledger, kills by image name |
-| **Audit agent** | a fresh subagent with no stake | reads the diff against the wave doc and finds what can go wrong (read-only) | edits, builds, runs games, commits |
+| **Audit agent** | a fresh subagent with no stake | compares built work with the spec, the reference and the pictures, writes a findings document; only when the owner asks for one | writes or changes code or tests |
 
 ## 2. Parallel waves: one worktree each
 
@@ -94,10 +94,9 @@ Every report has these headings, in this order. A missing heading is a returned 
 1. **Built:** what changed per item of the brief and why it fixes the cause; diagnosis kept apart from correction.
 2. **Tests:** each test and what it asserts, whether it failed before the fix, and the run result.
 3. **Verified:** the runs (folders), sheets read, anomaly and route-check results, numbers against baseline and target.
-4. **Needs audit:** the parts that touch memory coherence, ordering, descriptors, lifetimes or threading.
-5. **Unproven:** what no test or run shows, and the next step.
-6. **Slips:** any §4 rule broken, with the files involved. "None" if none.
-7. **Questions:** only those that pass §6, each with the sources checked and a recommendation.
+4. **Unproven:** what no test or run shows, and the next step.
+5. **Slips:** any §4 rule broken, with the files involved. "None" if none.
+6. **Questions:** only those that pass §6, each with the sources checked and a recommendation.
 
 ## 6. Settling a question (before anyone asks the owner)
 
@@ -119,8 +118,6 @@ The lead merges a wave only when every line holds:
 - [ ] Slips, if any, are checked in the diff.
 - [ ] The lead re-ran the tests of every changed crate in the wave's worktree: all pass.
 - [ ] The lead read the wave's final sheets and `report.md`s (anomalies, route checks), and any fault captures.
-- [ ] Changes under §5 "Needs audit" had a fresh audit agent; its HIGH and MEDIUM findings are fixed (by a send-back)
-      or recorded in the ledger with the reason.
 - [ ] Accepted perf numbers: the lead ran the wave's scenarios with nothing else running, and records those.
       Titles already at their target (owner: work the broken titles, don't re-verify passing ones) get one
       regression run each here, by the lead; agents spend their runs only on the titles below target.
@@ -136,7 +133,7 @@ Any unticked line sends the work back with the exact output and whether the prod
 ## 8. Agents: reuse, fresh, size
 
 - **Send-backs** for a wave go to that wave's agent while its context is healthy.
-- **Fresh** agent for every audit, and for a new wave once an agent's context is large or it repeats slips; the
+- **Fresh** agent for an audit the owner asks for, and for a new wave once an agent's context is large or it repeats slips; the
   brief then carries the conventions it needs. Fresh agents complete ledger rows, not open-ended game bugs.
 - **Split** a large wave when one part can be verified and merged alone.
 - **Few agents:** one per real sub-project; never split one doc set or one file's change between agents.
