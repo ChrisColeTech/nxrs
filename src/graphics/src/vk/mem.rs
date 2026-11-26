@@ -3102,6 +3102,11 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
             if !p.pending.is_empty() {
                 lazy.retain(|&pg| !p.pending.iter().any(|&(pa, pn)| pg < pa + pn && pa < pg + PAGE));
             }
+            // and so are the ones the upload budget left for later (taken from the watch, not on the device yet: held,
+            // a bring-back before their upload put the buffer's page over them, UPSYNC2 L6)
+            if !p.deferred.is_empty() {
+                lazy.retain(|&pg| !p.deferred.iter().any(|&(pa, pn)| pg < pa + pn && pa < pg + PAGE));
+            }
         }
         super::lazy::T_TAKE.fetch_add(tl.elapsed().as_nanos() as u64, Ordering::Relaxed);
         if !lazy.is_empty() {
