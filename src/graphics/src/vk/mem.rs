@@ -66,6 +66,8 @@ pub struct Pool {
     pub sealed: bool,
     /// `seal` has an entry for its pages (armed, or woken with chunks still read-only)
     pub seal_entry: bool,
+    /// chunk tracking (`seal::chunks`): armed whole once, so its scans ask only its open chunks (`seal::open_runs`)
+    pub tracked: bool,
     /// the frame a write-back last landed on it (a pool the GPU writes is not sealed)
     pub wb_frame: u64,
     /// A pool larger than the device's largest buffer (maintenance4 `maxBufferSize`; AMD: 2 GiB) has several buffers,
@@ -656,6 +658,7 @@ pub fn pool_add(p: &pool_t) {
         sporadic: false,
         sealed: false,
         seal_entry: false,
+        tracked: false,
         wb_frame: 0,
         win: 0,
         wins: Vec::new(),
@@ -682,6 +685,7 @@ pub fn pool_add(p: &pool_t) {
             if let Some(o) = m.by_base.get_mut(&b) {
                 o.sealed = false;
                 o.seal_entry = false;
+                o.tracked = false;
             }
             SEAL_GEN.fetch_add(1, Ordering::AcqRel);
         }
@@ -2422,7 +2426,7 @@ static PRESENT_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 fn walker_main() {
     let mut last_tail = 0;
-    let mut cached: ((u64, u64), Vec<WatchedPool>) = ((0, 0), Vec::new());
+    let mut cached: ((u64, u64, u64), Vec<WatchedPool>) = ((0, 0, 0), Vec::new());
     loop {
         let full;
         {
@@ -2466,15 +2470,20 @@ fn walker_main() {
                     if full {
                         // the same list while no pool came, went, got its buffer or was sealed or woken (with most
                         // pools sealed a walk is short, and its list was most of its time under the pool lock)
-                        let key = (POOL_GEN.load(Ordering::Acquire), SEAL_GEN.load(Ordering::Acquire));
+                        // (and the tracked pools' open chunks, chunk tracking)
+                        let key = (
+                            POOL_GEN.load(Ordering::Acquire),
+                            SEAL_GEN.load(Ordering::Acquire),
+                            super::seal::RUNS_GEN.load(Ordering::Acquire),
+                        );
                         if cached.0 != key || cached.1.is_empty() {
-                            cached = (key, watched_pools_where(&m, |p| !p.sealed));
+                            cached = (key, scan_list(&m, |_| true).0);
                         }
                         cached.1.clone()
                     } else {
                         // the pools a sync of this frame would scan (`begin_submit`'s cold rule)
                         let frame = super::present::frames();
-                        watched_pools_where(&m, |p| !p.sealed && !is_cold(p, frame))
+                        scan_list(&m, |p| p.tracked || !is_cold(p, frame)).0
                     }
                 };
                 let mut job = WalkJob::new(tail, signals, walk_pieces(&list, WALK_PIECE));
@@ -2540,6 +2549,33 @@ fn walker_main() {
 
 fn watched_pools(m: &Pools) -> Vec<WatchedPool> {
     watched_pools_where(m, |_| true)
+}
+
+/// What a scan asks: every watched pool `keep` takes and not sealed; a tracked one (chunk tracking) only over its open
+/// chunks (`seal::open_runs`, read now: call it after the replay queue's tail was read), any other whole. Ordered by
+/// address. Also the bytes of open chunks in it.
+fn scan_list(m: &Pools, keep: impl Fn(&Pool) -> bool) -> (Vec<WatchedPool>, u64) {
+    let mut runs: HashMap<u64, Vec<(u64, u64)>> = HashMap::new();
+    if super::seal::chunks() {
+        for (e, a, b) in super::seal::open_runs() {
+            runs.entry(e).or_default().push((a, b));
+        }
+    }
+    let (mut out, mut open_b) = (Vec::new(), 0u64);
+    for p in m.by_base.values().filter(|p| {
+        p.watched && matches!(p.placement, Placement::Mirror | Placement::Host) && !p.sealed && keep(p)
+    }) {
+        let (lo, hi) = page_range(p.base, p.size);
+        if p.tracked {
+            for &(a, b) in runs.get(&lo).map(|v| &v[..]).unwrap_or(&[]) {
+                out.push((p.base, a, b, p.alloc_base));
+                open_b += b - a;
+            }
+        } else {
+            out.push((p.base, lo, hi, p.alloc_base));
+        }
+    }
+    (out, open_b)
 }
 
 fn watched_pools_where(m: &Pools, keep: impl Fn(&Pool) -> bool) -> Vec<WatchedPool> {
@@ -2670,15 +2706,18 @@ fn sharing_pools(m: &Pools) -> std::collections::HashSet<u64> {
 
 /// Whether `p` may be sealed at `frame` (`seal`): a watched mirror wholly in one allocation, no CPU write and no
 /// write-back landing for `quiet` frames, nothing waiting to go up.
-fn seal_eligible(p: &Pool, frame: u64, quiet: u64) -> bool {
+/// With chunk tracking (`chunks`) a pool the CPU writes is armed too (its written chunks open again at their first
+/// store), and pages waiting to go up do not hold it back (arming adds to them anyway).
+fn seal_eligible(p: &Pool, frame: u64, quiet: u64, chunks: bool) -> bool {
     p.watched
         && p.placement == Placement::Mirror
         && !p.sealed
+        && !p.tracked
         && p.alloc_base != 0
         && p.size > 0
-        && frame.saturating_sub(p.dirty_frame) >= quiet
+        && (chunks || frame.saturating_sub(p.dirty_frame) >= quiet)
         && frame.saturating_sub(p.wb_frame) >= quiet
-        && p.pending.is_empty()
+        && (chunks || p.pending.is_empty())
         && p.deferred.is_empty()
         && p.tex_dirty.is_empty()
 }
@@ -2713,7 +2752,9 @@ fn seal_some(g: &Gpu) {
         let mut why: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
         for p in m.by_base.values().filter(|p| p.watched && p.placement == Placement::Mirror && !p.sealed) {
             let (lo, hi) = page_range(p.base, p.size);
-            let r = if p.alloc_base == 0 {
+            let r = if p.tracked {
+                "tracked with chunks open"
+            } else if p.alloc_base == 0 {
                 "two allocations"
             } else if shared.contains(&p.base) {
                 "shares a page"
@@ -2737,13 +2778,40 @@ fn seal_some(g: &Gpu) {
         let s: Vec<String> = why.iter().map(|(k, (b, n))| format!("{k} {n} ({} MB)", b >> 20)).collect();
         crate::vklog!("sealed pools: not sealed now: {}; this pass's lock and census {:.2} ms", s.join(", "), t0.elapsed().as_secs_f64() * 1e3);
     }
+    // chunk tracking: the tracked pools' open chunks quiet for a while are closed again (protected, then their write
+    // watch taken: a store made before the protection goes up at the next sync); one left with no open chunk is sealed
+    let chunks = super::seal::chunks();
+    if chunks {
+        let cq = super::seal::quiet_chunk_frames();
+        let open: Vec<u64> = m.by_base.values().filter(|p| p.tracked && !p.sealed).map(|p| p.base).collect();
+        for b in open {
+            let p = m.by_base.get_mut(&b).unwrap();
+            let lo = page_range(p.base, p.size).0;
+            let (closed, armed) = super::seal::close_quiet(lo, frame, cq);
+            let mut work = false;
+            for (a, z) in closed {
+                if let Some(pages) = watch::take(a, z, true) {
+                    work |= !pages.is_empty();
+                    p.pending.extend(pages.into_iter().map(|pg| (pg, PAGE)));
+                }
+            }
+            if armed {
+                // a store since the protection woke it already (it stays asked by the scans)
+                p.sealed = super::seal::armed(lo);
+                SEAL_GEN.fetch_add(1, Ordering::AcqRel);
+            }
+            if work {
+                m.busy.insert(b);
+            }
+        }
+    }
     // from where the last pass stopped, round the pools once
     let start = NEXT.load(Ordering::Relaxed);
     let order: Vec<u64> = m
         .by_base
         .range(start..)
         .chain(m.by_base.range(..start))
-        .filter(|(b, p)| seal_eligible(p, frame, quiet) && !shared.contains(b))
+        .filter(|(b, p)| seal_eligible(p, frame, quiet, chunks) && !shared.contains(b))
         .map(|(&b, _)| b)
         .collect();
     let mut budget = super::seal::budget();
@@ -2791,6 +2859,8 @@ fn seal_some(g: &Gpu) {
         }
         // a store since the protection woke it already (it stays asked by the scans)
         p.sealed = super::seal::armed(lo);
+        // chunk tracking: from now on its scans ask only its open chunks
+        p.tracked = chunks;
         SEAL_GEN.fetch_add(1, Ordering::AcqRel);
         // what the watch held goes up at the next sync, scanning or not
         m.busy.insert(b);
@@ -3004,6 +3074,37 @@ mod walker_tests {
     }
 }
 
+/// Chunk tracking's verify mode (`NXGFX_USE_SYNC=verify`), at every scanning sync under the pool and watch locks: the
+/// write watch of every tracked pool's closed chunks is peeked (what the scan of every pool would have found there). A
+/// written page in a chunk still closed is a store the chunk scan missed: a red line, its chunk opened, the page taken
+/// now (uploaded by this sync). The cost is the old whole-pool scan's.
+fn verify_closed(m: &Pools, taken: &mut HashMap<u64, Vec<u64>>) {
+    for p in m.by_base.values().filter(|p| p.tracked) {
+        let lo = page_range(p.base, p.size).0;
+        for (a, b) in super::seal::closed_runs(lo) {
+            let Some(pages) = watch::take(a, b, false) else {
+                continue;
+            };
+            for pg in pages {
+                // (a store opened its chunk meanwhile: no miss, the next scan takes it)
+                if !super::seal::missed(lo, pg) {
+                    continue;
+                }
+                static N: AtomicU64 = AtomicU64::new(0);
+                if N.fetch_add(1, Ordering::Relaxed) < 20 {
+                    crate::log::red(&format!(
+                        "chunk tracking missed a write: page {pg:#x} of pool {:#x} (+{:#x}) written in a closed chunk (verify)",
+                        p.base, p.size
+                    ));
+                }
+                if let Some(v) = watch::take(pg, pg + PAGE, true) {
+                    taken.entry(p.base).or_default().extend(v);
+                }
+            }
+        }
+    }
+}
+
 pub fn begin_submit(g: &Gpu, sub: &mut super::queue::Sub, due: Option<u64>) -> Vec<(u64, u64)> {
     begin_submit_ex(g, sub, due, false)
 }
@@ -3070,36 +3171,33 @@ pub fn begin_submit_ex(
         // the pools woken since `watch_lock` drained: a store made before an op up to `tail` woke its pool before the op
         // was queued, so after this every pool still sealed was not written before `tail` (`seal`)
         drain_woken(&mut m);
-        let skip = |p: &Pool| cold_on && !new_frame && is_cold(p, frame);
+        // (a tracked pool's scan asks its open chunks only: it is never left out as cold)
+        let skip = |p: &Pool| cold_on && !new_frame && !p.tracked && is_cold(p, frame);
         cold_skipped = m
             .by_base
             .values()
             .filter(|p| p.watched && skip(p))
             .map(|p| p.base)
             .collect();
-        // every watched pool (pages a run's call takes are handed to whichever pool holds them), and whether this scan
-        // asks it: not a cold pool left out, not sealed (`seal`: not written since, or a store would have woken it)
-        let (mut all_watched, mut asked) = (Vec::new(), Vec::new());
-        for p in m
-            .by_base
-            .values()
-            .filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host))
-        {
-            let (lo, hi) = page_range(p.base, p.size);
-            all_watched.push((p.base, lo, hi, p.alloc_base));
-            asked.push(!p.sealed && !skip(p));
+        // every watched pool (pages a run's call takes are handed to whichever pool holds them)
+        let all_watched = watched_pools(&m);
+        // what this scan asks: not a cold pool left out, not sealed (`seal`: not written since, or a store would have
+        // woken it), only the open chunks of a tracked one (chunk tracking: its closed chunks were not written since
+        // they closed, or a store would have opened them before this read)
+        let (asked, open_b) = scan_list(&m, |p| !skip(p));
+        super::seal::OPEN_SCAN_B.fetch_add(open_b, Ordering::Relaxed);
+        // a tracked pool is asked by this scan even when no chunk of it is open (its writes are then all taken already):
+        // the per-pool pass must not ask its whole range itself
+        for p in m.by_base.values().filter(|p| p.tracked && !p.sealed && p.watched) {
+            taken.entry(p.base).or_default();
         }
-        let all_watched: Vec<WatchedPool> = all_watched;
         // pools the walk in progress has walked since this op was queued, with no CPU signal since: their pages were
         // taken and drained into their pending writes when this sync took the watch lock (which it holds, so no piece
         // changes meanwhile); they need no scan here (`NXGFX_WALKER_POOLS=0` off)
         let walk = walk_for(due).filter(|j| j.signals == signals);
         let mut by_walk = 0u64;
-        let watched: Vec<_> = all_watched
-            .iter()
-            .zip(&asked)
-            .filter(|(_, &a)| a)
-            .map(|(p, _)| *p)
+        let watched: Vec<_> = asked
+            .into_iter()
             .filter(|p| {
                 let w = walk.as_ref().is_some_and(|j| j.covers(p.1, p.2));
                 if w {
@@ -3165,6 +3263,9 @@ pub fn begin_submit_ex(
             i = j;
         }
         distribute_watched_pages(&all_watched, &mut dirty_pages, &mut taken);
+        if super::seal::verify() {
+            verify_closed(&m, &mut taken);
+        }
         let recovered = cold_skipped
             .iter()
             .filter(|base| taken.get(base).is_some_and(|p| !p.is_empty()))
@@ -3227,6 +3328,10 @@ pub fn begin_submit_ex(
             return;
         }
         let mut ranges = p.take_cpu_writes(gen, pre);
+        // chunk tracking: the chunks written now stay open (hot) a while longer
+        if p.tracked && !ranges.is_empty() {
+            super::seal::stamp(p.page_lo, &ranges, frame);
+        }
         // what the budget left for later comes first (the guest bytes as they are now)
         if !p.deferred.is_empty() {
             ranges.extend(std::mem::take(&mut p.deferred));
@@ -3462,6 +3567,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
             super::seal::remove(lo, hi);
             p.seal_entry = false;
             p.sealed = false;
+            p.tracked = false;
             SEAL_GEN.fetch_add(1, Ordering::AcqRel);
         }
         // the GPU copy of the range is `src` now (unless a later submission changed it: then it restamped the pages);
@@ -3825,6 +3931,7 @@ mod seal_tests {
             sporadic: false,
             sealed: false,
             seal_entry: false,
+            tracked: false,
             wb_frame: 0,
             win: 0,
             wins: Vec::new(),
@@ -3874,10 +3981,20 @@ mod seal_tests {
         let q = 60;
         let mut p = pool(0x10000, 0x4000);
         p.dirty_frame = 100;
-        assert!(!seal_eligible(&p, 159, q), "written 59 frames ago");
-        assert!(seal_eligible(&p, 160, q));
+        assert!(!seal_eligible(&p, 159, q, false), "written 59 frames ago");
+        assert!(seal_eligible(&p, 160, q, false));
+        // chunk tracking: a pool the CPU writes is armed too, pending pages and all
+        assert!(seal_eligible(&p, 101, q, true), "written last frame, chunk tracking");
+        p.pending.push((0x10000, 8));
+        assert!(seal_eligible(&p, 101, q, true), "pending, chunk tracking");
+        assert!(!seal_eligible(&p, 160, q, false));
+        p.pending.clear();
+        p.tracked = true;
+        assert!(!seal_eligible(&p, 160, q, true), "tracked already: its chunks close by `close_quiet`");
+        p.tracked = false;
         p.wb_frame = 150;
-        assert!(!seal_eligible(&p, 160, q), "a landing 10 frames ago");
+        assert!(!seal_eligible(&p, 160, q, false), "a landing 10 frames ago");
+        assert!(!seal_eligible(&p, 160, q, true), "a landing 10 frames ago, chunk tracking");
         p.wb_frame = 0;
         for (what, f) in [
             ("pending", (|p: &mut Pool| p.pending.push((0x10000, 8))) as fn(&mut Pool)),
@@ -3892,8 +4009,53 @@ mod seal_tests {
             let mut c = pool(0x10000, 0x4000);
             c.dirty_frame = 100;
             f(&mut c);
-            assert!(!seal_eligible(&c, 160, q), "{what}");
+            assert!(!seal_eligible(&c, 160, q, false), "{what}");
+            if what != "pending" {
+                assert!(!seal_eligible(&c, 160, q, true), "{what}, chunk tracking");
+            }
         }
+    }
+
+    /// A scan asks a tracked pool only over its open chunks (none when none is open), an untracked one whole, a sealed
+    /// one not at all; the pools a run's call takes pages for are still found by their whole ranges.
+    #[cfg(windows)]
+    #[test]
+    fn a_tracked_pool_is_scanned_over_its_open_chunks_only() {
+        use super::super::seal;
+        use windows_sys::Win32::System::Memory::{
+            VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+        };
+        if !seal::chunks() {
+            return;
+        }
+        const MEM_WRITE_WATCH: u32 = 0x20_0000;
+        let c = seal::CHUNK;
+        let n = 4 * c;
+        let a = unsafe {
+            VirtualAlloc(core::ptr::null(), n as usize, MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE)
+        } as u64;
+        assert!(a != 0);
+        let mut m = pools(&[(a, n), (0x7000_0000_0000, PAGE)]);
+        assert_eq!(seal::arm(a, a, a + n, n).0, seal::Arm::Done);
+        let _ = watch::take(a, a + n, true);
+        {
+            let p = m.by_base.get_mut(&a).unwrap();
+            p.seal_entry = true;
+            p.tracked = true;
+            p.sealed = true;
+        }
+        let only_a = |l: Vec<WatchedPool>| l.into_iter().filter(|e| e.0 == a).collect::<Vec<_>>();
+        assert!(only_a(scan_list(&m, |_| true).0).is_empty(), "sealed: not asked");
+        assert_eq!(scan_list(&m, |_| true).0.len(), 1, "the untracked pool whole");
+        unsafe { ((a + 2 * c + 8) as *mut u8).write_volatile(3) };
+        drain_woken(&mut m);
+        assert!(!m.by_base[&a].sealed);
+        let (l, open_b) = scan_list(&m, |_| true);
+        assert_eq!(only_a(l), vec![(a, a + 2 * c, a + 3 * c, 1)], "its open chunk only");
+        assert_eq!(open_b, c);
+        assert_eq!(watch::take(a + 2 * c, a + 3 * c, true).unwrap(), vec![a + 2 * c], "the store is there");
+        seal::remove(a, a + n);
+        unsafe { VirtualFree(a as *mut _, 0, MEM_RELEASE) };
     }
 
     /// A sync that does not scan visits only `Pools::busy`: the walker's pages drained into a pool put it there, and
