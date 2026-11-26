@@ -84,6 +84,12 @@ pub struct Sub {
     pub children: Vec<Sub>,
     /// a child's own query pools while it writes its parent's (`child_begin`)
     own_queries: Option<(vk::QueryPool, vk::QueryPool)>,
+    /// the translation lane whose command pools its buffers come from (0: the replay thread's, `lane_sub`)
+    pub lane: usize,
+    /// children translated at the same time take their parent's timestamp and occlusion queries from these counters
+    qshare: Option<std::sync::Arc<[std::sync::atomic::AtomicU32; 2]>>,
+    /// children whose segment was translated again (`exec::run_segmented`): never submitted, retired with this one
+    pub dropped: Vec<Sub>,
 }
 
 pub(crate) const DB_CHUNK: u64 = 4 << 20;
@@ -479,9 +485,33 @@ impl Sub {
             .filter(|&a| a != 0)
     }
     pub fn query(&mut self) -> u32 {
+        if let Some(c) = &self.qshare {
+            return c[0].fetch_add(1, Ordering::Relaxed);
+        }
         let q = self.queries;
         self.queries += 1;
         q
+    }
+    /// A timestamp query of the pool's 256, if one is left.
+    pub fn take_query(&mut self) -> Option<u32> {
+        if let Some(c) = &self.qshare {
+            return c[0]
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 256).then_some(n + 1))
+                .ok();
+        }
+        (self.queries < 256).then(|| self.query())
+    }
+    /// An occlusion query of the pool's 256, if one is left.
+    pub fn take_occl(&mut self) -> Option<u32> {
+        if let Some(c) = &self.qshare {
+            return c[1]
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 256).then_some(n + 1))
+                .ok();
+        }
+        (self.occl_n < 256).then(|| {
+            self.occl_n += 1;
+            self.occl_n - 1
+        })
     }
 }
 
@@ -585,16 +615,57 @@ mod upload_entry_tests {
 }
 
 fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
-    let mut s = if let Some(s) = st.free_subs.pop() {
+    let reuse = st.free_subs.pop();
+    make_sub(g, reuse, st.cmd_pool, st.main_pool, 0)
+}
+
+/// Translation lanes 1.. (`exec::run_segmented`): a command pool each (a pool's buffers may be recorded on one thread
+/// at a time) and their free child submissions.
+struct Lane {
+    pool: vk::CommandPool,
+    free: Mutex<Vec<Sub>>,
+}
+static LANES: Mutex<Vec<&'static Lane>> = Mutex::new(Vec::new());
+
+fn lane(g: &Gpu, i: usize) -> &'static Lane {
+    let mut l = LANES.lock().unwrap();
+    while l.len() < i {
+        let pci = vk::CommandPoolCreateInfo::default()
+            .queue_family_index(g.d.qfam)
+            .flags(vk::CommandPoolCreateFlags::RESET_COMMAND_BUFFER);
+        let pool = unsafe { g.dev().create_command_pool(&pci, None) }.expect("command pool");
+        l.push(Box::leak(Box::new(Lane {
+            pool,
+            free: Mutex::new(Vec::new()),
+        })));
+    }
+    l[i - 1]
+}
+
+/// A child submission recorded on translation lane `i` (1..), from that lane's command pool.
+pub fn lane_sub(g: &Gpu, i: usize) -> Sub {
+    let l = lane(g, i);
+    let reuse = l.free.lock().unwrap().pop();
+    make_sub(g, reuse, l.pool, l.pool, i)
+}
+
+fn make_sub(
+    g: &Gpu,
+    reuse: Option<Sub>,
+    pre_pool: vk::CommandPool,
+    main_pool: vk::CommandPool,
+    lane: usize,
+) -> Sub {
+    let mut s = if let Some(s) = reuse {
         s
     } else {
         let ai = vk::CommandBufferAllocateInfo::default()
-            .command_pool(st.cmd_pool)
+            .command_pool(pre_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
         let pre = unsafe { g.dev().allocate_command_buffers(&ai) }.expect("command buffers")[0];
         let ai = vk::CommandBufferAllocateInfo::default()
-            .command_pool(st.main_pool)
+            .command_pool(main_pool)
             .level(vk::CommandBufferLevel::PRIMARY)
             .command_buffer_count(1);
         let main = unsafe { g.dev().allocate_command_buffers(&ai) }.expect("command buffers")[0];
@@ -642,6 +713,9 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
             db_log: Vec::new(),
             children: Vec::new(),
             own_queries: None,
+            lane,
+            qshare: None,
+            dropped: Vec::new(),
         }
     };
     static SUB_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
@@ -713,19 +787,52 @@ fn new_sub(g: &Gpu, st: &mut SubmitState) -> Sub {
 /// the parent's pools after the parent's (completion reads them there, with the posts that name them), and it binds
 /// the parent's texture pool snapshot.
 pub fn child_begin(parent: &Sub, c: &mut Sub) {
+    child_begin_with(&child_init(parent), c);
+}
+
+/// What children translated at the same time take from their parent (`child_begin_with`); the parent's query counts
+/// come back with `child_settle` once they are all translated.
+#[derive(Clone)]
+pub struct ChildInit {
+    query: vk::QueryPool,
+    occl: vk::QueryPool,
+    pool_snapshot: Option<(u64, vk::DescriptorSet, u64)>,
+    share: std::sync::Arc<[std::sync::atomic::AtomicU32; 2]>,
+}
+unsafe impl Send for ChildInit {}
+unsafe impl Sync for ChildInit {}
+
+pub fn child_init(parent: &Sub) -> ChildInit {
+    use std::sync::atomic::AtomicU32;
+    ChildInit {
+        query: parent.query,
+        occl: parent.occl,
+        pool_snapshot: parent.pool_snapshot,
+        share: std::sync::Arc::new([AtomicU32::new(parent.queries), AtomicU32::new(parent.occl_n)]),
+    }
+}
+
+pub fn child_begin_with(ci: &ChildInit, c: &mut Sub) {
     c.own_queries = Some((c.query, c.occl));
-    c.query = parent.query;
-    c.occl = parent.occl;
-    c.queries = parent.queries;
-    c.occl_n = parent.occl_n;
-    c.pool_snapshot = parent.pool_snapshot;
+    c.query = ci.query;
+    c.occl = ci.occl;
+    c.qshare = Some(ci.share.clone());
+    c.pool_snapshot = ci.pool_snapshot;
     c.db_bound = None;
+}
+
+/// The parent's query counts after its children's (`child_begin_with`).
+pub fn child_settle(parent: &mut Sub, ci: &ChildInit) {
+    parent.queries = ci.share[0].load(Ordering::Relaxed).min(256);
+    parent.occl_n = ci.share[1].load(Ordering::Relaxed).min(256);
 }
 
 /// A child's segment is translated: its CPU-side effects join the parent's, in stream order, and it is kept with it.
 pub fn child_join(parent: &mut Sub, mut c: Sub) {
-    parent.queries = c.queries;
-    parent.occl_n = c.occl_n;
+    if let Some(s) = &c.qshare {
+        parent.queries = s[0].load(Ordering::Relaxed).min(256);
+        parent.occl_n = s[1].load(Ordering::Relaxed).min(256);
+    }
     parent.post.append(&mut c.post);
     super::mem::join_writebacks(parent, std::mem::take(&mut c.writebacks));
     parent.tex_wb.append(&mut c.tex_wb);
@@ -853,6 +960,11 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
             super::defer::end(c.main);
             g.dev().end_command_buffer(c.main).unwrap();
         }
+        // a dropped child's upload buffer holds the first-use initializations its segment made (`gate::pass_pre`):
+        // submitted with the others; its main buffer is not
+        for c in &s.dropped {
+            g.dev().end_command_buffer(c.pre).unwrap();
+        }
     }
     wait_diag::phase("submit: driver/queue lock");
     let _x = super::pipe::driver_exclusive(g).then(|| super::pipe::EXCLUSIVE.lock().unwrap());
@@ -872,6 +984,12 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
             .collect()
     };
     let mut cbs = order(|x| x.pre);
+    cbs.splice(
+        1..1,
+        s.dropped
+            .iter()
+            .map(|c| vk::CommandBufferSubmitInfo::default().command_buffer(c.pre)),
+    );
     cbs.extend(order(|x| x.main));
     let mut sig = vec![vk::SemaphoreSubmitInfo::default()
         .semaphore(q.timeline)
@@ -1122,8 +1240,10 @@ fn completion_loop(g: &'static Gpu) {
             .unwrap_or_else(|_| submission_safety::resource_safety_fatal());
         super::newndve::trace::retire(sub.serial, item.value);
         sub.dpool_i = 0;
-        // segments' child submissions: their resources as the parent's, then back to the free list
-        for mut c in std::mem::take(&mut sub.children) {
+        // segments' child submissions (and those translated again, never submitted): their resources as the parent's,
+        // then back to their lane's free list
+        let dropped = std::mem::take(&mut sub.dropped);
+        for mut c in std::mem::take(&mut sub.children).into_iter().chain(dropped) {
             for b in c.transient.drain(..) {
                 g.free_buffer(b);
             }
@@ -1170,7 +1290,12 @@ fn completion_loop(g: &'static Gpu) {
             c.post.clear();
             c.queries = 2;
             c.occl_n = 0;
-            q.recycled.lock().unwrap().push(c);
+            c.qshare = None;
+            if c.lane > 0 {
+                lane(g, c.lane).free.lock().unwrap().push(c);
+            } else {
+                q.recycled.lock().unwrap().push(c);
+            }
         }
         // NXGFX_RECYCLE_DELAY=<n> (diagnosis): a completed submission's `Sub` waits until n later ones completed before
         // it is poisoned (NXGFX_DB_POISON) and reused

@@ -1621,7 +1621,12 @@ impl Gpu {
     }
 
     pub fn ensure_image(&self, imgs: &mut Images, t: &tex_t) -> bool {
-        if imgs.by_serial.contains_key(&t.serial) {
+        let have = imgs.by_serial.contains_key(&t.serial);
+        // a parallel translation's segment makes an image only at the gate's frontier (`gate`)
+        if !super::gate::pass_pre(!have) {
+            return false;
+        }
+        if have {
             return true;
         }
         watch_log("image", t, None);
@@ -1882,6 +1887,15 @@ impl Gpu {
         let key = (serial, kind);
         let mut all = CUBE_TWINS.lock().unwrap();
         let m = all.get_or_insert_with(HashMap::new);
+        // a twin made, replaced or brought up to date (a GPU-owned image's is copied by every submission that samples
+        // it): a parallel translation's segment does it only at the gate's frontier (`gate`)
+        let version = (im.rewrites, im.gpu_seq);
+        let stale = m
+            .get(&key)
+            .is_none_or(|t| t.src != im.image || t.version != Some(version) && !im.gpu_owned);
+        if !super::gate::pass_pre(stale) {
+            return None;
+        }
         if m.get(&key).is_some_and(|t| t.src != im.image) {
             if let Some(old) = m.remove(&key) {
                 self.drop_cube_twin(old);
@@ -2394,7 +2408,12 @@ impl Gpu {
 
     /// The image of texture ID `id` registered lazily, made now (its first use). Cheap when nothing waits.
     pub fn materialize(&self, id: i32) {
+        // (a parallel translation's segment: only at the gate's frontier, `gate`)
+        if super::gate::all() && super::gate::parallel() && !super::gate::pass(lazy::has(id)) {
+            return;
+        }
         if let Some((t, v, gone)) = lazy::take(id) {
+            super::gate::count();
             self.reg_tex_now(id, &t, v, false);
             if gone {
                 self.release_after_use(t.serial);
@@ -3377,6 +3396,11 @@ impl Gpu {
         let Some(im) = imgs.by_serial.get_mut(&serial) else {
             return;
         };
+        // the first GPU write takes the image from its storage (a parallel translation's segment: only at the gate's
+        // frontier, `gate`); later ones only count
+        if !super::gate::pass(!im.gpu_owned || im.needs_upload) {
+            return;
+        }
         im.gpu_owned = true;
         im.needs_upload = false;
         im.gpu_seq += 1;
@@ -3813,11 +3837,12 @@ impl Gpu {
     /// Layout and contents of an image, in the submission's upload command buffer (also used mid-replay for a render
     /// target created there: the upload command buffer runs before the replay).
     pub fn prepare_image(&self, imgs: &mut Images, serial: u64, sub: &mut Sub) {
-        if imgs
+        let need = imgs
             .by_serial
             .get(&serial)
-            .is_none_or(|im| !im.needs_init && !im.needs_upload)
-        {
+            .is_some_and(|im| im.needs_init || im.needs_upload);
+        // (a parallel translation's segment: only at the gate's frontier, `gate`)
+        if !super::gate::pass_pre(need) || !need {
             return;
         }
         self.prepare_image_in(imgs, serial, sub, 0);
@@ -4837,6 +4862,11 @@ mod lazy {
         if l.by_id.insert(id, (t, v)).is_none() {
             N.fetch_add(1, Ordering::Relaxed);
         }
+    }
+    /// Whether a registration waits at `id` (`take` would make it).
+    pub fn has(id: i32) -> bool {
+        N.load(Ordering::Relaxed) != 0
+            && ST.lock().unwrap().as_ref().is_some_and(|l| l.by_id.contains_key(&id))
     }
     /// The registration waiting at `id`, and whether its texture object was finalized since (`finalized`).
     pub fn take(id: i32) -> Option<(tex_t, Option<view_t>, bool)> {
