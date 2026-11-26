@@ -71,6 +71,10 @@ Every brief has these parts, in this order. A brief missing one is not sent.
   reported blocker.
 - **Device loss or reset:** stop the workload by PID, keep the log; it becomes the wave's top-priority bug. Never
   re-run the same path unchanged.
+- **Use the normal paths (owner-authorized).** Build with the normal CLI into the library entry's configured build
+  folder and run games from the real library (`%LOCALAPPDATA%\nxrs`) and the launcher. No throwaway temp builds, no
+  per-run copies of a game, its data or its shaders. (This line was dropped in the 2026-11-26 rewrite by mistake and
+  restored the same day.)
 - **Saves:** back up before a run that may change them; restore after experiments; never `--real-save`. Anything
   moved or swapped is backed up and restored, and the restore direction checked.
 - **Processes:** close only your own, by PID, never by image name. A relink (`dist\nxrs\nxrs.exe --select-title
