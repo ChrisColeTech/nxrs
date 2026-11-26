@@ -401,18 +401,38 @@ fn protect_some(lo: u64, hi: u64, open: bool) {
     if protect(lo, hi, open) {
         return;
     }
+    // the committed runs, as the OS lists them
+    for (a, b) in committed_runs(lo, hi) {
+        protect(a, b, open);
+    }
+}
+
+/// The committed runs of [lo, hi).
+#[cfg(windows)]
+fn committed_runs(lo: u64, hi: u64) -> Vec<(u64, u64)> {
+    use windows_sys::Win32::System::Memory::{VirtualQuery, MEMORY_BASIC_INFORMATION, MEM_COMMIT};
+    let mut out = Vec::new();
     let mut at = lo;
     while at < hi {
-        let e = ((at & !(CHUNK - 1)) + CHUNK).min(hi);
-        if !protect(at, e, open) {
-            let mut p = at;
-            while p < e {
-                protect(p, (p + 4096).min(e), open);
-                p += 4096;
-            }
+        let mut mbi: MEMORY_BASIC_INFORMATION = unsafe { core::mem::zeroed() };
+        // SAFETY: a query of this process's own address space
+        if unsafe { VirtualQuery(at as *const _, &mut mbi, core::mem::size_of::<MEMORY_BASIC_INFORMATION>()) } == 0 {
+            break;
+        }
+        let e = (mbi.BaseAddress as u64 + mbi.RegionSize as u64).min(hi);
+        if e <= at {
+            break;
+        }
+        if mbi.State == MEM_COMMIT {
+            out.push((at, e));
         }
         at = e;
     }
+    out
+}
+#[cfg(not(windows))]
+fn committed_runs(_lo: u64, _hi: u64) -> Vec<(u64, u64)> {
+    Vec::new()
 }
 
 /// [lo, hi) read-write again (its entry goes, or never was).
