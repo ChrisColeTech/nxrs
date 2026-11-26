@@ -73,6 +73,16 @@ or white props). A/B `114437-of-ring-cold0-oot-house` (`NXGFX_POOL_COLD=0`): **I
 same time from 11:45 (two OoT copies; see Provenance), which also explains its 13 FPS; its numbers and its 0 flashes
 count for nothing.
 
+**Correction (built, `63a439b`; not yet run: the lead held OoT runs).** `mem.rs` `is_cold` / `cold_rule`: a pool found
+written after a quiet stretch (more than 60 frames without a CPU write) gets `Pool::sporadic` and is never cold
+again: every sync asks it, not only a frame's first. Pools that stay unwritten after their load keep the cheap rule
+(DKB's ~1,300 never-written mirrors). The same rule decides the walker's warm walks and `sync_range`.
+`NXGFX_POOL_STICKY=0` restores the old rule. A diagnostic line logs each cold pool found written (pool, frame,
+first-sync or later sync, bytes; first 400). With the fix on, "a later sync of the frame" lines are writes the old
+rule left for the next frame's first sync. Residual by construction: the **first** write after a pool's first quiet
+stretch is still found only at the next frame's first sync (one frame per such pool). Test:
+`cold_rule_tests::a_pool_written_after_going_quiet_is_never_cold_again`.
+
 **Provenance of the OoT runs (lead's check).** UPSYNC2 relinks OoT into the same library folder from its own dist
 (without rewriting the build log); my relinks write the build log. Runs and the build they used:
 
