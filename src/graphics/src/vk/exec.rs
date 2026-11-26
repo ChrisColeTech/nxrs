@@ -2909,17 +2909,23 @@ fn sbuf0_cap() -> u64 {
 
 /// A storage binding of `n` bytes at `a`, held in a sparse virtual pool to the mapped, physically contiguous run from
 /// `a` (`vpool::run_len`): the binding resolves only over mapped pages, and one unmapped page put the whole binding on
-/// the 64 KiB zero / scratch buffer. Past the run the shader reads 0 and its writes are dropped (robustBufferAccess2),
-/// as unmapped sparse memory behaves. nxnative binds "a sparse pool's mapped run" (PRAGMATA's GI voxeliser /
+/// the 64 KiB zero / scratch buffer. Past the run the shader reads 0 and its writes are dropped (robustBufferAccess2):
+/// exact when the run ends at an unmapped page; a known limitation when the next page is mapped but not contiguous
+/// (that data is then out of the binding's reach). nxnative binds "a sparse pool's mapped run" (PRAGMATA's GI voxeliser /
 /// Resident Evil 4: a 0xc0000-byte run mapped at the base of a 1 GB sparse pool, bound with size 0 = 1 MB here).
 /// Outside sparse pools, and when `a`'s own page is unmapped, `n` is kept.
 fn sparse_bound(a: u64, n: u64) -> u64 {
     if n == 0 || !crate::nvn::vpool::is_sparse(a) {
         return n;
     }
+    // the run is held to the physical pool behind `a` too (`mem::room`): two physical pools back to back in host
+    // memory form one contiguous run that `resolve` still rejects (NVN2-FIX audit)
     match crate::nvn::vpool::run_len(a, n) {
         0 => n,
-        r => r,
+        r => match super::mem::room(a) {
+            0 => r,
+            p => r.min(p),
+        },
     }
 }
 
@@ -3259,15 +3265,34 @@ fn record_addr_size(
 ) -> (u64, u64) {
     use crate::nvn::device::ucb_handle_size;
     if nvn2 && st == 5 && slot == 0 && (0x210..0x310).contains(&byte) && (byte - 0x210) % 16 == 0 {
-        return ((v & ((1 << 45) - 1)) << 4, ucb_handle_size(v));
+        let a = (v & ((1 << 45) - 1)) << 4;
+        return (a, handle_bound(a, ucb_handle_size(v)));
     }
     let (a, handle) = decode_record_addr(v, nvn2);
     if handle {
-        (a, ucb_handle_size(v))
+        (a, handle_bound(a, ucb_handle_size(v)))
     } else if (24..=29).contains(&slot) {
         (a, 0)
     } else {
         (a, size())
+    }
+}
+
+/// The bytes to bind for a decoded handle of size `s` at `a` (NVN2-FIX audit): the saturated size field (2^19 - 1
+/// units, "8 MB or more") means no known size, so 0 (to the end of its pool, as a size-0 binding); outside sparse
+/// pools the size is held to the pool's window (`mem::room`), since a handle whose rounded size runs past its pool
+/// failed to resolve and put the whole binding on the zero buffer (nxnative bounds these bindings by the buffer
+/// that holds them, `nvn_mtl.m` SBUFU / SBUFQ). Sparse pools are bounded by `sparse_bound`.
+fn handle_bound(a: u64, s: u64) -> u64 {
+    if s >= ((1 << 19) - 1) * 16 {
+        return 0;
+    }
+    if s == 0 || crate::nvn::vpool::is_sparse(a) {
+        return s;
+    }
+    match super::mem::room(a) {
+        0 => s,
+        r => s.min(r),
     }
 }
 
@@ -5206,6 +5231,10 @@ mod set_patch_tests {
         let no_size_word = || -> u64 { panic!("a handle or a pushed address has no size word") };
         let big = ucb_handle(0x8000_0000, 3 << 20);
         assert_eq!(record_addr_size(big, true, 0, 26, 0x10, no_size_word), (0x8000_0000, 3 << 20), "3 MB, not 1 MB");
+        // the saturated size field means "8 MB or more": no known size, bound to the pool end like size 0
+        let huge = ucb_handle(0x8000_0000, 100 << 20);
+        assert_eq!(record_addr_size(huge, true, 0, 26, 0x10, no_size_word), (0x8000_0000, 0), "saturated");
+        assert_eq!(handle_bound(0x8000_0000, 0x40), 0x40, "no pool known: the handle's size");
         let small = ucb_handle(0x8000_1000, 0x40);
         assert_eq!(record_addr_size(small, true, 5, 24, 0x10, no_size_word), (0x8000_1000, 0x40));
         assert_eq!(record_addr_size(0x8000_1000, true, 5, 24, 0x10, no_size_word), (0x8000_1000, 0), "pushed: no size");

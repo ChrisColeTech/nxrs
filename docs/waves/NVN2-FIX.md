@@ -143,3 +143,110 @@ checked right after it ended (~21:13:20), so MKW-RECORD's measurement may have o
 ### Questions
 
 None.
+
+### Independent audit of NVN2-FIX
+
+(auditor, 2026-11-25; read-only review of `40ff148` `git show -- src/`, against the code at HEAD and nxnative
+`dm/gfx/nvn/nvn_mtl.m`; no builds, no games.) **No HIGH. One MEDIUM (a regression the report calls "as before"),
+six LOW.**
+
+**MEDIUM 1: a handle's size past its pool's end now loses the whole binding** (`vk/exec.rs:3265-3266`, used at
+`exec.rs:4244`). Before this commit a decoded handle had size 0 and took `room(a).min(1 MB)`, which always resolves.
+Now it takes `(v >> 45) * 16` as is. `sbuf_to_end` (`exec.rs:4266`) can only make the size larger, and `sparse_bound`
+leaves non-sparse sizes alone, so a handle whose size runs past the end of its physical pool (or past the end of a
+large pool's window, see `mem::room`) now fails `resolve`. The shader then gets the 64 KiB zero or scratch buffer
+for the whole binding (red line), where it used to read the real data. This is the pop-in symptom the wave set out to
+fix. Two cases make it likely: a game makes its handles with a fixed size (64 KB, the largest constant buffer) for
+buffers near a pool's end, or `ucb_handle` rounds the size up past the end. The report's "Unproven" line ("still fails
+`resolve` ... as before") is wrong for handles: only plain sized records failed before. nxnative does not use a
+handle's size for these bindings either. `NVN_RB_SBUFU` / `NVN_RB_SBUFQ` (`nvn_mtl.m:13220-13232`) decode the address
+and bind "size not known: bounded by the buffer that holds it". Fix: for a decoded handle outside sparse pools, use
+`n = handle_size.min(room(a))` (note it once when it clamps). This keeps the smaller write range the item wanted and
+cannot lose the binding. Add a test where the handle's size runs past `room`.
+
+**LOW 2: a saturated handle size is taken as exact** (`exec.rs:3266`, `nvn/device.rs:168`). `ucb_handle` caps the
+field at 2^19 - 1, so `0x7ffff * 16` (8 MB - 16) means "8 MB or more". A handle-addressed written buffer over 8 MB is
+cut there and the GPU's writes beyond it are dropped. That is still better than the old 1 MB cut, so it is not a
+regression, but treating the cap as exact is not right. Fix: when `v >> 45 == (1 << 19) - 1`, take the size-0 path
+(to the pool end), or `room(a)`.
+
+**LOW 3: the mapped run does not stop where the physical pool ends** (`nvn/vpool.rs:359-378`, `exec.rs:2916`).
+`run_len`, like `translate`, checks only that the host pointers are contiguous. Suppose two of the game's physical
+pools lie back to back in host memory and the sparse pool maps consecutive pages from both. The run then crosses
+the pool boundary, `mem::find` fails in `resolve_in`, and the whole binding falls to the zero buffer. Size-0
+bindings are already held to `room(a)`, which goes through `translate` to the physical pool. Sized, handle and
+record bindings are not. Fix: in `sparse_bound`, `min` the run with `mem::room(a)` (it translates sparse addresses
+already).
+
+**LOW 4: the doc comment overstates what lies past the run** (`exec.rs:2911-2915`). "Past the run the shader reads 0 /
+writes drop, as unmapped sparse memory does" is true only when the run ends at an unmapped page. When it ends at a page
+mapped to other, non-contiguous physical memory, the console reads and writes real data there. Here, reads get 0 and
+writes are lost (no write-back is noted for them). This still beats the whole binding on the zero buffer, so it is a
+known limitation, not a regression. Say so in the comment. A full fix needs a sparse `VkBuffer` or a per-page binding.
+
+**LOW 5: sparse bindings walk the page table three times** (`exec.rs:4278`, `mem.rs:1453`, `mem.rs:2132`).
+`sparse_bound` (via `is_sparse` + `run_len`), `resolve_in` (`translate`) and `note_gpu_write` (`translate` again) each
+take the `POOLS` read lock and walk every page of the binding. That is 256 steps for 1 MB, and tens of thousands for
+a large sized binding, at every set build or patch of a sparse-pool shader. The lock is read-only and only sparse
+titles pay, so this is not urgent. Fix, if PRAGMATA- or RE4-class titles show it: have `run_len` return the
+physical start too and pass the translated address on, or cache `(a, n, vpool::generation()) -> run`.
+
+**LOW 6: `ugen` changes at every UPDATE_UB** (`exec.rs:9095`, `exec.rs:550-556`). This is correct and conservative.
+Every set that reads an address from c3..c18 memory misses after any update, even one to unrelated memory. The cost
+is one patch of only the `ubo_read` slots: `bank_u64` + `room` + `resolve` per such storage buffer. Every UPDATE_UB
+already ends the render pass, which costs far more, so I expect little cost at MKW scale. MKW's reuse was not
+measured. Cheaper option, if MKW shows "uniforms read as addresses" high in `note_set_miss`: key such sets by the
+8-byte address words they read (through `ub_upd.word`) instead of the generation. A set is then reused whenever the
+address did not change, which also covers a rebind.
+
+**LOW 7 (pre-existing, not this commit): a sparse remap inside a submission does not invalidate cached sets.**
+`vpool::map` changes neither `POOL_GEN` (which `hit_version` / `patch_set` check) nor anything in `SetKey`. A set reused
+or patched in the same submission therefore keeps its old translation, and now its old run length too (the report
+says this). If it matters: add `vpool::generation()` to the key of sets that bind sparse addresses, or bump
+`POOL_GEN` on a sparse map.
+
+**LOW 8 (pre-existing, same as nxnative):** outside compute's c0 table, a size-0 handle (`ucb_handle(a, 0) = a >> 4`)
+cannot be told apart from a plain address and is read as `a >> 4`. `ucb_handle_addr` in nxnative behaves the same.
+I know of no game that pushes or stores a size-0 handle.
+
+**Checked and found correct:**
+
+- (1) `set_deps` sets a `ubo_read` bit only for a `Res::Sbuf` whose `cb_slot` is 3..18, and the same bit is in `ubo`,
+  so the binding stays keyed. `ub_read_key` gives `(0, 0)` to every other set, so sets that only bind uniform
+  buffers keep their reuse. `new_bgen` starts at 1 and is a shared u64, so a reading set never gets generation 0,
+  values never repeat across queues, and it cannot wrap in practice. `ugen` changes before the `resolve`. An update
+  that does not resolve adds nothing to `ub_upd` but still changes the key, which costs at most a miss. `SetKey`
+  equality covers `hit_version`, the `old == k` reuse in `patch_set`, and the key recomputed after `stage_set`
+  (`exec.rs:5943`). `patch_classes` adds exactly `new.ugen.1`: the Sbuf slots `res_class` maps to the same bit
+  (`1 << (cb_slot - 3)`) re-read through `bank_u64`/`bank_word`, which applies the `ub_upd` overlay. The key holds
+  `serial` and `chunk`, and `end` clears `ub_upd`, so nothing carries across submissions. `QState` (`sets`, `shadow`,
+  `ugen`, `ub_upd`) is per queue. Indirect dispatches with a private c0 are never keyed. The non-descriptor-buffer
+  path keeps no set cache. `UPDATE_UB` is the only op that pushes to `ub_upd`. Writes to uniform memory by copy, fill
+  or a shader were outside the overlay before and still are (nxnative reports the same case red, `ubo_read`
+  RED_ONCE 47).
+- (2) `run_len` returns 0 for no pool, an unmapped first page, or an offset past `size`. It stops at the first page
+  that is unmapped or non-contiguous, and at the pool's `size` and at `max`. The value matches what `translate`
+  accepts. Alias pools are dropped from `POOLS`, and physical pools were never in it, so `sparse_bound` leaves both
+  unchanged. Undecided virtual pools have no PTEs, so `run_len` is 0 and the size is kept, as before. `sparse_bound`
+  runs after the size-0 and to-the-end steps and before `append::bound`, `resolve` and `note_gpu_write`, so the bound
+  range, the resolved range and the write-tracking range are the same `n`. A run ends on a page boundary.
+  `robustBufferAccess2` covers the cut-off part where the device enables it (`vk/device.rs:740`). The `Res::Sbuf`
+  arm of `stage_set` is the only place that binds a game storage buffer by address. Raw gmem, `MeshDraw`, transform
+  feedback and vertex buffers are separate paths, outside this item.
+- (3) `ucb_handle_size` is the inverse of `ucb_handle`'s field: a multiple of 16, at most 8 MB - 16. A plain address
+  never has bits at 45 or above, so it gets the record's size word as before. Pushed plain addresses (c24..c29) keep 0.
+- (4) `write_image` has five callers. Lazy registration (`image.rs:2387`) and `scrub_slots` (`image.rs:3196`) write
+  stand-ins and pass `false`. `reg_tex_now`, the alias rebuild and the recreate path (`image.rs:2516/2926/3126`)
+  pass `own` from `storage_or_stand_in`, which is `true` exactly when the view is the image's own `storage_view`.
+  `list_storage` runs before the early return on an unchanged descriptor. `storage_views` has a single consumer,
+  `note_storage_write`, and its own `real` test (`im.views` contains the view) already ignored stand-ins. No real
+  storage view drops off the list, and no descriptor that is written changes.
+- (5) c0 rows 0x210 + 16 r (r < 16, ending 0x310) are written only by our own `put_cs_ubos`: a `ucb_handle` on NVN2
+  when `a != 0`, otherwise 0. A game cannot write a plain address there. The check takes row starts only, compute
+  only, NVN2 only, which matches nxnative `DMSH_C0_CS_UBO` (`nvn_mtl.m:13298`, `if (ounce) a = ucb_handle(a, n)`).
+  The size taken there is the uniform buffer's bound size rounded up to 16, which is what nxnative's `NVN_RB_UBOP`
+  binds (`u->size`).
+- (6) `TEST_CLOCK` and its check in `guest_ns` are `#[cfg(test)]`, so release builds are unchanged. The test now
+  restores the clock and never sets the process-wide `GUEST_CLOCK`.
+- `perf`: `SbufSize0Written` sits before `N`, its name is in `NAMES`, and the format string and its arguments both
+  gained one entry.

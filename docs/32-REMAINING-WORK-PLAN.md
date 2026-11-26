@@ -149,6 +149,16 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       the gap** (`NXOS_DISPLAY_MAX=1` no effect; DKB already scales to 2095x1179): OoT's ~70 ms frames are replay
       24-27 ms + **pool sync 26-35 ms** + GPU 10-11 ms. **Pop-in not reproduced in these scenarios (before or
       after)**: needs the owner's scene, and a Mario Kart World check once MKW-RECORD has merged this.
+- [x] **NVN2-FIX** (2026-11-25, `docs/waves/NVN2-FIX.md`, commit `40ff148`): the NVN2-PARITY audit's MEDIUMs —
+      set cache keyed by an inline-uniform-update generation for sets reading storage addresses from c3-c18;
+      sparse storage bindings held to the mapped contiguous run (`vpool::run_len`); handle sizes kept; stand-in
+      storage views off the storage list; NVN2 c0 0x210-0x310 always decoded. DKB 59.3, OoT 14.9, Wonder 60.0, sheets
+      unchanged (none of the scenarios exercises these paths). **Its audit: no HIGH, MEDIUM fixed by the lead**
+      (`handle_bound`: a handle's size held to its pool window outside sparse pools — a rounded size past the pool
+      end failed to resolve and fell to the zero buffer; saturated size = unknown; `sparse_bound` also held to
+      `mem::room`); graphics 224/224, `build/play/20261125-215058-dkb` 59.3 FPS (5% low 54.0), 0 red, sheet correct.
+      Recorded LOWs: sparse page table walked 3x per binding; update generation bumps every `UPDATE_UB`
+      (unmeasured on MKW); a sparse remap within a submission does not invalidate cached sets (pre-existing).
 - [ ] **NVN2-PARITY** (opened 2026-11-25, `docs/waves/NVN2-PARITY.md`, starts after OOT-FOREST2). Owner: every
       Switch 2 title misses 60 FPS and pops textures; Switch 1 titles fine. Read-only parity audit against nxnative
       (38 NVN2 items): missing/different — pushed buffer addresses (c24-c29) and uniform-buffer handles resolve to
