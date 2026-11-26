@@ -1,14 +1,14 @@
 # The portable release: dist/nxrs (Windows) and nxrs/ with the Linux launcher and engine, published together as a
-# GitHub Release. Runs when a version tag (v*) is pushed, or by hand with a tag name.
+# GitHub Release. Runs only on a push to main (owner, 2026-11-26: work is pushed to feature branches, and the release
+# is built when it reaches main); the release is tagged build-<UTC date>-<short commit>.
 name: Release
 on:
   push:
-    tags: ['v*']
-  workflow_dispatch:
-    inputs:
-      tag:
-        description: 'Release tag to create (e.g. v0.1.0)'
-        required: true
+    branches: [main]
+
+concurrency:
+  group: release-main
+  cancel-in-progress: false
 
 permissions:
   contents: write
@@ -134,7 +134,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${{ inputs.tag }}"
-          [ "$GITHUB_EVENT_NAME" = workflow_dispatch ] || tag="$GITHUB_REF_NAME"
+          tag="build-$(date -u +%Y%m%d)-${GITHUB_SHA::7}"
           gh release create "$tag" out/nxrs-windows-x64.zip out/nxrs-linux-x64.tar.gz -R "$GITHUB_REPOSITORY" \
             --target "$GITHUB_SHA" --title "nxrs $tag" --generate-notes

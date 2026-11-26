@@ -4,7 +4,7 @@
 name: Launcher
 on:
   push:
-    branches: [main]
+    branches: ['**']   # feature branches get format, clippy and tests; the release build runs on main only
     paths: ['src/launcher/**', '.github/workflows/launcher.yml']
   pull_request:
     branches: [main]
@@ -68,8 +68,10 @@ jobs:
         if: runner.os == 'Linux'
         run: xvfb-run -a cargo test --locked --jobs 4
       - name: Release build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: cargo build --locked --release --jobs 4
       - uses: actions/upload-artifact@v4
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         with:
           name: nxrs-launcher-${{ runner.os }}
           path: |

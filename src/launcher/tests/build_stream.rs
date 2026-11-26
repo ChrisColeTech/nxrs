@@ -92,10 +92,26 @@ fn builds_stream_and_cancel_kills_the_tree() {
     let (_t2, dir2) = tmp();
     let mut app = app_with(&dir2, vec![unbuilt(&dir2)]);
     app.start_build();
-    std::thread::sleep(Duration::from_millis(700));
-    app.tick();
-    assert!(app.progress.total > 0, "progress arrived");
-    assert!(fake_processes() >= 2, "the build and its child run");
+    // wait for the state, not a fixed sleep: a loaded CI runner starts the fake and its child late
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let mut running = 0;
+    while Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(100));
+        app.tick();
+        running = fake_processes();
+        if app.progress.total > 0 && running >= 2 {
+            break;
+        }
+    }
+    assert!(
+        app.progress.total > 0,
+        "progress arrived: total {}",
+        app.progress.total
+    );
+    assert!(
+        running >= 2,
+        "the build and its child run: {running} fake processes"
+    );
     app.stop();
     settle(&mut app);
     assert_eq!(app.outcomes, vec![Outcome::Smoke(false)]);

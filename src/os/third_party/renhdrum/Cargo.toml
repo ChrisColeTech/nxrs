@@ -16,5 +16,7 @@ build = false
 [lib]
 name = "renhdrum"
 crate-type = ["rlib"]
+# nxrs: upstream's unit tests call Opus directly, and with no build script nothing links libopus into a renhdrum test
+# binary, so CI's `cargo test --workspace` excludes this package (2026-11-26).
 
 [dependencies]

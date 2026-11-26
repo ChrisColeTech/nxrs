@@ -121,7 +121,9 @@ The lead merges a wave only when every line holds:
 - [ ] Merge into `gameplay-harness` (`git merge --no-ff <wave>`), message ending with the attribution line; the
       ledger row updated and committed; the main `dist` rebuilt and the wave's titles relinked from it.
 - [ ] The worktree removed (junction first) when the wave is done.
-- [ ] Push only when the owner asks: `git push origin gameplay-harness:main`.
+- [ ] Push only when the owner asks, and to the feature branch (`git push origin gameplay-harness`), where CI builds
+      and tests. `main` changes only by merging a green feature branch (a pull request) when the owner says so; a push
+      to `main` is what builds and publishes the release (owner, 2026-11-26).
 
 Any unticked line sends the work back with the exact output and whether the product or the test is at fault.
 
