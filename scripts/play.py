@@ -1,13 +1,17 @@
 """Gameplay troubleshooting harness: run one built title through a scenario and report where it broke.
 
     py scripts/play.py <scenario> [--seconds N] [--diag pipeline|render] [--env K=V] [--option k=v]
-                                  [--exe game.exe] [--real-save] [--label text]
+                                  [--exe game.exe] [--real-save] [--label text] [--faults] [--ab-lanes]
     py scripts/play.py --list
     py scripts/play.py report <run folder>
+    py scripts/play.py checkpoint <run folder>   # a known-good run's shots become the scenario's route references
 
 Scenarios live in scripts/scenarios.toml; the game comes from the launcher library by the scenario's `title`
 (or --exe). A run folder build/play/<time>-<label>/ gets run.log (the engine's log), metrics-*.csv and
 frames-*.csv, NN-<name>.png screenshots, steps.jsonl (every step and control reply) and report.md/json.
+report.md carries the anomaly timeline (what the engine flagged, near which shot), the route checks (a scenario's
+`checks` against scripts/checkpoints.json: OFF-ROUTE marks the FPS invalid) and, with --faults, the frames the
+engine captured when an anomaly or a one-frame white/black flash happened (<run>/faults).
 
 Steps (one string each, run in order; `; S` waits S seconds after the step, `* N` repeats it):
     wait S                 sleep
@@ -33,7 +37,9 @@ import tomllib
 from ctypes import wintypes
 from pathlib import Path
 
+import play_events
 import play_report
+import play_route
 
 ROOT = Path(__file__).resolve().parents[1]
 INPUTS = ROOT / 'scripts' / 'inputs'
@@ -119,6 +125,13 @@ def expand(steps):
     return out
 
 
+def shot_file(name):
+    """A shot step's name as its file names it ('race later' -> 'race_later'; a window shot drops 'window ')."""
+    if name.startswith('window '):
+        name = name[7:]
+    return re.sub(r'[^A-Za-z0-9]+', '_', name).strip('_')[:40]
+
+
 def load_scenarios():
     with SCENARIOS.open('rb') as f:
         return tomllib.load(f)
@@ -167,7 +180,7 @@ class Run:
 
     def shot(self, name, command='fullres'):
         self.shots += 1
-        path = self.folder / ('%02d-%s.png' % (self.shots, re.sub(r'[^A-Za-z0-9]+', '_', name).strip('_')[:40]))
+        path = self.folder / ('%02d-%s.png' % (self.shots, shot_file(name)))
         self.ctl('%s %s' % (command, path), timeout=20)
         for _ in range(100):  # fullres is taken at the next present
             if path.exists() and path.stat().st_size > 8 and path.read_bytes()[-8:-4] == b'IEND':
@@ -269,6 +282,10 @@ def start(a, sc, name):
         env.update(NXGFX_PIPE_LOG='1', NXGFX_WAIT_DIAG='1')
     if a.diag == 'render':
         env['NXGFX_PROFILE'] = '1'
+    if a.faults:
+        # fault-triggered captures: the presented frame (and the one before) at every anomaly / image-check trip
+        (folder / 'faults').mkdir()
+        env['NXGFX_FAULT_SHOTS'] = str(folder / 'faults')
     if not a.real_save:
         real = exe.parent / (exe.stem + '_data') / 'save'
         if real.is_dir():
@@ -282,7 +299,7 @@ def start(a, sc, name):
     meta = dict(scenario=name, exe=str(exe), args=args, seconds=seconds, stall=a.stall,
                 window=sc.get('window'), fps=sc.get('fps', 60), diag=a.diag, real_save=a.real_save,
                 env={k: v for k, v in env.items() if k.startswith('NX')},
-                steps=sc['steps'], started=stamp)
+                steps=sc['steps'], checks=sc.get('checks', {}), started=stamp)
     (folder / 'run.json').write_text(json.dumps(meta, indent=1), encoding='utf-8')
     print(folder, flush=True)
     run = Run(folder, exe, expand(sc['steps']), seconds, a.stall)
@@ -312,6 +329,53 @@ def start(a, sc, name):
                   steps_done=run.steps_done, steps=len(run.steps), step_error=run.step_error)
     (folder / 'result.json').write_text(json.dumps(result, indent=1), encoding='utf-8')
     print(play_report.write(folder))
+    return folder
+
+
+def ab_lanes(a, sc, name):
+    """The scenario twice, translation in one piece (NXGFX_TRANSLATE_THREADS=0) then the default lanes, and ab.md
+    in the second run's folder: anomaly counts, route distances and FPS side by side."""
+    runs = []
+    for label, env in (('serial', ['NXGFX_TRANSLATE_THREADS=0']), ('lanes', [])):
+        b = argparse.Namespace(**vars(a))
+        b.env = [*a.env, *env]
+        b.label = '%s-%s' % (a.label or name, label)
+        runs.append(start(b, sc, name))
+    print(ab_report(name, runs))
+
+
+def ab_report(name, runs):
+    """ab.md in the second run's folder (serial run first); its text."""
+    reps = [json.loads((f / 'report.json').read_text(encoding='utf-8')) for f in runs]
+    kinds = [r['anomalies']['kinds'] for r in reps]
+    md = ['# %s: serial vs lanes' % name, '', '- serial (NXGFX_TRANSLATE_THREADS=0): `%s`' % runs[0].name,
+          '- lanes (default): `%s`' % runs[1].name, '',
+          '| | serial | lanes |', '|---|---|---|',
+          '| outcome | %s | %s |' % tuple(r['outcome'] for r in reps),
+          '| off route | %s | %s |' % tuple(', '.join(r['off_route']) or '-' for r in reps),
+          '| FPS mean (window) | %s | %s |' % tuple(r['metrics'].get('fps_mean') for r in reps)]
+    for k in play_events.KIND_ORDER:
+        if k in kinds[0] or k in kinds[1]:
+            md.append('| %s (run / window) | %s | %s |' % (k, *('%d / %d' % (x[k]['total'], x[k]['in_window'])
+                                                                if k in x else '-' for x in kinds)))
+    dist = [{c['shot']: c.get('hist') for c in r['route']} for r in reps]
+    for shot in sorted(set(dist[0]) | set(dist[1])):
+        md.append('| route `%s` | %s | %s |' % (shot, dist[0].get(shot, '-'), dist[1].get(shot, '-')))
+    (runs[1] / 'ab.md').write_text('\n'.join(md) + '\n', encoding='utf-8')
+    return '\n'.join(md)
+
+
+def checkpoint(folder, scenarios):
+    """A known-good run's declared shots become its scenario's route references (scripts/checkpoints.json)."""
+    folder = Path(folder)
+    name = json.loads((folder / 'run.json').read_text(encoding='utf-8'))['scenario']
+    checks = scenarios.get(name, {}).get('checks', {})
+    if not checks:
+        raise SystemExit('scenario %s declares no checks (scenarios.toml `checks = { shot = "what it shows" }`)' % name)
+    stored = play_route.record(folder, name, checks)
+    missing = sorted(set(checks) - set(stored))
+    print('%s: references from %s for %s%s' % (name, folder.name, ', '.join(stored) or 'nothing',
+                                               '; no shot for %s' % ', '.join(missing) if missing else ''))
 
 
 def main():
@@ -319,6 +383,9 @@ def main():
         print(play_report.write(Path(sys.argv[2])))
         return
     scenarios = load_scenarios()
+    if len(sys.argv) > 2 and sys.argv[1] == 'checkpoint':
+        checkpoint(sys.argv[2], scenarios)
+        return
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument('scenario', nargs='?', choices=sorted(scenarios))
     ap.add_argument('--list', action='store_true')
@@ -330,13 +397,22 @@ def main():
     ap.add_argument('--env', action='append', default=[], help='NAME=VALUE for the game')
     ap.add_argument('--option', action='append', default=[], help='key=value ini option for this run')
     ap.add_argument('--real-save', action='store_true', help='use the title\'s real save folder')
+    ap.add_argument('--faults', action='store_true',
+                    help='fault-triggered captures into <run>/faults (NXGFX_FAULT_SHOTS): the presented frame and '
+                         'the one before at every engine anomaly or one-frame white/black flash')
+    ap.add_argument('--ab-lanes', action='store_true',
+                    help='run twice, NXGFX_TRANSLATE_THREADS=0 then the default lanes; ab.md compares anomaly '
+                         'counts, route checks and FPS')
     ap.add_argument('--label')
     a = ap.parse_args()
     if a.list or not a.scenario:
         for name, sc in sorted(scenarios.items()):
             print('%-14s %-38s %4d s  %s' % (name, sc['title'], sc['seconds'], sc.get('about', '')))
         return
-    start(a, scenarios[a.scenario], a.scenario)
+    if a.ab_lanes:
+        ab_lanes(a, scenarios[a.scenario], a.scenario)
+    else:
+        start(a, scenarios[a.scenario], a.scenario)
 
 
 if __name__ == '__main__':

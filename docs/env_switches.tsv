@@ -41,6 +41,9 @@ NXGFX_DUMP_PASSES	diagnostic		src/graphics/src/vk/exec.rs
 NXGFX_DUMP_PNG	diagnostic	NXGFX_DUMP_PNG=0: the log lines only (dumps every few seconds over a long run)	src/graphics/src/vk/exec.rs
 NXGFX_DUMP_RAW	diagnostic		src/graphics/src/vk/exec.rs
 NXGFX_DUMP_TEX	diagnostic	`NXGFX_DUMP_TEX=<w>x<h>`: a sampled texture of that size, once per dump frame, is read back at the end of the	src/graphics/src/vk/exec.rs
+NXGFX_FAULT_FLASH	diagnostic	`NXGFX_FAULT_FLASH=<white>,<black>`: with NXGFX_FAULT_SHOTS, the fractions of the picture newly fully white / near black in one frame that trigger a capture (default `0.02,0.25`; 0 turns one off)	src/graphics/src/vk/shot/fault.rs
+NXGFX_FAULT_MAX	diagnostic	`NXGFX_FAULT_MAX=<n>`: with NXGFX_FAULT_SHOTS, the captures one run may write (default 32; at most 4 per reason)	src/graphics/src/vk/shot/fault.rs
+NXGFX_FAULT_SHOTS	diagnostic	`NXGFX_FAULT_SHOTS=<dir>` (`1`: `captures/faults`): fault-triggered captures. Every present is copied back and sampled; an engine anomaly (any red line, a zero stand-in bound, a draw with no render target) or a one-frame white/black flash writes that present (full size) and the one before (sampled) with a `fault capture N` log line. Off by default (one picture copy a frame); `play.py --faults` sets it	src/graphics/src/vk/shot/fault.rs
 NXGFX_FG_SHOT	diagnostic	`NXGFX_FG_SHOT=<s>`: once, after that many seconds, the first generated frame of a game frame and its two	src/graphics/src/vk/framegen.rs
 NXGFX_FRAMEGEN	switch	`0` turns frame generation off whatever the settings say	src/graphics/src/vk/framegen.rs
 NXGFX_FRAME_CSV	diagnostic	- `NXGFX_FRAME_CSV=<path>`: a row per frame (present interval, replay CPU time, GPU time, pipeline and upload	src/graphics/src/vk/perf.rs

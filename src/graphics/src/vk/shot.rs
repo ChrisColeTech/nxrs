@@ -16,6 +16,8 @@ use ash::vk;
 use std::path::PathBuf;
 use std::sync::{Mutex, OnceLock};
 
+pub mod fault;
+
 struct Cfg {
     at: Vec<u64>,
     every: u64,
@@ -530,7 +532,8 @@ pub fn set_frame_sink(fps: u32, f: Option<FrameSink>) {
     *SINK.lock().unwrap() = f.map(|f| (fps.max(1), f, None));
 }
 
-/// In a present's submission: a copy of the presented texture for the frame sink when one is due.
+/// In a present's submission: a copy of the presented texture for the frame sink when one is due, and for the
+/// fault watcher when it is on (`fault`, NXGFX_FAULT_SHOTS).
 pub fn record_sink(
     g: &Gpu,
     sub: &mut super::queue::Sub,
@@ -538,6 +541,7 @@ pub fn record_sink(
     crop: Option<[i32; 4]>,
     flip: bool,
 ) {
+    fault::record(g, sub, t, crop, flip);
     let f = {
         let mut s = SINK.lock().unwrap();
         let Some((fps, f, last)) = s.as_mut() else {
@@ -550,12 +554,53 @@ pub fn record_sink(
         *last = Some(now);
         *f
     };
-    let Some(tf) = crate::tex::format::tex_format(t.d.format) else {
+    let Some(rb) = copy_presented(g, sub, t, crop) else {
         return;
     };
+    sub.post
+        .push(super::queue::Post::Callback(Box::new(move |_g: &Gpu| {
+            let (w, h) = (rb.w as usize, rb.h as usize);
+            // SAFETY: the read-back buffer, freed after this callback
+            let src = unsafe { core::slice::from_raw_parts(rb.ptr as *const u8, rb.n) };
+            let mut px = vec![0u8; w * h * 4];
+            if !to_rgba8(rb.fmt, src, w * h, &mut px) {
+                return;
+            }
+            let mut out = vec![0u8; w * h * 4];
+            for row in 0..h {
+                let sr = if flip { h - 1 - row } else { row };
+                for c in 0..w {
+                    let s = (sr * w + c) * 4;
+                    let d = (row * w + c) * 4;
+                    out[d..d + 4].copy_from_slice(&[px[s + 2], px[s + 1], px[s], 255]);
+                }
+            }
+            f(&out, w as u32, h as u32);
+        })));
+}
+
+/// A presented picture copied into host memory: its mapping, byte count, Vulkan format, bytes per texel and size.
+/// The buffer lives until the submission's callbacks have run (`Sub::transient`).
+pub(crate) struct Readback {
+    pub ptr: usize,
+    pub n: usize,
+    pub fmt: vk::Format,
+    pub bpb: usize,
+    pub w: u32,
+    pub h: u32,
+}
+
+/// In a present's submission: the presented texture (the window's crop applied) copied into a host buffer.
+pub(crate) fn copy_presented(
+    g: &Gpu,
+    sub: &mut super::queue::Sub,
+    t: &tex_t,
+    crop: Option<[i32; 4]>,
+) -> Option<Readback> {
+    let tf = crate::tex::format::tex_format(t.d.format)?;
     let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(t.d.format);
     if bw != 1 || bh != 1 || bpb == 0 {
-        return;
+        return None;
     }
     let (tw, th) = (t.d.width as i32, t.d.height as i32);
     let [x, y, w, h] = match crop {
@@ -564,22 +609,25 @@ pub fn record_sink(
         }
         _ => [0, 0, tw, th],
     };
+    if w <= 0 || h <= 0 {
+        return None;
+    }
     {
         let mut imgs = g.images.lock().unwrap();
         if !g.ensure_image(&mut imgs, t) {
-            return;
+            return None;
         }
         g.prepare_image(&mut imgs, t.serial, sub);
     }
     let n = w as u64 * h as u64 * bpb as u64;
-    let Ok(buf) = g.buffer(
-        n,
-        vk::BufferUsageFlags::TRANSFER_DST,
-        gpu_allocator::MemoryLocation::GpuToCpu,
-        "frame sink",
-    ) else {
-        return;
-    };
+    let buf = g
+        .buffer(
+            n,
+            vk::BufferUsageFlags::TRANSFER_DST,
+            gpu_allocator::MemoryLocation::GpuToCpu,
+            "frame sink",
+        )
+        .ok()?;
     let r = vk::BufferImageCopy {
         buffer_offset: 0,
         buffer_row_length: 0,
@@ -604,26 +652,17 @@ pub fn record_sink(
         super::image::copy_buf_img(g, sub.main, &imgs.by_serial[&t.serial], buf.buf, r, false);
     }
     let ptr = buf.ptr as usize;
-    let fmt = tf.vk;
+    if ptr == 0 {
+        sub.transient.push(buf);
+        return None;
+    }
     sub.transient.push(buf);
-    sub.post
-        .push(super::queue::Post::Callback(Box::new(move |_g: &Gpu| {
-            let (w, h) = (w as usize, h as usize);
-            // SAFETY: the read-back buffer, freed after this callback
-            let src = unsafe { core::slice::from_raw_parts(ptr as *const u8, n as usize) };
-            let mut px = vec![0u8; w * h * 4];
-            if !to_rgba8(fmt, src, w * h, &mut px) {
-                return;
-            }
-            let mut out = vec![0u8; w * h * 4];
-            for row in 0..h {
-                let sr = if flip { h - 1 - row } else { row };
-                for c in 0..w {
-                    let s = (sr * w + c) * 4;
-                    let d = (row * w + c) * 4;
-                    out[d..d + 4].copy_from_slice(&[px[s + 2], px[s + 1], px[s], 255]);
-                }
-            }
-            f(&out, w as u32, h as u32);
-        })));
+    Some(Readback {
+        ptr,
+        n: n as usize,
+        fmt: tf.vk,
+        bpb: bpb as usize,
+        w: w as u32,
+        h: h as u32,
+    })
 }

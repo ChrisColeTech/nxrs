@@ -9,14 +9,120 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import play  # noqa: E402
+import play_events  # noqa: E402
 import play_report  # noqa: E402
+import play_route  # noqa: E402
 
 
-def png(path, w, h, rgb):
-    raw = b''.join(b'\0' + bytes(rgb) * w for _ in range(h))
+def png(path, w, h, rgb, sub_filter=False):
+    """An RGB PNG of one colour (`sub_filter`: rows written with PNG filter 1, as other encoders do)."""
+    if sub_filter:
+        row = bytes(rgb) + bytes(3 * (w - 1))  # Sub: every texel after the first is a zero difference
+        raw = b''.join(b'\1' + row for _ in range(h))
+    else:
+        raw = b''.join(b'\0' + bytes(rgb) * w for _ in range(h))
     chunk = lambda t, d: struct.pack('>I', len(d)) + t + d + struct.pack('>I', zlib.crc32(t + d))
     path.write_bytes(b'\x89PNG\r\n\x1a\n' + chunk(b'IHDR', struct.pack('>IIBBBBB', w, h, 8, 2, 0, 0, 0))
                      + chunk(b'IDAT', zlib.compress(raw)) + chunk(b'IEND', b''))
+
+
+LOG = '''\
+[   1.00] [vk] replay up to frame 60, per frame: 1.0 draws (0.0 skipped: no shader 0, no pipeline 0, no target 0 in all), x; dropped work 0
+[   2.00] [vk] replay up to frame 120, per frame: 1.0 draws (0.0 skipped: no shader 0, no pipeline 10, no target 5 in all), x; dropped work 0
+[   3.00] [vk] replay up to frame 180, per frame: 1.0 draws (0.0 skipped: no shader 0, no pipeline 20, no target 10 in all), x; dropped work 0
+[   4.00] [vk] replay up to frame 240, per frame: 1.0 draws (0.0 skipped: no shader 0, no pipeline 30, no target 60 in all), x; dropped work 0
+[   4.10] [vk] texture ID 7 (target 4) at frame 230: nothing is registered there: a zero stand-in is bound
+[   4.20] [vk] texture pool: 1 slot(s) of an image that goes now name the zero stand-in (NXGFX_SCRUB_SLOTS=0 off)
+[   4.30] [RED] a draw with no render target bound (1 colour slots, 1 with a texture, depth set): skipped
+[   4.40] [vk] translate (parallel), over the last 600 frames: 3 streams; 2 segments translated again; the gate asked 9 times, 1 segments gave up; asked at
+[   4.50] [vk] pools: x; CPU writes held back a frame: 0.50 MB under in-flight write-backs (1.0 syncs), 0.00 MB past the upload budget; y
+[   4.60] [vk] fault capture 1: stand-in: texture ID 7 at present 241: f.png (8x8)
+[   4.70] [vk] screenshot: present 241 (8x8) written to C:\\run\\01-race.png (1.0 ms)
+[  20.00] [RED] lazy write-back: page 0x1000 dropped
+'''
+
+
+class Events(unittest.TestCase):
+    def test_kinds_times_and_screenshot_present(self):
+        ev, shots = play_events.parse(LOG.splitlines())
+        ev = [e for e in ev if e[2]]  # quiet periods (count 0) are kept for the steady rates
+        kinds = [e[1] for e in ev]
+        self.assertEqual(kinds, ['skip-no-pipeline', 'skip-no-target', 'skip-no-pipeline', 'skip-no-target',
+                                 'skip-no-pipeline', 'skip-no-target', 'stand-in', 'no-target', 'gate',
+                                 'held-back-frame', 'capture', 'red'])
+        stand_in = ev[6]
+        self.assertEqual((stand_in[0], stand_in[3]), (4.1, 230))
+        self.assertIn('(target 4 = 2D array)', stand_in[4])
+        self.assertEqual(ev[8][2], 3)  # gave up + translated again
+        self.assertEqual(ev[9][2], 512)  # KB held back
+        self.assertEqual(shots, {'01-race.png': (4.7, 241)})
+
+    def test_steady_skips_are_background_and_spikes_are_near(self):
+        ev, _ = play_events.parse(LOG.splitlines())
+        s = play_events.summary(ev, (3.5, 10))
+        self.assertEqual((s['skip-no-target']['total'], s['skip-no-target']['in_window']), (60, 50))
+        self.assertEqual((s['skip-no-target']['steady'], s['skip-no-target']['peak']), (5, 50))
+        saved = play_events.NEAR_BEFORE
+        play_events.NEAR_BEFORE = 1.0  # the shot's second only: the log's first periods have no baseline yet
+        self.addCleanup(setattr, play_events, 'NEAR_BEFORE', saved)
+        near = dict((k, n) for k, n, _ in play_events.near(ev, 4.7))
+        # the steady 10 pipelines a period are background; the 50-draw no-target spike is news
+        self.assertNotIn('skip-no-pipeline', near)
+        self.assertEqual((near['skip-no-target'], near['stand-in'], near['no-target']), (50, 1, 1))
+        self.assertNotIn('red', near)
+
+
+class AB(unittest.TestCase):
+    def test_serial_and_lanes_side_by_side(self):
+        with tempfile.TemporaryDirectory() as d:
+            runs = [Path(d) / 's', Path(d) / 'l']
+            for f, n in zip(runs, (0, 7)):
+                f.mkdir()
+                kinds = {'gate': dict(total=n, in_window=n)} if n else {}
+                (f / 'report.json').write_text(json.dumps(dict(
+                    outcome='completed', off_route=[], metrics=dict(fps_mean=30.0),
+                    anomalies=dict(kinds=kinds), route=[dict(shot='01-a.png', hist=0.05 * (n > 0))])))
+            text = play.ab_report('t', runs)
+            self.assertIn('| gate (run / window) | - | 7 / 7 |', text)
+            self.assertIn('| route `01-a.png` | 0.0 | 0.05 |', text)
+            self.assertTrue((runs[1] / 'ab.md').exists())
+
+
+class Route(unittest.TestCase):
+    def setUp(self):
+        d = tempfile.TemporaryDirectory()
+        self.addCleanup(d.cleanup)
+        self.f = Path(d.name)
+        self.saved = play_route.CHECKPOINTS
+        play_route.CHECKPOINTS = self.f / 'checkpoints.json'
+        self.addCleanup(setattr, play_route, 'CHECKPOINTS', self.saved)
+
+    def test_filtered_and_plain_rows_decode_the_same(self):
+        png(self.f / 'a.png', 40, 4, (200, 30, 90))
+        png(self.f / 'b.png', 40, 4, (200, 30, 90), sub_filter=True)
+        self.assertEqual(play_route.decode(self.f / 'a.png')[3], play_route.decode(self.f / 'b.png')[3])
+        self.assertEqual(play_route.distance(play_route.signature(self.f / 'a.png'),
+                                             play_route.signature(self.f / 'b.png')), (0.0, 0.0))
+
+    def test_reference_then_off_route_report(self):
+        good, bad = self.f / 'good', self.f / 'bad'
+        for run, colour in ((good, (40, 160, 40)), (bad, (90, 60, 30))):
+            run.mkdir()
+            png(run / '01-house.png', 64, 36, colour)
+            png(run / '02-other.png', 64, 36, colour)
+        self.assertEqual(play_route.record(good, 't', {'house': 'in the house'}), ['house'])
+        self.assertFalse(play_route.check(good, 't', {'house': 'x'}, [good / '01-house.png'])[0]['off'])
+        (bad / 'run.json').write_text(json.dumps(dict(scenario='t', exe='g.exe', window=[1, 3], fps=60,
+                                                      checks={'house': 'in the house'})))
+        (bad / 'metrics-1.csv').write_text('#seconds,frames,fps,cpu_percent,private_mb,xmon\n2.0,60,60,1,5,0\n')
+        (bad / 'result.json').write_text(json.dumps(dict(outcome='completed', exit_code=0)))
+        saved = play_report.sheets
+        play_report.sheets = lambda folder, shots: []  # no PowerShell: the sheet has its own test
+        self.addCleanup(setattr, play_report, 'sheets', saved)
+        text = play_report.write(bad)
+        self.assertIn('# t: completed - OFF-ROUTE', text)
+        self.assertIn('**INVALID (off route)** FPS', text)
+        self.assertEqual(json.loads((bad / 'report.json').read_text())['off_route'], ['01-house.png'])
 
 
 class Steps(unittest.TestCase):
@@ -36,6 +142,9 @@ class Steps(unittest.TestCase):
                 lo, hi = sc['window']
                 self.assertLess(lo, hi)
                 self.assertLessEqual(hi, sc['seconds'])
+                # route checks name shots the steps take (as play.py names their files)
+                shots = {play.shot_file(step[5:]) for step, _ in play.expand(sc['steps']) if step.startswith('shot ')}
+                self.assertLessEqual(set(sc.get('checks', {})), shots)
 
 
 class Report(unittest.TestCase):

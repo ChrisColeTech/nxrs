@@ -36,11 +36,18 @@ pub fn mute(on: bool) {
     MUTED.with(|m| m.set(on));
 }
 
+/// This thread's red lines are muted (a translation that will be thrown away): its anomalies are not real either.
+pub fn muted() -> bool {
+    MUTED.with(|m| m.get())
+}
+
 pub fn red(msg: &str) {
     if MUTED.with(|m| m.get()) {
         return;
     }
     line(&format!("[RED] {msg}"));
+    // a fault capture of the frame it happened in (NXGFX_FAULT_SHOTS; nothing when off)
+    crate::vk::shot::fault::note("red", msg);
 }
 
 /// A red line printed once per distinct text.

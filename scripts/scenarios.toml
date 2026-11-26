@@ -1,6 +1,9 @@
 # play.py scenarios: one per library title. Goal (owner's bar): past the intro videos into first gameplay, a
 # short stretch of play with screenshots, then quit. `title` is the launcher library's title; `window` is the
 # stretch of seconds the report's FPS numbers cover; `fps` the target. Step grammar: see play.py.
+# A `[<scenario>.checks]` table (`<shot> = "what it shows"`) names route checkpoints: shots of a stable place (not a cutscene moment
+# whose timing drifts) compared with a known-good run's (scripts/checkpoints.json, recorded with
+# `py scripts/play.py checkpoint <run>` after reading its sheets). A mismatch marks the run OFF-ROUTE, FPS invalid.
 # Old long-run variants (11-25 min memory trends) were dropped on purpose; add one only for a specific bug.
 
 [wonder]
@@ -32,6 +35,10 @@ window = [250, 325]
 steps = ["wait 40", "shot boot", "press A ; 6 * 16", "shot title", "press A ; 6 * 3", "shot menus",
          "press A ; 6 * 15", "shot grid", "replay mkw_drive.txt ; 42", "shot race",
          "replay mkw_drive.txt ; 42", "shot race later"]
+[mkw.checks]
+grid = "race start grid, Mario at the back"
+race = "racing, desert track"
+race_later = "lap 2, desert track"
 
 [mkw-turn]
 title = "Mario Kart World"
@@ -42,6 +49,11 @@ steps = ["wait 40", "shot boot", "press A ; 6 * 16", "shot title", "press A ; 6 
          "press A ; 6 * 15", "shot grid", "replay mkw_drive.txt ; 37", "shot t37 ; 0.5", "shot t38 ; 0.5",
          "shot t39 ; 0.5", "shot t40 ; 0.5", "shot t41 ; 0.5", "shot t42 ; 0.5", "shot t43 ; 0.5",
          "shot t44 ; 0.5", "shot t45 ; 0.5", "shot t46"]
+[mkw-turn.checks]
+grid = "race start grid"
+t37 = "desert hill before the banked turn"
+t41 = "steel deck after the turn"
+t46 = "steel deck, wall on the right"
 
 [mkw180]
 title = "Mario Kart World v1.8.0"
@@ -97,6 +109,13 @@ steps = ["wait 25", "shot title", "press A ; 3 * 25", "shot story", "press A ; 3
          "wait 9", "replay oot_house_walk.txt ; 3", "shot walk4", "wait 6", "shot walk5", "wait 6",
          "shot walk6", "wait 9", "replay oot_house_walk.txt ; 3", "shot walk7", "wait 6", "shot walk8",
          "wait 6", "shot walk9", "wait 9", "shot last"]
+[oot.checks]
+x5 = "Link in his house, 'Move / Change View'"
+h1 = "Link in his house"
+h4 = "Link in his house"
+h7 = "Link in his house"
+walk1 = "Link walking in his house"
+last = "Link in his house"
 
 [oot-house]
 title = "The Legend of Zelda Ocarina of Time"
@@ -118,6 +137,12 @@ steps = ["wait 25", "shot title", "press A ; 3 * 25", "press A ; 3 * 25", "press
          "press A ; 1.5", "shot d21", "press A ; 1.5", "shot d22", "press A ; 1.5", "shot d23", "press A ; 1.5", "shot d24",
          "press A ; 1.5", "shot d25", "press A ; 1.5", "shot d26", "press A ; 1.5", "shot d27", "press A ; 1.5", "shot d28",
          "press A ; 1.5", "shot d29", "press A ; 1.5", "shot d30", "shot last"]
+[oot-house.checks]
+d01 = "Link in his house, the door ahead"
+d10 = "Link in his house"
+d20 = "Link in his house"
+d30 = "Link in his house"
+last = "Link in his house"
 
 [mk8d]
 title = "Mario Kart 8 Deluxe"

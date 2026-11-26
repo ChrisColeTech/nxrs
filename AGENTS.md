@@ -25,11 +25,17 @@ screenshots. Read the sheets yourself; the harness does not judge pictures. It d
 no thermal/HWiNFO feeds, supervisors, stop latches, leases or pre-run gates (the owner removed that incident
 scaffolding; the thermal/incident wave docs under `docs/waves/` are history). Runs use a copy of the title's save
 (`NXOS_SAVE`) unless `--real-save`. Live native NDVE stays off in the engine itself.
+report.md also carries the anomaly timeline (stand-ins, missing render targets, skipped draws, gate give-ups,
+held-back writes, red lines: counts per run/window and what happened in the 5 s before each shot), the route checks
+(a scenario's `[<name>.checks]` shots against `scripts/checkpoints.json`; **OFF-ROUTE** means the FPS is invalid)
+and, with `--faults`, the frames the engine captured at each anomaly or one-frame white/black flash.
 
 ```powershell
 py scripts/play.py --list                 # scenarios and their library titles
 py scripts/play.py wonder                 # run, then read report.md and sheet-*.png
 py scripts/play.py dkb --diag pipeline    # with compile/wait logging; --env/--option/--seconds/--exe too
+py scripts/play.py oot-house --faults     # + fault-triggered captures in <run>/faults (NXGFX_FAULT_SHOTS)
+py scripts/play.py checkpoint build/play/<run>   # a known-good run (sheets read) becomes the route reference
 py scripts/play.py report build/play/<run>   # regenerate a report
 py -m unittest scripts.test_play          # the harness's own checks (under a second)
 ```
