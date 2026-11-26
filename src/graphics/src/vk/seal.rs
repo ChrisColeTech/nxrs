@@ -67,6 +67,8 @@ pub static ARMS: AtomicU64 = AtomicU64::new(0);
 pub static ARM_B: AtomicU64 = AtomicU64::new(0);
 pub static ARM_NS: AtomicU64 = AtomicU64::new(0);
 pub static UNSEALS: AtomicU64 = AtomicU64::new(0);
+/// The sealing passes' time under the pool lock (`mem::seal_some`).
+pub static PASS_NS: AtomicU64 = AtomicU64::new(0);
 
 pub fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -340,9 +342,10 @@ pub fn summary(frames: f64) -> String {
     let (w, h, l, a) = (t(&WAKES), t(&HOST_WAKES), LEAKS.load(Ordering::Relaxed), t(&ARMS));
     let mb = ARM_B.swap(0, Ordering::Relaxed) as f64 / frames / 1048576.0;
     let ms = ARM_NS.swap(0, Ordering::Relaxed) as f64 / frames / 1e6;
+    let pass = PASS_NS.swap(0, Ordering::Relaxed) as f64 / frames / 1e6;
     let u = UNSEALS.load(Ordering::Relaxed);
     format!(
-        "; sealed pools: {n} ({} MB) out of every scan; a frame {w:.2} woken by a store, {h:.2} by a host write, {a:.2} armed ({mb:.2} MB protected in {ms:.3} ms); {u} unsealed whole so far, {l} found written without a fault so far",
+        "; sealed pools: {n} ({} MB) out of every scan; a frame {w:.2} woken by a store, {h:.2} by a host write, {a:.2} armed ({mb:.2} MB protected in {ms:.3} ms; sealing pass {pass:.3} ms under the pool lock); {u} unsealed whole so far, {l} found written without a fault so far",
         b >> 20
     )
 }
@@ -452,10 +455,6 @@ mod tests {
         assert_eq!(r, 0);
         v[..n].iter().map(|&p| p as u64).collect()
     }
-    fn woken_has(pool: u64) -> bool {
-        let r = reg();
-        r.0.woken.contains(&pool)
-    }
     /// Armed in one call.
     fn arm1(pool: u64, lo: u64, hi: u64) -> bool {
         arm(pool, lo, hi, u64::MAX >> 1).0 == Arm::Done
@@ -476,7 +475,8 @@ mod tests {
         assert_eq!(arm(lo, lo, hi, CHUNK), (Arm::Part, CHUNK));
         // the first two chunks are read-only: a store there faults and wakes it
         unsafe { ((lo + 8) as *mut u8).write_volatile(1) };
-        assert!(woken_has(lo));
+        // (the woken queue is shared with other tests, which may drain it: the entry tells)
+        assert!(!armed(lo), "woken");
         // past the protected pieces: no fault
         let wakes = WAKES.load(Ordering::Relaxed);
         unsafe { ((lo + 3 * CHUNK) as *mut u8).write_volatile(1) };
@@ -508,7 +508,6 @@ mod tests {
         let wakes = WAKES.load(Ordering::Relaxed);
         unsafe { ((lo + CHUNK + 8) as *mut u64).write_volatile(0x1234) };
         assert!(!armed(lo), "the store woke it");
-        assert!(woken_has(pool));
         assert!(WAKES.load(Ordering::Relaxed) > wakes);
         assert_eq!(unsafe { ((lo + CHUNK + 8) as *const u64).read_volatile() }, 0x1234);
         assert_eq!(written(lo, hi), vec![lo + CHUNK], "the store is in the write watch");

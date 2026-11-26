@@ -2677,9 +2677,48 @@ fn seal_some(g: &Gpu) {
         return;
     }
     let quiet = super::seal::quiet_frames();
+    let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
     let _watch = watch_lock(&mut m);
+    struct PassTimer(std::time::Instant);
+    impl Drop for PassTimer {
+        fn drop(&mut self) {
+            super::seal::PASS_NS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+    let _pass_t = PassTimer(std::time::Instant::now());
     let shared = sharing_pools(&m);
+    // every 300 frames: why the watched mirrors not sealed are not (bytes, pools by reason)
+    if frame % 300 == 0 {
+        let mut why: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+        for p in m.by_base.values().filter(|p| p.watched && p.placement == Placement::Mirror && !p.sealed) {
+            let (lo, hi) = page_range(p.base, p.size);
+            let r = if p.alloc_base == 0 {
+                "two allocations"
+            } else if shared.contains(&p.base) {
+                "shares a page"
+            } else if frame.saturating_sub(p.wb_frame) < quiet {
+                "write-backs"
+            } else if frame.saturating_sub(p.dirty_frame) < quiet {
+                "CPU writes"
+            } else if !(p.pending.is_empty() && p.deferred.is_empty() && p.tex_dirty.is_empty()) {
+                "work waiting"
+            } else if super::lazy::holds_any(lo, hi - lo) {
+                "lazy pages"
+            } else if p.seal_entry {
+                "being sealed"
+            } else if !host_writable(lo, hi - lo) {
+                "not all committed read-write"
+            } else {
+                "queued"
+            };
+            let e = why.entry(r).or_default();
+            e.0 += p.size;
+            e.1 += 1;
+        }
+        let s: Vec<String> = why.iter().map(|(k, (b, n))| format!("{k} {n} ({} MB)", b >> 20)).collect();
+        crate::vklog!("sealed pools: not sealed now: {}; this pass's lock and census {:.2} ms", s.join(", "), t0.elapsed().as_secs_f64() * 1e3);
+    }
     // from where the last pass stopped, round the pools once
     let start = NEXT.load(Ordering::Relaxed);
     let order: Vec<u64> = m
