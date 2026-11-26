@@ -118,7 +118,25 @@ pub fn release(addr: u64) {
 
 #[cfg(windows)]
 pub fn commit(addr: u64, n: u64) -> bool {
+    if n != 0 {
+        commit_hook(addr, n);
+    }
     n == 0 || !unsafe { VirtualAlloc(addr as _, n as usize, MEM_COMMIT, PAGE_READWRITE) }.is_null()
+}
+
+/// Told before every commit (`commit`): a commit makes committed read-only pages read-write without a fault, so the
+/// graphics side's sealed pools over them are woken first (nxgfx `vk::seal`). Set once.
+static COMMIT_HOOK: std::sync::OnceLock<fn(u64, u64)> = std::sync::OnceLock::new();
+
+pub fn set_commit_hook(f: fn(u64, u64)) {
+    let _ = COMMIT_HOOK.set(f);
+}
+
+#[cfg(windows)]
+fn commit_hook(addr: u64, n: u64) {
+    if let Some(f) = COMMIT_HOOK.get() {
+        f(addr, n);
+    }
 }
 
 #[cfg(windows)]

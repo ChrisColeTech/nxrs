@@ -62,6 +62,12 @@ pub struct Pool {
     pub dirty_frame: u64,
     /// found written after a quiet stretch (`is_cold`): never cold again (`NXGFX_POOL_STICKY=0`: as before)
     pub sporadic: bool,
+    /// read-only and not written since (`seal`): left out of every scan, walk and per-pool pass until a store wakes it
+    pub sealed: bool,
+    /// `seal` has an entry for its pages (armed, or woken with chunks still read-only)
+    pub seal_entry: bool,
+    /// the frame a write-back last landed on it (a pool the GPU writes is not sealed)
+    pub wb_frame: u64,
     /// A pool larger than the device's largest buffer (maintenance4 `maxBufferSize`; AMD: 2 GiB) has several buffers,
     /// windows side by side over it: window k holds pool bytes [k * win, (k + 1) *
     /// win), window 0 is `buf`, the others are here. `win` 0: one buffer for all of it.
@@ -252,6 +258,19 @@ pub struct Pools {
     pub gen: u32,
     /// the frame the last submission's pool sync was in
     pub scan_frame: u64,
+    /// pools that may hold work for a sync that does not scan (pending, deferred or texture-dirty ranges; mirrors
+    /// without a write watch): such a sync visits only these, not every pool (SCAN-COST: ~4,500 pools at 8 covered
+    /// syncs a frame in OoT). Every place that gives a pool such work adds it; a scanning sync visits every pool and
+    /// rebuilds it.
+    pub busy: std::collections::BTreeSet<u64>,
+}
+
+/// Whether a sync that does not scan has anything to do for `p` (`Pools::busy`).
+fn busy(p: &Pool) -> bool {
+    !p.pending.is_empty()
+        || !p.deferred.is_empty()
+        || !p.tex_dirty.is_empty()
+        || (!p.watched && matches!(p.placement, Placement::Mirror | Placement::Host))
 }
 
 pub static UPLOAD_BYTES: AtomicU64 = AtomicU64::new(0);
@@ -635,6 +654,9 @@ pub fn pool_add(p: &pool_t) {
         alloc_base: if watched { watch::alloc_of(lo, hi) } else { 0 },
         dirty_frame: super::present::frames(),
         sporadic: false,
+        sealed: false,
+        seal_entry: false,
+        wb_frame: 0,
         win: 0,
         wins: Vec::new(),
         wins_da: Vec::new(),
@@ -655,6 +677,18 @@ pub fn pool_add(p: &pool_t) {
     super::upskip::drop_pool(base, base + p.size);
     let old = {
         let mut m = g.mem.lock().unwrap();
+        // a sealed pool under the new one's pages is unsealed whole (sealed pools share no page with another pool)
+        for b in super::seal::remove(lo, hi) {
+            if let Some(o) = m.by_base.get_mut(&b) {
+                o.sealed = false;
+                o.seal_entry = false;
+            }
+            SEAL_GEN.fetch_add(1, Ordering::AcqRel);
+        }
+        // a mirror without a write watch is compared at every sync, scanning or not
+        if !watched && matches!(placement, Placement::Mirror | Placement::Host) {
+            m.busy.insert(base);
+        }
         let old = m.by_base.insert(base, pool);
         POOL_GEN.fetch_add(1, Ordering::Release);
         old
@@ -667,6 +701,11 @@ pub fn pool_add(p: &pool_t) {
 
 fn release(g: &Gpu, p: Pool) {
     POOL_GEN.fetch_add(1, Ordering::Relaxed);
+    // its pages read-write again (the memory goes back to the game, or to a pool made over it)
+    if p.seal_entry {
+        let (lo, hi) = page_range(p.base, p.size);
+        super::seal::remove(lo, hi);
+    }
     // pages of it held on the device (lazy write-back) come back now, from this buffer, while it still exists: left
     // in the lazy table they named a freed buffer, and the next touch of those pages (a new pool's buffer over the
     // same memory brings its range back first) copied from it on the GPU: an invalid read inside a buffer unbound
@@ -857,6 +896,7 @@ pub fn cpu_flushed(a: u64, n: u64) {
     let mut m = g.mem.lock().unwrap();
     if let Some(b) = find(&m, a, n.max(1)) {
         m.by_base.get_mut(&b).unwrap().pending.push((a, n));
+        m.busy.insert(b);
     }
 }
 
@@ -915,9 +955,14 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     let _watch = watch_lock(&mut m);
     let gen = m.gen;
     let Some(b) = find(&m, a, n) else { return };
+    // it may be left with pending writes or texture-dirty ranges below (a sync that does not scan finds it; one with
+    // nothing leaves the set at that sync)
+    m.busy.insert(b);
     let p = m.by_base.get_mut(&b).unwrap();
-    // a hot pool was asked at this submission's start; only a watched mirror's pages are taken here
-    if !p.watched || p.placement != Placement::Mirror || !is_cold(p, frame) {
+    // a hot pool was asked at this submission's start; only a watched mirror's pages are taken here; a sealed one was
+    // not written since it was sealed (a store would have woken it, and `watch_lock` took the woken ones back): only
+    // what it holds pending
+    if !p.watched || p.placement != Placement::Mirror || !is_cold(p, frame) || (p.sealed && p.pending.is_empty()) {
         return;
     }
     // taking the watch and uploading the CPU writes: a first-use initialization in the upload buffer (`gate::pass_pre`)
@@ -2377,6 +2422,7 @@ static PRESENT_ASKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicB
 
 fn walker_main() {
     let mut last_tail = 0;
+    let mut cached: ((u64, u64), Vec<WatchedPool>) = ((0, 0), Vec::new());
     loop {
         let full;
         {
@@ -2414,13 +2460,21 @@ fn walker_main() {
         let ok = match super::Gpu::try_get() {
             Some(g) => {
                 let list = {
-                    let m = g.mem.lock().unwrap();
+                    let mut m = g.mem.lock().unwrap();
+                    // after `tail` was read: a pool woken by a store made before an op this walk covers is walked
+                    drain_woken(&mut m);
                     if full {
-                        watched_pools(&m)
+                        // the same list while no pool came, went, got its buffer or was sealed or woken (with most
+                        // pools sealed a walk is short, and its list was most of its time under the pool lock)
+                        let key = (POOL_GEN.load(Ordering::Acquire), SEAL_GEN.load(Ordering::Acquire));
+                        if cached.0 != key || cached.1.is_empty() {
+                            cached = (key, watched_pools_where(&m, |p| !p.sealed));
+                        }
+                        cached.1.clone()
                     } else {
                         // the pools a sync of this frame would scan (`begin_submit`'s cold rule)
                         let frame = super::present::frames();
-                        watched_pools_where(&m, |p| !is_cold(p, frame))
+                        watched_pools_where(&m, |p| !p.sealed && !is_cold(p, frame))
                     }
                 };
                 let mut job = WalkJob::new(tail, signals, walk_pieces(&list, WALK_PIECE));
@@ -2462,6 +2516,10 @@ fn walker_main() {
             }
         }
         WALK_CV.notify_all();
+        if let Some(g) = super::Gpu::try_get() {
+            seal_some(g);
+            seal_check(g);
+        }
         if n % 600 == 0 {
             crate::vklog!(
                 "pool walker, last 600 walks: {} without the cold pools ({} of them covering no sync: a cold pool written meanwhile), {:.2} ms a walk, {} could not read a range, {} presents' syncs covered ({} finishing a walk), {} other syncs finished one, the replay's syncs walked {:.3} ms a walk of them, scanning syncs left {} MB to walks in progress; syncs and landings waited {:.3} ms a walk for the watch lock (with the drain)",
@@ -2546,6 +2604,7 @@ fn drain_walk(m: &mut Pools, stash: &mut Vec<u64>) {
     for (base, pgs) in taken {
         if let Some(p) = m.by_base.get_mut(&base) {
             p.pending.extend(pgs.into_iter().map(|pg| (pg, PAGE)));
+            m.busy.insert(base);
         }
     }
 }
@@ -2563,8 +2622,212 @@ fn watch_lock(m: &mut Pools) -> std::sync::MutexGuard<'static, Vec<u64>> {
     let mut s = WATCH_MU.lock().unwrap();
     WATCH_WANT.fetch_sub(1, Ordering::AcqRel);
     drain_walk(m, &mut s);
+    drain_woken(m);
     WATCH_WAIT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     s
+}
+
+/// Moves whenever a pool is sealed or stops being sealed (the walker's list of the pools it walks is kept until then).
+static SEAL_GEN: AtomicU64 = AtomicU64::new(0);
+
+/// The pools a store woke since (`seal`): asked by every scan again, and warm, so the cold rule does not hold their
+/// writes back a frame either. Under the pool lock; a scan calls it again after reading the replay queue's tail (a
+/// store made before an op it covers woke its pool before that op was queued).
+fn drain_woken(m: &mut Pools) {
+    let woken = super::seal::take_woken();
+    if woken.is_empty() {
+        return;
+    }
+    SEAL_GEN.fetch_add(1, Ordering::AcqRel);
+    let frame = super::present::frames();
+    for b in woken {
+        if let Some(p) = m.by_base.get_mut(&b) {
+            p.sealed = false;
+            p.dirty_frame = frame;
+        }
+    }
+}
+
+/// The pools that share a page with another pool (an alias, a nested pool): never sealed. One pass in base order
+/// against the pool reaching furthest so far.
+fn sharing_pools(m: &Pools) -> std::collections::HashSet<u64> {
+    let mut out = std::collections::HashSet::new();
+    let mut far: Option<(u64, u64)> = None;
+    for p in m.by_base.values() {
+        let (lo, hi) = page_range(p.base, p.size);
+        if let Some((fb, fhi)) = far {
+            if lo < fhi {
+                out.insert(fb);
+                out.insert(p.base);
+            }
+        }
+        if far.is_none_or(|(_, fhi)| hi > fhi) {
+            far = Some((p.base, hi));
+        }
+    }
+    out
+}
+
+/// Whether `p` may be sealed at `frame` (`seal`): a watched mirror wholly in one allocation, no CPU write and no
+/// write-back landing for `quiet` frames, nothing waiting to go up.
+fn seal_eligible(p: &Pool, frame: u64, quiet: u64) -> bool {
+    p.watched
+        && p.placement == Placement::Mirror
+        && !p.sealed
+        && p.alloc_base != 0
+        && p.size > 0
+        && frame.saturating_sub(p.dirty_frame) >= quiet
+        && frame.saturating_sub(p.wb_frame) >= quiet
+        && p.pending.is_empty()
+        && p.deferred.is_empty()
+        && p.tex_dirty.is_empty()
+}
+
+/// Pools sealed per pass at most (re-seals protect only their opened chunks; a first seal counts against the budget).
+const SEAL_POOLS: usize = 256;
+
+/// The pool walker, at most once a frame: quiet pools sealed (`seal`), at most `seal::budget()` bytes newly protected.
+/// Under the pool lock and the watch lock: the protection first, then the write watch taken over the pool (a store made
+/// before the protection goes up at the next sync), then the pool counts as sealed while no store woke it meanwhile.
+fn seal_some(g: &Gpu) {
+    static LAST: AtomicU64 = AtomicU64::new(u64::MAX);
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let frame = super::present::frames();
+    if !super::seal::on() || LAST.swap(frame, Ordering::AcqRel) == frame {
+        return;
+    }
+    let quiet = super::seal::quiet_frames();
+    let t0 = std::time::Instant::now();
+    let mut m = g.mem.lock().unwrap();
+    let _watch = watch_lock(&mut m);
+    struct PassTimer(std::time::Instant);
+    impl Drop for PassTimer {
+        fn drop(&mut self) {
+            super::seal::PASS_NS.fetch_add(self.0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        }
+    }
+    let _pass_t = PassTimer(std::time::Instant::now());
+    let shared = sharing_pools(&m);
+    // every 300 frames: why the watched mirrors not sealed are not (bytes, pools by reason)
+    if frame % 300 == 0 {
+        let mut why: BTreeMap<&str, (u64, u64)> = BTreeMap::new();
+        for p in m.by_base.values().filter(|p| p.watched && p.placement == Placement::Mirror && !p.sealed) {
+            let (lo, hi) = page_range(p.base, p.size);
+            let r = if p.alloc_base == 0 {
+                "two allocations"
+            } else if shared.contains(&p.base) {
+                "shares a page"
+            } else if frame.saturating_sub(p.wb_frame) < quiet {
+                "write-backs"
+            } else if frame.saturating_sub(p.dirty_frame) < quiet {
+                "CPU writes"
+            } else if !(p.pending.is_empty() && p.deferred.is_empty() && p.tex_dirty.is_empty()) {
+                "work waiting"
+            } else if super::lazy::holds_any(lo, hi - lo) {
+                "lazy pages"
+            } else if p.seal_entry {
+                "being sealed"
+            } else {
+                "queued"
+            };
+            let e = why.entry(r).or_default();
+            e.0 += p.size;
+            e.1 += 1;
+        }
+        let s: Vec<String> = why.iter().map(|(k, (b, n))| format!("{k} {n} ({} MB)", b >> 20)).collect();
+        crate::vklog!("sealed pools: not sealed now: {}; this pass's lock and census {:.2} ms", s.join(", "), t0.elapsed().as_secs_f64() * 1e3);
+    }
+    // from where the last pass stopped, round the pools once
+    let start = NEXT.load(Ordering::Relaxed);
+    let order: Vec<u64> = m
+        .by_base
+        .range(start..)
+        .chain(m.by_base.range(..start))
+        .filter(|(b, p)| seal_eligible(p, frame, quiet) && !shared.contains(b))
+        .map(|(&b, _)| b)
+        .collect();
+    let mut budget = super::seal::budget();
+    let mut done = 0usize;
+    for b in order {
+        if done >= SEAL_POOLS {
+            NEXT.store(b, Ordering::Relaxed);
+            return;
+        }
+        if budget == 0 {
+            NEXT.store(b, Ordering::Relaxed);
+            return;
+        }
+        let p = m.by_base.get_mut(&b).unwrap();
+        let (lo, hi) = page_range(p.base, p.size);
+        // (its committed pages are protected; the others are committed through the runtime, which wakes it. A page
+        // held by lazy write-back is inaccessible on purpose: such a pool is not sealed)
+        if super::lazy::holds_any(lo, hi - lo) {
+            continue;
+        }
+        done += 1;
+        // a large pool's first arming goes in pieces of the budget, one a pass
+        let (arm, bytes) = super::seal::arm(p.base, lo, hi, budget);
+        budget = budget.saturating_sub(bytes);
+        match arm {
+            super::seal::Arm::Refused => {
+                p.seal_entry = super::seal::holds(lo);
+                continue;
+            }
+            super::seal::Arm::Part => {
+                p.seal_entry = true;
+                NEXT.store(b, Ordering::Relaxed);
+                return;
+            }
+            super::seal::Arm::Done => {}
+        }
+        p.seal_entry = true;
+        match watch::take(lo, hi, true) {
+            Some(pages) => p.pending.extend(pages.into_iter().map(|pg| (pg, PAGE))),
+            None => {
+                super::seal::remove(lo, hi);
+                p.seal_entry = false;
+                continue;
+            }
+        }
+        // a store since the protection woke it already (it stays asked by the scans)
+        p.sealed = super::seal::armed(lo);
+        SEAL_GEN.fetch_add(1, Ordering::AcqRel);
+        // what the watch held goes up at the next sync, scanning or not
+        m.busy.insert(b);
+    }
+    NEXT.store(0, Ordering::Relaxed);
+}
+
+/// Sealed pools' write watch peeked now and then (every 30 frames, by the pool walker): a page written there without a
+/// fault (a store the protection did not see) is a red line, and the pool is woken (the next scan takes the store).
+fn seal_check(g: &Gpu) {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let frame = super::present::frames();
+    if !super::seal::on() || frame < LAST.load(Ordering::Relaxed) + 30 {
+        return;
+    }
+    LAST.store(frame, Ordering::Relaxed);
+    let list: Vec<(u64, u64, u64)> = {
+        let m = g.mem.lock().unwrap();
+        m.by_base
+            .values()
+            .filter(|p| p.sealed)
+            .map(|p| {
+                let (lo, hi) = page_range(p.base, p.size);
+                (p.base, lo, hi)
+            })
+            .collect()
+    };
+    for (base, lo, hi) in list {
+        let written = watch::take(lo, hi, false).is_some_and(|v| !v.is_empty());
+        // checked after the peek: a store woke it first (then its bit is no leak)
+        if written && super::seal::leaked(lo) {
+            crate::log::red_once(&format!(
+                "sealed pool {base:#x} (+{:#x}) written without a fault: woken (a host write the protection did not see)",
+                hi - lo
+            ));
+        }
+    }
 }
 
 /// `NXGFX_WALKER_REWALK=0`: the walker walks once per present (no new walk while the present still waits).
@@ -2804,6 +3067,9 @@ pub fn begin_submit_ex(
         let signals = cpu_signals();
         let tail = super::queue::aq_tail();
         m.scan_frame = frame;
+        // the pools woken since `watch_lock` drained: a store made before an op up to `tail` woke its pool before the op
+        // was queued, so after this every pool still sealed was not written before `tail` (`seal`)
+        drain_woken(&mut m);
         let skip = |p: &Pool| cold_on && !new_frame && is_cold(p, frame);
         cold_skipped = m
             .by_base
@@ -2811,15 +3077,19 @@ pub fn begin_submit_ex(
             .filter(|p| p.watched && skip(p))
             .map(|p| p.base)
             .collect();
-        let all_watched: Vec<WatchedPool> = m
+        // every watched pool (pages a run's call takes are handed to whichever pool holds them), and whether this scan
+        // asks it: not a cold pool left out, not sealed (`seal`: not written since, or a store would have woken it)
+        let (mut all_watched, mut asked) = (Vec::new(), Vec::new());
+        for p in m
             .by_base
             .values()
             .filter(|p| p.watched && matches!(p.placement, Placement::Mirror | Placement::Host))
-            .map(|p| {
-                let (lo, hi) = page_range(p.base, p.size);
-                (p.base, lo, hi, p.alloc_base)
-            })
-            .collect();
+        {
+            let (lo, hi) = page_range(p.base, p.size);
+            all_watched.push((p.base, lo, hi, p.alloc_base));
+            asked.push(!p.sealed && !skip(p));
+        }
+        let all_watched: Vec<WatchedPool> = all_watched;
         // pools the walk in progress has walked since this op was queued, with no CPU signal since: their pages were
         // taken and drained into their pending writes when this sync took the watch lock (which it holds, so no piece
         // changes meanwhile); they need no scan here (`NXGFX_WALKER_POOLS=0` off)
@@ -2827,8 +3097,9 @@ pub fn begin_submit_ex(
         let mut by_walk = 0u64;
         let watched: Vec<_> = all_watched
             .iter()
-            .copied()
-            .filter(|p| !cold_skipped.contains(&p.0))
+            .zip(&asked)
+            .filter(|(_, &a)| a)
+            .map(|(p, _)| *p)
             .filter(|p| {
                 let w = walk.as_ref().is_some_and(|j| j.covers(p.1, p.2));
                 if w {
@@ -2913,23 +3184,30 @@ pub fn begin_submit_ex(
     SYNC_SCAN_NS.fetch_add(t_scan.elapsed().as_nanos() as u64, Ordering::Relaxed);
     super::queue::chain_trace::note("scan", t_scan.elapsed().as_micros() as u64, covered as u64);
     let _loop_t = SyncLoopTimer(std::time::Instant::now());
-    for p in m.by_base.values_mut() {
+    let Pools { by_base, busy: busy_set, .. } = &mut *m;
+    let mut one = |p: &mut Pool| {
         if !p.tex_dirty.is_empty() {
             all.append(&mut p.tex_dirty);
         }
         if !matches!(p.placement, Placement::Mirror | Placement::Host) && p.pending.is_empty() {
-            continue;
+            return;
         }
         if p.pending.is_empty() && cold_skipped.contains(&p.base) && !taken.contains_key(&p.base) {
-            continue;
+            return;
+        }
+        // sealed: no store since it was sealed; only what it holds (pending, deferred, a page a run's call handed it)
+        if p.sealed && p.pending.is_empty() && p.deferred.is_empty() && !taken.contains_key(&p.base) {
+            return;
         }
         // no scan this time: a watched pool's writes were taken by the last one (what it left pending or deferred
         // still goes now)
         if covered && p.watched && p.pending.is_empty() && p.deferred.is_empty() {
-            continue;
+            return;
         }
         let mut pre = if covered && p.watched {
             Some(Vec::new())
+        } else if p.sealed {
+            Some(taken.remove(&p.base).unwrap_or_default())
         } else {
             taken.remove(&p.base)
         };
@@ -2946,7 +3224,7 @@ pub fn begin_submit_ex(
             && p.pending.is_empty()
             && p.deferred.is_empty()
         {
-            continue;
+            return;
         }
         let mut ranges = p.take_cpu_writes(gen, pre);
         // what the budget left for later comes first (the guest bytes as they are now)
@@ -2984,7 +3262,7 @@ pub fn begin_submit_ex(
                     p.deferred.push((a, n));
                     DEFERRED_BYTES.fetch_add(n, Ordering::Relaxed);
                     deferred_now = true;
-                    continue;
+                    continue; // (the next range)
                 }
                 if super::uptrace::on() {
                     super::uptrace::note(p.base, p.size, a, n);
@@ -3039,6 +3317,31 @@ pub fn begin_submit_ex(
             p.dirty_frame = f;
         }
         all.extend(ranges);
+    };
+    if covered {
+        // no scan: only the pools with work of their own (`Pools::busy`); those left without any leave the set
+        let keys: Vec<u64> = busy_set.iter().copied().collect();
+        for b in keys {
+            match by_base.get_mut(&b) {
+                Some(p) => {
+                    one(p);
+                    if !busy(p) {
+                        busy_set.remove(&b);
+                    }
+                }
+                None => {
+                    busy_set.remove(&b);
+                }
+            }
+        }
+    } else {
+        busy_set.clear();
+        for p in by_base.values_mut() {
+            one(p);
+            if busy(p) {
+                busy_set.insert(p.base);
+            }
+        }
     }
     all
 }
@@ -3145,10 +3448,22 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
     super::lazy::T_LOCK.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     super::queue::chain_trace::note("wb_lock", t0.elapsed().as_micros() as u64, wbs.len() as u64);
     for &(pool, a, n, src, pre, identity) in wbs {
+        // a landing keeps CPU writes it meets as pending (a sync that does not scan visits it for them)
+        m.busy.insert(pool);
         let Some(p) = m.by_base.get_mut(&pool) else {
             continue;
         };
         if !writeback_identity_matches(Some(identity), p.identity) { continue; }
+        // the GPU writes it: unsealed whole before its bytes land (lazy write-back owns its held pages' protection, and a
+        // landing's stores are no CPU writes), and not sealed again while write-backs keep coming
+        p.wb_frame = super::present::frames();
+        if p.seal_entry {
+            let (lo, hi) = page_range(p.base, p.size);
+            super::seal::remove(lo, hi);
+            p.seal_entry = false;
+            p.sealed = false;
+            SEAL_GEN.fetch_add(1, Ordering::AcqRel);
+        }
         // the GPU copy of the range is `src` now (unless a later submission changed it: then it restamped the pages);
         // the pages it found the GPU left alone are not compared again below
         let same = super::upskip::landed(pool, a, n, src, pre, epoch, value);
@@ -3398,7 +3713,8 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         bytes[2] >> 20,
         cnt[3],
         sb >> 20
-    ) + &super::lazy::summary(f)
+    ) + &super::seal::summary(f)
+        + &super::lazy::summary(f)
         + &(if super::uptrace::on() { super::uptrace::report(f) } else { String::new() })
         + &super::upskip::report(f)
 }
@@ -3482,6 +3798,168 @@ mod scan_cover_tests {
         assert!(!scan_covers(Some(30), true), "but not a frame's first sync, which asks the cold pools too");
         note_walk(31, cpu_signals(), true);
         assert!(scan_covers(Some(31), true), "a full walk covers both");
+    }
+}
+
+#[cfg(test)]
+mod seal_tests {
+    use super::*;
+
+    fn pool(base: u64, size: u64) -> Pool {
+        Pool {
+            identity: base,
+            base,
+            size,
+            flags: 0,
+            placement: Placement::Mirror,
+            buf: None,
+            buf_off: 0,
+            watched: true,
+            snapshot: None,
+            page_gen: Vec::new(),
+            page_lo: base,
+            pending: Vec::new(),
+            da: 0,
+            alloc_base: 1,
+            dirty_frame: 0,
+            sporadic: false,
+            sealed: false,
+            seal_entry: false,
+            wb_frame: 0,
+            win: 0,
+            wins: Vec::new(),
+            wins_da: Vec::new(),
+            gran: None,
+            deferred: Vec::new(),
+            tex_dirty: Vec::new(),
+        }
+    }
+
+    fn pools(v: &[(u64, u64)]) -> Pools {
+        let mut m = Pools::default();
+        for &(b, n) in v {
+            m.by_base.insert(b, pool(b, n));
+        }
+        m
+    }
+
+    /// Pools that share a page with another (an alias, a pool inside a larger one, a page both touch) are never sealed;
+    /// neighbours and pools beyond a large pool's end are.
+    #[test]
+    fn pools_sharing_a_page_are_found() {
+        let p = PAGE;
+        let m = pools(&[
+            (0, 4 * p),
+            (4 * p, 2 * p),
+            // inside the next one, and a third inside it after a gap
+            (100 * p, 50 * p),
+            (110 * p, 2 * p),
+            (140 * p, p),
+            // past the large one's end
+            (150 * p, p),
+            // two touching one page: the first ends mid-page
+            (200 * p, p + 8),
+            (201 * p + 64, p),
+        ]);
+        let s = sharing_pools(&m);
+        let mut v: Vec<u64> = s.into_iter().collect();
+        v.sort();
+        assert_eq!(v, vec![100 * p, 110 * p, 140 * p, 200 * p, 201 * p + 64]);
+    }
+
+    /// A pool is sealed only after `quiet` frames without a CPU write and without a landing, with nothing waiting to go
+    /// up, when it is a watched mirror in one allocation and not sealed already.
+    #[test]
+    fn only_quiet_watched_mirrors_are_sealed() {
+        let q = 60;
+        let mut p = pool(0x10000, 0x4000);
+        p.dirty_frame = 100;
+        assert!(!seal_eligible(&p, 159, q), "written 59 frames ago");
+        assert!(seal_eligible(&p, 160, q));
+        p.wb_frame = 150;
+        assert!(!seal_eligible(&p, 160, q), "a landing 10 frames ago");
+        p.wb_frame = 0;
+        for (what, f) in [
+            ("pending", (|p: &mut Pool| p.pending.push((0x10000, 8))) as fn(&mut Pool)),
+            ("deferred", |p| p.deferred.push((0x10000, 8))),
+            ("tex_dirty", |p| p.tex_dirty.push((0x10000, 8))),
+            ("sealed", |p| p.sealed = true),
+            ("unwatched", |p| p.watched = false),
+            ("two allocations", |p| p.alloc_base = 0),
+            ("vram", |p| p.placement = Placement::Vram),
+            ("host", |p| p.placement = Placement::Host),
+        ] {
+            let mut c = pool(0x10000, 0x4000);
+            c.dirty_frame = 100;
+            f(&mut c);
+            assert!(!seal_eligible(&c, 160, q), "{what}");
+        }
+    }
+
+    /// A sync that does not scan visits only `Pools::busy`: the walker's pages drained into a pool put it there, and
+    /// what makes a pool busy is any work of its own (pending, deferred, texture-dirty) or having no write watch.
+    #[test]
+    fn work_handed_to_a_pool_makes_it_busy() {
+        let p = PAGE;
+        let mut m = pools(&[(0, 4 * p), (8 * p, 4 * p)]);
+        assert!(m.busy.is_empty());
+        let mut stash = vec![9 * p, 9 * p];
+        drain_walk(&mut m, &mut stash);
+        assert!(stash.is_empty());
+        assert_eq!(m.busy.iter().copied().collect::<Vec<_>>(), vec![8 * p]);
+        assert_eq!(m.by_base[&(8 * p)].pending, vec![(9 * p, PAGE)]);
+        let mut q = pool(0, p);
+        assert!(!busy(&q));
+        for f in [
+            (|q: &mut Pool| q.pending.push((0, 1))) as fn(&mut Pool),
+            |q| q.deferred.push((0, 1)),
+            |q| q.tex_dirty.push((0, 1)),
+            |q| q.watched = false,
+        ] {
+            let mut c = pool(0, p);
+            f(&mut c);
+            assert!(busy(&c));
+        }
+        q.watched = false;
+        q.placement = Placement::Vram;
+        assert!(!busy(&q), "a pool with no CPU copy to compare");
+    }
+
+    /// A store into a sealed pool's pages wakes it; the next holder of the pool lock asks it again (`sealed` off) and
+    /// counts it written now, so the cold rule cannot hold its writes back either.
+    #[cfg(windows)]
+    #[test]
+    fn a_woken_pool_is_asked_again_and_warm() {
+        use windows_sys::Win32::System::Memory::{
+            VirtualAlloc, VirtualFree, MEM_COMMIT, MEM_RELEASE, MEM_RESERVE, PAGE_READWRITE,
+        };
+        if !super::super::seal::on() {
+            return;
+        }
+        const MEM_WRITE_WATCH: u32 = 0x20_0000;
+        let n = 4 * super::super::seal::CHUNK;
+        let a = unsafe {
+            VirtualAlloc(core::ptr::null(), n as usize, MEM_COMMIT | MEM_RESERVE | MEM_WRITE_WATCH, PAGE_READWRITE)
+        } as u64;
+        assert!(a != 0);
+        let mut m = pools(&[(a, n)]);
+        {
+            let p = m.by_base.get_mut(&a).unwrap();
+            assert_eq!(super::super::seal::arm(a, a, a + n, n).0, super::super::seal::Arm::Done);
+            p.seal_entry = true;
+            p.sealed = true;
+            p.dirty_frame = 0;
+        }
+        drain_woken(&mut m);
+        assert!(m.by_base[&a].sealed, "nothing written: still sealed");
+        unsafe { ((a + 0x2000) as *mut u32).write_volatile(5) };
+        drain_woken(&mut m);
+        let p = &m.by_base[&a];
+        assert!(!p.sealed, "woken: asked by the scans again");
+        assert!(!is_cold(p, super::super::present::frames()), "and not cold");
+        assert_eq!(watch::take(a, a + n, true).unwrap(), vec![a + 0x2000], "the store is in the write watch");
+        super::super::seal::remove(a, a + n);
+        unsafe { VirtualFree(a as *mut _, 0, MEM_RELEASE) };
     }
 }
 

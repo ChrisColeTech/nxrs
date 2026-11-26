@@ -38,6 +38,7 @@ pub mod rt;
 pub mod rtclass;
 pub mod scale;
 pub mod screen;
+pub mod seal;
 pub mod shader;
 pub mod shot;
 pub mod sparse;
