@@ -44,7 +44,7 @@ pub fn general(ui: &mut Ui, app: &App, d: &mut PropertiesDraft) {
         });
     });
     rule(ui);
-    group(ui, Icon::General, "About", "");
+    group(ui, Icon::General, "About", w::ABOUT_GAME_NOTE);
     row(ui, "Format", "", |ui| readout(ui, d.game.format()));
     let version = app.version_of(&d.game);
     if !version.is_empty() {

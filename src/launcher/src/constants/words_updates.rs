@@ -47,6 +47,8 @@ pub const LIST_NAME: &str = "Installed updates";
 pub const PICKER: &str = "Add update";
 pub const FILTER: (&str, &[&str]) = ("Game updates", &["nsp", "xci", "nca"]);
 pub const HINT_LOCKED: &str = "Updates cannot be changed while the game is running or building.";
+/// The list's state under it when nothing is installed (how to add is in the heading's info mark).
+pub const LIST_EMPTY: &str = "No update is installed for this game.";
 pub const HINT_EMPTY: &str = "No update is installed for this game. Click Add update… or drop files here: NSP, XCI or NCA, several at once. The game itself has to be an NSP package; a package that holds another game's update is refused.";
 pub const HINT_SOME: &str = "Add update… installs more packages, several at once. Select one or more entries and click Remove to take them off. One update applies at a time: the newest, unless Version to build says otherwise. The original files are never changed; a build copies the update's data into the game, which then plays without the package.";
 pub const PANEL_EMPTY: &str = "No update is installed for this game. Add one with Game > Install Updates… (NSP, XCI or NCA; the game itself has to be an NSP package).";

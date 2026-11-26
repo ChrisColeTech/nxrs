@@ -18,3 +18,5 @@ pub const BUTTON_MIN: f32 = 76.0;
 pub const FOOTER: f32 = 40.0;
 pub const VALIDATION_FONT: f32 = 11.0;
 pub const RADIUS: u8 = 5;
+/// An in-window popover's corners (Search & Filter, Build tools).
+pub const POPOVER_RADIUS: u8 = 8;

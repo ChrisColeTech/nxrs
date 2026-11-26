@@ -87,7 +87,70 @@ first. The agent read `docs/ARCHITECTURE-AND-STYLE-GUIDE.md` and the giga-cut po
 Commit 384de45 (the message/question box rework and `--show-remove`) is the part to revert; the remove-with-delete
 behaviour itself is in 6c9656f.
 
-## Results
+## Send-back 1 (lead, 2026-11-26): the remove dialog in the existing style, migration explicit
+
+Reference first (PrintWindow, 3x, a test data folder): the Remove from library box and About of a launcher built
+from `gameplay-harness` (`build/dialogs/ref-remove-kart-0.png`, `ref-about-0.png`). 384de45 reverted; the tick box
+is the question text's last paragraph, in the text column beside the `?` mark, info mark after it, No / filled Yes
+unchanged (02b234a). The window no longer migrates at start; `--migrate-builds` and Settings > Build defaults > Old
+build folders > Move (a readout and a ghost button, the Engine > Checks pattern) are the only ways.
+
+## Send-back 2 (owner via lead): one dialog grammar app-wide
+
+### Inventory (before; captures in `build/dialogs/before/<name>-0.png`, launcher at 02b234a + capture flags)
+
+Checked against `docs/ARCHITECTURE-AND-STYLE-GUIDE.md` §5 and the AGENTS.md family grammar. "Shared header" =
+`authored::header` (12 pt semibold title, 28 pt, hairline under it, bordered 22 pt X named `Close <title>`).
+"Shared footer" = `authored::footer` (hairline, ghost then the one filled primary, right).
+
+| Surface (capture) | Kind | Header | Body | Footer / buttons | Deviations from the guide |
+|---|---|---|---|---|---|
+| Message, info: About (`about`) | child window | shared | ringed `i` mark, text | **own strip, no hairline**; filled **Close** (label drawn off-centre) | footer not shared; Close filled (guide: Close is ghost, a surface with nothing to commit has no primary) |
+| Message, error: Cannot add game (`error-add`) | child window | shared | red `!` mark, text | as About | as About |
+| Question: Remove from library, not built (`remove-unbuilt`) | child window | shared | `?` mark, text | own strip, no hairline; ghost No, filled Yes | footer not shared |
+| Question + tick box: Remove, built (`remove-built`) | child window | shared | `?` mark, text, tick box + info mark as last paragraph | as above | footer not shared |
+| Question: close during a build (not capturable without a build; same `message::question`) | child window | shared | as Remove | as Remove | as Remove |
+| Install keys | native file picker, then the info message box | - | - | - | as About |
+| Properties, 6 tabs (`props-0..5`) | rail work window, 820 pt | shared | Groups and Rows | shared: Cancel, Apply | General's **About** Group and Settings' **Library** Group have no info mark (every other Group has one); width 820 vs Settings 840 |
+| Add game (`add-game`) | rail work window, 820 pt | shared | as Properties (4 tabs) | shared: Cancel, Add game | as Properties |
+| Settings, 5 tabs (`settings-0..4`) | rail work window, **840 pt** | shared | Groups and Rows; Checks / Old build folders: readout + ghost verb | shared: Cancel, Apply | Library Group without info mark; rail windows differ in width |
+| DLC (`dlc`) | work window, no rail | shared | Group heading, list | **own row, no hairline**: ghost Remove (leading), ghost Close, filled Add DLC… | footer not shared; **empty list has no status line** (guide: a list's state is a status line under it; Properties > DLC has one) |
+| Updates (`updates`) | work window, no rail | shared | Group heading, **"Version to build" label inline, not a Row** (no 190 pt column, no info mark), list | own row, no hairline: ghost Remove, ghost Build now, ghost Close, filled Add update… | footer not shared; the select is not a Row; empty list has no status line |
+| Build tools popup (`tool`) | in-window popover | **own title, 17 pt, no hairline**, X | readout text | filled **Open Settings** | header not shared; a navigation verb filled (guide: primary = the commit) |
+| Search & Filter (`filters`) | in-window popover (Live) | **own title, 17 pt, no hairline**, X | labels above controls (stacked rows), segmented Gallery/List | ghost Clear filters, filled **Done** | header not shared; **Done** (guide: never Done); a Live surface has no commit, so no primary |
+| Build output dock / pop-out (`console`) | panel | panel bar: bold title, ghost verbs, borderless icons | log | - | none (panel grammar, guide §5 Panels) |
+| Menus (`menu`) | menu | - | - | - | none |
+
+### Rules chosen (written into the guide §5)
+
+1. **One header**: every titled surface, child window or popover, uses `authored::header`.
+2. **One footer**: every child window ends with `authored::footer`: a hairline; the surface's own verbs as ghost
+   buttons at the leading side (Remove, Build now); then Cancel / No / Close as ghost; then the one filled
+   primary, last. A surface with nothing to commit (a message, a Live popover) has no filled button.
+3. **Messages and questions keep their shape** (the mark, the text, a tick box as the text's last paragraph with its
+   info mark) and use rule 2: a message's footer is a ghost Close; a question's is ghost No and filled Yes.
+4. **Every Group heading has an info mark** (the common form: 17 of 19 Groups); **Rows**: an info mark when there is
+   an explanation (the common form: Color mode, Format, Status have none).
+5. **A list's state is a status line under it** in every window that shows the list (DLC, Updates, Properties).
+6. **A control with a label in a form is a Row** (190 pt label column), also outside rail windows.
+7. **Rail work windows share one size** (`RAIL_WINDOW`).
+8. **Popovers (Live)**: the shared header; no Done, no filled button; the X closes.
+
+### Applied (after; `docs/images/dialogs/<name>.png`, all captures in `build/dialogs/after/`)
+
+- `authored::footer_bar` / `footer_at_bottom` (leading ghost verbs, ghost dismissal, optional primary with its
+  tooltip) is the one footer: message boxes (ghost Close), questions (ghost No, filled Yes), DLC and Updates
+  (Remove / Build now leading, Close, filled Add…), and through `footer` the rail windows.
+- `authored::popover_frame` + `authored::header` for Search & Filter (Done removed) and Build tools (Open Settings
+  ghost); both had their own 17 pt titles and frames.
+- DLC and Updates: "No DLC / No update is installed for this game." status line; Version to build is a Row.
+- Properties > General > About and Settings > Appearance > Library got their info marks; the rail windows share one
+  size (840 x 440, least 730 x 360).
+- Capture openers: `--show-window remove|about|build-settings|tool`, `--show-add <package>` (flags moved to
+  `cli/flags.rs`, options.rs was at the 200-line limit).
+- Not changed: the console dock and the menus (panel and menu grammar, no deviation); native file pickers (OS
+  dialogs); the close-during-build question was not captured (needs a running build) but is the same
+  `message::question` as Remove.
 
 - Tests: translator 166 + package 35 (extract, synthetic NSP/update/DLC moved-away reads), nxrs-cli 29, os all pass;
   launcher `cargo test` all pass (new: model `layout_tests`, `tests/migrate.rs` through the real CLI,

@@ -46,18 +46,66 @@ pub fn footer(
     enabled: bool,
     cancel: &str,
 ) -> (bool, bool) {
+    footer_bar(ui, p, |_| {}, cancel, Some((primary, enabled, "")))
+}
+
+/// Every child window's footer: a hairline; the surface's own verbs (`lead`, ghost buttons) at the
+/// leading side; at the trailing side the ghost dismissal (Cancel, No, Close; empty: none) and the
+/// one filled primary, last: (label, enabled, tooltip); None: a surface with nothing to commit.
+/// (dismissed, primary pressed).
+pub fn footer_bar(
+    ui: &mut Ui,
+    p: &Palette,
+    lead: impl FnOnce(&mut Ui),
+    ghost: &str,
+    primary: Option<(&str, bool, &str)>,
+) -> (bool, bool) {
     let rect = ui.available_rect_before_wrap();
     ui.painter()
         .hline(rect.x_range(), rect.top(), Stroke::new(1.0, p.border));
     ui.add_space(c::GAP + 2.0);
     let mut out = (false, false);
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        out.1 = button::primary(ui, p, primary, enabled).clicked();
-        if !cancel.is_empty() {
-            out.0 = button::ghost(ui, cancel, true).clicked();
-        }
+    ui.horizontal(|ui| {
+        lead(ui);
+        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+            if let Some((label, enabled, tip)) = primary {
+                out.1 = button::tip(button::primary(ui, p, label, enabled), tip).clicked();
+            }
+            if !ghost.is_empty() {
+                out.0 = button::ghost(ui, ghost, true).clicked();
+            }
+        });
     });
     out
+}
+
+/// The footer at the bottom of the space left (a message's, a list window's).
+pub fn footer_at_bottom(
+    ui: &mut Ui,
+    p: &Palette,
+    lead: impl FnOnce(&mut Ui),
+    ghost: &str,
+    primary: Option<(&str, bool, &str)>,
+) -> (bool, bool) {
+    ui.add_space((ui.available_height() - c::FOOTER).max(0.0));
+    footer_bar(ui, p, lead, ghost, primary)
+}
+
+/// An in-window popover's frame (Search & Filter, Build tools): raised fill, border, the shared
+/// shadow and the scaffold's inset; its first row is `header`.
+pub fn popover_frame(p: &Palette) -> egui::Frame {
+    let shadow = egui::epaint::Shadow {
+        offset: [0, 6],
+        blur: 24,
+        spread: 0,
+        color: egui::Color32::from_black_alpha(190),
+    };
+    egui::Frame::new()
+        .fill(p.raised)
+        .stroke(Stroke::new(1.0, p.border))
+        .corner_radius(egui::CornerRadius::same(c::POPOVER_RADIUS))
+        .inner_margin(egui::Margin::same(c::PAD))
+        .shadow(shadow)
 }
 
 /// The room left for a body above a footer.

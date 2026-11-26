@@ -34,8 +34,8 @@ fn version_row(ui: &mut Ui, app: &mut App, win: &ListWindow, editable: bool) {
         .enumerate()
         .map(|(i, (l, _))| (l.clone(), i))
         .collect();
-    ui.horizontal(|ui| {
-        ui.label(w::VERSION);
+    // a Row like every labelled control: the label column, its explanation in the info mark
+    crate::ui::widgets::page::row(ui, w::VERSION, w::VERSION_TIP, |ui| {
         let changed = ui
             .add_enabled_ui(editable, |ui| {
                 select::select(ui, w::VERSION, &mut index, &indexed)
@@ -45,9 +45,7 @@ fn version_row(ui: &mut Ui, app: &mut App, win: &ListWindow, editable: bool) {
             let value = choices.get(index).map(|c| c.1.clone()).unwrap_or_default();
             app.set_update_choice(&win.game_id, &value);
         }
-    })
-    .response
-    .on_hover_text(w::VERSION_TIP);
+    });
 }
 
 pub fn show(ui: &mut Ui, app: &mut App, win: &mut ListWindow) -> Reply {
@@ -85,7 +83,12 @@ pub fn show(ui: &mut Ui, app: &mut App, win: &mut ListWindow) -> Reply {
     let pending = app.update_pending_text(&game);
     // the state stays in view; how the list works is in the heading's info mark
     let locked = if win.locked { w::HINT_LOCKED } else { "" };
-    let lines = [locked, pending.as_str()];
+    let empty = if game.updates.is_empty() {
+        w::LIST_EMPTY
+    } else {
+        ""
+    };
+    let lines = [locked, empty, pending.as_str()];
     let buttons = Buttons {
         add: w::ADD,
         add_tip: w::ADD_TIP,

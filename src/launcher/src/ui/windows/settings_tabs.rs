@@ -108,7 +108,7 @@ pub fn appearance(ui: &mut Ui, app: &mut App, s: &mut SettingsDraft) {
         ui.checkbox(&mut s.show_background, w::BACKDROP);
     });
     rule(ui);
-    group(ui, Icon::Appearance, "Library", "");
+    group(ui, Icon::Appearance, "Library", w::LIBRARY_NOTE);
     row(ui, "Library file", "", |ui| {
         readout(ui, &display(&app.lib.path))
     });

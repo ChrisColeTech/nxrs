@@ -144,7 +144,7 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 | W-08 | Selection: single, kept across refresh, first game when lost; selection line "title · format · vX · renderer" with source tooltip | `selectGame`, `refreshSelection` |
 | W-09 | Background canvas: selected game's background (else cover), opacity .32 dark / .20 light, top-to-bottom fade; toggle | `LibraryCanvas` |
 | W-10 | Empty states: "Your library is empty …" / "No games match these filters …" | `refreshLibrary` |
-| W-11 | Search & Filter popover: Search, Status (All / Ready / Needs build / Running), Source (All / NUP-NSP / NRO / Extracted / Native builds), Sort (Name, Last played, Build status, "Custom table order"), Gallery/List, Card size (disabled in list), "x of y games shown", Clear filters (one change signal), Done; Esc/Enter close; anchored under its button, clamped to the screen | `FilterPopup`, `LibraryFilter::matches`, `activeCount` |
+| W-11 | Search & Filter popover: Search, Status (All / Ready / Needs build / Running), Source (All / NUP-NSP / NRO / Extracted / Native builds), Sort (Name, Last played, Build status, "Custom table order"), Gallery/List, Card size (disabled in list), "x of y games shown", Clear filters (one change signal); the shared header's X, Esc and Enter close (no Done: a Live popover commits nothing, 2026-11-26); anchored under its button, clamped to the screen | `FilterPopup`, `LibraryFilter::matches`, `activeCount` |
 | W-12 | Status bar: game count ("n games" / "x / y games"), progress bar (determinate or busy), selection line, job line, engine badge (click: popup with problem + health + Open Settings, Esc closes), Settings button, size grip | `createStatusBar`, `showToolPopup` |
 | W-13 | Build output dock: bottom or right, hide/undock, title follows state, Open log, Clear view, 12000-line cap, placeholder, opens at 190 px | `createBuildDock`, `showBuildOutput` |
 | W-14 | Drag & drop onto the window: native builds import, anything else goes through Add | `dropEvent` |
@@ -184,7 +184,7 @@ engine's docs) depend on them.
 | `--library <file>` | library file; skips legacy migration |
 | `--import-build <exe>` | import after the window opens |
 | `--demo` | non-persistent preview library |
-| `--list-view`, `--show-console`, `--show-filters`, `--show-appearance`, `--show-controller`, `--show-engine-settings`, `--show-play-settings`, `--show-updates`, `--show-dlc`, `--show-remove` | open that view |
+| `--list-view`, `--show-console`, `--show-filters`, `--show-appearance`, `--show-controller`, `--show-engine-settings`, `--show-play-settings`, `--show-updates`, `--show-dlc`, `--show-window remove\|about\|build-settings\|tool`, `--show-add <package>` | open that view (the last two: captures of every dialog) |
 | `--show-properties` + `--properties-tab <0..5>` | Properties on a tab |
 | `--show-menu <File\|Game\|Keys\|View\|Help>` | pop a title-bar menu (after 300 ms) |
 | `--preview-theme <mode>`, `--preview-accent <id>` | appearance without saving |
