@@ -2444,7 +2444,7 @@ fn target_image(
     vk::Extent3D,
     vk::SampleCountFlags,
 )> {
-    let mut imgs = g.images.lock().unwrap();
+    let mut imgs = super::gate::lock(&g.images, 2);
     if !g.ensure_image(&mut imgs, t) {
         return None;
     }
@@ -2522,7 +2522,7 @@ fn attach_view_layers(
     u32,
 )> {
     let _ = target_image(g, sub, t)?;
-    let mut imgs = g.images.lock().unwrap();
+    let mut imgs = super::gate::lock(&g.images, 2);
     let im = imgs.by_serial.get_mut(&t.serial)?;
     let lvl = v
         .filter(|v| v.bits & VW_LEVELS != 0)
@@ -3561,7 +3561,7 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
     }
     g.materialize(id);
     if let Some((serial, view)) = g.tables.tex_at(id) {
-        let mut imgs = g.images.lock().unwrap();
+        let mut imgs = super::gate::lock(&g.images, 2);
         let reg_serial = serial;
         let serial = imgs.live(serial);
         if probe {
@@ -8462,10 +8462,13 @@ pub mod seg_stats {
         let w = WHY.each_ref().map(|x| x.swap(0, Relaxed));
         if super::translate_lanes() > 1 {
             crate::vklog!(
-                "translate (parallel), over the last 600 frames: {} streams in parallel, {} cuts inside a pass, lanes translated {:.2} ms a frame together, the replay thread waited {:.2} ms a frame for the lanes, {} segments translated again; the gate asked {} times, {} segments gave up; asked at {}",
+                "translate (parallel), over the last 600 frames: {} streams in parallel, {} cuts inside a pass, lanes translated {:.2} ms a frame together (waiting for locks: pools {:.2} ms at GPU writes, {:.2} ms at resolves, images {:.2} ms), the replay thread waited {:.2} ms a frame for the lanes, {} segments translated again; the gate asked {} times, {} segments gave up; asked at {}",
                 PAR.swap(0, Relaxed),
                 MIDCUT.swap(0, Relaxed),
                 LANE_NS.swap(0, Relaxed) as f64 / 600.0 / 1e6,
+                super::super::gate::LOCK_NS[0].swap(0, Relaxed) as f64 / 600.0 / 1e6,
+                super::super::gate::LOCK_NS[1].swap(0, Relaxed) as f64 / 600.0 / 1e6,
+                super::super::gate::LOCK_NS[2].swap(0, Relaxed) as f64 / 600.0 / 1e6,
                 JOIN_WAIT_NS.swap(0, Relaxed) as f64 / 600.0 / 1e6,
                 REDO.swap(0, Relaxed),
                 super::super::gate::ASKED.swap(0, Relaxed),

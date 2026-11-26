@@ -135,6 +135,24 @@ pub fn pass_pre(need: bool) -> bool {
     true
 }
 
+/// Time parallel segments waited for shared locks (diagnosis): the pool lock in `note_gpu_write`, in `resolve`, the
+/// images' lock (views, targets), in ns.
+pub static LOCK_NS: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+/// Takes `m`, timing the wait into `LOCK_NS[k]` on a translation lane.
+pub fn lock<'a, T>(m: &'a Mutex<T>, k: usize) -> std::sync::MutexGuard<'a, T> {
+    if !parallel() {
+        return m.lock().unwrap();
+    }
+    if let Ok(g) = m.try_lock() {
+        return g;
+    }
+    let t = std::time::Instant::now();
+    let g = m.lock().unwrap();
+    LOCK_NS[k].fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+    g
+}
+
 /// Counts a change made without asking (a serial translation's: `changes`).
 pub fn count() {
     CHANGES.with(|c| c.set(c.get() + 1));

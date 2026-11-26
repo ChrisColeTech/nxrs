@@ -1532,7 +1532,7 @@ fn resolve_in(
     if let Some((_, lo, _, _, buf, off, pool)) = hit {
         return Some((buf, off + (a - lo), pool));
     }
-    let mut m = g.mem.lock().unwrap();
+    let mut m = super::gate::lock(&g.mem, 1);
     let Some(b) = find(&m, a, n1) else {
         static N: AtomicU64 = AtomicU64::new(0);
         if N.fetch_add(1, Ordering::Relaxed) < 8 {
@@ -1950,12 +1950,42 @@ fn cpu_signals() -> u64 {
 /// A scan that started once the replay queue's tail was `tail` and `signals` CPU event signals had been made (`full`:
 /// no pool left out).
 fn note_scan(tail: u64, signals: u64, full: bool) {
+    let _l = SCAN_MU.lock().unwrap();
     SCAN_TAIL_ANY.store(tail, Ordering::Release);
     SCAN_SIG_ANY.store(signals, Ordering::Release);
     if full {
         SCAN_TAIL_FULL.store(tail, Ordering::Release);
         SCAN_SIG_FULL.store(signals, Ordering::Release);
     }
+}
+
+/// The coverage pairs (tail, signals) change together: the replay's scans and the pool walker's walks both note them.
+static SCAN_MU: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// A complete walk of every watched pool by the pool walker, started once the queue's tail was `tail` and `signals`
+/// CPU signals had been made, counts as a scan of every pool (`scan_covers`): it took every page written before it
+/// started, and the next sync drains what it took into the pools' pending writes and uploads them before its own
+/// work (`watch_lock`). Kept only when newer than the scans noted already.
+fn note_walk(tail: u64, signals: u64) {
+    let _l = SCAN_MU.lock().unwrap();
+    for (t, s) in [(&SCAN_TAIL_FULL, &SCAN_SIG_FULL), (&SCAN_TAIL_ANY, &SCAN_SIG_ANY)] {
+        if tail > t.load(Ordering::Acquire) {
+            t.store(tail, Ordering::Release);
+            s.store(signals, Ordering::Release);
+        }
+    }
+}
+
+/// `NXGFX_WALKER_HELP=1`: a sync no scan covers finishes a walk in progress instead of scanning (`begin_submit_ex`).
+fn walker_help() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_WALKER_HELP").as_deref() == Ok("1"))
+}
+
+/// `NXGFX_WALKER_SYNCS=0`: the walker walks only for presents and its walks cover presents' syncs only.
+fn walker_syncs() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_WALKER_SYNCS").as_deref() != Ok("0"))
 }
 
 /// Whether work the game queued as replay op `due` needs no write-watch scan of its own: a scan (of every pool when
@@ -2025,6 +2055,8 @@ static WALK: std::sync::Mutex<WalkState> = std::sync::Mutex::new(WalkState {
 struct WalkJob {
     /// `queue::aq_tail` before any page was taken
     tail: u64,
+    /// CPU signals made before it started (`cpu_signals`)
+    signals: u64,
     pieces: Vec<(u64, u64)>,
     next: std::sync::atomic::AtomicUsize,
     done: std::sync::atomic::AtomicUsize,
@@ -2099,23 +2131,38 @@ pub fn walker_kick() {
 }
 
 fn walker_main() {
+    let mut last_tail = 0;
     loop {
         {
             let mut w = WALK.lock().unwrap();
-            while !w.want {
-                w = WALK_CV.wait(w).unwrap();
+            // a present asked; or (`walker_syncs`) ops were queued since the last walk started and wait for the
+            // replay: a new walk covers their syncs, which then scan nothing themselves (MKW: ~9 ms a frame of
+            // warm scans on the replay thread)
+            while !w.want
+                && !(walker_syncs()
+                    && super::queue::aq_backlog() > 0
+                    && super::queue::aq_tail() > last_tail)
+            {
+                w = WALK_CV
+                    .wait_timeout(w, std::time::Duration::from_micros(500))
+                    .unwrap()
+                    .0;
             }
             w.want = false;
             w.running = true;
         }
-        // read before any page is taken: every op queued up to `tail` was queued before the walk took its pages
+        // read before any page is taken: every op queued up to `tail` was queued before the walk took its pages, and
+        // no CPU signal after `signals` came before it
+        let signals = cpu_signals();
         let tail = super::queue::aq_tail();
+        last_tail = tail;
         let t0 = std::time::Instant::now();
         let ok = match super::Gpu::try_get() {
             Some(g) => {
                 let list = watched_pools(&g.mem.lock().unwrap());
                 let job = std::sync::Arc::new(WalkJob {
                     tail,
+                    signals,
                     pieces: walk_pieces(&list, WALK_PIECE),
                     next: Default::default(),
                     done: Default::default(),
@@ -2138,6 +2185,9 @@ fn walker_main() {
             w.job = None;
             if ok {
                 w.done_tail = w.done_tail.max(tail);
+                if walker_syncs() {
+                    note_walk(tail, signals);
+                }
             }
             if w.waiting > 0 && rewalk() {
                 w.waiting -= 1;
@@ -2147,10 +2197,12 @@ fn walker_main() {
         WALK_CV.notify_all();
         if n % 600 == 0 {
             crate::vklog!(
-                "pool walker, last 600 walks: {:.2} ms a walk, {} could not read a range, {} presents' syncs covered, the replay waited {:.3} ms a walk for one; syncs and landings waited {:.3} ms a walk for the watch lock (with the drain)",
+                "pool walker, last 600 walks: {:.2} ms a walk, {} could not read a range, {} presents' syncs covered ({} finishing a walk), {} other syncs finished one, the replay's syncs walked {:.3} ms a walk of them; syncs and landings waited {:.3} ms a walk for the watch lock (with the drain)",
                 WALK_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6,
                 WALK_FAILED.swap(0, Ordering::Relaxed),
                 WALK_COVERED.swap(0, Ordering::Relaxed),
+                WALK_HELPED.swap(0, Ordering::Relaxed),
+                WALK_HELPED_SYNCS.swap(0, Ordering::Relaxed),
                 WALK_WAIT_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6,
                 WATCH_WAIT_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6
             );
@@ -2238,6 +2290,13 @@ fn rewalk() -> bool {
 /// scans every pool itself, as without the walker). The CPU-signal rule of `scan_covers` does not apply: a present
 /// waits on no event, and work a signal releases has syncs of its own.
 fn walker_covers(due: Option<u64>) -> bool {
+    walker_covers_ex(due, true)
+}
+
+/// As `walker_covers`; `present` false: any other sync, whose scan a walk in progress replaces only when it started
+/// after the op was queued and after the last CPU signal (the `scan_covers` rule; a complete walk counts through
+/// `note_walk`).
+fn walker_covers_ex(due: Option<u64>, present: bool) -> bool {
     if !walker_on() {
         return false;
     }
@@ -2246,11 +2305,15 @@ fn walker_covers(due: Option<u64>) -> bool {
     };
     let job = {
         let mut w = WALK.lock().unwrap();
-        w.waiting = 0;
-        if w.done_tail >= d {
-            return true;
+        if present {
+            w.waiting = 0;
+            if w.done_tail >= d {
+                return true;
+            }
         }
-        w.job.clone().filter(|j| j.tail >= d)
+        w.job
+            .clone()
+            .filter(|j| j.tail >= d && (present || j.signals == cpu_signals()))
     };
     let Some(job) = job else {
         return false;
@@ -2263,8 +2326,9 @@ fn walker_covers(due: Option<u64>) -> bool {
     ok
 }
 
-/// Presents' syncs that finished a walk in progress (`walker_covers`).
+/// Presents' syncs that finished a walk in progress (`walker_covers`), and other syncs that did (`walker_covers_ex`).
 pub static WALK_HELPED: AtomicU64 = AtomicU64::new(0);
+pub static WALK_HELPED_SYNCS: AtomicU64 = AtomicU64::new(0);
 
 #[cfg(test)]
 mod walker_tests {
@@ -2310,19 +2374,26 @@ mod walker_tests {
         assert!(!walker_covers(Some(0)));
         // a walk in progress that started after the present: the sync finishes it (no wait for a whole walk); one
         // that started before it does not cover it
-        let job = |tail| {
+        let job = |tail, signals| {
             std::sync::Arc::new(WalkJob {
                 tail,
+                signals,
                 pieces: vec![],
                 next: Default::default(),
                 done: Default::default(),
                 ok: std::sync::atomic::AtomicBool::new(true),
             })
         };
-        WALK.lock().unwrap().job = Some(job(12));
+        WALK.lock().unwrap().job = Some(job(12, 0));
         assert!(walker_covers(Some(12)));
-        WALK.lock().unwrap().job = Some(job(11));
+        WALK.lock().unwrap().job = Some(job(11, 0));
         assert!(!walker_covers(Some(12)));
+        // another sync: also only when no CPU signal came after the walk started
+        let now = cpu_signals();
+        WALK.lock().unwrap().job = Some(job(12, now));
+        assert!(walker_covers_ex(Some(12), false));
+        WALK.lock().unwrap().job = Some(job(12, now.wrapping_sub(1)));
+        assert!(!walker_covers_ex(Some(12), false), "a CPU signal since the walk started");
         *WALK.lock().unwrap() = keep;
     }
 
@@ -2331,6 +2402,7 @@ mod walker_tests {
     fn a_walk_is_shared_piece_by_piece() {
         let j = WalkJob {
             tail: 1,
+            signals: 0,
             pieces: vec![(0, 0); 64],
             next: Default::default(),
             done: Default::default(),
@@ -2361,6 +2433,17 @@ pub fn begin_submit_ex(
 ) -> Vec<(u64, u64)> {
     // before the pool lock: the walker takes it for each piece
     let walked = present && walker_covers(due);
+    // another sync that no scan covers may finish a walk in progress that does, instead of scanning itself
+    // (`NXGFX_WALKER_HELP=1`; off by default: MKW measured it slower, 12.5 vs 10.0 ms of pool sync a frame, since the
+    // rest of a walk asks the cold pools too, which the sync's own scan leaves out)
+    let helped = !present
+        && walker_help()
+        && walker_syncs()
+        && !scan_covers(due, true)
+        && walker_covers_ex(due, false);
+    if helped {
+        WALK_HELPED_SYNCS.fetch_add(1, Ordering::Relaxed);
+    }
     let t_lock = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
     // the walker's pages first, and none taken by it while this sync scans and uploads
@@ -2387,7 +2470,7 @@ pub fn begin_submit_ex(
     let mid_frame = !new_frame;
     // the scan this one would make (every pool, or the cold ones left out) already started after the game queued this
     // work: every CPU write made before it was queued has been taken (`scan_covers`)
-    let covered = walked || scan_covers(due, new_frame || !cold_on);
+    let covered = walked || helped || scan_covers(due, new_frame || !cold_on);
     if walked {
         // the walk asked every pool, cold ones too: this frame's later syncs leave the cold ones out
         WALK_COVERED.fetch_add(1, Ordering::Relaxed);
@@ -2610,7 +2693,7 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
         a
     };
     super::upskip::forget(a, n);
-    let m = g.mem.lock().unwrap();
+    let m = super::gate::lock(&g.mem, 0);
     let Some(b) = find(&m, a, n) else { return };
     let p = &m.by_base[&b];
     if !writeback_identity_matches(identity, p.identity) { return; }
