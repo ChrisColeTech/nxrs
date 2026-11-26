@@ -174,6 +174,13 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       largest segment (~1,300 draws, a third of translation) needs step 5's mid-pass cuts. Write-watch scan cost
       flips 3.5 <-> 9 ms run to run (FPS noise of 1-2). Steps 4-6 handed to a fresh agent (after merging
       `gameplay-harness`); independent audit of steps 1-3 running.
+- [ ] **MKW-RECORD steps 4-6** (2026-11-25 late, branch `mkw-record` up to `2d02e3b`, report in the worktree's
+      `docs/waves/MKW-RECORD.md`): 6 translation lanes by default, in-pass cuts, walker walks count as scans. MKW
+      30.1 FPS (5% low 28.0) of 60, was 26.9/22.0; replay thread 23.4 ms (was 30.3). Smash 59.8/59.0 unchanged.
+      Lead: graphics 235/235, race and Smash sheets correct. Independent audit: HIGH H1 (pre buffers run in
+      segment order but were recorded in lane time order → stale pool bytes / twin copied before upload: a
+      pop-in candidate), MEDIUM M1 (image takeover not gated), LOW L1-L6. Not merged; audit-fix agent running in
+      the worktree, then re-measure, merge, commit.
 - [ ] **Running 2026-11-25 evening:** MKW-RECORD phase 2 (steps 1-3, 8 h) in worktree
       `D:\Projects\RecompLauncherEngine-mkw` (branch `mkw-record`, own target/dist, relinks only MKW, main-tree
       locks); OOT-FOREST2 in the main tree (OoT only, regression `wonder`, no `vk/queue.rs`); the OOT-NAN audit.
