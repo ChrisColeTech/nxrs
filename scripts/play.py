@@ -358,7 +358,7 @@ def ab_report(name, runs):
         if k in kinds[0] or k in kinds[1]:
             md.append('| %s (run / window) | %s | %s |' % (k, *('%d / %d' % (x[k]['total'], x[k]['in_window'])
                                                                 if k in x else '-' for x in kinds)))
-    dist = [{c['shot']: c.get('hist') for c in r['route']} for r in reps]
+    dist = [{c['shot']: play_route.describe(c) for c in r['route']} for r in reps]
     for shot in sorted(set(dist[0]) | set(dist[1])):
         md.append('| route `%s` | %s | %s |' % (shot, dist[0].get(shot, '-'), dist[1].get(shot, '-')))
     (runs[1] / 'ab.md').write_text('\n'.join(md) + '\n', encoding='utf-8')
