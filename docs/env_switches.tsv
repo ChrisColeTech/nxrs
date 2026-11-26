@@ -231,6 +231,7 @@ NXRS_DOCTOR_EXE	test	the real engine, when the developer names it (NXRS_DOCTOR_E
 NXRS_DUMP_FRAMES	diagnostic	NXRS_DUMP_FRAMES=<ret>[,<ret>..]: the 16 words at the frame record of a frame returning there (its	src/runtime/src/kernel.rs
 NXRS_ENGINE_LIB	switch	found, the MSVC engine library beside nxrs-build or `NXRS_ENGINE_LIB`), else the bundled llvm-mingw when it is	src/cli/src/cc.rs
 NXRS_ESC_QUIT	switch	NXRS_ESC_QUIT=0 (scripted runs): Esc is logged and ignored; the foreground state says	src/front/src/window.rs, src/front/src/window_linux.rs
+NXRS_FNPROF	diagnostic	`NXRS_FNPROF=<file>`: record every guest function entered at least once and rewrite the file every 5 s with their addresses (the web build's hot set, docs/35 W0(c)).	src/runtime/src/rt.rs
 NXRS_GNU_LIBS	switch	The folder of the gnullvm engine libraries: `NXRS_GNU_LIBS`, else `gnu\` beside nxrs.	src/cli/src/cc.rs
 NXRS_HOME_QUIT_TEXT	switch	any line with `NXRS_CTRL_PROMPT_TEXT`, `NXRS_HOME_QUIT_TEXT`, `NXRS_USER_PROMPT_TEXT` (the lines of a prompt, one per	src/os/src/ui_text.rs
 NXRS_HOST_PROF	switch	`NXRS_HOST_PROF=<start s>,<seconds>[,<file>]` samples one host thread about 2000 times a second for that window	src/runtime/src/hostprof.rs
@@ -297,12 +298,14 @@ NXRS_USER_PROMPT_TEXT	switch	any line with `NXRS_CTRL_PROMPT_TEXT`, `NXRS_HOME_Q
 NXRS_VERSION	switch		src/launcher/build.rs, src/launcher/src/cli/options.rs, src/launcher/src/main.rs
 NXRS_XMON	switch	- the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`NXRS_XMON=1` / `NXRS_NO_XMON=1`);	src/runtime/src/process.rs
 NXRT_CLANG	test	the clang the runtime ABI layout test compiles with	src/runtime/tests/abi_layout.rs
-NXRT_EXEFS	switch	folder `<name>_data` is handed over as NXRS_DATA, and its `exefs` as NXRT_EXEFS (the runtime's module folder),	src/cli/src/cc.rs, src/os/src/services/oe.rs, src/runtime/src/process.rs
+NXRT_COMPACT_ALIAS_MB	diagnostic	Alias region size in MiB for `NXRT_LAYOUT=compact` (default 2304).	src/runtime/src/mem.rs
+NXRT_EXEFS	switchfolder `<name>_data` is handed over as NXRS_DATA, and its `exefs` as NXRT_EXEFS (the runtime's module folder),	src/cli/src/cc.rs, src/os/src/services/oe.rs, src/runtime/src/process.rs
 NXRT_FATAL_PEEK	switch	`NXRT_FATAL_PEEK=<chain>[;<chain>...]` (a debugging aid for crash reports): a chain is `<reg or hex>[+-off]`	src/runtime/src/rt.rs
 NXRT_FOREIGN_FAULTS	switch	`NXRT_FOREIGN_FAULTS=1` (debugging): a fault in another module (a system DLL's memcpy under host code, a	src/runtime/src/fault.rs
 NXRT_INTERP_CHILD	test	set in the child process of an interpreter test (internal)	src/runtime/src/interp/tests.rs
 NXRT_LAZY_HEAP	switch	- the lazy heap (`NXRT_LAZY_HEAP=1`);	src/runtime/src/process.rs
-NXRT_LLVM	switch	(`clang\bin`, `..\toolchain\clang\bin`); `NXRT_LLVM` (the runtime's own tools use it); LLVM's installer's folder;	src/cli/src/cc.rs, src/os/src/bin/nxos_dev.rs, src/runtime/src/bin/nxrt_dev.rs
+NXRT_LAYOUT	diagnostic	`NXRT_LAYOUT=compact`: every guest region (stack + heap block, alias, SDK maps, modules, kernel region) in one window of under 4 GiB around the modules, the map a web build needs (docs/35 W0(d)).	src/runtime/src/mem.rs
+NXRT_LLVM	switch(`clang\bin`, `..\toolchain\clang\bin`); `NXRT_LLVM` (the runtime's own tools use it); LLVM's installer's folder;	src/cli/src/cc.rs, src/os/src/bin/nxos_dev.rs, src/runtime/src/bin/nxrt_dev.rs
 NXRT_MINIDUMP	diagnostic	Which minidump a crash writes (`NXRT_MINIDUMP`): `0` none, `full` with the memory the threads' stacks point to,	src/runtime/src/fault.rs
 NXRT_MKW_PYTHON	test	the Python nxrt_dev runs Mario Kart World's scripts with	src/runtime/src/bin/nxrt_dev.rs
 NXRT_PANIC_CHILD	test	set in the child process of the boundary panic test (internal)	src/runtime/src/boundary.rs

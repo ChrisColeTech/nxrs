@@ -43,6 +43,36 @@ const ALIAS_ALIGN: u64 = 4 * GIB;
 /// Application memory pool a Switch 1 title sees (GetInfo TotalMemorySize): 3285 MiB.
 pub const DEFAULT_POOL: u64 = 3285 << 20;
 
+// `NXRT_LAYOUT=compact`: every region the guest reads or writes in one window of under 4 GiB around the modules, the
+// map a web build's single linear memory needs (docs/35 W0(d)). Below the modules: stack + heap block, alias region,
+// then free address space for the SDK's own maps; above them: the kernel region. The default map is unchanged.
+const COMPACT_STACK: u64 = 256 << 20;
+const COMPACT_HEAP: u64 = 512 << 20;
+const COMPACT_SLACK: u64 = 256 << 20;
+
+fn compact() -> bool {
+    static C: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *C.get_or_init(|| std::env::var("NXRT_LAYOUT").is_ok_and(|v| v == "compact"))
+}
+
+/// The compact map's alias region: `NXRT_COMPACT_ALIAS_MB` (default 2304 MiB).
+fn compact_alias() -> u64 {
+    std::env::var("NXRT_COMPACT_ALIAS_MB")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(2304)
+        << 20
+}
+
+/// The kernel region's base for the module window `w`: `KERNEL_BASE`, or right above the modules in the compact map.
+fn kernel_base_for(w: Range) -> u64 {
+    if compact() {
+        align_up(w.end(), KERNEL_SIZE)
+    } else {
+        KERNEL_BASE
+    }
+}
+
 // Horizon memory states and permissions (QueryMemory).
 pub const ST_FREE: u32 = 0;
 pub const ST_CODE: u32 = 3;
@@ -280,6 +310,8 @@ pub struct Space {
     pub stack: Range,
     pub heap: Range,
     pub alias: Range,
+    /// Size of the write-watched stack + heap block at `aslr.base`.
+    low_size: u64,
     pub kernel: Range,
     /// The application pool (GetInfo TotalMemorySize): what the heap and physical memory may take together.
     pub pool: u64,
@@ -328,7 +360,7 @@ pub fn claim_fixed(mods: Range) {
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     for (a, n) in [
         (w.base, w.size),
-        (KERNEL_BASE, KERNEL_SIZE),
+        (kernel_base_for(w), KERNEL_SIZE),
         (crate::hostfn::HOSTFN_BASE, crate::hostfn::HOSTFN_SIZE),
     ] {
         if !e.contains(&(a, n)) && reserve(a, n, false) {
@@ -424,6 +456,11 @@ impl Space {
     /// `kernel_base` is `KERNEL_BASE` in a game process (tests pass their own).
     pub fn new(mods: Range, kernel_base: u64, reserve_hostfn: bool) -> Result<Space, String> {
         let mods = module_window(mods);
+        let kernel_base = if kernel_base == KERNEL_BASE {
+            kernel_base_for(mods)
+        } else {
+            kernel_base
+        };
         if mods.end() > kernel_base || kernel_base + KERNEL_SIZE > ADDRESS_LIMIT {
             return Err(format!(
                 "memory: modules end at {:#x}, inside the kernel region",
@@ -451,6 +488,40 @@ impl Space {
                 describe_taken(crate::hostfn::HOSTFN_BASE)
             ));
         }
+        if compact() {
+            let alias_size = compact_alias();
+            let low_size = COMPACT_STACK + COMPACT_HEAP;
+            let alias = (mods.base - COMPACT_SLACK - alias_size) & !(0x20_0000 - 1);
+            let low = alias - low_size;
+            if !reserve(low, low_size, true) || !reserve(alias, alias_size, true) {
+                return Err(format!(
+                    "memory: the compact map's stack, heap and alias block {low:#x}..{:#x} is taken{}",
+                    alias + alias_size,
+                    describe_taken(low)
+                ));
+            }
+            return Ok(Space::with(
+                mods,
+                Range {
+                    base: low,
+                    size: kernel_base + KERNEL_SIZE - low,
+                },
+                Range {
+                    base: low,
+                    size: COMPACT_STACK,
+                },
+                Range {
+                    base: low + COMPACT_STACK,
+                    size: COMPACT_HEAP,
+                },
+                Range {
+                    base: alias,
+                    size: alias_size,
+                },
+                kernel_base,
+                low_size,
+            ));
+        }
         let mut low = 0;
         let mut at = LOW_SEARCH_FROM;
         while at + LOW_SIZE <= mods.base && low == 0 {
@@ -473,24 +544,46 @@ impl Space {
         if alias == 0 {
             return Err("memory: no free alias region below the modules".into());
         }
-        Ok(Space {
-            modules: mods,
-            aslr: Range {
+        Ok(Space::with(
+            mods,
+            Range {
                 base: low,
                 size: ADDRESS_LIMIT - low,
             },
-            stack: Range {
+            Range {
                 base: low + STACK_OFF,
                 size: STACK_SIZE,
             },
-            heap: Range {
+            Range {
                 base: low + HEAP_OFF,
                 size: HEAP_CAP,
             },
-            alias: Range {
+            Range {
                 base: alias,
                 size: ALIAS_SIZE,
             },
+            kernel_base,
+            LOW_SIZE,
+        ))
+    }
+
+    /// The space over regions already reserved.
+    fn with(
+        mods: Range,
+        aslr: Range,
+        stack: Range,
+        heap: Range,
+        alias: Range,
+        kernel_base: u64,
+        low_size: u64,
+    ) -> Space {
+        Space {
+            modules: mods,
+            aslr,
+            stack,
+            heap,
+            alias,
+            low_size,
             kernel: Range {
                 base: kernel_base,
                 size: KERNEL_SIZE,
@@ -504,11 +597,11 @@ impl Space {
             st: Mutex::new(State {
                 heap_size: 0,
                 kernel_top: kernel_base,
-                stack_top: low + STACK_OFF,
+                stack_top: stack.base,
                 regions: vec![],
                 free_tls: vec![],
             }),
-        })
+        }
     }
 
     /// Commits a module's image read-write (the loader copies and relocates it, then `protect_module`).
@@ -624,7 +717,7 @@ impl Space {
             .st
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if size > HEAP_CAP || !size.is_multiple_of(0x20_0000) {
+        if size > self.heap.size || !size.is_multiple_of(0x20_0000) {
             return Err(R_INVALID_SIZE);
         }
         if size > st.heap_size && size + self.phys_bytes.load(Ordering::Relaxed) > self.pool() {
@@ -906,7 +999,7 @@ impl Space {
     pub fn written_pages(&self, addr: u64, n: u64) -> Option<Vec<u64>> {
         let low = Range {
             base: self.aslr.base,
-            size: LOW_SIZE,
+            size: self.low_size,
         };
         let inside = |r: Range| addr >= r.base && addr + n <= r.end();
         if !inside(low) && !inside(self.alias) {
