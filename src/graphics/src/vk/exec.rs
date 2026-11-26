@@ -447,6 +447,10 @@ fn set_key(
     }
     let d = facts(m).deps?;
     let st = m.stage as usize;
+    // an indirect dispatch's set points at a c0 of its own (`private_c0`): never reused
+    if private_c0(st, facts(m).need[0].1) {
+        return None;
+    }
     // the dispatch size and the base instance are in c0 only, and matter only to a set that reads their words
     let (di, bi) = if !d.c0 || !d.draw {
         ([0; 3], 0)
@@ -786,6 +790,12 @@ impl QState {
                 }
             }
         }
+        // an indirect dispatch's c0: a copy of its own, which the GPU copy of the record writes into
+        let private = private_c0(st, need[0].1).then(|| {
+            let s = sub.stage_bytes_fresh(g, &b0.as_ref().unwrap().bytes);
+            INDIRECT_C0.with(|c| c.set((true, Some(s))));
+            s
+        });
         // staged once per submission (equal bytes staged earlier in it are shared: equal sets are bound again)
         let mut staged = |c: &mut CBank| match c.staged {
             Some((serial, s)) if serial == sub.serial => s,
@@ -797,7 +807,13 @@ impl QState {
         };
         let none = (vk::Buffer::null(), 0);
         let (s0, s2) = (
-            if need[0].1 { staged(b0.as_mut().unwrap()) } else { none },
+            if let Some(s) = private {
+                s
+            } else if need[0].1 {
+                staged(b0.as_mut().unwrap())
+            } else {
+                none
+            },
             if need[1].1 { staged(b2.as_mut().unwrap()) } else { none },
         );
         let bytes = |c: &Option<CBank>, n: (bool, bool)| match c {
@@ -2918,6 +2934,38 @@ fn put_dispatch(v: &mut [u8], dispatch: [u32; 3], nvn2: bool) {
     }
 }
 
+thread_local! {
+    /// An indirect dispatch's c0 (`dispatch_guest`): (its c0 is staged privately for this dispatch, where it was staged).
+    /// The CPU does not know the group counts the GPU wrote into the record, so the dispatch copies the record into its
+    /// own c0 on the GPU (nxnative nvn_mtl.m `dispatch_`); a c0 shared with another set would get them too.
+    static INDIRECT_C0: std::cell::Cell<(bool, Option<(vk::Buffer, u64)>)> =
+        const { std::cell::Cell::new((false, None)) };
+}
+
+/// Whether stage `st`'s set gets a c0 of its own, staged for this dispatch only and kept out of the set cache: an
+/// indirect dispatch's compute set that binds c0 (`INDIRECT_C0`).
+fn private_c0(st: usize, binds_c0: bool) -> bool {
+    st == 5 && binds_c0 && INDIRECT_C0.with(|c| c.get().0)
+}
+
+/// The copies of an indirect dispatch's record (12 bytes at `src`) into its c0 staged at `c0`: the dispatch size at
+/// 0x200, and for an NVN2 game also at `C0_DISPATCH_NVN2` (as `put_dispatch` writes a direct one's).
+fn indirect_c0_copies(src: u64, c0: u64, nvn2: bool) -> Vec<vk::BufferCopy> {
+    let mut v = vec![vk::BufferCopy {
+        src_offset: src,
+        dst_offset: c0 + 0x200,
+        size: 12,
+    }];
+    if nvn2 {
+        v.push(vk::BufferCopy {
+            src_offset: src,
+            dst_offset: c0 + C0_DISPATCH_NVN2 as u64,
+            size: 12,
+        });
+    }
+    v
+}
+
 /// The driver's constant segment c0 of a stage: storage buffer table, compute dispatch size and uniform table, base
 /// instance.
 fn c0_bytes(qs: &QState, st: usize, dispatch: [u32; 3], base_instance: u32) -> Vec<u8> {
@@ -3958,7 +4006,12 @@ fn stage_set(
                     k @ 3..=18 => {
                         let (a, n) = qs.ubo[st][(k - 3) as usize];
                         let nf = (n.min(64) / 4) as usize;
-                        if dumping && a != 0 && nf > 0 && super::mem::room(a) >= 4 * nf as u64 {
+                        if dumping
+                            && a != 0
+                            && nf > 0
+                            && !crate::nvn::vpool::is_sparse(a)
+                            && super::mem::room(a) >= 4 * nf as u64
+                        {
                             // SAFETY: guest memory inside a registered pool (identity mapped)
                             let f = unsafe { core::slice::from_raw_parts(a as *const f32, nf) };
                             said.push(format!(
@@ -4030,7 +4083,12 @@ fn stage_set(
                 if dumping {
                     // pass dumps: the storage buffer's address, bound size and its first words in guest memory
                     let nf = (bound_n.min(160) / 4) as usize;
-                    let f: Vec<f32> = if a != 0 && nf > 0 && super::mem::room(a) >= 4 * nf as u64 {
+                    // (not a sparse virtual pool's address: its range is not CPU-accessible)
+                    let f: Vec<f32> = if a != 0
+                        && nf > 0
+                        && !crate::nvn::vpool::is_sparse(a)
+                        && super::mem::room(a) >= 4 * nf as u64
+                    {
                         // SAFETY: guest memory inside a registered pool (identity mapped)
                         unsafe { core::slice::from_raw_parts(a as *const f32, nf) }.to_vec()
                     } else {
@@ -4863,6 +4921,26 @@ mod set_patch_tests {
         let mut cs = module(vec![(1, Res::Cbuf { bank: 0 })]);
         cs.stage = 5;
         assert!(reads_draw_words(&cs));
+    }
+
+    /// An indirect dispatch copies its record into its own c0 where the shader reads the group counts: 0x200, and
+    /// 0x4 for NVN2; only while `dispatch_guest` marks it, only for the compute set that binds c0, and that set is
+    /// never taken from (or put in) the set cache.
+    #[test]
+    fn indirect_dispatch_copies_its_record_into_a_private_c0() {
+        let c = indirect_c0_copies(0x40, 0x1000, true);
+        assert_eq!(c.len(), 2);
+        assert_eq!((c[0].src_offset, c[0].dst_offset, c[0].size), (0x40, 0x1200, 12));
+        assert_eq!((c[1].src_offset, c[1].dst_offset, c[1].size), (0x40, 0x1004, 12));
+        let c1 = indirect_c0_copies(0x40, 0x1000, false);
+        assert_eq!(c1.len(), 1);
+        assert_eq!(c1[0].dst_offset, 0x1200);
+        assert!(!private_c0(5, true), "a direct dispatch shares c0");
+        INDIRECT_C0.with(|c| c.set((true, None)));
+        assert!(private_c0(5, true));
+        assert!(!private_c0(5, false), "a set that does not bind c0 cannot read the counts");
+        assert!(!private_c0(0, true), "graphics stages are not dispatches");
+        INDIRECT_C0.with(|c| c.set((false, None)));
     }
 
     fn module(res: Vec<(u32, Res)>) -> Module {
@@ -6118,7 +6196,7 @@ fn draw_setup_ex(
         }
         if passdump::active() {
             crate::vklog!(
-                "pass dump {}: depth test {} write {} func {} stencil test {}, cull {:#x}, color mask {:#x} output map {:#x}, blend enables {:#x}, target 0 blend rgb {}*src {} {}*dst, alpha {}*src {} {}*dst, logic op {:#x}, alpha to coverage {}, alpha test {}",
+                "pass dump {}: depth test {} write {} func {} stencil test {}, cull {:#x}, color mask {:#x} output map {:#x}, blend enables {:#x}, target 0 blend rgb {}*src {} {}*dst, alpha {}*src {} {}*dst, blend constant {:?}, logic op {:#x}, alpha to coverage {}, alpha test {}",
                 passdump::pass_no(),
                 ds.get(ds_field::DT),
                 ds.get(ds_field::DW),
@@ -6134,6 +6212,7 @@ fn draw_setup_ex(
                 qs.blend[0].get(blend_field::SRC_A),
                 qs.blend[0].get(blend_field::EQ_A),
                 qs.blend[0].get(blend_field::DST_A),
+                qs.blend_color,
                 qs.color.logic_op(),
                 qs.ms.a2c,
                 qs.color.alpha_func()
@@ -7761,6 +7840,10 @@ fn dispatch_guest(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
             .cmd_bind_pipeline(sub.main, vk::PipelineBindPoint::COMPUTE, pipe)
     };
     super::queue::wait_diag::phase("dispatch: descriptor sets");
+    // NXGFX_INDIRECT_C0=0 (diagnosis): the CPU-side counts (0) as before
+    static COPY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let copy = *COPY.get_or_init(|| std::env::var("NXGFX_INDIRECT_C0").as_deref() != Ok("0"));
+    INDIRECT_C0.with(|c| c.set((copy && ind.is_some(), None)));
     bind_sets(
         g,
         sub,
@@ -7770,6 +7853,25 @@ fn dispatch_guest(g: &Gpu, sub: &mut Sub, qs: &mut QState, d: p_dispatch) {
         [d.x as u32, d.y as u32, d.z as u32],
         0,
     );
+    let c0 = INDIRECT_C0.with(|c| c.replace((false, None)).1);
+    // indirect: the GPU-written group counts copied into this dispatch's own c0 before it reads them (nxnative
+    // nvn_mtl.m `dispatch_`); the CPU-side counts are 0, and a shader dividing or looping by them got Inf / NaN
+    if let (Some((b, o)), Some((cb, co))) = (ind, c0) {
+        let nvn2 = crate::nvn::device::SWITCH2.load(std::sync::atomic::Ordering::Relaxed);
+        unsafe {
+            g.dev()
+                .cmd_copy_buffer(sub.main, b, cb, &indirect_c0_copies(o, co, nvn2))
+        };
+        barrier(g, sub);
+        static N: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let n = N.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        if n.is_power_of_two() {
+            crate::vklog!(
+                "indirect dispatch {n}: compute {} reads c0, its group counts copied there on the GPU",
+                cs.key.iter().map(|b| format!("{b:02x}")).collect::<String>()
+            );
+        }
+    }
     super::queue::wait_diag::phase("dispatch: push/issue/barrier");
     push_constants(g, sub, qs, false);
     unsafe {
@@ -8352,6 +8454,14 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
                 clear_value: vk::ClearValue { color: v },
             }];
             let r = clear_rect(qs);
+            if passdump::active() {
+                crate::vklog!(
+                    "pass dump {}: clear colour {i} of ser{} {:?}",
+                    passdump::pass_no(),
+                    qs.rt[i].tex.map_or(0, |t| t.serial),
+                    r.rect
+                );
+            }
             if r.rect.extent.width > 0 && r.rect.extent.height > 0 {
                 unsafe { dev.cmd_clear_attachments(sub.main, &a, &[r]) };
             }
@@ -9020,6 +9130,18 @@ fn record_op(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> b
                 }
                 _ => true,
             };
+            // (the counters only for a conditional mode: address 0 is no report memory)
+            if passdump::active() && r.addr != 0 && r.mode < 2 {
+                crate::vklog!(
+                    "pass dump {}: render condition mode {} at {:#x}: counters {:?} / {:?}, rendering {}",
+                    passdump::pass_no(),
+                    r.mode,
+                    r.addr,
+                    super::counters::rc_value(r.addr),
+                    super::counters::rc_value(r.addr + 16),
+                    qs.render_on
+                );
+            }
         }
         op::ALPHA_REF => qs.alpha_ref = rd_payload::<crate::nvn::cmd2::p_f32x4>(rec).v[0],
         op::DEPTH_BOUNDS => {

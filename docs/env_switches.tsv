@@ -57,7 +57,8 @@ NXGFX_LATE_OUTPUTS	switch	a vertex shader's outputs written once at the end (`sp
 NXGFX_LAZY_ALL_FRAME	switch	Images a frame makes for shaders that index the texture pool, at most (with 32 MB of guest bytes); default `0`: every waiting one at once (a cap measured slower on Jamboree's opening)	src/graphics/src/vk/image.rs
 NXGFX_LAZY_CPU_CHECK	switch	`0` skips the check that lazily written-back pages were not written by the CPU meanwhile	src/graphics/src/vk/mem.rs
 NXGFX_LAZY_IMAGES	switch	textures, 7.2 GB of images, most never drawn in a race. `NXGFX_LAZY_IMAGES=0`: every image at registration.	src/graphics/src/vk/image.rs, src/graphics/tests/gpu.rs
-NXGFX_LAZY_KEEP	test	Whether a finalized texture's waiting registrations stay (`NXGFX_LAZY_KEEP=0`: dropped, as before).	src/graphics/src/vk/image.rs
+NXGFX_INDIRECT_C0	diagnostic	`NXGFX_INDIRECT_C0=0` (diagnosis): an indirect dispatch's c0 keeps the CPU-side group counts (0) instead of a GPU copy of its record.	src/graphics/src/vk/exec.rs
+NXGFX_LAZY_KEEP	testWhether a finalized texture's waiting registrations stay (`NXGFX_LAZY_KEEP=0`: dropped, as before).	src/graphics/src/vk/image.rs
 NXGFX_LINK_IO	switch	`NXGFX_LINK_IO=0` off.	src/graphics/src/vk/pipe.rs
 NXGFX_LIVE	switch	`0` turns the live shader translator off (a draw whose shader the build did not translate is skipped)	src/graphics/src/vk/live.rs
 NXGFX_LIVE_JOBS	switch	as many translators as the build uses (NXGFX_LIVE_JOBS, 4)	src/graphics/src/vk/live.rs
@@ -148,7 +149,9 @@ NXGFX_TEST_SHADERS	test	memory budget. Uses `NXGFX_TEST_SHADERS` (default: the w
 NXGFX_TEX_CAP	switch	textures in the shared descriptor table at most (default 262144, within the device limit)	src/graphics/src/vk/layout.rs
 NXGFX_TEX_WB	switch	are the storage's bytes: true for every format let through here). `NXGFX_TEX_WB=1` on (off by default: `K2-mkw16`'s race washed out with it).	src/graphics/src/vk/exec.rs, src/graphics/tests/gpu.rs
 NXGFX_UPLOAD_MB	switch	`NXGFX_UPLOAD_MB` (default 64; 0: no budget).	src/graphics/src/vk/mem.rs
-NXGFX_UPSCALE	switch	`NXGFX_UPSCALE=standard` (or the ini's `upscale=standard`) keeps the linear blit; `NXGFX_SHARPNESS` 0..1 (0.5).	src/graphics/src/vk/upscale.rs
+NXGFX_UPLOAD_SKIP	switch	`NXGFX_UPLOAD_SKIP=0`: every CPU-written page is uploaded, also one whose bytes are those of its last upload (`upskip`).	src/graphics/src/vk/upskip.rs
+NXGFX_UPLOAD_TRACE	diagnostic`NXGFX_UPLOAD_TRACE=1` (diagnosis): the pool summary also logs what the pool sync uploads, by pool, and how much of it was unchanged since its last upload.	src/graphics/src/vk/uptrace.rs
+NXGFX_UPSCALE	switch`NXGFX_UPSCALE=standard` (or the ini's `upscale=standard`) keeps the linear blit; `NXGFX_SHARPNESS` 0..1 (0.5).	src/graphics/src/vk/upscale.rs
 NXGFX_VALIDATION	diagnostic	`1` turns the Vulkan validation layer on (the GPU tests set it)	src/graphics/src/vk/device.rs, src/graphics/src/vk/newndve/gpu_tests.rs, src/graphics/tests/common/mod.rs
 NXGFX_VIN_SKIP	switch	NXGFX_VIN_SKIP=0: vertex input set up at every draw.	src/graphics/src/vk/exec.rs
 NXGFX_VIN_TEST_DIR	test		src/graphics/src/vk/shader.rs

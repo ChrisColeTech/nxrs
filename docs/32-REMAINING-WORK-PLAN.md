@@ -123,6 +123,17 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       counts in c0; the haze; forest frames 70-380 ms with ~56 MB uploaded per frame and ~20 s without presents
       entering the house; route to Link moving). Slip: one shader `.spv` swapped for a trap run, restored
       byte-identical (SHA-256 checked).
+- [x] **OOT-FOREST2** (2026-11-25, `docs/waves/OOT-FOREST2.md`; lead re-ran graphics 212/212 and read the final
+      sheet; **independent audit running**). Indirect dispatches: private c0 per dispatch, the GPU copies the record
+      to 0x200 (and NVN2 0x4) before it. Texture-pool snapshots recycled with only changed descriptors re-copied
+      (were 8-24 a frame at 13-17 ms: 135 ms frames) -> ~0.1 ms. `upskip.rs`: identical re-uploads skipped
+      (~8.5 of ~56 MB/frame); the other ~46 MB/frame are pages noted GPU-written every frame and need a per-write
+      sequence through the write-back (`queue.rs`, after MKW-RECORD). **Link moves under input** in his house:
+      `build/play/20261125-192048-oot-f2-final` window [845, 915] **13.7 FPS (5% low 10.0) of 59**; forest 14.8
+      (was 7.0), house 15.1 (was 3-5); GPU 8.7 ms, replay 12.4 ms, **pool sync ~36 ms a frame** (the limit). Haze:
+      not item 1; added by the game's bloom composite, engine inputs correct as far as checked; unproven without a
+      reference capture. Wonder regression 59.5 FPS, 0 red. Slips: three runs overlapped MKW-RECORD's machine lock
+      (their FPS indicative only); one crash from its own dump-log line (fixed, dump-only).
 - [ ] **NVN2-PARITY** (opened 2026-11-25, `docs/waves/NVN2-PARITY.md`, starts after OOT-FOREST2). Owner: every
       Switch 2 title misses 60 FPS and pops textures; Switch 1 titles fine. Read-only parity audit against nxnative
       (38 NVN2 items): missing/different — pushed buffer addresses (c24-c29) and uniform-buffer handles resolve to
