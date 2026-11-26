@@ -178,3 +178,103 @@ Changed files: `src/graphics/src/vk/exec.rs`, `src/graphics/src/nvn/device.rs`, 
 ### Questions
 
 None.
+
+### Independent audit of 78c7f82 (read-only, 2026-11-25)
+
+Scope: `git show 78c7f82 -- src/` against nxnative `nvn_mtl.m` (ucb_handle / ucb_handle_addr 1551, NVN_RB_SBUFU /
+SBUFQ 13221-13235, c0 table 13297, ubo_bind_handle 12637, ubo_read 12619, cbsize / ub_bound 12896), `dmsh_abi.h`
+(push blocks, stage banks), `hle_nvn.c` (guest_ns 3277, g_devinfo2 182). No builds, no games, no code edits.
+No HIGH found. Line numbers are HEAD (78c7f82).
+
+**MEDIUM**
+
+1. **The `ub_upd` overlay is defeated by the set cache for storage buffers whose address comes from a uniform
+   buffer** (`vk/exec.rs:515` `set_key` keys c3..c18 by `masked_ubos` = the binding `(a, n)`; `set_deps:620`;
+   overlay `exec.rs:156-193`, filled at `UPDATE_UB` `exec.rs:8929`). Scenario: draw 1 of module M builds its set with
+   storage address X read from c3+0x38; `UPDATE_UB` rewrites c3+0x38 to Y (same binding); draw 2 of M has the same
+   key -> `hit_version` / `patch_set` (`old == k`) reuse the set holding X. The overlay only helps on a cache miss
+   (and for texture handles read from c3..c18, whose modules are uncacheable via `set_deps` -> None). Not a
+   regression (before, both draws read X), but item 4's fix does not work in the common case. Fix: a
+   uniform-update generation in `QState`, bumped by every `UPDATE_UB` (or one overlapping a bound c3..c18 range),
+   put in `SetKey` when the module reads a storage record from c3..c18 (new `SetDeps` bit), and `CL_UBO`-class
+   patching on change.
+2. **Size-0 (pushed / handle) storage buffers in a sparse pool resolve to nothing**
+   (`exec.rs:4178-4179` `n = room(a).min(sbuf0_cap())`; `mem.rs:692-698` `room` translates a sparse address and
+   returns the bytes to the end of the *physical* pool's window; `mem.rs:1452` `resolve_in` then needs every page
+   of `[a, a + n)` mapped and contiguous). Scenario (nxnative's own case, PRAGMATA GI voxeliser / RE4
+   0ee0c5f004239ce2): an address pushed at c24 into a 1 GB sparse pool with one 0xc0000-byte run mapped: `n` = 1 MB,
+   `translate(a, 1 MB)` fails -> red line, the whole binding is the 64 KiB scratch / zero buffer. The read-only
+   to-the-end path already skips sparse (`exec.rs:4195`); the size-0 path does not. Fix: for `vpool::is_sparse(a)`
+   bound `n` by the contiguous mapped run from `a` (a `vpool::run_len(a)` beside `translate`), as nxnative binds
+   "a sparse pool's mapped run".
+3. **A decoded handle's size is thrown away** (`exec.rs:3194-3196` returns `(a, 0)` for every handle). The handle
+   carries the size (`(v >> 45) * 16`, up to 8 MB); instead the binding becomes `min(room, 1 MB)`: a handle-addressed
+   buffer over 1 MB is cut at 1 MB (robustBufferAccess2 drops the rest: reads 0, writes lost), and a small written
+   one is noted as a GPU write over up to 1 MB (`exec.rs:4229` `note_gpu_write` -> a Mirror write-back with its
+   pre-image copy plus `upskip::forget` of the whole MB every submission -> re-uploads). The same over-wide note
+   applies to every written pushed plain address (no size exists there: nxnative does the same, but on unified
+   memory it costs nothing). Fix: for a handle use its size field (non-zero) as `n`; keep the size-0 path only for
+   pushed plain addresses, and count those (perf) so the write-back cost is visible.
+4. **Stand-in storage views go into `storage_tex`** (`vk/image.rs:2450-2463` `storage_or_stand_in` ->
+   `tables.rs:985-992` `write_image` inserts any `Some` view; `tables.rs:926` `storage_views`). Every registered
+   texture slot now lists a "storage view", so every draw/dispatch of a module using the storage pool
+   (`exec.rs:5695-5700`) walks all textures of the pool with an image-map lookup each under the images lock
+   (`note_storage_write` filters the stand-ins out, so it is correct, but O(textures) instead of O(storage images)
+   per such draw). Fix: write the stand-in descriptor but keep it out of `storage_tex` (a `real: bool` to
+   `write_image`, or insert only when the view is the image's own).
+
+**LOW**
+
+5. A handle of size 0 has no bit >= 45 (`device.rs:152-163`): `put_cs_ubos` (`exec.rs:3022`) writes
+   `ucb_handle(a, 0) = a >> 4` for a compute uniform bound with size 0, which `bank_u64` then takes as the plain
+   address `a >> 4` (no pool -> scratch). nxnative has the same heuristic. Fix: on NVN2, decode compute c0 rows
+   0x210..0x310 unconditionally (`(v & (2^45-1)) << 4`); the heuristic stays for game memory.
+6. On NVN2 any storage record word with bits >= 45 set is now decoded; uninitialized/garbage data could decode
+   into a real pool and, if written, be noted as a GPU write there (`exec.rs:3193`). Low probability (bits 36..44
+   must be clear); no change needed beyond knowing it.
+7. The overlay ignores other GPU writes to the same uniform memory later in the submission (COPY_BUF, CLEAR_BUF,
+   storage stores): an `UPDATE_UB` then a buffer copy over it reads the update's bytes on the CPU while the GPU sees
+   the copy. nxnative tracks kinds (`pend_read`) and red-lines it (RED 47). Fix: drop/flag overlay entries a later
+   copy or fill overlaps, red once.
+8. Timestamps (`device.rs:169-177`, `counters.rs:112-131`): units agree on both versions (ns in, `timestamp_from_ns`
+   for reports, `/256` on both sides with `game_dynamic_resolution=0`), and a report never exceeds the current time.
+   With DRS on, reports subtract the frame's GPU idle (`c.idle`) and the current timestamp does not, so
+   `current - report` includes that idle; with DRS off the GPU clock runs 1/256 against the CPU tick clock (intended
+   by that option). No fix needed; noted for anyone reading GPU-vs-CPU calibration.
+9. `counters.rs:241` the new test sets the process-global `GUEST_CLOCK` (`OnceLock`, never reset) to now + 5e12 s;
+   every later test in the binary that reads `guest_ns` runs on that clock (order-dependent; passes today). Fix:
+   a test-only override that is restored, or no global set in the test.
+10. Stand-in storage views for 1D / rectangle / multisample targets are 2D (array) single-sample views
+    (`exec.rs:3765` `dummy_view_of`): a view-type mismatch against an image1D / image2DMS declaration (same as the
+    placeholder paths already; validation-layer noise, not a device loss on this driver so far).
+11. Pre-existing, now also for the rounded tail: `bank_word` (`exec.rs:3143-3149`) reads c3..c18 by CPU pointer at
+    the guest address even when it is a sparse virtual address (the pass-dump path notes those are not
+    CPU-accessible).
+
+**Checked and found correct**
+
+- `push_bank` = `push_info`: c24 is the stage group's whole 0x800 (compute: group 1 / `push[1]`, its entries at
+  +0x100 as nxnative's SBUFQ reads `S.push[stage==5]` at `b->off`), c25..c29 graphics blocks 1..5 (dmsh_abi.h
+  DMSH_NVN2_STAGE_BANK); bounds checked by `rd`. Deferred pushes are copied at record time; every PUSH_CONST and both
+  compute-snapshot swaps bump `pgen`; `set_deps` / `res_class` now key and patch push-sourced storage buffers
+  (CL_PUSH), so no stale set across a changed pushed address.
+- `ucb_handle` / `ucb_handle_addr` are bit-identical to nxnative (cap 2^19-1); `nvnDeviceGetUniformBufferHandle`
+  uses it; decode is NVN2-only (`decode_record_addr`), plain guest addresses (< 2^40) are never misread; NVN1 records
+  keep their size word.
+- The NVN2 compute c0 table: no host path reads rows 0x210..0x310 as addresses except `bank_u64`, which decodes;
+  `indirect_c0_copies` only patches the dispatch words; the size at +8 is kept (as nxnative).
+- Two-word OR: all five CPU handle reads use `handle_word`; no site missed (`newndve::prepare::operand` matches
+  reflection words only). NVN1: separate sampler handles are `id << 20` (low 20 bits 0) and separate texture
+  handles `< 2^20`, so the texture ID is unchanged; the kind-1 sampler ID from the OR is what the shader computes.
+- Overlay order (later wins, byte-wise), scope (cleared in `exec::end`, which `run_stream_due` always calls, parked
+  streams included), only updates that were actually copied are recorded; cost is a span check plus a scan of the
+  submission's updates (17-87 a frame).
+- `ub_bound`: capped by `min(maxUniformBufferRange, 65536)` in `ubo_info`, held to the pool *window* (`room`), a
+  binding already past its pool keeps its size (as before); with 256-aligned uniform addresses the rounded tail never
+  crosses a page, so sparse uniforms translate as before. The tail bytes are pool memory, as the hardware reads.
+- Device items equal nxnative's `g_devinfo2` (0x06 = 16, RT items below 0x69 take the X1 value incl. 0x62 = 32,
+  0x7D / 0x87 / 0x99 / 0x9A answer 0 with a red line); 0x2E / 0x30 / 0x67 are not shadowed on NVN2.
+- image.rs: `dummy_view_ready` takes only the DUMMY lock (no images lock inside: no lock-order inversion);
+  `note_storage_write` ignores stand-ins (`im.views` membership); `rescale_images` makes storage views from the
+  rebacked image after its old views were drained and deferred, as the re-backing loop does; emulated formats stay
+  out of the pool.
