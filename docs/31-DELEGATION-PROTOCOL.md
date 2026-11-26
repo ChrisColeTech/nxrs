@@ -1,101 +1,137 @@
-# 31 — Delegation protocol: nxrs engine, launcher and acceptance
+# 31 - Delegation protocol: how the lead and agents divide work (rewritten 2026-11-26)
 
-**Binding for delegated work; revised 2026-11-22** after a review found that most of the first version's process
-rules were local choices that stopped work rather than real constraints. Adapted from
-`D:\Projects\giga-cut-rust\docs\31-DELEGATION-PROTOCOL.md`. `ARCHITECTURE-AND-STYLE-GUIDE.md` governs code; owner
-instructions take precedence over both. The execution ledger is `32-REMAINING-WORK-PLAN.md`; the game-outcome
-roadmap is `33-REFERENCE-DELTA-ROADMAP.md`; `PORT_PLAN.md` and `INTERFACES.md` stay the status and interface records.
+**Status: BINDING.** Owner, 2026-11-26: the previous version was not written properly; rewrite it on the pattern of
+`D:\Projects\giga-cut-rust\docs\31-DELEGATION-PROTOCOL.md`. Every agent working on this repository reads this document
+before it starts, and the lead holds every brief, report, merge and commit to it. Where this document and an older one
+disagree about *how work is delegated*, this one wins (it replaces `docs/waves/PARALLEL-RULES.md`, the lock files
+`build/locks/*.lock`, and `AGENTS.md`'s summary). `ARCHITECTURE-AND-STYLE-GUIDE.md` still governs the code itself;
+the owner's instructions govern both. The ledger is `32-REMAINING-WORK-PLAN.md`; the game-outcome roadmap is
+`33-REFERENCE-DELTA-ROADMAP.md`.
 
 ## 1. Roles
 
-| Role | Owns |
-|---|---|
-| **Owner** | Scope, priorities, product choices, authorizations |
-| **Lead** — main session | Briefs, priorities between agents, integration review, the ledger and status docs. May implement, build, test and run games like any agent |
-| **Agent** | A bug or feature **end to end**: diagnosis, the fix, its tests, the build, and verification in the game. It keeps the work until the game shows the result or the agent reports a real blocker |
-| **Auditor** — fresh session | An independent review, only when §4 calls for one |
+| Role | Who | Does | Never does |
+|---|---|---|---|
+| **Owner** | the person | sets scope and order, decides real choices, authorizes | - |
+| **Lead** | the main session | writes briefs, opens and removes worktrees, reviews reports, re-runs tests, reads the sheets, takes the accepted perf numbers, orders audits, merges and commits, keeps the ledger, rebuilds the main `dist` | attributes its own inferences to the owner; lets accepted work sit uncommitted |
+| **Wave agent** | a subagent, one per wave | owns a bug or feature **end to end** in its own worktree: diagnosis, the fix, its tests, its build, verification in the game, the wave doc, commits on its own branch | touches another wave's worktree or branch, commits to `gameplay-harness`, pushes, edits the ledger, kills by image name |
+| **Audit agent** | a fresh subagent with no stake | reads the diff against the wave doc and finds what can go wrong (read-only) | edits, builds, runs games, commits |
 
-Domain specialties (graphics, shaders, runtime/OS, harness, launcher) describe who knows what; they do not limit
-what an agent may run for its own work.
+## 2. Parallel waves: one worktree each
 
-## 2. The brief
+Owner, 2026-11-25: builds and games may run concurrently at full parallelism. Waves therefore do not share a tree.
 
-1. **Goal and baseline:** the deliverable (a fix verified in the game, not a diagnosis), current HEAD and dirty-tree
-   state, the build in use.
-2. **Read first:** absolute paths to this protocol, `AGENTS.md`, the architecture guide, the ledger row, relevant
-   source and evidence.
-3. **Scope and hypothesis:** the behaviour, the evidence for the hypothesis, exclusions, decisions already made, and
-   what would disprove it. Reference implementations are evidence, not truth.
-4. **Files:** what the agent expects to change, recorded in `docs/waves/<id>.md`. Touching more is fine when the fix
-   needs it; say so in the report. Only the lead edits the shared ledger and summaries.
-5. **Report:** the headings in §5.
+- **Each wave gets its own git worktree and branch**, opened by the lead from a committed `gameplay-harness`:
+  `git worktree add D:\Projects\RecompLauncherEngine-<wave> -b <wave> gameplay-harness`. The agent builds there
+  (its own `target/` and `dist/`) and relinks its titles from its own `dist`. Nothing is shared but the machine and
+  the library, so there are no lock files and no waiting on other agents.
+- **Titles belong to one wave at a time.** The brief names them. A title's build folder in the library is shared by
+  every worktree, so only the owning wave relinks or runs it. **Never two copies of one title at once** (they share
+  `pipeline-*.bin`; the second blacklists the first's in-flight compiles).
+- **A worktree's `build\tools` is a junction** into the main checkout: remove the junction (`rmdir`) before removing
+  the worktree, never `rm -rf` it. Check disk (`duf`) before opening one; each `target/` is large.
+- **One wave alone** may work in the main tree instead (no worktree); the rules below still hold.
+- **GPU:** two GPUs; the brief names one (`--env NXGFX_GPU=<n>` on every `play.py` run).
+- **Perf numbers:** agents measure freely, and their numbers are indicative (the machine is shared). **The accepted
+  numbers are the lead's**, taken at acceptance (§7) with nothing else running. An agent's report says what else was
+  running during its runs if it knows.
 
-## 3. Shared machine, shared tree
+## 3. The brief (lead to agent)
 
-These hold for everyone, lead included:
+Every brief has these parts, in this order. A brief missing one is not sent.
 
-- **Preserve the dirty tree.** Inspect unfamiliar edits before touching them; never reset, revert or reformat other
-  work; agents never stage or commit it (the lead's commits are below). Edit with `apply_patch` or the editor tools; no scripts that rewrite `.rs`,
-  `.toml` or `.md`.
-- **Builds and games may run concurrently, at full parallelism** (owner, 2026-11-25: the old "one build / one game
-  at a time, `--jobs 4`" rules came from the previous hardware's compiler crashes and the hypervisor-error crash;
-  the machine is now a Core Ultra 9 285K / Z890 with a new GPU, and that Windows feature is disabled). Cargo's own
-  lock on `target/` serializes builds in one checkout. Exception: a run whose FPS or timing is the measurement
-  (before/after perf numbers) has the machine to itself — no other game or build during it — and its report says so.
-  Two GPUs: `NXGFX_GPU=<index>` puts a game on one (`py scripts/play.py <s> --env NXGFX_GPU=1`).
-- **Use the normal paths.** Build with the normal CLI into `target/release` and the configured build folders; run
-  games from the real library (`%LOCALAPPDATA%\nxrs`) and the launcher, which the owner has authorized. Don't make
-  a full copy of a game, its data or its shaders per run.
-- **Saves:** back them up before a run that may change them, and restore them when the run was an experiment.
-- **Device loss or reset:** stop the faulting workload by PID and keep its log. **The fault becomes the top-priority
-  bug** for whoever owns that title: diagnose it, fix it, and re-run that path as soon as a candidate fix exists.
-  The only thing not to do is re-run the same path unchanged, since a blind retry just resets the driver again.
-  Other titles and other work carry on meanwhile.
-- **Blacklists** stay unless a specific corrected pipeline is shown safe; then remove that entry, not the list.
-- Close only your own processes, by PID, never by image name.
-- **Commits (owner, 2026-11-25): the lead commits as work lands** — after every accepted wave, and as a checkpoint
-  before opening work that needs one (a branch or worktree) — so work never piles up uncommitted. Delegated agents
-  do not commit (they share the tree). Push when the owner asks.
+1. **Wave id and one-line goal**, the deliverable (a fix verified in the game, never a diagnosis), the base commit,
+   the worktree path and branch, the titles it owns, its GPU.
+2. **Read first:** this document, `AGENTS.md`, the architecture guide, the ledger rows, the relevant wave docs and
+   source, and the evidence (run folders).
+3. **Scope and hypothesis:** the behaviour, the evidence, exclusions, decisions already made (cite them), and what
+   would disprove the hypothesis. Reference implementations (nxnative) are evidence, not truth.
+4. **Wave doc first:** the agent writes `docs/waves/<id>.md` (plan, expected files) before any code.
+5. **Verification required:** the scenarios (`py scripts/play.py --list`), the regressions, and the numbers to report
+   against which baseline and target.
+6. **Deadline** (investigation: 1-2 h hard; implementation: as the brief says) and the **report shape** (§5).
 
-## 4. Verification
+## 4. Rules the agent follows while working
 
-- **Agents run their own tests** (focused first, the affected package's suite before reporting) and their own game
-  runs. `not run` is not a pass.
-- **A game claim needs real evidence:** screenshots of the game window and input-response evidence over the declared
-  stretch, plus the logs and metrics. A named screenshot, an FPS number or a synthetic test alone is not gameplay.
-- **Diagnostics are never milestones.** A diagnosis, a test or an audit is a step inside a task; the task ends with a
-  source correction and its game result, or with a reported blocker.
-- **Audits are for genuinely dangerous changes** (guest-execution, memory lifetime, descriptor or shader-arithmetic
-  changes that could corrupt state or hang the GPU), done by a fresh session **after a fix exists**. Not per
-  diagnostic, not as a gate before every GPU run.
-- **Evidence stays compact:** keep what proves the result and the last failure; delete duplicated candidates,
-  superseded captures and stale target lanes.
+- **Edit only with the editor tools** (Edit, Write), one file at a time. No `sed`, no script that writes a `.rs`,
+  `.toml` or `.md`, no multi-file replace; `cargo fmt` is the only bulk rewrite. A slip is reported and the lead checks
+  the diff of every file it names.
+- **Fix the cause, in source.** Never answer a rendering bug by skipping draws, hiding work, weakening robustness or
+  acceptance, faking a service result or forcing a completion signal. Live native NDVE stays off. Blacklists stay
+  unless a specific corrected pipeline is shown safe; then remove that entry, not the list.
+- **Tests for every behaviour added** where a test can show it, run and passing (`cargo test --release -p <crate>` for
+  each crate changed; launcher: `cargo test` and `cargo clippy --all-targets -- -D warnings` in `src/launcher`;
+  harness: `py -m unittest scripts.test_play`). Default test runs stay seconds-fast. Fix the product, not the test.
+- **Verify in the game** with `scripts/play.py`: read every sheet yourself, and read `report.md`'s anomaly table,
+  "Near each screenshot" and route checks. An **OFF-ROUTE** run's FPS is invalid. Use `--faults` when chasing a
+  one-frame fault. A game claim needs screenshots over the declared stretch, not an FPS number alone.
+- **Diagnostics are steps, not milestones.** The work ends with a source correction and its game result, or a
+  reported blocker.
+- **Device loss or reset:** stop the workload by PID, keep the log; it becomes the wave's top-priority bug. Never
+  re-run the same path unchanged.
+- **Saves:** back up before a run that may change them; restore after experiments; never `--real-save`. Anything
+  moved or swapped is backed up and restored, and the restore direction checked.
+- **Processes:** close only your own, by PID, never by image name. A relink (`dist\nxrs\nxrs.exe --select-title
+  "<title>" --build`) returns early; wait on its PID before relying on its output.
+- **Stay in scope.** Unrelated defects are reported, not fixed, unless they block the wave. Scratch work stays in the
+  scratchpad, outside the repo.
+- **Commits:** on the wave's own branch only, as work lands (owner, 2026-11-25: work never piles up uncommitted),
+  message ending with the attribution line. Never `gameplay-harness`, never push.
+- **Python:** `py` with `PYTHONDONTWRITEBYTECODE=1`.
 
-## 5. Report (required headings)
+## 5. The report (agent to lead)
 
-1. **Built:** what changed and why it fixes the cause; diagnosis kept apart from correction.
-2. **Tests:** what each asserts, whether it failed before the fix, and that it was run.
-3. **Verified:** commands, results, and the game evidence looked at (paths).
-4. **Unproven:** what is still open and the next step.
-5. **Slips:** deviations from this protocol, or `None`.
-6. **Questions:** only real product choices left after §6, with sources and a recommendation.
+Every report has these headings, in this order. A missing heading is a returned report.
 
-## 6. Resolve questions from sources first
+1. **Built:** what changed per item of the brief and why it fixes the cause; diagnosis kept apart from correction.
+2. **Tests:** each test and what it asserts, whether it failed before the fix, and the run result.
+3. **Verified:** the runs (folders), sheets read, anomaly and route-check results, numbers against baseline and target.
+4. **Needs audit:** the parts that touch memory coherence, ordering, descriptors, lifetimes or threading.
+5. **Unproven:** what no test or run shows, and the next step.
+6. **Slips:** any §4 rule broken, with the files involved. "None" if none.
+7. **Questions:** only those that pass §6, each with the sources checked and a recommendation.
 
-Check, in order: the latest owner instructions; recorded decisions and the ledger; architecture and contracts;
-current source and reproducible evidence; documented upstream behaviour and licensed references. Then:
+## 6. Settling a question (before anyone asks the owner)
 
-- **Answered:** act.
-- **Owed implementation:** do it; never ask whether to finish promised behaviour.
-- **Missing evidence:** run the smallest useful experiment yourself.
-- **Excluded by an owner decision:** keep the exclusion.
-- **Real product choice:** ask, with sources and a recommendation.
+In this order; stop at the first that answers: the owner's latest instructions; the ledger and recorded decisions;
+the architecture guide and contracts; current source and reproducible evidence; documented upstream behaviour and the
+reference implementation. Then:
 
-Never answer a rendering bug by hiding work, weakening acceptance, faking a service result, forcing a completion
-signal or enabling an unverified replacement.
+- answered -> act on it;
+- promised behaviour not yet built -> owed work, done, not asked;
+- missing evidence -> run the smallest experiment that settles it;
+- excluded by an owner decision -> not raised again;
+- none of these -> a real question for the owner, stated with the sources checked and a recommendation.
 
-## 7. Handoff
+## 7. The lead's acceptance (before any merge)
 
-The lead updates the ledger after each report and acceptance. A handoff lists HEAD and the dirty-tree state, the
-accepted changes, the build in use, the evidence paths, any open device-loss bug with its owner and evidence, and the next
-concrete task. List running processes and active agents as they are; an `In progress` row implies nothing is running.
+The lead merges a wave only when every line holds:
+
+- [ ] The report has all §5 headings.
+- [ ] Slips, if any, are checked in the diff.
+- [ ] The lead re-ran the tests of every changed crate in the wave's worktree: all pass.
+- [ ] The lead read the wave's final sheets and `report.md`s (anomalies, route checks), and any fault captures.
+- [ ] Changes under §5 "Needs audit" had a fresh audit agent; its HIGH and MEDIUM findings are fixed (by a send-back)
+      or recorded in the ledger with the reason.
+- [ ] Accepted perf numbers: the lead ran the wave's scenarios with nothing else running, and records those.
+- [ ] Merge into `gameplay-harness` (`git merge --no-ff <wave>`), message ending with the attribution line; the
+      ledger row updated and committed; the main `dist` rebuilt and the wave's titles relinked from it.
+- [ ] The worktree removed (junction first) when the wave is done.
+
+Any unticked line sends the work back with the exact output and whether the product or the test is at fault.
+
+## 8. Agents: reuse, fresh, size
+
+- **Send-backs** for a wave go to that wave's agent while its context is healthy.
+- **Fresh** agent for every audit, and for a new wave once an agent's context is large or it repeats slips; the
+  brief then carries the conventions it needs. Fresh agents complete ledger rows, not open-ended game bugs.
+- **Split** a large wave when one part can be verified and merged alone.
+- **Few agents:** one per real sub-project; never split one doc set or one file's change between agents.
+
+## 9. Enforcement
+
+- `AGENTS.md` points here, and every brief's "Read first" names this document.
+- The lead returns a brief, report or merge that breaks §§3-5, and records the return in the ledger row.
+- Repeated slips of one rule end that agent's reuse.
+- The lead's own breaches (a misattributed instruction, an unmerged accepted wave, a question a source answered) are
+  logged in the ledger when the owner points them out, and the rule that was missed is added here.

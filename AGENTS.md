@@ -6,18 +6,13 @@
 before changing behaviour or structure. The tree is often dirty: preserve unrelated work, and never reset, revert,
 stage or commit another person's changes.
 
-**Delegated work follows `docs/31-DELEGATION-PROTOCOL.md` (binding).** Read it before a wave. An agent owns a bug
-end to end: it implements, builds, tests and verifies in the game; the lead may implement too. Builds and games may run
-concurrently at full parallelism, except that a perf-measurement run (FPS/timing before/after) has the machine to
-itself; two GPUs, `NXGFX_GPU=<index>` picks one. Use the normal CLI builds, the real
-library and the configured build folders (owner-authorized); no per-run copies of games. Diagnostics, tests and
-audits are steps, never milestones: work ends with a source correction and its game result. A device loss stops
-that workload and becomes the top-priority bug: fix it and re-run that path with the fix, never unchanged.
-Blacklists stay unless a corrected pipeline is proven safe.
-Back up and restore saves. Audits are for genuinely dangerous changes, after a fix exists. Keep evidence compact.
+**Delegated work follows `docs/31-DELEGATION-PROTOCOL.md` (binding, strictly enforced).** Read it before any wave,
+send-back or audit: roles, one worktree and branch per parallel wave (its own `target/` and `dist/`, no lock files),
+titles owned by one wave at a time, the brief's parts, the rules while working, the report's headings, how a
+question is settled before the owner is asked, and the lead's acceptance list (re-run tests, read sheets, audit
+dangerous changes, the lead's own quiet-machine perf numbers, merge, commit, rebuild). Agents commit only on their
+own wave branch; the lead merges into `gameplay-harness`; push when the owner asks. Two GPUs: `NXGFX_GPU=<index>`.
 The game-outcome roadmap is `docs/33-REFERENCE-DELTA-ROADMAP.md`; `docs/32-REMAINING-WORK-PLAN.md` is the ledger.
-The lead commits as work lands (after every accepted wave; checkpoints before branch/worktree work); delegated
-agents do not commit. Push when the owner asks.
 
 **Gameplay harness (2026-11-24):** `scripts/play.py` runs one built title through a scenario from
 `scripts/scenarios.toml` and writes `build/play/<run>/report.md` plus `sheet-N.png` contact sheets of the
