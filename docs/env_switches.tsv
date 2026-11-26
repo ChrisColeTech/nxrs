@@ -207,7 +207,7 @@ NXOS_NICK	switch	(`NXOS_NICK` overrides): opened at launch, answered by the user
 NXOS_NS2_STRICT	switch	catch-all session for a name nobody registered (`Unknown`; `NXOS_NS2_STRICT=1` refuses it as for a Switch game).	src/os/src/ipc/mod.rs
 NXOS_NVN_BT	switch	`NXOS_NVN_BT=<proc>`: the first 64 calls of that proc log their arguments and the	src/os/src/nvn/mod.rs
 NXOS_OPMODE	switch	mode by default, so games draw for a television; `NXOS_OPMODE` overrides), changed live with the console's	src/os/src/services/oe.rs
-NXOS_SAVE	switch	marker (`romfs.nsp`, `romfs.nup`, `romfs.dir` or `romfs/`). Saves go to `<data dir>/save` (or `NXOS_SAVE`).	src/os/src/boot.rs
+NXOS_SAVE	switch	instead: `romfs.nsp`, `romfs.nup` or `romfs.dir`). Saves go to `<data dir>/save` (or `NXOS_SAVE`).	src/os/src/boot.rs
 NXOS_STEAL_ANY_MS	switch	`NXOS_STEAL_ANY_MS=<ms>` (debugging): how long a waiter waits before it takes a core from an equal or better holder	src/os/src/sched.rs
 NXOS_STEAL_WORSE_MS	switch	`NXOS_STEAL_WORSE_MS=<ms>` (debugging): how long a waiter waits before it takes a core from a worse holder (default	src/os/src/sched.rs
 NXOS_SWKBD	switch	the `keyboard_text` setting ("Player"). With no window to show it over (`NXOS_SWKBD=auto`, a headless run) the	src/os/src/services/swkbd.rs

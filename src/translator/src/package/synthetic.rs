@@ -481,21 +481,36 @@ fn combined_package_applies_its_update_per_read() {
     assert_eq!(g.display_version.as_deref(), Some("1.2.3"));
     assert_eq!(g.addons, [GAME + 0x1001]);
     expect_new(&g.romfs);
-    // the marker alone (what the runtime has) reads the same bytes
+    // the data folder carries the patched RomFS (romfs/), no in-place marker; romfs.source records what it was made
+    // from (the old marker's text, which the launcher reads)
     let data = _t.0.join("data");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(data.join("romfs.nsp"), "SWRNSP1\nold\n0\n0\n").unwrap();
     g.write_data(&data, &|_| {}).unwrap();
-    let text = std::fs::read_to_string(data.join("romfs.nsp")).unwrap();
+    assert!(!data.join("romfs.nsp").exists() && data.join("romfs").is_dir());
+    let text = std::fs::read_to_string(data.join("romfs.source")).unwrap();
     assert!(
         text.starts_with("SWRNSP2\n")
             && text.contains("\nbase ")
             && text.contains("\npatch ")
             && !text.contains("\nupdate ")
+            && text.contains("\nextracted romfs 3 ")
+            && text.contains("\nstamp ")
     );
     assert!(text.contains(&format!(
         "titlekek_02:{}",
         crate::package::io::hex(&ecb_encrypt(&titlekek(), &fx.base_key))
     )));
-    expect_new(&marker::open_data_dir(&data, Some(&keys)).unwrap());
+    // a rebuild with the record unchanged leaves the copy alone
+    let said = std::cell::RefCell::new(vec![]);
+    g.write_data(&data, &|m| said.borrow_mut().push(m.to_string()))
+        .unwrap();
+    assert!(said.borrow().iter().any(|m| m.contains("romfs is current")));
+    // the built game reads its data with the package moved away
+    let away = _t.0.join("away.nsp");
+    std::fs::rename(&pkg, &away).unwrap();
+    expect_new(&marker::open_data_dir(&data, None).unwrap());
+    std::fs::rename(&away, &pkg).unwrap();
     assert_eq!(
         std::fs::read(data.join("exefs/main")).unwrap(),
         nso(b"update")
@@ -569,7 +584,7 @@ fn separate_update_nsp_xci_and_bare_nca() {
         expect_new(&g.romfs);
         let data = _t.0.join("data");
         g.write_data(&data, &|_| {}).unwrap();
-        let text = std::fs::read_to_string(data.join("romfs.nsp")).unwrap();
+        let text = std::fs::read_to_string(data.join("romfs.source")).unwrap();
         assert!(text.contains(&format!(
             "\nupdate {}\n",
             crate::package::io::abspath(pkg).display()
@@ -589,13 +604,25 @@ fn separate_update_nsp_xci_and_bare_nca() {
         )
     );
     assert_eq!(update_info(&upd, Some(&keys), Some(&game)).unwrap(), info);
-    // the marker names the update package; when it is gone the runtime says so
+    // the build carries the patched data: with the game and its update package both gone it reads the same
     let data = _t.0.join("data2");
     open_game(&game, &opts(&keys, UpdateChoice::Package(upd.clone())))
         .unwrap()
         .write_data(&data, &|_| {})
         .unwrap();
     std::fs::rename(&upd, _t.0.join("moved.nsp")).unwrap();
+    std::fs::rename(&game, _t.0.join("moved-game.nsp")).unwrap();
+    expect_new(&marker::open_data_dir(&data, None).unwrap());
+    // a build made before (an in-place marker) still names the missing update
+    std::fs::write(
+        data.join("romfs.nsp"),
+        format!(
+            "SWRNSP2\n{}\nkeys -\nromfs 0 10\nupdate {}\npatch 0 10 0 4 0 - 0 0 0 0\n",
+            _t.0.join("moved-game.nsp").display(),
+            upd.display()
+        ),
+    )
+    .unwrap();
     let e = marker::open_data_dir(&data, Some(&keys))
         .unwrap_err()
         .to_string();
@@ -698,16 +725,22 @@ fn dlc_install_reads_in_place_and_refuses() {
     let p = crate::package::io::abspath(&pkg).display().to_string();
     assert!(said.borrow().iter().any(|m| m
         == &format!(
-            "DLC: installed {:016x} v65536 (read in place from the package) from {p}",
+            "DLC: installed {:016x} v65536 (extracted into romfs/, 0.0 MB) from {p}",
             GAME + 0x1001
         )));
+    let title = dlc::title_folder(&datadir, GAME + 0x1001);
+    assert!(title.join("romfs").is_dir() && !title.join("romfs.nsp").exists());
     assert_eq!(
         dlc::read_manifest(&datadir),
         [(GAME + 0x1001, 65536, "data".to_string(), p.clone())]
     );
-    let r = dlc::title_romfs(&datadir, GAME + 0x1001, Some(&keys)).unwrap();
+    // read with the package moved away
+    let away = _t.0.join("away.nsp");
+    std::fs::rename(&pkg, &away).unwrap();
+    let r = dlc::title_romfs(&datadir, GAME + 0x1001, None).unwrap();
     assert_eq!(r.read_file("version.txt").unwrap(), b"10002");
     assert_eq!(r.read_file("contents.dat").unwrap(), [7u8; 4096]);
+    std::fs::rename(&away, &pkg).unwrap();
     // again: nothing to do
     said.borrow_mut().clear();
     dlc::install(&[pkg.clone()], &datadir, &say, Some(&keys), false).unwrap();
