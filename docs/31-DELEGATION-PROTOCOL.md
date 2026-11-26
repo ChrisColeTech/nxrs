@@ -117,6 +117,7 @@ The lead merges a wave only when every line holds:
 - [ ] Merge into `gameplay-harness` (`git merge --no-ff <wave>`), message ending with the attribution line; the
       ledger row updated and committed; the main `dist` rebuilt and the wave's titles relinked from it.
 - [ ] The worktree removed (junction first) when the wave is done.
+- [ ] Push only when the owner asks: `git push origin gameplay-harness:main`.
 
 Any unticked line sends the work back with the exact output and whether the product or the test is at fault.
 
