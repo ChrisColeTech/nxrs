@@ -1252,6 +1252,10 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         (r, sh.join().unwrap_or(0.0))
     });
     built?;
+    if a.web {
+        // what the page streams and prefetches (docs/35 W3)
+        out.say(&crate::webpack::write(&outdir, &data, &name)?);
+    }
     timings.push(("shaders", shader_secs));
     timings.push(("total", t_all.elapsed().as_secs_f64()));
     // NROs the game's NRRs register and no file holds: the game decodes them at run time. Boot it once to capture

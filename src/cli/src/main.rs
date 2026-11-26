@@ -26,6 +26,7 @@ mod out;
 mod pipeline;
 mod profile;
 mod stubgen;
+mod webpack;
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};

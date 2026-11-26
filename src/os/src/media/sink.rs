@@ -817,9 +817,14 @@ fn start() {
             }
         })
         .expect("audio release thread");
+    // the web: the page's AudioWorklet through a shared ring (docs/35 W3)
+    #[cfg(target_os = "emscripten")]
+    let device: fn() = web_device_thread;
+    #[cfg(not(target_os = "emscripten"))]
+    let device: fn() = device_thread;
     std::thread::Builder::new()
         .name("nxos audio device".into())
-        .spawn(device_thread)
+        .spawn(device)
         .expect("audio device thread");
     std::thread::Builder::new()
         .name("nxos audio clock".into())
@@ -874,6 +879,79 @@ fn device_thread() {
                 }
                 clock(Duration::from_secs(2));
             }
+        }
+    }
+}
+
+/// The web's output device: the mix written into the ring the page's AudioWorklet plays, kept at [`WEB_FILL`] frames
+/// ahead. Until the page's AudioContext runs (the browser starts sound only after a click or a key) or while it does
+/// not (its heartbeat stops), the mix is consumed in real time, as without a device, and the log says so.
+#[cfg(target_os = "emscripten")]
+const WEB_FILL: u32 = 3072;
+
+#[cfg(target_os = "emscripten")]
+fn web_device_thread() {
+    use crate::web::audio::{Ring, CAPACITY};
+    let ring = Ring::publish();
+    let mut r = Resampler::new(RATE);
+    let mut running = false;
+    let mut beat = (ring.heartbeat(), Instant::now());
+    let mut clock0 = (Instant::now(), 0u64);
+    let mut report = (Instant::now(), (0u32, 0u32), false);
+    let mut buf: Vec<[f32; 2]> = Vec::with_capacity(CAPACITY as usize);
+    crate::log!("audio: the page's sound starts at the first click or key (the browser's autoplay rule); until then the game's sound is consumed in real time, not heard");
+    // the longest pass of this loop since the last report (a stall that empties the ring shows here)
+    let mut last = Instant::now();
+    let mut longest = Duration::ZERO;
+    loop {
+        std::thread::sleep(Duration::from_millis(2));
+        let now = Instant::now();
+        longest = longest.max(now.duration_since(last));
+        last = now;
+        let hb = ring.heartbeat();
+        if hb != beat.0 {
+            beat = (hb, now);
+        }
+        let (state, rate) = ring.context();
+        let live = state == 1 && now.duration_since(beat.1) < Duration::from_millis(500);
+        if live != running {
+            running = live;
+            if live {
+                *sink().device.lock().unwrap() = format!("the page's AudioWorklet ({rate} Hz)");
+                crate::log!("audio: output on the page's AudioWorklet ({rate} Hz context, 48 kHz stereo ring of {CAPACITY} frames kept {WEB_FILL} ahead)");
+            } else {
+                crate::log!("[RED] audio: the page's AudioWorklet stopped (context state {state}): the game's sound is consumed in real time, not heard");
+                clock0 = (now, 0);
+            }
+        }
+        if running {
+            let fill = ring.fill();
+            if fill < WEB_FILL {
+                buf.clear();
+                buf.extend((0..WEB_FILL - fill).map(|_| r.next48()));
+                ring.push(&buf);
+            }
+        } else {
+            let due = (now.duration_since(clock0.0).as_secs_f64() * RATE as f64) as u64;
+            while clock0.1 < due {
+                r.next48();
+                clock0.1 += 1;
+            }
+        }
+        if running && now.duration_since(report.0) >= Duration::from_secs(5) {
+            let u = ring.underruns();
+            // the first report once running, then whenever the underruns grew
+            if u != report.1 || !report.2 {
+                crate::log!(
+                    "audio: web output: {} underruns ({} frames of silence) so far; ring fill {}/{CAPACITY}, worklet calls {hb}, longest refill gap {:.0} ms",
+                    u.1,
+                    u.0,
+                    ring.fill(),
+                    longest.as_secs_f64() * 1e3
+                );
+            }
+            report = (now, u, true);
+            longest = Duration::ZERO;
         }
     }
 }
