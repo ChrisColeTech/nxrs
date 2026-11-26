@@ -1,7 +1,8 @@
-//! A game's (or an add-on title's) RomFS, read in place: a RomFS image inside a package (an NSP section, plain,
-//! AES-CTR or BKTR-patched), the file tree of a NUP, or a dumped folder's `romfs/`. Nothing is extracted.
+//! A game's (or an add-on title's) RomFS: a RomFS image inside a package (an NSP section, plain, AES-CTR or
+//! BKTR-patched) or a file of its own, the file tree of a NUP, or a folder (a dump's `romfs/`, or the copy a build
+//! extracted into the game's data folder, `package::extract`).
 use crate::package::error::{fmt, PackageError, Result};
-use crate::package::io::{u32le, u64le};
+use crate::package::io::{u32le, u64le, Blob};
 use crate::package::nup::{FileNode as NupFile, NupReader};
 use crate::package::storage::Storage;
 use std::collections::HashSet;
@@ -61,7 +62,29 @@ pub struct DirEntry {
 pub(crate) enum Backend {
     Image(Arc<dyn Storage>),
     Nup(Arc<NupReader>),
-    Folder,
+    Folder(OpenFiles),
+}
+
+/// A folder RomFS's open files, read positionally (one handle a file, shared by every reader thread) instead of
+/// opened at every read. Holds at most [`OPEN_FILES`]; when full it is emptied and refilled.
+#[derive(Default)]
+pub(crate) struct OpenFiles(std::sync::Mutex<std::collections::HashMap<PathBuf, Arc<Blob>>>);
+
+const OPEN_FILES: usize = 256;
+
+impl OpenFiles {
+    fn get(&self, p: &Path) -> Result<Arc<Blob>> {
+        let mut map = self.0.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(b) = map.get(p) {
+            return Ok(b.clone());
+        }
+        let b = Arc::new(Blob::open(p)?);
+        if map.len() >= OPEN_FILES {
+            map.clear();
+        }
+        map.insert(p.to_path_buf(), b.clone());
+        Ok(b)
+    }
 }
 
 /// A RomFS file tree with in-place reads. `Send + Sync`: share it (`Arc<RomFs>`) between reader threads.
@@ -272,7 +295,7 @@ impl RomFs {
                 name: String::new(),
                 kind: NodeKind::Dir(vec![]),
             },
-            backend: Backend::Folder,
+            backend: Backend::Folder(OpenFiles::default()),
             source,
         }
     }
@@ -288,7 +311,7 @@ impl RomFs {
                 name: String::new(),
                 kind: NodeKind::Dir(kids),
             },
-            backend: Backend::Folder,
+            backend: Backend::Folder(OpenFiles::default()),
             source: format!("folder {}", dir.display()),
         })
     }
@@ -378,17 +401,11 @@ impl RomFs {
         match (loc, &self.backend) {
             (FileLoc::Image(at), Backend::Image(img)) => img.read(at + offset, len),
             (FileLoc::Nup(f), Backend::Nup(r)) => r.read(f, offset, len),
-            (FileLoc::Disk(p), _) => {
-                use std::io::{Read, Seek, SeekFrom};
-                let io = |source| PackageError::Io {
-                    path: p.clone(),
-                    source,
-                };
-                let mut f = std::fs::File::open(p).map_err(io)?;
-                f.seek(SeekFrom::Start(offset)).map_err(io)?;
-                let mut out = Vec::with_capacity(len as usize);
-                f.take(len).read_to_end(&mut out).map_err(io)?;
-                Ok(out)
+            (FileLoc::Disk(p), Backend::Folder(open)) => {
+                let blob = open.get(p)?;
+                // the file may have shrunk since the tree was read: what is there
+                let len = len.min(blob.size.saturating_sub(offset));
+                blob.read_at(offset, len)
             }
             _ => fmt(format!("{path}: file location does not match its RomFS")),
         }

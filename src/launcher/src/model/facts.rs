@@ -9,7 +9,8 @@ pub struct Facts {
     pub update_pending: bool,
     /// its source exists
     pub source_available: bool,
-    /// its source is an in-place package (NUP, NSP, XCI)
+    /// its build reads its source package while it plays (an in-place marker, from before builds carried
+    /// their data); a build with its own copy of the data never needs the source
     pub in_place: bool,
     pub build_incomplete: bool,
 }

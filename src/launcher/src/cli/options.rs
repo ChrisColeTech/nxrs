@@ -1,6 +1,6 @@
 //! The command line: the Qt launcher's flags, same names, values and exit codes.
 
-use clap::{Arg, ArgAction, ArgMatches, Command};
+use clap::ArgMatches;
 
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct Options {
@@ -38,6 +38,9 @@ pub struct Options {
     pub nxrs_doctor: bool,
     pub smoke_build: Option<String>,
     pub build_output: Option<String>,
+    pub migrate_builds: bool,
+    pub show_window: Option<String>,
+    pub show_add: Option<String>,
 }
 
 impl Options {
@@ -52,69 +55,12 @@ impl Options {
                 || !self.remove_update.is_empty()
                 || self.update_choice.is_some()
                 || self.source.is_some()
-                || self.nxrs_doctor)
+                || self.nxrs_doctor
+                || self.migrate_builds)
     }
 }
 
-pub fn command() -> Command {
-    let flag = |name: &'static str, help: &'static str| {
-        Arg::new(name)
-            .long(name)
-            .help(help)
-            .action(ArgAction::SetTrue)
-    };
-    let value = |name: &'static str, v: &'static str, help: &'static str| {
-        Arg::new(name)
-            .long(name)
-            .value_name(v)
-            .help(help)
-            .num_args(1)
-    };
-    let many = |name: &'static str, v: &'static str, help: &'static str| {
-        Arg::new(name)
-            .long(name)
-            .value_name(v)
-            .help(help)
-            .action(ArgAction::Append)
-    };
-    Command::new("nxrs")
-        .about("nxrs — native game library and build launcher")
-        .version(env!("NXRS_VERSION"))
-        .arg(value("root", "directory", "Kept for older scripts; has no effect"))
-        .arg(value("library", "file", "Use a specific library file"))
-        .arg(value("import-build", "exe", "Import an existing native game executable"))
-        .arg(flag("demo", "Show a non-persistent preview library"))
-        .arg(flag("list-view", "Start in the details-list view"))
-        .arg(flag("show-console", "Show the build-output dock"))
-        .arg(flag("show-properties", "Open the selected game's Properties dialog"))
-        .arg(flag("show-filters", "Open the library search and filter popout"))
-        .arg(value("preview-theme", "mode", "Preview dark or light mode without saving"))
-        .arg(value("preview-accent", "color", "Preview an accent without saving"))
-        .arg(value("select-title", "title", "Select a library game by display title"))
-        .arg(value("source", "package", "Set the --select-title game's source package or extracted folder, saved before --build"))
-        .arg(value("check-image", "file", "Validate an artwork image"))
-        .arg(flag("show-appearance", "Open appearance settings"))
-        .arg(flag("show-controller", "Open controller settings"))
-        .arg(value("properties-tab", "index", "Tab for --show-properties (0 General, 1 Build, 2 Runtime, 3 Artwork, 4 DLC, 5 Updates)"))
-        .arg(many("install-dlc", "package", "Install a DLC package for the --select-title game and exit (repeatable)"))
-        .arg(many("remove-dlc", "package", "Remove a DLC package from the --select-title game and exit (repeatable)"))
-        .arg(many("install-update", "package", "Add an update package to the --select-title game and exit (repeatable)"))
-        .arg(many("remove-update", "package", "Remove an update package from the --select-title game and exit (repeatable)"))
-        .arg(value("update-choice", "choice", "Version to build for the --select-title game: newest, none or an installed package"))
-        .arg(flag("show-updates", "Open the selected game's Updates window (Game > Install Updates…)"))
-        .arg(flag("build", "Build the --select-title game with its saved options and exit"))
-        .arg(value("engine", "engine", "Engine of the --select-title game, saved: nxrs (before --build and the DLC/update options)"))
-        .arg(value("nxrs-build", "exe", "nxrs-build to use instead of the bundled one, saved in the library (empty: the bundled one)"))
-        .arg(flag("show-dlc", "Open the selected game's DLC window (Game > Install DLC…)"))
-        .arg(value("show-menu", "name", "Open a menu of the title bar (File, Game, Keys, View, Help)"))
-        .arg(value("screenshot", "png", "Save a launcher preview and exit"))
-        .arg(value("screenshot-delay", "ms", "Milliseconds before --screenshot grabs the window (default 1100)"))
-        .arg(flag("show-engine-settings", "Open Settings > Engine (nxrs-build doctor runs there)"))
-        .arg(flag("show-play-settings", "Open Settings > Play (screen mode, background pause and mute: every game)"))
-        .arg(flag("nxrs-doctor", "Run nxrs-build doctor for the configured nxrs-build, print its checks and exit (0 = all ok)"))
-        .arg(value("smoke-build", "input", "Build a synthetic test input and exit (diagnostics)"))
-        .arg(value("build-output", "directory", "Output folder for --smoke-build"))
-}
+pub use super::flags::command;
 
 pub fn parse_from<I, T>(args: I) -> Result<Options, clap::Error>
 where
@@ -172,6 +118,9 @@ fn from_matches(m: &ArgMatches) -> Options {
         nxrs_doctor: f("nxrs-doctor"),
         smoke_build: s("smoke-build"),
         build_output: s("build-output"),
+        migrate_builds: f("migrate-builds"),
+        show_window: s("show-window"),
+        show_add: s("show-add"),
     }
 }
 

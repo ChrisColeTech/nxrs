@@ -11,7 +11,7 @@
 //!
 //! - `NXGFX_FAULT_SHOTS=<dir>`: on (`1`: `captures/faults`);
 //! - `NXGFX_FAULT_FLASH=<white>,<black>`: the fractions of the picture that trip (default `0.02,0.25`; 0 = off);
-//! - `NXGFX_FAULT_MAX=<n>`: captures per run (default 32; at most 4 per reason).
+//! - `NXGFX_FAULT_MAX=<n>`: captures per run (default 32; at most `NXGFX_FAULT_PER_REASON`, default 4, per reason).
 //!
 //! Cost when on: one copy of the presented picture per frame on the GPU and a sparse sample of it on the completion
 //! thread (about 0.2 ms at 1080p); a capture converts and writes its pictures on a thread of its own.
@@ -30,7 +30,17 @@ struct Cfg {
     max: u32,
 }
 
-const PER_REASON: u32 = 4;
+/// Captures per reason (`NXGFX_FAULT_PER_REASON`, default 4): OoT's forest fog trips the white-flash check four times
+/// before Link's house, where the one-frame white props come (OOT-FLASH).
+fn per_reason() -> u32 {
+    static N: OnceLock<u32> = OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("NXGFX_FAULT_PER_REASON")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4)
+    })
+}
 /// sample columns across the picture
 const SAMPLE_W: u32 = 480;
 
@@ -265,7 +275,7 @@ fn landed(c: &'static Cfg, rb: &super::Readback, src: &[u8], flip: bool, frame: 
     let key: String = why.chars().filter(|c| !c.is_ascii_digit()).take(48).collect();
     let key = if key.starts_with("flash-") { key[..11].to_string() } else { key };
     let per = st.per_reason.entry(key).or_insert(0);
-    if st.taken >= c.max || *per >= PER_REASON {
+    if st.taken >= c.max || *per >= per_reason() {
         return;
     }
     *per += 1;
@@ -289,6 +299,7 @@ fn landed(c: &'static Cfg, rb: &super::Readback, src: &[u8], flip: bool, frame: 
             .map(|p| format!(", the present before: {} ({w}x{h})", p.display()))
             .unwrap_or_default()
     );
+    super::super::exec::draw_ring::dump(frame, &c.dir.join(format!("fault-{n:02}-draws.txt")));
     std::thread::spawn(move || {
         if ok {
             if flip {

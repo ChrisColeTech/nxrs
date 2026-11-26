@@ -37,8 +37,8 @@ pub fn built_game(dir: &str) -> Game {
     g
 }
 
-/// An entry an older engine built (`"engine": "turbo"`, or no engine) loads as nxrs, moved to its
-/// `[nxrs]` folder and not built, even with the older build still on disk; it saves back as nxrs, and
+/// An entry an older engine built (`"engine": "turbo"`, or no engine) loads as nxrs, moved to an
+/// `nxrs\<name>` folder and not built, even with the older build still on disk; it saves back as nxrs, and
 /// `savesOffered` is kept as it was.
 #[test]
 fn other_engine_entries_load_as_nxrs() {
@@ -51,7 +51,7 @@ fn other_engine_entries_load_as_nxrs() {
         v["savesOffered"] = serde_json::json!("offered");
         let g = game_json::from_json(&v);
         assert_eq!(g.engine, e::ENGINE_NXRS);
-        assert_eq!(g.build_dir, format!("{dir}/Build output [nxrs]"));
+        assert_eq!(g.build_dir, format!("{dir}/nxrs/Build output"));
         assert!(g.nxrs() && g.built_source.is_empty() && !has_build(&g));
         assert_eq!(g.saves_offered, "offered");
         let back = game_json::to_json(&g);

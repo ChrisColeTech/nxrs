@@ -11,7 +11,7 @@ use crate::ui::widgets::select;
 use egui::Ui;
 
 const NAME_TIP: &str = "The name the library shows. The build keeps its executable name.";
-const SOURCE_TIP: &str = "The game package (NSP, XCI, NUP, an NRO) or an extracted folder (exefs/ + romfs/). Its data is read in place.";
+const SOURCE_TIP: &str = "The game package (NSP, XCI, NUP, an NRO) or an extracted folder (exefs/ + romfs/). The build copies its data into the game, which then plays without it.";
 const FOLDER_TIP: &str =
     "Where this game's build goes: the executable, the compiled code and the caches.";
 const EXE_TIP: &str = "The build's file name; it is set when the game is added.";
@@ -44,7 +44,7 @@ pub fn general(ui: &mut Ui, app: &App, d: &mut PropertiesDraft) {
         });
     });
     rule(ui);
-    group(ui, Icon::General, "About", "");
+    group(ui, Icon::General, "About", w::ABOUT_GAME_NOTE);
     row(ui, "Format", "", |ui| readout(ui, d.game.format()));
     let version = app.version_of(&d.game);
     if !version.is_empty() {

@@ -55,6 +55,17 @@ pub fn windows(app: &mut App, o: &Options) {
             app.dispatch(action);
         }
     }
+    let named = match o.show_window.as_deref() {
+        Some("remove") => Some(Action::RemoveGame),
+        Some("about") => Some(Action::About),
+        Some("build-settings") => Some(Action::Settings(1)),
+        Some("tool") => Some(Action::ToolPopup),
+        _ => None,
+    };
+    named.into_iter().for_each(|a| app.dispatch(a));
+    if let Some(source) = &o.show_add {
+        app.import_source(source, true, "");
+    }
     if o.show_filters {
         app.filters.open = true;
         app.filters.focus_search = true;

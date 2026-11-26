@@ -917,11 +917,88 @@ pub struct Images {
     /// still the game's (Mario Kart 8 Deluxe registers its scene target, ser6754, into new texture pool slots every
     /// frame while it also makes new objects over the same storage; once one of those took the image, every slot
     /// naming ser6754 bound the zero stand-in: the black stretches of its laps, async replay only by timing)
-    forward: HashMap<u64, u64>,
+    forward: Recent<u64>,
     /// released texture objects (what pool slots may still name): on the console a slot's descriptor keeps naming the
     /// memory, so it shows what the live object over the same storage holds (MK8D finalizes its scene target's object,
     /// ser6754, while slots registered with it are still sampled: 88 stand-in binds a lap, the black stretches)
-    released: HashMap<u64, tex_t>,
+    released: Recent<tex_t>,
+}
+
+/// Entries kept by `Recent`: the newest this many.
+const RECENT_MAX: usize = 1 << 16;
+
+/// A map by serial that keeps its newest `RECENT_MAX` entries, dropping the oldest. It was a map cleared whole when
+/// full: OoT makes ~46 texture objects a frame over its render targets' storage, so every ~80 s the clear dropped the
+/// entries of the frame in flight too, and the 5-20 slots that named the objects whose images were just taken over
+/// bound the zero stand-in for a frame (the black and red frames, OOT-FLASH).
+struct Recent<V> {
+    map: HashMap<u64, (V, u64)>,
+    /// (serial, the insertion's sequence number) oldest first; an entry inserted again is dropped by its newest one
+    order: std::collections::VecDeque<(u64, u64)>,
+    seq: u64,
+}
+
+impl<V> Default for Recent<V> {
+    fn default() -> Self {
+        Recent {
+            map: HashMap::new(),
+            order: Default::default(),
+            seq: 0,
+        }
+    }
+}
+
+impl<V> Recent<V> {
+    fn insert(&mut self, k: u64, v: V) {
+        self.seq += 1;
+        self.map.insert(k, (v, self.seq));
+        self.order.push_back((k, self.seq));
+        while self.map.len() > RECENT_MAX || self.order.len() > 2 * RECENT_MAX {
+            let Some((old, s)) = self.order.pop_front() else {
+                break;
+            };
+            if self.map.get(&old).is_some_and(|e| e.1 == s) {
+                self.map.remove(&old);
+            }
+        }
+    }
+    fn get(&self, k: &u64) -> Option<&V> {
+        self.map.get(k).map(|e| &e.0)
+    }
+    fn contains_key(&self, k: &u64) -> bool {
+        self.map.contains_key(k)
+    }
+    fn remove(&mut self, k: &u64) {
+        self.map.remove(k);
+    }
+}
+
+#[cfg(test)]
+mod recent_tests {
+    use super::*;
+
+    #[test]
+    fn a_full_map_drops_only_its_oldest_entries() {
+        let mut r = Recent::<u64>::default();
+        for k in 0..RECENT_MAX as u64 + 10 {
+            r.insert(k, k + 1);
+        }
+        // the old map was cleared whole here: the newest entries (the frame in flight) went with it
+        assert_eq!(r.map.len(), RECENT_MAX);
+        assert!(!r.contains_key(&9), "the oldest go");
+        assert!(r.contains_key(&10));
+        let last = RECENT_MAX as u64 + 9;
+        assert_eq!(r.get(&last), Some(&(last + 1)), "the newest stay");
+        // an entry inserted again lives from its newest insertion; a removed one is gone
+        r.insert(10, 77);
+        for k in 0..20u64 {
+            r.insert(1_000_000 + k, 0);
+        }
+        assert_eq!(r.get(&10), Some(&77));
+        r.remove(&10);
+        assert!(!r.contains_key(&10));
+        assert!(r.order.len() <= 2 * RECENT_MAX);
+    }
 }
 
 impl Images {
@@ -1010,8 +1087,10 @@ impl Images {
             }
         } else if self.forward.contains_key(&serial) {
             "forwarded to an object that is gone"
+        } else if self.released.contains_key(&serial) {
+            "released, its image gone"
         } else {
-            "released or never made"
+            "never made (or released long ago)"
         }
     }
 
@@ -1660,9 +1739,6 @@ impl Gpu {
                 imgs.parked_n -= 1;
                 // pool slots registered with the released object find the image through the new one
                 if forward_on() && im.tex.serial != t.serial {
-                    if imgs.forward.len() >= 1 << 16 {
-                        imgs.forward.clear();
-                    }
                     imgs.forward.insert(im.tex.serial, t.serial);
                 }
                 if im.tex.swz != t.swz || im.tex.bits != t.bits {
@@ -1719,14 +1795,12 @@ impl Gpu {
                 return None;
             }
             let mut im = imgs.by_serial.remove(&old)?;
+            textrace::ev(old, || format!("image taken over by ser{}", t.serial));
             super::gate::note_takeover(old, t.serial);
             if let Some(v) = imgs.by_addr.get_mut(&(t.mem as u64)) {
                 v.retain(|s| *s != old);
             }
             if forward_on() {
-                if imgs.forward.len() >= 1 << 16 {
-                    imgs.forward.clear();
-                }
                 imgs.forward.insert(old, t.serial);
             }
             for a in imgs.by_serial.values_mut() {
@@ -2424,6 +2498,13 @@ impl Gpu {
     /// textures, 7.2 GB of images, most never drawn in a race. `NXGFX_LAZY_IMAGES=0`: every image at registration.
     pub fn reg_tex(&self, id: i32, t: &tex_t, v: Option<view_t>, as_image: bool) {
         super::capture::tex_reg(id, t, v, as_image);
+        if textrace::on() {
+            if let Some((was, _)) = self.tables.tex_at(id) {
+                if was != t.serial && lazy::has(id) {
+                    textrace::ev(was, || format!("its waiting registration at ID {id} replaced by ser{}", t.serial));
+                }
+            }
+        }
         lazy::forget_id(id);
         if !as_image
             && t.valid()
@@ -2450,8 +2531,10 @@ impl Gpu {
                 self.tables.write_image(&self.d, id, view, sview, false);
             }
             lazy::put(id, *t, v);
+            textrace::ev(t.serial, || format!("registered lazily at ID {id} (mem {:#x})", t.mem as u64));
             return;
         }
+        textrace::ev(t.serial, || format!("registered now at ID {id} image {as_image} (mem {:#x})", t.mem as u64));
         self.reg_tex_now(id, t, v, as_image);
     }
 
@@ -2461,8 +2544,17 @@ impl Gpu {
         if super::gate::all() && super::gate::parallel() && !super::gate::pass(lazy::has(id)) {
             return;
         }
+        // Another thread may have taken this registration with a batch (`materialize_all`) and still be making it: a
+        // pool-indexing draw on one translation lane took OoT's 3,834 waiting registrations at the forest load and
+        // made them for 0.5 s, while bound uses on other lanes found neither the registration nor an image and bound
+        // the zero stand-in (OOT-FLASH). Wait for that batch: the image exists when this use samples it.
+        if !lazy::has(id) && !lazy::making() {
+            return;
+        }
+        let _making = lazy::make_lock();
         if let Some((t, v, gone)) = lazy::take(id) {
             super::gate::count();
+            textrace::ev(t.serial, || format!("taken at ID {id} for a bound use (finalized {gone})"));
             self.reg_tex_now(id, &t, v, false);
             if gone {
                 self.release_after_use(t.serial);
@@ -2479,12 +2571,18 @@ impl Gpu {
     /// Lazily registered textures made now (a shader indexes the texture pool itself: any ID may be read), at most a
     /// frame's budget of them (`lazy::take_for_frame`; the rest in the next frames).
     pub fn materialize_all(&self) {
+        if lazy::waiting() == 0 {
+            return;
+        }
+        // held until every image taken here is made (`materialize` waits for it)
+        let _making = lazy::make_lock();
         let all = lazy::take_for_frame(super::present::frames());
         if all.is_empty() {
             return;
         }
         let n = all.len();
         for (id, (t, v, gone)) in all {
+            textrace::ev(t.serial, || format!("taken at ID {id} for the pool (finalized {gone})"));
             self.reg_tex_now(id, &t, v, false);
             if gone {
                 self.release_after_use(t.serial);
@@ -2553,9 +2651,13 @@ impl Gpu {
         }
         let mut imgs = self.images.lock().unwrap();
         if !self.ensure_image(&mut imgs, t) {
+            textrace::ev(t.serial, || format!("ID {id}: no image made (ensure_image refused)"));
             return;
         }
         let im = imgs.by_serial.get_mut(&t.serial).unwrap();
+        textrace::ev(t.serial, || {
+            format!("ID {id}: image ok (init {} upload {})", im.needs_init, im.needs_upload)
+        });
         if im.needs_init || im.needs_upload {
             self.tables.note_image_pending(t.serial);
         }
@@ -2594,13 +2696,16 @@ impl Gpu {
         if *ORDER.get_or_init(|| std::env::var("NXGFX_RELEASE_ORDER").as_deref() != Ok("0"))
             && super::queue::aq_busy()
         {
+            textrace::ev(serial, || "finalized: release queued".to_string());
             super::queue::after_queued(Box::new(move |g: &'static Gpu| g.tex_release_now(serial)));
             return;
         }
+        textrace::ev(serial, || "finalized: release now".to_string());
         self.tex_release_now(serial);
     }
 
     fn tex_release_now(&self, serial: u64) {
+        textrace::ev(serial, || "released".to_string());
         self.tables.invalidate_images();
         super::capture::tex_release(serial);
         lazy::finalized(serial);
@@ -2610,9 +2715,6 @@ impl Gpu {
             return;
         };
         watch_log("released", &im.tex, Some(im.gpu_owned));
-        if imgs.released.len() >= 1 << 16 {
-            imgs.released.clear();
-        }
         imgs.released.insert(serial, im.tex);
         if let Some(v) = imgs.by_addr.get_mut(&(im.tex.mem as u64)) {
             v.retain(|s| *s != serial);
@@ -2732,6 +2834,7 @@ impl Gpu {
             let mut i = 0;
             while i < v.len() {
                 if frame.saturating_sub(v[i].1) > PARK_FRAMES || over && v.len() > 1 && i == 0 {
+                    textrace::ev(v[i].0.tex.serial, || "parked image evicted".to_string());
                     out.push(v.remove(i).0);
                 } else {
                     i += 1;
@@ -4917,6 +5020,54 @@ fn write_storage(
     Some(())
 }
 
+/// `NXGFX_TEX_TRACE=1` (diagnostics): the last events of each texture object's registration and image (registered,
+/// taken from the lazy list, made, finalized, released, evicted, taken over), printed with a zero stand-in line.
+pub mod textrace {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static T: Mutex<Option<HashMap<u64, Vec<String>>>> = Mutex::new(None);
+
+    pub fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("NXGFX_TEX_TRACE").as_deref() == Ok("1"))
+    }
+
+    pub fn ev(serial: u64, what: impl FnOnce() -> String) {
+        if !on() {
+            return;
+        }
+        let th = std::thread::current();
+        let line = format!(
+            "f{} {} {}",
+            super::super::present::frames(),
+            th.name().unwrap_or("?"),
+            what()
+        );
+        let mut g = T.lock().unwrap();
+        let m = g.get_or_insert_with(HashMap::new);
+        if m.len() > 1 << 18 {
+            m.clear();
+        }
+        let v = m.entry(serial).or_default();
+        if v.len() >= 8 {
+            v.remove(0);
+        }
+        v.push(line);
+    }
+
+    pub fn dump(serial: u64) -> String {
+        if !on() {
+            return String::new();
+        }
+        let g = T.lock().unwrap();
+        match g.as_ref().and_then(|m| m.get(&serial)) {
+            Some(v) => format!(" [trace ser{serial}: {}]", v.join("; ")),
+            None => format!(" [trace ser{serial}: nothing]"),
+        }
+    }
+}
+
 /// Texture registrations waiting for their image (`Gpu::reg_tex`).
 mod lazy {
     use crate::nvn::obj::{tex_t, view_t};
@@ -4933,6 +5084,32 @@ mod lazy {
     }
     static ST: Mutex<Option<L>> = Mutex::new(None);
     static N: AtomicUsize = AtomicUsize::new(0);
+
+    /// Held while registrations taken from the list are made (`make_lock`); `MAKERS` counts its holders and waiters,
+    /// raised before the lock is asked for, so a registration taken under it is never seen neither waiting nor made.
+    static MAKING: Mutex<()> = Mutex::new(());
+    static MAKERS: AtomicUsize = AtomicUsize::new(0);
+
+    pub struct Making {
+        _held: std::sync::MutexGuard<'static, ()>,
+    }
+    impl Drop for Making {
+        fn drop(&mut self) {
+            // before the lock goes (the field is dropped after this): every image taken under it is made
+            MAKERS.fetch_sub(1, Ordering::AcqRel);
+        }
+    }
+    /// Take before taking registrations off the list, hold until their images are made.
+    pub fn make_lock() -> Making {
+        MAKERS.fetch_add(1, Ordering::AcqRel);
+        Making {
+            _held: MAKING.lock().unwrap_or_else(|e| e.into_inner()),
+        }
+    }
+    /// Whether some thread holds or waits for `make_lock` (a registration may be off the list and not made yet).
+    pub fn making() -> bool {
+        MAKERS.load(Ordering::Acquire) != 0
+    }
 
     pub fn on() -> bool {
         static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
@@ -5143,6 +5320,32 @@ mod lazy {
             assert!(matches!(take(910_003), Some((_, _, false))), "not finalized");
             put(910_004, tex(0xF1_0001), None);
             assert!(matches!(take(910_004), Some((_, _, false))), "the mark went with its last registration");
+        }
+
+        /// A registration taken off the list by a batch still being made is seen as "being made" (not waiting, and
+        /// `making`), and a use that then takes the make lock gets it only once the batch's images are made (OOT-FLASH:
+        /// before, the use found nothing waiting and no image and bound the zero stand-in).
+        #[test]
+        fn a_use_waits_for_a_batch_that_took_its_registration() {
+            use std::sync::atomic::AtomicBool;
+            use std::sync::Arc;
+            put(920_001, tex(0xF2_0001), None);
+            let made = Arc::new(AtomicBool::new(false));
+            let (tx, rx) = std::sync::mpsc::channel();
+            let m2 = made.clone();
+            let maker = std::thread::spawn(move || {
+                let _m = make_lock();
+                assert!(take(920_001).is_some());
+                tx.send(()).unwrap();
+                std::thread::sleep(std::time::Duration::from_millis(50));
+                m2.store(true, Ordering::SeqCst);
+            });
+            rx.recv().unwrap();
+            assert!(!has(920_001), "off the list");
+            assert!(making(), "but being made");
+            let _m = make_lock();
+            assert!(made.load(Ordering::SeqCst), "the lock comes after the batch is made");
+            maker.join().unwrap();
         }
 
         /// A pool-indexing shader makes at most a frame's budget of the waiting images, live textures first; the

@@ -36,7 +36,7 @@ impl LibraryFilter {
         }
         let ready = facts.playable();
         match self.state {
-            1 => ready && !running && !building && !(package && !facts.source_available),
+            1 => ready && !running && !building && !facts.source_offline(),
             2 => !(ready || building || running),
             3 => running,
             _ => true,

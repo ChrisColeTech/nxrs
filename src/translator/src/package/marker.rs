@@ -23,6 +23,9 @@
 //! romfs.nup  <package path>              a NUP's RomFS tree, read in place
 //! romfs.dir  <folder path>               (this engine) a dumped folder's romfs/, read in place
 //! ```
+//! Builds no longer leave these in the game's data folder (BUILD-LAYOUT, 2026-11-26): the RomFS is extracted into
+//! `romfs/` and the marker's text kept in `romfs.source` for the launcher. A build made before still has one and is
+//! read in place until it is built again. Add-on content still uses `romfs.nsp` until its next sync.
 //! Content keys stay wrapped as the package holds them; they are unwrapped with prod.keys when the marker is opened
 //! (the explicit keys, else NXRS_PROD_KEYS, else the marker's `keys` path). No key is written by the build.
 use crate::package::bktr::Patched;
@@ -40,6 +43,12 @@ use std::sync::Arc;
 pub const NSP: &str = "romfs.nsp";
 pub const NUP: &str = "romfs.nup";
 pub const DIR: &str = "romfs.dir";
+/// The RomFS a build extracted: its files ...
+pub const FOLDER: &str = "romfs";
+/// ... or its image, when its names cannot be files in a Windows folder.
+pub const IMAGE: &str = "romfs.bin";
+/// What the extracted RomFS was made from ([`crate::package::Game::romfs_record`]); the runtime does not read it.
+pub const SOURCE: &str = "romfs.source";
 /// No marker: the game has no RomFS (a homebrew NRO without one); the data folder gets an empty `romfs/`.
 pub const NONE: &str = "";
 
@@ -263,8 +272,9 @@ pub fn open_nsp_marker(marker: &Path, keys: Option<&Path>) -> Result<RomFs> {
     }
 }
 
-/// Open the game's RomFS from its data folder, in the order the runtime checks (docs/NUP_IN_PLACE.md):
-/// `romfs.nup`, `romfs.nsp`, `romfs.dir`, `romfs/`.
+/// Open the game's RomFS from its data folder, in the order the runtime checks: the in-place markers of builds made
+/// before the RomFS was extracted (`romfs.nup`, `romfs.nsp`, `romfs.dir`), then the extracted copy (`romfs.bin`,
+/// the image, then the `romfs/` folder).
 pub fn open_data_dir(datadir: &Path, keys: Option<&Path>) -> Result<RomFs> {
     let nup = datadir.join(NUP);
     if let Ok(t) = std::fs::read_to_string(&nup) {
@@ -278,5 +288,16 @@ pub fn open_data_dir(datadir: &Path, keys: Option<&Path>) -> Result<RomFs> {
     if let Ok(t) = std::fs::read_to_string(datadir.join(DIR)) {
         return RomFs::from_folder(Path::new(t.lines().next().unwrap_or("").trim()));
     }
-    RomFs::from_folder(&datadir.join("romfs"))
+    let image = datadir.join(IMAGE);
+    if image.is_file() {
+        let blob = Arc::new(Blob::open(&image)?);
+        let size = blob.size;
+        let range = FileRange {
+            blob,
+            offset: 0,
+            size,
+        };
+        return RomFs::from_image(Arc::new(range), format!("image {}", image.display()));
+    }
+    RomFs::from_folder(&datadir.join(FOLDER))
 }

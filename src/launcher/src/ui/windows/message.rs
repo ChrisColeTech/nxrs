@@ -1,20 +1,23 @@
-//! Message and question boxes (`QMessageBox`): an icon, the text, Close or Yes / No.
+//! Message and question boxes (`QMessageBox`): a mark, the text (a question's tick box as its last
+//! paragraph), and the shared footer: a ghost Close, or ghost No and filled Yes.
 
 use super::Reply;
 use crate::constants::{child_window as c, popups as p, theme as tokens, words_settings as w};
 use crate::flows::Action;
-use crate::ui::popups::child_window::ChildSpec;
+use crate::flows::surface::Check;
+use crate::ui::popups::{authored, child_window::ChildSpec};
 use crate::ui::theme;
-use crate::ui::widgets::button;
-use egui::{Align, Layout, Sense, Stroke, Ui, vec2};
+use crate::ui::widgets::page;
+use egui::{Sense, Stroke, Ui, vec2};
 
 /// Sized to its text: about 62 characters a line at its width.
-pub fn spec<'a>(key: &'a str, title: &'a str, text: &str) -> ChildSpec<'a> {
+/// `checked`: a tick box is the text's last paragraph.
+pub fn spec<'a>(key: &'a str, title: &'a str, text: &str, checked: bool) -> ChildSpec<'a> {
     let lines: f32 = text
         .lines()
         .map(|l| (l.chars().count() as f32 / 62.0).ceil().max(1.0))
         .sum();
-    let body = (lines * 19.0 + 70.0).clamp(110.0, 460.0);
+    let body = (lines * 19.0 + 70.0 + footer(checked) - p::FOOTER).clamp(110.0, 500.0);
     ChildSpec::work(key, title, c::MESSAGE_WIDTH, body)
         .least(c::MESSAGE_LEAST, body.min(160.0))
         .popup()
@@ -39,30 +42,49 @@ fn mark(ui: &mut Ui, glyph: &str, error: bool) {
     );
 }
 
-fn text_area(ui: &mut Ui, glyph: &str, text: &str, error: bool) {
-    let height = (ui.available_height() - p::FOOTER).max(40.0);
+/// The buttons' strip, and the tick box's paragraph over it.
+fn footer(checked: bool) -> f32 {
+    if checked {
+        p::FOOTER + c::MESSAGE_CHECK_ROW
+    } else {
+        p::FOOTER
+    }
+}
+
+/// The mark, and beside it the text with the tick box as its last paragraph (its explanation in the
+/// info mark after it).
+fn text_area(ui: &mut Ui, glyph: &str, text: &str, error: bool, check: Option<&mut Check>) {
+    let height = (ui.available_height() - footer(check.is_some())).max(40.0);
     ui.horizontal_top(|ui| {
         mark(ui, glyph, error);
         ui.add_space(6.0);
-        egui::ScrollArea::vertical()
-            .max_height(height)
-            .show(ui, |ui| {
-                ui.add(egui::Label::new(text).wrap().selectable(true));
-            });
+        ui.vertical(|ui| {
+            egui::ScrollArea::vertical()
+                .max_height(height)
+                .show(ui, |ui| {
+                    ui.add(egui::Label::new(text).wrap().selectable(true));
+                });
+            if let Some(c) = check {
+                ui.add_space(c::MESSAGE_CHECK_GAP);
+                ui.horizontal(|ui| {
+                    ui.checkbox(&mut c.on, c.label.as_str());
+                    page::info(ui, &c.tip);
+                });
+            }
+        });
     });
 }
 
+/// A message has nothing to commit: the shared footer with a ghost Close (Enter closes too).
 pub fn message(ui: &mut Ui, text: &str, error: bool) -> Reply {
-    text_area(ui, if error { "!" } else { "i" }, text, error);
+    text_area(ui, if error { "!" } else { "i" }, text, error, None);
     let pal = theme::of(ui.ctx());
-    let mut reply = Reply::default();
-    ui.with_layout(Layout::bottom_up(Align::Max), |ui| {
-        let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-        if button::primary(ui, &pal, w::CLOSE, true).clicked() || enter {
-            reply.close = true;
-        }
-    });
-    reply
+    let (closed, _) = authored::footer_at_bottom(ui, &pal, |_| {}, w::CLOSE, None);
+    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+    Reply {
+        close: closed || enter,
+        ..Reply::default()
+    }
 }
 
 pub fn question(
@@ -70,24 +92,23 @@ pub fn question(
     text: &str,
     (yes, no): (&Action, Option<&Action>),
     default_no: bool,
+    mut check: Option<&mut Check>,
 ) -> Reply {
-    text_area(ui, "?", text, false);
+    text_area(ui, "?", text, false, check.as_deref_mut());
     let pal = theme::of(ui.ctx());
+    // the shared footer: ghost No, filled Yes last; Enter answers the default (No where the Qt box did)
+    let (said_no, said_yes) =
+        authored::footer_at_bottom(ui, &pal, |_| {}, w::NO, Some((w::YES, true, "")));
+    let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+    let said_no = said_no || (enter && default_no);
+    let said_yes = said_yes || (enter && !default_no);
     let mut reply = Reply::default();
-    ui.with_layout(Layout::bottom_up(Align::Max), |ui| {
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            // always No | Yes, Yes filled and last; Enter answers the default (No where the Qt box did)
-            let said_yes = button::primary(ui, &pal, w::YES, true).clicked();
-            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
-            let said_no = button::ghost(ui, w::NO, true).clicked() || (enter && default_no);
-            let said_yes = said_yes || (enter && !default_no);
-            if said_yes {
-                reply.actions.push(yes.clone());
-            } else if said_no {
-                reply.actions.extend(no.cloned());
-            }
-            reply.close = said_yes || said_no;
-        });
-    });
+    if said_yes {
+        let ticked = check.as_deref().filter(|c| c.on).map(|c| c.yes_on.clone());
+        reply.actions.push(ticked.unwrap_or_else(|| yes.clone()));
+    } else if said_no {
+        reply.actions.extend(no.cloned());
+    }
+    reply.close = said_yes || said_no;
     reply
 }

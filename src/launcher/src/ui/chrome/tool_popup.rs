@@ -1,11 +1,13 @@
 //! The engine badge's popup (`showToolPopup`): ready, or the problem; nxrs-build's health; Open
-//! Settings. Above the badge, kept on the window; Escape or a press outside closes it.
+//! Settings. Above the badge, kept on the window; the shared header's X, Escape or a press outside
+//! closes it.
 
-use crate::constants::{layout, theme as tokens, words_build as w};
+use crate::constants::{layout, words_build as w};
 use crate::flows::{Action, App};
-use crate::ui::theme::{self, semibold};
+use crate::ui::popups::authored;
+use crate::ui::theme;
 use crate::ui::widgets::{button, form};
-use egui::{Align, Color32, CornerRadius, Id, Layout, Rect, RichText, Sense, Stroke, vec2};
+use egui::{Align, CornerRadius, Id, Layout, Rect, Sense, vec2};
 
 /// The popup; whether it stays open, and the action it asks.
 pub fn show(ctx: &egui::Context, app: &App, anchor: Rect) -> (bool, Option<Action>) {
@@ -13,18 +15,7 @@ pub fn show(ctx: &egui::Context, app: &App, anchor: Rect) -> (bool, Option<Actio
     let problem = app.tool_problem();
     let ready = problem.is_empty();
     let (mut keep, mut action) = (true, None);
-    let shadow = egui::epaint::Shadow {
-        offset: [0, 6],
-        blur: 24,
-        spread: 0,
-        color: Color32::from_black_alpha(190),
-    };
-    let frame = egui::Frame::new()
-        .fill(p.raised)
-        .stroke(Stroke::new(1.0, p.border))
-        .corner_radius(CornerRadius::same(8))
-        .inner_margin(egui::Margin::same(16))
-        .shadow(shadow);
+    let frame = authored::popover_frame(&p);
     let area = egui::Area::new(Id::unique("tool-popup"))
         .order(egui::Order::Foreground)
         .pivot(egui::Align2::RIGHT_BOTTOM)
@@ -32,22 +23,15 @@ pub fn show(ctx: &egui::Context, app: &App, anchor: Rect) -> (bool, Option<Actio
     let shown = area.show(ctx, |ui| {
         frame.show(ui, |ui| {
             ui.set_width(layout::TOOL_POPUP_WIDTH);
-            ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(if ready {
-                        w::POPUP_READY
-                    } else {
-                        w::POPUP_PROBLEM
-                    })
-                    .font(semibold(tokens::FONT_POPUP_TITLE)),
-                );
-                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                    use crate::ui::widgets::icon_button::{Glyph, add};
-                    if add(ui, Glyph::Close, "Close (Esc)", true) {
-                        keep = false;
-                    }
-                });
-            });
+            let title = if ready {
+                w::POPUP_READY
+            } else {
+                w::POPUP_PROBLEM
+            };
+            if authored::header(ui, layout::TOOL_POPUP_WIDTH, title, "tool-popup-close") {
+                keep = false;
+            }
+            ui.add_space(crate::constants::popups::GAP);
             if !ready {
                 ui.add(egui::Label::new(problem.as_str()).wrap().selectable(true));
                 let (r, _) =
@@ -55,8 +39,9 @@ pub fn show(ctx: &egui::Context, app: &App, anchor: Rect) -> (bool, Option<Actio
                 ui.painter().rect_filled(r, CornerRadius::ZERO, p.border);
             }
             form::selectable(ui, &p, &app.health_text());
+            // a Live popover commits nothing: its verb is a ghost button
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if button::primary(ui, &p, w::OPEN_SETTINGS, true).clicked() {
+                if button::ghost(ui, w::OPEN_SETTINGS, true).clicked() {
                     action = Some(Action::Settings(0));
                     keep = false;
                 }

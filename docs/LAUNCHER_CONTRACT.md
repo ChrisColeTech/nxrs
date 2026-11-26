@@ -41,7 +41,7 @@ linux` fail (no interpreter, Windows only). nxrs adds `--keys` and `--contract`.
 | Package DLC | a line starting `DLC: this package also holds add-on content` (the launcher then adds the package to the game's DLC) |
 | Update probe | `UPDATE\t<abs path>\t<title id, 16 lowercase hex>\t<version>\t<display>` per accepted package, `UPDATE error: <reason>` per refused one; exit 1 if any was refused |
 | DLC | each `DLC error: <reason>` line is one refused package; exit ≠ 0 fails the step |
-| Built game | `<name>_data\romfs.nsp` / `romfs.nup` (line 2 / 1: the package; `SWRNSP2` `update <path>` row: the applied update), `control.nacp` (+0x3060 display version), `dlc.manifest` |
+| Built game | `<name>_data\romfs.source` (the record of the extracted RomFS: the text the old in-place marker had, so line 2 of `SWRNSP1`/`SWRNSP2` or line 1 with a `marker romfs.nup` row is the package, an `SWRNSP2` `update <path>` row the applied update; then `marker`, `extracted`, `stamp` rows), else, for a build made before 2026-11-26, `romfs.nsp` / `romfs.nup` read the same way; `control.nacp` (+0x3060 display version), `dlc.manifest` |
 | Errors | anything on stderr is shown; the exit code decides |
 
 Lines end in CRLF (Python's text mode); the launcher trims them. Exit codes: 0 done, 1 failed, 2 bad arguments.
@@ -51,12 +51,21 @@ Lines end in CRLF (Python's text mode); the launcher trims them. Exit codes: 0 d
 ```
 <outdir>\<name>.exe              loader (loads <name>_code.dll beside it)
 <outdir>\<name>_code.dll         the game's code + the runtime (nxrt.lib, static)
-<outdir>\<name>_data\            exefs\, romfs.nsp | romfs.nup | romfs.dir, control.nacp, icon, dlc.manifest + dlc\
+<outdir>\<name>_data\            exefs\, romfs\ (the game's RomFS extracted: decrypted, the update applied) or
+                                 romfs.bin (its image, when its names cannot be files in a Windows folder),
+                                 romfs.source, control.nacp, icon, dlc.manifest + dlc\<id>\romfs\
+<outdir>\<name>_data\save, sdmc, cheats    the player's files (the game writes them; kept on Remove, below)
+<outdir>\mods\                   the player's mods
 <outdir>\<name>.ini              written when missing; the launcher then writes the game's settings into it
 <outdir>\<name>_build[_v<N>|_base]\gen, obj   generated C and objects, kept for rebuilds
 ```
 
-`<outdir>` defaults to `<the input's folder>\SwitchRecomp Builds\<name>` (the launcher always passes it).
+`<outdir>` defaults to `<the input's folder>\nxrs\<name>` (the launcher always passes it: the same folder, or
+`<Build location>\nxrs\<name>` when Settings > Build location is set).
+
+**A built game carries its own data** (owner, 2026-11-26): the build writes the RomFS into the data folder, so the
+game plays with its package (and update and DLC packages) moved or deleted. A rebuild writes it again only when
+`romfs.source` changed (another package, update, or package file). Disk use is accepted.
 
 ### Output notes
 
@@ -70,12 +79,17 @@ Lines end in CRLF (Python's text mode); the launcher trims them. Exit codes: 0 d
    `compile: k of n units compiled, the rest reused` line and a `time:` line.
 5. Shaders: a `shaders:` line (the shader lane's prebuild is called once it is published); no `tools\nxshader\`,
    no `<name>_nvn\` pipeline seed, no `.hints` / `.hints.for` (nxrs has no interpreter fallback).
-6. A dumped folder's RomFS is read in place (`romfs.dir` marker), not copied into `_data\romfs\`.
-7. Add-on content encrypted with AES-CTR is read in place (`dlc\<id>\romfs.nsp` marker, `Reading … in place`) instead
-   of decrypted by hactool into `romfs.bin` (`Decrypting …`); nxrs needs no hactool.
+6. The game's RomFS, from any source (package, update, NUP, dumped folder, NRO), is extracted into `_data\romfs\`
+   (`RomFS: extracting …`, `RomFS: N of M MB written` every few seconds, `RomFS: extracted into romfs/ (…)`; with
+   `--machine` also `@progress\tdata\t<MB>\t<MB>`), or `RomFS: romfs is current` when `romfs.source` is unchanged.
+   Builds made before 2026-11-26 have an in-place marker instead (`romfs.nsp` / `romfs.nup` / `romfs.dir`), which the
+   runtime still reads until the game is built again.
+7. Add-on content is extracted into `dlc\<id>\romfs\` (`Extracting <id> (… MB)...`, storage `folder` in
+   `install.json`), decrypted by nxrs itself (no hactool); an NSZ / XCZ title is unpacked into `romfs.bin`. A title
+   installed before as an in-place `romfs.nsp` marker (storage `package`) is extracted at its next `dlc sync`.
 8. The first `<name>.ini` carries nxrs's own comment.
 9. Argument errors are clap's text (exit 2 as argparse).
-10. Without `--outdir`, the default is the launcher's `SwitchRecomp Builds\<name>` beside the input.
+10. Without `--outdir`, the default is `nxrs\<name>` beside the input (the launcher's folder).
 11. A missing input says `Cannot load the game: <path> does not exist`, before the banner; the launcher checks the
     source before it starts a build. Package errors are lines like `Cannot load the game: <update>: this update is for
     <id>, not for this game (<id>)`.
@@ -127,10 +141,29 @@ exit codes 0 / 1 / 2, the output layout and the data folder), plus, with `--mach
 ### Engine and the build folder
 
 - Every game builds with nxrs. `library.json`'s game field `"engine"` is written as `"nxrs"`; an entry saved with
-  another value or none loads as nxrs and is moved to its `<build folder> [nxrs]` folder, so it shows as needing a
-  build until it is built there. `nxrs.exe --engine` accepts only `nxrs`.
-- An nxrs build goes to `<build folder> [nxrs]` (e.g. `<dump>\SwitchRecomp Builds\<name> [nxrs]\`); the entry reads
-  what is built there (source and applied update from the data folder's marker).
+  another value or none loads as nxrs and is pointed at an nxrs folder of its own (`<base>\nxrs\<name>`, base = the
+  folder above its old build folder, or above `SwitchRecomp Builds`), so it shows as needing a build until it is built
+  there; the other engine's build is never touched. `nxrs.exe --engine` accepts only `nxrs`.
+- An nxrs build goes to `<source folder>\nxrs\<name>\` (owner, 2026-11-26; `<Build location>\nxrs\<name>` when that
+  setting is set); the entry reads what is built there (source and applied update from `romfs.source`).
+- **Migration** of the layout before (`<source folder>\SwitchRecomp Builds\<name> [nxrs]`): `nxrs.exe
+  --migrate-builds [--select-title <title>] [--library <file>]` (prints a line an entry, exit 1 when one was left),
+  or Settings > Build defaults > Old build folders > Move. It runs only when asked, never at start (other tools and
+  agents use build folders). Each such folder is renamed to `<source folder>\nxrs\<name>` and its entry's
+  `buildDir` updated; a game running or building (process list, or its executable / module open), a folder whose new
+  place exists, or a rename that fails is left and reported, and retried next time. `library.json` is copied to
+  `library.pre-layout.json` before the first write (and to `library.qt-backup.json` by the Qt rule). A `SwitchRecomp
+  Builds` folder is removed only when the moves leave it empty; other engines' builds in it stay.
+- **A built game never needs its source to play**: "Source offline" applies only to a build with an in-place marker
+  (made before 2026-11-26).
+- **Remove from library** asks with a tick box, ticked: *Also delete the build (N GB)*. Ticked, the player's files
+  (`<name>_data` and `<name>_p<N>_data`: `save\`, `sdmc\`, `cheats\`; the build's `mods\`) are moved to
+  `<launcher data folder>\saves\<title id>\` (`data\…`, `p<N>\…`, `mods\`; the title id from `exefs\main.npdm`, else
+  the output name; an older kept folder of the same game is renamed aside, never merged), then the build folder alone
+  is deleted (refused while the game runs or builds, when the folder holds the source package or is not a build of the
+  game). The package is never deleted. Unticked, no file changes. **Restoring** is the launcher's: after a successful
+  build, a kept folder of that game is moved back into the build where the build has no such folder of its own (an
+  empty one is replaced), then removed; the engine reads saves only from `<name>_data\save` as before.
 - **Import build** / discover: a build whose `<name>_build*\gen\nxrs.gen.key` exists is an nxrs build (the entry gets
   `"engine": "nxrs"`).
 - **Play**: no Python, .NET or `tools\nxshader` checks (nxrs translates shaders in the build). The DLC check before

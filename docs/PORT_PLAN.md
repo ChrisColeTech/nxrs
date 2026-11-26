@@ -278,7 +278,7 @@ the model for that piece.
 ```
  BUILD (nxrs build — the launcher's "Build")                    RUN (<name>.exe)
  ┌────────────────────────────────────────────────┐            ┌───────────────────────────────────────────────┐
- │ NSP/NUP/update/DLC in place  (nx-package)       │            │ Translated game code (C → clang)              │
+ │ NSP/NUP/update/DLC → data    (nx-package)       │            │ Translated game code (C → clang)              │
  │ Profile from nxnative's 192   (nx-profiles)     │ _code.dll ►│   └ calls into the host via the bridge (nx-cpu)│
  │ ARM64 ─► nx-xlate/nx-aot (mkw-recomp's lifter   │            │ nxnative's host, in Rust: kernel/threads,     │
  │   ported to Rust) ─► C ─► bundled clang          │ _data/ ──► │   memory (Windows model from mkw-recomp),     │
@@ -329,11 +329,11 @@ the model for that piece.
 | `nx-oracle` (dev) | dynarmic | Differential tests of lifted C vs dynarmic per instruction class. Parallel lane, not gating | `diff(class, n)` | `dynarmic-sys-mythrax` 0.3.7 |
 | `nx-mem` | nxnative `hle_svc.c` (memory SVCs, layout rules, `memory.md`); **mkw-recomp `core/memory/memory.c`, `memory_early.c`, `platform/win32_mem.c`** (Windows mechanism) | Guest space reservation below 2^39, 4 KB commit, `MEM_WRITE_WATCH`, read traps, aliases, QueryMemory | `Space::reserve`, `map/unmap/protect`, `written_pages(range)` | `windows-sys` |
 | `nx-loader` | nxnative `loader.c`, `main.c`, `nso.py`, `nacp.py`, `patch_nso.py` (cut and frame-step parts) | Module layout, relocation, imports bound to host-call addresses, `HLE_FORCE` takeovers and aliases, frame-step state page, NROs | `load(&Package, &Profile) -> Process` | — |
-| `nx-package` | nxnative `romfs.py`, `pack_nup.py`; the package formats themselves | NSP/NSZ/XCI/NCA/BKTR/NUP/DLC/updates/ZBIC, keys, RomFS in place | `Package::open`, `RomFs::open(base, update)` | `aes`, `ctr`, `xts-mode`, `sha2`, `zstd` |
+| `nx-package` | nxnative `romfs.py`, `pack_nup.py`; the package formats themselves | NSP/NSZ/XCI/NCA/BKTR/NUP/DLC/updates/ZBIC, keys; the RomFS (update applied) and DLC extracted into the build's data folder (BUILD-LAYOUT, 2026-11-26: built games carry their data; before, read in place) | `Package::open`, `RomFs::open(base, update)` | `aes`, `ctr`, `xts-mode`, `sha2`, `zstd` |
 | `nx-profiles` | nxnative `dm/games/**`, `sdk_patches.py`, `profile_guess.py`, `settings.*` | 192 profiles as data; `patches.toml` from the 27 `patches.py`; per-game runtime facts (memory layout, cores, tick rate) | `Profile::for_build(title, build_ids)` | `serde`, `toml` |
 | `nx-kernel` | nxnative `hle_thread.c`, `hle_svc.c` (non-memory), `hle_os.c`, `hle_guestthread.c`; Windows thread mechanics from mkw-recomp `platform/win32_sync.c`, `kernel_preempt.c` (reference) | Threads (one host thread per guest thread), cores, priorities, preemption, sync SVCs, events, handles, guest clock | `svc(ctx, n)`, `create_thread`, `wait_sync`, `arbitrate_lock` | `windows-sys` |
 | `nx-hle` (+ `nx-hle-macros`) | nxnative `hle.h`, `hle.c`, all service `hle_*.c`, `hle_sf.c` | HLE registry by mangled name (`#[hle]`, `#[hle_force]`, `hle_alias!`); the CMIF/sf framework; the services | `#[hle("_ZN2nn…")] fn f(ctx, a: u32, p: GuestPtr<T>) -> Result` | `linkme`, `syn`, `quote` |
-| `nx-fs` | nxnative `hle_fs.c`, `account_users.h` | Mounts, RomFS in place, transactional saves | `mount`, `SaveBackend` | — |
+| `nx-fs` | nxnative `hle_fs.c`, `account_users.h` | Mounts, the RomFS from the build's data folder (older builds: in place), transactional saves | `mount`, `SaveBackend` | — |
 | `nx-nvn` | nxnative `gfx/nvn/hle_nvn.c`, `nvn_obj.h`, `names.txt`, `nvn.h`, `nvn_tex.c`, `nvn_fstep.h`, `nvn_pace.h`, `nvn_capture.*` | NVN interface layer: bootstrap takeover, 523 entry points, objects in guest memory, command records | `trait Replay`, `entry_table()` | — |
 | `nx-vk` | nxnative `nvn_mtl.m` + `.inc` + `nvn_owner.m` + `nvn_queue`, `nvn_dirty` (structure); **mkw-recomp `gfx/vk/*`** (donor for Vulkan pieces) | NVN replay on Vulkan: device, pools (discrete-GPU model), textures, pipelines, descriptors, recording, queues, present, capture | `VkReplay::new(window) -> impl Replay` | `ash` 0.38, VMA (MIT) or `gpu-allocator` 0.28 |
 | `nx-shader` | nxnative `shader_split.py`, `dmsh_build.py`, `dmsh_reflect.py`, `dmsh_xlate`; mkw-recomp `vk_spirv_patch.c` (binding rewrites); mkw-recomp `sm86/` (cross-check only) | Build-time shaders → SPIR-V for Vulkan, shader map, pipeline manifest | `build_shaders(romfs, profile)` | `rspirv` 0.13, `spirv-tools` 0.13 |
@@ -545,7 +545,7 @@ Actions:
 | `hle_lifecycle.c` | 49 | `nx-hle::lifecycle` | PORT | Console control handler |
 | `hle_account.c`, `hle_account_users.c`, `account_users.h` | 291 | `nx-hle::account` | PORT | |
 | `user_select_mac.h` | 26 | `nx-front` | REWRITE | egui |
-| `hle_fs.c` | 1,506 | `nx-fs` | PORT | RomFS in place via `nx-package` |
+| `hle_fs.c` | 1,506 | `nx-fs` | PORT | RomFS via `nx-package` (the build's extracted copy; older builds in place) |
 | `romfs_image.h`, `romfs_identity.h` | 181 | — | DROP | iOS RomFS image; we read in place |
 | `save_sync.c/.h` | 842 | — | DROP | iCloud |
 | `hle_hid.c`, `dm_input.h`, `hle_touch.c`, `hle_haptics.c/.h` | 2,223 | `nx-hle::hid`, `nx-input` | PORT | |
@@ -644,7 +644,7 @@ Actions:
 | `jit_capture.py` | 283 | — | DROP (iOS) |
 | `romfs.py`, `nacp.py` | 378 | `nx-package` | PORT |
 | `romfs_image.py`, `tree_tar.py`, `vol_space.py` | 403 | — | DROP (iOS packaging) |
-| `nx_extract/` | 574 + binary | `nx-package` | REWRITE (packages read in place) |
+| `nx_extract/` | 574 + binary | `nx-package` | REWRITE (packages read by nx-package; the build extracts the RomFS itself, `package::extract`) |
 | `shader_cache.py`, `shader_lib.py` | 788 | `nx-shader` | PORT |
 | `make_shared_fonts.py`, `make_ext_font.py` | 206 | `nx-hle::pl` | PORT |
 | `ue_*.py`, `unity_*.py`, `il2cpp_sym.py`, `snowdrop_pools.py` | 1,240 | `nx-profiles::engines` | DEFER |

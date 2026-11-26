@@ -393,9 +393,51 @@ pub unsafe extern "C" fn rt_udf(c: *mut Cpu, pc: u64) -> ! {
     })
 }
 
-/// The function-entry profiler hook (`FN_ENTER`); reached only while `g_fnprof` is set, which nothing sets yet.
+/// The function-entry profiler hook (`FN_ENTER`); reached only while `g_fnprof` is set: the game's `nxrs_game_main`
+/// sets it when `NXRS_FNPROF` names a file. Records each guest function entered at least once (one bit per 4-byte
+/// address of the module window) and rewrites that file every 5 s with the entered addresses, one hex per line: the
+/// web target's hot set (docs/35 W0(c)).
 #[no_mangle]
-pub extern "C" fn fnprof_hit(_addr: u64, _lr: u64, _x0: u64) {}
+pub extern "C" fn fnprof_hit(addr: u64, _lr: u64, _x0: u64) {
+    use core::sync::atomic::{AtomicU64, Ordering};
+    const BASE: u64 = 0x70_0000_0000;
+    const SPAN: u64 = 1 << 30;
+    static BITS: OnceLock<Vec<AtomicU64>> = OnceLock::new();
+    static OUTSIDE: AtomicU64 = AtomicU64::new(0);
+    let bits = BITS.get_or_init(|| {
+        let v: Vec<AtomicU64> = (0..SPAN / 4 / 64).map(|_| AtomicU64::new(0)).collect();
+        if let Ok(path) = std::env::var("NXRS_FNPROF") {
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                let Some(b) = BITS.get() else { continue };
+                let mut s = String::new();
+                for (w, word) in b.iter().enumerate() {
+                    let mut m = word.load(Ordering::Relaxed);
+                    while m != 0 {
+                        let i = m.trailing_zeros() as u64;
+                        m &= m - 1;
+                        s.push_str(&format!("{:x}\n", BASE + (w as u64 * 64 + i) * 4));
+                    }
+                }
+                s.push_str(&format!("# outside {}\n", OUTSIDE.load(Ordering::Relaxed)));
+                let tmp = format!("{path}.tmp");
+                if std::fs::write(&tmp, s).is_ok() {
+                    let _ = std::fs::rename(&tmp, &path);
+                }
+            });
+        }
+        v
+    });
+    let off = addr.wrapping_sub(BASE);
+    if off >= SPAN {
+        OUTSIDE.fetch_add(1, Ordering::Relaxed);
+        return;
+    }
+    let (w, b) = ((off / 4 / 64) as usize, (off / 4) % 64);
+    if bits[w].load(Ordering::Relaxed) & (1 << b) == 0 {
+        bits[w].fetch_or(1 << b, Ordering::Relaxed);
+    }
+}
 
 #[cfg(test)]
 mod tests {

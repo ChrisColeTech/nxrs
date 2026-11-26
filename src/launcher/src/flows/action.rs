@@ -36,7 +36,8 @@ pub enum Action {
     CardProperties(String),
     CardActivate(String),
     /// answers of question boxes
-    ConfirmRemove(String),
+    /// the game's id, and whether its build is deleted too (its saves kept first)
+    ConfirmRemove(String, bool),
     ConfirmClose,
 }
 

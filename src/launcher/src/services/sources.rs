@@ -3,12 +3,11 @@
 use super::files::{is_dir, is_file, read_at};
 use super::markers::{adopt_built_update, build_cover, source_of_build};
 use crate::constants::{engine as e, words_library as w};
+use crate::model::build_layout::build_dir_for;
 use crate::model::fill::fill;
 use crate::model::game::Game;
-use crate::model::names::{build_folder_for, output_name_for, title_from_name};
-use crate::model::path_text::{
-    absolute, base_name, ends_with_ci, file_name, from_native, join, parent, suffix,
-};
+use crate::model::names::{output_name_for, title_from_name};
+use crate::model::path_text::{absolute, base_name, ends_with_ci, file_name, join, parent, suffix};
 
 fn at(bytes: &[u8], i: usize, what: &[u8]) -> bool {
     bytes.get(i..i + what.len()) == Some(what)
@@ -52,20 +51,15 @@ pub fn title_for_source(source: &str) -> String {
     })
 }
 
-/// A new entry for a source: the nxrs engine's, built into `<build location>\<name> [nxrs]` (the
-/// default output folder, else `SwitchRecomp Builds` beside the source).
+/// A new entry for a source: the nxrs engine's, built into `<source folder>\nxrs\<name>` (or
+/// `<Build location>\nxrs\<name>` when it is set).
 pub fn game_from_source(source: &str, output_root: &str) -> Game {
     let title = title_for_source(source);
     let output_name = output_name_for(&title);
-    let base = if output_root.is_empty() {
-        join(&parent(source), e::DEFAULT_BUILDS)
-    } else {
-        from_native(output_root)
-    };
     Game {
         id: uuid::Uuid::new_v4().to_string(),
         source: absolute(source),
-        build_dir: build_folder_for(&join(&base, &output_name)),
+        build_dir: build_dir_for(&absolute(source), output_root, &output_name),
         engine: e::ENGINE_NXRS.into(),
         title,
         output_name,

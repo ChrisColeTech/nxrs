@@ -43,6 +43,7 @@ NXGFX_DUMP_RAW	diagnostic		src/graphics/src/vk/exec.rs
 NXGFX_DUMP_TEX	diagnostic	`NXGFX_DUMP_TEX=<w>x<h>`: a sampled texture of that size, once per dump frame, is read back at the end of the	src/graphics/src/vk/exec.rs
 NXGFX_FAULT_FLASH	diagnostic	`NXGFX_FAULT_FLASH=<white>,<black>`: with NXGFX_FAULT_SHOTS, the fractions of the picture newly fully white / near black in one frame that trigger a capture (default `0.02,0.25`; 0 turns one off)	src/graphics/src/vk/shot/fault.rs
 NXGFX_FAULT_MAX	diagnostic	`NXGFX_FAULT_MAX=<n>`: with NXGFX_FAULT_SHOTS, the captures one run may write (default 32; at most 4 per reason)	src/graphics/src/vk/shot/fault.rs
+NXGFX_FAULT_PER_REASON	diagnostic	`NXGFX_FAULT_PER_REASON=<n>`: with NXGFX_FAULT_SHOTS, the captures one reason (a red line kind, a white flash, a black flash) may write (default 4)	src/graphics/src/vk/shot/fault.rs
 NXGFX_FAULT_SHOTS	diagnostic	`NXGFX_FAULT_SHOTS=<dir>` (`1`: `captures/faults`): fault-triggered captures. Every present is copied back and sampled; an engine anomaly (any red line, a zero stand-in bound, a draw with no render target) or a one-frame white/black flash writes that present (full size) and the one before (sampled) with a `fault capture N` log line. Off by default (one picture copy a frame); `play.py --faults` sets it	src/graphics/src/vk/shot/fault.rs
 NXGFX_FG_SHOT	diagnostic	`NXGFX_FG_SHOT=<s>`: once, after that many seconds, the first generated frame of a game frame and its two	src/graphics/src/vk/framegen.rs
 NXGFX_FRAMEGEN	switch	`0` turns frame generation off whatever the settings say	src/graphics/src/vk/framegen.rs
@@ -86,6 +87,7 @@ NXGFX_PIPE_NOOPT	diagnostic	`1` makes pipelines with optimization disabled (driv
 NXGFX_POOL	switch	- **Host** (`NXGFX_POOL=host`): the guest pages imported into Vulkan (VK_EXT_external_memory_host): zero-copy,	src/graphics/src/vk/mem.rs, src/graphics/tests/gpu.rs
 NXGFX_POOL_COLD	switch	from then on). NXGFX_POOL_COLD=0: every pool at every submission.	src/graphics/src/vk/mem.rs
 NXGFX_POOL_LOG	diagnostic	set: a line per memory pool with its placement	src/graphics/src/vk/mem.rs
+NXGFX_POOL_STICKY	switch	`NXGFX_POOL_STICKY=0`: a pool found written after 60 quiet frames goes cold again after the next 60 (as before OOT-FLASH); by default it is asked at every sync from then on	src/graphics/src/vk/mem.rs
 NXGFX_POOL_SPARSE	switch	`NXGFX_POOL_SPARSE=0` backs every pool whole.	src/graphics/src/vk/mem.rs
 NXGFX_POOL_WALKER	switch	`NXGFX_POOL_WALKER=0`: no pool walker thread (MKW-RECORD step 1); the present's sync walks every pool itself	src/graphics/src/vk/mem.rs
 NXGFX_PRESENT	switch	the swap chain present mode: `fifo`, `mailbox` or `immediate`	src/graphics/src/vk/present.rs
@@ -145,6 +147,7 @@ NXGFX_STORAGE_PROBE	switch	NXGFX_STORAGE_PROBE=<texture ID>: four uncached bindi
 NXGFX_STOREMU	switch	Storage access to formats the device cannot store (E5B9G9R9) through an R32_UINT view, the shader packing and unpacking (`storemu`); `NXGFX_STOREMU=0` off.	src/graphics/src/vk/image.rs
 NXGFX_STOREMU_IN	test	The opt-in `storemu_folder` test: every formatless float storage image of a folder of translated modules (`NXGFX_STOREMU_IN=<shaders/spv>`) emulated and checked with spirv-val.	src/graphics/src/vk/storemu.rs
 NXGFX_TAKEOVER_FORWARD	switch	NXGFX_TAKEOVER_FORWARD=0: a texture object whose image another took over has none (as before).	src/graphics/src/vk/image.rs
+NXGFX_TEX_TRACE	diagnostic	`NXGFX_TEX_TRACE=1`: each texture object's last registration / image events (registered, taken from the lazy list, made, finalized, released, evicted, taken over) printed with its zero stand-in line, and stand-ins logged every frame they happen.	src/graphics/src/vk/image.rs
 NXGFX_TEST_PAIR	test	`NXGFX_TEST_PAIR` = `<vertex key> <pixel key>`): a driver compiler crash reproduced outside the game.	src/graphics/tests/shaders_lane_c.rs
 NXGFX_TEST_PAIRS	test	vertex / pixel pairs the lane C shader test builds (default 400)	src/graphics/tests/shaders_lane_c.rs
 NXGFX_TEST_PROGRAM	test	`NXGFX_TEST_PROGRAM` = its stage keys, including vertex and pixel; `NXGFX_TEST_PAIR` remains the two-stage form):	src/graphics/tests/shaders_lane_c.rs
@@ -207,7 +210,7 @@ NXOS_NICK	switch	(`NXOS_NICK` overrides): opened at launch, answered by the user
 NXOS_NS2_STRICT	switch	catch-all session for a name nobody registered (`Unknown`; `NXOS_NS2_STRICT=1` refuses it as for a Switch game).	src/os/src/ipc/mod.rs
 NXOS_NVN_BT	switch	`NXOS_NVN_BT=<proc>`: the first 64 calls of that proc log their arguments and the	src/os/src/nvn/mod.rs
 NXOS_OPMODE	switch	mode by default, so games draw for a television; `NXOS_OPMODE` overrides), changed live with the console's	src/os/src/services/oe.rs
-NXOS_SAVE	switch	marker (`romfs.nsp`, `romfs.nup`, `romfs.dir` or `romfs/`). Saves go to `<data dir>/save` (or `NXOS_SAVE`).	src/os/src/boot.rs
+NXOS_SAVE	switch	instead: `romfs.nsp`, `romfs.nup` or `romfs.dir`). Saves go to `<data dir>/save` (or `NXOS_SAVE`).	src/os/src/boot.rs
 NXOS_STEAL_ANY_MS	switch	`NXOS_STEAL_ANY_MS=<ms>` (debugging): how long a waiter waits before it takes a core from an equal or better holder	src/os/src/sched.rs
 NXOS_STEAL_WORSE_MS	switch	`NXOS_STEAL_WORSE_MS=<ms>` (debugging): how long a waiter waits before it takes a core from a worse holder (default	src/os/src/sched.rs
 NXOS_SWKBD	switch	the `keyboard_text` setting ("Player"). With no window to show it over (`NXOS_SWKBD=auto`, a headless run) the	src/os/src/services/swkbd.rs
@@ -228,6 +231,7 @@ NXRS_DOCTOR_EXE	test	the real engine, when the developer names it (NXRS_DOCTOR_E
 NXRS_DUMP_FRAMES	diagnostic	NXRS_DUMP_FRAMES=<ret>[,<ret>..]: the 16 words at the frame record of a frame returning there (its	src/runtime/src/kernel.rs
 NXRS_ENGINE_LIB	switch	found, the MSVC engine library beside nxrs-build or `NXRS_ENGINE_LIB`), else the bundled llvm-mingw when it is	src/cli/src/cc.rs
 NXRS_ESC_QUIT	switch	NXRS_ESC_QUIT=0 (scripted runs): Esc is logged and ignored; the foreground state says	src/front/src/window.rs, src/front/src/window_linux.rs
+NXRS_FNPROF	diagnostic	`NXRS_FNPROF=<file>`: record every guest function entered at least once and rewrite the file every 5 s with their addresses (the web build's hot set, docs/35 W0(c)).	src/runtime/src/rt.rs
 NXRS_GNU_LIBS	switch	The folder of the gnullvm engine libraries: `NXRS_GNU_LIBS`, else `gnu\` beside nxrs.	src/cli/src/cc.rs
 NXRS_HOME_QUIT_TEXT	switch	any line with `NXRS_CTRL_PROMPT_TEXT`, `NXRS_HOME_QUIT_TEXT`, `NXRS_USER_PROMPT_TEXT` (the lines of a prompt, one per	src/os/src/ui_text.rs
 NXRS_HOST_PROF	switch	`NXRS_HOST_PROF=<start s>,<seconds>[,<file>]` samples one host thread about 2000 times a second for that window	src/runtime/src/hostprof.rs
@@ -294,12 +298,14 @@ NXRS_USER_PROMPT_TEXT	switch	any line with `NXRS_CTRL_PROMPT_TEXT`, `NXRS_HOME_Q
 NXRS_VERSION	switch		src/launcher/build.rs, src/launcher/src/cli/options.rs, src/launcher/src/main.rs
 NXRS_XMON	switch	- the global exclusive monitor: on for Switch programs, off for Switch 2 ones (`NXRS_XMON=1` / `NXRS_NO_XMON=1`);	src/runtime/src/process.rs
 NXRT_CLANG	test	the clang the runtime ABI layout test compiles with	src/runtime/tests/abi_layout.rs
-NXRT_EXEFS	switch	folder `<name>_data` is handed over as NXRS_DATA, and its `exefs` as NXRT_EXEFS (the runtime's module folder),	src/cli/src/cc.rs, src/os/src/services/oe.rs, src/runtime/src/process.rs
+NXRT_COMPACT_ALIAS_MB	diagnostic	Alias region size in MiB for `NXRT_LAYOUT=compact` (default 2304).	src/runtime/src/mem.rs
+NXRT_EXEFS	switchfolder `<name>_data` is handed over as NXRS_DATA, and its `exefs` as NXRT_EXEFS (the runtime's module folder),	src/cli/src/cc.rs, src/os/src/services/oe.rs, src/runtime/src/process.rs
 NXRT_FATAL_PEEK	switch	`NXRT_FATAL_PEEK=<chain>[;<chain>...]` (a debugging aid for crash reports): a chain is `<reg or hex>[+-off]`	src/runtime/src/rt.rs
 NXRT_FOREIGN_FAULTS	switch	`NXRT_FOREIGN_FAULTS=1` (debugging): a fault in another module (a system DLL's memcpy under host code, a	src/runtime/src/fault.rs
 NXRT_INTERP_CHILD	test	set in the child process of an interpreter test (internal)	src/runtime/src/interp/tests.rs
 NXRT_LAZY_HEAP	switch	- the lazy heap (`NXRT_LAZY_HEAP=1`);	src/runtime/src/process.rs
-NXRT_LLVM	switch	(`clang\bin`, `..\toolchain\clang\bin`); `NXRT_LLVM` (the runtime's own tools use it); LLVM's installer's folder;	src/cli/src/cc.rs, src/os/src/bin/nxos_dev.rs, src/runtime/src/bin/nxrt_dev.rs
+NXRT_LAYOUT	diagnostic	`NXRT_LAYOUT=compact`: every guest region (stack + heap block, alias, SDK maps, modules, kernel region) in one window of under 4 GiB around the modules, the map a web build needs (docs/35 W0(d)).	src/runtime/src/mem.rs
+NXRT_LLVM	switch(`clang\bin`, `..\toolchain\clang\bin`); `NXRT_LLVM` (the runtime's own tools use it); LLVM's installer's folder;	src/cli/src/cc.rs, src/os/src/bin/nxos_dev.rs, src/runtime/src/bin/nxrt_dev.rs
 NXRT_MINIDUMP	diagnostic	Which minidump a crash writes (`NXRT_MINIDUMP`): `0` none, `full` with the memory the threads' stacks point to,	src/runtime/src/fault.rs
 NXRT_MKW_PYTHON	test	the Python nxrt_dev runs Mario Kart World's scripts with	src/runtime/src/bin/nxrt_dev.rs
 NXRT_PANIC_CHILD	test	set in the child process of the boundary panic test (internal)	src/runtime/src/boundary.rs

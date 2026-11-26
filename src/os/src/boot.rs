@@ -7,7 +7,8 @@
 //! `nnMain`. The SDK owns DT_INIT_ARRAY. The host's services, takeovers and stubs are bound before relocation.
 //!
 //! Arguments: `<game>.exe <data dir>` (or `NXOS_DATA`): the build's data folder, holding `exefs/` and the RomFS
-//! marker (`romfs.nsp`, `romfs.nup`, `romfs.dir` or `romfs/`). Saves go to `<data dir>/save` (or `NXOS_SAVE`).
+//! the build extracted (`romfs/`, or the image `romfs.bin`; a build from before 2026-11-26 has an in-place marker
+//! instead: `romfs.nsp`, `romfs.nup` or `romfs.dir`). Saves go to `<data dir>/save` (or `NXOS_SAVE`).
 
 use crate::guest;
 use nxrt::cpu::Cpu;
