@@ -32,8 +32,25 @@ struct PoolSnapshot {
     set: vk::DescriptorSet,
     db: Option<DescBuf>,
 }
+/// Snapshot buffers the GPU is done with, by the pool generation they hold (`Tables::snapshot` brings one up to date
+/// with the descriptors written since, instead of allocating 10 MB of host-visible memory and copying the whole
+/// shadow: Ocarina of Time's forest made ~24 snapshots a frame at ~13 ms each).
+static RECYCLED: Mutex<Vec<(u64, DescBuf)>> = Mutex::new(Vec::new());
+/// At most this many are kept (the rest are freed).
+const RECYCLE_KEEP: usize = 32;
+/// Descriptor writes remembered for bringing recycled snapshots up to date (`Inner::edits`).
+const EDITS_KEEP: usize = 1 << 16;
+
 impl Drop for PoolSnapshot {
     fn drop(&mut self) {
+        if let Some(db) = self.db.take() {
+            let mut r = RECYCLED.lock().unwrap();
+            if r.len() < RECYCLE_KEEP {
+                r.push((self.generation, db));
+                return;
+            }
+            self.db = Some(db);
+        }
         unsafe {
             if let Some(db) = &self.db {
                 super::lost::ring::note_free(3, db.addr, db.size, vk::Handle::as_raw(db.buf), 0);
@@ -45,6 +62,58 @@ impl Drop for PoolSnapshot {
             }
         }
     }
+}
+
+fn free_desc_buffer(dev: &ash::Device, db: DescBuf) {
+    unsafe {
+        super::lost::ring::note_free(3, db.addr, db.size, vk::Handle::as_raw(db.buf), 0);
+        dev.unmap_memory(db.mem);
+        dev.destroy_buffer(db.buf, None);
+        dev.free_memory(db.mem, None);
+    }
+}
+
+/// A shadow write at pool generation `gen` (`Inner::edits`); the oldest half is dropped past `EDITS_KEEP`.
+fn note_edit(i: &mut Inner, gen: u64, at: u64, size: usize) {
+    if i.edits.len() >= EDITS_KEEP {
+        let cut = EDITS_KEEP / 2;
+        // every write of a generation up to the last one dropped may be missing now
+        i.edits_from = i.edits_from.max(i.edits[cut - 1].0 + 1);
+        i.edits.drain(..cut);
+    }
+    i.edits.push((gen, at as u32, size as u32));
+}
+
+/// The shadow's writes since generation `from` copied into a snapshot buffer at `ptr` that holds generation `from`
+/// (all of it when the log no longer reaches back that far). Returns the bytes copied.
+fn refresh(i: &Inner, from: u64, ptr: usize) -> u64 {
+    let ranges = refresh_ranges(i, from);
+    let mut n = 0;
+    for (at, size) in ranges {
+        // SAFETY: [at, at + size) lies in the shadow, and the buffer is at least the shadow's size (checked by the
+        // caller); the GPU no longer reads the recycled buffer (it came back after its last use)
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                i.shadow.as_ptr().add(at),
+                (ptr + at) as *mut u8,
+                size,
+            )
+        };
+        n += size as u64;
+    }
+    n
+}
+
+/// What `refresh` copies: the writes made at generation `from` or later, or the whole shadow.
+fn refresh_ranges(i: &Inner, from: u64) -> Vec<(usize, usize)> {
+    if from < i.edits_from {
+        return vec![(0, i.shadow.len())];
+    }
+    i.edits
+        .iter()
+        .filter(|e| e.0 >= from)
+        .map(|e| (e.1 as usize, e.2 as usize))
+        .collect()
 }
 
 /// A host-visible descriptor buffer with its mapping and device address.
@@ -127,6 +196,11 @@ pub unsafe fn put_descriptor(
 struct Inner {
     /// Normal CPU memory: reading the live device-local mapping through BAR for a snapshot costs hundreds of ms.
     shadow: Vec<u8>,
+    /// the shadow's writes as (pool generation when written, offset, size): a snapshot of generation G lacks those
+    /// written at G or later
+    edits: Vec<(u64, u32, u32)>,
+    /// `edits` holds every write made at this generation or later (older ones were dropped)
+    edits_from: u64,
     snapshot: Option<Arc<PoolSnapshot>>,
     image_desc: HashMap<i32, (vk::ImageView, Option<vk::ImageView>)>,
     prepare_images: HashSet<u64>,
@@ -212,6 +286,31 @@ mod registration_boundary_tests {
         Tables { pool: vk::DescriptorPool::null(), set: vk::DescriptorSet::null(), db: None,
             inner: Mutex::new(Inner::default()), generation: AtomicU64::new(1),
             pool_generation: AtomicU64::new(1), pending_images: AtomicBool::new(false) }
+    }
+
+    /// A recycled snapshot of generation G gets exactly the writes made at G or later; once the log has dropped
+    /// writes of G, the whole shadow.
+    #[test]
+    fn recycled_snapshot_gets_the_writes_since_its_generation() {
+        let mut i = Inner { shadow: vec![0; 4096], ..Inner::default() };
+        note_edit(&mut i, 3, 64, 32);
+        note_edit(&mut i, 4, 128, 16);
+        note_edit(&mut i, 5, 256, 16);
+        assert_eq!(refresh_ranges(&i, 4), vec![(128, 16), (256, 16)]);
+        assert_eq!(refresh_ranges(&i, 6), vec![]);
+        assert_eq!(refresh_ranges(&i, 0), vec![(64, 32), (128, 16), (256, 16)]);
+        i.shadow[130] = 7;
+        let mut buf = vec![0u8; 4096];
+        assert_eq!(refresh(&i, 4, buf.as_mut_ptr() as usize), 32);
+        assert_eq!(buf[130], 7);
+        // the log overflows: generation 0's writes are gone, a snapshot that old is copied whole
+        for k in 0..EDITS_KEEP {
+            note_edit(&mut i, 10 + k as u64 / 1000, 0, 4);
+        }
+        assert!(i.edits.len() <= EDITS_KEEP);
+        assert_eq!(refresh_ranges(&i, 4), vec![(0, 4096)]);
+        let newest = i.edits.last().unwrap().0;
+        assert!(refresh_ranges(&i, newest).iter().all(|r| *r == (0, 4)));
     }
 
     #[test]
@@ -400,6 +499,7 @@ impl Tables {
             (self.db.as_ref().unwrap().ptr + at as usize) as *mut u8,
             size,
         );
+        note_edit(i, self.pool_generation(), at, size);
     }
 
     /// Freeze the pool for recorded commands. Updating the live pool after an inline image upgrade must not
@@ -414,14 +514,30 @@ impl Tables {
         } else {
             super::perf::inc(super::perf::C::PoolSnapshots);
             let (pool, set, db) = if self.db.is_some() {
-                let dst = desc_buffer(&g.d, g.layout.db_pool_size).expect("texture pool snapshot");
-                super::perf::add(super::perf::C::PoolSnapshotBytes, g.layout.db_pool_size);
-                unsafe {
-                    core::ptr::copy_nonoverlapping(
-                        i.shadow.as_ptr(),
-                        dst.ptr as *mut u8,
-                        i.shadow.len(),
-                    )
+                // a recycled snapshot brought up to date with the writes made since its generation, or a new one
+                let old = RECYCLED.lock().unwrap().pop();
+                let dst = match old {
+                    Some((from, dst)) if dst.size >= i.shadow.len() as u64 => {
+                        let n = refresh(&i, from, dst.ptr);
+                        super::perf::add(super::perf::C::PoolSnapshotBytes, n);
+                        dst
+                    }
+                    other => {
+                        if let Some((_, b)) = other {
+                            free_desc_buffer(g.dev(), b);
+                        }
+                        let dst = desc_buffer(&g.d, g.layout.db_pool_size)
+                            .expect("texture pool snapshot");
+                        super::perf::add(super::perf::C::PoolSnapshotBytes, g.layout.db_pool_size);
+                        unsafe {
+                            core::ptr::copy_nonoverlapping(
+                                i.shadow.as_ptr(),
+                                dst.ptr as *mut u8,
+                                i.shadow.len(),
+                            )
+                        };
+                        dst
+                    }
                 };
                 (
                     vk::DescriptorPool::null(),

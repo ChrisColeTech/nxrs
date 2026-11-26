@@ -2480,7 +2480,12 @@ impl Gpu {
         // an image whose format the device cannot store has storage only through an emulated view, which a shader
         // must pack/unpack for (`storemu`); shaders that index the pool's storage slots get no variant, so the pool
         // keeps no storage view of it (a formatless float store through a uint view is undefined)
-        let sview = if storage && !self.emulated_storage(im.format) {
+        // (also when only this slot's view format is emulated: an R32_UINT image registered through an E5B9G9R9 view
+        // would get a uint storage view, `image_view_kind` remapping it)
+        let sview = if storage
+            && !self.emulated_storage(im.format)
+            && !self.emulated_storage(self.view_format(im, v.as_ref()))
+        {
             self.storage_view(im, v.as_ref())
         } else {
             None
@@ -3079,7 +3084,9 @@ impl Gpu {
             if let Some(im) = imgs.by_serial.get_mut(&serial) {
                 if let Some(view) = self.image_view(im, v.as_ref(), false) {
                     // emulated storage stays out of the pool (see reg_tex_now)
-                    let sview = if self.emulated_storage(im.format) {
+                    let sview = if self.emulated_storage(im.format)
+                        || self.emulated_storage(self.view_format(im, v.as_ref()))
+                    {
                         None
                     } else {
                         self.storage_view(im, v.as_ref())

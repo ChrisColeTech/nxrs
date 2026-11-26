@@ -44,6 +44,8 @@ pub mod spvfix;
 pub mod storemu;
 pub mod tables;
 pub mod upscale;
+pub mod upskip;
+pub mod uptrace;
 pub mod xfb;
 
 use ash::vk;

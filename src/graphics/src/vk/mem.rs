@@ -596,6 +596,7 @@ pub fn pool_add(p: &pool_t) {
             if watched { " (write watch)" } else { "" }
         );
     }
+    super::upskip::drop_pool(base);
     let old = {
         let mut m = g.mem.lock().unwrap();
         let old = m.by_base.insert(base, pool);
@@ -610,6 +611,7 @@ pub fn pool_add(p: &pool_t) {
 
 fn release(g: &Gpu, p: Pool) {
     POOL_GEN.fetch_add(1, Ordering::Relaxed);
+    super::upskip::drop_pool(p.base);
     // pages of it held on the device (lazy write-back) come back now, from this buffer, while it still exists: left
     // in the lazy table they named a freed buffer, and the next touch of those pages (a new pool's buffer over the
     // same memory brings its range back first) copied from it on the GPU: an invalid read inside a buffer unbound
@@ -838,6 +840,7 @@ pub fn sync_range(g: &Gpu, sub: &mut super::queue::Sub, a: u64, n: u64) {
     p.dirty_frame = frame;
     if p.buf.is_some() {
         for &(ra, rn) in &ranges {
+            super::upskip::forget(ra, rn);
             for (buf, boff, pa, pn) in p.pieces(ra, rn) {
                 let src = unsafe { core::slice::from_raw_parts(pa as *const u8, pn as usize) };
                 sub.upload(g, src, buf, boff);
@@ -974,6 +977,8 @@ impl Pool {
         // guest's memory hold anything (a large pool the game has not written yet is zero and is not read here: reading
         // it would commit it, and staging it would double it in host memory; Mario Kart World's pools)
         super::lazy::touch(self.base, self.size);
+        // a new GPU copy: no page of it was uploaded by the pool sync yet
+        super::upskip::drop_pool(self.base);
         unsafe {
             g.dev()
                 .cmd_fill_buffer(sub.pre, b.buf, 0, vk::WHOLE_SIZE, 0)
@@ -1159,6 +1164,7 @@ impl Pool {
                     continue;
                 }
                 super::lazy::touch(lo, hi - lo);
+                super::upskip::forget(lo, hi - lo);
                 for (ca, cn) in committed(lo, hi - lo) {
                     let src = unsafe { core::slice::from_raw_parts(ca as *const u8, cn as usize) };
                     sub.upload(g, src, buf, ca - self.base);
@@ -1179,6 +1185,7 @@ impl Pool {
                 keep.push((da, dn));
                 continue;
             }
+            super::upskip::forget(da, dn);
             self.upload_now(g, sub, da, dn);
             DEFERRED_USED.fetch_add(dn, Ordering::Relaxed);
         }
@@ -2360,7 +2367,13 @@ pub fn begin_submit_ex(
                     deferred_now = true;
                     continue;
                 }
-                p.upload_now(g, sub, a, n);
+                if super::uptrace::on() {
+                    super::uptrace::note(p.base, p.size, a, n);
+                }
+                // written pages whose bytes the GPU copy already holds stay as they are (`upskip`)
+                for (ca, cn) in super::upskip::changed_runs(p.base, p.size, a, n) {
+                    p.upload_now(g, sub, ca, cn);
+                }
             }
             if deferred_now {
                 // resolves of this pool cached before must look at the deferred ranges
@@ -2399,6 +2412,8 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
     }
     // a sparse virtual pool's range was bound at the physical memory it maps (`resolve_in`): the write-back goes there
     // too, or the GPU's bytes are lost and a later CPU write to the page uploads stale guest memory over them
+    // the GPU copy changes: its pages' last-upload hashes no longer describe it (`upskip`)
+    super::upskip::forget(a, n);
     let a = if crate::nvn::vpool::is_sparse(a) {
         match crate::nvn::vpool::translate(a, n) {
             Some(p) => p,
@@ -2407,6 +2422,7 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
     } else {
         a
     };
+    super::upskip::forget(a, n);
     let m = g.mem.lock().unwrap();
     let Some(b) = find(&m, a, n) else { return };
     let p = &m.by_base[&b];
@@ -2691,6 +2707,8 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         cnt[3],
         sb >> 20
     ) + &super::lazy::summary(f)
+        + &(if super::uptrace::on() { super::uptrace::report(f) } else { String::new() })
+        + &super::upskip::report(f)
 }
 
 #[cfg(test)]

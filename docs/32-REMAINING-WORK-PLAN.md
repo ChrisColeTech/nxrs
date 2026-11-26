@@ -107,6 +107,56 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       agent's restore copied the wrong way and **lost the original 152 MB `pipeline-cache.bin`** (regenerable cache;
       the live one is this session's 357 MB); keys and crashed lists restored byte-identical. Owner option: drop the
       old-machine `pipeline-crashed.bin` entry that now compiles cleanly (`-xoot5-noblack`).
+- [x] **OOT-NAN** (2026-11-25, `docs/waves/OOT-NAN.md`, commit `9903fc7`; lead re-ran graphics 209/209 and read the
+      oot and mkw sheets). **Audit done: no HIGH**; c0 layout, platform gate, every cache path (bank cache, set key,
+      patching) checked correct. MEDIUM M1 gap (an R32_UINT image with an E5B9G9R9 view still gets a pool storage
+      view) and LOW dump crash on sparse pools handed to OOT-FOREST2. Recorded LOWs: M3 queries only the 2D shape;
+      capture replays never set `SWITCH2` (NVN2 captures lose dispatch words and deswizzle wrong); Bits32 read alpha;
+      `SWITCH2` gated on program-id prefix 04 (a Switch 2 Edition under 01 needs the `switch2 1` override). Cause of the white forest: **NVN2 compute shaders read the
+      dispatch group counts at c0 + 0x4; nxrs wrote only 0x200** (NVN1's place) -> the sky irradiance compute
+      divided by 0 -> Inf/NaN spherical harmonics -> NaN in the forward pass, spread by fog. `c0_bytes` now writes
+      both for Switch 2 titles (MKW too). The `0x13dc17000` suspect was the game's own transient aliasing, not a bug.
+      Also fixed OOT-RGB9E5's audit M1-M3, L3, L5, L7 (L1 not done). `build/play/20261125-153150-oot-nan-fix`: Deku
+      Tree, Navi, roots render (white before), 2 known red lines; `-172447-oot-route7` to Link dressing in his house
+      (~1284 s, still a cutscene). MKW `-154021-mkw-nan` race 29.2 FPS, 1 known red line, sheet correct. Lead's
+      sheet read: the forest haze looks too strong. Open -> wave **OOT-FOREST2** (indirect dispatches still put CPU
+      counts in c0; the haze; forest frames 70-380 ms with ~56 MB uploaded per frame and ~20 s without presents
+      entering the house; route to Link moving). Slip: one shader `.spv` swapped for a trap run, restored
+      byte-identical (SHA-256 checked).
+- [x] **OOT-FOREST2** (2026-11-25, `docs/waves/OOT-FOREST2.md`; lead re-ran graphics 212/212 and read the final
+      sheet). **Audit (in the wave doc): snapshot recycling and indirect c0 correct; upload skip has 2 HIGH** (raw-
+      pointer shader writes forget the hash only after the next upload pass, never for pools > 64 MB; `forget` stops
+      early under nested pools) **+ MEDIUM** (hash and upload read guest memory at different times; skipped bytes
+      still charge the upload budget) -> **lead turned the skip off by default** (`NXGFX_UPLOAD_SKIP=1` for A/B;
+      graphics 220/220); fixing it joins the GPU-written re-upload work after MKW-RECORD (`gmem`/`queue.rs`). LOW
+      L1 (M1-gap slot keeps an old storage view, should be null) handed to NVN2-PARITY. Indirect dispatches: private c0 per dispatch, the GPU copies the record
+      to 0x200 (and NVN2 0x4) before it. Texture-pool snapshots recycled with only changed descriptors re-copied
+      (were 8-24 a frame at 13-17 ms: 135 ms frames) -> ~0.1 ms. `upskip.rs`: identical re-uploads skipped
+      (~8.5 of ~56 MB/frame); the other ~46 MB/frame are pages noted GPU-written every frame and need a per-write
+      sequence through the write-back (`queue.rs`, after MKW-RECORD). **Link moves under input** in his house:
+      `build/play/20261125-192048-oot-f2-final` window [845, 915] **13.7 FPS (5% low 10.0) of 59**; forest 14.8
+      (was 7.0), house 15.1 (was 3-5); GPU 8.7 ms, replay 12.4 ms, **pool sync ~36 ms a frame** (the limit). Haze:
+      not item 1; added by the game's bloom composite, engine inputs correct as far as checked; unproven without a
+      reference capture. Wonder regression 59.5 FPS, 0 red. Slips: three runs overlapped MKW-RECORD's machine lock
+      (their FPS indicative only); one crash from its own dump-log line (fixed, dump-only).
+- [ ] **NVN2-PARITY** (opened 2026-11-25, `docs/waves/NVN2-PARITY.md`, starts after OOT-FOREST2). Owner: every
+      Switch 2 title misses 60 FPS and pops textures; Switch 1 titles fine. Read-only parity audit against nxnative
+      (38 NVN2 items): missing/different — pushed buffer addresses (c24-c29) and uniform-buffer handles resolve to
+      nothing; compute c0 uniform table raw addresses instead of handles; `GetCurrentTimestampInNanoseconds` on its
+      own clock; two-word texture handles take the first word only; `UPDATE_UB` breaks passes and CPU handle reads
+      miss queued updates; uniform size not rounded to 256; sparse tile slots freed per mapping; device items
+      0x06/0x62; DLSS is a plain blit; ray tracing absent; c0 sample table. Indirect dispatch sizes and pool
+      snapshots are OOT-FOREST2's.
+- [ ] **MKW-RECORD steps 1-3 done** (branch `mkw-record`, commits `3fadfd6`, `58286e3`, `f89bd0a`, report `fd5c2b3`;
+      lead read the `195700-s3c-on` sheet: correct). Pool walker thread: replay+prep 32.5 -> 26.0 ms a frame
+      (paired), write-watch scan 8-12 -> 3.6 ms; segmented replay (off by default, `NXGFX_TRANSLATE_THREADS`): 0
+      entry-state differences, +0.8-2 ms. **No FPS gain yet (~29 of 60)**: the gain is step 4 (worker lanes); the
+      largest segment (~1,300 draws, a third of translation) needs step 5's mid-pass cuts. Write-watch scan cost
+      flips 3.5 <-> 9 ms run to run (FPS noise of 1-2). Steps 4-6 handed to a fresh agent (after merging
+      `gameplay-harness`); independent audit of steps 1-3 running.
+- [ ] **Running 2026-11-25 evening:** MKW-RECORD phase 2 (steps 1-3, 8 h) in worktree
+      `D:\Projects\RecompLauncherEngine-mkw` (branch `mkw-record`, own target/dist, relinks only MKW, main-tree
+      locks); OOT-FOREST2 in the main tree (OoT only, regression `wonder`, no `vk/queue.rs`); the OOT-NAN audit.
 - [~] **OOT-RGB9E5** (2026-11-25, `docs/waves/OOT-RGB9E5.md`; lead re-ran graphics 208/208 and read both sheets;
       accepted pending OOT-NAN's audit fixes). New `vk/storemu.rs`: emulated storage formats (E5B9G9R9 via an R32_UINT view;
       the game's own E5B9G9R9 view gets the RGB9E5 pack, its own `r32ui` view the raw bits), `image.rs`
