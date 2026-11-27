@@ -3861,6 +3861,38 @@ impl Gpu {
             } else {
                 Vec::new()
             };
+            // (NXGFX_WEB_SYNC_AUDIT) the textures over the ranges no use compared
+            for (a, n) in super::mem::web_audit_take() {
+                let over: Vec<String> = imgs
+                    .by_serial
+                    .iter()
+                    .filter(|(_, im)| {
+                        let lo = im.tex.mem as u64;
+                        !im.tex.mem.is_null() && lo < a + n && a < lo + im.tex.l.size
+                    })
+                    .take(6)
+                    .map(|(s, im)| {
+                        let d = &im.tex.d;
+                        format!(
+                            "ser{s} {}x{}x{} fmt {:#x} target {} levels {} at {:#x}+{:#x}{}{}",
+                            d.width,
+                            d.height,
+                            d.depth,
+                            d.format,
+                            d.target,
+                            d.levels,
+                            im.tex.mem as u64,
+                            im.tex.l.size,
+                            if im.gpu_owned { " gpu-owned" } else { "" },
+                            if im.sparse.is_some() { " sparse" } else { "" }
+                        )
+                    })
+                    .collect();
+                crate::vklog!(
+                    "web sync audit: {a:#x}+{n:#x}: {}",
+                    if over.is_empty() { "no texture over it".to_string() } else { over.join("; ") }
+                );
+            }
             if found.is_empty() {
                 dirty
             } else {

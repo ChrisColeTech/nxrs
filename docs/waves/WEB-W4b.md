@@ -162,3 +162,26 @@ like texture memory the CPU rewrites that the by-use compare does not reach (a s
 step is the same frame with both settings (a frame capture at a fixed frame number) and, if it differs, the
 textures whose storage `image_begin_submit`'s web arm skips (sparse, no storage, or memory written after its compare in
 the sync).
+
+## W4d - the sea sheen: the write the by-use sync misses
+
+Same branch (`web-w4b`, from `b608ee8`), title, port 8772, GPU 1. Evidence in the main checkout's `build/WEB/W4d/`.
+
+### Plan
+
+1. **An audit that names the miss** (`NXGFX_WEB_SYNC_AUDIT=1`, web, by-use sync only): at each sync's start, before
+   anything is compared, every snapshot pool is compared whole with guest memory without changing the snapshot; the
+   pages that differ are the CPU's writes the GPU copy does not have yet. Each compare by use (`web_sync`: a resolve or
+   the texture check) clears the pages it looks at. At the next sync's start the pages still set were written before the
+   sync and never compared during it: no use reached them. They are counted, merged into ranges and logged per pool
+   with the textures over them (`audit:` lines). A missed GPU read lies in those ranges; CPU-only data the GPU never
+   reads does too, so the line also says what overlaps each range (texture serial, format, size), and a range is
+   named a miss only once a run shows the GPU reads it.
+2. **The same frame with both settings**: Chrome with `?shots=N`, a fixed frame number, the same page arguments in
+   both runs (sync on, `NXGFX_WEB_USE_SYNC=0`), the audit on in a third run.
+3. **Fix the path** the audit names, in source, with a unit test that fails before the fix.
+4. **Verify**: screenshots side by side, the audit's count over 60 s of beach (target 0 missed ranges), FPS and sync ms
+   on the default (W4c: 59.3-60.0 FPS, ~1.2 ms).
+
+Expected files: `src/graphics/src/vk/mem.rs` (audit, fix, tests), possibly `src/graphics/src/vk/image.rs` (the
+texture check's web arm).
