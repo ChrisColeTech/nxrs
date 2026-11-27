@@ -4,7 +4,8 @@
 [![Launcher](https://github.com/ChrisColeTech/nxrs/actions/workflows/launcher.yml/badge.svg)](https://github.com/ChrisColeTech/nxrs/actions/workflows/launcher.yml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-A Rust static recompiler and launcher for Switch and Switch 2 games. Add your NSP, NUP or game dump, build, play.
+A Rust static recompiler and launcher for Switch and Switch 2 games. Add your NSP, NUP or game dump, build, play:
+as a native Windows or Linux program, or (preview) as WebAssembly + WebGPU that plays in Chrome.
 
 > [!IMPORTANT]
 > No games, keys or firmware are included. Use your own legally obtained dumps and console keys.
@@ -57,6 +58,30 @@ FPS is the average during gameplay, with the slowest 5% in brackets.
 
 **While playing:** Xbox, DualSense, DualShock 4, Switch Pro and Joy-Con controllers, with rumble and motion.
 **F1** controls · **F3** screenshot · **F4** FPS limit · **F6** cheats · **F7** record video · **F11** fullscreen.
+
+## Play in the browser (preview)
+
+nxrs can also build a game for the web: the same translated code compiled to WebAssembly (64-bit memory, threads,
+SIMD) with Emscripten, drawn with WebGPU, and played in a Chrome tab. There is still one **Build** and one **Play**;
+when a game has both builds, they ask **Native** or **Web**. Play > Web serves the build from your PC and opens it in
+Chrome.
+
+- **The page is the game.** The canvas fills the window at full resolution; the log goes to the browser console.
+- **In-game menu:** Esc, Home, or Minus + Plus held for a second. It really pauses the game (input, game clock and
+  sound stop) and holds:
+  - **Saves:** stored in the browser, written safely, with export and import.
+  - **Settings:** graphics, audio volume and controller layout (button mapping, stick dead zone), applied live.
+    Graphics are per game; controller and volume settings are shared.
+- **Controllers:** keyboard and gamepads through Chrome, with rumble. DualSense rumble goes through WebHID: allow it
+  once from the menu's Controller page.
+- **Streaming:** game data is read on demand by a background worker instead of being downloaded up front, and the
+  module is split, deduplicated and compressed (Beach Bounce: 25 MiB to download).
+
+Running on the web today: **Anime Girls: Sun of a Beach** (beach gameplay at about 52 FPS) and **Beach Bounce
+Remastered**. Web builds need desktop Chrome with WebGPU, and for now a source checkout: the
+[Emscripten SDK](https://emscripten.org/docs/getting_started/downloads.html) in `build/tools/emsdk` (or `NXRS_EMSDK`),
+and the engine built for the web with `pwsh scripts/build/web.ps1 -Crates os` (pinned nightly Rust with `rust-src`).
+The plan and progress are in [docs/35-WEB-TARGET-PLAN.md](docs/35-WEB-TARGET-PLAN.md).
 
 ## Credits
 
