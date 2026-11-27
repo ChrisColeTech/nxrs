@@ -11218,7 +11218,7 @@ fn emit_op2(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bo
                 ) {
                     let n =
                         ASTC_BC7_COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if n <= 8 || n.is_power_of_two() {
+                    if n <= 16 || n.is_power_of_two() {
                         crate::vklog!(
                             "texture copy {n} from an ASTC texture kept as RGBA8 into a BC7 image: encoded to BC7 (ser{} {}x{} level {} layer {} -> ser{} level {} layer {} at {},{})",
                             s.serial, sext.width, sext.height, ssl.mip_level, ssl.base_array_layer, d.serial,

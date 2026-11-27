@@ -80,9 +80,8 @@ struct Img {
     bound: Vec<Option<SlotKey>>,
     dirty: Vec<bool>,
     dl: Vec<u32>,
-    // levels outside the tiles and the mip tail: memory of their own, shared by the images over the same storage with
-    // the same layout (`State::tails`)
-    tail: Option<(TailKey, vk::DeviceMemory, u64)>,
+    // levels outside the tiles and the mip tail: memory of their own
+    tail: Option<(Allocation, vk::DeviceMemory, u64)>,
     tail_pending: bool,
     tail_end: u32,
     nmips: u32,
@@ -90,18 +89,9 @@ struct Img {
     tail_req: Option<vk::SparseImageMemoryRequirements>,
 }
 
-/// The storage and layout an image's levels outside the tiles have: (storage address, storage size, Vulkan format,
-/// width, height, layers, levels, first level outside the tiles, slot size, memory types).
-type TailKey = (u64, u64, i32, u32, u32, u32, u32, u32, u64, u32);
-
 #[derive(Default)]
 struct State {
     imgs: Vec<Img>,
-    /// The memory of the levels outside the tiles, by storage and layout, and the images binding it (MKW-ATLAS). Two
-    /// texture objects over one storage are one texture on the console: Mario Kart World's terrain arrays come in
-    /// such pairs (8192x8192x68 BC7, one storage), it copies the small levels (5-11) through one and samples them
-    /// through the other. The tiles were shared already (one slot per physical page); these levels now are too.
-    tails: HashMap<TailKey, (Allocation, u32)>,
     slots: HashMap<SlotKey, Slot>,
     blocks: Vec<Block>,
     dying: Vec<SlotKey>,
@@ -310,9 +300,9 @@ pub fn create(g: &Gpu, t: &crate::nvn::obj::tex_t, ci0: &vk::ImageCreateInfo) ->
     let n = (s.layers * s.nblk) as usize;
     s.bound = vec![None; n];
     s.dirty = vec![false; n];
+    tail_alloc(g, &mut s);
     let mut lk = ST.lock().unwrap();
     let st = lk.get_or_insert_with(Default::default);
-    tail_alloc(g, st, &mut s);
     // coarse levels first: a full budget leaves fine detail out rather than whole layers
     for l in (0..s.nlev as usize).rev() {
         for y in 0..s.layers {
@@ -396,25 +386,8 @@ fn round_up(v: u64, a: u64) -> u64 {
     v.div_ceil(a) * a
 }
 
-/// The key under which images share their levels outside the tiles (`State::tails`).
-fn tail_key(s: &Img) -> TailKey {
-    (
-        s.addr,
-        s.size,
-        s.fmt.as_raw(),
-        s.w,
-        s.h,
-        s.layers,
-        s.nmips,
-        s.nlev,
-        s.slot_size,
-        s.type_bits,
-    )
-}
-
-/// Memory for the levels outside NVN's tiles and the Vulkan mip tail: an image over the same storage with the same
-/// layout lends its own.
-fn tail_alloc(g: &Gpu, st: &mut State, s: &mut Img) {
+/// Memory for the levels outside NVN's tiles and the Vulkan mip tail.
+fn tail_alloc(g: &Gpu, s: &mut Img) {
     s.tail_end = s
         .tail_req
         .map(|r| r.image_mip_tail_first_lod.min(s.nmips))
@@ -432,23 +405,10 @@ fn tail_alloc(g: &Gpu, st: &mut State, s: &mut Img) {
     if bytes == 0 {
         return;
     }
-    let key = tail_key(s);
-    if let Some((a, refs)) = st.tails.get_mut(&key) {
-        *refs += 1;
-        let (m, o) = unsafe { (a.memory(), a.offset()) };
-        s.tail = Some((key, m, o));
-        s.tail_pending = true;
-        crate::vklog!(
-            "sparse textures: {}x{} layers {} {:?}: the levels outside the tiles share the memory of the image over the same storage {:#x} ({} images)",
-            s.w, s.h, s.layers, s.fmt, s.addr, refs
-        );
-        return;
-    }
     match alloc_mem(g, bytes, s.slot_size, s.type_bits, "sparse tail") {
         Some(a) => {
             let (m, o) = unsafe { (a.memory(), a.offset()) };
-            st.tails.insert(key, (a, 1));
-            s.tail = Some((key, m, o));
+            s.tail = Some((a, m, o));
             s.tail_pending = true;
         }
         None => crate::log::red(&format!("sparse textures: no memory for the {} KB of levels outside the tiles ({}x{} layers {})", bytes >> 10, s.w, s.h, s.layers)),
@@ -650,16 +610,8 @@ pub fn destroy(img: vk::Image) {
     for k in s.bound.iter().flatten() {
         slot_unref(st, *k);
     }
-    if let Some((k, _, _)) = s.tail {
-        let last = st.tails.get_mut(&k).is_some_and(|(_, refs)| {
-            *refs -= 1;
-            *refs == 0
-        });
-        if last {
-            if let Some((a, _)) = st.tails.remove(&k) {
-                st.dying_tails.push(a);
-            }
-        }
+    if let Some((a, _, _)) = s.tail {
+        st.dying_tails.push(a);
     }
 }
 
@@ -836,7 +788,7 @@ pub fn flush(
             let mut v = Vec::new();
             if s.tail_pending {
                 s.tail_pending = false;
-                if let Some((mem, base)) = s.tail.as_ref().map(|(_, m, b)| (*m, *b)) {
+                if let Some((_, mem, base)) = s.tail.as_ref().map(|(a, m, b)| (a, *m, *b)) {
                     let mut off = base;
                     for layer in 0..s.layers {
                         for l in s.nlev..s.tail_end {
