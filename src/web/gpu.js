@@ -61,8 +61,11 @@
         tell({ fatal: 'the GPU worker stopped: ' + e.message });
       };
       // ?shots=N: every N-th presented image goes to the dev server (development)
-      const shotEvery = Number(new URLSearchParams(location.search).get('shots') || 0);
-      worker.postMessage({ memory, ring, canvas: off, width: W, height: H, shotEvery }, [off]);
+      const q = new URLSearchParams(location.search);
+      const shotEvery = Number(q.get('shots') || 0);
+      // ?subtrace=1: the worker logs every submission to the dev server (gpu-worker.js traceSubmit)
+      const subTrace = q.get('subtrace') === '1';
+      worker.postMessage({ memory, ring, canvas: off, width: W, height: H, shotEvery, subTrace }, [off]);
       NXRS_GPU.worker = worker;
     },
   };

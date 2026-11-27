@@ -24,9 +24,19 @@ pub fn loop_cap() -> u32 {
         std::env::var("NXGFX_LOOP_GUARD")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(65536)
+            .unwrap_or(LOOP_CAP_DEFAULT)
     })
 }
+
+/// The loop bound's default. Native: 65536 back-edges a call. The web (WEB-WPAGE): a runaway loop must end well
+/// inside the browser's GPU watchdog (D3D12 TDR, ~2 s): 65536 back-edges for each of a 1728x972 pass's 1.7 M
+/// fragments is ~1.1e11 iterations, a hung device (DXGI_ERROR_DEVICE_HUNG, 2026-11-27) and once a locked machine;
+/// 4096 is ~7e9 at most, well under a second on the GPUs the web build targets, and above the loops games run on
+/// purpose (blur and PCF kernels, light lists: tens to a few hundred back-edges a call).
+#[cfg(target_os = "emscripten")]
+pub const LOOP_CAP_DEFAULT: u32 = 4096;
+#[cfg(not(target_os = "emscripten"))]
+pub const LOOP_CAP_DEFAULT: u32 = 65536;
 
 pub static CLIP_CULL_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
