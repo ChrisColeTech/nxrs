@@ -792,12 +792,13 @@ unsafe extern "system" fn create_image_view(_d: vk::Device, ci: *const vk::Image
             r.layer_count
         },
         aspect: r.aspect_mask,
+        swizzle: swizzle_str(ci.components),
     };
     if im.samples > 1 {
         v.mips = 1;
     }
     drop(o);
-    v.id = obj::gpu_view(&v, &im, &swizzle_str(ci.components));
+    v.id = obj::gpu_view(&v, &im, &v.swizzle);
     let h = obj::new_handle();
     o = objs();
     o.view.insert(h, v);

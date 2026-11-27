@@ -575,12 +575,15 @@ function submit(p0, len) {
             const vi = info.get(dview);
             const ds = { view: attView(dview) };
             const [hasD, hasS] = DEPTH_FORMATS[vi.format] || [1, 0];
-            if (hasD) {
+            // mode 3 (WEB-W10c): the pass samples this aspect and never writes it: read-only, no load/store ops
+            if (hasD && dmode === 3) ds.depthReadOnly = true;
+            else if (hasD) {
               ds.depthLoadOp = dmode === 2 ? 'clear' : 'load';
               ds.depthStoreOp = 'store';
               ds.depthClearValue = dclear;
             }
-            if (hasS) {
+            if (hasS && smode === 3) ds.stencilReadOnly = true;
+            else if (hasS) {
               ds.stencilLoadOp = smode === 2 ? 'clear' : 'load';
               ds.stencilStoreOp = 'store';
               ds.stencilClearValue = sclear;

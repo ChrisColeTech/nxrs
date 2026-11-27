@@ -11,6 +11,7 @@ pub mod fmt;
 pub mod icd;
 pub mod obj;
 pub mod ring;
+pub mod seg;
 pub mod submit;
 
 pub use icd::{entry, surface};

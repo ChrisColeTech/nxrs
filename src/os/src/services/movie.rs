@@ -275,8 +275,15 @@ static SIG_THREAD: AtomicBool = AtomicBool::new(false);
 /// Held while a signal is delivered: Stop takes it, so no signal reaches a stopped decoder.
 static SIG_MU: Mutex<()> = Mutex::new(());
 
+/// A client's event entry: an aligned, readable address in the guest's address space (its modules or the ASLR
+/// region). WEB-W10c: the web's compact map puts the heap below 4 GiB (MK8D's event at 0x24ba03d0), where the
+/// former fixed 4 GiB floor refused every event and the movie decoder's Start was never signalled.
 fn ev_ok(p: u64) -> bool {
-    p >= 0x1_0000_0000 && p & 7 == 0 && crate::guest::readable(p, 8)
+    let in_space = match crate::mem::try_get() {
+        Some(m) => m.space.aslr.contains(p) || m.space.modules.contains(p),
+        None => p >= 0x1_0000_0000,
+    };
+    in_space && p & 7 == 0 && crate::guest::readable(p, 8)
 }
 
 /// Signals event `i` of `d`: the client's entry read now (it may have filled its struct after registering), else
