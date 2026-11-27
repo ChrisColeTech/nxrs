@@ -21,7 +21,8 @@ impl App {
             .iter()
             .find(|g| same_path(&g.web_build, &place))
         {
-            return g.id.clone();
+            self.selected = g.id.clone();
+            return self.selected.clone();
         }
         let tid = web_import::title_id(found);
         let same_game = self.lib.games.iter_mut().find(|g| {

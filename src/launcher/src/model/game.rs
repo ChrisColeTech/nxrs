@@ -109,6 +109,8 @@ impl Game {
             "DIRECT XCI"
         } else if ends_with_ci(s, ".nro") {
             "HOMEBREW"
+        } else if s.is_empty() && self.build_dir.is_empty() && !self.web_build.is_empty() {
+            "WEB BUILD"
         } else if s.is_empty() {
             "NATIVE BUILD"
         } else {

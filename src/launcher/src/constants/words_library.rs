@@ -72,6 +72,8 @@ pub const KEYS_DONE: &str = "prod.keys was installed in the launcher data folder
 
 /// The statuses (`cardState`, `statusFor`).
 pub const READY: &str = "Ready to play";
+/// No native build to play, a web build that plays in the browser.
+pub const READY_WEB: &str = "Ready to play in the browser";
 pub const NEEDS_BUILD: &str = "Needs build";
 pub const INCOMPLETE: &str = "Build incomplete";
 pub const UPDATE_CHANGED: &str = "Update changed";

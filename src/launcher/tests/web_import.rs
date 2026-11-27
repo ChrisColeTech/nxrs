@@ -64,9 +64,19 @@ fn a_web_game_folder_imports_and_plays_from_its_own_host() {
     assert!(app.why_not(&g.id, false, true).is_none());
     assert!(app.why_not(&g.id, false, false).is_some());
     assert!(app.why_not(&g.id, true, true).is_some());
+    // the card plays it and nothing needs attention; the status says where it plays
+    let card = app.card_of(&g);
+    assert_eq!(
+        (card.action.as_str(), card.needs_attention),
+        ("Play", false)
+    );
+    assert_eq!(app.status_of(&g), "Ready to play in the browser");
+    assert_eq!(g.format(), "WEB BUILD");
     // the same folder again selects the entry
+    app.selected.clear();
     assert!(app.import_build(&page));
     assert_eq!(app.lib.games.len(), 1);
+    assert_eq!(app.selected, g.id);
     // the key is written for this entry only
     let saved = library(&format!("{dir}/library.json"));
     assert_eq!(saved["games"][0]["webBuild"], page.as_str());
