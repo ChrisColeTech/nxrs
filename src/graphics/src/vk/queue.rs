@@ -1242,6 +1242,7 @@ fn completion_loop(g: &'static Gpu) {
         for p in sub.post.drain(..) {
             match p {
                 Post::Event { addr, mode, value } => {
+                    chain_trace::note("gpu_sig", addr, (mode as u64) << 32 | value as u64);
                     crate::nvn::sync::event_publish(addr as *mut u32, mode, value, false);
                     signalled = true;
                 }
@@ -1620,6 +1621,9 @@ pub fn aq_wait_room(present: bool) {
     if !full() {
         return;
     }
+    let t0 = std::time::Instant::now();
+    let by_presents = present
+        && a.tail.load(Ordering::Acquire) - a.done.load(Ordering::Acquire) < AQ_MAX - 1;
     let mut l = a.idle_mu.lock().unwrap();
     while full() {
         l = a
@@ -1628,6 +1632,15 @@ pub fn aq_wait_room(present: bool) {
             .unwrap()
             .0;
     }
+    drop(l);
+    super::perf::add(
+        if by_presents {
+            super::perf::C::WaitRoomPresentNs
+        } else {
+            super::perf::C::WaitRoomNs
+        },
+        t0.elapsed().as_nanos() as u64,
+    );
 }
 
 fn aq_push(g: &'static Gpu, op: Op) -> u64 {
@@ -1759,6 +1772,7 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
         super::rtclass::tick();
         // the op, and the sequence numbers of the submits of the same queue queued right behind it and taken with it
         let mut merged: Vec<u64> = Vec::new();
+        let t_idle = std::time::Instant::now();
         let (mut seq, mut op) = {
             let mut q = a.ops.lock().unwrap();
             loop {
@@ -1768,6 +1782,11 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
                 q = a.cv.wait(q).unwrap();
             }
         };
+        let t_busy = std::time::Instant::now();
+        super::perf::add(
+            super::perf::C::AqIdleNs,
+            (t_busy - t_idle).as_nanos() as u64,
+        );
         // submits of one queue already waiting one after another replay as one submission: one pool sync (a write-
         // watch scan of every mirror: Mario Kart World's ~3,500 pools cost ~10 ms a submission) and one queue submit
         // for all of them. Their fences all resolve to the merged submission's (later for the first: conservative).
@@ -1897,6 +1916,11 @@ fn aq_main(g: &'static Gpu, a: &'static Aq) {
         // fence waiters look again
         let _d = g.q.done.lock().unwrap();
         g.q.done_cv.notify_all();
+        drop(_d);
+        super::perf::add(
+            super::perf::C::AqBusyNs,
+            t_busy.elapsed().as_nanos() as u64,
+        );
         wait_diag::mark(0, "idle", [0, seq]);
     }
 }
@@ -2108,6 +2132,10 @@ fn run_stream_due(
     match rest {
         // parked again: its receipts wait for the rest
         Some(off) => {
+            if chain_trace::on() {
+                let (a, v) = exec::wait_of(&stream[off..]);
+                chain_trace::note("park", a, v);
+            }
             st.parked.insert(
                 qserial,
                 Parked {
@@ -2179,6 +2207,9 @@ fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
         }
         for q in ready {
             let mut p = st.parked.remove(&q).unwrap();
+            if chain_trace::on() {
+                chain_trace::note("resume", exec::wait_of(&p.stream).0, q);
+            }
             let ll = st.qstates.get(&q).map(|s| s.origin_ll).unwrap_or(true);
             if let Some(&(off, r)) = p.later.first() {
                 // the work up to a queued wait runs; the rest parks behind that wait (its receipts and presents last)

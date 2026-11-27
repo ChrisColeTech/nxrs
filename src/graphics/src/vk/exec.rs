@@ -9092,6 +9092,16 @@ pub fn wait_passes(g: &Gpu, stream: &[u8]) -> bool {
     event_wait_passes(g, addr, mode, value)
 }
 
+/// The event wait at the start of a parked stream: (address, mode << 32 | value), for the chain trace.
+pub fn wait_of(stream: &[u8]) -> (u64, u64) {
+    if stream.len() < 24 || unsafe { rd::<op_hdr>(stream.as_ptr()) }.op != op::WAIT_EVENT {
+        return (0, 0);
+    }
+    let (addr, mode, value): (u64, u32, u32) =
+        unsafe { (rd_at(stream, 0), rd_at(stream, 8), rd_at(stream, 12)) };
+    (addr, (mode as u64) << 32 | value as u64)
+}
+
 /// What a parked stream waits for (its first record), for the log.
 pub fn wait_desc(stream: &[u8]) -> String {
     if stream.len() < 24 {

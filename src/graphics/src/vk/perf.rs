@@ -85,6 +85,14 @@ pub enum C {
     SbufSize0Written,
     /// (SET-FAST) dynamic states and set offsets not set again: the command buffer holds those values already
     DynSkipped,
+    /// (MKW-PIPE) the game's threads blocked before queueing an op (`aq_wait_room`): the replay 63 ops behind, the
+    /// presents queued at their limit; nvnSyncWait waiting for a command-buffer fence to be published
+    WaitRoomNs,
+    WaitRoomPresentNs,
+    WaitPublishNs,
+    /// the replay thread's time in its ops (busy), and waiting for one (idle)
+    AqBusyNs,
+    AqIdleNs,
     N,
 }
 
@@ -149,6 +157,11 @@ const NAMES: [&str; C::N as usize] = [
     "uniform_update_pass_ends",
     "sbuf_size0_written",
     "dyn_skipped",
+    "wait_room_ns",
+    "wait_room_present_ns",
+    "wait_publish_ns",
+    "aq_busy_ns",
+    "aq_idle_ns",
 ];
 
 static COUNT: [AtomicU64; C::N as usize] = [const { AtomicU64::new(0) }; C::N as usize];
@@ -518,6 +531,15 @@ pub fn frame(frame: u64) {
             d(C::WaitSyncNs, &p) as f64 / 1e6 / df,
             d(C::WaitAcquireNs, &p) as f64 / 1e6 / df,
             d(C::WaitFinishNs, &p) as f64 / 1e6 / df
+        );
+        crate::vklog!(
+            "pipelining up to frame {frame}, per frame: the game's threads waited for room in the replay queue {:.2} ms (ops {:.2}, presents {:.2}) and for fence publication {:.2} ms; the replay thread busy {:.2} ms, idle {:.2} ms",
+            (d(C::WaitRoomNs, &p) + d(C::WaitRoomPresentNs, &p)) as f64 / 1e6 / df,
+            d(C::WaitRoomNs, &p) as f64 / 1e6 / df,
+            d(C::WaitRoomPresentNs, &p) as f64 / 1e6 / df,
+            d(C::WaitPublishNs, &p) as f64 / 1e6 / df,
+            d(C::AqBusyNs, &p) as f64 / 1e6 / df,
+            d(C::AqIdleNs, &p) as f64 / 1e6 / df
         );
     }
     crate::vklog!(
