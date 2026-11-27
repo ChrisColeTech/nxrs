@@ -3951,26 +3951,22 @@ impl Gpu {
         let vgen = crate::nvn::vpool::generation();
         let look = vgen != imgs.sparse_seen;
         imgs.sparse_seen = vgen;
-        for im in imgs.by_serial.values_mut() {
-            let Some((runs, gen)) = im.sparse.as_ref() else {
-                continue;
-            };
-            if im.gpu_owned {
-                continue;
+        // and the images due (init or upload): one walk over every image with the sparse check (two walks of ~6,700
+        // images at each of OoT's ~11 submissions a frame were most of this function's time, OOT-DESC)
+        let mut serials: Vec<u64> = Vec::new();
+        for (s, im) in imgs.by_serial.iter_mut() {
+            if let Some((runs, gen)) = im.sparse.as_ref().filter(|_| !im.gpu_owned) {
+                let hit = dirty
+                    .iter()
+                    .any(|&(a, n)| runs.iter().any(|&(b, m)| a < b + m && b < a + n));
+                if hit || (look && crate::nvn::vpool::gen_in(im.tex.mem as u64, im.tex.l.size) > *gen) {
+                    im.needs_upload = true;
+                }
             }
-            let hit = dirty
-                .iter()
-                .any(|&(a, n)| runs.iter().any(|&(b, m)| a < b + m && b < a + n));
-            if hit || (look && crate::nvn::vpool::gen_in(im.tex.mem as u64, im.tex.l.size) > *gen) {
-                im.needs_upload = true;
+            if im.needs_init || im.needs_upload {
+                serials.push(*s);
             }
         }
-        let serials: Vec<u64> = imgs
-            .by_serial
-            .iter()
-            .filter(|(_, i)| i.needs_init || i.needs_upload)
-            .map(|(s, _)| *s)
-            .collect();
         // the textures' storage read and laid out linearly on several threads first (a streaming burst: Pokemon
         // Legends: Z-A uploads ~1,400 textures in a few seconds, 0.5 ms each on one thread: frames of 200-370 ms)
         let t_scan = t_all.elapsed().as_secs_f64();
