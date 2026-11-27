@@ -135,6 +135,16 @@ What the pass dump of `20261127-101211-rd-dump` (frame 13044, 271 s; files in th
   ser33393, BC7_SRGB ser33395), small per-object textures (275x275 BC7, 165x165 RGBA8 viewed (R,0,1,1), 138x138
   SRGB), probe arrays (128x128x12 cube array from passes 44-66), a 256x256 RGBA16F LUT (pass 9). A BC6H lighting atlas
   whose tiles are zero, or a mask texture read as zero, would give exactly this.
+- Ruled out: the 165x165 ASTC 8x8 mask the shader reads as (R,0,1,1). Read back from the GPU
+  (`20261127-110535-rd-dumptex3`, `NXGFX_DUMP_TEX=165x165`, translation serial so the dump's frame check holds; the
+  texture dump now also reads back ASTC images decoded to RGBA8, which it used to leave out silently): R 152-255, mean
+  214, not zero. Every vertex program of the colour passes samples the same 128x128x8 RGBA16F array, the lit ones too,
+  so that is not shrub-specific either.
+- **Next step**: read back the tiles of the BC6H_UFLOAT atlas (ser33393, sparse image 4) and the probe cube array the
+  shrub draw samples, at the shrubs' coordinates (the texture dump handles one level-0 layer of non-sparse images
+  only), or diff the shrub pixel shader's inputs one at a time with a replay. `NXGFX_SPARSE=0` (whole images) would
+  test the sparse path at once, but the source records 19 GB of terrain arrays in the first second that way: not run
+  (device-loss risk; the brief stops a run at exit 71/72).
 
 ## 5. The 18 draws a frame skipped for "no pipeline" (missing geometry; not changed)
 
