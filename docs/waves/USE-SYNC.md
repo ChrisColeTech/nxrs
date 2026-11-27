@@ -79,6 +79,88 @@ chunk tracking removes, so the plan stood.
 | `20261126-182205-us-base2-mkw` | HEAD `4b9e524` | 29.8 / 26.0 | 33.5 | 12.25 | 11.2 | 7.8 | 1.64 / 4.27 / 1.92 | 3/3 on |
 | `20261126-182928-us-a1-mkw` | `1bc88e3`, on | 27.3 / 6.0 (stalls, below) | 36.8 | 12.9 | 8.0 | 4.9 | 1.38 / 1.89 / 1.67 | 3/3 on |
 | `20261126-183553-us-a1-verify-mkw` | `1bc88e3`, verify | 10.3 (verify cost; OFF-ROUTE, not used) | | | | | | 1/3 |
+| `20261126-184207-us-a2-on-mkw` | `1bc88e3`, on | 29.5 / 27.0 | 33.9 | 15.3 | 12.3 | 7.5 | 2.55 / 2.30 / 2.67 | 3/3 on |
+| `20261126-184744-us-a2-off-mkw` | `1bc88e3`, `NXGFX_USE_SYNC=0` (control, right after) | 20.6 / 0.9 | 49.9 | 16.4 | 15.2 | 11.9 | 1.85 / 8.82 / 2.49 | 3/3 on |
+| `20261126-185411-us-a2-turn` (`mkw-turn --faults`, window [250, 290]) | `1bc88e3`, on | 30.3 / 28.2 | | | | | | 4/4 on |
+
+The `a2` pair ran while OOT-DESC's OoT run (GPU 1) was going: its absolute ms are higher than `base2` / `a1` on both
+sides. The same-conditions comparison is on vs off: **write-watch scan 8.8 -> 2.3 ms, pool sync 11.9 -> 7.5 ms, prep
+15.2 -> 12.3 ms** a frame. Against step 0 (`base2` -> `a1`, quieter): scan 4.27 -> 1.89, pool sync 7.8 -> 4.9, prep 11.2
+-> 8.0. **FPS does not move: MKW stays held at 30** (29.5-30.3 with chunk tracking, 29.8 on HEAD). The replay thread is
+still ~20 ms a frame (replay 12-15 + prep 8-12) against the 16.7 ms that 60 needs, and the descriptor work on the lanes
+(13-16 ms) is untouched; that is SET-FAST's.
+
+In `a2-on`: ~600 chunks open (23 MB), 30 opened and 31 closed a frame, 43 MB of open chunks scanned a frame, 0 pages
+missed. What is left of the scan is call overhead, not bytes: a walk over the scan list takes ~1 ms (pool walker line),
+~700 write-watch calls (~450 open runs plus ~250 pools with write-backs, scanned whole as before) at ~1.4 us each,
+~2 scanning syncs a frame. The sealing pass (now also closing quiet chunks) is 0.23-0.46 ms a frame under the pool
+lock, on the walker thread.
+
+Pictures: every sheet read (base2, a1, a2-on, a2-off, verify, turn x2). Grid, race and lap 2 correct in all; `mkw-turn`
+12 shots in a row through the banked turn and steel deck (t37-t46), all correct textures, no pop-in, no stale or garbage
+texture. Its 15 fault captures were all read: the known timestamp-query and crashed-pipeline lines, stand-ins at loads
+(released textures, the known set), the exit's "compilation stopped", and white flashes at presents 346-348 and 3070,
+which are the real scene (the opening's camera into bright clouds, the course flyover's white roof). Red lines: the known
+set only, none from chunk tracking.
+
+## Stage B (use-driven sync in the pre-pass): not built
+
+Decided from the numbers above. After stage A the sync parts left on the replay thread are scan ~1.9-2.3 ms (call
+overhead), per-pool pass ~1.7-2.7 ms (mostly uploads and the upload skip's compare of what really changed), and lock wait
+~1.4-2.5 ms (the completion thread's landings hold the pool lock). A use-driven sync could take at most the scan and part
+of the pass, ~2-3 ms, minus the per-use checks (Turbo: ~1 ms a frame). It needs the replay pre-pass to see every binding
+(UBO, SSBO, vertex, index, indirect, copy sources, addresses read from UBOs), a gmem raw-pointer scan, and texture checks
+from page stamps. That would change exec.rs, image.rs and gmem.rs and risk stale data. That gain would not lift MKW off
+30 (the replay thread would still be ~17-18 ms), so it was not attempted inside this deadline.
+
+## Report (agent, protocol §5)
+
+Branch `usesync`: `b78ed26` (plan), `1bc88e3` (chunk tracking), `ff34d7f` + this commit (doc).
+
+### 1. Built
+Diagnosis: on HEAD, MKW's write-watch scan was still 4.3 ms a frame. ~2 sealed pools a frame were woken by a store and
+then scanned whole for 60 frames, and 428 CPU-written pools were never sealed. Correction: chunk tracking in `seal.rs` /
+`mem.rs` (design above). Every eligible mirror is armed. Scans ask only open 64 KiB chunks. Quiet chunks close again
+after 8 frames. Verify mode is `NXGFX_USE_SYNC=verify`. Switch rows are in `docs/env_switches.tsv`. Default on (verify
+clean, pictures correct); `NXGFX_USE_SYNC=0` restores SCAN-COST's behaviour.
+
+### 2. Tests (`cargo test --release -p graphics`: 271 passed, 6 ignored; other targets pass)
+- `seal::tests::chunks_open_at_a_store_and_close_when_quiet` (real VirtualAlloc + handler): stores open only their
+  chunks, and adjacent ones form one run. A stamped chunk stays open; a quiet one closes and a later store reopens it.
+  `closed_runs` is the complement. A write past the protection counts as a miss and opens its chunk, while a write in an
+  open chunk does not. Once all chunks close, the entry is armed again.
+- `mem::seal_tests::a_tracked_pool_is_scanned_over_its_open_chunks_only`: a sealed tracked pool is not asked. After a
+  store, only its open chunk is asked, and an untracked pool is still asked whole.
+- `mem::seal_tests::only_quiet_watched_mirrors_are_sealed` extended for chunk mode (written pools and pending pages
+  allowed, tracked ones and landings not).
+- These cover new behaviour, so there is no "failed before" state; the old seal tests pass unchanged.
+
+### 3. Verified
+Runs and numbers are in the table above. Verify mode over a full scenario run: 0 misses, 0 leaks. Route checks were on
+in every non-verify run (3/3, 3/3, 3/3, 4/4). FPS before/after: 29.8 / 26.0 -> 29.5 / 27.0 (`a2-on`) and 30.3 / 28.2
+(`turn`); the control with it off gave 20.6 / 0.9 under the same load. Target 60 not reached. Screenshots:
+`build/play/20261126-182205-us-base2-mkw/sheet-1.png` (before),
+`build/play/20261126-184207-us-a2-on-mkw/sheet-1.png`, `build/play/20261126-185411-us-a2-turn/sheet-1.png` and
+`sheet-2.png` (after). All numbers are indicative: OOT-DESC (OoT, GPU 1) and the web waves ran throughout.
+
+### 4. Unproven
+- The verify run reached lap 1 only, because verify mode is slow. A longer verify run would cover more of the race.
+- Chunk churn: 9-30 chunks opened and closed a frame at `NXGFX_USE_SYNC_QUIET=8`. A larger value was not tried.
+- Write paths the protection cannot see (kernel-mode writes into guest pages) now matter for CPU-written pools too, not
+  only quiet ones. None appeared (verify 0, leak check 0), but the risk now covers more memory.
+- Pools with write-backs are still unsealed whole at a landing (~250 pools, ~60 MB, one call each per scan).
+- OoT and other titles were not run (not owned). Chunk tracking is on by default for every title, so the lead's
+  regression runs should cover OoT and DKB before merge.
+- What holds MKW at 30: replay 12-15 ms plus the remaining prep, and descriptor time on the lanes (SET-FAST).
+
+### 5. Slips
+- Relinks ran this worktree's `target/release/nxrs-build.exe` directly with the launcher's own argument list (as
+  SCAN-COST did): `build.ps1` refused to start while another wave's cargo was running. I checked the DLL time after each
+  relink (18:19, 18:28).
+- `20261126-181955-us-base-mkw`: the harness died at 112 s while the game ran on. I closed the game by PID (56488).
+
+### 6. Questions
+None.
 
 `us-a1`: chunk tracking 450-550 chunks open (13-18 MB), ~9.5 opened and ~9 closed a frame, ~23 MB of open chunks
 scanned a frame. The 5 % low comes from one stretch, 290-305 s (18:34:18-18:34:33), of 100-250 ms frames with the
