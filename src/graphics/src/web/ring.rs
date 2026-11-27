@@ -5,7 +5,8 @@
 //! the worker (`Atomics.waitAsync` on `H_HEAD`); the worker advances `H_TAIL` as it consumes. A packet that does not
 //! fit before the ring's end is preceded by a wrap packet (op 0) or, with under 8 bytes left, an implied wrap.
 //!
-//! Completion: the worker writes a 64-bit value into the word a `SIGNAL` names, then bumps `H_GEN` and notifies it;
+//! Completion: a `SIGNAL` names two words and a value; the worker writes the value into the second (queued) word once it
+//! has handed the submission to the GPU, and into the first once the GPU finished it, bumping `H_GEN` and notifying it;
 //! engine threads waiting for any value sleep on `H_GEN` (`wait_until`).
 
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};

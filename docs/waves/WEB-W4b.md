@@ -98,3 +98,48 @@ after. W4's `m4-page.log` paused at the same point for 4.2 s (`slow frame 4: 421
 The FPS gain, the per-frame sync time after the change, and the picture comparison with `build/WEB/W4` all need the
 game past the logo. Native is unaffected by construction (every behavioural line is behind
 `cfg(target_os = "emscripten")` or `web_by_use()`, which is false off the web); no native run was made.
+
+## W4c - the stall after the 4th submission, then W4b's numbers
+
+Same branch (`web-w4b`, from `bea32d0`), title, port 8772, GPU 1. Evidence in the main checkout's `build/WEB/W4c/`.
+
+### Plan
+
+1. Name the wait: which thread holds the fence the game's main thread waits on, and why it never resolves (log lines
+   at the wait, the replay and the completion lanes; live-thread count against the pthread pool).
+2. Fix the cause in source; no forced signal, skipped wait or faked completion (docs/31 section 4).
+3. Measure W4b: per-frame sync and FPS on the beach, default against `NXGFX_WEB_USE_SYNC=0`, same build; title and
+   beach screenshots against `build/WEB/W4/*.png`.
+
+### Findings (diagnosis)
+
+- **Not the pthread pool.** At the stall the page has 49 game workers: `PThread.unusedWorkers` 1, `PThread.pthreads`
+  48, and all 48 are running thread code (a CDP `Runtime.evaluate` in each worker times out; the one idle worker
+  answers). Every thread the engine asked for started (`run4`, `run5`).
+- **The wait** (one-shot log in `queue::wait_fence` once `done` has not moved for 3 s, `run8`-`run10`): the game waits
+  for timeline value 3 (`f=ASYNC|3`, resolved: the replay thread is idle with every op replayed, `aq(tail,done)=(8,8)`);
+  `done=2`; `inflight=[4,5,6,7]`, so the completion thread had taken 3. At 3 s the GPU worker is still executing
+  submission 3 (`H_DONE`=2, ring not drained); at 12 s it has finished everything (`H_DONE`=7, ring empty, the
+  timeline word reads 7), yet `done` stays 2.
+- **Why:** the completion thread's wait for value 3 hit `submission_safety::COMPLETION_BUDGET` (5 s, measured from the
+  moment it took the submission) and called `resource_safety_fatal` (lane mark `completion deadline: fatal` at 5000 ms,
+  `run10`). The GPU worker had spent 6.8 s *executing* that submission (`H_EXEC_US` = 6,767,700: the worker's CPU-side
+  translation, where WebGPU pipelines are created synchronously at their first draw, cold in a fresh browser profile).
+  On native that CPU work happens inside `vkQueueSubmit`, before the budget starts; on the web device it happens in the
+  worker after `vkQueueSubmit2` returns, so the budget counted it as GPU time. W4's run paused 4.2 s at this point,
+  under the budget, and went on.
+- **Why it was silent:** on Emscripten `resource_safety_fatal` is the `unix` arm, `_exit(72)`, which on a pthread is
+  proxied to the page thread, does not end a runtime kept alive (`PROXY_TO_PTHREAD`), and only ends the calling
+  thread. The completion thread was gone (its worker back in the pool: the one idle worker above), nothing completed
+  again, and the game waited for ever.
+
+### Fix (planned files)
+
+| File | Change |
+|---|---|
+| `src/web/gpu-worker.js` | `SIGNAL` carries a second word, written as soon as the submission is handed to `device.queue.submit` (before the GPU finishes) |
+| `src/graphics/src/web/obj.rs`, `icd.rs`, `submit.rs` | each semaphore/fence has that `queued` word; `icd::wait_queued(sem, value)`: waits while the worker is alive until it has queued the submission signalling `value` |
+| `src/graphics/src/vk/queue.rs` | web arm of `completion_loop`: the budget starts once the worker has queued the submission (as native starts it after `vkQueueSubmit` did its CPU work); a red line when a worker's execute takes over 5 s |
+| `src/graphics/src/vk/submission_safety.rs` | Emscripten arm of `resource_safety_fatal`: `abort()` (the page's `onAbort` reports it), not a silent thread exit |
+
+The budget itself and its fatal stay: a submission the GPU does not finish within 5 s of being queued is still fatal.

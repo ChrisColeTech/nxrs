@@ -611,7 +611,8 @@ function submit(p0, len) {
           readbacks.push([u32(a), u64(a + 4), u64(a + 12), u64(a + 20)]);
           break;
         case OP.SIGNAL:
-          signals.push([u64(a), u64(a + 8)]);
+          // [done word, value, queued word (0: none)]
+          signals.push([u64(a), u64(a + 8), n >= 24 ? u64(a + 16) : 0]);
           break;
         default:
           once('sub' + op, `unknown submission op ${op}`);
@@ -640,6 +641,18 @@ function submit(p0, len) {
   for (const t of temps) t.destroy();
   const exec = performance.now() - t0;
   H[H_EXEC_US] = Math.round(exec * 1000);
+  // queued: the engine's GPU-time budget for this submission starts now (its CPU-side execute is done)
+  let queued = false;
+  for (const [, v, q] of signals) {
+    if (q) {
+      Atomics.store(new BigInt64Array(heap(), q, 1), 0, BigInt(v));
+      queued = true;
+    }
+  }
+  if (queued) {
+    Atomics.add(H, H_GEN, 1);
+    Atomics.notify(H, H_GEN);
+  }
   const done = device.queue.onSubmittedWorkDone();
   const mapped = maps.map(([st]) => st.mapAsync(GPUMapMode.READ));
   chain = chain.then(async () => {

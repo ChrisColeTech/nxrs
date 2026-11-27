@@ -108,7 +108,7 @@ pub fn wait_idle() {
     let w = Word::new(0);
     let mut s = Pk::default();
     sub(&mut s, op::SIGNAL, |p| {
-        p.u64(w.addr()).u64(1);
+        p.u64(w.addr()).u64(1).u64(0);
     });
     ring::push(op::SUBMIT_BEGIN, &s.0);
     ring::wait_until(u64::MAX, || w.get() != 0);
@@ -1463,7 +1463,8 @@ fn merge(v: &mut Vec<(u32, u64, u64, u64)>) {
     *v = out;
 }
 
-fn submit_one(cbs: &[vk::CommandBuffer], signals: &[(u64, u64)]) {
+/// `signals`: (done word, value, queued word) of each semaphore or fence the submission signals.
+fn submit_one(cbs: &[vk::CommandBuffer], signals: &[(u64, u64, u64)]) {
     let o = objs();
     let mut rs = Rs::new(&o);
     for &c in cbs {
@@ -1505,16 +1506,17 @@ fn submit_one(cbs: &[vk::CommandBuffer], signals: &[(u64, u64)]) {
             p.u32(id).u64(off).u64(n).u64(dst);
         });
     }
-    for &(addr, v) in signals {
+    for &(addr, v, queued) in signals {
         sub(&mut tail, op::SIGNAL, |p| {
-            p.u64(addr).u64(v);
+            p.u64(addr).u64(v).u64(queued);
         });
     }
     ring::push_parts(op::SUBMIT_BEGIN, &[&head.0, &body.0, &tail.0]);
 }
 
-fn sem_word(h: u64) -> Option<u64> {
-    objs().sem.get(&h).map(|s| s.word.addr())
+/// A semaphore's or fence's (done word, queued word).
+fn sem_word(h: u64) -> Option<(u64, u64)> {
+    objs().sem.get(&h).map(|s| (s.word.addr(), s.queued.addr()))
 }
 
 pub unsafe extern "system" fn queue_submit2(_q: vk::Queue, n: u32, si: *const vk::SubmitInfo2<'_>, fence: vk::Fence) -> R {
@@ -1528,24 +1530,24 @@ pub unsafe extern "system" fn queue_submit2(_q: vk::Queue, n: u32, si: *const vk
                 .map(|c| c.command_buffer)
                 .collect()
         };
-        let mut signals: Vec<(u64, u64)> = Vec::new();
+        let mut signals: Vec<(u64, u64, u64)> = Vec::new();
         if !s.p_signal_semaphore_infos.is_null() {
             for x in std::slice::from_raw_parts(s.p_signal_semaphore_infos, s.signal_semaphore_info_count as usize) {
-                if let Some(a) = sem_word(x.semaphore.as_raw()) {
-                    signals.push((a, x.value.max(1)));
+                if let Some((a, q)) = sem_word(x.semaphore.as_raw()) {
+                    signals.push((a, x.value.max(1), q));
                 }
             }
         }
         if k + 1 == infos.len() && fence != vk::Fence::null() {
-            if let Some(a) = sem_word(fence.as_raw()) {
-                signals.push((a, 1));
+            if let Some((a, q)) = sem_word(fence.as_raw()) {
+                signals.push((a, 1, q));
             }
         }
         submit_one(&cbs, &signals);
     }
     if infos.is_empty() && fence != vk::Fence::null() {
-        if let Some(a) = sem_word(fence.as_raw()) {
-            submit_one(&[], &[(a, 1)]);
+        if let Some((a, q)) = sem_word(fence.as_raw()) {
+            submit_one(&[], &[(a, 1, q)]);
         }
     }
     vk::Result::SUCCESS
@@ -1571,21 +1573,21 @@ pub unsafe extern "system" fn queue_submit(_q: vk::Queue, n: u32, si: *const vk:
         let mut signals = Vec::new();
         if !s.p_signal_semaphores.is_null() {
             for (i, x) in std::slice::from_raw_parts(s.p_signal_semaphores, s.signal_semaphore_count as usize).iter().enumerate() {
-                if let Some(a) = sem_word(x.as_raw()) {
-                    signals.push((a, values.get(i).copied().unwrap_or(1).max(1)));
+                if let Some((a, q)) = sem_word(x.as_raw()) {
+                    signals.push((a, values.get(i).copied().unwrap_or(1).max(1), q));
                 }
             }
         }
         if k + 1 == infos.len() && fence != vk::Fence::null() {
-            if let Some(a) = sem_word(fence.as_raw()) {
-                signals.push((a, 1));
+            if let Some((a, q)) = sem_word(fence.as_raw()) {
+                signals.push((a, 1, q));
             }
         }
         submit_one(&cbs, &signals);
     }
     if infos.is_empty() && fence != vk::Fence::null() {
-        if let Some(a) = sem_word(fence.as_raw()) {
-            submit_one(&[], &[(a, 1)]);
+        if let Some((a, q)) = sem_word(fence.as_raw()) {
+            submit_one(&[], &[(a, 1, q)]);
         }
     }
     let _ = Ordering::Relaxed;

@@ -6,7 +6,7 @@
 use super::cmd;
 use super::fmt;
 use super::obj::{self, objs, op, Desc, Dsl, Gfx, Image, Memory, Pipeline, PipelineLayout, View};
-use super::ring::{self, Word};
+use super::ring;
 use super::submit;
 use ash::vk;
 use ash::vk::Handle;
@@ -1136,7 +1136,7 @@ unsafe extern "system" fn create_semaphore(_d: vk::Device, ci: *const vk::Semaph
         }
     });
     let h = obj::new_handle();
-    objs().sem.insert(h, obj::Semaphore { word: Word::new(init) });
+    objs().sem.insert(h, obj::Semaphore::new(init));
     *out = vk::Semaphore::from_raw(h);
     OK
 }
@@ -1154,6 +1154,22 @@ fn word_addr(h: u64) -> Option<&'static std::sync::atomic::AtomicU64> {
     // SAFETY: words are never freed (destroy_semaphore leaks them)
     objs().sem.get(&h).map(|s| unsafe { &*(s.word.addr() as *const std::sync::atomic::AtomicU64) })
 }
+fn queued_addr(h: u64) -> Option<&'static std::sync::atomic::AtomicU64> {
+    // SAFETY: as `word_addr` (the queued word is leaked with its semaphore)
+    objs().sem.get(&h).map(|s| unsafe { &*(s.queued.addr() as *const std::sync::atomic::AtomicU64) })
+}
+
+/// Waits until the worker has handed the submission that signals `value` on `sem` to the GPU, or has stopped: the
+/// worker's CPU-side execute of a submission (command encoding, WebGPU pipelines created at their first draw) is what
+/// a native driver does inside `vkQueueSubmit`, so a GPU-time budget starts after it. Returns the time waited.
+pub fn wait_queued(sem: vk::Semaphore, value: u64) -> std::time::Duration {
+    let t = std::time::Instant::now();
+    if let Some(q) = queued_addr(sem.as_raw()) {
+        ring::wait_until(u64::MAX, || q.load(Ordering::Acquire) >= value);
+    }
+    t.elapsed()
+}
+
 unsafe extern "system" fn wait_semaphores(_d: vk::Device, wi: *const vk::SemaphoreWaitInfo<'_>, timeout: u64) -> R {
     let wi = &*wi;
     let any = wi.flags.contains(vk::SemaphoreWaitFlags::ANY);
@@ -1178,6 +1194,9 @@ unsafe extern "system" fn wait_semaphores(_d: vk::Device, wi: *const vk::Semapho
 }
 unsafe extern "system" fn signal_semaphore(_d: vk::Device, si: *const vk::SemaphoreSignalInfo<'_>) -> R {
     if let Some(w) = word_addr((*si).semaphore.as_raw()) {
+        if let Some(q) = queued_addr((*si).semaphore.as_raw()) {
+            q.store((*si).value, Ordering::Release);
+        }
         w.store((*si).value, Ordering::Release);
         ring::hdr(ring::H_GEN).fetch_add(1, Ordering::AcqRel);
         ring::wake(ring::hdr(ring::H_GEN));
@@ -1187,7 +1206,7 @@ unsafe extern "system" fn signal_semaphore(_d: vk::Device, si: *const vk::Semaph
 unsafe extern "system" fn create_fence(_d: vk::Device, ci: *const vk::FenceCreateInfo<'_>, _a: *const c_void, out: *mut vk::Fence) -> R {
     let on = (*ci).flags.contains(vk::FenceCreateFlags::SIGNALED) as u64;
     let h = obj::new_handle();
-    objs().sem.insert(h, obj::Semaphore { word: Word::new(on) });
+    objs().sem.insert(h, obj::Semaphore::new(on));
     *out = vk::Fence::from_raw(h);
     OK
 }
@@ -1211,6 +1230,9 @@ unsafe extern "system" fn reset_fences(_d: vk::Device, n: u32, f: *const vk::Fen
     for f in sl(f, n) {
         if let Some(w) = word_addr(f.as_raw()) {
             w.store(0, Ordering::Release);
+        }
+        if let Some(q) = queued_addr(f.as_raw()) {
+            q.store(0, Ordering::Release);
         }
     }
     OK
