@@ -4548,12 +4548,17 @@ impl Gpu {
         let mut imgs = super::gate::lock(&self.images, 2);
         let kept = TEX_DUE.load(std::sync::atomic::Ordering::Acquire) == due
             && imgs.by_serial.get_mut(&serial).is_some_and(|im| {
+                // the parts are cut to the shape read before: every field the decode and the copies use must stand
+                let (a, b) = (&im.tex.d, &inp.tex.d);
                 let same = im.needs_upload
                     && !im.gpu_owned
                     && im.decoded.is_none()
                     && im.tex.mem as u64 == lo
                     && im.tex.l.size == size
-                    && im.tex.d.format == inp.tex.d.format;
+                    && (a.format, a.width, a.height, a.depth, a.levels, a.target, a.flags, a.stride)
+                        == (b.format, b.width, b.height, b.depth, b.levels, b.target, b.flags, b.stride)
+                    && (im.layers, im.levels, im.tf.astc.is_some(), im.tf.expand3)
+                        == (inp.layers, inp.levels, inp.astc, inp.expand3);
                 if same {
                     im.decoded = Some(parts);
                     if let Some(h) = hashes {
