@@ -1348,6 +1348,19 @@ fn completion_loop(g: &'static Gpu) {
                 Err(e) => Err(e),
             },
         );
+        // the web build: the fatal below is an abort with no reason (native's exit status 72 reaches no one there), so
+        // the page said only "The game stopped" (WEB-W8c, run after3): name the submission and why first
+        #[cfg(target_os = "emscripten")]
+        if let Err(e) = &completion {
+            let why = match e {
+                submission_safety::CompletionError::Deadline => format!(
+                    "not complete {:.1} s after the GPU worker handed it to the GPU",
+                    started.elapsed().as_secs_f64()
+                ),
+                submission_safety::CompletionError::Driver(r) => format!("the wait failed: {r:?}"),
+            };
+            crate::log::red(&format!("web: submission {} {why}; the game stops (GPU completion budget)", item.value));
+        }
         let completion = submission_safety::resource_safety_result(completion);
         super::lost::ring::COMPLETED.store(item.value, Ordering::Relaxed);
         chain_trace::note("gpu_done", item.value, item.wb.len() as u64);

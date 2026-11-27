@@ -323,6 +323,8 @@
   }
   function instantiateWasm(imports, done) {
     const t0 = performance.now();
+    // WEB-W8c: the GPU worker gets the memory now, while it is small (gpu.js early: why)
+    if (globalThis.NXRS_GPU && imports.env) NXRS_GPU.early(imports.env.memory);
     codeResponse('game.wasm')
       .then(({ response, from }) => WebAssembly.instantiateStreaming(counted(response, from), imports).then((r) => {
         const s = ((performance.now() - t0) / 1000).toFixed(2);

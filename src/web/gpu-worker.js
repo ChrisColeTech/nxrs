@@ -93,7 +93,12 @@ onmessage = async (e) => {
     Atomics.store(H, H_CANVAS_H, m.resize[1]);
     return;
   }
-  memory = m.memory;
+  // WEB-W8c: the memory alone, at the page's instantiation (gpu.js early), while it is small; the ring comes later
+  if (m.ring === undefined) {
+    memory = m.memory;
+    return;
+  }
+  if (m.memory) memory = m.memory;
   ringAddr = m.ring;
   shotEvery = m.shotEvery | 0;
   subTrace = !!m.subTrace;

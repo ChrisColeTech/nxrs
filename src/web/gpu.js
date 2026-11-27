@@ -38,7 +38,8 @@
   const resized = (s) => {
     if (s[0] === size[0] && s[1] === size[1]) return;
     size = s;
-    const worker = globalThis.NXRS_GPU && NXRS_GPU.worker;
+    // the worker exists from instantiation (early), but owns the canvas only once started
+    const worker = started && globalThis.NXRS_GPU && NXRS_GPU.worker;
     if (worker) worker.postMessage({ resize: s });
     else {
       canvas.width = s[0];
@@ -76,30 +77,49 @@
     ask() {
       if (NXRS_GPU.worker) NXRS_GPU.worker.postMessage({ ask: 1 });
     },
+    // WEB-W8c: the worker gets the wasm memory at instantiation (boot.js instantiateWasm), while it is still small.
+    // V8 counts a shared memory's length at the time an isolate receives it as that isolate's external memory (later
+    // growth is not counted): handed over at nxgfx_web_start, after the guest window was claimed (~9.4 GB), the
+    // worker's GC limit sat below that figure and it ran ~220 full collections a second (build/WEB/W8c/gcbench: a
+    // worker handed >= 8 GiB collects continuously, one handed it small and grown later does not).
+    early(memory) {
+      if (handed || !memory) return;
+      handed = true;
+      worker().postMessage({ memory });
+    },
     start(memory, ring) {
       if (started) return;
       started = true;
       place();
       const off = canvas.transferControlToOffscreen();
-      const worker = new Worker('gpu-worker.js');
-      worker.onmessage = (e) => {
-        const m = e.data;
-        if (m.log) say(m.log);
-        if (m.stats) NXRS_GPU.stats = m.stats;
-        if (m.first) tell({ first: true });
-        if (m.fatal) tell({ fatal: m.fatal });
-      };
-      worker.onerror = (e) => {
-        say('worker: ' + e.message);
-        tell({ fatal: 'the GPU worker stopped: ' + e.message });
-      };
+      const w = worker();
       // ?shots=N: every N-th presented image goes to the dev server (development)
       const q = new URLSearchParams(location.search);
       const shotEvery = Number(q.get('shots') || 0);
       // ?subtrace=1: the worker logs every submission to the dev server (gpu-worker.js traceSubmit)
       const subTrace = q.get('subtrace') === '1';
-      worker.postMessage({ memory, ring, canvas: off, width: size[0], height: size[1], shotEvery, subTrace }, [off]);
-      NXRS_GPU.worker = worker;
+      // the memory only when early() did not hand it over (a page without the instantiate hook)
+      const m = { ring, canvas: off, width: size[0], height: size[1], shotEvery, subTrace };
+      if (!handed) m.memory = memory;
+      w.postMessage(m, [off]);
     },
   };
+  let handed = false;
+  function worker() {
+    if (NXRS_GPU.worker) return NXRS_GPU.worker;
+    const worker = new Worker('gpu-worker.js');
+    worker.onmessage = (e) => {
+      const m = e.data;
+      if (m.log) say(m.log);
+      if (m.stats) NXRS_GPU.stats = m.stats;
+      if (m.first) tell({ first: true });
+      if (m.fatal) tell({ fatal: m.fatal });
+    };
+    worker.onerror = (e) => {
+      say('worker: ' + e.message);
+      tell({ fatal: 'the GPU worker stopped: ' + e.message });
+    };
+    NXRS_GPU.worker = worker;
+    return worker;
+  }
 })();
