@@ -18,7 +18,9 @@
   <a href="#credits">Credits</a>
 </p>
 
-<!-- hero.gif: library → Build native/web → native and web launching to MK8D's title (coming) -->
+<p align="center">
+  <img src="docs/images/readme/hero.gif" alt="nxrs building Mario Kart 8 Deluxe natively and for the web, then playing both to its title screen" width="100%">
+</p>
 
 > [!IMPORTANT]
 > No games, keys or firmware are included. Use your own legally obtained dumps and keys.
