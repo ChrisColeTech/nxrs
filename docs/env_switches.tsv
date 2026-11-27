@@ -77,6 +77,9 @@ NXGFX_NATIVE_TRACE	test		src/graphics/src/vk/queue.rs
 NXGFX_NDVE	test		src/graphics/src/vk/newndve.rs
 NXGFX_NDVE_COMPARE_8	test		src/graphics/src/vk/newndve/kernels.rs
 NXGFX_OCCL_SYNC	switch	frame's results otherwise read them two presents late: Mario Kart 8 Deluxe's black stretches). NXGFX_OCCL_SYNC=0 off	src/graphics/src/vk/queue.rs
+NXGFX_OCCL_LAG	switch	`NXGFX_OCCL_LAG` (default 1): presents the replay may stay behind while a game uses samples-passed results; 0 = each present waits until everything queued is replayed, as before (OOT-OCC); 1 = the game builds its next frame while the replay translates this one and reads the most recent results completed	src/graphics/src/vk/occl.rs
+NXGFX_OCCL_POOL	switch	`NXGFX_OCCL_POOL` (default 4096): occlusion queries a submission has; 256 = as before (OoT's ~560 box tests a frame used them up and ~1,000 queries a frame were refused, their draws missing from the counts; OOT-OCC)	src/graphics/src/vk/queue.rs
+NXGFX_OCCL_EARLY	switch`NXGFX_OCCL_EARLY=0`: report memory the game rewrote before resubmitting is left as the game wrote it until its result lands; by default the previous answer is put back at submit (OOT-OCC)	src/graphics/src/vk/occl.rs
 NXGFX_OP_TIMES	diagnostic	Replay time by record kind (`NXGFX_OP_TIMES=1`): every 600 presents a `[vk] replay by record` line	src/graphics/src/vk/exec.rs
 NXGFX_PACE_N	diagnostic	presents per pacing line (default 300)	src/graphics/src/vk/present.rs, src/graphics/tests/window.rs
 NXGFX_PARTS_PRIVATE_MB	switch	The process private memory in MB past which no more shader parts are made ahead (default an eighth of the machine's memory, at least 6144).	src/graphics/src/vk/pipe.rs

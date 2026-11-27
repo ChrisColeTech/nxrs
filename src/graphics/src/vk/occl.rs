@@ -88,6 +88,10 @@ struct St {
 
 static ST: Mutex<Option<St>> = Mutex::new(None);
 static PRESENTS: AtomicU64 = AtomicU64::new(0);
+/// The game's presents' wait for the replay in `aq_wait_room` (ns, cumulative).
+pub static PRESENT_WAIT_NS: AtomicU64 = AtomicU64::new(0);
+/// The present wait and the replay thread's busy time at the last diagnosis line.
+static LAST_NS: Mutex<(u64, u64)> = Mutex::new((0, 0));
 
 /// The records of one submission, read on the game's thread before it is queued: its samples-passed reports, resets,
 /// draws and render conditions in order (`op` codes of `nvn::obj::op`).
@@ -211,12 +215,19 @@ pub fn note_present() {
     let frames = (n - st.from).max(1) as f64;
     let s = std::mem::take(&mut st.s);
     st.from = n;
+    let (wait, busy) = (
+        PRESENT_WAIT_NS.load(Ordering::Relaxed),
+        super::queue::aq_ns(),
+    );
+    let (w0, b0) = std::mem::replace(&mut *LAST_NS.lock().unwrap(), (wait, busy));
     if s.reports == 0 && s.landed == 0 {
         return;
     }
     let pct = |a: u64, b: u64| 100.0 * a as f64 / b.max(1) as f64;
     crate::vklog!(
-        "occlusion, per frame over the last {frames:.0}: {:.1} samples-passed reports at {} addresses in all, {:.1} resets, {:.1} draws counted a report, {:.1} render conditions on report addresses; landed {:.1}: {:.0} % zero, {:.1} % changed between zero and not; landed after 0 / 1 / 2 / 3+ presents: {} / {} / {} / {}; the game rewrote report memory before its submit {} times ({} put back), before its landing {} (NXGFX_OCCL_LAG={}, OCCL_EARLY {})",
+        "occlusion, per frame over the last {frames:.0}: presents waited {:.2} ms for the replay, the replay thread busy {:.2} ms; {:.1} samples-passed reports at {} addresses in all, {:.1} resets, {:.1} draws counted a report, {:.1} render conditions on report addresses; landed {:.1}: {:.0} % zero, {:.1} % changed between zero and not; landed after 0 / 1 / 2 / 3+ presents: {} / {} / {} / {}; the game rewrote report memory before its submit {} times ({} put back), before its landing {} (NXGFX_OCCL_LAG={}, OCCL_EARLY {})",
+        (wait - w0) as f64 / 1e6 / frames,
+        (busy - b0) as f64 / 1e6 / frames,
         s.reports as f64 / frames,
         st.slots.len(),
         s.resets as f64 / frames,

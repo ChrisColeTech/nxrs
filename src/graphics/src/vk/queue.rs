@@ -521,13 +521,14 @@ impl Sub {
         }
         q
     }
-    /// An occlusion query of the pool's 256, if one is left.
+    /// An occlusion query of the pool's `occl_pool()`, if one is left.
     pub fn take_occl(&mut self) -> Option<u32> {
+        let n_max = occl_pool();
         let q = if let Some(c) = &self.qshare {
-            c[1].try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 256).then_some(n + 1))
+            c[1].try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < n_max).then_some(n + 1))
                 .ok()
         } else {
-            (self.occl_n < 256).then(|| {
+            (self.occl_n < n_max).then(|| {
                 self.occl_n += 1;
                 self.occl_n - 1
             })
@@ -539,8 +540,24 @@ impl Sub {
     }
 }
 
-/// Queries refused because the submission's pool of 256 was used up: timestamp (counter reports), occlusion (audit
-/// L4: a parallel run's dropped children and in-pass cuts spend them faster). Counted in the translate line.
+/// `NXGFX_OCCL_POOL` (default 4096): occlusion queries a submission has. A query runs from a pass's (or a reset's)
+/// first draw to the pass's end, its report or the next reset, so a game testing each object's box with its own reset
+/// and report spends one a test: Ocarina of Time's Kokiri Forest and Link's house make ~560 tests a frame, and with 256
+/// about 1,000 queries a frame were refused there, their draws missing from the counts (OOT-OCC). 256: as before.
+pub fn occl_pool() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("NXGFX_OCCL_POOL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4096u32)
+            .clamp(16, 65536)
+    })
+}
+
+/// Queries refused because the submission's pool (256 timestamps, `occl_pool()` occlusion) was used up: timestamp
+/// (counter reports), occlusion (audit L4: a parallel run's dropped children and in-pass cuts spend them faster).
+/// Counted in the translate line.
 pub static QUERIES_OUT: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
 fn queries_out(k: usize) {
@@ -548,7 +565,7 @@ fn queries_out(k: usize) {
     crate::log::red_once(if k == 0 {
         "a submission used all 256 timestamp queries: a counter report gets no GPU timestamp"
     } else {
-        "a submission used all 256 occlusion queries: a samples-passed count misses the draws after it"
+        "a submission used all its occlusion queries (NXGFX_OCCL_POOL): a samples-passed count misses the draws after it"
     });
 }
 
@@ -713,7 +730,7 @@ fn make_sub(
         let query = unsafe { g.dev().create_query_pool(&qi, None) }.expect("query pool");
         let oi = vk::QueryPoolCreateInfo::default()
             .query_type(vk::QueryType::OCCLUSION)
-            .query_count(256);
+            .query_count(occl_pool());
         let occl = unsafe { g.dev().create_query_pool(&oi, None) }.expect("occlusion query pool");
         Sub {
             pre: cbs[0],
@@ -784,7 +801,7 @@ fn make_sub(
         g.dev().begin_command_buffer(s.main, &bi).unwrap();
         super::defer::begin(s.main);
         g.dev().cmd_reset_query_pool(s.pre, s.query, 0, 256);
-        g.dev().cmd_reset_query_pool(s.pre, s.occl, 0, 256);
+        g.dev().cmd_reset_query_pool(s.pre, s.occl, 0, occl_pool());
         g.dev()
             .cmd_write_timestamp2(s.main, vk::PipelineStageFlags2::TOP_OF_PIPE, s.query, 0);
     }
@@ -884,14 +901,14 @@ pub fn child_begin_with(ci: &ChildInit, c: &mut Sub) {
 /// The parent's query counts after its children's (`child_begin_with`).
 pub fn child_settle(parent: &mut Sub, ci: &ChildInit) {
     parent.queries = ci.share[0].load(Ordering::Relaxed).min(256);
-    parent.occl_n = ci.share[1].load(Ordering::Relaxed).min(256);
+    parent.occl_n = ci.share[1].load(Ordering::Relaxed).min(occl_pool());
 }
 
 /// A child's segment is translated: its CPU-side effects join the parent's, in stream order, and it is kept with it.
 pub fn child_join(parent: &mut Sub, mut c: Sub) {
     if let Some(s) = &c.qshare {
         parent.queries = s[0].load(Ordering::Relaxed).min(256);
-        parent.occl_n = s[1].load(Ordering::Relaxed).min(256);
+        parent.occl_n = s[1].load(Ordering::Relaxed).min(occl_pool());
     }
     parent.post.append(&mut c.post);
     super::mem::join_writebacks(parent, std::mem::take(&mut c.writebacks));
@@ -1750,6 +1767,7 @@ pub fn aq_wait_room(present: bool) {
     if !full() {
         return;
     }
+    let t0 = std::time::Instant::now();
     let mut l = a.idle_mu.lock().unwrap();
     while full() {
         l = a
@@ -1757,6 +1775,9 @@ pub fn aq_wait_room(present: bool) {
             .wait_timeout(l, std::time::Duration::from_millis(20))
             .unwrap()
             .0;
+    }
+    if present {
+        super::occl::PRESENT_WAIT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     }
 }
 
