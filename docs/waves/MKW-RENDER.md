@@ -74,3 +74,64 @@ the race. Pictures: the character select (`rd-v1-pop/06-o5.png`) shows the full 
 Pauline, Yoshi, Toad, Koopa, Baby Mario, Wario, Waluigi, Bowser, Baby Luigi), Mario's 3D model, the name banner's
 tire-track backdrop and the selection bracket on Mario; the kart select (`07-o6.png`) its kart grid and Mario in the
 Standard Kart; the race HUD's lap counter has its flag icon (`1/3`; base: `1 3` with a gap).
+
+**Second step (v1 → v3).** `rd-v1-pop` still had 7 such stand-ins, each right after `made again ... image ok` followed by
+`vk replay released` in the same frame: a make outside a submission's recording (record-time translation, MKW-RECORD)
+hands `release_after_use` to `defer_after_use`, which with nothing being recorded runs it after the last fence
+already submitted (often done): the image went before the draws that wanted it. (The same holds for the first use's
+make in the old path.) Now a remade image is kept and released by a sweep at the present `remade::KEEP` (60) frames after
+its make (`Gpu::sweep_remade`, `queue.rs` present path); a later use takes the parked image back. And each
+`release_after_use` carries a generation (`release_gen`): a release queued after an earlier submission's use no longer
+releases an image a later submission made again. `rd-v3-pop` (`20261127-104040`): **stand-ins 1 in the whole run** (the
+known boot one, `texture ID 0 ... nothing is registered there`); remakes ~50 per stats line (5 textures, every 60
+frames) instead of ~3,000; the gate's give-ups and re-translations **4,234-4,297 → 157-172** a run (parallel lanes no
+longer meet missing images and give up).
+
+| | base `rd-base-pop` | `rd-v1-pop` | `rd-v3-pop` |
+|---|---|---|---|
+| zero stand-ins (logged; capped at 4,096 IDs) | 6,653 | 8 | 1 |
+| gate (give-ups + re-translations, run) | 4,234 | 4,296 | 157 |
+| character select | `faults/fault-08-p2464.png`: no portraits, no model | `06-o5.png`: correct | `07-o6.png`: correct |
+| race HUD lap counter | `1 3` | `1/3` with its flag icon | same |
+
+## 3. Pop-in
+
+What the 0.5 s shots and the logs show:
+
+- **Stand-ins were the pop-in the engine caused.** A finalized texture's slot showed its texture for one frame (the
+  first use's image) and the zero stand-in after it, and stand-ins are fault-capture triggers, not anything the old
+  sheets showed. 6,653 logged in the base run (and, past the log's 4,096-ID cap, more in the race that were not
+  logged): character portraits, kart icons, name banners, the race intro's and HUD's icons. Gone (§2).
+- **The upload skip and chunk tracking miss no CPU write.** `20261127-102015-rd-verify` (`mkw`,
+  `NXGFX_USE_SYNC=verify`, boot to lap 2, 341 s, route 3/3 on): **0 written pages missed in closed chunks** at every
+  report.
+- **The ASTC path is not late.** `astc::record` decodes (or takes the BC7 disk cache's blocks) and copies into the image
+  in the same submission as the first use; nothing provisional is shown first. Big uploads (8192² levels, 20-250 ms,
+  MKW-SPIKE) make a slow frame, not a late texture.
+- **Sparse terrain arrays** (8192x8192x68 BC7 / BC6H, Vulkan sparse images, `sparse.rs`) are bound as the game maps
+  pages; the game streams their tiles itself, so a coarse-to-fine change there is the game's level-of-detail streaming
+  unless a tile it wrote is missing. Not separately checked (no tile readback tool).
+- In the 78-80 race shots of `rd-v3-pop` (238-302 s) no texture appears late or changes from shot to shot beyond the
+  camera's movement; the sand's streaks at 290-302 s are the game's motion blur at speed (they follow the kart's
+  speed, the coins and HUD are sharp). Still shots 0.5 s apart cannot show a one-frame pop or a sub-0.5 s swap.
+
+## 4. The black shrubs (not fixed)
+
+Still near-black in every run of this wave (e.g. `rd-v3-pop/28-pop.png`, `29-pop.png`, `36-pop.png`, `59-pop.png`).
+What the pass dump of `20261127-101211-rd-dump` (frame 13044, 271 s; files in the scratchpad, not kept) shows:
+
+- MKW draws the course forward: a depth prepass (passes 68-102, colour mask 0, depth LESS), then the colour passes
+  (129-160, depth test **EQUAL**, no depth write), each with its own vertex programs.
+- The shrubs are drawn by a single colour draw (pass 146: vertex `def3f05b1930ac56`, pixel `cb0bfd018d46e25c`) and their
+  pixels **are written**: (16-24, 16, 8) of 255 in the scene target where the sand around them is above 1.0. Brightened
+  4x the crop shows the full leaf texture in brown: the albedo arrives, the lighting comes out ~0.
+- Not shadow: the screen-space shadow mask (pass 125, target 0) is white (lit) over the shrubs.
+- Tried and taken out: **NoContraction** on all pre-raster float arithmetic (the hypothesis: the EQUAL test failing
+  between two programs' positions). Built, run (`20261127-103033-rd-v2-pop`): shrubs unchanged; the dump then showed the
+  shrub pixels are written, so the depth test is not what darkens them. The change moved nothing and was removed
+  (§4 rule). Ryujinx's output already marks the position `Invariant`.
+- Not the 18 blacklisted draws a frame either (§5): with them compiled the shrubs are the same.
+- Left: the pixel shader's inputs. Its textures: three sparse 8192x8192x68 arrays (BC7_SRGB ser33391, **BC6H_UFLOAT**
+  ser33393, BC7_SRGB ser33395), small per-object textures (275x275 BC7, 165x165 RGBA8 viewed (R,0,1,1), 138x138
+  SRGB), probe arrays (128x128x12 cube array from passes 44-66), a 256x256 RGBA16F LUT (pass 9). A BC6H lighting atlas
+  whose tiles are zero, or a mask texture read as zero, would give exactly this.
