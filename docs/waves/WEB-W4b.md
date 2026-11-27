@@ -143,3 +143,22 @@ Same branch (`web-w4b`, from `bea32d0`), title, port 8772, GPU 1. Evidence in th
 | `src/graphics/src/vk/submission_safety.rs` | Emscripten arm of `resource_safety_fatal`: `abort()` (the page's `onAbort` reports it), not a silent thread exit |
 
 The budget itself and its fatal stay: a submission the GPU does not finish within 5 s of being queued is still fatal.
+
+### Results (2026-11-26)
+
+| Item | State | Evidence |
+|---|---|---|
+| Stall fix (queued word, budget from the queue point, web fatal aborts) | Built (`4d86011`) | `run11`: `web: the GPU worker took 7.2 s to execute submission 3 before the GPU could start it`, then the logo, the title menu (`run11/t60.png`) and 50-56 FPS; `cargo test --release -p graphics` 275 passed |
+| Beach gameplay in Chrome | Shown | `run12-on/beach1.png` (Day 1, HUD, monsters, pier), `run13-off/beach1.png` |
+| W4b by-use sync, default (`run12-on`, beach 80-118 s) | **59.3-60.0 FPS**, pool sync ~1.1 ms a frame | `compared by use a frame: 6.6-8.2 MB in 0.95-1.33 ms`, per-pool pass 0.06-0.07 ms |
+| Same build, `NXGFX_WEB_USE_SYNC=0` (`run13-off`, beach 80-118 s) | **6.7-10.2 FPS**, pool sync 84-124 ms a frame | `per-pool pass 84.12-123.58 ms` (W4: 86 ms, ~10 FPS) |
+
+Both runs are on the beach but not in the same frame (the slow run reaches the beach later, with the camera and time
+of day elsewhere), so the picture comparison is by content, not pixel for pixel.
+
+**Open (W4b correctness):** in the default run the sea shows an iridescent, noisy sheen (`run12-on/beach1.png`,
+behind the menu in `beach2.png`) that neither the `NXGFX_WEB_USE_SYNC=0` run nor W4's beach picture has. It looks
+like texture memory the CPU rewrites that the by-use compare does not reach (a stale texture), not proven: the next
+step is the same frame with both settings (a frame capture at a fixed frame number) and, if it differs, the
+textures whose storage `image_begin_submit`'s web arm skips (sparse, no storage, or memory written after its compare in
+the sync).
