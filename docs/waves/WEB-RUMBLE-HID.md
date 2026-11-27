@@ -1,6 +1,7 @@
 # WEB-RUMBLE-HID - the DualSense rumbles in the web games (WebHID)
 
-**Status: in progress (2026-11-27).** Branch `web-hid`, base `ed9e5d6` (gameplay-harness after WEB-RUMBLE). Title:
+**Status: built and verified up to Chrome's permission prompt (2026-11-27); results in section 5; a felt motor
+is the owner's manual test (5.5).** Branch `web-hid`, base `ed9e5d6` (gameplay-harness after WEB-RUMBLE). Title:
 Beach Bounce Remastered (library web build `nxrs-web\Beach Bounce Remastered nsw2u`). GPU 1
 (`--use-adapter-luid=0,113326`). Evidence `build/WEB/RUMBLE-HID`.
 
@@ -50,4 +51,71 @@ output report the native engine already writes (`src/os/src/input/sony.rs` `outp
 
 ## 5. Results
 
-(filled in at the end)
+### 5.1 Built
+
+As planned in section 3 (`432857a`). Details: the report is the native one with the light flags left at 0 (section
+2); one report in flight per device, a newer level replacing a waiting one, a report only when the 0..255 level
+changes (the DualSense holds its motors until told otherwise, so a held level is not re-sent); a gamepad whose id
+names a DualSense and has no dual-rumble actuator takes WebHID, any other pad stays on `vibrationActuator` (the
+DualShock 4 included). Stops: menu open, blur and hidden go through `stopAllRumble` (now also `NxrsHid.stopAll`),
+`pagehide` sends zero, an open device no gamepad takes is set to zero. The menu row appears only when WebHID exists
+and a connected pad is such a DualSense; "Allow…" from a gamepad's A has no user activation in Chrome, so it shows
+"Not allowed: …" (Chrome's reason); a mouse click or Enter works.
+
+### 5.2 Tests
+
+- `src/web/hid-rumble.test.js` (node 24.19 from `build\tools\emsdk\node`): 5/5 pass: CRC-32 standard vector (as
+  sony.rs `crc32_matches_the_standard`); word -> byte rounding (32768 -> 128 = native's `(0.5 * 255 + 0.5) as u32`);
+  USB 0x02 47 bytes `03 00 <high> <low>`, nothing else set, v2 at data[38] (packet [39]), the descriptor's larger
+  size kept; Bluetooth 0x31 77 bytes `seq<<4 10 03 00 <high> <low>`, CRC at packet [74..78) over `a2 31 ...`, v2
+  shifted; gamepad ids (0ce6, 0df2 yes; DualShock 4 and Xbox no) and the filters.
+- `cargo test --release -p nxrs-cli webhost`: 2/2 (the host list and build.json now carry `hid-rumble.js`; the count
+  assertions failed before they were updated for the eleventh host file).
+
+### 5.3 Chrome (Beach Bounce, own profiles, GPU 1, dev server on 8795 serving Beach Bounce's build.json)
+
+Driver `build/WEB/RUMBLE-HID/tools/drive.mjs`: a DualSense-named standard gamepad with `vibrationActuator` null; in
+mode `shim` a `navigator.hid` test double whose `requestDevice` logs its arguments and requires user activation, and
+whose `sendReport` logs the bytes. Page `?env=NXRS_CONTROLLER_SELFTEST=1,NXRS_CONTROLLER_TRACE=1`.
+
+- `run2-shim`: Esc, Controller: the row "Rumble on this controller · Not allowed yet · Allow…"
+  (`1-controller-row.png`). A real CDP mouse click on Allow…: `requestDevice {"filters":[{"vendorId":1356 (054c),
+  "productId":3302 (0ce6)},{.., 3570 (0df2)}]} userActivation true`; the device opened (`USB, report 0x02, 47 bytes,
+  vibration v2 on`), the readout "On: DualSense Wireless Controller" (`2-allowed.png`). Reload: `getDevices -> 1`,
+  reopened without a click; the self-test: `sendReport 0x02 47 bytes: 03 00 00 80 ... 04 ...` (heavy 128), 0.5 s
+  later `03 00 80 00` (light 128), 0.5 s later `03 00 00 00` (stop). Reload with the pad connected after the game
+  was up, Esc during the heavy motor: `report 0x02 low 0 high 0 (menu open)` 160 ms later, and no report while the
+  menu stayed open although the self-test's light phase ran in the engine.
+- `run3-shim-hidden`: during the heavy motor, `visibilitychange` to hidden: `low 0 high 0 (page hidden)`; then
+  `pagehide`: `low 0 high 0 (page closing)` (both events dispatched in the page; a tab in front did not hide the
+  page under CDP focus emulation).
+- `run4-real-prompt`: Chrome's own `navigator.hid`; the same click on Allow…: `rumble: requestDevice
+  [{"vendorId":"0x054c","productId":"0x0ce6"},{"vendorId":"0x054c","productId":"0x0df2"}]`, no rejection while the
+  chooser was up (a missing user activation rejects at once); nothing was chosen, Chrome closed by PID. CDP
+  `DeviceAccess` reports no HID prompt, so the chooser itself is not in the evidence. No DualSense was connected.
+- `run5-relinked`: not valid: the first relink used this worktree's `nxrs-build` without the web engine library
+  (`scripts/build/web.ps1 -Crates os` not yet run here), so the game stopped (`missing function:
+  nxrt_patch_table`). Built the library, relinked again (game.wasm 91.19 MB as before).
+- `run6-relinked`: the library's relinked build served as built (no `--live`): the game runs; the row, Allow… with
+  the Sony filters, "On: DualSense Wireless Controller", reopened on reload, the self-test's reports `03 00 00 80`,
+  `03 00 80 00`, `03 00 00 00`, and the stop at menu open (`(menu open)` 160 ms after the heavy motor began).
+
+### 5.4 Unproven
+
+A motor felt on the owner's DualSense (the real chooser cannot be clicked here); Bluetooth (report 0x31 built and
+tested in node only; sending 0x31 also switches a DualSense to its full input reports, as natively, which Chrome's
+gamepad reading over Bluetooth was not checked against); the real `receiveFeatureReport(0x20)` layout (either
+layout is read; failure means v2 on, as native); several DualSenses at once.
+
+### 5.5 Manual test for the owner
+
+1. Plug the DualSense in by USB. Launcher: Beach Bounce Remastered, Play -> Web. Press a button on the pad once the
+   loading screen shows (Chrome shows a pad only after a press).
+2. Esc (or the PS button), Controller. The row "Rumble on this controller" shows "Not allowed yet" and **Allow…**.
+   Click Allow… with the mouse, pick "DualSense Wireless Controller" in Chrome's list, Connect. The readout becomes
+   "On: DualSense Wireless Controller". Close the menu (Esc).
+3. Add `?env=NXRS_CONTROLLER_SELFTEST=1` to the page's address (after `index.html` or `/`) and reload; press a pad
+   button once the loading screen shows. Feel: the heavy (left) motor 0.5 s, then the light (right) motor 0.5 s, then
+   nothing. No new Allow… is needed (the console shows `rumble: 1 controller(s) allowed before, reopening` and
+   `rumble DualSense Wireless Controller: report 0x02 low 128 high 0`).
+4. The lights of the pad do not change.
