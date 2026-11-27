@@ -25,6 +25,7 @@ mod mods;
 mod out;
 mod pipeline;
 mod profile;
+mod shaderimport;
 mod stubgen;
 mod webhost;
 mod webpack;
@@ -267,6 +268,7 @@ fn run_v1(args: Vec<String>) -> i32 {
         }),
         interp_only: a.interp_only,
         web: false,
+        shaders_from: None,
     };
     build(&o, &b)
 }
@@ -424,6 +426,10 @@ enum Cmd {
         /// `web`: a browser build (wasm + JS, docs/35) into <input folder>\nxrs-web\<name> instead of a Windows build
         #[arg(long, value_parser = ["web"])]
         target: Option<String>,
+        /// another build's data folder: its translated shaders (those its runs translated live) are imported, for a
+        /// title that makes its shaders at run time; a web build cannot translate them in the browser
+        #[arg(long)]
+        shaders_from: Option<PathBuf>,
     },
     /// Say what each update package is; with --game, check it belongs to that game (exit 1 on any error).
     UpdateInfo {
@@ -534,6 +540,7 @@ fn run_v2(args: Vec<String>) -> i32 {
             machine,
             interp_only,
             target,
+            shaders_from,
         } => {
             if let Some(n) = pkg.program {
                 std::env::set_var("NXRS_PROGRAM_INDEX", n.to_string());
@@ -555,6 +562,7 @@ fn run_v2(args: Vec<String>) -> i32 {
                 ignored: None,
                 interp_only,
                 web: target.as_deref() == Some("web"),
+                shaders_from,
             };
             build(&o, &b)
         }
