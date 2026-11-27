@@ -80,11 +80,61 @@ pub struct Wgsl {
     pub inputs: Vec<(u32, char, u32)>,
     /// fragment outputs by location (colour targets written)
     pub outputs: Vec<u32>,
+    /// the interpolation of the stage interface by location: a vertex module's outputs, a fragment module's inputs
+    pub interp: Vec<(u32, Interp)>,
+    /// what this conversion changed from the module's own interface (`Variant::default()`: nothing)
+    pub variant: Variant,
+    /// the module's SPIR-V, for a variant made later (`Wgsl::variant`)
+    pub spirv: std::sync::Arc<Vec<u32>>,
+}
+
+/// An interface location's interpolation and sampling.
+pub type Interp = (Option<naga::Interpolation>, Option<naga::Sampling>);
+
+/// A vertex attribute format WebGPU has none for, fed as one `uint32` and unpacked in the vertex stage.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum Packed {
+    /// A2B10G10R10: x in bits 0-9, y 10-19, z 20-29, w 30-31; `signed` two's complement fields; `norm` normalized
+    /// (SNORM: v / (2^(n-1) - 1) clamped to -1, UNORM: v / (2^n - 1)), else the integer value (UINT/SINT, or its
+    /// float for USCALED/SSCALED).
+    A2b10g10r10 { signed: bool, norm: bool },
+}
+
+/// A conversion of a module that differs from its own interface, made per pipeline (wave WEB-W10b).
+#[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Variant {
+    /// vertex outputs by location take this interpolation (Vulkan uses the fragment stage's; WebGPU needs both equal)
+    pub interp: Vec<(u32, Interp)>,
+    /// vertex inputs by location fed packed (`Packed`)
+    pub packed: Vec<(u32, Packed)>,
+}
+
+impl Wgsl {
+    /// This module converted again with `v` applied.
+    pub fn variant(&self, v: &Variant) -> Result<Wgsl, String> {
+        convert_with(&self.spirv, v)
+    }
+}
+
+/// The outputs of vertex module `vs` whose interpolation differs from fragment module `fs`'s inputs at the same
+/// location, with the fragment's (None: they agree).
+pub fn interp_fix(vs: &Wgsl, fs: &Wgsl) -> Option<Vec<(u32, Interp)>> {
+    let fix: Vec<(u32, Interp)> = vs
+        .interp
+        .iter()
+        .filter_map(|&(loc, i)| fs.interp.iter().find(|f| f.0 == loc).filter(|f| f.1 != i).copied())
+        .collect();
+    (!fix.is_empty()).then_some(fix)
 }
 
 /// Converts one module. The error names what the web device cannot express.
 pub fn convert(words: &[u32]) -> Result<Wgsl, String> {
-    let words = rewrite_spirv(words)?;
+    convert_with(words, &Variant::default())
+}
+
+/// Converts one module with a variant's changes (`Variant`).
+pub fn convert_with(spirv: &[u32], variant: &Variant) -> Result<Wgsl, String> {
+    let words = rewrite_spirv(spirv)?;
     let bytes: Vec<u8> = words.iter().flat_map(|w| w.to_le_bytes()).collect();
     let opts = naga::front::spv::Options {
         adjust_coordinate_space: true,
@@ -99,6 +149,8 @@ pub fn convert(words: &[u32]) -> Result<Wgsl, String> {
     lower_position(&mut m, draw)?;
     lower_draw_builtins(&mut m, draw)?;
     let push = retarget_globals(&mut m)?;
+    set_interp(&mut m, &variant.interp);
+    unpack_inputs(&mut m, &variant.packed)?;
     let mut v = naga::valid::Validator::new(naga::valid::ValidationFlags::all(), naga::valid::Capabilities::all());
     let info = v.validate(&m).map_err(|e| format!("naga validation: {}", e.emit_to_string("")))?;
     let code = naga::back::wgsl::write_string(&m, &info, naga::back::wgsl::WriterFlags::empty())
@@ -121,7 +173,24 @@ pub fn convert(words: &[u32]) -> Result<Wgsl, String> {
         io_locations(&m, r.ty, r.binding.as_ref(), &mut outs);
         outputs = outs.into_iter().map(|o| o.0).collect();
     }
+    let mut interp = Vec::new();
+    match stage {
+        Stage::Vertex => {
+            if let Some(r) = &ep.function.result {
+                interp_locations(&m, r.ty, r.binding.as_ref(), &mut interp);
+            }
+        }
+        Stage::Fragment => {
+            for a in &ep.function.arguments {
+                interp_locations(&m, a.ty, a.binding.as_ref(), &mut interp);
+            }
+        }
+        Stage::Compute => {}
+    }
     Ok(Wgsl {
+        interp,
+        variant: variant.clone(),
+        spirv: std::sync::Arc::new(spirv.to_vec()),
         code: format!("diagnostic(off, derivative_uniformity);\n{code}"),
         stage,
         entry: ep.name.clone(),
@@ -155,6 +224,178 @@ fn io_locations(m: &naga::Module, ty: Handle<Type>, b: Option<&Binding>, out: &m
         }
         _ => {}
     }
+}
+
+fn interp_locations(m: &naga::Module, ty: Handle<Type>, b: Option<&Binding>, out: &mut Vec<(u32, Interp)>) {
+    match (b, &m.types[ty].inner) {
+        (Some(Binding::Location { location, interpolation, sampling, .. }), _) => {
+            out.push((*location, (*interpolation, *sampling)));
+        }
+        (None, TypeInner::Struct { members, .. }) => {
+            for mem in members {
+                interp_locations(m, mem.ty, mem.binding.as_ref(), out);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// A vertex module's outputs at the given locations take the given interpolation (`Variant::interp`). The entry's
+/// result struct is replaced by a copy with those bindings (types are unique: not changed in place), and the entry's
+/// compositions of it take the copy.
+fn set_interp(m: &mut naga::Module, want: &[(u32, Interp)]) {
+    let set = |b: &mut Option<Binding>| {
+        if let Some(Binding::Location { location, interpolation, sampling, .. }) = b {
+            if let Some(&(_, (i, s))) = want.iter().find(|w| w.0 == *location) {
+                *interpolation = i;
+                *sampling = s;
+            }
+        }
+    };
+    if want.is_empty() || m.entry_points[0].stage != ShaderStage::Vertex {
+        return;
+    }
+    let Some(r) = m.entry_points[0].function.result.as_mut() else { return };
+    if r.binding.is_some() {
+        set(&mut r.binding);
+        return;
+    }
+    let old = r.ty;
+    let TypeInner::Struct { mut members, span } = m.types[old].inner.clone() else { return };
+    for mem in &mut members {
+        set(&mut mem.binding);
+    }
+    let name = m.types[old].name.clone().map(|n| format!("{n}_nxi"));
+    let new = m.types.insert(Type { name, inner: TypeInner::Struct { members, span } }, Span::UNDEFINED);
+    let f = &mut m.entry_points[0].function;
+    if let Some(r) = f.result.as_mut() {
+        r.ty = new;
+    }
+    for (_, e) in f.expressions.iter_mut() {
+        match e {
+            Expression::Compose { ty, .. } | Expression::ZeroValue(ty) if *ty == old => *ty = new,
+            _ => {}
+        }
+    }
+    for (_, l) in f.local_variables.iter_mut() {
+        if l.ty == old {
+            l.ty = new;
+        }
+    }
+}
+
+/// Vertex inputs fed packed (`Variant::packed`): the entry's argument becomes a `u32`, and the value it stored into
+/// the module's input is unpacked from it (bit fields, then the shader's scalar kind, normalized when the format is).
+fn unpack_inputs(m: &mut naga::Module, packed: &[(u32, Packed)]) -> Result<(), String> {
+    if packed.is_empty() {
+        return Ok(());
+    }
+    let u = u32_ty(m);
+    for &(loc, p) in packed {
+        let Packed::A2b10g10r10 { signed, norm } = p;
+        let Some(i) = m.entry_points[0].function.arguments.iter().position(
+            |a| matches!(a.binding, Some(Binding::Location { location, .. }) if location == loc),
+        ) else {
+            continue;
+        };
+        let old_ty = m.entry_points[0].function.arguments[i].ty;
+        let (n, kind) = match m.types[old_ty].inner {
+            TypeInner::Scalar(s) => (1u32, s.kind),
+            TypeInner::Vector { size, scalar } => (size as u32, scalar.kind),
+            _ => return Err(format!("packed vertex input {loc}: not a scalar or vector")),
+        };
+        let f = &mut m.entry_points[0].function;
+        f.arguments[i].ty = u;
+        if let Some(Binding::Location { interpolation, sampling, .. }) = &mut f.arguments[i].binding {
+            *interpolation = None;
+            *sampling = None;
+        }
+        let uses: Vec<Handle<Expression>> = f
+            .expressions
+            .iter()
+            .filter(|(_, e)| matches!(e, Expression::FunctionArgument(a) if *a as usize == i))
+            .map(|(h, _)| h)
+            .collect();
+        let Some(&arg) = uses.first() else { continue };
+        let ex = &mut f.expressions;
+        let mut emits = Vec::new();
+        let mut add = |e: Expression| {
+            let lit = matches!(e, Expression::Literal(_));
+            let h = ex.append(e, Span::UNDEFINED);
+            if !lit {
+                emits.push(Statement::Emit(naga::Range::new_from_bounds(h, h)));
+            }
+            h
+        };
+        let lu = |v: u32| Expression::Literal(naga::Literal::U32(v));
+        let bin = |op, left, right| Expression::Binary { op, left, right };
+        let bits = if signed { add(Expression::As { expr: arg, kind: ScalarKind::Sint, convert: None }) } else { arg };
+        let mut comps = Vec::new();
+        for (off, width) in [(0u32, 10u32), (10, 10), (20, 10), (30, 2)].into_iter().take(n as usize) {
+            // the field as an integer of the packed signedness
+            let v = if signed {
+                let l = add(lu(32 - off - width));
+                let up = add(bin(BinaryOperator::ShiftLeft, bits, l));
+                let r = add(lu(32 - width));
+                add(bin(BinaryOperator::ShiftRight, up, r))
+            } else {
+                let o = add(lu(off));
+                let down = add(bin(BinaryOperator::ShiftRight, bits, o));
+                let mask = add(lu((1 << width) - 1));
+                add(bin(BinaryOperator::And, down, mask))
+            };
+            let c = match kind {
+                ScalarKind::Float => {
+                    let fv = add(Expression::As { expr: v, kind: ScalarKind::Float, convert: Some(4) });
+                    if norm {
+                        let max = if signed { (1u32 << (width - 1)) - 1 } else { (1u32 << width) - 1 };
+                        let s = add(Expression::Literal(naga::Literal::F32(1.0 / max as f32)));
+                        let scaled = add(bin(BinaryOperator::Multiply, fv, s));
+                        if signed {
+                            let lo = add(Expression::Literal(naga::Literal::F32(-1.0)));
+                            add(Expression::Math {
+                                fun: naga::MathFunction::Max,
+                                arg: scaled,
+                                arg1: Some(lo),
+                                arg2: None,
+                                arg3: None,
+                            })
+                        } else {
+                            scaled
+                        }
+                    } else {
+                        fv
+                    }
+                }
+                ScalarKind::Sint if !signed => add(Expression::As { expr: v, kind: ScalarKind::Sint, convert: None }),
+                ScalarKind::Uint if signed => add(Expression::As { expr: v, kind: ScalarKind::Uint, convert: None }),
+                _ => v,
+            };
+            comps.push(c);
+        }
+        let value = if n == 1 { comps[0] } else { add(Expression::Compose { ty: old_ty, components: comps }) };
+        let mut body = naga::Block::new();
+        for s in emits {
+            body.push(s, Span::UNDEFINED);
+        }
+        let old = std::mem::take(&mut f.body);
+        let mut stored = 0;
+        for s in old.iter().cloned() {
+            let s = match s {
+                Statement::Store { pointer, value: v } if uses.contains(&v) => {
+                    stored += 1;
+                    Statement::Store { pointer, value }
+                }
+                s => s,
+            };
+            body.push(s, Span::UNDEFINED);
+        }
+        if stored == 0 {
+            return Err(format!("packed vertex input {loc}: read other than through the entry's store"));
+        }
+        f.body = body;
+    }
+    Ok(())
 }
 
 // ---------- 1. SPIR-V rewrites ----------
@@ -821,6 +1062,52 @@ fn storage_format(f: naga::StorageFormat) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn spv(b: &[u8]) -> Vec<u32> {
+        b.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+    }
+    const VS: &[u8] = include_bytes!("../testdata/wgsl/interp.vert.spv");
+    const FS: &[u8] = include_bytes!("../testdata/wgsl/interp.frag.spv");
+
+    /// WEB-W10b: a perspective vertex output read by a `noperspective` fragment input (MK8D's pipeline 2165) is
+    /// found, and the vertex module's variant emits the fragment's interpolation; the flat integer output is left.
+    #[test]
+    fn vertex_outputs_take_the_fragment_interpolation() {
+        let vs = convert(&spv(VS)).unwrap();
+        let fs = convert(&spv(FS)).unwrap();
+        let persp = vs.interp.iter().find(|i| i.0 == 0).unwrap().1;
+        assert_eq!(persp.0, Some(naga::Interpolation::Perspective));
+        assert_eq!(fs.interp.iter().find(|i| i.0 == 0).unwrap().1 .0, Some(naga::Interpolation::Linear));
+        let fix = interp_fix(&vs, &fs).expect("a mismatch");
+        assert_eq!(fix.len(), 1, "{fix:?}");
+        let v = vs.variant(&Variant { interp: fix, ..Default::default() }).unwrap();
+        assert!(v.code.contains("@location(0) @interpolate(linear"), "{}", v.code);
+        assert!(interp_fix(&v, &fs).is_none());
+        assert_eq!(v.variant.interp.len(), 1);
+    }
+
+    /// WEB-W10b: A2B10G10R10 SNORM / UINT attributes are read as one u32 and unpacked to the shader's own types.
+    #[test]
+    fn packed_vertex_inputs_are_unpacked_from_a_u32() {
+        let vs = convert(&spv(VS)).unwrap();
+        assert!(!vs.code.contains("@location(1) n: u32") && !vs.code.contains("@location(1) param_1: u32"));
+        let v = vs
+            .variant(&Variant {
+                packed: vec![
+                    (1, Packed::A2b10g10r10 { signed: true, norm: true }),
+                    (2, Packed::A2b10g10r10 { signed: false, norm: false }),
+                ],
+                ..Default::default()
+            })
+            .unwrap();
+        // locations 1 and 2 are u32 arguments now, location 0 is untouched
+        let args = v.code.lines().find(|l| l.contains("@vertex")).map_or(String::new(), |_| v.code.clone());
+        assert!(args.matches(": u32").count() >= 2, "{}", v.code);
+        assert!(v.code.contains("max("), "SNORM clamps to -1: {}", v.code);
+        assert!(v.code.contains("0.0019569471"), "1 / 511: {}", v.code);
+        assert!(v.code.contains("1023u"), "UINT masks 10 bits: {}", v.code);
+        assert_eq!(v.inputs.iter().find(|i| i.0 == 1).unwrap().1, 'u');
+    }
 
     /// Opt-in: `NXRS_WGSL_SPV=<folder of .spv>` (and `NXRS_WGSL_KEYS=<file of keys>` to take only those): every module
     /// converts; `NXRS_WGSL_OUT=<folder>` keeps the WGSL for a browser check.
