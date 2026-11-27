@@ -32,8 +32,13 @@ about = "unskippable opening, title, A through Grand Prix 50cc to Mario Bros. Ci
 # grid is up by ~232 s (build/play/20261124-164514-explore1). Extra A presses are harmless (A accelerates).
 seconds = 360
 window = [250, 325]
-steps = ["wait 40", "shot boot", "press A ; 6 * 16", "shot title", "press A ; 6 * 3", "shot menus",
-         "press A ; 6 * 15", "shot grid", "replay mkw_drive.txt ; 42", "shot race",
+# Every menu screen is shot just before the A that leaves it (5.5 s + the shot's 0.5 s keeps the 6 s rhythm).
+steps = ["wait 40", "shot boot", "press A ; 6 * 16", "shot title", "press A ; 5.5", "shot m1 ; 0.5",
+         "press A ; 5.5", "shot m2 ; 0.5", "press A ; 6", "shot menus",
+         "press A ; 5.5", "shot m4 ; 0.5", "press A ; 5.5", "shot m5 ; 0.5", "press A ; 5.5", "shot m6 ; 0.5",
+         "press A ; 5.5", "shot m7 ; 0.5", "press A ; 5.5", "shot m8 ; 0.5", "press A ; 5.5", "shot m9 ; 0.5",
+         "press A ; 5.5", "shot m10 ; 0.5", "press A ; 5.5", "shot m11 ; 0.5", "press A ; 5.5", "shot m12 ; 0.5",
+         "press A ; 6 * 6", "shot grid", "replay mkw_drive.txt ; 42", "shot race",
          "replay mkw_drive.txt ; 42", "shot race later"]
 [mkw.checks]
 # race shots never land at the same spot of the track (game time drifts with FPS): they check the race HUD
@@ -59,6 +64,22 @@ grid = { about = "race start grid or racing (coin counter, place badge)", region
 t37 = { about = "in the race (before the banked turn at ~60 FPS)", regions = "kart-hud" }
 t41 = { about = "in the race (the turn / steel deck at ~60 FPS)", regions = "kart-hud" }
 t46 = { about = "in the race (steel deck at ~60 FPS)", regions = "kart-hud" }
+
+[mkw-pop]
+title = "Mario Kart World"
+about = "as mkw (menu screens shot), then a shot about every 0.5 s for 40 s of the race (pop-in, missing textures)"
+# run it with --faults; the window is the dense stretch (the shots cost some FPS: take FPS from mkw)
+seconds = 330
+window = [245, 290]
+steps = ["wait 40", "shot boot", "press A ; 6 * 16", "shot title", "press A ; 5.5", "shot m1 ; 0.5",
+         "press A ; 5.5", "shot m2 ; 0.5", "press A ; 6", "shot menus",
+         "press A ; 5.5", "shot m4 ; 0.5", "press A ; 5.5", "shot m5 ; 0.5", "press A ; 5.5", "shot m6 ; 0.5",
+         "press A ; 5.5", "shot m7 ; 0.5", "press A ; 5.5", "shot m8 ; 0.5", "press A ; 5.5", "shot m9 ; 0.5",
+         "press A ; 5.5", "shot m10 ; 0.5", "press A ; 5.5", "shot m11 ; 0.5", "press A ; 5.5", "shot m12 ; 0.5",
+         "press A ; 6 * 6", "shot grid", "replay mkw_drive.txt ; 6", "shot pop ; 0.5 * 80", "shot pop end"]
+[mkw-pop.checks]
+grid = { about = "race start grid or racing (coin counter, place badge)", regions = "kart-hud" }
+pop_end = { about = "in the race (coin counter, place badge)", regions = "kart-hud" }
 
 [mkw180]
 title = "Mario Kart World v1.8.0"
