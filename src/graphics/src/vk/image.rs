@@ -1221,11 +1221,31 @@ fn from_storage(t: &tex_t) -> bool {
     !t.mem.is_null() && t.d.flags as u32 & tex_flags::COMPRESSIBLE == 0
 }
 
+/// (OOT-MEM census) images made new, parked ones reused, taken over, aliases; released, destroyed; nvnTexture
+/// Initialize, Finalize, Initialize over a live object; images made for an object already finalized; memory pools
+/// finalized, replaced by a new pool at the same base; images released with their pool
+pub static HOW: [std::sync::atomic::AtomicU64; 13] = [const { std::sync::atomic::AtomicU64::new(0) }; 13];
+fn how_inc(i: usize) {
+    HOW[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+fn alias_overlap_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_ALIAS_OVERLAP").as_deref() != Ok("0"))
+}
+
 const PARK_FRAMES: u64 = 8;
 const PARK_MAX: usize = 512;
 
 impl Images {
-    pub fn drop_pool(&mut self, _base: u64, _size: u64) {}
+    /// The texture objects with an image whose storage starts in [base, base + size) (a memory pool's; images of
+    /// sparse virtual pools are not listed by address).
+    pub fn serials_in(&self, base: u64, size: u64) -> Vec<u64> {
+        self.by_addr
+            .range(base..base.saturating_add(size))
+            .flat_map(|(_, v)| v.iter().copied())
+            .collect()
+    }
 
     /// Where texture object `serial`'s image is (diagnostics): live, parked after its release, or gone.
     pub fn whereabouts(&self, serial: u64) -> &'static str {
@@ -2049,6 +2069,101 @@ impl Gpu {
         (i.by_serial.len(), i.parked_n)
     }
 
+    /// (OOT-MEM, the memory line) the live images: how they were made and went since the start (`HOW`), and those
+    /// whose storage a newer live image's overlaps (the game made another texture over that memory without
+    /// finalizing this one), grouped by shape, most first.
+    pub fn image_census(&self) -> String {
+        let imgs = self.images.lock().unwrap();
+        let mut sp: Vec<(u64, u64, u64)> = imgs
+            .by_serial
+            .values()
+            .filter(|im| !im.tex.mem.is_null())
+            .map(|im| (im.tex.mem as u64, im.tex.mem as u64 + im.tex.l.size.max(1), im.tex.serial))
+            .collect();
+        sp.sort_unstable();
+        let mut covered: std::collections::HashSet<u64> = Default::default();
+        let mut same_start = 0u64;
+        for i in 0..sp.len() {
+            let (lo, hi, s) = sp[i];
+            for &(lo2, _, s2) in sp[i + 1..].iter().take(4096) {
+                if lo2 >= hi {
+                    break;
+                }
+                if covered.insert(s.min(s2)) && lo2 == lo {
+                    same_start += 1;
+                }
+            }
+        }
+        let mut groups: HashMap<String, (u64, u64)> = HashMap::new();
+        let (mut cn, mut cb, mut owned_b, mut alias_n) = (0u64, 0u64, 0u64, 0u64);
+        for im in imgs.by_serial.values() {
+            let b = im.alloc.as_ref().map_or(0, |a| a.size());
+            if im.alloc.is_some() {
+                owned_b += b;
+            }
+            if im.alias_of.is_some() {
+                alias_n += 1;
+            }
+            if !covered.contains(&im.tex.serial) {
+                continue;
+            }
+            cn += 1;
+            cb += b;
+            let k = format!(
+                "{:?} {}x{}x{} l{}{}{}",
+                im.format,
+                im.extent.width,
+                im.extent.height,
+                im.layers,
+                im.levels,
+                if im.gpu_owned { " gpu" } else { "" },
+                if im.alias_of.is_some() { " alias" } else { "" }
+            );
+            let e = groups.entry(k).or_default();
+            e.0 += 1;
+            e.1 += b;
+        }
+        let mut g: Vec<_> = groups.into_iter().collect();
+        g.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        let top: Vec<String> = g
+            .iter()
+            .take(6)
+            .map(|(k, (n, b))| format!("{k} x{n} ({} MB)", b >> 20))
+            .collect();
+        let h = |i: usize| HOW[i].load(std::sync::atomic::Ordering::Relaxed);
+        let live = imgs.by_serial.len();
+        let ranges: Vec<(u64, u64)> = imgs
+            .by_serial
+            .values()
+            .filter(|im| !im.tex.mem.is_null() && !crate::nvn::vpool::is_sparse(im.tex.mem as u64))
+            .map(|im| (im.tex.mem as u64, im.tex.l.size.max(1)))
+            .collect();
+        drop(imgs);
+        // (the tables' and pools' locks after the images lock is let go)
+        let slotted = self.tables.ids_of(&covered).iter().map(|e| e.1).collect::<std::collections::HashSet<u64>>().len();
+        let orphans = super::mem::outside_pools(self, &ranges);
+        format!(
+            "image census: {} live ({} MB with memory, {alias_n} aliases; {orphans} over no live memory pool, pools finalized {} replaced {}, images released with their pool {}); since start: inits {} finalizes {} re-inits {}, made new {} parked reused {} taken over {} alias {} (for a finalized object {}), released {} destroyed {}; {cn} live under a newer live image's storage ({same_start} at its start, {slotted} still in a pool slot; {} MB): {}",
+            live,
+            owned_b >> 20,
+            h(10),
+            h(11),
+            h(12),
+            h(6),
+            h(7),
+            h(8),
+            h(0),
+            h(1),
+            h(2),
+            h(3),
+            h(9),
+            h(4),
+            h(5),
+            cb >> 20,
+            top.join(", ")
+        )
+    }
+
     pub fn ensure_image(&self, imgs: &mut Images, t: &tex_t) -> bool {
         let have = imgs.by_serial.contains_key(&t.serial);
         // a parallel translation's segment makes an image only at the gate's frontier (`gate`)
@@ -2170,6 +2285,15 @@ impl Gpu {
         let Some(im) = reused.or_else(|| self.create_image(t)) else {
             return false;
         };
+        if imgs.released.contains_key(&t.serial) {
+            how_inc(9);
+        }
+        how_inc(match how.get() {
+            "made new" => 0,
+            "a parked image reused" => 1,
+            "taken over from an older object" => 2,
+            _ => 3,
+        });
         life_log(t, || format!("{}: {}", how.get(), img_desc(&im)));
         if !t.mem.is_null() {
             // textures of sparse virtual pools are checked through their pages, not by address (a 5.8 GB terrain
@@ -2230,12 +2354,7 @@ impl Gpu {
         let samples = samples_of(t.d.samples);
         let bpb = layout::fmt_bpb(t.d.format).0;
         let depthy = |k: Kind| matches!(k, Kind::Depth | Kind::DepthStencil | Kind::Stencil);
-        let (os, o) = imgs
-            .by_addr
-            .get(&(t.mem as u64))?
-            .iter()
-            .rev()
-            .find_map(|s| {
+        let fits = |s: &u64| {
                 let o = imgs.by_serial.get(s)?;
                 let (_, oext, _) = shape(&o.tex);
                 let same_shape = o.ty == ty
@@ -2255,7 +2374,36 @@ impl Gpu {
                 let storage_ok = t.d.flags as u32 & tex_flags::IMAGE == 0
                     || o.usage.contains(vk::ImageUsageFlags::STORAGE);
                 (same_shape && same_fmt && storage_ok && !o.needs_init).then_some((*s, o))
-            })?;
+        };
+        let lo = t.mem as u64;
+        let at_start = imgs.by_addr.get(&lo).and_then(|v| v.iter().rev().find_map(fits));
+        // (OOT-MEM) else a live image the GPU drew, of exactly this format and shape, over part of this storage: Ocarina
+        // of Time keeps render-target objects of a transient heap whose placements overlap one another (never
+        // finalized; on the console they share that memory), and each new placement was a new 7.5-15 MB image for
+        // good (~900 of them, 4.9 GB, by the end of the walk; the run reached 31.8 of its 32 GB). Sharing the image is
+        // what the console's shared memory does: what one draws, the other reads. `NXGFX_ALIAS_OVERLAP=0`: only at
+        // the same start, as before.
+        let (os, o) = match at_start {
+            Some(x) => x,
+            None if alias_overlap_on() => {
+                let hi = lo + t.l.size.max(1);
+                imgs.by_addr
+                    .range(lo.saturating_sub(imgs.max_size)..hi)
+                    .rev()
+                    .flat_map(|(_, v)| v.iter().rev())
+                    .filter(|s| {
+                        imgs.by_serial.get(s).is_some_and(|o| {
+                            let olo = o.tex.mem as u64;
+                            o.gpu_owned
+                                && o.format == tf.vk
+                                && olo < hi
+                                && lo < olo + o.tex.l.size.max(1)
+                        })
+                    })
+                    .find_map(fits)?
+            }
+            None => return None,
+        };
         let owner = o.alias_of.unwrap_or(os);
         static SAID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         if SAID.fetch_add(1, std::sync::atomic::Ordering::Relaxed) < 8 {
@@ -3050,6 +3198,32 @@ impl Gpu {
         self.tex_release_now(serial);
     }
 
+    /// nvnMemoryPoolFinalize (or a new pool registered over the same base): the images of the texture objects over
+    /// the pool's memory go as if each object were finalized. On the console a texture over a finalized pool names
+    /// memory the GPU no longer has; the game makes new pools and textures for its next scene without finalizing the
+    /// old objects (Ocarina of Time: ~2,300 images, 1.8 GB, kept at each scene load until the 32 GB cap, OOT-MEM).
+    /// In queue order, as a texture's release (`tex_release`): the work queued before the finalize still binds them,
+    /// and images queued work makes over the pool before then go too. `NXGFX_POOL_DROP_IMAGES=0`: kept, as before.
+    pub fn drop_pool_images(&self, base: u64, size: u64) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("NXGFX_POOL_DROP_IMAGES").as_deref() != Ok("0")) || size == 0 {
+            return;
+        }
+        let go = move |g: &Gpu| {
+            let serials = g.images.lock().unwrap().serials_in(base, size);
+            HOW[12].fetch_add(serials.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            for s in serials {
+                textrace::ev(s, || format!("its memory pool {base:#x} went: released"));
+                g.tex_release_now(s);
+            }
+        };
+        if super::queue::aq_busy() {
+            super::queue::after_queued(Box::new(move |g: &'static Gpu| go(g)));
+        } else {
+            go(self);
+        }
+    }
+
     fn tex_release_now(&self, serial: u64) {
         textrace::ev(serial, || "released".to_string());
         self.tables.invalidate_images();
@@ -3060,6 +3234,7 @@ impl Gpu {
         let Some(mut im) = imgs.by_serial.remove(&serial) else {
             return;
         };
+        how_inc(4);
         watch_log("released", &im.tex, Some(im.gpu_owned));
         imgs.released.insert(serial, im.tex);
         if let Some(v) = imgs.by_addr.get_mut(&(im.tex.mem as u64)) {
@@ -3730,6 +3905,7 @@ impl Gpu {
     }
 
     fn destroy_released(&self, im: Image) {
+        how_inc(5);
         life_log(&im.tex, || {
             format!("destroyed (after its last use): {}", img_desc(&im))
         });

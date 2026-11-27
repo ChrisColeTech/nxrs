@@ -793,6 +793,19 @@ pub fn landing_pre(a: u64, n: u64, src: *const u8, before: *const u8) -> Option<
     })
 }
 
+impl LandingPre {
+    /// The whole pages the GPU left as the baseline has them, ascending: their landing writes nothing
+    /// (`mem::land_changed` compares exactly these bytes), so it need not compare them again under the pool lock.
+    pub fn same_pages(&self) -> Vec<u64> {
+        self.eq
+            .iter()
+            .enumerate()
+            .filter(|(_, &e)| e == 1)
+            .map(|(k, _)| self.lo_pg + k as u64 * PAGE)
+            .collect()
+    }
+}
+
 /// Time in `landing_pre` (the completion thread, before the pool lock), ns.
 static PRE_NS: AtomicU64 = AtomicU64::new(0);
 
@@ -1509,5 +1522,22 @@ mod tests {
             assert!(old.1[3].0 == 0 && old.1[3].2 != 0, "page 3: restamped since, left for its own landing");
             drop_any(base);
         }
+    }
+
+    /// OOT-MEM: the pages a landing need not compare under the pool lock are exactly the whole pages whose GPU bytes
+    /// equal the baseline's, stamped or not; changed pages, the partial pages at the ends and a landing without a
+    /// baseline list none.
+    #[test]
+    fn same_pages_are_the_whole_pages_the_gpu_left_alone() {
+        let _s = SERIAL.lock().unwrap();
+        let lo = 0x7000_0000u64;
+        let (a, n) = (lo + 100, 6 * PAGE - 200);
+        let before = vec![3u8; n as usize];
+        let mut after = before.clone();
+        after[(2 * PAGE - 100) as usize + 9] ^= 1;
+        let pre = landing_pre(a, n, after.as_ptr(), before.as_ptr()).unwrap();
+        assert_eq!(pre.same_pages(), vec![lo + PAGE, lo + 3 * PAGE, lo + 4 * PAGE]);
+        let none = landing_pre(a, n, after.as_ptr(), core::ptr::null()).unwrap();
+        assert!(none.same_pages().is_empty(), "no baseline: every page lands as before");
     }
 }

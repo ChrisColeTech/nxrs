@@ -122,8 +122,10 @@ nvn_fns! {
         // Initialize on a live texture object without a Finalize (games re-initialize transient render targets every
         // frame): the old host image goes first.
         if (*o).magic == MAGIC_TEX && (*o).serial != 0 {
+            vk::image::HOW[8].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             vk::Gpu::with(|g| g.tex_release((*o).serial));
         }
+        vk::image::HOW[6].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         core::ptr::write_bytes(o as *mut u8, 0, core::mem::size_of::<tex_t>());
         let o = &mut *o;
         o.magic = MAGIC_TEX;
@@ -146,7 +148,10 @@ nvn_fns! {
     }
     fn nvnTextureFinalize(t: *mut NVNtexture) {
         let o = &mut *(t as *mut tex_t);
-        if o.magic == MAGIC_TEX { vk::Gpu::with(|g| g.tex_release(o.serial)); }
+        if o.magic == MAGIC_TEX {
+            vk::image::HOW[7].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            vk::Gpu::with(|g| g.tex_release(o.serial));
+        }
         o.magic = 0;
     }
     fn nvnTextureSetDebugLabel(t: *mut NVNtexture, s: *const u8) { let _ = (t, s); }

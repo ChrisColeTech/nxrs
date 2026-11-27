@@ -868,6 +868,8 @@ pub fn pool_add(p: &pool_t) {
         old
     };
     if let Some(o) = old {
+        super::image::HOW[11].fetch_add(1, Ordering::Relaxed);
+        g.drop_pool_images(o.base, o.size);
         release(g, o);
     }
     g.tables.requeue_buf_texs(base, base + p.size);
@@ -937,7 +939,8 @@ pub fn pool_del(base: u64) {
         p
     };
     if let Some(p) = p {
-        g.images.lock().unwrap().drop_pool(base, p.size);
+        super::image::HOW[10].fetch_add(1, Ordering::Relaxed);
+        g.drop_pool_images(base, p.size);
         g.tables.requeue_buf_texs(base, base + p.size);
         release(g, p);
     }
@@ -950,6 +953,12 @@ fn find(m: &Pools, a: u64, n: u64) -> Option<u64> {
     } else {
         None
     }
+}
+
+/// (OOT-MEM census) how many of `ranges` lie in no live memory pool.
+pub fn outside_pools(g: &Gpu, ranges: &[(u64, u64)]) -> usize {
+    let m = g.mem.lock().unwrap();
+    ranges.iter().filter(|&&(a, n)| find(&m, a, n).is_none()).count()
 }
 
 /// Whether [a, a + n) lies in one known memory pool.
@@ -4422,6 +4431,11 @@ fn lazy_cpu_check_on() -> bool {
     *ON.get_or_init(|| std::env::var("NXGFX_LAZY_CPU_CHECK").as_deref() != Ok("0"))
 }
 
+fn land_skip_same_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_LAND_SKIP_SAME").as_deref() != Ok("0"))
+}
+
 pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)], epoch: u64, value: u64) {
     if wbs.is_empty() {
         return;
@@ -4433,6 +4447,14 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
     // `NXGFX_LAND_PRE=0`: done under the lock, as before
     let pres: Vec<Option<super::upskip::LandingPre>> = if land_pre_on() {
         wbs.iter().map(|w| super::upskip::landing_pre(w.1, w.2, w.3, w.4)).collect()
+    } else {
+        Vec::new()
+    };
+    // (OOT-MEM) every whole page the GPU left as the baseline has it, not only the re-armed ones: `land_changed`
+    // compared each such page again under the pool lock (OoT: ~48 MB a frame, ~3 ms of the lock the replay thread's
+    // syncs wait for) to find it writes nothing. `NXGFX_LAND_SKIP_SAME=0`: only the re-armed pages, as before
+    let mut pre_same: Vec<Vec<u64>> = if land_skip_same_on() {
+        pres.iter().map(|p| p.as_ref().map(|p| p.same_pages()).unwrap_or_default()).collect()
     } else {
         Vec::new()
     };
@@ -4473,6 +4495,11 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
             value,
             pres.get(i).and_then(|p| p.as_ref()),
         );
+        // (a superset of `same`: its pages are the re-armed ones among these)
+        let same = match pre_same.get_mut(i) {
+            Some(v) if v.len() > same.len() => std::mem::take(v),
+            _ => same,
+        };
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let tl = std::time::Instant::now();
         let mut lazy = if p.watched {

@@ -607,6 +607,9 @@ pub fn frame(frame: u64) {
             crate::vklog!("{l}");
         }
         crate::vklog!("{}", memory_line());
+        if let Some(g) = super::Gpu::try_get() {
+            crate::vklog!("{}", g.image_census());
+        }
         st.rsz_frame = frame;
     }
 }
