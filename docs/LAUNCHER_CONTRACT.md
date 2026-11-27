@@ -126,6 +126,7 @@ The program is nxrs-build itself; working directory: its folder; stdout and stde
 | Update probe | `update-info --game <source> [--keys <prod.keys>] <pkg>...` |
 | DLC | `dlc sync --datadir <buildDir>\<name>_data [--keys <prod.keys>] [<pkg>...]` (Play, Install DLC, Remove, after a build) |
 | Version | `contract` |
+| Run-time shader (the web server) | `shader-xlate <webDir>\<name>_data\shaders`, the request on stdin, the key on stdout (Web builds, below) |
 
 Other subcommands (not run by the launcher): `dlc install | remove | list`, `profile`, `doctor`, `translate`.
 
@@ -185,6 +186,22 @@ lacks). A title that makes its shaders at run time (Ren'Py, Unity variants) has 
 browser cannot run the translator, so its web build draws only the shaders its native build's runs translated. A
 folder without a library is a line in the log, not a failure.
 
+**Run-time shaders on request** (WEB-W7b). A shader the page's library lacks is asked for with
+`POST /<slug>/shader-xlate/<key>` (`<key>`: 16 hex digits; body `u32 LE ctl length | ctl | code`, the blobs the
+native live translator is given, at most 4 MiB). The launcher's server runs `nxrs-build shader-xlate <data>\shaders`
+(contract v2: the body on stdin, fixed arguments, working directory nxrs-build's folder, 120 s limit) with the
+nxrs-build it builds with (Play in browser: the toolchain's; `--serve-web`: `NXRS_BUILD`, the release's
+`nxrs-engine\`, beside the launcher). nxrs-build translates it exactly as a native run's live translator does
+(`translate_one`: dmsh_xlate, fixes, spirv-val, the profile's facts) into `<data>\shaders\live\<key>\`, prints the key
+and exits 0, or prints the reason on stderr and exits 1. Answers: `200` `u32 LE spv length | spv | json` (also when
+`live\<key>\spv\` already holds both files: nothing is run); `400` a key that is not 16 hex digits or a body that is
+not a request; `404` no such build; `413` a body over 4 MiB, refused unread (connection closed); `422` the
+translation failed (nxrs-build's reason, or a key other than the one asked for); `503` no nxrs-build. One
+translation per key at a time. Nothing outside the mount's `shaders\live\<key>\` is written, and nothing but
+nxrs-build is run. The page also looks in `data/shaders/live/<key>/spv/` before asking (an earlier page's
+translation); the next build promotes those records into the library's `spv\`. A static host has no route: the page
+says so in a red line and skips the draws, as before. `src/web/dev_server.py` has the same route.
+
 ```
 <webDir>\index.html, boot.js, input.js, saves.js, io-worker.js, audio-worklet.js   the page and its workers
                                  (embedded in nxrs-build: a release needs no source tree; the list is webhost.rs's
@@ -212,7 +229,8 @@ serves one folder without a window; `src/web/dev_server.py` (engine development)
 **Play in browser** is shown only when the web folder holds a finished web build and a Chromium browser exists:
 the default browser when its `http` ProgId is Chrome, Edge, Brave, Chromium, Vivaldi or Opera, else Chrome by path
 (App Paths, then Program Files, Program Files (x86), the user's local data; Linux: `google-chrome`,
-`chromium` on PATH). It starts the server (once), mounts the build and opens its address in a tab; Chrome's
+`chromium` on PATH). It starts the server (once), mounts the build (with the toolchain's nxrs-build for run-time
+shaders) and opens its address in a tab; Chrome's
 "Install as app" gives it an app window. The server lives as long as the launcher: closing the launcher stops the
 game's data streaming.
 

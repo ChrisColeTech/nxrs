@@ -929,6 +929,11 @@ impl Library {
                 return Some((words, json));
             }
         }
+        // the web: what the live translator brought (or is still waiting for) is not fetched again (WEB-W7b)
+        #[cfg(target_os = "emscripten")]
+        if let Some(known) = super::live::web_known(key) {
+            return known;
+        }
         // the web build preloads no shaders: the library's files come from the page's server on first use
         #[cfg(target_os = "emscripten")]
         if let Some(bytes) = crate::web::fetch_data(&format!("shaders/spv/{hex}.spv")) {
@@ -942,6 +947,9 @@ impl Library {
                 return Some((words, json));
             }
         }
+        #[cfg(target_os = "emscripten")]
+        return super::live::web_fetch_live(key);
+        #[allow(unreachable_code)]
         None
     }
 

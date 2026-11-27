@@ -81,8 +81,10 @@ impl App {
 
     /// Mounts the game's web folder on the server (started now if it is not running); its address.
     fn serve(&mut self, game: &Game) -> Result<String, String> {
-        let (_, mount) =
+        let (_, mut mount) =
             web_serve::open_build(&web_dir(game)).map_err(|e| format!("{}{e}", ww::BAD_BUILD))?;
+        // the page's run-time shaders are translated by the engine the launcher builds with
+        mount.translator = self.tools.nxrs_build.clone();
         if self.web_server.is_none() {
             let server = WebServer::start(web_serve::wanted_port())?;
             if let Some(note) = server.moved_note() {

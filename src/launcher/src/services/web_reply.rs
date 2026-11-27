@@ -177,6 +177,14 @@ pub fn serve(stream: TcpStream, mounts: &Mounts) {
     };
     let mut r = BufReader::with_capacity(c::MAX_HEAD, stream);
     while let Some(req) = read_head(&mut r) {
+        // a run-time shader to translate (WEB-W7b): the route reads its own body
+        if super::web_xlate::wants(&req.method, &req.path) {
+            let kept = super::web_xlate::serve(&mut r, &mut out, &req.path, req.length, mounts);
+            if !kept.unwrap_or(false) || req.close {
+                return;
+            }
+            continue;
+        }
         // a body is read past, so the next request starts where it should
         let body = std::io::copy(&mut (&mut r).take(req.length), &mut std::io::sink());
         if body.ok() != Some(req.length) || answer(&mut out, &req, mounts).is_err() || req.close {

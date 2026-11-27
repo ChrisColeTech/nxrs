@@ -14,6 +14,8 @@
 //!   nxrs-build dlc install|sync|remove|list --datadir <dir> [package or title id...]
 //!   nxrs-build profile <title id> [<main build id>]
 //!   nxrs-build doctor | contract
+//!   nxrs-build shader-xlate <shaders folder>     (a web build's server: one run-time shader from stdin, translated
+//!                                                 into <shaders folder>\live\<key>\; the key on stdout)
 //!   nxrs-build translate <input> --out <dir>      (development: the C and the data folder only, as nxrt-dev uses it)
 //!
 //! Exit codes: 0 done, 1 failed (the reason on stderr, or the UPDATE / DLC error lines), 2 bad arguments.
@@ -26,6 +28,7 @@ mod out;
 mod pipeline;
 mod profile;
 mod shaderimport;
+mod shaderxlate;
 mod stubgen;
 mod webhost;
 mod webpack;
@@ -460,6 +463,9 @@ enum Cmd {
     Doctor,
     /// Print the contract version.
     Contract,
+    /// Translate one shader a web build's page asked for (stdin: u32 LE ctl length, ctl, code) into
+    /// <shaders>\live\<key>\ as a native run's live translator does; prints the key.
+    ShaderXlate { shaders: PathBuf },
     /// (development) Translate to C and stage the data folder: what nxrt-dev's end-to-end tests run.
     Translate {
         input: PathBuf,
@@ -510,6 +516,7 @@ const SUBCOMMANDS: &[&str] = &[
     "profile",
     "doctor",
     "contract",
+    "shader-xlate",
     "translate",
     "help",
 ];
@@ -630,6 +637,13 @@ fn run_v2(args: Vec<String>) -> i32 {
             }
         }
         Cmd::Doctor => doctor(),
+        Cmd::ShaderXlate { shaders } => match shaderxlate::command(&shaders) {
+            Ok(key) => {
+                out::line(&key);
+                0
+            }
+            Err(e) => fail(&e),
+        },
         Cmd::Translate {
             input,
             out,

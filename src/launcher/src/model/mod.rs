@@ -23,6 +23,7 @@ pub mod output_lines;
 pub mod path_text;
 pub mod play;
 pub mod qtjson;
+pub mod shader_xlate;
 pub mod update_text;
 pub mod web_build;
 
