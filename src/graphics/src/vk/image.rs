@@ -848,6 +848,9 @@ pub struct Part {
 /// The levels and layers of a texture from its storage bytes, laid out linearly.
 /// Bytes of texture storage deswizzled on the GPU.
 pub static GPU_DESWIZZLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Images made again for a bound use of a slot naming a released texture object (`remake_released`), since the last
+/// `uploads from storage` line.
+static REMADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// Whether a texture's upload from its storage goes through the GPU deswizzle: block-linear, not ASTC (its blocks are
 /// decoded on the GPU from CPU-deswizzled rows), no 3-byte expansion, big enough, every level in whole words.
@@ -3054,6 +3057,40 @@ impl Gpu {
                 self.release_after_use(t.serial);
             }
         }
+    }
+
+    /// A bound use of texture ID `id` whose slot still names texture object `serial`, finalized and released since
+    /// (`release_after_use` after its first use, or `tex_release`): on the console the descriptor outlives the object
+    /// and still samples its storage, so its image is made again for this use from the registration kept at the
+    /// release (`ensure_image` takes the parked image back, uploading again only pages that changed) and released
+    /// again after this submission. Without it every use after the first bound the zero stand-in: Mario Kart World's
+    /// character-select portraits were drawn for one frame, then never (MKW-RENDER). Whether an image was made.
+    /// `NXGFX_RELEASED_SLOT_USE=0`: the stand-in, as before.
+    pub fn remake_released(&self, id: i32, serial: u64) -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("NXGFX_RELEASED_SLOT_USE").as_deref() != Ok("0")) {
+            return false;
+        }
+        let Some((reg, v)) = self.tables.tex_at(id) else {
+            return false;
+        };
+        let Some(t) = (reg == serial)
+            .then(|| self.images.lock().unwrap().released.get(&serial).copied())
+            .flatten()
+        else {
+            return false;
+        };
+        if t.mem.is_null() || t.d.target == target::BUFFER {
+            return false;
+        }
+        textrace::ev(serial, || format!("made again at ID {id} for a bound use after its release"));
+        self.reg_tex_now(id, &t, v, false);
+        let made = self.images.lock().unwrap().by_serial.contains_key(&serial);
+        if made {
+            REMADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            self.release_after_use(serial);
+        }
+        made
     }
 
     /// The image of a texture object finalized before its first use, made now for that use: released (parked, its
@@ -5670,12 +5707,13 @@ pub mod upload_stats {
             .collect();
         let un: Vec<u64> = UNLOCKED.iter().map(|a| a.swap(0, Relaxed)).collect();
         Some(format!(
-            "uploads from storage: {} textures, {:.2} ms per frame ({} decoded with the images' lock released in {:.2} ms per frame, {} of them dropped: NXGFX_UPLOAD_UNLOCKED); most: {}",
+            "uploads from storage: {} textures, {:.2} ms per frame ({} decoded with the images' lock released in {:.2} ms per frame, {} of them dropped: NXGFX_UPLOAD_UNLOCKED; {} released textures made again for a bound use: NXGFX_RELEASED_SLOT_USE); most: {}",
             v.len(),
             total as f64 / 1e6 / f,
             un[0] + un[1],
             un[2] as f64 / 1e6 / f,
             un[1],
+            super::REMADE.swap(0, Relaxed),
             top.join("; ")
         ))
     }

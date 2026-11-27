@@ -3874,7 +3874,7 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
     if let Some((serial, view)) = g.tables.tex_at(id) {
         let mut imgs = super::gate::lock(&g.images, 2);
         let reg_serial = serial;
-        let serial = imgs.live(serial);
+        let mut serial = imgs.live(serial);
         // A parallel segment may look the texture up before an earlier segment of the stream has made its image (a
         // target drawn there: Mario Kart World's shadow maps, new objects each frame); the zero stand-in would be
         // bound where the stream order samples the image (a dark, sharp-edged turn). Unless at the gate's frontier,
@@ -3885,6 +3885,14 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
         {
             drop(imgs);
             return dummy_view(g, sub, want, storage);
+        }
+        // the slot still names a texture object released since (finalized after its first use): its image made again
+        // from the registration, as the console's descriptor still samples the storage (MKW-RENDER)
+        if !imgs.by_serial.contains_key(&serial) {
+            drop(imgs);
+            g.remake_released(id, reg_serial);
+            imgs = super::gate::lock(&g.images, 2);
+            serial = imgs.live(reg_serial);
         }
         if probe {
             let declared = crate::tex::format::tex_format(ifmt as i32)
