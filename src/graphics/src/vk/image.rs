@@ -1122,10 +1122,33 @@ fn from_storage(t: &tex_t) -> bool {
 
 /// (OOT-MEM census) images made new, parked ones reused, taken over, aliases; released, destroyed; nvnTexture
 /// Initialize, Finalize, Initialize over a live object; images made for an object already finalized; memory pools
-/// finalized, replaced by a new pool at the same base; images released with their pool
-pub static HOW: [std::sync::atomic::AtomicU64; 13] = [const { std::sync::atomic::AtomicU64::new(0) }; 13];
+/// finalized, replaced by a new pool at the same base; images released with their pool; let go under a newer one
+pub static HOW: [std::sync::atomic::AtomicU64; 14] = [const { std::sync::atomic::AtomicU64::new(0) }; 14];
 fn how_inc(i: usize) {
     HOW[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// (`Gpu::retire_overlapped`) whether an older live image over `old` storage goes when a new one is made over `new`:
+/// the two overlap, the old one was drawn by the GPU, has one layer and level, is no alias, and is not of the same
+/// description (that one is taken over instead).
+fn retires(old: (u64, u64), new: (u64, u64), gpu: bool, layered: bool, alias: bool, same: bool) -> bool {
+    old.0 < new.1 && new.0 < old.1 && gpu && !layered && !alias && !same
+}
+
+#[cfg(test)]
+mod retire_tests {
+    #[test]
+    fn only_overlapped_single_gpu_images_of_another_description_go() {
+        use super::retires;
+        let old = (0x1000, 0x5000);
+        assert!(retires(old, (0x1000, 0x3000), true, false, false, false), "same start, smaller");
+        assert!(retires(old, (0x4000, 0x9000), true, false, false, false), "partly over it");
+        assert!(!retires(old, (0x5000, 0x9000), true, false, false, false), "next to it, not over it");
+        assert!(!retires(old, (0x1000, 0x3000), false, false, false, false), "content from storage: not drawn");
+        assert!(!retires(old, (0x2000, 0x3000), true, true, false, false), "a layered image: views at offsets");
+        assert!(!retires(old, (0x1000, 0x3000), true, false, true, false), "an alias");
+        assert!(!retires(old, (0x1000, 0x5000), true, false, false, true), "same description: taken over");
+    }
 }
 
 const PARK_FRAMES: u64 = 8;
@@ -2037,12 +2060,13 @@ impl Gpu {
         let slotted = self.tables.ids_of(&covered).iter().map(|e| e.1).collect::<std::collections::HashSet<u64>>().len();
         let orphans = super::mem::outside_pools(self, &ranges);
         format!(
-            "image census: {} live ({} MB with memory, {alias_n} aliases; {orphans} over no live memory pool, pools finalized {} replaced {}, images released with their pool {}); since start: inits {} finalizes {} re-inits {}, made new {} parked reused {} taken over {} alias {} (for a finalized object {}), released {} destroyed {}; {cn} live under a newer live image's storage ({same_start} at its start, {slotted} still in a pool slot; {} MB): {}",
+            "image census: {} live ({} MB with memory, {alias_n} aliases; {orphans} over no live memory pool, pools finalized {} replaced {}, images released with their pool {}, let go under a newer image {}); since start: inits {} finalizes {} re-inits {}, made new {} parked reused {} taken over {} alias {} (for a finalized object {}), released {} destroyed {}; {cn} live under a newer live image's storage ({same_start} at its start, {slotted} still in a pool slot; {} MB): {}",
             live,
             owned_b >> 20,
             h(10),
             h(11),
             h(12),
+            h(13),
             h(6),
             h(7),
             h(8),
@@ -2176,9 +2200,13 @@ impl Gpu {
             }
             a
         });
+        let made_new = reused.is_none();
         let Some(im) = reused.or_else(|| self.create_image(t)) else {
             return false;
         };
+        if made_new {
+            self.retire_overlapped(imgs, t, key);
+        }
         if imgs.released.contains_key(&t.serial) {
             how_inc(9);
         }
@@ -2212,6 +2240,52 @@ impl Gpu {
         imgs.addr_gen += 1;
         self.tables.invalidate_images();
         true
+    }
+
+    /// A new image of texture `t` over storage that older live images drawn by the GPU also occupy, with another
+    /// description: those older objects are let go after the submission being recorded (parked, as a finalized
+    /// texture's: a use within the park window gets the image back with its content). On the console a texture is
+    /// its memory: once another texture is placed over that memory and drawn, the older object's content is gone,
+    /// and the game has moved on from it; here each kept its own image for good (Ocarina of Time places new render
+    /// targets and text surfaces over the memory of older ones without finalizing those: ~520 images, 2 GB, by the
+    /// house, OOT-MEM). Not an image with layers or levels (another object may view one of them at an offset), an
+    /// alias or an image others alias. `NXGFX_RETIRE_OVERLAP=0`: kept, as before.
+    fn retire_overlapped(&self, imgs: &Images, t: &tex_t, key: u128) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("NXGFX_RETIRE_OVERLAP").as_deref() != Ok("0"))
+            || t.mem.is_null()
+            || crate::nvn::vpool::is_sparse(t.mem as u64)
+        {
+            return;
+        }
+        let (lo, hi) = (t.mem as u64, t.mem as u64 + t.l.size.max(1));
+        let olds: Vec<u64> = imgs
+            .by_addr
+            .range(lo.saturating_sub(imgs.max_size)..hi)
+            .flat_map(|(_, v)| v.iter().copied())
+            .filter(|&s| {
+                s != t.serial
+                    && imgs.by_serial.get(&s).is_some_and(|o| {
+                        let olo = o.tex.mem as u64;
+                        retires(
+                            (olo, olo + o.tex.l.size.max(1)),
+                            (lo, hi),
+                            o.gpu_owned,
+                            o.layers > 1 || o.levels > 1 || o.ty == vk::ImageType::TYPE_3D,
+                            o.alias_of.is_some(),
+                            tex_identity(&o.tex) == key,
+                        )
+                    })
+            })
+            .collect();
+        for s in olds {
+            if imgs.by_serial.values().any(|a| a.alias_of == Some(s)) {
+                continue;
+            }
+            HOW[13].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            textrace::ev(s, || format!("ser{} made over its storage: let go", t.serial));
+            self.release_after_use(s);
+        }
     }
 
     /// `ensure_image` for a use that draws into or copies from the texture (a render target, a copy's source or
