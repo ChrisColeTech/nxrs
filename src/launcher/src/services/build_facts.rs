@@ -5,7 +5,6 @@ use crate::constants::engine as e;
 use crate::model::facts::Facts;
 use crate::model::game::{Game, in_place_package, same_token};
 use crate::model::path_text::{join, same_path};
-use crate::model::web_build::web_dir;
 
 /// Its executable, code module and data folder are there, the build finished and was made from its
 /// source (or it has none).
@@ -45,7 +44,7 @@ pub fn facts(g: &Game) -> Facts {
         // only a build made before the build carried its data reads its package while it plays
         in_place: in_place_package(&g.source) && super::markers::reads_in_place(&g.data_dir()),
         build_incomplete: g.build_incomplete,
-        web_build: super::web_serve::has_web_build(&web_dir(g)),
+        web_build: super::web_serve::has_web_build(&super::web_serve::played_web_dir(g)),
     }
 }
 

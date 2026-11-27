@@ -23,8 +23,12 @@ fn main() {
             "None".into()
         }
     };
+    // nxnative's shader tables (26 MiB over all profiles) are read only by nxrs-build, which writes a title's tables
+    // into its data folder; the web engine never reads them, and they were 95% of every web module's data segment
+    // (WEB-W11): left out of the emscripten library
+    let web = std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("emscripten");
     let opt_bytes = |p: std::path::PathBuf| {
-        if p.is_file() {
+        if p.is_file() && !web {
             format!("Some(include_bytes!({:?}))", p.display().to_string())
         } else {
             "None".into()
