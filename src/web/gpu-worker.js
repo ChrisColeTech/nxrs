@@ -26,6 +26,19 @@ const objs = new Map();
 const info = new Map(); // id -> descriptor facts (textures: {format, dim, w, h, d, mips, samples}; views: {...})
 let chain = Promise.resolve();
 let lastPresent = 0;
+// WEB-W8e: a submission the GPU finishes >= 1 s after the worker handed it over is logged with what was made since
+// the previous one (pipelines are compiled in Chrome's GPU process ahead of the submission that follows them)
+const SLOW_SUB_MS = 1000;
+let madePipes = 0, madeShaders = 0, inFlight = 0, madeTotal = 0;
+const pendingSubs = [];
+// a submission still not finished 3 s after the hand-over is named while it waits (the engine gives up at 5 s)
+setInterval(() => {
+  const r = pendingSubs[0];
+  if (r && !r.warned && performance.now() - r.t > 3000) {
+    r.warned = true;
+    say(`submission still not finished by the GPU ${((performance.now() - r.t) / 1000).toFixed(1)} s after the hand-over (${pendingSubs.length} in flight; ${r.np} pipelines made just before it; ${madeTotal} pipelines made so far)`);
+  }
+}, 500);
 const logged = new Map();
 
 const say = (text, red) => postMessage({ log: text, red });
@@ -216,6 +229,7 @@ async function loop() {
       if (op === 0) { tail = 0; continue; }
       let presented = false;
       try {
+        if (pipesPending.length && (op === OP.SUBMIT_BEGIN || op === OP.DESTROY)) await settlePipelines();
         presented = run(op, tail + 8, len);
       } catch (err) {
         once('op' + op + String(err).slice(0, 40), `op ${op}: ${err && err.stack || err}`);
@@ -240,6 +254,32 @@ const u64 = (p) => DV.getUint32(p, true) + DV.getUint32(p + 4, true) * 429496729
 // first (TextDecoder does not read shared memory)
 const decoder = new TextDecoder();
 const text = (p, n) => decoder.decode(D8.slice(p, p + n));
+
+// WEB-W8e: Chrome compiles a pipeline in its GPU process, not in createRenderPipeline's call: the synchronous calls
+// returned at once and the compile ran ahead of the next submission on the GPU process's one thread, after the worker
+// had stored that submission's "queued" word (the engine's 5 s GPU budget). At a level load that put 1-2 s (once
+// > 5 s: the abort) of compiling, GPU idle, inside the GPU budget. So pipelines are made asynchronously and the
+// worker waits for them before the next submission (or a destroy), as a native driver's vkCreate*Pipelines returns
+// only once compiled: the compile is CPU-side work before the hand-over, which the engine does not budget.
+const pipesPending = [];
+function makePipeline(id, label, compile, sync) {
+  madePipes++;
+  madeTotal++;
+  pipesPending.push(compile().then((pl) => { objs.set(id, pl); }, () => {
+    // an invalid descriptor: the same invalid object and validation message as the synchronous call
+    device.pushErrorScope('validation');
+    objs.set(id, sync());
+    device.popErrorScope().then((er) => {
+      if (er) once(label + er.message.slice(0, 60), `${label} ${id}: ${er.message.slice(0, 900)}`);
+    });
+  }));
+}
+async function settlePipelines() {
+  const n = pipesPending.length, t = performance.now();
+  await Promise.all(pipesPending.splice(0));
+  const ms = performance.now() - t;
+  if (ms >= SLOW_SUB_MS) say(`pipelines: ${n} compiled by Chrome's GPU process in ${(ms / 1000).toFixed(2)} s before the next submission`);
+}
 
 function run(op, p, len) {
   switch (op) {
@@ -277,6 +317,7 @@ function run(op, p, len) {
     case OP.SHADER: {
       const j = JSON.parse(text(p, len));
       const m = device.createShaderModule({ code: j.code });
+      madeShaders++;
       objs.set(j.id, m);
       if (subTrace && /\bloop\b/.test(j.code)) loopCode.set(j.id, j.code);
       m.getCompilationInfo().then((ci) => {
@@ -308,21 +349,14 @@ function run(op, p, len) {
       if (j.depthStencil) d.depthStencil = j.depthStencil;
       if (d.primitive.unclippedDepth && !device.features.has('depth-clip-control')) delete d.primitive.unclippedDepth;
       pipeMods.set(j.id, [j.vertex.module, j.fragment ? j.fragment.module : 0]);
-      device.pushErrorScope('validation');
-      objs.set(j.id, device.createRenderPipeline(d));
-      device.popErrorScope().then((er) => {
-        if (er) once('rpipe' + er.message.slice(0, 60), `render pipeline ${j.id}: ${er.message.slice(0, 900)}`);
-      });
+      makePipeline(j.id, 'render pipeline', () => device.createRenderPipelineAsync(d), () => device.createRenderPipeline(d));
       return false;
     }
     case OP.CPIPE: {
       const j = JSON.parse(text(p, len));
-      device.pushErrorScope('validation');
       pipeMods.set(j.id, [j.module, 0]);
-      objs.set(j.id, device.createComputePipeline({ layout: objs.get(j.layout), compute: { module: objs.get(j.module), entryPoint: j.entry } }));
-      device.popErrorScope().then((er) => {
-        if (er) once('cpipe' + er.message.slice(0, 60), `compute pipeline ${j.id}: ${er.message.slice(0, 900)}`);
-      });
+      const d = { layout: objs.get(j.layout), compute: { module: objs.get(j.module), entryPoint: j.entry } };
+      makePipeline(j.id, 'compute pipeline', () => device.createComputePipelineAsync(d), () => device.createComputePipeline(d));
       return false;
     }
     case OP.BINDGROUP: {
@@ -749,6 +783,20 @@ function submit(p0, len) {
     Atomics.notify(H, H_GEN);
   }
   const done = device.queue.onSubmittedWorkDone();
+  const tSub = performance.now(), np = madePipes, ns = madeShaders, ahead = inFlight;
+  madePipes = 0;
+  madeShaders = 0;
+  inFlight++;
+  const rec = { t: tSub, np, warned: false };
+  pendingSubs.push(rec);
+  done.then(() => {
+    inFlight--;
+    pendingSubs.splice(pendingSubs.indexOf(rec), 1);
+    const ms = performance.now() - tSub;
+    if (ms >= SLOW_SUB_MS) {
+      say(`slow submission: the GPU finished it ${(ms / 1000).toFixed(2)} s after the worker handed it over (execute ${exec.toFixed(0)} ms; ${np} pipelines and ${ns} shader modules made since the previous submission; ${ahead} submissions in flight before it)`);
+    }
+  });
   const mapped = maps.map(([st]) => st.mapAsync(GPUMapMode.READ));
   chain = chain.then(async () => {
     await done;
