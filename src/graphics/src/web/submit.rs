@@ -8,6 +8,7 @@ use super::cmd::{Attachment, Cmd, Dyn};
 use super::fmt;
 use super::obj::{self, objs, op, Desc, Objs, Pipeline};
 use super::ring::{self, Pk, Word};
+use super::seg::{self, Seg};
 use ash::vk;
 use ash::vk::Handle;
 use shaders::wgsl::{Bind, Kind, Wgsl};
@@ -188,6 +189,36 @@ struct Pass {
     extent: (u32, u32),
     /// no attachment at all: WebGPU has no such pass; nothing is emitted and its draws are refused
     empty: bool,
+    /// the depth/stencil attachment, for the pass's segments (WEB-W10c, `seg.rs`)
+    ds: Option<DsAtt>,
+    /// where the current segment's begin payload is in the submission, and the pass's own begin payload
+    begin_at: usize,
+    payload: Vec<u8>,
+    seg: Seg,
+}
+
+/// The depth/stencil attachment of a pass: its image, mip and layers, and the aspects it has (depth, stencil).
+struct DsAtt {
+    image: u64,
+    mip: u32,
+    layers: (u32, u32),
+    has: [bool; 2],
+}
+
+impl DsAtt {
+    /// The aspects of this attachment a bound texture view samples (same image, overlapping mip and layers).
+    fn sampled_by(&self, v: &obj::View) -> [bool; 2] {
+        let mips = v.base_mip..v.base_mip.saturating_add(v.mips.max(1));
+        let layers = v.base_layer..v.base_layer.saturating_add(v.layers.max(1));
+        let ours = self.layers.0..self.layers.0.saturating_add(self.layers.1.max(1));
+        if v.image != self.image || !mips.contains(&self.mip) || layers.start >= ours.end || ours.start >= layers.end {
+            return [false; 2];
+        }
+        [
+            self.has[0] && v.aspect.contains(vk::ImageAspectFlags::DEPTH),
+            self.has[1] && v.aspect.contains(vk::ImageAspectFlags::STENCIL),
+        ]
+    }
 }
 
 #[derive(Default, Clone, PartialEq)]
@@ -226,6 +257,8 @@ struct Rs<'a> {
     /// bind groups dropped from the cache while this submission was resolved: destroyed only after it is in the ring
     /// (it may have bound them already; destroyed before it, its draws found no group: WEB-WPAGE)
     retired: Vec<u32>,
+    /// the aspects of the pass's depth/stencil attachment the bind groups being resolved sample
+    hits: [bool; 2],
 }
 
 fn h64(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
@@ -242,6 +275,7 @@ impl<'a> Rs<'a> {
             uploads: Vec::new(),
             readbacks: Vec::new(),
             retired: Vec::new(),
+            hits: [false; 2],
             uniforms: Vec::new(),
             pass: None,
             compute: false,
@@ -299,6 +333,7 @@ impl<'a> Rs<'a> {
                     self.begin_pass(colors, depth.as_ref().or(stencil.as_ref()), depth.is_some(), stencil.is_some());
                 }
                 Cmd::EndRendering => {
+                    self.end_segment(false);
                     if self.pass.take().is_some_and(|p| !p.empty) {
                         self.put(op::PASS_END, |_| {});
                     }
@@ -474,6 +509,14 @@ impl<'a> Rs<'a> {
                     if self.pass.as_ref().is_none_or(|p| p.empty) {
                         continue;
                     }
+                    let has = self.pass.as_ref().and_then(|p| p.ds.as_ref()).map_or([false; 2], |d| d.has);
+                    let writes = atts.iter().fold([false; 2], |w, a| {
+                        [
+                            w[0] || has[0] && a.aspect_mask.contains(vk::ImageAspectFlags::DEPTH),
+                            w[1] || has[1] && a.aspect_mask.contains(vk::ImageAspectFlags::STENCIL),
+                        ]
+                    });
+                    self.ds_use([false; 2], writes);
                     for a in atts {
                         for r in rects {
                             let depth = a.aspect_mask.intersects(vk::ImageAspectFlags::DEPTH | vk::ImageAspectFlags::STENCIL);
@@ -525,7 +568,17 @@ impl<'a> Rs<'a> {
     }
 
     fn begin_pass(&mut self, colors: &[Attachment], ds: Option<&Attachment>, has_depth: bool, has_stencil: bool) {
-        let mut pass = Pass { colors: Vec::new(), depth: None, samples: 1, extent: (0, 0), empty: false };
+        let mut pass = Pass {
+            colors: Vec::new(),
+            depth: None,
+            samples: 1,
+            extent: (0, 0),
+            empty: false,
+            ds: None,
+            begin_at: 0,
+            payload: Vec::new(),
+            seg: Seg::default(),
+        };
         let view_info = |h: u64| -> Option<(u32, vk::Format, u32, (u32, u32), bool)> {
             let v = self.o.view.get(&h)?;
             let im = self.o.img.get(&v.image)?;
@@ -557,12 +610,18 @@ impl<'a> Rs<'a> {
                 pass.extent = *ext;
             }
         }
+        pass.ds = ds.and_then(|a| {
+            let v = self.o.view.get(&a.view)?;
+            let t = fmt::tex(v.format)?;
+            Some(DsAtt { image: v.image, mip: v.base_mip, layers: (v.base_layer, v.layers), has: [t.depth, t.stencil] })
+        });
         if dsv.is_none() && pass.colors.iter().all(|c| c.is_none()) {
             pass.empty = true;
             self.pass = Some(pass);
             self.bound = Bound::default();
             return;
         }
+        let begin = self.s.0.len();
         self.put(op::PASS_BEGIN, |p| {
             p.u32(cols.len() as u32);
             for (id, resolve, a, int) in &cols {
@@ -590,8 +649,49 @@ impl<'a> Rs<'a> {
                 }
             }
         });
+        // the packet just written: its payload follows the op and length words
+        let at = begin + 8;
+        pass.begin_at = at;
+        pass.payload = self.s.0[at..].to_vec();
+        pass.seg = Seg::starting(seg::modes(&pass.payload));
         self.pass = Some(pass);
         self.bound = Bound::default();
+    }
+
+    /// Ends the current segment of the pass: an aspect it sampled and never wrote becomes read-only in its begin
+    /// packet; with `more`, its colours are stored and a continuation segment begins (WEB-W10c, `seg.rs`).
+    fn end_segment(&mut self, more: bool) {
+        let Some(p) = self.pass.as_mut().filter(|p| !p.empty) else { return };
+        let (at, n) = (p.begin_at, p.payload.len());
+        let packet = &mut self.s.0[at..at + n];
+        seg::mark_read_only(packet, p.seg.read_only());
+        if !more {
+            return;
+        }
+        seg::keep_stores(packet);
+        let cont = seg::continuation(&p.payload);
+        p.seg = Seg::starting(seg::modes(&cont));
+        p.begin_at = self.s.0.len() + 16;
+        sub(&mut self.s, op::PASS_END, |_| {});
+        sub(&mut self.s, op::PASS_BEGIN, |q| {
+            q.0.extend_from_slice(&cont);
+        });
+        self.bound = Bound::default();
+    }
+
+    /// A draw or clear of the pass sampling and writing these aspects of its depth/stencil attachment: a new segment
+    /// first when the current one cannot hold both (WebGPU: one usage per pass).
+    fn ds_use(&mut self, samples: [bool; 2], writes: [bool; 2]) {
+        let Some(p) = self.pass.as_ref().filter(|p| !p.empty && p.ds.is_some()) else { return };
+        if (0..2).any(|i| samples[i] && writes[i]) {
+            red_once("a draw sampling the depth/stencil attachment it writes (a feedback loop): WebGPU refuses it");
+        }
+        if p.seg.conflicts(samples, writes) {
+            self.end_segment(true);
+        }
+        if let Some(p) = self.pass.as_mut() {
+            p.seg.add(samples, writes);
+        }
     }
 
     /// The bind group layout entries of a pipeline's binds for group `g`, with the bound resources' sample types; and
@@ -693,6 +793,10 @@ impl<'a> Rs<'a> {
                         unfilterable.push(b.src_binding);
                     }
                     layout.push(LayEnt::Texture(b.binding, *vis, st, *dim, *multi));
+                    if let (Some(v), Some(ds)) = (view, self.pass.as_ref().and_then(|p| p.ds.as_ref())) {
+                        let h = ds.sampled_by(v);
+                        self.hits = [self.hits[0] || h[0], self.hits[1] || h[1]];
+                    }
                     let id = match view {
                         Some(v) => v.id,
                         None => dummy_texture(dim, st, *multi),
@@ -926,7 +1030,19 @@ impl<'a> Rs<'a> {
         if let Some(fs) = &g.fs {
             stages.push((&fs.0, 2));
         }
+        self.hits = [false; 2];
         let Some((bgl, bg)) = self.groups(false, &stages) else { return false };
+        // what the draw does to the depth/stencil attachment (as the pipeline below declares it): WebGPU's
+        // writesDepth / writesStencil
+        if let Some(has) = self.pass.as_ref().and_then(|p| p.ds.as_ref()).map(|a| a.has) {
+            let keep = |o: vk::StencilOp| o == vk::StencilOp::KEEP;
+            let ops_write = d.stencil_ops.iter().any(|&(f, p, df, _)| !keep(f) || !keep(p) || !keep(df));
+            let writes = [
+                has[0] && d.depth_test && d.depth_write,
+                has[1] && d.stencil_test && d.stencil_write[0] & 0xff != 0 && ops_write,
+            ];
+            self.ds_use(self.hits, writes);
+        }
         let layout = self.playout(bgl);
         // vertex buffers: one WebGPU slot per Vulkan binding the shader's inputs read; inputs no attribute names read
         // a zero stand-in (WebGPU requires every input be fed)

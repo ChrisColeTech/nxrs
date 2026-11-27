@@ -17,6 +17,10 @@ pub mod tex;
 pub mod vk;
 #[cfg(target_os = "emscripten")]
 pub mod web;
+/// The web device's pass segments are plain logic: their tests run on the host too.
+#[cfg(all(test, not(target_os = "emscripten")))]
+#[path = "web/seg.rs"]
+mod web_seg;
 
 /// Where the game's translated shaders are (`<key>.spv` + `<key>.json`, lane C's output).
 pub fn set_shader_dir(p: std::path::PathBuf) {
