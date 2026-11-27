@@ -49,6 +49,8 @@ pub struct BuildArgs {
     /// `--target web`: a browser build (docs/35): emcc instead of clang, `game.js` + `game.wasm` instead of the
     /// executable and code DLL, into `<input folder>\nxrs-web\<name>` by default
     pub web: bool,
+    /// `--shaders-from <data folder>`: another build's translated shaders imported (`shaderimport`)
+    pub shaders_from: Option<PathBuf>,
 }
 
 /// What the build produced.
@@ -551,6 +553,18 @@ fn shaders_step(
                 Err(e) => out.say(&format!(
                     "shaders: runtime-derived variants not promoted ({e})"
                 )),
+            }
+            if let Some(from) = &a.shaders_from {
+                match crate::shaderimport::import(from, data) {
+                    Ok(r) => out.say(&format!(
+                        "shaders: {} imported from {} ({} already here, {} pair rows)",
+                        r.shaders,
+                        from.display(),
+                        r.present,
+                        r.pairs
+                    )),
+                    Err(e) => out.say(&format!("shaders: none imported ({e:#})")),
+                }
             }
             match reconcile_shader_pairs(data) {
                 Ok(removed) if removed > 0 => out.say(&format!(

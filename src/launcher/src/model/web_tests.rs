@@ -37,8 +37,16 @@ fn build_for_web_is_the_build_with_target_web_into_the_web_folder() {
         super::path_text::native("P:/Games/Kart/nxrs-web/Kart DX")
     );
     assert_eq!(&a[a.len() - 2..], ["--target", "web"]);
+    // the native build's data folder: the shaders its runs translated
+    assert_eq!(
+        &a[a.len() - 4..a.len() - 2],
+        [
+            "--shaders-from".to_string(),
+            super::path_text::native("P:/Games/Kart/nxrs/Kart DX/Kart DX_data")
+        ]
+    );
     // everything else is the native build's: source, name, jobs, --machine, update, keys
-    assert_eq!(a.len(), native.len() + 2);
+    assert_eq!(a.len(), native.len() + 4);
     assert_eq!(a[0], "build");
     for x in ["-o", "Kart DX", "--jobs", "8", "--machine", "--keys"] {
         assert!(a.iter().any(|y| y == x), "{x}");

@@ -15,6 +15,9 @@ pub const DEFAULT_ENTRY: &str = "index.html";
 pub const BUILD_LOG_SUFFIX: &str = ".build.log";
 /// `--target web` (launcher contract v2).
 pub const TARGET_ARGS: [&str; 2] = ["--target", "web"];
+/// `--shaders-from <native data folder>`: the shaders the native build's runs translated (a title
+/// that makes its shaders at run time has none the web build can find or translate in a browser).
+pub const SHADERS_FROM_ARG: &str = "--shaders-from";
 
 /// The server's port: fixed, so the page's origin (and with it the browser's data cache and saves,
 /// both kept per origin) stays the same from one Play to the next. `NXRS_WEB_PORT` overrides it.

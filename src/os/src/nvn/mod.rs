@@ -310,7 +310,12 @@ fn bind_graphics() {
     let shaders = std::env::var("NXGFX_SHADERS")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| data.join("shaders"));
-    if !shaders.join("manifest.tsv").is_file() {
+    // (web) the library is not preloaded: it is on the page's server, fetched on first use (`vk::shader`)
+    #[cfg(target_os = "emscripten")]
+    let on_server = || nxgfx::web::fetch_data("shaders/manifest.tsv").is_some_and(|b| !b.is_empty());
+    #[cfg(not(target_os = "emscripten"))]
+    let on_server = || false;
+    if !shaders.join("manifest.tsv").is_file() && !on_server() {
         crate::log!("[RED] graphics: no translated shaders at {} (nxshaders prebuild-data): draws with a missing shader wait for none", shaders.display());
     }
     // the profile's shader_key_skip: the keys graphics computes are the build's
