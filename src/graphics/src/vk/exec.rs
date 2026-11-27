@@ -9480,11 +9480,85 @@ fn ub_update_kept(dst: u64, n: u64, len: usize) -> bool {
     n > 0 && 24 + n as usize <= len && super::mem::room(dst) >= n
 }
 
+/// (MKW-AHEAD) `NXGFX_TRANSLATE_BALANCE` (default on; 0: off): a stream translated in parallel is cut into about one
+/// segment per lane, of equal draws, instead of segments of `NXGFX_TRANSLATE_SEG` / `_MIDCUT` draws. Mario Kart World's
+/// two long parts of its frame (~700-850 draws each, up to their waits) became 3-4 segments of 256 (or 6-7 of 128) on
+/// 6 lanes: the part waited for its slowest lane's second segment while the others idled.
+fn translate_balance() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("NXGFX_TRANSLATE_BALANCE").as_deref() != Ok("0");
+        crate::vklog!(
+            "translate: a stream's segments {}",
+            if on {
+                "one per lane, of equal draws up to its first wait that parks (NXGFX_TRANSLATE_BALANCE=0: fixed sizes)"
+            } else {
+                "of fixed sizes (NXGFX_TRANSLATE_BALANCE=0)"
+            }
+        );
+        on
+    })
+}
+
+/// Fewest draws in a balanced segment (`balanced_target`).
+const BALANCE_MIN: usize = 32;
+
+/// A balanced segment's draws: `draws` (up to the stream's first wait that parks) over `lanes`, at least
+/// `BALANCE_MIN`, at most `max` (the fixed size).
+fn balanced_target(draws: usize, lanes: usize, max: usize) -> usize {
+    draws.div_ceil(lanes.max(1)).clamp(BALANCE_MIN, max.max(BALANCE_MIN))
+}
+
+/// The segment size for `stream` when balanced (`translate_balance`): None when off or not translated in parallel.
+/// Draws are counted up to the first event wait that does not pass now (a wait passed by the stream's own earlier
+/// signal is counted as parking: the segments then come out smaller, never fewer).
+fn balanced_seg(g: &Gpu, stream: &[u8]) -> Option<usize> {
+    let lanes = translate_lanes();
+    if lanes < 2 || !translate_balance() {
+        return None;
+    }
+    let (mut p, mut draws) = (0usize, 0usize);
+    while p + 8 <= stream.len() {
+        let h = unsafe { rd::<op_hdr>(stream.as_ptr().add(p)) };
+        let sz = h.size as usize;
+        if sz < 8 || p + sz > stream.len() {
+            break;
+        }
+        if is_draw(h.op) {
+            draws += 1;
+        } else if h.op == op::WAIT_EVENT && sz >= 24 {
+            let (addr, mode, value): (u64, u32, u32) =
+                unsafe { (rd_at(&stream[p..], 0), rd_at(&stream[p..], 8), rd_at(&stream[p..], 12)) };
+            if !event_wait_passes(g, addr, mode, value) {
+                break;
+            }
+        }
+        p += sz;
+    }
+    Some(balanced_target(draws, lanes, translate_seg().max(translate_midcut())))
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::*;
+    /// A stream's draws up to its park are spread over the lanes in equal segments, within the bounds.
+    #[test]
+    fn segments_are_one_per_lane_within_bounds() {
+        assert_eq!(balanced_target(830, 6, 256), 139, "830 draws on 6 lanes");
+        assert_eq!(balanced_target(700, 6, 256), 117);
+        assert_eq!(balanced_target(100, 6, 256), BALANCE_MIN, "never below the minimum");
+        assert_eq!(balanced_target(4000, 6, 256), 256, "never above the fixed size");
+        assert_eq!(balanced_target(500, 0, 256), 256, "no lanes: one piece capped by the fixed size");
+    }
+}
+
 /// The pre-pass: the stream's segments and the offset of a wait that parks it (as `run` returns). Makes the stream's
-/// ordered global effects.
-fn plan(g: &Gpu, qs: &QState, stream: &[u8]) -> (Vec<Segment>, Option<usize>) {
-    let target = translate_seg();
-    let midcut = translate_midcut();
+/// ordered global effects. Also returns the state the pre-pass reached (at the park, or the stream's end).
+fn plan(g: &Gpu, qs: &QState, stream: &[u8]) -> (Vec<Segment>, Option<usize>, QState) {
+    let (target, midcut) = match balanced_seg(g, stream) {
+        Some(n) => (n, n),
+        None => (translate_seg(), translate_midcut()),
+    };
     let mut shadow = qs.fork_state();
     let mut segs = Vec::new();
     let mut cur = Segment {
@@ -9569,7 +9643,7 @@ fn plan(g: &Gpu, qs: &QState, stream: &[u8]) -> (Vec<Segment>, Option<usize>) {
     if cur.end > cur.start {
         segs.push(cur);
     }
-    (segs, park)
+    (segs, park, shadow)
 }
 
 /// Replays `stream` in segments when it qualifies (`segmentable`): None when it does not (the caller runs it in one
@@ -9591,7 +9665,7 @@ pub fn run_segmented(
     };
     use std::sync::atomic::Ordering::Relaxed;
     let t0 = std::time::Instant::now();
-    let (segs, park) = plan(g, qs, stream);
+    let (segs, park, _) = plan(g, qs, stream);
     seg_stats::PRE_NS.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
     seg_stats::STREAMS.fetch_add(1, Relaxed);
     seg_stats::SEGMENTS.fetch_add(segs.len() as u64, Relaxed);
@@ -9647,6 +9721,108 @@ pub fn run_segmented(
     }
     seg_stats::RUN_NS.fetch_add(t1.elapsed().as_nanos() as u64, Relaxed);
     Some(park)
+}
+
+// ---------- translate-ahead (MKW-AHEAD) ----------
+//
+// Mario Kart World's frame op is one stream of its main queue cut by event waits that a second queue's parts signal,
+// and the other way round: A1, B1, A2, B2, A3, B3, A4. They used to be translated one after another (each long part
+// over the lanes, its segments in parallel), the lanes idle between them. Translated ahead, every part the GPU
+// signals recorded so far release is planned in queue order first (`ahead_plan`: its segments, its ordered global
+// effects, the state after it), then all their segments are translated at once through one gate run, and each part
+// is submitted in queue order as soon as its segments are joined (`run_ahead`).
+
+/// `NXGFX_AHEAD` (1: on; default off): the parts of a chain translated ahead (`queue::chain_ahead`).
+pub fn ahead_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = translate_lanes() > 1 && std::env::var("NXGFX_AHEAD").as_deref() == Ok("1");
+        crate::vklog!(
+            "parked queues run on at once: {}",
+            if on {
+                "their parts planned in queue order and translated ahead together on the lanes, each submitted in order once joined (NXGFX_AHEAD=0: one part after another)"
+            } else {
+                "one part after another (NXGFX_AHEAD=0 or no lanes)"
+            }
+        );
+        on
+    })
+}
+
+/// One part of a chain planned ahead (`ahead_plan`): its segments, the offset of the wait that parks its stream, the
+/// state the pre-pass reached.
+pub struct AheadPlan {
+    segs: Vec<Segment>,
+    pub park: Option<usize>,
+    exit: QState,
+}
+
+impl AheadPlan {
+    /// The queue's state for its next part: the pre-pass's, with the submission's inline uniform updates gone (`end`).
+    pub fn next_state(&self) -> QState {
+        let mut q = self.exit.fork_state();
+        q.ub_upd.clear();
+        q
+    }
+}
+
+/// Whether `stream` may be translated ahead from `qs`: what lets a stream be cut into segments (`segmentable`), at any
+/// size, and no record translated on the replay thread only (`is_rare`).
+pub fn ahead_ok(qs: &QState, stream: &[u8]) -> bool {
+    if passdump::active()
+        || super::defer::active()
+        || db_poison_on()
+        || super::lost::bindings::enabled()
+        || super::newndve::mode() != super::newndve::Mode::Off
+        || std::env::var("NXGFX_SKIP_PS").is_ok()
+        || !shadows_on()
+    {
+        return false;
+    }
+    if !qs.ndve.pending.is_empty() || qs.raw_probe.borrow().is_some() || qs.tf_on || qs.tf_active != 0 {
+        return false;
+    }
+    let mut p = 0usize;
+    while p + 8 <= stream.len() {
+        let h = unsafe { rd::<op_hdr>(stream.as_ptr().add(p)) };
+        let sz = h.size as usize;
+        if sz < 8 || p + sz > stream.len() || matches!(h.op, op::TF_BIND | op::TF_STATE) || is_rare(h.op) {
+            return false;
+        }
+        p += sz;
+    }
+    true
+}
+
+/// The pre-pass of part `k` (0: the next submission) of a chain translated ahead: its segments and global effects
+/// (the timeline values its fence syncs and GPU signals name are `k` submissions after the next one).
+pub fn ahead_plan(g: &Gpu, qs: &QState, stream: &[u8], k: u64) -> AheadPlan {
+    let t0 = std::time::Instant::now();
+    AHEAD_FENCES.with(|c| c.set(k));
+    let (segs, park, exit) = plan(g, qs, stream);
+    AHEAD_FENCES.with(|c| c.set(0));
+    use std::sync::atomic::Ordering::Relaxed;
+    seg_stats::PRE_NS.fetch_add(t0.elapsed().as_nanos() as u64, Relaxed);
+    seg_stats::STREAMS.fetch_add(1, Relaxed);
+    seg_stats::SEGMENTS.fetch_add(segs.len() as u64, Relaxed);
+    AheadPlan { segs, park, exit }
+}
+
+thread_local! {
+    /// (`ahead_plan`) submissions between the next one and the one a planned part's records go into
+    static AHEAD_FENCES: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+}
+
+pub use par::PartHost;
+
+/// Translates the planned parts (`ahead_plan`, in queue order) into their submissions `subs` (made in that order),
+/// handing each to `host.done` in order as soon as it is joined (`par::run_parts`).
+pub fn run_ahead(g: &'static Gpu, parts: Vec<(&[u8], AheadPlan)>, subs: Vec<Sub>, host: &mut dyn PartHost) {
+    let t = std::time::Instant::now();
+    par::run_parts(g, parts.into_iter().map(|(s, p)| (s, p.segs)).collect(), subs, host);
+    use std::sync::atomic::Ordering::Relaxed;
+    seg_stats::RUN_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+    seg_stats::PAR.fetch_add(1, Relaxed);
 }
 
 /// Whether `stream` holds a record that is translated on the replay thread only (DLSS, a downsample, a depth resolve:
@@ -9835,12 +10011,22 @@ mod par {
 
     struct Job {
         g: &'static Gpu,
-        stream: Own<(*const u8, usize)>,
+        /// the streams of the job's parts (one, or a chain's parts translated ahead: `run_parts`)
+        streams: Vec<Own<(*const u8, usize)>>,
+        /// each segment's part
+        part_of: Vec<usize>,
         segs: Vec<Mutex<Option<Own<Segment>>>>,
         out: Vec<Mutex<Option<Own<(Sub, QState, u64)>>>>,
         next: AtomicUsize,
-        init: queue::ChildInit,
+        /// each part's parent submission (its upload buffer shared by the part's segments)
+        init: Vec<queue::ChildInit>,
         run: gate::Run,
+        /// (`run_parts`) a lane ends its child's command buffers itself: its parent is submitted while the lane goes
+        /// on recording later segments from the same command pool
+        end_own: bool,
+        /// a segment's result was put (`run_parts` joins them as they come)
+        put: Mutex<()>,
+        put_cv: Condvar,
         /// translation threads inside this job
         busy: Mutex<usize>,
         idle: Condvar,
@@ -9897,33 +10083,45 @@ mod par {
 
     /// Takes segments until none is left.
     fn work(job: &Job, mk: &mut dyn FnMut() -> Sub, replay: bool) {
-        loop {
-            let k = job.next.fetch_add(1, Relaxed);
-            if k >= job.segs.len() {
-                return;
-            }
-            seg_stats::LANE0_SEGS[replay as usize].fetch_add(1, Relaxed);
-            let Some(Own(s)) = job.segs[k].lock().unwrap().take() else {
-                continue;
-            };
-            let mut c = mk();
-            queue::child_begin_with(&job.init, &mut c);
-            // first-use initializations go into the parent's upload buffer, in the order they are made (audit H1)
-            let own_pre = queue::share_pre(&job.init, &mut c);
-            let mut wq = s.entry;
-            wq.seg = true;
-            wq.seg_rc = s.rc;
-            wq.seg_mem = s.mem;
-            // SAFETY: the stream outlives the job (`run` waits until no thread is inside it)
-            let stream = unsafe { std::slice::from_raw_parts(job.stream.0 .0, job.stream.0 .1) };
-            job.run.enter(k);
-            let t = std::time::Instant::now();
-            let draws = translate_segment(job.g, &mut c, &mut wq, stream, s.start, s.end);
-            seg_stats::LANE_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
-            job.run.leave(k);
-            queue::unshare_pre(&mut c, own_pre);
-            *job.out[k].lock().unwrap() = Some(Own((c, wq, draws)));
+        while take_one(job, mk, replay) {}
+    }
+
+    /// Takes and translates one segment; false when none is left.
+    fn take_one(job: &Job, mk: &mut dyn FnMut() -> Sub, replay: bool) -> bool {
+        let k = job.next.fetch_add(1, Relaxed);
+        if k >= job.segs.len() {
+            return false;
         }
+        seg_stats::LANE0_SEGS[replay as usize].fetch_add(1, Relaxed);
+        let Some(Own(s)) = job.segs[k].lock().unwrap().take() else {
+            return true;
+        };
+        let part = job.part_of[k];
+        let init = &job.init[part];
+        let mut c = mk();
+        queue::child_begin_with(init, &mut c);
+        // first-use initializations go into the parent's upload buffer, in the order they are made (audit H1)
+        let own_pre = queue::share_pre(init, &mut c);
+        let mut wq = s.entry;
+        wq.seg = true;
+        wq.seg_rc = s.rc;
+        wq.seg_mem = s.mem;
+        // SAFETY: the streams outlive the job (`run` / `run_parts` wait until no thread is inside it)
+        let st = &job.streams[part].0;
+        let stream = unsafe { std::slice::from_raw_parts(st.0, st.1) };
+        job.run.enter(k);
+        let t = std::time::Instant::now();
+        let draws = translate_segment(job.g, &mut c, &mut wq, stream, s.start, s.end);
+        seg_stats::LANE_NS.fetch_add(t.elapsed().as_nanos() as u64, Relaxed);
+        job.run.leave(k);
+        queue::unshare_pre(&mut c, own_pre);
+        if job.end_own && !replay {
+            queue::child_end(job.g, &mut c);
+        }
+        *job.out[k].lock().unwrap() = Some(Own((c, wq, draws)));
+        let _p = job.put.lock().unwrap();
+        job.put_cv.notify_all();
+        true
     }
 
     /// Translates `segs` in parallel and joins them into `sub`; returns the queue's state after the last one.
@@ -9957,12 +10155,16 @@ mod par {
             .collect();
         let job = Arc::new(Job {
             g,
-            stream: Own((stream.as_ptr(), stream.len())),
+            streams: vec![Own((stream.as_ptr(), stream.len()))],
+            part_of: vec![0; n],
             segs: segs.into_iter().map(|s| Mutex::new(Some(Own(s)))).collect(),
             out: (0..n).map(|_| Mutex::new(None)).collect(),
             next: AtomicUsize::new(0),
-            init: queue::child_init(sub),
+            init: vec![queue::child_init(sub)],
             run: gate::Run::new(n),
+            end_own: false,
+            put: Mutex::new(()),
+            put_cv: Condvar::new(),
             busy: Mutex::new(0),
             idle: Condvar::new(),
             t0: std::time::Instant::now(),
@@ -10008,7 +10210,7 @@ mod par {
                 seg_stats::REDO.fetch_add(1, Relaxed);
                 sub.dropped.push(c);
                 let mut c = child();
-                queue::child_begin_with(&job.init, &mut c);
+                queue::child_begin_with(&job.init[0], &mut c);
                 let mut wq = s.entry;
                 wq.seg = true;
                 wq.seg_rc = s.rc;
@@ -10039,8 +10241,212 @@ mod par {
             queue::child_join(sub, c);
             last = Some(wq);
         }
-        queue::child_settle(sub, &job.init);
+        queue::child_settle(sub, &job.init[0]);
         last.expect("a parallel run has segments")
+    }
+
+    /// (MKW-AHEAD) What `run_parts` asks of its caller: replay-thread child submissions, and each part once its
+    /// segments are joined (in part order; the parts after it may still be translating on the lanes).
+    pub trait PartHost {
+        fn child(&mut self) -> Sub;
+        fn done(&mut self, part: usize, sub: Sub, exit: QState);
+    }
+
+    /// (MKW-AHEAD) Translates the segments of several parts of a chain at once, one gate run over all of them in
+    /// chain order (`parts`: each part's stream and planned segments; `subs`: each part's submission, made before),
+    /// and hands each part to `host.done` as soon as it and every part before it are joined: the caller submits it
+    /// while later parts are still translated. The lanes end their children's command buffers themselves (`end_own`).
+    /// The first segment whose parallel result does not stand stops the parallel run: the lanes finish what they
+    /// took, and from there every segment is translated on the replay thread, in order, as `run`'s join does.
+    pub(super) fn run_parts(
+        g: &'static Gpu,
+        parts: Vec<(&[u8], Vec<Segment>)>,
+        mut subs: Vec<Sub>,
+        host: &mut dyn PartHost,
+    ) {
+        start(translate_lanes());
+        let _ = zero_buffer(g, &mut subs[0]);
+        if DUMMY.lock().unwrap().is_none() {
+            let _ = dummy_view(g, &mut subs[0], target::T2D, false);
+        }
+        let np = parts.len();
+        let mut streams = Vec::with_capacity(np);
+        let mut part_of = Vec::new();
+        let mut segs = Vec::new();
+        // each part's segments [first, end) in the job
+        let mut ends = Vec::with_capacity(np);
+        for (j, (stream, ss)) in parts.into_iter().enumerate() {
+            streams.push(Own((stream.as_ptr(), stream.len())));
+            for s in ss {
+                part_of.push(j);
+                segs.push(s);
+            }
+            ends.push(segs.len());
+        }
+        let n = segs.len();
+        let mut again: Vec<Option<Segment>> = segs
+            .iter()
+            .map(|s| {
+                Some(Segment {
+                    start: s.start,
+                    end: s.end,
+                    entry: s.entry.fork_state(),
+                    rc: s.rc.clone(),
+                    mem: s.mem.clone(),
+                })
+            })
+            .collect();
+        let job = Arc::new(Job {
+            g,
+            streams,
+            run: gate::Run::with_parts(part_of.clone()),
+            part_of,
+            segs: segs.into_iter().map(|s| Mutex::new(Some(Own(s)))).collect(),
+            out: (0..n).map(|_| Mutex::new(None)).collect(),
+            next: AtomicUsize::new(0),
+            init: subs.iter().map(queue::child_init).collect(),
+            end_own: true,
+            put: Mutex::new(()),
+            put_cv: Condvar::new(),
+            busy: Mutex::new(0),
+            idle: Condvar::new(),
+            t0: std::time::Instant::now(),
+        });
+        if n > 0 {
+            let mut p = POOL.lock().unwrap();
+            p.gen += 1;
+            p.job = Some(job.clone());
+        }
+        WAKE.notify_all();
+        let stop_lanes = |job: &Arc<Job>| {
+            POOL.lock().unwrap().job = None;
+            job.next.store(n, Relaxed);
+            let mut b = job.busy.lock().unwrap();
+            while *b > 0 {
+                b = job.idle.wait(b).unwrap();
+            }
+        };
+        let mut subs: Vec<Option<Sub>> = subs.into_iter().map(Some).collect();
+        let mut last: Vec<Option<QState>> = (0..np).map(|_| None).collect();
+        let mut later = 0u64;
+        let mut serial = false;
+        let (mut k, mut j) = (0usize, 0usize);
+        loop {
+            // parts whose segments are all joined go to the caller, in order
+            while j < np && k >= ends[j] {
+                let mut sub = subs[j].take().unwrap();
+                queue::child_settle(&mut sub, &job.init[j]);
+                let mut exit = match last[j].take() {
+                    Some(q) => q,
+                    // a part without segments (nothing before its park): its entry state
+                    None => job_entry(&again, j, &ends).unwrap_or_else(|| QState::new(true)),
+                };
+                exit.seg = false;
+                exit.seg_rc.clear();
+                host.done(j, sub, exit);
+                j += 1;
+            }
+            if k >= n {
+                break;
+            }
+            let j_k = job.part_of[k];
+            let got = if serial {
+                None
+            } else {
+                job.out[k].lock().unwrap().take()
+            };
+            let (c, wq) = match got {
+                Some(Own((c, wq, draws))) => {
+                    seg_stats::LARGEST.fetch_max(draws, Relaxed);
+                    if job.run.stands(k, &mut later) {
+                        again[k] = None;
+                        (c, wq)
+                    } else {
+                        // stop the parallel run here; this segment and every later one in order on this thread
+                        stop_lanes(&job);
+                        serial = true;
+                        subs[j_k].as_mut().unwrap().dropped.push(c);
+                        redo_one(g, &job, &mut again, k, host, &mut later)
+                    }
+                }
+                None if serial => {
+                    // a later parallel result (made before the stop) or a segment no lane took
+                    match job.out[k].lock().unwrap().take() {
+                        Some(Own((c, wq, _))) if job.run.stands(k, &mut later) => {
+                            again[k] = None;
+                            (c, wq)
+                        }
+                        Some(Own((c, _, _))) => {
+                            subs[j_k].as_mut().unwrap().dropped.push(c);
+                            redo_one(g, &job, &mut again, k, host, &mut later)
+                        }
+                        None => redo_one(g, &job, &mut again, k, host, &mut later),
+                    }
+                }
+                None => {
+                    // not ready: translate one more segment here, or wait for it
+                    if !take_one(
+                        &job,
+                        &mut || {
+                            let _l = gate::pre_pool_lock();
+                            host.child()
+                        },
+                        true,
+                    ) {
+                        let mut p = job.put.lock().unwrap();
+                        while job.out[k].lock().unwrap().is_none() {
+                            p = job.put_cv.wait(p).unwrap();
+                        }
+                    }
+                    continue;
+                }
+            };
+            queue::child_join(subs[j_k].as_mut().unwrap(), c);
+            last[j_k] = Some(wq);
+            k += 1;
+        }
+        if !serial {
+            stop_lanes(&job);
+        }
+    }
+
+    /// The entry state of part `j`'s first segment, if it has one (`run_parts`).
+    fn job_entry(again: &[Option<Segment>], j: usize, ends: &[usize]) -> Option<QState> {
+        let first = if j == 0 { 0 } else { ends[j - 1] };
+        (first < ends[j]).then(|| again[first].as_ref().map(|s| s.entry.fork_state())).flatten()
+    }
+
+    /// Segment `k` of a `run_parts` job translated on the replay thread from its entry state, after the lanes stopped.
+    fn redo_one(
+        g: &'static Gpu,
+        job: &Job,
+        again: &mut [Option<Segment>],
+        k: usize,
+        host: &mut dyn PartHost,
+        later: &mut u64,
+    ) -> (Sub, QState) {
+        use std::sync::atomic::Ordering::Relaxed;
+        seg_stats::REDO.fetch_add(1, Relaxed);
+        let s = again[k].take().unwrap();
+        let part = job.part_of[k];
+        let mut c = host.child();
+        queue::child_begin_with(&job.init[part], &mut c);
+        let mut wq = s.entry;
+        wq.seg = true;
+        wq.seg_rc = s.rc;
+        wq.seg_mem = s.mem;
+        let st = &job.streams[part].0;
+        // SAFETY: as in `take_one`
+        let stream = unsafe { std::slice::from_raw_parts(st.0, st.1) };
+        let before = gate::changes();
+        job.run.redo(Some(k));
+        translate_segment(g, &mut c, &mut wq, stream, s.start, s.end);
+        job.run.redo(None);
+        if gate::changes() != before {
+            *later = u64::MAX;
+            job.run.changed_at_join();
+        }
+        (c, wq)
     }
 }
 
@@ -10380,13 +10786,16 @@ fn set_rt_state(qs: &mut QState, rec: &[u8]) {
 /// stream pass on it), a fence sync's value, a counter report's note (later render conditions read it). They run in
 /// stream order: by `record_op` on the serial path, by the stream's pre-pass when it is translated in segments.
 fn global_op(g: &Gpu, opc: u32, rec: &[u8]) {
+    // the timeline value of the submission that will hold the record: the next one, or (a part planned ahead,
+    // `ahead_plan`) the one that many submissions later
+    let next = g.q.last_fence() + 1 + AHEAD_FENCES.with(|c| c.get());
     match opc {
         op::SIGNAL_EVENT => {
             let (addr, mode, value): (u64, u32, u32) =
                 unsafe { (rd_at(rec, 0), rd_at(rec, 8), rd_at(rec, 12)) };
             let mut ps = g.q.pending_signals.lock().unwrap();
             if mode == event_signal::WRITE {
-                ps.insert(addr, (mode, value, g.q.last_fence() + 1));
+                ps.insert(addr, (mode, value, next));
             } else {
                 ps.remove(&addr);
             }
@@ -10397,7 +10806,7 @@ fn global_op(g: &Gpu, opc: u32, rec: &[u8]) {
                 let so = s as *mut sync_t;
                 unsafe {
                     (*so).fenced = 1;
-                    (*so).fence = g.q.last_fence() + 1;
+                    (*so).fence = next;
                 }
             }
         }

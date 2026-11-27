@@ -59,6 +59,8 @@ pub struct Run {
     /// `St::epoch`, readable without its lock: a view kept at an older epoch is not used (a change of shared state
     /// since may have changed what the lookup finds)
     epoch_now: AtomicU64,
+    /// (MKW-AHEAD) each segment's part, in a run over several (`with_parts`); empty: one submission
+    parts: Vec<usize>,
 }
 
 /// `NXGFX_VIEW_SHARE=1`: later segments reuse views earlier segments looked up. Off by default (lead, 2026-11-26):
@@ -173,6 +175,8 @@ pub static TAKEN_LATER: AtomicU64 = AtomicU64::new(0);
 /// Gate statistics, per frame in the `[vk] translate` line.
 pub static ASKED: AtomicU64 = AtomicU64::new(0);
 pub static GAVE_UP: AtomicU64 = AtomicU64::new(0);
+/// (MKW-AHEAD) segments of a later part that gave up at a first-use initialization (`pass_pre`)
+pub static PRE_GAVE_UP: AtomicU64 = AtomicU64::new(0);
 
 /// `NXGFX_TRANSLATE_GATE=all`: every gated call counts as a change (correctness reference for A/B runs).
 pub fn all() -> bool {
@@ -238,12 +242,22 @@ pub fn sites() -> String {
 /// caller after this), in the order they are made, and it runs before all of the submission's main buffers, as the
 /// serial path's single one does, so any segment may make it. Gated as `pass` only in the reference mode
 /// (`NXGFX_TRANSLATE_GATE=all`).
+///
+/// (MKW-AHEAD) In a run over several parts of a chain, each part a submission of its own (`Run::with_parts`), a part's
+/// upload buffer runs before its own main buffers only, after the parts before it: such a change is made only by a
+/// segment of the oldest part still being translated (the frontier's); a segment of a later part gives up.
 #[track_caller]
 pub fn pass_pre(need: bool) -> bool {
     if all() {
         return pass(need);
     }
-    true
+    let (r, k) = CTX.with(|c| c.get());
+    if r.is_null() {
+        return true;
+    }
+    // SAFETY: as in `pass`
+    let run = unsafe { &*r };
+    run.pre_ok(k)
 }
 
 /// The upload buffer every segment of a parallel run records into (audit H1). The first-use initializations depend on
@@ -345,7 +359,38 @@ impl Run {
             takeovers: Mutex::new(Default::default()),
             views: Mutex::new(Default::default()),
             epoch_now: AtomicU64::new(0),
+            parts: Vec::new(),
         }
+    }
+
+    /// (MKW-AHEAD) A run over the segments of several parts, each submitted on its own: `parts[k]` is segment `k`'s.
+    pub fn with_parts(parts: Vec<usize>) -> Run {
+        let mut r = Run::new(parts.len());
+        r.parts = parts;
+        r
+    }
+
+    /// `pass_pre` for segment `k`: always in a one-submission run; in a run over parts, only for a segment of the
+    /// frontier's part (else it gives up, as `ask`).
+    fn pre_ok(&self, k: usize) -> bool {
+        if self.parts.is_empty() {
+            return true;
+        }
+        let mut st = self.st.lock().unwrap();
+        let f = st.frontier.min(self.parts.len() - 1);
+        if self.parts[k] <= self.parts[f] && st.seg[k].state != 3 {
+            return true;
+        }
+        PRE_GAVE_UP.fetch_add(1, Relaxed);
+        if st.seg[k].state == 3 {
+            return false;
+        }
+        st.seg[k].state = 3;
+        drop(st);
+        GIVEN_UP.with(|c| c.set(true));
+        crate::log::mute(true);
+        GAVE_UP.fetch_add(1, Relaxed);
+        false
     }
 
     /// This thread translates segment `k` again at the join, in order (`taken_later` knows its place); `None` ends it.

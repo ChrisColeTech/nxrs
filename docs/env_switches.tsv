@@ -4,7 +4,8 @@ NXGFX_ADDR_REPORT	diagnostic	VK_EXT_device_address_binding_report (`NXGFX_ADDR_R
 NXGFX_ALIAS	switch	`0` gives every texture an image of its own instead of aliasing images over the same storage of the same shape	src/graphics/src/vk/image.rs
 NXGFX_ALPHA_TEST	switch	The alpha test applied in the pixel shader (`NXGFX_ALPHA_TEST=0` off).	src/graphics/src/lib.rs
 NXGFX_APPEND_RESET	switch	frame begins. Records written by dispatches or by the CPU are not touched. `NXGFX_APPEND_RESET=0` turns it off.	src/graphics/src/vk/exec.rs
-NXGFX_AQ_MERGE	switch	NXGFX_AQ_MERGE=0: one submission each.	src/graphics/src/vk/queue.rs
+NXGFX_AHEAD	switch	MKW-AHEAD: `1`: the parked queues a chain runs on (`NXGFX_PARK_CHAIN`) are planned in queue order first (segments and ordered global effects, their signals and fences named with the timeline values of the submissions they will be in), then all their segments are translated at once on the lanes through one gate run and each part is submitted in order as soon as its segments are joined. Off by default (`0` or unset: one part after another)	src/graphics/src/vk/queue.rs
+NXGFX_AQ_MERGE	switchNXGFX_AQ_MERGE=0: one submission each.	src/graphics/src/vk/queue.rs
 NXGFX_ASTC	switch	`rgba8` keeps every ASTC texture as RGBA8 (no BC7 re-encode of the 256x256 and larger ones)	src/graphics/src/vk/image.rs
 NXGFX_ASTC_CACHE	switch	big enough that a read beats an encode (`MIN_BYTES`). `NXGFX_ASTC_CACHE=0` off, `NXGFX_ASTC_CACHE_MB` the most the	src/graphics/src/tex/astc_cache.rs
 NXGFX_ASTC_CACHE_MB	switch	big enough that a read beats an encode (`MIN_BYTES`). `NXGFX_ASTC_CACHE=0` off, `NXGFX_ASTC_CACHE_MB` the most the	src/graphics/src/tex/astc_cache.rs
@@ -160,7 +161,8 @@ NXGFX_TEST_SDK	test	NXGFX_TEST_SDK=<a Switch 2 game's exefs/sdk>	src/graphics/te
 NXGFX_TEST_SHADERS	test	memory budget. Uses `NXGFX_TEST_SHADERS` (default: the workspace's `build/shaders/mk8d`); skipped when absent.	src/graphics/tests/shaders_lane_c.rs
 NXGFX_TEX_CAP	switch	textures in the shared descriptor table at most (default 262144, within the device limit)	src/graphics/src/vk/layout.rs
 NXGFX_TEX_WB	switch	are the storage's bytes: true for every format let through here). `NXGFX_TEX_WB=1` on (off by default: `K2-mkw16`'s race washed out with it).	src/graphics/src/vk/exec.rs, src/graphics/tests/gpu.rs
-NXGFX_TRANSLATE_CHECK	diagnostic	`NXGFX_TRANSLATE_CHECK=1`: each segment's pre-pass entry state is compared with the state the segment before it left; differences logged	src/graphics/src/vk/exec.rs
+NXGFX_TRANSLATE_BALANCE	switch	MKW-AHEAD: a stream translated in parallel is cut into about one segment per lane, of equal draws (its draws up to its first wait that parks, over the lanes; at least 32, at most `NXGFX_TRANSLATE_SEG`), instead of fixed-size segments. Default on; `0`: fixed sizes as before	src/graphics/src/vk/exec.rs
+NXGFX_TRANSLATE_CHECK	diagnostic`NXGFX_TRANSLATE_CHECK=1`: each segment's pre-pass entry state is compared with the state the segment before it left; differences logged	src/graphics/src/vk/exec.rs
 NXGFX_TRANSLATE_GATE	diagnostic	`NXGFX_TRANSLATE_GATE=all`: every gated change of shared state in a parallel translation counts as order-dependent (reference mode for A/B runs)	src/graphics/src/vk/gate.rs
 NXGFX_TRANSLATE_MIDCUT	switch	a segment is also cut before a draw inside a pass once it holds this many draws (default 256; 0: only where the pass ends anyway)	src/graphics/src/vk/exec.rs
 NXGFX_TRANSLATE_RARE_SPLIT	switch	`NXGFX_TRANSLATE_RARE_SPLIT=1`: a stream with a DLSS / downsample / depth-resolve record translates only the segments holding one serially, the runs between them in parallel (default off: the whole stream one segment after another on the replay thread)	src/graphics/src/vk/exec.rs
