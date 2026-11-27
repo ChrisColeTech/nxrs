@@ -28,6 +28,41 @@ let lastPresent = 0;
 const logged = new Map();
 
 const say = (text, red) => postMessage({ log: text, red });
+
+// ?subtrace=1 (WEB-WPAGE, development): one line per submission (its draws, the largest, the pipelines and their
+// draw counts) sent to the dev server's log every 250 ms from this worker, so a GPU hang's submission is named even
+// if the page never gets to report it; at a lost device the last ones again with their modules and any loop shader
+let subTrace = false;
+let subN = 0;
+const subLines = [];
+const subLast = [];
+const pipeMods = new Map(); // pipeline id -> [vertex or compute module, fragment module]
+const loopCode = new Map(); // module id -> WGSL with a loop (subtrace only)
+const logUrl = () => new URL('log', self.location.href).href;
+function postTrace() {
+  if (!subLines.length) return;
+  const body = subLines.splice(0).join('\n') + '\n';
+  fetch(logUrl(), { method: 'POST', body, keepalive: true }).catch(() => {});
+}
+function traceSubmit(t) {
+  if (!subTrace) return;
+  subN++;
+  const pipes = [...t.pipes].map(([id, n]) => `${id}x${n}`).join(' ');
+  const line = `[nxrs] [gpu] sub ${subN}: ${t.draws} draws (${t.indirect} indirect, ${t.dispatches} dispatches), largest ${t.largest}, pipelines ${pipes}`;
+  subLines.push(line);
+  subLast.push(t);
+  if (subLast.length > 6) subLast.shift();
+}
+function traceLost() {
+  if (!subTrace) return;
+  const mods = new Set();
+  for (const t of subLast) for (const id of t.pipes.keys()) for (const m of pipeMods.get(id) || []) if (m) mods.add(m);
+  subLines.push(`[nxrs] [gpu] lost after sub ${subN}; modules of the last ${subLast.length} submissions: ${[...mods].join(' ')}`);
+  for (const m of mods) {
+    if (loopCode.has(m)) subLines.push(`[nxrs] [gpu] module ${m} (has a loop):\n${loopCode.get(m)}`);
+  }
+  postTrace();
+}
 const once = (key, text) => {
   const n = (logged.get(key) || 0) + 1;
   logged.set(key, n);
@@ -52,6 +87,8 @@ onmessage = async (e) => {
   memory = m.memory;
   ringAddr = m.ring;
   shotEvery = m.shotEvery | 0;
+  subTrace = !!m.subTrace;
+  if (subTrace) setInterval(postTrace, 250);
   H = new Int32Array(memory.buffer, ringAddr, 64);
   DATA = H[H_DATA_SIZE];
   dataBase = ringAddr + 256;
@@ -79,6 +116,8 @@ onmessage = async (e) => {
     device = await adapter.requestDevice({ requiredFeatures: features, requiredLimits: lim });
     device.lost.then((i) => {
       say(`device lost: ${i.reason} ${i.message}`, true);
+      traceLost();
+      postMessage({ fatal: `the GPU device was lost (${i.reason || 'unknown'}): reload the page to start again` });
       Atomics.store(H, H_STATE, 2);
       Atomics.notify(H, H_STATE);
       Atomics.notify(H, H_GEN);
@@ -114,6 +153,7 @@ onmessage = async (e) => {
     Atomics.notify(H, H_STATE);
   } catch (err) {
     say('no WebGPU device: ' + err, true);
+    postMessage({ fatal: 'no WebGPU device: ' + err });
     Atomics.store(H, H_STATE, 2);
     Atomics.notify(H, H_STATE);
     return;
@@ -211,6 +251,7 @@ function run(op, p, len) {
       const j = JSON.parse(text(p, len));
       const m = device.createShaderModule({ code: j.code });
       objs.set(j.id, m);
+      if (subTrace && /\bloop\b/.test(j.code)) loopCode.set(j.id, j.code);
       m.getCompilationInfo().then((ci) => {
         for (const msg of ci.messages) {
           if (msg.type === 'error') once('shader' + j.id, `shader ${j.id}: ${msg.lineNum}:${msg.linePos} ${msg.message}`);
@@ -239,6 +280,7 @@ function run(op, p, len) {
       if (j.fragment) d.fragment = { module: objs.get(j.fragment.module), entryPoint: j.fragment.entryPoint, targets: j.fragment.targets };
       if (j.depthStencil) d.depthStencil = j.depthStencil;
       if (d.primitive.unclippedDepth && !device.features.has('depth-clip-control')) delete d.primitive.unclippedDepth;
+      pipeMods.set(j.id, [j.vertex.module, j.fragment ? j.fragment.module : 0]);
       device.pushErrorScope('validation');
       objs.set(j.id, device.createRenderPipeline(d));
       device.popErrorScope().then((er) => {
@@ -249,6 +291,7 @@ function run(op, p, len) {
     case OP.CPIPE: {
       const j = JSON.parse(text(p, len));
       device.pushErrorScope('validation');
+      pipeMods.set(j.id, [j.module, 0]);
       objs.set(j.id, device.createComputePipeline({ layout: objs.get(j.layout), compute: { module: objs.get(j.module), entryPoint: j.entry } }));
       device.popErrorScope().then((er) => {
         if (er) once('cpipe' + er.message.slice(0, 60), `compute pipeline ${j.id}: ${er.message.slice(0, 900)}`);
@@ -361,8 +404,22 @@ function submit(p0, len) {
   const readbacks = [];
   const signals = [];
   const temps = [];
+  // ?subtrace=1: what this submission draws (traceSubmit)
+  let tr = { draws: 0, indirect: 0, dispatches: 0, largest: 0, pipes: new Map() }, curPipe = 0;
+  const drew = (count) => {
+    if (!subTrace) return;
+    tr.draws++;
+    if (count < 0) tr.indirect++;
+    else if (count > tr.largest) tr.largest = count;
+    tr.pipes.set(curPipe, (tr.pipes.get(curPipe) || 0) + 1);
+  };
+  const traced = () => {
+    traceSubmit(tr);
+    tr = { draws: 0, indirect: 0, dispatches: 0, largest: 0, pipes: new Map() };
+  };
   const flush = () => {
     if (used) {
+      traced();
       device.queue.submit([enc.finish()]);
       enc = device.createCommandEncoder();
       used = false;
@@ -454,7 +511,8 @@ function submit(p0, len) {
           cpass = null;
           break;
         case OP.SET_PIPELINE:
-          (pass || cpass).setPipeline(objs.get(u32(a)));
+          curPipe = u32(a);
+          (pass || cpass).setPipeline(objs.get(curPipe));
           break;
         case OP.SET_BIND_GROUP: {
           const idx = u32(a), bg = objs.get(u32(a + 4)), nd = u32(a + 8);
@@ -482,19 +540,24 @@ function submit(p0, len) {
           pass.setStencilReference(u32(a));
           break;
         case OP.DRAW:
+          drew(u32(a) * u32(a + 4));
           pass.draw(u32(a), u32(a + 4), u32(a + 8), u32(a + 12));
           break;
         case OP.DRAW_INDEXED:
+          drew(u32(a) * u32(a + 4));
           pass.drawIndexed(u32(a), u32(a + 4), u32(a + 8), i32(a + 12), u32(a + 16));
           break;
         case OP.DRAW_INDIRECT:
+          drew(-1);
           if (u32(a + 12)) pass.drawIndexedIndirect(objs.get(u32(a)), u64(a + 4));
           else pass.drawIndirect(objs.get(u32(a)), u64(a + 4));
           break;
         case OP.DISPATCH:
+          if (subTrace) { tr.dispatches++; tr.pipes.set(curPipe, (tr.pipes.get(curPipe) || 0) + 1); }
           cpass.dispatchWorkgroups(u32(a), u32(a + 4), u32(a + 8));
           break;
         case OP.DISPATCH_INDIRECT:
+          if (subTrace) { tr.dispatches++; tr.pipes.set(curPipe, (tr.pipes.get(curPipe) || 0) + 1); }
           cpass.dispatchWorkgroupsIndirect(objs.get(u32(a)), u64(a + 4));
           break;
         case OP.COPY_B2B: {
@@ -637,6 +700,7 @@ function submit(p0, len) {
     used = true;
     maps.push([st, off - a0, n, dst]);
   }
+  traced();
   device.queue.submit([enc.finish()]);
   for (const t of temps) t.destroy();
   const exec = performance.now() - t0;
@@ -898,6 +962,7 @@ function present(texId) {
   frameTimes.push(now - lastPresent);
   lastPresent = now;
   const n = Atomics.add(H, H_PRESENTS, 1) + 1;
+  if (n === 1) postMessage({ first: 1 });
   if (shotEvery && n % shotEvery === 0) shot(t, ti, n);
   if (frameTimes.length >= 300) {
     const v = frameTimes.splice(0).sort((x, y) => x - y);

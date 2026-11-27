@@ -3,18 +3,22 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>nxrs</title>
+<title>Loading</title>
 <style>
   :root { color-scheme: dark; }
-  html, body { margin: 0; height: 100%; background: #0b0d10; color: #d8dde3; font: 13px/1.4 ui-monospace, Consolas, monospace; }
-  #status { padding: 8px 12px; border-bottom: 1px solid #222831; }
-  #log { margin: 0; padding: 8px 12px; height: calc(100% - 40px); overflow: auto; white-space: pre-wrap; }
-  .red { color: #ff6b6b; }
+  html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
+  /* the game: as large as the window allows at its own aspect (gpu.js sets the size), centred, black bars */
+  #screen { position: fixed; inset: 0; margin: auto; display: block; background: #000; }
+  /* what the player must see: loading, the click for sound, a failure; the engine's log is in the console */
+  #notice { position: fixed; left: 50%; bottom: 32px; transform: translateX(-50%); max-width: min(720px, calc(100% - 32px));
+    padding: 8px 14px; border-radius: 6px; background: rgba(16, 18, 22, 0.82); color: #e8ebef;
+    font: 14px/1.45 system-ui, "Segoe UI", sans-serif; text-align: center; pointer-events: none; z-index: 1; }
+  #notice:empty { display: none; }
+  #notice.error { top: 50%; bottom: auto; transform: translate(-50%, -50%); color: #ffb4b4; user-select: text; pointer-events: auto; }
 </style>
 </head>
 <body>
-<div id="status">starting</div>
-<pre id="log"></pre>
+<div id="notice">Loading</div>
 <script src="input.js"></script>
 <script src="saves.js"></script>
 <script src="gpu.js"></script>

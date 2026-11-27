@@ -173,6 +173,9 @@ struct Rs<'a> {
     ibuf: Option<(u64, u64, vk::IndexType)>,
     bound: Bound,
     last_uni: Option<([u8; 128], [u8; 16], u32, u32)>,
+    /// bind groups dropped from the cache while this submission was resolved: destroyed only after it is in the ring
+    /// (it may have bound them already; destroyed before it, its draws found no group: WEB-WPAGE)
+    retired: Vec<u32>,
 }
 
 fn h64(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
@@ -188,6 +191,7 @@ impl<'a> Rs<'a> {
             s: Pk::default(),
             uploads: Vec::new(),
             readbacks: Vec::new(),
+            retired: Vec::new(),
             uniforms: Vec::new(),
             pass: None,
             compute: false,
@@ -706,9 +710,7 @@ impl<'a> Rs<'a> {
             Some(&id) => id,
             None => {
                 if c.bg.len() > 50_000 {
-                    for (_, id) in c.bg.drain() {
-                        obj::destroy(id);
-                    }
+                    self.retired.extend(c.bg.drain().map(|(_, id)| id));
                 }
                 let id = obj::new_id();
                 ring::push(op::BINDGROUP, format!("{{\"id\":{id},\"layout\":{bgl},\"entries\":{ekey}}}").as_bytes());
@@ -1480,6 +1482,7 @@ fn submit_one(cbs: &[vk::CommandBuffer], signals: &[(u64, u64, u64)]) {
     let mut rbs = std::mem::take(&mut rs.readbacks);
     let mut uniforms = std::mem::take(&mut rs.uniforms);
     let body = std::mem::take(&mut rs.s);
+    let retired = std::mem::take(&mut rs.retired);
     drop(rs);
     drop(o);
     if uniforms.len() as u64 > obj::UNIFORM_RING_SIZE {
@@ -1512,6 +1515,9 @@ fn submit_one(cbs: &[vk::CommandBuffer], signals: &[(u64, u64, u64)]) {
         });
     }
     ring::push_parts(op::SUBMIT_BEGIN, &[&head.0, &body.0, &tail.0]);
+    for id in retired {
+        obj::destroy(id);
+    }
 }
 
 /// A semaphore's or fence's (done word, queued word).

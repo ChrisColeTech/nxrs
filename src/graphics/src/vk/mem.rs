@@ -2238,7 +2238,15 @@ fn resolve_in(
                 .by_base
                 .values()
                 .map(|p| {
-                    let plain = p.gran.is_none() && p.win == 0 && p.deferred.is_empty();
+                    // (web) a pool compared by use is never plain: each range's first use in a sync must reach
+                    // `web_sync` below, the only place the CPU's writes to it are found and uploaded (WEB-WPAGE: a
+                    // copy answering for the whole pool skipped them, the GPU drew from stale uniforms and the web
+                    // build's picture stood still on a splash screen while the game ran on)
+                    #[cfg(target_os = "emscripten")]
+                    let compared = p.snapshot.is_some() && web_by_use();
+                    #[cfg(not(target_os = "emscripten"))]
+                    let compared = false;
+                    let plain = p.gran.is_none() && p.win == 0 && p.deferred.is_empty() && !compared;
                     let (buf, off) = match &p.buf {
                         Some(b) if plain => (b.buf, p.buf_off),
                         _ => (vk::Buffer::null(), 0),
