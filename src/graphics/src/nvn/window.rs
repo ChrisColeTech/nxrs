@@ -84,8 +84,29 @@ pub fn sleep_until(deadline: u64) {
     }
 }
 
+static HELD: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// The game is paused by the host (the web page's in-game menu, WEB-W9): its next present waits until released, so
+/// its frame loop stops there and the last image presented stays on the screen.
+pub fn set_held(on: bool) {
+    HELD.store(on, std::sync::atomic::Ordering::Release);
+}
+
+fn wait_while_held() {
+    use std::sync::atomic::Ordering;
+    if !HELD.load(Ordering::Acquire) {
+        return;
+    }
+    super::blocking(|| {
+        while HELD.load(Ordering::Acquire) {
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+    });
+}
+
 /// nvnQueuePresentTexture.
 pub fn present(q: &queue_t, w: &mut win_t, idx: i32) {
+    wait_while_held();
     if idx < 0 || idx >= w.ntex || w.tex[idx as usize].is_null() {
         crate::log::red(&format!(
             "QueuePresentTexture: texture index {idx} of {}",

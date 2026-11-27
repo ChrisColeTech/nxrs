@@ -19,7 +19,7 @@ browser, or `nxrs --serve-web <folder>`, which serve the same folder the same wa
                     request is also kept beside the log as xlate-<key>.bin (a recorded input for the launcher's test)
 
 --live serves the page and its scripts (index.html, boot.js, input.js, saves.js, io-worker.js, audio-worklet.js,
-gpu.js, gpu-worker.js) from src/web beside this file instead of the build's copies, to try a JS change without
+gpu.js, gpu-worker.js, menu.js, menu.css) from src/web beside this file instead of the build's copies, to try a JS change without
 building again. A build from before W5 (no build.json) is served that way too.
 
 Every response carries COOP/COEP (shared memory and threads need a cross-origin isolated page). Binds 127.0.0.1 only.
@@ -38,8 +38,9 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 PAGE = {'index.html', 'boot.js', 'input.js', 'saves.js', 'io-worker.js', 'audio-worklet.js', 'gpu.js',
-        'gpu-worker.js'}
-TYPES = {'.wasm': 'application/wasm', '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json'}
+        'gpu-worker.js', 'menu.js', 'menu.css'}
+TYPES = {'.wasm': 'application/wasm', '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json',
+         '.css': 'text/css'}
 MAX_XLATE = 4 << 20
 XLATE_LOCK = threading.Lock()
 

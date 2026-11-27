@@ -1,12 +1,23 @@
-//! The page's keyboard and gamepads as player 1's controller (docs/35 W3).
+//! The page's keyboard and gamepads as player 1's controller (docs/35 W3), the page's in-game menu (WEB-W9) and its
+//! settings mailbox.
 //!
-//! The page (`src/web/input.js`) writes a published block of 32-bit words with Atomics: `[0]` sequence (bumped at
-//! every change), `[1]` focus (1 while the page is visible and focused; keys are released on blur), `[2..10)` 256 key
-//! bits by Windows virtual-key code, `[10]` gamepads connected (a bit each), then 4 gamepads of 8 words from `[16]`:
-//! `[0]` connected, `[1]` buttons (bit = the standard mapping's button index), `[2..6)` axes 0-3 scaled to ±32767;
-//! `[40..48)` key presses latched by the page until this side takes them (a press shorter than a tick counts).
+//! The page (`src/web/input.js`, `menu.js`) writes a published block of 32-bit words with Atomics: `[0]` sequence
+//! (bumped at every change), `[1]` focus (1 visible and focused, 2 visible behind another window, 3 hidden; keys are
+//! released when it is not 1), `[2..10)` 256 key bits by Windows virtual-key code, `[10]` gamepads connected (a bit
+//! each), `[11]` the in-game menu is open, then 4 gamepads of 8 words from `[16]`: `[0]` connected, `[1]` buttons
+//! (bit = the standard mapping's button index), `[2..6)` axes 0-3 scaled to ±32767; `[48..56)` key presses latched
+//! by the page until this side takes them (a press shorter than a tick counts).
+//!
+//! The settings mailbox follows at `[64]`: `[64]` a sequence lock (odd while the page writes), `[65]` the text's
+//! length in bytes, then up to `MAIL_BYTES` bytes from `[68]`: `key=value` lines (the engine's ini format), applied
+//! with `nxconfig::set` (the same listeners as a native hotkey), so a change in the menu applies live.
+//!
 //! The input thread reads it every tick: the keys through the native front's default keys (`front/src/keys.rs`, the
-//! F1 page's table), gamepad 0 by position like every other pad, into player 1's keyboard path.
+//! F1 page's table) with `key_map`'s changes, gamepad 0 by position through `button_layout` / `button_map`
+//! (`layout.rs`, as every native pad) with the `stick_deadzone` dead zone, into player 1's keyboard path. While the
+//! menu is open the game is paused: no input, the guest clock held, its next present waits (the last image stays).
+
+use super::layout;
 
 /// The native front's default keys (`front/src/keys.rs`): VK code to guest button bits (0..15), or the stick keys
 /// (40..47).
@@ -38,6 +49,85 @@ pub fn keymap(vk: u32) -> u64 {
     }
 }
 
+/// A `key_map` key name to its Windows virtual-key code.
+pub fn key_vk(name: &str) -> Option<u32> {
+    let b = name.as_bytes();
+    if b.len() == 1 && (b[0].is_ascii_lowercase() || b[0].is_ascii_digit()) {
+        return Some(b[0].to_ascii_uppercase() as u32);
+    }
+    if let Some(d) = name.strip_prefix("num") {
+        if let Ok(n) = d.parse::<u32>() {
+            return (n < 10).then_some(0x60 + n);
+        }
+    }
+    Some(match name {
+        "backspace" => 0x08,
+        "tab" => 0x09,
+        "enter" => 0x0D,
+        "shift" | "lshift" => 0xA0,
+        "rshift" => 0xA1,
+        "ctrl" | "lctrl" => 0xA2,
+        "rctrl" => 0xA3,
+        "alt" | "lalt" => 0xA4,
+        "ralt" => 0xA5,
+        "space" => 0x20,
+        "pageup" => 0x21,
+        "pagedown" => 0x22,
+        "end" => 0x23,
+        "home" => 0x24,
+        "left" => 0x25,
+        "up" => 0x26,
+        "right" => 0x27,
+        "down" => 0x28,
+        "insert" => 0x2D,
+        "delete" => 0x2E,
+        "semicolon" => 0xBA,
+        "equal" => 0xBB,
+        "comma" => 0xBC,
+        "minus" => 0xBD,
+        "period" => 0xBE,
+        "slash" => 0xBF,
+        "backquote" => 0xC0,
+        "bracketleft" => 0xDB,
+        "backslash" => 0xDC,
+        "bracketright" => 0xDD,
+        "quote" => 0xDE,
+        _ => return None,
+    })
+}
+
+/// A `key_map` guest name to its bits: a button (`layout::GUEST`), a stick direction (40..47), or none (0).
+pub fn guest_bits(name: &str) -> Option<u64> {
+    const STICK: [&str; 8] = [
+        "lsleft", "lsup", "lsright", "lsdown", "rsleft", "rsup", "rsright", "rsdown",
+    ];
+    if name == "none" {
+        return Some(0);
+    }
+    if let Some(i) = layout::GUEST.iter().position(|g| *g == name) {
+        return Some(1 << i);
+    }
+    STICK.iter().position(|s| *s == name).map(|i| 1 << (40 + i))
+}
+
+/// The keyboard's table (VK code to bits): the default keys with `key_map`'s `key:guest` changes; the count of
+/// entries not understood.
+pub fn key_table(map: &str) -> (Vec<u64>, u32) {
+    let mut t: Vec<u64> = (0..256).map(keymap).collect();
+    let mut bad = 0;
+    for tok in map.split([' ', ',', ';', '\t']).filter(|t| !t.is_empty()) {
+        let tok = tok.to_ascii_lowercase();
+        match tok
+            .split_once(':')
+            .and_then(|(k, g)| Some((key_vk(k)?, guest_bits(g)?)))
+        {
+            Some((vk, bits)) => t[vk as usize] = bits,
+            None => bad += 1,
+        }
+    }
+    (t, bad)
+}
+
 fn axis(b: u64, neg: u32, pos: u32) -> i32 {
     (if b >> pos & 1 != 0 { 32767 } else { 0 }) - (if b >> neg & 1 != 0 { 32767 } else { 0 })
 }
@@ -55,36 +145,42 @@ pub fn keys_state(held: u64) -> (u64, [i32; 4]) {
     )
 }
 
-/// The standard gamepad mapping's buttons by position to guest buttons (Switch positions: bottom B, right A, left Y,
-/// top X).
-pub fn pad_buttons(std_bits: u32) -> u64 {
-    const MAP: [u64; 16] = [
-        1 << 1,  // 0 bottom: B
-        1 << 0,  // 1 right: A
-        1 << 3,  // 2 left: Y
-        1 << 2,  // 3 top: X
-        1 << 6,  // 4 left bumper: L
-        1 << 7,  // 5 right bumper: R
-        1 << 8,  // 6 left trigger: ZL
-        1 << 9,  // 7 right trigger: ZR
-        1 << 11, // 8 back / view: Minus
-        1 << 10, // 9 start / menu: Plus
-        1 << 4,  // 10 left stick press
-        1 << 5,  // 11 right stick press
-        1 << 13, // 12 D-pad up
-        1 << 15, // 13 down
-        1 << 12, // 14 left
-        1 << 14, // 15 right
+/// The standard gamepad mapping's buttons to positions in the Switch bit order `layout.rs` takes (0 right, 1 bottom,
+/// 2 top, 3 left, stick clicks, L, R, ZL, ZR, Plus, Minus, D-pad left, up, right, down).
+pub fn pad_positions(std_bits: u32) -> u64 {
+    const POS: [u8; 16] = [
+        1,  // 0 bottom
+        0,  // 1 right
+        3,  // 2 left
+        2,  // 3 top
+        6,  // 4 left bumper: L
+        7,  // 5 right bumper: R
+        8,  // 6 left trigger: ZL
+        9,  // 7 right trigger: ZR
+        11, // 8 back / view: Minus
+        10, // 9 start / menu: Plus
+        4,  // 10 left stick press
+        5,  // 11 right stick press
+        13, // 12 D-pad up
+        15, // 13 down
+        12, // 14 left
+        14, // 15 right
     ];
     (0..16)
         .filter(|i| std_bits >> i & 1 != 0)
-        .fold(0, |b, i| b | MAP[i as usize])
+        .fold(0, |b, i| b | 1 << POS[i as usize])
 }
 
-/// The standard mapping's axes (x right, y down) to guest sticks (y up), with a 10% dead zone.
-pub fn pad_sticks(axes: [i32; 4]) -> [i32; 4] {
+/// The standard mapping's buttons to guest buttons through the player's layout and map.
+pub fn pad_buttons(map: &layout::PadMap, std_bits: u32) -> u64 {
+    layout::apply(map, pad_positions(std_bits))
+}
+
+/// The standard mapping's axes (x right, y down) to guest sticks (y up), with a dead zone of `dz_percent`.
+pub fn pad_sticks(axes: [i32; 4], dz_percent: i64) -> [i32; 4] {
+    let edge = (32767 * dz_percent.clamp(0, 30) / 100) as i32;
     let dz = |v: i32| {
-        if v.abs() < 3277 {
+        if v.abs() < edge.max(1) {
             0
         } else {
             v.clamp(-32767, 32767)
@@ -93,12 +189,25 @@ pub fn pad_sticks(axes: [i32; 4]) -> [i32; 4] {
     [dz(axes[0]), -dz(axes[1]), dz(axes[2]), -dz(axes[3])]
 }
 
+/// The settings mailbox's text to the pairs that differ from the current values.
+pub fn mail_changes(text: &str, current: impl Fn(&str) -> String) -> Vec<(String, String)> {
+    nxconfig::parse(text)
+        .into_iter()
+        .filter(|(k, v)| {
+            let k = nxconfig::options::canonical(k);
+            nxconfig::options::normalise(k, v).is_some_and(|n| n != current(k))
+        })
+        .collect()
+}
+
 #[cfg(target_os = "emscripten")]
 mod block {
     use std::sync::atomic::{AtomicU32, Ordering::*};
     use std::sync::{Mutex, OnceLock};
 
-    const WORDS: usize = 64;
+    const MAIL: usize = 64;
+    const MAIL_BYTES: usize = 4096;
+    const WORDS: usize = MAIL + 4 + MAIL_BYTES / 4;
 
     fn block() -> &'static [AtomicU32] {
         static B: OnceLock<&'static [AtomicU32]> = OnceLock::new();
@@ -107,48 +216,135 @@ mod block {
             // SAFETY: the block lives for the process
             unsafe { crate::web::nxweb_input_publish(b.as_ptr() as *const u32, WORDS as u32) };
             crate::log!(
-                "input: the page's keyboard and gamepads through the input block at {:#x}",
+                "input: the page's keyboard, gamepads, menu and settings through the input block at {:#x}",
                 b.as_ptr() as usize
             );
             b
         })
     }
 
+    /// The mailbox's text when the page wrote a new one since `last` (a consistent copy: the lock was even and
+    /// unchanged around it).
+    fn mail(b: &[AtomicU32], last: &mut u32) -> Option<String> {
+        let s1 = b[MAIL].load(Acquire);
+        if s1 == *last || s1 & 1 != 0 {
+            return None;
+        }
+        let n = (b[MAIL + 1].load(Acquire) as usize).min(MAIL_BYTES);
+        let mut bytes = Vec::with_capacity(n);
+        for i in 0..n {
+            let w = b[MAIL + 4 + i / 4].load(Relaxed);
+            bytes.push((w >> (8 * (i % 4))) as u8);
+        }
+        if b[MAIL].load(Acquire) != s1 {
+            return None;
+        }
+        *last = s1;
+        Some(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
+    struct Last {
+        seq: u32,
+        btn: u64,
+        axes: [i32; 4],
+        logged: u32,
+        mail: u32,
+        menu: bool,
+        focus: u32,
+        gen: u64,
+        keys: Vec<u64>,
+        dz: i64,
+    }
+
     /// One read of the block into player 1's keyboard path (the input thread's tick).
-    pub fn poll() {
-        static LAST: Mutex<(u32, u64, [i32; 4], u32)> = Mutex::new((u32::MAX, 0, [0; 4], 0));
+    pub fn poll(map: &crate::input::layout::PadMap) {
+        static LAST: Mutex<Option<Last>> = Mutex::new(None);
         let b = block();
-        let focus = b[1].load(Acquire) != 0;
-        crate::input::set_focus(focus);
+        let mut g = LAST.lock().unwrap_or_else(|e| e.into_inner());
+        let l = g.get_or_insert_with(|| Last {
+            seq: u32::MAX,
+            btn: 0,
+            axes: [0; 4],
+            logged: 0,
+            mail: 0,
+            menu: false,
+            focus: 0,
+            gen: 0,
+            keys: vec![],
+            dz: 10,
+        });
+        // the menu's settings, applied as a native hotkey would
+        if let Some(text) = mail(b, &mut l.mail) {
+            let changes = super::mail_changes(&text, nxconfig::string);
+            for (k, v) in &changes {
+                nxconfig::set(k, v);
+            }
+            if !changes.is_empty() {
+                let list: Vec<String> = changes.iter().map(|(k, v)| format!("{k}={v}")).collect();
+                crate::log!("settings from the page: {}", list.join(" "));
+            }
+        }
+        let gen = nxconfig::generation();
+        let gen_changed = gen != l.gen;
+        if gen_changed {
+            l.gen = gen;
+            let (t, bad) = super::key_table(&nxconfig::string("key_map"));
+            if bad > 0 {
+                crate::log!("input: key_map: {bad} entries not understood (key:guest, e.g. space:b)");
+            }
+            l.keys = t;
+            l.dz = nxconfig::int("stick_deadzone");
+        }
+        // the focus as the game sees it (pause_on_focus_loss) and the sound (mute_on_focus_loss)
+        let focus = b[1].load(Acquire);
+        crate::input::set_focus(focus == 1);
+        if focus != l.focus || gen_changed {
+            l.focus = focus;
+            crate::services::oe::set_focus(if focus == 0 { 1 } else { focus as i32 });
+        }
+        // the menu pauses the game
+        let menu = b[11].load(Acquire) != 0;
+        if menu != l.menu {
+            l.menu = menu;
+            crate::clock::set_hold(menu);
+            nxgfx::nvn::window::set_held(menu);
+            crate::input::set_suspended(menu);
+            crate::log!(
+                "input: the page's menu {}",
+                if menu { "opened: the game is paused" } else { "closed: the game runs" }
+            );
+        }
         let mut held = 0u64;
         for w in 0..8usize {
             // held now, or pressed since the last read (a press shorter than a tick)
-            let bits = b[2 + w].load(Relaxed) | b[40 + w].swap(0, AcqRel);
+            let bits = b[2 + w].load(Relaxed) | b[48 + w].swap(0, AcqRel);
             for i in 0..32u32 {
                 if bits >> i & 1 != 0 {
-                    held |= super::keymap(w as u32 * 32 + i);
+                    held |= l.keys.get((w as u32 * 32 + i) as usize).copied().unwrap_or(0);
                 }
             }
         }
         let (mut btn, mut axes) = super::keys_state(held);
         if b[16].load(Relaxed) != 0 {
-            btn |= super::pad_buttons(b[17].load(Relaxed));
+            btn |= super::pad_buttons(map, b[17].load(Relaxed));
             let raw: [i32; 4] = std::array::from_fn(|i| b[18 + i].load(Relaxed) as i32);
-            let p = super::pad_sticks(raw);
+            let p = super::pad_sticks(raw, l.dz);
             for i in 0..4 {
                 axes[i] = crate::input::pick(axes[i], p[i]);
             }
         }
+        if menu {
+            (btn, axes) = (0, [0; 4]);
+        }
         crate::input::set_keyboard(btn, axes);
         let seq = b[0].load(Acquire);
-        let mut l = LAST.lock().unwrap_or_else(|e| e.into_inner());
-        if seq != l.0 && (btn, axes) != (l.1, l.2) && l.3 < 64 {
-            l.3 += 1;
+        if seq != l.seq && (btn, axes) != (l.btn, l.axes) && l.logged < 64 {
+            l.logged += 1;
             crate::log!("input: page keys/gamepad -> player 1 buttons {btn:#06x} sticks {axes:?} (focus {focus})");
         }
-        l.0 = seq;
-        l.1 = btn;
-        l.2 = axes;
+        l.seq = seq;
+        l.btn = btn;
+        l.axes = axes;
     }
 }
 #[cfg(target_os = "emscripten")]
@@ -163,14 +359,75 @@ mod tests {
         // Space + W + right arrow: A, left stick up, D-pad right
         let held = keymap(0x20) | keymap(0x57) | keymap(0x27);
         assert_eq!(keys_state(held), (1 | 1 << 14, [0, 32767, 0, 0]));
-        // standard bottom + right + start + D-pad down
+        // standard bottom + right + start + D-pad down, by position (the switch layout)
+        let sw = layout::build("switch", "").0;
         assert_eq!(
-            pad_buttons(1 | 1 << 1 | 1 << 9 | 1 << 13),
+            pad_buttons(&sw, 1 | 1 << 1 | 1 << 9 | 1 << 13),
             1 << 1 | 1 << 0 | 1 << 10 | 1 << 15
         );
         assert_eq!(
-            pad_sticks([1000, -32767, 32767, 40000]),
+            pad_sticks([1000, -32767, 32767, 40000], 10),
             [0, 32767, 32767, -32767]
+        );
+    }
+
+    /// The web pad goes through button_layout and button_map as every native pad does.
+    #[test]
+    fn pad_follows_button_layout_and_map() {
+        let xbox = layout::build("xbox", "").0;
+        assert_eq!(pad_buttons(&xbox, 1), 1, "bottom is A by the Xbox labels");
+        assert_eq!(pad_buttons(&xbox, 1 << 1), 1 << 1, "right is B");
+        assert_eq!(pad_buttons(&xbox, 1 << 2), 1 << 2, "left is X");
+        let swap = layout::build("switch", "south:a east:b l:zl").0;
+        assert_eq!(pad_buttons(&swap, 1), 1, "south (bottom) to A");
+        assert_eq!(pad_buttons(&swap, 1 << 1), 1 << 1, "east (right) to B");
+        assert_eq!(pad_buttons(&swap, 1 << 4), 1 << 8, "left bumper to ZL");
+    }
+
+    #[test]
+    fn dead_zone_follows_the_setting() {
+        assert_eq!(pad_sticks([5000, 0, 0, 0], 10), [5000, 0, 0, 0]);
+        assert_eq!(pad_sticks([5000, 0, 0, 0], 20), [0, 0, 0, 0]);
+        assert_eq!(pad_sticks([200, 0, 0, 0], 0), [200, 0, 0, 0]);
+        assert_eq!(pad_sticks([9000, 0, 0, 0], 99), [0, 0, 0, 0], "clamped to 30%");
+    }
+
+    /// key_map changes the default keys: a key to another button, a key off, a stick direction.
+    #[test]
+    fn key_map_changes_the_keys() {
+        let (t, bad) = key_table("space:b Z:none q:lsleft num4:rsdown f:zr nonsense x:what");
+        assert_eq!(bad, 2);
+        assert_eq!(t[0x20], 1 << 1, "space to B");
+        assert_eq!(t[0x5A], 0, "Z off");
+        assert_eq!(t[0x51], 1 << 40, "Q to the left stick's left");
+        assert_eq!(t[0x64], 1 << 47);
+        assert_eq!(t[0x46], 1 << 9);
+        assert_eq!(t[0x58], 1, "X keeps its default A");
+        let (d, _) = key_table("");
+        assert!((0..256).all(|vk| d[vk] == keymap(vk as u32)));
+        assert_eq!(key_vk("bracketleft"), Some(0xDB));
+        assert_eq!(key_vk("7"), Some(0x37));
+        assert_eq!(key_vk("num10"), None);
+    }
+
+    /// The mailbox applies only what differs, by the canonical key and its normalised value.
+    #[test]
+    fn mail_changes_only_what_differs() {
+        let cur = |k: &str| match k {
+            "resolution" => "1".to_string(),
+            "docked" => "1".to_string(),
+            _ => String::new(),
+        };
+        let c = mail_changes(
+            "[Display]\ndocked=1\n[Graphics]\nresolution=0.50\nresolucion=1\nkey_map=Space:B\nvsync=1\n",
+            cur,
+        );
+        assert_eq!(
+            c,
+            vec![
+                ("resolution".to_string(), "0.50".to_string()),
+                ("key_map".to_string(), "Space:B".to_string())
+            ]
         );
     }
 }

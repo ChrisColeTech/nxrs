@@ -63,6 +63,15 @@ pub unsafe extern "C" fn nxweb_main(
     count: i32,
 ) -> i32 {
     nxrt::process::claim_fixed_regions(mods, count);
+    // WEB-W9: the page's settings for this game (the browser keeps them; the page writes them here before main), in
+    // the engine's own ini format, read as a native run reads its <name>.ini
+    let ini = Path::new("/data/settings.ini");
+    if ini.is_file() {
+        let title = std::env::var("NXRS_TITLE").unwrap_or_else(|_| "Game".into());
+        if let Err(e) = nxconfig::open(ini, &title) {
+            eprintln!("[web] settings: {} not read: {e}", ini.display());
+        }
+    }
     nxos_main_with(argc, argv, mods, count, None)
 }
 

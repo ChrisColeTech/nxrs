@@ -38,6 +38,13 @@ unsafe fn vsync_event(c: *mut Cpu) {
                 let period = std::time::Duration::from_nanos(16_666_667);
                 let mut next = std::time::Instant::now() + period;
                 loop {
+                    // a held guest clock (the web's in-game menu): no vsync until it runs again
+                    if crate::clock::held() {
+                        while crate::clock::held() {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        next = std::time::Instant::now() + period;
+                    }
                     let now = std::time::Instant::now();
                     if next > now {
                         std::thread::sleep(next - now);

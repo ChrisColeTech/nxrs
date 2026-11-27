@@ -1,8 +1,13 @@
 // The page's keyboard and gamepads into the engine's input block (docs/35 W3; os/src/input/web.rs reads it).
-// Words: [0] sequence (bumped at every change), [1] focus, [2..10) 256 key bits by Windows virtual-key code, [10]
-// gamepads connected (a bit each), gamepad i at [16 + 8i]: [0] connected, [1] buttons (bit = standard mapping index),
-// [2..6) axes 0-3 scaled to ±32767; [40..48) key presses latched until the engine reads them. Keys are released when
-// the page loses the focus.
+// Words: [0] sequence (bumped at every change), [1] focus (1 visible and focused, 2 visible behind another window,
+// 3 hidden), [2..10) 256 key bits by Windows virtual-key code, [10] gamepads connected (a bit each), [11] the in-game
+// menu is open (WEB-W9: the engine pauses the game), gamepad i at [16 + 8i]: [0] connected, [1] buttons (bit =
+// standard mapping index), [2..6) axes 0-3 scaled to ±32767; [48..56) key presses latched until the engine reads
+// them. From [64] the settings mailbox (writeSettings). Keys are released when the page loses the focus.
+//
+// The menu (menu.js) opens with Esc, a gamepad's Home (standard button 16) or Minus + Plus held 1 s. While it is open
+// nothing reaches the game: keys go to the menu, the block's keys and pads are released, and a button still held when
+// it closes stays released until it is let go.
 'use strict';
 const NxrsInput = (() => {
   const VK = {
@@ -19,25 +24,59 @@ const NxrsInput = (() => {
   }
   // the browser's own keys pass through
   const PASS = new Set(['F5', 'F11', 'F12']);
+  const MAIL = 64;
+  const MAIL_BYTES = 4096;
+  const HOME = 16;
+  const MINUS = 8;
+  const PLUS = 9;
   let w = null;
+  let menuOpen = false;
+  let suppress = 0; // pad buttons held when the menu closed: released until let go
+  let comboSince = 0;
+  let homeWas = false;
+  let pendingMail = null;
   const pads = new Map(); // index -> last encoding (string)
+  const hooks = { open: () => {}, key: () => {} };
 
   function bump() {
     Atomics.add(w, 0, 1);
   }
+  function focusState() {
+    if (document.visibilityState !== 'visible') return 3;
+    return document.hasFocus() ? 1 : 2;
+  }
   function setFocus() {
     if (!w) return;
-    const f = document.hasFocus() && document.visibilityState === 'visible' ? 1 : 0;
+    const f = focusState();
     if (Atomics.exchange(w, 1, f) !== f) bump();
-    if (!f) releaseAll();
+    if (f !== 1) releaseAll();
   }
   function releaseAll() {
+    if (!w) return;
     let any = false;
     for (let i = 2; i < 10; i++) any = Atomics.exchange(w, i, 0) !== 0 || any;
     if (any) bump();
   }
+  function releasePads() {
+    for (let i = 0; i < 4; i++) {
+      const base = 16 + 8 * i;
+      for (let j = 1; j < 6; j++) Atomics.store(w, base + j, 0);
+    }
+    pads.clear();
+    bump();
+  }
   function key(e, down) {
-    if (!w || PASS.has(e.code) || e.ctrlKey && e.shiftKey) return;
+    if (PASS.has(e.code) || e.ctrlKey && e.shiftKey) return;
+    if (menuOpen) {
+      if (down) hooks.key(e);
+      return;
+    }
+    if (e.code === 'Escape') {
+      e.preventDefault();
+      if (down && !e.repeat) hooks.open();
+      return;
+    }
+    if (!w) return;
     const vk = VK[e.code];
     if (vk === undefined) return;
     e.preventDefault();
@@ -45,11 +84,35 @@ const NxrsInput = (() => {
     const bit = 1 << (vk & 31);
     const old = down ? Atomics.or(w, word, bit) : Atomics.and(w, word, ~bit);
     // a press latched until the engine reads it: one shorter than its 4 ms tick still reaches the game
-    if (down) Atomics.or(w, 40 + (vk >> 5), bit);
+    if (down) Atomics.or(w, 48 + (vk >> 5), bit);
     if (((old & bit) !== 0) !== down) bump();
   }
+  function padBits(g) {
+    let b = 0;
+    g.buttons.forEach((x, j) => { if (j < 32 && (x.pressed || x.value > 0.5)) b |= 1 << j; });
+    return b;
+  }
+  // the first connected gamepad (the menu reads it too)
+  function firstPad() {
+    const list = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const g of list) if (g && g.connected) return g;
+    return null;
+  }
+  function menuShortcut(b) {
+    const home = (b >> HOME & 1) !== 0;
+    const homePressed = home && !homeWas;
+    homeWas = home;
+    const combo = (b >> MINUS & 1) && (b >> PLUS & 1);
+    if (!combo) comboSince = 0;
+    else if (!comboSince) comboSince = performance.now();
+    if (homePressed || (comboSince && performance.now() - comboSince >= 1000)) {
+      comboSince = 0;
+      return true;
+    }
+    return false;
+  }
   function pollPads() {
-    if (w) {
+    if (w && !menuOpen) {
       const list = navigator.getGamepads ? navigator.getGamepads() : [];
       let mask = 0;
       for (let i = 0; i < 4; i++) {
@@ -58,8 +121,17 @@ const NxrsInput = (() => {
         let enc = '';
         if (g && g.connected) {
           mask |= 1 << i;
-          let b = 0;
-          g.buttons.forEach((x, j) => { if (j < 32 && (x.pressed || x.value > 0.5)) b |= 1 << j; });
+          let b = padBits(g);
+          if (i === 0 || !(mask & ((1 << i) - 1))) {
+            if (menuShortcut(b)) {
+              suppress = b;
+              hooks.open();
+              break;
+            }
+          }
+          suppress &= b;
+          b &= ~suppress;
+          b &= ~(1 << HOME);
           const ax = [0, 1, 2, 3].map((j) => Math.round((g.axes[j] || 0) * 32767));
           enc = b + ',' + ax.join(',');
           if (pads.get(i) !== enc) {
@@ -75,15 +147,50 @@ const NxrsInput = (() => {
           bump();
         }
       }
-      Atomics.store(w, 10, mask);
+      if (!menuOpen) Atomics.store(w, 10, mask);
     }
     requestAnimationFrame(pollPads);
+  }
+
+  // The settings mailbox: `text` (key=value lines) for the engine's next tick, under a sequence lock (odd while
+  // written). Before the engine published its block, kept and written when it does.
+  function writeSettings(text) {
+    if (!w) {
+      pendingMail = text;
+      return;
+    }
+    const bytes = new TextEncoder().encode(text).subarray(0, MAIL_BYTES);
+    Atomics.add(w, MAIL, 1);
+    Atomics.store(w, MAIL + 1, bytes.length);
+    for (let i = 0; i < bytes.length; i += 4) {
+      const v = bytes[i] | (bytes[i + 1] || 0) << 8 | (bytes[i + 2] || 0) << 16 | (bytes[i + 3] || 0) << 24;
+      Atomics.store(w, MAIL + 4 + (i >> 2), v);
+    }
+    Atomics.add(w, MAIL, 1);
+  }
+
+  // The menu opens (the game pauses: keys and pads released) or closes (buttons still held stay released).
+  function setMenu(open) {
+    menuOpen = open;
+    if (!w) return;
+    releaseAll();
+    if (open) releasePads();
+    else {
+      const g = firstPad();
+      suppress = g ? padBits(g) : 0;
+      homeWas = g ? (padBits(g) >> HOME & 1) !== 0 : false;
+    }
+    Atomics.store(w, 11, open ? 1 : 0);
+    bump();
   }
 
   // the engine published its block: from now on the page writes into it
   function publish(memory, block, words, log) {
     w = new Int32Array(memory.buffer, block, words);
     setFocus();
+    if (menuOpen) setMenu(true);
+    if (pendingMail !== null) writeSettings(pendingMail);
+    pendingMail = null;
     log(`[web] input: keyboard and gamepads into the engine's block at ${block}`);
   }
   addEventListener('keydown', (e) => key(e, true), true);
@@ -93,5 +200,16 @@ const NxrsInput = (() => {
   document.addEventListener('visibilitychange', setFocus);
   addEventListener('gamepadconnected', (e) => console.log(`[nxrs] [web] gamepad ${e.gamepad.index}: ${e.gamepad.id} (${e.gamepad.mapping || 'no standard mapping'})`));
   requestAnimationFrame(pollPads);
-  return { publish };
+  return {
+    publish,
+    setMenu,
+    writeSettings,
+    firstPad,
+    padBits,
+    // menu.js: what opens it and where its keys go while it is open
+    hook(open, keyHandler) {
+      hooks.open = open;
+      hooks.key = keyHandler;
+    },
+  };
 })();

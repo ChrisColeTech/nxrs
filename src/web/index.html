@@ -4,12 +4,13 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Loading</title>
+<link rel="stylesheet" href="menu.css">
 <style>
   :root { color-scheme: dark; }
   html, body { margin: 0; height: 100%; overflow: hidden; background: #000; }
   /* the game: as large as the window allows at its own aspect (gpu.js sets the size), centred, black bars */
   #screen { position: fixed; inset: 0; margin: auto; display: block; background: #000; }
-  /* what the player must see: loading, the click for sound, a failure; the engine's log is in the console */
+  /* what the player must see over the game: the click for sound, a failure; the engine's log is in the console */
   #notice { position: fixed; left: 50%; bottom: 32px; transform: translateX(-50%); max-width: min(720px, calc(100% - 32px));
     padding: 8px 14px; border-radius: 6px; background: rgba(16, 18, 22, 0.82); color: #e8ebef;
     font: 14px/1.45 system-ui, "Segoe UI", sans-serif; text-align: center; pointer-events: none; z-index: 1; }
@@ -18,10 +19,27 @@
 </style>
 </head>
 <body>
-<div id="notice">Loading</div>
+<div id="nx-loading">
+  <div class="lcard">
+    <div class="lhead"><div class="icon"></div><div><h1>Loading</h1><div class="sub"></div></div></div>
+    <div class="cap"><span>Starting</span><span class="val"></span></div>
+    <div class="big"><i></i></div>
+    <ul class="steps">
+      <li data-step="checks"><span class="dot"></span>Browser checked<span class="m"></span></li>
+      <li data-step="code"><span class="dot"></span>Game code<span class="m"></span></li>
+      <li data-step="compile"><span class="dot"></span>Game code compiled<span class="m"></span></li>
+      <li data-step="data"><span class="dot"></span>Game data<span class="m"></span></li>
+      <li data-step="saves"><span class="dot"></span>Saves<span class="m"></span></li>
+      <li data-step="start"><span class="dot"></span>Starting the game<span class="m"></span></li>
+    </ul>
+    <div class="error"></div>
+  </div>
+</div>
+<div id="notice"></div>
 <script src="input.js"></script>
 <script src="saves.js"></script>
 <script src="gpu.js"></script>
+<script src="menu.js"></script>
 <script src="boot.js"></script>
 </body>
 </html>
