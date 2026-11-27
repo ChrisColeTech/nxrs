@@ -10,11 +10,11 @@ pub const PLAY_TEXT: &str = "Native runs the Windows program the launcher built.
 pub const BUILD_TEXT: &str = "Native builds the Windows program into the game's build folder. Web \
                               builds the version that runs in Chrome into its web folder. Building \
                               one leaves the other as it is.";
-/// The two verbs: Native the filled one, last; Web the ghost one at the leading side.
+/// The two equal options, side by side in this order.
 pub const NATIVE: &str = "Native";
 pub const WEB: &str = "Web";
 
-/// Why a version cannot play or build now (a disabled verb's tooltip).
+/// Why a version cannot play or build now (its disabled button's tooltip).
 pub const NO_NATIVE_BUILD: &str = "No native build yet: build it first.";
 pub const NO_WEB_BUILD: &str = "No web build yet: build it for the web first.";
 pub const NO_BROWSER: &str = "No Chromium browser found: install Chrome.";

@@ -189,10 +189,11 @@ fn build_web_then_play_web() {
     assert_eq!(app.why_not("g", true, false), Some(t::UP_TO_DATE.into()));
     assert_eq!(app.why_not("g", false, true), Some(t::NO_WEB_BUILD.into()));
     app.dispatch(Action::Build);
-    let Some(Surface::Question { ask: q, .. }) = app.surfaces.pop() else {
+    let Some(Surface::Choices { options, .. }) = app.surfaces.pop() else {
         panic!("Build asks Native or Web")
     };
-    assert_eq!(q.lead.map(|l| l.action), Some(Action::BuildWeb));
+    let actions: Vec<Action> = options.into_iter().map(|o| o.action).collect();
+    assert_eq!(actions, [Action::BuildNative, Action::BuildWeb]);
     // the question's Web answer
     app.dispatch(Action::BuildWeb);
     app.wait_idle(std::time::Duration::from_secs(20));

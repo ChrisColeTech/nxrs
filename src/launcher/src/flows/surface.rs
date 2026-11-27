@@ -36,25 +36,13 @@ pub struct Check {
 }
 
 /// A question's words: the window's title, the heading (the question itself), the text under it
-/// (may be empty) and the verb of its one filled button ("Remove"); the X and Escape answer No.
-/// `why_not`: why the verb cannot answer now (its disabled button's tooltip); empty: it can.
-/// `lead`: a second verb, a ghost button at the footer's leading side (Play's and Build's Web).
+/// (may be empty) and the verb of its one button ("Remove"); the X and Escape answer No.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Ask {
     pub title: String,
     pub heading: String,
     pub text: String,
     pub verb: String,
-    pub why_not: String,
-    pub lead: Option<Box<Lead>>,
-}
-
-/// A question's leading verb: its label, what it answers, why it cannot now (empty: it can).
-#[derive(Clone, Debug, PartialEq)]
-pub struct Lead {
-    pub verb: String,
-    pub action: Action,
-    pub why_not: String,
 }
 
 impl Ask {
@@ -65,10 +53,17 @@ impl Ask {
             heading: own(heading),
             text: own(text),
             verb: own(verb),
-            why_not: String::new(),
-            lead: None,
         }
     }
+}
+
+/// One option of a Choices dialog: its button's label, what it runs, and why it cannot run now
+/// (its disabled button's tooltip; empty: it can).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    pub label: String,
+    pub action: Action,
+    pub why_not: String,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -88,6 +83,12 @@ pub enum Surface {
         default_no: bool,
         check: Option<Check>,
     },
+    /// Which of equal actions to take (Play's and Build's Native or Web; owner, 2026-11-27): the
+    /// question box's words (no verb) and one equal button per option; X and Escape dismiss.
+    Choices {
+        ask: Ask,
+        options: Vec<Choice>,
+    },
     Properties(Box<PropertiesDraft>),
     Settings(Box<SettingsDraft>),
     Dlc(ListWindow),
@@ -99,7 +100,9 @@ impl Surface {
     /// The child window's key (one native window per key).
     pub fn key(&self, at: usize) -> String {
         match self {
-            Surface::Message { .. } | Surface::Question { .. } => format!("message-{at}"),
+            Surface::Message { .. } | Surface::Question { .. } | Surface::Choices { .. } => {
+                format!("message-{at}")
+            }
             Surface::Properties(p) if p.adding => "add-game".into(),
             Surface::Properties(_) => "properties".into(),
             Surface::Settings(_) => "settings".into(),

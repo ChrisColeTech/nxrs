@@ -222,7 +222,7 @@ fn updates_window_chooses_and_builds() {
     // Build now closes the window and asks Native or Web, as every Build does
     let left = h.state().app.surfaces.clone();
     let native = Action::BuildNative;
-    assert!(matches!(&left[..], [Surface::Question { yes, .. }] if *yes == native));
+    assert!(matches!(&left[..], [Surface::Choices { options, .. }] if options[0].action == native));
     h.get_by_role_and_label(Role::Button, "Native").click();
     h.run_steps(3);
     assert!(h.state().app.surfaces.is_empty() && h.state().app.is_building("g"));

@@ -1,16 +1,17 @@
 //! Message and question boxes (`QMessageBox`) with the one body header every dialog has: the icon
 //! tile (`i`, `!` in the error red, `?`) and the heading, then the text (a question's tick box as its
 //! last paragraph). Every box ends with one filled primary and no dismissal button: a message's OK, a
-//! question's verb ("Remove"), after a question's own second verb as a ghost button at the leading
-//! side when it has one (Play's and Build's Web); the X and Escape close a message and answer No.
+//! question's verb ("Remove"); the X and Escape close a message and answer a question No. A Choices
+//! box (Play's and Build's Native or Web) has the same body and one equal button per option, none
+//! filled; the X and Escape dismiss it.
 
 use super::Reply;
 use crate::constants::{child_window as c, popups as p, theme as tokens};
 use crate::flows::Action;
-use crate::flows::surface::{Ask, Check};
+use crate::flows::surface::{Ask, Check, Choice};
 use crate::ui::popups::{authored, child_window::ChildSpec};
 use crate::ui::theme;
-use crate::ui::widgets::{button, page, rail::Icon};
+use crate::ui::widgets::{page, rail::Icon};
 use egui::Ui;
 
 /// The heading row (tile, gaps) and a wrapped heading's extra line; text lines; the gap under it.
@@ -82,30 +83,12 @@ pub fn question(
         });
     }
     let pal = theme::of(ui.ctx());
-    // the one verb, filled, last; a leading verb a ghost button at the leading side; a verb that
-    // cannot answer now is disabled, its reason its tooltip. Enter answers the default (No where
-    // the Qt box did, as the X does)
-    let can = ask.why_not.is_empty();
-    let mut said_lead = None;
-    ui.add_space((ui.available_height() - p::FOOTER).max(0.0));
-    let lead = |ui: &mut Ui| {
-        if let Some(l) = &ask.lead {
-            let pressed = button::ghost(ui, &l.verb, l.why_not.is_empty());
-            if button::tip(pressed, &l.why_not).clicked() {
-                said_lead = Some(l.action.clone());
-            }
-        }
-    };
-    let said_yes = authored::footer_bar(ui, &pal, lead, (&ask.verb, can, &ask.why_not));
+    // the one verb, filled; Enter answers the default (No where the Qt box did, as the X does)
+    let said_yes = authored::footer_at_bottom(ui, &pal, (&ask.verb, true, ""));
     let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
     let said_no = enter && default_no;
-    let said_yes = said_yes || (enter && !default_no && can);
+    let said_yes = said_yes || (enter && !default_no);
     let mut reply = Reply::default();
-    if let Some(action) = said_lead {
-        reply.actions.push(action);
-        reply.close = true;
-        return reply;
-    }
     if said_yes {
         let ticked = check.as_deref().filter(|c| c.on).map(|c| c.yes_on.clone());
         reply.actions.push(ticked.unwrap_or_else(|| yes.clone()));
@@ -113,5 +96,29 @@ pub fn question(
         reply.actions.extend(no.cloned());
     }
     reply.close = said_yes || said_no;
+    reply
+}
+
+/// Which of equal actions to take: the question's body, then one equal button per option at the
+/// footer's trailing end, in order; one that cannot run is disabled, its reason its tooltip. Enter
+/// does nothing (no option is the default); the X and Escape dismiss.
+pub fn choices(ui: &mut Ui, ask: &Ask, options: &[Choice]) -> Reply {
+    body(
+        ui,
+        (Icon::Question, &ask.heading, false),
+        &ask.text,
+        p::FOOTER,
+    );
+    let pal = theme::of(ui.ctx());
+    let buttons: Vec<(&str, bool, &str)> = options
+        .iter()
+        .map(|o| (o.label.as_str(), o.why_not.is_empty(), o.why_not.as_str()))
+        .collect();
+    let chosen = authored::choices_at_bottom(ui, &pal, &buttons);
+    let mut reply = Reply::default();
+    if let Some(o) = chosen.and_then(|at| options.get(at)) {
+        reply.actions.push(o.action.clone());
+        reply.close = true;
+    }
     reply
 }

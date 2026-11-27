@@ -72,6 +72,30 @@ pub fn footer_at_bottom(ui: &mut Ui, p: &Palette, primary: (&str, bool, &str)) -
     footer_bar(ui, p, |_| {}, primary)
 }
 
+/// A Choices box's footer at the bottom of the space left: a hairline, then one equal button per
+/// option (label, enabled, tooltip or the reason it is disabled), none filled, side by side at the
+/// trailing end in their order. The one pressed.
+pub fn choices_at_bottom(
+    ui: &mut Ui,
+    p: &Palette,
+    options: &[(&str, bool, &str)],
+) -> Option<usize> {
+    ui.add_space((ui.available_height() - c::FOOTER).max(0.0));
+    let rect = ui.available_rect_before_wrap();
+    ui.painter()
+        .hline(rect.x_range(), rect.top(), Stroke::new(1.0, p.border));
+    ui.add_space(c::GAP + 2.0);
+    let mut chosen = None;
+    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+        for (at, (label, enabled, tip)) in options.iter().enumerate().rev() {
+            if button::tip(button::choice(ui, p, label, *enabled), tip).clicked() {
+                chosen = Some(at);
+            }
+        }
+    });
+    chosen
+}
+
 /// An in-window popover's frame (Search & Filter, Build tools): raised fill, border, the shared
 /// shadow and the scaffold's inset; its first row is `header`.
 pub fn popover_frame(p: &Palette) -> egui::Frame {

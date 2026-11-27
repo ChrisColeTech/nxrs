@@ -1,7 +1,7 @@
 //! One Play and one Build (owner, 2026-11-27): every menu has exactly one of each and no web entries;
 //! Play runs the one version that can play and asks Native or Web only when both can; Build asks.
-//! The question is the shared question box: its heading names the game, Native its filled verb,
-//! Web the ghost verb at the leading side, the X answering nothing; Web builds through the real shell.
+//! The choice is a Choices box: its heading names the game, Native and Web are equal buttons, the
+//! X dismisses it; Web builds through the real shell.
 
 mod common;
 
@@ -35,10 +35,10 @@ fn labels(items: &[Item]) -> Vec<String> {
         .collect()
 }
 
-/// Play's or Build's question is the one open surface: its filled verb's answer.
+/// Play's or Build's Choices box is the one open surface: its first option's action (Native).
 fn asked(app: &App) -> Option<Action> {
     match &app.surfaces[..] {
-        [Surface::Question { yes, .. }] => Some(yes.clone()),
+        [Surface::Choices { options, .. }] => options.first().map(|o| o.action.clone()),
         _ => None,
     }
 }

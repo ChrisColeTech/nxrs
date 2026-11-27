@@ -86,7 +86,7 @@ dialog is built from the shared parts in `ui/popups/authored.rs` and `ui/widgets
 |---|---|---|
 | Header: 12 pt semibold title, 28 pt, hairline under it, bordered 22 pt X named `Close <title>` | `authored::header` | every dialog and every popover |
 | Body header: the 32 pt icon tile, the bold 16 pt heading, the info mark when there is an explanation | `page::heading` (`page::group`) | every dialog's body (a Group in a rail window; DLC, Updates; a message's or question's heading) |
-| Footer: a hairline; the dialog's own verbs as ghost buttons at the leading side; the one filled primary, last | `authored::footer_bar` (`footer`, `footer_at_bottom`) | every dialog |
+| Footer: a hairline; the dialog's own verbs as ghost buttons at the leading side; the one filled primary, last (a Choices box: one equal button per option at the trailing end, none filled) | `authored::footer_bar` (`footer`, `footer_at_bottom`; `choices_at_bottom`) | every dialog |
 | Popover frame: raised fill, border, shadow, the scaffold's inset | `authored::popover_frame` | Search & Filter, Build tools |
 
 - **Dismissal lives only in the header's X** (and Escape). No footer has Close, Cancel, No or Done: the X closes a
@@ -94,7 +94,7 @@ dialog is built from the shared parts in `ui/popups/authored.rs` and `ui/widgets
 - **Every dialog ends with exactly one filled primary, last** (owner, 2026-11-26: "you removed cancel/close but
   didnt add ok"): Apply, Add game, Add DLC…, Add update…, a question's verb, and a message's **OK** (it
   acknowledges). Other footer buttons are the dialog's own ghost verbs at the leading side. A Live popover has no
-  filled button.
+  filled button, and neither has a Choices box (below): its options are equal.
 - **One body header.** Every dialog's body starts with the tile + heading; no dialog without a heading, no second
   icon style (no ringed marks beside text). The tile is accent-tinted; an error's tile is the error red throughout
   (ink, fill and edge). Tile icons are bare line glyphs (no ring around `i`, `!`, `?`).
@@ -107,6 +107,11 @@ dialog is built from the shared parts in `ui/popups/authored.rs` and `ui/widgets
 - **Questions** (`?`): the window title names the action (Remove from library); the heading is the question itself
   (Remove “Kart” from the library?); the rest is the text, a tick box as its last paragraph with its explanation in
   an info mark. The footer is one filled button named with its verb (Remove, Stop build and close), never Yes / No.
+- **Choices**: a dialog that asks which of two or more equal actions to take (Play/Build: Native or Web): the
+  window title names the action, the heading the choice, the text explains each option; the footer has one equal
+  button per option, side by side at the trailing end, none filled; X and Escape dismiss (owner, 2026-11-27).
+  An option that cannot run is disabled, its reason its tooltip; Enter chooses nothing (`Surface::Choices`,
+  `message::choices`, `button::choice`). Play asks only when both versions can play; with one, it runs it.
 - **Work windows** (rail or not) start their body with a Group heading; a labelled control is a Row (the 190 pt
   column) wherever it appears, Updates' "Version to build" included.
 - Captures of every dialog as it should look: `docs/images/dialogs/` (PrintWindow at 3x;
@@ -136,7 +141,8 @@ scrolling beside it, above the footer (`ui/windows/rail_window.rs`).
 | Kind | Where |
 |---|---|
 | Ghost (`button::ghost`) | the default everywhere: a dialog's own verbs (Remove, Build now), row and panel verbs. No border at rest, the hover fill under the pointer |
-| Primary (`button::primary`) | the one filled accent action of a dialog, last and rightmost (Apply, Add game, Remove, Add DLC…, a message's OK); none on a Live popover |
+| Primary (`button::primary`) | the one filled accent action of a dialog, last and rightmost (Apply, Add game, Remove, Add DLC…, a message's OK); none on a Live popover or a Choices box |
+| Choice (`button::choice`) | a Choices box's options (Native, Web): equal, raised fill and border, none filled |
 | Icon (`icon_button`) | icon-only controls; the tooltip is the accessible name. Borderless, except a title header's close, which is bordered. Every close in the app is this button with the same X |
 | Outline | the title bar only |
 
