@@ -97,6 +97,7 @@ nvn_fns! {
         let fence = o.fence;
         diag.set("fence wait: blocking hook entry", Some(fence));
         let ok = super::blocking(|| {
+            let _w = vk::queue::GuestWait::new();
             diag.set("wait fence", Some(fence));
             let ok = vk::queue::wait_fence(fence, timeout);
             diag.set(if ok { "fence satisfied: blocking hook re-entry" } else { "fence expired: blocking hook re-entry" }, Some(fence));

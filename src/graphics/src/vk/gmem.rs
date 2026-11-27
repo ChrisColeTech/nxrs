@@ -9,7 +9,7 @@
 //! chunk's indirect draw record through an address it reads from a list), as do Mario Kart World's
 //! c9a56f796ea4a4cd / ce770ef0597876ca.
 //!
-//! - The table: 8,192 entries of 32 bytes {start, end (exclusive), delta, hint, 0}, sorted by start; entry 0 is empty and
+//! - The table: 8,192 entries of 32 bytes {start, end (exclusive), delta, hint, span}, sorted by start; entry 0 is empty and
 //!   unused entries start at ~0. Hint k (in entry k's word 6) names the entry holding all of the 2 MiB chunks whose
 //!   number is k modulo 8,192: chunk << 13 | entry, 0 = none. Pools are listed once their buffer exists. The table is
 //!   built again when a pool comes, goes or gets its buffer, and staged immutably per generation used by a submission.
@@ -105,6 +105,18 @@ fn visible_ranges(
     out
 }
 
+/// An entry's span (word 7): its size when the whole range lies in one 4 GiB window, else 0. The translator's helper
+/// keeps the entry an invocation chose last and takes it again for an address whose high word is the start's and whose
+/// low word is under start + span; with 0 every raw access searched the table again (hint, then a binary search over
+/// 8,192 entries: OOT-FIX, the span was never written).
+fn span(lo: u64, hi: u64) -> u32 {
+    if hi > lo && lo >> 32 == (hi - 1) >> 32 {
+        (hi - lo).min(u32::MAX as u64) as u32
+    } else {
+        0
+    }
+}
+
 fn encode(gen: u64, windows: &[(u64, u64, u64)]) -> (Table, usize) {
     let mut bytes = vec![0u8; ENTRIES * ENTRY];
     let mut ranges = vec![(0u64, 0u64)];
@@ -119,6 +131,7 @@ fn encode(gen: u64, windows: &[(u64, u64, u64)]) -> (Table, usize) {
         e[0..8].copy_from_slice(&lo.to_le_bytes());
         e[8..16].copy_from_slice(&hi.to_le_bytes());
         e[16..24].copy_from_slice(&da.wrapping_sub(lo).to_le_bytes());
+        e[28..32].copy_from_slice(&span(lo, hi).to_le_bytes());
         ranges.push((lo, hi));
     }
     for i in ranges.len()..ENTRIES {
@@ -150,6 +163,43 @@ fn encode(gen: u64, windows: &[(u64, u64, u64)]) -> (Table, usize) {
     )
 }
 
+/// Pools given a buffer only to be listed in the table (`bindings`).
+static BACKED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Pools (by identity) given their buffer only to be in the table and backed in granules: their granules are bound
+/// where the guest's memory is committed and where the CPU writes (`table_only`), not whole.
+static TABLE_ONLY: Mutex<std::collections::BTreeSet<u64>> = Mutex::new(std::collections::BTreeSet::new());
+
+/// The pool sync: a CPU write into pool `identity` binds its granules first when the pool is one of `TABLE_ONLY`
+/// (a shader may read the written bytes through a loaded pointer; nothing else would bind that granule).
+pub fn table_only(identity: u64) -> bool {
+    TABLE_ONLY.lock().unwrap().contains(&identity)
+}
+
+/// The device reads 0 from a sparse buffer's unbound memory (residencyNonResidentStrict).
+fn strict(g: &Gpu) -> bool {
+    g.d.props.sparse_properties.residency_non_resident_strict != 0
+}
+
+/// `NXGFX_GMEM_BACK_ALL=0`: only pools some binding gave a buffer are in the table, as before OOT-FIX.
+fn back_all() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_GMEM_BACK_ALL").as_deref() != Ok("0"))
+}
+
+/// Bytes of pools given a buffer per table (`NXGFX_GMEM_BACK_MB`, default 256).
+fn back_budget() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("NXGFX_GMEM_BACK_MB")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(256)
+            .max(1)
+            << 20
+    })
+}
+
 /// The binding of constant slot 255 at word `word` (0: the table, 1: the log) for a draw of `sub`; None when the
 /// device has no buffer device addresses (red line once).
 pub fn binding(g: &Gpu, sub: &mut Sub, word: u32) -> Option<vk::DescriptorBufferInfo> {
@@ -170,10 +220,57 @@ pub(crate) fn bindings(g: &Gpu, sub: &mut Sub) -> Option<Bindings> {
         // a shader may reach any byte of a listed pool: pools backed in granules are bound whole first
         {
             let mut m = g.mem.lock().unwrap();
+            // and every pool the GPU may reach is listed, which needs its buffer: a pool no binding ever named had
+            // none, so it was not in the table and a load through a pointer into it read 0 (OOT-FIX: Ocarina of
+            // Time's light-probe data, read by agl's scene analysis 6e28359aa3558f61 through pointers in a storage
+            // buffer, never reached the GPU; the sums the CPU turns into exposure stayed 0 and the picture was
+            // several times too bright, under a pale veil). At most `NXGFX_GMEM_BACK_MB` (default 256) of new
+            // buffers per table (each one's committed bytes are staged now); the rest come with the next tables.
+            if back_all() {
+                let mut budget = back_budget();
+                let mut made = 0u64;
+                for p in m.by_base.values_mut().filter(|p| {
+                    p.buf.is_none() && p.size != 0 && p.placement != super::mem::Placement::CpuOnly
+                }) {
+                    if budget == 0 {
+                        break;
+                    }
+                    let size = p.size;
+                    if let Err(e) = p.ensure_buffer(g, sub) {
+                        crate::log::red_once(&format!("raw global memory: {e}"));
+                        continue;
+                    }
+                    // a pool backed in granules gets memory only where the guest's memory is committed (the rest is
+                    // zero, which a non-resident read returns on a device with strict residency), and where the CPU
+                    // writes later (`table_only`, the pool sync): binding these whole was +4 GB of OoT's 32 GB cap
+                    if p.gran.is_some() && strict(g) {
+                        TABLE_ONLY.lock().unwrap().insert(p.identity);
+                        for (a, n) in super::mem::committed(p.base, p.size) {
+                            if let Err(e) = p.bind(g, sub, a, n) {
+                                crate::log::red_once(&format!("raw global memory: {e}"));
+                                break;
+                            }
+                        }
+                    }
+                    budget = budget.saturating_sub(size.min(budget));
+                    made += 1;
+                }
+                if made != 0 {
+                    BACKED.fetch_add(made, Ordering::Relaxed);
+                    static SAID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+                    if SAID.fetch_add(1, Ordering::Relaxed) < 8 {
+                        crate::vklog!(
+                            "raw global memory: {made} pools no binding had named got their buffer, to be in the pool table ({} so far)",
+                            BACKED.load(Ordering::Relaxed)
+                        );
+                    }
+                }
+            }
+            let table_only = TABLE_ONLY.lock().unwrap().clone();
             for p in m
                 .by_base
                 .values_mut()
-                .filter(|p| p.gran.is_some() && p.da != 0)
+                .filter(|p| p.gran.is_some() && p.da != 0 && !table_only.contains(&p.identity))
             {
                 let (base, size) = (p.base, p.size);
                 if p.bind(g, sub, base, size).is_err() {
@@ -1052,6 +1149,19 @@ mod tests {
         assert!(super::super::mem::writeback_identity_matches(Some(7), 7));
         assert_eq!(super::super::mem::merge_changed_bytes(&mut guest, &result, &baseline), 1);
         assert_eq!(guest, [1, 9]);
+    }
+
+    /// OOT-FIX: word 7 of an entry is its span (the translator's last-entry check), 0 across a 4 GiB boundary.
+    #[test]
+    fn entries_carry_their_span_within_one_4gib_window() {
+        let (t, _) = encode(
+            1,
+            &[(0x1_afc0_0000, 0x1_afd0_0000, 0x8000), (0x1_ffff_f000, 0x2_0000_1000, 0x9000)],
+        );
+        let w7 = |i: usize| u32::from_le_bytes(t.bytes[i * ENTRY + 28..i * ENTRY + 32].try_into().unwrap());
+        assert_eq!(w7(1), 0x10_0000);
+        assert_eq!(w7(2), 0, "crosses a 4 GiB boundary: the exact lookup");
+        assert_eq!(span(0x1_0000_0000, 0x2_0000_0000), u32::MAX, "a whole window: held to u32");
     }
 
     #[test]
