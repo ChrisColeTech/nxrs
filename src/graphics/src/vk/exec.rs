@@ -2632,12 +2632,6 @@ fn source_image(
     let im = imgs.by_serial.get(&serial)?;
     Some((im.image, im.tf, im.extent))
 }
-/// Texture copies from an ASTC texture kept as RGBA8 into a BC7 image, encoded to BC7 (`image::copy_astc_into_bc7`).
-static ASTC_BC7_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-/// Copies of block-compressed regions smaller than their blocks, made as whole blocks (`block_copy_plan`).
-static BLOCK_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
 /// Copies traced (`NXGFX_COPY_TRACE`).
 static COPY_TRACED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
@@ -2645,90 +2639,6 @@ static COPY_TRACED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64:
 fn copy_trace() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("NXGFX_COPY_TRACE").as_deref() == Ok("1"))
-}
-
-/// The bytes of a 4x4 block of a BC format; None for the others.
-fn bc_block_bytes(f: vk::Format) -> Option<u64> {
-    use vk::Format as F;
-    match f {
-        F::BC1_RGB_UNORM_BLOCK
-        | F::BC1_RGB_SRGB_BLOCK
-        | F::BC1_RGBA_UNORM_BLOCK
-        | F::BC1_RGBA_SRGB_BLOCK
-        | F::BC4_UNORM_BLOCK
-        | F::BC4_SNORM_BLOCK => Some(8),
-        F::BC2_UNORM_BLOCK
-        | F::BC2_SRGB_BLOCK
-        | F::BC3_UNORM_BLOCK
-        | F::BC3_SRGB_BLOCK
-        | F::BC5_UNORM_BLOCK
-        | F::BC5_SNORM_BLOCK
-        | F::BC6H_UFLOAT_BLOCK
-        | F::BC6H_SFLOAT_BLOCK
-        | F::BC7_UNORM_BLOCK
-        | F::BC7_SRGB_BLOCK => Some(16),
-        _ => None,
-    }
-}
-
-/// How a copy of a w x h region between two images of one 4x4 block-compressed format is made. Vulkan wants each side
-/// of the extent a multiple of 4 or reaching the level's edge, in the source and in the destination; a level smaller
-/// than a block (1x3, 2x7: one block in memory) copied into a larger level meets neither in the destination, and such
-/// a copy may write nothing (MKW-ATLAS: the terrain arrays' levels 9-10, which the shrubs read). The console copies
-/// whole blocks: then the region goes through a buffer, read at the source's extent and written as whole blocks
-/// (`Some((rows of texels, rows, written width, written height))`); None when the direct copy is valid, or when no
-/// block copy fits either (the region does not reach the source's edge).
-fn block_copy_plan(
-    (w, h): (u32, u32),
-    (sx, sy): (u32, u32),
-    (sw, sh): (u32, u32),
-    (dx, dy): (u32, u32),
-    (dw, dh): (u32, u32),
-) -> Option<(u32, u32, u32, u32)> {
-    let ok = |n: u32, o: u32, l: u32| n % 4 == 0 || o + n == l;
-    if ok(w, sx, sw) && ok(h, sy, sh) && ok(w, dx, dw) && ok(h, dy, dh) {
-        return None;
-    }
-    if !(ok(w, sx, sw) && ok(h, sy, sh)) || dx % 4 != 0 || dy % 4 != 0 || dx + w > dw || dy + h > dh {
-        return None;
-    }
-    let (rw, rh) = (w.div_ceil(4) * 4, h.div_ceil(4) * 4);
-    Some((rw, rh, rw.min(dw - dx), rh.min(dh - dy)))
-}
-
-#[cfg(test)]
-mod block_copy_tests {
-    use super::block_copy_plan;
-
-    /// Mario Kart World's small levels into its terrain arrays: whole blocks; aligned or edge-reaching copies stay
-    /// direct; a region inside the source that is not whole blocks is left to the direct copy.
-    #[test]
-    fn plans() {
-        // a 1x3 level (one block) into the 8x8 level 10 at 0,0: one 4x4 block
-        assert_eq!(block_copy_plan((1, 3), (0, 0), (1, 3), (0, 0), (8, 8)), Some((4, 4, 4, 4)));
-        // 7x2 into level 10, 15x5 into level 9 (16x16)
-        assert_eq!(block_copy_plan((7, 2), (0, 0), (7, 2), (0, 0), (8, 8)), Some((8, 4, 8, 4)));
-        assert_eq!(block_copy_plan((15, 5), (0, 0), (15, 5), (0, 0), (16, 16)), Some((16, 8, 16, 8)));
-        // 180x511 into the 1024x1024 level 3: the height is not whole blocks there
-        assert_eq!(
-            block_copy_plan((180, 511), (0, 0), (180, 511), (0, 0), (1024, 1024)),
-            Some((180, 512, 180, 512))
-        );
-        // valid as it is: whole blocks, or both edges reached
-        assert_eq!(block_copy_plan((512, 512), (0, 0), (512, 512), (0, 0), (1024, 1024)), None);
-        assert_eq!(block_copy_plan((2, 2), (0, 0), (2, 2), (0, 0), (2, 2)), None);
-        // the destination's last partial block: reaches the edge there and in the source
-        assert_eq!(block_copy_plan((6, 6), (0, 0), (6, 6), (4, 4), (10, 10)), None);
-        // a region inside the source, not whole blocks: nothing to round
-        assert_eq!(block_copy_plan((3, 3), (0, 0), (8, 8), (0, 0), (8, 8)), None);
-        // a destination offset off the block grid
-        assert_eq!(block_copy_plan((1, 3), (0, 0), (1, 3), (2, 0), (8, 8)), None);
-    }
-}
-
-/// A BC7 format (an ASTC texture re-encoded, or the game's own BC7).
-fn is_bc7(f: vk::Format) -> bool {
-    matches!(f, vk::Format::BC7_UNORM_BLOCK | vk::Format::BC7_SRGB_BLOCK)
 }
 
 /// The resolution scale of a texture's image (1 when nothing is scaled).
@@ -11293,48 +11203,27 @@ fn emit_op2(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bo
                     record_texture::<p_copy_t2t>(rec, 1, c.dst),
                 )
             };
-            let Some((si, stf, ssize)) = source_image(g, sub, &s) else {
+            let Some((si, stf, _)) = source_image(g, sub, &s) else {
                 return true;
             };
-            let Some((di, dtf, dsize, _)) = target_image(g, sub, &d) else {
+            let Some((di, dtf, _, _)) = target_image(g, sub, &d) else {
                 return true;
             };
             let (ssl, soff, sext) = region_copy(&s, (c.has_sv != 0).then_some(&c.sv), &c.sr, &stf);
             let (dsl, doff, dext) = region_copy(&d, (c.has_dv != 0).then_some(&c.dv), &c.dr, &dtf);
-            // NXGFX_COPY_TRACE=1 (diagnostics, MKW-ATLAS): every copy into a sparse texture, its source and formats
+            // NXGFX_COPY_TRACE=1 (diagnostics, MKW-ATLAS): every copy into a sparse texture, its source, formats and
+            // the physical pages behind the destination layer's last tile and its page past the tiles
             if copy_trace() && crate::nvn::vpool::is_sparse(d.mem as u64) {
                 let n = COPY_TRACED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 if n < 4000 {
+                    let pages = super::sparse::layer_pages(di, dsl.base_array_layer);
                     crate::vklog!(
-                        "copy trace {n}: ser{} {:?} {}x{} (levels {}) level {} layer {}+{} at {},{} {}x{} -> ser{} {:?} level {} layer {}+{} at {},{} {}x{}",
+                        "copy trace {n}: ser{} {:?} {}x{} (levels {}) level {} layer {}+{} at {},{} {}x{} -> ser{} {:?} level {} layer {}+{} at {},{} {}x{}; dst layer's last tile / tail page physical {:x?}",
                         s.serial, stf.vk, s.d.width, s.d.height, s.d.levels, ssl.mip_level, ssl.base_array_layer,
                         ssl.layer_count, soff.x, soff.y, sext.width, sext.height, d.serial, dtf.vk, dsl.mip_level,
-                        dsl.base_array_layer, dsl.layer_count, doff.x, doff.y, dext.width, dext.height
+                        dsl.base_array_layer, dsl.layer_count, doff.x, doff.y, dext.width, dext.height, pages
                     );
                 }
-            }
-            // an ASTC texture kept as RGBA8 into one re-encoded as BC7: a blit cannot write BC7, so the source's ASTC
-            // blocks are encoded to BC7 and copied (MKW-ATLAS: the terrain arrays' small levels, the shrubs' colour)
-            if stf.astc.is_some() && stf.vk != dtf.vk && is_bc7(dtf.vk) {
-                if super::image::copy_astc_into_bc7(
-                    g, sub, s.serial, ssl, soff, sext, di, dsize, dsl, doff,
-                ) {
-                    let n =
-                        ASTC_BC7_COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if n <= 16 || n.is_power_of_two() {
-                        crate::vklog!(
-                            "texture copy {n} from an ASTC texture kept as RGBA8 into a BC7 image: encoded to BC7 (ser{} {}x{} level {} layer {} -> ser{} level {} layer {} at {},{})",
-                            s.serial, sext.width, sext.height, ssl.mip_level, ssl.base_array_layer, d.serial,
-                            dsl.mip_level, dsl.base_array_layer, doff.x, doff.y
-                        );
-                    }
-                    barrier(g, sub);
-                    return true;
-                }
-                crate::log::red_once(&format!(
-                    "a texture copy from an ASTC texture kept as RGBA8 into a BC7 image could not be encoded ({}x{} at {},{} -> {},{}): it writes nothing",
-                    sext.width, sext.height, soff.x, soff.y, doff.x, doff.y
-                ));
             }
             let (ss, ds) = (img_scale(g, s.serial), img_scale(g, d.serial));
             if ss != 1.0 || ds != 1.0 {
@@ -11373,73 +11262,6 @@ fn emit_op2(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bo
                 };
                 barrier(g, sub);
                 return true;
-            }
-            // a block-compressed region smaller than its blocks: copied as whole blocks through a buffer
-            let lvl = |e: vk::Extent3D, l: u32| ((e.width >> l).max(1), (e.height >> l).max(1));
-            let plan = (sext == dext && stf.vk == dtf.vk && sext.depth == 1)
-                .then(|| bc_block_bytes(stf.vk))
-                .flatten()
-                .zip(
-                    (soff.x >= 0 && soff.y >= 0 && doff.x >= 0 && doff.y >= 0)
-                        .then(|| {
-                            block_copy_plan(
-                                (sext.width, sext.height),
-                                (soff.x as u32, soff.y as u32),
-                                lvl(ssize, ssl.mip_level),
-                                (doff.x as u32, doff.y as u32),
-                                lvl(dsize, dsl.mip_level),
-                            )
-                        })
-                        .flatten(),
-                );
-            if let Some((bb, (rw, rh, ew, eh))) = plan {
-                let layers = ssl.layer_count.min(dsl.layer_count).max(1);
-                let bytes = (rw / 4) as u64 * (rh / 4) as u64 * bb * layers as u64;
-                if let Some((buf, off)) = sub.gpu_scratch(g, bytes) {
-                    let r = |sl: vk::ImageSubresourceLayers, o: vk::Offset3D, w: u32, h: u32| {
-                        vk::BufferImageCopy {
-                            buffer_offset: off,
-                            buffer_row_length: rw,
-                            buffer_image_height: rh,
-                            image_subresource: vk::ImageSubresourceLayers {
-                                layer_count: layers,
-                                ..sl
-                            },
-                            image_offset: o,
-                            image_extent: vk::Extent3D {
-                                width: w,
-                                height: h,
-                                depth: 1,
-                            },
-                        }
-                    };
-                    let n = BLOCK_COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-                    if n <= 4 || n.is_power_of_two() {
-                        crate::vklog!(
-                            "texture copy {n} of a {}x{} region smaller than its blocks ({:?} level {} -> level {}): as whole blocks ({ew}x{eh})",
-                            sext.width, sext.height, stf.vk, ssl.mip_level, dsl.mip_level
-                        );
-                    }
-                    unsafe {
-                        dev.cmd_copy_image_to_buffer(
-                            sub.main,
-                            si,
-                            vk::ImageLayout::GENERAL,
-                            buf,
-                            &[r(ssl, soff, sext.width, sext.height)],
-                        );
-                        super::queue::full_barrier(g, sub.main);
-                        dev.cmd_copy_buffer_to_image(
-                            sub.main,
-                            buf,
-                            di,
-                            vk::ImageLayout::GENERAL,
-                            &[r(dsl, doff, ew, eh)],
-                        );
-                    }
-                    barrier(g, sub);
-                    return true;
-                }
             }
             unsafe {
                 if sext == dext && stf.vk == dtf.vk {

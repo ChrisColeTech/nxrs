@@ -359,24 +359,6 @@ pub fn record(
     };
 }
 
-/// Encodes `blocks` (one w x h region of an ASTC level, block rows, 16 bytes a block) to BC7 in the submission's upload
-/// command buffer, for a copy the caller records itself (MKW-ATLAS: a copy from an ASTC texture kept as RGBA8 into an
-/// image re-encoded as BC7). Returns the buffer, the BC7 blocks' offset in it, its rows per image and row length in
-/// texels (multiples of 4).
-#[allow(clippy::too_many_arguments)]
-pub fn encode_bc7(
-    g: &Gpu,
-    sub: &mut Sub,
-    blocks: &[u8],
-    w: u32,
-    h: u32,
-    bw: u32,
-    bh: u32,
-    srgb: bool,
-) -> Option<(vk::Buffer, u64, u32, u32)> {
-    dispatch(g, sub, blocks, w, h, 1, bw, bh, srgb, true, None)
-}
-
 /// The dispatches: blocks -> RGBA8 texels (-> BC7 blocks). Returns the output buffer, the output's offset in it, its
 /// rows per image and row length in texels.
 #[allow(clippy::too_many_arguments)]

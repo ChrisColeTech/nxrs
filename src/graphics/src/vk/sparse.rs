@@ -592,6 +592,18 @@ pub fn remap(lo: u64, size: u64) {
     st.imgs = imgs;
 }
 
+/// (diagnostics, `NXGFX_COPY_TRACE`) The physical pages behind a sparse image's layer: its last whole-tile level's first
+/// page and the page past every layer's tiles that belongs to it (storage page layers x stride + layer), when mapped.
+pub fn layer_pages(img: vk::Image, layer: u32) -> Option<(Option<u64>, Option<u64>)> {
+    let lk = ST.lock().unwrap();
+    let s = lk.as_ref()?.imgs.iter().find(|s| s.image == img)?;
+    let last = s.nnvn.saturating_sub(1) as usize;
+    let tile = s.addr + (layer as u64 * s.stride as u64 + s.tile0[last] as u64) * PAGE;
+    let tail = s.addr + (s.layers as u64 * s.stride as u64 + layer as u64) * PAGE;
+    let ph = |a: u64| (a + PAGE <= s.addr + s.size).then(|| crate::nvn::vpool::translate(a, PAGE)).flatten();
+    Some((ph(tile), ph(tail)))
+}
+
 pub fn is_sparse(img: vk::Image) -> bool {
     ST.lock()
         .unwrap()
