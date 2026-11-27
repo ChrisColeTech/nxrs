@@ -4,7 +4,7 @@
 use super::App;
 use super::properties::PropertiesDraft;
 use super::surface::Surface;
-use crate::constants::words_library as w;
+use crate::constants::{words_contexts as c, words_library as w};
 use crate::model::game::Game;
 use crate::model::path_text::{absolute, same_path};
 use crate::services::pickers::{self, Pick};
@@ -47,7 +47,7 @@ impl App {
     /// `--build-output`. A source already in the library is selected.
     pub fn import_source(&mut self, source: &str, interactive: bool, output: &str) -> bool {
         if let Err(e) = sources::valid_source(source) {
-            self.message(w::CANNOT_ADD, &e, true);
+            self.message(c::ADD, w::CANNOT_ADD, &e, true);
             return false;
         }
         let mut game = sources::game_from_source(source, &self.lib.output_root);
@@ -76,7 +76,7 @@ impl App {
         let id = game.id.clone();
         if !library_ops::add(&mut self.lib, game) {
             if interactive {
-                self.message(w::ALREADY_TITLE, w::ALREADY, false);
+                self.message(c::ADD, w::ALREADY_TITLE, w::ALREADY, false);
             }
             return false;
         }
@@ -90,7 +90,7 @@ impl App {
         let game = match sources::game_from_executable(executable) {
             Ok(g) => g,
             Err(e) => {
-                self.message(w::CANNOT_IMPORT, &e, true);
+                self.message(c::IMPORT, w::CANNOT_IMPORT, &e, true);
                 return false;
             }
         };
@@ -100,7 +100,7 @@ impl App {
             .iter()
             .any(|g| same_path(&g.source, &game.source) && self.busy(&g.id))
         {
-            self.message(w::BUSY_TITLE, w::BUSY_IMPORT, false);
+            self.message(c::IMPORT, w::BUSY_TITLE, w::BUSY_IMPORT, false);
             return false;
         }
         self.selected = library_ops::import_build(&mut self.lib, &game);

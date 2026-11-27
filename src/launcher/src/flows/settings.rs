@@ -4,7 +4,7 @@
 
 use super::App;
 use super::surface::Surface;
-use crate::constants::{engine as e, words_settings as w};
+use crate::constants::{engine as e, words_contexts as c, words_settings as w};
 use crate::model::fill::fill;
 use crate::model::path_text::{absolute, from_native, native, same_path};
 use crate::services::{build_facts, files, ini_file};
@@ -67,11 +67,12 @@ impl App {
             || s.jobs != self.lib.jobs
             || chosen != self.lib.nxrs_build;
         if self.builder_busy() && engine_changed {
-            self.message(w::BUSY_TITLE, w::BUSY, false);
+            self.message(c::SETTINGS, w::BUSY_TITLE, w::BUSY, false);
             return false;
         }
         if !chosen.is_empty() && chosen != self.lib.nxrs_build && !files::exists(&chosen) {
             self.message(
+                c::SETTINGS,
                 w::NXRS_MISSING_TITLE,
                 &fill(w::NXRS_MISSING, &[e::EXECUTABLE_SUFFIX]),
                 true,
@@ -98,6 +99,7 @@ impl App {
             });
             if failed > 0 {
                 self.message(
+                    c::SETTINGS,
                     crate::constants::words_play::NO_SETTINGS,
                     &fill(w::LAYOUT_FAILED, &[&failed.to_string(), &error]),
                     true,
@@ -115,6 +117,7 @@ impl App {
             });
             if failed > 0 {
                 self.message(
+                    c::SETTINGS,
                     crate::constants::words_play::NO_SETTINGS,
                     &fill(w::PLAY_FAILED, &[&failed.to_string(), &error]),
                     true,

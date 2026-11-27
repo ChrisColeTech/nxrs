@@ -1,7 +1,8 @@
 //! One scaffold for every dialog (owner, 2026-11-26; style guide §5): the header's X is the only
-//! dismissal (no Close, Cancel, No or Yes in any footer); a message has no footer, a question one verb,
-//! a rail window its commit, a list window its verbs and its filled Add; the heading on messages; a
-//! list's empty state as a status line; no Done on a Live popover.
+//! dismissal (no Close, Cancel, No or Yes in any footer); a message has one filled OK, a question
+//! one verb, a rail window its commit, a list window its verbs and its filled Add; a message is
+//! titled by its task and headed by itself; a list's empty state as a status line; no Done on a
+//! Live popover.
 
 mod common;
 
@@ -41,14 +42,39 @@ fn no_footer_dismissal(h: &Harness<'static, Shell>) {
 fn a_message_has_the_header_and_one_filled_ok() {
     let (_t, dir) = tmp();
     let mut h = opened(&dir, Action::About);
-    assert!(h.query_by_label("About nxrs").is_some(), "the heading");
+    // the window names its task, never the app alone; the heading is the message's own
+    assert!(
+        h.query_by_label("Close About nxrs").is_some(),
+        "titled About nxrs"
+    );
+    assert!(h.query_by_label("Close nxrs").is_none());
     no_footer_dismissal(&h);
     h.get_by_role_and_label(Role::Button, "OK").click();
     h.run_steps(4);
     assert!(h.state().app.surfaces.is_empty());
     // the X closes it too
     let mut h = opened(&dir, Action::About);
-    h.get_by_label("Close nxrs").click();
+    h.get_by_label("Close About nxrs").click();
+    h.run_steps(4);
+    assert!(h.state().app.surfaces.is_empty());
+}
+
+#[test]
+fn an_error_is_titled_by_its_task_and_headed_by_itself() {
+    let (_t, dir) = tmp();
+    let notes = format!("{dir}/notes.txt");
+    write(&notes, b"not a game");
+    let mut app = app_with(&dir, vec![built_game(&dir)]);
+    app.interactive = true;
+    app.import_source(&notes, true, "");
+    let mut h = harness(app);
+    h.run_steps(4);
+    assert!(
+        h.query_by_label("Close Add game").is_some(),
+        "titled Add game"
+    );
+    assert!(h.query_by_label("Cannot add game").is_some(), "the heading");
+    h.get_by_role_and_label(Role::Button, "OK").click();
     h.run_steps(4);
     assert!(h.state().app.surfaces.is_empty());
 }

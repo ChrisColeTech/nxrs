@@ -59,8 +59,10 @@ impl Ask {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Surface {
-    /// A message box: `title` is its heading (the window is titled with the app's name).
+    /// A message box: `context` titles the window (the task or place it belongs to: "Add game",
+    /// "Build"), `title` is its heading (the message itself: "Cannot add game").
     Message {
+        context: String,
         title: String,
         text: String,
         error: bool,

@@ -4,6 +4,7 @@
 use super::properties::PropertiesDraft;
 use super::surface::Surface;
 use super::{App, DlcReason};
+use crate::constants::words_contexts as c;
 use crate::model::game::Game;
 use crate::model::path_text::{absolute, same_path};
 use crate::model::play::{effective_button_layout, effective_docked};
@@ -51,7 +52,8 @@ impl App {
         let edited = match draft.accept() {
             Ok(g) => g,
             Err((title, text)) => {
-                self.message(&title, &text, true);
+                let context = if draft.adding { c::ADD } else { c::PROPERTIES };
+                self.message(context, &title, &text, true);
                 return false;
             }
         };
@@ -61,9 +63,10 @@ impl App {
         }
         let id = draft.game.id.clone();
         let errors = self.copy_edits(&id, &edited);
+        let heading = crate::constants::words_play::NO_SETTINGS;
         errors
             .iter()
-            .for_each(|e| self.message(crate::constants::words_play::NO_SETTINGS, e, true));
+            .for_each(|e| self.message(c::PROPERTIES, heading, e, true));
         self.artwork_epoch += 1;
         self.save();
         self.refresh_facts();

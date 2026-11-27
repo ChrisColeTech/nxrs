@@ -3,7 +3,7 @@
 
 use super::surface::{Ask, Check, Surface};
 use super::{Action, App};
-use crate::constants::{engine as e, words_library as w};
+use crate::constants::{engine as e, words_contexts as c, words_library as w};
 use crate::model::facts::Facts;
 use crate::model::game::Game;
 use crate::services::library_file::{load, save};
@@ -24,7 +24,7 @@ impl App {
             self.running = platform::find_running_games(&self.lib.games);
         }
         if let Some(e) = error {
-            self.message(w::LOAD_FAILED, &e, true);
+            self.message(c::LIBRARY, w::LOAD_FAILED, &e, true);
         }
         self.refresh_facts();
         self.fix_selection();
@@ -106,12 +106,13 @@ impl App {
             return;
         }
         if let Err(e) = save(&self.lib, &mut self.store) {
-            self.message(w::SAVE_FAILED, &e, true);
+            self.message(c::LIBRARY, w::SAVE_FAILED, &e, true);
         }
     }
 
-    /// A message box; a command-line verb prints it instead.
-    pub fn message(&mut self, title: &str, text: &str, error: bool) {
+    /// A message box titled by its `context` (the task it belongs to, `words_contexts`), `title` its
+    /// heading; a command-line verb prints it instead.
+    pub fn message(&mut self, context: &str, title: &str, text: &str, error: bool) {
         if !self.interactive {
             eprintln!(
                 "{}{text}",
@@ -124,6 +125,7 @@ impl App {
             return;
         }
         self.surfaces.push(Surface::Message {
+            context: context.into(),
             title: title.into(),
             text: text.into(),
             error,

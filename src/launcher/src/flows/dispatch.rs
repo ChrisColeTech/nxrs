@@ -46,7 +46,10 @@ impl App {
             }
             Action::ViewConsole => self.lib.console.visible = true,
             Action::ToggleConsole => self.lib.console.visible = !self.lib.console.visible,
-            Action::About => self.message(crate::constants::menus::ABOUT, w::ABOUT, false),
+            Action::About => {
+                use crate::constants::words_contexts as c;
+                self.message(c::ABOUT, c::ABOUT_HEADING, w::ABOUT, false)
+            }
             Action::OpenBuildFolder => self.open_folder(false),
             Action::OpenSaveFolder => self.open_folder(true),
             Action::ViewGameLog => self.open_game_log(),

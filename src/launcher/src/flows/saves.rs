@@ -2,7 +2,7 @@
 
 use super::surface::{Ask, Check};
 use super::{Action, App};
-use crate::constants::{engine as e, words_library as l};
+use crate::constants::{engine as e, words_contexts as c, words_library as l};
 use crate::model::fill::fill;
 use crate::model::path_text::{join, native, parent};
 use crate::services::pickers::{self, Pick};
@@ -63,15 +63,15 @@ impl App {
         if delete {
             let running = platform::find_running_games(std::slice::from_ref(&game));
             if self.busy(id) || running.contains_key(id) {
-                self.message(l::DELETE_TITLE, l::DELETE_BUSY, true);
+                self.message(c::REMOVE, l::DELETE_TITLE, l::DELETE_BUSY, true);
                 return;
             }
             let kept = match kept_saves::keep(&game, &self.saves_root()) {
                 Ok(kept) => kept,
-                Err(err) => return self.message(l::DELETE_TITLE, &err, true),
+                Err(err) => return self.message(c::REMOVE, l::DELETE_TITLE, &err, true),
             };
             if let Err(err) = kept_saves::delete_build(&game) {
-                return self.message(l::DELETE_TITLE, &err, true);
+                return self.message(c::REMOVE, l::DELETE_TITLE, &err, true);
             }
             if let Some(kept) = kept {
                 self.console
@@ -92,12 +92,12 @@ impl App {
             return;
         };
         match keys::install(&source, &data_dir::data_dir()) {
-            Err((title, text)) => self.message(&title, &text, true),
+            Err((title, text)) => self.message(c::KEYS, &title, &text, true),
             Ok(dest) => {
                 self.lib.keys_path = dest;
                 self.save();
                 self.refresh_tools();
-                self.message(l::KEYS_DONE_TITLE, l::KEYS_DONE, false);
+                self.message(c::KEYS, l::KEYS_DONE_TITLE, l::KEYS_DONE, false);
             }
         }
     }

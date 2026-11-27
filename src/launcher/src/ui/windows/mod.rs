@@ -46,9 +46,12 @@ fn spec<'a>(surface: &Surface, key: &'a str, title: &'a str) -> ChildSpec<'a> {
         Surface::Settings(_) => ChildSpec::surface(key, title, c::SETTINGS),
         Surface::Dlc(_) => ChildSpec::surface(key, title, c::DLC),
         Surface::Updates(_) => ChildSpec::surface(key, title, c::UPDATES),
-        Surface::Message { title: h, text, .. } => {
-            message::spec((key, title), (heading(h), text), false)
-        }
+        Surface::Message {
+            context,
+            title: h,
+            text,
+            ..
+        } => message::spec((key, title), (heading(context, h), text), false),
         Surface::Question { ask, check, .. } => {
             let words = (ask.heading.as_str(), ask.text.as_str());
             message::spec((key, title), words, check.is_some())
@@ -117,8 +120,14 @@ fn title_of(app: &App, surface: &Surface) -> String {
             .unwrap_or_default()
     };
     match surface {
-        // a message's title is its heading; its window carries the app's name
-        Surface::Message { .. } => crate::constants::layout::WINDOW_TITLE.into(),
+        // a message's window names its task; without one, the message's own short title
+        Surface::Message { context, title, .. } => {
+            if context.is_empty() {
+                title.clone()
+            } else {
+                context.clone()
+            }
+        }
         Surface::Question { ask, .. } => ask.title.clone(),
         Surface::Properties(p) if p.adding => s::ADD_TITLE.into(),
         Surface::Properties(p) => format!("{}{}", p.game.title, s::PROPERTIES_TITLE),
@@ -131,9 +140,12 @@ fn title_of(app: &App, surface: &Surface) -> String {
 
 fn body(ui: &mut egui::Ui, app: &mut App, surface: &mut Surface) -> Reply {
     match surface {
-        Surface::Message { title, text, error } => {
-            message::message(ui, heading(title), text, *error)
-        }
+        Surface::Message {
+            context,
+            title,
+            text,
+            error,
+        } => message::message(ui, heading(context, title), text, *error),
         Surface::Question {
             ask,
             yes,
@@ -149,13 +161,9 @@ fn body(ui: &mut egui::Ui, app: &mut App, surface: &mut Surface) -> Reply {
     }
 }
 
-/// A message's heading: its title, the app's name when it has none.
-fn heading(title: &str) -> &str {
-    if title.is_empty() {
-        crate::constants::layout::WINDOW_TITLE
-    } else {
-        title
-    }
+/// A message's heading: its title; its context when it has none (a DLC or update outcome).
+fn heading<'a>(context: &'a str, title: &'a str) -> &'a str {
+    if title.is_empty() { context } else { title }
 }
 
 /// The X, Escape or the OS closing a window: a Draft is discarded; a question is answered No.

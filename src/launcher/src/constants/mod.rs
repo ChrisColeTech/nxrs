@@ -8,6 +8,7 @@ pub mod popups;
 pub mod theme;
 pub mod timing;
 pub mod words_build;
+pub mod words_contexts;
 pub mod words_dlc;
 pub mod words_library;
 pub mod words_play;
