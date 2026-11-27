@@ -22,3 +22,25 @@ walk, OOT-DESC, OOT-OCC occlusion lag, OOT-REPLAY snapshot keep + pcache try-all
 5. **Verify**: route checks, every sheet and fault capture; `cargo test --release -p graphics`.
 
 Expected files: `src/graphics/src/vk/tables.rs`, `exec.rs`, `queue.rs`, `docs/env_switches.tsv`, this document.
+
+## 0. The merged build hung OoT at the forest load (fixed first)
+
+The first three `oot` runs on the integration build (`cb-base-oot` 03:34, `cb-base2-oot` 03:39, `cb-hang-prof`
+03:44; all with the new levers off) **hung at Kokiri Forest's first frame** (presents stop at 213-248 s, the harness
+kills the game ~45 s later; `report.md`: "hung"). The run log has the cause each time:
+
+```
+thread 'vk replay' panicked at src\graphics\src\vk\queue.rs:2529:46: called `Option::unwrap()` on a `None` value
+thread 'nvn-parked' panicked at src\graphics\src\vk\queue.rs:2508:33: ... PoisonError
+```
+
+`retry_locked` collects the parked queues whose wait passes, then runs them one by one with
+`st.parked.remove(&q).unwrap()`. Running one goes through `run_stream_due`, which since MKW-PIPE (park chain,
+`NXGFX_PARK_CHAIN`, default on) runs on **other** parked queues whose wait a recorded GPU signal passes
+(`chain_parked`, which removes them from `st.parked`). The next `q` of the collected list was then gone: the replay
+thread panicked, the sub lock was poisoned (the retry thread panicked on it), and the game waited for the replay
+forever. MKW never has two queues ready in one retry at that point; OoT's forest load does.
+
+**Correction** (`queue.rs` `retry_locked`, commit `d19308b`): each collected queue is taken only while it is still
+parked and its wait still passes (the chain may also have parked it again at a later wait); otherwise it is skipped
+and the outer loop collects again. No switch: the old code is a crash. Every OoT run below is on this fix.
