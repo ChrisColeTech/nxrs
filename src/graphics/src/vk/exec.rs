@@ -2632,6 +2632,14 @@ fn source_image(
     let im = imgs.by_serial.get(&serial)?;
     Some((im.image, im.tf, im.extent))
 }
+/// Texture copies from an ASTC texture kept as RGBA8 into a BC7 image, encoded to BC7 (`image::copy_astc_into_bc7`).
+static ASTC_BC7_COPIES: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A BC7 format (an ASTC texture re-encoded, or the game's own BC7).
+fn is_bc7(f: vk::Format) -> bool {
+    matches!(f, vk::Format::BC7_UNORM_BLOCK | vk::Format::BC7_SRGB_BLOCK)
+}
+
 /// The resolution scale of a texture's image (1 when nothing is scaled).
 fn img_scale(g: &Gpu, serial: u64) -> f32 {
     if !super::scale::active() {
@@ -11197,11 +11205,34 @@ fn emit_op2(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bo
             let Some((si, stf, _)) = source_image(g, sub, &s) else {
                 return true;
             };
-            let Some((di, dtf, _, _)) = target_image(g, sub, &d) else {
+            let Some((di, dtf, dsize, _)) = target_image(g, sub, &d) else {
                 return true;
             };
             let (ssl, soff, sext) = region_copy(&s, (c.has_sv != 0).then_some(&c.sv), &c.sr, &stf);
             let (dsl, doff, dext) = region_copy(&d, (c.has_dv != 0).then_some(&c.dv), &c.dr, &dtf);
+            // an ASTC texture kept as RGBA8 into one re-encoded as BC7: a blit cannot write BC7, so the source's ASTC
+            // blocks are encoded to BC7 and copied (MKW-ATLAS: the terrain arrays' small levels, the shrubs' colour)
+            if stf.astc.is_some() && stf.vk != dtf.vk && is_bc7(dtf.vk) {
+                if super::image::copy_astc_into_bc7(
+                    g, sub, s.serial, ssl, soff, sext, di, dsize, dsl, doff,
+                ) {
+                    let n =
+                        ASTC_BC7_COPIES.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+                    if n <= 8 || n.is_power_of_two() {
+                        crate::vklog!(
+                            "texture copy {n} from an ASTC texture kept as RGBA8 into a BC7 image: encoded to BC7 (ser{} {}x{} level {} layer {} -> ser{} level {} layer {} at {},{})",
+                            s.serial, sext.width, sext.height, ssl.mip_level, ssl.base_array_layer, d.serial,
+                            dsl.mip_level, dsl.base_array_layer, doff.x, doff.y
+                        );
+                    }
+                    barrier(g, sub);
+                    return true;
+                }
+                crate::log::red_once(&format!(
+                    "a texture copy from an ASTC texture kept as RGBA8 into a BC7 image could not be encoded ({}x{} at {},{} -> {},{}): it writes nothing",
+                    sext.width, sext.height, soff.x, soff.y, doff.x, doff.y
+                ));
+            }
             let (ss, ds) = (img_scale(g, s.serial), img_scale(g, d.serial));
             if ss != 1.0 || ds != 1.0 {
                 // resolution scale: a blit of the regions at each image's scale (the game's region sizes kept)

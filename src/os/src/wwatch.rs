@@ -1,18 +1,19 @@
-//! Write watches for debugging (the control pipe's `wpage` / `wtrace`): the watched guest pages are guard pages; each
-//! write to them is logged with the guest function that made it (`nxrt::fault::describe_host`) and the value range,
-//! then the page is guarded again after that one instruction (single step). At most 600 lines a watch.
-
+//! Write watches for debugging (the control pipe's `wpage` / `wtrace`): the watched guest pages are made read-only;
+//! each write to them is logged with the guest function that made it (`nxrt::fault::describe_host`), the guest
+//! thread's registers and frames, and the 16 bytes after the write; the page opens for that one instruction (single
+//! step) and closes again. At most `NXOS_WWATCH_LINES` (600) lines a watch; `NXOS_WWATCH_CHANGED=1` logs only writes
+//! that change the bytes. A write by another thread while a page is open for one write's step is not seen.
+//! (Windows used guard pages before MKW-ATLAS: they fault on reads too, and a page read every frame let writes through.)
 //!
-//! Linux: a watched page is made read-only instead of a guard page (only writes fault, which is all the watch logs);
-//! the write fault logs, opens the page and sets the trap flag; the SIGTRAP after the instruction closes it again.
-//! A system call writing a watched page (a read() into it) fails with EFAULT meanwhile. AArch64 Linux has no user-mode
-//! single step, so there a page logs its first write and then stays open.
+//! The write fault logs, opens the page and sets the trap flag; the trap after the instruction closes it again.
+//! A system call writing a watched page (a read() into it) fails meanwhile. AArch64 Linux has no user-mode single
+//! step, so there a page logs its first write and then stays open.
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Mutex;
 #[cfg(windows)]
 use windows_sys::Win32::Foundation::{
-    EXCEPTION_SINGLE_STEP, NTSTATUS, STATUS_GUARD_PAGE_VIOLATION,
+    EXCEPTION_ACCESS_VIOLATION, EXCEPTION_SINGLE_STEP, NTSTATUS,
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Diagnostics::Debug::{
@@ -20,7 +21,7 @@ use windows_sys::Win32::System::Diagnostics::Debug::{
 };
 #[cfg(windows)]
 use windows_sys::Win32::System::Memory::{
-    VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_GUARD,
+    VirtualProtect, VirtualQuery, MEMORY_BASIC_INFORMATION, PAGE_READONLY, PAGE_READWRITE,
 };
 
 const PAGE: u64 = 0x1000;
@@ -36,8 +37,10 @@ static LINES: AtomicU32 = AtomicU32::new(0);
 thread_local! {
     /// The page to guard again after this thread's single step.
     static REARM: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// The address a logged write went to: its 16 bytes are logged after the single step (the value written).
-    static WROTE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// A write in a watched range, decided after its single step: (16-byte line it went to, those bytes before,
+    /// the line naming the writer). It is logged with the bytes after, and with `NXOS_WWATCH_CHANGED=1` only when
+    /// they changed (a clear of memory already clear, a rewrite of the same value, is not counted).
+    static PENDING: std::cell::RefCell<Option<(u64, [u8; 16], String)>> = const { std::cell::RefCell::new(None) };
 }
 
 fn watched(a: u64) -> bool {
@@ -73,7 +76,12 @@ fn writer() -> String {
         return format!("host thread {name} (no guest thread)");
     };
     let c = unsafe { &*c };
-    let mut s = format!("thread {name} lr {:#x} frames", c.x[30]);
+    // x0-x2 as the guest state holds them (a lifted function keeps its live registers in locals, so these are the
+    // values at its entry: a memcpy's destination, source and size)
+    let mut s = format!(
+        "thread {name} x0 {:#x} x1 {:#x} x2 {:#x} lr {:#x} frames",
+        c.x[0], c.x[1], c.x[2], c.x[30]
+    );
     let mut fp = c.x[29];
     for _ in 0..10 {
         if fp == 0 || fp & 7 != 0 || !nxrt::mem::readable(fp, 16) {
@@ -86,18 +94,51 @@ fn writer() -> String {
     s
 }
 
-/// After the write's single step: the 16 bytes at the address it wrote.
-fn log_value() {
-    let a = WROTE.with(|w| w.replace(0));
-    if a == 0 {
+/// Only writes that change the bytes are logged and counted: `NXOS_WWATCH_CHANGED=1`.
+fn changed_only() -> bool {
+    std::env::var("NXOS_WWATCH_CHANGED").is_ok_and(|v| v == "1")
+}
+
+/// The 16 bytes of the aligned line at `a` (zeros when not readable).
+fn line16(a: u64) -> [u8; 16] {
+    let mut b = [0u8; 16];
+    if nxrt::mem::readable(a, 16) {
+        unsafe { std::ptr::copy_nonoverlapping(a as *const u8, b.as_mut_ptr(), 16) };
+    }
+    b
+}
+
+/// At a write fault in a watched range: remembers who wrote and the bytes before, for [`log_value`].
+fn note_write(a: u64, host: String) {
+    if LINES.load(Ordering::Relaxed) > max_lines() {
         return;
     }
-    let a = a & !15;
-    if nxrt::mem::readable(a, 16) {
-        let w: Vec<String> = (0..4u64)
-            .map(|i| format!("{:08x}", unsafe { *((a + 4 * i) as *const u32) }))
+    let at = a & !15;
+    let line = format!("wwatch: write to {a:#x} by {host}; {}", writer());
+    PENDING.with(|p| *p.borrow_mut() = Some((at, line16(at), line)));
+}
+
+/// After the write's single step: logs it with the 16 bytes now there (only when they changed, with
+/// `NXOS_WWATCH_CHANGED=1`).
+fn log_value() {
+    let Some((at, before, line)) = PENDING.with(|p| p.borrow_mut().take()) else {
+        return;
+    };
+    let now = line16(at);
+    if changed_only() && now == before {
+        return;
+    }
+    let max = max_lines();
+    let n = LINES.fetch_add(1, Ordering::Relaxed);
+    if n < max {
+        let w: Vec<String> = now
+            .chunks(4)
+            .map(|c| format!("{:08x}", u32::from_le_bytes([c[0], c[1], c[2], c[3]])))
             .collect();
-        crate::log!("wwatch:   {a:#x} now {}", w.join(" "));
+        crate::log!("{line}");
+        crate::log!("wwatch:   {at:#x} now {}", w.join(" "));
+    } else if n == max {
+        crate::log!("wwatch: {max} writes logged: the watch stops");
     }
 }
 
@@ -132,16 +173,9 @@ unsafe fn hook(f: &mut nxrt::linux::Fault) -> bool {
         }
         let max = max_lines();
         if exact(a) {
-            let n = LINES.fetch_add(1, Ordering::Relaxed);
-            if n < max {
-                crate::log!(
-                    "wwatch: write to {a:#x} by {}; {}",
-                    nxrt::fault::describe_host(f.rip()),
-                    writer()
-                );
-                WROTE.with(|w| w.set(a));
-            } else if n == max {
-                crate::log!("wwatch: {max} writes logged: the watch stops");
+            note_write(a, nxrt::fault::describe_host(f.rip()));
+            if !nxrt::linux::CAN_SINGLE_STEP {
+                log_value(); // no step to wait for: logged now, with the bytes before the write
             }
         }
         let page = a & !(PAGE - 1);
@@ -184,14 +218,22 @@ fn guard(page: u64) -> bool {
         {
             return false; // not committed
         }
+        // read-write pages only (a read-only page faults on writes by itself); made read-only, so only writes fault:
+        // a guard page faulted on reads too, and a page opened for one reader's single step let other threads'
+        // writes through unseen (a table read every frame hid its writes)
+        if mbi.Protect != PAGE_READWRITE {
+            return false;
+        }
         let mut old = 0;
-        VirtualProtect(
-            page as *mut _,
-            PAGE as usize,
-            (mbi.Protect & !PAGE_GUARD) | PAGE_GUARD,
-            &mut old,
-        ) != 0
+        VirtualProtect(page as *mut _, PAGE as usize, PAGE_READONLY, &mut old) != 0
     }
+}
+
+/// Opens a watched page for one write (its single step).
+#[cfg(windows)]
+fn open(page: u64) {
+    let mut old = 0;
+    unsafe { VirtualProtect(page as *mut _, PAGE as usize, PAGE_READWRITE, &mut old) };
 }
 
 #[cfg(windows)]
@@ -200,25 +242,19 @@ unsafe extern "system" fn veh(info: *mut EXCEPTION_POINTERS) -> i32 {
     const CONTINUE_SEARCH: i32 = 0;
     let rec = &*(*info).ExceptionRecord;
     let ctx = &mut *(*info).ContextRecord;
-    if rec.ExceptionCode == STATUS_GUARD_PAGE_VIOLATION as NTSTATUS && rec.NumberParameters >= 2 {
+    if rec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION as NTSTATUS
+        && rec.NumberParameters >= 2
+        && rec.ExceptionInformation[0] == 1
+    {
         let a = rec.ExceptionInformation[1] as u64;
         if !watched(a) {
             return CONTINUE_SEARCH;
         }
         let max = max_lines();
-        if rec.ExceptionInformation[0] == 1 && exact(a) {
-            let n = LINES.fetch_add(1, Ordering::Relaxed);
-            if n < max {
-                crate::log!(
-                    "wwatch: write to {a:#x} by {}; {}",
-                    nxrt::fault::describe_host(ctx.Rip),
-                    writer()
-                );
-                WROTE.with(|w| w.set(a));
-            } else if n == max {
-                crate::log!("wwatch: {max} writes logged: the watch stops");
-            }
+        if exact(a) {
+            note_write(a, nxrt::fault::describe_host(ctx.Rip));
         }
+        open(a & !(PAGE - 1));
         if LINES.load(Ordering::Relaxed) <= max {
             REARM.with(|r| r.set(a & !(PAGE - 1)));
             ctx.EFlags |= 0x100; // trap after this instruction
@@ -289,15 +325,9 @@ pub fn disarm() -> String {
                     &mut mbi,
                     std::mem::size_of::<MEMORY_BASIC_INFORMATION>(),
                 ) != 0
-                    && mbi.Protect & PAGE_GUARD != 0
+                    && mbi.Protect == PAGE_READONLY
                 {
-                    let mut old = 0;
-                    VirtualProtect(
-                        p as *mut _,
-                        PAGE as usize,
-                        mbi.Protect & !PAGE_GUARD,
-                        &mut old,
-                    );
+                    open(p);
                 }
             }
             p += PAGE;

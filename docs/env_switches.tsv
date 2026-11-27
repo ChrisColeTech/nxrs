@@ -253,6 +253,8 @@ NXOS_STEAL_ANY_MS	switch	`NXOS_STEAL_ANY_MS=<ms>` (debugging): how long a waiter
 NXOS_STEAL_WORSE_MS	switch	`NXOS_STEAL_WORSE_MS=<ms>` (debugging): how long a waiter waits before it takes a core from a worse holder (default	src/os/src/sched.rs
 NXOS_SWKBD	switch	the `keyboard_text` setting ("Player"). With no window to show it over (`NXOS_SWKBD=auto`, a headless run) the	src/os/src/services/swkbd.rs
 NXOS_TRACE	diagnostic	`NXOS_TRACE=svc,ipc,hle,nvn,fs` (or `all`).	src/os/src/lib.rs
+NXOS_WWATCH_CHANGED	diagnostic	`NXOS_WWATCH_CHANGED=1`: the write watch (control `wpage` / `wtrace`) logs only writes that change the bytes (MKW-ATLAS)	src/os/src/wwatch.rs
+NXOS_WWATCH_LINES	diagnostic	`NXOS_WWATCH_LINES=<n>`: the most writes a write watch logs (default 600)	src/os/src/wwatch.rs
 NXRS_BUILD	switch	`NXRS_BUILD`: a development nxrs-build (a file or its folder).	src/launcher/src/constants/engine.rs, src/launcher/tests/common/mod.rs, src/launcher/tests/process.rs
 NXRS_CFLAGS	switch	`NXRS_CFLAGS`: extra compiler flags for the game code, split on white space (e.g. `-march`	src/cli/src/pipeline.rs
 NXRS_CHEAT_0000ABCD	test	a patch-set name the runtime's patchset unit test declares (not read at run time)	src/runtime/src/patchset.rs
