@@ -1174,6 +1174,18 @@ fn completion_loop(g: &'static Gpu) {
             }
             l.pop_front().unwrap()
         };
+        // the web device's worker does on its own thread the CPU work a native driver does inside vkQueueSubmit
+        // (command encoding, WebGPU pipelines created at their first draw): the GPU-time budget below starts once it
+        // has handed this submission to the GPU (6.8 s for a cold-cache submission ran out the budget, and the fatal
+        // ended only this thread: the game waited for ever, WEB-W4c)
+        #[cfg(target_os = "emscripten")]
+        {
+            wait_diag::mark(2, "web worker execute wait", [item.value, 0]);
+            let t = crate::web::icd::wait_queued(q.timeline, item.value);
+            if t.as_secs() >= 5 {
+                crate::vklog!("web: the GPU worker took {:.1} s to execute submission {} before the GPU could start it (pipeline creation)", t.as_secs_f64(), item.value);
+            }
+        }
         wait_diag::mark(2, "GPU timeline wait", [item.value, 0]);
         let sems = [q.timeline];
         let vals = [item.value];

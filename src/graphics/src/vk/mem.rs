@@ -83,6 +83,14 @@ pub struct Pool {
     /// CPU-written ranges uploaded outside a sync (`sync_range`): the next sync hands them to the texture check, which
     /// never saw them otherwise (their watch bits are gone)
     pub tex_dirty: Vec<(u64, u64)>,
+    /// (web: no write watch) the sync (`Pools::gen`) each page of [page_lo, ...) was last compared with the snapshot
+    /// in: a use compares only the pages of its range not compared in this sync yet (`compare_unseen`)
+    #[cfg(target_os = "emscripten")]
+    pub web_seen: Vec<u32>,
+    /// (web, `NXGFX_WEB_SYNC_AUDIT=1`) the pages that differed from the snapshot at this sync's start and no use has
+    /// compared since (`web_audit_sync`)
+    #[cfg(target_os = "emscripten")]
+    pub web_audit: Vec<bool>,
 }
 
 /// The per-frame upload budget (64 MB): CPU writes uploaded at the start of a submission count against it; past it,
@@ -211,6 +219,22 @@ pub fn max_buffer(g: &Gpu) -> u64 {
 
 /// The window size for a pool of `size` bytes when the device's largest buffer is `max`: 0 (one buffer) when it
 /// fits, else `max` rounded down to whole pages.
+/// (web) Zero bytes after a pool's end in its GPU buffer. WebGPU binds a uniform buffer only at the whole size its
+/// shader declares (a constant bank: 64 KiB), where Vulkan reads past a shorter range; the web device widens a short
+/// binding up to that size inside the buffer, which a constant buffer in a pool's last 64 KiB did not have: the
+/// whole bank was bound as zeros ("a uniform binding of N bytes where the shader declares 65536: a zero stand-in",
+/// WEB-W4d). Where the game's uniform ring stood decided it run to run.
+pub const WEB_POOL_TAIL: u64 = 65536;
+
+/// The length of a pool's GPU buffer: the pool and `tail` zero bytes after it, when that still fits the device's
+/// largest buffer (`max`).
+pub fn pool_buffer_len(size: u64, max: u64, tail: u64) -> u64 {
+    match size.checked_add(tail) {
+        Some(n) if n <= max => n,
+        _ => size,
+    }
+}
+
 pub fn window_size(size: u64, max: u64) -> u64 {
     if size <= max {
         0
@@ -663,6 +687,10 @@ pub fn pool_add(p: &pool_t) {
         gran: None,
         deferred: Vec::new(),
         tex_dirty: Vec::new(),
+        #[cfg(target_os = "emscripten")]
+        web_seen: Vec::new(),
+        #[cfg(target_os = "emscripten")]
+        web_audit: Vec::new(),
     };
     if std::env::var("NXGFX_POOL_LOG").is_ok() {
         crate::vklog!(
@@ -1124,8 +1152,10 @@ impl Pool {
         {
             return self.make_sparse(g);
         }
+        // (web) zeros after the pool, so a uniform binding near its end can take the size its shader declares
+        let tail = if cfg!(target_os = "emscripten") { WEB_POOL_TAIL } else { 0 };
         let b = g.buffer(
-            if win == 0 { self.size } else { win },
+            if win == 0 { pool_buffer_len(self.size, max_buffer(g), tail) } else { win },
             buf_usage(g),
             MemoryLocation::GpuOnly,
             "pool",
@@ -1479,7 +1509,12 @@ impl Pool {
                     out.push((p, PAGE));
                 }
             }
-        } else if let Some(snap) = self.snapshot.as_mut() {
+        } else if let Some(snap) = self
+            .snapshot
+            .as_mut()
+            // the web compares the snapshot by use, only where a use reads (`Pool::web_sync`), not all of it here
+            .filter(|_| !web_by_use())
+        {
             // only the committed parts can have been written (reading the rest faults)
             for (ca, cn) in committed(self.base, self.size) {
                 let cur = unsafe { core::slice::from_raw_parts(ca as *const u8, cn as usize) };
@@ -1522,6 +1557,326 @@ impl Pool {
         }
         merged.into_iter().map(|(s, e)| (s, e - s)).collect()
     }
+
+    /// (web: no write watch) The CPU's writes to [a, a + n) found by use: the pages of the range not compared in sync
+    /// `gen` yet are compared with the snapshot now, and what changed is uploaded into the pool's buffer (through the
+    /// upload skip and the in-flight write-back guard, as `sync_range` does). Returns the changed ranges uploaded now
+    /// (absolute); pieces under an in-flight write-back wait in `pending` for a later sync. Comparing every pool whole
+    /// at every sync was 86 ms a frame in Anime Girls (WEB-W4 §5.2, WEB-W4b).
+    #[cfg(target_os = "emscripten")]
+    fn web_sync(&mut self, g: &Gpu, sub: &mut super::queue::Sub, gen: u32, a: u64, n: u64) -> Vec<(u64, u64)> {
+        if self.placement != Placement::Mirror || self.buf.is_none() || !web_by_use() {
+            return Vec::new();
+        }
+        let Some(snap) = self.snapshot.as_mut() else {
+            return Vec::new();
+        };
+        if self.web_seen.len() != self.page_gen.len() {
+            // a new snapshot was taken whole: nothing compared in this sync yet
+            self.web_seen = vec![gen.wrapping_sub(1); self.page_gen.len()];
+        }
+        let (lo, hi) = (
+            a.max(self.base) - self.base,
+            a.saturating_add(n).min(self.base + self.size).saturating_sub(self.base),
+        );
+        let t = std::time::Instant::now();
+        // SAFETY: the pool's guest memory (linear memory on the web: every byte of it is readable)
+        let guest = unsafe { core::slice::from_raw_parts(self.base as *const u8, self.size as usize) };
+        let head = self.base - self.page_lo;
+        let (changed, looked) = compare_unseen(guest, snap, &mut self.web_seen, head, gen, lo, hi);
+        if !self.web_audit.is_empty() && lo < hi {
+            // (audit) every page of the range is compared in this sync now
+            let k0 = ((lo + head) / PAGE) as usize;
+            let k1 = ((hi + head).div_ceil(PAGE) as usize).min(self.web_audit.len());
+            for f in &mut self.web_audit[k0.min(k1)..k1] {
+                *f = false;
+            }
+        }
+        WEB_CMP_B.fetch_add(looked, Ordering::Relaxed);
+        WEB_CMP_NS.fetch_add(t.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        if changed.is_empty() {
+            return changed;
+        }
+        let mut ranges: Vec<(u64, u64)> = changed.into_iter().map(|(o, l)| (self.base + o, l)).collect();
+        // page generations, as `take_cpu_writes` marks them
+        for &(s, l) in &ranges {
+            let p0 = ((s - self.page_lo) / PAGE) as usize;
+            let p1 = ((s + l - self.page_lo).div_ceil(PAGE)) as usize;
+            let np = self.page_gen.len();
+            for pg in &mut self.page_gen[p0.min(np)..p1.min(np)] {
+                *pg = gen;
+            }
+        }
+        if wb_guard() {
+            let inflight = INFLIGHT.lock().unwrap();
+            let mine = inflight.overlapping(self.base, self.base + self.size);
+            if !mine.is_empty() {
+                let mut keep = Vec::new();
+                for &(ra, rn) in &ranges {
+                    let (now, later) = split_inflight(ra, rn, &mine);
+                    keep.extend(now);
+                    WB_HELD_B.fetch_add(later.iter().map(|r| r.1).sum::<u64>(), Ordering::Relaxed);
+                    self.pending.extend(later);
+                }
+                ranges = keep;
+            }
+        }
+        let mut back = Vec::new();
+        for &(ra, rn) in &ranges {
+            if super::upskip::on() {
+                let (base, size) = (self.base, self.size);
+                super::upskip::upload_changed(base, size, ra, rn, &mut back, |at, b| self.upload_from(g, sub, at, b));
+            } else {
+                self.upload_now(g, sub, ra, rn);
+            }
+        }
+        if !back.is_empty() {
+            ranges = without_pages(&ranges, &mut back);
+        }
+        if !ranges.is_empty() {
+            self.dirty_frame = super::present::frames();
+        }
+        ranges
+    }
+}
+
+/// Whether the web compares snapshots by use (`Pool::web_sync`); `NXGFX_WEB_USE_SYNC=0`: every snapshot whole at every
+/// sync, as before (WEB-W4; for comparison). Always false off the web.
+pub fn web_by_use() -> bool {
+    if !cfg!(target_os = "emscripten") {
+        return false;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_WEB_USE_SYNC").as_deref() != Ok("0"))
+}
+
+/// Snapshot bytes compared by use a frame (web) and the time it took (`summary`).
+#[cfg(target_os = "emscripten")]
+static WEB_CMP_B: AtomicU64 = AtomicU64::new(0);
+#[cfg(target_os = "emscripten")]
+static WEB_CMP_NS: AtomicU64 = AtomicU64::new(0);
+
+/// Whether two byte runs of one length differ, compared 64 bytes at a time as words. Slice equality is a call to
+/// memcmp, a byte loop on the web: W4's whole-snapshot compares ran at ~2 GB/s.
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
+fn bytes_differ(a: &[u8], b: &[u8]) -> bool {
+    debug_assert_eq!(a.len(), b.len());
+    let whole = a.len() / 64 * 64;
+    for (x, y) in a[..whole].chunks_exact(64).zip(b[..whole].chunks_exact(64)) {
+        let mut d = 0u64;
+        for i in 0..8 {
+            let xw = u64::from_ne_bytes(x[i * 8..i * 8 + 8].try_into().unwrap());
+            let yw = u64::from_ne_bytes(y[i * 8..i * 8 + 8].try_into().unwrap());
+            d |= xw ^ yw;
+        }
+        if d != 0 {
+            return true;
+        }
+    }
+    a[whole..] != b[whole..]
+}
+
+/// The pages of pool offsets [lo, hi) not compared in sync `gen` yet, compared now: `guest` is the pool's memory,
+/// `snap` its snapshot, `seen` the sync each page (from the page holding the pool's start, `head` bytes before it) was
+/// last compared in. A changed page is copied into the snapshot; every page looked at is marked `gen`. Returns the
+/// changed runs (pool offsets, merged) and the bytes compared.
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
+pub(crate) fn compare_unseen(
+    guest: &[u8],
+    snap: &mut [u8],
+    seen: &mut [u32],
+    head: u64,
+    gen: u32,
+    lo: u64,
+    hi: u64,
+) -> (Vec<(u64, u64)>, u64) {
+    let size = guest.len() as u64;
+    let (lo, hi) = (lo.min(size), hi.min(size));
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    let mut looked = 0u64;
+    if lo >= hi {
+        return (out, 0);
+    }
+    let k0 = ((lo + head) / PAGE) as usize;
+    let k1 = ((hi + head).div_ceil(PAGE) as usize).min(seen.len());
+    for k in k0..k1 {
+        if seen[k] == gen {
+            continue;
+        }
+        seen[k] = gen;
+        let s = (k as u64 * PAGE).saturating_sub(head) as usize;
+        let e = ((k as u64 + 1) * PAGE - head).min(size) as usize;
+        looked += (e - s) as u64;
+        if bytes_differ(&guest[s..e], &snap[s..e]) {
+            snap[s..e].copy_from_slice(&guest[s..e]);
+            match out.last_mut() {
+                Some(l) if l.0 + l.1 == s as u64 => l.1 += (e - s) as u64,
+                _ => out.push((s as u64, (e - s) as u64)),
+            }
+        }
+    }
+    (out, looked)
+}
+
+/// (audit) Which pages of a pool differ from its snapshot now: `flags[k]` for the page k from the page holding the
+/// pool's start (`head` bytes before it), as `compare_unseen` counts them. Nothing is changed.
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
+pub(crate) fn pages_differing(guest: &[u8], snap: &[u8], head: u64, flags: &mut [bool]) {
+    let size = guest.len() as u64;
+    for (k, f) in flags.iter_mut().enumerate() {
+        let s = (k as u64 * PAGE).saturating_sub(head).min(size) as usize;
+        let e = ((k as u64 + 1) * PAGE).saturating_sub(head).min(size) as usize;
+        *f = s < e && bytes_differ(&guest[s..e], &snap[s..e]);
+    }
+}
+
+/// (audit) The flagged pages as merged runs of pool offsets, clipped to the pool's `size`.
+#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
+pub(crate) fn flagged_runs(flags: &[bool], head: u64, size: u64) -> Vec<(u64, u64)> {
+    let mut out: Vec<(u64, u64)> = Vec::new();
+    for (k, _) in flags.iter().enumerate().filter(|(_, f)| **f) {
+        let s = (k as u64 * PAGE).saturating_sub(head).min(size);
+        let e = ((k as u64 + 1) * PAGE).saturating_sub(head).min(size);
+        if s >= e {
+            continue;
+        }
+        match out.last_mut() {
+            Some(l) if l.0 + l.1 == s => l.1 += e - s,
+            _ => out.push((s, e - s)),
+        }
+    }
+    out
+}
+
+/// `NXGFX_WEB_SYNC_AUDIT=1` (web, by-use sync): every sync also compares every snapshot pool whole, to name the CPU
+/// writes no use compared (`web_audit_sync`). Costs a whole compare a sync (the W4 rate); diagnosis only.
+#[cfg(target_os = "emscripten")]
+fn web_audit_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_WEB_SYNC_AUDIT").is_ok_and(|v| v != "0"))
+}
+
+/// (audit) At a sync's start, before anything is compared: the pages flagged at the last sync's start that no use
+/// compared during it (written before that sync, never brought to the GPU in it) are noted; then each snapshot pool's
+/// pages that differ from guest memory now are flagged for this sync. A use clears what it compares (`web_sync`).
+#[cfg(target_os = "emscripten")]
+fn web_audit_sync(m: &mut Pools) {
+    let mut left: Vec<(u64, u64, u64)> = Vec::new();
+    for p in m.by_base.values_mut() {
+        if p.placement != Placement::Mirror || p.buf.is_none() {
+            continue;
+        }
+        let Some(snap) = p.snapshot.as_ref() else {
+            continue;
+        };
+        if p.web_audit.len() != p.page_gen.len() {
+            p.web_audit = vec![false; p.page_gen.len()];
+        }
+        let head = p.base - p.page_lo;
+        for (o, n) in flagged_runs(&p.web_audit, head, p.size) {
+            left.push((p.base + o, n, p.base));
+        }
+        // SAFETY: the pool's guest memory (linear memory on the web: every byte of it is readable)
+        let guest = unsafe { core::slice::from_raw_parts(p.base as *const u8, p.size as usize) };
+        pages_differing(guest, snap, head, &mut p.web_audit);
+    }
+    web_audit_note(left);
+}
+
+/// (audit) What the audit found since its last line: syncs, ranges left uncompared and how often each was.
+#[cfg(target_os = "emscripten")]
+struct Audit {
+    syncs: u64,
+    syncs_left: u64,
+    bytes: u64,
+    total_ranges: u64,
+    runs: HashMap<(u64, u64), (u32, u64)>,
+}
+#[cfg(target_os = "emscripten")]
+static AUDIT: std::sync::Mutex<Option<Audit>> = std::sync::Mutex::new(None);
+/// (audit) the ranges of the last line, for the texture check to name the textures over them (`web_audit_take`)
+#[cfg(target_os = "emscripten")]
+static AUDIT_RUNS: std::sync::Mutex<Vec<(u64, u64)>> = std::sync::Mutex::new(Vec::new());
+
+#[cfg(target_os = "emscripten")]
+fn web_audit_note(left: Vec<(u64, u64, u64)>) {
+    let mut g = AUDIT.lock().unwrap();
+    let a = g.get_or_insert_with(|| Audit {
+        syncs: 0,
+        syncs_left: 0,
+        bytes: 0,
+        total_ranges: 0,
+        runs: HashMap::new(),
+    });
+    a.syncs += 1;
+    if !left.is_empty() {
+        a.syncs_left += 1;
+    }
+    for (s, n, pool) in left {
+        a.bytes += n;
+        a.total_ranges += 1;
+        a.runs.entry((s, n)).or_insert((0, pool)).0 += 1;
+    }
+    if a.syncs < 300 {
+        return;
+    }
+    let mut top: Vec<((u64, u64), (u32, u64))> = a.runs.drain().collect();
+    top.sort_by(|x, y| y.1 .0.cmp(&x.1 .0).then(x.0.cmp(&y.0)));
+    let list: Vec<String> = top
+        .iter()
+        .take(16)
+        .map(|((s, n), (c, pool))| format!("{s:#x}+{n:#x} (pool {pool:#x} +{:#x}) in {c}", s - pool))
+        .collect();
+    crate::vklog!(
+        "web sync audit, last {} syncs: {} ranges in {} syncs ({:.1} KB a sync) were written before a sync and compared by no use in it; {} distinct{}{}",
+        a.syncs,
+        a.total_ranges,
+        a.syncs_left,
+        a.bytes as f64 / a.syncs as f64 / 1024.0,
+        top.len(),
+        if list.is_empty() { "" } else { "; most often: " },
+        list.join(", ")
+    );
+    *AUDIT_RUNS.lock().unwrap() = top.iter().take(16).map(|((s, n), _)| (*s, *n)).collect();
+    a.syncs = 0;
+    a.syncs_left = 0;
+    a.bytes = 0;
+    a.total_ranges = 0;
+}
+
+/// (audit) The ranges of the audit's last line, once: the texture check names the textures over them.
+#[cfg(target_os = "emscripten")]
+pub fn web_audit_take() -> Vec<(u64, u64)> {
+    std::mem::take(&mut *AUDIT_RUNS.lock().unwrap())
+}
+
+/// (web) The CPU's writes to these ranges (absolute, sorted), found by comparing the pages of each not compared in
+/// this sync yet with its pool's snapshot; what changed is uploaded into the pool's buffer and returned (sorted). The
+/// texture check's use (`image_begin_submit`): texture storage is not resolved as a buffer. Lock order: the images
+/// lock may be held (images -> mem, as `queue::oneoff`'s recording already resolves under it).
+#[cfg(target_os = "emscripten")]
+pub fn web_compare(g: &Gpu, sub: &mut super::queue::Sub, ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    let mut out = Vec::new();
+    if ranges.is_empty() {
+        return out;
+    }
+    let mut m = g.mem.lock().unwrap();
+    let gen = m.gen;
+    // the pools with a snapshot (those with a GPU buffer: a handful), each range checked against every one it overlaps
+    // (pools may lie over each other or side by side under one texture's span)
+    let snapped: Vec<(u64, u64)> =
+        m.by_base.values().filter(|p| p.snapshot.is_some()).map(|p| (p.base, p.size)).collect();
+    for &(a, n) in ranges {
+        let end = a.saturating_add(n);
+        for &(b, s) in &snapped {
+            if b < end && a < b + s {
+                let p = m.by_base.get_mut(&b).unwrap();
+                out.extend(p.web_sync(g, sub, gen, a, n));
+            }
+        }
+    }
+    out.sort_unstable();
+    out
 }
 
 /// Imports [base, base + size), widened to the import alignment, as a buffer; returns it and base's offset in it.
@@ -1690,6 +2045,8 @@ fn resolve_in(
         }
         return None;
     };
+    #[cfg(target_os = "emscripten")]
+    let sync_gen = m.gen;
     let p = m.by_base.get_mut(&b).unwrap();
     // the pool's buffer made, granules bound or deferred CPU writes uploaded: first-use initialization in the upload
     // buffer (`gate::pass_pre`; checked only in the gate's reference mode)
@@ -1733,11 +2090,23 @@ fn resolve_in(
     if !p.deferred.is_empty() {
         p.upload_deferred(g, sub, a, n1);
     }
+    // (web: no write watch) the CPU's writes to this range, found by this use; the next sync's texture check sees them
+    // (as `sync_range` hands them on). A pool compared by use is not cached below: the cache answers for the whole
+    // window, and another range of it is compared at its own first use in this sync (the sync moves POOL_GEN, so
+    // `exec::resolve_cached`'s entries, exact ranges, last one sync)
+    #[cfg(target_os = "emscripten")]
+    let by_use = {
+        let changed = p.web_sync(g, sub, sync_gen, a, n1);
+        p.tex_dirty.extend(changed);
+        p.snapshot.is_some() && web_by_use()
+    };
+    #[cfg(not(target_os = "emscripten"))]
+    let by_use = false;
     // the generation after the buffer exists (its creation moved it)
     let gen = POOL_GEN.load(Ordering::Acquire);
 
     let (pb, ps) = (wlo, wlen);
-    let cache = p.deferred.is_empty();
+    let cache = p.deferred.is_empty() && !by_use;
     let next = m
         .by_base
         .range(b + 1..)
@@ -3035,8 +3404,17 @@ pub fn begin_submit_ex(
     let _watch = watch_lock(&mut m);
     SYNC_LOCK_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let t_scan = std::time::Instant::now();
+    #[cfg(target_os = "emscripten")]
+    if web_by_use() && web_audit_on() {
+        web_audit_sync(&mut m);
+    }
     m.gen = m.gen.wrapping_add(1);
     let gen = m.gen;
+    // (web) uses compare by this sync's generation (`Pool::web_sync`): the use caches keyed by POOL_GEN (resolved
+    // ranges, reused descriptor sets) last one sync, so each range's first use in a submission reaches the compare
+    if web_by_use() {
+        POOL_GEN.fetch_add(1, Ordering::AcqRel);
+    }
     let mut all = Vec::new();
     // the write watch asked once per run of watched pools whose pages touch (Pokemon Legends Z-A has ~400 mirrors,
     // most of them neighbours: one GetWriteWatch each was 3.5 ms a frame of `pools`; Mario Kart World 21 ms)
@@ -3717,6 +4095,150 @@ pub fn summary(g: &Gpu, frames: u64) -> String {
         + &super::lazy::summary(f)
         + &(if super::uptrace::on() { super::uptrace::report(f) } else { String::new() })
         + &super::upskip::report(f)
+        + &web_summary(f)
+}
+
+/// (web) What the compare by use read a frame, and its time.
+#[cfg(target_os = "emscripten")]
+fn web_summary(f: f64) -> String {
+    let mb = WEB_CMP_B.swap(0, Ordering::Relaxed) as f64 / f / 1048576.0;
+    let ms = WEB_CMP_NS.swap(0, Ordering::Relaxed) as f64 / f / 1e6;
+    format!("; compared by use a frame (no write watch): {mb:.2} MB in {ms:.2} ms")
+}
+#[cfg(not(target_os = "emscripten"))]
+fn web_summary(_f: f64) -> String {
+    String::new()
+}
+
+#[cfg(test)]
+mod web_pool_tail_tests {
+    use super::*;
+
+    /// The web device widens a short uniform binding to `need` bytes inside its buffer, or binds zeros
+    /// (`web::submit`'s rule): the bytes it can bind at `off` of a buffer of `len`.
+    fn bindable(off: u64, need: u64, len: u64) -> u64 {
+        need.min(len.saturating_sub(off))
+    }
+
+    #[test]
+    fn a_constant_buffer_at_a_pools_end_takes_the_whole_bank() {
+        let size = 16 << 20;
+        // Anime Girls' uniform ring: banks of 1.5-6.5 KiB in a pool's last 64 KiB (W4c run12, run13-off)
+        let off = size - 1536;
+        assert!(bindable(off, 65536, size) < 65536, "a buffer of the pool's size alone: zeros were bound");
+        let len = pool_buffer_len(size, 1 << 32, WEB_POOL_TAIL);
+        assert_eq!(len, size + WEB_POOL_TAIL);
+        assert_eq!(bindable(off, 65536, len), 65536, "the bank bound whole, the tail past the pool zeros");
+        assert_eq!(bindable(size - 4, 65536, len), 65536, "the pool's last word too");
+    }
+
+    #[test]
+    fn a_pool_at_the_largest_buffer_keeps_its_size() {
+        assert_eq!(pool_buffer_len(1 << 20, 1 << 20, WEB_POOL_TAIL), 1 << 20);
+        assert_eq!(pool_buffer_len(u64::MAX, u64::MAX, WEB_POOL_TAIL), u64::MAX);
+        assert_eq!(pool_buffer_len(1 << 20, 1 << 30, 0), 1 << 20, "native: no tail");
+    }
+}
+
+#[cfg(test)]
+mod web_sync_audit_tests {
+    use super::*;
+
+    #[test]
+    fn the_audit_flags_only_the_pages_that_differ_and_merges_them() {
+        // a pool starting 0x100 into its first page, three pages and a bit long
+        let head = 0x100u64;
+        let size = 3 * PAGE + 0x200 - head;
+        let snap = vec![0u8; size as usize];
+        let mut guest = snap.clone();
+        guest[10] = 1; // page 0
+        guest[(2 * PAGE - head + 5) as usize] = 1; // page 2
+        guest[(3 * PAGE - head + 5) as usize] = 1; // page 3 (the tail)
+        let mut flags = vec![false; 4];
+        pages_differing(&guest, &snap, head, &mut flags);
+        assert_eq!(flags, vec![true, false, true, true]);
+        assert_eq!(
+            flagged_runs(&flags, head, size),
+            vec![(0, PAGE - head), (2 * PAGE - head, size - (2 * PAGE - head))]
+        );
+        assert!(flagged_runs(&[false; 4], head, size).is_empty());
+    }
+}
+
+#[cfg(test)]
+mod compare_by_use_tests {
+    use super::*;
+
+    /// A pool of `pages` pages, its snapshot equal to it, nothing compared yet.
+    fn pool(pages: usize) -> (Vec<u8>, Vec<u8>, Vec<u32>) {
+        let g: Vec<u8> = (0..pages * PAGE as usize).map(|i| (i / 7) as u8).collect();
+        let s = g.clone();
+        (g, s, vec![0; pages])
+    }
+
+    #[test]
+    fn a_write_inside_the_used_range_is_found_and_taken_into_the_snapshot() {
+        let (mut g, mut s, mut seen) = pool(4);
+        g[5000] ^= 1;
+        let (changed, looked) = compare_unseen(&g, &mut s, &mut seen, 0, 1, 4096 + 100, 4096 + 200);
+        assert_eq!(changed, vec![(4096, 4096)], "the written page");
+        assert_eq!(looked, 4096, "only the used page was read");
+        assert_eq!(s, g, "the snapshot holds the new bytes");
+    }
+
+    #[test]
+    fn a_write_outside_the_used_range_waits_for_its_own_use() {
+        let (mut g, mut s, mut seen) = pool(4);
+        g[3 * 4096 + 9] ^= 0x80;
+        let (changed, _) = compare_unseen(&g, &mut s, &mut seen, 0, 1, 0, 2 * 4096);
+        assert!(changed.is_empty(), "page 3 is not used yet");
+        assert_ne!(s[3 * 4096 + 9], g[3 * 4096 + 9], "its snapshot still has the old bytes");
+        // used later in the same sync, or in a later one: found
+        let (changed, _) = compare_unseen(&g, &mut s, &mut seen, 0, 1, 3 * 4096, 4 * 4096);
+        assert_eq!(changed, vec![(3 * 4096, 4096)]);
+    }
+
+    #[test]
+    fn a_page_is_compared_once_a_sync_and_nothing_is_lost_across_syncs() {
+        let (mut g, mut s, mut seen) = pool(2);
+        g[10] = 0xaa;
+        assert_eq!(compare_unseen(&g, &mut s, &mut seen, 0, 1, 0, 4096).0, vec![(0, 4096)]);
+        // written again after its compare in this sync: not looked at again in it
+        g[11] = 0xbb;
+        let (changed, looked) = compare_unseen(&g, &mut s, &mut seen, 0, 1, 0, 64);
+        assert!(changed.is_empty() && looked == 0);
+        // the next sync's use finds the second write
+        assert_eq!(compare_unseen(&g, &mut s, &mut seen, 0, 2, 0, 64).0, vec![(0, 4096)]);
+        assert_eq!(s, g);
+        // unchanged since: found nothing
+        assert!(compare_unseen(&g, &mut s, &mut seen, 0, 3, 0, 8192).0.is_empty());
+    }
+
+    #[test]
+    fn pages_follow_the_guest_pages_of_an_unaligned_pool_and_runs_merge() {
+        // the pool starts 100 bytes into its first page: page 0 holds offsets [0, 3996), page 1 [3996, 8000)
+        let mut g: Vec<u8> = vec![0; 8000];
+        let mut s = g.clone();
+        let mut seen = vec![0u32; 2];
+        g[4000] = 1;
+        assert!(compare_unseen(&g, &mut s, &mut seen, 100, 1, 0, 3996).0.is_empty(), "page 0 only");
+        assert_eq!(compare_unseen(&g, &mut s, &mut seen, 100, 1, 3996, 4000).0, vec![(3996, 4004)]);
+        // both pages written: one run
+        g[1] = 1;
+        g[7999] = 1;
+        assert_eq!(compare_unseen(&g, &mut s, &mut seen, 100, 2, 0, 8000).0, vec![(0, 8000)]);
+    }
+
+    #[test]
+    fn word_compare_finds_a_difference_anywhere() {
+        let a = vec![7u8; 4096 + 37];
+        for at in [0, 63, 64, 2000, 4095, 4096, 4096 + 36] {
+            let mut b = a.clone();
+            b[at] ^= 1;
+            assert!(bytes_differ(&a, &b), "byte {at}");
+        }
+        assert!(!bytes_differ(&a, &a.clone()));
+    }
 }
 
 #[cfg(test)]
@@ -3832,6 +4354,10 @@ mod seal_tests {
             gran: None,
             deferred: Vec::new(),
             tex_dirty: Vec::new(),
+            #[cfg(target_os = "emscripten")]
+            web_seen: Vec::new(),
+            #[cfg(target_os = "emscripten")]
+            web_audit: Vec::new(),
         }
     }
 

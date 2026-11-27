@@ -170,8 +170,18 @@ pub enum Pipeline {
     Compute { cs: Stage },
 }
 
+/// A semaphore or fence: `word` is the value the GPU finished (written by the worker once the submission's work and
+/// read-backs are done); `queued` the value of the last submission signalling it that the worker has handed to the
+/// GPU (its CPU-side execute done), so a GPU-time budget starts there (`icd::wait_queued`).
 pub struct Semaphore {
     pub word: Word,
+    pub queued: Word,
+}
+
+impl Semaphore {
+    pub fn new(v: u64) -> Semaphore {
+        Semaphore { word: Word::new(v), queued: Word::new(v) }
+    }
 }
 
 pub struct Swapchain {
