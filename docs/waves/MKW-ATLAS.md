@@ -137,7 +137,7 @@ silhouette with only faint dark-green leaf shading; no run of this wave changed 
 | `-142058-at-trace` | + copy trace | 120 s | 2,301 copies into sparse textures (section 2) |
 | `-142643-at-fix3-pop` | + block copies | `mkw-pop --faults` | copies made as blocks; shrubs black; 47.9 / 29.0; 2/2 on route; normal exit |
 | `-143337-at-trace2` | + layer pages | 50 s | tail pages unmapped |
-| `-143834-at-final-mkw` | final (`664842c`) | `mkw` | see the report |
+| `-143834-at-final-mkw` | final (`664842c`) | `mkw` | **58.5 / 53.5** [250, 325]; **3/3 on route**; 1 stand-in (the known boot one); normal exit |
 
 FPS (window [245, 290] s of `mkw-pop`, mean / 5 % low) moved between 39 and 52 with the machine's other load; no
 change of this wave touches the frame path when its switch is off.
