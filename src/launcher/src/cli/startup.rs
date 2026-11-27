@@ -60,6 +60,12 @@ pub fn windows(app: &mut App, o: &Options) {
         Some("about") => Some(Action::About),
         Some("build-settings") => Some(Action::Settings(1)),
         Some("tool") => Some(Action::ToolPopup),
+        Some("close-build") => {
+            app.ask_close();
+            None
+        }
+        Some("play") => Some(Action::Play),
+        Some("build") => Some(Action::Build),
         _ => None,
     };
     named.into_iter().for_each(|a| app.dispatch(a));

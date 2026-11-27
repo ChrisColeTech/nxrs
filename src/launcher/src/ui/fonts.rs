@@ -22,6 +22,7 @@ pub fn definitions(files: FontFiles) -> FontDefinitions {
         add("cjk", files.cjk),
     );
     let symbols = add("symbols", files.symbols);
+    let mono_bold = add("ui-mono-bold", files.mono_bold);
     let builtin = |f: FontFamily| defs.families.get(&f).cloned().unwrap_or_default();
     let (prop, mono_builtin) = (
         builtin(FontFamily::Proportional),
@@ -50,6 +51,15 @@ pub fn definitions(files: FontFiles) -> FontDefinitions {
         family(semi_first, &prop),
         family(mono.then_some("ui-mono"), &mono_builtin),
     );
+    // the wordmark: the bold mono face, else the mono family
+    let bold_first = if mono_bold {
+        Some("ui-mono-bold")
+    } else {
+        mono.then_some("ui-mono")
+    };
+    let mb = family(bold_first, &mono_builtin);
+    defs.families
+        .insert(FontFamily::Name(super::theme::MONO_BOLD.into()), mb);
     defs.families.insert(FontFamily::Proportional, p);
     defs.families
         .insert(FontFamily::Name(super::theme::SEMIBOLD.into()), s);

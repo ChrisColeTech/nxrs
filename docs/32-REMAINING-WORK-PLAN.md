@@ -185,6 +185,15 @@ Open: GAR-5 raw-writeback producer delta (DKB/MKW), indirect mesh count validati
       write-backs (lanes wait ~20 %), after UPSYNC2 merges. Open bug, unowned: OoT textures sampled in the frame they
       are registered (zero stand-ins at scene changes → one-frame black/red frames; also with lanes off).
       docs/31 rewritten (giga-cut pattern, worktree per wave, no locks); CI: feature-branch CI, release only on main.
+- [~] **2026-11-26/27 engine waves** (lead; all merged into gameplay-harness up to `2e807c6`, wave docs in
+      `docs/waves/`): REF-ARCH, USE-SYNC, SET-FAST, MKW-PIPE, MKW-AHEAD, MKW-SETS, MKW-SYNC, OOT-DESC, OOT-OCC,
+      OOT-REPLAY, OOT-COMBO, DIALOGS. Lead's quiet runs on the main dist (console, 60 Hz, nothing else running):
+      MKW 42.7 / 5% low 29.4 of 60 (`20261127-065536-mkw`, on route, sheets correct; was ~30 / 28); MK8D
+      regression 59.9 / 59.0 (`20261127-070129-mk8d`, no black frames with the occlusion lag on). OoT (agents'
+      numbers): house ~28.8 / 27.5 of 59; full `oot` runs still hit the 32 GB cap at ~840-895 s (texture images grow
+      ~7/s in the house). Open: MKW's default pacer trial still fails on frame spikes (replay thread 17-24 ms);
+      OoT pool-lock waits behind the completion thread's landings; OoT white house frame (~3-5/min, pre-existing);
+      MKW near-black roadside shrubs (pre-existing).
 - [ ] **MKW-RECORD steps 4-6** (2026-11-25 late, branch `mkw-record` up to `2d02e3b`, report in the worktree's
       `docs/waves/MKW-RECORD.md`): 6 translation lanes by default, in-pass cuts, walker walks count as scans. MKW
       30.1 FPS (5% low 28.0) of 60, was 26.9/22.0; replay thread 23.4 ms (was 30.3). Smash 59.8/59.0 unchanged.

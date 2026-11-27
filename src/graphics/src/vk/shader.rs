@@ -24,9 +24,19 @@ pub fn loop_cap() -> u32 {
         std::env::var("NXGFX_LOOP_GUARD")
             .ok()
             .and_then(|v| v.parse().ok())
-            .unwrap_or(65536)
+            .unwrap_or(LOOP_CAP_DEFAULT)
     })
 }
+
+/// The loop bound's default. Native: 65536 back-edges a call. The web (WEB-WPAGE): a runaway loop must end well
+/// inside the browser's GPU watchdog (D3D12 TDR, ~2 s): 65536 back-edges for each of a 1728x972 pass's 1.7 M
+/// fragments is ~1.1e11 iterations, a hung device (DXGI_ERROR_DEVICE_HUNG, 2026-11-27) and once a locked machine;
+/// 4096 is ~7e9 at most, well under a second on the GPUs the web build targets, and above the loops games run on
+/// purpose (blur and PCF kernels, light lists: tens to a few hundred back-edges a call).
+#[cfg(target_os = "emscripten")]
+pub const LOOP_CAP_DEFAULT: u32 = 4096;
+#[cfg(not(target_os = "emscripten"))]
+pub const LOOP_CAP_DEFAULT: u32 = 65536;
 
 pub static CLIP_CULL_LIMIT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
 
@@ -814,6 +824,41 @@ pub fn remap(
     Ok((w, res, pool, c1))
 }
 
+/// A shader pack's modules as the library keeps them (SPIR-V words, json text); None when the pack cannot be read
+/// or a module is not whole words (`shaders::pack`, WEB-W6b).
+pub fn pack_modules(bytes: &[u8]) -> Option<Vec<(ShaderKey, (Vec<u32>, Option<String>))>> {
+    shaders::pack::decode(bytes)?
+        .into_iter()
+        .map(|e| {
+            if e.spv.len() % 4 != 0 || e.spv.is_empty() {
+                return None;
+            }
+            let words = e.spv.chunks_exact(4).map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect();
+            Some((e.key, (words, e.json.and_then(|j| String::from_utf8(j).ok()))))
+        })
+        .collect()
+}
+
+/// `NXGFX_SHADER_REC=<file>`: the key of each module the library loads, once, in first-use order, appended to the
+/// file (the recording the web build's shader packs are made from, `shaders::pack::RECORDING`; WEB-W6b).
+fn record(key: &ShaderKey) {
+    use std::io::Write;
+    type Rec = Mutex<(std::collections::HashSet<ShaderKey>, std::fs::File)>;
+    static REC: std::sync::OnceLock<Option<Rec>> = std::sync::OnceLock::new();
+    let rec = REC.get_or_init(|| {
+        let path = std::env::var_os("NXGFX_SHADER_REC")?;
+        let f = std::fs::OpenOptions::new().create(true).append(true).open(&path).ok()?;
+        crate::vklog!("shader recording: first uses appended to {}", PathBuf::from(&path).display());
+        Some(Mutex::new((Default::default(), f)))
+    });
+    if let Some(r) = rec {
+        let mut g = r.lock().unwrap();
+        if g.0.insert(*key) {
+            let _ = writeln!(g.1, "{}", key_hex(key));
+        }
+    }
+}
+
 pub struct Library {
     dir: Mutex<Option<PathBuf>>,
     mem: Mutex<HashMap<ShaderKey, (Vec<u32>, Option<String>)>>,
@@ -905,6 +950,14 @@ impl Library {
     }
 
     fn load(&self, key: &ShaderKey) -> Option<(Vec<u32>, Option<String>)> {
+        let v = self.load_from(key);
+        if v.is_some() {
+            record(key);
+        }
+        v
+    }
+
+    fn load_from(&self, key: &ShaderKey) -> Option<(Vec<u32>, Option<String>)> {
         if let Some(v) = self.mem.lock().unwrap().get(key) {
             return Some(v.clone());
         }
@@ -929,7 +982,67 @@ impl Library {
                 return Some((words, json));
             }
         }
+        // the web: what the live translator brought (or is still waiting for) is not fetched again (WEB-W7b)
+        #[cfg(target_os = "emscripten")]
+        if let Some(known) = super::live::web_known(key) {
+            return known;
+        }
+        // the web build preloads no shaders: a recorded module comes with its pack (the build's shaders/packs.txt,
+        // WEB-W6b), any other as its own files from the page's server, on first use; a key in neither goes on to the
+        // server's run-time translation (WEB-W7b, below)
+        #[cfg(target_os = "emscripten")]
+        if let Some(v) = self.from_pack(key) {
+            return Some(v);
+        }
+        #[cfg(target_os = "emscripten")]
+        if let Some(bytes) = crate::web::fetch_data(&format!("shaders/spv/{hex}.spv")) {
+            if bytes.len() % 4 == 0 && !bytes.is_empty() {
+                let words = bytes
+                    .chunks_exact(4)
+                    .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+                    .collect();
+                let json = crate::web::fetch_data(&format!("shaders/spv/{hex}.json"))
+                    .and_then(|b| String::from_utf8(b).ok());
+                return Some((words, json));
+            }
+        }
+        #[cfg(target_os = "emscripten")]
+        return super::live::web_fetch_live(key);
+        #[allow(unreachable_code)]
         None
+    }
+
+    /// The web: `key` from the build's shader packs. The index (`shaders/packs.txt`) is fetched once; the pack that
+    /// holds `key` is fetched whole at the first need of any member and all its members go into memory.
+    #[cfg(target_os = "emscripten")]
+    fn from_pack(&self, key: &ShaderKey) -> Option<(Vec<u32>, Option<String>)> {
+        use std::collections::HashSet;
+        use std::sync::OnceLock;
+        static INDEX: OnceLock<HashMap<ShaderKey, usize>> = OnceLock::new();
+        static FETCHED: Mutex<Option<HashSet<usize>>> = Mutex::new(None);
+        let index = INDEX.get_or_init(|| {
+            crate::web::ring::fetch(&format!("{}/{}", shaders::pack::DIR, shaders::pack::INDEX))
+                .and_then(|b| String::from_utf8(b).ok())
+                .and_then(|t| shaders::pack::parse_index(&t))
+                .unwrap_or_default()
+        });
+        let n = *index.get(key)?;
+        // one fetch of a pack, however many threads need its members at once
+        let mut fetched = FETCHED.lock().unwrap();
+        if fetched.get_or_insert_with(HashSet::new).insert(n) {
+            let url = format!("{}/{}", shaders::pack::DIR, shaders::pack::pack_name(n));
+            match crate::web::ring::fetch(&url).as_deref().and_then(pack_modules) {
+                Some(mods) => {
+                    let mut mem = self.mem.lock().unwrap();
+                    for (k, v) in mods {
+                        mem.entry(k).or_insert(v);
+                    }
+                }
+                None => crate::log::red(&format!("shader pack {url} could not be fetched or read")),
+            }
+        }
+        drop(fetched);
+        self.mem.lock().unwrap().get(key).cloned()
     }
 
     /// The module of a shader key; None (a red line once) when the library has none or it cannot be bound.
@@ -949,6 +1062,16 @@ impl Library {
         {
             return true;
         }
+        // the web: the library is on the page's server, fetched on first use (and kept: `load` finds it in memory)
+        #[cfg(target_os = "emscripten")]
+        {
+            if let Some(v) = self.load(key) {
+                self.mem.lock().unwrap().insert(*key, v);
+                return true;
+            }
+            return false;
+        }
+        #[allow(unreachable_code)]
         let Some(dir) = self.dir.lock().unwrap().clone() else {
             return false;
         };
@@ -1640,5 +1763,29 @@ mod vertex_input_tests {
                 String::from_utf8_lossy(&result.stderr)
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod pack_tests {
+    use super::*;
+    use shaders::pack::{encode, Entry};
+
+    #[test]
+    fn a_pack_gives_the_library_words_and_json() {
+        let b = encode(&[
+            Entry { key: [1; 8], spv: vec![0x03, 0x02, 0x23, 0x07, 1, 0, 0, 0], json: Some(b"{\"status\":\"ok\"}".to_vec()) },
+            Entry { key: [2; 8], spv: vec![0x03, 0x02, 0x23, 0x07], json: None },
+        ]);
+        let m = pack_modules(&b).unwrap();
+        assert_eq!(m[0], ([1; 8], (vec![0x0723_0203, 1], Some("{\"status\":\"ok\"}".to_string()))));
+        assert_eq!(m[1], ([2; 8], (vec![0x0723_0203], None)));
+    }
+
+    #[test]
+    fn a_module_that_is_not_whole_words_spoils_the_pack() {
+        let b = encode(&[Entry { key: [1; 8], spv: vec![1, 2, 3], json: None }]);
+        assert_eq!(pack_modules(&b), None);
+        assert_eq!(pack_modules(b"NXSP"), None);
     }
 }

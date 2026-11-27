@@ -63,6 +63,15 @@ pub unsafe extern "C" fn nxweb_main(
     count: i32,
 ) -> i32 {
     nxrt::process::claim_fixed_regions(mods, count);
+    // WEB-W9: the page's settings for this game (the browser keeps them; the page writes them here before main), in
+    // the engine's own ini format, read as a native run reads its <name>.ini
+    let ini = Path::new("/data/settings.ini");
+    if ini.is_file() {
+        let title = std::env::var("NXRS_TITLE").unwrap_or_else(|_| "Game".into());
+        if let Err(e) = nxconfig::open(ini, &title) {
+            eprintln!("[web] settings: {} not read: {e}", ini.display());
+        }
+    }
     nxos_main_with(argc, argv, mods, count, None)
 }
 
@@ -141,7 +150,8 @@ fn run(data: &Path, modules: Vec<Module>, hook: Option<InitHook>) -> Result<(), 
         return Err("no modules".into());
     }
     let exefs = data.join("exefs");
-    let npdm = std::fs::read(exefs.join("main.npdm")).ok();
+    // ExeFS and control data through webdata (the web: the I/O worker; the boot-set recorder)
+    let npdm = crate::webdata::read(data, "exefs/main.npdm").ok();
     let over = std::fs::read_to_string(data.join("profile.tsv")).ok();
     let prof = crate::profile::set(crate::profile::Profile::load(
         npdm.as_deref(),
@@ -162,6 +172,8 @@ fn run(data: &Path, modules: Vec<Module>, hook: Option<InitHook>) -> Result<(), 
 
     let lo = modules.iter().map(|m| m.base).min().unwrap();
     let hi = modules.iter().map(|m| m.base + m.size).max().unwrap();
+    // the compact map (the web) splits its heap and alias block by these
+    nxrt::mem::set_compact_process(prof.pool, prof.sys_resource != 0);
     let mut space = Space::new(
         Range {
             base: lo,
@@ -196,7 +208,8 @@ fn run(data: &Path, modules: Vec<Module>, hook: Option<InitHook>) -> Result<(), 
         .filter(|m| !nros.contains(&m.name) && !m.name.ends_with("_stubs"))
     {
         let p = exefs.join(&m.name);
-        let raw = std::fs::read(&p).map_err(|e| format!("{}: {e}", p.display()))?;
+        let raw = crate::webdata::read(data, &format!("exefs/{}", m.name))
+            .map_err(|e| format!("{}: {e}", p.display()))?;
         files.push((m.name.clone(), m.base, m.size, raw));
     }
     let syms = crate::hle::ModuleSyms::read(
@@ -220,7 +233,7 @@ fn run(data: &Path, modules: Vec<Module>, hook: Option<InitHook>) -> Result<(), 
         })
         .collect();
     // the title's version in the boot log (the build's control data, the update's when it came with one)
-    let version = std::fs::read(data.join("control.nacp"))
+    let version = crate::webdata::read(data, "control.nacp")
         .ok()
         .and_then(|n| nacp_version(&n));
     match &version {

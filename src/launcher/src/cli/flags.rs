@@ -49,6 +49,8 @@ pub fn command() -> Command {
         .arg(value("update-choice", "choice", "Version to build for the --select-title game: newest, none or an installed package"))
         .arg(flag("show-updates", "Open the selected game's Updates window (Game > Install Updates…)"))
         .arg(flag("build", "Build the --select-title game with its saved options and exit"))
+        .arg(flag("build-web", "Build the --select-title game for the web (Chrome) and exit"))
+        .arg(value("serve-web", "folder", "Serve a web build folder on 127.0.0.1 (NXRS_WEB_PORT, default 8780) until closed"))
         .arg(value("engine", "engine", "Engine of the --select-title game, saved: nxrs (before --build and the DLC/update options)"))
         .arg(value("nxrs-build", "exe", "nxrs-build to use instead of the bundled one, saved in the library (empty: the bundled one)"))
         .arg(flag("show-dlc", "Open the selected game's DLC window (Game > Install DLC…)"))
@@ -61,7 +63,7 @@ pub fn command() -> Command {
         .arg(value("smoke-build", "input", "Build a synthetic test input and exit (diagnostics)"))
         .arg(value("build-output", "directory", "Output folder for --smoke-build"))
         .arg(flag("migrate-builds", "Move build folders of the old layout (SwitchRecomp Builds\\<name> [nxrs]) to <source folder>\\nxrs\\<name>, print what moved and exit (with --select-title: that game only)"))
-        .arg(value("show-window", "name", "Open a window: remove (Remove from library), about, build-settings (Settings > Build defaults), tool (the build output popped out)")
-            .value_parser(["remove", "about", "build-settings", "tool"]))
+        .arg(value("show-window", "name", "Open a window: remove (Remove from library), about, build-settings (Settings > Build defaults), tool (the Build tools popover), close-build (the question a close during a build asks), play / build (the selected game's Play or Build: its Native or Web question)")
+            .value_parser(["remove", "about", "build-settings", "tool", "close-build", "play", "build"]))
         .arg(value("show-add", "package", "Open the Add game window for a package or extracted folder"))
 }

@@ -651,7 +651,8 @@ fn db() -> &'static Db {
 /// nxnative's shader tables of a profile (`games/<id>/shaders.tsv.zst`), each file byte for byte: `pso_manifest.tsv`
 /// (the prewarm seed: `S <key> <stage>`, `R <Metal pipeline key>`, `C <key>`), `pso_pairs.tsv` and
 /// `shader_pairs.tsv` (vertex / pixel key pairs), `shader_facts.tsv` and `shader_facts_manual.tsv` (answers to the
-/// shader translator's queries). Empty when the profile has none.
+/// shader translator's queries). Empty when the profile has none, and in the web engine (the tables are build-time
+/// data, left out of the emscripten library by build.rs).
 pub fn shader_tables(id: &str) -> Result<Vec<(String, String)>, String> {
     let Some(raw) = data::GAMES
         .iter()

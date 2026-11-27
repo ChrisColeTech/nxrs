@@ -9,6 +9,12 @@ pub const BAR_HEIGHT: f32 = 36.0;
 pub const CAPTION_BUTTON: f32 = 46.0;
 pub const GLYPH: f32 = 18.0;
 pub const GLYPH_LEFT: f32 = 13.0;
+/// The product name centred on the bar, in the family's wordmark type (giga-cut `brand.rs`: mono
+/// bold 12, 1.2 letter spacing); not drawn when it would come within `WORDMARK_GAP` of a control.
+pub const WORDMARK: &str = "NXRS";
+pub const WORDMARK_SIZE: f32 = 12.0;
+pub const WORDMARK_SPACING: f32 = 1.2;
+pub const WORDMARK_GAP: f32 = 12.0;
 /// The Commands strip under it (Add game, Search & Filter).
 pub const COMMANDS_HEIGHT: f32 = 67.0;
 pub const TOOL_BUTTON: [f32; 2] = [77.0, 59.0];

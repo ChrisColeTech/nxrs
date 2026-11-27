@@ -1,5 +1,5 @@
-//! Properties / Add game: the rail and its section (the family's work window), the footer (Cancel, Apply or Add game). A Draft: nothing
-//! changes until Apply; the X, Escape and Cancel discard it.
+//! Properties / Add game: the rail and its section (the family's work window), the footer (Apply or
+//! Add game). A Draft: nothing changes until Apply; the X and Escape discard it.
 
 use super::{Reply, properties_lists, properties_tabs};
 use crate::constants::words_settings as w;
@@ -45,12 +45,8 @@ pub fn show(ui: &mut Ui, app: &mut App, d: &mut PropertiesDraft) -> Reply {
     });
     d.tab = tab;
     let primary = if d.adding { w::ADD_TITLE } else { w::APPLY };
-    let (cancel, apply) = authored::footer(ui, &p, primary, true, w::CANCEL);
-    let mut reply = Reply {
-        close: cancel,
-        ..Reply::default()
-    };
-    if apply {
+    let mut reply = Reply::default();
+    if authored::footer(ui, &p, primary, true) {
         reply.close = app.apply_properties(d);
     }
     reply

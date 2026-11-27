@@ -38,6 +38,13 @@ unsafe fn vsync_event(c: *mut Cpu) {
                 let period = std::time::Duration::from_nanos(16_666_667);
                 let mut next = std::time::Instant::now() + period;
                 loop {
+                    // a held guest clock (the web's in-game menu): no vsync until it runs again
+                    if crate::clock::held() {
+                        while crate::clock::held() {
+                            std::thread::sleep(std::time::Duration::from_millis(10));
+                        }
+                        next = std::time::Instant::now() + period;
+                    }
                     let now = std::time::Instant::now();
                     if next > now {
                         std::thread::sleep(next - now);
@@ -363,6 +370,15 @@ fn fallback_ttf() -> Option<(Vec<u8>, std::path::PathBuf)> {
     if let Ok(p) = std::env::var("NXOS_FONT") {
         return std::fs::read(&p).ok().map(|d| (d, p.into()));
     }
+    // the web: a page sees no system fonts (without one the game waited for its shared font for ever at Anime Girls'
+    // first level load), and a system font may not be redistributed in a web build: the repository's own OFL font
+    // (Hind, LICENSES/hind-ofl.txt, which the web build carries beside the page)
+    #[cfg(target_os = "emscripten")]
+    {
+        static HIND: &[u8] = include_bytes!("../../third_party/fonts/Hind-Regular.ttf");
+        return Some((HIND.to_vec(), "Hind-Regular.ttf (built in)".into()));
+    }
+    #[allow(unreachable_code)]
     let w = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
     ["arial.ttf", "segoeui.ttf", "tahoma.ttf"]
         .iter()

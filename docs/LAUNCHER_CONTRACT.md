@@ -122,9 +122,12 @@ The program is nxrs-build itself; working directory: its folder; stdout and stde
 | What | Arguments (`nxrsBuildArguments`, `nxrsUpdateInfoArguments`, `nxrsDlcSyncArguments`) |
 |---|---|
 | Build | `build <source> --outdir <buildDir> -o <outputName> --jobs <n> --machine [--no-update \| --update <pkg>] [--keys <prod.keys>]` |
+| Build > Web | the same with `--outdir <webDir>`, then `--shaders-from <buildDir>\<name>_data` (when the game has a build folder) and `--target web` last (`model::args::build_web`); below |
 | Update probe | `update-info --game <source> [--keys <prod.keys>] <pkg>...` |
 | DLC | `dlc sync --datadir <buildDir>\<name>_data [--keys <prod.keys>] [<pkg>...]` (Play, Install DLC, Remove, after a build) |
 | Version | `contract` |
+| Run-time shader (the web server) | `shader-xlate <webDir>\<name>_data\shaders`, the request on stdin, the key on stdout (Web builds, below) |
+| Pad output (the web server) | `pad-bridge`, the page's pad lines on stdin, its log on stdout and stderr (Web builds, below; added 2026-11-27, WEB-PADBRIDGE) |
 
 Other subcommands (not run by the launcher): `dlc install | remove | list`, `profile`, `doctor`, `translate`.
 
@@ -169,6 +172,105 @@ exit codes 0 / 1 / 2, the output layout and the data folder), plus, with `--mach
 - **Play**: no Python, .NET or `tools\nxshader` checks (nxrs translates shaders in the build). The DLC check before
   Play and the INI settings (renderer, button layout) apply.
 
+### Web builds (`--target web`, docs/35 W5)
+
+**One Play, one Build** (owner, 2026-11-27; WEB-W5b). The Game menu, the game's context menu, the card's primary
+button, Enter / double-click, Ctrl+B and the Updates window's Build now each have one Play or one Build, and each
+opens the Native / Web chooser: a small dialog titled Play or Build, its heading the game, a line per target saying
+what it does or why it cannot run now, and two equal buttons, **Native** and **Web**, that act at once (the header
+X or Escape dismisses it). Play is enabled when either target can run, Build when either can build (`App::why_not`
+is the one rule). Play's reasons: no native build yet; no web build yet; no Chromium browser found; the game is
+running or building. Build's: the native build is up to date (Native); another build is running; the source is
+missing; nxrs-build cannot build. Native runs the existing build and play; Web the paths below.
+
+A browser build of the same game (Chrome is the target), built by Build > **Web** (`nxrs.exe --select-title
+<title> --build-web` headless) into the game's web folder, `<webDir>` =
+`<base>\nxrs-web\<outputName>` beside its `<base>\nxrs\<outputName>`. The native build is not touched and the library
+entry does not change (no `builtSource`, no INI, no DLC sync). The run's lines, `@progress` and `@result` are a
+build's; its log is `<webDir>\<outputName>.build.log`. Success: exit 0 **and** `<webDir>\build.json` and
+`<webDir>\game.wasm` exist.
+
+`--shaders-from <data folder>` (WEB-W7): the translated shaders of another build of the title are imported into
+the web build's library (every complete record its `shaders\spv\` and `shaders\live\<key>\` hold that the web library
+lacks). A title that makes its shaders at run time (Ren'Py, Unity variants) has none for the build to find, and a
+browser cannot run the translator, so its web build draws only the shaders its native build's runs translated. A
+folder without a library is a line in the log, not a failure.
+
+**Run-time shaders on request** (WEB-W7b). A shader the page's library lacks is asked for with
+`POST /<slug>/shader-xlate/<key>` (`<key>`: 16 hex digits; body `u32 LE ctl length | ctl | code`, the blobs the
+native live translator is given, at most 4 MiB). The launcher's server runs `nxrs-build shader-xlate <data>\shaders`
+(contract v2: the body on stdin, fixed arguments, working directory nxrs-build's folder, 120 s limit) with the
+nxrs-build it builds with (Play in browser: the toolchain's; `--serve-web`: `NXRS_BUILD`, the release's
+`nxrs-engine\`, beside the launcher). nxrs-build translates it exactly as a native run's live translator does
+(`translate_one`: dmsh_xlate, fixes, spirv-val, the profile's facts) into `<data>\shaders\live\<key>\`, prints the key
+and exits 0, or prints the reason on stderr and exits 1. Answers: `200` `u32 LE spv length | spv | json` (also when
+`live\<key>\spv\` already holds both files: nothing is run); `400` a key that is not 16 hex digits or a body that is
+not a request; `404` no such build; `413` a body over 4 MiB, refused unread (connection closed); `422` the
+translation failed (nxrs-build's reason, or a key other than the one asked for); `503` no nxrs-build. One
+translation per key at a time. Nothing outside the mount's `shaders\live\<key>\` is written, and nothing but
+nxrs-build is run. The page also looks in `data/shaders/live/<key>/spv/` before asking (an earlier page's
+translation); the next build promotes those records into the library's `spv\`. A static host has no route: the page
+says so in a red line and skips the draws, as before. `scripts/web/dev_server.py` has the same route.
+
+**Pad rumble and lights through the launcher** (WEB-PADBRIDGE, contract 2, added 2026-11-27). Chrome cannot rumble
+every pad (the DualSense has no `vibrationActuator` on Windows; WebHID needs a permission) and a page cannot set a
+pad's lights, so a page the launcher serves sends its pads' output to the launcher, which drives the pads natively:
+
+- The page opens a WebSocket (RFC 6455; text frames) to `/<slug>/pad-bridge` on its own origin and sends one line
+  per change and at least every 250 ms: `pad <active> <low 1> <high 1> <low 2> <high 2> <low 3> <high 3> <low 4>
+  <high 4>`. `active` is 1 while the game owns input (the page focused and visible, its menu closed: what a native
+  run takes from its window's focus), else 0; the levels are the engine's input block words `[56..64)` (0..65535,
+  already 0 when not active, the rumble settings applied). Zero at once on menu open, blur, hidden and `pagehide`.
+- The launcher's server answers the upgrade `101` (`Sec-WebSocket-Accept`), `400` without a key, `404` for no such
+  build, `503` when the mount has no nxrs-build (an imported web game) or it does not start. It runs `nxrs-build
+  pad-bridge` (fixed arguments, working directory nxrs-build's folder, stdout and stderr into `<webDir>\pad-bridge.log`,
+  written anew each connection), writes each well-formed line to its stdin (others are dropped), answers ping with
+  pong, and ends on a close frame, a broken socket or 5 s without a frame: stdin is closed and the bridge has 2 s to
+  end before it is killed.
+- `nxrs-build pad-bridge` (Windows; elsewhere it says so and exits 1) runs the engine's input layer as a native run's
+  input thread does (`src/os/src/input/bridge.rs`): its scan, player slots (the first pad is player 1), player lights
+  while `active` (DualSense player LED and lightbar, DualShock 4 lightbar, Nintendo player LEDs), and each player's
+  two levels through the native output (DualSense / DualShock 4 output reports, XInput, Nintendo standard rumble).
+  It never takes a pad from the browser: devices are opened shared, Sony pads on Bluetooth (whose output would switch
+  them to reports the browser cannot read) and Switch 2 pads (a BLE connection) are left alone, HD rumble is off (the
+  page carries the two standard levels). No line for 1 s: motors 0 and lights off until the next line. End of stdin:
+  motors 0, lights off, devices closed, exit 0. Each output report it writes is in its log with its bytes; a failed
+  write is logged with the Windows error.
+- Without the route (a static host, `dev_server.py`, a launcher or nxrs-build without the verb) the socket does not
+  open or closes, and the page plays rumble itself as before (`vibrationActuator`, WebHID for the DualSense).
+
+```
+<webDir>\index.html, boot.js, input.js, saves.js, io-worker.js, audio-worklet.js   the page and its workers
+                                 (embedded in nxrs-build: a release needs no source tree; the list is webhost.rs's
+                                 HOST_FILES)
+<webDir>\game.js, game.wasm      the Emscripten loader and the module (engine + game)
+<webDir>\data.json, bootset.json the data manifest and the boot set the page prefetches (webpack.rs)
+<webDir>\build.json              what the folder is (below)
+<webDir>\<outputName>_data\      the game's data, as a native build's; served, never copied
+<webDir>\<outputName>_build\     generated C and objects, kept for rebuilds
+```
+
+`build.json` (`format` 1): `{"format", "kind": "nxrs-web", "title", "titleId" (16 hex or null), "engine": {"name",
+"contract", "version"}, "entry": "index.html", "data": "<outputName>_data", "files": [{"path", "size", "role"}]}`;
+roles `host`, `loader`, `module`, `manifest`, `bootset` (later waves add others; readers ignore roles they do not
+know, and refuse a newer `format`).
+
+**Serving.** Any static server that sends `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp` and answers byte ranges exactly (206 + `Content-Range`) can serve the
+folder, with `data/<path>` mapped to the data folder `build.json` names. The launcher's own server
+(`services/web_serve.rs`, in its process, 127.0.0.1) mounts each web build at `/<slug>/` (the output name in
+lower case, `-` between words) on port 8780 (`NXRS_WEB_PORT`; the next of ten when it is taken), one fixed port so
+the page's origin, and with it the browser's data cache and saves, stays the same. `nxrs.exe --serve-web <webDir>`
+serves one folder without a window; `scripts/web/dev_server.py` (engine development) does the same.
+
+Play > **Web** can run only when the web folder holds a finished web build and a Chromium browser exists:
+the default browser when its `http` ProgId is Chrome, Edge, Brave, Chromium, Vivaldi or Opera, else Chrome by path
+(App Paths, then Program Files, Program Files (x86), the user's local data; Linux: `google-chrome`,
+`chromium` on PATH). It starts the server (once), mounts the build (with the toolchain's nxrs-build for run-time
+shaders) and opens its address in a tab; Chrome's
+"Install as app" gives it an app window. The server lives as long as the launcher: closing the launcher stops the
+game's data streaming.
+
 ### Release layout (`scripts/package-release.py --nxrs-engine <engine checkout>`)
 
 ```
@@ -177,11 +279,18 @@ nxrs-engine\nxrs-build.exe, engine.json
 nxrs-engine\nxfront.lib, nxrt.lib                       MSVC engine (used when Visual Studio + a clang are installed)
 nxrs-engine\gnu\libnxfront.a, libnxrt.a, libwindows.0.52.0.a   gnullvm engine
 toolchain\llvm-mingw\                                   x86_64 part of llvm-mingw (no Visual Studio needed)
+vcruntime140.dll, vcruntime140_1.dll, msvcp140.dll      beside nxrs.exe, nxrs-build.exe and tools\spirv-val.exe
 legal\licenses\nxrs-engine\                             the engine's LICENSES\
 ```
 
 nxrs-build chooses MSVC only when Visual Studio, a clang and `nxfront.lib` are all there (`cc::use_gnu`), else the
-bundled llvm-mingw with `gnu\`: a release may ship only the gnullvm set.
+bundled llvm-mingw with `gnu\`: a release may ship only the gnullvm set. `.github/workflows/release.yml` builds both
+(`scripts/build/build.ps1`), so the zip builds games with nothing installed.
+
+Linux (`nxrs-linux-x64.tar.gz`): `nxrs`, `nxrs-engine/` (`libnxfront.a` with opus, libvpx, dav1d and FFmpeg's H.264 /
+AAC decoders inside, `NXRS_CODECS`), and `toolchain/clang/` (LLVM's clang and lld, a glibc sysroot; nxrs-build's
+`../toolchain/clang/bin/clang`), all from `scripts/build/linux-deps.sh`. A game links only ALSA and the C library
+of the system.
 
 ### Not done
 

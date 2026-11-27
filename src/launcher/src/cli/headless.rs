@@ -96,6 +96,8 @@ pub fn run(app: &mut App, o: &Options) -> i32 {
         app.install_update_packages(&o.install_update, false);
     } else if o.build {
         app.start_build();
+    } else if o.build_web {
+        app.start_web_build();
     } else if source_changed {
         return 0;
     }

@@ -35,6 +35,12 @@ pub const NOT_A_BUILD: &str = "Not deleted: this folder is not a build of this g
                                game's package: ";
 /// Before the migration's first write, the library file is copied here (once).
 pub const PRE_LAYOUT_BACKUP: &str = "library.pre-layout.json";
+/// Covers and backgrounds are copied into `<data folder>\artwork\<entry id>-<kind>.<ext>`.
+pub const ARTWORK_FOLDER: &str = "artwork";
+/// The kinds, in the copies' names: the cover first.
+pub const ART_KINDS: [&str; 2] = ["cover", "background"];
+/// Before the start's first artwork repoint, the library file is copied here (once).
+pub const PRE_ARTWORK_BACKUP: &str = "library.pre-artwork.json";
 
 #[cfg(windows)]
 pub const EXECUTABLE_SUFFIX: &str = ".exe";

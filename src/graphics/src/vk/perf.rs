@@ -83,6 +83,24 @@ pub enum C {
     /// written storage buffers bound with no size (a pushed plain address): noted as GPU-written over their whole
     /// binding (up to `NXGFX_SBUF0_MB`) at every submission
     SbufSize0Written,
+    /// (SET-FAST) dynamic states and set offsets not set again: the command buffer holds those values already
+    DynSkipped,
+    /// (MKW-PIPE) the game's threads blocked before queueing an op (`aq_wait_room`): the replay 63 ops behind, the
+    /// presents queued at their limit; nvnSyncWait waiting for a command-buffer fence to be published
+    WaitRoomNs,
+    WaitRoomPresentNs,
+    WaitPublishNs,
+    /// the replay thread's time in its ops (busy), and waiting for one (idle)
+    AqBusyNs,
+    AqIdleNs,
+    /// parked streams run on at once without a pool sync of their own (`queue::chain_parked`)
+    Chained,
+    /// stage sets patched from a seed: a copy the segment's stream began with (`exec::set_seed_on`)
+    SetsSeeded,
+    /// seeds found for a module but not usable (older than the pools, not valid, a twin view)
+    SeedsStale,
+    /// presents of a GPU-drawn picture made without a pool sync of their own (`queue::present_lean`)
+    PresentsLean,
     N,
 }
 
@@ -146,6 +164,16 @@ const NAMES: [&str; C::N as usize] = [
     "uniform_updates",
     "uniform_update_pass_ends",
     "sbuf_size0_written",
+    "dyn_skipped",
+    "wait_room_ns",
+    "wait_room_present_ns",
+    "wait_publish_ns",
+    "aq_busy_ns",
+    "aq_idle_ns",
+    "parked_chained",
+    "sets_seeded",
+    "seeds_stale",
+    "presents_lean",
 ];
 
 static COUNT: [AtomicU64; C::N as usize] = [const { AtomicU64::new(0) }; C::N as usize];
@@ -503,12 +531,21 @@ pub fn frame(frame: u64) {
     let df = (frame - st.prev_frame).max(1) as f64;
     let p = st.prev;
     let subs = d(C::GpuSubs, &p);
-    if subs > 0 {
+    // WEB-W8: a device without timestamps (the web device) still gets the CPU side of these lines (replay time, the
+    // game's waits, pipelining), with the GPU time named as not measured
+    if subs > 0 || cfg!(target_os = "emscripten") {
+        let gpu = if subs > 0 {
+            format!(
+                "{:.2} ms per frame ({:.2} ms per submission, {:.1} submissions per frame)",
+                d(C::GpuNs, &p) as f64 / 1e6 / df,
+                d(C::GpuNs, &p) as f64 / 1e6 / subs as f64,
+                subs as f64 / df
+            )
+        } else {
+            "not measured (no timestamps)".to_string()
+        };
         crate::vklog!(
-            "GPU time up to frame {frame}: {:.2} ms per frame ({:.2} ms per submission, {:.1} submissions per frame); replay on the CPU {:.2} ms per frame ({}); the game waited {:.2} ms per frame (sync {:.2}, acquire {:.2}, finish {:.2})",
-            d(C::GpuNs, &p) as f64 / 1e6 / df,
-            d(C::GpuNs, &p) as f64 / 1e6 / subs as f64,
-            subs as f64 / df,
+            "GPU time up to frame {frame}: {gpu}; replay on the CPU {:.2} ms per frame ({}); the game waited {:.2} ms per frame (sync {:.2}, acquire {:.2}, finish {:.2})",
             d(C::ReplayNs, &p) as f64 / 1e6 / df,
             breakdown(&cur, &p, df),
             (d(C::WaitSyncNs, &p) + d(C::WaitAcquireNs, &p) + d(C::WaitFinishNs, &p)) as f64 / 1e6 / df,
@@ -516,9 +553,20 @@ pub fn frame(frame: u64) {
             d(C::WaitAcquireNs, &p) as f64 / 1e6 / df,
             d(C::WaitFinishNs, &p) as f64 / 1e6 / df
         );
+        crate::vklog!(
+            "pipelining up to frame {frame}, per frame: the game's threads waited for room in the replay queue {:.2} ms (ops {:.2}, presents {:.2}) and for fence publication {:.2} ms; the replay thread busy {:.2} ms, idle {:.2} ms; {:.1} parked streams run on at once without a pool sync of their own (NXGFX_PARK_CHAIN); {:.2} presents without one (NXGFX_PRESENT_LEAN)",
+            (d(C::WaitRoomNs, &p) + d(C::WaitRoomPresentNs, &p)) as f64 / 1e6 / df,
+            d(C::WaitRoomNs, &p) as f64 / 1e6 / df,
+            d(C::WaitRoomPresentNs, &p) as f64 / 1e6 / df,
+            d(C::WaitPublishNs, &p) as f64 / 1e6 / df,
+            d(C::AqBusyNs, &p) as f64 / 1e6 / df,
+            d(C::AqIdleNs, &p) as f64 / 1e6 / df,
+            d(C::Chained, &p) as f64 / df,
+            d(C::PresentsLean, &p) as f64 / df
+        );
     }
     crate::vklog!(
-        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets ({:.1} reused, {:.1} patched), {:.1} vertex inputs unchanged, {:.1} write-backs, {:.1} uniform updates ({:.1} ending a pass), {:.1} written storage buffers with no size; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms; {} linked from parts, {} of them optimized since, {} shader parts made ahead); dropped work {}",
+        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets ({:.1} reused, {:.1} patched, {:.1} of them from a seed, {:.1} seeds stale), {:.1} vertex inputs unchanged, {:.1} dynamic states / set offsets unchanged, {:.1} write-backs, {:.1} uniform updates ({:.1} ending a pass), {:.1} written storage buffers with no size; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms; {} linked from parts, {} of them optimized since, {} shader parts made ahead); dropped work {}",
         d(C::Draws, &p) as f64 / df,
         d(C::DrawsSkipped, &p) as f64 / df,
         cur[C::SkipNoShader as usize],
@@ -532,7 +580,10 @@ pub fn frame(frame: u64) {
         d(C::DescSets, &p) as f64 / df,
         d(C::SetsReused, &p) as f64 / df,
         d(C::SetsPatched, &p) as f64 / df,
+        d(C::SetsSeeded, &p) as f64 / df,
+        d(C::SeedsStale, &p) as f64 / df,
         d(C::VinSkipped, &p) as f64 / df,
+        d(C::DynSkipped, &p) as f64 / df,
         d(C::Writebacks, &p) as f64 / df,
         d(C::UbUpdates, &p) as f64 / df,
         d(C::UbPassEnds, &p) as f64 / df,
@@ -556,6 +607,9 @@ pub fn frame(frame: u64) {
             crate::vklog!("{l}");
         }
         crate::vklog!("{}", memory_line());
+        if let Some(g) = super::Gpu::try_get() {
+            crate::vklog!("{}", g.image_census());
+        }
         st.rsz_frame = frame;
     }
 }
@@ -610,12 +664,13 @@ pub fn memory_line() -> String {
         .collect();
     let (ni, parked) = g.image_counts();
     format!(
-        "memory: private {private} MB; allocator {} MB in blocks, {} MB allocated ({}); this layer's system memory {} MB ({} refused over its cap); images {ni}, parked {parked}, {} registered without one yet; replay queue {} ops behind, {} submits replayed with the one before",
+        "memory: private {private} MB; allocator {} MB in blocks, {} MB allocated ({}); this layer's system memory {} MB ({} refused over its cap); {}; images {ni}, parked {parked}, {} registered without one yet; replay queue {} ops behind, {} submits replayed with the one before",
         rep.total_reserved_bytes >> 20,
         rep.total_allocated_bytes >> 20,
         top.join(", "),
         super::HOST_LIVE.load(std::sync::atomic::Ordering::Relaxed) >> 20,
         super::HOST_REFUSED.load(std::sync::atomic::Ordering::Relaxed),
+        super::queue::wb_bufs::line(),
         super::image::lazy_waiting(),
         super::queue::aq_backlog(),
         super::queue::AQ_MERGED.load(std::sync::atomic::Ordering::Relaxed)

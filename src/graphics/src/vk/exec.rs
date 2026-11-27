@@ -130,6 +130,9 @@ pub struct QState {
     /// when the key is the same, patched for the next set of that module when only its uniform buffers or push
     /// constants changed
     shadow: std::cell::RefCell<[Vec<Box<Shadow>>; 7]>,
+    /// (segment seeding, `set_seed_on`) the host copies the queue's state held when the stream this segment is of
+    /// began: a module's copy is taken from here when `shadow` has none (`patch_set`)
+    seed: Option<Arc<Seeds>>,
     /// the id of the c2 bank `banks` returned last
     c2id: std::cell::Cell<u64>,
     /// the vertex input and vertex buffers last set in this queue's command buffer: (submission, layout words,
@@ -139,6 +142,8 @@ pub struct QState {
     /// shader's inputs, the pools' generation); the same again sets nothing (Donkey Kong Bananza: 4.4 ms a frame of
     /// vertex input over ~4,500 draws, most repeating the draw before)
     vin_from: std::cell::Cell<(u64, usize, u64)>,
+    /// the dynamic state and descriptor-buffer offsets last set in this queue's command buffer (`DynShadow`)
+    dyns: std::cell::RefCell<DynShadow>,
     /// push constants' generation (new at every PushConstants)
     pgen: u64,
     /// inline uniform updates' generation (new at every UPDATE_UB): a set whose storage-buffer address is read from a
@@ -266,6 +271,7 @@ struct SetKey {
 /// A stage's last set as written into the descriptor buffer, kept in host memory with the key it was made for: a set
 /// whose key differs from it only in uniform buffers or push constants is this copy with those slots written again
 /// (`patch_set`) instead of the whole set resolved and written (MKW binds new uniform buffers at nearly every draw).
+#[derive(Clone)]
 struct Shadow {
     /// the module the set is of
     module: (usize, crate::nvn::prog::ShaderKey),
@@ -282,6 +288,21 @@ struct Shadow {
     /// the loss ring's record of the set's buffer descriptors (`lost::ring::note_set`)
     ring: [(u32, i32, u64, u64, u64); super::lost::ring::MAXB],
     nr: usize,
+    /// (segment seeding) `image::TEX_DUE` when its texture slots were resolved, and whether one of them is a twin view
+    /// (`image::is_twin_view`: copied per submission, never taken over into another one)
+    due: u64,
+    twin: bool,
+}
+
+/// `NXGFX_SET_SEED` (default on; `0` the old path): a segment of a stream starts with the stage sets' host copies the
+/// queue's state held when the stream began (`QState::seed`), so its first set of a module is patched from that copy
+/// instead of built whole (SET-FAST: ~700 whole sets a frame, 95-97 % "no copy of the module", each segment starting
+/// empty). A copy from another submission is patched with every slot that has a per-submission effect made again
+/// (`CL_SUBMIT`: staged banks, push constants and support bytes, storage buffers and images with their GPU-write notes,
+/// draw records); only its uniform-buffer and sampled-texture slots are kept, as a patch keeps them.
+fn set_seed_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| set_patch_on() && std::env::var("NXGFX_SET_SEED").as_deref() != Ok("0"))
 }
 
 /// Stage sets are written in host memory first and patched from their copy (`Shadow`) unless `NXGFX_SET_PATCH=0`, the
@@ -317,6 +338,8 @@ fn shadow_slot(list: &mut Vec<Box<Shadow>>, module: (usize, crate::nvn::prog::Sh
                 memory_generation: 0,
                 ring: Default::default(),
                 nr: 0,
+                due: 0,
+                twin: false,
             }));
             list.len() - 1
         }
@@ -344,9 +367,22 @@ const CL_SUPPORT: u32 = 1 << 19;
 const CL_MESH: u32 = 1 << 20;
 /// textures and images (their handles are in c2; the views depend on the pools and the registered images)
 const CL_TEX: u32 = 1 << 21;
+/// a slot with a per-submission effect (staged bytes, a GPU-write note, a draw record): made again in every submission
+/// (only a seeded copy from another submission asks for it: `patch_classes`)
+const CL_SUBMIT: u32 = 1 << 22;
 
-/// The classes stage-set resource `r` depends on (0: only on the module and the submission).
+/// The classes stage-set resource `r` depends on, `CL_SUBMIT` for every slot but a uniform buffer bound directly and a
+/// sampled texture (resolved from global state only: the pools, the registered images).
 fn res_class(r: &Res) -> u32 {
+    let sub = match r {
+        Res::Cbuf { bank: 3..=18 } | Res::Tex { .. } | Res::Pool => 0,
+        _ => CL_SUBMIT,
+    };
+    res_class_of(r) | sub
+}
+
+/// `res_class` without `CL_SUBMIT` (0: only on the module and the submission).
+fn res_class_of(r: &Res) -> u32 {
     let slot = |s: i32| match s {
         0 => CL_C0,
         -1 | 2 => CL_C2,
@@ -369,11 +405,21 @@ fn res_class(r: &Res) -> u32 {
 /// The classes whose slots a set keyed `new` needs written again over the module's set keyed `old` (`patch_set`);
 /// None when it is another module's or another submission's set (staging is per submission). Every other slot names
 /// what a whole set would: a slot's class holds everything its descriptor is made from.
+#[cfg(test)]
 fn patch_classes(old: &SetKey, new: &SetKey) -> Option<u32> {
-    if old.module != new.module || old.serial != new.serial {
+    patch_classes_x(old, new, false)
+}
+
+/// `patch_classes`; `cross`: a copy of another submission is patched too (segment seeding), with every `CL_SUBMIT`
+/// slot made again.
+fn patch_classes_x(old: &SetKey, new: &SetKey, cross: bool) -> Option<u32> {
+    if old.module != new.module || (old.serial != new.serial && !cross) {
         return None;
     }
     let mut c = ubos_changed(old, new) as u32;
+    if old.serial != new.serial {
+        c |= CL_SUBMIT;
+    }
     if old.pgen != new.pgen {
         c |= CL_PUSH;
     }
@@ -542,7 +588,7 @@ fn set_key(
         dispatch: di,
         base_instance: bi,
         serial: sub.serial,
-        image_gen: g.tables.generation(),
+        image_gen: set_image_gen(g),
         chunk: sub.db_cur,
         mesh: match qs.mesh_rec {
             Some((b, o, r)) if m.res.iter().any(|(_, r)| matches!(r, Res::MeshDraw)) => {
@@ -997,9 +1043,11 @@ impl QState {
             tpart: Default::default(),
             sets: Default::default(),
             shadow: Default::default(),
+            seed: None,
             c2id: Default::default(),
             vin_last: std::cell::RefCell::new((0, 0, [(vk::Buffer::null(), u64::MAX); 32])),
             vin_from: std::cell::Cell::new((u64::MAX, 0, 0)),
+            dyns: Default::default(),
             pgen: new_bgen(),
             ugen: new_bgen(),
             scache: Default::default(),
@@ -1094,6 +1142,12 @@ impl QState {
         q.ugen = self.ugen;
         // the stream's inline uniform updates before the segment (its handle reads see them, as the GPU will)
         q.ub_upd = self.ub_upd.clone();
+        // the seeds (`set_seed_on`), shared: gathered at parallel runs' joins from the segments' copies, which are
+        // moved there, never copied (a copy of this state's own copies at every fork cost the replay thread more than
+        // the seeds saved)
+        if set_seed_on() {
+            q.seed = self.seed.clone();
+        }
         q
     }
 
@@ -1479,10 +1533,16 @@ pub mod passdump {
                 };
                 (im.image, im.tex, im.format, im.extent)
             };
-            let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(tex.d.format);
-            // compressed images as their blocks (an ASTC texture's image is decoded: left out)
+            let (mut bpb, mut bw, mut bh) = crate::tex::layout::fmt_bpb(tex.d.format);
+            // compressed images as their blocks; an ASTC texture's image is decoded: as its RGBA8 texels when decoded
+            // to RGBA8 (the -gpu.bin is then texels, the -mem.bin the ASTC blocks), left out when re-encoded as BC7
             let decoded =
                 crate::tex::format::tex_format(tex.d.format).is_some_and(|tf| tf.astc.is_some());
+            if decoded
+                && matches!(fmt, vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB)
+            {
+                (bpb, bw, bh) = (4, 1, 1);
+            }
             if bpb == 0 || decoded && (bw != 1 || bh != 1) {
                 continue;
             }
@@ -1945,7 +2005,12 @@ fn clamped_draw_record(
     ind: u64,
     rec: u32,
 ) -> Option<(vk::Buffer, u64)> {
-    let (b, o, _) = super::mem::resolve(g, sub, ind, rec as u64)?;
+    // (remembered on the thread with the lane caches: MKW's mesh draws resolved their record under the pools' lock)
+    let (b, o, _) = if super::mem::lane_caches() {
+        resolve_cached(g, sub, ind, rec as u64)?
+    } else {
+        super::mem::resolve(g, sub, ind, rec as u64)?
+    };
     if !clamp_on() {
         return Some((b, o));
     }
@@ -2567,6 +2632,15 @@ fn source_image(
     let im = imgs.by_serial.get(&serial)?;
     Some((im.image, im.tf, im.extent))
 }
+/// Copies traced (`NXGFX_COPY_TRACE`).
+static COPY_TRACED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `NXGFX_COPY_TRACE=1` (diagnostics): every texture copy into a sparse texture is logged (at most 4000).
+fn copy_trace() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_COPY_TRACE").as_deref() == Ok("1"))
+}
+
 /// The resolution scale of a texture's image (1 when nothing is scaled).
 fn img_scale(g: &Gpu, serial: u64) -> f32 {
     if !super::scale::active() {
@@ -3508,8 +3582,27 @@ fn target_of(ty: u32) -> i32 {
 
 /// The view of a registered texture ID with the type the shader declares; a stand-in when there is none.
 /// `ty`: the shader's texture type, and in bits 16.. the format a storage image is declared with (Res::Img::fmt).
+/// Views keyed per texture ID, stage sets by `Tables::set_generation` (TRANSLATE-REUSE change 7; OOT-COMBO: Ocarina
+/// of Time moves the tables' generation 40-60 times a frame by registrations of single IDs and pool descriptor
+/// writes, each emptying the view memo for every texture). `NXGFX_VIEW_ID_KEY=0`: both by the tables' generation.
+fn view_by_id() -> bool {
+    static BY_ID: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BY_ID.get_or_init(|| std::env::var("NXGFX_VIEW_ID_KEY").as_deref() != Ok("0"))
+}
+
+/// What a stage set's textures and samplers were made from (`SetKey::image_gen`, `TexPart`; `view_by_id`).
+fn set_image_gen(g: &Gpu) -> u64 {
+    if view_by_id() {
+        g.tables.set_generation()
+    } else {
+        g.tables.generation()
+    }
+}
+
 fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::ImageView {
-    let gen = g.tables.generation();
+    let by_id = view_by_id();
+    let version = |g: &Gpu| if by_id { g.tables.view_version(id) } else { g.tables.generation() };
+    let gen = version(g);
     if let Some(&v) = sub.memo_views.get(&(id, ty, storage, gen)) {
         return v;
     }
@@ -3522,7 +3615,7 @@ fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::Imag
         return v;
     }
     let v = tex_view_uncached(g, sub, id, ty, storage);
-    if gen == g.tables.generation() {
+    if gen == version(g) {
         sub.memo_views.insert(key, v);
         super::gate::view_put(key, vk::Handle::as_raw(v));
     }
@@ -3796,7 +3889,7 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
     if let Some((serial, view)) = g.tables.tex_at(id) {
         let mut imgs = super::gate::lock(&g.images, 2);
         let reg_serial = serial;
-        let serial = imgs.live(serial);
+        let mut serial = imgs.live(serial);
         // A parallel segment may look the texture up before an earlier segment of the stream has made its image (a
         // target drawn there: Mario Kart World's shadow maps, new objects each frame); the zero stand-in would be
         // bound where the stream order samples the image (a dark, sharp-edged turn). Unless at the gate's frontier,
@@ -3807,6 +3900,14 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
         {
             drop(imgs);
             return dummy_view(g, sub, want, storage);
+        }
+        // the slot still names a texture object released since (finalized after its first use): its image made again
+        // from the registration, as the console's descriptor still samples the storage (MKW-RENDER)
+        if !imgs.by_serial.contains_key(&serial) {
+            drop(imgs);
+            g.remake_released(id, reg_serial);
+            imgs = super::gate::lock(&g.images, 2);
+            serial = imgs.live(reg_serial);
         }
         if probe {
             let declared = crate::tex::format::tex_format(ifmt as i32)
@@ -3837,6 +3938,11 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
                 "storage probe ID {id} after: {}; upgraded {upgraded}",
                 storage_probe_state(g, &imgs, serial)
             );
+        }
+        // an upload's reading and laying out of the storage made without the images' lock, which every other lane's
+        // view lookup takes (MKW-SPIKE); `prepare_image` records it
+        if super::image::upload_unlocked_on() {
+            imgs = g.decode_unlocked(imgs, serial);
         }
         g.prepare_image(&mut imgs, serial, sub);
         if let Some(im) = imgs.by_serial.get_mut(&serial) {
@@ -4217,11 +4323,12 @@ fn room_cached(a: u64) -> u64 {
         return super::mem::room(a);
     }
     thread_local! {
-        static C: std::cell::RefCell<(u64, u64, std::collections::HashMap<u64, u64>)> =
-            std::cell::RefCell::new((0, 0, std::collections::HashMap::new()));
+        static C: std::cell::RefCell<(u64, u64, std::collections::HashMap<u64, u64, super::mem::AddrHash>)> =
+            std::cell::RefCell::new((0, 0, std::collections::HashMap::default()));
     }
-    // the generations read before the lookup: a change during it makes the entry miss next time
-    let gen = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
+    // the generations read before the lookup: a change during it makes the entry miss next time (the pools' layout
+    // only, with the lane caches: a sync deferring CPU writes changes no pool's extent)
+    let gen = super::mem::room_gen();
     let vgen = crate::nvn::vpool::generation();
     let hit = C.with(|c| {
         let mut c = c.borrow_mut();
@@ -4299,9 +4406,9 @@ fn resolve_cached(g: &Gpu, sub: &mut Sub, a: u64, n: u64) -> Option<(vk::Buffer,
     if !addr_cache_on() {
         return super::mem::resolve(g, sub, a, n);
     }
-    type Map = std::collections::HashMap<(u64, u64), (vk::Buffer, u64, u64)>;
+    type Map = std::collections::HashMap<(u64, u64), (vk::Buffer, u64, u64), super::mem::AddrHash>;
     thread_local! {
-        static C: std::cell::RefCell<(u64, u64, Map)> = std::cell::RefCell::new((0, 0, Map::new()));
+        static C: std::cell::RefCell<(u64, u64, Map)> = std::cell::RefCell::new((0, 0, Map::default()));
     }
     let gen = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
     let vgen = crate::nvn::vpool::generation();
@@ -4425,6 +4532,8 @@ fn stage_set(
     // Resolution may itself create backing. If this epoch changes, publication
     // declines caching this encoding rather than assigning it the later epoch.
     let memory_generation = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
+    // read before any texture is resolved: a storage write during it leaves the copy older (`Shadow::due`)
+    let tex_due = super::image::tex_due();
     let t_part = super::perf::fine().then(std::time::Instant::now);
     super::queue::wait_diag::phase("descriptors: banks");
     let st = m.stage as usize;
@@ -4454,7 +4563,7 @@ fn stage_set(
     // the texture part of the last set of this stage, when nothing it depends on changed
     let cacheable = !dumping && facts(m).tex_cacheable;
     let mkey = (m as *const Module as usize, m.key);
-    let image_gen = g.tables.generation();
+    let image_gen = set_image_gen(g);
     let cached = cacheable
         && qs.tpart.borrow()[st].as_ref().is_some_and(|t| {
             t.module == mkey
@@ -4558,6 +4667,18 @@ fn stage_set(
                         {
                             // SAFETY: guest memory inside a registered pool (identity mapped)
                             let f = unsafe { core::slice::from_raw_parts(a as *const f32, nf) };
+                            // NXGFX_DUMP_RAW=1: the whole bank as the guest memory holds it, once per address
+                            if std::env::var("NXGFX_DUMP_RAW").as_deref() == Ok("1")
+                                && super::mem::room(a) >= n
+                            {
+                                let p = passdump::dir().join(format!("cbuf-{a:x}-{n:x}.bin"));
+                                if !p.exists() {
+                                    // SAFETY: as above, `room` covers the bank's `n` bytes
+                                    let b = unsafe { core::slice::from_raw_parts(a as *const u8, n as usize) };
+                                    let _ = std::fs::create_dir_all(passdump::dir());
+                                    let _ = std::fs::write(p, b);
+                                }
+                            }
                             said.push(format!(
                                 "c{k}@{a:#x}+{n:#x}={:?}",
                                 f.iter()
@@ -4882,7 +5003,7 @@ fn stage_set(
                         },
                     ));
                 } else {
-                    let s = g.tables.samp_at(sid).unwrap_or_else(|| dummy_sampler(g));
+                    let s = g.tables.samp_at_cached(sid).unwrap_or_else(|| dummy_sampler(g));
                     imgs.push((
                         b,
                         vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
@@ -4952,6 +5073,11 @@ fn stage_set(
         let mut host = set_patch_on().then(|| shadow_slot(&mut sh[st], mkey));
         if let Some(h) = host.as_deref_mut().filter(|_| only.is_none()) {
             h.memory_generation = memory_generation;
+        }
+        // (segment seeding) what its texture slots were resolved against
+        if let Some(h) = host.as_deref_mut().filter(|_| set_seed_on() && only.is_none_or(|c| c & CL_TEX != 0)) {
+            h.due = tex_due;
+            h.twin = imgs.iter().any(|(_, _, i)| super::image::is_twin_view(i.image_view));
         }
         let (off, evidence) = write_db_set(g, sub, m, &bufs, &imgs, &taddrs, host, only.is_some());
         return (SetRef::Buf(off), evidence, raw_version, memory_generation);
@@ -5038,6 +5164,7 @@ fn patch_set(
     let gen = super::mem::POOL_GEN.load(Acquire);
     let mut sh = qs.shadow.borrow_mut();
     let list = &mut sh[st];
+    let seeded = list.iter().all(|s| s.module != k.module) && seed_into(qs, list, st, k, gen);
     let i = list.iter().position(|s| s.module == k.module)?;
     let h = &mut list[i];
     let old = h.key.as_ref()?;
@@ -5048,7 +5175,20 @@ fn patch_set(
     if old == k {
         return Some((h.off, true));
     }
-    let classes = patch_classes(old, k)?;
+    let mut classes = patch_classes_x(old, k, set_seed_on())?;
+    if old.serial != k.serial {
+        // a copy of another submission (a seed): its texture slots stand only while no texture's storage was written
+        // behind the graphics layer since, and never for a twin view (copied per submission)
+        if h.twin {
+            return None;
+        }
+        if h.due != super::image::tex_due() {
+            classes |= CL_TEX;
+        }
+        if seeded {
+            super::perf::inc(super::perf::C::SetsSeeded);
+        }
+    }
     note_patch(classes);
     // the module's copy to the front, unkeyed while it is patched (`stage_set` writes the front one)
     list[..=i].rotate_right(1);
@@ -5068,6 +5208,62 @@ fn patch_set(
     h.off = off;
     super::perf::inc(super::perf::C::SetsPatched);
     Some((off, false))
+}
+
+/// Segment seeding's copies by stage, one per module, newest first (`QState::seed`): the queue's stage-set copies
+/// gathered over its streams (every segment's, at a parallel run's join), shared by the states forked from it.
+type Seeds = [Vec<Arc<Shadow>>; 7];
+
+/// Most seeds kept per stage (MKW's race frame: a few hundred modules over all its streams).
+const SEEDS: usize = 160;
+
+/// The valid, keyed copies of `lists` as seeds, moved out of them (a segment's state that is dropped).
+fn seeds_of(lists: &mut [Vec<Box<Shadow>>; 7]) -> Seeds {
+    let keep = |s: &Shadow| s.valid && s.key.is_some() && !s.twin;
+    std::array::from_fn(|st| std::mem::take(&mut lists[st]).into_iter().filter(|s| keep(s)).map(Arc::from).collect())
+}
+
+/// `newer` (newest first) over `older`: per stage, a module's newest copy first, at most `SEEDS`.
+fn seeds_merge(newer: Vec<Seeds>, older: Option<&Seeds>) -> Arc<Seeds> {
+    Arc::new(std::array::from_fn(|st| {
+        let mut out: Vec<Arc<Shadow>> = Vec::new();
+        let mut seen: std::collections::HashSet<(usize, crate::nvn::prog::ShaderKey), super::mem::AddrHash> =
+            Default::default();
+        for s in newer.iter().map(|n| &n[st]).chain(older.map(|o| &o[st])).flatten() {
+            if out.len() >= SEEDS {
+                break;
+            }
+            if seen.insert(s.module) {
+                out.push(s.clone());
+            }
+        }
+        out
+    }))
+}
+
+/// Segment seeding: the module's copy from the seeds (`QState::seed`) put into `list` (the stage's copies, at the
+/// front) when it is a valid, keyed whole set of the same pools' generation; whether it was.
+fn seed_into(qs: &QState, list: &mut Vec<Box<Shadow>>, st: usize, k: &SetKey, gen: u64) -> bool {
+    if !set_seed_on() {
+        return false;
+    }
+    let Some(s) = qs.seed.as_ref().and_then(|seed| seed[st].iter().find(|s| s.module == k.module)) else {
+        return false;
+    };
+    if !(s.valid && s.key.is_some() && s.memory_generation == gen && !s.twin) {
+        // (the seed is older than the pools: counted beside the seeded sets)
+        super::perf::inc(super::perf::C::SeedsStale);
+        return false;
+    }
+    let s = Box::new((**s).clone());
+    if list.len() < SHADOWS {
+        list.insert(0, s);
+    } else {
+        // the least recently written copy goes
+        list.pop();
+        list.insert(0, s);
+    }
+    true
 }
 
 /// A stage's descriptors: a set (classic) or its offset in the submission's descriptor buffer.
@@ -5498,7 +5694,7 @@ mod set_patch_tests {
         assert_eq!(decode_record_addr(0x8000_1000, true), (0x8000_1000, false));
         let d = set_deps(&cs).unwrap();
         assert!(d.push && !d.c0, "keyed by the push constants");
-        assert_eq!(res_class(&Res::Sbuf { cb_slot: 27, cb_off: 0, written: false }), CL_PUSH);
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: 27, cb_off: 0, written: false }), CL_PUSH | CL_SUBMIT);
     }
 
     /// NVN2 compute's uniform table in c0 holds hardware handles (size kept at +8); NVN's the address.
@@ -5862,24 +6058,59 @@ mod set_patch_tests {
             change(&mut k);
             assert_eq!(patch_classes(&old, &k), None);
         }
-        // the slots each class makes again
+        // the slots each class makes again (`CL_SUBMIT`: also every slot with a per-submission effect)
         assert_eq!(res_class(&Res::Cbuf { bank: 3 }), 1);
         assert_eq!(res_class(&Res::Cbuf { bank: 18 }), 1 << 15);
-        assert_eq!(res_class(&Res::Cbuf { bank: 27 }), CL_PUSH);
-        assert_eq!(res_class(&Res::Cbuf { bank: 0 }), CL_C0);
-        assert_eq!(res_class(&Res::Cbuf { bank: 2 }), CL_C2);
-        assert_eq!(res_class(&Res::Cbuf { bank: 1 }), 0, "c1 is the module's own");
-        assert_eq!(res_class(&Res::Sbuf { cb_slot: 0, cb_off: 0x110, written: true }), CL_C0);
-        assert_eq!(res_class(&Res::Sbuf { cb_slot: -1, cb_off: 0x20, written: false }), CL_C2);
-        assert_eq!(res_class(&Res::Sbuf { cb_slot: 5, cb_off: 0x40, written: false }), 1 << 2);
+        assert_eq!(res_class(&Res::Cbuf { bank: 27 }), CL_PUSH | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Cbuf { bank: 0 }), CL_C0 | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Cbuf { bank: 2 }), CL_C2 | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Cbuf { bank: 1 }), CL_SUBMIT, "c1 is the module's own, staged");
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: 0, cb_off: 0x110, written: true }), CL_C0 | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: -1, cb_off: 0x20, written: false }), CL_C2 | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Sbuf { cb_slot: 5, cb_off: 0x40, written: false }), 1 << 2 | CL_SUBMIT);
         assert_eq!(
             res_class(&Res::Sbuf { cb_slot: super::super::gmem::CB_SLOT, cb_off: 0, written: false }),
             u32::MAX
         );
         assert_eq!(res_class(&Res::Tex { handle: 1, cbuf_slot: 2, ty: 1 }), CL_TEX);
-        assert_eq!(res_class(&Res::Img { handle: 1, cbuf_slot: 2, ty: 1, fmt: 0 }), CL_TEX);
-        assert_eq!(res_class(&Res::Support), CL_SUPPORT);
-        assert_eq!(res_class(&Res::MeshDraw), CL_MESH);
+        assert_eq!(res_class(&Res::Img { handle: 1, cbuf_slot: 2, ty: 1, fmt: 0 }), CL_TEX | CL_SUBMIT);
+        assert_eq!(res_class(&Res::Support), CL_SUPPORT | CL_SUBMIT);
+        assert_eq!(res_class(&Res::MeshDraw), CL_MESH | CL_SUBMIT);
+    }
+
+    /// Segment seeding: a copy of another submission is patched only when asked (`cross`), with every `CL_SUBMIT`
+    /// slot made again besides what changed; so only uniform buffers bound directly and sampled textures are kept from
+    /// it. Within one submission nothing changes (no patch ever names `CL_SUBMIT`).
+    #[test]
+    fn a_seed_of_another_submission_remakes_its_per_submission_slots() {
+        let old = key();
+        let mut k = key();
+        k.serial += 1;
+        assert_eq!(patch_classes_x(&old, &k, false), None);
+        assert_eq!(patch_classes_x(&old, &k, true), Some(CL_SUBMIT));
+        k.ubo[0] = (0x2000, 0x100);
+        assert_eq!(patch_classes_x(&old, &k, true), Some(1 | CL_SUBMIT));
+        k.image_gen += 1;
+        assert_eq!(patch_classes_x(&old, &k, true), Some(1 | CL_SUBMIT | CL_TEX));
+        let mut same = key();
+        same.ubo[0] = (0x2000, 0x100);
+        assert_eq!(patch_classes_x(&old, &same, true), patch_classes(&old, &same), "same submission: as before");
+        let mut other = key();
+        other.module.0 += 1;
+        assert_eq!(patch_classes_x(&old, &other, true), None, "another module's set");
+        // kept from the seed: a directly bound uniform buffer, a sampled texture; nothing else
+        let kept = |r: &Res| res_class(r) & CL_SUBMIT == 0;
+        assert!(kept(&Res::Cbuf { bank: 3 }) && kept(&Res::Tex { handle: 1, cbuf_slot: 2, ty: 1 }));
+        for r in [
+            Res::Cbuf { bank: 1 },
+            Res::Cbuf { bank: 24 },
+            Res::Sbuf { cb_slot: 5, cb_off: 0x40, written: false },
+            Res::Img { handle: 1, cbuf_slot: 2, ty: 1, fmt: 0 },
+            Res::Support,
+            Res::MeshDraw,
+        ] {
+            assert!(!kept(&r));
+        }
     }
 }
 
@@ -6298,6 +6529,7 @@ fn bind_sets(
                     .usage(usage),
             ];
             unsafe { g.d.db.cmd_bind_descriptor_buffers(sub.main, &infos) };
+            qs.dyns.borrow_mut().forget_offsets();
             sub.db_bound = Some(sub.db_cur);
             BOUND_DB.with(|b| b.set(sub.db[sub.db_cur].addr));
             super::lost::note_set(b'B', 0, sub.serial, sub.db_cur, 0);
@@ -6406,19 +6638,29 @@ fn bind_sets(
                     sub.db_cur,
                     off,
                 );
-                unsafe {
-                    g.d.db.cmd_set_descriptor_buffer_offsets(
-                        sub.main,
-                        bp,
-                        g.layout.pipeline,
-                        m.stage,
-                        &[1],
-                        &[off],
-                    )
-                };
+                // (SET-FAST) graphics only: compute work in these command buffers also binds classic sets
+                if bp != vk::PipelineBindPoint::GRAPHICS
+                    || qs.dyns.borrow_mut().set_offset(sub.serial, bp, m.stage, off)
+                {
+                    unsafe {
+                        g.d.db.cmd_set_descriptor_buffer_offsets(
+                            sub.main,
+                            bp,
+                            g.layout.pipeline,
+                            m.stage,
+                            &[1],
+                            &[off],
+                        )
+                    };
+                } else {
+                    super::perf::inc(super::perf::C::DynSkipped);
+                }
             }
         }
-        if pool {
+        if pool
+            && (bp != vk::PipelineBindPoint::GRAPHICS
+                || qs.dyns.borrow_mut().set_offset(sub.serial, bp, L::POOL_SET, u64::MAX))
+        {
             unsafe {
                 g.d.db.cmd_set_descriptor_buffer_offsets(
                     sub.main,
@@ -6929,52 +7171,82 @@ fn draw_setup_ex(
                 qs.rt_depth.tex.map(|t| (t.serial, t.mem as u64, t.d.format)));
         }
     }
+    // (SET-FAST) only the states that differ from what this command buffer holds are set (`DynShadow`)
+    let mut dyb = qs.dyns.borrow_mut();
+    let dy = &mut *dyb;
+    dy.begin(sub.serial, mesh);
+    let mut skipped = 0u64;
+    let sk = &mut skipped;
     unsafe {
-        dev.cmd_set_viewport_with_count(cb, &[vp]);
-        dev.cmd_set_scissor_with_count(cb, &[sc]);
+        let vpk = [vp.x, vp.y, vp.width, vp.height, vp.min_depth, vp.max_depth].map(f32::to_bits);
+        if dyn_new(&mut dy.vp, vpk, sk) {
+            dev.cmd_set_viewport_with_count(cb, &[vp]);
+        }
+        let sck = [sc.offset.x, sc.offset.y, sc.extent.width as i32, sc.extent.height as i32];
+        if dyn_new(&mut dy.sc, sck, sk) {
+            dev.cmd_set_scissor_with_count(cb, &[sc]);
+        }
         if qs.line_width != 1.0 {
             crate::log::red_once("line widths other than 1 are drawn 1 pixel wide");
         }
-        dev.cmd_set_line_width(cb, 1.0);
+        if dyn_new(&mut dy.line, (), sk) {
+            dev.cmd_set_line_width(cb, 1.0);
+        }
         let off_on = poly.offset_en() & (1 << poly.mode().min(2)) != 0;
-        dev.cmd_set_depth_bias_enable(cb, off_on);
-        dev.cmd_set_depth_bias(cb, qs.poly_off[1], qs.poly_off[2], qs.poly_off[0]);
-        dev.cmd_set_blend_constants(cb, &qs.blend_color);
-        dev.cmd_set_depth_bounds(
-            cb,
+        if dyn_new(&mut dy.bias_en, off_on, sk) {
+            dev.cmd_set_depth_bias_enable(cb, off_on);
+        }
+        if dyn_new(&mut dy.bias, qs.poly_off.map(f32::to_bits), sk) {
+            dev.cmd_set_depth_bias(cb, qs.poly_off[1], qs.poly_off[2], qs.poly_off[0]);
+        }
+        if dyn_new(&mut dy.bconst, qs.blend_color.map(f32::to_bits), sk) {
+            dev.cmd_set_blend_constants(cb, &qs.blend_color);
+        }
+        let (b0, b1) = (
             qs.depth_bounds.1.clamp(0.0, 1.0),
             qs.depth_bounds.2.clamp(0.0, 1.0),
         );
-        dev.cmd_set_depth_bounds_test_enable(cb, qs.depth_bounds.0 && g.d.caps.depth_bounds);
-        for (i, f) in [vk::StencilFaceFlags::FRONT, vk::StencilFaceFlags::BACK]
-            .iter()
-            .enumerate()
-        {
-            dev.cmd_set_stencil_compare_mask(cb, *f, qs.stencil[i][0]);
-            dev.cmd_set_stencil_write_mask(cb, *f, qs.stencil[i][1]);
-            dev.cmd_set_stencil_reference(cb, *f, qs.stencil[i][2]);
+        if dyn_new(&mut dy.dbounds, [b0.to_bits(), b1.to_bits()], sk) {
+            dev.cmd_set_depth_bounds(cb, b0, b1);
         }
-        dev.cmd_set_cull_mode(
-            cb,
-            if raster_mask & 2 != 0 {
-                vk::CullModeFlags::NONE
-            } else {
-                vk::CullModeFlags::from_raw(poly.cull())
-            },
-        );
+        let dbt = qs.depth_bounds.0 && g.d.caps.depth_bounds;
+        if dyn_new(&mut dy.dbt, dbt, sk) {
+            dev.cmd_set_depth_bounds_test_enable(cb, dbt);
+        }
+        if dyn_new(&mut dy.stencil, qs.stencil, sk) {
+            for (i, f) in [vk::StencilFaceFlags::FRONT, vk::StencilFaceFlags::BACK]
+                .iter()
+                .enumerate()
+            {
+                dev.cmd_set_stencil_compare_mask(cb, *f, qs.stencil[i][0]);
+                dev.cmd_set_stencil_write_mask(cb, *f, qs.stencil[i][1]);
+                dev.cmd_set_stencil_reference(cb, *f, qs.stencil[i][2]);
+            }
+        }
+        let cull = if raster_mask & 2 != 0 {
+            vk::CullModeFlags::NONE
+        } else {
+            vk::CullModeFlags::from_raw(poly.cull())
+        };
+        if dyn_new(&mut dy.cull, cull.as_raw(), sk) {
+            dev.cmd_set_cull_mode(cb, cull);
+        }
         // NVN CW = 0 / CCW = 1; Vulkan COUNTER_CLOCKWISE = 0 / CLOCKWISE = 1. Unflipped, the winding inverts.
         let ccw = poly.front() == front_face::CCW;
         let vk_ccw = if upper_left { ccw } else { !ccw };
-        dev.cmd_set_front_face(
-            cb,
-            if vk_ccw {
-                vk::FrontFace::COUNTER_CLOCKWISE
-            } else {
-                vk::FrontFace::CLOCKWISE
-            },
-        );
+        let front = if vk_ccw {
+            vk::FrontFace::COUNTER_CLOCKWISE
+        } else {
+            vk::FrontFace::CLOCKWISE
+        };
+        if dyn_new(&mut dy.front, front.as_raw(), sk) {
+            dev.cmd_set_front_face(cb, front);
+        }
         if !mesh {
-            dev.cmd_set_primitive_topology(cb, topology(prim_ty));
+            let t = topology(prim_ty);
+            if dyn_new(&mut dy.topo, t.as_raw(), sk) {
+                dev.cmd_set_primitive_topology(cb, t);
+            }
         }
         if passdump::active() {
             crate::vklog!(
@@ -7000,86 +7272,112 @@ fn draw_setup_ex(
                 qs.color.alpha_func()
             );
         }
-        dev.cmd_set_depth_test_enable(cb, ds.get(ds_field::DT) != 0 && raster_mask & 1 == 0);
-        dev.cmd_set_depth_write_enable(cb, ds.get(ds_field::DW) != 0);
-        dev.cmd_set_depth_compare_op(cb, super::tables::compare_op(ds.get(ds_field::DF)));
-        dev.cmd_set_stencil_test_enable(cb, ds.get(ds_field::ST) != 0);
-        dev.cmd_set_stencil_op(
-            cb,
-            vk::StencilFaceFlags::FRONT,
+        let dt = ds.get(ds_field::DT) != 0 && raster_mask & 1 == 0;
+        let dw = ds.get(ds_field::DW) != 0;
+        let df = super::tables::compare_op(ds.get(ds_field::DF));
+        if dyn_new(&mut dy.depth, (dt, dw, df.as_raw()), sk) {
+            dev.cmd_set_depth_test_enable(cb, dt);
+            dev.cmd_set_depth_write_enable(cb, dw);
+            dev.cmd_set_depth_compare_op(cb, df);
+        }
+        let st_en = ds.get(ds_field::ST) != 0;
+        if dyn_new(&mut dy.st_en, st_en, sk) {
+            dev.cmd_set_stencil_test_enable(cb, st_en);
+        }
+        let sop = [
             stencil_op_vk(ds.get(ds_field::FAIL_F)),
             stencil_op_vk(ds.get(ds_field::ZPASS_F)),
             stencil_op_vk(ds.get(ds_field::ZFAIL_F)),
-            super::tables::compare_op(ds.get(ds_field::SF_F)),
-        );
-        dev.cmd_set_stencil_op(
-            cb,
-            vk::StencilFaceFlags::BACK,
             stencil_op_vk(ds.get(ds_field::FAIL_B)),
             stencil_op_vk(ds.get(ds_field::ZPASS_B)),
             stencil_op_vk(ds.get(ds_field::ZFAIL_B)),
+        ];
+        let (sf, sb) = (
+            super::tables::compare_op(ds.get(ds_field::SF_F)),
             super::tables::compare_op(ds.get(ds_field::SF_B)),
         );
-        dev.cmd_set_rasterizer_discard_enable(cb, qs.rast_discard);
+        let sopk = [
+            sop[0].as_raw(),
+            sop[1].as_raw(),
+            sop[2].as_raw(),
+            sf.as_raw(),
+            sop[3].as_raw(),
+            sop[4].as_raw(),
+            sop[5].as_raw(),
+            sb.as_raw(),
+        ];
+        if dyn_new(&mut dy.sop, sopk, sk) {
+            dev.cmd_set_stencil_op(cb, vk::StencilFaceFlags::FRONT, sop[0], sop[1], sop[2], sf);
+            dev.cmd_set_stencil_op(cb, vk::StencilFaceFlags::BACK, sop[3], sop[4], sop[5], sb);
+        }
+        if dyn_new(&mut dy.discard, qs.rast_discard, sk) {
+            dev.cmd_set_rasterizer_discard_enable(cb, qs.rast_discard);
+        }
         if !mesh {
-            dev.cmd_set_primitive_restart_enable(
-                cb,
-                qs.prim_restart.0
-                    && !matches!(
-                        prim_ty,
-                        prim::POINTS | prim::LINES | prim::TRIANGLES | prim::QUADS | prim::PATCHES
-                    ),
-            );
+            let restart = qs.prim_restart.0
+                && !matches!(
+                    prim_ty,
+                    prim::POINTS | prim::LINES | prim::TRIANGLES | prim::QUADS | prim::PATCHES
+                );
+            if dyn_new(&mut dy.restart, restart, sk) {
+                dev.cmd_set_primitive_restart_enable(cb, restart);
+            }
         }
         let caps = g.d.caps;
         if caps.logic_op_dyn {
-            g.d.eds2
-                .cmd_set_logic_op(cb, vk::LogicOp::from_raw(qs.color.logic_op() as i32));
+            let lo = qs.color.logic_op() as i32;
+            if dyn_new(&mut dy.logic, lo, sk) {
+                g.d.eds2.cmd_set_logic_op(cb, vk::LogicOp::from_raw(lo));
+            }
         }
+        // (only a tessellation pipeline has it dynamic: any other disturbs it, so it is always set)
         if caps.patch_dyn && !mesh && mods.iter().any(|m| m.stage == 3 || m.stage == 4) {
             g.d.eds2.cmd_set_patch_control_points(cb, qs.patch.max(1));
         }
         let e3 = &g.d.eds3;
         if caps.eds3_poly {
-            e3.cmd_set_polygon_mode(
-                cb,
-                match poly.mode() {
-                    0 => vk::PolygonMode::POINT,
-                    1 => vk::PolygonMode::LINE,
-                    _ => vk::PolygonMode::FILL,
-                },
-            );
+            let pm = match poly.mode() {
+                0 => vk::PolygonMode::POINT,
+                1 => vk::PolygonMode::LINE,
+                _ => vk::PolygonMode::FILL,
+            };
+            if dyn_new(&mut dy.poly, pm.as_raw(), sk) {
+                e3.cmd_set_polygon_mode(cb, pm);
+            }
         }
         let sflag = vk::SampleCountFlags::from_raw(samples.max(1) as u32);
-        if caps.eds3_samples {
+        if caps.eds3_samples && dyn_new(&mut dy.samples, sflag.as_raw(), sk) {
             e3.cmd_set_rasterization_samples(cb, sflag);
         }
-        if caps.eds3_sample_mask {
+        if caps.eds3_sample_mask && dyn_new(&mut dy.smask, (sflag.as_raw(), qs.sample_mask), sk) {
             e3.cmd_set_sample_mask(cb, sflag, &[qs.sample_mask]);
         }
         if caps.eds3_a2c {
-            e3.cmd_set_alpha_to_coverage_enable(
-                cb,
-                qs.ms.a2c != 0 && A2C.load(std::sync::atomic::Ordering::Relaxed),
-            );
+            let a2c = qs.ms.a2c != 0 && A2C.load(std::sync::atomic::Ordering::Relaxed);
+            if dyn_new(&mut dy.a2c, a2c, sk) {
+                e3.cmd_set_alpha_to_coverage_enable(cb, a2c);
+            }
         }
         if caps.eds3_logic_en {
-            e3.cmd_set_logic_op_enable(cb, qs.color.logic_op() != logic_op::COPY);
+            let le = qs.color.logic_op() != logic_op::COPY;
+            if dyn_new(&mut dy.logic_en, le, sk) {
+                e3.cmd_set_logic_op_enable(cb, le);
+            }
         }
-        if caps.eds3_clamp {
+        if caps.eds3_clamp && dyn_new(&mut dy.clamp, qs.depth_clamp, sk) {
             e3.cmd_set_depth_clamp_enable(cb, qs.depth_clamp);
         }
         if caps.eds3_clip_neg {
-            e3.cmd_set_depth_clip_negative_one_to_one(
-                cb,
-                !crate::nvn::device::DEPTH_ZERO.load(std::sync::atomic::Ordering::Relaxed),
-            );
+            let neg = !crate::nvn::device::DEPTH_ZERO.load(std::sync::atomic::Ordering::Relaxed);
+            if dyn_new(&mut dy.clip, neg, sk) {
+                e3.cmd_set_depth_clip_negative_one_to_one(cb, neg);
+            }
         }
         if caps.eds3_cons_raster {
-            e3.cmd_set_conservative_rasterization_mode(
-                cb,
-                conservative_raster_mode(qs.cons_raster),
-            );
+            let cm = conservative_raster_mode(qs.cons_raster);
+            if dyn_new(&mut dy.cons, cm.as_raw(), sk) {
+                e3.cmd_set_conservative_rasterization_mode(cb, cm);
+            }
         } else if qs.cons_raster {
             crate::log::red_once(
                 "SetConservativeRasterEnable: VK_EXT_conservative_rasterization is unavailable",
@@ -7118,11 +7416,32 @@ fn draw_setup_ex(
             // The shader's scalar output stores select components. The dynamic mask is NVN's channel state, disabled
             // only for locations absent from the output map; do not apply OmapTargets twice.
             let omap = qs.prog[1].as_ref().and_then(|m| m.omap).unwrap_or(u32::MAX);
-            let wm = fragment_write_masks(qs.chmask, omap, n);
-            e3.cmd_set_color_blend_enable(cb, 0, en);
-            e3.cmd_set_color_blend_equation(cb, 0, &eq[..n]);
-            e3.cmd_set_color_write_mask(cb, 0, &wm);
+            if dyn_new(&mut dy.blend_en, (n, qs.color.blend_en() & ((1u32 << n) - 1)), sk) {
+                e3.cmd_set_color_blend_enable(cb, 0, en);
+            }
+            let eqk: [[i32; 6]; 8] = core::array::from_fn(|i| {
+                let e = &eq[i];
+                [
+                    e.src_color_blend_factor.as_raw(),
+                    e.dst_color_blend_factor.as_raw(),
+                    e.color_blend_op.as_raw(),
+                    e.src_alpha_blend_factor.as_raw(),
+                    e.dst_alpha_blend_factor.as_raw(),
+                    e.alpha_blend_op.as_raw(),
+                ]
+            });
+            if dyn_new(&mut dy.blend_eq, (n, eqk), sk) {
+                e3.cmd_set_color_blend_equation(cb, 0, &eq[..n]);
+            }
+            if dyn_new(&mut dy.wmask, (n, qs.chmask, omap), sk) {
+                let wm = fragment_write_masks(qs.chmask, omap, n);
+                e3.cmd_set_color_write_mask(cb, 0, &wm);
+            }
         }
+    }
+    drop(dyb);
+    if skipped != 0 {
+        super::perf::add(super::perf::C::DynSkipped, skipped);
     }
 
     if !mesh {
@@ -7274,6 +7593,148 @@ fn vertex_input(g: &Gpu, sub: &mut Sub, qs: &QState, vs: &Module) {
 }
 
 /// NXGFX_VIN_SKIP=0: vertex input set up at every draw.
+/// (SET-FAST) The dynamic state the draw path last set in one command buffer: a `vkCmdSet*` whose values equal the
+/// last ones is not emitted again (Turbo `ds_same`, nxnative `g_ed`; MKW ~30 calls a draw). Keyed by the submission
+/// serial: each submission (child segments included) is a freshly begun command buffer, where nothing is set yet.
+/// Every graphics pipeline has the same dynamic list (`pipe.rs` `dynamic_states`) but for the pipeline class: a mesh
+/// pipeline has no topology / primitive restart (forgotten when the class changes) and only a tessellation pipeline
+/// has patch control points (never deduplicated). No other graphics pipeline is bound into these command buffers.
+/// Also the stage sets' descriptor-buffer offsets (one universal layout: a pipeline change keeps them bound).
+#[derive(Default)]
+struct DynShadow {
+    serial: u64,
+    mesh: Option<bool>,
+    vp: Option<[u32; 6]>,
+    sc: Option<[i32; 4]>,
+    line: Option<()>,
+    bias_en: Option<bool>,
+    bias: Option<[u32; 3]>,
+    bconst: Option<[u32; 4]>,
+    dbounds: Option<[u32; 2]>,
+    dbt: Option<bool>,
+    stencil: Option<[[u32; 3]; 2]>,
+    cull: Option<u32>,
+    front: Option<i32>,
+    topo: Option<i32>,
+    depth: Option<(bool, bool, i32)>,
+    st_en: Option<bool>,
+    sop: Option<[i32; 8]>,
+    discard: Option<bool>,
+    restart: Option<bool>,
+    logic: Option<i32>,
+    poly: Option<i32>,
+    samples: Option<u32>,
+    smask: Option<(u32, u32)>,
+    a2c: Option<bool>,
+    logic_en: Option<bool>,
+    clamp: Option<bool>,
+    clip: Option<bool>,
+    cons: Option<i32>,
+    blend_en: Option<(usize, u32)>,
+    blend_eq: Option<(usize, [[i32; 6]; 8])>,
+    wmask: Option<(usize, u32, u32)>,
+    /// the descriptor-buffer offset bound per set index (stage sets 0..5, the pool set), by bind point
+    sets: [[Option<u64>; 8]; 2],
+}
+
+impl DynShadow {
+    /// The shadow for command buffer `serial` and a pipeline of class `mesh`: empty in a new command buffer; the
+    /// states a mesh pipeline lacks are forgotten when the class changes.
+    fn begin(&mut self, serial: u64, mesh: bool) {
+        if self.serial != serial || !dyn_dedupe_on() {
+            *self = DynShadow {
+                serial,
+                ..Default::default()
+            };
+        }
+        if self.mesh != Some(mesh) {
+            self.topo = None;
+            self.restart = None;
+            self.mesh = Some(mesh);
+        }
+    }
+
+    /// The set offset bound at (`bp`, `set`) in this command buffer, recorded; false when it is already bound there.
+    fn set_offset(&mut self, serial: u64, bp: vk::PipelineBindPoint, set: u32, off: u64) -> bool {
+        if self.serial != serial || !dyn_dedupe_on() {
+            *self = DynShadow {
+                serial,
+                ..Default::default()
+            };
+        }
+        let slot = &mut self.sets[(bp == vk::PipelineBindPoint::COMPUTE) as usize][set as usize & 7];
+        if *slot == Some(off) {
+            return false;
+        }
+        *slot = Some(off);
+        true
+    }
+
+    /// Bound descriptor buffers moved: every offset must be set again.
+    fn forget_offsets(&mut self) {
+        self.sets = Default::default();
+    }
+}
+
+/// `v` differs from what `slot` last held (recorded): the state is to be set; else `skipped` counts it.
+fn dyn_new<T: PartialEq + Copy>(slot: &mut Option<T>, v: T, skipped: &mut u64) -> bool {
+    if *slot == Some(v) {
+        *skipped += 1;
+        return false;
+    }
+    *slot = Some(v);
+    true
+}
+
+#[cfg(test)]
+mod dyn_shadow_tests {
+    use super::{dyn_new, DynShadow};
+    use ash::vk;
+
+    /// A state equal to the command buffer's is skipped; a new command buffer, a changed value or (for topology and
+    /// primitive restart) a change of pipeline class sets it again.
+    #[test]
+    fn states_are_set_once_per_command_buffer_and_value() {
+        let mut d = DynShadow::default();
+        let mut sk = 0;
+        d.begin(7, false);
+        assert!(dyn_new(&mut d.cull, 2, &mut sk));
+        assert!(!dyn_new(&mut d.cull, 2, &mut sk));
+        assert!(dyn_new(&mut d.cull, 1, &mut sk));
+        assert!(dyn_new(&mut d.topo, 3, &mut sk));
+        assert!(!dyn_new(&mut d.topo, 3, &mut sk));
+        assert_eq!(sk, 2);
+        // a mesh draw between: its pipeline has no topology, the next ordinary draw sets it again (cull is kept)
+        d.begin(7, true);
+        d.begin(7, false);
+        assert!(dyn_new(&mut d.topo, 3, &mut sk));
+        assert!(!dyn_new(&mut d.cull, 1, &mut sk));
+        // another command buffer holds nothing
+        d.begin(8, false);
+        assert!(dyn_new(&mut d.cull, 1, &mut sk));
+    }
+
+    /// Set offsets: the same offset at the same set is bound once per command buffer and descriptor-buffer binding.
+    #[test]
+    fn set_offsets_are_bound_once_until_the_buffers_move() {
+        let g = vk::PipelineBindPoint::GRAPHICS;
+        let mut d = DynShadow::default();
+        assert!(d.set_offset(3, g, 1, 4096));
+        assert!(!d.set_offset(3, g, 1, 4096));
+        assert!(d.set_offset(3, g, 0, 4096));
+        assert!(d.set_offset(3, g, 1, 8192));
+        d.forget_offsets();
+        assert!(d.set_offset(3, g, 1, 8192));
+        assert!(d.set_offset(4, g, 1, 8192));
+    }
+}
+
+/// `NXGFX_DYN_DEDUPE=0`: every dynamic state and set offset is set at every draw, as before SET-FAST.
+fn dyn_dedupe_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_DYN_DEDUPE").as_deref() != Ok("0"))
+}
+
 fn vin_skip_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("NXGFX_VIN_SKIP").as_deref() != Ok("0"))
@@ -8859,6 +9320,64 @@ pub fn wait_passes(g: &Gpu, stream: &[u8]) -> bool {
     event_wait_passes(g, addr, mode, value)
 }
 
+/// (MKW-PIPE) Whether a parked stream may run on at once without a pool sync of its own (`queue::chain_parked`): it
+/// starts at an event wait that a GPU signal already recorded passes (that signal's work comes first in the queue),
+/// or that the event's value passes while no CPU signal was made since the last pool sync (`cpu_quiet`: what the CPU
+/// wrote before a signal it made later would not be in that sync).
+pub fn wait_passes_chained(g: &Gpu, stream: &[u8], cpu_quiet: bool) -> bool {
+    if stream.len() < 24 || unsafe { rd::<op_hdr>(stream.as_ptr()) }.op != op::WAIT_EVENT {
+        return false;
+    }
+    let (addr, mode, value): (u64, u32, u32) =
+        unsafe { (rd_at(stream, 0), rd_at(stream, 8), rd_at(stream, 12)) };
+    let cur = unsafe {
+        (*(addr as *const std::sync::atomic::AtomicU32)).load(std::sync::atomic::Ordering::Acquire)
+    };
+    let pending = g.q.pending_signals.lock().unwrap().get(&addr).map(|&(m, v, _)| (m, v));
+    chainable(cur, pending, mode, value, cpu_quiet)
+}
+
+/// `wait_passes_chained`'s rule: the event's value `cur`, the GPU signal recorded for it (mode, value), the wait.
+fn chainable(cur: u32, pending: Option<(u32, u32)>, mode: u32, value: u32, cpu_quiet: bool) -> bool {
+    if crate::nvn::sync::event_passes(cur, mode, value) {
+        return cpu_quiet;
+    }
+    matches!(pending, Some((m, v)) if m == event_signal::WRITE && crate::nvn::sync::event_passes(v, mode, value))
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    /// A parked stream runs on without a sync of its own when a GPU signal recorded so far passes its wait, or when
+    /// the event's value passes and no CPU signal came after the last sync; never on a wait nothing passes yet.
+    #[test]
+    fn a_wait_chains_on_recorded_gpu_signals_or_a_quiet_cpu() {
+        let geq = event_wait::GEQUAL_WRAP;
+        let w = event_signal::WRITE;
+        assert!(chainable(0, Some((w, 3)), geq, 3, false), "a recorded GPU WRITE signal passes it");
+        assert!(!chainable(0, Some((w, 2)), geq, 3, true), "a recorded signal short of the value does not");
+        assert!(!chainable(0, Some((event_signal::ADD, 5)), geq, 3, true), "an ADD signal's sum is not known");
+        assert!(!chainable(0, None, geq, 3, true), "nothing passes it");
+        assert!(chainable(4, None, geq, 3, true), "the value passes it, no CPU signal since the sync");
+        assert!(!chainable(4, None, geq, 3, false), "the value passes it after a CPU signal: a new sync first");
+        assert!(chainable(6, Some((w, 7)), event_wait::EQUAL, 7, false), "EQUAL by a recorded signal");
+        assert!(
+            !chainable(7, Some((w, 7)), event_wait::EQUAL, 7, false),
+            "the value passes it already after a CPU signal: not chained, even with a recorded signal"
+        );
+    }
+}
+
+/// The event wait at the start of a parked stream: (address, mode << 32 | value), for the chain trace.
+pub fn wait_of(stream: &[u8]) -> (u64, u64) {
+    if stream.len() < 24 || unsafe { rd::<op_hdr>(stream.as_ptr()) }.op != op::WAIT_EVENT {
+        return (0, 0);
+    }
+    let (addr, mode, value): (u64, u32, u32) =
+        unsafe { (rd_at(stream, 0), rd_at(stream, 8), rd_at(stream, 12)) };
+    (addr, (mode as u64) << 32 | value as u64)
+}
+
 /// What a parked stream waits for (its first record), for the log.
 pub fn wait_desc(stream: &[u8]) -> String {
     if stream.len() < 24 {
@@ -9189,11 +9708,85 @@ fn ub_update_kept(dst: u64, n: u64, len: usize) -> bool {
     n > 0 && 24 + n as usize <= len && super::mem::room(dst) >= n
 }
 
+/// (MKW-AHEAD) `NXGFX_TRANSLATE_BALANCE` (default on; 0: off): a stream translated in parallel is cut into about one
+/// segment per lane, of equal draws, instead of segments of `NXGFX_TRANSLATE_SEG` / `_MIDCUT` draws. Mario Kart World's
+/// two long parts of its frame (~700-850 draws each, up to their waits) became 3-4 segments of 256 (or 6-7 of 128) on
+/// 6 lanes: the part waited for its slowest lane's second segment while the others idled.
+fn translate_balance() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("NXGFX_TRANSLATE_BALANCE").as_deref() != Ok("0");
+        crate::vklog!(
+            "translate: a stream's segments {}",
+            if on {
+                "one per lane, of equal draws up to its first wait that parks (NXGFX_TRANSLATE_BALANCE=0: fixed sizes)"
+            } else {
+                "of fixed sizes (NXGFX_TRANSLATE_BALANCE=0)"
+            }
+        );
+        on
+    })
+}
+
+/// Fewest draws in a balanced segment (`balanced_target`).
+const BALANCE_MIN: usize = 32;
+
+/// A balanced segment's draws: `draws` (up to the stream's first wait that parks) over `lanes`, at least
+/// `BALANCE_MIN`, at most `max` (the fixed size).
+fn balanced_target(draws: usize, lanes: usize, max: usize) -> usize {
+    draws.div_ceil(lanes.max(1)).clamp(BALANCE_MIN, max.max(BALANCE_MIN))
+}
+
+/// The segment size for `stream` when balanced (`translate_balance`): None when off or not translated in parallel.
+/// Draws are counted up to the first event wait that does not pass now (a wait passed by the stream's own earlier
+/// signal is counted as parking: the segments then come out smaller, never fewer).
+fn balanced_seg(g: &Gpu, stream: &[u8]) -> Option<usize> {
+    let lanes = translate_lanes();
+    if lanes < 2 || !translate_balance() {
+        return None;
+    }
+    let (mut p, mut draws) = (0usize, 0usize);
+    while p + 8 <= stream.len() {
+        let h = unsafe { rd::<op_hdr>(stream.as_ptr().add(p)) };
+        let sz = h.size as usize;
+        if sz < 8 || p + sz > stream.len() {
+            break;
+        }
+        if is_draw(h.op) {
+            draws += 1;
+        } else if h.op == op::WAIT_EVENT && sz >= 24 {
+            let (addr, mode, value): (u64, u32, u32) =
+                unsafe { (rd_at(&stream[p..], 0), rd_at(&stream[p..], 8), rd_at(&stream[p..], 12)) };
+            if !event_wait_passes(g, addr, mode, value) {
+                break;
+            }
+        }
+        p += sz;
+    }
+    Some(balanced_target(draws, lanes, translate_seg().max(translate_midcut())))
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::*;
+    /// A stream's draws up to its park are spread over the lanes in equal segments, within the bounds.
+    #[test]
+    fn segments_are_one_per_lane_within_bounds() {
+        assert_eq!(balanced_target(830, 6, 256), 139, "830 draws on 6 lanes");
+        assert_eq!(balanced_target(700, 6, 256), 117);
+        assert_eq!(balanced_target(100, 6, 256), BALANCE_MIN, "never below the minimum");
+        assert_eq!(balanced_target(4000, 6, 256), 256, "never above the fixed size");
+        assert_eq!(balanced_target(500, 0, 256), 256, "no lanes: one piece capped by the fixed size");
+    }
+}
+
 /// The pre-pass: the stream's segments and the offset of a wait that parks it (as `run` returns). Makes the stream's
 /// ordered global effects.
 fn plan(g: &Gpu, qs: &QState, stream: &[u8]) -> (Vec<Segment>, Option<usize>) {
-    let target = translate_seg();
-    let midcut = translate_midcut();
+    let (target, midcut) = match balanced_seg(g, stream) {
+        Some(n) => (n, n),
+        None => (translate_seg(), translate_midcut()),
+    };
     let mut shadow = qs.fork_state();
     let mut segs = Vec::new();
     let mut cur = Segment {
@@ -9703,7 +10296,8 @@ mod par {
         seg_stats::JOIN_WAIT_NS.fetch_add(tw.elapsed().as_nanos() as u64, Relaxed);
         seg_stats::PAR.fetch_add(1, Relaxed);
         let mut later = 0u64;
-        let mut last = None;
+        let mut last: Option<QState> = None;
+        let mut gathered: Vec<Seeds> = Vec::new();
         for k in 0..n {
             let Some(Own((c, wq, draws))) = job.out[k].lock().unwrap().take() else {
                 unreachable!("segment {k} of {n} was not translated");
@@ -9746,10 +10340,23 @@ mod par {
                 }
             }
             queue::child_join(sub, c);
-            last = Some(wq);
+            // (segment seeding) the copies of every segment but the last, gathered for the streams after this one
+            if let Some(prev) = last.replace(wq) {
+                if set_seed_on() {
+                    gathered.push(seeds_of(&mut prev.shadow.borrow_mut()));
+                }
+            }
         }
         queue::child_settle(sub, &job.init);
-        last.expect("a parallel run has segments")
+        let last: QState = last.expect("a parallel run has segments");
+        if set_seed_on() && !gathered.is_empty() {
+            // newest first (the last segment's own copies stay its state's working copies)
+            gathered.reverse();
+            let mut last = last;
+            last.seed = Some(seeds_merge(gathered, last.seed.as_deref()));
+            return last;
+        }
+        last
     }
 }
 
@@ -10604,6 +11211,20 @@ fn emit_op2(g: &Gpu, sub: &mut Sub, qs: &mut QState, opc: u32, rec: &[u8]) -> bo
             };
             let (ssl, soff, sext) = region_copy(&s, (c.has_sv != 0).then_some(&c.sv), &c.sr, &stf);
             let (dsl, doff, dext) = region_copy(&d, (c.has_dv != 0).then_some(&c.dv), &c.dr, &dtf);
+            // NXGFX_COPY_TRACE=1 (diagnostics, MKW-ATLAS): every copy into a sparse texture, its source, formats and
+            // the physical pages behind the destination layer's last tile and its page past the tiles
+            if copy_trace() && crate::nvn::vpool::is_sparse(d.mem as u64) {
+                let n = COPY_TRACED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if n < 4000 {
+                    let pages = super::sparse::layer_pages(di, dsl.base_array_layer);
+                    crate::vklog!(
+                        "copy trace {n}: ser{} {:?} {}x{} (levels {}) level {} layer {}+{} at {},{} {}x{} -> ser{} {:?} level {} layer {}+{} at {},{} {}x{}; dst layer's last tile / tail page physical {:x?}",
+                        s.serial, stf.vk, s.d.width, s.d.height, s.d.levels, ssl.mip_level, ssl.base_array_layer,
+                        ssl.layer_count, soff.x, soff.y, sext.width, sext.height, d.serial, dtf.vk, dsl.mip_level,
+                        dsl.base_array_layer, dsl.layer_count, doff.x, doff.y, dext.width, dext.height, pages
+                    );
+                }
+            }
             let (ss, ds) = (img_scale(g, s.serial), img_scale(g, d.serial));
             if ss != 1.0 || ds != 1.0 {
                 // resolution scale: a blit of the regions at each image's scale (the game's region sizes kept)

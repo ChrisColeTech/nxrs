@@ -49,6 +49,8 @@ pub struct BuildArgs {
     /// `--target web`: a browser build (docs/35): emcc instead of clang, `game.js` + `game.wasm` instead of the
     /// executable and code DLL, into `<input folder>\nxrs-web\<name>` by default
     pub web: bool,
+    /// `--shaders-from <data folder>`: another build's translated shaders imported (`shaderimport`)
+    pub shaders_from: Option<PathBuf>,
 }
 
 /// What the build produced.
@@ -380,7 +382,9 @@ pub fn modules_c(mods: &[(String, String, String)], entry: &str, web: bool) -> S
     if web {
         // the mod markers find the executable's folder through the OS; a web build has neither (its data, mods
         // included, is packaged by docs/35 W3/W5)
-        s.push_str("#include <stdio.h>\n#include <string.h>\nstatic void nxrs_mod_markers(void) {}\n\n");
+        s.push_str(
+            "#include <stdio.h>\n#include <string.h>\nstatic void nxrs_mod_markers(void) {}\n\n",
+        );
     } else {
         s.push_str(crate::mods::C_DECLS);
         s.push_str(&crate::mods::c_code());
@@ -551,6 +555,18 @@ fn shaders_step(
                 Err(e) => out.say(&format!(
                     "shaders: runtime-derived variants not promoted ({e})"
                 )),
+            }
+            if let Some(from) = &a.shaders_from {
+                match crate::shaderimport::import(from, data) {
+                    Ok(r) => out.say(&format!(
+                        "shaders: {} imported from {} ({} already here, {} pair rows)",
+                        r.shaders,
+                        from.display(),
+                        r.present,
+                        r.pairs
+                    )),
+                    Err(e) => out.say(&format!("shaders: none imported ({e:#})")),
+                }
             }
             match reconcile_shader_pairs(data) {
                 Ok(removed) if removed > 0 => out.say(&format!(
@@ -877,6 +893,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         .or_else(|| game.exefs.files.get("main.npdm").and_then(|n| npdm_name(n)))
         .unwrap_or_else(|| source_name(&a.input));
     let name = output_name(&title);
+    let web_title_id = game.exefs.title_id;
     let outdir = std::path::absolute(a.outdir.clone().unwrap_or_else(|| {
         if a.web {
             default_web_outdir(&a.input, &name)
@@ -889,7 +906,11 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     let with = |suffix: &str| PathBuf::from(format!("{}{suffix}", base.display()));
     // Linux: `<name>` and `<name>_code.so`; web: `game.js` and `game.wasm` (the folder is the game's)
     let (exe, dll, data) = if a.web {
-        (outdir.join("game.js"), outdir.join("game.wasm"), with("_data"))
+        (
+            outdir.join("game.js"),
+            outdir.join("game.wasm"),
+            with("_data"),
+        )
     } else if cfg!(target_os = "linux") {
         (with(""), with("_code.so"), with("_data"))
     } else {
@@ -1156,10 +1177,21 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             u.flags.extend(extra.iter().cloned());
         }
         let (cc_name, cc_version) = match &clang.web {
-            Some(e) => (format!("emcc from {}", e.root.display()), clang.version.clone()),
+            Some(e) => (
+                format!("emcc from {}", e.root.display()),
+                clang.version.clone(),
+            ),
             None => (
-                clang.path.file_name().unwrap().to_string_lossy().into_owned(),
-                clang.version.trim_start_matches("clang version ").to_string(),
+                clang
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                clang
+                    .version
+                    .trim_start_matches("clang version ")
+                    .to_string(),
             ),
         };
         out.say(&format!(
@@ -1213,16 +1245,60 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
                 cc::link_dll(&clang, &objs, engine, &obj, &dll)?;
                 cc::link_exe(&clang, &obj, &exe)?;
             }
-            None => match cc::find_web_lib() {
-                Some(lib) => {
-                    out.say(&format!("  with {} ({WEB_ENTRY})", lib.display()));
-                    cc::link_web(&clang, &objs, Some(&lib), &obj, &exe)?;
+            None => {
+                // the hot/cold split (websplit.rs) when the data folder has a recorded hot set and NXRS_WEB_SPLIT=1:
+                // opt-in: with pthreads every engine thread instantiates the hot module's ~290k placeholder imports
+                // (~140 MiB each) and Chrome's renderer is killed at ~16.6 GB (docs/waves/WEB-W6b.md §1)
+                let hot = crate::websplit::hot_set(&data)
+                    .filter(|_| std::env::var("NXRS_WEB_SPLIT").as_deref() == Ok("1"));
+                match cc::find_web_lib() {
+                    Some(lib) => {
+                        if let Some(root) = cc::web_lib_dev_tree(&lib) {
+                            let secs = cc::refresh_web_lib(&root)?;
+                            out.say(&format!(
+                                "  web engine library brought up to date with {} ({secs:.1}s)",
+                                root.display()
+                            ));
+                        }
+                        cc::check_web_lib(&lib)?;
+                        out.say(&format!("  with {} ({WEB_ENTRY})", lib.display()));
+                        cc::link_web(&clang, &objs, Some(&lib), &obj, &exe, hot.is_some())?;
+                    }
+                    None => {
+                        out.say("  no web engine library (scripts/build/web.ps1 -Crates os): the runtime's symbols are imports");
+                        cc::link_web(&clang, &objs, None, &obj, &exe, hot.is_some())?;
+                    }
                 }
-                None => {
-                    out.say("  no web engine library (scripts/build/web.ps1 -Crates os): the runtime's symbols are imports");
-                    cc::link_web(&clang, &objs, None, &obj, &exe)?;
+                let dir = exe.parent().unwrap_or(Path::new("."));
+                match (&hot, &clang.web) {
+                    (Some(h), Some(e)) => {
+                        timings.push(("link", t.elapsed().as_secs_f64()));
+                        let t = Instant::now();
+                        for l in crate::websplit::split(
+                            dir,
+                            &e.root,
+                            h,
+                            translator::loader::layout::FIRST_BASE,
+                            translator::loader::layout::WEB_FIRST_BASE,
+                        )? {
+                            out.say(&l);
+                        }
+                        timings.push(("split", t.elapsed().as_secs_f64()));
+                        return Ok(());
+                    }
+                    (_, e) => {
+                        crate::websplit::clean_unsplit(dir);
+                        out.say(&format!(
+                            "  one module (split: a {} in the data folder and NXRS_WEB_SPLIT=1)",
+                            crate::websplit::HOTSET
+                        ));
+                        // identical functions folded (WEB-W11)
+                        if let Some(e) = e.as_ref().filter(|_| crate::websplit::fold_on()) {
+                            out.say(&crate::websplit::fold(dir, &e.root)?);
+                        }
+                    }
                 }
-            },
+            }
         }
         timings.push(("link", t.elapsed().as_secs_f64()));
         Ok(())
@@ -1234,10 +1310,9 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             .name("shader prebuild".into())
             .spawn_scoped(s, move || {
                 let t = Instant::now();
-                // the web build's shaders are WGSL packs (docs/35 W4), not this SPIR-V prebuild
-                if web {
-                    return 0.0;
-                }
+                // the web build translates them too: its GPU turns each module the replay makes from them into WGSL
+                // when it is created (src/graphics/src/web), the page serves them on first use (docs/35 W4)
+                let _ = web;
                 // never fatal, a panic of the prebuild thread included
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shaders_step(out, data, profile_id, exact_profile_build, a))).is_err() {
                     out.say("shaders: not translated at build time (the prebuild stopped); the game translates them while it runs");
@@ -1252,6 +1327,48 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         (r, sh.join().unwrap_or(0.0))
     });
     built?;
+    if a.web {
+        // the shared-font fallback is the engine's built-in OFL font on the web (os services/misc.rs `fallback_ttf`;
+        // its license goes beside the page, webhost.rs). Builds before WEB-W6 copied this machine's system font
+        // here, which may not be redistributed: removed
+        let stale = data.join("fonts").join("fallback.ttf");
+        if stale.is_file() {
+            std::fs::remove_file(&stale)?;
+            let _ = std::fs::remove_dir(data.join("fonts"));
+            out.say("  removed fonts\\fallback.ttf (a system font an older web build copied; the engine has its own)");
+        }
+        // what the page streams and prefetches (docs/35 W3)
+        out.say(&crate::webpack::write(&outdir, &data, &name)?);
+        // the recorded run's shader modules as a few packs the page fetches whole (webshaders.rs, WEB-W6b)
+        out.say(&crate::webshaders::write(&outdir, &data)?);
+        // gzip copies of the modules and descriptions, sent with Content-Encoding (webzip.rs)
+        let t = Instant::now();
+        let mut zipped = vec![];
+        for f in [
+            "game.wasm",
+            crate::websplit::COLD,
+            "game.js",
+            crate::webpack::MANIFEST,
+        ] {
+            match crate::webzip::gzip_file(&outdir.join(f))? {
+                Some((raw, z)) => zipped.push(format!(
+                    "{f} {:.1} -> {:.1} MiB",
+                    raw as f64 / 1048576.0,
+                    z as f64 / 1048576.0
+                )),
+                None => {
+                    let _ = std::fs::remove_file(crate::webzip::gz_path(&outdir.join(f)));
+                }
+            }
+        }
+        out.say(&format!(
+            "Web gzip copies: {} ({:.1}s)",
+            zipped.join(", "),
+            t.elapsed().as_secs_f64()
+        ));
+        // the page, its workers and build.json: the folder is complete for any COOP/COEP server (docs/35 W5)
+        out.say(&crate::webhost::write(&outdir, &data, &name, web_title_id)?);
+    }
     timings.push(("shaders", shader_secs));
     timings.push(("total", t_all.elapsed().as_secs_f64()));
     // NROs the game's NRRs register and no file holds: the game decodes them at run time. Boot it once to capture
@@ -1442,8 +1559,19 @@ mod tests {
 
     #[test]
     fn web_builds_go_beside_the_input() {
-        let input = if cfg!(windows) { r"P:\Games\x\game.nsp" } else { "/games/x/game.nsp" };
-        let want = if cfg!(windows) { r"P:\Games\x\nxrs-web\X" } else { "/games/x/nxrs-web/X" };
-        assert_eq!(default_web_outdir(Path::new(input), "X"), PathBuf::from(want));
+        let input = if cfg!(windows) {
+            r"P:\Games\x\game.nsp"
+        } else {
+            "/games/x/game.nsp"
+        };
+        let want = if cfg!(windows) {
+            r"P:\Games\x\nxrs-web\X"
+        } else {
+            "/games/x/nxrs-web/X"
+        };
+        assert_eq!(
+            default_web_outdir(Path::new(input), "X"),
+            PathBuf::from(want)
+        );
     }
 }

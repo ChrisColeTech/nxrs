@@ -60,6 +60,8 @@ pub fn request(key: ShaderKey, ctl: Vec<u8>, code: Vec<u8>) {
         return;
     }
     st.missed_at.insert(key, Instant::now());
+    // the web: the translator is a native executable a browser cannot start; the same threads ask the page's server
+    // to run it (`translate` below), and a server that cannot is said in the red line
     st.q.push_back((key, ctl, code));
     if !st.started {
         st.started = true;
@@ -108,7 +110,7 @@ fn worker() {
         };
         let t0 = Instant::now();
         let hex = key_hex(&key);
-        match shaders::prebuild::translate_one(&ctl, &code, &d) {
+        match translate(&key, &ctl, &code, &d) {
             Ok(k) => {
                 let since = ST
                     .lock()
@@ -133,6 +135,73 @@ fn worker() {
             }
         }
     }
+}
+
+/// One translation into `<live>/<key>/` (native: `translate_one` on this thread, which runs `dmsh_xlate`); its key.
+#[cfg(not(target_os = "emscripten"))]
+fn translate(_key: &ShaderKey, ctl: &[u8], code: &[u8], d: &std::path::Path) -> Result<String, String> {
+    shaders::prebuild::translate_one(ctl, code, d)
+}
+
+/// The web: the page's server runs the native translator (`POST shader-xlate/<key>`, WEB-W7b; it writes
+/// `<data>/shaders/live/<key>/` as a native run does). This thread waits for its answer, as the native one waits for
+/// `dmsh_xlate`; the module is kept in memory for the library (`web_known`).
+#[cfg(target_os = "emscripten")]
+fn translate(key: &ShaderKey, ctl: &[u8], code: &[u8], _d: &std::path::Path) -> Result<String, String> {
+    let hex = key_hex(key);
+    let (status, body) = crate::web::ring::post(
+        &format!("shader-xlate/{hex}"),
+        &shaders::wire::request(ctl, code),
+    );
+    let text = || String::from_utf8_lossy(&body[..body.len().min(400)]).trim().to_string();
+    match status {
+        200 => {
+            let m = shaders::wire::parse_answer(&body)
+                .ok_or_else(|| format!("the page's server answered {} bytes that are not a shader", body.len()))?;
+            ARRIVED.lock().unwrap().get_or_insert_with(HashMap::new).insert(*key, m);
+            Ok(hex)
+        }
+        // a static host (no route), an older server that takes every POST, or no answer at all
+        0 | 204 | 404 | 405 | 501 => Err(format!(
+            "not in the web build's library, and the page's server cannot translate shaders (HTTP {status}): play it from the launcher (Play in browser, or nxrs --serve-web), or run the title natively once and build for the web with --shaders-from <its data folder>"
+        )),
+        _ => Err(format!("the page's server did not translate it (HTTP {status}: {})", text())),
+    }
+}
+
+/// The web: modules the page's server translated in this run.
+#[cfg(target_os = "emscripten")]
+static ARRIVED: Mutex<Option<HashMap<ShaderKey, (Vec<u32>, Option<String>)>>> = Mutex::new(None);
+
+/// The web library's view of `key` before it asks the server for the file: Some(module) when the live translator
+/// brought it, Some(None) while the translator was asked for it and has not answered (or failed: the server is not
+/// asked again for a file it does not have), None when the live translator never saw it.
+#[cfg(target_os = "emscripten")]
+pub fn web_known(key: &ShaderKey) -> Option<Option<(Vec<u32>, Option<String>)>> {
+    if let Some(m) = ARRIVED.lock().unwrap().as_ref().and_then(|a| a.get(key)) {
+        return Some(Some(m.clone()));
+    }
+    let asked = ST.lock().unwrap().as_ref().is_some_and(|s| s.queued.contains(key));
+    asked.then_some(None)
+}
+
+/// The web: an earlier page's live translation of `key` on the server (`shaders/live/<key>/spv/`), which the next
+/// build promotes into the library; a warm run draws it without translating it again.
+#[cfg(target_os = "emscripten")]
+pub fn web_fetch_live(key: &ShaderKey) -> Option<(Vec<u32>, Option<String>)> {
+    let hex = key_hex(key);
+    let bytes = crate::web::fetch_data(&format!("shaders/live/{hex}/spv/{hex}.spv"))?;
+    if bytes.is_empty() || bytes.len() % 4 != 0 {
+        return None;
+    }
+    let words = bytes
+        .chunks_exact(4)
+        .map(|c| u32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .collect();
+    let json = crate::web::fetch_data(&format!("shaders/live/{hex}/spv/{hex}.json"))
+        .and_then(|b| String::from_utf8(b).ok());
+    crate::vklog!("live shader {hex}: an earlier translation found on the page's server");
+    Some((words, json))
 }
 
 /// Whether the live translator gave up on `key` (a draw stops waiting for it).

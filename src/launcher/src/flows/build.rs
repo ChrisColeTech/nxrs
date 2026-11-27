@@ -4,18 +4,24 @@ use super::App;
 use super::Outcome;
 use super::runs::BuildRun;
 use super::view_state::BuildProgress;
-use crate::constants::{engine as e, menus, words_build as w};
+use crate::constants::{engine as e, menus, words_build as w, words_web as ww};
 use crate::model::fill::fill;
 use crate::model::game::Game;
 use crate::model::names::output_name_for;
 use crate::model::path_text::{display, ends_with_ci, file_name, parent};
 use crate::model::play::effective_button_layout;
+use crate::model::web_build::web_dir;
 use crate::model::{args, output_lines};
 use crate::services::jobs::{Job, Spec, open_build_log};
 use crate::services::{files, sources};
 
 impl App {
     pub fn start_build(&mut self) {
+        self.start_build_kind(false);
+    }
+
+    /// A native build, or (`web`) a build for the browser into the game's web folder.
+    pub(super) fn start_build_kind(&mut self, web: bool) {
         let Some(id) = self.selected_id() else { return };
         if self.demo || self.is_running(&id) {
             return;
@@ -29,28 +35,39 @@ impl App {
         };
         let mut build = game.clone();
         build.button_layout = effective_button_layout(&game, &self.lib.button_layout);
-        if let Err(err) = self.start_build_job(build) {
+        if let Err(err) = self.start_build_job(build, web) {
             self.outcomes.push(Outcome::Smoke(false));
-            self.message(w::CANNOT_START, &err, true);
+            self.message(
+                crate::constants::words_contexts::BUILD,
+                w::CANNOT_START,
+                &err,
+                true,
+            );
             self.refresh_facts();
             return;
         }
-        if let Some(g) = self.lib.find_mut(&id) {
+        // a web build leaves the native one as it is
+        if let Some(g) = self.lib.find_mut(&id).filter(|_| !web) {
             g.build_incomplete = true;
         }
         self.save();
         self.console.clear();
+        let (output, heading) = if web {
+            (web_dir(&game), ww::OUTPUT)
+        } else {
+            (game.build_dir.clone(), w::OUTPUT)
+        };
         self.console.push(format!(
             "Source: {}\nOutput: {}\n",
             display(&game.source),
-            display(&game.build_dir)
+            display(&output)
         ));
-        self.console.title = format!("{} — {}", w::OUTPUT, game.title);
+        self.console.title = format!("{heading} — {}", game.title);
         self.lib.console.visible = true;
         self.refresh_facts();
     }
 
-    fn check_build(&self, next: &Game) -> Result<(), String> {
+    fn check_build(&self, next: &Game, web: bool) -> Result<(), String> {
         if self.build.is_some() {
             return Err(w::BUSY.into());
         }
@@ -74,21 +91,25 @@ impl App {
                 return Err(w::UPDATE_KEYS.into());
             }
         }
-        if !files::make_dir(&next.build_dir) {
+        if web && !files::make_dir(&web_dir(next)) {
+            return Err(ww::NO_FOLDER.into());
+        }
+        if !web && !files::make_dir(&next.build_dir) {
             return Err(w::NO_FOLDER.into());
         }
         Ok(())
     }
 
-    fn start_build_job(&mut self, next: Game) -> Result<(), String> {
-        self.check_build(&next)?;
-        let log = open_build_log(&next.build_log())?;
-        let a = args::build(
-            &next,
-            &self.tools.keys,
-            self.tools.keys_exist(),
-            self.lib.jobs,
-        );
+    fn start_build_job(&mut self, next: Game, web: bool) -> Result<(), String> {
+        self.check_build(&next, web)?;
+        let (keys, have_keys, jobs) = (&self.tools.keys, self.tools.keys_exist(), self.lib.jobs);
+        let (log, a) = if web {
+            let a = args::build_web(&next, keys, have_keys, jobs);
+            (Self::web_build_log(&next), a)
+        } else {
+            (next.build_log(), args::build(&next, keys, have_keys, jobs))
+        };
+        let log = open_build_log(&log)?;
         let (program, cwd, env) = (
             self.tools.nxrs_build.clone(),
             parent(&self.tools.nxrs_build),
@@ -108,6 +129,7 @@ impl App {
             game: next,
             play: self.lib.play(),
             holds_dlc: false,
+            web,
         });
         self.set_progress(e::STARTING, 0, 0);
         Ok(())
@@ -127,7 +149,7 @@ impl App {
         self.bar = Some((current, total));
     }
 
-    /// The card's primary button: Stop / Cancel build, Play, or Build.
+    /// The card's primary button: Stop / Cancel build, or Play or Build (each asks Native or Web).
     pub fn card_action(&mut self, id: &str) {
         self.select(id);
         if self.demo || self.lib.find(id).is_none() {
@@ -135,20 +157,9 @@ impl App {
         }
         if self.busy(id) {
             self.stop();
-        } else if self.facts_of(id).playable() {
-            self.play();
         } else {
-            self.start_build();
-        }
-    }
-
-    /// Enter / double-click: Play when it can, else Properties > Build.
-    pub fn activate(&mut self) {
-        let Some(id) = self.selected_id() else { return };
-        if self.facts_of(&id).playable() {
-            self.play()
-        } else {
-            self.show_properties(1)
+            let plays = self.facts_of(id).playable() || self.can_target(id, false);
+            self.ask_target(!plays);
         }
     }
 

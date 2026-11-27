@@ -27,6 +27,10 @@ pub mod sched;
 pub mod services;
 pub mod svc;
 pub mod watch;
+/// The web build's host side: the I/O worker's slots, browser saves, the audio ring (docs/35 W3).
+#[cfg(target_os = "emscripten")]
+pub mod web;
+pub mod webdata;
 
 /// `NXOS_TRACE=svc,ipc,hle,nvn,fs` (or `all`).
 pub mod ui;

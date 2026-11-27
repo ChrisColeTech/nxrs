@@ -1,9 +1,9 @@
 //! Opening the library (`Window::Window`), and what every command shares: the selected game, whether a
 //! game is busy, what the disk says, saving, message and question boxes.
 
-use super::surface::{Check, Surface};
+use super::surface::{Ask, Check, Surface};
 use super::{Action, App};
-use crate::constants::{engine as e, words_library as w};
+use crate::constants::{engine as e, words_contexts as c, words_library as w};
 use crate::model::facts::Facts;
 use crate::model::game::Game;
 use crate::services::library_file::{load, save};
@@ -24,7 +24,7 @@ impl App {
             self.running = platform::find_running_games(&self.lib.games);
         }
         if let Some(e) = error {
-            self.message(w::LOAD_FAILED, &e, true);
+            self.message(c::LIBRARY, w::LOAD_FAILED, &e, true);
         }
         self.refresh_facts();
         self.fix_selection();
@@ -106,12 +106,13 @@ impl App {
             return;
         }
         if let Err(e) = save(&self.lib, &mut self.store) {
-            self.message(w::SAVE_FAILED, &e, true);
+            self.message(c::LIBRARY, w::SAVE_FAILED, &e, true);
         }
     }
 
-    /// A message box; a command-line verb prints it instead.
-    pub fn message(&mut self, title: &str, text: &str, error: bool) {
+    /// A message box titled by its `context` (the task it belongs to, `words_contexts`), `title` its
+    /// heading; a command-line verb prints it instead.
+    pub fn message(&mut self, context: &str, title: &str, text: &str, error: bool) {
         if !self.interactive {
             eprintln!(
                 "{}{text}",
@@ -124,33 +125,45 @@ impl App {
             return;
         }
         self.surfaces.push(Surface::Message {
+            context: context.into(),
             title: title.into(),
             text: text.into(),
             error,
+            links: Vec::new(),
         });
     }
-    pub fn question(
+    /// A message with web pages to open (About): each a ghost button at its footer's leading side.
+    pub fn message_with_links(
         &mut self,
-        title: &str,
+        (context, title): (&str, &str),
         text: &str,
-        yes: Action,
-        no: Option<Action>,
-        default_no: bool,
+        links: &[(&str, &str)],
     ) {
+        self.message(context, title, text, false);
+        if !self.interactive {
+            return; // printed; no box was opened
+        }
+        if let Some(Surface::Message { links: kept, .. }) = self.surfaces.last_mut() {
+            *kept = links
+                .iter()
+                .map(|(l, u)| (l.to_string(), u.to_string()))
+                .collect();
+        }
+    }
+    /// A question: its one button (the verb) asks for `yes`; the X and Escape for `no`.
+    pub fn question(&mut self, ask: Ask, yes: Action, no: Option<Action>, default_no: bool) {
         self.surfaces.push(Surface::Question {
-            title: title.into(),
-            text: text.into(),
+            ask,
             yes,
             no,
             default_no,
             check: None,
         });
     }
-    /// A question with a tick box: Yes asks for `check.yes_on` while it is ticked.
-    pub fn question_checked(&mut self, title: &str, text: &str, yes: Action, check: Check) {
+    /// A question with a tick box: the verb asks for `check.yes_on` while it is ticked.
+    pub fn question_checked(&mut self, ask: Ask, yes: Action, check: Check) {
         self.surfaces.push(Surface::Question {
-            title: title.into(),
-            text: text.into(),
+            ask,
             yes,
             no: None,
             default_no: false,

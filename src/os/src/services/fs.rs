@@ -141,7 +141,14 @@ pub fn romfs() -> Option<Arc<RomFs>> {
     ROMFS
         .get_or_init(|| {
             let t0 = std::time::Instant::now();
-            match translator::package::open_data_dir(&data_dir(), None) {
+            // the web: the data manifest's files through the I/O worker (docs/35 W3)
+            #[cfg(target_os = "emscripten")]
+            let opened = crate::web::io::romfs(&data_dir())
+                .map(Ok)
+                .unwrap_or_else(|| translator::package::open_data_dir(&data_dir(), None));
+            #[cfg(not(target_os = "emscripten"))]
+            let opened = translator::package::open_data_dir(&data_dir(), None);
+            match opened {
                 Ok(r) => {
                     crate::log!(
                         "fs: RomFS from {} ({} files, {:.2} s)",
@@ -435,6 +442,12 @@ pub fn read_file(h: u64, off: u64, len: u64) -> Result<Vec<u8>, u64> {
         None => Err(RES_FAIL),
     })?;
     if let Some(fs) = fs {
+        // the boot-set recorder (webdata.rs): the game's own RomFS, as the web build's data folder names it (the web
+        // RomFS notes its reads itself)
+        #[cfg(not(target_os = "emscripten"))]
+        if is_game(&fs) {
+            crate::webdata::record(&format!("romfs/{p}"), off, len.min(fs.find(&p).map_or(0, |n| n.size()).saturating_sub(off)));
+        }
         return fs.read(&p, off, len).map_err(|e| {
             crate::log!("[RED] fs: read {p} at {off:#x}+{len:#x}: {e}");
             RES_FAIL
@@ -726,6 +739,15 @@ pub fn commit(name: &str) -> u64 {
         work,
     }) {
         Ok(()) => {
+            // the web: the commit counts once the browser has stored it (docs/35 W3)
+            #[cfg(target_os = "emscripten")]
+            if let Err(e) = crate::web::saves::persist(&save_dir(), &committed) {
+                crate::log!(
+                    "[RED] fs: commit {name}: the browser did not store {}: {e} (it is in this page's memory only)",
+                    committed.display()
+                );
+                return RES_FAIL;
+            }
             crate::log_once!(
                 format!("commit {}", committed.display()),
                 "fs: commit {name}: {} (first commit of this save)",

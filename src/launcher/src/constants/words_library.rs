@@ -21,8 +21,9 @@ pub const CANNOT_IMPORT: &str = "Cannot import build";
 pub const BUSY_TITLE: &str = "Game is busy";
 pub const BUSY_IMPORT: &str = "Wait for this game's build or run to finish before importing it.";
 pub const REMOVE_TITLE: &str = "Remove from library";
-pub const REMOVE_TEXT: &str =
-    "Remove “{}” from the library?\n\nThe game's package is never deleted.";
+pub const REMOVE_HEADING: &str = "Remove “{}” from the library?";
+pub const REMOVE_TEXT: &str = "The game's package is never deleted.";
+pub const REMOVE_VERB: &str = "Remove";
 pub const DELETE_BUILD: &str = "Also delete the build ({})";
 pub const DELETE_BUILD_TIP: &str = "Deletes the build folder {}. Saves, SD card files, cheats and \
     mods are moved first to {}; when the game is added and built again they go back into it. \
@@ -49,14 +50,19 @@ pub const GAMES: &str = "{} game{}";
 pub const SHOWN_OF: &str = "{} / {} games";
 pub const RESULT: &str = "{} of {} games shown";
 pub const FILTERS_ACTIVE: &str = "{} active filters — Ctrl+F to edit or clear";
-pub const ABOUT: &str = "Build and launch your own game dumps from one library.\nNo games, keys, or firmware are included.\n\nEngine: nxrs (MIT) — see legal/ in the release.\n\nNative controller input is supported. Vibration and some Switch 2 audio/video features remain incomplete.";
+pub const ABOUT: &str = "Build and launch your own game dumps from one library.\nNo games, keys, or firmware are included.\n\nEngine: nxrs (MIT) — see legal/ in the release.\n\nNative controller input is supported. Vibration and some Switch 2 audio/video features remain incomplete.\n\nWebsite: https://nxrs.app";
+/// About's own verbs (the footer's leading ghost buttons) and the pages they open in the browser.
+pub const WEBSITE: &str = "Website";
+pub const WEBSITE_URL: &str = "https://nxrs.app";
+pub const GITHUB: &str = "GitHub";
+pub const GITHUB_URL: &str = "https://github.com/ChrisColeTech/nxrs";
+pub const ABOUT_LINKS: [(&str, &str); 2] = [(WEBSITE, WEBSITE_URL), (GITHUB, GITHUB_URL)];
 pub const NO_ARTWORK: &str = "Add artwork";
 pub const BAD_ARTWORK: &str = "Image unavailable";
 pub const CHOOSE_ARTWORK: &str = "Choose artwork in Properties";
 pub const ARTWORK_ERROR: &str = "Cannot load artwork: ";
 pub const PICK_GAME: &str = "Add game";
 pub const PICK_FOLDER: &str = "Add extracted game folder";
-pub const PICK_BUILD: &str = "Import native build";
 pub const GAME_FILTER: (&str, &[&str]) = ("Game packages", &["nup", "nsp", "xci", "nro"]);
 
 /// The keys (`installKeys`).
@@ -72,6 +78,8 @@ pub const KEYS_DONE: &str = "prod.keys was installed in the launcher data folder
 
 /// The statuses (`cardState`, `statusFor`).
 pub const READY: &str = "Ready to play";
+/// No native build to play, a web build that plays in the browser.
+pub const READY_WEB: &str = "Ready to play in the browser";
 pub const NEEDS_BUILD: &str = "Needs build";
 pub const INCOMPLETE: &str = "Build incomplete";
 pub const UPDATE_CHANGED: &str = "Update changed";

@@ -100,7 +100,7 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 | L-01 | `dlc.manifest` lines `<id16> <ver> [data\|stub] <package>`, comments ignored | `readDlcManifest` |
 | L-02 | Package check: nsp/nsz (`PFS0`), xci/xcz (`HEAD`), nca (>= 0xC00); texts | `validDlcPackage` |
 | L-03 | `dlcUpToDate`, `adoptInstalledDlc` (installed but unlisted joins the list), descriptions ("— <ids>", "not installed yet", "installs when the game is built", "file not found", "(no data)") | `lib` |
-| L-04 | DLC window: list (multi-select), Add DLC… (multi-file picker, start dir), drop files, Remove (button, Delete, context menu "Remove n packages"), Open containing folder, Close; busy bar; status line (error red); locked when running/building | `DlcDialog` |
+| L-04 | DLC window: list (multi-select), Add DLC… (multi-file picker, start dir), drop files, Remove (button, Delete, context menu "Remove n packages"), Open containing folder, the header's X closes (no footer Close, 2026-11-26); busy bar; status line (error red); locked when running/building | `DlcDialog` |
 | L-05 | Install flow: validate, dedupe, add to list, sync when built else "installed when built"; command line all-or-nothing; engine refusals remove the package from the list (data folder is truth); outcome texts; reasons `DlcInstalled/Built/Play/Changed` | `installDlcPackages`, `removeDlcPackages`, `startDlcSync`, `dlcReport`, finished handler |
 | L-06 | Properties > DLC page: same list, Remove applied on OK, then sync | `DlcPanel`, `showProperties` |
 
@@ -111,7 +111,7 @@ Paths are relative to `D:\Projects\RecompLauncher`. `lib` = `src/launcher/librar
 | U-01 | Package check: nsp (`PFS0`), xci (`HEAD`), nca; nsz/xcz refused as compressed | `validUpdatePackage` |
 | U-02 | Probe through the engine (`UPDATE\t...` / `UPDATE error:`), keys and the game's own package required; found updates merged by path | `UpdateProbe`, `parseUpdateInfo` |
 | U-03 | Choice: newest (default), a package, or `none`; removal of the chosen one falls back to newest; labels ("1.1.1 (v262144)", "the game without updates", "the game as its package is") | `Game::activeUpdate`, `updateToken`, `updateTokenLabel`, `updateDescription` |
-| U-04 | Updates window: Version to build combo, list (multi-select, word-wrapped), Add update…, drop, Remove, context menu (Build with this update / Remove n / Open containing folder), pending text, Build now (enabled only when a rebuild is pending), Close; busy; status; locked | `UpdateDialog` |
+| U-04 | Updates window: Version to build combo, list (multi-select, word-wrapped), Add update…, drop, Remove, context menu (Build with this update / Remove n / Open containing folder), pending text, Build now (enabled only when a rebuild is pending), the header's X closes; busy; status; locked | `UpdateDialog` |
 | U-05 | Outcome texts ("Build the game again to get …", "The current build already is …") | `updateOutcome`, `updateReport` |
 | U-06 | Properties > Updates page: remove on OK | `UpdatePanel`, `showProperties` |
 
@@ -169,7 +169,7 @@ fetching.
 | X-03 | Settings (690x440): Engine (nxrs-build, health text, nxrs checks with Check again run on open, Open setup guide in a checkout), Build defaults (Build location, Compiler workers 1..64), Controller (Button layout + note), Appearance (Color mode, Accent with swatches, background toggle, library file path), Play (Screen mode, Pause, Mute, Ask who is playing, note); OK rules (no engine/build changes during a build, empty = bundled, nxrs-build must exist, layout/play changes written to every built game with a failure count) | `showSettings` |
 | X-04 | Install keys: picker for `prod.keys`, must contain `header_key`/`header_key_source`, atomic copy to `<data>\keys\prod.keys`, texts | `installKeys` |
 | X-05 | Remove from library: confirmation with the tick box *Also delete the build (N GB)*, ticked by default (owner, 2026-11-26). Ticked: saves, SD card, cheats and mods moved to `<data>\saves\<title id>`, then the build folder deleted (refused while running or building); the next build of the game puts them back. Unticked: files untouched. The package is never deleted | `removeGame` |
-| X-06 | About text; message boxes (info/warning) and question boxes with exact texts | `createMenusAndToolbar`, `message` |
+| X-06 | About text; message boxes (info/warning) and question boxes with exact texts (2026-11-26: laid out in the one dialog scaffold, guide §5: tile + heading, no Close / Yes / No; a message's one button is a filled OK, a question's its verb) | `createMenusAndToolbar`, `message` |
 | X-07 | Open build folder / save folder / game log / build log / INI, with "not available" messages | `openFolder`, `openGameFile`, dock toolbar |
 
 ### 1.12 Command line (`main.cpp`)
@@ -184,7 +184,7 @@ engine's docs) depend on them.
 | `--library <file>` | library file; skips legacy migration |
 | `--import-build <exe>` | import after the window opens |
 | `--demo` | non-persistent preview library |
-| `--list-view`, `--show-console`, `--show-filters`, `--show-appearance`, `--show-controller`, `--show-engine-settings`, `--show-play-settings`, `--show-updates`, `--show-dlc`, `--show-window remove\|about\|build-settings\|tool`, `--show-add <package>` | open that view (the last two: captures of every dialog) |
+| `--list-view`, `--show-console`, `--show-filters`, `--show-appearance`, `--show-controller`, `--show-engine-settings`, `--show-play-settings`, `--show-updates`, `--show-dlc`, `--show-window remove\|about\|build-settings\|tool\|close-build`, `--show-add <package>` | open that view (the last two: captures of every dialog and popover) |
 | `--show-properties` + `--properties-tab <0..5>` | Properties on a tab |
 | `--show-menu <File\|Game\|Keys\|View\|Help>` | pop a title-bar menu (after 300 ms) |
 | `--preview-theme <mode>`, `--preview-accent <id>` | appearance without saving |

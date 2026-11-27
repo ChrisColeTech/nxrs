@@ -12,6 +12,7 @@
 //! | [`fixes`] | the SPIR-V edits Vulkan needs (capabilities the translator leaves out, out-of-range size-query components) |
 //! | [`link`] | edits made when a module meets the device and its partner stage: clip / cull distances trimmed to the device, varyings a pixel shader reads and its vertex shader never writes |
 //! | [`reflect`] | the SPIR-V's descriptor bindings, as the graphics module creates its layouts |
+//! | [`pack`] | the web build's shader packs: a recorded run's modules in first-use order, a few files fetched whole |
 //! | [`prebuild`] | the whole build step: scan, translate, validate, write the output and its manifest |
 //!
 //! Credits and licenses: the repository's README.md.
@@ -24,10 +25,13 @@ pub mod job;
 pub mod link;
 pub mod mesh;
 pub mod nvn;
+pub mod pack;
 pub mod prebuild;
 pub mod reflect;
 pub mod rt;
 pub mod scan;
+pub mod wgsl;
+pub mod wire;
 pub mod xlate;
 
 pub use prebuild::{prebuild, prebuild_data, prebuild_game, Options, Report};

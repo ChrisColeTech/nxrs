@@ -73,30 +73,51 @@ bringing the engine to them is an owner decision, never a side task of other wor
 
 ## 5. The interface (the family grammar)
 
-**Windows.** A dialog is a child window (its own OS window, modal over a scrim) with the shared header: the title
-and a trailing close button named `Close <title>`. Embedded in tests and `--screenshot`. Escape and the close button
-discard a Draft. Sizes come from `constants/child_window.rs`; the rail work windows share one size.
+**Dialogs, popovers, menus.** Only a **dialog** is a child window (its own OS window, modal over a scrim):
+Properties, Add game, Settings, DLC, Updates, and the message and question boxes. A **popover** (Search & Filter,
+Build tools) is anchored inside the main window and is Live; a **menu** is a menu; the build output is a panel. They
+keep their own grammar below and are not dialogs: their captures live in `docs/images/popovers/`, not with the
+dialogs. Sizes come from `constants/child_window.rs`; the rail work windows share one size.
 
-**One scaffold for every dialog** (owner, 2026-11-26: the dialogs must be consistent app-wide; BUILD-LAYOUT). Every
-surface is built from the shared parts in `ui/popups/authored.rs`, never with its own chrome:
+**One scaffold for every dialog** (owner, 2026-11-26: the dialogs must be consistent app-wide; DIALOGS wave). Every
+dialog is built from the shared parts in `ui/popups/authored.rs` and `ui/widgets/page.rs`, never its own chrome:
 
 | Part | Shared block | Used by |
 |---|---|---|
-| Header: 12 pt semibold title, 28 pt, hairline under it, bordered 22 pt X named `Close <title>` | `authored::header` | every child window and every popover |
-| Footer: a hairline; the surface's own verbs as ghost buttons at the leading side; at the trailing side the ghost dismissal (Cancel, No, Close) and the one filled primary, last | `authored::footer_bar` (`footer`, `footer_at_bottom`) | every child window |
+| Header: 12 pt semibold title, 28 pt, hairline under it, bordered 22 pt X named `Close <title>` | `authored::header` | every dialog and every popover |
+| Body header: the 32 pt icon tile, the bold 16 pt heading, the info mark when there is an explanation | `page::heading` (`page::group`) | every dialog's body (a Group in a rail window; DLC, Updates; a message's or question's heading) |
+| Footer: a hairline; the dialog's own verbs as ghost buttons at the leading side; the one filled primary, last (a Choices box: one equal button per option at the trailing end, none filled) | `authored::footer_bar` (`footer`, `footer_at_bottom`; `choices_at_bottom`) | every dialog |
 | Popover frame: raised fill, border, shadow, the scaffold's inset | `authored::popover_frame` | Search & Filter, Build tools |
 
-- **Filled means commit.** A surface has at most one filled button, its commit (Apply, Add game, Yes, Add DLC…). A
-  surface with nothing to commit (a message, a Live popover) has none: a message's footer is a ghost Close, a
-  popover closes with its header X (no Done).
-- **Messages and questions** keep the message-box body: a ringed mark (`i`, `!` in the error red, `?`), the text,
-  and for a question with an option a tick box as the text's last paragraph with its explanation in an info mark
-  (Remove from library: "Also delete the build (N GB)", ticked by default). Footer: Close; or No and a filled Yes.
+- **Dismissal lives only in the header's X** (and Escape). No footer has Close, Cancel, No or Done: the X closes a
+  window, discards a Draft (Settings restores its previewed appearance), and answers a question No.
+- **Every dialog ends with exactly one filled primary, last** (owner, 2026-11-26: "you removed cancel/close but
+  didnt add ok"): Apply, Add game, Add DLC…, Add update…, a question's verb, and a message's **OK** (it
+  acknowledges). Other footer buttons are the dialog's own ghost verbs at the leading side. A Live popover has no
+  filled button, and neither has a Choices box (below): its options are equal.
+- **One body header.** Every dialog's body starts with the tile + heading; no dialog without a heading, no second
+  icon style (no ringed marks beside text). The tile is accent-tinted; an error's tile is the error red throughout
+  (ink, fill and edge). Tile icons are bare line glyphs (no ring around `i`, `!`, `?`).
+- **Messages** (`i`, or `!` for an error): the window title names the task or place the message belongs to
+  (`constants/words_contexts.rs`: Add game, Import build, Build, Play, Stop, Settings, Properties, Keys, DLC,
+  Updates, Library, Remove from library, Build folder, Save folder, Game log, About nxrs), **never the app's name
+  alone**; the heading states the message itself (Cannot add game); the text under it. With no natural context, the
+  message's own short title goes in the title bar and a fuller heading under it. Footer: one filled OK; OK, Enter,
+  the X and Escape close it.
+- **Questions** (`?`): the window title names the action (Remove from library); the heading is the question itself
+  (Remove “Kart” from the library?); the rest is the text, a tick box as its last paragraph with its explanation in
+  an info mark. The footer is one filled button named with its verb (Remove, Stop build and close), never Yes / No.
+- **Choices**: a dialog that asks which of two or more equal actions to take (Play/Build: Native or Web): the
+  window title names the action, the heading the choice, the text explains each option; the footer has one equal
+  button per option, side by side at the trailing end, none filled; X and Escape dismiss (owner, 2026-11-27).
+  An option that cannot run is disabled, its reason its tooltip; Enter chooses nothing (`Surface::Choices`,
+  `message::choices`, `button::choice`). Play asks only when both versions can play; with one, it runs it.
 - **Work windows** (rail or not) start their body with a Group heading; a labelled control is a Row (the 190 pt
   column) wherever it appears, Updates' "Version to build" included.
 - Captures of every dialog as it should look: `docs/images/dialogs/` (PrintWindow at 3x;
-  `nxrs --show-window remove|about|build-settings|tool`, `--show-add <package>`, `--show-properties`,
-  `--properties-tab N`, `--show-dlc`, `--show-updates`, the `--show-*-settings` flags, `--show-filters` open each).
+  `nxrs --show-window remove|about|build-settings|close-build`, `--show-add <package>`, `--show-properties`,
+  `--properties-tab N`, `--show-dlc`, `--show-updates`, the `--show-*-settings` flags open each); the popovers in
+  `docs/images/popovers/` (`--show-filters`, `--show-window tool`).
 
 **Work windows** (Settings, Properties, Add game) have a **rail** down the left (150 px; 32 px entries with an icon
 and a label; the chosen one has the selection tint, a 2 px accent bar and accent ink) and the chosen section's form
@@ -119,13 +140,14 @@ scrolling beside it, above the footer (`ui/windows/rail_window.rs`).
 
 | Kind | Where |
 |---|---|
-| Ghost (`button::ghost`) | the default everywhere: Cancel, Close, row and panel verbs. No border at rest, the hover fill under the pointer |
-| Primary (`button::primary`) | the one filled accent action of a surface, its commit, last and rightmost (Apply, Add game, Yes, Add DLC…); none on a surface with nothing to commit |
+| Ghost (`button::ghost`) | the default everywhere: a dialog's own verbs (Remove, Build now), row and panel verbs. No border at rest, the hover fill under the pointer |
+| Primary (`button::primary`) | the one filled accent action of a dialog, last and rightmost (Apply, Add game, Remove, Add DLC…, a message's OK); none on a Live popover or a Choices box |
+| Choice (`button::choice`) | a Choices box's options (Native, Web): equal, raised fill and border, none filled |
 | Icon (`icon_button`) | icon-only controls; the tooltip is the accessible name. Borderless, except a title header's close, which is bordered. Every close in the app is this button with the same X |
 | Outline | the title bar only |
 
-Footer language: **Apply** commits a Draft, **Cancel** discards it, **Close** dismisses a window that has nothing
-to commit. Never OK, Submit or Done for a commit. A question box is No and a filled Yes, Yes rightmost.
+Footer language: **Apply** commits a Draft; a question's button is its verb; a message's is **OK**. Discarding,
+closing and answering No are the header's X and Escape, never a footer button. Never Submit, Done, Yes or No.
 
 **Panels.** The build output docks at the bottom (default) or the right, or pops out into its own tool window. One
 owner sets its geometry (`ui/chrome/dock.rs`, `constants/panes.rs`): limits per side, a 5 px sash with a hairline
@@ -150,7 +172,8 @@ the saved size survives hiding it, and a small window refits only the paint.
 ## 7. Build and release
 
 - `scripts/build/build.ps1` builds the engine and the launcher in release and assembles `dist/nxrs` (the launcher,
-  `nxrs-engine/`, `toolchain/llvm-mingw` with the gnullvm engine, `legal/`), then removes all of `target/` so
+  `nxrs-engine/` with the MSVC and the gnullvm engines, `toolchain/llvm-mingw`, the Visual C++ runtime DLLs,
+  `legal/`: a release builds games with nothing installed), then removes all of `target/` so
   `dist/nxrs` is what remains; `-KeepCache` keeps `target/` for fast rebuilds, `-Run` starts the result.
   `scripts/build/prune.ps1` shrinks `target/` without removing it.
 - `src/launcher/scripts/package_launcher.py` makes the release archive with its SHA-256 manifest from an engine

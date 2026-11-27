@@ -42,6 +42,19 @@ pub fn build(game: &Game, keys: &str, keys_exist: bool, jobs: i64) -> Vec<String
     args
 }
 
+/// The same build for the web (docs/35 W5): `--outdir <web folder> … --target web`.
+pub fn build_web(game: &Game, keys: &str, keys_exist: bool, jobs: i64) -> Vec<String> {
+    let mut web = game.clone();
+    web.build_dir = super::web_build::web_dir(game);
+    let mut args = build(&web, keys, keys_exist, jobs);
+    if !game.build_dir.is_empty() {
+        args.push(crate::constants::web::SHADERS_FROM_ARG.into());
+        args.push(native(&game.data_dir()));
+    }
+    args.extend(crate::constants::web::TARGET_ARGS.map(String::from));
+    args
+}
+
 /// `update-info --game <src> [--keys <file>] <pkg>...`
 pub fn update_info(game: &Game, keys: &str, keys_exist: bool, packages: &[String]) -> Vec<String> {
     let mut args: Vec<String> = vec!["update-info".into(), "--game".into(), native(&game.source)];

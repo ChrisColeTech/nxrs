@@ -27,6 +27,8 @@ pub struct Options {
     pub update_choice: Option<String>,
     pub show_updates: bool,
     pub build: bool,
+    pub build_web: bool,
+    pub serve_web: Option<String>,
     pub engine: Option<String>,
     pub nxrs_build: Option<String>,
     pub show_dlc: bool,
@@ -48,6 +50,7 @@ impl Options {
     pub fn headless(&self) -> bool {
         self.screenshot.is_none()
             && (self.build
+                || self.build_web
                 || self.smoke_build.is_some()
                 || !self.install_dlc.is_empty()
                 || !self.remove_dlc.is_empty()
@@ -105,6 +108,8 @@ fn from_matches(m: &ArgMatches) -> Options {
         update_choice: s("update-choice"),
         show_updates: f("show-updates"),
         build: f("build"),
+        build_web: f("build-web"),
+        serve_web: s("serve-web"),
         engine: s("engine"),
         nxrs_build: s("nxrs-build"),
         show_dlc: f("show-dlc"),

@@ -19,9 +19,13 @@ unicode-normalization = "0.1"
 serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 ash = "0.38"
+# WEB-W6: the web build's precompressed modules and compressed data extents (gzip / raw deflate, which browsers decode)
+flate2 = "1"
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem"] }
+windows-sys = { version = "0.61", features = ["Win32_Storage_FileSystem", "Win32_System_Threading"] }
+# WEB-PADBRIDGE: `nxrs-build pad-bridge` drives the real pads with the engine's own input layer (input::bridge)
+os = { path = "../os" }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

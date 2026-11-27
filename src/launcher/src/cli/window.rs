@@ -46,6 +46,10 @@ pub fn run(path: &str, o: &Options) -> i32 {
     let mut probe = App::new(path, o.demo, crate::services::jobs::noop());
     probe.open();
     crate::services::startup_log::note(&format!("library open: {} games", probe.lib.games.len()));
+    // the launcher keeps its own copies of every entry's artwork (idempotent: done once per image)
+    for line in probe.own_all_artwork() {
+        crate::services::startup_log::note(&line);
+    }
     // no build-folder migration here: other tools use those folders; it runs only when asked
     // (`--migrate-builds`, Settings > Build defaults)
     let builder = viewport(&probe);

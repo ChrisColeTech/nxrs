@@ -1,6 +1,7 @@
-//! The menus' entries and their enabled states (`createMenusAndToolbar`, `refreshSelection`,
-//! `showContextMenu`).
+//! The menus' entries (`createMenusAndToolbar`, `showContextMenu`); their enabled states are
+//! `menu_enabled`'s.
 
+pub use super::menu_enabled::{Enabled, enabled};
 use crate::constants::menus as m;
 use crate::flows::{Action, App};
 
@@ -35,45 +36,6 @@ fn check(label: &str, checked: bool, action: Action) -> Item {
     }
 }
 
-/// What the selected game's commands can do now.
-pub struct Enabled {
-    pub play: bool,
-    pub build: bool,
-    pub stop: bool,
-    pub stop_label: &'static str,
-    pub exists: bool,
-    pub remove: bool,
-    pub per_game: bool,
-    pub save_folder: bool,
-    pub log: bool,
-}
-
-pub fn enabled(app: &App) -> Enabled {
-    let id = app.selected_id();
-    let f = id.as_deref().map(|i| app.facts_of(i)).unwrap_or_default();
-    let (playing, building) = id
-        .as_deref()
-        .map_or((false, false), |i| (app.is_running(i), app.is_building(i)));
-    let exists = id.is_some();
-    Enabled {
-        play: exists && !app.demo && f.playable() && !playing && !building,
-        build: exists
-            && !app.demo
-            && !app.builder_busy()
-            && !playing
-            && f.source_available
-            && app.tools.can_build()
-            && !f.playable(),
-        stop: building || playing,
-        stop_label: if building { m::CANCEL_BUILD } else { m::STOP },
-        exists,
-        remove: exists && !playing && !building,
-        per_game: exists && !app.demo,
-        save_folder: exists && f.has_build,
-        log: app.has_log(),
-    }
-}
-
 pub fn filter_label(app: &App) -> String {
     let n = app.filters.query().active_count();
     if n > 0 {
@@ -95,6 +57,7 @@ pub fn menu(app: &App, name: &str) -> Vec<Item> {
             Item::Separator,
             cmd(m::EXIT, m::KEY_EXIT, true, Action::Exit),
         ],
+        // one Play and one Build: each asks Native or Web (owner, 2026-11-27)
         "Game" => vec![
             cmd(m::PLAY, "", e.play, Action::Play),
             cmd(e.stop_label, "", e.stop, Action::Stop),

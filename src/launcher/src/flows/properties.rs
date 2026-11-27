@@ -68,7 +68,9 @@ impl PropertiesDraft {
 
     /// The game as edited, or (title, text) of the refusal.
     pub fn accept(&self) -> Result<Game, (String, String)> {
-        if self.title.trim().is_empty() || self.build_dir.trim().is_empty() {
+        // an imported web build alone has no build folder (nothing is built for it)
+        let needs_folder = self.game.web_build.is_empty() || !self.source.trim().is_empty();
+        if self.title.trim().is_empty() || (needs_folder && self.build_dir.trim().is_empty()) {
             return Err((w::MISSING_TITLE.into(), w::MISSING.into()));
         }
         for (new, old) in [
@@ -87,7 +89,11 @@ impl PropertiesDraft {
         } else {
             absolute(self.source.trim())
         };
-        g.build_dir = absolute(self.build_dir.trim());
+        g.build_dir = if self.build_dir.trim().is_empty() {
+            String::new()
+        } else {
+            absolute(self.build_dir.trim())
+        };
         if self.adding {
             g.output_name = output_name_for(&self.output_name);
         }

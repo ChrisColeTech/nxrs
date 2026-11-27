@@ -26,6 +26,8 @@ clap = { version = "4", features = ["derive"] }
 base64 = "0.22"
 lzma-rs = "0.3"
 aes = "0.8"
+# SPIR-V -> WGSL for the web build (src/wgsl.rs, docs/35 W4)
+naga = { version = "30.0.2", default-features = false, features = ["spv-in", "wgsl-out"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 libc = "0.2"

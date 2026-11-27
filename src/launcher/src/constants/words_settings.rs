@@ -12,10 +12,7 @@ pub const SETTINGS_TABS: [&str; 5] = [
     "Play",
 ];
 pub const APPLY: &str = "Apply";
-pub const CANCEL: &str = "Cancel";
-pub const CLOSE: &str = "Close";
-pub const YES: &str = "Yes";
-pub const NO: &str = "No";
+/// A message's one button: it acknowledges (the owner, 2026-11-26: every dialog ends with a primary).
 pub const OK: &str = "OK";
 
 pub const MISSING_TITLE: &str = "Missing details";

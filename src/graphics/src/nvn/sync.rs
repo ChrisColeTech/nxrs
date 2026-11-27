@@ -81,7 +81,9 @@ nvn_fns! {
             let fenced = &(*(s as *const sync_t)).fenced as *const u32 as usize;
             super::blocking(|| {
                 diag.set("await command-buffer fence publication", None);
+                let t0 = std::time::Instant::now();
                 vk::queue::aq_wait_until(timeout, || unsafe { core::ptr::read_volatile(fenced as *const u32) } != 0);
+                vk::perf::add(vk::perf::C::WaitPublishNs, t0.elapsed().as_nanos() as u64);
                 diag.set("publication wait returned: blocking hook re-entry", None);
                 vk::queue::chain_trace::note("sw_pub", s as u64, 0);
             });

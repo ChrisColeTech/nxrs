@@ -1,0 +1,133 @@
+//! The web build (docs/35 W5): its folder, its description file, the local server and the browsers
+//! that play it.
+
+/// A game's web build goes into `<base>\nxrs-web\<name>`, beside its `<base>\nxrs\<name>`.
+pub const WEB_BUILDS_FOLDER: &str = "nxrs-web";
+/// What nxrs-build writes into a finished web build (src/cli/src/webhost.rs).
+pub const BUILD_JSON: &str = "build.json";
+/// The newest `build.json` layout this launcher reads.
+pub const BUILD_JSON_FORMAT: u64 = 1;
+pub const BUILD_JSON_KIND: &str = "nxrs-web";
+/// The module a finished web build has beside `build.json`.
+pub const MODULE: &str = "game.wasm";
+pub const DEFAULT_ENTRY: &str = "index.html";
+/// The engine's build log of a web build, in its folder.
+pub const BUILD_LOG_SUFFIX: &str = ".build.log";
+/// `--target web` (launcher contract v2).
+pub const TARGET_ARGS: [&str; 2] = ["--target", "web"];
+/// `--shaders-from <native data folder>`: the shaders the native build's runs translated (a title
+/// that makes its shaders at run time has none the web build can find or translate in a browser).
+pub const SHADERS_FROM_ARG: &str = "--shaders-from";
+
+/// The server's port: fixed, so the page's origin (and with it the browser's data cache and saves,
+/// both kept per origin) stays the same from one Play to the next. `NXRS_WEB_PORT` overrides it.
+pub const DEFAULT_PORT: u16 = 8780;
+pub const ENV_PORT: &str = "NXRS_WEB_PORT";
+/// Ports tried after a taken one.
+pub const PORT_TRIES: u16 = 10;
+pub const HOST: &str = "127.0.0.1";
+/// A request head larger than this is refused.
+pub const MAX_HEAD: usize = 16 * 1024;
+/// An idle keep-alive connection is closed after this long.
+pub const IDLE_SECONDS: u64 = 120;
+/// Bytes copied from a file per write.
+pub const CHUNK: usize = 1 << 20;
+/// Sent with every answer: shared memory and threads need a cross-origin isolated page.
+pub const ISOLATION_HEADERS: [(&str, &str); 3] = [
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Cross-Origin-Embedder-Policy", "require-corp"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+];
+/// A file's precompressed copy beside it (nxrs-build's webzip.rs).
+pub const GZIP_SUFFIX: &str = ".gz";
+/// Files: kept by the browser and revalidated by ETag; other answers: not kept.
+pub const CACHE_FILES: &str = "no-cache";
+pub const CACHE_NONE: &str = "no-store";
+/// An imported web game is served at the root of `<slug>.localhost` (Chrome sends every
+/// `*.localhost` to this computer, a secure context like `localhost`; its own origin keeps its
+/// saves apart from every other game's).
+pub const SITE_SUFFIX: &str = ".localhost";
+/// A folder looked into this many levels deep for a web game's page when it has none itself.
+pub const PAGE_DEPTH: usize = 3;
+/// A web game's page, as `index.html` is: what a folder's address serves.
+pub const PAGE_SUFFIXES: [&str; 2] = ["html", "htm"];
+/// A site whose `index.html` only routes to a menu page unless the address names how to start
+/// (`marker` in it) has a direct game link: Play opens `page?query` (the GTA V web port's
+/// `index.html`: `mode === 'story'` goes to `game.html`, anything else to its `launcher.html`).
+pub struct DirectStart {
+    pub marker: &'static str,
+    pub page: &'static str,
+    pub query: &'static str,
+}
+pub const DIRECT_STARTS: [DirectStart; 1] = [DirectStart {
+    marker: "mode === 'story'",
+    page: "game.html",
+    query: "mode=story",
+}];
+/// URL path segment that maps to the build's data folder.
+pub const DATA_SEGMENT: &str = "data";
+
+/// `POST /<slug>/shader-xlate/<key>` (WEB-W7b): a shader the game made at run time, translated by
+/// `nxrs-build shader-xlate <data>\shaders` into `<data>\shaders\live\<key>\` (the native live
+/// translator's folder) and answered (`u32 LE spv length | spv | json`).
+pub const XLATE_SEGMENT: &str = "shader-xlate";
+pub const XLATE_COMMAND: &str = "shader-xlate";
+/// The request's largest body (the engine's `shaders::wire::MAX_REQUEST`); a longer one is refused unread.
+pub const MAX_XLATE_BODY: u64 = 4 << 20;
+/// A translation that takes longer is stopped (the page's draw gave up long before).
+pub const XLATE_SECONDS: u64 = 120;
+/// A shader key: 16 hex digits, the name of its folder and files.
+pub const KEY_HEX_LEN: usize = 16;
+pub const SHADERS_FOLDER: &str = "shaders";
+pub const LIVE_FOLDER: &str = "live";
+pub const SPV_FOLDER: &str = "spv";
+
+/// `GET /<slug>/pad-bridge` upgraded to a WebSocket (WEB-PADBRIDGE): the page's pad output, one
+/// `pad <active> <low> <high> x4` text frame each, written to `nxrs-build pad-bridge`'s stdin; the
+/// engine's native input layer drives the pads' rumble and lights with it.
+pub const PAD_SEGMENT: &str = "pad-bridge";
+pub const PAD_COMMAND: &str = "pad-bridge";
+/// The bridge's log (its stdout and stderr: every output report and its write result), in the
+/// web build's folder; written anew for each connection.
+pub const PAD_LOG: &str = "pad-bridge.log";
+/// A socket with no frame for this long is closed (the page sends one every 250 ms).
+pub const PAD_IDLE_SECONDS: u64 = 5;
+/// After its stdin closes, the bridge has this long to stop the pads and end before it is killed.
+pub const PAD_EXIT_MS: u64 = 2000;
+/// A frame larger than this is not a pad line: the socket is closed.
+pub const PAD_MAX_FRAME: u64 = 1024;
+/// RFC 6455: the accept key is base64(SHA-1(the client's key + this)).
+pub const WS_GUID: &str = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+/// The pad line's values: active 0 or 1, then four players' low and high levels.
+pub const PAD_WORD: &str = "pad";
+pub const PAD_LEVELS: usize = 8;
+
+/// Windows: the `http` association's ProgIds of Chromium browsers (the default browser plays the
+/// build when it is one of these), with a name for the status line.
+pub const CHROMIUM_PROG_IDS: [(&str, &str); 7] = [
+    ("ChromeHTML", "Chrome"),
+    ("ChromeBHTML", "Chrome Beta"),
+    ("MSEdgeHTM", "Edge"),
+    ("BraveHTML", "Brave"),
+    ("ChromiumHTM", "Chromium"),
+    ("VivaldiHTM", "Vivaldi"),
+    ("OperaStable", "Opera"),
+];
+pub const USER_CHOICE_KEY: &str =
+    r"Software\Microsoft\Windows\Shell\Associations\UrlAssociations\http\UserChoice";
+pub const CHROME_APP_PATH_KEY: &str =
+    r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths\chrome.exe";
+/// Chrome's own install folders, under Program Files, Program Files (x86) and the user's local data.
+pub const CHROME_EXE: &str = r"Google\Chrome\Application\chrome.exe";
+pub const CHROME_BASE_VARS: [&str; 3] = ["ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"];
+/// Linux: Chromium browsers looked for on PATH, in this order.
+pub const LINUX_CHROMES: [&str; 4] = [
+    "google-chrome",
+    "google-chrome-stable",
+    "chromium",
+    "chromium-browser",
+];
+pub const CHROME: &str = "Chrome";
+/// `NXRS_BROWSER`: a program Play in browser starts with the address instead of the browser found
+/// (development and verification, like `NXRS_BUILD`).
+pub const ENV_BROWSER: &str = "NXRS_BROWSER";

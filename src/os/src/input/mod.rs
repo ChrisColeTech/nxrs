@@ -18,6 +18,7 @@
 //! without HidHide), `NXRS_INPUT_RECORD=<file>` / `NXRS_INPUT_REPLAY=<file>` (record / replay),
 //! `NXRS_KEYS=<steps>` (scripted presses), `NXRS_MOTION_GAIN`.
 
+pub mod bridge;
 pub mod hidio;
 pub mod layout;
 pub mod motion;
@@ -27,6 +28,7 @@ pub mod script;
 pub mod sony;
 pub mod switch2;
 pub mod switch2_ble;
+pub mod web;
 pub mod winmm;
 pub mod xinput;
 
@@ -139,6 +141,30 @@ static SUSPENDED: AtomicBool = AtomicBool::new(false);
 static PROMPT: AtomicBool = AtomicBool::new(false);
 static RESCAN: AtomicBool = AtomicBool::new(true);
 static SHUTDOWN: AtomicBool = AtomicBool::new(false);
+/// `nxrs-build pad-bridge` (bridge.rs): a browser reads the pads; this process only drives their outputs.
+static BRIDGE: AtomicBool = AtomicBool::new(false);
+
+pub(crate) fn bridged() -> bool {
+    BRIDGE.load(Ordering::Acquire)
+}
+
+/// Player p's motors as the page sends them (0..1 each, already after the rumble settings): held in the standard
+/// path's value for both sides, as `vibrate_with` would leave it, so `publish` drives the pads exactly as natively.
+pub fn set_levels(p: usize, low: f32, high: f32) {
+    if p >= PLAYERS {
+        return;
+    }
+    let v = clean(Vib {
+        amp_low: low,
+        amp_high: high,
+        ..Default::default()
+    });
+    let mut r = RUMBLE.lock().unwrap();
+    if r.v[p] != [v, v] {
+        r.v[p] = [v, v];
+        r.dirty[p] = true;
+    }
+}
 
 /// nn::hid::VibrationValue: amplitude and frequency of the low and high band.
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -761,7 +787,7 @@ impl Dev {
         match &mut self.kind {
             Kind::X(i) => {
                 let r = xinput::rumble(*i, (low * 257) as u16, (high * 257) as u16);
-                if r != 0 || t {
+                if r != 0 || t || bridged() {
                     ilog!("XInput output user={i} low={low} high={high} status={r}");
                 }
             }
@@ -855,10 +881,11 @@ fn sony_write(s: &mut SonyDev, name: &str, low: u32, high: u32, reset: bool) {
                 pkt[0]
             );
         }
-    } else if s.writes < 8 || trace() {
+    } else if s.writes < 8 || trace() || (bridged() && s.writes < 400) {
         s.writes += 1;
         ilog!("{name}: output sent id={:02x} bytes={n} low={low} high={high} leds={:#04x} reset={reset}", pkt[0], s.leds);
-        if trace() {
+        // the bridge's log carries each report it wrote (WEB-PADBRIDGE: the evidence that the pad got it)
+        if trace() || bridged() {
             ilog!(
                 "{name}: report {}",
                 pkt[..n]
@@ -993,6 +1020,8 @@ struct Inputs {
     active: bool,
     record: Option<script::Recorder>,
     replay: Option<script::Replay>,
+    /// Pads the bridge leaves to the browser (logged once).
+    skipped: Vec<String>,
 }
 
 fn device_name(i: &hidio::HidInfo) -> String {
@@ -1035,6 +1064,18 @@ impl Inputs {
             if model != 0 && !no_sony {
                 let tr = sony::transport(model, info.input_len, info.output_len);
                 if tr == 0 {
+                    continue;
+                }
+                if tr == sony::BT && bridged() {
+                    // the 0x31 / 0x11 output would switch the pad to the full Bluetooth reports, which the browser
+                    // reading its input (RawInput, report 0x01) cannot decode: left to the browser
+                    if !self.skipped.contains(&key) {
+                        ilog!(
+                            "{}: Bluetooth, left to the browser (no output from the bridge)",
+                            device_name(info)
+                        );
+                        self.skipped.push(key);
+                    }
                     continue;
                 }
                 let Some(hid) = hidio::HidDev::open(info, true) else {
@@ -1506,6 +1547,9 @@ static INPUTS: Mutex<Option<Inputs>> = Mutex::new(None);
 fn tick(inp: &mut Inputs) {
     let now = motion::now_s();
     inp.layout_update();
+    // the web: the page's keyboard and gamepads (no front end there), its pad through the same layout
+    #[cfg(target_os = "emscripten")]
+    web::poll(&inp.map);
     inp.xinput();
     if RESCAN.swap(false, Ordering::AcqRel) || now - inp.last_scan > 2.0 {
         inp.scan(now);
@@ -1546,9 +1590,13 @@ pub fn start() {
         active: true,
         record: env_str("NXRS_INPUT_RECORD").and_then(|p| script::Recorder::open(&p)),
         replay: env_str("NXRS_INPUT_REPLAY").map(script::Replay::new),
+        skipped: vec![],
     });
     script::start_keys();
-    switch2_ble::start();
+    if !bridged() {
+        // the bridge never connects a Switch 2 pad: that connection would take it from the browser
+        switch2_ble::start();
+    }
     std::thread::Builder::new()
         .name("input".into())
         .spawn(|| {
@@ -1618,6 +1666,7 @@ pub fn probe_tick() {
         active: true,
         record: None,
         replay: None,
+        skipped: vec![],
     });
     tick(inp);
 }

@@ -355,3 +355,15 @@ pub fn record(
     super::queue::full_barrier(g, sub.main);
     Some(timg)
 }
+
+#[cfg(test)]
+mod tests {
+    /// The web device converts every SPIR-V module to WGSL (`shaders::wgsl`) at vkCreateShaderModule; the present's
+    /// sharp upscale must convert too, or the web build falls back to the linear blit (WEB-W8: naga refused it).
+    #[test]
+    fn upscale_shader_converts_for_the_web() {
+        let w = super::words(super::SPV);
+        let r = shaders::wgsl::convert(&w);
+        assert!(r.is_ok(), "{}", r.err().unwrap_or_default());
+    }
+}

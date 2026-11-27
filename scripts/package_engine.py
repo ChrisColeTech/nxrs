@@ -31,9 +31,13 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-# what a Linux machine needs installed to build and run games (nxrs-build doctor checks each)
-LINUX_REQUIRES = ['clang', 'lld', 'libvulkan1 + a Vulkan 1.3 driver', 'libasound2', 'libopus0', 'libvpx', 'libdav1d',
-                  'libavcodec', 'libavutil', 'optional: libsdl2-2.0-0 (pads), zenity or kdialog (dialogs), ffmpeg (F7)']
+# what a Linux machine needs installed to build and run games (nxrs-build doctor checks each). The release bundles the
+# compiler and linker (toolchain/clang, scripts/build/linux-deps.sh) and builds the codecs into the engine
+# (NXRS_CODECS); a desktop has the rest. Without NXRS_CODECS (a development build) the system's codecs and clang.
+LINUX_REQUIRES = ['libvulkan1 + a Vulkan 1.3 driver', 'libasound2',
+                  'optional: libsdl2-2.0-0 (pads), zenity or kdialog (dialogs), ffmpeg (F7)']
+if not os.environ.get('NXRS_CODECS'):
+    LINUX_REQUIRES[2:2] = ['clang', 'lld', 'libopus0', 'libvpx', 'libdav1d', 'libavcodec', 'libavutil']
 
 
 def arg(name, default=None):

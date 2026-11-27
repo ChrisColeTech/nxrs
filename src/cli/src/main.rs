@@ -14,6 +14,8 @@
 //!   nxrs-build dlc install|sync|remove|list --datadir <dir> [package or title id...]
 //!   nxrs-build profile <title id> [<main build id>]
 //!   nxrs-build doctor | contract
+//!   nxrs-build shader-xlate <shaders folder>     (a web build's server: one run-time shader from stdin, translated
+//!                                                 into <shaders folder>\live\<key>\; the key on stdout)
 //!   nxrs-build translate <input> --out <dir>      (development: the C and the data folder only, as nxrt-dev uses it)
 //!
 //! Exit codes: 0 done, 1 failed (the reason on stderr, or the UPDATE / DLC error lines), 2 bad arguments.
@@ -24,8 +26,16 @@ mod fpsfind;
 mod mods;
 mod out;
 mod pipeline;
+mod priority;
 mod profile;
+mod shaderimport;
+mod shaderxlate;
 mod stubgen;
+mod webhost;
+mod webpack;
+mod webshaders;
+mod websplit;
+mod webzip;
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};
@@ -265,6 +275,7 @@ fn run_v1(args: Vec<String>) -> i32 {
         }),
         interp_only: a.interp_only,
         web: false,
+        shaders_from: None,
     };
     build(&o, &b)
 }
@@ -422,6 +433,10 @@ enum Cmd {
         /// `web`: a browser build (wasm + JS, docs/35) into <input folder>\nxrs-web\<name> instead of a Windows build
         #[arg(long, value_parser = ["web"])]
         target: Option<String>,
+        /// another build's data folder: its translated shaders (those its runs translated live) are imported, for a
+        /// title that makes its shaders at run time; a web build cannot translate them in the browser
+        #[arg(long)]
+        shaders_from: Option<PathBuf>,
     },
     /// Say what each update package is; with --game, check it belongs to that game (exit 1 on any error).
     UpdateInfo {
@@ -450,6 +465,12 @@ enum Cmd {
     Doctor,
     /// Print the contract version.
     Contract,
+    /// Translate one shader a web build's page asked for (stdin: u32 LE ctl length, ctl, code) into
+    /// <shaders>\live\<key>\ as a native run's live translator does; prints the key.
+    ShaderXlate { shaders: PathBuf },
+    /// Drive the pads' rumble and lights for a web page (stdin: `pad <active> <low> <high> x4` lines from the
+    /// launcher's server) with the engine's native input layer; quiet and exit at the end of stdin.
+    PadBridge,
     /// (development) Translate to C and stage the data folder: what nxrt-dev's end-to-end tests run.
     Translate {
         input: PathBuf,
@@ -500,6 +521,8 @@ const SUBCOMMANDS: &[&str] = &[
     "profile",
     "doctor",
     "contract",
+    "shader-xlate",
+    "pad-bridge",
     "translate",
     "help",
 ];
@@ -532,6 +555,7 @@ fn run_v2(args: Vec<String>) -> i32 {
             machine,
             interp_only,
             target,
+            shaders_from,
         } => {
             if let Some(n) = pkg.program {
                 std::env::set_var("NXRS_PROGRAM_INDEX", n.to_string());
@@ -553,6 +577,7 @@ fn run_v2(args: Vec<String>) -> i32 {
                 ignored: None,
                 interp_only,
                 web: target.as_deref() == Some("web"),
+                shaders_from,
             };
             build(&o, &b)
         }
@@ -618,6 +643,14 @@ fn run_v2(args: Vec<String>) -> i32 {
             }
         }
         Cmd::Doctor => doctor(),
+        Cmd::ShaderXlate { shaders } => match shaderxlate::command(&shaders) {
+            Ok(key) => {
+                out::line(&key);
+                0
+            }
+            Err(e) => fail(&e),
+        },
+        Cmd::PadBridge => pad_bridge(),
         Cmd::Translate {
             input,
             out,
@@ -663,6 +696,18 @@ fn translate(
         datadir.display()
     ));
     Ok(())
+}
+
+/// `pad-bridge` (WEB-PADBRIDGE): the engine's input layer drives the pads for a web page (os `input::bridge`).
+#[cfg(windows)]
+fn pad_bridge() -> i32 {
+    nxos::input::bridge::run()
+}
+
+#[cfg(not(windows))]
+fn pad_bridge() -> i32 {
+    eprintln!("pad-bridge: not built on this platform (Windows only); the page keeps its own rumble");
+    1
 }
 
 fn doctor() -> i32 {
@@ -717,7 +762,7 @@ fn doctor() -> i32 {
         match cc::find_clang(None) {
             Ok(c) => match cc::find_lld(&c) {
                 Some(l) => check(true, format!("linker: {}", l.display())),
-                None => check(false, "linker: ld.lld not found (install lld)".into()),
+                None => check(false, "linker: ld.lld not found beside clang".into()),
             },
             Err(_) => check(false, "linker: no clang to drive ld.lld".into()),
         }
@@ -830,18 +875,22 @@ fn linux_checks(check: &mut dyn FnMut(bool, String)) {
         has_lib("libvulkan.so.1"),
         "Vulkan loader (libvulkan.so.1)".into(),
     );
-    for (lib, what) in [
-        (
-            "libasound.so.2",
-            "ALSA (sound; PulseAudio / PipeWire through its default device)",
-        ),
-        ("libopus.so.0", "libopus (Opus sound)"),
-        ("libvpx.so", "libvpx (VP8 / VP9 movies)"),
-        ("libdav1d.so", "dav1d (AV1 movies)"),
-        ("libavcodec.so", "FFmpeg libavcodec (H.264 movies, AAC)"),
-        ("libavutil.so", "FFmpeg libavutil"),
-    ] {
-        check(has_lib(lib), format!("{what}: {lib}"));
+    check(
+        has_lib("libasound.so.2"),
+        "ALSA (sound; PulseAudio / PipeWire through its default device): libasound.so.2".into(),
+    );
+    if cc::STATIC_CODECS {
+        out::line("     codecs: opus, libvpx, dav1d, FFmpeg (H.264, AAC) built into the engine");
+    } else {
+        for (lib, what) in [
+            ("libopus.so.0", "libopus (Opus sound)"),
+            ("libvpx.so", "libvpx (VP8 / VP9 movies)"),
+            ("libdav1d.so", "dav1d (AV1 movies)"),
+            ("libavcodec.so", "FFmpeg libavcodec (H.264 movies, AAC)"),
+            ("libavutil.so", "FFmpeg libavutil"),
+        ] {
+            check(has_lib(lib), format!("{what}: {lib}"));
+        }
     }
     let display = std::env::var_os("WAYLAND_DISPLAY")
         .map(|v| format!("Wayland {}", v.to_string_lossy()))
@@ -974,6 +1023,8 @@ fn free_bytes(dir: &Path) -> Option<u64> {
 }
 
 fn main() {
+    // below normal before anything else, so every tool the build starts inherits it (WEB-WFREEZE)
+    priority::lower();
     let args: Vec<String> = std::env::args().collect();
     let code = match args.get(1).map(String::as_str) {
         Some(s) if SUBCOMMANDS.contains(&s) => run_v2(args),

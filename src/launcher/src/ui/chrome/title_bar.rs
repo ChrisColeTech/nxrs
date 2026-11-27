@@ -1,8 +1,9 @@
 //! The title bar row (`TitleBar`): the app glyph in the accent, File / Game / Keys / View / Help in the
-//! caption row (VS Code style), the window buttons; no title text. Windows hit-tests it natively (drag,
-//! double-click, snap, Snap Layouts on the maximize button); elsewhere egui drags the window.
+//! caption row (VS Code style), "NXRS" centred on the window (`wordmark`), the window buttons. Windows
+//! hit-tests it natively (drag, double-click, snap, Snap Layouts on the maximize button); elsewhere
+//! egui drags the window.
 
-use super::{caption, menu_draw, menu_model};
+use super::{caption, menu_draw, menu_model, wordmark};
 use crate::constants::{layout, menus};
 use crate::flows::{Action, App};
 use crate::ui::icons;
@@ -78,6 +79,7 @@ pub fn show(ui: &mut Ui, app: &App, bar: &mut BarState) -> Option<Action> {
     }
     let row = Rect::from_min_max(pos2(rect.left(), top), rect.max);
     let (buttons, close) = caption::buttons(ui, &p, row);
+    wordmark::show(ui, &p, row, x, buttons[0].left());
     let mut chosen = close.then_some(Action::Exit);
     // the empty row (and the glyph) drag the window; double-click maximizes (natively on Windows)
     for area in [

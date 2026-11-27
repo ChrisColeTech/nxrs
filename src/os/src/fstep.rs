@@ -15,7 +15,8 @@
 //! * `k` follows the cost: three late frames in a row step up to the cheapest of them, when the frames at `k` also
 //!   fall short of it on average (`LATE` over the last `RUN` frames, the longest left out: one stall is not a rate,
 //!   nxnative issue #1823, Mario Kart World's near-misses); `RUN` frames on time whose cost fits `k − 1` try it, a
-//!   trial that fails waits twice as long before the next (1 s → 8 s). A GPU whose clock falls with a longer hold
+//!   trial that fails waits twice as long before the next (1 s → 8 s; with the retry rule, `NXOS_FSTEP_RETRY`, every
+//!   trial waits 0.5 s). A GPU whose clock falls with a longer hold
 //!   (`Fgpu`) starts a probe straight back to `kmin`, with a grace while its clock rises.
 //! * The target fps sets the shortest hold: 60 → 1, 30 → 2 (`fps_target`, `NXOS_FPS_TARGET`; 0 turns it off). The
 //!   profile's `fps_hold` off keeps the hold at the target's vsyncs (late frames never raise it).
@@ -46,6 +47,17 @@ pub const SAME: f64 = 1.1;
 pub const RAMP: f64 = 0.05;
 /// Grace frames a probe may take in all.
 pub const PROBE_MAX: i32 = 180;
+/// The share rule's window (frames at one hold; bits of a u64).
+pub const WIN: u32 = 60;
+/// The share rule's default (`NXOS_FSTEP_SHARE`, percent of the window; 0 = 30 frames in a row).
+pub const SHARE: u32 = 75;
+/// The retry rule (`NXOS_FSTEP_RETRY`, default on): the hold-off before every trial, failed ones too (0.5 s), and the
+/// frames at the longer hold the share rule judges a trial on (instead of `WIN`).
+pub const RETRY_HOLD: f64 = 30.0;
+pub const RETRY_WIN: u32 = 20;
+/// With the retry rule, a hold is left for a longer one only when its frames run this many vsyncs past it on average
+/// (instead of `LATE`): the rate is nearer the longer hold's than its own.
+pub const RETRY_SHORT: f64 = 0.5;
 
 /// The controller (nxnative `nvn_fstep`).
 #[derive(Clone, Debug, Default)]
@@ -95,6 +107,23 @@ pub struct Fstep {
     pub smax: u32,
     /// the game does not take the step (it steps by its target): three late frames raise the hold whatever the average
     pub no_payback: bool,
+    /// The share rule (`NXOS_FSTEP_SHARE`, percent; 0 = off): over the last `WIN` frames at a hold, k − 1 is tried
+    /// when this share of them fits it (instead of `RUN` in a row), and k is left for a longer hold only while fewer
+    /// than this share of them are on time (besides three late in a row and the rate short of k). Frames over budget
+    /// are shown late and paid back by the step, so game time stays real time.
+    pub share: u32,
+    /// The retry rule (`NXOS_FSTEP_RETRY`): a failed trial does not double the hold-off (1 s → 8 s at the longer hold
+    /// pinned Mario Kart World's 5 % low at 30); every trial waits `RETRY_HOLD` and, with the share rule, `RETRY_WIN`
+    /// frames at the longer hold. A trial that fails costs a few late frames, shown late and paid back. A hold is left
+    /// for a longer one only when its frames run `RETRY_SHORT` past it on average (MKW's heavy-draw frames of 19-21 ms
+    /// stay at 1 vsync, ~50 FPS, instead of 30).
+    pub retry: bool,
+    /// the window's frames at hold `win_k`: bit i set = frame fit k − 1 (`win_down`) / was on time (`win_ok`)
+    win_down: u64,
+    win_ok: u64,
+    win_i: u32,
+    win_n: u32,
+    win_k: u32,
     pub late: u64,
     pub paid: u64,
     pub ups: u64,
@@ -129,7 +158,10 @@ impl Fstep {
         } else {
             1.0
         };
-        let (hold0, hold_max) = (HOLD0 * pv, HOLD_MAX * pv);
+        let (hold0, hold_max) = (
+            if self.retry { RETRY_HOLD } else { HOLD0 } * pv,
+            HOLD_MAX * pv,
+        );
         let smax = if self.smax > 0 && self.smax < MAX {
             self.smax
         } else {
@@ -238,6 +270,9 @@ impl Fstep {
         } else {
             self.late_run = 0;
         }
+        if self.share > 0 {
+            self.window(held, cost, late);
+        }
         // the cost of the frames on time: at kmin, and at the longer hold
         if kmin != self.ckmin {
             if (1..=MAX).contains(&self.ckmin) {
@@ -282,8 +317,13 @@ impl Fstep {
         }
         // a rate below k over the last RUN frames, the longest left out
         let omax = self.over.iter().cloned().fold(0.0f64, f64::max);
-        let short_of_k = self.no_payback || self.over_sum - omax > LATE * RUN as f64;
-        if self.late_run >= 3 && self.k < kmax && short_of_k {
+        // (the retry rule: short by half a vsync a frame, i.e. a rate nearer k + 1 than k: frames between are shown late
+        // and paid back, more of them than the longer hold would show)
+        let short_by = if self.retry { RETRY_SHORT } else { LATE };
+        let short_of_k = self.no_payback || self.over_sum - omax > short_by * RUN as f64;
+        // the share rule: k is kept while enough of the window is on time (the rest shown late, paid back)
+        let share_short = self.share == 0 || self.no_payback || !self.share_ok();
+        if self.late_run >= 3 && self.k < kmax && short_of_k && share_short {
             // step up to the cost of the cheapest of the three late frames, at least one vsync
             let c3 = self.last_cost.iter().cloned().fold(f64::MAX, f64::min);
             let want = ((c3 - 0.05).ceil().max(0.0) as u32)
@@ -292,7 +332,11 @@ impl Fstep {
             if self.trial > 0 || self.tpend || (self.probe == 2 && self.since < hold_max) {
                 self.failed += 1;
                 self.trial = 0;
-                self.holdoff = (self.holdoff * 2.0).min(hold_max);
+                self.holdoff = if self.retry {
+                    hold0
+                } else {
+                    (self.holdoff * 2.0).min(hold_max)
+                };
             } else if self.probe == 2 {
                 self.holdoff = hold0; // the probe's run at kmin lasted
             }
@@ -332,7 +376,12 @@ impl Fstep {
                 0
             };
         }
-        if self.fit_run >= RUN as u32 && self.since >= self.holdoff && self.trial == 0 {
+        let fits_lower = if self.share > 0 {
+            self.share_down()
+        } else {
+            self.fit_run >= RUN as u32
+        };
+        if fits_lower && self.since >= self.holdoff && self.trial == 0 && self.k > kmin {
             self.k -= 1;
             self.downs += 1;
             self.trial = RUN as u32;
@@ -351,6 +400,35 @@ impl Fstep {
         self.step = self.k + (self.debt >= 1.0 && self.k < smax) as u32;
         self.paid += (self.step > self.k) as u64;
         self.step
+    }
+
+    /// The share rule's window: this frame (held `held` vsyncs, its work `cost`) fit `held − 1` or not, and was on
+    /// time or not. A new hold starts the window again.
+    fn window(&mut self, held: u32, cost: f64, late: bool) {
+        if held != self.win_k {
+            self.win_k = held;
+            self.win_n = 0;
+            self.win_i = 0;
+            self.win_down = 0;
+            self.win_ok = 0;
+        }
+        let bit = 1u64 << self.win_i;
+        let down = held > 1 && cost <= FIT * (held - 1) as f64;
+        self.win_down = if down { self.win_down | bit } else { self.win_down & !bit };
+        self.win_ok = if late { self.win_ok & !bit } else { self.win_ok | bit };
+        self.win_i = (self.win_i + 1) % WIN;
+        self.win_n = (self.win_n + 1).min(WIN);
+    }
+
+    /// At least `share` % of the window's frames at this hold were on time.
+    fn share_ok(&self) -> bool {
+        self.win_n > 0 && self.win_ok.count_ones() * 100 >= self.share * self.win_n
+    }
+
+    /// A whole window at this hold, at least `share` % of it fitting the next shorter hold.
+    fn share_down(&self) -> bool {
+        let n = if self.retry { RETRY_WIN } else { WIN };
+        self.win_n >= n && self.win_down.count_ones() * 100 >= self.share * self.win_n
     }
 
     fn start_probe(&mut self) {
@@ -534,6 +612,8 @@ struct State {
     t0: u64,
     v0: u64,
     nlog: u32,
+    /// the frames' cost since the last summary line (vsyncs), and how many fit 2 vsyncs (the summary line)
+    cost: Vec<f64>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -557,8 +637,28 @@ pub fn init(page: u64, data: &std::path::Path) {
     if !hold {
         crate::log!("frame step: frames are not held longer than the target's vsyncs (game profile fps_hold)");
     }
+    let share = std::env::var("NXOS_FSTEP_SHARE")
+        .ok()
+        .and_then(|v| v.trim().parse::<u32>().ok())
+        .unwrap_or(SHARE)
+        .min(100);
+    if share > 0 {
+        crate::log!(
+            "frame step: share rule: a shorter hold is tried when {share} % of {WIN} frames fit it and kept while {share} % are on time (NXOS_FSTEP_SHARE=0: {RUN} frames in a row)"
+        );
+    }
+    let retry = std::env::var("NXOS_FSTEP_RETRY").as_deref() != Ok("0");
+    if retry {
+        crate::log!(
+            "frame step: retry rule: every trial of a shorter hold waits {:.1} s and {RETRY_WIN} frames at the longer hold, failed ones too; a hold is left only when its frames run {RETRY_SHORT} vsyncs past it on average (NXOS_FSTEP_RETRY=0: doubled after each failed trial up to {:.0} s, left at {LATE})",
+            RETRY_HOLD / 60.0,
+            HOLD_MAX / 60.0
+        );
+    }
     let fs = Fstep {
         smax,
+        share,
+        retry,
         ..Default::default()
     };
     crate::log!(
@@ -583,7 +683,26 @@ pub fn init(page: u64, data: &std::path::Path) {
         t0: 0,
         v0: 0,
         nlog: 0,
+        cost: Vec::new(),
     });
+}
+
+/// `; cost a frame (vsyncs): median M, 90 % P, under 1 / 2 / 3: a / b / c %` of the frames since the last summary.
+fn cost_text(v: &mut [f64]) -> String {
+    if v.is_empty() {
+        return String::new();
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    let at = |q: f64| v[((v.len() - 1) as f64 * q) as usize];
+    let under = |k: f64| 100.0 * v.iter().filter(|&&c| c <= k * FIT).count() as f64 / v.len() as f64;
+    format!(
+        "; cost a frame (vsyncs): median {:.2}, 90 % {:.2}, fitting 1 / 2 / 3: {:.0} / {:.0} / {:.0} %",
+        at(0.5),
+        at(0.9),
+        under(1.0),
+        under(2.0),
+        under(3.0)
+    )
 }
 
 /// The shortest hold of a target (60 → 1, 30 → 2, 20 → 3).
@@ -666,6 +785,9 @@ pub fn present() {
     let step = if first {
         st.fs.next(0.0, 0.0, kmin, kmax, fixed, false)
     } else {
+        if st.cost.len() < 4096 {
+            st.cost.push(cost);
+        }
         st.fs.next(shown, cost, kmin, kmax, fixed, slow)
     };
     put32(st.page + 0x20, step);
@@ -703,8 +825,9 @@ pub fn present() {
         let t = nxgfx::nvn::device::now_ns();
         if st.t0 > 0 {
             let (gt, rt) = ((vs - st.v0) as f64 / 60.0, (t - st.t0) as f64 / 1e9);
+            let ct = cost_text(&mut st.cost);
             crate::log!(
-                "frame step: game time {gt:.2} s in {rt:.2} s ({:.3} of real time); held 1 / 2 / 3 vsyncs {} / {} / {} frames, {} late, {} vsyncs paid back, {:.0} dropped, {} up / {} down ({} probes, {} failed trials)",
+                "frame step: game time {gt:.2} s in {rt:.2} s ({:.3} of real time); held 1 / 2 / 3 vsyncs {} / {} / {} frames, {} late, {} vsyncs paid back, {:.0} dropped, {} up / {} down ({} probes, {} failed trials){ct}",
                 gt / rt.max(1e-9),
                 st.held[1],
                 st.held[2],
@@ -721,6 +844,7 @@ pub fn present() {
         st.t0 = t;
         st.v0 = vs;
         st.held = [0; MAX as usize + 1];
+        st.cost.clear();
     }
     let k = st.fs.k;
     apply_hold(st, k);
@@ -773,6 +897,15 @@ mod tests {
             let d = self.real - self.game - self.s.debt;
             d > -1.01 && d < 1.01
         }
+    }
+
+    /// OOT-DESC: the summary's cost part: median, 90th percentile and the share fitting each hold (`FIT` of it).
+    #[test]
+    fn cost_text_gives_median_tail_and_fits() {
+        let mut v = vec![2.5, 0.5, 1.8, 2.9, 1.9, 3.5, 2.0, 1.0, 2.2, 1.5];
+        let t = cost_text(&mut v);
+        assert_eq!(t, "; cost a frame (vsyncs): median 1.90, 90 % 2.90, fitting 1 / 2 / 3: 10 / 50 / 80 %", "{t}");
+        assert_eq!(cost_text(&mut []), "");
     }
 
     #[test]
@@ -858,6 +991,51 @@ mod tests {
         );
         let d = real - game - s.debt;
         assert!(d > -1.01 && d < 1.01);
+    }
+
+    /// MKW-SYNC: the share rule (`NXOS_FSTEP_SHARE`). Frames of which 4 in 20 run over (21-22 ms) and the rest fit
+    /// 15.8 ms: the 30-in-a-row rule never tries hold 1 from hold 2; the share rule tries it, keeps it, and pays the
+    /// late frames back (game time = real time). A rate well short of hold 1 (23 ms frames) still steps up.
+    #[test]
+    fn the_share_rule_holds_1_on_a_mostly_fitting_window() {
+        let shared = || Sim {
+            s: Fstep {
+                share: 75,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mostly = |m: &mut Sim, n: usize| {
+            for i in 0..n {
+                m.run(1, if i % 20 < 4 { 1.3 } else { 0.9 }, 1, 3, 0);
+            }
+        };
+        // start at hold 2 (a load's slow frames)
+        let mut old = Sim::default();
+        old.run(60, 0.5, 1, 3, 0);
+        old.run(30, 1.5, 1, 3, 0);
+        assert_eq!(old.s.k, 2);
+        mostly(&mut old, 3000);
+        assert!(old.s.k == 2 && old.s.downs == 0, "30 in a row: never tried");
+        let mut m = shared();
+        m.run(60, 0.5, 1, 3, 0);
+        m.run(30, 1.5, 1, 3, 0);
+        assert_eq!(m.s.k, 2);
+        mostly(&mut m, 3000);
+        assert!(
+            m.s.k == 1 && m.s.downs == 1 && m.s.ups == 1 && m.s.failed == 0,
+            "share: tried once and kept (downs {}, ups {}, failed {})",
+            m.s.downs,
+            m.s.ups,
+            m.s.failed
+        );
+        assert!(m.balanced() && m.s.paid > 0 && m.s.dropped == 0.0, "late frames paid back");
+        // 23 ms frames: fewer than 75 % on time at hold 1
+        let mut m = shared();
+        m.run(120, 0.5, 1, 3, 0);
+        m.run(600, 1.4, 1, 3, 0);
+        assert!(m.s.k == 2 && m.s.ups >= 1, "43 fps: 30");
+        assert!(m.balanced());
     }
 
     #[test]
@@ -977,6 +1155,64 @@ mod tests {
                 && m.s.failed >= 3,
             "{gaps:?}"
         );
+    }
+
+    /// MKW-HEAVY: the retry rule (`NXOS_FSTEP_RETRY`) with the share rule. A heavy stretch whose frames miss hold 1 by a
+    /// little (19.7 ms, as MKW's 2,200-2,500-draw frames) keeps hold 1, the late frames paid back (the old rule: 30 FPS
+    /// and trials 1 → 8 s apart). A stretch of 28 ms frames goes to hold 2 and tries hold 1 again every ~0.7 s instead of
+    /// 1 → 8 s; when the stretch ends, hold 1 comes back within a second; game time stays real time.
+    #[test]
+    fn the_retry_rule_keeps_near_misses_and_tries_again_soon() {
+        let mk = |retry: bool| Sim {
+            s: Fstep {
+                share: 75,
+                retry,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let mut m = mk(true);
+        m.run(120, 0.5, 1, 3, 0);
+        m.run(1200, 1.18, 1, 3, 0);
+        assert!(m.s.k == 1 && m.s.ups == 0 && m.balanced() && m.s.paid > 0, "19.7 ms: hold 1, paid back");
+        let mut old = mk(false);
+        old.run(120, 0.5, 1, 3, 0);
+        old.run(1200, 1.18, 1, 3, 0);
+        assert!(old.s.k == 2 && old.s.ups >= 1, "old: 30 FPS");
+        let heavy = |m: &mut Sim| {
+            m.run(120, 0.5, 1, 3, 0);
+            let (mut gaps, mut last, mut downs) = (vec![], 0.0, 0);
+            let start = m.real;
+            while m.real - start < 1200.0 {
+                let w = if m.s.k == 1 { 1.7 } else { 0.6 };
+                m.run(1, w, 1, 3, 0);
+                if m.s.downs != downs {
+                    downs = m.s.downs;
+                    gaps.push(m.real - last);
+                    last = m.real;
+                }
+            }
+            gaps
+        };
+        let mut old = mk(false);
+        let g_old = heavy(&mut old);
+        let mut m = mk(true);
+        let g = heavy(&mut m);
+        assert!(g_old.len() <= 5 && g_old.iter().any(|&x| x >= 480.0), "old: doubled to 8 s {g_old:?}");
+        assert!(
+            g.len() >= 10 && g.iter().skip(1).all(|&x| x <= 100.0),
+            "retry: a trial every ~1-1.7 s ({} trials) {g:?}",
+            g.len()
+        );
+        assert!(m.balanced() && old.balanced(), "game time = real time");
+        // the stretch ends: hold 1 again within a second
+        let at = m.real;
+        while m.s.k != 1 {
+            m.run(1, 0.6, 1, 3, 0);
+        }
+        assert!(m.real - at <= 60.0, "back at hold 1 after {} vsyncs", m.real - at);
+        m.run(600, 0.6, 1, 3, 0);
+        assert!(m.s.k == 1 && m.balanced());
     }
 
     #[test]

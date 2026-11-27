@@ -8,6 +8,11 @@
 //! upstream libraries; pkg-config), and src/media/ffdec.c, the H.264 / AAC decoder over FFmpeg's libavcodec (what Media
 //! Foundation does on Windows), is compiled against the system headers. All of them are linked dynamically: the game
 //! link adds `-lopus -lvpx -ldav1d -lavcodec -lavutil`.
+//!
+//! Linux release: `NXRS_CODECS=<prefix>` names static, position-independent builds of the same libraries
+//! (scripts/build/linux-deps.sh: `<prefix>/lib/*.a`, `<prefix>/include`). They are linked `static=`, so rustc bundles
+//! them into the engine's staticlib and a game needs none of them installed (nxrs-build, built in the same cargo run,
+//! then links only ALSA: cc.rs `STATIC_CODECS`).
 
 fn main() {
     println!("cargo:rerun-if-changed=build.rs");
@@ -48,6 +53,23 @@ fn main() {
 }
 
 fn linux() {
+    println!("cargo:rerun-if-env-changed=NXRS_CODECS");
+    if let Some(prefix) = std::env::var_os("NXRS_CODECS") {
+        let prefix = std::path::PathBuf::from(prefix);
+        let lib = prefix.join("lib");
+        for name in ["opus", "vpx", "dav1d", "avcodec", "avutil"] {
+            let a = lib.join(format!("lib{name}.a"));
+            assert!(a.is_file(), "NXRS_CODECS: {} is missing", a.display());
+            println!("cargo:rerun-if-changed={}", a.display());
+        }
+        println!("cargo:rustc-link-search=native={}", lib.display());
+        // avcodec before avutil: a static link resolves left to right
+        for name in ["opus", "vpx", "dav1d", "avcodec", "avutil"] {
+            println!("cargo:rustc-link-lib=static={name}");
+        }
+        ffdec(&[prefix.join("include")]);
+        return;
+    }
     let need = |name: &str, what: &str| {
         pkg_config::Config::new()
             .cargo_metadata(true)
@@ -59,15 +81,21 @@ fn linux() {
     need("dav1d", "dav1d");
     let avcodec = need("libavcodec", "FFmpeg's libavcodec");
     let avutil = need("libavutil", "FFmpeg's libavutil");
+    let includes: Vec<_> = avcodec
+        .include_paths
+        .into_iter()
+        .chain(avutil.include_paths)
+        .collect();
+    ffdec(&includes);
+}
+
+/// src/media/ffdec.c, the H.264 / AAC decoder over libavcodec, compiled against `includes`.
+fn ffdec(includes: &[std::path::PathBuf]) {
     let src = "src/media/ffdec.c";
     println!("cargo:rerun-if-changed={src}");
     let mut b = cc::Build::new();
     b.file(src).opt_level(2).warnings(true).pic(true);
-    for p in avcodec
-        .include_paths
-        .iter()
-        .chain(avutil.include_paths.iter())
-    {
+    for p in includes {
         b.include(p);
     }
     b.compile("nxffdec");

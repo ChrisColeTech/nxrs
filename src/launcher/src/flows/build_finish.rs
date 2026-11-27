@@ -55,6 +55,9 @@ impl App {
     }
 
     fn finish_build(&mut self, run: BuildRun, code: Option<i32>) {
+        if run.web {
+            return self.finish_web_build(run, code);
+        }
         let (ok, detail) = Self::outcome(&run, code);
         run.job.log_line(&detail);
         let id = run.game.id.clone();
@@ -128,13 +131,13 @@ impl App {
         if self.build.is_none() {
             self.close_now = true;
         } else if !self.closing {
-            self.question(
-                w::CLOSE_TITLE,
-                w::CLOSE_TEXT,
-                super::Action::ConfirmClose,
-                None,
-                false,
-            );
+            self.ask_close();
         }
+    }
+
+    /// The question a close during a build asks (also `--show-window close-build`, a capture).
+    pub fn ask_close(&mut self) {
+        let ask = super::surface::Ask::new(w::CLOSE_TITLE, w::CLOSE_TEXT, "", w::CLOSE_VERB);
+        self.question(ask, super::Action::ConfirmClose, None, false);
     }
 }

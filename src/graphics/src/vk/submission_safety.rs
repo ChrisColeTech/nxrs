@@ -23,7 +23,13 @@ pub fn resource_safety_fatal() -> ! {
         unsafe { TerminateProcess(GetCurrentProcess(), RESOURCE_SAFETY_EXIT as u32) };
         std::process::abort()
     }
-    #[cfg(unix)]
+    // the web build: `_exit` on a pthread only ends that thread (the runtime is kept alive under PROXY_TO_PTHREAD), so
+    // the program went on without it and waited for ever (WEB-W4c). abort() traps and reaches the page's onAbort.
+    #[cfg(target_os = "emscripten")]
+    {
+        std::process::abort()
+    }
+    #[cfg(all(unix, not(target_os = "emscripten")))]
     {
         extern "C" {
             fn _exit(code: i32) -> !;

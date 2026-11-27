@@ -13,7 +13,8 @@ question is settled before the owner is asked, and the lead's acceptance list (r
 lead's own quiet-machine perf numbers, merge, commit, rebuild). Audits only when the owner asks for one. Agents commit only on their
 own wave branch; the lead merges into `gameplay-harness`; push when the owner asks. Two GPUs: `NXGFX_GPU=<index>`.
 Use the normal CLI builds, the real library and the configured build folders (owner-authorized); no throwaway temp
-builds or per-run copies of games.
+builds or per-run copies of games. Measure against the wave's baseline run and its diagnostics, never with
+switch-off "control" runs; the lead merges each wave when it reports and removes its worktree.
 The game-outcome roadmap is `docs/33-REFERENCE-DELTA-ROADMAP.md`; `docs/32-REMAINING-WORK-PLAN.md` is the ledger.
 
 **Gameplay harness (2026-11-24):** `scripts/play.py` runs one built title through a scenario from
@@ -41,7 +42,9 @@ py -m unittest scripts.test_play          # the harness's own checks (under a se
 
 - The engine workspace (root `Cargo.toml`): `src/translator` package input and the ARM64 → C translator;
   `src/runtime` the host runtime; `src/os` the OS services; `src/graphics` NVN on Vulkan; `src/shaders`;
-  `src/front` the window, input and presentation; `src/profiles` game profiles; `src/config`; `src/cli` the
+  `src/front` the window, input and presentation (`src/front/web`: the same for web builds, the browser host:
+  `page/` shipped beside game.wasm and embedded by `src/cli/src/webhost.rs`, `link/` Emscripten JS libraries,
+  `tests/` node tests; `scripts/web/dev_server.py` serves a web build); `src/profiles` game profiles; `src/config`; `src/cli` the
   `nxrs-cli` package, whose executable `nxrs-build` is what the launcher runs.
 - `src/launcher` the launcher `nxrs` (egui), its own workspace and lock file, building into the root `target/`.
   Layers: `constants` → `model` (pure) → `services` (all I/O) → `flows` (commands, no egui) → `ui` → `cli`.
@@ -53,7 +56,9 @@ py -m unittest scripts.test_play          # the harness's own checks (under a se
 
 ```powershell
 cargo build --release -p nxrs-cli -p front -p runtime   # the engine: nxrs-build + nxfront.lib + nxrt.lib
-cargo build --release --manifest-path src/launcher/Cargo.toml   # the launcher: target/release/nxrs.exe
+cd src/launcher; cargo build --release   # the launcher: target/release/nxrs.exe (run it from src/launcher: its
+                                         # .cargo/config.toml, which sends it to the root target/, is read only
+                                         # from there; --manifest-path from the root builds into src/launcher/target)
 cargo test                                          # engine (seconds; GPU and game tests are opt-in)
 cd src/launcher; cargo test                         # launcher (seconds: fake engine, kittest, CLI)
 cd src/launcher; cargo clippy --all-targets -- -D warnings; cargo fmt   # max_width 100

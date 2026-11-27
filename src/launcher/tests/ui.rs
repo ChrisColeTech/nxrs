@@ -10,7 +10,7 @@ use egui_kittest::kittest::Queryable;
 use egui_kittest::{Harness, HarnessBuilder};
 use nxrs_launcher::flows::surface::Surface;
 use nxrs_launcher::flows::view_state::Filters;
-use nxrs_launcher::flows::{Action, App};
+use nxrs_launcher::flows::{Action, App, Outcome};
 use nxrs_launcher::model::game_update::GameUpdate;
 use nxrs_launcher::services::jobs::noop;
 use nxrs_launcher::ui::chrome::menu_model::{self, Item};
@@ -138,7 +138,9 @@ fn properties_list_and_remove_dlc() {
         2,
         "nothing changes before Apply"
     );
-    h.get_by_label("Cancel").click();
+    // no Cancel in the footer: the header's X discards the Draft
+    assert!(h.query_by_label("Cancel").is_none());
+    h.get_by_label("Close Kart — Properties").click();
     h.run();
     assert!(h.state().app.surfaces.is_empty());
 }
@@ -217,16 +219,27 @@ fn updates_window_chooses_and_builds() {
     assert_eq!(h.state().app.lib.games[0].update_choice, older);
     h.get_by_label("Build now").click();
     h.run_steps(3);
-    let left = h.state().app.surfaces.len();
-    assert_eq!(
-        left,
-        0,
-        "Build now closes the window and builds (pending: {:?})",
-        h.state()
-            .app
-            .update_pending_text(&h.state().app.lib.games[0])
+    // Build now closes the window and asks Native or Web, as every Build does
+    let left = h.state().app.surfaces.clone();
+    let native = Action::BuildNative;
+    assert!(matches!(&left[..], [Surface::Choices { options, .. }] if options[0].action == native));
+    h.get_by_role_and_label(Role::Button, "Native").click();
+    h.run_steps(3);
+    // Native closes the box and builds the chosen version (the fake engine may be done already)
+    assert!(
+        h.state().app.surfaces.is_empty(),
+        "{:?}",
+        h.state().app.surfaces
     );
-    settle(&mut h.state_mut().app);
+    let app = &mut h.state_mut().app;
+    settle(app);
+    assert_eq!(
+        app.outcomes,
+        [Outcome::Smoke(true)],
+        "{:?}",
+        app.console.lines
+    );
+    assert_eq!(app.lib.games[0].built_update, older);
 }
 
 #[test]

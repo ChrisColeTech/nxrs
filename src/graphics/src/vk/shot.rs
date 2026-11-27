@@ -4,6 +4,8 @@
 //!
 //! - `NXGFX_SHOT=<n>[,<n>...]`: those presents (counted from 1);
 //! - `NXGFX_SHOT_EVERY=<n>`: every n-th present;
+//! - `NXGFX_SHOT_SPAN=<from>-<to>`: every present between those seconds of the log's clock (OOT-COMBO: one wrong frame
+//!   at a known moment of a scenario);
 //! - `NXGFX_SHOT_FILE=<path>`: when the file exists, the next present; the file is deleted (a path written in it is
 //!   where the PNG goes);
 //! - `NXGFX_SHOT_DIR=<dir>`: where they go (default `captures/` in the working directory);
@@ -21,8 +23,16 @@ pub mod fault;
 struct Cfg {
     at: Vec<u64>,
     every: u64,
+    span: Option<(f64, f64)>,
     file: Option<PathBuf>,
     dir: PathBuf,
+}
+
+/// `NXGFX_SHOT_SPAN`'s `<from>-<to>` in seconds.
+fn parse_span(v: &str) -> Option<(f64, f64)> {
+    let (a, b) = v.split_once('-')?;
+    let (a, b) = (a.trim().parse().ok()?, b.trim().parse().ok()?);
+    (a < b).then_some((a, b))
 }
 
 fn cfg() -> &'static Cfg {
@@ -36,6 +46,7 @@ fn cfg() -> &'static Cfg {
             .ok()
             .and_then(|v| v.parse().ok())
             .unwrap_or(0);
+        let span = std::env::var("NXGFX_SHOT_SPAN").ok().and_then(|v| parse_span(&v));
         let file = std::env::var("NXGFX_SHOT_FILE").ok().map(PathBuf::from);
         let dir = std::env::var("NXGFX_SHOT_DIR")
             .map(PathBuf::from)
@@ -43,14 +54,16 @@ fn cfg() -> &'static Cfg {
         let c = Cfg {
             at,
             every,
+            span,
             file,
             dir,
         };
-        if !c.at.is_empty() || c.every > 0 || c.file.is_some() {
+        if !c.at.is_empty() || c.every > 0 || c.span.is_some() || c.file.is_some() {
             crate::vklog!(
-                "screenshots: {} presents named, every {}, control file {}, to {}",
+                "screenshots: {} presents named, every {}, span {:?} s, control file {}, to {}",
                 c.at.len(),
                 c.every,
+                c.span,
                 c.file
                     .as_ref()
                     .map(|p| p.display().to_string())
@@ -89,7 +102,9 @@ pub fn count() -> u64 {
 /// Called with every present before it is queued (the frame's work is already submitted).
 pub fn on_present(t: &tex_t, frame: u64, crop: Option<[i32; 4]>, origin_ll: bool) {
     let c = cfg();
-    let mut want = c.at.contains(&frame) || (c.every > 0 && frame.is_multiple_of(c.every));
+    let mut want = c.at.contains(&frame)
+        || (c.every > 0 && frame.is_multiple_of(c.every))
+        || c.span.is_some_and(|(a, b)| (a..b).contains(&crate::log::elapsed()));
     let mut path = String::new();
     if let Some(f) = &c.file {
         if f.is_file() {
@@ -441,6 +456,16 @@ pub fn png_bytes(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// `NXGFX_SHOT_SPAN`: `<from>-<to>` seconds, from before to; anything else is no span.
+    #[test]
+    fn shot_span_parses_from_and_to() {
+        assert_eq!(super::parse_span("672-684"), Some((672.0, 684.0)));
+        assert_eq!(super::parse_span(" 1.5 - 2 "), Some((1.5, 2.0)));
+        assert_eq!(super::parse_span("684-672"), None);
+        assert_eq!(super::parse_span("672"), None);
+        assert_eq!(super::parse_span("a-b"), None);
+    }
+
     #[test]
     fn failed_readback_is_not_a_successful_black_capture() {
         let d = crate::tex::layout::TexDesc {

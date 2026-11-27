@@ -14,9 +14,13 @@ impl App {
             Action::ImportBuildPick => self.pick_build(),
             Action::Settings(tab) => self.show_settings(tab),
             Action::Exit => self.request_close(),
-            Action::Play => self.play(),
+            Action::Play => self.ask_target(false),
             Action::Stop => self.stop(),
-            Action::Build => self.start_build(),
+            Action::Build => self.ask_target(true),
+            Action::PlayNative => self.play(),
+            Action::BuildNative => self.start_build(),
+            Action::BuildWeb => self.start_web_build(),
+            Action::PlayWeb => self.play_in_browser(),
             Action::Properties(tab) => self.show_properties(tab),
             Action::InstallDlc => self.show_dlc(),
             Action::InstallUpdates => self.show_updates(),
@@ -46,7 +50,12 @@ impl App {
             }
             Action::ViewConsole => self.lib.console.visible = true,
             Action::ToggleConsole => self.lib.console.visible = !self.lib.console.visible,
-            Action::About => self.message("nxrs", w::ABOUT, false),
+            Action::About => {
+                use crate::constants::words_contexts as c;
+                let what = (c::ABOUT, c::ABOUT_HEADING);
+                self.message_with_links(what, w::ABOUT, &w::ABOUT_LINKS)
+            }
+            Action::OpenUrl(address) => shell_open::url(&address),
             Action::OpenBuildFolder => self.open_folder(false),
             Action::OpenSaveFolder => self.open_folder(true),
             Action::ViewGameLog => self.open_game_log(),
@@ -76,7 +85,7 @@ impl App {
         }
     }
 
-    /// The card's cover double-clicked: Play when it offers Play, else Properties > General.
+    /// The card's cover double-clicked: Play (the chooser) when it offers Play, else Properties > General.
     fn card_activate(&mut self, id: &str) {
         self.select(id);
         let plays = self

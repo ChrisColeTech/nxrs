@@ -1,6 +1,8 @@
 //! Everything that touches the disk, other processes or the OS. The model decides; these read, write,
 //! spawn and watch.
 pub mod artwork_decode;
+pub mod artwork_store;
+pub mod browser;
 pub mod build_facts;
 pub mod build_move;
 pub mod data_dir;
@@ -15,7 +17,9 @@ pub mod legacy;
 pub mod library_file;
 pub mod library_ops;
 pub mod markers;
+pub mod pad_bridge;
 pub mod pickers;
+pub mod piped_run;
 pub mod platform;
 pub mod run;
 pub mod shell_open;
@@ -23,6 +27,12 @@ pub mod sources;
 pub mod startup_log;
 pub mod toolchain;
 pub mod update_files;
+pub mod web_file;
+pub mod web_import;
+pub mod web_reply;
+pub mod web_route;
+pub mod web_serve;
+pub mod web_xlate;
 
 #[cfg(test)]
 mod dlc_tests;

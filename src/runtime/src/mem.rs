@@ -60,12 +60,52 @@ fn compact() -> bool {
 
 /// The compact map's alias region: `NXRT_COMPACT_ALIAS_MB` (default 2304 MiB; 6144 MiB on the web, the least Anime
 /// Girls ran with in W0(d): its SDK reserves well past 4 GiB of alias address space).
-fn compact_alias() -> u64 {
-    std::env::var("NXRT_COMPACT_ALIAS_MB")
+fn compact_alias() -> (u64, u64) {
+    let env = std::env::var("NXRT_COMPACT_ALIAS_MB")
         .ok()
         .and_then(|v| v.parse::<u64>().ok())
-        .unwrap_or(if cfg!(target_os = "emscripten") { 6144 } else { 2304 })
-        << 20
+        .map(|m| m << 20);
+    let default = if cfg!(target_os = "emscripten") {
+        6144
+    } else {
+        2304
+    } << 20;
+    compact_regions(
+        COMPACT_POOL.load(std::sync::atomic::Ordering::Relaxed),
+        COMPACT_VAM.load(std::sync::atomic::Ordering::Relaxed),
+        env,
+        default,
+    )
+}
+
+/// The process's application pool and whether it has virtual address memory (NPDM system resource not 0), told by
+/// the os layer before `Space::new` (`set_compact_process`); the compact map splits its heap and alias block by them.
+static COMPACT_POOL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+static COMPACT_VAM: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// What the compact map needs to know of the process before `Space::new`: its application pool and whether it has
+/// virtual address memory.
+pub fn set_compact_process(pool: u64, virtual_address_memory: bool) {
+    COMPACT_POOL.store(pool, std::sync::atomic::Ordering::Relaxed);
+    COMPACT_VAM.store(virtual_address_memory, std::sync::atomic::Ordering::Relaxed);
+}
+
+/// The compact map's heap and alias regions. The block below the modules is fixed (`COMPACT_HEAP` + the default
+/// alias); how it is split depends on the title. One with virtual address memory maps its memory in the alias region
+/// (Anime Girls: 2 GB committed there, its heap unused): a `COMPACT_HEAP` heap and the rest alias. One without sets
+/// its heap to about the whole pool (Mario Kart 8 Deluxe: SetHeapSize 0xc1c00000 of a 0xcd500000 pool; in a 512 MiB
+/// heap region the game got ResultOutOfMemory and crashed at nnMain, WEB-W10-MK8D): a heap region of the pool
+/// (256 MiB-aligned) and the rest alias, at least `COMPACT_MIN_ALIAS`. `NXRT_COMPACT_ALIAS_MB` names the alias
+/// region's size outright.
+fn compact_regions(pool: u64, vam: bool, alias_env: Option<u64>, default_alias: u64) -> (u64, u64) {
+    const COMPACT_MIN_ALIAS: u64 = 256 << 20;
+    let block = COMPACT_HEAP + default_alias;
+    let heap = if vam || pool == 0 {
+        COMPACT_HEAP
+    } else {
+        align_up(pool, 256 << 20).clamp(COMPACT_HEAP, block - COMPACT_MIN_ALIAS)
+    };
+    (heap, alias_env.unwrap_or(block - heap))
 }
 
 /// The kernel region's base for the module window `w`: `KERNEL_BASE`, or right above the modules in the compact map.
@@ -567,8 +607,8 @@ impl Space {
             ));
         }
         if compact() {
-            let alias_size = compact_alias();
-            let low_size = COMPACT_STACK + COMPACT_HEAP;
+            let (heap_size, alias_size) = compact_alias();
+            let low_size = COMPACT_STACK + heap_size;
             let alias = (mods.base - COMPACT_SLACK - alias_size) & !(0x20_0000 - 1);
             let low = alias - low_size;
             if !reserve(low, low_size, true) || !reserve(alias, alias_size, true) {
@@ -590,7 +630,7 @@ impl Space {
                 },
                 Range {
                     base: low + COMPACT_STACK,
-                    size: COMPACT_HEAP,
+                    size: heap_size,
                 },
                 Range {
                     base: alias,
@@ -1100,6 +1140,33 @@ pub fn align_up(v: u64, a: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// WEB-W10-MK8D: the compact block below the modules keeps its size; a title without virtual address memory gets
+    /// a heap region of its pool (Mario Kart 8 Deluxe's 0xc1c00000 heap fits), one with it keeps the big alias region
+    /// (Anime Girls); `NXRT_COMPACT_ALIAS_MB` still names the alias outright.
+    #[test]
+    fn compact_block_split_by_virtual_address_memory() {
+        let web = 6144 << 20;
+        let (heap, alias) = compact_regions(0xcd50_0000, false, None, web);
+        assert_eq!(heap, 0xd000_0000);
+        assert!(heap >= 0xc1c0_0000);
+        assert_eq!(heap + alias, COMPACT_HEAP + web);
+        assert_eq!(
+            compact_regions(0xcd50_0000, true, None, web),
+            (COMPACT_HEAP, web)
+        );
+        assert_eq!(compact_regions(0, false, None, web), (COMPACT_HEAP, web));
+        assert_eq!(
+            compact_regions(0xcd50_0000, true, Some(1 << 30), web),
+            (COMPACT_HEAP, 1 << 30)
+        );
+        // a pool larger than the block: the heap takes all but the least alias
+        let (heap, alias) = compact_regions(9 << 30, false, None, 2304 << 20);
+        assert_eq!(
+            (heap, alias),
+            ((2304 << 20) + COMPACT_HEAP - (256 << 20), 256 << 20)
+        );
+    }
 
     /// A fixed region claimed early (`claim_fixed`) is the space's to take, once; anyone else finds it taken, and the
     /// error says what holds it.

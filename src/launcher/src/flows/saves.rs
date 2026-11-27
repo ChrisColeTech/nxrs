@@ -1,8 +1,8 @@
 //! Remove from library, Install keys (`removeGame`, `installKeys`).
 
-use super::surface::Check;
+use super::surface::{Ask, Check};
 use super::{Action, App};
-use crate::constants::{engine as e, words_library as l};
+use crate::constants::{engine as e, words_contexts as c, words_library as l};
 use crate::model::fill::fill;
 use crate::model::path_text::{join, native, parent};
 use crate::services::pickers::{self, Pick};
@@ -33,10 +33,11 @@ impl App {
         if self.busy(&g.id) {
             return;
         }
-        let (id, text) = (g.id.clone(), fill(l::REMOVE_TEXT, &[&g.title]));
+        let (id, heading) = (g.id.clone(), fill(l::REMOVE_HEADING, &[&g.title]));
+        let ask = Ask::new(l::REMOVE_TITLE, &heading, l::REMOVE_TEXT, l::REMOVE_VERB);
         let yes = Action::ConfirmRemove(id.clone(), false);
         if !files::is_dir(&g.build_dir) {
-            self.question(l::REMOVE_TITLE, &text, yes, None, false);
+            self.question(ask, yes, None, false);
             return;
         }
         let size = size_text(kept_saves::folder_size(&g.build_dir));
@@ -50,7 +51,7 @@ impl App {
             on: true,
             yes_on: Action::ConfirmRemove(id, true),
         };
-        self.question_checked(l::REMOVE_TITLE, &text, yes, check);
+        self.question_checked(ask, yes, check);
     }
 
     /// The answer: the entry goes; with `delete`, its saves are kept and its build folder deleted first
@@ -62,15 +63,15 @@ impl App {
         if delete {
             let running = platform::find_running_games(std::slice::from_ref(&game));
             if self.busy(id) || running.contains_key(id) {
-                self.message(l::DELETE_TITLE, l::DELETE_BUSY, true);
+                self.message(c::REMOVE, l::DELETE_TITLE, l::DELETE_BUSY, true);
                 return;
             }
             let kept = match kept_saves::keep(&game, &self.saves_root()) {
                 Ok(kept) => kept,
-                Err(err) => return self.message(l::DELETE_TITLE, &err, true),
+                Err(err) => return self.message(c::REMOVE, l::DELETE_TITLE, &err, true),
             };
             if let Err(err) = kept_saves::delete_build(&game) {
-                return self.message(l::DELETE_TITLE, &err, true);
+                return self.message(c::REMOVE, l::DELETE_TITLE, &err, true);
             }
             if let Some(kept) = kept {
                 self.console
@@ -78,6 +79,7 @@ impl App {
             }
         }
         self.lib.games.retain(|g| g.id != id);
+        crate::services::artwork_store::remove_copies(&self.artwork_folder(), id);
         self.selected.clear();
         self.save();
     }
@@ -91,12 +93,12 @@ impl App {
             return;
         };
         match keys::install(&source, &data_dir::data_dir()) {
-            Err((title, text)) => self.message(&title, &text, true),
+            Err((title, text)) => self.message(c::KEYS, &title, &text, true),
             Ok(dest) => {
                 self.lib.keys_path = dest;
                 self.save();
                 self.refresh_tools();
-                self.message(l::KEYS_DONE_TITLE, l::KEYS_DONE, false);
+                self.message(c::KEYS, l::KEYS_DONE_TITLE, l::KEYS_DONE, false);
             }
         }
     }

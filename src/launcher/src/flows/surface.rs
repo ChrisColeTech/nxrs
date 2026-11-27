@@ -35,20 +35,61 @@ pub struct Check {
     pub yes_on: Action,
 }
 
+/// A question's words: the window's title, the heading (the question itself), the text under it
+/// (may be empty) and the verb of its one button ("Remove"); the X and Escape answer No.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ask {
+    pub title: String,
+    pub heading: String,
+    pub text: String,
+    pub verb: String,
+}
+
+impl Ask {
+    pub fn new(title: &str, heading: &str, text: &str, verb: &str) -> Self {
+        let own = |s: &str| s.to_string();
+        Self {
+            title: own(title),
+            heading: own(heading),
+            text: own(text),
+            verb: own(verb),
+        }
+    }
+}
+
+/// One option of a Choices dialog: its button's label, what it runs, and why it cannot run now
+/// (its disabled button's tooltip; empty: it can).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    pub label: String,
+    pub action: Action,
+    pub why_not: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Surface {
+    /// A message box: `context` titles the window (the task or place it belongs to: "Add game",
+    /// "Build"), `title` is its heading (the message itself: "Cannot add game").
     Message {
+        context: String,
         title: String,
         text: String,
         error: bool,
+        /// the message's own verbs: (label, web address) ghost buttons at the footer's leading side
+        links: Vec<(String, String)>,
     },
     Question {
-        title: String,
-        text: String,
+        ask: Ask,
         yes: Action,
         no: Option<Action>,
         default_no: bool,
         check: Option<Check>,
+    },
+    /// Which of equal actions to take (Play's and Build's Native or Web; owner, 2026-11-27): the
+    /// question box's words (no verb) and one equal button per option; X and Escape dismiss.
+    Choices {
+        ask: Ask,
+        options: Vec<Choice>,
     },
     Properties(Box<PropertiesDraft>),
     Settings(Box<SettingsDraft>),
@@ -61,7 +102,9 @@ impl Surface {
     /// The child window's key (one native window per key).
     pub fn key(&self, at: usize) -> String {
         match self {
-            Surface::Message { .. } | Surface::Question { .. } => format!("message-{at}"),
+            Surface::Message { .. } | Surface::Question { .. } | Surface::Choices { .. } => {
+                format!("message-{at}")
+            }
             Surface::Properties(p) if p.adding => "add-game".into(),
             Surface::Properties(_) => "properties".into(),
             Surface::Settings(_) => "settings".into(),

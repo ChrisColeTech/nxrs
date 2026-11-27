@@ -94,6 +94,11 @@ pub fn of(ctx: &egui::Context) -> Palette {
 
 pub const SEMIBOLD: &str = "semibold";
 pub const MONO: &str = "mono";
+pub const MONO_BOLD: &str = "mono-bold";
+/// The family's wordmark face (the title bar's product name).
+pub fn mono_bold(size: f32) -> FontId {
+    FontId::new(size, FontFamily::Name(MONO_BOLD.into()))
+}
 pub fn semibold(size: f32) -> FontId {
     FontId::new(size, FontFamily::Name(SEMIBOLD.into()))
 }

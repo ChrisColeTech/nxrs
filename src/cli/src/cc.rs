@@ -66,6 +66,9 @@ pub const GEN_FLAGS: &[&str] = &[
     "-w",
 ];
 
+/// The web build's optimization level for the game code (`gen_flags`), in place of `GEN_FLAGS`' -O1.
+const WEB_GEN_OPT: &str = "-O2";
+
 /// Flags for the loader executable (ordinary C, size over speed).
 const STUB_FLAGS: &[&str] = &["-std=gnu11", "-O2", "-fms-runtime-lib=dll", "-w"];
 
@@ -110,10 +113,24 @@ pub struct Emsdk {
 /// title's guest window does not fit 4 GiB: docs/35 W0(d)), shared-memory threads, wasm SIMD.
 /// `-mtail-call`: the dispatch's tail calls (src/runtime/web/boundary.c), and the generated code's calls of it in tail
 /// position, so guest indirect-branch chains keep the host stack flat.
-pub const WEB_FLAGS: &[&str] = &["-sMEMORY64=1", "-pthread", "-msimd128", "-mtail-call"];
+/// `-mrelaxed-simd`: the FP helpers' fused multiply-add as the relaxed madd (src/translator/runtime/simd_fp.h `FFMA`)
+/// instead of a software fmaf call (WEB-W8b); Chrome has relaxed SIMD since 114.
+pub const WEB_FLAGS: &[&str] = &[
+    "-sMEMORY64=1",
+    "-pthread",
+    "-msimd128",
+    "-mrelaxed-simd",
+    "-mtail-call",
+];
 
 /// The web build's boundary between generated code and Rust (asm.rs on the other hosts), compiled into each web link.
 const WEB_BOUNDARY: &str = include_str!("../../runtime/web/boundary.c");
+/// The engine's calls into the page (docs/35 W3), linked with `--js-library`.
+const WEB_JS_LIBRARY: &str = include_str!("../../front/web/link/nxrs-lib.js");
+/// The GPU's Emscripten JS library (docs/35 W4): starts the page's GPU worker, fetches shader files.
+const WEB_GPU_LIB: &str = include_str!("../../front/web/link/nxgfx.lib.js");
+/// The cold module's loader of a split build (docs/35 §4.6, WEB-W6), linked with `--pre-js`.
+const WEB_SPLIT_JS: &str = include_str!("../../front/web/link/split.js");
 
 impl Clang {
     /// The command that runs this compiler: clang itself, or emcc.py under emsdk's Python with its config.
@@ -121,6 +138,9 @@ impl Clang {
         let mut c = Command::new(&self.path);
         if let Some(e) = &self.web {
             c.arg("-E").arg(&e.emcc_py).env("EM_CONFIG", &e.config);
+            if let Some(cache) = em_cache() {
+                c.env("EM_CACHE", cache);
+            }
             // emcc builds missing system libraries with emcc.exe sub-processes, which find Python on PATH
             if let Some(py_dir) = self.path.parent() {
                 let mut paths = vec![py_dir.to_path_buf()];
@@ -149,9 +169,12 @@ impl Clang {
     /// into a shared object: position-independent).
     pub fn gen_flags(&self) -> Vec<String> {
         if self.web.is_some() {
+            // WEB-W8: the game code at -O2 on the web (the main game thread's guest code is the web frame's critical
+            // path; -O1 is the native choice for x86 instruction counts)
             return GEN_FLAGS
                 .iter()
                 .filter(|f| **f != MARCH && !f.starts_with("-fms-runtime-lib"))
+                .map(|f| if *f == "-O1" { &WEB_GEN_OPT } else { f })
                 .chain(WEB_FLAGS)
                 .map(|s| s.to_string())
                 .collect();
@@ -269,12 +292,18 @@ fn version_of(path: &Path) -> Result<(String, String)> {
         .take(3)
         .collect::<Vec<_>>()
         .join(" ");
-    let id = text
+    Ok((version, toolchain_id(&text)))
+}
+
+/// What an object depends on of `clang --version`: where the toolchain is unpacked is not (llvm-mingw and the bundled
+/// Linux clang print their folder in InstalledDir and in their configuration file's path), so a moved release keeps
+/// its objects.
+fn toolchain_id(version_text: &str) -> String {
+    version_text
         .lines()
-        .filter(|l| !l.starts_with("InstalledDir:"))
+        .filter(|l| !l.starts_with("InstalledDir:") && !l.starts_with("Configuration file:"))
         .collect::<Vec<_>>()
-        .join("\n");
-    Ok((version, id))
+        .join("\n")
 }
 
 fn which(exe: &str) -> Option<PathBuf> {
@@ -398,6 +427,27 @@ pub fn find_clang(cc_hint: Option<&str>) -> Result<Clang> {
         "clang not found (tried NXRS_CLANG, --cc, the bundled clang, NXRT_LLVM, LLVM's folder, PATH): {}",
         tried.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")
     )
+}
+
+/// The Emscripten cache (system headers and libraries) emcc uses: the user's `EM_CACHE` when set, else
+/// `<target>\emcache` when nxrs-build runs from a development tree's `target\<profile>` (`scripts/build/web.ps1` sets
+/// the same folder). A development tree reaches emsdk through the shared `build\tools` junction, and emsdk's own
+/// cache is keyed by that path: two worktrees cleared each other's (WEB-W5). A release (emsdk beside nxrs-build)
+/// keeps emsdk's own.
+pub fn em_cache() -> Option<PathBuf> {
+    if let Some(c) = std::env::var_os("EM_CACHE").filter(|c| !c.is_empty()) {
+        return Some(PathBuf::from(c));
+    }
+    let exe = std::env::current_exe().ok()?;
+    em_cache_for(&exe)
+}
+
+/// `<target>\emcache` for an executable under a `target` folder.
+fn em_cache_for(exe: &Path) -> Option<PathBuf> {
+    exe.ancestors()
+        .skip(1)
+        .find(|d| d.file_name().is_some_and(|n| n == "target"))
+        .map(|t| t.join("emcache"))
 }
 
 /// The Emscripten SDK for `--target web`: `NXRS_EMSDK`, else `emsdk` beside nxrs-build, else the development tree's
@@ -831,7 +881,8 @@ fn extra_libs(front: bool, gnu: bool) -> Vec<String> {
 /// line's limit). Written as `<dll>.part` and renamed, so a failed link leaves the previous DLL whole.
 /// Linux: what the engine's static libraries need of the system (`cargo rustc --crate-type staticlib --
 /// --print native-static-libs`): the runtime's, and for the whole engine ALSA (cpal's sound), the codec libraries
-/// (opus, libvpx, dav1d) and FFmpeg's libavcodec / libavutil (H.264 and AAC).
+/// (opus, libvpx, dav1d) and FFmpeg's libavcodec / libavutil (H.264 and AAC). A release builds the engine with
+/// `NXRS_CODECS` (scripts/build/linux-deps.sh): the codecs are then inside `libnxfront.a` and only ALSA is linked.
 const LINUX_SYS_LIBS: &[&str] = &[
     "-lgcc_s",
     "-lutil",
@@ -841,14 +892,22 @@ const LINUX_SYS_LIBS: &[&str] = &[
     "-ldl",
     "-lc",
 ];
-const LINUX_ENGINE_LIBS: &[&str] = &[
-    "-lopus",
-    "-lvpx",
-    "-ldav1d",
-    "-lavcodec",
-    "-lavutil",
-    "-lasound",
-];
+const LINUX_ENGINE_LIBS: &[&str] = if STATIC_CODECS {
+    &["-lasound"]
+} else {
+    &[
+        "-lopus",
+        "-lvpx",
+        "-ldav1d",
+        "-lavcodec",
+        "-lavutil",
+        "-lasound",
+    ]
+};
+
+/// Whether this engine was built with the codecs inside it (`NXRS_CODECS` when nxrs-build and the engine libraries
+/// were built, one cargo run: src/os/build.rs links them statically then).
+pub const STATIC_CODECS: bool = option_env!("NXRS_CODECS").is_some();
 
 /// `<name>_code.so` on Linux: every object and the engine library, `-Bsymbolic`, nothing left undefined.
 fn link_so(
@@ -1079,6 +1138,82 @@ pub fn find_web_lib() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// The development tree a web library found there belongs to (`<root>\target\wasm64-unknown-emscripten\release\
+/// libnxos.a` with `<root>\scripts\build\web.ps1`); None for a shipped library or one `NXRS_WEB_LIB` names.
+pub fn web_lib_dev_tree(lib: &Path) -> Option<PathBuf> {
+    if std::env::var_os("NXRS_WEB_LIB").is_some() {
+        return None;
+    }
+    let release = lib.parent()?;
+    let triple = release.parent()?;
+    let target = triple.parent()?;
+    let named = |p: &Path, n: &str| p.file_name().is_some_and(|f| f.eq_ignore_ascii_case(n));
+    if !(named(release, "release") && named(triple, "wasm64-unknown-emscripten") && named(target, "target")) {
+        return None;
+    }
+    let root = target.parent()?;
+    root.join("scripts").join("build").join("web.ps1").is_file().then(|| root.to_path_buf())
+}
+
+/// Brings a development tree's web library up to date with its sources (`scripts/build/web.ps1 -Crates os`; cargo
+/// decides what is stale, a current library costs a few seconds). WEB-W10-MK8D: nothing rebuilt the library when web
+/// waves were merged, so the launcher linked one from before the I/O worker with the current page, and the game
+/// died at its first read. Returns the seconds it took.
+pub fn refresh_web_lib(root: &Path) -> Result<f64> {
+    let t = Instant::now();
+    let script = root.join("scripts").join("build").join("web.ps1");
+    let mut last = String::new();
+    for shell in ["pwsh", "powershell"] {
+        let o = match Command::new(shell)
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .args(["-Crates", "os"])
+            .current_dir(root)
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                last = format!("{shell}: {e}");
+                continue;
+            }
+        };
+        if !o.status.success() {
+            let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            bail!(
+                "the web engine library could not be brought up to date ({} -Crates os): {}",
+                script.display(),
+                tail(&text, 3000)
+            );
+        }
+        return Ok(t.elapsed().as_secs_f64());
+    }
+    bail!("the web engine library could not be brought up to date: no PowerShell to run {} ({last})", script.display())
+}
+
+/// Refuses a web library built for another page interface than this nxrs-build's host files
+/// (`translator::loader::layout::WEB_HOST_PROTOCOL`, which the library carries as bytes).
+pub fn check_web_lib(lib: &Path) -> Result<()> {
+    let bytes = std::fs::read(lib).with_context(|| format!("reading {}", lib.display()))?;
+    match web_lib_protocol(&bytes) {
+        Some(p) if p == translator::loader::layout::WEB_HOST_PROTOCOL => Ok(()),
+        found => bail!(
+            "the web engine library {} was built for another page ({}; this nxrs-build's page is {}): rebuild it \
+             (scripts/build/web.ps1 -Crates os) or name the right one with NXRS_WEB_LIB",
+            lib.display(),
+            found.unwrap_or("no protocol mark: older than the I/O worker"),
+            translator::loader::layout::WEB_HOST_PROTOCOL
+        ),
+    }
+}
+
+/// The protocol mark (`nxrs-web-host-protocol=<n>;`) a web library's bytes carry, if any.
+fn web_lib_protocol(bytes: &[u8]) -> Option<&str> {
+    const KEY: &[u8] = b"nxrs-web-host-protocol=";
+    let at = bytes.windows(KEY.len()).position(|w| w == KEY)?;
+    let end = bytes[at..].iter().take(64).position(|&b| b == b';')?;
+    std::str::from_utf8(&bytes[at..at + end + 1]).ok()
+}
+
 /// The web build's `main`: the game's entry (modules.c) with the page's arguments, on a thread of its own
 /// (`-sPROXY_TO_PTHREAD`), so it may block as the native one does.
 const WEB_MAIN: &str = "// Written by nxrs: the web build's main.\n\
@@ -1096,7 +1231,16 @@ uint32_t *rt_excl_mon;\n";
 /// export is `nxrs_game_main` (modules.c). With `runtime` (the runtime crates' static library) the module is
 /// complete; without it the runtime's functions stay undefined and become imports of the module, and its data is
 /// defined here (`WEB_RUNTIME_DATA`).
-pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir: &Path, js: &Path) -> Result<()> {
+/// `split`: link for the hot/cold split (websplit.rs): function names kept and a symbol map written for wasm-split,
+/// Emscripten's split-module loader with ours (`src/front/web/link/split.js`) in front.
+pub fn link_web(
+    clang: &Clang,
+    objs: &[PathBuf],
+    runtime: Option<&Path>,
+    obj_dir: &Path,
+    js: &Path,
+    split: bool,
+) -> Result<()> {
     // the generated tree's headers (cpu.h): <build>\gen\include beside <build>\obj
     let include = obj_dir.parent().unwrap_or(obj_dir).join("gen").join("include");
     let compile = |name: &str, text: &str, extra: &[&str]| -> Result<PathBuf> {
@@ -1129,13 +1273,29 @@ pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir
     }
     let rsp = obj_dir.join("link-web.rsp");
     std::fs::write(&rsp, response_file(&all))?;
+    // the engine's calls into the page (shared blocks for the I/O worker, the audio ring, the input block)
+    let js_lib = obj_dir.join("nxrs-lib.js");
+    std::fs::write(&js_lib, WEB_JS_LIBRARY)?;
+    // the GPU's (docs/35 W4)
+    let gpu_lib = obj_dir.join("nxgfx.lib.js");
+    std::fs::write(&gpu_lib, WEB_GPU_LIB)?;
     // NXRS_WEB_LINK_FLAGS: more emcc link flags (development: -sNODERAWFS=1 runs the module under Node on the real
     // data folder)
-    let extra: Vec<String> = std::env::var("NXRS_WEB_LINK_FLAGS")
+    let mut extra: Vec<String> = std::env::var("NXRS_WEB_LINK_FLAGS")
         .unwrap_or_default()
         .split_whitespace()
         .map(String::from)
         .collect();
+    if split {
+        let pre = obj_dir.join("split.js");
+        std::fs::write(&pre, WEB_SPLIT_JS)?;
+        extra.extend([
+            "-sSPLIT_MODULE=1".to_string(),
+            "--profiling-funcs".to_string(),
+            "--emit-symbol-map".to_string(),
+            format!("--pre-js={}", pre.display()),
+        ]);
+    }
     let o = clang
         .command()
         .args(["-O1"])
@@ -1155,9 +1315,12 @@ pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir
             "-sDEFAULT_PTHREAD_STACK_SIZE=8MB",
             "-sERROR_ON_UNDEFINED_SYMBOLS=0",
             "-sWARN_ON_UNDEFINED_SYMBOLS=0",
-            // the page (src/web/boot.js) maps the data folder into the file system before main
-            "-sEXPORTED_RUNTIME_METHODS=FS,addRunDependency,removeRunDependency",
+            // the page (src/front/web/page/boot.js) puts the host files and the restored saves into the file system before
+            // main, and the engine's variables (?env=) into its environment
+            "-sEXPORTED_RUNTIME_METHODS=FS,ENV,addRunDependency,removeRunDependency",
         ])
+        .arg(format!("--js-library={}", js_lib.display()))
+        .arg(format!("--js-library={}", gpu_lib.display()))
         .args(&extra)
         .arg(format!("@{}", rsp.display()))
         .arg("-o")
@@ -1252,6 +1415,53 @@ pub fn link_exe(clang: &Clang, obj_dir: &Path, exe: &Path) -> Result<()> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn emscripten_cache_is_the_worktrees_own() {
+        let wt = Path::new("D:/Projects/wt");
+        let exe = wt.join("target").join("release").join("nxrs-build.exe");
+        assert_eq!(em_cache_for(&exe), Some(wt.join("target").join("emcache")));
+        // a release keeps emsdk's own (no target folder above it)
+        let release = Path::new("C:/nxrs").join("nxrs-engine").join("nxrs-build.exe");
+        assert_eq!(em_cache_for(&release), None);
+    }
+
+    /// WEB-W10-MK8D: a library without this nxrs-build's page protocol (one from before the I/O worker, or another
+    /// number) is refused; the current one passes.
+    #[test]
+    fn web_library_protocol_is_checked() {
+        let cur = translator::loader::layout::WEB_HOST_PROTOCOL;
+        let mut lib = b"!<arch>\n....unknown title....".to_vec();
+        assert_eq!(web_lib_protocol(&lib), None);
+        let d = std::env::temp_dir().join(format!("nxrs-weblib-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("libnxos.a");
+        std::fs::write(&p, &lib).unwrap();
+        assert!(check_web_lib(&p).unwrap_err().to_string().contains("older than the I/O worker"));
+        std::fs::write(&p, b"..nxrs-web-host-protocol=1;..").unwrap();
+        assert!(check_web_lib(&p).unwrap_err().to_string().contains("protocol=1;"));
+        lib.extend_from_slice(cur.as_bytes());
+        lib.extend_from_slice(b"\0tail");
+        assert_eq!(web_lib_protocol(&lib), Some(cur));
+        std::fs::write(&p, &lib).unwrap();
+        assert!(check_web_lib(&p).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Only a development tree's target library is refreshed (by its own web.ps1), never a shipped one.
+    #[test]
+    fn web_library_dev_tree() {
+        let d = std::env::temp_dir().join(format!("nxrs-webtree-{}", std::process::id()));
+        let lib = d.join("target").join("wasm64-unknown-emscripten").join("release").join("libnxos.a");
+        assert_eq!(web_lib_dev_tree(&lib), None);
+        std::fs::create_dir_all(d.join("scripts").join("build")).unwrap();
+        std::fs::write(d.join("scripts").join("build").join("web.ps1"), "").unwrap();
+        if std::env::var_os("NXRS_WEB_LIB").is_none() {
+            assert_eq!(web_lib_dev_tree(&lib), Some(d.clone()));
+        }
+        assert_eq!(web_lib_dev_tree(&d.join("nxrs-engine").join("web").join("libnxos.a")), None);
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
     fn fake_clang() -> Clang {
         Clang {
             path: "clang".into(),
@@ -1260,6 +1470,21 @@ mod tests {
             gnu: false,
             web: None,
         }
+    }
+
+    #[test]
+    fn web_game_code_is_optimized_at_web_gen_opt_and_native_keeps_o1() {
+        let mut c = fake_clang();
+        assert!(c.gen_flags().iter().any(|f| f == "-O1"));
+        c.web = Some(Emsdk { root: "e".into(), emcc_py: "e/emcc.py".into(), config: "e/.emscripten".into() });
+        let f = c.gen_flags();
+        assert!(f.iter().any(|f| f == WEB_GEN_OPT), "{f:?}");
+        assert!(!f.iter().any(|f| f == "-O1"), "{f:?}");
+        assert!(f.iter().any(|f| f == "-sMEMORY64=1"), "{f:?}");
+        // WEB-W8b: the FP helpers' fused multiply-add needs relaxed SIMD on the web, never natively
+        assert!(f.iter().any(|f| f == "-mrelaxed-simd"), "{f:?}");
+        c.web = None;
+        assert!(!c.gen_flags().iter().any(|f| f.contains("relaxed")));
     }
 
     #[test]
@@ -1303,6 +1528,20 @@ mod tests {
             "the C is in the key"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn toolchain_id_leaves_out_where_the_toolchain_is_unpacked() {
+        let at = |dir: &str| {
+            format!(
+                "clang version 23.1.5 (https://github.com/llvm/llvm-project.git 392dfff)\nTarget: x86_64-w64-windows-gnu\n\
+                 Thread model: posix\nInstalledDir: {dir}/bin\nConfiguration file: {dir}/bin/x86_64-w64-windows-gnu.cfg\n"
+            )
+        };
+        let a = toolchain_id(&at("C:/a/nxrs/toolchain/llvm-mingw"));
+        assert_eq!(a, toolchain_id(&at("D:/elsewhere/llvm-mingw")));
+        assert!(a.contains("clang version 23.1.5") && a.contains("x86_64-w64-windows-gnu"));
+        assert!(!a.contains("toolchain"));
     }
 
     #[test]

@@ -61,6 +61,7 @@ pub fn app_with(dir: &str, games: Vec<Game>) -> App {
         nxrs_version: String::new(),
         nxrs_contract: 2,
         keys,
+        browser: None,
     };
     app.tools_checked = true;
     app.refresh_facts();
