@@ -3141,6 +3141,14 @@ pub fn begin_submit_ex(
     let _watch = watch_lock(&mut m);
     SYNC_LOCK_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let t_scan = std::time::Instant::now();
+    // `upskip::prehash`'s hashes describe this sync's guest bytes only: dropped however this function ends
+    struct PrehashDrop;
+    impl Drop for PrehashDrop {
+        fn drop(&mut self) {
+            super::upskip::prehash_clear();
+        }
+    }
+    let _prehash = PrehashDrop;
     m.gen = m.gen.wrapping_add(1);
     let gen = m.gen;
     let mut all = Vec::new();
@@ -3290,6 +3298,33 @@ pub fn begin_submit_ex(
     SYNC_SCAN_NS.fetch_add(t_scan.elapsed().as_nanos() as u64, Ordering::Relaxed);
     super::queue::chain_trace::note("scan", t_scan.elapsed().as_micros() as u64, covered as u64);
     let _loop_t = SyncLoopTimer(std::time::Instant::now());
+    // every CPU-written page this sync may upload hashed at once on the hash threads, for the upload skip below
+    // (OOT-DESC): the scan's pages and the pages the pools hold pending (most of OoT's arrive through the pool walker's
+    // walks, drained into `pending`, with no scan of the sync's own)
+    if super::upskip::on() {
+        let mut pages: Vec<u64> = taken.values().flatten().copied().collect();
+        let mut pend = |p: &Pool| {
+            if p.buf.is_some() && p.placement == Placement::Mirror {
+                for &(a, n) in &p.pending {
+                    let mut pg = a & !(PAGE - 1);
+                    while pg < a + n {
+                        pages.push(pg);
+                        pg += PAGE;
+                    }
+                }
+            }
+        };
+        if covered {
+            for b in m.busy.iter() {
+                if let Some(p) = m.by_base.get(b) {
+                    pend(p);
+                }
+            }
+        } else {
+            m.by_base.values().for_each(&mut pend);
+        }
+        super::upskip::prehash(&pages);
+    }
     let Pools { by_base, busy: busy_set, .. } = &mut *m;
     let mut one = |p: &mut Pool| {
         if !p.tex_dirty.is_empty() {
@@ -3494,6 +3529,14 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
         a
     };
     super::upskip::gpu_writes(a, n);
+    // the same range noted again by this recording with no pool change since (a storage buffer bound draw after draw):
+    // the note it made stands (the same pool, pieces and identity; `note_writeback` would find it), so the pool lock is
+    // not taken again (OOT-DESC: those takes waited for the completion thread's landings). `NXGFX_NOTE_MEMO=0`: off
+    let key = (sub.serial, POOL_GEN.load(Ordering::Acquire), a, n, identity.unwrap_or(u64::MAX));
+    if note_memo_on() && note_memo::seen(key) {
+        super::perf::inc(super::perf::C::Writebacks);
+        return;
+    }
     let m = super::gate::lock(&g.mem, 0);
     let Some(b) = find(&m, a, n) else { return };
     let p = &m.by_base[&b];
@@ -3503,6 +3546,54 @@ pub(crate) fn note_gpu_write_version(g: &Gpu, sub: &mut super::queue::Sub, a: u6
         // one write-back per window the range lies in
         for (buf, off, a, n) in p.pieces(a, n) {
             note_writeback(sub, b, a, n, buf, off, p.identity);
+        }
+        note_memo::put(key);
+    }
+}
+
+fn note_memo_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_NOTE_MEMO").as_deref() != Ok("0"))
+}
+
+/// The GPU-write notes this thread made last: (recording serial, `POOL_GEN` then, address, bytes, identity). A key holds
+/// the recording, so a note of another recording (a later submission, another lane's child) never matches.
+mod note_memo {
+    type Key = (u64, u64, u64, u64, u64);
+    const N: usize = 16;
+    thread_local! {
+        static LAST: std::cell::RefCell<([Key; N], usize)> = const { std::cell::RefCell::new(([(0, 0, 0, 0, 0); N], 0)) };
+    }
+    pub(super) fn seen(k: Key) -> bool {
+        k.0 != 0 && LAST.with(|l| l.borrow().0.contains(&k))
+    }
+    pub(super) fn put(k: Key) {
+        LAST.with(|l| {
+            let mut l = l.borrow_mut();
+            let i = l.1;
+            l.0[i] = k;
+            l.1 = (i + 1) % N;
+        });
+    }
+
+    #[cfg(test)]
+    mod tests {
+        /// A note is found again only with the same recording, pool generation, range and identity; the 16 last kept.
+        #[test]
+        fn only_the_same_note_of_the_same_recording_is_found() {
+            let k = (7, 3, 0x1000, 0x40, 9);
+            assert!(!super::seen(k));
+            super::put(k);
+            assert!(super::seen(k));
+            assert!(!super::seen((8, 3, 0x1000, 0x40, 9)), "another recording");
+            assert!(!super::seen((7, 4, 0x1000, 0x40, 9)), "the pools changed since");
+            assert!(!super::seen((7, 3, 0x1000, 0x80, 9)), "another range");
+            assert!(!super::seen((7, 3, 0x1000, 0x40, 1)), "another identity");
+            assert!(!super::seen((0, 0, 0, 0, 0)), "an empty slot is no note");
+            for i in 0..16 {
+                super::put((7, 3, 0x2000 + i, 1, 9));
+            }
+            assert!(!super::seen(k), "pushed out");
         }
     }
 }
@@ -3544,12 +3635,26 @@ fn note_writeback(sub: &mut super::queue::Sub, b: u64, a: u64, n: u64, buf: vk::
 /// pages stay marked for the next upload; the write-back's own stores are not taken for CPU writes.
 /// `epoch`: the submission's recording epoch (`upskip::next_epoch`): pages it noted as GPU-written get the hash of the
 /// GPU's bytes back (`upskip::landed`); `value`: its GPU timeline value.
+/// `NXGFX_LAND_PRE=0`: a landing's page compares and hashes are made under the pool lock (`upskip::landing_pre`).
+fn land_pre_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_LAND_PRE").as_deref() != Ok("0"))
+}
+
 pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)], epoch: u64, value: u64) {
     if wbs.is_empty() {
         return;
     }
     let landed: Vec<(u64, u64)> = wbs.iter().map(|w| (w.1, w.2)).collect();
     let _done = InflightDone(landed);
+    // each write-back's pages compared with its baseline and hashed before the pool lock is taken (OOT-DESC: that work
+    // under the lock held up the replay thread's syncs and lookups); it reads only the write-back's own buffers.
+    // `NXGFX_LAND_PRE=0`: done under the lock, as before
+    let pres: Vec<Option<super::upskip::LandingPre>> = if land_pre_on() {
+        wbs.iter().map(|w| super::upskip::landing_pre(w.1, w.2, w.3, w.4)).collect()
+    } else {
+        Vec::new()
+    };
     let t0 = std::time::Instant::now();
     let mut m = g.mem.lock().unwrap();
     // landings take, write and reset pages: the walker must not take a landing's own stores for CPU writes, and the
@@ -3557,7 +3662,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
     let _watch = watch_lock(&mut m);
     super::lazy::T_LOCK.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
     super::queue::chain_trace::note("wb_lock", t0.elapsed().as_micros() as u64, wbs.len() as u64);
-    for &(pool, a, n, src, pre, identity) in wbs {
+    for (i, &(pool, a, n, src, pre, identity)) in wbs.iter().enumerate() {
         // a landing keeps CPU writes it meets as pending (a sync that does not scan visits it for them)
         m.busy.insert(pool);
         let Some(p) = m.by_base.get_mut(&pool) else {
@@ -3577,7 +3682,16 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
         }
         // the GPU copy of the range is `src` now (unless a later submission changed it: then it restamped the pages);
         // the pages it found the GPU left alone are not compared again below
-        let same = super::upskip::landed(pool, a, n, src, pre, epoch, value);
+        let same = super::upskip::landed_with(
+            pool,
+            a,
+            n,
+            src,
+            pre,
+            epoch,
+            value,
+            pres.get(i).and_then(|p| p.as_ref()),
+        );
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let tl = std::time::Instant::now();
         let mut lazy = if p.watched {

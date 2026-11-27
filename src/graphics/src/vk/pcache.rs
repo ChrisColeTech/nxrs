@@ -98,7 +98,9 @@ pub fn save_now(g: &Gpu) -> bool {
     let t0 = std::time::Instant::now();
     let _l = LOCK.lock().unwrap();
     let c = CREATED.load(Ordering::Relaxed);
-    let Ok(data) = (unsafe { g.dev().get_pipeline_cache_data(g.pipes.cache) }) else {
+    let Some(data) = cache_data(g) else {
+        // the next try waits for another quiet stretch
+        LAST_NS.store(crate::nvn::device::now_ns(), Ordering::Relaxed);
         return false;
     };
     let tmp = path.with_extension("bin.tmp");
@@ -128,6 +130,49 @@ pub fn save_now(g: &Gpu) -> bool {
     ok
 }
 
+/// The live cache's bytes in a buffer allocated fallibly: the cache is one block of hundreds of MB (Ocarina of Time's
+/// 391 MB), and ash's `get_pipeline_cache_data` allocates it with `Vec::with_capacity`, which aborts the process when
+/// the allocation fails under memory pressure (OOT-OCC v5: "memory allocation of 391528417 bytes failed"). A save
+/// that cannot get its buffer is skipped (the file on disk stays the previous one) and tried again later.
+/// `NXGFX_PCACHE_TRY_ALLOC=0`: ash's allocation, as before.
+fn cache_data(g: &Gpu) -> Option<Vec<u8>> {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("NXGFX_PCACHE_TRY_ALLOC").as_deref() != Ok("0")) {
+        return unsafe { g.dev().get_pipeline_cache_data(g.pipes.cache) }.ok();
+    }
+    let f = g.dev().fp_v1_0().get_pipeline_cache_data;
+    let dev = g.dev().handle();
+    for _ in 0..4 {
+        let mut n = 0usize;
+        if unsafe { f(dev, g.pipes.cache, &mut n, std::ptr::null_mut()) } != vk::Result::SUCCESS {
+            return None;
+        }
+        let mut data: Vec<u8> = Vec::new();
+        if let Err(e) = try_buffer(&mut data, n) {
+            crate::log::red_once(&format!(
+                "pipeline cache save skipped: its {n} bytes could not be allocated ({e}); the file keeps the last save"
+            ));
+            return None;
+        }
+        let r = unsafe { f(dev, g.pipes.cache, &mut n, data.as_mut_ptr().cast()) };
+        match r {
+            vk::Result::SUCCESS => {
+                // SAFETY: the driver wrote the first `n` bytes (n is at most the capacity it was given)
+                unsafe { data.set_len(n.min(data.capacity())) };
+                return Some(data);
+            }
+            vk::Result::INCOMPLETE => continue, // the cache grew between the calls
+            _ => return None,
+        }
+    }
+    None
+}
+
+/// Room for `n` bytes in `v`, or the allocation's error (never an abort).
+fn try_buffer(v: &mut Vec<u8>, n: usize) -> Result<(), std::collections::TryReserveError> {
+    v.try_reserve_exact(n)
+}
+
 /// (pipelines created, saves, bytes of the last save, save time ns).
 pub fn stats() -> (u64, u64, u64, u64) {
     (
@@ -140,6 +185,15 @@ pub fn stats() -> (u64, u64, u64, u64) {
 
 #[cfg(test)]
 mod tests {
+    /// A buffer too large to allocate is an error to skip the save on, not an abort.
+    #[test]
+    fn an_unallocatable_save_buffer_is_an_error() {
+        let mut v = Vec::new();
+        assert!(super::try_buffer(&mut v, usize::MAX / 2).is_err());
+        assert!(super::try_buffer(&mut v, 4096).is_ok());
+        assert!(v.capacity() >= 4096);
+    }
+
     #[test]
     fn header_check() {
         let mut p = ash::vk::PhysicalDeviceProperties {

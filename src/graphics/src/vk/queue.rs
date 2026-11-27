@@ -521,13 +521,14 @@ impl Sub {
         }
         q
     }
-    /// An occlusion query of the pool's 256, if one is left.
+    /// An occlusion query of the pool's `occl_pool()`, if one is left.
     pub fn take_occl(&mut self) -> Option<u32> {
+        let n_max = occl_pool();
         let q = if let Some(c) = &self.qshare {
-            c[1].try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < 256).then_some(n + 1))
+            c[1].try_update(Ordering::Relaxed, Ordering::Relaxed, |n| (n < n_max).then_some(n + 1))
                 .ok()
         } else {
-            (self.occl_n < 256).then(|| {
+            (self.occl_n < n_max).then(|| {
                 self.occl_n += 1;
                 self.occl_n - 1
             })
@@ -539,8 +540,24 @@ impl Sub {
     }
 }
 
-/// Queries refused because the submission's pool of 256 was used up: timestamp (counter reports), occlusion (audit
-/// L4: a parallel run's dropped children and in-pass cuts spend them faster). Counted in the translate line.
+/// `NXGFX_OCCL_POOL` (default 4096): occlusion queries a submission has. A query runs from a pass's (or a reset's)
+/// first draw to the pass's end, its report or the next reset, so a game testing each object's box with its own reset
+/// and report spends one a test: Ocarina of Time's Kokiri Forest and Link's house make ~560 tests a frame, and with 256
+/// about 1,000 queries a frame were refused there, their draws missing from the counts (OOT-OCC). 256: as before.
+pub fn occl_pool() -> u32 {
+    static N: std::sync::OnceLock<u32> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("NXGFX_OCCL_POOL")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(4096u32)
+            .clamp(16, 65536)
+    })
+}
+
+/// Queries refused because the submission's pool (256 timestamps, `occl_pool()` occlusion) was used up: timestamp
+/// (counter reports), occlusion (audit L4: a parallel run's dropped children and in-pass cuts spend them faster).
+/// Counted in the translate line.
 pub static QUERIES_OUT: [AtomicU64; 2] = [const { AtomicU64::new(0) }; 2];
 
 fn queries_out(k: usize) {
@@ -548,7 +565,7 @@ fn queries_out(k: usize) {
     crate::log::red_once(if k == 0 {
         "a submission used all 256 timestamp queries: a counter report gets no GPU timestamp"
     } else {
-        "a submission used all 256 occlusion queries: a samples-passed count misses the draws after it"
+        "a submission used all its occlusion queries (NXGFX_OCCL_POOL): a samples-passed count misses the draws after it"
     });
 }
 
@@ -713,7 +730,7 @@ fn make_sub(
         let query = unsafe { g.dev().create_query_pool(&qi, None) }.expect("query pool");
         let oi = vk::QueryPoolCreateInfo::default()
             .query_type(vk::QueryType::OCCLUSION)
-            .query_count(256);
+            .query_count(occl_pool());
         let occl = unsafe { g.dev().create_query_pool(&oi, None) }.expect("occlusion query pool");
         Sub {
             pre: cbs[0],
@@ -784,7 +801,7 @@ fn make_sub(
         g.dev().begin_command_buffer(s.main, &bi).unwrap();
         super::defer::begin(s.main);
         g.dev().cmd_reset_query_pool(s.pre, s.query, 0, 256);
-        g.dev().cmd_reset_query_pool(s.pre, s.occl, 0, 256);
+        g.dev().cmd_reset_query_pool(s.pre, s.occl, 0, occl_pool());
         g.dev()
             .cmd_write_timestamp2(s.main, vk::PipelineStageFlags2::TOP_OF_PIPE, s.query, 0);
     }
@@ -884,14 +901,14 @@ pub fn child_begin_with(ci: &ChildInit, c: &mut Sub) {
 /// The parent's query counts after its children's (`child_begin_with`).
 pub fn child_settle(parent: &mut Sub, ci: &ChildInit) {
     parent.queries = ci.share[0].load(Ordering::Relaxed).min(256);
-    parent.occl_n = ci.share[1].load(Ordering::Relaxed).min(256);
+    parent.occl_n = ci.share[1].load(Ordering::Relaxed).min(occl_pool());
 }
 
 /// A child's segment is translated: its CPU-side effects join the parent's, in stream order, and it is kept with it.
 pub fn child_join(parent: &mut Sub, mut c: Sub) {
     if let Some(s) = &c.qshare {
         parent.queries = s[0].load(Ordering::Relaxed).min(256);
-        parent.occl_n = s[1].load(Ordering::Relaxed).min(256);
+        parent.occl_n = s[1].load(Ordering::Relaxed).min(occl_pool());
     }
     parent.post.append(&mut c.post);
     super::mem::join_writebacks(parent, std::mem::take(&mut c.writebacks));
@@ -933,26 +950,12 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
     let mut wb = Vec::new();
     if total > 0 {
         barrier_all(g, s.main);
-        let rb = g
-            .buffer(
-                total,
-                vk::BufferUsageFlags::TRANSFER_DST,
-                MemoryLocation::GpuToCpu,
-                "write-back",
-            )
-            .expect("readback");
+        let rb = wb_bufs::take(g, total, "write-back").expect("readback");
         // the same ranges as the device had them before this submission's work (after its uploads, in `pre`): only
         // the words the GPU changed land in guest memory, so what the CPU wrote beside them meanwhile stays.
         // Landing the whole range put back stale bytes the CPU had changed since the upload: a
         // storage buffer bound read-write over a pool the CPU also writes (a size-0 one runs to the end of its pool)
-        let bf = g
-            .buffer(
-                total,
-                vk::BufferUsageFlags::TRANSFER_DST,
-                MemoryLocation::GpuToCpu,
-                "write-back base",
-            )
-            .ok();
+        let bf = wb_bufs::take(g, total, "write-back base").ok();
         if bf.is_some() {
             barrier_all(g, s.pre);
         }
@@ -1153,6 +1156,145 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
     value
 }
 
+/// The host buffers a submission's write-backs are copied into (the GPU-written ranges and their baseline), kept for
+/// the next submissions instead of freed at completion (OOT-DESC). Made and freed per submission, each one was a fresh
+/// block of host memory from the driver (`vkAllocateMemory`, ~15 % of Ocarina of Time's replay thread, and its
+/// `vkFreeMemory` ~6 % of the completion thread's). A kept buffer is handed out again only after the completion of the
+/// submission that used it has landed its write-backs (`give` runs after `apply_writebacks`), and a submission writes
+/// every byte of the ranges it reads back (`submit_sub`). `NXGFX_WB_RECYCLE=0`: made and freed each time, as before.
+pub(crate) mod wb_bufs {
+    use super::{Buf, Gpu};
+    use ash::vk;
+    use gpu_allocator::MemoryLocation;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::Mutex;
+
+    /// Bytes kept at most, and buffers of one size at most; a buffer that would pass either is freed. (Ocarina of Time
+    /// writes back ranges of 32-64 MB a few times a frame, readback and baseline each: in the house 4-6 buffers of 64 MB
+    /// are in flight at once. A 64 MB cap left every small buffer to be made again (od-wb1-oot), a 256 MB one still made
+    /// ~one 64 MB buffer a frame at the peaks (od-v4-oot).)
+    const KEEP: u64 = 1 << 30;
+    const PER_SIZE: usize = 64;
+    /// The smallest buffer made.
+    const MIN: u64 = 64 << 10;
+
+    pub(crate) fn on() -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        *ON.get_or_init(|| std::env::var("NXGFX_WB_RECYCLE").as_deref() != Ok("0"))
+    }
+
+    /// The size a buffer for `n` bytes is made at: a power of two from 64 KiB, so nearby sizes serve each other.
+    pub(crate) fn class(n: u64) -> u64 {
+        n.max(MIN).next_power_of_two()
+    }
+
+    /// Kept buffers with their sizes; the smallest one holding the bytes asked for is taken.
+    pub(crate) struct Shelf<T> {
+        items: Vec<(u64, T)>,
+        bytes: u64,
+    }
+
+    impl<T> Shelf<T> {
+        pub(crate) const fn new() -> Self {
+            Shelf {
+                items: Vec::new(),
+                bytes: 0,
+            }
+        }
+        /// The smallest kept item of at least `n` bytes.
+        pub(crate) fn take(&mut self, n: u64) -> Option<T> {
+            let i = self
+                .items
+                .iter()
+                .enumerate()
+                .filter(|(_, (s, _))| *s >= n)
+                .min_by_key(|(_, (s, _))| *s)
+                .map(|(i, _)| i)?;
+            let (s, t) = self.items.swap_remove(i);
+            self.bytes -= s;
+            Some(t)
+        }
+        /// Keeps `t` of `size` bytes, or hands it back when the shelf would hold more than `keep` bytes or more than
+        /// `per_size` items of that size.
+        pub(crate) fn put(&mut self, size: u64, t: T, keep: u64, per_size: usize) -> Option<T> {
+            if self.bytes + size > keep
+                || self.items.iter().filter(|(s, _)| *s == size).count() >= per_size
+            {
+                return Some(t);
+            }
+            self.bytes += size;
+            self.items.push((size, t));
+            None
+        }
+        pub(crate) fn bytes(&self) -> u64 {
+            self.bytes
+        }
+    }
+
+    static SHELF: Mutex<Shelf<Buf>> = Mutex::new(Shelf::new());
+    /// Buffers made, and buffers handed out again (the memory line).
+    pub(crate) static MADE: AtomicU64 = AtomicU64::new(0);
+    pub(crate) static REUSED: AtomicU64 = AtomicU64::new(0);
+
+    /// A mapped host buffer of at least `n` bytes for a submission's write-back copies.
+    pub(crate) fn take(g: &Gpu, n: u64, name: &str) -> Result<Buf, String> {
+        if !on() {
+            return g.buffer(n, vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, name);
+        }
+        if let Some(b) = SHELF.lock().unwrap().take(n) {
+            REUSED.fetch_add(1, Ordering::Relaxed);
+            return Ok(b);
+        }
+        MADE.fetch_add(1, Ordering::Relaxed);
+        g.buffer(class(n), vk::BufferUsageFlags::TRANSFER_DST, MemoryLocation::GpuToCpu, name)
+    }
+
+    /// A completed submission's write-back buffer: kept for the next ones (or freed past the cap, or with the switch off).
+    pub(crate) fn give(g: &Gpu, b: Buf) {
+        if !on() {
+            g.free_buffer(b);
+            return;
+        }
+        let size = b.size;
+        let back = SHELF.lock().unwrap().put(size, b, KEEP, PER_SIZE);
+        if let Some(b) = back {
+            g.free_buffer(b);
+        }
+    }
+
+    /// `write-back buffers N made, M reused, K MB kept`.
+    pub(crate) fn line() -> String {
+        format!(
+            "write-back buffers {} made, {} reused, {} MB kept",
+            MADE.load(Ordering::Relaxed),
+            REUSED.load(Ordering::Relaxed),
+            SHELF.lock().unwrap().bytes() >> 20
+        )
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        /// The smallest kept buffer that holds the bytes is handed out; nothing past the cap is kept.
+        #[test]
+        fn the_smallest_fitting_buffer_is_reused_and_the_cap_holds() {
+            let mut s: Shelf<&str> = Shelf::new();
+            assert_eq!(s.put(class(100_000), "128k", 1 << 20, 4), None);
+            assert_eq!(s.put(class(10), "64k", 1 << 20, 1), None);
+            assert_eq!(s.put(class(600_000), "1m", 1 << 20, 4), Some("1m"), "past the cap: handed back");
+            assert_eq!(s.put(class(20), "64k again", 1 << 20, 1), Some("64k again"), "one of a size at most");
+            assert_eq!(s.bytes(), (128 << 10) + (64 << 10));
+            assert_eq!(s.take(70_000), Some("128k"), "64 KiB is too small");
+            assert_eq!(s.take(200_000), None, "nothing large enough");
+            assert_eq!(s.take(1), Some("64k"));
+            assert_eq!(s.bytes(), 0);
+            assert_eq!(class(0), 64 << 10);
+            assert_eq!(class((64 << 10) + 1), 128 << 10);
+        }
+    }
+}
+
 fn start_completion(g: &'static Gpu) {
     if g.q.thread_started.swap(true, Ordering::AcqRel) {
         return;
@@ -1267,7 +1409,7 @@ fn completion_loop(g: &'static Gpu) {
                 Post::OcclReset => super::counters::vis_reset(),
                 Post::OcclReport { addr } => {
                     let t = super::counters::report_time(None, t0, t1);
-                    super::counters::write_record(addr, super::counters::vis(), t);
+                    super::occl::land(addr, super::counters::vis(), t);
                 }
                 Post::Readback { dst, src, n } => unsafe {
                     core::ptr::copy_nonoverlapping(src, dst, n)
@@ -1277,11 +1419,12 @@ fn completion_loop(g: &'static Gpu) {
             }
         }
         wait_diag::mark(2, "recycle/deferred callbacks", [item.value, 0]);
+        // the write-backs have landed (`apply_writebacks` above): nothing reads these buffers any more
         if let Some(rb) = item.readback {
-            g.free_buffer(rb);
+            wb_bufs::give(g, rb);
         }
         if let Some(b) = item.before {
-            g.free_buffer(b);
+            wb_bufs::give(g, b);
         }
         for b in sub.transient.drain(..) {
             g.free_buffer(b);
@@ -1610,13 +1753,17 @@ pub fn aq_wait_room(present: bool) {
     // replayed, so those results come back as soon as with replay on the game's thread (a game that culls on last
     // frame's results otherwise read them two presents late: Mario Kart 8 Deluxe's black stretches). NXGFX_OCCL_SYNC=0 off
     // (presents only: waiting at every submit too serialized the game with the replay: Donkey Kong Bananza 17.8 -> 13
-    // FPS, and did not help Mario Kart 8 Deluxe)
+    // FPS, and did not help Mario Kart 8 Deluxe). NXGFX_OCCL_LAG (occl.rs, default 1): the replay may stay that many
+    // presents behind instead (0: the wait above), so the game builds its next frame while the replay translates this
+    // one and reads the most recent results completed (Ocarina of Time's render thread waited here 83 % of its time)
     let occl = present && occl_sync();
+    let lag = super::occl::lag();
     let full = || {
         let behind = a.tail.load(Ordering::Acquire) - a.done.load(Ordering::Acquire);
+        let queued = AQ_PRESENTS.load(Ordering::Acquire);
         behind >= AQ_MAX - 1
-            || (present && AQ_PRESENTS.load(Ordering::Acquire) >= aq_max_presents())
-            || (occl && behind > 0)
+            || (present && queued >= aq_max_presents())
+            || (occl && super::occl::present_waits(lag, queued, behind))
     };
     if !full() {
         return;
@@ -1641,6 +1788,9 @@ pub fn aq_wait_room(present: bool) {
         },
         t0.elapsed().as_nanos() as u64,
     );
+    if present {
+        super::occl::PRESENT_WAIT_NS.fetch_add(t0.elapsed().as_nanos() as u64, Ordering::Relaxed);
+    }
 }
 
 fn aq_push(g: &'static Gpu, op: Op) -> u64 {
@@ -1968,14 +2118,17 @@ pub fn submit(qserial: u64, origin_ll: bool, handles: &[u64]) {
     if aq_on() || super::capture::on() {
         let mut stream = Vec::new();
         let mut syncs = Vec::new();
+        let mut occl = super::occl::Walk::default();
         unsafe {
             crate::nvn::cmd::for_each_record(handles, |op, r| {
                 if op == crate::nvn::obj::op::FENCE_SYNC && r.len() >= 16 {
                     syncs.push(core::ptr::read_unaligned(r.as_ptr().add(8) as *const u64));
                 }
+                occl.record(op, r);
                 stream.extend_from_slice(r)
             })
         };
+        super::occl::submitted(&occl);
         super::capture::submit(qserial, origin_ll, &stream);
         if !aq_on() {
             submit_stream(qserial, origin_ll, stream);
