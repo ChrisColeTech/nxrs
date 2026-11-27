@@ -72,7 +72,8 @@ t46 = { about = "in the race (steel deck at ~60 FPS)", regions = "kart-hud" }
 [mkw-pop]
 title = "Mario Kart World"
 about = "as mkw (menu screens shot), then a shot about every 0.5 s for 40 s of the race (pop-in, missing textures)"
-# run it with --faults; the window is the dense stretch (the shots cost some FPS: take FPS from mkw)
+# run it with --faults; the window is the dense stretch (the shots cost some FPS: take FPS from mkw). 99 shots in all:
+# the report and sheets take two-digit shot numbers only (`NN-name.png`), so a 100th would be left out
 seconds = 330
 window = [245, 290]
 steps = ["wait 40", "shot boot",
@@ -83,7 +84,7 @@ steps = ["wait 40", "shot boot",
          "press A ; 5.5", "shot o13 ; 0.5", "press A ; 5.5", "shot o14 ; 0.5", "press A ; 5.5", "shot o15 ; 0.5",
          "press A ; 5.5", "shot o16 ; 0.5",
          "shot title", "press A ; 6 * 3", "shot menus", "press A ; 6 * 15", "shot grid", "replay mkw_drive.txt ; 6",
-         "shot pop ; 0.5 * 80", "shot pop end"]
+         "shot pop ; 0.5 * 78", "shot pop end"]
 [mkw-pop.checks]
 grid = { about = "race start grid or racing (coin counter, place badge)", regions = "kart-hud" }
 pop_end = { about = "in the race (coin counter, place badge)", regions = "kart-hud" }
