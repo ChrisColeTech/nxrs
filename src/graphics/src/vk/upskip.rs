@@ -257,7 +257,12 @@ pub fn upload_changed(
     // a large range's pages hashed on several threads first (OoT rewrites mirrors of 6-15 MB a frame: ~56 MB hashed
     // on the replay thread was 6.5 ms); the hash of guest memory only decides a skip, which uploads nothing
     let first_pg = pg;
-    let pre: Vec<u64> = if e - a >= PAR_MIN { par_hashes(first_pg, e) } else { Vec::new() };
+    // (not when this sync's scan hashed its pages already, `prehash`)
+    let pre: Vec<u64> = if e - a >= PAR_MIN && PRE.with(|p| p.borrow().is_empty()) {
+        par_hashes(first_pg, e)
+    } else {
+        Vec::new()
+    };
     // SAFETY (each guest read below): the CPU-written guest bytes of a registered pool (committed memory, as the upload
     // reads it); a page held on the device faults and is brought back first
     let guest = |s: u64, t: u64| unsafe { core::slice::from_raw_parts(s as *const u8, (t - s) as usize) };
@@ -296,7 +301,11 @@ pub fn upload_changed(
             for c in cand.iter_mut().filter(|c| c.h != 0 || c.br != 0) {
                 c.gh = match pre.get(((c.pg - first_pg) / PAGE) as usize) {
                     Some(&h) if h != 0 => h,
-                    _ => page_hash(guest(c.s, c.t)),
+                    // (a whole page only: `prehash` hashed whole pages)
+                    _ => match if c.whole { prehashed(c.pg) } else { 0 } {
+                        0 => page_hash(guest(c.s, c.t)),
+                        h => h,
+                    },
                 };
             }
             // 3. left out where the page still is as step 1 found it and the guest bytes match; else marked for upload
@@ -391,6 +400,59 @@ pub fn upload_changed(
 
 /// Ranges from this size on are hashed on several threads (`par_hashes`).
 const PAR_MIN: u64 = 4 << 20;
+
+thread_local! {
+    /// (page, hash of its guest bytes) of the pages a pool sync's scan found written, ascending (`prehash`).
+    static PRE: std::cell::RefCell<Vec<(u64, u64)>> = const { std::cell::RefCell::new(Vec::new()) };
+}
+
+/// The pool sync's scan found `pages` (page addresses) written by the CPU: their guest bytes are hashed now on the
+/// `vk page hash` threads, all together, for this thread's `upload_changed` calls of this sync (which hashed the
+/// candidates of each range on its own, ranges under `PAR_MIN` on the replay thread alone: ~8 % of it in OoT, whose
+/// ~57 MB a frame of rewritten pages lie in many small ranges, OOT-DESC). As `par_hashes`' hashes, these only decide a
+/// skip: they are taken after the scan reset the pages' write watch, so a store made after the hash is found by the next
+/// scan. Kept until `prehash_clear`. `NXGFX_PREHASH=0`: off.
+pub fn prehash(pages: &[u64]) {
+    if !on() || !prehash_on() || pages.is_empty() {
+        return;
+    }
+    let _t = Timer(std::time::Instant::now(), &HASH_NS);
+    let mut v: Vec<u64> = pages.to_vec();
+    v.sort_unstable();
+    v.dedup();
+    let out: Vec<AtomicU64> = (0..v.len()).map(|_| AtomicU64::new(0)).collect();
+    par_for(v.len(), &|k| {
+        // SAFETY: a whole page a scan of a registered pool's committed guest memory reported written (as `par_hashes`)
+        let h = page_hash(unsafe { core::slice::from_raw_parts(v[k] as *const u8, PAGE as usize) });
+        out[k].store(h, Ordering::Relaxed);
+    });
+    PRE.with(|p| {
+        let mut p = p.borrow_mut();
+        p.clear();
+        p.extend(v.iter().zip(out).map(|(&pg, h)| (pg, h.into_inner())));
+    });
+}
+
+/// The end of the pool sync: `prehash`'s hashes are dropped (they describe the guest bytes at that sync only).
+pub fn prehash_clear() {
+    PRE.with(|p| p.borrow_mut().clear());
+}
+
+/// The hash `prehash` took of page `pg` in this sync (0: none).
+fn prehashed(pg: u64) -> u64 {
+    PRE.with(|p| {
+        let p = p.borrow();
+        p.binary_search_by_key(&pg, |e| e.0).map(|i| p[i].1).unwrap_or(0)
+    })
+}
+
+fn prehash_on() -> bool {
+    if cfg!(test) {
+        return true;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_PREHASH").as_deref() != Ok("0"))
+}
 
 /// The hash of each whole page in [a, e) (a page-aligned, by page from `a`), on several threads; 0 for a page not
 /// wholly inside. Persistent `vk page hash` threads take pieces of it with the caller (spawning threads per range cost
@@ -1367,6 +1429,30 @@ mod tests {
         assert_eq!(runs(base, 2 * PAGE, base, 2 * PAGE), vec![(base, 2 * PAGE)], "an entry made after the log");
         drop_any(base);
         state().as_mut().unwrap().raw.clear();
+    }
+
+    /// OOT-DESC: the hashes a sync's scan took of its written pages (`prehash`) decide that sync's skips, and only that
+    /// sync's: the same bytes are skipped as without them; a page changed after its prehash is decided on the prehash (as
+    /// a `par_hashes` hash taken before the decision), and the hashes are gone after `prehash_clear`.
+    #[test]
+    fn prehashed_pages_decide_the_skip_of_their_sync_only() {
+        let _s = SERIAL.lock().unwrap();
+        let (_m, base) = pool(3);
+        let size = 3 * PAGE;
+        drop_any(base);
+        set(base, &vec![0x11; size as usize]);
+        assert_eq!(runs(base, size, base, size), vec![(base, size)], "first upload");
+        prehash(&[base + PAGE, base, base + 2 * PAGE, base]);
+        assert_eq!(runs(base, size, base, size), vec![], "the same bytes, decided on the prehashes");
+        // a page's prehash taken, then its bytes changed before the decision: decided on the prehash, as any hash
+        // taken before it (the scan reset its write watch first, so the next scan finds the store)
+        prehash(&[base + PAGE]);
+        set(base + PAGE, &[0x22; 8]);
+        assert_eq!(runs(base, size, base + PAGE, PAGE), vec![], "decided on the prehash");
+        prehash_clear();
+        assert_eq!(runs(base, size, base + PAGE, PAGE), vec![(base + PAGE, PAGE)], "the next sync: its own hash");
+        assert_eq!(prehashed(base), 0, "cleared");
+        drop_any(base);
     }
 
     /// OOT-DESC: a landing whose pages were compared and hashed before the pool lock (`landing_pre`) leaves the same

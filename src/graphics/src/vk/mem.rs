@@ -3035,6 +3035,14 @@ pub fn begin_submit_ex(
     let _watch = watch_lock(&mut m);
     SYNC_LOCK_NS.fetch_add(t_lock.elapsed().as_nanos() as u64, Ordering::Relaxed);
     let t_scan = std::time::Instant::now();
+    // `upskip::prehash`'s hashes describe this sync's guest bytes only: dropped however this function ends
+    struct PrehashDrop;
+    impl Drop for PrehashDrop {
+        fn drop(&mut self) {
+            super::upskip::prehash_clear();
+        }
+    }
+    let _prehash = PrehashDrop;
     m.gen = m.gen.wrapping_add(1);
     let gen = m.gen;
     let mut all = Vec::new();
@@ -3165,6 +3173,11 @@ pub fn begin_submit_ex(
             i = j;
         }
         distribute_watched_pages(&all_watched, &mut dirty_pages, &mut taken);
+        // every page this scan found written hashed at once on the hash threads, for the upload skip below (OOT-DESC)
+        if super::upskip::on() {
+            let pages: Vec<u64> = taken.values().flatten().copied().collect();
+            super::upskip::prehash(&pages);
+        }
         let recovered = cold_skipped
             .iter()
             .filter(|base| taken.get(base).is_some_and(|p| !p.is_empty()))

@@ -71,6 +71,22 @@ write-back buffers, ~15 % of the replay thread's wall time (~7 ms of a ~51 ms fr
 thread's (which holds the pool lock the replay thread then waits for). Next: the pool lock held by landings
 (~10 %), the upload skip's page hashing on the replay thread (~10 %).
 
+## Runs (GPU 1; `oot`, window [845, 915] s unless said; other waves' MKW and web runs shared the machine)
+
+- `20261126-174908-od-prof1-oot` (base `0e04404`, PDB relink): the profile above; FPS 18.6 / 13.0 in the window (the
+  sampler ran over [860, 885]); [845, 858] unsampled: 18.9 FPS, frame 53.0 ms, replay 21.1, prep 18.5, GPU 9.2;
+  completion write-back 0.97 MB in 11.9 ms; frame step held 3 vsyncs for 1,715 of 1,800 frames. 6/6 on route.
+- `20261126-180856-od-wb1-oot` (change 1, 64 MB cap): stopped by PID at ~240 s after its log showed 26 % reuse.
+- `20261126-181606-od-wb2-oot` (change 1, final cap): 4 buffers made, all later write-backs reused; **its harness
+  process ended at 317 s** (last step 96, no report; started with `Start-Process` from a shell that went on to build),
+  the game ran on without inputs and was stopped by PID. No window.
+- `20261126-183520-od-v3-oot` (changes 1-3, the landing's compares on the shared hash threads): **OFF-ROUTE at `14-h1`**
+  (distance 0.31, limit 0.3; the other five on route), window FPS invalid; [845, 895]: 14.6 FPS with 28 frames of
+  200-950 ms (replay normal, the game's frame idle: the machine-side stall SCAN-COST saw, while `usesync` ran MKW
+  runs 18:35-18:48), the replay thread's copy and hash 4.8 -> 6.2 ms a frame: the landing's compares took the
+  `vk page hash` threads from the replay thread's sync. Corrected (change 2 off those threads). Its profile was not
+  written (the run ended at 913 s, inside the sampled stretch).
+
 ## Changes
 
 1. **Write-back buffers kept for reuse** (`vk/queue.rs` `wb_bufs`): the readback and baseline buffers of a submission's
@@ -78,4 +94,17 @@ thread's (which holds the pool lock the replay thread then waits for). Next: the
    to it at completion, after `apply_writebacks` has landed them, instead of being made and freed per submission.
    Every byte a submission reads back is written by its own copies, so a reused buffer's old bytes are never read.
    `NXGFX_WB_RECYCLE=0`: made and freed each time. The memory line reports made / reused / kept. Separate from
-   TRANSLATE-REUSE (`queue.rs` and `perf.rs` only).
+   TRANSLATE-REUSE (`queue.rs` and `perf.rs` only). First cut (64 MB cap) reused only 26 % (`od-wb1-oot`, stopped):
+   two 32 MB write-backs (size-0 storage buffers reaching their pool's end) filled the cap; now 256 MB and at most 64
+   buffers of a size: 4 buffers made in a whole run, every later write-back reuses them.
+2. **A landing's compares and hashes before the pool lock** (`upskip::landing_pre` / `landed_with`, `mem::apply_writebacks`):
+   the completion thread compared each write-back page with its baseline and hashed the changed ones (~59 MB a frame,
+   "re-arming 3.6-3.7 ms" a frame) while holding `g.mem` and the watch lock, which the replay thread's syncs,
+   resolves and GPU-write notes wait for. That work reads only the write-back's own readback and baseline buffers
+   (nothing changes them after completion), so it now runs before the lock; under the lock the same decisions are
+   applied from it (a page the GPU left alone without a kept hash is hashed there, as before). `NXGFX_LAND_PRE=0`: as
+   before.
+3. **Repeated GPU-write notes skip the pool lock** (`mem::note_gpu_write_version`, `note_memo`): a recording noting the
+   same range again (same pool generation, identity) already holds that write-back; the note returns before `g.mem`.
+   Keyed by the recording's serial (unique per `make_sub`, children included), so no other recording matches.
+   `NXGFX_NOTE_MEMO=0`: as before.
