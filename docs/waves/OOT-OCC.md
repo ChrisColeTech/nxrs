@@ -89,7 +89,16 @@ wait for the replay and the replay thread's busy time, ms a frame, house. Shown 
 
 House runs (`oot-house --faults`, window [610, 690] = Link standing, A every 1.5 s):
 
-HOUSE_TABLE
+| Run (`build/play/`) | LAG / POOL | FPS / 5 % low [610, 690] | wait / busy | frame step (last 1,800) | route |
+|---|---|---|---|---|---|
+| OOT-DESC `204440-od-v8-house` (base) | old | 19.3 / 18.0 | - | held 3 for 1,298-1,660 | 5/5 |
+| `001552-oc-v5-house` (final) | 1 / 4096 | **26.1 / 17.0** | 0.0 / 27-32 | **held 2 for 1,709**, cost median 1.21 | 5/5 |
+| `002805-oc-v5-house-off` (control) | 0 / 256 | invalid: **OFF-ROUTE** (20.0 / 15.0) | 33-41 / 39-47 | held 3 for 1,658, cost median 2.04 | 0/5 |
+
+The control fell behind the scripted A presses in the opening (the old wait slows the forest cutscenes) and spent
+the window on the village path outside the house (all five checks off route, sheet `-house-off/sheet-2.png`), so its
+FPS is not comparable; its presents still waited 33-41 ms a frame for the replay. Its `16-d13` shows a cut-frame
+smear at a camera change on the path (switches off; not seen in any run with the new rule).
 
 Notes:
 
@@ -136,3 +145,52 @@ Notes:
   (`NXGFX_OCCL_LAG=1`); MK8D's black stretches were the reason for the old wait (1 black lap shot of 14 with it, 3-5
   without, INTERFACES.md). Not run here (not this wave's title); `NXGFX_OCCL_LAG=0` restores the old rule. The lead
   should run `mk8d` once with the default before merging, or the lag default can be limited to OoT's profile.
+
+## Report (agent, protocol §5)
+
+Branch `ootocc` (base `ootdesc` `6f7413f`): `8f2fd6e` (diagnosis line, `NXGFX_OCCL_LAG`, `NXGFX_OCCL_EARLY`),
+`8337cba` (`NXGFX_OCCL_POOL`, wait / busy in the line), docs after.
+
+### 1. Built
+
+Diagnosis (section 1) kept apart: OoT tests each object's box with its own reset / one draw / report, 120-2,140 a
+frame, ~45 % read back by GPU render conditions, results read from memory as they lie (never cleared or polled).
+Corrections: presents wait for one frame of replay instead of all of it (`NXGFX_OCCL_LAG=1`; 0 = old), so the game
+and the replay overlap and the game reads the most recent completed results; the previous answer put back over report
+memory a game rewrote (`NXGFX_OCCL_EARLY`; a no-op for OoT); 4,096 occlusion queries a submission instead of 256
+(`NXGFX_OCCL_POOL`), so no box test goes uncounted. Files: `src/graphics/src/vk/occl.rs` (new), `vk/queue.rs`,
+`vk/mod.rs`, `nvn/window.rs`, `docs/env_switches.tsv`.
+
+### 2. Tests (`cargo test --release -p graphics`: lib 276 passed, 6 ignored; the other targets pass)
+
+- `occl::tests::the_lag_decides_when_a_present_waits`: lag 0 waits until nothing is behind; lag n while n presents
+  are queued.
+- `occl::tests::the_previous_answer_is_put_back_over_a_rewrite`: never-answered memory left alone; a landed record not
+  rewritten left alone; rewritten by the game: the previous record back; a landing writes the record.
+- `queue::occl_tests::occlusion_results_keep_the_replay_caught_up` (existing) still passes.
+- New functions; no old code to fail on.
+
+### 3. Verified
+
+Section 4: the final build in the house holds 2 vsyncs for 85-98 % of frames, **28.4 FPS over [600, 830] against
+22.0-23.3 for the same session's LAG 0 runs** and 22.2 in OOT-DESC's final; `oot-house` **26.1 / 17.0** (OOT-DESC
+19.3 / 18.0). The walk window [845, 915] is unchanged (~16 FPS both ways: replay-bound). Route checks on in every run
+used (v1's window invalid, machine stall; the house control off route). Every sheet read: correct, no popping or
+flicker; fault captures the known set.
+
+### 4. Unproven
+
+- Perf on a shared machine (MKW, builds, Chrome beside every run): the lead's quiet runs decide.
+- MK8D with the new default (section 5): not run.
+- v5's end at 884 s: the pipeline cache save's 391 MB buffer failed to allocate (machine memory); a run of the final
+  build to its end in `oot` was not repeated (the house run completed).
+- 59: the replay thread's own 31-67 ms a frame (section 5).
+
+### 5. Slips
+
+- The house control (`002805-oc-v5-house-off`) went off route; not repeated (time).
+- v1 was not stopped when its window stalled (left to its time limit; its log kept).
+
+### 6. Questions
+
+None.
