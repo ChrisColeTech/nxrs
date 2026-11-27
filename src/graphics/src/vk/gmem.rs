@@ -187,6 +187,21 @@ fn back_all() -> bool {
     *ON.get_or_init(|| std::env::var("NXGFX_GMEM_BACK_ALL").as_deref() != Ok("0"))
 }
 
+/// Pools larger than this are not given a buffer only for the table (`NXGFX_GMEM_BACK_MAX_MB`, default 1024; `0`: no
+/// limit): they stay out of it until a binding gives them one, as every pool did before OOT-FIX. Ocarina of Time's
+/// 2.4 GB heap pool (flags 0x24) grew to ~1.4 GB of mirrored granules as the game filled it and took the run to 31.4 GB
+/// of the 32 GB cap; left out, its pictures and draw counts were the same (`of-max1g`).
+fn back_max() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        match std::env::var("NXGFX_GMEM_BACK_MAX_MB").ok().and_then(|v| v.parse::<u64>().ok()) {
+            Some(0) => u64::MAX,
+            Some(v) => v << 20,
+            None => 1024 << 20,
+        }
+    })
+}
+
 /// Bytes of pools given a buffer per table (`NXGFX_GMEM_BACK_MB`, default 256).
 fn back_budget() -> u64 {
     static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
@@ -229,8 +244,28 @@ pub(crate) fn bindings(g: &Gpu, sub: &mut Sub) -> Option<Bindings> {
             if back_all() {
                 let mut budget = back_budget();
                 let mut made = 0u64;
+                let max = back_max();
+                static LEFT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+                if !LEFT.load(Ordering::Relaxed) {
+                    let big: Vec<String> = m
+                        .by_base
+                        .values()
+                        .filter(|p| p.buf.is_none() && p.size > max && p.placement != super::mem::Placement::CpuOnly)
+                        .map(|p| format!("{:#x}+{:#x}", p.base, p.size))
+                        .collect();
+                    if !big.is_empty() {
+                        LEFT.store(true, Ordering::Relaxed);
+                        crate::vklog!(
+                            "raw global memory: pools over NXGFX_GMEM_BACK_MAX_MB left out of the table until a binding gives them a buffer: {}",
+                            big.join(", ")
+                        );
+                    }
+                }
                 for p in m.by_base.values_mut().filter(|p| {
-                    p.buf.is_none() && p.size != 0 && p.placement != super::mem::Placement::CpuOnly
+                    p.buf.is_none()
+                        && p.size != 0
+                        && p.size <= max
+                        && p.placement != super::mem::Placement::CpuOnly
                 }) {
                     if budget == 0 {
                         break;
@@ -243,6 +278,17 @@ pub(crate) fn bindings(g: &Gpu, sub: &mut Sub) -> Option<Bindings> {
                     // a pool backed in granules gets memory only where the guest's memory is committed (the rest is
                     // zero, which a non-resident read returns on a device with strict residency), and where the CPU
                     // writes later (`table_only`, the pool sync): binding these whole was +4 GB of OoT's 32 GB cap
+                    if std::env::var("NXGFX_GMEM_BACK_LOG").is_ok() {
+                        let c: u64 = super::mem::committed(p.base, p.size).iter().map(|r| r.1).sum();
+                        crate::vklog!(
+                            "raw table pool {:#x}+{:#x} flags {:#x} committed {:#x} granules {}",
+                            p.base,
+                            p.size,
+                            p.flags,
+                            c,
+                            p.gran.is_some()
+                        );
+                    }
                     if p.gran.is_some() && strict(g) {
                         TABLE_ONLY.lock().unwrap().insert(p.identity);
                         for (a, n) in super::mem::committed(p.base, p.size) {
