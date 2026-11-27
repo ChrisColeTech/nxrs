@@ -66,6 +66,35 @@ older bytes). Write-back landings already update the snapshot (`land`).
   beach; screenshots compared with `build/WEB/W4`.
 - Native: only `cfg(target_os = "emscripten")` arms change; engine tests.
 
-## 5. Results
+## 5. Results (2026-11-26): built and unit-tested; not measured in the game (blocked)
 
-(filled in at the end)
+| Item | State | Evidence |
+|---|---|---|
+| Compare by use (buffers, textures, POOL_GEN per sync, word compare) | Built (`24061d1`) | `cargo test --release -p graphics`: 275 passed, 5 new (`compare_by_use_tests`, `merge_ranges_tests`); the web library builds and links (`web.ps1 -Crates os`, `nxrs-build ... --target web`) |
+| `NXGFX_WEB_USE_SYNC=0` | Built | the old whole-pool compare on the same build, for a same-scene before/after |
+| Chrome: per-frame sync and FPS before/after on the beach | **Not measured** | the game stops before the title menu on every run, also on the untouched base (below) |
+
+### 5.1 Blocker: the web build stalls after its 4th submission, base included
+
+Every Chrome run on this machine today (15 runs, `build/WEB/W4b/run*-page.log` in the main checkout) stops on the
+studio logo: `heartbeat: ... 4 submits, 3 presents` from ~20 s on, `warning: 6 s without a new image`, nothing
+after. W4's `m4-page.log` paused at the same point for 4.2 s (`slow frame 4: 4212 ms`) and then went on.
+
+- **Not this wave's change:** the same stall with `?env=NXGFX_WEB_USE_SYNC=0` (`run2-off`) and with a library
+  built from the untouched `055c41d` (`run15-base`). `055c41d` equals W4's tested tree in graphics, os, runtime and
+  web (`git diff 055c41d^2 055c41d` is empty there).
+- **Not:** synchronous replay (`NXGFX_ASYNC=0`, `run9`), a 64-worker pthread pool (`run10`), a warm OPFS cache
+  (`run14b`), the network (only `favicon.ico` 404s), WebGPU errors (none; the GPU worker drained the ring and
+  completed all 7 of its submissions: `H_DONE`=7, head == tail, `run6`).
+- **Where it waits** (wasm stacks named from `game.js.symbols`, `run8/stacks-named.txt`): the game's main thread is
+  in `nvnSyncWait -> queue::wait_fence -> queue::physical`, polling for a fence that never resolves; the loader thread
+  keeps reading RomFS slowly. Threads the engine starts lazily (the `nvn-parked` retry thread, the
+  `NXGFX_WAIT_DIAG` observer) never log anything, so whether the 4th submission is parked could not be read.
+- **Next step:** a log line at `run_stream_due`'s park and at `request_retry` (on the web) to see whether the 4th
+  submission parks at an event wait and whether the retry thread starts; then fix what it shows.
+
+### 5.2 What remains unproven
+
+The FPS gain, the per-frame sync time after the change, and the picture comparison with `build/WEB/W4` all need the
+game past the logo. Native is unaffected by construction (every behavioural line is behind
+`cfg(target_os = "emscripten")` or `web_by_use()`, which is false off the web); no native run was made.
