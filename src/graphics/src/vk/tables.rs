@@ -21,45 +21,6 @@ pub struct Tables {
     /// Only actual descriptor-content changes invalidate immutable pool snapshots.
     pool_generation: AtomicU64,
     pending_images: AtomicBool,
-    /// (SET-FAST) what a stage set's texture view of one ID depends on, read without a lock (`view_version`)
-    views: ViewVersions,
-}
-
-/// Versions of texture views by ID (SET-FAST): an image-level epoch (backing replaced, image released, aliases moved:
-/// any ID's view may change) and per-ID buckets (that ID registered again, made a placeholder, made a buffer texture).
-/// A registration of one ID leaves the other IDs' views as they were, so their lookups stay valid (the tables'
-/// `generation` moves at every registration and every pool descriptor write). IDs share a bucket by their low bits:
-/// a bump invalidates the bucket's other IDs too, never too few.
-pub struct ViewVersions {
-    image: AtomicU64,
-    ids: Box<[AtomicU64]>,
-}
-
-const VIEW_BUCKETS: usize = 1 << 16;
-
-impl Default for ViewVersions {
-    fn default() -> Self {
-        ViewVersions {
-            image: AtomicU64::new(1),
-            ids: (0..VIEW_BUCKETS).map(|_| AtomicU64::new(0)).collect(),
-        }
-    }
-}
-
-impl ViewVersions {
-    fn bucket(&self, id: i32) -> &AtomicU64 {
-        &self.ids[id as u32 as usize & (VIEW_BUCKETS - 1)]
-    }
-    fn bump_id(&self, id: i32) {
-        self.bucket(id).fetch_add(1, Ordering::Release);
-    }
-    fn bump_image(&self) {
-        self.image.fetch_add(1, Ordering::Release);
-    }
-    /// (image epoch, the ID's bucket) in one word (each kept to 32 bits: a wrap needs 2^32 changes in between)
-    fn of(&self, id: i32) -> u64 {
-        self.image.load(Ordering::Acquire) << 32 | (self.bucket(id).load(Ordering::Acquire) & 0xffff_ffff)
-    }
 }
 
 /// One immutable version. The table caches only the latest; recorded submissions retain older versions through
@@ -391,33 +352,7 @@ mod registration_boundary_tests {
     fn cpu_tables() -> Tables {
         Tables { pool: vk::DescriptorPool::null(), set: vk::DescriptorSet::null(), db: None,
             inner: Mutex::new(Inner::default()), generation: AtomicU64::new(1),
-            pool_generation: AtomicU64::new(1), pending_images: AtomicBool::new(false),
-            views: Default::default() }
-    }
-
-    /// (SET-FAST) A registration moves its own ID's view version (and the tables' generation), not another ID's; a
-    /// placeholder mark too; an image-level change moves every ID's.
-    #[test]
-    fn view_versions_move_per_id_and_for_image_changes() {
-        let tables = cpu_tables();
-        let (a, b) = (tables.view_version(5), tables.view_version(6));
-        let g = tables.generation();
-        tables.note_tex(5, 42, None);
-        assert_ne!(tables.view_version(5), a);
-        assert_eq!(tables.view_version(6), b);
-        assert_ne!(tables.generation(), g);
-        let a = tables.view_version(5);
-        tables.mark_placeholder(6);
-        assert_ne!(tables.view_version(6), b);
-        assert_eq!(tables.view_version(5), a);
-        let b = tables.view_version(6);
-        tables.invalidate_images();
-        assert_ne!(tables.view_version(5), a);
-        assert_ne!(tables.view_version(6), b);
-        // the same registration again changes nothing the views depend on
-        let a = tables.view_version(5);
-        tables.note_tex(5, 42, None);
-        assert_eq!(tables.view_version(5), a);
+            pool_generation: AtomicU64::new(1), pending_images: AtomicBool::new(false) }
     }
 
     /// A recycled snapshot of generation G gets exactly the writes made at G or later; once the log has dropped
@@ -534,7 +469,6 @@ impl Tables {
                 generation: AtomicU64::new(1),
                 pool_generation: AtomicU64::new(1),
                 pending_images: AtomicBool::new(false),
-                views: Default::default(),
             });
         }
         let sizes = [
@@ -579,7 +513,6 @@ impl Tables {
             generation: AtomicU64::new(1),
             pool_generation: AtomicU64::new(1),
             pending_images: AtomicBool::new(false),
-            views: Default::default(),
         })
     }
 
@@ -587,27 +520,7 @@ impl Tables {
         self.generation.load(Ordering::Acquire)
     }
 
-    /// (SET-FAST) The version of texture ID `id`'s stage-set view: it moves when that ID's registration changes or
-    /// any image-level change happens (`invalidate_images`), not when other IDs are registered.
-    pub fn view_version(&self, id: i32) -> u64 {
-        self.views.of(id)
-    }
-
-    /// Texture ID `id`'s view is to be looked up again (a lazy registration parked after `note_tex`).
-    pub fn touch_view(&self, id: i32) {
-        self.invalidate_id(id);
-    }
-
-    /// An image-level change (backing, release, aliases): every view may differ.
     pub fn invalidate_images(&self) {
-        self.views.bump_image();
-        self.generation.fetch_add(1, Ordering::Release);
-    }
-
-    /// A change of texture ID `id` alone (its registration): the generation moves as before; views of other IDs
-    /// stay valid.
-    fn invalidate_id(&self, id: i32) {
-        self.views.bump_id(id);
         self.generation.fetch_add(1, Ordering::Release);
     }
 
@@ -634,8 +547,7 @@ impl Tables {
     /// Called under inner after publishing descriptor bytes/sets, never for image ownership or materialization
     /// alone. Stage caches still use the broader registration/backing generation.
     fn descriptors_changed(&self) {
-        // (pool descriptors are not stage-set views: `write_image` moves its ID's view version itself)
-        self.generation.fetch_add(1, Ordering::Release);
+        self.invalidate_images();
         self.pool_generation.fetch_add(1, Ordering::Release);
     }
 
@@ -752,7 +664,7 @@ impl Tables {
         i.image_desc.remove(&id);
         i.buf_tex.insert(id, t);
         i.buf_pending.push(id);
-        self.invalidate_id(id);
+        self.invalidate_images();
     }
     /// The buffer textures over [lo, hi) are written again at the next submission: their memory pool went away or a
     /// new one took its place (their descriptors name the old buffer's device address: a write through one faulted).
@@ -1001,7 +913,7 @@ impl Tables {
         i.image_desc.remove(&id);
         i.tex_put(id, (serial, view));
         i.storage_tex.remove(&id);
-        self.invalidate_id(id);
+        self.invalidate_images();
     }
     /// The texture IDs registered with one of `serials`: (ID, serial, view).
     pub fn ids_of(
@@ -1069,7 +981,7 @@ impl Tables {
         let mut i = self.inner.lock().unwrap();
         i.bump_registration(id);
         i.placeholders.insert(id);
-        self.invalidate_id(id);
+        self.invalidate_images();
     }
     pub fn texture_slots(&self) -> Vec<(i32, u64, Option<view_t>)> {
         self.inner
@@ -1102,8 +1014,6 @@ impl Tables {
             return;
         }
         i.samp.insert(id, s);
-        // (SET-FAST) a stage set's sampler of this ID (`view_version(!id)`)
-        self.views.bump_id(!id);
         if self.db.is_some() {
             let Some(g) = super::Gpu::try_get() else {
                 return;
@@ -1152,7 +1062,6 @@ impl Tables {
             return;
         }
         i.image_desc.insert(id, (view, storage));
-        self.views.bump_id(id);
         if self.db.is_some() {
             let Some(g) = super::Gpu::try_get() else {
                 return;

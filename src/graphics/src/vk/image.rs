@@ -2531,8 +2531,6 @@ impl Gpu {
                 self.tables.write_image(&self.d, id, view, sview, false);
             }
             lazy::put(id, *t, v);
-            // (SET-FAST) a view looked up between the registration and `put` found nothing to make: looked up again
-            self.tables.touch_view(id);
             textrace::ev(t.serial, || format!("registered lazily at ID {id} (mem {:#x})", t.mem as u64));
             return;
         }
