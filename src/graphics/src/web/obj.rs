@@ -117,6 +117,8 @@ pub struct View {
     pub base_layer: u32,
     pub layers: u32,
     pub aspect: vk::ImageAspectFlags,
+    /// the worker view's swizzle (a narrower view of the same, WEB-W10c, keeps it)
+    pub swizzle: String,
 }
 
 pub struct ShaderModule {

@@ -104,9 +104,37 @@ pub fn continuation(p: &[u8]) -> Vec<u8> {
     q
 }
 
+/// The mips `[base, base + n)` of a sampled view narrowed to leave out the mips the pass renders into (`attached`,
+/// of the same image and layers). Vulkan lets a pass sample other mips of the image it renders into (a downsample
+/// chain renders mip k reading mip k - 1 through a view of every mip); WebGPU refuses a bound view whose range
+/// includes an attached mip. The narrowed range keeps the base (so the shader's mip numbering is unchanged) and stops
+/// below the first attached mip; when the base itself is attached, it starts after it. `None`: no attached mip is in
+/// the range (nothing to narrow) or none is left.
+pub fn unattached_mips(base: u32, n: u32, attached: &[u32]) -> Option<(u32, u32)> {
+    let end = base.saturating_add(n);
+    let first = attached.iter().copied().filter(|m| (base..end).contains(m)).min()?;
+    if first > base {
+        return Some((base, first - base));
+    }
+    let from = base + 1;
+    let stop = attached.iter().copied().filter(|&m| m >= from && m < end).min().unwrap_or(end);
+    (stop > from).then_some((from, stop - from))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_downsample_chain_binds_the_mips_below_the_one_it_renders() {
+        // MK8D's 480x272 rg11b10ufloat bloom chain: a view of mips 0..5 sampled while mip k is attached
+        assert_eq!(unattached_mips(0, 5, &[1]), Some((0, 1)));
+        assert_eq!(unattached_mips(0, 5, &[4]), Some((0, 4)));
+        assert_eq!(unattached_mips(0, 5, &[0]), Some((1, 4)), "the base attached: the mips above it");
+        assert_eq!(unattached_mips(0, 5, &[0, 3]), Some((1, 2)));
+        assert_eq!(unattached_mips(2, 1, &[2]), None, "nothing left");
+        assert_eq!(unattached_mips(0, 2, &[3]), None, "no attached mip in the view");
+    }
 
     /// A begin payload: colours (clear, store) and the depth/stencil modes.
     fn payload(cols: &[(u32, u32)], modes: [u32; 2]) -> Vec<u8> {

@@ -45,6 +45,8 @@ struct Cache {
     dummy_tex: HashMap<(&'static str, &'static str, bool), u32>,
     dummy_sampler: [u32; 2],
     nearest: HashMap<u32, u32>,
+    /// views narrowed to the mips a pass does not render into, by (view, base mip, mips) (WEB-W10c)
+    narrowed: HashMap<(u32, u32, u32), u32>,
 }
 
 /// A bind group layout entry (binding, visibility, then the kind's facts), hashed for the layout cache; JSON only
@@ -141,6 +143,14 @@ pub fn init() {
 /// A worker object is gone (a buffer, texture, view or sampler destroyed by the replay).
 pub fn release(id: u32) {
     obj::destroy(id);
+    let mut c = cache();
+    if c.narrowed.keys().any(|k| k.0 == id) {
+        let gone: Vec<_> = c.narrowed.iter().filter(|(k, _)| k.0 == id).map(|(k, &v)| (*k, v)).collect();
+        for (k, v) in gone {
+            c.narrowed.remove(&k);
+            obj::destroy(v);
+        }
+    }
 }
 
 pub fn forget_pipeline(h: u64) {
@@ -191,6 +201,8 @@ struct Pass {
     empty: bool,
     /// the depth/stencil attachment, for the pass's segments (WEB-W10c, `seg.rs`)
     ds: Option<DsAtt>,
+    /// the colour attachments' images, mips and layers (a bound view of one is named: WebGPU refuses it)
+    color_subs: Vec<(u64, u32, u32, u32)>,
     /// where the current segment's begin payload is in the submission, and the pass's own begin payload
     begin_at: usize,
     payload: Vec<u8>,
@@ -575,6 +587,11 @@ impl<'a> Rs<'a> {
             extent: (0, 0),
             empty: false,
             ds: None,
+            color_subs: colors
+                .iter()
+                .filter_map(|a| self.o.view.get(&a.view))
+                .map(|v| (v.image, v.base_mip, v.base_layer, v.layers))
+                .collect(),
             begin_at: 0,
             payload: Vec::new(),
             seg: Seg::default(),
@@ -677,6 +694,37 @@ impl<'a> Rs<'a> {
             q.0.extend_from_slice(&cont);
         });
         self.bound = Bound::default();
+    }
+
+    /// The worker view to bind for a sampled view: itself, or when the pass renders into some of its mips, a view of
+    /// the same image without them (`seg::unattached_mips`; WEB-W10c, MK8D's bloom chain renders mip k of a texture
+    /// it samples through a view of every mip).
+    fn unattached_view(&self, v: &obj::View) -> u32 {
+        let Some(p) = self.pass.as_ref() else { return v.id };
+        let layers = v.base_layer..v.base_layer.saturating_add(v.layers.max(1));
+        let attached: Vec<u32> = p
+            .color_subs
+            .iter()
+            .filter(|c| c.0 == v.image && c.2 < layers.end && layers.start < c.2.saturating_add(c.3.max(1)))
+            .map(|c| c.1)
+            .collect();
+        if attached.is_empty() {
+            return v.id;
+        }
+        let Some((base, n)) = seg::unattached_mips(v.base_mip, v.mips, &attached) else {
+            if attached.iter().any(|m| (v.base_mip..v.base_mip + v.mips.max(1)).contains(m)) {
+                red_once("a draw samples the mip it renders into (a feedback loop): WebGPU refuses it");
+            }
+            return v.id;
+        };
+        if let Some(&id) = cache().narrowed.get(&(v.id, base, n)) {
+            return id;
+        }
+        let Some(im) = self.o.img.get(&v.image) else { return v.id };
+        let nv = obj::View { base_mip: base, mips: n, ..v.clone() };
+        let id = obj::gpu_view(&nv, im, &v.swizzle);
+        cache().narrowed.insert((v.id, base, n), id);
+        id
     }
 
     /// A draw or clear of the pass sampling and writing these aspects of its depth/stencil attachment: a new segment
@@ -798,7 +846,7 @@ impl<'a> Rs<'a> {
                         self.hits = [self.hits[0] || h[0], self.hits[1] || h[1]];
                     }
                     let id = match view {
-                        Some(v) => v.id,
+                        Some(v) => self.unattached_view(v),
                         None => dummy_texture(dim, st, *multi),
                     };
                     entries.push(GrpEnt::View(b.binding, id));
