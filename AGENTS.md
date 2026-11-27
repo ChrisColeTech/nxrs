@@ -13,7 +13,8 @@ question is settled before the owner is asked, and the lead's acceptance list (r
 lead's own quiet-machine perf numbers, merge, commit, rebuild). Audits only when the owner asks for one. Agents commit only on their
 own wave branch; the lead merges into `gameplay-harness`; push when the owner asks. Two GPUs: `NXGFX_GPU=<index>`.
 Use the normal CLI builds, the real library and the configured build folders (owner-authorized); no throwaway temp
-builds or per-run copies of games.
+builds or per-run copies of games. Measure against the wave's baseline run and its diagnostics, never with
+switch-off "control" runs; the lead merges each wave when it reports and removes its worktree.
 The game-outcome roadmap is `docs/33-REFERENCE-DELTA-ROADMAP.md`; `docs/32-REMAINING-WORK-PLAN.md` is the ledger.
 
 **Gameplay harness (2026-11-24):** `scripts/play.py` runs one built title through a scenario from

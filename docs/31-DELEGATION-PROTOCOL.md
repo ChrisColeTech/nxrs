@@ -36,9 +36,9 @@ Owner, 2026-11-25: builds and games may run concurrently at full parallelism. Wa
 - **GPU:** two GPUs; the brief names one (`--env NXGFX_GPU=<n>` on every `play.py` run). Two waves running games
   at once get different GPUs (the lead checks `run.json` of recent runs; 2026-11-26 every brief said GPU 1 and four
   games ran on it while GPU 0 sat idle).
-- **Perf numbers:** agents measure freely, and their numbers are indicative (the machine is shared). **The accepted
-  numbers are the lead's**, taken at acceptance (§7) with nothing else running. An agent's report says what else was
-  running during its runs if it knows.
+- **Perf numbers:** agents' numbers are indicative (the machine is shared); an agent's report says what else was
+  running during its runs if it knows. The lead's quiet-machine numbers are a regression check after merge, never a
+  merge gate (2026-11-27: eight finished waves sat unmerged waiting for a quiet machine that never came).
 
 ## 3. The brief (lead to agent)
 
@@ -69,6 +69,11 @@ Every brief has these parts, in this order. A brief missing one is not sent.
 - **Verify in the game** with `scripts/play.py`: read every sheet yourself, and read `report.md`'s anomaly table,
   "Near each screenshot" and route checks. An **OFF-ROUTE** run's FPS is invalid. Use `--faults` when chasing a
   one-frame fault. A game claim needs screenshots over the declared stretch, not an FPS number alone.
+- **Measure against the baseline, not against switch-off runs** (owner, 2026-11-27). One baseline run at the start
+  of the wave with the diagnostics on (frame time, replay ms, the stage splits); after the work, a normal run compared
+  with that baseline and its diagnostics. The diagnostics show what a change did; no run with the new switch turned
+  off as a "control", per change or per wave. A change's switch exists to turn it off if it breaks something. A
+  change that moves nothing visible (FPS, frame time, the stage it targeted) is taken out, not kept.
 - **Diagnostics are steps, not milestones.** The work ends with a source correction and its game result, or a
   reported blocker.
 - **Device loss or reset:** stop the workload by PID, keep the log; it becomes the wave's top-priority bug. Never
@@ -118,12 +123,15 @@ The lead merges a wave only when every line holds:
 - [ ] Slips, if any, are checked in the diff.
 - [ ] The lead re-ran the tests of every changed crate in the wave's worktree: all pass.
 - [ ] The lead read the wave's final sheets and `report.md`s (anomalies, route checks), and any fault captures.
-- [ ] Accepted perf numbers: the lead ran the wave's scenarios with nothing else running, and records those.
-      Titles already at their target (owner: work the broken titles, don't re-verify passing ones) get one
-      regression run each here, by the lead; agents spend their runs only on the titles below target.
+- [ ] Perf: the report's numbers against the wave's baseline are recorded in the ledger. The lead's quiet-machine
+      run comes after the merge when the machine is free; it never holds a merge. Titles already at their target
+      (owner: work the broken titles, don't re-verify passing ones) get one regression run each, by the lead;
+      agents spend their runs only on the titles below target.
 - [ ] Merge into `gameplay-harness` (`git merge --no-ff <wave>`), message ending with the attribution line; the
       ledger row updated and committed; the main `dist` rebuilt and the wave's titles relinked from it.
-- [ ] The worktree removed (junction first) when the wave is done.
+- [ ] The lead merges each wave as soon as it reports and these lines hold, never batching finished waves; the
+      worktree is removed (junction first) right after its merge. A next wave branches from the merged
+      `gameplay-harness`, not from an unmerged wave branch.
 - [ ] Push only when the owner asks, and to the feature branch (`git push origin gameplay-harness`), where CI builds
       and tests. `main` changes only by merging a green feature branch (a pull request) when the owner says so; a push
       to `main` is what builds and publishes the release (owner, 2026-11-26).
