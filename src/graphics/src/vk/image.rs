@@ -939,6 +939,11 @@ pub struct Images {
     /// (`img_spans_on`) every image of `by_addr` as (storage start, end, serial), by start: the CPU-write check of a
     /// submission with many dirty ranges walks it beside the sorted ranges instead of looking every image up
     spans: Vec<(u64, u64, u64)>,
+    /// (MKW-SYNC, `img_span_edits_on`) the changes to `by_addr` since `spans` was made or brought up to date, in order:
+    /// (storage start, end, serial, added); a removal names the start the serial was added at
+    span_edits: Vec<(u64, u64, u64, bool)>,
+    /// `spans` was made (by a walk over `by_addr`) and `span_edits` holds every change since
+    spans_built: bool,
     /// (`img_due_on`) images that may be due for initialization or upload: made, CPU-written, or found due and not
     /// prepared yet; and the images of sparse virtual pools (checked through their pages at every submission). A
     /// submission's walk looks at these instead of every image (stale serials are skipped)
@@ -1297,6 +1302,73 @@ fn img_spans_on() -> bool {
     *ON.get_or_init(|| std::env::var("NXGFX_IMG_SPANS").as_deref() != Ok("0"))
 }
 
+/// (MKW-SYNC) `NXGFX_IMG_SPAN_EDITS` (default on; 0: the span list is made again from `by_addr` whenever it changed):
+/// the span list is brought up to date with the changes since it was made (`spans_apply`). MKW made images and
+/// released them every frame, and remaking the list (a walk over every image, each looked up) was ~1.2 ms of the
+/// replay thread a frame.
+fn img_span_edits_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_IMG_SPAN_EDITS").as_deref() != Ok("0"))
+}
+
+impl Images {
+    /// `by_addr` changed: serial `s` with storage [lo, hi) added, or removed (`added` false; `lo` the start it was
+    /// added at). Kept for `spans_apply` while the span list stands.
+    fn span_edit(&mut self, lo: u64, hi: u64, s: u64, added: bool) {
+        if self.spans_built && img_span_edits_on() {
+            self.span_edits.push((lo, hi, s, added));
+            if self.span_edits.len() > 1 << 16 {
+                // long unused: made again at its next use
+                self.span_edits.clear();
+                self.spans_built = false;
+            }
+        }
+    }
+}
+
+/// The span list (by start) with `edits` applied in order: an addition goes in at its start; a removal takes out every
+/// entry of its serial at its start (and an addition of it earlier in `edits`). An entry a removal does not find (its
+/// start not the one it was added at) stays: the check then looks at an image no longer there (`by_serial` misses it)
+/// and does nothing; an image is never left out.
+fn spans_apply(spans: &mut Vec<(u64, u64, u64)>, edits: &[(u64, u64, u64, bool)]) {
+    const DEAD: u64 = u64::MAX;
+    let mut adds: Vec<(u64, u64, u64)> = Vec::new();
+    let mut dead = false;
+    for &(lo, hi, s, added) in edits {
+        if added {
+            adds.push((lo, hi, s));
+            continue;
+        }
+        adds.retain(|e| e.2 != s);
+        let i0 = spans.partition_point(|e| e.0 < lo);
+        for e in spans[i0..].iter_mut().take_while(|e| e.0 == lo) {
+            if e.2 == s {
+                e.2 = DEAD;
+                dead = true;
+            }
+        }
+    }
+    if dead {
+        spans.retain(|e| e.2 != DEAD);
+    }
+    if adds.is_empty() {
+        return;
+    }
+    adds.sort_unstable();
+    let old = std::mem::take(spans);
+    spans.reserve(old.len() + adds.len());
+    let (mut i, mut j) = (0, 0);
+    while i < old.len() || j < adds.len() {
+        if j == adds.len() || (i < old.len() && old[i].0 <= adds[j].0) {
+            spans.push(old[i]);
+            i += 1;
+        } else {
+            spans.push(adds[j]);
+            j += 1;
+        }
+    }
+}
+
 /// The serials of `spans` (by start) that `dirty` (sorted, not overlapping) overlaps: for each span the first range
 /// ending past its start, as the old walk's binary search found it, here a pointer that only moves forward.
 fn spans_hit(spans: &[(u64, u64, u64)], dirty: &[(u64, u64)]) -> Vec<u64> {
@@ -1331,6 +1403,32 @@ mod spans_tests {
         let want: Vec<u64> = spans.iter().filter(|s| old(s.0, s.1)).map(|s| s.2).collect();
         assert_eq!(super::spans_hit(&spans, &dirty), want);
         assert!(super::spans_hit(&spans, &[]).is_empty());
+    }
+
+    /// (MKW-SYNC) The list brought up to date by the changes holds what a list made again holds: additions at their
+    /// start, removals gone, a serial removed then added again present once, one added then removed in the same batch
+    /// absent; it stays ordered by start.
+    #[test]
+    fn edits_bring_the_list_to_what_a_rebuild_makes() {
+        let mut spans = vec![(0x1000, 0x2000, 1), (0x1000, 0x1100, 2), (0x3000, 0x4000, 3), (0x5000, 0x9000, 4)];
+        let edits = [
+            (0x3000, 0x4000, 3, false),
+            (0x0800, 0x0900, 6, true),
+            (0x6000, 0x6100, 7, true),
+            (0x6000, 0x6100, 7, false),
+            (0x1000, 0x1100, 2, false),
+            (0x2000, 0x2400, 2, true),
+            (0x4000, 0x4400, 8, true),
+        ];
+        super::spans_apply(&mut spans, &edits);
+        let mut want = vec![(0x0800, 0x0900, 6), (0x1000, 0x2000, 1), (0x2000, 0x2400, 2), (0x4000, 0x4400, 8), (0x5000, 0x9000, 4)];
+        want.sort_unstable();
+        let mut got = spans.clone();
+        got.sort_unstable();
+        assert_eq!(got, want);
+        assert!(spans.windows(2).all(|w| w[0].0 <= w[1].0), "by start: {spans:x?}");
+        let dirty = [(0x2100, 0x10), (0x4100, 0x10)];
+        assert_eq!(super::spans_hit(&spans, &dirty), vec![2, 8], "the walk finds the added images");
     }
 }
 
@@ -1933,6 +2031,8 @@ impl Gpu {
                 v.retain(|s| *s != old);
             }
             imgs.addr_gen += 1;
+            let lo = im.tex.mem as u64;
+            imgs.span_edit(lo, lo + im.tex.l.size, old, false);
             if forward_on() {
                 imgs.forward.insert(old, t.serial);
             }
@@ -1976,6 +2076,9 @@ impl Gpu {
             if !crate::nvn::vpool::is_sparse(t.mem as u64) {
                 imgs.by_addr.entry(t.mem as u64).or_default().push(t.serial);
                 imgs.max_size = imgs.max_size.max(t.l.size);
+                // (the span the list's rebuild takes: the image's own storage, as `by_serial` will hold it)
+                let lo = im.tex.mem as u64;
+                imgs.span_edit(lo, lo + im.tex.l.size, t.serial, true);
             }
         }
         imgs.forward.remove(&t.serial);
@@ -2862,6 +2965,8 @@ impl Gpu {
             v.retain(|s| *s != serial);
         }
         imgs.addr_gen += 1;
+        let lo = im.tex.mem as u64;
+        imgs.span_edit(lo, lo + im.tex.l.size, serial, false);
         // an image shared with other texture objects: an alias only drops its views; an owner hands the image and its
         // memory to the first of its aliases
         let aliases: Vec<u64> = imgs
@@ -4038,7 +4143,20 @@ impl Gpu {
             if dirty_sorted && per_range >= 64 && img_spans_on() {
                 // (MKW-SETS) the textures' spans, kept while `by_addr` stands, walked beside the sorted ranges: no image
                 // looked up (the walk below was ~2 ms of the replay thread a frame in MKW's race, ~10 submissions)
-                if imgs.spans_gen != imgs.addr_gen || imgs.spans.is_empty() && !imgs.by_addr.is_empty() {
+                let edits = imgs.span_edits.len();
+                if imgs.spans_gen != imgs.addr_gen
+                    && imgs.spans_built
+                    && img_span_edits_on()
+                    && edits <= imgs.spans.len() / 2 + 4096
+                {
+                    // (MKW-SYNC) the list brought up to date with the changes since it was made
+                    let e = std::mem::take(&mut imgs.span_edits);
+                    spans_apply(&mut imgs.spans, &e);
+                    imgs.spans_gen = imgs.addr_gen;
+                }
+                if imgs.spans_gen != imgs.addr_gen || !imgs.spans_built && !imgs.by_addr.is_empty() {
+                    imgs.span_edits.clear();
+                    imgs.spans_built = true;
                     let mut v: Vec<(u64, u64, u64)> = Vec::with_capacity(imgs.by_serial.len());
                     for ss in imgs.by_addr.values() {
                         for &sv in ss {
