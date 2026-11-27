@@ -2979,9 +2979,19 @@ pub fn present_wait(ticket: u64) {
 /// land first (at most `LAND_FIRST_MAX`). MKW-HEAVY: a sync of the next frame's early work (the second queue's submit,
 /// replayed while the frame's fence was landing) held the pool lock 0.9 ms while the landing of the frame's last
 /// submissions waited for it, and the game waited for that fence: the frame's tail. Returns the ns waited.
+///
+/// OOT-FIX: only while a game thread waits for a fence (`GuestWait`: nvnSyncWait, the window's acquire); `always`: at
+/// every sync, as before. With nobody waiting the wait bought nothing and stood on the replay thread: Ocarina of Time
+/// (the game waiting 0.00 ms a frame) spent 0.0-4.6 ms a frame of its replay thread here (mean ~1.6 ms over its walk),
+/// waiting for a completion thread busy re-arming landed write-backs.
 pub fn land_first(g: &Gpu) -> u64 {
-    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    if !*ON.get_or_init(|| std::env::var("NXGFX_LAND_FIRST").as_deref() != Ok("0")) || !on_replay_thread() {
+    static MODE: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    let mode = *MODE.get_or_init(|| match std::env::var("NXGFX_LAND_FIRST").as_deref() {
+        Ok("0") => 0,
+        Ok("always") => 2,
+        _ => 1,
+    });
+    if mode == 0 || !on_replay_thread() || (mode == 1 && GUEST_WAITS.load(Ordering::Acquire) == 0) {
         return 0;
     }
     let Ok(gpu) = (unsafe { g.dev().get_semaphore_counter_value(g.q.timeline) }) else {
@@ -2995,6 +3005,24 @@ pub fn land_first(g: &Gpu) -> u64 {
     let ns = t.elapsed().as_nanos() as u64;
     chain_trace::note("land_first", gpu, ns / 1000);
     ns
+}
+
+/// Game threads waiting for a fence right now (`GuestWait`).
+static GUEST_WAITS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
+/// A game thread's fence wait (nvnSyncWait, the window's acquire) while it lives: `land_first` lets the completion
+/// thread land first only then.
+pub struct GuestWait;
+impl GuestWait {
+    pub fn new() -> GuestWait {
+        GUEST_WAITS.fetch_add(1, Ordering::AcqRel);
+        GuestWait
+    }
+}
+impl Drop for GuestWait {
+    fn drop(&mut self) {
+        GUEST_WAITS.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 /// The longest a sync waits for landings (`land_first`): 1.5 ms.
