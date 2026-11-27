@@ -5,10 +5,13 @@
 //! runtime maps each there when the game loads it.
 
 pub const FIRST_BASE: u64 = 0x70_0000_0000;
-/// The web build's first base (docs/35): 8 GiB, so the compact guest window around the modules (stack and heap block,
-/// alias region, the SDK's maps below; the kernel region above) lies inside wasm64's 16 GiB linear memory and a guest
-/// address is a linear-memory address.
-pub const WEB_FIRST_BASE: u64 = 0x2_0000_0000;
+/// The web build's first base (docs/35): 7.25 GiB, so the compact guest window around the modules (stack and heap
+/// block, alias region, the SDK's maps below; the kernel region above) lies inside wasm64's 16 GiB linear memory and a
+/// guest address is a linear-memory address. The window's bottom (the modules less 7 GiB: slack, 6 GiB alias, stack
+/// and heap) is then 256 MiB, right above the runtime heap's start (`-sINITIAL_MEMORY=256MB`): at 8 GiB the 768 MiB
+/// between the heap's break and the window were claimed and never used, and Chrome on Windows commits every byte the
+/// linear memory grows over (WEB-WMEM).
+pub const WEB_FIRST_BASE: u64 = 0x1_D000_0000;
 pub const ALIGN: u64 = 0x20_0000;
 pub const ADDRESS_LIMIT: u64 = 1 << 39;
 
