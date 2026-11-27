@@ -78,6 +78,7 @@ pub fn request_line(line: &str) -> Option<(String, String)> {
 pub fn reason(status: u16) -> &'static str {
     match status {
         200 => "OK",
+        204 => "No Content",
         206 => "Partial Content",
         301 => "Moved Permanently",
         400 => "Bad Request",

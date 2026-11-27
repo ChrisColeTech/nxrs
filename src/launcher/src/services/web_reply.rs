@@ -1,6 +1,7 @@
 //! One connection of the web server: requests read until the browser closes it (keep-alive), each
 //! answered with the cross-origin isolation headers, `Accept-Ranges`, an exact `206` and
-//! `Content-Range` for a range, `416` past the end. GET and HEAD only.
+//! `Content-Range` for a range, `416` past the end. GET and HEAD serve files; a POST (the page's
+//! development log) is read and answered `204`.
 
 use super::web_serve::{Mount, Mounts};
 use crate::constants::web as c;
@@ -17,6 +18,8 @@ struct Request {
     path: String,
     range: Option<String>,
     close: bool,
+    /// the body's length (a POST)
+    length: u64,
 }
 
 /// Reads one request head; None at the connection's end or on a malformed head.
@@ -40,6 +43,7 @@ fn read_head(r: &mut BufReader<TcpStream>) -> Option<Request> {
                 path,
                 range: None,
                 close,
+                length: 0,
             });
             continue;
         };
@@ -51,6 +55,7 @@ fn read_head(r: &mut BufReader<TcpStream>) -> Option<Request> {
             match k.as_str() {
                 "range" => rq.range = Some(v.to_string()),
                 "connection" => rq.close = v.eq_ignore_ascii_case("close"),
+                "content-length" => rq.length = v.parse().ok()?,
                 _ => {}
             }
         }
@@ -96,6 +101,10 @@ fn answer(out: &mut TcpStream, req: &Request, mounts: &Mounts) -> std::io::Resul
         h.push(("Content-Type", "text/plain".into()));
         head(status, &h, 0)
     };
+    // the page's development posts (the engine log, presented images: dev_server.py keeps them): taken, not kept
+    if req.method == "POST" {
+        return out.write_all(plain(204, vec![]).as_bytes());
+    }
     if req.method != "GET" && req.method != "HEAD" {
         let allow = vec![("Allow", "GET, HEAD".to_string())];
         return out.write_all(plain(405, allow).as_bytes());
@@ -155,7 +164,9 @@ pub fn serve(stream: TcpStream, mounts: &Mounts) {
     };
     let mut r = BufReader::with_capacity(c::MAX_HEAD, stream);
     while let Some(req) = read_head(&mut r) {
-        if answer(&mut out, &req, mounts).is_err() || req.close {
+        // a body is read past, so the next request starts where it should
+        let body = std::io::copy(&mut (&mut r).take(req.length), &mut std::io::sink());
+        if body.ok() != Some(req.length) || answer(&mut out, &req, mounts).is_err() || req.close {
             return;
         }
     }

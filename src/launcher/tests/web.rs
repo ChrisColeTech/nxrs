@@ -23,6 +23,11 @@ fn web_folder(dir: &str) -> String {
     write(&format!("{root}/index.html"), b"<!doctype html>page");
     write(&format!("{root}/game.wasm"), b"\0asm1234");
     write(&format!("{root}/Kart_data/romfs/a b.bin"), b"0123456789");
+    // the GPU's shader files: not in data.json, fetched by URL on first use
+    write(
+        &format!("{root}/Kart_data/shaders/spv/0aF3.spv"),
+        b"\x03\x02\x23\x07spv",
+    );
     write(&format!("{dir}/nxrs-web/secret.txt"), b"outside");
     root
 }
@@ -119,7 +124,17 @@ fn the_server_answers_with_isolation_and_exact_ranges() {
         );
     }
     assert_eq!(ask(&mut c, "GET /other/index.html", "").status, 404);
-    assert_eq!(ask(&mut c, &format!("POST {base}"), "").status, 405);
+    assert_eq!(ask(&mut c, &format!("PUT {base}"), "").status, 405);
+    // the page's log posts are taken (204) and their bodies read past: the connection goes on
+    // (`ask` ends the head with CRLF, which here ends the 7-byte body "hello\r\n" instead)
+    let log = ask(
+        &mut c,
+        &format!("POST {base}log"),
+        "Content-Length: 7\r\n\r\nhello",
+    );
+    assert_eq!(log.status, 204);
+    let spv = ask(&mut c, &format!("GET {base}data/shaders/spv/0aF3.spv"), "");
+    assert_eq!((spv.status, &spv.body[4..]), (200, &b"spv"[..]));
     let bare = ask(&mut c, "GET /kart", "");
     assert!(bare.status == 301 && bare.head.contains("Location: /kart/"));
 }
