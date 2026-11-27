@@ -58,6 +58,7 @@ NXGFX_HEADLESS	test	set: no window (headless rendering; the OS layer skips the f
 NXGFX_HOST_MB	switch	memory, NXGFX_HOST_MB (0 = no cap); over it the allocation is refused and its caller's fallback applies	src/graphics/src/vk/mod.rs
 NXGFX_IMAGE_NOFLAG	switch	no storage use and the writes were lost. With `NXGFX_IMAGE_NOFLAG=1` (or the ini / `--image_noflag=1`; off by	src/graphics/src/lib.rs, src/graphics/src/vk/image.rs, src/graphics/tests/gpu.rs
 NXGFX_IMG_FORMAT	switch	`0` leaves storage image views in the texture's format instead of the format the shader declares	src/graphics/src/vk/exec.rs
+NXGFX_IMG_SPANS	switch	MKW-SETS: a submission's CPU-write check over many dirty ranges walks a kept list of the images' storage spans beside the sorted ranges (made again only when an image comes or goes) instead of looking every image up. Default on; `0`: the per-image lookup walk, as before	src/graphics/src/vk/image.rs
 NXGFX_LATE_OUTPUTS	switch	a vertex shader's outputs written once at the end (`spvfix`; NXGFX_LATE_OUTPUTS=0: as translated)	src/graphics/src/vk/shader.rs
 NXGFX_LAZY_ALL_FRAME	switch	Images a frame makes for shaders that index the texture pool, at most (with 32 MB of guest bytes); default `0`: every waiting one at once (a cap measured slower on Jamboree's opening)	src/graphics/src/vk/image.rs
 NXGFX_LAZY_CPU_CHECK	switch	`0` skips the check that lazily written-back pages were not written by the CPU meanwhile	src/graphics/src/vk/mem.rs
@@ -94,6 +95,7 @@ NXGFX_POOL_STICKY	switch	`NXGFX_POOL_STICKY=0`: a pool found written after 60 qu
 NXGFX_POOL_SPARSE	switch	`NXGFX_POOL_SPARSE=0` backs every pool whole.	src/graphics/src/vk/mem.rs
 NXGFX_POOL_WALKER	switch	`NXGFX_POOL_WALKER=0`: no pool walker thread (MKW-RECORD step 1); the present's sync walks every pool itself	src/graphics/src/vk/mem.rs
 NXGFX_PRESENT	switch	the swap chain present mode: `fifo`, `mailbox` or `immediate`	src/graphics/src/vk/present.rs
+NXGFX_PRESENT_LEAN	switch	MKW-SETS: a present of a GPU-drawn picture (its image GPU-owned, not sparse, nothing due) makes no pool sync and no image walk of its own; the next submission makes them before any GPU work reads guest memory. Default on; `0`: every present syncs and walks, as before	src/graphics/src/vk/queue.rs
 NXGFX_PREWARM_BUDGET_MB	switch	The pipeline prewarm's private-memory budget in MB (default a sixteenth of the machine's memory, 2048-8192); the prewarm stops there or at a count cap. A VkPipelineCache is kept on disk.	src/graphics/src/vk/pipe.rs, src/graphics/tests/shaders_lane_c.rs
 NXGFX_PREWARM_MAX	switch	pipelines built ahead at most (default 50,000)	src/graphics/src/vk/pipe.rs, src/graphics/tests/shaders_lane_c.rs
 NXGFX_PREWARM_THREADS	switch	threads building pipelines ahead (default 4)	src/os/src/nvn/mod.rs

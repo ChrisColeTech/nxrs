@@ -1230,6 +1230,13 @@ pub fn tex_due() -> u64 {
     TEX_DUE.load(std::sync::atomic::Ordering::Acquire)
 }
 
+/// Whether a presented texture's image is a picture the GPU drew and nothing else is due for it: no CPU-written
+/// content to take (not sparse, no upload or initialization pending). Its present needs no pool sync of its own
+/// (`queue::present_lean`).
+pub fn presented_gpu_drawn(im: &Image) -> bool {
+    im.gpu_owned && im.sparse.is_none() && !im.needs_init && !im.needs_upload
+}
+
 /// `NXGFX_IMG_SPANS` (default on; `0` the old walk): a submission's CPU-write check over many dirty ranges walks the
 /// images' kept spans (`Images::spans`) beside the ranges instead of looking every image up.
 fn img_spans_on() -> bool {

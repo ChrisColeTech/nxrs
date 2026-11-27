@@ -2671,6 +2671,15 @@ fn present_locked(
     wait_diag::mark(1, "present: new submission", [_qserial, 0]);
     let mut sub = new_sub(g, st);
     wait_diag::mark(1, "present: prepare pools/textures", [_qserial, sub.serial]);
+    // a GPU-drawn picture presented: nothing of guest memory reaches this submission but its image (prepared by
+    // `record_present` itself), so the pool sync and the image walk are left to the next submission
+    let lean = present_lean() && {
+        let imgs = g.images.lock().unwrap();
+        imgs.by_serial.get(&t.serial).is_some_and(|im| super::image::presented_gpu_drawn(im))
+    };
+    if lean {
+        super::perf::inc(super::perf::C::PresentsLean);
+    } else {
     super::mem::SYNC_BY[1].fetch_add(1, Ordering::Relaxed);
     super::perf::timed(super::perf::C::PrepNs, || {
         let dirty = super::perf::timed(super::perf::C::PoolSyncNs, || {
@@ -2678,10 +2687,20 @@ fn present_locked(
         });
         g.image_begin_submit(&mut sub, &dirty);
     });
+    }
     wait_diag::phase("present: record");
     super::present::record_present(g, &mut sub, t, origin_ll, crop);
     super::shot::record_sink(g, &mut sub, t, crop, origin_ll);
     submit_sub(g, sub)
+}
+
+/// `NXGFX_PRESENT_LEAN` (default on; `0`: every present syncs the pools and walks the images, as before): a present
+/// of a GPU-drawn picture (`image::presented_gpu_drawn`) leaves the pool sync and the image walk to the next
+/// submission, which makes them before any GPU work could read guest memory (MKW-SETS: the present's sync and walk
+/// were ~14 % of the replay thread's busy time in MKW's race).
+fn present_lean() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_PRESENT_LEAN").as_deref() != Ok("0"))
 }
 
 pub fn present_wait(ticket: u64) {

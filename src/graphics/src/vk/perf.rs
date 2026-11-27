@@ -99,6 +99,8 @@ pub enum C {
     SetsSeeded,
     /// seeds found for a module but not usable (older than the pools, not valid, a twin view)
     SeedsStale,
+    /// presents of a GPU-drawn picture made without a pool sync of their own (`queue::present_lean`)
+    PresentsLean,
     N,
 }
 
@@ -171,6 +173,7 @@ const NAMES: [&str; C::N as usize] = [
     "parked_chained",
     "sets_seeded",
     "seeds_stale",
+    "presents_lean",
 ];
 
 static COUNT: [AtomicU64; C::N as usize] = [const { AtomicU64::new(0) }; C::N as usize];
@@ -542,14 +545,15 @@ pub fn frame(frame: u64) {
             d(C::WaitFinishNs, &p) as f64 / 1e6 / df
         );
         crate::vklog!(
-            "pipelining up to frame {frame}, per frame: the game's threads waited for room in the replay queue {:.2} ms (ops {:.2}, presents {:.2}) and for fence publication {:.2} ms; the replay thread busy {:.2} ms, idle {:.2} ms; {:.1} parked streams run on at once without a pool sync of their own (NXGFX_PARK_CHAIN)",
+            "pipelining up to frame {frame}, per frame: the game's threads waited for room in the replay queue {:.2} ms (ops {:.2}, presents {:.2}) and for fence publication {:.2} ms; the replay thread busy {:.2} ms, idle {:.2} ms; {:.1} parked streams run on at once without a pool sync of their own (NXGFX_PARK_CHAIN); {:.2} presents without one (NXGFX_PRESENT_LEAN)",
             (d(C::WaitRoomNs, &p) + d(C::WaitRoomPresentNs, &p)) as f64 / 1e6 / df,
             d(C::WaitRoomNs, &p) as f64 / 1e6 / df,
             d(C::WaitRoomPresentNs, &p) as f64 / 1e6 / df,
             d(C::WaitPublishNs, &p) as f64 / 1e6 / df,
             d(C::AqBusyNs, &p) as f64 / 1e6 / df,
             d(C::AqIdleNs, &p) as f64 / 1e6 / df,
-            d(C::Chained, &p) as f64 / df
+            d(C::Chained, &p) as f64 / df,
+            d(C::PresentsLean, &p) as f64 / df
         );
     }
     crate::vklog!(
