@@ -28,11 +28,16 @@ const MAX_LINES: u32 = 600;
 
 /// Watched ranges (page aligned): (start, end).
 static RANGES: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
+/// The ranges as asked (byte exact): only writes inside them are logged and counted; a write elsewhere on a watched
+/// page is let through silently (a table that shares its first page with other, busier data).
+static EXACT: Mutex<Vec<(u64, u64)>> = Mutex::new(Vec::new());
 static LINES: AtomicU32 = AtomicU32::new(0);
 
 thread_local! {
     /// The page to guard again after this thread's single step.
     static REARM: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// The address a logged write went to: its 16 bytes are logged after the single step (the value written).
+    static WROTE: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
 
 fn watched(a: u64) -> bool {
@@ -40,6 +45,60 @@ fn watched(a: u64) -> bool {
         .lock()
         .map(|r| r.iter().any(|&(s, e)| a >= s && a < e))
         .unwrap_or(false)
+}
+
+fn exact(a: u64) -> bool {
+    EXACT
+        .lock()
+        .map(|r| r.iter().any(|&(s, e)| a >= s && a < e))
+        .unwrap_or(false)
+}
+
+/// The most lines a watch logs: `NXOS_WWATCH_LINES` (default 600).
+fn max_lines() -> u32 {
+    std::env::var("NXOS_WWATCH_LINES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(MAX_LINES)
+}
+
+/// Who wrote: the host thread's name and, when it runs a guest thread, the guest link register and the return
+/// addresses of its frame chain (lock-free: read from the thread's own guest state).
+fn writer() -> String {
+    let name = std::thread::current()
+        .name()
+        .map(str::to_string)
+        .unwrap_or_else(|| "?".into());
+    let Some(c) = nxrt::kernel::current_cpu() else {
+        return format!("host thread {name} (no guest thread)");
+    };
+    let c = unsafe { &*c };
+    let mut s = format!("thread {name} lr {:#x} frames", c.x[30]);
+    let mut fp = c.x[29];
+    for _ in 0..10 {
+        if fp == 0 || fp & 7 != 0 || !nxrt::mem::readable(fp, 16) {
+            break;
+        }
+        let ret = unsafe { *((fp + 8) as *const u64) };
+        s.push_str(&format!(" {ret:#x}"));
+        fp = unsafe { *(fp as *const u64) };
+    }
+    s
+}
+
+/// After the write's single step: the 16 bytes at the address it wrote.
+fn log_value() {
+    let a = WROTE.with(|w| w.replace(0));
+    if a == 0 {
+        return;
+    }
+    let a = a & !15;
+    if nxrt::mem::readable(a, 16) {
+        let w: Vec<String> = (0..4u64)
+            .map(|i| format!("{:08x}", unsafe { *((a + 4 * i) as *const u32) }))
+            .collect();
+        crate::log!("wwatch:   {a:#x} now {}", w.join(" "));
+    }
 }
 
 // the web never arms a page (`arm` says so), so these only keep the shared code whole there
@@ -71,14 +130,19 @@ unsafe fn hook(f: &mut nxrt::linux::Fault) -> bool {
         if !watched(a) {
             return false;
         }
-        let n = LINES.fetch_add(1, Ordering::Relaxed);
-        if n < MAX_LINES {
-            crate::log!(
-                "wwatch: write to {a:#x} by {}",
-                nxrt::fault::describe_host(f.rip())
-            );
-        } else if n == MAX_LINES {
-            crate::log!("wwatch: {MAX_LINES} writes logged: the watch stops");
+        let max = max_lines();
+        if exact(a) {
+            let n = LINES.fetch_add(1, Ordering::Relaxed);
+            if n < max {
+                crate::log!(
+                    "wwatch: write to {a:#x} by {}; {}",
+                    nxrt::fault::describe_host(f.rip()),
+                    writer()
+                );
+                WROTE.with(|w| w.set(a));
+            } else if n == max {
+                crate::log!("wwatch: {max} writes logged: the watch stops");
+            }
         }
         let page = a & !(PAGE - 1);
         nxrt::mem::protect(page, PAGE, nxrt::mem::Prot::ReadWrite);
@@ -88,7 +152,7 @@ unsafe fn hook(f: &mut nxrt::linux::Fault) -> bool {
             crate::log!(
                 "wwatch: page {page:#x} is no longer watched (no single step on this host)"
             );
-        } else if LINES.load(Ordering::Relaxed) <= MAX_LINES {
+        } else if LINES.load(Ordering::Relaxed) <= max {
             REARM.with(|r| r.set(page));
             f.set_trap(true); // trap after this instruction
         }
@@ -100,6 +164,7 @@ unsafe fn hook(f: &mut nxrt::linux::Fault) -> bool {
             return false;
         }
         f.set_trap(false);
+        log_value();
         guard(p);
         return true;
     }
@@ -140,18 +205,21 @@ unsafe extern "system" fn veh(info: *mut EXCEPTION_POINTERS) -> i32 {
         if !watched(a) {
             return CONTINUE_SEARCH;
         }
-        if rec.ExceptionInformation[0] == 1 {
+        let max = max_lines();
+        if rec.ExceptionInformation[0] == 1 && exact(a) {
             let n = LINES.fetch_add(1, Ordering::Relaxed);
-            if n < MAX_LINES {
+            if n < max {
                 crate::log!(
-                    "wwatch: write to {a:#x} by {}",
-                    nxrt::fault::describe_host(ctx.Rip)
+                    "wwatch: write to {a:#x} by {}; {}",
+                    nxrt::fault::describe_host(ctx.Rip),
+                    writer()
                 );
-            } else if n == MAX_LINES {
-                crate::log!("wwatch: {MAX_LINES} writes logged: the watch stops");
+                WROTE.with(|w| w.set(a));
+            } else if n == max {
+                crate::log!("wwatch: {max} writes logged: the watch stops");
             }
         }
-        if LINES.load(Ordering::Relaxed) <= MAX_LINES {
+        if LINES.load(Ordering::Relaxed) <= max {
             REARM.with(|r| r.set(a & !(PAGE - 1)));
             ctx.EFlags |= 0x100; // trap after this instruction
         }
@@ -162,6 +230,7 @@ unsafe extern "system" fn veh(info: *mut EXCEPTION_POINTERS) -> i32 {
         if p == 0 {
             return CONTINUE_SEARCH;
         }
+        log_value();
         guard(p);
         return CONTINUE_EXECUTION;
     }
@@ -184,11 +253,13 @@ pub fn arm(lo: u64, hi: u64) -> String {
     });
     #[cfg(target_os = "linux")]
     HANDLER.call_once(|| nxrt::linux::add_fault_hook(hook));
+    let (from, to) = (lo, hi.max(lo + 1));
     let (lo, hi) = (lo & !(PAGE - 1), (hi + PAGE - 1) & !(PAGE - 1));
     if hi <= lo || hi - lo > 64 << 20 {
         return "wwatch: a range of 1 page to 64 MB\n".into();
     }
     LINES.store(0, Ordering::Relaxed);
+    EXACT.lock().unwrap().push((from, to));
     RANGES.lock().unwrap().push((lo, hi));
     let mut n = 0;
     let mut p = lo;
@@ -196,12 +267,14 @@ pub fn arm(lo: u64, hi: u64) -> String {
         n += guard(p) as u32;
         p += PAGE;
     }
-    crate::log!("wwatch: {lo:#x}..{hi:#x} armed ({n} committed pages); each write goes in the log, up to {MAX_LINES}");
-    format!("armed {n} pages: each write goes in the log, up to {MAX_LINES}\n")
+    let max = max_lines();
+    crate::log!("wwatch: {from:#x}..{to:#x} armed ({n} committed pages); each write goes in the log, up to {max}");
+    format!("armed {n} pages: each write in {from:#x}..{to:#x} goes in the log, up to {max}\n")
 }
 
 /// Stops every watch: the pages lose their guard.
 pub fn disarm() -> String {
+    EXACT.lock().unwrap().clear();
     let ranges = std::mem::take(&mut *RANGES.lock().unwrap());
     for (lo, hi) in ranges {
         let mut p = lo;
@@ -272,5 +345,16 @@ mod tests {
             after >= before + 2,
             "two writes logged: {before} -> {after}"
         );
+        // only the asked bytes are logged: a write elsewhere on the watched page goes through uncounted
+        super::arm(base + 0x100, base + 0x110);
+        let before = super::LINES.load(super::Ordering::Relaxed);
+        unsafe {
+            std::ptr::write_volatile(base as *mut u64, 1);
+            std::ptr::write_volatile((base + 0x108) as *mut u64, 2);
+        }
+        let after = super::LINES.load(super::Ordering::Relaxed);
+        super::disarm();
+        assert_eq!(unsafe { std::ptr::read_volatile(base as *const u64) }, 1);
+        assert_eq!(after, before + 1, "one write inside the range");
     }
 }
