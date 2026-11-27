@@ -686,6 +686,31 @@ fn page_hashes(lo: u64, hi: u64) -> Vec<u64> {
     v
 }
 
+/// `ranges` (address, bytes) in address order with overlapping and touching ones merged: the same bytes, each once.
+fn merge_ranges(ranges: &[(u64, u64)]) -> Vec<(u64, u64)> {
+    let mut v: Vec<(u64, u64)> = ranges.iter().copied().filter(|r| r.1 > 0).collect();
+    v.sort_unstable();
+    let mut out: Vec<(u64, u64)> = Vec::with_capacity(v.len());
+    for (a, n) in v {
+        match out.last_mut() {
+            Some(l) if a <= l.0 + l.1 => l.1 = l.1.max(a + n - l.0),
+            _ => out.push((a, n)),
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod merge_tests {
+    /// Out-of-order, overlapping, nested, touching and empty ranges come out sorted, disjoint, covering the same bytes.
+    #[test]
+    fn ranges_are_sorted_and_merged() {
+        let r = [(0x5000, 0x1000), (0x1000, 0x2000), (0x2000, 0x800), (0x3000, 0x10), (0x9000, 0), (0x4000, 0x1000)];
+        assert_eq!(super::merge_ranges(&r), vec![(0x1000, 0x2010), (0x4000, 0x2000)]);
+        assert_eq!(super::merge_ranges(&[]), vec![]);
+    }
+}
+
 /// Whether a write to [a, a + n) changed a page of the texture's storage [lo, hi) since its hashes were taken (the
 /// changed pages' hashes are updated).
 fn pages_changed(hashes: &mut [u64], lo: u64, hi: u64, a: u64, n: u64) -> bool {
@@ -3810,6 +3835,16 @@ impl Gpu {
         }
         let t_all = std::time::Instant::now();
         if !dirty.is_empty() && !imgs.by_addr.is_empty() {
+            // the pool sync hands each pool's ranges in pool order, not address order: in order and merged here, the
+            // lookups below take the sorted paths (unsorted, every texture hit filtered every range: OoT's syncs spent
+            // ~6 % of the replay thread here, OOT-DESC). Merged ranges are the same bytes, each counted once.
+            let merged;
+            let dirty: &[(u64, u64)] = if dirty.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0) {
+                dirty
+            } else {
+                merged = merge_ranges(dirty);
+                &merged
+            };
             let max = imgs.max_size;
             let mut hit = Vec::new();
             let dirty_sorted = dirty.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0);

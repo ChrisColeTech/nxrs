@@ -1152,10 +1152,11 @@ pub(crate) mod wb_bufs {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::sync::Mutex;
 
-    /// Bytes kept at most, and buffers of one size at most; a buffer that would pass either is freed. (A size-0
-    /// storage buffer's write-back reaches to its pool's end: Ocarina of Time has two 32 MB ones in flight, which filled
-    /// a 64 MB cap and left every small buffer to be made again.)
-    const KEEP: u64 = 256 << 20;
+    /// Bytes kept at most, and buffers of one size at most; a buffer that would pass either is freed. (Ocarina of Time
+    /// writes back ranges of 32-64 MB a few times a frame, readback and baseline each: in the house 4-6 buffers of 64 MB
+    /// are in flight at once. A 64 MB cap left every small buffer to be made again (od-wb1-oot), a 256 MB one still made
+    /// ~one 64 MB buffer a frame at the peaks (od-v4-oot).)
+    const KEEP: u64 = 1 << 30;
     const PER_SIZE: usize = 64;
     /// The smallest buffer made.
     const MIN: u64 = 64 << 10;
