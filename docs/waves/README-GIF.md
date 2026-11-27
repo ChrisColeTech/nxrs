@@ -61,12 +61,55 @@ priority (its builds and the game inherit it).
    (`palettegen stats_mode=full`), `paletteuse dither=bayer:bayer_scale=4` (sierra2_4a gave 10.7 MB), `-loop 0`.
    `tools\sheet.py` makes contact sheets of any source at given times (how the cut points were chosen).
 
+## Remake v2 (2026-11-27): slower, every click magnified
+
+Owner feedback on v1: "it's a little too fast, and it doesn't highlight or zoom what's being clicked". v2 reuses
+the same raw captures (nothing was recorded again) and is composed by `scripts/readme/hero_gif.py` (in git; the
+v1 `compose.py` stays in `build\README-GIF\tools`).
+
+- `docs/images/readme/hero.gif`: 960x540, 12 fps, 511 frames = 42.6 s, loops forever, 9.47 MB (9.0 MiB).
+- Segments (output seconds): library, MK8D's card magnified and selected 2.8; Game > Build (the menu opens inside
+  the magnifier) 3.3; the Build dialog, Native 3.8; the native build 2.8 (~40x, output scrolling at 6 fps, then
+  "Build complete" held); Game > Build 3.3; the Build dialog (Native disabled), Web 3.8; the web build 2.8
+  (~110x); the card's Play 2.7; the Play dialog, Native 3.4; the game window: logo, swoosh, title screen held
+  3.2; the card's Play 2.7; the Play dialog, Web 3.3; Chrome: loading list, logo, title screen held 4.5.
+- Click emphasis: a 1.8x magnifier grows out of the control (cubic ease in/out, 0.45 s) with a lime (#b5f36b)
+  border, a lime ring with a soft glow on the control's rectangle, a pointer that glides in and a pulse (flash and
+  two expanding rings) at the exact point, then the magnifier shrinks back. Each dialog is shown unmagnified for
+  ~1.2 s before the magnifier opens; each click is held ~1.5 s before and ~0.7 s after.
+- Control rectangles (1920x1080 capture space; the dialog buttons contain inp.py's recorded click points, the
+  rest measured on the full-size frames): card (1204,186)-(1467,416), its Play (1204,430)-(1412,474), Game
+  (124,8)-(204,52), Build item (128,162)-(524,206), Build dialog Native (1056,697)-(1176,744) and Web
+  (1189,697)-(1309,744), Play dialog Native (1032,686)-(1150,730) and Web (1162,686)-(1282,730).
+- Why a magnifier and not a full-frame camera zoom: tried first; a frame in which every pixel moves costs ~220 KB
+  (LZW on the card art, any dither or palette size, gifski lossy too), and the 13 camera moves came to 27 MB. The
+  magnifier changes only its own rectangle. Other size levers used: video holds step the source at 2 fps (`q`),
+  build scrolls at 6 fps, the dialogs appear in one frame, no full-frame dimming.
+
+To remake it:
+
+```powershell
+python scripts/readme/hero_gif.py build/README-GIF --out docs/images/readme/hero.gif --sheet build/README-GIF/hero-sheet.png
+```
+
+Needs Pillow and ffmpeg. It extracts the full-size launcher frames the magnified beats use from
+`raw\launcher.mkv` into `build\README-GIF\hf` on the first run (about 400 frames, a few minutes), renders the
+frames into `build\README-GIF\compose2\f`, and encodes with one palette (`palettegen stats_mode=full`,
+`paletteuse dither=bayer:bayer_scale=4`). The timeline is the `BEATS` table at the top of the script: per beat a
+source (H launcher 1920, L launcher 960, G game, C Chrome), a map from beat seconds to capture times, the
+magnifier, ring and click times and the control rectangles. Keep the result under 10 MB: every frame that
+changes the whole picture (a cut, a dialog appearing or closing, a video frame) costs ~200-280 KB.
+
 ## Verified
 
 Read: contact sheets of the launcher capture at every event, of the game capture (black, logo, title fade,
 "Press L+R to start" from ~13 s), of the screencast (loading list 0-11 s, logo 12-16 s, title screen from ~24 s),
 and nine frames of the final GIF (library; Build dialog; native build output; web build; Play dialog; game title;
-launcher "Opened in Chrome"; web title screen). Builds: native `@result ok` (96 s), web `@result ok` (271 s).
+launcher "Opened in Chrome"; web title screen). v2: the contact sheet of every half second
+(`build\README-GIF\hero-sheet.png`), full-size rendered frames at every click (card, Game, Build, Native, Web,
+Play, Play dialog Native and Web), the build output, both title screens, and frames decoded back from the GIF
+(menu with Build ringed, the Build dialog magnified on Native): text legible, rings and pulses on the controls.
+One white flash frame of the game's intro (q-stepped onto it) was found on the sheet and mapped around. Builds: native `@result ok` (96 s), web `@result ok` (271 s).
 `%LOCALAPPDATA%\nxrs\library.json` unchanged (14:56); no `_data\save` created; no capture, Chrome or game process
 left running.
 
