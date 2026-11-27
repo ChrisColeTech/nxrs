@@ -2,3 +2,6 @@
 /dist
 /build
 __pycache__/
+
+# agent worktrees (Claude Code)
+/.claude/worktrees/
