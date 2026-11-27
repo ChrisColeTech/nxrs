@@ -175,10 +175,17 @@ onmessage = async (e) => {
 
 // ---------- the ring ----------
 
+// one channel for every yield (WEB-W8: a new MessageChannel per present was garbage with finalizers)
+const yieldChannel = new MessageChannel();
+let yieldWake = null;
+yieldChannel.port1.onmessage = () => {
+  const r = yieldWake;
+  yieldWake = null;
+  if (r) r();
+};
 const yieldTask = () => new Promise((r) => {
-  const c = new MessageChannel();
-  c.port1.onmessage = () => r();
-  c.port2.postMessage(0);
+  yieldWake = r;
+  yieldChannel.port2.postMessage(0);
 });
 
 async function loop() {
