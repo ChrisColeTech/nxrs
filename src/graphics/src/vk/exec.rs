@@ -9132,7 +9132,11 @@ mod chain_tests {
         assert!(!chainable(0, None, geq, 3, true), "nothing passes it");
         assert!(chainable(4, None, geq, 3, true), "the value passes it, no CPU signal since the sync");
         assert!(!chainable(4, None, geq, 3, false), "the value passes it after a CPU signal: a new sync first");
-        assert!(chainable(7, Some((w, 7)), event_wait::EQUAL, 7, false), "EQUAL by a recorded signal");
+        assert!(chainable(6, Some((w, 7)), event_wait::EQUAL, 7, false), "EQUAL by a recorded signal");
+        assert!(
+            !chainable(7, Some((w, 7)), event_wait::EQUAL, 7, false),
+            "the value passes it already after a CPU signal: not chained, even with a recorded signal"
+        );
     }
 }
 
