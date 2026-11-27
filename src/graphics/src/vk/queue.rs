@@ -2523,21 +2523,29 @@ pub fn retry_parked(g: &'static Gpu) {
 
 fn retry_locked(g: &'static Gpu, st: &mut SubmitState) {
     take_recycled(g, st);
+    let passes = |p: &Parked| {
+        p.wait_receipt
+            .is_none_or(|r| g.q.receipts.lock().unwrap().contains_key(&r))
+            && (p.stream.is_empty() || exec::wait_passes(g, &p.stream))
+    };
     loop {
         let ready: Vec<u64> = st
             .parked
             .iter()
-            .filter(|(_, p)| {
-                p.wait_receipt
-                    .is_none_or(|r| g.q.receipts.lock().unwrap().contains_key(&r))
-                    && (p.stream.is_empty() || exec::wait_passes(g, &p.stream))
-            })
+            .filter(|(_, p)| passes(p))
             .map(|(k, _)| *k)
             .collect();
         if ready.is_empty() {
             return;
         }
         for q in ready {
+            // (OOT-COMBO) running an earlier ready queue may have run this one on already (`chain_parked`, MKW-PIPE's
+            // park chain, inside `run_stream_due`) and possibly parked it again at a later wait: take it only while
+            // it is still parked and its wait still passes (Ocarina of Time's forest load: the replay thread
+            // panicked on the missing entry and the game hung)
+            if !st.parked.get(&q).is_some_and(passes) {
+                continue;
+            }
             let mut p = st.parked.remove(&q).unwrap();
             if chain_trace::on() {
                 chain_trace::note("resume", exec::wait_of(&p.stream).0, q);
