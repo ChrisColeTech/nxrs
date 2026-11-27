@@ -60,6 +60,17 @@ pub fn request(key: ShaderKey, ctl: Vec<u8>, code: Vec<u8>) {
         return;
     }
     st.missed_at.insert(key, Instant::now());
+    // the web: the translator is a native executable a browser cannot start; the build carries the run-time shaders
+    // a native build of the title translated (`nxrs-build ... --target web --shaders-from <its data folder>`)
+    if cfg!(target_os = "emscripten") {
+        st.failed.insert(key);
+        let _ = (ctl, code);
+        crate::log::red(&format!(
+            "live shader {}: not in the web build's library, and a browser cannot translate a shader (run the title natively once, then build for the web with --shaders-from <its data folder>)",
+            key_hex(&key)
+        ));
+        return;
+    }
     st.q.push_back((key, ctl, code));
     if !st.started {
         st.started = true;
