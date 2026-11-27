@@ -980,10 +980,11 @@ fn decode_parts_of(im: &DecodeIn, storage: &[u8]) -> Vec<Part> {
 /// taking the lock again costs more than they do.
 const UNLOCKED_MIN: u64 = 64 << 10;
 
-/// `NXGFX_UPLOAD_UNLOCKED=0`: a lane's upload from storage is decoded under the images' lock, as before (MKW-SPIKE).
+/// `NXGFX_UPLOAD_UNLOCKED=1`: a lane's upload from storage is decoded with the images' lock released (MKW-SPIKE).
+/// Opt-in: the one MKW run that reset the GPU (TDR, exit 72) had it on, cause not found (lead, 2026-11-27).
 pub fn upload_unlocked_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
-    *ON.get_or_init(|| std::env::var("NXGFX_UPLOAD_UNLOCKED").as_deref() != Ok("0"))
+    *ON.get_or_init(|| std::env::var("NXGFX_UPLOAD_UNLOCKED").as_deref() == Ok("1"))
 }
 
 /// The storage of the textures among `serials` due an upload (not of sparse pools), decoded on several threads; only
