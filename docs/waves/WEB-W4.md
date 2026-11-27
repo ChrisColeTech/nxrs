@@ -125,7 +125,7 @@ Native after the wave (relinked into the library build): `build/play/20261126-19
 normal exit, 59.6 FPS mean (5% low 58.1) in [120, 250] s, no red lines, sheet read (title, swim, beach, pier).
 Side by side, the web run is Day 1 from no save (the page has no saves yet) while the native run uses the title's
 save copy, so the menus and lighting differ by state (web: water-and-sunglasses menu, dusk beach; native: menu with
-the character, daylight). The same scene in both has not been compared: unproven (5.5).
+the character, daylight). The same scene in both has not been compared: unproven (needs one save in both, or a fresh save natively).
 
 ### 5.4 Remaining red lines in the gameplay run
 
