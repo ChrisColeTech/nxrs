@@ -105,6 +105,27 @@ What each lever gives OoT, as far as these runs show (no switch-off controls, pe
    house 7.1 GB (`base3`) -> 4.9 GB (`base4`) -> **1.1 GB** (`v1d`).
 4. `NXGFX_SHOT_SPAN=<from>-<to>` (diagnostic, `shot.rs`): every present between two log-clock seconds is a screenshot.
 
+### Replay-thread profile, final build (house standing, console)
+
+`052624-cb-fin-oot`, host sampler over [700, 715] s, replay thread + lane 1, stacks, PDB (`build/prof/housefin.txt`,
+15,901 samples). Shares of the replay thread's wall time (inclusive):
+
+| what | share |
+|---|---|
+| pool sync and image prep (`mem::begin_submit_ex`), all callers | **30.0 %** |
+| - of it waiting for the pool lock (`g.mem`, held by the completion thread's landings and the walker) | 9.1 % |
+| - prehash waiting for the hash threads (`upskip::prehash`) | 5.9 % |
+| - write-watch take (`watch::take_one`) / watch lock | 2.7 / 1.6 % |
+| translation (`exec::record`: `bind_sets` 13.4 = `stage_set` 11.0 + `patch_set` 4.1; `tex_view` 3.5) | 20.0 % |
+| presents (`present_now`; 8.5 % of it is their own pool sync) | 13.5 % |
+| waiting at lane joins (`par::run` condvar) | **4.5 %** (OOT-REPLAY: 12.3 %) |
+| idle in the replay queue | 10.9 % |
+| other contended locks (images / tables at `tex_view`, `note_gpu_write_version`, `target_image`) | ~3.5 % |
+
+The next cut is the pool sync, and inside it the pool lock the completion thread holds while it lands write-backs (the
+pools line: "completion: pool lock 1.49 ms, whole write-backs landed 2.57"; "re-arming 7.76 ms before the pool
+lock" a frame on the completion thread) plus the prehash wait. Not changed in this wave (time; section 6).
+
 ## 3. Fault A (displaced props, 676-679 s of `oot-house`)
 
 Every present over log-clock [672, 684] s captured (`NXGFX_SHOT_SPAN`; the harness's shots there are at 674-686 s),

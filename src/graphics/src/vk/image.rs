@@ -3123,6 +3123,13 @@ impl Gpu {
                 }
             }
         }
+        // the images' backing changed: views looked up before are of the old images (as `upgrade_storage`). The pool
+        // descriptor writes above move only the tables' generation; views keyed per texture ID (`NXGFX_VIEW_ID_KEY`)
+        // and stage sets follow `view_epoch` / `set_generation` (OOT-COMBO: Ocarina of Time's one-frame white frames)
+        if !done.is_empty() {
+            self.tables.invalidate_images();
+            sub.memo_views.clear();
+        }
         drop(imgs);
         for im in gone {
             self.destroy_released(im);
