@@ -293,6 +293,11 @@ function run(op, p, len) {
       const id = u32(p);
       const o = objs.get(id);
       if (o && o.destroy) o.destroy();
+      const oi = info.get(id);
+      if (oi && oi.stage) oi.stage.destroy();
+      const sh = shadows.get(id);
+      if (sh) for (const s of sh.values()) s.destroy();
+      shadows.delete(id);
       objs.delete(id);
       info.delete(id);
       attViews.delete(id);
@@ -388,6 +393,19 @@ function createTexture(j) {
   };
   if (j.dim === '1d') d.size = [j.w, 1, 1];
   device.pushErrorScope('validation');
+  if (j.format.startsWith('bc') && j.dim === '2d' && (j.w % 4 || j.h % 4)) {
+    // WEB-W10b: a BC texture whose size is not whole blocks (Vulkan allows it, WebGPU does not). The BC data goes into
+    // a staging texture rounded up to whole blocks; what is sampled is a texture of the decoded format at the logical
+    // size, so coordinates, sizes and mips stay Vulkan's. Each copy into it is decoded by the GPU (bcDecode).
+    j.sfmt = standinFormat(j.format);
+    j.stage = device.createTexture(Object.assign({}, d, {
+      size: [Math.ceil(j.w / 4) * 4, Math.ceil(j.h / 4) * 4, j.d],
+      usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING,
+    }));
+    d.format = j.sfmt;
+    d.usage = GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT;
+    d.viewFormats = twinFormat(j.sfmt) ? [twinFormat(j.sfmt)] : [];
+  }
   objs.set(j.id, device.createTexture(d));
   device.popErrorScope().then((er) => {
     if (er) once('tex' + er.message.slice(0, 60), `texture ${j.id} ${j.format} ${j.w}x${j.h}x${j.d}: ${er.message.slice(0, 500)}`);
@@ -397,9 +415,22 @@ function createTexture(j) {
 }
 
 function createView(j) {
-  const t = objs.get(j.tex);
+  let t = objs.get(j.tex);
   if (!t) return false;
+  const ti = info.get(j.tex);
   const d = { format: j.format, dimension: j.dim, baseMipLevel: j.baseMip, mipLevelCount: j.mips, aspect: j.aspect };
+  if (ti && ti.stage) {
+    // a view of a BC stand-in (createTexture): the decoded format
+    d.format = standinFormat(j.format);
+  } else if (ti && j.aspect === 'all' && j.format !== ti.format && !(ti.viewFormats || []).includes(j.format)) {
+    // WEB-W10b: a view in another format of the same texel size (Vulkan MUTABLE_FORMAT: rgb10a2unorm of rgba8unorm)
+    // WebGPU cannot view: a shadow texture of that format, its bits kept the same as the texture's (shadowOf)
+    const s = shadowOf(j.tex, j.format);
+    if (s) {
+      t = s;
+      j.real = s;
+    }
+  }
   // a one-aspect view of a depth-stencil texture takes that aspect's format (WebGPU resolves it when left out)
   if (j.aspect !== 'all') delete d.format;
   if (j.dim !== '3d') {
@@ -427,7 +458,7 @@ function attView(viewId) {
   if ((v.dim === '2d') && v.mips === 1) return objs.get(viewId);
   let a = attViews.get(viewId);
   if (!a) {
-    const t = objs.get(v.tex);
+    const t = v.real || objs.get(v.tex);
     const ti = info.get(v.tex);
     const d = { format: v.format, dimension: '2d', baseMipLevel: v.baseMip, mipLevelCount: 1, aspect: v.aspect };
     if (ti.dim !== '3d') {
@@ -505,7 +536,7 @@ function submit(p0, len) {
           const tex = u32(a), mip = u32(a + 4), x = u32(a + 8), y = u32(a + 12), z = u32(a + 16);
           const w = u32(a + 20), h = u32(a + 24), d = u32(a + 28), asp = u32(a + 32);
           const src = u64(a + 36), bpr = u32(a + 44), rpi = u32(a + 48);
-          const t = objs.get(tex);
+          const t = copyTex(tex);
           if (!t) break;
           const ti = info.get(tex);
           const fi = blockOf(ti.format);
@@ -514,13 +545,14 @@ function submit(p0, len) {
           flush();
           device.queue.writeTexture({ texture: t, mipLevel: mip, origin: { x, y, z }, aspect: ASPECT[asp] },
             bytes(src, size), { offset: 0, bytesPerRow: bpr, rowsPerImage: rpi }, blockExtent(fi, w, h, d));
+          if (texWritten(enc, tex, mip, x, y, z, w, h, d)) used = true;
           break;
         }
         case OP.PASS_BEGIN: {
           const nc = u32(a);
           let q = a + 4;
           const colors = [];
-          passInfo = { formats: [], depth: null, samples: 1 };
+          passInfo = { formats: [], depth: null, samples: 1, written: [] };
           for (let i = 0; i < nc; i++) {
             const view = u32(q), resolve = u32(q + 4), clear = u32(q + 8), store = u32(q + 12), int = u32(q + 16);
             const cv = [q + 20, q + 24, q + 28, q + 32];
@@ -528,6 +560,8 @@ function submit(p0, len) {
             if (!view) { colors.push(null); passInfo.formats.push(null); continue; }
             const vi = info.get(view);
             const c = { view: attView(view), loadOp: clear ? 'clear' : 'load', storeOp: store ? 'store' : 'discard' };
+            if (store) passInfo.written.push(view);
+            if (resolve) passInfo.written.push(resolve);
             if (vi && info.get(vi.tex)?.dim === '3d') c.depthSlice = vi.baseLayer;
             if (clear) c.clearValue = int ? cv.map((x) => (int === 1 ? i32(x) : u32(x))) : cv.map(f32);
             if (resolve) c.resolveTarget = attView(resolve);
@@ -560,7 +594,11 @@ function submit(p0, len) {
           break;
         }
         case OP.PASS_END:
-          if (pass) pass.end();
+          if (pass) {
+            pass.end();
+            // what the pass drew into a texture with format shadows reaches them (and a shadow's, the texture)
+            for (const v of passInfo.written) viewWritten(enc, v);
+          }
           pass = null;
           break;
         case OP.COMPUTE_BEGIN:
@@ -643,7 +681,7 @@ function submit(p0, len) {
           const buf = objs.get(u32(a)), off = u64(a + 4), bpr = u32(a + 12), rpi = u32(a + 16);
           const tex = u32(a + 20), mip = u32(a + 24), x = u32(a + 28), y = u32(a + 32), z = u32(a + 36);
           const w = u32(a + 40), h = u32(a + 44), d = u32(a + 48), asp = u32(a + 52);
-          const t = objs.get(tex);
+          const t = copyTex(tex);
           if (!buf || !t) break;
           const fi = blockOf(info.get(tex).format);
           const rows = Math.ceil(h / fi.bh);
@@ -663,6 +701,7 @@ function submit(p0, len) {
           }
           enc.copyBufferToTexture({ buffer: src, offset: so, bytesPerRow: sbpr, rowsPerImage: src === buf ? rpi : rows },
             { texture: t, mipLevel: mip, origin: { x, y, z }, aspect: ASPECT[asp] }, blockExtent(fi, w, h, d));
+          texWritten(enc, tex, mip, x, y, z, w, h, d);
           used = true;
           break;
         }
@@ -670,7 +709,7 @@ function submit(p0, len) {
           const tex = u32(a), mip = u32(a + 4), x = u32(a + 8), y = u32(a + 12), z = u32(a + 16);
           const w = u32(a + 20), h = u32(a + 24), d = u32(a + 28), asp = u32(a + 32);
           const buf = objs.get(u32(a + 36)), off = u64(a + 40), bpr = u32(a + 48), rpi = u32(a + 52);
-          const t = objs.get(tex);
+          const t = copyTex(tex);
           if (!buf || !t) break;
           const fi = blockOf(info.get(tex).format);
           const rows = Math.ceil(h / fi.bh);
@@ -698,12 +737,13 @@ function submit(p0, len) {
           break;
         }
         case OP.COPY_T2T: {
-          const s = objs.get(u32(a)), d = objs.get(u32(a + 20));
+          const s = copyTex(u32(a)), d = copyTex(u32(a + 20));
           if (!s || !d) break;
           enc.copyTextureToTexture(
             { texture: s, mipLevel: u32(a + 4), origin: { x: u32(a + 8), y: u32(a + 12), z: u32(a + 16) }, aspect: ASPECT[u32(a + 52)] },
             { texture: d, mipLevel: u32(a + 24), origin: { x: u32(a + 28), y: u32(a + 32), z: u32(a + 36) }, aspect: ASPECT[u32(a + 52)] },
             blockExtent(blockOf(info.get(u32(a)).format), u32(a + 40), u32(a + 44), u32(a + 48)));
+          texWritten(enc, u32(a + 20), u32(a + 24), u32(a + 28), u32(a + 32), u32(a + 36), u32(a + 40), u32(a + 44), u32(a + 48));
           used = true;
           break;
         }
@@ -726,10 +766,13 @@ function submit(p0, len) {
         }
         case OP.BLIT:
           blit(enc, a);
+          // (a BC stand-in was drawn or cleared itself: its staging bytes are not decoded over it)
+          if (!info.get(u32(a + 28))?.stage) texWritten(enc, u32(a + 28), u32(a + 32), 0, 0, u32(a + 36), 1 << 30, 1 << 30, 1);
           used = true;
           break;
         case OP.CLEAR_TEX:
           clearTex(enc, a);
+          if (!info.get(u32(a))?.stage) texWritten(enc, u32(a), u32(a + 4), 0, 0, u32(a + 8), 1 << 30, 1 << 30, 1);
           used = true;
           break;
         case OP.CLEAR_RECT:
@@ -750,7 +793,10 @@ function submit(p0, len) {
       if (op === OP.PASS_BEGIN) pass = null;
     }
   }
-  if (pass) pass.end();
+  if (pass) {
+    pass.end();
+    for (const v of passInfo.written) viewWritten(enc, v);
+  }
   if (cpass) cpass.end();
   // read-backs: copies into mappable buffers in the same submission, mapped once the GPU is done
   const maps = [];
@@ -839,6 +885,153 @@ const isInt = (f) => /[us]int$/.test(f);
 // a copy of a block-compressed mip smaller than a block covers the whole block (WebGPU copies whole blocks)
 const blockExtent = (fi, w, h, d) => ({ width: Math.ceil(w / fi.bw) * fi.bw, height: Math.ceil(h / fi.bh) * fi.bh, depthOrArrayLayers: d });
 const UNFILTERABLE = new Set(['r32float', 'rg32float', 'rgba32float', 'depth32float', 'depth16unorm', 'depth24plus', 'depth32float-stencil8']);
+
+// ---------- WEB-W10b: BC stand-ins and format shadows ----------
+
+// the decoded format a BC stand-in has (createTexture): 8-bit RGBA for BC1/2/3/7, 16-bit float for BC4/5 (their
+// interpolated values are finer than 8 bits; snorm is not renderable) and BC6H
+function standinFormat(f) {
+  if (!f.startsWith('bc')) return f;
+  if (/^bc[45]-r-/.test(f)) return 'r16float';
+  if (/^bc5-/.test(f)) return 'rg16float';
+  if (/^bc6h-/.test(f)) return 'rgba16float';
+  return f.endsWith('-srgb') ? 'rgba8unorm-srgb' : 'rgba8unorm';
+}
+function twinFormat(f) {
+  if (f.endsWith('-srgb')) return f.slice(0, -5);
+  return f === 'rgba8unorm' || f === 'bgra8unorm' ? f + '-srgb' : null;
+}
+// the texture a copy reads or writes: a stand-in's BC staging texture (its BC bytes), else the texture
+const copyTex = (id) => info.get(id)?.stage || objs.get(id);
+
+// 32-bit formats whose texels the reinterpreting pass carries as bits: [WGSL sample type, texel -> u32 b, u32 b ->
+// texel]. sRGB formats go through their linear twin (the bits); formats not listed get no shadow.
+const BITS = {
+  rgba8unorm: ['f32', 'pack4x8unorm(v)', 'unpack4x8unorm(b)'],
+  bgra8unorm: ['f32', 'pack4x8unorm(v.bgra)', 'unpack4x8unorm(b).bgra'],
+  rgb10a2unorm: ['f32', 'dot(vec4u(round(clamp(v, vec4f(0.0), vec4f(1.0)) * vec4f(1023.0, 1023.0, 1023.0, 3.0))), vec4u(1u, 1024u, 1048576u, 1073741824u))',
+    'vec4f(vec4u(b & 1023u, (b >> 10u) & 1023u, (b >> 20u) & 1023u, b >> 30u)) / vec4f(1023.0, 1023.0, 1023.0, 3.0)'],
+  r32float: ['f32', 'bitcast<u32>(v.x)', 'vec4f(bitcast<f32>(b), 0.0, 0.0, 1.0)'],
+  rg16float: ['f32', 'pack2x16float(v.xy)', 'vec4f(unpack2x16float(b), 0.0, 1.0)'],
+  r32uint: ['u32', 'v.x', 'vec4u(b, 0u, 0u, 1u)'],
+  r32sint: ['i32', 'bitcast<u32>(v.x)', 'vec4i(bitcast<i32>(b), 0, 0, 1)'],
+  rgba8uint: ['u32', 'dot(v & vec4u(255u), vec4u(1u, 256u, 65536u, 16777216u))', 'vec4u(b & 255u, (b >> 8u) & 255u, (b >> 16u) & 255u, b >> 24u)'],
+  rgba8sint: ['i32', 'dot(bitcast<vec4u>(v) & vec4u(255u), vec4u(1u, 256u, 65536u, 16777216u))',
+    'vec4i(extractBits(bitcast<i32>(b), 0u, 8u), extractBits(bitcast<i32>(b), 8u, 8u), extractBits(bitcast<i32>(b), 16u, 8u), extractBits(bitcast<i32>(b), 24u, 8u))'],
+  rg16uint: ['u32', '(v.x & 65535u) | (v.y << 16u)', 'vec4u(b & 65535u, b >> 16u, 0u, 1u)'],
+  rg16sint: ['i32', '(bitcast<u32>(v.x) & 65535u) | (bitcast<u32>(v.y) << 16u)', 'vec4i(extractBits(bitcast<i32>(b), 0u, 16u), extractBits(bitcast<i32>(b), 16u, 16u), 0, 1)'],
+  rgb10a2uint: ['u32', 'dot(v & vec4u(1023u, 1023u, 1023u, 3u), vec4u(1u, 1024u, 1048576u, 1073741824u))',
+    'vec4u(b & 1023u, (b >> 10u) & 1023u, (b >> 20u) & 1023u, b >> 30u)'],
+};
+const bitsOf = (f) => BITS[f.replace(/-srgb$/, '')];
+const linearOf = (f) => f.replace(/-srgb$/, '');
+
+// shadows: texture id -> format -> shadow texture
+const shadows = new Map();
+function shadowOf(texId, format) {
+  const ti = info.get(texId);
+  if (!ti || ti.samples > 1 || ti.dim !== '2d' || !bitsOf(ti.format) || !bitsOf(format)) return null;
+  if (bitsOf(ti.format) && ti.format.endsWith('-srgb') && !(ti.viewFormats || []).includes(linearOf(ti.format))) return null;
+  let m = shadows.get(texId);
+  if (!m) shadows.set(texId, (m = new Map()));
+  let s = m.get(format);
+  if (s) return s;
+  s = device.createTexture({
+    size: [ti.w, ti.h, ti.d], format, dimension: '2d', mipLevelCount: ti.mips,
+    usage: GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+    viewFormats: format.endsWith('-srgb') ? [linearOf(format)] : [],
+  });
+  m.set(format, s);
+  // what the texture holds now
+  const e = device.createCommandEncoder();
+  for (let mip = 0; mip < ti.mips; mip++) {
+    for (let l = 0; l < ti.d; l++) reinterp(e, objs.get(texId), ti.format, s, format, mip, l, ti);
+  }
+  device.queue.submit([e.finish()]);
+  say(`texture ${texId} (${ti.format} ${ti.w}x${ti.h}) viewed as ${format}: a shadow texture kept bit-equal by reinterpreting passes`);
+  return s;
+}
+
+// one full-screen pass into dst's (mip, layer) that loads src's texel at the same place: `body` makes the output
+// from `v` (the loaded texel)
+const texelPipes = new Map();
+function texelPass(enc, key, srcSample, dstFmt, body, srcView, dstView, rect) {
+  let p = texelPipes.get(key);
+  if (!p) {
+    const out = srcSample === 'f32' && !BITS[dstFmt] ? 'f32' : (bitsOf(dstFmt) ? bitsOf(dstFmt)[0] : 'f32');
+    const code = `@group(0) @binding(0) var t: texture_2d<${srcSample}>;
+@vertex fn vs(@builtin(vertex_index) i: u32) -> @builtin(position) vec4f {
+  let c = vec2f(f32((i << 1u) & 2u), f32(i & 2u));
+  return vec4f(c.x * 2.0 - 1.0, 1.0 - c.y * 2.0, 0.0, 1.0);
+}
+@fragment fn fs(@builtin(position) q: vec4f) -> @location(0) vec4<${out}> {
+  let v = textureLoad(t, vec2i(q.xy), 0);
+  ${body}
+}`;
+    const m = device.createShaderModule({ code });
+    p = device.createRenderPipeline({ layout: 'auto', vertex: { module: m, entryPoint: 'vs' },
+      fragment: { module: m, entryPoint: 'fs', targets: [{ format: dstFmt }] }, primitive: { topology: 'triangle-list' } });
+    texelPipes.set(key, p);
+  }
+  const bg = device.createBindGroup({ layout: p.getBindGroupLayout(0), entries: [{ binding: 0, resource: srcView }] });
+  const rp = enc.beginRenderPass({ colorAttachments: [{ view: dstView, loadOp: 'load', storeOp: 'store' }] });
+  rp.setPipeline(p);
+  rp.setBindGroup(0, bg);
+  rp.setScissorRect(rect[0], rect[1], rect[2], rect[3]);
+  rp.draw(3);
+  rp.end();
+}
+const mipView = (tex, format, mip, layer) => tex.createView({ format, dimension: '2d', baseMipLevel: mip, mipLevelCount: 1, baseArrayLayer: layer, arrayLayerCount: 1 });
+
+// src's (mip, layer) bits into dst's, each in its own format
+function reinterp(enc, src, srcFmt, dst, dstFmt, mip, layer, ti) {
+  const [ss, toBits] = bitsOf(srcFmt), fromBits = bitsOf(dstFmt)[2];
+  const w = Math.max(1, ti.w >> mip), h = Math.max(1, ti.h >> mip);
+  texelPass(enc, 'ri' + srcFmt + '>' + dstFmt, ss, linearOf(dstFmt), `let b: u32 = ${toBits};\n  return ${fromBits};`,
+    mipView(src, linearOf(srcFmt), mip, layer), mipView(dst, linearOf(dstFmt), mip, layer), [0, 0, w, h]);
+}
+
+// a write into texture `id` (mip, region, layers z..z+d): a BC stand-in decodes it, a texture with shadows passes its
+// bits on. True when it encoded work.
+function texWritten(enc, id, mip, x, y, z, w, h, d) {
+  const ti = info.get(id);
+  if (!ti) return false;
+  const mw = Math.max(1, ti.w >> mip), mh = Math.max(1, ti.h >> mip);
+  const x0 = Math.min(x, mw), y0 = Math.min(y, mh), x1 = Math.min(mw, x + w), y1 = Math.min(mh, y + h);
+  if (ti.stage) {
+    if (x1 <= x0 || y1 <= y0) return false;
+    for (let l = z; l < z + d && l < ti.d; l++) {
+      texelPass(enc, 'bc' + ti.format, 'f32', ti.sfmt, 'return v;', mipView(ti.stage, ti.format, mip, l),
+        mipView(objs.get(id), ti.sfmt, mip, l), [x0, y0, x1 - x0, y1 - y0]);
+    }
+    return true;
+  }
+  const sh = shadows.get(id);
+  if (!sh) return false;
+  for (const [f, s] of sh) {
+    for (let l = z; l < z + d && l < ti.d; l++) reinterp(enc, objs.get(id), ti.format, s, f, mip, l, ti);
+  }
+  return true;
+}
+
+// a pass stored into view `viewId`: a shadow's bits go back to its texture (and on to the texture's other shadows),
+// a texture's go to its shadows
+function viewWritten(enc, viewId) {
+  const vi = info.get(viewId);
+  if (!vi) return;
+  const ti = info.get(vi.tex);
+  if (!ti || !shadows.has(vi.tex)) return;
+  const layers = ti.dim === '3d' ? 1 : vi.layers;
+  if (vi.real) {
+    for (let l = vi.baseLayer; l < vi.baseLayer + layers; l++) reinterp(enc, vi.real, vi.format, objs.get(vi.tex), ti.format, vi.baseMip, l, ti);
+    for (const [f, s] of shadows.get(vi.tex)) {
+      if (s === vi.real) continue;
+      for (let l = vi.baseLayer; l < vi.baseLayer + layers; l++) reinterp(enc, objs.get(vi.tex), ti.format, s, f, vi.baseMip, l, ti);
+    }
+  } else {
+    texWritten(enc, vi.tex, vi.baseMip, 0, 0, vi.baseLayer, 1 << 30, 1 << 30, layers);
+  }
+}
 
 // ---------- blit, clears, present ----------
 

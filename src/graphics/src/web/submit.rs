@@ -934,12 +934,21 @@ impl<'a> Rs<'a> {
         let mut vbl: Vec<serde_json::Value> = Vec::new();
         let mut missing = Vec::new();
         let mut per_slot: HashMap<u32, Vec<serde_json::Value>> = HashMap::new();
+        let mut packed = Vec::new();
         for &(loc, kind, n) in &g.vs.0.inputs {
             match d.vattr.iter().find(|a| a.0 == loc) {
                 Some(&(_, binding, f, off)) => {
-                    let Some(vf) = fmt::vertex(f) else {
-                        red_once(&format!("vertex format {f:?} (not a WebGPU vertex format): the draw is refused"));
-                        return false;
+                    let vf = match (fmt::vertex(f), fmt::packed(f)) {
+                        (Some(vf), _) => vf,
+                        // fed as one u32, unpacked by a variant of the vertex module (below)
+                        (None, Some(p)) => {
+                            packed.push((loc, p));
+                            "uint32"
+                        }
+                        (None, None) => {
+                            red_once(&format!("vertex format {f:?} (not a WebGPU vertex format): the draw is refused"));
+                            return false;
+                        }
                     };
                     if !slots.contains(&binding) {
                         slots.push(binding);
@@ -991,6 +1000,13 @@ impl<'a> Rs<'a> {
         if d.polygon != vk::PolygonMode::FILL {
             red_once("line / point polygon mode (WebGPU has none): drawn filled");
         }
+        let vs_mod = if packed.is_empty() {
+            (g.vs.1, g.vs.0.entry.clone())
+        } else {
+            let v = shaders::wgsl::Variant { packed, ..g.vs.0.variant.clone() };
+            let Some(s) = super::icd::vs_variant(&g.vs, v) else { return false };
+            (s.1, s.0.entry.clone())
+        };
         let fs_outs: Vec<u32> = g.fs.as_ref().map_or(Vec::new(), |f| f.0.outputs.clone());
         let targets: Vec<serde_json::Value> = pass_colors
             .iter()
@@ -1022,7 +1038,7 @@ impl<'a> Rs<'a> {
             .collect();
         let mut desc = serde_json::json!({
             "layout": layout,
-            "vertex": { "module": g.vs.1, "entryPoint": g.vs.0.entry, "buffers": vbl },
+            "vertex": { "module": vs_mod.0, "entryPoint": vs_mod.1, "buffers": vbl },
             "primitive": {
                 "topology": topo,
                 "cullMode": if tri { match d.cull { vk::CullModeFlags::FRONT => "front", vk::CullModeFlags::BACK => "back", _ => "none" } } else { "none" },

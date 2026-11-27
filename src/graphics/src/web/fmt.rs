@@ -199,6 +199,18 @@ pub fn vertex(f: vk::Format) -> Option<&'static str> {
     })
 }
 
+/// A vertex format WebGPU has none for that the web device feeds as `uint32` and unpacks in the vertex stage
+/// (`shaders::wgsl::Packed`, wave WEB-W10b).
+pub fn packed(f: vk::Format) -> Option<shaders::wgsl::Packed> {
+    use shaders::wgsl::Packed::A2b10g10r10;
+    Some(match f {
+        F::A2B10G10R10_SNORM_PACK32 => A2b10g10r10 { signed: true, norm: true },
+        F::A2B10G10R10_SINT_PACK32 | F::A2B10G10R10_SSCALED_PACK32 => A2b10g10r10 { signed: true, norm: false },
+        F::A2B10G10R10_UINT_PACK32 | F::A2B10G10R10_USCALED_PACK32 => A2b10g10r10 { signed: false, norm: false },
+        _ => return None,
+    })
+}
+
 /// The format features of `f` on the web device (optimal tiling; linear the same; buffer features: vertex only).
 pub fn features(f: vk::Format) -> vk::FormatProperties {
     use vk::FormatFeatureFlags as Ff;
@@ -222,7 +234,7 @@ pub fn features(f: vk::Format) -> vk::FormatProperties {
             opt |= Ff::STORAGE_IMAGE;
         }
     }
-    let buf = if vertex(f).is_some() { Ff::VERTEX_BUFFER } else { Ff::empty() };
+    let buf = if vertex(f).is_some() || packed(f).is_some() { Ff::VERTEX_BUFFER } else { Ff::empty() };
     vk::FormatProperties { linear_tiling_features: opt, optimal_tiling_features: opt, buffer_features: buf }
 }
 

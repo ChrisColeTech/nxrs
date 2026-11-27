@@ -1075,12 +1075,19 @@ unsafe extern "system" fn create_gfx_pipelines(
             let st = |h: u64| o.module.get(&h).and_then(|m| m.conv.as_ref().ok().map(|c| (c.clone(), m.id)));
             (st(vs), if fs == 0 { None } else { st(fs) })
         };
-        let Some(vs) = vs else {
+        let Some(mut vs) = vs else {
             crate::log::red_once("web: a graphics pipeline without a vertex module: refused");
             *out.add(i) = vk::Pipeline::null();
             res = R::ERROR_UNKNOWN;
             continue;
         };
+        // Vulkan interpolates as the fragment stage says; WebGPU requires the vertex outputs to say the same
+        if let Some(fix) = fs.as_ref().and_then(|f| shaders::wgsl::interp_fix(&vs.0, &f.0)) {
+            let v = shaders::wgsl::Variant { interp: fix, ..vs.0.variant.clone() };
+            if let Some(s) = vs_variant(&vs, v) {
+                vs = s;
+            }
+        }
         let g = Gfx { vs, fs, colors, depth, stencil, dynamic, stat: gfx_state(ci) };
         let h = obj::new_handle();
         objs().pipe.insert(h, Arc::new(Pipeline::Gfx(Box::new(g))));
@@ -1088,6 +1095,32 @@ unsafe extern "system" fn create_gfx_pipelines(
     }
     res
 }
+/// A vertex stage converted again with a variant (`shaders::wgsl::Variant`: interpolation taken from the fragment
+/// stage, packed attributes), its worker module made once per (module, variant). None: the variant does not convert
+/// (red line).
+pub fn vs_variant(base: &obj::Stage, v: shaders::wgsl::Variant) -> Option<obj::Stage> {
+    use std::collections::HashMap;
+    use std::sync::{Mutex, OnceLock};
+    static MADE: OnceLock<Mutex<HashMap<(u32, shaders::wgsl::Variant), obj::Stage>>> = OnceLock::new();
+    let key = (base.1, v);
+    if let Some(s) = MADE.get_or_init(Default::default).lock().unwrap().get(&key) {
+        return Some(s.clone());
+    }
+    match base.0.variant(&key.1) {
+        Ok(w) => {
+            let id = obj::new_id();
+            obj::json(op::SHADER, &serde_json::json!({ "id": id, "code": w.code }));
+            let s = (Arc::new(w), id);
+            MADE.get_or_init(Default::default).lock().unwrap().insert(key, s.clone());
+            Some(s)
+        }
+        Err(e) => {
+            crate::log::red_once(&format!("web: a vertex module variant ({:?}) does not convert: {e}", key.1));
+            None
+        }
+    }
+}
+
 unsafe extern "system" fn create_compute_pipelines(
     _d: vk::Device,
     _c: vk::PipelineCache,
