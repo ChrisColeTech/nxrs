@@ -3916,6 +3916,11 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
                 storage_probe_state(g, &imgs, serial)
             );
         }
+        // an upload's reading and laying out of the storage made without the images' lock, which every other lane's
+        // view lookup takes (MKW-SPIKE); `prepare_image` records it
+        if super::image::upload_unlocked_on() {
+            imgs = g.decode_unlocked(imgs, serial);
+        }
         g.prepare_image(&mut imgs, serial, sub);
         if let Some(im) = imgs.by_serial.get_mut(&serial) {
             if generic_typed_placeholder(im.tex.d.target, im.extent, im.layers, im.samples, want) {

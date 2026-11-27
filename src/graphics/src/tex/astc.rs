@@ -273,8 +273,45 @@ fn barrier(g: &Gpu, cb: vk::CommandBuffer) {
     crate::vk::queue::full_barrier(g, cb);
 }
 
+/// Whether a level of `bc_bytes` BC7 bytes goes through the disk cache (`astc_cache`).
+fn cache_applies(bc7: bool, bc_bytes: u64, full: bool) -> bool {
+    bc7 && bc_bytes as usize >= crate::tex::astc_cache::MIN_BYTES
+        && full
+        && crate::tex::astc_cache::active()
+}
+
+/// A level's disk-cache key and, on a hit, its BC7 blocks, looked up ahead of `record` (MKW-SPIKE: with the images'
+/// lock released, as the key hashes every block and a hit reads the level from the pack file).
+pub struct CachePre {
+    key: crate::tex::astc_cache::Key,
+    hit: Option<Vec<u8>>,
+}
+
+/// `record`'s cache lookup for one level, made ahead; None when the level does not go through the cache.
+#[allow(clippy::too_many_arguments)]
+pub fn cache_probe(
+    blocks: &[u8],
+    w: u32,
+    h: u32,
+    slices: u32,
+    bw: u32,
+    bh: u32,
+    srgb: bool,
+    bc7: bool,
+) -> Option<CachePre> {
+    let bc_bytes = w.div_ceil(4) as u64 * h.div_ceil(4) as u64 * slices as u64 * 16;
+    let full = !mode6_only() && bc7_full().is_some();
+    if !(4..=12).contains(&bw) || !(4..=12).contains(&bh) || !cache_applies(bc7, bc_bytes, full) {
+        return None;
+    }
+    let key = crate::tex::astc_cache::key(blocks, w, h, slices, bw, bh, srgb);
+    let hit = crate::tex::astc_cache::get(key, bc_bytes as usize);
+    Some(CachePre { key, hit })
+}
+
 /// Records the decode of `blocks` (one level and layer, block rows of a w x h x slices texture, 16 bytes a block)
 /// into `image` at `level` / `layer`, as RGBA8 or, with `bc7`, BC7. Into the submission's upload command buffer.
+/// `pre`: the level's disk-cache lookup made ahead (`cache_probe`), or None to make it here.
 #[allow(clippy::too_many_arguments)]
 pub fn record(
     g: &Gpu,
@@ -290,8 +327,10 @@ pub fn record(
     image: vk::Image,
     level: u32,
     layer: u32,
+    pre: Option<CachePre>,
 ) {
-    let Some((out, off, rows, bufrow)) = dispatch(g, sub, blocks, w, h, slices, bw, bh, srgb, bc7)
+    let Some((out, off, rows, bufrow)) =
+        dispatch(g, sub, blocks, w, h, slices, bw, bh, srgb, bc7, pre)
     else {
         return;
     };
@@ -334,6 +373,7 @@ fn dispatch(
     bh: u32,
     srgb: bool,
     bc7: bool,
+    pre: Option<CachePre>,
 ) -> Option<(vk::Buffer, u64, u32, u32)> {
     if !(4..=12).contains(&bw) || !(4..=12).contains(&bh) {
         crate::log::red_once(&format!("ASTC block {bw}x{bh} is not 2D LDR"));
@@ -347,16 +387,19 @@ fn dispatch(
     };
     // the disk cache: a level encoded before (this run or an earlier one) is uploaded as it was encoded
     let full = if mode6_only() { None } else { bc7_full() };
-    let ckey = (bc7
-        && bc_bytes as usize >= crate::tex::astc_cache::MIN_BYTES
-        && full.is_some()
-        && crate::tex::astc_cache::active())
-    .then(|| crate::tex::astc_cache::key(blocks, w, h, slices, bw, bh, srgb));
-    if let Some(k) = ckey {
-        if let Some(b) = crate::tex::astc_cache::get(k, bc_bytes as usize) {
-            let (sbuf, soff) = sub.stage_bytes_fresh(g, &b);
-            return Some((sbuf, soff, ey * 4, ex * 4));
+    // (MKW-SPIKE) the key and the read may have been made before, without the images' lock (`cache_probe`)
+    let (ckey, hit) = match pre {
+        Some(p) => (Some(p.key), p.hit),
+        None => {
+            let ckey = cache_applies(bc7, bc_bytes, full.is_some())
+                .then(|| crate::tex::astc_cache::key(blocks, w, h, slices, bw, bh, srgb));
+            let hit = ckey.and_then(|k| crate::tex::astc_cache::get(k, bc_bytes as usize));
+            (ckey, hit)
         }
+    };
+    if let Some(b) = hit {
+        let (sbuf, soff) = sub.stage_bytes_fresh(g, &b);
+        return Some((sbuf, soff, ey * 4, ex * 4));
     }
     let mut a = g.astc.lock().unwrap();
     if a.is_none() {
@@ -575,7 +618,7 @@ pub fn decode_blocks(
         .ok()?;
     let mut ok = false;
     let f = crate::vk::queue::oneoff(g, |g, sub, _imgs| {
-        if let Some((buf, off, _, _)) = dispatch(g, sub, blocks, w, h, 1, bw, bh, srgb, bc7) {
+        if let Some((buf, off, _, _)) = dispatch(g, sub, blocks, w, h, 1, bw, bh, srgb, bc7, None) {
             unsafe {
                 g.dev().cmd_copy_buffer(
                     sub.pre,
