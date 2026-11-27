@@ -88,14 +88,11 @@ static inline void rt_fpcr_sync(const Cpu *c) {
 #endif
 
 // ---- memory: guest addresses are host addresses
-// On wasm a guest address is an offset into the one linear memory: host = guest - rt_guest_off (the runtime sets it
-// from the compact guest layout before guest code runs). Elsewhere RT_HOST is the plain cast.
-#if defined(__wasm__)
-extern uint64_t rt_guest_off;
-#define RT_HOST(a) ((uintptr_t)((uint64_t)(a) - rt_guest_off))
-#else
+// On wasm too a guest address is the linear-memory address: the web build translates the modules at WEB_FIRST_BASE and
+// the guest map lies inside the linear memory, so the runtime's rt_guest_off is 0 (src/runtime/src/cpu.rs). WEB-W8:
+// the rebase was `a - rt_guest_off`, a load of that global at every guest access (reloaded after any store under
+// -fno-strict-aliasing): the main game thread ran ~3.5x native's CPU time a frame. The plain cast everywhere.
 #define RT_HOST(a) ((uintptr_t)(a))
-#endif
 typedef uint16_t __attribute__((aligned(1), may_alias)) u16u;
 typedef uint32_t __attribute__((aligned(1), may_alias)) u32u;
 typedef uint64_t __attribute__((aligned(1), may_alias)) u64u;

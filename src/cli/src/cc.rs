@@ -66,6 +66,9 @@ pub const GEN_FLAGS: &[&str] = &[
     "-w",
 ];
 
+/// The web build's optimization level for the game code (`gen_flags`), in place of `GEN_FLAGS`' -O1.
+const WEB_GEN_OPT: &str = "-O2";
+
 /// Flags for the loader executable (ordinary C, size over speed).
 const STUB_FLAGS: &[&str] = &["-std=gnu11", "-O2", "-fms-runtime-lib=dll", "-w"];
 
@@ -158,9 +161,12 @@ impl Clang {
     /// into a shared object: position-independent).
     pub fn gen_flags(&self) -> Vec<String> {
         if self.web.is_some() {
+            // WEB-W8: the game code at -O2 on the web (the main game thread's guest code is the web frame's critical
+            // path; -O1 is the native choice for x86 instruction counts)
             return GEN_FLAGS
                 .iter()
                 .filter(|f| **f != MARCH && !f.starts_with("-fms-runtime-lib"))
+                .map(|f| if *f == "-O1" { &WEB_GEN_OPT } else { f })
                 .chain(WEB_FLAGS)
                 .map(|s| s.to_string())
                 .collect();
@@ -1328,6 +1334,17 @@ mod tests {
             gnu: false,
             web: None,
         }
+    }
+
+    #[test]
+    fn web_game_code_is_optimized_at_web_gen_opt_and_native_keeps_o1() {
+        let mut c = fake_clang();
+        assert!(c.gen_flags().iter().any(|f| f == "-O1"));
+        c.web = Some(Emsdk { root: "e".into(), emcc_py: "e/emcc.py".into(), config: "e/.emscripten".into() });
+        let f = c.gen_flags();
+        assert!(f.iter().any(|f| f == WEB_GEN_OPT), "{f:?}");
+        assert!(!f.iter().any(|f| f == "-O1"), "{f:?}");
+        assert!(f.iter().any(|f| f == "-sMEMORY64=1"), "{f:?}");
     }
 
     #[test]

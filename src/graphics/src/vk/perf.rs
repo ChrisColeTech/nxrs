@@ -531,12 +531,21 @@ pub fn frame(frame: u64) {
     let df = (frame - st.prev_frame).max(1) as f64;
     let p = st.prev;
     let subs = d(C::GpuSubs, &p);
-    if subs > 0 {
+    // WEB-W8: a device without timestamps (the web device) still gets the CPU side of these lines (replay time, the
+    // game's waits, pipelining), with the GPU time named as not measured
+    if subs > 0 || cfg!(target_os = "emscripten") {
+        let gpu = if subs > 0 {
+            format!(
+                "{:.2} ms per frame ({:.2} ms per submission, {:.1} submissions per frame)",
+                d(C::GpuNs, &p) as f64 / 1e6 / df,
+                d(C::GpuNs, &p) as f64 / 1e6 / subs as f64,
+                subs as f64 / df
+            )
+        } else {
+            "not measured (no timestamps)".to_string()
+        };
         crate::vklog!(
-            "GPU time up to frame {frame}: {:.2} ms per frame ({:.2} ms per submission, {:.1} submissions per frame); replay on the CPU {:.2} ms per frame ({}); the game waited {:.2} ms per frame (sync {:.2}, acquire {:.2}, finish {:.2})",
-            d(C::GpuNs, &p) as f64 / 1e6 / df,
-            d(C::GpuNs, &p) as f64 / 1e6 / subs as f64,
-            subs as f64 / df,
+            "GPU time up to frame {frame}: {gpu}; replay on the CPU {:.2} ms per frame ({}); the game waited {:.2} ms per frame (sync {:.2}, acquire {:.2}, finish {:.2})",
             d(C::ReplayNs, &p) as f64 / 1e6 / df,
             breakdown(&cur, &p, df),
             (d(C::WaitSyncNs, &p) + d(C::WaitAcquireNs, &p) + d(C::WaitFinishNs, &p)) as f64 / 1e6 / df,

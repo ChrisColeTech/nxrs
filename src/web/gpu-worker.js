@@ -21,6 +21,7 @@ const OP = {
 
 let memory, ringAddr, H, DATA, D8, DV, dataBase;
 let device, ctx, canvasFormat = 'bgra8unorm';
+let offscreen = null;
 const objs = new Map();
 const info = new Map(); // id -> descriptor facts (textures: {format, dim, w, h, d, mips, samples}; views: {...})
 let chain = Promise.resolve();
@@ -84,12 +85,25 @@ onmessage = async (e) => {
     postMessage({ stats: H ? Array.from(H.slice(0, 24)) : [] });
     return;
   }
+  // WEB-W8: the canvas's displayed size in device pixels changed; the engine's next acquire finds its swap chain out
+  // of date (src/graphics/src/web/icd.rs acquire_next_image) and makes one of this size; the canvas itself takes the
+  // size at the first present of such an image (present), so the picture is never stretched in between
+  if (m.resize) {
+    Atomics.store(H, H_CANVAS_W, m.resize[0]);
+    Atomics.store(H, H_CANVAS_H, m.resize[1]);
+    return;
+  }
   memory = m.memory;
   ringAddr = m.ring;
   shotEvery = m.shotEvery | 0;
   subTrace = !!m.subTrace;
   if (subTrace) setInterval(postTrace, 250);
   H = new Int32Array(memory.buffer, ringAddr, 64);
+  offscreen = m.canvas;
+  offscreen.width = m.width;
+  offscreen.height = m.height;
+  Atomics.store(H, H_CANVAS_W, m.width);
+  Atomics.store(H, H_CANVAS_H, m.height);
   DATA = H[H_DATA_SIZE];
   dataBase = ringAddr + 256;
   D8 = new Uint8Array(memory.buffer, dataBase, DATA);
@@ -145,8 +159,6 @@ onmessage = async (e) => {
     H[H_MAX_BIND_GROUPS] = device.limits.maxBindGroups;
     H[H_MAX_STORAGE_MB] = Math.floor(Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize) / 1048576);
     H[H_MAX_TEX_2D] = device.limits.maxTextureDimension2D;
-    H[H_CANVAS_W] = m.width;
-    H[H_CANVAS_H] = m.height;
     const ai = adapter.info || {};
     say(`WebGPU device: ${ai.vendor || '?'} ${ai.architecture || ''} ${ai.description || ''}; features ${features.join(', ')}`);
     Atomics.store(H, H_STATE, 1);
@@ -163,10 +175,17 @@ onmessage = async (e) => {
 
 // ---------- the ring ----------
 
+// one channel for every yield (WEB-W8: a new MessageChannel per present was garbage with finalizers)
+const yieldChannel = new MessageChannel();
+let yieldWake = null;
+yieldChannel.port1.onmessage = () => {
+  const r = yieldWake;
+  yieldWake = null;
+  if (r) r();
+};
 const yieldTask = () => new Promise((r) => {
-  const c = new MessageChannel();
-  c.port1.onmessage = () => r();
-  c.port2.postMessage(0);
+  yieldWake = r;
+  yieldChannel.port2.postMessage(0);
 });
 
 async function loop() {
@@ -212,7 +231,10 @@ const u32 = (p) => DV.getUint32(p, true);
 const i32 = (p) => DV.getInt32(p, true);
 const f32 = (p) => DV.getFloat32(p, true);
 const u64 = (p) => DV.getUint32(p, true) + DV.getUint32(p + 4, true) * 4294967296;
-const text = (p, n) => new TextDecoder().decode(D8.slice(p, p + n));
+// one decoder (WEB-W8: a new one per object description was garbage); the bytes are copied out of the shared ring
+// first (TextDecoder does not read shared memory)
+const decoder = new TextDecoder();
+const text = (p, n) => decoder.decode(D8.slice(p, p + n));
 
 function run(op, p, len) {
   switch (op) {
@@ -516,6 +538,10 @@ function submit(p0, len) {
           break;
         case OP.SET_BIND_GROUP: {
           const idx = u32(a), bg = objs.get(u32(a + 4)), nd = u32(a + 8);
+          if (nd === 0) {
+            (pass || cpass).setBindGroup(idx, bg);
+            break;
+          }
           const offs = [];
           for (let i = 0; i < nd; i++) offs.push(u32(a + 12 + 4 * i));
           (pass || cpass).setBindGroup(idx, bg, offs);
@@ -952,6 +978,12 @@ function present(texId) {
   const t = objs.get(texId);
   if (!t) return false;
   const ti = info.get(texId);
+  // WEB-W8: the canvas is the size of the swap chain image presented (the engine made it at the canvas's device
+  // pixels), so the copy is 1:1 and the page never scales the picture
+  if (offscreen && (offscreen.width !== ti.w || offscreen.height !== ti.h)) {
+    offscreen.width = ti.w;
+    offscreen.height = ti.h;
+  }
   const cur = ctx.getCurrentTexture();
   const enc = device.createCommandEncoder();
   enc.copyTextureToTexture({ texture: t }, { texture: cur },

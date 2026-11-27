@@ -331,6 +331,22 @@ pub fn rewrite_spirv(w: &[u32]) -> Result<Vec<u32>, String> {
         if matches!(o, 5 | 71) && combined.contains_key(&x[1]) {
             continue;
         }
+        if o == 15 && x[4..].iter().any(|v| split.contains_key(v)) {
+            // OpEntryPoint: SPIR-V 1.4+ lists every global the entry point uses (glslang's own shaders, e.g. the
+            // present's upscale); a removed combined variable is replaced by its two halves (WEB-W8: naga refused the
+            // dangling id). The name ends at the first word with a zero byte.
+            let name_end = 3 + x[3..].iter().position(|w| w.to_le_bytes().contains(&0)).ok_or("entry point name")? + 1;
+            let mut e = x[..name_end].to_vec();
+            for v in &x[name_end..] {
+                match split.get(v) {
+                    Some(&(vi, vs, ..)) => e.extend([vi, vs]),
+                    None => e.push(*v),
+                }
+            }
+            e[0] = ((e.len() as u32) << 16) | 15;
+            out.push(e);
+            continue;
+        }
         if o == 59 && pv.contains_key(&x[2]) {
             let pp = pointer(&mut ids, &mut new_types, 3, pv[&x[2]].2);
             new_vars.push(mk(59, &[pp, x[2], 3]));
