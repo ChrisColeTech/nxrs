@@ -3173,11 +3173,6 @@ pub fn begin_submit_ex(
             i = j;
         }
         distribute_watched_pages(&all_watched, &mut dirty_pages, &mut taken);
-        // every page this scan found written hashed at once on the hash threads, for the upload skip below (OOT-DESC)
-        if super::upskip::on() {
-            let pages: Vec<u64> = taken.values().flatten().copied().collect();
-            super::upskip::prehash(&pages);
-        }
         let recovered = cold_skipped
             .iter()
             .filter(|base| taken.get(base).is_some_and(|p| !p.is_empty()))
@@ -3197,6 +3192,33 @@ pub fn begin_submit_ex(
     SYNC_SCAN_NS.fetch_add(t_scan.elapsed().as_nanos() as u64, Ordering::Relaxed);
     super::queue::chain_trace::note("scan", t_scan.elapsed().as_micros() as u64, covered as u64);
     let _loop_t = SyncLoopTimer(std::time::Instant::now());
+    // every CPU-written page this sync may upload hashed at once on the hash threads, for the upload skip below
+    // (OOT-DESC): the scan's pages and the pages the pools hold pending (most of OoT's arrive through the pool walker's
+    // walks, drained into `pending`, with no scan of the sync's own)
+    if super::upskip::on() {
+        let mut pages: Vec<u64> = taken.values().flatten().copied().collect();
+        let mut pend = |p: &Pool| {
+            if p.buf.is_some() && p.placement == Placement::Mirror {
+                for &(a, n) in &p.pending {
+                    let mut pg = a & !(PAGE - 1);
+                    while pg < a + n {
+                        pages.push(pg);
+                        pg += PAGE;
+                    }
+                }
+            }
+        };
+        if covered {
+            for b in m.busy.iter() {
+                if let Some(p) = m.by_base.get(b) {
+                    pend(p);
+                }
+            }
+        } else {
+            m.by_base.values().for_each(&mut pend);
+        }
+        super::upskip::prehash(&pages);
+    }
     let Pools { by_base, busy: busy_set, .. } = &mut *m;
     let mut one = |p: &mut Pool| {
         if !p.tex_dirty.is_empty() {
