@@ -17,6 +17,7 @@ pub mod library_file;
 pub mod library_ops;
 pub mod markers;
 pub mod pickers;
+pub mod piped_run;
 pub mod platform;
 pub mod run;
 pub mod shell_open;
@@ -27,6 +28,7 @@ pub mod update_files;
 pub mod web_file;
 pub mod web_reply;
 pub mod web_serve;
+pub mod web_xlate;
 
 #[cfg(test)]
 mod dlc_tests;

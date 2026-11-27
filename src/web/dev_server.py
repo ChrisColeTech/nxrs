@@ -11,6 +11,12 @@ browser, or `nxrs --serve-web <folder>`, which serve the same folder the same wa
                     Content-Range); the GPU worker's shader files (data/shaders/spv/<hex>.spv|.json) included
   POST /log         the page's engine log lines, appended to --log (development)
   POST /shot?n=N    a presented image (?shots=N on the page), saved beside --log (development)
+  POST /shader-xlate/<16 hex key>
+                    a shader the game made at run time (WEB-W7b; body: u32 LE ctl length, ctl, code, at most 4 MiB):
+                    translated by `nxrs-build shader-xlate <data>/shaders` (--engine, else NXRS_BUILD, else this
+                    tree's target/release/nxrs-build) into <data>/shaders/live/<key>/, answered with
+                    u32 LE spv length, spv, json; 503 without an nxrs-build, 422 with its reason. With --log, the
+                    request is also kept beside the log as xlate-<key>.bin (a recorded input for the launcher's test)
 
 --live serves the page and its scripts (index.html, boot.js, input.js, saves.js, io-worker.js, audio-worklet.js,
 gpu.js, gpu-worker.js) from src/web beside this file instead of the build's copies, to try a JS change without
@@ -21,8 +27,12 @@ Every response carries COOP/COEP (shared memory and threads need a cross-origin 
 import argparse
 import http.server
 import json
+import os
 import re
+import subprocess
 import sys
+import threading
+import time
 import urllib.parse
 from pathlib import Path
 
@@ -30,9 +40,47 @@ HERE = Path(__file__).resolve().parent
 PAGE = {'index.html', 'boot.js', 'input.js', 'saves.js', 'io-worker.js', 'audio-worklet.js', 'gpu.js',
         'gpu-worker.js'}
 TYPES = {'.wasm': 'application/wasm', '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json'}
+MAX_XLATE = 4 << 20
+XLATE_LOCK = threading.Lock()
 
 
-def make_handler(build: Path, data: Path, live: bool, log_file=None):
+def xlate(engine, data: Path, key: str, body: bytes):
+    """(status, answer) of one shader translation (the launcher's services/web_xlate.rs, the same rules)."""
+    n = int.from_bytes(body[:4], 'little') if len(body) >= 4 else 0
+    if n == 0 or 4 + n >= len(body):
+        return 400, b'not a shader request (u32 ctl length, ctl, code)'
+    shaders = data / 'shaders'
+    spv = shaders / 'live' / key / 'spv'
+
+    def answer():
+        s, j = spv / f'{key}.spv', spv / f'{key}.json'
+        if s.is_file() and j.is_file():
+            b = s.read_bytes()
+            return len(b).to_bytes(4, 'little') + b + j.read_bytes()
+        return None
+
+    t0 = time.time()
+    with XLATE_LOCK:
+        got = answer()
+        what = 'already translated'
+        if got is None and engine is None:
+            return 503, b'this server has no nxrs-build to translate shaders with'
+        if got is None:
+            p = subprocess.run([str(engine), 'shader-xlate', str(shaders)], input=body, capture_output=True,
+                               timeout=120)
+            printed = [l.strip() for l in p.stdout.decode(errors='replace').splitlines() if l.strip()]
+            if p.returncode != 0:
+                return 422, p.stderr.strip()
+            if not printed or printed[-1].lower() != key:
+                return 422, f'nxrs-build translated key {printed[-1] if printed else "?"} for {key}'.encode()
+            got, what = answer(), 'translated'
+            if got is None:
+                return 422, p.stdout.strip()
+    print(f'shader-xlate {key}: {what} in {time.time() - t0:.2f} s', flush=True)
+    return 200, got
+
+
+def make_handler(build: Path, data: Path, live: bool, log_file=None, engine=None):
     class H(http.server.BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
 
@@ -73,8 +121,28 @@ def make_handler(build: Path, data: Path, live: bool, log_file=None):
             self.send(head=True)
 
         def do_POST(self):
-            # /log: the page's engine log lines (gpu.js), appended to --log when given (development: read by tools)
             n = int(self.headers.get('Content-Length', '0'))
+            # /shader-xlate/<key>: a run-time shader to translate (WEB-W7b); a body past the limit is refused unread
+            m = re.match(r'/shader-xlate/([^/?]*)$', self.path)
+            if m:
+                key = m.group(1).lower()
+                if n > MAX_XLATE:
+                    status, out = 413, b'not a shader request (u32 ctl length, ctl, code)'
+                    self.close_connection = True
+                elif not re.fullmatch(r'[0-9a-f]{16}', key):
+                    self.rfile.read(n)
+                    status, out = 400, b'not a shader key'
+                else:
+                    body = self.rfile.read(n)
+                    if log_file is not None:
+                        (Path(log_file).parent / f'xlate-{key}.bin').write_bytes(body)
+                    status, out = xlate(engine, data, key, body)
+                self.send_response(status)
+                self.headers_common('application/octet-stream' if status == 200 else 'text/plain', len(out))
+                self.end_headers()
+                self.wfile.write(out)
+                return
+            # /log: the page's engine log lines (gpu.js), appended to --log when given (development: read by tools)
             body = self.rfile.read(n)
             if self.path == '/log' and log_file is not None:
                 with open(log_file, 'ab') as fh:
@@ -163,7 +231,12 @@ def main():
     ap.add_argument('--port', type=int, default=8770)
     ap.add_argument('--live', action='store_true', help='the page and its scripts from src/web')
     ap.add_argument('--log', help='append the page\'s engine log to this file')
+    ap.add_argument('--engine', help='the nxrs-build that translates run-time shaders (default: NXRS_BUILD, else '
+                                     'this tree\'s target/release/nxrs-build)')
     a = ap.parse_args()
+    exe = 'nxrs-build.exe' if os.name == 'nt' else 'nxrs-build'
+    engine = next((Path(p) for p in [a.engine, os.environ.get('NXRS_BUILD'), HERE.parent.parent / 'target' / 'release'
+                                     / exe] if p and Path(p).is_file()), None)
     build = Path(a.build).resolve()
     described = build / 'build.json'
     if described.is_file():
@@ -177,8 +250,10 @@ def main():
         if not (build / 'game.js').is_file() or not (build / 'data.json').is_file() or len(datas) != 1:
             sys.exit(f'{build}: not a web build (build.json, or game.js, data.json and one <name>_data folder)')
         data, live = datas[0], True
-    srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, data, live, a.log))
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, data, live, a.log, engine))
     print(f'serving {build} on http://127.0.0.1:{a.port}/' + (' (page from src/web)' if live else ''), flush=True)
+    print(f'run-time shaders translated with {engine}' if engine else 'no nxrs-build: run-time shaders are not '
+          'translated', flush=True)
     srv.serve_forever()
 
 

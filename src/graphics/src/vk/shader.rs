@@ -972,8 +972,14 @@ impl Library {
                 return Some((words, json));
             }
         }
+        // the web: what the live translator brought (or is still waiting for) is not fetched again (WEB-W7b)
+        #[cfg(target_os = "emscripten")]
+        if let Some(known) = super::live::web_known(key) {
+            return known;
+        }
         // the web build preloads no shaders: a recorded module comes with its pack (the build's shaders/packs.txt,
-        // WEB-W6b), any other as its own files from the page's server, on first use
+        // WEB-W6b), any other as its own files from the page's server, on first use; a key in neither goes on to the
+        // server's run-time translation (WEB-W7b, below)
         #[cfg(target_os = "emscripten")]
         if let Some(v) = self.from_pack(key) {
             return Some(v);
@@ -990,6 +996,9 @@ impl Library {
                 return Some((words, json));
             }
         }
+        #[cfg(target_os = "emscripten")]
+        return super::live::web_fetch_live(key);
+        #[allow(unreachable_code)]
         None
     }
 

@@ -46,6 +46,21 @@ pub const CACHE_NONE: &str = "no-store";
 /// URL path segment that maps to the build's data folder.
 pub const DATA_SEGMENT: &str = "data";
 
+/// `POST /<slug>/shader-xlate/<key>` (WEB-W7b): a shader the game made at run time, translated by
+/// `nxrs-build shader-xlate <data>\shaders` into `<data>\shaders\live\<key>\` (the native live
+/// translator's folder) and answered (`u32 LE spv length | spv | json`).
+pub const XLATE_SEGMENT: &str = "shader-xlate";
+pub const XLATE_COMMAND: &str = "shader-xlate";
+/// The request's largest body (the engine's `shaders::wire::MAX_REQUEST`); a longer one is refused unread.
+pub const MAX_XLATE_BODY: u64 = 4 << 20;
+/// A translation that takes longer is stopped (the page's draw gave up long before).
+pub const XLATE_SECONDS: u64 = 120;
+/// A shader key: 16 hex digits, the name of its folder and files.
+pub const KEY_HEX_LEN: usize = 16;
+pub const SHADERS_FOLDER: &str = "shaders";
+pub const LIVE_FOLDER: &str = "live";
+pub const SPV_FOLDER: &str = "spv";
+
 /// Windows: the `http` association's ProgIds of Chromium browsers (the default browser plays the
 /// build when it is one of these), with a name for the status line.
 pub const CHROMIUM_PROG_IDS: [(&str, &str); 7] = [

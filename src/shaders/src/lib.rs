@@ -31,6 +31,7 @@ pub mod reflect;
 pub mod rt;
 pub mod scan;
 pub mod wgsl;
+pub mod wire;
 pub mod xlate;
 
 pub use prebuild::{prebuild, prebuild_data, prebuild_game, Options, Report};

@@ -1,7 +1,7 @@
 //! Answers like nxrs-build (launcher contract v2) for the process and command-line tests, as the Qt
 //! test binary's `main()` did: `contract`, `doctor` (one failing check), `update-info` (every package
 //! but "other game" is update 1.1.1), `dlc sync` (every package but "refused" gets a manifest line),
-//! and `build` (progress lines, then the build's files). `FAKE_LINES`, `FAKE_SLEEP_MS`, `FAKE_FAIL`
+//! `build` (progress lines, then the build's files) and `shader-xlate`. `FAKE_LINES`, `FAKE_SLEEP_MS`, `FAKE_FAIL`
 //! and `FAKE_CHILD` shape a build for the streaming and cancel tests.
 
 use std::io::Write;
@@ -146,6 +146,31 @@ fn web_build(root: &Path, name: &str) -> i32 {
     if made { 0 } else { 1 }
 }
 
+/// `shader-xlate <shaders>`: stdin is `u32 ctl length | ctl | code`; a code that is a 16-hex key is
+/// "translated" (the ctl as its SPIR-V) into `<shaders>/live/<key>/spv/`, anything else refused.
+fn shader_xlate(args: &[String]) -> i32 {
+    use std::io::Read;
+    let (Some(shaders), mut body) = (args.get(1), Vec::new()) else {
+        return 2;
+    };
+    if std::io::stdin().read_to_end(&mut body).is_err() || body.len() < 4 {
+        return 2;
+    }
+    let n = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    let (ctl, code) = body[4..].split_at(n.min(body.len() - 4));
+    let key = String::from_utf8_lossy(code).to_string();
+    if key.len() != 16 || !key.bytes().all(|b| b.is_ascii_hexdigit()) {
+        eprintln!("fake translator: refused {key}");
+        return 1;
+    }
+    let dir = Path::new(shaders).join("live").join(&key).join("spv");
+    let made = std::fs::create_dir_all(&dir).is_ok()
+        && std::fs::write(dir.join(format!("{key}.spv")), ctl).is_ok()
+        && std::fs::write(dir.join(format!("{key}.json")), b"{}").is_ok();
+    println!("{key}");
+    if made { 0 } else { 1 }
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().skip(1).collect();
     let code = match args.first().map(String::as_str) {
@@ -157,6 +182,7 @@ fn main() {
         Some("update-info") => update_info(&args),
         Some("dlc") if args.get(1).is_some_and(|a| a == "sync") => dlc_sync(&args),
         Some("build") => build(&args),
+        Some("shader-xlate") => shader_xlate(&args),
         Some("sleep") => {
             std::thread::sleep(std::time::Duration::from_secs(60));
             0
