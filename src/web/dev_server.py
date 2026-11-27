@@ -6,11 +6,13 @@ browser, or `nxrs --serve-web <folder>`, which serve the same folder the same wa
   /                 the page (the build's index.html)
   /<file>           the build folder: the page and its workers, game.js, game.wasm, data.json, bootset.json
   /data/<path>      the data folder build.json names (<name>_data), with HTTP range requests (exact 206 +
-                    Content-Range)
+                    Content-Range); the GPU worker's shader files (data/shaders/spv/<hex>.spv|.json) included
+  POST /log         the page's engine log lines, appended to --log (development)
+  POST /shot?n=N    a presented image (?shots=N on the page), saved beside --log (development)
 
---live serves the page and its scripts (index.html, boot.js, input.js, saves.js, io-worker.js, audio-worklet.js)
-from src/web beside this file instead of the build's copies, to try a JS change without building again. A build
-from before W5 (no build.json) is served that way too.
+--live serves the page and its scripts (index.html, boot.js, input.js, saves.js, io-worker.js, audio-worklet.js,
+gpu.js, gpu-worker.js) from src/web beside this file instead of the build's copies, to try a JS change without
+building again. A build from before W5 (no build.json) is served that way too.
 
 Every response carries COOP/COEP (shared memory and threads need a cross-origin isolated page). Binds 127.0.0.1 only.
 """
@@ -23,11 +25,12 @@ import urllib.parse
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PAGE = {'index.html', 'boot.js', 'input.js', 'saves.js', 'io-worker.js', 'audio-worklet.js'}
+PAGE = {'index.html', 'boot.js', 'input.js', 'saves.js', 'io-worker.js', 'audio-worklet.js', 'gpu.js',
+        'gpu-worker.js'}
 TYPES = {'.wasm': 'application/wasm', '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json'}
 
 
-def make_handler(build: Path, data: Path, live: bool):
+def make_handler(build: Path, data: Path, live: bool, log_file=None):
     class H(http.server.BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
 
@@ -60,6 +63,21 @@ def make_handler(build: Path, data: Path, live: bool):
 
         def do_HEAD(self):
             self.send(head=True)
+
+        def do_POST(self):
+            # /log: the page's engine log lines (gpu.js), appended to --log when given (development: read by tools)
+            n = int(self.headers.get('Content-Length', '0'))
+            body = self.rfile.read(n)
+            if self.path == '/log' and log_file is not None:
+                with open(log_file, 'ab') as fh:
+                    fh.write(body)
+            # /shot?n=N: a presented image from the GPU worker (?shots=N on the page), saved beside --log
+            m = re.match(r'/shot\?n=(\d+)$', self.path)
+            if m and log_file is not None:
+                (Path(log_file).parent / f'shot-{int(m.group(1)):06d}.png').write_bytes(body)
+            self.send_response(204)
+            self.headers_common('text/plain', 0)
+            self.end_headers()
 
         def do_GET(self):
             self.send(head=False)
@@ -114,6 +132,7 @@ def main():
     ap.add_argument('build')
     ap.add_argument('--port', type=int, default=8770)
     ap.add_argument('--live', action='store_true', help='the page and its scripts from src/web')
+    ap.add_argument('--log', help='append the page\'s engine log to this file')
     a = ap.parse_args()
     build = Path(a.build).resolve()
     described = build / 'build.json'
@@ -128,7 +147,7 @@ def main():
         if not (build / 'game.js').is_file() or not (build / 'data.json').is_file() or len(datas) != 1:
             sys.exit(f'{build}: not a web build (build.json, or game.js, data.json and one <name>_data folder)')
         data, live = datas[0], True
-    srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, data, live))
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, data, live, a.log))
     print(f'serving {build} on http://127.0.0.1:{a.port}/' + (' (page from src/web)' if live else ''), flush=True)
     srv.serve_forever()
 

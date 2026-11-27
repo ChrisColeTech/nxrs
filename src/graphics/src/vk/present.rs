@@ -112,10 +112,17 @@ pub fn set_window_raw(
     }
 }
 
-/// The web has no Vulkan surface: the GPU worker draws into the page's canvas (docs/35 W4).
+/// The web: the surface is the page's canvas, which the GPU worker draws into (docs/35 W4, `crate::web`).
 #[cfg(target_os = "emscripten")]
 fn create_surface(_g: &Gpu, _p: &Presenter) -> Result<vk::SurfaceKHR, String> {
-    Err("no Vulkan surface in a web build: the page's GPU worker presents (docs/35 W4)".into())
+    Ok(crate::web::surface())
+}
+
+/// The web: the page's canvas is the window from the start (no front end hands one over).
+#[cfg(target_os = "emscripten")]
+pub(crate) fn web_canvas(p: &mut Presenter) {
+    p.hwnd = 1;
+    p.stale = true;
 }
 
 /// The Vulkan surface of the host window.

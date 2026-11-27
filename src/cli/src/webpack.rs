@@ -1,7 +1,8 @@
 //! The web build's data description (docs/35 W3), written beside `game.js` by `--target web`:
 //!
 //! - `data.json`: `{"version", "title", "files": [[path, size], ...]}`, every file of `<name>_data` (paths relative
-//!   to it, `/`-separated, sorted) except `save/` and the recording below. A file's index is its number in the
+//!   to it, `/`-separated, sorted) except `save/`, `shaders/` (fetched by the GPU on first use) and the recording
+//!   below. A file's index is its number in the
 //!   engine's I/O requests; the version (a hash of the paths, sizes and modification times) keys the page's OPFS
 //!   cache, so a changed data folder starts a fresh cache.
 //! - `bootset.json`: `[[path, [[first, last], ...]], ...]` (inclusive bytes), the ranges a recorded boot read, files
@@ -26,7 +27,9 @@ fn files(data: &Path) -> Result<Vec<(String, u64, u64)>> {
             let p = e.path();
             let rel = p.strip_prefix(root)?.to_string_lossy().replace('\\', "/");
             if e.file_type()?.is_dir() {
-                if rel != "save" {
+                // the shader library is not game data: the GPU fetches a module's files from the server when the
+                // replay first needs it (graphics web::fetch_data; 53,109 modules for Anime Girls)
+                if rel != "save" && rel != "shaders" {
                     walk(root, &p, out)?;
                 }
             } else if rel != RECORDING && rel != MANIFEST {
