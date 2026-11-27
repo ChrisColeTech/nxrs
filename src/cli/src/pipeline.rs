@@ -382,7 +382,9 @@ pub fn modules_c(mods: &[(String, String, String)], entry: &str, web: bool) -> S
     if web {
         // the mod markers find the executable's folder through the OS; a web build has neither (its data, mods
         // included, is packaged by docs/35 W3/W5)
-        s.push_str("#include <stdio.h>\n#include <string.h>\nstatic void nxrs_mod_markers(void) {}\n\n");
+        s.push_str(
+            "#include <stdio.h>\n#include <string.h>\nstatic void nxrs_mod_markers(void) {}\n\n",
+        );
     } else {
         s.push_str(crate::mods::C_DECLS);
         s.push_str(&crate::mods::c_code());
@@ -904,7 +906,11 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     let with = |suffix: &str| PathBuf::from(format!("{}{suffix}", base.display()));
     // Linux: `<name>` and `<name>_code.so`; web: `game.js` and `game.wasm` (the folder is the game's)
     let (exe, dll, data) = if a.web {
-        (outdir.join("game.js"), outdir.join("game.wasm"), with("_data"))
+        (
+            outdir.join("game.js"),
+            outdir.join("game.wasm"),
+            with("_data"),
+        )
     } else if cfg!(target_os = "linux") {
         (with(""), with("_code.so"), with("_data"))
     } else {
@@ -1171,10 +1177,21 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             u.flags.extend(extra.iter().cloned());
         }
         let (cc_name, cc_version) = match &clang.web {
-            Some(e) => (format!("emcc from {}", e.root.display()), clang.version.clone()),
+            Some(e) => (
+                format!("emcc from {}", e.root.display()),
+                clang.version.clone(),
+            ),
             None => (
-                clang.path.file_name().unwrap().to_string_lossy().into_owned(),
-                clang.version.trim_start_matches("clang version ").to_string(),
+                clang
+                    .path
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+                clang
+                    .version
+                    .trim_start_matches("clang version ")
+                    .to_string(),
             ),
         };
         out.say(&format!(
@@ -1261,12 +1278,16 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
                         timings.push(("split", t.elapsed().as_secs_f64()));
                         return Ok(());
                     }
-                    _ => {
+                    (_, e) => {
                         crate::websplit::clean_unsplit(dir);
                         out.say(&format!(
                             "  one module (split: a {} in the data folder and NXRS_WEB_SPLIT=1)",
                             crate::websplit::HOTSET
                         ));
+                        // identical functions folded (WEB-W11)
+                        if let Some(e) = e.as_ref().filter(|_| crate::websplit::fold_on()) {
+                            out.say(&crate::websplit::fold(dir, &e.root)?);
+                        }
                     }
                 }
             }
@@ -1315,7 +1336,12 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         // gzip copies of the modules and descriptions, sent with Content-Encoding (webzip.rs)
         let t = Instant::now();
         let mut zipped = vec![];
-        for f in ["game.wasm", crate::websplit::COLD, "game.js", crate::webpack::MANIFEST] {
+        for f in [
+            "game.wasm",
+            crate::websplit::COLD,
+            "game.js",
+            crate::webpack::MANIFEST,
+        ] {
             match crate::webzip::gzip_file(&outdir.join(f))? {
                 Some((raw, z)) => zipped.push(format!(
                     "{f} {:.1} -> {:.1} MiB",
@@ -1525,8 +1551,19 @@ mod tests {
 
     #[test]
     fn web_builds_go_beside_the_input() {
-        let input = if cfg!(windows) { r"P:\Games\x\game.nsp" } else { "/games/x/game.nsp" };
-        let want = if cfg!(windows) { r"P:\Games\x\nxrs-web\X" } else { "/games/x/nxrs-web/X" };
-        assert_eq!(default_web_outdir(Path::new(input), "X"), PathBuf::from(want));
+        let input = if cfg!(windows) {
+            r"P:\Games\x\game.nsp"
+        } else {
+            "/games/x/game.nsp"
+        };
+        let want = if cfg!(windows) {
+            r"P:\Games\x\nxrs-web\X"
+        } else {
+            "/games/x/nxrs-web/X"
+        };
+        assert_eq!(
+            default_web_outdir(Path::new(input), "X"),
+            PathBuf::from(want)
+        );
     }
 }

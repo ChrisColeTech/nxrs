@@ -56,7 +56,10 @@ fn is_guest(n: &str) -> bool {
 
 /// The optimization level (`NXRS_WEB_OPT`).
 pub fn opt_level() -> u32 {
-    std::env::var("NXRS_WEB_OPT").ok().and_then(|v| v.parse().ok()).map_or(1, |v: u32| v.min(2))
+    std::env::var("NXRS_WEB_OPT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .map_or(1, |v: u32| v.min(2))
 }
 
 /// The hot set of a web build's data folder, when it was recorded.
@@ -67,7 +70,17 @@ pub fn hot_set(data: &Path) -> Option<String> {
 fn run(cmd: &mut Command, what: &str) -> Result<()> {
     let o = cmd.output().with_context(|| format!("running {what}"))?;
     if !o.status.success() {
-        bail!("{what} failed: {}", String::from_utf8_lossy(&o.stderr).chars().rev().take(3000).collect::<String>().chars().rev().collect::<String>());
+        bail!(
+            "{what} failed: {}",
+            String::from_utf8_lossy(&o.stderr)
+                .chars()
+                .rev()
+                .take(3000)
+                .collect::<String>()
+                .chars()
+                .rev()
+                .collect::<String>()
+        );
     }
     Ok(())
 }
@@ -75,9 +88,21 @@ fn run(cmd: &mut Command, what: &str) -> Result<()> {
 /// After a split link (`game.wasm.orig`, the instrumented `game.wasm` emcc also writes, and `game.js.symbols`):
 /// optimizes, splits into `game.wasm` + `game.cold.wasm` with stripped names and writes `game.symbols`. Returns
 /// lines for the build log.
-pub fn split(outdir: &Path, emsdk: &Path, hot: &str, native_base: u64, web_base: u64) -> Result<Vec<String>> {
+pub fn split(
+    outdir: &Path,
+    emsdk: &Path,
+    hot: &str,
+    native_base: u64,
+    web_base: u64,
+) -> Result<Vec<String>> {
     let bin = emsdk.join("upstream").join("bin");
-    let exe = |n: &str| bin.join(if cfg!(windows) { format!("{n}.exe") } else { n.to_string() });
+    let exe = |n: &str| {
+        bin.join(if cfg!(windows) {
+            format!("{n}.exe")
+        } else {
+            n.to_string()
+        })
+    };
     let wasm = outdir.join("game.wasm");
     let orig = outdir.join("game.wasm.orig");
     let map = outdir.join("game.js.symbols");
@@ -85,7 +110,10 @@ pub fn split(outdir: &Path, emsdk: &Path, hot: &str, native_base: u64, web_base:
     let hot = hot_names(hot, native_base, web_base);
     let symbols = std::fs::read_to_string(&map).context("reading game.js.symbols")?;
     let cold = cold_names(&symbols, &hot);
-    let guests = symbols.lines().filter(|l| l.split_once(':').is_some_and(|(_, n)| is_guest(n))).count();
+    let guests = symbols
+        .lines()
+        .filter(|l| l.split_once(':').is_some_and(|(_, n)| is_guest(n)))
+        .count();
     let cold_list = outdir.join("game.cold.txt");
     std::fs::write(&cold_list, cold.join("\n"))?;
     // the optimized, still named module the split reads
@@ -161,6 +189,48 @@ fn sym_path(p: &Path) -> PathBuf {
 
 fn mb(p: &Path) -> f64 {
     std::fs::metadata(p).map_or(0.0, |m| m.len() as f64 / 1048576.0)
+}
+
+/// The one-module build's `wasm-opt` passes (WEB-W11, measured on Beach Bounce's 113.4 MiB module, 8 threads):
+/// identical functions folded into one (`--duplicate-function-elimination`: 16 s, 8.5% of the bytes, 2.3% gzip;
+/// a call reaches the same body, so no run-time cost). Not kept: `-O1` (203 s for 5.8% gzip), `-O2` (272 s),
+/// `-Os` (370 s, 6.8%), `--merge-similar-functions` (19 s, 16.7% raw / 5.1% gzip, but merged guest functions
+/// gain a forwarding call), game code at `-Os` (3.9% gzip, its flag helpers no longer inlined).
+pub const FOLD_PASSES: &[&str] = &["--duplicate-function-elimination"];
+
+/// Whether the one-module build folds identical functions (`NXRS_WEB_FOLD=0` turns it off).
+pub fn fold_on() -> bool {
+    std::env::var("NXRS_WEB_FOLD").as_deref() != Ok("0")
+}
+
+/// Runs `FOLD_PASSES` over `<outdir>\game.wasm` in place (binaryen with 8 threads: the build shares the machine);
+/// a line for the build log.
+pub fn fold(outdir: &Path, emsdk: &Path) -> Result<String> {
+    let exe = emsdk.join("upstream").join("bin").join(if cfg!(windows) {
+        "wasm-opt.exe"
+    } else {
+        "wasm-opt"
+    });
+    let wasm = outdir.join("game.wasm");
+    let tmp = outdir.join("game.fold.wasm");
+    let before = mb(&wasm);
+    let t = std::time::Instant::now();
+    run(
+        Command::new(&exe)
+            .env("BINARYEN_CORES", "8")
+            .arg(&wasm)
+            .args(FOLD_PASSES)
+            .arg("-o")
+            .arg(&tmp),
+        "wasm-opt",
+    )?;
+    std::fs::rename(&tmp, &wasm).context("replacing game.wasm")?;
+    Ok(format!(
+        "  wasm-opt {}: {before:.1} -> {:.1} MiB in {:.1}s (NXRS_WEB_FOLD=0 skips it)",
+        FOLD_PASSES.join(" "),
+        mb(&wasm),
+        t.elapsed().as_secs_f64()
+    ))
 }
 
 /// Removes what an earlier split build left that this one (unsplit) does not make.
