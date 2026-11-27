@@ -224,7 +224,10 @@ const u32 = (p) => DV.getUint32(p, true);
 const i32 = (p) => DV.getInt32(p, true);
 const f32 = (p) => DV.getFloat32(p, true);
 const u64 = (p) => DV.getUint32(p, true) + DV.getUint32(p + 4, true) * 4294967296;
-const text = (p, n) => new TextDecoder().decode(D8.slice(p, p + n));
+// one decoder (WEB-W8: a new one per object description was garbage); the bytes are copied out of the shared ring
+// first (TextDecoder does not read shared memory)
+const decoder = new TextDecoder();
+const text = (p, n) => decoder.decode(D8.slice(p, p + n));
 
 function run(op, p, len) {
   switch (op) {
@@ -528,6 +531,10 @@ function submit(p0, len) {
           break;
         case OP.SET_BIND_GROUP: {
           const idx = u32(a), bg = objs.get(u32(a + 4)), nd = u32(a + 8);
+          if (nd === 0) {
+            (pass || cpass).setBindGroup(idx, bg);
+            break;
+          }
           const offs = [];
           for (let i = 0; i < nd; i++) offs.push(u32(a + 12 + 4 * i));
           (pass || cpass).setBindGroup(idx, bg, offs);

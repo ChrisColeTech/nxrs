@@ -22,7 +22,8 @@ type R = vk::Result;
 /// unbound descriptors.
 #[derive(Default)]
 struct Cache {
-    bgl: HashMap<String, u32>,
+    /// by the hash of their entries (`LayEnt`)
+    bgl: HashMap<u64, u32>,
     playout: HashMap<[u32; 4], u32>,
     rpipe: HashMap<u64, u32>,
     cpipe: HashMap<u64, u32>,
@@ -37,6 +38,49 @@ struct Cache {
     dummy_tex: HashMap<(&'static str, &'static str, bool), u32>,
     dummy_sampler: [u32; 2],
     nearest: HashMap<u32, u32>,
+}
+
+/// A bind group layout entry (binding, visibility, then the kind's facts), hashed for the layout cache; JSON only
+/// when a new layout is made.
+#[derive(Hash)]
+enum LayEnt {
+    Buffer(u32, u32, &'static str),
+    /// sample type, view dimension, multisampled
+    Texture(u32, u32, &'static str, &'static str, bool),
+    /// access, format, view dimension
+    StorageTexture(u32, u32, &'static str, &'static str, &'static str),
+    Sampler(u32, u32, &'static str),
+}
+
+impl LayEnt {
+    fn json(&self) -> serde_json::Value {
+        match *self {
+            LayEnt::Buffer(b, v, ty) => serde_json::json!({ "binding": b, "visibility": v, "buffer": { "type": ty } }),
+            LayEnt::Texture(b, v, st, dim, multi) => serde_json::json!({ "binding": b, "visibility": v,
+                "texture": { "sampleType": st, "viewDimension": dim, "multisampled": multi } }),
+            LayEnt::StorageTexture(b, v, access, format, dim) => serde_json::json!({ "binding": b, "visibility": v,
+                "storageTexture": { "access": access, "format": format, "viewDimension": dim } }),
+            LayEnt::Sampler(b, v, ty) => serde_json::json!({ "binding": b, "visibility": v, "sampler": { "type": ty } }),
+        }
+    }
+}
+
+/// A bind group entry (binding, then the object id and for a buffer its range), hashed for the group cache.
+#[derive(Hash)]
+enum GrpEnt {
+    Buffer(u32, u32, u64, u64),
+    View(u32, u32),
+    Sampler(u32, u32),
+}
+
+impl GrpEnt {
+    fn json(&self) -> serde_json::Value {
+        match *self {
+            GrpEnt::Buffer(b, id, off, size) => serde_json::json!({ "binding": b, "buffer": id, "offset": off, "size": size }),
+            GrpEnt::View(b, id) => serde_json::json!({ "binding": b, "view": id }),
+            GrpEnt::Sampler(b, id) => serde_json::json!({ "binding": b, "sampler": id }),
+        }
+    }
 }
 
 fn cache() -> std::sync::MutexGuard<'static, Cache> {
@@ -560,8 +604,8 @@ impl<'a> Rs<'a> {
             return None;
         }
         binds.sort_by_key(|b| b.0.binding);
-        let mut layout = Vec::new();
-        let mut entries = Vec::new();
+        let mut layout: Vec<LayEnt> = Vec::new();
+        let mut entries: Vec<GrpEnt> = Vec::new();
         // first pass: textures decide whether their paired samplers must be non-filtering
         let mut unfilterable: Vec<u32> = Vec::new();
         for (b, vis) in &binds {
@@ -579,7 +623,7 @@ impl<'a> Rs<'a> {
                     } else {
                         "storage"
                     };
-                    layout.push(serde_json::json!({ "binding": b.binding, "visibility": vis, "buffer": { "type": ty } }));
+                    layout.push(LayEnt::Buffer(b.binding, *vis, ty));
                     let (id, off, size) = match desc {
                         Desc::Buf { buf, off, range } => {
                             let bsize = self.o.buf.get(&buf).map_or(0, |x| x.size);
@@ -614,7 +658,7 @@ impl<'a> Rs<'a> {
                     } else {
                         (id, off, size)
                     };
-                    entries.push(serde_json::json!({ "binding": b.binding, "buffer": id, "offset": off, "size": size }));
+                    entries.push(GrpEnt::Buffer(b.binding, id, off, size));
                 }
                 Kind::Texture { sample, dim, multi } => {
                     let mut view = match desc {
@@ -637,22 +681,20 @@ impl<'a> Rs<'a> {
                     let st = match view.and_then(|v| fmt::tex(v.format)) {
                         Some(t) if *sample == "float" && !t.filter => "unfilterable-float",
                         Some(t) if *sample == "float" && t.depth && !t.stencil => "unfilterable-float",
-                        _ => sample,
+                        _ => *sample,
                     };
                     if st == "unfilterable-float" {
                         unfilterable.push(b.src_binding);
                     }
-                    layout.push(serde_json::json!({ "binding": b.binding, "visibility": vis,
-                        "texture": { "sampleType": st, "viewDimension": dim, "multisampled": multi } }));
+                    layout.push(LayEnt::Texture(b.binding, *vis, st, *dim, *multi));
                     let id = match view {
                         Some(v) => v.id,
                         None => dummy_texture(dim, st, *multi),
                     };
-                    entries.push(serde_json::json!({ "binding": b.binding, "view": id }));
+                    entries.push(GrpEnt::View(b.binding, id));
                 }
                 Kind::StorageTexture { format, access, dim } => {
-                    layout.push(serde_json::json!({ "binding": b.binding, "visibility": vis,
-                        "storageTexture": { "access": access, "format": format, "viewDimension": dim } }));
+                    layout.push(LayEnt::StorageTexture(b.binding, *vis, *access, *format, *dim));
                     let id = match desc {
                         Desc::Img { view, .. } => self.o.view.get(&view).map_or(0, |v| v.id),
                         _ => 0,
@@ -661,7 +703,7 @@ impl<'a> Rs<'a> {
                         red_once("an unbound storage image: the draw is refused");
                         return Some((0, 0));
                     }
-                    entries.push(serde_json::json!({ "binding": b.binding, "view": id }));
+                    entries.push(GrpEnt::View(b.binding, id));
                 }
                 Kind::Sampler { .. } => {}
             }
@@ -678,7 +720,7 @@ impl<'a> Rs<'a> {
             } else {
                 "filtering"
             };
-            layout.push(serde_json::json!({ "binding": b.binding, "visibility": vis, "sampler": { "type": ty } }));
+            layout.push(LayEnt::Sampler(b.binding, *vis, ty));
             let s = match desc {
                 Desc::Img { sampler, .. } | Desc::Sampler(sampler) => self.o.sampler.get(&sampler).copied(),
                 _ => None,
@@ -688,23 +730,25 @@ impl<'a> Rs<'a> {
                 Some(id) => id,
                 None => cache().dummy_sampler[comparison as usize],
             };
-            entries.push(serde_json::json!({ "binding": b.binding, "sampler": id }));
+            entries.push(GrpEnt::Sampler(b.binding, id));
         }
-        let lkey = serde_json::Value::Array(layout).to_string();
+        // WEB-W8: the caches are keyed by the entries' plain values; JSON is written only for a layout or group not
+        // seen before (building and printing JSON for every draw's groups was most of the web replay's "sets" time)
+        let lkey = h64(|h| layout.hash(h));
         let mut c = cache();
         let bgl = match c.bgl.get(&lkey) {
             Some(&id) => id,
             None => {
                 let id = obj::new_id();
-                ring::push(op::BGL, format!("{{\"id\":{id},\"entries\":{lkey}}}").as_bytes());
+                let lj = serde_json::Value::Array(layout.iter().map(LayEnt::json).collect()).to_string();
+                ring::push(op::BGL, format!("{{\"id\":{id},\"entries\":{lj}}}").as_bytes());
                 c.bgl.insert(lkey, id);
                 id
             }
         };
-        let ekey = serde_json::Value::Array(entries).to_string();
         let k = h64(|h| {
             bgl.hash(h);
-            ekey.hash(h);
+            entries.hash(h);
         });
         let bg = match c.bg.get(&k) {
             Some(&id) => id,
@@ -713,6 +757,7 @@ impl<'a> Rs<'a> {
                     self.retired.extend(c.bg.drain().map(|(_, id)| id));
                 }
                 let id = obj::new_id();
+                let ekey = serde_json::Value::Array(entries.iter().map(GrpEnt::json).collect()).to_string();
                 ring::push(op::BINDGROUP, format!("{{\"id\":{id},\"layout\":{bgl},\"entries\":{ekey}}}").as_bytes());
                 c.bg.insert(k, id);
                 id

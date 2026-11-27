@@ -166,7 +166,7 @@ impl Clang {
             return GEN_FLAGS
                 .iter()
                 .filter(|f| **f != MARCH && !f.starts_with("-fms-runtime-lib"))
-                .map(|f| if *f == "-O1" { WEB_GEN_OPT } else { f })
+                .map(|f| if *f == "-O1" { &WEB_GEN_OPT } else { f })
                 .chain(WEB_FLAGS)
                 .map(|s| s.to_string())
                 .collect();
