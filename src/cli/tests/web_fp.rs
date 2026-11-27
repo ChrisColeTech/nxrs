@@ -8,7 +8,9 @@ use std::process::Command;
 #[test]
 #[ignore]
 fn web_fz_fast_paths_and_relaxed_fma_match_the_slow_paths() {
-    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+    let repo = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..");
     let emsdk = std::env::var_os("NXRS_EMSDK")
         .map(PathBuf::from)
         .unwrap_or_else(|| repo.join("build").join("tools").join("emsdk"));
@@ -28,7 +30,9 @@ fn web_fz_fast_paths_and_relaxed_fma_match_the_slow_paths() {
     std::fs::create_dir_all(&out).unwrap();
     let js = out.join("fpcheck.js");
     let mut path = vec![py_dir.clone()];
-    path.extend(std::env::split_paths(&std::env::var_os("PATH").unwrap_or_default()));
+    path.extend(std::env::split_paths(
+        &std::env::var_os("PATH").unwrap_or_default(),
+    ));
     let st = Command::new(py_dir.join("python.exe"))
         .arg("-E")
         .arg(emsdk.join("upstream").join("emscripten").join("emcc.py"))
@@ -38,8 +42,19 @@ fn web_fz_fast_paths_and_relaxed_fma_match_the_slow_paths() {
         .env("PATH", std::env::join_paths(path).unwrap())
         .args(["-O2", "-std=gnu11", "-fno-strict-aliasing", "-w"])
         .args(["-sMEMORY64=1", "-msimd128", "-mrelaxed-simd"])
-        .arg(format!("-I{}", repo.join("src").join("translator").join("runtime").display()))
-        .arg(repo.join("src").join("cli").join("tests").join("web_fpcheck.c"))
+        .arg(format!(
+            "-I{}",
+            repo.join("src")
+                .join("translator")
+                .join("runtime")
+                .display()
+        ))
+        .arg(
+            repo.join("src")
+                .join("cli")
+                .join("tests")
+                .join("web_fpcheck.c"),
+        )
         .arg("-o")
         .arg(&js)
         .status()
@@ -49,5 +64,8 @@ fn web_fz_fast_paths_and_relaxed_fma_match_the_slow_paths() {
     let text = String::from_utf8_lossy(&o.stdout).to_string();
     let _ = std::fs::remove_dir_all(&out);
     assert!(o.status.success(), "{text}");
-    assert!(text.contains(", 0 differ; FFMA") && text.trim_end().ends_with(" 0 differ"), "{text}");
+    assert!(
+        text.contains(", 0 differ; FFMA") && text.trim_end().ends_with(" 0 differ"),
+        "{text}"
+    );
 }

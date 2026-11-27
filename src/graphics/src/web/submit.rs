@@ -18,6 +18,12 @@ use std::sync::{Arc, Mutex, OnceLock};
 
 type R = vk::Result;
 
+/// Bind groups the cache keeps before it retires them all (they are made again on use). WEB-W8b: the GPU worker's
+/// heap is marked ~160 times a second (V8 counts the game's ~9 GiB shared linear memory as the worker's external
+/// memory, so every collection ends near its global limit), and every live WebGPU wrapper is marked each time: with
+/// 50,000 the worker held ~15,000 bind groups (93% of its objects, many naming views of destroyed textures).
+const BG_CACHE_MAX: usize = 4096;
+
 /// Objects made once: bind group layouts, pipeline layouts, pipelines and bind groups by content; stand-ins for
 /// unbound descriptors.
 #[derive(Default)]
@@ -753,7 +759,7 @@ impl<'a> Rs<'a> {
         let bg = match c.bg.get(&k) {
             Some(&id) => id,
             None => {
-                if c.bg.len() > 50_000 {
+                if c.bg.len() >= BG_CACHE_MAX {
                     self.retired.extend(c.bg.drain().map(|(_, id)| id));
                 }
                 let id = obj::new_id();

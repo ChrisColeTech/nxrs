@@ -115,8 +115,13 @@ pub struct Emsdk {
 /// position, so guest indirect-branch chains keep the host stack flat.
 /// `-mrelaxed-simd`: the FP helpers' fused multiply-add as the relaxed madd (src/translator/runtime/simd_fp.h `FFMA`)
 /// instead of a software fmaf call (WEB-W8b); Chrome has relaxed SIMD since 114.
-pub const WEB_FLAGS: &[&str] =
-    &["-sMEMORY64=1", "-pthread", "-msimd128", "-mrelaxed-simd", "-mtail-call"];
+pub const WEB_FLAGS: &[&str] = &[
+    "-sMEMORY64=1",
+    "-pthread",
+    "-msimd128",
+    "-mrelaxed-simd",
+    "-mtail-call",
+];
 
 /// The web build's boundary between generated code and Rust (asm.rs on the other hosts), compiled into each web link.
 const WEB_BOUNDARY: &str = include_str!("../../runtime/web/boundary.c");
