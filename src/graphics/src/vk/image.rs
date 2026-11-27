@@ -1202,6 +1202,28 @@ fn twin_levels(im: &Image) -> u32 {
 /// Twins by (texture serial, kind).
 static CUBE_TWINS: Mutex<Option<HashMap<(u64, TwinKind), CubeTwin>>> = Mutex::new(None);
 
+/// Every twin view made (raw handles; a handle Vulkan reuses after a twin went only makes a set unseedable), and their
+/// count: a stage set holding one is never taken into another submission (exec's segment seeding), since a twin is
+/// copied from its image by each submission that samples it.
+static TWIN_VIEWS: std::sync::RwLock<std::collections::BTreeSet<u64>> =
+    std::sync::RwLock::new(std::collections::BTreeSet::new());
+static TWINS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// Whether `v` is a twin view (`cube_twin_view`).
+pub fn is_twin_view(v: vk::ImageView) -> bool {
+    TWINS.load(std::sync::atomic::Ordering::Acquire) != 0
+        && TWIN_VIEWS.read().unwrap().contains(&vk::Handle::as_raw(v))
+}
+
+/// Moves whenever the CPU writes a texture's storage behind the graphics layer (`storage_written`: WriteTexels, a
+/// host decoder): its image uploads at the next use's preparation. A stage set's texture slots resolved before a move
+/// are resolved again before the set is used in another submission (exec's segment seeding).
+static TEX_DUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub fn tex_due() -> u64 {
+    TEX_DUE.load(std::sync::atomic::Ordering::Acquire)
+}
+
 /// Whether an image is a single-sample, one-layer 2D colour image (any aspect): the shape a 3D twin copies.
 pub fn volume_twin_fits(
     ty: vk::ImageType,
@@ -2073,6 +2095,8 @@ impl Gpu {
                 return None;
             }
         };
+        TWIN_VIEWS.write().unwrap().insert(vk::Handle::as_raw(view));
+        TWINS.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         t.views.insert(key, view);
         Some(view)
     }
@@ -4340,6 +4364,8 @@ impl Gpu {
     /// The CPU wrote [lo, lo + n) behind the graphics layer's back (WriteTexels, a host decoder): every image over
     /// it uploads from its storage at the next submission, also one the GPU wrote before.
     pub fn storage_written(&self, lo: u64, n: u64) {
+        // a stage set's texture slots resolved before this are not taken into another submission (`tex_due`)
+        TEX_DUE.fetch_add(1, std::sync::atomic::Ordering::AcqRel);
         let mut imgs = self.images.lock().unwrap();
         let max = imgs.max_size;
         let hit: Vec<u64> = imgs

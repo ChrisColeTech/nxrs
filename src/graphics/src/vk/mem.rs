@@ -301,6 +301,29 @@ struct Extents {
 
 static EXTENTS: std::sync::RwLock<Option<std::sync::Arc<Extents>>> = std::sync::RwLock::new(None);
 
+/// Every pool as of a `POOL_GEN`, by base: (base, size, buffer, buffer offset of base), the buffer null unless the pool
+/// is plain (one buffer made, no granules, no windows, no deferred CPU writes): what `resolve` answers for a plain
+/// pool's range without the pools' lock, as its per-thread `LAST` entries do.
+struct Plain {
+    gen: u64,
+    v: Vec<(u64, u64, vk::Buffer, u64)>,
+}
+
+static PLAIN: std::sync::RwLock<Option<std::sync::Arc<Plain>>> = std::sync::RwLock::new(None);
+
+/// [a, a + n) in a plain pool of `v` (the pool with the highest base at or below `a`, as `find`): (base, size, the
+/// next pool's base, buffer, buffer offset of base, the pool) for `resolve`'s `LAST`; None when it is in no pool or
+/// the pool is not plain.
+fn plain_find(v: &[(u64, u64, vk::Buffer, u64)], a: u64, n: u64) -> Option<(u64, u64, u64, vk::Buffer, u64, u64)> {
+    let i = v.partition_point(|x| x.0 <= a);
+    let (base, size, buf, off) = *v.get(i.checked_sub(1)?)?;
+    if a + n > base + size || buf == vk::Buffer::null() {
+        return None;
+    }
+    let next = v.get(i).map(|x| x.0).unwrap_or(u64::MAX);
+    Some((base, size, next, buf, off, base))
+}
+
 /// `room` from an extents copy: the bytes to the end of the window holding `a` (0 in no pool) and that window (start,
 /// end, the next pool's base) to remember.
 fn room_from(e: &Extents, a: u64) -> (u64, Option<(u64, u64, u64)>) {
@@ -338,6 +361,20 @@ mod extents_tests {
         // (as the map's `room`: to the window's end; the next pool's base only bounds the remembered window)
         assert_eq!(room_from(&e, 0x5000), (0x1000, Some((0x5000, 0x6000, 0x5800))), "second window");
         assert_eq!(room_from(&e, 0x5880), (0x80, Some((0x5800, 0x5900, u64::MAX))));
+    }
+
+    /// A plain pool's range resolves from the copy; a range past its pool, in no pool, or in a pool that is not plain
+    /// (null buffer: granules, windows, deferred writes, no buffer yet) goes to the pools' map.
+    #[test]
+    fn plain_pools_resolve_from_the_copy() {
+        use ash::vk::Handle;
+        let b = vk::Buffer::from_raw(7);
+        let v = vec![(0x1000, 0x1000, b, 0x100), (0x3000, 0x1000, vk::Buffer::null(), 0), (0x3800, 0x100, b, 0)];
+        assert_eq!(plain_find(&v, 0x1800, 0x10), Some((0x1000, 0x1000, 0x3000, b, 0x100, 0x1000)));
+        assert_eq!(plain_find(&v, 0x1ff0, 0x20), None, "past the pool's end");
+        assert_eq!(plain_find(&v, 0x800, 4), None, "in no pool");
+        assert_eq!(plain_find(&v, 0x3100, 4), None, "not plain");
+        assert_eq!(plain_find(&v, 0x3810, 4), Some((0x3800, 0x100, u64::MAX, b, 0, 0x3800)), "a pool laid over");
     }
 }
 
@@ -1821,7 +1858,42 @@ fn resolve_in(
     if let Some((_, lo, _, _, buf, off, pool)) = hit {
         return Some((buf, off + (a - lo), pool));
     }
+    // the lane caches: a plain pool's range from the copy of this generation, without the pools' lock
+    let plain = lane_caches() && !super::gate::all();
+    if plain {
+        let cur = PLAIN.read().unwrap().as_ref().filter(|s| s.gen == gen).cloned();
+        if let Some(s) = cur {
+            if let Some((lo, size, next, buf, off, pool)) = plain_find(&s.v, a, n1) {
+                LAST.with(|l| {
+                    let mut v = l.get();
+                    v.rotate_right(1);
+                    v[0] = (gen, lo, size, next, buf, off, pool);
+                    l.set(v);
+                });
+                return Some((buf, off + (a - lo), pool));
+            }
+        }
+    }
     let mut m = super::gate::lock(&g.mem, 1);
+    if plain {
+        // the copy made again under the lock when it is older than the pools (every change of them holds the lock)
+        let now = POOL_GEN.load(Ordering::Acquire);
+        if PLAIN.read().unwrap().as_ref().is_none_or(|s| s.gen != now) {
+            let v = m
+                .by_base
+                .values()
+                .map(|p| {
+                    let plain = p.gran.is_none() && p.win == 0 && p.deferred.is_empty();
+                    let (buf, off) = match &p.buf {
+                        Some(b) if plain => (b.buf, p.buf_off),
+                        _ => (vk::Buffer::null(), 0),
+                    };
+                    (p.base, p.size, buf, off)
+                })
+                .collect();
+            *PLAIN.write().unwrap() = Some(std::sync::Arc::new(Plain { gen: now, v }));
+        }
+    }
     let Some(b) = find(&m, a, n1) else {
         static N: AtomicU64 = AtomicU64::new(0);
         if N.fetch_add(1, Ordering::Relaxed) < 8 {
