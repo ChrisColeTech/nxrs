@@ -122,7 +122,7 @@ The program is nxrs-build itself; working directory: its folder; stdout and stde
 | What | Arguments (`nxrsBuildArguments`, `nxrsUpdateInfoArguments`, `nxrsDlcSyncArguments`) |
 |---|---|
 | Build | `build <source> --outdir <buildDir> -o <outputName> --jobs <n> --machine [--no-update \| --update <pkg>] [--keys <prod.keys>]` |
-| Build for web | the same with `--outdir <webDir>` and `--target web` last (`model::args::build_web`); below |
+| Build for web | the same with `--outdir <webDir>`, then `--shaders-from <buildDir>\<name>_data` (when the game has a build folder) and `--target web` last (`model::args::build_web`); below |
 | Update probe | `update-info --game <source> [--keys <prod.keys>] <pkg>...` |
 | DLC | `dlc sync --datadir <buildDir>\<name>_data [--keys <prod.keys>] [<pkg>...]` (Play, Install DLC, Remove, after a build) |
 | Version | `contract` |
@@ -178,6 +178,12 @@ context menu; `nxrs.exe --select-title <title> --build-web` headless) into the g
 entry does not change (no `builtSource`, no INI, no DLC sync). The run's lines, `@progress` and `@result` are a
 build's; its log is `<webDir>\<outputName>.build.log`. Success: exit 0 **and** `<webDir>\build.json` and
 `<webDir>\game.wasm` exist.
+
+`--shaders-from <data folder>` (WEB-W7): the translated shaders of another build of the title are imported into
+the web build's library (every complete record its `shaders\spv\` and `shaders\live\<key>\` hold that the web library
+lacks). A title that makes its shaders at run time (Ren'Py, Unity variants) has none for the build to find, and a
+browser cannot run the translator, so its web build draws only the shaders its native build's runs translated. A
+folder without a library is a line in the log, not a failure.
 
 ```
 <webDir>\index.html, boot.js, input.js, saves.js, io-worker.js, audio-worklet.js   the page and its workers

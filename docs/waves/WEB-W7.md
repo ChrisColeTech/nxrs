@@ -58,6 +58,26 @@ NativeAOT executable) on a thread; a browser cannot run it, so on the web a run-
 | `src/graphics/src/web/*` | only if the first frames show a web-device fault |
 | `docs/LAUNCHER_CONTRACT.md`, `docs/35-WEB-TARGET-PLAN.md` | the flag; the W7 row |
 
-## 4. Results
+## 4. Results (2026-11-26)
 
-(filled in as the wave lands)
+Evidence in the main checkout's `build/WEB/W7/` (Chrome 158 over CDP, own profile per run, cold OPFS, dev_server.py on
+port 8775; keyboard X = A, W3's input block).
+
+| Item | State | Evidence |
+|---|---|---|
+| Cause of the black frames | Found: every draw skipped for a missing shader (16 run-time shaders, no translator in the browser) | W5's `log.txt` (the `page.log` beside it is Anime Girls'); `run1/page.log`: 0 draws skipped after the fix |
+| `--shaders-from` import (`shaderimport.rs`) | Built (`3887da3`) | `shaders: 16 imported from ...nsw2u_data`; test `shaderimport::tests::imports_what_the_library_lacks` |
+| Web live translator | Built (`3887da3`): a missing shader is marked failed at once with a red line naming the cause (no 3 s wait per draw on a translator that can never answer) | |
+| Launcher Build for web | Built (`02b223f`): `--shaders-from <buildDir>\<name>_data` before `--target web` | `model::web_tests` updated; launcher tests and clippy clean |
+| False "no translated shaders" red line on the web | Fixed (`02b223f`): manifest looked for on the page's server | `run7-validate/page.log`: 0 red lines |
+| Menu, then story scenes | Shown, same as native | `run7-validate/01-boot..04-min3.png` against `build/play/20261126-182220-web-w3-native/sheet-1.png`: title menu; Grandma Umi with the same line at min_1; Tomoyo in the hospital at min_2 (a line later than native's); Yuuki at the Beach Bounce desk with the same line at min_3 |
+| Audio | Running | `audio: output, last 5 s: RMS ... -20.8 dBFS`; underruns counted (260 by 210 s in the loaded run7) |
+| FPS | **55.6 mean** over 60-230 s (30 windows, 42.8-59.8), below the 60 goal | `run8-measure` (Mario Kart World running from another wave); `run7-validate` 45.0 while another wave's wasm-opt held ~22 cores; slow frames have replay 1-11 ms, so the time is outside the replay (next step: where the game's own frame goes) |
+
+**Not a bug (checked):** the first run's shots showed the dialogue cut after two letters. The shot was taken 0.9 s
+after an A press (the typewriter mid-line); native shoots 4 s after. Shots 3-4 s after the press (runs 3, 5, 6, 7)
+show the whole line with the default by-use sync, with `NXGFX_WEB_USE_SYNC=0` and with `NXGFX_UPLOAD_SKIP=0` alike.
+
+**Rebuilds:** the prebuild rewrites the library's manifest, so a web rebuild without `--shaders-from` lists none of
+the imported keys; their `spv/` files stay and the web reads them by key (`vk::shader` fetches `shaders/spv/<key>.spv`),
+so drawing does not depend on the manifest. Build for web always passes the flag.
