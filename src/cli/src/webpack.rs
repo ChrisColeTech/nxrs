@@ -32,7 +32,11 @@ fn files(data: &Path) -> Result<Vec<(String, u64, u64)>> {
                 if rel != "save" && rel != "shaders" {
                     walk(root, &p, out)?;
                 }
-            } else if rel != RECORDING && rel != MANIFEST && rel != crate::websplit::HOTSET {
+            } else if rel != RECORDING
+                && rel != MANIFEST
+                && rel != crate::websplit::HOTSET
+                && rel != shaders::pack::RECORDING
+            {
                 let m = e.metadata()?;
                 let t = m
                     .modified()

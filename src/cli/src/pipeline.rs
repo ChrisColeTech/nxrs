@@ -1310,6 +1310,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         }
         // what the page streams and prefetches (docs/35 W3)
         out.say(&crate::webpack::write(&outdir, &data, &name)?);
+        // the recorded run's shader modules as a few packs the page fetches whole (webshaders.rs, WEB-W6b)
+        out.say(&crate::webshaders::write(&outdir, &data)?);
         // gzip copies of the modules and descriptions, sent with Content-Encoding (webzip.rs)
         let t = Instant::now();
         let mut zipped = vec![];
