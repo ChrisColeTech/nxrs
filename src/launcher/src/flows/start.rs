@@ -129,7 +129,26 @@ impl App {
             title: title.into(),
             text: text.into(),
             error,
+            links: Vec::new(),
         });
+    }
+    /// A message with web pages to open (About): each a ghost button at its footer's leading side.
+    pub fn message_with_links(
+        &mut self,
+        (context, title): (&str, &str),
+        text: &str,
+        links: &[(&str, &str)],
+    ) {
+        self.message(context, title, text, false);
+        if !self.interactive {
+            return; // printed; no box was opened
+        }
+        if let Some(Surface::Message { links: kept, .. }) = self.surfaces.last_mut() {
+            *kept = links
+                .iter()
+                .map(|(l, u)| (l.to_string(), u.to_string()))
+                .collect();
+        }
     }
     /// A question: its one button (the verb) asks for `yes`; the X and Escape for `no`.
     pub fn question(&mut self, ask: Ask, yes: Action, no: Option<Action>, default_no: bool) {

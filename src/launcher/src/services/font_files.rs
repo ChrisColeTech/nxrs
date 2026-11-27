@@ -1,4 +1,5 @@
-//! The system's UI fonts: Segoe UI and its semibold, Cascadia Mono or Consolas, and a CJK face for
+//! The system's UI fonts: Segoe UI and its semibold, Cascadia Mono or Consolas (and Consolas Bold for
+//! the title bar's wordmark), and a CJK face for
 //! Japanese titles (Windows); Noto / DejaVu on Linux.
 
 /// (bytes, face index in a collection) of each role; None when the system has none of its files.
@@ -6,6 +7,8 @@ pub struct FontFiles {
     pub ui: Option<(Vec<u8>, u32)>,
     pub semibold: Option<(Vec<u8>, u32)>,
     pub mono: Option<(Vec<u8>, u32)>,
+    /// the title bar's wordmark
+    pub mono_bold: Option<(Vec<u8>, u32)>,
     pub cjk: Option<(Vec<u8>, u32)>,
     /// marks the UI faces lack (the doctor's ✓ and ✗)
     pub symbols: Option<(Vec<u8>, u32)>,
@@ -32,6 +35,7 @@ pub fn load() -> FontFiles {
             ui: first(&p(&["segoeui.ttf"])),
             semibold: first(&p(&["seguisb.ttf", "segoeuib.ttf"])),
             mono: first(&p(&["CascadiaMono.ttf", "consola.ttf"])),
+            mono_bold: first(&p(&["consolab.ttf"])),
             cjk: first(&p(&[
                 "YuGothM.ttc",
                 "meiryo.ttc",
@@ -52,6 +56,9 @@ pub fn load() -> FontFiles {
                 "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf",
             ])),
             mono: first(&p(&["/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf"])),
+            mono_bold: first(&p(&[
+                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
+            ])),
             cjk: first(&p(&[
                 "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
                 "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",

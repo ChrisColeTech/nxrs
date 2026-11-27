@@ -52,8 +52,10 @@ impl App {
             Action::ToggleConsole => self.lib.console.visible = !self.lib.console.visible,
             Action::About => {
                 use crate::constants::words_contexts as c;
-                self.message(c::ABOUT, c::ABOUT_HEADING, w::ABOUT, false)
+                let what = (c::ABOUT, c::ABOUT_HEADING);
+                self.message_with_links(what, w::ABOUT, &w::ABOUT_LINKS)
             }
+            Action::OpenUrl(address) => shell_open::url(&address),
             Action::OpenBuildFolder => self.open_folder(false),
             Action::OpenSaveFolder => self.open_folder(true),
             Action::ViewGameLog => self.open_game_log(),

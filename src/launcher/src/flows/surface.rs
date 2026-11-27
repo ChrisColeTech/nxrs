@@ -75,6 +75,8 @@ pub enum Surface {
         title: String,
         text: String,
         error: bool,
+        /// the message's own verbs: (label, web address) ghost buttons at the footer's leading side
+        links: Vec<(String, String)>,
     },
     Question {
         ask: Ask,

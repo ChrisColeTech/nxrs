@@ -33,6 +33,8 @@ pub enum Action {
     ViewConsole,
     ToggleConsole,
     About,
+    /// a web page in the default browser (About's Website and GitHub)
+    OpenUrl(String),
     OpenBuildFolder,
     OpenSaveFolder,
     ViewGameLog,

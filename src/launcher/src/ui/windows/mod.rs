@@ -148,7 +148,8 @@ fn body(ui: &mut egui::Ui, app: &mut App, surface: &mut Surface) -> Reply {
             title,
             text,
             error,
-        } => message::message(ui, heading(context, title), text, *error),
+            links,
+        } => message::message(ui, heading(context, title), text, (*error, links)),
         Surface::Question {
             ask,
             yes,
