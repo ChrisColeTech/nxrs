@@ -865,6 +865,8 @@ pub fn pool_add(p: &pool_t) {
         old
     };
     if let Some(o) = old {
+        super::image::HOW[11].fetch_add(1, Ordering::Relaxed);
+        g.drop_pool_images(o.base, o.size);
         release(g, o);
     }
     g.tables.requeue_buf_texs(base, base + p.size);
@@ -934,7 +936,8 @@ pub fn pool_del(base: u64) {
         p
     };
     if let Some(p) = p {
-        g.images.lock().unwrap().drop_pool(base, p.size);
+        super::image::HOW[10].fetch_add(1, Ordering::Relaxed);
+        g.drop_pool_images(base, p.size);
         g.tables.requeue_buf_texs(base, base + p.size);
         release(g, p);
     }
@@ -947,6 +950,12 @@ fn find(m: &Pools, a: u64, n: u64) -> Option<u64> {
     } else {
         None
     }
+}
+
+/// (OOT-MEM census) how many of `ranges` lie in no live memory pool.
+pub fn outside_pools(g: &Gpu, ranges: &[(u64, u64)]) -> usize {
+    let m = g.mem.lock().unwrap();
+    ranges.iter().filter(|&&(a, n)| find(&m, a, n).is_none()).count()
 }
 
 /// Whether [a, a + n) lies in one known memory pool.

@@ -1121,8 +1121,9 @@ fn from_storage(t: &tex_t) -> bool {
 }
 
 /// (OOT-MEM census) images made new, parked ones reused, taken over, aliases; released, destroyed; nvnTexture
-/// Initialize, Finalize, Initialize over a live object; images made for an object already finalized
-pub static HOW: [std::sync::atomic::AtomicU64; 10] = [const { std::sync::atomic::AtomicU64::new(0) }; 10];
+/// Initialize, Finalize, Initialize over a live object; images made for an object already finalized; memory pools
+/// finalized, replaced by a new pool at the same base; images released with their pool
+pub static HOW: [std::sync::atomic::AtomicU64; 13] = [const { std::sync::atomic::AtomicU64::new(0) }; 13];
 fn how_inc(i: usize) {
     HOW[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
 }
@@ -1131,7 +1132,14 @@ const PARK_FRAMES: u64 = 8;
 const PARK_MAX: usize = 512;
 
 impl Images {
-    pub fn drop_pool(&mut self, _base: u64, _size: u64) {}
+    /// The texture objects with an image whose storage starts in [base, base + size) (a memory pool's; images of
+    /// sparse virtual pools are not listed by address).
+    pub fn serials_in(&self, base: u64, size: u64) -> Vec<u64> {
+        self.by_addr
+            .range(base..base.saturating_add(size))
+            .flat_map(|(_, v)| v.iter().copied())
+            .collect()
+    }
 
     /// Where texture object `serial`'s image is (diagnostics): live, parked after its release, or gone.
     pub fn whereabouts(&self, serial: u64) -> &'static str {
@@ -1968,13 +1976,16 @@ impl Gpu {
             .collect();
         sp.sort_unstable();
         let mut covered: std::collections::HashSet<u64> = Default::default();
+        let mut same_start = 0u64;
         for i in 0..sp.len() {
-            let (_, hi, s) = sp[i];
+            let (lo, hi, s) = sp[i];
             for &(lo2, _, s2) in sp[i + 1..].iter().take(4096) {
                 if lo2 >= hi {
                     break;
                 }
-                covered.insert(s.min(s2));
+                if covered.insert(s.min(s2)) && lo2 == lo {
+                    same_start += 1;
+                }
             }
         }
         let mut groups: HashMap<String, (u64, u64)> = HashMap::new();
@@ -2014,10 +2025,24 @@ impl Gpu {
             .map(|(k, (n, b))| format!("{k} x{n} ({} MB)", b >> 20))
             .collect();
         let h = |i: usize| HOW[i].load(std::sync::atomic::Ordering::Relaxed);
+        let live = imgs.by_serial.len();
+        let ranges: Vec<(u64, u64)> = imgs
+            .by_serial
+            .values()
+            .filter(|im| !im.tex.mem.is_null() && !crate::nvn::vpool::is_sparse(im.tex.mem as u64))
+            .map(|im| (im.tex.mem as u64, im.tex.l.size.max(1)))
+            .collect();
+        drop(imgs);
+        // (the tables' and pools' locks after the images lock is let go)
+        let slotted = self.tables.ids_of(&covered).iter().map(|e| e.1).collect::<std::collections::HashSet<u64>>().len();
+        let orphans = super::mem::outside_pools(self, &ranges);
         format!(
-            "image census: {} live ({} MB with memory, {alias_n} aliases); since start: inits {} finalizes {} re-inits {}, made new {} parked reused {} taken over {} alias {} (for a finalized object {}), released {} destroyed {}; {cn} live under a newer live image's storage ({} MB): {}",
-            imgs.by_serial.len(),
+            "image census: {} live ({} MB with memory, {alias_n} aliases; {orphans} over no live memory pool, pools finalized {} replaced {}, images released with their pool {}); since start: inits {} finalizes {} re-inits {}, made new {} parked reused {} taken over {} alias {} (for a finalized object {}), released {} destroyed {}; {cn} live under a newer live image's storage ({same_start} at its start, {slotted} still in a pool slot; {} MB): {}",
+            live,
             owned_b >> 20,
+            h(10),
+            h(11),
+            h(12),
             h(6),
             h(7),
             h(8),
@@ -3041,6 +3066,32 @@ impl Gpu {
         }
         textrace::ev(serial, || "finalized: release now".to_string());
         self.tex_release_now(serial);
+    }
+
+    /// nvnMemoryPoolFinalize (or a new pool registered over the same base): the images of the texture objects over
+    /// the pool's memory go as if each object were finalized. On the console a texture over a finalized pool names
+    /// memory the GPU no longer has; the game makes new pools and textures for its next scene without finalizing the
+    /// old objects (Ocarina of Time: ~2,300 images, 1.8 GB, kept at each scene load until the 32 GB cap, OOT-MEM).
+    /// In queue order, as a texture's release (`tex_release`): the work queued before the finalize still binds them,
+    /// and images queued work makes over the pool before then go too. `NXGFX_POOL_DROP_IMAGES=0`: kept, as before.
+    pub fn drop_pool_images(&self, base: u64, size: u64) {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("NXGFX_POOL_DROP_IMAGES").as_deref() != Ok("0")) || size == 0 {
+            return;
+        }
+        let go = move |g: &Gpu| {
+            let serials = g.images.lock().unwrap().serials_in(base, size);
+            HOW[12].fetch_add(serials.len() as u64, std::sync::atomic::Ordering::Relaxed);
+            for s in serials {
+                textrace::ev(s, || format!("its memory pool {base:#x} went: released"));
+                g.tex_release_now(s);
+            }
+        };
+        if super::queue::aq_busy() {
+            super::queue::after_queued(Box::new(move |g: &'static Gpu| go(g)));
+        } else {
+            go(self);
+        }
     }
 
     fn tex_release_now(&self, serial: u64) {
