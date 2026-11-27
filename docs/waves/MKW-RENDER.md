@@ -167,6 +167,7 @@ crash list was written, the process exited normally, skipped draws 18 → 0 a fr
 | `20261127-104040-rd-v3-pop` | `41d835d` | same | **53.2 / 45.0** | **1** | **157** | grid on (reference recorded from it) |
 | `20261127-102015-rd-verify` | `9cd78a4`, `NXGFX_USE_SYNC=verify` | `mkw` | 34.2 / 30.3 (verify cost) | - | - | 3/3 on; **0 pages missed** |
 | `20261127-104646-rd-final-mkw` | `41d835d` | `mkw` | **57.4 / 48.3** [250, 325] | 2 | 172 | **3/3 on** |
+| `20261127-111056-rd-final-pop` | `2292650` | `mkw-pop` + faults (no tex trace) | 53.0 / 44.0 | 1 | 206 | 2/2 on (its references) |
 
 Against the brief's baseline (the merged build ~50-56 FPS, 5 % low ~46; MKW-HEAVY's `hv-v2` 56.1 / 46.0, `hv-final2`
 51.4): the final `mkw` run is 57.4 / 48.3, not worse. Same-scenario before/after: `mkw-pop` 41.5 / 28.6 → 53.2 / 45.0
@@ -186,3 +187,74 @@ newest 65,536: not made again (one ID, once).
 
 The base run's menus came before its first menu shot (§1), so its only picture of the character select is the fault
 capture; the base run's race and the after runs' race pass different spots at a given second (game time drifts).
+Also after: `rd-final-pop/08-o7.png` (character select), `rd-final-pop/sheet-2..9.png` (race, 78 shots).
+
+**What still looks wrong** (literal): the roadside shrubs are near-black in every race shot of every run; the kart
+in `mkw-pop` drives into the sand at ~290 s and pushes there under the Bullet Bill item (the scripted input, the same
+in the base run); `o10`/`o11` (~103-110 s) are black loading frames between the OK and the course intro, as in the base
+run. A still shot every 0.5 s cannot show a one-frame pop or a texture that sharpens within 0.5 s.
+
+## 8. What is left
+
+- **Black shrubs** (§4): the shrub pixel shader's lighting inputs; next the BC6H atlas tiles and probe arrays.
+- **18 draws a frame skipped** (§5): the owner's call on the 3 crash-list entries that compile cleanly now.
+- **Slots naming objects released long ago**: `Images::released` keeps the newest 65,536; one such stand-in in
+  `rd-final-mkw` (289 s). Not made again.
+- **Harness**: the report and sheets take two-digit shot numbers only (`[0-9][0-9]-*.png`); `mkw-pop` stays at 99.
+  The character select's shot index moves with the run's speed (`o5`-`o7`), so it has no route check.
+- A new red line in `rd-final-pop` only: `graceful exit not done in 4.0 s, exiting at once` at the harness's quit
+  (316 s), after the steps; not seen in the other runs of this wave.
+
+## Report (agent, protocol §5)
+
+Branch `mkwrender` (base `dd9baed`): `5f03dfd` (plan, scenarios), `9cd78a4` (released-slot remake), `8ae5153` (its
+rule and test), `41d835d` (keep remade images 60 frames; release generations), `2292650` (texture dump of decoded
+ASTC; doc), `f88e33f` (route references), this commit (doc).
+
+### 1. Built
+- **Diagnosis**: (a) missing textures, the character screen and the engine's pop-in were one cause: a texture object
+  the game finalized while its pool slots still name it got its image at the first use and lost it after that
+  submission; every later bound use bound the zero stand-in (6,653 logged in the base run, more unlogged past the
+  4,096-ID cap). (b) A make outside a submission's recording was released at once (`defer_after_use` falls back to
+  the last fence). (c) The upload skip / chunk tracking misses no CPU write (verify: 0); the ASTC path is synchronous.
+  (d) The shrubs are drawn with near-zero light (pass dump), not shadowed and not a failed depth test; cause not found.
+- **Corrections**: `NXGFX_RELEASED_SLOT_USE` (default on): `remake_released` makes the image again from the
+  registration kept at the release, keeps it `remade::KEEP` (60) frames, `sweep_remade` at the present releases it;
+  `release_gen`: only the newest make's release applies. Scenarios: `mkw` shoots the menus, new `mkw-pop` (78 race
+  shots at ~0.5 s). Diagnostic: the texture dump reads back ASTC images decoded to RGBA8.
+- **Taken out**: NoContraction on pre-raster float arithmetic (moved nothing).
+
+### 2. Tests (`cargo test --release -p graphics`: lib 310 passed, 6 ignored; `py -m unittest scripts.test_play`: OK)
+- `image::released_slot_tests::a_slot_naming_its_released_texture_is_made_again`: the remake rule (slot still names
+  the released object over storage → made; renamed slot, not released, no storage, buffer texture → not).
+- `image::release_gen::only_the_newest_release_applies`: an older make's release is dropped, the newest applies once.
+- `image::remade::remade_images_are_released_after_keep_frames`: due only after `KEEP` frames, once.
+- New behaviour, so no failing-before state; the stand-in counts in the runs (6,653 → 1) are the before/after.
+
+### 3. Verified
+Runs §6, pictures §7; every sheet of `rd-base-pop`, `rd-v1-pop`, `rd-v2-pop` (race), `rd-v3-pop`, `rd-final-mkw`,
+`rd-final-pop` read, and the fault captures of `rd-base-pop`. Route: `rd-final-mkw` 3/3 on, `rd-final-pop` 2/2 on,
+`rd-verify` 3/3 on. `NXGFX_USE_SYNC=verify`: 0 pages missed over boot to lap 2. FPS: `mkw` 57.4 / 48.3 against the
+brief's ~50-56 / ~46; `mkw-pop` 41.5 / 28.6 (base) → 53.0-53.2 / 44.0-45.0. No exit 71 / 72, no device loss.
+
+### 4. Unproven
+- **The black shrubs are not fixed** (§4); next step there.
+- Pop-in the game itself streams (sparse terrain tiles, level of detail) is not checked tile by tile; 0.5 s shots
+  cannot show one-frame pops.
+- Other titles not run (not owned); `NXGFX_RELEASED_SLOT_USE` applies to every title (MK8D's finalized-while-bound
+  textures are the same pattern, OOT-FLASH / ser6754 notes).
+- FPS numbers are single runs with a web wave's builds running; the lead's quiet run decides.
+
+### 5. Slips
+- At the lead's first message I started building harness options in `scripts/play.py`; at its correction I took my
+  own uncommitted edits out with `git restore scripts/play.py` (not the editor). Only my edits were in it.
+- Scratch Python scripts (scratchpad only) read PNGs and SPIR-V for diagnosis; none writes repository files.
+- `pipeline-crashed.bin` of MKW was moved aside for one run and restored byte-identical (hash checked); a copy is in
+  the scratchpad.
+
+### 6. Questions
+- **MKW's `pipeline-crashed.bin` (3 entries, 2026-11-24)**: all three compiled cleanly with the file aside
+  (`rd-v1-noblk-pop`, exit normal, no new entry); keeping them skips 18 draws a frame from boot on. Sources: §4 of the
+  protocol ("remove that entry once shown safe"), the ledger's earlier "owner option" for OoT's and Shadow's lists.
+  Recommendation: drop the three entries (the file goes; the journal records a real crash again by itself).
+
