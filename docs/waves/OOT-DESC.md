@@ -111,6 +111,22 @@ thread's (which holds the pool lock the replay thread then waits for). Next: the
   555.8 s the swapchain was recreated at 1164x764 (the window was resized from outside), and from there every present
   took ~500 ms (2.0 FPS; the replay thread 91 % inside `vkQueuePresentKHR`). Not this wave's change (the window's size
   is not touched by it); its profile is of the throttled presents only.
+- `20261126-200158-od-v8-oot` (changes 1-7, `f1f3ead`): **6/6 on route, 21.0 / 10.0 FPS** in [845, 915] (frame 48.2
+  ms, replay 23.6, prep 12.7, pool sync 9.7 = 1.6 / 2.5 / 4.3, write-back 1.0 MB in 5.3 ms, GPU 9.1); [600, 830] (the
+  house before the walk): **22.2 FPS** against 18.0 in the lead's base run `131123` over the same stretch. The frame
+  step now holds **2 vsyncs for 540-1,111 of each 1,800 frames** in the house (base: 0 of 1,800); the frames' cost
+  in the house: median 1.76-1.85 vsyncs, 90 % 2.2-4.1, **56-67 % fit 2 vsyncs**. Sheets (3) read: all correct. Red
+  lines: the known three, plus `audio: no output device` at 5.9 s (the machine's audio device, not graphics).
+- `20261126-201814-od-v8-seg128-oot` (v8 + `NXGFX_TRANSLATE_SEG=128 NXGFX_TRANSLATE_MIDCUT=128`, an experiment on the
+  replay thread's lane-join waits): **stopped by PID at ~690 s, worse**: 17.1 segments a frame (9.7 at 256) but the
+  lanes spent **193-198 ms a frame of CPU** (49 at 256) and a run's wall rose 18.0 -> 38 ms a frame; house cost median
+  2.17 vsyncs (1.57-1.85 at 256). The cost is per segment, not per draw (not looked into further: most likely each
+  segment's first sets and staging made again, TRANSLATE-REUSE's ground). Not adopted; the defaults stay.
+- `20261126-202915-od-v8-off-oot` (control, the same build with `NXGFX_WB_RECYCLE=0 NXGFX_LAND_PRE=0
+  NXGFX_NOTE_MEMO=0 NXGFX_PREHASH=0`; changes 4 and 6 have no switch and stay on): 6/6 on route, **18.9 / 15.0 FPS**
+  in [845, 915] (frame 53.0, replay 20.6, prep 14.5, write-back 9.6 ms, re-arming under the lock 3.7 ms), [600, 830]
+  19.9 FPS; **held 3 vsyncs for 1,790-1,800 of each 1,800 frames from 480 s on, house cost median 2.25-2.56 vsyncs,
+  0-1 % fitting 2** (v8 with them on: median 1.76-1.85, 56-67 %). Sheets (3) read: correct.
 
 ## Changes
 
@@ -150,3 +166,106 @@ thread's (which holds the pool lock the replay thread then waits for). Next: the
    images due were two walks over every image (~6,700) at each of ~11 submissions a frame; one walk does both.
 7. **Diagnosis:** the frame step's summary line (`os/fstep.rs`, every 1,800 presents) gives the frames' cost: median,
    90th percentile, and the share fitting 1 / 2 / 3 vsyncs.
+
+Files: `src/graphics/src/vk/queue.rs` (1), `upskip.rs` (2, 5), `mem.rs` (2, 3, 5), `image.rs` (4, 6), `perf.rs` (1's
+memory-line part), `src/os/src/fstep.rs` (7), `docs/env_switches.tsv`. None in `exec.rs`, `gate.rs` or `tables.rs`
+(TRANSLATE-REUSE's files): separable from that wave.
+
+## Report (agent, protocol §5)
+
+Branch `ootdesc` (base `0e04404`): `b66f5c1` (diagnosis + 1), `712fd85` (1: cap), `74f0437` (2), `91c0ace` (3),
+`43274c3` (2: own threads), `b35c65e` (1: 1 GB, 4), `7c65fbc` (5), `bca4cbf` (6), `56e93a4` (5: pending pages),
+`f1f3ead` (7), docs after.
+
+### 1. Built
+
+**Diagnosis** (section "Critical path", written before any change): OoT's frame is quantized by the frame step (hold
+3 vsyncs = 20 FPS unless the frame's cost fits ~1.9 vsyncs); the game's render thread spends 83 % of its time in
+`aq_wait_room` at each present (occlusion results in use: every present waits until the replay thread has replayed
+everything), so the frame is the replay thread's work; that thread was idle 9 %, and its largest single cost was a
+fresh `vkAllocateMemory` for each submission's write-back buffers (15 %), then waits for the pool lock the completion
+thread held while landing write-backs (~10 %), the upload skip's serial hashing (~8 %) and walks over every image
+(~6 %). `descriptor_ms` (~19 ms) is CPU summed over the replay thread and five lanes; the lanes were 92 % idle, so it
+was not the path.
+
+**Corrections** (section "Changes" 1-6, each a cut of the replay thread's work or of the time it waits): write-back
+buffers kept for reuse (no `vkAllocateMemory` / `vkFreeMemory` per submission); a landing's page compares and hashes
+made before the pool lock (the lock held ~3.7 ms a frame less); repeated GPU-write notes without the pool lock; the
+dirty ranges sorted and merged before the image check; a sync's written pages (scan and pending) hashed at once on
+the hash threads; one walk over the images per submission. 1-3 and 5 have off switches (`NXGFX_WB_RECYCLE`,
+`NXGFX_LAND_PRE`, `NXGFX_NOTE_MEMO`, `NXGFX_PREHASH`); 4 and 6 are pure speed (the same images found, the same bytes).
+7 is diagnosis.
+
+### 2. Tests (`cargo test --release -p graphics`: lib 274 passed, 6 ignored, the other targets pass; `-p os`: 167
+passed, 1 ignored, the other targets pass)
+
+- `queue::wb_bufs::tests::the_smallest_fitting_buffer_is_reused_and_the_cap_holds`: the smallest kept buffer holding
+  the size is handed out; nothing past the byte cap or the per-size count is kept; size classes.
+- `upskip::tests::a_landing_compared_beforehand_decides_as_one_that_compares_itself`: on a pool with unchanged pages
+  (with and without a kept hash), changed pages, partial pages at both ends and a page restamped by a later note, a
+  landing with `landing_pre` leaves exactly the page states and unchanged-page list the old path does; small and
+  large (threaded) write-backs.
+- `upskip::tests::prehashed_pages_decide_the_skip_of_their_sync_only`: prehashes decide the skip of their sync; a page
+  changed after its prehash is decided on the prehash (as a `par_hashes` hash); gone after `prehash_clear`.
+- `mem::note_memo::tests::only_the_same_note_of_the_same_recording_is_found`: a note is found again only with the
+  same recording, pool generation, range and identity; 16 kept.
+- `image::merge_tests::ranges_are_sorted_and_merged`: out-of-order, overlapping, nested, touching and empty ranges.
+- `fstep::tests::cost_text_gives_median_tail_and_fits`.
+- All are new functions (no old code to fail on); the landing test compares the new path against the old one.
+
+### 3. Verified (GPU 1; `oot`, window [845, 915] s, target 59; other waves compiled and ran MKW / web runs throughout)
+
+| Run (`build/play/`) | build | FPS / 5% low | frame | replay | prep | write-back ms | house: held 2 of 1,800 | house cost median (fit 2) | route |
+|---|---|---|---|---|---|---|---|---|---|
+| `174908-od-prof1-oot` | base (sampled 860-885) | 18.6 / 13.0 | 53.0* | 21.1* | 18.5* | 11.9 | 0 | - | 6/6 |
+| `202915-od-v8-off-oot` | final, switches off | **18.9 / 15.0** | 53.0 | 20.6 | 14.5 | 9.6 | 0 | 2.25-2.56 (0-1 %) | 6/6 |
+| `200158-od-v8-oot` | **final** | **21.0 / 10.0** | 48.2 | 23.6 | 12.7 | 5.3 | 540-1,111 | **1.76-1.85 (56-67 %)** | 6/6 |
+
+(* [845, 858] unsampled.) Over [600, 830] (Link in his house before the walk): final 22.2 FPS, control 19.9, the
+lead's base `131123` 18.0. SCAN-COST's `sc-v4` 19.4 / 17.3. **Target 59 not reached; 30 not held**: the cost now
+straddles the 2-vsync line (median ~1.8 vsyncs), so the frame step alternates 2 and 3 vsyncs; the 5 % low is the
+3-vsync frames and stalls. Sheets read (all three) of prof1, v4, v5, v8, v8-off, v8-seg128 (to its stop): correct;
+`v5 23-walk3` judged camera clipping (see the run note). Anomalies: the known set (one stand-in at the forest load,
+no-target draws, the crashed pipeline, occlusion queries used up); new red line only `audio: no output device`
+(machine). Route checks on in every completed run except `v3` (`14-h1` 0.31).
+
+`oot-house --faults`, `20261126-204440-od-v8-house` (final build): completed, **5/5 on route**, house window [610, 690]
+**19.3 / 18.0 FPS** (SCAN-COST's house3: 19.3 / 18.0): in this scenario's stretch (Link standing, A every 1.5 s) the
+cost rose to a median of 1.96-2.03 vsyncs (31-45 % fitting 2), so the frame step held 3 vsyncs for 1,298-1,660 of
+1,800 frames; the gain of the `oot` house stretch does not show here. All 33 house shots read (x5, h1, d01-d30, last):
+correct. 16 fault captures, all read: nightmare lightning (1-2), the known no-target black frames at the forest load
+(3-10), scene cuts in the forest and the wake-up cutscene (11-16): the same set as SCAN-COST's house1/house3, none in
+the house stretch. No new red line.
+
+### 4. Unproven
+
+- Perf on a shared machine: the lead's quiet runs decide; the control (same build, switches off) is the fairest A/B
+  here. The windows also caught two machine-side events (frames of 0.3-1 s with the guest idle in `v3`; a resized
+  window throttling presents to 2 FPS in `v7`).
+- 30 FPS needs the cost under ~1.9 vsyncs in most frames. What remains on the replay thread (v6 profile): translation
+  `record` ~25 % (lanes idle ~89 %, the replay thread ~10 % waiting at joins: a run's wall is its slowest 256-draw
+  segment; smaller segments cost far more per segment, `seg128`), the pool sync ~20 % (write-watch takes ~4 %, the
+  upload skip's step hashing), presents ~5 %, image prep ~4-6 %. Next: translation reuse (TRANSLATE-REUSE), and the
+  per-segment set work.
+- The occlusion sync (`occl_sync`) serializes the game with the replay thread at every present; letting OoT's presents
+  run one frame ahead would overlap the guest with the replay, but its occlusion results would come a frame later
+  (MK8D's black stretches were the reason it exists): not changed, the owner's or lead's call.
+- Write-back ranges of 32-64 MB a frame (readback and baseline each) are copied back and compared although ~1 MB a
+  frame lands; which bindings note them was not looked into.
+- Change 1 keeps up to 1 GB of host-visible write-back buffers (HOST_LIVE counts them; 4-6 x 64 MB in flight in OoT).
+
+### 5. Slips
+
+- `od-wb2-oot`'s harness was started with `Start-Process` from a PowerShell call and ended at 317 s without a report;
+  its game ran on without inputs and was stopped by PID. Later runs used the normal background shell.
+- Stopped early by PID (harness, then game): `od-wb1-oot` (a fix was already known), `od-v7-oot` (throttled presents),
+  `od-v8-seg128-oot` (the experiment was clearly worse).
+- Builds and lib-test compiles ran during the boot of `od-wb2`, `od-v3`, `od-v6` and `od-v8-off` (never inside a
+  window [845, 915]).
+- Relinks ran this worktree's `nxrs-build` directly with the launcher's command line (as SCAN-COST did), with
+  `NXRS_LINK_LIBS=-Wl,/DEBUG -Wl,/OPT:REF -Wl,/OPT:ICF` (a PDB beside the DLL, for the profiles). The OoT DLL in the
+  library is this branch's final build with that PDB.
+
+### 6. Questions
+
+None.
