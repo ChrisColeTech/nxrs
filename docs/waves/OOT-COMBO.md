@@ -66,4 +66,67 @@ Columns as OOT-REPLAY (FPS / 5 % low from `frames-*.csv`; "busy": the replay thr
 | `040502-cb-base4-oot` | hang fix + trim (`SUB_KEEP` 64, lanes 64), `VIEW_ID_KEY=0` | - (died 838 s) | - | - | **26.7 / 19.6** | 24-30 | 0/78/21/0 | **died 838 s**: allocation failure at the 32 GB cap | 5/5 to 834 s |
 | `042215-cb-v1b-oot` | all on (`3c78d49`) | - | - | - | invalid: machine stall 550-700 s (frames 235-740 ms with replay 14-17 ms; the harness and every python on the machine were killed at ~613 s) | - | - | killed | - |
 | `043451-cb-v1c-oot` | all on | - | - | - | - | - | - | harness killed (as v1b) | - |
+| `050159-cb-fa256c-house` (`oot-house`, console 60 Hz) | all on, Fault A capture (`SNAP_KEEP=256`) | - | - | - | **[610, 670]: 28.8 / 27.5** ([672, 684] slowed by the every-present shots) | 25-27 | 0/97/2/1 | completed | 5/5 |
+| `051431-cb-fa32-house` (console 60 Hz) | all on, `SNAP_KEEP=32` (Fault A check) | - | - | - | [610, 670]: 13.4 / 4.7 | 57-59 | 0/42/29/29 | time limit (steps behind) | 3/3 |
 | `044441-cb-v1d-oot` | all on | **27.4 / 19.8** (to 895 s; Link walking to `24-walk4`, out of view from `25-walk5`) | 22-39 | 0/83/17/1 | 14.9 / 8.7 (the opening ran ~60 s late under machine load: dialogue until ~640 s) | 34-47 | 0/5/80/15 | **died 895 s** (32 GB cap) | 5/5 |
+
+What each lever gives OoT, as far as these runs show (no switch-off controls, per the rule change):
+
+- **USE-SYNC chunk tracking:** OoT's pool sync is still 8.8-11.5 ms a frame in the house (frames CSV `pool_sync_ms`),
+  the same as OOT-REPLAY's 9.4-9.6 without it. The pools line (`base4`, 836 s): write-watch scan 2.2 ms, per-pool
+  pass 4.5 ms, lock wait 2.0 ms; 1,040 chunks open (29 MB), 3.4 opened / closed a frame, 0 missed. OoT's sync is the
+  per-pool pass and the lock (the completion thread's landings: "re-arming 7.76 ms before the pool lock" a frame,
+  54 MB a frame of same-byte CPU writes skipped), not the scan; chunk tracking has little to take here.
+- **Balanced segments:** the lanes translate ~38 ms a frame together (house), the replay thread waits **1.5 ms a frame**
+  for them (OOT-REPLAY: ~4 ms, 12 % of the thread). That is the gain the lane joins could give; it is in.
+- **Views keyed per ID** (ported, below): the house replay busy went from 24-30 ms (`base4`, off, RDP) to **25-27**
+  (`fa256c`, on, console) and the `prep`-less replay ms from 12.9 to 11.4 over [610, 670]; the two runs differ in
+  display too, so this is not a clean A/B. The walk (`v1d`, Link walking) 27.4 / 19.8 against OOT-REPLAY's walking
+  24.3 / 19.1.
+- **SNAP_KEEP 256** (OOT-REPLAY's) confirmed again: with 32 the house replay busy is 57-59 ms and 12,544 snapshot
+  buffers are made in a run (`fa32`), with 256 25-27 ms and 128.
+
+## 2. Changes
+
+1. **Retry of parked queues** (section 0, `queue.rs`, `d19308b`): the forest-load crash. Cherry-picked into
+   `gameplay-harness` by the lead (`0765845`).
+2. **Texture views keyed per texture ID** (`NXGFX_VIEW_ID_KEY`, default on; 0 = by the tables' generation, as
+   before): TRANSLATE-REUSE change 7 (`reuse` `db758d6`) ported onto this base by hand (`tables.rs`: `view_epoch`,
+   per-ID `id_ver` slots, `set_generation`; `pool_descriptors_changed` for the pool's own texture / texel-buffer
+   descriptor writes; `exec.rs`: `tex_view` memo keyed by `view_version(id)`, stage sets' `image_gen` by
+   `set_generation`). The tables' generation still moves at every site it moved before, so everything keyed by it
+   (pool snapshots, NDVE captures) is unchanged. OoT moved the generation 40-60 times a frame, each emptying every
+   view memo.
+3. **Pooled submissions give back their memory** (`NXGFX_SUB_KEEP`, default 64; 0 = as before; `queue.rs`
+   `trim_free`): a free submission keeps one 8 MB staging chunk and one 64 MB scratch chunk, and pooled submissions
+   were never freed. Past the newest 64 on the replay thread's free list (16 on each translation lane's), the
+   others' staging and scratch are freed. At the forest load the log shows `pooled submissions: 2592 MB ... given
+   back` (`base4`, lanes at 64) and up to **6.2 GB** a run with the lanes at 16 (`v1d`, `fa256c`); staging held in the
+   house 7.1 GB (`base3`) -> 4.9 GB (`base4`) -> **1.1 GB** (`v1d`).
+4. `NXGFX_SHOT_SPAN=<from>-<to>` (diagnostic, `shot.rs`): every present between two log-clock seconds is a screenshot.
+
+## 3. Fault A (displaced props, 676-679 s of `oot-house`)
+
+Every present over log-clock [672, 684] s captured (`NXGFX_SHOT_SPAN`; the harness's shots there are at 674-686 s),
+with `--faults` and `NXGFX_FAULT_PER_REASON=40`, final build, console display:
+
+- `SNAP_KEEP=256` (`050159-cb-fa256c-house`): presents 18437-18521, **85 consecutive frames, all correct** (herbs,
+  vines, thatch, pots in place; contact sheets `build/span-sheets/k256-1..3.png`); 30 house shots correct.
+- `SNAP_KEEP=32` (`051431-cb-fa32-house`): presents 16902-16970, **69 consecutive frames, all correct**
+  (`build/span-sheets/k32-1..2.png`).
+- Fault captures in both: the nightmare's lightning (2) and the forest load's no-target frames (30), the known set;
+  none in the house.
+
+**Verdict: Fault A did not occur with either setting in these runs**, so it is not shown to depend on
+`NXGFX_SNAP_KEEP`; the default stays 256 (32 costs the house 2x the replay time). It remains an open, rare fault (one
+frame, ~1 a run before; 0 in 154 frames captured here and 0 in 60 house shots).
+
+## 4. Memory: what kills the walk window now
+
+Every full `oot` run on this base died at the 32 GB process cap (`process.rs` `memory_cap`): `base3` at 463 s
+(`MapPhysicalMemory commit failed`, staging 7.1 GB), `base4` at 838 s, `v1d` at 895 s (a 14.7 MB screenshot buffer
+failed). OOT-REPLAY's runs peaked at 32.4 GB and finished; with the park chain the forest load leaves more pooled
+submissions. Change 3 returns 6.2 GB of staging and scratch, but the run still reaches the cap in the walk:
+**texture images keep growing in the house standing still** (`v1d`: 3,906 images / 4.0 GB at 509 s, 6,554 / 8.2 GB at
+878 s, ~7 more a second), and scratch stays 3.5 GB (54 x 64 MB chunks: one kept per free submission, 144 kept). The
+image growth is the next memory item (images made for OoT's ~46 texture objects a frame and not released).
