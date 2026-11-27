@@ -1382,6 +1382,8 @@ fn completion_loop(g: &'static Gpu) {
         };
         let (t0, t1) = (ts[0], ts[1]);
         if t1 >= t0 && t1 > 0 {
+            // the submission's own GPU time (chain trace: gpu_done less vk_submit = queueing + this + the wake)
+            chain_trace::note("gpu_ts", item.value, t1 - t0);
             super::counters::part(super::counters::part_key(sub.frame, sub.serial), t0, t1);
             super::perf::gpu_time(t1 - t0);
             super::scale::note_gpu(t1 - t0);
@@ -1434,6 +1436,7 @@ fn completion_loop(g: &'static Gpu) {
                 Post::Early(f) => f(g, item.value),
             }
         }
+        chain_trace::note("cpl_land", item.value, 0);
         wait_diag::mark(2, "recycle/deferred callbacks", [item.value, 0]);
         // the write-backs have landed (`apply_writebacks` above): nothing reads these buffers any more
         if let Some(rb) = item.readback {
@@ -2941,6 +2944,32 @@ fn present_lean() -> bool {
 pub fn present_wait(ticket: u64) {
     wait_fence(ticket, u64::MAX);
 }
+
+/// `NXGFX_LAND_FIRST` (default on; `0`: a sync takes the pool lock at once, as before): before a pool sync on the
+/// replay thread takes the pool lock, submissions the GPU has finished but the completion thread has not landed yet
+/// land first (at most `LAND_FIRST_MAX`). MKW-HEAVY: a sync of the next frame's early work (the second queue's submit,
+/// replayed while the frame's fence was landing) held the pool lock 0.9 ms while the landing of the frame's last
+/// submissions waited for it, and the game waited for that fence: the frame's tail. Returns the ns waited.
+pub fn land_first(g: &Gpu) -> u64 {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    if !*ON.get_or_init(|| std::env::var("NXGFX_LAND_FIRST").as_deref() != Ok("0")) || !on_replay_thread() {
+        return 0;
+    }
+    let Ok(gpu) = (unsafe { g.dev().get_semaphore_counter_value(g.q.timeline) }) else {
+        return 0;
+    };
+    if gpu <= g.q.completed() {
+        return 0;
+    }
+    let t = std::time::Instant::now();
+    wait_fence(gpu, LAND_FIRST_MAX);
+    let ns = t.elapsed().as_nanos() as u64;
+    chain_trace::note("land_first", gpu, ns / 1000);
+    ns
+}
+
+/// The longest a sync waits for landings (`land_first`): 1.5 ms.
+const LAND_FIRST_MAX: u64 = 1_500_000;
 
 /// Waits for everything (tests and teardown).
 pub fn idle() {
