@@ -588,7 +588,7 @@ fn set_key(
         dispatch: di,
         base_instance: bi,
         serial: sub.serial,
-        image_gen: g.tables.generation(),
+        image_gen: set_image_gen(g),
         chunk: sub.db_cur,
         mesh: match qs.mesh_rec {
             Some((b, o, r)) if m.res.iter().any(|(_, r)| matches!(r, Res::MeshDraw)) => {
@@ -3567,8 +3567,27 @@ fn target_of(ty: u32) -> i32 {
 
 /// The view of a registered texture ID with the type the shader declares; a stand-in when there is none.
 /// `ty`: the shader's texture type, and in bits 16.. the format a storage image is declared with (Res::Img::fmt).
+/// Views keyed per texture ID, stage sets by `Tables::set_generation` (TRANSLATE-REUSE change 7; OOT-COMBO: Ocarina
+/// of Time moves the tables' generation 40-60 times a frame by registrations of single IDs and pool descriptor
+/// writes, each emptying the view memo for every texture). `NXGFX_VIEW_ID_KEY=0`: both by the tables' generation.
+fn view_by_id() -> bool {
+    static BY_ID: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *BY_ID.get_or_init(|| std::env::var("NXGFX_VIEW_ID_KEY").as_deref() != Ok("0"))
+}
+
+/// What a stage set's textures and samplers were made from (`SetKey::image_gen`, `TexPart`; `view_by_id`).
+fn set_image_gen(g: &Gpu) -> u64 {
+    if view_by_id() {
+        g.tables.set_generation()
+    } else {
+        g.tables.generation()
+    }
+}
+
 fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::ImageView {
-    let gen = g.tables.generation();
+    let by_id = view_by_id();
+    let version = |g: &Gpu| if by_id { g.tables.view_version(id) } else { g.tables.generation() };
+    let gen = version(g);
     if let Some(&v) = sub.memo_views.get(&(id, ty, storage, gen)) {
         return v;
     }
@@ -3581,7 +3600,7 @@ fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::Imag
         return v;
     }
     let v = tex_view_uncached(g, sub, id, ty, storage);
-    if gen == g.tables.generation() {
+    if gen == version(g) {
         sub.memo_views.insert(key, v);
         super::gate::view_put(key, vk::Handle::as_raw(v));
     }
@@ -4516,7 +4535,7 @@ fn stage_set(
     // the texture part of the last set of this stage, when nothing it depends on changed
     let cacheable = !dumping && facts(m).tex_cacheable;
     let mkey = (m as *const Module as usize, m.key);
-    let image_gen = g.tables.generation();
+    let image_gen = set_image_gen(g);
     let cached = cacheable
         && qs.tpart.borrow()[st].as_ref().is_some_and(|t| {
             t.module == mkey

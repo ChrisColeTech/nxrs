@@ -21,6 +21,21 @@ pub struct Tables {
     /// Only actual descriptor-content changes invalidate immutable pool snapshots.
     pool_generation: AtomicU64,
     pending_images: AtomicBool,
+    /// What a texture ID's view depends on (`view_version`), finer than `generation` (TRANSLATE-REUSE change 7): image
+    /// backing changes (every ID) move `view_epoch`; a registration at an ID (a texture, a placeholder, a buffer
+    /// texture there) moves that ID's slot of `id_ver` (IDs sharing a slot share it). Descriptor writes (pool
+    /// descriptors, samplers, texel buffers) move neither: no view looked up for an ID reads them.
+    view_epoch: AtomicU64,
+    id_ver: Box<[std::sync::atomic::AtomicU32]>,
+    /// `generation` but for the pool's own texture and texel-buffer descriptor writes (`set_generation`).
+    set_generation: AtomicU64,
+}
+
+/// Slots of `Tables::id_ver`.
+const ID_SLOTS: usize = 1 << 20;
+
+fn id_slots() -> Box<[std::sync::atomic::AtomicU32]> {
+    (0..ID_SLOTS).map(|_| std::sync::atomic::AtomicU32::new(0)).collect()
 }
 
 /// Moves whenever a sampler slot is written (`write_sampler`): `samp_at_cached`'s memos are of one value of it.
@@ -369,7 +384,45 @@ mod registration_boundary_tests {
     fn cpu_tables() -> Tables {
         Tables { pool: vk::DescriptorPool::null(), set: vk::DescriptorSet::null(), db: None,
             inner: Mutex::new(Inner::default()), generation: AtomicU64::new(1),
-            pool_generation: AtomicU64::new(1), pending_images: AtomicBool::new(false) }
+            pool_generation: AtomicU64::new(1), pending_images: AtomicBool::new(false),
+            view_epoch: AtomicU64::new(1), id_ver: id_slots(), set_generation: AtomicU64::new(1) }
+    }
+
+    /// An ID's view version moves when what it names changes (a texture, a placeholder, a buffer texture there) or an
+    /// image's backing changes, and not at another ID's registration or a descriptor write (TRANSLATE-REUSE); the
+    /// tables' generation moves at all of them.
+    #[test]
+    fn view_versions_move_per_id() {
+        let t = cpu_tables();
+        let (a, b) = (t.view_version(5), t.view_version(6));
+        let g = t.generation();
+        t.note_tex(6, 77, None);
+        assert_eq!(t.view_version(5), a, "another ID's registration");
+        assert_ne!(t.view_version(6), b);
+        assert_ne!(t.generation(), g);
+        let b = t.view_version(6);
+        t.note_tex(6, 77, None);
+        assert_eq!(t.view_version(6), b, "the same registration again");
+        t.mark_placeholder(6);
+        assert_ne!(t.view_version(6), b, "a placeholder there");
+        let b = t.view_version(6);
+        t.note_tex(6, 77, None);
+        assert_ne!(t.view_version(6), b, "the placeholder gone, the same registration: the texture again");
+        let (g, s) = (t.generation(), t.set_generation());
+        t.descriptors_changed();
+        assert_eq!(t.view_version(5), a, "a descriptor write");
+        assert_ne!(t.generation(), g);
+        assert_ne!(t.set_generation(), s, "a sampler's write: stage sets follow");
+        let (g, s) = (t.generation(), t.set_generation());
+        t.pool_descriptors_changed();
+        assert_eq!((t.view_version(5), t.set_generation()), (a, s), "the pool's own texture descriptor written");
+        assert_ne!(t.generation(), g);
+        t.invalidate_images();
+        assert_ne!(t.view_version(5), a, "an image's backing");
+        let a = t.view_version(5);
+        // SAFETY: a plain-data texture record, all zeros
+        t.note_buf_tex(5, unsafe { core::mem::zeroed() });
+        assert_ne!(t.view_version(5), a, "a buffer texture there");
     }
 
     /// A recycled snapshot of generation G gets exactly the writes made at G or later; once the log has dropped
@@ -486,6 +539,9 @@ impl Tables {
                 generation: AtomicU64::new(1),
                 pool_generation: AtomicU64::new(1),
                 pending_images: AtomicBool::new(false),
+                view_epoch: AtomicU64::new(1),
+                id_ver: id_slots(),
+                set_generation: AtomicU64::new(1),
             });
         }
         let sizes = [
@@ -530,6 +586,9 @@ impl Tables {
             generation: AtomicU64::new(1),
             pool_generation: AtomicU64::new(1),
             pending_images: AtomicBool::new(false),
+            view_epoch: AtomicU64::new(1),
+            id_ver: id_slots(),
+            set_generation: AtomicU64::new(1),
         })
     }
 
@@ -537,8 +596,35 @@ impl Tables {
         self.generation.load(Ordering::Acquire)
     }
 
+    /// An image's backing or ownership changed (any ID's view may differ): `generation` and `view_epoch` move.
     pub fn invalidate_images(&self) {
+        self.view_epoch.fetch_add(1, Ordering::Release);
+        self.moved();
+    }
+
+    /// What texture ID `id` names changed (a registration there): `generation` and the ID's `id_ver` slot move.
+    fn invalidate_id(&self, id: i32) {
+        self.id_ver[id as u32 as usize % ID_SLOTS].fetch_add(1, Ordering::Release);
+        self.moved();
+    }
+
+    fn moved(&self) {
+        self.set_generation.fetch_add(1, Ordering::Release);
         self.generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// What texture ID `id`'s view depends on (`exec::tex_view`'s memo key): it moves when an image's backing or
+    /// ownership changes or when what the ID names changes, not at registrations of other IDs or descriptor writes.
+    pub fn view_version(&self, id: i32) -> u64 {
+        let e = self.view_epoch.load(Ordering::Acquire);
+        let v = self.id_ver[id as u32 as usize % ID_SLOTS].load(Ordering::Acquire);
+        e << 32 | v as u64
+    }
+
+    /// What stage sets' textures and samplers depend on (`exec::set_key`, `TexPart`; `NXGFX_VIEW_ID_KEY=0`: the
+    /// generation): `generation` without the pool's own texture and texel-buffer descriptor writes.
+    pub fn set_generation(&self) -> u64 {
+        self.set_generation.load(Ordering::Acquire)
     }
 
     pub fn pool_generation(&self) -> u64 {
@@ -564,7 +650,17 @@ impl Tables {
     /// Called under inner after publishing descriptor bytes/sets, never for image ownership or materialization
     /// alone. Stage caches still use the broader registration/backing generation.
     fn descriptors_changed(&self) {
-        self.invalidate_images();
+        // (not `view_epoch`: a descriptor written into the pool or for a sampler or texel buffer changes no view an ID
+        // is looked up as)
+        self.moved();
+        self.pool_generation.fetch_add(1, Ordering::Release);
+    }
+
+    /// The pool's own descriptors for a texture or texel buffer written (`write_image`, `write_texel_*`): as
+    /// `descriptors_changed`, but `set_generation` stays (a stage set looks its textures' views up itself and keys no
+    /// texel buffer).
+    fn pool_descriptors_changed(&self) {
+        self.generation.fetch_add(1, Ordering::Release);
         self.pool_generation.fetch_add(1, Ordering::Release);
     }
 
@@ -689,7 +785,7 @@ impl Tables {
         i.image_desc.remove(&id);
         i.buf_tex.insert(id, t);
         i.buf_pending.push(id);
-        self.invalidate_images();
+        self.invalidate_id(id);
     }
     /// The buffer textures over [lo, hi) are written again at the next submission: their memory pool went away or a
     /// new one took its place (their descriptors name the old buffer's device address: a write through one faulted).
@@ -759,7 +855,7 @@ impl Tables {
                 );
             }
         }
-        self.descriptors_changed();
+        self.pool_descriptors_changed();
     }
 
     pub fn write_texel_views(
@@ -789,7 +885,7 @@ impl Tables {
         }
         let mut g = self.inner.lock().unwrap();
         unsafe { d.dev.update_descriptor_sets(&w, &[]) };
-        self.descriptors_changed();
+        self.pool_descriptors_changed();
         if let Some((ou, os)) = g.buf_views.insert(id, (uv, sv)) {
             drop(g);
             if let Some(gpu) = super::Gpu::try_get() {
@@ -929,8 +1025,12 @@ impl Tables {
         let mut i = self.inner.lock().unwrap();
         // Re-registering the same interpretation is still a new capture lifetime.
         i.bump_registration(id);
-        i.placeholders.remove(&id);
+        let was_placeholder = i.placeholders.remove(&id);
         if i.tex.get(&id) == Some(&(serial, view)) {
+            // (the ID no longer names a placeholder: its view is the texture's again)
+            if was_placeholder {
+                self.id_ver[id as u32 as usize % ID_SLOTS].fetch_add(1, Ordering::Release);
+            }
             return;
         }
         // A different object's view can reuse a retired Vulkan handle. Equality of handles is a sufficient
@@ -938,7 +1038,7 @@ impl Tables {
         i.image_desc.remove(&id);
         i.tex_put(id, (serial, view));
         i.storage_tex.remove(&id);
-        self.invalidate_images();
+        self.invalidate_id(id);
     }
     /// The texture IDs registered with one of `serials`: (ID, serial, view).
     pub fn ids_of(
@@ -1006,7 +1106,7 @@ impl Tables {
         let mut i = self.inner.lock().unwrap();
         i.bump_registration(id);
         i.placeholders.insert(id);
-        self.invalidate_images();
+        self.invalidate_id(id);
     }
     pub fn texture_slots(&self) -> Vec<(i32, u64, Option<view_t>)> {
         self.inner
@@ -1162,7 +1262,7 @@ impl Tables {
                     );
                 }
             }
-            self.descriptors_changed();
+            self.pool_descriptors_changed();
             return;
         }
         let ii = [vk::DescriptorImageInfo::default()
@@ -1188,7 +1288,7 @@ impl Tables {
             );
         }
         unsafe { d.dev.update_descriptor_sets(&w, &[]) };
-        self.descriptors_changed();
+        self.pool_descriptors_changed();
     }
 }
 
