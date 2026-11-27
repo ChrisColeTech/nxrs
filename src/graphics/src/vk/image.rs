@@ -713,6 +713,67 @@ mod merge_tests {
     }
 }
 
+#[cfg(test)]
+mod decode_in_tests {
+    use super::*;
+    use crate::tex::deswizzle::{geom, swizzle};
+    use crate::tex::layout::{tex_layout, TexDesc};
+
+    /// The decode a lane makes with the images' lock released (`decode_unlocked`) works from a copy of the image's
+    /// fields (`DecodeIn`): every level of a block-linear texture comes out as the rows that were swizzled in, with
+    /// its size, and no cache lookup attached (that is made for ASTC levels only, after the decode).
+    #[test]
+    fn a_decode_from_the_copied_fields_gives_every_level() {
+        let d = TexDesc {
+            target: 1,
+            format: 0x25,
+            width: 70,
+            height: 45,
+            depth: 1,
+            levels: 3,
+            ..Default::default()
+        };
+        // SAFETY: tex_t is plain data (repr(C) integers and raw pointers); all zero is a valid value.
+        let mut t: tex_t = unsafe { std::mem::zeroed() };
+        t.d = d;
+        t.l = tex_layout(&d);
+        let mut storage = vec![0u8; t.l.size as usize];
+        let mut want = Vec::new();
+        for lv in 0..3 {
+            let g = geom(&d, lv, 0).unwrap();
+            let n = g.row_bytes as usize * g.rows as usize;
+            let src: Vec<u8> = (0..n).map(|i| (i as u32 * 7 + lv * 31) as u8).collect();
+            swizzle(&d, lv, 0, &src, g.row_bytes as usize, &mut storage).unwrap();
+            want.push(src);
+        }
+        let inp = DecodeIn {
+            tex: t,
+            layers: 1,
+            levels: 3,
+            astc: false,
+            expand3: 0,
+        };
+        let parts = decode_parts_of(&inp, &storage);
+        assert_eq!(parts.len(), 3);
+        for (p, w) in parts.iter().zip(&want) {
+            assert_eq!(&p.data, w, "level {}", p.level);
+            assert_eq!((p.lw, p.lh), (70 >> p.level, 45 >> p.level));
+            assert!(p.pre.is_none());
+        }
+    }
+
+    /// The cache lookup made ahead applies only where `record` would use the cache: BC7 output, a level of at least
+    /// `MIN_BYTES`, the full encoder ready and the pack open; ASTC blocks outside 4..=12 never.
+    #[test]
+    fn the_cache_lookup_ahead_applies_where_record_would_look() {
+        let blocks = vec![0u8; 16 * 64 * 64];
+        // no pack open in this test binary and no encoder made: nothing to look up
+        assert!(crate::tex::astc::cache_probe(&blocks, 256, 256, 1, 4, 4, false, true).is_none());
+        assert!(crate::tex::astc::cache_probe(&blocks, 256, 256, 1, 4, 4, false, false).is_none());
+        assert!(crate::tex::astc::cache_probe(&blocks, 256, 256, 1, 3, 4, false, true).is_none());
+    }
+}
+
 /// Whether a write to [a, a + n) changed a page of the texture's storage [lo, hi) since its hashes were taken (the
 /// changed pages' hashes are updated).
 fn pages_changed(hashes: &mut [u64], lo: u64, hi: u64, a: u64, n: u64) -> bool {
@@ -780,6 +841,8 @@ pub struct Part {
     ld: u32,
     slices: u32,
     data: Vec<u8>,
+    /// (ASTC) the level's disk-cache lookup, made with the images' lock released (`decode_unlocked`)
+    pre: Option<crate::tex::astc::CachePre>,
 }
 
 /// The levels and layers of a texture from its storage bytes, laid out linearly.
@@ -808,6 +871,32 @@ fn gpu_deswizzle_ok(im: &Image) -> bool {
 }
 
 fn decode_parts(im: &Image, storage: &[u8]) -> Vec<Part> {
+    decode_parts_of(&DecodeIn::of(im), storage)
+}
+
+/// What `decode_parts` reads of an image, copied so the decode can run without the images' lock.
+#[derive(Clone, Copy)]
+struct DecodeIn {
+    tex: tex_t,
+    layers: u32,
+    levels: u32,
+    astc: bool,
+    expand3: u32,
+}
+
+impl DecodeIn {
+    fn of(im: &Image) -> DecodeIn {
+        DecodeIn {
+            tex: im.tex,
+            layers: im.layers,
+            levels: im.levels,
+            astc: im.tf.astc.is_some(),
+            expand3: im.tf.expand3,
+        }
+    }
+}
+
+fn decode_parts_of(im: &DecodeIn, storage: &[u8]) -> Vec<Part> {
     let t = im.tex;
     let d = t.d;
     let (bpb, bw, bh) = layout::fmt_bpb(d.format);
@@ -864,8 +953,8 @@ fn decode_parts(im: &Image, storage: &[u8]) -> Vec<Part> {
                 }
                 (v, g.slices)
             };
-            let data = if im.tf.astc.is_none() && im.tf.expand3 != 0 {
-                expand3(&rows_data, im.tf.expand3 as usize)
+            let data = if !im.astc && im.expand3 != 0 {
+                expand3(&rows_data, im.expand3 as usize)
             } else {
                 rows_data
             };
@@ -877,6 +966,7 @@ fn decode_parts(im: &Image, storage: &[u8]) -> Vec<Part> {
                 ld,
                 slices,
                 data,
+                pre: None,
             });
         }
         if d.target == target::T3D {
@@ -884,6 +974,16 @@ fn decode_parts(im: &Image, storage: &[u8]) -> Vec<Part> {
         }
     }
     out
+}
+
+/// Uploads from storage smaller than this are decoded under the images' lock (`Gpu::decode_unlocked`): releasing and
+/// taking the lock again costs more than they do.
+const UNLOCKED_MIN: u64 = 64 << 10;
+
+/// `NXGFX_UPLOAD_UNLOCKED=0`: a lane's upload from storage is decoded under the images' lock, as before (MKW-SPIKE).
+pub fn upload_unlocked_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_UPLOAD_UNLOCKED").as_deref() != Ok("0"))
 }
 
 /// The storage of the textures among `serials` due an upload (not of sparse pools), decoded on several threads; only
@@ -4401,6 +4501,72 @@ impl Gpu {
         }
     }
 
+    /// MKW-SPIKE (`NXGFX_UPLOAD_UNLOCKED`): the CPU part of an upload from storage that `prepare_image` is about to
+    /// make (page hashes, the storage read and laid out, an ASTC level's disk-cache key and read), made with the
+    /// images' lock released, then handed to the upload as `decoded` (as `decode_many` does). A lane's view lookup
+    /// prepares a texture at its first use; with that work under the lock every other lane's lookup waited for it
+    /// (MKW: the lanes' set time doubled in the ~6 % of race frames with an upload). Nothing is kept when the image
+    /// changed meanwhile, or when the CPU wrote texture storage (`TEX_DUE`): `prepare_image` then reads it as before.
+    pub fn decode_unlocked<'a>(
+        &'a self,
+        imgs: std::sync::MutexGuard<'a, Images>,
+        serial: u64,
+    ) -> std::sync::MutexGuard<'a, Images> {
+        let Some(im) = imgs.by_serial.get(&serial) else {
+            return imgs;
+        };
+        if !im.needs_upload
+            || im.gpu_owned
+            || im.tex.mem.is_null()
+            || im.decoded.is_some()
+            || im.tex.l.size < UNLOCKED_MIN
+            || crate::nvn::vpool::is_sparse(im.tex.mem as u64)
+            || gpu_deswizzle_ok(im)
+        {
+            return imgs;
+        }
+        let inp = DecodeIn::of(im);
+        let hash = hash_upload(im);
+        let (astc, bc7) = (im.tf.astc, im.bc7);
+        let due = TEX_DUE.load(std::sync::atomic::Ordering::Acquire);
+        drop(imgs);
+        let t0 = std::time::Instant::now();
+        let (lo, size) = (inp.tex.mem as u64, inp.tex.l.size);
+        // hashed before the read, as `image_begin_submit` does for its decode-ahead
+        let hashes = hash.then(|| page_hashes(lo, lo + size));
+        super::lazy::touch(lo, size);
+        let mut parts = decode_parts_of(&inp, &super::mem::guest_bytes(lo, size));
+        if let Some((abw, abh, srgb)) = astc {
+            for p in &mut parts {
+                p.pre = crate::tex::astc::cache_probe(
+                    &p.data, p.lw, p.lh, p.slices, abw, abh, srgb, bc7,
+                );
+            }
+        }
+        let ns = t0.elapsed().as_nanos() as u64;
+        super::perf::add(super::perf::C::TexUploadNs, ns);
+        let mut imgs = super::gate::lock(&self.images, 2);
+        let kept = TEX_DUE.load(std::sync::atomic::Ordering::Acquire) == due
+            && imgs.by_serial.get_mut(&serial).is_some_and(|im| {
+                let same = im.needs_upload
+                    && !im.gpu_owned
+                    && im.decoded.is_none()
+                    && im.tex.mem as u64 == lo
+                    && im.tex.l.size == size
+                    && im.tex.d.format == inp.tex.d.format;
+                if same {
+                    im.decoded = Some(parts);
+                    if let Some(h) = hashes {
+                        im.page_hash = h;
+                        im.hashed_early = true;
+                    }
+                }
+                same
+            });
+        upload_stats::unlocked(ns, kept);
+        imgs
+    }
+
     /// Layout and contents of an image, in the submission's upload command buffer (also used mid-replay for a render
     /// target created there: the upload command buffer runs before the replay).
     pub fn prepare_image(&self, imgs: &mut Images, serial: u64, sub: &mut Sub) {
@@ -4653,7 +4819,7 @@ impl Gpu {
             if let Some((abw, abh, srgb)) = im.tf.astc {
                 crate::tex::astc::record(
                     self, sub, &p.data, p.lw, p.lh, p.slices, abw, abh, srgb, im.bc7, im.image,
-                    p.level, p.layer,
+                    p.level, p.layer, p.pre,
                 );
                 continue;
             }
@@ -5268,6 +5434,15 @@ pub mod upload_stats {
     use std::collections::HashMap;
     use std::sync::Mutex;
     static S: Mutex<Option<HashMap<u64, (String, u64, u64)>>> = Mutex::new(None);
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    /// (MKW-SPIKE) uploads decoded with the images' lock released: kept, dropped (the image or the storage changed
+    /// meanwhile), and their time
+    static UNLOCKED: [AtomicU64; 3] = [const { AtomicU64::new(0) }; 3];
+
+    pub fn unlocked(ns: u64, kept: bool) {
+        UNLOCKED[if kept { 0 } else { 1 }].fetch_add(1, Relaxed);
+        UNLOCKED[2].fetch_add(ns, Relaxed);
+    }
 
     pub fn note(serial: u64, t: &crate::nvn::obj::tex_t, ns: u64) {
         let mut g = S.lock().unwrap();
@@ -5311,10 +5486,14 @@ pub mod upload_stats {
                 )
             })
             .collect();
+        let un: Vec<u64> = UNLOCKED.iter().map(|a| a.swap(0, Relaxed)).collect();
         Some(format!(
-            "uploads from storage: {} textures, {:.2} ms per frame; most: {}",
+            "uploads from storage: {} textures, {:.2} ms per frame ({} decoded with the images' lock released in {:.2} ms per frame, {} of them dropped: NXGFX_UPLOAD_UNLOCKED); most: {}",
             v.len(),
             total as f64 / 1e6 / f,
+            un[0] + un[1],
+            un[2] as f64 / 1e6 / f,
+            un[1],
             top.join("; ")
         ))
     }
