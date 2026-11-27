@@ -8,6 +8,14 @@
 //! (bit = the standard mapping's button index), `[2..6)` axes 0-3 scaled to ±32767; `[48..56)` key presses latched
 //! by the page until this side takes them (a press shorter than a tick counts).
 //!
+//! The other way (WEB-RUMBLE): `[56..64)` the game's vibration as motor levels the page plays on its gamepads, written
+//! here every tick: player p (0-3) low motor at `[56 + 2p]`, high motor at `[57 + 2p]`, 0..65535. They are the
+//! standard path's values (`RUMBLE`, after `RumbleSettings`; HD rumble claims only native Nintendo pads, so on the
+//! web every vibration takes this path), reduced to one low and one high motor as a native rotating-motor pad gets
+//! them (the larger of the two sides), and 0 while the game does not own input (the menu open, the page not
+//! focused). `NXRS_CONTROLLER_SELFTEST=1`: player 1's low motor 0.5 s, then the high one 0.5 s, once gamepad 0 is
+//! connected.
+//!
 //! The settings mailbox follows at `[64]`: `[64]` a sequence lock (odd while the page writes), `[65]` the text's
 //! length in bytes, then up to `MAIL_BYTES` bytes from `[68]`: `key=value` lines (the engine's ini format), applied
 //! with `nxconfig::set` (the same listeners as a native hotkey), so a change in the menu applies live.
@@ -189,6 +197,53 @@ pub fn pad_sticks(axes: [i32; 4], dz_percent: i64) -> [i32; 4] {
     [dz(axes[0]), -dz(axes[1]), dz(axes[2]), -dz(axes[3])]
 }
 
+/// The first word of the motor levels and the players they cover.
+pub const RUMBLE_WORD: usize = 56;
+pub const RUMBLE_PLAYERS: usize = 4;
+
+/// A player's two sides to one low and one high motor level (0..1), as a native pad with two rotating motors gets
+/// them (`Dev::rumble`: the larger side of each).
+pub fn two_motors(v: [super::Vib; 2]) -> (f32, f32) {
+    (
+        v[0].amp_low.max(v[1].amp_low),
+        v[0].amp_high.max(v[1].amp_high),
+    )
+}
+
+/// A motor level (0..1) as the block's word (0..65535).
+pub fn motor_word(x: f32) -> u32 {
+    if x.is_finite() {
+        (x.clamp(0.0, 1.0) * 65535.0 + 0.5) as u32
+    } else {
+        0
+    }
+}
+
+/// The block's motor words for the first `RUMBLE_PLAYERS` players: `[low, high]` per player, all 0 when `on` is
+/// false (the game does not own input, or `rumble` is 0).
+pub fn motor_words(v: &[[super::Vib; 2]], on: bool) -> [u32; 2 * RUMBLE_PLAYERS] {
+    let mut w = [0; 2 * RUMBLE_PLAYERS];
+    if on {
+        for (p, s) in v.iter().take(RUMBLE_PLAYERS).enumerate() {
+            let (low, high) = two_motors(*s);
+            w[2 * p] = motor_word(low);
+            w[2 * p + 1] = motor_word(high);
+        }
+    }
+    w
+}
+
+/// The self-test's levels (low, high) `t` seconds after it began: low 0.5 s, high 0.5 s, then over (None).
+pub fn selftest_levels(t: f64) -> Option<(f32, f32)> {
+    if t < 0.5 {
+        Some((0.5, 0.0))
+    } else if t < 1.0 {
+        Some((0.0, 0.5))
+    } else {
+        None
+    }
+}
+
 /// The settings mailbox's text to the pairs that differ from the current values.
 pub fn mail_changes(text: &str, current: impl Fn(&str) -> String) -> Vec<(String, String)> {
     nxconfig::parse(text)
@@ -254,6 +309,56 @@ mod block {
         gen: u64,
         keys: Vec<u64>,
         dz: i64,
+        rumble_on: bool,
+        rlogged: u32,
+        motors: [u32; 2 * super::RUMBLE_PLAYERS],
+        /// the self-test: None when not asked for, Some(None) waiting for gamepad 0, Some(Some(t0)) running
+        test: Option<Option<f64>>,
+    }
+
+    /// The game's vibration as motor levels into the block (words `[56..64)`), logged when they change.
+    fn motors(b: &[AtomicU32], l: &mut Last, pad: bool) {
+        let v = crate::input::RUMBLE
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .v;
+        let mut w = super::motor_words(&v, l.rumble_on && crate::input::active());
+        if let Some(t) = l.test {
+            let now = crate::input::motion::now_s();
+            match t {
+                None if pad => {
+                    crate::log!(
+                        "input: rumble self-test: player 1 low motor 0.5 s, high motor 0.5 s, stop"
+                    );
+                    l.test = Some(Some(now));
+                }
+                Some(t0) => match super::selftest_levels(now - t0) {
+                    Some((low, high)) => {
+                        w[0] = super::motor_word(low);
+                        w[1] = super::motor_word(high);
+                    }
+                    None => {
+                        crate::log!("input: rumble self-test finished");
+                        l.test = None;
+                    }
+                },
+                None => {}
+            }
+        }
+        for (i, x) in w.iter().enumerate() {
+            b[super::RUMBLE_WORD + i].store(*x, Release);
+        }
+        if w != l.motors {
+            if crate::input::trace() || l.rlogged < 200 {
+                l.rlogged += 1;
+                crate::log!(
+                    "input: rumble to the page: player 1 low {} high {} (of 65535)",
+                    w[0],
+                    w[1]
+                );
+            }
+            l.motors = w;
+        }
     }
 
     /// One read of the block into player 1's keyboard path (the input thread's tick).
@@ -272,6 +377,10 @@ mod block {
             gen: 0,
             keys: vec![],
             dz: 10,
+            rumble_on: true,
+            rlogged: 0,
+            motors: [0; 2 * super::RUMBLE_PLAYERS],
+            test: crate::input::env_flag("NXRS_CONTROLLER_SELFTEST").then_some(None),
         });
         // the menu's settings, applied as a native hotkey would
         if let Some(text) = mail(b, &mut l.mail) {
@@ -290,10 +399,14 @@ mod block {
             l.gen = gen;
             let (t, bad) = super::key_table(&nxconfig::string("key_map"));
             if bad > 0 {
-                crate::log!("input: key_map: {bad} entries not understood (key:guest, e.g. space:b)");
+                crate::log!(
+                    "input: key_map: {bad} entries not understood (key:guest, e.g. space:b)"
+                );
             }
             l.keys = t;
             l.dz = nxconfig::int("stick_deadzone");
+            // the menu's Rumble switch stops a vibration the game holds at once (the strength applies to its next)
+            l.rumble_on = nxconfig::string("rumble").trim() != "0";
         }
         // the focus as the game sees it (pause_on_focus_loss) and the sound (mute_on_focus_loss)
         let focus = b[1].load(Acquire);
@@ -311,7 +424,11 @@ mod block {
             crate::input::set_suspended(menu);
             crate::log!(
                 "input: the page's menu {}",
-                if menu { "opened: the game is paused" } else { "closed: the game runs" }
+                if menu {
+                    "opened: the game is paused"
+                } else {
+                    "closed: the game runs"
+                }
             );
         }
         let mut held = 0u64;
@@ -320,7 +437,11 @@ mod block {
             let bits = b[2 + w].load(Relaxed) | b[48 + w].swap(0, AcqRel);
             for i in 0..32u32 {
                 if bits >> i & 1 != 0 {
-                    held |= l.keys.get((w as u32 * 32 + i) as usize).copied().unwrap_or(0);
+                    held |= l
+                        .keys
+                        .get((w as u32 * 32 + i) as usize)
+                        .copied()
+                        .unwrap_or(0);
                 }
             }
         }
@@ -337,6 +458,7 @@ mod block {
             (btn, axes) = (0, [0; 4]);
         }
         crate::input::set_keyboard(btn, axes);
+        motors(b, l, b[16].load(Relaxed) != 0);
         let seq = b[0].load(Acquire);
         if seq != l.seq && (btn, axes) != (l.btn, l.axes) && l.logged < 64 {
             l.logged += 1;
@@ -389,7 +511,11 @@ mod tests {
         assert_eq!(pad_sticks([5000, 0, 0, 0], 10), [5000, 0, 0, 0]);
         assert_eq!(pad_sticks([5000, 0, 0, 0], 20), [0, 0, 0, 0]);
         assert_eq!(pad_sticks([200, 0, 0, 0], 0), [200, 0, 0, 0]);
-        assert_eq!(pad_sticks([9000, 0, 0, 0], 99), [0, 0, 0, 0], "clamped to 30%");
+        assert_eq!(
+            pad_sticks([9000, 0, 0, 0], 99),
+            [0, 0, 0, 0],
+            "clamped to 30%"
+        );
     }
 
     /// key_map changes the default keys: a key to another button, a key off, a stick direction.
@@ -408,6 +534,59 @@ mod tests {
         assert_eq!(key_vk("bracketleft"), Some(0xDB));
         assert_eq!(key_vk("7"), Some(0x37));
         assert_eq!(key_vk("num10"), None);
+    }
+
+    fn vib(low: f32, high: f32) -> crate::input::Vib {
+        crate::input::Vib {
+            amp_low: low,
+            amp_high: high,
+            ..Default::default()
+        }
+    }
+
+    /// Two sides to two motors: the larger of each, as a native rotating-motor pad.
+    #[test]
+    fn two_sides_make_two_motors() {
+        assert_eq!(two_motors([vib(0.2, 0.7), vib(0.6, 0.1)]), (0.6, 0.7));
+        assert_eq!(two_motors([Default::default(); 2]), (0.0, 0.0));
+    }
+
+    /// Levels to the block's words: 0..65535, clamped, a bad value silent; players at [56 + 2p], [57 + 2p].
+    #[test]
+    fn motor_levels_encode_into_the_block() {
+        assert_eq!(motor_word(0.0), 0);
+        assert_eq!(motor_word(1.0), 65535);
+        assert_eq!(motor_word(0.5), 32768);
+        assert_eq!(motor_word(2.0), 65535);
+        assert_eq!(motor_word(-1.0), 0);
+        assert_eq!(motor_word(f32::NAN), 0);
+        let v = [
+            [vib(1.0, 0.0), vib(0.0, 0.0)],
+            [vib(0.0, 0.0), vib(0.0, 0.25)],
+            [Default::default(); 2],
+            [vib(0.5, 0.5); 2],
+            [vib(1.0, 1.0); 2], // player 5: not on the page
+        ];
+        let w = motor_words(&v, true);
+        assert_eq!(w, [65535, 0, 0, 16384, 0, 0, 32768, 32768]);
+        assert_eq!(
+            motor_words(&v, false),
+            [0; 8],
+            "the game does not own input: silent"
+        );
+        // the words sit between the key latches [48..56) and the mailbox [64..)
+        assert_eq!(RUMBLE_WORD, 56);
+        assert!(RUMBLE_WORD + 2 * RUMBLE_PLAYERS <= 64);
+    }
+
+    /// The self-test: low motor 0.5 s, high motor 0.5 s, then over.
+    #[test]
+    fn selftest_runs_low_then_high() {
+        assert_eq!(selftest_levels(0.0), Some((0.5, 0.0)));
+        assert_eq!(selftest_levels(0.49), Some((0.5, 0.0)));
+        assert_eq!(selftest_levels(0.5), Some((0.0, 0.5)));
+        assert_eq!(selftest_levels(0.99), Some((0.0, 0.5)));
+        assert_eq!(selftest_levels(1.0), None);
     }
 
     /// The mailbox applies only what differs, by the canonical key and its normalised value.

@@ -5,6 +5,11 @@
 // standard mapping index), [2..6) axes 0-3 scaled to ±32767; [48..56) key presses latched until the engine reads
 // them. From [64] the settings mailbox (writeSettings). Keys are released when the page loses the focus.
 //
+// The engine writes the game's vibration back (WEB-RUMBLE): [56 + 2i] low motor, [57 + 2i] high motor of player i
+// (0..65535; 0 while the game does not own input). Each poll plays them on gamepad i through its vibrationActuator
+// ('dual-rumble': strong = low motor, weak = high motor), re-issued before an effect ends while the level holds,
+// reset at zero; nothing while the menu is open, on blur or while the page is hidden.
+//
 // The menu (menu.js) opens with Esc, a gamepad's Home (standard button 16) or Minus + Plus held 1 s. While it is open
 // nothing reaches the game: keys go to the menu, the block's keys and pads are released, and a button still held when
 // it closes stays released until it is let go.
@@ -37,6 +42,12 @@ const NxrsInput = (() => {
   let pendingMail = null;
   const pads = new Map(); // index -> last encoding (string)
   const hooks = { open: () => {}, key: () => {} };
+  const RUMBLE = 56;
+  const EFFECT_MS = 200; // one effect's length; re-issued while the level holds
+  const REISSUE_MS = 80; // re-issued this long before the effect would end
+  const rumbling = new Map(); // gamepad index -> { low, high, until } of the effect playing
+  const rumbleSeen = new Set(); // gamepad ids whose actuator was logged
+  let rumbleLogged = 0;
 
   function bump() {
     Atomics.add(w, 0, 1);
@@ -49,7 +60,10 @@ const NxrsInput = (() => {
     if (!w) return;
     const f = focusState();
     if (Atomics.exchange(w, 1, f) !== f) bump();
-    if (f !== 1) releaseAll();
+    if (f !== 1) {
+      releaseAll();
+      stopAllRumble(f === 3 ? 'page hidden' : 'page not focused');
+    }
   }
   function releaseAll() {
     if (!w) return;
@@ -111,7 +125,61 @@ const NxrsInput = (() => {
     }
     return false;
   }
+  // A gamepad's dual-rumble actuator (Chrome: vibrationActuator, its effects list where it has one), logged once.
+  function actuator(g, i) {
+    const a = g.vibrationActuator || null;
+    if (!rumbleSeen.has(g.id)) {
+      rumbleSeen.add(g.id);
+      const effects = a ? (a.effects ? [...a.effects].join(',') : `type ${a.type}`) : 'none';
+      console.log(`[nxrs] [web] gamepad ${i} rumble: vibrationActuator ${a ? 'present' : 'absent'}, effects ${effects || 'none'}`);
+    }
+    if (!a) return null;
+    if (a.effects ? ![...a.effects].includes('dual-rumble') : a.type && a.type !== 'dual-rumble') return null;
+    return a;
+  }
+  function stopRumble(i, a, why) {
+    rumbling.delete(i);
+    if (a) a.reset().catch(() => {});
+    if (rumbleLogged < 200) {
+      rumbleLogged++;
+      console.log(`[nxrs] [web] rumble gamepad ${i}: reset (${why})`);
+    }
+  }
+  // every gamepad still rumbling stops (menu open, blur, hidden: the next frame may not come while hidden)
+  function stopAllRumble(why) {
+    const list = navigator.getGamepads ? navigator.getGamepads() : [];
+    for (const i of [...rumbling.keys()]) stopRumble(i, list[i] && list[i].vibrationActuator, why);
+  }
+  // The engine's motor levels to the gamepads.
+  function pollRumble(list) {
+    const on = w && !menuOpen && focusState() === 1;
+    for (let i = 0; i < 4; i++) {
+      const g = list[i];
+      const a = g && g.connected ? actuator(g, i) : null;
+      if (!a) {
+        rumbling.delete(i);
+        continue;
+      }
+      const low = on ? Atomics.load(w, RUMBLE + 2 * i) / 65535 : 0;
+      const high = on ? Atomics.load(w, RUMBLE + 2 * i + 1) / 65535 : 0;
+      const last = rumbling.get(i);
+      if (low <= 0 && high <= 0) {
+        if (last) stopRumble(i, a, on ? 'the game stopped' : menuOpen ? 'menu open' : 'page not focused');
+        continue;
+      }
+      const now = performance.now();
+      if (last && last.low === low && last.high === high && now < last.until - REISSUE_MS) continue;
+      a.playEffect('dual-rumble', { startDelay: 0, duration: EFFECT_MS, strongMagnitude: low, weakMagnitude: high })
+        .catch((e) => console.log(`[nxrs] [web] rumble gamepad ${i}: playEffect failed: ${e}`));
+      if ((!last || last.low !== low || last.high !== high) && rumbleLogged < 200) {
+        rumbleLogged++;
+        console.log(`[nxrs] [web] rumble gamepad ${i}: playEffect dual-rumble strong ${low.toFixed(3)} weak ${high.toFixed(3)} ${EFFECT_MS} ms`);
+      }
+      rumbling.set(i, { low, high, until: now + EFFECT_MS });
+    }
+  }
   function pollPads() {
+    pollRumble(navigator.getGamepads ? navigator.getGamepads() : []);
     if (w && !menuOpen) {
       const list = navigator.getGamepads ? navigator.getGamepads() : [];
       let mask = 0;
@@ -172,6 +240,7 @@ const NxrsInput = (() => {
   // The menu opens (the game pauses: keys and pads released) or closes (buttons still held stay released).
   function setMenu(open) {
     menuOpen = open;
+    if (open) stopAllRumble('menu open');
     if (!w) return;
     releaseAll();
     if (open) releasePads();

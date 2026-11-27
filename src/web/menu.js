@@ -17,7 +17,10 @@ const NxrsSettings = (() => {
     Other: { upscale: 'sharp' },
   };
   const SHARED = {
-    Controls: { button_layout: 'switch', button_map: '', key_map: '', stick_deadzone: '10', mute_on_focus_loss: '0' },
+    Controls: {
+      button_layout: 'switch', button_map: '', key_map: '', stick_deadzone: '10', mute_on_focus_loss: '0', rumble: '1',
+      rumble_gain: '1.00',
+    },
     Audio: { audio_slowdown: '1' },
     Web: { volume: '100', mute: '0' },
   };
@@ -191,15 +194,17 @@ const NxrsMenu = (() => {
     show();
     return box;
   }
-  function slider(key, min, max, step, label) {
+  // a percentage slider; `ratio` stores it as a fraction (rumble_gain 1.00 = 100%)
+  function slider(key, min, max, step, label, ratio = false) {
     const val = $('span', { class: 'val' });
     const r = $('input', { type: 'range', min, max, step, 'aria-label': label, 'data-nav': '' });
-    r.value = NxrsSettings.get(key);
+    r.value = ratio ? String(Math.round(Number(NxrsSettings.get(key)) * 100)) : NxrsSettings.get(key);
+    const store = () => NxrsSettings.set(key, ratio ? (Number(r.value) / 100).toFixed(2) : r.value);
     const show = () => { val.textContent = r.value + '%'; };
-    r.oninput = () => { NxrsSettings.set(key, r.value); show(); };
+    r.oninput = () => { store(); show(); };
     r.nxStep = (d) => {
       r.value = String(Math.max(min, Math.min(max, Number(r.value) + d * step)));
-      NxrsSettings.set(key, r.value);
+      store();
       show();
     };
     show();
@@ -469,6 +474,8 @@ const NxrsMenu = (() => {
       row('Face buttons', 'By position: the right button is A, the bottom one B, as on a Switch. By label: the button marked A on an Xbox pad is A.',
         seg('button_layout', [['switch', 'By position (Switch)'], ['xbox', 'By label (Xbox)']], 'Face buttons')),
       row('Stick dead zone', 'How far a stick must move before the game sees it.', slider('stick_deadzone', 0, 30, 1, 'Stick dead zone')),
+      row('Rumble', 'The game\'s vibration on the gamepad, when the browser can drive its motors. Stops while this menu is open or the page is in the background.', toggle('rumble', 'Rumble')),
+      row('Rumble strength', '100% is as the game sends it.', slider('rumble_gain', 0, 300, 10, 'Rumble strength', true)),
       $('div', { class: 'rule', style: 'margin:12px 0' }),
       group('buttons', 'Buttons', 'Choose a key or a gamepad button, then press the one that should do it; a key or button already used elsewhere moves here. Esc (or B on a gamepad while choosing a key; Home while choosing a gamepad button) leaves it unchanged.'),
       $('div', { class: 'cols' }, table(GUESTS.slice(0, half)), table(GUESTS.slice(half))),
