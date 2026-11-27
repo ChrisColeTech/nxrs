@@ -1230,8 +1230,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             }
             None => {
                 // the hot/cold split (websplit.rs) when the data folder has a recorded hot set and NXRS_WEB_SPLIT=1:
-                // opt-in until a split build is shown running in Chrome (WEB-W6: it stalled after the swap chain's
-                // creation, docs/waves/WEB-W6.md)
+                // opt-in: with pthreads every engine thread instantiates the hot module's ~290k placeholder imports
+                // (~140 MiB each) and Chrome's renderer is killed at ~16.6 GB (docs/waves/WEB-W6b.md §1)
                 let hot = crate::websplit::hot_set(&data)
                     .filter(|_| std::env::var("NXRS_WEB_SPLIT").as_deref() == Ok("1"));
                 match cc::find_web_lib() {
