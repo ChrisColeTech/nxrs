@@ -239,6 +239,9 @@ struct TexPart {
     serial: u64,
     image_gen: u64,
     imgs: Vec<(u32, vk::DescriptorType, vk::DescriptorImageInfo)>,
+    /// (SET-FAST, `view_by_id`) the view version of each texture ID the part binds, taken before its lookup: the
+    /// part stands while they do, whatever other IDs are registered meanwhile
+    vers: Vec<(i32, u64)>,
 }
 
 /// What a stage's descriptor set is made from, when nothing else goes into it (`set_key`): the same key in the same
@@ -3511,8 +3514,23 @@ fn target_of(ty: u32) -> i32 {
 
 /// The view of a registered texture ID with the type the shader declares; a stand-in when there is none.
 /// `ty`: the shader's texture type, and in bits 16.. the format a storage image is declared with (Res::Img::fmt).
+/// `NXGFX_VIEW_BY_ID=0`: a submission's view lookups are kept while no texture at all is registered again (the
+/// tables' generation), as before SET-FAST; else while that ID's view version stands (`Tables::view_version`).
+fn view_by_id() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_VIEW_BY_ID").as_deref() != Ok("0"))
+}
+
+fn view_gen(g: &Gpu, id: i32) -> u64 {
+    if view_by_id() {
+        g.tables.view_version(id)
+    } else {
+        g.tables.generation()
+    }
+}
+
 fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::ImageView {
-    let gen = g.tables.generation();
+    let gen = view_gen(g, id);
     if let Some(&v) = sub.memo_views.get(&(id, ty, storage, gen)) {
         return v;
     }
@@ -3525,7 +3543,7 @@ fn tex_view(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) -> vk::Imag
         return v;
     }
     let v = tex_view_uncached(g, sub, id, ty, storage);
-    if gen == g.tables.generation() {
+    if gen == view_gen(g, id) {
         sub.memo_views.insert(key, v);
         super::gate::view_put(key, vk::Handle::as_raw(v));
     }
@@ -4464,8 +4482,13 @@ fn stage_set(
                 && t.gen == c2id
                 && t.pools == (tb, sb)
                 && t.serial == sub.serial
-                && t.image_gen == image_gen
+                && if view_by_id() {
+                    t.vers.iter().all(|&(id, v)| g.tables.view_version(id) == v)
+                } else {
+                    t.image_gen == image_gen
+                }
         });
+    let mut tvers: Vec<(i32, u64)> = Vec::new();
     if cached {
         imgs.extend_from_slice(&qs.tpart.borrow()[st].as_ref().unwrap().imgs);
     }
@@ -4771,6 +4794,9 @@ fn stage_set(
                         0
                     }
                 } + sb;
+                if cacheable {
+                    tvers.push((tid, view_gen(g, tid)));
+                }
                 let view = super::perf::timed_fine(super::perf::C::TexViewNs, || {
                     tex_view(g, sub, tid, *ty | (ifmt as u32) << 16, is_img)
                 });
@@ -4885,6 +4911,10 @@ fn stage_set(
                         },
                     ));
                 } else {
+                    if cacheable {
+                        // (the sampler's version as `!sid`: `Tables::write_sampler`)
+                        tvers.push((!sid, view_gen(g, !sid)));
+                    }
                     let s = g.tables.samp_at(sid).unwrap_or_else(|| dummy_sampler(g));
                     imgs.push((
                         b,
@@ -4936,6 +4966,7 @@ fn stage_set(
             serial: sub.serial,
             image_gen,
             imgs: imgs.clone(),
+            vers: tvers,
         });
     }
     if dumping {
