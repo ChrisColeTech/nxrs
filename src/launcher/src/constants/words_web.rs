@@ -26,6 +26,7 @@ pub const NEWER: &str = "build.json is from a newer nxrs-build (format {}); upda
 pub const NO_DATA: &str = "build.json names no data folder";
 pub const NO_DATA_DIR: &str = "the data folder is missing: ";
 pub const NO_BUILD_JSON: &str = "no build.json (build it for web again)";
+pub const NO_PAGE: &str = "the game's page is not there: ";
 pub const DEFAULT_BROWSER: &str = "the default browser";
 
 /// The shader translation route's answers (the page puts them in its red line).

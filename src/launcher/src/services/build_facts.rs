@@ -44,7 +44,7 @@ pub fn facts(g: &Game) -> Facts {
         // only a build made before the build carried its data reads its package while it plays
         in_place: in_place_package(&g.source) && super::markers::reads_in_place(&g.data_dir()),
         build_incomplete: g.build_incomplete,
-        web_build: super::web_serve::has_web_build(&super::web_serve::played_web_dir(g)),
+        web_build: super::web_serve::can_serve(g),
     }
 }
 

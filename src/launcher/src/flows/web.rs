@@ -8,7 +8,7 @@ use crate::constants::{web as c, words_build as w, words_web as ww};
 use crate::model::fill::fill;
 use crate::model::game::Game;
 use crate::model::path_text::join;
-use crate::model::web_build::web_dir;
+use crate::model::web_build::{imported_page, web_dir};
 use crate::services::browser;
 use crate::services::web_serve::{self, WebServer};
 
@@ -84,10 +84,16 @@ impl App {
 
     /// Mounts the game's web folder on the server (started now if it is not running); its address.
     fn serve(&mut self, game: &Game) -> Result<String, String> {
-        let (_, mut mount) = web_serve::open_build(&web_serve::played_web_dir(game))
-            .map_err(|e| format!("{}{e}", ww::BAD_BUILD))?;
+        let page = imported_page(game);
+        let mount = match page {
+            Some(p) => web_serve::open_site(p),
+            None => web_serve::open_build(&web_serve::played_web_dir(game)).map(|(_, m)| m),
+        };
+        let mut mount = mount.map_err(|e| format!("{}{e}", ww::BAD_BUILD))?;
         // the page's run-time shaders are translated by the engine the launcher builds with
-        mount.translator = self.tools.nxrs_build.clone();
+        if page.is_none() {
+            mount.translator = self.tools.nxrs_build.clone();
+        }
         if self.web_server.is_none() {
             let server = WebServer::start(web_serve::wanted_port())?;
             if let Some(note) = server.moved_note() {
@@ -96,6 +102,7 @@ impl App {
             self.web_server = Some(server);
         }
         match &self.web_server {
+            Some(s) if page.is_some() => s.mount_site(&game.output_name, mount),
             Some(s) => s.mount(&game.output_name, mount),
             None => Err(ww::NO_SERVER.into()),
         }

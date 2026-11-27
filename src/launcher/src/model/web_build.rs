@@ -15,6 +15,19 @@ pub fn web_dir(game: &Game) -> String {
     join(&join(&base, c::WEB_BUILDS_FOLDER), &game.output_name)
 }
 
+/// The page of an imported web game (`webBuild` names an `.html`/`.htm` file); None for an nxrs web
+/// build (`webBuild` a folder, or none).
+pub fn imported_page(game: &Game) -> Option<&str> {
+    let p = game.web_build.as_str();
+    let ext = super::path_text::suffix(p);
+    (!p.is_empty() && c::PAGE_SUFFIXES.contains(&ext.as_str())).then_some(p)
+}
+
+/// A web game's address on a server at `port`: the root of its own `<slug>.localhost`.
+pub fn site_url(port: u16, slug: &str) -> String {
+    format!("http://{slug}{}:{port}/", c::SITE_SUFFIX)
+}
+
 /// What a server needs from `build.json`.
 #[derive(Clone, Debug, PartialEq)]
 pub struct WebBuild {

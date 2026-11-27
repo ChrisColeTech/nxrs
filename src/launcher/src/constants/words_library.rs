@@ -57,7 +57,6 @@ pub const CHOOSE_ARTWORK: &str = "Choose artwork in Properties";
 pub const ARTWORK_ERROR: &str = "Cannot load artwork: ";
 pub const PICK_GAME: &str = "Add game";
 pub const PICK_FOLDER: &str = "Add extracted game folder";
-pub const PICK_BUILD: &str = "Import native build";
 pub const GAME_FILTER: (&str, &[&str]) = ("Game packages", &["nup", "nsp", "xci", "nro"]);
 
 /// The keys (`installKeys`).

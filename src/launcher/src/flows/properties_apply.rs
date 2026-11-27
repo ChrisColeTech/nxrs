@@ -67,6 +67,7 @@ impl App {
         errors
             .iter()
             .for_each(|e| self.message(c::PROPERTIES, heading, e, true));
+        self.own_artwork(&id);
         self.artwork_epoch += 1;
         self.save();
         self.refresh_facts();

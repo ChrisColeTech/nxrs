@@ -4,11 +4,12 @@
 use super::App;
 use super::properties::PropertiesDraft;
 use super::surface::Surface;
-use crate::constants::{words_contexts as c, words_library as w};
+use crate::constants::{words_contexts as c, words_import as wi, words_library as w};
 use crate::model::game::Game;
-use crate::model::path_text::{absolute, same_path};
+use crate::model::path_text::{absolute, same_path, suffix};
+use crate::services::files::is_dir;
 use crate::services::pickers::{self, Pick};
-use crate::services::{library_ops, sources};
+use crate::services::{library_ops, sources, web_import};
 
 impl App {
     pub(super) fn pick_games(&mut self) {
@@ -29,14 +30,16 @@ impl App {
             self.import_source(&d, true, "");
         }
     }
+    /// Import build: a native build's executable, or a web build (its folder's build.json or page).
     pub(super) fn pick_build(&mut self) {
-        let native: (&str, &[&str]) = (
-            "Native games",
-            if cfg!(windows) { &["exe"] } else { &["*"] },
-        );
+        let builds: (&str, &[&str]) = if cfg!(windows) {
+            wi::BUILD_FILTER
+        } else {
+            (wi::BUILD_FILTER.0, &["*"])
+        };
         if let Some(f) = pickers::file(&Pick {
-            title: w::PICK_BUILD,
-            filter: Some(native),
+            title: wi::PICK_BUILD,
+            filter: Some(builds),
             start: "",
         }) {
             self.import_build(&f);
@@ -80,16 +83,30 @@ impl App {
             }
             return false;
         }
+        self.own_artwork(&id);
         self.selected = id;
         self.save();
         self.refresh_facts();
         true
     }
 
-    pub fn import_build(&mut self, executable: &str) -> bool {
-        let game = match sources::game_from_executable(executable) {
+    /// A native build's executable, or a web build (`web_import`).
+    pub fn import_build(&mut self, path: &str) -> bool {
+        let game = match sources::game_from_executable(path) {
             Ok(g) => g,
-            Err(e) => {
+            Err(native) => {
+                let web = web_import::find(path);
+                if let Ok(found) = &web {
+                    self.import_web(found, path);
+                    return true;
+                }
+                // a folder or a page is a web build that was not found; anything else a native one
+                let page = is_dir(path) || matches!(suffix(path).as_str(), "html" | "htm" | "json");
+                let e = if page {
+                    web.err().unwrap_or(native)
+                } else {
+                    native
+                };
                 self.message(c::IMPORT, w::CANNOT_IMPORT, &e, true);
                 return false;
             }
@@ -104,15 +121,21 @@ impl App {
             return false;
         }
         self.selected = library_ops::import_build(&mut self.lib, &game);
+        let id = self.selected.clone();
+        self.own_artwork(&id);
         self.save();
         self.refresh_facts();
         true
     }
 
-    /// Files dropped on the window: native builds are imported, anything else is added.
+    /// Files dropped on the window: native and web builds are imported, anything else is added (a
+    /// game's extracted folder is a source even when it holds a page somewhere).
     pub fn drop_files(&mut self, files: &[String]) {
         for path in files {
-            if sources::game_from_executable(path).is_ok() {
+            let source = sources::valid_source(path).is_ok();
+            if sources::game_from_executable(path).is_ok()
+                || (!source && web_import::find(path).is_ok())
+            {
                 self.import_build(path);
             } else {
                 self.import_source(path, true, "");
