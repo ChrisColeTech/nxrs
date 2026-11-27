@@ -1391,7 +1391,7 @@ fn completion_loop(g: &'static Gpu) {
                 Post::OcclReset => super::counters::vis_reset(),
                 Post::OcclReport { addr } => {
                     let t = super::counters::report_time(None, t0, t1);
-                    super::counters::write_record(addr, super::counters::vis(), t);
+                    super::occl::land(addr, super::counters::vis(), t);
                 }
                 Post::Readback { dst, src, n } => unsafe {
                     core::ptr::copy_nonoverlapping(src, dst, n)
@@ -1735,13 +1735,17 @@ pub fn aq_wait_room(present: bool) {
     // replayed, so those results come back as soon as with replay on the game's thread (a game that culls on last
     // frame's results otherwise read them two presents late: Mario Kart 8 Deluxe's black stretches). NXGFX_OCCL_SYNC=0 off
     // (presents only: waiting at every submit too serialized the game with the replay: Donkey Kong Bananza 17.8 -> 13
-    // FPS, and did not help Mario Kart 8 Deluxe)
+    // FPS, and did not help Mario Kart 8 Deluxe). NXGFX_OCCL_LAG (occl.rs, default 1): the replay may stay that many
+    // presents behind instead (0: the wait above), so the game builds its next frame while the replay translates this
+    // one and reads the most recent results completed (Ocarina of Time's render thread waited here 83 % of its time)
     let occl = present && occl_sync();
+    let lag = super::occl::lag();
     let full = || {
         let behind = a.tail.load(Ordering::Acquire) - a.done.load(Ordering::Acquire);
+        let queued = AQ_PRESENTS.load(Ordering::Acquire);
         behind >= AQ_MAX - 1
-            || (present && AQ_PRESENTS.load(Ordering::Acquire) >= aq_max_presents())
-            || (occl && behind > 0)
+            || (present && queued >= aq_max_presents())
+            || (occl && super::occl::present_waits(lag, queued, behind))
     };
     if !full() {
         return;
@@ -2070,14 +2074,17 @@ pub fn submit(qserial: u64, origin_ll: bool, handles: &[u64]) {
     if aq_on() || super::capture::on() {
         let mut stream = Vec::new();
         let mut syncs = Vec::new();
+        let mut occl = super::occl::Walk::default();
         unsafe {
             crate::nvn::cmd::for_each_record(handles, |op, r| {
                 if op == crate::nvn::obj::op::FENCE_SYNC && r.len() >= 16 {
                     syncs.push(core::ptr::read_unaligned(r.as_ptr().add(8) as *const u64));
                 }
+                occl.record(op, r);
                 stream.extend_from_slice(r)
             })
         };
+        super::occl::submitted(&occl);
         super::capture::submit(qserial, origin_ll, &stream);
         if !aq_on() {
             submit_stream(qserial, origin_ll, stream);
