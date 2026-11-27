@@ -41,4 +41,24 @@ dialog to select either native or web. it should not be two play buttons, two bu
 
 ## Results
 
-(filled at the end)
+The dialog design changed four times during the wave on the owner's word (tiles + Cancel; tiles + one primary;
+two filled buttons; question box with Web as a ghost lead verb); what shipped is the guide's new **Choices** form:
+
+- One Play and one Build in the Game menu, the context menu, the card, Enter/double-click, Ctrl+B and Updates'
+  Build now; the W5 web entries are gone. `App::why_not(id, build, web)` (`flows/target.rs`) is the one rule.
+- **Play** runs the one version that can play (native: `play`; web: `play_in_browser`) and asks only when both can.
+  Pressed before the startup tools check ended, Play finishes the check first (`refresh_tools_now`): before that
+  fix, a Play at startup on Anime Girls saw no browser and ran native without asking.
+- **Build** always asks; a version that cannot build is disabled, its reason the tooltip (a built game's Native:
+  "The native build is up to date.", the existing enablement).
+- The box: `Surface::Choices` drawn by `message::choices` — window title Play / Build (`words_contexts`), heading
+  "Play <game> natively or on the web?" / "Build <game> natively or for the web?", the text explaining both, the
+  footer Native then Web as equal `button::choice` buttons at the trailing end (`authored::choices_at_bottom`),
+  none filled; Enter chooses nothing; X / Escape dismiss. `--show-window play|build` opens it for captures.
+- Docs: guide §5 Choices bullet + footer row + filled-primary bullet + Buttons table; `LAUNCHER_CONTRACT.md` web
+  section; `35-WEB-TARGET-PLAN.md` W5 row; captures `docs/images/dialogs/play.png`, `build.png`.
+
+Evidence (`build/WEB/W5b`): `game-menu.png`, `play-choices-anime.png`, `build-choices-anime.png`,
+`chrome-play-web.png` + `chrome-play-web-later.png` (Play > Web for Anime Girls: Chrome at
+`127.0.0.1:8781/anime-girls-sun-of-a-beach/`, title menu reached), `play-native-only.txt` (card Play on Beach
+Bounce, native only: no dialog, the game started, then stopped by PID).
