@@ -47,7 +47,7 @@ impl App {
         }
         .into();
         self.bar = None;
-        self.job_label = if ok { w::JOB_COMPLETE } else { w::JOB_STOPPED }.into();
+        self.job_label = if ok { ww::JOB_DONE } else { w::JOB_STOPPED }.into();
         self.refresh_facts();
         if self.closing {
             self.close_now = true;
