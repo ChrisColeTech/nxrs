@@ -138,7 +138,9 @@ fn properties_list_and_remove_dlc() {
         2,
         "nothing changes before Apply"
     );
-    h.get_by_label("Cancel").click();
+    // no Cancel in the footer: the header's X discards the Draft
+    assert!(h.query_by_label("Cancel").is_none());
+    h.get_by_label("Close Kart — Properties").click();
     h.run();
     assert!(h.state().app.surfaces.is_empty());
 }

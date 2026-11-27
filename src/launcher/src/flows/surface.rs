@@ -35,16 +35,38 @@ pub struct Check {
     pub yes_on: Action,
 }
 
+/// A question's words: the window's title, the heading (the question itself), the text under it
+/// (may be empty) and the verb of its one button ("Remove"); the X and Escape answer No.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ask {
+    pub title: String,
+    pub heading: String,
+    pub text: String,
+    pub verb: String,
+}
+
+impl Ask {
+    pub fn new(title: &str, heading: &str, text: &str, verb: &str) -> Self {
+        let own = |s: &str| s.to_string();
+        Self {
+            title: own(title),
+            heading: own(heading),
+            text: own(text),
+            verb: own(verb),
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Surface {
+    /// A message box: `title` is its heading (the window is titled with the app's name).
     Message {
         title: String,
         text: String,
         error: bool,
     },
     Question {
-        title: String,
-        text: String,
+        ask: Ask,
         yes: Action,
         no: Option<Action>,
         default_no: bool,

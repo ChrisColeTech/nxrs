@@ -25,6 +25,7 @@ pub const PLACEHOLDER: &str = "Build output appears here. Select a game and choo
 pub const PACKAGE_DLC: &str = "DLC: {} is now on this game's DLC list";
 pub const CLOSE_TITLE: &str = "Build in progress";
 pub const CLOSE_TEXT: &str = "Cancel the build and close the launcher?";
+pub const CLOSE_VERB: &str = "Stop build and close";
 
 /// nxrs-build's problems (`Toolchain::nxrsProblem`).
 pub const NOT_FOUND: &str = "nxrs-build was not found. It ships in the nxrs-engine folder beside nxrs; for a development engine choose it in File > Settings > Engine (or set NXRS_BUILD).";

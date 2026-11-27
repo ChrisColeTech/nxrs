@@ -134,10 +134,7 @@ pub fn show(ui: &mut Ui, app: &mut App, win: &mut ListWindow) -> Reply {
         let files = crate::flows::pick_files(w::PICKER, &start, w::FILTER);
         add(app, win, &files);
     }
-    let mut reply = Reply {
-        close: pressed.close,
-        ..Reply::default()
-    };
+    let mut reply = Reply::default();
     if pressed.build && editable {
         app.select(&win.game_id);
         reply.close = true;

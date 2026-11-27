@@ -23,7 +23,6 @@ pub struct Pressed {
     pub add: bool,
     pub remove: bool,
     pub build: bool,
-    pub close: bool,
     pub menu: Option<(usize, usize)>,
 }
 
@@ -39,7 +38,7 @@ pub fn show(
     let mut pressed = Pressed::default();
     // laid out from the bottom: the buttons, the outcome and the notes always show; the list takes the rest
     ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
-        // the shared footer: the list's own verbs lead, Close, the one filled action last
+        // the shared footer: the list's own verbs lead, the one filled action last (the X closes)
         let (mut remove, mut build) = (false, false);
         let can_remove = editable && !w.picks.rows.is_empty();
         let lead = |ui: &mut Ui| {
@@ -50,14 +49,12 @@ pub fn show(
             }
         };
         let size = vec2(ui.available_width(), FOOTER);
-        let close = crate::constants::words_settings::CLOSE;
-        let (closed, added) = ui
+        pressed.add = ui
             .allocate_ui_with_layout(size, Layout::top_down(Align::Min), |ui| {
-                authored::footer_bar(ui, p, lead, close, Some((b.add, editable, b.add_tip)))
+                authored::footer_bar(ui, p, lead, (b.add, editable, b.add_tip))
             })
             .inner;
         (pressed.remove, pressed.build) = (remove, build);
-        (pressed.close, pressed.add) = (closed, added);
         ui.add_space(4.0);
         if busy {
             form::busy(ui, p);

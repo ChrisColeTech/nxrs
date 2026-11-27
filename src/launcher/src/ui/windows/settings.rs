@@ -1,6 +1,6 @@
 //! Settings: Engine, Build defaults, Controller, Appearance, Play down the rail (the family's work
-//! window, as giga-cut's Settings); Cancel and Apply. The appearance
-//! previews live; Cancel, Escape and the X restore it.
+//! window, as giga-cut's Settings); Apply. The appearance previews live; Escape and the X discard
+//! the Draft and restore it.
 
 use super::{Reply, settings_tabs};
 use crate::constants::words_settings as w;
@@ -32,13 +32,8 @@ pub fn show(ui: &mut Ui, app: &mut App, s: &mut SettingsDraft) -> Reply {
         _ => settings_tabs::play(ui, s),
     });
     s.tab = tab;
-    let (cancel, apply) = authored::footer(ui, &p, w::APPLY, true, w::CANCEL);
     let mut reply = Reply::default();
-    if cancel {
-        app.cancel_settings();
-        reply.close = true;
-    }
-    if apply {
+    if authored::footer(ui, &p, w::APPLY, true) {
         reply.close = app.apply_settings(s);
     }
     reply

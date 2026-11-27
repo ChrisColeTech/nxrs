@@ -1,6 +1,6 @@
 //! Remove from library, Install keys (`removeGame`, `installKeys`).
 
-use super::surface::Check;
+use super::surface::{Ask, Check};
 use super::{Action, App};
 use crate::constants::{engine as e, words_library as l};
 use crate::model::fill::fill;
@@ -33,10 +33,11 @@ impl App {
         if self.busy(&g.id) {
             return;
         }
-        let (id, text) = (g.id.clone(), fill(l::REMOVE_TEXT, &[&g.title]));
+        let (id, heading) = (g.id.clone(), fill(l::REMOVE_HEADING, &[&g.title]));
+        let ask = Ask::new(l::REMOVE_TITLE, &heading, l::REMOVE_TEXT, l::REMOVE_VERB);
         let yes = Action::ConfirmRemove(id.clone(), false);
         if !files::is_dir(&g.build_dir) {
-            self.question(l::REMOVE_TITLE, &text, yes, None, false);
+            self.question(ask, yes, None, false);
             return;
         }
         let size = size_text(kept_saves::folder_size(&g.build_dir));
@@ -50,7 +51,7 @@ impl App {
             on: true,
             yes_on: Action::ConfirmRemove(id, true),
         };
-        self.question_checked(l::REMOVE_TITLE, &text, yes, check);
+        self.question_checked(ask, yes, check);
     }
 
     /// The answer: the entry goes; with `delete`, its saves are kept and its build folder deleted first
