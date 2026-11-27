@@ -192,7 +192,7 @@ mod tests {
         assert_eq!(merge(vec![(0, 10), (2, 5)]), [(0, 10)]);
     }
 
-    /// The blob the page unpacks (src/web/saves.js): directories first, then their files, paths relative.
+    /// The blob the page unpacks (src/front/web/page/saves.js): directories first, then their files, paths relative.
     #[test]
     fn save_blob_layout() {
         let d = std::env::temp_dir().join(format!("nxrs-packsave-{}", std::process::id()));

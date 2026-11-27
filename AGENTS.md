@@ -42,7 +42,9 @@ py -m unittest scripts.test_play          # the harness's own checks (under a se
 
 - The engine workspace (root `Cargo.toml`): `src/translator` package input and the ARM64 → C translator;
   `src/runtime` the host runtime; `src/os` the OS services; `src/graphics` NVN on Vulkan; `src/shaders`;
-  `src/front` the window, input and presentation; `src/profiles` game profiles; `src/config`; `src/cli` the
+  `src/front` the window, input and presentation (`src/front/web`: the same for web builds, the browser host:
+  `page/` shipped beside game.wasm and embedded by `src/cli/src/webhost.rs`, `link/` Emscripten JS libraries,
+  `tests/` node tests; `scripts/web/dev_server.py` serves a web build); `src/profiles` game profiles; `src/config`; `src/cli` the
   `nxrs-cli` package, whose executable `nxrs-build` is what the launcher runs.
 - `src/launcher` the launcher `nxrs` (egui), its own workspace and lock file, building into the root `target/`.
   Layers: `constants` → `model` (pure) → `services` (all I/O) → `flows` (commands, no egui) → `ui` → `cli`.

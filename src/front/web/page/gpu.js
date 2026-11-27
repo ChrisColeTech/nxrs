@@ -1,6 +1,6 @@
 // The page side of the web build's GPU (docs/35 W4): the canvas the game is shown in, and the GPU worker that owns the
-// WebGPU device and executes the engine's command ring (src/web/gpu-worker.js). The engine starts it through
-// nxgfx_web_start (src/web/nxgfx.lib.js) once it creates its Vulkan device (src/graphics/src/web).
+// WebGPU device and executes the engine's command ring (gpu-worker.js). The engine starts it through
+// nxgfx_web_start (../link/nxgfx.lib.js) once it creates its Vulkan device (src/graphics/src/web).
 //
 // The canvas is the page (WEB-WPAGE): as large as the window allows at the game's aspect, centred on black. What the
 // page must tell the player (the first picture, a lost device) goes to boot.js as an `nxrs-gpu` event.

@@ -2,7 +2,7 @@
 // is only the game's canvas and a one-line notice, WEB-WPAGE), starts the I/O worker
 // and the boot-set prefetch, restores the saves, puts the small host files in the in-memory file system, and starts
 // game.js (Emscripten; main runs on a worker thread of its own, PROXY_TO_PTHREAD). The engine then hands the page its
-// shared blocks (src/web/nxrs-lib.js -> Module.nxrsHost): the I/O slots (to the I/O worker), the audio ring (to the
+// shared blocks (../link/nxrs-lib.js -> Module.nxrsHost): the I/O slots (to the I/O worker), the audio ring (to the
 // AudioWorklet), the input block (to input.js). One function per subsystem below; the page never blocks.
 //
 // Game data (RomFS, ExeFS) is never copied into the in-memory file system: the engine reads it through the I/O worker

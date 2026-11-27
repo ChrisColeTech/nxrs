@@ -188,7 +188,7 @@ Each phase closes with a measured result in `build/WEB/<phase>/report.md`; from 
 | `src/graphics` | replay half builds for wasm and writes the command ring; Vulkan executor stays native-only |
 | `src/shaders` | SPIR-V → WGSL stage with the W0(e) rewrites, pack writer |
 | `src/cli` | emcc lane in `cc.rs`, `--target web`, packager, boot-set recorder |
-| `src/web` (new) | the host JS: page, engine worker bootstrap, GPU worker, I/O worker, audio worklet, input, saves |
+| `src/front/web` (moved from `src/web`, 2026-11-27) | the browser host, the web counterpart of `src/front`: `page/` (shipped with every build: page, GPU worker, I/O worker, audio worklet, input, saves, menu, pad output), `link/` (Emscripten JS libraries linked into game.js), `tests/` (node); `scripts/web/dev_server.py` serves a build for development. Paths in the rows above are from before the move |
 | `src/launcher` | Build for web, local serving, Play in Chrome (after W5) |
 
 ## 7. Risks

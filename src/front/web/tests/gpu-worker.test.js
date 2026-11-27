@@ -1,5 +1,5 @@
 // gpu-worker.js's pipeline creation (WEB-W8e), against a fake WebGPU device (not shipped; run with node:
-// build\tools\emsdk\node\<version>\node.exe src\web\gpu-worker.test.js). The worker script runs in a vm context whose
+// build\tools\emsdk\node\<version>\node.exe src\front\web\tests\gpu-worker.test.js). The worker script runs in a vm context whose
 // later scripts see its top-level bindings (objs, run, settlePipelines, ...).
 'use strict';
 const assert = require('assert');
@@ -17,7 +17,7 @@ function worker() {
     self: { location: { href: 'http://127.0.0.1/' } },
     navigator: {},
   });
-  vm.runInContext(fs.readFileSync(path.join(__dirname, 'gpu-worker.js'), 'utf8'), ctx);
+  vm.runInContext(fs.readFileSync(path.join(__dirname, '..', 'page', 'gpu-worker.js'), 'utf8'), ctx);
   // a fake device whose async pipelines resolve when the test says so; the sync calls are counted
   vm.runInContext(`
     var pending = [], syncMade = 0, scopes = [];

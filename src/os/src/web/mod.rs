@@ -1,6 +1,6 @@
 //! The web build's host side (docs/35 W3): what the native build gets from the OS, the page and its workers give
 //! here through shared memory. The engine allocates each shared block in linear memory and publishes its address once
-//! through a JS-library function (`src/web/nxrs-lib.js`, run on the page's thread); after that, engine threads and
+//! through a JS-library function (`src/front/web/link/nxrs-lib.js`, run on the page's thread); after that, engine threads and
 //! the page's workers meet only through atomics on those blocks, never through the page's thread.
 //!
 //! | Block | Written by | Read by |
@@ -31,7 +31,7 @@ pub static NXWEB_HOST_PROTOCOL: [u8; translator::loader::layout::WEB_HOST_PROTOC
 };
 
 extern "C" {
-    // src/web/nxrs-lib.js (proxied to the page's thread)
+    // src/front/web/link/nxrs-lib.js (proxied to the page's thread)
     pub(crate) fn nxweb_io_start(table: *const u32);
     pub(crate) fn nxweb_audio_publish(ring: *const u32, frames: u32);
     pub(crate) fn nxweb_input_publish(block: *const u32, words: u32);

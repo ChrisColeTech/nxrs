@@ -1,8 +1,8 @@
 // pad-bridge.js's lines and rules, against os/src/input/bridge.rs `parse` (not shipped; run with node:
-// build\tools\emsdk\node\<version>\node.exe src\web\pad-bridge.test.js).
+// build\tools\emsdk\node\<version>\node.exe src\front\web\tests\pad-bridge.test.js).
 'use strict';
 const assert = require('assert');
-const B = require('./pad-bridge.js');
+const B = require('../page/pad-bridge.js');
 
 const tests = {
   'the route sits beside the page'() {

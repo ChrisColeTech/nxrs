@@ -1,4 +1,4 @@
-//! Requests to the page's I/O worker (`src/web/io-worker.js`): game-data reads and save commits, through a table of
+//! Requests to the page's I/O worker (`src/front/web/page/io-worker.js`): game-data reads and save commits, through a table of
 //! slots in linear memory.
 //!
 //! Table (32-bit words): header 16 words — `[0]` doorbell (bumped by every request; the worker waits on it), `[1]`

@@ -1,7 +1,7 @@
 """Serves one web build to a local browser (docs/35, for engine developers; players use the launcher's Play in
 browser, or `nxrs --serve-web <folder>`, which serve the same folder the same way).
 
-    py -I src/web/dev_server.py <web build folder> [--port 8770] [--live]
+    py -I scripts/web/dev_server.py <web build folder> [--port 8770] [--live]
 
   /                 the page (the build's index.html)
   /<file>           the build folder: the page and its workers, game.js, game.wasm, game.cold.wasm, data.json,
@@ -19,7 +19,7 @@ browser, or `nxrs --serve-web <folder>`, which serve the same folder the same wa
                     request is also kept beside the log as xlate-<key>.bin (a recorded input for the launcher's test)
 
 --live serves the page and its scripts (index.html, boot.js, input.js, saves.js, io-worker.js, audio-worklet.js,
-gpu.js, gpu-worker.js, menu.js, menu.css, hid-rumble.js, pad-bridge.js) from src/web beside this file instead of the build's copies, to try a JS change without
+gpu.js, gpu-worker.js, menu.js, menu.css, hid-rumble.js, pad-bridge.js) from src/front/web/page instead of the build's copies, to try a JS change without
 building again. A build from before W5 (no build.json) is served that way too.
 
 Every response carries COOP/COEP (shared memory and threads need a cross-origin isolated page). Binds 127.0.0.1 only.
@@ -37,6 +37,8 @@ import urllib.parse
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
+REPO = HERE.parent.parent
+LIVE = REPO / 'src' / 'front' / 'web' / 'page'
 PAGE = {'index.html', 'boot.js', 'input.js', 'saves.js', 'io-worker.js', 'audio-worklet.js', 'gpu.js',
         'gpu-worker.js', 'menu.js', 'menu.css', 'hid-rumble.js', 'pad-bridge.js'}
 TYPES = {'.wasm': 'application/wasm', '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json',
@@ -107,7 +109,7 @@ def make_handler(build: Path, data: Path, live: bool, log_file=None, engine=None
             if p == '/':
                 p = '/index.html'
             if live and p.lstrip('/') in PAGE:
-                return HERE / p.lstrip('/')
+                return LIVE / p.lstrip('/')
             if p.startswith('/data/'):
                 rel = p[len('/data/'):]
                 base = data
@@ -230,13 +232,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('build')
     ap.add_argument('--port', type=int, default=8770)
-    ap.add_argument('--live', action='store_true', help='the page and its scripts from src/web')
+    ap.add_argument('--live', action='store_true', help='the page and its scripts from src/front/web/page')
     ap.add_argument('--log', help='append the page\'s engine log to this file')
     ap.add_argument('--engine', help='the nxrs-build that translates run-time shaders (default: NXRS_BUILD, else '
                                      'this tree\'s target/release/nxrs-build)')
     a = ap.parse_args()
     exe = 'nxrs-build.exe' if os.name == 'nt' else 'nxrs-build'
-    engine = next((Path(p) for p in [a.engine, os.environ.get('NXRS_BUILD'), HERE.parent.parent / 'target' / 'release'
+    engine = next((Path(p) for p in [a.engine, os.environ.get('NXRS_BUILD'), REPO / 'target' / 'release'
                                      / exe] if p and Path(p).is_file()), None)
     build = Path(a.build).resolve()
     described = build / 'build.json'
@@ -252,7 +254,7 @@ def main():
             sys.exit(f'{build}: not a web build (build.json, or game.js, data.json and one <name>_data folder)')
         data, live = datas[0], True
     srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, data, live, a.log, engine))
-    print(f'serving {build} on http://127.0.0.1:{a.port}/' + (' (page from src/web)' if live else ''), flush=True)
+    print(f'serving {build} on http://127.0.0.1:{a.port}/' + (' (page from src/front/web/page)' if live else ''), flush=True)
     print(f'run-time shaders translated with {engine}' if engine else 'no nxrs-build: run-time shaders are not '
           'translated', flush=True)
     srv.serve_forever()

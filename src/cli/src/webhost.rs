@@ -1,8 +1,8 @@
 //! The web build's host and its description (docs/35 W5), written into the output folder by `--target web` after
 //! the module and the data description (webpack.rs), so the folder is complete for any static server that sends
-//! COOP/COEP (the launcher's, src/web/dev_server.py, another):
+//! COOP/COEP (the launcher's, scripts/web/dev_server.py, another):
 //!
-//! - the host files (`HOST_FILES`: the page and its workers), embedded here from `src/web`, so a release needs no
+//! - the host files (`HOST_FILES`: the page and its workers), embedded here from `src/front/web/page`, so a release needs no
 //!   source tree; written only when they changed;
 //! - `build.json`: `{"format", "kind", "title", "titleId", "engine": {"name", "contract", "version"}, "entry",
 //!   "data", "files": [{"path", "size", "role"}, ...]}`. `data` names the build's `<name>_data` folder beside it
@@ -20,27 +20,27 @@ pub const FORMAT: u64 = 1;
 /// The page a server opens.
 pub const ENTRY: &str = "index.html";
 
-/// The host files of every web build, as they are in `src/web` (nxrs-lib.js and nxgfx.lib.js are linked into
+/// The host files of every web build, as they are in `src/front/web/page` (`link/`'s nxrs-lib.js and nxgfx.lib.js are linked into
 /// game.js instead). Later waves extend this list, one line each.
 pub const HOST_FILES: &[(&str, &str)] = &[
-    ("index.html", include_str!("../../web/index.html")),
-    ("boot.js", include_str!("../../web/boot.js")),
-    ("input.js", include_str!("../../web/input.js")),
-    ("saves.js", include_str!("../../web/saves.js")),
-    ("io-worker.js", include_str!("../../web/io-worker.js")),
+    ("index.html", include_str!("../../front/web/page/index.html")),
+    ("boot.js", include_str!("../../front/web/page/boot.js")),
+    ("input.js", include_str!("../../front/web/page/input.js")),
+    ("saves.js", include_str!("../../front/web/page/saves.js")),
+    ("io-worker.js", include_str!("../../front/web/page/io-worker.js")),
     (
         "audio-worklet.js",
-        include_str!("../../web/audio-worklet.js"),
+        include_str!("../../front/web/page/audio-worklet.js"),
     ),
-    ("gpu.js", include_str!("../../web/gpu.js")),
-    ("gpu-worker.js", include_str!("../../web/gpu-worker.js")),
+    ("gpu.js", include_str!("../../front/web/page/gpu.js")),
+    ("gpu-worker.js", include_str!("../../front/web/page/gpu-worker.js")),
     // WEB-W9: the in-game menu, the settings it keeps, the loading screen's style
-    ("menu.js", include_str!("../../web/menu.js")),
-    ("menu.css", include_str!("../../web/menu.css")),
+    ("menu.js", include_str!("../../front/web/page/menu.js")),
+    ("menu.css", include_str!("../../front/web/page/menu.css")),
     // WEB-RUMBLE-HID: the DualSense's motors through WebHID
-    ("hid-rumble.js", include_str!("../../web/hid-rumble.js")),
+    ("hid-rumble.js", include_str!("../../front/web/page/hid-rumble.js")),
     // WEB-PADBRIDGE: rumble and lights through the launcher's pad bridge
-    ("pad-bridge.js", include_str!("../../web/pad-bridge.js")),
+    ("pad-bridge.js", include_str!("../../front/web/page/pad-bridge.js")),
 ];
 
 /// The engine's version for `build.json`: a release's `engine.json` beside nxrs-build (its commit), else

@@ -1,7 +1,7 @@
 // Emscripten JS library of the web build's GPU (docs/35 W4; linked by nxrs-build --target web, src/cli/src/cc.rs).
 //
 // nxgfx_web_start(ring): on the page's thread (proxied), hands the wasm memory and the command ring's address to the
-//   page's GPU worker (src/web/gpu.js starts it); 1 when a worker exists.
+//   page's GPU worker (page/gpu.js starts it); 1 when a worker exists.
 // nxgfx_web_fetch(url, len, out_len) / nxgfx_web_fetch_take(dst): a synchronous GET on the calling thread (an engine
 //   pthread: synchronous XHR is allowed in workers), the body kept until taken into wasm memory.
 addToLibrary({

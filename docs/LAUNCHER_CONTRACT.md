@@ -210,7 +210,7 @@ translation failed (nxrs-build's reason, or a key other than the one asked for);
 translation per key at a time. Nothing outside the mount's `shaders\live\<key>\` is written, and nothing but
 nxrs-build is run. The page also looks in `data/shaders/live/<key>/spv/` before asking (an earlier page's
 translation); the next build promotes those records into the library's `spv\`. A static host has no route: the page
-says so in a red line and skips the draws, as before. `src/web/dev_server.py` has the same route.
+says so in a red line and skips the draws, as before. `scripts/web/dev_server.py` has the same route.
 
 **Pad rumble and lights through the launcher** (WEB-PADBRIDGE, contract 2, added 2026-11-27). Chrome cannot rumble
 every pad (the DualSense has no `vibrationActuator` on Windows; WebHID needs a permission) and a page cannot set a
@@ -261,7 +261,7 @@ folder, with `data/<path>` mapped to the data folder `build.json` names. The lau
 (`services/web_serve.rs`, in its process, 127.0.0.1) mounts each web build at `/<slug>/` (the output name in
 lower case, `-` between words) on port 8780 (`NXRS_WEB_PORT`; the next of ten when it is taken), one fixed port so
 the page's origin, and with it the browser's data cache and saves, stays the same. `nxrs.exe --serve-web <webDir>`
-serves one folder without a window; `src/web/dev_server.py` (engine development) does the same.
+serves one folder without a window; `scripts/web/dev_server.py` (engine development) does the same.
 
 Play > **Web** can run only when the web folder holds a finished web build and a Chromium browser exists:
 the default browser when its `http` ProgId is Chrome, Edge, Brave, Chromium, Vivaldi or Opera, else Chrome by path

@@ -126,11 +126,11 @@ pub const WEB_FLAGS: &[&str] = &[
 /// The web build's boundary between generated code and Rust (asm.rs on the other hosts), compiled into each web link.
 const WEB_BOUNDARY: &str = include_str!("../../runtime/web/boundary.c");
 /// The engine's calls into the page (docs/35 W3), linked with `--js-library`.
-const WEB_JS_LIBRARY: &str = include_str!("../../web/nxrs-lib.js");
+const WEB_JS_LIBRARY: &str = include_str!("../../front/web/link/nxrs-lib.js");
 /// The GPU's Emscripten JS library (docs/35 W4): starts the page's GPU worker, fetches shader files.
-const WEB_GPU_LIB: &str = include_str!("../../web/nxgfx.lib.js");
+const WEB_GPU_LIB: &str = include_str!("../../front/web/link/nxgfx.lib.js");
 /// The cold module's loader of a split build (docs/35 §4.6, WEB-W6), linked with `--pre-js`.
-const WEB_SPLIT_JS: &str = include_str!("../../web/split.js");
+const WEB_SPLIT_JS: &str = include_str!("../../front/web/link/split.js");
 
 impl Clang {
     /// The command that runs this compiler: clang itself, or emcc.py under emsdk's Python with its config.
@@ -1217,7 +1217,7 @@ uint32_t *rt_excl_mon;\n";
 /// complete; without it the runtime's functions stay undefined and become imports of the module, and its data is
 /// defined here (`WEB_RUNTIME_DATA`).
 /// `split`: link for the hot/cold split (websplit.rs): function names kept and a symbol map written for wasm-split,
-/// Emscripten's split-module loader with ours (`src/web/split.js`) in front.
+/// Emscripten's split-module loader with ours (`src/front/web/link/split.js`) in front.
 pub fn link_web(
     clang: &Clang,
     objs: &[PathBuf],
@@ -1300,7 +1300,7 @@ pub fn link_web(
             "-sDEFAULT_PTHREAD_STACK_SIZE=8MB",
             "-sERROR_ON_UNDEFINED_SYMBOLS=0",
             "-sWARN_ON_UNDEFINED_SYMBOLS=0",
-            // the page (src/web/boot.js) puts the host files and the restored saves into the file system before
+            // the page (src/front/web/page/boot.js) puts the host files and the restored saves into the file system before
             // main, and the engine's variables (?env=) into its environment
             "-sEXPORTED_RUNTIME_METHODS=FS,ENV,addRunDependency,removeRunDependency",
         ])

@@ -7,7 +7,7 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 
-/// Packet ops (`src/web/gpu-worker.js` has the same table).
+/// Packet ops (`src/front/web/page/gpu-worker.js` has the same table).
 pub mod op {
     pub const BUFFER: u32 = 1;
     pub const DESTROY: u32 = 2;

@@ -1,4 +1,4 @@
-//! The audio ring the page's AudioWorklet plays (`src/web/audio-worklet.js`): 48 kHz float stereo frames in linear
+//! The audio ring the page's AudioWorklet plays (`src/front/web/page/audio-worklet.js`): 48 kHz float stereo frames in linear
 //! memory, written by the engine's audio device thread (`media/sink.rs`), read by the worklet.
 //!
 //! Header (32-bit words): `[0]` frames written, `[1]` frames read (free-running counters; fill = written - read),

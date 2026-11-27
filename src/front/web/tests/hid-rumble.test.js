@@ -1,9 +1,9 @@
 // The DualSense output report hid-rumble.js builds, against os/src/input/sony.rs `output` (not shipped; run with node:
-// build\tools\emsdk\node\<version>\node.exe src\web\hid-rumble.test.js). sony.rs indexes the whole packet (id at
+// build\tools\emsdk\node\<version>\node.exe src\front\web\tests\hid-rumble.test.js). sony.rs indexes the whole packet (id at
 // [0]); the page's report data starts after the id, so the packet's [k] is data[k - 1].
 'use strict';
 const assert = require('assert');
-const H = require('./hid-rumble.js');
+const H = require('../page/hid-rumble.js');
 
 const tests = {
   'CRC-32 matches the standard (sony.rs crc32_matches_the_standard)'() {

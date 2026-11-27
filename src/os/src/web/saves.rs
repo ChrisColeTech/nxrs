@@ -2,7 +2,7 @@
 //! worker in the origin-private file system (`nxrs-saves/<title>/<save>.bin`, written as `.new`, flushed, then moved
 //! over the old one). The slot's done state is the acknowledgement: a commit the worker did not confirm within 10 s
 //! fails with a red line. The page restores every stored save into the in-memory file system before `main` starts
-//! (`src/web/saves.js`), and refuses to start when it cannot read them.
+//! (`src/front/web/page/saves.js`), and refuses to start when it cannot read them.
 
 use std::path::Path;
 use std::time::Instant;

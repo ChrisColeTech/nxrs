@@ -1,4 +1,4 @@
-//! The command ring between the replay and the page's GPU worker (`src/web/gpu-worker.js` reads it).
+//! The command ring between the replay and the page's GPU worker (`src/front/web/page/gpu-worker.js` reads it).
 //!
 //! One static block of linear memory: a 256-byte header of 32-bit words (`H_*`) and a byte ring of packets
 //! `[op u32, payload length u32, payload padded to 4]`. Producers (any engine thread) append under one lock and wake
@@ -75,9 +75,9 @@ pub fn addr() -> *const u8 {
 extern "C" {
     fn emscripten_futex_wait(addr: *const u32, val: u32, max_wait_ms: f64) -> i32;
     fn emscripten_futex_wake(addr: *const u32, count: i32) -> i32;
-    /// `src/web/nxgfx.lib.js`, run on the page's thread: hands the ring and the memory to the GPU worker (1: started)
+    /// `src/front/web/page/nxgfx.lib.js`, run on the page's thread: hands the ring and the memory to the GPU worker (1: started)
     fn nxgfx_web_start(ring: *const u8) -> i32;
-    /// `src/web/nxgfx.lib.js`, on the calling thread: a synchronous GET of a URL relative to the page; the body's
+    /// `src/front/web/page/nxgfx.lib.js`, on the calling thread: a synchronous GET of a URL relative to the page; the body's
     /// length (kept for `nxgfx_web_fetch_take`), or -1
     fn nxgfx_web_fetch(url: *const u8, url_len: usize) -> i32;
     fn nxgfx_web_fetch_take(dst: *mut u8);
@@ -106,7 +106,7 @@ pub fn start() -> Result<(), String> {
             hdr(H_DATA_SIZE).store(DATA as u32, Ordering::Release);
             // SAFETY: a plain call into the page's JS
             if unsafe { nxgfx_web_start(addr()) } == 0 {
-                return Err("the page has no GPU worker (src/web/gpu.js)".into());
+                return Err("the page has no GPU worker (src/front/web/page/gpu.js)".into());
             }
             let t = std::time::Instant::now();
             loop {

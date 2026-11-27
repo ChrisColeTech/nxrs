@@ -3,7 +3,7 @@
 //! The replay (`vk`) runs unchanged above it: ash loads its function tables from `icd::gipa` instead of a Vulkan
 //! loader (`vk::device`'s web arm). Each Vulkan call is answered here; command buffers are kept as records (`cmd`) and
 //! resolved at submission (`submit`) into WebGPU-shaped packets in the command ring (`ring`), which
-//! `src/web/gpu-worker.js` executes. Shader modules become WGSL (`shaders::wgsl`). Native builds do not compile this
+//! `src/front/web/page/gpu-worker.js` executes. Shader modules become WGSL (`shaders::wgsl`). Native builds do not compile this
 //! module.
 
 pub mod cmd;

@@ -1,7 +1,7 @@
 //! The page's keyboard and gamepads as player 1's controller (docs/35 W3), the page's in-game menu (WEB-W9) and its
 //! settings mailbox.
 //!
-//! The page (`src/web/input.js`, `menu.js`) writes a published block of 32-bit words with Atomics: `[0]` sequence
+//! The page (`src/front/web/page/input.js`, `menu.js`) writes a published block of 32-bit words with Atomics: `[0]` sequence
 //! (bumped at every change), `[1]` focus (1 visible and focused, 2 visible behind another window, 3 hidden; keys are
 //! released when it is not 1), `[2..10)` 256 key bits by Windows virtual-key code, `[10]` gamepads connected (a bit
 //! each), `[11]` the in-game menu is open, then 4 gamepads of 8 words from `[16]`: `[0]` connected, `[1]` buttons
