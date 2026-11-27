@@ -8,7 +8,7 @@ use crate::constants::{web as c, words_build as w, words_web as ww};
 use crate::model::fill::fill;
 use crate::model::game::Game;
 use crate::model::path_text::join;
-use crate::model::web_build::{imported_page, web_dir};
+use crate::model::web_build::{imported_page, page_parts, web_dir};
 use crate::services::browser;
 use crate::services::web_serve::{self, WebServer};
 
@@ -102,7 +102,10 @@ impl App {
             self.web_server = Some(server);
         }
         match &self.web_server {
-            Some(s) if page.is_some() => s.mount_site(&game.output_name, mount),
+            Some(s) if page.is_some() => {
+                let query = page_parts(&game.web_build).1;
+                s.mount_site(&game.output_name, mount, query)
+            }
             Some(s) => s.mount(&game.output_name, mount),
             None => Err(ww::NO_SERVER.into()),
         }

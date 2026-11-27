@@ -18,14 +18,26 @@ pub fn web_dir(game: &Game) -> String {
 /// The page of an imported web game (`webBuild` names an `.html`/`.htm` file); None for an nxrs web
 /// build (`webBuild` a folder, or none).
 pub fn imported_page(game: &Game) -> Option<&str> {
-    let p = game.web_build.as_str();
+    let p = page_parts(&game.web_build).0;
     let ext = super::path_text::suffix(p);
     (!p.is_empty() && c::PAGE_SUFFIXES.contains(&ext.as_str())).then_some(p)
 }
 
-/// A web game's address on a server at `port`: the root of its own `<slug>.localhost`.
-pub fn site_url(port: u16, slug: &str) -> String {
-    format!("http://{slug}{}:{port}/", c::SITE_SUFFIX)
+/// An imported page's path and the query its address carries (`…\game.html?mode=story`: the page
+/// that starts the game, and how).
+pub fn page_parts(web_build: &str) -> (&str, &str) {
+    web_build.split_once('?').unwrap_or((web_build, ""))
+}
+
+/// A web game's address on a server at `port`: the root of its own `<slug>.localhost`, with the
+/// query that starts it.
+pub fn site_url(port: u16, slug: &str, query: &str) -> String {
+    let q = if query.is_empty() {
+        String::new()
+    } else {
+        format!("?{query}")
+    };
+    format!("http://{slug}{}:{port}/{q}", c::SITE_SUFFIX)
 }
 
 /// What a server needs from `build.json`.

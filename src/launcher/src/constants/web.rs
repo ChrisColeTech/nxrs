@@ -51,6 +51,19 @@ pub const SITE_SUFFIX: &str = ".localhost";
 pub const PAGE_DEPTH: usize = 3;
 /// A web game's page, as `index.html` is: what a folder's address serves.
 pub const PAGE_SUFFIXES: [&str; 2] = ["html", "htm"];
+/// A site whose `index.html` only routes to a menu page unless the address names how to start
+/// (`marker` in it) has a direct game link: Play opens `page?query` (the GTA V web port's
+/// `index.html`: `mode === 'story'` goes to `game.html`, anything else to its `launcher.html`).
+pub struct DirectStart {
+    pub marker: &'static str,
+    pub page: &'static str,
+    pub query: &'static str,
+}
+pub const DIRECT_STARTS: [DirectStart; 1] = [DirectStart {
+    marker: "mode === 'story'",
+    page: "game.html",
+    query: "mode=story",
+}];
 /// URL path segment that maps to the build's data folder.
 pub const DATA_SEGMENT: &str = "data";
 

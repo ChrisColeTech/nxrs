@@ -5,9 +5,9 @@ mod common;
 
 use common::*;
 use nxrs_launcher::flows::surface::Surface;
-use nxrs_launcher::model::web_build::imported_page;
+use nxrs_launcher::model::web_build::{imported_page, page_parts};
 use nxrs_launcher::services::browser::Browser;
-use nxrs_launcher::services::web_import::{Found, find};
+use nxrs_launcher::services::web_import::{self, Found, find};
 use nxrs_launcher::services::web_serve::{WebServer, open_site};
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -83,7 +83,7 @@ fn a_web_game_folder_imports_and_plays_from_its_own_host() {
 
     let server = WebServer::start(0).unwrap();
     let url = server
-        .mount_site(&g.output_name, open_site(&page).unwrap())
+        .mount_site(&g.output_name, open_site(&page).unwrap(), "")
         .unwrap();
     let port = server.port();
     assert_eq!(url, format!("http://gta5.localhost:{port}/"));
@@ -112,6 +112,47 @@ fn a_web_game_folder_imports_and_plays_from_its_own_host() {
         404
     );
     assert_eq!(get(port, "127.0.0.1", "/b/x.js", "").0, 404);
+}
+
+/// GTA's `index.html` sends a visit without `?mode=story|sandbox` to its own launcher.html (a menu):
+/// Play opens its direct game link, `game.html?mode=story`, instead; an entry made before that
+/// (its page `index.html`) is moved to it when the folder is imported again.
+#[test]
+fn a_site_with_a_direct_game_link_plays_the_game_not_its_menu() {
+    let (_t, dir) = tmp();
+    let (top, index) = web_game(&dir);
+    let site = format!("{dir}/Web/GTA5/mirror/playgta5.com");
+    let routing =
+        b"<script>const page = mode === 'story' ? 'game.html' : 'launcher.html';</script>";
+    write(&index, routing);
+    write(&format!("{site}/game.html"), b"the game");
+    write(&format!("{site}/launcher.html"), b"the menu");
+    let start = format!("{site}/game.html?mode=story");
+    assert_eq!(find(&top), Ok(Found::Page(start.clone())));
+    assert_eq!(find(&index), Ok(Found::Page(start.clone())));
+    let mut old = web_import::game_for(&Found::Page(index.clone()), &top);
+    old.id = "gta".into();
+    let mut app = app_with(&dir, vec![old]);
+    assert!(app.import_build(&top));
+    assert_eq!(app.lib.games.len(), 1);
+    assert_eq!(app.lib.games[0].web_build, start);
+    let g = app.lib.games[0].clone();
+    let (page, query) = page_parts(&g.web_build);
+    let server = WebServer::start(0).unwrap();
+    let url = server
+        .mount_site(&g.output_name, open_site(page).unwrap(), query)
+        .unwrap();
+    let port = server.port();
+    assert_eq!(url, format!("http://gta5.localhost:{port}/?mode=story"));
+    assert_eq!(
+        get(port, "gta5.localhost", "/?mode=story", "").2,
+        b"the game"
+    );
+    // its "Return to launcher" still finds the menu
+    assert_eq!(
+        get(port, "gta5.localhost", "/launcher.html", "").2,
+        b"the menu"
+    );
 }
 
 #[test]

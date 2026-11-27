@@ -30,7 +30,20 @@ fn at_top(dir: &str) -> Option<Found> {
         return Some(Found::Nxrs(dir.to_string()));
     }
     let index = join(dir, c::DEFAULT_ENTRY);
-    is_file(&index).then_some(Found::Page(index))
+    if !is_file(&index) {
+        return None;
+    }
+    Some(Found::Page(direct_start(dir, &index).unwrap_or(index)))
+}
+
+/// The page that starts the game, with its query, when the site's `index.html` routes to a menu
+/// unless told how to start (`DIRECT_STARTS`).
+fn direct_start(dir: &str, index: &str) -> Option<String> {
+    let text = read_text(index)?;
+    c::DIRECT_STARTS
+        .iter()
+        .find(|d| text.contains(d.marker) && is_file(&join(dir, d.page)))
+        .map(|d| format!("{}?{}", join(dir, d.page), d.query))
 }
 
 /// The web build at `path`; Err with why it is none (a path that is not one at all: `NOT_A_BUILD`).
@@ -41,6 +54,10 @@ pub fn find(path: &str) -> Result<Found, String> {
         if file_name(&path).eq_ignore_ascii_case(c::BUILD_JSON) || is_page(&path) {
             if has_web_build(&dir) {
                 return Ok(Found::Nxrs(dir));
+            }
+            // the site's own index.html picked: the page that starts the game, when it names one
+            if file_name(&path).eq_ignore_ascii_case(c::DEFAULT_ENTRY) {
+                return at_top(&dir).ok_or_else(|| w::NOT_A_BUILD.to_string());
             }
             if is_page(&path) {
                 return Ok(Found::Page(path));

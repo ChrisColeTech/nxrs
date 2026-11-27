@@ -164,14 +164,14 @@ impl WebServer {
 
     /// Serves a web game at the root of its own `<slug>.localhost` (replacing an earlier mount of
     /// it); its address.
-    pub fn mount_site(&self, name: &str, mount: Mount) -> Result<String, String> {
+    pub fn mount_site(&self, name: &str, mount: Mount, query: &str) -> Result<String, String> {
         let slug = web_build::slug(name);
         let mut m = self
             .mounts
             .lock()
             .map_err(|_| format!("{}{}", w::NO_SERVER, w::NOT_SERVED_TITLE))?;
         m.insert(super::web_route::site_key(&slug), mount);
-        Ok(web_build::site_url(self.port, &slug))
+        Ok(web_build::site_url(self.port, &slug, query))
     }
 
     /// The line said when the port asked for was taken.
