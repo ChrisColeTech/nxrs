@@ -2100,6 +2100,8 @@ fn run_stream_due(
     let t0 = std::time::Instant::now();
     let mut nd = 0;
     let mut tp = 0.0;
+    // the CPU signals made before this submission's pool sync (`chain_parked`)
+    let sig0 = super::mem::cpu_signals_now();
     super::perf::timed(super::perf::C::PrepNs, || {
         super::mem::SYNC_BY[0].fetch_add(1, Ordering::Relaxed);
         let dirty = super::perf::timed(super::perf::C::PoolSyncNs, || {
@@ -2127,15 +2129,42 @@ fn run_stream_due(
     wait_diag::phase("end replay/pass");
     exec::end(g, &mut sub, &mut qs);
     st.qstates.insert(qserial, qs);
+    if park_chain() {
+        // (MKW-PIPE) the rest parks first; then the parked queues the GPU signals recorded so far release run on
+        let mut done = Vec::new();
+        let mut reparked = false;
+        match rest {
+            Some(off) => {
+                note_park(&stream[off..]);
+                st.parked.insert(
+                    qserial,
+                    Parked {
+                        stream: stream[off..].to_vec(),
+                        receipts,
+                        wait_receipt: None,
+                        presents: Vec::new(),
+                        later: Vec::new(),
+                    },
+                );
+                reparked = true;
+            }
+            None => done = receipts,
+        }
+        reparked |= chain_parked(g, st, &mut sub, sig0, &mut done);
+        let value = submit_sub(g, sub);
+        wait_diag::phase("submitted");
+        resolve_receipts(g, &mut done, value);
+        if reparked && !st.parked.is_empty() {
+            request_retry(g);
+        }
+        return;
+    }
     let value = submit_sub(g, sub);
     wait_diag::phase("submitted");
     match rest {
         // parked again: its receipts wait for the rest
         Some(off) => {
-            if chain_trace::on() {
-                let (a, v) = exec::wait_of(&stream[off..]);
-                chain_trace::note("park", a, v);
-            }
+            note_park(&stream[off..]);
             st.parked.insert(
                 qserial,
                 Parked {
@@ -2159,6 +2188,132 @@ fn run_stream_due(
         }
         None => {}
     }
+}
+
+fn note_park(rest: &[u8]) {
+    if chain_trace::on() {
+        let (a, v) = exec::wait_of(rest);
+        chain_trace::note("park", a, v);
+    }
+}
+
+/// The receipts of streams that ran to their end in the submission of timeline `value`.
+fn resolve_receipts(g: &Gpu, done: &mut Vec<u64>, value: u64) {
+    if done.is_empty() {
+        return;
+    }
+    let mut r = g.q.receipts.lock().unwrap();
+    for id in done.drain(..) {
+        r.insert(id, value);
+    }
+    drop(r);
+    g.q.done_cv.notify_all();
+}
+
+/// (MKW-PIPE) `NXGFX_PARK_CHAIN` (default on; 0: off): when a stream parks at an event wait another queue's work
+/// will signal, the parked queues whose wait a GPU signal recorded so far passes run on at once, on the replay thread,
+/// each in a submission of its own made without a pool sync (`chained_sub`), until none passes. The two NVN queues of
+/// Mario Kart World's frame hand work to each other this way about nine times a frame; each hand-over went through
+/// the parked-work retry and a full pool sync (a whole write-watch scan whenever the game had made a CPU signal
+/// meanwhile, which it does every frame on other events), in series on the replay thread, which the game's frame
+/// waits for (its main thread's nvnSyncWait on the frame's fence). The first sync covers them all: every parked
+/// stream was queued before the op this submission replays, and its wait passes by GPU work recorded after that
+/// sync, not by a CPU signal (`exec::wait_passes_chained`). CPU writes made since stay in the write watch for the
+/// next ordinary sync, as they would for a GPU that had not reached them yet. Each keeps a submission of its own so
+/// the GPU works on one while the next is translated (one submission for all of them left the frame's GPU work to
+/// after its last translation: 10.6 ms from the end of the replay to the game's fence, against 1.0).
+fn park_chain() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("NXGFX_PARK_CHAIN").as_deref() != Ok("0");
+        crate::vklog!(
+            "parked queues released by GPU signals already recorded: {}",
+            if on {
+                "run on at once, without a pool sync of their own (NXGFX_PARK_CHAIN=0: through the retry, each with its own)"
+            } else {
+                "through the retry, each with its own pool sync (NXGFX_PARK_CHAIN=0)"
+            }
+        );
+        on
+    })
+}
+
+/// Streams run on after one pool sync at most.
+const CHAIN_MAX: usize = 32;
+
+/// A submission for a chained stream (`chain_parked`): as `run_stream_due`'s, without the pool sync (the textures'
+/// own preparation still runs: registrations, landed texture write-backs, images due).
+fn chained_sub(g: &'static Gpu, st: &mut SubmitState) -> Sub {
+    let mut sub = new_sub(g, st);
+    super::scale::begin_submit(g, &mut sub);
+    super::perf::timed(super::perf::C::PrepNs, || {
+        super::gmem::begin(g, &mut sub);
+        g.image_begin_submit(&mut sub, &[]);
+    });
+    chain_trace::note("prep", 0, 0);
+    sub
+}
+
+/// Runs on the parked queues whose wait now passes by GPU work (`exec::wait_passes_chained`), each in a submission
+/// of its own (`chained_sub`): `sub` (recorded so far) is submitted before each and replaced; `sig0`: the CPU signals
+/// made before the last pool sync. The receipts of the streams that ran to their end go to `done` (resolved with the
+/// value of the submission that holds them). Returns whether one parked again.
+fn chain_parked(
+    g: &'static Gpu,
+    st: &mut SubmitState,
+    sub: &mut Sub,
+    sig0: u64,
+    done: &mut Vec<u64>,
+) -> bool {
+    let mut reparked = false;
+    for _ in 0..CHAIN_MAX {
+        let quiet = super::mem::cpu_signals_now() == sig0;
+        let pick = st
+            .parked
+            .iter()
+            .filter(|(_, p)| {
+                p.wait_receipt.is_none()
+                    && p.presents.is_empty()
+                    && p.later.is_empty()
+                    && exec::wait_passes_chained(g, &p.stream, quiet)
+            })
+            .map(|(k, _)| *k)
+            .min();
+        let Some(q) = pick else { break };
+        let p = st.parked.remove(&q).unwrap();
+        chain_trace::note("chain", exec::wait_of(&p.stream).0, q);
+        super::perf::inc(super::perf::C::Chained);
+        let prev = std::mem::replace(sub, chained_sub(g, st));
+        let value = submit_sub(g, prev);
+        resolve_receipts(g, done, value);
+        let ll = st.qstates.get(&q).map(|s| s.origin_ll).unwrap_or(true);
+        let mut qs = st.qstates.remove(&q).unwrap_or_else(|| QState::new(ll));
+        let stream = p.stream;
+        let rest = super::perf::timed(super::perf::C::ReplayNs, || {
+            exec::run_segmented(g, sub, &mut qs, &stream, &mut || new_sub(g, st))
+                .unwrap_or_else(|| exec::run(g, sub, &mut qs, &stream))
+        });
+        exec::end(g, sub, &mut qs);
+        st.qstates.insert(q, qs);
+        match rest {
+            Some(off) => {
+                note_park(&stream[off..]);
+                st.parked.insert(
+                    q,
+                    Parked {
+                        stream: stream[off..].to_vec(),
+                        receipts: p.receipts,
+                        wait_receipt: None,
+                        presents: Vec::new(),
+                        later: Vec::new(),
+                    },
+                );
+                reparked = true;
+            }
+            None => done.extend(p.receipts),
+        }
+    }
+    reparked
 }
 
 /// A queue parked for 2 s or more, logged once per park with its wait (the retry thread, every second).

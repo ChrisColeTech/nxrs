@@ -9092,6 +9092,50 @@ pub fn wait_passes(g: &Gpu, stream: &[u8]) -> bool {
     event_wait_passes(g, addr, mode, value)
 }
 
+/// (MKW-PIPE) Whether a parked stream may run on at once without a pool sync of its own (`queue::chain_parked`): it
+/// starts at an event wait that a GPU signal already recorded passes (that signal's work comes first in the queue),
+/// or that the event's value passes while no CPU signal was made since the last pool sync (`cpu_quiet`: what the CPU
+/// wrote before a signal it made later would not be in that sync).
+pub fn wait_passes_chained(g: &Gpu, stream: &[u8], cpu_quiet: bool) -> bool {
+    if stream.len() < 24 || unsafe { rd::<op_hdr>(stream.as_ptr()) }.op != op::WAIT_EVENT {
+        return false;
+    }
+    let (addr, mode, value): (u64, u32, u32) =
+        unsafe { (rd_at(stream, 0), rd_at(stream, 8), rd_at(stream, 12)) };
+    let cur = unsafe {
+        (*(addr as *const std::sync::atomic::AtomicU32)).load(std::sync::atomic::Ordering::Acquire)
+    };
+    let pending = g.q.pending_signals.lock().unwrap().get(&addr).map(|&(m, v, _)| (m, v));
+    chainable(cur, pending, mode, value, cpu_quiet)
+}
+
+/// `wait_passes_chained`'s rule: the event's value `cur`, the GPU signal recorded for it (mode, value), the wait.
+fn chainable(cur: u32, pending: Option<(u32, u32)>, mode: u32, value: u32, cpu_quiet: bool) -> bool {
+    if crate::nvn::sync::event_passes(cur, mode, value) {
+        return cpu_quiet;
+    }
+    matches!(pending, Some((m, v)) if m == event_signal::WRITE && crate::nvn::sync::event_passes(v, mode, value))
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    /// A parked stream runs on without a sync of its own when a GPU signal recorded so far passes its wait, or when
+    /// the event's value passes and no CPU signal came after the last sync; never on a wait nothing passes yet.
+    #[test]
+    fn a_wait_chains_on_recorded_gpu_signals_or_a_quiet_cpu() {
+        let geq = event_wait::GEQUAL_WRAP;
+        let w = event_signal::WRITE;
+        assert!(chainable(0, Some((w, 3)), geq, 3, false), "a recorded GPU WRITE signal passes it");
+        assert!(!chainable(0, Some((w, 2)), geq, 3, true), "a recorded signal short of the value does not");
+        assert!(!chainable(0, Some((event_signal::ADD, 5)), geq, 3, true), "an ADD signal's sum is not known");
+        assert!(!chainable(0, None, geq, 3, true), "nothing passes it");
+        assert!(chainable(4, None, geq, 3, true), "the value passes it, no CPU signal since the sync");
+        assert!(!chainable(4, None, geq, 3, false), "the value passes it after a CPU signal: a new sync first");
+        assert!(chainable(7, Some((w, 7)), event_wait::EQUAL, 7, false), "EQUAL by a recorded signal");
+    }
+}
+
 /// The event wait at the start of a parked stream: (address, mode << 32 | value), for the chain trace.
 pub fn wait_of(stream: &[u8]) -> (u64, u64) {
     if stream.len() < 24 || unsafe { rd::<op_hdr>(stream.as_ptr()) }.op != op::WAIT_EVENT {

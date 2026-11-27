@@ -80,6 +80,7 @@ NXGFX_NDVE_COMPARE_8	test		src/graphics/src/vk/newndve/kernels.rs
 NXGFX_OCCL_SYNC	switch	frame's results otherwise read them two presents late: Mario Kart 8 Deluxe's black stretches). NXGFX_OCCL_SYNC=0 off	src/graphics/src/vk/queue.rs
 NXGFX_OP_TIMES	diagnostic	Replay time by record kind (`NXGFX_OP_TIMES=1`): every 600 presents a `[vk] replay by record` line	src/graphics/src/vk/exec.rs
 NXGFX_PACE_N	diagnostic	presents per pacing line (default 300)	src/graphics/src/vk/present.rs, src/graphics/tests/window.rs
+NXGFX_PARK_CHAIN	switch	MKW-PIPE: when a stream parks at an event wait, the parked queues whose wait a GPU signal recorded so far passes run on at once on the replay thread, each in a submission of its own without a pool sync (the first sync covers them; a wait passed by the event's value after a CPU signal is not chained). `NXGFX_PARK_CHAIN=0`: each through the parked-work retry with its own pool sync, as before	src/graphics/src/vk/queue.rs
 NXGFX_PARTS_PRIVATE_MB	switch	The process private memory in MB past which no more shader parts are made ahead (default an eighth of the machine's memory, at least 6144).	src/graphics/src/vk/pipe.rs
 NXGFX_PART_LTO	switch	make (NXGFX_PART_LTO=1: retained, as before)	src/graphics/src/vk/pipe.rs
 NXGFX_PCACHE_QUIET_MS	switch	is killed. A saver thread writes it a few seconds after new pipelines stop arriving (`NXGFX_PCACHE_QUIET_MS`,	src/graphics/src/vk/pcache.rs

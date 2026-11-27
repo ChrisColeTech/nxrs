@@ -2134,6 +2134,11 @@ fn cpu_signals() -> u64 {
     CPU_SIGNALS.load(Ordering::SeqCst)
 }
 
+/// CPU event signals made so far (MKW-PIPE: chained parked streams, `queue::chain_parked`).
+pub fn cpu_signals_now() -> u64 {
+    cpu_signals()
+}
+
 /// A scan that started once the replay queue's tail was `tail` and `signals` CPU event signals had been made (`full`:
 /// no pool left out).
 fn note_scan(tail: u64, signals: u64, full: bool) {

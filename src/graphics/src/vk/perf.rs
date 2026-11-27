@@ -93,6 +93,8 @@ pub enum C {
     /// the replay thread's time in its ops (busy), and waiting for one (idle)
     AqBusyNs,
     AqIdleNs,
+    /// parked streams run on at once without a pool sync of their own (`queue::chain_parked`)
+    Chained,
     N,
 }
 
@@ -162,6 +164,7 @@ const NAMES: [&str; C::N as usize] = [
     "wait_publish_ns",
     "aq_busy_ns",
     "aq_idle_ns",
+    "parked_chained",
 ];
 
 static COUNT: [AtomicU64; C::N as usize] = [const { AtomicU64::new(0) }; C::N as usize];
@@ -533,13 +536,14 @@ pub fn frame(frame: u64) {
             d(C::WaitFinishNs, &p) as f64 / 1e6 / df
         );
         crate::vklog!(
-            "pipelining up to frame {frame}, per frame: the game's threads waited for room in the replay queue {:.2} ms (ops {:.2}, presents {:.2}) and for fence publication {:.2} ms; the replay thread busy {:.2} ms, idle {:.2} ms",
+            "pipelining up to frame {frame}, per frame: the game's threads waited for room in the replay queue {:.2} ms (ops {:.2}, presents {:.2}) and for fence publication {:.2} ms; the replay thread busy {:.2} ms, idle {:.2} ms; {:.1} parked streams run on at once without a pool sync of their own (NXGFX_PARK_CHAIN)",
             (d(C::WaitRoomNs, &p) + d(C::WaitRoomPresentNs, &p)) as f64 / 1e6 / df,
             d(C::WaitRoomNs, &p) as f64 / 1e6 / df,
             d(C::WaitRoomPresentNs, &p) as f64 / 1e6 / df,
             d(C::WaitPublishNs, &p) as f64 / 1e6 / df,
             d(C::AqBusyNs, &p) as f64 / 1e6 / df,
-            d(C::AqIdleNs, &p) as f64 / 1e6 / df
+            d(C::AqIdleNs, &p) as f64 / 1e6 / df,
+            d(C::Chained, &p) as f64 / df
         );
     }
     crate::vklog!(
