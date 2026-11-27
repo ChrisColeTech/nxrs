@@ -87,8 +87,13 @@ pub fn held() -> bool {
 
 #[cfg(test)]
 mod tests {
+    /// The clock is one process-wide state: its tests run one at a time (in parallel, one test's hold or rate change
+    /// lands between another's reads).
+    static ONE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn slows_and_keeps_time() {
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
         let a = super::now_ns();
         super::set_rate(0.5);
         let b = super::now_ns();
@@ -100,6 +105,7 @@ mod tests {
     /// A hold stops the clock; on release it goes on from where it stopped, without the time held.
     #[test]
     fn hold_stops_time_and_hides_the_gap() {
+        let _one = ONE.lock().unwrap_or_else(|e| e.into_inner());
         super::set_rate(1.0);
         super::set_hold(true);
         assert!(super::held());
