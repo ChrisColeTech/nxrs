@@ -22,6 +22,7 @@ NXGFX_CHAIN_TRACE	diagnostic	Frame-chain trace (`NXGFX_CHAIN_TRACE=<start s>[:<l
 NXGFX_CHECKPOINTS	diagnostic	Checkpoints (VK_NV_device_diagnostic_checkpoints, `NXGFX_CHECKPOINTS`: default on for dispatches and indirect draws,	src/graphics/src/vk/lost.rs
 NXGFX_CLAMP_INDIRECT	path	`NXGFX_CLAMP_INDIRECT=0`: the records as they are. Returns where to read them from.	src/graphics/src/vk/exec.rs
 NXGFX_COPY_SYNC	switch	`NXGFX_COPY_SYNC=0` off.	src/graphics/src/vk/mem.rs
+NXGFX_COPY_TRACE	diagnostic	`NXGFX_COPY_TRACE=1` (MKW-ATLAS): every texture copy into a sparse texture is logged with its source, formats, levels, layers and regions (at most 4000)	src/graphics/src/vk/exec.rs
 NXGFX_CUBE_TWIN	test	NXGFX_CUBE_TWIN=0: the zero stand-in as before (A/B comparisons)	src/graphics/src/vk/exec.rs
 NXGFX_DB_FILL	test	fill is off (`NXGFX_DB_FILL=0`: unbound slots keep what the chunk held) or a descriptor diagnosis reads the chunk	src/graphics/src/vk/exec.rs
 NXGFX_DB_POISON	test	(`NXGFX_DB_POISON`, `NXGFX_MESH_BINDINGS`).	src/graphics/src/vk/exec.rs
