@@ -220,6 +220,9 @@ pub fn fold(outdir: &Path, emsdk: &Path) -> Result<String> {
             .env("BINARYEN_CORES", "8")
             .arg(&wasm)
             .args(FOLD_PASSES)
+            // keep the name section a profiling link (NXRS_WEB_LINK_FLAGS=--profiling-funcs) wrote; a module without
+            // one gains nothing
+            .arg("-g")
             .arg("-o")
             .arg(&tmp),
         "wasm-opt",

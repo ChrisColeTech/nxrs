@@ -113,7 +113,10 @@ pub struct Emsdk {
 /// title's guest window does not fit 4 GiB: docs/35 W0(d)), shared-memory threads, wasm SIMD.
 /// `-mtail-call`: the dispatch's tail calls (src/runtime/web/boundary.c), and the generated code's calls of it in tail
 /// position, so guest indirect-branch chains keep the host stack flat.
-pub const WEB_FLAGS: &[&str] = &["-sMEMORY64=1", "-pthread", "-msimd128", "-mtail-call"];
+/// `-mrelaxed-simd`: the FP helpers' fused multiply-add as the relaxed madd (src/translator/runtime/simd_fp.h `FFMA`)
+/// instead of a software fmaf call (WEB-W8b); Chrome has relaxed SIMD since 114.
+pub const WEB_FLAGS: &[&str] =
+    &["-sMEMORY64=1", "-pthread", "-msimd128", "-mrelaxed-simd", "-mtail-call"];
 
 /// The web build's boundary between generated code and Rust (asm.rs on the other hosts), compiled into each web link.
 const WEB_BOUNDARY: &str = include_str!("../../runtime/web/boundary.c");
@@ -1345,6 +1348,10 @@ mod tests {
         assert!(f.iter().any(|f| f == WEB_GEN_OPT), "{f:?}");
         assert!(!f.iter().any(|f| f == "-O1"), "{f:?}");
         assert!(f.iter().any(|f| f == "-sMEMORY64=1"), "{f:?}");
+        // WEB-W8b: the FP helpers' fused multiply-add needs relaxed SIMD on the web, never natively
+        assert!(f.iter().any(|f| f == "-mrelaxed-simd"), "{f:?}");
+        c.web = None;
+        assert!(!c.gen_flags().iter().any(|f| f.contains("relaxed")));
     }
 
     #[test]

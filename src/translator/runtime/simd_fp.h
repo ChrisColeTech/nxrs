@@ -10,6 +10,23 @@
 #define VK(v) ((VT){} + (T)(v))
 #define K(v) ((T)(v))
 
+// FFMA(x, y, z): x * y + z with one rounding. wasm has no fused multiply-add instruction, so clang lowers fma to a
+// call of the software fmaf / fma (WEB-W8b: 10-12% of the game's job threads in Chrome). With relaxed SIMD it is the
+// relaxed madd, which V8 makes one fused instruction wherever the host has FMA (x86-64 with FMA3, every AArch64):
+// bit-identical to fma there (a host without FMA would round twice). Scalars go through lane 0.
+#if defined(__wasm_relaxed_simd__)
+#if NB == 32
+SI VT FN(rmadd_v)(VT x, VT y, VT z) { return __builtin_wasm_relaxed_madd_f32x4(x, y, z); }
+#else
+SI VT FN(rmadd_v)(VT x, VT y, VT z) { return __builtin_wasm_relaxed_madd_f64x2(x, y, z); }
+#endif
+// (VT){x}, not VK(x): VK adds x to a zero vector, which turns -0 into +0
+SI T FN(rmadd_s)(T x, T y, T z) { return FN(rmadd_v)((VT){x}, (VT){y}, (VT){z})[0]; }
+#define FFMA(x, y, z) _Generic((x), VT: FN(rmadd_v), default: FN(rmadd_s))(x, y, z)
+#else
+#define FFMA(x, y, z) __builtin_elementwise_fma(x, y, z)
+#endif
+
 SI U FN(fb)(T x) { U u; memcpy(&u, &x, sizeof u); return u; }
 SI T FN(fv)(U u) { T x; memcpy(&x, &u, sizeof x); return x; }
 SI int FN(isnan)(U u) { return (u & ~SGN) > EXPM; }
@@ -65,9 +82,9 @@ SN T FN(nan3)(Cpu *c, T a, T b, T d) {
    : (op) == FOP_MUL || (op) == FOP_MULX ? (a) * (b) : (op) == FOP_NMUL ? -((a) * (b))              \
    : (op) == FOP_DIV ? (a) / (b) : (op) == FOP_ABD ? __builtin_elementwise_abs((a) - (b))          \
    : (op) == FOP_SQRT ? __builtin_elementwise_sqrt(a)                                              \
-   : (op) == FOP_MADD ? __builtin_elementwise_fma(b, d, a)                                         \
-   : (op) == FOP_RECPS ? __builtin_elementwise_fma(a, b, KK(2))                                    \
-   : (op) == FOP_RSQRTS ? __builtin_elementwise_fma(a, b, KK(3)) * KK(0.5) : (a))
+   : (op) == FOP_MADD ? FFMA(b, d, a)                                                              \
+   : (op) == FOP_RECPS ? FFMA(a, b, KK(2))                                                         \
+   : (op) == FOP_RSQRTS ? FFMA(a, b, KK(3)) * KK(0.5) : (a))
 
 // Lanes whose fast result needs fixing: NaN results (NaN operand or invalid op), RSQRTS overflow.
 #define FBAD(op, r) ((op) == FOP_RSQRTS ? ((r) != (r)) | (__builtin_elementwise_abs(r) == K(INFINITY)) : (r) != (r))
@@ -75,9 +92,9 @@ SN T FN(nan3)(Cpu *c, T a, T b, T d) {
 // (3 + a*b) / 2 with one rounding (a already negated): halve a normal operand first, so a product beyond
 // the format's range (which the fast path rounds to inf, or to the largest normal when rounding down) is exact.
 SN T FN(rsqrts)(T a, T b) {
-    if (__builtin_elementwise_abs(a) >= FN(fv)(2 * MINN)) return __builtin_elementwise_fma(a * K(0.5), b, K(1.5));
-    if (__builtin_elementwise_abs(b) >= FN(fv)(2 * MINN)) return __builtin_elementwise_fma(a, b * K(0.5), K(1.5));
-    return __builtin_elementwise_fma(a, b, K(3)) * K(0.5);
+    if (__builtin_elementwise_abs(a) >= FN(fv)(2 * MINN)) return FFMA(a * K(0.5), b, K(1.5));
+    if (__builtin_elementwise_abs(b) >= FN(fv)(2 * MINN)) return FFMA(a, b * K(0.5), K(1.5));
+    return FFMA(a, b, K(3)) * K(0.5);
 }
 
 // ARM result for a lane flagged by FBAD (operands already flushed).
@@ -170,7 +187,16 @@ SN T FN(redo)(Cpu *c, int op, T a, T b, T d, T r) {
 // (the recompute toward zero needs a rounding mode wasm lacks).
 SI T FN(op)(Cpu *c, int op, T a, T b, T d) {
 #if defined(__wasm__)
-    if (__builtin_expect((c->fpcr & FPCR_FZ) != 0, 0)) return FN(slow)(c, op, a, b, d);
+    if (__builtin_expect((c->fpcr & FPCR_FZ) != 0, 0)) {
+        // WEB-W8b: with no denormal operand the flush changes no input, and a result that is neither NaN nor tiny
+        // (|r| above the smallest normal, or zero) is what the slow path returns: only the other cases take it
+        if (!simd_directed(c) && !FMINMAX(op) && op != FOP_RSQRTS &&
+            !(FN(isden)(FN(fb)(a)) | FN(isden)(FN(fb)(b)) | FN(isden)(FN(fb)(d)))) {
+            T r = FCALC(op, a, b, d, K);
+            if (__builtin_elementwise_abs(r) > FN(fv)(MINN) || r == K(0)) return r;
+        }
+        return FN(slow)(c, op, a, b, d);
+    }
 #endif
     if (simd_directed(c)) return FN(slow)(c, op, a, b, d);
     if (FMINMAX(op)) {
@@ -189,6 +215,10 @@ SN VT FN(vslow)(Cpu *c, int op, VT a, VT b, VT d) {
 }
 
 SI VTU FN(vsel)(VTS m, VTU x, VTU y) { return (x & (VTU)m) | (y & ~(VTU)m); }
+#if defined(__wasm__)
+// Lanes holding a denormal (exponent field 0, magnitude not 0).
+SI VTS FN(vden)(VTU u) { return ((u & ~((VTU){} + SGN)) != 0) & ((u & EXPM) == 0); }
+#endif
 
 SI VT FN(vflush)(VT a) {
     VTU u = (VTU)a;
@@ -207,8 +237,20 @@ SI VT FN(vflush)(VT a) {
 // Vector FP op: native lanes; any lane FREDO flags (or FPCR.RMode) reruns all lanes through the scalar path.
 SI VT FN(vop)(Cpu *c, int op, VT a, VT b, VT d) {
 #if defined(__wasm__)
-    // FZ: lane by lane through the software flush (FN(op) above)
-    if (__builtin_expect((c->fpcr & FPCR_FZ) != 0, 0)) return FN(vslow)(c, op, a, b, d);
+    // FZ: the vector fast path when no lane has a denormal operand and every result lane is zero or above the smallest
+    // normal (the scalar rule of FN(op) for all lanes at once), else lane by lane through the software flush
+    if (__builtin_expect((c->fpcr & FPCR_FZ) != 0, 0)) {
+        if (!simd_directed(c) && !FMINMAX(op) && op != FOP_RSQRTS) {
+            VTU ua = (VTU)a, ub = (VTU)b, ud = (VTU)d;
+            VTS den = FN(vden)(ua) | FN(vden)(ub) | FN(vden)(ud);
+            if (!__builtin_reduce_or(den)) {
+                VT r = FCALC(op, a, b, d, VK);
+                if (__builtin_reduce_and((__builtin_elementwise_abs(r) > VK(FN(fv)(MINN))) | (r == VK(0))) != 0)
+                    return r;
+            }
+        }
+        return FN(vslow)(c, op, a, b, d);
+    }
 #endif
     if (simd_directed(c)) return FN(vslow)(c, op, a, b, d);
     VT r;
