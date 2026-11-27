@@ -28,6 +28,8 @@ mod profile;
 mod stubgen;
 mod webhost;
 mod webpack;
+mod websplit;
+mod webzip;
 
 use anyhow::{anyhow, Result};
 use clap::{Args, Parser, Subcommand};

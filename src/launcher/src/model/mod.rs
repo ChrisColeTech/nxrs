@@ -12,6 +12,7 @@ pub mod filter;
 pub mod game;
 pub mod game_json;
 pub mod game_update;
+pub mod http_cache;
 pub mod http_range;
 pub mod ini_text;
 pub mod json_fields;

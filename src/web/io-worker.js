@@ -39,7 +39,8 @@ let storeEnd = 0;
 let pending = []; // journal entries not yet written
 const index = new Map(); // block key -> store offset (OPFS) or Uint8Array (memory)
 const inflight = new Map(); // block key -> Promise
-const stats = { boot: 0, demand: 0, hit: 0, reads: 0, fetches: 0, bootFiles: 0, bootBytes: 0, bootDone: false, bootMs: 0, cached: 0 };
+// boot / demand: bytes fetched (compressed where the file is); zraw: the data those fetches carried, inflated
+const stats = { boot: 0, demand: 0, zraw: 0, hit: 0, reads: 0, fetches: 0, bootFiles: 0, bootBytes: 0, bootDone: false, bootMs: 0, cached: 0 };
 
 const log = (text) => postMessage({ log: text });
 const key = (f, b) => f * 4294967296 + b;
@@ -148,45 +149,102 @@ function keep(f, b0, bytes) {
 
 // ---------------------------------------------------------------- fetching
 
-async function fetchRun(f, b0, b1, priority, kind) {
-  const size = files[f][1];
-  const first = b0 * BS;
-  const last = Math.min((b1 + 1) * BS, size) - 1;
+// A compressed file (WEB-W6, src/cli/src/webzip.rs): data.json lists it as [path, size, [extent, end0, end1, ...]];
+// zdata/<path> holds its extents, each raw-deflated alone (or stored as is when that did not shrink it: its length is
+// then the extent's own). Whole extents are fetched by exact range from the compressed file and inflated here; the
+// store keeps the inflated blocks, so the cache and the reads are as for an identity file.
+const zurl = (f) => 'zdata/' + files[f][0].split('/').map(encodeURIComponent).join('/');
+
+async function inflate(bytes) {
+  const s = new Blob([bytes]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
+  return new Uint8Array(await new Response(s).arrayBuffer());
+}
+
+async function fetchExtents(f, b0, b1, priority, kind) {
+  const [size, z] = [files[f][1], files[f][2]];
+  const E = z[0];
+  const ends = z; // ends[1 + i] is extent i's start in the compressed file
+  const x0 = Math.floor((b0 * BS) / E);
+  const x1 = Math.floor((Math.min((b1 + 1) * BS, size) - 1) / E);
+  const first = ends[1 + x0];
+  const last = ends[2 + x1] - 1;
+  const zsize = ends[ends.length - 1];
+  const buf = await rangeGet(zurl(f), files[f][0] + ' (compressed)', first, last, zsize, priority);
+  stats[kind] += buf.length;
+  stats.zraw += Math.min((x1 + 1) * E, size) - x0 * E;
+  stats.fetches++;
+  const parts = await Promise.all(Array.from({ length: x1 - x0 + 1 }, (_, i) => {
+    const x = x0 + i;
+    const part = buf.subarray(ends[1 + x] - first, ends[2 + x] - first);
+    const rawLen = Math.min(E, size - x * E);
+    return part.length === rawLen ? part : inflate(part);
+  }));
+  const out = new Uint8Array(Math.min((x1 + 1) * E, size) - x0 * E);
+  let at = 0;
+  for (const p of parts) {
+    out.set(p, at);
+    at += p.length;
+  }
+  if (at !== out.length) throw new Error(`${files[f][0]}: extents ${x0}-${x1} inflated to ${at} bytes, wanted ${out.length}`);
+  keep(f, (x0 * E) / BS, out);
+}
+
+// bytes [first, last] of url (a file of `size` bytes), checked: exact 206 Content-Range or a whole 200, retried
+async function rangeGet(u, name, first, last, size, priority) {
   for (let attempt = 0; ; attempt++) {
     let r;
     try {
-      r = await fetch(url(f), { headers: { Range: `bytes=${first}-${last}` }, cache: 'no-store', priority });
+      r = await fetch(u, { headers: { Range: `bytes=${first}-${last}` }, cache: 'no-store', priority });
     } catch (e) {
       r = null;
     }
     if (r && (r.status === 206 || r.status === 200)) {
       const ct = r.headers.get('Content-Type') || '';
-      if (ct.startsWith('text/html')) throw new Error(`${files[f][0]}: the server answered with a page, not data`);
+      if (ct.startsWith('text/html')) throw new Error(`${name}: the server answered with a page, not data`);
       if (r.status === 206) {
         const want = `bytes ${first}-${last}/${size}`;
         if (r.headers.get('Content-Range') !== want) {
-          throw new Error(`${files[f][0]}: Content-Range ${r.headers.get('Content-Range')}, wanted ${want}`);
+          throw new Error(`${name}: Content-Range ${r.headers.get('Content-Range')}, wanted ${want}`);
         }
       }
       let buf = new Uint8Array(await r.arrayBuffer());
       if (r.status === 200) {
-        if (buf.length !== size) throw new Error(`${files[f][0]}: ${buf.length} bytes, the manifest says ${size}`);
+        if (buf.length !== size) throw new Error(`${name}: ${buf.length} bytes, the manifest says ${size}`);
         buf = buf.subarray(first, last + 1);
       }
-      if (buf.length !== last - first + 1) throw new Error(`${files[f][0]}: ${buf.length} bytes for ${last - first + 1}`);
-      stats[kind] += buf.length;
-      stats.fetches++;
-      keep(f, b0, buf);
-      return;
+      if (buf.length !== last - first + 1) throw new Error(`${name}: ${buf.length} bytes for ${last - first + 1}`);
+      return buf;
     }
-    if (r && r.status < 500 && r.status !== 429) throw new Error(`${files[f][0]}: HTTP ${r.status}`);
-    if (attempt >= 7) throw new Error(`${files[f][0]}: ${r ? 'HTTP ' + r.status : 'no response'} after ${attempt + 1} tries`);
+    if (r && r.status < 500 && r.status !== 429) throw new Error(`${name}: HTTP ${r.status}`);
+    if (attempt >= 7) throw new Error(`${name}: ${r ? 'HTTP ' + r.status : 'no response'} after ${attempt + 1} tries`);
     await sleep(250 * 2 ** attempt * (0.5 + Math.random()));
   }
 }
 
+async function fetchRun(f, b0, b1, priority, kind) {
+  if (files[f][2]) return fetchExtents(f, b0, b1, priority, kind);
+  const size = files[f][1];
+  const first = b0 * BS;
+  const last = Math.min((b1 + 1) * BS, size) - 1;
+  const buf = await rangeGet(url(f), files[f][0], first, last, size, priority);
+  stats[kind] += buf.length;
+  stats.zraw += buf.length;
+  stats.fetches++;
+  keep(f, b0, buf);
+}
+
+// a compressed file's blocks come in whole extents: [b0, b1] widened to its extents' bounds
+function extentBounds(f, b0, b1) {
+  const z = files[f][2];
+  if (!z) return [b0, b1];
+  const per = z[0] / BS;
+  const lastBlock = Math.ceil(files[f][1] / BS) - 1;
+  return [Math.floor(b0 / per) * per, Math.min(lastBlock, Math.floor(b1 / per) * per + per - 1)];
+}
+
 // Every block of [b0, b1] of file f present; returns whether all were already there.
 async function ensure(f, b0, b1, priority, kind) {
+  [b0, b1] = extentBounds(f, b0, b1);
   const waits = [];
   let run = -1;
   let hit = true;

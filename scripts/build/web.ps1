@@ -72,6 +72,10 @@ $python = Get-ChildItem (Join-Path $emsdk 'python') -Directory | ForEach-Object 
     Where-Object { Test-Path $_ } | Select-Object -First 1
 if (-not $python) { throw "no Python in $emsdk\python (install the Emscripten SDK into build\tools\emsdk)" }
 $env:EM_CONFIG = Join-Path $emsdk '.emscripten'
+# This worktree's own Emscripten cache (system headers and libraries): emsdk is a junction shared by every worktree,
+# and its default cache inside it is keyed by the path it was reached by, so two worktrees cleared each other's
+# (WEB-W5). nxrs-build uses the same folder (src/cli/src/cc.rs `em_cache`).
+$env:EM_CACHE = Join-Path $repo 'target\emcache'
 $env:PATH = "$(Split-Path $python);$emsdk\upstream\bin;$emsdk\upstream\emscripten;$env:PATH"
 $env:CC_wasm64_unknown_emscripten = Join-Path $emsdk 'upstream\emscripten\emcc.exe'
 $env:AR_wasm64_unknown_emscripten = Join-Path $emsdk 'upstream\emscripten\emar.exe'

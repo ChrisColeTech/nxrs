@@ -4,7 +4,9 @@ browser, or `nxrs --serve-web <folder>`, which serve the same folder the same wa
     py -I src/web/dev_server.py <web build folder> [--port 8770] [--live]
 
   /                 the page (the build's index.html)
-  /<file>           the build folder: the page and its workers, game.js, game.wasm, data.json, bootset.json
+  /<file>           the build folder: the page and its workers, game.js, game.wasm, game.cold.wasm, data.json,
+                    bootset.json, zdata/ (compressed data extents, read by range); a whole-file GET that accepts gzip
+                    gets the build's <file>.gz with Content-Encoding: gzip; files carry an ETag and are revalidated
   /data/<path>      the data folder build.json names (<name>_data), with HTTP range requests (exact 206 +
                     Content-Range); the GPU worker's shader files (data/shaders/spv/<hex>.spv|.json) included
   POST /log         the page's engine log lines, appended to --log (development)
@@ -37,13 +39,19 @@ def make_handler(build: Path, data: Path, live: bool, log_file=None):
         def log_message(self, *a):
             pass
 
-        def headers_common(self, ctype, length):
+        def headers_common(self, ctype, length, etag=None):
             self.send_header('Content-Type', ctype)
             self.send_header('Content-Length', str(length))
             self.send_header('Accept-Ranges', 'bytes')
             self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
             self.send_header('Cross-Origin-Embedder-Policy', 'require-corp')
-            self.send_header('Cache-Control', 'no-store')
+            # files: kept by the browser and revalidated (a warm start is 304s, and Chrome keeps the compiled wasm)
+            if etag:
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('ETag', etag)
+                self.send_header('Vary', 'Accept-Encoding')
+            else:
+                self.send_header('Cache-Control', 'no-store')
 
         def resolve(self):
             p = self.path.split('?', 1)[0]
@@ -89,9 +97,29 @@ def make_handler(build: Path, data: Path, live: bool, log_file=None):
                 self.headers_common('text/plain', 0)
                 self.end_headers()
                 return
-            size = f.stat().st_size
             ctype = TYPES.get(f.suffix, 'application/octet-stream')
-            m = re.match(r'bytes=(\d*)-(\d*)$', self.headers.get('Range', ''))
+            rng = self.headers.get('Range', '')
+            # the build's gzip copy (<file>.gz, src/cli/src/webzip.rs) for a whole-file GET that accepts gzip; a
+            # range always gets the identity bytes
+            gz = f.with_name(f.name + '.gz')
+            enc = None
+            if not rng and 'gzip' in self.headers.get('Accept-Encoding', '') and gz.is_file() \
+                    and gz.stat().st_mtime >= f.stat().st_mtime:
+                f, enc = gz, 'gzip'
+            st = f.stat()
+            size = st.st_size
+            etag = f'"{size:x}-{st.st_mtime_ns:x}{"-gz" if enc else ""}"'
+            if not rng and self.headers.get('If-None-Match') == etag:
+                self.send_response(304)
+                self.send_header('ETag', etag)
+                self.send_header('Cache-Control', 'no-cache')
+                self.send_header('Vary', 'Accept-Encoding')
+                self.send_header('Cross-Origin-Opener-Policy', 'same-origin')
+                self.send_header('Cross-Origin-Embedder-Policy', 'require-corp')
+                self.send_header('Content-Length', '0')
+                self.end_headers()
+                return
+            m = re.match(r'bytes=(\d*)-(\d*)$', rng)
             lo, hi = 0, size - 1
             if m and (m.group(1) or m.group(2)):
                 if m.group(1):
@@ -111,7 +139,9 @@ def make_handler(build: Path, data: Path, live: bool, log_file=None):
             else:
                 self.send_response(200)
             n = hi - lo + 1
-            self.headers_common(ctype, n)
+            self.headers_common(ctype, n, etag)
+            if enc:
+                self.send_header('Content-Encoding', enc)
             self.end_headers()
             if head:
                 return

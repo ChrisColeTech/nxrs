@@ -118,6 +118,8 @@ const WEB_BOUNDARY: &str = include_str!("../../runtime/web/boundary.c");
 const WEB_JS_LIBRARY: &str = include_str!("../../web/nxrs-lib.js");
 /// The GPU's Emscripten JS library (docs/35 W4): starts the page's GPU worker, fetches shader files.
 const WEB_GPU_LIB: &str = include_str!("../../web/nxgfx.lib.js");
+/// The cold module's loader of a split build (docs/35 §4.6, WEB-W6), linked with `--pre-js`.
+const WEB_SPLIT_JS: &str = include_str!("../../web/split.js");
 
 impl Clang {
     /// The command that runs this compiler: clang itself, or emcc.py under emsdk's Python with its config.
@@ -125,6 +127,9 @@ impl Clang {
         let mut c = Command::new(&self.path);
         if let Some(e) = &self.web {
             c.arg("-E").arg(&e.emcc_py).env("EM_CONFIG", &e.config);
+            if let Some(cache) = em_cache() {
+                c.env("EM_CACHE", cache);
+            }
             // emcc builds missing system libraries with emcc.exe sub-processes, which find Python on PATH
             if let Some(py_dir) = self.path.parent() {
                 let mut paths = vec![py_dir.to_path_buf()];
@@ -402,6 +407,27 @@ pub fn find_clang(cc_hint: Option<&str>) -> Result<Clang> {
         "clang not found (tried NXRS_CLANG, --cc, the bundled clang, NXRT_LLVM, LLVM's folder, PATH): {}",
         tried.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("; ")
     )
+}
+
+/// The Emscripten cache (system headers and libraries) emcc uses: the user's `EM_CACHE` when set, else
+/// `<target>\emcache` when nxrs-build runs from a development tree's `target\<profile>` (`scripts/build/web.ps1` sets
+/// the same folder). A development tree reaches emsdk through the shared `build\tools` junction, and emsdk's own
+/// cache is keyed by that path: two worktrees cleared each other's (WEB-W5). A release (emsdk beside nxrs-build)
+/// keeps emsdk's own.
+pub fn em_cache() -> Option<PathBuf> {
+    if let Some(c) = std::env::var_os("EM_CACHE").filter(|c| !c.is_empty()) {
+        return Some(PathBuf::from(c));
+    }
+    let exe = std::env::current_exe().ok()?;
+    em_cache_for(&exe)
+}
+
+/// `<target>\emcache` for an executable under a `target` folder.
+fn em_cache_for(exe: &Path) -> Option<PathBuf> {
+    exe.ancestors()
+        .skip(1)
+        .find(|d| d.file_name().is_some_and(|n| n == "target"))
+        .map(|t| t.join("emcache"))
 }
 
 /// The Emscripten SDK for `--target web`: `NXRS_EMSDK`, else `emsdk` beside nxrs-build, else the development tree's
@@ -1100,7 +1126,16 @@ uint32_t *rt_excl_mon;\n";
 /// export is `nxrs_game_main` (modules.c). With `runtime` (the runtime crates' static library) the module is
 /// complete; without it the runtime's functions stay undefined and become imports of the module, and its data is
 /// defined here (`WEB_RUNTIME_DATA`).
-pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir: &Path, js: &Path) -> Result<()> {
+/// `split`: link for the hot/cold split (websplit.rs): function names kept and a symbol map written for wasm-split,
+/// Emscripten's split-module loader with ours (`src/web/split.js`) in front.
+pub fn link_web(
+    clang: &Clang,
+    objs: &[PathBuf],
+    runtime: Option<&Path>,
+    obj_dir: &Path,
+    js: &Path,
+    split: bool,
+) -> Result<()> {
     // the generated tree's headers (cpu.h): <build>\gen\include beside <build>\obj
     let include = obj_dir.parent().unwrap_or(obj_dir).join("gen").join("include");
     let compile = |name: &str, text: &str, extra: &[&str]| -> Result<PathBuf> {
@@ -1141,11 +1176,21 @@ pub fn link_web(clang: &Clang, objs: &[PathBuf], runtime: Option<&Path>, obj_dir
     std::fs::write(&gpu_lib, WEB_GPU_LIB)?;
     // NXRS_WEB_LINK_FLAGS: more emcc link flags (development: -sNODERAWFS=1 runs the module under Node on the real
     // data folder)
-    let extra: Vec<String> = std::env::var("NXRS_WEB_LINK_FLAGS")
+    let mut extra: Vec<String> = std::env::var("NXRS_WEB_LINK_FLAGS")
         .unwrap_or_default()
         .split_whitespace()
         .map(String::from)
         .collect();
+    if split {
+        let pre = obj_dir.join("split.js");
+        std::fs::write(&pre, WEB_SPLIT_JS)?;
+        extra.extend([
+            "-sSPLIT_MODULE=1".to_string(),
+            "--profiling-funcs".to_string(),
+            "--emit-symbol-map".to_string(),
+            format!("--pre-js={}", pre.display()),
+        ]);
+    }
     let o = clang
         .command()
         .args(["-O1"])
@@ -1264,6 +1309,16 @@ pub fn link_exe(clang: &Clang, obj_dir: &Path, exe: &Path) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn emscripten_cache_is_the_worktrees_own() {
+        let wt = Path::new("D:/Projects/wt");
+        let exe = wt.join("target").join("release").join("nxrs-build.exe");
+        assert_eq!(em_cache_for(&exe), Some(wt.join("target").join("emcache")));
+        // a release keeps emsdk's own (no target folder above it)
+        let release = Path::new("C:/nxrs").join("nxrs-engine").join("nxrs-build.exe");
+        assert_eq!(em_cache_for(&release), None);
+    }
 
     fn fake_clang() -> Clang {
         Clang {
