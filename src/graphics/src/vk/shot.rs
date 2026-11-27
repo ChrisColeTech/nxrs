@@ -456,6 +456,16 @@ pub fn png_bytes(rgba: &[u8], w: u32, h: u32) -> Vec<u8> {
 
 #[cfg(test)]
 mod tests {
+    /// `NXGFX_SHOT_SPAN`: `<from>-<to>` seconds, from before to; anything else is no span.
+    #[test]
+    fn shot_span_parses_from_and_to() {
+        assert_eq!(super::parse_span("672-684"), Some((672.0, 684.0)));
+        assert_eq!(super::parse_span(" 1.5 - 2 "), Some((1.5, 2.0)));
+        assert_eq!(super::parse_span("684-672"), None);
+        assert_eq!(super::parse_span("672"), None);
+        assert_eq!(super::parse_span("a-b"), None);
+    }
+
     #[test]
     fn failed_readback_is_not_a_successful_black_capture() {
         let d = crate::tex::layout::TexDesc {

@@ -699,7 +699,11 @@ fn lane(g: &Gpu, i: usize) -> &'static Lane {
 /// A child submission recorded on translation lane `i` (1..), from that lane's command pool.
 pub fn lane_sub(g: &Gpu, i: usize) -> Sub {
     let l = lane(g, i);
-    let reuse = l.free.lock().unwrap().pop();
+    let reuse = {
+        let mut f = l.free.lock().unwrap();
+        trim_free(g, &mut f);
+        f.pop()
+    };
     make_sub(g, reuse, l.pool, l.pool, i)
 }
 
@@ -1621,6 +1625,52 @@ fn request_retry(g: &'static Gpu) {
 fn take_recycled(g: &Gpu, st: &mut SubmitState) {
     let mut r = g.q.recycled.lock().unwrap();
     st.free_subs.append(&mut r);
+    drop(r);
+    trim_free(g, &mut st.free_subs);
+}
+
+/// Free submissions that keep their staging and scratch chunks: `NXGFX_SUB_KEEP` (default 64; 0 = all, as before).
+/// OOT-COMBO: a submission keeps one 8 MB staging chunk and one 64 MB scratch chunk for its next use, and pooled
+/// submissions are never freed, so Ocarina of Time's forest-load burst (~415 submissions) left ~3.5 GB of staging and
+/// ~2.6 GB of scratch held for the rest of the run.
+fn sub_keep() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("NXGFX_SUB_KEEP").ok().and_then(|v| v.parse().ok()).unwrap_or(64)
+    })
+}
+
+/// The free submissions past the newest `sub_keep()` (the front of the list: `pop` takes from the back) give back
+/// their staging and scratch chunks; a later use allocates them again. They are free, so the GPU is done with them.
+/// Bytes given back.
+fn trim_free(g: &Gpu, free: &mut [Sub]) -> u64 {
+    let keep = sub_keep();
+    if keep == 0 || free.len() <= keep {
+        return 0;
+    }
+    let n = free.len() - keep;
+    let mut bytes = 0;
+    for s in &mut free[..n] {
+        for b in s.stage.drain(..) {
+            bytes += b.size;
+            g.free_buffer(b);
+        }
+        for b in s.arena.drain(..) {
+            bytes += b.size;
+            g.free_buffer(b);
+        }
+        s.stage_used = 0;
+        s.arena_used = 0;
+    }
+    if bytes >= 256 << 20 {
+        crate::vklog!(
+            "pooled submissions: {} MB of staging and scratch given back ({} free, {} keep theirs; NXGFX_SUB_KEEP)",
+            bytes >> 20,
+            free.len(),
+            keep
+        );
+    }
+    bytes
 }
 
 // ---------- asynchronous submission ----------
