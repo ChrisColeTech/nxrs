@@ -865,6 +865,88 @@ fn released_slot_remake(
     (!t.mem.is_null() && t.d.target != target::BUFFER).then_some((t, v))
 }
 
+/// Images made again by `remake_released` and the frame of their make, until `Gpu::sweep_remade` releases them.
+mod remade {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// Frames a remade image stays made (its slot is usually drawn every frame meanwhile).
+    pub const KEEP: u64 = 60;
+    static M: Mutex<Option<HashMap<u64, u64>>> = Mutex::new(None);
+
+    pub fn note(serial: u64, frame: u64) {
+        M.lock().unwrap().get_or_insert_with(HashMap::new).insert(serial, frame);
+    }
+
+    /// The serials made `KEEP` frames before `now` or earlier, taken off the list.
+    pub fn due(now: u64) -> Vec<u64> {
+        let mut g = M.lock().unwrap();
+        let Some(m) = g.as_mut().filter(|m| !m.is_empty()) else {
+            return Vec::new();
+        };
+        let out: Vec<u64> = m
+            .iter()
+            .filter(|&(_, &f)| f + KEEP <= now)
+            .map(|(&s, _)| s)
+            .collect();
+        for s in &out {
+            m.remove(s);
+        }
+        out
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn remade_images_are_released_after_keep_frames() {
+        note(0xBEE1, 100);
+        note(0xBEE2, 130);
+        assert!(!due(100 + KEEP - 1).contains(&0xBEE1), "not yet");
+        assert_eq!(due(100 + KEEP).iter().filter(|&&s| s >> 4 == 0xBEE).count(), 1);
+        assert!(due(100 + KEEP).iter().all(|&s| s != 0xBEE1), "taken once");
+        assert!(due(130 + KEEP).contains(&0xBEE2));
+    }
+}
+
+/// Generations of `release_after_use`: each make of a finalized texture's image takes the next for its serial, and its
+/// deferred release applies only while it is still the newest (the entry goes with it).
+mod release_gen {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static GEN: Mutex<Option<HashMap<u64, u64>>> = Mutex::new(None);
+
+    pub fn take(serial: u64) -> u64 {
+        let mut g = GEN.lock().unwrap();
+        let e = g.get_or_insert_with(HashMap::new).entry(serial).or_insert(0);
+        *e += 1;
+        *e
+    }
+
+    /// Whether `gen` is still `serial`'s newest; if so its entry is removed (the release goes ahead).
+    pub fn current(serial: u64, gen: u64) -> bool {
+        let mut g = GEN.lock().unwrap();
+        let m = g.get_or_insert_with(HashMap::new);
+        if m.get(&serial) == Some(&gen) {
+            m.remove(&serial);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn only_the_newest_release_applies() {
+        let a = take(0xA11CE);
+        let b = take(0xA11CE);
+        assert!(!current(0xA11CE, a), "an older make's release is dropped");
+        assert!(current(0xA11CE, b));
+        assert!(!current(0xA11CE, b), "once");
+        let c = take(0xA11CE);
+        assert!(current(0xA11CE, c), "a make after a release starts again");
+    }
+}
+
 #[cfg(test)]
 mod released_slot_tests {
     use super::*;
@@ -3123,15 +3205,34 @@ impl Gpu {
         let made = self.images.lock().unwrap().by_serial.contains_key(&serial);
         if made {
             REMADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            self.release_after_use(serial);
+            // kept for the next frames' uses and released by `sweep_remade`, not after this submission: a translation
+            // made outside a submission's recording (record-time translation) had it released at once, before the
+            // draws that wanted it, and the next lookup bound the stand-in again
+            remade::note(serial, super::present::frames());
         }
         made
+    }
+
+    /// Once a frame (a present): the images `remake_released` made `remade::KEEP` frames ago or more are released again
+    /// (parked, in queue order as the game's finalize); a later use takes the parked image back.
+    pub fn sweep_remade(&self, frame: u64) {
+        for serial in remade::due(frame) {
+            textrace::ev(serial, || "made again earlier: released".to_string());
+            self.tex_release(serial);
+        }
     }
 
     /// The image of a texture object finalized before its first use, made now for that use: released (parked, its
     /// slots kept until it is evicted) once the submission being recorded can no longer use it.
     fn release_after_use(&self, serial: u64) {
-        self.q.defer_after_use(Box::new(move |g: &Gpu| g.tex_release_now(serial)));
+        // only the newest make's release applies: one queued after an earlier submission's use may run after a later
+        // submission made the image again (`remake_released`) and would release it under that submission's draws
+        let gen = release_gen::take(serial);
+        self.q.defer_after_use(Box::new(move |g: &Gpu| {
+            if release_gen::current(serial, gen) {
+                g.tex_release_now(serial);
+            }
+        }));
     }
 
     /// Lazily registered textures made now (a shader indexes the texture pool itself: any ID may be read), at most a

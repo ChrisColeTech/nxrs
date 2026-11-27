@@ -118,6 +118,7 @@ NXGFX_RAW_PROBE_COUNT	switch	NXGFX_RAW_PROBE_SHADER=<16 hex digits>, NXGFX_RAW_P
 NXGFX_RAW_PROBE_SHADER	switch	NXGFX_RAW_PROBE_SHADER=<16 hex digits>, NXGFX_RAW_PROBE_AT_S=106, NXGFX_RAW_PROBE_COUNT=8 (1..32).	src/graphics/src/vk/gmem.rs
 NXGFX_RECYCLE_DELAY	test	NXGFX_RECYCLE_DELAY=<n> (diagnosis): a completed submission's `Sub` waits until n later ones completed before	src/graphics/src/vk/queue.rs
 NXGFX_RELEASE_ORDER	switch	NXGFX_RELEASE_ORDER=0: at once, as before.	src/graphics/src/vk/image.rs
+NXGFX_RELEASED_SLOT_USE	switch	MKW-RENDER: a bound use of a texture pool slot that still names a texture object released since (finalized after its first use) makes its image again from the registration kept at the release (`remake_released`; a parked image is taken back) and releases it after that submission, as the console's descriptor still samples the storage; counted in the `uploads from storage` line. Before, every use after the first bound the zero stand-in (MKW's character-select portraits, name banners, the race HUD's lap icon). Default on; `0`: the stand-in, as before	src/graphics/src/vk/image.rs, src/graphics/src/vk/exec.rs
 NXGFX_RENDER_CHAIN	switch		src/graphics/src/vk/image.rs, src/graphics/src/vk/render_chain.rs
 NXGFX_REPLAY_DUMP	diagnostic	NXGFX_REPLAY_DUMP=1: the passes of the frame after the first present as PNGs into <out> (pass dump), to diff two	src/graphics/src/vk/capture.rs
 NXGFX_REPLAY_SHADER_DIR	path		src/graphics/src/vk/capture.rs

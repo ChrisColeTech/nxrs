@@ -2882,6 +2882,8 @@ fn present_now(
     // the frame's bookkeeping and a requested screenshot before the submission state is locked: a screenshot reads
     // the texture back through its own submission (oneoff locks it; under the lock the game froze in its present)
     let frame = present_frame(t, crop, origin_ll, true);
+    // images made again for slots naming released textures, released once they had their frames (MKW-RENDER)
+    g.sweep_remade(frame);
     let mut st = g.q.sub.lock().unwrap();
     take_recycled(g, &mut st);
     present_locked(g, &mut st, qserial, origin_ll, t, crop, frame, due, due.is_some())
