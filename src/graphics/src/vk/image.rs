@@ -848,6 +848,133 @@ pub struct Part {
 /// The levels and layers of a texture from its storage bytes, laid out linearly.
 /// Bytes of texture storage deswizzled on the GPU.
 pub static GPU_DESWIZZLED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Images made again for a bound use of a slot naming a released texture object (`remake_released`), since the last
+/// `uploads from storage` line.
+static REMADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// `remake_released`'s rule: the registration to make again for a bound use of a slot (`slot`: what the table names
+/// there) whose texture object `serial` has no image, when the slot still names that very object and its release
+/// kept its description (`released`), over guest storage and not a buffer texture.
+fn released_slot_remake(
+    slot: Option<(u64, Option<view_t>)>,
+    serial: u64,
+    released: Option<tex_t>,
+) -> Option<(tex_t, Option<view_t>)> {
+    let (reg, v) = slot?;
+    let t = released.filter(|_| reg == serial)?;
+    (!t.mem.is_null() && t.d.target != target::BUFFER).then_some((t, v))
+}
+
+/// Images made again by `remake_released` and the frame of their make, until `Gpu::sweep_remade` releases them.
+mod remade {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    /// Frames a remade image stays made (its slot is usually drawn every frame meanwhile).
+    pub const KEEP: u64 = 60;
+    static M: Mutex<Option<HashMap<u64, u64>>> = Mutex::new(None);
+
+    pub fn note(serial: u64, frame: u64) {
+        M.lock().unwrap().get_or_insert_with(HashMap::new).insert(serial, frame);
+    }
+
+    /// The serials made `KEEP` frames before `now` or earlier, taken off the list.
+    pub fn due(now: u64) -> Vec<u64> {
+        let mut g = M.lock().unwrap();
+        let Some(m) = g.as_mut().filter(|m| !m.is_empty()) else {
+            return Vec::new();
+        };
+        let out: Vec<u64> = m
+            .iter()
+            .filter(|&(_, &f)| f + KEEP <= now)
+            .map(|(&s, _)| s)
+            .collect();
+        for s in &out {
+            m.remove(s);
+        }
+        out
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn remade_images_are_released_after_keep_frames() {
+        note(0xBEE1, 100);
+        note(0xBEE2, 130);
+        assert!(!due(100 + KEEP - 1).contains(&0xBEE1), "not yet");
+        assert_eq!(due(100 + KEEP).iter().filter(|&&s| s >> 4 == 0xBEE).count(), 1);
+        assert!(due(100 + KEEP).iter().all(|&s| s != 0xBEE1), "taken once");
+        assert!(due(130 + KEEP).contains(&0xBEE2));
+    }
+}
+
+/// Generations of `release_after_use`: each make of a finalized texture's image takes the next for its serial, and its
+/// deferred release applies only while it is still the newest (the entry goes with it).
+mod release_gen {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+
+    static GEN: Mutex<Option<HashMap<u64, u64>>> = Mutex::new(None);
+
+    pub fn take(serial: u64) -> u64 {
+        let mut g = GEN.lock().unwrap();
+        let e = g.get_or_insert_with(HashMap::new).entry(serial).or_insert(0);
+        *e += 1;
+        *e
+    }
+
+    /// Whether `gen` is still `serial`'s newest; if so its entry is removed (the release goes ahead).
+    pub fn current(serial: u64, gen: u64) -> bool {
+        let mut g = GEN.lock().unwrap();
+        let m = g.get_or_insert_with(HashMap::new);
+        if m.get(&serial) == Some(&gen) {
+            m.remove(&serial);
+            true
+        } else {
+            false
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn only_the_newest_release_applies() {
+        let a = take(0xA11CE);
+        let b = take(0xA11CE);
+        assert!(!current(0xA11CE, a), "an older make's release is dropped");
+        assert!(current(0xA11CE, b));
+        assert!(!current(0xA11CE, b), "once");
+        let c = take(0xA11CE);
+        assert!(current(0xA11CE, c), "a make after a release starts again");
+    }
+}
+
+#[cfg(test)]
+mod released_slot_tests {
+    use super::*;
+
+    fn tex(serial: u64, mem: usize, tgt: i32) -> tex_t {
+        // SAFETY: tex_t is plain data (repr(C) integers and a raw pointer); all zero is a valid value.
+        let mut t: tex_t = unsafe { std::mem::zeroed() };
+        t.serial = serial;
+        t.mem = mem as *mut u8;
+        t.d.target = tgt;
+        t
+    }
+
+    /// A slot still naming a released 2D texture over storage is made again from the kept registration (the
+    /// character-select portraits); a slot registered again since, a texture never released, no storage or a buffer
+    /// texture are not.
+    #[test]
+    fn a_slot_naming_its_released_texture_is_made_again() {
+        let t = tex(7, 0x1000, target::T2D);
+        let got = released_slot_remake(Some((7, None)), 7, Some(t));
+        assert!(matches!(got, Some((x, None)) if x.serial == 7));
+        assert!(released_slot_remake(Some((8, None)), 7, Some(t)).is_none(), "slot names another object now");
+        assert!(released_slot_remake(None, 7, Some(t)).is_none(), "nothing registered");
+        assert!(released_slot_remake(Some((7, None)), 7, None).is_none(), "not released");
+        assert!(released_slot_remake(Some((7, None)), 7, Some(tex(7, 0, target::T2D))).is_none(), "no storage");
+        assert!(released_slot_remake(Some((7, None)), 7, Some(tex(7, 0x1000, target::BUFFER))).is_none());
+    }
+}
 
 /// Whether a texture's upload from its storage goes through the GPU deswizzle: block-linear, not ASTC (its blocks are
 /// decoded on the GPU from CPU-deswizzled rows), no 3-byte expansion, big enough, every level in whole words.
@@ -3056,10 +3183,56 @@ impl Gpu {
         }
     }
 
+    /// A bound use of texture ID `id` whose slot still names texture object `serial`, finalized and released since
+    /// (`release_after_use` after its first use, or `tex_release`): on the console the descriptor outlives the object
+    /// and still samples its storage, so its image is made again for this use from the registration kept at the
+    /// release (`ensure_image` takes the parked image back, uploading again only pages that changed) and released
+    /// again after this submission. Without it every use after the first bound the zero stand-in: Mario Kart World's
+    /// character-select portraits were drawn for one frame, then never (MKW-RENDER). Whether an image was made.
+    /// `NXGFX_RELEASED_SLOT_USE=0`: the stand-in, as before.
+    pub fn remake_released(&self, id: i32, serial: u64) -> bool {
+        static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+        if !*ON.get_or_init(|| std::env::var("NXGFX_RELEASED_SLOT_USE").as_deref() != Ok("0")) {
+            return false;
+        }
+        let slot = self.tables.tex_at(id);
+        let released = self.images.lock().unwrap().released.get(&serial).copied();
+        let Some((t, v)) = released_slot_remake(slot, serial, released) else {
+            return false;
+        };
+        textrace::ev(serial, || format!("made again at ID {id} for a bound use after its release"));
+        self.reg_tex_now(id, &t, v, false);
+        let made = self.images.lock().unwrap().by_serial.contains_key(&serial);
+        if made {
+            REMADE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            // kept for the next frames' uses and released by `sweep_remade`, not after this submission: a translation
+            // made outside a submission's recording (record-time translation) had it released at once, before the
+            // draws that wanted it, and the next lookup bound the stand-in again
+            remade::note(serial, super::present::frames());
+        }
+        made
+    }
+
+    /// Once a frame (a present): the images `remake_released` made `remade::KEEP` frames ago or more are released again
+    /// (parked, in queue order as the game's finalize); a later use takes the parked image back.
+    pub fn sweep_remade(&self, frame: u64) {
+        for serial in remade::due(frame) {
+            textrace::ev(serial, || "made again earlier: released".to_string());
+            self.tex_release(serial);
+        }
+    }
+
     /// The image of a texture object finalized before its first use, made now for that use: released (parked, its
     /// slots kept until it is evicted) once the submission being recorded can no longer use it.
     fn release_after_use(&self, serial: u64) {
-        self.q.defer_after_use(Box::new(move |g: &Gpu| g.tex_release_now(serial)));
+        // only the newest make's release applies: one queued after an earlier submission's use may run after a later
+        // submission made the image again (`remake_released`) and would release it under that submission's draws
+        let gen = release_gen::take(serial);
+        self.q.defer_after_use(Box::new(move |g: &Gpu| {
+            if release_gen::current(serial, gen) {
+                g.tex_release_now(serial);
+            }
+        }));
     }
 
     /// Lazily registered textures made now (a shader indexes the texture pool itself: any ID may be read), at most a
@@ -5670,12 +5843,13 @@ pub mod upload_stats {
             .collect();
         let un: Vec<u64> = UNLOCKED.iter().map(|a| a.swap(0, Relaxed)).collect();
         Some(format!(
-            "uploads from storage: {} textures, {:.2} ms per frame ({} decoded with the images' lock released in {:.2} ms per frame, {} of them dropped: NXGFX_UPLOAD_UNLOCKED); most: {}",
+            "uploads from storage: {} textures, {:.2} ms per frame ({} decoded with the images' lock released in {:.2} ms per frame, {} of them dropped: NXGFX_UPLOAD_UNLOCKED; {} released textures made again for a bound use: NXGFX_RELEASED_SLOT_USE); most: {}",
             v.len(),
             total as f64 / 1e6 / f,
             un[0] + un[1],
             un[2] as f64 / 1e6 / f,
             un[1],
+            super::REMADE.swap(0, Relaxed),
             top.join("; ")
         ))
     }

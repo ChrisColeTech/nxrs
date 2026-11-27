@@ -1533,10 +1533,16 @@ pub mod passdump {
                 };
                 (im.image, im.tex, im.format, im.extent)
             };
-            let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(tex.d.format);
-            // compressed images as their blocks (an ASTC texture's image is decoded: left out)
+            let (mut bpb, mut bw, mut bh) = crate::tex::layout::fmt_bpb(tex.d.format);
+            // compressed images as their blocks; an ASTC texture's image is decoded: as its RGBA8 texels when decoded
+            // to RGBA8 (the -gpu.bin is then texels, the -mem.bin the ASTC blocks), left out when re-encoded as BC7
             let decoded =
                 crate::tex::format::tex_format(tex.d.format).is_some_and(|tf| tf.astc.is_some());
+            if decoded
+                && matches!(fmt, vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB)
+            {
+                (bpb, bw, bh) = (4, 1, 1);
+            }
             if bpb == 0 || decoded && (bw != 1 || bh != 1) {
                 continue;
             }
@@ -3874,7 +3880,7 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
     if let Some((serial, view)) = g.tables.tex_at(id) {
         let mut imgs = super::gate::lock(&g.images, 2);
         let reg_serial = serial;
-        let serial = imgs.live(serial);
+        let mut serial = imgs.live(serial);
         // A parallel segment may look the texture up before an earlier segment of the stream has made its image (a
         // target drawn there: Mario Kart World's shadow maps, new objects each frame); the zero stand-in would be
         // bound where the stream order samples the image (a dark, sharp-edged turn). Unless at the gate's frontier,
@@ -3885,6 +3891,14 @@ fn tex_view_uncached(g: &Gpu, sub: &mut Sub, id: i32, ty: u32, storage: bool) ->
         {
             drop(imgs);
             return dummy_view(g, sub, want, storage);
+        }
+        // the slot still names a texture object released since (finalized after its first use): its image made again
+        // from the registration, as the console's descriptor still samples the storage (MKW-RENDER)
+        if !imgs.by_serial.contains_key(&serial) {
+            drop(imgs);
+            g.remake_released(id, reg_serial);
+            imgs = super::gate::lock(&g.images, 2);
+            serial = imgs.live(reg_serial);
         }
         if probe {
             let declared = crate::tex::format::tex_format(ifmt as i32)

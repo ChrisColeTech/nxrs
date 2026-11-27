@@ -32,9 +32,18 @@ about = "unskippable opening, title, A through Grand Prix 50cc to Mario Bros. Ci
 # grid is up by ~232 s (build/play/20261124-164514-explore1). Extra A presses are harmless (A accelerates).
 seconds = 360
 window = [250, 325]
-steps = ["wait 40", "shot boot", "press A ; 6 * 16", "shot title", "press A ; 6 * 3", "shot menus",
-         "press A ; 6 * 15", "shot grid", "replay mkw_drive.txt ; 42", "shot race",
-         "replay mkw_drive.txt ; 42", "shot race later"]
+# At ~50 FPS (MKW-HEAVY on) the opening ends well before 138 s and the first 16 presses already take the menus (the
+# character select at ~90 s, the race from ~160 s; build/play/20261127-094847-rd-base-pop): each of those screens is
+# shot just before the A that leaves it (5.5 s + the shot's 0.5 s keeps the 6 s rhythm, so the route is unchanged).
+steps = ["wait 40", "shot boot",
+         "press A ; 5.5", "shot o1 ; 0.5", "press A ; 5.5", "shot o2 ; 0.5", "press A ; 5.5", "shot o3 ; 0.5",
+         "press A ; 5.5", "shot o4 ; 0.5", "press A ; 5.5", "shot o5 ; 0.5", "press A ; 5.5", "shot o6 ; 0.5",
+         "press A ; 5.5", "shot o7 ; 0.5", "press A ; 5.5", "shot o8 ; 0.5", "press A ; 5.5", "shot o9 ; 0.5",
+         "press A ; 5.5", "shot o10 ; 0.5", "press A ; 5.5", "shot o11 ; 0.5", "press A ; 5.5", "shot o12 ; 0.5",
+         "press A ; 5.5", "shot o13 ; 0.5", "press A ; 5.5", "shot o14 ; 0.5", "press A ; 5.5", "shot o15 ; 0.5",
+         "press A ; 5.5", "shot o16 ; 0.5",
+         "shot title", "press A ; 6 * 3", "shot menus", "press A ; 6 * 15", "shot grid", "replay mkw_drive.txt ; 42",
+         "shot race", "replay mkw_drive.txt ; 42", "shot race later"]
 [mkw.checks]
 # race shots never land at the same spot of the track (game time drifts with FPS): they check the race HUD
 # (coin counter, place badge; play_route.REGION_SETS) instead of the whole frame. The HUD is up from the start grid
@@ -59,6 +68,26 @@ grid = { about = "race start grid or racing (coin counter, place badge)", region
 t37 = { about = "in the race (before the banked turn at ~60 FPS)", regions = "kart-hud" }
 t41 = { about = "in the race (the turn / steel deck at ~60 FPS)", regions = "kart-hud" }
 t46 = { about = "in the race (steel deck at ~60 FPS)", regions = "kart-hud" }
+
+[mkw-pop]
+title = "Mario Kart World"
+about = "as mkw (menu screens shot), then 78 shots about every 0.5 s of the race (pop-in, missing textures)"
+# run it with --faults; the window is the dense stretch (the shots cost some FPS: take FPS from mkw). 99 shots in all:
+# the report and sheets take two-digit shot numbers only (`NN-name.png`), so a 100th would be left out
+seconds = 330
+window = [245, 290]
+steps = ["wait 40", "shot boot",
+         "press A ; 5.5", "shot o1 ; 0.5", "press A ; 5.5", "shot o2 ; 0.5", "press A ; 5.5", "shot o3 ; 0.5",
+         "press A ; 5.5", "shot o4 ; 0.5", "press A ; 5.5", "shot o5 ; 0.5", "press A ; 5.5", "shot o6 ; 0.5",
+         "press A ; 5.5", "shot o7 ; 0.5", "press A ; 5.5", "shot o8 ; 0.5", "press A ; 5.5", "shot o9 ; 0.5",
+         "press A ; 5.5", "shot o10 ; 0.5", "press A ; 5.5", "shot o11 ; 0.5", "press A ; 5.5", "shot o12 ; 0.5",
+         "press A ; 5.5", "shot o13 ; 0.5", "press A ; 5.5", "shot o14 ; 0.5", "press A ; 5.5", "shot o15 ; 0.5",
+         "press A ; 5.5", "shot o16 ; 0.5",
+         "shot title", "press A ; 6 * 3", "shot menus", "press A ; 6 * 15", "shot grid", "replay mkw_drive.txt ; 6",
+         "shot pop ; 0.5 * 78", "shot pop end"]
+[mkw-pop.checks]
+grid = { about = "race start grid or racing (coin counter, place badge)", regions = "kart-hud" }
+pop_end = { about = "in the race (coin counter, place badge)", regions = "kart-hud" }
 
 [mkw180]
 title = "Mario Kart World v1.8.0"
