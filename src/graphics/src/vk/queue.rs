@@ -93,8 +93,6 @@ pub struct Sub {
     qshare: Option<std::sync::Arc<[std::sync::atomic::AtomicU32; 2]>>,
     /// children whose segment was translated again (`exec::run_segmented`): never submitted, retired with this one
     pub dropped: Vec<Sub>,
-    /// (MKW-AHEAD) its command buffers were ended on its lane (`child_end`): its parent's submit leaves them alone
-    ended: bool,
 }
 
 pub(crate) const DB_CHUNK: u64 = 4 << 20;
@@ -756,10 +754,8 @@ fn make_sub(
             lane,
             qshare: None,
             dropped: Vec::new(),
-            ended: false,
         }
     };
-    s.ended = false;
     static SUB_SERIAL: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     s.serial = SUB_SERIAL.fetch_add(1, Ordering::Relaxed) + 1;
     s.pre_serial = s.serial;
@@ -883,17 +879,6 @@ pub fn child_begin_with(ci: &ChildInit, c: &mut Sub) {
     c.qshare = Some(ci.share.clone());
     c.pool_snapshot = ci.pool_snapshot;
     c.db_bound = None;
-}
-
-/// (MKW-AHEAD) A lane's translated child ends its own command buffers, on the lane (its command pool's thread): its
-/// parent is submitted from the replay thread while the lane records later segments from that pool.
-pub fn child_end(g: &Gpu, c: &mut Sub) {
-    unsafe {
-        g.dev().end_command_buffer(c.pre).unwrap();
-        super::defer::end(c.main);
-        g.dev().end_command_buffer(c.main).unwrap();
-    }
-    c.ended = true;
 }
 
 /// The parent's query counts after its children's (`child_begin_with`).
@@ -1030,14 +1015,14 @@ fn submit_sub(g: &'static Gpu, mut s: Sub) -> u64 {
         g.dev().end_command_buffer(s.pre).unwrap();
         super::defer::end(s.main);
         g.dev().end_command_buffer(s.main).unwrap();
-        for c in s.children.iter().filter(|c| !c.ended) {
+        for c in &s.children {
             g.dev().end_command_buffer(c.pre).unwrap();
             super::defer::end(c.main);
             g.dev().end_command_buffer(c.main).unwrap();
         }
         // a dropped child's upload buffer: begun, so ended and submitted with the others (a parallel segment's
         // initializations are in the shared one, `share_pre`); its main buffer is not
-        for c in s.dropped.iter().filter(|c| !c.ended) {
+        for c in &s.dropped {
             g.dev().end_command_buffer(c.pre).unwrap();
         }
     }
@@ -2167,9 +2152,6 @@ fn run_stream_due(
             }
             None => done = receipts,
         }
-        if exec::ahead_on() {
-            sub = chain_ahead(g, st, sub, sig0, &mut done, &mut reparked);
-        }
         reparked |= chain_parked(g, st, &mut sub, sig0, &mut done);
         let value = submit_sub(g, sub);
         wait_diag::phase("submitted");
@@ -2344,199 +2326,6 @@ fn chain_parked(
         }
     }
     reparked
-}
-
-/// (MKW-AHEAD) The pseudo-lanes whose command pools hold the submissions of a chain's parts translated ahead: part `j`'s
-/// is lane `AHEAD_LANE0 + j` (`lane_sub`), recorded by the replay thread before and after its part's translation and
-/// by the lanes (its shared upload buffer, under `gate::pre_lock`) during it, never at the same time as another part's.
-const AHEAD_LANE0: usize = 64;
-
-/// The submission of part `j` of a chain translated ahead: as `chained_sub`'s, from its own command pools.
-fn ahead_sub(g: &'static Gpu, j: usize) -> Sub {
-    let mut sub = lane_sub(g, AHEAD_LANE0 + j);
-    super::scale::begin_submit(g, &mut sub);
-    super::perf::timed(super::perf::C::PrepNs, || {
-        super::gmem::begin(g, &mut sub);
-        g.image_begin_submit(&mut sub, &[]);
-    });
-    chain_trace::note("prep", 0, 0);
-    sub
-}
-
-/// Parts translated ahead, so far, in the pipelining line: chains, parts, segments of later parts that gave up at a
-/// first-use initialization, segments translated again on the replay thread.
-pub static AHEAD_STATS: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
-
-/// (MKW-AHEAD) `chain_parked` with the parts translated ahead (`exec::ahead_on`): the parked queues the GPU signals
-/// recorded so far release are picked in queue order as before, but each is only planned (`exec::ahead_plan`: its
-/// segments and ordered global effects, whose signals release the next pick) and its rest parked again; then `sub`
-/// (recorded so far) is submitted and every planned part is translated at once (`exec::run_ahead`), each submitted in
-/// order as soon as its segments are joined. Returns the last part's submission (submitted by the caller, its
-/// receipts in `done`), or `sub` itself when no part qualifies (`exec::ahead_ok`); what is left is `chain_parked`'s.
-fn chain_ahead(
-    g: &'static Gpu,
-    st: &mut SubmitState,
-    sub: Sub,
-    sig0: u64,
-    done: &mut Vec<u64>,
-    reparked: &mut bool,
-) -> Sub {
-    struct Part {
-        q: u64,
-        stream: Vec<u8>,
-        plan: exec::AheadPlan,
-        /// the stream ran to its end: its receipts resolve with this part's submission
-        receipts: Vec<u64>,
-    }
-    let mut cur = Some(sub);
-    let mut parts: Vec<Part> = Vec::new();
-    let mut next: HashMap<u64, QState> = HashMap::new();
-    for _ in 0..CHAIN_MAX {
-        let quiet = super::mem::cpu_signals_now() == sig0;
-        let pick = st
-            .parked
-            .iter()
-            .filter(|(_, p)| {
-                p.wait_receipt.is_none()
-                    && p.presents.is_empty()
-                    && p.later.is_empty()
-                    && exec::wait_passes_chained(g, &p.stream, quiet)
-            })
-            .map(|(k, _)| *k)
-            .min();
-        let Some(q) = pick else { break };
-        let ll = st.qstates.get(&q).map(|s| s.origin_ll).unwrap_or(true);
-        let fresh;
-        let entry = match next.get(&q).or(st.qstates.get(&q)) {
-            Some(s) => s,
-            None => {
-                fresh = QState::new(ll);
-                &fresh
-            }
-        };
-        if !exec::ahead_ok(entry, &st.parked[&q].stream) {
-            break;
-        }
-        if let Some(s) = cur.take() {
-            // what is recorded so far goes first: the GPU works on it while the parts are translated
-            let value = submit_sub(g, s);
-            resolve_receipts(g, done, value);
-        }
-        let p = st.parked.remove(&q).unwrap();
-        chain_trace::note("chain", exec::wait_of(&p.stream).0, q);
-        super::perf::inc(super::perf::C::Chained);
-        let after = next.remove(&q);
-        let k = parts.len() as u64;
-        let plan = match after.as_ref().or(st.qstates.get(&q)) {
-            Some(e) => exec::ahead_plan(g, e, &p.stream, k),
-            None => exec::ahead_plan(g, &QState::new(ll), &p.stream, k),
-        };
-        next.insert(q, plan.next_state());
-        let receipts = match plan.park {
-            Some(off) => {
-                note_park(&p.stream[off..]);
-                st.parked.insert(
-                    q,
-                    Parked {
-                        stream: p.stream[off..].to_vec(),
-                        receipts: p.receipts,
-                        wait_receipt: None,
-                        presents: Vec::new(),
-                        later: Vec::new(),
-                    },
-                );
-                *reparked = true;
-                Vec::new()
-            }
-            None => p.receipts,
-        };
-        parts.push(Part {
-            q,
-            stream: p.stream,
-            plan,
-            receipts,
-        });
-    }
-    if let Some(s) = cur {
-        return s;
-    }
-    let n = parts.len();
-    AHEAD_STATS[0].fetch_add(1, Ordering::Relaxed);
-    AHEAD_STATS[1].fetch_add(n as u64, Ordering::Relaxed);
-    let subs: Vec<Sub> = (0..n).map(|j| ahead_sub(g, j)).collect();
-    struct Host<'a> {
-        g: &'static Gpu,
-        st: &'a mut SubmitState,
-        meta: Vec<(u64, usize, Vec<u64>)>,
-        done: &'a mut Vec<u64>,
-        last: Option<Sub>,
-        base: u64,
-    }
-    impl exec::PartHost for Host<'_> {
-        fn child(&mut self) -> Sub {
-            new_sub(self.g, self.st)
-        }
-        fn done(&mut self, j: usize, mut sub: Sub, mut qs: QState) {
-            let g = self.g;
-            exec::end(g, &mut sub, &mut qs);
-            let (q, len, receipts) = std::mem::take(&mut self.meta[j]);
-            if chain_trace::on() {
-                chain_trace::note("xlated", len as u64, sub.children.len() as u64);
-            }
-            self.st.qstates.insert(q, qs);
-            // the submission's own end goes into its last child (`submit_sub`): one of the replay thread's, not a
-            // lane's (ended on its lane)
-            if sub.children.last().is_some_and(|c| c.ended) {
-                let mut t = new_sub(g, self.st);
-                child_begin(&sub, &mut t);
-                child_join(&mut sub, t);
-            }
-            self.done.extend(receipts);
-            if j + 1 == self.meta.len() {
-                self.last = Some(sub);
-                return;
-            }
-            let value = submit_sub(g, sub);
-            if value != self.base + 1 + j as u64 {
-                crate::log::red_once("translate-ahead: a part's submission got another timeline value than its plan gave its signals and fences");
-            }
-            resolve_receipts(g, self.done, value);
-        }
-    }
-    let base = g.q.last_fence();
-    let mut meta = Vec::with_capacity(n);
-    let mut streams = Vec::with_capacity(n);
-    let mut plans = Vec::with_capacity(n);
-    for p in parts {
-        meta.push((p.q, p.stream.len(), p.receipts));
-        streams.push(p.stream);
-        plans.push(p.plan);
-    }
-    let mut host = Host {
-        g,
-        st,
-        meta,
-        done,
-        last: None,
-        base,
-    };
-    let gave0 = super::gate::PRE_GAVE_UP.load(Ordering::Relaxed);
-    let redo0 = exec::seg_stats::REDO.load(Ordering::Relaxed);
-    exec::run_ahead(
-        g,
-        streams.iter().map(|s| &s[..]).zip(plans).collect(),
-        subs,
-        &mut host,
-    );
-    AHEAD_STATS[2].fetch_add(
-        super::gate::PRE_GAVE_UP.load(Ordering::Relaxed).wrapping_sub(gave0),
-        Ordering::Relaxed,
-    );
-    AHEAD_STATS[3].fetch_add(
-        exec::seg_stats::REDO.load(Ordering::Relaxed).wrapping_sub(redo0),
-        Ordering::Relaxed,
-    );
-    host.last.take().expect("a chain translated ahead has a last part")
 }
 
 /// A queue parked for 2 s or more, logged once per park with its wait (the retry thread, every second).

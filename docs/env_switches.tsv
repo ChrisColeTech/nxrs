@@ -4,7 +4,6 @@ NXGFX_ADDR_REPORT	diagnostic	VK_EXT_device_address_binding_report (`NXGFX_ADDR_R
 NXGFX_ALIAS	switch	`0` gives every texture an image of its own instead of aliasing images over the same storage of the same shape	src/graphics/src/vk/image.rs
 NXGFX_ALPHA_TEST	switch	The alpha test applied in the pixel shader (`NXGFX_ALPHA_TEST=0` off).	src/graphics/src/lib.rs
 NXGFX_APPEND_RESET	switch	frame begins. Records written by dispatches or by the CPU are not touched. `NXGFX_APPEND_RESET=0` turns it off.	src/graphics/src/vk/exec.rs
-NXGFX_AHEAD	switch	MKW-AHEAD: `1`: the parked queues a chain runs on (`NXGFX_PARK_CHAIN`) are planned in queue order first (segments and ordered global effects, their signals and fences named with the timeline values of the submissions they will be in), then all their segments are translated at once on the lanes through one gate run and each part is submitted in order as soon as its segments are joined. Off by default (`0` or unset: one part after another)	src/graphics/src/vk/queue.rs
 NXGFX_AQ_MERGE	switchNXGFX_AQ_MERGE=0: one submission each.	src/graphics/src/vk/queue.rs
 NXGFX_ASTC	switch	`rgba8` keeps every ASTC texture as RGBA8 (no BC7 re-encode of the 256x256 and larger ones)	src/graphics/src/vk/image.rs
 NXGFX_ASTC_CACHE	switch	big enough that a read beats an encode (`MIN_BYTES`). `NXGFX_ASTC_CACHE=0` off, `NXGFX_ASTC_CACHE_MB` the most the	src/graphics/src/tex/astc_cache.rs
