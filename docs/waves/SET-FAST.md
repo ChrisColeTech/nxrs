@@ -112,3 +112,110 @@ took ~23 cores from ~22:05 on; replay 11 ms and GPU 11-13 ms in 150-200 ms frame
 
 Since it changed nothing measurable, **step 2 was taken out again** (the files restored to `102bbc0`; the switch row
 removed). Its commit stays in the branch history as the record.
+
+## Step 3: texture descriptors by ID from the pool set: not built
+
+The measured premise is absent (step 0: the 176-slot copy is 60-70 ns a set), and the remaining per-texture work
+(`vkGetDescriptorEXT` for a combined image sampler) cannot be replaced by copying the pool set's separate
+sampled-image and sampler descriptor bytes: Vulkan does not define a combined descriptor's bytes in terms of the two.
+The texture cost that matters is the per-segment view lookups (step 2's diagnosis), which this would not remove.
+
+## Step 4: lanes 0 / 2 / 6 (`NXGFX_TRANSLATE_THREADS`)
+
+Step-2 build (its switch neutral), runs right after each other, window [250, 325] s:
+
+| Run | lanes | FPS / 5 % low | frame | replay + prep = replay thread | descriptor | lanes CPU a frame | segments wall |
+|---|---|---|---|---|---|---|---|
+| `20261126-214047-sf-s2-on2-mkw` | 6 (default) | 33.6 / 29.5 | 29.8 | 10.2 + 6.3 = 16.6 | 12.2 | 12.1-24.4 | 6.9-7.8 |
+| `20261126-221053-sf-lanes2-mkw` | 2 | 33.1 / 28.7 | 30.2 | 11.6 + 6.3 = 17.8 | 9.0 | 11.9-15.8 | 8.3-9.8 |
+| `20261126-221631-sf-lanes0-mkw` | 0 (one piece) | 30.0 / 27.0 | 33.3 | 15.5 + 7.4 = 22.9 | 8.7 | - | - |
+
+One piece on the replay thread costs ~5-6 ms of replay thread and ~3 FPS. Two lanes hold the same FPS as six within the
+noise (+1.2 ms replay thread) for about two thirds of the lane CPU.
+
+**Recommendation: keep 6 as the default for now.** Six is ahead on the replay thread (−1.2 ms) and 2 is not ahead on
+FPS; 2 frees ~6-8 ms of CPU a frame, which matters only when something else needs the cores (OoT, the web waves). If
+the lead's quiet runs confirm 2 = 6 in FPS, 2 is the better default (less lock contention, less CPU for the same
+frame). 0 is clearly worse.
+
+## Final build (`e9b2cc4`: step 1 only; relinked 22:23)
+
+| Run | switches | FPS / 5 % low | frame | replay + prep | descriptor | lanes CPU | segments wall | route |
+|---|---|---|---|---|---|---|---|---|
+| `20261126-222743-sf-final-on-mkw` | defaults | 28.8 / 13.9 | 34.4 | 13.2 + 11.1 | 14.4 | 18.3-24.4 | 7.7-9.2 | 3/3 on |
+| `20261126-223319-sf-final-off-mkw` (right after) | `NXGFX_DYN_DEDUPE=0` | 28.8 / 11.3 | 34.4 | 11.9 + 7.9 | 13.9 | 20.3-25.3 | 7.8-9.0 | 3/3 on |
+| `20261126-223857-sf-final-lanes2-mkw` | 2 lanes | 17.2 / 1.8 (**contaminated**: OOT-DESC's OoT started 22:38:47) | 58.2 | 23.4 + 11.4 | 13.7 | 17.4-21.8 | 11.8-26.3 | 3/3 on |
+| `20261126-224436-sf-final-turn` (`mkw-turn`, [250, 290]) | defaults | 23.7 / 6.1 (OoT running) | | | | | | 4/4 on |
+
+Both mkw runs have a stretch of 4-13 FPS frames at 245-255 s (in the on run with prep at ~11 ms over the window, in the
+off run without); the same kind of stretch hit `s2-on`, `s2-off` and `s2-off4` at 258-275 or 322-329 s, with switches
+on and off, and with replay ~10-15 ms and GPU 5-15 ms inside 150-250 ms frames (the frame lost outside the replay
+thread). They come and go with what else the machine runs (`wasm-opt` on ~23 cores 22:05-22:11, OoT from 22:38), not
+with these switches. All numbers here are indicative (shared machine); the clean pairs are `s1-on`/`s1-off` and
+`s2-on2`/`lanes2`/`lanes0`.
+
+**Before vs after, on the cleanest runs:** base 32.4 / 28.7 FPS, replay thread 17.5 ms (`210150`) against 33.6 / 29.5,
+16.6 ms (`214047`, step 1 on). That 0.9 ms is inside the spread of same-build runs (16.6-20.3 ms). **MKW stays held
+near 30; this wave does not lift it.**
+
+Pictures (all sheets read, every run): boot, title / course flyover, menus, grid, race and lap 2 drawn correctly in
+every run; no pop-in, no stale or wrong textures, no missing geometry; `mkw-turn` 10 shots through the banked turn
+under the arch and onto the steel deck (t37-t46), lit and textured correctly (`build/play/20261126-224436-sf-final-turn/
+sheet-1.png`, `sheet-2.png`; before: `build/play/20261126-210150-sf-base-mkw/sheet-1.png`; after:
+`build/play/20261126-222743-sf-final-on-mkw/sheet-1.png`). Anomalies: the known set only (stand-ins at loads, the
+timestamp-query and crashed-pipeline red lines, gate counts as before).
+
+## What is left (by the measured split)
+
+- **Whole sets at each lane segment's start**: ~700 a frame at ~9.3 µs (1.0 before + 8.3 bindings) ≈ 6.5 ms of lane
+  CPU. 95-97 % have no host copy of their module because a segment's `QState` starts empty and patching is tied to the
+  submission (staged banks, `prepare_image`, `note_gpu_write` are per submission). Carrying copies across segments
+  needs every per-submission side effect redone for the classes that have one; not attempted in this deadline (the
+  risk is a set naming another submission's staging).
+- **Patched sets**: ~2,300-2,600 a frame at ~2.6 µs ≈ 6.5 ms of lane CPU; 93 % remake uniform buffers. The untimed
+  part of the bindings loop (~half of `sets` ms: the profile's views + banks + writes + memory are 8.3 of 15 ms) is not
+  attributed; a stack profile of the lanes (`NXRS_HOST_PROF_STACK=1` with a PDB relink) is the next step before
+  changing it.
+- The frame is replay thread + ~13 ms in every run; the other 13 ms (game side, waiting on the replay) is outside
+  SET-FAST and decides as much of MKW's frame as the replay thread does.
+
+## Report (agent, protocol §5)
+
+Branch `setfast`: `102bbc0` (plan, step 1), `22766a0` (step 2), `e9b2cc4` (step 2 taken out, doc), this commit (doc).
+
+### 1. Built
+- Step 1 (`NXGFX_DYN_DEDUPE`, default on): dynamic state and graphics set offsets emitted only on change per command
+  buffer. Removes ~55-66 k driver calls a frame; no measurable FPS or replay-thread change (on/off pairs above).
+- Step 2 (per-ID view versions): built, measured neutral (views 3.79 → 3.74 ms), taken out. Diagnosis kept: view
+  lookups miss because each lane segment is its own submission, not because of the tables' generation.
+- Steps 2's key premise and 3 do not hold on HEAD (key 0.00 ms, chunk copy 60-70 ns a set): said with numbers, not
+  built.
+- Step 4: lanes measured; recommendation above (keep 6 pending the lead's quiet A/B with 2; 0 is worse).
+
+### 2. Tests (`cargo test --release -p graphics`: 273 passed, 6 ignored)
+- `dyn_shadow_tests::states_are_set_once_per_command_buffer_and_value`: equal state skipped; a new command buffer, a
+  changed value, or a mesh/ordinary class change (topology) sets it again.
+- `dyn_shadow_tests::set_offsets_are_bound_once_until_the_buffers_move`: an offset is bound once per command buffer
+  and set, again after the descriptor buffers are bound again or in a new command buffer.
+- New behaviour, so no failing-before state. (Step 2's test went out with step 2.)
+
+### 3. Verified
+Runs, numbers and sheets above. Route checks on in every mkw / mkw-turn run (3/3, 4/4). FPS 60 not reached; MKW
+stays near 30.
+
+### 4. Unproven
+- A quiet same-build A/B (the lead's): step 1's effect is below run-to-run noise here.
+- Lanes 2 vs 6 on a quiet machine (the final-build lanes-2 run was contaminated by OoT).
+- Validation-layer run with step 1 (dynamic state set before a pipeline with the same dynamic list; mesh / tess class
+  rules) was not done.
+
+### 5. Slips
+- Three of my runs were cut short by their background shell being stopped (not by me, as far as I can tell;
+  `20261126-215210-sf-s2-off2-mkw`, `20261126-215539-sf-s2-off3-mkw`: the harness died, the game ran on; I closed
+  that game by PID 39236). After that I used one background chain at a time and no `TaskStop` on waiters (my one
+  `TaskStop` on a waiter coincided with the second cut).
+- Relinks ran this worktree's `nxrs-build` directly with the launcher's own argument list (as USE-SYNC did).
+- Step 2's files were restored with `git checkout 102bbc0 -- <three files>` (a git restore, not a script edit).
+
+### 6. Questions
+None.
