@@ -6,10 +6,19 @@ use super::http_range::{Answer, answer, content_type, request_line};
 use super::web_build::{Target, WebBuild, chromium_browser, parse, percent_decode, route, slug};
 use super::web_build::{url, web_dir};
 
+/// An absolute path as the library holds one: under a drive on Windows, under `/` elsewhere.
+fn abs(rest: &str) -> String {
+    if cfg!(windows) {
+        format!("P:/{rest}")
+    } else {
+        format!("/{rest}")
+    }
+}
+
 fn game() -> Game {
     Game {
-        source: "P:/Games/Kart/Kart.nsp".into(),
-        build_dir: "P:/Games/Kart/nxrs/Kart DX".into(),
+        source: abs("Games/Kart/Kart.nsp"),
+        build_dir: abs("Games/Kart/nxrs/Kart DX"),
         output_name: "Kart DX".into(),
         ..Game::default()
     }
@@ -17,7 +26,7 @@ fn game() -> Game {
 
 #[test]
 fn web_builds_go_beside_the_native_one() {
-    assert_eq!(web_dir(&game()), "P:/Games/Kart/nxrs-web/Kart DX");
+    assert_eq!(web_dir(&game()), abs("Games/Kart/nxrs-web/Kart DX"));
     let none = Game::default();
     assert_eq!(web_dir(&none), "");
 }
@@ -30,11 +39,11 @@ fn build_for_web_is_the_build_with_target_web_into_the_web_folder() {
     let dir = |a: &[String]| a[a.iter().position(|x| x == "--outdir").unwrap() + 1].clone();
     assert_eq!(
         dir(&native),
-        super::path_text::native("P:/Games/Kart/nxrs/Kart DX")
+        super::path_text::native(&abs("Games/Kart/nxrs/Kart DX"))
     );
     assert_eq!(
         dir(&a),
-        super::path_text::native("P:/Games/Kart/nxrs-web/Kart DX")
+        super::path_text::native(&abs("Games/Kart/nxrs-web/Kart DX"))
     );
     assert_eq!(&a[a.len() - 2..], ["--target", "web"]);
     // the native build's data folder: the shaders its runs translated
@@ -42,7 +51,7 @@ fn build_for_web_is_the_build_with_target_web_into_the_web_folder() {
         &a[a.len() - 4..a.len() - 2],
         [
             "--shaders-from".to_string(),
-            super::path_text::native("P:/Games/Kart/nxrs/Kart DX/Kart DX_data")
+            super::path_text::native(&abs("Games/Kart/nxrs/Kart DX/Kart DX_data"))
         ]
     );
     // everything else is the native build's: source, name, jobs, --machine, update, keys

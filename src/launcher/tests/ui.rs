@@ -225,7 +225,19 @@ fn updates_window_chooses_and_builds() {
     assert!(matches!(&left[..], [Surface::Choices { options, .. }] if options[0].action == native));
     h.get_by_role_and_label(Role::Button, "Native").click();
     h.run_steps(3);
-    assert!(h.state().app.surfaces.is_empty() && h.state().app.is_building("g"));
+    let app = &h.state().app;
+    assert!(
+        app.surfaces.is_empty(),
+        "{:?} {:?}",
+        app.surfaces,
+        app.outcomes
+    );
+    assert!(
+        app.is_building("g"),
+        "{:?} {:?}",
+        app.outcomes,
+        app.console.lines
+    );
     settle(&mut h.state_mut().app);
 }
 
