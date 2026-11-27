@@ -1652,17 +1652,31 @@ fn sub_keep() -> usize {
     })
 }
 
+fn sub_idle() -> u64 {
+    static N: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("NXGFX_SUB_IDLE").ok().and_then(|v| v.parse().ok()).unwrap_or(300)
+    })
+}
+
 /// The free submissions past the newest `keep` (the front of the list: `pop` takes from the back) give back their
 /// staging and scratch chunks; a later use allocates them again. They are free, so the GPU is done with them. Each
 /// translation lane's own list keeps a quarter of `sub_keep()` (six lists of 64 still held ~4.9 GB of staging in the
 /// house: OoT's process then reached its 32 GB cap). Bytes given back.
+/// (OOT-MEM) Kept ones not used for `NXGFX_SUB_IDLE` presents (default 300; 0 = kept however long) give theirs back
+/// too: `pop` takes from the back, so most of the 64 (and each lane's 16) sat idle with a 64 MB scratch chunk each
+/// (OoT's house: 55 chunks, 3.5 GB, of which a frame uses a few).
 fn trim_free(g: &Gpu, free: &mut [Sub], keep: usize) -> u64 {
-    if sub_keep() == 0 || free.len() <= keep {
+    if sub_keep() == 0 {
         return 0;
     }
-    let n = free.len() - keep;
+    let n = free.len().saturating_sub(keep);
+    let (now, idle) = (super::present::frames(), sub_idle());
     let mut bytes = 0;
-    for s in &mut free[..n] {
+    for (i, s) in free.iter_mut().enumerate() {
+        if i >= n && (idle == 0 || now.saturating_sub(s.frame) <= idle) {
+            continue;
+        }
         for b in s.stage.drain(..) {
             bytes += b.size;
             g.free_buffer(b);
