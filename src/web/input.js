@@ -8,7 +8,8 @@
 // The engine writes the game's vibration back (WEB-RUMBLE): [56 + 2i] low motor, [57 + 2i] high motor of player i
 // (0..65535; 0 while the game does not own input). Each poll plays them on gamepad i through its vibrationActuator
 // ('dual-rumble': strong = low motor, weak = high motor), re-issued before an effect ends while the level holds,
-// reset at zero; nothing while the menu is open, on blur or while the page is hidden.
+// reset at zero; nothing while the menu is open, on blur or while the page is hidden. A DualSense has no actuator in
+// Chrome on Windows: its levels go to hid-rumble.js (WebHID, the native engine's output report) instead.
 //
 // The menu (menu.js) opens with Esc, a gamepad's Home (standard button 16) or Minus + Plus held 1 s. While it is open
 // nothing reaches the game: keys go to the menu, the block's keys and pads are released, and a button still held when
@@ -149,15 +150,20 @@ const NxrsInput = (() => {
   function stopAllRumble(why) {
     const list = navigator.getGamepads ? navigator.getGamepads() : [];
     for (const i of [...rumbling.keys()]) stopRumble(i, list[i] && list[i].vibrationActuator, why);
+    NxrsHid.stopAll(why);
   }
-  // The engine's motor levels to the gamepads.
+  // The engine's motor levels to the gamepads; a DualSense (no actuator in Chrome on Windows) through WebHID.
   function pollRumble(list) {
     const on = w && !menuOpen && focusState() === 1;
+    const hidPads = [];
     for (let i = 0; i < 4; i++) {
       const g = list[i];
       const a = g && g.connected ? actuator(g, i) : null;
       if (!a) {
         rumbling.delete(i);
+        if (g && g.connected && NxrsHid.drives(g)) {
+          hidPads.push({ gamepad: g, low: on ? Atomics.load(w, RUMBLE + 2 * i) : 0, high: on ? Atomics.load(w, RUMBLE + 2 * i + 1) : 0 });
+        }
         continue;
       }
       const low = on ? Atomics.load(w, RUMBLE + 2 * i) / 65535 : 0;
@@ -177,6 +183,7 @@ const NxrsInput = (() => {
       }
       rumbling.set(i, { low, high, until: now + EFFECT_MS });
     }
+    NxrsHid.play(hidPads);
   }
   function pollPads() {
     pollRumble(navigator.getGamepads ? navigator.getGamepads() : []);
@@ -275,6 +282,15 @@ const NxrsInput = (() => {
     writeSettings,
     firstPad,
     padBits,
+    // menu.js: a connected gamepad Chrome cannot rumble that WebHID can (a DualSense), or null
+    hidPad() {
+      const list = navigator.getGamepads ? navigator.getGamepads() : [];
+      for (let i = 0; i < list.length; i++) {
+        const g = list[i];
+        if (g && g.connected && !actuator(g, i) && NxrsHid.drives(g)) return g;
+      }
+      return null;
+    },
     // menu.js: what opens it and where its keys go while it is open
     hook(open, keyHandler) {
       hooks.open = open;

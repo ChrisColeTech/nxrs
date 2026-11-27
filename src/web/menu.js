@@ -476,6 +476,7 @@ const NxrsMenu = (() => {
       row('Stick dead zone', 'How far a stick must move before the game sees it.', slider('stick_deadzone', 0, 30, 1, 'Stick dead zone')),
       row('Rumble', 'The game\'s vibration on the gamepad, when the browser can drive its motors. Stops while this menu is open or the page is in the background.', toggle('rumble', 'Rumble')),
       row('Rumble strength', '100% is as the game sends it.', slider('rumble_gain', 0, 300, 10, 'Rumble strength', true)),
+      hidRow(),
       $('div', { class: 'rule', style: 'margin:12px 0' }),
       group('buttons', 'Buttons', 'Choose a key or a gamepad button, then press the one that should do it; a key or button already used elsewhere moves here. Esc (or B on a gamepad while choosing a key; Home while choosing a gamepad button) leaves it unchanged.'),
       $('div', { class: 'cols' }, table(GUESTS.slice(0, half)), table(GUESTS.slice(half))),
@@ -484,6 +485,24 @@ const NxrsMenu = (() => {
         NxrsSettings.set('button_map', '');
         show(section);
       })));
+  }
+  // WEB-RUMBLE-HID: a DualSense has no vibration through Chrome's gamepad interface on Windows; its motors are driven
+  // through WebHID once the player allows it (Chrome's chooser needs this click). Shown only for such a pad.
+  function hidRow() {
+    if (!NxrsHid.available() || !NxrsInput.hidPad()) return null;
+    const names = NxrsHid.opened();
+    const state = $('span', { class: 'readout' }, names.length ? `On: ${names.join(', ')}` : 'Not allowed yet');
+    const allow = names.length ? null : btn('Allow…', async () => {
+      try {
+        await NxrsHid.allow();
+        show(section, 'Rumble on this controller');
+      } catch (e) {
+        state.textContent = e && e.name === 'NotFoundError' ? 'Not allowed yet' : `Not allowed: ${e.message || e}`;
+      }
+    });
+    if (allow) allow.setAttribute('aria-label', 'Rumble on this controller');
+    return row('Rumble on this controller', 'Chrome does not drive this controller\'s motors through its gamepad support. Allow… asks Chrome to let this page drive them directly (choose the controller in Chrome\'s list); Chrome remembers it for every game here. Only the motors are used: its lights stay as they are.',
+      $('span', { style: 'display:flex;gap:6px;align-items:center' }, state, allow));
   }
   function startCapture(kind, guest, el) {
     capture = { kind, guest, el, prev: NxrsInput.firstPad() ? NxrsInput.padBits(NxrsInput.firstPad()) : 0 };
@@ -680,6 +699,10 @@ const NxrsMenu = (() => {
   // the button table's gamepad names follow the face-button layout
   NxrsSettings.onChange((k) => {
     if (k === 'button_layout' && open && section === 'controller') show('controller', 'Face buttons');
+  });
+  // a DualSense opened through WebHID (allowed, reconnected) or gone: the Rumble on this controller row follows
+  NxrsHid.onChange(() => {
+    if (open && section === 'controller' && !question && !capture) show('controller');
   });
 
   return {

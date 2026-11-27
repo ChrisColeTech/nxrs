@@ -37,6 +37,8 @@ pub const HOST_FILES: &[(&str, &str)] = &[
     // WEB-W9: the in-game menu, the settings it keeps, the loading screen's style
     ("menu.js", include_str!("../../web/menu.js")),
     ("menu.css", include_str!("../../web/menu.css")),
+    // WEB-RUMBLE-HID: the DualSense's motors through WebHID
+    ("hid-rumble.js", include_str!("../../web/hid-rumble.js")),
 ];
 
 /// The engine's version for `build.json`: a release's `engine.json` beside nxrs-build (its commit), else
@@ -170,12 +172,20 @@ mod tests {
                 "gpu.js",
                 "gpu-worker.js",
                 "menu.js",
-                "menu.css"
+                "menu.css",
+                "hid-rumble.js"
             ]
         );
         // what index.html loads and what boot.js and gpu.js start are all here
         let file = |n: &str| HOST_FILES.iter().find(|(f, _)| *f == n).unwrap().1;
-        for n in ["input.js", "saves.js", "gpu.js", "menu.js", "boot.js"] {
+        for n in [
+            "hid-rumble.js",
+            "input.js",
+            "saves.js",
+            "gpu.js",
+            "menu.js",
+            "boot.js",
+        ] {
             assert!(file("index.html").contains(&format!("src=\"{n}\"")), "{n}");
         }
         assert!(file("index.html").contains("href=\"menu.css\""));
@@ -196,7 +206,7 @@ mod tests {
         std::fs::write(d.join("game.wasm"), b"wasm!").unwrap();
         std::fs::write(d.join("data.json"), b"{}").unwrap();
         let line = write(&d, &data, "X Y", Some(0x0100_4060_145c_0000)).unwrap();
-        assert!(line.contains("10 files (10 updated)"), "{line}");
+        assert!(line.contains("11 files (11 updated)"), "{line}");
         for (n, t) in HOST_FILES {
             assert_eq!(std::fs::read_to_string(d.join(n)).unwrap(), *t);
         }
@@ -214,10 +224,10 @@ mod tests {
             .as_str()
             .is_some_and(|v| !v.is_empty()));
         let files = j["files"].as_array().unwrap();
-        // ten host files, the loader, the module, the manifest, the font's license; no bootset.json, cold module,
+        // eleven host files, the loader, the module, the manifest, the font's license; no bootset.json, cold module,
         // symbols or compressed copies here, so none listed
-        assert_eq!(files.len(), 14);
-        assert_eq!(files[13]["role"], "license");
+        assert_eq!(files.len(), 15);
+        assert_eq!(files[14]["role"], "license");
         assert_eq!(
             std::fs::read_to_string(d.join(HIND_LICENSE.0)).unwrap(),
             HIND_LICENSE.1
@@ -225,15 +235,16 @@ mod tests {
         assert!(HIND_LICENSE.1.contains("SIL OPEN FONT LICENSE"));
         assert_eq!(files[7]["path"], "gpu-worker.js");
         assert_eq!(files[9]["path"], "menu.css");
+        assert_eq!(files[10]["path"], "hid-rumble.js");
         assert_eq!(
-            files[10],
+            files[11],
             serde_json::json!({"path": "game.js", "size": 2, "role": "loader"})
         );
         assert_eq!(
-            files[11],
+            files[12],
             serde_json::json!({"path": "game.wasm", "size": 5, "role": "module"})
         );
-        assert_eq!(files[12]["role"], "manifest");
+        assert_eq!(files[13]["role"], "manifest");
         let html = &files[0];
         assert_eq!(html["role"], "host");
         assert_eq!(html["size"], HOST_FILES[0].1.len() as u64);
