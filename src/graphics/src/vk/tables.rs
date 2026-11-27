@@ -120,9 +120,12 @@ fn refresh_ranges(i: &Inner, from: u64) -> Vec<(usize, usize)> {
     if from < i.edits_from {
         return vec![(0, i.shadow.len())];
     }
-    i.edits
+    // the log is in generation order (each write is noted at the then current generation, which only grows): the
+    // writes from `from` on are its tail, found by a binary search instead of a walk over up to 65,536 entries under
+    // the tables' lock at each of OoT's 40-60 snapshots a frame
+    let first = i.edits.partition_point(|e| e.0 < from);
+    i.edits[first..]
         .iter()
-        .filter(|e| e.0 >= from)
         .map(|e| (e.1 as usize, e.2 as usize))
         .collect()
 }
