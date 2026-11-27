@@ -12,6 +12,11 @@ pub const FIRST_BASE: u64 = 0x70_0000_0000;
 /// between the heap's break and the window were claimed and never used, and Chrome on Windows commits every byte the
 /// linear memory grows over (WEB-WMEM).
 pub const WEB_FIRST_BASE: u64 = 0x1_D000_0000;
+/// The web engine library's interface with the page (`src/web`: the host files, the JS libraries, the shared-memory
+/// blocks) and with this layout. The library carries it as bytes (`os::web::HOST_PROTOCOL`); `nxrs-build --target
+/// web` refuses a library without the one it was built with (WEB-W10-MK8D: a library from before the I/O worker was
+/// linked with a newer page, and every game died at its first read). Bump the number when that interface changes.
+pub const WEB_HOST_PROTOCOL: &str = "nxrs-web-host-protocol=2;";
 pub const ALIGN: u64 = 0x20_0000;
 pub const ADDRESS_LIMIT: u64 = 1 << 39;
 
