@@ -50,4 +50,61 @@ Expected files: `src/graphics/src/web/{submit,seg,mod}.rs`, `src/graphics/src/li
 
 ## Results
 
-(filled in as the work lands)
+### Built
+
+1. **Depth/stencil pass segments** (as planned): `src/graphics/src/web/seg.rs` (`Seg`, `modes`, `mark_read_only`,
+   `keep_stores`, `continuation`); `submit.rs` `Pass.ds` / `begin_at` / `payload` / `seg`, `end_segment`, `ds_use`
+   (draws: the pipeline's writesDepth / writesStencil as WebGPU defines them, and the bound views of the attachment's
+   image found while the bind groups are resolved; `vkCmdClearAttachments` of depth/stencil counts as a write);
+   `gpu-worker.js` `PASS_BEGIN` mode 3 = `depthReadOnly` / `stencilReadOnly`. MK8D's Depth32Float error is gone.
+2. **Next blocker found and fixed: movie decoder events refused on the web** (`src/os/src/services/movie.rs`
+   `ev_ok`). An event entry had to be at or above 4 GiB; the web's compact map puts MK8D's heap at 0x20000000, so
+   `RegisterClientEvents` recorded `0x0 0x0 0x0 0x0` and Start's event was never delivered (`event 0 not delivered`
+   in W10b). The check is now "inside the guest's modules or ASLR region" (native: the same addresses as before; the
+   native run registers 0x134ba03d0.., the web now 0x24ba03d0..). The decoder now gets its input buffers; it still
+   decodes nothing on the web (H.264 through WebCodecs is not wired, docs/35, red line kept).
+3. **Next blocker found and fixed: a pass sampling other mips of its colour attachment** (W10c run1/run2: `Texture
+   (480x272 RG11B10Ufloat) usage (TextureBinding|RenderAttachment)`, 16,292 errors by 156 s, frames stuck on the
+   logo). The diagnostic named it: MK8D's bloom chain renders mip k (1..4) while sampling a `TYPE_2D` view of mips
+   0..5 of the same image (Vulkan allows reading the other mips; WebGPU refuses a bound view whose range includes an
+   attached mip). `seg::unattached_mips` + `submit.rs` `unattached_view`: the sampled view is bound as a view of the
+   same image without the attached mips (base kept, so the shader's mip numbering is unchanged: mips 0..k; when the
+   base itself is attached, the mips above it), cached by (view, base, count), destroyed with its view;
+   `obj::View.swizzle` kept for it. A view of only the attached mip (a real feedback loop) gets a red line.
+
+### Tests
+
+`cargo test --release -p graphics --lib web_seg` (host build of `web/seg.rs`, included from `lib.rs` for tests):
+5 passed — `a_segment_that_only_samples_depth_declares_it_read_only`, `depth_and_stencil_are_decided_separately`,
+`writing_then_sampling_splits_and_the_continuation_loads_everything`, `sampling_then_writing_splits`,
+`a_downsample_chain_binds_the_mips_below_the_one_it_renders`. They are new (the code did not exist before). The movie
+fix has no unit test (needs the os memory map); verified in the game.
+
+### MK8D in Chrome (GPU 1), `build/WEB/W10c/mk8d`
+
+- `run1` (items 1-2): 0 Depth32Float errors; the movie decoder gets its events and input; still on the logo (the
+  RG11B10 errors). The Chrome GPU process went away at 108 s (no crash report, no TDR in the System log; cause not
+  found), so later shots are missing.
+- `run2` (diagnostic build): the colour-attachment line above; logo only (t60 = t90, t120 = t150).
+- **`run3` (items 1-3): 0 WebGPU errors in 200 s; the title logo, then the title menu (Single Player / Multiplayer /
+  Online Play / Wireless Play, Mario/Peach/Bowser art) from ~41 s (`t60`..`t180`), 59.5-59.7 FPS.** A presses every 4
+  s are delivered (`buttons 0x0001`, focus 1) but the menu stays on Single Player through 180 s: the race is not
+  reached. Red lines: only the movie decoder's WebCodecs one.
+
+### Regression: Anime Girls (rebuilt with this branch, backup in `build/WEB/W10c/ag/backup-before`)
+
+`build/WEB/W10c/ag/run1`: beach gameplay (Kayla on the pier, a lizard, HUD, 5 kills) at t130; 0 WebGPU errors;
+51.9-53.3 FPS (W8e's beach ~52-55). Red lines `rgba8unorm ... reads depth`, `uniform binding of 4352 bytes`,
+`A4B4G4R4_UNORM_PACK16` were already in W8e's runs.
+
+### Unproven / next
+
+- MK8D's menu does not act on A (Single Player stays highlighted): not diagnosed (deadline). Next: compare the native
+  `mk8d` scenario's input timing (presses of 3 s cadence; held vs 80 ms taps) and log the game's npad reads on the
+  web around a press.
+- H.264 movie decoding on the web (WebCodecs): not wired; the title's movie surfaces stay empty.
+- The `uniform bank c3 ... in no memory pool` red lines (W10b, 26 s) did not appear in run3.
+- run1's Chrome GPU process exit at 108 s: not reproduced in run2/run3.
+
+MK8D's previous web files: `build/WEB/W10c/mk8d/backup-before`. Build logs: `build/WEB/W10c/mk8d/build{1..4}.log`.
+Driver: `build/WEB/W10c/tools/drive.mjs` (W8e's plus `--shots`, `--xfrom`, `--xevery`).
