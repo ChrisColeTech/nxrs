@@ -102,8 +102,13 @@ pub fn import(from: &Path, data: &Path) -> Result<Imported> {
         }
     }
     for p in pair_sources {
-        let Ok(text) = std::fs::read_to_string(p) else { continue };
-        for row in text.lines().filter(|l| !l.is_empty() && !l.starts_with('#')) {
+        let Ok(text) = std::fs::read_to_string(p) else {
+            continue;
+        };
+        for row in text
+            .lines()
+            .filter(|l| !l.is_empty() && !l.starts_with('#'))
+        {
             if pair_rows.insert(row.to_string()) {
                 pairs.push_str(row);
                 pairs.push('\n');
@@ -125,7 +130,8 @@ mod tests {
         std::fs::write(p, s).unwrap();
     }
 
-    const HEAD: &str = "# nxshaders 1\n# chain x\nkey\tstage\ttranslated_as\tarch\tstatus\tspv_bytes\tsource\n";
+    const HEAD: &str =
+        "# nxshaders 1\n# chain x\nkey\tstage\ttranslated_as\tarch\tstatus\tspv_bytes\tsource\n";
 
     /// The other library's records and its unpromoted live ones are copied with their rows; a key this library has is
     /// left as it is; an incomplete live record (no reflection) is not taken; pairs are joined once.
@@ -139,7 +145,12 @@ mod tests {
         let c = "00000000000000cc";
         let d = "00000000000000dd";
         // the other library: a (promoted) and b (already in ours)
-        write(&from.join("shaders/manifest.tsv"), &format!("{HEAD}{a}\tps\tps\tmaxwell\tok\t4\tlive\n{b}\tvs\tvs\tmaxwell\tok\t4\tbuild\n"));
+        write(
+            &from.join("shaders/manifest.tsv"),
+            &format!(
+                "{HEAD}{a}\tps\tps\tmaxwell\tok\t4\tlive\n{b}\tvs\tvs\tmaxwell\tok\t4\tbuild\n"
+            ),
+        );
         write(&from.join(format!("shaders/spv/{a}.spv")), "spvA");
         write(&from.join(format!("shaders/spv/{a}.json")), "{}");
         write(&from.join(format!("shaders/spv/{b}.spv")), "spvB-native");
@@ -147,25 +158,53 @@ mod tests {
         write(&from.join("shaders/pairs.tsv"), "# pairs\n");
         // live: c complete, d without reflection, a again (once)
         for k in [a, c, d] {
-            write(&from.join(format!("shaders/live/{k}/manifest.tsv")), &format!("{HEAD}{k}\tps\tps\tmaxwell\tok\t4\tlive (set by the game at run time)\n"));
+            write(
+                &from.join(format!("shaders/live/{k}/manifest.tsv")),
+                &format!("{HEAD}{k}\tps\tps\tmaxwell\tok\t4\tlive (set by the game at run time)\n"),
+            );
             write(&from.join(format!("shaders/live/{k}/spv/{k}.spv")), "spv");
         }
         write(&from.join(format!("shaders/live/{a}/spv/{a}.json")), "{}");
         write(&from.join(format!("shaders/live/{c}/spv/{c}.json")), "{}");
-        write(&from.join(format!("shaders/live/{c}/pairs.tsv")), &format!("# p\n{b}\t{c}\tvar\n"));
-        write(&from.join(format!("shaders/live/{a}/pairs.tsv")), &format!("{b}\t{c}\tvar\n"));
+        write(
+            &from.join(format!("shaders/live/{c}/pairs.tsv")),
+            &format!("# p\n{b}\t{c}\tvar\n"),
+        );
+        write(
+            &from.join(format!("shaders/live/{a}/pairs.tsv")),
+            &format!("{b}\t{c}\tvar\n"),
+        );
         // ours: b only
-        write(&data.join("shaders/manifest.tsv"), &format!("{HEAD}{b}\tvs\tvs\tmaxwell\tok\t4\tbuild\n"));
+        write(
+            &data.join("shaders/manifest.tsv"),
+            &format!("{HEAD}{b}\tvs\tvs\tmaxwell\tok\t4\tbuild\n"),
+        );
         write(&data.join(format!("shaders/spv/{b}.spv")), "spvB-ours");
         write(&data.join(format!("shaders/spv/{b}.json")), "{}");
 
         let r = import(&from, &data).unwrap();
-        assert_eq!(r, Imported { shaders: 2, present: 1, pairs: 1 });
+        assert_eq!(
+            r,
+            Imported {
+                shaders: 2,
+                present: 1,
+                pairs: 1
+            }
+        );
         let s = data.join("shaders");
-        assert_eq!(std::fs::read_to_string(s.join(format!("spv/{a}.spv"))).unwrap(), "spvA");
+        assert_eq!(
+            std::fs::read_to_string(s.join(format!("spv/{a}.spv"))).unwrap(),
+            "spvA"
+        );
         assert!(s.join(format!("spv/{c}.json")).is_file());
-        assert!(!s.join(format!("spv/{d}.spv")).exists(), "an incomplete record is not taken");
-        assert_eq!(std::fs::read_to_string(s.join(format!("spv/{b}.spv"))).unwrap(), "spvB-ours");
+        assert!(
+            !s.join(format!("spv/{d}.spv")).exists(),
+            "an incomplete record is not taken"
+        );
+        assert_eq!(
+            std::fs::read_to_string(s.join(format!("spv/{b}.spv"))).unwrap(),
+            "spvB-ours"
+        );
         let m = std::fs::read_to_string(s.join("manifest.tsv")).unwrap();
         let keys: Vec<_> = rows(&m).map(|(k, _)| k.to_string()).collect();
         assert_eq!(keys, [b, a, c]);
@@ -175,8 +214,18 @@ mod tests {
 
         // again: nothing new
         let r = import(&from, &data).unwrap();
-        assert_eq!(r, Imported { shaders: 0, present: 3, pairs: 0 });
-        assert!(import(&t.join("none"), &data).is_err(), "a folder with no library is an error");
+        assert_eq!(
+            r,
+            Imported {
+                shaders: 0,
+                present: 3,
+                pairs: 0
+            }
+        );
+        assert!(
+            import(&t.join("none"), &data).is_err(),
+            "a folder with no library is an error"
+        );
         let _ = std::fs::remove_dir_all(&t);
     }
 }
