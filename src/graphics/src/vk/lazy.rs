@@ -72,8 +72,9 @@ pub fn summary(frames: f64) -> String {
     let t = |a: &AtomicU64| a.swap(0, Ordering::Relaxed) as f64 / 1e6 / frames;
     let (lk, tk, mk, ld, tc) = (t(&T_LOCK), t(&T_TAKE), t(&T_MAKE), t(&T_LAND), t(&T_TOUCH));
     let (uh, rr) = (UNHELD.swap(0, Ordering::Relaxed), REREAD.swap(0, Ordering::Relaxed));
+    let ly = super::mem::LAND_YIELDS.swap(0, Ordering::Relaxed) as f64 / frames;
     format!(
-        "; lazy write-back: {} pages on the device, {skip:.2} MB a frame not copied back, {n:.1} pages a frame brought back in {ms:.2} ms (completion: pool lock {lk:.2} ms, pages chosen {tk:.2}, held {mk:.2}, whole write-backs landed {ld:.2}, pages touched {tc:.2}; {uh} released at once for a CPU store, {rr} read again for a landing during the read)",
+        "; lazy write-back: {} pages on the device, {skip:.2} MB a frame not copied back, {n:.1} pages a frame brought back in {ms:.2} ms (completion: pool lock {lk:.2} ms, pages chosen {tk:.2}, held {mk:.2}, whole write-backs landed {ld:.2}, pages touched {tc:.2}; {uh} released at once for a CPU store, {rr} read again for a landing during the read; {ly:.2} a frame stepped aside for a sync, NXGFX_LAND_YIELD)",
         pages()
     )
 }
