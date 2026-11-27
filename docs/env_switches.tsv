@@ -85,6 +85,7 @@ NXGFX_PACE_N	diagnostic	presents per pacing line (default 300)	src/graphics/src/
 NXGFX_PARTS_PRIVATE_MB	switch	The process private memory in MB past which no more shader parts are made ahead (default an eighth of the machine's memory, at least 6144).	src/graphics/src/vk/pipe.rs
 NXGFX_PART_LTO	switch	make (NXGFX_PART_LTO=1: retained, as before)	src/graphics/src/vk/pipe.rs
 NXGFX_PCACHE_QUIET_MS	switch	is killed. A saver thread writes it a few seconds after new pipelines stop arriving (`NXGFX_PCACHE_QUIET_MS`,	src/graphics/src/vk/pcache.rs
+NXGFX_PCACHE_TRY_ALLOC	switch	`NXGFX_PCACHE_TRY_ALLOC=0`: the pipeline cache save's buffer allocated by ash as before (an allocation failure aborts the process: OoT's 391 MB cache, OOT-OCC v5); by default a save that cannot get its buffer is skipped and tried again later (OOT-REPLAY)	src/graphics/src/vk/pcache.rs
 NXGFX_PIPE_LOG	diagnostic	`NXGFX_PIPE_LOG=1`: every pipeline the driver compiles is logged as it starts and ends (the one a compiler crash	src/graphics/src/vk/pipe.rs
 NXGFX_PIPE_NOOPT	diagnostic	`1` makes pipelines with optimization disabled (driver bisecting)	src/graphics/src/vk/pipe.rs
 NXGFX_POOL	switch	- **Host** (`NXGFX_POOL=host`): the guest pages imported into Vulkan (VK_EXT_external_memory_host): zero-copy,	src/graphics/src/vk/mem.rs, src/graphics/tests/gpu.rs
@@ -141,6 +142,7 @@ NXGFX_SHOT	diagnostic	- `NXGFX_SHOT=<n>[,<n>...]`: those presents (counted from 
 NXGFX_SHOT_DIR	path	neighbours as PNG (`fg-generated.png`, `fg-previous.png`, `fg-current.png` in `NXGFX_SHOT_DIR`).	src/graphics/src/vk/framegen.rs, src/graphics/src/vk/shot.rs
 NXGFX_SHOT_EVERY	diagnostic	- `NXGFX_SHOT_EVERY=<n>`: every n-th present;	src/graphics/src/vk/shot.rs
 NXGFX_SHOT_FILE	path	- `NXGFX_SHOT_FILE=<path>`: when the file exists, the next present; the file is deleted (a path written in it is	src/graphics/src/vk/shot.rs
+NXGFX_SNAP_KEEP	switch	`NXGFX_SNAP_KEEP` (default 256): texture pool snapshot buffers kept for reuse once the GPU is done with them; 32 = as before (OoT's walk makes 40-60 snapshots a frame; past 32 each made 10 MB of host-visible memory and copied the whole shadow under the tables' lock; OOT-REPLAY)	src/graphics/src/vk/tables.rs
 NXGFX_SKIP_PS	switch	`NXGFX_SKIP_PS=<key>[,<key>...]` (diagnosis, with a replay): draws with one of these pixel shaders are skipped, to	src/graphics/src/vk/exec.rs
 NXGFX_SLOW_MS	switch	frames the sizes the game renders at (`[vk] render sizes …`); a frame longer than `NXGFX_SLOW_MS` (50) gets a	src/graphics/src/vk/perf.rs
 NXGFX_SPARSE	switch	waits on. `NXGFX_SPARSE=0`: sparse textures are whole images (as before). `NXGFX_SPARSE_MIB`: slot memory cap	src/graphics/src/vk/sparse.rs
