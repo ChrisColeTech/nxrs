@@ -73,14 +73,16 @@ lines.
 Baseline (`base`, the library build before this wave): **33.5 FPS** (95-135 s), median frame 24-30 ms. Native
 (`build/play/20261126-193134-agsob`, metrics CSV, 100-160 s): 59.7 FPS.
 
-| per frame | native | web base | web run3 | source |
+| per frame | native | web before (`base` / `run2`) | web after (`final`) | source |
 |---|---|---|---|---|
-| main game thread CPU (guest code + svc) | 5.7 ms (t1001) | ~26-28 ms (80% busy, 68% guest) | ~20 ms (81% busy at 39 FPS) | native metrics CSV; CPU profile thread 15 (`boot_main`) |
-| the game waited for the GPU | 0.00 | 0.0-0.3 ms | 0.2-2.7 ms | `[vk] GPU time` line (now printed without timestamps) |
-| replay thread busy / replay CPU | 1.6 ms replay | 17-19 ms busy, 8-11 ms replay (sets 4-16, vertex input 2-9) | 10-13 ms busy, 6-8 ms replay (sets 2-4, vertex input 2-6) | `[vk] pipelining`, `GPU time` lines |
+| FPS, 95-135 s gameplay | 59.7 | **33.5** (`base`) | **40.7** | pacing lines |
+| main game thread work (profiler on: every thread slower) | 5.7 ms CPU (t1001) | 36.9 ms (`run2`: 80% busy at 21.7 FPS) | 29.7 ms (84% busy at 28.3 FPS) | native metrics CSV; CPU profile of thread 15 (`boot_main`) over 12-16 s |
+| the game waited for the GPU | 0.00 | 0.0-0.3 ms (`run2`) | 0.6-2.0 ms | `[vk] GPU time` line (now printed without timestamps) |
+| replay thread busy / replay CPU | 1.6 ms replay | 17-19 ms busy, 8-11 ms replay (sets 4-16, vertex input 2-9) | 13-15 ms busy, 8-10 ms replay (sets 2-4) | `[vk] pipelining`, `GPU time` lines |
 | translation lanes (6) together | 0 (not parallel) | 14-19 ms, 5-8 ms of it waiting for the pools lock at resolves | similar | `[vk] translate (parallel)` |
-| GPU worker JS | - | 77% busy: GC 40%, writeBuffer 14% | 59-62% busy: GC 33%, writeBuffer 14% | CPU profile of `gpu-worker.js` |
+| GPU worker JS | - | 77% busy: GC 40%, writeBuffer 14% | 59-62% busy (run3): GC 33%, writeBuffer 14% | CPU profile of `gpu-worker.js` |
 | GPU time | ~1 ms | not measured (no timestamp queries on the web device) | - | |
+| present | - | 1280x720 canvas, bilinear blit, CSS stretch | 3376x1899 canvas, sharp upscale, 1:1 | |
 
 The frame is bound by the **main game thread** (threads 8/9, the game's workers, wait 69% for it; the replay thread
 is idle 8-15 ms a frame; the game waits on the GPU < 3 ms). Its guest code runs flat over ~3,000 functions (no spin);
@@ -97,7 +99,29 @@ Cuts, in order:
    Replay "sets" 5-10 -> 2-4 ms a frame, replay thread busy 17-19 -> 10-13 ms.
 3. **Guest address rebase** (`translator/runtime/cpu.h`): on wasm every guest load and store computed
    `a - rt_guest_off`, reading that global from linear memory at each access (reloaded after every store under
-   `-fno-strict-aliasing`), though it is always 0 (`runtime/src/cpu.rs`). Now the plain cast, as native. Result: see
-   `final` below.
+   `-fno-strict-aliasing`), though it is always 0 (`runtime/src/cpu.rs`). Now the plain cast, as native: main thread
+   work 34.1 -> 29.7 ms a frame under the same profiler (run3 -> final), FPS 39.1 -> 40.7, `game.wasm` 467.8 ->
+   392.5 MB.
 4. GPU worker: one `TextDecoder`, one `MessageChannel` for its yields, no offsets array for a bind without dynamic
-   offsets (allocation; its GC share did not move: see Unproven).
+   offsets (allocation hygiene; its GC share did not move: see Unproven).
+
+### Final run (`final`, the library build relinked from this worktree without profiling names)
+
+Chrome on GPU 1, another session's native Ocarina of Time running (3.3 cores), no builds. Boot, menu, beach gameplay
+from ~95 s (`t120.png`: Kayla on the pier, HUD, native colours; `t160.png`: spiders attacking, after the resize),
+0 WebGPU errors, no lost device. **40.7 FPS** over 95-135 s (baseline 33.5; goal 60 not reached), last GPU worker
+line 39.0 FPS, median 25.4 ms. Resize at 150 s: CSS 1139.6x641 at devicePixelRatio 3 -> backing 3418x1923 and
+`[vk] swapchain 3418x1923, 3 images, B8G8R8A8_SRGB` (the out-of-date path), the picture keeps its aspect.
+
+### Unproven / next
+
+- **60 FPS:** the main game thread's guest code is the limit (29.7 ms of work a frame under the profiler vs native's
+  5.7 ms CPU). Next levers: wasm-opt on the one module (W11's scope), the memory64 bounds checks V8 adds to every
+  access, the setjmp owner frame (4.7% self on the main thread), `fmaf` emulated in software on the game's workers.
+- **GPU worker GC (33-40%)** with a low allocation rate (~5 MiB/s sampled): likely tracing a large live set (up to
+  50,000 cached bind groups and their views as WebGPU wrappers), not the worker's allocations. At 60 FPS the worker
+  (59-77% busy at 33-40 FPS) would be the next limit; a smaller bind-group cache bound is the first thing to measure.
+- Replay lanes still wait 5-8 ms a frame for the pools lock at resolves (the web's sync by use).
+- No GPU timestamps on the web device (`timestamp-query` not used): GPU time is not in the table.
+- Pre-existing, not from this wave: the ammo HUD's "∞" is missing on the web (before and after; likely the
+  unsupported `A4B4G4R4_UNORM_PACK16` red line), two stand-in red lines at boot.
