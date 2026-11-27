@@ -912,6 +912,11 @@ pub struct Images {
     /// (`img_spans_on`) every image of `by_addr` as (storage start, end, serial), by start: the CPU-write check of a
     /// submission with many dirty ranges walks it beside the sorted ranges instead of looking every image up
     spans: Vec<(u64, u64, u64)>,
+    /// (`img_due_on`) images that may be due for initialization or upload: made, CPU-written, or found due and not
+    /// prepared yet; and the images of sparse virtual pools (checked through their pages at every submission). A
+    /// submission's walk looks at these instead of every image (stale serials are skipped)
+    due: Vec<u64>,
+    sparse_list: Vec<u64>,
     /// the virtual pool mapping generation the sparse textures were last checked at
     sparse_seen: u64,
     /// released images by what they were (storage, description, layout): a game that initializes its transient
@@ -1235,6 +1240,15 @@ pub fn tex_due() -> u64 {
 /// (`queue::present_lean`).
 pub fn presented_gpu_drawn(im: &Image) -> bool {
     im.gpu_owned && im.sparse.is_none() && !im.needs_init && !im.needs_upload
+}
+
+/// `NXGFX_IMG_DUE` (default on; `0` the old walk over every image): a submission looks for the images due for
+/// initialization or upload among the candidates `Images::due` keeps (made or CPU-written since, found due before and
+/// not prepared yet), the images the CPU writes overlap now and the sparse ones, instead of walking every image
+/// (MKW: ~2 % of the replay thread at ~10 walks a frame).
+fn img_due_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_IMG_DUE").as_deref() != Ok("0"))
 }
 
 /// `NXGFX_IMG_SPANS` (default on; `0` the old walk): a submission's CPU-write check over many dirty ranges walks the
@@ -1927,6 +1941,12 @@ impl Gpu {
         }
         imgs.forward.remove(&t.serial);
         imgs.released.remove(&t.serial);
+        if im.needs_init || im.needs_upload {
+            imgs.due.push(t.serial);
+        }
+        if !t.mem.is_null() && crate::nvn::vpool::is_sparse(t.mem as u64) {
+            imgs.sparse_list.push(t.serial);
+        }
         imgs.by_serial.insert(t.serial, im);
         imgs.addr_gen += 1;
         self.tables.invalidate_images();
@@ -3893,9 +3913,10 @@ impl Gpu {
             self.upgrade_storage(&mut imgs, &pending, sub, cb);
         }
         let t_all = std::time::Instant::now();
+        // the images the CPU writes overlap (candidates of the due walk below, `img_due_on`)
+        let mut hit: Vec<u64> = Vec::new();
         if !dirty.is_empty() && !imgs.by_addr.is_empty() {
             let max = imgs.max_size;
-            let mut hit = Vec::new();
             let dirty_sorted = dirty.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0);
             let per_range: usize = if dirty_sorted {
                 dirty.len().min(imgs.by_addr.len())
@@ -3944,7 +3965,7 @@ impl Gpu {
             // once each (a texture under many dirty pages was hashed once per page: Violet's 40 ms of prep a frame)
             hit.sort_unstable();
             hit.dedup();
-            for s in hit {
+            for &s in &hit {
                 if let Some(im) = imgs.by_serial.get_mut(&s) {
                     let lo = im.tex.mem as u64;
                     let hi = lo + im.tex.l.size;
@@ -4055,6 +4076,33 @@ impl Gpu {
         // and the images due (init or upload): one walk over every image with the sparse check (two walks of ~6,700
         // images at each of OoT's ~11 submissions a frame were most of this function's time, OOT-DESC)
         let mut serials: Vec<u64> = Vec::new();
+        if img_due_on() {
+            // (MKW-SETS) only the images that can be due: made or CPU-written since (`Images::due`), the ones the CPU
+            // writes overlap now, and the sparse ones; those found due stay candidates until prepared
+            let mut cand = std::mem::take(&mut imgs.due);
+            cand.extend_from_slice(&hit);
+            cand.extend_from_slice(&imgs.sparse_list);
+            cand.sort_unstable();
+            cand.dedup();
+            let images = &mut *imgs;
+            for s in cand {
+                let Some(im) = images.by_serial.get_mut(&s) else { continue };
+                if let Some((runs, gen)) = im.sparse.as_ref().filter(|_| !im.gpu_owned) {
+                    let hit = dirty
+                        .iter()
+                        .any(|&(a, n)| runs.iter().any(|&(b, m)| a < b + m && b < a + n));
+                    if hit || (look && crate::nvn::vpool::gen_in(im.tex.mem as u64, im.tex.l.size) > *gen) {
+                        im.needs_upload = true;
+                    }
+                }
+                if im.needs_init || im.needs_upload {
+                    serials.push(s);
+                }
+            }
+            let live = &images.by_serial;
+            images.sparse_list.retain(|s| live.contains_key(s));
+            images.due = serials.clone();
+        } else {
         for (s, im) in imgs.by_serial.iter_mut() {
             if let Some((runs, gen)) = im.sparse.as_ref().filter(|_| !im.gpu_owned) {
                 let hit = dirty
@@ -4067,6 +4115,7 @@ impl Gpu {
             if im.needs_init || im.needs_upload {
                 serials.push(*s);
             }
+        }
         }
         // the textures' storage read and laid out linearly on several threads first (a streaming burst: Pokemon
         // Legends: Z-A uploads ~1,400 textures in a few seconds, 0.5 ms each on one thread: frames of 200-370 ms)
@@ -4450,12 +4499,14 @@ impl Gpu {
             .range(lo.saturating_sub(max)..lo + n)
             .flat_map(|(_, ss)| ss.iter().copied())
             .collect();
+        let images = &mut *imgs;
         for s in hit {
-            if let Some(im) = imgs.by_serial.get_mut(&s) {
+            if let Some(im) = images.by_serial.get_mut(&s) {
                 let (a, b) = (im.tex.mem as u64, im.tex.mem as u64 + im.tex.l.size);
                 if a < lo + n && lo < b && im.sparse.is_none() {
                     im.gpu_owned = false;
                     im.needs_upload = true;
+                    images.due.push(s);
                 }
             }
         }
