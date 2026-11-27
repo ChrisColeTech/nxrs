@@ -149,6 +149,45 @@
     };
   }
 
+  // ---- code: the modules kept in Cache Storage. Chrome's HTTP cache does not store an entry this large (its disk
+  // cache refuses one over an eighth of its size; game.wasm.gz is 107 MB), so the server's ETag was never asked
+  // about and every launch downloaded the module again (WEB-W6). The page keeps the response itself and asks the
+  // server with If-None-Match: a 304 (no body) uses the kept copy, a 200 (a changed build: its ETag is the file's
+  // size and time) replaces it. Without Cache Storage (a private window, storage blocked) it is a plain fetch.
+  const CODE_CACHE = 'nxrs-code-1';
+  async function codeResponse(file) {
+    const url = new URL(file, location.href).href;
+    let cache = null;
+    let kept = null;
+    try {
+      cache = await caches.open(CODE_CACHE);
+      kept = await cache.match(url);
+    } catch {
+      cache = null;
+    }
+    const tag = kept && kept.headers.get('ETag');
+    const r = await fetch(url, { cache: 'no-store', headers: tag ? { 'If-None-Match': tag } : {} });
+    if (r.status === 304 && kept) return { response: kept, from: 'kept copy (304)' };
+    if (!r.ok) throw new Error(`${file}: HTTP ${r.status}`);
+    if (cache && r.headers.get('ETag')) {
+      const copy = r.clone();
+      cache.put(url, copy).catch((e) => log(`[web] code cache: ${file} not kept (${e})`));
+    }
+    return { response: r, from: kept ? 'changed on the server, fetched' : 'fetched' };
+  }
+
+  // Module.instantiateWasm: game.wasm through the code cache, compiled while it streams
+  function instantiateWasm(imports, done) {
+    const t0 = performance.now();
+    codeResponse('game.wasm')
+      .then(({ response, from }) => WebAssembly.instantiateStreaming(response, imports).then((r) => {
+        log(`[web] game.wasm: ${from}, compiled and instantiated in ${((performance.now() - t0) / 1000).toFixed(2)} s`);
+        done(r.instance, r.module);
+      }))
+      .catch((e) => fail('game.wasm: ' + (e.message || e)));
+    return {};
+  }
+
   // ---- the engine
   function engineArgs(M) {
     const env = new URLSearchParams(location.search).get('env');
@@ -197,6 +236,7 @@
     const audio = audioHost();
     window.Module = {
       arguments: ['/data'],
+      instantiateWasm,
       nxrsHost: {
         io: (memory, table) => io.start(memory, table),
         audio,

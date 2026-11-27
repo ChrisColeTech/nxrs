@@ -32,6 +32,7 @@ mod shaderxlate;
 mod stubgen;
 mod webhost;
 mod webpack;
+mod webshaders;
 mod websplit;
 mod webzip;
 

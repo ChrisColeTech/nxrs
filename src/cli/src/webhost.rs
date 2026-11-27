@@ -87,13 +87,26 @@ pub fn describe(
     title_id: Option<u64>,
     version: &str,
 ) -> serde_json::Value {
-    let files: Vec<serde_json::Value> = listed()
+    let mut files: Vec<serde_json::Value> = listed()
         .into_iter()
         .filter_map(|(p, role)| {
             let size = std::fs::metadata(outdir.join(p)).ok()?.len();
             Some(serde_json::json!({"path": p, "size": size, "role": role}))
         })
         .collect();
+    // WEB-W6b: the shader packs and their index (webshaders.rs), with their gzip copies
+    let dir = shaders::pack::DIR;
+    let mut packs: Vec<(String, u64)> = std::fs::read_dir(outdir.join(dir))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| Some((e.file_name().to_string_lossy().into_owned(), e.metadata().ok()?.len())))
+        .collect();
+    packs.sort();
+    files.extend(packs.into_iter().map(|(n, size)| {
+        let role = if n.ends_with(".gz") { "gzip" } else { "shaders" };
+        serde_json::json!({"path": format!("{dir}/{n}"), "size": size, "role": role})
+    }));
     serde_json::json!({
         "format": FORMAT,
         "kind": "nxrs-web",
