@@ -64,3 +64,6 @@ pub const LINUX_CHROMES: [&str; 4] = [
     "chromium-browser",
 ];
 pub const CHROME: &str = "Chrome";
+/// `NXRS_BROWSER`: a program Play in browser starts with the address instead of the browser found
+/// (development and verification, like `NXRS_BUILD`).
+pub const ENV_BROWSER: &str = "NXRS_BROWSER";

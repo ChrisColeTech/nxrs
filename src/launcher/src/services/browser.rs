@@ -4,7 +4,7 @@
 use super::files::is_file;
 use super::platform;
 use crate::constants::{web as c, words_web as w};
-use crate::model::path_text::join;
+use crate::model::path_text::{file_name, join};
 use crate::model::web_build::chromium_browser;
 use std::process::Command;
 
@@ -16,8 +16,15 @@ pub struct Browser {
     pub program: String,
 }
 
-/// The default browser if it is Chromium-based, else Chrome by path.
+/// `NXRS_BROWSER` (development: a program given the address), else the default browser if it is
+/// Chromium-based, else Chrome by path.
 pub fn find() -> Option<Browser> {
+    if let Some(program) = std::env::var(c::ENV_BROWSER).ok().filter(|p| is_file(p)) {
+        return Some(Browser {
+            name: file_name(&program),
+            program,
+        });
+    }
     let default = platform::registry_text(false, c::USER_CHOICE_KEY, "ProgId")
         .and_then(|id| chromium_browser(&id));
     if let Some(name) = default {
