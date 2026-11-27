@@ -1483,7 +1483,7 @@ mod tests {
             for with_pre in [false, true] {
                 drop_any(base);
                 for k in 0..pages {
-                    set(base + k * PAGE, &vec![k as u8 + 1; PAGE as usize]);
+                    set(base + k * PAGE, &vec![(k as u8).wrapping_add(1); PAGE as usize]);
                 }
                 assert_eq!(runs(base, size, base, size), vec![(base, size)]);
                 // page 2's kept hash gone (a forget), then the whole range noted as written by the GPU
