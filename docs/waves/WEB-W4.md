@@ -87,6 +87,48 @@ M1 ring + worker + a presented clear of the game's first render target; M2 pipel
 textures and uploads; M4 the title menu and beach gameplay compared with the native sheet. Each committed on
 `web-w4` when verified. Native: graphics/shaders/os/runtime/cli tests and a native Anime Girls run at 60 FPS.
 
-## 5. Results
+## 5. Results (2026-11-26)
 
-(filled as milestones land)
+| Milestone | State | Evidence |
+|---|---|---|
+| M1 ring + worker + presented frame | Done | the web device creates, the worker answers (`WebGPU device: nvidia blackwell`), the canvas shows the game's images |
+| M2 pipelines with converted shaders | Done | every module the title uses on the way to the beach converts at vkCreateShaderModule; 0 WebGPU errors in the gameplay run |
+| M3 textures and uploads | Done | BC textures, render targets, depth-stencil, uploads straight from linear memory, read-backs into it |
+| M4 menu and beach gameplay | Shown, below FPS goal | `build/WEB/W4/m1-title-menu-chrome.png`, `m4-beach-gameplay-chrome.png`, page logs beside them; 9.7-10.7 FPS |
+| Pool sync without write watch | Not done | measured: 86 ms a frame (`per-pool pass`), the whole frame budget; see 5.2 |
+
+### 5.1 What the browser found (fixed)
+
+wasm checks an indirect call's signature exactly (a void entry point declared returning a result trapped);
+update-after-bind descriptor limits; rg11b10ufloat and 16-bit unorm only with their features; naga reads no
+demote-to-helper (reported absent, the replay discards); block-compressed mip tails copied as whole blocks; every
+buffer index/vertex-capable; copies within one buffer through a temporary; one-aspect views take the aspect's
+format; D24S8 as depth24plus-stencil8 (its buffer copies refused with a red line); passes with no attachment
+refused; textures the shader cannot read as bound get a stand-in (red line); the shader library is served on first
+use (data.json leaves `shaders/` out: 106,299 files had made the page fetch 4 GB into memory before main); the
+level load waited for ever for a shared font (pl had none on the web): the build carries the machine's fallback
+font.
+
+### 5.2 Pool sync (open)
+
+Without a write watch every mirror pool (38, 626 MB) is compared with its snapshot at every sync: 86 ms a frame,
+which caps the title at ~10 FPS (replay 2-3 ms, worker 0.2-0.8 ms a submission). Checking only what a submission
+binds has two parts: buffer ranges at `mem::resolve_in` (the use already names the range; compare and upload there,
+as `sync_range` does for copies), and texture memory, whose CPU writes reach the images only through the dirty
+ranges `begin_submit` returns to `image_begin_submit`: those need a per-image range check (lock order images ->
+mem to be settled first). A software write watch (a dirty-page bit per guest store in the translator's web store
+macros) is the other route; it also needs every host write into guest memory to mark pages.
+
+### 5.3 Native and the side-by-side
+
+Native after the wave (relinked into the library build): `build/play/20261126-193134-agsob` (GPU 1), completed,
+normal exit, 59.6 FPS mean (5% low 58.1) in [120, 250] s, no red lines, sheet read (title, swim, beach, pier).
+Side by side, the web run is Day 1 from no save (the page has no saves yet) while the native run uses the title's
+save copy, so the menus and lighting differ by state (web: water-and-sunglasses menu, dusk beach; native: menu with
+the character, daylight). The same scene in both has not been compared: unproven (5.5).
+
+### 5.4 Remaining red lines in the gameplay run
+
+`A4B4G4R4_UNORM_PACK16` (no WebGPU format), one depth read of a colour stand-in, live-shader lookups for keys the
+prewarm asks before their first fetch (fixed by `has` fetching; not re-checked), occlusion queries and timestamps
+are absent on the web device (refused / zeros).
