@@ -4912,6 +4912,11 @@ mod scan_cover_tests {
 mod seal_tests {
     use super::*;
 
+    /// The tests that drain the woken queue (`seal::take_woken`, process-wide) run one at a time: in parallel one
+    /// takes the other's wake and its pool stays sealed (an intermittent failure, MKW-SETS).
+    #[cfg(windows)]
+    static WOKEN_QUEUE: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     fn pool(base: u64, size: u64) -> Pool {
         Pool {
             identity: base,
@@ -5060,6 +5065,7 @@ mod seal_tests {
         if !seal::chunks() {
             return;
         }
+        let _one = WOKEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
         const MEM_WRITE_WATCH: u32 = 0x20_0000;
         let c = seal::CHUNK;
         let n = 4 * c;
@@ -5130,6 +5136,7 @@ mod seal_tests {
         if !super::super::seal::on() {
             return;
         }
+        let _one = WOKEN_QUEUE.lock().unwrap_or_else(|e| e.into_inner());
         const MEM_WRITE_WATCH: u32 = 0x20_0000;
         let n = 4 * super::super::seal::CHUNK;
         let a = unsafe {
