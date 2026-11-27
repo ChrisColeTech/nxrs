@@ -1120,6 +1120,13 @@ fn from_storage(t: &tex_t) -> bool {
     !t.mem.is_null() && t.d.flags as u32 & tex_flags::COMPRESSIBLE == 0
 }
 
+/// (OOT-MEM census) images made new, parked ones reused, taken over, aliases; released, destroyed; nvnTexture
+/// Initialize, Finalize, Initialize over a live object; images made for an object already finalized
+pub static HOW: [std::sync::atomic::AtomicU64; 10] = [const { std::sync::atomic::AtomicU64::new(0) }; 10];
+fn how_inc(i: usize) {
+    HOW[i].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+}
+
 const PARK_FRAMES: u64 = 8;
 const PARK_MAX: usize = 512;
 
@@ -1948,6 +1955,84 @@ impl Gpu {
         (i.by_serial.len(), i.parked_n)
     }
 
+    /// (OOT-MEM, the memory line) the live images: how they were made and went since the start (`HOW`), and those
+    /// whose storage a newer live image's overlaps (the game made another texture over that memory without
+    /// finalizing this one), grouped by shape, most first.
+    pub fn image_census(&self) -> String {
+        let imgs = self.images.lock().unwrap();
+        let mut sp: Vec<(u64, u64, u64)> = imgs
+            .by_serial
+            .values()
+            .filter(|im| !im.tex.mem.is_null())
+            .map(|im| (im.tex.mem as u64, im.tex.mem as u64 + im.tex.l.size.max(1), im.tex.serial))
+            .collect();
+        sp.sort_unstable();
+        let mut covered: std::collections::HashSet<u64> = Default::default();
+        for i in 0..sp.len() {
+            let (_, hi, s) = sp[i];
+            for &(lo2, _, s2) in sp[i + 1..].iter().take(4096) {
+                if lo2 >= hi {
+                    break;
+                }
+                covered.insert(s.min(s2));
+            }
+        }
+        let mut groups: HashMap<String, (u64, u64)> = HashMap::new();
+        let (mut cn, mut cb, mut owned_b, mut alias_n) = (0u64, 0u64, 0u64, 0u64);
+        for im in imgs.by_serial.values() {
+            let b = im.alloc.as_ref().map_or(0, |a| a.size());
+            if im.alloc.is_some() {
+                owned_b += b;
+            }
+            if im.alias_of.is_some() {
+                alias_n += 1;
+            }
+            if !covered.contains(&im.tex.serial) {
+                continue;
+            }
+            cn += 1;
+            cb += b;
+            let k = format!(
+                "{:?} {}x{}x{} l{}{}{}",
+                im.format,
+                im.extent.width,
+                im.extent.height,
+                im.layers,
+                im.levels,
+                if im.gpu_owned { " gpu" } else { "" },
+                if im.alias_of.is_some() { " alias" } else { "" }
+            );
+            let e = groups.entry(k).or_default();
+            e.0 += 1;
+            e.1 += b;
+        }
+        let mut g: Vec<_> = groups.into_iter().collect();
+        g.sort_by(|a, b| b.1 .0.cmp(&a.1 .0));
+        let top: Vec<String> = g
+            .iter()
+            .take(6)
+            .map(|(k, (n, b))| format!("{k} x{n} ({} MB)", b >> 20))
+            .collect();
+        let h = |i: usize| HOW[i].load(std::sync::atomic::Ordering::Relaxed);
+        format!(
+            "image census: {} live ({} MB with memory, {alias_n} aliases); since start: inits {} finalizes {} re-inits {}, made new {} parked reused {} taken over {} alias {} (for a finalized object {}), released {} destroyed {}; {cn} live under a newer live image's storage ({} MB): {}",
+            imgs.by_serial.len(),
+            owned_b >> 20,
+            h(6),
+            h(7),
+            h(8),
+            h(0),
+            h(1),
+            h(2),
+            h(3),
+            h(9),
+            h(4),
+            h(5),
+            cb >> 20,
+            top.join(", ")
+        )
+    }
+
     pub fn ensure_image(&self, imgs: &mut Images, t: &tex_t) -> bool {
         let have = imgs.by_serial.contains_key(&t.serial);
         // a parallel translation's segment makes an image only at the gate's frontier (`gate`)
@@ -2069,6 +2154,15 @@ impl Gpu {
         let Some(im) = reused.or_else(|| self.create_image(t)) else {
             return false;
         };
+        if imgs.released.contains_key(&t.serial) {
+            how_inc(9);
+        }
+        how_inc(match how.get() {
+            "made new" => 0,
+            "a parked image reused" => 1,
+            "taken over from an older object" => 2,
+            _ => 3,
+        });
         life_log(t, || format!("{}: {}", how.get(), img_desc(&im)));
         if !t.mem.is_null() {
             // textures of sparse virtual pools are checked through their pages, not by address (a 5.8 GB terrain
@@ -2959,6 +3053,7 @@ impl Gpu {
         let Some(mut im) = imgs.by_serial.remove(&serial) else {
             return;
         };
+        how_inc(4);
         watch_log("released", &im.tex, Some(im.gpu_owned));
         imgs.released.insert(serial, im.tex);
         if let Some(v) = imgs.by_addr.get_mut(&(im.tex.mem as u64)) {
@@ -3629,6 +3724,7 @@ impl Gpu {
     }
 
     fn destroy_released(&self, im: Image) {
+        how_inc(5);
         life_log(&im.tex, || {
             format!("destroyed (after its last use): {}", img_desc(&im))
         });
