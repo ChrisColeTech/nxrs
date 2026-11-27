@@ -427,6 +427,9 @@ pub struct Pools {
     /// syncs a frame in OoT). Every place that gives a pool such work adds it; a scanning sync visits every pool and
     /// rebuilds it.
     pub busy: std::collections::BTreeSet<u64>,
+    /// (MKW-SPIKE, `drain_list_on`) `watched_pools` as of a `POOL_GEN` (which moves under this lock whenever a pool
+    /// comes, goes or gets its buffer): the walker's pages are given out over it at every drain
+    watched_list: Option<(u64, Vec<WatchedPool>)>,
 }
 
 /// Whether a sync that does not scan has anything to do for `p` (`Pools::busy`).
@@ -3114,7 +3117,7 @@ fn walker_main() {
         }
         if n % 600 == 0 {
             crate::vklog!(
-                "pool walker, last 600 walks: {} without the cold pools ({} of them covering no sync: a cold pool written meanwhile), {:.2} ms a walk, {} could not read a range, {} presents' syncs covered ({} finishing a walk), {} other syncs finished one, the replay's syncs walked {:.3} ms a walk of them, scanning syncs left {} MB to walks in progress; syncs and landings waited {:.3} ms a walk for the watch lock (with the drain)",
+                "pool walker, last 600 walks: {} without the cold pools ({} of them covering no sync: a cold pool written meanwhile), {:.2} ms a walk, {} could not read a range, {} presents' syncs covered ({} finishing a walk), {} other syncs finished one, the replay's syncs walked {:.3} ms a walk of them, scanning syncs left {} MB to walks in progress; syncs and landings waited {:.3} ms a walk for the watch lock (with the drain); {} drains of its pages, {} of them making the watched list again (NXGFX_DRAIN_LIST)",
                 WALKS_WARM.swap(0, Ordering::Relaxed),
                 WALKS_WARM_VOID.swap(0, Ordering::Relaxed),
                 WALK_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6,
@@ -3124,7 +3127,9 @@ fn walker_main() {
                 WALK_HELPED_SYNCS.swap(0, Ordering::Relaxed),
                 WALK_WAIT_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6,
                 WALK_POOLS_B.swap(0, Ordering::Relaxed) >> 20,
-                WATCH_WAIT_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6
+                WATCH_WAIT_NS.swap(0, Ordering::Relaxed) as f64 / 600.0 / 1e6,
+                DRAINS.swap(0, Ordering::Relaxed),
+                DRAIN_LISTS.swap(0, Ordering::Relaxed)
             );
         }
     }
@@ -3284,9 +3289,23 @@ fn drain_walk(m: &mut Pools, stash: &mut Vec<u64>) {
     if stash.is_empty() {
         return;
     }
-    let list = watched_pools(m);
     let mut taken = HashMap::new();
-    distribute_watched_pages(&list, stash, &mut taken);
+    if drain_list_on() {
+        // the list made again only when the pools changed (it was made at every drain: a walk over every pool under
+        // the pool lock, ~0.8 ms a frame of the completion thread's landings in MKW)
+        let gen = POOL_GEN.load(Ordering::Acquire);
+        if m.watched_list.as_ref().is_none_or(|(g, _)| *g != gen) {
+            m.watched_list = Some((gen, watched_pools(m)));
+            DRAIN_LISTS.fetch_add(1, Ordering::Relaxed);
+        }
+        DRAINS.fetch_add(1, Ordering::Relaxed);
+        if let Some((_, list)) = &m.watched_list {
+            distribute_watched_pages(list, stash, &mut taken);
+        }
+    } else {
+        let list = watched_pools(m);
+        distribute_watched_pages(&list, stash, &mut taken);
+    }
     stash.clear();
     for (base, pgs) in taken {
         if let Some(p) = m.by_base.get_mut(&base) {
@@ -3295,6 +3314,15 @@ fn drain_walk(m: &mut Pools, stash: &mut Vec<u64>) {
         }
     }
 }
+
+/// `NXGFX_DRAIN_LIST=0`: every drain of the walker's pages makes the list of watched pools again (MKW-SPIKE).
+fn drain_list_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_DRAIN_LIST").as_deref() != Ok("0"))
+}
+/// Drains of the walker's pages, and of them the ones that made the watched list again (the walker's line).
+static DRAINS: AtomicU64 = AtomicU64::new(0);
+static DRAIN_LISTS: AtomicU64 = AtomicU64::new(0);
 
 /// Threads waiting for `WATCH_MU` other than the walker: the walker steps aside between its pieces while any wait
 /// (the lock is not fair: the walker took it again before a woken sync ran, 3 ms a frame of syncs waiting in MKW).
@@ -4379,6 +4407,13 @@ fn land_pre_on() -> bool {
     *ON.get_or_init(|| std::env::var("NXGFX_LAND_PRE").as_deref() != Ok("0"))
 }
 
+/// `NXGFX_LAZY_CPU_CHECK=0`: pages the CPU wrote are held on the device too. Read once (it was read for every
+/// write-back, under the pool lock).
+fn lazy_cpu_check_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_LAZY_CPU_CHECK").as_deref() != Ok("0"))
+}
+
 pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)], epoch: u64, value: u64) {
     if wbs.is_empty() {
         return;
@@ -4440,7 +4475,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
         // a page the CPU wrote since its pool was last asked (a cold pool is asked once a frame) is not held on the
         // device: its buffer copy lacks those bytes, and bringing it back would put the buffer's page over them (lane
         // K2: the bytes of a page the GPU and the CPU both write, as MKW's glyph pages may be; mkw-recomp #250)
-        if !lazy.is_empty() && std::env::var("NXGFX_LAZY_CPU_CHECK").as_deref() != Ok("0") {
+        if !lazy.is_empty() && lazy_cpu_check_on() {
             let (lo, hi) = page_range(a, n);
             if let Some(cpu) = watch::take(lo, hi, false) {
                 if !cpu.is_empty() {
@@ -4506,7 +4541,7 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
             // a game store between the write-watch check above and a page's protection is in guest memory only: such a
             // page is not held (bringing it back would put the buffer's page over the store), it is released and this
             // write-back lands on it instead (UPSYNC2 send-back 2)
-            if !fresh.is_empty() && std::env::var("NXGFX_LAZY_CPU_CHECK").as_deref() != Ok("0") {
+            if !fresh.is_empty() && lazy_cpu_check_on() {
                 fresh.sort_unstable();
                 let (lo, hi) = (fresh[0], fresh[fresh.len() - 1] + PAGE);
                 if let Some(cpu) = watch::take(lo, hi, false) {
@@ -4958,6 +4993,32 @@ mod seal_tests {
             m.by_base.insert(b, pool(b, n));
         }
         m
+    }
+
+    /// The walker's pages go to every watched pool holding them, nested ones too, with the watched list kept between
+    /// drains (MKW-SPIKE); a pool added since (`POOL_GEN` moved, as `pool_add` does under the lock) gets its pages at
+    /// the next drain, and an unwatched pool none.
+    #[test]
+    fn drained_pages_reach_their_pools_with_the_list_kept() {
+        let p = PAGE;
+        let mut m = pools(&[(0, 4 * p), (100 * p, 50 * p), (110 * p, 2 * p)]);
+        let mut stash = vec![p, 3 * p, 110 * p, 120 * p, 300 * p];
+        drain_walk(&mut m, &mut stash);
+        assert!(stash.is_empty());
+        let got = |m: &Pools, b: u64| -> Vec<u64> { m.by_base[&b].pending.iter().map(|r| r.0).collect() };
+        assert_eq!(got(&m, 0), vec![p, 3 * p]);
+        assert_eq!(got(&m, 100 * p), vec![110 * p, 120 * p]);
+        assert_eq!(got(&m, 110 * p), vec![110 * p], "the nested pool too");
+        assert!(m.busy.contains(&0) && m.busy.contains(&(110 * p)));
+        m.by_base.insert(300 * p, pool(300 * p, p));
+        let mut off = pool(400 * p, p);
+        off.watched = false;
+        m.by_base.insert(400 * p, off);
+        POOL_GEN.fetch_add(1, Ordering::AcqRel);
+        let mut stash = vec![300 * p, 400 * p];
+        drain_walk(&mut m, &mut stash);
+        assert_eq!(got(&m, 300 * p), vec![300 * p], "a pool added since");
+        assert!(got(&m, 400 * p).is_empty(), "not watched");
     }
 
     /// Pools that share a page with another (an alias, a pool inside a larger one, a page both touch) are never sealed;
