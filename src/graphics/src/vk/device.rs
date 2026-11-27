@@ -164,7 +164,11 @@ fn robustness_policy(
 
 impl Device {
     pub fn new() -> Result<Device, String> {
+        #[cfg(not(target_os = "emscripten"))]
         let entry = unsafe { ash::Entry::load() }.map_err(|e| format!("Vulkan loader: {e}"))?;
+        // the web build: the Vulkan device implemented on the page's WebGPU (crate::web)
+        #[cfg(target_os = "emscripten")]
+        let entry = crate::web::entry();
         let app = CString::new("RecompLauncherEngine").unwrap();
         let app_info = vk::ApplicationInfo::default()
             .application_name(&app)

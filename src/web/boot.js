@@ -201,7 +201,8 @@
         io: (memory, table) => io.start(memory, table),
         audio,
         input: (memory, block, words) => NxrsInput.publish(memory, block, words, log),
-        // WEB-W4: the GPU worker's start goes here
+        // WEB-W4: the GPU worker (gpu.js) gets the memory and the engine's command ring
+        gpu: (memory, ring) => NXRS_GPU.start(memory, ring),
       },
       print: (t) => log(t),
       printErr: (t) => log(t),

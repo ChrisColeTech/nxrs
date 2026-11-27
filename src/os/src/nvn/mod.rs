@@ -251,7 +251,7 @@ fn sdk_major(data: &std::path::Path, switch2: bool) -> i32 {
             .collect();
         digits.parse().ok()
     }
-    let v = std::fs::read(data.join("exefs").join("sdk"))
+    let v = crate::webdata::read(&data, "exefs/sdk")
         .ok()
         .and_then(|raw| match nxrt::loader::parse(&raw) {
             Ok(img) => {

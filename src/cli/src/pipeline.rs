@@ -1234,10 +1234,9 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
             .name("shader prebuild".into())
             .spawn_scoped(s, move || {
                 let t = Instant::now();
-                // the web build's shaders are WGSL packs (docs/35 W4), not this SPIR-V prebuild
-                if web {
-                    return 0.0;
-                }
+                // the web build translates them too: its GPU turns each module the replay makes from them into WGSL
+                // when it is created (src/graphics/src/web), the page serves them on first use (docs/35 W4)
+                let _ = web;
                 // never fatal, a panic of the prebuild thread included
                 if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| shaders_step(out, data, profile_id, exact_profile_build, a))).is_err() {
                     out.say("shaders: not translated at build time (the prebuild stopped); the game translates them while it runs");
@@ -1253,6 +1252,24 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
     });
     built?;
     if a.web {
+        // the shared-font fallback a native run reads from the system's fonts: a page has none, so the web build
+        // carries this machine's (os services/misc.rs `fallback_ttf`)
+        let fonts = data.join("fonts");
+        if !fonts.join("fallback.ttf").is_file() {
+            let w = std::env::var("WINDIR").unwrap_or_else(|_| "C:\\Windows".into());
+            let found = ["arial.ttf", "segoeui.ttf", "tahoma.ttf"]
+                .iter()
+                .map(|n| std::path::Path::new(&w).join("Fonts").join(n))
+                .find(|p| p.is_file());
+            match found {
+                Some(src) => {
+                    std::fs::create_dir_all(&fonts)?;
+                    std::fs::copy(&src, fonts.join("fallback.ttf"))?;
+                    out.say(&format!("  shared-font fallback: {}", src.display()));
+                }
+                None => out.say("  no system font to carry as the shared-font fallback: games that wait for one will not start"),
+            }
+        }
         // what the page streams and prefetches (docs/35 W3)
         out.say(&crate::webpack::write(&outdir, &data, &name)?);
     }

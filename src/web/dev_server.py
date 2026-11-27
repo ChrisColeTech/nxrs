@@ -3,9 +3,10 @@
     py -I src/web/dev_server.py <web build folder> [--port 8770]
 
   /                 the page (src/web/index.html; its scripts beside this file: boot.js, input.js, saves.js,
-                    io-worker.js, audio-worklet.js)
+                    io-worker.js, audio-worklet.js, gpu.js, gpu-worker.js)
   /game.js, /game.wasm, /data.json, /bootset.json   the build folder (nxrs-build build --target web)
   /data/<path>      the build's <name>_data folder, with HTTP range requests (exact 206 + Content-Range)
+  POST /log         the page's engine log lines, appended to --log (development)
 
 Every response carries COOP/COEP (shared memory and threads need a cross-origin isolated page). Binds 127.0.0.1 only.
 """
@@ -17,11 +18,11 @@ import urllib.parse
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PAGE = {'boot.js', 'input.js', 'saves.js', 'io-worker.js', 'audio-worklet.js'}
+PAGE = {'boot.js', 'input.js', 'saves.js', 'io-worker.js', 'audio-worklet.js', 'gpu.js', 'gpu-worker.js'}
 TYPES = {'.wasm': 'application/wasm', '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json'}
 
 
-def make_handler(build: Path, data: Path):
+def make_handler(build: Path, data: Path, log_file=None):
     class H(http.server.BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
 
@@ -54,6 +55,21 @@ def make_handler(build: Path, data: Path):
 
         def do_HEAD(self):
             self.send(head=True)
+
+        def do_POST(self):
+            # /log: the page's engine log lines (gpu.js), appended to --log when given (development: read by tools)
+            n = int(self.headers.get('Content-Length', '0'))
+            body = self.rfile.read(n)
+            if self.path == '/log' and log_file is not None:
+                with open(log_file, 'ab') as fh:
+                    fh.write(body)
+            # /shot?n=N: a presented image from the GPU worker (?shots=N on the page), saved beside --log
+            m = re.match(r'/shot\?n=(\d+)$', self.path)
+            if m and log_file is not None:
+                (Path(log_file).parent / f'shot-{int(m.group(1)):06d}.png').write_bytes(body)
+            self.send_response(204)
+            self.headers_common('text/plain', 0)
+            self.end_headers()
 
         def do_GET(self):
             self.send(head=False)
@@ -107,12 +123,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('build')
     ap.add_argument('--port', type=int, default=8770)
+    ap.add_argument('--log', help='append the page\'s engine log to this file')
     a = ap.parse_args()
     build = Path(a.build).resolve()
     datas = [d for d in build.iterdir() if d.is_dir() and d.name.endswith('_data')]
     if not (build / 'game.js').is_file() or not (build / 'data.json').is_file() or len(datas) != 1:
         sys.exit(f'{build}: not a web build (game.js, data.json and one <name>_data folder)')
-    srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, datas[0]))
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, datas[0], a.log))
     print(f'serving {build} on http://127.0.0.1:{a.port}/', flush=True)
     srv.serve_forever()
 
