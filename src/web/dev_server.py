@@ -1,28 +1,36 @@
-"""Serves one web build to a local browser (docs/35, development; the launcher serves builds from W5 on).
+"""Serves one web build to a local browser (docs/35, for engine developers; players use the launcher's Play in
+browser, or `nxrs --serve-web <folder>`, which serve the same folder the same way).
 
-    py -I src/web/dev_server.py <web build folder> [--port 8770]
+    py -I src/web/dev_server.py <web build folder> [--port 8770] [--live]
 
-  /                 the page (src/web/index.html; its scripts beside this file: boot.js, input.js, saves.js,
-                    io-worker.js, audio-worklet.js, gpu.js, gpu-worker.js)
-  /game.js, /game.wasm, /data.json, /bootset.json   the build folder (nxrs-build build --target web)
-  /data/<path>      the build's <name>_data folder, with HTTP range requests (exact 206 + Content-Range)
+  /                 the page (the build's index.html)
+  /<file>           the build folder: the page and its workers, game.js, game.wasm, data.json, bootset.json
+  /data/<path>      the data folder build.json names (<name>_data), with HTTP range requests (exact 206 +
+                    Content-Range); the GPU worker's shader files (data/shaders/spv/<hex>.spv|.json) included
   POST /log         the page's engine log lines, appended to --log (development)
+  POST /shot?n=N    a presented image (?shots=N on the page), saved beside --log (development)
+
+--live serves the page and its scripts (index.html, boot.js, input.js, saves.js, io-worker.js, audio-worklet.js,
+gpu.js, gpu-worker.js) from src/web beside this file instead of the build's copies, to try a JS change without
+building again. A build from before W5 (no build.json) is served that way too.
 
 Every response carries COOP/COEP (shared memory and threads need a cross-origin isolated page). Binds 127.0.0.1 only.
 """
 import argparse
 import http.server
+import json
 import re
 import sys
 import urllib.parse
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-PAGE = {'boot.js', 'input.js', 'saves.js', 'io-worker.js', 'audio-worklet.js', 'gpu.js', 'gpu-worker.js'}
+PAGE = {'index.html', 'boot.js', 'input.js', 'saves.js', 'io-worker.js', 'audio-worklet.js', 'gpu.js',
+        'gpu-worker.js'}
 TYPES = {'.wasm': 'application/wasm', '.js': 'text/javascript', '.html': 'text/html', '.json': 'application/json'}
 
 
-def make_handler(build: Path, data: Path, log_file=None):
+def make_handler(build: Path, data: Path, live: bool, log_file=None):
     class H(http.server.BaseHTTPRequestHandler):
         protocol_version = 'HTTP/1.1'
 
@@ -39,9 +47,9 @@ def make_handler(build: Path, data: Path, log_file=None):
 
         def resolve(self):
             p = self.path.split('?', 1)[0]
-            if p in ('/', '/index.html'):
-                return HERE / 'index.html'
-            if p.lstrip('/') in PAGE:
+            if p == '/':
+                p = '/index.html'
+            if live and p.lstrip('/') in PAGE:
                 return HERE / p.lstrip('/')
             if p.startswith('/data/'):
                 rel = p[len('/data/'):]
@@ -123,14 +131,24 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('build')
     ap.add_argument('--port', type=int, default=8770)
+    ap.add_argument('--live', action='store_true', help='the page and its scripts from src/web')
     ap.add_argument('--log', help='append the page\'s engine log to this file')
     a = ap.parse_args()
     build = Path(a.build).resolve()
-    datas = [d for d in build.iterdir() if d.is_dir() and d.name.endswith('_data')]
-    if not (build / 'game.js').is_file() or not (build / 'data.json').is_file() or len(datas) != 1:
-        sys.exit(f'{build}: not a web build (game.js, data.json and one <name>_data folder)')
-    srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, datas[0], a.log))
-    print(f'serving {build} on http://127.0.0.1:{a.port}/', flush=True)
+    described = build / 'build.json'
+    if described.is_file():
+        # a W5 build: complete, its data folder named by build.json
+        data = build / json.loads(described.read_text(encoding='utf-8'))['data']
+        if not data.is_dir():
+            sys.exit(f'{build}: build.json names {data.name}, which is missing')
+        live = a.live
+    else:
+        datas = [d for d in build.iterdir() if d.is_dir() and d.name.endswith('_data')]
+        if not (build / 'game.js').is_file() or not (build / 'data.json').is_file() or len(datas) != 1:
+            sys.exit(f'{build}: not a web build (build.json, or game.js, data.json and one <name>_data folder)')
+        data, live = datas[0], True
+    srv = http.server.ThreadingHTTPServer(('127.0.0.1', a.port), make_handler(build, data, live, a.log))
+    print(f'serving {build} on http://127.0.0.1:{a.port}/' + (' (page from src/web)' if live else ''), flush=True)
     srv.serve_forever()
 
 

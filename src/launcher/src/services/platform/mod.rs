@@ -11,6 +11,8 @@ pub mod windows_caption;
 #[cfg(windows)]
 mod windows_process;
 #[cfg(windows)]
+mod windows_registry;
+#[cfg(windows)]
 use windows_process as sys;
 #[cfg(windows)]
 mod windows_tree;
@@ -118,6 +120,17 @@ pub fn launch_detached(
     cmd.current_dir(cwd).envs(env.iter().map(|(k, v)| (k, v)));
     sys::detach(&mut cmd);
     cmd.spawn().map(|c| c.id()).map_err(|e| e.to_string())
+}
+
+/// A registry text value, HKLM (`machine`) or HKCU (Windows); None elsewhere or when missing.
+pub fn registry_text(machine: bool, key: &str, value: &str) -> Option<String> {
+    #[cfg(windows)]
+    return windows_registry::text(machine, key, value);
+    #[cfg(not(windows))]
+    {
+        let _ = (machine, key, value);
+        None
+    }
 }
 
 /// Before spawn: no console, its own process group (Linux).

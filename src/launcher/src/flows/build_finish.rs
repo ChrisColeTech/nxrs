@@ -55,6 +55,9 @@ impl App {
     }
 
     fn finish_build(&mut self, run: BuildRun, code: Option<i32>) {
+        if run.web {
+            return self.finish_web_build(run, code);
+        }
         let (ok, detail) = Self::outcome(&run, code);
         run.job.log_line(&detail);
         let id = run.game.id.clone();

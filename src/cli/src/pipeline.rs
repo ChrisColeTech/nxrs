@@ -877,6 +877,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         .or_else(|| game.exefs.files.get("main.npdm").and_then(|n| npdm_name(n)))
         .unwrap_or_else(|| source_name(&a.input));
     let name = output_name(&title);
+    let web_title_id = game.exefs.title_id;
     let outdir = std::path::absolute(a.outdir.clone().unwrap_or_else(|| {
         if a.web {
             default_web_outdir(&a.input, &name)
@@ -1272,6 +1273,8 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
         }
         // what the page streams and prefetches (docs/35 W3)
         out.say(&crate::webpack::write(&outdir, &data, &name)?);
+        // the page, its workers and build.json: the folder is complete for any COOP/COEP server (docs/35 W5)
+        out.say(&crate::webhost::write(&outdir, &data, &name, web_title_id)?);
     }
     timings.push(("shaders", shader_secs));
     timings.push(("total", t_all.elapsed().as_secs_f64()));

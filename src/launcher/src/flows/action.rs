@@ -11,6 +11,10 @@ pub enum Action {
     Play,
     Stop,
     Build,
+    /// Build for web: `--target web` into the game's web folder
+    BuildWeb,
+    /// Play in browser: the web build served locally, opened in Chrome
+    PlayWeb,
     Properties(usize),
     InstallDlc,
     InstallUpdates,

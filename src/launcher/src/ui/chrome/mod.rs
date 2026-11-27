@@ -6,6 +6,7 @@ pub mod console;
 pub mod dock;
 pub mod filter_popover;
 pub mod menu_draw;
+pub mod menu_enabled;
 pub mod menu_model;
 pub mod status_bar;
 pub mod title_bar;

@@ -4,6 +4,7 @@
 mod flags;
 mod headless;
 pub mod options;
+mod serve;
 mod startup;
 mod window;
 
@@ -14,6 +15,10 @@ use crate::services::{data_dir, legacy};
 
 /// Runs the launcher as the options say; its exit code.
 pub fn run(o: Options) -> i32 {
+    // serving a folder reads no library
+    if let Some(folder) = &o.serve_web {
+        return serve::serve_web(folder);
+    }
     // a library of its own (--library: tests, a portable library) leaves the data folder alone
     let note = crate::services::startup_log::note;
     if o.library.is_none() {

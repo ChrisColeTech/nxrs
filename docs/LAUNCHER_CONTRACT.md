@@ -122,6 +122,7 @@ The program is nxrs-build itself; working directory: its folder; stdout and stde
 | What | Arguments (`nxrsBuildArguments`, `nxrsUpdateInfoArguments`, `nxrsDlcSyncArguments`) |
 |---|---|
 | Build | `build <source> --outdir <buildDir> -o <outputName> --jobs <n> --machine [--no-update \| --update <pkg>] [--keys <prod.keys>]` |
+| Build for web | the same with `--outdir <webDir>` and `--target web` last (`model::args::build_web`); below |
 | Update probe | `update-info --game <source> [--keys <prod.keys>] <pkg>...` |
 | DLC | `dlc sync --datadir <buildDir>\<name>_data [--keys <prod.keys>] [<pkg>...]` (Play, Install DLC, Remove, after a build) |
 | Version | `contract` |
@@ -168,6 +169,46 @@ exit codes 0 / 1 / 2, the output layout and the data folder), plus, with `--mach
   `"engine": "nxrs"`).
 - **Play**: no Python, .NET or `tools\nxshader` checks (nxrs translates shaders in the build). The DLC check before
   Play and the INI settings (renderer, button layout) apply.
+
+### Web builds (`--target web`, docs/35 W5)
+
+A browser build of the same game (Chrome is the target), built by Game > **Build for web** (also in the game's
+context menu; `nxrs.exe --select-title <title> --build-web` headless) into the game's web folder, `<webDir>` =
+`<base>\nxrs-web\<outputName>` beside its `<base>\nxrs\<outputName>`. The native build is not touched and the library
+entry does not change (no `builtSource`, no INI, no DLC sync). The run's lines, `@progress` and `@result` are a
+build's; its log is `<webDir>\<outputName>.build.log`. Success: exit 0 **and** `<webDir>\build.json` and
+`<webDir>\game.wasm` exist.
+
+```
+<webDir>\index.html, boot.js, input.js, saves.js, io-worker.js, audio-worklet.js   the page and its workers
+                                 (embedded in nxrs-build: a release needs no source tree; the list is webhost.rs's
+                                 HOST_FILES)
+<webDir>\game.js, game.wasm      the Emscripten loader and the module (engine + game)
+<webDir>\data.json, bootset.json the data manifest and the boot set the page prefetches (webpack.rs)
+<webDir>\build.json              what the folder is (below)
+<webDir>\<outputName>_data\      the game's data, as a native build's; served, never copied
+<webDir>\<outputName>_build\     generated C and objects, kept for rebuilds
+```
+
+`build.json` (`format` 1): `{"format", "kind": "nxrs-web", "title", "titleId" (16 hex or null), "engine": {"name",
+"contract", "version"}, "entry": "index.html", "data": "<outputName>_data", "files": [{"path", "size", "role"}]}`;
+roles `host`, `loader`, `module`, `manifest`, `bootset` (later waves add others; readers ignore roles they do not
+know, and refuse a newer `format`).
+
+**Serving.** Any static server that sends `Cross-Origin-Opener-Policy: same-origin` and
+`Cross-Origin-Embedder-Policy: require-corp` and answers byte ranges exactly (206 + `Content-Range`) can serve the
+folder, with `data/<path>` mapped to the data folder `build.json` names. The launcher's own server
+(`services/web_serve.rs`, in its process, 127.0.0.1) mounts each web build at `/<slug>/` (the output name in
+lower case, `-` between words) on port 8780 (`NXRS_WEB_PORT`; the next of ten when it is taken), one fixed port so
+the page's origin, and with it the browser's data cache and saves, stays the same. `nxrs.exe --serve-web <webDir>`
+serves one folder without a window; `src/web/dev_server.py` (engine development) does the same.
+
+**Play in browser** is shown only when the web folder holds a finished web build and a Chromium browser exists:
+the default browser when its `http` ProgId is Chrome, Edge, Brave, Chromium, Vivaldi or Opera, else Chrome by path
+(App Paths, then Program Files, Program Files (x86), the user's local data; Linux: `google-chrome`,
+`chromium` on PATH). It starts the server (once), mounts the build and opens its address in a tab; Chrome's
+"Install as app" gives it an app window. The server lives as long as the launcher: closing the launcher stops the
+game's data streaming.
 
 ### Release layout (`scripts/package-release.py --nxrs-engine <engine checkout>`)
 

@@ -26,6 +26,7 @@ mod out;
 mod pipeline;
 mod profile;
 mod stubgen;
+mod webhost;
 mod webpack;
 
 use anyhow::{anyhow, Result};

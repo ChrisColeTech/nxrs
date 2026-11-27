@@ -26,6 +26,7 @@ mod tools;
 mod update_probe;
 mod updates;
 pub mod view_state;
+mod web;
 
 /// Covers and backgrounds for the gallery's image cache.
 pub use crate::services::artwork_decode::decode as decode_artwork;

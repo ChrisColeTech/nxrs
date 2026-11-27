@@ -12,6 +12,8 @@ pub struct BuildRun {
     pub play: PlaySettings,
     /// the engine said the package also holds add-on content
     pub holds_dlc: bool,
+    /// a web build (`--target web`, into the game's web folder): the native build is not touched
+    pub web: bool,
 }
 
 pub struct ProbeRun {

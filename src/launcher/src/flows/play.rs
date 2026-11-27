@@ -35,6 +35,16 @@ impl App {
         self.launch();
     }
 
+    /// Enter / double-click: Play when it can, else Properties > Build.
+    pub fn activate(&mut self) {
+        let Some(id) = self.selected_id() else { return };
+        if self.facts_of(&id).playable() {
+            self.play()
+        } else {
+            self.show_properties(1)
+        }
+    }
+
     /// Writes the game's settings and starts it detached; records its pid and when it was played.
     pub(super) fn launch(&mut self) {
         let Some(game) = self.selected_game().cloned() else {
