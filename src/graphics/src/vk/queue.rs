@@ -701,7 +701,7 @@ pub fn lane_sub(g: &Gpu, i: usize) -> Sub {
     let l = lane(g, i);
     let reuse = {
         let mut f = l.free.lock().unwrap();
-        trim_free(g, &mut f);
+        trim_free(g, &mut f, (sub_keep() / 4).max(1));
         f.pop()
     };
     make_sub(g, reuse, l.pool, l.pool, i)
@@ -1626,7 +1626,7 @@ fn take_recycled(g: &Gpu, st: &mut SubmitState) {
     let mut r = g.q.recycled.lock().unwrap();
     st.free_subs.append(&mut r);
     drop(r);
-    trim_free(g, &mut st.free_subs);
+    trim_free(g, &mut st.free_subs, sub_keep());
 }
 
 /// Free submissions that keep their staging and scratch chunks: `NXGFX_SUB_KEEP` (default 64; 0 = all, as before).
@@ -1640,12 +1640,12 @@ fn sub_keep() -> usize {
     })
 }
 
-/// The free submissions past the newest `sub_keep()` (the front of the list: `pop` takes from the back) give back
-/// their staging and scratch chunks; a later use allocates them again. They are free, so the GPU is done with them.
-/// Bytes given back.
-fn trim_free(g: &Gpu, free: &mut [Sub]) -> u64 {
-    let keep = sub_keep();
-    if keep == 0 || free.len() <= keep {
+/// The free submissions past the newest `keep` (the front of the list: `pop` takes from the back) give back their
+/// staging and scratch chunks; a later use allocates them again. They are free, so the GPU is done with them. Each
+/// translation lane's own list keeps a quarter of `sub_keep()` (six lists of 64 still held ~4.9 GB of staging in the
+/// house: OoT's process then reached its 32 GB cap). Bytes given back.
+fn trim_free(g: &Gpu, free: &mut [Sub], keep: usize) -> u64 {
+    if sub_keep() == 0 || free.len() <= keep {
         return 0;
     }
     let n = free.len() - keep;
