@@ -852,6 +852,48 @@ pub static GPU_DESWIZZLED: std::sync::atomic::AtomicU64 = std::sync::atomic::Ato
 /// `uploads from storage` line.
 static REMADE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// `remake_released`'s rule: the registration to make again for a bound use of a slot (`slot`: what the table names
+/// there) whose texture object `serial` has no image, when the slot still names that very object and its release
+/// kept its description (`released`), over guest storage and not a buffer texture.
+fn released_slot_remake(
+    slot: Option<(u64, Option<view_t>)>,
+    serial: u64,
+    released: Option<tex_t>,
+) -> Option<(tex_t, Option<view_t>)> {
+    let (reg, v) = slot?;
+    let t = released.filter(|_| reg == serial)?;
+    (!t.mem.is_null() && t.d.target != target::BUFFER).then_some((t, v))
+}
+
+#[cfg(test)]
+mod released_slot_tests {
+    use super::*;
+
+    fn tex(serial: u64, mem: usize, tgt: i32) -> tex_t {
+        // SAFETY: tex_t is plain data (repr(C) integers and a raw pointer); all zero is a valid value.
+        let mut t: tex_t = unsafe { std::mem::zeroed() };
+        t.serial = serial;
+        t.mem = mem as *mut u8;
+        t.d.target = tgt;
+        t
+    }
+
+    /// A slot still naming a released 2D texture over storage is made again from the kept registration (the
+    /// character-select portraits); a slot registered again since, a texture never released, no storage or a buffer
+    /// texture are not.
+    #[test]
+    fn a_slot_naming_its_released_texture_is_made_again() {
+        let t = tex(7, 0x1000, target::T2D);
+        let got = released_slot_remake(Some((7, None)), 7, Some(t));
+        assert!(matches!(got, Some((x, None)) if x.serial == 7));
+        assert!(released_slot_remake(Some((8, None)), 7, Some(t)).is_none(), "slot names another object now");
+        assert!(released_slot_remake(None, 7, Some(t)).is_none(), "nothing registered");
+        assert!(released_slot_remake(Some((7, None)), 7, None).is_none(), "not released");
+        assert!(released_slot_remake(Some((7, None)), 7, Some(tex(7, 0, target::T2D))).is_none(), "no storage");
+        assert!(released_slot_remake(Some((7, None)), 7, Some(tex(7, 0x1000, target::BUFFER))).is_none());
+    }
+}
+
 /// Whether a texture's upload from its storage goes through the GPU deswizzle: block-linear, not ASTC (its blocks are
 /// decoded on the GPU from CPU-deswizzled rows), no 3-byte expansion, big enough, every level in whole words.
 fn gpu_deswizzle_ok(im: &Image) -> bool {
@@ -3071,18 +3113,11 @@ impl Gpu {
         if !*ON.get_or_init(|| std::env::var("NXGFX_RELEASED_SLOT_USE").as_deref() != Ok("0")) {
             return false;
         }
-        let Some((reg, v)) = self.tables.tex_at(id) else {
+        let slot = self.tables.tex_at(id);
+        let released = self.images.lock().unwrap().released.get(&serial).copied();
+        let Some((t, v)) = released_slot_remake(slot, serial, released) else {
             return false;
         };
-        let Some(t) = (reg == serial)
-            .then(|| self.images.lock().unwrap().released.get(&serial).copied())
-            .flatten()
-        else {
-            return false;
-        };
-        if t.mem.is_null() || t.d.target == target::BUFFER {
-            return false;
-        }
         textrace::ev(serial, || format!("made again at ID {id} for a bound use after its release"));
         self.reg_tex_now(id, &t, v, false);
         let made = self.images.lock().unwrap().by_serial.contains_key(&serial);
