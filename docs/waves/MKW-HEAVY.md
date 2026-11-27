@@ -156,13 +156,22 @@ Every sheet read (`sheet-1.png` of every run, `sheet-2.png` of `hv-final-turn`):
 bus), title (Mario Kart arch with the field at the start line; in `hv-final-turn` the opening-to-title cut's emblem on
 black, as earlier waves), menus, grid, the desert slope and lap 2 by the water / the steel deck; `hv-final`'s other
 course (town, beach, staircase) also correct. Lit and textured, HUD, coins, items, minimap and opponents in every run.
-No pop-in, stale textures, flicker or missing geometry against the baseline. The roadside shrubs render as dark
-silhouettes in every run including the baseline (known since MKW-SYNC; not this wave's). Anomaly tables: the
+The sheets show no difference from the baseline. The roadside shrubs render as dark silhouettes in every run,
+baseline included (known since MKW-SYNC).
+
+**This wave did not fix MKW's graphical issues.** The owner reports (2026-11-27, during this wave), playing the game:
+**missing textures, severe pop-in, and a broken character screen**. All of them are still there. This wave worked on
+frame time and pacing only and changed no rendering. A few still shots per run cannot show pop-in, and the scenario
+has no shot of the character screen. So "the sheets show no difference" does not mean the picture is right. These
+are open rendering bugs for a wave of their own. Anomaly tables: the
 baseline's set only (zero stand-ins before 165 s, none in the window; crashed-pipeline and timestamp-query red lines;
 gate give-ups at loads; held-back frames 0-70 in the window).
 
 ## 6. What is left
 
+- **Graphics (owner-reported, not fixed here)**: missing textures, severe pop-in, the character screen not displaying
+  properly. These need a rendering wave with shots at the character-select screen and frame-by-frame captures in
+  the race (`--faults`) to catch the pop-in.
 - **60 FPS**: the frame is op + ~4-5 ms of tail at 1 vsync, so the op needs ~12 ms; it is 12.9-13.9 ms p50. The
   biggest remaining serial items: the join wait for the slowest lane (1.5-3.4 ms a frame, driven by the images' lock in
   the lanes, §2), the pre-pass (1.3-1.7 ms), the pool sync (~3 ms).
@@ -199,6 +208,8 @@ Runs §4, pictures §5. Route checks on in every run (`hv-final`: on, but anothe
 52.8. Best final `mkw` 56.1 / 46.0 (`hv-v2`), op p50 / p95 12.93 / 16.72. Target 60: not reached.
 
 ### 4. Unproven
+- **Graphics are not fixed**: the owner reports missing textures, severe pop-in and a broken character screen in MKW.
+  This wave did not address them (§5).
 - How much of `hv-v2` → `hv-final2` (56.1 → 51.4) is the owner's activity in `hv-final2` and how much run-to-run spread;
   the lead's quiet-machine run decides.
 - Other titles (OoT, DKB, PLZA) not run; both switches apply to every title (`NXGFX_LAND_FIRST` only waits when a sync
