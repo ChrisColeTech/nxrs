@@ -1229,9 +1229,11 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
                 cc::link_exe(&clang, &obj, &exe)?;
             }
             None => {
-                // the hot/cold split (websplit.rs) when the data folder has a recorded hot set; NXRS_WEB_SPLIT=0 off
+                // the hot/cold split (websplit.rs) when the data folder has a recorded hot set and NXRS_WEB_SPLIT=1:
+                // opt-in until a split build is shown running in Chrome (WEB-W6: it stalled after the swap chain's
+                // creation, docs/waves/WEB-W6.md)
                 let hot = crate::websplit::hot_set(&data)
-                    .filter(|_| std::env::var("NXRS_WEB_SPLIT").as_deref() != Ok("0"));
+                    .filter(|_| std::env::var("NXRS_WEB_SPLIT").as_deref() == Ok("1"));
                 match cc::find_web_lib() {
                     Some(lib) => {
                         out.say(&format!("  with {} ({WEB_ENTRY})", lib.display()));
@@ -1262,7 +1264,7 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
                     _ => {
                         crate::websplit::clean_unsplit(dir);
                         out.say(&format!(
-                            "  one module: no {} in the data folder (record one with NXRS_FNPROF)",
+                            "  one module (split: a {} in the data folder and NXRS_WEB_SPLIT=1)",
                             crate::websplit::HOTSET
                         ));
                     }

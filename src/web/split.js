@@ -5,6 +5,13 @@
 // pthread: synchronous XHR and compile are allowed in workers), instantiated against this thread's primary instance
 // (which patches this thread's table), and the call goes on: a cold call waits, it never traps. Each thread does this
 // once; the server's revalidation answers the later fetches from the browser cache.
+//
+// Emscripten's proxy names the cold file from `wasmBinaryFile`, which only the page's thread sets (an engine thread
+// gets the compiled module, not the file): every thread is given it here, from this script's own location (game.js
+// beside game.wasm), before the module is instantiated.
+if (typeof WorkerGlobalScope !== 'undefined' && self.location && /^https?:/.test(self.location.href)) {
+  wasmBinaryFile = new URL('game.wasm', self.location.href).href;
+}
 Module['loadSplitModule'] = (file, imports, base) => {
   const say = (t) => (typeof err === 'function' ? err(t) : console.log(t));
   if (typeof WorkerGlobalScope === 'undefined') {

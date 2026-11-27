@@ -67,6 +67,40 @@ older build is removed.
 `EM_CACHE=<worktree>\target\emcache` in `web.ps1` and in `cc.rs` (every emcc the CLI runs), so parallel worktrees do
 not clear each other's cache through the shared emsdk junction.
 
+## Build measurements (2026-11-26, Anime Girls)
+
+| Step | Result |
+|---|---|
+| Hot set | native run `build/play/20261126-213655-web-w6-fnprof` (GPU 1, boot -> beach, 59.6 FPS, normal exit, sheet read): 26,774 guest functions of 316,912. Stored as `<name>_data\hotset.txt`; regenerate with that run's `--env NXRS_FNPROF=<file>` and copy the file there |
+| Boot set | same run, `NXRS_BOOTSET`: 41 files, 838.5 MiB of 937 MiB read in the first 60 s (stored as `bootset.rec.json`) |
+| Link | 295 s with `-sSPLIT_MODULE` (emcc's own `wasm-split --instrument` pass on the 457 MiB module is ~5 min of it; unsplit link 14 s) |
+| wasm-opt | none: 457.3 MiB (named) / 451 MiB shipped; `-O1`: 409.9 MiB in 259 s (wasm-opt -O1 by hand on the same input: 232 s). `-O2` not tried: -O1 alone already takes 4 min; default left at 1 (`NXRS_WEB_OPT`) |
+| Split | 136 s: `game.wasm` 140.2 MiB (all runtime/libc/Rust + the hot guest functions), `game.cold.wasm` 273.3 MiB, names stripped, `game.symbols` 15.5 MiB beside them |
+| gzip copies | `game.wasm` 140.2 -> 49.0 MiB, `game.cold.wasm` 273.3 -> 53.5 MiB, in 3.5 s (parallel pieces) |
+| Data | whole-file gzip of RomFS: 45%. Chosen: compressed extents (64 KiB, raw deflate each): 33 files 905.0 -> 409.7 MiB (45%); the rest identity. Per-file compression would break range reads; identity data would leave 838 MiB of the first minute's reads uncompressed |
+
+## Chrome results (Chrome 158, through the launcher server `nxrs --serve-web`, port 8774; A every 6 s from 40 s)
+
+| Run | Transferred | Requests | nnMain | Title menu | Beach FPS |
+|---|---|---|---|---|---|
+| Before, cold (base build, dev_server.py, fresh profile) | 1,361.6 MB (wasm 473.1, data 883.0, shader files 5.1 in 346 requests) | 7,449 | 4.7 s | ~32 s | 57.7-59.7 (70-90 s) |
+| After, cold, one module (`w6d-cold`) | **550.9 MB** (wasm 111.9 gzip, data extents 406.7, small data 26.9, shader files 5.1 in 346) | **1,530** | 7.6 s | **<= 26 s** | **56.2-60.0** (100-146 s), beach shot read: HUD, monsters, pier, clean water |
+| After, warm (same profile) | 112.1 MB (the module again), data 0 | 377 | 3.8 s | ~20 s (first frames) | - |
+| After, cold, split (`w6-cold`) | stalled | - | 8.3 s | never | - |
+
+- nnMain is later cold (7.6 vs 4.7 s) because the boot set (838.5 MiB, now 413 MiB of extents) is prefetched and inflated
+  first (10.4 s); the game then reads 900 MiB from the cache with no demand fetch, and the title comes earlier.
+- **Warm launch still downloads the module** (112 MB): the ETag / `no-cache` answers are in both servers and the
+  launcher's are tested (304 on `If-None-Match`), but Chrome sent no revalidation for `game.wasm`; not diagnosed (the
+  HTTP cache may not keep a 107 MB entry, or Emscripten's fetch bypasses it).
+- **Split: blocker.** With the split module the engine reached nnMain and `WindowInitialize`, then nothing for 74 s,
+  no request for `game.cold.wasm`, and the tab reloaded at ~87 s. The first split build had failed earlier on every
+  thread (`wasmBinaryFile` undefined in pthreads; fixed in `split.js`); this second failure is not diagnosed. The
+  split is therefore opt-in (`NXRS_WEB_SPLIT=1`); the default build is one module. Next step: the stack of the stalled
+  threads (as W4b did with `game.symbols`) and whether the placeholder path runs at all in a pthread.
+- Lazy shader packs: not done (346 shader requests before and after). W7's imported shaders land in the same
+  `<data>\shaders` library, so a pack built from it includes them.
+
 ## Files expected
 
 `docs/waves/WEB-W6.md`, `docs/35-WEB-TARGET-PLAN.md` (W6, shader-pack rows); `scripts/build/web.ps1`;
