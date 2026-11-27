@@ -534,6 +534,8 @@ struct State {
     t0: u64,
     v0: u64,
     nlog: u32,
+    /// the frames' cost since the last summary line (vsyncs), and how many fit 2 vsyncs (the summary line)
+    cost: Vec<f64>,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -583,7 +585,26 @@ pub fn init(page: u64, data: &std::path::Path) {
         t0: 0,
         v0: 0,
         nlog: 0,
+        cost: Vec::new(),
     });
+}
+
+/// `; cost a frame (vsyncs): median M, 90 % P, under 1 / 2 / 3: a / b / c %` of the frames since the last summary.
+fn cost_text(v: &mut [f64]) -> String {
+    if v.is_empty() {
+        return String::new();
+    }
+    v.sort_by(|a, b| a.total_cmp(b));
+    let at = |q: f64| v[((v.len() - 1) as f64 * q) as usize];
+    let under = |k: f64| 100.0 * v.iter().filter(|&&c| c <= k * FIT).count() as f64 / v.len() as f64;
+    format!(
+        "; cost a frame (vsyncs): median {:.2}, 90 % {:.2}, fitting 1 / 2 / 3: {:.0} / {:.0} / {:.0} %",
+        at(0.5),
+        at(0.9),
+        under(1.0),
+        under(2.0),
+        under(3.0)
+    )
 }
 
 /// The shortest hold of a target (60 → 1, 30 → 2, 20 → 3).
@@ -666,6 +687,9 @@ pub fn present() {
     let step = if first {
         st.fs.next(0.0, 0.0, kmin, kmax, fixed, false)
     } else {
+        if st.cost.len() < 4096 {
+            st.cost.push(cost);
+        }
         st.fs.next(shown, cost, kmin, kmax, fixed, slow)
     };
     put32(st.page + 0x20, step);
@@ -703,8 +727,9 @@ pub fn present() {
         let t = nxgfx::nvn::device::now_ns();
         if st.t0 > 0 {
             let (gt, rt) = ((vs - st.v0) as f64 / 60.0, (t - st.t0) as f64 / 1e9);
+            let ct = cost_text(&mut st.cost);
             crate::log!(
-                "frame step: game time {gt:.2} s in {rt:.2} s ({:.3} of real time); held 1 / 2 / 3 vsyncs {} / {} / {} frames, {} late, {} vsyncs paid back, {:.0} dropped, {} up / {} down ({} probes, {} failed trials)",
+                "frame step: game time {gt:.2} s in {rt:.2} s ({:.3} of real time); held 1 / 2 / 3 vsyncs {} / {} / {} frames, {} late, {} vsyncs paid back, {:.0} dropped, {} up / {} down ({} probes, {} failed trials){ct}",
                 gt / rt.max(1e-9),
                 st.held[1],
                 st.held[2],
@@ -721,6 +746,7 @@ pub fn present() {
         st.t0 = t;
         st.v0 = vs;
         st.held = [0; MAX as usize + 1];
+        st.cost.clear();
     }
     let k = st.fs.k;
     apply_hold(st, k);
@@ -773,6 +799,15 @@ mod tests {
             let d = self.real - self.game - self.s.debt;
             d > -1.01 && d < 1.01
         }
+    }
+
+    /// OOT-DESC: the summary's cost part: median, 90th percentile and the share fitting each hold (`FIT` of it).
+    #[test]
+    fn cost_text_gives_median_tail_and_fits() {
+        let mut v = vec![2.5, 0.5, 1.8, 2.9, 1.9, 3.5, 2.0, 1.0, 2.2, 1.5];
+        let t = cost_text(&mut v);
+        assert_eq!(t, "; cost a frame (vsyncs): median 1.90, 90 % 2.90, fitting 1 / 2 / 3: 10 / 50 / 80 %", "{t}");
+        assert_eq!(cost_text(&mut []), "");
     }
 
     #[test]
