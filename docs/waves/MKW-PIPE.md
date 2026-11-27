@@ -94,18 +94,51 @@ but the GPU then started the frame's work only after its last translation: tail 
 
 Hold kept at 1 vsync (the frame unquantized), same build, back to back; per-frame chain medians from each run's trace:
 
-| Run (`build/play/`) | switch | FPS / 5 % low [250, 325] | period | frame op | tail | main waits | route |
+| Run (`build/play/`) | switch | FPS / 5 % low [250, 325] | period | frame op | tail | main waits (mean) | route |
 |---|---|---|---|---|---|---|---|
 | `20261126-235351-mp-off-hold1` | `NXGFX_PARK_CHAIN=0` | 45.7 / 38.0 | 20.2 | 17.1 | 1.1 | 6.1 | 3/3 on |
 | `20261126-234759-mp-chain3-hold1` | on | **47.3 / 37.0** | **18.6** | **15.2** | 1.8 | 5.3 | 3/3 on |
 | `20261126-232459-mp-chain2-hold1` (earlier build, off path) | - | 45.0 / 38.0 | 21.2 | 17.9 | 1.0 | 7.1 | 3/3 on |
 
-The frame op is ~2 ms shorter (prep on its path 7.0 → ~5 ms a frame, no retry hand-overs); the tail grows ~0.7 ms
-(the last parts reach the GPU later); the period gains ~1.6-2.6 ms. FPS at hold 1: +1.6 mean, 5 % low unchanged:
-within run-to-run noise on a shared machine (OoT ran on GPU 1 throughout). **At the default hold it does not lift the
-30 hold**: the trial threshold is a cost ≤ 0.95 vsync (15.8 ms), and the frame is ~18.6 ms.
+The frame op is ~2 ms shorter (prep a frame 7.1 → 5.5 ms in the frames CSV, no retry hand-overs); the tail grows
+~0.7 ms (the last parts reach the GPU later); the period gains ~1.6-2.6 ms. FPS at hold 1: +1.6 mean, 5 % low
+unchanged: within run-to-run noise on a shared machine (OoT ran on GPU 1 throughout). Translation (`replay_ms`) rose
+~2 ms a frame in the same runs (10.0 → 12.4 median): part of what the per-part syncs did moved into the translation
+(first-use and cold-pool uploads at resolve) or is noise; the chain trace's op latency is the figure that matters
+for the game's fence.
 
-FINAL_RUNS
+Default pacer (`fps_hold` as the profile has it), final build `a59c2aa` (relinked 00:00), back to back, window [250, 325]:
+
+| Run (`build/play/`) | switch | FPS / 5 % low | frame mean / p50 | replay / prep p50 | frame step: held 1 vsync of 1,800 | route |
+|---|---|---|---|---|---|---|
+| `20261127-000150-mp-final-on` | on | **33.2 / 28.0** | 30.2 / 33.2 | 12.0 / 5.5 | 1,165 then 616 | 3/3 on |
+| `20261127-000728-mp-final-off` (right after) | `NXGFX_PARK_CHAIN=0` | 30.6 / 29.0 | 32.7 / 33.3 | 10.7 / 7.8 | 104 then 119 | 3/3 on |
+| `20261127-001814-mp-final-on2` (repeat) | on | 32.1 / 29.0 | 31.0 / 33.2 | 11.9 / 5.3 | 1,209 then 302 | 3/3 on |
+| `20261127-001306-mp-final-turn` (`mkw-turn`, [250, 290]) | on | 41.0 / 27.7 | | | | 4/4 on |
+
+The pacer holds 1 vsync far more often with the switch on (its 1-vsync trials pass more: frames near the 18.3 ms
+`LATE` line), so the mean rises ~2 FPS; the median frame is still 2 vsyncs and the 5 % low is unchanged. **MKW is
+still held near 30 at the default pacer.** For reference, SET-FAST's base was 32.4 / 28.7 and its final 28.8 / 13.9
+on the same machine; run-to-run spread is ±2 FPS.
+
+Pictures (every sheet read): boot, title, menus, grid, race and lap 2 drawn correctly in every run, both switch
+states; `mkw-turn` t37-t46 on the banked desert slope (at ~41 FPS the kart has not reached the steel deck by t46),
+lit and textured correctly, coins, items and HUD present; no pop-in, stale textures, flicker or missing geometry.
+Anomalies: the known set only (zero stand-ins at loads and the known released-image stand-in pair, which the base
+`210150-sf-base-mkw` also has in its race at 313 s; skipped draws of the crashed pipeline; gate give-ups;
+held-back CPU writes, at the off runs' rate). **The title shot (`02-title`, 138.6-138.7 s) was black in
+`final-on` and `final-on2`, a dim fade-in in `final-turn`, the full title in `chain3` and in every off run**: the shot
+falls on the opening-to-title cut, which the game fades in from black, with a 300 ms title-scene load right after it
+(139.1 s on, 139.6 s off); the race and menus are unaffected. Read as a timing difference of the cut, not proven:
+see Unproven. A fifth switch-on run with fault captures (`20261127-002601-mp-final-faults`, 32.8 / 29.0, 3/3 on)
+shows the title scene at the same shot time, and its 11 captures are all of the known kinds: the timestamp-query and
+crashed-pipeline red lines, zero / released-image stand-ins, and four "white flash" triggers that are bright sky and
+a sunlit roof in the opening and course flyover (read: correct pictures); no black frame was captured anywhere.
+
+Sheets: hold 1 `build/play/20261126-234759-mp-chain3-hold1/sheet-1.png` (on), `20261126-235351-mp-off-hold1` (off);
+default `20261127-000150-mp-final-on`, `20261127-000728-mp-final-off`, `20261127-001814-mp-final-on2`,
+`20261127-002601-mp-final-faults` (each `sheet-1.png`); `mkw-turn` `20261127-001306-mp-final-turn/sheet-1.png`,
+`sheet-2.png`.
 
 ## 4. The frame step
 
@@ -126,4 +159,59 @@ defer those parts' global effects (signals, fence values) until their release in
 
 ## Report (agent, protocol §5)
 
-REPORT
+Branch `mkwpipe` (base `setfast` `70373e2`): `55d3735` (plan, counters, trace notes), `a59c2aa` (`NXGFX_PARK_CHAIN`,
+switch row), `fa8401d` (test), this commit (doc).
+
+### 1. Built
+- **Diagnosis** (§1): the "+13 ms" is the frame step holding 2 vsyncs; unquantized the race frame is ~21 ms and equals
+  the game's own chain: its main thread waits (`nvnSyncWait`, main+0x69d034) for the previous frame's fence before
+  the render thread may submit the next frame, so the frame = replay of that frame's submit op (18.1 ms) + GPU tail
+  (1.0) + the next submit (1.5). The engine's throttles (`aq_wait_room`, presents, publication, acquire) cost
+  0.0-0.2 ms a frame; the game's 12 ms of CPU already overlaps the replay. Inside the op the two NVN queues hand work
+  to each other 6-7 times a frame, each hand-over a new submission with its own pool sync (7.2 ms of prep a frame on
+  the critical path). Turbo has the same throttles and fence rule; it is faster per op (no per-resume sync, ~1 µs
+  sets), not more overlapped.
+- **Correction** (§2): `NXGFX_PARK_CHAIN` (default on): parked queues released by GPU signals already recorded run on
+  at once, a submission each, without a pool sync of their own. Op latency 17.1 → 15.2 ms, period 20.2 → 18.6 ms
+  (hold 1, medians). The fence is still answered at GPU completion (NVN's meaning); nothing is answered early.
+- Diagnosis tools kept: `[vk] pipelining` line (game waits by cause, replay thread busy / idle, chained streams),
+  chain-trace notes `park` / `resume` / `chain` / `gpu_sig`.
+- Rejected with numbers: all chained streams in one submission (tail 10.8 ms, 37.6 FPS at hold 1).
+
+### 2. Tests (`cargo test --release -p graphics`: lib 274 passed, 6 ignored; other targets pass)
+- `exec::chain_tests::a_wait_chains_on_recorded_gpu_signals_or_a_quiet_cpu`: a wait is chained when a recorded GPU
+  WRITE signal passes it, or when the event's value passes with no CPU signal since the sync; not when the recorded
+  signal falls short, is an ADD, nothing passes it, or the value passes after a CPU signal (even with a recorded
+  signal). New function, no failing-before state. (Its first version expected the last case the other way; the test
+  was wrong, the rule is the intended one.)
+- `queue::occl_tests` unchanged and passing. The chaining itself (submission order, receipts) is verified in the game
+  only.
+
+### 3. Verified
+Runs and numbers in §3 (hold 1: `234759-mp-chain3-hold1` vs `235351-mp-off-hold1`; default: `000150-mp-final-on`,
+`000728-mp-final-off`, `001814-mp-final-on2`; `001306-mp-final-turn`). Route checks on in every run (3/3, turn 4/4).
+Every sheet read. **Target 60 not reached; MKW stays near 30 at the default pacer (+~2 FPS mean, 5 % low unchanged);
+at hold 1 it runs 47 / 37 FPS against 45.7 / 38.0 with the switch off.** OoT (OOT-OCC) ran on GPU 1 during all runs.
+
+### 4. Unproven
+- The black / dim title shot in three switch-on runs (§3): a fade-in timing difference at the opening-to-title cut
+  is the reading; a series of shots across 137-141 s with the switch on and off would settle it (the scenario takes
+  one shot there). The fourth on-run showed the title, and its fault captures found no black frame.
+- Gains are near the noise of a shared machine; the lead's quiet A/B decides (on/off, default pacer and hold 1).
+- Validation layers were not run with the chained submissions.
+- Next for 60 (§5): the main queue's later parts translated ahead on the lanes while the other queue's parts are
+  translated (planned through the waits, their signals and fence values released in queue order); per-use sync
+  (USE-SYNC) for the first part's sync; OOT-DESC's single image walk. The `fps_hold` decision (now 43-47 FPS uneven at
+  hold 1, not 35-36) is the owner's.
+
+### 5. Slips
+- `cargo fmt -p graphics` reformatted the whole crate (the tree was not fmt-clean) and that went into a commit; it was
+  undone at once (`git reset --soft HEAD~1`, the untouched files restored with `git checkout HEAD -- <files>`, my
+  three files' edits made again with the editor). The branch history has no formatting commit; the committed diff is
+  only this wave's lines (`git show --stat a59c2aa`: 5 files, +215 / −6).
+- Relinks ran this worktree's `target\release\nxrs-build.exe` directly with the launcher's argument list and
+  `NXRS_LINK_LIBS=-Wl,/DEBUG ...` (a PDB beside the DLL, for the host profile), as USE-SYNC and SET-FAST did. The MKW
+  DLL in the library is this branch's `a59c2aa` build with that PDB.
+
+### 6. Questions
+None.
