@@ -80,7 +80,7 @@ What each lever gives OoT, as far as these runs show (no switch-off controls, pe
 - **Balanced segments:** the lanes translate ~38 ms a frame together (house), the replay thread waits **1.5 ms a frame**
   for them (OOT-REPLAY: ~4 ms, 12 % of the thread). That is the gain the lane joins could give; it is in.
 - **Views keyed per ID** (ported, below): the house replay busy went from 24-30 ms (`base4`, off, RDP) to **25-27**
-  (`fa256c`, on, console) and the `prep`-less replay ms from 12.9 to 11.4 over [610, 670]; the two runs differ in
+  (`fa256c`, on, console) and the frames CSV's `replay_ms` from 12.9 to 11.4 over [610, 670]; the two runs differ in
   display too, so this is not a clean A/B. The walk (`v1d`, Link walking) 27.4 / 19.8 against OOT-REPLAY's walking
   24.3 / 19.1.
 - **SNAP_KEEP 256** (OOT-REPLAY's) confirmed again: with 32 the house replay busy is 57-59 ms and 12,544 snapshot
@@ -139,8 +139,26 @@ with `--faults` and `NXGFX_FAULT_PER_REASON=40`, final build, console display:
   none in the house.
 
 **Verdict: Fault A did not occur with either setting in these runs**, so it is not shown to depend on
-`NXGFX_SNAP_KEEP`; the default stays 256 (32 costs the house 2x the replay time). It remains an open, rare fault (one
-frame, ~1 a run before; 0 in 154 frames captured here and 0 in 60 house shots).
+`NXGFX_SNAP_KEEP`; the default stays 256 (32 costs the house 2x the replay time). The displaced-props frame remains
+open and rare (0 in 154 frames captured here and 0 in 60 house shots).
+
+### The white one-frame flashes in the house (OOT-FLASH's white Fault A), checked against this wave's switches
+
+The final `oot` run's `18-h5` (764 s, `052624-cb-fin-oot`) caught a wrong frame: the floor, shelves and pots blown
+to white and lightning-like streaks on the hanging herbs (`18-h5.png`), the shots before and after correct. The fault
+capture finds it on its own once its caps are raised (`NXGFX_FAULT_MAX=200`, `NXGFX_FAULT_PER_REASON=80`; the
+default cap of 32 is spent at the forest load). `oot-house --faults`, console, final build, house stretch (>= 560 s),
+one-frame white flashes (share of the picture, all "100 % gone again" at the next present):
+
+| Run (`build/play/`) | switches | flashes in the house |
+|---|---|---|
+| `054300-cb-flash-on-house` | defaults (views by ID, trim) | 603 s 2.3 %, **612 s 19.9 %**, 617 s 2.3 %, **636 s 20 %**, **653 s 20.1 %** (`faults/fault-118-p14744.png` = the `18-h5` picture) |
+| `055504-cb-flash-idoff-house` | `NXGFX_VIEW_ID_KEY=0` | **593 s 20 %, 596 s 20.1 %, 616 s 20 %, 633 s 20 %, 645 s 19.5 %** (`fault-113-p15485.png`, the same picture) |
+| `cb-flash-keep0-house` | `NXGFX_SUB_KEEP=0` | (see below) |
+
+The same picture at the same rate with views keyed by the generation: **not caused by the view-ID port**. It is the
+rate OOT-FLASH measured before the UPSYNC2 merge (6 flashes in 589-694 s, "all the same props"), i.e. its white
+Fault A, back on this base. Neither check is a perf control (rule change): they decide a correctness question.
 
 ## 4. Memory: what kills the walk window now
 
@@ -150,4 +168,82 @@ failed). OOT-REPLAY's runs peaked at 32.4 GB and finished; with the park chain t
 submissions. Change 3 returns 6.2 GB of staging and scratch, but the run still reaches the cap in the walk:
 **texture images keep growing in the house standing still** (`v1d`: 3,906 images / 4.0 GB at 509 s, 6,554 / 8.2 GB at
 878 s, ~7 more a second), and scratch stays 3.5 GB (54 x 64 MB chunks: one kept per free submission, 144 kept). The
-image growth is the next memory item (images made for OoT's ~46 texture objects a frame and not released).
+image growth is the next memory item (images made for OoT's ~46 texture objects a frame and not released). The
+final console run `052624-cb-fin-oot` died the same way at 850 s (`nvn-completion` panicked: "memory allocation of
+1572864 bytes failed"), 5 s into the walk window.
+
+## 5. What is left between this and 59
+
+- **Where OoT is now (final build, console 60 Hz, shared machine):** house standing 28.8 / 27.5 FPS over [610, 670]
+  in the quieter run (`fa256c`: 97 % of frames at 2 vsyncs, replay busy 25-27 ms), 19-23 FPS in runs with MKW and
+  builds beside them (busy 29-50); walk 27.4 / 19.8 (`v1d`, RDP display, to 895 s). 59 needs the replay thread
+  under ~15.8 ms every frame; it is 25-27 ms at best in the house.
+- **Pool sync, ~30 % of the replay thread (~8-9 ms a frame):** a third of it is waiting for the pool lock the
+  completion thread holds while landing write-backs; then the prehash wait and the write-watch take. USE-SYNC's chunk
+  tracking took the scan, which was not OoT's problem. Next: land write-backs without the pool lock (or with it for
+  the bookkeeping only) and take the prehash off the sync's path.
+- **Translation, ~20 % (~6 ms):** `bind_sets` (stage sets 11 %, patches 4 %); lanes wait only 1.5 ms a frame now.
+- **Presents, ~13.5 %:** most of it their own pool sync (the same work again per present).
+- **Memory:** every full `oot` run dies at the 32 GB cap at 838-895 s (section 4): the walk window cannot be measured
+  until the house's image growth (~7 images a second) is found.
+- **Correctness:** the white one-frame flashes in the house (~5 in 60 s, section 3) are on this base whatever this
+  wave's switches; they are OOT-FLASH's open white Fault A.
+
+## Report (agent, protocol §5)
+
+Branch `ootcombo` (base `15f3606`): `cfa4516` (plan, view-ID port, shot span), `fba8522` (trim), `d19308b` (parked
+retry fix; cherry-picked by the lead as `0765845`), `3c78d49` (lanes keep 16), `d824f9b` (rescale invalidation,
+profile), docs commits.
+
+### 1. Built
+
+- Diagnosis: the integration build hung OoT at the forest load every run (replay thread panicked in `retry_locked`
+  on a queue the park chain had already run). Correction `d19308b`: take a queue only while it is still parked and its
+  wait passes.
+- Views keyed per texture ID (`NXGFX_VIEW_ID_KEY`, TRANSLATE-REUSE change 7) ported; images remade at a resolution
+  change now invalidate them (`rescale_images`, as `upgrade_storage`; OoT does not rescale, the gap was the port's).
+- Pooled submissions past the newest 64 (16 per lane) give back staging and scratch (`NXGFX_SUB_KEEP`): ~6 GB a run;
+  house staging 7.1 -> 1.1 GB.
+- `NXGFX_SHOT_SPAN` for every-present captures over a time span.
+- Not built: a cut in the pool sync (the profile's top cost); the image growth.
+
+### 2. Tests (`cargo test --release -p graphics`: lib 285 passed, 6 ignored; other targets pass)
+
+- `tables::…::view_versions_move_per_id` (ported): another ID's registration, a re-registration of the same view and
+  descriptor writes leave an ID's view version; its own registration, a placeholder there and back, an image's backing
+  and a buffer texture move it; the pool's own descriptor writes leave `set_generation`. New function, no failing-before
+  state.
+- `shot::tests::shot_span_parses_from_and_to`: the span's parse.
+- The retry fix and the trim have no unit test (they need a `Gpu`); shown by the runs (no hang in any run after
+  `d19308b`; trim lines in every run).
+
+### 3. Verified
+
+Runs in sections 1 and 3. No run after the fix hung. Route checks on in every completed scenario (5/5, 3/3 in the
+time-limited `fa32`). Sheets read: `base3`, `base4`, `v1d` (3 sheets), `fa256c` (3), `fin` (2), and the 154 span
+frames; all correct except the white flash (`fin/18-h5`) and its fault captures in both flash runs, judged above.
+Fault captures read: nightmare lightning (known), forest-load no-target frames (known), the house white flashes.
+Numbers against OOT-REPLAY: house 28.8 / 27.5 (`fa256c`) against 25.8 / 19.5; walk 27.4 / 19.8 (`v1d`) against
+24.3 / 19.1 (walking, sampled); target 59 not reached.
+
+### 4. Unproven
+
+- Perf on a shared machine and across a display change (RDP 32 Hz until ~05:01, console 60 Hz after): the lead's
+  quiet console runs decide. No walk number on the console display (the runs die at the memory cap first).
+- What each merged lever gives OoT in isolation (switch-off controls dropped by the rule change); section 1 gives
+  what the logs and profile show.
+- The white flash's cause; the image growth; Fault A's displaced-props frame (not seen in 154 frames).
+
+### 5. Slips
+
+- Something killed every python process on the machine at ~04:32 and ~04:42 (MKW's harness too), twice orphaning my
+  game (closed by PID). From `v1d` on the harness ran under a renamed copy of the Python interpreter
+  (`ocharness.exe`, scratchpad, `PYTHONHOME` = the installed Python): an interpreter copy, not a game copy.
+- Relinks ran this worktree's `dist\nxrs\nxrs.exe --select-title ... --build` with `NXRS_LINK_LIBS=-Wl,/DEBUG`.
+  Builds and test compiles ran during the boot of some runs.
+- Two harness launches failed on argument quoting (`050052-cb-fa256-house` was ended by the display switch; one
+  launch with an unquoted thread list exited at once).
+
+### 6. Questions
+
+None.
