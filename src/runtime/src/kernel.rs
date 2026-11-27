@@ -32,8 +32,10 @@ const H_FIRST: u32 = 0x1000;
 const MAX_SYNC: usize = 64;
 /// Host stack of a guest thread: lifted code runs on it, so guest recursion depth costs host stack. On the web it
 /// is the linear-memory shadow stack, which holds only locals whose address is taken (the calls themselves go on
-/// the engine's own stack), and every thread's comes out of the one 16 GiB memory beside the guest window: 32 MiB.
-pub const HOST_STACK: usize = if cfg!(target_os = "emscripten") { 32 << 20 } else { 256 << 20 };
+/// the engine's own stack), and every thread's comes out of the one 16 GiB memory beside the guest window: 4 MiB.
+/// Chrome on Windows commits all of it; Anime Girls' 24 guest threads used at most ~24 KiB each of the 32 MiB they
+/// had (768 MiB committed, under 1 MiB touched; WEB-WMEM).
+pub const HOST_STACK: usize = if cfg!(target_os = "emscripten") { 4 << 20 } else { 256 << 20 };
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Obj {
