@@ -1948,7 +1948,12 @@ fn clamped_draw_record(
     ind: u64,
     rec: u32,
 ) -> Option<(vk::Buffer, u64)> {
-    let (b, o, _) = super::mem::resolve(g, sub, ind, rec as u64)?;
+    // (remembered on the thread with the lane caches: MKW's mesh draws resolved their record under the pools' lock)
+    let (b, o, _) = if super::mem::lane_caches() {
+        resolve_cached(g, sub, ind, rec as u64)?
+    } else {
+        super::mem::resolve(g, sub, ind, rec as u64)?
+    };
     if !clamp_on() {
         return Some((b, o));
     }
@@ -4220,11 +4225,12 @@ fn room_cached(a: u64) -> u64 {
         return super::mem::room(a);
     }
     thread_local! {
-        static C: std::cell::RefCell<(u64, u64, std::collections::HashMap<u64, u64>)> =
-            std::cell::RefCell::new((0, 0, std::collections::HashMap::new()));
+        static C: std::cell::RefCell<(u64, u64, std::collections::HashMap<u64, u64, super::mem::AddrHash>)> =
+            std::cell::RefCell::new((0, 0, std::collections::HashMap::default()));
     }
-    // the generations read before the lookup: a change during it makes the entry miss next time
-    let gen = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
+    // the generations read before the lookup: a change during it makes the entry miss next time (the pools' layout
+    // only, with the lane caches: a sync deferring CPU writes changes no pool's extent)
+    let gen = super::mem::room_gen();
     let vgen = crate::nvn::vpool::generation();
     let hit = C.with(|c| {
         let mut c = c.borrow_mut();
@@ -4302,9 +4308,9 @@ fn resolve_cached(g: &Gpu, sub: &mut Sub, a: u64, n: u64) -> Option<(vk::Buffer,
     if !addr_cache_on() {
         return super::mem::resolve(g, sub, a, n);
     }
-    type Map = std::collections::HashMap<(u64, u64), (vk::Buffer, u64, u64)>;
+    type Map = std::collections::HashMap<(u64, u64), (vk::Buffer, u64, u64), super::mem::AddrHash>;
     thread_local! {
-        static C: std::cell::RefCell<(u64, u64, Map)> = std::cell::RefCell::new((0, 0, Map::new()));
+        static C: std::cell::RefCell<(u64, u64, Map)> = std::cell::RefCell::new((0, 0, Map::default()));
     }
     let gen = super::mem::POOL_GEN.load(std::sync::atomic::Ordering::Acquire);
     let vgen = crate::nvn::vpool::generation();
@@ -4885,7 +4891,7 @@ fn stage_set(
                         },
                     ));
                 } else {
-                    let s = g.tables.samp_at(sid).unwrap_or_else(|| dummy_sampler(g));
+                    let s = g.tables.samp_at_cached(sid).unwrap_or_else(|| dummy_sampler(g));
                     imgs.push((
                         b,
                         vk::DescriptorType::COMBINED_IMAGE_SAMPLER,
