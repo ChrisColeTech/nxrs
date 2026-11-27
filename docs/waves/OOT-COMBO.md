@@ -44,3 +44,26 @@ forever. MKW never has two queues ready in one retry at that point; OoT's forest
 **Correction** (`queue.rs` `retry_locked`, commit `d19308b`): each collected queue is taken only while it is still
 parked and its wait still passes (the chain may also have parked it again at a later wait); otherwise it is skipped
 and the outer loop collects again. No switch: the old code is a crash. Every OoT run below is on this fix.
+
+## 1. Runs and what the levers give OoT
+
+Conditions, all runs: GPU 1; MKW-SETS's Mario Kart World on GPU 0 and other waves' builds (rustc at ~200 % CPU)
+through most of them; **the owner's session was on Remote Desktop (32 Hz virtual display, Remote Audio) for every
+run up to 04:58**; the session moved to the console (60 Hz, 3840x2160) at ~05:01, which ended the running games
+(`050052-cb-fa256-house` exited -1 at 46 s, MKW's game at the same moment). Runs from `cb-fa256c` on are on the 60 Hz
+console display. Indicative only; the lead's quiet console numbers decide. The owner's rule change (docs/31 §4, `ec16da5`): no switch-off control runs; the
+USE_SYNC=0 / TRANSLATE_BALANCE=0 controls of the brief were dropped.
+
+Columns as OOT-REPLAY (FPS / 5 % low from `frames-*.csv`; "busy": the replay thread's busy ms a frame from the
+`occlusion, per frame` lines; "shown": share of frames on screen 1 / 2 / 3 / 4+ vsyncs).
+
+| Run (`build/play/`) | build / switches | walk [845, 915] FPS / 5 % low | walk busy | walk shown | house [600, 830] FPS / 5 % low | house busy | house shown | end | route |
+|---|---|---|---|---|---|---|---|---|---|
+| OOT-REPLAY `021206-or-v2-oot` (ref.) | its final | 28.2 / 20.0 (Link out of view) | 27-30 | 0/91/8/0 | 25.8 / 19.5 | 30-34 | 0/70/30/0 | 935 s | 6/6 |
+| OOT-REPLAY `011621-or-v1-prof` (ref.) | v1, sampled, Link walking | 24.3 / 19.1 | 33 | 0/56/44/1 | 26.2 / 19.6 | 31-34 | 0/74/26/0 | 935 s | 6/6 |
+| `033411-cb-base-oot`, `033938-cb-base2-oot`, `034447-cb-hang-prof`, `034918-cb-hang-prof2` | merge `15f3606` (+ inert view-ID port), `VIEW_ID_KEY=0` | - | - | - | - | - | - | **hung 213-248 s** (section 0) | - |
+| `035702-cb-base3-oot` | hang fix, `VIEW_ID_KEY=0`, `SUB_KEEP=0` (= the merge) | - | - | - | - | - | - | **died 463 s**: `MapPhysicalMemory commit ... failed` (32 GB process cap; staging 861 chunks = 7.1 GB) | - |
+| `040502-cb-base4-oot` | hang fix + trim (`SUB_KEEP` 64, lanes 64), `VIEW_ID_KEY=0` | - (died 838 s) | - | - | **26.7 / 19.6** | 24-30 | 0/78/21/0 | **died 838 s**: allocation failure at the 32 GB cap | 5/5 to 834 s |
+| `042215-cb-v1b-oot` | all on (`3c78d49`) | - | - | - | invalid: machine stall 550-700 s (frames 235-740 ms with replay 14-17 ms; the harness and every python on the machine were killed at ~613 s) | - | - | killed | - |
+| `043451-cb-v1c-oot` | all on | - | - | - | - | - | - | harness killed (as v1b) | - |
+| `044441-cb-v1d-oot` | all on | **27.4 / 19.8** (to 895 s; Link walking to `24-walk4`, out of view from `25-walk5`) | 22-39 | 0/83/17/1 | 14.9 / 8.7 (the opening ran ~60 s late under machine load: dialogue until ~640 s) | 34-47 | 0/5/80/15 | **died 895 s** (32 GB cap) | 5/5 |
