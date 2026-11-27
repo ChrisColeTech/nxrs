@@ -154,9 +154,11 @@ one-frame white flashes (share of the picture, all "100 % gone again" at the nex
 |---|---|---|
 | `054300-cb-flash-on-house` | defaults (views by ID, trim) | 603 s 2.3 %, **612 s 19.9 %**, 617 s 2.3 %, **636 s 20 %**, **653 s 20.1 %** (`faults/fault-118-p14744.png` = the `18-h5` picture) |
 | `055504-cb-flash-idoff-house` | `NXGFX_VIEW_ID_KEY=0` | **593 s 20 %, 596 s 20.1 %, 616 s 20 %, 633 s 20 %, 645 s 19.5 %** (`fault-113-p15485.png`, the same picture) |
-| `cb-flash-keep0-house` | `NXGFX_SUB_KEEP=0` | (see below) |
+| `061037-cb-flash-keep0-house` | `NXGFX_SUB_KEEP=0` | none reached: **died at 434 s** at the 32 GB cap (`MapPhysicalMemory commit ... failed`), as `base3`: without the trim OoT does not reach the house on this base |
+| `061803-cb-flash-keep0b-house` | `NXGFX_SUB_KEEP=0`, `NXRS_MEMORY_CAP_GB=48` (for this check only) | 560 s 2.3 %, 619 s 2.3 %, **672 s 20 %**; process peak **36.1 GB** (staging 870 chunks = 7.2 GB) against ~31 GB with the trim |
 
-The same picture at the same rate with views keyed by the generation: **not caused by the view-ID port**. It is the
+The same picture at the same rate with views keyed by the generation, and present without the trim: **not caused by
+this wave's changes**. It is the
 rate OOT-FLASH measured before the UPSYNC2 merge (6 flashes in 589-694 s, "all the same props"), i.e. its white
 Fault A, back on this base. Neither check is a perf control (rule change): they decide a correctness question.
 
@@ -215,7 +217,8 @@ profile), docs commits.
   state.
 - `shot::tests::shot_span_parses_from_and_to`: the span's parse.
 - The retry fix and the trim have no unit test (they need a `Gpu`); shown by the runs (no hang in any run after
-  `d19308b`; trim lines in every run).
+  `d19308b`; trim lines in every run; with `SUB_KEEP=0` OoT died at 434 s at the 32 GB cap, `061037`, and peaked at
+  36.1 GB under a raised cap, `061803`).
 
 ### 3. Verified
 
