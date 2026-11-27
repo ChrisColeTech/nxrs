@@ -14,6 +14,14 @@
 //!
 //! Host writers that reset the protection without faulting (`VirtualAlloc(MEM_COMMIT)` over a committed read-only page
 //! makes it read-write) tell it first (`host_write`). `NXGFX_SEAL=0`: off. Windows only (Linux: never sealed).
+//!
+//! **Chunk tracking** (USE-SYNC, `NXGFX_USE_SYNC`): a pool need not be quiet to be armed. Once armed whole it stays in
+//! the registry for good ("tracked"): a store opens only its chunk, and a sync's scan asks the pool's **open chunks**
+//! (`open_runs`), not its whole range. An open chunk the scans found unwritten for `quiet_chunk_frames` frames is closed
+//! again (`close_quiet`: protected, then the caller takes the write watch over it); a chunk written frame after frame
+//! stays open (hot) and is asked by every scan. The guarantee is the sealed pools' one, per chunk: a store into a closed
+//! chunk opens it (and is recorded by the write watch) before it lands, and a scan reads the open chunks after it read
+//! the replay queue's tail.
 
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
@@ -30,6 +38,8 @@ struct Entry {
     armed: bool,
     /// chunks made read-write since the last arming (protected again at the next one), ascending
     open: Vec<u64>,
+    /// for each of `open`: the frame it was opened or last found written (chunk tracking closes it when quiet)
+    last: Vec<u64>,
     /// a first arming in pieces (a pool of hundreds of MB is protected over several passes): [todo, end) is not
     /// protected yet; `end` when it is all done
     todo: u64,
@@ -69,10 +79,51 @@ pub static ARM_NS: AtomicU64 = AtomicU64::new(0);
 pub static UNSEALS: AtomicU64 = AtomicU64::new(0);
 /// The sealing passes' time under the pool lock (`mem::seal_some`).
 pub static PASS_NS: AtomicU64 = AtomicU64::new(0);
+/// Chunk tracking: chunks opened by a store or a host write, closed again when quiet, bytes of open chunks the scans
+/// asked, and (verify mode) written pages found in closed chunks (a store the new path would have missed: red).
+pub static OPENS: AtomicU64 = AtomicU64::new(0);
+pub static CLOSES: AtomicU64 = AtomicU64::new(0);
+pub static OPEN_SCAN_B: AtomicU64 = AtomicU64::new(0);
+pub static MISSES: AtomicU64 = AtomicU64::new(0);
+/// Moves whenever a chunk opens or closes (the pool walker keeps its list of runs until then).
+pub static RUNS_GEN: AtomicU64 = AtomicU64::new(0);
 
 pub fn on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     cfg!(windows) && *ON.get_or_init(|| std::env::var("NXGFX_SEAL").as_deref() != Ok("0"))
+}
+
+/// `NXGFX_USE_SYNC`: chunk tracking (`1`, the default; `verify` also checks every scan's closed chunks; `0`: whole
+/// quiet pools only, as SCAN-COST left it). Needs sealing on.
+fn mode() -> u8 {
+    static V: std::sync::OnceLock<u8> = std::sync::OnceLock::new();
+    *V.get_or_init(|| match std::env::var("NXGFX_USE_SYNC").as_deref() {
+        Ok("0") => 0,
+        Ok("verify") => 2,
+        _ => 1,
+    })
+}
+
+/// Chunk tracking on (`NXGFX_USE_SYNC`).
+pub fn chunks() -> bool {
+    on() && mode() != 0
+}
+
+/// Chunk tracking's verify mode (`NXGFX_USE_SYNC=verify`).
+pub fn verify() -> bool {
+    on() && mode() == 2
+}
+
+/// Frames an open chunk stays open after it was last found written (`NXGFX_USE_SYNC_QUIET`, default 8): a chunk written
+/// every frame or every other frame stays open (hot: no fault per frame), one written once is closed again soon.
+pub fn quiet_chunk_frames() -> u64 {
+    static V: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *V.get_or_init(|| {
+        std::env::var("NXGFX_USE_SYNC_QUIET")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(8)
+    })
 }
 
 /// Frames without a CPU write or a write-back landing before a pool is sealed (`NXGFX_SEAL_FRAMES`, default 60).
@@ -150,6 +201,7 @@ pub fn arm(pool: u64, lo: u64, hi: u64, max: u64) -> (Arm, u64) {
         pool,
         armed: true,
         open: Vec::new(),
+        last: Vec::new(),
         todo: lo,
     });
     let mut ranges = Vec::new();
@@ -163,6 +215,8 @@ pub fn arm(pool: u64, lo: u64, hi: u64, max: u64) -> (Arm, u64) {
     if done {
         // the chunks a store or a host write opened since the last arming (or during this one) closed again
         ranges.extend(std::mem::take(&mut e.open).into_iter().map(|c| chunk_of(lo, hi, c)));
+        e.last.clear();
+        RUNS_GEN.fetch_add(1, Ordering::AcqRel);
     }
     let bytes = ranges.iter().map(|c| c.1 - c.0).sum();
     // the committed pages (the rest is committed later through `host_write`, which wakes the pool)
@@ -207,9 +261,7 @@ pub fn fault(a: u64) -> bool {
     }
     let (c, ce) = chunk_of(lo, e.end, a);
     protect_some(c, ce, true);
-    if let Err(i) = e.open.binary_search(&c) {
-        e.open.insert(i, c);
-    }
+    open_chunk(e, c);
     if e.armed {
         e.armed = false;
         woken.push(e.pool);
@@ -217,6 +269,20 @@ pub fn fault(a: u64) -> bool {
         WAKES.fetch_add(1, Ordering::Relaxed);
     }
     true
+}
+
+/// Chunk `c` (its start, as `open` keeps it) of `e` counted open from this frame.
+fn open_chunk(e: &mut Entry, c: u64) {
+    let f = super::present::frames();
+    match e.open.binary_search(&c) {
+        Ok(i) => e.last[i] = f,
+        Err(i) => {
+            e.open.insert(i, c);
+            e.last.insert(i, f);
+            OPENS.fetch_add(1, Ordering::Relaxed);
+            RUNS_GEN.fetch_add(1, Ordering::AcqRel);
+        }
+    }
 }
 
 /// The host is about to write or recommit [a, a + n) without the protection seeing it (a recommit makes committed pages
@@ -241,9 +307,7 @@ pub fn host_write(a: u64, n: u64) {
         while at < end {
             let (c, ce) = chunk_of(lo, e.end, at);
             protect_some(c, ce, true);
-            if let Err(i) = e.open.binary_search(&c) {
-                e.open.insert(i, c);
-            }
+            open_chunk(e, c);
             at = ce;
         }
         if e.armed {
@@ -308,6 +372,153 @@ pub fn take_woken() -> Vec<u64> {
     std::mem::take(&mut r.0.woken)
 }
 
+/// Chunk tracking: the open chunks of every entry armed whole at least once, merged into runs: (entry start, run start,
+/// run end), ascending. A tracked pool's scan asks these only (its closed chunks were not written since they closed: a
+/// store would have opened them first).
+pub fn open_runs() -> Vec<(u64, u64, u64)> {
+    if !installed() {
+        return vec![];
+    }
+    let r = reg();
+    let mut out: Vec<(u64, u64, u64)> = Vec::new();
+    for (&lo, e) in &r.0.by_lo {
+        if e.todo < e.end {
+            continue;
+        }
+        for &c in &e.open {
+            let (a, b) = chunk_of(lo, e.end, c);
+            match out.last_mut() {
+                Some(l) if l.0 == lo && l.2 == a => l.2 = b,
+                _ => out.push((lo, a, b)),
+            }
+        }
+    }
+    out
+}
+
+/// Chunk tracking: the entry at `lo` had CPU writes taken over `ranges` (address, bytes) at `frame`: the open chunks
+/// they touch stay open (`close_quiet`).
+pub fn stamp(lo: u64, ranges: &[(u64, u64)], frame: u64) {
+    if ranges.is_empty() || !installed() {
+        return;
+    }
+    let mut r = reg();
+    let Some(e) = r.0.by_lo.get_mut(&lo) else {
+        return;
+    };
+    for &(a, n) in ranges {
+        let mut at = a.max(lo);
+        let end = a.saturating_add(n).min(e.end);
+        while at < end {
+            let (c, ce) = chunk_of(lo, e.end, at);
+            if let Ok(i) = e.open.binary_search(&c) {
+                e.last[i] = e.last[i].max(frame);
+            }
+            at = ce;
+        }
+    }
+}
+
+/// Chunk tracking: the open chunks of the entry at `lo` not written for `quiet` frames by `frame` are protected again.
+/// Returns them (the caller, holding the pool and watch locks, takes the write watch over them: a store made before the
+/// protection) and whether the entry has no open chunk now (armed: its pool counts as sealed while no store wakes it).
+/// A store into one after the protection faults (it waits for this call) and opens it again.
+pub fn close_quiet(lo: u64, frame: u64, quiet: u64) -> (Vec<(u64, u64)>, bool) {
+    if !installed() {
+        return (vec![], false);
+    }
+    let mut r = reg();
+    let Some(e) = r.0.by_lo.get_mut(&lo) else {
+        return (vec![], false);
+    };
+    if e.todo < e.end {
+        return (vec![], false);
+    }
+    let mut closed = Vec::new();
+    let (mut open, mut last) = (Vec::with_capacity(e.open.len()), Vec::with_capacity(e.open.len()));
+    for (&c, &l) in e.open.iter().zip(&e.last) {
+        if frame.saturating_sub(l) >= quiet {
+            let (a, b) = chunk_of(lo, e.end, c);
+            protect_some(a, b, false);
+            match closed.last_mut() {
+                Some((_, pb)) if *pb == a => *pb = b,
+                _ => closed.push((a, b)),
+            }
+            CLOSES.fetch_add(1, Ordering::Relaxed);
+        } else {
+            open.push(c);
+            last.push(l);
+        }
+    }
+    if !closed.is_empty() {
+        RUNS_GEN.fetch_add(1, Ordering::AcqRel);
+    }
+    e.open = open;
+    e.last = last;
+    if e.open.is_empty() && !e.armed {
+        e.armed = true;
+        ARMS.fetch_add(1, Ordering::Relaxed);
+    }
+    (closed, e.armed)
+}
+
+/// Verify mode: the closed chunks of the entry at `lo` (armed whole at least once) as runs.
+pub fn closed_runs(lo: u64) -> Vec<(u64, u64)> {
+    if !installed() {
+        return vec![];
+    }
+    let r = reg();
+    let Some(e) = r.0.by_lo.get(&lo) else {
+        return vec![];
+    };
+    if e.todo < e.end {
+        return vec![];
+    }
+    let mut out = Vec::new();
+    let mut at = lo;
+    for &c in &e.open {
+        let (a, b) = chunk_of(lo, e.end, c);
+        if a > at {
+            out.push((at, a));
+        }
+        at = at.max(b);
+    }
+    if at < e.end {
+        out.push((at, e.end));
+    }
+    out
+}
+
+/// Verify mode: page `pg` of the entry at `lo` was found written in a chunk that is closed now (a store no fault saw):
+/// counted, and its chunk opened so the scans ask it. False when its chunk is open now (a store opened it meanwhile:
+/// no miss).
+pub fn missed(lo: u64, pg: u64) -> bool {
+    if !installed() {
+        return false;
+    }
+    let mut r = reg();
+    let Reg { by_lo, woken } = &mut *r.0;
+    let Some(e) = by_lo.get_mut(&lo) else {
+        return false;
+    };
+    if pg < lo || pg >= e.end {
+        return false;
+    }
+    let (c, ce) = chunk_of(lo, e.end, pg);
+    if e.open.binary_search(&c).is_ok() {
+        return false;
+    }
+    protect_some(c, ce, true);
+    open_chunk(e, c);
+    if e.armed {
+        e.armed = false;
+        woken.push(e.pool);
+        ANY_WOKEN.store(true, Ordering::Release);
+    }
+    MISSES.fetch_add(1, Ordering::Relaxed);
+    true
+}
+
 /// Whether page `p` lies in an entry (lazy write-back's handler leaves such a fault to this one).
 pub fn holds(p: u64) -> bool {
     if !installed() || HOLDING.with(|h| h.get()) {
@@ -344,10 +555,38 @@ pub fn summary(frames: f64) -> String {
     let ms = ARM_NS.swap(0, Ordering::Relaxed) as f64 / frames / 1e6;
     let pass = PASS_NS.swap(0, Ordering::Relaxed) as f64 / frames / 1e6;
     let u = UNSEALS.load(Ordering::Relaxed);
+    let chunks = if chunks() {
+        let (on, ob) = open_total();
+        let (o, c) = (t(&OPENS), t(&CLOSES));
+        let sb = OPEN_SCAN_B.swap(0, Ordering::Relaxed) as f64 / frames / 1048576.0;
+        format!(
+            "; chunk tracking{}: {on} chunks open ({} MB), a frame {o:.1} opened, {c:.1} closed, {sb:.2} MB of open chunks scanned; {} written pages missed in closed chunks so far",
+            if verify() { " (verify)" } else { "" },
+            ob >> 20,
+            MISSES.load(Ordering::Relaxed)
+        )
+    } else {
+        String::new()
+    };
     format!(
-        "; sealed pools: {n} ({} MB) out of every scan; a frame {w:.2} woken by a store, {h:.2} by a host write, {a:.2} armed ({mb:.2} MB protected in {ms:.3} ms; sealing pass {pass:.3} ms under the pool lock); {u} unsealed whole so far, {l} found written without a fault so far",
+        "; sealed pools: {n} ({} MB) out of every scan; a frame {w:.2} woken by a store, {h:.2} by a host write, {a:.2} armed ({mb:.2} MB protected in {ms:.3} ms; sealing pass {pass:.3} ms under the pool lock); {u} unsealed whole so far, {l} found written without a fault so far{chunks}",
         b >> 20
     )
+}
+
+/// (open chunks, their bytes) for the pools line.
+fn open_total() -> (u64, u64) {
+    if !installed() {
+        return (0, 0);
+    }
+    let r = reg();
+    r.0.by_lo.iter().fold((0, 0), |(n, b), (&lo, e)| {
+        let bytes: u64 = e.open.iter().map(|&c| {
+            let (a, z) = chunk_of(lo, e.end, c);
+            z - a
+        }).sum();
+        (n + e.open.len() as u64, b + bytes)
+    })
 }
 
 static HANDLER: AtomicBool = AtomicBool::new(false);
@@ -557,6 +796,52 @@ mod tests {
         unsafe { (lo as *mut u8).write_volatile(1) };
         assert!(!armed(lo));
         assert_eq!(written(lo, hi), vec![lo]);
+    }
+
+    /// Chunk tracking: stores open only their chunks (listed by `open_runs`, adjacent ones as one run); a chunk found
+    /// written stays open, a quiet one closes (read-only: the next store faults and opens it again); with none open the
+    /// entry is armed again. `closed_runs` is the rest; a page written in a closed chunk without a fault is a miss (its
+    /// chunk opens), one in an open chunk is not.
+    #[test]
+    fn chunks_open_at_a_store_and_close_when_quiet() {
+        if !on() {
+            return;
+        }
+        let m = alloc(4 * CHUNK);
+        let (lo, hi) = (m.0, m.0 + m.1);
+        assert!(arm1(lo, lo, hi));
+        written(lo, hi);
+        unsafe { ((lo + CHUNK + 8) as *mut u8).write_volatile(1) };
+        unsafe { ((lo + 2 * CHUNK + 8) as *mut u8).write_volatile(1) };
+        let mine = || open_runs().into_iter().filter(|r| r.0 == lo).collect::<Vec<_>>();
+        assert_eq!(mine(), vec![(lo, lo + CHUNK, lo + 3 * CHUNK)], "two adjacent open chunks: one run");
+        assert_eq!(closed_runs(lo), vec![(lo, lo + CHUNK), (lo + 3 * CHUNK, hi)]);
+        let f0 = super::super::present::frames();
+        // the first chunk found written 10 frames on; at that frame with 5 quiet frames the second closes
+        stamp(lo, &[(lo + CHUNK + 8, 1)], f0 + 10);
+        let (closed, armed_now) = close_quiet(lo, f0 + 10, 5);
+        assert_eq!(closed, vec![(lo + 2 * CHUNK, lo + 3 * CHUNK)]);
+        assert!(!armed_now, "one chunk still open");
+        assert_eq!(mine(), vec![(lo, lo + CHUNK, lo + 2 * CHUNK)]);
+        // closed again: a store faults and opens it
+        let opens = OPENS.load(Ordering::Relaxed);
+        unsafe { ((lo + 2 * CHUNK + 16) as *mut u8).write_volatile(2) };
+        assert!(OPENS.load(Ordering::Relaxed) > opens);
+        assert_eq!(mine(), vec![(lo, lo + CHUNK, lo + 3 * CHUNK)]);
+        // a page written in an open chunk is no miss; one written past the protection (a write no fault saw) is
+        assert!(!missed(lo, lo + CHUNK));
+        assert!(protect(lo + 3 * CHUNK, lo + 3 * CHUNK + 4096, true));
+        unsafe { ((lo + 3 * CHUNK) as *mut u8).write_volatile(3) };
+        let misses = MISSES.load(Ordering::Relaxed);
+        assert!(missed(lo, lo + 3 * CHUNK));
+        assert!(MISSES.load(Ordering::Relaxed) > misses);
+        assert_eq!(mine(), vec![(lo, lo + CHUNK, hi)], "the missed page's chunk is open now");
+        // everything quiet: all closed, armed again (sealed), nothing open
+        let (closed, armed_now) = close_quiet(lo, f0 + 1000, 5);
+        assert_eq!(closed, vec![(lo + CHUNK, hi)]);
+        assert!(armed_now && armed(lo));
+        assert!(mine().is_empty());
+        assert_eq!(closed_runs(lo), vec![(lo, hi)]);
     }
 
     /// A host write announced before it (a recommit) wakes the pool and opens the chunks it covers; `remove` unseals the

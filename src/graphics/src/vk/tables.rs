@@ -36,8 +36,19 @@ struct PoolSnapshot {
 /// with the descriptors written since, instead of allocating 10 MB of host-visible memory and copying the whole
 /// shadow: Ocarina of Time's forest made ~24 snapshots a frame at ~13 ms each).
 static RECYCLED: Mutex<Vec<(u64, DescBuf)>> = Mutex::new(Vec::new());
-/// At most this many are kept (the rest are freed).
-const RECYCLE_KEEP: usize = 32;
+/// At most this many are kept (the rest are freed): `NXGFX_SNAP_KEEP` (default 256; 32 = as before). Ocarina of
+/// Time's house walk makes 40-60 snapshots a frame, each held until its submissions complete (1-2 frames later), so
+/// 32 ran out and every further snapshot allocated 10 MB of host-visible memory and copied the whole shadow under the
+/// tables' lock (OOT-REPLAY: up to 400 ms of snapshots in one frame). Kept buffers are only what was once in flight.
+fn recycle_keep() -> usize {
+    static N: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *N.get_or_init(|| {
+        std::env::var("NXGFX_SNAP_KEEP")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(256)
+    })
+}
 /// Descriptor writes remembered for bringing recycled snapshots up to date (`Inner::edits`).
 const EDITS_KEEP: usize = 1 << 16;
 
@@ -45,7 +56,7 @@ impl Drop for PoolSnapshot {
     fn drop(&mut self) {
         if let Some(db) = self.db.take() {
             let mut r = RECYCLED.lock().unwrap();
-            if r.len() < RECYCLE_KEEP {
+            if r.len() < recycle_keep() {
                 r.push((self.generation, db));
                 return;
             }
@@ -109,9 +120,12 @@ fn refresh_ranges(i: &Inner, from: u64) -> Vec<(usize, usize)> {
     if from < i.edits_from {
         return vec![(0, i.shadow.len())];
     }
-    i.edits
+    // the log is in generation order (each write is noted at the then current generation, which only grows): the
+    // writes from `from` on are its tail, found by a binary search instead of a walk over up to 65,536 entries under
+    // the tables' lock at each of OoT's 40-60 snapshots a frame
+    let first = i.edits.partition_point(|e| e.0 < from);
+    i.edits[first..]
         .iter()
-        .filter(|e| e.0 >= from)
         .map(|e| (e.1 as usize, e.2 as usize))
         .collect()
 }
@@ -592,6 +606,14 @@ impl Tables {
                     other => {
                         if let Some((_, b)) = other {
                             free_desc_buffer(g.dev(), b);
+                        }
+                        static MADE: AtomicU64 = AtomicU64::new(0);
+                        let n = MADE.fetch_add(1, Ordering::Relaxed) + 1;
+                        if n.is_power_of_two() || n % 256 == 0 {
+                            crate::vklog!(
+                                "pool snapshots: {n} buffers made new so far (none kept to reuse; NXGFX_SNAP_KEEP {})",
+                                recycle_keep()
+                            );
                         }
                         let dst = desc_buffer(&g.d, g.layout.db_pool_size)
                             .expect("texture pool snapshot");

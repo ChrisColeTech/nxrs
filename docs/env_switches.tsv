@@ -4,7 +4,7 @@ NXGFX_ADDR_REPORT	diagnostic	VK_EXT_device_address_binding_report (`NXGFX_ADDR_R
 NXGFX_ALIAS	switch	`0` gives every texture an image of its own instead of aliasing images over the same storage of the same shape	src/graphics/src/vk/image.rs
 NXGFX_ALPHA_TEST	switch	The alpha test applied in the pixel shader (`NXGFX_ALPHA_TEST=0` off).	src/graphics/src/lib.rs
 NXGFX_APPEND_RESET	switch	frame begins. Records written by dispatches or by the CPU are not touched. `NXGFX_APPEND_RESET=0` turns it off.	src/graphics/src/vk/exec.rs
-NXGFX_AQ_MERGE	switch	NXGFX_AQ_MERGE=0: one submission each.	src/graphics/src/vk/queue.rs
+NXGFX_AQ_MERGE	switchNXGFX_AQ_MERGE=0: one submission each.	src/graphics/src/vk/queue.rs
 NXGFX_ASTC	switch	`rgba8` keeps every ASTC texture as RGBA8 (no BC7 re-encode of the 256x256 and larger ones)	src/graphics/src/vk/image.rs
 NXGFX_ASTC_CACHE	switch	big enough that a read beats an encode (`MIN_BYTES`). `NXGFX_ASTC_CACHE=0` off, `NXGFX_ASTC_CACHE_MB` the most the	src/graphics/src/tex/astc_cache.rs
 NXGFX_ASTC_CACHE_MB	switch	big enough that a read beats an encode (`MIN_BYTES`). `NXGFX_ASTC_CACHE=0` off, `NXGFX_ASTC_CACHE_MB` the most the	src/graphics/src/tex/astc_cache.rs
@@ -41,6 +41,7 @@ NXGFX_DUMP_PASSES	diagnostic		src/graphics/src/vk/exec.rs
 NXGFX_DUMP_PNG	diagnostic	NXGFX_DUMP_PNG=0: the log lines only (dumps every few seconds over a long run)	src/graphics/src/vk/exec.rs
 NXGFX_DUMP_RAW	diagnostic		src/graphics/src/vk/exec.rs
 NXGFX_DUMP_TEX	diagnostic	`NXGFX_DUMP_TEX=<w>x<h>`: a sampled texture of that size, once per dump frame, is read back at the end of the	src/graphics/src/vk/exec.rs
+NXGFX_DYN_DEDUPE	switch	SET-FAST: a draw sets only the dynamic states (and graphics stage-set descriptor-buffer offsets) that differ from what its command buffer holds; mesh / ordinary pipeline changes forget topology and primitive restart, patch control points are always set. `NXGFX_DYN_DEDUPE=0`: every state and offset at every draw, as before	src/graphics/src/vk/exec.rs
 NXGFX_FAULT_FLASH	diagnostic	`NXGFX_FAULT_FLASH=<white>,<black>`: with NXGFX_FAULT_SHOTS, the fractions of the picture newly fully white / near black in one frame that trigger a capture (default `0.02,0.25`; 0 turns one off)	src/graphics/src/vk/shot/fault.rs
 NXGFX_FAULT_MAX	diagnostic	`NXGFX_FAULT_MAX=<n>`: with NXGFX_FAULT_SHOTS, the captures one run may write (default 32; at most 4 per reason)	src/graphics/src/vk/shot/fault.rs
 NXGFX_FAULT_PER_REASON	diagnostic	`NXGFX_FAULT_PER_REASON=<n>`: with NXGFX_FAULT_SHOTS, the captures one reason (a red line kind, a white flash, a black flash) may write (default 4)	src/graphics/src/vk/shot/fault.rs
@@ -77,11 +78,16 @@ NXGFX_NATIVE_TRACE	test		src/graphics/src/vk/queue.rs
 NXGFX_NDVE	test		src/graphics/src/vk/newndve.rs
 NXGFX_NDVE_COMPARE_8	test		src/graphics/src/vk/newndve/kernels.rs
 NXGFX_OCCL_SYNC	switch	frame's results otherwise read them two presents late: Mario Kart 8 Deluxe's black stretches). NXGFX_OCCL_SYNC=0 off	src/graphics/src/vk/queue.rs
+NXGFX_OCCL_LAG	switch	`NXGFX_OCCL_LAG` (default 1): presents the replay may stay behind while a game uses samples-passed results; 0 = each present waits until everything queued is replayed, as before (OOT-OCC); 1 = the game builds its next frame while the replay translates this one and reads the most recent results completed	src/graphics/src/vk/occl.rs
+NXGFX_OCCL_POOL	switch	`NXGFX_OCCL_POOL` (default 4096): occlusion queries a submission has; 256 = as before (OoT's ~560 box tests a frame used them up and ~1,000 queries a frame were refused, their draws missing from the counts; OOT-OCC)	src/graphics/src/vk/queue.rs
+NXGFX_OCCL_EARLY	switch`NXGFX_OCCL_EARLY=0`: report memory the game rewrote before resubmitting is left as the game wrote it until its result lands; by default the previous answer is put back at submit (OOT-OCC)	src/graphics/src/vk/occl.rs
 NXGFX_OP_TIMES	diagnostic	Replay time by record kind (`NXGFX_OP_TIMES=1`): every 600 presents a `[vk] replay by record` line	src/graphics/src/vk/exec.rs
 NXGFX_PACE_N	diagnostic	presents per pacing line (default 300)	src/graphics/src/vk/present.rs, src/graphics/tests/window.rs
+NXGFX_PARK_CHAIN	switch	MKW-PIPE: when a stream parks at an event wait, the parked queues whose wait a GPU signal recorded so far passes run on at once on the replay thread, each in a submission of its own without a pool sync (the first sync covers them; a wait passed by the event's value after a CPU signal is not chained). `NXGFX_PARK_CHAIN=0`: each through the parked-work retry with its own pool sync, as before	src/graphics/src/vk/queue.rs
 NXGFX_PARTS_PRIVATE_MB	switch	The process private memory in MB past which no more shader parts are made ahead (default an eighth of the machine's memory, at least 6144).	src/graphics/src/vk/pipe.rs
 NXGFX_PART_LTO	switch	make (NXGFX_PART_LTO=1: retained, as before)	src/graphics/src/vk/pipe.rs
 NXGFX_PCACHE_QUIET_MS	switch	is killed. A saver thread writes it a few seconds after new pipelines stop arriving (`NXGFX_PCACHE_QUIET_MS`,	src/graphics/src/vk/pcache.rs
+NXGFX_PCACHE_TRY_ALLOC	switch	`NXGFX_PCACHE_TRY_ALLOC=0`: the pipeline cache save's buffer allocated by ash as before (an allocation failure aborts the process: OoT's 391 MB cache, OOT-OCC v5); by default a save that cannot get its buffer is skipped and tried again later (OOT-REPLAY)	src/graphics/src/vk/pcache.rs
 NXGFX_PIPE_LOG	diagnostic	`NXGFX_PIPE_LOG=1`: every pipeline the driver compiles is logged as it starts and ends (the one a compiler crash	src/graphics/src/vk/pipe.rs
 NXGFX_PIPE_NOOPT	diagnostic	`1` makes pipelines with optimization disabled (driver bisecting)	src/graphics/src/vk/pipe.rs
 NXGFX_POOL	switch	- **Host** (`NXGFX_POOL=host`): the guest pages imported into Vulkan (VK_EXT_external_memory_host): zero-copy,	src/graphics/src/vk/mem.rs, src/graphics/tests/gpu.rs
@@ -138,6 +144,7 @@ NXGFX_SHOT	diagnostic	- `NXGFX_SHOT=<n>[,<n>...]`: those presents (counted from 
 NXGFX_SHOT_DIR	path	neighbours as PNG (`fg-generated.png`, `fg-previous.png`, `fg-current.png` in `NXGFX_SHOT_DIR`).	src/graphics/src/vk/framegen.rs, src/graphics/src/vk/shot.rs
 NXGFX_SHOT_EVERY	diagnostic	- `NXGFX_SHOT_EVERY=<n>`: every n-th present;	src/graphics/src/vk/shot.rs
 NXGFX_SHOT_FILE	path	- `NXGFX_SHOT_FILE=<path>`: when the file exists, the next present; the file is deleted (a path written in it is	src/graphics/src/vk/shot.rs
+NXGFX_SNAP_KEEP	switch	`NXGFX_SNAP_KEEP` (default 256): texture pool snapshot buffers kept for reuse once the GPU is done with them; 32 = as before (OoT's walk makes 40-60 snapshots a frame; past 32 each made 10 MB of host-visible memory and copied the whole shadow under the tables' lock; OOT-REPLAY)	src/graphics/src/vk/tables.rs
 NXGFX_SKIP_PS	switch	`NXGFX_SKIP_PS=<key>[,<key>...]` (diagnosis, with a replay): draws with one of these pixel shaders are skipped, to	src/graphics/src/vk/exec.rs
 NXGFX_SLOW_MS	switch	frames the sizes the game renders at (`[vk] render sizes …`); a frame longer than `NXGFX_SLOW_MS` (50) gets a	src/graphics/src/vk/perf.rs
 NXGFX_SPARSE	switch	waits on. `NXGFX_SPARSE=0`: sparse textures are whole images (as before). `NXGFX_SPARSE_MIB`: slot memory cap	src/graphics/src/vk/sparse.rs
@@ -158,18 +165,21 @@ NXGFX_TEST_SDK	test	NXGFX_TEST_SDK=<a Switch 2 game's exefs/sdk>	src/graphics/te
 NXGFX_TEST_SHADERS	test	memory budget. Uses `NXGFX_TEST_SHADERS` (default: the workspace's `build/shaders/mk8d`); skipped when absent.	src/graphics/tests/shaders_lane_c.rs
 NXGFX_TEX_CAP	switch	textures in the shared descriptor table at most (default 262144, within the device limit)	src/graphics/src/vk/layout.rs
 NXGFX_TEX_WB	switch	are the storage's bytes: true for every format let through here). `NXGFX_TEX_WB=1` on (off by default: `K2-mkw16`'s race washed out with it).	src/graphics/src/vk/exec.rs, src/graphics/tests/gpu.rs
-NXGFX_TRANSLATE_CHECK	diagnostic	`NXGFX_TRANSLATE_CHECK=1`: each segment's pre-pass entry state is compared with the state the segment before it left; differences logged	src/graphics/src/vk/exec.rs
+NXGFX_TRANSLATE_BALANCE	switch	MKW-AHEAD: a stream translated in parallel is cut into about one segment per lane, of equal draws (its draws up to its first wait that parks, over the lanes; at least 32, at most `NXGFX_TRANSLATE_SEG`), instead of fixed-size segments. Default on; `0`: fixed sizes as before	src/graphics/src/vk/exec.rs
+NXGFX_TRANSLATE_CHECK	diagnostic`NXGFX_TRANSLATE_CHECK=1`: each segment's pre-pass entry state is compared with the state the segment before it left; differences logged	src/graphics/src/vk/exec.rs
 NXGFX_TRANSLATE_GATE	diagnostic	`NXGFX_TRANSLATE_GATE=all`: every gated change of shared state in a parallel translation counts as order-dependent (reference mode for A/B runs)	src/graphics/src/vk/gate.rs
 NXGFX_TRANSLATE_MIDCUT	switch	a segment is also cut before a draw inside a pass once it holds this many draws (default 256; 0: only where the pass ends anyway)	src/graphics/src/vk/exec.rs
 NXGFX_TRANSLATE_RARE_SPLIT	switch	`NXGFX_TRANSLATE_RARE_SPLIT=1`: a stream with a DLSS / downsample / depth-resolve record translates only the segments holding one serially, the runs between them in parallel (default off: the whole stream one segment after another on the replay thread)	src/graphics/src/vk/exec.rs
 NXGFX_ADDR_CACHE	switch	`NXGFX_ADDR_CACHE=0`: the replay asks `mem::room` / `mem::resolve` at every binding instead of its per-thread memos (keyed by `POOL_GEN` and the virtual pools' generation)	src/graphics/src/vk/exec.rs
-NXGFX_VIEW_SHARE	switch	`NXGFX_VIEW_SHARE=1`: later segments of a parallel translation use an earlier segment's texture-view lookups (default off: each segment looks its views up on its own)	src/graphics/src/vk/gate.rs
+NXGFX_VIEW_SHARE	switch`NXGFX_VIEW_SHARE=1`: later segments of a parallel translation use an earlier segment's texture-view lookups (default off: each segment looks its views up on its own)	src/graphics/src/vk/gate.rs
 NXGFX_TRANSLATE_MIN	switchstreams with fewer draws are translated in one piece (default 64)	src/graphics/src/vk/exec.rs
 NXGFX_TRANSLATE_SEG	switch	a segment ends at the first record that ends the pass after this many draws (default 256)	src/graphics/src/vk/exec.rs
 NXGFX_TRANSLATE_THREADS	switch	translation lanes for long streams (MKW-RECORD): 0 one piece as before, 1 segments one after another on the replay thread, N > 1 the replay thread and N - 1 `vk translate` threads in parallel	src/graphics/src/vk/exec.rs
 NXGFX_UPLOAD_MB	switch	`NXGFX_UPLOAD_MB` (default 64; 0: no budget).	src/graphics/src/vk/mem.rs
 NXGFX_UPLOAD_SKIP	switch	`NXGFX_UPLOAD_SKIP=0`: every CPU-written page is uploaded; by default a whole page whose bytes are what the GPU copy holds (its last upload, or the GPU's bytes re-armed at its write-back's landing) is left out (`upskip`; UPLOAD-SYNC fixed the OOT-FOREST2 audit's H1/H2/M1/M2).	src/graphics/src/vk/upskip.rs
 NXGFX_UPLOAD_TRACE	diagnostic`NXGFX_UPLOAD_TRACE=1` (diagnosis): the pool summary also logs what the pool sync uploads, by pool, and how much of it was unchanged since its last upload.	src/graphics/src/vk/uptrace.rs
+NXGFX_USE_SYNC	switch	Chunk tracking (USE-SYNC; needs `NXGFX_SEAL`): every watched mirror that shares no page, lies in one allocation and has had no write-back landing for `NXGFX_SEAL_FRAMES` is made read-only even when the CPU writes it; a store opens only its 64 KiB chunk, and the scans ask a tracked pool's open chunks only. `1` (default) on; `verify` also peeks every tracked pool's closed chunks at every scanning sync and logs a page written there (a store the chunk scan missed) red, then takes it; `0` off (whole quiet pools only, as SCAN-COST left it)	src/graphics/src/vk/seal.rs, src/graphics/src/vk/mem.rs
+NXGFX_USE_SYNC_QUIET	switch	Frames an open chunk stays open after it was last found written (default 8): chunks written every frame or every other frame stay open (no fault a frame), a chunk written once is protected again after this many quiet frames	src/graphics/src/vk/seal.rs
 NXGFX_UPSCALE	switch`NXGFX_UPSCALE=standard` (or the ini's `upscale=standard`) keeps the linear blit; `NXGFX_SHARPNESS` 0..1 (0.5).	src/graphics/src/vk/upscale.rs
 NXGFX_VALIDATION	diagnostic	`1` turns the Vulkan validation layer on (the GPU tests set it)	src/graphics/src/vk/device.rs, src/graphics/src/vk/newndve/gpu_tests.rs, src/graphics/tests/common/mod.rs
 NXGFX_VIN_SKIP	switch	NXGFX_VIN_SKIP=0: vertex input set up at every draw.	src/graphics/src/vk/exec.rs
@@ -179,6 +189,10 @@ NXGFX_VRAM_EVICT_PCT	switch	VRAM eviction: over the budget's threshold (`NXGFX_V
 NXGFX_WAIT_DIAG	switch	Opt-in CPU-side wait ledger (NXGFX_WAIT_DIAG=1). No driver calls or guest-memory reads on the observer.	src/graphics/src/vk/wait_diag.rs, src/os/src/services/codec_video.rs
 NXGFX_WATCH_ADDR	switch	`NXGFX_WATCH_ADDR=<hex>`: images made / released over that address are logged (diagnostics).	src/graphics/src/vk/image.rs, src/graphics/src/vk/mem.rs
 NXGFX_WB_GUARD	switch	stale, the black stretches). Those pieces upload once it has landed (NXGFX_WB_GUARD=0: uploaded at once, as before).	src/graphics/src/vk/mem.rs
+NXGFX_LAND_PRE	switch	`NXGFX_LAND_PRE=0`: a write-back landing compares its pages with the baseline and hashes them under the pool lock, as before (OOT-DESC); by default that is done before the lock is taken	src/graphics/src/vk/mem.rs
+NXGFX_PREHASH	switch	`NXGFX_PREHASH=0`: the upload skip hashes each CPU-written range's pages as it decides them, as before (OOT-DESC); by default a pool sync's scan hashes all the pages it found written at once on the page-hash threads	src/graphics/src/vk/upskip.rs
+NXGFX_NOTE_MEMO	switch	`NXGFX_NOTE_MEMO=0`: every GPU-write note takes the pool lock, as before (OOT-DESC); by default a recording's repeat of the same note with no pool change since returns at once	src/graphics/src/vk/mem.rs
+NXGFX_WB_RECYCLE	switch	`NXGFX_WB_RECYCLE=0`: a submission's write-back host buffers are made and freed per submission as before (OOT-DESC); by default they are kept and reused (power-of-two sizes from 64 KiB, at most 64 MB kept)	src/graphics/src/vk/queue.rs
 NXGFX_WALKER_PARKED	switch	`NXGFX_WALKER_PARKED=0`: a present behind parked work is not covered by the pool walker's walk (it scans every pool)	src/graphics/src/vk/queue.rs
 NXGFX_WALKER_REWALK	switch	`NXGFX_WALKER_REWALK=0`: the pool walker does not walk again while a present waits in the queue	src/graphics/src/vk/mem.rs
 NXGFX_WALKER_SYNCS	switch	`NXGFX_WALKER_SYNCS=0`: the pool walker's walks cover presents' syncs only (not other syncs, which then scan themselves)	src/graphics/src/vk/mem.rs

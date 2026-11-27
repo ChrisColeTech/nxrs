@@ -101,6 +101,7 @@ pub fn present(q: &queue_t, w: &mut win_t, idx: i32) {
         None
     };
     w.presents += 1;
+    vk::occl::note_present();
     if vk::queue::aq_on() {
         super::blocking(|| vk::queue::aq_wait_room(true));
     }
