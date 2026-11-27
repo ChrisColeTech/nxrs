@@ -1253,6 +1253,14 @@ pub fn build(a: &BuildArgs, out: &Out) -> Result<Built> {
                     .filter(|_| std::env::var("NXRS_WEB_SPLIT").as_deref() == Ok("1"));
                 match cc::find_web_lib() {
                     Some(lib) => {
+                        if let Some(root) = cc::web_lib_dev_tree(&lib) {
+                            let secs = cc::refresh_web_lib(&root)?;
+                            out.say(&format!(
+                                "  web engine library brought up to date with {} ({secs:.1}s)",
+                                root.display()
+                            ));
+                        }
+                        cc::check_web_lib(&lib)?;
                         out.say(&format!("  with {} ({WEB_ENTRY})", lib.display()));
                         cc::link_web(&clang, &objs, Some(&lib), &obj, &exe, hot.is_some())?;
                     }

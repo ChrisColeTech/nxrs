@@ -15,6 +15,21 @@ pub mod saves;
 
 use std::sync::atomic::AtomicU32;
 
+/// The page interface this library was built for, kept in the library's bytes for `nxrs-build`'s check
+/// (`translator::loader::layout::WEB_HOST_PROTOCOL`).
+#[used]
+#[no_mangle]
+pub static NXWEB_HOST_PROTOCOL: [u8; translator::loader::layout::WEB_HOST_PROTOCOL.len()] = {
+    let s = translator::loader::layout::WEB_HOST_PROTOCOL.as_bytes();
+    let mut a = [0u8; translator::loader::layout::WEB_HOST_PROTOCOL.len()];
+    let mut i = 0;
+    while i < s.len() {
+        a[i] = s[i];
+        i += 1;
+    }
+    a
+};
+
 extern "C" {
     // src/web/nxrs-lib.js (proxied to the page's thread)
     pub(crate) fn nxweb_io_start(table: *const u32);

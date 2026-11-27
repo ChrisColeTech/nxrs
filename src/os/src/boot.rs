@@ -172,6 +172,8 @@ fn run(data: &Path, modules: Vec<Module>, hook: Option<InitHook>) -> Result<(), 
 
     let lo = modules.iter().map(|m| m.base).min().unwrap();
     let hi = modules.iter().map(|m| m.base + m.size).max().unwrap();
+    // the compact map (the web) splits its heap and alias block by these
+    nxrt::mem::set_compact_process(prof.pool, prof.sys_resource != 0);
     let mut space = Space::new(
         Range {
             base: lo,

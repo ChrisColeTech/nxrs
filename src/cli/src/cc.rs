@@ -1123,6 +1123,82 @@ pub fn find_web_lib() -> Option<PathBuf> {
         .find(|p| p.is_file())
 }
 
+/// The development tree a web library found there belongs to (`<root>\target\wasm64-unknown-emscripten\release\
+/// libnxos.a` with `<root>\scripts\build\web.ps1`); None for a shipped library or one `NXRS_WEB_LIB` names.
+pub fn web_lib_dev_tree(lib: &Path) -> Option<PathBuf> {
+    if std::env::var_os("NXRS_WEB_LIB").is_some() {
+        return None;
+    }
+    let release = lib.parent()?;
+    let triple = release.parent()?;
+    let target = triple.parent()?;
+    let named = |p: &Path, n: &str| p.file_name().is_some_and(|f| f.eq_ignore_ascii_case(n));
+    if !(named(release, "release") && named(triple, "wasm64-unknown-emscripten") && named(target, "target")) {
+        return None;
+    }
+    let root = target.parent()?;
+    root.join("scripts").join("build").join("web.ps1").is_file().then(|| root.to_path_buf())
+}
+
+/// Brings a development tree's web library up to date with its sources (`scripts/build/web.ps1 -Crates os`; cargo
+/// decides what is stale, a current library costs a few seconds). WEB-W10-MK8D: nothing rebuilt the library when web
+/// waves were merged, so the launcher linked one from before the I/O worker with the current page, and the game
+/// died at its first read. Returns the seconds it took.
+pub fn refresh_web_lib(root: &Path) -> Result<f64> {
+    let t = Instant::now();
+    let script = root.join("scripts").join("build").join("web.ps1");
+    let mut last = String::new();
+    for shell in ["pwsh", "powershell"] {
+        let o = match Command::new(shell)
+            .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
+            .arg(&script)
+            .args(["-Crates", "os"])
+            .current_dir(root)
+            .output()
+        {
+            Ok(o) => o,
+            Err(e) => {
+                last = format!("{shell}: {e}");
+                continue;
+            }
+        };
+        if !o.status.success() {
+            let text = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
+            bail!(
+                "the web engine library could not be brought up to date ({} -Crates os): {}",
+                script.display(),
+                tail(&text, 3000)
+            );
+        }
+        return Ok(t.elapsed().as_secs_f64());
+    }
+    bail!("the web engine library could not be brought up to date: no PowerShell to run {} ({last})", script.display())
+}
+
+/// Refuses a web library built for another page interface than this nxrs-build's host files
+/// (`translator::loader::layout::WEB_HOST_PROTOCOL`, which the library carries as bytes).
+pub fn check_web_lib(lib: &Path) -> Result<()> {
+    let bytes = std::fs::read(lib).with_context(|| format!("reading {}", lib.display()))?;
+    match web_lib_protocol(&bytes) {
+        Some(p) if p == translator::loader::layout::WEB_HOST_PROTOCOL => Ok(()),
+        found => bail!(
+            "the web engine library {} was built for another page ({}; this nxrs-build's page is {}): rebuild it \
+             (scripts/build/web.ps1 -Crates os) or name the right one with NXRS_WEB_LIB",
+            lib.display(),
+            found.unwrap_or("no protocol mark: older than the I/O worker"),
+            translator::loader::layout::WEB_HOST_PROTOCOL
+        ),
+    }
+}
+
+/// The protocol mark (`nxrs-web-host-protocol=<n>;`) a web library's bytes carry, if any.
+fn web_lib_protocol(bytes: &[u8]) -> Option<&str> {
+    const KEY: &[u8] = b"nxrs-web-host-protocol=";
+    let at = bytes.windows(KEY.len()).position(|w| w == KEY)?;
+    let end = bytes[at..].iter().take(64).position(|&b| b == b';')?;
+    std::str::from_utf8(&bytes[at..at + end + 1]).ok()
+}
+
 /// The web build's `main`: the game's entry (modules.c) with the page's arguments, on a thread of its own
 /// (`-sPROXY_TO_PTHREAD`), so it may block as the native one does.
 const WEB_MAIN: &str = "// Written by nxrs: the web build's main.\n\
@@ -1332,6 +1408,43 @@ mod tests {
         // a release keeps emsdk's own (no target folder above it)
         let release = Path::new("C:/nxrs").join("nxrs-engine").join("nxrs-build.exe");
         assert_eq!(em_cache_for(&release), None);
+    }
+
+    /// WEB-W10-MK8D: a library without this nxrs-build's page protocol (one from before the I/O worker, or another
+    /// number) is refused; the current one passes.
+    #[test]
+    fn web_library_protocol_is_checked() {
+        let cur = translator::loader::layout::WEB_HOST_PROTOCOL;
+        let mut lib = b"!<arch>\n....unknown title....".to_vec();
+        assert_eq!(web_lib_protocol(&lib), None);
+        let d = std::env::temp_dir().join(format!("nxrs-weblib-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let p = d.join("libnxos.a");
+        std::fs::write(&p, &lib).unwrap();
+        assert!(check_web_lib(&p).unwrap_err().to_string().contains("older than the I/O worker"));
+        std::fs::write(&p, b"..nxrs-web-host-protocol=1;..").unwrap();
+        assert!(check_web_lib(&p).unwrap_err().to_string().contains("protocol=1;"));
+        lib.extend_from_slice(cur.as_bytes());
+        lib.extend_from_slice(b"\0tail");
+        assert_eq!(web_lib_protocol(&lib), Some(cur));
+        std::fs::write(&p, &lib).unwrap();
+        assert!(check_web_lib(&p).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
+    }
+
+    /// Only a development tree's target library is refreshed (by its own web.ps1), never a shipped one.
+    #[test]
+    fn web_library_dev_tree() {
+        let d = std::env::temp_dir().join(format!("nxrs-webtree-{}", std::process::id()));
+        let lib = d.join("target").join("wasm64-unknown-emscripten").join("release").join("libnxos.a");
+        assert_eq!(web_lib_dev_tree(&lib), None);
+        std::fs::create_dir_all(d.join("scripts").join("build")).unwrap();
+        std::fs::write(d.join("scripts").join("build").join("web.ps1"), "").unwrap();
+        if std::env::var_os("NXRS_WEB_LIB").is_none() {
+            assert_eq!(web_lib_dev_tree(&lib), Some(d.clone()));
+        }
+        assert_eq!(web_lib_dev_tree(&d.join("nxrs-engine").join("web").join("libnxos.a")), None);
+        let _ = std::fs::remove_dir_all(&d);
     }
 
     fn fake_clang() -> Clang {
