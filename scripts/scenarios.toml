@@ -71,7 +71,7 @@ t46 = { about = "in the race (steel deck at ~60 FPS)", regions = "kart-hud" }
 
 [mkw-pop]
 title = "Mario Kart World"
-about = "as mkw (menu screens shot), then a shot about every 0.5 s for 40 s of the race (pop-in, missing textures)"
+about = "as mkw (menu screens shot), then 78 shots about every 0.5 s of the race (pop-in, missing textures)"
 # run it with --faults; the window is the dense stretch (the shots cost some FPS: take FPS from mkw). 99 shots in all:
 # the report and sheets take two-digit shot numbers only (`NN-name.png`), so a 100th would be left out
 seconds = 330

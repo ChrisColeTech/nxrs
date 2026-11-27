@@ -1533,10 +1533,16 @@ pub mod passdump {
                 };
                 (im.image, im.tex, im.format, im.extent)
             };
-            let (bpb, bw, bh) = crate::tex::layout::fmt_bpb(tex.d.format);
-            // compressed images as their blocks (an ASTC texture's image is decoded: left out)
+            let (mut bpb, mut bw, mut bh) = crate::tex::layout::fmt_bpb(tex.d.format);
+            // compressed images as their blocks; an ASTC texture's image is decoded: as its RGBA8 texels when decoded
+            // to RGBA8 (the -gpu.bin is then texels, the -mem.bin the ASTC blocks), left out when re-encoded as BC7
             let decoded =
                 crate::tex::format::tex_format(tex.d.format).is_some_and(|tf| tf.astc.is_some());
+            if decoded
+                && matches!(fmt, vk::Format::R8G8B8A8_UNORM | vk::Format::R8G8B8A8_SRGB)
+            {
+                (bpb, bw, bh) = (4, 1, 1);
+            }
             if bpb == 0 || decoded && (bw != 1 || bh != 1) {
                 continue;
             }

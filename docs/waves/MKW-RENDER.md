@@ -135,3 +135,44 @@ What the pass dump of `20261127-101211-rd-dump` (frame 13044, 271 s; files in th
   ser33393, BC7_SRGB ser33395), small per-object textures (275x275 BC7, 165x165 RGBA8 viewed (R,0,1,1), 138x138
   SRGB), probe arrays (128x128x12 cube array from passes 44-66), a 256x256 RGBA16F LUT (pass 9). A BC6H lighting atlas
   whose tiles are zero, or a mask texture read as zero, would give exactly this.
+
+## 5. The 18 draws a frame skipped for "no pipeline" (missing geometry; not changed)
+
+Every run, base and after, skips **18 draws a frame** from boot to the race (`skip-no-pipeline` 1,080 a period): 3
+pipelines on MKW's `pipeline-crashed.bin` (237 bytes, 2026-11-24, the old machine's compiler-crash era; a process that
+ends abruptly while compiling has its in-flight pipelines recorded there). Experiment `20261127-100617-rd-v1-noblk-pop`
+(the file moved aside, restored byte-identical afterwards, SHA-256 `FE2AA577…`): **all three compiled cleanly**, no new
+crash list was written, the process exited normally, skipped draws 18 → 0 a frame. The sheets show no clear difference
+(the 18 draws are not the shrubs). The file is back as it was: earlier waves left dropping such entries to the owner
+(ledger, OOT-NAN / ROUTES-SS). See Questions.
+
+## 6. Measured (GPU 0; a web wave's cargo / wasm-opt ran during the later runs)
+
+| run (`build/play/`) | build | scenario | FPS / 5 % low (window) | stand-ins (run) | gate (run) | route |
+|---|---|---|---|---|---|---|
+| `20261127-094847-rd-base-pop` | base `dd9baed` | `mkw-pop` + tex trace + faults | 41.5 / 28.6 [245, 290] | 6,653 | 4,234 | n/a (old menu timing) |
+| `20261127-100011-rd-v1-pop` | `9cd78a4` | same | 44.5 / 28.0 | 8 | 4,296 | grid n/a (no ref yet) |
+| `20261127-100617-rd-v1-noblk-pop` | `9cd78a4`, crash list aside, `--diag pipeline` | same | 37.8 / 26.0 | 6 | 4,297 | - |
+| `20261127-103033-rd-v2-pop` | + NoContraction (taken out) | same, first run of new SPIR-V | 53.1 / 46.0 | 39 | 4,294 | - |
+| `20261127-104040-rd-v3-pop` | `41d835d` | same | **53.2 / 45.0** | **1** | **157** | grid on (reference recorded from it) |
+| `20261127-102015-rd-verify` | `9cd78a4`, `NXGFX_USE_SYNC=verify` | `mkw` | 34.2 / 30.3 (verify cost) | - | - | 3/3 on; **0 pages missed** |
+| `20261127-104646-rd-final-mkw` | `41d835d` | `mkw` | **57.4 / 48.3** [250, 325] | 2 | 172 | **3/3 on** |
+
+Against the brief's baseline (the merged build ~50-56 FPS, 5 % low ~46; MKW-HEAVY's `hv-v2` 56.1 / 46.0, `hv-final2`
+51.4): the final `mkw` run is 57.4 / 48.3, not worse. Same-scenario before/after: `mkw-pop` 41.5 / 28.6 → 53.2 / 45.0
+(both with the tex trace and fault captures; one run each, other work on the machine, so indicative). The final run's
+second stand-in (289 s): a slot naming an object `never made (or released long ago)`, outside `Images::released`'s
+newest 65,536: not made again (one ID, once).
+
+## 7. Pictures before / after (the harness's shots)
+
+| what | before (base `dd9baed`) | after (`41d835d`) |
+|---|---|---|
+| character select | `rd-base-pop/faults/fault-08-p2464.png` (no portraits, no model, empty bracket) | `rd-v3-pop/07-o6.png`, `rd-final-mkw/06-o5.png`, `rd-v1-pop/06-o5.png` (full grid, Mario model, name banner) |
+| kart select | (not shot in the base run: menus passed before its shots) | `rd-v3-pop/08-o7.png` (kart grid, Standard Kart) |
+| race HUD lap counter | `rd-base-pop/16-pop.png`… `1 3` | `rd-v3-pop/21-pop.png`… `1/3` with flag icon |
+| race, 0.5 s apart | `rd-base-pop/sheet-2..8.png` | `rd-v3-pop/sheet-2..8.png` |
+| roadside shrubs | `rd-base-pop/32-pop.png`, `51-pop.png` (black / dark maroon) | `rd-v3-pop/28-pop.png`, `36-pop.png`, `59-pop.png` (**still black**) |
+
+The base run's menus came before its first menu shot (§1), so its only picture of the character select is the fault
+capture; the base run's race and the after runs' race pass different spots at a given second (game time drifts).
