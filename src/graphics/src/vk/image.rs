@@ -687,8 +687,8 @@ fn page_hashes(lo: u64, hi: u64) -> Vec<u64> {
 }
 
 /// Ranges (address, bytes) sorted and merged where they overlap or touch: the texture check's dirty ranges, which it
-/// reads as sorted and disjoint (web: the sync's ranges joined by the textures' compare by use).
-#[cfg_attr(not(target_os = "emscripten"), allow(dead_code))]
+/// reads as sorted and disjoint (web: the sync's ranges joined by the textures' compare by use). The same bytes,
+/// each once.
 fn merge_ranges(v: impl Iterator<Item = (u64, u64)>) -> Vec<(u64, u64)> {
     let mut v: Vec<(u64, u64)> = v.filter(|r| r.1 > 0).collect();
     v.sort_unstable();
@@ -700,6 +700,17 @@ fn merge_ranges(v: impl Iterator<Item = (u64, u64)>) -> Vec<(u64, u64)> {
         }
     }
     out
+}
+
+#[cfg(test)]
+mod merge_tests {
+    /// Out-of-order, overlapping, nested, touching and empty ranges come out sorted, disjoint, covering the same bytes.
+    #[test]
+    fn ranges_are_sorted_and_merged() {
+        let r = [(0x5000, 0x1000), (0x1000, 0x2000), (0x2000, 0x800), (0x3000, 0x10), (0x9000, 0), (0x4000, 0x1000)];
+        assert_eq!(super::merge_ranges(r.iter().copied()), vec![(0x1000, 0x2010), (0x4000, 0x2000)]);
+        assert_eq!(super::merge_ranges(std::iter::empty()), vec![]);
+    }
 }
 
 /// Whether a write to [a, a + n) changed a page of the texture's storage [lo, hi) since its hashes were taken (the
@@ -3901,6 +3912,16 @@ impl Gpu {
             }
         };
         if !dirty.is_empty() && !imgs.by_addr.is_empty() {
+            // the pool sync hands each pool's ranges in pool order, not address order: in order and merged here, the
+            // lookups below take the sorted paths (unsorted, every texture hit filtered every range: OoT's syncs spent
+            // ~6 % of the replay thread here, OOT-DESC). Merged ranges are the same bytes, each counted once.
+            let merged;
+            let dirty: &[(u64, u64)] = if dirty.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0) {
+                dirty
+            } else {
+                merged = merge_ranges(dirty.iter().copied());
+                &merged
+            };
             let max = imgs.max_size;
             let mut hit = Vec::new();
             let dirty_sorted = dirty.windows(2).all(|w| w[0].0 + w[0].1 <= w[1].0);
@@ -4042,26 +4063,22 @@ impl Gpu {
         let vgen = crate::nvn::vpool::generation();
         let look = vgen != imgs.sparse_seen;
         imgs.sparse_seen = vgen;
-        for im in imgs.by_serial.values_mut() {
-            let Some((runs, gen)) = im.sparse.as_ref() else {
-                continue;
-            };
-            if im.gpu_owned {
-                continue;
+        // and the images due (init or upload): one walk over every image with the sparse check (two walks of ~6,700
+        // images at each of OoT's ~11 submissions a frame were most of this function's time, OOT-DESC)
+        let mut serials: Vec<u64> = Vec::new();
+        for (s, im) in imgs.by_serial.iter_mut() {
+            if let Some((runs, gen)) = im.sparse.as_ref().filter(|_| !im.gpu_owned) {
+                let hit = dirty
+                    .iter()
+                    .any(|&(a, n)| runs.iter().any(|&(b, m)| a < b + m && b < a + n));
+                if hit || (look && crate::nvn::vpool::gen_in(im.tex.mem as u64, im.tex.l.size) > *gen) {
+                    im.needs_upload = true;
+                }
             }
-            let hit = dirty
-                .iter()
-                .any(|&(a, n)| runs.iter().any(|&(b, m)| a < b + m && b < a + n));
-            if hit || (look && crate::nvn::vpool::gen_in(im.tex.mem as u64, im.tex.l.size) > *gen) {
-                im.needs_upload = true;
+            if im.needs_init || im.needs_upload {
+                serials.push(*s);
             }
         }
-        let serials: Vec<u64> = imgs
-            .by_serial
-            .iter()
-            .filter(|(_, i)| i.needs_init || i.needs_upload)
-            .map(|(s, _)| *s)
-            .collect();
         // the textures' storage read and laid out linearly on several threads first (a streaming burst: Pokemon
         // Legends: Z-A uploads ~1,400 textures in a few seconds, 0.5 ms each on one thread: frames of 200-370 ms)
         let t_scan = t_all.elapsed().as_secs_f64();

@@ -75,7 +75,10 @@ impl App {
             .and_then(|url| browser::open(&b, &url).map(|_| url))
         {
             Ok(url) => self.job_label = fill(ww::OPENED, &[&b.name, &url]),
-            Err(err) => self.message(ww::NOT_SERVED_TITLE, &err, true),
+            Err(err) => {
+                let play = crate::constants::words_contexts::PLAY;
+                self.message(play, ww::NOT_SERVED_TITLE, &err, true)
+            }
         }
     }
 

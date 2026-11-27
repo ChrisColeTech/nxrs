@@ -35,16 +35,54 @@ pub struct Check {
     pub yes_on: Action,
 }
 
+/// A question's words: the window's title, the heading (the question itself), the text under it
+/// (may be empty) and the verb of its one filled button ("Remove"); the X and Escape answer No.
+/// `why_not`: why the verb cannot answer now (its disabled button's tooltip); empty: it can.
+/// `lead`: a second verb, a ghost button at the footer's leading side (Play's and Build's Web).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Ask {
+    pub title: String,
+    pub heading: String,
+    pub text: String,
+    pub verb: String,
+    pub why_not: String,
+    pub lead: Option<Box<Lead>>,
+}
+
+/// A question's leading verb: its label, what it answers, why it cannot now (empty: it can).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Lead {
+    pub verb: String,
+    pub action: Action,
+    pub why_not: String,
+}
+
+impl Ask {
+    pub fn new(title: &str, heading: &str, text: &str, verb: &str) -> Self {
+        let own = |s: &str| s.to_string();
+        Self {
+            title: own(title),
+            heading: own(heading),
+            text: own(text),
+            verb: own(verb),
+            why_not: String::new(),
+            lead: None,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Surface {
+    /// A message box: `context` titles the window (the task or place it belongs to: "Add game",
+    /// "Build"), `title` is its heading (the message itself: "Cannot add game").
     Message {
+        context: String,
         title: String,
         text: String,
         error: bool,
     },
     Question {
-        title: String,
-        text: String,
+        ask: Ask,
         yes: Action,
         no: Option<Action>,
         default_no: bool,
@@ -54,11 +92,6 @@ pub enum Surface {
     Settings(Box<SettingsDraft>),
     Dlc(ListWindow),
     Updates(ListWindow),
-    /// Play or Build (`build`) asks where: Native or Web (owner, 2026-11-27: one Play, one Build)
-    Target {
-        game_id: String,
-        build: bool,
-    },
     ToolPopup,
 }
 
@@ -72,7 +105,6 @@ impl Surface {
             Surface::Settings(_) => "settings".into(),
             Surface::Dlc(_) => "dlc".into(),
             Surface::Updates(_) => "updates".into(),
-            Surface::Target { .. } => "target".into(),
             Surface::ToolPopup => "tool-popup".into(),
         }
     }

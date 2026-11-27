@@ -31,6 +31,12 @@ pub enum Icon {
     Dlc,
     /// an arrow into a tray: updates
     Updates,
+    /// an "i": a message
+    Info,
+    /// an "!": an error (drawn in the error red)
+    Error,
+    /// a "?": a question
+    Question,
 }
 
 /// A section's icon, centred on `center` (the rail's entries, the page's group tiles).
@@ -106,6 +112,24 @@ pub fn paint(ui: &Ui, center: Pos2, kind: Icon, ink: Color32) {
         Icon::Play => {
             let points = vec![at(-0.5, -0.8), at(0.8, 0.0), at(-0.5, 0.8)];
             p.add(egui::Shape::convex_polygon(points, Color32::TRANSPARENT, s));
+        }
+        Icon::Info | Icon::Error => {
+            let s = Stroke::new(2.0, ink);
+            let (dot, from, to) = match kind {
+                Icon::Info => (-0.75, -0.3, 0.85),
+                _ => (0.8, -0.85, 0.35),
+            };
+            p.circle_filled(at(0.0, dot), 1.6, ink);
+            p.line_segment([at(0.0, from), at(0.0, to)], s);
+        }
+        Icon::Question => {
+            let hook: Vec<Pos2> = (0..=10)
+                .map(|i| std::f32::consts::PI * (1.0 + i as f32 * 0.13))
+                .map(|a| at(a.cos() * 0.5, -0.4 + a.sin() * 0.5))
+                .chain([at(0.0, 0.35)])
+                .collect();
+            p.add(egui::Shape::line(hook, Stroke::new(2.0, ink)));
+            p.circle_filled(at(0.0, 0.82), 1.6, ink);
         }
     }
 }

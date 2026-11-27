@@ -73,7 +73,8 @@ impl App {
         if let Some(win) = self.updates_window() {
             win.status = Some((text, false));
         } else if !problems.is_empty() {
-            self.message(w::CANNOT_INSTALL, &problems.join("\n"), true);
+            let context = crate::constants::words_contexts::UPDATES;
+            self.message(context, w::CANNOT_INSTALL, &problems.join("\n"), true);
         }
         true
     }

@@ -1,4 +1,4 @@
-//! Through the real shell: Remove from library's tick box (ticked by default; unticked, Yes keeps the
+//! Through the real shell: Remove from library's tick box (ticked by default; unticked, Remove keeps the
 //! build) in the question box, and Settings > Build defaults' Move, the only way besides
 //! `--migrate-builds` that old-layout build folders move (opening the library never moves them).
 
@@ -38,7 +38,13 @@ fn remove_ticked_by_default_deletes_the_build() {
     let (mut h, g) = remove_dialog(&dir);
     let tick = h.get_by_role_and_label(Role::CheckBox, TICK);
     assert_eq!(tick.accesskit_node().toggled(), Some(Toggled::True));
-    h.get_by_label("Yes").click();
+    // the question is the heading; its one button is the verb (no Yes / No)
+    assert!(
+        h.query_by_label("Remove “Kart” from the library?")
+            .is_some()
+    );
+    assert!(h.query_by_label("Yes").is_none() && h.query_by_label("No").is_none());
+    h.get_by_label("Remove").click();
     h.run_steps(4);
     assert!(h.state().app.lib.games.is_empty());
     assert!(!Path::new(&g.build_dir).exists(), "the build went");
@@ -56,7 +62,7 @@ fn remove_unticked_keeps_the_build() {
     h.run_steps(2);
     let tick = h.get_by_role_and_label(Role::CheckBox, TICK);
     assert_eq!(tick.accesskit_node().toggled(), Some(Toggled::False));
-    h.get_by_label("Yes").click();
+    h.get_by_label("Remove").click();
     h.run_steps(4);
     assert!(h.state().app.lib.games.is_empty());
     assert!(Path::new(&g.executable()).is_file(), "the build stays");

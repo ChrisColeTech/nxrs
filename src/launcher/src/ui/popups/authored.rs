@@ -1,5 +1,5 @@
 //! The authored scaffold's parts: the title header with its close button (`Close <title>`), the
-//! connected primary tabs, the footer with its one primary action.
+//! footer with its one primary action and nothing that only dismisses.
 
 use crate::constants::popups as c;
 use crate::ui::theme::{self, Palette};
@@ -37,79 +37,39 @@ pub fn header(ui: &mut Ui, width: f32, title: &str, close_id: &str) -> bool {
     pressed
 }
 
-/// The footer: a hairline, then Cancel and the primary action at the right (primary last).
-/// (cancelled, primary pressed).
-pub fn footer(
-    ui: &mut Ui,
-    p: &Palette,
-    primary: &str,
-    enabled: bool,
-    cancel: &str,
-) -> (bool, bool) {
-    footer_bar(ui, p, |_| {}, cancel, Some((primary, enabled, "")))
+/// The footer of a window whose only action is its commit (Apply, Add game): true when pressed.
+pub fn footer(ui: &mut Ui, p: &Palette, primary: &str, enabled: bool) -> bool {
+    footer_bar(ui, p, |_| {}, (primary, enabled, ""))
 }
 
-/// Every child window's footer: a hairline; the surface's own verbs (`lead`, ghost buttons) at the
-/// leading side; at the trailing side the ghost dismissal (Cancel, No, Close; empty: none) and the
-/// one filled primary, last: (label, enabled, tooltip); None: a surface with nothing to commit.
-/// (dismissed, primary pressed).
+/// Every child window's footer, which holds only real actions: a hairline; the surface's own verbs
+/// (`lead`, ghost buttons) at the leading side; the one filled primary, last: (label, enabled,
+/// tooltip). Dismissal is never here: the header's X and Escape close, cancel or answer No.
+/// True when the primary was pressed.
 pub fn footer_bar(
     ui: &mut Ui,
     p: &Palette,
     lead: impl FnOnce(&mut Ui),
-    ghost: &str,
-    primary: Option<(&str, bool, &str)>,
-) -> (bool, bool) {
+    (label, enabled, tip): (&str, bool, &str),
+) -> bool {
     let rect = ui.available_rect_before_wrap();
     ui.painter()
         .hline(rect.x_range(), rect.top(), Stroke::new(1.0, p.border));
     ui.add_space(c::GAP + 2.0);
-    let mut out = (false, false);
+    let mut pressed = false;
     ui.horizontal(|ui| {
         lead(ui);
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if let Some((label, enabled, tip)) = primary {
-                out.1 = button::tip(button::primary(ui, p, label, enabled), tip).clicked();
-            }
-            if !ghost.is_empty() {
-                out.0 = button::ghost(ui, ghost, true).clicked();
-            }
+            pressed = button::tip(button::primary(ui, p, label, enabled), tip).clicked();
         });
     });
-    out
+    pressed
 }
 
-/// The footer at the bottom of the space left (a message's, a list window's).
-pub fn footer_at_bottom(
-    ui: &mut Ui,
-    p: &Palette,
-    lead: impl FnOnce(&mut Ui),
-    ghost: &str,
-    primary: Option<(&str, bool, &str)>,
-) -> (bool, bool) {
+/// The footer at the bottom of the space left (a question's).
+pub fn footer_at_bottom(ui: &mut Ui, p: &Palette, primary: (&str, bool, &str)) -> bool {
     ui.add_space((ui.available_height() - c::FOOTER).max(0.0));
-    footer_bar(ui, p, lead, ghost, primary)
-}
-
-/// A choice dialog's footer at the bottom of the space left (owner, 2026-11-27: its choices are its
-/// buttons, equal weight, each acts at once; no dismissal, the header X): a hairline, then the
-/// choices as filled buttons at the trailing side in their order, each (label, enabled, tooltip or
-/// the reason it is disabled). The one pressed.
-pub fn footer_choices(ui: &mut Ui, p: &Palette, choices: &[(&str, bool, &str)]) -> Option<usize> {
-    ui.add_space((ui.available_height() - c::FOOTER).max(0.0));
-    let rect = ui.available_rect_before_wrap();
-    ui.painter()
-        .hline(rect.x_range(), rect.top(), Stroke::new(1.0, p.border));
-    ui.add_space(c::GAP + 2.0);
-    let mut out = None;
-    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-        for (at, (label, enabled, tip)) in choices.iter().enumerate().rev() {
-            if button::tip(button::primary(ui, p, label, *enabled), tip).clicked() {
-                out = Some(at);
-            }
-        }
-    });
-    out
+    footer_bar(ui, p, |_| {}, primary)
 }
 
 /// An in-window popover's frame (Search & Filter, Build tools): raised fill, border, the shared

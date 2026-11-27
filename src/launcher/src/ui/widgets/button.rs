@@ -6,7 +6,7 @@ use crate::constants::popups as c;
 use crate::ui::theme::{self, Palette};
 use egui::{Button, Response, RichText, Stroke, Ui, vec2};
 
-/// The ghost button, the family's default (Cancel, Close, the row and panel verbs): no frame at rest,
+/// The ghost button, the family's default (a dialog's own verbs, row and panel verbs): no frame at rest,
 /// the hover fill under the pointer. Outlines belong to the title bar alone.
 pub fn ghost(ui: &mut Ui, label: &str, enabled: bool) -> Response {
     let button = Button::new(label).frame_when_inactive(false);

@@ -35,25 +35,32 @@ pub fn info(ui: &mut Ui, tip: &str) {
 
 /// A Group's heading; its rows follow.
 pub fn group(ui: &mut Ui, icon: Icon, title: &str, tip: &str) {
+    heading(ui, icon, title, tip, None);
+}
+
+/// The one body header of every dialog and Group: the icon tile, the bold title (wrapped when long),
+/// the info mark when there is an explanation. `ink`: the tile's colour when it is not the accent
+/// (an error's red).
+pub fn heading(ui: &mut Ui, icon: Icon, title: &str, tip: &str, ink: Option<Color32>) {
     let p = theme::of(ui.ctx());
+    // the tile's fill and edge follow its ink: an error's tile is red throughout, never red in green
+    let (ink, fill, edge) = match ink {
+        Some(c) => (c, c.gamma_multiply(0.16), c.gamma_multiply(0.45)),
+        None => (p.accent, p.selected, p.border),
+    };
     ui.add_space(10.0);
     ui.horizontal(|ui| {
         let (tile, _) = ui.allocate_exact_size(vec2(TILE, TILE), Sense::hover());
         let radius = CornerRadius::same(8);
-        ui.painter().rect(
-            tile,
-            radius,
-            p.selected,
-            Stroke::new(1.0, p.border),
-            StrokeKind::Inside,
-        );
-        rail::paint(ui, tile.center(), icon, p.accent);
+        let edge = Stroke::new(1.0, edge);
+        ui.painter()
+            .rect(tile, radius, fill, edge, StrokeKind::Inside);
+        rail::paint(ui, tile.center(), icon, ink);
         ui.add_space(4.0);
-        ui.label(
-            egui::RichText::new(title)
-                .font(theme::semibold(16.0))
-                .color(p.text),
-        );
+        let text = egui::RichText::new(title)
+            .font(theme::semibold(16.0))
+            .color(p.text);
+        ui.add(egui::Label::new(text).wrap());
         if !tip.is_empty() {
             info(ui, tip);
         }

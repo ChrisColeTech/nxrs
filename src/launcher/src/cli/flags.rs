@@ -63,7 +63,7 @@ pub fn command() -> Command {
         .arg(value("smoke-build", "input", "Build a synthetic test input and exit (diagnostics)"))
         .arg(value("build-output", "directory", "Output folder for --smoke-build"))
         .arg(flag("migrate-builds", "Move build folders of the old layout (SwitchRecomp Builds\\<name> [nxrs]) to <source folder>\\nxrs\\<name>, print what moved and exit (with --select-title: that game only)"))
-        .arg(value("show-window", "name", "Open a window: remove (Remove from library), about, build-settings (Settings > Build defaults), tool (the build output popped out), play / build (the Native / Web chooser)")
-            .value_parser(["remove", "about", "build-settings", "tool", "play", "build"]))
+        .arg(value("show-window", "name", "Open a window: remove (Remove from library), about, build-settings (Settings > Build defaults), tool (the Build tools popover), close-build (the question a close during a build asks), play / build (the selected game's Play or Build: its Native or Web question)")
+            .value_parser(["remove", "about", "build-settings", "tool", "close-build", "play", "build"]))
         .arg(value("show-add", "package", "Open the Add game window for a package or extracted folder"))
 }

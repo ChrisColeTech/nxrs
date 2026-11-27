@@ -95,10 +95,7 @@ pub fn show(ui: &mut Ui, app: &mut App, win: &mut ListWindow) -> Reply {
         let files = crate::flows::pick_files(w::PICKER, &start, w::FILTER);
         add(app, win, &files);
     }
-    Reply {
-        close: pressed.close,
-        ..Reply::default()
-    }
+    Reply::default()
 }
 
 /// Add DLC… or a drop on the window: the packages go to the main window, which installs them.

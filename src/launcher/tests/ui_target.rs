@@ -1,12 +1,13 @@
 //! One Play and one Build (owner, 2026-11-27): every menu has exactly one of each and no web entries;
-//! Play runs the one version that can play and asks Native or Web only when both can; Build asks, and
-//! the dialog's Web runs the web build through the real shell.
+//! Play runs the one version that can play and asks Native or Web only when both can; Build asks.
+//! The question is the shared question box: its heading names the game, Native its filled verb,
+//! Web the ghost verb at the leading side, the X answering nothing; Web builds through the real shell.
 
 mod common;
 
 use common::*;
 use egui::accesskit::Role;
-use egui_kittest::kittest::Queryable;
+use egui_kittest::kittest::{NodeT, Queryable};
 use egui_kittest::{Harness, HarnessBuilder};
 use nxrs_launcher::constants::words_target as t;
 use nxrs_launcher::flows::surface::Surface;
@@ -34,10 +35,11 @@ fn labels(items: &[Item]) -> Vec<String> {
         .collect()
 }
 
-fn chooser(build: bool) -> Surface {
-    Surface::Target {
-        game_id: "g".into(),
-        build,
+/// Play's or Build's question is the one open surface: its filled verb's answer.
+fn asked(app: &App) -> Option<Action> {
+    match &app.surfaces[..] {
+        [Surface::Question { yes, .. }] => Some(yes.clone()),
+        _ => None,
     }
 }
 
@@ -55,6 +57,12 @@ fn with_web_build(app: &mut App, g: &Game) {
         program: FAKE.into(),
     });
     app.refresh_facts();
+}
+
+fn disabled(h: &Harness<'static, Shell>, label: &str) -> bool {
+    h.get_by_role_and_label(Role::Button, label)
+        .accesskit_node()
+        .is_disabled()
 }
 
 #[test]
@@ -77,23 +85,23 @@ fn play_asks_only_when_both_versions_can_play() {
     let (_t, dir) = tmp();
     let g = built_game(&dir);
     let mut app = app_with(&dir, vec![g.clone()]);
-    // native only: Play (menu, card, Enter) runs it, no chooser
+    // native only: Play (menu, card, Enter) runs it, no question
     for action in [
         Action::Play,
         Action::CardPrimary("g".into()),
         Action::Activate,
     ] {
         app.dispatch(action.clone());
-        assert!(!app.surfaces.contains(&chooser(false)), "{action:?}");
+        assert_ne!(asked(&app), Some(Action::PlayNative), "{action:?}");
         app.surfaces.clear();
     }
     // both: Play asks, once
     with_web_build(&mut app, &g);
     app.dispatch(Action::Play);
     app.dispatch(Action::Play);
-    assert_eq!(app.surfaces, vec![chooser(false)]);
+    assert_eq!(asked(&app), Some(Action::PlayNative));
     app.surfaces.clear();
-    // web only: Play serves it and opens the browser, no chooser
+    // web only: Play serves it and opens the browser, no question
     std::fs::remove_file(g.executable()).unwrap();
     app.refresh_facts();
     assert_eq!(
@@ -113,15 +121,17 @@ fn play_asks_only_when_both_versions_can_play() {
 fn build_asks_and_web_builds() {
     let (_t, dir) = tmp();
     let mut app = app_with(&dir, vec![built_game(&dir)]);
-    for action in [Action::Build, Action::Build] {
-        app.dispatch(action);
-    }
-    assert_eq!(app.surfaces, vec![chooser(true)], "asked once");
+    app.dispatch(Action::Build);
+    app.dispatch(Action::Build);
+    assert_eq!(asked(&app), Some(Action::BuildNative), "asked once");
     let mut h = harness(app);
     h.run_steps(4);
-    // no Cancel: the header X dismisses it
+    // the window names the task; the heading is the question, naming the game; no Cancel or No
     assert!(h.query_by_label("Close Build").is_some());
-    assert!(h.query_by_label("Cancel").is_none());
+    assert!(h.query_by_label_contains("Build Kart natively").is_some());
+    assert!(h.query_by_label("Cancel").is_none() && h.query_by_label("No").is_none());
+    // built and up to date: Native is disabled (its reason its tooltip), Web can build
+    assert!(disabled(&h, t::NATIVE) && !disabled(&h, t::WEB));
     h.get_by_role_and_label(Role::Button, t::WEB).click();
     h.run_steps(4);
     let app = &mut h.state_mut().app;

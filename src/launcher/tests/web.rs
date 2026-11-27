@@ -1,5 +1,5 @@
 //! Build and Play answered Web: the server's answers (headers, ranges, the data folder, paths that
-//! leave the build), `--serve-web`, and the flow from Build's chooser through the fake engine's web
+//! leave the build), `--serve-web`, and the flow from Build's question through the fake engine's web
 //! build to the served page.
 mod common;
 
@@ -189,13 +189,11 @@ fn build_web_then_play_web() {
     assert_eq!(app.why_not("g", true, false), Some(t::UP_TO_DATE.into()));
     assert_eq!(app.why_not("g", false, true), Some(t::NO_WEB_BUILD.into()));
     app.dispatch(Action::Build);
-    let chooser = Surface::Target {
-        game_id: "g".into(),
-        build: true,
+    let Some(Surface::Question { ask: q, .. }) = app.surfaces.pop() else {
+        panic!("Build asks Native or Web")
     };
-    assert_eq!(app.surfaces, vec![chooser]);
-    app.surfaces.clear();
-    // the chooser's Web answer
+    assert_eq!(q.lead.map(|l| l.action), Some(Action::BuildWeb));
+    // the question's Web answer
     app.dispatch(Action::BuildWeb);
     app.wait_idle(std::time::Duration::from_secs(20));
     assert_eq!(app.outcomes, vec![Outcome::Smoke(true)]);

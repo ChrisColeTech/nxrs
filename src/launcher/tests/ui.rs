@@ -138,7 +138,9 @@ fn properties_list_and_remove_dlc() {
         2,
         "nothing changes before Apply"
     );
-    h.get_by_label("Cancel").click();
+    // no Cancel in the footer: the header's X discards the Draft
+    assert!(h.query_by_label("Cancel").is_none());
+    h.get_by_label("Close Kart — Properties").click();
     h.run();
     assert!(h.state().app.surfaces.is_empty());
 }
@@ -219,11 +221,8 @@ fn updates_window_chooses_and_builds() {
     h.run_steps(3);
     // Build now closes the window and asks Native or Web, as every Build does
     let left = h.state().app.surfaces.clone();
-    let chooser = Surface::Target {
-        game_id: "g".into(),
-        build: true,
-    };
-    assert_eq!(left, vec![chooser]);
+    let native = Action::BuildNative;
+    assert!(matches!(&left[..], [Surface::Question { yes, .. }] if *yes == native));
     h.get_by_role_and_label(Role::Button, "Native").click();
     h.run_steps(3);
     assert!(h.state().app.surfaces.is_empty() && h.state().app.is_building("g"));

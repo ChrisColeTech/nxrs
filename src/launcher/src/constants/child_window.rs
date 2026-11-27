@@ -47,8 +47,3 @@ pub const MESSAGE_LEAST: f32 = 340.0;
 pub const MESSAGE_CHECK_GAP: f32 = 12.0;
 pub const MESSAGE_CHECK_ROW: f32 = 36.0;
 pub const MESSAGE_KEY: &str = "message";
-/// The Native / Web chooser: its width, its body (the Group heading, two choice tiles, the footer),
-/// a tile's height.
-pub const TARGET_WIDTH: f32 = 420.0;
-pub const TARGET_BODY: f32 = 228.0;
-pub const TARGET_TILE: f32 = 54.0;

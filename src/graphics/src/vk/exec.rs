@@ -139,6 +139,8 @@ pub struct QState {
     /// shader's inputs, the pools' generation); the same again sets nothing (Donkey Kong Bananza: 4.4 ms a frame of
     /// vertex input over ~4,500 draws, most repeating the draw before)
     vin_from: std::cell::Cell<(u64, usize, u64)>,
+    /// the dynamic state and descriptor-buffer offsets last set in this queue's command buffer (`DynShadow`)
+    dyns: std::cell::RefCell<DynShadow>,
     /// push constants' generation (new at every PushConstants)
     pgen: u64,
     /// inline uniform updates' generation (new at every UPDATE_UB): a set whose storage-buffer address is read from a
@@ -1000,6 +1002,7 @@ impl QState {
             c2id: Default::default(),
             vin_last: std::cell::RefCell::new((0, 0, [(vk::Buffer::null(), u64::MAX); 32])),
             vin_from: std::cell::Cell::new((u64::MAX, 0, 0)),
+            dyns: Default::default(),
             pgen: new_bgen(),
             ugen: new_bgen(),
             scache: Default::default(),
@@ -6298,6 +6301,7 @@ fn bind_sets(
                     .usage(usage),
             ];
             unsafe { g.d.db.cmd_bind_descriptor_buffers(sub.main, &infos) };
+            qs.dyns.borrow_mut().forget_offsets();
             sub.db_bound = Some(sub.db_cur);
             BOUND_DB.with(|b| b.set(sub.db[sub.db_cur].addr));
             super::lost::note_set(b'B', 0, sub.serial, sub.db_cur, 0);
@@ -6406,19 +6410,29 @@ fn bind_sets(
                     sub.db_cur,
                     off,
                 );
-                unsafe {
-                    g.d.db.cmd_set_descriptor_buffer_offsets(
-                        sub.main,
-                        bp,
-                        g.layout.pipeline,
-                        m.stage,
-                        &[1],
-                        &[off],
-                    )
-                };
+                // (SET-FAST) graphics only: compute work in these command buffers also binds classic sets
+                if bp != vk::PipelineBindPoint::GRAPHICS
+                    || qs.dyns.borrow_mut().set_offset(sub.serial, bp, m.stage, off)
+                {
+                    unsafe {
+                        g.d.db.cmd_set_descriptor_buffer_offsets(
+                            sub.main,
+                            bp,
+                            g.layout.pipeline,
+                            m.stage,
+                            &[1],
+                            &[off],
+                        )
+                    };
+                } else {
+                    super::perf::inc(super::perf::C::DynSkipped);
+                }
             }
         }
-        if pool {
+        if pool
+            && (bp != vk::PipelineBindPoint::GRAPHICS
+                || qs.dyns.borrow_mut().set_offset(sub.serial, bp, L::POOL_SET, u64::MAX))
+        {
             unsafe {
                 g.d.db.cmd_set_descriptor_buffer_offsets(
                     sub.main,
@@ -6929,52 +6943,82 @@ fn draw_setup_ex(
                 qs.rt_depth.tex.map(|t| (t.serial, t.mem as u64, t.d.format)));
         }
     }
+    // (SET-FAST) only the states that differ from what this command buffer holds are set (`DynShadow`)
+    let mut dyb = qs.dyns.borrow_mut();
+    let dy = &mut *dyb;
+    dy.begin(sub.serial, mesh);
+    let mut skipped = 0u64;
+    let sk = &mut skipped;
     unsafe {
-        dev.cmd_set_viewport_with_count(cb, &[vp]);
-        dev.cmd_set_scissor_with_count(cb, &[sc]);
+        let vpk = [vp.x, vp.y, vp.width, vp.height, vp.min_depth, vp.max_depth].map(f32::to_bits);
+        if dyn_new(&mut dy.vp, vpk, sk) {
+            dev.cmd_set_viewport_with_count(cb, &[vp]);
+        }
+        let sck = [sc.offset.x, sc.offset.y, sc.extent.width as i32, sc.extent.height as i32];
+        if dyn_new(&mut dy.sc, sck, sk) {
+            dev.cmd_set_scissor_with_count(cb, &[sc]);
+        }
         if qs.line_width != 1.0 {
             crate::log::red_once("line widths other than 1 are drawn 1 pixel wide");
         }
-        dev.cmd_set_line_width(cb, 1.0);
+        if dyn_new(&mut dy.line, (), sk) {
+            dev.cmd_set_line_width(cb, 1.0);
+        }
         let off_on = poly.offset_en() & (1 << poly.mode().min(2)) != 0;
-        dev.cmd_set_depth_bias_enable(cb, off_on);
-        dev.cmd_set_depth_bias(cb, qs.poly_off[1], qs.poly_off[2], qs.poly_off[0]);
-        dev.cmd_set_blend_constants(cb, &qs.blend_color);
-        dev.cmd_set_depth_bounds(
-            cb,
+        if dyn_new(&mut dy.bias_en, off_on, sk) {
+            dev.cmd_set_depth_bias_enable(cb, off_on);
+        }
+        if dyn_new(&mut dy.bias, qs.poly_off.map(f32::to_bits), sk) {
+            dev.cmd_set_depth_bias(cb, qs.poly_off[1], qs.poly_off[2], qs.poly_off[0]);
+        }
+        if dyn_new(&mut dy.bconst, qs.blend_color.map(f32::to_bits), sk) {
+            dev.cmd_set_blend_constants(cb, &qs.blend_color);
+        }
+        let (b0, b1) = (
             qs.depth_bounds.1.clamp(0.0, 1.0),
             qs.depth_bounds.2.clamp(0.0, 1.0),
         );
-        dev.cmd_set_depth_bounds_test_enable(cb, qs.depth_bounds.0 && g.d.caps.depth_bounds);
-        for (i, f) in [vk::StencilFaceFlags::FRONT, vk::StencilFaceFlags::BACK]
-            .iter()
-            .enumerate()
-        {
-            dev.cmd_set_stencil_compare_mask(cb, *f, qs.stencil[i][0]);
-            dev.cmd_set_stencil_write_mask(cb, *f, qs.stencil[i][1]);
-            dev.cmd_set_stencil_reference(cb, *f, qs.stencil[i][2]);
+        if dyn_new(&mut dy.dbounds, [b0.to_bits(), b1.to_bits()], sk) {
+            dev.cmd_set_depth_bounds(cb, b0, b1);
         }
-        dev.cmd_set_cull_mode(
-            cb,
-            if raster_mask & 2 != 0 {
-                vk::CullModeFlags::NONE
-            } else {
-                vk::CullModeFlags::from_raw(poly.cull())
-            },
-        );
+        let dbt = qs.depth_bounds.0 && g.d.caps.depth_bounds;
+        if dyn_new(&mut dy.dbt, dbt, sk) {
+            dev.cmd_set_depth_bounds_test_enable(cb, dbt);
+        }
+        if dyn_new(&mut dy.stencil, qs.stencil, sk) {
+            for (i, f) in [vk::StencilFaceFlags::FRONT, vk::StencilFaceFlags::BACK]
+                .iter()
+                .enumerate()
+            {
+                dev.cmd_set_stencil_compare_mask(cb, *f, qs.stencil[i][0]);
+                dev.cmd_set_stencil_write_mask(cb, *f, qs.stencil[i][1]);
+                dev.cmd_set_stencil_reference(cb, *f, qs.stencil[i][2]);
+            }
+        }
+        let cull = if raster_mask & 2 != 0 {
+            vk::CullModeFlags::NONE
+        } else {
+            vk::CullModeFlags::from_raw(poly.cull())
+        };
+        if dyn_new(&mut dy.cull, cull.as_raw(), sk) {
+            dev.cmd_set_cull_mode(cb, cull);
+        }
         // NVN CW = 0 / CCW = 1; Vulkan COUNTER_CLOCKWISE = 0 / CLOCKWISE = 1. Unflipped, the winding inverts.
         let ccw = poly.front() == front_face::CCW;
         let vk_ccw = if upper_left { ccw } else { !ccw };
-        dev.cmd_set_front_face(
-            cb,
-            if vk_ccw {
-                vk::FrontFace::COUNTER_CLOCKWISE
-            } else {
-                vk::FrontFace::CLOCKWISE
-            },
-        );
+        let front = if vk_ccw {
+            vk::FrontFace::COUNTER_CLOCKWISE
+        } else {
+            vk::FrontFace::CLOCKWISE
+        };
+        if dyn_new(&mut dy.front, front.as_raw(), sk) {
+            dev.cmd_set_front_face(cb, front);
+        }
         if !mesh {
-            dev.cmd_set_primitive_topology(cb, topology(prim_ty));
+            let t = topology(prim_ty);
+            if dyn_new(&mut dy.topo, t.as_raw(), sk) {
+                dev.cmd_set_primitive_topology(cb, t);
+            }
         }
         if passdump::active() {
             crate::vklog!(
@@ -7000,86 +7044,112 @@ fn draw_setup_ex(
                 qs.color.alpha_func()
             );
         }
-        dev.cmd_set_depth_test_enable(cb, ds.get(ds_field::DT) != 0 && raster_mask & 1 == 0);
-        dev.cmd_set_depth_write_enable(cb, ds.get(ds_field::DW) != 0);
-        dev.cmd_set_depth_compare_op(cb, super::tables::compare_op(ds.get(ds_field::DF)));
-        dev.cmd_set_stencil_test_enable(cb, ds.get(ds_field::ST) != 0);
-        dev.cmd_set_stencil_op(
-            cb,
-            vk::StencilFaceFlags::FRONT,
+        let dt = ds.get(ds_field::DT) != 0 && raster_mask & 1 == 0;
+        let dw = ds.get(ds_field::DW) != 0;
+        let df = super::tables::compare_op(ds.get(ds_field::DF));
+        if dyn_new(&mut dy.depth, (dt, dw, df.as_raw()), sk) {
+            dev.cmd_set_depth_test_enable(cb, dt);
+            dev.cmd_set_depth_write_enable(cb, dw);
+            dev.cmd_set_depth_compare_op(cb, df);
+        }
+        let st_en = ds.get(ds_field::ST) != 0;
+        if dyn_new(&mut dy.st_en, st_en, sk) {
+            dev.cmd_set_stencil_test_enable(cb, st_en);
+        }
+        let sop = [
             stencil_op_vk(ds.get(ds_field::FAIL_F)),
             stencil_op_vk(ds.get(ds_field::ZPASS_F)),
             stencil_op_vk(ds.get(ds_field::ZFAIL_F)),
-            super::tables::compare_op(ds.get(ds_field::SF_F)),
-        );
-        dev.cmd_set_stencil_op(
-            cb,
-            vk::StencilFaceFlags::BACK,
             stencil_op_vk(ds.get(ds_field::FAIL_B)),
             stencil_op_vk(ds.get(ds_field::ZPASS_B)),
             stencil_op_vk(ds.get(ds_field::ZFAIL_B)),
+        ];
+        let (sf, sb) = (
+            super::tables::compare_op(ds.get(ds_field::SF_F)),
             super::tables::compare_op(ds.get(ds_field::SF_B)),
         );
-        dev.cmd_set_rasterizer_discard_enable(cb, qs.rast_discard);
+        let sopk = [
+            sop[0].as_raw(),
+            sop[1].as_raw(),
+            sop[2].as_raw(),
+            sf.as_raw(),
+            sop[3].as_raw(),
+            sop[4].as_raw(),
+            sop[5].as_raw(),
+            sb.as_raw(),
+        ];
+        if dyn_new(&mut dy.sop, sopk, sk) {
+            dev.cmd_set_stencil_op(cb, vk::StencilFaceFlags::FRONT, sop[0], sop[1], sop[2], sf);
+            dev.cmd_set_stencil_op(cb, vk::StencilFaceFlags::BACK, sop[3], sop[4], sop[5], sb);
+        }
+        if dyn_new(&mut dy.discard, qs.rast_discard, sk) {
+            dev.cmd_set_rasterizer_discard_enable(cb, qs.rast_discard);
+        }
         if !mesh {
-            dev.cmd_set_primitive_restart_enable(
-                cb,
-                qs.prim_restart.0
-                    && !matches!(
-                        prim_ty,
-                        prim::POINTS | prim::LINES | prim::TRIANGLES | prim::QUADS | prim::PATCHES
-                    ),
-            );
+            let restart = qs.prim_restart.0
+                && !matches!(
+                    prim_ty,
+                    prim::POINTS | prim::LINES | prim::TRIANGLES | prim::QUADS | prim::PATCHES
+                );
+            if dyn_new(&mut dy.restart, restart, sk) {
+                dev.cmd_set_primitive_restart_enable(cb, restart);
+            }
         }
         let caps = g.d.caps;
         if caps.logic_op_dyn {
-            g.d.eds2
-                .cmd_set_logic_op(cb, vk::LogicOp::from_raw(qs.color.logic_op() as i32));
+            let lo = qs.color.logic_op() as i32;
+            if dyn_new(&mut dy.logic, lo, sk) {
+                g.d.eds2.cmd_set_logic_op(cb, vk::LogicOp::from_raw(lo));
+            }
         }
+        // (only a tessellation pipeline has it dynamic: any other disturbs it, so it is always set)
         if caps.patch_dyn && !mesh && mods.iter().any(|m| m.stage == 3 || m.stage == 4) {
             g.d.eds2.cmd_set_patch_control_points(cb, qs.patch.max(1));
         }
         let e3 = &g.d.eds3;
         if caps.eds3_poly {
-            e3.cmd_set_polygon_mode(
-                cb,
-                match poly.mode() {
-                    0 => vk::PolygonMode::POINT,
-                    1 => vk::PolygonMode::LINE,
-                    _ => vk::PolygonMode::FILL,
-                },
-            );
+            let pm = match poly.mode() {
+                0 => vk::PolygonMode::POINT,
+                1 => vk::PolygonMode::LINE,
+                _ => vk::PolygonMode::FILL,
+            };
+            if dyn_new(&mut dy.poly, pm.as_raw(), sk) {
+                e3.cmd_set_polygon_mode(cb, pm);
+            }
         }
         let sflag = vk::SampleCountFlags::from_raw(samples.max(1) as u32);
-        if caps.eds3_samples {
+        if caps.eds3_samples && dyn_new(&mut dy.samples, sflag.as_raw(), sk) {
             e3.cmd_set_rasterization_samples(cb, sflag);
         }
-        if caps.eds3_sample_mask {
+        if caps.eds3_sample_mask && dyn_new(&mut dy.smask, (sflag.as_raw(), qs.sample_mask), sk) {
             e3.cmd_set_sample_mask(cb, sflag, &[qs.sample_mask]);
         }
         if caps.eds3_a2c {
-            e3.cmd_set_alpha_to_coverage_enable(
-                cb,
-                qs.ms.a2c != 0 && A2C.load(std::sync::atomic::Ordering::Relaxed),
-            );
+            let a2c = qs.ms.a2c != 0 && A2C.load(std::sync::atomic::Ordering::Relaxed);
+            if dyn_new(&mut dy.a2c, a2c, sk) {
+                e3.cmd_set_alpha_to_coverage_enable(cb, a2c);
+            }
         }
         if caps.eds3_logic_en {
-            e3.cmd_set_logic_op_enable(cb, qs.color.logic_op() != logic_op::COPY);
+            let le = qs.color.logic_op() != logic_op::COPY;
+            if dyn_new(&mut dy.logic_en, le, sk) {
+                e3.cmd_set_logic_op_enable(cb, le);
+            }
         }
-        if caps.eds3_clamp {
+        if caps.eds3_clamp && dyn_new(&mut dy.clamp, qs.depth_clamp, sk) {
             e3.cmd_set_depth_clamp_enable(cb, qs.depth_clamp);
         }
         if caps.eds3_clip_neg {
-            e3.cmd_set_depth_clip_negative_one_to_one(
-                cb,
-                !crate::nvn::device::DEPTH_ZERO.load(std::sync::atomic::Ordering::Relaxed),
-            );
+            let neg = !crate::nvn::device::DEPTH_ZERO.load(std::sync::atomic::Ordering::Relaxed);
+            if dyn_new(&mut dy.clip, neg, sk) {
+                e3.cmd_set_depth_clip_negative_one_to_one(cb, neg);
+            }
         }
         if caps.eds3_cons_raster {
-            e3.cmd_set_conservative_rasterization_mode(
-                cb,
-                conservative_raster_mode(qs.cons_raster),
-            );
+            let cm = conservative_raster_mode(qs.cons_raster);
+            if dyn_new(&mut dy.cons, cm.as_raw(), sk) {
+                e3.cmd_set_conservative_rasterization_mode(cb, cm);
+            }
         } else if qs.cons_raster {
             crate::log::red_once(
                 "SetConservativeRasterEnable: VK_EXT_conservative_rasterization is unavailable",
@@ -7118,11 +7188,32 @@ fn draw_setup_ex(
             // The shader's scalar output stores select components. The dynamic mask is NVN's channel state, disabled
             // only for locations absent from the output map; do not apply OmapTargets twice.
             let omap = qs.prog[1].as_ref().and_then(|m| m.omap).unwrap_or(u32::MAX);
-            let wm = fragment_write_masks(qs.chmask, omap, n);
-            e3.cmd_set_color_blend_enable(cb, 0, en);
-            e3.cmd_set_color_blend_equation(cb, 0, &eq[..n]);
-            e3.cmd_set_color_write_mask(cb, 0, &wm);
+            if dyn_new(&mut dy.blend_en, (n, qs.color.blend_en() & ((1u32 << n) - 1)), sk) {
+                e3.cmd_set_color_blend_enable(cb, 0, en);
+            }
+            let eqk: [[i32; 6]; 8] = core::array::from_fn(|i| {
+                let e = &eq[i];
+                [
+                    e.src_color_blend_factor.as_raw(),
+                    e.dst_color_blend_factor.as_raw(),
+                    e.color_blend_op.as_raw(),
+                    e.src_alpha_blend_factor.as_raw(),
+                    e.dst_alpha_blend_factor.as_raw(),
+                    e.alpha_blend_op.as_raw(),
+                ]
+            });
+            if dyn_new(&mut dy.blend_eq, (n, eqk), sk) {
+                e3.cmd_set_color_blend_equation(cb, 0, &eq[..n]);
+            }
+            if dyn_new(&mut dy.wmask, (n, qs.chmask, omap), sk) {
+                let wm = fragment_write_masks(qs.chmask, omap, n);
+                e3.cmd_set_color_write_mask(cb, 0, &wm);
+            }
         }
+    }
+    drop(dyb);
+    if skipped != 0 {
+        super::perf::add(super::perf::C::DynSkipped, skipped);
     }
 
     if !mesh {
@@ -7274,6 +7365,148 @@ fn vertex_input(g: &Gpu, sub: &mut Sub, qs: &QState, vs: &Module) {
 }
 
 /// NXGFX_VIN_SKIP=0: vertex input set up at every draw.
+/// (SET-FAST) The dynamic state the draw path last set in one command buffer: a `vkCmdSet*` whose values equal the
+/// last ones is not emitted again (Turbo `ds_same`, nxnative `g_ed`; MKW ~30 calls a draw). Keyed by the submission
+/// serial: each submission (child segments included) is a freshly begun command buffer, where nothing is set yet.
+/// Every graphics pipeline has the same dynamic list (`pipe.rs` `dynamic_states`) but for the pipeline class: a mesh
+/// pipeline has no topology / primitive restart (forgotten when the class changes) and only a tessellation pipeline
+/// has patch control points (never deduplicated). No other graphics pipeline is bound into these command buffers.
+/// Also the stage sets' descriptor-buffer offsets (one universal layout: a pipeline change keeps them bound).
+#[derive(Default)]
+struct DynShadow {
+    serial: u64,
+    mesh: Option<bool>,
+    vp: Option<[u32; 6]>,
+    sc: Option<[i32; 4]>,
+    line: Option<()>,
+    bias_en: Option<bool>,
+    bias: Option<[u32; 3]>,
+    bconst: Option<[u32; 4]>,
+    dbounds: Option<[u32; 2]>,
+    dbt: Option<bool>,
+    stencil: Option<[[u32; 3]; 2]>,
+    cull: Option<u32>,
+    front: Option<i32>,
+    topo: Option<i32>,
+    depth: Option<(bool, bool, i32)>,
+    st_en: Option<bool>,
+    sop: Option<[i32; 8]>,
+    discard: Option<bool>,
+    restart: Option<bool>,
+    logic: Option<i32>,
+    poly: Option<i32>,
+    samples: Option<u32>,
+    smask: Option<(u32, u32)>,
+    a2c: Option<bool>,
+    logic_en: Option<bool>,
+    clamp: Option<bool>,
+    clip: Option<bool>,
+    cons: Option<i32>,
+    blend_en: Option<(usize, u32)>,
+    blend_eq: Option<(usize, [[i32; 6]; 8])>,
+    wmask: Option<(usize, u32, u32)>,
+    /// the descriptor-buffer offset bound per set index (stage sets 0..5, the pool set), by bind point
+    sets: [[Option<u64>; 8]; 2],
+}
+
+impl DynShadow {
+    /// The shadow for command buffer `serial` and a pipeline of class `mesh`: empty in a new command buffer; the
+    /// states a mesh pipeline lacks are forgotten when the class changes.
+    fn begin(&mut self, serial: u64, mesh: bool) {
+        if self.serial != serial || !dyn_dedupe_on() {
+            *self = DynShadow {
+                serial,
+                ..Default::default()
+            };
+        }
+        if self.mesh != Some(mesh) {
+            self.topo = None;
+            self.restart = None;
+            self.mesh = Some(mesh);
+        }
+    }
+
+    /// The set offset bound at (`bp`, `set`) in this command buffer, recorded; false when it is already bound there.
+    fn set_offset(&mut self, serial: u64, bp: vk::PipelineBindPoint, set: u32, off: u64) -> bool {
+        if self.serial != serial || !dyn_dedupe_on() {
+            *self = DynShadow {
+                serial,
+                ..Default::default()
+            };
+        }
+        let slot = &mut self.sets[(bp == vk::PipelineBindPoint::COMPUTE) as usize][set as usize & 7];
+        if *slot == Some(off) {
+            return false;
+        }
+        *slot = Some(off);
+        true
+    }
+
+    /// Bound descriptor buffers moved: every offset must be set again.
+    fn forget_offsets(&mut self) {
+        self.sets = Default::default();
+    }
+}
+
+/// `v` differs from what `slot` last held (recorded): the state is to be set; else `skipped` counts it.
+fn dyn_new<T: PartialEq + Copy>(slot: &mut Option<T>, v: T, skipped: &mut u64) -> bool {
+    if *slot == Some(v) {
+        *skipped += 1;
+        return false;
+    }
+    *slot = Some(v);
+    true
+}
+
+#[cfg(test)]
+mod dyn_shadow_tests {
+    use super::{dyn_new, DynShadow};
+    use ash::vk;
+
+    /// A state equal to the command buffer's is skipped; a new command buffer, a changed value or (for topology and
+    /// primitive restart) a change of pipeline class sets it again.
+    #[test]
+    fn states_are_set_once_per_command_buffer_and_value() {
+        let mut d = DynShadow::default();
+        let mut sk = 0;
+        d.begin(7, false);
+        assert!(dyn_new(&mut d.cull, 2, &mut sk));
+        assert!(!dyn_new(&mut d.cull, 2, &mut sk));
+        assert!(dyn_new(&mut d.cull, 1, &mut sk));
+        assert!(dyn_new(&mut d.topo, 3, &mut sk));
+        assert!(!dyn_new(&mut d.topo, 3, &mut sk));
+        assert_eq!(sk, 2);
+        // a mesh draw between: its pipeline has no topology, the next ordinary draw sets it again (cull is kept)
+        d.begin(7, true);
+        d.begin(7, false);
+        assert!(dyn_new(&mut d.topo, 3, &mut sk));
+        assert!(!dyn_new(&mut d.cull, 1, &mut sk));
+        // another command buffer holds nothing
+        d.begin(8, false);
+        assert!(dyn_new(&mut d.cull, 1, &mut sk));
+    }
+
+    /// Set offsets: the same offset at the same set is bound once per command buffer and descriptor-buffer binding.
+    #[test]
+    fn set_offsets_are_bound_once_until_the_buffers_move() {
+        let g = vk::PipelineBindPoint::GRAPHICS;
+        let mut d = DynShadow::default();
+        assert!(d.set_offset(3, g, 1, 4096));
+        assert!(!d.set_offset(3, g, 1, 4096));
+        assert!(d.set_offset(3, g, 0, 4096));
+        assert!(d.set_offset(3, g, 1, 8192));
+        d.forget_offsets();
+        assert!(d.set_offset(3, g, 1, 8192));
+        assert!(d.set_offset(4, g, 1, 8192));
+    }
+}
+
+/// `NXGFX_DYN_DEDUPE=0`: every dynamic state and set offset is set at every draw, as before SET-FAST.
+fn dyn_dedupe_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_DYN_DEDUPE").as_deref() != Ok("0"))
+}
+
 fn vin_skip_on() -> bool {
     static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
     *ON.get_or_init(|| std::env::var("NXGFX_VIN_SKIP").as_deref() != Ok("0"))
@@ -8859,6 +9092,64 @@ pub fn wait_passes(g: &Gpu, stream: &[u8]) -> bool {
     event_wait_passes(g, addr, mode, value)
 }
 
+/// (MKW-PIPE) Whether a parked stream may run on at once without a pool sync of its own (`queue::chain_parked`): it
+/// starts at an event wait that a GPU signal already recorded passes (that signal's work comes first in the queue),
+/// or that the event's value passes while no CPU signal was made since the last pool sync (`cpu_quiet`: what the CPU
+/// wrote before a signal it made later would not be in that sync).
+pub fn wait_passes_chained(g: &Gpu, stream: &[u8], cpu_quiet: bool) -> bool {
+    if stream.len() < 24 || unsafe { rd::<op_hdr>(stream.as_ptr()) }.op != op::WAIT_EVENT {
+        return false;
+    }
+    let (addr, mode, value): (u64, u32, u32) =
+        unsafe { (rd_at(stream, 0), rd_at(stream, 8), rd_at(stream, 12)) };
+    let cur = unsafe {
+        (*(addr as *const std::sync::atomic::AtomicU32)).load(std::sync::atomic::Ordering::Acquire)
+    };
+    let pending = g.q.pending_signals.lock().unwrap().get(&addr).map(|&(m, v, _)| (m, v));
+    chainable(cur, pending, mode, value, cpu_quiet)
+}
+
+/// `wait_passes_chained`'s rule: the event's value `cur`, the GPU signal recorded for it (mode, value), the wait.
+fn chainable(cur: u32, pending: Option<(u32, u32)>, mode: u32, value: u32, cpu_quiet: bool) -> bool {
+    if crate::nvn::sync::event_passes(cur, mode, value) {
+        return cpu_quiet;
+    }
+    matches!(pending, Some((m, v)) if m == event_signal::WRITE && crate::nvn::sync::event_passes(v, mode, value))
+}
+
+#[cfg(test)]
+mod chain_tests {
+    use super::*;
+    /// A parked stream runs on without a sync of its own when a GPU signal recorded so far passes its wait, or when
+    /// the event's value passes and no CPU signal came after the last sync; never on a wait nothing passes yet.
+    #[test]
+    fn a_wait_chains_on_recorded_gpu_signals_or_a_quiet_cpu() {
+        let geq = event_wait::GEQUAL_WRAP;
+        let w = event_signal::WRITE;
+        assert!(chainable(0, Some((w, 3)), geq, 3, false), "a recorded GPU WRITE signal passes it");
+        assert!(!chainable(0, Some((w, 2)), geq, 3, true), "a recorded signal short of the value does not");
+        assert!(!chainable(0, Some((event_signal::ADD, 5)), geq, 3, true), "an ADD signal's sum is not known");
+        assert!(!chainable(0, None, geq, 3, true), "nothing passes it");
+        assert!(chainable(4, None, geq, 3, true), "the value passes it, no CPU signal since the sync");
+        assert!(!chainable(4, None, geq, 3, false), "the value passes it after a CPU signal: a new sync first");
+        assert!(chainable(6, Some((w, 7)), event_wait::EQUAL, 7, false), "EQUAL by a recorded signal");
+        assert!(
+            !chainable(7, Some((w, 7)), event_wait::EQUAL, 7, false),
+            "the value passes it already after a CPU signal: not chained, even with a recorded signal"
+        );
+    }
+}
+
+/// The event wait at the start of a parked stream: (address, mode << 32 | value), for the chain trace.
+pub fn wait_of(stream: &[u8]) -> (u64, u64) {
+    if stream.len() < 24 || unsafe { rd::<op_hdr>(stream.as_ptr()) }.op != op::WAIT_EVENT {
+        return (0, 0);
+    }
+    let (addr, mode, value): (u64, u32, u32) =
+        unsafe { (rd_at(stream, 0), rd_at(stream, 8), rd_at(stream, 12)) };
+    (addr, (mode as u64) << 32 | value as u64)
+}
+
 /// What a parked stream waits for (its first record), for the log.
 pub fn wait_desc(stream: &[u8]) -> String {
     if stream.len() < 24 {
@@ -9189,11 +9480,85 @@ fn ub_update_kept(dst: u64, n: u64, len: usize) -> bool {
     n > 0 && 24 + n as usize <= len && super::mem::room(dst) >= n
 }
 
+/// (MKW-AHEAD) `NXGFX_TRANSLATE_BALANCE` (default on; 0: off): a stream translated in parallel is cut into about one
+/// segment per lane, of equal draws, instead of segments of `NXGFX_TRANSLATE_SEG` / `_MIDCUT` draws. Mario Kart World's
+/// two long parts of its frame (~700-850 draws each, up to their waits) became 3-4 segments of 256 (or 6-7 of 128) on
+/// 6 lanes: the part waited for its slowest lane's second segment while the others idled.
+fn translate_balance() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| {
+        let on = std::env::var("NXGFX_TRANSLATE_BALANCE").as_deref() != Ok("0");
+        crate::vklog!(
+            "translate: a stream's segments {}",
+            if on {
+                "one per lane, of equal draws up to its first wait that parks (NXGFX_TRANSLATE_BALANCE=0: fixed sizes)"
+            } else {
+                "of fixed sizes (NXGFX_TRANSLATE_BALANCE=0)"
+            }
+        );
+        on
+    })
+}
+
+/// Fewest draws in a balanced segment (`balanced_target`).
+const BALANCE_MIN: usize = 32;
+
+/// A balanced segment's draws: `draws` (up to the stream's first wait that parks) over `lanes`, at least
+/// `BALANCE_MIN`, at most `max` (the fixed size).
+fn balanced_target(draws: usize, lanes: usize, max: usize) -> usize {
+    draws.div_ceil(lanes.max(1)).clamp(BALANCE_MIN, max.max(BALANCE_MIN))
+}
+
+/// The segment size for `stream` when balanced (`translate_balance`): None when off or not translated in parallel.
+/// Draws are counted up to the first event wait that does not pass now (a wait passed by the stream's own earlier
+/// signal is counted as parking: the segments then come out smaller, never fewer).
+fn balanced_seg(g: &Gpu, stream: &[u8]) -> Option<usize> {
+    let lanes = translate_lanes();
+    if lanes < 2 || !translate_balance() {
+        return None;
+    }
+    let (mut p, mut draws) = (0usize, 0usize);
+    while p + 8 <= stream.len() {
+        let h = unsafe { rd::<op_hdr>(stream.as_ptr().add(p)) };
+        let sz = h.size as usize;
+        if sz < 8 || p + sz > stream.len() {
+            break;
+        }
+        if is_draw(h.op) {
+            draws += 1;
+        } else if h.op == op::WAIT_EVENT && sz >= 24 {
+            let (addr, mode, value): (u64, u32, u32) =
+                unsafe { (rd_at(&stream[p..], 0), rd_at(&stream[p..], 8), rd_at(&stream[p..], 12)) };
+            if !event_wait_passes(g, addr, mode, value) {
+                break;
+            }
+        }
+        p += sz;
+    }
+    Some(balanced_target(draws, lanes, translate_seg().max(translate_midcut())))
+}
+
+#[cfg(test)]
+mod balance_tests {
+    use super::*;
+    /// A stream's draws up to its park are spread over the lanes in equal segments, within the bounds.
+    #[test]
+    fn segments_are_one_per_lane_within_bounds() {
+        assert_eq!(balanced_target(830, 6, 256), 139, "830 draws on 6 lanes");
+        assert_eq!(balanced_target(700, 6, 256), 117);
+        assert_eq!(balanced_target(100, 6, 256), BALANCE_MIN, "never below the minimum");
+        assert_eq!(balanced_target(4000, 6, 256), 256, "never above the fixed size");
+        assert_eq!(balanced_target(500, 0, 256), 256, "no lanes: one piece capped by the fixed size");
+    }
+}
+
 /// The pre-pass: the stream's segments and the offset of a wait that parks it (as `run` returns). Makes the stream's
 /// ordered global effects.
 fn plan(g: &Gpu, qs: &QState, stream: &[u8]) -> (Vec<Segment>, Option<usize>) {
-    let target = translate_seg();
-    let midcut = translate_midcut();
+    let (target, midcut) = match balanced_seg(g, stream) {
+        Some(n) => (n, n),
+        None => (translate_seg(), translate_midcut()),
+    };
     let mut shadow = qs.fork_state();
     let mut segs = Vec::new();
     let mut cur = Segment {

@@ -1,41 +1,20 @@
-//! What Play and Build say about their two versions, Native and Web (owner, 2026-11-27): Play runs the
-//! one version there is and asks only when both are there; Build always asks.
+//! What Play and Build ask when a game has two versions, Native and Web (owner, 2026-11-27: one Play,
+//! one Build; Play with one version runs it). The window titles are `words_contexts`' Play and Build.
 
-/// The dialog's window title.
-pub const PLAY: &str = "Play";
-pub const BUILD: &str = "Build";
-/// Its heading (the task, the game) and the sentence under it.
-pub const PLAY_HEADING: &str = "Play {}";
-pub const BUILD_HEADING: &str = "Build {}";
-pub const PLAY_INTRO: &str = "This game has two versions. Choose where to run it.";
-pub const BUILD_INTRO: &str = "Choose which version to build.";
-/// The heading's info mark.
-pub const PLAY_TIP: &str = "Native is the Windows program the launcher built; Web is the version \
-                            that runs in a Chromium browser, served by the launcher from this PC.";
-pub const BUILD_TIP: &str = "Each version is built into its own folder; building one leaves the \
-                             other as it is.";
-
-/// Each option: its name, what it is, its button.
+/// The question (the heading), the game's title in it.
+pub const PLAY_HEADING: &str = "Play {} natively or on the web?";
+pub const BUILD_HEADING: &str = "Build {} natively or for the web?";
+/// The text under it; Play's names the browser.
+pub const PLAY_TEXT: &str = "Native runs the Windows program the launcher built. Web runs the web \
+                             build in {}, served from this PC by the launcher.";
+pub const BUILD_TEXT: &str = "Native builds the Windows program into the game's build folder. Web \
+                              builds the version that runs in Chrome into its web folder. Building \
+                              one leaves the other as it is.";
+/// The two verbs: Native the filled one, last; Web the ghost one at the leading side.
 pub const NATIVE: &str = "Native";
 pub const WEB: &str = "Web";
-pub const PLAY_NATIVE_WHAT: &str = "Runs as a Windows program on this PC.";
-/// The browser.
-pub const PLAY_WEB_WHAT: &str = "Runs in {}, served from this PC by the launcher.";
-pub const BUILD_NATIVE_WHAT: &str = "Builds the Windows program the launcher runs.";
-pub const BUILD_WEB_WHAT: &str = "Builds a version that runs in Chrome.";
-pub const PLAY_NATIVE: &str = "Play native";
-/// The browser.
-pub const PLAY_WEB: &str = "Play in {}";
-pub const BUILD_NATIVE: &str = "Build native";
-pub const BUILD_WEB: &str = "Build for web";
 
-/// Each option's state line.
-/// When it was built ("26 Nov 2026, 9:14 PM").
-pub const BUILT: &str = "Built {}";
-pub const BUILT_AGAIN: &str = "Built {}. Building again replaces it.";
-pub const NOT_BUILT: &str = "Not built yet";
-
-/// Why an option cannot run now, in its state line.
+/// Why a version cannot play or build now (a disabled verb's tooltip).
 pub const NO_NATIVE_BUILD: &str = "No native build yet: build it first.";
 pub const NO_WEB_BUILD: &str = "No web build yet: build it for the web first.";
 pub const NO_BROWSER: &str = "No Chromium browser found: install Chrome.";
