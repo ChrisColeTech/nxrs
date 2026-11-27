@@ -63,6 +63,7 @@ NXGFX_LAZY_ALL_FRAME	switch	Images a frame makes for shaders that index the text
 NXGFX_LAZY_CPU_CHECK	switch	`0` skips the check that lazily written-back pages were not written by the CPU meanwhile	src/graphics/src/vk/mem.rs
 NXGFX_LAZY_IMAGES	switch	textures, 7.2 GB of images, most never drawn in a race. `NXGFX_LAZY_IMAGES=0`: every image at registration.	src/graphics/src/vk/image.rs, src/graphics/tests/gpu.rs
 NXGFX_INDIRECT_C0	diagnostic	`NXGFX_INDIRECT_C0=0` (diagnosis): an indirect dispatch's c0 keeps the CPU-side group counts (0) instead of a GPU copy of its record.	src/graphics/src/vk/exec.rs
+NXGFX_LANE_CACHES	switch	MKW-SETS: the translation lanes' read-mostly lookups without the pools' or the tables' lock: `room` from a copy of the pools' extents (kept by a layout generation that a sync's deferral does not move), a plain pool's `resolve` from a copy, GPU-write notes and samplers from per-thread memos. Default on; `0`: the locks at every miss, as before	src/graphics/src/vk/mem.rs, src/graphics/src/vk/tables.rs, src/graphics/src/vk/exec.rs
 NXGFX_LAZY_KEEP	testWhether a finalized texture's waiting registrations stay (`NXGFX_LAZY_KEEP=0`: dropped, as before).	src/graphics/src/vk/image.rs
 NXGFX_LINK_IO	switch	`NXGFX_LINK_IO=0` off.	src/graphics/src/vk/pipe.rs
 NXGFX_LIVE	switch	`0` turns the live shader translator off (a draw whose shader the build did not translate is skipped)	src/graphics/src/vk/live.rs
@@ -132,6 +133,7 @@ NXGFX_SEAL_FRAMES	switch	Frames without a CPU write or a write-back landing befo
 NXGFX_SEAL_MB	switch	Bytes newly made read-only per sealing pass, at most one pass a frame (default 32)	src/graphics/src/vk/seal.rs
 NXGFX_SET_CACHE	switch	`0` writes every draw's descriptor sets again instead of reusing equal ones	src/graphics/src/vk/exec.rs
 NXGFX_SET_PATCH	switch	Stage sets are written in host memory first and patched from their copy (`Shadow`) unless `NXGFX_SET_PATCH=0`, the	src/graphics/src/vk/exec.rs
+NXGFX_SET_SEED	switch	MKW-SETS: a stream's segments start with seeds, the stage-set host copies the queue's earlier segments made (gathered at each parallel run's join), so a segment's first set of a module is patched from its seed (uniform buffers and sampled textures kept, every slot with a per-submission effect made again) instead of built whole. Default on; `0`: each segment starts with no copies, as before	src/graphics/src/vk/exec.rs
 NXGFX_SHADERS	path	the translated shader folder (default: `<data>\shaders`)	src/graphics/src/vk/shader.rs, src/os/src/nvn/mod.rs
 NXGFX_SHADER_WAIT_FRAME_MS	switch	`NXGFX_SHADER_WAIT_FRAME_MS` (default 1500; 0: no cap).	src/graphics/src/vk/live.rs
 NXGFX_SHADER_WAIT_MS	switch	A draw whose shaders have not arrived waits for them, once per set of programs and at most `NXGFX_SHADER_WAIT_MS`	src/graphics/src/vk/live.rs

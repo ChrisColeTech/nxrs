@@ -132,7 +132,7 @@ pub struct QState {
     shadow: std::cell::RefCell<[Vec<Box<Shadow>>; 7]>,
     /// (segment seeding, `set_seed_on`) the host copies the queue's state held when the stream this segment is of
     /// began: a module's copy is taken from here when `shadow` has none (`patch_set`)
-    seed: Option<Arc<[Vec<Box<Shadow>>; 7]>>,
+    seed: Option<Arc<Seeds>>,
     /// the id of the c2 bank `banks` returned last
     c2id: std::cell::Cell<u64>,
     /// the vertex input and vertex buffers last set in this queue's command buffer: (submission, layout words,
@@ -1142,15 +1142,11 @@ impl QState {
         q.ugen = self.ugen;
         // the stream's inline uniform updates before the segment (its handle reads see them, as the GPU will)
         q.ub_upd = self.ub_upd.clone();
-        // the stage sets' host copies as seeds (`set_seed_on`): this state's own (copied once, shared by every state
-        // forked from the copy), else the seeds it was forked with
+        // the seeds (`set_seed_on`), shared: gathered at parallel runs' joins from the segments' copies, which are
+        // moved there, never copied (a copy of this state's own copies at every fork cost the replay thread more than
+        // the seeds saved)
         if set_seed_on() {
-            let sh = self.shadow.borrow();
-            q.seed = if sh.iter().any(|l| !l.is_empty()) {
-                Some(Arc::new(sh.clone()))
-            } else {
-                self.seed.clone()
-            };
+            q.seed = self.seed.clone();
         }
         q
     }
@@ -5155,19 +5151,51 @@ fn patch_set(
     Some((off, false))
 }
 
+/// Segment seeding's copies by stage, one per module, newest first (`QState::seed`): the queue's stage-set copies
+/// gathered over its streams (every segment's, at a parallel run's join), shared by the states forked from it.
+type Seeds = [Vec<Arc<Shadow>>; 7];
+
+/// Most seeds kept per stage (MKW's race frame: a few hundred modules over all its streams).
+const SEEDS: usize = 160;
+
+/// The valid, keyed copies of `lists` as seeds, moved out of them (a segment's state that is dropped).
+fn seeds_of(lists: &mut [Vec<Box<Shadow>>; 7]) -> Seeds {
+    let keep = |s: &Shadow| s.valid && s.key.is_some() && !s.twin;
+    std::array::from_fn(|st| std::mem::take(&mut lists[st]).into_iter().filter(|s| keep(s)).map(Arc::from).collect())
+}
+
+/// `newer` (newest first) over `older`: per stage, a module's newest copy first, at most `SEEDS`.
+fn seeds_merge(newer: Vec<Seeds>, older: Option<&Seeds>) -> Arc<Seeds> {
+    Arc::new(std::array::from_fn(|st| {
+        let mut out: Vec<Arc<Shadow>> = Vec::new();
+        let mut seen: std::collections::HashSet<(usize, crate::nvn::prog::ShaderKey), super::mem::AddrHash> =
+            Default::default();
+        for s in newer.iter().map(|n| &n[st]).chain(older.map(|o| &o[st])).flatten() {
+            if out.len() >= SEEDS {
+                break;
+            }
+            if seen.insert(s.module) {
+                out.push(s.clone());
+            }
+        }
+        out
+    }))
+}
+
 /// Segment seeding: the module's copy from the seeds (`QState::seed`) put into `list` (the stage's copies, at the
 /// front) when it is a valid, keyed whole set of the same pools' generation; whether it was.
 fn seed_into(qs: &QState, list: &mut Vec<Box<Shadow>>, st: usize, k: &SetKey, gen: u64) -> bool {
     if !set_seed_on() {
         return false;
     }
-    let Some(s) = qs.seed.as_ref().and_then(|seed| {
-        seed[st].iter().find(|s| {
-            s.module == k.module && s.valid && s.key.is_some() && s.memory_generation == gen && !s.twin
-        })
-    }) else {
+    let Some(s) = qs.seed.as_ref().and_then(|seed| seed[st].iter().find(|s| s.module == k.module)) else {
         return false;
     };
+    if !(s.valid && s.key.is_some() && s.memory_generation == gen && !s.twin) {
+        // (the seed is older than the pools: counted beside the seeded sets)
+        super::perf::inc(super::perf::C::SeedsStale);
+        return false;
+    }
     let s = Box::new((**s).clone());
     if list.len() < SHADOWS {
         list.insert(0, s);
@@ -10209,7 +10237,8 @@ mod par {
         seg_stats::JOIN_WAIT_NS.fetch_add(tw.elapsed().as_nanos() as u64, Relaxed);
         seg_stats::PAR.fetch_add(1, Relaxed);
         let mut later = 0u64;
-        let mut last = None;
+        let mut last: Option<QState> = None;
+        let mut gathered: Vec<Seeds> = Vec::new();
         for k in 0..n {
             let Some(Own((c, wq, draws))) = job.out[k].lock().unwrap().take() else {
                 unreachable!("segment {k} of {n} was not translated");
@@ -10252,10 +10281,23 @@ mod par {
                 }
             }
             queue::child_join(sub, c);
-            last = Some(wq);
+            // (segment seeding) the copies of every segment but the last, gathered for the streams after this one
+            if let Some(prev) = last.replace(wq) {
+                if set_seed_on() {
+                    gathered.push(seeds_of(&mut prev.shadow.borrow_mut()));
+                }
+            }
         }
         queue::child_settle(sub, &job.init);
-        last.expect("a parallel run has segments")
+        let last: QState = last.expect("a parallel run has segments");
+        if set_seed_on() && !gathered.is_empty() {
+            // newest first (the last segment's own copies stay its state's working copies)
+            gathered.reverse();
+            let mut last = last;
+            last.seed = Some(seeds_merge(gathered, last.seed.as_deref()));
+            return last;
+        }
+        last
     }
 }
 

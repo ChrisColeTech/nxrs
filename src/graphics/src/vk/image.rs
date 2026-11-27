@@ -906,6 +906,12 @@ pub struct Images {
     /// storage start -> serials (CPU-written textures)
     by_addr: BTreeMap<u64, Vec<u64>>,
     max_size: u64,
+    /// moves whenever `by_addr` (or an image's storage behind it) changes; `spans` is of `spans_gen`
+    addr_gen: u64,
+    spans_gen: u64,
+    /// (`img_spans_on`) every image of `by_addr` as (storage start, end, serial), by start: the CPU-write check of a
+    /// submission with many dirty ranges walks it beside the sorted ranges instead of looking every image up
+    spans: Vec<(u64, u64, u64)>,
     /// the virtual pool mapping generation the sparse textures were last checked at
     sparse_seen: u64,
     /// released images by what they were (storage, description, layout): a game that initializes its transient
@@ -1222,6 +1228,50 @@ static TEX_DUE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new
 
 pub fn tex_due() -> u64 {
     TEX_DUE.load(std::sync::atomic::Ordering::Acquire)
+}
+
+/// `NXGFX_IMG_SPANS` (default on; `0` the old walk): a submission's CPU-write check over many dirty ranges walks the
+/// images' kept spans (`Images::spans`) beside the ranges instead of looking every image up.
+fn img_spans_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_IMG_SPANS").as_deref() != Ok("0"))
+}
+
+/// The serials of `spans` (by start) that `dirty` (sorted, not overlapping) overlaps: for each span the first range
+/// ending past its start, as the old walk's binary search found it, here a pointer that only moves forward.
+fn spans_hit(spans: &[(u64, u64, u64)], dirty: &[(u64, u64)]) -> Vec<u64> {
+    let mut hit = Vec::new();
+    let mut j = 0;
+    for &(lo, hi, s) in spans {
+        while j < dirty.len() && dirty[j].0 + dirty[j].1 <= lo {
+            j += 1;
+        }
+        if j == dirty.len() {
+            break;
+        }
+        if dirty[j].0 < hi {
+            hit.push(s);
+        }
+    }
+    hit
+}
+
+#[cfg(test)]
+mod spans_tests {
+    /// The forward walk finds what a binary search per image finds.
+    #[test]
+    fn spans_hit_the_images_the_ranges_overlap() {
+        let spans = [(0x1000, 0x2000, 1), (0x1000, 0x1100, 2), (0x3000, 0x4000, 3), (0x5000, 0x9000, 4), (0xa000, 0xb000, 5)];
+        let dirty = [(0x1800, 0x10), (0x4000, 0x800), (0x8ff0, 0x20)];
+        assert_eq!(super::spans_hit(&spans, &dirty), vec![1, 4], "ends are exclusive; an image after the last range");
+        let old = |lo: u64, hi: u64| {
+            let i0 = dirty.partition_point(|&(a, n)| a + n <= lo);
+            i0 < dirty.len() && dirty[i0].0 < hi
+        };
+        let want: Vec<u64> = spans.iter().filter(|s| old(s.0, s.1)).map(|s| s.2).collect();
+        assert_eq!(super::spans_hit(&spans, &dirty), want);
+        assert!(super::spans_hit(&spans, &[]).is_empty());
+    }
 }
 
 /// Whether an image is a single-sample, one-layer 2D colour image (any aspect): the shape a 3D twin copies.
@@ -1822,6 +1872,7 @@ impl Gpu {
             if let Some(v) = imgs.by_addr.get_mut(&(t.mem as u64)) {
                 v.retain(|s| *s != old);
             }
+            imgs.addr_gen += 1;
             if forward_on() {
                 imgs.forward.insert(old, t.serial);
             }
@@ -1870,6 +1921,7 @@ impl Gpu {
         imgs.forward.remove(&t.serial);
         imgs.released.remove(&t.serial);
         imgs.by_serial.insert(t.serial, im);
+        imgs.addr_gen += 1;
         self.tables.invalidate_images();
         true
     }
@@ -2743,6 +2795,7 @@ impl Gpu {
         if let Some(v) = imgs.by_addr.get_mut(&(im.tex.mem as u64)) {
             v.retain(|s| *s != serial);
         }
+        imgs.addr_gen += 1;
         // an image shared with other texture objects: an alias only drops its views; an owner hands the image and its
         // memory to the first of its aliases
         let aliases: Vec<u64> = imgs
@@ -3842,7 +3895,24 @@ impl Gpu {
             } else {
                 usize::MAX
             };
-            if dirty_sorted && per_range >= 64 {
+            if dirty_sorted && per_range >= 64 && img_spans_on() {
+                // (MKW-SETS) the textures' spans, kept while `by_addr` stands, walked beside the sorted ranges: no image
+                // looked up (the walk below was ~2 ms of the replay thread a frame in MKW's race, ~10 submissions)
+                if imgs.spans_gen != imgs.addr_gen || imgs.spans.is_empty() && !imgs.by_addr.is_empty() {
+                    let mut v: Vec<(u64, u64, u64)> = Vec::with_capacity(imgs.by_serial.len());
+                    for ss in imgs.by_addr.values() {
+                        for &sv in ss {
+                            if let Some(im) = imgs.by_serial.get(&sv) {
+                                let lo = im.tex.mem as u64;
+                                v.push((lo, lo + im.tex.l.size, sv));
+                            }
+                        }
+                    }
+                    imgs.spans = v;
+                    imgs.spans_gen = imgs.addr_gen;
+                }
+                hit = spans_hit(&imgs.spans, dirty);
+            } else if dirty_sorted && per_range >= 64 {
                 // many dirty ranges (a game's loading: Mario Kart World's first submission had ~30,000 textures and
                 // pages without end; a lookup per range over the largest texture's span took 17 s): one pass over the
                 // textures, each looking its storage up in the sorted ranges

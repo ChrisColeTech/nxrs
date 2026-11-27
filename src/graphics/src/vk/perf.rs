@@ -97,6 +97,8 @@ pub enum C {
     Chained,
     /// stage sets patched from a seed: a copy the segment's stream began with (`exec::set_seed_on`)
     SetsSeeded,
+    /// seeds found for a module but not usable (older than the pools, not valid, a twin view)
+    SeedsStale,
     N,
 }
 
@@ -168,6 +170,7 @@ const NAMES: [&str; C::N as usize] = [
     "aq_idle_ns",
     "parked_chained",
     "sets_seeded",
+    "seeds_stale",
 ];
 
 static COUNT: [AtomicU64; C::N as usize] = [const { AtomicU64::new(0) }; C::N as usize];
@@ -550,7 +553,7 @@ pub fn frame(frame: u64) {
         );
     }
     crate::vklog!(
-        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets ({:.1} reused, {:.1} patched, {:.1} of them from a seed), {:.1} vertex inputs unchanged, {:.1} dynamic states / set offsets unchanged, {:.1} write-backs, {:.1} uniform updates ({:.1} ending a pass), {:.1} written storage buffers with no size; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms; {} linked from parts, {} of them optimized since, {} shader parts made ahead); dropped work {}",
+        "replay up to frame {frame}, per frame: {:.1} draws ({:.1} skipped: no shader {}, no pipeline {}, no target {} in all), {:.1} passes, {:.1} dispatches, {:.1} clears, {:.1} texture copies, {:.1} buffer copies, {:.1} descriptor sets ({:.1} reused, {:.1} patched, {:.1} of them from a seed, {:.1} seeds stale), {:.1} vertex inputs unchanged, {:.1} dynamic states / set offsets unchanged, {:.1} write-backs, {:.1} uniform updates ({:.1} ending a pass), {:.1} written storage buffers with no size; {} graphics + {} compute pipelines ({:.1} ms creating, worst {:.1} ms; {} linked from parts, {} of them optimized since, {} shader parts made ahead); dropped work {}",
         d(C::Draws, &p) as f64 / df,
         d(C::DrawsSkipped, &p) as f64 / df,
         cur[C::SkipNoShader as usize],
@@ -565,6 +568,7 @@ pub fn frame(frame: u64) {
         d(C::SetsReused, &p) as f64 / df,
         d(C::SetsPatched, &p) as f64 / df,
         d(C::SetsSeeded, &p) as f64 / df,
+        d(C::SeedsStale, &p) as f64 / df,
         d(C::VinSkipped, &p) as f64 / df,
         d(C::DynSkipped, &p) as f64 / df,
         d(C::Writebacks, &p) as f64 / df,
