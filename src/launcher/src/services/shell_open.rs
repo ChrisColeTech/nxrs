@@ -7,3 +7,10 @@ pub fn open(path: &str) {
         let _ = open::that_detached(native(path));
     }
 }
+
+/// A web page in the default browser (the address as given: no path rewriting).
+pub fn url(address: &str) {
+    if !address.is_empty() {
+        let _ = open::that_detached(address);
+    }
+}

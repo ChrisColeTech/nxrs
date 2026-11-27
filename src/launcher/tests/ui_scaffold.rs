@@ -108,6 +108,101 @@ fn rail_windows_end_with_their_commit_only() {
     no_footer_dismissal(&h);
 }
 
+/// About (owner, 2026-11-27): the app name and the build's version, no text; its own verbs, ghost
+/// Website and GitHub at the footer's leading side, each asking for its page (the dialogs are drawn
+/// alone, so the answers are read without dispatching: no browser opens).
+#[test]
+fn about_shows_the_name_and_its_buttons_ask_for_the_right_pages() {
+    use nxrs_launcher::constants::words_library as w;
+    let (_t, dir) = tmp();
+    let mut app = app_with(&dir, vec![built_game(&dir)]);
+    app.interactive = true;
+    app.dispatch(Action::About);
+    assert_eq!(w::ABOUT_VERSION, concat!("v", env!("NXRS_VERSION")));
+    assert_eq!(w::WEBSITE_URL, "https://nxrs.app");
+    assert_eq!(w::GITHUB_URL, "https://github.com/ChrisColeTech/nxrs");
+    let mut fonts = Some(nxrs_launcher::ui::fonts::definitions(
+        nxrs_launcher::services::font_files::load(),
+    ));
+    let mut h = HarnessBuilder::default()
+        .with_size([1280.0, 800.0])
+        .build_ui_state(
+            move |ui, s: &mut (App, Vec<Action>)| {
+                // the shell's fonts first (they take effect from the next frame), as the shell does
+                if let Some(f) = fonts.take() {
+                    ui.ctx().set_fonts(f);
+                    return;
+                }
+                let got = nxrs_launcher::ui::windows::show(ui.ctx(), &mut s.0);
+                s.1.extend(got);
+            },
+            (app, Vec::new()),
+        );
+    h.run_steps(4);
+    assert!(h.query_by_label("nxrs").is_some(), "the name");
+    assert!(h.query_by_label(w::ABOUT_VERSION).is_some(), "the version");
+    for gone in [
+        "Engine: nxrs",
+        "Website: https://nxrs.app",
+        "No games, keys",
+    ] {
+        assert!(h.query_by_label_contains(gone).is_none(), "no text: {gone}");
+    }
+    for (label, url) in w::ABOUT_LINKS {
+        h.state_mut().1.clear();
+        h.get_by_role_and_label(Role::Button, label).click();
+        h.run_steps(2);
+        assert_eq!(h.state().1, vec![Action::OpenUrl(url.into())], "{label}");
+        assert!(
+            !h.state().0.surfaces.is_empty(),
+            "{label} leaves About open"
+        );
+    }
+    assert!(
+        h.query_by_label("Close About nxrs").is_some(),
+        "the header's X"
+    );
+    assert!(
+        h.query_by_role_and_label(Role::Button, "Close").is_none(),
+        "no footer Close"
+    );
+    h.state_mut().1.clear();
+    h.get_by_role_and_label(Role::Button, "OK").click();
+    h.run_steps(2);
+    assert!(h.state().1.is_empty(), "OK only closes");
+    assert!(h.state().0.surfaces.is_empty(), "OK closes About");
+}
+
+/// "NXRS" sits at the centre of the window's full width; a bar too narrow for it leaves it out.
+#[test]
+fn the_title_bar_centres_nxrs_and_drops_it_when_crowded() {
+    use egui::{Rect, pos2, vec2};
+    use nxrs_launcher::ui::chrome::wordmark::place;
+    let (_t, dir) = tmp();
+    let mut h = harness(app_with(&dir, vec![built_game(&dir)]));
+    h.run_steps(4);
+    let at = h.get_by_label("NXRS").rect();
+    assert!((at.center().x - 640.0).abs() < 1.0, "centred: {at:?}");
+    let narrow = HarnessBuilder::default().with_size([420.0, 800.0]);
+    let mut n = narrow.build_ui_state(
+        |ui, s: &mut Shell| s.frame(ui),
+        Shell::new(app_with(&dir, vec![built_game(&dir)]), noop()),
+    );
+    n.run_steps(4);
+    assert!(n.query_by_label("NXRS").is_none(), "no room: not drawn");
+    let row = Rect::from_min_size(pos2(0.0, 0.0), vec2(1000.0, 36.0));
+    let size = vec2(40.0, 14.0);
+    assert_eq!(
+        place(row, size, 300.0, 862.0).map(|r| r.center().x),
+        Some(500.0)
+    );
+    assert!(place(row, size, 475.0, 862.0).is_none(), "near the menus");
+    assert!(
+        place(row, size, 300.0, 525.0).is_none(),
+        "near the window buttons"
+    );
+}
+
 #[test]
 fn a_list_window_has_the_shared_footer_and_its_empty_state() {
     let (_t, dir) = tmp();

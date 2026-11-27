@@ -2,7 +2,6 @@
 
 use super::surface::Surface;
 use super::{Action, App};
-use crate::constants::words_library as w;
 use crate::model::path_text::parent;
 use crate::services::{files, shell_open};
 
@@ -50,10 +49,8 @@ impl App {
             }
             Action::ViewConsole => self.lib.console.visible = true,
             Action::ToggleConsole => self.lib.console.visible = !self.lib.console.visible,
-            Action::About => {
-                use crate::constants::words_contexts as c;
-                self.message(c::ABOUT, c::ABOUT_HEADING, w::ABOUT, false)
-            }
+            Action::About => self.about(),
+            Action::OpenUrl(address) => shell_open::url(&address),
             Action::OpenBuildFolder => self.open_folder(false),
             Action::OpenSaveFolder => self.open_folder(true),
             Action::ViewGameLog => self.open_game_log(),

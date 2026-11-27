@@ -11,3 +11,4 @@ pub mod menu_model;
 pub mod status_bar;
 pub mod title_bar;
 pub mod tool_popup;
+pub mod wordmark;

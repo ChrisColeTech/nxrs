@@ -131,6 +131,15 @@ impl App {
             error,
         });
     }
+    /// Help > About nxrs; a command-line verb prints the name and version instead.
+    pub fn about(&mut self) {
+        use crate::constants::{words_contexts as c, words_library as w};
+        if !self.interactive {
+            eprintln!("{} {}", c::ABOUT_HEADING, w::ABOUT_VERSION);
+            return;
+        }
+        self.surfaces.push(Surface::About);
+    }
     /// A question: its one button (the verb) asks for `yes`; the X and Escape for `no`.
     pub fn question(&mut self, ask: Ask, yes: Action, no: Option<Action>, default_no: bool) {
         self.surfaces.push(Surface::Question {

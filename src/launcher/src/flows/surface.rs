@@ -76,6 +76,8 @@ pub enum Surface {
         text: String,
         error: bool,
     },
+    /// Help > About nxrs (owner, 2026-11-27): the app icon and name, Website and GitHub, OK.
+    About,
     Question {
         ask: Ask,
         yes: Action,
@@ -100,7 +102,10 @@ impl Surface {
     /// The child window's key (one native window per key).
     pub fn key(&self, at: usize) -> String {
         match self {
-            Surface::Message { .. } | Surface::Question { .. } | Surface::Choices { .. } => {
+            Surface::Message { .. }
+            | Surface::About
+            | Surface::Question { .. }
+            | Surface::Choices { .. } => {
                 format!("message-{at}")
             }
             Surface::Properties(p) if p.adding => "add-game".into(),
