@@ -21,6 +21,7 @@ const OP = {
 
 let memory, ringAddr, H, DATA, D8, DV, dataBase;
 let device, ctx, canvasFormat = 'bgra8unorm';
+let offscreen = null;
 const objs = new Map();
 const info = new Map(); // id -> descriptor facts (textures: {format, dim, w, h, d, mips, samples}; views: {...})
 let chain = Promise.resolve();
@@ -84,12 +85,25 @@ onmessage = async (e) => {
     postMessage({ stats: H ? Array.from(H.slice(0, 24)) : [] });
     return;
   }
+  // WEB-W8: the canvas's displayed size in device pixels changed; the engine's next acquire finds its swap chain out
+  // of date (src/graphics/src/web/icd.rs acquire_next_image) and makes one of this size; the canvas itself takes the
+  // size at the first present of such an image (present), so the picture is never stretched in between
+  if (m.resize) {
+    Atomics.store(H, H_CANVAS_W, m.resize[0]);
+    Atomics.store(H, H_CANVAS_H, m.resize[1]);
+    return;
+  }
   memory = m.memory;
   ringAddr = m.ring;
   shotEvery = m.shotEvery | 0;
   subTrace = !!m.subTrace;
   if (subTrace) setInterval(postTrace, 250);
   H = new Int32Array(memory.buffer, ringAddr, 64);
+  offscreen = m.canvas;
+  offscreen.width = m.width;
+  offscreen.height = m.height;
+  Atomics.store(H, H_CANVAS_W, m.width);
+  Atomics.store(H, H_CANVAS_H, m.height);
   DATA = H[H_DATA_SIZE];
   dataBase = ringAddr + 256;
   D8 = new Uint8Array(memory.buffer, dataBase, DATA);
@@ -145,8 +159,6 @@ onmessage = async (e) => {
     H[H_MAX_BIND_GROUPS] = device.limits.maxBindGroups;
     H[H_MAX_STORAGE_MB] = Math.floor(Math.min(device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize) / 1048576);
     H[H_MAX_TEX_2D] = device.limits.maxTextureDimension2D;
-    H[H_CANVAS_W] = m.width;
-    H[H_CANVAS_H] = m.height;
     const ai = adapter.info || {};
     say(`WebGPU device: ${ai.vendor || '?'} ${ai.architecture || ''} ${ai.description || ''}; features ${features.join(', ')}`);
     Atomics.store(H, H_STATE, 1);
@@ -952,6 +964,12 @@ function present(texId) {
   const t = objs.get(texId);
   if (!t) return false;
   const ti = info.get(texId);
+  // WEB-W8: the canvas is the size of the swap chain image presented (the engine made it at the canvas's device
+  // pixels), so the copy is 1:1 and the page never scales the picture
+  if (offscreen && (offscreen.width !== ti.w || offscreen.height !== ti.h)) {
+    offscreen.width = ti.w;
+    offscreen.height = ti.h;
+  }
   const cur = ctx.getCurrentTexture();
   const enc = device.createCommandEncoder();
   enc.copyTextureToTexture({ texture: t }, { texture: cur },

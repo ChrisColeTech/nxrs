@@ -18,6 +18,7 @@
     const body = pending.splice(0).join('\n') + '\n';
     fetch('log', { method: 'POST', body }).catch(() => {});
   }, 500);
+  // the game's aspect (the canvas's shape on the page); its backing store is the displayed size in device pixels
   const W = 1280;
   const H = 720;
   let started = false;
@@ -25,13 +26,45 @@
   const say = (text) => console.log('[nxrs] [gpu] ' + text);
   const canvas = document.createElement('canvas');
   canvas.id = 'screen';
-  canvas.width = W;
-  canvas.height = H;
   // letterboxed: the whole width when the window is taller than the game, the whole height when it is wider
   canvas.style.width = `min(100vw, calc(100vh * ${W} / ${H}))`;
   canvas.style.height = `min(100vh, calc(100vw * ${H} / ${W}))`;
+  // WEB-W8: the backing store follows the canvas's displayed size x devicePixelRatio (exact device pixels where the
+  // browser reports them), so the engine's swap chain is the screen's pixels and the picture is scaled once, by the
+  // engine's present (sharp upscale or its filtered blit), never again by the page. Before the canvas goes to the
+  // GPU worker its size is set here; after, the worker resizes it at the present of an image of the new size.
+  let size = [W, H];
+  const device = (w, h) => [Math.max(1, Math.round(w)), Math.max(1, Math.round(h))];
+  const resized = (s) => {
+    if (s[0] === size[0] && s[1] === size[1]) return;
+    size = s;
+    const worker = globalThis.NXRS_GPU && NXRS_GPU.worker;
+    if (worker) worker.postMessage({ resize: s });
+    else {
+      canvas.width = s[0];
+      canvas.height = s[1];
+    }
+  };
+  const observer = new ResizeObserver((entries) => {
+    const e = entries[entries.length - 1];
+    const dp = e.devicePixelContentBoxSize && e.devicePixelContentBoxSize[0];
+    if (dp) resized(device(dp.inlineSize, dp.blockSize));
+    else {
+      const c = e.contentBoxSize[0];
+      resized(device(c.inlineSize * devicePixelRatio, c.blockSize * devicePixelRatio));
+    }
+  });
+  try {
+    observer.observe(canvas, { box: 'device-pixel-content-box' });
+  } catch {
+    observer.observe(canvas);
+  }
+  canvas.width = W;
+  canvas.height = H;
   const place = () => {
     if (!canvas.isConnected) document.body.prepend(canvas);
+    const r = canvas.getBoundingClientRect();
+    if (r.width > 0) resized(device(r.width * devicePixelRatio, r.height * devicePixelRatio));
   };
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', place);
   else place();
@@ -65,7 +98,7 @@
       const shotEvery = Number(q.get('shots') || 0);
       // ?subtrace=1: the worker logs every submission to the dev server (gpu-worker.js traceSubmit)
       const subTrace = q.get('subtrace') === '1';
-      worker.postMessage({ memory, ring, canvas: off, width: W, height: H, shotEvery, subTrace }, [off]);
+      worker.postMessage({ memory, ring, canvas: off, width: size[0], height: size[1], shotEvery, subTrace }, [off]);
       NXRS_GPU.worker = worker;
     },
   };

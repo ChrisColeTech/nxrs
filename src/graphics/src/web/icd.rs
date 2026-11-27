@@ -483,11 +483,25 @@ unsafe extern "system" fn surface_caps(_p: vk::PhysicalDevice, _s: vk::SurfaceKH
     OK
 }
 unsafe extern "system" fn surface_formats(_p: vk::PhysicalDevice, _s: vk::SurfaceKHR, count: *mut u32, out: *mut vk::SurfaceFormatKHR) -> R {
+    // WEB-W8: the sRGB format too (as a native surface offers it): an sRGB picture blitted into it is encoded again,
+    // where into the UNORM one it arrived decoded (too dark). The canvas stays bgra8unorm; the present's copy between
+    // the two differs only in sRGB-ness, which WebGPU copies byte for byte.
     answer(
-        &[vk::SurfaceFormatKHR { format: vk::Format::B8G8R8A8_UNORM, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR }],
+        &[
+            vk::SurfaceFormatKHR { format: vk::Format::B8G8R8A8_UNORM, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR },
+            vk::SurfaceFormatKHR { format: vk::Format::B8G8R8A8_SRGB, color_space: vk::ColorSpaceKHR::SRGB_NONLINEAR },
+        ],
         count,
         out,
     )
+}
+
+/// The swap chain image formats the canvas surface offers (`surface_formats`); anything else is made as UNORM.
+fn swapchain_format(f: vk::Format) -> vk::Format {
+    match f {
+        vk::Format::B8G8R8A8_SRGB => f,
+        _ => vk::Format::B8G8R8A8_UNORM,
+    }
 }
 unsafe extern "system" fn surface_modes(_p: vk::PhysicalDevice, _s: vk::SurfaceKHR, count: *mut u32, out: *mut vk::PresentModeKHR) -> R {
     answer(&[vk::PresentModeKHR::FIFO], count, out)
@@ -497,11 +511,12 @@ unsafe extern "system" fn destroy_surface(_i: vk::Instance, _s: vk::SurfaceKHR, 
 unsafe extern "system" fn create_swapchain(_d: vk::Device, ci: *const vk::SwapchainCreateInfoKHR<'_>, _a: *const c_void, out: *mut vk::SwapchainKHR) -> R {
     let ci = &*ci;
     let n = ci.min_image_count.clamp(2, 3);
+    let format = swapchain_format(ci.image_format);
     let mut images = Vec::new();
     for _ in 0..n {
         let mut im = Image {
             ty: vk::ImageType::TYPE_2D,
-            format: vk::Format::B8G8R8A8_UNORM,
+            format,
             extent: vk::Extent3D { width: ci.image_extent.width, height: ci.image_extent.height, depth: 1 },
             mips: 1,
             layers: 1,
@@ -509,7 +524,7 @@ unsafe extern "system" fn create_swapchain(_d: vk::Device, ci: *const vk::Swapch
             usage: ci.image_usage | vk::ImageUsageFlags::SAMPLED,
             flags: vk::ImageCreateFlags::empty(),
             id: 0,
-            tex: fmt::tex(vk::Format::B8G8R8A8_UNORM),
+            tex: fmt::tex(format),
         };
         im.id = obj::gpu_texture(&im, true);
         let h = obj::new_handle();
