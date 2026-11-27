@@ -47,7 +47,6 @@ fn game_menu_installs_dlc() {
         "Play",
         "Stop",
         "Build",
-        "Build for web",
         "-",
         "Install DLC…",
         "Install Updates…",
@@ -220,15 +219,13 @@ fn updates_window_chooses_and_builds() {
     assert_eq!(h.state().app.lib.games[0].update_choice, older);
     h.get_by_label("Build now").click();
     h.run_steps(3);
-    let left = h.state().app.surfaces.len();
-    assert_eq!(
-        left,
-        0,
-        "Build now closes the window and builds (pending: {:?})",
-        h.state()
-            .app
-            .update_pending_text(&h.state().app.lib.games[0])
-    );
+    // Build now closes the window and asks Native or Web, as every Build does
+    let left = h.state().app.surfaces.clone();
+    let native = Action::BuildNative;
+    assert!(matches!(&left[..], [Surface::Choices { options, .. }] if options[0].action == native));
+    h.get_by_role_and_label(Role::Button, "Native").click();
+    h.run_steps(3);
+    assert!(h.state().app.surfaces.is_empty() && h.state().app.is_building("g"));
     settle(&mut h.state_mut().app);
 }
 

@@ -56,6 +56,9 @@ fn spec<'a>(surface: &Surface, key: &'a str, title: &'a str) -> ChildSpec<'a> {
             let words = (ask.heading.as_str(), ask.text.as_str());
             message::spec((key, title), words, check.is_some())
         }
+        Surface::Choices { ask, .. } => {
+            message::spec((key, title), (&ask.heading, &ask.text), false)
+        }
         Surface::ToolPopup => ChildSpec::work(key, title, 0.0, 0.0),
     }
 }
@@ -128,7 +131,7 @@ fn title_of(app: &App, surface: &Surface) -> String {
                 context.clone()
             }
         }
-        Surface::Question { ask, .. } => ask.title.clone(),
+        Surface::Question { ask, .. } | Surface::Choices { ask, .. } => ask.title.clone(),
         Surface::Properties(p) if p.adding => s::ADD_TITLE.into(),
         Surface::Properties(p) => format!("{}{}", p.game.title, s::PROPERTIES_TITLE),
         Surface::Settings(_) => s::SETTINGS_TITLE.into(),
@@ -153,6 +156,7 @@ fn body(ui: &mut egui::Ui, app: &mut App, surface: &mut Surface) -> Reply {
             default_no,
             check,
         } => message::question(ui, ask, (yes, no.as_ref()), *default_no, check.as_mut()),
+        Surface::Choices { ask, options } => message::choices(ui, ask, options),
         Surface::Properties(p) => properties::show(ui, app, p),
         Surface::Settings(s) => settings::show(ui, app, s),
         Surface::Dlc(w) => dlc::show(ui, app, w),

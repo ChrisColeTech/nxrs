@@ -57,6 +57,15 @@ impl Ask {
     }
 }
 
+/// One option of a Choices dialog: its button's label, what it runs, and why it cannot run now
+/// (its disabled button's tooltip; empty: it can).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Choice {
+    pub label: String,
+    pub action: Action,
+    pub why_not: String,
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub enum Surface {
     /// A message box: `context` titles the window (the task or place it belongs to: "Add game",
@@ -74,6 +83,12 @@ pub enum Surface {
         default_no: bool,
         check: Option<Check>,
     },
+    /// Which of equal actions to take (Play's and Build's Native or Web; owner, 2026-11-27): the
+    /// question box's words (no verb) and one equal button per option; X and Escape dismiss.
+    Choices {
+        ask: Ask,
+        options: Vec<Choice>,
+    },
     Properties(Box<PropertiesDraft>),
     Settings(Box<SettingsDraft>),
     Dlc(ListWindow),
@@ -85,7 +100,9 @@ impl Surface {
     /// The child window's key (one native window per key).
     pub fn key(&self, at: usize) -> String {
         match self {
-            Surface::Message { .. } | Surface::Question { .. } => format!("message-{at}"),
+            Surface::Message { .. } | Surface::Question { .. } | Surface::Choices { .. } => {
+                format!("message-{at}")
+            }
             Surface::Properties(p) if p.adding => "add-game".into(),
             Surface::Properties(_) => "properties".into(),
             Surface::Settings(_) => "settings".into(),

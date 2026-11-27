@@ -35,11 +35,11 @@ impl App {
         self.launch();
     }
 
-    /// Enter / double-click: Play when it can, else Properties > Build.
+    /// Enter / double-click: Play (Native or Web) when it can, else Properties > Build.
     pub fn activate(&mut self) {
         let Some(id) = self.selected_id() else { return };
-        if self.facts_of(&id).playable() {
-            self.play()
+        if self.facts_of(&id).playable() || self.can_target(&id, false) {
+            self.ask_target(false)
         } else {
             self.show_properties(1)
         }

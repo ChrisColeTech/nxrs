@@ -64,6 +64,8 @@ pub fn windows(app: &mut App, o: &Options) {
             app.ask_close();
             None
         }
+        Some("play") => Some(Action::Play),
+        Some("build") => Some(Action::Build),
         _ => None,
     };
     named.into_iter().for_each(|a| app.dispatch(a));

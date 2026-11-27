@@ -21,6 +21,7 @@ pub mod settings;
 mod start;
 mod state;
 pub mod surface;
+mod target;
 mod tick;
 mod tools;
 mod update_probe;

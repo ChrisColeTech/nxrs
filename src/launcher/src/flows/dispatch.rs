@@ -14,9 +14,11 @@ impl App {
             Action::ImportBuildPick => self.pick_build(),
             Action::Settings(tab) => self.show_settings(tab),
             Action::Exit => self.request_close(),
-            Action::Play => self.play(),
+            Action::Play => self.ask_target(false),
             Action::Stop => self.stop(),
-            Action::Build => self.start_build(),
+            Action::Build => self.ask_target(true),
+            Action::PlayNative => self.play(),
+            Action::BuildNative => self.start_build(),
             Action::BuildWeb => self.start_web_build(),
             Action::PlayWeb => self.play_in_browser(),
             Action::Properties(tab) => self.show_properties(tab),
@@ -81,7 +83,7 @@ impl App {
         }
     }
 
-    /// The card's cover double-clicked: Play when it offers Play, else Properties > General.
+    /// The card's cover double-clicked: Play (the chooser) when it offers Play, else Properties > General.
     fn card_activate(&mut self, id: &str) {
         self.select(id);
         let plays = self

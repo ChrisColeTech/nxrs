@@ -1,12 +1,14 @@
 //! Message and question boxes (`QMessageBox`) with the one body header every dialog has: the icon
 //! tile (`i`, `!` in the error red, `?`) and the heading, then the text (a question's tick box as its
 //! last paragraph). Every box ends with one filled primary and no dismissal button: a message's OK, a
-//! question's verb ("Remove"); the X and Escape close a message and answer a question No.
+//! question's verb ("Remove"); the X and Escape close a message and answer a question No. A Choices
+//! box (Play's and Build's Native or Web) has the same body and one equal button per option, none
+//! filled; the X and Escape dismiss it.
 
 use super::Reply;
 use crate::constants::{child_window as c, popups as p, theme as tokens};
 use crate::flows::Action;
-use crate::flows::surface::{Ask, Check};
+use crate::flows::surface::{Ask, Check, Choice};
 use crate::ui::popups::{authored, child_window::ChildSpec};
 use crate::ui::theme;
 use crate::ui::widgets::{page, rail::Icon};
@@ -94,5 +96,29 @@ pub fn question(
         reply.actions.extend(no.cloned());
     }
     reply.close = said_yes || said_no;
+    reply
+}
+
+/// Which of equal actions to take: the question's body, then one equal button per option at the
+/// footer's trailing end, in order; one that cannot run is disabled, its reason its tooltip. Enter
+/// does nothing (no option is the default); the X and Escape dismiss.
+pub fn choices(ui: &mut Ui, ask: &Ask, options: &[Choice]) -> Reply {
+    body(
+        ui,
+        (Icon::Question, &ask.heading, false),
+        &ask.text,
+        p::FOOTER,
+    );
+    let pal = theme::of(ui.ctx());
+    let buttons: Vec<(&str, bool, &str)> = options
+        .iter()
+        .map(|o| (o.label.as_str(), o.why_not.is_empty(), o.why_not.as_str()))
+        .collect();
+    let chosen = authored::choices_at_bottom(ui, &pal, &buttons);
+    let mut reply = Reply::default();
+    if let Some(o) = chosen.and_then(|at| options.get(at)) {
+        reply.actions.push(o.action.clone());
+        reply.close = true;
+    }
     reply
 }
