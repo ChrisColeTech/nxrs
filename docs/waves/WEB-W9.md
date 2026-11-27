@@ -1,7 +1,10 @@
-# WEB-W9 - Saves, loading, settings in the game page (design)
+# WEB-W9 - Saves, loading, settings in the game page
 
-**Status: design for the owner's review; nothing is built.** Phase W9 of `docs/35-WEB-TARGET-PLAN.md`. Branch
-`web-w9`, base `cee67c0`.
+**Status: built (2026-11-27), verified on Beach Bounce in Chrome; results in section 8.** Phase W9 of
+`docs/35-WEB-TARGET-PLAN.md`. Branch `web-w9`, base `cee67c0`, gameplay-harness (W8, W11) merged in. Owner, at the
+build: the three questions of section 7 take the recommendations; the Saves page carries no developer detail (no
+acknowledgement times, no storage wording; one plain line only when a save could not be stored); Restart is one
+Group "Game" with a single "Restart game…" button, its explanation in the info mark.
 
 Owner decisions this design keeps (2026-11-27): settings and save management live **in the game page**, as an in-game
 menu over the game in Chrome, stored in the browser. Not a separate web launcher page, not the desktop launcher.
@@ -297,3 +300,43 @@ game; graphics depend on the game.
 **Q3. Gamepad shortcut for the menu.** Home works on DualSense and Switch pads in Chrome; Windows takes the Xbox
 guide button for Game Bar. Choices: Home plus Minus + Plus held 1 s (as designed), or Home only. **Recommendation:
 both**, so every pad can open it.
+
+## 8. Built and verified (2026-11-27)
+
+**Built** (commits on `web-w9`):
+
+| Part | Where |
+|---|---|
+| Menu (Saves, Graphics, Audio, Controller), questions, gamepad and keyboard navigation | `src/web/menu.js`, `menu.css` (new; host files in `cli/src/webhost.rs`, `dev_server.py`) |
+| Opening: Esc, gamepad Home (std 16), Minus + Plus held 1 s; input released while open, held buttons stay released after | `src/web/input.js` |
+| Pause: menu word `[11]` -> `clock::set_hold`, the next present waits (`graphics nvn/window.rs set_held`), vsync thread waits, `input::set_suspended`; AudioContext suspended and the ring left untouched (`media/sink.rs`); no stall warning while held (`watch.rs`) | `os/src/input/web.rs`, `os/src/clock.rs`, `services/misc.rs` |
+| Settings: engine ini text in localStorage (`nxrs-settings/<titleId>` graphics, `nxrs-settings/shared` audio + controller + `[Web]` volume/mute), written to `/data/settings.ini`, opened by `nxweb_main` (`nxconfig::open`); live through the settings mailbox at input block `[64..]` (sequence lock, `nxconfig::set`) | `menu.js` `NxrsSettings`, `boot.js`, `os/src/boot.rs`, `os/src/input/web.rs` |
+| New keys `key_map`, `stick_deadzone` (`docs/settings.md` regenerated); web pad through `layout.rs` (`button_layout`, `button_map`) | `config/src/options.rs`, `os/src/input/web.rs` |
+| Focus 1 / 2 / 3 to `oe::set_focus` (mute and pause on focus loss) | `input.js`, `input/web.rs` |
+| Saves: list, export (`.nxsave`: `NXSE1`, version, JSON, pack), import (checked whole, title id checked), delete; import / delete restart; I/O worker posts `saved` / `saveFailed`; `navigator.storage.persist()` at the first save; save names escaped (`encodeURIComponent`) and restored at the same path (the `a/b` -> `a_b` bug) | `saves.js`, `io-worker.js`, `boot.js` |
+| Loading screen: name and icon from the control data, one bar over game-code + boot-set bytes, steps with real measures | `index.html`, `boot.js`, `io-worker.js` (`bootDoneBytes`) |
+| Latched key presses moved from `[40..48)` to `[48..56)` (they overlapped gamepad 3's words) | `input.js`, `input/web.rs` |
+
+Not built: the design's "Shaders" loading step (no page-side measure of shader packs exists; Beach Bounce has no
+packs) and the Audio status line's underrun count (a plain "Sound is on" instead).
+
+**Verified** (`build/WEB/W9/run1`, driver `tools/drive.mjs`, dev_server `--live` on 8779, own Chrome profile;
+chrome://gpu: `LUID={0,113326} *ACTIVE*`): Beach Bounce's own Save menu wrote slot 12 (`io: save user1 written`,
+`fs: commit save`); the menu listed "Player 1 · user1 · written by the game" (`09-menu-saves.png`); a reload restored it
+(`saves: user1 restored`); the save exported to `run1/Beach Bounce Remastered - Player 1.nxsave`, deleted through the
+menu's question (`14-delete-question.png`; restart: `none stored`), imported (another title's id refused with its
+reason), restart: restored, and the game's Load screen shows slot 12 "Nov 27, 09:08" (`18-game-load-p2.png`). Pause:
+presents stop at the menu (frames 14343 held), resume on close. Graphics: Handheld + Half applied live
+(`oe: operation mode handheld`, `[vk] resolution scale x1.00 -> x0.50`), picture visibly softer
+(`11-handheld-half.png`), and read again at start after a reload. Controller: A rebound to F through the table's
+capture: X then gave no button, F gave A (0x0001); an injected standard pad (CDP `navigator.getGamepads` override):
+bottom = B under switch, Home opened the menu, the pad's D-pad switched Face buttons to Xbox, its B closed the menu,
+bottom = A (`button layout xbox`).
+
+A check on the relinked build (`run2`) showed one `[RED] audio: the page's AudioWorklet stopped (context state 2)`
+at resume: the hold is released a moment before the page resumes its AudioContext. The web output now keeps running
+for 1 s after a hold (`media/sink.rs`); that build is the library's, but it was not run again in Chrome (W8b's Chrome
+was running).
+
+**Unproven:** the resume fix above in Chrome; the Export button's download and the Import file picker themselves (the same functions were driven
+directly); a real gamepad (injected only); Minus + Plus hold; volume heard; Anime Girls (W8b's title).

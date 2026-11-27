@@ -903,6 +903,7 @@ fn web_device_thread() {
     // the longest pass of this loop since the last report (a stall that empties the ring shows here)
     let mut last = Instant::now();
     let mut longest = Duration::ZERO;
+    let mut resumed = Instant::now();
     loop {
         std::thread::sleep(Duration::from_millis(2));
         let now = Instant::now();
@@ -912,6 +913,8 @@ fn web_device_thread() {
             beat = (ring.heartbeat(), now);
             clock0 = (now, 0);
             last = now;
+            // the page resumes its AudioContext a moment after the game runs again
+            resumed = now + Duration::from_secs(1);
             continue;
         }
         longest = longest.max(now.duration_since(last));
@@ -921,7 +924,8 @@ fn web_device_thread() {
             beat = (hb, now);
         }
         let (state, rate) = ring.context();
-        let live = state == 1 && now.duration_since(beat.1) < Duration::from_millis(500);
+        let live = (state == 1 && now.duration_since(beat.1) < Duration::from_millis(500))
+            || (running && now < resumed);
         if live != running {
             running = live;
             if live {
