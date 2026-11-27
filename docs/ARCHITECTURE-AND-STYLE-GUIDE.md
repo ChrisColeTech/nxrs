@@ -172,7 +172,8 @@ the saved size survives hiding it, and a small window refits only the paint.
 ## 7. Build and release
 
 - `scripts/build/build.ps1` builds the engine and the launcher in release and assembles `dist/nxrs` (the launcher,
-  `nxrs-engine/`, `toolchain/llvm-mingw` with the gnullvm engine, `legal/`), then removes all of `target/` so
+  `nxrs-engine/` with the MSVC and the gnullvm engines, `toolchain/llvm-mingw`, the Visual C++ runtime DLLs,
+  `legal/`: a release builds games with nothing installed), then removes all of `target/` so
   `dist/nxrs` is what remains; `-KeepCache` keeps `target/` for fast rebuilds, `-Run` starts the result.
   `scripts/build/prune.ps1` shrinks `target/` without removing it.
 - `src/launcher/scripts/package_launcher.py` makes the release archive with its SHA-256 manifest from an engine

@@ -292,12 +292,18 @@ fn version_of(path: &Path) -> Result<(String, String)> {
         .take(3)
         .collect::<Vec<_>>()
         .join(" ");
-    let id = text
+    Ok((version, toolchain_id(&text)))
+}
+
+/// What an object depends on of `clang --version`: where the toolchain is unpacked is not (llvm-mingw and the bundled
+/// Linux clang print their folder in InstalledDir and in their configuration file's path), so a moved release keeps
+/// its objects.
+fn toolchain_id(version_text: &str) -> String {
+    version_text
         .lines()
-        .filter(|l| !l.starts_with("InstalledDir:"))
+        .filter(|l| !l.starts_with("InstalledDir:") && !l.starts_with("Configuration file:"))
         .collect::<Vec<_>>()
-        .join("\n");
-    Ok((version, id))
+        .join("\n")
 }
 
 fn which(exe: &str) -> Option<PathBuf> {
@@ -875,7 +881,8 @@ fn extra_libs(front: bool, gnu: bool) -> Vec<String> {
 /// line's limit). Written as `<dll>.part` and renamed, so a failed link leaves the previous DLL whole.
 /// Linux: what the engine's static libraries need of the system (`cargo rustc --crate-type staticlib --
 /// --print native-static-libs`): the runtime's, and for the whole engine ALSA (cpal's sound), the codec libraries
-/// (opus, libvpx, dav1d) and FFmpeg's libavcodec / libavutil (H.264 and AAC).
+/// (opus, libvpx, dav1d) and FFmpeg's libavcodec / libavutil (H.264 and AAC). A release builds the engine with
+/// `NXRS_CODECS` (scripts/build/linux-deps.sh): the codecs are then inside `libnxfront.a` and only ALSA is linked.
 const LINUX_SYS_LIBS: &[&str] = &[
     "-lgcc_s",
     "-lutil",
@@ -885,14 +892,22 @@ const LINUX_SYS_LIBS: &[&str] = &[
     "-ldl",
     "-lc",
 ];
-const LINUX_ENGINE_LIBS: &[&str] = &[
-    "-lopus",
-    "-lvpx",
-    "-ldav1d",
-    "-lavcodec",
-    "-lavutil",
-    "-lasound",
-];
+const LINUX_ENGINE_LIBS: &[&str] = if STATIC_CODECS {
+    &["-lasound"]
+} else {
+    &[
+        "-lopus",
+        "-lvpx",
+        "-ldav1d",
+        "-lavcodec",
+        "-lavutil",
+        "-lasound",
+    ]
+};
+
+/// Whether this engine was built with the codecs inside it (`NXRS_CODECS` when nxrs-build and the engine libraries
+/// were built, one cargo run: src/os/build.rs links them statically then).
+pub const STATIC_CODECS: bool = option_env!("NXRS_CODECS").is_some();
 
 /// `<name>_code.so` on Linux: every object and the engine library, `-Bsymbolic`, nothing left undefined.
 fn link_so(
@@ -1513,6 +1528,20 @@ mod tests {
             "the C is in the key"
         );
         let _ = std::fs::remove_dir_all(&d);
+    }
+
+    #[test]
+    fn toolchain_id_leaves_out_where_the_toolchain_is_unpacked() {
+        let at = |dir: &str| {
+            format!(
+                "clang version 23.1.5 (https://github.com/llvm/llvm-project.git 392dfff)\nTarget: x86_64-w64-windows-gnu\n\
+                 Thread model: posix\nInstalledDir: {dir}/bin\nConfiguration file: {dir}/bin/x86_64-w64-windows-gnu.cfg\n"
+            )
+        };
+        let a = toolchain_id(&at("C:/a/nxrs/toolchain/llvm-mingw"));
+        assert_eq!(a, toolchain_id(&at("D:/elsewhere/llvm-mingw")));
+        assert!(a.contains("clang version 23.1.5") && a.contains("x86_64-w64-windows-gnu"));
+        assert!(!a.contains("toolchain"));
     }
 
     #[test]

@@ -762,7 +762,7 @@ fn doctor() -> i32 {
         match cc::find_clang(None) {
             Ok(c) => match cc::find_lld(&c) {
                 Some(l) => check(true, format!("linker: {}", l.display())),
-                None => check(false, "linker: ld.lld not found (install lld)".into()),
+                None => check(false, "linker: ld.lld not found beside clang".into()),
             },
             Err(_) => check(false, "linker: no clang to drive ld.lld".into()),
         }
@@ -875,18 +875,22 @@ fn linux_checks(check: &mut dyn FnMut(bool, String)) {
         has_lib("libvulkan.so.1"),
         "Vulkan loader (libvulkan.so.1)".into(),
     );
-    for (lib, what) in [
-        (
-            "libasound.so.2",
-            "ALSA (sound; PulseAudio / PipeWire through its default device)",
-        ),
-        ("libopus.so.0", "libopus (Opus sound)"),
-        ("libvpx.so", "libvpx (VP8 / VP9 movies)"),
-        ("libdav1d.so", "dav1d (AV1 movies)"),
-        ("libavcodec.so", "FFmpeg libavcodec (H.264 movies, AAC)"),
-        ("libavutil.so", "FFmpeg libavutil"),
-    ] {
-        check(has_lib(lib), format!("{what}: {lib}"));
+    check(
+        has_lib("libasound.so.2"),
+        "ALSA (sound; PulseAudio / PipeWire through its default device): libasound.so.2".into(),
+    );
+    if cc::STATIC_CODECS {
+        out::line("     codecs: opus, libvpx, dav1d, FFmpeg (H.264, AAC) built into the engine");
+    } else {
+        for (lib, what) in [
+            ("libopus.so.0", "libopus (Opus sound)"),
+            ("libvpx.so", "libvpx (VP8 / VP9 movies)"),
+            ("libdav1d.so", "dav1d (AV1 movies)"),
+            ("libavcodec.so", "FFmpeg libavcodec (H.264 movies, AAC)"),
+            ("libavutil.so", "FFmpeg libavutil"),
+        ] {
+            check(has_lib(lib), format!("{what}: {lib}"));
+        }
     }
     let display = std::env::var_os("WAYLAND_DISPLAY")
         .map(|v| format!("Wayland {}", v.to_string_lossy()))

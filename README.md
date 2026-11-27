@@ -32,16 +32,16 @@
 
 ## Install
 
-You need a 64-bit CPU with AVX2 and a graphics card with Vulkan. **Settings > Engine** checks your PC and lists
-anything missing.
+Download for Windows or Linux, unpack it anywhere and run nxrs. There is nothing else to install: the tools nxrs
+builds games with come in the download.
 
-| OS | Download | Also install |
-|---|---|---|
-| **Windows&nbsp;10&nbsp;/&nbsp;11** | [x64&nbsp;(.zip)](https://github.com/ChrisColeTech/nxrs/releases/latest/download/nxrs-windows-x64.zip) | [LLVM](https://github.com/llvm/llvm-project/releases) and the [Visual Studio Build Tools](https://visualstudio.microsoft.com/visual-cpp-build-tools/) ("Desktop development with C++") |
-| **Linux** | [x64&nbsp;(.tar.gz)](https://github.com/ChrisColeTech/nxrs/releases/latest/download/nxrs-linux-x64.tar.gz) | clang, lld, a Vulkan driver, and the ALSA, Opus, libvpx, dav1d and FFmpeg libraries |
+| OS | Download |
+|---|---|
+| **Windows&nbsp;10&nbsp;/&nbsp;11** | [x64&nbsp;(.zip)](https://github.com/ChrisColeTech/nxrs/releases/latest/download/nxrs-windows-x64.zip) |
+| **Linux** | [x64&nbsp;(.tar.gz)](https://github.com/ChrisColeTech/nxrs/releases/latest/download/nxrs-linux-x64.tar.gz) |
 
-Unpack it anywhere and run `nxrs.exe` (Windows) or `nxrs/nxrs` (Linux). The extra tools are what nxrs uses to
-build each game.
+You need a 64-bit PC (a CPU with AVX2) with a Vulkan graphics card. Run `nxrs.exe` on Windows, `nxrs/nxrs` on
+Linux. **Settings > Engine** checks your PC.
 
 ## Getting started
 

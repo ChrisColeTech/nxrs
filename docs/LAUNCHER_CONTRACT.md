@@ -279,11 +279,18 @@ nxrs-engine\nxrs-build.exe, engine.json
 nxrs-engine\nxfront.lib, nxrt.lib                       MSVC engine (used when Visual Studio + a clang are installed)
 nxrs-engine\gnu\libnxfront.a, libnxrt.a, libwindows.0.52.0.a   gnullvm engine
 toolchain\llvm-mingw\                                   x86_64 part of llvm-mingw (no Visual Studio needed)
+vcruntime140.dll, vcruntime140_1.dll, msvcp140.dll      beside nxrs.exe, nxrs-build.exe and tools\spirv-val.exe
 legal\licenses\nxrs-engine\                             the engine's LICENSES\
 ```
 
 nxrs-build chooses MSVC only when Visual Studio, a clang and `nxfront.lib` are all there (`cc::use_gnu`), else the
-bundled llvm-mingw with `gnu\`: a release may ship only the gnullvm set.
+bundled llvm-mingw with `gnu\`: a release may ship only the gnullvm set. `.github/workflows/release.yml` builds both
+(`scripts/build/build.ps1`), so the zip builds games with nothing installed.
+
+Linux (`nxrs-linux-x64.tar.gz`): `nxrs`, `nxrs-engine/` (`libnxfront.a` with opus, libvpx, dav1d and FFmpeg's H.264 /
+AAC decoders inside, `NXRS_CODECS`), and `toolchain/clang/` (LLVM's clang and lld, a glibc sysroot; nxrs-build's
+`../toolchain/clang/bin/clang`), all from `scripts/build/linux-deps.sh`. A game links only ALSA and the C library
+of the system.
 
 ### Not done
 
