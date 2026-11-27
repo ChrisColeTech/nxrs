@@ -54,7 +54,9 @@ py -m unittest scripts.test_play          # the harness's own checks (under a se
 
 ```powershell
 cargo build --release -p nxrs-cli -p front -p runtime   # the engine: nxrs-build + nxfront.lib + nxrt.lib
-cargo build --release --manifest-path src/launcher/Cargo.toml   # the launcher: target/release/nxrs.exe
+cd src/launcher; cargo build --release   # the launcher: target/release/nxrs.exe (run it from src/launcher: its
+                                         # .cargo/config.toml, which sends it to the root target/, is read only
+                                         # from there; --manifest-path from the root builds into src/launcher/target)
 cargo test                                          # engine (seconds; GPU and game tests are opt-in)
 cd src/launcher; cargo test                         # launcher (seconds: fake engine, kittest, CLI)
 cd src/launcher; cargo clippy --all-targets -- -D warnings; cargo fmt   # max_width 100
