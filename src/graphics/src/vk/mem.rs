@@ -4388,6 +4388,11 @@ fn land_pre_on() -> bool {
     *ON.get_or_init(|| std::env::var("NXGFX_LAND_PRE").as_deref() != Ok("0"))
 }
 
+fn land_skip_same_on() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var("NXGFX_LAND_SKIP_SAME").as_deref() != Ok("0"))
+}
+
 pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u64)], epoch: u64, value: u64) {
     if wbs.is_empty() {
         return;
@@ -4399,6 +4404,14 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
     // `NXGFX_LAND_PRE=0`: done under the lock, as before
     let pres: Vec<Option<super::upskip::LandingPre>> = if land_pre_on() {
         wbs.iter().map(|w| super::upskip::landing_pre(w.1, w.2, w.3, w.4)).collect()
+    } else {
+        Vec::new()
+    };
+    // (OOT-MEM) every whole page the GPU left as the baseline has it, not only the re-armed ones: `land_changed`
+    // compared each such page again under the pool lock (OoT: ~48 MB a frame, ~3 ms of the lock the replay thread's
+    // syncs wait for) to find it writes nothing. `NXGFX_LAND_SKIP_SAME=0`: only the re-armed pages, as before
+    let mut pre_same: Vec<Vec<u64>> = if land_skip_same_on() {
+        pres.iter().map(|p| p.as_ref().map(|p| p.same_pages()).unwrap_or_default()).collect()
     } else {
         Vec::new()
     };
@@ -4439,6 +4452,11 @@ pub fn apply_writebacks(g: &Gpu, wbs: &[(u64, u64, u64, *const u8, *const u8, u6
             value,
             pres.get(i).and_then(|p| p.as_ref()),
         );
+        // (a superset of `same`: its pages are the re-armed ones among these)
+        let same = match pre_same.get_mut(i) {
+            Some(v) if v.len() > same.len() => std::mem::take(v),
+            _ => same,
+        };
         // pages GPU writes keep coming to stay on the device (write-back on demand, `lazy`); the rest lands here
         let tl = std::time::Instant::now();
         let mut lazy = if p.watched {
