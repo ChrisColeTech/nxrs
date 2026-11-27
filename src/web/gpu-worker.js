@@ -79,6 +79,7 @@ onmessage = async (e) => {
     device = await adapter.requestDevice({ requiredFeatures: features, requiredLimits: lim });
     device.lost.then((i) => {
       say(`device lost: ${i.reason} ${i.message}`, true);
+      postMessage({ fatal: `the GPU device was lost (${i.reason || 'unknown'}): reload the page to start again` });
       Atomics.store(H, H_STATE, 2);
       Atomics.notify(H, H_STATE);
       Atomics.notify(H, H_GEN);
@@ -114,6 +115,7 @@ onmessage = async (e) => {
     Atomics.notify(H, H_STATE);
   } catch (err) {
     say('no WebGPU device: ' + err, true);
+    postMessage({ fatal: 'no WebGPU device: ' + err });
     Atomics.store(H, H_STATE, 2);
     Atomics.notify(H, H_STATE);
     return;
@@ -898,6 +900,7 @@ function present(texId) {
   frameTimes.push(now - lastPresent);
   lastPresent = now;
   const n = Atomics.add(H, H_PRESENTS, 1) + 1;
+  if (n === 1) postMessage({ first: 1 });
   if (shotEvery && n % shotEvery === 0) shot(t, ti, n);
   if (frameTimes.length >= 300) {
     const v = frameTimes.splice(0).sort((x, y) => x - y);

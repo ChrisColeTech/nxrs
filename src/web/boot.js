@@ -1,4 +1,5 @@
-// The page side of a web build (docs/35): checks what the build needs, shows the engine's log, starts the I/O worker
+// The page side of a web build (docs/35): checks what the build needs, logs the engine to the console (the page itself
+// is only the game's canvas and a one-line notice, WEB-WPAGE), starts the I/O worker
 // and the boot-set prefetch, restores the saves, puts the small host files in the in-memory file system, and starts
 // game.js (Emscripten; main runs on a worker thread of its own, PROXY_TO_PTHREAD). The engine then hands the page its
 // shared blocks (src/web/nxrs-lib.js -> Module.nxrsHost): the I/O slots (to the I/O worker), the audio ring (to the
@@ -9,52 +10,72 @@
 // variables (e.g. NXRS_CONTROLLER_TRACE=1); ?fresh=1 empties the data cache first; ?bootset=0 skips the prefetch.
 'use strict';
 (() => {
-  const status = document.getElementById('status');
   const T0 = performance.now();
   const secs = () => ((performance.now() - T0) / 1000).toFixed(2);
   const watchers = [];
   const log = makeLog();
+  const notice = makeNotice();
+  let failed = false;
   const fail = (why) => {
-    status.textContent = why;
-    status.className = 'red';
-    log(why, true);
+    failed = true;
+    notice.show(why, true);
+    log('[RED] ' + why);
   };
 
+  // WEB-WPAGE: the engine's log goes to the console only (and to the server, gpu.js). The page keeps the last
+  // LOG_KEEP lines in window.NXRS_LOG for drivers (newest last) and calls the watchers with every line.
   function makeLog() {
-    const logEl = document.getElementById('log');
+    const LOG_KEEP = 5000;
     const lines = [];
-    let flush = 0;
     window.NXRS_LOG = lines;
-    return (text, red) => {
+    return (text) => {
       console.log('[nxrs] ' + text);
       for (const w of watchers) w(text);
-      lines.push([text, red || /\[RED\]|FATAL|panicked|Aborted/.test(text)]);
-      if (!flush) {
-        flush = requestAnimationFrame(() => {
-          flush = 0;
-          const frag = document.createDocumentFragment();
-          for (const [t, r] of lines.splice(0)) {
-            const d = document.createElement('div');
-            d.textContent = t;
-            if (r) d.className = 'red';
-            frag.appendChild(d);
-          }
-          logEl.appendChild(frag);
-          logEl.scrollTop = logEl.scrollHeight;
-        });
-      }
+      lines.push(text);
+      if (lines.length > LOG_KEEP + 1000) lines.splice(0, lines.length - LOG_KEEP);
     };
   }
 
+  // the one line the player sees: loading, the click for sound, a failure (which stays)
+  function makeNotice() {
+    const el = document.getElementById('notice');
+    return {
+      show(text, error) {
+        if (failed && !error) return;
+        el.textContent = text;
+        el.className = error ? 'error' : '';
+      },
+      clear(text) {
+        if (!failed && (text === undefined || el.textContent === text)) el.textContent = '';
+      },
+    };
+  }
+
+  // the picture replaces the loading line; a lost GPU device is a failure the player must see
+  addEventListener('nxrs-gpu', (e) => {
+    if (e.detail.first) notice.clear('Loading');
+    if (e.detail.fatal) fail(e.detail.fatal);
+  });
+
+  // the page's title is the game's name (build.json, beside this page)
+  fetch('build.json', { cache: 'no-store' })
+    .then((r) => (r.ok ? r.json() : null))
+    .then((b) => { if (b && b.title) document.title = b.title; })
+    .catch(() => {});
+
   function checks() {
     if (!self.crossOriginIsolated) {
-      fail('this page is not cross-origin isolated (COOP/COEP): threads and shared memory are unavailable');
+      fail('This page is not cross-origin isolated (COOP/COEP): threads and shared memory are unavailable. Open it from the nxrs launcher or a server that sends those headers.');
+      return false;
+    }
+    if (!navigator.gpu) {
+      fail('This browser has no WebGPU. Use a current Chrome or Edge.');
       return false;
     }
     try {
       new WebAssembly.Memory({ initial: 1n, maximum: 2n, address: 'i64', shared: true });
     } catch (e) {
-      fail('this browser has no shared 64-bit WebAssembly memory (memory64): ' + e);
+      fail('This browser has no shared 64-bit WebAssembly memory (memory64): ' + e);
       return false;
     }
     // Chrome on Windows rounds short Atomics.wait timeouts up to the 15.6 ms system tick unless a short timer is
@@ -132,12 +153,14 @@
         await ctx.resume();
         state();
       } catch (e) {
-        log(`[RED] [web] audio: the AudioWorklet did not start: ${e}`, true);
+        log(`[RED] [web] audio: the AudioWorklet did not start: ${e}`);
         ctx = null;
       }
     };
+    const HINT = 'Click or press a key for sound';
     const onGesture = () => {
       gesture = true;
+      notice.clear(HINT);
       start();
     };
     addEventListener('pointerdown', onGesture, true);
@@ -145,6 +168,8 @@
     return (memory, at, frames) => {
       ring = { memory, at, frames };
       log(`[web] audio: the engine's ring at ${at} (${frames} frames)${gesture ? '' : '; sound starts at the first click or key'}`);
+      // the hint replaces the loading line; the first picture does not remove it, the first click or key does
+      if (!gesture) notice.show(HINT);
       start();
     };
   }
@@ -222,7 +247,6 @@
   }
 
   async function main() {
-    status.textContent = 'reading the data manifest';
     const text = await (await fetch('data.json', { cache: 'no-store' })).text();
     const manifest = JSON.parse(text);
     // ?bootset=0: no prefetch (every read on demand); ?fresh=1: the cache emptied first (a cold start)
@@ -257,20 +281,19 @@
           NxrsSaves.restore(FS, '/data/save', manifest.title, log),
         ]).then(([cache, [n, bytes]]) => {
           log(`[web] ${n} host files (${(bytes / 1024).toFixed(0)} KiB) in /data; game data streamed by the I/O worker (${cache} cache); ${secs()} s`);
-          status.textContent = 'running';
           M.removeRunDependency('host');
-        }, (e) => fail('not started: ' + (e.message || e)));
+        }, (e) => fail('The game did not start: ' + (e.message || e)));
       }],
-      onAbort: (what) => fail('aborted: ' + what),
-      onExit: (code) => { status.textContent = `exited (${code}) after ${secs()} s`; },
-      setStatus: (t) => { if (t) status.textContent = t; },
+      onAbort: (what) => fail('The game stopped: ' + what),
+      onExit: (code) => fail(`The game exited (${code}) after ${secs()} s.`),
+      // Emscripten's own progress words ("Running...") are log lines, not something the page shows
+      setStatus: (t) => { if (t) log('[web] ' + t); },
     };
-    status.textContent = 'loading game.wasm';
     const s = document.createElement('script');
     s.src = 'game.js';
-    s.onerror = () => fail('game.js failed to load');
+    s.onerror = () => fail('game.js failed to load.');
     document.body.appendChild(s);
   }
 
-  if (checks()) main().catch((e) => fail('boot: ' + (e.message || e)));
+  if (checks()) main().catch((e) => fail('The page did not start: ' + (e.message || e)));
 })();
